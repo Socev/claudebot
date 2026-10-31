@@ -153,10 +153,12 @@ function maak(o) {
     dagBij: db.prepare('INSERT INTO ramble_dag (dag, seconden) VALUES (?, ?) ON CONFLICT (dag) DO UPDATE SET seconden = seconden + excluded.seconden'),
     perStatus: db.prepare('SELECT * FROM ramble WHERE status = ? ORDER BY aangemaakt, ramble_id'),
     intake: db.prepare("UPDATE ramble SET status = 'intake', stuk_id = ? WHERE ramble_id = ?"),
-    marker: db.prepare('UPDATE ramble SET marker = ? WHERE ramble_id = ?'),
-    kaart: db.prepare("UPDATE ramble SET status = 'vastgehouden', kaart = ?, kaart_op = ? WHERE ramble_id = ?"),
-    keuze: db.prepare('UPDATE ramble SET keuze = ?, keuze_op = ? WHERE ramble_id = ?'),
-    notitie: db.prepare("UPDATE ramble SET status = 'notitie', notitie = ?, notitie_op = ?, offsite_ok = CASE WHEN proef = 1 THEN 0 ELSE 1 END WHERE ramble_id = ?"),
+    // status 'verwijderd' (wv2069): de verwijderroute (intake-verwijder.js) zet de rij dicht vóór het wissen; een tik die al liep, schrijft
+    // daarna niets meer terug (marker, kaart, keuze, notitie)
+    marker: db.prepare("UPDATE ramble SET marker = ? WHERE ramble_id = ? AND status <> 'verwijderd'"),
+    kaart: db.prepare("UPDATE ramble SET status = 'vastgehouden', kaart = ?, kaart_op = ? WHERE ramble_id = ? AND status <> 'verwijderd'"),
+    keuze: db.prepare("UPDATE ramble SET keuze = ?, keuze_op = ? WHERE ramble_id = ? AND status <> 'verwijderd'"),
+    notitie: db.prepare("UPDATE ramble SET status = 'notitie', notitie = ?, notitie_op = ?, offsite_ok = CASE WHEN proef = 1 THEN 0 ELSE 1 END WHERE ramble_id = ? AND status <> 'verwijderd'"),
     gemeld: db.prepare('UPDATE ramble SET gemeld = ? WHERE ramble_id = ?'),
     wachtPlafond: db.prepare('UPDATE ramble SET wacht_plafond = ? WHERE ramble_id = ?'),
     offsiteKlaar: db.prepare('UPDATE ramble SET offsite_op = ? WHERE ramble_id = ? AND offsite_ok = 1'),
@@ -488,6 +490,8 @@ function maak(o) {
   function schrijfNotitie(r) {
     if (o.onderhoudAan && o.onderhoudAan()) return { wacht: 'onderhoud' };
     if (o.nachtgrendel && o.nachtgrendel()) return { wacht: 'nachtgrendel' };
+    const nu_ = q.rij.get(r.ramble_id);
+    if (!nu_ || nu_.status === 'verwijderd') return { wacht: 'verwijderd' };   // wv2069: intussen via de verwijderroute weggehaald
     const tr = transcriptVanStuk(r.stuk_id);
     if (tr == null) return { fout: 'transcript_niet_op_de_pod' };
     const a = amsDelen(Date.parse(r.opgenomen_op || r.aangemaakt));
@@ -640,6 +644,9 @@ function maak(o) {
     if (!/^herinnering-[0-9a-f]{10}$/.test(String(sleutel || ''))) return null;
     const r = q.perKaart.get(sleutel);
     if (!r) return null;
+    // wv2069: de opname is via de verwijderroute weggehaald; een druk op een oude markerkaart doet niets meer
+    if (r.status === 'verwijderd') return { context: ' (Herinneringen-kaart: deze opname is al verwijderd; er gebeurt niets meer mee en jij doet niets. Zeg in één zin dat de herinnering al weg is.)',
+      bijStart: function () {}, bijVerval: function () {} };
     const kz = keuze === 'ja' ? 'doorlaten' : keuze === 'nee' ? 'vasthouden' : 'anders';
     const context = kz === 'doorlaten' ? ' (Herinneringen-kaart: David laat deze opname door. De pod schrijft zelf de privé-notitie in de Second Brain en zet de opname versleuteld in de back-up; jij krijgt de tekst niet en doet niets. Bevestig in één zin.)'
       : kz === 'vasthouden' ? ' (Herinneringen-kaart: David houdt deze opname vast. Tekst en opname blijven alleen op de pod; jij doet niets. Bevestig in één zin.)'

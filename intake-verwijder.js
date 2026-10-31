@@ -20,6 +20,15 @@
  *     8. tellingen na, 9. Verwijderregister (zonder paden), 10. RPC sb_bron_verwijder_klaar.
  *   lijst                             de tombstonelijst (aantallen) uit cache, vault en databank.
  *
+ * HERINNERINGEN (wv2069). Een ramble@1-stuk (MemoryLane, herinneringen.js) heeft naast Intake eigen opslag: de rijen in ramble en
+ * ramble_stuk (+ ramble_spoor) van dezelfde intake.sqlite en de map <herinneringen>/audio/<ramble_id>/ (de stem: <n>.wav, de tekst per
+ * stuk: <n>.txt, manifest.txt) en eventueel staging/<ramble_id>/. Plan telt ze; voer-uit zet de rij eerst op 'verwijderd' (de tik raakt hem
+ * dan niet meer: geen nieuwe aanlevering en geen dagelijkse spoorregel), wist de mappen bestand voor bestand (geen symlink volgen) en in
+ * de databanktransactie ramble_stuk en ramble_spoor; de ramblerij blijft met alleen ids (ramble_id, dag, tijden, stuk_id, kaartsleutel,
+ * offsite_op, proef), zodat een late upload van dezelfde opname 409 krijgt en een knop op een oude markerkaart niets doet. Wat blijft:
+ * de versleutelde audiokopie op vaultcrypt:herinneringen-audio/ (alleen toevoegen; offsite_op zegt of die er is) en ramble_dag (alleen
+ * seconden per dag). Een open markerkaart (kaartsleutel in het plan) sluit de machinekamer met de hand.
+ *
  * Privacy: naar Supabase alleen hashes, stuk-id's en tellingen; in de vault alleen hashes (tombstones.md) en tellingen (index.md).
  * Paden staan alleen in het journaal/plan op de pod (0600) en in het antwoord aan de machinekamer.
  */
@@ -37,6 +46,7 @@ const KOP_LEES = 4096;
 const AFGELEID_MAX = 512 * 1024;           // .md groter dan dit wordt niet op stuk-id doorzocht (afgeleide pagina's)
 const SLA_OVER = new Set(['.git', '.obsidian', '.stfolder', '.claude', '.trash', 'node_modules']);
 const REGISTER = '00_Systeem/Verwijderregister/index.md';
+const RAMBLE_RE = /^r[0-9]{8}-[0-9a-f]{16}$/;   // = herinneringen.js ID_RE
 const BRON_TEKST = { 'gmail:david': 'mail (privé-Gmail)', 'gmail:groenhouten': 'mail (Groenhouten-Gmail)', 'outlook:tolgaarde': 'mail (Tolgaarde-Outlook)',
   'whatsapp:nl': 'WhatsApp', 'whatsapp:gambia': 'WhatsApp (Gambia)', signal: 'Signal', teams: 'Teams', 'scanner:scansnap': 'de scanner', 'contacten:google': 'Contacten' };
 
@@ -82,7 +92,8 @@ function nlKlok(iso) { const t = Date.parse(iso); return isNaN(t) ? '' : new Int
  * maak(o) → { plan, voerUit, lijst }.
  * o = { dir (intake-map), vault, db (node:sqlite DatabaseSync op intake.sqlite), vv (vault-veilig), rpc(fn, body) → Promise<json>,
  *       staat (map voor plan en journaal, 0700), extraMappen? ([mappen met kopieën: intake/schaduw, Syncthing-versies]),
- *       zoekindex? () → Promise<{ok}> (herbouw), zoekTel? (naalden) → aantal treffers in de tekstindex, nu? () → ms, buitenVenster? () → reden|null }
+ *       zoekindex? () → Promise<{ok}> (herbouw), zoekTel? (naalden) → aantal treffers in de tekstindex, nu? () → ms, buitenVenster? () → reden|null,
+ *       herinneringen? (map van herinneringen.js, wv2069) }
  */
 function maak(o) {
   const db = o.db, nu = typeof o.nu === 'function' ? o.nu : Date.now;
@@ -100,6 +111,24 @@ function maak(o) {
   const tabellen = () => new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name));
   const STUK_TABELLEN = ['vrij_veld', 'bestemming', 'router_stuk', 'live_stuk', 'uitvoering', 'overgang', 'correctie', 'aanlevering', 'scansnap', 'spiegel', 'besluit', 'systeem_post', 'onderdeel'];   // systeem_post: wv2004
   const blobPad = (s) => path.join(BLOB, s.slice(0, 2), s);
+  // herinneringen (wv2069): opnames van deze stukken en hun mappen
+  const rambleMappen = (rid) => o.herinneringen ? [path.join(o.herinneringen, 'audio', rid), path.join(o.herinneringen, 'staging', rid)] : [];
+  function rambles(stukIds) {
+    const ids = [...stukIds];
+    if (!ids.length || !tabellen().has('ramble')) return [];
+    return db.prepare('SELECT ramble_id, status, offsite_op, kaart, keuze FROM ramble WHERE stuk_id IN (' + ids.map(() => '?').join(',') + ') ORDER BY ramble_id').all(...ids)
+      .filter((r) => RAMBLE_RE.test(r.ramble_id));
+  }
+  function rambleTel(rid) {
+    let mappen = 0, bestanden = 0;
+    for (const m of rambleMappen(rid)) {
+      let st;
+      try { st = fs.lstatSync(m); } catch (e) { continue; }
+      mappen++;
+      if (st.isDirectory()) loop(m, function () { bestanden++; });
+    }
+    return { mappen, bestanden };
+  }
   const journaalPad = (id) => path.join(o.staat, id + '.journaal.json');
   function schrijfJson(p, j) {
     const tmp = p + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
@@ -170,7 +199,7 @@ function maak(o) {
     return { treffers, afgeleid };
   }
 
-  function kaartVoor(hoofd, verz, vinger, databank) {
+  function kaartVoor(hoofd, verz, vinger, databank, ram) {
     const s = verz.stukken.get(hoofd);
     const bron = BRON_TEKST[s.bron] || s.bron.split(':')[0];
     const rollen = {};
@@ -181,9 +210,12 @@ function maak(o) {
       'Controleer dat het om dit stuk gaat: binnengekomen op ' + nlDag(s.ontvangen || s.aangemaakt) + ' ' + nlKlok(s.ontvangen || s.aangemaakt) + ' via ' + bron + ' (' + (delen || 'onderdelen') + ').',
       anderen ? 'Dezelfde inhoud kwam nog ' + anderen + ' keer binnen; die ontvangst' + (anderen > 1 ? 'en gaan' : ' gaat') + ' mee.' : 'Dit stuk kwam één keer binnen.',
       'Na je Ja (met vingerafdruk) haal ik het weg uit je kennisbank, de databank en de zoekindex, en kan dezelfde inhoud niet meer binnenkomen.',
-      'Wat blijft: de versleutelde nachtkopieën (Drive, lokaal, NAS) en de prullenbak van Syncthing op je eigen apparaten. Daaruit komt het niet vanzelf terug.',
-      'Code van het stuk: ' + vinger.slice(0, 12),
     ];
+    if (ram && ram.length) stappen.push('Het is een ingesproken herinnering' + (ram.length > 1 ? ' (' + ram.length + ' opnames)' : '') + ': ook de opname (je stem) en de uitgeschreven tekst op de server gaan weg.');
+    stappen.push(
+      'Wat blijft: de versleutelde nachtkopieën (Drive, lokaal, NAS)' + (ram && ram.some((r) => r.offsite_op) ? ', de versleutelde kopie van de opname op Drive' : '') +
+        ' en de prullenbak van Syncthing op je eigen apparaten. Daaruit komt het niet vanzelf terug.',
+      'Code van het stuk: ' + vinger.slice(0, 12));
     return { titel: ('Stuk van ' + nlDag(s.ontvangen || s.aangemaakt) + ' uit ' + bron + ' — verwijderen?').slice(0, 90), soort: 'besluit', waar: 'overal',
       waarom: 'Je wilt dit stuk kwijt omdat er patiëntgegevens of een geheim in staan. Verwijderen kan niet ongedaan worden; daarom vraag ik je Ja met vingerafdruk.',
       stappen, deadline: new Date(nu() + 7 * 86400000).toISOString().slice(0, 10), databank_rijen: databank };
@@ -199,6 +231,7 @@ function maak(o) {
     const vinger = setVinger(verz.set);
     const vind = zoek(verz.stukken.keys(), verz.shas);
     const blobs = verz.set.filter((s) => fs.existsSync(blobPad(s))).length;
+    const ram = rambles(verz.stukken.keys());
     let databank = null;
     try {
       const r = await o.rpc('sb_bron_verwijder_plan', { p: { sha256: verz.set } });
@@ -216,7 +249,14 @@ function maak(o) {
       paden: vind.treffers.map((t) => ({ soort: t.soort, rel: t.rel, waarom: t.waarom })), afgeleid: vind.afgeleid,
       databank,
     };
-    p.kaart = kaartVoor(stukId, verz, vinger, databank && databank.telling ? Object.values(databank.telling).reduce((a, b) => a + (Number(b) || 0), 0) : null);
+    if (ram.length) {
+      if (!o.herinneringen) return { ok: false, reden: 'stuk is een herinnering, maar de herinneringen-map is niet opgegeven' };
+      const st = ram.map((r) => rambleTel(r.ramble_id));
+      p.herinneringen = { opnames: ram.map((r) => r.ramble_id), mappen: st.reduce((a, x) => a + x.mappen, 0), bestanden: st.reduce((a, x) => a + x.bestanden, 0),
+        rijen_stuk: db.prepare('SELECT count(*) n FROM ramble_stuk WHERE ramble_id IN (' + ram.map(() => '?').join(',') + ')').get(...ram.map((r) => r.ramble_id)).n,
+        offsite: ram.filter((r) => r.offsite_op).length, open_kaarten: ram.filter((r) => r.kaart && !r.keuze).map((r) => r.kaart) };
+    }
+    p.kaart = kaartVoor(stukId, verz, vinger, databank && databank.telling ? Object.values(databank.telling).reduce((a, b) => a + (Number(b) || 0), 0) : null, ram);
     schrijfJson(path.join(o.staat, stukId + '.plan.json'), p);
     return p;
   }
@@ -261,9 +301,48 @@ function maak(o) {
       return true;
     } finally { fs.closeSync(dfd); }
   }
+  // Een opnamemap leeg maken en weghalen (wv2069): elk gewoon bestand via wis, daarna de mappen van diep naar ondiep (rmdir: alleen leeg).
+  // Een symlink in de map wordt niet gevolgd en niet gewist; dan blijft de map staan en telt hij als overgeslagen.
+  function wisMap(abs) {
+    const tel = { bestanden: 0, mappen: 0, overgeslagen: 0 };
+    let st;
+    try { st = fs.lstatSync(abs); } catch (e) { if (e.code === 'ENOENT') return tel; throw e; }
+    if (!st.isDirectory()) { tel.overgeslagen++; return tel; }
+    const mappen = [''];
+    loop(abs, function (a, rel) { try { if (wis(a)) tel.bestanden++; } catch (e) { tel.overgeslagen++; } });
+    (function verzamel(rel) {
+      let namen = [];
+      try { namen = fs.readdirSync(path.join(abs, rel), { withFileTypes: true }); } catch (e) { return; }
+      for (const d of namen) if (d.isDirectory() && !d.isSymbolicLink()) { const r = rel ? rel + '/' + d.name : d.name; mappen.push(r); verzamel(r); }
+    })('');
+    for (const rel of mappen.sort((a, b) => b.length - a.length)) {
+      const m = rel ? path.join(abs, rel) : abs;
+      const dfd = fs.openSync(path.dirname(m), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+      try {
+        if (!o.vv.opPlek(dfd, path.dirname(m))) { tel.overgeslagen++; continue; }
+        const p = '/proc/self/fd/' + dfd + '/' + path.basename(m);
+        let x;
+        try { x = fs.lstatSync(p); } catch (e) { continue; }
+        if (!x.isDirectory()) { tel.overgeslagen++; continue; }
+        try { fs.rmdirSync(p); tel.mappen++; } catch (e) { tel.overgeslagen++; }
+      } finally { fs.closeSync(dfd); }
+    }
+    return tel;
+  }
+
+  // herinneringen (wv2069): stukken en spoor van de opname weg; de opnamerij blijft met alleen ids (zie de kop). Binnen een transactie.
+  function rambleSchoon(rambleIds, tel, aanwezig) {
+    if (!aanwezig.has('ramble')) return;
+    for (const rid of rambleIds || []) {
+      for (const t of ['ramble_stuk', 'ramble_spoor']) if (aanwezig.has(t)) tel[t] = (tel[t] || 0) + db.prepare('DELETE FROM ' + t + ' WHERE ramble_id = ?').run(rid).changes;
+      tel.ramble = (tel.ramble || 0) + db.prepare("UPDATE ramble SET status = 'verwijderd', apparaat = NULL, aantal = NULL, manifest = NULL, opgenomen_op = NULL, verteller = NULL, " +
+        'duur_s = NULL, vingerafdruk = NULL, onvolledig = 0, archief_op = NULL, wacht_plafond = NULL, marker = NULL, kaart_op = NULL, keuze = NULL, keuze_op = NULL, ' +
+        'notitie = NULL, notitie_op = NULL, offsite_ok = 0, gemeld = NULL WHERE ramble_id = ?').run(rid).changes;
+    }
+  }
 
   // intake.sqlite: alles van deze stukken weg behalve één stukrij met alleen ids (status verwijderd); blobrijen weg; spoorregel per sha.
-  function schoonDb(stukIds, set, wanneer) {
+  function schoonDb(stukIds, set, wanneer, rambleIds) {
     db.exec('PRAGMA secure_delete = ON');
     const trig = db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'besluit'").all();
     const tel = {}, aanwezig = tabellen();
@@ -279,6 +358,7 @@ function maak(o) {
         db.prepare("UPDATE stuk SET status = 'verwijderd', bron_id = ?, meta = '{}', afgeleid = NULL, stand = NULL, bestandsnaam = NULL, marker_soorten = NULL, gemeld = NULL WHERE stuk_id = ?")
           .run(String(s.bron_id).startsWith('verwijderd:') ? s.bron_id : I.verwijderdId(s.bron_id), id);
       }
+      rambleSchoon(rambleIds, tel, aanwezig);
       for (const s of set) {
         tel.blob = (tel.blob || 0) + db.prepare('DELETE FROM blob WHERE sha256 = ?').run(s).changes;
         if (aanwezig.has('scansnap')) tel.scansnap_sha = (tel.scansnap_sha || 0) + db.prepare('DELETE FROM scansnap WHERE sha256 = ?').run(s).changes;
@@ -292,7 +372,7 @@ function maak(o) {
     return { tel, wal };
   }
 
-  function telNa(stukIds, set, paden) {
+  function telNa(stukIds, set, paden, rambleIds) {
     const inSet = set.map(() => '?').join(',');
     const ids = [...stukIds], inIds = ids.map(() => '?').join(',');
     const r = {
@@ -305,6 +385,17 @@ function maak(o) {
     const aanwezig = tabellen();
     for (const t of STUK_TABELLEN.filter((x) => x !== 'onderdeel' && aanwezig.has(x)))
       r['db_' + t] = db.prepare('SELECT count(*) n FROM ' + t + ' WHERE stuk_id IN (' + inIds + ')').get(...ids).n;
+    // herinneringen (wv2069): geen opnamerij met inhoud, geen stuk- of spoorrijen, geen map
+    if (aanwezig.has('ramble')) {
+      r.db_ramble_inhoud = db.prepare("SELECT count(*) n FROM ramble WHERE stuk_id IN (" + inIds + ") AND (status <> 'verwijderd' OR manifest IS NOT NULL OR notitie IS NOT NULL " +
+        'OR verteller IS NOT NULL OR vingerafdruk IS NOT NULL OR marker IS NOT NULL OR apparaat IS NOT NULL)').get(...ids).n;
+      const rids = rambleIds || [];
+      if (rids.length) {
+        const inR = rids.map(() => '?').join(',');
+        for (const t of ['ramble_stuk', 'ramble_spoor']) if (aanwezig.has(t)) r['db_' + t] = db.prepare('SELECT count(*) n FROM ' + t + ' WHERE ramble_id IN (' + inR + ')').get(...rids).n;
+        r.herinneringen_mappen = o.herinneringen ? rids.reduce((a, rid) => a + rambleTel(rid).mappen, 0) : 'map onbekend';   // review wv2069 MOET 1
+      }
+    }
     // tweede scan op naam en frontmatter (de sha-treffers telt de bestandstoets hierboven); vindt hij iets, dan is het niet 0
     const vind = zoek(stukIds, new Map());
     r.vault_tweede_scan = vind.treffers.length;
@@ -328,7 +419,9 @@ function maak(o) {
       if (proef && p.stukken.some((s) => !s.proef)) return { ok: false, reden: '--proef alleen voor verzonnen proefstukken' };
       if (opt.code && opt.code !== p.code) return { ok: false, reden: 'de set veranderde sinds de kaart (code ' + p.code + ' ≠ ' + opt.code + '); nieuwe kaart nodig' };
       j = { stuk: stukId, stap: 'start', reden, vraag: proef ? null : opt.vraag, set: p.set, set_vinger: p.set_vinger, stukken: p.stukken.map((s) => s.stuk_id),
-        paden: p.paden.map((t) => ({ soort: t.soort, rel: t.rel, waarom: t.waarom })), afgeleid: p.afgeleid, databank_plan: p.databank, gestart: nuIso() };
+        paden: p.paden.map((t) => ({ soort: t.soort, rel: t.rel, waarom: t.waarom })), afgeleid: p.afgeleid, databank_plan: p.databank, gestart: nuIso(),
+        rambles: p.herinneringen ? p.herinneringen.opnames : [], open_kaarten: p.herinneringen ? p.herinneringen.open_kaarten : [],
+        herinneringen: p.herinneringen ? path.resolve(o.herinneringen) : null };
       schrijfJson(journaalPad(stukId), j);
     }
     const wortel = (soort, rel) => {
@@ -353,6 +446,15 @@ function maak(o) {
     const wanneer = nuIso();
     // 3. tombstones (vóór het wissen)
     if (!j.tombstones) { tombstonesErbij(j.set, reden, wanneer); j.tombstones = wanneer; schrijfJson(journaalPad(stukId), j); }
+    const rids = (j.rambles || []).filter((x) => RAMBLE_RE.test(x));
+    // hervatten met een andere of geen herinneringen-map zou de opnamemappen overslaan (review wv2069 MOET 1)
+    if (rids.length && (!o.herinneringen || (j.herinneringen && path.resolve(o.herinneringen) !== j.herinneringen)))
+      return { ok: false, reden: 'stuk is een herinnering, maar de herinneringen-map ontbreekt of wijkt af van het journaal', journaal: journaalPad(stukId) };
+    // 3b. herinneringen (wv2069): de opname eerst dicht, zodat de tik van herinneringen.js hem tijdens het wissen niet meer oppakt
+    if (rids.length && !j.rambleDicht) {
+      for (const rid of rids) db.prepare("UPDATE ramble SET status = 'verwijderd' WHERE ramble_id = ?").run(rid);
+      j.rambleDicht = wanneer; schrijfJson(journaalPad(stukId), j);
+    }
     // 4–5. blobs en bestanden
     if (!j.bestanden) {
       const tel = { blob: 0, vault: 0, kopie: 0, overgeslagen: 0 };
@@ -364,10 +466,15 @@ function maak(o) {
         if (t.waarom === 'sha') { let h = null; try { h = shaBestand(a); } catch (e) { h = null; } if (h && !setS.has(h)) { tel.overgeslagen++; continue; } }
         try { if (wis(a)) tel[t.soort]++; } catch (e) { tel.overgeslagen++; }
       }
+      for (const rid of rids) for (const m of rambleMappen(rid)) {
+        let w;
+        try { w = wisMap(m); } catch (e) { w = { bestanden: 0, mappen: 0, overgeslagen: 1 }; }
+        tel.herinneringen = (tel.herinneringen || 0) + w.bestanden; tel.overgeslagen += w.overgeslagen;
+      }
       j.bestanden = tel; schrijfJson(journaalPad(stukId), j);
     }
     // 6. intake.sqlite
-    if (!j.dbSchoon) { j.dbSchoon = schoonDb(j.stukken, j.set, wanneer); j.stap = 'pod'; schrijfJson(journaalPad(stukId), j); }
+    if (!j.dbSchoon) { j.dbSchoon = schoonDb(j.stukken, j.set, wanneer, rids); j.stap = 'pod'; schrijfJson(journaalPad(stukId), j); }
     // 7. tekstindex opnieuw bouwen (bouwt uit de vault)
     if (!j.zoekindex && o.zoekindex) {
       let z;
@@ -376,31 +483,51 @@ function maak(o) {
     }
     // 8. tellingen na
     const paden = j.paden.map((t) => wortel(t.soort, t.rel) || path.join(o.vault, t.rel));
-    const na = telNa(j.stukken, j.set, paden);
+    const na = telNa(j.stukken, j.set, paden, rids);
     if (o.zoekTel) { try { na.zoekindex = o.zoekTel(j.stukken.concat(j.paden.filter((t) => t.soort === 'vault').map((t) => t.rel))); } catch (e) { na.zoekindex = 'fout'; } }
-    j.na = na;
-    const nul = Object.values(na).every((v) => v === 0);
+    // 8b. herinneringen (review wv2069 ZOU 1): een tik die al liep toen de opname dicht ging, kan nog een notitie of rij hebben
+    // teruggeschreven. Is de telling niet 0, dan nog één keer: opnamemappen, opnamerijen en de vaulttreffers van de tweede scan (zelfde
+    // criteria als het plan: naam of ovis_stuk), en opnieuw tellen. Ook bij een herhaalde aanroep na 'na_niet_nul'.
+    let na2 = na;
+    if (rids.length && !Object.values(na).every((v) => v === 0)) {
+      const tel = { herinneringen: 0, vault: 0, overgeslagen: 0, db: {} };
+      for (const rid of rids) for (const m of rambleMappen(rid)) {
+        let w;
+        try { w = wisMap(m); } catch (e) { w = { bestanden: 0, overgeslagen: 1 }; }
+        tel.herinneringen += w.bestanden; tel.overgeslagen += w.overgeslagen;
+      }
+      db.exec('BEGIN IMMEDIATE');
+      try { rambleSchoon(rids, tel.db, tabellen()); db.exec('COMMIT'); } catch (e) { try { db.exec('ROLLBACK'); } catch (x) { /* al terug */ } tel.db_fout = String(e && e.message || e).slice(0, 120); }
+      for (const t of zoek(j.stukken, new Map()).treffers) if (t.soort === 'vault') { try { if (wis(t.pad)) tel.vault++; } catch (e) { tel.overgeslagen++; } }
+      if (tel.vault && o.zoekindex) { try { tel.zoekindex = await o.zoekindex(); } catch (e) { tel.zoekindex = { ok: false }; } }
+      j.naloop = Object.assign({ op: nuIso() }, tel);
+      na2 = telNa(j.stukken, j.set, paden, rids);
+      if (o.zoekTel) { try { na2.zoekindex = o.zoekTel(j.stukken.concat(j.paden.filter((t) => t.soort === 'vault').map((t) => t.rel))); } catch (e) { na2.zoekindex = 'fout'; } }
+    }
+    j.na = na2;
+    const nul = Object.values(na2).every((v) => v === 0);
     // 9. Verwijderregister (zonder paden: een bestandsnaam kan zelf een naam zijn)
     if (!j.register) {
       const akkoord = proef ? 'proef (verzonnen stuk, geen kaart)' : 'David, Ja met vingerafdruk op de kaart (vraag-id ' + j.vraag + ')';
       const d = j.databank && j.databank.telling_voor ? Object.values(j.databank.telling_voor).reduce((a, b) => a + (Number(b) || 0), 0) : 0;
       const regel = '| ' + wanneer.slice(0, 10) + ' | stuk ' + stukId + (j.stukken.length > 1 ? ' (+' + (j.stukken.length - 1) + ' met dezelfde inhoud)' : '') + ': ' + j.set.length +
         ' sha256 (code ' + j.set_vinger.slice(0, 12) + '), ' + (j.bestanden.blob || 0) + ' blobs, ' + (j.bestanden.vault || 0) + ' vaultbestanden, ' + (j.bestanden.kopie || 0) +
-        ' kopieën, ' + d + ' databankrijen | ' + reden + ' | ' + akkoord + ' | geen (bewust); tombstones in [[00_Systeem/Verwijderregister/tombstones]] |\n';
+        ' kopieën, ' + (rids.length ? rids.length + ' opname(s) met ' + (j.bestanden.herinneringen || 0) + ' bestanden, ' : '') + d + ' databankrijen | ' + reden + ' | ' + akkoord + ' | geen (bewust); tombstones in [[00_Systeem/Verwijderregister/tombstones]] |\n';
       const pr = path.join(o.vault, REGISTER);
       o.vv.wijzig(pr, function (t) { return t.indexOf('stuk ' + stukId) >= 0 ? null : t.replace(/\n*$/, '\n') + regel; });
       j.register = wanneer; schrijfJson(journaalPad(stukId), j);
     }
     // 10. databank: klaar
     if (j.databank && j.databank.verwijdering_id && !j.databank.klaar) {
-      try { const r = await o.rpc('sb_bron_verwijder_klaar', { p_id: j.databank.verwijdering_id, p_pod_telling: Object.assign({ bestanden: j.bestanden }, na) }); j.databank.klaar = !!(r && r.ok); }
+      try { const r = await o.rpc('sb_bron_verwijder_klaar', { p_id: j.databank.verwijdering_id, p_pod_telling: Object.assign({ bestanden: j.bestanden }, na2) }); j.databank.klaar = !!(r && r.ok); }
       catch (e) { j.databank.klaar = false; }
     }
     j.stap = nul ? 'klaar' : 'na_niet_nul';
     j.klaar = wanneer;
     schrijfJson(journaalPad(stukId), j);
     return { ok: nul, stuk: stukId, stukken: j.stukken, set_vinger: j.set_vinger, databank: j.databank, bestanden: j.bestanden, sqlite: j.dbSchoon.tel,
-      wal: j.dbSchoon.wal, zoekindex: j.zoekindex || null, na, afgeleid: j.afgeleid, journaal: journaalPad(stukId) };
+      wal: j.dbSchoon.wal, zoekindex: j.zoekindex || null, na: na2, naloop: j.naloop, afgeleid: j.afgeleid, open_kaarten: j.open_kaarten && j.open_kaarten.length ? j.open_kaarten : undefined,
+      journaal: journaalPad(stukId) };
   }
 
   async function lijst() {
@@ -453,7 +580,8 @@ async function hoofd(argv) {
       return n;
     } finally { z.close(); }
   };
-  const V = maak({ dir: DIR, vault: VAULT, db, vv: require('./vault-veilig.js'), rpc, staat: STAAT,
+  const HDIR = process.env.HERINNERINGEN_DIR || '/opt/data/herinneringen';
+  const V = maak({ dir: DIR, vault: VAULT, db, vv: require('./vault-veilig.js'), rpc, staat: STAAT, herinneringen: fs.existsSync(HDIR) ? HDIR : null,
     extraMappen: [path.join(DIR, 'schaduw'), '/opt/data/syncthing/versies'].filter((m) => fs.existsSync(m)),
     zoekindex: fs.existsSync(ZI) ? zoekindex : null, zoekTel: fs.existsSync(ZI) ? zoekTel : null, buitenVenster: () => buitenNachtvenster() });
   let uit;
