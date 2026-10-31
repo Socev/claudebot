@@ -150,6 +150,18 @@ const MK_TEKST = (function () {
   const p = path.join(__dirname, 'mk-tekst.js');
   try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('mk-tekst', e); return null; }
 })();
+// wv2081 (David 31-10 13:42, b36b3088): Terra-nacontrolebundel. Gemerkte nacontroles van de werkvoorraad (zet --terra) draaien op
+// GPT-6.1 Terra via de Codex ChatGPT-login, als meter in een eigen CODEX_HOME zonder projectdocs/MCP/skills, sandbox workspace-write en
+// een minimale omgeving; terra-toepas (werkvoorraad.py) past de uitkomst toe. Zie codex-mk.js en het ontwerp in 01_Ontwikkeling.
+const CODEX_MK = (function () {
+  const p = path.join(__dirname, 'codex-mk.js');
+  try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('codex-mk', e); return null; }
+})();
+const CODEX_MK_HOME = serverPad('codex_mk', process.env.CODEX_MK_HOME, '/opt/data/codex-mk', serverProefDeel('codex-mk'));
+const CODEX_MK_VERBRUIK = serverPad('codex_verbruik', process.env.CODEX_VERBRUIK_FILE, '/opt/data/scripts-staat/codex-verbruik.jsonl', serverProefDeel('codex-verbruik.jsonl'));
+const CODEX_MK_BEWAAR = serverPad('codex_mk_uitkomst', process.env.CODEX_MK_UITKOMST_DIR, '/opt/data/scripts-staat/codex-mk-uitkomst', serverProefDeel('codex-mk-uitkomst'));
+const WERKVOORRAAD_PY = process.env.WERKVOORRAAD_PY || '/opt/data/mk-scripts/werkvoorraad.py';
+const terraSleutels = Object.create(null);   // jobsleutel (GET /mk/n8n-lees) → job-id, alleen zolang die Terra-run loopt
 const mkTekstStand = { mk_runs: 0, smal_runs: 0, zonder_geheugen: 0, geheugen: MK_TEKST ? null : 'dicht: module ontbreekt', geheugen_t: null, drift: null, drift_t: 0 };
 let mkTekstLaatsteReden = '';
 const mkTekstBoxDag = {};
@@ -2020,8 +2032,17 @@ function agyVersieMeten() {
 // zodat de fallback in processJob voor beide gelijk werkt.
 function runBrein(runtime, prompt, sessionId, outdir, cwd, model, opts) {
   // wv1001: een mk-run alleen op claude; codex en gemini laden de vault-CLAUDE.md (~/.codex/AGENTS.md en ~/.gemini/GEMINI.md zijn er links naar)
-  if (opts && opts.tekst === 'mk' && (runtime === 'codex' || runtime === 'gemini')) return Promise.resolve({ ok: false, error: 'mk-alleen-claude', runtime: runtime,
-    output: 'Een machinekamer-beurt draait alleen op claude (wv1001): ' + runtime + ' laadt de vault-CLAUDE.md als instructie. Kies claude.' });
+  if (opts && opts.tekst === 'mk' && (runtime === 'codex' || runtime === 'gemini')) {
+    // wv2081: de enige uitzondering is de Terra-nacontrolebundel (bundelsoort terra, eigen CODEX_MK_HOME) met een groene vóórtoets
+    // van codex-mk.js (gegenereerde config zonder projectdocs, geen AGENTS.md, login-symlink, sandboxvlaggen, minimale env).
+    const tr = opts.terra;
+    if (runtime === 'codex' && CODEX_MK && tr && tr.wv > 0 && tr.home === CODEX_MK_HOME && tr.voortoets && tr.voortoets.ok === true && tr.run) {
+      const vt = CODEX_MK.voortoets({ home: tr.home, authDoel: path.join(CODEX_HOME, 'auth.json'), args: tr.run.args, env: tr.run.env });
+      if (vt.ok) return CODEX_MK.draai(tr.run).then(function (r) { r.runtime = 'codex'; return r; });
+    }
+    return Promise.resolve({ ok: false, error: 'mk-alleen-claude', runtime: runtime,
+      output: 'Een machinekamer-beurt draait alleen op claude (wv1001): ' + runtime + ' laadt de vault-CLAUDE.md als instructie. Kies claude.' });
+  }
   if (runtime === 'codex') return runCodex(prompt, sessionId, outdir, cwd, model, opts);
   if (runtime === 'gemini') return runGemini(prompt, sessionId, outdir, cwd, model, opts);
   function merk(r) {
@@ -2969,6 +2990,58 @@ function wachtOpStartbeurt() {
 }
 
 // ── v2: achtergrondagent — niet geserialiseerd, eigen limieten, push aan het eind
+// wv2081: lopende Terra-bundels in het register (eigen plek naast MAX_AGENTS).
+function terraLopend() {
+  let n = 0;
+  for (const id in agentsReg) { const a = agentsReg[id]; if (a && a.terra && (a.status === 'running' || a.status === 'pending')) n++; }
+  return n;
+}
+// wv2081: één Terra-bundel via codex-mk.js. De codex-run zelf gaat langs runBrein (uitzondering op mk-alleen-claude, alleen met een
+// groene vóórtoets); werkvoorraad.py draait daarna als claude met de volle omgeving (terra-toepas / terra-staat), zonder model.
+async function terraBundel(jobId, wv, prompt, base, outdir, maxMs, progress, entry) {
+  const sleutel = crypto.randomBytes(24).toString('hex');
+  terraSleutels[sleutel] = jobId;
+  try {
+    const geh = MK_TEKST ? MK_TEKST.geheugenToets(MK_GEHEUGEN) : { ok: false };
+    const envPy = Object.assign({}, process.env, { SOCEV_AGENT_RUN: jobId, TERRA_POORT_JS: path.join(__dirname, 'codex-mk.js') });
+    delete envPy.CLAUDE_OAUTH_TOKEN_2;
+    return await CODEX_MK.bundel({ wvId: wv, jobId: jobId, prompt: prompt, base: base, outdir: outdir, home: CODEX_MK_HOME, echteHome: HOME,
+      authDoel: path.join(CODEX_HOME, 'auth.json'), instructies: CODEX_MK.instructies(MK_TEKST, MK_GEHEUGEN, geh.ok),
+      leesUrl: 'http://127.0.0.1:' + PORT + '/mk/n8n-lees', sleutel: sleutel, verbruikPad: CODEX_MK_VERBRUIK, bewaarMap: CODEX_MK_BEWAAR,
+      maxMs: Math.min(maxMs || 30 * 60 * 1000, 30 * 60 * 1000), progress: progress, path: process.env.PATH,
+      opSpawn: function (i) { if (entry) { entry.pid = i.pid; entry.transcript = null; entry.gebruiker = 'claude'; saveAgents(); } },
+      draai: function (ro) {
+        return runBrein('codex', ro.prompt, '', outdir, ro.cwd, CODEX_MK.MODEL, { tekst: 'mk', terra: { voortoets: ro.voortoets, home: ro.home, wv: wv, run: ro } });
+      },
+      py: CODEX_MK.pyRunner(WERKVOORRAAD_PY, envPy) });
+  } catch (e) {
+    logError('terra-bundel', e);
+    return { ok: false, error: 'terra-fout', output: 'De Terra-bundel faalde in de pod: ' + String(e && e.message || e).slice(0, 200) +
+      '. De tikker zet de leden bij het afsluiten terug naar de Sonnet-bundel.' };
+  } finally { delete terraSleutels[sleutel]; }
+}
+// wv2081: GET /mk/n8n-lees/… voor de Terra-run (jobsleutel in x-mk-sleutel): runlijst, één run met per knoop items en status,
+// workflowmetadata. Geen itemdata, geen schrijfacties; andere methode = 405, ander pad = 404.
+async function mkN8nLeesGet(pad) {
+  const b = appN8nBasis(), k = process.env.N8N_API_KEY;
+  if (!b || !k) throw new Error('n8n-API niet ingesteld');
+  const r = await fetch(b + '/api/v1' + pad, { headers: { 'X-N8N-API-KEY': k, accept: 'application/json' }, signal: AbortSignal.timeout(30000), redirect: 'error' });
+  if (!r.ok) { const e = new Error('n8n http ' + r.status); e.status = r.status; throw e; }
+  return r.json();
+}
+function mkN8nLeesRoute(req, res) {
+  function stuur(code, o) { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); }
+  if (!CODEX_MK) return stuur(404, { ok: false, error: 'niet-gevonden' });
+  const r = CODEX_MK.n8nLeesPad(req.method, req.url);
+  if (r.fout === 405) { res.setHeader('Allow', 'GET'); return stuur(405, { ok: false, error: 'alleen-get' }); }
+  const sl = String(req.headers['x-mk-sleutel'] || '');
+  const jid = sl && Object.prototype.hasOwnProperty.call(terraSleutels, sl) ? terraSleutels[sl] : null;
+  if (!jid || !(agentsReg[jid] && agentsReg[jid].terra && agentsReg[jid].status === 'running')) return stuur(401, { ok: false, error: 'sleutel' });
+  if (r.fout) return stuur(r.fout, { ok: false, error: r.fout === 400 ? 'ongeldige-parameter' : 'niet-gevonden' });
+  CODEX_MK.n8nLees(r, mkN8nLeesGet).then(function (o) { stuur(200, Object.assign({ ok: true }, o)); },
+    function (e) { stuur(e && e.status === 404 ? 404 : 502, { ok: false, error: e && e.status === 404 ? 'niet-gevonden' : 'n8n-onbereikbaar' }); });
+}
+
 async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
@@ -2999,6 +3072,21 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
   try {
     fs.mkdirSync(indir, { recursive: true });
     fs.mkdirSync(outdir, { recursive: true });
+    if (j.terra) {   // wv2081: Terra-nacontrolebundel; geen lessenblok, geen eindcontrole (codex-mk.js + terra-toepas)
+      await wachtOpStartbeurt();
+      j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = 'codex';
+      entry.status = 'running'; entry.runtime = 'codex'; saveAgents();
+      const r = stopVoorStart ? { ok: false, error: 'afgebroken-gestopt', output: 'De Terra-bundel is gestopt voordat hij begon; er is niets gedaan.' }
+        : await terraBundel(jobId, j.terra, prompt, base, outdir, maxMs, j.progress, entry);
+      r.files = []; r.workspace = ws;   // uitkomst.json staat bewaard in scripts-staat/codex-mk-uitkomst; geen bijlage in het rapport
+      const volledig = typeof r.output === 'string' ? r.output : '';
+      appRapport = volledig || (r.error ? 'Mislukt: ' + String(r.error) : '');
+      j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
+      jobEindLog(jobId, j, ws);
+      entry.status = 'done'; entry.ok = !!r.ok; entry.error = agentFoutcode(r.error); entry.ended = Date.now(); saveAgents();
+      sendReport(entry, Object.assign({}, r, { output: volledig }));
+      return;
+    }
     const lesblok = await lessenBlok(prompt, (entry && entry.chat_id) || '', (entry && entry.label) || '');
     const fullPrompt = lesblok + prompt + '\n\n' + space.hint(indir, outdir) + '\n' + AGENT_EINDREGEL;
     await wachtOpStartbeurt();
@@ -3733,6 +3821,7 @@ function handleRequest(req, res) {
       secondbrain: secondbrainInfo(),
       omzet: omzetInfo(),   // wv1854: Download als… (pandoc/chromium aanwezig, huisstijlen, bezig/wachtend, tellers; geen inhoud)
       docs_delen: docsDelenInfo(),   // wv1382: OVIS Docs › Delen (aan? host, aantal delingen; geen links)   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
+      terra: { module: !!CODEX_MK, lopend: terraLopend() },   // wv2081: Terra-nacontrolebundel (geen inhoud)
       mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
       sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },
@@ -4051,7 +4140,7 @@ function handleRequest(req, res) {
   // wv424b: smalle routes voor sessies zonder beheersleutels (zie smalRoute)
   if (req.method === 'POST' && reqPath(req).indexOf('/smal/') === 0) return rolPoort(res, function () { smalRoute(req, res); });   // passieve kant: niets schrijven, geen tweede Telegram-lezer
   if (req.method === 'POST' && req.url === '/agent') {
-    return rolPoort(res, function () { readBody(req, function (d) {
+    return rolPoort(res, function () { readBody(req, async function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       // wv424: SOCEV_AGENT_SLEUTEL (Socev buiten de machinekamer) start alleen smalle agents.
       const smal = socevAgentSleutelOk(d.secret);
@@ -4075,7 +4164,26 @@ function handleRequest(req, res) {
             uitleg: 'Er wacht een pod-uitrol op stilte; machinekamer-agents starten pas daarna. Probeer het over ~10 min opnieuw of zet het in de werkvoorraad.' }));
         }
       }
-      if (agentInfo().lopend >= MAX_AGENTS) {
+      // wv2081: Terra-bundel van de tikker (label machinekamer:wv<N> terra nacontroles …, model terra). Alleen als de databank zegt
+      // dat rij N een geclaimde Terra-bundel is; de opdracht komt dan uit de databank, niet uit dit verzoek. Telt niet mee voor
+      // MAX_AGENTS (eigen plek, hooguit één tegelijk).
+      const terraM = /^machinekamer:wv(\d+) terra nacontroles /.exec(label);
+      let terraRij = null;
+      if (terraM) {
+        if (!CODEX_MK || smal || d.beperkt || d.runtime || String(d.model || '') !== 'terra' || d.advisor || d.session_id) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ ok: false, error: 'terra-ongeldig', uitleg: 'een Terra-bundel komt alleen van de tikker, met model terra' }));
+        }
+        try { terraRij = await appSbRpc('mk_werkvoorraad_toon', { p_id: Number(terraM[1]) }, 15000); } catch (e) { logError('terra-toets', e); }
+        if (!terraRij || terraRij.soort !== 'terra' || terraRij.model !== 'terra' || terraRij.status !== 'starten' || !terraRij.prompt) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ ok: false, error: 'terra-niet-geclaimd', uitleg: 'rij is geen geclaimde Terra-bundel (of de databank is onbereikbaar)' }));
+        }
+        if (terraLopend() >= 1) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ ok: false, error: 'terra-loopt', uitleg: 'er loopt al een Terra-bundel' }));
+        }
+      } else if (agentInfo().lopend - terraLopend() >= MAX_AGENTS) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: false, error: 'max-agents', uitleg: 'Er lopen al ' + MAX_AGENTS + ' achtergrondagents; wacht tot er één klaar is.' }));
       }
@@ -4083,7 +4191,7 @@ function handleRequest(req, res) {
       if (wsFout) return weigerWorkspace(res, wsFout, '/agent');
       const ws = resolveWorkspace(d.workspace);
       if (!fs.existsSync(WORKSPACES[ws].dir)) { res.writeHead(400); return res.end('workspace missing'); }
-      let keuze = resolveKeuze(d);
+      let keuze = terraRij ? { runtime: 'codex', model: CODEX_MK.MODEL, fallback: '' } : resolveKeuze(d);   // wv2081
       if (keuze.fout) return weigerRuntime(res, keuze.fout, '/agent');
       // beperkt=auto (spraakkastje): altijd Claude zonder terugval, want alleen daar gelden de verboden tools.
       const beperkt = d.beperkt === 'auto' ? 'auto' : '';
@@ -4102,7 +4210,7 @@ function handleRequest(req, res) {
       const proef = (!eigenKeuze && !beperkt && !smal) ? advisorProefClaim(jobId, label, prompt) : null;
       if (proef) keuze = { runtime: 'claude', model: proef.model, advisor: proef.advisor, fallback: '' };
       jobs[jobId] = { status: 'pending', created: Date.now(), agent: true, workspace: ws, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', beperkt: beperkt, smal: smal || undefined,
-        model: keuze.model || undefined, advisor: keuze.advisor || undefined };
+        model: keuze.model || undefined, advisor: keuze.advisor || undefined, terra: terraRij ? terraRij.id : undefined };
       res._log = { job_id: jobId, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', workspace: ws, agent: 1 };
       agentsReg[jobId] = {
         job_id: jobId, label: label, status: 'pending',
@@ -4110,13 +4218,14 @@ function handleRequest(req, res) {
         started: Date.now(), ended: null, ok: null, rapport: '-',
         max_minuten: maxMin, workspace: ws, runtime: keuze.runtime, beperkt: beperkt || undefined,
         omgeving: agentIsMk(label, smal, beperkt) ? 'mk' : (beperkt ? 'auto' : 'smal'),   // wv424
-        model: keuze.model || undefined, advisor: keuze.advisor || undefined, advisor_proef: proef ? true : undefined   // wv479
+        model: keuze.model || undefined, advisor: keuze.advisor || undefined, advisor_proef: proef ? true : undefined,   // wv479
+        terra: terraRij ? terraRij.id : undefined   // wv2081
       };
       // wv275: gestart vanuit een [AUTO]-beurt van de telefoon? Synchroon, vóór het antwoord: het verzoekende proces leeft dan nog.
       try { telMerkAgent(req, jobId, label); } catch (e) { logError('tel-merk', e); }
       saveAgents();
       // Bewust NIET in de chat-wachtrij: agents draaien parallel aan het gesprek.
-      processAgent(jobId, prompt, d.session_id, ws, keuze, maxMin * 60 * 1000);
+      processAgent(jobId, terraRij ? terraRij.prompt : prompt, d.session_id, ws, keuze, maxMin * 60 * 1000);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, job_id: jobId, label: label, max_minuten: maxMin, runtime: keuze.runtime, omgeving: agentsReg[jobId].omgeving,
         model: keuze.model || undefined, advisor: keuze.advisor || undefined, advisor_proef: proef ? true : undefined }));
@@ -4125,6 +4234,8 @@ function handleRequest(req, res) {
 
   // ── v2: toezicht — wat loopt er, wat liep er ──────────────────────────────
   // Alleen labels en toestanden, geen inhoud; zelfde openbaarheidsniveau als /health.
+  if (req.url === '/mk/n8n-lees' || req.url.indexOf('/mk/n8n-lees/') === 0 || req.url.indexOf('/mk/n8n-lees?') === 0) return mkN8nLeesRoute(req, res);   // wv2081
+
   if (req.method === 'GET' && req.url === '/agents') {
     const lijst = Object.keys(agentsReg).map(function (id) {
       const a = agentsReg[id];
