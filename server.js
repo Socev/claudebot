@@ -12742,6 +12742,7 @@ async function appWhisper(wav) {
 //   POST /app/ramble/<ramble_id>/<n>   ruwe WAV → { ok, n, sha256, dubbel?, compleet } | 409 conflict
 //   POST /app/ramble/<ramble_id>/klaar { aantal, sha256: [...], opgenomen_op, verteller? } → 200 compleet | 202 { ontbreekt } | 409
 //   POST /app/ramble/<ramble_id>/weg   David gooit een nog niet afgesloten opname weg (staging weg; anders 409)
+//   POST /app/ramble/<ramble_id>/categorie { categorie, gevoelig, gekozen_op } → categorie kiezen of wijzigen (31-10; ook mee met klaar)
 //   GET  /app/ramble/<ramble_id>       → welke stukken de pod heeft (hervatten na een herstart van de app)
 // Valt onder sessie, apparaatsleutel en (vaste plek) het invoerslot zoals elke POST; een stuk verlengt de sessie. Nooit tekst in het auditlog.
 const APP_RAMBLE_STUK_RE = /^\/app\/ramble\/r[0-9]{8}-[0-9a-f]{16}\/[1-9][0-9]?$/;
@@ -12752,12 +12753,14 @@ function appRamble(req, res, a, route, d) {
   const st = /^POST \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})\/([1-9][0-9]?)$/.exec(route);
   const kl = /^POST \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})\/klaar$/.exec(route);
   const wg = /^POST \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})\/weg$/.exec(route);
+  const ca = /^POST \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})\/categorie$/.exec(route);
   const ga = /^GET \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})$/.exec(route);
   const antw = function (id, wat, u) { res._app.reden = 'ramble ' + id + ' ' + wat + ' ' + u.status; return appStuur(res, u.status, u.body); };
   try {
     if (ga) return antw(ga[1], 'stand', herinneringen.stand(ga[1]));
     if (kl) return antw(kl[1], 'klaar', herinneringen.ontvangKlaar(kl[1], d, { apparaat: a.id }));
     if (wg) return antw(wg[1], 'weg', herinneringen.weg(wg[1]));
+    if (ca) return antw(ca[1], 'categorie', typeof herinneringen.kiesCategorie === 'function' ? herinneringen.kiesCategorie(ca[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } });
     if (!st) return weg(404, 'onbekend', 'ramble pad');
   } catch (e) { logError('ramble', e); return weg(503, 'de pod kon de opname nu niet opslaan; de app probeert het opnieuw', 'ramble fout'); }
   const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();

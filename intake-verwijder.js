@@ -331,13 +331,16 @@ function maak(o) {
   }
 
   // herinneringen (wv2069): stukken en spoor van de opname weg; de opnamerij blijft met alleen ids (zie de kop). Binnen een transactie.
+  // de categorie van een herinnering (31-10-2026, herinneringen.js voegt de kolommen toe; een oudere databank heeft ze niet)
+  const catKolom = () => db.prepare('PRAGMA table_info(ramble)').all().some((k) => k.name === 'categorie');
   function rambleSchoon(rambleIds, tel, aanwezig) {
     if (!aanwezig.has('ramble')) return;
     for (const rid of rambleIds || []) {
       for (const t of ['ramble_stuk', 'ramble_spoor']) if (aanwezig.has(t)) tel[t] = (tel[t] || 0) + db.prepare('DELETE FROM ' + t + ' WHERE ramble_id = ?').run(rid).changes;
       tel.ramble = (tel.ramble || 0) + db.prepare("UPDATE ramble SET status = 'verwijderd', apparaat = NULL, aantal = NULL, manifest = NULL, opgenomen_op = NULL, verteller = NULL, " +
         'duur_s = NULL, vingerafdruk = NULL, onvolledig = 0, archief_op = NULL, wacht_plafond = NULL, marker = NULL, kaart_op = NULL, keuze = NULL, keuze_op = NULL, ' +
-        'notitie = NULL, notitie_op = NULL, offsite_ok = 0, gemeld = NULL WHERE ramble_id = ?').run(rid).changes;
+        'notitie = NULL, notitie_op = NULL, offsite_ok = 0, gemeld = NULL' + (catKolom() ? ', categorie = NULL, herinnering_gevoelig = NULL, categorie_gekozen = NULL' : '') +
+        ' WHERE ramble_id = ?').run(rid).changes;
     }
   }
 
@@ -388,7 +391,7 @@ function maak(o) {
     // herinneringen (wv2069): geen opnamerij met inhoud, geen stuk- of spoorrijen, geen map
     if (aanwezig.has('ramble')) {
       r.db_ramble_inhoud = db.prepare("SELECT count(*) n FROM ramble WHERE stuk_id IN (" + inIds + ") AND (status <> 'verwijderd' OR manifest IS NOT NULL OR notitie IS NOT NULL " +
-        'OR verteller IS NOT NULL OR vingerafdruk IS NOT NULL OR marker IS NOT NULL OR apparaat IS NOT NULL)').get(...ids).n;
+        'OR verteller IS NOT NULL OR vingerafdruk IS NOT NULL OR marker IS NOT NULL OR apparaat IS NOT NULL' + (catKolom() ? ' OR categorie IS NOT NULL' : '') + ')').get(...ids).n;
       const rids = rambleIds || [];
       if (rids.length) {
         const inR = rids.map(() => '?').join(',');

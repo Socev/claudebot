@@ -492,3 +492,76 @@ test('wv2069: open markerkaart doet na verwijderen niets; hervatten zonder of me
     assert.strictEqual(o.notities().length, 0);
   } finally { o.sluit(); }
 });
+
+// 31-10-2026 (MemoryLane eigen App): categorie per herinnering. Laatste keuze wint op de kiestijd van de telefoon; nooit in manifest.txt;
+// in de frontmatter categorie + herinnering_gevoelig, 'gevoelig: prive' blijft; wijzigen na de notitie raakt alleen de frontmatter.
+test('categorie: mee met klaar, Privé altijd gevoelig, zonder keuze gevoelig, wijzigen na de notitie, onderhoud, verwijderd', async () => {
+  const o = omgeving();
+  try {
+    const fm = (n) => fs.readFileSync(path.join(o.vault, H.NOTITIE_MAP, n), 'utf8');
+    const kat = (t) => [/\ncategorie: (.*)\n/.exec(t)?.[1], /\nherinnering_gevoelig: (.*)\n/.exec(t)?.[1]];
+    // ongeldige keuzes = 400, niets vastgelegd
+    const a = [o.stuk(ID1, 1, VERHAAL[0])];
+    o.h.ontvangStuk(ID1, 1, a[0]);
+    assert.strictEqual(o.h.ontvangKlaar(ID1, Object.assign(manifest(a), { categorie: 'werk', gevoelig: false, gekozen_op: '2026-10-30T08:56:00Z' })).status, 400, 'onbekende categorie');
+    assert.strictEqual(o.h.ontvangKlaar(ID1, Object.assign(manifest(a), { categorie: 'gezin', gevoelig: 'nee', gekozen_op: '2026-10-30T08:56:00Z' })).status, 400, 'vlag geen boolean');
+    assert.strictEqual(o.h.ontvangKlaar(ID1, Object.assign(manifest(a), { categorie: 'gezin', gevoelig: false })).status, 400, 'kiestijd ontbreekt');
+    assert.strictEqual(o.h.kiesCategorie(ID2, { categorie: 'gezin', gevoelig: false, gekozen_op: '2026-10-30T08:56:00Z' }).status, 404, 'onbekende opname');
+    // klaar met Gezin, niet gevoelig
+    let u = o.h.ontvangKlaar(ID1, Object.assign(manifest(a), { categorie: 'gezin', gevoelig: false, gekozen_op: '2026-10-30T08:56:00Z' }));
+    assert.strictEqual(u.status, 200);
+    const mt = fs.readFileSync(path.join(o.hdir, 'audio', ID1, 'manifest.txt'), 'utf8');
+    assert.ok(!/gezin|categorie/.test(mt), 'niet in manifest.txt (vingerafdruk)');
+    // een oudere keuze die later binnenkomt (herhaalde klaar) draait niets terug
+    u = o.h.kiesCategorie(ID1, { categorie: 'prive', gevoelig: false, gekozen_op: '2026-10-30T08:55:30Z' });
+    assert.strictEqual(u.status, 200); assert.strictEqual(u.body.ouder, true); assert.strictEqual(u.body.categorie, 'gezin');
+    await o.h.tik();
+    let n = o.notities(); assert.strictEqual(n.length, 1);
+    let t = fm(n[0]);
+    assert.deepStrictEqual(kat(t), ['gezin', 'nee']);
+    assert.match(t, /\ngevoelig: prive\naccess_context: strikt_prive\ncategorie: gezin\nherinnering_gevoelig: nee\novis_stuk: /, 'R1-markering blijft, regels op hun plek');
+    assert.ok(!o.box.some((x) => /gezin/i.test(x)), 'categorie niet in de box');
+    // na de notitie: Privé (ook met gevoelig false = gevoelig), alleen de frontmatter verandert
+    const lijf = t.slice(t.indexOf('\n---\n', 4));
+    u = o.h.kiesCategorie(ID1, { categorie: 'prive', gevoelig: false, gekozen_op: '2026-10-30T09:10:00Z' });
+    assert.deepStrictEqual([u.status, u.body.categorie, u.body.gevoelig, u.body.notitie], [200, 'prive', true, 'bijgewerkt']);
+    t = fm(n[0]); assert.deepStrictEqual(kat(t), ['prive', 'ja']); assert.strictEqual(t.slice(t.indexOf('\n---\n', 4)), lijf, 'tekst onder de frontmatter gelijk');
+    assert.strictEqual(t.match(/\ncategorie: /g).length, 1, 'geen dubbele regel');
+    // Shizzle met eigen vlag gevoelig, tijdens onderhoud: volgt bij de volgende tik
+    o.staat.onderhoud = true;
+    u = o.h.kiesCategorie(ID1, { categorie: 'shizzle', gevoelig: true, gekozen_op: '2026-10-30T09:11:00Z' });
+    assert.strictEqual(u.body.notitie, 'volgt'); assert.deepStrictEqual(kat(fm(n[0])), ['prive', 'ja']);
+    o.staat.onderhoud = false;
+    let tk = await o.h.tik(); assert.strictEqual(tk.categorie, 1);
+    assert.deepStrictEqual(kat(fm(n[0])), ['shizzle', 'ja']);
+    tk = await o.h.tik(); assert.ok(!tk.categorie, 'daarna niets meer');
+    // zonder keuze (oudere app): categorie geen, gevoelig ja; een R1-notitie zonder de regels krijgt ze ingevoegd
+    o.klok.t += 3600000;
+    const b = [o.stuk(ID2, 1, VERHAAL[1])];
+    o.h.ontvangStuk(ID2, 1, b[0]); o.h.ontvangKlaar(ID2, manifest(b));
+    await o.h.tik();
+    n = o.notities(); assert.strictEqual(n.length, 2);
+    const n2 = n.find((x) => fm(x).includes(ID2));
+    assert.deepStrictEqual(kat(fm(n2)), ['geen', 'ja']);
+    const p2 = path.join(o.vault, H.NOTITIE_MAP, n2);
+    fs.writeFileSync(p2, fm(n2).replace(/categorie: geen\nherinnering_gevoelig: ja\n/, ''));   // zoals de twee notities van R1
+    u = o.h.kiesCategorie(ID2, { categorie: 'familie', gevoelig: false, gekozen_op: '2026-10-30T10:30:00Z' });
+    assert.strictEqual(u.body.notitie, 'bijgewerkt');
+    assert.match(fm(n2), /\naccess_context: strikt_prive\ncategorie: familie\nherinnering_gevoelig: nee\n/);
+    // pure functie: geen frontmatter = niets
+    assert.strictEqual(H._metCatRegels('geen frontmatter', ['categorie: gezin']), null);
+    // weggegooid = 409
+    const c = [o.stuk(ID3, 1, VERHAAL[2])];
+    o.h.ontvangStuk(ID3, 1, c[0]); o.h.weg(ID3);
+    assert.strictEqual(o.h.kiesCategorie(ID3, { categorie: 'gezin', gevoelig: false, gekozen_op: '2026-10-30T10:31:00Z' }).status, 409);
+    // zelfde lijst als CATEGORIEEN in socev-app src/memorylaneKern.ts (die toets heeft dezelfde kopie); wijzig je hem, dan beide
+    assert.deepStrictEqual(Object.fromEntries(Object.entries(H.CATEGORIEEN).map(([k, v]) => [k, v.gevoelig])), { gezin: false, familie: false, shizzle: false, prive: true, overig: false });
+    // notitie tijdelijk weg: geen 'bijgewerkt', en terug = alsnog bijgewerkt (review MOET 1)
+    const p1 = path.join(o.vault, H.NOTITIE_MAP, o.notities().find((x) => fm(x).includes(ID1)));
+    const bewaar = fs.readFileSync(p1, 'utf8'); fs.unlinkSync(p1);
+    assert.strictEqual(o.h.kiesCategorie(ID1, { categorie: 'overig', gevoelig: false, gekozen_op: '2026-10-30T10:40:00Z' }).body.notitie, 'volgt');
+    fs.writeFileSync(p1, bewaar);
+    tk = await o.h.tik(); assert.strictEqual(tk.categorie, 1);
+    assert.deepStrictEqual(kat(fs.readFileSync(p1, 'utf8')), ['overig', 'nee']);
+  } finally { o.sluit(); }
+});

@@ -29,6 +29,15 @@
  *  6. Offsite: alleen opnames met marker 'geen' of doorgelaten; rclone copy --ignore-existing naar vaultcrypt:herinneringen-audio/ (alleen
  *     toevoegen, namen en inhoud versleuteld) + cryptcheck --one-way, hooguit één ronde per uur. Proef- en markeropnames nooit.
  *
+ * CATEGORIE (31-10-2026, David: "categorieën, zoals privé, shizzle, familie, gezin"; MemoryLane eigen App). Per opname een categorie uit
+ *    de vaste lijst CATEGORIEEN en een vlag 'gevoelig' (Privé altijd; de rest standaard niet, David kan hem per opname aanzetten). De app
+ *    stuurt hem mee met 'klaar' en kan hem later wijzigen (kiesCategorie, POST /app/ramble/<id>/categorie). Laatste keuze wint op de
+ *    kiestijd van de telefoon (gekozen_op), zodat een 'klaar' die later aankomt een nieuwere keuze niet terugdraait. Nooit in manifest.txt
+ *    (dat is de vingerafdruk en blijft gelijk) en niet in het Intake-stuk; wel in de ramblerij en in de frontmatter van de opnamenotitie
+ *    (categorie: <id>|geen, herinnering_gevoelig: ja|nee). Geen categorie (oudere app, of nog niet gekozen) = gevoelig. 'gevoelig: prive'
+ *    van R1 blijft staan: dat is de privacylaag van de vault (elke herinnering is privé); herinnering_gevoelig is de toonmodus-vlag.
+ *    Een gewijzigde keuze na de notitie herschrijft alleen die twee frontmatterregels (vault-veilig, niet tijdens onderhoud/nachtgrendel:
+ *    dan bij een volgende tik; cat_versie ↔ cat_notitie).
  * PRIVACY. Nooit transcripttekst, titels of namen in logs, box-rijen, kaarten of /health: alleen ramble_id, stuk_id, aantallen en seconden.
  * VORM. Alleen fs, path, crypto en child_process; Intake, Whisper, vault-veilig, kaarten en box komen van server.js via maak({...}).
  */
@@ -50,6 +59,12 @@ const KAART_BEWAAR_MS = 14 * 86400000;
 const VERTELLER_RE = /^[\p{L}][\p{L} .'-]{0,59}$/u;
 const NOTITIE_MAP = '20_Prive/Herinneringen/Opnames';
 const PROFIEL = 'ramble@1', BRON = 'app:ramble';
+// De vaste lijst (volgorde = de app). Familie, Gezin en Shizzle zijn ook mappen in 20_Prive; Privé = altijd gevoelig.
+const CATEGORIEEN = { gezin: { naam: 'Gezin', gevoelig: false }, familie: { naam: 'Familie', gevoelig: false }, shizzle: { naam: 'Shizzle', gevoelig: false },
+  prive: { naam: 'Privé', gevoelig: true }, overig: { naam: 'Overig', gevoelig: false } };
+// Categoriekolommen (31-10-2026); de tabel bestond al bij R1, dus ALTER TABLE als ze ontbreken
+const CAT_KOLOMMEN = [['categorie', 'TEXT'], ['herinnering_gevoelig', 'INTEGER'], ['categorie_gekozen', 'TEXT'], ['cat_versie', 'INTEGER NOT NULL DEFAULT 0'],
+  ['cat_notitie', 'INTEGER NOT NULL DEFAULT 0']];
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS ramble (ramble_id TEXT PRIMARY KEY, dag TEXT NOT NULL, aangemaakt TEXT NOT NULL, laatst TEXT NOT NULL,
@@ -115,6 +130,36 @@ function leesStuk(req, lengte) {
 function schoonTekst(t) { return String(t == null ? '' : t).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim(); }
 function yamlTekst(s) { return JSON.stringify(String(s)); }
 
+// De categoriekeuze uit de app: { categorie: <id>|null, gevoelig: bool, gekozen_op: ISO }. → { keuze } | { fout } | {} (geen keuze
+// meegestuurd, oudere app). Privé is altijd gevoelig; zonder categorie ook (veilige kant: in de toonmodus verborgen tot David kiest).
+function leesKeuze(d) {
+  d = d && typeof d === 'object' ? d : {};
+  if (d.categorie === undefined && d.gevoelig === undefined && d.gekozen_op === undefined) return {};
+  const cat = d.categorie == null || d.categorie === '' ? null : String(d.categorie);
+  if (cat !== null && !Object.hasOwn(CATEGORIEEN, cat)) return { fout: 'onbekende categorie' };
+  if (d.gevoelig !== undefined && typeof d.gevoelig !== 'boolean') return { fout: 'ongeldige vlag gevoelig' };
+  const op = typeof d.gekozen_op === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(d.gekozen_op) && !isNaN(Date.parse(d.gekozen_op)) ? new Date(Date.parse(d.gekozen_op)).toISOString() : null;
+  if (!op) return { fout: 'kiestijd ontbreekt' };
+  const gevoelig = cat === null || CATEGORIEEN[cat].gevoelig || d.gevoelig === true;
+  return { keuze: { categorie: cat, gevoelig, gekozen_op: op } };
+}
+// De twee frontmatterregels van de categorie (r = ramblerij)
+function catRegels(r) {
+  return ['categorie: ' + (r.categorie && Object.hasOwn(CATEGORIEEN, r.categorie) ? r.categorie : 'geen'), 'herinnering_gevoelig: ' + (r.categorie && Object.hasOwn(CATEGORIEEN, r.categorie) && r.herinnering_gevoelig === 0 ? 'nee' : 'ja')];
+}
+// Zet de categorieregels in de frontmatter van een bestaande notitie (vervangen, of na access_context invoegen bij een R1-notitie).
+// Alleen de frontmatter; de rest van de tekst blijft byte voor byte gelijk. null = geen frontmatter te vinden (niets doen).
+function metCatRegels(tekst, regels) {
+  const m = /^---\n([\s\S]*?\n)---\n/.exec(tekst);
+  if (!m) return null;
+  let fm = m[1].split('\n').filter((x, i, a) => i < a.length - 1 || x !== '');
+  fm = fm.filter((x) => !/^(categorie|herinnering_gevoelig):/.test(x));
+  let i = fm.findIndex((x) => /^access_context:/.test(x));
+  if (i < 0) i = fm.findIndex((x) => /^gevoelig:/.test(x));
+  fm.splice(i < 0 ? fm.length : i + 1, 0, ...regels);
+  return '---\n' + fm.join('\n') + '\n---\n' + tekst.slice(m[0].length);
+}
+
 /*
  * maak(o) → { ontvangStuk, ontvangKlaar, tik, knop, info, offsiteLijst, _db }.
  * o = { dir (/opt/data/herinneringen), intake (intake-ingang maak(): leverIntern, markeer, vrijgeven, _db), vault, vv (vault-veilig),
@@ -126,6 +171,8 @@ function maak(o) {
   const nu = typeof o.nu === 'function' ? o.nu : Date.now;
   const db = o.intake._db;
   db.exec(SCHEMA_SQL);
+  const kolommen = new Set(db.prepare('PRAGMA table_info(ramble)').all().map((k) => k.name));
+  for (const [k, soort] of CAT_KOLOMMEN) if (!kolommen.has(k)) db.exec('ALTER TABLE ramble ADD COLUMN ' + k + ' ' + soort);
   const DIR = o.dir, STAGING = path.join(DIR, 'staging'), AUDIO = path.join(DIR, 'audio'), UIT = path.join(DIR, 'uit');
   for (const d of [DIR, STAGING, AUDIO]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); try { fs.chmodSync(d, 0o700); } catch (e) { /* niet van ons */ } }
   const rcBin = o.rclone || 'rclone', remote = o.remote || 'vaultcrypt:herinneringen-audio';
@@ -160,6 +207,11 @@ function maak(o) {
     keuze: db.prepare("UPDATE ramble SET keuze = ?, keuze_op = ? WHERE ramble_id = ? AND status <> 'verwijderd'"),
     notitie: db.prepare("UPDATE ramble SET status = 'notitie', notitie = ?, notitie_op = ?, offsite_ok = CASE WHEN proef = 1 THEN 0 ELSE 1 END WHERE ramble_id = ? AND status <> 'verwijderd'"),
     gemeld: db.prepare('UPDATE ramble SET gemeld = ? WHERE ramble_id = ?'),
+    // categorie: alleen als deze keuze nieuwer is dan de bewaarde (kiestijd van de telefoon); nooit op een verwijderde of weggegooide opname
+    categorie: db.prepare("UPDATE ramble SET categorie = ?, herinnering_gevoelig = ?, categorie_gekozen = ?, cat_versie = cat_versie + 1 WHERE ramble_id = ? " +
+      "AND status NOT IN ('verwijderd', 'weggegooid', 'opgeruimd') AND (categorie_gekozen IS NULL OR categorie_gekozen < ?)"),
+    catNotitie: db.prepare('UPDATE ramble SET cat_notitie = ? WHERE ramble_id = ?'),
+    catAchter: db.prepare("SELECT * FROM ramble WHERE status = 'notitie' AND notitie IS NOT NULL AND cat_versie > cat_notitie ORDER BY ramble_id"),
     wachtPlafond: db.prepare('UPDATE ramble SET wacht_plafond = ? WHERE ramble_id = ?'),
     offsiteKlaar: db.prepare('UPDATE ramble SET offsite_op = ? WHERE ramble_id = ? AND offsite_ok = 1'),
   };
@@ -289,6 +341,8 @@ function maak(o) {
     if (!op) return { status: 400, body: { ok: false, fout: 'opnametijd ontbreekt' } };
     const verteller = d.verteller == null || d.verteller === '' ? 'David' : String(d.verteller).trim();
     if (!VERTELLER_RE.test(verteller)) return { status: 400, body: { ok: false, fout: 'ongeldige verteller' } };
+    const kz = leesKeuze(d);
+    if (kz.fout) return { status: 400, body: { ok: false, fout: kz.fout } };
     const manifest = JSON.stringify(lijst), t = iso(nu());
     let r = q.rij.get(id);
     if (r && r.manifest) {
@@ -309,11 +363,56 @@ function maak(o) {
       q.manifest.run(aantal, manifest, op, verteller, t, id);
       r = q.rij.get(id);
     }
+    if (kz.keuze) zetKeuze(r, kz.keuze);   // ook bij een herhaalde 'klaar' (een nieuwere keuze van de telefoon); een oudere doet niets
     if (r.status !== 'staging' && r.status !== 'wacht') return { status: 200, body: { ok: true, compleet: true, al: true } };
     const mis = ontbreekt(r);
     if (mis.length) return { status: 202, body: { ok: true, compleet: false, ontbreekt: mis } };
     naarArchief(id, false);
     return { status: 200, body: { ok: true, compleet: true } };
+  }
+
+  // Keuze vastleggen (alleen als hij nieuwer is) en, staat de notitie er al, haar frontmatter bijwerken. → true als de keuze telde.
+  function zetKeuze(r, k) {
+    const telde = q.categorie.run(k.categorie, k.gevoelig ? 1 : 0, k.gekozen_op, r.ramble_id, k.gekozen_op).changes > 0;
+    if (telde) spoor(r.ramble_id, null, 'categorie');
+    return telde;
+  }
+  // De categorieregels in een bestaande notitie zetten. → 'bijgewerkt' | 'volgt' (onderhoud/nachtgrendel/fout: bij een volgende tik)
+  function catNaarNotitie(r) {
+    if (!r || r.status !== 'notitie' || !r.notitie) return null;
+    if (r.cat_versie <= r.cat_notitie) return 'bijgewerkt';
+    if ((o.onderhoudAan && o.onderhoudAan()) || (o.nachtgrendel && o.nachtgrendel())) return 'volgt';
+    const pad = path.join(o.vault, r.notitie);
+    if (path.relative(path.join(o.vault, NOTITIE_MAP), pad).startsWith('..')) { spoorEens(r.ramble_id, 'notitiepad_buiten_map'); return 'volgt'; }
+    const regels = catRegels(r);
+    try {
+      let geen = false;
+      o.vv.wijzig(pad, function (tekst) { const nieuw = metCatRegels(tekst, regels); if (nieuw === null) geen = true; return nieuw === null || nieuw === tekst ? null : nieuw; });
+      if (geen) { spoorEens(r.ramble_id, 'notitie_zonder_frontmatter'); return 'volgt'; }
+    } catch (e) {
+      // notitie weg (bijv. tijdelijk door een verhuizing of sync): niet als bijgewerkt tellen, de volgende tik probeert opnieuw (review MOET 1)
+      if (e && e.code === 'ENOENT') { spoorEens(r.ramble_id, 'notitie_weg'); return 'volgt'; }
+      fout('ramble-categorie', e); return 'volgt';
+    }
+    q.catNotitie.run(r.cat_versie, r.ramble_id);
+    return 'bijgewerkt';
+  }
+  /*
+   * POST /app/ramble/<id>/categorie { categorie, gevoelig, gekozen_op } — David kiest of wijzigt de categorie (na 'klaar', ook nadat de
+   * notitie er is). 404 = de pod kent de opname (nog) niet (de app stuurt de keuze dan mee met 'klaar'); 409 = weggegooid of verwijderd.
+   * Antwoord zonder inhoud: { ok, categorie, gevoelig, notitie: 'bijgewerkt'|'volgt'|null, ouder?: true (een nieuwere keuze stond er al) }.
+   */
+  function kiesCategorie(id, d) {
+    if (!ID_RE.test(String(id))) return { status: 400, body: { ok: false, fout: 'ongeldige opname' } };
+    const kz = leesKeuze(d);
+    if (kz.fout || !kz.keuze) return { status: 400, body: { ok: false, fout: kz.fout || 'geen keuze' } };
+    let r = q.rij.get(id);
+    if (!r) return { status: 404, body: { ok: false, fout: 'deze opname kent de server (nog) niet' } };
+    if (r.status === 'verwijderd' || r.status === 'weggegooid' || r.status === 'opgeruimd') return { status: 409, body: { ok: false, fout: 'deze opname is er niet meer', conflict: true } };
+    const telde = zetKeuze(r, kz.keuze);
+    r = q.rij.get(id);
+    const notitie = catNaarNotitie(r);
+    return { status: 200, body: { ok: true, categorie: r.categorie || null, gevoelig: catRegels(r)[1] === 'herinnering_gevoelig: ja', notitie, ouder: telde ? undefined : true } };
   }
 
   // Wat de pod van een opname heeft (de app hervat hiermee na een herstart). Alleen nummers en hashes.
@@ -472,7 +571,7 @@ function maak(o) {
   function notitieTekst(r, transcriptTekst) {
     const op = Date.parse(r.opgenomen_op || r.aangemaakt), a = amsDelen(op);
     const duur = tijdcode(r.duur_s || 0);
-    const fm = ['---', 'type: bron', 'bron_soort: ramble', 'gevoelig: prive', 'access_context: strikt_prive', 'ovis_stuk: ' + r.stuk_id,
+    const fm = ['---', 'type: bron', 'bron_soort: ramble', 'gevoelig: prive', 'access_context: strikt_prive', ...catRegels(r), 'ovis_stuk: ' + r.stuk_id,
       'ramble_id: ' + r.ramble_id, 'opgenomen_op: ' + yamlTekst(r.opgenomen_op || r.aangemaakt), 'duur: ' + yamlTekst(duur), 'duur_s: ' + Math.round(r.duur_s || 0),
       'route: ' + (r.route || 'app'), 'verteller: ' + yamlTekst(r.verteller || 'David'), 'vingerafdruk: ' + r.vingerafdruk, 'onvolledig: ' + (r.onvolledig ? 'true' : 'false'),
       'created: ' + a.datum, 'tags: [herinnering, prive]', '---', ''];
@@ -498,11 +597,11 @@ function maak(o) {
     const rel = path.join(NOTITIE_MAP, a.datum + '_' + r.stuk_id + '.md');
     const mapAbs = path.join(o.vault, NOTITIE_MAP);
     if (!fs.existsSync(mapAbs)) fs.mkdirSync(mapAbs, { recursive: true, mode: 0o770 });
-    const inhoud = notitieTekst(r, tr.toString('utf8'));
+    const inhoud = notitieTekst(nu_, tr.toString('utf8'));   // de verse rij: de laatste categoriekeuze
     let bestaand = null;
     try { bestaand = o.vv.lees(path.join(o.vault, rel), 'utf8'); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
     if (bestaand === null) o.vv.schrijf(path.join(o.vault, rel), inhoud);
-    return { pad: rel, bestond: bestaand !== null };
+    return { pad: rel, bestond: bestaand !== null, versie: nu_.cat_versie || 0 };
   }
 
   function kaartVoor(r) {
@@ -535,6 +634,7 @@ function maak(o) {
         if (n.wacht) { uit.wacht = n.wacht; continue; }
         if (n.fout) { spoorEens(r.ramble_id, n.fout); uit.notitie_fout = (uit.notitie_fout || 0) + 1; continue; }
         q.notitie.run(n.pad, iso(nu()), r.ramble_id);
+        if (!n.bestond) q.catNotitie.run(n.versie, r.ramble_id);
         try { if (!r.proef && o.intake.vrijgeven) o.intake.vrijgeven(r.stuk_id); } catch (e) { fout('ramble-vrijgeven', e); }
         uit.notities = (uit.notities || 0) + 1;
         continue;
@@ -553,6 +653,7 @@ function maak(o) {
       if (n.wacht) { uit.wacht = n.wacht; continue; }
       if (n.fout) { spoorEens(r.ramble_id, n.fout); continue; }
       q.notitie.run(n.pad, iso(nu()), r.ramble_id);
+      if (!n.bestond) q.catNotitie.run(n.versie, r.ramble_id);
       try { if (!r.proef && o.intake.vrijgeven) o.intake.vrijgeven(r.stuk_id); } catch (e) { fout('ramble-vrijgeven', e); }
       uit.notities = (uit.notities || 0) + 1;
     }
@@ -629,6 +730,7 @@ function maak(o) {
       await uitschrijven(uit, start);
       await naarIntake(uit);
       await markerEnNotitie(uit);
+      for (const r of q.catAchter.all()) if (catNaarNotitie(r) === 'bijgewerkt') uit.categorie = (uit.categorie || 0) + 1;   // een keuze tijdens onderhoud
       await kaartenNalopen();
       await offsite(uit, opt.offsite === true);
     } catch (e) { fout('ramble-tik', e); uit.fout = (uit.fout || 0) + 1; }
@@ -675,7 +777,7 @@ function maak(o) {
       wacht_plafond: plafondDag === amsDelen(nu()).datum, laatst, offsite: { open: offsiteOpen, laatst: offsiteLaatst, remote: remote.split(':')[0] + ':…' } };
   }
 
-  return { ontvangStuk, ontvangKlaar, stand, weg, tik, knop, info, offsiteLijst, _db: db, _transcript: transcript, _notitieTekst: notitieTekst, _kaartVoor: kaartVoor };
+  return { ontvangStuk, ontvangKlaar, kiesCategorie, stand, weg, tik, knop, info, offsiteLijst, _db: db, _transcript: transcript, _notitieTekst: notitieTekst, _kaartVoor: kaartVoor };
 }
 
 /*
@@ -695,4 +797,4 @@ if (require.main === module && process.argv[2] === 'offsite-lijst') {
   db.close();
 }
 
-module.exports = { maak, leesStuk, wavSeconden, tijdcode, ID_RE, STUK_MAX_BYTES, STUKKEN_MAX, PER_DAG, PLAFOND_S, NOTITIE_MAP };
+module.exports = { maak, leesStuk, wavSeconden, tijdcode, ID_RE, STUK_MAX_BYTES, STUKKEN_MAX, PER_DAG, PLAFOND_S, NOTITIE_MAP, CATEGORIEEN, _metCatRegels: metCatRegels };
