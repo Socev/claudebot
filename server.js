@@ -309,6 +309,13 @@ const LOG_GENERATIES = Math.max(1, Math.min(20, parseInt(process.env.LOG_GENERAT
 
 let logTeller = 0;
 let logOmvang = null;         // gecachete omvang van API_LOG
+// wv2133: de supervisor geeft het kind als stdout een fd op api.log. Wijst fd 1 bij de start naar hetzelfde bestand als API_LOG
+// (dev+ino), dan schreef schrijfLog elke regel twee keer (gemeten 31-10: 1006 van 2000). Eén keer meten bij de start: na een
+// rotatie wijst fd 1 naar .1 en mag de kopie daar ook niet heen. kubectl logs zag deze regels nooit (alleen de supervisor).
+const STDOUT_IS_API_LOG = (function () {
+  try { const a = fs.fstatSync(1), b = fs.statSync(API_LOG); return a.isFile() && a.dev === b.dev && a.ino === b.ino; }
+  catch (e) { return false; }
+})();
 
 function roteerIndienNodig(extra) {
   try {
@@ -322,6 +329,7 @@ function roteerIndienNodig(extra) {
       // api.log heette, en schrijfLog schrijft elke regel ook naar stdout. Dat inode schuift nu .1 → … → .N mee en krijgt de
       // stdout-kopie (regels dubbel, nieuwere stempels dan zijn naam zegt); na .N groeit het ontkoppeld door tot de volgende
       // kindherstart. Was al zo met één generatie; lezers ontdubbelen op de hele regel (ui-manager/gebruik.py). Vervolgrij wv896.
+      // wv2133: schrijfLog slaat de stdout-kopie nu over als stdout bij de start API_LOG zelf was (STDOUT_IS_API_LOG).
       for (let i = LOG_GENERATIES - 1; i >= 1; i--) { try { fs.renameSync(API_LOG + '.' + i, API_LOG + '.' + (i + 1)); } catch (e) {} }
       try { fs.renameSync(API_LOG, API_LOG + '.1'); } catch (e) {}  // de oudste (.LOG_GENERATIES) wordt overschreven
       logOmvang = 0;
@@ -337,7 +345,7 @@ function schrijfLog(regel) {
     logOmvang += Buffer.byteLength(r, 'utf8');
     logTeller++;
   } catch (e) { /* nooit werpen vanuit het logpad */ }
-  try { process.stdout.write(regel + '\n'); } catch (e) {}
+  if (!STDOUT_IS_API_LOG) { try { process.stdout.write(regel + '\n'); } catch (e) {} }
 }
 
 function nu() {
