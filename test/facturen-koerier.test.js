@@ -763,10 +763,13 @@ test('Intake → koerier: pdf al via het verzamelpostvak binnen → al_in_factur
 
 test('Intake → koerier: bijlage weg uit Intake → terugmelden als fout (de router telt pogingen); router weg → ronde gaat door', async () => {
   const t = opzet(), g = nepGmail();
-  const n = nepIntake([intakeStuk('stk_20261022_0000dddd', Z.pdf(['x']), { ontbreekt: 1 })]);
+  const n = nepIntake([intakeStuk('stk_20261022_0000dddd', Z.pdf(['x']), { ontbreekt: 1 }), intakeStuk('stk_20261022_0000eeee', Z.pdf(['y']), { te_groot: 1, bron_id: '49a2b3c4d5e6f7a8' }),
+    intakeStuk('stk_20261022_0000ffff', Buffer.from('geen pdf'), { bron_id: '59a2b3c4d5e6f7a8' })]);
   const u = await KO.ronde(t.fdb, n.io(g), { nu: NU, klok: () => NU });
   assert.equal(u.intake.ok, false);
-  assert.deepEqual(n.uitkomsten.map((x) => x.r), [{ ok: false, code: 'ontbreekt' }]);
+  // review MOET 1: te groot of geen pdf/UBL is nooit een geslaagde levering
+  assert.deepEqual(n.uitkomsten.map((x) => x.r), [{ ok: false, code: 'ontbreekt' }, { ok: false, code: 'te_groot' }, { ok: false, code: 'geen_document' }]);
+  n.stukken = [n.stukken[0]];
   assert.equal(t.n("SELECT count(*) AS n FROM bericht b JOIN bron r ON r.id = b.bron WHERE r.soort = 'intake'"), 0);
   n.fout = true;
   const u2 = await KO.ronde(t.fdb, n.io(g), { nu: NU + 60 * MIN, klok: () => NU + 60 * MIN });

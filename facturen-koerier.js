@@ -627,6 +627,9 @@ async function leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel) {
     doc.patientkenmerk_koerier = !!(doc.tekst && K.stapPatientkenmerk([doc.tekst]).kenmerk);
     documenten.push(doc);
   }
+  // review wv1919 MOET 1: een te grote of onleesbare bijlage is geen geslaagde levering (anders verdween de factuur stil uit Intake): fout
+  // richting de router, die het na vijf pogingen aan David teruggeeft
+  if (s.te_groot > 0 || documenten.length < s.documenten.length || !documenten.length) throw Object.assign(new Error('bijlage te groot of geen pdf/UBL'), { code: s.te_groot > 0 ? 'te_groot' : 'geen_document' });
   tel.documenten += documenten.length;
   let afzender = kort(s.van, 320);
   if (documenten.length && s.mailtekst && isDoorgestuurd({ van: s.van, onderwerp: s.onderwerp }, eigen)) { const a = oorspronkelijkeAfzender(s.mailtekst); if (a) afzender = a; }
@@ -656,7 +659,6 @@ async function leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel) {
     const echt = s.dkim === 'uitgelijnd' && afzender === kort(s.van, 320) && !eigen.includes(String(s.van || '').toLowerCase());
     tel.knoop_id += await knoopVul(fdb, io, vf.map((f) => f.id), echt ? String(s.van).split('@')[1] : null, o);
   }
-  if (!documenten.length) return 'geen_pdf';
   return n ? 'facturen:' + n : 'al_in_facturen';
 }
 /*
