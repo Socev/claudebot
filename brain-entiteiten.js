@@ -360,6 +360,50 @@ function maak(o) {
     return { ok: true, q: w, knopen: hit.slice(0, ZOEK_MAX).map(priveRegel), totaal: hit.length };
   }
 
+  // wv2077 (David 31-10: "als ik een naam of entiteit zoek, moet de Entiteitspagina bovenaan staan"): voor Brain › Zoeken de partijen
+  // waarvan de naam, een alias (register, handvat of pagina) of de paginanaam past, met hun vaultpad. Alleen hele woorden of het begin van
+  // een woord ("Abel" past niet in "Allekabels"). sterk: 0 = precies de naam, 1 = alle woorden als heel woord, 2 = begin van een woord.
+  // Zelfde grens als de lijst (zichtbaar, privé alleen zonder vaste plek); secondbrain.js toetst elk pad daarna nog aan de kaart.
+  async function naamTreffers(q, vast) {
+    const qw = woorden(q);
+    const qs = qw ? qw.split(' ') : [];
+    if (qw.replace(/ /g, '').length < 2) return [];
+    const sterkVan = function (namen) {
+      let best = 9;
+      namen.forEach(function (n) {
+        const w = woorden(n);
+        if (!w) return;
+        if (w === qw) { best = 0; return; }
+        const ws = w.split(' ');
+        if (qs.every(function (x) { return ws.indexOf(x) >= 0; })) best = Math.min(best, 1);
+        else if (qs.every(function (x) { return ws.some(function (y) { return y.indexOf(x) === 0; }); })) best = Math.min(best, 2);
+      });
+      return best;
+    };
+    const stam = function (p) { return stamVan(p).replace(/^Entiteit - /, ''); };
+    const uit = [];
+    let reg = null;
+    try { reg = await register(); } catch (e) { reg = null; }
+    if (reg) reg.knopen.forEach(function (k) {
+      const rel = String(k.vault_pagina || '');
+      if (k.actief === false || !zichtbaar(k, vast) || !PAGINA_RE.test(rel) || rel.split('/').indexOf('..') >= 0) return;
+      const namen = [k.naam, stam(rel)].concat(k.aliassen || []).concat((reg.handvatten[k.id] || []).filter(function (h) { return h.soort === 'alias'; }).map(function (h) { return h.waarde; }));
+      const s = sterkVan(namen);
+      if (s < 9) uit.push({ pad: rel, naam: masker(k.naam), soort: ROL_WOORD[k.rol] || (isPersoon(k) ? 'persoon' : null), sleutel: sleutelVan(k.id), sterk: s, r: isEigen(k) ? 0 : 1 });
+    });
+    if (!vast) {
+      const pv = prive();
+      const gehad = new Set(uit.map(function (x) { return x.pad; }));
+      pv.personen.concat(pv.stamboom).forEach(function (x) {
+        if (gehad.has(x.pad)) return;
+        const s = sterkVan([x.naam, stamVan(x.pad)].concat(x.aliassen || []));
+        if (s < 9) uit.push({ pad: x.pad, naam: masker(x.naam), soort: x.rol === 'stamboom' ? 'stamboom' : 'privé', sleutel: sleutelVan(x.pad), sterk: s, r: x.rol === 'stamboom' ? 3 : 2 });
+      });
+    }
+    uit.sort(function (a, b) { return a.sterk - b.sterk || a.r - b.r || a.naam.localeCompare(b.naam, 'nl'); });
+    return uit.slice(0, 20).map(function (x) { return { pad: x.pad, naam: x.naam, soort: x.soort, sleutel: x.sleutel, sterk: x.sterk }; });
+  }
+
   const LEEG_REGISTER = { concept: false, compilatie: null, gecompileerd_op: null };
 
   // Detail van een privépersoon uit de vault (geen knoop): hele pagina, deadlines en Dossier
@@ -429,7 +473,7 @@ function maak(o) {
       })) } };
   }
 
-  return { lijst: lijst, zoek: zoek, detail: detail, vergeet: function () { cache = null; priveCache = null; } };
+  return { lijst: lijst, zoek: zoek, detail: detail, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; } };
 }
 
 module.exports = { telNl: telNl, maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, maskeerIban: maskeerIban, zichtbaar: zichtbaar, groepVan: groepVan,

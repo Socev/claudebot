@@ -7,7 +7,7 @@
 # sleutelmasker blijft; met de vaste-plekschakelaar aan alleen organisaties aan de zakelijke kant, IBAN van derden gemaskeerd, zonder
 # facturen, deadlines of Dossier; facturen op naam/alias en knoop_id, zonder patiëntkenmerk; uitrol.sh, Dockerfile en CI.
 # wv1771: contactgegevens uit Google bij een persoon met een Google-koppeling, niet op een vaste plek. wv1948: ook een voorgestelde
-# koppeling (gelabeld voorgesteld), plus adressen en verjaardag.
+# koppeling (gelabeld voorgesteld), plus adressen en verjaardag. wv2077: naamTreffers (Brain › Zoeken: entiteitpagina bovenaan).
 # Alle namen en nummers hieronder zijn verzonnen (openbare repo).
 # Gebruik: bash test/brain-entiteiten.sh
 set -u
@@ -230,6 +230,27 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   toets('20d detail op de sleutel uit de lijst (12 hex), past in APP_ROUTE_RE', /^[0-9a-f]{12}$/.test(sl) && (await T.detail(sl, false)).j.knoop.id === 'org:voorbeeld-energie' && /^\/app\/[a-z0-9/-]{1,64}$/.test('/app/brain/entiteit/' + sl));
   toets('21 naamPatronen: één woord pas vanaf 4 letters, haakjes eraf', JSON.stringify(B.naamPatronen(['Bram Proefsen (Bijnaam)', 'Jo', 'K. Verzonnen', 'Kees']).sort()) === JSON.stringify(['bram proefsen', 'bram proefsen bijnaam', 'k verzonnen', 'kees']), B.naamPatronen(['Bram Proefsen (Bijnaam)', 'Jo', 'K. Verzonnen', 'Kees']));
   toets('21b bevatNaam: hele woorden, zonder accenten', B.bevatNaam('Voorbeeld - Jaargesprek Daniëlle van der Proef', ['danielle van der proef']) && !B.bevatNaam('Akeesje', ['kees']));
+
+  // wv2077: naamTreffers voor Brain › Zoeken (entiteitpagina bovenaan)
+  T.vergeet();
+  const nt = async (q, vast) => (await T.naamTreffers(q, vast)).map((x) => x.pad + '#' + x.sterk);
+  const n1 = await nt('Voorbeeld Energie', false);
+  toets('23 naamTreffers: precies de naam = sterk 0, met pad, soort en sleutel', n1[0] === '10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Energie.md#0' &&
+    (await T.naamTreffers('Voorbeeld Energie', false))[0].soort === 'leverancier' && /^[0-9a-f]{12}$/.test((await T.naamTreffers('Voorbeeld Energie', false))[0].sleutel), n1);
+  toets('23a alias uit register en handvat; begin van een woord', (await nt('VE Zakelijk', false))[0] === '10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Energie.md#0' &&
+    (await nt('Energie Levering', false)).indexOf('10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Energie.md#1') === 0 && (await nt('Voorbeeldp', false))[0] === '10_Zakelijk/Voorbeeld/Entiteit - VB.md#2', [await nt('VE Zakelijk', false), await nt('Voorbeeldp', false)]);
+  toets('23b paginanaam zonder "Entiteit - " telt mee (VB)', (await nt('VB', false))[0] === '10_Zakelijk/Voorbeeld/Entiteit - VB.md#0', await nt('VB', false));
+  toets('23c alleen hele woorden of het begin: "oorbeeld" past nergens; inactief en pagina buiten de vault niet', (await nt('oorbeeld', false)).length === 0 &&
+    (await nt('Opgeheven', false)).length === 0 && (await nt('Kapotte', false)).length === 0, [await nt('oorbeeld', false)]);
+  const n4 = await nt('Bram', false), n4v = await nt('Bram', true);
+  toets('23d privépersoon en stamboom zonder vaste plek, niet met vaste plek', n4.some((p) => /Bram Verzonnen \(Vriend\)\.md/.test(p)) && (await nt('Henk Oudverzonnen', false))[0] === '20_Prive/Familie/Stamboom/Henk Oudverzonnen.md#0' &&
+    n4v.length === 0 && (await nt('Voorbeeld Streaming', true)).length === 0, [n4, n4v]);
+  const n5 = await nt('Voorbeeld', false);
+  toets('23e volgorde: sterkte eerst (Voorbeeld Energie, heel woord, vóór Voorbeeldpraktijk, begin van een woord)', n5.indexOf('10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Energie.md#1') >= 0 &&
+    n5.indexOf('10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Energie.md#1') < n5.indexOf('10_Zakelijk/Voorbeeld/Entiteit - VB.md#2'), n5);
+  rpcFout = true; T.vergeet();
+  toets('23f register weg: wel privépersonen, geen fout', (await nt('Bram', false)).length > 0);
+  rpcFout = false; T.vergeet();
 
   const srv = fs.readFileSync('server.js', 'utf8');
   toets('22 server.js: routes (ook zoeken), vaste plek uit de schakelaar, sleutelmasker en kaart mee', /route === 'GET \/app\/brain\/entiteiten' \|\| route\.indexOf\('GET \/app\/brain\/entiteit\/'\) === 0 \|\| route\.indexOf\('GET \/app\/brain\/entiteiten\/zoek\/'\) === 0/.test(srv) && /B\.detail\(id, vast\)/.test(srv) && /B\.zoek\(q, vast\)/.test(srv) &&

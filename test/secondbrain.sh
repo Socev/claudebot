@@ -4,7 +4,8 @@
 # (exact pad, naam, hoofdletters/NFC, zelfde map, dubbelzinnig, #kop, |tekst, \| in tabel, embed, md-link met %20, codeblok genegeerd),
 # backlinks, openen (masker, frontmatter, .., absoluut, NUL, niet in kaart, vast + privé/personeel, symlink na de bouw, te groot), bestand
 # (alleen niet-md, tekst gemaskeerd, twee tegelijk), zoeken (naam, tekst, accenten, verborgen, vast, fragment gemaskeerd, betekenis gefilterd;
-# wv1940 zoekfilter soorten: codes, soort én plek, afgekapt per soort, teller, vault eerst),
+# wv1940 zoekfilter soorten: codes, soort én plek, afgekapt per soort, teller, vault eerst; wv2077 relevantie: entiteitpagina bovenaan,
+# groepen entiteiten · paginas · tekst, paginanaam/alias/vaker genoemd, map-wirwar achteraan, register weg = zonder groep),
 # kaart.json 0600 buiten de vault, koppeltabel Financiën, en server.js (dispatch, grenzen, glijdroutes, invoerslot, audit zonder pad, /health,
 # verrijking Financiën, uitrol-lijst, Dockerfile). Raakt de echte vault niet. Gebruik: bash test/secondbrain.sh
 set -u
@@ -253,6 +254,65 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   await new Promise((r) => setTimeout(r, 5));
   await sb.app('POST /app/secondbrain/open', { pad: 'bestaat/nogniet.md' }, {});
   toets('3 onbekend pad: hooguit één geforceerde herbouw per 10 s', sb.health().gebouwd === naBouw, [naBouw, sb.health().gebouwd]);
+
+  // ── 5c. relevantie (wv2077, David 31-10: "de Entiteitspagina bovenaan"; alle namen verzonnen, openbare repo) ──
+  {
+    const V3 = path.join(W, 'vault3');
+    const zet3 = (p, t) => { fs.mkdirSync(path.dirname(path.join(V3, p)), { recursive: true }); fs.writeFileSync(path.join(V3, p), t); };
+    zet3('10_Zakelijk/Voorbeeld/Entiteit - VB.md', '# Voorbeeldpraktijk\nDe Voorbeeldpraktijk.\n');
+    for (let i = 0; i < 60; i++) zet3('10_Zakelijk/Voorbeeld/Notulen/Overleg ' + i + '.md', '# overleg\nniets\n');   // alleen de map heet zo (de oude wirwar)
+    zet3('10_Zakelijk/Voorbeeld/Medewerkers/Piet Verzonnen.md', '# Piet\n');
+    zet3('10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Leverancier.md', '# lev\n');
+    zet3('01_Ontwikkeling/Voorbeeld.md', '# precies de naam\n');
+    zet3('01_Ontwikkeling/Voorbeeld plan.md', '# begint ermee\n');
+    zet3('01_Ontwikkeling/Allevoorbeeldig.md', '# ergens in de naam\n');
+    zet3('01_Ontwikkeling/Bijnaam.md', '---\naliases: [Voorbeeld, VB]\n---\n# alias\n');
+    zet3('01_Ontwikkeling/Veel.md', '# veel\nvoorbeeld voorbeeld voorbeeld voorbeeld voorbeeld\n');
+    zet3('01_Ontwikkeling/Weinig.md', '# weinig\neen voorbeeld\n');
+    zet3('20_Prive/Geheim Voorbeeld.md', '# privé\n');
+    zet3('30_Conversaties/WhatsApp/2026-10-30.md', '# dump\nvoorbeeld\n');
+    const nieuw = new Date(), oud = new Date(Date.now() - 5 * 86400000);
+    fs.utimesSync(path.join(V3, '01_Ontwikkeling/Veel.md'), oud, oud);   // veel treffers maar ouder: toch boven Weinig
+    let entVraag = null;
+    const ENT = [{ pad: '10_Zakelijk/Voorbeeld/Entiteit - VB.md', naam: 'Voorbeeldpraktijk', soort: 'eigen entiteit', sleutel: 'aaaaaaaaaaaa', sterk: 0 },
+      { pad: '20_Prive/Geheim Voorbeeld.md', naam: 'Geheim', soort: 'privé', sleutel: 'bbbbbbbbbbbb', sterk: 1 },
+      { pad: '10_Zakelijk/Bestaat/Niet.md', naam: 'Weg', soort: 'leverancier', sleutel: 'cccccccccccc', sterk: 1 },
+      { pad: '10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Leverancier.md', naam: 'Voorbeeld Leverancier', soort: 'leverancier', sleutel: 'niet-hex', sterk: 1 }];
+    const sb3 = S.maak({ vault: V3, dir: path.join(W, 'staat3'), hmac: (p) => 'h' + p.length, entiteiten: async (q, vast) => { entVraag = [q, vast]; return ENT; } });
+    const r = (await sb3.app('POST /app/secondbrain/zoek', { q: 'Voorbeeld', soorten: [] }, {})).j;
+    const pd = r.treffers.map((t) => t.pad);
+    toets('5c entiteitpagina bovenaan, groep entiteiten, met soort en sleutel', r.treffers[0].pad === '10_Zakelijk/Voorbeeld/Entiteit - VB.md' && r.treffers[0].groep === 'entiteiten' &&
+      r.treffers[0].waar === 'entiteit' && r.treffers[0].soort === 'eigen entiteit' && r.treffers[0].sleutel === 'aaaaaaaaaaaa' && r.treffers[0].domein && /^\d{4}-\d{2}-\d{2}$/.test(r.treffers[0].gewijzigd), r.treffers[0]);
+    toets('5c register-pad buiten de kaart valt weg; vreemde sleutel niet mee', pd.indexOf('10_Zakelijk/Bestaat/Niet.md') < 0 &&
+      r.treffers.find((t) => t.pad === '10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Leverancier.md').sleutel === undefined, r.treffers.slice(0, 4));
+    toets('5c entiteit niet nog eens als pagina', pd.filter((p) => p === '10_Zakelijk/Voorbeeld/Entiteit - VB.md').length === 1);
+    const groepen = r.treffers.map((t) => t.groep);
+    toets('5c groepen op volgorde: entiteiten · paginas · tekst', groepen.join(',') === groepen.slice().sort((a, b) => ['entiteiten', 'paginas', 'tekst'].indexOf(a) - ['entiteiten', 'paginas', 'tekst'].indexOf(b)).join(','), groepen);
+    const nm = r.treffers.filter((t) => t.groep === 'paginas').map((t) => t.pad.split('/').pop());
+    toets('5c paginanaam: precies, begint ermee, alias, dan ergens in de naam', nm.indexOf('Voorbeeld.md') === 0 && nm.indexOf('Voorbeeld plan.md') < nm.indexOf('Bijnaam.md') &&
+      nm.indexOf('Bijnaam.md') < nm.indexOf('Allevoorbeeldig.md') && r.treffers.find((t) => t.pad === '01_Ontwikkeling/Bijnaam.md').waar === 'alias', nm);
+    const tk = r.treffers.filter((t) => t.groep === 'tekst');
+    const ix = (f) => tk.findIndex(f);
+    toets('5c tekst: vaker genoemd eerst (ook als ouder), dan alleen-de-map; gesprekken na de vault', tk[0].pad === '01_Ontwikkeling/Veel.md' &&
+      ix((t) => t.pad === '01_Ontwikkeling/Weinig.md') < ix((t) => t.waar === 'map') && (ix((t) => /^30_/.test(t.pad)) < 0 || ix((t) => /^30_/.test(t.pad)) > ix((t) => t.pad === '01_Ontwikkeling/Weinig.md')), tk.map((t) => t.waar + ' ' + t.pad).slice(0, 6));
+    toets('5c de map-wirwar (60 overleggen) staat niet vóór de pagina\'s, en houdt plek voor tekst', r.treffers.length === 40 && r.afgekapt === true &&
+      r.treffers.findIndex((t) => t.waar === 'map') > r.treffers.findIndex((t) => t.pad === '01_Ontwikkeling/Allevoorbeeldig.md') && r.groepen.entiteiten === 3, { n: r.treffers.length, g: r.groepen });
+    toets('5c opt.entiteiten krijgt de vraag en de vaste plek', entVraag && entVraag[0] === 'Voorbeeld' && entVraag[1] === false, entVraag);
+    const rv = (await sb3.app('POST /app/secondbrain/zoek', { q: 'Voorbeeld', soorten: [] }, { vast: true })).j;
+    toets('5c vaste plek: vast mee naar het register; elk pad nog langs de kaart', entVraag[1] === true && rv.treffers.every((t) => !/^20_|^30_/.test(t.pad)), rv.treffers.filter((t) => /^20_|^30_/.test(t.pad)));
+    const rk = (await sb3.app('POST /app/secondbrain/zoek', { q: 'Voorbeeld', soorten: ['vault'] }, {})).j;
+    toets('5c chip Vault: entiteit blijft, privé-entiteit en gesprekken alleen als ze in de vault-plek vallen', rk.treffers[0].groep === 'entiteiten' && !rk.treffers.some((t) => /^30_/.test(t.pad)), rk.treffers.slice(0, 3));
+    const rp = (await sb3.app('POST /app/secondbrain/zoek', { q: 'Voorbeeld', soorten: ['pdf'] }, {})).j;
+    toets('5c chip PDF: geen entiteitpagina (dat is geen pdf)', !rp.treffers.some((t) => t.groep === 'entiteiten'), rp.treffers);
+    const sb4 = S.maak({ vault: V3, dir: path.join(W, 'staat4'), hmac: (p) => 'h' + p.length, entiteiten: async () => { throw new Error('register weg'); } });
+    const rf = (await sb4.app('POST /app/secondbrain/zoek', { q: 'Voorbeeld', soorten: [] }, {})).j;
+    toets('5c register weg: zoeken werkt, zonder entiteiten, met ent_fout', rf.ok && rf.ent_fout === true && rf.treffers[0].pad === '01_Ontwikkeling/Voorbeeld.md', rf.treffers[0]);
+    const sb5 = S.maak({ vault: V3, dir: path.join(W, 'staat5'), hmac: (p) => 'h' + p.length });
+    const ro = (await sb5.app('POST /app/secondbrain/zoek', { q: 'Voorbeeld', soorten: [] }, {})).j;
+    toets('5c zonder opt.entiteiten (oude aansluiting): geen ent_fout, paginanaam eerst', ro.ent_fout === undefined && ro.treffers[0].pad === '01_Ontwikkeling/Voorbeeld.md' && ro.treffers.every((t) => t.pad && t.waar && typeof t.fragment === 'string'));
+    const rw = (await sb3.app('POST /app/secondbrain/zoek', { q: 'oorbee', soorten: [] }, {})).j;
+    toets('5c deel van een woord: geen entiteitgroep-eis, wel ergens-in-de-naam', rw.treffers.some((t) => t.pad === '01_Ontwikkeling/Allevoorbeeldig.md' && t.groep === 'paginas'), rw.treffers.slice(0, 3));
+  }
 
   // ── 7. masker los ──
   const m = S.masker;

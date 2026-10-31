@@ -24,6 +24,7 @@ const KAART_VERS_MS = 120000;       // ouder = opnieuw bouwen bij de volgende vr
 const MAX_MD = 2 * 1024 * 1024;
 const MAX_BESTAND = 20 * 1024 * 1024;
 const MAX_TREFFERS = 40, FRAGMENT = 160, ZOEK_MS = 4000, MAX_Q = 200;
+const MAX_ENT = 8, MIN_TEKST = 10, MAX_LEZEN = 300;   // wv2077: hooguit 8 entiteiten, minstens 10 plekken voor tekstvondsten, 300 tekstvondsten om te rangschikken
 
 // wv1931 (David 28-10: "Jij schermt af wat ik al heb"): geen vaultmap meer verborgen voor David. Beveiliging, Tokens, Vault-RAG,
 // TempFinData, Claude outputs en 0b-werkmap zijn zichtbaar; het sleutelmasker (masker) geldt er zoals overal. Punt-mappen en
@@ -124,6 +125,20 @@ function zonderMarkeringen(t) {
     regels[i] = z.trim() ? z : '';   // lege regel i.p.v. weg: anders loopt tekst na het blok lui door in de callout (> …)
   }
   return regels.join('');
+}
+
+// wv2077: past de zoekvraag op een alias in de frontmatter (aliases: [a, b] of een lijst met -)? 1 = precies, 2 = alle woorden als heel woord, 0 = nee
+function aliasPast(t, qPlat, woorden) {
+  const fm = /^\uFEFF?---\r?\n([\s\S]{0,4000}?)\r?\n---/.exec(t);
+  if (!fm) return 0;
+  const m = /^(?:aliases|alias)\s*:[ \t]*(.*(?:\r?\n[ \t]+-.*)*)/m.exec(fm[1]);
+  if (!m) return 0;
+  const vlak = (x) => String(x).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const lijst = m[1].replace(/^\[|\]\s*$/g, '').split(/,|\r?\n[ \t]+-/).map(function (x) { return vlak(x.replace(/^[ \t]*-/, '').replace(/^\s*["']|["']\s*$/g, '')); }).filter(Boolean);
+  const q = vlak(qPlat), qs = q.split(' ');
+  if (lijst.some(function (a) { return a === q; })) return 1;
+  if (lijst.some(function (a) { const ws = a.split(' '); return qs.every(function (w) { return ws.indexOf(w) >= 0; }); })) return 2;
+  return 0;
 }
 
 // ── paden ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -658,51 +673,103 @@ function maak(opt) {
     if (zoekBezig) return { status: 429, j: { ok: false, fout: 'er loopt al een zoekvraag; even geduld' } };
     zoekBezig = true;
     try {
+      // wv2077 (David 31-10: "een wirwar van pagina's … de Entiteitspagina bovenaan"): drie groepen op relevantie in plaats van naam en
+      // tekst op datum. 1. entiteiten: de pagina van een partij of persoon uit het register (Entiteiten & Personen) waarvan naam of alias
+      // past (opt.entiteiten, brain-entiteiten.js), elk pad nog langs de kaart en het filter; 2. paginas: de paginanaam past (precies, als
+      // heel woord, als begin van een woord, ergens erin) of een alias in de frontmatter; 3. tekst: in de tekst, op hoe vaak de woorden
+      // erin staan, en pagina's die alleen in een map met die naam staan (vroeger "naam": dat was de wirwar). Binnen een groep eerst de
+      // vault zelf, dan Bronnen en gesprekken. Een oudere app leest pad, waar en fragment en negeert de rest.
       const woorden = plat(q).split(/\s+/).filter(function (w) { return w.length > 0; }).slice(0, 8);
-      const opNaam = [], opTekst = [];
+      const qPlat = woorden.join(' ');
       const t0 = Date.now();
       let afgekapt = false;
       const lijst = k.bestanden.filter(past);
-      const naamPast = function (b) { const p = plat(b.p); return woorden.every(function (w) { return p.indexOf(w) >= 0; }); };
-      for (const b of lijst) if (naamPast(b)) opNaam.push({ b: b, pad: b.p, waar: 'naam', fragment: '' });
+      const stamPlat = function (b) { return plat(b.p.split('/').pop().replace(/\.[^.\/]+$/, '')).replace(/[^a-z0-9]+/g, ' ').trim(); };
+      const naamSterk = function (b) {   // 0 precies · 1 begint ermee · 2 alle woorden heel · 3 begin van een woord · 4 ergens in de naam · null
+        const n = stamPlat(b), ws = n.split(' ');
+        if (n === qPlat || n.replace(/^entiteit /, '') === qPlat) return 0;
+        if (n.indexOf(qPlat + ' ') === 0) return 1;
+        if (woorden.every(function (w) { return ws.indexOf(w) >= 0; })) return 2;
+        if (woorden.every(function (w) { return ws.some(function (y) { return y.indexOf(w) === 0; }); })) return 3;
+        if (woorden.every(function (w) { return n.indexOf(w) >= 0; })) return 4;
+        return null;
+      };
+      const padPast = function (b) { const p = plat(b.p); return woorden.every(function (w) { return p.indexOf(w) >= 0; }); };
       // wv1940: teller per soort die alleen op naam zoekt (dus exact en goedkoop), binnen de gekozen plekken
       let tel;
       if (keuze) {
         tel = { pdf: 0, office: 0, media: 0 };
         for (const b of k.bestanden) {
           const c = soortCode(b);
-          if (c !== 'paginas' && plekGoed(b) && naamPast(b)) tel[c]++;
+          if (c !== 'paginas' && plekGoed(b) && padPast(b)) tel[c]++;
         }
       }
-      const opNaamSet = new Set(opNaam.map(function (x) { return x.pad; }));
-      const tekstLijst = lijst.filter(function (b) { return (b.s === 'md' || b.s === 'tekst') && b.g <= MAX_MD && !opNaamSet.has(b.p); })
-        .sort(function (a, b) { return rang(a) - rang(b) || b.m - a.m; });
-      const naamVoor = [opNaam.filter(function (x) { return rang(x.b) === 0; }).length, opNaam.length];   // naamtreffers die vóór deze rang staan
-      for (const b of tekstLijst) {
-        if (opTekst.length + naamVoor[rang(b)] >= MAX_TREFFERS) { afgekapt = true; break; }
-        if (Date.now() - t0 > ZOEK_MS) { afgekapt = true; break; }
+      // 1. entiteiten (hooguit 2,5 s; lukt het niet, dan zonder die groep en ent_fout)
+      const ent = [], gehad = new Set();
+      let entFout = false;
+      if (typeof opt.entiteiten === 'function') {
+        let rij = null;
+        try {
+          rij = await Promise.race([Promise.resolve(opt.entiteiten(q, !!ctx.vast)), new Promise(function (ok) { setTimeout(function () { ok(null); }, 2500).unref(); })]);
+        } catch (e) { rij = null; }
+        if (!Array.isArray(rij)) entFout = true;
+        else for (const e of rij) {
+          const i = k.perPad.get(sleutel(String(e && e.pad || '')));
+          if (i === undefined) continue;
+          const b = k.bestanden[i];
+          if (!past(b) || gehad.has(b.p) || ent.length >= MAX_ENT) continue;
+          gehad.add(b.p);
+          ent.push({ b: b, pad: b.p, waar: 'entiteit', groep: 'entiteiten', fragment: '', soort: e.soort ? String(e.soort).slice(0, 40) : null, sleutel: /^[0-9a-f]{12}$/.test(String(e.sleutel)) ? e.sleutel : null });
+        }
+      }
+      // 2. op de paginanaam
+      const opNaam = [];
+      for (const b of lijst) {
+        if (gehad.has(b.p)) continue;
+        const s = naamSterk(b);
+        if (s !== null) { opNaam.push({ b: b, pad: b.p, waar: 'naam', groep: 'paginas', fragment: '', s: s }); gehad.add(b.p); }
+      }
+      // 3. in de tekst (en de frontmatter-alias, die promoveert naar paginas). Eerst wat in een map met die naam staat, dan de vault zelf
+      // op datum; lezen stopt bij MAX_LEZEN treffers of ZOEK_MS. Daarna gerangschikt op hoe vaak de woorden erin staan.
+      const opTekst = [];
+      const tekstLijst = lijst.filter(function (b) { return (b.s === 'md' || b.s === 'tekst') && b.g <= MAX_MD && !gehad.has(b.p); })
+        .map(function (b) { return { b: b, map: padPast(b) ? 0 : 1 }; })
+        .sort(function (a, z) { return a.map - z.map || rang(a.b) - rang(z.b) || z.b.m - a.b.m; });
+      const telIn = function (t, w) { let n = 0, i = t.indexOf(w); while (i >= 0 && n < 20) { n++; i = t.indexOf(w, i + w.length); } return n; };
+      for (const x of tekstLijst) {
+        const b = x.b;
+        if (opTekst.length >= MAX_LEZEN || Date.now() - t0 > ZOEK_MS) {
+          afgekapt = true;
+          if (x.map === 0) opTekst.push({ b: b, pad: b.p, waar: 'map', groep: 'tekst', fragment: '', n: 0 });   // niet meer gelezen: alleen de map
+          if (opTekst.length >= MAX_LEZEN + MAX_TREFFERS) break;
+          continue;
+        }
         let t;
         try { t = fs.readFileSync(path.join(VAULT, b.p), 'utf8'); } catch (e) { continue; }
-        const l = t.toLowerCase();
-        // snelle voortoets zonder accenten-omzetting; alleen bij een kans de dure omzetting
-        const eerste = woorden[0];
-        let pos = l.indexOf(eerste);
-        let vlak = null;
-        if (pos < 0) { if (!/[À-ɏ]/.test(t)) continue; vlak = plat(t); pos = vlak.indexOf(eerste); if (pos < 0) continue; }
-        const bron = vlak || l;
+        let bron = t.toLowerCase();
         if (!woorden.every(function (w) { return bron.indexOf(w) >= 0; })) {
-          if (vlak) continue;
-          vlak = plat(t);
-          if (!woorden.every(function (w) { return vlak.indexOf(w) >= 0; })) continue;
-          pos = vlak.indexOf(eerste);
+          if (!/[À-ɏ]/.test(t)) { if (x.map === 0) opTekst.push({ b: b, pad: b.p, waar: 'map', groep: 'tekst', fragment: '', n: 0 }); continue; }
+          bron = plat(t);
+          if (!woorden.every(function (w) { return bron.indexOf(w) >= 0; })) { if (x.map === 0) opTekst.push({ b: b, pad: b.p, waar: 'map', groep: 'tekst', fragment: '', n: 0 }); continue; }
         }
-        opTekst.push({ pad: b.p, waar: 'tekst', fragment: fragment(t, Math.min(pos, t.length), ctx), r: rang(b) });
+        const al = aliasPast(t, qPlat, woorden);
+        if (al) { opNaam.push({ b: b, pad: b.p, waar: 'alias', groep: 'paginas', fragment: '', s: al === 1 ? 1.5 : 2.5 }); continue; }
+        const n = woorden.reduce(function (s, w) { return s + telIn(bron, w); }, 0);
+        opTekst.push({ b: b, pad: b.p, waar: 'tekst', groep: 'tekst', fragment: fragment(t, Math.min(bron.indexOf(woorden[0]), t.length), ctx), n: n + (x.map === 0 ? 3 : 0) });
       }
-      opNaam.sort(function (a, b) { return rang(a.b) - rang(b.b) || b.b.m - a.b.m; });
-      const treffers = opNaam.slice(0, MAX_TREFFERS).map(function (x) { return { pad: x.pad, waar: 'naam', fragment: '', r: rang(x.b) }; }).concat(opTekst)
-        .sort(function (a, b) { return a.r - b.r; }).slice(0, MAX_TREFFERS)
-        .map(function (x) { return { pad: x.pad, waar: x.waar, fragment: x.fragment }; });
-      const j = { ok: true, q: q, treffers: treffers, afgekapt: afgekapt || opNaam.length > MAX_TREFFERS, ms: Date.now() - t0 };
+      opNaam.sort(function (a, z) { return rang(a.b) - rang(z.b) || a.s - z.s || z.b.m - a.b.m; });
+      opTekst.sort(function (a, z) { return rang(a.b) - rang(z.b) || z.n - a.n || z.b.m - a.b.m; });
+      const naamDeel = opNaam.slice(0, MAX_TREFFERS - ent.length - Math.min(opTekst.length, MIN_TEKST));   // de tekstgroep houdt minstens MIN_TEKST plekken
+      const alle = ent.concat(naamDeel).concat(opTekst);
+      const treffers = alle.slice(0, MAX_TREFFERS).map(function (x) {
+        const t = { pad: x.pad, waar: x.waar, groep: x.groep, fragment: x.fragment, domein: x.b.d, gewijzigd: new Date(x.b.m).toISOString().slice(0, 10) };
+        if (x.soort) t.soort = x.soort;
+        if (x.sleutel) t.sleutel = x.sleutel;
+        return t;
+      });
+      const j = { ok: true, q: q, treffers: treffers, afgekapt: afgekapt || ent.length + opNaam.length + opTekst.length > treffers.length, ms: Date.now() - t0,
+        groepen: { entiteiten: ent.length, paginas: opNaam.length, tekst: opTekst.length } };
+      if (entFout) j.ent_fout = true;
       if (tel) j.tel = tel;
       return { status: 200, j: j };
     } finally { zoekBezig = false; }
