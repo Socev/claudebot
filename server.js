@@ -3605,8 +3605,10 @@ async function meetTank(account) {
   const getal = (n) => { const v = h(n); return v === null ? null : Number(v); };
   const moment = (n) => { const v = getal(n); return v ? new Date(v * 1000).toISOString() : null; };
   // Fail-closed: zonder tellers is er niets te melden, en dan mag dit NIET als volle tank
-  // doorgaan. Een tank die niet te lezen is, is geen volle tank.
-  if (getal('5h-utilization') === null) {
+  // doorgaan. Een tank die niet te lezen is, is geen volle tank. Sinds 31-10-2026 telt alleen de
+  // weekteller: Anthropic stopte met de 5-uurslimiet en stuurt geen 5h-koppen meer (David 17:31).
+  // vijf_uur blijft als veld bestaan maar is dan null (niet gemeten), nooit een verzonnen 0.
+  if (getal('7d-utilization') === null) {
     return { ok: false, fout: 'geen rate-limit-headers', http: r.status };
   }
   const benut7 = getal('7d-utilization');
@@ -3617,7 +3619,7 @@ async function meetTank(account) {
     bron: 'anthropic-ratelimit-unified-* headers op /v1/messages',
     vijf_uur: { benut: getal('5h-utilization'), status: h('5h-status'), reset: moment('5h-reset') },
     zeven_dagen: { benut: benut7, status: h('7d-status'), reset: reset7iso },
-    status: h('status'),
+    status: h('status') || h('7d-status'),   // 31-10: unified-status kwam nog mee; valt hij weg, dan beslist de weekstatus
     overage: { status: h('overage-status'), reden_uit: h('overage-disabled-reason') },
     terugval_bij: getal('fallback-percentage'),
     representatief: h('representative-claim'),
@@ -3692,7 +3694,6 @@ const ACCOUNT2_AUTH_BLOK_MS = 6 * 3600 * 1000;
 const ACCOUNT2_AUTHFOUT = /authentication_error|invalid.{0,20}(token|api.?key|bearer)|oauth token (has )?(expired|revoked)|token (has been )?revoked|\b401\b|please run \/login|not logged in/i;
 const ACCOUNT2_WEEK_MAX = 0.97;   // zelfde drempel als werkvoorraad_stand.account2_max
 const ACCOUNT1_RESERVE = 1 / 14;  // Davids reserve op account 1 (werkvoorraad_stand.reserve_david)
-const ACCOUNT1_VIJF_UUR_MAX = 0.85;
 const ACCOUNT2_MEET_MS = 10 * 60 * 1000;
 let account2 = { waarde: '', gehaald: 0, fout: null, bron: null };
 let account2Blok = { tot: 0, reden: '' };
@@ -3762,7 +3763,6 @@ async function account1Vangnet() {
   if (!t || !t.ok) return { mag: false, reden: 'geen meting van account 1' };
   const rest = 1 - Number(t.zeven_dagen && t.zeven_dagen.benut);
   if (!(rest >= ACCOUNT1_RESERVE)) return { mag: false, reden: 'account 1 onder Davids reserve (' + Math.round(rest * 100) + '% over)' };
-  if (!(Number(t.vijf_uur && t.vijf_uur.benut) < ACCOUNT1_VIJF_UUR_MAX)) return { mag: false, reden: 'account 1 vijf-uursvenster vol' };
   if (t.status && !/^allowed/.test(t.status)) return { mag: false, reden: 'account 1 status ' + t.status };
   return { mag: true, reden: Math.round(rest * 100) + '% over op account 1' };
 }
@@ -8051,7 +8051,7 @@ const APP_DRAAD_ZIN = {
   uit: 'tikker staat uit', pod: 'wacht tot de pod weer bereikbaar is', niet_primair: 'wacht tot de pod weer de hoofdkant is',
   uitrol: 'wacht tot een uitrol klaar is', pauze: 'pauze na een limiet', auto: 'wacht tot de opdrachten uit de auto klaar zijn',
   plekken: 'wacht op een vrije plek', eigen_max: 'wacht op een vrije plek', quotum: 'wacht op een verse meting van je weekbudget',
-  vijf_uur: 'wacht tot het vijf-uursvenster weer ruimte heeft', ruimte: 'wacht op ruimte in je weekbudget',
+  ruimte: 'wacht op ruimte in je weekbudget',
   dagmax: 'dagmaximum bereikt, morgen weer', volgende_tik: 'start bij de volgende tik', na_lopend: 'start na een lopende klus',
   na_klus: 'start na een andere klus', bundel: 'gaat mee in de bundelronde (08:30, 13:30 of 18:30)', niet_voor: 'wacht op zijn starttijd',
   afwerk: 'wacht op de lopende afwerkklus', mislukt: 'mislukt', machinekamer: 'wacht op de machinekamer', onbekend: 'wacht op de tikker',
@@ -12643,8 +12643,7 @@ async function appVerbruik(req, res) {
     if (s && s.max_eigen_vrij != null) {
       vrij = s.vrij_tot || null;
       limieten = { vrij: { tegelijk: Number(s.max_eigen_vrij) || 0, per_dag: Number(s.max_starts_dag_vrij) || 0 },
-        normaal: { tegelijk: Number(s.max_eigen_normaal) || 0, per_dag: Number(s.max_starts_dag_normaal) || 0 },
-        vijf_uur_max: s.vijf_uur_max != null ? Number(s.vijf_uur_max) : null, tank_max_leeftijd_min: Number(s.tank_max_leeftijd_min) || null };
+        normaal: { tegelijk: Number(s.max_eigen_normaal) || 0, per_dag: Number(s.max_starts_dag_normaal) || 0 }, tank_max_leeftijd_min: Number(s.tank_max_leeftijd_min) || null };
     }
   } catch (e) { logError('app-verbruik', e); if (fouten.indexOf('werkvoorraad') < 0) fouten.push('werkvoorraad'); }
   const getal = function (v) { const n = Number(v); return v == null || !isFinite(n) ? null : n; };

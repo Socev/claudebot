@@ -40,13 +40,15 @@ setTimeout(() => {
 `, { mode: 0o755 });
 
 const rapporten = [];
-let week1 = '0.40', tankRijen = [];   // nep-tank van account 1 (headers zoals /v1/messages) en wat de pod naar de RPC's schrijft
+let week1 = '0.40', tankRijen = [], koppen = 'beide';   // koppen: beide | zonder5h (Anthropic sinds 31-10-2026) | alleen7d | zonder7d   // nep-tank van account 1 (headers zoals /v1/messages) en wat de pod naar de RPC's schrijft
 const hook = http.createServer((req, res) => { let b = ''; req.on('data', (c) => b += c); req.on('end', () => {
   if (req.url === '/v1/messages') {
     const r7 = Math.floor(Date.now() / 1000) + 3 * 86400;
-    res.writeHead(200, { 'anthropic-ratelimit-unified-5h-utilization': '0.10', 'anthropic-ratelimit-unified-7d-utilization': week1,
+    const k = { 'anthropic-ratelimit-unified-5h-utilization': '0.10', 'anthropic-ratelimit-unified-7d-utilization': week1,
       'anthropic-ratelimit-unified-7d-reset': String(r7), 'anthropic-ratelimit-unified-5h-reset': String(r7 - 86400), 'anthropic-ratelimit-unified-status': 'allowed',
-      'anthropic-ratelimit-unified-5h-status': 'allowed', 'anthropic-ratelimit-unified-7d-status': 'allowed' });
+      'anthropic-ratelimit-unified-5h-status': 'allowed', 'anthropic-ratelimit-unified-7d-status': 'allowed' };
+    Object.keys(k).forEach((n) => { if (((koppen === 'zonder5h' || koppen === 'alleen7d') && n.indexOf('-5h-') > 0) || (koppen === 'alleen7d' && !/-7d-/.test(n)) || (koppen === 'zonder7d' && n.indexOf('-7d-') > 0)) delete k[n]; });
+    res.writeHead(200, k);
     return res.end('{}');
   }
   if (req.url.indexOf('/rest/v1/rpc/mk_tank') === 0) { try { tankRijen.push({ rpc: req.url.split('/').pop(), body: JSON.parse(b) }); } catch (e) {} return res.end(JSON.stringify([{ oordeel: 'proef' }])); }
@@ -135,6 +137,21 @@ function stop(srv) { try { process.kill(-srv.p.pid, 'SIGKILL'); } catch (e) {} }
     await rapportVoor(b2.job_id, 15000);
     const sb = spawns().filter((x) => x.sleutel === 'bb');
     toets('D volgende agent meteen op account 1', sb.length >= 1 && sb[0].acc === 1, JSON.stringify(sb));
+    // D1. (na D: de verse /tank vult de cache die het vangnet in D zou gebruiken) 31-10-2026: geen 5h-koppen meer -> meting ok met vijf_uur null (geen verzonnen 0); zonder 7d-koppen fail-closed
+    koppen = 'zonder5h'; tankRijen = [];
+    const z5 = await req(s, 'GET', '/tank?verversen=1');
+    const z5rij = tankRijen.find((x) => x.rpc === 'mk_tank_schrijf');
+    toets('D1 /tank zonder 5h-koppen: ok, week gemeten, vijf_uur null', z5._status === 200 && z5.ok === true && z5.zeven_dagen.benut === 0.4 && z5.vijf_uur.benut === null, JSON.stringify(z5).slice(0, 200));
+    toets('D1 zonder 5h-koppen: RPC krijgt p_vijf_uur null', !!(z5rij && z5rij.body.p_vijf_uur === null && z5rij.body.p_zeven_dagen === 0.4), JSON.stringify(z5rij && z5rij.body));
+    const z5b = await req(s, 'GET', '/tank?account=2&verversen=1');
+    toets('D1 /tank?account=2 zonder 5h-koppen: ok', z5b._status === 200 && z5b.ok === true && z5b.vijf_uur.benut === null, JSON.stringify(z5b).slice(0, 160));
+    koppen = 'alleen7d';
+    const a7 = await req(s, 'GET', '/tank?verversen=1');
+    toets('D1 /tank met alleen 7d-koppen: ok, status uit 7d-status', a7._status === 200 && a7.ok === true && a7.status === 'allowed' && a7.vijf_uur.benut === null, JSON.stringify(a7).slice(0, 200));
+    koppen = 'zonder7d'; tankRijen = [];
+    const z7 = await req(s, 'GET', '/tank?verversen=1');
+    toets('D1 /tank zonder 7d-koppen: fail-closed (503, niets geschreven)', z7._status === 503 && z7.ok === false && !tankRijen.length, JSON.stringify(z7));
+    koppen = 'beide';
     stop(s);
 
     // G. vangnet: account 1 onder Davids reserve (96% van de week) -> geen terugval, agent eindigt als limiet
