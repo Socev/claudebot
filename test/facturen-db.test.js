@@ -174,7 +174,7 @@ test('migratie 5 (wv1299): schema 4 → 5 verruimt bank/formaat met TRIODOS/trio
   const dir = map('m5');
   dbOpSchema4(dir).close();
   const f = D.open(dir);
-  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
   assert.equal(f.schema, D.SCHEMA_VERSIE);
   assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
@@ -232,7 +232,7 @@ test('migratie 5 (wv1299): een fout ná het bijwerken van sqlite_master rolt vol
   assert.deepEqual(tabelSql(db), voor);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   db.close();
-  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
+  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
 });
 
 test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets', () => {
@@ -1085,7 +1085,33 @@ test("migratie 11 (wv1326): signaal krijgt soort 'afwijkend_bedrag'; vanaf schem
   const dir2 = path.dirname(d2.pad);
   D.sluit(d2);
   const e2 = D.open(dir2);
-  assert.deepEqual(e2.toegepast, [10, 11, 12, 13, 14]);
+  assert.deepEqual(e2.toegepast, [10, 11, 12, 13, 14, 15]);
   assert.equal(sigSql(e2.db), vers);
   D.sluit(e2);
+});
+
+test("migratie 15 (wv1919): bron krijgt soort 'intake'; vanaf schema 14 = nieuw aangemaakt; al verruimd → overslaan", () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'facturen-m15-'));
+  const nieuw = D.open(dir);
+  const vers = nieuw.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'bron'").get().sql;
+  assert.ok(vers.includes("soort IN ('verzamelpostvak','upload','bankluis','intake')"));
+  nieuw.db.prepare("INSERT INTO bron (id, soort, naam, actief) VALUES ('eeeeeeeeeeee0001', 'intake', 'intake:gmail:proef', 1)").run();
+  assert.throws(() => nieuw.db.prepare("INSERT INTO bron (id, soort, naam, actief) VALUES ('eeeeeeeeeeee0002', 'iets', 'x', 1)").run(), /CHECK/);
+  // terug naar schema 14 (oude CHECK, rij 15 weg; zonder intake-bron), dan opnieuw openen: M15 verruimt
+  nieuw.db.exec("DELETE FROM bron WHERE soort = 'intake'");
+  nieuw.db.exec('PRAGMA writable_schema = ON');
+  nieuw.db.prepare("UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = 'bron'").run(",'bankluis','intake')", ",'bankluis')");
+  nieuw.db.exec('PRAGMA writable_schema = OFF');
+  nieuw.db.exec('DELETE FROM schema_migratie WHERE versie = 15');
+  D.sluit(nieuw);
+  const f = D.open(dir);
+  assert.deepEqual(f.toegepast, [15]);
+  assert.equal(f.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'bron'").get().sql, vers);
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  D.sluit(f);
+  // al verruimd, alleen de rij ontbrak → overslaan zonder fout
+  const g = new DatabaseSync(path.join(dir, D.BESTAND)); g.exec('DELETE FROM schema_migratie WHERE versie = 15'); g.close();
+  const h = D.open(dir); assert.deepEqual(h.toegepast, [15]); D.sluit(h);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

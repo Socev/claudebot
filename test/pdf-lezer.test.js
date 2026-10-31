@@ -438,7 +438,7 @@ test('server.js: sleutel via de Management-API (niet uit de omgeving), alleen op
   assert.ok(!/process\.env\.ANTHROPIC/.test(blok), 'geen ANTHROPIC_* uit de omgeving');
   assert.match(blok, /function pdfSchaduw\(job\) \{ if \(!pdfLezer \|\| !rolPrimair\(\)\) return false;/);
   assert.match(s, /pdf_lezer: pdfLezerInfo\(\)/);
-  assert.match(s, /function facturenIo\(\) \{ return \{[^}]*pdfSchaduw: pdfSchaduw, pdfLive: pdfLive \}; \}/);
+  assert.match(s, /function facturenIo\(\) \{\n  return \{[^}]*pdfSchaduw: pdfSchaduw, pdfLive: pdfLive,/);   // wv1919: daarna intake + knoopVoor
   // wv1921: live alleen op de primaire kant en alleen als die aanroeper live staat
   assert.match(blok, /async function pdfLive\(job\) \{ if \(!pdfLezer \|\| !rolPrimair\(\) \|\| !pdfLezer\.isLive\('facturen'\)\) return null;/);
   assert.match(blok, /if \(!pdfLezer \|\| !rolPrimair\(\) \|\| !pdfLezer\.isLive\('intake'\)\) return \{ ok: false, terugval: 'uit' \};/);

@@ -3236,7 +3236,8 @@ function alsFout(e, log) {
  * zoals MailMans archiefregel; review MOET 1: anders kan de stap FACTUUR weghalen vóór het archiveren). Dan: betaald_gezien (bankmatch, ook een
  * gezien incasso) = is_betaald; ingevoerd (SEPA-batch of 'ingevoerd in bank') of betaald_vooraf (bevestigd als al betaald) = in_sepa; al het
  * andere (te betalen, incasso verwacht) = nog geen stap. Alleen berichten met een stap. UNION ALL over factuur.bericht en document.bericht
- * (review ZOU 4: geen gecorreleerde subquery per factuur). Alleen lezen. → [{ gmail_id, stap }]
+ * (review ZOU 4: geen gecorreleerde subquery per factuur). Alleen lezen. wv1919: een bericht dat de koerier uit OVIS Intake las (bron
+ * intake:gmail:david, message_id = de Gmail-id) telt net zo. → [{ gmail_id, stap }]
  */
 const STAP_STATUS = "('in_wachtrij','wordt_verstuurd','concept_klaar','verstuurd','prive_archief')";
 function mailStappen(fdb, max) {
@@ -3247,7 +3248,7 @@ function mailStappen(fdb, max) {
       UNION ALL
       SELECT d.bericht AS ber, ${RANG} AS rang FROM factuur f JOIN document d ON d.id = f.document WHERE d.bericht IS NOT NULL AND ${ECHT}
     ) x JOIN bericht b ON b.id = x.ber JOIN bron r ON r.id = b.bron
-    WHERE r.soort = 'verzamelpostvak' GROUP BY b.id HAVING min(x.rang) >= 1 ORDER BY b.ontvangen_op DESC LIMIT ?`).all(max || 2000)
+    WHERE (r.soort = 'verzamelpostvak' OR (r.soort = 'intake' AND r.naam = 'intake:gmail:david')) GROUP BY b.id HAVING min(x.rang) >= 1 ORDER BY b.ontvangen_op DESC LIMIT ?`).all(max || 2000)
     .filter((x) => /^[0-9a-f]{12,24}$/.test(String(x.gmail_id)))
     .map((x) => ({ gmail_id: String(x.gmail_id), stap: Number(x.rang) >= 2 ? 'is_betaald' : 'in_sepa' }));
 }

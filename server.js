@@ -15278,7 +15278,15 @@ async function facturenVerzender(v) {
   }
   throw vooraf('verzender-webhook niet gevonden');
 }
-function facturenIo() { return { luik: appAgendaApi, luikBytes: facturenLuikBytes, verzender: facturenVerzender, pdfSchaduw: pdfSchaduw, pdfLive: pdfLive }; }   // wv1431: schaduw PDF-lezer; wv1921: live
+// wv1919 (OVIS Intake stap 3d): de koerier leest ook de stukken die de Intake-router naar de facturenlens stuurde (io.intake) en vult
+// leverancier.knoop_id via het register van de router (io.knoopVoor). Router uit of niet geladen: een lege lijst (de koerier doet dan niets extra).
+function facturenIntakeRouter() { return typeof intakeRouterHaal === 'function' && typeof intakeRouterStand === 'function' && intakeRouterStand() ? intakeRouterHaal() : null; }
+function facturenIo() {
+  return { luik: appAgendaApi, luikBytes: facturenLuikBytes, verzender: facturenVerzender, pdfSchaduw: pdfSchaduw, pdfLive: pdfLive,   // wv1431: schaduw PDF-lezer; wv1921: live
+    intake: { lijst: async function (max) { const ir = facturenIntakeRouter(); return ir && typeof ir.facturenAangeboden === 'function' ? ir.facturenAangeboden(max) : []; },
+      uitkomst: async function (id, versie, r) { const ir = facturenIntakeRouter(); if (!ir || typeof ir.facturenUitkomst !== 'function') throw new Error('intake-router niet geladen'); return ir.facturenUitkomst(id, versie, r); } },
+    knoopVoor: async function (x) { const ir = facturenIntakeRouter(); return ir && typeof ir.knoopVoor === 'function' ? ir.knoopVoor(x) : null; } };
+}
 function facturenKoerierInfo(fdb) {
   if (!facturenKoerier) return { aan: false };
   let k = null;
@@ -16096,6 +16104,43 @@ function intakeSysteemBericht(tekst) {
     k.on('close', function (code) { clearTimeout(tm); klaar(code === 0); });
   });
 }
+// ── OVIS Intake stap 3d (wv1919): wat de router van de Facturen-app wil weten (alleen lezen op facturen.sqlite) ──
+// facturenKent(sha256[]) → Set van de sha256's die als gelezen document in de app staan (dan hoeft David er niet over te beslissen).
+function intakeFacturenKent(shas) {
+  const fdb = facturenOpen();
+  if (!fdb || !fdb.db) throw new Error('facturen-databank niet open');
+  const q = fdb.db.prepare('SELECT 1 FROM document WHERE sha256 = ? AND te_lezen = 0');
+  const uit = new Set();
+  for (const s of (shas || []).slice(0, 50)) if (/^[0-9a-f]{64}$/.test(String(s)) && q.get(String(s))) uit.add(String(s));
+  return uit;
+}
+// ketenBetaling({ entiteit (knoop), kenmerken, ibans, ontvangen }) → { gevonden, via, bank_tot, nagekeken, prive }. Een betaling = een afschrijving
+// met het kenmerk in omschrijving of betaalkenmerk (vanaf 180 dagen vóór ontvangst), of naar een rekening op het stuk (vanaf 3 dagen vóór
+// ontvangst). Zonder eigen transacties van die entiteit (bv. privé: die rekeningen kent de Facturen-app niet) alle zakelijke rekeningen.
+const INTAKE_FACTUREN_ENT = { TG: 'tolgaarde', GH: 'groenhouten', HAGRO: 'hagro', POT: 'pot', HOLD: 'holding', PHBV: 'praktijkhouders_bv', SEL: 'sel', DBH: 'dbh',
+  GHAWA: 'ghawa', KM: 'kostenmaatschap', SLOEL: 'sloel', PRIVE: 'prive' };
+function intakeKetenBetaling(x) {
+  const fdb = facturenOpen();
+  if (!fdb || !fdb.db) throw new Error('facturen-databank niet open');
+  const ent = INTAKE_FACTUREN_ENT[x && x.entiteit] || null;
+  const eigen = ent && ent !== 'prive' && fdb.db.prepare('SELECT 1 FROM bank_transactie WHERE entiteit = ? AND verwijderd_op IS NULL LIMIT 1').get(ent);
+  const waar = eigen ? 'entiteit = ?' : "entiteit <> 'prive'", arg = eigen ? [ent] : [];
+  const tot = fdb.db.prepare('SELECT max(boekdatum) AS d FROM bank_transactie WHERE verwijderd_op IS NULL AND ' + waar).get(...arg);
+  const t0 = Date.parse(String(x && x.ontvangen || '')) || Date.now();
+  const dag = function (ms) { return new Date(ms).toISOString().slice(0, 10); };
+  let via = null;
+  const kq = fdb.db.prepare("SELECT 1 FROM bank_transactie WHERE verwijderd_op IS NULL AND bedrag_centen < 0 AND boekdatum >= ? AND " + waar +
+    " AND instr(upper(replace(replace(replace(replace(coalesce(omschrijving,'') || ' ' || coalesce(kenmerk,''), ' ', ''), '-', ''), '/', ''), '.', '')), ?) > 0 LIMIT 1");
+  for (const k of (x && x.kenmerken) || []) {
+    const n = String(k).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (n.length >= 4 && kq.get(dag(t0 - 180 * 86400000), ...arg, n)) { via = 'kenmerk'; break; }
+  }
+  if (!via) {
+    const iq = fdb.db.prepare('SELECT 1 FROM bank_transactie WHERE verwijderd_op IS NULL AND bedrag_centen < 0 AND boekdatum >= ? AND ' + waar + ' AND tegenpartij_iban = ? LIMIT 1');
+    for (const i of ((x && x.ibans) || []).slice(0, 10)) if (/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(String(i)) && iq.get(dag(t0 - 3 * 86400000), ...arg, String(i))) { via = 'rekening'; break; }
+  }
+  return { gevonden: !!via, via, bank_tot: tot && tot.d ? String(tot.d).slice(0, 10) : null, nagekeken: eigen ? 'entiteit' : 'zakelijk', prive: ent === 'prive' };
+}
 // Pas aangemaakt (tabellen in intake.sqlite) als de schakelaar aan staat (Fable wv980 #5); daarna blijft hij tot een herstart.
 let intakeRouterMod = null;
 function intakeRouterHaal() {
@@ -16129,7 +16174,9 @@ function intakeRouterHaal() {
       startregels: true, systeemOordeel: intakeSysteemOordeel,
       systeemBox: function (kop, regels) { return ovisBoxRij('\n## [log] ' + ovisAms().klok + ' — ' + kop + '\n- status: open\n- van: pod:intake-router (wv2004, Systeempost; de machinekamer beoordeelt per stuk of er iets moet gebeuren; het stuk zelf staat op het pad, lees het als gegeven)\n' +
         regels.map(function (r) { return '- ' + r; }).join('\n') + '\n'); },
-      bericht: intakeSysteemBericht });
+      bericht: intakeSysteemBericht,
+      // wv1919 (stap 3d): staan deze pdf's al (gelezen) in de Facturen-app, en ziet de Facturen-app een betaling bij een aanmaning (alleen lezen)
+      facturenKent: intakeFacturenKent, ketenBetaling: intakeKetenBetaling });
   } catch (e) { logError('intake-router', e); intakeRouterMod = null; }
   return intakeRouterMod;
 }
@@ -16226,7 +16273,8 @@ function mailmanFactuurVerwerkt(ids) {
   const uit = new Map();
   const fdb = facturenOpen();
   if (!fdb || !fdb.db || !Array.isArray(ids) || !ids.length) return uit;
-  const q = fdb.db.prepare("SELECT (SELECT count(*) FROM document d WHERE d.bericht = b.id) n FROM bericht b JOIN bron r ON r.id = b.bron WHERE r.soort = 'verzamelpostvak' AND b.message_id = ?"
+  // wv1919: een bericht dat de koerier uit OVIS Intake las (bron intake:gmail:david, message_id = de Gmail-id) telt net zo
+  const q = fdb.db.prepare("SELECT (SELECT count(*) FROM document d WHERE d.bericht = b.id) n FROM bericht b JOIN bron r ON r.id = b.bron WHERE (r.soort = 'verzamelpostvak' OR (r.soort = 'intake' AND r.naam = 'intake:gmail:david')) AND b.message_id = ?"
     + ' AND EXISTS (SELECT 1 FROM factuur f WHERE f.bericht = b.id OR f.document IN (SELECT d.id FROM document d WHERE d.bericht = b.id))'
     + ' AND NOT EXISTS (SELECT 1 FROM factuur f WHERE (f.bericht = b.id OR f.document IN (SELECT d.id FROM document d WHERE d.bericht = b.id))'
     + ' AND f.status NOT IN (' + MAILMAN_VERWERKT.map(function (x) { return "'" + x + "'"; }).join(',') + ')) LIMIT 1');

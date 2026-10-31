@@ -41,7 +41,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const REGELVERSIE = 'router-1.2';   // 1.1 (wv1408): Davids routeringsregels gaan vóór de standaard; 1.2 (wv1916): live per bron (Jev, vangnet, kennislens)
+const REGELVERSIE = 'router-1.3';   // 1.1 (wv1408): Davids routeringsregels gaan vóór de standaard; 1.2 (wv1916): live per bron (Jev, vangnet, kennislens); 1.3 (wv1919): facturen, keten, deadlines
 const PROFIELEN = new Set(['mail@1', 'outlook-mail@1', 'scansnap@1']);   // de rest (dumps, contacten) gaat zoals nu: buiten de router
 // ── live (wv1916, stap 3a) ──
 const JEV_DREMPEL = 0.3;                // gelijk aan Jev: Uitslag in de Mail Processor (vastgezet 12-10)
@@ -78,6 +78,13 @@ const SYSTEEM_MODEL_MAX = 3;            // pogingen voor het modeloordeel; daarn
 const SYSTEEM_TEKST_MAX = 20000;        // tekens van het systeemstuk voor het modeloordeel
 const STIL_VAN = 23, STIL_TOT = 7;      // geen bericht aan David in de stille uren
 const NIVEAU = { geen: 0, zwak: 1, redelijk: 2, hoog: 3 };
+// ── stap 3d (wv1919): facturen, keten, deadlines ──
+const FACTUREN_PER_RONDE = 10;          // stukken die de koerier per ronde uit Intake haalt
+const FACTUUR_BYTES = 20 * 1024 * 1024; // per bijlage (gelijk aan de koerier)
+const DL_PAD = '00_Systeem/Deadlines.md';
+// eigen knoop → naam in de kolom Entiteit van het deadline-register (zoals de nachtconsolidatie schrijft)
+const DL_ENTITEIT = { TG: 'Tolgaarde', GH: 'Groenhouten', HAGRO: 'HAGRO', POT: 'POT / POH-GGZ', HOLD: 'Holding', PHBV: 'Praktijkhouders BV', SEL: 'SEL', DBH: 'DBH',
+  GHAWA: 'GHAWA', KM: 'Kostenmaatschap', SLOEL: 'SLOEL', PRIVE: 'Privé' };
 const NIVEAU_NAAM = ['geen', 'zwak', 'redelijk', 'hoog'];
 // entiteitslabel van de Mail Processor / Outlook → knoop-id van de eigen entiteit (alleen om te vergelijken, nooit als bewijs)
 const LABEL_KNOOP = { tolgaarde: 'TG', groenhouten: 'GH', hagro: 'HAGRO', pot: 'POT', holding: 'HOLD', phbv: 'PHBV', sel: 'SEL', dbh: 'DBH', ghawa: 'GHAWA', prive: 'PRIVE' };
@@ -603,6 +610,8 @@ function herbereken(sam, m, regels) {
  * 'model'; Davids Ja 28-10 20:03: "automatisch, zoals vandaag") — nooit meer op het routelabel (dat kwam van het model vóór de marker);
  * (2) een lens die nog niet live is (facturen, keten, deadlines tot stap 3d) voert niets uit en maakt het stuk geen twijfel; zolang facturen
  * niet live is, krijgt een bewijsstuk of ketenstuk óók de kennislens (zoals de Mail Processor nu alles in raw_input zet).
+ * (3, wv1919) de facturenlens vraagt een pdf of UBL-bijlage (x.heeftDoc; de Facturen-app leest geen mailtekst): zonder bijlage telt hij als
+ * niet live, dus de kennislens neemt het stuk (een aanmaning in de mailtekst gaat zo naar keten én raw_input).
  * → { live: [bestemmingen die uitgevoerd worden], schaduw: [lenzen die nog niet live zijn] }
  */
 function bestemmingenLive(s, afz, ent, x, lenzen) {
@@ -611,12 +620,21 @@ function bestemmingenLive(s, afz, ent, x, lenzen) {
   const live = [], schaduw = [];
   for (const b of std) {
     if (lenzen.indexOf(b.lens) < 0) { schaduw.push(b); continue; }
+    if (b.lens === 'facturen' && x.heeftDoc === false) { schaduw.push(Object.assign({}, b, { reden: 'geen_document' })); continue; }
     if (b.lens === 'kennis') live.push({ lens: 'kennis', doel: ent.knoop || null, zou_auto: autoKennis && !!ent.knoop, reden: autoKennis && ent.knoop ? null : (ent.knoop ? 'entiteit_niet_zeker' : 'geen_entiteit') });
     else live.push(b);
   }
   if (schaduw.some(function (b) { return b.lens === 'facturen' || b.lens === 'keten'; }) && !live.some(function (b) { return b.lens === 'kennis'; }))
     live.push({ lens: 'kennis', doel: ent.knoop || null, zou_auto: autoKennis && !!ent.knoop, reden: autoKennis && ent.knoop ? null : (ent.knoop ? 'entiteit_niet_zeker' : 'geen_entiteit') });
   return { live, schaduw };
+}
+// De onderdelen die de Facturen-app kan lezen (wv1919): pdf of UBL/XML als bijlage; bij een scan het origineel (de pdf van de scanner).
+function factuurDelen(s, delen) {
+  return (delen || []).filter(function (d) {
+    if (!(d.rol === 'bijlage' || (s.profiel === 'scansnap@1' && d.rol === 'origineel'))) return false;
+    const m = String(d.mime || '').toLowerCase();
+    return m === 'application/pdf' || /xml/.test(m) || /\.(pdf|xml)$/i.test(String(d.naam || ''));
+  });
 }
 // Jev-uitslag → oordeel. Boven de drempel of een aanspreking van de AI: geen model, geen regel, twijfel (Fable wv1408 #2).
 function jevOordeel(j) {
@@ -738,10 +756,100 @@ function stilUur(uur) { return uur >= STIL_VAN || uur < STIL_TOT; }
 // factuur of aanmaning (die blijven naar de Facturen-app gaan).
 const SYSTEEM_VOORSTEL = ['cloudflare.com', 'anthropic.com', 'n8n.io', 'supabase.com', 'supabase.io', 'github.com', 'olares.com'];
 
+/*
+ * STAP 3d (wv1919; bouwplan § 12.4.4): facturen, keten en deadlines. Pure hulpjes (getoetst); de uitvoering staat in maak().
+ * facturen → de koerier (facturen-koerier.js) haalt een aangeboden stuk op via facturenAangeboden en meldt de uitkomst terug; de router voert
+ *   de facturenlens zelf nooit uit. keten → alleen signaleren: een regel 'keten' in het logboek en, als de Facturen-app voor het kenmerk of de
+ *   rekening geen betaling ziet, een kaart "open en geëscaleerd, geen betaling gevonden — bank bijgewerkt tot <datum>" (nooit "onbetaald": de
+ *   bank kan achterlopen of via een andere rekening betaald zijn). deadlines → de vervaldatum met vindplaats als voorstel in het
+ *   deadline-register; een stuk dat ook naar de Facturen-app gaat niet (de app bewaakt zijn eigen vervaldata en betalingen, wv2057).
+ */
+const MAAND = { jan: 1, feb: 2, mrt: 3, maa: 3, apr: 4, mei: 5, jun: 6, jul: 7, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, dec: 12 };
+// datum uit een veldwaarde (vervaldatum) → 'JJJJ-MM-DD' of null (alleen een echte kalenderdag tussen 2000 en 2100)
+function datumIso(w) {
+  const t = String(w || '').trim().toLowerCase();
+  let j, m, d, x;
+  if ((x = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t))) { j = +x[1]; m = +x[2]; d = +x[3]; }
+  else if ((x = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})$/.exec(t))) { d = +x[1]; m = +x[2]; j = +x[3]; if (x[3].length === 2) j += 2000; }
+  else if ((x = /^(\d{1,2})\s+([a-z]{3})[a-z]*\.?\s+(\d{4})$/.exec(t)) && MAAND[x[2]]) { d = +x[1]; m = MAAND[x[2]]; j = +x[3]; }
+  else return null;
+  if (j < 2000 || j > 2100 || m < 1 || m > 12 || d < 1) return null;
+  const dt = new Date(Date.UTC(j, m - 1, d));
+  if (dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
+  return dt.toISOString().slice(0, 10);
+}
+// de kenmerken van een ketenstuk (dossier-, betalings- of factuurnummer), alleen wat letterlijk in de tekst staat; ≥ 4 tekens zonder witruimte
+function ketenKenmerken(vs) {
+  const uit = [];
+  for (const soort of ['dossiernummer', 'kenmerk', 'factuurnummer']) for (const v of vs || []) {
+    if (v.veld !== soort || !v.letterlijk) continue;
+    const w = String(v.waarde || '').replace(/\s+/g, ' ').trim();
+    if (w.replace(/[^A-Za-z0-9]/g, '').length < 4 || uit.some(function (u) { return u.waarde === w; })) continue;
+    uit.push({ soort, waarde: w });
+  }
+  return uit;
+}
+// geldige IBAN's in een tekst (alleen in het geheugen; voor de betalingscontrole van een ketenstuk)
+function ibansIn(t) {
+  const uit = new Set();
+  IBAN_RE.lastIndex = 0;
+  let m;
+  while ((m = IBAN_RE.exec(String(t || '')))) { const s = m[1].replace(/\s/g, '').toUpperCase(); if (s.length >= 15 && ibanGeldig(s)) uit.add(s); }
+  IBAN_RE.lastIndex = 0;
+  return Array.from(uit);
+}
+function nlDatum(iso) { const x = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || '')); return x ? (+x[3]) + '-' + (+x[2]) + '-' + x[1] : null; }
+function cel(t, n) { return String(t == null ? '' : t).replace(/[\r\n|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n || 200); }
+// sleutel van de ketenkaart: één per stuk (zetten is idempotent op de sleutel)
+function ketenSleutel(stukId) { return 'intake-keten-' + String(stukId).replace(/^stk_/, '').replace(/_/g, '-'); }
+/*
+ * De ketenkaart. x = { stuk_id, afzender, kenmerk, ontvangen (iso), bank_tot ('JJJJ-MM-DD' | null), prive (de privérekeningen kijkt de
+ * Facturen-app niet na) }. Grenzen van mk_voor_jou_zet: titel ≤ 90, waarom ≤ 400; geen bedragen of rekeningnummers.
+ */
+function ketenKaart(x) {
+  const afz = cel(x.afzender || 'een onbekende afzender', 50);
+  const bank = x.bank_tot ? 'bank bijgewerkt tot ' + nlDatum(x.bank_tot) : 'bank niet bijgewerkt';
+  const waarom = cel('Er kwam een aanmaning of herinnering binnen van ' + afz + (x.ontvangen ? ' (ontvangen ' + nlDatum(x.ontvangen) + ')' : '') + ' met kenmerk ' + cel(x.kenmerk, 40) +
+    ': open en geëscaleerd, geen betaling gevonden — ' + bank + '. Intake zoekt alleen naar een betaling met dit kenmerk of naar de rekening op het stuk' +
+    (x.prive ? ', en alleen in de zakelijke rekeningen' : '') + '; betaald via een andere weg ziet hij niet.', 400);
+  return { sleutel: ketenSleutel(x.stuk_id), soort: 'doen', waar: 'overal', prive: true, duur_min: 5, volgorde: 25,
+    titel: cel('Aanmaning van ' + afz + ' — nakijken', 90), waarom,
+    stappen: ['Open in de Socev-app Intake het stuk en bekijk het hele stuk.', 'Ga na of het al betaald is; zo niet, betaal het of neem contact op met de afzender.', 'Klaar? Zet deze kaart op gedaan.'],
+    herkomst: { module: 'intake', handmatig: 'intake', doel: { scherm: 'intake', focus: 'stuk:' + x.stuk_id } } };
+}
+/*
+ * Eén regel voor ## Actueel in het deadline-register (vorm van de nachtconsolidatie: Datum | Entiteit | Wat | Actie | Signaleer | Bron).
+ * x = { datum, entiteit (knoop), wat ('factuur' | 'aanmaning'), afzender, kenmerk?, vindplaats ({ naam, pagina?, regel? }), stuk_id, ontvangen }. Een voorstel: David of de nachtconsolidatie haalt hem weg als hij niet klopt.
+ */
+function deadlineRegel(x) {
+  const v = x.vindplaats || {};
+  const waar = [v.naam ? '"' + cel(v.naam, 80) + '"' : null, v.pagina != null ? 'pagina ' + v.pagina : null, v.regel != null ? 'regel ' + v.regel : null].filter(Boolean).join(', ');
+  const wat = '**Vervaldatum ' + (x.wat === 'aanmaning' ? 'aanmaning' : 'factuur') + ' van ' + cel(x.afzender || 'onbekende afzender', 60) + '**' +
+    (x.kenmerk ? ' (kenmerk ' + cel(x.kenmerk, 40) + ')' : '') + ' — voorstel van OVIS Intake, stuk ' + x.stuk_id + (x.ontvangen ? ', ontvangen ' + nlDatum(x.ontvangen) : '') +
+    (waar ? '; vindplaats: ' + waar : '');
+  // geen wikilink naar het kennisbestand: raw_input wordt 's nachts verwerkt en verplaatst (de Bibliothecaris zou een dode link melden)
+  const bron = 'Socev-app › Intake, stuk ' + x.stuk_id;
+  return '| ' + x.datum + ' | ' + cel(DL_ENTITEIT[x.entiteit] || x.entiteit || 'Onbekend', 40) + ' | ' + wat + ' | Voorstel: nakijken of het betaald is; klopt de datum niet, deze regel weghalen | 3 | ' + bron + ' |';
+}
+// regel onder de laatste tabelregel van ## Actueel → nieuwe tekst; null als het stuk er al staat; gooit als de tabel ontbreekt
+function deadlineInvoegen(tekst, regel, stukId) {
+  const t = String(tekst);
+  if (t.indexOf('stuk ' + stukId) >= 0) return null;
+  const r = t.split('\n');
+  const kop = r.findIndex(function (x) { return /^## Actueel\s*$/.test(x); });
+  if (kop < 0) { const e = new Error('deadline-register: ## Actueel ontbreekt'); e.code = 'EDLTABEL'; throw e; }
+  let eerste = -1, laatste = -1;
+  for (let i = kop + 1; i < r.length && !/^## /.test(r[i]); i++) if (/^\|/.test(r[i])) { if (eerste < 0) eerste = i; laatste = i; }
+  if (eerste < 0 || laatste - eerste < 1) { const e = new Error('deadline-register: tabel onder ## Actueel ontbreekt'); e.code = 'EDLTABEL'; throw e; }
+  r.splice(laatste + 1, 0, regel);
+  return r.join('\n');
+}
+
 const K = { REGELVERSIE, KOP_MAX, orgDomein, adresVan, dkimUitslag, mailLees, bboxRegels, velden, letterlijk, ibanGeldig, soortBepaal, register, afzenderBepaal, entiteitBepaal, bestemmingen, normAlias, LABEL_KNOOP,
   regelVoorwaarden, regelPast, regelZoek, regelBestemmingen, herbereken, REGEL_LENZEN,
   bestemmingenLive, jevOordeel, kennisNaam, bijlageNaam, kennisInhoud, slug, KENNIS_MAP, INDELING, JEV_DREMPEL,
-  systeemOordeelRegels, systeemOordeelModel, systeemNaam, systeemBoxRegel, systeemDavidRegel, stilUur, SYSTEEM_MAP, SYSTEEM_VOORSTEL, SYSTEEM_SOORTEN };
+  systeemOordeelRegels, systeemOordeelModel, systeemNaam, systeemBoxRegel, systeemDavidRegel, stilUur, SYSTEEM_MAP, SYSTEEM_VOORSTEL, SYSTEEM_SOORTEN,
+  factuurDelen, datumIso, ketenKenmerken, ibansIn, ketenKaart, ketenSleutel, deadlineRegel, deadlineInvoegen, DL_PAD };
 
 // ─────────────────────────── module ───────────────────────────
 
@@ -807,7 +915,7 @@ function maak(o) {
   let hangDag = '';
   const pauze = new Map();   // stuk_id → ms van de laatste mislukte Jev- of vangnet-aanroep (niet elke ronde opnieuw)
   function liveStand() { let j = null; try { j = o.live ? o.live() : null; } catch (e) { j = null; } return isObj(j) ? j : {}; }
-  function lenzenLive() { let l = null; try { l = o.lenzenLive ? o.lenzenLive() : null; } catch (e) { l = null; } return Array.isArray(l) && l.length ? l.filter(function (x) { return REGEL_LENZEN.indexOf(x) >= 0; }) : LIVE_LENZEN_STANDAARD; }
+  function lenzenLive() { let l = null; try { l = o.lenzenLive ? o.lenzenLive() : null; } catch (e) { l = null; } return Array.isArray(l) && l.length ? l.filter(function (x) { return REGEL_LENZEN.indexOf(x) >= 0 || x === 'deadlines'; }) : LIVE_LENZEN_STANDAARD; }   // deadlines: geen regel-lens, wel live (wv1919)
   // Jev ná de marker, vóór elk model. MailMan-uitslag als die er is (alleen de mailtekst: niet bij een stuk met bijlage- of scantekst), anders de
   // n8n-webhook. Geen uitslag: wachten (pauze) tot JEV_WACHT_MS na compleet, daarna geen model en twijfel. → oordeel | 'wacht'
   let jevDichtTot = 0;   // na een mislukte Jev-aanroep 15 min geen enkele aanroep (Opus-review wv1916 ZOU 5)
@@ -1085,6 +1193,7 @@ function maak(o) {
           // Davids regels gaan vóór de standaard (wv1408); de marker ging hierboven al voor
           const mk = kenmerkenStuk(s, meta, delen, { soort: so.soort, afzender: af.knoop || null, afzender_kracht: af.kracht, entiteit: en.knoop || null,
             dkim: dkim ? (dkim.uitgelijnd ? 'uitgelijnd' : (dkim.pass ? 'pass' : (dkim.gelezen ? 'geen_pass' : 'geen_uitslag'))) : null }, r);
+          const heeftDoc = factuurDelen(s, delen).length > 0;   // wv1919: de facturenlens vraagt een pdf of UBL-bijlage
           const jevStop = live && (jv.boven || !jv.gemeten);   // boven de drempel of geen uitslag na 24 u: geen regel, geen model, twijfel
           const rg = jevStop ? null : regelZoek(regelsActief(), mk);
           let bs, schaduwLenzen = [];
@@ -1097,9 +1206,9 @@ function maak(o) {
               B('vangnet', vn.knoop || 'onbekend', vn.knoop ? 'redelijk' : null, { categorie: vn.categorie || null, reden: vn.reden || null, eerder: { knoop: en.knoop || null, kracht: en.kracht } });
               if (vn.knoop) { en.knoop = vn.knoop; en.kracht = 'redelijk'; en.bewijs = 'model'; }
             }
-            if (rg) { bs = regelBestemmingen(rg, en, { velden: vd.velden }).filter(function (b) { if (lenzenLive().indexOf(b.lens) >= 0 || b.lens === 'vragen') return true; schaduwLenzen.push(b); return false; });
+            if (rg) { bs = regelBestemmingen(rg, en, { velden: vd.velden }).filter(function (b) { if ((lenzenLive().indexOf(b.lens) >= 0 && !(b.lens === 'facturen' && !heeftDoc)) || b.lens === 'vragen') return true; schaduwLenzen.push(b); return false; });
               if (!bs.length) bs = [{ lens: 'kennis', doel: en.knoop || null, zou_auto: false, reden: 'regel_lens_nog_niet_live', regel: 'R' + rg.id + '@' + rg.versie }]; }
-            else { const bl = bestemmingenLive(so, af, en, { velden: vd.velden }, lenzenLive()); bs = bl.live; schaduwLenzen = bl.schaduw; }
+            else { const bl = bestemmingenLive(so, af, en, { velden: vd.velden, heeftDoc }, lenzenLive()); bs = bl.live; schaduwLenzen = bl.schaduw; }
             // de kennislens heeft een eigen entiteit met een raw_input-map nodig (Fable wv1408 #6)
             bs = bs.map(function (b) { return b.lens === 'kennis' && b.zou_auto && !KENNIS_MAP[b.doel] ? Object.assign({}, b, { zou_auto: false, reden: 'entiteit_zonder_map' }) : b; });
             if (jevStop) bs = bs.map(function (b) { return Object.assign({}, b, { zou_auto: false, reden: jv.gemeten ? 'jev' : 'jev_geen_uitslag' }); });
@@ -1222,9 +1331,190 @@ function maak(o) {
     }
     return [k].concat(uit);
   }
+  /*
+   * STAP 3d (wv1919). keten: alleen signaleren (logboek 'keten', kaart bij geen gevonden betaling); deadlines: voorstel in het register;
+   * facturen: de koerier haalt op (facturenAangeboden) en meldt terug (facturenUitkomst). Nooit voor een vastgehouden stuk: een bestemming
+   * bestaat alleen voor een beoordeeld stuk, en de selecties hieronder eisen dat nog eens (live_stuk niet vastgehouden/bewaard/weg).
+   */
+  async function stukVelden(s) {
+    const delen = db.prepare('SELECT * FROM onderdeel WHERE stuk_id = ? ORDER BY deel').all(s.stuk_id);
+    const lt = await stukTekst(s, delen);
+    if (lt.ontbreekt.length) { const e = new Error('origineel ontbreekt'); e.code = 'EONTBREEKT'; throw e; }
+    return { delen, lt, vd: velden(lt.delen) };
+  }
+  function afzenderNaam(sam, meta) {
+    return naamVan(reg, sam.afzender) || domeinVan(adresVan(meta.van || '')) || null;
+  }
+  async function ketenSignaal(s, rs, b) {
+    const sam = safeJson(rs.samenvatting) || {}, meta = safeJson(s.meta) || {};
+    if (!reg) await registerVers().catch(function () { return null; });
+    const x = await stukVelden(s);
+    const km = ketenKenmerken(x.vd.velden);
+    const ontvangen = meta.verzonden || s.ontvangen || s.aangemaakt;
+    if (!km.length) return { uitkomst: 'geen_kenmerk', bewijs: { kenmerken: 0 } };
+    if (!o.ketenBetaling) { const e = new Error('geen betalingscontrole'); e.code = 'EGEENBANK'; throw e; }
+    const ibans = ibansIn(x.lt.delen.map(function (d) { return d.tekst; }).join('\n'));
+    const bet = await o.ketenBetaling({ entiteit: b.doel || sam.entiteit || null, kenmerken: km.map(function (k) { return k.waarde; }), ibans, ontvangen });
+    if (!bet || typeof bet.gevonden !== 'boolean') { const e = new Error('betalingscontrole gaf geen antwoord'); e.code = 'EGEENBANK'; throw e; }
+    const bewijs = { kenmerk_soort: km[0].soort, kenmerken: km.length, ibans: ibans.length, bank_tot: bet.bank_tot || null, nagekeken: bet.nagekeken || null };
+    if (bet.gevonden) return { uitkomst: 'betaling_gevonden', bewijs: Object.assign(bewijs, { via: bet.via || null }) };
+    if (!o.kaartZet) { const e = new Error('geen kaarten'); e.code = 'EGEENKAART'; throw e; }
+    const kaart = ketenKaart({ stuk_id: s.stuk_id, afzender: afzenderNaam(sam, meta), kenmerk: km[0].waarde, ontvangen, bank_tot: bet.bank_tot || null, prive: bet.prive === true });
+    await o.kaartZet(kaart);
+    return { uitkomst: 'open_geescaleerd', bewijs: Object.assign(bewijs, { kaart: kaart.sleutel }) };
+  }
+  async function deadlineSchrijf(s, rs, b) {
+    const sam = safeJson(rs.samenvatting) || {}, meta = safeJson(s.meta) || {};
+    const lenzen = db.prepare("SELECT lens FROM bestemming WHERE stuk_id = ? AND versie = ? AND status <> 'afgewezen'").all(s.stuk_id, s.versie).map(function (r) { return r.lens; });
+    // een stuk dat naar de Facturen-app gaat: daar staan vervaldatum en betaling al (betaalmeldingen, wv2057); het register zou dubbel tellen
+    if (lenzen.indexOf('facturen') >= 0 && lenzen.indexOf('keten') < 0) return { uitkomst: 'via_facturen_app' };
+    const x = await stukVelden(s);
+    const v = x.vd.velden.find(function (y) { return y.veld === 'vervaldatum' && y.letterlijk; });
+    const datum = v ? datumIso(v.waarde) : null;
+    if (!datum) return { uitkomst: v ? 'datum_onleesbaar' : 'geen_vervaldatum' };
+    if (!reg) await registerVers().catch(function () { return null; });
+    const km = ketenKenmerken(x.vd.velden);
+    const deel = x.delen.find(function (d) { return d.deel === v.deel; });
+    const regel = deadlineRegel({ datum, entiteit: b.doel || sam.entiteit || null, wat: lenzen.indexOf('keten') >= 0 || sam.soort === 'keten' ? 'aanmaning' : 'factuur',
+      afzender: afzenderNaam(sam, meta), kenmerk: km.length ? km[0].waarde : null, stuk_id: s.stuk_id, ontvangen: meta.verzonden || s.ontvangen || s.aangemaakt,
+      vindplaats: Object.assign({ naam: deel && deel.rol !== 'origineel' && deel.rol !== 'hoofdtekst' ? deel.naam : 'de mailtekst' }, v.vindplaats && v.vindplaats.pagina != null ? { pagina: v.vindplaats.pagina } : {},
+        v.vindplaats && v.vindplaats.regel != null ? { regel: v.vindplaats.regel } : {}) });
+    if (!o.vv || typeof o.vv.wijzig !== 'function') { const e = new Error('vault-veilig ontbreekt'); e.code = 'EGEENVV'; throw e; }
+    let al = false;
+    const ok = o.vv.wijzig(path.join(o.vault, DL_PAD), function (t) {
+      const n = deadlineInvoegen(Buffer.isBuffer(t) ? t.toString('utf8') : String(t), regel, s.stuk_id);
+      if (n === null) { al = true; return null; }
+      return Buffer.from(n, 'utf8');
+    }, { grendel: 5 });
+    if (al) return { uitkomst: 'al_in_register' };
+    if (!ok) { const e = new Error('deadline-register veranderde steeds tijdens het schrijven'); e.code = 'EDLBEZET'; throw e; }
+    return { uitkomst: 'voorstel_' + datum, geschreven: true };
+  }
+  // Voor de koerier: aangeboden facturenstukken met hun pdf/UBL-bijlagen (bytes uit de blob; in het geheugen). → [stuk]
+  async function facturenAangeboden(max) {
+    if (lenzenLive().indexOf('facturen') < 0) return [];
+    const rijen = db.prepare(`SELECT b.id, b.stuk_id, b.versie, b.doel FROM bestemming b JOIN live_stuk l ON l.stuk_id = b.stuk_id AND l.versie = b.versie
+      JOIN router_stuk r ON r.stuk_id = b.stuk_id AND r.versie = b.versie
+      WHERE b.lens = 'facturen' AND b.status = 'aangeboden' AND l.staat IN ('automatisch','twijfel','klaar') AND r.status = 'beoordeeld' ORDER BY b.id LIMIT ?`).all(Math.min(Number(max) || FACTUREN_PER_RONDE, 50));
+    const eigen = new Set((o.eigenAdressen ? o.eigenAdressen() : []).map(function (a) { return String(a).toLowerCase(); }));
+    const uit = [];
+    for (const r of rijen) {
+      const s = db.prepare('SELECT * FROM stuk WHERE stuk_id = ? AND versie = ?').get(r.stuk_id, r.versie);
+      const rs = db.prepare('SELECT samenvatting FROM router_stuk WHERE stuk_id = ? AND versie = ?').get(r.stuk_id, r.versie);
+      const sam = rs ? (safeJson(rs.samenvatting) || {}) : {};
+      if (!s || sam.marker !== 'geen') continue;   // dubbel slot: nooit iets dat de marker niet doorliet
+      const meta = safeJson(s.meta) || {};
+      const delen = db.prepare('SELECT * FROM onderdeel WHERE stuk_id = ? ORDER BY deel').all(s.stuk_id);
+      const docs = [];
+      let ontbreekt = 0, teGroot = 0;
+      for (const d of factuurDelen(s, delen)) {
+        if (d.grootte > FACTUUR_BYTES) { teGroot++; continue; }
+        try { docs.push({ naam: d.naam, mime: d.mime, sha256: d.sha256, bytes: fs.readFileSync(blobPad(d.sha256)) }); }
+        catch (e) { if (e && e.code === 'ENOENT') ontbreekt++; else throw e; }
+      }
+      const van = adresVan(meta.van || '');
+      const onderwerp = typeof meta.onderwerp === 'string' ? meta.onderwerp : '';
+      let mailtekst = null;   // alleen bij een doorgestuurde mail van David: de koerier zoekt er de oorspronkelijke afzender in
+      if (docs.length && (eigen.has(van) || /^\s*(fwd?|fw|doorst(?:uurd)?|tr)\s*:/i.test(onderwerp))) {
+        const tekstDelen = delen.filter(function (d) { return d.rol === 'origineel' || d.rol === 'hoofdtekst'; });
+        try { const lt = await stukTekst(s, tekstDelen); mailtekst = lt.delen.map(function (d) { return d.tekst; }).join('\n').slice(0, 100000); } catch (e) { mailtekst = null; }
+      }
+      uit.push({ stuk_id: s.stuk_id, versie: s.versie, bron: s.bron, bron_id: s.bron_id, profiel: s.profiel, onderwerp, van, van_naam: meta.van_naam || '',
+        thread_id: meta.thread_id || null, ontvangen: meta.verzonden || s.ontvangen || s.aangemaakt, dkim: sam.dkim || null, jev: sam.jev || null, na_keuze: !!sam.na_keuze,
+        doel: r.doel || sam.entiteit || null, documenten: docs, ontbreekt, te_groot: teGroot, mailtekst });
+    }
+    return uit;
+  }
+  // De koerier meldt terug: r = { ok: true, uitkomst } → bevestigd + uitvoering (door koerier); { ok: false, code } → opnieuw, na 5 keer David.
+  function facturenUitkomst(stukId, versie, r) {
+    const b = db.prepare("SELECT * FROM bestemming WHERE stuk_id = ? AND versie = ? AND lens = 'facturen' AND status = 'aangeboden'").get(String(stukId), Number(versie));
+    if (!b) return { ok: false, fout: 'niet_aangeboden' };
+    if (!r || r.ok !== true) { const e = new Error('koerier: ' + String(r && r.code || 'fout').slice(0, 40)); e.code = String(r && r.code || 'koerier').slice(0, 20); uitvoerMislukt(b, b.stuk_id, e); return { ok: true, opnieuw: true }; }
+    tx(function () {
+      db.prepare("UPDATE bestemming SET status = 'bevestigd', bevestigd_op = ? WHERE id = ?").run(iso(), b.id);
+      db.prepare('INSERT INTO uitvoering (stuk_id, versie, lens, doel, pad, sha256, uitkomst, tijd, door) VALUES (?,?,?,?,?,?,?,?,?)').run(b.stuk_id, b.versie, 'facturen', b.doel, null, null, String(r.uitkomst || 'ingelezen').slice(0, 60), iso(), 'koerier');
+    });
+    klaarAls(b.stuk_id, b.versie);
+    return { ok: true };
+  }
+  /*
+   * knoop_id voor een leverancier (wv1919, § 12.4.4): deterministisch op ACTIEVE kenmerken van een organisatie (nooit een eigen entiteit).
+   * x = { kvk?, domein? } (domein alleen meegeven als het vaststaat, bv. afzender met DKIM uitgelijnd). Meer dan één kandidaat per kenmerk, of
+   * KvK en domein wijzen naar een andere knoop: twijfel = null. → 'org:…' | null
+   */
+  async function knoopVoor(x) {
+    x = isObj(x) ? x : {};
+    const r = await registerVers();
+    const knopen = function (hits) {
+      const k = new Set();
+      for (const h of hits) { if (h.st !== 'actief') continue; const e = r.ent.get(h.o); if (e && !e.eigen && e.soort !== 'entiteit' && typeof e.k === 'string') k.add(e.k); }
+      return k;
+    };
+    const kvk = String(x.kvk || '').replace(/\D/g, '');
+    const kk = kvk.length === 8 ? knopen(zoek(r, 'kvk', kvk)) : new Set();
+    const dom = String(x.domein || '').toLowerCase().replace(/^www\./, '');
+    const dk = dom ? knopen(zoek(r, 'domein', dom).concat(zoek(r, 'domein', orgDomein(dom)))) : new Set();
+    if (kk.size > 1 || dk.size > 1) return null;
+    const a = kk.size ? Array.from(kk)[0] : null, c = dk.size ? Array.from(dk)[0] : null;
+    if (a && c && a !== c) return null;
+    const k = a || c;
+    return k && /^[A-Za-z0-9:._-]{2,120}$/.test(k) ? k : null;
+  }
+  /*
+   * Twijfel die geen twijfel meer is (wv1919): een stuk wacht op David alléén omdat de facturenlens niet zeker genoeg was (afzender niet hoog),
+   * en elke pdf/UBL-bijlage staat al in de Facturen-app (bv. via het verzamelpostvak of het label FACTUUR). Dan bevestigt de router de
+   * facturenlens zelf ('al_in_facturen') en gaat de rest automatisch; anders kreeg David een vraag over een factuur die er al is. Nooit bij
+   * Jev boven de drempel of zonder uitslag (reden jev*), nooit na een mislukte uitvoering of een keuze van David.
+   */
+  function facturenAlBekend() {
+    if (!o.facturenKent || lenzenLive().indexOf('facturen') < 0) return 0;
+    let n = 0;
+    for (const l of db.prepare("SELECT stuk_id, versie FROM live_stuk WHERE staat = 'twijfel' AND keuze IS NULL ORDER BY sinds LIMIT 50").all()) {
+      const bs = db.prepare("SELECT * FROM bestemming WHERE stuk_id = ? AND versie = ? AND status IN ('schaduw','aangeboden')").all(l.stuk_id, l.versie);
+      const twijfel = bs.filter(function (b) { return !b.zou_auto; });
+      if (!twijfel.some(function (b) { return b.lens === 'facturen'; })) continue;
+      if (twijfel.some(function (b) { return (b.lens !== 'facturen' && b.lens !== 'deadlines') || b.reden !== 'soort_of_afzender_niet_hoog'; })) continue;
+      const s = db.prepare('SELECT * FROM stuk WHERE stuk_id = ? AND versie = ?').get(l.stuk_id, l.versie);
+      if (!s) continue;
+      const shas = factuurDelen(s, db.prepare('SELECT * FROM onderdeel WHERE stuk_id = ?').all(s.stuk_id)).map(function (d) { return d.sha256; });
+      let bekend = null;
+      try { bekend = shas.length ? o.facturenKent(shas) : null; } catch (e) { bekend = null; }
+      if (!bekend || !shas.every(function (x) { return bekend.has(x); })) continue;
+      tx(function () {
+        for (const b of bs) {
+          if (b.lens === 'facturen') {
+            db.prepare("UPDATE bestemming SET status = 'bevestigd', zou_auto = 1, reden = 'al_in_facturen', bevestigd_op = ? WHERE id = ?").run(iso(), b.id);
+            db.prepare('INSERT INTO uitvoering (stuk_id, versie, lens, doel, pad, sha256, uitkomst, tijd, door) VALUES (?,?,?,?,?,?,?,?,?)').run(b.stuk_id, b.versie, 'facturen', b.doel, null, null, 'al_in_facturen', iso(), 'router');
+          } else if (b.status === 'schaduw') db.prepare("UPDATE bestemming SET status = 'aangeboden', zou_auto = 1, reden = NULL WHERE id = ?").run(b.id);
+        }
+        besluit(l.stuk_id, l.versie, 'zeker_genoeg', 'automatisch', null, { reden: 'al_in_facturen', bijlagen: shas.length }, 'router');
+        db.prepare("UPDATE live_stuk SET staat = 'automatisch', sinds = ? WHERE stuk_id = ?").run(iso(), l.stuk_id);
+      });
+      n++;
+    }
+    return n;
+  }
   let uitvoerBezig = false;
+  // een uitvoering die niet lukte: pogingen tellen, na 3 één box-rij, na UITVOER_MAX terug naar David (ook voor de koerier, wv1919)
+  function uitvoerMislukt(b, stukId, e) {
+    const n = (b.pogingen || 0) + 1;
+    db.prepare('UPDATE bestemming SET pogingen = ? WHERE id = ?').run(n, b.id);
+    if (n >= UITVOER_MAX) {   // blijvende fout: niet eindeloos herhalen, David kiest opnieuw (Opus-review wv1916 ZOU 6)
+      tx(function () { db.prepare("UPDATE bestemming SET status = 'schaduw', zou_auto = 0, reden = ? WHERE id = ?").run('uitvoeren_mislukt:' + String(e && e.code || 'fout').slice(0, 20), b.id);
+        db.prepare("UPDATE live_stuk SET staat = 'twijfel', sinds = ? WHERE stuk_id = ? AND staat IN ('automatisch','klaar')").run(iso(), stukId); });
+    }
+    if (n === 3 && o.melding) o.melding('OVIS Intake: stuk ' + stukId + ' (' + b.lens + ' → ' + (b.doel || '?') + ') lukt na drie keer niet (' + String(e && e.code || 'fout') + '); het blijft aangeboden en wordt elke ronde opnieuw geprobeerd');
+    if (n === 1 && o.fout) o.fout('intake-router-uitvoer', e);
+  }
+  // alles van dit stuk bevestigd (in de lenzen die live zijn) → klaar
+  function klaarAls(stukId, versie) {
+    const lenzen = lenzenLive().concat(['vragen']);
+    if (!db.prepare("SELECT 1 FROM bestemming WHERE stuk_id = ? AND versie = ? AND status IN ('aangeboden','schaduw') AND lens IN (" + lenzen.map(function () { return '?'; }).join(',') + ')').get(stukId, versie, ...lenzen))
+      db.prepare("UPDATE live_stuk SET staat = 'klaar', sinds = ? WHERE stuk_id = ? AND staat IN ('automatisch','twijfel')").run(iso(), stukId);
+  }
   async function voerUit(stukId) {
-    const rijen = db.prepare("SELECT b.*, s.bron FROM bestemming b JOIN stuk s ON s.stuk_id = b.stuk_id AND s.versie = b.versie WHERE b.stuk_id = ? AND b.status = 'aangeboden' ORDER BY b.id").all(stukId);
+    const rijen = db.prepare("SELECT b.*, s.bron FROM bestemming b JOIN stuk s ON s.stuk_id = b.stuk_id AND s.versie = b.versie WHERE b.stuk_id = ? AND b.status = 'aangeboden' ORDER BY b.id").all(stukId)
+      .sort(function (a, c) { return (a.lens === 'deadlines') - (c.lens === 'deadlines'); });   // wv1919: deadlines als laatste (kijkt naar de andere lenzen)
     if (!rijen.length) return { klaar: 0 };
     const lenzen = lenzenLive();
     const s = db.prepare('SELECT * FROM stuk WHERE stuk_id = ? AND versie = ?').get(stukId, rijen[0].versie);
@@ -1233,36 +1523,33 @@ function maak(o) {
     let klaar = 0;
     for (const b of rijen) {
       if (lenzen.indexOf(b.lens) < 0 && b.lens !== 'vragen') continue;   // nog niet live: blijft aangeboden
+      if (b.lens === 'facturen') continue;   // wv1919: dat doet de koerier (facturenAangeboden → facturenUitkomst)
       try {
-        let paden = [];
+        let paden = [], uitk = null, keten = null;
         if (b.lens === 'kennis' || b.lens === 'systeem') {
           if (o.vaultPauze && o.vaultPauze()) return { klaar, wacht: 'onderhoud' };
           paden = await kennisSchrijf(s, rs, b);
         } else if (b.lens === 'geen') { if (o.bewaarNa) o.bewaarNa(stukId, nu() + BEWAAR_MS); }
+        else if (b.lens === 'keten') { keten = await ketenSignaal(s, rs, b); uitk = keten.uitkomst; }
+        else if (b.lens === 'deadlines') {
+          if (o.vaultPauze && o.vaultPauze()) return { klaar, wacht: 'onderhoud' };
+          const dl = await deadlineSchrijf(s, rs, b); uitk = dl.uitkomst;
+          if (dl.geschreven) paden = [{ pad: DL_PAD, sha256: null, uitkomst: dl.uitkomst }];
+        }
         tx(function () {
           db.prepare("UPDATE bestemming SET status = 'bevestigd', bevestigd_op = ? WHERE id = ?").run(iso(), b.id);
+          if (keten) besluit(stukId, b.versie, 'keten', keten.uitkomst, null, keten.bewijs, 'router');
           if (paden.length) for (const p of paden) db.prepare('INSERT INTO uitvoering (stuk_id, versie, lens, doel, pad, sha256, uitkomst, tijd, door) VALUES (?,?,?,?,?,?,?,?,?)').run(stukId, b.versie, b.lens, b.doel, p.pad, p.sha256, p.uitkomst, iso(), 'router');
-          else db.prepare('INSERT INTO uitvoering (stuk_id, versie, lens, doel, pad, sha256, uitkomst, tijd, door) VALUES (?,?,?,?,?,?,?,?,?)').run(stukId, b.versie, b.lens, b.doel, null, null, b.lens === 'geen' ? 'bewaard_90_dagen' : 'niets', iso(), 'router');
+          else db.prepare('INSERT INTO uitvoering (stuk_id, versie, lens, doel, pad, sha256, uitkomst, tijd, door) VALUES (?,?,?,?,?,?,?,?,?)').run(stukId, b.versie, b.lens, b.doel, null, null, uitk || (b.lens === 'geen' ? 'bewaard_90_dagen' : 'niets'), iso(), 'router');
           for (const p of paden) if (p.systeem) db.prepare(`INSERT INTO systeem_post (stuk_id, versie, pad, onderwerp, van, van_adres, dkim, jev, na_keuze, tijd, oordeel, definitief) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(stuk_id, versie) DO UPDATE SET pad = excluded.pad, oordeel = excluded.oordeel, definitief = excluded.definitief, model_pogingen = 0, gebundeld_op = NULL, gemeld_op = NULL, meld_pogingen = 0`)
             .run(stukId, b.versie, p.pad, String(p.systeem.onderwerp || '').slice(0, 300), String(p.systeem.van || '').slice(0, 300), String(p.systeem.van_adres || '').slice(0, 200), p.systeem.dkim, p.systeem.jev,
               p.systeem.na_keuze ? 1 : 0, iso(), JSON.stringify(p.systeem.oordeel), p.systeem.model ? 0 : 1);
         });
         klaar++;
-      } catch (e) {
-        const n = (b.pogingen || 0) + 1;
-        db.prepare('UPDATE bestemming SET pogingen = ? WHERE id = ?').run(n, b.id);
-        if (n >= UITVOER_MAX) {   // blijvende fout: niet eindeloos herhalen, David kiest opnieuw (Opus-review wv1916 ZOU 6)
-          tx(function () { db.prepare("UPDATE bestemming SET status = 'schaduw', zou_auto = 0, reden = ? WHERE id = ?").run('uitvoeren_mislukt:' + String(e && e.code || 'fout').slice(0, 20), b.id);
-            db.prepare("UPDATE live_stuk SET staat = 'twijfel', sinds = ? WHERE stuk_id = ? AND staat IN ('automatisch','klaar')").run(iso(), stukId); });
-        }
-        if (n === 3 && o.melding) o.melding('OVIS Intake: stuk ' + stukId + ' (' + b.lens + ' → ' + (b.doel || '?') + ') lukt na drie keer niet (' + String(e && e.code || 'fout') + '); het blijft aangeboden en wordt elke ronde opnieuw geprobeerd');
-        if (n === 1 && o.fout) o.fout('intake-router-uitvoer', e);
-      }
+      } catch (e) { uitvoerMislukt(b, stukId, e); }
     }
-    // alles van dit stuk bevestigd → klaar
-    if (!db.prepare("SELECT 1 FROM bestemming WHERE stuk_id = ? AND versie = ? AND status IN ('aangeboden','schaduw') AND lens IN (" + lenzen.concat(['vragen']).map(function () { return '?'; }).join(',') + ')').get(stukId, rijen[0].versie, ...lenzen.concat(['vragen'])))
-      db.prepare("UPDATE live_stuk SET staat = 'klaar', sinds = ? WHERE stuk_id = ? AND staat IN ('automatisch','twijfel')").run(iso(), stukId);
+    klaarAls(stukId, rijen[0].versie);
     return { klaar };
   }
   async function uitvoerRonde() {
@@ -1328,6 +1615,10 @@ function maak(o) {
     if (lenzenLive().indexOf(lens) < 0) return { status: 409, j: { ok: false, fout: 'die bestemming staat nog niet live' } };
     const ent = d.entiteit && lens !== 'systeem' ? String(d.entiteit) : null;   // Systeem (voor Socev) heeft geen entiteit
     if (lens === 'kennis' && (!ent || !KENNIS_MAP[ent])) return { status: 400, j: { ok: false, fout: 'kies een entiteit met een Second Brain-map' } };
+    // wv1919: de Facturen-app leest alleen een pdf- of UBL-bijlage
+    const sk = db.prepare('SELECT * FROM stuk WHERE stuk_id = ? AND versie = ?').get(id, ls.versie);
+    if (lens === 'facturen' && (!sk || !factuurDelen(sk, db.prepare('SELECT * FROM onderdeel WHERE stuk_id = ?').all(id)).length)) return { status: 400, j: { ok: false, fout: 'dit stuk heeft geen pdf- of UBL-bijlage; de Facturen-app kan er niets mee' } };
+    if (ent && !KNOOP_RE.test(ent)) return { status: 400, j: { ok: false, fout: 'entiteit onbekend' } };
     // vorige uitvoering van de kennislens (om er een verwijzing van te maken)
     const oud = db.prepare("SELECT * FROM uitvoering WHERE stuk_id = ? AND versie = ? AND lens IN ('kennis','systeem') AND pad LIKE '%.md' AND door = 'router' ORDER BY id DESC LIMIT 1").get(id, ls.versie);
     const was = { staat: ls.staat, lens: (sam.bestemmingen || []).map(function (b) { return b.lens; }), entiteit: sam.entiteit || null, bewijs: ls.bewijs || sam.entiteit_bewijs || null };
@@ -1340,6 +1631,12 @@ function maak(o) {
       const bestaat = db.prepare('SELECT id FROM bestemming WHERE stuk_id = ? AND versie = ? AND lens = ?').get(id, ls.versie, lens);
       if (bestaat) db.prepare("UPDATE bestemming SET doel = ?, reden = 'david', status = 'aangeboden', pogingen = 0 WHERE id = ?").run(ent, bestaat.id);
       else db.prepare("INSERT INTO bestemming (stuk_id, versie, lens, doel, zou_auto, reden, status, tijd) VALUES (?,?,?,?,0,'david','aangeboden',?)").run(id, ls.versie, lens, ent, iso());
+      // wv1919: een factuur of aanmaning met een vervaldatum krijgt ook de deadlines-lens (zoals een regel van David)
+      if ((lens === 'facturen' || lens === 'keten') && (sam.velden || []).indexOf('vervaldatum') >= 0 && lenzenLive().indexOf('deadlines') >= 0) {
+        const dl = db.prepare("SELECT id FROM bestemming WHERE stuk_id = ? AND versie = ? AND lens = 'deadlines'").get(id, ls.versie);
+        if (dl) db.prepare("UPDATE bestemming SET doel = ?, reden = 'david', status = 'aangeboden', pogingen = 0 WHERE id = ? AND status <> 'bevestigd'").run(ent, dl.id);
+        else db.prepare("INSERT INTO bestemming (stuk_id, versie, lens, doel, zou_auto, reden, status, tijd) VALUES (?,?,?,?,0,'david','aangeboden',?)").run(id, ls.versie, 'deadlines', ent, iso());
+      }
       db.prepare("UPDATE live_stuk SET staat = 'automatisch', sinds = ?, keuze = ?, keuze_op = ?, keuze_door = ? WHERE stuk_id = ?").run(iso(), lens + ':' + (ent || ''), iso(), door || 'david', id);
       // review ZOU 2: weg uit Systeem → geen melding of box-regel meer voor dit stuk (wat al gemeld of gebundeld is, blijft als spoor)
       if (lens !== 'systeem') db.prepare('DELETE FROM systeem_post WHERE stuk_id = ? AND versie = ? AND gemeld_op IS NULL AND gebundeld_op IS NULL').run(id, ls.versie);
@@ -1351,14 +1648,15 @@ function maak(o) {
         const ok = o.vv.wijzig(abs, function (t) {
           const b = Buffer.isBuffer(t) ? t : Buffer.from(String(t), 'utf8');
           if (crypto.createHash('sha256').update(b).digest('hex') !== oud.sha256) return null;   // al bewerkt of verwerkt: niet aanraken
-          return Buffer.from('---\novis_stuk: ' + id + '\novis_verplaatst: ' + yv(iso()) + '\n---\n\nDavid koos een andere plek voor dit stuk (OVIS Intake). Niet verwerken: ' + (lens === 'kennis' ? 'het staat nu in de raw_input van ' + ent : lens === 'systeem' ? 'het is post voor Socev zelf en staat nu in ' + SYSTEEM_MAP : 'het hoort niet in de Second Brain (alleen bewaard in Intake)') + '.\n', 'utf8');
+          return Buffer.from('---\novis_stuk: ' + id + '\novis_verplaatst: ' + yv(iso()) + '\n---\n\nDavid koos een andere plek voor dit stuk (OVIS Intake). Niet verwerken: ' + (lens === 'kennis' ? 'het staat nu in de raw_input van ' + ent : lens === 'systeem' ? 'het is post voor Socev zelf en staat nu in ' + SYSTEEM_MAP : lens === 'facturen' ? 'het gaat naar de Facturen-app' : lens === 'keten' ? 'het is een aanmaning of herinnering (Intake signaleert hem)' : 'het hoort niet in de Second Brain (alleen bewaard in Intake)') + '.\n', 'utf8');
         });
         verwijzing = ok ? oud.pad : null;
       } catch (e) { if (!e || e.code !== 'ENOENT') { if (o.fout) o.fout('intake-router-verwijzing', e); } }
     }
     const v = await voerUit(id);
     if (lens === 'systeem') systeemLater();
-    return { status: 200, j: { ok: true, uitkomst: v.klaar ? 'uitgevoerd' : 'aangeboden', oud_bestand_verwijzing: !!verwijzing } };
+    // wv1919: de facturenlens voert de koerier uit (elk uur), dus dan altijd 'aangeboden'
+    return { status: 200, j: { ok: true, uitkomst: v.klaar && lens !== 'facturen' ? 'uitgevoerd' : 'aangeboden', oud_bestand_verwijzing: !!verwijzing } };
   }
   /*
    * SYSTEEMPOST VERWERKEN (wv2004). (1) oordeel met het model waar dat mocht (Jev onder de drempel), hooguit SYSTEEM_MODEL_MAX pogingen, anders
@@ -1534,6 +1832,7 @@ function maak(o) {
     } catch (e) { if (o.fout) o.fout('intake-router-hangers', e); }
     // live (wv1916): wat nog aangeboden staat uitvoeren (vault was even dicht, of David koos net) en de dagkaarten bijwerken
     if (Object.keys(liveStand()).some(function (b) { return liveStand()[b] === true; }) || db.prepare('SELECT 1 FROM live_stuk LIMIT 1').get()) {
+      try { uit.al_in_facturen = facturenAlBekend(); } catch (e) { if (o.fout) o.fout('intake-router-facturen', e); }   // wv1919
       try { const u = await uitvoerRonde(); uit.uitgevoerd = u.klaar || 0; } catch (e) { if (o.fout) o.fout('intake-router-uitvoer', e); }
       try { if (o.datum) await kaartenRonde(o.datum()); } catch (e) { if (o.fout) o.fout('intake-router-kaarten', e); }
     }
@@ -1845,6 +2144,7 @@ function maak(o) {
   }
   if (o.startregels === true) { try { startregels(); } catch (e) { if (o.fout) o.fout('intake-startregels', e); } }
   return { ronde, verwerkStuk, telling, regel, lijst, info, appOverzicht, appWerkstroom, werkstroomTel, appToets, appRegel, appKeuze, appStuk, voerUit, uitvoerRonde, kaartenRonde, wachtOpDavid, verbeteringen, regels: regelsAlle,
+    facturenAangeboden, facturenUitkomst, knoopVoor, facturenAlBekend,
     systeemRonde, startregels, _cache: { grootte: function () { return stukCache.size; }, rij: function () { return leesRij.length; } },
     sluit: function () { gesloten = true; if (systeemTimer) { clearTimeout(systeemTimer); systeemTimer = null; } db.close(); } };
 }

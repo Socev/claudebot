@@ -84,7 +84,7 @@ test('live: gewone mail → Jev ná de marker, vangnet (model) kiest de entiteit
   const f = E.bestanden();
   assert.deepEqual(f, ['10_Zakelijk/Tolgaarde/raw_input/2026-10-28_1930_gmail_Overleg-roosters.md', '10_Zakelijk/Tolgaarde/raw_input/2026-10-28_1930_gmail_Overleg-roosters__Rooster-week-45.pdf']);
   const t = fs.readFileSync(path.join(E.vault, f[0]), 'utf8');
-  assert.match(t, /^---\novis_stuk: stk_20261028_00000001\novis_router: router-1\.2\nbron: "gmail:david"\nonderwerp: "Re: Overleg roosters"\n/);
+  assert.match(t, /^---\novis_stuk: stk_20261028_00000001\novis_router: router-1\.3\nbron: "gmail:david"\nonderwerp: "Re: Overleg roosters"\n/);
   assert.match(t, /entiteit: "TG \(redelijk, bewijs model\)"/);
   assert.match(t, /bijlagen:\n  - "2026-10-28_1930_gmail_Overleg-roosters__Rooster-week-45.pdf"/);
   assert.match(t, /## Mailtekst\n\nBeste David/);

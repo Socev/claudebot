@@ -692,3 +692,87 @@ test('live PDF-lezer (wv1921): vóór de transactie per document een kandidaat v
   assert.equal(f2.leverancier_naam, null);
   assert.equal(f2.incl, 1000);
 });
+
+// ───────────────────────────── OVIS Intake als tweede bron (wv1919, stap 3d) ─────────────────────────────
+
+// nep-Intake: wat de router aanbiedt (facturenAangeboden) en wat de koerier terugmeldt (facturenUitkomst); alle data verzonnen
+function nepIntake(stukken) {
+  const n = { stukken: stukken || [], uitkomsten: [], knoop: [], live: [], fout: false };
+  n.io = (g) => Object.assign(g.io(), {
+    intake: { lijst: async () => { if (n.fout) throw new Error('router weg'); return n.stukken.filter((s) => !n.uitkomsten.some((u) => u.id === s.stuk_id && u.r.ok)); },
+      uitkomst: async (id, versie, r) => { n.uitkomsten.push({ id, versie, r }); return { ok: true }; } },
+    knoopVoor: async (x) => { n.knoop.push(x); return x.kvk === '98000065' ? 'org:leverancier-a' : null; },
+    pdfLive: async (x) => { n.live.push(x.documenten.length); return null; } });
+  return n;
+}
+function intakeStuk(id, bytes, extra) {
+  return Object.assign({ stuk_id: id, versie: 1, bron: 'gmail:david', bron_id: '19a2b3c4d5e6f7a8', profiel: 'mail@1', onderwerp: 'Factuur oktober', van: 'facturen@leverancier-a.invalid',
+    van_naam: 'Leverancier A', thread_id: null, ontvangen: '2026-10-22T10:00:00Z', dkim: 'uitgelijnd', jev: 'onder', na_keuze: false, doel: 'TG',
+    documenten: [{ naam: 'factuur-okt.pdf', mime: 'application/pdf', sha256: null, bytes }], ontbreekt: 0, te_groot: 0, mailtekst: null }, extra || {});
+}
+
+test('Intake → koerier: aangeboden stuk wordt bericht (bron intake:gmail:david, Gmail-id), zelfde besliskader, terugmelden; knoop_id via KvK; één keer', async () => {
+  const t = opzet(), g = nepGmail();
+  const lev = t.fdb.db.prepare("SELECT l.id, i.iban FROM leverancier l JOIN leverancier_iban i ON i.leverancier = l.id WHERE l.naam = 'Leverancier A B.V.'").get();
+  const bytes = Z.pdf(['Leverancier A B.V.', 'Factuur', 'Factuurnummer: INTAKE-0001', 'Factuurdatum: 20-10-2026', 'Totaal incl. btw: EUR 61,50',
+    'Huisartsenpraktijk Tolgaarde B.V.', 'IBAN ' + lev.iban, 'KvK 98000065', 'Merkwoord Kolibrievleugel']);
+  const n = nepIntake([intakeStuk('stk_20261022_0000aaaa', bytes)]);
+  const u = await KO.ronde(t.fdb, n.io(g), { nu: NU, klok: () => NU });
+  assert.equal(u.intake.ok, true, JSON.stringify(u.intake));
+  assert.equal(u.intake.aantallen.ingelezen, 1);
+  assert.deepEqual(n.uitkomsten.map((x) => x.r), [{ ok: true, uitkomst: 'facturen:1' }]);
+  const b = t.fdb.db.prepare("SELECT b.*, r.naam AS bron_naam, r.soort FROM bericht b JOIN bron r ON r.id = b.bron WHERE r.soort = 'intake'").get();
+  assert.equal(b.bron_naam, 'intake:gmail:david'); assert.equal(b.message_id, '19a2b3c4d5e6f7a8');
+  assert.equal(b.bron_link, 'https://mail.google.com/mail/u/0/#all/19a2b3c4d5e6f7a8');
+  const f = t.fdb.db.prepare('SELECT * FROM factuur WHERE bericht = ?').get(b.id);
+  assert.equal(f.nummer, 'INTAKE-0001'); assert.equal(f.status, 'te_beoordelen');   // bevestigen blijft Davids knop
+  assert.equal(n.live.length, 1, 'Jev onder de drempel: PDF-lezer mag');
+  // knoop_id: KvK van de factuur → precies één organisatie; audit; nooit overschrijven
+  assert.equal(t.fdb.db.prepare('SELECT knoop_id FROM leverancier WHERE id = ?').get(lev.id).knoop_id, 'org:leverancier-a');
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'knoop_id' AND object_id = ?", [lev.id]), 1);
+  assert.equal(n.knoop[0].domein, 'leverancier-a.invalid');
+  // de pdftotext-tekst nergens bewaard
+  t.fdb.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  for (const s of ['', '-wal']) { const p = t.fdb.pad + s; if (fs.existsSync(p)) assert.ok(fs.readFileSync(p).indexOf('Kolibrievleugel') < 0, 'tekst niet in ' + path.basename(p)); }
+  // terugmelden ging mis en de router biedt hem opnieuw aan → al ingelezen, geen tweede factuur
+  n.uitkomsten.length = 0;
+  const u2 = await KO.ronde(t.fdb, n.io(g), { nu: NU + 60 * MIN, klok: () => NU + 60 * MIN });
+  assert.equal(u2.intake.aantallen.al_ingelezen, 1);
+  assert.deepEqual(n.uitkomsten.map((x) => x.r.uitkomst), ['al_ingelezen']);
+  assert.equal(t.n("SELECT count(*) AS n FROM factuur WHERE nummer = 'INTAKE-0001'"), 1);
+  // MailMan ziet dit bericht zoals een bericht uit het verzamelpostvak (factuurstap)
+  t.fdb.db.prepare("UPDATE factuur SET status = 'verstuurd', bevestigd_op = ?, bevestigd_door = 'david (proef)', betaalspoor = 'betaald_gezien' WHERE id = ?").run(new Date(NU).toISOString(), f.id);
+  assert.deepEqual(F.mailStappen(t.fdb).filter((x) => x.gmail_id === '19a2b3c4d5e6f7a8'), [{ gmail_id: '19a2b3c4d5e6f7a8', stap: 'is_betaald' }]);
+});
+
+test('Intake → koerier: pdf al via het verzamelpostvak binnen → al_in_facturen (dubbel op sha256, geen tweede factuur); geen model zonder Jev onder of na "gewoon verwerken"', async () => {
+  const t = opzet(), g = nepGmail();
+  const bytes = Z.pdf(['Leverancier A B.V.', 'Factuur', 'Factuurnummer: DUBBEL-0001', 'Factuurdatum: 20-10-2026', 'Totaal incl. btw: EUR 12,00', 'Huisartsenpraktijk Tolgaarde B.V.']);
+  const st = D.stukSchrijf(t.fdb, bytes);
+  D.voegToe(t.fdb, 'document', { id: D.nieuwId(), sha256: st.sha256, naam: 'al.pdf', mime: 'application/pdf', bytes: st.bytes, soort: 'pdf', te_lezen: 0, aangemaakt_op: new Date(NU).toISOString() });
+  const n = nepIntake([intakeStuk('stk_20261022_0000bbbb', bytes, { jev: 'geen_uitslag', bron: 'gmail:groenhouten', bron_id: '29a2b3c4d5e6f7a8', dkim: null }),
+    intakeStuk('stk_20261022_0000cccc', Z.pdf(['Factuur', 'Factuurnummer: NAKEUZE-1', 'Totaal incl. btw: EUR 5,00']), { na_keuze: true, bron_id: '39a2b3c4d5e6f7a8' })]);
+  const u = await KO.ronde(t.fdb, n.io(g), { nu: NU, klok: () => NU });
+  assert.equal(u.intake.ok, true, JSON.stringify(u.intake));
+  assert.deepEqual(n.uitkomsten.map((x) => x.r.uitkomst).sort(), ['al_in_facturen', 'facturen:1']);
+  assert.equal(t.n("SELECT count(*) AS n FROM factuur WHERE nummer = 'DUBBEL-0001'"), 0);
+  assert.equal(n.live.length, 0, 'geen PDF-lezer zonder Jev onder de drempel of na gewoon verwerken');
+  assert.equal(t.fdb.db.prepare("SELECT bron_link FROM bericht WHERE message_id = '29a2b3c4d5e6f7a8'").get().bron_link, null, 'alleen voor Davids privé-Gmail een link');
+  assert.equal(t.n("SELECT count(*) AS n FROM bron WHERE soort = 'intake'"), 2);
+});
+
+test('Intake → koerier: bijlage weg uit Intake → terugmelden als fout (de router telt pogingen); router weg → ronde gaat door', async () => {
+  const t = opzet(), g = nepGmail();
+  const n = nepIntake([intakeStuk('stk_20261022_0000dddd', Z.pdf(['x']), { ontbreekt: 1 })]);
+  const u = await KO.ronde(t.fdb, n.io(g), { nu: NU, klok: () => NU });
+  assert.equal(u.intake.ok, false);
+  assert.deepEqual(n.uitkomsten.map((x) => x.r), [{ ok: false, code: 'ontbreekt' }]);
+  assert.equal(t.n("SELECT count(*) AS n FROM bericht b JOIN bron r ON r.id = b.bron WHERE r.soort = 'intake'"), 0);
+  n.fout = true;
+  const u2 = await KO.ronde(t.fdb, n.io(g), { nu: NU + 60 * MIN, klok: () => NU + 60 * MIN });
+  assert.equal(u2.intake.ok, false); assert.equal(u2.intake.fout, 'lijst');
+  assert.ok(u2.upload, 'de rest van de ronde liep');
+  // zonder io.intake (oude server.js) doet de koerier niets extra
+  const u3 = await t.ronde(g, NU + 120 * MIN);
+  assert.equal(u3.intake, undefined);
+});

@@ -738,6 +738,20 @@ function M7(db) {
 }
 
 /*
+ * wv1919 (OVIS Intake stap 3d, bouwplan vault "01_Ontwikkeling/OVIS Intake - één ingang en router (bouwplan 24-10-2026).md" § 12.4.4): de
+ * koerier leest facturen ook uit OVIS Intake, als bericht van een eigen bron per Intake-bron (naam 'intake:<bron>', bv. 'intake:gmail:david';
+ * message_id = de id in die bron, dus voor Gmail de Gmail-id, zodat MailMan hem net zo vindt als een bericht uit het verzamelpostvak).
+ * bron.soort krijgt 'intake' erbij. Zelfde weg als M5/M6/M10/M11 (writable_schema, één vervanging, al verruimd = overslaan). LET OP terugrol:
+ * een release van vóór wv1919 opent deze database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 15`:
+ * de verruimde CHECK hindert de oude code niet; bronrijen 'intake' leest de oude koerier niet (die kiest op soort verzamelpostvak/upload) en
+ * hun berichten en facturen blijven gewoon in de app staan.
+ */
+const M15_VERVANG = [
+  ['bron', "soort IN ('verzamelpostvak','upload','bankluis')", "soort IN ('verzamelpostvak','upload','bankluis','intake')"],
+];
+function M15(db, vervang) { return M5(db, vervang || M15_VERVANG, 'migratie_15'); }
+
+/*
  * wv980 (OVIS Intake stap 2, bouwplan § 3.3/§ 9 #2): leverancier krijgt knoop_id, de id van de organisatie in het OVIS-register
  * (secondbrain.knoop/entity, bv. 'org:voorbeeld'). Leeg tot de facturen-lens in stap 3 hem vult; de router leest hem niet in de schaduw.
  * Alleen een vorm-CHECK, geen verwijzing (het register staat in Supabase). LET OP terugrol: een release van vóór wv980 opent deze
@@ -1007,6 +1021,7 @@ const MIGRATIES = [
   { versie: 12, naam: 'regels per afzender: afzender_regel (wv1917)', sql: M12 },
   { versie: 13, naam: 'creditcard (ICS) als bron: kaart, kaart_bestand, kaart_regel, kaart_incasso (wv2043)', sql: M13 },
   { versie: 14, naam: 'PayPal zakelijk als bron: paypal_regel (wv2056)', sql: M14 },
+  { versie: 15, naam: "bron: soort 'intake' (OVIS Intake stap 3d, wv1919)", fn: (db) => M15(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -1553,7 +1568,7 @@ function health(fdb) {
 }
 
 module.exports = {
-  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
+  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
   terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,

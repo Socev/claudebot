@@ -49,6 +49,7 @@ const GRENS = {
   bronDagen: 14,            // het postvak kijkt zo ver terug (eerste ronde) en altijd 2 dagen vóór de laatste geslaagde ronde
   bijlageBytes: 20 * 1024 * 1024,
   tekst: 200000,
+  intake: 10,               // OVIS Intake-stukken per ronde (wv1919)
 };
 const OPGEHAALD_MS = K.OPGEHAALD_TIMEOUT_MS;
 const TOKEN_RE = /\[ref (F[VA][0-9a-f]{16})\]/;
@@ -321,6 +322,12 @@ async function ronde(fdb, io, o) {
   if (bron && luikOk && klok() - start <= GRENS.rondeMs * 2) { try { uit.postvak = await leesPostvak(fdb, bron, io, pdf, { klok, wie, start }); if (!uit.postvak.ok) uit.ok = false; } catch (e) { fout('postvak', e); } }
   else uit.postvak = bron ? { overgeslagen: luikOk ? 'tijd' : 'lees-luik' } : { aan: false };
 
+  // 5b. OVIS Intake (wv1919): stukken die de router naar de facturenlens stuurde; los van het lees-luik (bytes komen uit de Intake-blob)
+  if (io.intake && typeof io.intake.lijst === 'function' && typeof io.intake.uitkomst === 'function') {
+    if (klok() - start <= GRENS.rondeMs * 2) { try { uit.intake = await leesIntake(fdb, io, pdf, { klok, wie, start }); if (!uit.intake.ok) uit.ok = false; } catch (e) { fout('intake', e); } }
+    else uit.intake = { overgeslagen: 'tijd' };
+  }
+
   // 6. hartslag (alleen soorten en aantallen)
   D.metaZet(fdb, 'koerier_ronde', JSON.stringify({ op: nuIso(start), eind: nuIso(klok()), ok: uit.ok, fout: uit.fouten.length ? uit.fouten.map((f) => f.wat + ':' + f.soort).join(', ').slice(0, 200) : null,
     verzending: uit.verzending, detectie: uit.detectie }));
@@ -561,4 +568,119 @@ async function leesBericht(fdb, bron, io, pdf, m, eigen, o, tel, nietGelezen) {
   return n;
 }
 
-module.exports = { ronde, controleer, pdfNaarTekst, oorspronkelijkeAfzender, isDoorgestuurd, tokenVan, mailVoor, zoekToken, naamMetExtensie, LuikFout, GRENS, PDFTOTEXT, TOKEN_RE };
+
+// ───────────────────────────── OVIS Intake als tweede bron (wv1919) ─────────────────────────────
+
+/*
+ * OVIS Intake stap 3d (bouwplan vault "01_Ontwikkeling/OVIS Intake - één ingang en router (bouwplan 24-10-2026).md" § 12.4.4). Een stuk dat
+ * de router naar de facturenlens stuurde (bestemming 'aangeboden') leest de koerier hier als bericht in: bytes uit de Intake-blob (via
+ * io.intake.lijst, in het geheugen), pdftotext vluchtig, hetzelfde besliskader (F.verwerkBericht, dubbel op sha256: een pdf die al via het
+ * verzamelpostvak binnenkwam wordt stil overgeslagen), daarna terugmelden (io.intake.uitkomst → bestemming 'bevestigd' + uitvoering in
+ * intake.sqlite). Bevestigen in de Facturen-app blijft Davids knop: hier wordt alleen ingelezen. De router geeft alleen stukken die de
+ * patiëntmarker doorliet (nooit een vastgehouden stuk); Claude (PDF-lezer live) en de schaduw alleen met een Jev-uitslag onder de drempel
+ * en niet na Davids "gewoon verwerken", gelijk aan de kennislens. Eén bronrij per Intake-bron (naam 'intake:<bron>'), message_id = de id in
+ * die bron (Gmail-id), zodat MailMan (factuur verwerkt, factuurstap) dit bericht vindt zoals een bericht uit het verzamelpostvak.
+ */
+function intakeBron(fdb, bron) {
+  const naam = 'intake:' + String(bron || 'onbekend').replace(/[^a-z0-9:-]/gi, '').slice(0, 60);
+  let b = fdb.db.prepare("SELECT * FROM bron WHERE soort = 'intake' AND naam = ?").get(naam);
+  if (!b) { b = { id: D.nieuwId(), soort: 'intake', naam, actief: 1 }; D.voegToe(fdb, 'bron', b); }
+  return b;
+}
+async function leesIntake(fdb, io, pdf, o) {
+  const tel = { stukken: 0, ingelezen: 0, al_ingelezen: 0, facturen: 0, documenten: 0, fout: 0, claude: 0, knoop_id: 0 };
+  const fouten = [];
+  let stukken;
+  try { stukken = await io.intake.lijst(GRENS.intake); } catch (e) { return { ok: false, fout: 'lijst', aantallen: tel }; }
+  if (!Array.isArray(stukken)) return { ok: false, fout: 'lijst', aantallen: tel };
+  const eigen = (json(D.metaLees(fdb, 'koerier_eigen_adressen'), null) || ['d.schaap@gmail.com', 'dokterschaap@gmail.com']).map((x) => String(x).toLowerCase());
+  for (const s of stukken) {
+    if (o.klok() - o.start > GRENS.rondeMs * 2) break;
+    tel.stukken++;
+    try {
+      const r = await leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel);
+      await io.intake.uitkomst(s.stuk_id, s.versie, { ok: true, uitkomst: r });
+    } catch (e) {
+      tel.fout++; fouten.push({ wat: 'stuk', id: kort(s && s.stuk_id, 40), melding: foutSoort(e) });
+      try { await io.intake.uitkomst(s.stuk_id, s.versie, { ok: false, code: foutSoort(e) }); } catch (e2) { /* volgende ronde opnieuw (blijft aangeboden) */ }
+    }
+  }
+  if (stukken.length) hartslag(fdb, 'intake', 'intake', o, { ok: tel.fout === 0, aantallen: tel, fouten });
+  return { ok: tel.fout === 0, aantallen: tel };
+}
+async function leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel) {
+  if (!s || typeof s.stuk_id !== 'string' || !Array.isArray(s.documenten)) throw Object.assign(new Error('stuk onvolledig'), { code: 'stuk' });
+  if (s.ontbreekt > 0) throw Object.assign(new Error('bijlage niet meer in Intake'), { code: 'ontbreekt' });
+  const bron = D.transactie(fdb, function () { return intakeBron(fdb, s.bron); });
+  const mid = kort(s.bron_id || s.stuk_id, 200);
+  if (fdb.db.prepare('SELECT 1 FROM bericht WHERE bron = ? AND message_id = ?').get(bron.id, mid)) { tel.al_ingelezen++; return 'al_ingelezen'; }
+  const documenten = [];
+  for (const b of s.documenten) {
+    const bytes = Buffer.isBuffer(b.bytes) ? b.bytes : Buffer.from(b.bytes || '');
+    if (!bytes.length || bytes.length > GRENS.bijlageBytes) continue;
+    const isPdf = bytes.subarray(0, 5).toString('latin1') === '%PDF-';
+    const isXml = !isPdf && /^\s*(?:﻿)?</.test(bytes.subarray(0, 200).toString('utf8'));
+    if (!isPdf && !isXml) continue;
+    const doc = { naam: kort(b.naam, 255), mime: isPdf ? 'application/pdf' : 'application/xml', bytes: bytes.length, _bytes: bytes };
+    if (isPdf) { const t = await pdf(bytes); doc.tekst = t.ok ? t.tekst : ''; doc.tekstlaag = !!(t.ok && t.tekstlaag); }
+    else doc.ubl_xml = bytes.toString('utf8');
+    doc.patientkenmerk_koerier = !!(doc.tekst && K.stapPatientkenmerk([doc.tekst]).kenmerk);
+    documenten.push(doc);
+  }
+  tel.documenten += documenten.length;
+  let afzender = kort(s.van, 320);
+  if (documenten.length && s.mailtekst && isDoorgestuurd({ van: s.van, onderwerp: s.onderwerp }, eigen)) { const a = oorspronkelijkeAfzender(s.mailtekst); if (a) afzender = a; }
+  const ruw = new Map();
+  for (const d of documenten) { const st = D.stukSchrijf(fdb, d._bytes); d.sha256 = st.sha256; ruw.set(d.sha256, d._bytes); delete d._bytes; }
+  const model = s.jev === 'onder' && !s.na_keuze;   // gelijk aan de kennislens: geen model zonder Jev onder de drempel of na "gewoon verwerken"
+  if (documenten.length && model) tel.claude += await pdfLive(io, { afzender, onderwerp: s.onderwerp }, documenten, ruw, 0, o);
+  let vf = null, nieuwId = null, al = false;
+  D.transactie(fdb, function () {
+    if (fdb.db.prepare('SELECT 1 FROM bericht WHERE bron = ? AND message_id = ?').get(bron.id, mid)) { al = true; return; }
+    nieuwId = D.nieuwId();
+    D.voegToe(fdb, 'bericht', { id: nieuwId, bron: bron.id, message_id: mid, draad_id: kort(s.thread_id, 200), afzender, onderwerp: kort(s.onderwerp, 300),
+      datum_lokaal: kort(s.ontvangen, 40), bron_link: s.bron === 'gmail:david' && /^[0-9a-f]{12,24}$/.test(mid) ? 'https://mail.google.com/mail/u/0/#all/' + mid : null, ontvangen_op: nuIso(o.klok()) });
+    if (!documenten.length) return;
+    const v = F.verwerkBericht(fdb, { bericht: { id: nieuwId, message_id: mid, afzender, onderwerp: s.onderwerp }, documenten }, { wie: o.wie, nu: o.klok() });
+    vf = v.facturen;
+  });
+  if (al) { tel.al_ingelezen++; return 'al_ingelezen'; }
+  if (vf && model) schaduwPdf(fdb, io, nieuwId, { afzender, onderwerp: s.onderwerp }, documenten, ruw, vf, 0);
+  for (const d of documenten) { d.tekst = null; d.ubl_xml = null; d.ocr_tekst = null; d.model_kandidaat = null; }
+  ruw.clear();
+  tel.ingelezen++;
+  const n = vf ? vf.length : 0;
+  tel.facturen += n;
+  // knoop_id (§ 12.4.4): domein alleen als de afzender met DKIM vaststaat en het geen doorgestuurde mail van David is
+  if (n && typeof io.knoopVoor === 'function') {
+    const echt = s.dkim === 'uitgelijnd' && afzender === kort(s.van, 320) && !eigen.includes(String(s.van || '').toLowerCase());
+    tel.knoop_id += await knoopVul(fdb, io, vf.map((f) => f.id), echt ? String(s.van).split('@')[1] : null, o);
+  }
+  if (!documenten.length) return 'geen_pdf';
+  return n ? 'facturen:' + n : 'al_in_facturen';
+}
+/*
+ * leverancier.knoop_id deterministisch vullen (§ 12.4.4): KvK van de factuur (of het vaste afzenderdomein) gelijk aan een ACTIEF kenmerk van
+ * precies één organisatie in het OVIS-register (io.knoopVoor, de router kent het register). Twijfel = niets; een gevulde knoop_id wordt nooit
+ * overschreven. → aantal gevulde leveranciers.
+ */
+async function knoopVul(fdb, io, factuurIds, domein, o) {
+  let n = 0;
+  for (const id of factuurIds || []) {
+    const f = fdb.db.prepare('SELECT f.leverancier, f.leverancier_kvk, l.knoop_id FROM factuur f JOIN leverancier l ON l.id = f.leverancier WHERE f.id = ?').get(id);
+    if (!f || f.knoop_id || (!f.leverancier_kvk && !domein)) continue;
+    let k = null;
+    try { k = await io.knoopVoor({ kvk: f.leverancier_kvk || null, domein: domein || null }); } catch (e) { k = null; }
+    if (!k) continue;
+    const wanneer = nuIso(o.klok());
+    D.transactie(fdb, function () {
+      if (fdb.db.prepare('UPDATE leverancier SET knoop_id = ?, bijgewerkt_op = ? WHERE id = ? AND knoop_id IS NULL').run(k, wanneer, f.leverancier).changes === 1) {
+        D.audit(fdb, { wie: o.wie, wat: 'knoop_id', object_soort: 'leverancier', object_id: f.leverancier, na: { knoop_id: k, via: f.leverancier_kvk ? 'kvk' : 'domein' }, wanneer });
+        n++;
+      }
+    });
+  }
+  return n;
+}
+
+module.exports = { ronde, leesIntake, knoopVul, controleer, pdfNaarTekst, oorspronkelijkeAfzender, isDoorgestuurd, tokenVan, mailVoor, zoekToken, naamMetExtensie, LuikFout, GRENS, PDFTOTEXT, TOKEN_RE };
