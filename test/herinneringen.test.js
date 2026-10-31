@@ -555,7 +555,7 @@ test('categorie: mee met klaar, Privé altijd gevoelig, zonder keuze gevoelig, w
     o.h.ontvangStuk(ID3, 1, c[0]); o.h.weg(ID3);
     assert.strictEqual(o.h.kiesCategorie(ID3, { categorie: 'gezin', gevoelig: false, gekozen_op: '2026-10-30T10:31:00Z' }).status, 409);
     // zelfde lijst als CATEGORIEEN in socev-app src/memorylaneKern.ts (die toets heeft dezelfde kopie); wijzig je hem, dan beide
-    assert.deepStrictEqual(Object.fromEntries(Object.entries(H.CATEGORIEEN).map(([k, v]) => [k, v.gevoelig])), { gezin: false, familie: false, shizzle: false, prive: true, overig: false });
+    assert.deepStrictEqual(Object.fromEntries(Object.entries(H.CATEGORIEEN).map(([k, v]) => [k, v.gevoelig])), { gezin: false, familie: false, shizzle: false, prive: true, overig: false, reizen: false });
     // notitie tijdelijk weg: geen 'bijgewerkt', en terug = alsnog bijgewerkt (review MOET 1)
     const p1 = path.join(o.vault, H.NOTITIE_MAP, o.notities().find((x) => fm(x).includes(ID1)));
     const bewaar = fs.readFileSync(p1, 'utf8'); fs.unlinkSync(p1);

@@ -3859,6 +3859,7 @@ function handleRequest(req, res) {
       mailman: typeof mailmanInfo === 'function' ? mailmanInfo() : { aan: false },   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
+      memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
       ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
       scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
@@ -12352,6 +12353,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/concept') return appConceptZet(req, res, a, d);
         if (route === 'POST /app/spraak') return appSpraak(req, res, a);   // wv172
         if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
+        if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
@@ -18373,6 +18375,95 @@ function docsDelenInfo() {
   if (!docsDelen) return { aan: false };
   try { return docsDelen.health(); } catch (e) { return { aan: true, fout: true }; }
 }
+// ── MemoryLane delen (wv2114, 31-10-2026; ontwerp vault fase R § 14, review vooraf OpenAI verwerkt). Logica en waarom in
+// memorylane-delen.js; hier alleen: D1 (zelfde databank `deel` als Docs › Delen), de twee wachtwoorden uit de kluis (niet op de witte lijst:
+// op het moment van gebruik via de Management-API, 10 min in het geheugen, nooit in process.env), de app-routes en de tik.
+//   GET  /app/memorylane/lijst | /app/memorylane/h/<hid> | /app/memorylane/delen
+//   POST /app/memorylane/h/<hid>/zicht {kring, aan} · titel {titel} · tekst {tekst, soort} · categorie {categorie, gevoelig} · toon-opname {aan} · toch-delen
+//   POST /app/memorylane/stuk/<sid>/opnemen|afwijzen|bewaren|weggooien · POST /app/memorylane/link/<kring>/aan|uit|vernieuw
+// Naar buiten (zicht aan, link aan, toch delen): verse vingerafdruk en nooit vanaf een vaste plek (zoals Docs › Delen). Dichter maken mag altijd.
+const ML_KLUIS = { memorylane_link_familie: true, memorylane_link_vrienden: true };
+const mlKluisCache = new Map();   // naam → { w, tot }; alleen in het geheugen
+async function mlKluis(naam) {
+  if (!ML_KLUIS[naam]) return null;
+  const c = mlKluisCache.get(naam);
+  if (c && Date.now() < c.tot) return c.w;
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  if (!m || !pat) return null;
+  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
+    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-memorylane/1' },
+    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + naam + "'" }),
+    signal: AbortSignal.timeout(20000) });
+  if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
+  const rijen = await r.json();
+  const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w : '';
+  mlKluisCache.set(naam, { w: w || null, tot: Date.now() + (w ? 10 : 2) * 60 * 1000 });
+  return w || null;
+}
+const memorylaneDelen = (function () {
+  const p = path.join(__dirname, 'memorylane-delen.js');
+  if (!fs.existsSync(p) || !intake || !herinneringen || !HERINNERINGEN_MOD) return null;
+  try {
+    return require(p).maak({ db: intake._db, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, host: DOCS_HOST, kluis: mlKluis,
+      marker: require(path.join(__dirname, 'intake', 'patientpoort.js')), geheimen: function () { try { return openaiPodGeheimen(); } catch (e) { return []; } },
+      categorieen: HERINNERINGEN_MOD.CATEGORIEEN, onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
+      fout: logError, box: function (t) { ovisBoxRij(t); },
+      d1: SERVER_ECHT || process.env.ML_D1_TOETS ? async function (sql, params) {
+        if (!process.env.CLOUDFLARE_API_TOKEN) return { ok: false, rijen: null };
+        const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/d1/database/' + DOCS_D1_ID + '/query', { sql: sql, params: params || [] });
+        const q = r.status === 200 && r.j && r.j.success && Array.isArray(r.j.result) ? r.j.result[0] : null;
+        if (!q || !q.success) logError('ml-d1', new Error('D1 gaf HTTP ' + r.status));   // nooit sql of waarden in het log
+        return { ok: !!(q && q.success), rijen: q && Array.isArray(q.results) ? q.results : null };
+      } : null });
+  } catch (e) { logError('memorylane-delen', e); return null; }
+})();
+function memorylaneDelenInfo() { if (!memorylaneDelen) return { module: false }; try { return Object.assign({ module: true }, memorylaneDelen.info()); } catch (e) { return { fout: true }; } }
+let mlTikLoopt = false;
+async function memorylaneDelenTik() {
+  if (!memorylaneDelen || mlTikLoopt || !rolPrimair()) return;
+  mlTikLoopt = true;
+  try { await memorylaneDelen.tik(); } catch (e) { logError('ml-tik', e); } finally { mlTikLoopt = false; }
+}
+if (memorylaneDelen && SERVER_ECHT) { setTimeout(function () { memorylaneDelenTik(); }, 120000).unref(); setInterval(function () { memorylaneDelenTik(); }, 60000).unref(); }
+appStaat.tellers.memorylane = [];
+async function appMemorylane(req, res, a, s, route, d) {
+  if (!memorylaneDelen) return appWeiger(res, 404, 'MemoryLane delen zit niet in deze versie van de pod', 'ml ontbreekt');
+  if (!appTeller('memorylane', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens memorylane');
+  const antw = function (wat, u) { res._app.reden = 'memorylane ' + wat + ' ' + u.status; return appStuur(res, u.status, u.body); };
+  const naarBuiten = function (wat) {
+    if (a.soort === 'vast') { res._app.reden = 'memorylane ' + wat + ', vaste plek'; appStuur(res, 403, { ok: false, fout: 'delen kan alleen vanaf je telefoon of een meereizend apparaat' }); return false; }
+    if (!appVersOk(a, s)) { res._app.reden = 'memorylane ' + wat + ', niet vers'; appStuur(res, 403, { ok: false, fout: 'bevestig het delen met je vingerafdruk', vers_nodig: true }); return false; }
+    return true;
+  };
+  const daarna = function () { setTimeout(function () { memorylaneDelenTik(); }, 0); };
+  let m;
+  try {
+    if (route === 'GET /app/memorylane/lijst') return antw('lijst', memorylaneDelen.lijst());
+    if (route === 'GET /app/memorylane/delen') return antw('delen', memorylaneDelen.delenStand());
+    if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})$/.exec(route))) return antw('detail', memorylaneDelen.detail(m[1]));
+    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(zicht|titel|tekst|categorie|toon-opname|toch-delen)$/.exec(route))) {
+      const hid = m[1], wat = m[2];
+      if (wat === 'zicht' && d && d.aan === true && !naarBuiten('zicht')) return;
+      if (wat === 'toch-delen' && !naarBuiten('toch-delen')) return;
+      const u = wat === 'zicht' ? memorylaneDelen.zicht(hid, d) : wat === 'titel' ? memorylaneDelen.titel(hid, d) : wat === 'tekst' ? memorylaneDelen.tekst(hid, d)
+        : wat === 'categorie' ? memorylaneDelen.categorie(hid, d) : wat === 'toon-opname' ? memorylaneDelen.toonOpname(hid, d) : memorylaneDelen.tochDelen(hid);
+      if (u.status === 200) daarna();
+      return antw(wat, u);
+    }
+    if ((m = /^POST \/app\/memorylane\/stuk\/(s[0-9a-f]{16})\/(opnemen|afwijzen|bewaren|weggooien)$/.exec(route))) {
+      const u = memorylaneDelen.stukBesluit(m[1], m[2]);
+      if (u.status === 200) daarna();
+      return antw('stuk ' + m[2], u);
+    }
+    if ((m = /^POST \/app\/memorylane\/link\/(familie|vrienden)\/(aan|uit|vernieuw)$/.exec(route))) {
+      if (m[2] === 'aan' && !naarBuiten('link aan')) return;
+      return antw('link ' + m[2], await memorylaneDelen.link(m[1], m[2]));
+    }
+  } catch (e) { logError('memorylane', e); return appWeiger(res, 503, 'MemoryLane kon dit nu niet doen; probeer het zo opnieuw', 'ml fout'); }
+  return appWeiger(res, 404, 'onbekend', 'ml pad');
+}
+// ── einde MemoryLane delen ──
 async function appDocs(req, res, a, s, d, route) {
   if (!docsDelen) return appWeiger(res, 404, 'Delen zit niet in deze versie van de pod', 'docs ontbreekt');
   if (!appTeller('docs', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs');

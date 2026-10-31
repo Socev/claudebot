@@ -1,0 +1,708 @@
+'use strict';
+/*
+ * MemoryLane delen (wv2114, 31-10-2026): reizen, eigen aanvullingen en twee deellinks (familie, vrienden). Ontwerp in de vault:
+ * "01_Ontwikkeling/Second Brain 2.0 - fase R rambles en herinneringen (ontwerp 29-10-2026).md" § 14 (review vooraf OpenAI, 4 MOET verwerkt).
+ *
+ * WAAROM. David 31-10 19:22: een herinnering is van meer mensen; familie en vrienden moeten het verhaal kunnen zien en hun kant kunnen
+ * typen of inspreken. Alle input blijft als eigen stuk bewaard; het samengestelde verhaal (R2, wv2118) is later een afgeleide.
+ *
+ * VORM.
+ *  - Register in intake.sqlite (ml_*): alleen ids, vlaggen, tijden en hashes. GEEN tekst, titels of namen (die databank gaat elke nacht in de
+ *    podstaat-bundel; zelfde regel als ramble, Opus-review wv1969 MOET 1).
+ *  - Tekst in de vault: per herinnering 20_Prive/Herinneringen/MemoryLane/<hid>.md (frontmatter titel/bron, per stuk een blok
+ *    "<!-- ml:stuk <sid> -->"). Davids handwijziging in een blok wint: de pod leest de tekst uit de pagina. Tot het blok in de vault staat
+ *    (onderhoud, nachtgrendel) en bij een markertreffer staat het stuk in <dir>/ml-wacht/<sid>.json (0600).
+ *  - Buiten de pod staat alleen wat David zichtbaar zette, in D1 `deel` (ml_item), en alleen voor een link die aan staat. De worker op
+ *    deel.socev.dev/h/<slug> (socev-app deel/site/_worker.js) leest dat en schrijft bijdragen VERSLEUTELD met de publieke sleutel van de pod
+ *    (ml_sleutel); alleen de pod kan ze lezen (review MOET 1). De pod haalt ze altijd op, ook als de link uit staat (MOET 2).
+ *  - Gevoelig (Privé, geen categorie, vinkje) of een vastgehouden opname is nooit zichtbaar; getoetst bij de schakelaar en bij elke publicatie.
+ *  - Vóór elke publicatie: geheimenpoort (hard, ook geen "toch delen"; MOET 3) en patiëntmarker (waarschuwen: David kan per inhoudshash
+ *    "toch delen").
+ *  - Wachtwoorden: kluis memorylane_link_familie / memorylane_link_vrienden (David zet ze in het sleutelportaal), gelezen via o.kluis op het
+ *    moment van gebruik; in D1 alleen PBKDF2-SHA256 (100.000 rondes, het maximum van Workers) met eigen zout.
+ *  - Haak wv2118: verhaalVoorDelen(hid) geeft nu null; met een goedgekeurd verhaal toont de deling dat in plaats van de letterlijke opname.
+ * PRIVACY. Nooit tekst, titels of namen in logs, box, /health of fouten: alleen ids en aantallen.
+ * VORM. Alleen fs, path en crypto; D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
+ */
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const KRINGEN = ['familie', 'vrienden'];
+const HID_RE = /^h[0-9a-f]{16}$/, SID_RE = /^s[0-9a-f]{16}$/, PUB_RE = /^[A-Za-z0-9_-]{16}$/, SLUG_RE = /^[A-Za-z0-9_-]{22}$/;
+const BIJ_ID_RE = /^[A-Za-z0-9_-]{22}$/;
+const MAP = '20_Prive/Herinneringen/MemoryLane';
+const REIS_MAP = '20_Prive/Reizen';
+const ITER = 100000;
+const MAX_TEKST = 5000, MAX_TITEL = 120, MAX_NAAM = 60;
+const NAAM_RE = /^[\p{L}][\p{L}\p{M} .'’-]{0,59}$/u;
+const KLUIS = { familie: 'memorylane_link_familie', vrienden: 'memorylane_link_vrienden' };
+const HOST = 'deel.socev.dev';
+const WW_ELKE_MS = 10 * 60000, CONTROLE_ELKE_MS = 10 * 60000, OPHAAL_RUST_MS = 10 * 60000, ACTIEF_MS = 3600000;
+
+const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS ml_herinnering (hid TEXT PRIMARY KEY, soort TEXT NOT NULL, ref TEXT, categorie TEXT, gevoelig INTEGER,
+  zicht_familie INTEGER NOT NULL DEFAULT 0, zicht_vrienden INTEGER NOT NULL DEFAULT 0, toon_opname INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL, aangemaakt TEXT NOT NULL, gewijzigd TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS ml_herinnering_ref ON ml_herinnering (soort, ref);
+CREATE TABLE IF NOT EXISTS ml_stuk (sid TEXT PRIMARY KEY, hid TEXT NOT NULL, wie TEXT NOT NULL, kring TEXT NOT NULL, vorm TEXT NOT NULL,
+  soort TEXT NOT NULL, status TEXT NOT NULL, marker TEXT NOT NULL DEFAULT 'geen', sha256 TEXT NOT NULL, vault INTEGER NOT NULL DEFAULT 0,
+  binnen_op TEXT NOT NULL, besluit_op TEXT, bron_id TEXT UNIQUE);
+CREATE TABLE IF NOT EXISTS ml_link (kring TEXT PRIMARY KEY, slug TEXT NOT NULL, versie INTEGER NOT NULL, aan INTEGER NOT NULL DEFAULT 0,
+  zout TEXT, ww_vinger TEXT, ww_stand TEXT, aan_op TEXT, uit_op TEXT, sync INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS ml_pub (kring TEXT NOT NULL, versie INTEGER NOT NULL, hid TEXT NOT NULL, pub TEXT NOT NULL UNIQUE, PRIMARY KEY (kring, versie, hid));
+CREATE TABLE IF NOT EXISTS ml_d1 (kring TEXT NOT NULL, pub TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (kring, pub));
+CREATE TABLE IF NOT EXISTS ml_blok (hid TEXT NOT NULL, kring TEXT NOT NULL, reden TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (hid, kring));
+CREATE TABLE IF NOT EXISTS ml_marker_ok (hid TEXT NOT NULL, kring TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (hid, kring));
+`;
+
+function iso(ms) { return new Date(ms).toISOString(); }
+function sha256(x) { return crypto.createHash('sha256').update(x).digest('hex'); }
+function rnd(n) { return crypto.randomBytes(n); }
+function b64u(b) { return Buffer.from(b).toString('base64url'); }
+function amsDmj(ms) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return { dmj: p.day + '-' + p.month + '-' + p.year, klok: (p.hour === '24' ? '00' : p.hour) + ':' + p.minute, datum: p.year + '-' + p.month + '-' + p.day };
+}
+// Tekst van buiten (of van David) schoon: geen stuurtekens behalve regeleinden, hooguit max tekens, nooit ons blokmerkteken.
+function schoon(t, max, regels) {
+  let s = String(t == null ? '' : t).normalize('NFC').replace(/\r\n?/g, '\n');
+  s = regels ? s.replace(/[\u0000-\u0009\u000b-\u001f\u007f\u2028\u2029]/g, ' ') : s.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ');
+  s = s.replace(/<!--/g, '<!‐‐').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return Array.from(s).length > max ? null : s;
+}
+function wwNorm(w) { return String(w == null ? '' : w).normalize('NFC').trim().toLowerCase(); }   // zelfde als de worker
+// asynchroon: 100.000 rondes duren ± 50–100 ms, dat blokkeert de pod niet
+function pbkdf2(ww, zoutB64) {
+  return new Promise(function (klaar, mis) { crypto.pbkdf2(Buffer.from(wwNorm(ww), 'utf8'), Buffer.from(zoutB64, 'base64'), ITER, 32, 'sha256', function (e, b) { if (e) mis(e); else klaar(b.toString('base64')); }); });
+}
+function yaml(s) { return JSON.stringify(String(s)); }
+// "[01:00] tekst" → "tekst"; stilte en gaten weg (de bezoeker krijgt het verhaal, geen tijdcodes)
+function kaleOpname(body) {
+  return String(body || '').split(/\n{2,}/).map((x) => x.trim()).filter(Boolean)
+    .map((x) => x.replace(/^\[[0-9:]+\]\s*/, '')).filter((x) => x && x !== '(stilte)' && !/^\[[0-9:–-]+ (ontbreekt|niet uitgeschreven)\]$/.test(x)).join('\n\n');
+}
+function zonderFrontmatter(t) { const m = /^---\n[\s\S]*?\n---\n?/.exec(t); return m ? t.slice(m[0].length) : t; }
+function fmVeld(t, veld) {
+  const m = /^---\n([\s\S]*?)\n---/.exec(t || '');
+  if (!m) return null;
+  const r = new RegExp('^' + veld + ':\\s*(.*)$', 'm').exec(m[1]);
+  if (!r) return null;
+  let v = r[1].trim();
+  if (v.startsWith('"')) { try { v = JSON.parse(v); } catch (e) { v = v.replace(/^"|"$/g, ''); } }
+  return v;
+}
+
+/*
+ * maak(o) → { lijst, detail, zicht, titel, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, _db }.
+ * o = { db (intake._db), vault, vv (vault-veilig), dir (/opt/data/herinneringen), d1(sql, params) → Promise<{ok, rijen}>,
+ *       kluis(naam) → Promise<string|null>, marker (patientpoort: beoordeel), geheimen() → [string], categorieen (herinneringen CATEGORIEEN),
+ *       onderhoudAan() → bool, nachtgrendel() → bool, nu() → ms, box(tekst), fout(label, e), host?, reisVandaag?() → 'JJJJ-MM-DD' }
+ */
+function maak(o) {
+  const nu = typeof o.nu === 'function' ? o.nu : Date.now;
+  const db = o.db;
+  db.exec(SCHEMA_SQL);
+  const CAT = o.categorieen || {};
+  const DIR = o.dir, WACHT = path.join(DIR, 'ml-wacht'), SLEUTEL = path.join(DIR, 'ml-inbox.pem');
+  for (const d of [DIR, WACHT]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); try { fs.chmodSync(d, 0o700); } catch (e) { /* niet van ons */ } }
+  const host = o.host || HOST;
+  const fout = (l, e) => { if (o.fout) o.fout(l, e); };
+  let laatsteWw = 0, laatsteControle = 0, laatsteOphaal = 0, vuil = new Set(KRINGEN), bezig = false, laatst = null, onleesbaar = 0, d1Fout = false;
+
+  const q = {
+    h: db.prepare('SELECT * FROM ml_herinnering WHERE hid = ?'),
+    hRef: db.prepare('SELECT * FROM ml_herinnering WHERE soort = ? AND ref = ?'),
+    hNieuw: db.prepare('INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
+    hAlle: db.prepare("SELECT * FROM ml_herinnering WHERE status <> 'weg' ORDER BY aangemaakt DESC, hid"),
+    hStatus: db.prepare('UPDATE ml_herinnering SET status = ?, gewijzigd = ? WHERE hid = ?'),
+    hZicht: { familie: db.prepare('UPDATE ml_herinnering SET zicht_familie = ?, gewijzigd = ? WHERE hid = ?'), vrienden: db.prepare('UPDATE ml_herinnering SET zicht_vrienden = ?, gewijzigd = ? WHERE hid = ?') },
+    hCat: db.prepare('UPDATE ml_herinnering SET categorie = ?, gevoelig = ?, gewijzigd = ? WHERE hid = ?'),
+    hToon: db.prepare('UPDATE ml_herinnering SET toon_opname = ?, gewijzigd = ? WHERE hid = ?'),
+    hGewijzigd: db.prepare('UPDATE ml_herinnering SET gewijzigd = ? WHERE hid = ?'),
+    s: db.prepare('SELECT * FROM ml_stuk WHERE sid = ?'),
+    sBron: db.prepare('SELECT * FROM ml_stuk WHERE bron_id = ?'),
+    sVan: db.prepare('SELECT * FROM ml_stuk WHERE hid = ? ORDER BY binnen_op, sid'),
+    sNieuw: db.prepare('INSERT INTO ml_stuk (sid, hid, wie, kring, vorm, soort, status, marker, sha256, vault, binnen_op, bron_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)'),
+    sStatus: db.prepare('UPDATE ml_stuk SET status = ?, besluit_op = ? WHERE sid = ?'),
+    sVault: db.prepare('UPDATE ml_stuk SET vault = 1 WHERE sid = ?'),
+    sNaarVault: db.prepare("SELECT * FROM ml_stuk WHERE vault = 0 AND status IN ('binnen', 'opgenomen', 'afgewezen') ORDER BY binnen_op"),
+    sTel: db.prepare('SELECT status, count(*) n FROM ml_stuk GROUP BY status'),
+    link: db.prepare('SELECT * FROM ml_link WHERE kring = ?'),
+    linkNieuw: db.prepare('INSERT INTO ml_link (kring, slug, versie, aan) VALUES (?, ?, 1, 0)'),
+    linkAan: db.prepare('UPDATE ml_link SET aan = ?, aan_op = CASE WHEN ? = 1 THEN ? ELSE aan_op END, uit_op = CASE WHEN ? = 0 THEN ? ELSE uit_op END WHERE kring = ?'),
+    linkVernieuw: db.prepare('UPDATE ml_link SET slug = ?, versie = versie + 1, zout = NULL, ww_vinger = NULL WHERE kring = ?'),
+    linkWw: db.prepare('UPDATE ml_link SET zout = ?, ww_vinger = ?, ww_stand = ? WHERE kring = ?'),
+    linkWwStand: db.prepare('UPDATE ml_link SET ww_stand = ? WHERE kring = ?'),
+    pub: db.prepare('SELECT pub FROM ml_pub WHERE kring = ? AND versie = ? AND hid = ?'),
+    pubNieuw: db.prepare('INSERT INTO ml_pub (kring, versie, hid, pub) VALUES (?, ?, ?, ?)'),
+    pubHid: db.prepare('SELECT hid FROM ml_pub WHERE kring = ? AND pub = ?'),
+    d1: db.prepare('SELECT * FROM ml_d1 WHERE kring = ?'),
+    d1Zet: db.prepare('INSERT INTO ml_d1 (kring, pub, hash) VALUES (?, ?, ?) ON CONFLICT (kring, pub) DO UPDATE SET hash = excluded.hash'),
+    d1Weg: db.prepare('DELETE FROM ml_d1 WHERE kring = ? AND pub = ?'),
+    d1Leeg: db.prepare('DELETE FROM ml_d1 WHERE kring = ?'),
+    // review ZOU 1: per kring (de bijdragen die een kring ziet verschillen)
+    blok: db.prepare("SELECT * FROM ml_blok WHERE hid = ? ORDER BY CASE reden WHEN 'geheim' THEN 0 ELSE 1 END, kring"),
+    blokZet: db.prepare('INSERT INTO ml_blok (hid, kring, reden, hash) VALUES (?, ?, ?, ?) ON CONFLICT (hid, kring) DO UPDATE SET reden = excluded.reden, hash = excluded.hash'),
+    blokWeg: db.prepare('DELETE FROM ml_blok WHERE hid = ? AND kring = ?'),
+    okGet: db.prepare('SELECT hash FROM ml_marker_ok WHERE hid = ? AND kring = ?'),
+    okZet: db.prepare('INSERT INTO ml_marker_ok (hid, kring, hash) VALUES (?, ?, ?) ON CONFLICT (hid, kring) DO UPDATE SET hash = excluded.hash'),
+    linkSync: db.prepare('UPDATE ml_link SET sync = ? WHERE kring = ?'),
+    ramble: db.prepare('SELECT ramble_id, status, categorie, herinnering_gevoelig, notitie, opgenomen_op, aangemaakt, proef FROM ramble WHERE ramble_id = ?'),
+    rambles: db.prepare("SELECT ramble_id FROM ramble WHERE status = 'notitie' AND proef = 0 AND notitie IS NOT NULL"),
+  };
+  function tx(f) { db.exec('BEGIN IMMEDIATE'); try { const r = f(); db.exec('COMMIT'); return r; } catch (e) { try { db.exec('ROLLBACK'); } catch (x) { /* al weg */ } throw e; } }
+  function nieuwHid() { return 'h' + rnd(8).toString('hex'); }
+  function nieuwSid() { return 's' + rnd(8).toString('hex'); }
+
+  // ── sleutelpaar van de inbox (geen toegangssleutel tot een dienst: alleen om bijdragen op Cloudflare onleesbaar te houden) ──
+  let sleutel = null;
+  function inbox() {
+    if (sleutel) return sleutel;
+    let pem = null;
+    try { pem = fs.readFileSync(SLEUTEL, 'utf8'); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+    if (!pem) {
+      const k = crypto.generateKeyPairSync('rsa', { modulusLength: 3072, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'der' } });
+      const tmp = SLEUTEL + '.' + rnd(6).toString('hex') + '.tmp';
+      fs.writeFileSync(tmp, k.privateKey, { mode: 0o600, flag: 'wx' });
+      fs.renameSync(tmp, SLEUTEL);
+      pem = k.privateKey;
+    }
+    const priv = crypto.createPrivateKey(pem);
+    const spki = crypto.createPublicKey(priv).export({ type: 'spki', format: 'der' });
+    sleutel = { priv, spki: spki.toString('base64'), id: sha256(spki).slice(0, 16) };
+    return sleutel;
+  }
+  function ontsleutel(r) {
+    const k = inbox();
+    if (r.sleutel_id !== k.id) return null;
+    const aes = crypto.privateDecrypt({ key: k.priv, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, Buffer.from(String(r.sleutel), 'base64'));
+    const ct = Buffer.from(String(r.inhoud), 'base64'), iv = Buffer.from(String(r.iv), 'base64');
+    if (aes.length !== 32 || iv.length !== 12 || ct.length < 17) return null;
+    const d = crypto.createDecipheriv('aes-256-gcm', aes, iv);
+    d.setAAD(Buffer.from(r.id + '|' + r.kring + '|' + r.versie, 'utf8'));
+    d.setAuthTag(ct.subarray(ct.length - 16));
+    const pt = Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]);
+    return JSON.parse(pt.toString('utf8'));
+  }
+
+  // ── wachtrij op de pod (0600): tekst die (nog) niet in de vault staat ──
+  function wachtPad(sid) { if (!SID_RE.test(sid)) throw new Error('ongeldig stuk'); return path.join(WACHT, sid + '.json'); }
+  function wachtZet(sid, x) {
+    const tmp = path.join(WACHT, '.' + rnd(8).toString('hex') + '.tmp');
+    const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+    try { fs.writeFileSync(fd, JSON.stringify(x)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(tmp, wachtPad(sid));
+  }
+  function wachtLees(sid) { try { return JSON.parse(fs.readFileSync(wachtPad(sid), 'utf8')); } catch (e) { return null; } }
+  function wachtWeg(sid) { try { fs.unlinkSync(wachtPad(sid)); } catch (e) { /* al weg */ } }
+
+  // ── vault-pagina per herinnering ──
+  function paginaRel(hid) { return path.join(MAP, hid + '.md'); }
+  function paginaLees(hid) {
+    try { return o.vv.lees(path.join(o.vault, paginaRel(hid)), 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return null; throw e; }
+  }
+  function blokken(tekst) {
+    const uit = new Map();
+    if (!tekst) return uit;
+    const delen = zonderFrontmatter(tekst).split(/^<!-- ml:stuk (s[0-9a-f]{16}) -->\n/m);
+    for (let i = 1; i + 1 < delen.length; i += 2) {
+      const body = delen[i + 1].replace(/^### [^\n]*\n/, '');
+      uit.set(delen[i], body.replace(/\n+$/, '').replace(/^\n+/, ''));
+    }
+    return uit;
+  }
+  function stukTekst(s, pagina) {
+    if (!s.vault) { const w = wachtLees(s.sid); return w ? w.tekst : null; }
+    const b = blokken(pagina === undefined ? paginaLees(s.hid) : pagina).get(s.sid);
+    if (b == null) return null;
+    return s.wie === 'bezoeker' ? b.split('\n').map((r) => r.replace(/^> ?/, '')).join('\n').trim() : b.trim();
+  }
+  function stukNaam(s, pagina) {
+    if (s.wie === 'david') return 'David';
+    if (!s.vault) { const w = wachtLees(s.sid); return w && w.naam ? w.naam : 'Onbekend'; }
+    const t = pagina === undefined ? paginaLees(s.hid) : pagina;
+    const m = t ? new RegExp('^<!-- ml:stuk ' + s.sid + ' -->\\n### [^·\\n]*· ([^·\\n(]+)', 'm').exec(t) : null;
+    return m ? m[1].trim() : 'Onbekend';
+  }
+  function bronLink(h) {
+    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); return r && r.notitie ? '"[[' + r.notitie.replace(/\.md$/, '') + ']]"' : '""'; }
+    if (h.soort === 'reis') return '"[[' + h.ref.replace(/\.md$/, '') + ']]"';
+    return '""';
+  }
+  function standaardTitel(h) {
+    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); const a = amsDmj(Date.parse((r && (r.opgenomen_op || r.aangemaakt)) || h.aangemaakt)); return 'Opname ' + a.dmj + ' ' + a.klok; }
+    if (h.soort === 'reis') { const t = reisInfo(h.ref); return t ? t.titel : path.basename(h.ref, '.md'); }
+    return 'Losse bijdrage';
+  }
+  function paginaNieuw(h, titel) {
+    return ['---', 'type: herinnering-stukken', 'gevoelig: prive', 'access_context: strikt_prive', 'herinnering_id: ' + h.hid, 'soort: ' + h.soort,
+      'bron: ' + bronLink(h), 'titel: ' + yaml(titel || standaardTitel(h)), 'tags: [herinnering, prive, memorylane]', '---',
+      '> **Privé — persoonlijke herinnering.** Alle bijdragen bij deze herinnering, elk als eigen stuk (wie, wanneer, hoe). Een herinnering is geen bron voor feiten.',
+      ''].join('\n') + '\n';
+  }
+  function kanVault() { return !(o.onderhoudAan && o.onderhoudAan()) && !(o.nachtgrendel && o.nachtgrendel()); }
+  function zorgMap() { const m = path.join(o.vault, MAP); if (!fs.existsSync(m)) fs.mkdirSync(m, { recursive: true, mode: 0o770 }); }
+  function blokTekst(s, w) {
+    const a = amsDmj(Date.parse(s.binnen_op));
+    const wie = s.wie === 'david' ? 'David' : (w.naam || 'Onbekend') + ' (' + s.kring + ')';
+    const kop = '### ' + a.dmj + ' ' + a.klok + ' · ' + wie + ' · ' + s.soort + ' · ' + (s.vorm === 'spraak' ? 'ingesproken' : 'getypt');
+    const tekst = s.wie === 'bezoeker' ? w.tekst.split('\n').map((r) => '> ' + r).join('\n') : w.tekst;
+    return '<!-- ml:stuk ' + s.sid + ' -->\n' + kop + '\n\n' + tekst + '\n\n';
+  }
+  // Schrijf de wachtende stukken naar hun pagina (alleen als de vault mag); geeft het aantal.
+  function naarVault() {
+    if (!kanVault()) return 0;
+    let n = 0;
+    for (const s of q.sNaarVault.all()) {
+      const w = wachtLees(s.sid);
+      if (!w) continue;
+      const h = q.h.get(s.hid);
+      if (!h) continue;
+      try {
+        zorgMap();
+        const pad = path.join(o.vault, paginaRel(h.hid));
+        let bestaand = paginaLees(h.hid);
+        if (bestaand === null) { o.vv.schrijf(pad, paginaNieuw(h, w.titel_nieuw || null)); bestaand = paginaLees(h.hid); }
+        if (!blokken(bestaand).has(s.sid)) o.vv.voegToe(pad, (bestaand.endsWith('\n') ? '' : '\n') + blokTekst(s, w));
+        q.sVault.run(s.sid);
+        wachtWeg(s.sid);
+        n++;
+      } catch (e) { fout('ml-vault', e); }
+    }
+    return n;
+  }
+  function paginaZekerTitel(h, titel) {
+    zorgMap();
+    const pad = path.join(o.vault, paginaRel(h.hid));
+    if (paginaLees(h.hid) === null) { o.vv.schrijf(pad, paginaNieuw(h, titel)); return true; }
+    return o.vv.wijzig(pad, function (t) {
+      const m = /^---\n([\s\S]*?)\n---/.exec(t);
+      if (!m) return null;
+      const fm = /^titel:.*$/m.test(m[1]) ? m[1].replace(/^titel:.*$/m, 'titel: ' + yaml(titel)) : m[1] + '\ntitel: ' + yaml(titel);
+      return '---\n' + fm + '\n---' + t.slice(m[0].length);
+    });
+  }
+
+  // ── herinneringen: opnames (notitie) en reizen (type: reis, voorbij) ──
+  function reisInfo(rel) {
+    let t;
+    try { t = o.vv.lees(path.join(o.vault, rel), 'utf8', { max: 512 * 1024 }); } catch (e) { return null; }
+    if (fmVeld(t, 'type') !== 'reis') return null;
+    const periode = fmVeld(t, 'periode') || '';
+    const data = periode.match(/\d{4}-\d{2}-\d{2}/g) || [];
+    return { titel: (fmVeld(t, 'onderwerp') || path.basename(rel, '.md')).slice(0, MAX_TITEL), periode, van: data[0] || null, tot: data[data.length - 1] || null };
+  }
+  function vandaag() { return typeof o.reisVandaag === 'function' ? o.reisVandaag() : amsDmj(nu()).datum; }
+  function bijwerken() {
+    const t = iso(nu());
+    for (const r of q.rambles.all()) if (!q.hRef.get('opname', r.ramble_id)) q.hNieuw.run(nieuwHid(), 'opname', r.ramble_id, null, null, 'actief', t, t);
+    let reizen = [];
+    try { reizen = fs.readdirSync(path.join(o.vault, REIS_MAP)).filter((n) => /\.md$/.test(n) && !n.startsWith('.')); } catch (e) { reizen = []; }
+    const gezien = new Set();
+    for (const n of reizen) {
+      const rel = path.join(REIS_MAP, n);
+      const i = reisInfo(rel);
+      if (!i || !i.tot || i.tot >= vandaag()) continue;
+      gezien.add(rel);
+      const h = q.hRef.get('reis', rel);
+      if (!h) q.hNieuw.run(nieuwHid(), 'reis', rel, 'reizen', 0, 'actief', t, t);
+      else if (h.status === 'weg') q.hStatus.run('actief', t, h.hid);
+    }
+    for (const h of q.hAlle.all()) {
+      if (h.soort === 'reis' && !gezien.has(h.ref) && !fs.existsSync(path.join(o.vault, h.ref))) { q.hStatus.run('weg', t, h.hid); vuilAlle(); }
+      if (h.soort === 'opname') { const r = q.ramble.get(h.ref); if (!r || r.status !== 'notitie') { q.hStatus.run('weg', t, h.hid); vuilAlle(); } }
+    }
+  }
+  function vuilAlle() { for (const k of KRINGEN) vuil.add(k); }
+
+  // Categorie en gevoelig zoals ze nu gelden (opname: de ramble-rij is de bron)
+  function catVan(h) {
+    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); return { categorie: r ? r.categorie || null : null, gevoeligVink: !!(r && r.herinnering_gevoelig) }; }
+    return { categorie: h.categorie || null, gevoeligVink: !!h.gevoelig };
+  }
+  function isGevoelig(h) { const c = catVan(h); return !c.categorie || !CAT[c.categorie] || !!CAT[c.categorie].gevoelig || c.gevoeligVink; }
+  // Mag deze herinnering naar buiten? → null of de reden (gewone taal)
+  function nietDeelbaar(h) {
+    if (!h || h.status !== 'actief') return h && h.status === 'voorstel' ? 'eerst opnemen' : 'niet beschikbaar';
+    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); if (!r || r.status !== 'notitie' || r.proef) return 'opname niet beschikbaar'; }
+    const c = catVan(h);
+    if (!c.categorie) return 'kies eerst een categorie';
+    if (isGevoelig(h)) return 'gevoelig: nooit zichtbaar';
+    return null;
+  }
+  function titelVan(h, pagina) { const t = fmVeld(pagina === undefined ? paginaLees(h.hid) : pagina, 'titel'); return t || standaardTitel(h); }
+  function wanneerVan(h) {
+    if (h.soort === 'reis') { const i = reisInfo(h.ref); return i ? i.periode : ''; }
+    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); return r ? 'verteld op ' + amsDmj(Date.parse(r.opgenomen_op || r.aangemaakt)).dmj : ''; }
+    return '';
+  }
+  function sorteerSleutel(h) {
+    if (h.soort === 'reis') { const i = reisInfo(h.ref); return (i && i.van) || h.aangemaakt.slice(0, 10); }
+    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); return r ? String(r.opgenomen_op || r.aangemaakt).slice(0, 10) : h.aangemaakt.slice(0, 10); }
+    return h.aangemaakt.slice(0, 10);
+  }
+  function opnameTekst(h) {
+    const r = q.ramble.get(h.ref);
+    if (!r || !r.notitie) return null;
+    let t;
+    try { t = o.vv.lees(path.join(o.vault, r.notitie), 'utf8'); } catch (e) { return null; }
+    const body = zonderFrontmatter(t).replace(/^> \*\*Privé[^\n]*\n+/, '').replace(/^# Opname[^\n]*\n+/, '');
+    return kaleOpname(body);
+  }
+  // Haak wv2118 (R2): een door David goedgekeurd verhaal gaat bij delen vóór de letterlijke opname. Bestaat nog niet.
+  function verhaalVoorDelen(/* hid */) { return null; }
+
+  // Het item zoals een bezoeker van kring k het ziet; null als er niets te tonen is
+  function itemVoor(h, k) {
+    const pagina = paginaLees(h.hid);
+    const stukken = [];
+    if (h.soort === 'opname' && h.toon_opname) {
+      const v = verhaalVoorDelen(h.hid);
+      const t = v != null ? v : opnameTekst(h);
+      if (t) stukken.push({ wie: 'David', soort: v != null ? 'verhaal' : 'opname', tekst: t });
+    }
+    for (const s of q.sVan.all(h.hid)) {
+      if (s.status !== 'opgenomen') continue;
+      if (!(s.wie === 'david' || (s.wie === 'bezoeker' && s.kring === k))) continue;
+      const t = stukTekst(s, pagina);
+      if (t) stukken.push({ wie: stukNaam(s, pagina), soort: s.soort, tekst: t });
+    }
+    return { titel: titelVan(h, pagina), wanneer: wanneerVan(h), stukken };
+  }
+  // Geheimen: letterlijke pod-geheimen + bekende vormen (zelfde soort als de geheimenpoort op de uitgangen)
+  const VORMEN = [/sbp_[0-9a-f]{40}/, /sk-(ant-|proj-)?[A-Za-z0-9_-]{20,}/, /gh[pousr]_[A-Za-z0-9]{30,}/, /github_pat_[A-Za-z0-9_]{40,}/, /AKIA[0-9A-Z]{16}/,
+    /xox[abpr]-[A-Za-z0-9-]{10,}/, /-----BEGIN [A-Z ]*PRIVATE KEY-----/, /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, /\b\d{9,10}:AA[A-Za-z0-9_-]{30,}/];
+  function geheimRaak(t) {
+    if (VORMEN.some((r) => r.test(t))) return true;
+    const lijst = typeof o.geheimen === 'function' ? o.geheimen() : [];
+    return lijst.some((g) => typeof g === 'string' && g.length >= 12 && t.indexOf(g) >= 0);
+  }
+  function markerRaak(teksten) {
+    if (!o.marker) return false;
+    try { return !!o.marker.beoordeel({ teksten }, { eigen: o.marker.maakEigen ? o.marker.maakEigen(null, {}) : undefined }).tegenhouden; }
+    catch (e) { fout('ml-marker', e); return true; }   // twijfel = vasthouden
+  }
+  function pubVan(k, versie, hid) {
+    const r = q.pub.get(k, versie, hid);
+    if (r) return r.pub;
+    const p = b64u(rnd(12));
+    q.pubNieuw.run(k, versie, hid, p);
+    return p;
+  }
+
+  async function d1(sql, params) {
+    const r = await o.d1(sql, params || []);
+    if (!r || !r.ok) { d1Fout = true; throw new Error('d1'); }
+    return r.rijen || [];
+  }
+
+  // Wat er voor kring k buiten hoort: [{ pub, hash, item, volgorde }], en welke herinneringen geblokkeerd zijn (geheim/marker)
+  function setVoor(k) {
+    const L = q.link.get(k);
+    if (!L || !L.aan || !L.ww_vinger) return [];
+    const uit = [];
+    for (const h of q.hAlle.all()) {
+      if (!h['zicht_' + k] || nietDeelbaar(h)) continue;
+      const item = itemVoor(h, k);
+      const alle = [item.titel, item.wanneer].concat(item.stukken.map((s) => s.wie + ' ' + s.tekst)).join('\n');
+      const ih = sha256(alle);
+      if (geheimRaak(alle)) { q.blokZet.run(h.hid, k, 'geheim', ih); continue; }
+      const ok = q.okGet.get(h.hid, k);
+      if (!(ok && ok.hash === ih) && markerRaak([alle])) { q.blokZet.run(h.hid, k, 'marker', ih); continue; }
+      q.blokWeg.run(h.hid, k);
+      uit.push({ hid: h.hid, item, sort: sorteerSleutel(h) });
+    }
+    uit.sort((a, b) => (a.sort < b.sort ? 1 : a.sort > b.sort ? -1 : a.hid < b.hid ? -1 : 1));
+    return uit.map((x, i) => { const pub = pubVan(k, L.versie, x.hid); const json = JSON.stringify(x.item.stukken);
+      return { pub, volgorde: i, item: x.item, json, hash: sha256(L.versie + '|' + i + '|' + x.item.titel + '|' + x.item.wanneer + '|' + json) }; });
+  }
+
+  async function publiceer(k, volledig) {
+    const L = q.link.get(k);
+    if (!L) return 0;
+    const set = setVoor(k);
+    let n = 0;
+    if (L.aan && L.ww_vinger) {
+      const had = new Map(q.d1.all(k).map((r) => [r.pub, r.hash]));
+      for (const x of set) {
+        if (had.get(x.pub) === x.hash) continue;
+        await d1('INSERT INTO ml_item (kring, versie, pub, volgorde, titel, wanneer, stukken) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ' +
+          'ON CONFLICT (kring, pub) DO UPDATE SET versie = excluded.versie, volgorde = excluded.volgorde, titel = excluded.titel, wanneer = excluded.wanneer, stukken = excluded.stukken',
+        [k, L.versie, x.pub, x.volgorde, x.item.titel, x.item.wanneer, x.json]);
+        q.d1Zet.run(k, x.pub, x.hash); n++;
+      }
+      const moet = new Set(set.map((x) => x.pub));
+      const weg = volledig ? (await d1('SELECT pub, versie FROM ml_item WHERE kring = ?1', [k])).filter((r) => !moet.has(r.pub) || r.versie !== L.versie).map((r) => r.pub)
+        : [...had.keys()].filter((p) => !moet.has(p));
+      for (const p of weg) { await d1('DELETE FROM ml_item WHERE kring = ?1 AND pub = ?2', [k, p]); q.d1Weg.run(k, p); n++; }
+    } else {
+      // link uit of geen wachtwoord: van deze kring staat niets buiten
+      if (volledig || q.d1.all(k).length) { await d1('DELETE FROM ml_item WHERE kring = ?1', [k]); q.d1Leeg.run(k); }
+    }
+    return n;
+  }
+
+  // Wachtwoord uit de kluis → PBKDF2 in D1 als het veranderde; zonder wachtwoord blijft de link dicht
+  async function wachtwoord(k) {
+    const L = q.link.get(k);
+    if (!L) return;
+    let w = null;
+    try { w = await o.kluis(KLUIS[k]); } catch (e) { fout('ml-kluis', e); q.linkWwStand.run('fout', k); return; }
+    if (!w || !wwNorm(w)) {
+      if (L.ww_vinger || L.ww_stand !== 'leeg') {
+        await d1('UPDATE ml_link SET ww_hash = NULL, ww_zout = NULL, aan = 0 WHERE kring = ?1', [k]);
+        await d1('DELETE FROM ml_sessie WHERE kring = ?1', [k]);
+        q.linkWw.run(null, null, 'leeg', k); vuil.add(k);
+      }
+      return;
+    }
+    const zout = L.zout || rnd(16).toString('base64');
+    const hash = await pbkdf2(w, zout);
+    const vinger = sha256(zout + '|' + hash + '|' + L.versie + '|' + L.slug);
+    if (vinger === L.ww_vinger) { if (L.ww_stand !== 'ok') q.linkWwStand.run('ok', k); return; }
+    const nieuwZout = L.ww_vinger ? rnd(16).toString('base64') : zout;   // ander wachtwoord: ook een nieuw zout
+    const h2 = nieuwZout === zout ? hash : await pbkdf2(w, nieuwZout);
+    await d1('DELETE FROM ml_sessie WHERE kring = ?1', [k]);
+    await linkNaarD1(k, { zout: nieuwZout, hash: h2 });
+    q.linkWw.run(nieuwZout, sha256(nieuwZout + '|' + h2 + '|' + L.versie + '|' + L.slug), 'ok', k);
+    vuil.add(k);
+  }
+  async function linkNaarD1(k, ww) {
+    const L = q.link.get(k);
+    await d1('INSERT INTO ml_link (kring, slug, versie, aan, ww_zout, ww_hash, ww_iter) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ' +
+      'ON CONFLICT (kring) DO UPDATE SET slug = excluded.slug, versie = excluded.versie, aan = excluded.aan, ww_zout = COALESCE(excluded.ww_zout, ml_link.ww_zout), ' +
+      'ww_hash = COALESCE(excluded.ww_hash, ml_link.ww_hash), ww_iter = excluded.ww_iter',
+    [k, L.slug, L.versie, L.aan ? 1 : 0, ww ? ww.zout : null, ww ? ww.hash : null, ITER]);
+  }
+  async function sleutelNaarD1() {
+    const k = inbox();
+    await d1('INSERT INTO ml_sleutel (id, spki) VALUES (?1, ?2) ON CONFLICT (id) DO NOTHING', [k.id, k.spki]);
+    await d1('DELETE FROM ml_sleutel WHERE id <> ?1', [k.id]);
+  }
+
+  // Bijdragen ophalen: ontsleutelen, toetsen, op de pod vastleggen, dan pas uit D1 wissen
+  async function ophalen() {
+    const rijen = await d1('SELECT id, kring, versie, sleutel_id, sleutel, iv, inhoud, op FROM ml_bijdrage ORDER BY op LIMIT 50', []);
+    let n = 0;
+    for (const r of rijen) {
+      if (!BIJ_ID_RE.test(String(r.id)) || KRINGEN.indexOf(r.kring) < 0) { await d1('DELETE FROM ml_bijdrage WHERE id = ?1', [r.id]); continue; }
+      if (q.sBron.get(r.id)) { await d1('DELETE FROM ml_bijdrage WHERE id = ?1', [r.id]); continue; }   // al binnen (vorige ronde stopte vóór het wissen)
+      let x = null;
+      try { x = ontsleutel(r); } catch (e) { x = null; }
+      if (!x) { onleesbaar++; await d1('DELETE FROM ml_bijdrage WHERE id = ?1', [r.id]); continue; }
+      const naam = schoon(x.naam, MAX_NAAM, false), tekst = schoon(x.tekst, MAX_TEKST, true);
+      const titel = x.titel == null || x.titel === '' ? '' : schoon(x.titel, MAX_TITEL, false);
+      if (!naam || !NAAM_RE.test(naam) || !tekst || titel === null) { onleesbaar++; await d1('DELETE FROM ml_bijdrage WHERE id = ?1', [r.id]); continue; }
+      const vorm = x.vorm === 'spraak' ? 'spraak' : 'tekst';
+      const ph = PUB_RE.test(String(x.pub || '')) ? q.pubHid.get(r.kring, x.pub) : null;
+      const raak = geheimRaak(titel + '\n' + tekst) ? 'geheim' : markerRaak([titel, tekst]) ? 'raak' : 'geen';
+      const sid = nieuwSid(), t = iso(nu());
+      wachtZet(sid, { tekst, naam, titel_nieuw: ph ? null : (titel || 'Bijdrage van ' + naam) });
+      tx(function () {
+        let hid = ph ? ph.hid : null;
+        if (!hid) { hid = nieuwHid(); q.hNieuw.run(hid, 'los', 'los:' + r.id, null, null, 'voorstel', t, t); }
+        q.sNieuw.run(sid, hid, 'bezoeker', r.kring, vorm, ph ? 'aanvulling' : 'los', raak === 'geen' ? 'binnen' : 'vastgehouden', raak, sha256(tekst), t, r.id);
+      });
+      await d1('DELETE FROM ml_bijdrage WHERE id = ?1', [r.id]);
+      n++;
+    }
+    return n;
+  }
+  async function telling() {
+    const r = await d1("SELECT sleutel, venster, n FROM ml_poging WHERE sleutel LIKE 'link:%'", []);
+    const uit = {};
+    const uur = Math.floor(nu() / 3600000) * 3600000;   // de worker bewaart het begin van het venster in ms
+    for (const x of r) { const k = String(x.sleutel).slice(5); if (KRINGEN.indexOf(k) >= 0 && Number(x.venster) === uur && Number(x.n) >= 20) uit[k] = true; }
+    return uit;
+  }
+  let dicht = {};
+
+  async function tik() {
+    if (bezig) return { bezig: true };
+    bezig = true;
+    const uit = { vault: 0, bijdragen: 0, d1: 0 };
+    try {
+      bijwerken();
+      uit.vault = naarVault();
+      if (!o.d1) return uit;
+      d1Fout = false;
+      const t = nu();
+      const iemandAan = KRINGEN.some((k) => { const L = q.link.get(k); return L && (L.aan || (L.uit_op && t - Date.parse(L.uit_op) < ACTIEF_MS)); });
+      try {
+        if (t - laatsteOphaal >= (iemandAan ? 0 : OPHAAL_RUST_MS)) { laatsteOphaal = t; uit.bijdragen = await ophalen(); if (uit.bijdragen) uit.vault += naarVault(); }
+        const controle = t - laatsteControle >= CONTROLE_ELKE_MS;
+        if (controle) { laatsteControle = t; await sleutelNaarD1(); dicht = await telling(); }
+        for (const k of KRINGEN) { const L = q.link.get(k); if (L && !L.sync) await syncLink(k); }
+        for (const k of KRINGEN) {
+          const L = q.link.get(k);
+          if (L && L.aan && (t - laatsteWw >= WW_ELKE_MS || !L.ww_vinger)) await wachtwoord(k);
+        }
+        if (t - laatsteWw >= WW_ELKE_MS) laatsteWw = t;
+        for (const k of KRINGEN) if (controle || vuil.has(k) || (q.link.get(k) || {}).aan) { uit.d1 += await publiceer(k, controle); vuil.delete(k); }
+      } catch (e) { if (!d1Fout) fout('ml-tik', e); uit.fout = d1Fout ? 'd1' : 'tik'; }
+      return uit;
+    } finally { bezig = false; laatst = { op: iso(nu()), ...uit }; }
+  }
+
+  // ── voor de app ──
+  function kort(h) {
+    const pagina = paginaLees(h.hid);
+    const st = q.sVan.all(h.hid), c = catVan(h), b = q.blok.all(h.hid)[0];
+    return { hid: h.hid, soort: h.soort, status: h.status, titel: titelVan(h, pagina), wanneer: wanneerVan(h), datum: sorteerSleutel(h),
+      categorie: c.categorie, gevoelig: isGevoelig(h), gevoelig_vink: c.gevoeligVink, zicht: { familie: !!h.zicht_familie, vrienden: !!h.zicht_vrienden },
+      toon_opname: !!h.toon_opname, niet_deelbaar: nietDeelbaar(h), blok: b ? b.reden : null,
+      stukken: st.filter((s) => s.status !== 'weggegooid').length, binnen: st.filter((s) => s.status === 'binnen').length,
+      vastgehouden: st.filter((s) => s.status === 'vastgehouden').length };
+  }
+  function lijst() {
+    bijwerken();
+    const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen').map(kort);
+    alle.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));
+    return { status: 200, body: { ok: true, herinneringen: alle, categorieen: Object.keys(CAT).map((id) => ({ id, naam: CAT[id].naam, gevoelig: !!CAT[id].gevoelig })),
+      nieuw: alle.reduce((n, h) => n + h.binnen + h.vastgehouden, 0) } };
+  }
+  function vind(hid) { return HID_RE.test(String(hid)) ? q.h.get(hid) : null; }
+  function detail(hid) {
+    const h = vind(hid);
+    if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    const pagina = paginaLees(h.hid);
+    const stukken = q.sVan.all(h.hid).filter((s) => s.status !== 'weggegooid').map((s) => ({ sid: s.sid, wie: s.wie, naam: stukNaam(s, pagina), kring: s.kring, vorm: s.vorm,
+      soort: s.soort, status: s.status, marker: s.marker, op: s.binnen_op, tekst: stukTekst(s, pagina) }));
+    const uit = Object.assign(kort(h), { stukken_lijst: stukken });
+    if (h.soort === 'opname') { uit.opname = opnameTekst(h); const r = q.ramble.get(h.ref); uit.ramble_id = h.ref; uit.notitie = r ? r.notitie : null; }
+    if (h.soort === 'reis') uit.pagina = h.ref;
+    uit.pagina_stukken = paginaRel(h.hid);
+    return { status: 200, body: { ok: true, herinnering: uit } };
+  }
+  function zicht(hid, d) {
+    const h = vind(hid), k = d && d.kring;
+    if (!h) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (KRINGEN.indexOf(k) < 0 || typeof d.aan !== 'boolean') return { status: 400, body: { ok: false, fout: 'kring en aan' } };
+    if (d.aan) { const r = nietDeelbaar(h); if (r) return { status: 409, body: { ok: false, fout: r } }; }
+    q.hZicht[k].run(d.aan ? 1 : 0, iso(nu()), h.hid);
+    vuil.add(k);
+    return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
+  }
+  function titel(hid, d) {
+    const h = vind(hid);
+    if (!h) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    const t = schoon(d && d.titel, MAX_TITEL, false);
+    if (!t) return { status: 400, body: { ok: false, fout: 'titel 1–' + MAX_TITEL + ' tekens' } };
+    if (!kanVault()) return { status: 503, body: { ok: false, fout: 'de Second Brain is even in onderhoud; probeer het zo opnieuw' } };
+    paginaZekerTitel(h, t);
+    q.hGewijzigd.run(iso(nu()), h.hid); vuilAlle();
+    return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
+  }
+  function tekst(hid, d) {
+    const h = vind(hid);
+    if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    const t = schoon(d && d.tekst, MAX_TEKST, true);
+    if (!t) return { status: 400, body: { ok: false, fout: 'tekst 1–' + MAX_TEKST + ' tekens' } };
+    const soort = d.soort === 'correctie' ? 'correctie' : 'aanvulling';
+    const sid = nieuwSid(), nuIso = iso(nu());
+    wachtZet(sid, { tekst: t, naam: 'David' });
+    q.sNieuw.run(sid, h.hid, 'david', 'eigen', 'tekst', soort, 'opgenomen', 'geen', sha256(t), nuIso, null);
+    naarVault(); vuilAlle();
+    return { status: 200, body: { ok: true, sid, vault: !!q.s.get(sid).vault } };
+  }
+  function categorie(hid, d) {
+    const h = vind(hid);
+    if (!h) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (h.soort === 'opname') return { status: 409, body: { ok: false, fout: 'de categorie van een opname kies je bij de opname' } };
+    const c = d && d.categorie;
+    if (!CAT[c]) return { status: 400, body: { ok: false, fout: 'onbekende categorie' } };
+    const gev = CAT[c].gevoelig ? 1 : d.gevoelig ? 1 : 0;
+    q.hCat.run(c, gev, iso(nu()), h.hid);
+    if (gev) for (const k of KRINGEN) q.hZicht[k].run(0, iso(nu()), h.hid);   // gevoelig = meteen nergens meer zichtbaar
+    vuilAlle();
+    return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
+  }
+  function toonOpname(hid, d) {
+    const h = vind(hid);
+    if (!h || h.soort !== 'opname') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    q.hToon.run(d && d.aan ? 1 : 0, iso(nu()), h.hid); vuilAlle();
+    return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
+  }
+  // David deelt een herinnering waarop de patiëntmarker raak was toch (verse vingerafdruk in server.js); geldt voor precies deze inhoud
+  function tochDelen(hid) {
+    const h = vind(hid), b = h ? q.blok.all(h.hid) : [];
+    if (!h || !b.length) return { status: 404, body: { ok: false, fout: 'niets tegengehouden' } };
+    if (b.some((x) => x.reden === 'geheim')) return { status: 409, body: { ok: false, fout: 'er staat een sleutel of wachtwoord in; haal dat eerst weg' } };
+    tx(function () { for (const x of b) { q.okZet.run(h.hid, x.kring, x.hash); q.blokWeg.run(h.hid, x.kring); } q.hGewijzigd.run(iso(nu()), h.hid); });
+    vuilAlle();
+    return { status: 200, body: { ok: true } };
+  }
+  function stukBesluit(sid, actie) {
+    const s = SID_RE.test(String(sid)) ? q.s.get(sid) : null;
+    if (!s) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    const t = iso(nu());
+    const mag = { opnemen: ['binnen', 'afgewezen'], afwijzen: ['binnen', 'opgenomen'], bewaren: ['vastgehouden'], weggooien: ['vastgehouden'] };
+    if (!mag[actie]) return { status: 400, body: { ok: false, fout: 'onbekende keuze' } };
+    if (mag[actie].indexOf(s.status) < 0) return { status: 409, body: { ok: false, fout: 'kan niet bij dit stuk' } };
+    // een bijdrage met een sleutel of wachtwoord erin komt nooit in de vault (beveiliging, geen filter op Davids eigen tekst)
+    if (actie === 'bewaren' && s.marker === 'geheim') return { status: 409, body: { ok: false, fout: 'hier staat een sleutel of wachtwoord in; alleen weggooien kan' } };
+    if (actie === 'weggooien') { wachtWeg(s.sid); q.sStatus.run('weggegooid', t, s.sid); }
+    else q.sStatus.run(actie === 'opnemen' ? 'opgenomen' : actie === 'afwijzen' ? 'afgewezen' : 'binnen', t, s.sid);
+    const h = q.h.get(s.hid);
+    if (h && h.soort === 'los') {
+      if (actie === 'opnemen' && h.status === 'voorstel') q.hStatus.run('actief', t, h.hid);
+      if (actie === 'afwijzen' && q.sVan.all(h.hid).every((x) => x.status !== 'opgenomen')) q.hStatus.run('afgewezen', t, h.hid);
+    }
+    naarVault(); vuilAlle();
+    return { status: 200, body: { ok: true, status: q.s.get(s.sid).status } };
+  }
+  function zorgLink(k) { if (!q.link.get(k)) q.linkNieuw.run(k, b64u(rnd(16)).slice(0, 22)); return q.link.get(k); }
+  function delenStand() {
+    const links = KRINGEN.map((k) => {
+      const L = zorgLink(k);
+      return { kring: k, aan: !!L.aan, url: 'https://' + host + '/h/' + L.slug, wachtwoord: L.ww_stand === 'ok' ? 'gezet' : L.ww_stand === 'fout' ? 'onbekend' : L.aan ? 'ontbreekt' : 'onbekend',
+        dicht: !!dicht[k], zichtbaar: q.hAlle.all().filter((h) => h['zicht_' + k] && !nietDeelbaar(h) && !q.blok.all(h.hid).some((b) => b.kring === k)).length, kluisnaam: KLUIS[k],
+        buiten_bijgewerkt: !!L.sync };
+    });
+    return { status: 200, body: { ok: true, links, laatst: laatst ? laatst.op : null, d1_fout: d1Fout } };
+  }
+  // aan (verse vingerafdruk in server.js), uit, vernieuw. De lokale stand gaat meteen om en krijgt sync = 0; syncLink zet D1 recht. Lukt
+  // dat niet (D1 onbereikbaar), dan herhaalt elke tik het tot het lukt en toont de app "buiten nog niet bijgewerkt" (review MOET 4).
+  async function link(k, actie) {
+    if (KRINGEN.indexOf(k) < 0) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    zorgLink(k);
+    const t = iso(nu());
+    if (actie === 'aan') q.linkAan.run(1, 1, t, 1, null, k);
+    else if (actie === 'uit') q.linkAan.run(0, 0, null, 0, t, k);
+    else if (actie === 'vernieuw') q.linkVernieuw.run(b64u(rnd(16)).slice(0, 22), k);
+    else return { status: 400, body: { ok: false, fout: 'onbekende keuze' } };
+    q.linkSync.run(0, k);
+    vuil.add(k);
+    if (o.d1) {
+      try { await syncLink(k); }
+      catch (e) { if (!d1Fout) fout('ml-link', e); return { status: 502, body: { ok: false, fout: 'de deelpagina was niet bereikbaar; de server zet hem zo recht (tot dan staat hij buiten nog in de oude stand)', stand: delenStand().body } }; }
+    }
+    return delenStand();
+  }
+  async function syncLink(k) {
+    const L = q.link.get(k);
+    if (!L.aan) { if (await ophalen()) naarVault(); }   // MOET 2: eerst leeghalen
+    await d1('DELETE FROM ml_sessie WHERE kring = ?1 AND versie <> ?2', [k, L.versie]);
+    if (!L.aan) {
+      await d1('UPDATE ml_link SET aan = 0 WHERE kring = ?1', [k]);
+      await d1('DELETE FROM ml_sessie WHERE kring = ?1', [k]);
+      await d1('DELETE FROM ml_item WHERE kring = ?1', [k]); q.d1Leeg.run(k);
+    }
+    await linkNaarD1(k, null);
+    if (L.aan) { await sleutelNaarD1(); await wachtwoord(k); }
+    await publiceer(k, true);
+    q.linkSync.run(1, k);
+    vuil.delete(k);
+  }
+  function info() {
+    const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
+    return { herinneringen: q.hAlle.all().length, stukken: st, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
+      laatst, d1_fout: d1Fout, onleesbaar };
+  }
+  return { lijst, detail, zicht, titel, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, _db: db, _setVoor: setVoor,
+    _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
+}
+
+module.exports = { maak, KRINGEN, KLUIS, MAP, ITER, MAX_TEKST, MAX_TITEL, MAX_NAAM, HID_RE, SID_RE, _pbkdf2: pbkdf2, _wwNorm: wwNorm, _kaleOpname: kaleOpname, _schoon: schoon };

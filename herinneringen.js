@@ -61,7 +61,7 @@ const NOTITIE_MAP = '20_Prive/Herinneringen/Opnames';
 const PROFIEL = 'ramble@1', BRON = 'app:ramble';
 // De vaste lijst (volgorde = de app). Familie, Gezin en Shizzle zijn ook mappen in 20_Prive; Privé = altijd gevoelig.
 const CATEGORIEEN = { gezin: { naam: 'Gezin', gevoelig: false }, familie: { naam: 'Familie', gevoelig: false }, shizzle: { naam: 'Shizzle', gevoelig: false },
-  prive: { naam: 'Privé', gevoelig: true }, overig: { naam: 'Overig', gevoelig: false } };
+  prive: { naam: 'Privé', gevoelig: true }, overig: { naam: 'Overig', gevoelig: false }, reizen: { naam: 'Reizen', gevoelig: false } };   // reizen: wv2114 (David 31-10)
 // Categoriekolommen (31-10-2026); de tabel bestond al bij R1, dus ALTER TABLE als ze ontbreken
 const CAT_KOLOMMEN = [['categorie', 'TEXT'], ['herinnering_gevoelig', 'INTEGER'], ['categorie_gekozen', 'TEXT'], ['cat_versie', 'INTEGER NOT NULL DEFAULT 0'],
   ['cat_notitie', 'INTEGER NOT NULL DEFAULT 0']];
