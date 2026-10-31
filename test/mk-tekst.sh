@@ -130,7 +130,9 @@ toets('server.js zonder mk-tekst.js: mk zonder vaulttekst én zonder geheugen, g
 // runBrein weigert codex/gemini voor mk
 const rb = stuk('function runBrein(', '  function merk(r)');
 const roep = [];
-const ctx2 = { runCodex: function () { roep.push('codex'); return Promise.resolve({ ok: true }); }, runGemini: function () { roep.push('gemini'); return Promise.resolve({ ok: true }); }, Promise: Promise };
+// wv2081: runBrein kent de Terra-uitzondering (CODEX_MK); zonder opts.terra mag die nooit aangeroepen worden
+const ctx2 = { runCodex: function () { roep.push('codex'); return Promise.resolve({ ok: true }); }, runGemini: function () { roep.push('gemini'); return Promise.resolve({ ok: true }); }, Promise: Promise,
+  CODEX_MK: { voortoets: function () { roep.push('terra-voortoets'); return { ok: true }; }, draai: function () { roep.push('terra'); return Promise.resolve({ ok: true }); } }, CODEX_MK_HOME: '/proef/codex-mk' };
 vm.createContext(ctx2); vm.runInContext(rb + '  return Promise.resolve({ ok: true, claude: true }); }', ctx2);
 Promise.all([ctx2.runBrein('codex', 'p', '', '/o', V, '', { tekst: 'mk' }), ctx2.runBrein('gemini', 'p', '', '/o', V, '', { tekst: 'mk' }),
   ctx2.runBrein('codex', 'p', '', '/o', V, '', { tekst: 'smal' }), ctx2.runBrein('claude', 'p', '', '/o', V, '', { tekst: 'mk' })]).then(function (u) {

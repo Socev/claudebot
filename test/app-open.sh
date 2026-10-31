@@ -163,7 +163,7 @@ toets('14b appOntmasker: vol-breedte en onzichtbaar teken ook', T.appOntmasker('
 // ── structuur: de andere knippunten en de uitlevering in de geschiedenis ──
 const pj = fn('processJob'), pa = fn('processAgent'), we = fn('weesEindtekst'), bn = fn('berichtNieuw'), gs = fn('appGeschiedenis'), gr = fn('appGeschiedenisRuw'), nb = fn('appNaBeurt');
 toets('15 processJob roept appOpenNaRun aan na collectFiles, vóór spillIfLarge', pj.indexOf('appOpenNaRun(jobId, j, r)') > pj.indexOf('r.files = collectFiles(outdir)') && pj.indexOf('appOpenNaRun(jobId, j, r)') < pj.indexOf('spillIfLarge(jobId, r)'));
-toets('15b processAgent knipt na de eindcontrole, vóór het rapport', pa.indexOf('appOpenKnip(r.output, APP_OPEN_LEEG)') > pa.indexOf('eindcontrole(jobId') && pa.indexOf('appOpenKnip(r.output, APP_OPEN_LEEG)') < pa.indexOf('sendReport('));
+toets('15b processAgent knipt na de eindcontrole, vóór het rapport', pa.indexOf('appOpenKnip(r.output, APP_OPEN_LEEG)') > pa.indexOf('eindcontrole(jobId') && pa.indexOf('appOpenKnip(r.output, APP_OPEN_LEEG)') < pa.indexOf('sendReport(', pa.indexOf('eindcontrole(jobId')));   // wv2081: de Terra-tak bovenin heeft een eigen sendReport
 toets('15c herstelpad (weesEindtekst) knipt beide uitgangen', (we.match(/weesOpenKnip\(/g) || []).length === 2);
 toets('15c2 tussenstand na herstart knipt vóór sendReport (Fable diff #3)', (function () { const f = fn('naHerstartTussenstand'); return f.indexOf("appOpenKnip(tekst, '')") > 0 && f.indexOf("appOpenKnip(tekst, '')") < f.indexOf('sendReport('); })());
 toets('15d /bericht knipt vóór het opslaan', bn.indexOf('appOpenKnip(') > 0 && bn.indexOf('appOpenKnip(') < bn.indexOf('berichtIndex()'));
