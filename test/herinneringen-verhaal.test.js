@@ -352,3 +352,150 @@ test('padpoorten: herinneringspaden herkend; deelpagina weigert ze; forumfilter 
     assert.ok(JSON.parse(r.stdout).some((x) => x.soort === 'pad'), 'forumkaart met een herinneringspad wordt tegengehouden');
   } finally { fs.rmSync(leeg, { recursive: true, force: true }); }
 });
+
+// wv2123: de verwijderroute (intake-verwijder.js) kent de verhalen van een opname: pagina's (ook een versiekopie en een pagina die na het
+// plan kwam), de standrij ramble_verhaal, de registerrijen; een bevestigd voorval dat een andere herinnering deelt blijft, een eigen voorval gaat.
+test('wv2123: verwijderen van een opname neemt verhalen, standrij, voorstellen en een eigen voorval mee; een gedeeld voorval blijft', async () => {
+  const IV = require(path.join(ROOT, 'intake-verwijder.js'));
+  const o = await omgeving();
+  try {
+    // de verwijderroute rekent met dezelfde ids en mappen
+    for (const [rid, i] of [[ID1, 0], [ID2, 29]]) assert.strictEqual(IV.hidVan(rid, i), V.hidVan(rid, i));
+    assert.strictEqual(IV.MAX_HERINNERINGEN, V.MAX_HERINNERINGEN); assert.strictEqual(IV.VERHAAL_MAP, V.VERHAAL_MAP); assert.strictEqual(IV.VOORVAL_MAP, V.VOORVAL_MAP);
+    const db = o.ing._db, reg = o.v._reg;
+    const r1 = await o.opname(ID1, TEKST);
+    o.staat.antwoord = { herinneringen: [
+      { t_van: 0, t_tot: 120, titel: 'Regen op de camping in Proefdorp', alineas: goed().herinneringen[0].alineas.slice(0, 2),
+        datum_citaat: 'in de zomer van negentien vijfennegentig', plaats: 'Proefdorp', personen: ['Teun'], voorval_voorstel: 'Regen op de camping' },
+      { t_van: 120, t_tot: 180, titel: 'Naar het meer', alineas: goed().herinneringen[0].alineas.slice(2),
+        datum_citaat: '', plaats: '', personen: [], voorval_voorstel: 'Fiets naar het meer' }] };
+    assert.strictEqual((await o.v.tik()).verhalen, 2);
+    const r2 = await o.opname(ID2, [TEKST[0], 'We speelden kaartspelletjes in de voortent met Teun tot het donker werd.']);
+    o.staat.antwoord = { herinneringen: [{ t_van: 0, t_tot: 60, titel: 'Regen op de camping in Proefdorp', alineas: goed().herinneringen[0].alineas.slice(0, 1),
+      datum_citaat: 'in de zomer van negentien vijfennegentig', plaats: 'Proefdorp', personen: [], voorval_voorstel: 'Regen op de camping' }] };
+    assert.strictEqual((await o.v.tik()).verhalen, 1);
+    const hA = V.hidVan(ID1, 0), hB = V.hidVan(ID1, 1), hC = V.hidVan(ID2, 0);
+    assert.deepStrictEqual(o.verhalen(), [hA, hB, hC].map((h) => h + '.md').sort());
+    // Ja op de drie voorvallen: A en C delen "Regen op de camping", B heeft een eigen voorval; het persoonsvoorstel van A blijft open
+    for (const v of o.v.voorstellen().filter((x) => x.soort === 'voorval')) assert.strictEqual(o.v.besluit(v.id, 'ja').status, 200);
+    const vm = path.join(o.vault, V.VOORVAL_MAP), vvs = fs.readdirSync(vm).sort();
+    assert.strictEqual(vvs.length, 2);
+    const vid = (h) => /^voorval: "\[\[20_Prive\/Herinneringen\/Voorvallen\/(vo_[0-9a-f]{16})\]\]"$/m.exec(o.lees(h + '.md'))[1];
+    const gedeeld = vid(hA), eigen = vid(hB);
+    assert.strictEqual(vid(hC), gedeeld); assert.notStrictEqual(eigen, gedeeld);
+    assert.ok(o.v.voorstellen().some((x) => x.soort === 'persoon' && x.herinnering_id === hA));
+    o.klok.t += 2 * 3600000; await o.v.tik();   // register en index bijgewerkt
+    assert.match(fs.readFileSync(path.join(o.vault, V.INDEX), 'utf8'), new RegExp(hA));
+    // versiekopieën (Syncthing) van verhaal A en het eigen voorval
+    const kopie = path.join(o.basis, 'versies');
+    fs.mkdirSync(path.join(kopie, V.VERHAAL_MAP), { recursive: true }); fs.mkdirSync(path.join(kopie, V.VOORVAL_MAP), { recursive: true });
+    fs.writeFileSync(path.join(kopie, V.VERHAAL_MAP, hA + '~20261031-101010.md'), o.lees(hA + '.md'));
+    fs.writeFileSync(path.join(kopie, V.VOORVAL_MAP, eigen + '~20261031-101010.md'), fs.readFileSync(path.join(vm, eigen + '.md')));
+    fs.writeFileSync(path.join(kopie, V.VOORVAL_MAP, gedeeld + '~20261031-101010.md'), fs.readFileSync(path.join(vm, gedeeld + '.md')));
+    fs.mkdirSync(path.join(o.vault, '00_Systeem/Verwijderregister'), { recursive: true });
+    fs.writeFileSync(path.join(o.vault, '00_Systeem/Verwijderregister/index.md'), '# Verwijderregister\n\n| datum | wat | reden | akkoord | kopie |\n|---|---|---|---|---|\n');
+    const R = IV.maak({ dir: path.join(o.basis, 'intake'), vault: o.vault, db, vv: VV, staat: path.join(o.basis, 'staat'), nu: () => o.klok.t, herinneringen: o.hdir,
+      extraMappen: [kopie],
+      rpc: async (fn, body) => fn === 'sb_bron_verwijder_plan' ? { ok: true, set_vinger: IV.setVinger(body.p.sha256), telling: { blob: 2 } }
+        : fn === 'sb_bron_verwijder' ? { ok: true, verwijdering_id: 21, telling_voor: { blob: 2 }, telling_na: {} } : { ok: true } });
+
+    // plan: alleen deze opname; twee verhalen + een kopie; één voorval weg, één blijft; kaart zonder inhoud
+    const p = await R.plan(r1.stuk_id);
+    assert.strictEqual(p.ok, true, JSON.stringify(p));
+    assert.deepStrictEqual(p.stukken.map((s) => s.stuk_id), [r1.stuk_id]);
+    assert.strictEqual(p.verhalen.paginas, 2); assert.strictEqual(p.verhalen.kopieen, 1);
+    assert.strictEqual(p.verhalen.voorvallen_weg, 1); assert.strictEqual(p.verhalen.voorvallen_blijft, 1);
+    assert.strictEqual(p.verhalen.rij_verhaal, 1); assert.ok(p.verhalen.register_rijen >= 4, JSON.stringify(p.verhalen));
+    assert.ok(p.paden.some((t) => t.rel === V.VERHAAL_MAP + '/' + hA + '.md') && p.paden.some((t) => t.soort === 'kopie' && t.rel.indexOf(hA + '~') > 0));
+    assert.ok(p.afgeleid.indexOf(V.INDEX) >= 0, 'index.md als afgeleid gemeld');
+    const k = JSON.stringify(p.kaart);
+    assert.ok(p.kaart.stappen.some((s) => /2 verhalen van gemaakt/.test(s) && /blijft staan/.test(s)), k);
+    for (const verboden of ['Proefdorp', 'Teun', 'camping', 'Fiets', 'hr_', 'vo_', ID1, '.md']) assert.ok(k.indexOf(verboden) < 0, 'kaart lekt: ' + verboden);
+    // eerste poging breekt af ná de databank (kapotte tombstone-cache); daarna komt er nog een verhaalpagina van deze opname bij (een tik
+    // die al liep). Het hervatten zoekt de verhalen opnieuw (stap 5a): die pagina gaat ook mee
+    fs.writeFileSync(path.join(o.basis, 'intake', 'tombstones.json'), '{kapot');
+    await assert.rejects(R.voerUit(r1.stuk_id, { vraag: 'c14a2123', code: p.code }), /tombstones\.json onleesbaar/);
+    fs.unlinkSync(path.join(o.basis, 'intake', 'tombstones.json'));
+    assert.strictEqual(o.verhalen().length, 3, 'nog niets gewist');
+    const hL = V.hidVan(ID1, 2);
+    fs.writeFileSync(path.join(o.vault, V.VERHAAL_MAP, hL + '.md'), '---\ntype: herinnering\nramble_id: ' + ID1 + '\n---\nverzonnen\n');
+
+    const u = await R.voerUit(r1.stuk_id, { vraag: 'c14a2123', code: p.code });
+    assert.strictEqual(u.ok, true, JSON.stringify(u));
+    assert.strictEqual(u.bestanden.verhalen, 3); assert.strictEqual(u.bestanden.voorvallen, 2);
+    assert.strictEqual(u.verhaal.nagezocht, 1); assert.strictEqual(u.verhaal.voorvallen_weg, 1); assert.strictEqual(u.verhaal.voorvallen_blijft, 1);
+    assert.strictEqual(u.sqlite.ramble_verhaal, 1); assert.strictEqual(u.na.db_ramble_verhaal, 0); assert.strictEqual(u.na.register_rijen, 0); assert.strictEqual(u.na.voorvallen, 0);
+    assert.ok(u.verhaal.register.voorstel >= 2 && u.verhaal.register.herinnering === 2, JSON.stringify(u.verhaal.register));
+    // geen pagina's, geen standrij, geen voorstellen of registerrijen van deze opname; het eigen voorval weg (ook de kopie), het gedeelde blijft
+    assert.deepStrictEqual(o.verhalen(), [hC + '.md']);
+    assert.deepStrictEqual(fs.readdirSync(path.join(kopie, V.VERHAAL_MAP)), []);
+    assert.strictEqual(db.prepare('SELECT count(*) n FROM ramble_verhaal WHERE ramble_id = ?').get(ID1).n, 0);
+    const hids = Array.from({ length: V.MAX_HERINNERINGEN }, (_, i) => V.hidVan(ID1, i)), inH = hids.map(() => '?').join(',');
+    assert.strictEqual(reg.prepare('SELECT count(*) n FROM voorstel WHERE herinnering_id IN (' + inH + ')').get(...hids).n, 0);
+    assert.strictEqual(reg.prepare('SELECT count(*) n FROM herinnering WHERE ramble_id = ?').get(ID1).n, 0);
+    assert.strictEqual(reg.prepare('SELECT count(*) n FROM spoor WHERE ramble_id = ? OR herinnering_id IN (' + inH + ')').get(ID1, ...hids).n, 0);
+    assert.deepStrictEqual(fs.readdirSync(vm), [gedeeld + '.md']);
+    assert.deepStrictEqual(fs.readdirSync(path.join(kopie, V.VOORVAL_MAP)), [gedeeld + '~20261031-101010.md']);
+    // de andere opname blijft heel
+    assert.strictEqual(db.prepare('SELECT status FROM ramble_verhaal WHERE ramble_id = ?').get(ID2).status, 'klaar');
+    assert.strictEqual(reg.prepare('SELECT count(*) n FROM herinnering WHERE ramble_id = ?').get(ID2).n, 1);
+    assert.match(o.lees(hC + '.md'), new RegExp('^voorval: "\\[\\[20_Prive/Herinneringen/Voorvallen/' + gedeeld + '\\]\\]"$', 'm'));
+    const vr = fs.readFileSync(path.join(o.vault, '00_Systeem/Verwijderregister/index.md'), 'utf8');
+    assert.match(vr, /3 verhaal\(en\), 2 voorval\(len\)/); assert.ok(!vr.includes(hA) && !vr.includes('Proefdorp'));
+    // het herbouwsignaal: de volgende tik bouwt register en index meteen (ook binnen het uur), zonder nieuwe aanroep of standrij voor de opname
+    assert.ok(fs.existsSync(path.join(o.hdir, 'verhaal-herbouw')));
+    const n0 = o.staat.verzoeken.length;
+    await o.v.tik();
+    assert.ok(!fs.existsSync(path.join(o.hdir, 'verhaal-herbouw')));
+    const idx = fs.readFileSync(path.join(o.vault, V.INDEX), 'utf8');
+    assert.ok(idx.indexOf(hA) < 0 && idx.indexOf(hB) < 0 && idx.indexOf(hC) > 0, 'index zonder de verwijderde verhalen');
+    assert.strictEqual(o.staat.verzoeken.length, n0);
+    assert.strictEqual(db.prepare('SELECT count(*) n FROM ramble_verhaal WHERE ramble_id = ?').get(ID1).n, 0);
+  } finally { o.sluit(); }
+});
+
+test('wv2123: wordt de opname verwijderd terwijl de aanroep loopt, dan schrijft de tik geen pagina en geen standrij', async () => {
+  const o = await omgeving();
+  try {
+    await o.opname(ID3, TEKST);
+    o.staat.antwoord = () => { o.ing._db.prepare("UPDATE ramble SET status = 'verwijderd' WHERE ramble_id = ?").run(ID3); return goed(); };
+    await o.v.tik();
+    assert.strictEqual(o.staat.verzoeken.length, 1);
+    assert.deepStrictEqual(o.verhalen(), []);
+    assert.strictEqual(o.ing._db.prepare('SELECT count(*) n FROM ramble_verhaal WHERE ramble_id = ?').get(ID3).n, 0);
+  } finally { o.sluit(); }
+});
+
+test('wv2123: herbouwsignaal blijft tot het bouwen gelukt is; zonder signaal is de verwijdering niet klaar', async () => {
+  const o = await omgeving();
+  try {
+    await o.opname(ID1, TEKST);
+    o.staat.antwoord = goed();
+    await o.v.tik();
+    const sig = path.join(o.hdir, 'verhaal-herbouw');
+    // mislukt bouwen (index.md is een map): .bezig blijft, de volgende tik probeert opnieuw
+    fs.writeFileSync(sig, '');
+    fs.rmSync(path.join(o.vault, V.INDEX), { force: true }); fs.mkdirSync(path.join(o.vault, V.INDEX));
+    await o.v.tik();
+    assert.ok(!fs.existsSync(sig) && fs.existsSync(sig + '.bezig'), 'signaal bewaard');
+    fs.rmdirSync(path.join(o.vault, V.INDEX));
+    await o.v.tik();
+    assert.ok(!fs.existsSync(sig + '.bezig') && fs.existsSync(path.join(o.vault, V.INDEX)), 'na gelukt bouwen weg');
+    // de verwijderroute: lukt het signaal niet (herinneringen-map niet schrijfbaar), dan is de uitkomst niet ok
+    const IV = require(path.join(ROOT, 'intake-verwijder.js'));
+    const r1 = o.ing._db.prepare('SELECT * FROM ramble WHERE ramble_id = ?').get(ID1);
+    fs.mkdirSync(path.join(o.vault, '00_Systeem/Verwijderregister'), { recursive: true });
+    fs.writeFileSync(path.join(o.vault, '00_Systeem/Verwijderregister/index.md'), '# Verwijderregister\n');
+    fs.mkdirSync(sig);   // een map op de plek van het signaal: openen mislukt
+    const R = IV.maak({ dir: path.join(o.basis, 'intake'), vault: o.vault, db: o.ing._db, vv: VV, staat: path.join(o.basis, 'staat'), nu: () => o.klok.t, herinneringen: o.hdir,
+      rpc: async (fn, body) => fn === 'sb_bron_verwijder_plan' ? { ok: true, set_vinger: IV.setVinger(body.p.sha256), telling: { blob: 2 } }
+        : fn === 'sb_bron_verwijder' ? { ok: true, verwijdering_id: 22, telling_voor: { blob: 2 }, telling_na: {} } : { ok: true } });
+    const p = await R.plan(r1.stuk_id);
+    let u = await R.voerUit(r1.stuk_id, { vraag: 'c14a2124', code: p.code });
+    assert.strictEqual(u.ok, false); assert.strictEqual(u.na.herbouw_signaal, 1);
+    assert.deepStrictEqual(o.verhalen(), [], 'de verhalen zelf zijn wel weg');
+    fs.rmdirSync(sig);
+    u = await R.voerUit(r1.stuk_id, { vraag: 'c14a2124', code: p.code });
+    assert.strictEqual(u.ok, true, JSON.stringify(u.na)); assert.strictEqual(u.na.herbouw_signaal, 0); assert.ok(fs.existsSync(sig));
+  } finally { o.sluit(); }
+});

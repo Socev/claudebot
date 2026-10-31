@@ -29,6 +29,13 @@
  * de versleutelde audiokopie op vaultcrypt:herinneringen-audio/ (alleen toevoegen; offsite_op zegt of die er is) en ramble_dag (alleen
  * seconden per dag). Een open markerkaart (kaartsleutel in het plan) sluit de machinekamer met de hand.
  *
+ * VERHALEN (wv2123, MemoryLane R2). Van een opname maakt herinneringen-verhaal.js verhaalpagina's (20_Prive/Herinneringen/Verhalen/
+ * hr_<16 hex>.md, frontmatter ramble_id; het herinnering_id is vast uit opname en volgnummer, < MAX_HERINNERINGEN), een standrij
+ * ramble_verhaal in intake.sqlite en rijen herinnering/voorstel/spoor in <herinneringen>/register.sqlite. Plan en voer-uit nemen ze mee:
+ * de pagina's (ook versiekopieën; bij voer-uit opnieuw gezocht, er kunnen er na het plan bij gekomen zijn), de standrij, de registerrijen,
+ * en een voorvalpagina (Voorvallen/vo_<16 hex>.md) alleen als geen verhaalpagina buiten deze opname er nog naar linkt. Daarna zet de route
+ * het signaal <herinneringen>/verhaal-herbouw: de volgende verhaaltik bouwt register en index.md opnieuw. De tombstones blijven sha256
+ * (het mechanisme kent geen herinnering_id's); de herinnering_id's staan alleen in het journaal op de pod.
  * Privacy: naar Supabase alleen hashes, stuk-id's en tellingen; in de vault alleen hashes (tombstones.md) en tellingen (index.md).
  * Paden staan alleen in het journaal/plan op de pod (0600) en in het antwoord aan de machinekamer.
  */
@@ -47,10 +54,31 @@ const AFGELEID_MAX = 512 * 1024;           // .md groter dan dit wordt niet op s
 const SLA_OVER = new Set(['.git', '.obsidian', '.stfolder', '.claude', '.trash', 'node_modules']);
 const REGISTER = '00_Systeem/Verwijderregister/index.md';
 const RAMBLE_RE = /^r[0-9]{8}-[0-9a-f]{16}$/;   // = herinneringen.js ID_RE
+// MemoryLane R2 (wv2123): verhalen en voorvallen (= herinneringen-verhaal.js VERHAAL_MAP, VOORVAL_MAP, hidVan, MAX_HERINNERINGEN; de toets vergelijkt)
+const VERHAAL_MAP = '20_Prive/Herinneringen/Verhalen', VOORVAL_MAP = '20_Prive/Herinneringen/Voorvallen';
+const VERHAAL_NAAM_RE = /^(hr_[0-9a-f]{16})(~[0-9]{8}-[0-9]{6})?\.md$/;   // ~<stempel>: versiekopie van Syncthing
+const VOORVAL_ID_RE = /\bvo_[0-9a-f]{16}\b/;
+const MAX_HERINNERINGEN = 30;
+const FM_LEES = 16384;
+function hidVan(rid, i) { return 'hr_' + sha256(Buffer.from(rid + '|' + i, 'utf8')).slice(0, 16); }
 const BRON_TEKST = { 'gmail:david': 'mail (privé-Gmail)', 'gmail:groenhouten': 'mail (Groenhouten-Gmail)', 'outlook:tolgaarde': 'mail (Tolgaarde-Outlook)',
   'whatsapp:nl': 'WhatsApp', 'whatsapp:gambia': 'WhatsApp (Gambia)', signal: 'Signal', teams: 'Teams', 'scanner:scansnap': 'de scanner', 'contacten:google': 'Contacten' };
 
 function sha256(b) { return crypto.createHash('sha256').update(b).digest('hex'); }
+// de frontmatter van een .md (tekst tussen de eerste twee ---), '' als die er niet is
+function fmVan(p, n) {
+  let k = '';
+  try { k = leesKop(p, n || FM_LEES); } catch (e) { return ''; }
+  if (!k.startsWith('---\n')) return '';
+  const e = k.indexOf('\n---', 3);
+  return e > 0 ? k.slice(4, e + 1) : '';
+}
+// een verhaalpagina onder Verhalen (ook als versiekopie)? → herinnering_id of null
+function verhaalId(rel) {
+  if (path.dirname(rel).split(path.sep).join('/') !== VERHAAL_MAP) return null;
+  const m = VERHAAL_NAAM_RE.exec(path.basename(rel));
+  return m ? m[1] : null;
+}
 function setVinger(set) { return sha256(Buffer.from(set.join(','), 'utf8')); }
 function shaBestand(p) {
   const h = crypto.createHash('sha256'), fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -129,6 +157,100 @@ function maak(o) {
     }
     return { mappen, bestanden };
   }
+  // verhalen (wv2123): de herinnering_id's van deze opnames (vast) en een herkenner voor ramble_id in de frontmatter
+  function herVan(rids, extra) {
+    if (!rids || !rids.length) return null;
+    const hids = new Set(extra || []);
+    for (const rid of rids) for (let i = 0; i < MAX_HERINNERINGEN; i++) hids.add(hidVan(rid, i));
+    return { rids, hids, ridRe: new RegExp('^ramble_id:\\s*"?(' + rids.join('|') + ')"?\\s*$', 'm') };
+  }
+  const kopieWortels = () => [{ w: o.vault, soort: 'vault' }].concat((o.extraMappen || []).map((w) => ({ w, soort: 'kopie' })));
+  function isVerhaalVan(abs, rel, her) {
+    const hid = verhaalId(rel);
+    return !!hid && (her.hids.has(hid) || her.ridRe.test(fmVan(abs)));
+  }
+  // de verhaalpagina's van deze opnames (vault en kopiemappen; alleen de map Verhalen) en de voorvallen waar de vaultpagina's naar linken
+  function verhalenVan(her) {
+    const uit = { paden: [], voorvallen: new Set(), hids: new Set() };
+    if (!her) return uit;
+    for (const { w, soort } of kopieWortels()) {
+      loop(path.join(w, VERHAAL_MAP), function (abs, r) {
+        const rel = VERHAAL_MAP + '/' + r;
+        if (!isVerhaalVan(abs, rel, her)) return;
+        uit.paden.push({ soort, pad: abs, rel, waarom: 'verhaal' });
+        uit.hids.add(verhaalId(rel));
+        if (soort === 'vault') { const m = /^voorval:(.*)$/m.exec(fmVan(abs)); const v = m && VOORVAL_ID_RE.exec(m[1]); if (v) uit.voorvallen.add(v[0]); }
+      });
+    }
+    return uit;
+  }
+  // linkt een verhaalpagina in de vault buiten weg (rel-namen) nog naar dit voorval? Dan blijft het.
+  function voorvalGedeeld(vid, weg) {
+    let ja = false;
+    loop(path.join(o.vault, VERHAAL_MAP), function (abs, r) {
+      if (ja) return;
+      const rel = VERHAAL_MAP + '/' + r;
+      if (weg.has(rel) || !verhaalId(rel) || path.basename(rel).indexOf('~') >= 0) return;
+      const m = /^voorval:(.*)$/m.exec(fmVan(abs));
+      if (m && m[1].indexOf(vid) >= 0) ja = true;
+    });
+    return ja;
+  }
+  function voorvalPaden(vid) {
+    const uit = [];
+    for (const { w } of kopieWortels()) {
+      let namen = [];
+      try { namen = fs.readdirSync(path.join(w, VOORVAL_MAP)); } catch (e) { continue; }
+      for (const n of namen) if (n === vid + '.md' || (n.startsWith(vid + '~') && /^vo_[0-9a-f]{16}~[0-9]{8}-[0-9]{6}\.md$/.test(n))) uit.push(path.join(w, VOORVAL_MAP, n));
+    }
+    return uit;
+  }
+  function voorvallenBeslis(vids, weg) {
+    const r = { weg: [], blijft: [] };
+    for (const vid of [...vids].sort()) (voorvalGedeeld(vid, weg) ? r.blijft : r.weg).push(vid);
+    return r;
+  }
+  // register.sqlite (wv2123): rijen herinnering, voorstel en spoor van deze opnames. Eigen verbinding, kort; de server schrijft er ook in.
+  const regPad = () => o.herinneringen ? path.join(o.herinneringen, 'register.sqlite') : null;
+  function metRegister(f) {
+    const p = regPad();
+    if (!p || !fs.existsSync(p)) return null;
+    const { DatabaseSync } = require('node:sqlite');
+    const r = new DatabaseSync(p);
+    try { r.exec('PRAGMA busy_timeout = 10000'); return f(r, new Set(r.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((x) => x.name))); }
+    finally { r.close(); }
+  }
+  const REG_WAAR = { herinnering: (h, rr) => 'herinnering_id IN (' + h + ') OR ramble_id IN (' + rr + ')', voorstel: (h) => 'herinnering_id IN (' + h + ')',
+    spoor: (h, rr) => 'herinnering_id IN (' + h + ') OR ramble_id IN (' + rr + ')' };
+  const regArgs = (t, hids, rids) => t === 'voorstel' ? hids : hids.concat(rids);
+  function registerTel(rids, hids) {
+    if (!rids.length) return 0;
+    const h = hids.map(() => '?').join(','), rr = rids.map(() => '?').join(',');
+    const n = metRegister((r, aanwezig) => Object.keys(REG_WAAR).filter((t) => aanwezig.has(t))
+      .reduce((a, t) => a + r.prepare('SELECT count(*) n FROM ' + t + ' WHERE ' + REG_WAAR[t](h, rr)).get(...regArgs(t, hids, rids)).n, 0));
+    return n || 0;
+  }
+  function registerSchoon(rids, hids) {
+    if (!rids.length) return null;
+    const h = hids.map(() => '?').join(','), rr = rids.map(() => '?').join(',');
+    return metRegister((r, aanwezig) => {
+      const tel = {};
+      r.exec('PRAGMA secure_delete = ON');
+      r.exec('BEGIN IMMEDIATE');
+      try {
+        for (const t of Object.keys(REG_WAAR).filter((x) => aanwezig.has(x))) tel[t] = r.prepare('DELETE FROM ' + t + ' WHERE ' + REG_WAAR[t](h, rr)).run(...regArgs(t, hids, rids)).changes;
+        r.exec('COMMIT');
+      } catch (e) { try { r.exec('ROLLBACK'); } catch (x) { /* al terug */ } throw e; }
+      try { tel.wal = r.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get(); } catch (e) { tel.wal = { fout: e.message }; }
+      return tel;
+    }) || { afwezig: true };
+  }
+  // signaal voor herinneringen-verhaal.js: register en index meteen opnieuw (geen symlink volgen; inhoud leeg)
+  function herbouwSignaal() {
+    if (!o.herinneringen) return false;
+    try { fs.closeSync(fs.openSync(path.join(o.herinneringen, 'verhaal-herbouw'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600)); return true; }
+    catch (e) { return false; }
+  }
   const journaalPad = (id) => path.join(o.staat, id + '.journaal.json');
   function schrijfJson(p, j) {
     const tmp = p + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
@@ -168,10 +290,11 @@ function maak(o) {
 
   // Vindplaatsen in de vault en de kopiemappen: sha-treffer (eerst op grootte), ovis_stuk in de frontmatter, bronnotitie op naam;
   // daarnaast afgeleide pagina's (noemen een stuk-id of linken naar de bronnotitie) — die alleen melden.
-  function zoek(stukIds, shas) {
+  function zoek(stukIds, shas, her) {
     const groottes = new Set([...shas.values()].map((x) => x.grootte).filter((g) => g != null));
     const ids = [...stukIds];
-    const idRe = new RegExp('(' + ids.join('|') + ')');
+    // afgeleid: noemt een stuk-id of (wv2123) een herinnering_id van deze opnames (bv. index.md: die bouwt de verhaaltik opnieuw)
+    const idRe = new RegExp('(' + ids.concat(her ? [...her.hids] : []).join('|') + ')');
     const fmRe = new RegExp('^ovis_stuk:\\s*"?(' + ids.join('|') + ')"?\\s*$', 'm');
     const naamRe = new RegExp('_(' + ids.join('|') + ')\\.md$');
     const treffers = [], afgeleid = [];
@@ -181,6 +304,7 @@ function maak(o) {
         let waarom = null;
         if (groottes.has(st.size)) { try { const h = shaBestand(abs); if (h && shas.has(h)) waarom = 'sha'; } catch (e) { /* onleesbaar */ } }
         const md = /\.md$/i.test(rel);
+        if (!waarom && md && her && isVerhaalVan(abs, rel, her)) waarom = 'verhaal';
         if (!waarom && md && naamRe.test(rel)) waarom = 'bronnotitie';
         if (!waarom && md) {
           let kop = '';
@@ -199,7 +323,7 @@ function maak(o) {
     return { treffers, afgeleid };
   }
 
-  function kaartVoor(hoofd, verz, vinger, databank, ram) {
+  function kaartVoor(hoofd, verz, vinger, databank, ram, verh) {
     const s = verz.stukken.get(hoofd);
     const bron = BRON_TEKST[s.bron] || s.bron.split(':')[0];
     const rollen = {};
@@ -212,6 +336,8 @@ function maak(o) {
       'Na je Ja (met vingerafdruk) haal ik het weg uit je kennisbank, de databank en de zoekindex, en kan dezelfde inhoud niet meer binnenkomen.',
     ];
     if (ram && ram.length) stappen.push('Het is een ingesproken herinnering' + (ram.length > 1 ? ' (' + ram.length + ' opnames)' : '') + ': ook de opname (je stem) en de uitgeschreven tekst op de server gaan weg.');
+    if (verh && verh.paginas) stappen.push((verh.paginas === 1 ? 'Er is één verhaal van gemaakt; dat gaat' : 'Er zijn ' + verh.paginas + ' verhalen van gemaakt; die gaan') + ' ook weg, met de voorstellen voor personen en voorvallen' +
+      (verh.voorvallen_blijft ? '. Een voorval dat ook bij een andere herinnering hoort, blijft staan.' : '.'));
     stappen.push(
       'Wat blijft: de versleutelde nachtkopieën (Drive, lokaal, NAS)' + (ram && ram.some((r) => r.offsite_op) ? ', de versleutelde kopie van de opname op Drive' : '') +
         ' en de prullenbak van Syncthing op je eigen apparaten. Daaruit komt het niet vanzelf terug.',
@@ -229,9 +355,10 @@ function maak(o) {
     const verz = verzamel(stukId, zonder);
     if (verz.fout) return { ok: false, reden: verz.fout };
     const vinger = setVinger(verz.set);
-    const vind = zoek(verz.stukken.keys(), verz.shas);
-    const blobs = verz.set.filter((s) => fs.existsSync(blobPad(s))).length;
     const ram = rambles(verz.stukken.keys());
+    const her = herVan(ram.map((r) => r.ramble_id));
+    const vind = zoek(verz.stukken.keys(), verz.shas, her);
+    const blobs = verz.set.filter((s) => fs.existsSync(blobPad(s))).length;
     let databank = null;
     try {
       const r = await o.rpc('sb_bron_verwijder_plan', { p: { sha256: verz.set } });
@@ -255,8 +382,15 @@ function maak(o) {
       p.herinneringen = { opnames: ram.map((r) => r.ramble_id), mappen: st.reduce((a, x) => a + x.mappen, 0), bestanden: st.reduce((a, x) => a + x.bestanden, 0),
         rijen_stuk: db.prepare('SELECT count(*) n FROM ramble_stuk WHERE ramble_id IN (' + ram.map(() => '?').join(',') + ')').get(...ram.map((r) => r.ramble_id)).n,
         offsite: ram.filter((r) => r.offsite_op).length, open_kaarten: ram.filter((r) => r.kaart && !r.keuze).map((r) => r.kaart) };
+      // verhalen (wv2123): pagina's, voorvallen (gedeeld = blijft), standrij, registerrijen
+      const vh = verhalenVan(her), rids = her.rids;
+      const vp = vh.paden.filter((t) => t.soort === 'vault');
+      const vb = voorvallenBeslis(vh.voorvallen, new Set(vp.map((t) => t.rel)));
+      p.verhalen = { paginas: vp.length, kopieen: vh.paden.length - vp.length, voorvallen: [...vh.voorvallen].sort(), voorvallen_weg: vb.weg.length, voorvallen_blijft: vb.blijft.length,
+        rij_verhaal: tabellen().has('ramble_verhaal') ? db.prepare('SELECT count(*) n FROM ramble_verhaal WHERE ramble_id IN (' + rids.map(() => '?').join(',') + ')').get(...rids).n : 0,
+        register_rijen: registerTel(rids, [...herVan(rids, vh.hids).hids]), hids: [...vh.hids].sort() };
     }
-    p.kaart = kaartVoor(stukId, verz, vinger, databank && databank.telling ? Object.values(databank.telling).reduce((a, b) => a + (Number(b) || 0), 0) : null, ram);
+    p.kaart = kaartVoor(stukId, verz, vinger, databank && databank.telling ? Object.values(databank.telling).reduce((a, b) => a + (Number(b) || 0), 0) : null, ram, p.verhalen);
     schrijfJson(path.join(o.staat, stukId + '.plan.json'), p);
     return p;
   }
@@ -336,7 +470,7 @@ function maak(o) {
   function rambleSchoon(rambleIds, tel, aanwezig) {
     if (!aanwezig.has('ramble')) return;
     for (const rid of rambleIds || []) {
-      for (const t of ['ramble_stuk', 'ramble_spoor']) if (aanwezig.has(t)) tel[t] = (tel[t] || 0) + db.prepare('DELETE FROM ' + t + ' WHERE ramble_id = ?').run(rid).changes;
+      for (const t of ['ramble_stuk', 'ramble_spoor', 'ramble_verhaal']) if (aanwezig.has(t)) tel[t] = (tel[t] || 0) + db.prepare('DELETE FROM ' + t + ' WHERE ramble_id = ?').run(rid).changes;
       tel.ramble = (tel.ramble || 0) + db.prepare("UPDATE ramble SET status = 'verwijderd', apparaat = NULL, aantal = NULL, manifest = NULL, opgenomen_op = NULL, verteller = NULL, " +
         'duur_s = NULL, vingerafdruk = NULL, onvolledig = 0, archief_op = NULL, wacht_plafond = NULL, marker = NULL, kaart_op = NULL, keuze = NULL, keuze_op = NULL, ' +
         'notitie = NULL, notitie_op = NULL, offsite_ok = 0, gemeld = NULL' + (catKolom() ? ', categorie = NULL, herinnering_gevoelig = NULL, categorie_gekozen = NULL' : '') +
@@ -375,7 +509,7 @@ function maak(o) {
     return { tel, wal };
   }
 
-  function telNa(stukIds, set, paden, rambleIds) {
+  function telNa(stukIds, set, paden, rambleIds, verh) {
     const inSet = set.map(() => '?').join(',');
     const ids = [...stukIds], inIds = ids.map(() => '?').join(',');
     const r = {
@@ -395,12 +529,15 @@ function maak(o) {
       const rids = rambleIds || [];
       if (rids.length) {
         const inR = rids.map(() => '?').join(',');
-        for (const t of ['ramble_stuk', 'ramble_spoor']) if (aanwezig.has(t)) r['db_' + t] = db.prepare('SELECT count(*) n FROM ' + t + ' WHERE ramble_id IN (' + inR + ')').get(...rids).n;
+        for (const t of ['ramble_stuk', 'ramble_spoor', 'ramble_verhaal']) if (aanwezig.has(t)) r['db_' + t] = db.prepare('SELECT count(*) n FROM ' + t + ' WHERE ramble_id IN (' + inR + ')').get(...rids).n;
+        // verhalen (wv2123): registerrijen en de voorvallen die weg moesten (de pagina's telt de tweede scan)
+        r.register_rijen = registerTel(rids, verh ? verh.hids : [...herVan(rids).hids]);
+        r.voorvallen = verh ? verh.voorvallen_weg.reduce((a, vid) => a + voorvalPaden(vid).length, 0) : 0;
         r.herinneringen_mappen = o.herinneringen ? rids.reduce((a, rid) => a + rambleTel(rid).mappen, 0) : 'map onbekend';   // review wv2069 MOET 1
       }
     }
     // tweede scan op naam en frontmatter (de sha-treffers telt de bestandstoets hierboven); vindt hij iets, dan is het niet 0
-    const vind = zoek(stukIds, new Map());
+    const vind = zoek(stukIds, new Map(), herVan(rambleIds || [], verh ? verh.hids : []));
     r.vault_tweede_scan = vind.treffers.length;
     return r;
   }
@@ -424,7 +561,8 @@ function maak(o) {
       j = { stuk: stukId, stap: 'start', reden, vraag: proef ? null : opt.vraag, set: p.set, set_vinger: p.set_vinger, stukken: p.stukken.map((s) => s.stuk_id),
         paden: p.paden.map((t) => ({ soort: t.soort, rel: t.rel, waarom: t.waarom })), afgeleid: p.afgeleid, databank_plan: p.databank, gestart: nuIso(),
         rambles: p.herinneringen ? p.herinneringen.opnames : [], open_kaarten: p.herinneringen ? p.herinneringen.open_kaarten : [],
-        herinneringen: p.herinneringen ? path.resolve(o.herinneringen) : null };
+        herinneringen: p.herinneringen ? path.resolve(o.herinneringen) : null, voorvallen_plan: p.verhalen ? p.verhalen.voorvallen : [],
+        hids_plan: p.verhalen ? p.verhalen.hids : [] };
       schrijfJson(journaalPad(stukId), j);
     }
     const wortel = (soort, rel) => {
@@ -458,6 +596,17 @@ function maak(o) {
       for (const rid of rids) db.prepare("UPDATE ramble SET status = 'verwijderd' WHERE ramble_id = ?").run(rid);
       j.rambleDicht = wanneer; schrijfJson(journaalPad(stukId), j);
     }
+    // 5a. verhalen (wv2123): opnieuw zoeken (na het plan kunnen er bij gekomen zijn) en de voorvallen beslissen, vóór het wissen
+    if (rids.length && !j.verhaal) {
+      const vh = verhalenVan(herVan(rids, j.hids_plan));
+      for (const vid of j.voorvallen_plan || []) vh.voorvallen.add(vid);
+      const vb = voorvallenBeslis(vh.voorvallen, new Set(vh.paden.filter((t) => t.soort === 'vault').map((t) => t.rel)));
+      const bekend = new Set(j.paden.map((t) => t.soort + ':' + t.rel));
+      j.verhaal = { paden: vh.paden.filter((t) => !bekend.has(t.soort + ':' + t.rel)).map((t) => ({ soort: t.soort, rel: t.rel, waarom: t.waarom })),
+        hids: [...herVan(rids, (j.hids_plan || []).concat([...vh.hids])).hids].sort(), voorvallen_weg: vb.weg, voorvallen_blijft: vb.blijft.length };
+      schrijfJson(journaalPad(stukId), j);
+    }
+    const verh = j.verhaal || null;
     // 4–5. blobs en bestanden
     if (!j.bestanden) {
       const tel = { blob: 0, vault: 0, kopie: 0, overgeslagen: 0 };
@@ -467,7 +616,15 @@ function maak(o) {
         const a = wortel(t.soort, t.rel);
         if (!a) continue;
         if (t.waarom === 'sha') { let h = null; try { h = shaBestand(a); } catch (e) { h = null; } if (h && !setS.has(h)) { tel.overgeslagen++; continue; } }
-        try { if (wis(a)) tel[t.soort]++; } catch (e) { tel.overgeslagen++; }
+        try { if (wis(a)) { tel[t.soort]++; if (t.soort === 'vault' && verhaalId(t.rel)) tel.verhalen = (tel.verhalen || 0) + 1; } } catch (e) { tel.overgeslagen++; }
+      }
+      if (verh) {
+        for (const t of verh.paden) {
+          const a = wortel(t.soort, t.rel);
+          if (!a) continue;
+          try { if (wis(a)) { tel[t.soort]++; if (t.soort === 'vault') tel.verhalen = (tel.verhalen || 0) + 1; } } catch (e) { tel.overgeslagen++; }
+        }
+        for (const vid of verh.voorvallen_weg) for (const a of voorvalPaden(vid)) { try { if (wis(a)) tel.voorvallen = (tel.voorvallen || 0) + 1; } catch (e) { tel.overgeslagen++; } }
       }
       for (const rid of rids) for (const m of rambleMappen(rid)) {
         let w;
@@ -478,6 +635,8 @@ function maak(o) {
     }
     // 6. intake.sqlite
     if (!j.dbSchoon) { j.dbSchoon = schoonDb(j.stukken, j.set, wanneer, rids); j.stap = 'pod'; schrijfJson(journaalPad(stukId), j); }
+    // 6b. register.sqlite (wv2123) en het herbouwsignaal voor register en index
+    if (verh && !j.registerSchoon) { j.registerSchoon = registerSchoon(rids, verh.hids); j.herbouw = herbouwSignaal(); schrijfJson(journaalPad(stukId), j); }
     // 7. tekstindex opnieuw bouwen (bouwt uit de vault)
     if (!j.zoekindex && o.zoekindex) {
       let z;
@@ -485,8 +644,9 @@ function maak(o) {
       j.zoekindex = z; schrijfJson(journaalPad(stukId), j);
     }
     // 8. tellingen na
-    const paden = j.paden.map((t) => wortel(t.soort, t.rel) || path.join(o.vault, t.rel));
-    const na = telNa(j.stukken, j.set, paden, rids);
+    const paden = j.paden.concat(verh ? verh.paden : []).map((t) => wortel(t.soort, t.rel) || path.join(o.vault, t.rel));
+    const na = telNa(j.stukken, j.set, paden, rids, verh);
+    if (verh) na.herbouw_signaal = j.herbouw ? 0 : 1;   // review wv2123 MOET 3: zonder signaal blijft de index de verhalen noemen
     if (o.zoekTel) { try { na.zoekindex = o.zoekTel(j.stukken.concat(j.paden.filter((t) => t.soort === 'vault').map((t) => t.rel))); } catch (e) { na.zoekindex = 'fout'; } }
     // 8b. herinneringen (review wv2069 ZOU 1): een tik die al liep toen de opname dicht ging, kan nog een notitie of rij hebben
     // teruggeschreven. Is de telling niet 0, dan nog één keer: opnamemappen, opnamerijen en de vaulttreffers van de tweede scan (zelfde
@@ -501,10 +661,21 @@ function maak(o) {
       }
       db.exec('BEGIN IMMEDIATE');
       try { rambleSchoon(rids, tel.db, tabellen()); db.exec('COMMIT'); } catch (e) { try { db.exec('ROLLBACK'); } catch (x) { /* al terug */ } tel.db_fout = String(e && e.message || e).slice(0, 120); }
-      for (const t of zoek(j.stukken, new Map()).treffers) if (t.soort === 'vault') { try { if (wis(t.pad)) tel.vault++; } catch (e) { tel.overgeslagen++; } }
+      // wv2123: ook verhaalpagina's (vault en kopie), voorvallen en registerrijen die een late tik nog schreef
+      tel.kopie = 0;
+      for (const t of zoek(j.stukken, new Map(), herVan(rids, verh ? verh.hids : [])).treffers) {
+        if (t.soort !== 'vault' && t.waarom !== 'verhaal') continue;
+        try { if (wis(t.pad)) tel[t.soort]++; } catch (e) { tel.overgeslagen++; }
+      }
+      if (verh) {
+        for (const vid of verh.voorvallen_weg) for (const a of voorvalPaden(vid)) { try { if (wis(a)) tel.voorvallen = (tel.voorvallen || 0) + 1; } catch (e) { tel.overgeslagen++; } }
+        try { tel.register = registerSchoon(rids, verh.hids); } catch (e) { tel.register_fout = String(e && e.message || e).slice(0, 120); }
+        j.herbouw = herbouwSignaal() || j.herbouw;
+      }
       if (tel.vault && o.zoekindex) { try { tel.zoekindex = await o.zoekindex(); } catch (e) { tel.zoekindex = { ok: false }; } }
       j.naloop = Object.assign({ op: nuIso() }, tel);
-      na2 = telNa(j.stukken, j.set, paden, rids);
+      na2 = telNa(j.stukken, j.set, paden, rids, verh);
+      if (verh) na2.herbouw_signaal = j.herbouw ? 0 : 1;
       if (o.zoekTel) { try { na2.zoekindex = o.zoekTel(j.stukken.concat(j.paden.filter((t) => t.soort === 'vault').map((t) => t.rel))); } catch (e) { na2.zoekindex = 'fout'; } }
     }
     j.na = na2;
@@ -515,7 +686,8 @@ function maak(o) {
       const d = j.databank && j.databank.telling_voor ? Object.values(j.databank.telling_voor).reduce((a, b) => a + (Number(b) || 0), 0) : 0;
       const regel = '| ' + wanneer.slice(0, 10) + ' | stuk ' + stukId + (j.stukken.length > 1 ? ' (+' + (j.stukken.length - 1) + ' met dezelfde inhoud)' : '') + ': ' + j.set.length +
         ' sha256 (code ' + j.set_vinger.slice(0, 12) + '), ' + (j.bestanden.blob || 0) + ' blobs, ' + (j.bestanden.vault || 0) + ' vaultbestanden, ' + (j.bestanden.kopie || 0) +
-        ' kopieën, ' + (rids.length ? rids.length + ' opname(s) met ' + (j.bestanden.herinneringen || 0) + ' bestanden, ' : '') + d + ' databankrijen | ' + reden + ' | ' + akkoord + ' | geen (bewust); tombstones in [[00_Systeem/Verwijderregister/tombstones]] |\n';
+        ' kopieën, ' + (rids.length ? rids.length + ' opname(s) met ' + (j.bestanden.herinneringen || 0) + ' bestanden, ' : '') +
+        (j.bestanden.verhalen ? j.bestanden.verhalen + ' verhaal(en), ' : '') + (j.bestanden.voorvallen ? j.bestanden.voorvallen + ' voorval(len), ' : '') + d + ' databankrijen | ' + reden + ' | ' + akkoord + ' | geen (bewust); tombstones in [[00_Systeem/Verwijderregister/tombstones]] |\n';
       const pr = path.join(o.vault, REGISTER);
       o.vv.wijzig(pr, function (t) { return t.indexOf('stuk ' + stukId) >= 0 ? null : t.replace(/\n*$/, '\n') + regel; });
       j.register = wanneer; schrijfJson(journaalPad(stukId), j);
@@ -529,7 +701,8 @@ function maak(o) {
     j.klaar = wanneer;
     schrijfJson(journaalPad(stukId), j);
     return { ok: nul, stuk: stukId, stukken: j.stukken, set_vinger: j.set_vinger, databank: j.databank, bestanden: j.bestanden, sqlite: j.dbSchoon.tel,
-      wal: j.dbSchoon.wal, zoekindex: j.zoekindex || null, na: na2, naloop: j.naloop, afgeleid: j.afgeleid, open_kaarten: j.open_kaarten && j.open_kaarten.length ? j.open_kaarten : undefined,
+      wal: j.dbSchoon.wal, zoekindex: j.zoekindex || null, na: na2,
+      verhaal: verh ? { nagezocht: verh.paden.length, voorvallen_weg: verh.voorvallen_weg.length, voorvallen_blijft: verh.voorvallen_blijft, register: j.registerSchoon, herbouw: j.herbouw } : undefined, naloop: j.naloop, afgeleid: j.afgeleid, open_kaarten: j.open_kaarten && j.open_kaarten.length ? j.open_kaarten : undefined,
       journaal: journaalPad(stukId) };
   }
 
@@ -597,5 +770,5 @@ async function hoofd(argv) {
   return uit && uit.ok === false ? 1 : 0;
 }
 
-module.exports = { maak, buitenNachtvenster, setVinger, MAX_STUKKEN };
+module.exports = { maak, buitenNachtvenster, setVinger, hidVan, MAX_STUKKEN, MAX_HERINNERINGEN, VERHAAL_MAP, VOORVAL_MAP };
 if (require.main === module) hoofd(process.argv.slice(2)).then((c) => { process.exitCode = c; }, (e) => { process.stderr.write(String(e && e.stack || e) + '\n'); process.exitCode = 1; });

@@ -60,6 +60,7 @@ const ID_RE = /^r[0-9]{8}-[0-9a-f]{16}$/;
 const PRIJS = { in: 2, uit: 10, cache_lezen: 0.20, cache_schrijven: 2.5 };   // Sonnet 5.5 per miljoen (gelijk aan pdf-lezer.js)
 const DUURST = { in: 10, uit: 50, cache_lezen: 1, cache_schrijven: 12.5 };
 const OVERLAP_MIN = 0.5;
+const MAX_HERINNERINGEN = 30;             // per opname; intake-verwijder.js rekent met dezelfde grens de herinnering_id's na (hidVan)
 const BLOK_EIND = '<!-- ovis:blok eind -->';
 const BLOK_BEGIN_RE = /<!-- ovis:blok begin id="([^"<>]{1,80})" content_hash="([0-9a-f]{16})" -->/;
 
@@ -76,6 +77,8 @@ CREATE TABLE IF NOT EXISTS spoor (id INTEGER PRIMARY KEY, tijd TEXT NOT NULL, ra
 `;
 
 function iso(ms) { return new Date(ms).toISOString(); }
+// herinnering_id: vast uit opname en volgnummer (intake-verwijder.js rekent hem na; de toets vergelijkt)
+function hidVan(rid, i) { return 'hr_' + crypto.createHash('sha256').update(Buffer.from(rid + '|' + i, 'utf8')).digest('hex').slice(0, 16); }
 function sha256(b) { return crypto.createHash('sha256').update(b).digest('hex'); }
 function amsDatum(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
 function dmj(ms) { const d = amsDatum(ms).split('-'); return d[2] + '-' + d[1] + '-' + d[0]; }
@@ -375,12 +378,13 @@ function maak(o) {
   const db = o.db;
   db.exec(SCHEMA_SQL);
   const DIR = o.dir, AUDIO = path.join(DIR, 'audio'), UIT = path.join(DIR, 'verhaal-uit'), VERBRUIK = path.join(DIR, 'verhaal-verbruik.jsonl');
+  const HERBOUW = path.join(DIR, 'verhaal-herbouw');   // wv2123: de verwijderroute vraagt zo om register en index meteen opnieuw te bouwen
   fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });
   const { DatabaseSync } = require('node:sqlite');
   const regPad = path.join(DIR, 'register.sqlite');
   const reg = new DatabaseSync(regPad);
   try { fs.chmodSync(regPad, 0o600); } catch (e) { /* niet van ons */ }
-  reg.exec('PRAGMA journal_mode = WAL'); reg.exec(REGISTER_SQL);
+  reg.exec('PRAGMA journal_mode = WAL'); reg.exec('PRAGMA busy_timeout = 5000'); reg.exec(REGISTER_SQL);
   const CAT = o.categorieen || {};
   let bezig = false, laatst = null, dienstPauzeTot = 0, registerOp = 0;
   const tel = { dag: '', aanroepen: 0, usd_dag: 0, maand: '', usd_maand: 0, sleutel: 'nog_niet_gevraagd', sdk: null };
@@ -546,7 +550,6 @@ function maak(o) {
   }
 
   // ── pagina's ──
-  function hidVan(rid, i) { return 'hr_' + sha256(Buffer.from(rid + '|' + i, 'utf8')).slice(0, 16); }
   function catRegels(r) {
     const c = r.categorie && Object.hasOwn(CAT, r.categorie) ? r.categorie : null;
     return ['categorie: ' + (c || 'geen'), 'herinnering_gevoelig: ' + (c && r.herinnering_gevoelig === 0 ? 'nee' : 'ja')];
@@ -626,9 +629,10 @@ function maak(o) {
   async function verwerk(r, uit) {
     const v = q.v.get(r.ramble_id) || { pogingen: 0, poging_op: null };
     if (v.poging_op && nu() - Date.parse(v.poging_op) < PAUZE_MS) return;
-    const zet = (status, extra) => q.vZet.run(r.ramble_id, status, extra.pogingen != null ? extra.pogingen : v.pogingen, extra.poging_op || v.poging_op || null,
+    // wv2123: is de opname intussen verwijderd (verwijderroute), dan schrijft de tik geen stand meer terug
+    const zet = (status, extra) => { const x = q.rij.get(r.ramble_id); if (!x || x.status === 'verwijderd') return; q.vZet.run(r.ramble_id, status, extra.pogingen != null ? extra.pogingen : v.pogingen, extra.poging_op || v.poging_op || null,
       extra.herinneringen != null ? extra.herinneringen : null, extra.gelukt != null ? extra.gelukt : null, extra.mislukt != null ? extra.mislukt : null,
-      r.cat_versie || 0, extra.reden || null, iso(nu()));
+      r.cat_versie || 0, extra.reden || null, iso(nu())); };
     const pl = plafond();
     if (pl) { uit.plafond = pl; return 'stop'; }
     const segs = segmenten(r);
@@ -650,7 +654,7 @@ function maak(o) {
     const duur = segs.length ? segs[segs.length - 1].tot : 0, opname = Date.parse(r.opgenomen_op || r.aangemaakt);
     let geboren = null;
     try { geboren = o.geboren ? await o.geboren() : null; } catch (e) { geboren = null; }
-    const lijst = a.j.herinneringen.slice(0, 30);
+    const lijst = a.j.herinneringen.slice(0, MAX_HERINNERINGEN);
     let gelukt = 0, mislukt = 0;
     const paginas = [];
     lijst.forEach((x, i) => {
@@ -663,6 +667,9 @@ function maak(o) {
     const vers = q.rij.get(r.ramble_id);
     if (!vers || vers.status !== 'notitie') { zet('vervallen', { reden: 'opname_' + (vers ? vers.status : 'weg') }); return; }
     for (const p of paginas) {
+      // wv2123 (review MOET 1): de verwijderroute is een ander proces; vóór elke pagina opnieuw kijken of de opname er nog is
+      const nog = q.rij.get(r.ramble_id);
+      if (!nog || nog.status !== 'notitie') { uit.vervallen = (uit.vervallen || 0) + 1; return; }
       const rel = path.join(VERHAAL_MAP, p.hid + '.md');
       try { if (schrijfPagina(rel, paginaTekst(vers, p.hid, p.h, p.mislukt))) uit.paginas = (uit.paginas || 0) + 1; }
       catch (e) { fout('verhaal-pagina', e); zet('wacht', { pogingen: v.pogingen, reden: 'schrijven' }); return; }
@@ -836,8 +843,15 @@ function maak(o) {
 
   async function tik() {
     if (bezig) return { bezig: true };
-    if (!aan()) return { uit: true };
     if (o.primair && !o.primair()) return { niet_primair: true };
+    // wv2123: na een verwijdering meteen register en index opnieuw (ook als de verhalen uit staan). Het signaal wordt eerst <naam>.bezig
+    // (een nieuw signaal tijdens het bouwen gaat zo niet verloren) en pas na gelukt bouwen weg; mislukt het, dan blijft .bezig voor de volgende tik.
+    const sig = fs.existsSync(HERBOUW) ? HERBOUW : fs.existsSync(HERBOUW + '.bezig') ? HERBOUW + '.bezig' : null;
+    if (sig && !grendel()) {
+      try { if (sig === HERBOUW) fs.renameSync(HERBOUW, HERBOUW + '.bezig'); herbouw(); schrijfIndex(); registerOp = nu(); fs.unlinkSync(HERBOUW + '.bezig'); }
+      catch (e) { fout('verhaal-herbouw', e); }
+    }
+    if (!aan()) return { uit: true };
     bezig = true;
     const uit = { t: iso(nu()) };
     try {
@@ -873,4 +887,4 @@ function isHerinneringPad(p) {
   return /(^|\/)20_prive\/herinneringen(\/|$)/i.test(s);
 }
 
-module.exports = { maak, toetsTekst, vensterSet, rekenDatum, telwoord, getallenVan, isHerinneringPad, SCHEMA, SYSTEEM, VERHAAL_MAP, VOORVAL_MAP, OPNAME_MAP, INDEX, VERSIE };
+module.exports = { maak, hidVan, MAX_HERINNERINGEN, toetsTekst, vensterSet, rekenDatum, telwoord, getallenVan, isHerinneringPad, SCHEMA, SYSTEEM, VERHAAL_MAP, VOORVAL_MAP, OPNAME_MAP, INDEX, VERSIE };
