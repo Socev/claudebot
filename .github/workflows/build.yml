@@ -355,6 +355,11 @@ jobs:
       - name: "memorylane-delen (wv2114, deellinks familie/vrienden)"
         if: ${{ !cancelled() }}
         run: bash test/memorylane-delen.sh
+      # MemoryLane R2 (wv2118): verhaal uit een opname (Claude zonder tools, nep-API), citaattoets, datum door code, injectie, categorie volgt,
+      # voorstellen alleen na Ja, Davids aanpassing wint, plafond/dienstfout/grendel, padpoorten.
+      - name: "herinneringen-verhaal (wv2118, MemoryLane R2)"
+        if: ${{ !cancelled() }}
+        run: bash test/herinneringen-verhaal.sh
       # OVIS-register (wv979): frontmatter als tekst, vingerafdruk, validatie, compileer tegen een nep-databank, Bibliothecaris BB1-BB8.
       # wv1271: aliases/aliassen, blok met id + content_hash, handwerk niet overschrijven (BB8).
       - name: "ovis-register (wv979, compiler + Bibliothecaris)"

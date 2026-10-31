@@ -46,6 +46,7 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
   zet('10_Zakelijk/Groenhouten/Bronnen/bron.md', '# bron\n');
   zet('10_Zakelijk/Tolgaarde/actueel.md', '# actueel\n');
   zet('20_Prive/Reis.md', '# privé\n');
+  zet('20_Prive/Herinneringen/Verhalen/hr_0123456789abcdef.md', '# verzonnen herinnering\n');   // wv2118
   zet('30_Conversaties/x.md', '# gesprek\n');
   zet('10_Zakelijk/Tolgaarde/Personeel/y.md', '# p\n');
 
@@ -107,6 +108,8 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
     const r = await app('voorbeeld', { pad: p });
     toets('2 nooit te delen: ' + waarom + ' (' + st + ')', r.status === st && r.j.kan_niet === true, r);
   }
+  const her = await app('voorbeeld', { pad: '20_Prive/Herinneringen/Verhalen/hr_0123456789abcdef.md' });   // wv2118: eigen padpoort, vóór de vaste-plekregel
+  toets('2 herinnering: nooit via een deelpagina (403, eigen reden)', her.status === 403 && her.j.kan_niet === true && /MemoryLane/.test(JSON.stringify(her.j)), her);
   const bev = await app('voorbeeld', { pad: '01_Ontwikkeling/Beveiliging/Plan.md' });
   toets('2 Beveiliging: sinds wv1931 zichtbaar voor David, maar nooit te delen (403 kan_niet)', bev.status === 403 && bev.j.kan_niet === true, bev);
   for (const [p, re, waarom] of [['01_Ontwikkeling/Sleutel.md', /sleutel/, 'sleutel'], ['01_Ontwikkeling/Sleutel-in-link.md', /sleutel/, 'sleutel in een linkadres'],

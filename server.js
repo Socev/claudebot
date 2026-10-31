@@ -16624,7 +16624,45 @@ const herinneringen = (function () {
       box: function (t) { ovisBoxRij(t); }, fout: logError });
   } catch (e) { logError('herinneringen', e); return null; }
 })();
-function herinneringenInfo() { if (!herinneringen) return { module: false }; try { return Object.assign({ module: true }, herinneringen.info()); } catch (e) { return { fout: true }; } }
+function herinneringenInfo() { if (!herinneringen) return { module: false }; try { return Object.assign({ module: true }, Object.assign(herinneringen.info(), { verhaal: herinneringenVerhaalInfo() })); } catch (e) { return { fout: true }; } }
+// ── MemoryLane R2 (wv2118, 31-10-2026; Davids Ja 31-10 20:05): herinneringen-verhaal.js — per opname met een notitie één aanroep van de
+// Claude-API zonder tools (vast schema), citaattoets in code, verhaalpagina's in 20_Prive/Herinneringen/Verhalen, voorstellen voor personen
+// en voorval in <HERINNERINGEN_DIR>/register.sqlite (nooit vanzelf gekoppeld), index.md. Sleutel: die van de PDF-lezer (anthropic_api_key_pdf,
+// niet op de witte lijst, via pdfSleutel; geen nieuwe credential). Davids geboortedatum (als gegeven, voor "toen ik tien was") uit de
+// frontmatter van zijn stamboompagina. Uit: bestand <HERINNERINGEN_DIR>/verhaal-uit. Ontbreekt de module (terugrol): ramble.verhaal.module=false.
+const HERINNERING_GEBOREN_PAD = '20_Prive/Familie/Stamboom/David Schaap (1984).md';
+let herinneringGeborenCache = null;
+function herinneringGeboren() {
+  if (herinneringGeborenCache && Date.now() - herinneringGeborenCache.op < 3600000) return herinneringGeborenCache.w;
+  let w = null;
+  try { const t = VV().lees(path.join(VAULT, HERINNERING_GEBOREN_PAD), 'utf8'); const m = /^---\n[\s\S]*?^geboren:\s*"?(\d{4}-\d{2}-\d{2})"?\s*$[\s\S]*?^---$/m.exec(t); w = m ? m[1] : null; } catch (e) { w = null; }
+  herinneringGeborenCache = { op: Date.now(), w: w };
+  return w;
+}
+const herinneringenVerhaal = (function () {
+  const p = path.join(__dirname, 'herinneringen-verhaal.js');
+  if (!herinneringen || !HERINNERINGEN_MOD || !fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ db: intake._db, dir: HERINNERINGEN_DIR, vault: VAULT, vv: VV(), sleutel: pdfSleutel, sdk: pdfSdk, geboren: herinneringGeboren,
+      categorieen: HERINNERINGEN_MOD.CATEGORIEEN, metCatRegels: HERINNERINGEN_MOD._metCatRegels,
+      onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
+      primair: function () { return rolPrimair(); }, box: function (t) { ovisBoxRij(t); }, fout: logError });
+  } catch (e) { logError('herinneringen-verhaal', e); return null; }
+})();
+function herinneringenVerhaalInfo() { if (!herinneringenVerhaal) return { module: false }; try { return Object.assign({ module: true }, herinneringenVerhaal.info()); } catch (e) { return { fout: true }; } }
+let herinneringenVerhaalLoopt = false;
+async function herinneringenVerhaalTik() {
+  if (!herinneringenVerhaal || herinneringenVerhaalLoopt) return;
+  herinneringenVerhaalLoopt = true;
+  try {
+    const u = await herinneringenVerhaal.tik();
+    if (u && (u.verhalen || u.niet_gelukt || u.geen || u.antwoord_fout || u.categorie || u.fout || u.dienst || u.plafond))
+      schrijfLog(nu() + ' ramble-verhaal ' + velden({ verhalen: u.verhalen || 0, niet_gelukt: u.niet_gelukt || 0, geen: u.geen || 0, voorstellen: u.voorstellen || 0,
+        antwoord_fout: u.antwoord_fout || 0, categorie: u.categorie || 0, dienst: u.dienst || '', plafond: u.plafond || '', fout: u.fout || 0 }));
+  } catch (e) { logError('herinneringen-verhaal-tik', e); }
+  finally { herinneringenVerhaalLoopt = false; }
+}
+if (herinneringenVerhaal && SERVER_ECHT) { setTimeout(function () { herinneringenVerhaalTik(); }, 150000).unref(); setInterval(function () { herinneringenVerhaalTik(); }, 60000).unref(); }
 let herinneringenFoutLog = 0;
 async function herinneringenTik() {
   if (!herinneringen) return;

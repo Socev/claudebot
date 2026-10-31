@@ -449,6 +449,9 @@ function maak(opt) {
 
   function nooitDelen(p) {
     const naam = p.split('/').pop().toLowerCase();
+    // wv2118 (ontwerp fase R § 5): herinneringen nooit via een deelpagina, ook niet als de vaste-plekregels later wijzigen; delen van een
+    // herinnering gaat alleen via MemoryLane › Delen (Davids eigen schakelaar per kring, wv2114)
+    if (/(^|\/)20_prive\/herinneringen(\/|$)/i.test(String(p).replace(/\\/g, '/'))) return 'herinneringen deel je alleen vanuit MemoryLane';
     if (opt.isVastDicht(p)) return 'privé-pagina\'s, gesprekken en personeelszaken deel je hier nooit';
     if (opt.isVerborgen(p)) return 'bronnen deel je hier niet';
     if (p.indexOf('00_Systeem/') === 0) return 'systeempagina\'s deel je niet';
