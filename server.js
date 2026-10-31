@@ -400,7 +400,7 @@ const MODEL_ALIASSEN = {
   // of David zeggen "model: astra" zonder apart runtime: codex mee te geven.
   astra: 'codex:gpt-6-astra',   // zwaarste: plannen, reviews (slugs: learn.chatgpt.com/docs/models, 5-9-2026)
   sol: 'codex:gpt-5.6-sol',     // dagelijks brein op de Codex-stand (tegenhanger van Opus)
-  terra: 'codex:gpt-5.6-terra', // sneller, goedkoper in het venster
+  terra: 'codex:gpt-6.1-terra', // sneller, goedkoper in het venster (wv2078, David 31-10: GPT-6.1 Terra; gpt-5.6-terra blijft kiesbaar)
   luna: 'codex:gpt-5.6-luna',   // snelste
   codex: 'codex:',
   claude: 'claude:',
@@ -12256,7 +12256,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/facturen' || route.indexOf(' /app/facturen/') > 0) return typeof appFacturen === 'function' ? appFacturen(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'facturen');   // wv833: App Facturen
         if (route === 'GET /app/vast' || route === 'POST /app/vast') return appVastRoute(req, res, a, d);   // wv1051 (OVIS M1b): vastzetten
         if (route === 'GET /app/mediatheek' || /^GET \/app\/mediatheek\/bestand\/[a-f0-9]{16}$/.test(route)) return typeof appMediatheek === 'function' ? appMediatheek(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mediatheek');   // wv1269: App Mediatheek (alleen lezen)
-        if (route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
+        if (route === 'GET /app/tokens/openai' || route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/mailman' || route === 'GET /app/mailman/verkoop' || route.indexOf('POST /app/mailman/') === 0) return typeof appMailman === 'function' ? appMailman(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'mailman');   // wv1856: OVIS MailMan
         if (route === 'GET /app/werkstroom' || route.indexOf('GET /app/werkstroom/') === 0) return typeof appWerkstroom === 'function' ? appWerkstroom(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'werkstroom');   // wv2002: Werkstroom (alleen lezen)
@@ -12408,7 +12408,8 @@ const APP_MODEL_KEUZES = {
   codex: [
     { id: 'gpt-5.6-sol', naam: 'GPT-5.6 Sol', noot: 'dagelijks op de Codex-stand' },
     { id: 'gpt-6-astra', naam: 'GPT-6 Astra', noot: 'zwaarst; plannen en reviews' },
-    { id: 'gpt-5.6-terra', naam: 'GPT-5.6 Terra', noot: 'sneller' },
+    { id: 'gpt-6.1-terra', naam: 'GPT-6.1 Terra', noot: 'sneller, scherp geprijsd' },   // wv2078: codex exec -m gpt-6.1-terra antwoordde 31-10
+    { id: 'gpt-5.6-terra', naam: 'GPT-5.6 Terra', noot: 'sneller (vorige versie)' },
     { id: 'gpt-5.6-luna', naam: 'GPT-5.6 Luna', noot: 'snelst' },
   ],
   gemini: [
@@ -16321,15 +16322,16 @@ async function pdfBatchTik() {
 
 // ── OpenAI-hulp (wv2055, 30-10-2026; Davids Ja 30-10 22:09, vraag-id afd66b6a; box-rij #openai-tegoed) ──
 // openai-hulp.js: één gedeelde OpenAI-aanroep met patiëntpoort + geheimenfilter, kostenteller per aanroep (OPENAI_DIR/openai.sqlite, tabel
-// aanroep en batch; nooit tekst) en een eigen zachte maandgrens (OPENAI_DIR/openai.json: aan, tegoed_usd, grens_pct of grens_usd, reset_dag;
-// inst() herleest per minuut). Ontbreekt openai.json of staat aan niet op true: elke aanroep geweigerd (status uit).
+// aanroep en batch; nooit tekst) en een eigen zachte grens (OPENAI_DIR/openai.json: aan, tegoed_usd, cyclus_eind [, cyclus_start]; wv2078:
+// jaarcyclus met maandtempo; inst() herleest per minuut). Ontbreekt openai.json of staat aan niet op true: elke aanroep geweigerd (status uit).
 // SLEUTEL: kluisnaam openai_api_key, NIET op de witte lijst (een OPENAI_API_KEY in de omgeving zou de Codex-CLI naar het API-tegoed zetten);
 // gelezen via de Management-API zoals pdfSleutel, 10 min in het geheugen (ontbreekt hij: 2 min), alleen als Authorization-kop in de module.
 // Routes (alleen API_SECRET = machinekamer; body {secret, ...}, alleen op de primaire kant):
 //   POST /openai/vraag        {afnemer, model?, instructies?, invoer, max_uit?, effort?, schema?} → {ok, tekst, json?, model, usd, onvolledig}
 //   POST /openai/batch        {afnemer, model?, instructies?, max_uit?, effort?, verzoeken:[{id, invoer}]} → {ok, id, aantal, geweigerd}
 //   POST /openai/batch/stand  {id} → stand, en de antwoorden zodra hij klaar is
-// /health.openai en de regel "OpenAI deze maand" in GET /app/tokens (veld openai) tonen alleen bedragen, aantallen en tijden.
+// /health.openai, de regel "OpenAI deze maand" in GET /app/tokens (veld openai) en GET /app/tokens/openai (wv2078: Verbruikspagina,
+// uitsplitsing per model, afnemer, standaard/batch en tokensoort) tonen alleen bedragen, aantallen en tijden.
 const OPENAI_DIR = serverPad('openai', process.env.OPENAI_DIR, '/opt/data/openai', serverProefDeel('openai'));
 const OPENAI_SLEUTEL_NAAM = 'openai_api_key';
 let openaiSleutelCache = null;   // { w, tot }; alleen in het geheugen
@@ -16377,8 +16379,13 @@ const openaiHulp = (function () {
 function openaiInfo() { if (!openaiHulp) return { aan: false, module: false }; try { return openaiHulp.health(); } catch (e) { return { fout: true }; } }
 function openaiAppRegel() {
   if (!openaiHulp) return null;
-  try { const s = openaiHulp.stand(); return { maand_usd: s.maand_usd, open_batch_usd: s.open_batch_usd, tegoed_usd: s.tegoed_usd, grens_usd: s.grens_usd, periode_start: s.periode_start, aan: s.aan }; }
+  try { const s = openaiHulp.stand(); return { maand_usd: s.maand_usd, open_batch_usd: s.open_batch_usd, tegoed_usd: s.tegoed_usd, grens_usd: s.grens_usd, periode_start: s.periode_start, aan: s.aan,
+    cyclus: s.cyclus, maand: s.maand }; }
   catch (e) { logError('openai-app', e); return null; }
+}
+function openaiVerbruik() {
+  if (!openaiHulp || typeof openaiHulp.verbruik !== 'function') return null;
+  try { return openaiHulp.verbruik(); } catch (e) { logError('openai-verbruik', e); return null; }
 }
 function openaiIsPad(req) { const p = reqPath(req); return p === '/openai/vraag' || p === '/openai/batch' || p === '/openai/batch/stand'; }
 function openaiRoute(req, res) {
@@ -17488,7 +17495,11 @@ async function appTokens(req, res, a, route) {
   const vast = appAfscherm(a);   // wv1901
   let uit;
   try {
-    if (route === 'GET /app/tokens') { uit = tokenteller.stand({ vast: vast, tank: await tokentellerTank() }); if (uit && typeof openaiAppRegel === 'function') uit.openai = openaiAppRegel(); }   // wv2055: regel OpenAI deze maand
+    if (route === 'GET /app/tokens/openai') {   // wv2078: OpenAI-blok op de Verbruikspagina (alleen getallen)
+      uit = typeof openaiVerbruik === 'function' ? openaiVerbruik() : null;
+      if (!uit) return appWeiger(res, 404, 'De OpenAI-teller zit niet in deze versie van de pod', 'openai-verbruik ontbreekt');
+    }
+    else if (route === 'GET /app/tokens') { uit = tokenteller.stand({ vast: vast, tank: await tokentellerTank() }); if (uit && typeof openaiAppRegel === 'function') uit.openai = openaiAppRegel(); }   // wv2055: regel OpenAI deze maand
     else {
       const m = /^GET \/app\/tokens\/dag\/(\d{4}-\d{2}-\d{2})$/.exec(route);
       uit = m ? tokenteller.dag(m[1], { vast: vast }) : null;

@@ -12,8 +12,11 @@
  *  2. poort: elke tekst eerst door de patiëntpoort (patientpoort-2.0, tegenhouden zoals bij pdf-lezer en MailMan; fout of geen uitslag = dicht)
  *     en door een geheimenfilter (sleutels,
  *     tokens, wachtwoordregels). Raak = niet naar OpenAI, één rij met status poort/geheim, nooit de tekst;
- *  3. zachte grens: maandtotaal (sinds reset_dag, Nederlandse tijd) + open reserveringen + schatting van deze aanroep (invoer ≈ tekens/3,
- *     uitvoer = max_uit, ongecachet) > grens → weigeren (status grens). Grens = grens_usd, of grens_pct × tegoed_usd (standaard 80 %);
+ *  3. zachte grens (wv2078, 31-10-2026): het tegoed geldt per JAARCYCLUS (David 31-10: jaarlijks betaald, verloopt 19-08-2027). Binnen
+ *     de cyclus een maandtempo: grens deze kalendermaand = (tegoed − verbruik vóór deze maand) / resterende maanden × het deel van de maand
+ *     dat in de cyclus valt. Maandtotaal + open reserveringen + schatting van deze aanroep (invoer ≈ tekens/3, uitvoer = max_uit,
+ *     ongecachet) > die grens, of boven het tegoed van de cyclus → weigeren (status grens); buiten de cyclus → status cyclus.
+ *     Instelbaar in openai.json: tegoed_usd, cyclus_eind (en eventueel cyclus_start; zonder = eind − 1 jaar, gevlagd als afgeleid);
  *  4. aanroep: POST /v1/responses met store:false; werkelijk verbruik uit usage van het antwoord, met het model uit het antwoord;
  *  5. telling: één rij in openai.sqlite (tabel aanroep): model, tokens in/cache/uit, batch ja/nee, usd, prijsdatum. Nooit tekst of sleutel.
  * Batch: JSONL naar /v1/files (purpose batch), /v1/batches op /v1/responses (24 u). batchTik haalt klare batches op, telt per regel tegen de
@@ -30,13 +33,16 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const VERSIE = 'openai-hulp-1.0';
+const VERSIE = 'openai-hulp-1.1';
 // Prijzen per miljoen tokens (developers.openai.com/api/docs/pricing, gelezen 30-10-2026, tabellen Standard en Batch). cache_schrijven = de
 // "12h write"-kolom (de hoogste; de API gaf 30-10 prompt_cache_retention 24h), alleen bij modellen die schrijfkosten rekenen. Modellen zonder
 // eigen rij hier worden geweigerd. Lange context (> 272k invoer) bij gpt-5.4/5.5 (lang: true) kost meer: de hulp weigert dat vooraf (LANG_MAX)
-// en rekent het achteraf dubbel met de vlag prijs_onbekend.
+// en rekent het achteraf dubbel met de vlag prijs_onbekend, tenzij de rij een eigen lange-contexttarief heeft (lang_p). datum = eigen leesdatum.
 const PRIJS_DATUM = '2026-10-30';
 const PRIJZEN = {
+  // wv2078: gelezen 31-10-2026 op developers.openai.com/api/docs/pricing (Standard en Batch, korte én lange context > 272k; schrijven = 12h write)
+  'gpt-6.1-terra': { in: 1, cache: 0.05, schrijf: 2.5, uit: 5, b_in: 0.5, b_cache: 0.025, b_schrijf: 1.25, b_uit: 2.5, datum: '2026-10-31',
+    lang_p: { in: 2, cache: 0.1, schrijf: 5, uit: 7.5, b_in: 1, b_cache: 0.05, b_schrijf: 2.5, b_uit: 3.75 } },
   'gpt-6-astra': { in: 10, cache: 1, schrijf: 25, uit: 50, b_in: 5, b_cache: 0.5, b_schrijf: 12.5, b_uit: 25 },
   'gpt-6-sol': { in: 2, cache: 0.2, schrijf: 5, uit: 10, b_in: 1, b_cache: 0.1, b_schrijf: 2.5, b_uit: 5 },
   'gpt-6-luna': { in: 0.10, cache: 0.01, schrijf: 0.25, uit: 0.50, b_in: 0.05, b_cache: 0.005, b_schrijf: 0.125, b_uit: 0.25 },
@@ -50,13 +56,26 @@ const PRIJZEN = {
   'gpt-5-mini': { in: 0.25, cache: 0.025, uit: 2, b_in: 0.125, b_cache: 0.0125, b_uit: 1 },
   'gpt-5-nano': { in: 0.05, cache: 0.005, uit: 0.4, b_in: 0.025, b_cache: 0.0025, b_uit: 0.2 },
 };
+/*
+ * Beeldmodellen (wv2078; David 31-10: beeldgeneratie hoort bij de gerichte inzet). Per miljoen tokens, gelezen 31-10-2026 op dezelfde
+ * prijspagina (Standard en Batch; per-beeldprijzen staan daar niet, alleen tokens). t_uit null = tekstuitvoer niet genoemd. Er is nog GEEN
+ * beeldroute: kostenBeeld staat klaar zodat een latere route meteen telt; tegen een echt antwoord is hij nog niet gemeten.
+ */
+const BEELD_DATUM = '2026-10-31';
+const BEELDPRIJZEN = {
+  'gpt-image-2.5-sunburst': { t_in: 5, t_cache: 1.25, b_in: 8, b_cache: 2, b_uit: 30, t_uit: null, batch: { t_in: 2.5, t_cache: 0.625, b_in: 4, b_cache: 1, b_uit: 15, t_uit: null } },
+  'gpt-image-2.5-flare': { t_in: 5, t_cache: 1.25, b_in: 8, b_cache: 2, b_uit: 30, t_uit: null, batch: { t_in: 2.5, t_cache: 0.625, b_in: 4, b_cache: 1, b_uit: 15, t_uit: null } },
+  'gpt-image-2': { t_in: 5, t_cache: 1.25, b_in: 8, b_cache: 2, b_uit: 30, t_uit: null, batch: { t_in: 2.5, t_cache: 0.625, b_in: 4, b_cache: 1, b_uit: 15, t_uit: null } },
+  'gpt-image-1.5': { t_in: 5, t_cache: 1.25, b_in: 8, b_cache: 2, b_uit: 32, t_uit: 10, batch: { t_in: 2.5, t_cache: 0.63, b_in: 4, b_cache: 1, b_uit: 16, t_uit: 5 } },
+  'gpt-image-1-mini': { t_in: 2, t_cache: 0.2, b_in: 2.5, b_cache: 0.25, b_uit: 8, t_uit: null, batch: { t_in: 1, t_cache: 0.1, b_in: 1.25, b_cache: 0.13, b_uit: 4, t_uit: null } },
+  'chatgpt-image-latest': { t_in: 5, t_cache: 1.25, b_in: 8, b_cache: 2, b_uit: 32, t_uit: 10, batch: { t_in: 2.5, t_cache: 0.63, b_in: 4, b_cache: 1, b_uit: 16, t_uit: 5 } },
+};
 const LANG_MAX = 272000;        // invoertokens: daarboven een ander tarief → weigeren
 const STANDAARD = {
   aan: false,                   // hoofdschakelaar; uit = elke aanroep geweigerd (status uit)
-  tegoed_usd: 1745.18,          // wat David noemde (30-10); alleen voor de grens en de regel in de app
-  grens_pct: 0.8,               // zachte grens = 80 % van het tegoed, tenzij grens_usd
-  grens_usd: null,
-  reset_dag: 1,                 // dag van de maand waarop het tegoed opnieuw begint (niet gemeten; David kan het zetten)
+  tegoed_usd: 1745.18,          // tegoed van de jaarcyclus (David 30-10; 31-10 noemde hij $ 1.730): instelbaar in openai.json
+  cyclus_eind: '2027-08-19',    // David 31-10: het tegoed verloopt op 19-08-2027 (00:00 Nederlandse tijd = eerste dag zonder tegoed)
+  cyclus_start: null,           // niet genoemd: dan cyclus_eind − 1 jaar, in stand() gevlagd als afgeleid
   standaard_model: 'gpt-5.4-mini',
   per_uur: 300,                 // synchrone aanroepen per uur
   max_tekens: 600000,           // invoer per aanroep (instructies + invoer)
@@ -84,6 +103,7 @@ function maskeer(t) {
   return { tekst: uit, n: n };
 }
 // Model uit het antwoord ("gpt-5.4-mini-2026-03-17") → rij in de tabel; eerst exact, dan zonder datumstaart.
+function prijsDatum(model) { const k = prijsSleutel(model); return k && PRIJZEN[k].datum ? PRIJZEN[k].datum : PRIJS_DATUM; }
 function prijsSleutel(model) {
   const m = String(model || '');
   if (Object.prototype.hasOwnProperty.call(PRIJZEN, m)) return m;
@@ -103,12 +123,37 @@ function kosten(model, u, batch) {
   const red = isObj(u.output_tokens_details) ? Number(u.output_tokens_details.reasoning_tokens) || 0 : 0;
   const k = prijsSleutel(model);
   const p = k ? PRIJZEN[k] : PRIJZEN['gpt-6-astra'];
-  const pin = batch ? p.b_in : p.in, pc = batch ? p.b_cache : p.cache, puit = batch ? p.b_uit : p.uit;
-  const ps = (batch ? p.b_schrijf : p.schrijf) || pin;
-  // Lange context (> 272k invoer) heeft een eigen, hoger tarief dat de tabel niet kent: dubbel rekenen en vlaggen (review wv2055 KAN 1)
-  const lang = p.lang && inT > LANG_MAX ? 2 : 1;
-  const usd = lang * ((inT - cache) * pin + cache * pc + schrijf * ps + uitT * puit) / 1e6;
+  // Lange context (> 272k invoer): het eigen tarief van de rij (lang_p, wv2078), anders dubbel rekenen en vlaggen (review wv2055 KAN 1)
+  const langP = inT > LANG_MAX && p.lang_p ? p.lang_p : null;
+  const t = tarief(langP || p, batch);
+  const lang = !langP && p.lang && inT > LANG_MAX ? 2 : 1;
+  const usd = lang * ((inT - cache) * t.in + cache * t.cache + schrijf * t.schrijf + uitT * t.uit) / 1e6;
   return { usd: rond(usd), in: inT, cache: cache, schrijf: schrijf, uit: uitT, redeneer: red, prijs_onbekend: !k || lang > 1 };
+}
+// Tarief van één prijsrij, standaard of batch; schrijven zonder eigen tarief = het invoertarief
+function tarief(p, batch) {
+  const pin = batch ? p.b_in : p.in;
+  return { in: pin, cache: batch ? p.b_cache : p.cache, schrijf: (batch ? p.b_schrijf : p.schrijf) || pin, uit: batch ? p.b_uit : p.uit };
+}
+/*
+ * Beeldkosten uit de usage van een beeldantwoord (wv2078, nog geen route): input_tokens_details.text_tokens/image_tokens, cached_tokens
+ * (ongesplitst: gerekend tegen het hoogste cachetarief), output_tokens_details.text_tokens (zonder eigen tarief: tegen het beeldtarief).
+ * Ontbreekt de splitsing, dan telt alles als beeld (duurste kant). → null bij een onbekend beeldmodel.
+ */
+function kostenBeeld(model, u, batch) {
+  const m = String(model || '').replace(/-\d{4}-\d{2}-\d{2}$/, '');
+  if (!Object.prototype.hasOwnProperty.call(BEELDPRIJZEN, m)) return null;
+  const p = batch ? BEELDPRIJZEN[m].batch : BEELDPRIJZEN[m];
+  u = isObj(u) ? u : {};
+  const di = isObj(u.input_tokens_details) ? u.input_tokens_details : {}, du = isObj(u.output_tokens_details) ? u.output_tokens_details : {};
+  const inT = Number(u.input_tokens) || 0, uitT = Number(u.output_tokens) || 0;
+  const tIn = Math.min(inT, Number(di.text_tokens) || 0), bIn = inT - tIn;
+  const cache = Math.min(inT, Number(di.cached_tokens) || 0);
+  const tUit = p.t_uit == null ? 0 : Math.min(uitT, Number(du.text_tokens) || 0);
+  // de cache eerst van de (goedkopere) tekst af: zo valt het nooit te laag uit
+  const vol = Math.max(0, tIn - cache) * p.t_in + Math.max(0, bIn - Math.max(0, cache - tIn)) * p.b_in;
+  const usd = (vol + cache * Math.max(p.b_cache, p.t_cache) + (uitT - tUit) * p.b_uit + tUit * (p.t_uit || 0)) / 1e6;
+  return { usd: rond(usd), in: inT, cache: cache, schrijf: 0, uit: uitT, redeneer: 0, prijs_onbekend: false };
 }
 function schatting(model, tekens, maxUit, batch) {
   const p = PRIJZEN[model];
@@ -130,6 +175,38 @@ function startIso(dag) {
   const l = new Date(g).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).replace(' ', 'T') + 'Z';
   return new Date(g - (Date.parse(l) - g)).toISOString();
 }
+// ── Jaarcyclus en maandtempo (wv2078). Dagen als 'JJJJ-MM-DD' in Nederlandse tijd; een dag begint om 00:00 NL (startIso).
+const DAG = /^\d{4}-\d{2}-\d{2}$/;
+function dagNL(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
+function dagUtc(dag) { return Date.UTC(Number(dag.slice(0, 4)), Number(dag.slice(5, 7)) - 1, Number(dag.slice(8, 10))); }
+function dagUit(ms) { return new Date(ms).toISOString().slice(0, 10); }
+function echteDag(d) { return typeof d === 'string' && DAG.test(d) && dagUit(dagUtc(d)) === d; }
+function maandBegin(dag) { return dag.slice(0, 8) + '01'; }
+function volgendeMaand(dag) { const j = Number(dag.slice(0, 4)), m = Number(dag.slice(5, 7)); return m === 12 ? (j + 1) + '-01-01' : j + '-' + String(m + 1).padStart(2, '0') + '-01'; }
+function jaarEerder(dag) { const d = new Date(dagUtc(dag)); d.setUTCFullYear(d.getUTCFullYear() - 1); return dagUit(d.getTime()); }
+function dagen(van, tot) { return Math.round((dagUtc(tot) - dagUtc(van)) / 864e5); }
+/*
+ * Waar ms valt in de cyclus [start, eind): de kalendermaand (ingekort tot de cyclus), welk deel van die kalendermaand in de cyclus valt
+ * (maand_deel), hoeveel maanden er vanaf het begin van deze maand nog over zijn (delen van maanden naar rato van de dagen) en welk deel van
+ * deze maand voorbij is. Buiten de cyclus: binnen false.
+ */
+function cyclusVan(ms, start, eind) {
+  const nuDag = dagNL(ms), km = maandBegin(nuDag), kv = volgendeMaand(km);
+  const mb = km < start ? start : km, me = kv > eind ? eind : kv;
+  const binnen = nuDag >= start && nuDag < eind;
+  let over = 0;
+  for (let a = km; a < eind; a = volgendeMaand(a)) {
+    const b = volgendeMaand(a), van = a < mb ? mb : a, tot = b > eind ? eind : b;
+    if (tot > van) over += dagen(van, tot) / dagen(a, b);
+  }
+  const t0 = Date.parse(startIso(mb)), t1 = Date.parse(startIso(me));
+  return { binnen: binnen, maand_begin: mb, maand_eind: me, maand_deel: binnen ? dagen(mb, me) / dagen(km, kv) : 0, maanden_over: binnen ? over : 0,
+    verstreken: binnen && t1 > t0 ? Math.min(1, Math.max(0, (ms - t0) / (t1 - t0))) : null,
+    cyclus_verstreken: Math.min(1, Math.max(0, (ms - Date.parse(startIso(start))) / (Date.parse(startIso(eind)) - Date.parse(startIso(start))))) };
+}
+const GESLAAGD = ['ok', 'onvolledig'];
+function isFout(status) { return /^api_/.test(status) || status === 'fout'; }
+
 // Tekst uit een Responses-antwoord: alle output_text-delen achter elkaar.
 function tekstVan(r) {
   const out = [];
@@ -178,23 +255,51 @@ function maak(o) {
     const i = Object.assign({}, STANDAARD, isObj(j) ? j : {});
     i.aan = i.aan === true;
     i.tegoed_usd = Number(i.tegoed_usd) > 0 ? Number(i.tegoed_usd) : STANDAARD.tegoed_usd;
-    i.grens_pct = Number(i.grens_pct) > 0 && Number(i.grens_pct) <= 1 ? Number(i.grens_pct) : STANDAARD.grens_pct;
-    i.grens = Number(i.grens_usd) > 0 ? Number(i.grens_usd) : rond(i.tegoed_usd * i.grens_pct);
+    // wv2078: grens_usd, grens_pct en reset_dag bestaan niet meer; de grens volgt uit de cyclus (grensStand)
+    if (!echteDag(i.cyclus_eind)) i.cyclus_eind = STANDAARD.cyclus_eind;
+    i.start_afgeleid = !echteDag(i.cyclus_start) || i.cyclus_start >= i.cyclus_eind;
+    if (i.start_afgeleid) i.cyclus_start = jaarEerder(i.cyclus_eind);
     if (!PRIJZEN[i.standaard_model]) i.standaard_model = STANDAARD.standaard_model;
     instBuf = { t: nu(), i: i };
     return i;
   }
   const tel = { gereserveerd: 0, uur: [], sleutel: 'nog_niet_gevraagd', tik_bezig: false };
-  function maandUsd(periode) {
-    const r = db.prepare('SELECT COALESCE(SUM(usd), 0) AS u FROM aanroep WHERE t >= ?').get(startIso(periode));
-    const b = db.prepare("SELECT COALESCE(SUM(reserve_usd), 0) AS u FROM batch WHERE klaar = 0").get();
-    return { usd: rond(r.u), open_batch: rond(b.u) };
+  // Som van usd in [van, tot) (dagen, Nederlandse tijd); open batches tellen apart (hun reservering, tot ze klaar zijn)
+  function som(van, tot) { return rond(db.prepare('SELECT COALESCE(SUM(usd), 0) AS u FROM aanroep WHERE t >= ? AND t < ?').get(startIso(van), startIso(tot)).u); }
+  function openBatchUsd() { return rond(db.prepare('SELECT COALESCE(SUM(reserve_usd), 0) AS u FROM batch WHERE klaar = 0').get().u); }
+  /*
+   * Grens van nu (wv2078): rest bij het begin van deze maand = tegoed − verbruik in de cyclus vóór deze maand; tempo = rest / resterende
+   * maanden; grens deze maand = tempo × het deel van de maand dat in de cyclus valt. Wat een maand overhoudt, schuift door naar de rest.
+   * oordeel: op_koers, te_snel (dit maandtempo doorgetrokken komt boven de grens; de eerste 10 % van de maand gedempt), grens_bereikt, buiten_cyclus.
+   */
+  function grensStand() {
+    const i = inst(), t = nu();
+    const c = cyclusVan(t, i.cyclus_start, i.cyclus_eind);
+    const voor = c.binnen ? som(i.cyclus_start, c.maand_begin) : 0;
+    const maand = som(c.maand_begin, c.maand_eind), cyclus = som(i.cyclus_start, i.cyclus_eind), open = openBatchUsd();
+    const rest0 = Math.max(0, rond(i.tegoed_usd - voor));
+    const tempo = c.maanden_over > 0 ? rond(rest0 / c.maanden_over) : 0;
+    const grens = c.binnen ? rond(tempo * c.maand_deel) : 0;
+    const projectie = c.verstreken == null ? null : rond(maand / Math.max(0.1, c.verstreken));
+    const oordeel = !c.binnen ? 'buiten_cyclus' : maand + open >= grens ? 'grens_bereikt' : projectie > grens ? 'te_snel' : 'op_koers';
+    return { binnen: c.binnen, tegoed: i.tegoed_usd, grens: grens, maand_usd: maand, open_batch: open, cyclus_usd: cyclus,
+      cyclus: { start: i.cyclus_start, eind: i.cyclus_eind, start_afgeleid: i.start_afgeleid, usd: cyclus, rest_usd: rond(Math.max(0, i.tegoed_usd - cyclus - open)),
+        rest_begin_maand_usd: rest0, maanden_over: Math.round(c.maanden_over * 100) / 100, tempo_usd: tempo, verstreken: Math.round(c.cyclus_verstreken * 1000) / 1000 },
+      maand: { begin: c.maand_begin, eind: c.maand_eind, usd: maand, grens_usd: grens, over_usd: rond(Math.max(0, grens - maand - open)),
+        verstreken: c.verstreken == null ? null : Math.round(c.verstreken * 1000) / 1000, projectie_usd: projectie, oordeel: oordeel } };
+  }
+  // null = mag; anders de weigerstatus. extra = schatting van deze aanroep (de lopende reserveringen tellen mee)
+  function grensWeigering(extra) {
+    const g = grensStand();
+    if (!g.binnen) return 'cyclus';
+    const bij = g.open_batch + tel.gereserveerd + extra;
+    return g.maand_usd + bij > g.grens || g.cyclus_usd + bij > g.tegoed ? 'grens' : null;
   }
   function rijRuw(r) {
       db.prepare(`INSERT INTO aanroep (t, periode, afnemer, model, batch, invoer, cache_lees, cache_schrijf, uitvoer, redeneer, usd, prijs_datum,
         prijs_onbekend, status, fout, ref, ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(new Date(nu()).toISOString(),
-        periodeVan(nu(), inst().reset_dag), r.afnemer, r.model || null, r.batch ? 1 : 0, r.in || 0, r.cache || 0, r.schrijf || 0, r.uit || 0,
-        r.redeneer || 0, r.usd || 0, PRIJS_DATUM, r.prijs_onbekend ? 1 : 0, r.status, kort(r.fout, 120), kort(r.ref, 80), r.ms == null ? null : r.ms);
+        periodeVan(nu(), 1), r.afnemer, r.model || null, r.batch ? 1 : 0, r.in || 0, r.cache || 0, r.schrijf || 0, r.uit || 0,
+        r.redeneer || 0, r.usd || 0, prijsDatum(r.model), r.prijs_onbekend ? 1 : 0, r.status, kort(r.fout, 120), kort(r.ref, 80), r.ms == null ? null : r.ms);
   }
   function rij(r) { try { rijRuw(r); } catch (e) { fout('openai-rij', e); } }
   async function sleutel() {
@@ -265,8 +370,8 @@ function maak(o) {
     tel.uur = tel.uur.filter(function (x) { return t0 - x < 3600000; });
     if (tel.uur.length >= i.per_uur) return weiger(afnemer, model, 'uurgrens');
     const sch = schatting(model, tekens, maxUit, false);
-    const m = maandUsd(periodeVan(t0, i.reset_dag));
-    if (m.usd + m.open_batch + tel.gereserveerd + sch > i.grens) return weiger(afnemer, model, 'grens');
+    const g = grensWeigering(sch);
+    if (g) return weiger(afnemer, model, g);
     // Reserveren meteen na de controle, zonder await ertussen (review wv2055 MOET 2); vrijgeven in finally
     tel.uur.push(t0); tel.gereserveerd += sch;
     let verstuurd = false;
@@ -336,8 +441,8 @@ function maak(o) {
     if (geweigerd.length) rij({ afnemer: afnemer, model: model, batch: 1, status: 'poort', fout: geweigerd.length + ' verzoeken' });
     if (!regels.length) return { ok: false, status: 'poort', geweigerd: geweigerd };
     sch = rond(sch);
-    const m = maandUsd(periodeVan(nu(), i.reset_dag));
-    if (m.usd + m.open_batch + tel.gereserveerd + sch > i.grens) return weiger(afnemer, model, 'grens', { batch: 1 });
+    const g = grensWeigering(sch);
+    if (g) return weiger(afnemer, model, g, { batch: 1 });
     // Reserveren meteen na de controle (review wv2055 MOET 2); na de INSERT telt de batchrij zelf (open_batch), dus vrijgeven in finally
     tel.gereserveerd += sch;
     let bestand = null, btId = null, sl = null;
@@ -445,23 +550,90 @@ function maak(o) {
   }
 
   // Voor /health en de regel in de app: alleen bedragen, aantallen en tijden; nooit tekst, sleutel of afnemersinhoud.
+  // maand_usd en grens_usd gelden voor de kalendermaand (grens = het maandtempo van de cyclus, wv2078); periode_start = begin van die maand.
   function stand() {
-    const i = inst();
-    const per = periodeVan(nu(), i.reset_dag);
-    const m = maandUsd(per);
-    return { maand_usd: m.usd, open_batch_usd: m.open_batch, tegoed_usd: i.tegoed_usd, grens_usd: i.grens, periode_start: per, prijzen: PRIJS_DATUM, aan: i.aan };
+    const i = inst(), g = grensStand();
+    return { maand_usd: g.maand_usd, open_batch_usd: g.open_batch, tegoed_usd: i.tegoed_usd, grens_usd: g.grens, periode_start: g.maand.begin,
+      prijzen: PRIJS_DATUM, aan: i.aan, cyclus: g.cyclus, maand: g.maand };
   }
   function health() {
     const i = inst();
-    const per = periodeVan(nu(), i.reset_dag);
+    const per = periodeVan(nu(), 1);
     const st = {};
     for (const r of db.prepare('SELECT status, COUNT(*) AS n FROM aanroep WHERE periode = ? GROUP BY status').all(per)) st[r.status] = r.n;
     const l = db.prepare('SELECT t, afnemer, model, batch, status FROM aanroep ORDER BY id DESC LIMIT 1').get() || null;
     return Object.assign(stand(), { module: true, versie: VERSIE, sleutel: tel.sleutel, gereserveerd_usd: rond(tel.gereserveerd), per_status: st,
       batches_open: db.prepare('SELECT COUNT(*) AS n FROM batch WHERE klaar = 0').get().n, laatste: l, standaard_model: i.standaard_model });
   }
+  /*
+   * Uitsplitsing over [van, tot) voor de Verbruikspagina (wv2078). Alleen getallen: per model, per afnemer, standaard of batch, en per
+   * tokensoort met tokens en dollars. De dollars per tokensoort rekent deze functie uit de tokens en de prijstabel (lange context naar het
+   * eigen tarief of dubbel, zoals kosten()); usd in de rijen blijft leidend: wat niet toe te delen is (geschatte time-outs, onbekende prijs,
+   * beeldmodellen) staat in niet_toegedeeld_usd.
+   */
+  function uitsplitsing(van, tot) {
+    const rijen = db.prepare(`SELECT model, batch, status, afnemer, invoer > ${LANG_MAX} AS lang, COUNT(*) AS n, SUM(usd) AS usd, SUM(invoer) AS invoer,
+      SUM(cache_lees) AS cache_lees, SUM(cache_schrijf) AS cache_schrijf, SUM(uitvoer) AS uitvoer, SUM(redeneer) AS redeneer FROM aanroep
+      WHERE t >= ? AND t < ? GROUP BY model, batch, status, afnemer, lang`).all(startIso(van), startIso(tot));
+    const SOORTEN = ['invoer', 'cache_lees', 'cache_schrijf', 'uitvoer', 'redeneer'];
+    const leeg = function () { return { aanroepen: 0, usd: 0 }; };
+    const u = { van: van, tot: tot, usd: 0, aanroepen: 0, onvolledig: 0, geweigerd: 0, fouten: 0, per_status: Object.create(null), per_model: Object.create(null), per_afnemer: Object.create(null),   // review ZOU 2: geen prototype-sleutels
+      standaard: leeg(), batch: leeg(), tokens: {}, niet_toegedeeld_usd: 0 };
+    for (const k of SOORTEN) u.tokens[k] = { tokens: 0, usd: 0 };
+    let toegedeeld = 0;
+    for (const r of rijen) {
+      const n = r.n, usd = Number(r.usd) || 0, gelukt = GESLAAGD.indexOf(r.status) >= 0;
+      u.usd += usd;
+      u.per_status[r.status] = (u.per_status[r.status] || 0) + n;
+      if (gelukt) u.aanroepen += n; else if (isFout(r.status)) u.fouten += n; else u.geweigerd += n;
+      if (r.status === 'onvolledig') u.onvolledig += n;
+      const mk = prijsSleutel(r.model) || kort(r.model, 60) || 'onbekend';
+      const m = u.per_model[mk] || (u.per_model[mk] = { model: mk, aanroepen: 0, usd: 0, tokens: 0, bekend: !!prijsSleutel(r.model) });
+      const a = u.per_afnemer[r.afnemer] || (u.per_afnemer[r.afnemer] = { afnemer: r.afnemer, aanroepen: 0, usd: 0, geweigerd: 0 });
+      const sb = r.batch ? u.batch : u.standaard;
+      m.usd += usd; a.usd += usd; sb.usd += usd;
+      if (gelukt) { m.aanroepen += n; a.aanroepen += n; sb.aanroepen += n; } else if (!isFout(r.status)) a.geweigerd += n;
+      m.tokens += (r.invoer || 0) + (r.uitvoer || 0);
+      for (const k of SOORTEN) u.tokens[k].tokens += r[k] || 0;
+      const pk = prijsSleutel(r.model);
+      if (!pk) continue;
+      const p = PRIJZEN[pk], langP = r.lang && p.lang_p ? p.lang_p : null, f = !langP && p.lang && r.lang ? 2 : 1, t = tarief(langP || p, !!r.batch);
+      const d = { invoer: Math.max(0, (r.invoer || 0) - (r.cache_lees || 0)) * t.in, cache_lees: (r.cache_lees || 0) * t.cache,
+        cache_schrijf: (r.cache_schrijf || 0) * t.schrijf, uitvoer: (r.uitvoer || 0) * t.uit, redeneer: (r.redeneer || 0) * t.uit };
+      for (const k of SOORTEN) { u.tokens[k].usd += f * d[k] / 1e6; if (k !== 'redeneer') toegedeeld += f * d[k] / 1e6; }
+    }
+    const lijst = function (o) { return Object.values(o).map(function (x) { x.usd = rond(x.usd); return x; }).sort(function (a, b) { return b.usd - a.usd || b.aanroepen - a.aanroepen; }); };
+    u.per_model = lijst(u.per_model); u.per_afnemer = lijst(u.per_afnemer); u.per_status = Object.assign({}, u.per_status);
+    for (const k of SOORTEN) u.tokens[k].usd = rond(u.tokens[k].usd);
+    u.standaard.usd = rond(u.standaard.usd); u.batch.usd = rond(u.batch.usd);
+    u.usd = rond(u.usd);
+    u.niet_toegedeeld_usd = u.usd - toegedeeld > 0.000005 ? rond(u.usd - toegedeeld) : 0;
+    return u;
+  }
+  // Verbruikspagina (GET /app/tokens/openai): stand van de cyclus en de maand, uitsplitsing voor beide, dagen van deze maand, open batches.
+  function verbruik() {
+    const i = inst(), g = grensStand(), t = nu();
+    const per_dag = [];
+    const dagIdx = {};
+    for (let d = g.maand.begin; d < g.maand.eind && d <= dagNL(t); d = dagUit(dagUtc(d) + 864e5)) { dagIdx[d] = per_dag.length; per_dag.push({ datum: d, usd: 0, standaard_usd: 0, batch_usd: 0, aanroepen: 0 }); }
+    for (const r of db.prepare('SELECT t, batch, status, usd FROM aanroep WHERE t >= ? AND t < ?').all(startIso(g.maand.begin), startIso(g.maand.eind))) {
+      const x = per_dag[dagIdx[dagNL(Date.parse(r.t))]];
+      if (!x) continue;
+      x.usd += r.usd || 0; x[r.batch ? 'batch_usd' : 'standaard_usd'] += r.usd || 0;
+      if (GESLAAGD.indexOf(r.status) >= 0) x.aanroepen++;
+    }
+    for (const x of per_dag) { x.usd = rond(x.usd); x.standaard_usd = rond(x.standaard_usd); x.batch_usd = rond(x.batch_usd); }
+    const open = db.prepare('SELECT ingediend, afnemer, model, aantal, status, reserve_usd FROM batch WHERE klaar = 0 ORDER BY ingediend').all();
+    const aannames = ['eigen telling van de pod (OpenAI geeft het saldo niet aan een projectsleutel); maanden zijn kalendermaanden, Nederlandse tijd'];
+    if (i.start_afgeleid) aannames.push('begin van de cyclus afgeleid: einddatum min één jaar');
+    return { ok: true, versie: VERSIE, aan: i.aan, nu: new Date(t).toISOString(), prijzen: { tekst: PRIJS_DATUM, terra: PRIJZEN['gpt-6.1-terra'].datum, beeld: BEELD_DATUM },
+      tegoed_usd: i.tegoed_usd, open_batch_usd: g.open_batch, cyclus: g.cyclus, maand: g.maand,
+      deze_maand: uitsplitsing(g.maand.begin, g.maand.eind), sinds_begin: uitsplitsing(i.cyclus_start, i.cyclus_eind), per_dag: per_dag,
+      open_batches: open.map(function (b) { return { ingediend: b.ingediend, afnemer: b.afnemer, model: b.model, aantal: b.aantal, status: b.status, reserve_usd: rond(b.reserve_usd) }; }),
+      aannames: aannames };
+  }
   function sluit() { try { db.close(); } catch (e) {} }
-  return { vraag, batchIndienen, batchTik, batchStand, stand, health, sluit };
+  return { vraag, batchIndienen, batchTik, batchStand, stand, health, verbruik, sluit };
 }
 
-module.exports = { maak, VERSIE, PRIJZEN, PRIJS_DATUM, _intern: { kosten, schatting, periodeVan, tekstVan, geheimIn, maskeer, prijsSleutel } };
+module.exports = { maak, VERSIE, PRIJZEN, PRIJS_DATUM, BEELDPRIJZEN, BEELD_DATUM, _intern: { kosten, kostenBeeld, schatting, periodeVan, cyclusVan, tekstVan, geheimIn, maskeer, prijsSleutel } };
