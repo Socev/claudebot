@@ -352,6 +352,7 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
   toets('5 uitrol-lijst en Dockerfile', /RELEASE_OPTIONEEL="[^"]*docs-delen\.js/.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY docs-delen\.js \/app\/release-bootstrap\/docs-delen\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
   toets('5 D1-id ingevuld (geen plaatshouder meer)', !/__DOCS_D1_ID__/.test(src) && /const DOCS_D1_ID = process\.env\.DOCS_D1_ID \|\| '[0-9a-f-]{36}';/.test(src));
   const vm = require('vm');
+  // wv2118: sinds wv2114 staat het MemoryLane-deelblok binnen het docs-knipsel; dat blok toetst test/memorylane-delen.sh, hier eruit
   const hb = src.indexOf('// ── Second Brain (wv832'), he = src.indexOf('// ── einde secondbrain');
   const db0 = src.indexOf('// ── OVIS Docs › Delen (wv1382'), de = src.indexOf('// ── einde docs delen');
   const gestuurd = [];
@@ -364,7 +365,7 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
     SMAL_CF_BASIS: 'https://cf', SMAL_CF_ACCOUNT: 'acc', appTeller: () => true, appVersOk: (a, s) => s.vers === true,
     appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Date, Promise, JSON, String, Number, Array, Object, Math, Buffer, Map, Set,
     AbortSignal, encodeURIComponent, fetch: async (url, o) => { fetchLog.push({ url, o }); return { status: 200, json: async () => fetchAntw(url, o) }; } });
-  vm.runInContext((/^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0]) + src.slice(hb, he) + '\n' + src.slice(db0, de) + ';globalThis.__dd = { docsDelen, appDocs, docsDelenInfo, docsCf, docsAccess, docsAccessBodyOk };', ctx, { filename: 'server.js#docs' });
+  vm.runInContext((/^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0]) + src.slice(hb, he) + '\n' + src.slice(db0, de).replace(/\/\/ ── MemoryLane delen \(wv2114[\s\S]*?\/\/ ── einde MemoryLane delen ──\n/, '') + ';globalThis.__dd = { docsDelen, appDocs, docsDelenInfo, docsCf, docsAccess, docsAccessBodyOk };', ctx, { filename: 'server.js#docs' });
   toets('5 koppeling laadt (docsDelen aan)', !!ctx.__dd.docsDelen && ctx.__dd.docsDelenInfo().aan === true, ctx.__dd.docsDelenInfo());
   let res = { _app: {} };
   await ctx.__dd.appDocs({}, res, { soort: 'meereizend' }, { vers: false }, { pad: '01_Ontwikkeling/Reis.md', soort: 'openbaar', sha: 'a'.repeat(64) }, 'POST /app/docs/delen');
