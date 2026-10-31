@@ -961,6 +961,14 @@ const CLAUDE_EFFORT = (function () {
   const w = String(process.env.CLAUDE_EFFORT || 'high').trim().toLowerCase();
   return EFFORT_NIVEAUS.indexOf(w) >= 0 ? w : 'high';
 })();
+// wv2111 (David 31-10-2026): effort per agent. POST /agent {effort} (de tikker geeft 'medium' aan nacontroles en de bundelronde);
+// leeg = CLAUDE_EFFORT, onbekend = null (de route weigert met 400). Alleen voor runtime claude; codex en gemini houden hun eigen stand.
+function ontleedEffort(v) {
+  const k = (v == null ? '' : String(v)).trim().toLowerCase();
+  if (!k) return '';
+  return EFFORT_NIVEAUS.indexOf(k) >= 0 ? k : null;
+}
+function effortVoor(opts) { return (opts && opts.effort && EFFORT_NIVEAUS.indexOf(opts.effort) >= 0) ? opts.effort : CLAUDE_EFFORT; }
 
 // Is de transcriptmeting in dit proces al eens bewezen (ons eigen, exact gepinde transcript groeide)?
 // Bijgehouden per projectmap (review 4-10): een bewijs in de vault zegt niets over een andere cwd.
@@ -991,9 +999,9 @@ const GEREEDSCHAP_LEZEN_MAX_UIT = 30 * 1024 * 1024;
 function claudeBasisArgs(opts) {
   if (opts && opts.gereedschap === 'lezen') {
     return ['-p', '--output-format', 'json', '--restricted', '--strict-mcp-config', '--tools', GEREEDSCHAP_LEZEN_TOOLS,
-      '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', '--effort', CLAUDE_EFFORT];
+      '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', '--effort', effortVoor(opts)];
   }
-  return ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--effort', CLAUDE_EFFORT];
+  return ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--effort', effortVoor(opts)];
 }
 // '' = standaard, 'lezen' = beperkt; null bij een onbekende waarde.
 function leesGereedschap(w) {
@@ -2314,7 +2322,8 @@ function jobEindLog(jobId, j, ws) {
     seconden: Math.round((((j.done_at || Date.now()) - (j.started || j.created || Date.now()))) / 1000),
     exit_code: (r.exit_code === undefined || r.exit_code === null) ? 'n.v.t.' : r.exit_code,
     uitvoer_bytes: (r.output_bytes !== undefined) ? r.output_bytes : Buffer.byteLength(out, 'utf8'),
-    model: j.agent ? j.model : undefined, advisor: j.agent ? j.advisor : undefined   // wv479: alleen agents (leeg = niet in de regel)
+    model: j.agent ? j.model : undefined, advisor: j.agent ? j.advisor : undefined,   // wv479: alleen agents (leeg = niet in de regel)
+    effort: j.agent ? j.effort : undefined   // wv2111
   });
 }
 
@@ -3106,6 +3115,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
       opSpawnWv781(); saveAgents();
     };
     if (keuze.advisor) runOpts.advisor = keuze.advisor;   // wv479: gaat mee in de hervattingen van de eindcontrole (runOpts)
+    if (j.effort) runOpts.effort = j.effort;   // wv2111: idem
     if (j.beperkt === 'auto') { runOpts.disallowedTools = AUTO_AGENT_VERBODEN; runOpts.envMag = AUTO_AGENT_ENV_MAG; }
     // wv424: alleen een machinekamer:-agent met API_SECRET krijgt de volledige omgeving; Socevs eigen agents (SOCEV_AGENT_SLEUTEL)
     // en alle andere labels draaien smal, ook in de hervatting van de eindcontrole (runOpts gaat mee).
@@ -4202,6 +4212,9 @@ function handleRequest(req, res) {
         Object.keys(ADVISEURS).join(', ') + ', of leeg voor geen adviseur.', lengte: String(d.advisor).length }, '/agent');
       if (advEigen && (beperkt || keuze.runtime !== 'claude')) return weigerRuntime(res, { error: 'adviseur-alleen-claude',
         melding: 'een adviseur kan alleen bij runtime claude (en niet bij beperkt).', lengte: 0 }, '/agent');
+      const effort = terraRij ? '' : ontleedEffort(d.effort);   // wv2111
+      if (effort === null) return weigerRuntime(res, { error: 'onbekend-effort', melding: 'onbekend effort; geldig zijn ' +
+        EFFORT_NIVEAUS.join(', ') + ', of leeg voor de podstandaard (' + CLAUDE_EFFORT + ').', lengte: String(d.effort).length }, '/agent');
       const maxMin = Math.min(Math.max(parseInt(d.max_minuten || BG_MAX_DEFAULT_MIN, 10) || BG_MAX_DEFAULT_MIN, 5), BG_MAX_CAP_MIN);
       const jobId = crypto.randomBytes(8).toString('hex');
       keuze = Object.assign({}, keuze, { advisor: advEigen });
@@ -4210,7 +4223,7 @@ function handleRequest(req, res) {
       const proef = (!eigenKeuze && !beperkt && !smal) ? advisorProefClaim(jobId, label, prompt) : null;
       if (proef) keuze = { runtime: 'claude', model: proef.model, advisor: proef.advisor, fallback: '' };
       jobs[jobId] = { status: 'pending', created: Date.now(), agent: true, workspace: ws, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', beperkt: beperkt, smal: smal || undefined,
-        model: keuze.model || undefined, advisor: keuze.advisor || undefined, terra: terraRij ? terraRij.id : undefined };
+        model: keuze.model || undefined, advisor: keuze.advisor || undefined, terra: terraRij ? terraRij.id : undefined, effort: effort || undefined };
       res._log = { job_id: jobId, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', workspace: ws, agent: 1 };
       agentsReg[jobId] = {
         job_id: jobId, label: label, status: 'pending',
@@ -4219,7 +4232,8 @@ function handleRequest(req, res) {
         max_minuten: maxMin, workspace: ws, runtime: keuze.runtime, beperkt: beperkt || undefined,
         omgeving: agentIsMk(label, smal, beperkt) ? 'mk' : (beperkt ? 'auto' : 'smal'),   // wv424
         model: keuze.model || undefined, advisor: keuze.advisor || undefined, advisor_proef: proef ? true : undefined,   // wv479
-        terra: terraRij ? terraRij.id : undefined   // wv2081
+        terra: terraRij ? terraRij.id : undefined,   // wv2081
+        effort: effort || undefined   // wv2111: leeg = podstandaard
       };
       // wv275: gestart vanuit een [AUTO]-beurt van de telefoon? Synchroon, vóór het antwoord: het verzoekende proces leeft dan nog.
       try { telMerkAgent(req, jobId, label); } catch (e) { logError('tel-merk', e); }
@@ -4228,7 +4242,7 @@ function handleRequest(req, res) {
       processAgent(jobId, terraRij ? terraRij.prompt : prompt, d.session_id, ws, keuze, maxMin * 60 * 1000);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, job_id: jobId, label: label, max_minuten: maxMin, runtime: keuze.runtime, omgeving: agentsReg[jobId].omgeving,
-        model: keuze.model || undefined, advisor: keuze.advisor || undefined, advisor_proef: proef ? true : undefined }));
+        model: keuze.model || undefined, advisor: keuze.advisor || undefined, advisor_proef: proef ? true : undefined, effort: effort || undefined }));
     }); });
   }
 
@@ -4249,6 +4263,7 @@ function handleRequest(req, res) {
         omgeving: a.omgeving,   // wv424: mk | smal | auto (geen inhoud, alleen de klasse)
         gebruiker: a.gebruiker || (a.status === 'pending' ? undefined : 'claude'),   // wv715: socev = via de loper (uid 1002)
         model: a.model, advisor: a.advisor, advisor_proef: a.advisor_proef,   // wv479
+        effort: a.effort,   // wv2111: alleen als de agent een eigen effort kreeg; leeg = podstandaard (/health effort)
         account: a.account,   // wv781: 1 of 2 (tweede abonnement)
         herstart: a.herstart,
         error: a.error,   // foutcode (wv51); de tikker gebruikt hem als /result kwijt is
