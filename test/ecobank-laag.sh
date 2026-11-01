@@ -126,9 +126,13 @@ const M = {
     const ctx = vm.createContext(g);
     vm.runInContext(ssrc.slice(k1, k2) + '\n' + ssrc.slice(sa, sb) + '\n;globalThis.__h = { bankSmal, ecobankRonde, ecobankNaBankRonde };', ctx, { filename: 'server.js#bank' });
     const h = ctx.__h;
+    // eerste ronde op een lege tabel (na de bank-ronde, zonder van): de hele historie (vanaf 2023) in één keer
+    const r0 = await h.ecobankNaBankRonde();
+    toets('server: eerste ronde (lege tabel) leest de hele historie', r0.ok === true && r0.van === '2023-01-01' && r0.nieuw === 5 && LL.zoek.some((q) => /after:2022\/12\/31/.test(q)), { r0, z: LL.zoek.slice(0, 2) });
     const r1 = await h.bankSmal({ opdracht: 'ecobank-ronde', secret: SECRET, van: '2026-09-01' });
-    toets('server: ecobank-ronde (machinekamer) leest en bewaart', r1.status === 200 && r1.j.ok === true && r1.j.bewaard.nieuw === 5 && r1.j.stand.posten === 5, r1.j);
+    toets('server: ecobank-ronde (machinekamer) met van werkt', r1.status === 200 && r1.j.ok === true && r1.j.van === '2026-09-01' && r1.j.al_bekend === 5 && r1.j.stand.posten === 5, r1.j);
     toets('server: elke mail één keer geopend', LL.lees.length === 5 && new Set(LL.lees).size === 5, LL.lees);
+    toets('server: antwoord eerste ronde bevat alleen aantallen', !/VOORBEELD|XPRESS|12500|9500|1250/.test(JSON.stringify(r0)), r0);
     toets('server: antwoord bevat alleen aantallen (geen namen, bedragen of tekst)', !/VOORBEELD|XPRESS|12500|9500|1250/.test(JSON.stringify(r1.j)), r1.j);
     const voor = LL.lees.length;
     const r2 = await h.bankSmal({ opdracht: 'ecobank-ronde', secret: SECRET, van: '2026-09-01' });

@@ -21329,10 +21329,12 @@ async function paypalNaBankRonde() {
 // zijn twee Gambiaanse rekeningen (EUR en GMD). Ecobank heeft geen koppeling; elke mutatie geeft een mail met bedrag en saldo erna.
 // HOE. Zelfde route als de PayPal-laag: mail_zoeken + mail_lezen van het lees-luik (alleen lezen), ecobank-mail.js leesMail (vaste regels,
 // geen taalmodel), bank-lezer.js ecobank-bij bewaart in de transactiedatabase (tabel ecobank_tx). Alleen nieuwe mails worden geopend.
-// Ronde: na elke bank-ronde (07:00 en 18:00) de laatste ECOBANK_RONDE_DAGEN dagen; historie alleen machinekamer (bank.py ecobank-ronde van=…).
+// Ronde: na elke bank-ronde (07:00 en 18:00) de laatste ECOBANK_RONDE_DAGEN dagen; de eerste ronde (tabel leeg) leest de hele historie
+// vanaf ECOBANK_HISTORIE_VAN; opnieuw vanaf een datum alleen machinekamer (bank.py ecobank-ronde van=…).
 // Niets wordt gelabeld, gelezen gemarkeerd of gearchiveerd; er gaat niets naar Ecobank. Uitkomst alleen als aantallen (log, n8n).
 const ECOBANK_QUERY = 'from:noreply@ecobank.com subject:"Transaction Notification on A/C"';
 const ECOBANK_RONDE_DAGEN = 5;
+const ECOBANK_HISTORIE_VAN = '2023-01-01';   // eerste ronde (nog niets bewaard): de hele historie één keer (Ecobank-mails sinds 2023, meldingen sinds 21-4-2026)
 const ECOBANK_BATCH = 60;   // posten per kindproces (± 400 bytes per post; stdin van bank-lezer.js is begrensd op 64 KB)
 let ecobankBezig = false;
 async function ecobankZoek(van, tot, uit, diepte) {
@@ -21357,9 +21359,9 @@ async function ecobankRonde(o) {
   try {
     const E = require(path.join(__dirname, 'ecobank-mail.js'));
     const vandaag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
-    const van = (o && o.van) || paypalPlusDagen(vandaag, -ECOBANK_RONDE_DAGEN);
     const bek = await bankKind(['ecobank-bekend']);
     if (!bek.j || bek.j.ok !== true || !Array.isArray(bek.j.mail_ids)) return { ok: false, fout: 'database niet leesbaar: ' + String((bek.j && bek.j.fout) || 'ecobank-bekend faalde').slice(0, 120) };
+    const van = (o && o.van) || (bek.j.mail_ids.length ? paypalPlusDagen(vandaag, -ECOBANK_RONDE_DAGEN) : ECOBANK_HISTORIE_VAN);
     const bekend = new Set(bek.j.mail_ids);
     const zoek = { mails: new Map(), afgekapt: false, melding: false };
     let s = paypalPlusDagen(van, -1);
