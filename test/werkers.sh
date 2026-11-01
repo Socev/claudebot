@@ -95,6 +95,11 @@ toets('4l meetfout: rooster onleesbaar, actief onbekend, fout gemeld', af.filter
 toets('4m meetfout: hartslag onbekend, niet "nooit"', af.filter((x) => x.hartslag.length).every((x) => x.status === 'onbekend'));
 toets('4n meetfout: check niet gemeten (null)', sf.check.ontbreekt === null && sf.check.hartslag_zonder_werker === null);
 toets('4o overig geteld', st.overig.aantal === W.OVERIG.length);
+// wv2177: bewust uit (JIMMY) = geen bevinding als hij uit staat; een gewone overig-stroom die uit staat wel
+const bewust = W.OVERIG.filter((w) => w.bewust_uit), gewoon = W.OVERIG.find((w) => !w.bewust_uit);
+const sb = W.stand({ workflows: live.filter((w) => !bewust.some((b) => b.n8n === w.id) && w.id !== gewoon.n8n), hartslag: hs, nu: NU });
+toets('4p check: bewust uit telt niet als uit of weg, gewone overig wel', bewust.length >= 1 && !sb.check.niet_actief.some((x) => bewust.some((b) => b.n8n === x.id)) &&
+  sb.check.niet_actief.some((x) => x.id === gewoon.n8n && x.overig), sb.check.niet_actief);
 
 // 5 Ploeg.md
 const md = W.markdown(st, '2026-11-02');

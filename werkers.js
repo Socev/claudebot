@@ -80,6 +80,9 @@ const N8N = [
   {"id": "n8n-pwXNABV5CYnnv0as", "naam": "Heartbeat - proactief overdag", "soort": "wachter", "n8n": "pwXNABV5CYnnv0as", "sessie": "hoofd", "model": "pod-standaard", "hartslag": [], "uitkomst": "Bericht aan David (hoofd)"},
   {"id": "n8n-lKcF3Oxt8WVeELPJ", "naam": "Nachtconsolidatie - dromen (03:00)", "soort": "wachter", "n8n": "lKcF3Oxt8WVeELPJ", "sessie": "hoofd", "skill": "nachtconsolidatie", "model": "pod-standaard", "hartslag": [], "uitkomst": "vault (actueel, logboek, deadlines)"},
   {"id": "n8n-vNsdkyTQIaGhU0Fj", "naam": "Nachtelijke raw_input-verwerking", "soort": "wachter", "n8n": "vNsdkyTQIaGhU0Fj", "sessie": "hoofd", "skill": "second-brain-verwerk-raw-input", "model": "pod-standaard", "hartslag": [], "uitkomst": "vault + Bericht (hoofd/machinekamer)"},
+  // wv2177 (Data Manager DM12, 1-11-2026): actief in n8n, nog niet in het register
+  {"id": "n8n-a2uQmFJuV38kcwMJ", "naam": "MailMan", "soort": "routine", "module": "intake", "n8n": "a2uQmFJuV38kcwMJ", "model": "Jev (lokaal)", "hartslag": [], "uitkomst": "labels in Davids privé-Gmail + verkoopfacturen Doktersmaten naar Exact (grondwet 1 en 7)"},
+  {"id": "n8n-IXfyQbJ1eTDWQ3Qh", "naam": "Meeleespod-seintjes", "soort": "routine", "n8n": "IXfyQbJ1eTDWQ3Qh", "model": "geen", "hartslag": [], "uitkomst": "Bericht aan David (app) bij een verlopen login of inlogvenster van de meelezers"},
   {"id": "n8n-OQBs2wP6YugOHhQC", "naam": "Waarnemingzoeker", "soort": "routine", "n8n": "OQBs2wP6YugOHhQC", "model": "geen", "hartslag": [], "uitkomst": "Bericht aan David (hoofd)"},
 ];
 
@@ -93,6 +96,11 @@ const POD = [
     model: 'geen', hartslag: [], uitkomst: 'secondbrain.knoop + gegenereerd blok in de entiteitpagina\'s', bron: 'ovis-register.js compileer' },
   { id: 'sb2-linter', naam: 'SB2 frontmatter-linter', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke nacht 02:00–02:29',
     model: 'geen', hartslag: ['sb2_linter'], uitkomst: 'vault-manifest + box bij fouten', bron: 'sb2-nacht.js → socev-scripts linter.py' },
+  // wv2177 (DM12): de nachtketen zelf (één slotstempel) en de zoekstappen erin stempelden zonder werker
+  { id: 'sb2-nachtketen', naam: 'SB2-nachtketen (nachtstappen in volgorde)', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke nacht tot 07:40',
+    model: 'geen', hartslag: ['sb2_nachtketen'], uitkomst: 'slotstempel + box-rij bij een mislukte of onvolledige stap', uitzetbaar: false, bron: 'nachtketen.js, server.js NK_MOD' },
+  { id: 'sb2-zoeken', naam: 'SB2 zoeken (feitenlijst, zoekindex, zoekleer)', soort: 'routine', module: 'intake', trigger: 'pod-tijdklok', rooster: 'elke nacht 05:00–07:00 (in de nachtketen)',
+    model: 'geen', hartslag: ['sb2-feitenlijst', 'sb2-zoekindex', 'sb2-zoekleer'], uitkomst: 'secondbrain.identifier + zoekindex voor Zoek snel', bron: 'server.js sb2ZoekKlok → socev-scripts feitenlijst.py, zoekindex.py, zoekleer.py' },
   { id: 'socev-run-veeg', naam: 'Opruimronde crash-vangnet', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke nacht 03:50–04:49',
     model: 'geen', hartslag: ['socev-run-veeg'], uitkomst: 'opgeruimde runs', bron: 'sb2-nacht.js → socev-run --veeg' },
   { id: 'ovis-kalender', naam: 'OVIS Calendar (externe kalenders)', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke dag 06:35–07:34',
@@ -106,7 +114,8 @@ const POD = [
   { id: 'vault-r2', naam: 'Vault naar R2', soort: 'routine', trigger: 'pod', rooster: 'elke nacht',
     model: 'geen', hartslag: ['vault_sync_r2'], uitkomst: 'kopie in de EU-R2-bucket', uitzetbaar: false, bron: 'sync-naar-r2.sh' },
   { id: 'uitwijk', naam: 'Uitwijk-sync en R230-nachtronde', soort: 'routine', trigger: 'pod', rooster: 'elke nacht',
-    model: 'geen', hartslag: ['uitwijk_sync', 'r230_nachtcheck'], uitkomst: 'uitwijkserver bij', uitzetbaar: false, bron: 'bouwplan uitwijk § 4.3 en § 13.7' },
+    model: 'geen', hartslag: ['uitwijk_sync', 'r230_nachtcheck', 'uitwijk_cred'], uitkomst: 'uitwijkserver bij (ook de versleutelde n8n-credentials, 03:10)', uitzetbaar: false,
+    bron: 'bouwplan uitwijk § 4.3 en § 13.7; uitwijk-cred.js (nachtketen)' },
   { id: 'syncthing', naam: 'Syncthing (vault ↔ thuis, laptop, werk-pc)', soort: 'routine', trigger: 'pod', rooster: 'stempel elke 30 min',
     model: 'geen', hartslag: ['syncthing'], uitkomst: 'vault op de apparaten', uitzetbaar: false, bron: 'server.js (wv1277)' },
   { id: 'pot-verzending', naam: 'POT-verzending (SLOEL-nota\'s)', soort: 'routine', trigger: 'pod', rooster: 'op de verzenddatum die David koos',
@@ -116,6 +125,7 @@ const POD = [
 ];
 
 // ── actieve n8n-workflows die geen werker zijn (kanaal, luik, JIMMY) ──
+// bewust_uit (wv2177): staat uit in n8n en hoort uit te staan (de JIMMY-stromen, gemeten 1-11-2026); geen bevinding zolang hij uit staat.
 const OVERIG = [
   {"n8n": "LeqoYYEvJPhAKPS3", "naam": "Agenda-knoppen", "soort": "luik"},
   {"n8n": "JD0yNxPq79jXk25J", "naam": "Agenda-Wachter API", "soort": "luik"},
@@ -127,6 +137,7 @@ const OVERIG = [
   {"n8n": "3KSm6ON7lQFxdBve", "naam": "Foutmelder", "soort": "kanaal", "uitzetbaar": false},
   {"n8n": "Pxl1HeB7woGqcXzF", "naam": "Injectie-canary (Jev)", "soort": "luik"},
   {"n8n": "9a6vZy16RncxlQ8A", "naam": "Injectielabel (Jev)", "soort": "luik"},
+  {"n8n": "QsoEDYT0T6yra1iK", "naam": "Injectielabel (pod)", "soort": "luik"},
   {"n8n": "Z0OxkHC6vk3WCCHA", "naam": "Kluisluik (webhook)", "soort": "luik"},
   {"n8n": "ruUxLjRmYxgM8jzp", "naam": "Mailconcept naar Gmail", "soort": "luik"},
   {"n8n": "u2XdwcstzRuzb0nC", "naam": "OCR-gateway (DeepSeek) v2 (serieel)", "soort": "luik"},
@@ -151,11 +162,11 @@ const OVERIG = [
   {"n8n": "rzFcROmWRQsINhBE", "naam": "FV2 - Sub - Forward na OK (dashboard/Telegram)", "soort": "luik"},
   {"n8n": "Z8lwj3ctPEuXPqPE", "naam": "FV2 - Sub - Normaliseer document", "soort": "luik"},
   {"n8n": "4R2JPMAwJq9xCZNi", "naam": "GHAWA Website via Telegram", "soort": "kanaal"},
-  {"n8n": "mPIDK1kI5x6zB6iu", "naam": "JIMMY - Chat via Telegram", "soort": "jimmy"},
-  {"n8n": "sXgSLOEYc9mBcThI", "naam": "JIMMY - Cijfercontrole", "soort": "jimmy"},
-  {"n8n": "yC3NwNYJgHo6B5jb", "naam": "JIMMY - Dromen", "soort": "jimmy"},
-  {"n8n": "HY55oGtbeTZKFz7q", "naam": "JIMMY - Heartbeat", "soort": "jimmy"},
-  {"n8n": "hVr3SeSsfyxXfXdp", "naam": "JIMMY - Wachters", "soort": "jimmy"},
+  {"n8n": "mPIDK1kI5x6zB6iu", "naam": "JIMMY - Chat via Telegram", "soort": "jimmy", "bewust_uit": true},
+  {"n8n": "sXgSLOEYc9mBcThI", "naam": "JIMMY - Cijfercontrole", "soort": "jimmy", "bewust_uit": true},
+  {"n8n": "yC3NwNYJgHo6B5jb", "naam": "JIMMY - Dromen", "soort": "jimmy", "bewust_uit": true},
+  {"n8n": "HY55oGtbeTZKFz7q", "naam": "JIMMY - Heartbeat", "soort": "jimmy", "bewust_uit": true},
+  {"n8n": "hVr3SeSsfyxXfXdp", "naam": "JIMMY - Wachters", "soort": "jimmy", "bewust_uit": true},
 ];
 
 const WERKERS = N8N.map(function (w) { return Object.assign({ trigger: 'n8n' }, w); }).concat(POD);
@@ -287,7 +298,7 @@ function check(workflows, hartslag, schakelaars) {
     uit.n8n_actief = actief.length;
     uit.ontbreekt = actief.filter(function (w) { return !BEKEND_N8N.has(w.id); }).map(function (w) { return { id: w.id, naam: String(w.name || '').slice(0, 80) }; });
     uit.niet_actief = N8N.filter(function (w) { return !ids.has(w.n8n) && !(sch[w.id] && sch[w.id].geldig && !sch[w.id].verlopen); }).map(function (w) { return { id: w.n8n, naam: w.naam }; })
-      .concat(OVERIG.filter(function (w) { return !ids.has(w.n8n); }).map(function (w) { return { id: w.n8n, naam: w.naam, overig: true }; }));
+      .concat(OVERIG.filter(function (w) { return !ids.has(w.n8n) && !w.bewust_uit; }).map(function (w) { return { id: w.n8n, naam: w.naam, overig: true }; }));
   }
   if (Array.isArray(hartslag)) {
     const gekend = new Set();
