@@ -144,7 +144,7 @@ if [ "${POD_ZONDER_KLUIS:-}" = "1" ]; then
   export SECRETS_GELADEN=""
   export KLUIS_OVERGESLAGEN=1   # zichtbaar in /health, zodat de wachters het onderscheid zien
   # Zelfde opruiming als op de andere exec-paden: wat niet nodig is, geven we niet door.
-  unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY SUPABASE_PUBLISHABLE_KEY SUPABASE_LEGACY_TERUG 2>/dev/null || true
+  unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY 2>/dev/null || true
   kant_toepassen
   exec "$@"
 fi
@@ -157,7 +157,7 @@ if [ -z "${POD_BOOTSTRAP_SECRET:-}" ]; then
   if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     log "POD_BOOTSTRAP_SECRET leeg, maar CLAUDE_CODE_OAUTH_TOKEN staat in de omgeving -> overgangsmodus, doorstarten op de bestaande env"
     export SECRETS_GELADEN=""
-    unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY SUPABASE_PUBLISHABLE_KEY SUPABASE_LEGACY_TERUG   # zie de toelichting bij de laatste exec
+    unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY   # zie de toelichting bij de laatste exec
     kant_toepassen
     exec "$@"
   fi
@@ -382,6 +382,8 @@ log "klaar; via de RPC geladen: ${GELADEN:-(geen)}"
 # jobs hebben ze niet nodig, en kubelet levert ze bij elke herstart opnieuw aan.
 # Zonder deze regel kan iemand met /run-toegang ze uit /proc/self/environ vissen -
 # en daarmee alle secrets opnieuw ophalen, wat elke rotatie zinloos maakt.
-unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY SUPABASE_PUBLISHABLE_KEY SUPABASE_LEGACY_TERUG SB_SLEUTEL
+# SUPABASE_PUBLISHABLE_KEY en SUPABASE_LEGACY_TERUG blijven staan: niet geheim, en koppel-telegram.js en verversing.js lezen
+# ze als override en noodvlag (review wv2146 MOET 1). De legacy anon-JWT gaat wel weg (die opent, net als nu, de kluis-RPC).
+unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY SB_SLEUTEL
 
 exec "$@"

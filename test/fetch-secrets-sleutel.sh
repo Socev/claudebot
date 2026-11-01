@@ -4,7 +4,8 @@
 #   - SUPABASE_PUBLISHABLE_KEY uit de omgeving wint van de constante;
 #   - SUPABASE_ANON_KEY (legacy, nog in de chart) wordt genegeerd, tenzij SUPABASE_LEGACY_TERUG=1 (review wv2134 MOET 1);
 #   - een verkeerd bootstrapgeheim: geweigerd, exit 78, precies één aanroep (geen lockout voeden) (review wv2134 MOET 2);
-#   - geen van de sleutelnamen gaat mee naar het commando erachter, en geen waarde in het log.
+#   - het bootstrapgeheim en de legacy anon gaan niet mee naar het commando erachter; de publishable override en de
+#     noodvlag wel (niet geheim; koppel-telegram/verversing lezen ze, review wv2146 MOET 1); geen waarde in het log.
 # Draait met `env -i` tegen een nep-RPC op 127.0.0.1 die alleen hashes van de kopregels bijhoudt.
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -53,7 +54,7 @@ draai(){
 }
 waarde(){ grep "^$2 " "$W/$1.uit" | cut -d' ' -f2; }
 kop(){ [ "$(wc -l < "$W/$1.rpc")" = 1 ] && [ "$(cat "$W/$1.rpc")" = "$(h "$2") $(h "$2")" ]; }
-geen_sleutels(){ for n in SUPABASE_ANON_KEY SUPABASE_PUBLISHABLE_KEY SUPABASE_LEGACY_TERUG SB_SLEUTEL SUPABASE_PUBLISHABLE_STANDAARD POD_BOOTSTRAP_SECRET; do
+geen_sleutels(){ for n in SUPABASE_ANON_KEY SB_SLEUTEL SUPABASE_PUBLISHABLE_STANDAARD POD_BOOTSTRAP_SECRET; do
   [ "$(waarde "$1" "$n")" = AFWEZIG ] || return 1; done; }
 
 # 1. alleen de publishable-constante (geen sleutel in de omgeving)
@@ -73,12 +74,13 @@ toets 'anon zonder vlag: geen sleutelnaam naar het commando' "$(geen_sleutels le
 draai env SUPABASE_PUBLISHABLE_KEY=nep-pub SUPABASE_ANON_KEY=nep-anon
 toets 'env-publishable wint' "$(kop env nep-pub && echo 1)"
 toets 'env-publishable: start' "$([ "$(cat "$W/env.rc")" = 0 ] && echo 1)"
+toets 'env-publishable: gaat mee naar het commando, anon niet' "$([ "$(waarde env SUPABASE_PUBLISHABLE_KEY)" = "$(h nep-pub)" ] && geen_sleutels env && echo 1)"
 
 # 4. noodvlag: legacy bewust terug
 draai nood SUPABASE_LEGACY_TERUG=1 SUPABASE_ANON_KEY=nep-anon SUPABASE_PUBLISHABLE_KEY=nep-pub
 toets 'noodvlag: anon gebruikt' "$(kop nood nep-anon && echo 1)"
 toets 'noodvlag: LET OP-regel' "$(grep -q 'SUPABASE_LEGACY_TERUG=1' "$W/nood.log" && echo 1)"
-toets 'noodvlag: geen sleutelnaam naar het commando' "$(geen_sleutels nood && echo 1)"
+toets 'noodvlag: anon niet naar het commando, de vlag wel' "$(geen_sleutels nood && [ "$(waarde nood SUPABASE_LEGACY_TERUG)" = "$(h 1)" ] && echo 1)"
 draai nood2 SUPABASE_LEGACY_TERUG=1
 toets 'noodvlag zonder anon: constante' "$(kop nood2 "$CONST" && echo 1)"
 
