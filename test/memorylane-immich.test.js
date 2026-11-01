@@ -44,7 +44,7 @@ function jpeg(exif) {
 
 // Nep-Immich: albums met assets per maand, miniaturen; houdt bij wat er gevraagd werd
 function nepImmich() {
-  const st = { albums: [], beelden: new Map(), video: new Set(), uit: false, log: [], sleutel: 'proefsleutel-verzonnen-0123456789' };
+  const st = { albums: [], beelden: new Map(), video: new Set(), uit: false, log: [], patches: [], sleutel: 'proefsleutel-verzonnen-0123456789' };
   const res = (status, obj, ct) => new Response(Buffer.isBuffer(obj) ? obj : JSON.stringify(obj), { status, headers: { 'content-type': ct || 'application/json; charset=utf-8' } });
   st.fetch = async (url, init) => {
     const u = new URL(url), m = init.method;
@@ -59,6 +59,11 @@ function nepImmich() {
       const a = { id: uuid(), albumName: b.albumName, description: b.description || '', assets: [] };
       st.albums.push(a);
       return res(201, { id: a.id, albumName: a.albumName, description: a.description, assetCount: 0, albumThumbnailAssetId: null });
+    }
+    if (m === 'PATCH' && (r = /^\/api\/albums\/([0-9a-f-]{36})$/.exec(u.pathname))) {
+      const a = st.albums.find((x) => x.id === r[1]); if (!a) return res(404, {});
+      const b = JSON.parse(init.body); st.patches.push({ id: a.id, body: b }); a.albumName = b.albumName;
+      return res(200, { id: a.id, albumName: a.albumName, description: a.description, assetCount: a.assets.length });
     }
     if (m === 'GET' && (r = /^\/api\/albums\/([0-9a-f-]{36})$/.exec(u.pathname))) { const a = st.albums.find((x) => x.id === r[1]); return a ? res(200, { id: a.id, albumName: a.albumName, description: a.description, assetCount: a.assets.length }) : res(404, {}); }
     if (m === 'GET' && u.pathname === '/api/timeline/buckets') { const a = st.albums.find((x) => x.id === u.searchParams.get('albumId')); return res(200, a && a.assets.length ? [{ timeBucket: '2020-02-01', count: Math.min(3, a.assets.length) }, ...(a.assets.length > 3 ? [{ timeBucket: '2020-03-01', count: a.assets.length - 3 }] : [])] : []); }
@@ -117,14 +122,19 @@ function omgeving() {
 const RA = 'r20261031-0123456789abcdef', RB = 'r20261031-fedcba9876543210';
 const REIS = '20_Prive/Reizen/2020 - Proefrally Noorwegen.md';
 
-test('witte lijst: alleen lezen en een leeg album aanmaken; al het andere geweigerd vóór er iets over de lijn gaat', async () => {
+test('witte lijst: alleen lezen, een leeg album aanmaken en (wv2225) alleen de naam van een album wijzigen; al het andere geweigerd vóór er iets over de lijn gaat', async () => {
   const a = uuid();
   for (const [m, p, q, b] of [['GET', '/api/albums', {}, undefined], ['GET', '/api/albums/' + a], ['GET', '/api/timeline/buckets', { albumId: a, order: 'asc' }],
     ['GET', '/api/timeline/bucket', { albumId: a, timeBucket: '2020-02-01', order: 'asc' }], ['GET', '/api/assets/' + a + '/thumbnail', { size: 'thumbnail' }],
-    ['GET', '/api/assets/' + a + '/thumbnail', { size: 'preview' }], ['POST', '/api/albums', null, { albumName: 'MemoryLane – Proef', description: 'x' }]]) {
+    ['GET', '/api/assets/' + a + '/thumbnail', { size: 'preview' }], ['POST', '/api/albums', null, { albumName: 'MemoryLane – Proef', description: 'x' }],
+    ['PATCH', '/api/albums/' + a, null, { albumName: '2020 Proef (ML)' }]]) {
     assert.strictEqual(IM.weiger(m, p, q, b), null, m + ' ' + p);
   }
-  const weg = [['POST', '/api/assets', null, {}], ['DELETE', '/api/albums/' + a], ['PATCH', '/api/albums/' + a, null, { albumName: 'x' }], ['PUT', '/api/albums/' + a + '/assets', null, { ids: [a] }],
+  const weg = [['POST', '/api/assets', null, {}], ['DELETE', '/api/albums/' + a], ['PATCH', '/api/albums/' + a, null, { albumName: 'x', description: 'y' }],
+    ['PATCH', '/api/albums/' + a, null, { description: 'y' }], ['PATCH', '/api/albums/' + a, null, { albumName: 'x', albumThumbnailAssetId: a }], ['PATCH', '/api/albums/' + a, null, { albumName: '' }],
+    ['PATCH', '/api/albums/' + a, null, { albumName: 'x'.repeat(201) }], ['PATCH', '/api/albums/' + a, { x: '1' }, { albumName: 'x' }], ['PATCH', '/api/albums/' + a, null, { albumName: 'x', order: 'asc' }],
+    ['PATCH', '/api/albums', null, { albumName: 'x' }], ['PATCH', '/api/albums/' + a + '/users', null, { albumName: 'x' }], ['PATCH', '/api/assets/' + a, null, { albumName: 'x' }],
+    ['PATCH', '/api/albums/' + a.toUpperCase(), null, { albumName: 'x' }], ['PATCH', '/api/albums/' + a], ['PUT', '/api/albums/' + a, null, { albumName: 'x' }], ['PUT', '/api/albums/' + a + '/assets', null, { ids: [a] }],
     ['PUT', '/api/albums/assets', null, {}], ['DELETE', '/api/albums/' + a + '/assets', null, { ids: [a] }], ['POST', '/api/assets/delete'], ['DELETE', '/api/assets', null, { ids: [a] }],
     ['POST', '/api/albums', null, { albumName: 'x', assetIds: [a] }], ['POST', '/api/albums', null, { albumName: 'x', albumUsers: [{ userId: a, role: 'editor' }] }],
     ['POST', '/api/albums', null, {}], ['POST', '/api/albums', { x: '1' }, { albumName: 'x' }], ['GET', '/api/assets/' + a + '/original'], ['GET', '/api/assets/' + a + '/thumbnail', { size: 'original' }],
@@ -172,7 +182,7 @@ test('albums: vanzelf voor een reis en een opname met categorie; niet voor een o
     o.opname(RA, 'shizzle'); o.opname(RB, null);
     await o.tik();
     const namen = o.im.albums.map((a) => a.albumName).sort();
-    assert.deepStrictEqual(namen, ['MemoryLane – Opname 31-10-2026 10:37', 'MemoryLane – Proefrally Noorwegen 2020', 'Vakantie 2019 (eigen album)']);
+    assert.deepStrictEqual(namen, ['(zonder jaar) Opname 31-10-2026 10:37 (ML)', '2020 Proefrally Noorwegen (ML)', 'Vakantie 2019 (eigen album)'], 'wv2225: jaar vooraan, (ML) achteraan');
     const hr = o.hid('reis', REIS), hb = o.hid('opname', RB);
     assert.strictEqual(o.album(hr).status, 'actief');
     assert.strictEqual(o.album(hb), undefined, 'opname zonder categorie: geen album vanzelf');
@@ -203,6 +213,95 @@ test('albums: vanzelf voor een reis en een opname met categorie; niet voor een o
     assert.strictEqual(l.immich.sleutel, true);
     assert.strictEqual((await o.ml.albumMaken(hr)).status, 200);
     assert.strictEqual(posts(), 4);
+    assert.deepStrictEqual(o.fouten, []);
+  } finally { o.sluit(); }
+});
+
+test('wv2225 albumNaam: jaar vooraan, (ML) achteraan, geen dubbel jaartal, zonder jaar zichtbaar, begrensd', () => {
+  const N = MF.albumNaam;
+  assert.strictEqual(N('Gambia 2023', '2023'), '2023 Gambia (ML)', 'los jaar achteraan schuift naar voren');
+  assert.strictEqual(N('Shizzle: Proeftocht - Proefland - 2023', '2023'), '2023 Shizzle: Proeftocht - Proefland (ML)');
+  assert.strictEqual(N('Zomervakantie 2024 - Proefcamping', '2024'), '2024 Zomervakantie 2024 - Proefcamping (ML)', 'jaar midden in Davids naamgeving: titel ongemoeid');
+  assert.strictEqual(N('2026 - Proefreis, april–mei', '2026'), '2026 - Proefreis, april–mei (ML)', 'begint al met het jaar: niet nog eens');
+  assert.strictEqual(N('2026 Proefreis', '2026'), '2026 Proefreis (ML)');
+  assert.strictEqual(N('Proefverhaal', '1996'), '1996 Proefverhaal (ML)');
+  assert.strictEqual(N('Opname 31-10-2026 10:37', null), '(zonder jaar) Opname 31-10-2026 10:37 (ML)');
+  assert.strictEqual(N('Proefverhaal', ''), '(zonder jaar) Proefverhaal (ML)');
+  assert.strictEqual(N('2024 Proef', null), '(zonder jaar) 2024 Proef (ML)', 'review ZOU 1: een getal vooraan in de titel is geen bekend jaar');
+  assert.strictEqual(N('Proef 12023', '2023'), '2023 Proef 12023 (ML)', 'geen jaar uit een langer getal knippen');
+  assert.strictEqual(N('Proefverhaal (ML)', '2020'), '2020 Proefverhaal (ML)', 'geen dubbel merk');
+  assert.strictEqual(N('MemoryLane – Proefverhaal', '2020'), '2020 Proefverhaal (ML)', 'oude voorvoegsel weg');
+  assert.strictEqual(N('Proef', '1850'), '(zonder jaar) Proef (ML)', 'onzinjaar telt niet');
+  assert.strictEqual(N('', '2020'), '2020 Herinnering (ML)');
+  for (const [t, j] of [['x'.repeat(400), '2020'], ['x'.repeat(400), null], ['2020 ' + 'x'.repeat(400), '2020']]) {
+    const n = N(t, j);
+    assert.ok(n.length <= 200 && n.endsWith(' (ML)'), 'hooguit 200 tekens en het merk blijft: ' + n.length);
+    assert.strictEqual(IM.weiger('PATCH', '/api/albums/' + uuid(), null, { albumName: n }), null, 'past door de witte lijst');
+  }
+  assert.ok(!N('Gambia 2023', '2023').startsWith('MemoryLane'));
+  assert.ok(MF.socevsNaam('MemoryLane – Oud') && MF.socevsNaam('2020 Proef (ML)') && !MF.socevsNaam('2020 Proef') && !MF.socevsNaam('Vakantie 2019 (eigen album)'));
+});
+
+test('wv2225 hernoemen: alleen eigen albums (code + naamvorm), oude namen bijgewerkt, titel of jaar volgt, Davids eigen naam blijft, geen foto aangeraakt', async () => {
+  const o = omgeving();
+  try {
+    const eigen = o.im.davidsEigen();
+    const eigenOud = { id: uuid(), albumName: 'MemoryLane – Davids eigen proefalbum', description: 'van David, zonder code', assets: [] };
+    o.im.albums.push(eigenOud);
+    o.reis('2020 - Proefrally Noorwegen.md', '2020-02-09 – 2020-02-15');
+    o.reis('Gambia 2023.md', '2023-04-01 – 2023-04-20');
+    o.reis('Zomervakantie 2022 Proefcamping.md', '2022-07-10 – 2022-07-30');
+    o.opname(RA, 'shizzle');
+    // de albums zoals wv2120 ze maakte (oude vorm), met de code; één met een foto erin
+    const oud = (soort, ref, naam) => { const a = { id: uuid(), albumName: naam, description: MF.omschrijving(MF.code(soort, ref)), assets: [] }; o.im.albums.push(a); return a; };
+    const aR = oud('reis', REIS, 'MemoryLane – Proefrally Noorwegen 2020');
+    const aG = oud('reis', '20_Prive/Reizen/Gambia 2023.md', 'MemoryLane – Gambia 2023');
+    const aZ = oud('reis', '20_Prive/Reizen/Zomervakantie 2022 Proefcamping.md', 'MemoryLane – Zomervakantie 2022 Proefcamping');
+    const aO = oud('opname', RA, 'MemoryLane – Opname 31-10-2026 10:37');
+    const fotoId = o.im.foto(aG, webp(false));
+    const voor = { albums: o.im.albums.length, fotos: o.im.albums.map((a) => a.id + ':' + a.assets.join(',')).sort().join('|') };
+    await o.tik();
+    assert.strictEqual(o.im.log.filter((x) => x.startsWith('POST')).length, 0, 'overgenomen op de code, geen nieuw album');
+    const naam = (a) => o.im.albums.find((x) => x.id === a.id).albumName;
+    assert.strictEqual(naam(aR), '2020 Proefrally Noorwegen (ML)');
+    assert.strictEqual(naam(aG), '2023 Gambia (ML)');
+    assert.ok(/^2022 Zomervakantie 2022 .*Proefcamping.* \(ML\)$/.test(naam(aZ)), 'jaar midden in de titel blijft, één keer vooraan: ' + naam(aZ));
+    assert.strictEqual(naam(aO), '(zonder jaar) Opname 31-10-2026 10:37 (ML)');
+    assert.strictEqual(naam(eigen), 'Vakantie 2019 (eigen album)');
+    assert.strictEqual(naam(eigenOud), 'MemoryLane – Davids eigen proefalbum', 'album zonder code met de oude naam: onaangeroerd');
+    assert.strictEqual(o.im.patches.length, 4, 'precies de vier eigen albums hernoemd');
+    assert.ok(o.im.patches.every((p) => Object.keys(p.body).join() === 'albumName'), 'alleen de naam over de lijn');
+    assert.ok(!o.im.log.some((x) => x.includes(eigen.id) || x.includes(eigenOud.id)), 'Davids albums nooit aangesproken');
+    const na = { albums: o.im.albums.length, fotos: o.im.albums.map((a) => a.id + ':' + a.assets.join(',')).sort().join('|') };
+    assert.deepStrictEqual(na, voor, 'tel achteraf: zelfde albums, zelfde foto\'s');
+    assert.ok(o.im.albums.find((x) => x.id === aG.id).assets.includes(fotoId));
+    assert.ok(!o.ing._db.prepare('SELECT * FROM ml_album').all().some((r) => /Proef|Gambia|Opname/.test(JSON.stringify(r))), 'geen namen in intake.sqlite');
+    await o.tik(); await o.tik();
+    assert.strictEqual(o.im.patches.length, 4, 'idempotent: volgende rondes niets');
+    // David zet een jaar bij de opname → het album volgt
+    assert.strictEqual(o.ml.wanneer(o.hid('opname', RA), { van: '1996' }).status, 200);
+    await o.tik();
+    assert.strictEqual(naam(aO), '1996 Opname 31-10-2026 10:37 (ML)', 'jaar gezet: album volgt');
+    // David hernoemt zelf (zonder (ML)) → Socev blijft eraf, ook na een titelwijziging
+    o.im.albums.find((x) => x.id === aR.id).albumName = 'Proefrally met de jongens';
+    const n0 = o.im.patches.length;
+    await o.tik(); await o.tik();
+    assert.strictEqual(o.im.patches.length, n0, 'zonder (ML) geen hernoemen');
+    assert.strictEqual(naam(aR), 'Proefrally met de jongens');
+    // code in de omschrijving klopt niet met de koppeltabel → niet hernoemen
+    const z = o.im.albums.find((x) => x.id === aZ.id);
+    z.description = 'iets anders'; z.albumName = 'MemoryLane – iets';
+    await o.tik();
+    assert.strictEqual(z.albumName, 'MemoryLane – iets', 'zonder kloppende code geen hernoemen');
+    // Immich weigert de PATCH → fout gemeld, geen crash, volgende ronde opnieuw
+    const g = o.im.albums.find((x) => x.id === aG.id); g.albumName = 'MemoryLane – Gambia 2023';
+    const echt = o.im.client.hernoemAlbum; let keer = 0;
+    o.im.client.hernoemAlbum = async () => { keer++; const e = new Error('immich: HTTP 500'); e.code = 'HTTP'; e.status = 500; throw e; };
+    await o.tik();
+    assert.strictEqual(keer, 1); assert.ok(o.fouten.some((f) => f.startsWith('ml-immich-naam')));
+    o.im.client.hernoemAlbum = echt; o.fouten.length = 0;
+    await o.tik(); await o.tik();
+    assert.strictEqual(naam(aG), '2023 Gambia (ML)', 'na de fout alsnog');
     assert.deepStrictEqual(o.fouten, []);
   } finally { o.sluit(); }
 });

@@ -12,7 +12,9 @@
  *   GET  /api/timeline/bucket?albumId=<uuid>&timeBucket=<datum>   foto-ids van die maand
  *   GET  /api/assets/<uuid>/thumbnail?size=thumbnail|preview      miniatuur of voorbeeld (nooit het origineel)
  *   POST /api/albums  {albumName, description}         album aanmaken, LEEG (geen assetIds, geen albumUsers)
- * Al het andere (PUT/PATCH/DELETE, uploaden, foto's toevoegen of verplaatsen, delen, ander pad, andere query, andere body) weigert
+ *   PATCH /api/albums/<uuid>  {albumName}              ALLEEN de naam van een album (wv2225; memorylane-fotos.js doet dat alleen bij albums
+ *                                                       met zijn eigen code en naamvorm). Geen omschrijving, omslag, volgorde of delen.
+ * Al het andere (PUT/DELETE, andere PATCH-velden, uploaden, foto's toevoegen of verplaatsen, delen, ander pad, andere query, andere body) weigert
  * verzoek() vóór er iets over de lijn gaat. Doorverwijzingen worden niet gevolgd.
  * PRIVACY. Nooit de sleutel, albumnamen of foto-inhoud in logs of fouten; alleen HTTP-status en het soort verzoek.
  * VORM. Alleen ingebouwde modules; sleutel(), fetch en basis komen via maak({...}).
@@ -65,11 +67,20 @@ function weiger(methode, pad, query, body) {
     if (body.description !== undefined && (typeof body.description !== 'string' || body.description.length > MAX_OMSCHRIJVING)) return 'body';
     return null;
   }
+  if (methode === 'PATCH') {
+    if (!(m = /^\/api\/albums\/([0-9a-f-]{36})$/.exec(pad)) || !u(m[1])) return 'pad';
+    if (sleutels.length) return 'query';
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return 'body';
+    const bk = Object.keys(body);
+    if (bk.length !== 1 || bk[0] !== 'albumName') return 'body';   // nooit description, albumThumbnailAssetId, order of isActivityEnabled
+    if (typeof body.albumName !== 'string' || !body.albumName.trim() || body.albumName.length > MAX_NAAM) return 'body';
+    return null;
+  }
   return 'methode';
 }
 
 /*
- * maak(o) → { albums, album, maakAlbum, albumFotos, beeld, verzoek }
+ * maak(o) → { albums, album, maakAlbum, hernoemAlbum, albumFotos, beeld, verzoek }
  * o = { basis: 'https://immich…', sleutel: async () => string|null, fetch?, fout?(label, e), timeoutMs? }
  */
 function maak(o) {
@@ -123,6 +134,13 @@ function maak(o) {
     if (!a) throw new Error('immich: onverwacht antwoord');
     return a;
   }
+  // wv2225: alleen de naam; → het album (kort)
+  async function hernoemAlbum(id, naam) {
+    if (!u(id)) throw new Error('immich: ongeldig album');
+    const a = albumKort(await verzoek('PATCH', '/api/albums/' + id, null, { albumName: naam }));
+    if (!a || a.id !== id) throw new Error('immich: onverwacht antwoord');
+    return a;
+  }
   // Foto-ids van een album, oudste eerst, hooguit max; zonder prullenbak. → [{ id, beeld (false = video), ratio }]
   async function albumFotos(id, max) {
     if (!u(id)) throw new Error('immich: ongeldig album');
@@ -148,7 +166,7 @@ function maak(o) {
     if (!u(assetId)) throw new Error('immich: ongeldige foto');
     return verzoek('GET', '/api/assets/' + assetId + '/thumbnail', { size: maat === 'groot' ? 'preview' : 'thumbnail' }, undefined, 'beeld');
   }
-  return { albums, album, maakAlbum, albumFotos, beeld, verzoek, basis };
+  return { albums, album, maakAlbum, hernoemAlbum, albumFotos, beeld, verzoek, basis };
 }
 
 // Zit er nog metadata (Exif/XMP, met mogelijk de plek of het toestel) in een beeld? Dan delen we het niet naar buiten.

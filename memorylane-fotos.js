@@ -11,7 +11,13 @@
  *    gaat elke nacht in de podstaat-bundel; zelfde regel als ml_herinnering).
  *  - Herkenning (idempotent): elk album dat Socev maakt draagt in zijn omschrijving de code memorylane:<16 hex> = sha256(soort|ref). Die is
  *    stabiel (ook als intake.sqlite ooit leeg terugkomt); een album met die code wordt overgenomen in plaats van een tweede gemaakt. Albums
- *    zonder code (Davids eigen) raakt Socev nooit; geen enkel album wordt ooit gewijzigd of verwijderd (immich.js kan dat niet eens).
+ *    zonder code (Davids eigen) raakt Socev nooit; geen album wordt verwijderd en aan de foto's komt Socev niet (immich.js kan dat niet eens).
+ *  - Naam (wv2225, David 1-11-2026 22:43: "MemoryLane: …" vooraan maakte het mappenoverzicht in Immich onwerkbaar): "<jaar> <titel> (ML)".
+ *    Jaar = het (begin)jaar waar de herinnering over gaat (Davids 'wanneer', de reisperiode of het verhaal); onbekend = "(zonder jaar)" (de
+ *    opnamedatum is wanneer hij het vertelde, niet waar het over gaat; zet David een jaar, dan volgt het album). Begint de titel al met dat
+ *    jaar, dan niet nog eens; staat het jaar los achteraan ("Gambia 2023", "… - 2023"), dan schuift het naar voren. Verder blijft de titel
+ *    zoals hij is. Hernoemen (PATCH, alleen albumName) doet sync alleen bij een album uit ml_album waarvan de code klopt én waarvan de naam
+ *    nog Socevs vorm heeft: de oude vorm "MemoryLane – …" of eindigend op " (ML)". Haalt David "(ML)" weg, dan blijft Socev van de naam af.
  *  - Automatisch een album: elke actieve reis, en elke andere herinnering zodra die een categorie heeft (een opname zonder categorie kan nog
  *    een proef zijn; daarvoor staat in de app een knop "Album maken"). Verwijdert David een album in Immich, dan maakt Socev het niet
  *    vanzelf opnieuw (status weg; de knop kan het wel).
@@ -30,11 +36,27 @@ CREATE TABLE IF NOT EXISTS ml_album (hid TEXT PRIMARY KEY, sleutel TEXT NOT NULL
 `;
 const SYNC_ELKE_MS = 10 * 60000, RUST_NA_FOUT_MS = 5 * 60000, FOTO_CACHE_MS = 10 * 60000, TOEGANG_VERS_MS = 2 * 60000;
 const MAX_NIEUW_PER_RONDE = 30, MAX_DEEL = 8, MAX_DEEL_BYTES = 300 * 1024, MAX_FOTOS = 300;
-const VOORVOEGSEL = 'MemoryLane – ';
+const VOORVOEGSEL = 'MemoryLane – ';   // oude vorm (wv2120): alleen nog om Socevs eigen oude namen te herkennen
+const MERK = ' (ML)', ZONDER_JAAR = '(zonder jaar)', MAX_NAAM = 200, MAX_HERNOEM_PER_RONDE = 30;
 const CODE_RE = /memorylane:([0-9a-f]{16})/;
 
 function code(soort, ref) { return crypto.createHash('sha256').update(String(soort) + '|' + String(ref)).digest('hex').slice(0, 16); }
-function albumNaam(titel) { return (VOORVOEGSEL + String(titel || 'Herinnering').replace(/\s+/g, ' ').trim()).slice(0, 200); }
+// wv2225: "<jaar> <titel> (ML)"; jaar = "JJJJ" of leeg/null (→ "(zonder jaar)")
+function albumNaam(titel, jaar) {
+  let t = String(titel || 'Herinnering').replace(/\s+/g, ' ').trim();
+  if (t.startsWith(VOORVOEGSEL.trim())) t = t.slice(VOORVOEGSEL.trim().length).trim();
+  while (t.endsWith(MERK.trim())) t = t.slice(0, -MERK.trim().length).trim();
+  if (!t) t = 'Herinnering';
+  const j = /^\d{4}$/.test(String(jaar || '')) && Number(jaar) >= 1900 && Number(jaar) <= 2100 ? String(jaar) : null;
+  let kop;
+  if (j && new RegExp('^' + j + '(?!\\d)').test(t)) kop = '';
+  else if (j) { const z = t.replace(new RegExp('\\s*(?:[-–—,]\\s*)?(?<!\\d)' + j + '$'), '').trim(); if (z) t = z; kop = j + ' '; }
+  else kop = ZONDER_JAAR + ' ';   // review MOET 1: zonder bekend jaar altijd zichtbaar, ook als de titel met cijfers begint
+  const ruimte = MAX_NAAM - kop.length - MERK.length;
+  return kop + (t.length > ruimte ? t.slice(0, ruimte).trim() : t) + MERK;
+}
+// Is dit (nog) een naam in Socevs vorm? Alleen dan mag sync hem bijwerken.
+function socevsNaam(naam) { const n = String(naam || ''); return n.startsWith(VOORVOEGSEL) || n.endsWith(MERK); }
 function omschrijving(c) {
   return "Album voor MemoryLane, gemaakt door Socev. Zet hier de foto's van deze herinnering in; MemoryLane laat ze zien. " +
     'Laat de code hieronder staan, dan blijft MemoryLane dit album herkennen.\n\nmemorylane:' + c;
@@ -69,7 +91,7 @@ function maak(o) {
   function fotoStand(e) { return e && e.code === 'GEEN_SLEUTEL' ? 'geen sleutel' : 'Immich niet bereikbaar'; }
   function rust() { return laatsteFout && nu() - laatsteFout < RUST_NA_FOUT_MS; }
 
-  // kandidaten: [{ hid, soort, ref, titel, auto }] uit memorylane-delen (actieve herinneringen; auto = vanzelf een album)
+  // kandidaten: [{ hid, soort, ref, titel, jaar, auto }] uit memorylane-delen (actieve herinneringen; auto = vanzelf een album)
   async function sync(kandidaten, dwing) {
     if (!dwing && nu() - laatsteSync < SYNC_ELKE_MS) return null;
     laatsteSync = nu();
@@ -81,7 +103,7 @@ function maak(o) {
     const opId = new Map(lijst.map((a) => [a.id, a]));
     const opCode = new Map();
     for (const a of lijst) { const m = CODE_RE.exec(a.omschrijving || ''); if (m && !opCode.has(m[1])) opCode.set(m[1], a); }
-    const r = { nieuw: 0, overgenomen: 0, weg: 0 };
+    const r = { nieuw: 0, overgenomen: 0, weg: 0, hernoemd: 0, eigen_naam: 0 };
     for (const rij of q.alle.all()) {
       const a = rij.album_id ? opId.get(rij.album_id) : null;
       if (a) { q.stand.run('actief', a.aantal, a.omslag, t, rij.hid); continue; }
@@ -96,10 +118,23 @@ function maak(o) {
       if (a) { q.nieuw.run(k.hid, c, a.id, 'actief', a.aantal, a.omslag, t, t); r.overgenomen++; continue; }
       if (gemaakt >= MAX_NIEUW_PER_RONDE) continue;   // de rest de volgende ronde
       try {
-        const n = await im.maakAlbum(albumNaam(k.titel), omschrijving(c));
+        const n = await im.maakAlbum(albumNaam(k.titel, k.jaar), omschrijving(c));
         q.nieuw.run(k.hid, c, n.id, 'actief', 0, null, t, t); gemaakt++; r.nieuw++;
         opCode.set(c, n);
       } catch (e) { laatsteFout = nu(); fout('ml-immich-maak', e); break; }
+    }
+    // wv2225: naam bijwerken (ook direct na overnemen), alleen bij een album uit Immich met onze code dat nog Socevs naamvorm heeft
+    const opHid = new Map((kandidaten || []).map((k) => [k.hid, k]));
+    for (const rij of q.alle.all()) {
+      const a = rij.status === 'actief' && rij.album_id ? opId.get(rij.album_id) : null, k = a && opHid.get(rij.hid);
+      const m = a && CODE_RE.exec(a.omschrijving || '');
+      if (!k || !m || m[1] !== rij.sleutel) continue;
+      const gewenst = albumNaam(k.titel, k.jaar);
+      if (a.naam === gewenst) continue;
+      if (!socevsNaam(a.naam)) { r.eigen_naam++; continue; }
+      if (r.hernoemd >= MAX_HERNOEM_PER_RONDE || typeof im.hernoemAlbum !== 'function') continue;   // de rest de volgende ronde
+      try { await im.hernoemAlbum(a.id, gewenst); a.naam = gewenst; r.hernoemd++; }
+      catch (e) { laatsteFout = nu(); fout('ml-immich-naam', e); break; }
     }
     // foto's voor de deellinks bijhouden (alleen waar David dat aanzette); vers uit Immich, zodat een foto die David uit het album haalt
     // binnen één ronde ook van de link verdwijnt (review MOET 1: de wijziging telt mee, memorylane-delen publiceert dan opnieuw)
@@ -118,7 +153,7 @@ function maak(o) {
     let n;
     try {
       const bestaand = (await im.albums()).find((a) => (CODE_RE.exec(a.omschrijving || '') || [])[1] === c);
-      n = bestaand || await im.maakAlbum(albumNaam(k.titel), omschrijving(c));
+      n = bestaand || await im.maakAlbum(albumNaam(k.titel, k.jaar), omschrijving(c));
     } catch (e) { fout('ml-immich-maak', e); return { status: 503, body: { ok: false, fout: e.code === 'GEEN_SLEUTEL' ? 'nog geen Immich-sleutel' : 'Immich was niet bereikbaar; probeer het zo opnieuw' } }; }
     q.nieuw.run(k.hid, c, n.id, 'actief', n.aantal || 0, n.omslag || null, rij ? rij.gemaakt_op : t, t);
     cache.delete(k.hid);
@@ -242,4 +277,4 @@ function maak(o) {
   return { sync, kort, fotos, foto, gevel, fotoDelen, albumMaken, voorDelen, naarD1, info, _db: db, _cache: cache };
 }
 
-module.exports = { maak, code, albumNaam, omschrijving, VOORVOEGSEL, MAX_DEEL };
+module.exports = { maak, code, albumNaam, socevsNaam, omschrijving, VOORVOEGSEL, MERK, MAX_DEEL };

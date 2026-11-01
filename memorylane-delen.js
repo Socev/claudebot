@@ -419,7 +419,11 @@ function maak(o) {
     return null;
   }
   // wv2120: herinneringen die een album krijgen. Vanzelf: een reis, of een andere herinnering zodra hij een categorie heeft.
-  function albumKandidaat(h) { return { hid: h.hid, soort: h.soort, ref: h.ref, titel: titelVan(h), auto: h.soort === 'reis' || !!catVan(h).categorie }; }
+  // wv2225: met het (begin)jaar waar de herinnering over gaat (voor de albumnaam "<jaar> <titel> (ML)"); null = onbekend
+  function albumKandidaat(h) {
+    const p = paginaLees(h.hid), s = sam(h, p), w = wanneerInfo(h, p, s);
+    return { hid: h.hid, soort: h.soort, ref: h.ref, titel: titelVan(h, p, s), jaar: w.van ? String(w.van).slice(0, 4) : null, auto: h.soort === 'reis' || !!catVan(h).categorie };
+  }
   async function fotoSync(dwing) {
     if (!F) return null;
     return F.sync(q.hAlle.all().filter((h) => h.status === 'actief').map(albumKandidaat), dwing);
