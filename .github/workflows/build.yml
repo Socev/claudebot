@@ -627,6 +627,12 @@ jobs:
           done
 
           echo "-- containerlog (staart) --"; docker logs rooktest 2>&1 | tail -40
+          # wv2155: de API schrijft via de supervisor naar api.log in de container, niet naar het containerlog.
+          # Zonder deze staart was een rode /health niet te duiden (1-11: "containerlog leeg").
+          if [ ! -s /tmp/health.json ]; then
+            echo "-- supervisor.log (staart) --"; docker exec rooktest tail -40 /opt/data/bin/supervisor.log 2>&1 || true
+            echo "-- api.log (staart) --"; docker exec rooktest tail -80 /opt/data/bin/api.log 2>&1 || true
+          fi
           echo "-- /health --"; cat /tmp/health.json 2>/dev/null || echo "(geen antwoord)"; echo
 
           node -e '
