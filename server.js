@@ -15145,6 +15145,31 @@ function facturenOpen() {
   catch (e) { if (!facturenFout) logError('facturen', e); facturenFout = { ms: Date.now(), code: e && e.code || 'fout' }; }
   return facturenDb;
 }
+// wv2158: Facturen › Waarnemers — lopend totaal per waarnemer per praktijk (DocPlan-ontwerp § 9, idee 25; docplan-totaal.js). Alleen lezen en
+// alleen de eigenaar: GET /app/facturen/waarnemers[/<jaar>] in appFacturen, vóór facturen.js (de praktijkmanager-ingang roept facturen.js
+// rechtstreeks aan en kent de route dus niet). Per vraag twee alleen-lezen verbindingen (docplan.sqlite readOnly, facturen.sqlite alleenLezen),
+// daarna dicht; niets opgeslagen, geen bedrag of naam in een log. Ontbreekt docplan-totaal.js (terugrol), dan 404 en draait de rest door.
+const DOCPLAN_DIR = serverPad('docplan', process.env.DOCPLAN_DIR, '/opt/data/docplan', serverProefDeel('docplan'));
+const docplanTotaal = (function () {
+  const p = path.join(__dirname, 'docplan-totaal.js');
+  if (!facturenMod || !fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ fout: logError,
+      openDocplan: function () {
+        const f = path.join(DOCPLAN_DIR, 'docplan.sqlite');
+        if (!fs.existsSync(f)) return null;
+        const { DatabaseSync } = require('node:sqlite');
+        const db = new DatabaseSync(f, { readOnly: true });
+        try { db.exec('PRAGMA busy_timeout = 5000'); } catch (e) { db.close(); throw e; }
+        return db;
+      },
+      openFacturen: function () {
+        if (!facturenMagOpenen()) return null;
+        const f = facturenMod.open(FACTUREN_DIR, { alleenLezen: true });
+        return { db: f.db, sluit: function () { facturenMod.sluit(f); } };
+      } });
+  } catch (e) { logError('waarnemers', e); return null; }
+})();
 // ── Aansluiting bank ↔ inkoopfacturen (wv1864, Second Brain 2.0 fase 4a, 28-10-2026; ontwerp vault 01_Ontwikkeling/Second Brain 2.0 - fase 4
 // financiële pilot Tolgaarde (ontwerp 28-10-2026).md) ──
 // POST /smal/facturen {opdracht: 'aansluiting', entiteit?, status?, max?, regels?, vers?} (skill facturen-lezen): de laatste run uit
@@ -15201,7 +15226,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo() } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), waarnemers: !!docplanTotaal } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -15323,6 +15348,16 @@ function facturenUploadNeem(a, beurt, n) {
 }
 async function appFacturen(req, res, a, s, d, route) {
   if (!facturenRoutes) return appWeiger(res, 404, 'Facturen zit niet in deze versie van de pod', 'facturen ontbreekt');
+  // wv2158: Waarnemers (DocPlan): eigen alleen-lezen route vóór het openen van de gewone facturendatabase en vóór facturen.js; rolVoor('app')
+  // raakt de database niet. De module weigert alles behalve GET van de eigenaar op de primaire kant (review wv2158 MOET 1).
+  const padW = route.slice(route.indexOf(' ') + 1);
+  if (padW === '/app/facturen/waarnemers' || padW.indexOf('/app/facturen/waarnemers/') === 0) {
+    if (!docplanTotaal) return appWeiger(res, 404, 'Waarnemers zit niet in deze versie van de pod', 'facturen waarnemers ontbreekt');
+    const x = docplanTotaal.app({ methode: req.method, pad: padW, rol: facturenRoutes.rolVoor(null, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' }), primair: rolPrimair() });
+    if (x.status === 200) res._app.stil = true;
+    res._app.reden = 'facturen ' + x.reden;
+    return appStuur(res, x.status, x.j);
+  }
   const fdb = facturenOpen();
   const rol = facturenRoutes.rolVoor(fdb, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' });
   const pad = route.slice(route.indexOf(' ') + 1);
