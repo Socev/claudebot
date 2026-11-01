@@ -172,7 +172,7 @@ test('albums: vanzelf voor een reis en een opname met categorie; niet voor een o
     o.opname(RA, 'shizzle'); o.opname(RB, null);
     await o.tik();
     const namen = o.im.albums.map((a) => a.albumName).sort();
-    assert.deepStrictEqual(namen, ['MemoryLane – 2020 - Proefrally Noorwegen', 'MemoryLane – Opname 31-10-2026 10:37', 'Vakantie 2019 (eigen album)']);
+    assert.deepStrictEqual(namen, ['MemoryLane – Opname 31-10-2026 10:37', 'MemoryLane – Proefrally Noorwegen 2020', 'Vakantie 2019 (eigen album)']);
     const hr = o.hid('reis', REIS), hb = o.hid('opname', RB);
     assert.strictEqual(o.album(hr).status, 'actief');
     assert.strictEqual(o.album(hb), undefined, 'opname zonder categorie: geen album vanzelf');

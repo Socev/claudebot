@@ -16,6 +16,7 @@ const H = require(path.join(ROOT, 'herinneringen.js'));
 const M = require(path.join(ROOT, 'memorylane-delen.js'));
 const VV = require(path.join(ROOT, 'vault-veilig.js'));
 const P = require(path.join(ROOT, 'intake', 'patientpoort.js'));
+const V = require(path.join(ROOT, 'herinneringen-verhaal.js'));
 
 // zelfde tabellen als socev-app deel/schema.sql (alleen het MemoryLane-deel)
 const D1_SCHEMA = `
@@ -33,6 +34,16 @@ const VERHAAL = '[00:00] Op de camping in Proefdorp regende het drie dagen.\n\n[
 const WERK = 'Betreft: mw. P. Proefpersoon, geb. 03-04-1961. Bovengenoemde patiënt is bekend met hypertensie; diagnose ijzergebreksanemie, medicatie ferrofumaraat 200 mg, labuitslag Hb 6,4 mmol/l.';
 const NEP_GEHEIM = 'nepgeheim-0123456789abcdef';
 
+// wv2180: nep-verhaalmodule (zelfde vorm als herinneringen-verhaal.js samengesteld); staat.verhalen[rid] = { titel, alineas, datum_* }
+function nepVerhaal(staat) {
+  return { samengesteld: (rid, cs) => {
+    const v = staat.verhalen[rid];
+    if (!v) return { stand: null, versie: null, delen: [], niet_gelukt: [] };
+    return { stand: 'klaar', versie: 2, niet_gelukt: [], delen: [{ herinnering_id: 'hr_0000000000000001', titel: V.pasCorrectiesToe(v.titel || '', cs), status: 'concept', eigen: false, t_van: 0,
+      datum: v.datum_van || '', datum_precisie: v.datum_precisie || 'onbekend', datum_van: v.datum_van || '', datum_tot: v.datum_tot || '',
+      alineas: v.alineas.map((a, i) => ({ tekst: V.pasCorrectiesToe(a, cs), t_van: i * 60, t_tot: i * 60 + 60 })) }] };
+  } };
+}
 function omgeving() {
   const basis = fs.mkdtempSync(path.join(os.tmpdir(), 'ml-delen-toets-'));
   const idir = path.join(basis, 'intake'), vault = path.join(basis, 'vault'), hdir = path.join(basis, 'herinneringen');
@@ -44,7 +55,7 @@ function omgeving() {
     onderhoudAan: () => false, nachtgrendel: () => false, primair: () => true, kaartZet: async () => ({}), kaartLijst: async () => ({}), box: () => {}, offsiteAan: () => false });
   const d1db = new DatabaseSync(':memory:');
   d1db.exec(D1_SCHEMA);
-  const staat = { d1Uit: false, onderhoud: false, kluis: { memorylane_link_familie: 'Kaasschaaf Zeven', memorylane_link_vrienden: null }, d1Log: [] };
+  const staat = { d1Uit: false, onderhoud: false, kluis: { memorylane_link_familie: 'Kaasschaaf Zeven', memorylane_link_vrienden: null }, d1Log: [], verhalen: {} };
   const d1 = async (sql, params) => {
     if (staat.d1Uit) return { ok: false, rijen: null };
     staat.d1Log.push(sql);
@@ -54,7 +65,7 @@ function omgeving() {
   const fouten = [];
   const ml = M.maak({ db: ing._db, vault, vv: VV, dir: hdir, d1, kluis: async (n) => staat.kluis[n] || null, marker: P, geheimen: () => [NEP_GEHEIM],
     categorieen: H.CATEGORIEEN, onderhoudAan: () => staat.onderhoud, nachtgrendel: () => false, nu: () => klok.t, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)),
-    reisVandaag: () => '2026-10-31' });
+    reisVandaag: () => '2026-10-31', verhaal: nepVerhaal(staat) });
   // een opname met notitie zoals herinneringen.js hem achterlaat (verzonnen)
   function opname(id, cat, gevoelig) {
     const rel = path.join(H.NOTITIE_MAP, '2026-10-31_' + id.slice(-6) + '.md');
@@ -95,7 +106,7 @@ test('herinneringen: opnames met notitie en voorbije reizen; geplande reis en th
     const l = o.ml.lijst().body;
     assert.deepStrictEqual(l.herinneringen.map((h) => h.soort).sort(), ['opname', 'reis']);
     const r = l.herinneringen.find((h) => h.soort === 'reis');
-    assert.strictEqual(r.categorie, 'reizen'); assert.strictEqual(r.gevoelig, false); assert.strictEqual(r.titel, '2023 - Proefreis Engeland');
+    assert.strictEqual(r.categorie, 'reizen'); assert.strictEqual(r.gevoelig, false); assert.strictEqual(r.titel, 'Proefreis Engeland 2023', 'wv2180: vaste naamgeving');
     assert.strictEqual(r.zicht.familie, false); assert.strictEqual(r.zicht.vrienden, false, 'standaard nergens zichtbaar');
     assert.ok(l.categorieen.some((c) => c.id === 'reizen'), 'categorie Reizen in de vaste lijst');
   } finally { o.sluit(); }
@@ -139,6 +150,7 @@ test('publiceren: link uit = niets buiten; aan + wachtwoord = alleen wat zichtba
   const o = omgeving();
   try {
     o.opname(RA, 'familie', false); o.opname(RB, 'gezin', false);
+    o.staat.verhalen[RA] = { titel: '', alineas: ['Het regende drie dagen op de camping in Proefdorp.', 'Toen de zon terugkwam, fietsten we naar het meer.'] };
     o.reis('2022 - Proefstad.md', 'reis', '2022-05-01 – 2022-05-04');
     o.ml.lijst();
     const ha = o.hid('opname', RA), hr = o.hid('reis', '20_Prive/Reizen/2022 - Proefstad.md');
@@ -157,19 +169,21 @@ test('publiceren: link uit = niets buiten; aan + wachtwoord = alleen wat zichtba
     assert.ok(!JSON.stringify(o.d1db.prepare('SELECT * FROM ml_link').all()).includes('Kaasschaaf'), 'nooit het wachtwoord zelf');
     const it = o.items('familie');
     assert.strictEqual(it.length, 2, 'alleen de twee zichtbare');
-    const reis = it.find((x) => x.titel === '2022 - Proefstad');
-    assert.strictEqual(reis.wanneer, '2022-05-01 – 2022-05-04'); assert.deepStrictEqual(JSON.parse(reis.stukken), []);
+    const reis = it.find((x) => x.titel === 'Proefstad 2022');
+    assert.strictEqual(reis.wanneer, '1–4 mei 2022'); assert.deepStrictEqual(JSON.parse(reis.stukken), []);
     assert.ok(!JSON.stringify(it).includes('Reisbureau') && !JSON.stringify(it).includes('1234'), 'nooit de reispagina zelf');
     const op = it.find((x) => x.titel.startsWith('Opname'));
     const s = JSON.parse(op.stukken);
-    assert.strictEqual(s[0].soort, 'opname');
-    assert.strictEqual(s[0].tekst, 'Op de camping in Proefdorp regende het drie dagen.\n\nToen de zon terugkwam, fietsten we naar het meer.');
+    // wv2180: het samengestelde verhaal, nooit het transcript (dat staat in de log)
+    assert.strictEqual(s.length, 1); assert.strictEqual(s[0].soort, 'verhaal');
+    assert.strictEqual(s[0].tekst, 'Het regende drie dagen op de camping in Proefdorp.\n\nToen de zon terugkwam, fietsten we naar het meer.');
+    assert.ok(!JSON.stringify(it).includes('Op de camping in Proefdorp regende'), 'transcript nooit buiten');
     assert.strictEqual(o.items('vrienden').length, 0, 'andere kring: niets');
     assert.ok(!JSON.stringify(o.d1db.prepare('SELECT * FROM ml_item').all()).includes(RB.slice(-6)), 'RB niet zichtbaar gezet');
     // later gevoelig → bij de volgende tik weg
     o.ing._db.prepare('UPDATE ramble SET herinnering_gevoelig = 1 WHERE ramble_id = ?').run(RA);
     await o.ml.tik();
-    assert.deepStrictEqual(o.items('familie').map((x) => x.titel), ['2022 - Proefstad']);
+    assert.deepStrictEqual(o.items('familie').map((x) => x.titel), ['Proefstad 2022']);
     // toon_opname uit → opname zonder letterlijke tekst
     o.ing._db.prepare('UPDATE ramble SET herinnering_gevoelig = 0 WHERE ramble_id = ?').run(RA);
     o.ml.toonOpname(ha, { aan: false });
@@ -207,12 +221,14 @@ test('bijdrage: versleuteld in D1, ook opgehaald als de link uit staat; eerst bi
     assert.ok(!JSON.stringify(o.items('vrienden')).includes('tent'), 'binnen = nog niet zichtbaar');
     assert.strictEqual(o.ml.stukBesluit(st.sid, 'opnemen').status, 200);
     await o.ml.tik();
-    assert.ok(JSON.stringify(o.items('vrienden')).includes('tent'), 'opgenomen = zichtbaar voor vrienden');
-    assert.ok(!JSON.stringify(o.items('familie')).includes('tent'), 'niet voor familie');
-    // Davids eigen tekst: meteen opgenomen, voor beide kringen
+    // wv2180: een bijdrage staat in de log (alleen David); een deellink toont alleen de samengestelde herinnering
+    for (const k of ['familie', 'vrienden']) assert.ok(!JSON.stringify(o.items(k)).includes('tent'), 'opgenomen bijdrage niet via de link: ' + k);
+    assert.strictEqual(o.ml.detail(ha).body.herinnering.log.stukken.find((x) => x.sid === st.sid).status, 'opgenomen', 'wel in de log');
+    // Davids eigen correctie (geen "X is Y"): in de log, niet via de link
     assert.strictEqual(o.ml.tekst(ha, { tekst: 'Het was in 1999, niet in 1998.', soort: 'correctie' }).status, 200);
     await o.ml.tik();
-    for (const k of ['familie', 'vrienden']) assert.ok(JSON.stringify(o.items(k)).includes('niet in 1998'), k);
+    for (const k of ['familie', 'vrienden']) assert.ok(!JSON.stringify(o.items(k)).includes('niet in 1998'), k);
+    assert.ok(o.ml.detail(ha).body.herinnering.log.stukken.some((x) => x.tekst === 'Het was in 1999, niet in 1998.'));
     // geen tekst, titels of namen in intake.sqlite
     const dump = JSON.stringify(['ml_herinnering', 'ml_stuk', 'ml_link', 'ml_pub', 'ml_d1', 'ml_blok'].map((t) => o.ing._db.prepare('SELECT * FROM ' + t).all()));
     for (const w of ['tent', 'Bram', '1998', 'camping', 'Proefwachtwoord']) assert.ok(!dump.includes(w), w);
@@ -261,9 +277,10 @@ test('losse bijdrage → voorstel, nergens zichtbaar; marker raak → vastgehoud
 test('poorten bij delen: geheim in Davids tekst = nooit; marker = pas na "toch delen" voor precies die inhoud', async () => {
   const o = omgeving();
   try {
-    o.opname(RA, 'overig', false); o.opname(RB, 'overig', false);
+    // wv2180: bij een reis is Davids eigen aanvulling het verhaal (bij een opname het verhaal uit de opname)
+    o.reis('2021 - Proefstad A.md', 'reis', '2021-05-01 – 2021-05-04'); o.reis('2022 - Proefstad B.md', 'reis', '2022-05-01 – 2022-05-04');
     o.ml.lijst();
-    const ha = o.hid('opname', RA), hb = o.hid('opname', RB);
+    const ha = o.hid('reis', '20_Prive/Reizen/2021 - Proefstad A.md'), hb = o.hid('reis', '20_Prive/Reizen/2022 - Proefstad B.md');
     o.ml.zicht(ha, { kring: 'familie', aan: true }); o.ml.zicht(hb, { kring: 'familie', aan: true });
     await o.ml.link('familie', 'aan');
     assert.strictEqual(o.items('familie').length, 2);
@@ -371,5 +388,116 @@ test('review MOET 4: D1 weg bij "uit" = 502 en buiten nog oud; de volgende tik z
     assert.strictEqual(o.d1db.prepare("SELECT aan FROM ml_link WHERE kring = 'familie'").get().aan, 0);
     assert.strictEqual(o.items('familie').length, 0);
     assert.strictEqual(o.ml.delenStand().body.links[0].buiten_bijgewerkt, true);
+  } finally { o.sluit(); }
+});
+
+// ─────────────────────────── wv2180: wanneer, volgorde, titels, log, correctie letterlijk ───────────────────────────
+
+test('wv2180 wanneer: David zet jaar, reeks of dag; zijn invoer wint van reis en verhaal; leeg = terug; ongeldig of toekomst = 400; ook in de deellink', async () => {
+  const o = omgeving();
+  try {
+    o.opname(RA, 'familie', false); o.opname(RB, 'gezin', false); o.opname(RC, 'gezin', false);
+    o.staat.verhalen[RB] = { titel: 'Regen in Proefdorp', alineas: ['Het regende.'], datum_van: '1995-01-01', datum_tot: '1995-12-31', datum_precisie: 'jaar' };
+    o.reis('2022 - Proefstad.md', 'reis', '2022-05-01 – 2022-05-04');
+    o.ml.lijst();
+    const ha = o.hid('opname', RA), hb = o.hid('opname', RB), hc = o.hid('opname', RC), hr = o.hid('reis', '20_Prive/Reizen/2022 - Proefstad.md');
+    let l = o.ml.lijst().body.herinneringen;
+    const k = (h) => l.find((x) => x.hid === h);
+    assert.strictEqual(k(hb).wanneer, '1995'); assert.strictEqual(k(hb).wanneer_bron, 'verhaal');
+    assert.strictEqual(k(hr).wanneer, '1–4 mei 2022'); assert.strictEqual(k(hr).wanneer_bron, 'reis');
+    assert.strictEqual(k(ha).wanneer, 'verteld op 31-10-2026'); assert.strictEqual(k(ha).wanneer_bron, null);
+    // volgorde: met datum eerst, nieuwste eerst; zonder datum achteraan
+    assert.deepStrictEqual(l.map((x) => x.hid).slice(0, 2), [hr, hb]);
+    // David zet een datum
+    assert.strictEqual(o.ml.wanneer(ha, { van: '2025-06-11', tot: '2025-06-16' }).status, 200);
+    assert.strictEqual(o.ml.wanneer(hr, { van: '2019' }).status, 200, 'ook bij een reis wint David');
+    assert.strictEqual(o.ml.wanneer(hc, { van: '1988', tot: '1990' }).status, 200);
+    assert.strictEqual(o.ml.wanneer(hb, { van: '1996-07' }).status, 200);
+    l = o.ml.lijst().body.herinneringen;
+    assert.strictEqual(k(ha).wanneer, '11–16 juni 2025'); assert.strictEqual(k(ha).wanneer_bron, 'david'); assert.deepStrictEqual(k(ha).wanneer_invoer, { van: '2025-06-11', tot: '2025-06-16' });
+    assert.strictEqual(k(hr).wanneer, '2019'); assert.strictEqual(k(hc).wanneer, '1988–1990'); assert.strictEqual(k(hb).wanneer, 'juli 1996');
+    assert.deepStrictEqual(l.map((x) => x.hid), [ha, hr, hb, hc], 'op tijd, nieuwste eerst');
+    const pg = fs.readFileSync(path.join(o.vault, M.MAP, ha + '.md'), 'utf8');
+    assert.ok(pg.split('\n').indexOf('wanneer: "2025-06-11/2025-06-16"') >= 0, 'in de frontmatter van de MemoryLane-pagina');
+    // ongeldig
+    for (const d of [{ van: '95' }, { van: '1995-13' }, { van: '1995-02-30' }, { van: '1995', tot: '1990' }, { van: '2031' }, { van: '1995/1996' }, { van: '2026-12-01' }])
+      assert.strictEqual(o.ml.wanneer(hc, d).status, 400, JSON.stringify(d));
+    // leeg = weer wat de code afleidt
+    assert.strictEqual(o.ml.wanneer(hb, { van: '' }).status, 200);
+    l = o.ml.lijst().body.herinneringen;
+    assert.strictEqual(k(hb).wanneer, '1995'); assert.ok(fs.readFileSync(path.join(o.vault, M.MAP, hb + '.md'), 'utf8').indexOf('wanneer:') < 0);
+    // deellink: alleen lezen, zelfde tekst
+    o.ml.zicht(ha, { kring: 'familie', aan: true });
+    await o.ml.link('familie', 'aan');
+    assert.strictEqual(o.items('familie')[0].wanneer, '11–16 juni 2025');
+    // onderhoud: niets schrijven
+    o.staat.onderhoud = true;
+    assert.strictEqual(o.ml.wanneer(ha, { van: '2001' }).status, 503);
+  } finally { o.sluit(); }
+});
+
+test('wv2180 log alleen voor David: detail heeft verhaal + log (transcript, correcties, bijdragen); de deellink nooit; correctie "X is Y" letterlijk', async () => {
+  const o = omgeving();
+  try {
+    o.staat.kluis.memorylane_link_vrienden = 'Proefwachtwoord Twee';
+    o.opname(RA, 'shizzle', false);
+    o.staat.verhalen[RA] = { titel: 'Het potlood uit de Sharky Edwi', alineas: ['Frits pakte een potlood uit zijn Sharky Edwi en prikte in mijn hand.'] };
+    o.ml.lijst();
+    const ha = o.hid('opname', RA);
+    assert.strictEqual(o.ml.tekst(ha, { tekst: 'Edwi is etui', soort: 'correctie' }).status, 200);
+    assert.strictEqual(o.ml.tekst(ha, { tekst: 'Het litteken zie je nog steeds.', soort: 'aanvulling' }).status, 200);
+    const d = o.ml.detail(ha).body.herinnering;
+    assert.strictEqual(d.verhaal.tekst, 'Frits pakte een potlood uit zijn Sharky etui en prikte in mijn hand.', 'correctie letterlijk in het samengestelde verhaal');
+    assert.strictEqual(d.titel, 'Het potlood uit de Sharky etui', 'ook in de titel van het verhaal');
+    assert.deepStrictEqual(d.log.correcties, [{ van: 'Edwi', naar: 'etui' }]);
+    assert.match(d.log.opname, /Op de camping in Proefdorp regende het drie dagen/, 'transcript in de log');
+    assert.deepStrictEqual(d.log.stukken.map((s) => s.soort).sort(), ['aanvulling', 'correctie'], 'niets uit de log verdwijnt');
+    assert.strictEqual(d.verhaal.delen[0].alineas[0].t_van, 0, 'tijdcodes in de log');
+    // voor de verhaalmodule: alleen Davids eigen stukken
+    assert.deepStrictEqual(o.ml.davidStukken(RA).sort((a, b) => (a.soort < b.soort ? -1 : 1)), [{ soort: 'aanvulling', tekst: 'Het litteken zie je nog steeds.' }, { soort: 'correctie', tekst: 'Edwi is etui' }]);
+    assert.deepStrictEqual(o.ml.davidStukken('r20261031-1111111111111111'), []);
+    // een bijdrage van een vriend
+    o.ml.zicht(ha, { kring: 'vrienden', aan: true });
+    await o.ml.link('vrienden', 'aan');
+    const pub = o.items('vrienden')[0].pub, vv = o.d1db.prepare("SELECT versie FROM ml_link WHERE kring = 'vrienden'").get().versie;
+    await alsWorker(o.d1db, 'vrienden', vv, { pub, naam: 'Bram Proefsen', titel: null, tekst: 'Ik zat ernaast en zag het gebeuren.', vorm: 'tekst' });
+    await o.ml.tik();
+    const sid = o.ml.detail(ha).body.herinnering.log.stukken.find((s) => s.wie === 'bezoeker').sid;
+    o.ml.stukBesluit(sid, 'opnemen');
+    await o.ml.tik();
+    const buiten = JSON.stringify(o.items('vrienden'));
+    assert.match(buiten, /Sharky etui/);
+    for (const w of ['Edwi', 'litteken', 'Ik zat ernaast', 'Bram', 'Op de camping', 'regende']) assert.ok(buiten.indexOf(w) < 0, 'deellink lekt de log: ' + w);
+    // toon_opname uit = geen verhaal via de link
+    o.ml.toonOpname(ha, { aan: false });
+    await o.ml.tik();
+    assert.ok(!JSON.stringify(o.items('vrienden')).includes('prikte'), 'alleen de titel blijft');
+  } finally { o.sluit(); }
+});
+
+test('wv2180 titels: David wint altijd; daarna de vaste naamgeving; een opname daarna de titel van zijn verhaal; oude eigen titel blijft van David', async () => {
+  const o = omgeving();
+  try {
+    o.opname(RA, 'familie', false); o.opname(RB, 'familie', false);
+    o.staat.verhalen[RA] = { titel: 'De koeien op het landweggetje', alineas: ['Er werden koeien uit de wei gelaten.'] };
+    o.reis('2023 - Proefstedentrip.md', 'reis', '2023-03-01 – 2023-03-03');
+    o.ml.lijst();
+    const ha = o.hid('opname', RA), hb = o.hid('opname', RB), hr = o.hid('reis', '20_Prive/Reizen/2023 - Proefstedentrip.md');
+    const titel = (h) => o.ml.detail(h).body.herinnering.titel;
+    assert.strictEqual(titel(ha), 'De koeien op het landweggetje', 'titel van het verhaal i.p.v. "Opname …"');
+    assert.match(titel(hb), /^Opname 31-10-2026/, 'nog geen verhaal: standaard');
+    assert.strictEqual(o.ml.naamgeving(hr, 'Citytrip Proefstad 2023').ok, true);
+    assert.strictEqual(titel(hr), 'Citytrip Proefstad 2023');
+    assert.strictEqual(o.ml.titel(hr, { titel: 'Mijn eigen titel' }).status, 200);
+    assert.strictEqual(o.ml.naamgeving(hr, 'Citytrip Anders 2023').al, 'david', 'naamgeving overschrijft David niet');
+    assert.strictEqual(titel(hr), 'Mijn eigen titel');
+    // een oudere pagina zonder titel_bron met een eigen titel (zoals vóór wv2180) = van David
+    fs.writeFileSync(path.join(o.vault, M.MAP, hb + '.md'), '---\ntype: herinnering-stukken\ngevoelig: prive\nherinnering_id: ' + hb + '\nsoort: opname\ntitel: "Potloodgate - Proef"\n---\n');
+    assert.strictEqual(o.ml.naamgeving(hb, 'Iets anders').al, 'david');
+    assert.strictEqual(titel(hb), 'Potloodgate - Proef');
+    assert.strictEqual(M.naamVoorReis('20_Prive/Reizen/2025 - Gambia april.md', { van: '2025-04-16' }, ['gambia']), 'Gambia 2025');
+    assert.strictEqual(M.naamVoorReis('20_Prive/Reizen/2026 - De Herfst van Shizzle (Keulen & Willingen).md', { van: '2026-10-16' }, ['shizzle']), 'Shizzle: De Herfst van Shizzle - Keulen en Willingen - 2026');
+    assert.strictEqual(M.naamVoorReis('20_Prive/Reizen/2022 - Edinburgh.md', { van: '2022-03-11' }, ['stedentrip']), 'Citytrip Edinburgh 2022');
+    assert.strictEqual(M.naamVoorReis('20_Prive/Reizen/2025 - Campertrip West-Amerika.md', { van: '2025-07-11' }, ['zomer']), 'Zomervakantie 2025 - Campertrip West-Amerika');
   } finally { o.sluit(); }
 });

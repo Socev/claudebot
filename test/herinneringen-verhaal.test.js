@@ -58,7 +58,7 @@ async function omgeving(opt) {
   const ing = I.maak({ dir: idir, vault, profielenDir: path.join(ROOT, 'intake', 'profielen'), filterPad: path.join(ROOT, 'bisync-filter.txt'),
     primair: () => true, vv: VV, nu: () => klok.t, fout: () => {}, marker: P, nachtgrendel: () => false, vrijeBytes: () => 50 * 1024 ** 3, stuur: () => {} });
   const tekstVoor = new Map(), box = [];
-  const staat = { onderhoud: false, nacht: false, verzoeken: [], opties: [], antwoord: null, gooi: 0 };
+  const staat = { onderhoud: false, nacht: false, verzoeken: [], opties: [], antwoord: null, gooi: 0, ds: null };
   const h = H.maak({ dir: hdir, intake: ing, vault, vv: VV, nu: () => klok.t, fout: () => {},
     whisper: async (b) => tekstVoor.get(sha(b)) || '', kanUitschrijven: () => true, onderhoudAan: () => staat.onderhoud, nachtgrendel: () => staat.nacht,
     primair: () => true, kaartZet: async (p) => ({ sleutel: p.sleutel }), kaartLijst: async () => ({}), box: (t) => box.push(t),
@@ -68,7 +68,8 @@ async function omgeving(opt) {
   fs.writeFileSync(path.join(vault, '20_Prive', 'Familie', 'Teun Proefman.md'), '---\ntype: persoon\naliases: ["Teun", "T. Proefman"]\n---\n# Teun Proefman\n');
   const v = V.maak({ db: ing._db, dir: hdir, vault, vv: VV, nu: () => klok.t, fout: opt.fout || (() => {}), sleutel: async () => 'nep-sleutel', sdk: nepSdk(staat),
     basisUrl: 'http://127.0.0.1:9', geboren: () => '1984-01-07', categorieen: H.CATEGORIEEN, metCatRegels: H._metCatRegels,
-    onderhoudAan: () => staat.onderhoud, nachtgrendel: () => staat.nacht, primair: () => true, box: (t) => box.push(t) });
+    onderhoudAan: () => staat.onderhoud, nachtgrendel: () => staat.nacht, primair: () => true, box: (t) => box.push(t),
+    davidStukken: (rid) => (staat.ds ? staat.ds[rid] || [] : null) });
   // één opname tot een notitie (R1), met de gegeven teksten per stuk van 60 s
   async function opname(id, teksten, x) {
     const bufs = teksten.map((t, i) => { const b = wav(60, id + i + t); tekstVoor.set(sha(b), t); return b; });
@@ -101,7 +102,7 @@ test('opname → één concept-verhaal: geen tools, transcript gemarkeerd, priv�
     const p = o.staat.verzoeken[0];
     assert.ok(!('tools' in p) && !('tool_choice' in p), 'geen gereedschap');
     assert.strictEqual(p.output_config.format.type, 'json_schema');
-    assert.match(p.system[0].text, /gegeven tekst van buiten/);
+    assert.match(p.system[0].text, /zijn gegeven tekst/); assert.match(p.system[0].text, /ghostwriter/);
     const inv = p.messages[0].content[0].text;
     assert.ok(inv.startsWith('<transcript>\n[t=0-60] Op de camping') && inv.indexOf('</transcript>') > 0);
     assert.strictEqual(o.staat.opties[0].apiKey, 'nep-sleutel'); assert.strictEqual(o.staat.opties[0].authToken, null); assert.strictEqual(o.staat.opties[0].logLevel, 'off');
@@ -497,5 +498,152 @@ test('wv2123: herbouwsignaal blijft tot het bouwen gelukt is; zonder signaal is 
     fs.rmdirSync(sig);
     u = await R.voerUit(r1.stuk_id, { vraag: 'c14a2124', code: p.code });
     assert.strictEqual(u.ok, true, JSON.stringify(u.na)); assert.strictEqual(u.na.herbouw_signaal, 0); assert.ok(fs.existsSync(sig));
+  } finally { o.sluit(); }
+});
+
+// ─────────────────────────── wv2180: ghostwriter, feitentoets, correcties, herbouw ───────────────────────────
+
+test('wv2180 feitentoets: vrij herschreven (eigen volgorde en woorden) mag; verzonnen naam, getal, maand of seizoen niet; één letter verschil in een naam mag', () => {
+  const v = V.vensterSet('ja dus eh we gingen naar Davo met de auto want de trein ging te krap worden en mijn vader reed en we sliepen in Walserhuis certig in 2025 en het was heel mooi');
+  assert.strictEqual(V.toetsFeiten('Omdat de trein te krap werd, besloten we met de auto te gaan. Mijn vader reed ons naar Davos, en we sliepen in Walserhuis Sertig.', v), null, 'vrij herschreven + tikfout van de uitschrijver');
+  assert.strictEqual(V.toetsFeiten('In 2025 reden we naar Davos.', v), null);
+  assert.strictEqual(V.toetsFeiten('We reden naar Chur.', v), 'naam_niet_gezegd');
+  assert.strictEqual(V.toetsFeiten('Pieter reed mee.', v), 'naam_niet_gezegd', 'verzonnen naam aan het zinsbegin');
+  assert.strictEqual(V.toetsFeiten('We sliepen drie nachten in Davos.', v), 'getal_niet_gezegd');
+  assert.strictEqual(V.toetsFeiten('In juli reden we naar Davos.', v), 'datum_niet_gezegd');
+  assert.strictEqual(V.toetsFeiten('Het was een mooie zomer.', v), 'datum_niet_gezegd', 'seizoen');
+  assert.strictEqual(V.toetsFeiten('In 2024 reden we naar Davos.', v), 'getal_niet_gezegd');
+  // het hele verhaal: eigen woorden genoeg, niet veel langer dan de bron
+  assert.strictEqual(V.toetsGeheel(['Omdat de trein te krap werd, gingen we met de auto. Mijn vader reed, we sliepen in Walserhuis Sertig en het was heel mooi.'], v), null);
+  assert.strictEqual(V.toetsGeheel(['Gisteravond keken wij samen naar oude films over ruimtevaart, piraten en verloren schatten op tropische eilanden.'], v), 'te_weinig_eigen_woorden');
+  assert.strictEqual(V.toetsGeheel([Array(60).fill('mijn vader reed de auto naar Davo').join(' ')], v), 'langer_dan_gezegd');
+});
+
+test('wv2180 correcties: "X is Y" letterlijk, ook hoofdletter aan het zinsbegin; beschrijvingen en lange zinnen zijn geen vervanging', () => {
+  const cs = V.correctiesUit(['Edwi is etui', 'Klaas is mijn leraar Latijn', 'niet Davo maar Davos\nKeshe-hutte → Kesch-Hütte', 'Het was in 1999 en niet in 1998 want toen waren we nog niet getrouwd']);
+  assert.deepStrictEqual(cs, [{ van: 'Edwi', naar: 'etui' }, { van: 'Davo', naar: 'Davos' }, { van: 'Keshe-hutte', naar: 'Kesch-Hütte' }]);
+  assert.strictEqual(V.pasCorrectiesToe('Hij pakte een potlood uit zijn Sharky Edwi. Edwi was groen. In Davo bij de Keshe-hutte.', cs),
+    'Hij pakte een potlood uit zijn Sharky etui. Etui was groen. In Davos bij de Kesch-Hütte.');
+  // Y bevat X: niet nog eens vervangen (ook niet als het verhaal al goed is)
+  const c2 = V.correctiesUit(['Jan is Jan-Willem']);
+  assert.strictEqual(V.pasCorrectiesToe(V.pasCorrectiesToe('Jan en Jan-Willem', c2), c2), 'Jan-Willem en Jan-Willem');
+  assert.strictEqual(V.pasCorrectiesToe('Edwina kwam ook', cs), 'Edwina kwam ook', 'alleen hele woorden');
+});
+
+test('wv2180 ghostwriter-verhaal met Davids aanvulling en correctie: gaat mee als gegeven tekst, naam uit de aanvulling mag, correctie letterlijk', async () => {
+  const o = await omgeving();
+  try {
+    o.staat.ds = { [ID1]: [{ soort: 'aanvulling', tekst: 'Teun had een rode fiets van zijn opa Gerrit.' }, { soort: 'correctie', tekst: 'Proefdorp is Proefdorpen' }] };
+    await o.opname(ID1, TEKST);
+    o.staat.antwoord = { herinneringen: [{ t_van: 0, t_tot: 180, titel: 'Zomervakantie 1995 - Proefdorp',
+      alineas: [{ tekst: 'Het regende drie dagen achter elkaar op de camping in Proefdorp, die zomer van 1995. Ik was elf, en met Teun speelden we kaartspelletjes in de voortent tot iedereen een keer gewonnen had.', t_van: 0, t_tot: 120 },
+        { tekst: 'Teun had een rode fiets van zijn opa Gerrit. Toen de zon terugkwam, fietsten we met z\'n vieren naar het meer en zwommen we tot het donker werd.', t_van: 120, t_tot: 180 }],
+      datum_citaat: 'in de zomer van negentien vijfennegentig', plaats: 'Proefdorp', personen: ['Teun', 'Gerrit'], voorval_voorstel: '' }] };
+    const u = await o.v.tik();
+    assert.strictEqual(u.verhalen, 1, JSON.stringify(u));
+    const inv = o.staat.verzoeken[0].messages[0].content[0].text;
+    assert.match(inv, /\[t=0-60\] Op de camping in Proefdorpen regende/, 'correctie al op het transcript');
+    assert.match(inv, /<aanvullingen_van_david>\n- Teun had een rode fiets van zijn opa Gerrit\.\n<\/aanvullingen_van_david>/);
+    assert.match(inv, /<correcties_van_david>\n- Proefdorp is Proefdorpen\n<\/correcties_van_david>/);
+    const t = o.lees(o.verhalen()[0]);
+    assert.match(t, /opa Gerrit/); assert.match(t, /camping in Proefdorpen/, 'correctie letterlijk in het verhaal'); assert.ok(!/Proefdorp[ ,.]/.test(t.split('-->')[1] || ''));
+    assert.match(t, /^titel: "Zomervakantie 1995 - Proefdorpen"$/m, 'titel volgens de naamgeving, met correctie');
+    assert.ok(t.split('\n').indexOf('verhaal_versie: herinneringen-verhaal-2') >= 0);
+    const vr = o.ing._db.prepare('SELECT * FROM ramble_verhaal WHERE ramble_id = ?').get(ID1);
+    assert.strictEqual(vr.versie, 2); assert.match(vr.stukken_hash, /^[0-9a-f]{16}:[0-9a-f]{16}$/);
+    assert.ok(!JSON.stringify(vr).includes('Gerrit'), 'geen tekst in intake.sqlite');
+    // samengesteld: correctie ook bij weergave (een nieuwe correctie zonder herbouw)
+    const s = o.v.samengesteld(ID1, V.correctiesUit(['Teun is Teunis']));
+    assert.strictEqual(s.stand, 'klaar'); assert.strictEqual(s.delen.length, 1);
+    assert.ok(s.delen[0].alineas.every((a) => !/\bTeun\b/.test(a.tekst)) && /Teunis/.test(s.delen[0].alineas[0].tekst));
+    assert.deepStrictEqual([s.delen[0].alineas[0].t_van, s.delen[0].alineas[0].t_tot], [0, 120], 'tijdcodes per alinea');
+    // een naam die nergens staat (ook niet in de aanvulling) blijft verboden
+    const a2 = V.toetsFeiten('Opa Hendrik fietste mee.', V.vensterSet(TEKST.join(' ') + ' Teun had een rode fiets van zijn opa Gerrit.'));
+    assert.strictEqual(a2, 'naam_niet_gezegd');
+  } finally { o.sluit(); }
+});
+
+test('wv2180 herbouw: versie 1 en een nieuwe aanvulling geven een nieuw verhaal; Davids eigen tekst blijft; koppeling blijft; overbodige pagina = vervangen; "X is Y" alleen = geen aanroep', async () => {
+  const o = await omgeving();
+  try {
+    o.staat.ds = { [ID1]: [] };
+    await o.opname(ID1, TEKST);
+    // versie 1: twee herinneringen
+    o.staat.antwoord = { herinneringen: [{ t_van: 0, t_tot: 120, titel: 'Regen in Proefdorp', alineas: goed().herinneringen[0].alineas.slice(0, 2), datum_citaat: '', plaats: '', personen: ['Teun'], voorval_voorstel: '' },
+      { t_van: 120, t_tot: 180, titel: 'Naar het meer', alineas: goed().herinneringen[0].alineas.slice(2), datum_citaat: '', plaats: '', personen: [], voorval_voorstel: '' }] };
+    await o.v.tik();
+    const h0 = V.hidVan(ID1, 0), h1 = V.hidVan(ID1, 1);
+    assert.deepStrictEqual(o.verhalen(), [h0, h1].map((x) => x + '.md').sort());
+    const p0 = o.v.voorstellen().find((x) => x.soort === 'persoon');
+    assert.strictEqual(o.v.besluit(p0.id, 'ja').status, 200);
+    o.ing._db.prepare('UPDATE ramble_verhaal SET versie = NULL').run();   // zoals een verhaal van vóór wv2180
+    // nieuw antwoord: één herinnering
+    o.staat.antwoord = goed();
+    o.klok.t += 11 * 60000;
+    let u = await o.v.tik();
+    assert.strictEqual(u.herbouw, 1); assert.strictEqual(o.staat.verzoeken.length, 2);
+    const t0 = o.lees(h0 + '.md'), t1 = o.lees(h1 + '.md');
+    assert.match(t0, /verhaal_versie: herinneringen-verhaal-2/); assert.match(t0, /zwommen we tot het donker werd/);
+    assert.ok(t0.split('\n').indexOf('personen: ["[[20_Prive/Familie/Teun Proefman]]"]') >= 0, 'Davids koppeling blijft');
+    assert.match(t1, /^status: vervangen$/m, 'overbodige codepagina vervangen');
+    assert.strictEqual(o.v.samengesteld(ID1, []).delen.length, 1);
+    // geen nieuwe aanroep zonder wijziging
+    o.klok.t += 11 * 60000;
+    await o.v.tik();
+    assert.strictEqual(o.staat.verzoeken.length, 2);
+    // een pure "X is Y"-correctie: geen aanroep (de weergave past hem toe)
+    o.staat.ds[ID1] = [{ soort: 'correctie', tekst: 'Teun is Teunis' }];
+    o.klok.t += 11 * 60000;
+    await o.v.tik();
+    assert.strictEqual(o.staat.verzoeken.length, 2, 'geen aanroep voor een letterlijke correctie');
+    // David past het verhaal zelf aan; daarna een aanvulling → nieuwe aanroep, maar zijn pagina blijft
+    const pad0 = path.join(o.vault, V.VERHAAL_MAP, h0 + '.md');
+    fs.writeFileSync(pad0, fs.readFileSync(pad0, 'utf8').replace('zwommen we tot het donker werd', 'zwommen we tot het pikkedonker werd'));
+    o.staat.ds[ID1] = [{ soort: 'correctie', tekst: 'Teun is Teunis' }, { soort: 'aanvulling', tekst: 'Het meer was ijskoud.' }];
+    o.klok.t += 11 * 60000;
+    u = await o.v.tik();
+    assert.strictEqual(u.herbouw, 1); assert.strictEqual(o.staat.verzoeken.length, 3);
+    assert.match(o.staat.verzoeken[2].messages[0].content[0].text, /Het meer was ijskoud/);
+    assert.match(fs.readFileSync(pad0, 'utf8'), /pikkedonker/, 'Davids aanpassing wint');
+    assert.strictEqual(u.eigen, 1);
+    assert.strictEqual(o.v.samengesteld(ID1, []).delen[0].eigen, true);
+  } finally { o.sluit(); }
+});
+
+test('wv2180 datum: een reeks dagen in één maand', () => {
+  const t = Date.parse('2026-10-31T10:00:00Z');
+  assert.deepStrictEqual(V.rekenDatum('In 2025, van 11 tot en met 16 juni', t), { datum: '2025-06-11', datum_precisie: 'dag', datum_van: '2025-06-11', datum_tot: '2025-06-16' });
+  const x = V.rekenDatum('van 16 tot 11 juni 2025', t);
+  assert.strictEqual(x.datum_van, x.datum_tot, 'omgekeerd = geen reeks');
+});
+
+test('wv2180 herbouw: een verhaal dat niet lukte, wordt na een "X is Y"-correctie wél opnieuw gemaakt', async () => {
+  const o = await omgeving();
+  try {
+    o.staat.ds = { [ID1]: [] };
+    await o.opname(ID1, TEKST);
+    const a = goed(); a.herinneringen[0].alineas[0].tekst = 'Op de camping in Proefdorpen regende het drie dagen achter elkaar.';   // naam niet zo gezegd
+    o.staat.antwoord = a;
+    await o.v.tik();
+    assert.strictEqual(o.ing._db.prepare('SELECT status FROM ramble_verhaal WHERE ramble_id = ?').get(ID1).status, 'niet_gelukt');
+    o.staat.ds[ID1] = [{ soort: 'correctie', tekst: 'Proefdorp is Proefdorpen' }];
+    o.klok.t += 11 * 60000;
+    const u = await o.v.tik();
+    assert.strictEqual(u.herbouw, 1); assert.strictEqual(o.staat.verzoeken.length, 2);
+    assert.strictEqual(o.ing._db.prepare('SELECT status FROM ramble_verhaal WHERE ramble_id = ?').get(ID1).status, 'klaar', 'met de correctie in de bron lukt het');
+  } finally { o.sluit(); }
+});
+
+test('wv2180 review MOET 1: een alinea buiten het venster van zijn herinnering, of een feit uit een ander deel van de opname = niet gelukt', async () => {
+  const o = await omgeving();
+  try {
+    await o.opname(ID1, TEKST);
+    o.staat.antwoord = { herinneringen: [
+      { t_van: 0, t_tot: 60, titel: 'Regen', alineas: [{ tekst: 'Het regende drie dagen op de camping in Proefdorp. Teun was er ook.', t_van: 0, t_tot: 60 }], datum_citaat: '', plaats: '', personen: [], voorval_voorstel: '' },
+      { t_van: 0, t_tot: 60, titel: 'Regen', alineas: [{ tekst: 'Op de camping in Proefdorp regende het drie dagen achter elkaar.', t_van: 0, t_tot: 120 }], datum_citaat: '', plaats: '', personen: [], voorval_voorstel: '' }] };
+    const u = await o.v.tik();
+    assert.strictEqual(u.verhalen || 0, 0); assert.strictEqual(u.niet_gelukt, 2);
+    const sp = o.v._reg.prepare("SELECT soort FROM spoor WHERE soort LIKE 'toets_%' ORDER BY soort").all().map((x) => x.soort);
+    assert.deepStrictEqual(sp, ['toets_alinea_venster_ongeldig', 'toets_naam_niet_gezegd'], 'Teun staat pas in de tweede minuut');
   } finally { o.sluit(); }
 });

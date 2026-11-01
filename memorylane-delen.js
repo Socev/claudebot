@@ -25,11 +25,85 @@
  *    neemt hooguit 8 miniaturen mee naar D1 ml_foto, alleen als David foto_delen per herinnering aanzette (standaard uit).
  * PRIVACY. Nooit tekst, titels of namen in logs, box, /health of fouten: alleen ids en aantallen.
  * VORM. Alleen fs, path, crypto en reizen.js (wv2136: de reispagina's, gedeeld met Tripper); D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
+ *
+ * WV2180 (David 1-11-2026 10:02; ontwerp fase R § 16): standaard alleen de SAMENGESTELDE herinnering; de rest staat in de LOG.
+ *  - Samengesteld = opname: het verhaal van herinneringen-verhaal.js (o.verhaal.samengesteld; ghostwriter, feitentoets) met Davids correcties
+ *    letterlijk toegepast; reis: Davids eigen aanvullingen; los: de bijdrage zelf. Nooit het transcript.
+ *  - Log (alleen in de app, alleen David): transcript, tijdcodes, wat niet lukte, correcties, eigen aanvullingen en de bijdragen van familie
+ *    en vrienden (opnemen/afwijzen). Een deellink toont nooit de log: ml_item krijgt alleen titel, wanneer en het samengestelde verhaal.
+ *  - Wanneer: frontmatter `wanneer` op de MemoryLane-pagina, door David gezet: "JJJJ[-MM[-DD]]" of een reeks "<van>/<tot>". Davids invoer
+ *    wint; anders de periode van de reis of de datum die de code uit het verhaal rekende. De lijst staat op tijd (nieuwste eerst, zoals de
+ *    straat van nu naar vroeger); zonder datum achteraan, op opnamedatum.
+ *  - Titel: `titel_bron` david (wint altijd) | naamgeving (Davids vaste naamgeving, door de machinekamer of naamVoorReis) | standaard; een
+ *    opname zonder eigen titel krijgt de titel van het verhaal.
  */
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const REIZEN = require('./reizen.js');   // wv2136: de reispagina's lezen Tripper en MemoryLane met dezelfde functie
+// wv2180: Davids correcties ("X is Y") letterlijk; ontbreekt de verhaalmodule (terugrol), dan zonder correcties
+const VH = (function () { try { return require('./herinneringen-verhaal.js'); } catch (e) { return null; } })();
+function correcties(teksten) { return VH ? VH.correctiesUit(teksten) : []; }
+function pasToe(t, cs) { return VH && cs && cs.length ? VH.pasCorrectiesToe(t, cs) : String(t == null ? '' : t); }
+const MAANDEN = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+const DEEL_RE = /^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$/;
+// "JJJJ[-MM[-DD]]" → { tekst, van: eerste dag, tot: laatste dag, precisie } of null
+function datumDeel(s) {
+  const m = DEEL_RE.exec(String(s || ''));
+  if (!m) return null;
+  const j = Number(m[1]), mm = m[2] ? Number(m[2]) : null, d = m[3] ? Number(m[3]) : null;
+  if (j < 1900 || j > 2100 || (mm !== null && (mm < 1 || mm > 12))) return null;
+  const p2 = (x) => String(x).padStart(2, '0');
+  if (d !== null) { const x = new Date(Date.UTC(j, mm - 1, d)); if (x.getUTCMonth() !== mm - 1 || x.getUTCDate() !== d) return null; const s2 = j + '-' + p2(mm) + '-' + p2(d); return { j, mm, d, van: s2, tot: s2, precisie: 'dag' }; }
+  if (mm !== null) return { j, mm, d: null, van: j + '-' + p2(mm) + '-01', tot: j + '-' + p2(mm) + '-' + p2(new Date(Date.UTC(j, mm, 0)).getUTCDate()), precisie: 'maand' };
+  return { j, mm: null, d: null, van: j + '-01-01', tot: j + '-12-31', precisie: 'jaar' };
+}
+// Davids invoer "van" of "van/tot" → { van, tot, precisie, invoer: {van, tot} } of null
+function wanneerUit(s) {
+  const delen = String(s || '').split('/');
+  if (!delen[0] || delen.length > 2) return null;
+  const a = datumDeel(delen[0]), b = delen[1] ? datumDeel(delen[1]) : null;
+  if (!a || (delen[1] && !b) || (b && b.tot < a.van)) return null;
+  return { van: a.van, tot: b ? b.tot : a.tot, precisie: a.precisie, a, b, invoer: { van: delen[0], tot: delen[1] || '' } };
+}
+// Leesbaar: "1995", "juli 1995", "12 juli 1995", "1990–1993", "11–16 juni 2025", "juni–juli 2025"
+function wanneerTekst(a, b) {
+  const een = (x) => (x.d ? x.d + ' ' : '') + (x.mm ? MAANDEN[x.mm - 1] + ' ' : '') + x.j;
+  if (!b) return een(a);
+  if (a.precisie === b.precisie && a.j === b.j && a.mm && b.mm) {
+    if (a.d && b.d && a.mm === b.mm) return a.d + '–' + b.d + ' ' + MAANDEN[a.mm - 1] + ' ' + a.j;
+    if (!a.d && !b.d) return MAANDEN[a.mm - 1] + '–' + MAANDEN[b.mm - 1] + ' ' + a.j;
+  }
+  if (a.precisie === 'jaar' && b.precisie === 'jaar') return a.j + '–' + b.j;
+  return een(a) + ' – ' + een(b);
+}
+// Datum van de code (reis, verhaal): "JJJJ-MM-DD" van/tot + precisie → zelfde vorm
+function codeWanneer(van, tot, precisie) {
+  const a = datumDeel(precisie === 'jaar' || precisie === 'ongeveer_jaar' || precisie === 'decennium' ? String(van).slice(0, 4) : precisie === 'maand' ? String(van).slice(0, 7) : van);
+  if (!a) return null;
+  if (precisie === 'decennium') return { van: a.van, tot: String(tot || a.tot), tekst: 'jaren ' + String(a.j).slice(2), precisie };
+  if (precisie === 'ongeveer_jaar') return { van: a.van, tot: a.tot, tekst: 'rond ' + a.j, precisie };
+  const b = tot && tot !== van ? datumDeel(precisie === 'dag' ? tot : precisie === 'maand' ? String(tot).slice(0, 7) : String(tot).slice(0, 4)) : null;
+  return { van: a.van, tot: b ? b.tot : a.tot, tekst: wanneerTekst(a, b && b.van !== a.van ? b : null), precisie };
+}
+/*
+ * Davids vaste naamgeving voor een reis (1-11-2026): Zomervakantie <jaar> - <omschrijving>, Gambia <jaar>, Citytrip <plaats> <jaar>,
+ * Shizzle: <naam> - <jaar>, anders de naam met het jaar. Een titel die David zelf zet wint; de bestaande reizen kregen een titel met de hand.
+ */
+function naamVoorReis(rel, i, tagLijst) {
+  const jaar = i && i.van ? String(i.van).slice(0, 4) : (/(\d{4})/.exec(path.basename(rel)) || [])[1] || '';
+  const kaal = path.basename(rel, '.md').replace(/^\d{4}\s*-\s*/, '').replace(/\s+&\s+/g, ' en ').trim();
+  const tags = (tagLijst || []).map((x) => String(x).toLowerCase());
+  const heeft = (x) => tags.indexOf(x) >= 0 || new RegExp('\\b' + x + '\\b', 'i').test(kaal);
+  const m = /^(.*?)\s*\(([^)]*)\)\s*$/.exec(kaal);
+  const naam = (m ? m[1] : kaal).replace(new RegExp('\\s*\\b' + jaar + '\\b'), '').trim(), extra = m ? m[2].trim() : '';
+  const met = (s) => s + (extra ? ' - ' + extra : '');
+  if (heeft('gambia')) return 'Gambia ' + jaar;
+  if (heeft('shizzle')) return 'Shizzle: ' + met(naam) + ' - ' + jaar;
+  if (heeft('stedentrip') || heeft('citytrip')) return 'Citytrip ' + naam.replace(/^(stedentrip|citytrip)\s+/i, '') + ' ' + jaar;
+  if (heeft('zomer') || heeft('zomervakantie')) return 'Zomervakantie ' + jaar + ' - ' + met(naam.replace(/^(zomervakantie|vakantie)\s*/i, ''));
+  return met(naam + (jaar ? ' ' + jaar : ''));
+}
 
 const KRINGEN = ['familie', 'vrienden'];
 const HID_RE = /^h[0-9a-f]{16}$/, SID_RE = /^s[0-9a-f]{16}$/, PUB_RE = /^[A-Za-z0-9_-]{16}$/, SLUG_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -239,12 +313,12 @@ function maak(o) {
   }
   function standaardTitel(h) {
     if (h.soort === 'opname') { const r = q.ramble.get(h.ref); const a = amsDmj(Date.parse((r && (r.opgenomen_op || r.aangemaakt)) || h.aangemaakt)); return 'Opname ' + a.dmj + ' ' + a.klok; }
-    if (h.soort === 'reis') { const t = reisInfo(h.ref); return t ? t.titel : path.basename(h.ref, '.md'); }
+    if (h.soort === 'reis') return naamVoorReis(h.ref, reisInfo(h.ref), reisTags(h.ref));   // wv2180: vaste naamgeving
     return 'Losse bijdrage';
   }
-  function paginaNieuw(h, titel) {
+  function paginaNieuw(h, titel, bron) {
     return ['---', 'type: herinnering-stukken', 'gevoelig: prive', 'access_context: strikt_prive', 'herinnering_id: ' + h.hid, 'soort: ' + h.soort,
-      'bron: ' + bronLink(h), 'titel: ' + yaml(titel || standaardTitel(h)), 'tags: [herinnering, prive, memorylane]', '---',
+      'bron: ' + bronLink(h), 'titel: ' + yaml(titel || standaardTitel(h)), 'titel_bron: ' + (titel ? bron || 'bezoeker' : 'standaard'), 'tags: [herinnering, prive, memorylane]', '---',
       '> **Privé — persoonlijke herinnering.** Alle bijdragen bij deze herinnering, elk als eigen stuk (wie, wanneer, hoe). Een herinnering is geen bron voor feiten.',
       ''].join('\n') + '\n';
   }
@@ -279,21 +353,36 @@ function maak(o) {
     }
     return n;
   }
-  function paginaZekerTitel(h, titel) {
+  // Frontmatterregels op de MemoryLane-pagina zetten (waarde null = regel weg); de tekst eronder blijft byte voor byte gelijk
+  function paginaVelden(h, velden) {
     zorgMap();
     const pad = path.join(o.vault, paginaRel(h.hid));
-    if (paginaLees(h.hid) === null) { o.vv.schrijf(pad, paginaNieuw(h, titel)); return true; }
+    if (paginaLees(h.hid) === null) o.vv.schrijf(pad, paginaNieuw(h, null));
     return o.vv.wijzig(pad, function (t) {
       const m = /^---\n([\s\S]*?)\n---/.exec(t);
       if (!m) return null;
-      const fm = /^titel:.*$/m.test(m[1]) ? m[1].replace(/^titel:.*$/m, 'titel: ' + yaml(titel)) : m[1] + '\ntitel: ' + yaml(titel);
-      return '---\n' + fm + '\n---' + t.slice(m[0].length);
+      let fm = m[1];
+      for (const [k, w] of Object.entries(velden)) {
+        const re = new RegExp('^' + k + ':.*$', 'm');
+        if (w === null) fm = fm.replace(new RegExp('^' + k + ':.*(\\n|$)', 'm'), '');
+        else fm = re.test(fm) ? fm.replace(re, k + ': ' + w) : fm + '\n' + k + ': ' + w;
+      }
+      fm = fm.replace(/\n+$/, '');
+      const n = '---\n' + fm + '\n---' + t.slice(m[0].length);
+      return n === t ? null : n;
     });
   }
+  function paginaZekerTitel(h, titel, bron) { return paginaVelden(h, { titel: yaml(titel), titel_bron: bron || 'david' }); }
 
   // ── herinneringen: opnames (notitie) en reizen (type: reis, voorbij) ──
   const reizen = REIZEN.maak({ vault: o.vault, vv: o.vv });   // wv2136: zelfde lezing als hiervoor, nu gedeeld met Tripper
   function reisInfo(rel) { return reizen.reisInfo(rel); }
+  function reisTags(rel) {
+    let x = null;
+    try { x = o.vv.lees(path.join(o.vault, rel), 'utf8'); } catch (e) { return []; }
+    const m = /^tags:\s*\[([^\]\n]*)\]/m.exec((/^---\n[\s\S]*?\n---/.exec(x) || [''])[0]);
+    return m ? m[1].split(',').map((s) => s.trim().replace(/^["']|["']$/g, '')) : [];
+  }
   function vandaag() { return typeof o.reisVandaag === 'function' ? o.reisVandaag() : amsDmj(nu()).datum; }
   function bijwerken() {
     const t = iso(nu());
@@ -335,16 +424,60 @@ function maak(o) {
     if (!F) return null;
     return F.sync(q.hAlle.all().filter((h) => h.status === 'actief').map(albumKandidaat), dwing);
   }
-  function titelVan(h, pagina) { const t = fmVeld(pagina === undefined ? paginaLees(h.hid) : pagina, 'titel'); return t || standaardTitel(h); }
-  function wanneerVan(h) {
-    if (h.soort === 'reis') { const i = reisInfo(h.ref); return i ? i.periode : ''; }
-    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); return r ? 'verteld op ' + amsDmj(Date.parse(r.opgenomen_op || r.aangemaakt)).dmj : ''; }
-    return '';
+  // wv2180: Davids eigen stukken (opgenomen) van een herinnering, met de tekst uit de pagina of de wachtrij
+  function eigenStukken(h, pagina) {
+    const p = pagina === undefined ? paginaLees(h.hid) : pagina;
+    return q.sVan.all(h.hid).filter((s) => s.wie === 'david' && s.status === 'opgenomen').map((s) => ({ sid: s.sid, soort: s.soort, tekst: stukTekst(s, p) })).filter((s) => s.tekst);
   }
-  function sorteerSleutel(h) {
-    if (h.soort === 'reis') { const i = reisInfo(h.ref); return (i && i.van) || h.aangemaakt.slice(0, 10); }
-    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); return r ? String(r.opgenomen_op || r.aangemaakt).slice(0, 10) : h.aangemaakt.slice(0, 10); }
-    return h.aangemaakt.slice(0, 10);
+  function cs(h, pagina) { return correcties(eigenStukken(h, pagina).filter((s) => s.soort === 'correctie').map((s) => s.tekst)); }
+  // het verhaal van een opname (herinneringen-verhaal.js), met Davids correcties; null zonder verhaalmodule
+  function sam(h, pagina) {
+    if (h.soort !== 'opname' || !o.verhaal || typeof o.verhaal.samengesteld !== 'function') return null;
+    try { return o.verhaal.samengesteld(h.ref, cs(h, pagina)); } catch (e) { fout('ml-verhaal', e); return null; }
+  }
+  // wv2180: titel. David wint altijd; dan de vaste naamgeving; een opname daarna de titel van zijn verhaal; anders de standaardtitel.
+  function oudeStandaard(h) {
+    if (h.soort === 'reis') { const i = reisInfo(h.ref); return i ? i.titel : path.basename(h.ref, '.md'); }
+    return standaardTitel(h);
+  }
+  function titelVan(h, pagina, s) {
+    const p = pagina === undefined ? paginaLees(h.hid) : pagina;
+    const t = fmVeld(p, 'titel'), b = fmVeld(p, 'titel_bron');
+    if (t && (b === 'david' || b === 'naamgeving' || b === 'bezoeker' || (!b && t !== oudeStandaard(h) && t !== standaardTitel(h)))) return t;
+    if (h.soort === 'opname') {
+      const x = s === undefined ? sam(h, p) : s;
+      const v = x && x.delen.find((d) => d.titel && !/^Herinnering uit de opname van /.test(d.titel));
+      if (v) return v.titel;
+    }
+    return standaardTitel(h);
+  }
+  // wv2180: wanneer. → { tekst, van, tot, precisie, bron: david|reis|verhaal|null, invoer: {van, tot}|null, verteld }
+  function wanneerInfo(h, pagina, s) {
+    const p = pagina === undefined ? paginaLees(h.hid) : pagina;
+    let verteld = '';
+    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); if (r) verteld = 'verteld op ' + amsDmj(Date.parse(r.opgenomen_op || r.aangemaakt)).dmj; }
+    const w = wanneerUit(fmVeld(p, 'wanneer'));
+    if (w) return { tekst: wanneerTekst(w.a, w.b), van: w.van, tot: w.tot, precisie: w.precisie, bron: 'david', invoer: w.invoer, verteld };
+    if (h.soort === 'reis') {
+      const i = reisInfo(h.ref);
+      const c = i && i.van ? codeWanneer(i.van, i.tot || i.van, 'dag') : null;
+      if (c) return { tekst: c.tekst, van: c.van, tot: c.tot, precisie: 'dag', bron: 'reis', invoer: null, verteld };
+    }
+    if (h.soort === 'opname') {
+      const x = s === undefined ? sam(h, p) : s;
+      const d = x && x.delen.find((y) => y.datum_precisie && y.datum_precisie !== 'onbekend' && y.datum_van);
+      const c = d ? codeWanneer(d.datum_van, d.datum_tot, d.datum_precisie) : null;
+      if (c) return { tekst: c.tekst, van: c.van, tot: c.tot, precisie: c.precisie, bron: 'verhaal', invoer: null, verteld };
+    }
+    return { tekst: '', van: null, tot: null, precisie: null, bron: null, invoer: null, verteld };
+  }
+  function wanneerVan(h, pagina, s) { const w = wanneerInfo(h, pagina, s); return w.tekst || w.verteld; }
+  // Volgorde (wv2180): met een datum eerst, nieuwste eerst (de straat loopt van nu naar vroeger); zonder datum achteraan, op opnamedatum.
+  function sorteerSleutel(h, w) {
+    w = w || wanneerInfo(h);
+    if (w.van) return '1|' + w.van + '|' + (w.tot || w.van);
+    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); return '0|' + (r ? String(r.opgenomen_op || r.aangemaakt).slice(0, 19) : h.aangemaakt.slice(0, 19)); }
+    return '0|' + h.aangemaakt.slice(0, 19);
   }
   function opnameTekst(h) {
     const r = q.ramble.get(h.ref);
@@ -354,25 +487,32 @@ function maak(o) {
     const body = zonderFrontmatter(t).replace(/^> \*\*Privé[^\n]*\n+/, '').replace(/^# Opname[^\n]*\n+/, '');
     return kaleOpname(body);
   }
-  // Haak wv2118 (R2): een door David goedgekeurd verhaal gaat bij delen vóór de letterlijke opname. Bestaat nog niet.
-  function verhaalVoorDelen(/* hid */) { return null; }
+  // wv2180: het samengestelde verhaal als platte tekst (alinea's), zonder tijdcodes; null = (nog) geen.
+  //  opname → het verhaal (concept of goedgekeurd; de feitentoets liet alleen gezegde namen, getallen en datums door); reis → Davids eigen
+  //  aanvullingen; los → de bijdrage zelf. Correcties letterlijk.
+  function verhaalVan(h, pagina, s) {
+    const p = pagina === undefined ? paginaLees(h.hid) : pagina;
+    const c = cs(h, p);
+    if (h.soort === 'opname') {
+      const x = s === undefined ? sam(h, p) : s;
+      if (!x || !x.delen.length) return null;
+      return x.delen.map((d) => (x.delen.length > 1 && d.titel ? d.titel + '\n\n' : '') + d.alineas.map((a) => a.tekst).join('\n\n')).join('\n\n');
+    }
+    if (h.soort === 'reis') { const l = eigenStukken(h, p).filter((x) => x.soort === 'aanvulling').map((x) => pasToe(x.tekst, c)); return l.length ? l.join('\n\n') : null; }
+    const l = q.sVan.all(h.hid).filter((x) => x.status === 'opgenomen' && x.soort === 'los').map((x) => stukTekst(x, p)).filter(Boolean).map((x) => pasToe(x, c));
+    return l.length ? l.join('\n\n') : null;
+  }
+  // Haak wv2118 (R2): sinds wv2180 het samengestelde verhaal (Davids opdracht: standaard alleen de samengestelde herinnering)
+  function verhaalVoorDelen(hid) { const h = vind(hid); return h ? verhaalVan(h) : null; }
 
-  // Het item zoals een bezoeker van kring k het ziet; null als er niets te tonen is
+  // Het item zoals een bezoeker van kring k het ziet: titel, wanneer en het samengestelde verhaal. NOOIT de log (transcript, correcties,
+  // losse aanvullingen, bijdragen van anderen); wv2180. k telt nog mee in de hash (zelfde vorm als voorheen).
   function itemVoor(h, k) {
-    const pagina = paginaLees(h.hid);
+    const pagina = paginaLees(h.hid), s = sam(h, pagina);
     const stukken = [];
-    if (h.soort === 'opname' && h.toon_opname) {
-      const v = verhaalVoorDelen(h.hid);
-      const t = v != null ? v : opnameTekst(h);
-      if (t) stukken.push({ wie: 'David', soort: v != null ? 'verhaal' : 'opname', tekst: t });
-    }
-    for (const s of q.sVan.all(h.hid)) {
-      if (s.status !== 'opgenomen') continue;
-      if (!(s.wie === 'david' || (s.wie === 'bezoeker' && s.kring === k))) continue;
-      const t = stukTekst(s, pagina);
-      if (t) stukken.push({ wie: stukNaam(s, pagina), soort: s.soort, tekst: t });
-    }
-    return { titel: titelVan(h, pagina), wanneer: wanneerVan(h), stukken };
+    const v = h.soort === 'opname' && !h.toon_opname ? null : verhaalVan(h, pagina, s);
+    if (v) stukken.push({ wie: h.soort === 'los' ? 'Verteld' : 'David', soort: 'verhaal', tekst: v });
+    return { titel: titelVan(h, pagina, s), wanneer: wanneerVan(h, pagina, s), stukken, kring: k };
   }
   // Geheimen: letterlijke pod-geheimen + bekende vormen (zelfde soort als de geheimenpoort op de uitgangen)
   const VORMEN = [/sbp_[0-9a-f]{40}/, /sk-(ant-|proj-)?[A-Za-z0-9_-]{20,}/, /gh[pousr]_[A-Za-z0-9]{30,}/, /github_pat_[A-Za-z0-9_]{40,}/, /AKIA[0-9A-Z]{16}/,
@@ -416,6 +556,7 @@ function maak(o) {
       if (!(ok && ok.hash === ih) && markerRaak([alle])) { q.blokZet.run(h.hid, k, 'marker', ih); continue; }
       q.blokWeg.run(h.hid, k);
       item.fotos = F ? F.voorDelen(h.hid) : [];   // wv2120: alleen asset-ids; de miniaturen haalt publiceer() op
+      delete item.kring;
       uit.push({ hid: h.hid, item, sort: sorteerSleutel(h) });
     }
     uit.sort((a, b) => (a.sort < b.sort ? 1 : a.sort > b.sort ? -1 : a.hid < b.hid ? -1 : 1));
@@ -565,19 +706,22 @@ function maak(o) {
   }
 
   // ── voor de app ──
-  function kort(h) {
-    const pagina = paginaLees(h.hid);
-    const st = q.sVan.all(h.hid), c = catVan(h), b = q.blok.all(h.hid)[0];
-    return { hid: h.hid, soort: h.soort, status: h.status, titel: titelVan(h, pagina), wanneer: wanneerVan(h), datum: sorteerSleutel(h),
-      categorie: c.categorie, gevoelig: isGevoelig(h), gevoelig_vink: c.gevoeligVink, zicht: { familie: !!h.zicht_familie, vrienden: !!h.zicht_vrienden },
+  function kort(h, pagina, s) {
+    const p = pagina === undefined ? paginaLees(h.hid) : pagina;
+    const x = s === undefined ? sam(h, p) : s;
+    const st = q.sVan.all(h.hid), c = catVan(h), b = q.blok.all(h.hid)[0], w = wanneerInfo(h, p, x);
+    return { hid: h.hid, soort: h.soort, status: h.status, titel: titelVan(h, p, x), wanneer: w.tekst || w.verteld, wanneer_bron: w.bron, wanneer_invoer: w.invoer,
+      verteld: w.verteld, datum: sorteerSleutel(h, w), categorie: c.categorie, gevoelig: isGevoelig(h), gevoelig_vink: c.gevoeligVink,
+      zicht: { familie: !!h.zicht_familie, vrienden: !!h.zicht_vrienden },
       toon_opname: !!h.toon_opname, niet_deelbaar: nietDeelbaar(h), blok: b ? b.reden : null,
-      stukken: st.filter((s) => s.status !== 'weggegooid').length, binnen: st.filter((s) => s.status === 'binnen').length,
-      vastgehouden: st.filter((s) => s.status === 'vastgehouden').length, album: F ? F.kort(h.hid) : null };
+      verhaal_stand: h.soort === 'opname' ? (x ? x.stand : null) : null,
+      stukken: st.filter((y) => y.status !== 'weggegooid').length, binnen: st.filter((y) => y.status === 'binnen').length,
+      vastgehouden: st.filter((y) => y.status === 'vastgehouden').length, album: F ? F.kort(h.hid) : null };
   }
   function lijst() {
     bijwerken();
-    const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen').map(kort);
-    alle.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));
+    const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen').map((h) => kort(h));
+    alle.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : a.hid < b.hid ? -1 : 1));
     return { status: 200, body: { ok: true, herinneringen: alle, immich: F ? { aan: true, sleutel: F.info().sleutel, fout: F.info().fout } : { aan: false }, categorieen: Object.keys(CAT).map((id) => ({ id, naam: CAT[id].naam, gevoelig: !!CAT[id].gevoelig })),
       nieuw: alle.reduce((n, h) => n + h.binnen + h.vastgehouden, 0) } };
   }
@@ -585,11 +729,17 @@ function maak(o) {
   function detail(hid) {
     const h = vind(hid);
     if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
-    const pagina = paginaLees(h.hid);
-    const stukken = q.sVan.all(h.hid).filter((s) => s.status !== 'weggegooid').map((s) => ({ sid: s.sid, wie: s.wie, naam: stukNaam(s, pagina), kring: s.kring, vorm: s.vorm,
-      soort: s.soort, status: s.status, marker: s.marker, op: s.binnen_op, tekst: stukTekst(s, pagina) }));
-    const uit = Object.assign(kort(h), { stukken_lijst: stukken });
-    if (h.soort === 'opname') { uit.opname = opnameTekst(h); const r = q.ramble.get(h.ref); uit.ramble_id = h.ref; uit.notitie = r ? r.notitie : null; }
+    const pagina = paginaLees(h.hid), s = sam(h, pagina);
+    const stukken = q.sVan.all(h.hid).filter((x) => x.status !== 'weggegooid').map((x) => ({ sid: x.sid, wie: x.wie, naam: stukNaam(x, pagina), kring: x.kring, vorm: x.vorm,
+      soort: x.soort, status: x.status, marker: x.marker, op: x.binnen_op, tekst: stukTekst(x, pagina) }));
+    const uit = Object.assign(kort(h, pagina, s), { stukken_lijst: stukken });
+    // wv2180: het samengestelde verhaal (standaard in beeld) en de log (alleen in de app; nooit in een deellink)
+    const c = cs(h, pagina);
+    uit.verhaal = { tekst: verhaalVan(h, pagina, s), stand: h.soort === 'opname' ? (s ? s.stand : null) : null,
+      delen: s ? s.delen.map((d) => ({ titel: d.titel, eigen: d.eigen, alineas: d.alineas.map((a) => ({ tekst: a.tekst, t_van: a.t_van, t_tot: a.t_tot })) })) : [] };
+    uit.log = { opname: h.soort === 'opname' ? opnameTekst(h) : null, niet_gelukt: s ? s.niet_gelukt.map((m) => ({ uitleg: m.uitleg, t_van: m.t_van, t_tot: m.t_tot })) : [],
+      correcties: c.map((x) => ({ van: x.van, naar: x.naar })), stukken };
+    if (h.soort === 'opname') { uit.opname = uit.log.opname; const r = q.ramble.get(h.ref); uit.ramble_id = h.ref; uit.notitie = r ? r.notitie : null; }
     if (h.soort === 'reis') uit.pagina = h.ref;
     uit.pagina_stukken = paginaRel(h.hid);
     return { status: 200, body: { ok: true, herinnering: uit } };
@@ -609,9 +759,45 @@ function maak(o) {
     const t = schoon(d && d.titel, MAX_TITEL, false);
     if (!t) return { status: 400, body: { ok: false, fout: 'titel 1–' + MAX_TITEL + ' tekens' } };
     if (!kanVault()) return { status: 503, body: { ok: false, fout: 'de Second Brain is even in onderhoud; probeer het zo opnieuw' } };
-    paginaZekerTitel(h, t);
+    paginaZekerTitel(h, t, 'david');
     q.hGewijzigd.run(iso(nu()), h.hid); vuilAlle();
     return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
+  }
+  // wv2180: Davids "wanneer" (jaar, of een reeks, optioneel met maand of dag). Leeg = weg (dan weer wat de code afleidt).
+  function wanneer(hid, d) {
+    const h = vind(hid);
+    if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    const van = String((d && d.van) || '').trim(), tot = String((d && d.tot) || '').trim();
+    let waarde = null;
+    if (van) {
+      const w = datumDeel(van) && (!tot || datumDeel(tot)) ? wanneerUit(van + (tot ? '/' + tot : '')) : null;
+      if (!w) return { status: 400, body: { ok: false, fout: 'datum: jaar (JJJJ), of JJJJ-MM of JJJJ-MM-DD; "tot" niet vóór "van"' } };
+      if (w.van > amsDmj(nu()).datum) return { status: 400, body: { ok: false, fout: 'een herinnering ligt niet in de toekomst' } };
+      waarde = yaml(w.invoer.van + (w.invoer.tot ? '/' + w.invoer.tot : ''));
+    }
+    if (!kanVault()) return { status: 503, body: { ok: false, fout: 'de Second Brain is even in onderhoud; probeer het zo opnieuw' } };
+    paginaVelden(h, { wanneer: waarde });
+    q.hGewijzigd.run(iso(nu()), h.hid); vuilAlle();
+    return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
+  }
+  // wv2180: voor de verhaalmodule — Davids eigen aanvullingen en correcties bij een opname (alleen David; bijdragen van anderen niet)
+  function davidStukken(rid) {
+    const h = q.hRef.get('opname', String(rid || ''));
+    if (!h) return [];
+    return eigenStukken(h).map((s) => ({ soort: s.soort, tekst: s.tekst }));
+  }
+  // wv2180: een titel volgens de vaste naamgeving zetten (machinekamer; een titel van David blijft staan)
+  function naamgeving(hid, titel) {
+    const h = vind(hid);
+    const t = schoon(titel, MAX_TITEL, false);
+    if (!h || !t) return { ok: false, fout: 'onbekend of lege titel' };
+    const p = paginaLees(h.hid);
+    const b = fmVeld(p, 'titel_bron'), oud = fmVeld(p, 'titel');
+    if (oud && (b === 'david' || (!b && oud !== oudeStandaard(h) && oud !== standaardTitel(h)))) return { ok: true, al: 'david' };
+    if (!kanVault()) return { ok: false, fout: 'onderhoud' };
+    paginaZekerTitel(h, t, 'naamgeving');
+    q.hGewijzigd.run(iso(nu()), h.hid); vuilAlle();
+    return { ok: true };
   }
   function tekst(hid, d) {
     const h = vind(hid);
@@ -744,9 +930,9 @@ function maak(o) {
     return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
-  return { lijst, detail, zicht, titel, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, fotoDelen, albumMaken, reisKoppeling,
+  return { lijst, detail, zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, fotoDelen, albumMaken, reisKoppeling,
     fotoSync, _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }
 
-module.exports = { maak, KRINGEN, KLUIS, MAP, ITER, MAX_TEKST, MAX_TITEL, MAX_NAAM, HID_RE, SID_RE, _pbkdf2: pbkdf2, _wwNorm: wwNorm, _kaleOpname: kaleOpname, _schoon: schoon };
+module.exports = { maak, wanneerUit, wanneerTekst, codeWanneer, naamVoorReis, KRINGEN, KLUIS, MAP, ITER, MAX_TEKST, MAX_TITEL, MAX_NAAM, HID_RE, SID_RE, _pbkdf2: pbkdf2, _wwNorm: wwNorm, _kaleOpname: kaleOpname, _schoon: schoon };

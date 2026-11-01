@@ -16712,7 +16712,9 @@ const herinneringenVerhaal = (function () {
     return require(p).maak({ db: intake._db, dir: HERINNERINGEN_DIR, vault: VAULT, vv: VV(), sleutel: pdfSleutel, sdk: pdfSdk, geboren: herinneringGeboren,
       categorieen: HERINNERINGEN_MOD.CATEGORIEEN, metCatRegels: HERINNERINGEN_MOD._metCatRegels,
       onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
-      primair: function () { return rolPrimair(); }, box: function (t) { ovisBoxRij(t); }, fout: logError });
+      primair: function () { return rolPrimair(); }, box: function (t) { ovisBoxRij(t); }, fout: logError,
+      // wv2180: Davids eigen aanvullingen en correcties (memorylane-delen.js; pas na het laden bereikbaar, tot dan "niet bekend")
+      davidStukken: function (rid) { try { return memorylaneDelen ? memorylaneDelen.davidStukken(rid) : null; } catch (e) { return null; } } });
   } catch (e) { logError('herinneringen-verhaal', e); return null; }
 })();
 function herinneringenVerhaalInfo() { if (!herinneringenVerhaal) return { module: false }; try { return Object.assign({ module: true }, herinneringenVerhaal.info()); } catch (e) { return { fout: true }; } }
@@ -18483,7 +18485,7 @@ function docsDelenInfo() {
 // memorylane-delen.js; hier alleen: D1 (zelfde databank `deel` als Docs › Delen), de twee wachtwoorden uit de kluis (niet op de witte lijst:
 // op het moment van gebruik via de Management-API, 10 min in het geheugen, nooit in process.env), de app-routes en de tik.
 //   GET  /app/memorylane/lijst | /app/memorylane/h/<hid> | /app/memorylane/delen
-//   POST /app/memorylane/h/<hid>/zicht {kring, aan} · titel {titel} · tekst {tekst, soort} · categorie {categorie, gevoelig} · toon-opname {aan} · toch-delen
+//   POST /app/memorylane/h/<hid>/zicht {kring, aan} · titel {titel} · wanneer {van, tot} (wv2180) · tekst {tekst, soort} · categorie {categorie, gevoelig} · toon-opname {aan} · toch-delen
 //   POST /app/memorylane/stuk/<sid>/opnemen|afwijzen|bewaren|weggooien · POST /app/memorylane/link/<kring>/aan|uit|vernieuw
 // Naar buiten (zicht aan, link aan, toch delen): verse vingerafdruk en nooit vanaf een vaste plek (zoals Docs › Delen). Dichter maken mag altijd.
 // wv2120: ook immich_api_key (David maakte hem 31-10 in Immich; rechten ruimer dan nodig, de witte lijst in immich.js is de grens)
@@ -18517,7 +18519,7 @@ const memorylaneDelen = (function () {
   const p = path.join(__dirname, 'memorylane-delen.js');
   if (!fs.existsSync(p) || !intake || !herinneringen || !HERINNERINGEN_MOD) return null;
   try {
-    return require(p).maak({ db: intake._db, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, host: DOCS_HOST, kluis: mlKluis, immich: immichMl,
+    return require(p).maak({ db: intake._db, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, host: DOCS_HOST, kluis: mlKluis, immich: immichMl, verhaal: herinneringenVerhaal,
       marker: require(path.join(__dirname, 'intake', 'patientpoort.js')), geheimen: function () { try { return openaiPodGeheimen(); } catch (e) { return []; } },
       categorieen: HERINNERINGEN_MOD.CATEGORIEEN, onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
       fout: logError, box: function (t) { ovisBoxRij(t); },
@@ -18569,11 +18571,11 @@ async function appMemorylane(req, res, a, s, route, d) {
       if (u.status === 200) daarna();
       return antw(m[2], u);
     }
-    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(zicht|titel|tekst|categorie|toon-opname|toch-delen)$/.exec(route))) {
+    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(zicht|titel|wanneer|tekst|categorie|toon-opname|toch-delen)$/.exec(route))) {
       const hid = m[1], wat = m[2];
       if (wat === 'zicht' && d && d.aan === true && !naarBuiten('zicht')) return;
       if (wat === 'toch-delen' && !naarBuiten('toch-delen')) return;
-      const u = wat === 'zicht' ? memorylaneDelen.zicht(hid, d) : wat === 'titel' ? memorylaneDelen.titel(hid, d) : wat === 'tekst' ? memorylaneDelen.tekst(hid, d)
+      const u = wat === 'zicht' ? memorylaneDelen.zicht(hid, d) : wat === 'titel' ? memorylaneDelen.titel(hid, d) : wat === 'wanneer' ? memorylaneDelen.wanneer(hid, d) : wat === 'tekst' ? memorylaneDelen.tekst(hid, d)
         : wat === 'categorie' ? memorylaneDelen.categorie(hid, d) : wat === 'toon-opname' ? memorylaneDelen.toonOpname(hid, d) : memorylaneDelen.tochDelen(hid);
       if (u.status === 200) daarna();
       return antw(wat, u);
