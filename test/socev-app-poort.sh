@@ -1071,6 +1071,16 @@ async function bewijs(o) {
     const gesprekVoor = gestart.length;
     r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'hoi' }, { pot: pot() });
     toets('9 beurt zonder sessie -> 401', r.status === 401);
+    // wv2136 (OVIS Tripper): de reizen zijn privé; zonder sessie niets, ook niet met een geldige of pad-achtige id. Met sessie bereikt de
+    // vraag de route (hier 404: appTripper staat buiten dit blok, in de echte pod achter dezelfde sessie)
+    for (const pad of ['/app/tripper/lijst', '/app/tripper/reis/0123456789ab']) {
+      r = await vraag('GET', pad, undefined, {});
+      toets('9 wv2136: ' + pad + ' zonder sessie -> 401', r.status === 401, r.status);
+    }
+    r = await vraag('GET', '/app/tripper/reis/..%2F10_Zakelijk', undefined, {});
+    toets('9 wv2136: pad-achtige id zonder sessie -> geweigerd vóór de route (404 op de padvorm)', r.status === 404 || r.status === 401, r.status);
+    r = await vraag('GET', '/app/tripper/lijst', undefined, { pot: P.jar });
+    toets('9 wv2136: met sessie voorbij de poort (404 zonder appTripper in dit blok)', r.status === 404, r.status);
     const sP = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
     let tot0 = sP.tot = Date.now() + 60000;
     const b1 = bid();

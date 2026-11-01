@@ -101,6 +101,23 @@ test('herinneringen: opnames met notitie en voorbije reizen; geplande reis en th
   } finally { o.sluit(); }
 });
 
+test('wv2136 (Tripper): reisKoppeling geeft hid en aantal opgenomen stukken; geplande reis en onbekend pad = null; maakt zelf niets', async () => {
+  const o = omgeving();
+  try {
+    o.reis('2023 - Proefreis Engeland.md', 'reis', '2023-06-29 – 2023-07-02');
+    o.reis('2027 - Geplande Proefreis.md', 'reis', '2027-02-22 – 2027-02-26');
+    const rel = '20_Prive/Reizen/2023 - Proefreis Engeland.md';
+    assert.strictEqual(o.ml.reisKoppeling(rel), null, 'vóór bijwerken bestaat de herinnering nog niet; de koppeling maakt hem niet aan');
+    o.ml.lijst();
+    const hid = o.hid('reis', rel);
+    assert.deepStrictEqual(o.ml.reisKoppeling(rel), { hid, stukken: 0, album: null });
+    assert.strictEqual(o.ml.tekst(hid, { tekst: 'Het regende de hele week.' }).status, 200);
+    assert.strictEqual(o.ml.reisKoppeling(rel).stukken, 1);
+    assert.strictEqual(o.ml.reisKoppeling('20_Prive/Reizen/2027 - Geplande Proefreis.md'), null);
+    assert.strictEqual(o.ml.reisKoppeling('../buiten.md'), null);
+  } finally { o.sluit(); }
+});
+
 test('zichtbaar maken: zonder categorie, Privé of het vinkje gevoelig = 409; Shizzle en reis = 200', async () => {
   const o = omgeving();
   try {

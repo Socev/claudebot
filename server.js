@@ -3867,6 +3867,7 @@ function handleRequest(req, res) {
       mailman: typeof mailmanInfo === 'function' ? mailmanInfo() : { aan: false },   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
+      tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
       memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
       ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
       scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
@@ -12362,6 +12363,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/spraak') return appSpraak(req, res, a);   // wv172
         if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
+        if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
@@ -18533,6 +18535,40 @@ async function appMemorylane(req, res, a, s, route, d) {
   return appWeiger(res, 404, 'onbekend', 'ml pad');
 }
 // ── einde MemoryLane delen ──
+
+// ── OVIS Tripper (wv2136, 1-11-2026; idee 24, ontwerp vault "01_Ontwikkeling/OVIS Tripper - reizen in beeld, samen met MemoryLane
+// (ontwerp 31-10-2026).md" § 4.2) ──
+// Je reizen als lijst met filter in de Socev-app. Geen eigen opslag: reizen.js leest bij elke vraag de reispagina's in 20_Prive/Reizen,
+// met dezelfde functie als MemoryLane (§ 2 afspraak 1). Hier alleen de twee leesroutes achter de app-sessie:
+//   GET /app/tripper/lijst      alle reizen (komend eerst), per reis titel, periode, dagen, soort, namen, beschrijving, MemoryLane-koppeling
+//   GET /app/tripper/reis/<id>  één reis met de paginatekst; id = 12 hex van sha256(vaultpad), reizen.js zoekt het pad zelf op (nooit een pad uit de vraag)
+// De koppeling met MemoryLane (hid, aantal opgenomen stukken, album als status/aantal) komt uit memorylane-delen.js; Tripper maakt geen
+// herinnering of album. Alleen lezen; niets naar buiten of naar een taalmodel. Audit: de lijst stil, een reis als "tripper reis <id> <status>"
+// (geen titel of pad). /health.tripper: alleen aantallen van de laatste lijst. Ontbreekt reizen.js in de release: 404 en aan=false.
+const tripper = (function () {
+  const p = path.join(__dirname, 'reizen.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ vault: VAULT, vv: VV(),
+      koppel: function (rel) { return memorylaneDelen && typeof memorylaneDelen.reisKoppeling === 'function' ? memorylaneDelen.reisKoppeling(rel) : null; } });
+  } catch (e) { logError('tripper', e); return null; }
+})();
+function tripperInfo() { if (!tripper) return { aan: false }; try { return tripper.info(); } catch (e) { return { aan: true, fout: true }; } }
+appStaat.tellers.tripper = [];
+async function appTripper(req, res, a, route) {
+  if (!tripper) return appWeiger(res, 404, 'Tripper zit niet in deze versie van de pod', 'tripper ontbreekt');
+  if (!appTeller('tripper', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens tripper');
+  let u, m = null;
+  try {
+    if (route === 'GET /app/tripper/lijst') u = tripper.lijst();
+    else if ((m = /^GET \/app\/tripper\/reis\/([^/]*)$/.exec(route))) u = tripper.reis(m[1]);   // reizen.js toetst de id zelf (12 hex, anders 400)
+    else u = { status: 404, body: { ok: false, fout: 'onbekend' } };
+  } catch (e) { logError('tripper', e); return appWeiger(res, 503, 'Tripper kon de reizen nu niet lezen; probeer het zo opnieuw', 'tripper fout'); }
+  if (route === 'GET /app/tripper/lijst' && u.status === 200) res._app.stil = true;
+  else res._app.reden = 'tripper ' + (m ? 'reis ' + (/^[0-9a-f]{12}$/.test(m[1]) ? m[1] : 'ongeldig') : 'onbekend') + ' ' + u.status;
+  return appStuur(res, u.status, u.body);
+}
+// ── einde OVIS Tripper ──
 async function appDocs(req, res, a, s, d, route) {
   if (!docsDelen) return appWeiger(res, 404, 'Delen zit niet in deze versie van de pod', 'docs ontbreekt');
   if (!appTeller('docs', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs');

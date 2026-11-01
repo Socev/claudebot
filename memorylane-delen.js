@@ -24,17 +24,17 @@
  *  - Foto's (wv2120): met o.immich koppelt memorylane-fotos.js elke herinnering aan een Immich-album (ml_album). Een gedeelde herinnering
  *    neemt hooguit 8 miniaturen mee naar D1 ml_foto, alleen als David foto_delen per herinnering aanzette (standaard uit).
  * PRIVACY. Nooit tekst, titels of namen in logs, box, /health of fouten: alleen ids en aantallen.
- * VORM. Alleen fs, path en crypto; D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
+ * VORM. Alleen fs, path, crypto en reizen.js (wv2136: de reispagina's, gedeeld met Tripper); D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
  */
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const REIZEN = require('./reizen.js');   // wv2136: de reispagina's lezen Tripper en MemoryLane met dezelfde functie
 
 const KRINGEN = ['familie', 'vrienden'];
 const HID_RE = /^h[0-9a-f]{16}$/, SID_RE = /^s[0-9a-f]{16}$/, PUB_RE = /^[A-Za-z0-9_-]{16}$/, SLUG_RE = /^[A-Za-z0-9_-]{22}$/;
 const BIJ_ID_RE = /^[A-Za-z0-9_-]{22}$/;
 const MAP = '20_Prive/Herinneringen/MemoryLane';
-const REIS_MAP = '20_Prive/Reizen';
 const ITER = 100000;
 const MAX_TEKST = 5000, MAX_TITEL = 120, MAX_NAAM = 60;
 const NAAM_RE = /^[\p{L}][\p{L}\p{M} .'’-]{0,59}$/u;
@@ -292,23 +292,14 @@ function maak(o) {
   }
 
   // ── herinneringen: opnames (notitie) en reizen (type: reis, voorbij) ──
-  function reisInfo(rel) {
-    let t;
-    try { t = o.vv.lees(path.join(o.vault, rel), 'utf8', { max: 512 * 1024 }); } catch (e) { return null; }
-    if (fmVeld(t, 'type') !== 'reis') return null;
-    const periode = fmVeld(t, 'periode') || '';
-    const data = periode.match(/\d{4}-\d{2}-\d{2}/g) || [];
-    return { titel: (fmVeld(t, 'onderwerp') || path.basename(rel, '.md')).slice(0, MAX_TITEL), periode, van: data[0] || null, tot: data[data.length - 1] || null };
-  }
+  const reizen = REIZEN.maak({ vault: o.vault, vv: o.vv });   // wv2136: zelfde lezing als hiervoor, nu gedeeld met Tripper
+  function reisInfo(rel) { return reizen.reisInfo(rel); }
   function vandaag() { return typeof o.reisVandaag === 'function' ? o.reisVandaag() : amsDmj(nu()).datum; }
   function bijwerken() {
     const t = iso(nu());
     for (const r of q.rambles.all()) if (!q.hRef.get('opname', r.ramble_id)) q.hNieuw.run(nieuwHid(), 'opname', r.ramble_id, null, null, 'actief', t, t);
-    let reizen = [];
-    try { reizen = fs.readdirSync(path.join(o.vault, REIS_MAP)).filter((n) => /\.md$/.test(n) && !n.startsWith('.')); } catch (e) { reizen = []; }
     const gezien = new Set();
-    for (const n of reizen) {
-      const rel = path.join(REIS_MAP, n);
+    for (const rel of reizen.paden()) {
       const i = reisInfo(rel);
       if (!i || !i.tot || i.tot >= vandaag()) continue;
       gezien.add(rel);
@@ -741,12 +732,19 @@ function maak(o) {
     q.linkSync.run(1, k);
     vuil.delete(k);
   }
+  // wv2136 (Tripper): de herinnering bij een reispagina (hid, aantal opgenomen stukken, album als status/aantal); alleen lezen, geen bijwerken()
+  function reisKoppeling(rel) {
+    const h = q.hRef.get('reis', String(rel));
+    if (!h || h.status === 'weg') return null;
+    const a = F ? F.kort(h.hid) : null;
+    return { hid: h.hid, stukken: q.sVan.all(h.hid).filter((s) => s.status === 'opgenomen').length, album: a ? { status: a.status, aantal: a.aantal } : null };
+  }
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
     return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
-  return { lijst, detail, zicht, titel, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, fotoDelen, albumMaken,
+  return { lijst, detail, zicht, titel, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, fotoDelen, albumMaken, reisKoppeling,
     fotoSync, _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }
