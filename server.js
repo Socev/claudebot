@@ -15170,6 +15170,16 @@ const docplanTotaal = (function () {
       } });
   } catch (e) { logError('waarnemers', e); return null; }
 })();
+// wv2159: Facturen › Waarnemers › Roosternamen — koppelscherm roosternaam → persoon (DocPlan-ontwerp § 3 en § 4.1 uitwerking koppelscherm;
+// docplan-koppel.js). GET leest public.sb_dienst_alias_lijst(jaar), POST schrijft public.sb_dienst_alias_zet([item], 'david'): alleen deze route
+// gebruikt p_door 'david', en alleen voor de eigenaar (in appFacturen, vóór facturen.js; /fac kent de route niet). Niets opgeslagen op de pod, geen
+// naam in een log. Ontbreekt docplan-koppel.js (terugrol), dan 404 en draait de rest door.
+const docplanKoppel = (function () {
+  const p = path.join(__dirname, 'docplan-koppel.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ fout: logError, rpc: function (fn, body) { return appSbRpc(fn, body, 20000); } }); }
+  catch (e) { logError('roosternamen', e); return null; }
+})();
 // ── Aansluiting bank ↔ inkoopfacturen (wv1864, Second Brain 2.0 fase 4a, 28-10-2026; ontwerp vault 01_Ontwikkeling/Second Brain 2.0 - fase 4
 // financiële pilot Tolgaarde (ontwerp 28-10-2026).md) ──
 // POST /smal/facturen {opdracht: 'aansluiting', entiteit?, status?, max?, regels?, vers?} (skill facturen-lezen): de laatste run uit
@@ -15226,7 +15236,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), waarnemers: !!docplanTotaal } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -15351,6 +15361,13 @@ async function appFacturen(req, res, a, s, d, route) {
   // wv2158: Waarnemers (DocPlan): eigen alleen-lezen route vóór het openen van de gewone facturendatabase en vóór facturen.js; rolVoor('app')
   // raakt de database niet. De module weigert alles behalve GET van de eigenaar op de primaire kant (review wv2158 MOET 1).
   const padW = route.slice(route.indexOf(' ') + 1);
+  if (padW === '/app/facturen/roosternamen' || padW.indexOf('/app/facturen/roosternamen/') === 0) {
+    if (!docplanKoppel) return appWeiger(res, 404, 'Roosternamen zit niet in deze versie van de pod', 'facturen roosternamen ontbreekt');
+    const x = await docplanKoppel.app({ methode: req.method, pad: padW, d: d, rol: facturenRoutes.rolVoor(null, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' }), primair: rolPrimair() });
+    if (x.status === 200 && req.method === 'GET') res._app.stil = true;
+    res._app.reden = 'facturen ' + x.reden;
+    return appStuur(res, x.status, x.j);
+  }
   if (padW === '/app/facturen/waarnemers' || padW.indexOf('/app/facturen/waarnemers/') === 0) {
     if (!docplanTotaal) return appWeiger(res, 404, 'Waarnemers zit niet in deze versie van de pod', 'facturen waarnemers ontbreekt');
     const x = docplanTotaal.app({ methode: req.method, pad: padW, rol: facturenRoutes.rolVoor(null, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' }), primair: rolPrimair() });
