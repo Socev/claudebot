@@ -55,6 +55,7 @@
  *   node bank-lezer.js gambia [--rekening GMD|EUR|1234] [--van] [--tot] [--zoek x] [--max N]   saldo per rekening + laatste posten
  *   node bank-lezer.js ecobank-bekend                                           alleen server.js: mail-id's die al bewaard zijn
  *   node bank-lezer.js ecobank-bij (stdin {posten, fouten, ronde})             alleen server.js: bewaren (idempotent op mail-id)
+ *   node bank-lezer.js ecobank-csv (stdin {bestanden: [tekst], bron})           alleen machinekamer via de CLI: CSV-exports van de website (wv2206)
  * Historie voor het archief (alleen machinekamer via server.js):
  *   node bank-lezer.js historie bunq --volledig [--opgeheven] [--opnieuw]       alle bunq-posten ooit, per rekening onder eigen slot
  *   node bank-lezer.js historie abn-diep --van JJJJ-MM-DD [--rekening r]        ABN zo ver als de bank geeft (laat David er 2 over)
@@ -1161,6 +1162,15 @@ const opdrachten = {
     if (a.opt.zoek != null) o.zoek = String(a.opt.zoek).slice(0, 40);
     if (a.opt.max != null) o.max = a.opt.max;
     return Object.assign({ ok: true, bron: 'ecobank-mail' }, ecobankModule().overzicht(x.a, o));
+  },
+  // wv2206: CSV-exports van de Ecobank-website (David haalt ze zelf op). Alleen machinekamer, alleen via de CLI (niet in BANK_OPDRACHTEN,
+  // dus niet via /smal/bank): stdin {bestanden: [tekst, …], bron}; alles of niets; alleen aantallen terug.
+  async 'ecobank-csv'() {
+    const x = archiefOpen(), E = ecobankModule();
+    if (!Array.isArray(geheim.bestanden) || !geheim.bestanden.length) throw new Weigering('bestanden ontbreken');
+    if (geheim.bestanden.length > 50) throw new Weigering('hooguit 50 bestanden per keer');   // nooit stil afkappen (review gpt-5.5 MOET 1)
+    const r = E.csvBij(x.a, geheim.bestanden, typeof geheim.bron === 'string' ? geheim.bron : 'csv');
+    return Object.assign({ ok: !r.fouten.length }, r, { stand: E.stand(x.a) });
   },
   async 'ecobank-bekend'() { const x = archiefOpen(); return { ok: true, mail_ids: ecobankModule().bekend(x.a) }; },
   async 'ecobank-bij'() {
