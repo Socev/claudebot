@@ -763,6 +763,15 @@ vault_retentie(){
   for bestand in "$BACKUP_DIR"/vault-*.tgz; do
     [ -e "$bestand" ] || continue
     dag="$(basename "$bestand" .tgz | sed 's/^vault-//')"
+    # wv2175 (David Ja 1-11-2026): handkopieën uit een onderhoudsstand (vault-onderhoud-<JJJJMMDD>-<uumm>.tgz) na 14 dagen weg.
+    # Alleen precies die vorm (uumm een geldige tijd); alles wat de datum niet leest (vault-voor-…) blijft staan zoals voorheen.
+    if [[ "$dag" =~ ^onderhoud-([0-9]{8})-([01][0-9]|2[0-3])[0-5][0-9]$ ]]; then
+      ts="$(date -d "${BASH_REMATCH[1]}" +%s 2>/dev/null)" || continue
+      if [ $(( (nu - ts) / 86400 )) -gt 14 ]; then
+        rm -f "$bestand" && verwijderd=$((verwijderd + 1))
+      fi
+      continue
+    fi
     ts="$(date -d "$dag" +%s 2>/dev/null)" || continue
     leeftijd=$(( (nu - ts) / 86400 ))
     dow="$(date -d "$dag" +%u)"    # 7 = zondag

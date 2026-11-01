@@ -388,6 +388,10 @@ jobs:
       - name: "datums (wv1275, POST /datums)"
         if: ${{ !cancelled() }}
         run: bash test/datums.sh
+      # Retentie van de lokale vault-tars (wv2175, David Ja 1-11-2026): vault-onderhoud-<JJJJMMDD>-<uumm>.tgz na 14 dagen weg, rest ongewijzigd.
+      - name: "vault-retentie (wv2175, onderhoud-tars na 14 dagen)"
+        if: ${{ !cancelled() }}
+        run: bash test/vault-retentie.sh
       # Onderhoudsstand van de vault (wv1271, SB2 fase 1a): wie wacht, echte flock-grendel, uit = los, alarm na 2 uur één keer.
       - name: "onderhoud (wv1271, onderhoudsstand vault)"
         if: ${{ !cancelled() }}
