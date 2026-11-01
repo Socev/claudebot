@@ -139,7 +139,23 @@ function kernCtx(fdb, nu) {
     entiteiten: entiteitenRijen(fdb).map((e) => ({ sleutel: e.sleutel, naam: e.naam, naam_kort: e.naam_kort, aliassen: e.aliassen || [], kvk: e.kvk,
       actief: e.actief === 1, boekhoud_doel: e.boekhoud_doel, ibans: ibans[e.sleutel] || [] })),
     drempelCenten: Number.isSafeInteger(drempel) && drempel > 0 ? drempel : undefined,
+    eerdereBetalingen: (q) => eerdereBetalingen(fdb, q),   // wv2143: de € 2.500-waarschuwing zwijgt bij een gebruikelijk bedrag (kern)
   };
+}
+/*
+ * wv2143: afschrijvingen aan een tegenpartij (IBAN's of incassant-id's) van `van` tot vóór `tot`, zonder de betalingen die al aan deze factuur
+ * gekoppeld zijn. Ook regels die alleen de eigenaar ziet (de oudere bankhistorie, POT) tellen mee, met hun vlag: de kern zet dan geen
+ * bedragen in de controletekst (die ziet een praktijkmanager wel).
+ */
+function eerdereBetalingen(fdb, q) {
+  const ibans = (q && q.ibans || []).filter((i) => typeof i === 'string' && i).slice(0, 50);
+  const inc = (q && q.incassant_ids || []).filter((i) => typeof i === 'string' && i).slice(0, 50);
+  if ((!ibans.length && !inc.length) || !K.isIsoDatum(q.van) || !K.isIsoDatum(q.tot)) return [];
+  const wie = [ibans.length ? 'tegenpartij_iban IN (' + ibans.map(() => '?').join(',') + ')' : null,
+    inc.length ? 'upper(trim(incassant_id)) IN (' + inc.map(() => '?').join(',') + ')' : null].filter(Boolean).join(' OR ');
+  return fdb.db.prepare('SELECT id, boekdatum, bedrag_centen, alleen_eigenaar FROM bank_transactie WHERE verwijderd_op IS NULL AND bedrag_centen < 0 AND boekdatum >= ? AND boekdatum < ? ' +
+    'AND (' + wie + ') AND id NOT IN (SELECT transactie FROM koppeling WHERE factuur = ?)')
+    .all(q.van, q.tot, ...ibans, ...inc, q.factuur || '').map((t) => Object.assign({}, t, { alleen_eigenaar: t.alleen_eigenaar === 1 }));
 }
 function leverancierLijst(fdb) {
   const ibans = {}, namen = {}, naamtoets = {};
@@ -3253,4 +3269,4 @@ function mailStappen(fdb, max) {
     .map((x) => ({ gmail_id: String(x.gmail_id), stap: Number(x.rang) >= 2 ? 'is_betaald' : 'in_sepa' }));
 }
 
-module.exports = { betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek };
+module.exports = { eerdereBetalingen, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek };

@@ -2209,3 +2209,48 @@ test('wv2061 te bekijken: per week per tegenpartij met voorstel; uitzondering �
   assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [potTx], categorie: 'loon' }, { rol: pm }).status, 403);
   assert.equal(t.call('POST', 'bank-keuze', { keuze: 'factuur', transactie: potTx, factuur: fid }, { rol: pm }).status, 404);
 });
+
+// ───────────────────────────── wv2143: € 2.500-waarschuwing bij een gebruikelijk bedrag ─────────────────────────────
+
+test('wv2143: drempel_vast stil bij > 3 eerdere afschrijvingen aan het bekende IBAN binnen de band; koppeling en POT tellen niet mee', () => {
+  const t = opzet();
+  const f = t.f("status = 'te_beoordelen' AND leverancier IS NOT NULL AND iban IS NOT NULL AND iban_nieuw = 0 AND valuta = 'EUR' AND patientkenmerk = 0 AND alleen_eigenaar = 0");
+  assert.ok(f, 'zaad heeft een te beoordelen factuur met bekend IBAN');
+  const rek = t.fdb.db.prepare("SELECT id, iban, entiteit FROM rekening WHERE alleen_eigenaar = 0 AND entiteit <> 'prive' LIMIT 1").get();
+  const pot = t.fdb.db.prepare('SELECT id, iban, entiteit FROM rekening WHERE alleen_eigenaar = 1 LIMIT 1').get();
+  const tx = (r, dag, centen, extra) => {
+    const id = D.nieuwId();
+    t.fdb.db.prepare('INSERT INTO bank_transactie (id, rekening, entiteit, eigen_iban, boekdatum, bedrag_centen, tegenpartij_iban, entry_ref, formaat, bankluis_sleutel, alleen_eigenaar, aangemaakt_op) ' +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'bankluis', 'proef', ?, '2026-10-22T00:00:00Z')").run(id, r.id, r.entiteit, r.iban, dag, -centen, f.iban, 'bankluis:wv2143|' + id, extra && extra.pot ? 1 : 0);
+    return id;
+  };
+  const dv = () => (JSON.parse(t.f('id = ?', [f.id]).controles).find((c) => c.naam === 'drempel_vast') || null);
+  const zet = (incl) => { const v = t.f('id = ?', [f.id]); const r = t.call('POST', 'wijzig', { id: f.id, versie: v.versie, velden: { incl, excl: null, btw: null } }); assert.equal(r.status, 200, JSON.stringify(r.body)); };
+  const fd = t.f('id = ?', [f.id]).factuurdatum || '2026-10-22';
+  const dag = (n) => K.plusDagen(fd, -n);
+  // de zaad-afschrijvingen aan dit IBAN uit beeld (verwijderd telt niet mee): de toets bepaalt zelf de historie
+  t.fdb.db.prepare("UPDATE bank_transactie SET verwijderd_op = '2026-10-22T00:00:00Z', verwijderd_door = 'proef' WHERE tegenpartij_iban = ?").run(f.iban);
+  for (const [n, c] of [[120, 350000], [90, 380000], [60, 420000]]) tx(rek, dag(n), c);
+  zet(400000);
+  assert.equal(dv().ok, false, 'drie eerdere: waarschuwing');
+  const gekoppeld = tx(rek, dag(20), 360000);
+  t.fdb.db.prepare("INSERT INTO koppeling (transactie, factuur, bron, wanneer) VALUES (?, ?, 'auto', '2026-10-22T00:00:00Z')").run(gekoppeld, f.id);
+  zet(400001);
+  assert.equal(dv().ok, false, 'de betaling van deze factuur zelf telt niet mee');
+  tx(rek, dag(400), 360000);
+  zet(400000);
+  assert.equal(dv().ok, false, 'een regel van ruim een jaar terug telt niet mee');
+  tx(rek, dag(10), 360000);
+  zet(400001);
+  assert.deepEqual([dv().ok, dv().ernst], [true, 'info'], 'vier eerdere binnen de band: stil');
+  assert.match(dv().reden, /4 eerdere betalingen aan deze tegenpartij, band € 2\.800,00 – € 4\.560,00$/);
+  const pt = tx(pot, dag(30), 360000, { pot: true });
+  zet(400000);
+  assert.deepEqual([dv().ok, /5 eerdere/.test(dv().reden), /€ 2\.800/.test(dv().reden)], [true, true, false], 'een alleen-eigenaarregel telt mee, maar zonder bedragen in de tekst');
+  zet(456001);
+  assert.equal(dv().ok, false, 'boven 1,2× het op één na hoogste');
+  tx(rek, fd, 360000);
+  const l = F.eerdereBetalingen(t.fdb, { ibans: [f.iban], van: dag(365), tot: fd, factuur: f.id });
+  assert.equal(l.length, 5, 'tot = vóór de factuurdatum; gekoppeld en verwijderd niet');
+  assert.deepEqual(l.filter((x) => x.alleen_eigenaar).map((x) => x.id), [pt]);
+});

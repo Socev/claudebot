@@ -932,6 +932,42 @@ function mediaan(lijst) {
   return a.length % 2 ? a[h] : Math.round((a[h - 1] + a[h]) / 2);
 }
 
+/*
+ * wv2143 (David 31-10-2026 22:45): "Bij facturen krijg ik nu een waarschuwing bij een bedrag boven de 2500. Dit hoeft niet, als iemand al
+ * meer dan 3 betalingen heeft ontvangen en het bedrag binnen de gebruikelijke range valt." Stil als: de beller levert de eerdere betalingen
+ * (ctx.eerdereBetalingen: afschrijvingen aan het factuur-IBAN, de IBAN's en incassant-id's van de leverancier, de 12 maanden vóór de
+ * factuurdatum, zonder de betaling van deze factuur zelf), er zijn er meer dan 3, en het bedrag ligt tussen 0,8× het laagste en 1,2× het op
+ * één na hoogste (één uitschieter in de historie rekt de band niet op). Nooit stil bij een nieuw of onbekend IBAN (ibanPoort), zonder
+ * factuurdatum, bij een andere of ontbrekende valuta of een bedrag of IBAN dat alleen Claude las. Gemeten op de jaarhistorie (mk-scripts/wv2143/meet.js): van 46 facturen boven
+ * € 2.500 hadden er 22 meer dan 3 eerdere betalingen; 19 daarvan binnen deze band. Buiten de band vielen alleen echte uitschieters.
+ * Haak (nog niet gebouwd): DocPlan levert later per waarnemer de verwachte hoogte uit het rooster; die gaat dan vóór de bankband.
+ */
+const GEBRUIKELIJK_MIN_EERDER = 4, GEBRUIKELIJK_LAAG = 0.8, GEBRUIKELIJK_HOOG = 1.2, GEBRUIKELIJK_DAGEN = 365;
+function euroKort(c) { return (c / 100).toLocaleString('nl-NL', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function gebruikelijkBedrag(f, ctx, lev) {
+  const nee = (reden) => ({ stil: false, reden });
+  if (!ctx || typeof ctx.eerdereBetalingen !== 'function') return nee('geen bankhistorie');
+  if (f.valuta !== 'EUR') return nee('geen euro');   // review wv2143 MOET 1: ook een ontbrekende valuta
+  const nakijken = (Array.isArray(f.model_zonder_steun) ? f.model_zonder_steun : []).filter((v) => !(Array.isArray(f.model_afgevinkt) ? f.model_afgevinkt : []).includes(v));
+  if (nakijken.length) return nee('alleen door Claude gelezen');
+  if (ibanPoort(f, lev || null, ctx).iban_nieuw) return nee('nieuw of onbekend IBAN');
+  const ibans = [...new Set([f.iban].concat((lev && lev.ibans) || []).map(ibanNorm).filter(Boolean))];
+  const incassant_ids = [...new Set(((lev && lev.incassant_ids) || []).map((x) => String(x || '').trim().toUpperCase()).filter(Boolean))];
+  if (!ibans.length && !incassant_ids.length) return nee('geen tegenpartij om te vergelijken');
+  if (!isIsoDatum(f.factuurdatum)) return nee('geen factuurdatum');   // review wv2143 MOET 2: geen terugval op vandaag
+  const tot = f.factuurdatum;
+  const lijst = (ctx.eerdereBetalingen({ ibans, incassant_ids, van: plusDagen(tot, -GEBRUIKELIJK_DAGEN), tot, factuur: f.id || null }) || [])
+    .filter((t) => t && Number.isSafeInteger(t.bedrag_centen) && t.bedrag_centen !== 0);
+  const b = lijst.map((t) => Math.abs(t.bedrag_centen)).sort((x, y) => x - y);
+  // een band uit regels die alleen de eigenaar ziet (oudere bankhistorie, POT) komt zonder bedragen in de tekst, tenzij de factuur zelf alleen-eigenaar is
+  // (een factuur met patiëntkenmerk ziet een praktijkmanager nooit: facturen.js factuurFilter)
+  const verborgen = !(f.alleen_eigenaar || f.patientkenmerk) && lijst.some((t) => !!t.alleen_eigenaar);
+  if (b.length < GEBRUIKELIJK_MIN_EERDER) return nee('3 of minder eerdere betalingen');
+  const laag = Math.round(b[0] * GEBRUIKELIJK_LAAG), hoog = Math.round(b[b.length - 2] * GEBRUIKELIJK_HOOG), x = Math.abs(f.incl);
+  if (x < laag || x > hoog) return Object.assign(nee('buiten de gebruikelijke band'), { aantal: b.length, laag_centen: laag, hoog_centen: hoog, verborgen });
+  return { stil: true, aantal: b.length, laag_centen: laag, hoog_centen: hoog, verborgen };
+}
+
 // Elke controle: { naam, ok, ernst: 'info'|'melding'|'fout', reden }. 'fout' bij een IBAN blokkeert Bevestigen als je zelf betaalt.
 function valideer(f, ctx, opties) {
   const c = [];
@@ -956,7 +992,12 @@ function valideer(f, ctx, opties) {
   const med = lev && lev.mediaan && f.entiteit ? lev.mediaan[f.entiteit] : null;
   if (med && f.incl != null) voeg('drempel', Math.abs(f.incl) <= 3 * Math.abs(med), 'melding', Math.abs(f.incl) <= 3 * Math.abs(med) ? 'bedrag ≤ 3× mediaan van deze leverancier' : 'bedrag ruim boven 3× de mediaan van deze leverancier');
   const drempel = ctx && Number.isSafeInteger(ctx.drempelCenten) ? ctx.drempelCenten : 250000;
-  if (f.incl != null && Math.abs(f.incl) > drempel) voeg('drempel_vast', false, 'melding', 'bedrag boven € ' + (drempel / 100).toLocaleString('nl-NL') + ': extra opletten');
+  if (f.incl != null && Math.abs(f.incl) > drempel) {
+    const gb = gebruikelijkBedrag(f, ctx, lev);
+    if (gb.stil) voeg('drempel_vast', true, 'info', 'bedrag boven € ' + (drempel / 100).toLocaleString('nl-NL') + ', maar gebruikelijk: ' + gb.aantal + ' eerdere betalingen aan deze tegenpartij' +
+      (gb.verborgen ? '' : ', band € ' + euroKort(gb.laag_centen) + ' – € ' + euroKort(gb.hoog_centen)));
+    else voeg('drempel_vast', false, 'melding', 'bedrag boven € ' + (drempel / 100).toLocaleString('nl-NL') + ': extra opletten');
+  }
   voeg('valuta', f.valuta === 'EUR', 'melding', f.valuta === 'EUR' ? 'euro' : 'valuta ' + f.valuta + ': bedrag en bankmatch met de hand controleren');
   let intern = null;
   if (f.iban) {
@@ -1130,7 +1171,8 @@ function beslisBericht(invoer, ctx) {
     }
     const sb = stapBetaalwijze(scan ? '' : tekst, v, ctx, { leverancier: lev, regel: rgLev ? rg : null });
     besluiten.push(...sb.besluiten);
-    const f = Object.assign(basis, { entiteit: se.entiteit, betaalwijze: sb.betaalwijze, status });
+    // wv2143: model_zonder_steun vóór valideer (een bedrag dat alleen Claude las maakt de € 2.500-waarschuwing nooit stil)
+    const f = Object.assign(basis, { entiteit: se.entiteit, betaalwijze: sb.betaalwijze, status, model_zonder_steun: modelZonder });
     const va = valideer(f, ctx, { leverancier: lev });
     const ip = ibanPoort(f, lev, ctx);
     f.intern = va.intern; f.iban_nieuw = ip.iban_nieuw; f.ibans_onbekend = ip.onbekend; f.controles = va.controles;
@@ -1375,7 +1417,7 @@ module.exports = {
   leesXml, leesUbl, leesPdfTekst,
   // besliskader per stap (§ 4.5)
   stapDubbelBestand, stapDubbelInhoud, factuurSleutel, stapSoort, groepeerBericht, stapPatientkenmerk, stapVelden, herkenLeverancier, compactNaam, naamVerwant, ibanNaamPast, VERZAMEL_RE,
-  stapEntiteit, stapGeenFactuur, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, ibanPoort, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
+  stapEntiteit, stapGeenFactuur, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, gebruikelijkBedrag, GEBRUIKELIJK_MIN_EERDER, ibanPoort, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
   // leren
   leerUitBevestiging,
   // overgangen (§ 4.4)

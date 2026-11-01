@@ -455,6 +455,50 @@ test('betaalwijze: tekst → leverancierstandaard → bankhistorie → onbekend'
   assert.ok(f.bevestigen.redenen.includes('geen entiteit'));
 });
 
+test('wv2143: € 2.500-waarschuwing stil bij > 3 eerdere betalingen binnen de band; anders blijft hij', () => {
+  const basis = { soort: 'factuur', excl: 330579, btw: 69421, incl: 400000, factuurdatum: '2026-10-01', vervaldatum: '2026-10-31', valuta: 'EUR', entiteit: 'tolgaarde', betaalwijze: 'zelf', iban: IBAN.A };
+  const tx = (bedragen) => bedragen.map((b, i) => ({ id: 't' + i, boekdatum: '2026-0' + (i + 1) + '-15', bedrag_centen: -b }));
+  let vraag = null;
+  const ctx = (bedragen) => ctxBasis({ eerdereBetalingen: (q) => { vraag = q; return tx(bedragen); } });
+  const dv = (f, lev, bedragen) => K.valideer(f, ctx(bedragen), { leverancier: lev }).controles.find((x) => x.naam === 'drempel_vast');
+  const vier = [350000, 380000, 420000, 360000];
+  // 5e betaling (4 eerdere) binnen 0,8× laagste – 1,2× op één na hoogste: stil (info, geen waarschuwing)
+  const stil = dv(basis, LEV_A, vier);
+  assert.deepEqual([stil.ok, stil.ernst], [true, 'info']);
+  assert.match(stil.reden, /4 eerdere betalingen aan deze tegenpartij, band € 2\.800,00 – € 4\.560,00$/);
+  // een regel die alleen de eigenaar ziet (oudere bankhistorie, POT) telt mee, maar dan geen bedragen in de tekst (tenzij de factuur zelf alleen-eigenaar is)
+  const ae = (f) => K.valideer(f, ctxBasis({ eerdereBetalingen: () => tx(vier).map((t, i) => Object.assign(t, { alleen_eigenaar: i === 0 })) }), { leverancier: LEV_A }).controles.find((x) => x.naam === 'drempel_vast');
+  assert.deepEqual([ae(basis).ok, /€ 2\.800/.test(ae(basis).reden)], [true, false]);
+  assert.match(ae(Object.assign({}, basis, { alleen_eigenaar: true })).reden, /€ 2\.800,00/);
+  assert.deepEqual([vraag.ibans, vraag.van, vraag.tot], [[IBAN.A], '2025-10-01', '2026-10-01'], 'IBAN van factuur en leverancier, 12 maanden vóór de factuurdatum');
+  assert.deepEqual(K.valideer(basis, ctx(vier), { leverancier: Object.assign({}, LEV_A, { mediaan: { tolgaarde: 380000 } }) }).controles.filter((x) => !x.ok), [], 'geen enkele waarschuwing meer');
+  // drie eerdere (dit is de 4e betaling): waarschuwing
+  assert.equal(dv(basis, LEV_A, vier.slice(0, 3)).ok, false, '≤ 3 eerdere');
+  // buiten de band: boven 1,2× het op één na hoogste (420.000 telt als uitschieter niet mee: 1,2 × 380.000 = 456.000)
+  assert.equal(dv(Object.assign({}, basis, { incl: 456000 }), LEV_A, vier).ok, true);
+  assert.equal(dv(Object.assign({}, basis, { incl: 456001 }), LEV_A, vier).ok, false, 'boven de band');
+  assert.equal(dv(Object.assign({}, basis, { incl: 279999 }), LEV_A, vier).ok, false, 'onder 0,8× het laagste');
+  // één grote eerdere uitschieter rekt de band niet op
+  assert.equal(dv(Object.assign({}, basis, { incl: 900000 }), LEV_A, [350000, 360000, 370000, 1000000]).ok, false);
+  // nieuw IBAN (niet bij de leverancier bekend), geen leverancier, tweede onbekend IBAN op het stuk: altijd waarschuwen
+  assert.equal(dv(Object.assign({}, basis, { iban: IBAN.A2 }), LEV_A, vier).ok, false, 'nieuw IBAN');
+  assert.equal(dv(basis, null, vier).ok, false, 'onbekende leverancier = IBAN niet nagebeld');
+  assert.equal(dv(Object.assign({}, basis, { ibans_betaal: [IBAN.A, IBAN.A2] }), LEV_A, vier).ok, false, 'tweede IBAN op de factuur');
+  // andere valuta en bedrag dat alleen Claude las: waarschuwen; afgevinkt telt weer
+  assert.equal(dv(Object.assign({}, basis, { valuta: 'USD' }), LEV_A, vier).ok, false);
+  assert.equal(dv(Object.assign({}, basis, { valuta: null }), LEV_A, vier).ok, false, 'ontbrekende valuta (review MOET 1)');
+  assert.equal(dv(Object.assign({}, basis, { factuurdatum: null }), LEV_A, vier).ok, false, 'geen factuurdatum: geen terugval op vandaag (review MOET 2)');
+  assert.equal(dv(Object.assign({}, basis, { model_zonder_steun: ['incl'] }), LEV_A, vier).ok, false);
+  assert.equal(dv(Object.assign({}, basis, { model_zonder_steun: ['incl'], model_afgevinkt: ['incl'] }), LEV_A, vier).ok, true);
+  // zonder bankhistorie (beller levert niets) blijft het oude gedrag
+  assert.equal(K.valideer(basis, ctxBasis(), { leverancier: LEV_A }).controles.find((x) => x.naam === 'drempel_vast').ok, false);
+  // incasso zonder IBAN op de factuur: via de incassant-id's van de leverancier; en de factuur zelf gaat mee (koppeling uitsluiten)
+  dv(Object.assign({}, basis, { iban: null, betaalwijze: 'incasso', id: 'f1' }), Object.assign({}, LEV_B, { incassant_ids: [' nl00zzz123 '] }), vier);
+  assert.deepEqual([vraag.ibans, vraag.incassant_ids, vraag.factuur], [[IBAN.B], ['NL00ZZZ123'], 'f1']);
+  // onder de drempel: geen controle; aan de beslisBericht-kant zet model_zonder_steun vóór valideer
+  assert.equal(dv(Object.assign({}, basis, { excl: 100000, btw: 21000, incl: 121000 }), LEV_A, vier), undefined);
+});
+
 test('validators: ±0,02, datums, 3× mediaan, mod-97, eigen IBAN fout/intern', () => {
   const basis = { soort: 'factuur', excl: 10000, btw: 2100, incl: 12102, factuurdatum: '2026-10-01', vervaldatum: '2026-10-31', valuta: 'EUR', entiteit: 'tolgaarde', betaalwijze: 'zelf', iban: IBAN.A };
   const c = (f, lev) => Object.fromEntries(K.valideer(f, ctxBasis(), { leverancier: lev }).controles.map((x) => [x.naam, x]));
