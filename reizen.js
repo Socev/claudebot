@@ -16,6 +16,9 @@
  *    deelnemers (frontmatter, T2) of anders de wikilinks onder "## Gezelschap" / "## Wie & hoe", description, paginatekst.
  *  - id = de eerste 12 hex van sha256(vaultpad). Een reis opvragen gaat alleen op id: de pod zoekt het pad zelf op in paden(), dus een
  *    pad uit de vraag komt nooit bij het bestandssysteem.
+ *  - T2 (wv2152, ontwerp § 4.1): vervoer (vaste woorden, VERVOER) in lijst en reis; alleen in de reis: verblijf [{plaats, naam, van, tot}],
+ *    plekken [{naam, rol, lat, lon}] (coördinaten alleen als beide geldig) en kosten {totaal, per_persoon, bron}: een bedrag zonder
+ *    kosten_bron valt weg (ontwerp § 6: geen totaal zonder onderbouwing). Lijsten van maps in flow- of blokvorm (fmObjLijst), ≤ 60 items.
  *  - Lezen via vault-veilig (o.vv.lees: geen symlink volgen, alleen een gewoon bestand, ≤ 512 kB).
  * PRIVACY. Reispagina's zijn strikt privé (namen, boekingen, bedragen). Deze module logt niets; info() geeft alleen aantallen.
  */
@@ -26,6 +29,8 @@ const crypto = require('crypto');
 const REIS_MAP = '20_Prive/Reizen';
 const MAX_TITEL = 120, MAX_BESCHRIJVING = 400, MAX_DEELNEMERS = 40, MAX_PAGINA = 512 * 1024;
 const ID_RE = /^[0-9a-f]{12}$/;
+const MAX_ITEMS = 60;
+const VERVOER = ['auto', 'vliegtuig', 'trein', 'ferry', 'camper', 'fiets', 'te-voet', 'bus'];
 const SOORTEN = ['vakantie', 'weekend', 'vrienden', 'carbage-run', 'gambia', 'festival', 'actief'];
 // Ontwerp § 3: volgorde telt (Gambia 2023 heeft ook de tag vakantie; een Shizzle-weekend is vrienden, geen stedentrip)
 const SOORT_REGELS = [
@@ -52,6 +57,18 @@ function fmVeld(t, veld) {
   if (v.startsWith('"')) { try { v = JSON.parse(v); } catch (e) { v = v.replace(/^"|"$/g, ''); } }
   return v;
 }
+// YAML-commentaar: een # na witruimte (of aan het begin), buiten aanhalingstekens; [[pad#kop]] blijft (review wv2152 MOET 2)
+function zonderCommentaar(x) {
+  x = String(x == null ? '' : x);
+  let aanh = null;
+  for (let i = 0; i < x.length; i++) {
+    const c = x[i];
+    if (aanh) { if (c === aanh && x[i - 1] !== '\\') aanh = null; continue; }
+    if (c === '"' || c === "'") aanh = c;
+    else if (c === '#' && (i === 0 || /\s/.test(x[i - 1]))) return x.slice(0, i).trimEnd();
+  }
+  return x;
+}
 // Een lijstveld: [a, "b"] op één regel of een blok "- a" eronder
 function fmLijst(t, veld) {
   const fm = frontmatter(t);
@@ -59,7 +76,7 @@ function fmLijst(t, veld) {
   const r = new RegExp('^' + veld + ':[ \\t]*(.*)$', 'm').exec(fm);
   if (!r) return [];
   const kaal = (x) => { x = x.trim(); if (/^".*"$/.test(x)) { try { return JSON.parse(x); } catch (e) { return x.slice(1, -1); } } return x.replace(/^'(.*)'$/, '$1'); };
-  const v = r[1].trim();
+  const v = zonderCommentaar(r[1]).trim();
   if (v.startsWith('[')) {
     const binnen = v.replace(/^\[/, '').replace(/\]$/, '');
     // komma's binnen [[...]] of "..." niet splitsen
@@ -77,11 +94,11 @@ function fmLijst(t, veld) {
   if (v) return [kaal(v)];
   const rest = fm.slice(r.index + r[0].length).split('\n').slice(1);
   const uit = [];
-  for (const regel of rest) { const m = /^[ \t]*-[ \t]+(.*)$/.exec(regel); if (!m) break; uit.push(kaal(m[1])); }
+  for (const regel of rest) { const m = /^[ \t]*-[ \t]+(.*)$/.exec(zonderCommentaar(regel)); if (!m) break; uit.push(kaal(m[1])); }
   return uit.filter(Boolean);
 }
 function soortVan(tekst) {
-  const eigen = String(fmVeld(tekst, 'trip_soort') || '').trim().toLowerCase();
+  const eigen = String(fmKop(tekst, 'trip_soort') || '').trim().toLowerCase();
   if (SOORTEN.indexOf(eigen) >= 0) return eigen;
   const tags = new Set(fmLijst(tekst, 'tags').map((x) => String(x).trim().toLowerCase().replace(/^#/, '')));
   for (const [soort, woorden] of SOORT_REGELS) if (woorden.some((w) => tags.has(w))) return soort;
@@ -103,7 +120,12 @@ function wikilinks(s) {
 }
 function deelnemersVan(tekst) {
   const fm = fmLijst(tekst, 'deelnemers');
-  if (fm.length) { const w = wikilinks(fm.join('\n')); return w.length ? w : fm.map((x) => String(x).slice(0, 80)).slice(0, MAX_DEELNEMERS); }
+  // T2: per item de naam uit de wikilink, anders de tekst zelf (iemand zonder eigen pagina); dubbele namen één keer
+  if (fm.length) {
+    const uit = [];
+    for (const x of fm) { const w = wikilinks(String(x)); const n = w.length ? w[0] : String(x).replace(/\[\[|\]\]/g, '').trim().slice(0, 80); if (n && uit.indexOf(n) < 0) uit.push(n); }
+    return uit.slice(0, MAX_DEELNEMERS);
+  }
   const lijf = zonderFrontmatter(tekst);
   const k = GEZELSCHAP_RE.exec(lijf);
   if (!k) return [];
@@ -111,6 +133,109 @@ function deelnemersVan(tekst) {
   const eind = /^#{1,2}[ \t]/m.exec(na);
   return wikilinks(eind ? na.slice(0, eind.index) : na);
 }
+// ── T2 (wv2152): de vaste kop uit ontwerp § 4.1 — vervoer, verblijf, plekken, kosten. Alleen wat er staat; wat niet klopt valt weg. ──
+// Eén waarde uit flow-YAML: "tekst" (JSON-escape), 'tekst', getal of kaal woord
+function kaalWaarde(x) {
+  x = String(x == null ? '' : x).trim();
+  if (/^".*"$/.test(x)) { try { return JSON.parse(x); } catch (e) { return x.slice(1, -1); } }
+  if (/^'.*'$/.test(x)) return x.slice(1, -1).replace(/''/g, "'");
+  return x;
+}
+// {a: 1, b: "x, y"} → { a: '1', b: 'x, y' } (komma's en dubbele punten binnen aanhalingstekens blijven); null als het geen map is
+function flowMap(s) {
+  s = String(s || '').trim();
+  if (!/^\{[\s\S]*\}$/.test(s)) return null;
+  const binnen = s.slice(1, -1), delen = [];
+  let aanh = null, cur = '';
+  for (let i = 0; i < binnen.length; i++) {
+    const c = binnen[i];
+    if (aanh) { if (c === aanh && binnen[i - 1] !== '\\') aanh = null; cur += c; continue; }
+    if (c === '"' || c === "'") { aanh = c; cur += c; continue; }
+    if (c === ',') { delen.push(cur); cur = ''; } else cur += c;
+  }
+  if (cur.trim()) delen.push(cur);
+  const uit = {};
+  for (const d of delen) { const m = /^\s*([A-Za-z_][\w-]*)\s*:\s*([\s\S]*)$/.exec(d); if (m) uit[m[1]] = kaalWaarde(m[2]); }
+  return uit;
+}
+// Een lijst van maps onder veld: "- {a: 1, b: 2}" per regel, of in blokvorm "- a: 1" met "  b: 2" eronder
+function fmObjLijst(t, veld) {
+  const fm = frontmatter(t);
+  if (fm == null) return [];
+  const r = new RegExp('^' + veld + ':[ \\t]*(?:#.*)?$', 'm').exec(fm);
+  if (!r) return [];
+  const uit = [];
+  let cur = null;
+  for (const ruw of fm.slice(r.index + r[0].length).split('\n').slice(1)) {
+    if (!/^[ \t]/.test(ruw) && ruw.trim() && !/^#/.test(ruw)) break;          // volgend veld
+    const regel = zonderCommentaar(ruw);
+    if (/^[ \t]*-[ \t]*$/.test(regel)) { if (cur) uit.push(cur); cur = {}; continue; }   // losse "-", sleutels eronder (review ZOU 1)
+    const item = /^[ \t]*-[ \t]+(.*)$/.exec(regel);
+    if (item) {
+      if (cur) uit.push(cur);
+      const fl = flowMap(item[1]);
+      if (fl) { uit.push(fl); cur = null; continue; }
+      const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(item[1]);
+      cur = kv ? { [kv[1]]: kaalWaarde(kv[2]) } : null;
+      continue;
+    }
+    const kv = /^[ \t]+([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(regel);
+    if (kv && cur) cur[kv[1]] = kaalWaarde(kv[2]);
+  }
+  if (cur && Object.keys(cur).length) uit.push(cur);
+  return uit.filter((x) => Object.keys(x).length).slice(0, MAX_ITEMS);
+}
+// Eén veld van de vaste kop: zonder commentaar, dan zonder aanhalingstekens (fmVeld zelf blijft zoals MemoryLane hem kent)
+function fmKop(t, veld) {
+  const fm = frontmatter(t);
+  if (fm == null) return null;
+  const r = new RegExp('^' + veld + ':[ \\t]*(.*)$', 'm').exec(fm);
+  return r ? kaalWaarde(zonderCommentaar(r[1])) : null;
+}
+const tekstVeld = (x, max) => { const v = String(x == null ? '' : x).replace(/[\u0000-\u001f]/g, ' ').trim(); return v ? v.slice(0, max || 120) : ''; };
+// JJJJ-MM-DD én een bestaande dag (review wv2152 MOET 1: 2025-02-31 of maand 99 valt weg)
+function datumVeld(x) {
+  const s = String(x || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const d = new Date(s + 'T00:00:00Z');
+  return !isNaN(d) && d.toISOString().slice(0, 10) === s ? s : null;
+}
+function graad(x, max) { const s = String(x == null ? '' : x).trim(); if (!/^-?\d{1,3}(\.\d+)?$/.test(s)) return null; const g = Number(s); return Math.abs(g) <= max ? g : null; }
+function vervoerVan(t) {
+  const uit = [];
+  for (const x of fmLijst(t, 'vervoer')) { const v = String(x).trim().toLowerCase(); if (VERVOER.indexOf(v) >= 0 && uit.indexOf(v) < 0) uit.push(v); }
+  return uit;
+}
+// verblijf: plaats of naam verplicht; van/tot als JJJJ-MM-DD (tot = de ochtend van vertrek), anders null
+function verblijfVan(t) {
+  const uit = [];
+  for (const o of fmObjLijst(t, 'verblijf')) {
+    const v = { plaats: tekstVeld(o.plaats, 80), naam: tekstVeld(o.naam, 120), van: datumVeld(o.van), tot: datumVeld(o.tot) };
+    if (v.van && v.tot && v.tot < v.van) v.tot = null;
+    if (v.plaats || v.naam) uit.push(v);
+  }
+  return uit;
+}
+// plekken: naam verplicht; coördinaten alleen als beide geldig zijn (stadsniveau, voor de kaart van T3)
+function plekkenVan(t) {
+  const uit = [];
+  for (const o of fmObjLijst(t, 'plekken')) {
+    const naam = tekstVeld(o.naam, 80);
+    if (!naam) continue;
+    const lat = graad(o.lat, 90), lon = graad(o.lon, 180), ok = lat != null && lon != null;
+    uit.push({ naam, rol: tekstVeld(o.rol, 30) || null, lat: ok ? lat : null, lon: ok ? lon : null });
+  }
+  return uit;
+}
+// kosten: alleen met een bron (ontwerp § 6: een bedrag zonder onderbouwing tonen we niet); euro, ≥ 0
+function bedrag(x) { const s = String(x == null ? '' : x).trim(); if (!/^\d{1,7}(\.\d{1,2})?$/.test(s)) return null; return Number(s); }
+function kostenVan(t) {
+  const bron = tekstVeld(fmKop(t, 'kosten_bron'), 200);
+  const totaal = bedrag(fmKop(t, 'kosten_totaal')), pp = bedrag(fmKop(t, 'kosten_per_persoon'));
+  if (!bron || (totaal == null && pp == null)) return null;
+  return { totaal, per_persoon: pp, bron };
+}
+
 function dagen(van, tot) {
   if (!van || !tot) return null;
   const a = Date.parse(van + 'T00:00:00Z'), b = Date.parse(tot + 'T00:00:00Z');
@@ -133,7 +258,7 @@ function ontleed(t, rel, vandaag) {
   if (!i) return null;
   const besch = fmVeld(t, 'description');
   return Object.assign({ id: idVan(rel) }, i, { dagen: dagen(i.van, i.tot), jaar: i.van ? i.van.slice(0, 4) : null, stand: stand(i.van, i.tot, vandaag || ''),
-    soort: soortVan(t), deelnemers: deelnemersVan(t), beschrijving: besch ? String(besch).slice(0, MAX_BESCHRIJVING) : '' });
+    soort: soortVan(t), deelnemers: deelnemersVan(t), vervoer: vervoerVan(t), beschrijving: besch ? String(besch).slice(0, MAX_BESCHRIJVING) : '' });
 }
 
 /*
@@ -187,10 +312,11 @@ function maak(o) {
     const t = lees(rel);
     const r = t == null ? null : ontleed(t, rel, vandaag());
     if (!r) return { status: 404, body: { ok: false, fout: 'onbekende reis' } };
-    return { status: 200, body: { ok: true, reis: Object.assign(r, { pad: rel, tekst: zonderFrontmatter(t), memorylane: koppeling(rel) }) } };
+    return { status: 200, body: { ok: true, reis: Object.assign(r, { verblijf: verblijfVan(t), plekken: plekkenVan(t), kosten: kostenVan(t),
+      pad: rel, tekst: zonderFrontmatter(t), memorylane: koppeling(rel) }) } };
   }
   function info() { return Object.assign({ aan: true }, laatst || { op: null, reizen: null, komend: null, onleesbaar: null }); }
   return { paden, reisInfo, lijst, reis, info };
 }
 
-module.exports = { maak, ontleed, idVan, soortVan, deelnemersVan, fmVeld, fmLijst, REIS_MAP, SOORTEN, SOORT_REGELS, ID_RE, MAX_TITEL };
+module.exports = { maak, ontleed, idVan, soortVan, deelnemersVan, vervoerVan, verblijfVan, plekkenVan, kostenVan, fmObjLijst, flowMap, fmVeld, fmLijst, VERVOER, REIS_MAP, SOORTEN, SOORT_REGELS, ID_RE, MAX_TITEL };
