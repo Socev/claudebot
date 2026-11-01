@@ -86,6 +86,19 @@
  * pas als het archiveren van die mail gedaan is (n8n archiveert alleen met FACTUUR erop). Alleen met config.json statuslabels[postvak].ja
  * naast labelset2; nooit doktersmaten. Een mislukte zet komt terug (≤ STAP_POGINGEN), de stand staat in /health (mailman.factuurstap).
  *
+ * TWIJFEL INTERN, LABELS OP DE DRAAD (wv2196, 1-11-2026; David 13:13: "Het label TWIJFEL hoef ik niet te zien … Intern mag je best een
+ * lijst "TWIJFEL" bijhouden … Als een label aan een mail gehangen wordt, moet het label trouwens aan de hele thread gehangen"). (1) labelPlan2
+ * zet TWIJFEL nooit meer in Gmail; de twijfel blijft intern (stroom twijfel, Werkstroom, correcties). Het vangnet (3 dagen → INTAKE) rekent
+ * vanaf het labelmoment van het besluit; bestaande TWIJFEL-labels gaan eraf via soort opruim (niet als David het zelf zette). (2) Zichtbare
+ * labels (DRAAD_LABELS) gaan bij de soorten DRAAD_SOORTEN op alle binnengekomen berichten van de draad (n8n leest de draad na en zet per
+ * bericht; nooit op verzonden mail, concept, spam of prullenbak), en een nieuw bericht krijgt de zichtbare labels die de draad al draagt
+ * (erf). Per bericht blijven: het wachtrijlabel AI/MailMan (de Mail Processor), UNREAD en INBOX (gelezen, archief) en de factuurreeks
+ * (FACTUUR …/Is_betaald): de Facturen-koerier zoekt label:FACTUUR has:attachment per bericht, op een antwoord met bijlage zou hij een
+ * niet-factuur ophalen. Wat David in een draad weghaalde (draad_niet) komt niet terug op de andere berichten; weghalen op de andere berichten
+ * alleen waar label_staat het label als MailMans eigen kent (draad_eraf; bij afgedaan elke vlag; review MOET 1). Labels op andere berichten
+ * van de draad tellen als MailMans eigen (bron mailman/keuze, keus 'draad': nooit een eigen route naar Intake). Eén draadactie per draad
+ * per ronde. Uit: config.json draad_uit[postvak] (dan weer per bericht).
+ *
  * DE RONDE (n8n, O.2): POST /mailman/start → per postvak de zoekvraag (venster uit de laatste geslaagde ronde) · /mailman/nieuw (alle id's
  * van de lijst, gepagineerd + volledig ja/nee) → de id's zonder besluit · /mailman/stap1 (kop, labels, bijlagen, privé ook tekst ≤ 4.000
  * tekens) → stap 0–3 + patiëntpoort, en de Jev-aanvragen · /mailman/stap2 (de Jev-antwoorden) → besluit · /mailman/gedaan.
@@ -105,7 +118,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-2.2';   // wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
+const VERSIE = 'mailman-2.3';   // wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -187,7 +200,12 @@ const SOCIAAL_DOMEINEN = ['linkedin.com', 'facebookmail.com', 'facebook.com', 'i
 const L2_LIJST_MAX = 5000;                         // berichten per labellijst; meer = afgekapt (niets veranderen voor dat label)
 const L2_VENSTER_MS = 13 * 24 * 3600 * 1000;       // n8n vraagt newer_than:14d; weg alleen beoordelen voor mail die zeker in de lijst had gestaan
 const AANBOD_EIGEN_MS = 3600 * 1000;               // aangeboden maar (nog) niet teruggemeld: tot 1 uur telt het als MailMans eigen actie
-const VANGNET_MS = 3 * 24 * 3600 * 1000;           // Twijfel zonder keuze: na 3 dagen INTAKE erbij (TWIJFEL blijft)
+const VANGNET_MS = 3 * 24 * 3600 * 1000;           // Twijfel zonder keuze: na 3 dagen INTAKE erbij (wv2196: gerekend vanaf het labelmoment)
+// wv2196: zichtbare labels die op de hele draad gaan (bij DRAAD_SOORTEN), en wat een nieuw bericht van de draad erft (TWIJFEL nooit meer erbij)
+const DRAAD_LABELS = ['INTAKE', 'NIEUWSBRIEF', 'SOCIAAL', 'OVERIG', 'TWIJFEL', 'TODO', 'ACTIE_DS', 'AGENDA', 'BEZORGING', 'SYSTEEM'];
+const ERF_LABELS = DRAAD_LABELS.filter(function (l) { return l !== 'TWIJFEL'; });
+const DRAAD_SOORTEN = ['besluit', 'keuze', 'vangnet', 'opruim', 'afgedaan'];
+const DRAAD_MAX = 20;                               // andere berichten per draad die n8n meeneemt
 // wv2036 statuslabels: de factuurstappen na FACTUUR/verwerkt, hun rang (alleen vooruit) en wat er per stap af mag (eerdere stappen uit de reeks)
 const STAP_LABEL = { in_sepa: 'FACTUUR/In_SEPA', is_betaald: 'FACTUUR/Is_betaald' };
 const STAP_RANG = { in_sepa: 1, is_betaald: 2 };
@@ -609,7 +627,7 @@ function todoNooit(m, instel) {
  * bij INTAKE/FACTUUR), SOCIAAL (tab Sociaal of een sociaal netwerk), de labels van de regel (veld labels) en de vlaggen. OVERIG alleen als er
  * geen andere categorie is. ACTIE_DS = Jev mens ≥ 0,8 én actie ≥ 0,8; TODO = Jev actie ≥ 0,8 én waarde ≥ 1,5 (ruwe schaal 0–3), niet bij
  * FACTUUR en niet naast ACTIE_DS; beide nooit bij Davids vaste uitzonderingen (todo_nooit). wv2189: bij FACTUUR geen ACTIE_DS van Jev als
- * alleen betalen gevraagd wordt (alleenBetalen). → { hoofd, labels }
+ * alleen betalen gevraagd wordt (alleenBetalen). wv2196: TWIJFEL is alleen nog hoofd (intern), nooit een label. → { hoofd, labels }
  */
 function labelPlan2(stroom, ruw, m, instel, regelLabels) {
   if (!stroom || !L2_HOOFD[stroom] || instel.gedeeld) return { hoofd: null, labels: [] };
@@ -623,7 +641,8 @@ function labelPlan2(stroom, ruw, m, instel, regelLabels) {
   if (ruw && ruw.mens >= 0.8 && ruw.actie >= 0.8 && !nooit && !(hoofd === 'FACTUUR' && alleenBetalen(ruw))) uit.add('ACTIE_DS');   // wv2189
   if (ruw && ruw.actie >= 0.8 && ruw.waarde >= 1.5 && !nooit && !uit.has('FACTUUR')) uit.add('TODO');
   if (uit.has('ACTIE_DS')) uit.delete('TODO');
-  return { hoofd, labels: L2_VAST.concat(L2_OPTIONEEL).filter(function (l) { return uit.has(l); }) };
+  // wv2196: de hoofdcategorie TWIJFEL blijft intern (hoofd), nooit als Gmail-label
+  return { hoofd, labels: L2_VAST.concat(L2_OPTIONEEL).filter(function (l) { return uit.has(l) && l !== 'TWIJFEL'; }) };
 }
 function zorgmail(m) {
   if (m.labels.includes(ZORG_LABEL)) return true;
@@ -637,7 +656,7 @@ function venster(laatsteGeslaagd, nuMs) {
 
 const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, eersteRegel, regelStroom, jevVragen,
   jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
-  labelset2Lees, toetsRegelLabels, labelPlan2, alleenBetalen, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
+  labelset2Lees, toetsRegelLabels, labelPlan2, alleenBetalen, DRAAD_LABELS, ERF_LABELS, DRAAD_SOORTEN, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
   authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL };
 
 // ─────────────────────────── startset (O.5) ───────────────────────────
@@ -747,7 +766,8 @@ function maak(o) {
     ['postvak', 'verkoop_archief_sinds TEXT'],   // wv1997 B7-V schakelaars (standaard uit)
     ['besluit', 'juist_regel INTEGER'], ['besluit', 'juist_tijd TEXT'],   // wv2029: Twijfel-keuze via een regel op de pijplijn (en wanneer)
     ['regel', 'labels TEXT'], ['postvak', 'labelset2_sinds TEXT'], ['postvak', 'overstap_klaar TEXT'], ['besluit', 'keuze_tijd TEXT'],
-    ['besluit', 'vangnet_tijd TEXT'], ['besluit', 'overstap_tijd TEXT'], ['besluit', 'overstap_poging INTEGER NOT NULL DEFAULT 0']]) {   // wv2033 B8 labelset 2
+    ['besluit', 'vangnet_tijd TEXT'], ['besluit', 'overstap_tijd TEXT'], ['besluit', 'overstap_poging INTEGER NOT NULL DEFAULT 0'],   // wv2033 B8 labelset 2
+    ['aanbod', 'thread_id TEXT'], ['aanbod', 'erf TEXT']]) {   // wv2196 draadlabels
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
   function tx(f) {
@@ -1126,6 +1146,7 @@ function maak(o) {
     const c = config(), r = labelset2Lees(isObj(c.labelset2) ? c.labelset2[p.id] : null);
     return r.ok ? r : null;
   }
+  function draadAan(p) { const c = config(); return !(isObj(c.draad_uit) && c.draad_uit[p.id]); }   // wv2196
   function l2Live(p) { const s = l2(p); return s && p.stand === 'live' && liveMag(p).ok ? s : null; }
   function l2Start(p) {
     if (!p.labelset2_sinds) { const t = iso(); db.prepare('UPDATE postvak SET labelset2_sinds = ? WHERE id = ? AND labelset2_sinds IS NULL').run(t, p.id); p.labelset2_sinds = t; }
@@ -1150,6 +1171,21 @@ function maak(o) {
       .all(pv, id, new Date(nu() - AANBOD_EIGEN_MS).toISOString())) {
       let x = []; try { x = JSON.parse(a[kant]); } catch (e) { x = []; }
       if (Array.isArray(x) && x.includes(l)) return a.soort;
+    }
+    return null;
+  }
+  // wv2196: een zichtbaar label dat MailMan in het afgelopen uur op de hele draad zette of weghaalde (aanbod met thread_id) → de soort, anders null
+  function aanbodLijst(a, kant) {   // wv2196: erbij telt ook wat het bericht van de draad mocht erven (kolom erf)
+    let x = [], e = []; try { x = JSON.parse(a[kant]); } catch (er) { x = []; }
+    if (kant === 'erbij' && a.erf) { try { e = JSON.parse(a.erf); } catch (er) { e = []; } }
+    return (Array.isArray(x) ? x : []).concat(Array.isArray(e) ? e : []);
+  }
+  function aanbodDraad(pv, th, l, kant) {
+    if (!th || !DRAAD_LABELS.includes(l)) return null;
+    for (const a of db.prepare("SELECT soort, erbij, eraf, erf FROM aanbod WHERE postvak = ? AND thread_id = ? AND tijd >= ? AND (uitkomst IS NULL OR uitkomst = 'ok') ORDER BY id DESC")
+      .all(pv, th, new Date(nu() - AANBOD_EIGEN_MS).toISOString())) {
+      if (!DRAAD_SOORTEN.includes(a.soort)) continue;
+      if (aanbodLijst(a, kant).includes(l)) return a.soort;
     }
     return null;
   }
@@ -1257,11 +1293,14 @@ function maak(o) {
         for (const [id, th] of S) {
           const st = lsGet(pv, id, naam);
           if (st && !st.weg) { db.prepare('UPDATE label_staat SET gezien = ?, gezet = COALESCE(gezet, ?) WHERE id = ?').run(iso(), iso(), st.id); continue; }
-          const eigen = aanbodEigen(pv, id, naam, 'erbij');
+          const eigen0 = aanbodEigen(pv, id, naam, 'erbij');
+          const viaDraad = !eigen0 ? aanbodDraad(pv, th, naam, 'erbij') : null;   // wv2196: MailMan zette het op de draad
+          const eigen = eigen0 || viaDraad;
           // review B8a ZOU 7: een label dat terugkomt houdt zijn oude bron (tenzij MailMan het zelf weghaalde: dan zette David het terug)
           const oud = st && st.bron !== 'david' && st.weg_door !== 'mailman' ? st.bron : null;
           const bron = eigen ? (eigen === 'keuze' ? 'keuze' : 'mailman') : (oud || (basis ? 'voor' : 'david'));
           lsZet(pv, id, th, naam, bron);
+          if (viaDraad && bron !== 'david') db.prepare("UPDATE label_staat SET keus = 'draad' WHERE postvak = ? AND gmail_id = ? AND label = ? AND keus IS NULL").run(pv, id, naam);
           if (bron !== 'david') continue;
           tel.david_erbij++;
           if (!L2_CATEGORIE.includes(naam)) continue;
@@ -1276,7 +1315,7 @@ function maak(o) {
             .run(pv, id, b ? b.afzender_domein || null : null, plan.hoofd, naam, iso()).changes);
         }
         for (const st of weg) {
-          const door = aanbodEigen(pv, st.gmail_id, naam, 'eraf') ? 'mailman' : (naam === WACHTRIJ ? 'elders' : 'david');
+          const door = aanbodEigen(pv, st.gmail_id, naam, 'eraf') || aanbodDraad(pv, st.thread_id, naam, 'eraf') ? 'mailman' : (naam === WACHTRIJ ? 'elders' : 'david');
           lsWeg(pv, st.gmail_id, naam, door);
           if (door === 'david') tel.david_eraf++;
         }
@@ -1384,12 +1423,47 @@ function maak(o) {
     const acties = new Map(), aanbod = [], gelezenAangeboden = [], archiefPogingen = [], af = [];
     let wacht = 0;
     const tel = { besluit: 0, keuze: 0, vangnet: 0, route: 0, intrek: 0, opruim: 0, overstap: 0, archief: 0, factuurstap: 0, afgedaan: 0, afgedaan_schaduw: 0 };
+    const vlagPlan = function (eff, plan, b) { return plan.labels.includes('TODO') || plan.labels.includes('ACTIE_DS') || eff === 'twijfel' || vlagRij(b); };
     const vol = function () { return acties.size >= LABEL_ACTIES_MAX; };
     const mag = function (id, l, na) { return !!set.ids[l] && !lsHeeft(pv, id, l) && !lsDavidWeg(pv, id, l, na); };
+    // wv2196: bij DRAAD_SOORTEN gaan de zichtbare labels op de hele draad (n8n); één draadactie per draad per ronde, en wat David ergens in de
+    // draad weghaalde (draad_niet) zet n8n niet terug op de andere berichten
+    const draad = draadAan(p), drSlot = new Set();
+    const thVan = function (id) {
+      const b = besluitVan(pv, id);
+      if (b && b.thread_id) return b.thread_id;
+      const x = db.prepare('SELECT thread_id FROM label_staat WHERE postvak = ? AND gmail_id = ? AND thread_id IS NOT NULL LIMIT 1').get(pv, id);
+      return x ? x.thread_id : null;
+    };
     const voeg = function (id, soort, erbij, eraf) {
       if (acties.has(id) || vol()) return false;
-      acties.set(id, { gmail_id: id, erbij, eraf, soort });
-      aanbod.push({ id, soort, erbij, eraf });
+      const th = draad && DRAAD_SOORTEN.includes(soort) ? thVan(id) : null;
+      if (th && !ID_RE.test(th)) return false;
+      if (th && drSlot.has(th)) return false;   // de volgende ronde
+      const a = { gmail_id: id, erbij, eraf, soort };
+      if (th) {
+        drSlot.add(th);
+        a.thread_id = th; a.draad = true;
+        a.draad_niet = db.prepare("SELECT DISTINCT label FROM label_staat WHERE postvak = ? AND thread_id = ? AND weg IS NOT NULL AND weg_door = 'david'").all(pv, th)
+          .map(function (x) { return x.label; }).filter(function (l) { return DRAAD_LABELS.includes(l); });
+        // review wv2196 MOET 1: weghalen op de andere berichten alleen waar label_staat het label als MailMans eigen kent (bij afgedaan: elke
+        // vlag, want David archiveerde de draad); een label dat David zelf op een ander bericht zette blijft staan
+        a.draad_eraf = {};
+        for (const l of eraf.filter(function (x) { return DRAAD_LABELS.includes(x); })) {
+          a.draad_eraf[l] = db.prepare("SELECT gmail_id FROM label_staat WHERE postvak = ? AND thread_id = ? AND gmail_id != ? AND label = ? AND weg IS NULL AND gezet IS NOT NULL AND (? = 'afgedaan' OR bron != 'david') ORDER BY id LIMIT ?")
+            .all(pv, th, id, l, soort, DRAAD_MAX).map(function (x) { return x.gmail_id; });
+        }
+        // erf (alleen bij een nieuw besluit): zichtbare labels die een ander bericht van de draad nu draagt (label_staat), niet wat David hier of
+        // in de draad weghaalde, niet wat dit besluit al zet of weghaalt; OVERIG niet als de draad of het besluit een andere categorie heeft
+        if (soort === 'besluit') {
+          const andere = db.prepare('SELECT DISTINCT label FROM label_staat WHERE postvak = ? AND thread_id = ? AND gmail_id != ? AND weg IS NULL AND gezet IS NOT NULL').all(pv, th, id).map(function (x) { return x.label; });
+          let erf = ERF_LABELS.filter(function (l) { return andere.includes(l) && !erbij.includes(l) && !eraf.includes(l) && !a.draad_niet.includes(l) && mag(id, l); });
+          if (erf.concat(erbij).some(function (l) { return l !== 'OVERIG' && L2_CATEGORIE.includes(l); })) erf = erf.filter(function (l) { return l !== 'OVERIG'; });
+          a.erf = erf;
+        }
+      }
+      acties.set(id, a);
+      aanbod.push({ id, soort, erbij, eraf, th, erf: a.erf || null });
       tel[soort]++;
       return true;
     };
@@ -1408,7 +1482,7 @@ function maak(o) {
       const bt = b.besloten || b.aangemaakt;
       const vers = Date.parse(bt) >= nu() - GELEZEN_MS && !!sa.gelezen_sinds && String(bt) >= sa.gelezen_sinds && !b.gelezen_aangeboden;
       const gaat = wr || plan.labels.includes('FACTUUR') || (gem && plan.labels.includes('INTAKE'));
-      const vlag = plan.labels.includes('TODO') || plan.labels.includes('ACTIE_DS') || plan.labels.includes('TWIJFEL') || vlagRij(b);
+      const vlag = vlagPlan(eff, plan, b);   // wv2196: Twijfel nooit gelezen, ook zonder TWIJFEL-label
       const eraf = uitgang && sa.gelezen && vers && gaat && ['intake', 'factuur'].includes(eff) && !vlag ? ['UNREAD'] : [];
       if (!erbij.length && !eraf.length) { af.push({ k: 'besluit', id: b.id }); continue; }   // alles staat al (of David haalde het weg): af zonder Gmail-actie
       if (voeg(b.gmail_id, 'besluit', erbij, eraf) && eraf.length) gelezenAangeboden.push(b.id);
@@ -1430,7 +1504,12 @@ function maak(o) {
     }
     // vangnet
     const drie = new Date(nu() - VANGNET_MS).toISOString();
-    for (const b of db.prepare("SELECT b.* FROM besluit b JOIN label_staat s ON s.postvak = b.postvak AND s.gmail_id = b.gmail_id AND s.label = 'TWIJFEL' WHERE b.postvak = ? AND b.inhaal = 0 AND b.status = 'klaar' AND b.stroom = 'twijfel' AND b.juist IS NULL AND b.vangnet_tijd IS NULL AND b.namen_weg IS NULL AND s.weg IS NULL AND s.gezet IS NOT NULL AND s.gezet <= ? ORDER BY s.gezet LIMIT 100").all(pv, drie)) {
+    // wv2196: TWIJFEL staat niet meer in Gmail; de drie dagen tellen vanaf het (oude) TWIJFEL-label, anders vanaf het labelmoment van het besluit
+    // (alleen besluiten uit labelset 2, zonder wachtrijlabel). Haalde David TWIJFEL zelf weg, dan geen vangnet (zoals vóór wv2196).
+    for (const b of db.prepare(`SELECT b.* FROM besluit b LEFT JOIN label_staat s ON s.postvak = b.postvak AND s.gmail_id = b.gmail_id AND s.label = 'TWIJFEL' AND s.gezet IS NOT NULL
+      WHERE b.postvak = ? AND b.inhaal = 0 AND b.status = 'klaar' AND b.stroom = 'twijfel' AND b.juist IS NULL AND b.vangnet_tijd IS NULL AND b.namen_weg IS NULL
+        AND b.labels_gezet IS NOT NULL AND instr(b.labels_gezet, ?) = 0 AND (s.id IS NOT NULL OR b.labels_tijd >= ?) AND (s.id IS NULL OR s.weg IS NULL OR s.weg_door != 'david')
+        AND COALESCE(s.gezet, b.labels_tijd) <= ? ORDER BY COALESCE(s.gezet, b.labels_tijd), b.id LIMIT 100`).all(pv, '"' + WACHTRIJ + '"', p.labelset2_sinds || iso(), drie)) {
       if (vol()) break;
       // INTAKE staat al, David haalde het weg, of David koos zelf in Gmail een categorie (dat is ook een keuze)
       const koos = db.prepare("SELECT 1 FROM label_staat WHERE postvak = ? AND gmail_id = ? AND bron = 'david' AND weg IS NULL AND label IN ('" + L2_CATEGORIE.filter(function (c) { return c !== 'TWIJFEL'; }).join("', '") + "') LIMIT 1").get(pv, b.gmail_id);
@@ -1461,6 +1540,11 @@ function maak(o) {
       if (vol()) break;
       if (!teVaak(pv, x.gmail_id, 'opruim')) voeg(x.gmail_id, 'opruim', [], ['OVERIG']);
     }
+    // wv2196 opruim: TWIJFEL komt niet meer in Gmail; wat MailMan eerder zette gaat eraf (niet als David het zelf zette)
+    for (const x of db.prepare("SELECT gmail_id FROM label_staat WHERE postvak = ? AND label = 'TWIJFEL' AND weg IS NULL AND gezet IS NOT NULL AND bron != 'david' ORDER BY gezet, id LIMIT 100").all(pv)) {
+      if (vol()) break;
+      if (!acties.has(x.gmail_id) && !teVaak(pv, x.gmail_id, 'opruim')) voeg(x.gmail_id, 'opruim', [], ['TWIJFEL']);
+    }
     // overstap (eenmalig)
     let overstapOpen = 0;
     if (!p.overstap_klaar) {
@@ -1477,7 +1561,6 @@ function maak(o) {
         if (lab.includes(WACHTRIJ) && (!b.juist || b.juist === 'intake') && mag(b.gmail_id, 'INTAKE')) erbij.push('INTAKE');
         const todo = lsGet(pv, b.gmail_id, 'TODO');
         if (lab.includes('TODO') && ruw && ruw.mens >= 0.8 && !(stroomEffectief(b) === 'factuur' && alleenBetalen(ruw))) { if (mag(b.gmail_id, 'ACTIE_DS')) erbij.push('ACTIE_DS'); if (todo && !todo.weg && todo.gezet && todo.bron === 'mailman') eraf.push('TODO'); }
-        if (b.stroom === 'twijfel' && !b.juist && !lab.includes(WACHTRIJ) && mag(b.gmail_id, 'TWIJFEL')) erbij.push('TWIJFEL');
         if (!erbij.length && !eraf.length) { db.prepare('UPDATE besluit SET overstap_tijd = ? WHERE id = ?').run(iso(), b.id); overstapOpen--; continue; }
         if (n >= OVERSTAP_MAX || vol()) continue;
         if (voeg(b.gmail_id, 'overstap', erbij, eraf)) { n++; db.prepare('UPDATE besluit SET overstap_poging = overstap_poging + 1 WHERE id = ?').run(b.id); }
@@ -1542,7 +1625,7 @@ function maak(o) {
     tx(function () {
       const t = iso();
       for (const x of afgPogingen) for (const l of x.eraf) db.prepare('UPDATE vlag_plek SET pogingen = pogingen + 1 WHERE postvak = ? AND gmail_id = ? AND label = ? AND afgedaan IS NULL').run(pv, x.id, l);   // review KAN 1: alleen de aangeboden vlaggen
-      for (const a of aanbod) db.prepare('INSERT INTO aanbod (postvak, ronde, gmail_id, soort, erbij, eraf, tijd) VALUES (?, ?, ?, ?, ?, ?, ?)').run(pv, r.id, a.id, a.soort, JSON.stringify(a.erbij), JSON.stringify(a.eraf), t);
+      for (const a of aanbod) db.prepare('INSERT INTO aanbod (postvak, ronde, gmail_id, soort, erbij, eraf, tijd, thread_id, erf) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(pv, r.id, a.id, a.soort, JSON.stringify(a.erbij), JSON.stringify(a.eraf), t, a.th || null, a.erf && a.erf.length ? JSON.stringify(a.erf) : null);
       for (const id of gelezenAangeboden) db.prepare('UPDATE besluit SET gelezen_aangeboden = ? WHERE id = ?').run(t, id);
       for (const id of archiefPogingen) db.prepare('UPDATE besluit SET archief_poging = archief_poging + 1 WHERE id = ?').run(id);
       for (const x of stapPogingen) {   // een poging telt bij het aanbieden (ook als n8n niets terugmeldt); een nieuwe stap begint weer bij 1
@@ -1563,7 +1646,7 @@ function maak(o) {
    * is af; de toestand komt de volgende ronde opnieuw uit label_staat (behalve gelezen: dicht, één keer).
    */
   function gezet2(r, d) {
-    const pv = r.postvak, tel = { ok: 0, fout: 0, gelezen: 0, archief: 0, afgedaan: 0 }, telStap = { gezet: 0, fout: 0, overgeslagen: 0 };
+    const pv = r.postvak, tel = { ok: 0, fout: 0, gelezen: 0, archief: 0, afgedaan: 0, draad: 0, erf: 0 }, telStap = { gezet: 0, fout: 0, overgeslagen: 0 };
     tx(function () {
       for (const x of (Array.isArray(d.resultaten) ? d.resultaten : []).slice(0, LABEL_ACTIES_MAX * 2)) {
         if (!isObj(x) || !ID_RE.test(String(x.gmail_id || ''))) continue;
@@ -1572,6 +1655,31 @@ function maak(o) {
         if (!open.length) continue;
         const erbijN = (Array.isArray(x.erbij) ? x.erbij : []).map(String), erafN = (Array.isArray(x.eraf) ? x.eraf : []).map(String);
         const b = besluitVan(pv, id), th = b ? b.thread_id : null;
+        // wv2196: wat n8n op de andere berichten van de draad deed (draad) en wat dit bericht van de draad erfde (erf); alleen zichtbare labels
+        // uit het aanbod (erf: ERF_LABELS bij een besluit), alleen berichten die niet aantoonbaar in een andere draad zitten
+        const da = open.find(function (a) { return !!a.thread_id && DRAAD_SOORTEN.includes(a.soort); });
+        if (da) {
+          const dae = JSON.parse(da.erbij), daw = JSON.parse(da.eraf), dbron = da.soort === 'keuze' ? 'keuze' : 'mailman';
+          const keusDraad = function (sid, l) { if (l === 'INTAKE') db.prepare("UPDATE label_staat SET keus = 'draad' WHERE postvak = ? AND gmail_id = ? AND label = 'INTAKE' AND keus IS NULL").run(pv, sid); };
+          for (const y of (Array.isArray(x.draad) ? x.draad : []).slice(0, DRAAD_MAX)) {
+            const sid = isObj(y) ? String(y.gmail_id || '') : '';
+            if (!isObj(y) || y.ok !== true || !ID_RE.test(sid) || sid === id) continue;
+            const sb = besluitVan(pv, sid);
+            if (sb && sb.thread_id && sb.thread_id !== da.thread_id) continue;
+            let n = 0;
+            for (const l of (Array.isArray(y.erbij) ? y.erbij : []).map(String)) if (dae.includes(l) && DRAAD_LABELS.includes(l) && l !== 'TWIJFEL') { lsZet(pv, sid, da.thread_id, l, dbron); keusDraad(sid, l); n++; }
+            for (const l of (Array.isArray(y.eraf) ? y.eraf : []).map(String)) if (daw.includes(l) && DRAAD_LABELS.includes(l)) {
+              lsWeg(pv, sid, l, 'mailman'); n++;
+              if (da.soort === 'afgedaan' && VLAG_LABELS.includes(l)) db.prepare('UPDATE vlag_plek SET afgedaan = ? WHERE postvak = ? AND gmail_id = ? AND label = ? AND afgedaan IS NULL').run(iso(), pv, sid, l);
+            }
+            if (n) tel.draad++;
+          }
+          let daf = []; try { daf = da.erf ? JSON.parse(da.erf) : []; } catch (e) { daf = []; }
+          if (x.ok === true && da.soort === 'besluit') for (const l of (Array.isArray(x.erf) ? x.erf : []).map(String).slice(0, ERF_LABELS.length)) {
+            if (!ERF_LABELS.includes(l) || !Array.isArray(daf) || !daf.includes(l) || dae.includes(l)) continue;
+            lsZet(pv, id, da.thread_id, l, 'mailman'); keusDraad(id, l); tel.erf++;
+          }
+        }
         for (const a of open) {
           const ae = JSON.parse(a.erbij), aw = JSON.parse(a.eraf);
           const erbij = ae.filter(function (l) { return erbijN.includes(l); }), eraf = aw.filter(function (l) { return erafN.includes(l); });
@@ -1580,6 +1688,9 @@ function maak(o) {
             // review wv2036 ZOU 2: een factuurstap die de grens overslaat (prullenbak, verzonden, al verder) is geen labelfout
             if (a.soort === 'factuurstap') { if (x.overgeslagen === true) telStap.overgeslagen++; else { telStap.fout++; tel.fout++; } continue; }
             if (a.soort === 'afgedaan') { if (x.overgeslagen !== true) tel.fout++; continue; }   // wv2189: overgeslagen (terug in de inbox, nieuwsbrief) is geen labelfout
+            // wv2196: opruim die de grens overslaat (het label staat er al niet meer, of de mail is verzonden/weg) is geen fout: niet eindeloos opnieuw;
+            // staat het label toch nog in Gmail, dan zet de volgende labelstaat het terug (bron blijft MailMan) en komt de opruim terug
+            if (a.soort === 'opruim' && x.overgeslagen === true) { for (const l of aw) if (l === 'TWIJFEL' || l === 'OVERIG') lsWeg(pv, id, l, 'elders'); continue; }
             if (x.overgeslagen === true && a.soort === 'besluit' && b && !ae.length) db.prepare("UPDATE besluit SET labels_gezet = '[]', labels_tijd = ? WHERE id = ? AND labels_gezet IS NULL").run(iso(), b.id);
             else tel.fout++;
             continue;
