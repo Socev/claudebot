@@ -85,6 +85,16 @@ jobs:
           fi
           echo "paypal-bewijs.js: alleen lokaal."
 
+      # ecobank-mail.js (wv2202): de Ecobank-laag leest mailtekst (gegeven, geen opdracht) en schrijft alleen in de transactiedatabase.
+      - name: ecobank-mail.js moet lokaal blijven
+        if: ${{ !cancelled() }}
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' ecobank-mail.js)
+          if echo "$C" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|\bfetch\s*\(|process\.binding|import\("; then
+            echo "::error::ecobank-mail.js laadt een netwerk- of procesmodule; de Ecobank-laag moet lokaal blijven"; exit 1
+          fi
+          echo "ecobank-mail.js: alleen lokaal."
+
       # paypal-zakelijk-lezer.js (wv2056): de sleutel van PayPal zakelijk kan technisch ook terugbetalen en innen (PayPal laat "Accept
       # payments" niet uitzetten). Davids Ja (30-10-2026) geldt alleen als de pod niets anders aanroept dan POST /v1/oauth2/token en GET
       # /v1/reporting/transactions: één fetch, altijd achter padToets, geen module, geen ander PayPal-pad. facturen-paypal.js blijft lokaal.
@@ -278,6 +288,7 @@ jobs:
           t test/bank-archief.sh
           t test/vaste-lasten-ronde.sh   # wv776: maandronde vaste lasten (binnenblok vault, poort nieuwste post, box 1× per maand per reden)
           t test/paypal-laag.sh
+          t test/ecobank-laag.sh
           t test/bank-pot.sh   # wv786: POT-rekening afgescheiden van privé, indeling zonder taalmodel
           t test/financien-app.sh   # wv771: App Financiën — veld-allowlist, signalen, opzeglinks met host-allowlist
           TOETS_NU=2026-11-03T10:00:00Z t test/financien-app.sh   # wv1044: ook op dag 1–9 van een maand (een toetspost in de toekomst schoof de peildag op)

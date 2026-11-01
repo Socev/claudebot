@@ -11009,7 +11009,7 @@ async function appFinancien(req, res, a) {
     return appWeiger(res, 503, oud ? 'Financiën wordt net bijgewerkt; probeer het over een paar minuten' : 'de cijfers zijn nu niet te lezen; probeer het zo opnieuw', oud ? 'financien oud' : 'financien fout');
   }
   const d = {};
-  ['peildatum', 'maand', 'deze_maand', 'vorige_maand', 'verloop', 'vaste_lasten', 'buffer', 'stroom', 'paypal', 'signalen', 'links', 'fouten'].forEach(function (k) { d[k] = j[k] === undefined ? null : j[k]; });
+  ['peildatum', 'maand', 'deze_maand', 'vorige_maand', 'verloop', 'vaste_lasten', 'buffer', 'stroom', 'paypal', 'signalen', 'links', 'fouten', 'gambia'].forEach(function (k) { d[k] = j[k] === undefined ? null : j[k]; });   // wv2202: + gambia
   if (typeof secondbrainFinPagina === 'function') secondbrainFinPagina(d);   // wv832: link naar de vaultpagina (koppeltabel)
   appFinCache = Array.isArray(d.fouten) && d.fouten.length ? null : { op: nu, d: d };   // half overzicht niet bewaren (Fable diffreview #4)
   return appStuur(res, 200, appFinSamen({ ok: true, vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }, d, appFinVault(nu)));   // wv1337: + vault
@@ -20452,9 +20452,10 @@ function smalRoute(req, res) {
 const BANK_SCRIPT = process.env.BANK_SCRIPT || path.join(__dirname, 'bank-lezer.js');
 const BANK_DIR = process.env.BANK_DIR || '/opt/data/bank';
 const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', 'saldo', 'transacties', 'toestemming', 'label',
-  'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'ontkoppel'];
+  'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'gambia', 'ecobank-ronde', 'ontkoppel'];
 const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'verrijk-open', 'verrijk-zet',
   'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'geld-briefing',   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
+  'gambia', 'ecobank-bekend', 'ecobank-bij',   // wv2202: de Ecobank-laag leest alleen de database
   'pot-afschrift-maanden', 'pot-afschrift', 'pot-datahub-invoer'];   // wv787 (wv815: pot-datahub-invoer alleen voor potDatahubRonde): alleen voor de App-routes en de maandronde (niet in BANK_OPDRACHTEN: niet via /smal/bank)
 const BANK_TERUG_PER_UUR = 30;
 const bankTerugTijden = [];
@@ -20614,6 +20615,14 @@ async function bankSmal(d) {
     schrijfLog(nu() + ' bank ' + velden({ opdracht: 'paypal-ronde', ok: !!r.ok, mk: true, gelezen: r.gelezen, nieuw: r.nieuw }));
     return { status: 200, j: r };
   }
+  // wv2202: de Ecobank-ronde met historie (van=…) alleen voor de machinekamer; de vaste ronde loopt na de bank-ronde
+  if (opdracht === 'ecobank-ronde') {
+    if (!machinekamer) return { status: 403, j: { ok: false, fout: 'ecobank-ronde alleen vanuit de machinekamer' } };
+    if (d.van != null && !(typeof d.van === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d.van) && d.van >= '2015-01-01')) return { status: 400, j: { ok: false, fout: 'van: JJJJ-MM-DD' } };
+    const r = await ecobankRonde({ van: d.van || null });
+    schrijfLog(nu() + ' bank ' + velden({ opdracht: 'ecobank-ronde', ok: !!r.ok, mk: true, gelezen: r.gelezen, nieuw: r.nieuw, niet_uitgelezen: r.niet_uitgelezen, fout: r.ok ? undefined : r.fout }));
+    return { status: 200, j: r };
+  }
   // Begint met een letter of cijfer: een leidende '--' zou in het kind als optie gelezen worden (Fable wv680 #4).
   const ref = function (v) { return typeof v === 'string' && /^[\p{L}\p{N}][\p{L}\p{N} .\-_]{0,63}$/u.test(v.trim()) ? v.trim() : null; };
   const datum = function (v) { return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null; };
@@ -20651,6 +20660,16 @@ async function bankSmal(d) {
     for (const k of ['van', 'tot', 'maand']) {
       if (d[k] == null || d[k] === '') continue;
       const v = k === 'maand' ? (typeof d[k] === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(d[k]) ? d[k] : null) : datum(d[k]);
+      if (v == null) return { status: 400, j: { ok: false, fout: k + ' ongeldig' } };
+      args.push('--' + k, v);
+    }
+  }
+  if (opdracht === 'gambia') {   // wv2202
+    for (const k of ['van', 'tot', 'rekening', 'zoek', 'max']) {
+      if (d[k] == null || d[k] === '') continue;
+      const w = String(d[k]).trim();
+      const v = k === 'max' ? (/^\d{1,3}$/.test(w) ? w : null) : k === 'rekening' ? (/^(GMD|EUR|\d{4})$/i.test(w) ? w.toUpperCase() : null)
+        : k === 'zoek' ? (/^[\p{L}\p{N}][\p{L}\p{N} .,&'()\-_/]{0,39}$/u.test(w) ? w : null) : datum(w);
       if (v == null) return { status: 400, j: { ok: false, fout: k + ' ongeldig' } };
       args.push('--' + k, v);
     }
@@ -20699,7 +20718,7 @@ async function bankSmal(d) {
   if (opdracht === 'ontkoppel') { if (typeof d.sessie !== 'string' || !/^[A-Za-z0-9-]{8,80}$/.test(d.sessie)) return { status: 400, j: { ok: false, fout: 'sessie ongeldig' } }; args.push(d.sessie); }
   const r = await bankKind(args, null, opdracht === 'historie' ? 1800000 : undefined);   // historie: 19 rekeningen × pagina's à 1,1 s
   const j = r.j;
-  if (['transacties', 'saldo', 'rekeningen', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'paypal', 'paypal-diensten'].indexOf(opdracht) >= 0) j.let_op_bron = BANK_LET_OP;   // wv683: ook rekeningnamen zijn tekst van derden
+  if (['transacties', 'saldo', 'rekeningen', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'paypal', 'paypal-diensten', 'gambia'].indexOf(opdracht) >= 0) j.let_op_bron = BANK_LET_OP;   // wv683: ook rekeningnamen zijn tekst van derden
   if (opdracht === 'archief') j.verrijk_ai = bankVerrijkStand();   // wv687: alleen aantallen en tijden
   schrijfLog(nu() + ' bank ' + velden({ opdracht: opdracht, ok: !!j.ok, code: r.code, mk: machinekamer || undefined }));
   return { status: 200, j: j };
@@ -20890,6 +20909,9 @@ async function bankRonde() {
   try { const p = await paypalNaBankRonde(); uit.paypal = { ok: p.ok, gevonden: p.gevonden, gelezen: p.gelezen, nieuw: p.nieuw, niet_uitgelezen: p.niet_uitgelezen,
     gekoppeld: p.koppeling ? p.koppeling.een_op_een + p.koppeling.samengesteld : undefined, fout: p.ok ? undefined : p.fout }; }
   catch (e) { logError('paypal-ronde', e); uit.paypal = { ok: false, fout: 'paypal-ronde faalde in de pod' }; }
+  // wv2202: nieuwe Ecobank-transactiemails (Gambia) inlezen; alleen aantallen naar n8n, een fout raakt de bank-ronde niet
+  try { const e = await ecobankNaBankRonde(); uit.ecobank = { ok: e.ok, gevonden: e.gevonden, nieuw: e.nieuw, niet_uitgelezen: e.niet_uitgelezen, fout: e.ok ? undefined : e.fout }; }
+  catch (e) { logError('ecobank-ronde', e); uit.ecobank = { ok: false, fout: 'ecobank-ronde faalde in de pod' }; }
   // wv776: vanaf de 3e de vaste-lastentabel van de vorige maand in de vault (één keer per maand); alleen aantallen naar n8n, een fout raakt de ronde niet
   try {
     const v = await vasteLastenRonde();
@@ -21300,6 +21322,108 @@ async function paypalNaBankRonde() {
   }
   schrijfLog(nu() + ' bank ' + velden({ opdracht: 'paypal-ronde', ok: !!r.ok, gevonden: r.gevonden, gelezen: r.gelezen, nieuw: r.nieuw, niet_uitgelezen: r.niet_uitgelezen,
     samengevoegd: (r.bewaard && r.bewaard.samengevoegd) || undefined, afgekapt: r.afgekapt, fout: r.ok ? undefined : r.fout, hartslag: r.hartslag }));
+  return r;
+}
+// ── wv2202: Ecobank-laag (Gambia) ─────────────────────────────────────────────────────────────────────────────
+// WAAROM. David (1-11-2026): de Ecobank-mails "InApp Notification - Transaction Notification on A/C" bijhouden en daaruit het saldo van
+// zijn twee Gambiaanse rekeningen (EUR en GMD). Ecobank heeft geen koppeling; elke mutatie geeft een mail met bedrag en saldo erna.
+// HOE. Zelfde route als de PayPal-laag: mail_zoeken + mail_lezen van het lees-luik (alleen lezen), ecobank-mail.js leesMail (vaste regels,
+// geen taalmodel), bank-lezer.js ecobank-bij bewaart in de transactiedatabase (tabel ecobank_tx). Alleen nieuwe mails worden geopend.
+// Ronde: na elke bank-ronde (07:00 en 18:00) de laatste ECOBANK_RONDE_DAGEN dagen; historie alleen machinekamer (bank.py ecobank-ronde van=…).
+// Niets wordt gelabeld, gelezen gemarkeerd of gearchiveerd; er gaat niets naar Ecobank. Uitkomst alleen als aantallen (log, n8n).
+const ECOBANK_QUERY = 'from:noreply@ecobank.com subject:"Transaction Notification on A/C"';
+const ECOBANK_RONDE_DAGEN = 5;
+const ECOBANK_BATCH = 60;   // posten per kindproces (± 400 bytes per post; stdin van bank-lezer.js is begrensd op 64 KB)
+let ecobankBezig = false;
+async function ecobankZoek(van, tot, uit, diepte) {
+  const j = await appAgendaApi({ actie: 'mail_zoeken', query: ECOBANK_QUERY + ' after:' + paypalGmailDag(van) + ' before:' + paypalGmailDag(tot), max: 25 });
+  const mails = (j && Array.isArray(j.mails)) ? j.mails : null;
+  if (!mails) throw new Error('mail_zoeken gaf geen lijst');
+  if (j.melding) uit.melding = true;   // lees-luik: "fout bij zoeken" / "deels mislukt" (Forbidden per item); volgende ronde opnieuw
+  const dagen = Math.round((Date.parse(tot) - Date.parse(van)) / 86400000);
+  if (mails.length >= 25 && dagen > 1 && (diepte || 0) < 8) {
+    const midden = paypalPlusDagen(van, Math.floor(dagen / 2));
+    await ecobankZoek(van, midden, uit, (diepte || 0) + 1);
+    await ecobankZoek(midden, tot, uit, (diepte || 0) + 1);
+    return;
+  }
+  if (mails.length >= 25) uit.afgekapt = true;
+  mails.forEach(function (m) { if (m && typeof m.id === 'string' && !uit.mails.has(m.id)) uit.mails.set(m.id, m); });
+}
+async function ecobankRonde(o) {
+  if (ecobankBezig) return { ok: false, fout: 'er loopt al een Ecobank-ronde' };
+  ecobankBezig = true;
+  const begin = Date.now();
+  try {
+    const E = require(path.join(__dirname, 'ecobank-mail.js'));
+    const vandaag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    const van = (o && o.van) || paypalPlusDagen(vandaag, -ECOBANK_RONDE_DAGEN);
+    const bek = await bankKind(['ecobank-bekend']);
+    if (!bek.j || bek.j.ok !== true || !Array.isArray(bek.j.mail_ids)) return { ok: false, fout: 'database niet leesbaar: ' + String((bek.j && bek.j.fout) || 'ecobank-bekend faalde').slice(0, 120) };
+    const bekend = new Set(bek.j.mail_ids);
+    const zoek = { mails: new Map(), afgekapt: false, melding: false };
+    let s = paypalPlusDagen(van, -1);
+    const eind = paypalPlusDagen(vandaag, 1);
+    while (s < eind) {
+      let e = paypalPlusDagen(s, 31);
+      if (e > eind) e = eind;
+      await ecobankZoek(s, e, zoek, 0);
+      s = e;
+    }
+    const passend = Array.from(zoek.mails.values()).filter(function (m) { return E.isMelding(m.onderwerp); });
+    const nieuw = passend.filter(function (m) { return !bekend.has(m.id); });
+    const posten = [], fouten = [];
+    let leesFout = 0;
+    for (const m of nieuw) {
+      let vol = null;
+      try { vol = await appAgendaApi({ actie: 'mail_lezen', id: m.id }); } catch (e) { leesFout++; continue; }   // volgende ronde opnieuw
+      if (!vol || typeof vol !== 'object' || typeof vol.tekst !== 'string' || vol.fout) { leesFout++; continue; }
+      const p = E.leesMail({ id: m.id, van: vol.van || m.van, onderwerp: vol.onderwerp || m.onderwerp, tekst: vol.tekst, datum: vol.datum || m.datum });
+      if (p.fout) fouten.push({ mail_id: m.id, fout: p.fout }); else posten.push(p);
+    }
+    const bewaard = { nieuw: 0, al_bekend: 0, geweigerd: 0 };
+    let stand = null;
+    const delen = [];
+    for (let i = 0; i < Math.max(posten.length, 1); i += ECOBANK_BATCH) delen.push(posten.slice(i, i + ECOBANK_BATCH));
+    for (let i = 0; i < delen.length; i++) {
+      const laatste = i === delen.length - 1;
+      const r = await bankKind(['ecobank-bij'], { posten: delen[i], fouten: laatste ? fouten : [], ronde: laatste && !zoek.afgekapt });
+      if (!r.j || r.j.ok !== true) return { ok: false, fout: 'bewaren faalde: ' + String((r.j && r.j.fout) || 'ecobank-bij faalde').slice(0, 120), gelezen: nieuw.length };
+      ['nieuw', 'al_bekend', 'geweigerd'].forEach(function (k) { bewaard[k] += (r.j.bewaard && r.j.bewaard[k]) || 0; });
+      if (laatste) stand = r.j.stand || null;
+    }
+    // Meer dan 25 mails op één dag: wat gelezen is staat erin, maar de ronde telt niet als geslaagd (review gpt-5.5 MOET 2)
+    if (zoek.afgekapt) return { ok: false, fout: 'meer dan 25 Ecobank-mails op één dag: niet alles gelezen', gevonden: passend.length, nieuw: bewaard.nieuw, afgekapt: true };
+    // alleen aantallen terug (geen bedragen, saldi, namen of mailinhoud)
+    return { ok: true, van: van, gevonden: passend.length, al_bekend: passend.length - nieuw.length, gelezen: nieuw.length - leesFout,
+      lees_fout: leesFout || undefined, niet_uitgelezen: fouten.length || undefined, afgekapt: zoek.afgekapt || undefined, melding: zoek.melding || undefined,
+      bewaard: bewaard, nieuw: bewaard.nieuw, stand: stand, duur_s: Math.round((Date.now() - begin) / 100) / 10 };
+  } catch (e) {
+    logError('ecobank-ronde', e);
+    return { ok: false, fout: String(e && e.message || e).replace(/\d{4,}/g, '#').slice(0, 160) };
+  } finally { ecobankBezig = false; }
+}
+// Na de bank-ronde. Een mail die niet uit te lezen is (Ecobank veranderde het formaat): één box-rij per dag, geen bericht aan David.
+async function ecobankNaBankRonde() {
+  const r = await ecobankRonde({});
+  schrijfLog(nu() + ' bank ' + velden({ opdracht: 'ecobank-ronde', ok: !!r.ok, gevonden: r.gevonden, gelezen: r.gelezen, nieuw: r.nieuw, niet_uitgelezen: r.niet_uitgelezen,
+    lees_fout: r.lees_fout, afgekapt: r.afgekapt, melding: r.melding, fout: r.ok ? undefined : r.fout }));
+  if (r.ok && r.niet_uitgelezen) {
+    try {
+      const vandaag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+      const staat = path.join(BANK_DIR, 'ecobank-box.json');
+      let laatst = null; try { laatst = JSON.parse(fs.readFileSync(staat, 'utf8')).dag; } catch (e) { laatst = null; }
+      if (laatst !== vandaag) {
+        const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+        const rij = '\n## [direct] ' + tijd + ' — Ecobank-mail niet uit te lezen #ecobank-gambia (pod, automatisch)\n' +
+          '- status: open\n- van: pod ecobankNaBankRonde (server.js, na de bank-ronde; hooguit 1× per dag)\n' +
+          '- gemeten: ' + r.niet_uitgelezen + ' Ecobank-transactiemail(s) pasten niet op het vaste formaat (ecobank-mail.js leesMail).\n' +
+          '- gevolg als er niets gebeurt: het Gambia-saldo in Financiën en bank.py gambia loopt achter.\n' +
+          '- voorstel: één mail bekijken (mail_lezen, cijfers gemaskeerd), KERN in ecobank-mail.js aanpassen, meta ecobank_niet_gelezen wissen en bank.py ecobank-ronde van=<datum>.\n';
+        if (ovisBoxRij(rij)) fs.writeFileSync(staat, JSON.stringify({ dag: vandaag }), { mode: 0o600 });
+      }
+    } catch (e) { logError('ecobank-box', e); }
+  }
   return r;
 }
 // ── wv776: vaste lasten maandelijks in de vault (idee 16, bouwplan privé-financiën § 3 en § 10) ──────────────────────────

@@ -51,6 +51,10 @@
  *   node bank-lezer.js paypal-diensten                                          vaste PayPal-diensten (ritme, bedrag, signalen)
  *   node bank-lezer.js paypal-bekend [--van]                                    alleen server.js: mail-id's die al bewaard zijn
  *   node bank-lezer.js paypal-bij (stdin {bewijzen, fouten, ronde})            alleen server.js: bewaren (idempotent) + koppelen
+ * Ecobank-laag (wv2202, ecobank-mail.js; de twee Gambiaanse rekeningen uit de transactiemails van Ecobank, eigen tabel ecobank_tx):
+ *   node bank-lezer.js gambia [--rekening GMD|EUR|1234] [--van] [--tot] [--zoek x] [--max N]   saldo per rekening + laatste posten
+ *   node bank-lezer.js ecobank-bekend                                           alleen server.js: mail-id's die al bewaard zijn
+ *   node bank-lezer.js ecobank-bij (stdin {posten, fouten, ronde})             alleen server.js: bewaren (idempotent op mail-id)
  * Historie voor het archief (alleen machinekamer via server.js):
  *   node bank-lezer.js historie bunq --volledig [--opgeheven] [--opnieuw]       alle bunq-posten ooit, per rekening onder eigen slot
  *   node bank-lezer.js historie abn-diep --van JJJJ-MM-DD [--rekening r]        ABN zo ver als de bank geeft (laat David er 2 over)
@@ -594,6 +598,9 @@ function archiefKlaar() {
 // wv765: de PayPal-laag; zelfde database, eigen tabel. Laadt pas als een PayPal-opdracht hem nodig heeft.
 let paypalObj;
 function paypalModule() { if (!paypalObj) paypalObj = require(path.join(__dirname, 'paypal-bewijs.js')); return paypalObj; }
+// wv2202: de Ecobank-laag; zelfde database, eigen tabel. Laadt pas als een Ecobank-opdracht hem nodig heeft.
+let ecobankObj;
+function ecobankModule() { if (!ecobankObj) ecobankObj = require(path.join(__dirname, 'ecobank-mail.js')); return ecobankObj; }
 function archiefFilter(a, s) {
   const o = a.opt, f = {};
   ['van', 'tot'].forEach(function (k) { if (o[k] != null) { if (!isDatum(o[k])) throw new Weigering('--' + k + ' als JJJJ-MM-DD'); f[k] = o[k]; } });
@@ -1146,6 +1153,23 @@ const opdrachten = {
     if (a.opt.van != null && !isDatum(a.opt.van)) throw new Weigering('--van als JJJJ-MM-DD');
     return { ok: true, mail_ids: paypalModule().bekend(x.a, a.opt.van) };
   },
+  // ── Ecobank-laag (wv2202): ecobank-mail.js op dezelfde database; geen bankopvraag, alleen de bewaarde mails ──
+  async gambia(a) {
+    const x = archiefOpen(), o = {};
+    ['van', 'tot'].forEach(function (k) { if (a.opt[k] != null) { if (!isDatum(a.opt[k])) throw new Weigering('--' + k + ' als JJJJ-MM-DD'); o[k] = a.opt[k]; } });
+    if (a.opt.rekening != null) o.rekening = String(a.opt.rekening).slice(0, 8);
+    if (a.opt.zoek != null) o.zoek = String(a.opt.zoek).slice(0, 40);
+    if (a.opt.max != null) o.max = a.opt.max;
+    return Object.assign({ ok: true, bron: 'ecobank-mail' }, ecobankModule().overzicht(x.a, o));
+  },
+  async 'ecobank-bekend'() { const x = archiefOpen(); return { ok: true, mail_ids: ecobankModule().bekend(x.a) }; },
+  async 'ecobank-bij'() {
+    const x = archiefOpen(), E = ecobankModule();
+    if (!Array.isArray(geheim.posten)) throw new Weigering('posten ontbreken');
+    const b = E.bij(x.a, geheim.posten.slice(0, 200), Array.isArray(geheim.fouten) ? geheim.fouten.slice(0, 200) : []);
+    if (geheim.ronde === true) E.metaZet(x.a, 'ecobank_ronde_op', new Date().toISOString());
+    return { ok: true, bewaard: b, stand: E.stand(x.a) };
+  },
   async 'paypal-bij'() {
     const x = archiefKlaar(), P = paypalModule();
     if (!Array.isArray(geheim.bewijzen)) throw new Weigering('bewijzen ontbreken');
@@ -1158,7 +1182,11 @@ const opdrachten = {
   async 'vaste-lasten'(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.vasteLasten(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^(maand|rekening):/.test(e.message)) throw new Weigering(e.message); throw e; } },
   // wv771: App Financiën — één alleen-lees overzicht, veld voor veld opgebouwd (financien-app.js); alleen voor GET /app/financien
   async 'app-financien'() { const x = archiefKlaar(); let P = null; try { P = paypalModule(); } catch (e) { P = null; }
-    return Object.assign({ ok: true, bron: 'archief' }, require(path.join(__dirname, 'financien-app.js')).bereken(x.A, x.a, { paypal: P })); },
+    const uit = Object.assign({ ok: true, bron: 'archief' }, require(path.join(__dirname, 'financien-app.js')).bereken(x.A, x.a, { paypal: P }));
+    // wv2202: tabblad Gambia (Ecobank uit de mails); een fout hier maakt alleen dat blok leeg
+    try { const g = ecobankModule().overzicht(x.a, { max: 30 }); uit.gambia = { rekeningen: g.rekeningen, transacties: g.transacties, ronde_op: g.ronde_op, let_op: g.let_op_ecobank }; }
+    catch (e) { uit.gambia = null; uit.fouten = (uit.fouten || []).concat(['gambia']); }
+    return uit; },
   // wv777: signalen voor het blok "Geld deze maand" in de briefing (financien-app.js briefing); alleen de pod roept dit aan, na de bank-ronde
   async 'geld-briefing'(a) {
     const o = {};
