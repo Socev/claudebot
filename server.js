@@ -312,7 +312,11 @@ let logOmvang = null;         // gecachete omvang van API_LOG
 // wv2133: de supervisor geeft het kind als stdout een fd op api.log. Wijst fd 1 bij de start naar hetzelfde bestand als API_LOG
 // (dev+ino), dan schreef schrijfLog elke regel twee keer (gemeten 31-10: 1006 van 2000). Eén keer meten bij de start: na een
 // rotatie wijst fd 1 naar .1 en mag de kopie daar ook niet heen. kubectl logs zag deze regels nooit (alleen de supervisor).
-const STDOUT_IS_API_LOG = (function () {
+// wv2155: `var`, geen const. schrijfLog draait al vóór deze regel (r. 186: release zonder mk-tekst.js, zoals de bootstrapkopie
+// in het image; r. 202 bij een dicht mk-geheugen); een const gaf daar een TDZ-ReferenceError buiten de try en het kind crashte
+// bij elke start (CI-rooktest deel B rood sinds 53b2b50). Vóór de meting is hij undefined: die vroege regels gaan dan alleen
+// naar stdout (API_LOG bestaat dan ook nog niet), zoals vóór wv2133. De meting zelf blijft hier bij het laden, vóór elke rotatie.
+var STDOUT_IS_API_LOG = (function () {
   try { const a = fs.fstatSync(1), b = fs.statSync(API_LOG); return a.isFile() && a.dev === b.dev && a.ino === b.ino; }
   catch (e) { return false; }
 })();
@@ -345,7 +349,7 @@ function schrijfLog(regel) {
     logOmvang += Buffer.byteLength(r, 'utf8');
     logTeller++;
   } catch (e) { /* nooit werpen vanuit het logpad */ }
-  if (!STDOUT_IS_API_LOG) { try { process.stdout.write(regel + '\n'); } catch (e) {} }
+  if (STDOUT_IS_API_LOG !== true) { try { process.stdout.write(regel + '\n'); } catch (e) {} }
 }
 
 function nu() {

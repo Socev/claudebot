@@ -320,6 +320,10 @@ jobs:
       - name: "studio (wv707, tab Studio fase 1)"
         if: ${{ !cancelled() }}
         run: bash test/studio.sh
+      # wv2155: schrijfLog draait al bij het laden van server.js (release zonder mk-tekst.js); geen TDZ-crash (kruisproef alleen lokaal).
+      - name: "schrijflog-vroeg (wv2155, logpad vóór de initialisatie)"
+        if: ${{ !cancelled() }}
+        run: bash test/schrijflog-vroeg.sh
       # Vault zonder symlinks (wv900): vault-veilig.js/vault_veilig.py — link op de doelnaam, map-symlink, hangende link, vaste tmp-namen,
       # fifo, ACL-masker, flock; potVzRegister uit server.js in een vm; geen vaste tmp-naam of append op een vaultpad meer in server.js.
       - name: "vault-veilig (wv900, geen symlink volgen in de vault)"
