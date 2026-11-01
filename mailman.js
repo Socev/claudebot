@@ -118,7 +118,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-2.3';   // wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
+const VERSIE = 'mailman-2.4';   // wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -196,6 +196,11 @@ const ACTIE_ANDERS_MIN = 0.8;
 const VLAG_LABELS = ['TODO', 'ACTIE_DS'];
 const VLAG_LIJSTEN = { 'TODO@inbox': ['TODO', 'inbox'], 'TODO@uit': ['TODO', 'uit'], 'ACTIE_DS@inbox': ['ACTIE_DS', 'inbox'], 'ACTIE_DS@uit': ['ACTIE_DS', 'uit'] };
 const AFGEDAAN_MAX = 20, AFGEDAAN_POGINGEN = 5, VLAG_PLEK_MS = 90 * 24 * 3600 * 1000;
+// wv2208 (David 1-11-2026): Ecobank-transactiemeldingen verwerkt de pod zelf (ecobank-mail.js, tabel ecobank_tx); in MailMan een vaste regel:
+// hoofdcategorie OVERIG, geen NIEUWSBRIEF (de mail heeft een afmeldkop, ook niet via de draad geërfd) en geen Jev (geen vlaggen op een
+// automatische bankmelding). Afzender exact, onderwerp aan het begin; gelezen markeren en archiveren blijven uit (grondwet 7).
+const ECOBANK_AFZENDER = 'noreply@ecobank.com';
+const ECOBANK_ONDERWERP = 'InApp Notification - Transaction Notification on A/C';
 const SOCIAAL_DOMEINEN = ['linkedin.com', 'facebookmail.com', 'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'tiktok.com', 'pinterest.com', 'nextdoor.nl', 'nextdoor.com'];
 const L2_LIJST_MAX = 5000;                         // berichten per labellijst; meer = afgekapt (niets veranderen voor dat label)
 const L2_VENSTER_MS = 13 * 24 * 3600 * 1000;       // n8n vraagt newer_than:14d; weg alleen beoordelen voor mail die zeker in de lijst had gestaan
@@ -472,8 +477,11 @@ function besluitRegels(m, instel) {
   const eigen = (instel.eigen || []).map(function (a) { return gmailKern(a, true); });
   if (eigen.includes(gmailKern(m.van_adres, true)) && !gemarkeerd) return { stap: 'buiten', stroom: null, reden: 'eigen adres' };
   const alias = instel.factuur_alias ? gmailKern(instel.factuur_alias, false) : '';
-  if (alt.factuur_alias !== false && alias && m.aan.some(function (a) { return gmailKern(a, false) === alias; })) return { stap: 'altijd', stroom: 'factuur', reden: 'factuur_alias' };
-  if (alt.ai_label !== false && gemarkeerd) return { stap: 'altijd', stroom: 'intake', reden: 'markering' };
+  // wv2208 (review MOET 1): de Ecobank-regel vóór factuuralias, draad en Davids regels; alleen Davids eigen _AI_-markering gaat vóór
+  const eco = ecobankMelding(m), mark = alt.ai_label !== false && gemarkeerd;
+  if (eco && !mark) return { stap: 'altijd', stroom: 'info', reden: 'ecobank' };
+  if (!eco && alt.factuur_alias !== false && alias && m.aan.some(function (a) { return gmailKern(a, false) === alias; })) return { stap: 'altijd', stroom: 'factuur', reden: 'factuur_alias' };
+  if (mark) return { stap: 'altijd', stroom: 'intake', reden: 'markering' };
   if (alt.draad !== false && instel.draadBekend) return { stap: 'altijd', stroom: 'intake', reden: 'draad' };
   const r = eersteRegel(instel.regels, m);
   if (r) return { stap: r.stap, stroom: regelStroom(r), regel_id: r.id, regel_versie: r.versie, reden: 'regel' };
@@ -615,6 +623,11 @@ function toetsRegelLabels(x) {
   }
   return { ok: true, l };
 }
+function ecobankMelding(m) {
+  if (!m) return false;
+  if (m.ecobank === true) return true;   // logboekrij met reden 'ecobank' (na 14 dagen is de afzender weg)
+  return String(m.van_adres || '').toLowerCase() === ECOBANK_AFZENDER && String(m.onderwerp || '').trim().startsWith(ECOBANK_ONDERWERP);
+}
 function sociaal(m) {
   if (m.tab === 'sociaal') return true;
   return SOCIAAL_DOMEINEN.some(function (d) { return m.van_domein === d || m.van_domein.endsWith('.' + d); });
@@ -633,7 +646,7 @@ function labelPlan2(stroom, ruw, m, instel, regelLabels) {
   if (!stroom || !L2_HOOFD[stroom] || instel.gedeeld) return { hoofd: null, labels: [] };
   const hoofd = L2_HOOFD[stroom];
   const uit = new Set([hoofd]);
-  if (m.afmeld && hoofd !== 'INTAKE' && hoofd !== 'FACTUUR') uit.add('NIEUWSBRIEF');
+  if (m.afmeld && hoofd !== 'INTAKE' && hoofd !== 'FACTUUR' && !ecobankMelding(m)) uit.add('NIEUWSBRIEF');   // wv2208
   if (sociaal(m)) uit.add('SOCIAAL');
   for (const l of regelLabels || []) if (L2_REGEL.includes(l)) uit.add(l);
   if (Array.from(uit).some(function (l) { return l !== 'OVERIG' && L2_CATEGORIE.includes(l); })) uit.delete('OVERIG');
@@ -656,7 +669,7 @@ function venster(laatsteGeslaagd, nuMs) {
 
 const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, eersteRegel, regelStroom, jevVragen,
   jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
-  labelset2Lees, toetsRegelLabels, labelPlan2, alleenBetalen, DRAAD_LABELS, ERF_LABELS, DRAAD_SOORTEN, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
+  labelset2Lees, toetsRegelLabels, labelPlan2, alleenBetalen, ecobankMelding, DRAAD_LABELS, ERF_LABELS, DRAAD_SOORTEN, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
   authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL };
 
 // ─────────────────────────── startset (O.5) ───────────────────────────
@@ -1006,7 +1019,7 @@ function maak(o) {
         tel[b.stap === 'jev' ? 'jev' : b.stap]++;
         if (pt.tegenhouden) tel.marker++;
         if (zorg) tel.zorg++;
-        const magJev = p.jev && !pt.tegenhouden && !zorg && b.stap !== 'buiten' && Object.keys(q).length > 0;
+        const magJev = p.jev && !pt.tegenhouden && !zorg && b.stap !== 'buiten' && b.reden !== 'ecobank' && Object.keys(q).length > 0;   // wv2208
         // Zonder Jev beslist de regel; de Jev-stap valt dan op Twijfel (doktersmaten: alleen geteld; marker: Intake houdt hem vast)
         let stroom = b.stroom, status = 'klaar', reden = b.reden;
         if (b.stap === 'buiten') stroom = null;
@@ -1458,6 +1471,8 @@ function maak(o) {
         if (soort === 'besluit') {
           const andere = db.prepare('SELECT DISTINCT label FROM label_staat WHERE postvak = ? AND thread_id = ? AND gmail_id != ? AND weg IS NULL AND gezet IS NOT NULL').all(pv, th, id).map(function (x) { return x.label; });
           let erf = ERF_LABELS.filter(function (l) { return andere.includes(l) && !erbij.includes(l) && !eraf.includes(l) && !a.draad_niet.includes(l) && mag(id, l); });
+          const eb = besluitVan(pv, id);   // wv2208: een Ecobank-melding erft geen NIEUWSBRIEF van een eerder bericht in de draad
+          if (eb && ecobankMelding(mailUitRij(eb))) erf = erf.filter(function (l) { return l !== 'NIEUWSBRIEF'; });
           if (erf.concat(erbij).some(function (l) { return l !== 'OVERIG' && L2_CATEGORIE.includes(l); })) erf = erf.filter(function (l) { return l !== 'OVERIG'; });
           a.erf = erf;
         }
@@ -2200,7 +2215,7 @@ function maak(o) {
     let aan = [], bij = [], lab = [];
     try { aan = JSON.parse(b.aan || '[]'); bij = JSON.parse(b.bijlagen || '[]'); lab = JSON.parse(b.labels || '[]'); } catch (e) { /* oud */ }
     return { id: b.gmail_id, draad: b.thread_id, van_adres: b.afzender || '', van_naam: b.van_naam || '', van_domein: b.afzender_domein || '', aan: aan || [],
-      onderwerp: b.onderwerp || '', labels: lab || [], tab: b.tab, afmeld: !!b.afmeld, bijlagen: (bij || []).map(function (x) { return { naam: '', mime: String(x) }; }) };
+      onderwerp: b.onderwerp || '', labels: lab || [], tab: b.tab, afmeld: !!b.afmeld, ecobank: b.reden === 'ecobank', bijlagen: (bij || []).map(function (x) { return { naam: '', mime: String(x) }; }) };
   }
   // Na 14 dagen alleen het domein en de tellingen (O.4)
   function opruim() {

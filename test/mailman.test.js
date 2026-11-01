@@ -2636,3 +2636,54 @@ test('wv2189 archief na een weggehaalde vlag: factuurmail met ACTIE_DS (oud besl
   assert.ok(gm.heeft(a.id, 'FACTUUR/verwerkt') && gm.heeft(b.id, 'FACTUUR/verwerkt'));
   assert.equal(gm.ber.get(b.id).plek, 'archief');
 });
+
+test('wv2208 Ecobank-transactiemelding: vaste regel → OVERIG, geen NIEUWSBRIEF (ook niet geërfd), geen Jev; gewone nieuwsbrief blijft NIEUWSBRIEF', () => {
+  const EB = 'Ecobank <noreply@ecobank.com>', OND = 'InApp Notification - Transaction Notification on A/C ***0000';
+  // zuiver: afzender exact, onderwerp aan het begin
+  const n = function (o) { return K.normaliseer(mail(o)); };
+  assert.equal(K.ecobankMelding(n({ van: EB, onderwerp: OND, afmeld: true })), true);
+  assert.equal(K.ecobankMelding(n({ van: 'NOREPLY@Ecobank.com', onderwerp: OND })), true, 'adres hoofdletterongevoelig');
+  assert.equal(K.ecobankMelding(n({ van: 'Ecobank <noreply@ecobank.com.voorbeeld.invalid>', onderwerp: OND })), false, 'afzender exact');
+  assert.equal(K.ecobankMelding(n({ van: 'Ecobank <alerts@ecobank.com>', onderwerp: OND })), false);
+  assert.equal(K.ecobankMelding(n({ van: EB, onderwerp: 'InApp Notification - Account Statement - XYZ' })), false, 'alleen transactiemeldingen');
+  assert.equal(K.ecobankMelding(n({ van: EB, onderwerp: 'Re: ' + OND })), false, 'onderwerp aan het begin');
+  const inst = { todo_nooit: ['doctolib'] };
+  assert.deepEqual(K.labelPlan2('info', null, n({ van: EB, onderwerp: OND, afmeld: true }), inst).labels, ['OVERIG'], 'Ecobank: OVERIG, geen NIEUWSBRIEF');
+  assert.deepEqual(K.labelPlan2('info', null, { van_adres: '', van_domein: 'ecobank.com', onderwerp: '', afmeld: true, ecobank: true }, inst).labels, ['OVERIG'], 'logboekrij na 14 dagen (reden ecobank)');
+  assert.deepEqual(K.labelPlan2('info', null, n({ van: 'Nieuws <nieuws@vereniging.invalid>', onderwerp: 'Nieuwsbrief', afmeld: true }), inst).labels, ['NIEUWSBRIEF'], 'gewone nieuwsbrief blijft');
+  assert.deepEqual(K.labelPlan2('info', null, n({ van: EB, onderwerp: 'InApp Notification - Account Statement', afmeld: true }), inst).labels, ['NIEUWSBRIEF'], 'andere Ecobank-mail: ongewijzigd');
+
+  // besluit: vaste regel vóór draad, geen Jev; Davids eigen _AI_-markering gaat vóór
+  const { mm, dir, gm } = b8Kamer();
+  const th = hexId();
+  const eb1 = mail({ van: EB, onderwerp: OND, afmeld: true, threadId: th, datum: klok - 9 * 3600000 });
+  const gev = mail({ van: EB, onderwerp: OND, afmeld: true, datum: klok - 8 * 3600000 });
+  const ai = mail({ van: EB, onderwerp: OND, afmeld: true, labels: ['INBOX', '_AI_'], datum: klok - 8 * 3600000 });
+  const nb = mail({ van: 'Nieuws <nieuws@vereniging.invalid>', onderwerp: 'Nieuwsbrief november', afmeld: true, datum: klok - 8 * 3600000 });
+  const fa = mail({ van: EB, onderwerp: OND, afmeld: true, aan: ALIAS, datum: klok - 8 * 3600000 });   // review MOET 1: ook aan de factuuralias
+  let gevraagd = [];
+  const d = draai(mm, 'gmail:david', [eb1, gev, ai, nb, fa], { gevolgd: [gev.threadId], jev: function (a) { gevraagd.push(a.gmail_id); return jevAntwoord(JEV_INFO); } });
+  assert.ok(!d.s1.j.jev.some(function (a) { return a.gmail_id === eb1.id || a.gmail_id === gev.id; }), 'Ecobank-melding niet naar Jev');
+  assert.ok(!d.s1.j.jev.some(function (a) { return a.gmail_id === fa.id; }));
+  for (const x of [eb1, gev, fa]) { const b = rij(mm, x.id); assert.equal(b.stap, 'altijd'); assert.equal(b.reden, 'ecobank'); assert.equal(b.stroom, 'info'); assert.equal(b.status, 'klaar'); }
+  assert.equal(rij(mm, ai.id).reden, 'markering', 'Davids _AI_ gaat vóór'); assert.equal(rij(mm, ai.id).stroom, 'intake');
+  assert.ok(gevraagd.includes(nb.id), 'gewone nieuwsbrief wel naar Jev');
+
+  // labels live: Ecobank OVERIG; nieuwsbrief NIEUWSBRIEF; een nieuwe melding in een draad met NIEUWSBRIEF erft die niet
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  for (const x of [eb1, gev, nb]) gm.voeg(x);
+  l2Ronde(mm, gm, [eb1.id, gev.id, nb.id]);
+  assert.ok(gm.heeft(eb1.id, 'OVERIG') && !gm.heeft(eb1.id, 'NIEUWSBRIEF'));
+  assert.ok(gm.heeft(gev.id, 'OVERIG') && !gm.heeft(gev.id, 'NIEUWSBRIEF'));
+  assert.ok(gm.heeft(nb.id, 'NIEUWSBRIEF') && !gm.heeft(nb.id, 'OVERIG'));
+  gm.zet(eb1.id, 'NIEUWSBRIEF');   // zoals de oude meldingen van vóór wv2208 (blijft staan: MailMan haalt NIEUWSBRIEF nooit weg)
+  l2Ronde(mm, gm, [eb1.id, gev.id, nb.id]);
+  const eb2 = mail({ van: EB, onderwerp: OND, afmeld: true, threadId: th, datum: klok - 60000 });
+  draai(mm, 'gmail:david', [eb2]);
+  gm.voeg(eb2);
+  const a = l2Ronde(mm, gm, [eb1.id, eb2.id]);
+  const x = perId(a.l.j.acties)[eb2.id];
+  assert.deepEqual(x.erbij, ['OVERIG']); assert.deepEqual(x.erf || [], [], 'geen geërfde NIEUWSBRIEF');
+  assert.ok(gm.heeft(eb2.id, 'OVERIG') && !gm.heeft(eb2.id, 'NIEUWSBRIEF'));
+  assert.ok(gm.heeft(eb1.id, 'NIEUWSBRIEF'), 'Davids/oude label blijft staan');
+});
