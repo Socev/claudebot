@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Toetst OVIS Tripper (wv2136, 1-11-2026): reizen.js (soort uit trip_soort of de tags, gambia vóór vakantie; gezelschap uit de kop;
 # komend bovenaan; id = hash van het pad, nooit een pad uit de vraag; geen symlink volgen), dezelfde reisInfo als MemoryLane had
-# (oude functie letterlijk vergeleken), en het server.js-blok (routes, audit zonder titel, /health alleen aantallen, uitrol-lijst).
+# (oude functie letterlijk vergeleken), de vaste kop van T2 (wv2152: vervoer, verblijf, plekken, kosten alleen met bron), en het server.js-blok (routes, audit zonder titel, /health alleen aantallen, uitrol-lijst).
 # Zonder sessie 401: test/socev-app-poort.sh § 21. Alleen verzonnen reizen en namen; raakt de echte vault niet. Gebruik: bash test/tripper.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -140,6 +140,53 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   vm.runInContext(src.slice(hb, he) + ';globalThis.__tr = { appTripper, tripperInfo };', ctx2, { filename: 'server.js#tripper2' });
   const n2 = gestuurd.length; await ctx2.__tr.appTripper({}, { _app: {} }, {}, 'GET /app/tripper/lijst');
   toets('8l zonder reizen.js in de release: 404 en aan=false', gestuurd[n2].s === 404 && ctx2.__tr.tripperInfo().aan === false);
+
+  // ── 9. T2 (wv2152): vaste kop — vervoer, verblijf (lijst van maps), plekken, kosten alleen met bron ──
+  zet('2025 - Vaste kop.md', reis(['type: reis', 'onderwerp: "Vaste kop"', 'periode: "2025-02-09 – 2025-02-15"', 'trip_soort: carbage-run',
+    'deelnemers: ["[[20_Prive/Familie/Kees Verzonnen|Kees]]", "Los Zonderpagina", "[[20_Prive/Familie/Kees Verzonnen|Kees]]"]',
+    'vervoer: [auto, ferry, raket, Auto]', 'verblijf:', '  - {plaats: "Proefstad", naam: "Hotel Komma, Dubbelepunt: ja", van: "2025-02-09", tot: "2025-02-10"}',
+    "  - {plaats: 'Tweede', naam: \"Camping \\\"Aanhalings\\\"\", van: 2025-02-10, tot: 2025-02-12}", '  - plaats: Blokstad', '    naam: Blokhotel', '    van: "2025-02-12"', '    tot: "2025-02-11"',
+    '  - {naam: "", plaats: ""}', '  - {plaats: "Kapotte datum", van: "12-02-2025", tot: "morgen"}',
+    'plekken:', '  - {naam: "Start", rol: start, lat: 55.60, lon: 13.00}', '  - {naam: "Zonder coord", rol: finish}', '  - {naam: "Halve coord", lat: 55.6}', '  - {naam: "Buiten bereik", lat: 91, lon: 10}',
+    '  - {rol: etappe, lat: 1, lon: 1}', 'kosten_totaal: 1928.90', 'kosten_bron: "volgens de pagina"', 'updated: 2026-11-01'], '## Gezelschap\n\n- [[20_Prive/X/Anders|Anders]]\n'));
+  zet('2025 - Kosten zonder bron.md', reis(['type: reis', 'onderwerp: "Kosten zonder bron"', 'periode: "2025-03-01 – 2025-03-02"', 'kosten_totaal: 500', 'vervoer:', '  - trein', '  - te-voet']));
+  zet('2025 - Per persoon.md', reis(['type: reis', 'onderwerp: "Per persoon"', 'periode: "2025-04-01 – 2025-04-02"', 'kosten_per_persoon: 305.13', 'kosten_bron: "Svens rapportage"', 'kosten_totaal: ongeveer 1500']));
+  const m2 = R.maak({ vault: V, vv: VV, vandaag: () => '2026-11-01' });
+  const L2 = m2.lijst().body.reizen, op2 = (t) => L2.find((r) => r.titel === t);
+  const vk = op2('Vaste kop');
+  toets('9a deelnemers: wikilink-naam én naam zonder pagina, dubbel één keer, frontmatter wint van de kop', JSON.stringify(vk.deelnemers) === JSON.stringify(['Kees', 'Los Zonderpagina']), vk.deelnemers);
+  toets('9b vervoer in de lijst: alleen vaste woorden, kleine letters, geen dubbele', JSON.stringify(vk.vervoer) === JSON.stringify(['auto', 'ferry']) && JSON.stringify(op2('Kosten zonder bron').vervoer) === JSON.stringify(['trein', 'te-voet']), vk.vervoer);
+  toets('9c lijst zonder verblijf, plekken of kosten (alleen in de reis)', !('verblijf' in vk) && !('plekken' in vk) && !('kosten' in vk));
+  const dk = m2.reis(vk.id).body.reis;
+  toets('9d verblijf: flow-maps met komma en dubbele punt in "…", \'…\', escape, kale datum, blokvorm; tot < van = null; leeg en kapotte datum',
+    JSON.stringify(dk.verblijf) === JSON.stringify([{ plaats: 'Proefstad', naam: 'Hotel Komma, Dubbelepunt: ja', van: '2025-02-09', tot: '2025-02-10' },
+      { plaats: 'Tweede', naam: 'Camping "Aanhalings"', van: '2025-02-10', tot: '2025-02-12' }, { plaats: 'Blokstad', naam: 'Blokhotel', van: '2025-02-12', tot: null },
+      { plaats: 'Kapotte datum', naam: '', van: null, tot: null }]), dk.verblijf);
+  toets('9e plekken: coördinaten alleen als beide geldig; zonder naam weg', JSON.stringify(dk.plekken) === JSON.stringify([{ naam: 'Start', rol: 'start', lat: 55.6, lon: 13 },
+    { naam: 'Zonder coord', rol: 'finish', lat: null, lon: null }, { naam: 'Halve coord', rol: null, lat: null, lon: null }, { naam: 'Buiten bereik', rol: null, lat: null, lon: null }]), dk.plekken);
+  toets('9f kosten met bron: totaal + bron', JSON.stringify(dk.kosten) === JSON.stringify({ totaal: 1928.9, per_persoon: null, bron: 'volgens de pagina' }), dk.kosten);
+  toets('9g kosten zonder bron = weggelaten (null)', m2.reis(op2('Kosten zonder bron').id).body.reis.kosten === null);
+  const pp = m2.reis(op2('Per persoon').id).body.reis.kosten;
+  toets('9h per persoon met bron; een totaal dat geen getal is valt weg', JSON.stringify(pp) === JSON.stringify({ totaal: null, per_persoon: 305.13, bron: 'Svens rapportage' }), pp);
+  toets('9i pagina zonder vaste kop: lege lijsten, kosten null', JSON.stringify([d.body.reis.verblijf, d.body.reis.plekken, d.body.reis.kosten, p.vervoer]) === JSON.stringify([[], [], null, []]), d.body.reis);
+  const veel = ['type: reis', 'periode: "2025-01-01 – 2025-01-02"', 'verblijf:'].concat(Array.from({ length: 80 }, (_, k) => '  - {plaats: "P' + k + '"}'));
+  toets('9j hooguit 60 verblijfsregels', R.verblijfVan(reis(veel)).length === 60);
+  toets('9k een volgend veld stopt de lijst (geen items van verblijf in plekken)', R.plekkenVan(reis(['verblijf:', '  - {plaats: "A"}', 'plekken: []', 'x:', '  - {naam: "B"}'])).length === 0
+    && R.verblijfVan(reis(['verblijf:', '  - {plaats: "A"}', 'plekken:', '  - {naam: "B"}'])).length === 1);
+
+  // review wv2152: onmogelijke datums, commentaar achter een regel (het sjabloon heeft dat), losse "-" in blokvorm
+  const sj = reis(['type: reis', 'periode: "2026-01-01 – 2026-01-02"', 'trip_soort: weekend          # vakantie | weekend', 'vervoer: [auto, trein]   # auto | vliegtuig',
+    'deelnemers: ["[[20_Prive/X/Lid Een#Kop|Lid]]", "Los # geen commentaar binnen aanhalingstekens"]   # David niet',
+    'verblijf:                     # per adres', '  - {plaats: "Plaats", naam: "Hotel #1", van: "2025-02-31", tot: "2025-13-01"}   # commentaar', '  # losse commentaarregel',
+    '  -', '    plaats: Losstreep', '    van: "2024-02-29"   # schrikkeldag', 'plekken:', '  - {naam: "Plaats", rol: bestemming, lat: 52.09, lon: 5.12}   # coördinaten',
+    'kosten_totaal: 1234.56        # alleen als de pagina', 'kosten_bron: "waar # het vandaan komt"   # zonder bron']);
+  toets('10a commentaar achter de regels van het sjabloon: soort, vervoer, deelnemers, verblijf, plekken en kosten blijven leesbaar',
+    R.soortVan(sj) === 'weekend' && JSON.stringify(R.vervoerVan(sj)) === JSON.stringify(['auto', 'trein']) && JSON.stringify(R.deelnemersVan(sj)) === JSON.stringify(['Lid', 'Los # geen commentaar binnen aanhalingstekens'])
+    && R.plekkenVan(sj).length === 1 && R.plekkenVan(sj)[0].lat === 52.09 && JSON.stringify(R.kostenVan(sj)) === JSON.stringify({ totaal: 1234.56, per_persoon: null, bron: 'waar # het vandaan komt' }),
+    [R.soortVan(sj), R.vervoerVan(sj), R.deelnemersVan(sj), R.plekkenVan(sj), R.kostenVan(sj)]);
+  toets('10b onmogelijke datum (31 feb, maand 13) = null; schrikkeldag blijft; losse "-" met sleutels eronder telt',
+    JSON.stringify(R.verblijfVan(sj)) === JSON.stringify([{ plaats: 'Plaats', naam: 'Hotel #1', van: null, tot: null }, { plaats: 'Losstreep', naam: '', van: '2024-02-29', tot: null }]), R.verblijfVan(sj));
+  toets('10c MemoryLane-lezing (reisInfo/fmVeld) ongemoeid: tags met # in een wikilink en zonder commentaar gelijk', R.fmVeld(sj, 'periode') === '2026-01-01 – 2026-01-02');
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

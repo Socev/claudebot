@@ -18546,6 +18546,7 @@ async function appMemorylane(req, res, a, s, route, d) {
 // met dezelfde functie als MemoryLane (§ 2 afspraak 1). Hier alleen de twee leesroutes achter de app-sessie:
 //   GET /app/tripper/lijst      alle reizen (komend eerst), per reis titel, periode, dagen, soort, namen, beschrijving, MemoryLane-koppeling
 //   GET /app/tripper/reis/<id>  één reis met de paginatekst; id = 12 hex van sha256(vaultpad), reizen.js zoekt het pad zelf op (nooit een pad uit de vraag)
+//                               sinds T2 (wv2152) ook vervoer (ook in de lijst), verblijf, plekken en kosten (alleen met bron) uit de vaste kop
 // De koppeling met MemoryLane (hid, aantal opgenomen stukken, album als status/aantal) komt uit memorylane-delen.js; Tripper maakt geen
 // herinnering of album. Alleen lezen; niets naar buiten of naar een taalmodel. Audit: de lijst stil, een reis als "tripper reis <id> <status>"
 // (geen titel of pad). /health.tripper: alleen aantallen van de laatste lijst. Ontbreekt reizen.js in de release: 404 en aan=false.
