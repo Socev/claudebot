@@ -86,6 +86,10 @@ const DL_PAD = '00_Systeem/Deadlines.md';
 const DL_ENTITEIT = { TG: 'Tolgaarde', GH: 'Groenhouten', HAGRO: 'HAGRO', POT: 'POT / POH-GGZ', HOLD: 'Holding', PHBV: 'Praktijkhouders BV', SEL: 'SEL', DBH: 'DBH',
   GHAWA: 'GHAWA', KM: 'Kostenmaatschap', SLOEL: 'SLOEL', PRIVE: 'Privé' };
 const NIVEAU_NAAM = ['geen', 'zwak', 'redelijk', 'hoog'];
+// wv2177 (Data Manager DM6): eigen knoop → schrijfwijze van `entiteit:` in het kennisbestand, zoals de Mail Processor schrijft en
+// secondbrain.knoop_vertaling kent (tolgaarde → TG, …); de code komt in entiteit_id:, de zekerheid in een eigen veld
+const KENNIS_ENTITEIT = { TG: 'tolgaarde', GH: 'groenhouten', HAGRO: 'hagro', POT: 'pot', HOLD: 'holding', PHBV: 'phbv', SEL: 'sel', DBH: 'dbh',
+  GHAWA: 'GHAWA-ECG', PRIVE: 'prive' };
 // entiteitslabel van de Mail Processor / Outlook → knoop-id van de eigen entiteit (alleen om te vergelijken, nooit als bewijs)
 const LABEL_KNOOP = { tolgaarde: 'TG', groenhouten: 'GH', hagro: 'HAGRO', pot: 'POT', holding: 'HOLD', phbv: 'PHBV', sel: 'SEL', dbh: 'DBH', ghawa: 'GHAWA', prive: 'PRIVE' };
 // postvak → eigen entiteit (het postvak van een praktijk is zijn context; Davids privé-Gmail ontvangt alles en zegt niets)
@@ -665,7 +669,8 @@ function bijlageNaam(stam, naam) {
 // YAML-veilige waarde (JSON-string is geldige YAML)
 function yv(v) { return JSON.stringify(v == null ? '' : String(v)); }
 /*
- * Kennisbestand (§ 12.4.4): kop met ovis_stuk, bron, afzender + kracht, soort, entiteit + kracht + bewijs, regel, ontvangen; daarna de lokale
+ * Kennisbestand (§ 12.4.4): kop met ovis_stuk, bron, afzender + kracht, soort, entiteit (schrijfwijze van de vault) + entiteit_id (knoop) +
+ * entiteit_zekerheid (kracht + bewijs; wv2177, vroeger alles in entiteit:), regel, ontvangen; daarna de lokale
  * tekst (mail en bijlagen, door de pod zelf gelezen; geen AI-samenvatting). x = { stuk_id, bron, profiel, onderwerp, van, van_naam, ontvangen,
  * soort, soort_kracht, afzender, afzender_naam, afzender_kracht, entiteit, entiteit_kracht, entiteit_bewijs, regel, jev, delen: [{ rol, naam, tekst }],
  * bijlagen: [{ naam, bestand }] }
@@ -675,7 +680,9 @@ function kennisInhoud(x) {
     'afzender: ' + yv((x.van_naam ? x.van_naam + ' ' : '') + (x.van ? '<' + x.van + '>' : '')),
     'afzender_herkend: ' + yv(x.afzender ? (x.afzender_naam || x.afzender) + ' (' + x.afzender_kracht + ')' : 'niet herkend'),
     'soort: ' + yv(x.soort + ' (' + x.soort_kracht + ')'),
-    x.systeem ? 'bestemming: "Systeem (voor Socev)"' : 'entiteit: ' + yv(x.entiteit + ' (' + x.entiteit_kracht + ', bewijs ' + (x.entiteit_bewijs || 'regels') + ')'),
+    ...(x.systeem ? ['bestemming: "Systeem (voor Socev)"'] : ['entiteit: ' + yv(KENNIS_ENTITEIT[x.entiteit] || x.entiteit),
+      ...(KENNIS_ENTITEIT[x.entiteit] ? ['entiteit_id: ' + x.entiteit] : []),
+      'entiteit_zekerheid: ' + yv(x.entiteit_kracht + ', bewijs ' + (x.entiteit_bewijs || 'regels'))]),
     'regel: ' + yv(x.regel || 'standaard'), 'ontvangen: ' + yv(x.ontvangen || '')];
   if (x.documentbron) kop.push('documentbron: ' + yv(x.documentbron));
   const geplaatst = (x.bijlagen || []).filter(function (b) { return b.bestand; }), niet = (x.bijlagen || []).filter(function (b) { return !b.bestand; });
@@ -847,7 +854,7 @@ function deadlineInvoegen(tekst, regel, stukId) {
 
 const K = { REGELVERSIE, KOP_MAX, orgDomein, adresVan, dkimUitslag, mailLees, bboxRegels, velden, letterlijk, ibanGeldig, soortBepaal, register, afzenderBepaal, entiteitBepaal, bestemmingen, normAlias, LABEL_KNOOP,
   regelVoorwaarden, regelPast, regelZoek, regelBestemmingen, herbereken, REGEL_LENZEN,
-  bestemmingenLive, jevOordeel, kennisNaam, bijlageNaam, kennisInhoud, slug, KENNIS_MAP, INDELING, JEV_DREMPEL,
+  bestemmingenLive, jevOordeel, kennisNaam, bijlageNaam, kennisInhoud, slug, KENNIS_MAP, KENNIS_ENTITEIT, INDELING, JEV_DREMPEL,
   systeemOordeelRegels, systeemOordeelModel, systeemNaam, systeemBoxRegel, systeemDavidRegel, stilUur, SYSTEEM_MAP, SYSTEEM_VOORSTEL, SYSTEEM_SOORTEN,
   factuurDelen, datumIso, ketenKenmerken, ibansIn, ketenKaart, ketenSleutel, deadlineRegel, deadlineInvoegen, DL_PAD };
 

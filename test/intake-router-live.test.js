@@ -85,7 +85,8 @@ test('live: gewone mail → Jev ná de marker, vangnet (model) kiest de entiteit
   assert.deepEqual(f, ['10_Zakelijk/Tolgaarde/raw_input/2026-10-28_1930_gmail_Overleg-roosters.md', '10_Zakelijk/Tolgaarde/raw_input/2026-10-28_1930_gmail_Overleg-roosters__Rooster-week-45.pdf']);
   const t = fs.readFileSync(path.join(E.vault, f[0]), 'utf8');
   assert.match(t, /^---\novis_stuk: stk_20261028_00000001\novis_router: router-1\.3\nbron: "gmail:david"\nonderwerp: "Re: Overleg roosters"\n/);
-  assert.match(t, /entiteit: "TG \(redelijk, bewijs model\)"/);
+  assert.match(t, /\nentiteit: "tolgaarde"\nentiteit_id: TG\nentiteit_zekerheid: "redelijk, bewijs model"\n/);   // wv2177 (DM6): schrijfwijze, code en zekerheid apart
+  assert.doesNotMatch(t, /entiteit: "TG/);
   assert.match(t, /bijlagen:\n  - "2026-10-28_1930_gmail_Overleg-roosters__Rooster-week-45.pdf"/);
   assert.match(t, /## Mailtekst\n\nBeste David/);
   assert.equal(E.db.prepare("SELECT status FROM bestemming WHERE stuk_id = ? AND lens = 'kennis'").get(id).status, 'bevestigd');
@@ -173,7 +174,7 @@ test('live: Jev boven de drempel → geen regel, geen model, twijfel; David kies
   assert.equal(k.status, 200, JSON.stringify(k.j)); assert.equal(k.j.uitkomst, 'uitgevoerd');
   const f = E.bestanden(); assert.equal(f.length, 1); assert.match(f[0], /^10_Zakelijk\/Groenhouten\/raw_input\//);
   const t = fs.readFileSync(path.join(E.vault, f[0]), 'utf8');
-  assert.match(t, /Let op: de injectiedetector/); assert.match(t, /entiteit: "GH \(david, bewijs keuze van David\)"/);
+  assert.match(t, /Let op: de injectiedetector/); assert.match(t, /\nentiteit: "groenhouten"\nentiteit_id: GH\nentiteit_zekerheid: "david, bewijs keuze van David"\n/);
   // ongeldige keuzes
   assert.equal((await E.r.appKeuze({ stuk_id: id, keuze: 'bestemming', lens: 'facturen' })).status, 409);
   assert.equal((await E.r.appKeuze({ stuk_id: id, keuze: 'bestemming', lens: 'kennis', entiteit: 'KM' })).status, 400);
@@ -263,6 +264,12 @@ test('kern: bestandsnaam, kop zonder modelsamenvatting, slug', () => {
   const t = K.kennisInhoud({ stuk_id: 'stk_20261028_00000009', bron: 'gmail:david', profiel: 'mail@1', onderwerp: 'Zeg "hoi"\nregel', soort: 'correspondentie', soort_kracht: 'redelijk',
     entiteit: 'TG', entiteit_kracht: 'hoog', delen: [{ rol: 'origineel', tekst: 'tekst' }] });
   assert.match(t, /onderwerp: "Zeg \\"hoi\\"\\nregel"/);   // JSON-escape: één regel, geldige YAML
+  assert.match(t, /\nentiteit: "tolgaarde"\nentiteit_id: TG\nentiteit_zekerheid: "hoog, bewijs regels"\n/);
+  // wv2177: elke eigen knoop met een raw_input-map heeft een schrijfwijze; een knoop zonder (KM) blijft de code, zonder entiteit_id
+  assert.deepEqual(Object.keys(K.KENNIS_MAP).filter((k) => !K.KENNIS_ENTITEIT[k]), []);
+  const km = K.kennisInhoud({ stuk_id: 'stk_20261028_00000009', bron: 'gmail:david', profiel: 'mail@1', onderwerp: 'x', soort: 'factuur', soort_kracht: 'hoog',
+    entiteit: 'KM', entiteit_kracht: 'david', entiteit_bewijs: 'keuze van David', delen: [] });
+  assert.match(km, /\nentiteit: "KM"\nentiteit_zekerheid: "david, bewijs keuze van David"\n/); assert.doesNotMatch(km, /entiteit_id/);
   assert.doesNotMatch(t, /samenvatting/);
 });
 
