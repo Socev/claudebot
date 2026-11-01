@@ -14,6 +14,9 @@
  *  - ontleed(tekst, rel): de hele reis. Titel uit onderwerp (anders de bestandsnaam), periode "JJJJ-MM-DD – JJJJ-MM-DD", soort uit
  *    trip_soort (frontmatter, T2) of anders uit de tags (SOORT_REGELS, eerste raak wint: gambia vóór vakantie), deelnemers uit
  *    deelnemers (frontmatter, T2) of anders de wikilinks onder "## Gezelschap" / "## Wie & hoe", description, paginatekst.
+ *  - T4 (wv2172): stand 'geannuleerd' bij status: geannuleerd (niet komend; reisInfo → null, dus geen MemoryLane-herinnering); bij een
+ *    komende reis te_regelen_open (lijst) en te_regelen {kop, tekst, open, klaar, afgekapt} (reis) uit ## Nog te regelen / ## Open…
+ *    / ## Nog niet bekend. De periode op de tijdlijn van OVIS Calendar zet socev-sb2 kalender_reizen.py (zelfde id).
  *  - id = de eerste 12 hex van sha256(vaultpad). Een reis opvragen gaat alleen op id: de pod zoekt het pad zelf op in paden(), dus een
  *    pad uit de vraag komt nooit bij het bestandssysteem.
  *  - T2 (wv2152, ontwerp § 4.1): vervoer (vaste woorden, VERVOER) in lijst en reis; alleen in de reis: verblijf [{plaats, naam, van, tot}],
@@ -292,7 +295,8 @@ function dagen(van, tot) {
   const a = Date.parse(van + 'T00:00:00Z'), b = Date.parse(tot + 'T00:00:00Z');
   return isNaN(a) || isNaN(b) || b < a ? null : Math.round((b - a) / 86400000) + 1;
 }
-function stand(van, tot, vandaag) {
+function stand(van, tot, vandaag, geannuleerd) {
+  if (geannuleerd) return 'geannuleerd';   // wv2172 (T4): status: geannuleerd in de pagina; niet onder Komend
   if (!van) return 'onbekend';
   if (van > vandaag) return 'gepland';
   return (tot || van) >= vandaag ? 'nu' : 'geweest';
@@ -303,12 +307,34 @@ function reisInfoUit(t, rel) {
   const data = periode.match(/\d{4}-\d{2}-\d{2}/g) || [];
   return { titel: (fmVeld(t, 'onderwerp') || path.basename(rel, '.md')).slice(0, MAX_TITEL), periode, van: data[0] || null, tot: data[data.length - 1] || null };
 }
+// wv2172 (T4): status: geannuleerd (commentaar erachter mag) — de pagina blijft, de reis telt niet meer als komend
+function geannuleerd(t) { return /^geannuleerd$/i.test(zonderCommentaar(fmVeld(t, 'status') || '').replace(/^['"]|['"]$/g, '').trim()); }
+// wv2172 (T4): "nog te regelen" = de tekst onder de eerste kop ## Nog te regelen / ## Te regelen / ## Open… / ## Nog niet bekend, tot de
+// volgende kop van niveau 1 of 2 (of een gegenereerd blok), hooguit MAX_REGELEN tekens (afgekapt op een regel, met "…"); open/klaar =
+// takenlijst-regels "- [ ]" en "- [x]". De pagina blijft de bron; de App toont dit alleen.
+const REGELEN_KOP = /^##[ \t]+((?:nog[ \t]+)?te[ \t]+regelen|open|nog[ \t]+niet[ \t]+bekend)\b[^\n]*$/im;
+const MAX_REGELEN = 4000;
+function teRegelenVan(t) {
+  const lijf = zonderFrontmatter(t);
+  const m = REGELEN_KOP.exec(lijf);
+  if (!m) return null;
+  const na = lijf.slice(m.index + m[0].length);
+  const eind = /^(?:#{1,2}[ \t]|<!-- sb:generated)/m.exec(na);
+  let tekst = (eind ? na.slice(0, eind.index) : na).trim();
+  let afgekapt = false;
+  if (tekst.length > MAX_REGELEN) { const k = tekst.lastIndexOf('\n', MAX_REGELEN); tekst = tekst.slice(0, k > 0 ? k : MAX_REGELEN).trimEnd() + '\n\n…'; afgekapt = true; }
+  const open = (tekst.match(/^[ \t]*[-*+][ \t]+\[ \]/gm) || []).length, klaar = (tekst.match(/^[ \t]*[-*+][ \t]+\[[xX]\]/gm) || []).length;
+  return { kop: m[0].replace(/^##[ \t]+/, '').trim().slice(0, 80), tekst, open, klaar, afgekapt };
+}
 // De hele reis uit een paginatekst (null als het geen reis is). vandaag 'JJJJ-MM-DD' voor gepland/nu/geweest.
 function ontleed(t, rel, vandaag) {
   const i = reisInfoUit(t, rel);
   if (!i) return null;
   const besch = fmVeld(t, 'description');
-  return Object.assign({ id: idVan(rel) }, i, { dagen: dagen(i.van, i.tot), jaar: i.van ? i.van.slice(0, 4) : null, stand: stand(i.van, i.tot, vandaag || ''),
+  const st = stand(i.van, i.tot, vandaag || '', geannuleerd(t));
+  const komend = st === 'gepland' || st === 'nu', tr = komend ? teRegelenVan(t) : null;
+  return Object.assign({ id: idVan(rel) }, i, { dagen: dagen(i.van, i.tot), jaar: i.van ? i.van.slice(0, 4) : null, stand: st,
+    te_regelen_open: tr ? tr.open : null,
     soort: soortVan(t), deelnemers: deelnemersVan(t), vervoer: vervoerVan(t), beschrijving: besch ? String(besch).slice(0, MAX_BESCHRIJVING) : '',
     punt: kaartPunt(plekkenVan(t)) });
 }
@@ -327,7 +353,8 @@ function maak(o) {
     return n.sort().map((x) => path.join(REIS_MAP, x));
   }
   function lees(rel) { try { return o.vv.lees(path.join(o.vault, rel), 'utf8', { max: MAX_PAGINA }); } catch (e) { return null; } }
-  function reisInfo(rel) { const t = lees(rel); return t == null ? null : reisInfoUit(t, rel); }
+  // wv2172: een geannuleerde reis is voor MemoryLane geen reis (wordt na de datum geen herinnering); Tripper toont hem wel
+  function reisInfo(rel) { const t = lees(rel); return t == null || geannuleerd(t) ? null : reisInfoUit(t, rel); }
   function koppeling(rel) {
     if (typeof o.koppel !== 'function') return null;
     try { return o.koppel(rel) || null; } catch (e) { return null; }
@@ -354,7 +381,7 @@ function maak(o) {
   function lijst() {
     const { v, uit, onleesbaar } = alle();
     const reizen = uit.map(({ rel, r }) => Object.assign({}, r, { memorylane: koppeling(rel) })).sort(sorteer);
-    laatst = { op: new Date().toISOString(), reizen: reizen.length, komend: reizen.filter((r) => r.stand !== 'geweest' && r.stand !== 'onbekend').length, onleesbaar };
+    laatst = { op: new Date().toISOString(), reizen: reizen.length, komend: reizen.filter((r) => r.stand === 'gepland' || r.stand === 'nu').length, onleesbaar };
     return { status: 200, body: { ok: true, vandaag: v, soorten: SOORTEN, reizen } };
   }
   function reis(id) {
@@ -365,11 +392,13 @@ function maak(o) {
     const r = t == null ? null : ontleed(t, rel, vandaag());
     if (!r) return { status: 404, body: { ok: false, fout: 'onbekende reis' } };
     const verblijf = verblijfVan(t), plekken = plekkenVan(t);
+    const komend = r.stand === 'gepland' || r.stand === 'nu';
     return { status: 200, body: { ok: true, reis: Object.assign(r, { verblijf, plekken, kosten: kostenVan(t), kaart: kaartVan(plekken, verblijf),
+      te_regelen: komend ? teRegelenVan(t) : null,
       pad: rel, tekst: zonderFrontmatter(t), memorylane: koppeling(rel) }) } };
   }
   function info() { return Object.assign({ aan: true }, laatst || { op: null, reizen: null, komend: null, onleesbaar: null }); }
   return { paden, reisInfo, lijst, reis, info };
 }
 
-module.exports = { maak, ontleed, idVan, soortVan, deelnemersVan, vervoerVan, verblijfVan, plekkenVan, kostenVan, kaartVan, kaartPunt, fmObjLijst, flowMap, fmVeld, fmLijst, VERVOER, REIS_MAP, SOORTEN, SOORT_REGELS, ID_RE, MAX_TITEL };
+module.exports = { maak, ontleed, idVan, teRegelenVan, geannuleerd, soortVan, deelnemersVan, vervoerVan, verblijfVan, plekkenVan, kostenVan, kaartVan, kaartPunt, fmObjLijst, flowMap, fmVeld, fmLijst, VERVOER, REIS_MAP, SOORTEN, SOORT_REGELS, ID_RE, MAX_TITEL };

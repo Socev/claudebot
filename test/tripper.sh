@@ -2,7 +2,7 @@
 # Toetst OVIS Tripper (wv2136, 1-11-2026): reizen.js (soort uit trip_soort of de tags, gambia vóór vakantie; gezelschap uit de kop;
 # komend bovenaan; id = hash van het pad, nooit een pad uit de vraag; geen symlink volgen), dezelfde reisInfo als MemoryLane had
 # (oude functie letterlijk vergeleken), de vaste kop van T2 (wv2152: vervoer, verblijf, plekken, kosten alleen met bron), de kaart van T3 (wv2163: verblijf op plaatsnaam
-# aan een plek, lijn, punt per reis), en het server.js-blok (routes, audit zonder titel, /health alleen aantallen, uitrol-lijst).
+# aan een plek, lijn, punt per reis), T4 (wv2172: nog te regelen bij een komende reis, geannuleerd), en het server.js-blok (routes, audit zonder titel, /health alleen aantallen, uitrol-lijst).
 # Zonder sessie 401: test/socev-app-poort.sh § 21. Alleen verzonnen reizen en namen; raakt de echte vault niet. Gebruik: bash test/tripper.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -214,6 +214,36 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     && dk3.kaart.verblijf_zonder_plek === 4 && dk3.kaart.lijn.length === 0, dk3.kaart);
   toets('11i lijst: punt per reis (of null), geen plekken of kaart in de lijst', op2('Vaste kop').punt && op2('Vaste kop').punt.lat === 55.6 && op2('Per persoon').punt === null
     && !('kaart' in op2('Vaste kop')) && !('plekken' in op2('Vaste kop')), op2('Vaste kop'));
+
+  // ── 12. T4 (wv2172): nog te regelen en geannuleerd ──
+  const V4 = path.join(W, 'vault4'), RM4 = path.join(V4, R.REIS_MAP);
+  fs.mkdirSync(RM4, { recursive: true });
+  const zet4 = (n, t) => fs.writeFileSync(path.join(RM4, n), t);
+  zet4('2027 - Gepland.md', reis(['type: reis', 'onderwerp: "Gepland"', 'periode: "2027-03-01 – 2027-03-05"'],
+    '# Gepland\n\n## Openbaar vervoer\n\nGeen kop voor regelen.\n\n## Nog te regelen\n\n- [ ] Verblijf boeken\n- [x] Vrij gevraagd\n  - [ ] sub telt mee\n* [ ] Hond naar oppas\n\n### Detail\n\nnog binnen\n\n## Verloop\n\nNiet meer.\n'));
+  zet4('2026 - Geweest.md', reis(['type: reis', 'onderwerp: "Geweest"', 'periode: "2026-07-01 – 2026-07-05"'], '## Nog te regelen\n\n- [ ] Oud punt\n'));
+  zet4('2027 - Open kop.md', reis(['type: reis', 'onderwerp: "Open kop"', 'periode: "2027-04-01 – 2027-04-02"'],
+    '## Open / nog te verwerken\n\n- **Iets** geregeld.\n\n<!-- sb:generated id="verbonden" begin -->\nX\n'));
+  zet4('2027 - Geannuleerd.md', reis(['type: reis', 'onderwerp: "Geannuleerd"', 'status: geannuleerd   # David', 'periode: "2027-05-01 – 2027-05-02"'], '## Nog te regelen\n\n- [ ] x\n'));
+  zet4('2027 - Lang.md', reis(['type: reis', 'onderwerp: "Lang"', 'periode: "2027-06-01 – 2027-06-02"'], '## Te regelen\n\n' + '- [ ] punt met wat tekst erachter\n'.repeat(200)));
+  const m4 = R.maak({ vault: V4, vv: VV, vandaag: () => '2026-11-01' }), L4 = m4.lijst().body.reizen, op4 = (t) => L4.find((r) => r.titel === t);
+  const g4 = m4.reis(op4('Gepland').id).body.reis;
+  toets('12a te_regelen: eerste passende kop (niet "Openbaar vervoer"), tot de volgende ##, ### hoort erbij; open/klaar geteld',
+    g4.te_regelen && g4.te_regelen.kop === 'Nog te regelen' && /Hond naar oppas/.test(g4.te_regelen.tekst) && /nog binnen/.test(g4.te_regelen.tekst) && !/Niet meer/.test(g4.te_regelen.tekst)
+    && !/Geen kop/.test(g4.te_regelen.tekst) && g4.te_regelen.open === 3 && g4.te_regelen.klaar === 1 && g4.te_regelen.afgekapt === false, g4.te_regelen);
+  toets('12b lijst: te_regelen_open bij een komende reis, null bij een geweest reis, en geen tekst in de lijst',
+    op4('Gepland').te_regelen_open === 3 && op4('Geweest').te_regelen_open === null && !JSON.stringify(L4).includes('Verblijf boeken'), L4.map((r) => [r.titel, r.te_regelen_open]));
+  toets('12c geweest: geen te_regelen in de reis', m4.reis(op4('Geweest').id).body.reis.te_regelen === null);
+  const o4 = m4.reis(op4('Open kop').id).body.reis.te_regelen;
+  toets('12d "## Open / nog te verwerken" telt; stopt bij een gegenereerd blok; zonder takenlijst open 0', o4 && o4.kop === 'Open / nog te verwerken' && o4.open === 0 && !/sb:generated/.test(o4.tekst), o4);
+  const l4 = m4.reis(op4('Lang').id).body.reis.te_regelen;
+  toets('12e lange lijst afgekapt op een regel met …, hooguit 4000 tekens + …', l4.afgekapt && l4.tekst.length <= 4003 && /\n\n…$/.test(l4.tekst) && /erachter\n\n…$/.test(l4.tekst), [l4.tekst.length, l4.tekst.slice(-40)]);
+  const a4 = op4('Geannuleerd');
+  toets('12f status: geannuleerd (met commentaar) = stand geannuleerd, niet komend, geen te_regelen; info telt hem niet als komend',
+    a4.stand === 'geannuleerd' && a4.te_regelen_open === null && m4.reis(a4.id).body.reis.te_regelen === null && m4.info().komend === 3, [a4.stand, m4.info()]);
+  toets('12g geannuleerd: reisInfo null (MemoryLane maakt er geen herinnering van); een gewone reis wel',
+    m4.reisInfo('20_Prive/Reizen/2027 - Geannuleerd.md') === null && m4.reisInfo('20_Prive/Reizen/2027 - Gepland.md').van === '2027-03-01');
+  toets('12h geannuleerd() leest alleen het statusveld', R.geannuleerd('---\nstatus: "geannuleerd"\n---\n') && !R.geannuleerd('---\nstatus: actueel\n---\ngeannuleerd\n') && !R.geannuleerd('geen fm'));
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
