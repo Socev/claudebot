@@ -415,6 +415,9 @@ jobs:
       - name: "harvester (wv820, App Harvester)"
         if: ${{ !cancelled() }}
         run: bash test/harvester.sh
+      - name: "nieuwsbrief (wv2190, wekelijkse bloemlezing)"
+        if: ${{ !cancelled() }}
+        run: bash test/nieuwsbrief.sh
       - name: "secondbrain (wv832, App Second Brain)"
         if: ${{ !cancelled() }}
         run: bash test/secondbrain.sh

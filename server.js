@@ -3862,6 +3862,7 @@ function handleRequest(req, res) {
       werkers: typeof werkersInfo === 'function' ? werkersInfo() : { aan: false },   // wv1707 (OVIS M4a): Ploeg-register (aantal werkers, laatste n8n-lezing, check-aantallen; geen namen)
       mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },
       pot_app: typeof potAppInfo === 'function' ? potAppInfo() : { aan: false },   // wv1894: OVIS POT (lezen)   // wv1269: App Mediatheek (aantallen, geen inhoud)
+      nieuwsbrief: nieuwsbriefInfo(),   // wv2190: nieuwsbrief-bloemlezing (laatste ronde, bezig; geen inhoud)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761/wv942: App AIX (laatste lezing, catalogus, plaatsing, uur- en weekronde; geen inhoud)
       aix: typeof aixInfo === 'function' ? aixInfo() : { aan: false },   // wv942: aix.js (sleutel bruikbaar?, laatst bereikbaar, plat sinds; nooit de sleutel)
@@ -4119,6 +4120,20 @@ function handleRequest(req, res) {
       const r = !harvester ? { status: 404, j: { ok: false, fout: 'Harvester zit niet in deze versie van de pod' } }
         : req.url === '/harvester-ronde' ? harvester.rondeStart() : harvester.rondeUitkomst();
       reqLogExtra(res, { harvester_ronde: req.url === '/harvester-ronde' ? (r.status === 202 ? 'gestart' : 'bezig') : 'uitkomst' });
+      res.writeHead(r.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(r.j));
+    }); });
+  }
+
+  // ── wv2190: wekelijkse nieuwsbrief-bloemlezing (n8n AI - Nieuwsbrief-bloemlezing; body-secret zoals /run; alleen proef:true als invoer) ──
+  if (req.method === 'POST' && (req.url === '/nieuwsbrief-ronde' || req.url === '/nieuwsbrief-ronde/uitkomst')) {
+    return rolPoort(res, function () { readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!SECRET || typeof d.secret !== 'string' || Buffer.byteLength(d.secret) !== Buffer.byteLength(SECRET) ||
+          !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
+      const r = !nieuwsbrief ? { status: 404, j: { ok: false, fout: 'de nieuwsbrief-bloemlezing zit niet in deze versie van de pod' } }
+        : req.url === '/nieuwsbrief-ronde' ? nieuwsbrief.rondeStart({ proef: d.proef === true }) : nieuwsbrief.rondeUitkomst();
+      reqLogExtra(res, { nieuwsbrief_ronde: req.url === '/nieuwsbrief-ronde' ? (r.status === 202 ? 'gestart' : 'bezig') : 'uitkomst' });
       res.writeHead(r.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(r.j));
     }); });
@@ -13290,11 +13305,12 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'facturen-bank',        // wv2057: failsafe na het inschieten (betaling niet op de bank, bedrag wijkt af); hoofdkanaal, soort dag
   'doorgeefluik',         // wv1267: regel in de machinekamer als David een opdracht via Socev op de werklijst zette
   'manager',              // wv895: rapport van een manager-ronde op afroep (machinekamer; soort antwoord als David of Socev hem startte)
+  'nieuwsbrief',          // wv2190: wekelijkse bloemlezing uit de nieuwsbrieven (za 09:15, AI - Nieuwsbrief-bloemlezing); hoofdkanaal, soort dag
   'dagsamenvatting']);    // wv589: dagsamenvatting "Gebeurd" 07:15 (idee 13 § 4.6): machinekamer, geen MELD_SOORT-regel = archief, geen seintje
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
 const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag' };
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', nieuwsbrief: 'dag' };
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
@@ -16830,6 +16846,35 @@ const harvester = (function () {
     return h;
   } catch (e) { logError('harvester', e); return null; }
 })();
+// ── wv2190: nieuwsbrief-bloemlezing (bouwplan vault 01_Ontwikkeling/Nieuwsbrief-bloemlezing - wekelijks (bouwplan 1-11-2026).md) ──
+// Logica in nieuwsbrief.js; hier de koppeling: lees-luik (appAgendaApi, alleen mail_zoeken/mail_lezen), modelaanroep zonder tools
+// (harvesterClaude: Sonnet, account 2), vault alleen lezen via vault-veilig (twee vaste pagina's), bericht via berichtIntern (bron
+// nieuwsbrief) en de hartslag. Ontbreekt nieuwsbrief.js in de release, dan 404 op de route en nieuwsbrief.aan=false in /health.
+const NIEUWSBRIEF_DIR = serverPad('nieuwsbrief', process.env.NIEUWSBRIEF_DIR, '/opt/data/nieuwsbrief', serverProefDeel('nieuwsbrief'));
+const nieuwsbrief = (function () {
+  const p = path.join(__dirname, 'nieuwsbrief.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const n = require(p).maak({ dir: NIEUWSBRIEF_DIR, fout: logError,
+      luik: function (b) { return appAgendaApi(b); },
+      claude: harvesterClaude,
+      leesVault: function (rel) { return VV().lees(path.join(VAULT, rel)); },
+      bericht: async function (b) {
+        const r = await berichtIntern({ kanaal: b.kanaal, bron: 'nieuwsbrief', klasse: 'normaal', tekst: b.tekst, sleutel: b.sleutel });
+        return { ok: !!(r && r.status === 200 && r.j && r.j.ok), status: r && r.status, id: r && r.j && r.j.id };
+      },
+      hartslag: async function (gelezen, punten) {
+        await appSbRpc('mk_hartslag_stempel', { p_component: 'nieuwsbrief-bloemlezing', p_gemeten_rijen: gelezen, p_bevindingen: punten });
+        return true;
+      } });
+    n.mkdir();   // /opt/data/nieuwsbrief op 0700, staat 0600
+    return n;
+  } catch (e) { logError('nieuwsbrief', e); return null; }
+})();
+function nieuwsbriefInfo() {
+  if (!nieuwsbrief) return { aan: false };
+  try { return nieuwsbrief.health(); } catch (e) { return { aan: true, fout: true }; }
+}
 function harvesterInfo() {
   if (!harvester) return { aan: false };
   try { return harvester.health(); } catch (e) { return { aan: true, fout: true }; }
