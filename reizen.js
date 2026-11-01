@@ -19,6 +19,8 @@
  *  - T2 (wv2152, ontwerp § 4.1): vervoer (vaste woorden, VERVOER) in lijst en reis; alleen in de reis: verblijf [{plaats, naam, van, tot}],
  *    plekken [{naam, rol, lat, lon}] (coördinaten alleen als beide geldig) en kosten {totaal, per_persoon, bron}: een bedrag zonder
  *    kosten_bron valt weg (ontwerp § 6: geen totaal zonder onderbouwing). Lijsten van maps in flow- of blokvorm (fmObjLijst), ≤ 60 items.
+ *  - T3 (wv2163): kaart in de reis {punten, lijn, verblijf_zonder_plek} (kaartVan: verblijf op plaatsnaam aan een plek, geen geocoder) en
+ *    één punt per reis in de lijst (kaartPunt: bestemming, anders het verste punt) voor de overzichtskaart. Coördinaten alleen uit de pagina.
  *  - Lezen via vault-veilig (o.vv.lees: geen symlink volgen, alleen een gewoon bestand, ≤ 512 kB).
  * PRIVACY. Reispagina's zijn strikt privé (namen, boekingen, bedragen). Deze module logt niets; info() geeft alleen aantallen.
  */
@@ -236,6 +238,55 @@ function kostenVan(t) {
   return { totaal, per_persoon: pp, bron };
 }
 
+// ── T3 (wv2163, ontwerp § 4.4 keuze a): de kaart. Alleen de plekken met coördinaten uit de vaste kop; een verblijf hangt op plaatsnaam aan
+// een plek (geen geocoder): eerst de naam zonder "(…)" ("Zion" = "Zion (Springdale)"), dan wat tussen haakjes staat ("Cavallino-Treporti" =
+// "Punta Sabbioni (Cavallino-Treporti)"). Wat geen plek vindt, telt mee als verblijf_zonder_plek. De lijn volgt de volgorde van de pagina
+// (geen gereden route).
+const sleutel = (s) => String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim();
+function naamDelen(n) { const m = /^(.*?)\s*\(([^)]*)\)\s*$/.exec(String(n || '')); return m ? { kern: sleutel(m[1]), binnen: sleutel(m[2]) } : { kern: sleutel(n), binnen: null }; }
+const puntSleutel = (p) => p.lat + ',' + p.lon + '|' + sleutel(p.naam);
+function plekVoorPlaats(plaats, plekken) {
+  const k = naamDelen(plaats).kern;
+  if (!k) return null;
+  const met = plekken.filter((p) => p.lat != null && p.lon != null);
+  return met.find((p) => naamDelen(p.naam).kern === k) || met.find((p) => naamDelen(p.naam).binnen === k) || null;
+}
+// → { punten: [{naam, rollen, lat, lon, verblijf: [{naam, van, tot}]}], lijn: [[lat, lon]…] (≥ 2 of leeg), verblijf_zonder_plek }
+function kaartVan(plekken, verblijf) {
+  const punten = [], index = new Map();
+  for (const p of plekken || []) {
+    if (p.lat == null || p.lon == null) continue;
+    const k = puntSleutel(p);
+    if (index.has(k)) { const q = punten[index.get(k)]; if (p.rol && q.rollen.indexOf(p.rol) < 0) q.rollen.push(p.rol); continue; }   // start = finish
+    index.set(k, punten.length);
+    punten.push({ naam: p.naam, rollen: p.rol ? [p.rol] : [], lat: p.lat, lon: p.lon, verblijf: [] });
+  }
+  let zonder = 0;
+  for (const v of verblijf || []) {
+    const p = plekVoorPlaats(v.plaats, plekken || []);
+    if (!p) { zonder++; continue; }
+    punten[index.get(puntSleutel(p))].verblijf.push({ naam: v.naam, van: v.van, tot: v.tot });
+  }
+  const lijn = [];
+  for (const p of plekken || []) {
+    if (p.lat == null || p.lon == null) continue;
+    const l = lijn[lijn.length - 1];
+    if (!l || l[0] !== p.lat || l[1] !== p.lon) lijn.push([p.lat, p.lon]);
+  }
+  return { punten, lijn: lijn.length >= 2 ? lijn : [], verblijf_zonder_plek: zonder };
+}
+// Eén punt per reis voor de overzichtskaart: de plek met rol bestemming, anders de plek het verst van de eerste (keerpunt van een rondreis)
+function kaartPunt(plekken) {
+  const met = (plekken || []).filter((p) => p.lat != null && p.lon != null);
+  if (!met.length) return null;
+  const b = met.find((p) => p.rol === 'bestemming');
+  if (b) return { lat: b.lat, lon: b.lon };
+  const a = met[0], cos = Math.cos(a.lat * Math.PI / 180);
+  const afst = (p) => Math.pow(p.lat - a.lat, 2) + Math.pow((p.lon - a.lon) * cos, 2);
+  const ver = met.reduce((x, p) => (afst(p) > afst(x) ? p : x), a);
+  return { lat: ver.lat, lon: ver.lon };
+}
+
 function dagen(van, tot) {
   if (!van || !tot) return null;
   const a = Date.parse(van + 'T00:00:00Z'), b = Date.parse(tot + 'T00:00:00Z');
@@ -258,7 +309,8 @@ function ontleed(t, rel, vandaag) {
   if (!i) return null;
   const besch = fmVeld(t, 'description');
   return Object.assign({ id: idVan(rel) }, i, { dagen: dagen(i.van, i.tot), jaar: i.van ? i.van.slice(0, 4) : null, stand: stand(i.van, i.tot, vandaag || ''),
-    soort: soortVan(t), deelnemers: deelnemersVan(t), vervoer: vervoerVan(t), beschrijving: besch ? String(besch).slice(0, MAX_BESCHRIJVING) : '' });
+    soort: soortVan(t), deelnemers: deelnemersVan(t), vervoer: vervoerVan(t), beschrijving: besch ? String(besch).slice(0, MAX_BESCHRIJVING) : '',
+    punt: kaartPunt(plekkenVan(t)) });
 }
 
 /*
@@ -312,11 +364,12 @@ function maak(o) {
     const t = lees(rel);
     const r = t == null ? null : ontleed(t, rel, vandaag());
     if (!r) return { status: 404, body: { ok: false, fout: 'onbekende reis' } };
-    return { status: 200, body: { ok: true, reis: Object.assign(r, { verblijf: verblijfVan(t), plekken: plekkenVan(t), kosten: kostenVan(t),
+    const verblijf = verblijfVan(t), plekken = plekkenVan(t);
+    return { status: 200, body: { ok: true, reis: Object.assign(r, { verblijf, plekken, kosten: kostenVan(t), kaart: kaartVan(plekken, verblijf),
       pad: rel, tekst: zonderFrontmatter(t), memorylane: koppeling(rel) }) } };
   }
   function info() { return Object.assign({ aan: true }, laatst || { op: null, reizen: null, komend: null, onleesbaar: null }); }
   return { paden, reisInfo, lijst, reis, info };
 }
 
-module.exports = { maak, ontleed, idVan, soortVan, deelnemersVan, vervoerVan, verblijfVan, plekkenVan, kostenVan, fmObjLijst, flowMap, fmVeld, fmLijst, VERVOER, REIS_MAP, SOORTEN, SOORT_REGELS, ID_RE, MAX_TITEL };
+module.exports = { maak, ontleed, idVan, soortVan, deelnemersVan, vervoerVan, verblijfVan, plekkenVan, kostenVan, kaartVan, kaartPunt, fmObjLijst, flowMap, fmVeld, fmLijst, VERVOER, REIS_MAP, SOORTEN, SOORT_REGELS, ID_RE, MAX_TITEL };

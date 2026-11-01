@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Toetst OVIS Tripper (wv2136, 1-11-2026): reizen.js (soort uit trip_soort of de tags, gambia vóór vakantie; gezelschap uit de kop;
 # komend bovenaan; id = hash van het pad, nooit een pad uit de vraag; geen symlink volgen), dezelfde reisInfo als MemoryLane had
-# (oude functie letterlijk vergeleken), de vaste kop van T2 (wv2152: vervoer, verblijf, plekken, kosten alleen met bron), en het server.js-blok (routes, audit zonder titel, /health alleen aantallen, uitrol-lijst).
+# (oude functie letterlijk vergeleken), de vaste kop van T2 (wv2152: vervoer, verblijf, plekken, kosten alleen met bron), de kaart van T3 (wv2163: verblijf op plaatsnaam
+# aan een plek, lijn, punt per reis), en het server.js-blok (routes, audit zonder titel, /health alleen aantallen, uitrol-lijst).
 # Zonder sessie 401: test/socev-app-poort.sh § 21. Alleen verzonnen reizen en namen; raakt de echte vault niet. Gebruik: bash test/tripper.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -187,6 +188,32 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('10b onmogelijke datum (31 feb, maand 13) = null; schrikkeldag blijft; losse "-" met sleutels eronder telt',
     JSON.stringify(R.verblijfVan(sj)) === JSON.stringify([{ plaats: 'Plaats', naam: 'Hotel #1', van: null, tot: null }, { plaats: 'Losstreep', naam: '', van: '2024-02-29', tot: null }]), R.verblijfVan(sj));
   toets('10c MemoryLane-lezing (reisInfo/fmVeld) ongemoeid: tags met # in een wikilink en zonder commentaar gelijk', R.fmVeld(sj, 'periode') === '2026-01-01 – 2026-01-02');
+
+  // ── 11. T3 (wv2163): kaart — verblijf op plaatsnaam aan een plek (geen geocoder), lijn in paginavolgorde, één punt per reis ──
+  const pl = [{ naam: 'Proefstad', rol: 'start', lat: 50, lon: 5 }, { naam: 'Zion (Springdale)', rol: 'overnachting', lat: 37.2, lon: -113 },
+    { naam: 'Lio Grando (Kustdorp)', rol: 'overnachting', lat: null, lon: null }, { naam: 'Punta Proef (Kustdorp)', rol: 'bestemming', lat: 45.4, lon: 12.4 },
+    { naam: 'Zonder coord', rol: 'etappe', lat: null, lon: null }, { naam: 'Proefstad', rol: 'finish', lat: 50, lon: 5 }];
+  const vb = [{ plaats: 'Zion', naam: 'Camping Rots', van: '2025-07-01', tot: '2025-07-02' }, { plaats: 'kustdorp', naam: 'Hotel Strand', van: null, tot: null },
+    { plaats: 'Proefstad', naam: '', van: '2025-06-30', tot: '2025-07-01' }, { plaats: 'Nergensdorp', naam: 'Pension Weg', van: null, tot: null },
+    { plaats: 'Zonder coord', naam: 'Hut', van: null, tot: null }, { plaats: '', naam: 'Alleen naam', van: null, tot: null }];
+  const K = R.kaartVan(pl, vb);
+  toets('11a alleen plekken met coördinaten; start = finish op dezelfde plek één punt met beide rollen',
+    JSON.stringify(K.punten.map((p) => [p.naam, p.rollen])) === JSON.stringify([['Proefstad', ['start', 'finish']], ['Zion (Springdale)', ['overnachting']], ['Punta Proef (Kustdorp)', ['bestemming']]]), K.punten);
+  toets('11b verblijf: "Zion" = "Zion (Springdale)", hoofdletters gelijk, tussen haakjes ("kustdorp") alleen een plek met coördinaten',
+    JSON.stringify(K.punten.map((p) => p.verblijf.map((v) => v.naam))) === JSON.stringify([[''], ['Camping Rots'], ['Hotel Strand']]), K.punten.map((p) => p.verblijf));
+  toets('11c zonder plek geteld: onbekende plaats, plek zonder coördinaten, alleen een naam', K.verblijf_zonder_plek === 3, K.verblijf_zonder_plek);
+  toets('11d lijn in paginavolgorde, plekken zonder coördinaten overgeslagen; rondreis sluit', JSON.stringify(K.lijn) === JSON.stringify([[50, 5], [37.2, -113], [45.4, 12.4], [50, 5]]), K.lijn);
+  toets('11e één punt of niets: geen lijn, leeg = leeg', R.kaartVan([pl[0]], []).lijn.length === 0 && R.kaartVan([pl[0], pl[5]], []).lijn.length === 0
+    && JSON.stringify(R.kaartVan([], [])) === JSON.stringify({ punten: [], lijn: [], verblijf_zonder_plek: 0 }) && R.kaartVan(undefined, undefined).punten.length === 0);
+  toets('11f punt van de reis: bestemming wint', JSON.stringify(R.kaartPunt(pl)) === JSON.stringify({ lat: 45.4, lon: 12.4 }));
+  toets('11g zonder bestemming: het verste punt vanaf de eerste plek (keerpunt); zonder coördinaten null',
+    JSON.stringify(R.kaartPunt([pl[0], { naam: 'Dichtbij', lat: 51, lon: 5 }, { naam: 'Ver', lat: 69, lon: 18 }, pl[5]])) === JSON.stringify({ lat: 69, lon: 18 })
+    && R.kaartPunt([pl[2], pl[4]]) === null && R.kaartPunt([]) === null);
+  const dk3 = m2.reis(op2('Vaste kop').id).body.reis;
+  toets('11h de reis heeft kaart {punten, lijn, verblijf_zonder_plek} uit de vaste kop (Proefstad = start)', dk3.kaart && dk3.kaart.punten.length === 1 && dk3.kaart.punten[0].naam === 'Start'
+    && dk3.kaart.verblijf_zonder_plek === 4 && dk3.kaart.lijn.length === 0, dk3.kaart);
+  toets('11i lijst: punt per reis (of null), geen plekken of kaart in de lijst', op2('Vaste kop').punt && op2('Vaste kop').punt.lat === 55.6 && op2('Per persoon').punt === null
+    && !('kaart' in op2('Vaste kop')) && !('plekken' in op2('Vaste kop')), op2('Vaste kop'));
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
