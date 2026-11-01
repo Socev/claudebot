@@ -1654,6 +1654,9 @@ function nepGmail() {
         uit.push({ naam: l + '@' + kant, id: o.vlagId || IDS2[l], volledig: o.vlagAfgekapt !== l + '@' + kant,
           berichten: Array.from(ber.entries()).filter(function (e) { return !e[1].sent && e[1].labels.has(l) && (kant === 'inbox' ? e[1].plek === 'inbox' : e[1].plek !== 'inbox'); }).map(function (e) { return { gmail_id: e[0], thread_id: e[1].thread }; }) });
       }
+      // wv2218: de inbox van de laatste 14 dagen (alleen id's, nooit verzonden)
+      if (o.inbox) uit.push({ naam: 'INBOX', id: o.inboxId || 'INBOX', volledig: !o.inboxAfgekapt,
+        berichten: Array.from(ber.entries()).filter(function (e) { return !e[1].sent && e[1].plek === 'inbox'; }).map(function (e) { return { gmail_id: e[0], thread_id: e[1].thread }; }) });
       return uit;
     },
     fout: false,
@@ -2686,4 +2689,171 @@ test('wv2208 Ecobank-transactiemelding: vaste regel → OVERIG, geen NIEUWSBRIEF
   assert.deepEqual(x.erbij, ['OVERIG']); assert.deepEqual(x.erf || [], [], 'geen geërfde NIEUWSBRIEF');
   assert.ok(gm.heeft(eb2.id, 'OVERIG') && !gm.heeft(eb2.id, 'NIEUWSBRIEF'));
   assert.ok(gm.heeft(eb1.id, 'NIEUWSBRIEF'), 'Davids/oude label blijft staan');
+});
+
+// ─────────── wv2218 zaakregister (Mail-laag stap 3): laagregel, inboxstand, afgehandeld, heropenen, lijst ───────────
+test('wv2218 laagBericht: jij · socev · weg volgens B3.3; OVERIG met actie ≥ 0,5 zonder afmeldlink → jij (de 19-gevallen-valkuil)', () => {
+  const b = function (o) { return Object.assign({ status: 'klaar', stroom: 'info', juist: null, stap: 'jev', reden: 'score', marker: false, zorg: false, botsing: null, afmeld: false, jev: { actie: 0.1, mens: 0.1 }, vlag: false, route: null, factuur: null }, o || {}); };
+  const L = function (o) { const r = K.laagBericht(b(o)); return r.laag + ':' + r.reden + (r.detail ? ':' + r.detail : ''); };
+  assert.equal(L({ jev: { actie: 0.6, mens: 0.1 } }), 'jij:actie_mogelijk', 'valkuil: OVERIG met actie');
+  assert.equal(L({ jev: { actie: 0.5, mens: 0.1 } }), 'jij:actie_mogelijk', 'grens 0,5 telt mee');
+  assert.equal(L({ jev: { actie: 0.49, mens: 0.1 } }), 'weg:geen_actie');
+  assert.equal(L({ jev: { actie: 0.1, mens: 0.7 } }), 'jij:persoonlijk');
+  assert.equal(L({ jev: { actie: 0.9, mens: 0.9 }, afmeld: true }), 'weg:nieuwsbrief', 'met afmeldlink weggezet');
+  assert.equal(L({ reden: 'hard_uit_systeem', jev: { actie: 0.6 } }), 'jij:actie_mogelijk', 'ook een systeemmelding met actie');
+  assert.equal(L({ reden: 'hard_uit_systeem', jev: { actie: 0.2 } }), 'weg:systeemmelding');
+  assert.equal(L({ jev: null }), 'jij:socev_weet_het_niet', 'geen Jev-oordeel en geen regel');
+  assert.equal(L({ jev: { mens: 0.1 } }), 'weg:geen_actie', 'actie niet gemeten: NaN telt niet als ≥ 0,5');
+  assert.equal(L({ stap: 'weg', reden: 'regel', jev: null }), 'weg:regel', 'Davids Weg-regel');
+  assert.equal(L({ stap: 'weg', reden: 'regel', botsing: 'weg_mens_vraag' }), 'jij:actie_mogelijk', 'botsing gaat vóór de regel');
+  assert.equal(L({ stap: 'altijd', reden: 'ecobank', jev: null, afmeld: true }), 'weg:vaste_regel');
+  assert.equal(L({ stroom: 'twijfel' }), 'jij:socev_weet_het_niet');
+  assert.equal(L({ stroom: 'twijfel', juist: 'info', jev: { actie: 0.9 } }), 'weg:jouw_keuze', 'Davids keuze Overig');
+  assert.equal(L({ stroom: 'twijfel', juist: 'intake' }), 'socev:naar_second_brain');
+  assert.equal(L({ stroom: 'intake', route: 'wachtrij' }), 'socev:naar_second_brain');
+  assert.equal(L({ stroom: 'intake', route: 'verwerkt' }), 'socev:second_brain');
+  assert.equal(L({ stroom: 'factuur', factuur: 'in_sepa' }), 'socev:facturen:in_sepa');
+  assert.equal(L({ stroom: 'factuur', factuur: 'raar' }), 'socev:facturen:ontvangen');
+  assert.equal(L({ stroom: 'factuur', vlag: true }), 'jij:vraagt_actie', 'TODO/ACTIE_DS wint');
+  assert.equal(L({ stroom: 'intake', marker: true }), 'jij:slotje');
+  assert.equal(L({ stroom: 'twijfel', zorg: true }), 'jij:slotje');
+  assert.equal(L({ status: 'wacht_jev', stroom: null }), 'jij:socev_weet_het_niet');
+  assert.equal(L({ stroom: 'verkoop' }), 'jij:socev_weet_het_niet', 'onbekend = jij');
+  assert.equal(K.laagBericht(null).laag, 'jij');
+});
+test('wv2218 laagDraad: hoogste laag wint, dan de zwaarste reden, dan het nieuwste bericht', () => {
+  const t = function (h) { return new Date(Date.UTC(2026, 10, 1, h)).toISOString(); };
+  assert.equal(K.laagDraad([]), null);
+  let r = K.laagDraad([{ laag: 'weg', reden: 'nieuwsbrief', tijd: t(9) }, { laag: 'socev', reden: 'facturen', detail: 'in_sepa', tijd: t(8) }]);
+  assert.deepEqual([r.laag, r.reden, r.detail, r.index], ['socev', 'facturen', 'in_sepa', 1]);
+  r = K.laagDraad([{ laag: 'socev', reden: 'second_brain', tijd: t(10) }, { laag: 'jij', reden: 'persoonlijk', tijd: t(8) }, { laag: 'jij', reden: 'vraagt_actie', tijd: t(7) }]);
+  assert.deepEqual([r.laag, r.reden, r.index], ['jij', 'vraagt_actie', 2]);
+  r = K.laagDraad([{ laag: 'weg', reden: 'geen_actie', tijd: t(7) }, { laag: 'weg', reden: 'geen_actie', tijd: t(9) }]);
+  assert.equal(r.index, 1, 'nieuwste');
+  r = K.laagDraad([{ laag: 'raar', reden: 'x' }, { laag: 'weg', reden: 'regel', tijd: t(1) }]);
+  assert.equal(r.laag, 'weg');
+});
+
+function zakenToestaan(dir, waarde) {
+  const f = path.join(dir, 'config.json'), c = JSON.parse(fs.readFileSync(f, 'utf8'));
+  c.zaken = waarde === undefined ? { 'gmail:david': { aan: true, ja: '2026-11-01T15:59:00Z' }, 'gmail:groenhouten': true } : waarde;
+  fs.writeFileSync(f, JSON.stringify(c), { mode: 0o600 });
+}
+function zaak(mm, th) { return mm._db.prepare('SELECT * FROM zaak WHERE thread_id = ?').get(th); }
+function zakenApp(mm, groep, pagina) { return mm.zakenLijst(groep ? { groep, pagina } : {}); }
+test('wv2218 zaakregister: lagen per draad, inbox nooit → laag blijft, eerst in de inbox gezien en dan weg → afgedaan, eigen archief ≠ afgehandeld, heropenen', () => {
+  const { mm, dir, gm, fouten } = b8Kamer();
+  const actie = mail({ onderwerp: 'Kun je dit tekenen?' });                              // OVERIG met actie, zonder afmeldlink → jij
+  const nb = mail({ van: 'Nieuws <nieuws@vereniging.invalid>', onderwerp: 'Nieuwsbrief', afmeld: true });   // → weg nieuwsbrief
+  const sys = mail({ onderwerp: 'Je wachtwoord is gewijzigd' });                          // → weg systeemmelding
+  const mens = mail({ van: 'Iemand <iemand@voorbeeld.invalid>', onderwerp: 'Etentje' });  // → socev (intake)
+  const nooit = mail({ onderwerp: 'Via een filter' });                                    // nooit in de inbox
+  const arch = mail({ onderwerp: 'Gelezen en weg' });                                     // David archiveert → afgedaan
+  const eigen = mail({ onderwerp: 'Factuur', bijlagen: [{ naam: 'f.pdf', mime: 'application/pdf' }] });   // MailMans eigen archief
+  const d1 = mail({ onderwerp: 'Draad: eerst nieuws', afmeld: true }), d2 = mail({ threadId: d1.threadId, onderwerp: 'Re: draad', datum: klok - 1800000 });   // jij wint in de draad
+  const ms = [actie, nb, sys, mens, nooit, arch, eigen, d1, d2];
+  const jev = { [actie.id]: { systeem: 0.99, waarde: 0, actie: 0.6 }, [nb.id]: JEV_INFO, [sys.id]: JEV_INFO, [mens.id]: JEV_INTAKE, [nooit.id]: JEV_INFO,
+    [arch.id]: JEV_INFO, [eigen.id]: { factuur: 0.99 }, [d1.id]: JEV_INFO, [d2.id]: { systeem: 0.99, waarde: 0, mens: 0.7 } };
+  draai(mm, 'gmail:david', ms, { jev: function (a) { return jevAntwoord(jev[a.gmail_id]); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  ms.forEach(function (m) { gm.voeg(m); });
+  gm.plek(nooit.id, 'archief');   // kwam nooit in de inbox
+  const ids = ms.map(function (m) { return m.id; });
+  // zonder schakelaar: geen zaken, de inboxlijst wordt genegeerd
+  let x = l2Ronde(mm, gm, ids, { vlag: true, inbox: true });
+  assert.equal(x.s.status, 200); assert.equal(x.s.j.telling.zaken, undefined);
+  assert.equal(mm._db.prepare('SELECT count(*) n FROM zaak').get().n, 0);
+  assert.deepEqual(zakenApp(mm).j, { ok: true, aan: false });
+  zakenToestaan(dir);
+  x = l2Ronde(mm, gm, ids, { vlag: true, inbox: true });
+  assert.deepEqual(fouten, []);
+  assert.equal(x.s.j.telling.inbox, 8, 'acht van de negen berichten in de inbox (nooit staat in het archief)');
+  assert.equal(x.s.j.telling.zaken.draden, 8);
+  const L = function (m) { const z = zaak(mm, m.threadId); return z.laag + ':' + z.laag_reden + (z.laag_detail ? ':' + z.laag_detail : ''); };
+  assert.equal(L(actie), 'jij:actie_mogelijk');
+  assert.equal(L(nb), 'weg:nieuwsbrief');
+  assert.equal(L(sys), 'weg:systeemmelding');
+  assert.equal(L(mens), 'socev:naar_second_brain');
+  assert.equal(L(eigen), 'socev:facturen:ontvangen');
+  assert.equal(L(d1), 'jij:persoonlijk', 'hoogste laag in de draad');
+  assert.equal(zaak(mm, d1.threadId).berichten, 2);
+  assert.equal(zaak(mm, d1.threadId).laag_versie, K.LAAG_VERSIE);
+  assert.equal(zaak(mm, nooit.threadId).inbox, 'nooit');
+  assert.equal(zaak(mm, actie.threadId).inbox, 'ja');
+  assert.ok(zaak(mm, nb.threadId).ooit_weggezet, 'weggezet onthouden voor de meting (B3.6)');
+  // David archiveert arch en nooit blijft weg; MailMan archiveert eigen (archief_tijd) — daarna ook uit de inbox
+  klok += 15 * 60000;
+  gm.plek(arch.id, 'archief');
+  mm._db.prepare('UPDATE besluit SET archief_tijd = ? WHERE gmail_id = ?').run(new Date(klok).toISOString(), eigen.id);
+  gm.plek(eigen.id, 'archief');
+  // onvolledige inboxlijst: niets verandert
+  x = l2Ronde(mm, gm, ids, { vlag: true, inbox: true, inboxAfgekapt: true });
+  assert.equal(x.s.j.telling.inbox_afgekapt, 1);
+  assert.equal(zaak(mm, arch.threadId).inbox, 'ja'); assert.equal(zaak(mm, arch.threadId).afgehandeld, null);
+  // verkeerde ID: ook niets
+  x = l2Ronde(mm, gm, ids, { vlag: true, inbox: true, inboxId: 'Label_99' });
+  assert.equal(zaak(mm, arch.threadId).afgehandeld, null);
+  // volledig: arch afgedaan door David; eigen archief niet; nooit blijft nooit
+  x = l2Ronde(mm, gm, ids, { vlag: true, inbox: true });
+  assert.equal(zaak(mm, arch.threadId).inbox, 'nee'); assert.ok(zaak(mm, arch.threadId).afgehandeld); assert.equal(zaak(mm, arch.threadId).afgehandeld_door, 'david_gmail');
+  assert.equal(zaak(mm, eigen.threadId).inbox, 'nee'); assert.equal(zaak(mm, eigen.threadId).afgehandeld, null); assert.equal(zaak(mm, eigen.threadId).eigen_archief, 1);
+  assert.equal(L(eigen), 'socev:facturen:verwerkt');
+  assert.equal(zaak(mm, nooit.threadId).inbox, 'nooit'); assert.equal(zaak(mm, nooit.threadId).afgehandeld, null);
+  assert.equal(L(nooit), 'weg:systeemmelding', 'de laag blijft staan');
+  assert.equal(x.s.j.telling.zaken.afgehandeld, 1);
+  // de lijst in de app
+  let a = zakenApp(mm);
+  assert.equal(a.status, 200); assert.equal(a.j.aan, true);
+  assert.deepEqual(a.j.tellers, { jij: 2, socev: 2, weg: 3, afgedaan: 1 });
+  assert.deepEqual(a.j.lagen.afgedaan.map(function (z) { return z.draad; }), [arch.threadId]);
+  const rj = a.j.lagen.jij.find(function (z) { return z.draad === actie.threadId; });
+  assert.equal(rj.onderwerp, 'Kun je dit tekenen?'); assert.equal(rj.domein, 'voorbeeld.invalid'); assert.equal(rj.reden, 'actie_mogelijk');
+  assert.ok(a.j.bijgewerkt && a.j.inbox_bijgewerkt); assert.equal(a.j.verouderd, false);
+  assert.equal(a.j.weg_vandaag, 4, 'nb, sys, nooit en arch (afgedaan telt mee: hij werd vandaag weggezet)');
+  assert.equal(zakenApp(mm, 'raar', 1).status, 404); assert.equal(zakenApp(mm, 'jij', 0).status, 404); assert.equal(zakenApp(mm, 'jij', 1.5).status, 404);
+  const p2 = zakenApp(mm, 'weg', 2);
+  assert.equal(p2.status, 200); assert.deepEqual(p2.j.lagen.weg, []); assert.equal(p2.j.lagen.jij, undefined); assert.equal(p2.j.meer.weg, false);
+  const stand = mm.info().postvakken.find(function (p) { return p.id === 'gmail:david'; }).zaken;
+  assert.deepEqual([stand.aan, stand.jij, stand.socev, stand.weg, stand.afgedaan], [true, 2, 2, 3, 1]);
+  assert.deepEqual(mm.info().postvakken.find(function (p) { return p.id === 'gmail:groenhouten'; }).zaken, undefined, 'nooit doktersmaten');
+  // heropenen: een nieuw bericht in de afgehandelde draad
+  klok += 3600000;
+  const arch2 = mail({ threadId: arch.threadId, onderwerp: 'Re: Gelezen en weg', datum: klok - 60000 });
+  draai(mm, 'gmail:david', [arch2], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  gm.voeg(arch2);
+  l2Ronde(mm, gm, ids.concat([arch2.id]), { vlag: true, inbox: true });
+  assert.equal(zaak(mm, arch.threadId).afgehandeld, null); assert.ok(zaak(mm, arch.threadId).heropend); assert.equal(zaak(mm, arch.threadId).inbox, 'ja');
+  assert.equal(zakenApp(mm).j.tellers.afgedaan, 0);
+  // een twijfelzaak geeft het besluit-id voor de bestaande keuzeknoppen (Werkstroom)
+  mm._db.prepare("UPDATE besluit SET stroom = 'twijfel', juist = NULL WHERE gmail_id = ?").run(sys.id);
+  l2Ronde(mm, gm, ids.concat([arch2.id]), { vlag: true, inbox: true });
+  const tw = zakenApp(mm).j.lagen.jij.find(function (z) { return z.draad === sys.threadId; });
+  assert.equal(tw.reden, 'socev_weet_het_niet'); assert.equal(tw.twijfel, rij(mm, sys.id).id);
+  // schakelaar uit: lijst uit, niets meer berekend
+  zakenToestaan(dir, {});
+  const voor = zaak(mm, actie.threadId).bijgewerkt;
+  klok += 60000;
+  x = l2Ronde(mm, gm, ids, { vlag: true, inbox: true });
+  assert.equal(x.s.j.telling.zaken, undefined); assert.equal(zaak(mm, actie.threadId).bijgewerkt, voor);
+  assert.equal(zakenApp(mm).j.aan, false);
+  assert.deepEqual(fouten, []);
+});
+test('wv2218 zaakregister: nooit doktersmaten, geen Gmail-actie erbij, oude zaken na 60 dagen weg', () => {
+  const { mm, dir, gm } = b8Kamer();
+  const m1 = mail({ onderwerp: 'Gewoon' });
+  draai(mm, 'gmail:david', [m1], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  gm.voeg(m1);
+  l2Ronde(mm, gm, [m1.id], { vlag: true });   // labels van het besluit gezet
+  const zonder = l2Ronde(mm, gm, [m1.id], { vlag: true }).l.j.acties;
+  zakenToestaan(dir, { 'gmail:groenhouten': true });
+  l2Ronde(mm, gm, [m1.id], { vlag: true, inbox: true });
+  assert.equal(mm._db.prepare('SELECT count(*) n FROM zaak').get().n, 0, 'alleen de schakelaar van gmail:david telt');
+  zakenToestaan(dir, { 'gmail:david': true });
+  const met = l2Ronde(mm, gm, [m1.id], { vlag: true, inbox: true });
+  assert.equal(mm._db.prepare('SELECT count(*) n FROM zaak').get().n, 1);
+  assert.deepEqual(met.l.j.acties, zonder, 'het zaakregister voegt geen Gmail-actie toe');
+  klok += 61 * 86400000;
+  mm.opruim();
+  assert.equal(mm._db.prepare('SELECT count(*) n FROM zaak').get().n, 0);
 });

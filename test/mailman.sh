@@ -23,6 +23,8 @@ grep -q "mailmanIsPad(req)) return mailmanRoute" server.js || { echo "ROOD  serv
 grep -q "route.indexOf('POST /app/mailman/') === 0" server.js || { echo "ROOD  server.js: /app/mailman niet in de app-routes"; f=1; }
 grep -q "if (route === 'POST /app/mailman/mail') return appMailmanMail(res, a, d || {});" server.js || { echo "ROOD  server.js: voorbeeld rechts (wv2029) niet gekoppeld"; f=1; }
 grep -q "if (appAfscherm(a) && b.postvak === 'gmail:david') return appWeiger(res, 403" server.js || { echo "ROOD  server.js: voorbeeld rechts toont privépost op een afgeschermd apparaat"; f=1; }
+grep -q "return typeof appMailZaken === 'function' ? appMailZaken(req, res, a, route)" server.js || { echo "ROOD  server.js: GET /app/mail/zaken (wv2218) niet gekoppeld"; f=1; }
+grep -q "if (appAfscherm(a)) return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'mail afgeschermd');" server.js || { echo "ROOD  server.js: de mail-lijst toont privépost op een afgeschermd apparaat"; f=1; }
 grep -q "mailman: typeof mailmanInfo" server.js || { echo "ROOD  server.js: mailman ontbreekt in /health"; f=1; }
 grep -q "r = toets ? await mailman.verkoopToets(d) : mailman.n8n" server.js || { echo "ROOD  server.js: /mailman/verkoop/toets niet via verkoopToets"; f=1; }
 grep -q "proces: intakeProces, verkoopTmp: '/dev/shm'" server.js || { echo "ROOD  server.js: verkoop-lezer niet lokaal in /dev/shm"; f=1; }

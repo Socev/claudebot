@@ -12416,6 +12416,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/tokens/openai' || route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/mailman' || route === 'GET /app/mailman/verkoop' || route.indexOf('POST /app/mailman/') === 0) return typeof appMailman === 'function' ? appMailman(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'mailman');   // wv1856: OVIS MailMan
+        if (route === 'GET /app/mail/zaken' || /^GET \/app\/mail\/zaken\/(jij|socev|weg|afgedaan)\/[1-9]\d?$/.test(route)) return typeof appMailZaken === 'function' ? appMailZaken(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mail');   // wv2218: Apps › Mail (zaakregister, alleen lezen)
         if (route === 'GET /app/werkstroom' || route.indexOf('GET /app/werkstroom/') === 0) return typeof appWerkstroom === 'function' ? appWerkstroom(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'werkstroom');   // wv2002: Werkstroom (alleen lezen)
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
@@ -16429,6 +16430,23 @@ async function appMailman(req, res, a, s, d, route) {
 // van een MailMan-besluit lezen via het bestaande lees-luik (mail_lezen van AI - Agenda-Wachter API; Doktersmaten met account dm), alleen
 // op Davids tik. Kop en platte tekst (≤ 12.000 tekens, zoals het luik hem geeft) gaan alleen naar de App: niets op schijf, niets in het
 // log (alleen "mailman mail"), geen bijlagen openen (alleen de soorten uit het logboek). Afgeschermd apparaat: geen privépost.
+// wv2218 (Mail-laag stap 3, David 1-11-2026 16:59 keuze 1): Apps › Mail — de lijst Jij · Socev deed · Weggezet per zaak (Gmail-draad) uit het
+// zaakregister van mailman.js (zakenLijst). Alleen lezen, apparaatsleutel (geen vingerafdruk: dezelfde gegevens als Apps › MailMan),
+// geen Gmail-actie. Afgeschermd apparaat: geen privépost (alles in deze lijst is privé). Geen 'stil': elke opening is een auditregel (B3.6).
+const MAIL_ZAKEN_UUR = 600;
+function appMailZaken(req, res, a, route) {
+  if (!mailman || typeof mailman.zakenLijst !== 'function') return appWeiger(res, 404, 'De mail-lijst zit niet in deze versie van de pod', 'mail ontbreekt');
+  if (appAfscherm(a)) return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'mail afgeschermd');
+  appStaat.tellers['mail-zaken'] = appStaat.tellers['mail-zaken'] || [];
+  if (!appTeller('mail-zaken', MAIL_ZAKEN_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens mail zaken');
+  const m = /^GET \/app\/mail\/zaken\/([a-z]+)\/(\d+)$/.exec(route);
+  let r;
+  try { r = mailman.zakenLijst(m ? { groep: m[1], pagina: Number(m[2]) } : {}); } catch (e) { logError('mail-zaken', e); return appWeiger(res, 500, 'fout op de pod', 'mail zaken uitzondering'); }
+  if (r.status !== 200) return appWeiger(res, r.status, 'Onbekende lijst', 'mail zaken ' + String(r.j && r.j.fout || '').slice(0, 40));
+  res._app.reden = 'mail zaken' + (m ? ' ' + m[1] + ' ' + m[2] : '');
+  if (m) res._app.stil = true;   // alleen de eerste pagina telt als "geopend"
+  return appStuur(res, 200, r.j);
+}
 const MAILMAN_MAIL_UUR = 240;
 async function appMailmanMail(res, a, d) {
   let b = null;

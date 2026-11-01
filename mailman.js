@@ -99,6 +99,11 @@
  * van de draad tellen als MailMans eigen (bron mailman/keuze, keus 'draad': nooit een eigen route naar Intake). Eén draadactie per draad
  * per ronde. Uit: config.json draad_uit[postvak] (dan weer per bericht).
  *
+ * ZAAKREGISTER (wv2218, 1-11-2026; Mail-laag stap 3, David 16:59 keuze 1: een eigen lijst naast Gmail). Eén zaak per draad in privé (tabel
+ * zaak), laag jij | socev | weg uit de vaste laagregel (laagBericht/laagDraad in K, LAAG_VERSIE), elke ronde opnieuw na de labelstaat; de
+ * inboxstand uit de extra n8n-lijst INBOX (14 dagen, ≤ 500, alleen lezen). Afgehandeld alleen na eerst in de inbox gezien en zonder
+ * MailMans eigen archief. GET /app/mail/zaken (zakenLijst) voor Apps › Mail. Schakelaar config.json zaken[postvak]; niets in Gmail.
+ *
  * DE RONDE (n8n, O.2): POST /mailman/start → per postvak de zoekvraag (venster uit de laatste geslaagde ronde) · /mailman/nieuw (alle id's
  * van de lijst, gepagineerd + volledig ja/nee) → de id's zonder besluit · /mailman/stap1 (kop, labels, bijlagen, privé ook tekst ≤ 4.000
  * tekens) → stap 0–3 + patiëntpoort, en de Jev-aanvragen · /mailman/stap2 (de Jev-antwoorden) → besluit · /mailman/gedaan.
@@ -118,7 +123,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-2.4';   // wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
+const VERSIE = 'mailman-2.5';   // wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -667,10 +672,68 @@ function venster(laatsteGeslaagd, nuMs) {
   return Math.max(VENSTER_MIN, Math.min(VENSTER_MAX, Number.isFinite(d) ? d : VENSTER_MAX));
 }
 
+/*
+ * ZAAKREGISTER (wv2218, Mail-laag stap 3; David 1-11-2026 16:59 "Akkoord met je voorstellen!", keuze 1: een eigen lijst naast Gmail).
+ * Bouwplan vault "01_Ontwikkeling/Mail-laag stap 3 - zaakregister en lijst (bouwplan 1-11-2026).md" § B3.1–B3.6 (ontwerp gereviewd door gpt-5.5,
+ * GO-MET-WIJZIGINGEN, verwerkt). Eén zaak per Gmail-draad in privé (gmail:david; nooit doktersmaten), in drie lagen: jij (wat David moet doen),
+ * socev (wat Socev deed: Intake, Facturen) en weg (wat weggezet zou worden — in deze stap blijft alles in Gmail staan: ALLEEN LEZEN).
+ * De laag is afgeleid, niet bedacht: elke ronde opnieuw uit besluit (stroom, juist), label_staat (vlaggen), route (Intake), factuurstap en
+ * de inboxstand. Hoogste wint per draad (jij > socev > weg); twijfel over de regel = jij. LAAG_VERSIE staat bij elke zaak.
+ * Afgehandeld door David alleen als MailMan de draad eerst ín de inbox zag en hij daarna verdween zonder MailMans eigen archief (B3.4).
+ * Schakelaar: config.json zaken["gmail:david"] (true of { aan: true }); uit = geen lagen meer, de inboxlijst van n8n wordt genegeerd.
+ */
+const LAAG_VERSIE = 'laag-1';
+const LAGEN = ['jij', 'socev', 'weg'];
+const LAAG_RANG = { jij: 3, socev: 2, weg: 1 };
+// vaste redencodes, in volgorde van gewicht binnen de laag (de app vertaalt ze naar gewone taal)
+const LAAG_REDENEN = { jij: ['slotje', 'vraagt_actie', 'actie_mogelijk', 'persoonlijk', 'socev_weet_het_niet'],
+  socev: ['facturen', 'second_brain', 'naar_second_brain'], weg: ['jouw_keuze', 'regel', 'vaste_regel', 'nieuwsbrief', 'systeemmelding', 'geen_actie'] };
+const LAAG_ACTIE_MIN = 0.5, LAAG_MENS_MIN = 0.5;          // B3.3: OVERIG zonder afmeldlink met Jev-actie of Jev-mens ≥ 0,5 = jij
+const FACTUUR_FASEN = ['ontvangen', 'verwerkt', 'in_sepa', 'is_betaald'];
+const ZAAK_BEWAAR_MS = 60 * 24 * 3600 * 1000, ZAAK_LIJST_MS = 14 * 24 * 3600 * 1000, ZAAK_PAGINA = 100, INBOX_MAX = 500;
+function getal(x) { const n = Number(x); return x === null || x === undefined || x === '' || !Number.isFinite(n) ? NaN : n; }
+/*
+ * Laag van één binnengekomen bericht. x = { status, stroom, juist, stap, reden, marker, zorg, botsing, afmeld, jev: {actie, mens, …} | null,
+ * vlag (TODO/ACTIE_DS geldt nu), route (status van de Intake-route of null), factuur (fase uit FACTUUR_FASEN) } → { laag, reden, detail }
+ */
+function laagBericht(x) {
+  if (!isObj(x)) return { laag: 'jij', reden: 'socev_weet_het_niet', detail: null };
+  if (x.marker || x.zorg) return { laag: 'jij', reden: 'slotje', detail: null };          // inhoud niet door AI gelezen — open zelf
+  if (x.vlag) return { laag: 'jij', reden: 'vraagt_actie', detail: null };
+  if (x.status !== 'klaar' || !x.stroom) return { laag: 'jij', reden: 'socev_weet_het_niet', detail: null };   // wacht nog op Jev of de pdf-toets
+  const keus = x.stroom === 'twijfel' && ['intake', 'factuur', 'info'].includes(x.juist) ? x.juist : null;
+  const s = keus || x.stroom;
+  if (s === 'intake') return { laag: 'socev', reden: x.route === 'verwerkt' ? 'second_brain' : 'naar_second_brain', detail: null };
+  if (s === 'factuur') return { laag: 'socev', reden: 'facturen', detail: FACTUUR_FASEN.includes(x.factuur) ? x.factuur : 'ontvangen' };
+  if (s !== 'info') return { laag: 'jij', reden: 'socev_weet_het_niet', detail: null };   // twijfel zonder keus, en alles wat de regel niet kent
+  if (keus) return { laag: 'weg', reden: 'jouw_keuze', detail: null };                    // David koos zelf Overig
+  if (x.botsing) return { laag: 'jij', reden: 'actie_mogelijk', detail: null };           // een regel stuurde weg wat Jev als mens-met-vraag of factuur zag
+  if (x.stap === 'weg') return { laag: 'weg', reden: 'regel', detail: null };             // Davids eigen Weg-regel
+  if (x.reden === 'ecobank') return { laag: 'weg', reden: 'vaste_regel', detail: null };
+  const j = isObj(x.jev) ? x.jev : null;
+  if (!x.afmeld && j && getal(j.actie) >= LAAG_ACTIE_MIN) return { laag: 'jij', reden: 'actie_mogelijk', detail: null };
+  if (!x.afmeld && j && getal(j.mens) >= LAAG_MENS_MIN) return { laag: 'jij', reden: 'persoonlijk', detail: null };
+  if (x.afmeld) return { laag: 'weg', reden: 'nieuwsbrief', detail: null };
+  if (!j) return { laag: 'jij', reden: 'socev_weet_het_niet', detail: null };            // geen Jev-oordeel en niet via een regel
+  return { laag: 'weg', reden: x.reden === 'hard_uit_systeem' ? 'systeemmelding' : 'geen_actie', detail: null };
+}
+// Laag van een draad: hoogste laag wint; binnen de laag de zwaarste reden, dan het nieuwste bericht. lijst = [{ ...laagBericht, tijd }]
+// → { laag, reden, detail, index } (index = welk bericht de laag gaf), of null bij een lege lijst
+function laagDraad(lijst) {
+  let best = null;
+  (Array.isArray(lijst) ? lijst : []).forEach(function (r, i) {
+    if (!isObj(r) || !LAAG_RANG[r.laag]) return;
+    const k = [LAAG_RANG[r.laag], -LAAG_REDENEN[r.laag].indexOf(r.reden), Date.parse(r.tijd || '') || 0];
+    if (!best || k[0] > best.k[0] || (k[0] === best.k[0] && (k[1] > best.k[1] || (k[1] === best.k[1] && k[2] >= best.k[2])))) best = { k, i, r };
+  });
+  return best ? { laag: best.r.laag, reden: best.r.reden, detail: best.r.detail || null, index: best.i } : null;
+}
+
 const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, eersteRegel, regelStroom, jevVragen,
   jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
   labelset2Lees, toetsRegelLabels, labelPlan2, alleenBetalen, ecobankMelding, DRAAD_LABELS, ERF_LABELS, DRAAD_SOORTEN, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
-  authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL };
+  authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL,
+  laagBericht, laagDraad, LAAG_VERSIE, LAGEN, LAAG_REDENEN, FACTUUR_FASEN };
 
 // ─────────────────────────── startset (O.5) ───────────────────────────
 
@@ -746,6 +809,11 @@ CREATE TABLE IF NOT EXISTS factuurstap (postvak TEXT NOT NULL, gmail_id TEXT NOT
   poging_tijd TEXT, PRIMARY KEY (postvak, gmail_id));
 CREATE TABLE IF NOT EXISTS vlag_plek (postvak TEXT NOT NULL, gmail_id TEXT NOT NULL, label TEXT NOT NULL, inbox_gezien TEXT, uit_gezien TEXT, uit_laatst TEXT,
   eigen INTEGER NOT NULL DEFAULT 0, afgedaan TEXT, pogingen INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (postvak, gmail_id, label));
+CREATE TABLE IF NOT EXISTS zaak (postvak TEXT NOT NULL, thread_id TEXT NOT NULL, bron TEXT NOT NULL DEFAULT 'gmail', eerste TEXT, laatste TEXT,
+  laatste_besluit INTEGER, berichten INTEGER NOT NULL DEFAULT 0, laag TEXT NOT NULL, laag_reden TEXT NOT NULL, laag_detail TEXT, laag_sinds TEXT NOT NULL,
+  laag_versie TEXT NOT NULL, laag_besluit INTEGER, inbox TEXT NOT NULL DEFAULT 'onbekend', inbox_tijd TEXT, inbox_gezien TEXT, eigen_archief INTEGER NOT NULL DEFAULT 0,
+  afgehandeld TEXT, afgehandeld_door TEXT, heropend TEXT, beantwoord TEXT, ooit_weggezet TEXT, bijgewerkt TEXT NOT NULL, PRIMARY KEY (postvak, thread_id));
+CREATE INDEX IF NOT EXISTS zaak_laag ON zaak (postvak, laag, laatste);
 `;
 
 // ─────────────────────────── opslag en routes ───────────────────────────
@@ -780,7 +848,8 @@ function maak(o) {
     ['besluit', 'juist_regel INTEGER'], ['besluit', 'juist_tijd TEXT'],   // wv2029: Twijfel-keuze via een regel op de pijplijn (en wanneer)
     ['regel', 'labels TEXT'], ['postvak', 'labelset2_sinds TEXT'], ['postvak', 'overstap_klaar TEXT'], ['besluit', 'keuze_tijd TEXT'],
     ['besluit', 'vangnet_tijd TEXT'], ['besluit', 'overstap_tijd TEXT'], ['besluit', 'overstap_poging INTEGER NOT NULL DEFAULT 0'],   // wv2033 B8 labelset 2
-    ['aanbod', 'thread_id TEXT'], ['aanbod', 'erf TEXT']]) {   // wv2196 draadlabels
+    ['aanbod', 'thread_id TEXT'], ['aanbod', 'erf TEXT'],   // wv2196 draadlabels
+    ['postvak', 'inbox_lijst TEXT'], ['postvak', 'zaken_tijd TEXT']]) {   // wv2218 zaakregister: laatste volledige inboxlijst, laatste berekening
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
   function tx(f) {
@@ -1145,6 +1214,133 @@ function maak(o) {
     return { ok: true, reden: 'Ja ' + t.ja.slice(0, 16) };
   }
 
+  // ─────────── zaakregister (wv2218, Mail-laag stap 3; zie de kop bij laagBericht) ───────────
+  function zakenAan(p) {
+    if (!p || p.gedeeld) return false;
+    const c = config(), z = isObj(c.zaken) ? c.zaken[p.id] : null;
+    return z === true || (isObj(z) && z.aan === true);
+  }
+  function labelsVan(b) { let l = []; try { l = JSON.parse(b.labels || '[]'); } catch (e) { l = []; } return Array.isArray(l) ? l : []; }
+  // fase van factuurmail: de factuurstap uit de Facturen-app gaat voor, dan MailMans archief (= verwerkt), anders ontvangen
+  function factuurFase(pv, b) {
+    const st = stapGet(pv, b.gmail_id);
+    if (st && STAP_RANG[st.stap]) return st.stap;
+    return b.archief_tijd ? 'verwerkt' : 'ontvangen';
+  }
+  // haalde MailMan zelf INBOX weg bij een bericht van deze draad (archief B6+, of een aanbod met INBOX eraf dat niet mislukte)?
+  function eigenArchief(pv, binnen) {
+    const q = db.prepare("SELECT 1 FROM aanbod WHERE postvak = ? AND gmail_id = ? AND eraf LIKE '%\"INBOX\"%' AND (uitkomst IS NULL OR uitkomst = 'ok') LIMIT 1");
+    return binnen.some(function (b) { return !!b.archief_tijd || !!q.get(pv, b.gmail_id); });
+  }
+  /*
+   * Elke ronde (na de labelstaat): alle draden met een bericht van de laatste 14 dagen opnieuw indelen. inbox = Map gmail_id → thread_id van
+   * een VOLLEDIGE inboxlijst (14 dagen), of null (geen of onvolledige lijst: inbox en afgehandeld blijven zoals ze waren).
+   *  in de inbox                → inbox ja (inbox_gezien); was hij afgehandeld, dan heropend
+   *  niet in de inbox, eerder gezien → inbox nee; zonder MailMans eigen archief = afgehandeld door David (david_gmail)
+   *  niet in de inbox, nooit gezien  → inbox nooit (Gmail-filter, andere route): de laag blijft staan
+   * Alleen beoordelen voor een draad met een bericht binnen 13 dagen (anders viel hij gewoon uit de lijst). Een nieuw bericht na
+   * afgehandeld heropent de zaak.
+   */
+  function zakenBij(p, inbox) {
+    const pv = p.id, t = iso(), n = nu(), venster = n - L2_VENSTER_MS;
+    const rijen = db.prepare("SELECT * FROM besluit WHERE postvak = ? AND inhaal = 0 AND thread_id IN (SELECT thread_id FROM besluit WHERE postvak = ? AND inhaal = 0 AND COALESCE(ontvangen, aangemaakt) >= ?) ORDER BY thread_id, COALESCE(ontvangen, aangemaakt), id")
+      .all(pv, pv, new Date(n - NAMEN_MS).toISOString());
+    const draden = new Map();
+    for (const b of rijen) { if (!draden.has(b.thread_id)) draden.set(b.thread_id, []); draden.get(b.thread_id).push(b); }
+    const inboxDraad = inbox ? new Set(Array.from(inbox.values()).filter(Boolean)) : null;
+    const tel = { draden: 0, jij: 0, socev: 0, weg: 0, afgedaan: 0, afgehandeld: 0, heropend: 0, nooit: 0, inbox: inbox ? 'volledig' : 'onbekend' };
+    const get = db.prepare('SELECT * FROM zaak WHERE postvak = ? AND thread_id = ?');
+    const zet = db.prepare(`INSERT OR REPLACE INTO zaak (postvak, thread_id, bron, eerste, laatste, laatste_besluit, berichten, laag, laag_reden, laag_detail, laag_sinds,
+      laag_versie, laag_besluit, inbox, inbox_tijd, inbox_gezien, eigen_archief, afgehandeld, afgehandeld_door, heropend, beantwoord, ooit_weggezet, bijgewerkt)
+      VALUES (?, ?, 'gmail', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const tijd = function (b) { return b.ontvangen || b.aangemaakt; };
+    tx(function () {
+      for (const [th, alle] of draden) {
+        if (!ID_RE.test(String(th))) continue;
+        const binnen = alle.filter(function (b) { return !buitenRij(b); });
+        if (!binnen.length) continue;   // alleen eigen verzonden mail: geen zaak
+        let beantwoord = null;
+        for (const b of alle) if (buitenRij(b) && labelsVan(b).includes('SENT') && (!beantwoord || tijd(b) > beantwoord)) beantwoord = tijd(b);
+        const lagen = binnen.map(function (b) {
+          const rt = routeGet(pv, b.gmail_id);
+          return Object.assign(laagBericht({ status: b.status, stroom: b.stroom, juist: b.juist, stap: b.stap, reden: b.reden, marker: !!b.marker,
+            zorg: b.marker_soorten === 'zorgmail' || b.reden === 'zorgmail', botsing: b.botsing || null, afmeld: !!b.afmeld, jev: ruwVan(b), vlag: vlagNu(pv, b),
+            route: rt ? rt.status : null, factuur: stroomEffectief(b) === 'factuur' ? factuurFase(pv, b) : null }), { tijd: tijd(b) });
+        });
+        const l = laagDraad(lagen);
+        const oud = get.get(pv, th), laatste = tijd(binnen[binnen.length - 1]);
+        let inb = oud ? oud.inbox : 'onbekend', inbT = oud ? oud.inbox_tijd : null, gezien = oud ? oud.inbox_gezien : null, eigen = oud ? oud.eigen_archief : 0;
+        let af = oud ? oud.afgehandeld : null, afDoor = oud ? oud.afgehandeld_door : null, her = oud ? oud.heropend : null, open = false;
+        if (af && laatste > af) open = true;   // nieuw bericht na afgehandeld
+        if (inboxDraad) {
+          if (inboxDraad.has(th) || binnen.some(function (b) { return inbox.has(b.gmail_id); })) {
+            if (af) open = true;   // weer in de inbox
+            inb = 'ja'; inbT = t; gezien = t; eigen = 0;
+          } else if (Date.parse(laatste) >= venster) {
+            inbT = t;
+            if (gezien) {
+              inb = 'nee';
+              eigen = eigenArchief(pv, binnen) ? 1 : 0;
+              if (!eigen && !af && !open) { af = t; afDoor = 'david_gmail'; tel.afgehandeld++; }
+            } else { inb = 'nooit'; tel.nooit++; }
+          }
+        }
+        if (open) { af = null; afDoor = null; her = t; tel.heropend++; }
+        const sinds = oud && oud.laag === l.laag ? oud.laag_sinds : t;
+        const ooit = oud && oud.ooit_weggezet ? oud.ooit_weggezet : (l.laag === 'weg' ? t : null);
+        zet.run(pv, th, tijd(binnen[0]), laatste, binnen[binnen.length - 1].id, binnen.length, l.laag, l.reden, l.detail, sinds, LAAG_VERSIE, binnen[l.index].id,
+          inb, inbT, gezien, eigen, af, afDoor, her, beantwoord, ooit, t);
+        tel.draden++;
+        if (af) tel.afgedaan++; else tel[l.laag]++;
+      }
+      db.prepare('UPDATE postvak SET zaken_tijd = ?, inbox_lijst = COALESCE(?, inbox_lijst) WHERE id = ?').run(t, inbox ? t : null, pv);
+      db.prepare('DELETE FROM zaak WHERE postvak = ? AND laatste < ?').run(pv, new Date(n - ZAAK_BEWAAR_MS).toISOString());
+    });
+    return tel;
+  }
+  // GET /app/mail/zaken[/<groep>/<pagina>] — de lijst Jij · Socev deed · Weggezet · Afgedaan (alleen lezen). Afzender en onderwerp uit het
+  // nieuwste besluit van de draad (na 14 dagen alleen het domein). Alleen zaken met een bericht van de laatste 14 dagen; ≤ 100 per groep.
+  const ZAAK_GROEPEN = { jij: "z.afgehandeld IS NULL AND z.laag = 'jij'", socev: "z.afgehandeld IS NULL AND z.laag = 'socev'", weg: "z.afgehandeld IS NULL AND z.laag = 'weg'", afgedaan: 'z.afgehandeld IS NOT NULL' };
+  function zaakRij(z) {
+    const tw = z.laag === 'jij' && z.laag_reden === 'socev_weet_het_niet'
+      ? db.prepare("SELECT id FROM besluit WHERE postvak = ? AND thread_id = ? AND inhaal = 0 AND status = 'klaar' AND stroom = 'twijfel' AND juist IS NULL ORDER BY id DESC LIMIT 1").get(z.postvak, z.thread_id) : null;
+    return { draad: z.thread_id, laag: z.laag, reden: z.laag_reden, detail: z.laag_detail || null, sinds: z.laag_sinds, eerste: z.eerste, laatste: z.laatste, berichten: z.berichten,
+      inbox: z.inbox, inbox_tijd: z.inbox_tijd || null, eigen_archief: !!z.eigen_archief, afgehandeld: z.afgehandeld || null, heropend: z.heropend || null, beantwoord: z.beantwoord || null,
+      afzender: z.afzender || null, naam: z.van_naam || null, domein: z.afzender_domein || null, onderwerp: z.onderwerp || null, namen_weg: !!z.namen_weg, twijfel: tw ? tw.id : null };
+  }
+  function lokaleDag(ms) { try { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); } catch (e) { return new Date(ms).toISOString().slice(0, 10); } }
+  function zakenLijst(d) {
+    d = isObj(d) ? d : {};
+    const p = postvak('gmail:david');
+    if (!p || !zakenAan(p)) return { status: 200, j: { ok: true, aan: false } };
+    const groep = d.groep == null ? null : String(d.groep), pagina = d.pagina == null ? 1 : Number(d.pagina);
+    if (groep !== null && !Object.prototype.hasOwnProperty.call(ZAAK_GROEPEN, groep)) return { status: 404, j: { ok: false, fout: 'onbekende groep' } };
+    if (!Number.isSafeInteger(pagina) || pagina < 1 || pagina > 50) return { status: 404, j: { ok: false, fout: 'onbekende pagina' } };
+    const grens = new Date(nu() - ZAAK_LIJST_MS).toISOString();
+    const basis = ' FROM zaak z LEFT JOIN besluit b ON b.id = z.laatste_besluit WHERE z.postvak = ? AND z.laatste >= ? AND ';
+    const tellers = {}, lagen = {}, meer = {};
+    for (const g of Object.keys(ZAAK_GROEPEN)) {
+      tellers[g] = db.prepare('SELECT count(*) n' + basis + ZAAK_GROEPEN[g]).get(p.id, grens).n;
+      if (groep !== null && g !== groep) continue;
+      const van = (groep === g ? pagina - 1 : 0) * ZAAK_PAGINA;
+      lagen[g] = db.prepare('SELECT z.*, b.afzender, b.van_naam, b.afzender_domein, b.onderwerp, b.namen_weg' + basis + ZAAK_GROEPEN[g] + ' ORDER BY z.laatste DESC, z.thread_id LIMIT ? OFFSET ?')
+        .all(p.id, grens, ZAAK_PAGINA, van).map(zaakRij);
+      meer[g] = tellers[g] > van + lagen[g].length;
+    }
+    const vandaag = lokaleDag(nu());
+    const weg_vandaag = db.prepare("SELECT laatste FROM zaak WHERE postvak = ? AND laag = 'weg' AND laatste >= ?").all(p.id, new Date(nu() - 2 * 86400000).toISOString())
+      .filter(function (z) { return lokaleDag(Date.parse(z.laatste)) === vandaag; }).length;
+    const bij = p.zaken_tijd ? Date.parse(p.zaken_tijd) : NaN;
+    return { status: 200, j: { ok: true, aan: true, versie: LAAG_VERSIE, bijgewerkt: p.zaken_tijd || null, inbox_bijgewerkt: p.inbox_lijst || null,
+      verouderd: !Number.isFinite(bij) || nu() - bij > 2 * 3600000, groep, pagina, per_pagina: ZAAK_PAGINA, tellers, weg_vandaag, lagen, meer } };
+  }
+  function zakenStand(p) {
+    if (!zakenAan(p)) return { aan: false };
+    const r = {};
+    for (const x of db.prepare("SELECT CASE WHEN afgehandeld IS NOT NULL THEN 'afgedaan' ELSE laag END g, count(*) n FROM zaak WHERE postvak = ? AND laatste >= ? GROUP BY 1").all(p.id, new Date(nu() - ZAAK_LIJST_MS).toISOString())) r[x.g] = x.n;
+    return { aan: true, jij: r.jij || 0, socev: r.socev || 0, weg: r.weg || 0, afgedaan: r.afgedaan || 0, bijgewerkt: p.zaken_tijd || null, inbox_bijgewerkt: p.inbox_lijst || null };
+  }
+
   // ─────────── B8 labelset 2 (wv2033): labels als routering ───────────
   /*
    * Alleen als config.json labelset2[postvak] geldig is (labelset2Lees; schrijft de machinekamer na Davids Ja), nooit doktersmaten, en
@@ -1279,9 +1475,21 @@ function maak(o) {
     const pv = p.id, tel = { labels: 0, afgekapt: 0, onbekend: 0, verdacht: 0, verzonden: 0, keuze_gmail: 0, david_erbij: 0, david_eraf: 0, routes_nieuw: 0, ingetrokken: 0, terug_gepland: 0, verwerkt: 0, correcties: 0,
       vlag_lijsten: 0, vlag_inbox: 0, vlag_uit: 0, vlag_eigen: 0 };
     const lijst = {}, vlagLijst = {};
+    let inboxLijst = null, inboxGezien = false;   // wv2218: de inbox van de laatste 14 dagen (alleen voor het zaakregister; geen label)
     for (const x of (Array.isArray(d.labels) ? d.labels : []).slice(0, 20)) {
       if (!isObj(x)) continue;
       const naam = String(x.naam || '');
+      if (naam === 'INBOX') {
+        if (inboxGezien || String(x.id || '') !== 'INBOX') { tel.onbekend++; continue; }
+        inboxGezien = true;
+        const ber = Array.isArray(x.berichten) ? x.berichten : null;
+        const m = new Map();
+        // onvolledig (paginering, fout, > 500) = inboxstand onbekend: het zaakregister verandert dan niets aan inbox of afgehandeld
+        if (x.volledig !== true || !ber || ber.length > INBOX_MAX || !ber.every(function (y) {
+          if (!isObj(y) || !ID_RE.test(String(y.gmail_id || ''))) return false; m.set(String(y.gmail_id), ID_RE.test(String(y.thread_id || '')) ? String(y.thread_id) : null); return true; })) { tel.inbox_afgekapt = 1; continue; }
+        inboxLijst = m; tel.inbox = m.size;
+        continue;
+      }
       const vl = Object.prototype.hasOwnProperty.call(VLAG_LIJSTEN, naam) ? VLAG_LIJSTEN[naam] : null;   // wv2189: plek van de vlaggen
       if (vl ? set.ids[vl[0]] !== String(x.id || '') : (!set.ids[naam] || set.ids[naam] !== String(x.id || ''))) { tel.onbekend++; continue; }
       const ber = Array.isArray(x.berichten) ? x.berichten : null;
@@ -1403,6 +1611,11 @@ function maak(o) {
       const bew = inIntake(pv, open.map(function (x) { return x.gmail_id; }));
       for (const x of open) if (bew.has(x.gmail_id)) { db.prepare("UPDATE route SET status = 'verwerkt', verwerkt_tijd = ?, bijgewerkt = ? WHERE id = ?").run(iso(), iso(), x.id); tel.verwerkt++; }
     });
+    // wv2218: het zaakregister na de labelstaat (de routes en vlaggen van deze ronde tellen mee). Los afgevangen: een fout hier laat de
+    // labelronde nooit falen.
+    if (zakenAan(p)) {
+      try { tel.zaken = zakenBij(p, inboxLijst); } catch (e) { fout('mailman-zaken', e); tel.zaken_fout = 1; }
+    }
     return { status: 200, j: { ok: true, actief: true, telling: tel } };
   }
   /*
@@ -2221,6 +2434,7 @@ function maak(o) {
   function opruim() {
     const grens = new Date(nu() - NAMEN_MS).toISOString();
     db.prepare('DELETE FROM aanbod WHERE tijd < ?').run(new Date(nu() - 30 * 86400000).toISOString());   // wv2033: aanbiedingen alleen voor de terugmelding
+    db.prepare('DELETE FROM zaak WHERE laatste < ?').run(new Date(nu() - ZAAK_BEWAAR_MS).toISOString());   // wv2218: alleen metadata, 60 dagen
     db.prepare("UPDATE besluit SET afzender = NULL, van_naam = NULL, aan = NULL, onderwerp = NULL, namen_weg = ? WHERE aangemaakt < ? AND namen_weg IS NULL").run(iso(), grens);
     // wv1998: de bestandsnamen van verkoopnota's (kunnen een patiëntnaam dragen) na dezelfde 14 dagen weg; nummer en bedrag blijven
     for (const v of db.prepare("SELECT id, pdfs FROM verkoop WHERE kandidaat_tijd < ? AND pdfs LIKE '%\"naam\":\"%'").all(grens)) {
@@ -2751,6 +2965,7 @@ function maak(o) {
         labelset: !!l2Live(p),   // wv2033 B8
         factuurstap: p.gedeeld ? undefined : stapStand(p, dag),   // wv2036 statuslabels: alleen tellingen
         afgedaan: p.gedeeld ? undefined : afgedaanStand(p, dag),   // wv2189: alleen tellingen
+        zaken: p.gedeeld ? undefined : zakenStand(p),   // wv2218: alleen tellingen
         routes_24u: db.prepare('SELECT count(*) n FROM route WHERE postvak = ? AND aangemaakt >= ?').get(p.id, dag).n,
         correcties_24u: db.prepare('SELECT count(*) n FROM correctie WHERE postvak = ? AND tijd >= ?').get(p.id, dag).n,
         verkoop: p.id === VERKOOP_POSTVAK ? Object.assign({ door: !!p.verkoop_door, archief: !!p.verkoop_archief, toegestaan: verkoopMag(p).ok }, verkoopTellers(p.id, dag)) : undefined };   // wv1997: alleen tellingen
@@ -2812,7 +3027,7 @@ function maak(o) {
     }
     return uit;
   }
-  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, werkstroomTel, werkstroomLijst, mailBron, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
+  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, werkstroomTel, werkstroomLijst, mailBron, zakenLijst, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
 }
 
 function isPad(p) { return p === '/mailman' || String(p).indexOf('/mailman/') === 0; }
