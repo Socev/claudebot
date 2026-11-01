@@ -18,7 +18,9 @@
 # ENV DIE DIT SCRIPT LEEST:
 #   POD_BOOTSTRAP_SECRET  het bootstrapgeheim voor de RPC (leeg = overgangsmodus)
 #   SUPABASE_URL          basis-URL van het Supabase-project
-#   SUPABASE_ANON_KEY     anon-key; gaat mee als apikey én als Bearer-token
+#   SUPABASE_PUBLISHABLE_KEY  publishable key (sb_publishable_…); gaat mee als apikey én als Bearer-token.
+#                         Ontbreekt hij, dan de ingebouwde constante hieronder.
+#   SUPABASE_ANON_KEY     legacy anon-JWT: alleen nog gebruikt met SUPABASE_LEGACY_TERUG=1 (noodterugval), anders genegeerd
 set -u
 
 log() { printf '%s fetch-secrets: %s\n' "$(date '+%F %T')" "$1"; }
@@ -142,7 +144,7 @@ if [ "${POD_ZONDER_KLUIS:-}" = "1" ]; then
   export SECRETS_GELADEN=""
   export KLUIS_OVERGESLAGEN=1   # zichtbaar in /health, zodat de wachters het onderscheid zien
   # Zelfde opruiming als op de andere exec-paden: wat niet nodig is, geven we niet door.
-  unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY 2>/dev/null || true
+  unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY SUPABASE_PUBLISHABLE_KEY SUPABASE_LEGACY_TERUG 2>/dev/null || true
   kant_toepassen
   exec "$@"
 fi
@@ -155,7 +157,7 @@ if [ -z "${POD_BOOTSTRAP_SECRET:-}" ]; then
   if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     log "POD_BOOTSTRAP_SECRET leeg, maar CLAUDE_CODE_OAUTH_TOKEN staat in de omgeving -> overgangsmodus, doorstarten op de bestaande env"
     export SECRETS_GELADEN=""
-    unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY   # zie de toelichting bij de laatste exec
+    unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY SUPABASE_PUBLISHABLE_KEY SUPABASE_LEGACY_TERUG   # zie de toelichting bij de laatste exec
     kant_toepassen
     exec "$@"
   fi
@@ -163,8 +165,23 @@ if [ -z "${POD_BOOTSTRAP_SECRET:-}" ]; then
   exit 78
 fi
 
-if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_ANON_KEY:-}" ]; then
-  log "FATAAL: SUPABASE_URL of SUPABASE_ANON_KEY ontbreekt, terwijl er wel een bootstrapgeheim is"
+# ── Welke transportsleutel (wv2146, 1-11-2026) ─────────────────────────────
+# Supabase faseert de legacy anon-JWT uit (eind 2026). De publishable key is net als de anon-JWT per ontwerp
+# openbaar (zelfde rol anon; de bescherming zit in p_bootstrap en de lockout van de RPC), dus hij mag als
+# constante in de code staan. De env wint. SUPABASE_ANON_KEY uit de chart telt alleen nog als iemand bewust
+# SUPABASE_LEGACY_TERUG=1 zet: anders zou de legacy-waarde die nog in de chart staat stil blijven winnen en
+# merken we het uitzetten pas bij de eerstvolgende herstart (review wv2134 MOET 1).
+SUPABASE_PUBLISHABLE_STANDAARD='sb_publishable_aW96y8tmzTVc0_VKqSOLRg_LgBckhLO'
+if [ "${SUPABASE_LEGACY_TERUG:-}" = "1" ] && [ -n "${SUPABASE_ANON_KEY:-}" ]; then
+  SB_SLEUTEL="$SUPABASE_ANON_KEY"
+  log "LET OP: SUPABASE_LEGACY_TERUG=1 - de legacy anon-sleutel wordt gebruikt (noodterugval)"
+else
+  SB_SLEUTEL="${SUPABASE_PUBLISHABLE_KEY:-$SUPABASE_PUBLISHABLE_STANDAARD}"
+  [ -n "${SUPABASE_ANON_KEY:-}" ] && log "SUPABASE_ANON_KEY genegeerd (publishable key; legacy alleen met SUPABASE_LEGACY_TERUG=1)"
+fi
+
+if [ -z "${SUPABASE_URL:-}" ] || [ -z "$SB_SLEUTEL" ]; then
+  log "FATAAL: SUPABASE_URL of de Supabase-sleutel ontbreekt, terwijl er wel een bootstrapgeheim is"
   exit 78
 fi
 
@@ -201,8 +218,8 @@ GEDAAN=0
 for ((i = 1; i <= POGINGEN; i++)); do
   GEDAAN=$i
   RUW="$(bouw_body | curl -sS -m 20 -X POST "${SUPABASE_URL}${RPC_PAD}" \
-    -H "apikey: ${SUPABASE_ANON_KEY}" \
-    -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+    -H "apikey: ${SB_SLEUTEL}" \
+    -H "Authorization: Bearer ${SB_SLEUTEL}" \
     -H 'Content-Type: application/json' \
     -d @- 2>/dev/null)"
   CURL_CODE=$?
@@ -365,6 +382,6 @@ log "klaar; via de RPC geladen: ${GELADEN:-(geen)}"
 # jobs hebben ze niet nodig, en kubelet levert ze bij elke herstart opnieuw aan.
 # Zonder deze regel kan iemand met /run-toegang ze uit /proc/self/environ vissen -
 # en daarmee alle secrets opnieuw ophalen, wat elke rotatie zinloos maakt.
-unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY
+unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY SUPABASE_PUBLISHABLE_KEY SUPABASE_LEGACY_TERUG SB_SLEUTEL
 
 exec "$@"
