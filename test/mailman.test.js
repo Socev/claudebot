@@ -58,6 +58,8 @@ function draai(mm, pv, mails, opties) {
 function jevAntwoord(w) {
   const answers = {};
   for (const k of ['factuur', 'mens', 'actie', 'systeem', 'aan_ai', 'injectie']) answers[k] = { type: 'noul', noul: w[k] == null ? 0.02 : w[k] };
+  // wv2189: actie_anders (iets anders dan betalen) volgt standaard actie, zodat de oudere toetsen hetzelfde blijven
+  answers.actie_anders = { type: 'noul', noul: w.actie_anders != null ? w.actie_anders : (w.actie == null ? 0.02 : w.actie) };
   answers.waarde = { type: 'score', score: w.waarde == null ? 1 : w.waarde, legend: {}, probabilities: {}, confidence: 0.8 };
   return { result: { state: 'Completed', result: { model: 'jev-1.13.0', answers, usage: { input_tokens: w.tokens || 900, output_tokens: 40 } } }, success: true };
 }
@@ -1635,17 +1637,24 @@ function nepGmail() {
   const ber = new Map();
   const g = {
     ber,
-    voeg: function (m, sent) { ber.set(m.id, { thread: m.threadId, labels: new Set(), sent: !!sent }); return m; },
+    voeg: function (m, sent) { ber.set(m.id, { thread: m.threadId, labels: new Set(), sent: !!sent, plek: 'inbox' }); return m; },
+    plek: function (id, p) { ber.get(id).plek = p; },   // wv2189: inbox | archief | prullenbak (David)
     zet: function (id, l) { ber.get(id).labels.add(l); },
     weg: function (id, l) { ber.get(id).labels.delete(l); },
     heeft: function (id, l) { return ber.get(id).labels.has(l); },
     draadLabel: function (thread, l) { for (const x of ber.values()) if (x.thread === thread) x.labels.add(l); },   // Gmail-UI: het hele gesprek
     lijsten: function (o) {
       o = o || {};
-      return Object.keys(IDS2).map(function (naam) {
+      const uit = Object.keys(IDS2).map(function (naam) {
         return { naam, id: o.ander && o.ander[naam] ? o.ander[naam] : IDS2[naam], volledig: o.afgekapt !== naam,
-          berichten: Array.from(ber.entries()).filter(function (e) { return (o.metVerzonden || !e[1].sent) && !(o.leeg && naam !== 'AI/MailMan') && e[1].labels.has(naam); }).map(function (e) { return { gmail_id: e[0], thread_id: e[1].thread }; }) };
+          berichten: Array.from(ber.entries()).filter(function (e) { return (o.metVerzonden || !e[1].sent) && e[1].plek !== 'prullenbak' && !(o.leeg && naam !== 'AI/MailMan') && e[1].labels.has(naam); }).map(function (e) { return { gmail_id: e[0], thread_id: e[1].thread }; }) };
       });
+      // wv2189: per vlag de lijst in de inbox en buiten de inbox (gearchiveerd of prullenbak; zonder tijdgrens, nooit verzonden)
+      if (o.vlag) for (const l of ['TODO', 'ACTIE_DS']) for (const kant of ['inbox', 'uit']) {
+        uit.push({ naam: l + '@' + kant, id: o.vlagId || IDS2[l], volledig: o.vlagAfgekapt !== l + '@' + kant,
+          berichten: Array.from(ber.entries()).filter(function (e) { return !e[1].sent && e[1].labels.has(l) && (kant === 'inbox' ? e[1].plek === 'inbox' : e[1].plek !== 'inbox'); }).map(function (e) { return { gmail_id: e[0], thread_id: e[1].thread }; }) });
+      }
+      return uit;
     },
     fout: false,
     pas: function (acties) {
@@ -1653,8 +1662,13 @@ function nepGmail() {
         const x = ber.get(a.gmail_id);
         if (g.fout) return { gmail_id: a.gmail_id, ok: false, fout: 'HTTP 500' };
         if (!x || x.sent) return { gmail_id: a.gmail_id, ok: false, overgeslagen: true };
+        // wv2189: de n8n-grens bij afgedaan: nooit in de inbox, nooit bij NIEUWSBRIEF, alleen weghalen wat er staat; prullenbak mag
+        if (a.soort === 'afgedaan' && (x.plek === 'inbox' || x.labels.has('NIEUWSBRIEF'))) return { gmail_id: a.gmail_id, ok: false, overgeslagen: true };
+        if (a.soort === 'afgedaan') { const w = a.eraf.filter(function (l) { return x.labels.has(l); }); w.forEach(function (l) { x.labels.delete(l); }); return { gmail_id: a.gmail_id, erbij: [], eraf: w, ok: true }; }
+        if (x.plek === 'prullenbak') return { gmail_id: a.gmail_id, ok: false, overgeslagen: true };
         for (const l of a.erbij) if (!['UNREAD', 'INBOX'].includes(l)) x.labels.add(l);
         for (const l of a.eraf) x.labels.delete(l);
+        if (a.eraf.includes('INBOX')) x.plek = 'archief';
         return { gmail_id: a.gmail_id, erbij: a.erbij, eraf: a.eraf, ok: true };
       });
     },
@@ -2236,4 +2250,184 @@ test('wv2036 factuurstap wacht op het archiveren (n8n archiveert alleen met FACT
   assert.deepEqual([h3.opgegeven, h3.overgeslagen_24u], [1, 5]);
   assert.ok(!mm.zorgen().some(function (z) { return /statuslabel/.test(z); }), 'overgeslagen geeft geen box-regel');
   klok -= 25 * 3600000;
+});
+
+// ── wv2189 (David 1-11-2026 12:02): factuur alleen betalen zonder actievlag; actievlag weg nadat David archiveert of weggooit ──
+function afgedaanToestaan(dir) {
+  const f = path.join(dir, 'config.json'), c = JSON.parse(fs.readFileSync(f, 'utf8'));
+  c.actielabel_weg = { 'gmail:david': { ja: '2026-11-02T09:30:00Z', door: 'proef' }, 'gmail:groenhouten': { ja: 'x' } };
+  fs.writeFileSync(f, JSON.stringify(c), { mode: 0o600 });
+}
+function soortActies(x, s) { return x.l.j.acties.filter(function (a) { return a.soort === s; }); }
+function afStand(mm) { return mm.info().postvakken.find(function (p) { return p.id === 'gmail:david'; }).afgedaan; }
+
+test('wv2189 labelplan: factuur waarbij alleen betalen gevraagd wordt krijgt geen ACTIE_DS/TODO; factuur + vraag wel; niet gemeten = als vroeger; alleen bij factuur', () => {
+  const inst = { todo_nooit: [] };
+  const m = Object.assign({ van_domein: 'hotmail.invalid', onderwerp: 'factuur oktober', afmeld: false, tab: null });
+  const ruw = function (anders) { const r = { factuur: 0.97, mens: 0.86, actie: 0.99, waarde: 2.16 }; if (anders !== undefined) r.actie_anders = anders; return r; };
+  assert.equal(K.alleenBetalen(ruw(0.3)), true);
+  assert.equal(K.alleenBetalen(ruw(0.8)), false, 'grens 0,8 = er wordt iets anders gevraagd');
+  assert.equal(K.alleenBetalen(ruw()), false, 'niet gemeten');
+  assert.equal(K.alleenBetalen(null), false);
+  assert.deepEqual(K.labelPlan2('factuur', ruw(0.3), m, inst).labels, ['FACTUUR'], 'besluit 231: alleen betalen');
+  assert.deepEqual(K.labelPlan2('factuur', ruw(0.95), m, inst).labels, ['FACTUUR', 'ACTIE_DS'], 'factuur + vraag');
+  assert.deepEqual(K.labelPlan2('factuur', ruw(), m, inst).labels, ['FACTUUR', 'ACTIE_DS'], 'oud besluit zonder meting');
+  assert.deepEqual(K.labelPlan2('intake', ruw(0.3), m, inst).labels, ['INTAKE', 'ACTIE_DS'], 'alleen bij FACTUUR');
+  assert.deepEqual(K.labelPlan2('factuur', ruw(0.3), m, inst, ['ACTIE_DS']).labels, ['FACTUUR', 'ACTIE_DS'], 'Davids eigen regel blijft gelden');
+  assert.deepEqual(K.labelPlan('factuur', ruw(0.3), Object.assign({}, m), { stromen: {} }), ['FACTUUR'], '1.8-plan: geen TODO');
+  assert.deepEqual(K.labelPlan('factuur', ruw(0.95), Object.assign({}, m), { stromen: {} }), ['FACTUUR', 'TODO']);
+  assert.ok(K.VLAG_LIJSTEN['TODO@uit'] && K.VLAG_LIJSTEN['ACTIE_DS@inbox']);
+});
+
+test('wv2189 Jev-vraag actie_anders: in de startset, één keer gezaaid in een bestaande databank, Davids uitgezette vraag blijft uit; gaat mee naar Jev', () => {
+  const { mm, dir } = nieuweKamer();
+  const q = function () { return mm._db.prepare("SELECT * FROM jev_vraag WHERE postvak = '*' AND sleutel = 'actie_anders'").all(); };
+  assert.equal(q().length, 1);
+  assert.equal(q()[0].rol, 'meten');
+  // databank van vóór wv2189: vraag weg → bij het openen komt hij er (achteraan) bij
+  mm._db.prepare("DELETE FROM jev_vraag WHERE sleutel = 'actie_anders'").run();
+  const mm2 = MM.maak({ dir, nu: function () { return klok; }, marker: poort, eigenAdressen: function () { return []; }, intakeDraden: function () { return new Set(); }, primair: function () { return true; }, geheimOk: function () { return true; } });
+  const r2 = mm2._db.prepare("SELECT * FROM jev_vraag WHERE postvak = '*' AND sleutel = 'actie_anders'").all();
+  assert.equal(r2.length, 1);
+  assert.equal(r2[0].volgorde, mm2._db.prepare("SELECT max(volgorde) v FROM jev_vraag WHERE postvak = '*'").get().v);
+  mm2._db.prepare("UPDATE jev_vraag SET actief = 0 WHERE sleutel = 'actie_anders'").run();
+  const mm3 = MM.maak({ dir, nu: function () { return klok; }, marker: poort, eigenAdressen: function () { return []; }, intakeDraden: function () { return new Set(); }, primair: function () { return true; }, geheimOk: function () { return true; } });
+  assert.deepEqual(mm3._db.prepare("SELECT actief FROM jev_vraag WHERE sleutel = 'actie_anders'").all().map(function (x) { return x.actief; }), [0], 'uit blijft uit, geen tweede rij');
+  const { mm: mm4 } = nieuweKamer();
+  const m = mail({ aan: ALIAS, bijlagen: [{ naam: 'f.pdf', mime: 'application/pdf' }] });
+  const x = draai(mm4, 'gmail:david', [m], { jev: function () { return jevAntwoord({}); } });
+  assert.ok(x.s1.j.jev.length === 0 || Object.keys(x.s1.j.jev[0].body.input.questions).includes('actie_anders'));
+});
+
+test('wv2189 ronde: waarnemersfactuur (persoonlijk, alleen betalen) → alleen FACTUUR, wordt na verwerking gearchiveerd; factuur + vraag → ACTIE_DS en niet gearchiveerd', () => {
+  const verwerkt = new Map();
+  const k = nieuweKamer({ factuurVerwerkt: function (ids) { return new Map(ids.filter(function (i) { return verwerkt.has(i); }).map(function (i) { return [i, 1]; })); } });
+  const { mm, dir } = k, gm = nepGmail();
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir); uitgangToestaan(dir, ['gmail:david']); vinkje(mm, 'factuur', 'archief');
+  const pdf = [{ naam: 'Factuur.pdf', mime: 'application/pdf' }];
+  const a = mail({ van: 'Piet <p.voorbeeld@hotmail.invalid>', bijlagen: pdf }), b = mail({ van: 'Jan <j.voorbeeld@hotmail.invalid>', bijlagen: pdf });
+  const jev = { [a.id]: { factuur: 0.97, mens: 0.86, actie: 0.99, actie_anders: 0.3, waarde: 2 }, [b.id]: { factuur: 0.97, mens: 0.9, actie: 0.99, actie_anders: 0.95, waarde: 2 } };
+  gm.voeg(a); gm.voeg(b);
+  const r = ronde(mm, 'gmail:david');
+  mm.n8n('POST /mailman/nieuw', { ronde: r.ronde, postvak: 'gmail:david', ids: [a.id, b.id], volledig: true });
+  const s1 = mm.n8n('POST /mailman/stap1', { ronde: r.ronde, postvak: 'gmail:david', mails: [a, b], gevolgd: [] });
+  mm.n8n('POST /mailman/stap2', { ronde: r.ronde, postvak: 'gmail:david', antwoorden: s1.j.jev.map(function (x) { return { gmail_id: x.gmail_id, antwoord: jevAntwoord(jev[x.gmail_id]) }; }) });
+  mm.n8n('POST /mailman/labelstaat', { ronde: r.ronde, postvak: 'gmail:david', labels: gm.lijsten({ vlag: true }) });
+  const l = mm.n8n('POST /mailman/labels', { ronde: r.ronde, postvak: 'gmail:david', ids: [a.id, b.id] });
+  mm.n8n('POST /mailman/gezet', { ronde: r.ronde, postvak: 'gmail:david', resultaten: gm.pas(l.j.acties) });
+  mm.n8n('POST /mailman/gedaan', { ronde: r.ronde, postvak: 'gmail:david' });
+  assert.deepEqual(JSON.parse(rij(mm, a.id).labels_plan), ['FACTUUR'], 'geen TODO in het plan');
+  assert.deepEqual(Array.from(gm.ber.get(a.id).labels).sort(), ['FACTUUR']);
+  assert.deepEqual(Array.from(gm.ber.get(b.id).labels).sort(), ['ACTIE_DS', 'FACTUUR']);
+  verwerkt.set(a.id, 1); verwerkt.set(b.id, 1);
+  const x = l2Ronde(mm, gm, [a.id, b.id], { vlag: true });
+  assert.deepEqual(soortActies(x, 'archief').map(function (y) { return y.gmail_id; }), [a.id], 'alleen de factuur zonder vlag');
+  assert.equal(gm.ber.get(a.id).plek, 'archief');
+  assert.equal(gm.ber.get(b.id).plek, 'inbox');
+});
+
+test('wv2189 afgedaan: alleen na Davids archiveren of prullenbak, alleen met de schakelaar; niet bij NIEUWSBRIEF, niet als de vlag pas buiten de inbox kwam, niet na MailMans eigen archief', () => {
+  const { mm, dir, gm } = b8Kamer();
+  const ms = [mail(), mail(), mail(), mail(), mail(), mail(), mail()];
+  const [a, f, c, d, e, g, h] = ms;
+  draai(mm, 'gmail:david', ms, { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  ms.forEach(function (m) { gm.voeg(m); });
+  const ids = ms.map(function (m) { return m.id; });
+  l2Ronde(mm, gm, ids, { vlag: true });   // eerste volledige lijsten (bron voor), OVERIG via de besluittak
+  gm.zet(a.id, 'ACTIE_DS'); gm.zet(f.id, 'ACTIE_DS'); gm.zet(f.id, 'TODO'); gm.zet(c.id, 'TODO'); gm.zet(c.id, 'NIEUWSBRIEF'); gm.zet(e.id, 'TODO'); gm.zet(g.id, 'TODO'); gm.zet(h.id, 'TODO');
+  gm.plek(d.id, 'archief');
+  l2Ronde(mm, gm, ids, { vlag: true });   // alle vlaggen in de inbox gezien (behalve d: die is al gearchiveerd)
+  gm.zet(d.id, 'TODO');                    // David zet TODO op een mail die al gearchiveerd was
+  mm._db.prepare('UPDATE besluit SET archief_tijd = ? WHERE gmail_id = ?').run(new Date(klok).toISOString(), e.id);   // MailMans eigen archief
+  gm.plek(a.id, 'archief'); gm.plek(f.id, 'prullenbak'); gm.plek(c.id, 'archief'); gm.plek(e.id, 'archief'); gm.plek(g.id, 'archief');
+  // zonder schakelaar: niets in Gmail, wel geteld
+  const s = l2Ronde(mm, gm, ids, { vlag: true });
+  assert.deepEqual(soortActies(s, 'afgedaan'), []);
+  assert.equal(s.l.j.telling.afgedaan_schaduw, 3, 'a, f en g (niet c: nieuwsbrief, d: nooit in de inbox gezien, e: eigen archief)');
+  assert.equal(s.s.j.telling.vlag_eigen, 1);
+  assert.deepEqual([afStand(mm).aan, afStand(mm).wacht, afStand(mm).eigen], [false, 4, 1], 'c telt als wacht maar wordt overgeslagen (nieuwsbrief)');
+  // g gaat terug in de inbox vóór de schakelaar aan gaat → geen afgedaan
+  gm.plek(g.id, 'inbox');
+  afgedaanToestaan(dir);
+  const x = l2Ronde(mm, gm, ids, { vlag: true });
+  const per = perId(soortActies(x, 'afgedaan'));
+  assert.deepEqual(Object.keys(per).sort(), [a.id, f.id].sort());
+  assert.deepEqual(per[a.id].erbij, []); assert.deepEqual(per[a.id].eraf, ['ACTIE_DS']);
+  assert.deepEqual(per[f.id].eraf.slice().sort(), ['ACTIE_DS', 'TODO'], 'prullenbak: beide vlaggen');
+  assert.equal(x.l.j.telling.afgedaan, 2);
+  assert.equal(x.g.j.telling.afgedaan, 2);
+  assert.equal(gm.heeft(a.id, 'ACTIE_DS'), false); assert.equal(gm.heeft(f.id, 'TODO'), false);
+  assert.ok(gm.heeft(c.id, 'TODO') && gm.heeft(c.id, 'NIEUWSBRIEF'), 'gearchiveerde nieuwsbrief houdt zijn labels');
+  assert.ok(gm.heeft(d.id, 'TODO') && gm.heeft(e.id, 'TODO') && gm.heeft(g.id, 'TODO') && gm.heeft(h.id, 'TODO'));
+  assert.equal(lsRij(mm, a.id, 'ACTIE_DS').weg_door, 'mailman');
+  // volgende ronde: niets meer, en de lijst ziet geen 'David haalde het weg'
+  const y = l2Ronde(mm, gm, ids, { vlag: true });
+  assert.deepEqual(soortActies(y, 'afgedaan'), []);
+  assert.equal(y.s.j.telling.david_eraf, 0);
+  // h: archiveren, maar de lijst buiten de inbox is afgekapt → niets; daarna volledig → afgedaan
+  gm.plek(h.id, 'archief');
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids, { vlag: true, vlagAfgekapt: 'TODO@uit' }), 'afgedaan'), []);
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids, { vlag: true, vlagId: 'Label_99' }), 'afgedaan'), [], 'verkeerd label-ID');
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids, { vlag: true }), 'afgedaan').map(function (z) { return z.gmail_id; }), [h.id]);
+  // David zet de vlag opnieuw en zet de mail terug in de inbox: nieuw begin; weer archiveren → weer weg
+  gm.zet(a.id, 'TODO'); gm.plek(a.id, 'inbox');
+  l2Ronde(mm, gm, ids, { vlag: true });
+  gm.plek(a.id, 'archief');
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids, { vlag: true }), 'afgedaan').map(function (z) { return [z.gmail_id, z.eraf]; }), [[a.id, ['TODO']]]);
+  // doktersmaten nooit
+  assert.equal(mm.info().postvakken.find(function (p) { return p.id === 'gmail:groenhouten'; }).afgedaan, undefined);
+});
+
+test('wv2189 afgedaan: overgeslagen bij de n8n-grens is geen labelfout, hooguit 5 pogingen; labelset 2 uit = niets', () => {
+  const { mm, dir, gm } = b8Kamer();
+  const a = mail();
+  draai(mm, 'gmail:david', [a], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir); afgedaanToestaan(dir);
+  gm.voeg(a);
+  l2Ronde(mm, gm, [a.id], { vlag: true });
+  gm.zet(a.id, 'TODO');
+  l2Ronde(mm, gm, [a.id], { vlag: true });
+  gm.plek(a.id, 'archief');
+  gm.zet(a.id, 'NIEUWSBRIEF');   // de nep-grens slaat over; label_staat ziet NIEUWSBRIEF pas als David het zet — hier tegelijk
+  let n = 0, fouten = 0;
+  for (let i = 0; i < 8; i++) { const x = l2Ronde(mm, gm, [a.id], { vlag: true, afgekapt: 'NIEUWSBRIEF' }); n += soortActies(x, 'afgedaan').length; fouten += x.g.j.telling.fout; }
+  assert.equal(n, 5, 'hooguit 5 keer aangeboden');
+  assert.equal(fouten, 0);
+  assert.equal(afStand(mm).opgegeven, 1);
+  // labelset 2 weg: geen vlaglijsten, geen afgedaan
+  const f = path.join(dir, 'config.json'), c = JSON.parse(fs.readFileSync(f, 'utf8')); delete c.labelset2; fs.writeFileSync(f, JSON.stringify(c), { mode: 0o600 });
+  assert.equal(afStand(mm).aan, false);
+});
+
+test('wv2189 archief na een weggehaalde vlag: factuurmail met ACTIE_DS (oud besluit) wacht; na Davids archiveren gaat ACTIE_DS eraf en volgt FACTUUR/verwerkt; David haalt hem zelf weg → archief', () => {
+  const verwerkt = new Map();
+  const intake = new Set();
+  const k = nieuweKamer({ factuurVerwerkt: function (ids) { return new Map(ids.filter(function (i) { return verwerkt.has(i); }).map(function (i) { return [i, 1]; })); },
+    intakeBerichten: function (pv, ids) { return new Set(ids.filter(function (i) { return intake.has(i); })); } });
+  const { mm, dir } = k, gm = nepGmail();
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir); uitgangToestaan(dir, ['gmail:david']); vinkje(mm, 'factuur', 'archief');
+  const pdf = [{ naam: 'Factuur.pdf', mime: 'application/pdf' }];
+  const a = mail({ bijlagen: pdf }), b = mail({ bijlagen: pdf });
+  gm.voeg(a); gm.voeg(b);
+  // een besluit van vóór wv2189 (Jev zonder actie_anders): FACTUUR + ACTIE_DS
+  draai(mm, 'gmail:david', [a, b], { jev: function () { return jevAntwoord({ factuur: 0.97, mens: 0.86, actie: 0.99, waarde: 2 }); } });
+  mm._db.prepare("UPDATE besluit SET jev = json_remove(jev, '$.actie_anders')").run();
+  assert.ok(JSON.parse(rij(mm, a.id).labels_plan).includes('TODO'), 'oud plan noemt TODO');
+  const ids = [a.id, b.id];
+  l2Ronde(mm, gm, ids, { vlag: true });
+  assert.ok(gm.heeft(a.id, 'ACTIE_DS') && gm.heeft(b.id, 'ACTIE_DS'));
+  l2Ronde(mm, gm, ids, { vlag: true });
+  verwerkt.set(a.id, 1); verwerkt.set(b.id, 1);
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids, { vlag: true }), 'archief'), [], 'met ACTIE_DS nooit archief');
+  afgedaanToestaan(dir);
+  gm.plek(a.id, 'archief');            // David archiveert a
+  gm.weg(b.id, 'ACTIE_DS');            // David haalt bij b zelf ACTIE_DS weg (b blijft in de inbox)
+  const x = l2Ronde(mm, gm, ids, { vlag: true });
+  assert.deepEqual(soortActies(x, 'afgedaan').map(function (y) { return y.gmail_id; }), [a.id]);
+  assert.deepEqual(soortActies(x, 'archief').map(function (y) { return y.gmail_id; }), [b.id], 'b: David haalde de vlag weg → meteen archief');
+  const y = l2Ronde(mm, gm, ids, { vlag: true });
+  assert.deepEqual(soortActies(y, 'archief').map(function (z) { return z.gmail_id; }), [a.id], 'a: na afgedaan de ronde erna (staat al buiten de inbox: alleen het sublabel)');
+  assert.ok(gm.heeft(a.id, 'FACTUUR/verwerkt') && gm.heeft(b.id, 'FACTUUR/verwerkt'));
+  assert.equal(gm.ber.get(b.id).plek, 'archief');
 });
