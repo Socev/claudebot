@@ -764,7 +764,7 @@ test('wv1317: de ronde beoordeelt na een regelwijziging één keer opnieuw (ná 
   const r = F.ronde(t.fdb, { nu: NU });
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(r.herbeoordeling.ok, true, JSON.stringify(r.herbeoordeling));
-  assert.equal(D.metaLees(t.fdb, 'bank_regels'), 'wv1317');
+  assert.equal(D.metaLees(t.fdb, 'bank_regels'), 'wv2260');   // wv2260: versie opgehoogd (herbeoordeling sluit de open zonder-factuur-signalen)
   assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'herbeoordeling'"), 1);
   const r2 = F.ronde(t.fdb, { nu: NU + 60000 });
   assert.equal(r2.herbeoordeling, undefined);

@@ -3145,7 +3145,7 @@ function afschriftKlaarzetten(fdb, r, invoer, o) {
 // keer opnieuw, ná de back-up: zo vervallen voorstellen die onder de oude regels ontstonden, ook zonder nieuwe bankupload (elke upload en
 // bankluis-ronde doet hetzelfde al via bankcontroleToepassen). Mislukt het: ok = false (de koerier meldt 'herbeoordeling') en de volgende
 // back-upronde probeert het opnieuw; de meta-sleutel wordt pas gezet na een geslaagde transactie (wv1317).
-const BANK_REGELS = 'wv1317';
+const BANK_REGELS = 'wv2260';   // wv2260: herbeoordeling sluit de open "afschrijving zonder factuur" ook zonder nieuwe bankregels (was wv1317)
 function ronde(fdb, o) {
   const nu = o.nu || Date.now();
   const uit = { ok: true };
