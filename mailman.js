@@ -1227,6 +1227,8 @@ function maak(o) {
     if (!uitgangMag(p).ok) { uit.reden = 'uitgangen niet toegestaan'; return uit; }
     if (!l2Live(p)) { uit.reden = 'labelset 2 staat niet live'; return uit; }
     uit.ja = true; uit.ecobank = t.ecobank === true; uit.facturen = t.facturen === true; uit.reden = 'Ja ' + t.ja.slice(0, 16);
+    // ecobank_max (proef): hooguit zoveel per ronde (1..ECOBANK_MAX); ontbreekt = ECOBANK_MAX
+    uit.ecobank_max = Number.isInteger(t.ecobank_max) && t.ecobank_max >= 1 ? Math.min(t.ecobank_max, ECOBANK_MAX) : ECOBANK_MAX;
     return uit;
   }
   // wv2259: server.js meldt na elke Ecobank-ronde welke mails de pod verwerkte (ecobank_tx); nieuwe komen erbij, bestaande blijven. → aantal nieuw
@@ -1873,7 +1875,7 @@ function maak(o) {
     if (iu.ecobank && !vol()) {
       let n = 0;
       for (const x of db.prepare('SELECT gmail_id FROM ecobank_mail WHERE postvak = ? AND archief_tijd IS NULL AND pogingen < ? ORDER BY bekend_tijd, gmail_id LIMIT 200').all(pv, ECOBANK_POGINGEN)) {
-        if (vol() || n >= ECOBANK_MAX) break;
+        if (vol() || n >= iu.ecobank_max) break;
         const id = x.gmail_id;
         if (acties.has(id) || lsHeeft(pv, id, 'TODO') || lsHeeft(pv, id, 'ACTIE_DS')) continue;
         const b = besluitVan(pv, id);

@@ -2907,6 +2907,9 @@ test('wv2259 ecobank: alleen met inbox_uit.ja + ecobank, alleen verwerkte id\'s,
   // 25 nieuwe verwerkte meldingen → hooguit 20 per ronde; overgeslagen bij de grens telt als poging, geen labelfout, na 5 opgegeven
   const veel = []; for (let i = 0; i < 25; i++) { const m = mail({ van: 'noreply@ecobank.com' }); gm.voeg(m); veel.push(m.id); }
   mm.ecobankBekend('gmail:david', veel);
+  inboxUitToestaan(dir, { ecobank: true, ecobank_max: 2 });
+  assert.equal(soortActies(l2Ronde(mm, gm, ids), 'ecobank').length, 2, 'proefgrens ecobank_max');
+  inboxUitToestaan(dir, { ecobank: true, ecobank_max: 99 });
   assert.equal(soortActies(l2Ronde(mm, gm, ids), 'ecobank').length, 20);
   const z = mail(); mm.ecobankBekend('gmail:david', [z.id]);   // niet in nep-Gmail → overgeslagen
   let n = 0, fout = 0;
