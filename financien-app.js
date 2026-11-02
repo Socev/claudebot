@@ -4,7 +4,7 @@
 // dezelfde database. bank-lezer.js (opdracht app-financien) roept dit aan; de pod geeft het door aan GET /app/financien.
 //
 // Het antwoord wordt veld voor veld opgebouwd (nooit een bankobject doorgeven; Fable wv771 #9): geen IBAN of rekeningnummer, geen
-// machtiging, geen omschrijving, geen losse posten, geen saldo behalve de dekking van de vaste-lastenrekening. Namen wel (wv1957, David
+// machtiging, geen omschrijving, geen losse posten, geen saldo behalve de dekking en het blok saldi (wv2258, de bewaarde stand per rekening). Namen wel (wv1957, David
 // 28-10: "Je moet NIETS voor mij afschermen"; dit antwoord gaat alleen naar zijn App): steun met de naam uit het archief, een externe
 // rekening met zijn naam (plus extern: true), een PayPal-ontvanger en een aanbieder onder "dubbel" altijd bij naam, ook als het een
 // persoon is. De briefing (hieronder) gaat via de n8n-tabel ochtend_buffer en Voor jou-kaarten en houdt de oude regels (wv777).
@@ -128,6 +128,40 @@ function vasteRekening(a) {
   return l.length === 1 ? l[0].rek : null;
 }
 function rekNaam(n, extern) { return veilig(n, 30) || (extern ? 'extern' : 'eigen rekening'); }
+
+// ── Saldi per rekening (wv2258, David 2-11-2026: "waar vind ik een overzicht van Saldi per rekening?") ──
+// De laatst bewaarde stand per rekening (bank-lezer.js: tabel saldo in cache.sqlite, gevuld door de bank-ronde en bank.py saldo); geen
+// bankopvraag bij het openen. Alleen open rekeningen (bunq ACTIVE, niet ontkoppeld). Per rekening de groep uit de eigenaar in het archief
+// (zoals bank.py saldo en de rest van de App): eigen, samen (gezamenlijk), kind, Gambia-hulp, extern (op Davids naam, niet van hem),
+// Cynthia, onbekend. De POT-rekening apart (zakelijk; de App-sessie is altijd de eigenaar). Geen IBAN; alleen bij twee rekeningen met
+// dezelfde naam de laatste vier cijfers, anders zijn ze niet uit elkaar te houden. Geen totaal: de App telt niets op.
+const SALDO_GROEP = { david: 'eigen', samen: 'samen', kind: 'kind', 'gambia-hulp': 'gambia', extern: 'extern', cynthia: 'cynthia', pot: 'pot' };
+const SALDO_VOLGORDE = ['eigen', 'samen', 'kind', 'cynthia', 'gambia', 'extern', 'onbekend'];
+function blokSaldi(a, rijen) {
+  const st = new Map((rijen || []).map(function (r) { return [r.rek, r]; }));
+  const reks = a.db.prepare('SELECT rek, bron, naam, label, status, gezamenlijk, eigenaar, iban_eind FROM rekeningen').all()
+    .filter(function (r) { return r.status !== 'ontkoppeld' && (r.bron !== 'bunq' || r.status === 'ACTIVE'); });
+  const uit = [], pot = [];
+  let zonder = 0;
+  reks.forEach(function (r) {
+    const groep = SALDO_GROEP[String(r.eigenaar || '').toLowerCase()] || 'onbekend', s = st.get(r.rek);
+    let j = null;
+    try { j = s ? JSON.parse(s.json) : null; } catch (e) { j = null; }
+    if (!j || getal(j.geboekt) === null) { zonder++; return; }
+    const besch = getal(j.beschikbaar), saldo = getal(j.geboekt);
+    const x = { naam: veilig(r.label || r.naam, 40) || 'Rekening', bank: r.bron === 'bunq' ? 'bunq' : r.bron === 'abn' ? 'ABN AMRO' : 'bank', groep: groep,
+      gezamenlijk: r.gezamenlijk ? true : undefined, saldo: saldo, beschikbaar: besch !== null && besch !== saldo ? besch : undefined,
+      valuta: /^[A-Z]{3}$/.test(String(j.valuta || '')) ? j.valuta : 'EUR', stand_van: /^\d{4}-\d{2}-\d{2}T/.test(String(s.opgehaald || '')) ? s.opgehaald : null, _eind: r.iban_eind };
+    (groep === 'pot' ? pot : uit).push(x);
+  });
+  [uit, pot].forEach(function (l) {
+    const tel = new Map();
+    l.forEach(function (x) { tel.set(x.naam.toLowerCase(), (tel.get(x.naam.toLowerCase()) || 0) + 1); });
+    l.forEach(function (x) { if (tel.get(x.naam.toLowerCase()) > 1 && /^\d{4}$/.test(String(x._eind || ''))) x.eind = x._eind; delete x._eind; });
+    l.sort(function (p, q) { return SALDO_VOLGORDE.indexOf(p.groep) - SALDO_VOLGORDE.indexOf(q.groep) || p.naam.localeCompare(q.naam, 'nl') || String(p.eind || '').localeCompare(String(q.eind || '')); });
+  });
+  return { rekeningen: uit, pot: pot, zonder_stand: zonder };
+}
 
 // ── de blokken ──
 function blokMaand(A, a, m) {
@@ -378,6 +412,7 @@ function bereken(A, a, o) {
   blok('energie', function () { signaalEnergie(a, mNu, vanaf, signalen); });
   blok('dubbel', function () { signaalDubbel(A, a, L.links, signalen, true); });
   uit.paypal = ppD ? blok('paypal', function () { return blokPaypal(ppD, L.links, signalen, A); }) : null;
+  uit.saldi = o.saldi ? blok('saldi', function () { return blokSaldi(a, o.saldi); }) : null;   // wv2258: alleen via bank-lezer (de bewaarde standen)
   // één signaal per soort en post (een PayPal-dienst op zijn dienst, wv909: de titel van een onbekende dienst draagt de incassodag, die
   // in de bank en in de ontvangstbewijzen een dag kan verschillen); gedempt wat David al kent (Bewust-tabel)
   const gezien = new Set();
@@ -571,4 +606,4 @@ function briefingTekst(nieuw) {
   return r.join('\n');
 }
 
-module.exports = { bereken, leesLinks, linkGeldig, linkVoor, LINK_HOSTS, LINK_PAGINA, plusMaanden, maandPlus, briefing, briefingNieuw, briefingTekst, briefingDag, werkdag, feestdag, pasen };
+module.exports = { bereken, blokSaldi, leesLinks, linkGeldig, linkVoor, LINK_HOSTS, LINK_PAGINA, plusMaanden, maandPlus, briefing, briefingNieuw, briefingTekst, briefingDag, werkdag, feestdag, pasen };

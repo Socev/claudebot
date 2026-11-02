@@ -11112,7 +11112,7 @@ async function appFinancien(req, res, a) {
     return appWeiger(res, 503, oud ? 'Financiën wordt net bijgewerkt; probeer het over een paar minuten' : 'de cijfers zijn nu niet te lezen; probeer het zo opnieuw', oud ? 'financien oud' : 'financien fout');
   }
   const d = {};
-  ['peildatum', 'maand', 'deze_maand', 'vorige_maand', 'verloop', 'vaste_lasten', 'buffer', 'stroom', 'paypal', 'signalen', 'links', 'fouten', 'gambia'].forEach(function (k) { d[k] = j[k] === undefined ? null : j[k]; });   // wv2202: + gambia
+  ['peildatum', 'maand', 'deze_maand', 'vorige_maand', 'verloop', 'vaste_lasten', 'buffer', 'stroom', 'paypal', 'signalen', 'links', 'fouten', 'gambia', 'saldi'].forEach(function (k) { d[k] = j[k] === undefined ? null : j[k]; });   // wv2202: + gambia; wv2258: + saldi
   if (typeof secondbrainFinPagina === 'function') secondbrainFinPagina(d);   // wv832: link naar de vaultpagina (koppeltabel)
   appFinCache = Array.isArray(d.fouten) && d.fouten.length ? null : { op: nu, d: d };   // half overzicht niet bewaren (Fable diffreview #4)
   return appStuur(res, 200, appFinSamen({ ok: true, vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }, d, appFinVault(nu)));   // wv1337: + vault

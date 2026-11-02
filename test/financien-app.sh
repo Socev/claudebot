@@ -176,12 +176,61 @@ toets('bewust: PayPal-dubbel gedempt; rij zonder woord van David dempt niets (Kr
   toets('kapot blok: alleen stroom en buffer leeg, rest gevuld, foutnaam zonder inhoud', u3.fouten.indexOf('stroom') >= 0 && u3.buffer === null && u3.vaste_lasten && u3.verloop && !/Jan Jansen/.test(JSON.stringify(u3)), u3.fouten);
 }
 
+// ── wv2258: saldi per rekening (de bewaarde stand, geen bankopvraag) ──
+{
+  const BD3 = path.join(W, 'bank3'), a3 = A.open(BD3);
+  const R3 = {
+    vl: { uid: 'u1', bank: 'ABN AMRO', label: 'Vaste lasten', naam: 'D VOORBEELD CJ', iban: 'NL00ABNA0123456789', sessie: 's1' },
+    pt: { uid: 'u2', bank: 'ABN AMRO', label: 'POT', naam: 'D VOORBEELD', iban: 'NL66ABNA0987654321', sessie: 's1' },
+    hr: { bron: 'bunq', uid: 'bunq-1', bunq_id: 1, naam: 'Hoofdrekening', soort: 'lopend', iban: 'NL11BUNQ0000001111', status: 'ACTIVE' },
+    k1: { bron: 'bunq', uid: 'bunq-2', bunq_id: 2, naam: 'Kleedgeld', soort: 'lopend', iban: 'NL11BUNQ0000002222', status: 'ACTIVE' },
+    k2: { bron: 'bunq', uid: 'bunq-3', bunq_id: 3, naam: 'Kleedgeld', soort: 'lopend', iban: 'NL11BUNQ0000003333', status: 'ACTIVE' },
+    ki: { bron: 'bunq', uid: 'bunq-4', bunq_id: 4, naam: 'Kids sparen', soort: 'spaar', iban: 'NL11BUNQ0000004444', status: 'ACTIVE' },
+    ex: { bron: 'bunq', uid: 'bunq-5', bunq_id: 5, naam: 'Rekening Petronella', soort: 'lopend', iban: 'NL11BUNQ0000005555', status: 'ACTIVE' },
+    gh: { bron: 'bunq', uid: 'bunq-6', bunq_id: 6, naam: 'Gambia Noodfonds', soort: 'spaar', iban: 'NL11BUNQ0000006666', status: 'ACTIVE' },
+    dicht: { bron: 'bunq', uid: 'bunq-7', bunq_id: 7, naam: 'Oude vakantie', soort: 'spaar', iban: 'NL11BUNQ0000007777', status: 'CANCELLED' },
+    leeg: { bron: 'bunq', uid: 'bunq-8', bunq_id: 8, naam: 'Nog zonder stand', soort: 'spaar', iban: 'NL11BUNQ0000008888', status: 'ACTIVE' },
+  };
+  A.zakelijkZet(a3, { 'NL66ABNA0987654321': 'POT' });
+  A.rekeningenSync(a3, R3);
+  A.corrigeer(a3, { rek: 'ex', eigenaar: 'extern' });
+  const op = '2026-11-02T06:00:41.249Z', sj = (geboekt, besch, val) => JSON.stringify({ geboekt: geboekt, beschikbaar: besch, valuta: val || 'EUR', peildatum: op });
+  const rijen = [['vl', sj(2500.5, 2400)], ['pt', sj(12000, 12000)], ['hr', sj(1234.56, null)], ['k1', sj(10, 10)], ['k2', sj(20, 20)], ['ki', sj(300, null)],
+    ['ex', sj(77, null)], ['gh', sj(450, null)], ['dicht', sj(999, null)]].map((x) => ({ rek: x[0], json: x[1], opgehaald: op }));
+  rijen.push({ rek: 'kapot', json: '{niet', opgehaald: op });
+  const S = F.blokSaldi(a3, rijen), t3 = JSON.stringify(S), naam = (n) => S.rekeningen.filter((x) => x.naam === n);
+  toets('saldi: alle open rekeningen met een stand, gesloten niet, zonder stand geteld; POT apart', S.rekeningen.length === 7 && !/Oude vakantie|999/.test(t3) && S.zonder_stand === 1 &&
+    S.pot.length === 1 && S.pot[0].naam === 'POT' && S.pot[0].groep === 'pot' && !S.rekeningen.some((x) => x.groep === 'pot'), S);
+  toets('saldi: groepen uit de eigenaar (eigen, samen+gezamenlijk, kind, Gambia-hulp, extern) in die volgorde', naam('Vaste lasten')[0].groep === 'samen' && naam('Vaste lasten')[0].gezamenlijk === true &&
+    naam('Hoofdrekening')[0].groep === 'eigen' && naam('Kids sparen')[0].groep === 'kind' && naam('Gambia Noodfonds')[0].groep === 'gambia' && naam('Rekening Petronella')[0].groep === 'extern' &&
+    JSON.stringify(S.rekeningen.map((x) => x.groep)) === JSON.stringify(['eigen', 'eigen', 'eigen', 'samen', 'kind', 'gambia', 'extern']), S.rekeningen.map((x) => [x.naam, x.groep]));
+  toets('saldi: bedrag, valuta, stand van; beschikbaar alleen als het afwijkt', naam('Vaste lasten')[0].saldo === 2500.5 && naam('Vaste lasten')[0].beschikbaar === 2400 && naam('Hoofdrekening')[0].beschikbaar === undefined &&
+    naam('Kleedgeld')[0].beschikbaar === undefined && S.rekeningen.every((x) => x.valuta === 'EUR' && x.stand_van === op) && naam('Vaste lasten')[0].bank === 'ABN AMRO' && naam('Hoofdrekening')[0].bank === 'bunq', S.rekeningen);
+  toets('saldi: geen IBAN; laatste vier cijfers alleen bij twee rekeningen met dezelfde naam', !/NL\d{2}[A-Z]{4}\d{6,}/.test(t3) && naam('Kleedgeld').map((x) => x.eind).join() === '2222,3333' &&
+    S.rekeningen.filter((x) => x.naam !== 'Kleedgeld').every((x) => x.eind === undefined) && !/_eind|iban|"rek"/.test(t3), S.rekeningen);
+  const leegS = F.blokSaldi(a3, []);
+  toets('saldi: zonder bewaarde standen een lege lijst en het aantal zonder stand', leegS.rekeningen.length === 0 && leegS.pot.length === 0 && leegS.zonder_stand === 9, leegS);
+  const u5 = F.bereken(A, a3, { vault: VAULT, saldi: rijen }), u6 = F.bereken(A, a3, { vault: VAULT });
+  toets('saldi: in bereken alleen met de standen van bank-lezer (zonder: null, geen fout)', u5.saldi && u5.saldi.rekeningen.length === 7 && u6.saldi === null && u6.fouten.indexOf('saldi') < 0, [u5.saldi, u6.fouten]);
+  a3.db.close();
+}
+
 // ── via bank-lezer.js (zoals de pod het aanroept): lokaal, zonder kluis ──
 {
+  // wv2258: bewaarde standen in cache.sqlite (tabel saldo, zoals bank-lezer.js die vult)
+  { const { DatabaseSync } = require('node:sqlite'), c = new DatabaseSync(path.join(BD, 'cache.sqlite'));
+    c.exec('CREATE TABLE IF NOT EXISTS saldo (rek TEXT PRIMARY KEY, json TEXT, opgehaald TEXT)');
+    const z = c.prepare('INSERT OR REPLACE INTO saldo (rek, json, opgehaald) VALUES (?, ?, ?)');
+    z.run('pr', JSON.stringify({ geboekt: 4321, beschikbaar: null, valuta: 'EUR', peildatum: null }), '2026-11-02T06:00:00.000Z');
+    z.run('el', JSON.stringify({ geboekt: 55, beschikbaar: null, valuta: 'EUR', peildatum: null }), '2026-11-02T06:00:00.000Z');
+    c.close(); }
   a.db.close();
   const r = spawnSync(process.execPath, ['--no-warnings', '--require', './test/vaste-klok.cjs', 'bank-lezer.js', 'app-financien'], { input: '{}', env: { PATH: process.env.PATH, BANK_DIR: BD, VAULT_DIR: VAULT, TZ: 'Europe/Amsterdam', TOETS_KLOK_DELTA: process.env.TOETS_KLOK_DELTA || '' }, encoding: 'utf8', timeout: 60000 });
   let j = null; try { j = JSON.parse(String(r.stdout).trim().split('\n').pop()); } catch (e) {}
   toets('bank-lezer app-financien: ok, zonder kluissleutels, zelfde vorm', r.status === 0 && j && j.ok === true && j.vaste_lasten && Array.isArray(j.signalen) && j.paypal && j.paypal.actief === 0, [r.status, String(r.stderr).slice(0, 300), j && Object.keys(j)]);
+  toets('bank-lezer app-financien: blok saldi uit de bewaarde standen (Privé eigen, de externe rekening gemarkeerd)', j && j.saldi && j.saldi.rekeningen.length === 2 &&
+    j.saldi.rekeningen.some((x) => x.naam === 'Privé' && x.saldo === 4321 && x.groep === 'eigen') && j.saldi.rekeningen.some((x) => x.groep === 'extern' && x.saldo === 55) && j.saldi.zonder_stand === 2, j && j.saldi);
+  toets('server.js: GET /app/financien geeft het blok saldi door', /'gambia', 'saldi'\]\.forEach\(function \(k\) \{ d\[k\]/.test(fs.readFileSync('server.js', 'utf8')), null);
   const srv = fs.readFileSync('server.js', 'utf8');
   toets('server.js: app-financien in BANK_LOKAAL (geen kluis), niet in BANK_OPDRACHTEN (/smal/bank)', /const BANK_LOKAAL = \[[^\]]*'app-financien'/.test(srv) && !/const BANK_OPDRACHTEN = \[[^\]]*'app-financien'/.test(srv), null);
   const src = fs.readFileSync('financien-app.js', 'utf8').replace(/^\s*(\*|\/\/).*$/gm, '');

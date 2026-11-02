@@ -1192,7 +1192,10 @@ const opdrachten = {
   async 'vaste-lasten'(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.vasteLasten(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^(maand|rekening):/.test(e.message)) throw new Weigering(e.message); throw e; } },
   // wv771: App Financiën — één alleen-lees overzicht, veld voor veld opgebouwd (financien-app.js); alleen voor GET /app/financien
   async 'app-financien'() { const x = archiefKlaar(); let P = null; try { P = paypalModule(); } catch (e) { P = null; }
-    const uit = Object.assign({ ok: true, bron: 'archief' }, require(path.join(__dirname, 'financien-app.js')).bereken(x.A, x.a, { paypal: P }));
+    // wv2258: blok saldi = de bewaarde stand per rekening (tabel saldo, zoals bank.py saldo die leest); geen bankopvraag, geen slot nodig
+    let saldi = null; try { saldi = db().prepare('SELECT rek, json, opgehaald FROM saldo').all(); } catch (e) { saldi = null; }
+    const uit = Object.assign({ ok: true, bron: 'archief' }, require(path.join(__dirname, 'financien-app.js')).bereken(x.A, x.a, { paypal: P, saldi: saldi || [] }));
+    if (!saldi) { uit.saldi = null; uit.fouten = (uit.fouten || []).concat(['saldi']); }
     // wv2202: tabblad Gambia (Ecobank uit de mails); een fout hier maakt alleen dat blok leeg
     try { const g = ecobankModule().overzicht(x.a, { max: 30 }); uit.gambia = { rekeningen: g.rekeningen, transacties: g.transacties, ronde_op: g.ronde_op, let_op: g.let_op_ecobank }; }
     catch (e) { uit.gambia = null; uit.fouten = (uit.fouten || []).concat(['gambia']); }
