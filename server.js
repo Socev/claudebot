@@ -16732,6 +16732,7 @@ async function pdfBatchTik() {
 // gelezen via de Management-API zoals pdfSleutel, 10 min in het geheugen (ontbreekt hij: 2 min), alleen als Authorization-kop in de module.
 // Routes (alleen API_SECRET = machinekamer; body {secret, ...}, alleen op de primaire kant):
 //   POST /openai/vraag        {afnemer, model?, instructies?, invoer, max_uit?, effort?, schema?} → {ok, tekst, json?, model, usd, onvolledig}
+//   POST /openai/zoek         {afnemer, vraag, domeinen?, model?, max_zoek?, max_uit?, effort?, context?} → {ok, kandidaten, bronnen, zoekacties, usd} (wv2266)
 //   POST /openai/batch        {afnemer, model?, instructies?, max_uit?, effort?, verzoeken:[{id, invoer}]} → {ok, id, aantal, geweigerd}
 //   POST /openai/batch/stand  {id} → stand, en de antwoorden zodra hij klaar is
 // /health.openai, de regel "OpenAI deze maand" in GET /app/tokens (veld openai) en GET /app/tokens/openai (wv2078: Verbruikspagina,
@@ -16791,7 +16792,7 @@ function openaiVerbruik() {
   if (!openaiHulp || typeof openaiHulp.verbruik !== 'function') return null;
   try { return openaiHulp.verbruik(); } catch (e) { logError('openai-verbruik', e); return null; }
 }
-function openaiIsPad(req) { const p = reqPath(req); return p === '/openai/vraag' || p === '/openai/batch' || p === '/openai/batch/stand'; }
+function openaiIsPad(req) { const p = reqPath(req); return p === '/openai/vraag' || p === '/openai/zoek' || p === '/openai/batch' || p === '/openai/batch/stand'; }
 function openaiRoute(req, res) {
   const p = reqPath(req);
   if (req.method !== 'POST') { req.resume(); return berichtStuur(res, 405, { ok: false, fout: 'alleen POST' }); }
@@ -16805,6 +16806,7 @@ function openaiRoute(req, res) {
     delete d.secret;
     (async function () {
       if (p === '/openai/vraag') { const r = await openaiHulp.vraag(d); return berichtStuur(res, 200, r); }
+      if (p === '/openai/zoek') { if (typeof openaiHulp.zoek !== 'function') return berichtStuur(res, 404, { ok: false, fout: 'zoeken zit niet in deze versie' }); const r = await openaiHulp.zoek(d); return berichtStuur(res, 200, r); }   // wv2266: web_search (NL)
       if (p === '/openai/batch') { const r = await openaiHulp.batchIndienen(d); return berichtStuur(res, 200, r); }
       const s = openaiHulp.batchStand(d.id);
       return berichtStuur(res, s ? 200 : 404, s ? Object.assign({ ok: true }, s) : { ok: false, fout: 'onbekende batch' });

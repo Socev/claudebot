@@ -419,12 +419,109 @@ test('server.js: route alleen met API_SECRET, op de primaire kant; vraag loopt d
   assert.ok(n.verzoeken[0].body.indexOf('geheim-van-de-toets') < 0, 'het pod-geheim gaat niet mee naar OpenAI');
   assert.strictEqual((await roep('/openai/vraag', { secret: 'geheim-van-de-toets', afnemer: 'proef', invoer: PATIENT })).j.status, 'poort');
   assert.strictEqual((await roep('/openai/batch/stand', { secret: 'geheim-van-de-toets', id: 'batch_x' })).st, 404);
+  // wv2266: /openai/zoek is een pad, loopt door de module en houdt de poort
+  assert.ok(ctx.openaiIsPad({ url: '/openai/zoek' }));
+  assert.strictEqual((await roep('/openai/zoek', { afnemer: 'shopper', vraag: 'snoer' })).st, 401);
+  assert.strictEqual((await roep('/openai/zoek', { secret: 'geheim-van-de-toets', afnemer: 'shopper', vraag: PATIENT })).j.status, 'poort');
+  const z = await roep('/openai/zoek', { secret: 'geheim-van-de-toets', afnemer: 'shopper', vraag: 'verlengsnoer 5 meter', domeinen: ['bol.com'] });
+  assert.strictEqual(z.st, 200); assert.strictEqual(z.j.ok, true); assert.deepStrictEqual(z.j.kandidaten, []);
+  assert.strictEqual(JSON.parse(n.verzoeken[1].body).tools[0].type, 'web_search');
   const h = ctx.openaiInfo();
-  assert.strictEqual(h.module, true); assert.strictEqual(h.per_status.ok, 1); assert.strictEqual(h.per_status.poort, 1);
+  assert.strictEqual(h.module, true); assert.strictEqual(h.per_status.ok, 2); assert.strictEqual(h.per_status.poort, 2);
   assert.ok(JSON.stringify(h).indexOf('nep-sleutel') < 0);
   assert.deepStrictEqual(Object.keys(ctx.openaiAppRegel()).sort(), ['aan', 'cyclus', 'grens_usd', 'maand', 'maand_usd', 'open_batch_usd', 'periode_start', 'tegoed_usd']);
   const v = ctx.openaiVerbruik();
-  assert.strictEqual(v.ok, true); assert.strictEqual(v.deze_maand.aanroepen, 1); assert.ok(JSON.stringify(v).indexOf('nep-sleutel') < 0);
+  assert.strictEqual(v.ok, true); assert.strictEqual(v.deze_maand.aanroepen, 2); assert.ok(JSON.stringify(v).indexOf('nep-sleutel') < 0);
   assert.deepStrictEqual(fouten, []);
   n.srv.close();
+});
+
+// ── wv2266: zoek() met web_search (NL) ──
+function zoekAntwoord(kandidaten, extra) {
+  return Object.assign({ id: 'resp_z', status: 'completed', model: 'gpt-5.4-mini-2026-03-17', output: [
+    { type: 'web_search_call', id: 'ws_1', status: 'completed', action: { type: 'search', queries: ['verlengsnoer 5 meter'], sources: [
+      { type: 'url', url: 'https://www.voorbeeldwinkel.nl/p/snoer-5m?utm_source=openai' }, { type: 'url', url: 'http://onveilig.example.nl/x' }] } },
+    { type: 'web_search_call', id: 'ws_2', status: 'completed', action: { type: 'open_page', url: 'https://www.voorbeeldwinkel.nl/p/snoer-5m' } },
+    { type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ kandidaten: kandidaten }),
+      annotations: [{ type: 'url_citation', url: 'https://shop.tweede-winkel.nl/snoer?utm_medium=x&kleur=wit#boven', title: 'Snoer wit', start_index: 0, end_index: 1 }] }] }],
+    usage: { input_tokens: 20000, input_tokens_details: { cached_tokens: 0 }, output_tokens: 1000 } }, extra || {});
+}
+const KAND = [
+  { winkel: 'Voorbeeldwinkel', product: 'Verlengsnoer 5 m', url: 'https://www.voorbeeldwinkel.nl/p/snoer-5m?utm_source=openai', prijs_tekst: '€ 12,99', opmerking: null },
+  { winkel: 'Tweede', product: 'Snoer wit 5 m', url: 'https://shop.tweede-winkel.nl/snoer?kleur=wit&utm_source=openai', prijs_tekst: null, opmerking: 'variant wit' },
+  { winkel: 'Verzonnen', product: 'Snoer', url: 'https://www.voorbeeldwinkel.nl/p/niet-in-bronnen', prijs_tekst: null, opmerking: null },
+  { winkel: 'Onveilig', product: 'Snoer', url: 'http://onveilig.example.nl/x', prijs_tekst: null, opmerking: null },
+  { winkel: 'Script', product: 'Snoer', url: 'javascript:alert(1)', prijs_tekst: null, opmerking: null },
+];
+test('zoek: schoneUrl alleen https, utm en # eraf', function () {
+  assert.strictEqual(H._intern.schoneUrl('https://a.nl/p?utm_source=openai&x=1#y'), 'https://a.nl/p?x=1');
+  assert.strictEqual(H._intern.schoneUrl('http://a.nl/p'), null);
+  assert.strictEqual(H._intern.schoneUrl('https://gebruiker:ww@a.nl/'), null);
+  assert.strictEqual(H._intern.schoneUrl('geen url'), null);
+});
+test('zoek: web_search met NL en domeinfilter, kosten = tokens + $0,01 per zoekactie, kandidaten gefilterd en gemerkt', async function () {
+  const n = await nepApi(); const t = nieuw(n.url, { aan: true });
+  n.antwoord = zoekAntwoord(KAND);
+  const r = await t.h.zoek({ afnemer: 'shopper', vraag: 'verlengsnoer 5 meter', domeinen: ['www.Voorbeeldwinkel.nl', 'tweede-winkel.nl'], max_zoek: 4 });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  const b = JSON.parse(n.verzoeken[0].body);
+  assert.deepStrictEqual(b.tools, [{ type: 'web_search', user_location: { type: 'approximate', country: 'NL' }, search_context_size: 'medium',
+    filters: { allowed_domains: ['voorbeeldwinkel.nl', 'tweede-winkel.nl'] } }]);
+  assert.strictEqual(b.max_tool_calls, 4); assert.strictEqual(b.store, false); assert.deepStrictEqual(b.include, ['web_search_call.action.sources']);
+  assert.strictEqual(b.text.format.type, 'json_schema'); assert.deepStrictEqual(b.reasoning, { effort: 'low' });
+  assert.strictEqual(r.zoekacties, 2);
+  const tok = H._intern.kosten('gpt-5.4-mini', { input_tokens: 20000, output_tokens: 1000 }, false).usd;
+  assert.strictEqual(r.usd, Math.round((tok + 0.02) * 1e6) / 1e6);
+  assert.strictEqual(t.h.stand().maand_usd, r.usd);
+  assert.deepStrictEqual(r.kandidaten.map(function (k) { return [k.url, k.gezien]; }), [
+    ['https://www.voorbeeldwinkel.nl/p/snoer-5m', true], ['https://shop.tweede-winkel.nl/snoer?kleur=wit', true],
+    ['https://www.voorbeeldwinkel.nl/p/niet-in-bronnen', false]]);
+  assert.strictEqual(r.weggelaten, 2);
+  assert.ok(r.bronnen.every(function (x) { return x.url.indexOf('https://') === 0 && x.url.indexOf('utm_') < 0; }));
+  assert.strictEqual(r.bronnen.length, 2);
+  // de zoekacties staan in de rij; uitsplitsing zet de toolkosten bij niet_toegedeeld
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(path.join(t.dir, 'openai.sqlite'));
+  assert.strictEqual(db.prepare('SELECT zoek FROM aanroep WHERE status = ?').get('ok').zoek, 2); db.close();
+  assert.strictEqual(t.h.verbruik().deze_maand.niet_toegedeeld_usd, 0.02);
+  n.srv.close(); t.h.sluit();
+});
+test('zoek: kandidaat buiten het domeinfilter weg; zonder filter blijft hij', async function () {
+  const n = await nepApi(); const t = nieuw(n.url, { aan: true });
+  n.antwoord = zoekAntwoord(KAND.slice(0, 2));
+  const r = await t.h.zoek({ afnemer: 'shopper', vraag: 'verlengsnoer', domeinen: ['voorbeeldwinkel.nl'] });
+  assert.deepStrictEqual(r.kandidaten.map(function (k) { return k.winkel; }), ['Voorbeeldwinkel']); assert.strictEqual(r.weggelaten, 1);
+  assert.ok(r.bronnen.every(function (x) { return /voorbeeldwinkel\.nl/.test(x.url); }));
+  const r2 = await t.h.zoek({ afnemer: 'shopper', vraag: 'verlengsnoer' });
+  assert.strictEqual(r2.kandidaten.length, 2); assert.strictEqual(JSON.parse(n.verzoeken[1].body).tools[0].filters, undefined);
+  n.srv.close(); t.h.sluit();
+});
+test('zoek: weigeringen vóór het netwerk (poort, geheim, domeinen, plafond, uit) en geen JSON → tekst', async function () {
+  const n = await nepApi(); const t = nieuw(n.url, { aan: true });
+  assert.strictEqual((await t.h.zoek({ afnemer: 'shopper', vraag: PATIENT })).status, 'poort');
+  assert.strictEqual((await t.h.zoek({ afnemer: 'shopper', vraag: 'snoer sk-proj-' + 'd'.repeat(40) })).status, 'geheim');
+  assert.strictEqual((await t.h.zoek({ afnemer: 'shopper', vraag: 'snoer', domeinen: ['https://bol.com'] })).status, 'domeinen');
+  assert.strictEqual((await t.h.zoek({ afnemer: 'shopper', vraag: 'snoer', domeinen: 'bol.com' })).status, 'domeinen');
+  assert.strictEqual((await t.h.zoek({ afnemer: 'shopper', vraag: 'snoer', domeinen: Array(21).fill('bol.com') })).status, 'domeinen');
+  assert.strictEqual((await t.h.zoek({ afnemer: 'shopper', vraag: 'x'.repeat(2001) })).status, 'te_groot');
+  assert.strictEqual((await t.h.zoek({ afnemer: 'shopper', vraag: 'snoer', model: 'gpt-5.5', max_zoek: 10 })).status, 'te_duur');
+  assert.strictEqual((await t.h.zoek({ afnemer: 'shopper', vraag: '' })).status, 'invoer');
+  assert.strictEqual(n.verzoeken.length, 0);
+  n.antwoord = { id: 'r', status: 'completed', model: 'gpt-5.4-mini', output: [{ type: 'message', content: [{ type: 'output_text', text: 'geen json' }] }], usage: { input_tokens: 10, output_tokens: 5 } };
+  const r = await t.h.zoek({ afnemer: 'shopper', vraag: 'snoer' });
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.tekst, 'geen json'); assert.deepStrictEqual(r.kandidaten, []); assert.strictEqual(r.zoekacties, 0);
+  n.srv.close(); t.h.sluit();
+  const n2 = await nepApi(); const t2 = nieuw(n2.url, null);
+  assert.strictEqual((await t2.h.zoek({ afnemer: 'shopper', vraag: 'snoer' })).status, 'uit'); assert.strictEqual(n2.verzoeken.length, 0);
+  n2.srv.close(); t2.h.sluit();
+});
+test('zoek: api-fout 5xx boekt de schatting gevlagd, 4xx niet', async function () {
+  const n = await nepApi(); const t = nieuw(n.url, { aan: true });
+  n.status = 500;
+  assert.strictEqual((await t.h.zoek({ afnemer: 'shopper', vraag: 'snoer' })).status, 'api_500');
+  const na5 = t.h.stand().maand_usd; assert.ok(na5 > 0.05 && na5 <= 0.25, String(na5));
+  n.status = 429;
+  assert.strictEqual((await t.h.zoek({ afnemer: 'shopper', vraag: 'snoer' })).status, 'api_429');
+  assert.strictEqual(t.h.stand().maand_usd, na5);
+  n.srv.close(); t.h.sluit();
 });
