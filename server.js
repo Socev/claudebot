@@ -18857,12 +18857,20 @@ async function appTripper(req, res, a, route) {
 //   GET  /app/shopper/<id>            één zoektocht: opties (koop-link alleen als https, anders url null), advies, eisen, aannames, niet te lezen
 //   POST /app/shopper/<id>/status     {status: "vervallen"} = Niet meer nodig; de enige schrijfactie. Gekocht NIET via de App (review 2-11
 //                                     MOET 5: alleen op Davids eigen woord via Socev).
+// wv2276 S5: bij een gekochte zoektocht geeft GET /app/shopper/<id> ook facturen (hooguit 3 passende facturen uit de Facturen-app: id,
+// leverancier, datum, bedrag, zekerheid; berekend, niets geschreven) en de lijst factuur_gevonden (aantal). De app-sessie is in Facturen de
+// eigenaar (rolVoor ingang app), dus Shopper toont niets dat de Facturen-app David niet ook toont.
 // id = 12 hex van sha256(vaultpad); shopper.js zoekt het pad zelf op (nooit een pad uit de vraag). Audit zonder wens of pad. /health.shopper:
 // aantallen en het tijdstip van de laatste lijst (geen wens, pad of bedrag). Ontbreekt shopper.js in de release: 404 en aan=false.
 const shopper = (function () {
   const p = path.join(__dirname, 'shopper.js');
   if (!fs.existsSync(p)) return null;
-  try { return require(p).maak({ vault: VAULT, vv: VV() }); } catch (e) { logError('shopper', e); return null; }
+  // wv2276 S5: het pad van facturen.sqlite (alleen op de primaire Olares-kant, anders null = geen koppeling); shopper.js opent hem zelf
+  // alleen-lezen (readOnly + query_only) per vraag, nooit via de gedeelde Facturen-handle (review MOET 2)
+  const facturenPad = function () {
+    return typeof facturenMagOpenen === 'function' && typeof FACTUREN_DIR === 'string' && facturenMagOpenen() ? path.join(FACTUREN_DIR, 'facturen.sqlite') : null;
+  };
+  try { return require(p).maak({ vault: VAULT, vv: VV(), facturenPad: facturenPad }); } catch (e) { logError('shopper', e); return null; }
 })();
 function shopperInfo() { if (!shopper) return { aan: false }; try { return shopper.info(); } catch (e) { return { aan: true, fout: true }; } }
 appStaat.tellers.shopper = [];

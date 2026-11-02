@@ -2,7 +2,7 @@
 # Toetst OVIS Shopper S3 (wv2264, 2-11-2026; favorieten wv2267 § 6): shopper.js (alleen type: shopper-zoektocht direct in de vaste Shopper-mappen, entiteit uit de map,
 # geen symlink volgen, id = hash van het pad en nooit een pad uit de vraag, koop-link alleen https, totaal/advies uit de opties) en het
 # server.js-blok (routes, audit zonder wens, Niet meer nodig = de enige schrijfactie, gekocht niet via de App, /health alleen aantallen + tijdstip,
-# uitrol-lijst). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
+# uitrol-lijst; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
 if grep -nE "console\.|eval\(" shopper.js; then echo "ROOD  shopper.js logt naar de console of gebruikt eval"; exit 1; fi
@@ -148,6 +148,82 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   vm.runInContext(src.slice(hb, he) + ';globalThis.__sh = { appShopper, shopperInfo };', ctx2, { filename: 'server.js#shopper2' });
   const n2 = gestuurd.length; await ctx2.__sh.appShopper({}, { _app: {} }, {}, 'GET /app/shopper');
   toets('5m zonder shopper.js in de release: 404 en aan=false', gestuurd[n2].s === 404 && ctx2.__sh.shopperInfo().aan === false);
+
+  // ── 7. S5 Facturen-koppeling (wv2276): verzonnen facturendatabase, alleen lezen ──
+  {
+    const F = require('./facturen-db.js'), FD = path.join(W, 'facturen'), fdb = F.open(FD), db = fdb.db, nu = '2026-11-02T10:00:00.000Z';
+    for (const e of ['groenhouten', 'tolgaarde', 'praktijkhouders_bv', 'prive']) db.prepare('INSERT INTO entiteit (sleutel, naam) VALUES (?, ?)').run(e, 'Proef ' + e);
+    const lev = (id, naam) => db.prepare('INSERT INTO leverancier (id, naam, genormaliseerd, aangemaakt_op) VALUES (?, ?, ?, ?)').run(id, naam, naam.toLowerCase(), nu);
+    lev('a000000000000001', 'Bouwmarkt Proef B.V.'); lev('a000000000000002', 'Bolwerk Proefhandel'); lev('a000000000000003', 'Proefbol.com B.V.'); lev('a000000000000004', 'Nepwinkel Nederland B.V.');
+    let nr = 0;
+    const fac = (x) => { nr++; const h = String(nr).padStart(15, '0'); db.prepare('INSERT INTO document (id, sha256, soort, aangemaakt_op) VALUES (?, ?, ?, ?)').run('d' + h, String(nr).padStart(64, '0'), 'pdf', nu);
+      db.prepare('INSERT INTO factuur (id, document, soort, leverancier, leverancier_naam, factuurdatum, incl, incl_eur, valuta, entiteit, status, aangemaakt_op, bijgewerkt_op) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run('f' + h, 'd' + h, x.soort || 'factuur', x.lev || null, x.naam || null, x.datum === undefined ? '2026-11-03' : x.datum, x.c, x.c, 'EUR', x.ent === undefined ? 'groenhouten' : x.ent, x.st || 'te_beoordelen', x.aan || nu, nu); return 'f' + h; };
+    const fHoog = fac({ lev: 'a000000000000001', c: 5194 });                         // gelijk bedrag
+    const fMid = fac({ lev: 'a000000000000001', c: 5194 + 695, datum: '2026-11-10' });   // + verzending
+    fac({ lev: 'a000000000000001', c: 9999 });                                           // bedrag te ver
+    fac({ lev: 'a000000000000001', c: 5194, ent: 'tolgaarde' });                         // andere entiteit
+    fac({ lev: 'a000000000000001', c: 5194, ent: null });                                // geen entiteit
+    fac({ lev: 'a000000000000001', c: 5194, datum: '2026-10-15' });                      // te vroeg (> 14 d vóór)
+    fac({ lev: 'a000000000000001', c: 5194, datum: '2026-12-05' });                      // te laat (> 30 d na)
+    fac({ lev: 'a000000000000001', c: 5194, soort: 'creditnota' });                      // creditnota telt niet
+    fac({ lev: 'a000000000000001', c: 5194, st: 'geen_factuur' });                       // geen factuur telt niet
+    fac({ lev: 'a000000000000002', c: 5194 });                                           // Bolwerk ≠ bol (heel woord)
+    fac({ lev: 'a000000000000003', c: 5194 });                                           // Proefbol ≠ bol
+    const fZonderDatum = fac({ naam: 'Nepwinkel Nederland B.V.', c: 1250, datum: null, aan: '2026-11-04T09:00:00.000Z' });   // leverancier_naam + aangemaakt_op
+    const fPh = fac({ lev: 'a000000000000004', c: 1250, ent: 'praktijkhouders_bv' });
+    const fPr = fac({ lev: 'a000000000000004', c: 1250, ent: 'prive' });
+    F.sluit ? F.sluit(fdb) : db.close();
+    const FP = path.join(FD, 'facturen.sqlite'), hashVan = () => require('crypto').createHash('sha256').update(fs.readFileSync(FP)).digest('hex') + ':' + fs.statSync(FP).mtimeMs;
+    const voorHash = hashVan();
+    const V3 = path.join(W, 'vault3');
+    for (const m of S.MAPPEN) fs.mkdirSync(path.join(V3, m[2]), { recursive: true });
+    const gk = (map, naam, g, opties, st) => fs.writeFileSync(path.join(V3, map, naam + '.md'), pagina(['type: shopper-zoektocht', 'wens: "' + naam + '"', 'status: ' + (st || 'gekocht'),
+      ...(g ? ['gekocht: ' + g] : []), 'gezocht: 2026-11-01T09:00+01:00', 'opties:', ...(opties || [opt('o1', { w: 'Bouwmarkt Proef', p: 51.94, v: 0, t: 51.94, u: 'https://www.bouwmarktproef.nl/p/1' })]), 'advies: o1']));
+    gk('10_Zakelijk/Groenhouten/Shopper', 'Met bedrag', '{optie: o1, winkel: "Bouwmarkt Proef", bedrag_eur: 51.94, datum: "2026-11-02", toelichting: "1+1 # gratis"}');
+    gk('10_Zakelijk/Groenhouten/Shopper', 'Zonder bedrag', '{optie: o1, winkel: "Bouwmarkt Proef", bedrag_eur: null, datum: "2026-11-02"}');
+    gk('10_Zakelijk/Groenhouten/Shopper', 'Bol via host', '{optie: o1, winkel: "bol", bedrag_eur: 51.94, datum: "2026-11-02"}', [opt('o1', { w: 'bol', p: 51.94, v: 0, t: 51.94, u: 'https://www.bol.com/nl/nl/p/x/1/' })]);
+    gk('10_Zakelijk/Groenhouten/Shopper', 'Open met gekocht-regel', '{optie: o1, winkel: "Bouwmarkt Proef", bedrag_eur: 51.94, datum: "2026-11-02"}', null, 'open');
+    gk('10_Zakelijk/Groenhouten/Shopper', 'Zonder datum', '{optie: o1, winkel: "Bouwmarkt Proef", bedrag_eur: 51.94}');
+    gk('10_Zakelijk/Groenhouten/Shopper', 'Host als sleutel', '{optie: o2, winkel: "Iets Anders", bedrag_eur: 12.50, datum: "2026-11-02"}',
+      [opt('o2', { w: 'Iets Anders', p: 12.5, v: 0, t: 12.5, u: 'https://nepwinkel.nl/p/9' })]);
+    gk('10_Zakelijk/Praktijkhouders_BV/Shopper', 'Praktijkhouders', '{optie: o1, winkel: "Nepwinkel", bedrag_eur: 12.50, datum: "2026-11-02"}');
+    gk('20_Prive/Shopper', 'Prive', '{winkel: "Nepwinkel", bedrag_eur: 12.50, datum: "2026-11-02"}');
+    const m3 = S.maak({ vault: V3, vv: VV, facturenPad: () => FP });
+    const L3 = m3.lijst().body.zoektochten, z3 = (w) => L3.find((x) => x.wens === w), det = (w) => m3.zoektocht(z3(w).id).body.zoektocht;
+    const a = det('Met bedrag');
+    toets('7a gekocht-blok gelezen (winkel, bedrag, datum, opmerking met # binnen aanhalingstekens)', a.gekocht && a.gekocht.winkel === 'Bouwmarkt Proef' && a.gekocht.bedrag_eur === 51.94
+      && a.gekocht.datum === '2026-11-02' && a.gekocht.opmerking === '1+1 # gratis' && a.gekocht.optie === 'o1', a.gekocht);
+    toets('7b met bedrag: gelijk = hoog, + verzending = middel; verkeerde entiteit/zonder entiteit/te vroeg/te laat/te ver/creditnota/geen_factuur/Bolwerk tellen niet',
+      Array.isArray(a.facturen) && a.facturen.length === 2 && a.facturen[0].id === fHoog && a.facturen[0].zekerheid === 'hoog' && a.facturen[0].bedrag_eur === 51.94
+      && a.facturen[0].leverancier === 'Bouwmarkt Proef B.V.' && a.facturen[0].factuurdatum === '2026-11-03' && a.facturen[1].id === fMid && a.facturen[1].zekerheid === 'middel', a.facturen);
+    const b = det('Zonder bedrag');
+    toets('7c bedrag onbekend: alle passende (winkel + entiteit + datum) op laag, hooguit 3, dichtst bij de datum eerst', b.facturen.length === 3 && b.facturen.every((x) => x.zekerheid === 'laag')
+      && b.facturen[0].factuurdatum === '2026-11-03' && !b.facturen.some((x) => x.id === fMid) === false, b.facturen);
+    toets('7d bol via de hostnaam: Bolwerk en Proefbol tellen niet (heel woord)', det('Bol via host').facturen.length === 0, det('Bol via host').facturen);
+    toets('7e open zoektocht (ook met een gekocht-regel): geen facturen-veld, geen gekocht-blok', det('Open met gekocht-regel').facturen === undefined && det('Open met gekocht-regel').gekocht === null);
+    toets('7f gekocht zonder datum: lege lijst', Array.isArray(det('Zonder datum').facturen) && det('Zonder datum').facturen.length === 0);
+    const h = det('Host als sleutel');
+    toets('7g winkelnaam past niet, hostnaam wel; factuur zonder leverancier-id (leverancier_naam) en zonder factuurdatum (aangemaakt_op)', h.facturen.length === 1 && h.facturen[0].id === fZonderDatum
+      && h.facturen[0].factuurdatum === '2026-11-04' && h.facturen[0].zekerheid === 'hoog', h.facturen);
+    toets('7h praktijkhouders → praktijkhouders_bv; privé alleen privé', det('Praktijkhouders').facturen.map((x) => x.id).join() === fPh && det('Prive').facturen.map((x) => x.id).join() === fPr,
+      [det('Praktijkhouders').facturen, det('Prive').facturen]);
+    toets('7i lijst: factuur_gevonden alleen bij gekocht (aantal), gekocht-blok alleen de winkel; open zonder veld', z3('Met bedrag').factuur_gevonden === 2 && z3('Zonder bedrag').factuur_gevonden === 3
+      && JSON.stringify(z3('Met bedrag').gekocht) === JSON.stringify({ winkel: 'Bouwmarkt Proef' }) && !('factuur_gevonden' in z3('Open met gekocht-regel')), z3('Met bedrag'));
+    toets('7j de facturendatabase is na alle vragen byte-gelijk (niets geschreven)', hashVan() === voorHash);
+    const m4 = S.maak({ vault: V3, vv: VV, facturenPad: () => { throw new Error('kapot'); } }), m5 = S.maak({ vault: V3, vv: VV, facturenPad: () => null }), m6 = S.maak({ vault: V3, vv: VV });
+    const id = z3('Met bedrag').id;
+    toets('7k facturenPad gooit / null / ontbreekt: facturen null, zoektocht gewoon 200', [m4, m5, m6].every((x) => { const r = x.zoektocht(id); return r.status === 200 && r.body.zoektocht.facturen === null; })
+      && m4.lijst().body.zoektochten.find((x) => x.wens === 'Met bedrag').factuur_gevonden === null);
+    // schrijven via een handle zoals metFacturen hem opent faalt
+    const { DatabaseSync } = require('node:sqlite'), ro = new DatabaseSync(FP, { readOnly: true }); ro.exec('PRAGMA query_only = ON');
+    let geweigerd = false; try { ro.exec("UPDATE factuur SET status = 'verstuurd'"); } catch (e) { geweigerd = true; } ro.close();
+    toets('7l een readOnly + query_only-handle kan niet schrijven', geweigerd && hashVan() === voorHash);
+    const bron = fs.readFileSync('shopper.js', 'utf8');
+    toets('7m shopper.js: alleen SELECT op facturen, readOnly + query_only, geen gedeelde handle', !/\b(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|ATTACH)\b/.test(bron) && /readOnly: true/.test(bron) && /query_only = ON/.test(bron) && !/facturenOpen/.test(bron));
+    const srv = fs.readFileSync('server.js', 'utf8');
+    toets('7n server.js geeft shopper alleen een pad (primaire kant), geen facturenOpen()', /maak\(\{ vault: VAULT, vv: VV\(\), facturenPad: facturenPad \}\)/.test(srv) && /facturenMagOpenen\(\) \? path\.join\(FACTUREN_DIR, 'facturen\.sqlite'\) : null/.test(srv));
+  }
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

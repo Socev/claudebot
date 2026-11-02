@@ -19,6 +19,13 @@
  *    weten"): de vault-pagina FAVORIETEN (type: shopper-favorieten, lijst winkels: {domein, aan}) wordt bij elke vraag gelezen (vault-veilig,
  *    zelfde grens). Een optie krijgt favoriet: true als haar (al goedgekeurde https-)koop-link op een domein staat dat aan staat (zelfde host
  *    of een subdomein). Geen pagina of geen geldige regels = niets favoriet. De pagina zelf wordt nooit geschreven.
+ *  - S5 Facturen-koppeling (wv2276, ontwerp § 3.4b): bij een zoektocht op gekocht zoekt facturenBij() in de Facturen-app naar facturen die bij
+ *    de aankoop passen (entiteit gelijk, datum 14 d vóór t/m 30 d na gekocht.datum, winkel als heel woord in de leveranciersnaam, bedrag in
+ *    centen ± max(€ 1, 1 %) = hoog, hooguit € 15 hoger = middel, bedrag onbekend = laag). Een berekende verwijzing: er wordt NIETS
+ *    geschreven, niet in facturen.sqlite en niet op de pagina. De database gaat per vraag zelf open met readOnly + query_only (review
+ *    MOET 2: niet de gedeelde Facturen-handle) en weer dicht. o.facturenPad() geeft het pad of null (niet op de primaire kant = geen
+ *    koppeling). Faalt het lezen: facturen null; de zoektocht blijft gewoon leesbaar. Zichtbaar alleen achter de app-sessie, die in
+ *    Facturen de eigenaar is (review MOET 3).
  * PRIVACY. Deze module logt niets; info() geeft alleen aantallen en het tijdstip van de laatste lijst (geen wens, pad of bedrag). Er gaat niets naar buiten of naar een taalmodel.
  */
 const fs = require('fs');
@@ -107,6 +114,63 @@ function inleiding(t) {
   const eind = /^(?:#{1,2}[ \t]|\|)/m.exec(lijf);
   return (eind ? lijf.slice(0, eind.index) : lijf).trim().slice(0, 2000);
 }
+// ── S5 (wv2276): het gekocht-blok en de facturen die erbij passen ──
+const DATUM_RE = /^\d{4}-\d{2}-\d{2}$/;
+const FAC_ENT = { praktijkhouders: 'praktijkhouders_bv' };   // Shopper-entiteit → sleutel in Facturen (de rest is gelijk)
+const RUIS = new Set(['bv', 'nv', 'vof', 'b', 'v', 'n', 'nederland', 'netherlands', 'nl', 'com', 'be', 'eu', 'de', 'het', 'the', 'webshop', 'shop', 'winkel', 'store', 'online', 'www']);
+const ZEKER = { hoog: 0, middel: 1, laag: 2 };
+function woorden(s) {
+  return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\bb\.v\.?/g, ' bv ').replace(/\bn\.v\.?/g, ' nv ')
+    .replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+}
+// Zoeksleutel uit een winkelnaam: de woorden zonder rechtsvorm/landnaam/.com; korter dan 3 tekens telt niet
+function sleutelVan(s) { const k = woorden(s).filter((w) => !RUIS.has(w)).join(' '); return k.length >= 3 ? k : null; }
+// Kern van een hostnaam: www.bol.com → bol, shop.hornbach.nl → hornbach (het label vóór het topdomein)
+function hostKern(url) { try { const d = new URL(url).hostname.toLowerCase().split('.').filter(Boolean); return d.length >= 2 ? sleutelVan(d[d.length - 2]) : null; } catch (e) { return null; } }
+function gekochtVan(t) {
+  const fm = /^---\n([\s\S]*?)\n---/.exec(t || '');
+  const r = fm && /^gekocht:[ \t]*(\{.*\})[ \t]*(?:#.*)?$/m.exec(fm[1]);
+  const g = r ? R.flowMap(r[1]) : null;
+  if (!g) return null;
+  const datum = tekstVeld(g.datum, 10);
+  return { optie: /^o\d{1,3}$/.test(String(g.optie || '')) ? String(g.optie) : null, winkel: tekstVeld(g.winkel, 80) || null, bedrag_eur: bedrag(g.bedrag_eur),
+    datum: DATUM_RE.test(datum) ? datum : null, opmerking: tekstVeld(g.opmerking || g.toelichting, 120) || null };
+}
+function dagPlus(d, n) { const x = new Date(d + 'T12:00:00Z'); if (isNaN(x)) return null; x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
+function dagAfstand(a, b) { return Math.abs(Math.round((new Date(a + 'T12:00:00Z') - new Date(b + 'T12:00:00Z')) / 86400000)); }
+// Kandidaat-facturen voor één gekochte zoektocht z (met z.gekocht en z._opties), uit een alleen-lezen database db
+function facturenBij(db, z) {
+  const g = z.gekocht;
+  if (!g || !g.datum) return [];
+  const van = dagPlus(g.datum, -14), tot = dagPlus(g.datum, 30);
+  if (!van || !tot) return [];
+  const opt = g.optie ? z._opties.find((x) => x.id === g.optie) : null;
+  const sleutels = [];
+  for (const s of [sleutelVan(g.winkel), opt && sleutelVan(opt.winkel), opt && opt.url && hostKern(opt.url), opt && sleutelVan(opt.verkoper)]) if (s && sleutels.indexOf(s) < 0) sleutels.push(s);
+  if (!sleutels.length) return [];
+  const rijen = db.prepare("SELECT f.id, f.factuurdatum, substr(f.aangemaakt_op, 1, 10) AS aangemaakt, f.incl_eur, f.incl, f.valuta, f.leverancier_naam, l.naam AS lnaam "
+    + "FROM factuur f LEFT JOIN leverancier l ON l.id = f.leverancier WHERE f.soort = 'factuur' AND f.status <> 'geen_factuur' AND f.dubbel_van IS NULL "
+    + "AND f.entiteit = ? AND coalesce(f.factuurdatum, substr(f.aangemaakt_op, 1, 10)) BETWEEN ? AND ? LIMIT 500").all(FAC_ENT[z.entiteit] || z.entiteit, van, tot);
+  const doel = g.bedrag_eur == null ? null : Math.round(g.bedrag_eur * 100);   // centen (review MOET 1)
+  const uit = [];
+  for (const f of rijen) {
+    const lev = ' ' + woorden([f.lnaam, f.leverancier_naam].filter(Boolean).join(' ')).join(' ') + ' ';
+    if (!sleutels.some((s) => lev.indexOf(' ' + s + ' ') >= 0)) continue;
+    const incl = Number.isInteger(f.incl_eur) ? f.incl_eur : (f.valuta === 'EUR' && Number.isInteger(f.incl) ? f.incl : null);
+    let zeker = 'laag';
+    if (doel != null && incl != null) {
+      const vers = incl - doel;
+      if (Math.abs(vers) <= Math.max(100, Math.round(doel * 0.01))) zeker = 'hoog';
+      else if (vers > 0 && vers <= 1500) zeker = 'middel';
+      else continue;
+    }
+    const d = f.factuurdatum || f.aangemaakt;
+    uit.push({ id: String(f.id), leverancier: tekstVeld(f.lnaam || f.leverancier_naam, 80), factuurdatum: d, bedrag_eur: incl == null ? null : incl / 100, zekerheid: zeker, _afstand: dagAfstand(d, g.datum) });
+  }
+  uit.sort((a, b) => ZEKER[a.zekerheid] - ZEKER[b.zekerheid] || a._afstand - b._afstand || (a.id < b.id ? -1 : 1));
+  return uit.slice(0, 3).map((x) => { delete x._afstand; return x; });
+}
+
 function ontleed(t, rel, ent, fav) {
   if (fmWaarde(t, 'type') !== 'shopper-zoektocht') return null;
   const st = String(fmWaarde(t, 'status') || '').toLowerCase();
@@ -115,7 +179,8 @@ function ontleed(t, rel, ent, fav) {
   return { id: idVan(rel), wens: tekstVeld(fmWaarde(t, 'wens'), 160) || path.basename(rel, '.md').slice(0, 160), entiteit: ent[0], entiteit_naam: ent[1],
     status: STATUSSEN.indexOf(st) >= 0 ? st : 'open', gezocht: tekstVeld(fmWaarde(t, 'gezocht'), 40), aantal: aantal(fmWaarde(t, 'aantal')),
     opties_aantal: opties.length, advies: advies ? advies.id : null, advies_totaal: advies ? advies.totaal_eur : null, advies_winkel: advies ? advies.winkel : null,
-    advies_favoriet: advies ? advies.favoriet : false, favorieten_aantal: opties.filter((x) => x.favoriet).length, _opties: opties };
+    advies_favoriet: advies ? advies.favoriet : false, favorieten_aantal: opties.filter((x) => x.favoriet).length, _opties: opties,
+    gekocht: st === 'gekocht' ? gekochtVan(t) : null };
 }
 
 /*
@@ -137,6 +202,18 @@ function maak(o) {
   // De favorietenlijst, bij elke vraag opnieuw (David past hem aan in Brain); onleesbaar = geen favorieten
   function favorieten() { const t = lees(FAVORIETEN); return t == null ? [] : favorietenVan(t); }
   const kaal = (z) => { const k = Object.assign({}, z); delete k._opties; return k; };
+  // S5: de Facturen-database alleen-lezen openen, fn(db) draaien, weer sluiten; elke fout (geen pad, geen bestand, slot) = null
+  function metFacturen(fn) {
+    let db = null;
+    try {
+      const pad = typeof o.facturenPad === 'function' ? o.facturenPad() : null;
+      if (!pad || !fs.existsSync(pad)) return null;
+      const { DatabaseSync } = require('node:sqlite');
+      db = new DatabaseSync(pad, { readOnly: true });
+      db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 2000;');
+      return fn(db);
+    } catch (e) { return null; } finally { try { if (db) db.close(); } catch (e) {} }
+  }
   // Open bovenaan, daarna gekocht/vervallen; binnen elk de vaste entiteitvolgorde, nieuwste zoektocht eerst
   const volg = (z) => MAPPEN.findIndex((m) => m[0] === z.entiteit);
   function sorteer(a, b) {
@@ -153,8 +230,15 @@ function maak(o) {
       const t = lees(p.rel);
       if (t == null) { onleesbaar++; continue; }
       const z = ontleed(t, p.rel, p.ent, fav);
-      if (z) uit.push(kaal(z));
+      if (z) uit.push(z);
     }
+    // S5: bij gekochte zoektochten alleen het aantal passende facturen (null = Facturen niet te lezen); één keer de database open
+    const gk = uit.filter((z) => z.status === 'gekocht');
+    if (gk.length) {
+      const n = metFacturen((db) => gk.map((z) => facturenBij(db, z).length));
+      gk.forEach((z, i) => { z.factuur_gevonden = n ? n[i] : null; });
+    }
+    for (let i = 0; i < uit.length; i++) { uit[i] = kaal(uit[i]); if (uit[i].gekocht) uit[i].gekocht = { winkel: uit[i].gekocht.winkel }; }
     uit.sort(sorteer);
     laatst = { op: new Date().toISOString(), zoektochten: uit.length, open: uit.filter((z) => z.status === 'open').length, onleesbaar, favorieten: fav.length };
     return { status: 200, body: { ok: true, entiteiten: MAPPEN.map((m) => ({ id: m[0], naam: m[1] })), zoektochten: uit } };
@@ -174,7 +258,8 @@ function maak(o) {
     return { status: 200, body: { ok: true, zoektocht: Object.assign(kaal(z), { opties: z._opties, pad: p.rel, bestand: path.basename(p.rel),
       eisen: R.fmLijst(t, 'eisen').map((x) => tekstVeld(x, 200)).filter(Boolean).slice(0, 20),
       aannames: R.fmLijst(t, 'aannames').map((x) => tekstVeld(x, 300)).filter(Boolean).slice(0, 20),
-      inleiding: inleiding(t), waarom: sectie(t, 'Waarom dit advies'), niet_te_lezen: sectie(t, 'Niet te lezen') }) } };
+      inleiding: inleiding(t), waarom: sectie(t, 'Waarom dit advies'), niet_te_lezen: sectie(t, 'Niet te lezen'),
+      facturen: z.status === 'gekocht' ? metFacturen((db) => facturenBij(db, z)) : undefined }) } };
   }
   // POST …/status {status: 'vervallen'}: alleen van open naar vervallen; al vervallen = 200 zonder schrijven; gekocht blijft (409)
   function status(id, d) {
@@ -203,4 +288,4 @@ function maak(o) {
   return { paden, lijst, zoektocht, status, info };
 }
 
-module.exports = { maak, ontleed, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, MAPPEN, ID_RE, FAVORIETEN };
+module.exports = { maak, ontleed, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
