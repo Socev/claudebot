@@ -13,8 +13,11 @@
  *  - Lezen via vault-veilig (o.vv.lees: geen symlink volgen, alleen een gewoon bestand, ≤ 512 kB).
  *  - id = de eerste 12 hex van sha256(vaultpad); opvragen en wijzigen alleen op id: het pad uit paden(), nooit uit de vraag.
  *  - Een koop-link telt alleen als https-adres met een hostnaam (geen gebruiker/wachtwoord, ≤ 2000 tekens); anders url null (geen knop).
- *  - Eén schrijfactie: status open → vervallen ("Niet meer nodig"), via o.vv.wijzig (opnieuw gelezen, alleen de statusregel). Gekocht
- *    gaat NIET via de App (review 2-11 MOET 5: alleen op Davids eigen woord via Socev).
+ *  - Schrijfacties, alle via o.vv.wijzig (opnieuw gelezen onder het slot; alleen de statusregel en de gekocht-regel, de rest byte-gelijk):
+ *    status open → vervallen ("Niet meer nodig"); gekocht(id, d) open/vervallen → gekocht ("Gekocht", wv2275); status gekocht → open
+ *    ("Toch niet gekocht", haalt de gekocht-regel weg). Review 2-11 MOET 5 ("gekocht alleen op Davids eigen woord") blijft staan: een tik
+ *    van David in zijn eigen ingelogde app ís zijn woord (bouwplan "OVIS Shopper - knop Gekocht (ontwerp 2-11-2026)" § 4). Wat van MOET 5
+ *    blijft: geen automatisme zet ooit gekocht; het bedrag komt nooit uit de optie; bij een optie komt de winkel van de pagina, niet uit de vraag.
  *  - Favoriet (wv2267, David 2-11: "Kunnen we gericht iets bouwen dat ook op favoriete websites zoekt? … Ik wil altijd prijs en levervoorraad
  *    weten"): de vault-pagina FAVORIETEN (type: shopper-favorieten, lijst winkels: {domein, aan}) wordt bij elke vraag gelezen (vault-veilig,
  *    zelfde grens). Een optie krijgt favoriet: true als haar (al goedgekeurde https-)koop-link op een domein staat dat aan staat (zelfde host
@@ -134,8 +137,41 @@ function gekochtVan(t) {
   if (!g) return null;
   const datum = tekstVeld(g.datum, 10);
   return { optie: /^o\d{1,3}$/.test(String(g.optie || '')) ? String(g.optie) : null, winkel: tekstVeld(g.winkel, 80) || null, bedrag_eur: bedrag(g.bedrag_eur),
-    datum: DATUM_RE.test(datum) ? datum : null, opmerking: tekstVeld(g.opmerking || g.toelichting, 120) || null };
+    datum: DATUM_RE.test(datum) ? datum : null, opmerking: tekstVeld(g.opmerking || g.toelichting, 120) || null,
+    via: ['app', 'socev'].indexOf(String(g.via || '')) >= 0 ? String(g.via) : null };
 }
+// ── wv2275: de knop Gekocht (bouwplan "OVIS Shopper - knop Gekocht (ontwerp 2-11-2026)" § 3.2) ──
+const GEKOCHT_VELDEN = ['optie', 'winkel', 'bedrag_eur', 'datum', 'opmerking'];
+// Vrije tekst voor de flow-map in de frontmatter: geen regeleinden of besturingstekens (ook U+2028/2029/0085), geen " of \ (dat breekt de
+// map niet, maar ook het lezen niet); te lang = null (de vraag wordt geweigerd, niet afgekapt)
+function mapTekst(x, max) {
+  const v = String(x == null ? '' : x).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/"/g, "'").replace(/\\/g, '/').replace(/\s+/g, ' ').trim();
+  return v.length > max ? null : v;
+}
+function nlDag(d) { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d); }
+function geldigeDag(s) { if (!DATUM_RE.test(s)) return false; const x = new Date(s + 'T12:00:00Z'); return !isNaN(x) && x.toISOString().slice(0, 10) === s; }
+// De regel die op de pagina komt; null-waarden als null (gekochtVan leest ze als leeg)
+function gekochtRegel(g) {
+  const q = (x) => (x == null || x === '' ? 'null' : '"' + x + '"');
+  return 'gekocht: {optie: ' + (g.optie || 'null') + ', winkel: ' + q(g.winkel) + ', bedrag_eur: ' + (g.bedrag_eur == null ? 'null' : String(g.bedrag_eur))
+    + ', datum: ' + q(g.datum) + ', opmerking: ' + q(g.opmerking) + ', via: app}';
+}
+// Frontmatterregels: de status zetten, alle gekocht-regels (ook een blokvorm met ingesprongen regels eronder) eruit, eventueel één nieuwe
+// gekocht-regel direct onder de status. De rest van de frontmatter blijft regel voor regel gelijk.
+function zetStatusRegels(fm, st, gekochtLijn) {
+  const uit = [];
+  let weg = false, statusGezet = false;
+  for (const r of fm.split('\n')) {
+    if (weg && /^[ \t]/.test(r)) continue;
+    weg = false;
+    if (/^gekocht:/.test(r)) { weg = true; continue; }
+    if (!statusGezet && /^status:/.test(r)) { uit.push('status: ' + st); if (gekochtLijn) uit.push(gekochtLijn); statusGezet = true; continue; }
+    uit.push(r);
+  }
+  if (!statusGezet) { uit.push('status: ' + st); if (gekochtLijn) uit.push(gekochtLijn); }
+  return uit.join('\n');
+}
+const zelfdeGekocht = (a, b) => !!a && !!b && GEKOCHT_VELDEN.every((k) => (a[k] == null ? null : a[k]) === (b[k] == null ? null : b[k]));
 function dagPlus(d, n) { const x = new Date(d + 'T12:00:00Z'); if (isNaN(x)) return null; x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
 function dagAfstand(a, b) { return Math.abs(Math.round((new Date(a + 'T12:00:00Z') - new Date(b + 'T12:00:00Z')) / 86400000)); }
 // Kandidaat-facturen voor één gekochte zoektocht z (met z.gekocht en z._opties), uit een alleen-lezen database db
@@ -184,7 +220,7 @@ function ontleed(t, rel, ent, fav) {
 }
 
 /*
- * maak(o) → { paden, lijst, zoektocht, status, info }
+ * maak(o) → { paden, lijst, zoektocht, status, gekocht, info }
  * o = { vault, vv (vault-veilig: lees, wijzig), nu?() → Date }
  */
 function maak(o) {
@@ -262,12 +298,14 @@ function maak(o) {
       facturen: z.status === 'gekocht' ? metFacturen((db) => facturenBij(db, z)) : undefined }) } };
   }
   // POST …/status {status: 'vervallen'}: alleen van open naar vervallen; al vervallen = 200 zonder schrijven; gekocht blijft (409)
+  // POST …/status {status: 'open'} (wv2275, "Toch niet gekocht"): alleen van gekocht naar open, de gekocht-regel gaat weg; al open = 200 al
   function status(id, d) {
-    if (!d || d.status !== 'vervallen' || Object.keys(d).length !== 1) return { status: 400, body: { ok: false, fout: 'alleen status vervallen kan hier' } };
+    if (d && d.status === 'open' && Object.keys(d).length === 1) return terugOpen(id);
+    if (!d || d.status !== 'vervallen' || Object.keys(d).length !== 1) return { status: 400, body: { ok: false, fout: 'alleen status vervallen of open kan hier' } };
     const v = vind(id);
     if (v.fout) return v.fout;
     if (v.z.status === 'vervallen') return { status: 200, body: { ok: true, status: 'vervallen', al: true } };
-    if (v.z.status !== 'open') return { status: 409, body: { ok: false, fout: 'deze zoektocht staat op gekocht; dat verander je via Socev' } };
+    if (v.z.status !== 'open') return { status: 409, body: { ok: false, fout: 'deze zoektocht staat op gekocht; tik eerst Toch niet gekocht' } };
     let reden = null;
     const ok = o.vv.wijzig(path.join(o.vault, v.p.rel), function (t) {
       const fm = /^---\n([\s\S]*?)\n---/.exec(t || '');
@@ -284,8 +322,88 @@ function maak(o) {
     if (reden === 'gekocht') return { status: 409, body: { ok: false, fout: 'deze zoektocht staat intussen op gekocht' } };
     return { status: 409, body: { ok: false, fout: 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
   }
+  function terugOpen(id) {
+    const v = vind(id);
+    if (v.fout) return v.fout;
+    if (v.z.status === 'open') return { status: 200, body: { ok: true, status: 'open', al: true } };
+    if (v.z.status !== 'gekocht') return { status: 409, body: { ok: false, fout: 'alleen een gekochte zoektocht kan terug naar open' } };
+    let reden = null;
+    const ok = o.vv.wijzig(path.join(o.vault, v.p.rel), function (t) {
+      const fm = /^---\n([\s\S]*?)\n---/.exec(t || '');
+      const z = fm ? ontleed(t, v.p.rel, v.p.ent) : null;
+      if (!z) { reden = 'weg'; return null; }
+      if (z.status !== 'gekocht') { reden = z.status; return null; }
+      return '---\n' + zetStatusRegels(fm[1], 'open', null) + '\n---' + t.slice(fm[0].length);
+    });
+    if (ok) return { status: 200, body: { ok: true, status: 'open' } };
+    if (reden === 'open') return { status: 200, body: { ok: true, status: 'open', al: true } };
+    return { status: 409, body: { ok: false, fout: 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
+  }
+  // POST …/gekocht {optie | winkel, bedrag_eur?, datum?, opmerking?} (wv2275): Davids eigen tik in de app. Van open of vervallen naar gekocht;
+  // al gekocht met dezelfde gegevens = 200 al, met andere = 409 (eerst Toch niet gekocht). Bij een optie komt de winkel van de pagina (opnieuw
+  // gelezen onder het slot); het bedrag komt alleen uit de vraag, nooit uit de optie.
+  function gekocht(id, d) {
+    const nee = (fout) => ({ status: 400, body: { ok: false, fout } });
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return nee('geen gegevens');
+    if (Object.keys(d).some((k) => GEKOCHT_VELDEN.indexOf(k) < 0)) return nee('onbekend veld');
+    const heeftOptie = d.optie != null && d.optie !== '', heeftWinkel = d.winkel != null && d.winkel !== '';
+    if (heeftOptie === heeftWinkel) return nee('kies een optie of vul een winkel in (één van beide)');
+    if (heeftOptie && (typeof d.optie !== 'string' || !/^o\d{1,3}$/.test(d.optie))) return nee('ongeldige optie');
+    let winkelElders = null;
+    if (heeftWinkel) { winkelElders = typeof d.winkel === 'string' ? mapTekst(d.winkel, 80) : null; if (!winkelElders) return nee('winkel: tekst van hooguit 80 tekens'); }
+    let bedragEur = null;
+    if (d.bedrag_eur != null && d.bedrag_eur !== '') {
+      if (typeof d.bedrag_eur !== 'number' && typeof d.bedrag_eur !== 'string') return nee('ongeldig bedrag');
+      bedragEur = bedrag(d.bedrag_eur);
+      if (bedragEur == null || !Number.isFinite(bedragEur)) return nee('bedrag: een getal met hooguit 2 decimalen');
+    }
+    let opmerking = null;
+    if (d.opmerking != null && d.opmerking !== '') {
+      opmerking = typeof d.opmerking === 'string' ? mapTekst(d.opmerking, 120) : null;
+      if (opmerking == null) return nee('opmerking: hooguit 120 tekens');
+      opmerking = opmerking || null;
+    }
+    const vandaag = nlDag(typeof o.nu === 'function' ? o.nu() : new Date());
+    let datum = vandaag;
+    if (d.datum != null && d.datum !== '') {
+      if (typeof d.datum !== 'string' || !geldigeDag(d.datum)) return nee('datum: JJJJ-MM-DD');
+      datum = d.datum;
+    }
+    if (datum > vandaag) return nee('de datum ligt in de toekomst');
+    const v = vind(id);
+    if (v.fout) return v.fout;
+    // niet vóór de zoekdatum min 30 dagen; onder het slot opnieuw getoetst op de herlezen pagina (review wv2275 MOET 1)
+    const teVroeg = (z) => { const gz = String(z.gezocht || '').slice(0, 10); return geldigeDag(gz) && datum < dagPlus(gz, -30); };
+    if (teVroeg(v.z)) return nee('de datum ligt ruim vóór de zoektocht');
+    let nieuw = null, reden = null, bestaand = null;
+    const maakNieuw = (z) => {
+      if (!heeftOptie) return { optie: null, winkel: winkelElders, bedrag_eur: bedragEur, datum, opmerking };
+      const opt = z._opties.find((x) => x.id === d.optie);
+      if (!opt) return null;
+      return { optie: opt.id, winkel: mapTekst(opt.winkel, 80) || null, bedrag_eur: bedragEur, datum, opmerking };
+    };
+    if (!maakNieuw(v.z)) return nee('onbekende optie');
+    if (v.z.status === 'gekocht') {
+      const g = gekochtVan(v.t), n = maakNieuw(v.z);
+      return zelfdeGekocht(g, n) ? { status: 200, body: { ok: true, status: 'gekocht', al: true, gekocht: g } }
+        : { status: 409, body: { ok: false, fout: 'deze zoektocht staat al op gekocht met andere gegevens; tik eerst Toch niet gekocht' } };
+    }
+    const ok = o.vv.wijzig(path.join(o.vault, v.p.rel), function (t) {
+      const fm = /^---\n([\s\S]*?)\n---/.exec(t || '');
+      const z = fm ? ontleed(t, v.p.rel, v.p.ent) : null;
+      if (!z) { reden = 'weg'; return null; }
+      if (z.status !== v.z.status) { reden = z.status; bestaand = z.status === 'gekocht' ? gekochtVan(t) : null; return null; }
+      if (teVroeg(z)) { reden = 'datum'; return null; }
+      nieuw = maakNieuw(z);
+      if (!nieuw) { reden = 'optie'; return null; }
+      return '---\n' + zetStatusRegels(fm[1], 'gekocht', gekochtRegel(nieuw)) + '\n---' + t.slice(fm[0].length);
+    });
+    if (ok) return { status: 200, body: { ok: true, status: 'gekocht', gekocht: Object.assign({}, nieuw, { via: 'app' }) } };
+    if (reden === 'gekocht' && bestaand && nieuw === null && zelfdeGekocht(bestaand, maakNieuw(v.z))) return { status: 200, body: { ok: true, status: 'gekocht', al: true, gekocht: bestaand } };
+    return { status: 409, body: { ok: false, fout: 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
+  }
   function info() { return Object.assign({ aan: true }, laatst || { op: null, zoektochten: null, open: null, onleesbaar: null, favorieten: null }); }
-  return { paden, lijst, zoektocht, status, info };
+  return { paden, lijst, zoektocht, status, gekocht, info };
 }
 
-module.exports = { maak, ontleed, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
+module.exports = { maak, ontleed, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };

@@ -12488,7 +12488,7 @@ function handleApp(req, res) {
         if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
-        if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen + Niet meer nodig)
+        if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
@@ -18855,8 +18855,11 @@ async function appTripper(req, res, a, route) {
 // (type: shopper-zoektocht) direct in de vaste Shopper-mappen per entiteit, via vault-veilig. Routes achter de app-sessie:
 //   GET  /app/shopper                 alle zoektochten (open bovenaan, per entiteit): wens, entiteit, status, gezocht, advies-totaal, aantal opties
 //   GET  /app/shopper/<id>            één zoektocht: opties (koop-link alleen als https, anders url null), advies, eisen, aannames, niet te lezen
-//   POST /app/shopper/<id>/status     {status: "vervallen"} = Niet meer nodig; de enige schrijfactie. Gekocht NIET via de App (review 2-11
-//                                     MOET 5: alleen op Davids eigen woord via Socev).
+//   POST /app/shopper/<id>/status     {status: "vervallen"} = Niet meer nodig; {status: "open"} = Toch niet gekocht (alleen van gekocht, wv2275)
+//   POST /app/shopper/<id>/gekocht    {optie | winkel, bedrag_eur?, datum?, opmerking?} = Davids tik op Gekocht (wv2275, bouwplan "OVIS Shopper -
+//                                     knop Gekocht (ontwerp 2-11-2026)"). Review 2-11 MOET 5 blijft: zijn tik in de eigen ingelogde app ís zijn
+//                                     woord; geen automatisme zet gekocht, het bedrag komt nooit uit de optie, de winkel bij een optie van de pagina.
+//                                     Beide schrijfroutes delen de teller shopper_status (30/uur); audit alleen soort + id + status.
 // wv2276 S5: bij een gekochte zoektocht geeft GET /app/shopper/<id> ook facturen (hooguit 3 passende facturen uit de Facturen-app: id,
 // leverancier, datum, bedrag, zekerheid; berekend, niets geschreven) en de lijst factuur_gevonden (aantal). De app-sessie is in Facturen de
 // eigenaar (rolVoor ingang app), dus Shopper toont niets dat de Facturen-app David niet ook toont.
@@ -18886,6 +18889,11 @@ async function appShopper(req, res, a, route, d) {
       soort = 'status';
       if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
       u = shopper.status(m[1], d);
+    }
+    else if ((m = /^POST \/app\/shopper\/([^/]*)\/gekocht$/.exec(route))) {
+      soort = 'gekocht';
+      if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
+      u = typeof shopper.gekocht === 'function' ? shopper.gekocht(m[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
     }
     else u = { status: 404, body: { ok: false, fout: 'onbekend' } };
   } catch (e) { logError('shopper', e); return appWeiger(res, 503, 'Shopper kon de zoektochten nu niet lezen; probeer het zo opnieuw', 'shopper fout'); }

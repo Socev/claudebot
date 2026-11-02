@@ -2,7 +2,7 @@
 # Toetst OVIS Shopper S3 (wv2264, 2-11-2026; favorieten wv2267 § 6): shopper.js (alleen type: shopper-zoektocht direct in de vaste Shopper-mappen, entiteit uit de map,
 # geen symlink volgen, id = hash van het pad en nooit een pad uit de vraag, koop-link alleen https, totaal/advies uit de opties) en het
 # server.js-blok (routes, audit zonder wens, Niet meer nodig = de enige schrijfactie, gekocht niet via de App, /health alleen aantallen + tijdstip,
-# uitrol-lijst; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
+# uitrol-lijst; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase; § 8 de knop Gekocht en Toch niet gekocht, wv2275). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
 if grep -nE "console\.|eval\(" shopper.js; then echo "ROOD  shopper.js logt naar de console of gebruikt eval"; exit 1; fi
@@ -69,7 +69,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('2h id = 12 hex van sha256(pad)', k.id === S.idVan(zt.pad) && /^[0-9a-f]{12}$/.test(k.id));
   // ── 3. Niet meer nodig ──
   const voor = fs.readFileSync(path.join(GH, 'Shopper - 2026-11-01 - Proefkasten.md'), 'utf8');
-  toets('3a alleen {status: "vervallen"}; gekocht, open of extra velden = 400, niets geschreven', [{ status: 'gekocht' }, { status: 'open' }, {}, null, { status: 'vervallen', x: 1 }].every((x) => m.status(k.id, x).status === 400)
+  toets('3a alleen {status: "vervallen"}; gekocht, open of extra velden = 400, niets geschreven', [{ status: 'gekocht' }, { status: 'open', x: 1 }, {}, null, { status: 'vervallen', x: 1 }].every((x) => m.status(k.id, x).status === 400)
     && fs.readFileSync(path.join(GH, 'Shopper - 2026-11-01 - Proefkasten.md'), 'utf8') === voor);
   toets('3b gekocht → vervallen geweigerd (409), pagina ongemoeid', m.status(op('Oud gekocht').id, { status: 'vervallen' }).status === 409 && /status: gekocht/.test(fs.readFileSync(path.join(GH, 'Shopper - 2026-10-20 - Oud gekocht.md'), 'utf8')));
   const r3 = m.status(k.id, { status: 'vervallen' }), na = fs.readFileSync(path.join(GH, 'Shopper - 2026-11-01 - Proefkasten.md'), 'utf8');
@@ -138,8 +138,17 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   r = await vraag('POST /app/shopper/' + id2 + '/status', { status: 'vervallen' });
   toets('5i POST vervallen = 200, pagina op vervallen, reden "shopper status <id> 200"', r.s === 200 && r.app.reden === 'shopper status ' + id2 + ' 200' && /\nstatus: vervallen\n/.test(fs.readFileSync(path.join(GH2, 'Shopper - 2026-11-01 - Proefkasten.md'), 'utf8')), r);
   r = await vraag('POST /app/shopper/' + id2 + '/gekocht', { status: 'gekocht' });
-  r = Object.assign(r, {});
-  toets('5j andere POST onder /app/shopper/ (gekocht) = 404', r.s === 404 && r.app.reden === 'shopper onbekend 404', r.app);
+  toets('5j POST gekocht met een onbekend veld = 400, reden "shopper gekocht <id> 400", niets geschreven', r.s === 400 && r.app.reden === 'shopper gekocht ' + id2 + ' 400'
+    && /\nstatus: vervallen\n/.test(fs.readFileSync(path.join(GH2, 'Shopper - 2026-11-01 - Proefkasten.md'), 'utf8')), r);
+  r = await vraag('POST /app/shopper/' + id2 + '/gekocht', { optie: 'o1', bedrag_eur: 46.95, opmerking: 'Geheime opmerking' });
+  const pg5 = fs.readFileSync(path.join(GH2, 'Shopper - 2026-11-01 - Proefkasten.md'), 'utf8');
+  toets('5n POST gekocht (vervallen → gekocht) = 200, reden zonder winkel/bedrag/opmerking', r.s === 200 && r.app.reden === 'shopper gekocht ' + id2 + ' 200' && !/Proefwinkel|46|Geheim/.test(JSON.stringify(r.app))
+    && /\nstatus: gekocht\ngekocht: \{optie: o1, winkel: "Proefwinkel", bedrag_eur: 46.95, datum: "\d{4}-\d{2}-\d{2}", opmerking: "Geheime opmerking", via: app\}\n/.test(pg5), [r, pg5.slice(0, 400)]);
+  r = await vraag('POST /app/shopper/' + id2 + '/status', { status: 'open' });
+  toets('5o POST status open (Toch niet gekocht) = 200, gekocht-regel weg', r.s === 200 && r.app.reden === 'shopper status ' + id2 + ' 200'
+    && !/gekocht/.test(fs.readFileSync(path.join(GH2, 'Shopper - 2026-11-01 - Proefkasten.md'), 'utf8').split('\n---')[0].replace('# open | gekocht | vervallen', '')), r);
+  r = await vraag('POST /app/shopper/' + id2 + '/anders', {});
+  toets('5j2 andere POST onder /app/shopper/ = 404', r.s === 404 && r.app.reden === 'shopper onbekend 404', r.app);
   r = await vraag('GET /app/shopper/' + id2 + '/meer');
   toets('5k andere GET = 404', r.s === 404, r.app);
   toets('5l shopperInfo: aantallen, geen fouten gelogd', ctx.__sh.shopperInfo().zoektochten === 1 && fl.length === 0, [ctx.__sh.shopperInfo(), fl]);
@@ -223,6 +232,95 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('7m shopper.js: alleen SELECT op facturen, readOnly + query_only, geen gedeelde handle', !/\b(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|ATTACH)\b/.test(bron) && /readOnly: true/.test(bron) && /query_only = ON/.test(bron) && !/facturenOpen/.test(bron));
     const srv = fs.readFileSync('server.js', 'utf8');
     toets('7n server.js geeft shopper alleen een pad (primaire kant), geen facturenOpen()', /maak\(\{ vault: VAULT, vv: VV\(\), facturenPad: facturenPad \}\)/.test(srv) && /facturenMagOpenen\(\) \? path\.join\(FACTUREN_DIR, 'facturen\.sqlite'\) : null/.test(srv));
+  }
+
+  // ── 8. de knop Gekocht (wv2275, bouwplan "OVIS Shopper - knop Gekocht (ontwerp 2-11-2026)" § 3.2 en § 7) ──
+  {
+    const V4 = path.join(W, 'vault4'), M4 = path.join(V4, '10_Zakelijk/Groenhouten/Shopper'); fs.mkdirSync(M4, { recursive: true });
+    const NAAM = 'Shopper - 2026-11-01 - Kast.md', P4 = path.join(M4, NAAM), id = S.idVan('10_Zakelijk/Groenhouten/Shopper/' + NAAM);
+    const bron = pagina(['type: shopper-zoektocht', 'wens: "Proefkast"', 'status: open   # open | gekocht | vervallen', 'gezocht: 2026-11-01T09:00+01:00', 'opties:',
+      opt('o1', { w: 'Bouwmarkt Proef', p: 25.97, v: 0, t: 51.94, n: 2, u: 'https://www.bouwmarktproef.nl/p/1' }),
+      '  - {id: o2, winkel: "Andere \\"Winkel\\"", product: "x", prijs_eur: 9, totaal_eur: 9, url: "https://andere.nl/p"}', 'advies: o1', 'updated: 2026-11-01'], '# Kast\n\ntekst\n');
+    const zet = (t) => fs.writeFileSync(P4, t), leesP = () => fs.readFileSync(P4, 'utf8');
+    const nu = () => new Date('2026-11-02T11:00:00Z');
+    const m8 = S.maak({ vault: V4, vv: VV, nu });
+    zet(bron);
+    let r8 = m8.gekocht(id, { optie: 'o1', bedrag_eur: 51.94, datum: '2026-11-02', opmerking: '1+1 gratis' });
+    const regel = 'gekocht: {optie: o1, winkel: "Bouwmarkt Proef", bedrag_eur: 51.94, datum: "2026-11-02", opmerking: "1+1 gratis", via: app}';
+    toets('8a gekocht per optie: 200, statusregel gekocht + gekocht-regel direct eronder, rest byte-gelijk', r8.status === 200 && leesP() === bron.replace('status: open   # open | gekocht | vervallen', 'status: gekocht\n' + regel), [r8, leesP().slice(0, 300)]);
+    const g8 = m8.zoektocht(id).body.zoektocht;
+    toets('8b GET geeft het gekocht-blok terug (via app), de lijst alleen de winkel', g8.status === 'gekocht' && JSON.stringify(g8.gekocht) === JSON.stringify({ optie: 'o1', winkel: 'Bouwmarkt Proef', bedrag_eur: 51.94, datum: '2026-11-02', opmerking: '1+1 gratis', via: 'app' })
+      && JSON.stringify(m8.lijst().body.zoektochten[0].gekocht) === JSON.stringify({ winkel: 'Bouwmarkt Proef' }), g8.gekocht);
+    const ervoor = leesP();
+    r8 = m8.gekocht(id, { optie: 'o1', bedrag_eur: '51.94', datum: '2026-11-02', opmerking: '1+1 gratis' });
+    toets('8c nog eens met dezelfde gegevens = 200 al, niets geschreven', r8.status === 200 && r8.body.al === true && leesP() === ervoor, r8);
+    r8 = m8.gekocht(id, { optie: 'o1', bedrag_eur: 40, datum: '2026-11-02' });
+    toets('8d al gekocht met andere gegevens = 409, niets geschreven', r8.status === 409 && leesP() === ervoor, r8);
+    toets('8e gekocht → vervallen blijft 409', m8.status(id, { status: 'vervallen' }).status === 409 && leesP() === ervoor);
+    r8 = m8.status(id, { status: 'open' });
+    toets('8f Toch niet gekocht: gekocht → open, gekocht-regel weg, pagina weer byte-gelijk aan het begin (op de statusregel na)', r8.status === 200 && leesP() === bron.replace('status: open   # open | gekocht | vervallen', 'status: open'), [r8, leesP().slice(0, 200)]);
+    toets('8g open → open = 200 al', m8.status(id, { status: 'open' }).body.al === true);
+    zet(bron);
+    r8 = m8.gekocht(id, { optie: 'o2' });
+    toets('8h winkel komt uit de pagina (aanhalingstekens veilig), bedrag nooit uit de optie (null), datum leeg = vandaag', r8.status === 200
+      && leesP().includes('gekocht: {optie: o2, winkel: "Andere \'Winkel\'", bedrag_eur: null, datum: "2026-11-02", opmerking: null, via: app}')
+      && m8.zoektocht(id).body.zoektocht.gekocht.bedrag_eur === null && m8.zoektocht(id).body.zoektocht.gekocht.winkel === "Andere 'Winkel'", [r8, leesP().slice(0, 400)]);
+    zet(bron);
+    const slecht8 = [null, [], 'o1', {}, { optie: 'o1', winkel: 'Gamma' }, { optie: 'o9' }, { optie: 'x1' }, { optie: 1 }, { optie: 'o1', status: 'gekocht' }, { optie: 'o1', via: 'socev' },
+      { optie: 'o1', bedrag_eur: '12,50' }, { optie: 'o1', bedrag_eur: -1 }, { optie: 'o1', bedrag_eur: 1.234 }, { optie: 'o1', bedrag_eur: 'abc' }, { optie: 'o1', bedrag_eur: 1e10 }, { optie: 'o1', bedrag_eur: true },
+      { optie: 'o1', datum: '2026-11-03' }, { optie: 'o1', datum: '2026-02-30' }, { optie: 'o1', datum: '2026-09-30' }, { optie: 'o1', datum: '2-11-2026' }, { optie: 'o1', datum: 20261102 },
+      { optie: 'o1', opmerking: 'x'.repeat(121) }, { optie: 'o1', opmerking: 5 }, { winkel: 'w'.repeat(81) }, { winkel: '   ' }, { winkel: 3 }];
+    const st8 = slecht8.map((x) => m8.gekocht(id, x).status);
+    toets('8i ongeldig (optie/winkel beide of geen, onbekende optie, extra veld, bedrag, datum toekomst/ongeldig/te vroeg, te lange tekst) = 400, niets geschreven', st8.every((x) => x === 400) && leesP() === bron, st8);
+    toets('8j onbekende of pad-achtige id = 404/400', m8.gekocht('0123456789ab', { optie: 'o1' }).status === 404 && m8.gekocht('../x', { optie: 'o1' }).status === 400);
+    r8 = m8.gekocht(id, { optie: 'o1', opmerking: 'regel1\nregel2 "aanh" \\ back, komma: #hekje } {acc}\u2028zz\r\t\u0085' });
+    const t8 = leesP(), fm8 = t8.split('\n---')[0], g8b = m8.zoektocht(id).body.zoektocht;
+    toets('8k opmerking met regeleinde, aanhalingstekens, backslash, komma, #, accolades, U+2028: één regel, terug te lezen, frontmatter heel', r8.status === 200
+      && fm8.split('\n').length === bron.split('\n---')[0].split('\n').length + 1 && g8b.gekocht.opmerking === "regel1 regel2 'aanh' / back, komma: #hekje } {acc} zz"
+      && g8b.opties.length === 2 && g8b.advies === 'o1' && t8.endsWith('\n---\n# Kast\n\ntekst\n'), [g8b.gekocht, fm8]);
+    zet(bron.replace('status: open   # open | gekocht | vervallen', 'status: vervallen'));
+    r8 = m8.gekocht(id, { winkel: 'Kringloop "De Ruil"\n', bedrag_eur: 12.5, datum: '2026-10-05', opmerking: '' });
+    const g8c = m8.zoektocht(id).body.zoektocht.gekocht;
+    toets('8l vervallen → gekocht; ergens anders gekocht: optie null, winkel uit de vraag (veilig), datum binnen 30 d vóór de zoektocht mag', r8.status === 200
+      && leesP().includes('\nstatus: gekocht\ngekocht: {optie: null, winkel: "Kringloop \'De Ruil\'", bedrag_eur: 12.5, datum: "2026-10-05", opmerking: null, via: app}\n')
+      && g8c.optie === null && g8c.winkel === "Kringloop 'De Ruil'" && g8c.bedrag_eur === 12.5, [r8, g8c]);
+    // gelijktijdige wijziging: tussen het lezen en het schrijven verandert de pagina
+    const vvRace = (fn) => Object.assign({}, VV, { wijzig: (p, f) => { fn(); return VV.wijzig(p, f); } });
+    zet(bron);
+    const mR = S.maak({ vault: V4, vv: vvRace(() => zet(bron.replace('status: open   # open | gekocht | vervallen', 'status: vervallen'))), nu });
+    r8 = mR.gekocht(id, { optie: 'o1' });
+    toets('8m gelijktijdige wijziging (status veranderd) = 409, alleen de andere wijziging staat er', r8.status === 409 && leesP() === bron.replace('status: open   # open | gekocht | vervallen', 'status: vervallen'), r8);
+    zet(bron);
+    const zonderO1 = bron.replace(/\n  - \{id: o1[^\n]*/, '');
+    r8 = S.maak({ vault: V4, vv: vvRace(() => zet(zonderO1)), nu }).gekocht(id, { optie: 'o1' });
+    toets('8n gelijktijdige wijziging (optie weg) = 409, niets bijgeschreven', r8.status === 409 && leesP() === zonderO1, r8);
+    zet(bron);
+    const laterGezocht = bron.replace('gezocht: 2026-11-01T09:00+01:00', 'gezocht: 2026-11-02T09:00+01:00');
+    r8 = S.maak({ vault: V4, vv: vvRace(() => zet(laterGezocht)), nu }).gekocht(id, { optie: 'o1', datum: '2026-10-02' });
+    toets('8n2 gelijktijdige wijziging van gezocht: datum onder het slot opnieuw getoetst (te vroeg = 409, niets geschreven)', r8.status === 409 && leesP() === laterGezocht, r8);
+    zet(bron);
+    r8 = S.maak({ vault: V4, vv: vvRace(() => { m8.gekocht(id, { optie: 'o1', datum: '2026-11-02' }); }), nu }).gekocht(id, { optie: 'o1', datum: '2026-11-02' });
+    toets('8o gelijktijdig dezelfde tik = 200 al (één gekocht-regel)', r8.status === 200 && r8.body.al === true && leesP().split('\ngekocht:').length === 2, [r8, leesP().slice(0, 300)]);
+    // de nederlandse dag: 23:30 UTC op 2 nov = 3 nov in Nederland
+    zet(bron);
+    r8 = S.maak({ vault: V4, vv: VV, nu: () => new Date('2026-11-02T23:30:00Z') }).gekocht(id, { optie: 'o1' });
+    toets('8p datum leeg = vandaag in Nederland (niet UTC); 3 nov mag dan', r8.status === 200 && r8.body.gekocht.datum === '2026-11-03', r8);
+    // de handmatige regel (Stellingkast-vorm: toelichting, zonder via) en een blokvorm
+    zet(bron.replace('status: open   # open | gekocht | vervallen', 'status: gekocht\ngekocht: {optie: o1, winkel: "Gamma", bedrag_eur: null, datum: "2026-11-02", toelichting: "1+1 gratis (opgave David)"}'));
+    const g8d = m8.zoektocht(id).body.zoektocht.gekocht;
+    toets('8q handmatige gekocht-regel zonder via blijft leesbaar (opmerking uit toelichting, via null)', m8.zoektocht(id).status === 200 && g8d.winkel === 'Gamma' && g8d.opmerking === '1+1 gratis (opgave David)' && g8d.via === null && g8d.bedrag_eur === null, g8d);
+    toets('8r daarop Gekocht met andere gegevens = 409; Toch niet gekocht haalt de handmatige regel weg', m8.gekocht(id, { optie: 'o1', bedrag_eur: 51.94 }).status === 409
+      && m8.status(id, { status: 'open' }).status === 200 && leesP() === bron.replace('status: open   # open | gekocht | vervallen', 'status: open'), leesP().slice(0, 300));
+    zet(bron.replace('status: open   # open | gekocht | vervallen', 'status: gekocht\ngekocht:\n  optie: o1\n  winkel: Gamma'));
+    toets('8s Toch niet gekocht haalt ook een gekocht-blok in blokvorm helemaal weg', m8.status(id, { status: 'open' }).status === 200 && leesP() === bron.replace('status: open   # open | gekocht | vervallen', 'status: open'), leesP().slice(0, 300));
+    zet(bron.replace('status: open   # open | gekocht | vervallen', 'status: vervallen'));
+    toets('8t vervallen → open via status = 409 (alleen gekocht kan terug naar open)', m8.status(id, { status: 'open' }).status === 409);
+    zet(bron.replace('status: open   # open | gekocht | vervallen\n', '').replace('opties:', 'gekocht: {optie: o2, winkel: "Oud"}\nopties:'));
+    r8 = m8.gekocht(id, { optie: 'o1' });
+    toets('8u zonder statusregel en met een oude gekocht-regel elders: oude regel weg, status + regel onderaan de frontmatter', r8.status === 200 && !leesP().includes('"Oud"')
+      && /\nupdated: 2026-11-01\nstatus: gekocht\ngekocht: \{optie: o1,[^\n]*\}\n---\n/.test(leesP()), leesP().slice(0, 700));
+    const bronSh = fs.readFileSync('shopper.js', 'utf8'), gk = bronSh.slice(bronSh.indexOf('  function gekocht(id, d)'), bronSh.indexOf('  function info()'));
+    toets('8v gekocht() leest geen prijs of totaal uit de optie (bedrag alleen uit de vraag)', gk.length > 500 && !/totaal_eur|prijs_eur|verzending_eur/.test(gk));
   }
 
   fs.rmSync(W, { recursive: true, force: true });
