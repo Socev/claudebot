@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Toetst app-vast.js en de koppeling appVastRoute in server.js (wv1051, OVIS M1b: vastzetten in het menu; ontwerplijnen § 2.3, § 4.3).
 # Toetst: alleen { scherm, focus? } (geen naam of ander veld op schijf), standaard Facturen + Bestanden, zet/los/vervang, dubbel = niets,
-# grens 25, ongeldige id's, vaste plek: geen privé-App en geen subkaart in het antwoord, vastzetten geweigerd, losmaken mag; in
+# grens 65 (5 × 13), ongeldige id's, vaste plek: geen privé-App en geen subkaart in het antwoord, vastzetten geweigerd, losmaken mag; in
 # server.js: schrijven alleen bij een wijziging, A zet → B ziet, kapot bestand = standaard, 404 zonder module, één lijst privé-id's
 # die ook de drie vaste-plekweigeringen gebruiken, uitrol.sh en Dockerfile.
 # Gebruik: bash test/app-vast.sh
@@ -22,7 +22,7 @@ toets('1b de standaard is een kopie (niet te muteren)', L.uitBestand(null).lijst
 u = L.uitBestand({ vast: [{ scherm: 'facturen', naam: 'Factuur van X', extra: 1 }, { scherm: 'facturen' }, { scherm: '../x' }, { scherm: 'brain', focus: 'pagina:12' }, { scherm: 'brain', focus: 'a b' }, 'tekst', null] });
 toets('2 schoon: onbekende velden, dubbel, ongeldige id/focus weg', u.standaard === false && JSON.stringify(u.lijst) === '[{"scherm":"facturen"},{"scherm":"brain","focus":"pagina:12"}]', u);
 toets('2b lege lijst blijft leeg (niet terug naar de standaard)', L.uitBestand({ vast: [] }).lijst.length === 0 && L.uitBestand({ vast: [] }).standaard === false);
-toets('2c hooguit 25 van schijf', L.uitBestand({ vast: Array.from({ length: 40 }, (_, i) => ({ scherm: 'app' + i })) }).lijst.length === 25);
+toets('2c hooguit 65 van schijf', L.uitBestand({ vast: Array.from({ length: 80 }, (_, i) => ({ scherm: 'app' + i })) }).lijst.length === 65);
 
 let r = L.pas([{ scherm: 'facturen' }], { actie: 'zet', scherm: 'financien' }, false);
 toets('3 zet voegt achteraan toe', r.ok && r.veranderd && r.lijst.map((x) => x.scherm).join() === 'facturen,financien', r);
@@ -38,8 +38,10 @@ r = L.pas([{ scherm: 'a1' }, { scherm: 'a2' }], { actie: 'los', scherm: 'a1' }, 
 toets('5 los haalt weg', r.ok && r.veranderd && r.lijst.map((x) => x.scherm).join() === 'a2');
 r = L.pas([{ scherm: 'a1' }], { actie: 'los', scherm: 'a9' }, false);
 toets('5b los van iets wat niet vast staat = niets veranderd', r.ok && !r.veranderd);
-r = L.pas(Array.from({ length: 25 }, (_, i) => ({ scherm: 'app' + i })), { actie: 'zet', scherm: 'nog-een' }, false);
-toets('6 grens 25 → 409', !r.ok && r.status === 409, r);
+r = L.pas(Array.from({ length: 65 }, (_, i) => ({ scherm: 'app' + i })), { actie: 'zet', scherm: 'nog-een' }, false);
+toets('6 grens 65 → 409', !r.ok && r.status === 409, r);
+r = L.pas(Array.from({ length: 64 }, (_, i) => ({ scherm: 'app' + i })), { actie: 'zet', scherm: 'nog-een' }, false);
+toets('6b menu-desktop: de 65e mag nog (13 × 5)', r.ok && r.lijst.length === 65, r);
 for (const d of [{ actie: 'weg', scherm: 'a' }, { actie: 'zet', scherm: 'Facturen' }, { actie: 'zet', scherm: 'a/../b' }, { actie: 'zet', scherm: 'x'.repeat(41) }, { actie: 'zet', scherm: 'brain', focus: '20_Prive/Gezin.md' }, { actie: 'zet', scherm: 'brain', focus: 5 }, null]) {
   r = L.pas([], d, false);
   toets('7 ongeldig → 400: ' + JSON.stringify(d), !r.ok && r.status === 400, r);

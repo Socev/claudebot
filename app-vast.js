@@ -2,13 +2,13 @@
 // OVIS M1b (wv1051, ontwerplijnen § 2.3, § 4.2, § 4.3; David Ja 24-10 20:51, e1580d70): vastgezette plekken en Apps in het menu.
 // Eén lijst voor alle apparaten in vast.json (app-data); alleen het podproces schrijft, via POST /app/vast. Een regel is alleen
 // { scherm, focus? } (id's; nooit een naam: de naam komt live uit de module in de app, Fable 24-10 #9). De pod kent geen catalogus
-// (§ 4.3): hij toetst alleen de vorm van een id. Hooguit vijf per plek bewaakt de app (die kent de plek van elke module); de pod
+// (§ 4.3): hij toetst alleen de vorm van een id. Hooguit dertien per plek bewaakt de app (die kent de plek van elke module); de pod
 // houdt een harde grens op het geheel. Privé-Apps (de ene lijst privé-id's in server.js) en subkaarten (focus) gaan nooit naar een
 // apparaat met een vaste plek, en zo'n apparaat zet niets vast (het ziet maar een deel van de lijst; losmaken mag wel).
 // Logica zonder opslag of HTTP (drie lagen, § 4.4): server.js leest en schrijft het bestand en stuurt het antwoord.
 
 const STANDAARD = [{ scherm: 'facturen' }, { scherm: 'bestanden' }];   // § 2.3: standaard vast, tot David zelf iets wijzigt
-const MAX = 25;                                // vijf plekken × vijf; de grens per plek houdt de app
+const MAX = 65;                                // vijf plekken × dertien (menu-desktop, David 2-11-2026; was 5 × 5); de grens per plek houdt de app
 const SCHERM_RE = /^[a-z][a-z0-9-]{1,39}$/;    // module-id uit de catalogus (src/modules.ts)
 const FOCUS_RE = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,119}$/;   // subkaart-id (M2d); geen pad, geen spatie, geen naam
 
