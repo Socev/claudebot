@@ -15,6 +15,10 @@
  *  - Een koop-link telt alleen als https-adres met een hostnaam (geen gebruiker/wachtwoord, ≤ 2000 tekens); anders url null (geen knop).
  *  - Eén schrijfactie: status open → vervallen ("Niet meer nodig"), via o.vv.wijzig (opnieuw gelezen, alleen de statusregel). Gekocht
  *    gaat NIET via de App (review 2-11 MOET 5: alleen op Davids eigen woord via Socev).
+ *  - Favoriet (wv2267, David 2-11: "Kunnen we gericht iets bouwen dat ook op favoriete websites zoekt? … Ik wil altijd prijs en levervoorraad
+ *    weten"): de vault-pagina FAVORIETEN (type: shopper-favorieten, lijst winkels: {domein, aan}) wordt bij elke vraag gelezen (vault-veilig,
+ *    zelfde grens). Een optie krijgt favoriet: true als haar (al goedgekeurde https-)koop-link op een domein staat dat aan staat (zelfde host
+ *    of een subdomein). Geen pagina of geen geldige regels = niets favoriet. De pagina zelf wordt nooit geschreven.
  * PRIVACY. Deze module logt niets; info() geeft alleen aantallen en het tijdstip van de laatste lijst (geen wens, pad of bedrag). Er gaat niets naar buiten of naar een taalmodel.
  */
 const fs = require('fs');
@@ -31,6 +35,7 @@ const MAPPEN = [
   ['prive', 'Privé', '20_Prive/Shopper'],
 ];
 const STATUSSEN = ['open', 'gekocht', 'vervallen'];
+const FAVORIETEN = '00_Systeem/Shopper - favoriete winkels.md', MAX_FAVORIETEN = 60;
 const MAX_PAGINA = 512 * 1024, MAX_OPTIES = 12;
 const ID_RE = /^[0-9a-f]{12}$/;
 
@@ -58,7 +63,24 @@ function koopUrl(x) {
   if (u.protocol !== 'https:' || u.username || u.password || !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(u.hostname)) return null;
   return u.href;
 }
-function optiesVan(t) {
+// Domeinen die aan staan: "www.", "https://" en een pad vallen weg; alleen een kale hostnaam met een punt telt
+function favorietenVan(t) {
+  if (fmWaarde(t, 'type') !== 'shopper-favorieten') return [];
+  const uit = [];
+  for (const w of R.fmObjLijst(t, 'winkels')) {
+    if (String(w.aan).trim().toLowerCase() !== 'true') continue;
+    const d = String(w.domein == null ? '' : w.domein).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split(/[/?#]/)[0];
+    if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d) && d.length <= 100 && uit.indexOf(d) < 0) uit.push(d);
+  }
+  return uit.slice(0, MAX_FAVORIETEN);
+}
+function isFavoriet(url, fav) {
+  if (!url || !fav || !fav.length) return false;
+  let h;
+  try { h = new URL(url).hostname.toLowerCase().replace(/\.$/, ''); } catch (e) { return false; }
+  return fav.some((d) => h === d || h.endsWith('.' + d));
+}
+function optiesVan(t, fav) {
   const uit = [];
   for (const o of R.fmObjLijst(t, 'opties').slice(0, MAX_OPTIES)) {
     const id = /^o\d{1,3}$/.test(String(o.id || '')) ? String(o.id) : null;
@@ -67,7 +89,7 @@ function optiesVan(t) {
     uit.push({ id, winkel: tekstVeld(o.winkel, 80), verkoper: tekstVeld(o.verkoper, 120), product: tekstVeld(o.product, 300),
       koop_eenheid: tekstVeld(o.koop_eenheid, 60), koop_aantal: aantal(o.koop_aantal), prijs_eur: bedrag(o.prijs_eur), verzending_eur: bedrag(o.verzending_eur),
       totaal_eur: bedrag(o.totaal_eur), levertijd: tekstVeld(o.levertijd, 160), voorraad: tekstVeld(o.voorraad, 120),
-      url: koopUrl(ruw), url_geweigerd: !!ruw && !koopUrl(ruw), gelezen: tekstVeld(o.gelezen, 40) });
+      url: koopUrl(ruw), url_geweigerd: !!ruw && !koopUrl(ruw), favoriet: isFavoriet(koopUrl(ruw), fav), gelezen: tekstVeld(o.gelezen, 40) });
   }
   return uit;
 }
@@ -85,15 +107,15 @@ function inleiding(t) {
   const eind = /^(?:#{1,2}[ \t]|\|)/m.exec(lijf);
   return (eind ? lijf.slice(0, eind.index) : lijf).trim().slice(0, 2000);
 }
-function ontleed(t, rel, ent) {
+function ontleed(t, rel, ent, fav) {
   if (fmWaarde(t, 'type') !== 'shopper-zoektocht') return null;
   const st = String(fmWaarde(t, 'status') || '').toLowerCase();
-  const opties = optiesVan(t), adviesId = tekstVeld(fmWaarde(t, 'advies'), 8);
+  const opties = optiesVan(t, fav), adviesId = tekstVeld(fmWaarde(t, 'advies'), 8);
   const advies = opties.find((o) => o.id === adviesId) || null;
   return { id: idVan(rel), wens: tekstVeld(fmWaarde(t, 'wens'), 160) || path.basename(rel, '.md').slice(0, 160), entiteit: ent[0], entiteit_naam: ent[1],
     status: STATUSSEN.indexOf(st) >= 0 ? st : 'open', gezocht: tekstVeld(fmWaarde(t, 'gezocht'), 40), aantal: aantal(fmWaarde(t, 'aantal')),
     opties_aantal: opties.length, advies: advies ? advies.id : null, advies_totaal: advies ? advies.totaal_eur : null, advies_winkel: advies ? advies.winkel : null,
-    _opties: opties };
+    advies_favoriet: advies ? advies.favoriet : false, favorieten_aantal: opties.filter((x) => x.favoriet).length, _opties: opties };
 }
 
 /*
@@ -112,6 +134,8 @@ function maak(o) {
     return uit;
   }
   function lees(rel) { try { return o.vv.lees(path.join(o.vault, rel), 'utf8', { max: MAX_PAGINA }); } catch (e) { return null; } }
+  // De favorietenlijst, bij elke vraag opnieuw (David past hem aan in Brain); onleesbaar = geen favorieten
+  function favorieten() { const t = lees(FAVORIETEN); return t == null ? [] : favorietenVan(t); }
   const kaal = (z) => { const k = Object.assign({}, z); delete k._opties; return k; };
   // Open bovenaan, daarna gekocht/vervallen; binnen elk de vaste entiteitvolgorde, nieuwste zoektocht eerst
   const volg = (z) => MAPPEN.findIndex((m) => m[0] === z.entiteit);
@@ -124,21 +148,22 @@ function maak(o) {
   function lijst() {
     const uit = [];
     let onleesbaar = 0;
+    const fav = favorieten();
     for (const p of paden()) {
       const t = lees(p.rel);
       if (t == null) { onleesbaar++; continue; }
-      const z = ontleed(t, p.rel, p.ent);
+      const z = ontleed(t, p.rel, p.ent, fav);
       if (z) uit.push(kaal(z));
     }
     uit.sort(sorteer);
-    laatst = { op: new Date().toISOString(), zoektochten: uit.length, open: uit.filter((z) => z.status === 'open').length, onleesbaar };
+    laatst = { op: new Date().toISOString(), zoektochten: uit.length, open: uit.filter((z) => z.status === 'open').length, onleesbaar, favorieten: fav.length };
     return { status: 200, body: { ok: true, entiteiten: MAPPEN.map((m) => ({ id: m[0], naam: m[1] })), zoektochten: uit } };
   }
   function vind(id) {
     if (!ID_RE.test(String(id))) return { fout: { status: 400, body: { ok: false, fout: 'ongeldige zoektocht' } } };
     const p = paden().find((x) => idVan(x.rel) === id);
     const t = p ? lees(p.rel) : null;
-    const z = t == null ? null : ontleed(t, p.rel, p.ent);
+    const z = t == null ? null : ontleed(t, p.rel, p.ent, favorieten());
     if (!z) return { fout: { status: 404, body: { ok: false, fout: 'onbekende zoektocht' } } };
     return { p, t, z };
   }
@@ -174,8 +199,8 @@ function maak(o) {
     if (reden === 'gekocht') return { status: 409, body: { ok: false, fout: 'deze zoektocht staat intussen op gekocht' } };
     return { status: 409, body: { ok: false, fout: 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
   }
-  function info() { return Object.assign({ aan: true }, laatst || { op: null, zoektochten: null, open: null, onleesbaar: null }); }
+  function info() { return Object.assign({ aan: true }, laatst || { op: null, zoektochten: null, open: null, onleesbaar: null, favorieten: null }); }
   return { paden, lijst, zoektocht, status, info };
 }
 
-module.exports = { maak, ontleed, idVan, koopUrl, optiesVan, MAPPEN, ID_RE };
+module.exports = { maak, ontleed, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, MAPPEN, ID_RE, FAVORIETEN };

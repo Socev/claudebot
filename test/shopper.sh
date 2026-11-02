@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Toetst OVIS Shopper S3 (wv2264, 2-11-2026): shopper.js (alleen type: shopper-zoektocht direct in de vaste Shopper-mappen, entiteit uit de map,
+# Toetst OVIS Shopper S3 (wv2264, 2-11-2026; favorieten wv2267 § 6): shopper.js (alleen type: shopper-zoektocht direct in de vaste Shopper-mappen, entiteit uit de map,
 # geen symlink volgen, id = hash van het pad en nooit een pad uit de vraag, koop-link alleen https, totaal/advies uit de opties) en het
 # server.js-blok (routes, audit zonder wens, Niet meer nodig = de enige schrijfactie, gekocht niet via de App, /health alleen aantallen + tijdstip,
 # uitrol-lijst). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
@@ -81,7 +81,33 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('3f pagina zonder statusregel krijgt er een', (function () { const id = S.idVan('20_Prive/Shopper/Shopper - 2026-11-02 - Prive lamp.md'); fs.writeFileSync(path.join(PR, 'Shopper - 2026-11-02 - Prive lamp.md'), pagina(['type: shopper-zoektocht', 'wens: "Proeflamp"']));
     return m.status(id, { status: 'vervallen' }).status === 200 && /\nstatus: vervallen\n---/.test(fs.readFileSync(path.join(PR, 'Shopper - 2026-11-02 - Prive lamp.md'), 'utf8')); })());
   const i = m.info();
-  toets('4 info: alleen aantallen en tijdstip (geen wens of pad)', i.aan === true && i.zoektochten === 4 && Object.keys(i).sort().join() === 'aan,onleesbaar,op,open,zoektochten', i);
+  toets('4 info: alleen aantallen en tijdstip (geen wens of pad)', i.aan === true && i.zoektochten === 4 && Object.keys(i).sort().join() === 'aan,favorieten,onleesbaar,op,open,zoektochten' && i.favorieten === 0, i);
+
+  // ── 6. favorieten (wv2267) ──
+  const FV = path.join(V, '00_Systeem'); fs.mkdirSync(FV, { recursive: true });
+  const favPad = path.join(V, S.FAVORIETEN);
+  const favPagina = (regels, type) => '---\ntype: ' + (type || 'shopper-favorieten') + '\n# commentaar bovenaan\nwinkels:\n' + regels.join('\n') + '\nupdated: 2026-11-02\n---\n# lijf\n';
+  fs.writeFileSync(favPad, favPagina(['  - {domein: proefwinkel.nl, naam: "Proef, winkel", aan: true}', '  # voorstel', '  - {domein: "https://www.bouwmarktnep.nl/", aan: true}',
+    '  - {domein: ok.nl, aan: false}', '  - {domein: "kapot domein", aan: true}', '  - {domein: a.nl, aan: "true"}', '  -', '    domein: nep.nl', '    aan: true']));
+  const fv = S.favorietenVan(fs.readFileSync(favPad, 'utf8'));
+  toets('6a favorietenVan: alleen aan, www/https/pad weg, kapot domein weg, blokvorm telt', JSON.stringify(fv) === JSON.stringify(['proefwinkel.nl', 'bouwmarktnep.nl', 'a.nl', 'nep.nl']), fv);
+  toets('6b isFavoriet: zelfde host of subdomein; geen look-alike, geen null', S.isFavoriet('https://www.proefwinkel.nl/p/1', fv) && S.isFavoriet('https://proefwinkel.nl/x', fv)
+    && !S.isFavoriet('https://proefwinkel.nl.evil.com/x', fv) && !S.isFavoriet('https://nepproefwinkel.nl/x', fv) && !S.isFavoriet(null, fv) && !S.isFavoriet('https://ok.nl/p', fv));
+  const GH3 = path.join(V, '10_Zakelijk/Tolgaarde/Shopper'); fs.mkdirSync(GH3, { recursive: true });
+  fs.writeFileSync(path.join(GH3, 'Shopper - 2026-11-02 - Fav.md'), pagina(['type: shopper-zoektocht', 'wens: "Favproef"', 'status: open', 'gezocht: 2026-11-02T08:00+01:00', 'opties:',
+    opt('o1', { p: 10, v: 0, t: 10, u: 'https://www.proefwinkel.nl/p/1' }), opt('o2', { w: 'Andere', p: 9, v: 0, t: 9, u: 'https://ok.nl/p' }),
+    opt('o3', { p: 8, v: 0, t: 8, u: 'http://www.bouwmarktnep.nl/p' }), 'advies: o1']));
+  const m6 = S.maak({ vault: V, vv: VV }), l6 = m6.lijst().body.zoektochten.find((x) => x.wens === 'Favproef');
+  const z6 = m6.zoektocht(l6.id).body.zoektocht, o6 = (id) => z6.opties.find((x) => x.id === id);
+  toets('6c optie op een favoriet domein = favoriet; ander domein of geweigerde (http) link = niet', o6('o1').favoriet === true && o6('o2').favoriet === false && o6('o3').favoriet === false, z6.opties);
+  toets('6d lijst: advies_favoriet en favorieten_aantal; info telt de favorieten', l6.advies_favoriet === true && l6.favorieten_aantal === 1 && m6.info().favorieten === 4, [l6, m6.info()]);
+  fs.writeFileSync(favPad, favPagina(['  - {domein: proefwinkel.nl, aan: true}'], 'index'));
+  toets('6e verkeerd type = geen favorieten', S.maak({ vault: V, vv: VV }).zoektocht(l6.id).body.zoektocht.opties.every((x) => x.favoriet === false));
+  fs.rmSync(favPad); fs.writeFileSync(path.join(V, '10_Zakelijk/Geheim/fav.md'), favPagina(['  - {domein: proefwinkel.nl, aan: true}'])); fs.symlinkSync(path.join(V, '10_Zakelijk/Geheim/fav.md'), favPad);
+  const m7 = S.maak({ vault: V, vv: VV });
+  toets('6f favorietenpagina als symlink: niet gevolgd, geen favorieten, geen fout', m7.zoektocht(l6.id).body.zoektocht.opties.every((x) => x.favoriet === false) && m7.lijst().status === 200 && m7.info().favorieten === 0);
+  fs.rmSync(favPad);
+  toets('6g geen favorietenpagina = niets favoriet, lijst werkt', S.maak({ vault: V, vv: VV }).lijst().body.zoektochten.every((x) => x.favorieten_aantal === 0));
 
   // ── 5. server.js ──
   const src = fs.readFileSync('server.js', 'utf8');
