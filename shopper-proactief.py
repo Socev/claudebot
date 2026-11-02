@@ -78,11 +78,20 @@ def open_taken():
     return uit
 
 
+def veilig_pad(rel):
+    """Vaultpad zonder symlink in een deel van het pad (socev kan in de vault een link zetten; dit script draait als claude)."""
+    basis = os.path.realpath(VAULT); p = basis
+    for deel in rel.split('/'):
+        p = os.path.join(p, deel)
+        if os.path.islink(p): return None
+    return p if os.path.realpath(p).startswith(basis + os.sep) else None
+
+
 def gezochte_ids():
     ids = set()
     for m in MAPPEN:
-        d = os.path.join(VAULT, m)
-        if not os.path.isdir(d): continue
+        d = veilig_pad(m)
+        if not d or not os.path.isdir(d): continue
         for f in os.listdir(d):
             p = os.path.join(d, f)
             if not f.endswith('.md') or os.path.islink(p): continue
@@ -93,7 +102,8 @@ def gezochte_ids():
 
 
 def favorieten():
-    p = os.path.join(VAULT, '00_Systeem', 'Shopper - favoriete winkels.md')
+    p = veilig_pad('00_Systeem/Shopper - favoriete winkels.md')
+    if not p: return []
     try: s = open(p, encoding='utf-8').read(20000)
     except OSError: return []
     uit = []
