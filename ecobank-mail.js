@@ -137,6 +137,12 @@ function bekend(a) {
   let ng = []; try { ng = JSON.parse(metaLees(a, 'ecobank_niet_gelezen') || '[]'); } catch (e) { ng = []; }
   return ids.concat(ng.map(function (f) { return f.mail_id; }));
 }
+// wv2259: alleen de mails die echt gelezen en in ecobank_tx opgenomen zijn (niet de onleesbare uit ecobank_niet_gelezen): die mag MailMan
+// uit de inbox halen
+function verwerkt(a) {
+  schema(a);
+  return a.db.prepare('SELECT mail_id FROM ecobank_tx ORDER BY ts DESC, mail_id LIMIT 20000').all().map(function (r) { return r.mail_id; });
+}
 
 function voor(p) { return p.saldo === null ? null : r2(p.saldo - (p.soort === 'bij' ? p.bedrag : -p.bedrag)); }
 /*
@@ -402,4 +408,4 @@ function stand(a) {
     rekeningen: rekeningen(a).length, niet_gelezen: ng.length };
 }
 
-module.exports = { afzenderAdres, leesMail, isMelding, controleer, schema, bij, bekend, volgorde, overzicht, stand, metaZet, LET_OP, leesCsv, csvBij, csvVolgorde };
+module.exports = { afzenderAdres, leesMail, isMelding, controleer, schema, bij, bekend, verwerkt, volgorde, overzicht, stand, metaZet, LET_OP, leesCsv, csvBij, csvVolgorde };

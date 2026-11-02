@@ -1690,6 +1690,8 @@ function nepGmail() {
         for (const l of erbijM) if (!['UNREAD', 'INBOX'].includes(l)) x.labels.add(l);
         for (const l of a.eraf) x.labels.delete(l);
         if (a.eraf.includes('INBOX')) x.plek = 'archief';
+        if (a.erbij.includes('INBOX')) x.plek = 'inbox';   // wv2259 terug
+        if (a.erbij.includes('UNREAD')) x.ongelezen = true;
         for (const [zid, z] of zus) {
           const bij = a.erbij.filter(function (l) { return K.DRAAD_LABELS.includes(l) && !(a.draad_niet || []).includes(l) && !z.labels.has(l) && !(l === 'OVERIG' && ['INTAKE', 'FACTUUR', 'NIEUWSBRIEF', 'SOCIAAL'].some(function (c) { return z.labels.has(c); })); });
           const af = a.eraf.filter(function (l) { return K.DRAAD_LABELS.includes(l) && z.labels.has(l) && ((a.draad_eraf || {})[l] || []).includes(zid); });
@@ -2856,4 +2858,140 @@ test('wv2218 zaakregister: nooit doktersmaten, geen Gmail-actie erbij, oude zake
   klok += 61 * 86400000;
   mm.opruim();
   assert.equal(mm._db.prepare('SELECT count(*) n FROM zaak').get().n, 0);
+});
+
+// ─────────── wv2259: inbox_uit (Ecobank-meldingen, factuurmail zodra in Facturen, terug bij Geen factuur) ───────────
+function inboxUitToestaan(dir, o) {
+  const f = path.join(dir, 'config.json'), c = JSON.parse(fs.readFileSync(f, 'utf8'));
+  c.inbox_uit = { 'gmail:david': Object.assign({ ja: '2026-11-02T13:55:00+01:00, vraag-id 640619c4' }, o || {}), 'gmail:groenhouten': Object.assign({ ja: 'x', ecobank: true, facturen: true }) };
+  fs.writeFileSync(f, JSON.stringify(c), { mode: 0o600 });
+}
+function wv2259Kamer(extra) {
+  const k = nieuweKamer(extra), gm = nepGmail();
+  toestaan(k.dir, ['gmail:david']); zetLive(k.mm); l2Toestaan(k.dir); uitgangToestaan(k.dir, ['gmail:david']);
+  return Object.assign(k, { gm });
+}
+
+test('wv2259 ecobank: alleen met inbox_uit.ja + ecobank, alleen verwerkte id\'s, UNREAD+INBOX eraf, één keer; TODO nooit; ≤ 20 per ronde; gedeeld nooit', () => {
+  const { mm, dir, gm } = wv2259Kamer();
+  const a = mail({ van: 'Ecobank <noreply@ecobank.com>', onderwerp: 'InApp Notification - Transaction Notification on A/C ***1234' });
+  const b = mail({ van: 'Ecobank <noreply@ecobank.com>', onderwerp: 'Login success Alert.' });
+  const c = mail({ van: 'Ecobank <noreply@ecobank.com>', onderwerp: 'InApp Notification - Transaction Notification on A/C ***5678' });
+  draai(mm, 'gmail:david', [a, b, c], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  [a, b, c].forEach(function (m) { gm.voeg(m); });
+  const ids = [a.id, b.id, c.id];
+  l2Ronde(mm, gm, ids);
+  assert.equal(mm.ecobankBekend('gmail:david', [a.id, c.id, 'geen-hex']), 2);
+  assert.equal(mm.ecobankBekend('gmail:david', [a.id]), 0, 'bestaande blijven');
+  assert.equal(mm.ecobankBekend('gmail:onbekend', [a.id]), 0);
+  // zonder Ja: niets
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids), 'ecobank'), []);
+  inboxUitToestaan(dir, { ecobank: false, facturen: false });
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids), 'ecobank'), [], 'vinkje ecobank uit');
+  gm.zet(c.id, 'TODO');
+  l2Ronde(mm, gm, ids);   // label_staat ziet TODO
+  inboxUitToestaan(dir, { ecobank: true });
+  const x = l2Ronde(mm, gm, ids);
+  const e = soortActies(x, 'ecobank');
+  assert.deepEqual(e.map(function (y) { return [y.gmail_id, y.erbij, y.eraf]; }), [[a.id, [], ['UNREAD', 'INBOX']]], 'alleen a: b is niet verwerkt, c heeft TODO');
+  assert.equal(e[0].draad, undefined, 'nooit op de draad');
+  assert.equal(x.g.j.telling.ecobank, 1);
+  assert.equal(gm.ber.get(a.id).plek, 'archief'); assert.equal(gm.ber.get(b.id).plek, 'inbox');
+  assert.ok(mm._db.prepare('SELECT archief_tijd FROM ecobank_mail WHERE gmail_id = ?').get(a.id).archief_tijd);
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids), 'ecobank'), [], 'één keer');
+  const ov = mm.app('GET /app/mailman', {});
+  const pd = ov.j.postvakken.find(function (p) { return p.id === 'gmail:david'; }).inbox_uit;
+  assert.deepEqual([pd.ja, pd.ecobank, pd.facturen, pd.ecobank_bekend, pd.ecobank_weg], [true, true, false, 2, 1]);
+  const pg = ov.j.postvakken.find(function (p) { return p.id === 'gmail:groenhouten'; }).inbox_uit;
+  assert.equal(pg.ja, false, 'doktersmaten nooit');
+  // 25 nieuwe verwerkte meldingen → hooguit 20 per ronde; overgeslagen bij de grens telt als poging, geen labelfout, na 5 opgegeven
+  const veel = []; for (let i = 0; i < 25; i++) { const m = mail({ van: 'noreply@ecobank.com' }); gm.voeg(m); veel.push(m.id); }
+  mm.ecobankBekend('gmail:david', veel);
+  assert.equal(soortActies(l2Ronde(mm, gm, ids), 'ecobank').length, 20);
+  const z = mail(); mm.ecobankBekend('gmail:david', [z.id]);   // niet in nep-Gmail → overgeslagen
+  let n = 0, fout = 0;
+  for (let i = 0; i < 8; i++) { const y = l2Ronde(mm, gm, ids); n += soortActies(y, 'ecobank').filter(function (q) { return q.gmail_id === z.id; }).length; fout += y.g.j.telling.fout; }
+  assert.equal(n, 5); assert.equal(fout, 0);
+});
+
+test('wv2259 facturen: archiveren met inFacturen alleen als het vinkje facturen aan staat; terug bij Geen factuur (INBOX + UNREAD als MailMan las, FACTUUR/verwerkt eraf), één keer, daarna nooit opnieuw archief', () => {
+  const inF = new Map(), verw = new Map(), geen = new Set(), modi = [];
+  const { mm, dir, gm } = wv2259Kamer({
+    factuurVerwerkt: function (ids, opt) { modi.push(!!(opt && opt.inFacturen)); const bron = opt && opt.inFacturen ? inF : verw; return new Map(ids.filter(function (i) { return bron.has(i); }).map(function (i) { return [i, bron.get(i)]; })); },
+    factuurGeen: function (ids) { return new Set(ids.filter(function (i) { return geen.has(i); })); } });
+  vinkje(mm, 'factuur', 'archief'); vinkje(mm, 'factuur', 'gelezen');
+  const pdf = [{ naam: 'Factuur.pdf', mime: 'application/pdf' }];
+  const a = mail({ aan: ALIAS, bijlagen: pdf }), b = mail({ aan: ALIAS, bijlagen: pdf });
+  gm.voeg(a); gm.voeg(b);
+  const r = ronde(mm, 'gmail:david');
+  mm.n8n('POST /mailman/nieuw', { ronde: r.ronde, postvak: 'gmail:david', ids: [a.id, b.id], volledig: true });
+  const s1 = mm.n8n('POST /mailman/stap1', { ronde: r.ronde, postvak: 'gmail:david', mails: [a, b], gevolgd: [] });
+  if (s1.j.jev && s1.j.jev.length) mm.n8n('POST /mailman/stap2', { ronde: r.ronde, postvak: 'gmail:david', antwoorden: s1.j.jev.map(function (x) { return { gmail_id: x.gmail_id, antwoord: jevAntwoord({ factuur: 0.97, waarde: 2, actie: 0.2 }) }; }) });
+  mm.n8n('POST /mailman/labelstaat', { ronde: r.ronde, postvak: 'gmail:david', labels: gm.lijsten() });
+  const l = mm.n8n('POST /mailman/labels', { ronde: r.ronde, postvak: 'gmail:david', ids: [a.id, b.id] });
+  mm.n8n('POST /mailman/gezet', { ronde: r.ronde, postvak: 'gmail:david', resultaten: gm.pas(l.j.acties) });
+  mm.n8n('POST /mailman/gedaan', { ronde: r.ronde, postvak: 'gmail:david' });
+  assert.ok(gm.heeft(a.id, 'FACTUUR') && gm.heeft(b.id, 'FACTUUR'));
+  assert.ok(rij(mm, a.id).gelezen_tijd, 'MailMan markeerde a gelezen');
+  const ids = [a.id, b.id];
+  // in Facturen (te beoordelen), nog niet verwerkt: zonder vinkje facturen geen archief, en de oude modus wordt gevraagd
+  inF.set(a.id, 1); inF.set(b.id, 1);
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids), 'archief'), []);
+  assert.equal(modi[modi.length - 1], false);
+  inboxUitToestaan(dir, { facturen: true });
+  const x = l2Ronde(mm, gm, ids);
+  assert.deepEqual(soortActies(x, 'archief').map(function (y) { return y.gmail_id; }).sort(), ids.slice().sort());
+  assert.equal(modi[modi.length - 1], true);
+  assert.equal(gm.ber.get(a.id).plek, 'archief'); assert.ok(gm.heeft(a.id, 'FACTUUR/verwerkt'));
+  // David: Geen factuur op a → terug
+  geen.add(a.id);
+  const y = l2Ronde(mm, gm, ids);
+  const t = soortActies(y, 'terug');
+  assert.deepEqual(t.map(function (q) { return [q.gmail_id, q.erbij, q.eraf]; }), [[a.id, ['INBOX', 'UNREAD'], ['FACTUUR/verwerkt']]]);
+  assert.equal(y.g.j.telling.terug, 1);
+  assert.equal(gm.ber.get(a.id).plek, 'inbox'); assert.equal(gm.heeft(a.id, 'FACTUUR/verwerkt'), false); assert.ok(gm.heeft(a.id, 'FACTUUR'), 'FACTUUR blijft');
+  assert.ok(rij(mm, a.id).terug_tijd);
+  // idempotent en nooit opnieuw archief
+  const z = l2Ronde(mm, gm, ids);
+  assert.deepEqual(soortActies(z, 'terug'), []); assert.deepEqual(soortActies(z, 'archief'), []);
+  // b niet door MailMan gelezen gemarkeerd → terug zonder UNREAD
+  mm._db.prepare('UPDATE besluit SET gelezen_tijd = NULL WHERE gmail_id = ?').run(b.id);
+  geen.add(b.id);
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids), 'terug').map(function (q) { return q.erbij; }), [['INBOX']]);
+  // terug zonder inbox_uit.ja: niets
+  const c = mail({ aan: ALIAS, bijlagen: pdf }); void c;
+});
+
+test('wv2259 terug: alleen wat MailMan zelf archiveerde; overgeslagen (prullenbak) is geen labelfout, hooguit 5 keer; zonder Ja niets', () => {
+  const geen = new Set();
+  const { mm, dir, gm } = wv2259Kamer({ factuurGeen: function (ids) { return new Set(ids.filter(function (i) { return geen.has(i); })); } });
+  const a = mail(), b = mail();
+  draai(mm, 'gmail:david', [a, b], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  gm.voeg(a); gm.voeg(b);
+  const ids = [a.id, b.id];
+  l2Ronde(mm, gm, ids);
+  mm._db.prepare('UPDATE besluit SET archief_tijd = ? WHERE gmail_id = ?').run(new Date(klok).toISOString(), a.id);
+  geen.add(a.id); geen.add(b.id);
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids), 'terug'), [], 'zonder Ja niets');
+  inboxUitToestaan(dir, {});
+  gm.plek(a.id, 'prullenbak');
+  let n = 0, fout = 0;
+  for (let i = 0; i < 8; i++) { const y = l2Ronde(mm, gm, ids); const t = soortActies(y, 'terug'); assert.ok(t.every(function (q) { return q.gmail_id === a.id; }), 'b archiveerde MailMan niet'); n += t.length; fout += y.g.j.telling.fout; }
+  assert.equal(n, 5); assert.equal(fout, 0);
+  assert.equal(gm.ber.get(a.id).plek, 'prullenbak');
+});
+
+test('wv2259 terug: niet bij TODO of ACTIE_DS (review gpt-5.5 MOET 1)', () => {
+  const geen = new Set();
+  const { mm, dir, gm } = wv2259Kamer({ factuurGeen: function (ids) { return new Set(ids.filter(function (i) { return geen.has(i); })); } });
+  const a = mail(), b = mail();
+  draai(mm, 'gmail:david', [a, b], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  gm.voeg(a); gm.voeg(b);
+  const ids = [a.id, b.id];
+  l2Ronde(mm, gm, ids);
+  for (const m of [a, b]) mm._db.prepare('UPDATE besluit SET archief_tijd = ? WHERE gmail_id = ?').run(new Date(klok).toISOString(), m.id);
+  gm.zet(a.id, 'TODO'); gm.zet(b.id, 'FACTUUR');
+  l2Ronde(mm, gm, ids);
+  geen.add(a.id); geen.add(b.id); inboxUitToestaan(dir, {});
+  assert.deepEqual(soortActies(l2Ronde(mm, gm, ids), 'terug').map(function (q) { return q.gmail_id; }), [b.id]);
 });

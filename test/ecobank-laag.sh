@@ -166,6 +166,7 @@ const M = {
     A.open(BD2).db.close();
     fs.writeFileSync(path.join(BD2, 'stand.json'), JSON.stringify({ rekeningen: {}, sessies: {}, opgehaald: {}, wachtend: {} }), { mode: 0o600 });
     const LL = { zoek: [], lees: [], vol: false, faal: false }, box = [];
+    const MMG = [];   // wv2259: wat MailMan van de Ecobank-ronde kreeg
     const SECRET = 's'.repeat(40), logs = [];
     const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD2, N8N_WEBHOOK_AGENDA_API: 'x' };
     const mails = [M.bij1, M.opname, M.kosten, M.belasting, M.eur];
@@ -185,6 +186,7 @@ const M = {
         if (body.actie === 'mail_lezen') { LL.lees.push(body.id); const x = mails.find((y) => y.id === body.id); return x ? Object.assign({}, x) : { id: body.id, van: VAN, onderwerp: OND, datum: '2026-10-02T10:00:00.000Z', tekst: 'onleesbaar' }; }
         throw new Error('onbekende actie ' + body.actie);
       },
+      mailman: { ecobankBekend: function (pv, ids) { MMG.push([pv, ids.slice()]); if (MMG.faal) throw new Error('mailman stuk'); return ids.length; } },   // wv2259
       appSbRpc: async function () { return { ok: true }; }, ovisBoxRij: (t) => { box.push(t); return true; },
       logError: (w, e) => logs.push(w + ': ' + (e && e.message || e)), schrijfLog: (r) => logs.push(r), nu: () => 'NU', velden: (x) => JSON.stringify(x),
       reqPath: (req) => (req.url || '').split('?')[0], rolPoort: (res, verder) => verder(), rol: { eerste: true }, rolPrimair: () => true, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 50 };
@@ -195,6 +197,7 @@ const M = {
     const r0 = await h.ecobankNaBankRonde();
     toets('server: eerste ronde (lege tabel) leest de hele historie', r0.ok === true && r0.van === '2023-01-01' && r0.nieuw === 5 && LL.zoek.some((q) => /after:2022\/12\/31/.test(q)), { r0, z: LL.zoek.slice(0, 2) });
     const r1 = await h.bankSmal({ opdracht: 'ecobank-ronde', secret: SECRET, van: '2026-09-01' });
+    toets('wv2259 server: na de ronde krijgt MailMan (gmail:david) de verwerkte mail-id\'s uit ecobank_tx', MMG.length >= 1 && MMG[0][0] === 'gmail:david' && MMG[0][1].length === 5 && mails.slice(0, 5).every((m) => MMG[0][1].includes(m.id)), MMG);
     toets('server: ecobank-ronde (machinekamer) met van werkt', r1.status === 200 && r1.j.ok === true && r1.j.van === '2026-09-01' && r1.j.al_bekend === 5 && r1.j.stand.posten === 5, r1.j);
     toets('server: elke mail één keer geopend', LL.lees.length === 5 && new Set(LL.lees).size === 5, LL.lees);
     toets('server: antwoord eerste ronde bevat alleen aantallen', !/VOORBEELD|XPRESS|12500|9500|1250/.test(JSON.stringify(r0)), r0);
@@ -216,7 +219,11 @@ const M = {
     const r3 = await h.ecobankNaBankRonde();
     toets('server: na de bank-ronde komt een nieuwe mail van vandaag mee', r3.ok === true && r3.nieuw === 1 && r3.niet_uitgelezen === 1, r3);
     toets('server: onleesbare mail → één box-rij, zonder bedragen', box.length === 1 && /#ecobank-gambia/.test(box[0]) && !/9400|AIRTIME/.test(box[0]), box);
+    toets('wv2259 server: onleesbare mail gaat niet naar MailMan', !MMG[MMG.length - 1][1].includes(raar.id) && MMG[MMG.length - 1][1].includes(vers.id), MMG[MMG.length - 1]);
+    MMG.faal = true;
     const r4 = await h.ecobankNaBankRonde();
+    MMG.faal = false;
+    toets('wv2259 server: fout in MailMan breekt de Ecobank-ronde niet', r4.ok === true && logs.some((x) => /ecobank-mailman: mailman stuk/.test(x)), { r4, logs: logs.slice(-3) });
     toets('server: onleesbare mail niet opnieuw geopend, geen tweede box-rij', r4.ok === true && LL.lees.filter((x) => x === raar.id).length === 1 && box.length === 1, { r4, box: box.length });
     LL.vol = true;
     const r5 = await h.bankSmal({ opdracht: 'ecobank-ronde', secret: SECRET, van: '2026-10-01' });

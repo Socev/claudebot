@@ -16458,16 +16458,39 @@ function mailmanIntakeBerichten(postvak, ids) {
 // te_beoordelen, geen_factuur, dubbel en verzending_mislukt houden de mail in de inbox. Geeft Map gmail_id → aantal documenten van het
 // bericht (mailman.js vergelijkt dat met de pdf/xml-bijlagen). Alleen lezen; zonder Facturen-databank een lege Map (dan archiveert MailMan niets).
 const MAILMAN_VERWERKT = ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'prive_archief'];
-function mailmanFactuurVerwerkt(ids) {
+// wv2259 (opt.inFacturen, MailMan inbox_uit.facturen): al zodra de mail in de Facturen-app staat — geen stuk meer te lezen (document.te_lezen)
+// en minstens één factuur die niet op Geen factuur staat — in plaats van pas als elke factuur verwerkt is. Zelfde telling documenten.
+const MAILMAN_BRON = "(r.soort = 'verzamelpostvak' OR (r.soort = 'intake' AND r.naam = 'intake:gmail:david'))";
+const MAILMAN_FACTUUR_VAN = '(f.bericht = b.id OR f.document IN (SELECT d.id FROM document d WHERE d.bericht = b.id))';
+function mailmanFactuurVerwerkt(ids, opt) {
   const uit = new Map();
   const fdb = facturenOpen();
   if (!fdb || !fdb.db || !Array.isArray(ids) || !ids.length) return uit;
+  if (opt && opt.inFacturen === true) {
+    const qi = fdb.db.prepare('SELECT (SELECT count(*) FROM document d WHERE d.bericht = b.id) n FROM bericht b JOIN bron r ON r.id = b.bron WHERE ' + MAILMAN_BRON + ' AND b.message_id = ?'
+      + " AND EXISTS (SELECT 1 FROM factuur f WHERE " + MAILMAN_FACTUUR_VAN + " AND f.status <> 'geen_factuur')"
+      + ' AND NOT EXISTS (SELECT 1 FROM document d WHERE d.bericht = b.id AND d.te_lezen = 1) LIMIT 1');
+    for (const id of ids.slice(0, 200)) { if (!/^[0-9a-f]{12,24}$/.test(String(id))) continue; const r = qi.get(String(id)); if (r) uit.set(String(id), Number(r.n) || 0); }
+    return uit;
+  }
   // wv1919: een bericht dat de koerier uit OVIS Intake las (bron intake:gmail:david, message_id = de Gmail-id) telt net zo
   const q = fdb.db.prepare("SELECT (SELECT count(*) FROM document d WHERE d.bericht = b.id) n FROM bericht b JOIN bron r ON r.id = b.bron WHERE (r.soort = 'verzamelpostvak' OR (r.soort = 'intake' AND r.naam = 'intake:gmail:david')) AND b.message_id = ?"
     + ' AND EXISTS (SELECT 1 FROM factuur f WHERE f.bericht = b.id OR f.document IN (SELECT d.id FROM document d WHERE d.bericht = b.id))'
     + ' AND NOT EXISTS (SELECT 1 FROM factuur f WHERE (f.bericht = b.id OR f.document IN (SELECT d.id FROM document d WHERE d.bericht = b.id))'
     + ' AND f.status NOT IN (' + MAILMAN_VERWERKT.map(function (x) { return "'" + x + "'"; }).join(',') + ')) LIMIT 1');
   for (const id of ids.slice(0, 200)) { if (!/^[0-9a-f]{12,24}$/.test(String(id))) continue; const r = q.get(String(id)); if (r) uit.set(String(id), Number(r.n) || 0); }
+  return uit;
+}
+// wv2259: welke van deze Gmail-berichten heeft David in Facturen helemaal op Geen factuur gezet (minstens één keer zijn knop Geen factuur,
+// audit wat = 'geen_factuur', en geen factuur meer die iets anders is)? → Set. Alleen lezen; MailMan zet zo'n mail terug in de inbox.
+function mailmanFactuurGeen(ids) {
+  const uit = new Set();
+  const fdb = facturenOpen();
+  if (!fdb || !fdb.db || !Array.isArray(ids) || !ids.length) return uit;
+  const q = fdb.db.prepare('SELECT 1 FROM bericht b JOIN bron r ON r.id = b.bron WHERE ' + MAILMAN_BRON + ' AND b.message_id = ?'
+    + " AND EXISTS (SELECT 1 FROM factuur f JOIN audit a ON a.object_soort = 'factuur' AND a.object_id = f.id AND a.wat = 'geen_factuur' WHERE " + MAILMAN_FACTUUR_VAN + " AND f.status = 'geen_factuur')"
+    + " AND NOT EXISTS (SELECT 1 FROM factuur f WHERE " + MAILMAN_FACTUUR_VAN + " AND f.status <> 'geen_factuur') LIMIT 1");
+  for (const id of ids.slice(0, 200)) { if (!/^[0-9a-f]{12,24}$/.test(String(id))) continue; if (q.get(String(id))) uit.add(String(id)); }
   return uit;
 }
 // wv2036 (statuslabels, Davids Ja 30-10-2026 16:30): de factuurstap per Gmail-bericht uit het verzamelpostvak (Davids privé-Gmail), voor
@@ -16485,7 +16508,7 @@ const mailman = (function () {
   try {
     return require(p).maak({ dir: MAILMAN_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
-      intakeDraden: mailmanIntakeDraden, intakeBerichten: mailmanIntakeBerichten, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt, factuurStap: mailmanFactuurStap,
+      intakeDraden: mailmanIntakeDraden, intakeBerichten: mailmanIntakeBerichten, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt, factuurStap: mailmanFactuurStap, factuurGeen: mailmanFactuurGeen,
       proces: intakeProces, verkoopTmp: '/dev/shm' });
   } catch (e) { logError('mailman', e); return null; }
 })();
@@ -21516,6 +21539,12 @@ async function ecobankRonde(o) {
       ['nieuw', 'al_bekend', 'geweigerd'].forEach(function (k) { bewaard[k] += (r.j.bewaard && r.j.bewaard[k]) || 0; });
       if (laatste) stand = r.j.stand || null;
     }
+    // wv2259: MailMan krijgt de mail-id's die nu in ecobank_tx staan (alleen verwerkte meldingen; wat de lezer niet kon lezen ontbreekt).
+    // MailMan zet ze alleen uit de inbox als inbox_uit.ecobank aan staat. Een fout hier laat de Ecobank-ronde zelf ongemoeid.
+    try {
+      const na = await bankKind(['ecobank-bekend']);
+      if (mailman && na.j && na.j.ok === true && Array.isArray(na.j.verwerkt_ids)) mailman.ecobankBekend('gmail:david', na.j.verwerkt_ids);
+    } catch (e) { logError('ecobank-mailman', e); }
     // Meer dan 25 mails op één dag: wat gelezen is staat erin, maar de ronde telt niet als geslaagd (review gpt-5.5 MOET 2)
     if (zoek.afgekapt) return { ok: false, fout: 'meer dan 25 Ecobank-mails op één dag: niet alles gelezen', gevonden: passend.length, nieuw: bewaard.nieuw, afgekapt: true };
     // alleen aantallen terug (geen bedragen, saldi, namen of mailinhoud)

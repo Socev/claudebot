@@ -123,7 +123,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-2.5';   // wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
+const VERSIE = 'mailman-2.6';   // wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -205,6 +205,17 @@ const AFGEDAAN_MAX = 20, AFGEDAAN_POGINGEN = 5, VLAG_PLEK_MS = 90 * 24 * 3600 * 
 // hoofdcategorie OVERIG, geen NIEUWSBRIEF (de mail heeft een afmeldkop, ook niet via de draad geërfd) en geen Jev (geen vlaggen op een
 // automatische bankmelding). Afzender exact, onderwerp aan het begin; gelezen markeren en archiveren blijven uit (grondwet 7).
 const ECOBANK_AFZENDER = 'noreply@ecobank.com';
+// wv2259 (David 2-11-2026 13:50, Ja 13:55 vraag-id 640619c4; grondwet 7 aanvulling 2-11): INBOX_UIT per postvak in config.json inbox_uit[postvak]
+// = { ja, ecobank: bool, facturen: bool } (schrijft de machinekamer; zonder ja doet niets hiervan iets).
+//  ecobank  — een Ecobank-transactiemelding die de pod verwerkte (server.js meldt na elke Ecobank-ronde de mail-id's uit ecobank_tx via
+//             ecobankBekend; een mail die de lezer niet kon lezen staat daar niet in) krijgt UNREAD en INBOX eraf; ≤ ECOBANK_MAX per ronde,
+//             ≤ ECOBANK_POGINGEN per mail; nooit bij TODO/ACTIE_DS. n8n leest afzender en onderwerp zelf na (tweede grens).
+//  facturen — factuurmail archiveren zodra hij in de Facturen-app staat (elk stuk gelezen, minstens één factuur die geen Geen factuur is),
+//             in plaats van pas als elke factuur verwerkt is (B6+). Zelfde archiefactie, zelfde grenzen.
+//  terug    — (met ja altijd aan) mail die MailMan zelf archiveerde en waarvan David in Facturen elke factuur op Geen factuur zette: INBOX
+//             erbij, FACTUUR/verwerkt eraf, UNREAD erbij als MailMan hem gelezen markeerde; één keer (terug_tijd), daarna nooit opnieuw
+//             gearchiveerd. FACTUUR blijft staan (de Facturen-ingang volgt dat label).
+const ECOBANK_MAX = 20, ECOBANK_POGINGEN = 5, TERUG_MAX = 20, TERUG_POGINGEN = 5;
 const ECOBANK_ONDERWERP = 'InApp Notification - Transaction Notification on A/C';
 const SOCIAAL_DOMEINEN = ['linkedin.com', 'facebookmail.com', 'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'tiktok.com', 'pinterest.com', 'nextdoor.nl', 'nextdoor.com'];
 const L2_LIJST_MAX = 5000;                         // berichten per labellijst; meer = afgekapt (niets veranderen voor dat label)
@@ -849,9 +860,13 @@ function maak(o) {
     ['regel', 'labels TEXT'], ['postvak', 'labelset2_sinds TEXT'], ['postvak', 'overstap_klaar TEXT'], ['besluit', 'keuze_tijd TEXT'],
     ['besluit', 'vangnet_tijd TEXT'], ['besluit', 'overstap_tijd TEXT'], ['besluit', 'overstap_poging INTEGER NOT NULL DEFAULT 0'],   // wv2033 B8 labelset 2
     ['aanbod', 'thread_id TEXT'], ['aanbod', 'erf TEXT'],   // wv2196 draadlabels
-    ['postvak', 'inbox_lijst TEXT'], ['postvak', 'zaken_tijd TEXT']]) {   // wv2218 zaakregister: laatste volledige inboxlijst, laatste berekening
+    ['postvak', 'inbox_lijst TEXT'], ['postvak', 'zaken_tijd TEXT'],   // wv2218 zaakregister
+    ['besluit', 'terug_tijd TEXT'], ['besluit', 'terug_poging INTEGER NOT NULL DEFAULT 0']]) {   // wv2259 terug bij Geen factuur   // wv2218 zaakregister: laatste volledige inboxlijst, laatste berekening
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
+  // wv2259: Ecobank-meldingen die de pod verwerkte (bron: server.js na de Ecobank-ronde) en wat MailMan ermee deed
+  db.exec('CREATE TABLE IF NOT EXISTS ecobank_mail (postvak TEXT NOT NULL, gmail_id TEXT NOT NULL, bekend_tijd TEXT NOT NULL, pogingen INTEGER NOT NULL DEFAULT 0, ' +
+    'poging_tijd TEXT, archief_tijd TEXT, eraf TEXT, PRIMARY KEY (postvak, gmail_id))');
   function tx(f) {
     db.exec('BEGIN IMMEDIATE');
     try { const r = f(); db.exec('COMMIT'); return r; } catch (e) { try { db.exec('ROLLBACK'); } catch (x) { /* al dicht */ } throw e; }
@@ -1202,6 +1217,28 @@ function maak(o) {
     if (!l2Live(p)) return { ok: false, reden: 'labelset 2 staat niet live' };
     return { ok: true, reden: 'Ja ' + t.ja.slice(0, 16) };
   }
+  // wv2259: inbox_uit voor dit postvak → { ja, ecobank, facturen, reden }. Alleen een eigen postvak met uitgang_toegestaan, labelset 2 live en
+  // config.json inbox_uit[postvak].ja; ecobank en facturen elk een eigen vinkje (standaard uit).
+  function inboxUit(p) {
+    const uit = { ja: false, ecobank: false, facturen: false, reden: '' };
+    if (!p || p.gedeeld) { uit.reden = 'gedeeld postvak: nooit'; return uit; }
+    const c = config(), t = isObj(c.inbox_uit) ? c.inbox_uit[p.id] : null;
+    if (!isObj(t) || typeof t.ja !== 'string' || !t.ja) { uit.reden = 'wacht op je Ja (grondwet 7, 2-11-2026)'; return uit; }
+    if (!uitgangMag(p).ok) { uit.reden = 'uitgangen niet toegestaan'; return uit; }
+    if (!l2Live(p)) { uit.reden = 'labelset 2 staat niet live'; return uit; }
+    uit.ja = true; uit.ecobank = t.ecobank === true; uit.facturen = t.facturen === true; uit.reden = 'Ja ' + t.ja.slice(0, 16);
+    return uit;
+  }
+  // wv2259: server.js meldt na elke Ecobank-ronde welke mails de pod verwerkte (ecobank_tx); nieuwe komen erbij, bestaande blijven. → aantal nieuw
+  function ecobankBekend(pv, ids) {
+    if (!Array.isArray(ids) || !db.prepare('SELECT 1 FROM postvak WHERE id = ?').get(String(pv))) return 0;
+    let n = 0;
+    tx(function () {
+      const q = db.prepare('INSERT OR IGNORE INTO ecobank_mail (postvak, gmail_id, bekend_tijd) VALUES (?, ?, ?)');
+      for (const id of ids.slice(0, 20000)) if (ID_RE.test(String(id))) n += Number(q.run(String(pv), String(id), iso()).changes) || 0;
+    });
+    return n;
+  }
   function stapGet(pv, id) { return db.prepare('SELECT * FROM factuurstap WHERE postvak = ? AND gmail_id = ?').get(pv, id); }
   // wv2189: mag MailMan TODO/ACTIE_DS weghalen nadat David de mail archiveerde of weggooide? Alleen een eigen postvak waarvoor config.json
   // actielabel_weg[postvak].ja zet (de machinekamer, na Davids Ja op de grondwetkaart) én labelset 2 live staat. → { ok, reden }
@@ -1225,7 +1262,7 @@ function maak(o) {
   function factuurFase(pv, b) {
     const st = stapGet(pv, b.gmail_id);
     if (st && STAP_RANG[st.stap]) return st.stap;
-    return b.archief_tijd ? 'verwerkt' : 'ontvangen';
+    return b.archief_tijd && !b.terug_tijd ? 'verwerkt' : 'ontvangen';   // wv2259: terug bij Geen factuur = weer ontvangen
   }
   // haalde MailMan zelf INBOX weg bij een bericht van deze draad (archief B6+, of een aanbod met INBOX eraf dat niet mislukte)?
   function eigenArchief(pv, binnen) {
@@ -1648,7 +1685,8 @@ function maak(o) {
       - db.prepare("SELECT count(*) n FROM aanbod WHERE postvak = ? AND uitkomst IS NULL AND tijd >= ? AND instr(erbij, ?) > 0").get(pv, new Date(nu() - AANBOD_EIGEN_MS).toISOString(), '"' + WACHTRIJ + '"').n;
     const acties = new Map(), aanbod = [], gelezenAangeboden = [], archiefPogingen = [], af = [];
     let wacht = 0;
-    const tel = { besluit: 0, keuze: 0, vangnet: 0, route: 0, intrek: 0, opruim: 0, overstap: 0, archief: 0, factuurstap: 0, afgedaan: 0, afgedaan_schaduw: 0 };
+    const tel = { besluit: 0, keuze: 0, vangnet: 0, route: 0, intrek: 0, opruim: 0, overstap: 0, archief: 0, factuurstap: 0, afgedaan: 0, afgedaan_schaduw: 0, terug: 0, ecobank: 0 };
+    const iu = inboxUit(p);   // wv2259
     const vlagPlan = function (eff, plan, b) { return plan.labels.includes('TODO') || plan.labels.includes('ACTIE_DS') || eff === 'twijfel' || vlagRij(b); };
     const vol = function () { return acties.size >= LABEL_ACTIES_MAX; };
     const mag = function (id, l, na) { return !!set.ids[l] && !lsHeeft(pv, id, l) && !lsDavidWeg(pv, id, l, na); };
@@ -1795,15 +1833,30 @@ function maak(o) {
       }
       if (overstapOpen <= 0) db.prepare('UPDATE postvak SET overstap_klaar = ? WHERE id = ? AND overstap_klaar IS NULL').run(iso(), pv);
     }
-    // archief (B6+), nooit bij TODO of ACTIE_DS
+    // terug (wv2259): David zette in Facturen elke factuur van mail die MailMan archiveerde op Geen factuur → terug in de inbox
+    const terugPogingen = [];
+    if (iu.ja && typeof o.factuurGeen === 'function' && !vol()) {
+      const kand = db.prepare('SELECT id, gmail_id, gelezen_tijd FROM besluit WHERE postvak = ? AND archief_tijd IS NOT NULL AND terug_tijd IS NULL AND terug_poging < ? AND archief_tijd >= ? ORDER BY archief_tijd, id LIMIT 200')
+        .all(pv, TERUG_POGINGEN, new Date(nu() - ARCHIEF_MS).toISOString()).filter(function (x) { return !acties.has(x.gmail_id); });
+      let geen = new Set();
+      if (kand.length) { try { const g = o.factuurGeen(kand.map(function (x) { return x.gmail_id; })); geen = g instanceof Set ? g : new Set(); } catch (e) { fout('mailman-terug', e); } }
+      let n = 0;
+      for (const x of kand) {
+        if (!geen.has(x.gmail_id) || vol() || n >= TERUG_MAX) continue;
+        const b = besluitVan(pv, x.gmail_id);   // review gpt-5.5 MOET 1: niet bij TODO/ACTIE_DS (David zette de vlag zelf op gearchiveerde mail)
+        if (!b || vlagNu(pv, b) || lsHeeft(pv, x.gmail_id, 'TODO') || lsHeeft(pv, x.gmail_id, 'ACTIE_DS')) continue;
+        if (voeg(x.gmail_id, 'terug', x.gelezen_tijd ? ['INBOX', 'UNREAD'] : ['INBOX'], [VERWERKT_LABEL])) { terugPogingen.push(x.id); n++; }
+      }
+    }
+    // archief (B6+), nooit bij TODO of ACTIE_DS; wv2259: met inbox_uit.facturen al zodra de mail in de Facturen-app staat; nooit na terug
     let archief = 0;
     const archiefOpen = new Set();   // wv2036: mail die nog gearchiveerd wordt; de factuurstap wacht daarop (n8n archiveert alleen met FACTUUR erop)
     if (uitgang && st.factuur && st.factuur.archief && !vol() && typeof o.factuurVerwerkt === 'function') {
-      const kand = db.prepare("SELECT id, gmail_id, bijlagen, labels_plan, labels, labels_gezet FROM besluit WHERE postvak = ? AND inhaal = 0 AND archief_tijd IS NULL AND archief_poging < ? AND instr(labels_gezet, ?) > 0 AND labels_tijd >= ? ORDER BY labels_tijd, id LIMIT 200")
+      const kand = db.prepare("SELECT id, gmail_id, bijlagen, labels_plan, labels, labels_gezet FROM besluit WHERE postvak = ? AND inhaal = 0 AND archief_tijd IS NULL AND terug_tijd IS NULL AND archief_poging < ? AND instr(labels_gezet, ?) > 0 AND labels_tijd >= ? ORDER BY labels_tijd, id LIMIT 200")
         .all(pv, ARCHIEF_POGINGEN, '"FACTUUR"', new Date(nu() - ARCHIEF_MS).toISOString())
         .filter(function (x) { return !vlagNu(pv, x) && !acties.has(x.gmail_id); });   // wv2189: vlagNu (was vlagRij + lsHeeft TODO/ACTIE_DS)
       let klaar = new Map();
-      if (kand.length) { try { const k = o.factuurVerwerkt(kand.map(function (x) { return x.gmail_id; })); klaar = k instanceof Map ? k : new Map(); } catch (e) { fout('mailman-verwerkt', e); } }
+      if (kand.length) { try { const k = o.factuurVerwerkt(kand.map(function (x) { return x.gmail_id; }), { inFacturen: iu.facturen }); klaar = k instanceof Map ? k : new Map(); } catch (e) { fout('mailman-verwerkt', e); } }
       for (const x of kand) {
         const docs = klaar.get(x.gmail_id);
         if (typeof docs !== 'number') continue;
@@ -1813,6 +1866,19 @@ function maak(o) {
         archiefOpen.add(x.gmail_id);
         if (vol() || archief >= ARCHIEF_MAX) continue;
         if (voeg(x.gmail_id, 'archief', [VERWERKT_LABEL], ['INBOX'])) { acties.get(x.gmail_id).archief = true; archiefPogingen.push(x.id); archief++; }
+      }
+    }
+    // ecobank (wv2259): verwerkte Ecobank-meldingen gelezen + uit de inbox; nooit bij TODO of ACTIE_DS
+    const ecoPogingen = [];
+    if (iu.ecobank && !vol()) {
+      let n = 0;
+      for (const x of db.prepare('SELECT gmail_id FROM ecobank_mail WHERE postvak = ? AND archief_tijd IS NULL AND pogingen < ? ORDER BY bekend_tijd, gmail_id LIMIT 200').all(pv, ECOBANK_POGINGEN)) {
+        if (vol() || n >= ECOBANK_MAX) break;
+        const id = x.gmail_id;
+        if (acties.has(id) || lsHeeft(pv, id, 'TODO') || lsHeeft(pv, id, 'ACTIE_DS')) continue;
+        const b = besluitVan(pv, id);
+        if (b && vlagNu(pv, b)) continue;
+        if (voeg(id, 'ecobank', [], ['UNREAD', 'INBOX'])) { ecoPogingen.push(id); n++; }
       }
     }
     // factuurstap (wv2036): alleen vooruit; ook oudere en gearchiveerde mail (de Facturen-app noemt elk bericht uit het verzamelpostvak)
@@ -1856,6 +1922,8 @@ function maak(o) {
       for (const a of aanbod) db.prepare('INSERT INTO aanbod (postvak, ronde, gmail_id, soort, erbij, eraf, tijd, thread_id, erf) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(pv, r.id, a.id, a.soort, JSON.stringify(a.erbij), JSON.stringify(a.eraf), t, a.th || null, a.erf && a.erf.length ? JSON.stringify(a.erf) : null);
       for (const id of gelezenAangeboden) db.prepare('UPDATE besluit SET gelezen_aangeboden = ? WHERE id = ?').run(t, id);
       for (const id of archiefPogingen) db.prepare('UPDATE besluit SET archief_poging = archief_poging + 1 WHERE id = ?').run(id);
+      for (const id of terugPogingen) db.prepare('UPDATE besluit SET terug_poging = terug_poging + 1 WHERE id = ?').run(id);
+      for (const id of ecoPogingen) db.prepare('UPDATE ecobank_mail SET pogingen = pogingen + 1, poging_tijd = ? WHERE postvak = ? AND gmail_id = ?').run(t, pv, id);
       for (const x of stapPogingen) {   // een poging telt bij het aanbieden (ook als n8n niets terugmeldt); een nieuwe stap begint weer bij 1
         db.prepare(`INSERT INTO factuurstap (postvak, gmail_id, doel, pogingen, poging_tijd) VALUES (?, ?, ?, 1, ?)
           ON CONFLICT (postvak, gmail_id) DO UPDATE SET pogingen = CASE WHEN factuurstap.doel = excluded.doel THEN factuurstap.pogingen + 1 ELSE 1 END,
@@ -1874,7 +1942,7 @@ function maak(o) {
    * is af; de toestand komt de volgende ronde opnieuw uit label_staat (behalve gelezen: dicht, één keer).
    */
   function gezet2(r, d) {
-    const pv = r.postvak, tel = { ok: 0, fout: 0, gelezen: 0, archief: 0, afgedaan: 0, draad: 0, erf: 0 }, telStap = { gezet: 0, fout: 0, overgeslagen: 0 };
+    const pv = r.postvak, tel = { ok: 0, fout: 0, gelezen: 0, archief: 0, afgedaan: 0, draad: 0, erf: 0, terug: 0, ecobank: 0 }, telStap = { gezet: 0, fout: 0, overgeslagen: 0 };
     tx(function () {
       for (const x of (Array.isArray(d.resultaten) ? d.resultaten : []).slice(0, LABEL_ACTIES_MAX * 2)) {
         if (!isObj(x) || !ID_RE.test(String(x.gmail_id || ''))) continue;
@@ -1915,6 +1983,7 @@ function maak(o) {
             db.prepare('UPDATE aanbod SET uitkomst = ? WHERE id = ?').run(x.overgeslagen === true ? 'overgeslagen' : 'fout', a.id);
             // review wv2036 ZOU 2: een factuurstap die de grens overslaat (prullenbak, verzonden, al verder) is geen labelfout
             if (a.soort === 'factuurstap') { if (x.overgeslagen === true) telStap.overgeslagen++; else { telStap.fout++; tel.fout++; } continue; }
+            if (a.soort === 'terug' || a.soort === 'ecobank') { if (x.overgeslagen !== true) tel.fout++; continue; }   // wv2259: grens sloeg over (prullenbak, geen factuurmail, afzender) = geen labelfout; telt als poging
             if (a.soort === 'afgedaan') { if (x.overgeslagen !== true) tel.fout++; continue; }   // wv2189: overgeslagen (terug in de inbox, nieuwsbrief) is geen labelfout
             // wv2196: opruim die de grens overslaat (het label staat er al niet meer, of de mail is verzonden/weg) is geen fout: niet eindeloos opnieuw;
             // staat het label toch nog in Gmail, dan zet de volgende labelstaat het terug (bron blijft MailMan) en komt de opruim terug
@@ -1935,6 +2004,15 @@ function maak(o) {
               telStap.gezet++;
             } else telStap.fout++;
             lsWeg(pv, id, 'FACTUUR', 'mailman');   // review KAN 7: na een stap staat FACTUUR nooit meer (ook als hij al weg was)
+            continue;
+          }
+          if (a.soort === 'ecobank') {   // wv2259: eraf = wat Gmail echt weghaalde (leeg: stond al buiten de inbox en gelezen)
+            db.prepare('UPDATE ecobank_mail SET archief_tijd = ?, eraf = ? WHERE postvak = ? AND gmail_id = ? AND archief_tijd IS NULL').run(iso(), JSON.stringify(eraf), pv, id);
+            tel.ecobank++;
+            continue;
+          }
+          if (a.soort === 'terug') {   // wv2259: pas terug als n8n INBOX erbij meldt
+            if (b && !b.terug_tijd && erbij.includes('INBOX')) { db.prepare('UPDATE besluit SET terug_tijd = ? WHERE id = ?').run(iso(), b.id); tel.terug++; }
             continue;
           }
           if (a.soort === 'archief') {
@@ -2589,6 +2667,11 @@ function maak(o) {
           labelset2: labelset2Stand(p), routes: routesOverzicht(p.id), correcties: correctieLijst(p.id), regelvoorstellen: regelvoorstellen(p.id),
           id: p.id, naam: p.naam, stand: p.stand, live_kan: lm.ok, live_reden: lm.reden, live_sinds: p.live_sinds || null,
           uitgang_kan: um.ok, uitgang_reden: um.reden,
+          inbox_uit: (function () { const iu = inboxUit(p); return { ja: iu.ja, ecobank: iu.ecobank, facturen: iu.facturen, reden: iu.reden,   // wv2259
+            ecobank_bekend: db.prepare('SELECT count(*) n FROM ecobank_mail WHERE postvak = ?').get(p.id).n,
+            ecobank_weg: db.prepare('SELECT count(*) n FROM ecobank_mail WHERE postvak = ? AND archief_tijd IS NOT NULL').get(p.id).n,
+            ecobank_opgegeven: db.prepare('SELECT count(*) n FROM ecobank_mail WHERE postvak = ? AND archief_tijd IS NULL AND pogingen >= ?').get(p.id, ECOBANK_POGINGEN).n,
+            terug_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND terug_tijd >= ?').get(p.id, dag).n }; })(),
           gelezen_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND gelezen_tijd >= ?').get(p.id, dag).n,
           archief_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND archief_tijd >= ?').get(p.id, dag).n,
           labels_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND labels_tijd >= ?').get(p.id, new Date(n - 86400000).toISOString()).n,
@@ -3027,7 +3110,7 @@ function maak(o) {
     }
     return uit;
   }
-  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, werkstroomTel, werkstroomLijst, mailBron, zakenLijst, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
+  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, ecobankBekend, inboxUit: function (pv) { return inboxUit(postvakken().find(function (p) { return p.id === pv; })); }, werkstroomTel, werkstroomLijst, mailBron, zakenLijst, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
 }
 
 function isPad(p) { return p === '/mailman' || String(p).indexOf('/mailman/') === 0; }
