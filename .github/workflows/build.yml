@@ -429,6 +429,9 @@ jobs:
       - name: "nieuwsbrief (wv2190, wekelijkse bloemlezing)"
         if: ${{ !cancelled() }}
         run: bash test/nieuwsbrief.sh
+      - name: "te-lezen (wv2245, Te lezen in Voor jou)"
+        if: ${{ !cancelled() }}
+        run: bash test/te-lezen.sh
       - name: "secondbrain (wv832, App Second Brain)"
         if: ${{ !cancelled() }}
         run: bash test/secondbrain.sh

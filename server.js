@@ -3863,6 +3863,7 @@ function handleRequest(req, res) {
       mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },
       pot_app: typeof potAppInfo === 'function' ? potAppInfo() : { aan: false },   // wv1894: OVIS POT (lezen)   // wv1269: App Mediatheek (aantallen, geen inhoud)
       nieuwsbrief: nieuwsbriefInfo(),   // wv2190: nieuwsbrief-bloemlezing (laatste ronde, bezig; geen inhoud)
+      te_lezen: { aan: typeof teLezenMod !== 'undefined' && !!teLezenMod },   // wv2245: Te lezen in Voor jou (module in de release)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761/wv942: App AIX (laatste lezing, catalogus, plaatsing, uur- en weekronde; geen inhoud)
       aix: typeof aixInfo === 'function' ? aixInfo() : { aan: false },   // wv942: aix.js (sleutel bruikbaar?, laatst bereikbaar, plat sinds; nooit de sleutel)
@@ -5052,7 +5053,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
-  'POST /app/reactie', 'POST /app/agenda', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
+  'POST /app/reactie', 'POST /app/agenda', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/te-lezen']);   // wv2245: afvinken of bewaren = David die leest   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
 APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
@@ -9788,8 +9789,14 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   const sleutels = [];
   lijst.forEach(function (p) { sleutels.push('k:' + p.id); if (p.deadline && p.deadline < vandaag) sleutels.push('k:' + p.id + ':over'); });
   (moet || []).forEach(function (m) { sleutels.push(m.punt); });
+  // wv2245: Te lezen; een fout hier raakt Moet iets en de kaarten niet (te_lezen.fout, lege lijst). Zonder module: geen veld (oude stand).
+  let teLezen;
+  if (teLezenMod) {
+    try { teLezen = await appTeLezen(a, moet, nu); } catch (e) { logError('te-lezen', e); teLezen = { punten: [], meer: 0, ongezien: 0, nieuw: 0, afgevinkt: [], bewaard: null, fout: 'Te lezen is nu niet te lezen', gezien_bekend: false }; }
+    teLezen.punten.forEach(function (p) { sleutels.push(p.sleutel); });
+  }
   appMoetGezienOpruim(punten, nu, vandaag);
-  appStuur(res, 200, Object.assign(basisAntwoord, { moet_iets: moet, moet_fout: moetFout, gezien: appMoetGezien(sleutels) }));
+  appStuur(res, 200, Object.assign(basisAntwoord, { moet_iets: moet, moet_fout: moetFout, gezien: appMoetGezien(sleutels) }, teLezen ? { te_lezen: teLezen } : {}));
 }
 // ── wv594: één meldingenkanaal fase 4 (bouwplan "Eén meldingenkanaal" § 4.5; fase 3 punt a, ontwerp wv804 § 0) ──
 // Moet iets: open app-vragen (< 72 u, onbeantwoord, niet naar Telegram, geen Telegram-beurt; soort leeg of socev, dus geen
@@ -9883,6 +9890,102 @@ async function appMoetIets(kaarten, nu, af) {
   let jobs = af && af.jobs;
   if (!jobs) { try { jobs = await appVjVraagJobs(); } catch (e) { logError('app-voor-jou', e); jobs = {}; } }   // dan zoals voor wv1004: alleen koppeling en wv-nummer
   return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu, jobs, af && af.map);
+}
+// ── wv2245: Te lezen (bouwplan "Eén meldingenkanaal" § 4.8; David 2-11-2026 10:19, Ja 10:20 vraag-id d5f22ee1) ──
+// Berichten die voor David zijn maar niets vragen: rapporten van klussen die rechtstreeks uit zijn opdracht kwamen, antwoorden op zijn
+// eigen beurt die hij nog niet zag, en wat hij zelf bewaarde. Logica puur in te-lezen.js; hier het hele app-log (30 dagen, op mtime +
+// grootte bewaard), de herkomst (mk_te_lezen_klussen, alleen lezen, 30 min per klus bewaard), gezien-david.json (tabs: gezien door
+// David per gesprek; punten: in beeld geweest, voor het getal) en te-lezen.json (afgevinkt, bewaard; alleen ids en tijden).
+// Ontbreekt te-lezen.js in de release, dan geen te_lezen in /app/voor-jou/kanaal en 404 op POST /app/te-lezen.
+const teLezenMod = (function () { try { return require(path.join(__dirname, 'te-lezen.js')); } catch (e) { if (!(e && e.code === 'MODULE_NOT_FOUND')) logError('te-lezen-module', e); return null; } })();
+const APP_TE_LEZEN = path.join(APP_DATA, 'te-lezen.json');
+const APP_TE_LEZEN_KLUS_MS = 30 * 60 * 1000;
+const APP_TE_LEZEN_FOUT_MS = 2 * 60 * 1000;
+const APP_TE_LEZEN_PER_UUR = 300;
+async function appTeLezenLog(kanaal) {
+  let st;
+  try { st = await fs.promises.stat(appLogPad(kanaal)); } catch (e) { if (e && e.code === 'ENOENT') return []; throw e; }
+  const c = (appStaat.teLezenLog = appStaat.teLezenLog || {})[kanaal];
+  if (c && c.mtime === st.mtimeMs && c.size === st.size) return c.items.slice();
+  const items = await appLogLees(kanaal);
+  appStaat.teLezenLog[kanaal] = { mtime: st.mtimeMs, size: st.size, items: items };
+  return items.slice();
+}
+// Een niet-lege VRAAG AAN DAVID-regel (zoals appInklapRapport) of een geregistreerde vraag: dat bericht staat in Moet iets of als kaart.
+function appTeLezenVraag(x) {
+  if (x && x.vraag_hash) return true;
+  const a = String((x && x.antwoord) || ''), vr = /^[^\S\n]*[*_]*VRAAG AAN DAVID:[*_]*[^\S\n]*(.*)$/gm;
+  for (let m; (m = vr.exec(a));) if (!appVraagLeeg(m[1])) return true;
+  return false;
+}
+// Herkomst per agentklus; alleen de klussen die nog niet bekend zijn worden gevraagd. Onleesbaar: null (geen klus-punten, wel de rest).
+async function appTeLezenKlussen(jobs) {
+  const c = appStaat.teLezenKlus = appStaat.teLezenKlus || { per: {}, foutOp: 0 };
+  const nu = Date.now();
+  const mis = jobs.filter(function (j) { const k = c.per[j]; return !k || nu - k.op > APP_TE_LEZEN_KLUS_MS; });
+  if (mis.length) {
+    if (c.foutOp && nu - c.foutOp < APP_TE_LEZEN_FOUT_MS) return null;
+    let r;
+    try { r = await appSbRpc('mk_te_lezen_klussen', { p_jobs: mis.slice(0, 2000) }); } catch (e) { c.foutOp = nu; logError('te-lezen', e); return null; }
+    const kl = r && r.klussen && typeof r.klussen === 'object' && !Array.isArray(r.klussen) ? r.klussen : null;
+    if (!kl) { c.foutOp = nu; logError('te-lezen', new Error('mk_te_lezen_klussen zonder klussen')); return null; }
+    c.foutOp = 0;
+    mis.forEach(function (j) { c.per[j] = { op: nu, k: kl[j] && typeof kl[j] === 'object' ? kl[j] : null }; });
+    Object.keys(c.per).forEach(function (j) { if (nu - c.per[j].op > 4 * APP_TE_LEZEN_KLUS_MS) delete c.per[j]; });
+  }
+  const uit = {};
+  jobs.forEach(function (j) { if (c.per[j] && c.per[j].k) uit[j] = c.per[j].k; });
+  return uit;
+}
+// De eerste keer (geen bestand of geen sinds) wordt het startpunt vastgelegd; daarna alleen lezen (schrijven doet POST /app/te-lezen).
+function appTeLezenStaat() {
+  const r = appLeesStreng(APP_TE_LEZEN, {}), s = teLezenMod.staatNorm(r, Date.now());
+  if (!r.sinds) { try { appSchrijfJson(APP_TE_LEZEN, s); } catch (e) { logError('te-lezen', e); } }
+  return s;
+}
+async function appTeLezenPer() {
+  const per = {};
+  for (const k of ['hoofd', 'machinekamer']) {
+    const r = await appGeschiedenisRuw(k, appTeLezenLog);
+    if (r.fout) throw r.fout;
+    per[k] = r.items;
+  }
+  return per;
+}
+// Voor GET /app/voor-jou/kanaal. moet = de punten van Moet iets (die tonen we hier niet nog eens).
+async function appTeLezen(a, moet, nu) {
+  const per = await appTeLezenPer();
+  const klussen = await appTeLezenKlussen(teLezenMod.klusJobs(per, nu));
+  const g = appGezienDavid();
+  const moetJobs = new Set((moet || []).map(function (m) { return m.job_id; }));
+  const uit = teLezenMod.uit({ per: per, klussen: klussen, staat: appTeLezenStaat(), tabs: g ? g.tabs : {}, inBeeld: g ? g.punten : {},
+    vraag: appTeLezenVraag, moet: moetJobs, vast: appAfscherm(a), nu: nu });
+  // gezien-david.json onleesbaar: dan geen tabtijden, dus antwoorden die David misschien al zag; zeg dat (de app toont geen getal)
+  return Object.assign(uit, { fout: klussen === null ? 'de rapporten van je klussen zijn nu niet te lezen' : null, gezien_bekend: !!g });
+}
+// POST /app/te-lezen {job_id, kanaal, actie: gezien|terug|bewaar|niet-bewaren}. Onder het invoerslot (David die werkt); geen inhoud in
+// de audit. Op een vaste plek niets uit het hoofdkanaal (zoals Moet iets). Bewaren alleen van een bericht dat in dat gesprek staat.
+async function appTeLezenZet(req, res, a, d) {
+  if (!teLezenMod) return appWeiger(res, 404, 'onbekend', 'te-lezen module');
+  const kanaal = String((d && d.kanaal) || ''), job = String((d && d.job_id) || ''), actie = String((d && d.actie) || '');
+  if (appAfscherm(a) && kanaal === 'hoofd') return appWeiger(res, 403, 'niet op een vaste plek', 'te-lezen vast hoofd');
+  if (!appTeller('telezen', APP_TE_LEZEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens te-lezen');
+  let bestaat = null;
+  if (actie === 'bewaar' && teLezenMod.JOB_RE.test(job) && (kanaal === 'hoofd' || kanaal === 'machinekamer')) {
+    try {
+      const r = await appGeschiedenisRuw(kanaal, appTeLezenLog);
+      if (r.fout) throw r.fout;
+      const x = r.items.find(function (i) { return i && i.job_id === job && String(i.antwoord || '').trim() && i.soort !== 'telegram' && i.soort !== 'zoek'; });
+      if (x) bestaat = Date.parse(x.t) || null;
+    } catch (e) { logError('te-lezen', e); return appWeiger(res, 503, 'het gesprek is nu niet te lezen; probeer het zo opnieuw', 'te-lezen lezen'); }
+  }
+  let staat;
+  try { staat = appLeesStreng(APP_TE_LEZEN, {}); } catch (e) { logError('te-lezen', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen', 'te-lezen staat'); }
+  const z = teLezenMod.zet(staat, { job_id: job, kanaal: kanaal, actie: actie }, Date.now(), bestaat);
+  if (z.fout) return appWeiger(res, z.fout === 'onbekende actie' || z.fout === 'ongeldig bericht' || z.fout === 'onbekend gesprek' ? 400 : 409, z.fout, 'te-lezen ' + actie);
+  try { appSchrijfJson(APP_TE_LEZEN, z.staat); } catch (e) { logError('te-lezen', e); return appWeiger(res, 500, 'opslaan lukte niet', 'te-lezen schrijven'); }
+  if (res._app) res._app.reden = 'te-lezen ' + actie + ' ' + kanaal + ' ' + job;
+  appStuur(res, 200, { ok: true, actie: actie, job_id: job, bewaard: !!z.staat.bewaard[job], gezien: z.staat.gezien[job] || null });
 }
 // review wv594 #2: een kaart die niet meer op David wacht (dicht, of later met een datum na vandaag) gaat uit gezien-david.json, zodat
 // hij opnieuw telt als hij terugkomt (heropend, later verlopen); zoals gezienBijwerken in de app. Alleen kaarten die de lijst echt
@@ -11966,7 +12069,7 @@ function appPushMag(id, reg, s) {
 // gezien-david.json (ontwerp § 2): {versie, tabs: {tab: iso}, punten: {id: iso}, bron: {tab: apparaat}}; geen inhoud. Kapot: null +
 // logError (niet stil); dan wordt er ook niet geschreven (geen overschrijven).
 const APP_GEZIEN_DAVID = path.join(APP_DATA, 'gezien-david.json');
-const APP_GEZIEN_DAVID_PUNTEN_MAX = 500;
+const APP_GEZIEN_DAVID_PUNTEN_MAX = 1000;   // wv2245: Te lezen (t:<job>) erbij, ± 17 per dag × 14 dagen
 const APP_GEZIEN_DAVID_PUNT_MS = 14 * 86400000;
 const APP_GEZIEN_PUNT_RE = /^[a-z0-9:_-]{1,80}$/;
 const APP_DAVID_AANWEZIG_MS = 130 * 1000;   // wv804 Fable M6: door_david van een ander apparaat alleen met aanwezig < 130 s
@@ -12398,6 +12501,7 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/voor-jou/') === 0) return appVoorJouDetail(req, res, a, route.slice('GET /app/voor-jou/'.length));
         if (route === 'POST /app/voor-jou/keuze') return appVoorJouKeuze(req, res, a, d);
         if (route === 'POST /app/voor-jou/knop') return appVoorJouKnop(req, res, reg, a, s, d);   // wv404
+        if (route === 'POST /app/te-lezen') return appTeLezenZet(req, res, a, d);   // wv2245
         if (route === 'POST /app/anders') return appAnders(req, res, reg, a, s, d);   // wv1821
         if (route.indexOf('GET /app/vandaag/actie/') === 0) return appVandaagActieDetail(req, res, a, route.slice('GET /app/vandaag/actie/'.length));
         if (route === 'GET /app/sleutels') return appSleutels(req, res, a);
