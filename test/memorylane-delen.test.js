@@ -299,6 +299,40 @@ test('poorten bij delen: geheim in Davids tekst = nooit; marker = pas na "toch d
   } finally { o.sluit(); }
 });
 
+test('wv2254 fotoalbum (Google): bron google; Davids aanvulling staat in het verhaal en de deellink; afwijzen van een bijdrage laat het album staan', async () => {
+  const o = omgeving();
+  try {
+    const t = '2026-11-02T10:00:00Z', hg = 'h00000000000000a1', hl = 'h00000000000000a2';
+    const ins = o.ing._db.prepare("INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES (?, 'los', ?, 'gezin', 0, 'actief', ?, ?)");
+    ins.run(hg, 'google:0123456789abcdef', t, t);
+    ins.run(hl, 'los:proef-zonder-google', t, t);
+    const k = (hid) => o.ml.lijst().body.herinneringen.find((h) => h.hid === hid);
+    assert.strictEqual(k(hg).bron, 'google'); assert.strictEqual(k(hl).bron, null, 'gewone losse bijdrage blijft bijdrage');
+    assert.strictEqual(k(hg).soort, 'los', 'de soort in de db verandert niet (albumcode)');
+    assert.strictEqual(o.ml.detail(hg).body.herinnering.verhaal.tekst, null);
+    assert.strictEqual(o.ml.tekst(hg, { tekst: 'We liepen de hele dag langs het Proefmeer.' }).status, 200);
+    assert.strictEqual(o.ml.tekst(hg, { tekst: 'Proefmeer is Proefplas', soort: 'correctie' }).status, 200);
+    assert.strictEqual(o.ml.tekst(hl, { tekst: 'Eigen aanvulling bij een losse bijdrage.' }).status, 200);
+    assert.strictEqual(o.ml.detail(hg).body.herinnering.verhaal.tekst, 'We liepen de hele dag langs het Proefplas.', 'aanvulling met correctie toegepast; de correctie zelf niet');
+    assert.strictEqual(o.ml.detail(hl).body.herinnering.verhaal.tekst, null, 'bij een gewone losse bijdrage telt Davids aanvulling niet (ongewijzigd)');
+    o.ml.zicht(hg, { kring: 'familie', aan: true });
+    await o.ml.link('familie', 'aan');
+    await o.ml.tik();
+    const it = o.items('familie');
+    assert.strictEqual(it.length, 1);
+    assert.deepStrictEqual(JSON.parse(it[0].stukken), [{ wie: 'David', soort: 'verhaal', tekst: 'We liepen de hele dag langs het Proefplas.' }]);
+    // een bezoeker vult aan op het album; afwijzen = alleen dat stuk, het album blijft actief en het verhaal gelijk
+    const v = o.d1db.prepare("SELECT versie FROM ml_link WHERE kring = 'familie'").get().versie;
+    await alsWorker(o.d1db, 'familie', v, { pub: it[0].pub, naam: 'Kees Verzonnen', tekst: 'Ik was er ook bij, met de hond.', vorm: 'tekst' });
+    await o.ml.tik();
+    const st = o.ml.detail(hg).body.herinnering.stukken_lijst.find((x) => x.wie !== 'david');
+    assert.ok(st, 'bijdrage binnen');
+    assert.strictEqual(o.ml.stukBesluit(st.sid, 'afwijzen').status, 200);
+    assert.strictEqual(k(hg).status, 'actief');
+    assert.strictEqual(o.ml.detail(hg).body.herinnering.verhaal.tekst, 'We liepen de hele dag langs het Proefplas.');
+  } finally { o.sluit(); }
+});
+
 test('wachtwoord: wissel = nieuwe hash en sessies weg; kluis leeg = link dicht; vernieuwen = nieuwe slug, versie en pubs', async () => {
   const o = omgeving();
   try {

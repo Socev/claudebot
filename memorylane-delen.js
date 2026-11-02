@@ -491,6 +491,10 @@ function maak(o) {
     const body = zonderFrontmatter(t).replace(/^> \*\*Privé[^\n]*\n+/, '').replace(/^# Opname[^\n]*\n+/, '');
     return kaleOpname(body);
   }
+  // wv2254: een herinnering uit een Google Foto's-album (wv2238: soort 'los', ref google:<16 hex>). De soort blijft 'los' (de albumcode is
+  //  sha256(soort|ref)); alleen weergave en verhaal behandelen hem als fotoalbum: Davids eigen aanvullingen tellen mee, zoals bij een reis.
+  const GOOGLE_RE = /^google:[0-9a-f]{16}$/;
+  function isFotoalbum(h) { return h.soort === 'los' && GOOGLE_RE.test(String(h.ref || '')); }
   // wv2180: het samengestelde verhaal als platte tekst (alinea's), zonder tijdcodes; null = (nog) geen.
   //  opname → het verhaal (concept of goedgekeurd; de feitentoets liet alleen gezegde namen, getallen en datums door); reis → Davids eigen
   //  aanvullingen; los → de bijdrage zelf. Correcties letterlijk.
@@ -503,6 +507,11 @@ function maak(o) {
       return x.delen.map((d) => (x.delen.length > 1 && d.titel ? d.titel + '\n\n' : '') + d.alineas.map((a) => a.tekst).join('\n\n')).join('\n\n');
     }
     if (h.soort === 'reis') { const l = eigenStukken(h, p).filter((x) => x.soort === 'aanvulling').map((x) => pasToe(x.tekst, c)); return l.length ? l.join('\n\n') : null; }
+    if (isFotoalbum(h)) {
+      const l = q.sVan.all(h.hid).filter((x) => x.status === 'opgenomen' && (x.wie === 'david' ? x.soort === 'aanvulling' : x.soort === 'los'))
+        .map((x) => stukTekst(x, p)).filter(Boolean).map((x) => pasToe(x, c));
+      return l.length ? l.join('\n\n') : null;
+    }
     const l = q.sVan.all(h.hid).filter((x) => x.status === 'opgenomen' && x.soort === 'los').map((x) => stukTekst(x, p)).filter(Boolean).map((x) => pasToe(x, c));
     return l.length ? l.join('\n\n') : null;
   }
@@ -515,7 +524,7 @@ function maak(o) {
     const pagina = paginaLees(h.hid), s = sam(h, pagina);
     const stukken = [];
     const v = h.soort === 'opname' && !h.toon_opname ? null : verhaalVan(h, pagina, s);
-    if (v) stukken.push({ wie: h.soort === 'los' ? 'Verteld' : 'David', soort: 'verhaal', tekst: v });
+    if (v) stukken.push({ wie: h.soort === 'los' && !isFotoalbum(h) ? 'Verteld' : 'David', soort: 'verhaal', tekst: v });
     return { titel: titelVan(h, pagina, s), wanneer: wanneerVan(h, pagina, s), stukken, kring: k };
   }
   // Geheimen: letterlijke pod-geheimen + bekende vormen (zelfde soort als de geheimenpoort op de uitgangen)
@@ -714,7 +723,7 @@ function maak(o) {
     const p = pagina === undefined ? paginaLees(h.hid) : pagina;
     const x = s === undefined ? sam(h, p) : s;
     const st = q.sVan.all(h.hid), c = catVan(h), b = q.blok.all(h.hid)[0], w = wanneerInfo(h, p, x);
-    return { hid: h.hid, soort: h.soort, status: h.status, titel: titelVan(h, p, x), wanneer: w.tekst || w.verteld, wanneer_bron: w.bron, wanneer_invoer: w.invoer,
+    return { hid: h.hid, soort: h.soort, bron: isFotoalbum(h) ? 'google' : null, status: h.status, titel: titelVan(h, p, x), wanneer: w.tekst || w.verteld, wanneer_bron: w.bron, wanneer_invoer: w.invoer,
       verteld: w.verteld, datum: sorteerSleutel(h, w), categorie: c.categorie, gevoelig: isGevoelig(h), gevoelig_vink: c.gevoeligVink,
       zicht: { familie: !!h.zicht_familie, vrienden: !!h.zicht_vrienden },
       toon_opname: !!h.toon_opname, niet_deelbaar: nietDeelbaar(h), blok: b ? b.reden : null,
@@ -854,7 +863,7 @@ function maak(o) {
     if (actie === 'weggooien') { wachtWeg(s.sid); q.sStatus.run('weggegooid', t, s.sid); }
     else q.sStatus.run(actie === 'opnemen' ? 'opgenomen' : actie === 'afwijzen' ? 'afgewezen' : 'binnen', t, s.sid);
     const h = q.h.get(s.hid);
-    if (h && h.soort === 'los') {
+    if (h && h.soort === 'los' && !isFotoalbum(h)) {   // wv2254: een fotoalbum blijft actief, ook als een bijdrage wordt afgewezen
       if (actie === 'opnemen' && h.status === 'voorstel') q.hStatus.run('actief', t, h.hid);
       if (actie === 'afwijzen' && q.sVan.all(h.hid).every((x) => x.status !== 'opgenomen')) q.hStatus.run('afgewezen', t, h.hid);
     }
