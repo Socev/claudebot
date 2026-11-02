@@ -380,6 +380,11 @@ jobs:
       - name: "tripper (wv2136, reizen in de app)"
         if: ${{ !cancelled() }}
         run: bash test/tripper.sh
+      # OVIS Shopper S3 (wv2264): shopper.js (alleen zoektochtpagina's in de vaste mappen, entiteit uit de map, id = hash, geen symlink, koop-link
+      # alleen https) en het server.js-blok (routes, Niet meer nodig = enige schrijfactie, gekocht niet via de App, /health aantallen + tijdstip).
+      - name: "shopper (wv2264, zoektochten in de app)"
+        if: ${{ !cancelled() }}
+        run: bash test/shopper.sh
       # MemoryLane R2 (wv2118): verhaal uit een opname (Claude zonder tools, nep-API), citaattoets, datum door code, injectie, categorie volgt,
       # voorstellen alleen na Ja, Davids aanpassing wint, plafond/dienstfout/grendel, padpoorten.
       - name: "herinneringen-verhaal (wv2118, MemoryLane R2)"

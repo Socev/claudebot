@@ -1081,6 +1081,11 @@ async function bewijs(o) {
     toets('9 wv2136: pad-achtige id zonder sessie -> geweigerd vóór de route (404 op de padvorm)', r.status === 404 || r.status === 401, r.status);
     r = await vraag('GET', '/app/tripper/lijst', undefined, { pot: P.jar });
     toets('9 wv2136: met sessie voorbij de poort (404 zonder appTripper in dit blok)', r.status === 404, r.status);
+    // wv2264 (OVIS Shopper): zoektochten zonder sessie niet te lezen of op vervallen te zetten
+    for (const [mt, pad] of [['GET', '/app/shopper'], ['GET', '/app/shopper/0123456789ab'], ['POST', '/app/shopper/0123456789ab/status']]) {
+      r = await vraag(mt, pad, mt === 'POST' ? { status: 'vervallen' } : undefined, {});
+      toets('9 wv2264: ' + mt + ' ' + pad + ' zonder sessie -> 401', r.status === 401, r.status);
+    }
     const sP = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
     let tot0 = sP.tot = Date.now() + 60000;
     const b1 = bid();

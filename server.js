@@ -3874,6 +3874,7 @@ function handleRequest(req, res) {
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
+      shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
       memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
       ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
       scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
@@ -12486,6 +12487,7 @@ function handleApp(req, res) {
         if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
+        if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen + Niet meer nodig)
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
@@ -18820,6 +18822,43 @@ async function appTripper(req, res, a, route) {
   return appStuur(res, u.status, u.body);
 }
 // ── einde OVIS Tripper ──
+// ── OVIS Shopper (wv2264, 2-11-2026; idee 23 S3, ontwerp vault "01_Ontwikkeling/OVIS Shopper - wat er al bestaat en ontwerp (2-11-2026).md"
+// § 3.3–3.4) ──
+// Apps › Shopper in de Socev-app: de zoektochten van de skill ovis-shopper. Geen eigen opslag: shopper.js leest bij elke vraag de pagina's
+// (type: shopper-zoektocht) direct in de vaste Shopper-mappen per entiteit, via vault-veilig. Routes achter de app-sessie:
+//   GET  /app/shopper                 alle zoektochten (open bovenaan, per entiteit): wens, entiteit, status, gezocht, advies-totaal, aantal opties
+//   GET  /app/shopper/<id>            één zoektocht: opties (koop-link alleen als https, anders url null), advies, eisen, aannames, niet te lezen
+//   POST /app/shopper/<id>/status     {status: "vervallen"} = Niet meer nodig; de enige schrijfactie. Gekocht NIET via de App (review 2-11
+//                                     MOET 5: alleen op Davids eigen woord via Socev).
+// id = 12 hex van sha256(vaultpad); shopper.js zoekt het pad zelf op (nooit een pad uit de vraag). Audit zonder wens of pad. /health.shopper:
+// aantallen en het tijdstip van de laatste lijst (geen wens, pad of bedrag). Ontbreekt shopper.js in de release: 404 en aan=false.
+const shopper = (function () {
+  const p = path.join(__dirname, 'shopper.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ vault: VAULT, vv: VV() }); } catch (e) { logError('shopper', e); return null; }
+})();
+function shopperInfo() { if (!shopper) return { aan: false }; try { return shopper.info(); } catch (e) { return { aan: true, fout: true }; } }
+appStaat.tellers.shopper = [];
+appStaat.tellers.shopper_status = [];
+async function appShopper(req, res, a, route, d) {
+  if (!shopper) return appWeiger(res, 404, 'Shopper zit niet in deze versie van de pod', 'shopper ontbreekt');
+  if (!appTeller('shopper', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens shopper');
+  let u, m = null, soort = 'onbekend';
+  try {
+    if (route === 'GET /app/shopper') { soort = 'lijst'; u = shopper.lijst(); }
+    else if ((m = /^GET \/app\/shopper\/([^/]*)$/.exec(route))) { soort = 'zoektocht'; u = shopper.zoektocht(m[1]); }   // shopper.js toetst de id zelf (12 hex, anders 400)
+    else if ((m = /^POST \/app\/shopper\/([^/]*)\/status$/.exec(route))) {
+      soort = 'status';
+      if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
+      u = shopper.status(m[1], d);
+    }
+    else u = { status: 404, body: { ok: false, fout: 'onbekend' } };
+  } catch (e) { logError('shopper', e); return appWeiger(res, 503, 'Shopper kon de zoektochten nu niet lezen; probeer het zo opnieuw', 'shopper fout'); }
+  if (soort === 'lijst' && u.status === 200) res._app.stil = true;
+  else res._app.reden = 'shopper ' + soort + (m ? ' ' + (/^[0-9a-f]{12}$/.test(m[1]) ? m[1] : 'ongeldig') : '') + ' ' + u.status;
+  return appStuur(res, u.status, u.body);
+}
+// ── einde OVIS Shopper ──
 async function appDocs(req, res, a, s, d, route) {
   if (!docsDelen) return appWeiger(res, 404, 'Delen zit niet in deze versie van de pod', 'docs ontbreekt');
   if (!appTeller('docs', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs');
