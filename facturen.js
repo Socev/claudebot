@@ -646,6 +646,33 @@ function oranjeSignalenDicht(fdb, r, txIds, afhandeling, les, wanneer) {
   }
   return n;
 }
+/*
+ * wv2244: een open "afschrijving zonder factuur" waarvan elke bankregel nu onder een ingebouwde regel valt die er nooit een factuur bij
+ * verwacht (salaris op de omschrijving, winstvoorschot aan de maten; B.INGEBOUWD_GEEN_SIGNAAL), gaat dicht zoals de knop "Is een
+ * uitzondering" (afhandeling is_uitzondering, les in "wat we leerden", auditrij), door de bankcontrole. De les noemt geen naam (salarissen =
+ * personeelsgegevens). Alleen geen_factuur; uitzonderingen = uit.uitzonderingen van deze ronde (elke ronde opnieuw berekend, dus herhaalbaar).
+ */
+const INGEBOUWD_LES = {
+  salaris_omschrijving: 'Salaris (omschrijving begint met "Salaris") is een stroom zonder factuur (loon); de bankcontrole herkent het voortaan zelf.',
+  winstvoorschot: 'Voorschot op of deling van de winst aan de maten is een stroom zonder factuur (winstvoorschot); de bankcontrole herkent het voortaan zelf.',
+};
+function ingebouwdSignalenDicht(fdb, uitzonderingen, wanneer) {
+  const per = new Map();
+  for (const u of uitzonderingen || []) if (B.INGEBOUWD_GEEN_SIGNAAL.includes(u.ingebouwd)) per.set(u.transactie, u.ingebouwd);
+  if (!per.size) return 0;
+  let n = 0;
+  const up = fdb.db.prepare("UPDATE signaal SET status = 'afgehandeld', afhandeling = 'is_uitzondering', les = ?, wie = 'bankcontrole', wanneer = ?, sluimer_tot = NULL WHERE id = ? AND status = 'open'");
+  for (const s of fdb.db.prepare("SELECT id, entiteit, transacties FROM signaal WHERE status = 'open' AND soort = 'geen_factuur'").all()) {
+    const tx = json(s.transacties, []) || [];
+    if (!tx.length || !tx.every((id) => per.has(id))) continue;
+    const soort = per.get(tx[0]);
+    if (!up.run(INGEBOUWD_LES[soort], wanneer, s.id).changes) continue;
+    n++;
+    D.audit(fdb, { wie: 'bankcontrole', wat: 'signaal_afgehandeld', object_soort: 'signaal', object_id: s.id, entiteit: s.entiteit, voor: { status: 'open' },
+      na: { status: 'afgehandeld', knop: 'is_uitzondering', ingebouwd: soort }, wanneer });
+  }
+  return n;
+}
 function isoWeek(d) {
   const t = new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)));
   const dag = (t.getUTCDay() + 6) % 7;
@@ -1985,8 +2012,11 @@ function bankcontroleToepassen(fdb, nu) {
     .all(K.plusDagen(van, -60)).map((f) => Object.assign({}, f, { patientkenmerk: !!f.patientkenmerk, alleen_eigenaar: !!f.alleen_eigenaar }));
   const ibans = {};
   for (const k of fdb.db.prepare('SELECT entiteit, iban FROM rekening').all()) (ibans[k.entiteit] = ibans[k.entiteit] || []).push(k.iban);
+  const leveranciers = leverancierLijst(fdb);
+  // wv2244 (review MOET 1): het archief kent geen leverancier-id, alleen de naam; een leverancier met dezelfde naam telt als "met facturen"
+  const archiefNamen = new Set(fdb.db.prepare('SELECT DISTINCT leverancier_naam AS n FROM factuur_archief WHERE leverancier_naam IS NOT NULL').all().map((r) => K.normNaam(r.n)).filter(Boolean));
   const inv = {
-    vandaag, transacties, facturen, leveranciers: leverancierLijst(fdb),
+    vandaag, transacties, facturen, leveranciers,
     uitzonderingen: fdb.db.prepare('SELECT * FROM uitzondering WHERE actief = 1').all(),
     entiteiten: entiteitenRijen(fdb).map((e) => ({ sleutel: e.sleutel, ibans: ibans[e.sleutel] || [] })),
     rekeningen: fdb.db.prepare('SELECT iban, entiteit, controle, bank_formaat, alleen_eigenaar FROM rekening').all(),
@@ -1998,6 +2028,12 @@ function bankcontroleToepassen(fdb, nu) {
     verzamelTel: verzamelTellingen(fdb), verzamelNaam,
     sepa: sepaVoorControle(fdb, nuIso(Date.parse(van + 'T00:00:00Z'))),   // wv1405: eigen batches (PmtInfId + totaal)
     afwijkend: afwijkendVoorControle(fdb, vandaag),   // wv1326: incasso's ruim boven hun gebruikelijke band (alleen na de startdatum)
+    // wv2244: tegenpartijen met facturen (de ingebouwde regels salaris/winstvoorschot gelden daar niet)
+    metFacturen: {
+      ibans: fdb.db.prepare("SELECT iban FROM factuur WHERE iban IS NOT NULL AND status <> 'geen_factuur' UNION SELECT iban FROM factuur_archief WHERE iban IS NOT NULL").all().map((r) => r.iban),
+      leveranciers: fdb.db.prepare("SELECT DISTINCT leverancier FROM factuur WHERE leverancier IS NOT NULL AND status <> 'geen_factuur'").all().map((r) => r.leverancier)
+        .concat(leveranciers.filter((l) => archiefNamen.has(K.normNaam(l.naam))).map((l) => l.id)),
+    },
   };
   const uit = B.bankcontrole(inv);
   const tel = { koppelingen: 0, voorstellen: 0, uitzonderingen: 0, betaald_gezien: 0, signalen: 0, heropend: 0 };
@@ -2026,6 +2062,7 @@ function bankcontroleToepassen(fdb, nu) {
   tel.voorstellen_vervallen = voorstellenHerbeoordelen(fdb, uit, txMap, facturen, wanneer);
   for (const u of uit.uitzonderingen) tel.uitzonderingen += fdb.db.prepare('UPDATE bank_transactie SET categorie = ?, uitzondering = ? WHERE id = ? AND categorie IS NULL')
     .run(u.categorie, u.uitzondering || null, u.transactie).changes;
+  tel.ingebouwd_dicht = ingebouwdSignalenDicht(fdb, uit.uitzonderingen, wanneer);
   for (const b of uit.betaalspoor) {
     if (b.gebeurtenis === 'teruggeboekt') {
       const n = terugZet(fdb, { id: b.factuur, betaalspoor: b.van }, wanneer);

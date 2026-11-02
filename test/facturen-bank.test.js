@@ -537,6 +537,51 @@ test('buitenlandse valuta: tegenpartij + bedrag ± 3 % met een koers → altijd 
   assert.equal(B.matchTransactie(tx({ boekdatum: '2026-10-02', bedrag_centen: -9600, tegenpartij_naam: 'LEVERANCIER D INC' }), [f], { leveranciers: LEVS, koersen: { USD: 0.92 } }).length, 0);
 });
 
+test('wv2244: ingebouwd salaris op de omschrijving (POT-bankluis) en winstvoorschot aan de maten; salarisbatch blijft; leverancier en eigen keuze gaan voor', () => {
+  const MW = maakIban('NL', 'TEST', '0000000901'), MAAT = maakIban('NL', 'TEST', '0000000902');
+  const pot = (o) => tx(Object.assign({ boekdatum: '2026-10-01', eigen_iban: ABN_POT, entiteit: 'pot', alleen_eigenaar: true, transactietype: 'BANKLUIS:SEPA Overboeking',
+    tegenpartij_iban: MW, tegenpartij_naam: 'Medewerker Proef', bedrag_centen: -250000 }, o));
+  const gh = (o) => tx(Object.assign({ boekdatum: '2026-10-01', eigen_iban: ABN_GH, entiteit: 'groenhouten', tegenpartij_iban: MAAT, tegenpartij_naam: 'Maat Proef', bedrag_centen: -800000 }, o));
+  const salaris = pot({ omschrijving: 'Salaris periode 10' }), periode = pot({ omschrijving: 'Salarisperiode 9 Kenmerk: NOTPROVIDED' });
+  const batch = tx({ boekdatum: '2026-10-01', bedrag_centen: -1200000, transactietype: 'ABN:SEPA Batch Salaris', omschrijving: 'Salarisbetaling batch' });
+  const winst = gh({ omschrijving: 'Voorschot winst 2026' }), restant = gh({ omschrijving: 'restant winstdelin g 2025' }), deling = gh({ omschrijving: 'Winstdeling 2026' });
+  const naarEigen = gh({ omschrijving: 'Voorschot winst 2026', tegenpartij_iban: ABN_TG, tegenpartij_naam: 'Eigen entiteit' });
+  // niet meenemen: salaris midden in de tekst bij een leverancier met facturen, "Salarisadministratie", "Salaris" aan een bekende leverancier, bijschrijving
+  const midden = tx({ boekdatum: '2026-10-01', eigen_iban: ABN_GH, entiteit: 'groenhouten', tegenpartij_iban: LEV.A, tegenpartij_naam: 'Leverancier A B.V.', bedrag_centen: -45000,
+    omschrijving: '2026-0812 Factuur Salaris en Pensioen' });
+  const admin = tx({ boekdatum: '2026-10-01', tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Bureau Proef', bedrag_centen: -30000, omschrijving: 'Salarisadministratie september' });
+  const levSal = tx({ boekdatum: '2026-10-01', tegenpartij_iban: LEV.B, tegenpartij_naam: 'Leverancier B B.V.', bedrag_centen: -30000, omschrijving: 'Salaris verwerking oktober' });
+  const levWinst = tx({ boekdatum: '2026-10-01', tegenpartij_iban: LEV.F, tegenpartij_naam: 'Leverancier F B.V.', bedrag_centen: -30000, omschrijving: 'winstdeling advies' });
+  const bij = pot({ bedrag_centen: 250000, omschrijving: 'Salaris periode 10 retour' });
+  const eigenKeuze = pot({ omschrijving: 'Salaris periode 10', tegenpartij_iban: maakIban('NL', 'TEST', '0000000903') });
+  const uitz = [{ id: 'u-eigen', richting: 'af', tegenpartij: eigenKeuze.tegenpartij_iban, categorie: 'overig' }];
+  const r = controle({ transacties: [salaris, periode, batch, winst, restant, deling, naarEigen, midden, admin, levSal, levWinst, bij, eigenKeuze], facturen: [], uitzonderingen: uitz });
+  const per = Object.fromEntries(r.uitzonderingen.map((u) => [u.transactie, [u.categorie, u.ingebouwd || u.uitzondering]]));
+  assert.deepEqual(per, {
+    [salaris.id]: ['loon', 'salaris_omschrijving'], [periode.id]: ['loon', 'salaris_omschrijving'], [batch.id]: ['loon', 'salarisbatch'],
+    [winst.id]: ['winstvoorschot', 'winstvoorschot'], [restant.id]: ['winstvoorschot', 'winstvoorschot'], [deling.id]: ['winstvoorschot', 'winstvoorschot'],
+    [naarEigen.id]: ['rekening_courant', 'eigen_iban'], [eigenKeuze.id]: ['overig', 'u-eigen'],
+  });
+  const geen = new Set(r.signalen.filter((s) => s.soort === 'geen_factuur').map((s) => s.transacties[0]));
+  for (const t of [midden, admin, levSal, levWinst]) assert.ok(geen.has(t.id), 'blijft een signaal: ' + t.omschrijving);
+  for (const t of [salaris, periode, batch, winst, restant, deling]) assert.ok(!geen.has(t.id), 'geen signaal: ' + t.omschrijving);
+  // met metFacturen (zoals facturen.js): een "leverancier" uit de bankhistorie zonder één factuur (wv1323: medewerkers, maten) blokkeert niet;
+  // een leverancier of IBAN mét facturen wel. Zonder metFacturen blokkeert elke herkende leverancier (hierboven: levSal, levWinst).
+  const sel = (mf) => { const x = controle({ transacties: [levSal, levWinst, admin], facturen: [], metFacturen: mf });
+    return Object.fromEntries(x.uitzonderingen.map((u) => [u.transactie, u.ingebouwd])); };
+  assert.deepEqual(sel({ ibans: [], leveranciers: [] }), { [levSal.id]: 'salaris_omschrijving', [levWinst.id]: 'winstvoorschot' });
+  assert.deepEqual(sel({ ibans: [], leveranciers: ['lb'] }), { [levWinst.id]: 'winstvoorschot' });
+  assert.deepEqual(sel({ ibans: [LEV.F], leveranciers: [] }), { [levSal.id]: 'salaris_omschrijving' });
+  assert.equal(B.uitzonderingVoor(salaris, { metFacturen: { ibans: new Set([MW]), leveranciers: new Set() } }), null, 'IBAN op een factuur: geen ingebouwde regel');
+  // review ZOU 1: winst alleen vanaf een maatschap; nooit bij een incasso
+  assert.equal(B.uitzonderingVoor(pot({ omschrijving: 'Voorschot winst 2026' }), {}), null, 'winst vanaf de POT: geen ingebouwde regel');
+  assert.equal(B.uitzonderingVoor(gh({ omschrijving: 'Winstdeling 2026', is_incasso: true }), {}), null, 'incasso: geen ingebouwde regel');
+  assert.equal(B.uitzonderingVoor(pot({ omschrijving: 'Salaris periode 10', is_incasso: true }), {}), null);
+  assert.equal(B.uitzonderingVoor(gh({ omschrijving: 'Winstdeling 2026' }), {}).ingebouwd, 'winstvoorschot');
+  assert.ok(B.CATEGORIEEN.includes('winstvoorschot'));
+  assert.deepEqual(B.INGEBOUWD_GEEN_SIGNAAL, ['salaris_omschrijving', 'winstvoorschot']);
+});
+
 test('uitzonderingen: declaratie-bijschrijving, loon (salarisbatch), rekening-courant tussen eigen entiteiten, privé-opname, bankkosten', () => {
   const decl = tx({ boekdatum: '2026-10-01', eigen_iban: ABN_GH, entiteit: 'groenhouten', bedrag_centen: 100000, tegenpartij_iban: LEV.ZV, tegenpartij_naam: 'Zorgverzekeraar Voorbeeld', omschrijving: 'Declaratie september' });
   const loon = tx({ boekdatum: '2026-09-25', bedrag_centen: -1200000, transactietype: 'ABN:SEPA Batch Salaris', omschrijving: 'Salarisbetaling batch' });

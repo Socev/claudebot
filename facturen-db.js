@@ -50,6 +50,10 @@ const SIGNAAL_V1 = ['geen_factuur', 'dubbel_betaald', 'dubbele_factuur', 'verzen
   'ingevoerd_niet_gezien', 'onbekend_iban', 'mogelijk_dubbel_geupload'];
 const SIGNAAL_V10 = SIGNAAL_V1.concat(['teruggeboekt']);
 const SIGNAAL_V11 = SIGNAAL_V10.concat(['afwijkend_bedrag']);
+// wv2244: categorie 'winstvoorschot' erbij (M16); M1 houdt de oorspronkelijke lijst, M16 verruimt de CHECK
+const CATEGORIE_V1 = ['loon', 'loonheffing', 'btw', 'belasting', 'declaraties', 'rekening_courant', 'eigen_overboeking', 'bankkosten', 'creditcard',
+  'prive_opname', 'abonnement_zonder_factuur', 'subsidie', 'rente', 'overig'];
+const CATEGORIE_V16 = CATEGORIE_V1.concat(['winstvoorschot']);
 const L = {
   status: ['te_beoordelen', 'geen_factuur', 'dubbel', 'in_wachtrij', 'prive_archief', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'],
   onderweg: ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'],
@@ -58,8 +62,7 @@ const L = {
   opdrachtStatus: ['wacht', 'opgehaald', 'gelukt', 'mislukt', 'geweigerd', 'teruggedraaid'],
   besluitBron: ['anker', 'leverancier', 'regel', 'bank', 'model', 'mens'],
   formaat: ['ing_csv', 'abn_tab', 'abn_mt940', 'triodos_csv', 'bankluis'],
-  categorie: ['loon', 'loonheffing', 'btw', 'belasting', 'declaraties', 'rekening_courant', 'eigen_overboeking', 'bankkosten', 'creditcard',
-    'prive_opname', 'abonnement_zonder_factuur', 'subsidie', 'rente', 'overig'],
+  categorie: CATEGORIE_V16,
   signaal: SIGNAAL_V11,
 };
 const IN = (l) => '(' + l.map((x) => "'" + x + "'").join(',') + ')';
@@ -303,7 +306,7 @@ CREATE TABLE uitzondering (
   rekening TEXT ${IBAN('rekening')},
   tegenpartij TEXT, omschrijving TEXT, transactietype TEXT,
   bedrag_centen INTEGER, tolerantie_centen INTEGER, tolerantie_pct REAL,
-  categorie TEXT NOT NULL CHECK (categorie IN ${IN(L.categorie)}),
+  categorie TEXT NOT NULL CHECK (categorie IN ${IN(CATEGORIE_V1)}),
   toelichting TEXT,
   actief INTEGER NOT NULL DEFAULT 1 ${BOOL('actief')},
   alleen_eigenaar INTEGER NOT NULL DEFAULT 0 ${BOOL('alleen_eigenaar')},
@@ -333,7 +336,7 @@ CREATE TABLE bank_transactie (
   bankluis_sleutel TEXT,
   bestand_op TEXT,
   alleen_eigenaar INTEGER NOT NULL DEFAULT 0 ${BOOL('alleen_eigenaar')},
-  categorie TEXT CHECK (categorie IS NULL OR categorie IN ${IN(L.categorie)}),
+  categorie TEXT CHECK (categorie IS NULL OR categorie IN ${IN(CATEGORIE_V1)}),
   uitzondering TEXT REFERENCES uitzondering(id),
   verwijderd_op TEXT, verwijderd_door TEXT,
   aangemaakt_op TEXT NOT NULL,
@@ -752,6 +755,19 @@ const M15_VERVANG = [
 function M15(db, vervang) { return M5(db, vervang || M15_VERVANG, 'migratie_15'); }
 
 /*
+ * wv2244 (David 2-11-2026 10:03, Ja op "salarissen en winstvoorschotten aan de maten nooit meer als afschrijving zonder factuur"):
+ * categorie 'winstvoorschot' in de CHECKs van uitzondering en bank_transactie. Zelfde weg als M5/M6/M10/M11/M15 (writable_schema, één
+ * vervanging per tabel, al verruimd = overslaan). LET OP terugrol: een release van vóór wv2244 opent deze database niet meer (schema_nieuwer);
+ * lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 16`: de verruimde CHECK hindert de oude code niet; een bankregel met
+ * categorie 'winstvoorschot' toont de oude code als tekst (de oude bankcontrole slaat een regel met categorie over).
+ */
+const M16_VERVANG = [
+  ['uitzondering', 'categorie IN ' + IN(CATEGORIE_V1), 'categorie IN ' + IN(CATEGORIE_V16)],
+  ['bank_transactie', 'categorie IN ' + IN(CATEGORIE_V1), 'categorie IN ' + IN(CATEGORIE_V16)],
+];
+function M16(db, vervang) { return M5(db, vervang || M16_VERVANG, 'migratie_16'); }
+
+/*
  * wv980 (OVIS Intake stap 2, bouwplan § 3.3/§ 9 #2): leverancier krijgt knoop_id, de id van de organisatie in het OVIS-register
  * (secondbrain.knoop/entity, bv. 'org:voorbeeld'). Leeg tot de facturen-lens in stap 3 hem vult; de router leest hem niet in de schaduw.
  * Alleen een vorm-CHECK, geen verwijzing (het register staat in Supabase). LET OP terugrol: een release van vóór wv980 opent deze
@@ -1022,6 +1038,7 @@ const MIGRATIES = [
   { versie: 13, naam: 'creditcard (ICS) als bron: kaart, kaart_bestand, kaart_regel, kaart_incasso (wv2043)', sql: M13 },
   { versie: 14, naam: 'PayPal zakelijk als bron: paypal_regel (wv2056)', sql: M14 },
   { versie: 15, naam: "bron: soort 'intake' (OVIS Intake stap 3d, wv1919)", fn: (db) => M15(db) },
+  { versie: 16, naam: "categorie 'winstvoorschot' in uitzondering en bank_transactie (wv2244)", fn: (db) => M16(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -1568,7 +1585,7 @@ function health(fdb) {
 }
 
 module.exports = {
-  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
+  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
   terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,

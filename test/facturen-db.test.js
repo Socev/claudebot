@@ -174,7 +174,7 @@ test('migratie 5 (wv1299): schema 4 → 5 verruimt bank/formaat met TRIODOS/trio
   const dir = map('m5');
   dbOpSchema4(dir).close();
   const f = D.open(dir);
-  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
   assert.equal(f.schema, D.SCHEMA_VERSIE);
   assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
@@ -232,7 +232,7 @@ test('migratie 5 (wv1299): een fout ná het bijwerken van sqlite_master rolt vol
   assert.deepEqual(tabelSql(db), voor);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   db.close();
-  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
+  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
 });
 
 test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets', () => {
@@ -1085,7 +1085,7 @@ test("migratie 11 (wv1326): signaal krijgt soort 'afwijkend_bedrag'; vanaf schem
   const dir2 = path.dirname(d2.pad);
   D.sluit(d2);
   const e2 = D.open(dir2);
-  assert.deepEqual(e2.toegepast, [10, 11, 12, 13, 14, 15]);
+  assert.deepEqual(e2.toegepast, [10, 11, 12, 13, 14, 15, 16]);
   assert.equal(sigSql(e2.db), vers);
   D.sluit(e2);
 });
@@ -1113,5 +1113,51 @@ test("migratie 15 (wv1919): bron krijgt soort 'intake'; vanaf schema 14 = nieuw 
   // al verruimd, alleen de rij ontbrak → overslaan zonder fout
   const g = new DatabaseSync(path.join(dir, D.BESTAND)); g.exec('DELETE FROM schema_migratie WHERE versie = 15'); g.close();
   const h = D.open(dir); assert.deepEqual(h.toegepast, [15]); D.sluit(h);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("migratie 16 (wv2244): categorie 'winstvoorschot' in uitzondering en bank_transactie; vanaf schema 15 = nieuw aangemaakt; al verruimd → overslaan; afwijkend → terugrollen", () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'facturen-m16-'));
+  const sql = (db, t) => db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(t).sql;
+  const zet = (db, oud, nieuw) => {
+    const v = db.prepare('PRAGMA schema_version').get().schema_version;
+    db.exec('PRAGMA writable_schema = ON');
+    db.prepare("UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name IN ('uitzondering','bank_transactie')").run(oud, nieuw);
+    db.exec('PRAGMA schema_version = ' + (v + 1)); db.exec('PRAGMA writable_schema = OFF');
+  };
+  const uz = (db, id, cat) => db.prepare("INSERT INTO uitzondering (id, tegenpartij, categorie, aangemaakt_door, aangemaakt_op) VALUES (?, 'Proef', ?, 'toets', ?)").run(id, cat, iso(NU));
+  const nieuw = D.open(dir);
+  const vers = { u: sql(nieuw.db, 'uitzondering'), b: sql(nieuw.db, 'bank_transactie') };
+  for (const x of Object.values(vers)) assert.ok(x.includes(",'overig','winstvoorschot')"), x.slice(0, 60));
+  assert.ok(D.LIJSTEN.categorie.includes('winstvoorschot'));
+  // terug naar schema 15 (oude CHECK, rij 16 weg), met een bestaande uitzondering
+  zet(nieuw.db, ",'overig','winstvoorschot')", ",'overig')");
+  nieuw.db.exec('DELETE FROM schema_migratie WHERE versie = 16');
+  uz(nieuw.db, 'eeeeeeeeeeee0161', 'loon');
+  gooit(() => uz(nieuw.db, 'eeeeeeeeeeee0162', 'winstvoorschot'), /CHECK/);
+  D.sluit(nieuw);
+  const f = D.open(dir);
+  assert.deepEqual(f.toegepast, [16]);
+  assert.equal(sql(f.db, 'uitzondering'), vers.u, 'gemigreerd = nieuw aangemaakt');
+  assert.equal(sql(f.db, 'bank_transactie'), vers.b, 'gemigreerd = nieuw aangemaakt');
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  assert.equal(f.db.prepare("SELECT categorie FROM uitzondering WHERE id = 'eeeeeeeeeeee0161'").get().categorie, 'loon');
+  uz(f.db, 'eeeeeeeeeeee0163', 'winstvoorschot');
+  gooit(() => uz(f.db, 'eeeeeeeeeeee0164', 'onzin'), /CHECK/);
+  D.sluit(f);
+  // al verruimd, alleen de rij ontbrak → overslaan zonder fout
+  const g = new DatabaseSync(path.join(dir, D.BESTAND)); g.exec('DELETE FROM schema_migratie WHERE versie = 16'); g.close();
+  const h = D.open(dir); assert.deepEqual(h.toegepast, [16]); assert.equal(sql(h.db, 'uitzondering'), vers.u);
+  // afwijkende CHECK-tekst → weigeren, niets half (ook de andere tabel blijft zoals hij was)
+  h.db.exec('DELETE FROM schema_migratie WHERE versie = 16');
+  h.db.exec("DELETE FROM uitzondering WHERE categorie = 'winstvoorschot'");
+  zet(h.db, ",'overig','winstvoorschot')", ",'overig','iets_anders')");
+  const voor = { u: sql(h.db, 'uitzondering'), b: sql(h.db, 'bank_transactie') };
+  D.sluit(h);
+  gooit(() => D.open(dir), /migratie_16|staat er 0 keer/);
+  const r = D.open(dir, { alleenLezen: true });
+  assert.equal(sql(r.db, 'uitzondering'), voor.u); assert.equal(sql(r.db, 'bank_transactie'), voor.b);
+  D.sluit(r);
   fs.rmSync(dir, { recursive: true, force: true });
 });

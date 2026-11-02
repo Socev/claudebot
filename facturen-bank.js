@@ -529,7 +529,7 @@ function normaliseerBankluis(post, rekening) {
 // ───────────────────────────── uitzonderingen (stromen zonder factuur) ─────────────────────────────
 
 const CATEGORIEEN = ['loon', 'loonheffing', 'btw', 'belasting', 'declaraties', 'rekening_courant', 'eigen_overboeking', 'bankkosten', 'creditcard',
-  'prive_opname', 'abonnement_zonder_factuur', 'subsidie', 'rente', 'overig'];
+  'prive_opname', 'abonnement_zonder_factuur', 'subsidie', 'rente', 'overig', 'winstvoorschot'];   // winstvoorschot: wv2244 (facturen-db M16)
 const RICHTINGEN = ['af', 'bij', 'beide'];
 function richtingVan(tx) { return tx.bedrag_centen < 0 ? 'af' : tx.bedrag_centen > 0 ? 'bij' : null; }
 function eigenIbanMap(ctx) {
@@ -560,7 +560,38 @@ function uitzonderingPast(u, tx) {
   }
   return true;
 }
-// → { categorie, uitzondering (id) | ingebouwd: 'eigen_iban' | 'salarisbatch' } of null
+/*
+ * wv2244 (David 2-11-2026 09:57: "Alle salarissen staan er tussen, die hebben nooit een factuur; De voorlopige winstdeling aan de maten zit er
+ * tussen"). Twee ingebouwde regels voor afschrijvingen, na Davids eigen uitzonderingen (een eigen keuze gaat voor):
+ *  - salaris_omschrijving: de omschrijving BEGINT met "Salaris" of "Salarisperiode" (de bankluis-route van de POT heeft geen transactietype
+ *    "Salaris" zoals de ABN-salarisbatch). Alleen aan het begin: "… Salaris en …" midden in de tekst is in de historie een leverancier met
+ *    facturen; "Salarisadministratie" telt niet (geen woordgrens).
+ *  - winstvoorschot: "voorschot winst", "winstdeling", "winstuitkering", "winstvoorschot" of "winstaandeel" in de omschrijving, spaties weg
+ *    (de bank breekt "winstdeling" soms af als "winstdelin g"), alleen vanaf een maatschap (WINST_ENTITEITEN; review ZOU 1). Meting 2-11 op
+ *    de hele historie: alleen Groenhouten aan de maten.
+ * Nooit bij een incasso (een leverancier incasseert; salaris en winst worden overgemaakt).
+ * Beide niet als er bij de tegenpartij facturen zijn: ctx.metFacturen = { ibans, leveranciers } (Sets; facturen.js vult ze uit factuur en
+ * factuur_archief): het IBAN kwam op een factuur voor, of de herkende leverancier (IBAN, incassant of exacte naam) heeft facturen. Een
+ * "leverancier" zonder één factuur telt niet: sinds wv1323 staan medewerkers en maten als leverancier uit de bankhistorie in de lijst
+ * (meting 2-11: alle 13 open signalen). Zonder ctx.metFacturen (losse aanroep) blokkeert elke herkende leverancier: liever een signaal te veel.
+ */
+const SALARIS_OMSCHRIJVING_RE = /^\s*salaris(?:periode)?(?![a-z])/i;
+const WINST_OMSCHRIJVING_RE = /voorschotwinst|winstdeling|winstuitkering|winstvoorschot|winstaandeel/i;
+const WINST_ENTITEITEN = ['groenhouten', 'tolgaarde', 'kostenmaatschap'];
+const INGEBOUWD_GEEN_SIGNAAL = ['salaris_omschrijving', 'winstvoorschot'];   // facturen.js sluit hun open "afschrijving zonder factuur"
+function ingebouwdOmschrijving(tx, ctx) {
+  if (richtingVan(tx) !== 'af' || tx.is_incasso) return null;
+  const om = String(tx.omschrijving || '');
+  const soort = SALARIS_OMSCHRIJVING_RE.test(om) ? 'salaris_omschrijving'
+    : WINST_ENTITEITEN.includes(tx.entiteit) && WINST_OMSCHRIJVING_RE.test(om.replace(/\s+/g, '')) ? 'winstvoorschot' : null;
+  if (!soort) return null;
+  const mf = ctx && ctx.metFacturen;
+  if (mf && mf.ibans.has(ibanNorm(tx.tegenpartij_iban))) return null;
+  const lt = leverancierBijTx(tx, ctx);
+  if (lt && !lt.deel && (!mf || mf.leveranciers.has(lt.leverancier.id))) return null;
+  return soort === 'salaris_omschrijving' ? { categorie: 'loon', ingebouwd: soort } : { categorie: 'winstvoorschot', ingebouwd: soort };
+}
+// → { categorie, uitzondering (id) | ingebouwd: 'eigen_iban' | 'salarisbatch' | 'salaris_omschrijving' | 'winstvoorschot' } of null
 function uitzonderingVoor(tx, ctx) {
   const eigen = eigenIbanMap(ctx);
   const tegen = ibanNorm(tx.tegenpartij_iban);
@@ -571,7 +602,7 @@ function uitzonderingVoor(tx, ctx) {
   }
   if (richtingVan(tx) === 'af' && /\bSalaris\b/i.test(String(tx.transactietype || ''))) return { categorie: 'loon', ingebouwd: 'salarisbatch' };
   for (const u of (ctx && ctx.uitzonderingen) || []) if (uitzonderingPast(u, tx)) return { categorie: CATEGORIEEN.includes(u.categorie) ? u.categorie : 'overig', uitzondering: u.id };
-  return null;
+  return ingebouwdOmschrijving(tx, ctx);
 }
 
 /*
@@ -1216,7 +1247,8 @@ function noemtBatchId(tekst, id) {
 function bankcontrole(inv) {
   const vandaag = inv && inv.vandaag;
   if (!isIsoDatum(vandaag)) throw new BankWeigering('vandaag', 'vandaag ontbreekt');
-  const ctx = { leveranciers: inv.leveranciers || [], uitzonderingen: inv.uitzonderingen || [], entiteiten: inv.entiteiten || [], rekeningen: inv.rekeningen || [], koersen: inv.koersen || {} };
+  const ctx = { leveranciers: inv.leveranciers || [], uitzonderingen: inv.uitzonderingen || [], entiteiten: inv.entiteiten || [], rekeningen: inv.rekeningen || [], koersen: inv.koersen || {},
+    metFacturen: inv.metFacturen ? { ibans: new Set((inv.metFacturen.ibans || []).map(ibanNorm).filter(Boolean)), leveranciers: new Set(inv.metFacturen.leveranciers || []) } : null };
   // wv1360: rekeningen van betaaldiensten en derdengelden (de beller telt per rekening de afschrijvingen met zo'n naam in de hele bankhistorie)
   const verzamelTel = inv.verzamelTel || {}, verzamelNaam = typeof inv.verzamelNaam === 'function' ? inv.verzamelNaam : (n) => VERZAMEL_RE.test(String(n || ''));
   const isVerzamel = (tx, tegen) => (verzamelTel[tegen] || 0) - (verzamelNaam(tx.tegenpartij_naam) ? 1 : 0) > 0 || (!!tx.is_incasso && verzamelNaam(tx.tegenpartij_naam));
@@ -1821,7 +1853,7 @@ module.exports = {
   // parsers
   pyStr, mkRef, kenEntryRefsToe, refBasis, saldoControle, normBedrag, herkenFormaat, csvRijen, leesIng, leesTriodos, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
   // controle
-  uitzonderingVoor, uitzonderingPast, oranjePatroon, categorieVoorstel, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
+  uitzonderingVoor, uitzonderingPast, INGEBOUWD_GEEN_SIGNAAL, oranjePatroon, categorieVoorstel, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
   plusWerkdagen, betaalVerwachting, dekkingVan, eigenBetaling, BETAAL_TERMIJN, betaalMeldingTekst, eurTekst,
   // signalen
   maakSignaal, signaalSleutel, afhandelSignaal, terugvraagTekst, bandTekst, signaalUitleg,

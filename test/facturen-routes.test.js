@@ -2254,3 +2254,52 @@ test('wv2143: drempel_vast stil bij > 3 eerdere afschrijvingen aan het bekende I
   assert.equal(l.length, 5, 'tot = vóór de factuurdatum; gekoppeld en verwijderd niet');
   assert.deepEqual(l.filter((x) => x.alleen_eigenaar).map((x) => x.id), [pt]);
 });
+
+// wv2244: open "afschrijving zonder factuur" van vóór de nieuwe ingebouwde regels gaan bij de volgende bankcontrole dicht zoals de knop
+// "Is een uitzondering" (afhandeling is_uitzondering, les zonder naam, auditrij); een gewone afschrijving houdt zijn signaal. Waarden verzonnen.
+test('wv2244: bankcontrole sluit open geen_factuur van salaris (omschrijving) en winstvoorschot; les zonder naam, auditrij; anders blijft open; herhaalbaar', () => {
+  const t = opzet();
+  // het zaad heeft een eigen uitzondering op omschrijving "salaris" (een eigen keuze gaat voor de ingebouwde regel): uit voor deze toets
+  assert.equal(t.fdb.db.prepare("UPDATE uitzondering SET actief = 0 WHERE omschrijving = 'salaris'").run().changes, 1);
+  const kloon = (ent, o) => {
+    const b = t.fdb.db.prepare('SELECT * FROM bank_transactie WHERE entiteit = ? AND bedrag_centen < 0 AND verwijderd_op IS NULL LIMIT 1').get(ent);
+    assert.ok(b, 'zaad heeft een afschrijving van ' + ent);
+    const id = D.nieuwId();
+    const rij = Object.assign({}, b, { id, entry_ref: 'wv2244-' + id, bankluis_sleutel: b.bankluis_sleutel ? 'wv2244-' + id : null, boekdatum: '2026-10-10', categorie: null,
+      uitzondering: null, kenmerk: null, is_incasso: 0, incassant_id: null, machtiging: null, tegenpartij_naam: 'Proef Persoon', aangemaakt_op: new Date(NU).toISOString() }, o);
+    D.voegToe(t.fdb, 'bank_transactie', rij);
+    D.voegToe(t.fdb, 'signaal', { id: D.nieuwId(), sleutel: 'wv2244-proef-' + id, soort: 'geen_factuur', titel: 'Afschrijving zonder factuur', entiteit: ent, transacties: [id],
+      alleen_eigenaar: rij.alleen_eigenaar, aangemaakt_op: new Date(NU).toISOString() });
+    return id;
+  };
+  const sal = kloon('pot', { omschrijving: 'Salaris periode 10', transactietype: 'BANKLUIS:SEPA Overboeking', tegenpartij_iban: Z.maakIban('NL', 'TEST', '0000000911') });
+  const winst = kloon('groenhouten', { omschrijving: 'Voorschot winst 2026', transactietype: 'ABN:SEPA Overboeking', tegenpartij_iban: Z.maakIban('NL', 'TEST', '0000000912') });
+  const gewoonTx = kloon('groenhouten', { omschrijving: 'Betaling proef zonder factuur', transactietype: 'ABN:SEPA Overboeking', tegenpartij_iban: Z.maakIban('NL', 'TEST', '0000000913') });
+  const sig = (id) => t.fdb.db.prepare("SELECT * FROM signaal WHERE sleutel LIKE 'wv2244-proef-%' AND EXISTS (SELECT 1 FROM json_each(transacties) j WHERE j.value = ?)").get(id);
+  const tel = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  assert.equal(tel.ingebouwd_dicht, 2);
+  for (const [id, cat] of [[sal, 'loon'], [winst, 'winstvoorschot']]) {
+    const s = sig(id);
+    assert.deepEqual([s.status, s.afhandeling, s.wie], ['afgehandeld', 'is_uitzondering', 'bankcontrole']);
+    assert.ok(!/Proef Persoon/.test(s.les) && /voortaan zelf/.test(s.les), s.les);
+    assert.equal(t.fdb.db.prepare('SELECT categorie FROM bank_transactie WHERE id = ?').get(id).categorie, cat);
+    assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'signaal_afgehandeld' AND object_id = ? AND wie = 'bankcontrole'", [s.id]), 1);
+  }
+  assert.equal(sig(gewoonTx).status, 'open');
+  assert.equal(t.fdb.db.prepare('SELECT categorie FROM bank_transactie WHERE id = ?').get(gewoonTx).categorie, null);
+  // review MOET 1: een leverancier met alleen archieffacturen (op naam) houdt het signaal, ook met "Salaris" vooraan
+  D.voegToe(t.fdb, 'factuur_archief', { id: D.nieuwId(), herkomst: 'fv2', extern_id: 'wv2244-proef', entiteit: 'groenhouten', leverancier_naam: 'Salarisbureau Proef B.V.',
+    factuurdatum: '2025-03-01', incl: 12100, aangemaakt_op: new Date(NU).toISOString() });
+  const arch = { n: 'Salarisbureau Proef B.V.' };
+  {
+    const lid = D.nieuwId();
+    D.voegToe(t.fdb, 'leverancier', { id: lid, naam: arch.n, genormaliseerd: K.normNaam(arch.n), aangemaakt_op: new Date(NU).toISOString() });
+    const archTx = kloon('groenhouten', { omschrijving: 'Salaris verwerking oktober', transactietype: 'ABN:SEPA Overboeking', tegenpartij_naam: arch.n, tegenpartij_iban: Z.maakIban('NL', 'TEST', '0000000914') });
+    D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU + 60000));
+    assert.equal(sig(archTx).status, 'open', 'leverancier met archieffacturen: signaal blijft');
+  }
+  // nog een ronde: niets meer dicht te zetten, geen tweede auditrij
+  const tel2 = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU + 3600000));
+  assert.equal(tel2.ingebouwd_dicht, 0);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'signaal_afgehandeld' AND wie = 'bankcontrole'"), 2);
+});
