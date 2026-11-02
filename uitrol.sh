@@ -116,7 +116,7 @@ RELEASE_BESTANDEN="server.js telegram-reader.js koppel-telegram.js package.json"
 # shopper.js (wv2264): OVIS Shopper, de zoektochtpagina's per entiteit voor /app/shopper*; heeft reizen.js nodig (ontbreekt een van beide,
 #   dan 404 op /app/shopper* en shopper.aan=false).
 RELEASE_MAPPEN="intake"
-RELEASE_OPTIONEEL="intake-ingang.js intake-verwijder.js intake-router.js mailman.js vault-veilig.js bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js pot-app.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js facturen-sepa.js facturen-specificatie.js secondbrain.js ideeen.js ideeen-filter.js aix.js managers.js managers-poort.js mk-tekst.js ringkaart.js mediatheek.js gezondheid-app.js ovis-register.js ovis-run.js ovis-plekken.js app-vast.js app-open.js intake-telling.js zoek-snel.js onderhoud.js datums.js scansnap.js sb2-nacht.js nachtketen.js docs-delen.js financien-vault.js pdf-lezer.js facturen-kaart.js werkers.js brain-entiteiten.js huisstijl-pod.js tokenteller.js omzet.js omzet-huisstijl.js xlsx-schrijver.js fin-toewijzing.js fin-reconcile.js intake-publicatie.js herstelreferentie.js uitwijk-cred.js werkstroom.js herinneringen.js herinneringen-verhaal.js memorylane-delen.js reizen.js immich.js memorylane-fotos.js facturen-creditcard.js openai-hulp.js facturen-paypal.js paypal-zakelijk-lezer.js facturen-maandspec.js codex-mk.js docplan-totaal.js docplan-koppel.js nieuwsbrief.js ecobank-mail.js te-lezen.js shopper.js"
+RELEASE_OPTIONEEL="intake-ingang.js intake-verwijder.js intake-router.js mailman.js vault-veilig.js bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js pot-app.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js facturen-sepa.js facturen-specificatie.js secondbrain.js ideeen.js ideeen-filter.js aix.js managers.js managers-poort.js mk-tekst.js ringkaart.js mediatheek.js gezondheid-app.js ovis-register.js ovis-run.js ovis-plekken.js app-vast.js app-open.js intake-telling.js zoek-snel.js onderhoud.js datums.js scansnap.js sb2-nacht.js nachtketen.js docs-delen.js financien-vault.js pdf-lezer.js facturen-kaart.js werkers.js brain-entiteiten.js huisstijl-pod.js tokenteller.js omzet.js omzet-huisstijl.js xlsx-schrijver.js fin-toewijzing.js fin-reconcile.js intake-publicatie.js herstelreferentie.js uitwijk-cred.js werkstroom.js herinneringen.js herinneringen-verhaal.js memorylane-delen.js reizen.js immich.js memorylane-fotos.js facturen-creditcard.js openai-hulp.js facturen-paypal.js paypal-zakelijk-lezer.js facturen-maandspec.js codex-mk.js docplan-totaal.js docplan-koppel.js nieuwsbrief.js ecobank-mail.js te-lezen.js shopper.js shopper-proactief.py"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }
@@ -185,7 +185,10 @@ else
   for b in $RELEASE_OPTIONEEL; do
     if git -C "$BRON_REPO" cat-file -e "$SHA:$b" 2>/dev/null; then
       git -C "$BRON_REPO" show "$SHA:$b" > "$TMP/$b" || fout "$b niet te lezen uit commit $KORT"
-      node --check "$TMP/$b" || fout "$b van $KORT komt de syntaxcontrole niet door"
+      case "$b" in   # wv2273: een .py-bestand (shopper-proactief.py) krijgt de Python-syntaxcontrole
+        (*.py) python3 -I -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$TMP/$b" || fout "$b van $KORT komt de syntaxcontrole niet door" ;;
+        (*) node --check "$TMP/$b" || fout "$b van $KORT komt de syntaxcontrole niet door" ;;
+      esac
     fi
   done
   # Mappen (wv1282): elk .js- of .json-bestand onder de map gaat mee met zijn relatieve pad (js: syntaxcontrole, json: moet te lezen zijn).

@@ -3852,6 +3852,7 @@ function handleRequest(req, res) {
       sb2_herstelproef: typeof sb2HerstelproefInfo === 'function' ? sb2HerstelproefInfo() : { aan: false, lopend: 0 },   // wv2016: maandklok herstelproef (schakelaar, lopend 0/1 voor uitrol.sh, maand, laatste exit; geen inhoud)
       sb2_zoek: typeof sb2ZoekKlokInfo === 'function' ? sb2ZoekKlokInfo() : { aan: false },   // wv1788: nachtklussen feitenlijst + tekstindex (datum, exit, duur)   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
       scripts_veeg: typeof scriptsVeegInfo === 'function' ? scriptsVeegInfo() : { aan: false },   // wv1311: opruimronde socev-run --veeg (exit, aantal opgeveegd; geen namen)
+      shopper_proactief: typeof shopperProactiefInfo === 'function' ? shopperProactiefInfo() : { aan: false },   // wv2273: Shopper vanzelf (datum, exit, duur)
       ovis_kalender: typeof ovisKalenderInfo === 'function' ? ovisKalenderInfo() : { aan: false },   // wv1385: OVIS Calendar-feeds (datum, exit, duur; geen namen of URL's)
       ovis_agenda: typeof ovisAgendaInfo === 'function' ? ovisAgendaInfo() : { aan: false },   // wv1411: OVIS Calendar Google-spiegel (datum, exit, duur; geen titels)
       ovis_deadlines: typeof ovisDeadlinesInfo === 'function' ? ovisDeadlinesInfo() : { aan: false },   // wv1412: deadline-register → tijdlijn + momentopname (datum, exit, duur)
@@ -17326,6 +17327,30 @@ async function ovisKalenderTik() {
   } catch (e) { logError('ovis-kalender-tik', e); }
 }
 if (ovisKalender && SERVER_ECHT) { setInterval(function () { ovisKalenderTik(); }, 5 * 60000).unref(); }
+// ── OVIS Shopper S4: Socev zet Shopper zelf in op een open koopwens in Todoist (wv2273; waarom, grenzen en review in
+// shopper-proactief.py en vault "01_Ontwikkeling/OVIS Shopper - wat er al bestaat en ontwerp (2-11-2026).md" § 3.4a) ──
+// Elke 5 min (echte pod, rol primair); werk alleen 10:05–11:04 en eenmaal per datum (exit 3 = er wachtte een agent op een plek: tot 4
+// pogingen); via socev-run (crash-vangnet). Bewust NIET in de nachtketen: overdag, zodat de Todoist-opmerking op een normaal uur komt.
+// Het script leest Todoist, zoekt via /openai/zoek en start hooguit 2 agents per dag via /agent (socev:). Ontbreekt het script: aan=false.
+const shopperProactief = (function () {
+  const p = path.join(__dirname, 'sb2-nacht.js'), script = path.join(__dirname, 'shopper-proactief.py');
+  if (!fs.existsSync(p) || !fs.existsSync(script)) return null;
+  try {
+    const m = require(p);
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'shopper-proactief', staatBestand: path.join(KLOKKEN_DIR, 'shopper-proactief-ronde.json'),
+      maxMin: 8, pogingen: 4, venster: { van: [10, 5], tot: [11, 5] }, socevRun: '/opt/data/scripts/huidig/bin/socev-run',
+      env: Object.assign({}, process.env, { SHOPPER_STAAT: path.join(KLOKKEN_DIR, 'shopper-proactief.json') }), argv: ['python3', '-I', script] }) : null;
+  } catch (e) { logError('shopper-proactief', e); return null; }
+})();
+function shopperProactiefInfo() { if (!shopperProactief) return { aan: false }; try { return shopperProactief.info(); } catch (e) { return { fout: true }; } }
+async function shopperProactiefTik() {
+  if (!shopperProactief || !SERVER_ECHT || !rolPrimair()) return;
+  try {
+    const u = await shopperProactief.tik({ ams: ovisAms() });
+    if (u) schrijfLog(nu() + ' shopper-proactief ' + velden({ exit: u.exit, ms: u.ms }));
+  } catch (e) { logError('shopper-proactief-tik', e); }
+}
+if (shopperProactief && SERVER_ECHT) { setInterval(function () { shopperProactiefTik(); }, 5 * 60000).unref(); }
 // ── OVIS Calendar: alleen-lezen spiegel van Davids Google-agenda's (wv1411; waarom en grenzen in kalender_spiegel.py) ──
 // Elke 5 min (echte pod, rol primair); werk alleen 03:30–03:59 (vóór de agenda-wachter van 04:00) en eenmaal per datum; via socev-run
 // met hartslag ovis-agenda (36 u). Het script roept alleen actie 'agenda' van de lees-route aan (n8n AI - Agenda-Wachter API).

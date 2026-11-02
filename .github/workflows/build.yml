@@ -385,6 +385,11 @@ jobs:
       - name: "shopper (wv2264, zoektochten in de app)"
         if: ${{ !cancelled() }}
         run: bash test/shopper.sh
+      # OVIS Shopper S4 (wv2273): shopper-proactief.py (koopwens uit Todoist, zoekterm lokaal zonder namen, staat vóór de zoekronde, plafond,
+      # 429 = wacht_plek zonder tweede zoekronde, schakelaar) tegen nep-Todoist/nep-pod, plus het dagrondeblok en de uitrol-lijst.
+      - name: "shopper-proactief (wv2273, Shopper vanzelf)"
+        if: ${{ !cancelled() }}
+        run: bash test/shopper-proactief.sh
       # MemoryLane R2 (wv2118): verhaal uit een opname (Claude zonder tools, nep-API), citaattoets, datum door code, injectie, categorie volgt,
       # voorstellen alleen na Ja, Davids aanpassing wint, plafond/dienstfout/grendel, padpoorten.
       - name: "herinneringen-verhaal (wv2118, MemoryLane R2)"
