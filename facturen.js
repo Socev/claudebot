@@ -44,6 +44,12 @@ const PREFIX = '/app/facturen';
 const DOC_PER_UUR = 120;            // eigen teller documentinzage (precedent APP_BESTAND_PER_UUR), los van de gedeelde app-teller
 const LIJST_MAX = 500;
 const BANK_DAGEN = 400;             // bankcontrole en bankluis kijken zo ver terug
+// wv2260 (David 2-11-2026 14:0x: "Afschrijvingen zonder factuur geheel niet zien … de boekhouder doet dat stuk al"): het signaal
+// "Afschrijving zonder factuur" (geen_factuur) wordt niet meer gemaakt, open exemplaren gaan dicht (afhandeling uitgezet), en de App
+// toont geen tellers, lessen, oranje "te bekijken" of Historie-blok "Incasso zonder factuur". Terug aan: aan: true (code blijft).
+const ZONDER_FACTUUR = { aan: false };
+const ZONDER_FACTUUR_LES = 'Uitgezet op verzoek van David (2-11-2026): afschrijvingen zonder factuur controleert de boekhouder; de app meldt ze niet meer.';
+const zfFilter = (a) => (ZONDER_FACTUUR.aan ? '' : ' AND ' + a + ".soort <> 'geen_factuur'");
 const ONDERWEG = ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'];
 const BETAAL_STATUS = ONDERWEG.concat(['prive_archief']);
 const STAPPEN = { beoordelen: ['te_beoordelen'], wachtrij: ['in_wachtrij', 'wordt_verstuurd'], prive: ['prive_archief'], geen: ['geen_factuur'],
@@ -234,7 +240,7 @@ function overzicht(fdb, r, nu) {
   const tel = (where, p) => Number(fdb.db.prepare('SELECT count(*) AS n FROM factuur f WHERE ' + where + ' AND ' + ff).get(...p, ...fp).n);
   const vandaag = dagAmsterdam(nu);
   const [sf, sp] = eigenaarFilter(r, 's');
-  const signalen = Number(fdb.db.prepare("SELECT count(*) AS n FROM signaal s WHERE s.status = 'open' AND (s.sluimer_tot IS NULL OR s.sluimer_tot <= ?) AND " + sf).get(vandaag, ...sp).n);
+  const signalen = Number(fdb.db.prepare("SELECT count(*) AS n FROM signaal s WHERE s.status = 'open' AND (s.sluimer_tot IS NULL OR s.sluimer_tot <= ?)" + zfFilter('s') + ' AND ' + sf).get(vandaag, ...sp).n);
   const [vf, vp] = eigenaarFilter(r, 'v', 't.entiteit');
   const voorstellen = Number(fdb.db.prepare("SELECT count(*) AS n FROM voorstel v JOIN bank_transactie t ON t.id = v.transactie WHERE v.status = 'open' AND t.verwijderd_op IS NULL AND " + vf).get(...vp).n);
   const feiten = feitKaarten(fdb, r, nu).length;
@@ -407,8 +413,8 @@ function betalen(fdb, r, nu) {
 function bank(fdb, r, nu) {
   const vandaag = dagAmsterdam(nu), maand = vandaag.slice(0, 7);
   const [sf, sp] = eigenaarFilter(r, 's');
-  const open = fdb.db.prepare("SELECT s.* FROM signaal s WHERE s.status = 'open' AND (s.sluimer_tot IS NULL OR s.sluimer_tot <= ?) AND " + sf + ' ORDER BY s.aangemaakt_op DESC LIMIT ' + LIJST_MAX).all(vandaag, ...sp);
-  const geleerd = fdb.db.prepare("SELECT s.* FROM signaal s WHERE s.status = 'afgehandeld' AND substr(s.wanneer, 1, 7) = ? AND " + sf + ' ORDER BY s.wanneer DESC LIMIT 200').all(maand, ...sp);
+  const open = fdb.db.prepare("SELECT s.* FROM signaal s WHERE s.status = 'open' AND (s.sluimer_tot IS NULL OR s.sluimer_tot <= ?)" + zfFilter('s') + ' AND ' + sf + ' ORDER BY s.aangemaakt_op DESC LIMIT ' + LIJST_MAX).all(vandaag, ...sp);
+  const geleerd = fdb.db.prepare("SELECT s.* FROM signaal s WHERE s.status = 'afgehandeld' AND substr(s.wanneer, 1, 7) = ?" + zfFilter('s') + ' AND ' + sf + ' ORDER BY s.wanneer DESC LIMIT 200').all(maand, ...sp);
   const [vf, vp] = eigenaarFilter(r, 'v', 't.entiteit');
   const tx = fdb.db.prepare('SELECT * FROM bank_transactie WHERE id = ?');
   const [ff, fp] = factuurFilter(r, 'f');
@@ -439,12 +445,12 @@ function bank(fdb, r, nu) {
     'WHERE t.verwijderd_op IS NULL AND t.bedrag_centen < 0 AND t.boekdatum >= ? AND ' + tf).all(van, ...tp)) {
     const w = isoWeek(t.boekdatum);
     const x = weken[w] = weken[w] || { week: w, factuur: 0, uitzondering: 0, te_bekijken: 0 };
-    if (t.k > 0) x.factuur++; else if (t.categorie) x.uitzondering++; else x.te_bekijken++;
+    if (t.k > 0) x.factuur++; else if (t.categorie) x.uitzondering++; else if (ZONDER_FACTUUR.aan) x.te_bekijken++;   // wv2260: uit = niet tellen
   }
   // wv1317: "wat we deze maand leerden" gegroepeerd en in gewone taal (ook de koppelvoorstellen die vervielen), nooit een interne code
   // per entiteit, zodat de App op een vaste plek (spreekkamer) Privé en POT kan weglaten zoals bij de signalen
   const groepen = fdb.db.prepare("SELECT s.entiteit, s.soort, s.titel, s.afhandeling, s.les, count(*) AS aantal, max(s.wanneer) AS laatst FROM signaal s WHERE s.status = 'afgehandeld' AND " +
-    'substr(s.wanneer, 1, 7) = ? AND ' + sf + ' GROUP BY s.entiteit, s.soort, s.titel, s.afhandeling, s.les ORDER BY laatst DESC LIMIT 100').all(maand, ...sp);
+    'substr(s.wanneer, 1, 7) = ?' + zfFilter('s') + ' AND ' + sf + ' GROUP BY s.entiteit, s.soort, s.titel, s.afhandeling, s.les ORDER BY laatst DESC LIMIT 100').all(maand, ...sp);
   const geleerd_regels = groepen.map((g) => ({ tekst: B.leerRegel(g), aantal: g.aantal, soort: g.soort, entiteit: g.entiteit || null }));
   const verval = new Map();
   for (const v of fdb.db.prepare("SELECT v.details, t.entiteit FROM voorstel v JOIN bank_transactie t ON t.id = v.transactie WHERE v.status = 'vervallen' AND substr(v.afgehandeld_op, 1, 7) = ? AND " + vf)
@@ -456,7 +462,7 @@ function bank(fdb, r, nu) {
       g.n + (g.n === 1 ? ' koppelvoorstel' : ' koppelvoorstellen') + ' afgewezen; dezelfde koppeling wordt niet opnieuw voorgesteld.', aantal: g.n, soort: 'voorstel_' + g.status, entiteit: g.entiteit || null });
   }
   // wv2061: regels uit "te bekijken" (bank-keuze), per categorie; zonder signaal verschenen ze anders nergens
-  if (isEig(r)) for (const g of fdb.db.prepare("SELECT categorie, count(DISTINCT coalesce(tegenpartij, '') || '|' || coalesce(omschrijving, '')) AS n FROM uitzondering " +
+  if (isEig(r) && ZONDER_FACTUUR.aan) for (const g of fdb.db.prepare("SELECT categorie, count(DISTINCT coalesce(tegenpartij, '') || '|' || coalesce(omschrijving, '')) AS n FROM uitzondering " +
     "WHERE toelichting = 'uit de bankcontrole (te bekijken)' AND actief = 1 AND substr(aangemaakt_op, 1, 7) = ? GROUP BY categorie").all(maand)) {
     geleerd_regels.push({ tekst: g.n + (g.n === 1 ? ' tegenpartij' : ' tegenpartijen') + ' voortaan als ' + g.categorie.replace(/_/g, ' ') + ' (geen factuur nodig); komt niet meer bij te bekijken.',
       aantal: g.n, soort: 'uitzondering_regel', entiteit: null });
@@ -466,7 +472,7 @@ function bank(fdb, r, nu) {
   if (isEig(r)) for (const g of feitGroep) geleerd_regels.push({ tekst: g.status === 'bevestigd' ? g.n + (g.n === 1 ? ' rekening' : ' rekeningen') + ' vastgelegd als rekening van een leverancier (uit de bankhistorie).'
     : g.n + (g.n === 1 ? ' rekeningkaart' : ' rekeningkaarten') + ' afgewezen; nabellen blijft nodig en de kaart komt niet terug.', aantal: g.n, soort: 'feit_' + g.status, entiteit: null });
   return { signalen: open.map(signaalKort), geleerd: geleerd.slice(0, 50).map(signaalKort), geleerd_regels, voorstellen, feiten: feitKaarten(fdb, r, nu),
-    weken: Object.values(weken).sort((a, b) => (a.week < b.week ? -1 : 1)) };
+    weken: Object.values(weken).sort((a, b) => (a.week < b.week ? -1 : 1)), zonder_factuur: ZONDER_FACTUUR.aan };
 }
 function t2(a, b) { return JSON.stringify([a || null, b]); }
 /*
@@ -670,6 +676,18 @@ function ingebouwdSignalenDicht(fdb, uitzonderingen, wanneer) {
     n++;
     D.audit(fdb, { wie: 'bankcontrole', wat: 'signaal_afgehandeld', object_soort: 'signaal', object_id: s.id, entiteit: s.entiteit, voor: { status: 'open' },
       na: { status: 'afgehandeld', knop: 'is_uitzondering', ingebouwd: soort }, wanneer });
+  }
+  return n;
+}
+// wv2260: elk open "afschrijving zonder factuur" dicht zolang ZONDER_FACTUUR uit staat (afhandeling uitgezet, les, auditrij; herhaalbaar)
+function zonderFactuurDicht(fdb, wanneer) {
+  let n = 0;
+  const up = fdb.db.prepare("UPDATE signaal SET status = 'afgehandeld', afhandeling = 'uitgezet', les = ?, wie = 'bankcontrole', wanneer = ?, sluimer_tot = NULL WHERE id = ? AND status = 'open'");
+  for (const s of fdb.db.prepare("SELECT id, entiteit FROM signaal WHERE status = 'open' AND soort = 'geen_factuur'").all()) {
+    if (!up.run(ZONDER_FACTUUR_LES, wanneer, s.id).changes) continue;
+    n++;
+    D.audit(fdb, { wie: 'bankcontrole', wat: 'signaal_afgehandeld', object_soort: 'signaal', object_id: s.id, entiteit: s.entiteit, voor: { status: 'open' },
+      na: { status: 'afgehandeld', knop: 'uitgezet', reden: 'zonder_factuur_uit' }, wanneer });
   }
   return n;
 }
@@ -2025,7 +2043,7 @@ function bankcontroleToepassen(fdb, nu) {
     opdrachten: fdb.db.prepare('SELECT id, factuur, entiteit, status, poging FROM opdracht WHERE factuur IS NOT NULL').all(),
     bestaandeSignalen: fdb.db.prepare('SELECT sleutel, status, sluimer_tot FROM signaal').all(),
     afgewezenVoorstellen: fdb.db.prepare("SELECT sleutel FROM voorstel WHERE status = 'afgewezen'").all().map((v) => v.sleutel),
-    verzamelTel: verzamelTellingen(fdb), verzamelNaam,
+    verzamelTel: verzamelTellingen(fdb), verzamelNaam, geen_factuur_signaal: ZONDER_FACTUUR.aan,   // wv2260
     sepa: sepaVoorControle(fdb, nuIso(Date.parse(van + 'T00:00:00Z'))),   // wv1405: eigen batches (PmtInfId + totaal)
     afwijkend: afwijkendVoorControle(fdb, vandaag),   // wv1326: incasso's ruim boven hun gebruikelijke band (alleen na de startdatum)
     // wv2244: tegenpartijen met facturen (de ingebouwde regels salaris/winstvoorschot gelden daar niet)
@@ -2062,6 +2080,8 @@ function bankcontroleToepassen(fdb, nu) {
   tel.voorstellen_vervallen = voorstellenHerbeoordelen(fdb, uit, txMap, facturen, wanneer);
   for (const u of uit.uitzonderingen) tel.uitzonderingen += fdb.db.prepare('UPDATE bank_transactie SET categorie = ?, uitzondering = ? WHERE id = ? AND categorie IS NULL')
     .run(u.categorie, u.uitzondering || null, u.transactie).changes;
+  // wv2260 (review MOET 1): uit → elk open exemplaar dicht met de eigen afhandeling (ook die een ingebouwde regel zou sluiten); aan → wv2244
+  if (!ZONDER_FACTUUR.aan) tel.zonder_factuur_dicht = zonderFactuurDicht(fdb, wanneer);
   tel.ingebouwd_dicht = ingebouwdSignalenDicht(fdb, uit.uitzonderingen, wanneer);
   for (const b of uit.betaalspoor) {
     if (b.gebeurtenis === 'teruggeboekt') {
@@ -2685,7 +2705,7 @@ function validatie(fdb, r, d, nu) {
       dubbele_betalingen: c.dubbele_betalingen.slice(0, 50), afwijkend_bedrag: c.afwijkend_bedrag.slice(0, 50), nieuwe_iban: isEig(r) ? c.nieuwe_iban.slice(0, 50) : [] },
     tellingen: { incasso_zonder_factuur: c.incasso_zonder_factuur.length, facturen_zonder_betaling: c.facturen_zonder_betaling.length,
       dubbele_betalingen: c.dubbele_betalingen.length, afwijkend_bedrag: c.afwijkend_bedrag.length, nieuwe_iban: isEig(r) ? c.nieuwe_iban.length : 0 },
-    top_tegenpartijen: top };
+    top_tegenpartijen: top, zonder_factuur: ZONDER_FACTUUR.aan };   // wv2260: de App toont "Incasso zonder factuur" alleen bij true
 }
 // Socev-leesroute (/smal/facturen in server.js): alleen lezen, rol eigenaar met wie 'socev'; salarisregels gewoon mee (wv945).
 const LEES_OPDRACHTEN = { zoek: 'zoek', hoe: 'tegenpartij', tegenpartij: 'tegenpartij', factuur: 'factuur', controles: 'overzicht', overzicht: 'overzicht' };
@@ -3306,4 +3326,4 @@ function mailStappen(fdb, max) {
     .map((x) => ({ gmail_id: String(x.gmail_id), stap: Number(x.rang) >= 2 ? 'is_betaald' : 'in_sepa' }));
 }
 
-module.exports = { eerdereBetalingen, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek };
+module.exports = { eerdereBetalingen, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek, ZONDER_FACTUUR };

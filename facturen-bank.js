@@ -1543,7 +1543,8 @@ function bankcontrole(inv) {
     const kand = (sk && !sk.dubbel && sk.ter_bevestiging ? [sk] : []).concat(matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx))
       .map((k) => Object.assign({ sleutel: voorstelSleutel(tx.id, k.facturen) }, k)).filter((k) => !afgewezen.has(k.sleutel));
     if (kand.length) { wensen.push({ tx, kand, basis }); continue; }
-    if (richtingVan(tx) === 'af' && dagenTussen(tx.boekdatum, vandaag) > 7) signalen.push(maakSignaal('geen_factuur', basis));
+    // wv2260: inv.geen_factuur_signaal === false (facturen.js ZONDER_FACTUUR) maakt geen "afschrijving zonder factuur" meer; zonder vlag ongewijzigd
+    if (inv.geen_factuur_signaal !== false && richtingVan(tx) === 'af' && dagenTussen(tx.boekdatum, vandaag) > 7) signalen.push(maakSignaal('geen_factuur', basis));
   }
   // afstand tot de periode van de factuur: 0 tussen factuur- en vervaldatum, anders tot de dichtstbijzijnde grens (diffreview wv1317 ZOU 4)
   const afstandVan = (w) => {

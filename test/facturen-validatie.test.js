@@ -16,6 +16,7 @@ const K = require(path.join(ROOT, 'facturen-kern.js'));
 const B = require(path.join(ROOT, 'facturen-bank.js'));
 const V = require(path.join(ROOT, 'facturen-validatie.js'));
 const F = require(path.join(ROOT, 'facturen.js'));
+F.ZONDER_FACTUUR.aan = true;   // wv2260: deze toetsen houden het oude gedrag (signaal geen_factuur) aan; uit toetst facturen-routes
 const { maakIban } = require(path.join(ROOT, 'test', 'facturen-zaad.js'));
 const { ibanFromAbnAccount } = require(path.join(ROOT, 'mt940-lezer.js'));
 

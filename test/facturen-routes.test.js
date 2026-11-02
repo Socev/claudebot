@@ -12,6 +12,8 @@ const D = require(path.join(ROOT, 'facturen-db.js'));
 const K = require(path.join(ROOT, 'facturen-kern.js'));
 const F = require(path.join(ROOT, 'facturen.js'));
 const B = require(path.join(ROOT, 'facturen-bank.js'));
+// wv2260: "afschrijving zonder factuur" staat in productie uit (F.ZONDER_FACTUUR); deze toetsen houden het oude gedrag aan, de wv2260-toets onderaan toetst uit
+F.ZONDER_FACTUUR.aan = true;
 const Z = require(path.join(ROOT, 'test', 'facturen-zaad.js'));
 const { ibanFromAbnAccount } = require(path.join(ROOT, 'mt940-lezer.js'));
 
@@ -2302,4 +2304,58 @@ test('wv2244: bankcontrole sluit open geen_factuur van salaris (omschrijving) en
   const tel2 = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU + 3600000));
   assert.equal(tel2.ingebouwd_dicht, 0);
   assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'signaal_afgehandeld' AND wie = 'bankcontrole'"), 2);
+});
+
+test('wv2260: zonder-factuur uit — geen nieuwe geen_factuur, open exemplaren dicht (uitgezet, les, audit), geen teller/les/te bekijken; andere signalen blijven; herhaalbaar', () => {
+  const t = opzet();
+  try {
+    // een open geen_factuur en een open onbekend_iban (ander signaal) op afschrijvingen; aan: de controle maakt geen_factuur zelf ook
+    const b = t.fdb.db.prepare("SELECT * FROM bank_transactie WHERE entiteit = 'groenhouten' AND bedrag_centen < 0 AND verwijderd_op IS NULL LIMIT 1").get();
+    const nieuw = (o) => { const id = D.nieuwId(); D.voegToe(t.fdb, 'bank_transactie', Object.assign({}, b, { id, entry_ref: 'wv2260-' + id, bankluis_sleutel: b.bankluis_sleutel ? 'wv2260-' + id : null,
+      boekdatum: '2026-10-05', categorie: null, uitzondering: null, kenmerk: null, is_incasso: 0, incassant_id: null, machtiging: null, tegenpartij_naam: 'Proef Winkel Zonder Factuur',
+      omschrijving: 'proef wv2260', transactietype: 'ABN:SEPA Overboeking', aangemaakt_op: new Date(NU).toISOString() }, o)); return id; };
+    const tx1 = nieuw({ tegenpartij_iban: Z.maakIban('NL', 'TEST', '0000002260') });
+    D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+    const openGf = () => t.n("SELECT count(*) AS n FROM signaal WHERE status = 'open' AND soort = 'geen_factuur'");
+    assert.ok(openGf() >= 1, 'aan: er is een open geen_factuur');
+    assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE soort = 'geen_factuur' AND EXISTS (SELECT 1 FROM json_each(transacties) j WHERE j.value = ?)", [tx1]), 1, 'aan: ook voor de proefregel');
+    t.fdb.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, entiteit, transacties, details, aangemaakt_op) VALUES (?, 'wv2260-ander', 'onbekend_iban', 'Onbekend IBAN', 'groenhouten', ?, '{}', ?)")
+      .run(D.nieuwId(), JSON.stringify([tx1]), new Date(NU).toISOString());
+    const ander = () => t.n("SELECT count(*) AS n FROM signaal WHERE status = 'open' AND soort <> 'geen_factuur'");
+    const anderVoor = ander(), gfVoor = openGf();
+    // overstap naar uit (zoals productie)
+    F.ZONDER_FACTUUR.aan = false;
+    const tel = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU + 60000));
+    assert.equal(tel.zonder_factuur_dicht, gfVoor);
+    assert.equal(openGf(), 0, 'uit: 0 open geen_factuur');
+    const dicht = t.fdb.db.prepare("SELECT * FROM signaal WHERE soort = 'geen_factuur' AND afhandeling = 'uitgezet'").all();
+    assert.equal(dicht.length, gfVoor);
+    for (const s of dicht) {
+      assert.deepEqual([s.status, s.wie], ['afgehandeld', 'bankcontrole']);
+      assert.ok(/boekhouder/.test(s.les) && s.les.length <= 300, s.les);
+      assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'signaal_afgehandeld' AND object_id = ? AND wie = 'bankcontrole'", [s.id]), 1);
+    }
+    assert.equal(ander(), anderVoor, 'andere signalen blijven open');
+    // App: teller, lijst, lessen en weekbalk zonder deze soort
+    const o = t.call('GET', '');
+    assert.equal(o.status, 200);
+    assert.equal(o.j.tellers.signalen, t.n("SELECT count(*) AS n FROM signaal WHERE status = 'open' AND soort <> 'geen_factuur' AND (sluimer_tot IS NULL OR sluimer_tot <= '2026-10-22')"));
+    const bk = t.call('GET', 'bank', null, { nu: NU + 60000 });
+    assert.equal(bk.status, 200);
+    assert.equal(bk.j.zonder_factuur, false);
+    assert.ok(!bk.j.signalen.some((s) => s.soort === 'geen_factuur'), 'geen geen_factuur in de lijst');
+    assert.ok(bk.j.signalen.some((s) => s.soort === 'onbekend_iban'), 'ander signaal staat er wel');
+    assert.ok(!bk.j.geleerd.some((s) => s.soort === 'geen_factuur') && !bk.j.geleerd_regels.some((g) => g.soort === 'geen_factuur' || g.soort === 'uitzondering_regel'), 'geen les van deze soort');
+    assert.ok(bk.j.weken.every((w) => w.te_bekijken === 0), JSON.stringify(bk.j.weken));
+    // herhaalbaar: een tweede ronde maakt niets nieuws en sluit niets meer
+    const tel2 = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU + 120000));
+    assert.equal(tel2.zonder_factuur_dicht, 0);
+    assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE soort = 'geen_factuur'"), gfVoor, 'geen nieuwe geen_factuur-rij');
+    // een nieuwe afschrijving zonder factuur krijgt geen signaal meer (eigen sleutel, dus niet door de unieke sleutel tegengehouden)
+    const tx2 = nieuw({ tegenpartij_iban: Z.maakIban('NL', 'TEST', '0000002261'), tegenpartij_naam: 'Tweede Proefwinkel' });
+    D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU + 180000));
+    assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE soort = 'geen_factuur' AND EXISTS (SELECT 1 FROM json_each(transacties) j WHERE j.value = ?)", [tx2]), 0, 'uit: geen signaal voor een nieuwe regel');
+    // Historie: de App krijgt de vlag en laat "Incasso zonder factuur" weg
+    assert.equal(F.validatie(t.fdb, t.eig, { soort: 'overzicht' }, NU).zonder_factuur, false);
+  } finally { F.ZONDER_FACTUUR.aan = true; }
 });
