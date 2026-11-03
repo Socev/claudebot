@@ -15338,6 +15338,36 @@ const docplanKoppel = (function () {
   try { return require(p).maak({ fout: logError, rpc: function (fn, body) { return appSbRpc(fn, body, 20000); } }); }
   catch (e) { logError('roosternamen', e); return null; }
 })();
+// wv2293: DocPlan § 8.1 vaste controle rooster ↔ betaling (docplan-controle.js; idee 25 meetpunt 4). Na de bank-ronde: dagen per waarnemer per
+// maand (public.sb_dienst_maanden, 0021) en de roosternamen (sb_dienst_alias_lijst) naast docplan.sqlite (readOnly) en de bank in Facturen;
+// uitkomst = signalen in Facturen (alleen de eigenaar, migratie 17). Alleen aantallen naar n8n en in het log; nooit een naam, IBAN of bedrag.
+// Ontbreekt docplan-controle.js of docplan.sqlite (terugrol), dan niets.
+const docplanControle = (function () {
+  const p = path.join(__dirname, 'docplan-controle.js');
+  if (!facturenMod || !fs.existsSync(p)) return null;
+  try { return require(p); } catch (e) { logError('docplan-controle', e); return null; }
+})();
+async function docplanControleRonde() {
+  if (!docplanControle || !facturenRoutes) return null;
+  const f = path.join(DOCPLAN_DIR, 'docplan.sqlite');
+  if (!fs.existsSync(f)) return null;
+  const fdb = facturenOpen();
+  if (!fdb) return null;
+  const nuMs = Date.now();
+  const maanden = await appSbRpc('sb_dienst_maanden', { p_van: docplanControle.maandenVanaf() }, 20000);
+  const lijsten = [];
+  for (const j of docplanControle.jaren(nuMs)) lijsten.push(Object.assign({}, await appSbRpc('sb_dienst_alias_lijst', { p_jaar: j }, 20000), { jaar: j }));
+  const { DatabaseSync } = require('node:sqlite');
+  const dp = new DatabaseSync(f, { readOnly: true });
+  try {
+    dp.exec('PRAGMA busy_timeout = 5000');
+    const u = docplanControle.controle({ maanden, lijsten, dp, fac: fdb.db, nu: nuMs });
+    const t = docplanControle.schrijf(fdb, facturenMod, u, new Date(nuMs).toISOString());
+    const som = (k) => u.tel.TG[k] + u.tel.GH[k];
+    schrijfLog(nu() + ' docplan-controle ' + velden({ a: som('a'), b: som('b'), c: som('c'), nieuw: t.nieuw, dicht: t.vanzelf_dicht, heropend: t.heropend || undefined }));
+    return { ok: true, tel: u.tel, nieuw: t.nieuw, vanzelf_dicht: t.vanzelf_dicht, heropend: t.heropend, open: t.open };
+  } finally { try { dp.close(); } catch (e) { /* al dicht */ } }
+}
 // ── Aansluiting bank ↔ inkoopfacturen (wv1864, Second Brain 2.0 fase 4a, 28-10-2026; ontwerp vault 01_Ontwikkeling/Second Brain 2.0 - fase 4
 // financiële pilot Tolgaarde (ontwerp 28-10-2026).md) ──
 // POST /smal/facturen {opdracht: 'aansluiting', entiteit?, status?, max?, regels?, vers?} (skill facturen-lezen): de laatste run uit
@@ -21208,6 +21238,11 @@ async function bankRonde() {
     const ms = await facturenMaandspecRonde();
     if (ms) uit.facturen_maandspec = ms;
   } catch (e) { logError('facturen-maandspec', e); uit.facturen_maandspec = { ok: false, fout: 'maandspec-ronde faalde in de pod' }; }
+  // wv2293: daarna de DocPlan-controle rooster ↔ betaling (signalen in Facturen); alleen aantallen naar n8n, een fout raakt de ronde niet
+  if (uit.ok) try {
+    const dc = await docplanControleRonde();
+    if (dc) uit.docplan_controle = dc;
+  } catch (e) { logError('docplan-controle', e); uit.docplan_controle = { ok: false, fout: 'docplan-controle faalde in de pod' }; }
   // box-melding ná de kaartstap, met wat die deed (Fable wv685 #9)
   (r.box || []).forEach(function (m) {
     const kaart = uit.kaarten ? (uit.kaarten.gezet.length ? 'de ronde zette Voor jou-kaart ' + uit.kaarten.gezet.join(', ') + (m.reden === 'toestemming' ? ' en een regel voor het hoofdkanaal' : '')

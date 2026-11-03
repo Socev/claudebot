@@ -949,10 +949,31 @@ function signaalUitleg(s) {
     return 'Zou op ' + dagNL(d.verwacht) + ' betaald worden' + (d.batch ? ' (SEPA-batch)' : '') + '; de bank van deze rekening is bijgewerkt t/m ' + dagNL(d.dekking) +
       ' en daar staat hij niet in.';
   }
+  // wv2293: DocPlan-controle rooster ↔ betaling (docplan-controle.js); details zonder IBAN of bedrag, alleen praktijk, maand, dagen en datums
+  if (s && DOCPLAN_SOORTEN.includes(s.soort)) return docplanUitleg(s);
   if (!s || s.soort !== 'afwijkend_bedrag') return null;
   const d = s.details || {};
   return bandTekst(d).replace(/^g/, 'G') + ', nu ' + eurTekst(Math.abs(Number(s.bedrag_centen) || 0)) + (d.datum ? ' op ' + dagNL(d.datum) : '') + '.' +
     (Number.isSafeInteger(d.aantal) ? ' Gerekend over ' + d.aantal + ' eerdere incasso\'s' + (d.sinds ? ' sinds ' + dagNL(d.sinds) : '') + '.' : '');
+}
+
+const DOCPLAN_SOORTEN = ['dienst_zonder_betaling', 'betaling_zonder_dienst', 'roosternaam_zonder_koppeling'];
+const MAANDEN_NL = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+function maandNL(m) { return /^\d{4}-\d{2}$/.test(String(m || '')) ? MAANDEN_NL[Number(m.slice(5, 7)) - 1] + ' ' + m.slice(0, 4) : '?'; }
+function dagenTekst(n) { const x = Number(n) || 0; return String(x).replace('.', ',') + (x === 1 ? ' dag' : ' dagen'); }
+function docplanUitleg(s) {
+  const d = s.details || {};
+  const pr = d.praktijk_naam || 'deze praktijk';
+  if (s.soort === 'dienst_zonder_betaling') return dagenTekst(d.dagen) + ' in het rooster van ' + pr + ' in ' + maandNL(d.maand) + '; van 1 ' + maandNL(d.maand) +
+    ' t/m ' + dagNL(d.venster_tot) + ' geen betaling en geen factuur aan deze waarnemer (bank bijgewerkt t/m ' + dagNL(d.bank_tm) + ').';
+  if (s.soort === 'betaling_zonder_dienst') return 'Betaald op ' + dagNL(d.datum) + '; in de vier maanden ervoor (vanaf ' + dagNL(d.venster_van) +
+    ') staat deze persoon niet in het rooster van ' + pr + '.';
+  return '"' + String(d.roosternaam || '').slice(0, 80) + '" staat ' + dagenTekst(d.dagen) + ' in het rooster van ' + pr + ' (' + (d.jaar || '?') + ') en hangt aan niemand' +
+    (d.status === 'nieuw' ? ' (je vroeg een nieuwe persoon; de machinekamer maakt die)' : '') + '. Koppel in Waarnemers › Roosternamen koppelen; daarna gaat dit signaal vanzelf dicht.';
+}
+function docplanWeg(wat) {
+  return { label: 'Wegzetten (met reden)', vereist: ['toelichting'], gevolgen: () => [],
+    les: (s, o) => wat(s) + ' weggezet: ' + String(o.toelichting).slice(0, 160) };
 }
 
 // Per soort: titel en knoppen. Elke knop: wat hij vraagt (vereist), welke gevolgen F2 uitvoert (declaratief: de kern voert niets uit),
@@ -1081,6 +1102,21 @@ const SIGNALEN = {
       uitzoeken: { label: 'Uitzoeken', vereist: ['toelichting'], gevolgen: () => [],
         les: (s, o) => 'Hogere incasso van ' + naamVan(s) + ' uitgezocht: ' + String(o.toelichting).slice(0, 160) },
     },
+  },
+  // wv2293 (DocPlan § 8.1, David 31-10-2026): de vaste controle rooster ↔ betaling na de bankronde (docplan-controle.js). Alleen de eigenaar.
+  // Eén knop: wegzetten met een reden (komt daarna nooit terug: zelfde sleutel). Verdwijnt de oorzaak (betaling binnen, naam gekoppeld), dan
+  // sluit de controle het signaal zelf (afhandeling vanzelf_opgelost). Nooit een bericht aan een waarnemer.
+  dienst_zonder_betaling: {
+    titel: 'Dienst zonder betaling',
+    knoppen: { wegzetten: docplanWeg((s) => 'Dienst van ' + naamVan(s) + ' in ' + maandNL((s.details || {}).maand) + ' zonder betaling') },
+  },
+  betaling_zonder_dienst: {
+    titel: 'Betaling zonder dienst',
+    knoppen: { wegzetten: docplanWeg((s) => 'Betaling aan ' + naamVan(s) + ' zonder dienst in het rooster') },
+  },
+  roosternaam_zonder_koppeling: {
+    titel: 'Roosternaam zonder persoon',
+    knoppen: { wegzetten: docplanWeg((s) => 'Roosternaam ' + naamVan(s) + ' zonder persoon') },
   },
 };
 const SIGNAAL_SOORTEN = Object.keys(SIGNALEN);
@@ -1850,7 +1886,7 @@ function feitUitleg(k) {
 }
 
 module.exports = {
-  BankWeigering, FORMATEN, HISTORIE_FORMATEN, ABN_HISTORIE_KOP, leesAbnHistorie, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
+  BankWeigering, FORMATEN, HISTORIE_FORMATEN, ABN_HISTORIE_KOP, leesAbnHistorie, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, DOCPLAN_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
   // parsers
   pyStr, mkRef, kenEntryRefsToe, refBasis, saldoControle, normBedrag, herkenFormaat, csvRijen, leesIng, leesTriodos, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
   // controle

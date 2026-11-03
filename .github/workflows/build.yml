@@ -487,6 +487,9 @@ jobs:
       - name: "docplan-koppel (wv2159, Facturen › Waarnemers › Roosternamen: koppelscherm, alleen de eigenaar, p_door david)"
         if: ${{ !cancelled() }}
         run: bash test/docplan-koppel.sh
+      - name: "docplan-controle (wv2293, DocPlan § 8.1: vaste controle rooster ↔ betaling na de bank-ronde, signalen in Facturen)"
+        if: ${{ !cancelled() }}
+        run: bash test/docplan-controle.sh
       # PDF-lezer via de Claude-API (wv1431): CI-poort (alleen crypto/fs/path), de echte SDK tegen een nep-API (sleutel en basis expliciet,
       # fallbacks + beta-kop, effort, structured output, cache_control), terugvallen, grens met reservering en herstart, patiëntregel
       # fail-closed (kenmerk, OCR, ingebedde PDF), schaduw zonder tekst, batches; koppeling in server.js en uitrol.sh.

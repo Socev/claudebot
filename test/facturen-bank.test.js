@@ -807,6 +807,7 @@ test('alle signalen: elke knop geeft een les, onbekende knop/zonder wie geweiger
     te_betalen_niet_betaald: ['naar_betaallijst', 'is_al_betaald'], ingevoerd_niet_gezien: ['opnieuw_kijken', 'koppelen'], onbekend_iban: ['uitzoeken'],
     mogelijk_dubbel_geupload: ['is_hetzelfde', 'zijn_er_twee'],
     teruggeboekt: ['opnieuw_betalen', 'leverancier_incasseert'], afwijkend_bedrag: ['klopt', 'uitzoeken'],
+    dienst_zonder_betaling: ['wegzetten'], betaling_zonder_dienst: ['wegzetten'], roosternaam_zonder_koppeling: ['wegzetten'],
   });
 });
 

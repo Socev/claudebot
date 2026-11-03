@@ -50,6 +50,8 @@ const SIGNAAL_V1 = ['geen_factuur', 'dubbel_betaald', 'dubbele_factuur', 'verzen
   'ingevoerd_niet_gezien', 'onbekend_iban', 'mogelijk_dubbel_geupload'];
 const SIGNAAL_V10 = SIGNAAL_V1.concat(['teruggeboekt']);
 const SIGNAAL_V11 = SIGNAAL_V10.concat(['afwijkend_bedrag']);
+// wv2293: DocPlan § 8.1 vaste controle rooster ↔ betaling (docplan-controle.js), migratie 17
+const SIGNAAL_V17 = SIGNAAL_V11.concat(['dienst_zonder_betaling', 'betaling_zonder_dienst', 'roosternaam_zonder_koppeling']);
 // wv2244: categorie 'winstvoorschot' erbij (M16); M1 houdt de oorspronkelijke lijst, M16 verruimt de CHECK
 const CATEGORIE_V1 = ['loon', 'loonheffing', 'btw', 'belasting', 'declaraties', 'rekening_courant', 'eigen_overboeking', 'bankkosten', 'creditcard',
   'prive_opname', 'abonnement_zonder_factuur', 'subsidie', 'rente', 'overig'];
@@ -63,7 +65,7 @@ const L = {
   besluitBron: ['anker', 'leverancier', 'regel', 'bank', 'model', 'mens'],
   formaat: ['ing_csv', 'abn_tab', 'abn_mt940', 'triodos_csv', 'bankluis'],
   categorie: CATEGORIE_V16,
-  signaal: SIGNAAL_V11,
+  signaal: SIGNAAL_V17,
 };
 const IN = (l) => '(' + l.map((x) => "'" + x + "'").join(',') + ')';
 const ID = (k) => 'CHECK (length(' + k + ') = 16 AND ' + k + " NOT GLOB '*[^0-9a-f]*')";
@@ -675,7 +677,7 @@ function M6(db, vervang) { return M5(db, vervang || M6_VERVANG, 'migratie_6'); }
  * code zonder knoppen (SIGNALEN kent hem niet) en een koppeling met methode 'sepa_terug' telt hij als gewone betaling.
  */
 const M10_VERVANG = [
-  ['signaal', 'soort IN ' + IN(SIGNAAL_V1), 'soort IN ' + IN(SIGNAAL_V10), ['soort IN ' + IN(SIGNAAL_V11)]],
+  ['signaal', 'soort IN ' + IN(SIGNAAL_V1), 'soort IN ' + IN(SIGNAAL_V10), ['soort IN ' + IN(SIGNAAL_V11), 'soort IN ' + IN(SIGNAAL_V17)]],
 ];
 function M10(db, vervang) { return M5(db, vervang || M10_VERVANG, 'migratie_10'); }
 
@@ -687,7 +689,7 @@ function M10(db, vervang) { return M5(db, vervang || M10_VERVANG, 'migratie_10')
  * CHECK hindert de oude code niet; een signaalrij 'afwijkend_bedrag' toont de oude code zonder knoppen (SIGNALEN kent hem niet).
  */
 const M11_VERVANG = [
-  ['signaal', 'soort IN ' + IN(SIGNAAL_V10), 'soort IN ' + IN(SIGNAAL_V11)],
+  ['signaal', 'soort IN ' + IN(SIGNAAL_V10), 'soort IN ' + IN(SIGNAAL_V11), ['soort IN ' + IN(SIGNAAL_V17)]],   // wv2293: al verder = ook overslaan
 ];
 function M11(db, vervang) { return M5(db, vervang || M11_VERVANG, 'migratie_11'); }
 
@@ -766,6 +768,18 @@ const M16_VERVANG = [
   ['bank_transactie', 'categorie IN ' + IN(CATEGORIE_V1), 'categorie IN ' + IN(CATEGORIE_V16)],
 ];
 function M16(db, vervang) { return M5(db, vervang || M16_VERVANG, 'migratie_16'); }
+
+/*
+ * wv2293 (DocPlan meetpunt 4, ontwerp § 8.1; David 31-10-2026 ± 22:55: "Alle vermeldingen in de planningsagenda's van Groenhouten en Tolgaarde
+ * moeten koppelbaar zijn uiteindelijk aan een factuur, meteen mooie check."): drie signaalsoorten uit docplan-controle.js — dienst zonder
+ * betaling, betaling zonder dienst, roosternaam zonder koppeling. Zelfde weg als M11 (writable_schema, één vervanging, al verruimd = overslaan).
+ * LET OP terugrol: een release van vóór wv2293 opent deze database niet meer (schema_nieuwer); lichtste terugrol is
+ * `DELETE FROM schema_migratie WHERE versie = 17`: de verruimde CHECK hindert de oude code niet; zo'n signaalrij toont de oude code zonder knoppen.
+ */
+const M17_VERVANG = [
+  ['signaal', 'soort IN ' + IN(SIGNAAL_V11), 'soort IN ' + IN(SIGNAAL_V17)],
+];
+function M17(db, vervang) { return M5(db, vervang || M17_VERVANG, 'migratie_17'); }
 
 /*
  * wv980 (OVIS Intake stap 2, bouwplan § 3.3/§ 9 #2): leverancier krijgt knoop_id, de id van de organisatie in het OVIS-register
@@ -1039,6 +1053,7 @@ const MIGRATIES = [
   { versie: 14, naam: 'PayPal zakelijk als bron: paypal_regel (wv2056)', sql: M14 },
   { versie: 15, naam: "bron: soort 'intake' (OVIS Intake stap 3d, wv1919)", fn: (db) => M15(db) },
   { versie: 16, naam: "categorie 'winstvoorschot' in uitzondering en bank_transactie (wv2244)", fn: (db) => M16(db) },
+  { versie: 17, naam: 'signaal: DocPlan-controle rooster ↔ betaling, drie soorten (wv2293)', fn: (db) => M17(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -1585,7 +1600,7 @@ function health(fdb) {
 }
 
 module.exports = {
-  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
+  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M17_VERVANG, _M17: M17, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
   terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,

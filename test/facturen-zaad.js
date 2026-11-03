@@ -363,6 +363,13 @@ function zaai(fdb, o) {
     const ab = tx('tolgaarde', { boekdatum: dag(-2), bedrag_centen: -39950, tegenpartij_naam: lev.B.naam, tegenpartij_iban: lev.B.iban, omschrijving: 'incasso maand (proef)', is_incasso: 1, incassant_id: lev.B.incassant });
     if (ab) signaal(B.maakSignaal('afwijkend_bedrag', { entiteit: 'tolgaarde', leverancier: lev.B.id, transacties: [ab.id], bedrag_centen: ab.bedrag_centen, sleutel_vast: 'tolgaarde|proef|' + ab.boekdatum.slice(0, 7),
       details: { laag_centen: 18015, hoog_centen: 18490, mediaan_centen: 18250, frequentie: 'maand', aantal: 8, sinds: dag(-300), datum: ab.boekdatum, naam: lev.B.naam } }), tijd(0, 6));
+    // wv2293: DocPlan-controle rooster ↔ betaling (verzonnen persoon en roosternaam; alleen de eigenaar)
+    signaal(B.maakSignaal('dienst_zonder_betaling', { entiteit: 'tolgaarde', naam: 'Bram Proefsen', alleen_eigenaar: true, sleutel_vast: 'oid-proef|TG|2026-07',
+      details: { regel: 'a', persoon: 'oid-proef', praktijk: 'TG', praktijk_naam: 'Tolgaarde', maand: '2026-07', dagen: 2, venster_tot: '2026-10-14', bank_tm: dag(-1), naam: 'Bram Proefsen' } }), tijd(0, 6));
+    signaal(B.maakSignaal('betaling_zonder_dienst', { entiteit: 'groenhouten', naam: 'Bram Proefsen', alleen_eigenaar: true, sleutel_vast: 'proef-tx',
+      details: { regel: 'b', persoon: 'oid-proef', praktijk: 'GH', praktijk_naam: 'Groenhouten', datum: dag(-20), venster_van: dag(-140), naam: 'Bram Proefsen' } }), tijd(0, 6));
+    signaal(B.maakSignaal('roosternaam_zonder_koppeling', { entiteit: 'groenhouten', naam: 'Proefdag', alleen_eigenaar: true, sleutel_vast: 'GH|proef|2026',
+      details: { regel: 'c', praktijk: 'GH', praktijk_naam: 'Groenhouten', roosternaam: 'Proefdag', dagen: 1, jaar: 2026, status: null, naam: 'Proefdag' } }), tijd(0, 6));
     if (teBetalen) signaal(B.maakSignaal('te_betalen_niet_betaald', { entiteit: teBetalen.entiteit, leverancier: teBetalen.l.id, facturen: [teBetalen.id], bedrag_centen: teBetalen.incl }), tijd(0, 6));
     if (ingevoerd) signaal(B.maakSignaal('ingevoerd_niet_gezien', { entiteit: ingevoerd.entiteit, leverancier: ingevoerd.l.id, facturen: [ingevoerd.id], bedrag_centen: ingevoerd.incl }), tijd(-10, 6),
       { afhandeling: 'opnieuw_kijken', les: 'Betaling aan ' + ingevoerd.l.naam + ' nog niet op de bank; over drie dagen opnieuw kijken.', sluimer_tot: dag(-7), wanneer: tijd(-10, 9) });
