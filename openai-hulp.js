@@ -33,7 +33,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const VERSIE = 'openai-hulp-1.2';   // 1.2 (wv2266): zoek() met web_search
+const VERSIE = 'openai-hulp-1.3';   // 1.2 (wv2266): zoek() met web_search; 1.3 (wv2325): beeld() voor MemoryLane Plaatje maken
 // Prijzen per miljoen tokens (developers.openai.com/api/docs/pricing, gelezen 30-10-2026, tabellen Standard en Batch). cache_schrijven = de
 // "12h write"-kolom (de hoogste; de API gaf 30-10 prompt_cache_retention 24h), alleen bij modellen die schrijfkosten rekenen. Modellen zonder
 // eigen rij hier worden geweigerd. Lange context (> 272k invoer) bij gpt-5.4/5.5 (lang: true) kost meer: de hulp weigert dat vooraf (LANG_MAX)
@@ -70,6 +70,18 @@ const BEELDPRIJZEN = {
   'gpt-image-1-mini': { t_in: 2, t_cache: 0.2, b_in: 2.5, b_cache: 0.25, b_uit: 8, t_uit: null, batch: { t_in: 1, t_cache: 0.1, b_in: 1.25, b_cache: 0.13, b_uit: 4, t_uit: null } },
   'chatgpt-image-latest': { t_in: 5, t_cache: 1.25, b_in: 8, b_cache: 2, b_uit: 32, t_uit: 10, batch: { t_in: 2.5, t_cache: 0.63, b_in: 4, b_cache: 1, b_uit: 16, t_uit: 5 } },
 };
+/*
+ * Beeld maken (wv2325, 3-11-2026; MemoryLane "Plaatje maken", ontwerp fase R § 12.1, Davids Ja 3-11 16:17). Images API
+ * (POST /v1/images/generations), één beeld per aanroep. Alleen de modellen in BEELD_MODELLEN (ander model = nieuwe review), alleen 1024x1024,
+ * kwaliteit low of medium, webp. Kosten uit de usage via kostenBeeld; de schatting vooraf rekent de prompt als tekst en BEELD_UIT_RESERVE
+ * uitvoertokens tegen het beeldtarief. Zelfde poort (patiëntpoort + geheimen), uurgrens, maandgrens en teller als vraag().
+ */
+const BEELD_MODELLEN = ['gpt-image-1-mini'];
+const BEELD_KWALITEIT = ['low', 'medium'];
+const BEELD_UIT_RESERVE = { low: 600, medium: 2000 };   // uitvoertokens per beeld (1024x1024) met marge; gemeten zie beeld()
+const BEELD_PROMPT_MAX = 2000;
+const BEELD_COMPRESSIE = 80;   // webp zonder compressie = lossless ± 1,1 MB (gemeten 3-11); met compressie lossy
+const BEELD_MAX_BYTES = 4 * 1024 * 1024;
 const LANG_MAX = 272000;        // invoertokens: daarboven een ander tarief → weigeren
 const STANDAARD = {
   aan: false,                   // hoofdschakelaar; uit = elke aanroep geweigerd (status uit)
@@ -539,6 +551,60 @@ function maak(o) {
   }
 
   /*
+   * Eén beeld (wv2325). b: { afnemer, prompt (≤ 2000 tekens), model? (alleen BEELD_MODELLEN, standaard het eerste), kwaliteit? (low|medium,
+   *   standaard low), ms? } → { ok: true, mime: 'image/webp', data: Buffer, model, usd, ms } of { ok: false, status } (uit, afnemer, model,
+   *   invoer, te_groot, kwaliteit, poort, geheim, grens, cyclus, uurgrens, geen_sleutel, leeg, api_<code>, fout). Nooit de prompt in een rij.
+   */
+  async function beeld(b) {
+    b = isObj(b) ? b : {};
+    const i = inst();
+    const afnemer = AFNEMER.test(String(b.afnemer || '')) ? String(b.afnemer) : null;
+    if (!afnemer) return { ok: false, status: 'afnemer' };
+    const model = b.model == null ? BEELD_MODELLEN[0] : String(b.model);
+    if (!i.aan) return weiger(afnemer, model, 'uit');
+    if (BEELD_MODELLEN.indexOf(model) < 0 || !BEELDPRIJZEN[model]) return weiger(afnemer, kort(model, 40), 'model');
+    const prompt = typeof b.prompt === 'string' ? b.prompt.trim() : '';
+    if (!prompt) return { ok: false, status: 'invoer' };
+    if (prompt.length > BEELD_PROMPT_MAX) return weiger(afnemer, model, 'te_groot');
+    const kwal = b.kwaliteit == null ? 'low' : String(b.kwaliteit);
+    if (BEELD_KWALITEIT.indexOf(kwal) < 0) return { ok: false, status: 'kwaliteit' };
+    const p = poort([prompt]);
+    if (p) return weiger(afnemer, model, p);
+    const pr = BEELDPRIJZEN[model];
+    const sch = rond(((Math.ceil(prompt.length / 3) + 200) * pr.t_in + BEELD_UIT_RESERVE[kwal] * pr.b_uit) / 1e6);
+    const t0 = nu();
+    tel.uur = tel.uur.filter(function (x) { return t0 - x < 3600000; });
+    if (tel.uur.length >= i.per_uur) return weiger(afnemer, model, 'uurgrens');
+    const g = grensWeigering(sch);
+    if (g) return weiger(afnemer, model, g);
+    tel.uur.push(t0); tel.gereserveerd += sch;
+    let verstuurd = false;
+    try {
+    const sl = await sleutel();
+    if (!sl) return weiger(afnemer, model, 'geen_sleutel');
+    const body = { model: model, prompt: prompt, n: 1, size: '1024x1024', quality: kwal, output_format: 'webp', output_compression: BEELD_COMPRESSIE, moderation: 'auto' };
+    try {
+      verstuurd = true;
+      const r = await api('POST', '/v1/images/generations', body, sl, Math.min(300000, Number(b.ms) || 180000));
+      const k = kostenBeeld(model, r && r.usage, false) || { usd: sch, prijs_onbekend: true };
+      if (!(r && r.usage)) { k.usd = sch; k.prijs_onbekend = true; }   // geen usage: de schatting boeken, gevlagd
+      const d = r && Array.isArray(r.data) && r.data[0] && typeof r.data[0].b64_json === 'string' ? Buffer.from(r.data[0].b64_json, 'base64') : null;
+      const okBeeld = !!(d && d.length >= 12 && d.length <= BEELD_MAX_BYTES && d.toString('latin1', 0, 4) === 'RIFF' && d.toString('latin1', 8, 12) === 'WEBP');
+      rij(Object.assign({}, k, { afnemer: afnemer, model: model, status: okBeeld ? 'ok' : 'leeg', ms: nu() - t0 }));
+      if (!okBeeld) return { ok: false, status: 'leeg', usd: k.usd };
+      return { ok: true, mime: 'image/webp', data: d, model: model, usd: k.usd, ms: nu() - t0 };
+    } catch (e) {
+      const st = e.status ? 'api_' + e.status : 'fout';
+      const geschat = verstuurd && (!e.status || e.status >= 500);
+      rij({ afnemer: afnemer, model: model, status: st, fout: (geschat ? 'geschat; ' : '') + (e.soort || kort(e.name, 40)), ms: nu() - t0,
+        usd: geschat ? sch : 0, prijs_onbekend: geschat });
+      if (e.status === 401 || e.status === 403) tel.sleutel = 'geweigerd';
+      return { ok: false, status: st, soort: e.soort || null };
+    }
+    } finally { tel.gereserveerd = Math.max(0, rond(tel.gereserveerd - sch)); }
+  }
+
+  /*
    * Batch indienen. b: { afnemer, model?, instructies?, max_uit?, effort?, verzoeken: [{ id: 'a-z0-9_-', invoer }] }. Elk verzoek door de poort;
    * geraakte verzoeken gaan niet mee (geweigerd: [id], zonder reden per id in de rij). → { ok, id, aantal, geweigerd } of { ok: false, status }.
    */
@@ -765,7 +831,7 @@ function maak(o) {
       aannames: aannames };
   }
   function sluit() { try { db.close(); } catch (e) {} }
-  return { vraag, zoek, batchIndienen, batchTik, batchStand, stand, health, verbruik, sluit };
+  return { vraag, zoek, beeld, batchIndienen, batchTik, batchStand, stand, health, verbruik, sluit };
 }
 
-module.exports = { maak, VERSIE, PRIJZEN, PRIJS_DATUM, BEELDPRIJZEN, BEELD_DATUM, ZOEK_USD, ZOEK_MAX, ZOEK_PLAFOND_USD, _intern: { schoneUrl, zoekBronnen, kosten, kostenBeeld, schatting, periodeVan, cyclusVan, tekstVan, geheimIn, maskeer, prijsSleutel } };
+module.exports = { maak, VERSIE, PRIJZEN, PRIJS_DATUM, BEELDPRIJZEN, BEELD_DATUM, BEELD_MODELLEN, ZOEK_USD, ZOEK_MAX, ZOEK_PLAFOND_USD, _intern: { schoneUrl, zoekBronnen, kosten, kostenBeeld, schatting, periodeVan, cyclusVan, tekstVan, geheimIn, maskeer, prijsSleutel } };

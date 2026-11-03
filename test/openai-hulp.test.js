@@ -28,6 +28,11 @@ function nepApi() {
           output: [{ type: 'reasoning' }, { type: 'message', content: [{ type: 'output_text', text: 'pong' }] }],
           usage: { input_tokens: 1000, input_tokens_details: { cached_tokens: 400, cache_write_tokens: 0 }, output_tokens: 200, output_tokens_details: { reasoning_tokens: 50 } } });
       }
+      if (req.method === 'POST' && req.url === '/v1/images/generations') {   // wv2325
+        if (s.status !== 200) return stuur(s.status, { error: { code: 'moderation_blocked', message: 'verzonnen' } });
+        return stuur(200, s.beeldAntwoord || { created: 1, data: [{ b64_json: NEP_WEBP.toString('base64') }], output_format: 'webp', quality: 'medium', size: '1024x1024',
+          usage: { input_tokens: 50, input_tokens_details: { text_tokens: 50, image_tokens: 0 }, output_tokens: 1056, output_tokens_details: { image_tokens: 1056, text_tokens: 0 } } });
+      }
       if (req.method === 'POST' && req.url === '/v1/files') {
         const id = 'file-in' + Object.keys(s.bestanden).length;
         s.bestanden[id] = body.toString('utf8');
@@ -59,6 +64,8 @@ function nieuw(api, inst, extra) {
     log: function (r) { logs.push(r); }, fout: function () {} }, extra || {}));
   return { h: h, dir: dir, logs: logs };
 }
+// verzonnen webp (alleen de kop): RIFF....WEBPVP8 + een paar bytes
+const NEP_WEBP = (function () { const d = Buffer.from([1, 2, 3, 4]); const c = Buffer.concat([Buffer.from('VP8 ', 'latin1'), Buffer.from([4, 0, 0, 0]), d]); const l = Buffer.alloc(4); l.writeUInt32LE(4 + c.length); return Buffer.concat([Buffer.from('RIFF', 'latin1'), l, Buffer.from('WEBP', 'latin1'), c]); })();
 const PATIENT = 'Betreft: mw. J. Jansen, geboortedatum 12-03-1958. Bovengenoemde patiënt is bekend met diabetes mellitus; wij zagen haar op de polikliniek.';
 
 test('kosten: cache tegen cachetarief, schrijftokens extra, batch halve prijs, model met datumstaart', function () {
@@ -524,4 +531,48 @@ test('zoek: api-fout 5xx boekt de schatting gevlagd, 4xx niet', async function (
   assert.strictEqual((await t.h.zoek({ afnemer: 'shopper', vraag: 'snoer' })).status, 'api_429');
   assert.strictEqual(t.h.stand().maand_usd, na5);
   n.srv.close(); t.h.sluit();
+});
+
+test('wv2325 beeld: alleen gpt-image-1-mini, 1024x1024 webp, alleen de prompt; kosten uit usage; poort, geheim, uit en model vóór het netwerk', async function () {
+  const api = await nepApi();
+  try {
+    const { h, dir } = nieuw(api.url, { aan: true });
+    const r = await h.beeld({ afnemer: 'memorylane-plaatje', prompt: 'Zachte illustratie van: Reis, 2019: een verzonnen strand', kwaliteit: 'medium' });
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(r.mime, 'image/webp');
+    assert.deepStrictEqual(r.data, NEP_WEBP);
+    // medium: 50 teksttokens × $2 + 1056 beeldtokens × $8 per miljoen
+    assert.strictEqual(r.usd, Math.round((50 * 2 + 1056 * 8)) / 1e6);
+    assert.strictEqual(api.verzoeken.length, 1);
+    const v = api.verzoeken[0];
+    assert.strictEqual(v.pad, '/v1/images/generations');
+    const b = JSON.parse(v.body);
+    assert.deepStrictEqual(Object.keys(b).sort(), ['model', 'moderation', 'n', 'output_compression', 'output_format', 'prompt', 'quality', 'size']);
+    assert.strictEqual(b.model, 'gpt-image-1-mini'); assert.strictEqual(b.size, '1024x1024'); assert.strictEqual(b.output_format, 'webp'); assert.strictEqual(b.n, 1);
+    assert.strictEqual(b.prompt, 'Zachte illustratie van: Reis, 2019: een verzonnen strand');
+    // rij zonder prompt
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(path.join(dir, 'openai.sqlite'));
+    const rij = db.prepare('SELECT * FROM aanroep').all();
+    db.close();
+    assert.strictEqual(rij.length, 1); assert.strictEqual(rij[0].status, 'ok'); assert.strictEqual(rij[0].afnemer, 'memorylane-plaatje'); assert.strictEqual(rij[0].uitvoer, 1056);
+    assert.ok(!JSON.stringify(rij).includes('strand'), 'geen prompt in de teller');
+    // weigeringen vóór het netwerk
+    assert.strictEqual((await h.beeld({ afnemer: 'x', prompt: 'p', model: 'gpt-image-2' })).status, 'model');
+    assert.strictEqual((await h.beeld({ afnemer: 'x', prompt: 'p', kwaliteit: 'high' })).status, 'kwaliteit');
+    assert.strictEqual((await h.beeld({ afnemer: 'x', prompt: PATIENT })).status, 'poort');
+    assert.strictEqual((await h.beeld({ afnemer: 'x', prompt: 'sleutel sk-proj-abcdefghijklmnopqrstuvwxyz0123' })).status, 'geheim');
+    assert.strictEqual((await h.beeld({ afnemer: 'x', prompt: 'x'.repeat(2001) })).status, 'te_groot');
+    assert.strictEqual((await h.beeld({ afnemer: 'x', prompt: '' })).status, 'invoer');
+    assert.strictEqual(api.verzoeken.length, 1, 'geen enkele weigering ging over de lijn');
+    const uit = nieuw(api.url, { aan: false });
+    assert.strictEqual((await uit.h.beeld({ afnemer: 'x', prompt: 'p' })).status, 'uit');
+    assert.strictEqual(api.verzoeken.length, 1);
+    // geen beeld terug = leeg (kosten wel geteld); API-fout = api_400
+    api.beeldAntwoord = { data: [], usage: { input_tokens: 10, output_tokens: 0 } };
+    assert.strictEqual((await h.beeld({ afnemer: 'x', prompt: 'p' })).status, 'leeg');
+    api.beeldAntwoord = null; api.status = 400;
+    assert.strictEqual((await h.beeld({ afnemer: 'x', prompt: 'p' })).status, 'api_400');
+    h.sluit(); uit.h.sluit();
+  } finally { api.srv.close(); }
 });

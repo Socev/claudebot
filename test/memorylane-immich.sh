@@ -4,7 +4,7 @@
 # Nep-Immich en nep-D1, alleen verzonnen tekst en beelden; raakt /opt/data niet. Gebruik: bash test/memorylane-immich.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
-if grep -nE "console\.|eval\(" immich.js memorylane-fotos.js; then echo "ROOD  immich.js/memorylane-fotos.js logt naar de console of gebruikt eval"; exit 1; fi
+if grep -nE "console\.|eval\(" immich.js memorylane-fotos.js memorylane-plaatje.js; then echo "ROOD  immich.js/memorylane-fotos.js logt naar de console of gebruikt eval"; exit 1; fi
 echo "GROEN poort: geen console"
 if grep -nE "method: *'(PUT|DELETE)'|'(PUT|DELETE)'" immich.js; then echo "ROOD  immich.js noemt PUT of DELETE"; exit 1; fi
 # wv2225: PATCH alleen in de witte lijst (één tak) en in hernoemAlbum (één aanroep, alleen albumName)

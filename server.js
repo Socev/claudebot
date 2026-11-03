@@ -18912,6 +18912,8 @@ function docsDelenInfo() {
 //   GET  /app/memorylane/h/<hid>/gevel/k (wv2314, de straat: miniatuur van de gevel, zonder fotolijst; toonmodus alleen toonbaar, anders 404)
 //   POST /app/memorylane/h/<hid>/zicht {kring, aan} · titel {titel} · wanneer {van, tot} (wv2180) · tekst {tekst, soort} · categorie {categorie, gevoelig} · toon-opname {aan} · toch-delen
 //   POST /app/memorylane/stuk/<sid>/opnemen|afwijzen|bewaren|weggooien · POST /app/memorylane/link/<kring>/aan|uit|vernieuw
+//   POST /app/memorylane/h/<hid>/plaatje/voorstel → {beschrijving} · POST …/plaatje {beschrijving} (naar OpenAI: verse vingerafdruk, niet vanaf
+//        een vaste plek; wv2325) · POST …/plaatje/weg. Niet in de toonmodus (niet in ML_TOON_ROUTES); de gevelroute geeft het plaatje.
 // Naar buiten (zicht aan, link aan, toch delen): verse vingerafdruk en nooit vanaf een vaste plek (zoals Docs › Delen). Dichter maken mag altijd.
 // wv2120: ook immich_api_key (David maakte hem 31-10 in Immich; rechten ruimer dan nodig, de witte lijst in immich.js is de grens)
 const ML_KLUIS = { memorylane_link_familie: true, memorylane_link_vrienden: true, immich_api_key: true };
@@ -18945,6 +18947,8 @@ const memorylaneDelen = (function () {
   if (!fs.existsSync(p) || !intake || !herinneringen || !HERINNERINGEN_MOD) return null;
   try {
     return require(p).maak({ db: intake._db, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, host: DOCS_HOST, kluis: mlKluis, immich: immichMl, verhaal: herinneringenVerhaal,
+      // wv2325: Plaatje maken via openai-hulp (alleen de beschrijving gaat naar OpenAI; teller en maandgrens daar)
+      beeld: function (x) { return openaiHulp && typeof openaiHulp.beeld === 'function' ? openaiHulp.beeld({ afnemer: 'memorylane-plaatje', prompt: x && x.prompt, kwaliteit: 'medium' }) : Promise.resolve({ ok: false, status: 'uit' }); },
       marker: require(path.join(__dirname, 'intake', 'patientpoort.js')), geheimen: function () { try { return openaiPodGeheimen(); } catch (e) { return []; } },
       categorieen: HERINNERINGEN_MOD.CATEGORIEEN, onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
       fout: logError, box: function (t) { ovisBoxRij(t); },
@@ -19016,6 +19020,13 @@ async function appMemorylane(req, res, a, s, route, d) {
       const u = m[2] === 'gevel' ? await memorylaneDelen.gevel(m[1], d) : m[2] === 'foto-delen' ? await memorylaneDelen.fotoDelen(m[1], d) : await memorylaneDelen.albumMaken(m[1]);
       if (u.status === 200) daarna();
       return antw(m[2], u);
+    }
+    // wv2325: Plaatje maken (ontwerp fase R § 12.1). Maken = de beschrijving gaat naar OpenAI: verse vingerafdruk en niet vanaf een vaste plek.
+    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/plaatje(\/voorstel|\/weg)?$/.exec(route))) {
+      if (m[2] === '/voorstel') return antw('plaatje voorstel', memorylaneDelen.plaatjeVoorstel(m[1], toon));
+      if (m[2] === '/weg') { const u = memorylaneDelen.plaatjeWeg(m[1], toon); return antw('plaatje weg', u); }
+      if (!naarBuiten('plaatje')) return;
+      return antw('plaatje', await memorylaneDelen.plaatjeMaken(m[1], d, toon));
     }
     if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(zicht|titel|wanneer|tekst|categorie|toon-opname|toch-delen)$/.exec(route))) {
       const hid = m[1], wat = m[2];

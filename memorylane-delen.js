@@ -23,6 +23,8 @@
  *  - Haak wv2118: verhaalVoorDelen(hid) geeft nu null; met een goedgekeurd verhaal toont de deling dat in plaats van de letterlijke opname.
  *  - Foto's (wv2120): met o.immich koppelt memorylane-fotos.js elke herinnering aan een Immich-album (ml_album). Een gedeelde herinnering
  *    neemt hooguit 8 miniaturen mee naar D1 ml_foto, alleen als David foto_delen per herinnering aanzette (standaard uit).
+ *  - Plaatje maken (wv2325, ontwerp § 12.1): met o.beeld maakt memorylane-plaatje.js voor een herinnering zonder foto een gegenereerd plaatje
+ *    als gevel. Alleen niet-gevoelig, met categorie, geen foto, niet in de toonmodus; de pod stelt de beschrijving voor, David past hem aan.
  * PRIVACY. Nooit tekst, titels of namen in logs, box, /health of fouten: alleen ids en aantallen.
  * VORM. Alleen fs, path, crypto en reizen.js (wv2136: de reispagina's, gedeeld met Tripper); D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
  *
@@ -174,7 +176,8 @@ function fmVeld(t, veld) {
  * maak(o) → { lijst, detail, zicht, titel, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, _db }.
  * o = { db (intake._db), vault, vv (vault-veilig), dir (/opt/data/herinneringen), d1(sql, params) → Promise<{ok, rijen}>,
  *       kluis(naam) → Promise<string|null>, marker (patientpoort: beoordeel), geheimen() → [string], categorieen (herinneringen CATEGORIEEN),
- *       onderhoudAan() → bool, nachtgrendel() → bool, nu() → ms, box(tekst), fout(label, e), host?, reisVandaag?() → 'JJJJ-MM-DD' }
+ *       onderhoudAan() → bool, nachtgrendel() → bool, nu() → ms, box(tekst), fout(label, e), host?, reisVandaag?() → 'JJJJ-MM-DD',
+ *       beeld?({prompt}) → Promise<openai-hulp.beeld-uitslag> (wv2325; zonder: geen Plaatje maken) }
  */
 function maak(o) {
   const nu = typeof o.nu === 'function' ? o.nu : Date.now;
@@ -189,6 +192,12 @@ function maak(o) {
   // (ontbreekt memorylane-fotos.js in de release, dan zonder foto's: delen werkt door)
   const F = (function () { if (!o.immich) return null; try { return require('./memorylane-fotos.js').maak({ db, immich: o.immich, nu, fout }); } catch (e) { fout('ml-fotos', e); return null; } })();
   let fotoTabel = false;
+  // wv2325: gegenereerde plaatjes als gevel (alleen met o.beeld; ontbreekt memorylane-plaatje.js, dan zonder)
+  const P = (function () {
+    if (typeof o.beeld !== 'function') return null;
+    try { return require('./memorylane-plaatje.js').maak({ db, dir: DIR, nu, fout, beeld: o.beeld, geheimRaak: (t) => geheimRaak(t), markerRaak: (l) => markerRaak(l) }); }
+    catch (e) { fout('ml-plaatje', e); return null; }
+  })();
   let laatsteWw = 0, laatsteControle = 0, laatsteOphaal = 0, vuil = new Set(KRINGEN), bezig = false, laatst = null, onleesbaar = 0, d1Fout = false;
 
   const q = {
@@ -700,6 +709,7 @@ function maak(o) {
     const uit = { vault: 0, bijdragen: 0, d1: 0 };
     try {
       bijwerken();
+      if (P) { try { P.opruim((hid) => !!q.h.get(hid)); } catch (e) { fout('ml-plaatje', e); } }
       uit.vault = naarVault();
       if (F) { try { const f = await fotoSync(false); if (f && (f.nieuw || f.overgenomen || f.weg || f.deel)) { uit.albums = f.nieuw + f.overgenomen; vuilAlle(); } } catch (e) { fout('ml-immich', e); } }
       if (!o.d1) return uit;
@@ -755,7 +765,7 @@ function maak(o) {
   function toonKort(k) {
     return { hid: k.hid, soort: k.soort, bron: k.bron, status: k.status, titel: k.titel, wanneer: k.wanneer, wanneer_bron: k.wanneer_bron, datum: k.datum, categorie: k.categorie,
       gevoelig: false, personen: k.personen, plaatsen: k.plaatsen, voorvallen: k.voorvallen, audio: k.audio, binnen: 0, vastgehouden: 0, stukken: 0,
-      zicht: { familie: false, vrienden: false }, album: k.album ? { status: k.album.status, aantal: k.album.aantal } : null };
+      zicht: { familie: false, vrienden: false }, album: k.album ? { status: k.album.status, aantal: k.album.aantal } : null, plaatje: !!k.plaatje, plaatje_kan: false };
   }
   function kort(h, pagina, s) {
     const p = pagina === undefined ? paginaLees(h.hid) : pagina;
@@ -767,7 +777,8 @@ function maak(o) {
       toon_opname: !!h.toon_opname, niet_deelbaar: nietDeelbaar(h), blok: b ? b.reden : null,
       verhaal_stand: h.soort === 'opname' ? (x ? x.stand : null) : null,
       stukken: st.filter((y) => y.status !== 'weggegooid').length, binnen: st.filter((y) => y.status === 'binnen').length,
-      vastgehouden: st.filter((y) => y.status === 'vastgehouden').length, album: F ? F.kort(h.hid) : null };
+      vastgehouden: st.filter((y) => y.status === 'vastgehouden').length, album: F ? F.kort(h.hid) : null,
+      plaatje: P ? P.heeft(h.hid) : false, plaatje_kan: !plaatjeNiet(h) };
   }
   // opt.toon (wv2306): de toonmodus van dit apparaat staat aan → alleen toonbare herinneringen, ingekort; geen gevoelige categorie in de lijst
   function lijst(opt) {
@@ -975,10 +986,14 @@ function maak(o) {
     return F.foto(id, maat, opt && opt.toon ? (hid) => toonbaar(vind(hid)) : null);
   }
   // wv2314 (R6): de gevel van één huis in de straat; in de toonmodus alleen van een toonbare herinnering (anders 404, zoals f/<id>)
+  // wv2325: zonder foto-gevel het gegenereerde plaatje (in de toonmodus alleen bij een toonbare); heeft het album foto's, dan wint de foto
   async function gevelBeeld(hid, opt) {
-    const h = F && metAlbum(hid);
-    if (!h || (opt && opt.toon && !toonbaar(h))) return { status: 404, body: { ok: false, fout: 'onbekend' } };
-    return F.gevelBeeld(hid);
+    const h = metAlbum(hid);
+    if (!h || (opt && opt.toon && !toonbaar(h)) || (!F && !P)) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    const plaatje = () => { const b = P ? P.beeld(h.hid) : null; return b ? { status: 200, body: { ok: true, mime: b.mime, data: b.data, plaatje: true } } : null; };
+    if (!F || !heeftFoto(h)) return plaatje() || (F ? F.gevelBeeld(hid) : { status: 404, body: { ok: false, fout: 'geen gevel' } });
+    const u = await F.gevelBeeld(hid);
+    return u.status === 404 ? plaatje() || u : u;
   }
   async function gevel(hid, d) { if (!F || !metAlbum(hid)) return { status: 404, body: { ok: false, fout: 'onbekend' } }; const u = await F.gevel(hid, d); if (u.status === 200) vuilAlle(); return u; }
   async function fotoDelen(hid, d) {
@@ -992,6 +1007,47 @@ function maak(o) {
     const h = F && metAlbum(hid);
     if (!h || h.status !== 'actief') return { status: 404, body: { ok: false, fout: 'onbekend' } };
     return F.albumMaken(albumKandidaat(h));
+  }
+  // ── wv2325: Plaatje maken (ontwerp § 12.1) ──
+  // Heeft de herinnering een foto (album met ≥ 1 foto)? Dan geen plaatje: de foto wint.
+  function heeftFoto(h) { const a = F ? F.kort(h.hid) : null; return !!(a && a.status === 'actief' && a.aantal > 0); }
+  // Mag er een plaatje voor deze herinnering gemaakt worden? → null of de reden (gewone taal). Zelfde regels als delen (actief, categorie,
+  // niet gevoelig, opname met notitie en geen proef), plus: geen foto, niet in de toonmodus.
+  function plaatjeNiet(h, opt) {
+    if (!P) return 'plaatjes maken zit niet in deze versie';
+    if (opt && opt.toon) return 'niet in de toonmodus';
+    const r = nietDeelbaar(h);
+    if (r) return r === 'gevoelig: nooit zichtbaar' ? 'gevoelig: geen plaatje' : r;
+    if (heeftFoto(h)) return 'er is al een foto';
+    return null;
+  }
+  function plaatjeVoorstel(hid, opt) {
+    const h = vind(hid);
+    if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.toon) return NIET_TOON;
+    const r = plaatjeNiet(h, opt);
+    if (r) return { status: 409, body: { ok: false, fout: r } };
+    const p = paginaLees(h.hid), s = sam(h, p), w = wanneerInfo(h, p, s);
+    return P.voorstel({ soort: isFotoalbum(h) ? 'fotoalbum' : h.soort, jaar: w.van ? String(w.van).slice(0, 4) : null, titel: titelVan(h, p, s) });
+  }
+  async function plaatjeMaken(hid, d, opt) {
+    const h = vind(hid);
+    if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.toon) return NIET_TOON;
+    const r = plaatjeNiet(h, opt);
+    if (r) return { status: 409, body: { ok: false, fout: r } };
+    const u = await P.maak(h.hid, d);
+    if (u.status === 200) u.body.herinnering = kort(q.h.get(h.hid));
+    return u;
+  }
+  // Weghalen mag altijd (ook als de herinnering intussen gevoelig werd of een foto kreeg), behalve in de toonmodus
+  function plaatjeWeg(hid, opt) {
+    const h = vind(hid);
+    if (!h || !P) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.toon) return NIET_TOON;
+    const u = P.weg(h.hid);
+    if (u.status === 200 && h.status !== 'weg') u.body.herinnering = kort(q.h.get(h.hid));
+    return u;
   }
   function zorgLink(k) { if (!q.link.get(k)) q.linkNieuw.run(k, b64u(rnd(16)).slice(0, 22)); return q.link.get(k); }
   function delenStand() {
@@ -1046,10 +1102,11 @@ function maak(o) {
   }
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
-    return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
+    return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
   return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling,
+    plaatjeVoorstel, plaatjeMaken, plaatjeWeg, _P: P,
     fotoSync, _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }
