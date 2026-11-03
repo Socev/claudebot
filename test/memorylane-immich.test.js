@@ -430,3 +430,46 @@ test('zonder Immich-sleutel: geen albums, lijst zegt het, geen fout in de tik', 
     assert.strictEqual((await zonder.albumMaken(l.herinneringen[0].hid)).status, 503);
   } finally { o.sluit(); }
 });
+
+// ── wv2314 (R6, de straat): GET /app/memorylane/h/<hid>/gevel/k ──
+test('wv2314 gevel: omslag zonder de fotolijst op te halen, gekozen gevel alleen zolang hij in het album staat, geen album/leeg = 404, toonmodus alleen toonbaar', async () => {
+  const o = omgeving();
+  try {
+    o.reis('2020 - Proefrally Noorwegen.md', '2020-02-09 – 2020-02-15');
+    o.opname(RA, 'prive');   // Privé = gevoelig: in de toonmodus nooit
+    await o.tik();
+    const hr = o.hid('reis', REIS), hp = o.hid('opname', RA);
+    const al = o.im.albums.find((a) => a.id === o.album(hr).album_id), ap = o.im.albums.find((a) => a.id === o.album(hp).album_id);
+    assert.strictEqual((await o.ml.gevelBeeld(hr)).status, 404, 'leeg album: geen gevel');
+    const f1 = o.im.foto(al, webp(false)), f2 = o.im.foto(al, jpeg(false), 'image/jpeg');
+    o.im.foto(ap, webp(false));
+    await o.tik();   // sync neemt de omslag over
+    const n0 = o.im.log.length;
+    const g = await o.ml.gevelBeeld(hr);
+    assert.strictEqual(g.status, 200); assert.deepStrictEqual(Buffer.from(g.body.data, 'base64'), webp(false));
+    const nieuw = o.im.log.slice(n0);
+    assert.deepStrictEqual(nieuw, ['GET /api/assets/' + f1 + '/thumbnail?size=thumbnail'], 'alleen de miniatuur van de omslag, geen fotolijst: ' + nieuw.join(' | '));
+    // David kiest f2 als gevel → die; haalt hij f2 uit het album, dan na de cache weer de omslag
+    assert.strictEqual((await o.ml.gevel(hr, { asset: f2 })).status, 200);
+    let b = await o.ml.gevelBeeld(hr);
+    assert.strictEqual(b.body.mime, 'image/jpeg', 'gekozen gevel');
+    al.assets = al.assets.filter((x) => x !== f2);
+    o.klok.t += 11 * 60000;
+    b = await o.ml.gevelBeeld(hr);
+    assert.strictEqual(b.status, 200); assert.strictEqual(b.body.mime, 'image/webp', 'gekozen gevel uit het album = terug naar de omslag');
+    // toonmodus: de reis (categorie reizen) wel, de Privé-opname niet (404, zonder Immich te vragen)
+    assert.strictEqual((await o.ml.gevelBeeld(hr, { toon: true })).status, 200);
+    assert.strictEqual((await o.ml.gevelBeeld(hp)).status, 200, 'zonder toonmodus ziet David ook Privé');
+    const n1 = o.im.log.length;
+    assert.strictEqual((await o.ml.gevelBeeld(hp, { toon: true })).status, 404, 'toonmodus: Privé = 404');
+    assert.strictEqual(o.im.log.length, n1, 'voor een niet-toonbare niets bij Immich gevraagd');
+    assert.strictEqual((await o.ml.gevelBeeld('h0000000000000000')).status, 404, 'onbekende herinnering');
+    assert.strictEqual((await o.ml.gevelBeeld('niet-een-hid')).status, 404);
+    // album weg in Immich → 404
+    o.im.albums.splice(o.im.albums.indexOf(al), 1);
+    await o.tik();
+    assert.strictEqual((await o.ml.gevelBeeld(hr)).status, 404, 'album weg');
+    o.im.uit = true;
+    assert.strictEqual((await o.ml.gevelBeeld(hp)).status, 503, 'Immich weg = 503, geen uitzondering');
+  } finally { o.sluit(); }
+});

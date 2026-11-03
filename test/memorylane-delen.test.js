@@ -628,10 +628,12 @@ test('wv2306 server.js: toonpoort vóór alle routes, alleen de leesroutes; uit 
   const R = eval(m[1]);
   const mag = (r) => R.some((x) => x.test(r));
   for (const r of ['GET /app/memorylane/lijst', 'GET /app/memorylane/h/h0123456789abcdef', 'GET /app/memorylane/h/h0123456789abcdef/audio/3', 'GET /app/memorylane/h/h0123456789abcdef/fotos',
-    'GET /app/memorylane/f/0123abcd-0123-4567-89ab-0123456789ab/k', 'POST /app/memorylane/toon', 'GET /app/memorylane/toon', 'POST /app/aanwezig']) assert.ok(mag(r), r);
+    'GET /app/memorylane/f/0123abcd-0123-4567-89ab-0123456789ab/k', 'POST /app/memorylane/toon', 'GET /app/memorylane/toon', 'POST /app/aanwezig',
+    'GET /app/memorylane/h/h0123456789abcdef/gevel/k']) assert.ok(mag(r), r);   // wv2314: gevel van een huis in de straat
   for (const r of ['GET /app/memorylane/delen', 'POST /app/memorylane/h/h0123456789abcdef/titel', 'POST /app/memorylane/h/h0123456789abcdef/categorie', 'POST /app/memorylane/voorstel/vp-0123456789abcdef/ja',
     'POST /app/memorylane/stuk/s0123456789abcdef/opnemen', 'POST /app/memorylane/link/familie/aan', 'GET /app/ramble/r20261031-0123456789abcdef', 'POST /app/beurt', 'POST /app/zoek-snel',
-    'GET /app/geschiedenis/hoofd', 'GET /app/nieuw', 'GET /app/tripper/lijst', 'GET /app/memorylane/h/h0123456789abcdef/audio/0', 'GET /app/memorylane/h/h0123456789abcdef/x']) assert.ok(!mag(r), r);
+    'GET /app/geschiedenis/hoofd', 'GET /app/nieuw', 'GET /app/tripper/lijst', 'GET /app/memorylane/h/h0123456789abcdef/audio/0', 'GET /app/memorylane/h/h0123456789abcdef/x',
+    'GET /app/memorylane/h/h0123456789abcdef/gevel/g', 'POST /app/memorylane/h/h0123456789abcdef/gevel/k']) assert.ok(!mag(r), r);
   assert.match(src, /if \(!d\.aan && toon\.toon && !appVersOk\(a, s\)\)/, 'uitzetten alleen vers');
   assert.match(src, /if \(reden !== 'poets' && mlToonAan\(id\)\) return \{ ok: false, reden: 'toonmodus' \};/, 'geen seintjes');
   assert.match(src, /toon: !!\(a && mlToonAan\(a\.id\)\)/, '/app/status kent de toonmodus');

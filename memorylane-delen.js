@@ -968,6 +968,12 @@ function maak(o) {
     if (!F) return { status: 404, body: { ok: false, fout: 'geen Immich' } };
     return F.foto(id, maat, opt && opt.toon ? (hid) => toonbaar(vind(hid)) : null);
   }
+  // wv2314 (R6): de gevel van één huis in de straat; in de toonmodus alleen van een toonbare herinnering (anders 404, zoals f/<id>)
+  async function gevelBeeld(hid, opt) {
+    const h = F && metAlbum(hid);
+    if (!h || (opt && opt.toon && !toonbaar(h))) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    return F.gevelBeeld(hid);
+  }
   async function gevel(hid, d) { if (!F || !metAlbum(hid)) return { status: 404, body: { ok: false, fout: 'onbekend' } }; const u = await F.gevel(hid, d); if (u.status === 200) vuilAlle(); return u; }
   async function fotoDelen(hid, d) {
     const h = F && metAlbum(hid);
@@ -1037,7 +1043,7 @@ function maak(o) {
     return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
-  return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, fotoDelen, albumMaken, reisKoppeling,
+  return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling,
     fotoSync, _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }

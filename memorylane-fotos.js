@@ -63,7 +63,7 @@ function omschrijving(c) {
 }
 
 /*
- * maak(o) → { sync, kort, fotos, foto, gevel, fotoDelen, albumMaken, voorDelen, naarD1, info, _db }
+ * maak(o) → { sync, kort, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, _db }
  * o = { db, immich (immich.js-client), nu() → ms, fout(label, e) }
  */
 function maak(o) {
@@ -216,6 +216,22 @@ function maak(o) {
     catch (e) { if (e.code === 'HTTP' && e.status === 404) return { status: 404, body: { ok: false, fout: 'onbekend' } }; fout('ml-immich-foto', e); return { status: 503, body: { ok: false, fout: 'Immich was niet bereikbaar' } }; }
     return { status: 200, body: { ok: true, mime: b.mime, data: b.data.toString('base64') } };
   }
+  // wv2314 (R6, de straat, ontwerp § 12.1): de miniatuur van de gevel van één herinnering, zonder eerst de fotolijst van het album op te halen
+  // (grootste album > 1.000 foto's; de straat vraagt er tot 191). Zonder gekozen gevel = de omslag die Immich bij elke sync (≤ 10 min) meegeeft;
+  // die zit in het album. Een door David gekozen gevel alleen als hij nog in de (gecachete) fotolijst staat, anders de omslag/eerste foto,
+  // zodat een foto die David uit het album haalde niet als gevel blijft staan. Geen album, leeg album of geen gevel = 404.
+  async function gevelBeeld(hid) {
+    const rij = q.a.get(hid);
+    if (!rij || rij.status !== 'actief') return { status: 404, body: { ok: false, fout: 'geen gevel' } };
+    let id;
+    try { id = rij.gevel ? gevelVan(rij, await lijstVan(hid, false)) : rij.omslag; }
+    catch (e) { return { status: 503, body: { ok: false, fout: 'Immich was niet bereikbaar' } }; }
+    if (!id || !IM.UUID_RE.test(String(id))) return { status: 404, body: { ok: false, fout: 'geen gevel' } };
+    let b;
+    try { b = await im.beeld(id, 'klein'); }
+    catch (e) { if (e.code === 'HTTP' && e.status === 404) return { status: 404, body: { ok: false, fout: 'geen gevel' } }; fout('ml-immich-gevel', e); return { status: 503, body: { ok: false, fout: 'Immich was niet bereikbaar' } }; }
+    return { status: 200, body: { ok: true, mime: b.mime, data: b.data.toString('base64') } };
+  }
   async function gevel(hid, d) {
     const rij = q.a.get(hid);
     if (!rij || rij.status !== 'actief') return { status: 404, body: { ok: false, fout: 'geen album' } };
@@ -276,7 +292,7 @@ function maak(o) {
     const t = Object.fromEntries(q.tel.all().map((r) => [r.status, r.n]));
     return { albums: t, delen: q.alle.all().filter((r) => r.foto_delen).length, sleutel: stand.sleutel, fout: stand.fout, laatst: stand.op };
   }
-  return { sync, kort, fotos, foto, gevel, fotoDelen, albumMaken, voorDelen, naarD1, info, _db: db, _cache: cache };
+  return { sync, kort, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, _db: db, _cache: cache };
 }
 
 module.exports = { maak, code, albumNaam, socevsNaam, omschrijving, VOORVOEGSEL, MERK, MAX_DEEL };

@@ -5695,7 +5695,7 @@ async function appTelegram(tekst) {
 // dat deel: de app-data van de toets).
 function mlToonPad() { let d = null; try { d = HERINNERINGEN_DIR; } catch (e) { d = null; } return path.join(d || APP_DATA, 'toonmodus.json'); }
 const ML_TOON_ROUTES = [/^GET \/app\/memorylane\/(lijst|toon)$/, /^POST \/app\/memorylane\/toon$/, /^GET \/app\/memorylane\/h\/h[0-9a-f]{16}(\/fotos|\/audio\/[1-9][0-9]?)?$/,
-  /^GET \/app\/memorylane\/f\/[0-9a-f-]{36}\/(k|g)$/, /^POST \/app\/aanwezig$/];
+  /^GET \/app\/memorylane\/f\/[0-9a-f-]{36}\/(k|g)$/, /^GET \/app\/memorylane\/h\/h[0-9a-f]{16}\/gevel\/k$/, /^POST \/app\/aanwezig$/];   // wv2314: gevel
 let mlToon = null;
 function mlToonLees() {
   if (mlToon) return mlToon;
@@ -18909,6 +18909,7 @@ function docsDelenInfo() {
 // memorylane-delen.js; hier alleen: D1 (zelfde databank `deel` als Docs › Delen), de twee wachtwoorden uit de kluis (niet op de witte lijst:
 // op het moment van gebruik via de Management-API, 10 min in het geheugen, nooit in process.env), de app-routes en de tik.
 //   GET  /app/memorylane/lijst | /app/memorylane/h/<hid> | /app/memorylane/delen
+//   GET  /app/memorylane/h/<hid>/gevel/k (wv2314, de straat: miniatuur van de gevel, zonder fotolijst; toonmodus alleen toonbaar, anders 404)
 //   POST /app/memorylane/h/<hid>/zicht {kring, aan} · titel {titel} · wanneer {van, tot} (wv2180) · tekst {tekst, soort} · categorie {categorie, gevoelig} · toon-opname {aan} · toch-delen
 //   POST /app/memorylane/stuk/<sid>/opnemen|afwijzen|bewaren|weggooien · POST /app/memorylane/link/<kring>/aan|uit|vernieuw
 // Naar buiten (zicht aan, link aan, toch delen): verse vingerafdruk en nooit vanaf een vaste plek (zoals Docs › Delen). Dichter maken mag altijd.
@@ -18975,6 +18976,12 @@ async function appMemorylane(req, res, a, s, route, d) {
     if (!appTeller('memorylane-foto', 3000, 3600000)) return appWeiger(res, 429, 'te veel foto\'s dit uur', 'grens memorylane-foto');
     try { return antw('foto', await memorylaneDelen.foto(m[1], m[2] === 'g' ? 'groot' : 'klein', { toon: mlToonAan(a.id) })); }
     catch (e) { logError('memorylane-foto', e); return appWeiger(res, 503, 'de foto kon nu niet geladen worden', 'ml foto fout'); }
+  }
+  // wv2314 (R6, de straat): de gevel van één herinnering als miniatuur {mime, data}, zonder de fotolijst; zelfde teller als de foto's
+  if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/gevel\/k$/.exec(route))) {
+    if (!appTeller('memorylane-foto', 3000, 3600000)) return appWeiger(res, 429, 'te veel foto\'s dit uur', 'grens memorylane-foto');
+    try { return antw('gevel', await memorylaneDelen.gevelBeeld(m[1], { toon: mlToonAan(a.id) })); }
+    catch (e) { logError('memorylane-gevel', e); return appWeiger(res, 503, 'de gevel kon nu niet geladen worden', 'ml gevel fout'); }
   }
   if (!appTeller('memorylane', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens memorylane');
   const naarBuiten = function (wat) {
