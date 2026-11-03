@@ -1098,6 +1098,13 @@ function maak(o) {
    * → { stand, versie, delen: [{ herinnering_id, titel, status, eigen, datum, datum_precisie, datum_van, datum_tot, alineas: [{ tekst, t_van, t_tot }] }],
    *     niet_gelukt: [{ herinnering_id, uitleg, t_van, t_tot }] }
    */
+  // wv2306: titel van een voorvalpagina (frontmatter titel), anders de bestandsnaam
+  function voorvalTitel(link) {
+    const rel = link.slice(2, -2) + '.md';
+    if (!binnen(rel, VOORVAL_MAP)) return '';
+    try { const d = fmDelen(o.vv.lees(abs(rel), 'utf8')); const t = d && fmVeld(d.regels, 'titel'); if (typeof t === 'string' && t) return t.slice(0, 120); } catch (e) { /* weg */ }
+    return path.basename(rel, '.md');
+  }
   function samengesteld(rid, cs) {
     if (!ID_RE.test(String(rid || ''))) return null;
     const v = q.v.get(rid) || null;
@@ -1122,7 +1129,12 @@ function maak(o) {
         const sec = (s) => s.split(':').reduce((a2, b2) => a2 * 60 + Number(b2), 0);
         return { tekst: pasCorrectiesToe(tm ? x.slice(0, tm.index) : x, cs), t_van: tm ? sec(tm[1]) : null, t_tot: tm ? sec(tm[2]) : null };
       });
+      // wv2306 (R3): bevestigde personen en voorval (alleen wat David met Ja koppelde) en de plaats, voor de filters in de app
+      const pl = Array.isArray(f('personen')) ? f('personen').filter((x) => typeof x === 'string' && /^\[\[[^\]]+\]\]$/.test(x)) : [];
+      const vl = typeof f('voorval') === 'string' && /^\[\[[^\]]+\]\]$/.test(f('voorval')) ? f('voorval') : '';
       delen.push({ herinnering_id: hid, titel: pasCorrectiesToe(String(f('titel') || ''), cs), status: st, eigen: !codePagina(p.tekst), t_van: Number(f('t_van')) || 0,
+        plaats: typeof f('plaats') === 'string' ? pasCorrectiesToe(f('plaats'), cs).slice(0, 80) : '',
+        personen: pl.map((x) => ({ link: x, naam: path.basename(x.slice(2, -2)).replace(/\s*\(.*\)$/, '') })), voorval: vl ? { link: vl, titel: voorvalTitel(vl) } : null,
         datum: String(f('datum') || ''), datum_precisie: String(f('datum_precisie') || 'onbekend'), datum_van: String(f('datum_van') || ''), datum_tot: String(f('datum_tot') || ''), alineas });
     }
     delen.sort((a2, b2) => a2.t_van - b2.t_van || (a2.herinnering_id < b2.herinnering_id ? -1 : 1));

@@ -194,9 +194,11 @@ function maak(o) {
   }
   // Een foto mag alleen als hij NU in een gekoppeld album zit (review MOET 2): de lijst van dat album is hooguit 2 minuten oud, anders eerst
   // opnieuw bij Immich gevraagd. De app haalt de lijst altijd eerst op (fotos()), dus normaal is hij vers.
-  async function toegestaan(id) {
+  // mag (wv2306, toonmodus): alleen albums van herinneringen waarvoor mag(hid) true geeft
+  async function toegestaan(id, mag) {
     for (const [hid, c] of cache) {
       if (!c.fotos.some((f) => f.id === id)) continue;
+      if (mag && !mag(hid)) continue;
       if (nu() - c.op < TOEGANG_VERS_MS) return true;
       const rij = q.a.get(hid);
       if (!rij || rij.status !== 'actief') { cache.delete(hid); continue; }
@@ -204,10 +206,10 @@ function maak(o) {
     }
     return false;
   }
-  async function foto(id, maat) {
+  async function foto(id, maat, magHid) {
     if (!IM.UUID_RE.test(String(id))) return { status: 404, body: { ok: false, fout: 'onbekend' } };
     let mag;
-    try { mag = await toegestaan(id); } catch (e) { return { status: 503, body: { ok: false, fout: 'Immich was niet bereikbaar' } }; }
+    try { mag = await toegestaan(id, magHid); } catch (e) { return { status: 503, body: { ok: false, fout: 'Immich was niet bereikbaar' } }; }
     if (!mag) return { status: 404, body: { ok: false, fout: 'onbekend' } };
     let b;
     try { b = await im.beeld(id, maat); }

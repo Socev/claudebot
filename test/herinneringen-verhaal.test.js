@@ -288,6 +288,13 @@ test('voorstellen: persoon en voorval alleen als voorstel; koppeling pas na Ja, 
     const vm = path.join(o.vault, V.VOORVAL_MAP);
     assert.strictEqual(fs.readdirSync(vm).length, 1);
     assert.match(fs.readFileSync(path.join(vm, fs.readdirSync(vm)[0]), 'utf8'), /type: voorval[\s\S]*gevoelig: prive/);
+    // wv2306 (R3): samengesteld geeft de bevestigde personen en het voorval (titel van de voorvalpagina) voor de filters; afgewezen niet
+    const d1 = o.v.samengesteld(ID1, []).delen[0], d3 = o.v.samengesteld(ID3, []).delen[0];
+    assert.deepStrictEqual(d1.personen, [{ link: '[[20_Prive/Familie/Teun Proefman]]', naam: 'Teun Proefman' }]);
+    assert.strictEqual(d1.voorval, null, 'afgewezen voorval telt niet');
+    assert.strictEqual(d3.voorval && d3.voorval.titel, 'Regen op de camping');
+    assert.deepStrictEqual(d3.personen, [], 'nog niet bevestigd = geen persoon');
+    assert.strictEqual(typeof d1.plaats, 'string');
   } finally { o.sluit(); }
 });
 

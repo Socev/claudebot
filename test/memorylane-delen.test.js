@@ -36,11 +36,13 @@ const NEP_GEHEIM = 'nepgeheim-0123456789abcdef';
 
 // wv2180: nep-verhaalmodule (zelfde vorm als herinneringen-verhaal.js samengesteld); staat.verhalen[rid] = { titel, alineas, datum_* }
 function nepVerhaal(staat) {
-  return { samengesteld: (rid, cs) => {
+  return { voorstellen: () => staat.voorstellen || [], besluit: (id, k) => { (staat.besluiten = staat.besluiten || []).push([id, k]); return { status: 200, body: { ok: true, keuze: k } }; },
+    samengesteld: (rid, cs) => {
     const v = staat.verhalen[rid];
     if (!v) return { stand: null, versie: null, delen: [], niet_gelukt: [] };
     return { stand: 'klaar', versie: 2, niet_gelukt: [], delen: [{ herinnering_id: 'hr_0000000000000001', titel: V.pasCorrectiesToe(v.titel || '', cs), status: 'concept', eigen: false, t_van: 0,
       datum: v.datum_van || '', datum_precisie: v.datum_precisie || 'onbekend', datum_van: v.datum_van || '', datum_tot: v.datum_tot || '',
+      plaats: v.plaats || '', personen: v.personen || [], voorval: v.voorval || null,
       alineas: v.alineas.map((a, i) => ({ tekst: V.pasCorrectiesToe(a, cs), t_van: i * 60, t_tot: i * 60 + 60 })) }] };
   } };
 }
@@ -534,4 +536,103 @@ test('wv2180 titels: David wint altijd; daarna de vaste naamgeving; een opname d
     assert.strictEqual(M.naamVoorReis('20_Prive/Reizen/2022 - Edinburgh.md', { van: '2022-03-11' }, ['stedentrip']), 'Citytrip Edinburgh 2022');
     assert.strictEqual(M.naamVoorReis('20_Prive/Reizen/2025 - Campertrip West-Amerika.md', { van: '2025-07-11' }, ['zomer']), 'Zomervakantie 2025 - Campertrip West-Amerika');
   } finally { o.sluit(); }
+});
+
+// ── wv2306 (R3): toonmodus, afspelen, voorstellen, filters. Gemengde verzonnen set: niet gevoelig, gevoelig (vinkje), Privé, zonder categorie ──
+function wav(n) { const b = Buffer.alloc(44 + 3200); b.write('RIFF', 0, 'latin1'); b.write('WAVE', 8, 'latin1'); b.writeUInt8(n, 44); return b; }
+test('wv2306 toonmodus: alleen niet-gevoelig met categorie; geen titel, id of telling van gevoelige in lijst, detail, afspelen of foto\'s', async () => {
+  const o = omgeving();
+  try {
+    o.opname(RA, 'shizzle', false); o.opname(RB, null, false); o.opname(RC, 'gezin', true);
+    const RD = 'r20261031-00000000000000dd'; o.opname(RD, 'prive', true);
+    o.reis('2022 - Proefstad.md', 'reis', '2022-05-01 – 2022-05-04');
+    o.staat.verhalen[RA] = { titel: 'Proefzichtbaar Kampvuur', alineas: ['We zaten bij het kampvuur.'] };
+    o.staat.verhalen[RB] = { titel: 'Proefgeheim Zonder Categorie', alineas: ['Geheime proeftekst zonder categorie.'] };
+    o.staat.verhalen[RC] = { titel: 'Proefgeheim Gevoelig Vinkje', alineas: ['Geheime proeftekst met vinkje.'] };
+    o.staat.verhalen[RD] = { titel: 'Proefgeheim Prive', alineas: ['Geheime proeftekst privé.'] };
+    for (const id of [RA, RB, RC]) { fs.mkdirSync(path.join(o.hdir, 'audio', id), { recursive: true }); fs.writeFileSync(path.join(o.hdir, 'audio', id, '1.wav'), wav(1)); fs.writeFileSync(path.join(o.hdir, 'audio', id, '2.wav'), wav(2)); }
+    const vol = o.ml.lijst().body;
+    assert.strictEqual(vol.herinneringen.length, 5, 'zonder toonmodus alles');
+    const t = o.ml.lijst({ toon: true }).body;
+    assert.strictEqual(t.toon, true);
+    assert.deepStrictEqual(t.herinneringen.map((h) => h.soort).sort(), ['opname', 'reis']);
+    const js = JSON.stringify(t);
+    for (const w of ['Proefgeheim', 'Geheime', RB, RC, RD, o.hid('opname', RB), o.hid('opname', RC), o.hid('opname', RD)]) assert.ok(js.indexOf(w) < 0, 'lekt in de lijst: ' + w);
+    assert.ok(!t.categorieen.some((c) => c.id === 'prive'), 'geen categorie Privé in de filters');
+    assert.strictEqual(t.nieuw, 0);
+    const ha = o.hid('opname', RA);
+    const ka = t.herinneringen.find((h) => h.hid === ha);
+    assert.strictEqual(ka.audio, 2, 'aantal minuutstukken');
+    for (const k of ['zicht_familie', 'niet_deelbaar', 'blok', 'verteld', 'gevoelig_vink', 'toon_opname']) assert.ok(!(k in ka), 'toonlijst heeft geen ' + k);
+    // detail
+    const d = o.ml.detail(ha, { toon: true });
+    assert.strictEqual(d.status, 200);
+    assert.strictEqual(d.body.herinnering.verhaal.tekst, 'We zaten bij het kampvuur.');
+    assert.ok(!d.body.herinnering.log && !d.body.herinnering.opname && !d.body.herinnering.ramble_id && !d.body.herinnering.notitie, 'geen log, transcript of opnamepad');
+    assert.ok(JSON.stringify(d.body).indexOf('Proefdorp') < 0, 'transcript niet in het antwoord');
+    for (const id of [RB, RC, RD]) {
+      const h = o.hid('opname', id);
+      assert.strictEqual(o.ml.detail(h, { toon: true }).status, 403, 'detail gevoelig ' + id);
+      assert.strictEqual(o.ml.audio(h, 1, { toon: true }).status, 403, 'afspelen gevoelig ' + id);
+      assert.ok(JSON.stringify(o.ml.detail(h, { toon: true }).body).indexOf('Proefgeheim') < 0);
+    }
+    assert.strictEqual(o.ml.toonbaar(o.hid('opname', RB)), false);
+    // afspelen
+    const a1 = o.ml.audio(ha, 1, { toon: true });
+    assert.strictEqual(a1.status, 200); assert.strictEqual(a1.body.mime, 'audio/wav'); assert.strictEqual(a1.body.volgende, 2);
+    assert.strictEqual(Buffer.from(a1.body.data, 'base64').toString('latin1', 0, 4), 'RIFF');
+    assert.strictEqual(o.ml.audio(ha, 2).body.volgende, null);
+    assert.strictEqual(o.ml.audio(ha, 3).status, 404, 'onbekend stuk');
+    assert.strictEqual(o.ml.audio(o.hid('opname', RB), 1).status, 200, 'zonder toonmodus mag David alles afspelen');
+    assert.strictEqual(o.ml.audio(o.hid('reis', '20_Prive/Reizen/2022 - Proefstad.md'), 1).status, 404, 'een reis heeft geen opname');
+    fs.writeFileSync(path.join(o.hdir, 'audio', RA, '1.wav'), Buffer.from('geen wav'));
+    assert.strictEqual(o.ml.audio(ha, 1).status, 404, 'geen RIFF = geen geluid');
+    // review MOET 3: alleen een actieve opname; review MOET 2: een losse bijdrage (geen fotoalbum) nooit in de toonmodus, een fotoalbum wel
+    o.ing._db.prepare("UPDATE ml_herinnering SET status = 'afgewezen' WHERE hid = ?").run(o.hid('opname', RB));
+    assert.strictEqual(o.ml.audio(o.hid('opname', RB), 1).status, 404, 'niet-actieve opname = geen geluid');
+    const t2 = new Date(o.klok.t).toISOString();
+    o.ing._db.prepare("INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES ('h00000000000000c1', 'los', 'bijdrage:proef', 'overig', 0, 'actief', ?, ?)").run(t2, t2);
+    o.ing._db.prepare("INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES ('h00000000000000c2', 'los', 'google:0123456789abcdef', 'overig', 0, 'actief', ?, ?)").run(t2, t2);
+    const t3 = o.ml.lijst({ toon: true }).body.herinneringen.map((h) => h.hid);
+    assert.ok(!t3.includes('h00000000000000c1') && t3.includes('h00000000000000c2'), 'losse bijdrage niet, fotoalbum wel');
+    assert.strictEqual(o.ml.detail('h00000000000000c1', { toon: true }).status, 403);
+    // foto's: zonder Immich 404; met toon gevoelig = 403 vóór Immich
+    assert.strictEqual((await o.ml.fotos(o.hid('opname', RC), { toon: true })).status, 404);
+  } finally { o.sluit(); }
+});
+test('wv2306 voorstellen en filters: open voorstellen per herinnering; Ja/Nee via de verhaalmodule; personen, plaats en voorval uit het verhaal', async () => {
+  const o = omgeving();
+  try {
+    o.opname(RA, 'shizzle', false); o.opname(RB, 'gezin', false);
+    o.staat.verhalen[RA] = { titel: 'Proefkamp', alineas: ['We zaten bij het kampvuur.'], plaats: 'Proefdorp',
+      personen: [{ link: '[[20_Prive/Familie/Proefoom Kees]]', naam: 'Proefoom Kees' }], voorval: { link: '[[20_Prive/Herinneringen/Voorvallen/vo_0000000000000001]]', titel: 'Kamp 1999' } };
+    o.staat.verhalen[RB] = { titel: 'Proefstrand', alineas: ['Op het strand.'] };
+    o.staat.voorstellen = [{ id: 'vp_00000000000000a1', soort: 'persoon', herinnering_id: 'hr_0000000000000001', doel: '[[20_Prive/Familie/Proeftante Mies]]', naam: 'Mies', reden: 'naam in de opname' },
+      { id: 'vv_00000000000000b2', soort: 'voorval', herinnering_id: 'hr_ffffffffffffffff', doel: 'nieuw', naam: 'Ander voorval', reden: 'voorstel uit het verhaal' }];
+    o.ml.lijst();
+    const ha = o.hid('opname', RA);
+    const k = o.ml.lijst().body.herinneringen.find((h) => h.hid === ha);
+    assert.deepStrictEqual([k.personen, k.plaatsen, k.voorvallen], [['Proefoom Kees'], ['Proefdorp'], ['Kamp 1999']]);
+    const d = o.ml.detail(ha).body.herinnering;
+    assert.deepStrictEqual(d.voorstellen, [{ id: 'vp_00000000000000a1', soort: 'persoon', naam: 'Mies', reden: 'naam in de opname', doel: 'Proeftante Mies' }], 'alleen de voorstellen van deze opname');
+    assert.deepStrictEqual(o.ml.detail(ha, { toon: true }).body.herinnering.voorstellen, [], 'geen voorstellen in de toonmodus');
+    assert.strictEqual(o.ml.voorstel('vp_00000000000000a1', 'ja').status, 200);
+    assert.deepStrictEqual(o.staat.besluiten, [['vp_00000000000000a1', 'ja']]);
+  } finally { o.sluit(); }
+});
+test('wv2306 server.js: toonpoort vóór alle routes, alleen de leesroutes; uit = verse vingerafdruk; geen seintjes', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+  const poort = src.indexOf("if (mlToonAan(a.id) && !ML_TOON_ROUTES.some("), eerste = src.indexOf("if (route === 'GET /app/apparaten')");
+  assert.ok(poort > 0 && poort < eerste, 'poort staat vóór de eerste sessieroute');
+  const m = /const ML_TOON_ROUTES = (\[[\s\S]*?\]);/.exec(src);
+  const R = eval(m[1]);
+  const mag = (r) => R.some((x) => x.test(r));
+  for (const r of ['GET /app/memorylane/lijst', 'GET /app/memorylane/h/h0123456789abcdef', 'GET /app/memorylane/h/h0123456789abcdef/audio/3', 'GET /app/memorylane/h/h0123456789abcdef/fotos',
+    'GET /app/memorylane/f/0123abcd-0123-4567-89ab-0123456789ab/k', 'POST /app/memorylane/toon', 'GET /app/memorylane/toon', 'POST /app/aanwezig']) assert.ok(mag(r), r);
+  for (const r of ['GET /app/memorylane/delen', 'POST /app/memorylane/h/h0123456789abcdef/titel', 'POST /app/memorylane/h/h0123456789abcdef/categorie', 'POST /app/memorylane/voorstel/vp-0123456789abcdef/ja',
+    'POST /app/memorylane/stuk/s0123456789abcdef/opnemen', 'POST /app/memorylane/link/familie/aan', 'GET /app/ramble/r20261031-0123456789abcdef', 'POST /app/beurt', 'POST /app/zoek-snel',
+    'GET /app/geschiedenis/hoofd', 'GET /app/nieuw', 'GET /app/tripper/lijst', 'GET /app/memorylane/h/h0123456789abcdef/audio/0', 'GET /app/memorylane/h/h0123456789abcdef/x']) assert.ok(!mag(r), r);
+  assert.match(src, /if \(!d\.aan && toon\.toon && !appVersOk\(a, s\)\)/, 'uitzetten alleen vers');
+  assert.match(src, /if \(reden !== 'poets' && mlToonAan\(id\)\) return \{ ok: false, reden: 'toonmodus' \};/, 'geen seintjes');
+  assert.match(src, /toon: !!\(a && mlToonAan\(a\.id\)\)/, '/app/status kent de toonmodus');
 });

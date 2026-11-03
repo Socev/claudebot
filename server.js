@@ -5660,6 +5660,26 @@ async function appTelegram(tekst) {
 }
 
 // ── routes ──
+// wv2306 (MemoryLane R3, § 13.2): toonmodus per apparaat (blijft aan na herladen, slot of herstart van app en pod). Op schijf alleen
+// apparaat-id → tijd van aanzetten; geen inhoud. Onleesbaar bestand = leeg (gelogd).
+// Pad naast de herinneringen (0700); HERINNERINGEN_DIR staat verderop in dit bestand, dus pas bij gebruik opgezocht (in een vm-knipsel zonder
+// dat deel: de app-data van de toets).
+function mlToonPad() { let d = null; try { d = HERINNERINGEN_DIR; } catch (e) { d = null; } return path.join(d || APP_DATA, 'toonmodus.json'); }
+const ML_TOON_ROUTES = [/^GET \/app\/memorylane\/(lijst|toon)$/, /^POST \/app\/memorylane\/toon$/, /^GET \/app\/memorylane\/h\/h[0-9a-f]{16}(\/fotos|\/audio\/[1-9][0-9]?)?$/,
+  /^GET \/app\/memorylane\/f\/[0-9a-f-]{36}\/(k|g)$/, /^POST \/app\/aanwezig$/];
+let mlToon = null;
+function mlToonLees() {
+  if (mlToon) return mlToon;
+  try { const j = appLeesStreng(mlToonPad(), {}); mlToon = j && typeof j.apparaten === 'object' && j.apparaten ? j : { apparaten: {} }; }
+  catch (e) { logError('ml-toon', e); mlToon = { apparaten: {} }; }
+  return mlToon;
+}
+function mlToonAan(id) { return !!id && Object.prototype.hasOwnProperty.call(mlToonLees().apparaten, id); }
+function mlToonZet(id, aan) {
+  const t = mlToonLees(), oud = Object.assign({}, t.apparaten);
+  if (aan) t.apparaten[id] = new Date().toISOString(); else delete t.apparaten[id];
+  try { appSchrijfJson(mlToonPad(), t); return true; } catch (e) { logError('ml-toon', e); t.apparaten = oud; return false; }
+}
 async function appStatus(req, res, reg, lichaam) {
   const a = appApparaat(req, reg);
   let s = a ? appSessie(req, a, false) : null;
@@ -5678,7 +5698,8 @@ async function appStatus(req, res, reg, lichaam) {
     herstelcode_nodig: appKoppelOpen(reg) && appHerstelActief(reg),   // wv135: veld naast de koppelcode (alleen telefoon)
     sessie: !!s, sessie_tot: s ? new Date(s.tot).toISOString() : null, passkey_klaar: !!appWebauthn(),
     sessie_rest_s: s ? Math.max(0, Math.floor((s.tot - Date.now()) / 1000)) : null,   // wv205: resttijd, los van de klok van het apparaat
-    binding: bu && bu.u !== 'ok' ? (bu.u === 'fout' ? bu.r : 'ontbreekt') : null });
+    binding: bu && bu.u !== 'ok' ? (bu.u === 'fout' ? bu.r : 'ontbreekt') : null,
+    toon: !!(a && mlToonAan(a.id)) });   // wv2306: MemoryLane-toonmodus op dit apparaat (de app opent dan alleen MemoryLane)
 }
 
 // Let op (wv316): dit is de binding van het KOPPELCOOKIE aan een koppelpoging. De apparaatsleutel van een sessie heet
@@ -12014,6 +12035,8 @@ async function appPushStuur(id, reden, poets) {
   let sub;
   try { sub = appPushLees().apparaten[id]; } catch (e) { logError('app-push', e); return { ok: false, reden: 'push.json onleesbaar' }; }
   if (!sub) return { ok: false, reden: 'geen abonnement' };
+  // wv2306: in de toonmodus geen seintjes naar dit apparaat (een seintje kan een titel tonen); ze staan daarna gewoon in de app
+  if (reden !== 'poets' && mlToonAan(id)) return { ok: false, reden: 'toonmodus' };
   if (!a || !a.actief) {
     try { appPushWijzig(function (p) { delete p.apparaten[id]; }); } catch (e) { logError('app-push', e); }
     return { ok: false, reden: 'apparaat niet (meer) actief' };
@@ -12463,6 +12486,11 @@ function handleApp(req, res) {
           res._app.binding = appBindingTekst(bu); res._app.bindingTel = true; res._app.bindingExtra = bu;
           if (bu.u !== 'ok' && appBindingModus().modus === 'afdwingen') return appBindingWeiger(res, bu);
           if (ruw && bu.u === 'ok') res._app.inhoud = inhoud;
+        }
+        // wv2306 (MemoryLane R3, toonmodus § 13.2): staat de toonmodus op dit apparaat aan, dan alleen de leesroutes van MemoryLane (gefilterd)
+        // en de toonschakelaar; al het andere (Brain, gesprekken, Apps, schrijven) weigert de pod, ook bij een handig opgebouwd verzoek.
+        if (mlToonAan(a.id) && !ML_TOON_ROUTES.some(function (r) { return r.test(route); })) {
+          res._app.reden = 'toonmodus'; return appStuur(res, 403, { ok: false, fout: 'MemoryLane laat nu alleen herinneringen zien', toon: true });
         }
         appHerstelVorigeWeg(reg, a);   // wv135
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10); sinds
@@ -18869,7 +18897,7 @@ async function appMemorylane(req, res, a, s, route, d) {
   // wv2120: één foto uit een gekoppeld Immich-album (k = miniatuur, g = groot voorbeeld) als JSON {mime, data}; eigen teller (een album = veel foto's)
   if ((m = /^GET \/app\/memorylane\/f\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(k|g)$/.exec(route))) {
     if (!appTeller('memorylane-foto', 3000, 3600000)) return appWeiger(res, 429, 'te veel foto\'s dit uur', 'grens memorylane-foto');
-    try { return antw('foto', await memorylaneDelen.foto(m[1], m[2] === 'g' ? 'groot' : 'klein')); }
+    try { return antw('foto', await memorylaneDelen.foto(m[1], m[2] === 'g' ? 'groot' : 'klein', { toon: mlToonAan(a.id) })); }
     catch (e) { logError('memorylane-foto', e); return appWeiger(res, 503, 'de foto kon nu niet geladen worden', 'ml foto fout'); }
   }
   if (!appTeller('memorylane', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens memorylane');
@@ -18880,11 +18908,26 @@ async function appMemorylane(req, res, a, s, route, d) {
   };
   const daarna = function () { setTimeout(function () { memorylaneDelenTik(); }, 0); };
   try {
-    if (route === 'GET /app/memorylane/lijst') return antw('lijst', memorylaneDelen.lijst());
+    const toon = { toon: mlToonAan(a.id) };   // wv2306
+    if (route === 'GET /app/memorylane/toon') return antw('toon', { status: 200, body: { ok: true, toon: toon.toon } });
+    if (route === 'POST /app/memorylane/toon') {
+      if (typeof d.aan !== 'boolean') return appWeiger(res, 400, 'aan: true of false', 'ml toon');
+      // aan mag zonder vingerafdruk (de veilige kant op) en verbruikt een nog verse vingerafdruk; uit alleen met een verse
+      if (!d.aan && toon.toon && !appVersOk(a, s)) { res._app.reden = 'memorylane toon uit, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true, toon: true }); }
+      s.vers_tot = 0;
+      if (!mlToonZet(a.id, d.aan)) return appWeiger(res, 503, 'de toonmodus kon niet bewaard worden; probeer het opnieuw', 'ml toon opslag');
+      return antw('toon ' + (d.aan ? 'aan' : 'uit'), { status: 200, body: { ok: true, toon: d.aan } });
+    }
+    if (route === 'GET /app/memorylane/lijst') return antw('lijst', memorylaneDelen.lijst(toon));
     if (route === 'GET /app/memorylane/delen') return antw('delen', memorylaneDelen.delenStand());
-    if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})$/.exec(route))) return antw('detail', memorylaneDelen.detail(m[1]));
+    if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})$/.exec(route))) return antw('detail', memorylaneDelen.detail(m[1], toon));
+    if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/audio\/([1-9][0-9]?)$/.exec(route))) return antw('audio', memorylaneDelen.audio(m[1], Number(m[2]), toon));   // wv2306
+    if ((m = /^POST \/app\/memorylane\/voorstel\/(v[pv])-([0-9a-f]{16})\/(ja|nee)$/.exec(route))) {   // wv2306: koppelvoorstel (persoon/voorval) na Davids keuze
+      const u = memorylaneDelen.voorstel(m[1] + '_' + m[2], m[3]);
+      return antw('voorstel ' + m[3], u);
+    }
     // wv2120: foto's van het gekoppelde album; gevel kiezen; foto's bij de deellinks (aan = naar buiten: verse vingerafdruk); album (opnieuw) maken
-    if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/fotos$/.exec(route))) return antw('fotos', await memorylaneDelen.fotos(m[1]));
+    if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/fotos$/.exec(route))) return antw('fotos', await memorylaneDelen.fotos(m[1], toon));
     if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(gevel|foto-delen|album)$/.exec(route))) {
       if (m[2] === 'foto-delen' && d && d.aan === true && !naarBuiten('foto-delen')) return;
       const u = m[2] === 'gevel' ? await memorylaneDelen.gevel(m[1], d) : m[2] === 'foto-delen' ? await memorylaneDelen.fotoDelen(m[1], d) : await memorylaneDelen.albumMaken(m[1]);

@@ -719,11 +719,45 @@ function maak(o) {
   }
 
   // ── voor de app ──
+  // ── wv2306 (R3): toonmodus, afspelen, voorstellen, filters ──
+  // Toonbaar in de toonmodus (§ 13.2): actief, met een categorie, niet gevoelig; een opname alleen met notitie en geen proef.
+  function toonbaar(h) {
+    if (!h || h.status !== 'actief' || !catVan(h).categorie || isGevoelig(h)) return false;
+    if (h.soort === 'los' && !isFotoalbum(h)) return false;   // review MOET 2: een losse bijdrage van een bezoeker niet in de toonmodus
+    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); if (!r || r.status !== 'notitie' || r.proef) return false; }
+    return true;
+  }
+  const AUDIO_RE = /^([1-9][0-9]?)\.wav$/;
+  // de minuutstukken (WAV) van een opname in het audio-archief van herinneringen.js → [n, …] oplopend; [] zonder archief
+  function audioStukken(h) {
+    if (h.soort !== 'opname' || !/^r[0-9]{8}-[0-9a-f]{16}$/.test(String(h.ref || ''))) return [];
+    const r = q.ramble.get(h.ref);
+    if (!r || r.proef) return [];
+    let namen = [];
+    try { namen = fs.readdirSync(path.join(DIR, 'audio', h.ref)); } catch (e) { return []; }
+    return namen.map((n) => AUDIO_RE.exec(n)).filter(Boolean).map((m) => Number(m[1])).sort((a, b) => a - b);
+  }
+  // personen, plaatsen en voorvallen uit het verhaal (alleen wat David met Ja koppelde; plaats zoals het verhaal hem noemt)
+  function facetten(x) {
+    const per = new Set(), pl = new Set(), vv = new Set();
+    for (const d of (x && x.delen) || []) {
+      for (const p2 of d.personen || []) if (p2 && p2.naam) per.add(p2.naam);
+      if (d.plaats) pl.add(d.plaats);
+      if (d.voorval && d.voorval.titel) vv.add(d.voorval.titel);
+    }
+    return { personen: [...per].sort(), plaatsen: [...pl].sort(), voorvallen: [...vv].sort() };
+  }
+  // Wat de toonmodus van een herinnering geeft: geen log, geen bijdragen, geen deelstand, geen paden of ids van de opname
+  function toonKort(k) {
+    return { hid: k.hid, soort: k.soort, bron: k.bron, status: k.status, titel: k.titel, wanneer: k.wanneer, wanneer_bron: k.wanneer_bron, datum: k.datum, categorie: k.categorie,
+      gevoelig: false, personen: k.personen, plaatsen: k.plaatsen, voorvallen: k.voorvallen, audio: k.audio, binnen: 0, vastgehouden: 0, stukken: 0,
+      zicht: { familie: false, vrienden: false }, album: k.album ? { status: k.album.status, aantal: k.album.aantal } : null };
+  }
   function kort(h, pagina, s) {
     const p = pagina === undefined ? paginaLees(h.hid) : pagina;
     const x = s === undefined ? sam(h, p) : s;
     const st = q.sVan.all(h.hid), c = catVan(h), b = q.blok.all(h.hid)[0], w = wanneerInfo(h, p, x);
-    return { hid: h.hid, soort: h.soort, bron: isFotoalbum(h) ? 'google' : null, status: h.status, titel: titelVan(h, p, x), wanneer: w.tekst || w.verteld, wanneer_bron: w.bron, wanneer_invoer: w.invoer,
+    return { ...facetten(x), audio: audioStukken(h).length, hid: h.hid, soort: h.soort, bron: isFotoalbum(h) ? 'google' : null, status: h.status, titel: titelVan(h, p, x), wanneer: w.tekst || w.verteld, wanneer_bron: w.bron, wanneer_invoer: w.invoer,
       verteld: w.verteld, datum: sorteerSleutel(h, w), categorie: c.categorie, gevoelig: isGevoelig(h), gevoelig_vink: c.gevoeligVink,
       zicht: { familie: !!h.zicht_familie, vrienden: !!h.zicht_vrienden },
       toon_opname: !!h.toon_opname, niet_deelbaar: nietDeelbaar(h), blok: b ? b.reden : null,
@@ -731,18 +765,34 @@ function maak(o) {
       stukken: st.filter((y) => y.status !== 'weggegooid').length, binnen: st.filter((y) => y.status === 'binnen').length,
       vastgehouden: st.filter((y) => y.status === 'vastgehouden').length, album: F ? F.kort(h.hid) : null };
   }
-  function lijst() {
+  // opt.toon (wv2306): de toonmodus van dit apparaat staat aan → alleen toonbare herinneringen, ingekort; geen gevoelige categorie in de lijst
+  function lijst(opt) {
+    const toon = !!(opt && opt.toon);
     bijwerken();
-    const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen').map((h) => kort(h));
+    const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen' && (!toon || toonbaar(h))).map((h) => (toon ? toonKort(kort(h)) : kort(h)));
     alle.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : a.hid < b.hid ? -1 : 1));
-    return { status: 200, body: { ok: true, herinneringen: alle, immich: F ? { aan: true, sleutel: F.info().sleutel, fout: F.info().fout } : { aan: false }, categorieen: Object.keys(CAT).map((id) => ({ id, naam: CAT[id].naam, gevoelig: !!CAT[id].gevoelig })),
+    if (toon) {
+      return { status: 200, body: { ok: true, toon: true, herinneringen: alle, immich: F ? { aan: true } : { aan: false },
+        categorieen: Object.keys(CAT).filter((id) => !CAT[id].gevoelig).map((id) => ({ id, naam: CAT[id].naam, gevoelig: false })), nieuw: 0 } };
+    }
+    return { status: 200, body: { ok: true, toon: false, herinneringen: alle, immich: F ? { aan: true, sleutel: F.info().sleutel, fout: F.info().fout } : { aan: false }, categorieen: Object.keys(CAT).map((id) => ({ id, naam: CAT[id].naam, gevoelig: !!CAT[id].gevoelig })),
       nieuw: alle.reduce((n, h) => n + h.binnen + h.vastgehouden, 0) } };
   }
   function vind(hid) { return HID_RE.test(String(hid)) ? q.h.get(hid) : null; }
-  function detail(hid) {
+  const NIET_TOON = { status: 403, body: { ok: false, fout: 'niet beschikbaar', toon: true } };
+  function detail(hid, opt) {
     const h = vind(hid);
     if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
     const pagina = paginaLees(h.hid), s = sam(h, pagina);
+    if (opt && opt.toon) {
+      if (!toonbaar(h)) return NIET_TOON;
+      // alleen het samengestelde verhaal (zonder tijdcodes en zonder "door jou aangepast"); nooit de log
+      const t = toonKort(kort(h, pagina, s));
+      t.verhaal = { tekst: verhaalVan(h, pagina, s), stand: h.soort === 'opname' ? (s ? s.stand : null) : null,
+        delen: s ? s.delen.map((d) => ({ titel: d.titel, eigen: false, alineas: d.alineas.map((a) => ({ tekst: a.tekst, t_van: null, t_tot: null })) })) : [] };
+      t.stukken_lijst = []; t.voorstellen = [];
+      return { status: 200, body: { ok: true, toon: true, herinnering: t } };
+    }
     const stukken = q.sVan.all(h.hid).filter((x) => x.status !== 'weggegooid').map((x) => ({ sid: x.sid, wie: x.wie, naam: stukNaam(x, pagina), kring: x.kring, vorm: x.vorm,
       soort: x.soort, status: x.status, marker: x.marker, op: x.binnen_op, tekst: stukTekst(x, pagina) }));
     const uit = Object.assign(kort(h, pagina, s), { stukken_lijst: stukken });
@@ -755,6 +805,7 @@ function maak(o) {
     if (h.soort === 'opname') { uit.opname = uit.log.opname; const r = q.ramble.get(h.ref); uit.ramble_id = h.ref; uit.notitie = r ? r.notitie : null; }
     if (h.soort === 'reis') uit.pagina = h.ref;
     uit.pagina_stukken = paginaRel(h.hid);
+    uit.voorstellen = voorstellenVan(s);
     return { status: 200, body: { ok: true, herinnering: uit } };
   }
   function zicht(hid, d) {
@@ -870,10 +921,53 @@ function maak(o) {
     naarVault(); vuilAlle();
     return { status: 200, body: { ok: true, status: q.s.get(s.sid).status } };
   }
+  // wv2306: open koppelvoorstellen (persoon, voorval) van de verhalen van deze opname; koppelen pas na Davids Ja (besluit)
+  function voorstellenVan(s) {
+    if (!s || !s.delen.length || !o.verhaal || typeof o.verhaal.voorstellen !== 'function') return [];
+    const hids = new Set(s.delen.map((d) => d.herinnering_id));
+    let l = [];
+    try { l = o.verhaal.voorstellen(); } catch (e) { fout('ml-voorstellen', e); return []; }
+    return l.filter((v) => hids.has(v.herinnering_id)).map((v) => ({ id: v.id, soort: v.soort, naam: v.naam, reden: v.reden,
+      doel: v.soort === 'persoon' ? path.basename(String(v.doel).replace(/^\[\[|\]\]$/g, '')) : null }));
+  }
+  function voorstel(id, keuze) {
+    if (!o.verhaal || typeof o.verhaal.besluit !== 'function') return { status: 404, body: { ok: false, fout: 'geen verhaalmodule' } };
+    return o.verhaal.besluit(id, keuze);
+  }
+  // Eén minuutstuk van de opname als WAV (base64 in JSON: het doorgeefluik geeft alleen JSON door). Alleen voor een actieve opname;
+  // in de toonmodus alleen als hij toonbaar is (anders 403). De route zit onder het app-slot (zonder sessie 401) en het antwoord is no-store.
+  function audio(hid, n, opt) {
+    const h = vind(hid);
+    if (!h || h.status === 'weg' || h.soort !== 'opname') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.toon && !toonbaar(h)) return NIET_TOON;
+    if (h.status !== 'actief') return { status: 404, body: { ok: false, fout: 'onbekend' } };   // review MOET 3
+    const l = audioStukken(h), k = Number(n);
+    if (!Number.isInteger(k) || l.indexOf(k) < 0) return { status: 404, body: { ok: false, fout: 'geen geluid' } };
+    let b;
+    try { b = fs.readFileSync(path.join(DIR, 'audio', h.ref, k + '.wav')); } catch (e) { return { status: 404, body: { ok: false, fout: 'geen geluid' } }; }
+    if (b.length < 44 || b.length > 2.5 * 1024 * 1024 || b.toString('latin1', 0, 4) !== 'RIFF') return { status: 404, body: { ok: false, fout: 'geen geluid' } };
+    const i = l.indexOf(k);
+    return { status: 200, body: { ok: true, n: k, volgende: i + 1 < l.length ? l[i + 1] : null, stukken: l.length, mime: 'audio/wav', data: b.toString('base64') } };
+  }
   // ── wv2120: foto's (Immich) ──
   function metAlbum(hid) { const h = vind(hid); return h && h.status !== 'weg' ? h : null; }
-  async function fotos(hid) { if (!F) return { status: 404, body: { ok: false, fout: 'geen Immich' } }; if (!metAlbum(hid)) return { status: 404, body: { ok: false, fout: 'onbekend' } }; return F.fotos(hid); }
-  async function foto(id, maat) { if (!F) return { status: 404, body: { ok: false, fout: 'geen Immich' } }; return F.foto(id, maat); }
+  async function fotos(hid, opt) {
+    if (!F) return { status: 404, body: { ok: false, fout: 'geen Immich' } };
+    const h = metAlbum(hid);
+    if (!h) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.toon) {
+      if (!toonbaar(h)) return NIET_TOON;
+      const u = await F.fotos(hid);
+      if (u.status === 200 && u.body && u.body.album) u.body = { ok: true, toon: true, album: { status: u.body.album.status, aantal: u.body.album.aantal, gevel: u.body.album.gevel }, fotos: u.body.fotos };
+      return u;
+    }
+    return F.fotos(hid);
+  }
+  // in de toonmodus alleen een foto uit het album van een toonbare herinnering
+  async function foto(id, maat, opt) {
+    if (!F) return { status: 404, body: { ok: false, fout: 'geen Immich' } };
+    return F.foto(id, maat, opt && opt.toon ? (hid) => toonbaar(vind(hid)) : null);
+  }
   async function gevel(hid, d) { if (!F || !metAlbum(hid)) return { status: 404, body: { ok: false, fout: 'onbekend' } }; const u = await F.gevel(hid, d); if (u.status === 200) vuilAlle(); return u; }
   async function fotoDelen(hid, d) {
     const h = F && metAlbum(hid);
@@ -943,7 +1037,7 @@ function maak(o) {
     return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
-  return { lijst, detail, zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, fotoDelen, albumMaken, reisKoppeling,
+  return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, fotoDelen, albumMaken, reisKoppeling,
     fotoSync, _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }
