@@ -2806,7 +2806,25 @@ test('wv2218 zaakregister: lagen per draad, inbox nooit → laag blijft, eerst i
   // de lijst in de app
   let a = zakenApp(mm);
   assert.equal(a.status, 200); assert.equal(a.j.aan, true);
-  assert.deepEqual(a.j.tellers, { jij: 2, socev: 2, weg: 3, afgedaan: 1 });
+  assert.deepEqual(a.j.tellers, { jij: 2, socev: 2, weg: 3, afgedaan: 1, zien: 2 });
+  // wv2291: zien = weg én nog in de inbox (nb en sys; nooit niet); weg blijft het geheel; elke zaak heeft het id van zijn nieuwste besluit
+  assert.deepEqual(a.j.lagen.zien.map(function (z) { return z.draad; }).sort(), [nb.threadId, sys.threadId].sort());
+  assert.equal(a.j.lagen.weg.length, 3);
+  assert.equal(a.j.lagen.jij.find(function (z) { return z.draad === actie.threadId; }).besluit, rij(mm, actie.id).id);
+  assert.ok(Object.keys(a.j.lagen).every(function (g) { return a.j.lagen[g].every(function (z) { return Number.isInteger(z.besluit) && z.besluit > 0; }); }), 'elke zaak een besluit-id');
+  // wv2291 review MOET 1: een slotje geeft geen besluit-id en de pod leest marker- of zorgmail nooit, ook niet via een ander bericht in de draad
+  assert.ok(mm.mailBron(rij(mm, actie.id).id), 'gewone mail is te lezen');
+  mm._db.prepare('UPDATE besluit SET marker = 1 WHERE gmail_id = ?').run(actie.id);
+  assert.equal(mm.mailBron(rij(mm, actie.id).id), null, 'patiëntmarker');
+  mm._db.prepare("UPDATE besluit SET marker = 0, marker_soorten = 'zorgmail' WHERE gmail_id = ?").run(actie.id);
+  assert.equal(mm.mailBron(rij(mm, actie.id).id), null, 'zorgmail');
+  mm._db.prepare('UPDATE besluit SET marker_soorten = NULL WHERE gmail_id = ?').run(actie.id);
+  mm._db.prepare("UPDATE zaak SET laag_reden = 'slotje' WHERE thread_id = ?").run(actie.threadId);
+  assert.equal(mm.mailBron(rij(mm, actie.id).id), null, 'draad met een slotje');
+  assert.equal(zakenApp(mm).j.lagen.jij.find(function (z) { return z.draad === actie.threadId; }).besluit, null, 'slotje: geen besluit-id');
+  mm._db.prepare("UPDATE zaak SET laag_reden = 'actie_mogelijk' WHERE thread_id = ?").run(actie.threadId);
+  assert.ok(mm.mailBron(rij(mm, actie.id).id), 'weer te lezen');
+  assert.equal(zakenApp(mm, 'zien', 1).status, 200); assert.equal(zakenApp(mm, 'zien', 1).j.lagen.zien.length, 2); assert.equal(zakenApp(mm, 'zien', 1).j.lagen.weg, undefined);
   assert.deepEqual(a.j.lagen.afgedaan.map(function (z) { return z.draad; }), [arch.threadId]);
   const rj = a.j.lagen.jij.find(function (z) { return z.draad === actie.threadId; });
   assert.equal(rj.onderwerp, 'Kun je dit tekenen?'); assert.equal(rj.domein, 'voorbeeld.invalid'); assert.equal(rj.reden, 'actie_mogelijk');

@@ -1339,13 +1339,18 @@ function maak(o) {
   }
   // GET /app/mail/zaken[/<groep>/<pagina>] — de lijst Jij · Socev deed · Weggezet · Afgedaan (alleen lezen). Afzender en onderwerp uit het
   // nieuwste besluit van de draad (na 14 dagen alleen het domein). Alleen zaken met een bericht van de laatste 14 dagen; ≤ 100 per groep.
-  const ZAAK_GROEPEN = { jij: "z.afgehandeld IS NULL AND z.laag = 'jij'", socev: "z.afgehandeld IS NULL AND z.laag = 'socev'", weg: "z.afgehandeld IS NULL AND z.laag = 'weg'", afgedaan: 'z.afgehandeld IS NOT NULL' };
+  // wv2291: zien = de deelverzameling van weg die nog in Davids inbox staat (bak "Om te zien" in het Mail-venster); weg blijft het geheel, zodat
+  // een oudere app (vier groepen) niets mist. Telt dus dubbel met weg: de app trekt zien van weg af.
+  const ZAAK_GROEPEN = { jij: "z.afgehandeld IS NULL AND z.laag = 'jij'", socev: "z.afgehandeld IS NULL AND z.laag = 'socev'", weg: "z.afgehandeld IS NULL AND z.laag = 'weg'", afgedaan: 'z.afgehandeld IS NOT NULL',
+    zien: "z.afgehandeld IS NULL AND z.laag = 'weg' AND z.inbox = 'ja'" };
   function zaakRij(z) {
     const tw = z.laag === 'jij' && z.laag_reden === 'socev_weet_het_niet'
       ? db.prepare("SELECT id FROM besluit WHERE postvak = ? AND thread_id = ? AND inhaal = 0 AND status = 'klaar' AND stroom = 'twijfel' AND juist IS NULL ORDER BY id DESC LIMIT 1").get(z.postvak, z.thread_id) : null;
     return { draad: z.thread_id, laag: z.laag, reden: z.laag_reden, detail: z.laag_detail || null, sinds: z.laag_sinds, eerste: z.eerste, laatste: z.laatste, berichten: z.berichten,
       inbox: z.inbox, inbox_tijd: z.inbox_tijd || null, eigen_archief: !!z.eigen_archief, afgehandeld: z.afgehandeld || null, heropend: z.heropend || null, beantwoord: z.beantwoord || null,
-      afzender: z.afzender || null, naam: z.van_naam || null, domein: z.afzender_domein || null, onderwerp: z.onderwerp || null, namen_weg: !!z.namen_weg, twijfel: tw ? tw.id : null };
+      afzender: z.afzender || null, naam: z.van_naam || null, domein: z.afzender_domein || null, onderwerp: z.onderwerp || null, namen_weg: !!z.namen_weg, twijfel: tw ? tw.id : null,
+      // wv2291: nieuwste bericht van de draad, voor het gesprek rechts (POST /app/mailman/mail); nooit bij een slotje (review MOET 1)
+      besluit: z.laag_reden === 'slotje' ? null : z.laatste_besluit || null };
   }
   function lokaleDag(ms) { try { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); } catch (e) { return new Date(ms).toISOString().slice(0, 10); } }
   function zakenLijst(d) {
@@ -3013,8 +3018,12 @@ function maak(o) {
   // wv2029 voorbeeld rechts: welke Gmail-mail hoort bij dit besluit (server.js leest hem via het lees-luik; MailMan bewaart geen tekst).
   // Alleen zolang de namen er nog zijn (14 dagen) en nooit voor verzonden mail of concepten (stap buiten).
   function mailBron(id) {
-    const b = db.prepare('SELECT id, postvak, gmail_id, bijlagen, stap FROM besluit WHERE id = ? AND namen_weg IS NULL').get(Number(id));
+    const b = db.prepare('SELECT id, postvak, gmail_id, bijlagen, stap, marker, marker_soorten, reden FROM besluit WHERE id = ? AND namen_weg IS NULL').get(Number(id));
     if (!b || b.stap === 'buiten' || !ID_RE.test(String(b.gmail_id))) return null;
+    // wv2291 (review MOET 1): patiëntmarker of zorgmail (slotje) nooit via de pod lezen — open zelf in Gmail; ook niet als een ander bericht
+    // in dezelfde draad het slotje gaf
+    if (b.marker || b.marker_soorten === 'zorgmail' || b.reden === 'zorgmail') return null;
+    if (db.prepare("SELECT 1 FROM zaak WHERE postvak = ? AND thread_id = (SELECT thread_id FROM besluit WHERE id = ?) AND laag_reden = 'slotje'").get(b.postvak, b.id)) return null;
     let bij = []; try { bij = JSON.parse(b.bijlagen || '[]'); } catch (e) { bij = []; }
     return { id: b.id, postvak: b.postvak, gmail_id: b.gmail_id, gedeeld: GEDEELD.has(b.postvak), bijlagen: Array.isArray(bij) ? bij.map(String).slice(0, 20) : [] };
   }
