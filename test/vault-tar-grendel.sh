@@ -50,6 +50,7 @@ toets 'onderhoudsstand uit: grendel vrij' 'flock -n "$LOCK" true'
 H=0 draai vault_snapshot_indien_nodig
 toets 'vrije grendel: tar gemaakt en stempel van vandaag' '[ -s "$tar_" ] && [ "$(cat "$T/bin/laatste-vault-snapshot")" = "$dag" ]'
 toets 'vrije grendel: inhoud klopt (20 notities)' '[ "$(tar -tzf "$tar_" | grep -c "\.md$")" -eq 20 ]'
+toets 'geslaagde snapshot: herpoging-stempel weg (wv2281)' '[ ! -e "$T/bin/laatste-vault-snapshot-grendel" ] && [ ! -e "$T/bin/laatste-vault-snapshot-grendel.tmp" ]'
 # 4. Losse houder (bv. syncronde) die binnen de wachttijd loslaat: tar wacht en draait.
 rm -f "$tar_" "$T/bin/laatste-vault-snapshot" "$T/bin/laatste-vault-snapshot-grendel"
 ( flock "$LOCK" sleep 2 ) & sleep 0.3
@@ -61,6 +62,21 @@ mv "$T/vault" "$T/vault.weg"; mkdir "$T/vault"; chmod 000 "$T/vault"
 W=2 draai vault_snapshot; rc=$?
 chmod 755 "$T/vault"; rm -rf "$T/vault"; mv "$T/vault.weg" "$T/vault"
 toets 'andere fout: rc 1 (niet de grendelcode 75), geen herpoging-stempel' '[ $rc -eq 1 ] && [ ! -e "$T/bin/laatste-vault-snapshot-grendel" ]'
+
+# 5b. wv2281: één onleesbaar bestand (tar 2) via vault_snapshot_indien_nodig: geen dagstempel, wél herpoging-stempel, en binnen
+# VAULT_TAR_HERPOGING geen nieuwe tar (3-11-2026: zonder stempel draaide elke tik een volle tar). Na de herpoging wel weer.
+rm -f "$tar_" "$T/bin/laatste-vault-snapshot" "$T/bin/laatste-vault-snapshot-grendel"
+echo geheim > "$T/vault/sub/dicht.pdf"; chmod 000 "$T/vault/sub/dicht.pdf"
+n0=$(grep -c "^.* start snapshot" "$log")
+H=3600 draai vault_snapshot_indien_nodig; rc=$?
+toets 'onleesbaar bestand: functie rc 0, geen tar, geen dagstempel' '[ $rc -eq 0 ] && [ ! -e "$tar_" ] && [ ! -e "$T/bin/laatste-vault-snapshot" ]'
+toets 'onleesbaar bestand: herpoging-stempel gezet' '[ -s "$T/bin/laatste-vault-snapshot-grendel" ]'
+toets 'onleesbaar bestand: logregel nieuwe poging over 3600s' 'grep -q "niet gelukt - nieuwe poging over 3600s" "$log" && ! grep -q "morgen opnieuw" "$log"'
+H=3600 draai vault_snapshot_indien_nodig; H=3600 draai vault_snapshot_indien_nodig
+toets 'onleesbaar bestand: binnen de herpoging geen nieuwe tar' '[ "$(grep -c "^.* start snapshot" "$log")" -eq $((n0+1)) ]'
+H=0 draai vault_snapshot_indien_nodig
+toets 'onleesbaar bestand: na de herpoging wel een nieuwe poging' '[ "$(grep -c "^.* start snapshot" "$log")" -eq $((n0+2)) ]'
+chmod 644 "$T/vault/sub/dicht.pdf"; rm -f "$T/vault/sub/dicht.pdf" "$T/bin/laatste-vault-snapshot-grendel"
 
 # 6. SIGTERM tijdens het wachten op de grendel: de trap draait meteen (tar op de achtergrond + wait; Opus-review ZOU 1).
 rm -f "$T/bin/laatste-vault-snapshot" "$T/bin/laatste-vault-snapshot-grendel"

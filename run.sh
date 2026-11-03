@@ -796,13 +796,18 @@ vault_snapshot_indien_nodig(){
   gedaan="$(cat "$BACKUP_MARKER" 2>/dev/null || echo '')"
   [ "$gedaan" = "$vandaag" ] && return 0
   # Na een bezette grendel (R2) niet elke 30 s opnieuw 15 min wachten: eerst VAULT_TAR_HERPOGING s rust.
+  # wv2281: ook na een gewone fout (tar >= 2, ruimte, inhoudscontrole). Op 3-11-2026 maakte één onleesbaar vaultbestand (600,
+  # ACL-masker ---) dat er elke tik een volle tar van 1,3 GB draaide ("morgen opnieuw" zonder stempel = elke 30 s opnieuw).
   local vorige nu rc
   nu="$(date +%s)"; vorige="$(cat "$VAULT_TAR_POGING" 2>/dev/null || echo 0)"
   case "$vorige" in (*[!0-9]*|'') vorige=0 ;; esac
   [ $(( nu - vorige )) -lt "$VAULT_TAR_HERPOGING" ] && return 0
+  # Stempel VÓÓR de poging (review gpt-5.5 MOET 1): ook als de poging zo misgaat dat er daarna niets te schrijven valt
+  # (schijf vol, I/O), draait er pas na VAULT_TAR_HERPOGING s een volgende. Via tmp + mv: nooit een leeg stempelbestand.
+  printf '%s\n' "$nu" > "$VAULT_TAR_POGING.tmp" 2>/dev/null && mv -f "$VAULT_TAR_POGING.tmp" "$VAULT_TAR_POGING" 2>/dev/null
   vault_snapshot; rc=$?
-  if [ "$rc" -eq "$GRENDEL_BEZET" ]; then date +%s > "$VAULT_TAR_POGING"
-  elif [ "$rc" -ne 0 ]; then blog "snapshot van $vandaag niet gelukt - morgen opnieuw"
+  if [ "$rc" -eq 0 ]; then rm -f "$VAULT_TAR_POGING"
+  elif [ "$rc" -ne "$GRENDEL_BEZET" ]; then blog "snapshot van $vandaag niet gelukt - nieuwe poging over ${VAULT_TAR_HERPOGING}s"
   fi
   return 0
 }
