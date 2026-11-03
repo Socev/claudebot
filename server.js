@@ -9838,7 +9838,21 @@ const APP_MOET_BERICHT_MAX = 6000;
 const APP_MOET_DAG_MAX = 600;
 const APP_MOET_MAX = 30;
 const APP_MOET_WV_RE = /\bwv\s?(\d{2,4})\b/gi;
-function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs, afgeleid) {
+// wv2317 (David 3-11: "Aanvoer stil" bleef staan terwijl de aanvoer al terug was): een stiltewachter-dagbericht telt niet meer
+// zodra elke stroom die erin staat in stilte_state weer gezond is met laatste_executie ná het bericht (zelfde regel als de
+// stilte-kaarten in appMeldingenVerzamel). Geen stand (null), geen leesbare stroom of één stroom nog niet terug: blijft staan.
+function appStilWeerTerug(tekst, stilte, t) {
+  if (!Array.isArray(stilte)) return false;
+  const s = appStilLees(tekst);
+  if (!s.length) return false;
+  const nu = {};
+  stilte.forEach(function (r) { if (r && r.naam) nu[String(r.naam)] = r; });
+  return s.every(function (x) {
+    const st = nu[x.naam];
+    return !!(st && st.status === 'gezond' && st.laatste_executie && Date.parse(st.laatste_executie) > t);
+  });
+}
+function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs, afgeleid, stilte) {
   const vandaag = appYmd(nu), gekoppeld = {}, kaartWv = {}, kaartJob = {};
   // tot = tot wanneer gestelde vragen wijken: open of later (review wv594 #1: ook geparkeerd) = altijd, dicht = tot gesloten_op
   const totZet = function (o, k, tot) { if (!(o[k] >= tot)) o[k] = tot; };
@@ -9881,7 +9895,8 @@ function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs
         return;
       }
       const dag = x.meld ? x.meld === 'dag' : x.klasse === 'dringend';
-      if (kanaal === 'hoofd' && x.soort === 'socev' && dag && x.klasse !== 'stil' && x.bron !== 'briefing' && x.ok !== false && appYmd(t) === vandaag)
+      if (kanaal === 'hoofd' && x.soort === 'socev' && dag && x.klasse !== 'stil' && x.bron !== 'briefing' && x.ok !== false && appYmd(t) === vandaag
+        && !(x.bron === 'stiltewachter-david' && appStilWeerTerug(x.antwoord, stilte, t)))   // wv2317
         uit.push(Object.assign({ punt: 'd:' + x.job_id, soort: 'dag', bericht: appMoetBericht(x.antwoord, APP_MOET_DAG_MAX), afgekapt: appMoetAf(x.antwoord, APP_MOET_DAG_MAX) }, basis));
     });
   });
@@ -9913,7 +9928,26 @@ async function appMoetIets(kaarten, nu, af) {
   }
   let jobs = af && af.jobs;
   if (!jobs) { try { jobs = await appVjVraagJobs(); } catch (e) { logError('app-voor-jou', e); jobs = {}; } }   // dan zoals voor wv1004: alleen koppeling en wv-nummer
-  return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu, jobs, af && af.map);
+  // wv2317: stilte_state alleen lezen als er vandaag een stiltewachter-dagbericht in het hoofdkanaal staat
+  const vandaag = appYmd(nu);
+  const stilNodig = (per.hoofd || []).some(function (x) { return x && x.bron === 'stiltewachter-david' && appYmd(Date.parse(x.t)) === vandaag; });
+  return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu, jobs, af && af.map, stilNodig ? await appStilteNu() : null);
+}
+// wv2317: stilte_state voor Moet iets, 60 s bewaard (Voor jou en de draden vragen elke paar seconden). Onleesbaar: de laatste stand
+// van hooguit 10 min, anders null (dan blijft het bericht gewoon staan, zoals vóór wv2317).
+async function appStilteNu() {
+  const c = appStaat.stilteNu;
+  if (c && Date.now() - c.op < 60000) return c.rijen;
+  try {
+    const r = await appN8nRijen(APP_STILTE_TABEL, null, 100);
+    if (!Array.isArray(r)) throw new Error('stilte_state onleesbaar');   // review wv2317 ZOU 1: dan de oude stand (hooguit 10 min)
+    appStaat.stilteNu = { op: Date.now(), goed: Date.now(), rijen: r };
+  } catch (e) {
+    logError('app-voor-jou', e);
+    const oud = c && c.rijen && Date.now() - c.goed < 600000 ? c.rijen : null;
+    appStaat.stilteNu = { op: Date.now(), goed: c ? c.goed : 0, rijen: oud };
+  }
+  return appStaat.stilteNu.rijen;
 }
 // ── wv2245: Te lezen (bouwplan "Eén meldingenkanaal" § 4.8; David 2-11-2026 10:19, Ja 10:20 vraag-id d5f22ee1) ──
 // Berichten die voor David zijn maar niets vragen: rapporten van klussen die rechtstreeks uit zijn opdracht kwamen, antwoorden op zijn

@@ -1814,6 +1814,27 @@ async function bewijs(o) {
       toets('9d wv926 Fable #6: een doe-kaart met hetzelfde wv-nummer verbergt de vraag niet (alleen een besluitkaart)', mDoe.some((x) => x.punt.includes(J(2))), JSON.stringify(mDoe.map((x) => x.punt)));
       const leeg = H.appMoetIetsUit({}, {}, {}, [], nu);
       toets('9d wv594: zonder gegevens een lege lijst', Array.isArray(leeg) && leeg.length === 0);
+      // wv2317 (David 3-11): een stiltewachter-dagbericht vervalt uit Moet iets zodra elke genoemde stroom weer gezond is na het bericht
+      {
+        const S = (n) => 'd2d2d2d2d2d2d2' + String(n).padStart(2, '0'), tb = nu - 20 * 60000, isoT = new Date(tb).toISOString(), na = new Date(tb + 5 * 60000).toISOString(), voor = new Date(tb - 5 * 60000).toISOString();
+        const regel = (naam) => naam + ' is stil sinds 2026-11-02 11:16 - 24.3 effectieve uren, drempel 24, vrijdag 17:00 tot maandag 08:00 telt niet mee.';
+        const st = (n, o) => ({ job_id: S(n), t: isoT, soort: 'socev', ok: true, tekst: '', bron: 'stiltewachter-david', klasse: 'dringend', meld: 'dag', antwoord: 'Aanvoer stil\n\n' + o });
+        const h2 = [st(1, regel('Stroom A')), st(2, regel('Stroom B')), st(3, regel('Stroom A') + '\n' + regel('Stroom C')), st(4, regel('Stroom D')), st(5, 'Aanvoer stil zonder leesbare regel'),
+          Object.assign(st(6, regel('Stroom A')), { bron: 'foutmelder' })];
+        const stand = [{ naam: 'Stroom A', status: 'gezond', laatste_executie: na }, { naam: 'Stroom B', status: 'gezond', laatste_executie: voor },
+          { naam: 'Stroom C', status: 'stil', laatste_executie: voor }, { naam: 'Stroom D', status: 'stil', laatste_executie: na }];
+        const p = (stilte) => H.appMoetIetsUit({ hoofd: h2 }, {}, {}, [], nu, {}, undefined, stilte).map((x) => x.punt);
+        const m5 = p(stand);
+        toets('9d wv2317: stil -> gezond met aanvoer na het bericht = weg uit Moet iets', !m5.includes('d:' + S(1)), JSON.stringify(m5));
+        toets('9d wv2317: gezond maar laatste aanvoer vóór het bericht = blijft', m5.includes('d:' + S(2)), JSON.stringify(m5));
+        toets('9d wv2317: twee stromen waarvan één nog stil = blijft', m5.includes('d:' + S(3)), JSON.stringify(m5));
+        toets('9d wv2317: nog stil (ook met recente executie) = blijft; zonder leesbare stroomregel = blijft', m5.includes('d:' + S(4)) && m5.includes('d:' + S(5)), JSON.stringify(m5));
+        toets('9d wv2317: alleen bron stiltewachter-david; een ander dagbericht met dezelfde tekst blijft', m5.includes('d:' + S(6)), JSON.stringify(m5));
+        const m6 = p(null), m7 = p([]);
+        toets('9d wv2317: stand onleesbaar (null) of stroom onbekend = alles blijft (zoals vóór wv2317)', [1, 2, 3, 4, 5, 6].every((n) => m6.includes('d:' + S(n)) && m7.includes('d:' + S(n))), JSON.stringify([m6, m7]));
+        const m8 = p([{ naam: 'Stroom A', status: 'gezond', laatste_executie: na }, { naam: 'Stroom C', status: 'gezond', laatste_executie: na }]);
+        toets('9d wv2317: beide stromen terug = ook het bericht met twee stromen weg', !m8.includes('d:' + S(1)) && !m8.includes('d:' + S(3)), JSON.stringify(m8));
+      }
       // wv1004 (David 24-10): een kaart die David via Ja / Nee / Anders beantwoordde, verbergt de chatversie van dezelfde vraag.
       // Koppeling: kaartJobs (ouder_job van de rij die de kaart zette) = agent_job van het agentrapport; of een wv-nummer in de titel.
       {
