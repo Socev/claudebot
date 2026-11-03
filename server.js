@@ -17095,8 +17095,8 @@ async function herinneringenVerhaalTik() {
   herinneringenVerhaalLoopt = true;
   try {
     const u = await herinneringenVerhaal.tik();
-    if (u && (u.verhalen || u.niet_gelukt || u.geen || u.antwoord_fout || u.categorie || u.fout || u.dienst || u.plafond))
-      schrijfLog(nu() + ' ramble-verhaal ' + velden({ verhalen: u.verhalen || 0, niet_gelukt: u.niet_gelukt || 0, geen: u.geen || 0, voorstellen: u.voorstellen || 0,
+    if (u && (u.verhalen || u.twijfel || u.geen || u.antwoord_fout || u.categorie || u.fout || u.dienst || u.plafond))
+      schrijfLog(nu() + ' ramble-verhaal ' + velden({ verhalen: u.verhalen || 0, twijfel: u.twijfel || 0, geen: u.geen || 0, voorstellen: u.voorstellen || 0,
         antwoord_fout: u.antwoord_fout || 0, categorie: u.categorie || 0, dienst: u.dienst || '', plafond: u.plafond || '', fout: u.fout || 0 }));
   } catch (e) { logError('herinneringen-verhaal-tik', e); }
   finally { herinneringenVerhaalLoopt = false; }

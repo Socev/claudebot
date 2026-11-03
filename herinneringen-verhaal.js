@@ -54,6 +54,18 @@
  *    model (zelfde plafonds, ≥ 10 min tussen twee aanroepen voor één opname). Een pagina die David aanpaste (blok gewijzigd, of
  *    goedgekeurd) blijft staan; een codepagina wordt vervangen met behoud van Davids koppelingen (personen, voorval); een overbodige
  *    codepagina krijgt status vervangen. Titel volgens Davids vaste naamgeving (Zomervakantie <jaar> - …, Gambia <jaar>, …).
+ *
+ * WV2322 (David 3-11-2026 17:14, app: "Maar hoe moet ik weten wat er verkeerd verstaan is, als jij geen transcript hebt gemaakt? Ik wil dat
+ * je NOOIT besluit maar geen vertaling te maken / verhaal, ik snap het doel niet helemaal van 'maar niets doen', dat is sowieso fout?").
+ * Stand 4: een opname levert ALTIJD een verhaal. De feitentoets blijft, maar als MARKERING, niet als blokkade:
+ *  - een naam, getal of datumwoord dat niet in de bron staat, blijft in de tekst en komt tussen ==…== (op de pagina; de app toont het
+ *    gemarkeerd met "deze naam hoorde ik niet in je opname — klopt hij?"); fouten over het geheel (te weinig eigen woorden, te lang,
+ *    een venster zonder tekst) komen als code in frontmatter twijfel: [...]. Status blijft concept ("concept met twijfel").
+ *  - Davids correctie ("X is Y") of bevestiging ("X klopt", knop Klopt in de app) haalt de markering weg; een goedgekeurde of door hem
+ *    aangepaste pagina toont geen markering. Een bevestiging vraagt geen nieuw verhaal (telt niet in de stukkenhash).
+ *  - Geeft het model niets bruikbaars (POGINGEN×) of geen enkele herinnering terwijl er wel tekst is: de letterlijke tekst wordt het
+ *    verhaal (één pagina, twijfel: [letterlijk]); nooit een lege plek. Een dienstfout blijft gewoon later opnieuw proberen.
+ *  - Buiten Davids eigen weergave (toonmodus, deellink) gaat een deel met open twijfel niet mee: een ongetoetste naam gaat nooit de deur uit.
  */
 const fs = require('fs');
 const path = require('path');
@@ -62,7 +74,9 @@ const crypto = require('crypto');
 const VERSIE = 'herinneringen-verhaal-2';
 // wv2321: standnummer 3 = versie 2 plus het woord dat de feitentoets niet terugvond (register.sqlite, tabel toets_woord). Een opname op
 // stand 2 met een mislukte herinnering wordt één keer opnieuw gemaakt; een geslaagde opname op stand 2 blijft staan.
-const VERSIE_NR = 3;
+// wv2322: stand 4 = altijd een verhaal (markering i.p.v. blokkade). Elke opname op een lagere stand met een mislukt deel (niet_gelukt,
+// fout, of klaar met mislukt > 0) wordt één keer opnieuw gemaakt.
+const VERSIE_NR = 4;
 const API = 'https://api.anthropic.com';
 const BETA_FALLBACK = 'server-side-fallback-2026-07-01';
 const MODEL = 'claude-sonnet-5-5';
@@ -123,7 +137,8 @@ function tijdcode(s) {
 // Modeltekst: daarbovenop geen markdownlinks of -beelden en geen URL's (alleen de linktekst blijft), zodat het verhaal niets naar buiten laat
 // wijzen; de toets draait op wat overblijft.
 function schoonModel(t, n) {
-  return schoon(String(t == null ? '' : t).replace(/!?\[([^\]]{0,200})\]\([^)]{0,500}\)/g, '$1').replace(/\b(?:https?|ftp|file|data|javascript):\/{0,2}\S*/gi, ' ').replace(/\bwww\.\S+/gi, ' '), n);
+  // wv2322: geen == in modeltekst (dat is de twijfelmarkering van de code)
+  return schoon(String(t == null ? '' : t).replace(/={2,}/g, ' ').replace(/!?\[([^\]]{0,200})\]\([^)]{0,500}\)/g, '$1').replace(/\b(?:https?|ftp|file|data|javascript):\/{0,2}\S*/gi, ' ').replace(/\bwww\.\S+/gi, ' '), n);
 }
 function schoon(t, n) {
   let s = String(t == null ? '' : t).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/[<>]/g, ' ').replace(/\[\[|\]\]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -273,25 +288,58 @@ function inBron(n, v) {
  * Feitentoets van één tekst tegen de bron (vensterSet). → null (goed) of een redencode. Vrij herschrijven mag; alleen een eigennaam, getal
  * of datumwoord dat niet in de bron staat, houdt hem tegen. o.extra = Set van woorden die in een titel ook mogen (vaste naamgeving).
  */
+// wv2322: o.alle = alle treffers verzamelen in o.treffers [{ woord, reden, i }] (i = plek in de tekst) in plaats van bij de eerste te stoppen.
 function toetsFeiten(tekst, v, o) {
   o = o || {};
   const t = String(tekst || '');
   const re = new RegExp(WOORD_RE.source, 'gu');
-  let m;
+  let m, eerste = null;
+  if (o.alle) o.treffers = [];
+  const raak = (w, i, reden) => { if (!eerste) { eerste = reden; o.treffer = w; } if (o.alle) o.treffers.push({ woord: w, reden, i }); return !o.alle; };
   while ((m = re.exec(t)) !== null) {
     const w = m[0], n = norm(w);
     const delen = n.split('-').filter(Boolean);
     const goed = (x) => inBron(x, v) || (o.extra && o.extra.has(x));
+    let r = null;
     if (/^\p{Lu}/u.test(w)) {
       const voor = t.slice(0, m.index).replace(/[\s"“”‘’'«»(\[*_]+$/u, '');
       const begin = !voor || /[.!?:…—–-]$/.test(voor);
       const stam = begin && n.length >= 4 && Array.from(v.w).some((x) => x.length > n.length && x.indexOf(n) === 0);
-      if (!goed(n) && !delen.every(goed) && !(begin && (ZINSBEGIN.has(n) || STOP.has(n) || stam))) { o.treffer = w; return 'naam_niet_gezegd'; }
+      if (!goed(n) && !delen.every(goed) && !(begin && (ZINSBEGIN.has(n) || STOP.has(n) || stam))) r = 'naam_niet_gezegd';
     }
-    if (DATUMWOORD.has(n) && !v.w.has(n)) { o.treffer = w; return 'datum_niet_gezegd'; }
-    for (const g of getallenVan(w, false)) if (!v.g.has(g) && !(o.extraGetal && o.extraGetal.has(g))) { o.treffer = w; return 'getal_niet_gezegd'; }
+    if (!r && DATUMWOORD.has(n) && !v.w.has(n)) r = 'datum_niet_gezegd';
+    if (!r) for (const g of getallenVan(w, false)) if (!v.g.has(g) && !(o.extraGetal && o.extraGetal.has(g))) { r = 'getal_niet_gezegd'; break; }
+    if (r && raak(w, m.index, r)) return r;
   }
-  return null;
+  return eerste;
+}
+// wv2322: zet de treffers van toetsFeiten (o.alle) tussen ==…== in de tekst (van achter naar voren, zodat de plekken kloppen).
+function markeer(tekst, treffers) {
+  let t = String(tekst);
+  for (const x of (treffers || []).slice().sort((a, b) => b.i - a.i)) {
+    if (t.slice(x.i, x.i + x.woord.length) !== x.woord) continue;
+    t = t.slice(0, x.i) + '==' + x.woord + '==' + t.slice(x.i + x.woord.length);
+  }
+  return t;
+}
+const MARK_RE = /==([^=\n]{1,80})==/g;
+// soort van een gemarkeerd woord (voor de uitleg in de app)
+function twijfelSoort(w) {
+  const n = norm(w);
+  if (DATUMWOORD.has(n)) return 'datum';
+  if (getallenVan(w, false).length) return 'getal';
+  return 'naam';
+}
+// "X klopt" / "X is goed" / "X is juist" (1–3 woorden): Davids bevestiging van een gemarkeerd woord. → [norm(X)]
+const VERHAAL_OK_RE = /^\s*(?:het |dit )?verhaal klopt\s*[.!]?\s*$/im;   // wv2322: Davids goedkeuring van de twijfel over het hele stuk
+const BEVESTIG_RE = /^\s*["'“‘]?(.{1,60}?)["'”’]?\s+(?:klopt|is goed|is juist|is correct)\s*[.!]?\s*$/i;
+function bevestigdUit(teksten) {
+  const uit = [];
+  for (const t of teksten || []) for (const regel of String(t || '').split('\n')) {
+    const m = BEVESTIG_RE.exec(regel);
+    if (m && woorden(m[1]).length >= 1 && woorden(m[1]).length <= 3) uit.push(norm(m[1]).trim());
+  }
+  return uit;
 }
 // Het hele verhaal tegen de bron: genoeg eigen woorden (op stam) en niet veel langer dan de bron.
 function toetsGeheel(teksten, v) {
@@ -316,6 +364,7 @@ const CORR_RE = [/^\s*niet\s+(.+?)\s+maar\s+(.+?)\s*[.!]?\s*$/i, /^\s*(.+?)\s+mo
 function correctiesUit(teksten) {
   const uit = [];
   for (const t of teksten || []) for (const regel of String(t || '').split('\n')) {
+    if (BEVESTIG_RE.test(regel)) continue;   // wv2322: "X is goed" is een bevestiging, geen vervanging door "goed"
     for (const re of CORR_RE) {
       const m = re.exec(regel);
       if (!m) continue;
@@ -638,7 +687,9 @@ function maak(o) {
   // die vragen bij een gelukt verhaal een nieuw verhaal ("X is Y" past de weergave al toe). Alles = ook "X is Y": bij een verhaal dat niet
   // lukte kan juist zo'n correctie (de spelling van een naam) het wel laten lukken.
   function stukkenHash(ds) {
-    if (!ds || !ds.length) return '';
+    // wv2322: een bevestiging ("Kesch klopt", knop Klopt) vraagt geen nieuw verhaal: die haalt alleen de markering weg (samengesteld)
+    ds = (ds || []).filter((x) => !(x.soort === 'correctie' && String(x.tekst).split('\n').filter((l) => l.trim()).every((l) => BEVESTIG_RE.test(l))));
+    if (!ds.length) return '';
     const h = (l) => (l.length ? sha256(Buffer.from(JSON.stringify(l), 'utf8')).slice(0, 16) : '');
     return h(ds.filter((x) => x.soort === 'aanvulling' || !correctiesUit([x.tekst]).length)) + ':' + h(ds);
   }
@@ -683,37 +734,54 @@ function maak(o) {
 
   // ── toetsen ──
   function vensterTekst(segs, van, tot) { return segs.filter((s) => s.van < tot && s.tot > van).map((s) => s.tekst).join(' '); }
+  // wv2322: de letterlijke tekst van een venster als alinea's (één per stuk van de opname), met Davids correcties
+  function letterlijkeAlineas(segs, van, tot, cs) {
+    return segs.filter((s) => s.tekst && s.van < tot && s.tot > van).map((s) => ({ tekst: pasCorrectiesToe(String(s.tekst).replace(/={2,}/g, ' '), cs),
+      t_van: Math.max(0, Math.floor(s.van)), t_tot: Math.ceil(s.tot) }));
+  }
   /*
-   * Eén herinnering uit het antwoord toetsen. → { ok, h } of { ok:false, reden, t_van, t_tot }. Alleen wat de toets doorstaat, blijft.
+   * Eén herinnering uit het antwoord toetsen. wv2322: de toets markeert, hij houdt niets meer tegen. → { ok: true, h } met h.twijfel
+   * (redencodes) en de alinea's met ==…== om elk woord dat niet in de bron stond; null alleen als er niets te tonen is.
    */
   const TITELWOORD = new Set(['zomervakantie', 'citytrip', 'weekendje', 'david']);   // vaste naamgeving + de verteller
   function toetsHerinnering(x, segs, duur, opname, geboren, ds) {
-    const tv = Number.isInteger(x && x.t_van) ? x.t_van : null, tt = Number.isInteger(x && x.t_tot) ? x.t_tot : null;
-    const fout_ = (reden, woord) => ({ ok: false, reden, woord: woord ? schoon(woord, 60) : '', t_van: tv != null ? Math.max(0, tv) : 0, t_tot: tt != null ? Math.min(Math.ceil(duur), tt) : Math.ceil(duur) });
-    if (!isObj(x) || tv == null || tt == null || tv < 0 || tt <= tv || tv > duur + 1) return fout_('venster_ongeldig');
-    const alineas = Array.isArray(x.alineas) ? x.alineas : [];
-    if (!alineas.length || alineas.length > 60) return fout_('geen_alineas');
-    // de bron: het venster van de herinnering (en van elke alinea), het transcript met én zonder Davids correcties, en Davids eigen tekst
+    if (!isObj(x)) return null;
+    const D = Math.ceil(duur);
+    const twijfel = new Set();
+    let tv = Number.isInteger(x.t_van) ? x.t_van : null, tt = Number.isInteger(x.t_tot) ? x.t_tot : null;
+    if (tv == null || tt == null || tv < 0 || tt <= tv || tv > duur + 1) { tv = 0; tt = Math.max(D, 1); twijfel.add('venster_ongeldig'); }
+    // de bron: het venster van de herinnering, het transcript met én zonder Davids correcties, en Davids eigen tekst
     const cs = correctiesVan(ds);
-    // review MOET 1/2: de bron is alleen het venster van de herinnering (+ Davids tekst); een alinea moet daarbinnen vallen (tijdcode)
-    for (const a of alineas) if (!isObj(a) || !Number.isInteger(a.t_van) || !Number.isInteger(a.t_tot) || a.t_van < tv || a.t_tot > tt || a.t_tot <= a.t_van) return fout_('alinea_venster_ongeldig');
     const ruw = vensterTekst(segs, tv, tt);
     const eigen = (ds || []).map((s) => s.tekst).join(' ');
-    if (!ruw.trim() && !eigen.trim()) return fout_('alinea_zonder_tekst_in_venster');
+    if (!ruw.trim() && !eigen.trim()) twijfel.add('alinea_zonder_tekst_in_venster');
     const bronTekst = ruw + ' ' + pasCorrectiesToe(ruw, cs) + ' ' + eigen;
     const hv = vensterSet(bronTekst);
     const lengteSet = vensterSet(ruw + ' ' + eigen);
-    const goed = [];
-    for (const a of alineas) {
+    let goed = [];
+    for (const a of Array.isArray(x.alineas) ? x.alineas.slice(0, 60) : []) {
+      if (!isObj(a)) continue;
       const tekst = pasCorrectiesToe(schoonModel(a.tekst, 4000), cs);
-      if (woorden(tekst).length < 3) return fout_('alinea_te_kort');
-      const fo = {};
-      const r = toetsFeiten(tekst, hv, fo);
-      if (r) return fout_(r, fo.treffer);   // wv2321: het woord gaat alleen naar register.sqlite (toets_woord) en de app-log, nooit naar spoor/log/box
-      goed.push({ tekst, t_van: a.t_van, t_tot: Math.min(a.t_tot, Math.ceil(duur)) });
+      if (!woorden(tekst).length) continue;
+      // een alinea buiten het venster van de herinnering: binnen het venster trekken (de tijdcode is een hulpmiddel, geen feit)
+      let av = Number.isInteger(a.t_van) ? a.t_van : tv, at = Number.isInteger(a.t_tot) ? a.t_tot : tt;
+      av = Math.min(Math.max(av, tv), tt); at = Math.min(Math.max(at, tv), tt);
+      if (at <= av) { av = tv; at = tt; }
+      const fo = { alle: true };
+      toetsFeiten(tekst, hv, fo);
+      for (const t of fo.treffers) twijfel.add(t.reden);
+      goed.push({ tekst: markeer(tekst, fo.treffers), t_van: av, t_tot: Math.min(at, Math.max(D, 1)) });
     }
-    const g = toetsGeheel(goed.map((a) => a.tekst), Object.assign({}, hv, { n: lengteSet.n }));
-    if (g) return fout_(g);
+    let letterlijk = false;
+    if (!goed.length) {
+      goed = letterlijkeAlineas(segs, tv, tt, cs);
+      if (!goed.length) return null;
+      letterlijk = true; twijfel.add('letterlijk');
+    }
+    if (!letterlijk) {
+      const g = toetsGeheel(goed.map((a) => a.tekst.replace(MARK_RE, '$1')), Object.assign({}, hv, { n: lengteSet.n }));
+      if (g) twijfel.add(g);
+    }
     let citaat = schoonModel(x.datum_citaat, 200);
     const cn = norm(citaat).replace(/[^a-z0-9]+/g, ' ').trim();
     if (!cn || (' ' + hv.tekst + ' ').indexOf(' ' + cn + ' ') < 0) citaat = '';
@@ -731,7 +799,7 @@ function maak(o) {
     }
     let voorval = pasCorrectiesToe(schoonModel(x.voorval_voorstel, 80), cs);
     if (voorval && (toetsFeiten(voorval, hv) || woorden(voorval).length > 8)) voorval = '';
-    return { ok: true, h: { t_van: tv, t_tot: Math.min(tt, Math.ceil(duur)), titel, alineas: goed, plaats, personen, voorval, datum_citaat: citaat, ...dt } };
+    return { ok: true, h: { t_van: tv, t_tot: Math.min(tt, Math.max(D, 1)), titel, alineas: goed, plaats, personen, voorval, datum_citaat: citaat, ...dt, twijfel: Array.from(twijfel).sort() } };
   }
 
   // ── pagina's ──
@@ -750,14 +818,23 @@ function maak(o) {
     if (!mislukt) fm.push('datum: ' + yaml(h.datum), 'datum_precisie: ' + h.datum_precisie, 'datum_van: ' + yaml(h.datum_van), 'datum_tot: ' + yaml(h.datum_tot),
       'datum_citaat: ' + yaml(h.datum_citaat), 'plaats: ' + yaml(h.plaats), 'personen: []', 'niet_persoon: []', 'voorval: ""', 'niet_voorval: []');
     if (mislukt) fm.push('reden: ' + (h.reden || 'onbekend'));
+    if (!mislukt && h.twijfel && h.twijfel.length) fm.push('twijfel: ' + JSON.stringify(h.twijfel));   // wv2322: concept met twijfel
     fm.push('verteller: ' + yaml(r.verteller || 'David'), 'verhaal_versie: ' + VERSIE, 'created: ' + amsDatum(nu()), 'tags: [herinnering, prive]', '---', '');
     if (mislukt) {
       return fm.join('\n') + '> **Privé — persoonlijke herinnering.**\n\n# ' + titel + '\n\nVan dit stuk van de opname (' + tc + ') kon geen verhaal gemaakt worden: ' +
         h.uitleg + '. De letterlijke tekst staat in ' + opnameLink(r) + '.\n';
     }
     const binnen = '\n## ' + titel + '\n\n' + h.alineas.map((a) => a.tekst + ' *(' + tijdcode(a.t_van) + '–' + tijdcode(a.t_tot) + ')*').join('\n\n') + '\n';
-    return fm.join('\n') + '> **Privé — persoonlijke herinnering.** Verhaal uit je opname van ' + dmj(op) + ' (' + tc + '), als ghostwriter vormgegeven door Claude; de server ' +
-      'toetste elke naam, elk getal en elke datum tegen wat je zei en schreef. Pas gerust aan: jouw tekst wint. Een herinnering is geen bron voor feiten.\n\n' +
+    const tw = h.twijfel || [];
+    const kop = tw.indexOf('letterlijk') >= 0
+      ? '> **Privé — persoonlijke herinnering.** Je letterlijke woorden uit de opname van ' + dmj(op) + ' (' + tc + '): van dit stuk kwam (nog) geen verhaal, dus hier staat ' +
+        'wat je zei. Pas gerust aan: jouw tekst wint. Een herinnering is geen bron voor feiten.\n'
+      : '> **Privé — persoonlijke herinnering.** Verhaal uit je opname van ' + dmj(op) + ' (' + tc + '), als ghostwriter vormgegeven door Claude; de server ' +
+        'toetste elke naam, elk getal en elke datum tegen wat je zei en schreef. Pas gerust aan: jouw tekst wint. Een herinnering is geen bron voor feiten.\n';
+    const twRegel = tw.some((c) => /_niet_gezegd$/.test(c))
+      ? '> **Concept met twijfel.** Wat tussen ==…== staat, vond de server niet terug in je opname (misschien verkeerd verstaan). Klopt het, tik dan in de app op Klopt; ' +
+        'zo niet, zet een correctie (bijvoorbeeld "Piet is Pieter").\n' : '';
+    return fm.join('\n') + kop + twRegel + '\n' +
       '<!-- ovis:blok begin id="verhaal:' + hid + '" content_hash="' + blokHash(binnen) + '" -->' + binnen + BLOK_EIND + '\n\n' +
       'Bron: ' + opnameLink(r) + ' · ' + tc + (h.plaats ? ' · plaats: ' + h.plaats : '') + (h.datum ? ' · ' + h.datum + ' (' + h.datum_precisie + ')' : '') + '\n';
   }
@@ -765,6 +842,12 @@ function maak(o) {
     te_weinig_eigen_woorden: 'de tekst week te veel af van je eigen woorden', langer_dan_gezegd: 'de tekst was langer dan wat je zei',
     alinea_te_kort: 'een alinea was te kort', alinea_zonder_tekst_in_venster: 'een alinea verwees naar een stuk zonder tekst',
     datum_niet_gezegd: 'er stond een maand, dag of seizoen in die je niet noemde' };
+  // wv2322: uitleg bij een twijfel over het hele stuk (de woorden zelf staan gemarkeerd in de tekst)
+  const UITLEG_DEEL = { te_weinig_eigen_woorden: 'Dit verhaal wijkt meer dan gewoonlijk af van je eigen woorden; lees het even na.',
+    langer_dan_gezegd: 'Dit verhaal is langer dan wat je vertelde; kijk of er niets bij verzonnen is.',
+    alinea_zonder_tekst_in_venster: 'Dit stuk kon ik niet aan een stuk van je opname met tekst koppelen; lees het even na.',
+    venster_ongeldig: 'Bij dit stuk klopten de tijdcodes niet; het hoort bij de hele opname.',
+    letterlijk: 'Van dit stuk kwam nog geen verhaal; hier staat letterlijk wat je zei. Met een aanvulling of correctie wordt het opnieuw geprobeerd.' };
   function schrijfPagina(rel, inhoud) {
     const m = path.dirname(abs(rel));
     if (!fs.existsSync(m)) fs.mkdirSync(m, { recursive: true, mode: 0o770 });
@@ -875,57 +958,74 @@ function maak(o) {
     if (!segs.some((s) => s.tekst) && !(ds && ds.some((s) => s.soort === 'aanvulling'))) { zet('geen', { herinneringen: 0, gelukt: 0, mislukt: 0, reden: 'geen_tekst' }); klaarMet(); uit.geen = (uit.geen || 0) + 1; return; }
     const a = await vraag(segs, ds);
     if (a.dienst) { dienstPauzeTot = nu() + PAUZE_MS; uit.dienst = a.reden; return 'stop'; }
-    if (!a.j) {
-      const p = v.pogingen + 1;
-      spoor(r.ramble_id, null, 'antwoord_' + a.reden);
-      if (p >= POGINGEN) {
-        zet('fout', { pogingen: p, poging_op: iso(nu()), reden: a.reden }); klaarMet();
-        box('geen bruikbaar antwoord', ['gemeten: opname ' + r.ramble_id + ' gaf ' + POGINGEN + '× geen bruikbaar antwoord (' + a.reden + '); er staat geen verhaal, de opnamenotitie blijft.',
-          'voorstel: niets aan David; later opnieuw (ramble_verhaal-rij op status wacht en pogingen 0 zetten).']);
-      } else zet('wacht', { pogingen: p, poging_op: iso(nu()), reden: a.reden });
-      uit.antwoord_fout = (uit.antwoord_fout || 0) + 1;
-      return;
-    }
     const duur = segs.length ? segs[segs.length - 1].tot : 0, opname = Date.parse(r.opgenomen_op || r.aangemaakt);
-    let geboren = null;
-    try { geboren = o.geboren ? await o.geboren() : null; } catch (e) { geboren = null; }
-    const lijst = a.j.herinneringen.slice(0, MAX_HERINNERINGEN);
+    let pogingen = v.pogingen + 1;
+    // wv2322: de letterlijke tekst van de hele opname als één verhaal (Davids eigen aanvullingen erachter), als het model niets bruikbaars gaf
+    const letterlijk = () => {
+      const cs = correctiesVan(ds);
+      const al = letterlijkeAlineas(segs, 0, Math.max(Math.ceil(duur), 1), cs)
+        .concat((ds || []).filter((x) => x.soort === 'aanvulling').map((x) => ({ tekst: pasCorrectiesToe(schoon(x.tekst, 4000).replace(/={2,}/g, ' '), cs), t_van: 0, t_tot: Math.max(Math.ceil(duur), 1) })))
+        .filter((x) => woorden(x.tekst).length);
+      if (!al.length) return [];
+      return [{ hid: hidVan(r.ramble_id, 0), i: 0, h: Object.assign({ t_van: 0, t_tot: Math.max(Math.ceil(duur), 1), titel: '', alineas: al, plaats: '', personen: [], voorval: '', datum_citaat: '' },
+        rekenDatum('', opname, null), { twijfel: ['letterlijk'] }), mislukt: false }];
+    };
+    let paginas = [];
+    if (!a.j) {
+      spoor(r.ramble_id, null, 'antwoord_' + a.reden);
+      uit.antwoord_fout = (uit.antwoord_fout || 0) + 1;
+      if (pogingen < POGINGEN) { zet('wacht', { pogingen, poging_op: iso(nu()), reden: a.reden }); return; }
+      // blijft het mislukken: de letterlijke tekst wordt het verhaal (nooit een lege plek)
+      paginas = letterlijk();
+      box('geen bruikbaar antwoord', ['gemeten: opname ' + r.ramble_id + ' gaf ' + POGINGEN + '× geen bruikbaar antwoord (' + a.reden + '); ' +
+        (paginas.length ? 'de letterlijke tekst staat nu als verhaal (twijfel: letterlijk).' : 'er is geen tekst om te tonen.'),
+        'voorstel: niets aan David; een nieuwe poging komt vanzelf bij een aanvulling of correctie van hem, of zet de ramble_verhaal-rij op status wacht en pogingen 0.']);
+    } else {
+      let geboren = null;
+      try { geboren = o.geboren ? await o.geboren() : null; } catch (e) { geboren = null; }
+      a.j.herinneringen.slice(0, MAX_HERINNERINGEN).forEach((x, i) => {
+        const t = toetsHerinnering(x, segs, duur, opname, geboren, ds);
+        if (t) paginas.push({ hid: hidVan(r.ramble_id, i), i, h: t.h, mislukt: false });
+      });
+      // geen enkele herinnering (of niets te tonen) terwijl er wel tekst is: ook dan de letterlijke tekst (David 3-11: nooit "niets doen")
+      if (!paginas.length) paginas = letterlijk();
+    }
     let gelukt = 0, mislukt = 0;
-    const paginas = [];
-    lijst.forEach((x, i) => {
-      const hid = hidVan(r.ramble_id, i);
-      const t = toetsHerinnering(x, segs, duur, opname, geboren, ds);
-      if (t.ok) { gelukt++; paginas.push({ hid, h: t.h, mislukt: false }); }
-      else { mislukt++; spoor(r.ramble_id, hid, 'toets_' + t.reden); paginas.push({ hid, h: { t_van: t.t_van, t_tot: t.t_tot, reden: t.reden, woord: t.woord, uitleg: UITLEG[t.reden] || 'de server kon het verhaal niet toetsen' }, mislukt: true }); }
-    });
+    for (const p of paginas) {
+      if (p.h.twijfel && p.h.twijfel.length) { mislukt++; for (const c of p.h.twijfel) spoor(r.ramble_id, p.hid, 'twijfel_' + c); }
+      else gelukt++;
+    }
     if (grendel()) { uit.wacht = 'grendel'; return 'stop'; }   // het antwoord gaat verloren; de volgende tik vraagt opnieuw (zeldzaam: de grendel kwam tijdens de aanroep)
     const vers = q.rij.get(r.ramble_id);
     if (!vers || vers.status !== 'notitie') { zet('vervallen', { reden: 'opname_' + (vers ? vers.status : 'weg') }); return; }
+    const gebruikt = new Set();
     for (const p of paginas) {
       // wv2123 (review MOET 1): de verwijderroute is een ander proces; vóór elke pagina opnieuw kijken of de opname er nog is
       const nog = q.rij.get(r.ramble_id);
       if (!nog || nog.status !== 'notitie') { uit.vervallen = (uit.vervallen || 0) + 1; return; }
+      gebruikt.add(p.i);
       const rel = path.join(VERHAAL_MAP, p.hid + '.md');
       // wv2180: herbouw vervangt een codepagina (met behoud van Davids koppelingen); een pagina die David aanpaste, blijft
       let z;
-      try { z = zetPagina(rel, paginaTekst(vers, p.hid, p.h, p.mislukt)); }
+      try { z = zetPagina(rel, paginaTekst(vers, p.hid, p.h, false)); }
       catch (e) { fout('verhaal-pagina', e); zet('wacht', { pogingen: v.pogingen, reden: 'schrijven' }); return; }
       if (z === 'nieuw' || z === 'herschreven') uit.paginas = (uit.paginas || 0) + 1;
       if (z === 'eigen') uit.eigen = (uit.eigen || 0) + 1;
-      if (!p.mislukt && z !== 'eigen') uit.voorstellen = (uit.voorstellen || 0) + voorstellenVoor(p.hid, p.h, rel);
-      try { if (p.mislukt && p.h.woord) rq.woordZet.run(p.hid, r.ramble_id, p.h.reden, p.h.woord, iso(nu())); else rq.woordWeg.run(p.hid); } catch (e) { fout('verhaal-woord', e); }
+      if (z !== 'eigen') uit.voorstellen = (uit.voorstellen || 0) + voorstellenVoor(p.hid, p.h, rel);
+      try { rq.woordWeg.run(p.hid); } catch (e) { fout('verhaal-woord', e); }   // wv2322: het woord staat nu gemarkeerd op de pagina zelf
     }
-    // overbodige codepagina's van een vorige indeling (meer herinneringen dan nu)
-    for (let i = lijst.length; i < MAX_HERINNERINGEN; i++) {
+    // overbodige codepagina's van een vorige indeling (meer herinneringen dan nu, of een herinnering die nu wegviel)
+    for (let i = 0; i < MAX_HERINNERINGEN; i++) {
+      if (gebruikt.has(i)) continue;
       const rel = path.join(VERHAAL_MAP, hidVan(r.ramble_id, i) + '.md');
       if (!fs.existsSync(abs(rel))) continue;
       try { if (vervang(rel)) uit.vervangen = (uit.vervangen || 0) + 1; rq.woordWeg.run(hidVan(r.ramble_id, i)); } catch (e) { fout('verhaal-vervang', e); }
     }
-    zet(lijst.length === 0 ? 'geen' : gelukt ? 'klaar' : 'niet_gelukt', { herinneringen: lijst.length, gelukt, mislukt, pogingen: v.pogingen + 1, poging_op: iso(nu()) });
+    zet(paginas.length ? 'klaar' : 'geen', { herinneringen: paginas.length, gelukt, mislukt, pogingen, poging_op: iso(nu()), reden: a.j ? null : a.reden });
     klaarMet();
     // de categorie kan tijdens de aanroep gewijzigd zijn: cat_versie van vóór het schrijven, de catAchter-ronde haalt een nieuwere in
     q.catKlaar.run(vers.cat_versie || 0, r.ramble_id);
-    uit.verhalen = (uit.verhalen || 0) + gelukt; uit.niet_gelukt = (uit.niet_gelukt || 0) + mislukt;
+    uit.verhalen = (uit.verhalen || 0) + gelukt; uit.twijfel = (uit.twijfel || 0) + mislukt;
     registerOp = 0;
   }
 
@@ -938,9 +1038,10 @@ function maak(o) {
       const misluktDeel = v.status === 'niet_gelukt' || v.status === 'fout' || (v.mislukt || 0) > 0;
       const anders = nu_ !== null && (deel(nu_, 0) !== deel(was, 0) || (misluktDeel && deel(nu_, 1) !== deel(was, 1)));
       const oud = (v.versie || 1) < 2;
-      // wv2321: stand 2 met een mislukte herinnering: één keer opnieuw, zodat de pagina het niet teruggevonden woord krijgt
-      const zonderWoord = !oud && (v.versie || 1) < VERSIE_NR && (v.status === 'niet_gelukt' || (v.status === 'klaar' && (v.mislukt || 0) > 0));
-      if (zonderWoord) { q.herbouwZet.run(v.ramble_id); spoor(v.ramble_id, null, 'herbouw_woord'); uit.herbouw = (uit.herbouw || 0) + 1; continue; }
+      // wv2322: een opname van vóór stand 4 met een mislukt deel (niet_gelukt, fout, of klaar met mislukt > 0): één keer opnieuw, zodat er
+      // overal een verhaal staat (met markering) in plaats van "niet gelukt"
+      const zonderVerhaal = !oud && (v.versie || 1) < VERSIE_NR && (v.status === 'niet_gelukt' || v.status === 'fout' || (v.status === 'klaar' && (v.mislukt || 0) > 0));
+      if (zonderVerhaal) { q.herbouwZet.run(v.ramble_id); spoor(v.ramble_id, null, 'herbouw_altijd_verhaal'); uit.herbouw = (uit.herbouw || 0) + 1; continue; }
       if (v.status === 'geen' && v.reden === 'geen_tekst' && !(anders && ds.some((s) => s.soort === 'aanvulling'))) continue;
       if (v.status === 'fout' && !anders && !oud) continue;   // review MOET 4: ook een fout uit versie 1 krijgt één nieuwe kans
       if (oud || anders) { q.herbouwZet.run(v.ramble_id); spoor(v.ramble_id, null, oud ? 'herbouw_versie' : 'herbouw_stukken'); uit.herbouw = (uit.herbouw || 0) + 1; }
@@ -1100,7 +1201,7 @@ function maak(o) {
       const m = BLOK_BEGIN_RE.exec(p.tekst);
       const e = m ? p.tekst.indexOf(BLOK_EIND, m.index) : -1;
       const binnen = m && e >= 0 ? p.tekst.slice(m.index + m[0].length, e) : '';
-      const alineas = binnen.split(/\n{2,}/).map((x) => x.trim()).filter((x) => x && !/^#/.test(x)).map((x) => x.replace(/\s*\*\(\d[\d:]*–\d[\d:]*\)\*\s*$/, ''));
+      const alineas = binnen.split(/\n{2,}/).map((x) => x.trim()).filter((x) => x && !/^#/.test(x)).map((x) => x.replace(/\s*\*\(\d[\d:]*–\d[\d:]*\)\*\s*$/, '').replace(new RegExp(MARK_RE.source, 'g'), '$1'));
       uit.push({ herinnering_id: p.rel.split('/').pop().replace(/\.md$/, ''), titel: String(fmVeld(p.fm, 'titel') || ''), alineas });
     }
     return uit;
@@ -1119,10 +1220,28 @@ function maak(o) {
     try { const d = fmDelen(o.vv.lees(abs(rel), 'utf8')); const t = d && fmVeld(d.regels, 'titel'); if (typeof t === 'string' && t) return t.slice(0, 120); } catch (e) { /* weg */ }
     return path.basename(rel, '.md');
   }
-  function samengesteld(rid, cs) {
+  // wv2322: markeringen ==…== uit een alinea halen. → { tekst (zonder ==), twijfel: [{ woord, soort }] }: alleen open twijfel (niet wat
+  // David zelf schreef: bevestigd met "X klopt", gecorrigeerd met "X is Y" of in een aanvulling). metTwijfel false = alleen weghalen.
+  function ontmarkeer(t, eigenW, metTwijfel) {
+    const tw = [];
+    const tekst = String(t).replace(new RegExp(MARK_RE.source, 'g'), (m, w) => {
+      const n = norm(w), delen = woorden(w).map(norm).flatMap((x) => x.split('-')).filter(Boolean);   // review ZOU 1: ook "Piet is Jan Jansen"
+      const opgelost = eigenW.has(n) || (delen.length > 0 && delen.every((d) => eigenW.has(d)));
+      if (metTwijfel && !opgelost && !tw.some((x) => x.woord === w)) tw.push({ woord: w, soort: twijfelSoort(w) });
+      return w;
+    });
+    return { tekst, twijfel: tw };
+  }
+  // ds (wv2322) = Davids eigen stukken [{ soort, tekst }] (memorylane-delen geeft ze mee; anders zelf opgehaald)
+  function samengesteld(rid, cs, ds) {
     if (!ID_RE.test(String(rid || ''))) return null;
     const v = q.v.get(rid) || null;
     const delen = [], mis = [];
+    if (ds === undefined) ds = davidStukken(rid);
+    const eigenW = vensterSet((ds || []).map((x) => String(x && x.tekst || '')).join(' ')).w;
+    // "Verhaal klopt" (knop Klopt zo in de app): David keurt de twijfel over het hele stuk goed (letterlijk, te lang, eigen woorden);
+    // gemarkeerde woorden houden hun eigen Klopt
+    const stukOk = (ds || []).some((x) => x && x.soort === 'correctie' && VERHAAL_OK_RE.test(String(x.tekst || '')));
     for (const p of paginasVan(rid)) {
       const f = (k) => fmVeld(p.fm, k);
       const st = String(f('status') || '');
@@ -1139,15 +1258,23 @@ function maak(o) {
       let binnen;
       if (m && e >= 0) binnen = p.tekst.slice(m.index + m[0].length, e);
       else binnen = p.tekst.slice(fmDelen(p.tekst) ? /^---\n[\s\S]*?\n---\n/.exec(p.tekst)[0].length : 0).replace(/^> \*\*Privé[^\n]*\n/m, '').replace(/\nBron: [^\n]*\n?$/, '');
+      // wv2322: twijfel tonen zolang de pagina een codepagina is en niet goedgekeurd (Davids aanpassing of goedkeuring haalt hem weg)
+      const eigen = !codePagina(p.tekst), metTwijfel = !eigen && st !== 'goedgekeurd';
       const alineas = binnen.split(/\n{2,}/).map((x) => x.trim()).filter((x) => x && !/^#/.test(x) && !/^>/.test(x)).map((x) => {
         const tm = /\s*\*\((\d[\d:]*)–(\d[\d:]*)\)\*\s*$/.exec(x);
         const sec = (s) => s.split(':').reduce((a2, b2) => a2 * 60 + Number(b2), 0);
-        return { tekst: pasCorrectiesToe(tm ? x.slice(0, tm.index) : x, cs), t_van: tm ? sec(tm[1]) : null, t_tot: tm ? sec(tm[2]) : null };
+        const om = ontmarkeer(pasCorrectiesToe(tm ? x.slice(0, tm.index) : x, cs), eigenW, metTwijfel);
+        return { tekst: om.tekst, t_van: tm ? sec(tm[1]) : null, t_tot: tm ? sec(tm[2]) : null, twijfel: om.twijfel };
       });
+      const tc = Array.isArray(f('twijfel')) ? f('twijfel').filter((c) => typeof c === 'string' && Object.hasOwn(UITLEG_DEEL, c)) : [];
       // wv2306 (R3): bevestigde personen en voorval (alleen wat David met Ja koppelde) en de plaats, voor de filters in de app
       const pl = Array.isArray(f('personen')) ? f('personen').filter((x) => typeof x === 'string' && /^\[\[[^\]]+\]\]$/.test(x)) : [];
       const vl = typeof f('voorval') === 'string' && /^\[\[[^\]]+\]\]$/.test(f('voorval')) ? f('voorval') : '';
-      delen.push({ herinnering_id: hid, titel: pasCorrectiesToe(String(f('titel') || ''), cs), status: st, eigen: !codePagina(p.tekst), t_van: Number(f('t_van')) || 0,
+      delen.push({ herinnering_id: hid, titel: pasCorrectiesToe(String(f('titel') || ''), cs), status: st, eigen, t_van: Number(f('t_van')) || 0,
+        // review MOET 1/2: open twijfel = een gemarkeerd woord of een twijfel over het hele stuk die David nog niet goedkeurde; zo'n deel gaat niet
+        // naar de deellink of de toonmodus
+        twijfel: metTwijfel && !stukOk ? tc.map((c) => UITLEG_DEEL[c]) : [], twijfel_open: alineas.some((a2) => a2.twijfel.length > 0) || (metTwijfel && !stukOk && tc.length > 0),
+        letterlijk: tc.indexOf('letterlijk') >= 0,
         plaats: typeof f('plaats') === 'string' ? pasCorrectiesToe(f('plaats'), cs).slice(0, 80) : '',
         personen: pl.map((x) => ({ link: x, naam: path.basename(x.slice(2, -2)).replace(/\s*\(.*\)$/, '') })), voorval: vl ? { link: vl, titel: voorvalTitel(vl) } : null,
         datum: String(f('datum') || ''), datum_precisie: String(f('datum_precisie') || 'onbekend'), datum_van: String(f('datum_van') || ''), datum_tot: String(f('datum_tot') || ''), alineas });
@@ -1189,7 +1316,7 @@ function maak(o) {
     let open = null;
     try { open = rq.open.all().length; } catch (e) { /* dicht */ }
     rol();
-    return { aan: aan(), bezig, versie: VERSIE, opnames: per, verhalen: h ? h.g : null, niet_gelukt: h ? h.m : null, voorstellen_open: open,
+    return { aan: aan(), bezig, versie: VERSIE, opnames: per, verhalen: h ? h.g : null, twijfel: h ? h.m : null, voorstellen_open: open,
       vandaag: { aanroepen: tel.aanroepen, plafond: PER_DAG, usd: Math.round(tel.usd_dag * 100) / 100 }, maand_usd: Math.round(tel.usd_maand * 100) / 100,
       grens_usd: { dag: GRENS_DAG_USD, maand: GRENS_MAAND_USD }, sleutel: tel.sleutel, sdk: tel.sdk, pauze: nu() < dienstPauzeTot, laatst };
   }
@@ -1203,4 +1330,4 @@ function isHerinneringPad(p) {
   return /(^|\/)20_prive\/herinneringen(\/|$)/i.test(s);
 }
 
-module.exports = { maak, hidVan, MAX_HERINNERINGEN, toetsTekst, toetsFeiten, toetsGeheel, correctiesUit, pasCorrectiesToe, vensterSet, rekenDatum, telwoord, getallenVan, isHerinneringPad, SCHEMA, SYSTEEM, VERHAAL_MAP, VOORVAL_MAP, OPNAME_MAP, INDEX, VERSIE };
+module.exports = { maak, hidVan, MAX_HERINNERINGEN, toetsTekst, toetsFeiten, markeer, bevestigdUit, twijfelSoort, toetsGeheel, correctiesUit, pasCorrectiesToe, vensterSet, rekenDatum, telwoord, getallenVan, isHerinneringPad, SCHEMA, SYSTEEM, VERHAAL_MAP, VOORVAL_MAP, OPNAME_MAP, INDEX, VERSIE };

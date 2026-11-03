@@ -43,7 +43,8 @@ function nepVerhaal(staat) {
     return { stand: 'klaar', versie: 2, niet_gelukt: [], delen: [{ herinnering_id: 'hr_0000000000000001', titel: V.pasCorrectiesToe(v.titel || '', cs), status: 'concept', eigen: false, t_van: 0,
       datum: v.datum_van || '', datum_precisie: v.datum_precisie || 'onbekend', datum_van: v.datum_van || '', datum_tot: v.datum_tot || '',
       plaats: v.plaats || '', personen: v.personen || [], voorval: v.voorval || null,
-      alineas: v.alineas.map((a, i) => ({ tekst: V.pasCorrectiesToe(a, cs), t_van: i * 60, t_tot: i * 60 + 60 })) }] };
+      twijfel: v.twijfel ? ['Dit verhaal wijkt meer dan gewoonlijk af van je eigen woorden; lees het even na.'] : [], twijfel_open: !!v.twijfel, letterlijk: false,
+      alineas: v.alineas.map((a, i) => ({ tekst: V.pasCorrectiesToe(a, cs), t_van: i * 60, t_tot: i * 60 + 60, twijfel: v.twijfel && i === 0 ? [{ woord: v.twijfel, soort: 'naam' }] : [] })) }] };
   } };
 }
 function omgeving() {
@@ -508,6 +509,35 @@ test('wv2180 log alleen voor David: detail heeft verhaal + log (transcript, corr
     o.ml.toonOpname(ha, { aan: false });
     await o.ml.tik();
     assert.ok(!JSON.stringify(o.items('vrienden')).includes('prikte'), 'alleen de titel blijft');
+  } finally { o.sluit(); }
+});
+
+test('wv2322 twijfel alleen voor David: detail toont het gemarkeerde woord en de uitleg; deellink en toonmodus laten een deel met open twijfel weg', async () => {
+  const o = omgeving();
+  try {
+    o.staat.kluis.memorylane_link_vrienden = 'Proefwachtwoord Twee';
+    o.opname(RA, 'shizzle', false);
+    o.staat.verhalen[RA] = { titel: 'Kaarten in de voortent', alineas: ['We speelden kaarten met Keesje Verzonnen in de voortent.'], twijfel: 'Keesje' };
+    o.ml.lijst();
+    const ha = o.hid('opname', RA);
+    const d = o.ml.detail(ha).body.herinnering;
+    assert.deepStrictEqual(d.verhaal.delen[0].alineas[0].twijfel, [{ woord: 'Keesje', soort: 'naam' }]);
+    assert.match(d.verhaal.delen[0].twijfel[0], /wijkt meer dan gewoonlijk af/);
+    assert.match(d.verhaal.tekst, /Keesje/, 'David ziet het verhaal zelf gewoon');
+    o.ml.zicht(ha, { kring: 'vrienden', aan: true });
+    await o.ml.link('vrienden', 'aan');
+    await o.ml.tik();
+    const buiten = JSON.stringify(o.items('vrienden'));
+    assert.ok(buiten.indexOf('Keesje') < 0 && buiten.indexOf('voortent.') < 0, 'een ongetoetste naam gaat niet de deur uit: ' + buiten);
+    // David bevestigt (de verhaalmodule meldt geen open twijfel meer): dan gaat het verhaal wel mee
+    o.staat.verhalen[RA].twijfel = null;
+    o.ml.titel(ha, { titel: 'Kaarten in de voortent!' });
+    await o.ml.tik();
+    assert.match(JSON.stringify(o.items('vrienden')), /Keesje Verzonnen/);
+    // toonmodus: zelfde regel (een deel met open twijfel valt weg)
+    o.staat.verhalen[RA].twijfel = 'Keesje';
+    const td = o.ml.detail(ha, { toon: true });
+    assert.strictEqual(td.status, 200); assert.ok(!JSON.stringify(td.body).includes('Keesje'), 'toonmodus zonder open twijfel');
   } finally { o.sluit(); }
 });
 

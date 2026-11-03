@@ -437,7 +437,8 @@ function maak(o) {
   // het verhaal van een opname (herinneringen-verhaal.js), met Davids correcties; null zonder verhaalmodule
   function sam(h, pagina) {
     if (h.soort !== 'opname' || !o.verhaal || typeof o.verhaal.samengesteld !== 'function') return null;
-    try { return o.verhaal.samengesteld(h.ref, cs(h, pagina)); } catch (e) { fout('ml-verhaal', e); return null; }
+    // wv2322: Davids eigen stukken mee (een bevestiging "X klopt" of correctie haalt de twijfelmarkering weg)
+    try { return o.verhaal.samengesteld(h.ref, cs(h, pagina), eigenStukken(h, pagina).map((x) => ({ soort: x.soort, tekst: x.tekst }))); } catch (e) { fout('ml-verhaal', e); return null; }
   }
   // wv2180: titel. David wint altijd; dan de vaste naamgeving; een opname daarna de titel van zijn verhaal; anders de standaardtitel.
   function oudeStandaard(h) {
@@ -498,13 +499,16 @@ function maak(o) {
   // wv2180: het samengestelde verhaal als platte tekst (alinea's), zonder tijdcodes; null = (nog) geen.
   //  opname → het verhaal (concept of goedgekeurd; de feitentoets liet alleen gezegde namen, getallen en datums door); reis → Davids eigen
   //  aanvullingen; los → de bijdrage zelf. Correcties letterlijk.
-  function verhaalVan(h, pagina, s) {
+  //  wv2322: buiten = voor iemand anders (deellink, toonmodus): een deel met open twijfel (een naam, getal of datum die de server niet terugvond
+  //  en die David nog niet bevestigde) gaat dan niet mee.
+  function verhaalVan(h, pagina, s, buiten) {
     const p = pagina === undefined ? paginaLees(h.hid) : pagina;
     const c = cs(h, p);
     if (h.soort === 'opname') {
       const x = s === undefined ? sam(h, p) : s;
-      if (!x || !x.delen.length) return null;
-      return x.delen.map((d) => (x.delen.length > 1 && d.titel ? d.titel + '\n\n' : '') + d.alineas.map((a) => a.tekst).join('\n\n')).join('\n\n');
+      const dl = x ? x.delen.filter((d) => !(buiten && d.twijfel_open)) : [];
+      if (!dl.length) return null;
+      return dl.map((d) => (dl.length > 1 && d.titel ? d.titel + '\n\n' : '') + d.alineas.map((a) => a.tekst).join('\n\n')).join('\n\n');
     }
     if (h.soort === 'reis') { const l = eigenStukken(h, p).filter((x) => x.soort === 'aanvulling').map((x) => pasToe(x.tekst, c)); return l.length ? l.join('\n\n') : null; }
     if (isFotoalbum(h)) {
@@ -516,14 +520,14 @@ function maak(o) {
     return l.length ? l.join('\n\n') : null;
   }
   // Haak wv2118 (R2): sinds wv2180 het samengestelde verhaal (Davids opdracht: standaard alleen de samengestelde herinnering)
-  function verhaalVoorDelen(hid) { const h = vind(hid); return h ? verhaalVan(h) : null; }
+  function verhaalVoorDelen(hid) { const h = vind(hid); return h ? verhaalVan(h, undefined, undefined, true) : null; }
 
   // Het item zoals een bezoeker van kring k het ziet: titel, wanneer en het samengestelde verhaal. NOOIT de log (transcript, correcties,
   // losse aanvullingen, bijdragen van anderen); wv2180. k telt nog mee in de hash (zelfde vorm als voorheen).
   function itemVoor(h, k) {
     const pagina = paginaLees(h.hid), s = sam(h, pagina);
     const stukken = [];
-    const v = h.soort === 'opname' && !h.toon_opname ? null : verhaalVan(h, pagina, s);
+    const v = h.soort === 'opname' && !h.toon_opname ? null : verhaalVan(h, pagina, s, true);
     if (v) stukken.push({ wie: h.soort === 'los' && !isFotoalbum(h) ? 'Verteld' : 'David', soort: 'verhaal', tekst: v });
     return { titel: titelVan(h, pagina, s), wanneer: wanneerVan(h, pagina, s), stukken, kring: k };
   }
@@ -788,8 +792,8 @@ function maak(o) {
       if (!toonbaar(h)) return NIET_TOON;
       // alleen het samengestelde verhaal (zonder tijdcodes en zonder "door jou aangepast"); nooit de log
       const t = toonKort(kort(h, pagina, s));
-      t.verhaal = { tekst: verhaalVan(h, pagina, s), stand: h.soort === 'opname' ? (s ? s.stand : null) : null,
-        delen: s ? s.delen.map((d) => ({ titel: d.titel, eigen: false, alineas: d.alineas.map((a) => ({ tekst: a.tekst, t_van: null, t_tot: null })) })) : [] };
+      t.verhaal = { tekst: verhaalVan(h, pagina, s, true), stand: h.soort === 'opname' ? (s ? s.stand : null) : null,
+        delen: s ? s.delen.filter((d) => !d.twijfel_open).map((d) => ({ titel: d.titel, eigen: false, alineas: d.alineas.map((a) => ({ tekst: a.tekst, t_van: null, t_tot: null })) })) : [] };
       t.stukken_lijst = []; t.voorstellen = [];
       return { status: 200, body: { ok: true, toon: true, herinnering: t } };
     }
@@ -799,7 +803,9 @@ function maak(o) {
     // wv2180: het samengestelde verhaal (standaard in beeld) en de log (alleen in de app; nooit in een deellink)
     const c = cs(h, pagina);
     uit.verhaal = { tekst: verhaalVan(h, pagina, s), stand: h.soort === 'opname' ? (s ? s.stand : null) : null,
-      delen: s ? s.delen.map((d) => ({ titel: d.titel, eigen: d.eigen, alineas: d.alineas.map((a) => ({ tekst: a.tekst, t_van: a.t_van, t_tot: a.t_tot })) })) : [] };
+      // wv2322: alleen voor David de twijfel (gemarkeerde woorden per alinea en een uitleg per deel)
+      delen: s ? s.delen.map((d) => ({ titel: d.titel, eigen: d.eigen, twijfel: d.twijfel || [], letterlijk: !!d.letterlijk,
+        alineas: d.alineas.map((a) => ({ tekst: a.tekst, t_van: a.t_van, t_tot: a.t_tot, twijfel: a.twijfel || [] })) })) : [] };
     uit.log = { opname: h.soort === 'opname' ? opnameTekst(h) : null, niet_gelukt: s ? s.niet_gelukt.map((m) => ({ uitleg: m.uitleg, woord: m.woord || null, t_van: m.t_van, t_tot: m.t_tot })) : [],
       correcties: c.map((x) => ({ van: x.van, naar: x.naar })), stukken };
     if (h.soort === 'opname') { uit.opname = uit.log.opname; const r = q.ramble.get(h.ref); uit.ramble_id = h.ref; uit.notitie = r ? r.notitie : null; }
