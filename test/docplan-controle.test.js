@@ -86,7 +86,7 @@ test('schrijf: geen dubbel, wegzetten blijft dicht, vanzelf dicht en weer open, 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'docplan-controle-'));
   try {
     const fdb = D.open(dir);
-    assert.equal(D.SCHEMA_VERSIE, 18);
+    assert.ok(D.SCHEMA_VERSIE >= 18);   // wv2316: migratie 19 (boekstuk) kwam erna
     fdb.db.exec("INSERT INTO entiteit (sleutel, naam) VALUES ('tolgaarde', 'TG (proef)'), ('groenhouten', 'GH (proef)')");
     const ronde = (lijst) => C.schrijf(fdb, D, C.controle({ maanden: MAANDEN, lijsten: [lijst], dp: docplan(), fac: facturen(), nu: NU }), '2026-11-03T10:00:00.000Z');
     assert.deepEqual(ronde(LIJST), { nieuw: 6, vanzelf_dicht: 0, heropend: 0, open: 6 });

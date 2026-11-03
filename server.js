@@ -4097,6 +4097,35 @@ function handleRequest(req, res) {
     }); });
   }
 
+  // ── wv2316: boekstuk Google Home (machinekamer; body-secret zoals /facturen/maandspecificatie). {actie: stand | proef (termijn: het
+  // boekstuk van die maand uit de echte mails naar Davids testalias, via de verzender) | kaart (voorbeeld: proef|gmail; de eenmalige
+  // vrijgavekaart) | ronde (de tik nu)}. Versturen aan André doet alleen de ronde, na Davids vrijgave.
+  if (req.method === 'POST' && req.url === '/facturen/boekstuk') {
+    return rolPoort(res, function () { readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!SECRET || typeof d.secret !== 'string' || Buffer.byteLength(d.secret) !== Buffer.byteLength(SECRET) ||
+          !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
+      const stuur = function (st, j) { reqLogExtra(res, { boekstuk: String(d.actie || '').slice(0, 10), ok: !!(j && j.ok) }); res.writeHead(st, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(j)); };
+      if (!BS_MOD || !facturenMod) return stuur(404, { ok: false, fout: 'het boekstuk zit niet in deze versie van de pod' });
+      const fdb = facturenOpen();
+      if (!fdb || !rolPrimair()) return stuur(409, { ok: false, fout: 'Facturen draait alleen op de primaire Olares-kant' });
+      const actie = String(d.actie || '');
+      (async function () {
+        if (actie === 'stand') return stuur(200, { ok: true, boekstuk: bsInfo() });
+        if (actie === 'ronde') { await bsTik(); return stuur(200, { ok: true, boekstuk: bsInfo() }); }
+        if (actie === 'kaart') { const x = await bsKaartZet(fdb, d.voorbeeld === 'proef' ? 'proef' : 'gmail'); return stuur(x.status, x.j); }
+        if (actie === 'proef') {
+          if (!(await potVzVerzenderOk(true))) return stuur(409, { ok: false, fout: 'de verzender kent bron boekstuk nog niet (Toetsen-hash wijkt af of workflow uit)' });
+          const u = await BS_MOD.proef(bsIo(fdb), { nu: Date.now(), termijn: String(d.termijn || ''), aan: BS_PROEF_AAN, van: BS_VAN });
+          facturenMod.audit(fdb, { wie: 'machinekamer', wat: 'boekstuk_proef', object_soort: 'boekstuk', object_id: 'google-home:proef-' + String(d.termijn || '').slice(0, 7), entiteit: BS_MOD.ABO.entiteit,
+            na: ({ ok: !!u.ok, status: u.status || null, code: u.code || null, reden: u.reden || null, sha256: u.sha256 || null }) });
+          return stuur(u.ok ? 200 : 409, u);
+        }
+        return stuur(400, { ok: false, fout: 'actie is stand, proef, kaart of ronde' });
+      })().catch(function (e) { logError('facturen-boekstuk', e); stuur(500, { ok: false, fout: 'fout op de pod: ' + String(e && e.message || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120) }); });
+    }); });
+  }
+
   // ── wv1275: datumdetector (SB2 fase 2). Body-secret zoals /run; geen rolPoort: alleen rekenen (en het schaduwlog), dus op beide
   // kanten. Uitkomst = socev-datum uit de scripts-release van dat moment (datums.js). 404 als de module niet in de release zit.
   if (req.method === 'POST' && reqPath(req) === '/datums') {
@@ -10325,6 +10354,8 @@ function appVjKnopStand(p, rv, afgeleid) {
   if (gev === null && typeof ovisKaartHerkomst === 'function' && ovisKaartHerkomst(p) && p.herkomst.ovis.gevoelig === true) gev = 'geld';
   // wv1969 (Opus-review KAN 9): doorlaten van een herinnering met markertreffer is onomkeerbaar (vault, Syncthing, offsite): Ja met vingerafdruk
   if (gev === null && /^herinnering-[0-9a-f]{10}$/.test(String(p.sleutel || '')) && typeof herinneringen !== 'undefined' && herinneringen) gev = 'versturen';
+  // wv2316: de vrijgavekaart van het boekstuk Google Home is altijd gevoelig (versturen aan een derde), welke woorden er ook staan
+  if (gev === null && /^boekstuk-vrijgave-\d{1,9}$/.test(String(p.sleutel || ''))) gev = 'versturen';
   // gekoppeld en bruikbaar: de druk loopt via die vraag (ook de knoppen onder het oorspronkelijke bericht tonen dan beantwoord)
   const gekBruik = !!(gekRij && !appNaarTelegramNu(gekRij) && Date.now() - Date.parse(gekRij.t || 0) <= APP_VRAAG_GELDIG_MS);
   // wv1018 (Fable diffreview #2): appKnop eist een vingerafdruk zodra de chatvraag gevoelig is (rij zonder gevoelig: false); zeg het de app vooraf
@@ -10544,6 +10575,15 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
       : !pot.reden && k.gevoelig ? ' (POT-vrijgave: de pod legt deze vrijgave zelf vast in de POT-databank zodra deze druk is aangenomen; op de verzenddag verstuurt de pod tussen 09:00 en 12:00 één mail per nota. Jij doet niets en verstuurt niets; bevestig het David in één zin.)'
       : ' (POT-vrijgave NIET vastgelegd: ' + (pot.reden || 'geen verse vingerafdruk') + '. De nota\'s komen op de verzenddag om 07:00 als concept in Gmail. Zeg dat kort; jij verstuurt niets.)');
   }
+  // wv2316: vrijgavekaart van het boekstuk Google Home ("… elke maand zelf naar je vader versturen?"). De pod legt de vrijgave zelf vast in
+  // facturen.sqlite (boekstuk_vrijgave), nooit het taalmodel; alleen een Ja met verse vingerafdruk van telefoon of meereizend apparaat telt.
+  let bs = null;
+  if (!pot && /^boekstuk-vrijgave-\d{1,9}$/.test(String(p.sleutel || ''))) {
+    bs = await bsKnopVoor(p, a);
+    ctx = context + (keuze !== 'ja' ? ' (Boekstuk-vrijgave: geen Ja, dus niets vrijgegeven; het boekstuk Google Home blijft elke maand een concept in Gmail. Zeg dat kort; jij verstuurt niets.)'
+      : !bs.reden && k.gevoelig ? ' (Boekstuk-vrijgave: de pod legt deze vrijgave zelf vast in de Facturen-databank zodra deze druk is aangenomen; vanaf de 3e van de volgende maand verstuurt de pod het boekstuk op een werkdag tussen 09:00 en 12:00 zelf aan je vader. Jij doet niets en verstuurt niets; bevestig het David in één zin.)'
+      : ' (Boekstuk-vrijgave NIET vastgelegd: ' + (bs.reden || 'geen verse vingerafdruk') + '. Het boekstuk blijft elke maand een concept in Gmail. Zeg dat kort; jij verstuurt niets.)');
+  }
   // wv861/wv942: bundelkaart van AIX (sleutel in /opt/data/aix-winkel/bundel.json; startset of weekbundel). De pod plaatst zelf, nooit het taalmodel,
   // en alleen bij een Ja met verse vingerafdruk van telefoon of meereizend apparaat (ideeen.plaatsBundel toetst de bevestiging opnieuw). Nee = bundel dicht, niets geplaatst.
   let ib = null, ctxIb = context;
@@ -10555,15 +10595,15 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
       : ' (AIX: NIET geplaatst, want deze Ja kwam van een vaste plek. Jij plaatst niets. Laat David op de telefoon drukken: heropen deze kaart met voor-jou-beheer.)');
   // wv1253: OVIS-kaart (herkenningskenmerken, kritiek veld, Bibliothecaris). De pod legt Davids keuze zelf vast via ovis_handvat_activeer
   // (precies de bevroren lijst; nooit het taalmodel); Socev hoort in de staart wat er werkelijk gebeurde.
-  const ov = !pot && !ib && typeof ovisKaartHerkomst === 'function' && ovisKaartHerkomst(p) ? ovisKnopHaak(p, d.toelichting) : null;
+  const ov = !pot && !bs && !ib && typeof ovisKaartHerkomst === 'function' && ovisKaartHerkomst(p) ? ovisKnopHaak(p, d.toelichting) : null;
   // wv1343: scankaart van scansnap.js. Alleen uit de eigen tabel van de pod (nooit uit de kaarttekst); Ja/Anders: kopie van de scan in de
   // invoermap van de knopbeurt; de keuze telt bij de start en gaat terug als de druk vervalt.
   let ss = null;
-  try { ss = !pot && !ib && !ov && typeof scansnap !== 'undefined' && scansnap ? scansnap.knop(p.sleutel, keuze, d.toelichting) : null; } catch (e) { logError('scansnap-knop', e); ss = null; }
+  try { ss = !pot && !bs && !ib && !ov && typeof scansnap !== 'undefined' && scansnap ? scansnap.knop(p.sleutel, keuze, d.toelichting) : null; } catch (e) { logError('scansnap-knop', e); ss = null; }
   // wv1969: markerkaart van een herinnering (herinneringen.js, eigen tabel). Ja = doorlaten, Nee = vasthouden; de pod doet het zelf, Socev krijgt
   // geen tekst. De keuze telt bij de start en gaat terug als de druk vervalt.
   let hr = null;
-  try { hr = !pot && !ib && !ov && !ss && typeof herinneringen !== 'undefined' && herinneringen ? herinneringen.knop(p.sleutel, keuze) : null; } catch (e) { logError('ramble-knop', e); hr = null; }
+  try { hr = !pot && !bs && !ib && !ov && !ss && typeof herinneringen !== 'undefined' && herinneringen ? herinneringen.knop(p.sleutel, keuze) : null; } catch (e) { logError('ramble-knop', e); hr = null; }
   if (hr) {
     const hrStart = bijStart;
     const knopHr = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
@@ -10586,9 +10626,10 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   }
   // wv921, wv861 en wv1253 sluiten elkaar uit (pot-vrijgave-N, de sleutel in bundel.json, intake-…); de haak van de een of de ander
   const knopRes = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
-    { tekst: tekst, bericht: bericht, context: pot ? ctx : ov ? context + ov.context : ctxIb, gevoelig: k.gevoelig || (!pot && !!ib),
+    { tekst: tekst, bericht: bericht, context: pot || bs ? ctx : ov ? context + ov.context : ctxIb, gevoelig: k.gevoelig || (!pot && !!ib) || !!bs,
       bijStart: ov ? function (kz, g) { bijStart(kz, g); return ov.staart(a); } : bijStart,
       naStart: ov ? ov.naStart : pot && !pot.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { potVzVrijgeven(pot.v, kz, gevoeligJa, ap, bevestiging, vraagId); }
+        : bs && !bs.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { bsVrijgeven(bs.v, kz, gevoeligJa, ap, bevestiging, vraagId); }
         : !pot && ib && !ib.afgehandeld ? function (kz, gevoeligJa, ap, bevestiging, vraagId) {
           if (kz === 'nee') { try { ideeen.bundelNee(ib.kaart); } catch (e) { logError('ideeen-plaats', e); } return; }
           if (kz !== 'ja') return;
@@ -13509,6 +13550,7 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'facturen-bank',        // wv2057: failsafe na het inschieten (betaling niet op de bank, bedrag wijkt af); hoofdkanaal, soort dag
   'doorgeefluik',         // wv1267: regel in de machinekamer als David een opdracht via Socev op de werklijst zette
   'manager',              // wv895: rapport van een manager-ronde op afroep (machinekamer; soort antwoord als David of Socev hem startte)
+  'facturen-boekstuk',    // wv2316: boekstuk Google Home naar André (verstuurd = archief; concept of vraag = dag)
   'nieuwsbrief',          // wv2190: wekelijkse bloemlezing uit de nieuwsbrieven (za 09:15, AI - Nieuwsbrief-bloemlezing); hoofdkanaal, soort dag
   'dagsamenvatting']);    // wv589: dagsamenvatting "Gebeurd" 07:15 (idee 13 § 4.6): machinekamer, geen MELD_SOORT-regel = archief, geen seintje
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
@@ -15516,7 +15558,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel, jaaropgaaf: !!docplanJaaropgaaf } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), boekstuk: typeof bsInfo === 'function' ? bsInfo() : undefined, waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel, jaaropgaaf: !!docplanJaaropgaaf } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -22355,7 +22397,10 @@ function potVzInfo() {
 const POT_VZ_GEHEIM_NAAM = 'n8n_verzender_versturen_secret';
 // sha256 van de jsCode van de Code-knoop Toetsen in AI - Facturen-verzender, zoals gepubliceerd door wv921. Wijkt de workflow af, dan
 // verstuurt de pod niets en wordt alles concept (Fable #10). Bewuste wijziging aan de verzender = deze waarde mee wijzigen (nieuw image).
-const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7716d25994bfd241b02';
+const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '8fec24893c22a23d54e56d8749b6c186d63897634e9e10608f97ee6336ddbcbb';
+// wv2316: de versie van vóór bron boekstuk telt voor pot nog mee, zodat image en gepubliceerde workflow niet op dezelfde minuut hoeven te
+// wisselen; het boekstuk eist de nieuwe (potVzVerzenderOk(true)). Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
+const POT_VZ_TOETSEN_SHA_VORIG = '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7716d25994bfd241b02';
 let potVzGeheimCache = null;   // { w, tot }
 async function potVzVerzendGeheim() {
   if (potVzGeheimCache && Date.now() < potVzGeheimCache.tot) return potVzGeheimCache.w;
@@ -22376,7 +22421,7 @@ async function potVzVerzendGeheim() {
 // Code-knopen niet toe). sha256 van tools/n8n/facturen-verzender-merk.js; de IF-waarde is de (niet-geheime) sha256 van het verzendgeheim.
 const POT_VZ_MERK_SHA = process.env.POT_VZ_MERK_SHA_TOETS || '92594dfa5edd9ea7b656dd1b4a8c1f831b86c22e0de42d7fa53c0f303b6117bb';
 const POT_VZ_GEHEIM_SHA = '675ccb2c6d979175f015301fb6b6614ccc2952f5f2f7a855a0262fd7b84019c9';
-async function potVzVerzenderOk() {
+async function potVzVerzenderOk(alleenNieuw) {
   const w = await appN8n('/workflows/' + encodeURIComponent(FACTUREN_VERZENDER_WF));
   if (!w || !Array.isArray(w.nodes)) throw new Error('verzender niet te lezen');
   if (w.active !== true) return false;
@@ -22386,7 +22431,8 @@ async function potVzVerzenderOk() {
   if (!t || !m || !i || typeof t.parameters.jsCode !== 'string' || typeof m.parameters.jsCode !== 'string') return false;
   const c = (((i.parameters || {}).conditions || {}).conditions) || [];
   const ifOk = c.length === 1 && c[0].rightValue === POT_VZ_GEHEIM_SHA && c[0].operator && c[0].operator.operation === 'equals' && ((i.parameters.conditions || {}).combinator === 'and');
-  return ifOk && sha(t.parameters.jsCode) === POT_VZ_TOETSEN_SHA && sha(m.parameters.jsCode) === POT_VZ_MERK_SHA;
+  const ts = sha(t.parameters.jsCode);
+  return ifOk && (ts === POT_VZ_TOETSEN_SHA || (!alleenNieuw && ts === POT_VZ_TOETSEN_SHA_VORIG)) && sha(m.parameters.jsCode) === POT_VZ_MERK_SHA;
 }
 // { bron, modus, ref, aan, cc, onderwerp, bericht, van, bijlage: { naam, bytes } } → { status, j }. Vóór de aanroep mislukt = zekerNietVerstuurd.
 async function potVzVerstuur(v) {
@@ -22548,6 +22594,187 @@ async function potVzTik() {
   } finally { potVz.bezig = false; }
 }
 setInterval(function () { potVzTik().catch(function (e) { logError('pot-verzend', e); }); }, POT_VZ_TIK_MS).unref();
+
+// ── wv2316: boekstuk Google Home Premium Advanced elke maand zelf naar André (David 3-11-2026 15:51; Ja met verse vingerafdruk 16:22) ──────
+// Ontwerp: vault "01_Ontwikkeling/Boekstuk Google Home - maandelijks zelf naar André (ontwerp 3-11-2026).md"; de logica staat in
+// facturen-boekstuk.js (puur). Tik elke 10 minuten, alleen de primaire kant, vanaf de 3e op een werkdag vanaf 09:00: de Google Play-
+// bevestiging en het PayPal-bewijs via het lees-luik, de voorcontrole, en dan (alleen na Davids eenmalige vrijgave met verse
+// vingerafdruk, vóór 12:00) versturen via AI - Facturen-verzender bron boekstuk met het eigen verzendgeheim van pot (geen nieuw geheim);
+// anders een Gmail-concept aan André via het mailluik (zoals de maandspecificatie) met één regel in de app. Staat en spoor in
+// facturen.sqlite (boekstuk_verzending, boekstuk_vrijgave, audit). Schakelaar FACTUREN_BOEKSTUK: uit = niets, concept = alleen
+// concepten, anders automatisch na de vrijgave. Eerste maand FACTUREN_BOEKSTUK_VANAF (2026-12).
+const BS_MOD = (function () { const p = path.join(__dirname, 'facturen-boekstuk.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('facturen-boekstuk', e); return null; } })();
+const BS_TIK_MS = 10 * 60 * 1000;
+const BS_VANAF = /^\d{4}-\d{2}$/.test(String(process.env.FACTUREN_BOEKSTUK_VANAF || '')) ? process.env.FACTUREN_BOEKSTUK_VANAF : '2026-12';
+const BS_PROEF_AAN = 'd.schaap+facturentest@gmail.com';
+const BS_VAN = '"David Schaap" <dokterschaap@gmail.com>';   // zelfde afzender als bron pot (POT_VAN in de Toetsen-code)   // Davids eigen testalias (ook op AAN_BOEKSTUK van de verzender)
+const bsStaat = { bezig: false, laatste: null, uitkomst: null, fouten_op_rij: 0, rij: {}, box: {} };
+function bsModus() { const w = String(process.env.FACTUREN_BOEKSTUK || '').trim().toLowerCase(); return w === 'uit' ? 'uit' : w === 'concept' ? 'concept' : 'auto'; }
+function bsAan() { return !!BS_MOD && !!facturenMod && SERVER_ECHT && rolPrimair() && bsModus() !== 'uit'; }
+function bsAdres(fdb) {
+  const e = fdb.db.prepare('SELECT afschrift_doel FROM entiteit WHERE sleutel = ?').get(BS_MOD.ABO.entiteit);
+  if (e && e.afschrift_doel) return String(e.afschrift_doel).toLowerCase();
+  const alle = fdb.db.prepare("SELECT DISTINCT afschrift_doel AS a FROM entiteit WHERE afschrift_doel IS NOT NULL AND actief = 1 AND sleutel <> 'prive'").all();
+  return alle.length === 1 ? String(alle[0].a).toLowerCase() : null;   // zelfde regel als de maandspecificatie (facturen.js specAan)
+}
+const BS_ZET = ['status', 'reden', 'verzonden_op', 'message_id', 'pdf_sha256'];
+const BS_RIJ = ['termijn', 'status', 'n', 'aan', 'pdf_sha256', 'play_id', 'paypal_id', 'reden', 'aangemaakt_op', 'bijgewerkt_op'];
+function bsStaatIo(fdb) {
+  const A = BS_MOD.ABO.sleutel, wanneer = function () { return new Date().toISOString(); };
+  return {
+    lees: function (t) { return fdb.db.prepare('SELECT * FROM boekstuk_verzending WHERE abonnement = ? AND termijn = ?').get(A, t) || null; },
+    eerderN: function () { return fdb.db.prepare("SELECT n FROM boekstuk_verzending WHERE abonnement = ? AND n IS NOT NULL AND status IN ('verzenden','verstuurd','onzeker','onzeker_gemeld')").all(A).map(function (r) { return Number(r.n); }); },
+    reserveer: function (rij) {
+      return facturenMod.transactie(fdb, function () {
+        const v = BS_RIJ.map(function (k) { return rij[k] === undefined ? null : rij[k]; });
+        // geen OR IGNORE: dat slikt in SQLite ook een CHECK-fout (dan zou een maand stil overslaan). Alleen een bestaande termijn = "bestond al";
+        // een al eerder verstuurd bestelnummer (unieke index op n) is een fout (de voorcontrole hoort dat al te zien)
+        let r;
+        try { r = fdb.db.prepare('INSERT INTO boekstuk_verzending (abonnement, ' + BS_RIJ.join(', ') + ') VALUES (?' + ', ?'.repeat(BS_RIJ.length) + ')').run(A, ...v); }
+        catch (e) { if (/UNIQUE constraint failed: boekstuk_verzending\.abonnement, boekstuk_verzending\.termijn$/.test(String(e && e.message))) return false; throw e; }
+        if (Number(r.changes) !== 1) return false;
+        facturenMod.audit(fdb, { wie: 'pod (boekstuk-ronde)', wat: 'boekstuk_' + rij.status, object_soort: 'boekstuk', object_id: A + ':' + rij.termijn, entiteit: BS_MOD.ABO.entiteit,
+          na: ({ n: rij.n == null ? null : rij.n, reden: rij.reden || null, sha256: rij.pdf_sha256 || null }), wanneer: wanneer() });
+        return true;
+      });
+    },
+    zet: function (t, van, velden) {
+      const k = Object.keys(velden).filter(function (x) { return BS_ZET.indexOf(x) >= 0; });
+      return facturenMod.transactie(fdb, function () {
+        const r = fdb.db.prepare('UPDATE boekstuk_verzending SET ' + k.map(function (x) { return x + ' = ?'; }).join(', ') + ', bijgewerkt_op = ? WHERE abonnement = ? AND termijn = ? AND status = ?')
+          .run(...k.map(function (x) { return velden[x] == null ? null : velden[x]; }), wanneer(), A, t, van);
+        if (Number(r.changes) !== 1) return false;
+        facturenMod.audit(fdb, { wie: 'pod (boekstuk-ronde)', wat: 'boekstuk_' + (velden.status || van), object_soort: 'boekstuk', object_id: A + ':' + t, entiteit: BS_MOD.ABO.entiteit,
+          voor: ({ status: van }), na: ({ reden: velden.reden || null, message_id: velden.message_id || null }), wanneer: wanneer() });
+        return true;
+      });
+    },
+    vrijgave: function () { return fdb.db.prepare('SELECT * FROM boekstuk_vrijgave WHERE abonnement = ? AND vraag_id IS NOT NULL AND ingetrokken_op IS NULL ORDER BY id DESC LIMIT 1').get(A) || null; },
+  };
+}
+// Lees-luik: { mails, melding } (melding = niet of deels gelukt: dan geen meting)
+async function bsZoek(query) {
+  const j = await appAgendaApi({ actie: 'mail_zoeken', query: query, max: 20 });
+  const mails = Array.isArray(j) ? j : (j && Array.isArray(j.mails) ? j.mails : null);
+  return { mails: mails, melding: !mails ? 'geen lijst' : (j && j.melding) || null };
+}
+async function bsLees(id) { const j = await appAgendaApi({ actie: 'mail_lezen', id: String(id) }); return j && typeof j === 'object' ? j : { fout: 'leeg' }; }
+async function bsBericht(tekst, soort) {
+  const d = { kanaal: 'hoofd', bron: 'facturen-boekstuk', klasse: 'normaal', tekst: tekst, sleutel: 'facturen-boekstuk-' + crypto.createHash('sha256').update(tekst).digest('hex').slice(0, 16) };
+  if (soort) d.soort = soort;
+  const r = await berichtIntern(d);
+  if (!r || r.status !== 200) throw new Error('bericht niet bezorgd (' + (r && r.status) + ')');
+}
+function bsIo(fdb) {
+  return {
+    zoek: bsZoek, lees: bsLees, staat: bsStaatIo(fdb), aan: function () { return bsAdres(fdb); },
+    // laatste 4 cijfers van de rekeningen van Tolgaarde in Facturen: PayPal moet daarvan afschrijven (niet in de code, review wv2316 MOET 1)
+    rekeningen: function () { return fdb.db.prepare('SELECT iban FROM rekening WHERE entiteit = ?').all(BS_MOD.ABO.entiteit).map(function (r) { return String(r.iban || '').slice(-4); }).filter(function (x) { return /^\d{4}$/.test(x); }); },
+    verzenderOk: function () { return potVzVerzenderOk(true); },
+    verstuur: potVzVerstuur,
+    concept: async function (c) { return facturenSpecMailluik(c); },
+    // een regel met "gestuurd" is alleen nieuws (archief, geen seintje); al het andere vraagt iets van David (dag)
+    bericht: function (tekst) { return bsBericht(tekst, /aan je vader gestuurd\.$/.test(tekst) ? undefined : 'dag'); },
+  };
+}
+// Box: één rij per reden per dag (onthouden in het geheugen; een storing pas na 5 tikken op rij)
+function bsBox(reden, tekst) {
+  const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  if (bsStaat.box[reden] === dag) return;
+  bsStaat.box[reden] = dag;
+  try {
+    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    const t = VV().lees(pad);
+    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
+    if (!eerste) return;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const rij = '\n## [direct] ' + tijd + ' — Boekstuk Google Home: ' + String(reden).slice(0, 40) + ' #boekstuk-google-home (pod, automatisch)\n' +
+      '- status: open\n- van: pod bsTik (server.js, elke 10 min; hooguit 1× per dag per reden)\n' +
+      '- gemeten: ' + String(tekst || '').replace(/[\r\n]+/g, ' ').replace(/https?:\/\/\S+/g, '<url>').slice(0, 220) + '\n' +
+      '- gevolg als er niets gebeurt: het boekstuk van deze maand gaat niet vanzelf; om 12:00 wordt het een concept (of er komt een regel aan David).\n' +
+      '- voorstel: /health facturen.boekstuk bekijken; staat in facturen.sqlite boekstuk_verzending (alleen lezen); verzender: POT_VZ_TOETSEN_SHA tegen de gepubliceerde Toetsen-code.\n';
+    VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
+  } catch (e) { logError('facturen-boekstuk-box', e); }
+}
+function bsInfo() {
+  if (!BS_MOD) return undefined;
+  let v = null, laatste = null;
+  try { const f = facturenOpen(); if (f) { v = f.db.prepare("SELECT id, kaart_sleutel, vraag_id IS NOT NULL AS vrij, ingetrokken_op IS NOT NULL AS ingetrokken FROM boekstuk_vrijgave WHERE abonnement = 'google-home' ORDER BY id DESC LIMIT 1").get() || null;
+    laatste = f.db.prepare("SELECT termijn, status, n, verzonden_op FROM boekstuk_verzending WHERE abonnement = 'google-home' ORDER BY termijn DESC LIMIT 1").get() || null; } } catch (e) { v = null; }
+  return { aan: bsAan(), modus: bsModus(), vanaf: BS_VANAF, laatste_tik: bsStaat.laatste, fouten_op_rij: bsStaat.fouten_op_rij,
+    vrijgave: v ? { id: v.id, vrij: !!v.vrij, ingetrokken: !!v.ingetrokken } : null, laatste: laatste, uitkomst: bsStaat.uitkomst };
+}
+async function bsTik() {
+  if (bsStaat.bezig || !bsAan()) return;
+  const fdb = facturenOpen();
+  if (!fdb) return;
+  bsStaat.bezig = true;
+  try {
+    const u = await BS_MOD.ronde(bsIo(fdb), { nu: Date.now(), modus: bsModus(), vanaf: BS_VANAF, van: BS_VAN });
+    bsStaat.laatste = new Date().toISOString(); bsStaat.fouten_op_rij = 0;
+    if (u.stap !== 'niets' && u.stap !== 'al') { bsStaat.uitkomst = { termijn: u.termijn, stap: u.stap, reden: u.reden ? String(u.reden).slice(0, 160) : undefined }; }
+    if (u.stap !== 'niets' && u.stap !== 'al' && u.stap !== 'wacht') schrijfLog(nu() + ' facturen-boekstuk ' + velden({ termijn: u.termijn, stap: u.stap, fouten: u.fouten.join(',') || undefined }));
+    ['luik', 'toetsen'].forEach(function (r) { bsStaat.rij[r] = u.fouten.indexOf(r) >= 0 ? (bsStaat.rij[r] || 0) + 1 : 0; if (bsStaat.rij[r] === 5) bsBox(r, 'stap ' + r + ' faalde 5 tikken op rij' + (r === 'toetsen' ? ' (Toetsen-code van de verzender kent bron boekstuk niet of wijkt af van het image)' : '')); });
+    if (u.stap === 'onzeker' || u.stap === 'concept_onzeker' || u.stap === 'concept_mislukt') bsBox(u.stap, 'termijn ' + u.termijn + ': ' + u.stap + (u.reden ? ' (' + u.reden + ')' : ''));
+    if (u.fouten.indexOf('bericht') >= 0) bsBox('bericht', 'termijn ' + u.termijn + ': de regel aan David kwam niet aan (stap ' + u.stap + ')');
+  } catch (e) {
+    bsStaat.fouten_op_rij++;
+    logError('facturen-boekstuk', e);
+    if (bsStaat.fouten_op_rij === 5) bsBox('ronde', 'de ronde faalde 5 keer op rij: ' + String(e && e.message || e).slice(0, 120));
+  } finally { bsStaat.bezig = false; }
+}
+setInterval(function () { bsTik().catch(function (e) { logError('facturen-boekstuk', e); }); }, BS_TIK_MS).unref();
+
+// Eenmalige vrijgave: kaart (machinekamer via POST /facturen/boekstuk {actie: 'kaart'}), knoproute (appVoorJouKnop, zoals potVzKnopVoor)
+async function bsKaartZet(fdb, voorbeeld) {
+  const aan = bsAdres(fdb);
+  if (!aan) return { status: 409, j: { ok: false, fout: 'geen adres van de boekhouder in Facturen' } };
+  const open = fdb.db.prepare("SELECT * FROM boekstuk_vrijgave WHERE abonnement = 'google-home' AND vraag_id IS NULL AND ingetrokken_op IS NULL ORDER BY id DESC LIMIT 1").get();
+  const al = fdb.db.prepare("SELECT id FROM boekstuk_vrijgave WHERE abonnement = 'google-home' AND vraag_id IS NOT NULL AND ingetrokken_op IS NULL").get();
+  if (al) return { status: 409, j: { ok: false, fout: 'al vrijgegeven (vrijgave ' + al.id + ')' } };
+  let v = open;
+  if (v && v.aan !== aan) { fdb.db.prepare('UPDATE boekstuk_vrijgave SET ingetrokken_op = ? WHERE id = ? AND vraag_id IS NULL').run(new Date().toISOString(), v.id); v = null; }
+  if (!v) {
+    const r = fdb.db.prepare("INSERT INTO boekstuk_vrijgave (abonnement, aan, abo_hash, aangemaakt_op) VALUES ('google-home', ?, ?, ?)").run(aan, BS_MOD.aboHash(aan), new Date().toISOString());
+    v = fdb.db.prepare('SELECT * FROM boekstuk_vrijgave WHERE id = ?').get(Number(r.lastInsertRowid));
+  }
+  const p = await appSbRpc('mk_voor_jou_zet', { p: BS_MOD.kaartVrijgave({ id: v.id, aan: aan, voorbeeld: voorbeeld }) });
+  const sl = 'boekstuk-vrijgave-' + v.id;
+  if (!p || p.sleutel !== sl) return { status: 502, j: { ok: false, fout: 'kaart niet teruggegeven', voor_jou: p && p.voor_jou } };
+  fdb.db.prepare('UPDATE boekstuk_vrijgave SET kaart_sleutel = ?, kaart_tekst_hash = ? WHERE id = ? AND vraag_id IS NULL').run(sl, BS_MOD.kaartHash(p), v.id);
+  facturenMod.audit(fdb, { wie: 'machinekamer', wat: 'boekstuk_vrijgave_kaart', object_soort: 'boekstuk', object_id: 'google-home:vrijgave-' + v.id, entiteit: BS_MOD.ABO.entiteit, na: ({ aan: aan }) });
+  appStaat.vjCache = null;
+  return { status: 200, j: { ok: true, vrijgave: v.id, sleutel: sl, voor_jou: p.voor_jou || null } };
+}
+async function bsKnopVoor(p, a) {
+  if (!BS_MOD) return { reden: 'deze pod kent het boekstuk niet' };
+  if (a && a.soort === 'vast') return { reden: 'een Ja vanaf een vaste plek telt niet' };
+  const fdb = facturenOpen();
+  if (!fdb) return { reden: 'Facturen draait niet op deze kant' };
+  let v = null, aan = null;
+  try { v = fdb.db.prepare('SELECT * FROM boekstuk_vrijgave WHERE kaart_sleutel = ?').get(String(p.sleutel)) || null; aan = bsAdres(fdb); } catch (e) { logError('facturen-boekstuk-knop', e); return { reden: 'de Facturen-databank was niet te lezen' }; }
+  const reden = BS_MOD.vrijgaveToets(p, v, aan);
+  return reden ? { reden: reden } : { v: v };
+}
+function bsVrijgeven(v, keuze, gevoeligJa, a, bevestiging, vraagId) {
+  if (keuze !== 'ja' || gevoeligJa !== true || !a || a.soort === 'vast' || bevestiging !== BS_MOD.BEVESTIGING) return;
+  try {
+    const fdb = facturenOpen();
+    if (!fdb) throw new Error('Facturen niet open');
+    // review wv2316 ZOU 2: vrijgave en spoor in één transactie; lukt het spoor niet, dan ook geen vrijgave
+    facturenMod.transactie(fdb, function () {
+      const r = fdb.db.prepare('UPDATE boekstuk_vrijgave SET vraag_id = ?, bevestiging = ?, bevestigd_op = ? WHERE id = ? AND kaart_tekst_hash = ? AND vraag_id IS NULL AND ingetrokken_op IS NULL')
+        .run(String(vraagId).slice(0, 40), String(bevestiging), new Date().toISOString(), v.id, v.kaart_tekst_hash);
+      if (Number(r.changes) !== 1) throw new Error('vrijgave ' + v.id + ' niet vastgelegd (al vrij, ingetrokken of kaart veranderd)');
+      facturenMod.audit(fdb, { wie: 'david (app, verse vingerafdruk)', wat: 'boekstuk_vrijgegeven', object_soort: 'boekstuk', object_id: 'google-home:vrijgave-' + v.id, entiteit: BS_MOD.ABO.entiteit, na: ({ vraag_id: String(vraagId).slice(0, 40) }) });
+    });
+    schrijfLog(nu() + ' facturen-boekstuk vrijgave ' + velden({ vrijgave: v.id, vastgelegd: 1 }));
+  } catch (e) {
+    logError('facturen-boekstuk-knop', e);
+    bsBox('vrijgave', 'vastleggen van de vrijgave faalde: ' + String(e && e.message || e).slice(0, 100));
+    bsBericht('Je Ja op het Google Home-boekstuk kon ik niet vastleggen. Het gaat dus nog niet vanzelf: elke maand staat het als concept in Gmail.', 'dag').catch(function (e2) { logError('facturen-boekstuk-knop', e2); });
+  }
+}
 
 const autoAgentLog = [];          // tijdstippen van gestarte opdrachten (24 uur)
 const autoAgentJobs = new Set();  // job_ids die deze poort startte (alleen die mag hij stoppen)

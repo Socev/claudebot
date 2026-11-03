@@ -18,6 +18,14 @@
 //     Alleen op een werkdag (geen weekend, geen NL-feestdag) tussen 09:00 en 12:00 Amsterdam (409 buiten_venster): ook wie het geheim
 //     zou bemachtigen, kan buiten dat venster niets versturen (diffreview wv921 #1).
 //  8. Precies één PDF (%PDF, ≤ 1 MB); onderwerp ≤ 150 zonder regeleinde; bericht ≤ 3000; ref = POT + nummer van de verzending.
+//
+// Bron boekstuk (wv2316, David Ja 3-11-2026 met verse vingerafdruk; grondwet 1, aanvulling 3-11-2026): het maandelijkse interne boekstuk
+// Google Home Premium Advanced van Tolgaarde naar André.
+//  9. Zelfde eigen verzendgeheim als bron pot (geen nieuw geheim); alleen modus versturen. AAN_BOEKSTUK: precies één adres (Andrés
+//     afschriftadres; Davids testalias voor de proef). Geen cc, bcc, draad of antwoordadres; afzender alleen POT_VAN.
+// 10. VERSTUREN_BOEKSTUK: schakelaar (false = 409). Plafond BOEKSTUK_PER_30D per 30 dagen (elke geslaagde toets telt, ook als Gmail
+//     daarna faalt); zelfde venster als pot (werkdag 09:00–12:00). Precies één PDF ≤ 250 KB; onderwerp begint met
+//     "Boekstuk Google Home Premium Advanced"; bericht ≤ 1000; ref = BS of BSP + JJJJMM.
 // Haalt nooit iets op. Fout → { toets: { fout, code, status } } zonder binaire data; de workflow antwoordt dan met die status.
 // De pod vergelijkt vóór elke batch de sha256 van déze code met de waarde in zijn image (Fable #10): wie hier iets wijzigt, zet de
 // automatische verzending stil tot het image mee is gewijzigd.
@@ -35,6 +43,10 @@ const VERSTUREN_POT = true;
 const POT_PER_DAG = 24;
 const POT_VAN = ['"David Schaap" <dokterschaap@gmail.com>'];
 const POT_PDF_MAX = 1024 * 1024;
+const AAN_BOEKSTUK = ['a.schaap@actasynergia.nl', 'd.schaap+facturentest@gmail.com'];   // wv2316: André (afschriftadres in Facturen) + testalias
+const VERSTUREN_BOEKSTUK = true;
+const BOEKSTUK_PER_30D = 2;
+const BOEKSTUK_PDF_MAX = 250 * 1024;
 
 function zichtbaar(ch) {
   const c = ch.codePointAt(0);
@@ -77,9 +89,10 @@ const modus = String(body.modus ?? '');
 const onderwerp = String(body.onderwerp ?? '');
 let aan = String(body.aan ?? '').trim().toLowerCase(), cc = '', van = '', ref = '', token = '';
 if (!['concept', 'versturen'].includes(modus)) zet('modus is concept of versturen', 'modus', 400);
-// 5. geheimen: versturen alleen met het eigen geheim; het eigen geheim alleen voor versturen van bron pot
+// 5. geheimen: versturen alleen met het eigen geheim; het eigen geheim alleen voor versturen van bron pot en boekstuk
+const eigen = bron === 'pot' || bron === 'boekstuk';
 if (modus === 'versturen' && !versturenGeheim) zet('versturen kan alleen met het eigen verzendgeheim', 'secret', 401);
-if (versturenGeheim && !(bron === 'pot' && modus === 'versturen')) zet('dit geheim opent alleen versturen voor bron pot', 'secret', 403);
+if (versturenGeheim && !(eigen && modus === 'versturen')) zet('dit geheim opent alleen versturen voor bron pot en boekstuk', 'secret', 403);
 
 if (bron === 'pot') {
   if (modus !== 'versturen') zet('bron pot kent alleen versturen', 'modus', 400);
@@ -99,6 +112,24 @@ if (bron === 'pot') {
   if (body.bijlagen !== undefined && body.bijlagen !== '') zet('bijlagen alleen als bestanden (multipart)', 'bijlagen', 400);
   if (bestanden.length !== 1) zet('precies één PDF', 'bijlagen', 400);
   aan = lijst.join(', '); cc = ccLijst.join(', ');
+} else if (bron === 'boekstuk') {
+  if (modus !== 'versturen') zet('bron boekstuk kent alleen versturen', 'modus', 400);
+  if (!versturenGeheim) zet('versturen kan alleen met het eigen verzendgeheim', 'secret', 401);
+  const lijst = adressen(body.aan);
+  if (lijst.length !== 1) zet('precies één adres in aan', 'aan', 400);
+  if (lijst.some((a) => !AAN_BOEKSTUK.includes(a))) zet('adres staat niet op de witte lijst van de verzender (boekstuk)', 'witte_lijst', 403);
+  if (!VERSTUREN_BOEKSTUK) zet('versturen staat uit voor bron boekstuk', 'versturen_uit', 409);
+  if (!venster(nu)) zet('bron boekstuk verstuurt alleen op werkdagen tussen 09:00 en 12:00', 'buiten_venster', 409);
+  for (const k of ['cc', 'bcc', 'thread_id', 'antwoord_aan', 'token']) if (body[k] !== undefined && body[k] !== '') zet('veld ' + k + ' is hier niet toegestaan', 'veld', 400);
+  van = String(body.van ?? '');
+  if (!POT_VAN.includes(van)) zet('afzender niet toegestaan', 'van', 400);
+  ref = String(body.ref ?? '');
+  if (!/^BSP?20\d\d(0[1-9]|1[0-2])$/.test(ref)) zet('ref ontbreekt of is ongeldig', 'ref', 400);
+  if (onderwerp.indexOf('Boekstuk Google Home Premium Advanced') !== 0 || onderwerp.length > 150 || /[\r\n]/.test(onderwerp)) zet('onderwerp past niet bij het boekstuk', 'onderwerp', 400);
+  if (typeof body.bericht !== 'string' || !body.bericht || body.bericht.length > 1000) zet('bericht ontbreekt of is te lang', 'bericht', 400);
+  if (body.bijlagen !== undefined && body.bijlagen !== '') zet('bijlagen alleen als bestanden (multipart)', 'bijlagen', 400);
+  if (bestanden.length !== 1) zet('precies één PDF', 'bijlagen', 400);
+  aan = lijst.join(', ');
 } else if (bron === 'facturen') {
   token = String(body.token ?? '');
   if (modus === 'versturen' && !VERSTUREN_AAN) zet('versturen staat uit in de verzender (alleen concepten tot fase F5)', 'versturen_uit', 403);
@@ -117,11 +148,11 @@ for (let i = 0; !fout && i < bestanden.length; i++) {
   const k = bestanden[i], nr = 'bijlage ' + (i + 1);
   let naam = saneer(item.binary[k].fileName);
   const p = naam.lastIndexOf('.'), ext = p > 0 ? naam.slice(p + 1).toLowerCase() : '';
-  if (!naam || !TYPES[ext] || (bron === 'pot' && ext !== 'pdf')) { zet(nr + ': alleen ' + (bron === 'pot' ? 'pdf' : 'pdf, xml of MT940'), 'bijlagen', 400); break; }
+  if (!naam || !TYPES[ext] || (eigen && ext !== 'pdf')) { zet(nr + ': alleen ' + (eigen ? 'pdf' : 'pdf, xml of MT940'), 'bijlagen', 400); break; }
   const buf = await this.helpers.getBinaryDataBuffer(0, k);
   if (!buf || !buf.length) { zet(nr + ': leeg bestand', 'bijlagen', 400); break; }
   totaal += buf.length;
-  if (totaal > (bron === 'pot' ? POT_PDF_MAX : MAX_BYTES)) { zet('bijlagen te groot', 'bijlagen', 400); break; }
+  if (totaal > (bron === 'pot' ? POT_PDF_MAX : bron === 'boekstuk' ? BOEKSTUK_PDF_MAX : MAX_BYTES)) { zet('bijlagen te groot', 'bijlagen', 400); break; }
   if (ext === 'pdf' && !(buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46)) { zet(nr + ': inhoud past niet bij .pdf', 'bijlagen', 400); break; }
   if (namen.has(naam.toLowerCase())) { const stam = naam.slice(0, p); let n = 2; while (namen.has((stam + ' (' + n + ').' + ext).toLowerCase())) n++; naam = stam + ' (' + n + ').' + ext; }
   namen.add(naam.toLowerCase());
@@ -129,13 +160,16 @@ for (let i = 0; !fout && i < bestanden.length; i++) {
   meta.push({ naam: naam, bytes: buf.length });
 }
 
-// plafond (alleen als de rest klopt): concepten per uur (facturen), verstuurde mails per 24 uur (pot)
+// plafond (alleen als de rest klopt): concepten per uur (facturen), verstuurde mails per 24 uur (pot en boekstuk samen), boekstuk per 30 dagen
 const sd = $getWorkflowStaticData('global');
 sd.gemaakt = (Array.isArray(sd.gemaakt) ? sd.gemaakt : []).filter((t) => nu - t < 3600000);
 sd.pot = (Array.isArray(sd.pot) ? sd.pot : []).filter((t) => nu - t < 86400000);
-if (!fout && bron !== 'pot' && sd.gemaakt.length >= PER_UUR) zet('plafond van ' + PER_UUR + ' per uur bereikt', 'plafond', 429);
-if (!fout && bron === 'pot' && sd.pot.length >= POT_PER_DAG) zet('plafond van ' + POT_PER_DAG + ' verstuurde nota\'s per 24 uur bereikt', 'plafond', 429);
+sd.boekstuk = (Array.isArray(sd.boekstuk) ? sd.boekstuk : []).filter((t) => nu - t < 30 * 86400000);
+if (!fout && !eigen && sd.gemaakt.length >= PER_UUR) zet('plafond van ' + PER_UUR + ' per uur bereikt', 'plafond', 429);
+if (!fout && eigen && sd.pot.length >= POT_PER_DAG) zet('plafond van ' + POT_PER_DAG + ' verstuurde nota\'s per 24 uur bereikt', 'plafond', 429);
+if (!fout && bron === 'boekstuk' && sd.boekstuk.length >= BOEKSTUK_PER_30D) zet('plafond van ' + BOEKSTUK_PER_30D + ' boekstukken per 30 dagen bereikt', 'plafond', 429);
+if (!fout && bron === 'boekstuk') sd.boekstuk.push(nu);
 
 const uit = { aan: aan, cc: cc, van: van, modus: modus, token: token, ref: ref, onderwerp: onderwerp, bericht: fout ? '' : body.bericht,
-  toets: { fout: fout, code: code, status: fout ? status : 200, pad: !fout && bron === 'pot' && modus === 'versturen' && versturenGeheim ? 'pot' : 'facturen', aantal: fout ? 0 : meta.length, props: fout ? '' : Object.keys(binary).join(',') } };
+  toets: { fout: fout, code: code, status: fout ? status : 200, pad: !fout && eigen && modus === 'versturen' && versturenGeheim ? 'pot' : 'facturen', aantal: fout ? 0 : meta.length, props: fout ? '' : Object.keys(binary).join(',') } };
 return [fout ? { json: uit } : { json: uit, binary: binary }];

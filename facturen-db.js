@@ -1049,6 +1049,54 @@ CREATE TRIGGER IF NOT EXISTS paypal_regel_id_vast BEFORE UPDATE OF id, account, 
 BEGIN SELECT RAISE(ABORT, 'paypal_regel_vast: id, account en aanmaakmoment veranderen niet'); END;
 `;
 
+// wv2316: het maandelijkse boekstuk Google Home Premium Advanced naar André (facturen-boekstuk.js; ontwerp vault 01_Ontwikkeling/Boekstuk Google
+// Home - maandelijks zelf naar André (ontwerp 3-11-2026).md). Eén rij per abonnement en termijn = de grens tegen dubbel versturen (de rij
+// 'verzenden' staat vóór de aanroep van de verzender). Rijen gaan nooit weg en alleen vooruit (trigger); een bestelnummer gaat hooguit één
+// keer de deur uit (unieke index). De eenmalige vrijgave (Ja met verse vingerafdruk) in boekstuk_vrijgave. Geen mailtekst of PDF erin.
+const M19 = `
+CREATE TABLE IF NOT EXISTS boekstuk_verzending (
+  abonnement TEXT NOT NULL CHECK (abonnement IN ('google-home')),
+  termijn TEXT NOT NULL CHECK (termijn GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]'),
+  status TEXT NOT NULL CHECK (status IN ('verzenden','verstuurd','onzeker','onzeker_gemeld','concept_bezig','concept','concept_mislukt','concept_onzeker','door_david','niet_gemaakt')),
+  n INTEGER CHECK (n IS NULL OR n BETWEEN 1 AND 9999),
+  aan TEXT CHECK (aan IS NULL OR length(aan) BETWEEN 3 AND 200),
+  pdf_sha256 TEXT CHECK (pdf_sha256 IS NULL OR (length(pdf_sha256) = 64 AND pdf_sha256 NOT GLOB '*[^0-9a-f]*')),
+  play_id TEXT CHECK (play_id IS NULL OR length(play_id) <= 40),
+  paypal_id TEXT CHECK (paypal_id IS NULL OR length(paypal_id) <= 40),
+  message_id TEXT CHECK (message_id IS NULL OR length(message_id) <= 80),
+  reden TEXT CHECK (reden IS NULL OR length(reden) <= 300),
+  verzonden_op TEXT,
+  aangemaakt_op TEXT NOT NULL,
+  bijgewerkt_op TEXT NOT NULL,
+  PRIMARY KEY (abonnement, termijn)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS boekstuk_verzending_n ON boekstuk_verzending (abonnement, n)
+  WHERE n IS NOT NULL AND status IN ('verzenden','verstuurd','onzeker','onzeker_gemeld');
+CREATE TRIGGER IF NOT EXISTS boekstuk_verzending_blijft BEFORE DELETE ON boekstuk_verzending BEGIN SELECT RAISE(ABORT, 'boekstuk_verzending: rijen blijven'); END;
+CREATE TRIGGER IF NOT EXISTS boekstuk_verzending_vooruit BEFORE UPDATE ON boekstuk_verzending
+  WHEN NEW.abonnement IS NOT OLD.abonnement OR NEW.termijn IS NOT OLD.termijn OR NEW.n IS NOT OLD.n OR NEW.aangemaakt_op IS NOT OLD.aangemaakt_op
+    OR (NEW.status <> OLD.status AND NOT (
+      (OLD.status = 'verzenden' AND NEW.status IN ('verstuurd','onzeker','concept_bezig')) OR
+      (OLD.status = 'onzeker' AND NEW.status IN ('verstuurd','onzeker_gemeld')) OR
+      (OLD.status = 'concept_bezig' AND NEW.status IN ('concept','concept_mislukt','concept_onzeker'))))
+  BEGIN SELECT RAISE(ABORT, 'boekstuk_verzending: alleen vooruit'); END;
+CREATE TABLE IF NOT EXISTS boekstuk_vrijgave (
+  id INTEGER PRIMARY KEY,
+  abonnement TEXT NOT NULL CHECK (abonnement IN ('google-home')),
+  aan TEXT NOT NULL CHECK (length(aan) BETWEEN 3 AND 200),
+  abo_hash TEXT NOT NULL CHECK (length(abo_hash) = 64),
+  kaart_sleutel TEXT UNIQUE CHECK (kaart_sleutel IS NULL OR kaart_sleutel GLOB 'boekstuk-vrijgave-[0-9]*'),
+  kaart_tekst_hash TEXT CHECK (kaart_tekst_hash IS NULL OR length(kaart_tekst_hash) = 64),
+  vraag_id TEXT CHECK (vraag_id IS NULL OR length(vraag_id) <= 40),
+  bevestiging TEXT CHECK (bevestiging IS NULL OR length(bevestiging) <= 40),
+  bevestigd_op TEXT,
+  ingetrokken_op TEXT,
+  aangemaakt_op TEXT NOT NULL,
+  CHECK (vraag_id IS NULL OR (bevestiging IS NOT NULL AND bevestigd_op IS NOT NULL))
+);
+CREATE TRIGGER IF NOT EXISTS boekstuk_vrijgave_blijft BEFORE DELETE ON boekstuk_vrijgave BEGIN SELECT RAISE(ABORT, 'boekstuk_vrijgave: rijen blijven'); END;
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -1067,12 +1115,13 @@ const MIGRATIES = [
   { versie: 16, naam: "categorie 'winstvoorschot' in uitzondering en bank_transactie (wv2244)", fn: (db) => M16(db) },
   { versie: 17, naam: 'signaal: DocPlan-controle rooster ↔ betaling, drie soorten (wv2293)', fn: (db) => M17(db) },
   { versie: 18, naam: 'signaal: DocPlan-factuurtoets, factuur_dagen_afwijkend (wv2297)', fn: (db) => M18(db) },
+  { versie: 19, naam: 'boekstuk Google Home naar de boekhouder: boekstuk_verzending, boekstuk_vrijgave (wv2316)', sql: M19 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
   'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel', 'afzender_regel',
-  'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso', 'paypal_regel'];
+  'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso', 'paypal_regel', 'boekstuk_verzending', 'boekstuk_vrijgave'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 
