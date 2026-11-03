@@ -16541,7 +16541,7 @@ function intakeKetenBetaling(x) {
   return { gevonden: !!via, via, bank_tot: tot && tot.d ? String(tot.d).slice(0, 10) : null, nagekeken: eigen ? 'entiteit' : 'zakelijk', prive: ent === 'prive' };
 }
 // Pas aangemaakt (tabellen in intake.sqlite) als de schakelaar aan staat (Fable wv980 #5); daarna blijft hij tot een herstart.
-let intakeRouterMod = null;
+let intakeRouterMod = null, intakePriveKring = null;
 function intakeRouterHaal() {
   if (intakeRouterMod || !intake || !intakeRouterStand()) return intakeRouterMod;
   const p = path.join(__dirname, 'intake-router.js');
@@ -16557,6 +16557,10 @@ function intakeRouterHaal() {
       // live (wv1916)
       live: function () { const j = intakeRouterStand(); return j && j.live && typeof j.live === 'object' ? j.live : {}; },
       lenzenLive: function () { const j = intakeRouterStand(); return j && Array.isArray(j.lenzen_live) ? j.lenzen_live : null; },
+      // wv2336: patiëntcontrole in Intake — 'schaduw' (wegen en loggen, vasthouden zoals voorheen) of 'door' (zacht gaat door met label, hard stil buiten)
+      // wv2336: privékring voor de privégrens (schaduw); podbestand 0600 gebouwd door mk-scripts/wv2336/maak-prive-kring.py; mtime-cache
+      priveKring: function () { const f = path.join(INTAKE_DIR, 'prive-kring.json'); try { const st = fs.statSync(f); if (!intakePriveKring || intakePriveKring.m !== st.mtimeMs) intakePriveKring = { m: st.mtimeMs, j: JSON.parse(fs.readFileSync(f, 'utf8')) }; return intakePriveKring.j; } catch (e) { return null; } },
+      markerStand: function () { const j = intakeRouterStand(); return j && typeof j.marker_zacht === 'string' ? j.marker_zacht : 'schaduw'; },
       jev: intakeJev, mailmanJev: intakeMailmanJev, indeling: intakeIndeling, vv: VV(), vault: VAULT,
       vaultPauze: function () { try { return onderhoud.stand().aan === true || ovisAms().uur === 1; } catch (e) { return true; } },
       naamOk: function (n) { try { return !require(path.join(__dirname, 'intake-ingang.js')).naampoort(n, intake._soorten); } catch (e) { return false; } },
@@ -16566,7 +16570,7 @@ function intakeRouterHaal() {
       kaartStatus: async function (sleutel, van, naar, samen) { appStaat.vjCache = null; return appSbRpc('mk_voor_jou_status', { p_sleutel: sleutel, p_van: van, p_naar: naar, p_door: 'agent', p_later_tot: null,
         p_bewijs: naar === 'gedaan' ? 'In Intake wacht niets meer op je keuze.' : null,
         p_samengevoegd_in: samen || null, p_reden: naar === 'gedaan' ? 'intake: niets meer dat op David wacht' : 'intake: nieuwere dagkaart' }); },
-      kaartOpen: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); return ((j && j.punten) || []).filter(function (x) { return /^intake-(twijfel|marker)-\d{4}-\d{2}-\d{2}$/.test(String(x.sleutel || '')); }).map(function (x) { return { sleutel: x.sleutel, status: x.status }; }); },
+      kaartOpen: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); return ((j && j.punten) || []).filter(function (x) { return /^intake-(twijfel|marker|wacht)-\d{4}-\d{2}-\d{2}$/.test(String(x.sleutel || '')); }).map(function (x) { return { sleutel: x.sleutel, status: x.status }; }); },
       melding: function (t) { ovisBoxRij('\n## [log] ' + ovisAms().klok + ' — ' + t + '\n- status: open\n- van: pod:intake-router\n'); },
       // wv2004: bestemming Systeem (voor Socev) — startregels als voorstel UIT, oordeel per stuk (Sonnet, alleen na Jev onder de drempel),
       // één gebundelde box-rij per dag en bij "actie nodig" één regel aan David via bericht.py (de router houdt de stille uren aan)

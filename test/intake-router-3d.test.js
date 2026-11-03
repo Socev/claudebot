@@ -176,7 +176,7 @@ test('3d: factuur van een onbekende afzender → twijfel; staat de pdf al in de 
   await E.r.ronde();
   assert.equal(E.staat(id), 'twijfel'); assert.equal(E.staat(id2), 'twijfel');
   assert.deepEqual(E.best(id), ['deadlines:schaduw:soort_of_afzender_niet_hoog', 'facturen:schaduw:soort_of_afzender_niet_hoog']);
-  assert.equal(E.tel.kaarten[0].sleutel, 'intake-twijfel-2026-10-31');
+  assert.equal(E.tel.kaarten[0].sleutel, 'intake-wacht-2026-10-31');
   // f7.pdf komt intussen via het verzamelpostvak binnen
   E.bekend.add(crypto.createHash('sha256').update(pdfVan(regels)).digest('hex'));
   const u = await E.r.ronde();

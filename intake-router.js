@@ -67,6 +67,62 @@ const KOP_MAX = 1500;                  // tekens per deel die als kop tellen voo
 const PER_RONDE = 20;
 const RONDE_MS = 10 * 60000;            // tijdsbudget per ronde (live: Jev + model per stuk kan minuten duren)
 const UITVOER_MAX = 5;                  // pogingen om een bestemming uit te voeren; daarna terug naar David (twijfel)
+// ── patiëntcontrole: hard of zacht (wv2336; David 3-11-2026 20:33 "ik wil geen irritante privacyfilters … tot heden heb ik alles alsnog
+// doorgestuurd") ── Alleen een HARD kenmerk houdt een stuk buiten de Brain, zonder vraag (één besluitregel 'marker_weging'); een zacht vermoeden
+// gaat door met het stille label "mogelijk medisch". Gemeten op de router-eigen lezing (gedecodeerd, OCR, met Davids eigen-lijst), niet op die
+// van de ontvangstlaag (die leest ruwe mailbytes; 3-11 gaf dat een BSN-achtig getal dat de router niet zag). Hard is:
+//  (a) bsn: een elfproef-getal dat niet Davids eigen BSN is en geen ander label draagt (KvK, RSIN …), met het label BSN of naast een
+//      medisch/patiëntkenmerk;
+//  (b) patientnummer: een HIS-/Promedico-nummer, of "patiëntnummer" + cijfers samen met een vreemde persoon (naam/datum, geboortedatum);
+//  (c) patientbrief: een patiëntbron (verwijsbericht/Edifact, arts-aan-arts-brieftaal, of afzender op de lijst zorgsystemen met DKIM uitgelijnd)
+//      + een herkenbare vreemde persoon (betreft mw./dhr., vreemde geboortedatum of persoon met oude datum) + een medisch kenmerk; of (d) zo'n
+//      vreemde persoon + medisch + een patiëntwoord, ook zonder bron.
+// Onleesbaar is nooit hard (er valt niets te wegen) en dus zacht: dat restrisico nam David met zijn antwoord (zie de Voor jou-kaart grondwet 3).
+const MARKER_STANDEN = ['schaduw', 'door'];   // schaduw = wegen en loggen, gedrag zoals vóór wv2336 (vasthouden); door = zacht gaat door, hard stil buiten
+const HIS_NUMMER = /\b(his|promedico)[\s-]?(pati[eë]nt[\s-]?)?(nummer|nr\.?|id)\s*[:#.]?\s*[A-Z]{0,3}[\s-]?\d{4,12}\b/i;
+const PATIENTNUMMER = /\bpati[eë]nt(en)?[\s-]?(nummer|nr\.?|id)\s*[:#.]?\s*[A-Z]{0,3}[\s-]?\d{4,12}\b/i;
+const PATIENT_BRON_DOMEIN = ['zorgmail.nl', 'promedico.nl', 'zorgdomein.nl', 'ksyos.nl', 'lifeline.nl', 'enovation.nl'];
+function markerWeging(x) {
+  x = x || {};
+  const s = new Set(x.soorten || []), p = x.personen || null, teksten = x.teksten || [];
+  const waarom = [];
+  const medisch = s.has('medisch') || s.has('uw_patient') || s.has('verwijsbericht');
+  const patientKenmerk = medisch || s.has('patient_woord') || s.has('brieftaal') || s.has('geboortedatum') || s.has('patient_geboortedatum') || s.has('patient_datum');
+  // zonder lezing van de personen (geen eigen-lijst te laden): elk BSN-kenmerk telt als vreemd (veilige kant)
+  const vreemdBsn = p ? p.vreemd_bsn > 0 : (s.has('bsn') || s.has('bsn_los'));
+  if (vreemdBsn && (s.has('bsn') || patientKenmerk)) waarom.push('bsn');
+  const vreemdPersoon = s.has('betreft_persoon') || (p ? (p.vreemd_geb > 0 || p.vreemd_persoon_datum > 0) : (s.has('geboortedatum') || s.has('persoon_datum')));
+  if (teksten.some(function (t) { return HIS_NUMMER.test(t); }) || (vreemdPersoon && teksten.some(function (t) { return PATIENTNUMMER.test(t); }))) waarom.push('patientnummer');
+  const dom = String(x.afzender_domein || '').toLowerCase();
+  const bron = s.has('verwijsbericht') || s.has('brieftaal') || (!!dom && PATIENT_BRON_DOMEIN.some(function (d) { return dom === d || dom.endsWith('.' + d); }));
+  if (bron && vreemdPersoon && medisch) waarom.push('patientbrief');
+  // (d) review wv2336 MOET 2: een gewone patiëntbrief zonder herkenbare bron — vreemde persoon + medisch + patiëntwoord ("uw patiënte", "betreft
+  // mw.", "patiënt") is ook hard; Davids eigen post telt niet mee (eigen geboortedatum is niet vreemd)
+  else if (vreemdPersoon && medisch && (s.has('patient_woord') || s.has('uw_patient') || s.has('betreft_persoon') || s.has('brieftaal'))) waarom.push('patientbrief');
+  return { hard: waarom.length > 0, waarom };
+}
+
+// ── privégrens (wv2336, stap 4; ontwerp mk-scripts/wv2336/ontwerp-privegrens.md, review gpt-5.5 3-11): SCHADUW ── Een stuk dat een persoon uit
+// de privékring (familiepagina's in de vault; podbestand prive-kring.json, 0600) noemt én over gezondheid gaat, hoort nooit vanzelf bij een
+// zakelijke entiteit. Nu alleen rekenen en loggen (besluit 'prive_grens', zonder namen of ids); live pas na een week schaduw en adresmatch.
+const GEZONDHEID = /\b(psycholo\w*|psychiat\w*|therap\w*|ggz|jeugdzorg|jeugdarts|ziekenhuis\w*|huisarts\w*|tandarts\w*|orthodont\w*|fysio\w*|diagnose|behandel\w*|consult|polikliniek|kinderarts|logopedi\w*|medicijn\w*|medicatie|recept|zorgverlener|intake ?gesprek)\b/i;
+function normWoorden(s) { return ' ' + String(s || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim() + ' '; }
+function priveGrens(x) {
+  const personen = (x && x.kring && Array.isArray(x.kring.personen)) ? x.kring.personen : [];
+  const t = normWoorden(x && x.tekst);
+  // een familienaam (laatste woord van een volledige naam bij ≥ 2 personen) telt los nooit: die staat in bijna elke mail aan het gezin
+  const achter = new Map();
+  for (const p of personen) for (const n of new Set((p.namen || []).filter(function (n) { return n.indexOf(' ') > 0; }).map(function (n) { return n.split(' ').pop(); }))) achter.set(n, (achter.get(n) || 0) + 1);
+  let vol = 0, voor = 0;
+  for (const p of personen) {
+    const namen = (p.namen || []).filter(function (n) { return typeof n === 'string' && n.length >= 4; });
+    if (namen.some(function (n) { return n.indexOf(' ') > 0 && t.indexOf(' ' + n + ' ') >= 0; })) { vol++; continue; }
+    if (namen.some(function (n) { return n.indexOf(' ') < 0 && (achter.get(n) || 0) < 2 && t.indexOf(' ' + n + ' ') >= 0; })) voor++;
+  }
+  const gezondheid = (x && Array.isArray(x.soorten) && x.soorten.indexOf('medisch') >= 0) || GEZONDHEID.test(String(x && x.tekst || ''));
+  return { vol, voornaam: voor, gezondheid: !!gezondheid, zou_prive: (vol + voor) > 0 && !!gezondheid };
+}
+
 // ── stuk ophalen en Systeem (wv2004) ──
 const STUK_BUDGET_MS = 12000;           // appStuk antwoordt binnen dit budget (het doorgeefluik kapt na 25 s af)
 const STUK_CACHE_MS = 30 * 60000;       // gelezen tekst per stuk+deel alleen in het geheugen
@@ -922,6 +978,7 @@ function maak(o) {
   let hangDag = '';
   const pauze = new Map();   // stuk_id → ms van de laatste mislukte Jev- of vangnet-aanroep (niet elke ronde opnieuw)
   function liveStand() { let j = null; try { j = o.live ? o.live() : null; } catch (e) { j = null; } return isObj(j) ? j : {}; }
+  function markerStand() { let v = null; try { v = o.markerStand ? o.markerStand() : null; } catch (e) { v = null; } return MARKER_STANDEN.indexOf(v) >= 0 ? v : 'schaduw'; }
   function lenzenLive() { let l = null; try { l = o.lenzenLive ? o.lenzenLive() : null; } catch (e) { l = null; } return Array.isArray(l) && l.length ? l.filter(function (x) { return REGEL_LENZEN.indexOf(x) >= 0 || x === 'deadlines'; }) : LIVE_LENZEN_STANDAARD; }   // deadlines: geen regel-lens, wel live (wv1919)
   // Jev ná de marker, vóór elk model. MailMan-uitslag als die er is (alleen de mailtekst: niet bij een stuk met bijlage- of scantekst), anders de
   // n8n-webhook. Geen uitslag: wachten (pauze) tot JEV_WACHT_MS na compleet, daarna geen model en twijfel. → oordeel | 'wacht'
@@ -1125,7 +1182,7 @@ function maak(o) {
     const meta = (function () { try { return JSON.parse(s.meta) || {}; } catch (e) { return {}; } })();
     const resultaat = [];   // [stap, uitkomst, kracht, bewijs]
     const B = function (stap, uitkomst, kracht, bewijs) { resultaat.push([stap, uitkomst, kracht, bewijs]); };
-    let status, sam, bestem = [], schaduwJob = null;
+    let status, sam, bestem = [], schaduwJob = null, weging = null, markerHard = false, priveSchaduw = null;
     if (!PROFIELEN.has(s.profiel)) {
       B('ontvangst', 'buiten_router', null, { profiel: s.profiel });
       status = 'buiten_router'; sam = { profiel: s.profiel, bron: s.bron };
@@ -1162,9 +1219,26 @@ function maak(o) {
         const soorten = Array.from(new Set([].concat(safeJson(s.marker_soorten) || [], (eigen && eigen.soorten) || [])));
         B('marker', marker, null, { ingang: ingang || null, router: routerMarker, soorten, versie: eigen ? eigen.versie : s.marker_versie, eigen_uitzondering: !!(eigen && eigen.eigen_uitzondering) });
         if (marker !== 'geen' && naKeuze) B('marker_keuze', 'gewoon_verwerken', null, { door: 'david', leren: false });
+        // wv2336: hard of zacht (alleen soorten en redenen in het besluit, nooit tekst); stand 'door' = zacht gaat door, hard stil buiten de Brain
+        let zachtDoor = false;
         if (marker !== 'geen' && !naKeuze) {
+          let pers = null;
+          // review MOET 1: dezelfde teksten als de marker (delen + vrije velden + onderwerp), anders mist de weging een BSN in het onderwerp
+          const wTeksten = lt.delen.map(function (d) { return d.tekst; }).concat(db.prepare('SELECT omschrijving, waarde FROM vrij_veld WHERE stuk_id = ?').all(s.stuk_id).map(function (v) { return v.omschrijving + ': ' + (v.waarde || ''); })).concat(onderwerp ? [onderwerp] : []);
+          try { if (eigen && o.marker._intern && o.marker.laadEigen) pers = o.marker._intern.personen(o.marker._intern.stukken(wTeksten), o.marker.laadEigen()); } catch (e) { pers = null; }
+          const dkimW = s.profiel === 'mail@1' ? dkimUitslag(lt.mail && lt.mail.ar.length ? lt.mail.ar : (meta.authentication_results ? [meta.authentication_results] : []), vanAdres, { authserv: 'mx.google.com' }) : null;
+          weging = markerWeging({ soorten: eigen ? eigen.soorten : [], personen: pers, teksten: wTeksten, afzender_domein: dkimW && dkimW.uitgelijnd ? domeinVan(vanAdres) : '' });
+          const st = markerStand();
+          B('marker_weging', weging.hard ? 'hard' : 'zacht', null, { waarom: weging.waarom, stand: st, live: !!live });
+          if (live && st === 'door') {
+            if (weging.hard) markerHard = true;
+            else { zachtDoor = true; B('marker_keuze', 'zacht_door', null, { door: 'router', leren: false }); }
+          }
+        }
+        if (marker !== 'geen' && !naKeuze && !zachtDoor) {
           status = 'vastgehouden';
           sam = { profiel: s.profiel, bron: s.bron, marker, marker_ingang: ingang || null, marker_router: routerMarker, soorten, live: live || undefined };
+          if (weging) { sam.weging = weging.hard ? 'hard' : 'zacht'; if (markerHard) sam.buiten_brain = true; }
         } else {
           // Jev (live): ná de marker, vóór elk model; in de schaduw niet (de Mail Processor scoort zelf)
           let jv = null;
@@ -1221,6 +1295,18 @@ function maak(o) {
             if (jevStop) bs = bs.map(function (b) { return Object.assign({}, b, { zou_auto: false, reden: jv.gemeten ? 'jev' : 'jev_geen_uitslag' }); });
             if (!bs.length) bs = [{ lens: 'vragen', doel: en.knoop || null, zou_auto: false, reden: 'geen_bestemming' }];
           }
+          // wv2336: privégrens in de schaduw — alleen een besluitregel bij een treffer (aantallen en de echte uitkomst, geen namen)
+          try {
+            const kr = o.priveKring ? o.priveKring() : null;
+            if (kr) {
+              const pg = priveGrens({ kring: kr, tekst, soorten: eigen ? eigen.soorten : [] });
+              if (pg.zou_prive) {
+                const doel = (bs.find(function (b) { return b.lens === 'kennis'; }) || bs[0] || {}).doel || en.knoop || null;
+                priveSchaduw = doel === 'PRIVE' ? 'prive' : (doel ? 'zakelijk' : 'onbekend');
+                B('prive_grens', 'zou_prive', null, { stand: 'schaduw', vol: pg.vol, voornaam: pg.voornaam, echt: priveSchaduw, automatisch: !bs.some(function (b) { return !b.zou_auto; }) });
+              }
+            }
+          } catch (e) { if (o.fout) o.fout('intake-router-privegrens', e); }
           B('bestemming', bs.map(function (b) { return b.lens; }).join(',') || 'geen', null, { bestemmingen: bs, regel: rg ? 'R' + rg.id + '@' + rg.versie : null, schaduw: schaduwLenzen.length ? schaduwLenzen : undefined });
           const twijfel = bs.some(function (b) { return !b.zou_auto; });
           B('zeker_genoeg', twijfel ? 'twijfel' : 'automatisch', null, { reden: bs.filter(function (b) { return !b.zou_auto; }).map(function (b) { return b.lens + ':' + b.reden; }) });
@@ -1229,10 +1315,11 @@ function maak(o) {
             afzender: af.knoop || null, afzender_kracht: af.kracht, afzender_kenmerken: af.kenmerken, aangeleverd_door: af.aangeleverd_door, voorgesteld_spoor: af.voorgesteld_spoor,
             dkim: dkim ? (dkim.uitgelijnd ? 'uitgelijnd' : (dkim.pass ? 'pass' : (dkim.gelezen ? 'geen_pass' : 'geen_uitslag'))) : null,
             entiteit: en.knoop || null, entiteit_kracht: en.kracht, label_route: labels, bestemmingen: bs, twijfel, regel: rg ? 'R' + rg.id + '@' + rg.versie : null, velden: vd.velden.map(function (v) { return v.veld; }), kenmerken: vd.kenmerken };
-          if (live) { sam.live = true; sam.entiteit_bewijs = en.bewijs || (rg ? 'regel' : 'regels'); sam.jev = jv.gemeten ? (jv.boven ? 'boven' : 'onder') : 'geen_uitslag'; if (jv.overgeslagen) sam.jev_overgeslagen = jv.overgeslagen; if (schaduwLenzen.length) sam.schaduw_lenzen = schaduwLenzen.map(function (b) { return b.lens; }); if (naKeuze) sam.na_keuze = true; }
+          if (live) { sam.live = true; sam.entiteit_bewijs = en.bewijs || (rg ? 'regel' : 'regels'); sam.jev = jv.gemeten ? (jv.boven ? 'boven' : 'onder') : 'geen_uitslag'; if (jv.overgeslagen) sam.jev_overgeslagen = jv.overgeslagen; if (schaduwLenzen.length) sam.schaduw_lenzen = schaduwLenzen.map(function (b) { return b.lens; }); if (naKeuze || zachtDoor) sam.na_keuze = true; if (zachtDoor || (naKeuze && marker !== 'geen')) sam.mogelijk_medisch = true; if (zachtDoor) sam.weging = 'zacht'; }
           sam.label_gelijk = labels.length ? labels.indexOf(en.knoop) >= 0 : null;
+          if (priveSchaduw) sam.prive_schaduw = priveSchaduw;   // wv2336: de privégrens zou dit stuk bij Privé zetten; echte uitkomst prive/zakelijk/onbekend
           bestem = bs;
-          if (o.pdfSchaduw && !lt.deels.length && !lt.onleesbaar.length) {
+          if (o.pdfSchaduw && !lt.deels.length && !lt.onleesbaar.length && !naKeuze && !zachtDoor) {   // review wv2336 ZOU 4: geen model op een (zacht) vrijgegeven stuk
             const pdfs = delen.filter(function (d) { return d.rol !== 'representatie' && String(d.mime || '').toLowerCase() === 'application/pdf'; });
             const tekstVan = function (deel) { const x = lt.delen.find(function (y) { return y.deel === deel; }); return x ? x.tekst : null; };
             const ds = pdfs.map(function (d) { return { deel: d.deel, sha256: d.sha256, pad: blobPad(d.sha256), tekst: tekstVan(d.deel) }; }).filter(function (d) { return d.tekst; });
@@ -1241,7 +1328,7 @@ function maak(o) {
         }
       }
     }
-    const liveStaat = !live ? null : (status === 'vastgehouden' ? 'vastgehouden' : (status === 'beoordeeld' ? (sam.twijfel ? 'twijfel' : 'automatisch') : null));
+    const liveStaat = !live ? null : (status === 'vastgehouden' ? (markerHard ? 'bewaard' : 'vastgehouden') : (status === 'beoordeeld' ? (sam.twijfel ? 'twijfel' : 'automatisch') : null));
     tx(function () {   // alles van één stuk in één transactie (Fable wv980 #6)
       if (naKeuze) db.prepare('DELETE FROM bestemming WHERE stuk_id = ? AND versie = ?').run(s.stuk_id, s.versie);   // een vastgehouden stuk had er geen
       // live: een automatische lens wordt 'aangeboden' (uitvoeren), twijfel blijft 'schaduw' tot David kiest
@@ -1252,7 +1339,11 @@ function maak(o) {
       else db.prepare('INSERT INTO router_stuk (stuk_id, versie, status, regelversie, compilatienummer, op, samenvatting) VALUES (?,?,?,?,?,?,?)')
         .run(s.stuk_id, s.versie, status, REGELVERSIE, reg ? reg.compilatienummer : null, nuIso(nu()), JSON.stringify(sam));
       if (liveStaat) liveZet(s.stuk_id, s.versie, s.bron, liveStaat, sam.entiteit_bewijs || null);
+      // wv2336: hard patiëntkenmerk = stil buiten de Brain (90 dagen alleen op de pod), geen vraag en geen kaart; David ziet het in Geschiedenis
+      if (markerHard) db.prepare("UPDATE live_stuk SET keuze = 'hard', keuze_op = ?, keuze_door = 'router' WHERE stuk_id = ?").run(nuIso(nu()), s.stuk_id);
+      else if (liveStaat) db.prepare("UPDATE live_stuk SET keuze = NULL, keuze_op = NULL, keuze_door = NULL WHERE stuk_id = ? AND keuze = 'hard' AND keuze_door = 'router'").run(s.stuk_id);   // review ZOU 8: nieuwe versie niet hard
     });
+    if (markerHard && o.bewaarNa) { try { o.bewaarNa(s.stuk_id, nu() + BEWAAR_MS); } catch (e) { if (o.fout) o.fout('intake-router-bewaar', e); } }
     pauze.delete(s.stuk_id);
     if (schaduwJob) { try { o.pdfSchaduw(schaduwJob); } catch (e) { /* schaduw: nooit de router raken */ } }
     if (liveStaat === 'automatisch') { try { await voerUit(s.stuk_id); } catch (e) { if (o.fout) o.fout('intake-router-uitvoer', e); } }
@@ -1594,12 +1685,19 @@ function maak(o) {
     const ls = db.prepare('SELECT * FROM live_stuk WHERE stuk_id = ?').get(id);
     if (!ls) return { status: 404, j: { ok: false, fout: 'dit stuk loopt niet live via Intake' } };
     const keuze = String(d.keuze || '');
+    // wv2336 (Astra): alleen een keuze op de actuele versie van het stuk; een ander venster of een oude lijst krijgt 409
+    if (d.versie != null && Number(d.versie) !== ls.versie) return { status: 409, j: { ok: false, fout: 'dit stuk is intussen veranderd; ververs' } };
     const rs = db.prepare('SELECT * FROM router_stuk WHERE stuk_id = ? AND versie = ?').get(id, ls.versie);
     const sam = rs ? (safeJson(rs.samenvatting) || {}) : {};
     const correctie = function (wat, leren) { db.prepare('INSERT INTO correctie (stuk_id, tijd, door, wat, leidt_tot, leren_mag) VALUES (?,?,?,?,?,?)').run(id, iso(), door || 'david', JSON.stringify(wat), null, leren ? 1 : 0); };
-    if (ls.staat === 'vastgehouden') {
+    // wv2336: dezelfde keuze nog eens (dubbele tik, tweede venster) verandert niets
+    if (ls.keuze && ls.keuze_door !== 'router' && (keuze === 'bestemming' ? ls.keuze === String(d.lens || '') + ':' + (d.entiteit && String(d.lens) !== 'systeem' ? String(d.entiteit) : '') : ls.keuze === keuze) && ls.staat !== 'twijfel')
+      return { status: 200, j: { ok: true, uitkomst: 'al_zo' } };
+    // wv2336: een stuk dat de router zelf buiten de Brain hield (hard patiëntkenmerk) kan David alsnog laten verwerken ("Geen patiënt — verwerk")
+    const hard = ls.staat === 'bewaard' && ls.keuze === 'hard' && ls.keuze_door === 'router';
+    if (ls.staat === 'vastgehouden' || hard) {
       if (keuze === 'verwerken') {
-        tx(function () { correctie({ keuze, was: 'vastgehouden', soorten: sam.soorten || [] }, false); db.prepare('UPDATE live_stuk SET keuze = ?, keuze_op = ?, keuze_door = ? WHERE stuk_id = ?').run(keuze, iso(), door || 'david', id); });
+        tx(function () { correctie({ keuze, was: hard ? 'hard' : 'vastgehouden', soorten: sam.soorten || [] }, false); db.prepare('UPDATE live_stuk SET keuze = ?, keuze_op = ?, keuze_door = ? WHERE stuk_id = ?').run(keuze, iso(), door || 'david', id); });
         pauze.delete(id);
         const v = await verwerkStuk(id, { na_keuze: true });
         if (!v) return { status: 202, j: { ok: true, uitkomst: 'wacht', uitleg: 'Intake wacht nog op de injectiedetector of het model; de router probeert het elke ronde opnieuw (binnen 24 uur, anders kies je de plek zelf)' } };
@@ -1792,8 +1890,8 @@ function maak(o) {
     // niets meer van die soort: open kaarten van die soort dicht (gedaan)
     for (const k of open) {
       if (k.status !== 'open' || gezet.indexOf(k.sleutel) >= 0) continue;
-      const soort = /^intake-(twijfel|marker)-/.exec(k.sleutel);
-      if (soort && stand[soort[1] === 'twijfel' ? 'twijfel' : 'marker'] === 0) await o.kaartStatus(k.sleutel, 'open', 'gedaan', null);
+      // wv2336: één verwijskaart; niets meer wachtend = elke open Intake-kaart dicht (ook oude twijfel-/markerkaarten)
+      if (KAART_RE.test(k.sleutel) && stand.twijfel + stand.marker === 0) await o.kaartStatus(k.sleutel, 'open', 'gedaan', null);
     }
     kaartStand = stand;
     return { gezet: gezet.length };
@@ -1823,9 +1921,10 @@ function maak(o) {
         }
       }
       // David koos 'gewoon verwerken' maar Jev of het model gaf toen nog geen antwoord: opnieuw (Opus-review wv1916 ZOU 4)
-      for (const r of db.prepare("SELECT stuk_id FROM live_stuk WHERE staat = 'vastgehouden' AND keuze = 'verwerken' LIMIT 10").all()) {
+      for (const r of db.prepare("SELECT stuk_id FROM live_stuk WHERE staat IN ('vastgehouden','bewaard') AND keuze = 'verwerken' LIMIT 10").all()) {
         if (nu() - t0r > RONDE_MS) break;
         if (pauze.has(r.stuk_id) && nu() - pauze.get(r.stuk_id) < JEV_PAUZE_MS) continue;
+        if (keuzeBezig.has(r.stuk_id)) continue;   // review wv2336 ZOU 6: David kiest dit stuk net; niet twee keer verwerken
         try { await verwerkStuk(r.stuk_id, { na_keuze: true }); } catch (e) { if (o.fout) o.fout('intake-router', e); }
       }
       stand.laatste = nuIso(nu());
@@ -1852,11 +1951,16 @@ function maak(o) {
   function telling(van, tot) {
     const rijen = db.prepare('SELECT status, samenvatting FROM router_stuk WHERE op >= ? AND op < ?').all(van, tot);
     const t = { stukken: rijen.length, buiten_router: 0, origineel_ontbreekt: 0, vastgehouden: 0, beoordeeld: 0, marker_alleen_router: 0, soort: {}, afzender: { hoog: 0, redelijk: 0, zwak: 0, geen: 0 },
-      entiteit: { hoog: 0, redelijk: 0, zwak: 0, geen: 0 }, marker_na_ocr: 0, ocr_gelezen: 0, label_gelijk: 0, label_anders: 0, mails: 0, dkim_uitgelijnd: 0, voorgesteld_spoor: 0, lens: {}, zou_auto_stuk: 0, scans: 0, scans_auto: 0 };
+      entiteit: { hoog: 0, redelijk: 0, zwak: 0, geen: 0 }, marker_na_ocr: 0, ocr_gelezen: 0, label_gelijk: 0, label_anders: 0, mails: 0, dkim_uitgelijnd: 0, voorgesteld_spoor: 0, lens: {}, zou_auto_stuk: 0, scans: 0, scans_auto: 0,
+      marker_hard: 0, marker_zacht: 0, mogelijk_medisch: 0, buiten_brain: 0, prive_zou: 0, prive_zou_zakelijk: 0 };   // wv2336: weging van de patiëntcontrole (alleen aantallen)
     for (const r of rijen) {
       const s = safeJson(r.samenvatting) || {};
       if (r.status === 'buiten_router') { t.buiten_router++; continue; }
       if (r.status === 'origineel_ontbreekt') { t.origineel_ontbreekt++; continue; }
+      if (s.weging === 'hard') t.marker_hard++; else if (s.weging === 'zacht') t.marker_zacht++;
+      if (s.buiten_brain) t.buiten_brain++;
+      if (s.prive_schaduw) { t.prive_zou++; if (s.prive_schaduw !== 'prive') t.prive_zou_zakelijk++; }
+      if (r.status === 'beoordeeld' && s.mogelijk_medisch) t.mogelijk_medisch++;
       if (r.status === 'vastgehouden') { t.vastgehouden++; if (s.marker_router === 'gemarkeerd' && s.marker_ingang === 'geen') t.marker_alleen_router++; if (s.marker_router === 'gemarkeerd' && s.marker_ingang === 'niet_te_lezen') t.marker_na_ocr++; continue; }
       t.beoordeeld++;
       t.soort[s.soort] = (t.soort[s.soort] || 0) + 1;
@@ -1876,7 +1980,7 @@ function maak(o) {
     const lens = Object.keys(t.lens).map(function (l) { return l + ' ' + t.lens[l].n + ' (twijfel ' + Math.round(100 * t.lens[l].twijfel / t.lens[l].n) + ' %)'; }).join(', ');
     const lv = liveStand(), live = Object.keys(lv).filter(function (b) { return lv[b] === true; });
     const w = live.length ? wachtOpDavid() : null;
-    return (live.length ? 'router (live voor ' + live.join(', ') + '; de rest in de schaduw; wacht op David: ' + w.twijfel.length + ' twijfel, ' + w.vastgehouden.length + ' vastgehouden): ' : 'router (schaduw, voert niets uit): ') + t.stukken + ' stukken; ' + t.beoordeeld + ' beoordeeld, ' + t.vastgehouden + ' vastgehouden' + (t.marker_alleen_router || t.marker_na_ocr ? ' (alleen door de router gemarkeerd ' + t.marker_alleen_router + ', na OCR ' + t.marker_na_ocr + ')' : '') + ', ' + t.buiten_router + ' buiten de router' + (t.origineel_ontbreekt ? ', ' + t.origineel_ontbreekt + ' zonder origineel op de pod' : '') +
+    return (live.length ? 'router (live voor ' + live.join(', ') + '; de rest in de schaduw; wacht op David: ' + w.twijfel.length + ' twijfel, ' + w.vastgehouden.length + ' vastgehouden): ' : 'router (schaduw, voert niets uit): ') + t.stukken + ' stukken; ' + t.beoordeeld + ' beoordeeld, ' + t.vastgehouden + ' vastgehouden' + (t.marker_hard || t.marker_zacht || t.mogelijk_medisch ? ' (patiëntcontrole: hard ' + t.marker_hard + ', zacht ' + t.marker_zacht + '; doorgegaan met label mogelijk medisch ' + t.mogelijk_medisch + ', stil buiten de Brain ' + t.buiten_brain + ')' : '') + (t.prive_zou ? ' (privégrens schaduw: zou privé ' + t.prive_zou + ', waarvan nu niet bij Privé ' + t.prive_zou_zakelijk + ')' : '') + (t.marker_alleen_router || t.marker_na_ocr ? ' (alleen door de router gemarkeerd ' + t.marker_alleen_router + ', na OCR ' + t.marker_na_ocr + ')' : '') + ', ' + t.buiten_router + ' buiten de router' + (t.origineel_ontbreekt ? ', ' + t.origineel_ontbreekt + ' zonder origineel op de pod' : '') +
       (t.beoordeeld ? '; soort ' + Object.keys(t.soort).map(function (k) { return k + ' ' + t.soort[k]; }).join(', ') + '; afzender hoog ' + t.afzender.hoog + ' / redelijk ' + t.afzender.redelijk + ' / zwak ' + t.afzender.zwak + ' / geen ' + t.afzender.geen +
         '; entiteit gelijk aan het routelabel ' + t.label_gelijk + ', anders ' + t.label_anders + '; DKIM uitgelijnd ' + t.dkim_uitgelijnd + ' van ' + t.mails + ' mails; spoor op voorgesteld kenmerk ' + t.voorgesteld_spoor + '; lenzen ' + (lens || 'geen') + '; zou automatisch ' + t.zou_auto_stuk + (t.scans ? '; scans automatisch ' + t.scans_auto + ' van ' + t.scans : '') : '');
   }
@@ -1909,11 +2013,70 @@ function maak(o) {
   async function regVoorApp() { try { return await registerVers(); } catch (e) { return null; } }
   // Eén stuk zoals de App het krijgt (wv2002: gedeeld door het Router-overzicht en de Werkstroom). PRIVACYGRENS: niet beoordeeld (vastgehouden,
   // origineel ontbreekt) = alleen status, tijd, bron, profiel en soorten kenmerken. actief = de actieve regels voor "met je regels nu" (null: niet herberekenen).
-  function stukVoorApp(row, r, actief) {
+  // wv2336 (Intake binnenbak, plan 3-11-2026 § 6 stap 2): per wachtend stuk een voorstel voor "Klopt", hooguit drie waarschijnlijke plekken en
+  // één reden in gewone taal. GEEN modelaanroep: alleen wat de router al besliste (bestemming, entiteit, vangnet, routelabel) en Davids eerdere
+  // keuzes voor hetzelfde afzenderadres (correctie, 90 dagen). Kandidaten zijn alleen eigen entiteiten met een Second Brain-map.
+  const REDEN_TEKST = { geen_entiteit: 'afzender niet herkend', entiteit_niet_zeker: 'afzender niet zeker herkend', soort_of_afzender_niet_hoog: 'lijkt een factuur, afzender niet zeker',
+    entiteit_zonder_map: 'die plek heeft nog geen map in de Brain', jev: 'de tekst richt zich tot een AI; daarom niet vanzelf', jev_geen_uitslag: 'de controle op AI-instructies gaf geen uitslag',
+    regel_lens_nog_niet_live: 'je regel wijst naar een plek die nog niet aanstaat', regel_altijd_vragen: 'je regel zegt: altijd mij vragen', geen_bestemming: 'Intake weet niet waar dit heen moet',
+    soort_zwak: 'lijkt reclame, maar niet zeker', geen_document: 'factuur zonder pdf' };
+  const VOORSTEL_LENZEN = ['kennis', 'geen', 'facturen', 'keten', 'systeem'];
+  function redenTekst(sam, ls) {
+    if (!ls) return null;
+    if (ls.staat === 'vastgehouden') return 'mogelijk patiëntgegevens: kies wat ermee gebeurt';
+    if (ls.staat === 'bewaard' && ls.keuze === 'hard') return 'patiëntkenmerk: buiten de Brain gehouden';
+    const tw = (sam.bestemmingen || []).filter(function (b) { return !b.zou_auto && b.lens !== 'deadlines'; });
+    if (!tw.length) return null;
+    const rd = String(tw[0].reden || '');
+    if (/^uitvoeren_mislukt/.test(rd)) return 'plaatsen lukte niet; kies opnieuw';
+    if (rd === 'entiteit_niet_zeker' && sam.entiteit_kracht && sam.entiteit_kracht !== 'geen' && sam.afzender_kracht === 'hoog') return 'past bij meer dan één plek';
+    return REDEN_TEKST[rd] || 'Intake is niet zeker genoeg';
+  }
+  function keuzesPerAfzender() {   // van_adres → Map(entiteit → aantal); één keer per overzicht
+    const uit = new Map();
+    for (const c of db.prepare("SELECT c.wat, s.meta FROM correctie c JOIN stuk s ON s.stuk_id = c.stuk_id WHERE c.leren_mag = 1 AND c.tijd >= ? AND c.wat LIKE '%\"entiteit\":\"%'").all(nuIso(nu() - 90 * DAG))) {
+      const w = safeJson(c.wat) || {}, m = safeJson(c.meta) || {};
+      const van = adresVan(m.van || ''); if (!van || !w.entiteit || !KENNIS_MAP[w.entiteit]) continue;
+      const x = uit.get(van) || new Map(); x.set(w.entiteit, (x.get(w.entiteit) || 0) + 1); uit.set(van, x);
+    }
+    return uit;
+  }
+  function binnenbak(row, sam, ls, meta, namen, perAfzender) {
+    const uit = { versie: ls ? ls.versie : row.versie, voorstel: null, kandidaten: [], reden: redenTekst(sam, ls),
+      mogelijk_medisch: !!(sam.mogelijk_medisch || sam.na_keuze), buiten_brain: !!(ls && ls.staat === 'bewaard' && ls.keuze === 'hard') };
+    if (!ls || ls.staat !== 'twijfel' || row.status !== 'beoordeeld') return uit;
+    const tw = (sam.bestemmingen || []).filter(function (b) { return !b.zou_auto && b.lens !== 'deadlines'; });
+    const k = [];
+    const voeg = function (x) { if (x && KENNIS_MAP[x] && k.indexOf(x) < 0) k.push(x); };
+    for (const b of tw) voeg(b.doel);
+    voeg(sam.entiteit);
+    const vn = db.prepare("SELECT uitkomst, bewijs FROM besluit WHERE stuk_id = ? AND versie = ? AND stap = 'vangnet' ORDER BY id DESC LIMIT 1").get(row.stuk_id, uit.versie);
+    if (vn) { voeg(vn.uitkomst); voeg(((safeJson(vn.bewijs) || {}).eerder || {}).knoop); }
+    const pa = perAfzender.get(adresVan(meta.van || ''));
+    if (pa) for (const e of Array.from(pa.entries()).sort(function (a, b) { return b[1] - a[1]; })) voeg(e[0]);
+    for (const l of sam.label_route || []) voeg(l);
+    uit.kandidaten = k.slice(0, 3).map(function (x) { return { id: x, naam: namen.get(x) || x }; });
+    let lens = tw.length ? tw[0].lens : null;
+    if (lens === 'vragen') lens = 'kennis';
+    if (lens && VOORSTEL_LENZEN.indexOf(lens) >= 0 && lenzenLive().indexOf(lens) >= 0) {
+      if (lens === 'kennis') { const e = tw[0].doel && KENNIS_MAP[tw[0].doel] ? tw[0].doel : (uit.kandidaten[0] ? uit.kandidaten[0].id : null); if (e) uit.voorstel = { lens, entiteit: e }; }
+      else if (lens === 'systeem' || lens === 'geen') uit.voorstel = { lens, entiteit: null };
+      else uit.voorstel = { lens, entiteit: tw[0].doel && KNOOP_RE.test(tw[0].doel) ? tw[0].doel : null };
+    }
+    return uit;
+  }
+  function entNamen(r) { const m = new Map(); if (r) for (const e of r.ent.values()) if (e.eigen && KNOOP_RE.test(String(e.k || ''))) m.set(e.k, e.naam || e.k); return m; }
+  function stukVoorApp(row, r, actief, ctx) {
     const sam = safeJson(row.samenvatting) || {};
-    const ls = db.prepare('SELECT staat, keuze FROM live_stuk WHERE stuk_id = ?').get(row.stuk_id);
+    const ls = db.prepare('SELECT staat, keuze, versie FROM live_stuk WHERE stuk_id = ?').get(row.stuk_id);
     const basis = { stuk_id: row.stuk_id, status: row.status, op: row.op, bron: sam.bron || null, profiel: sam.profiel || null,
       live: ls ? { staat: ls.staat, keuze: ls.keuze || null, uitgevoerd: db.prepare("SELECT lens, doel, pad FROM uitvoering WHERE stuk_id = ? AND pad LIKE '%.md' ORDER BY id DESC LIMIT 1").get(row.stuk_id) || null } : null };
+    if (ls) {
+      ctx = ctx || { namen: entNamen(r), perAfzender: null };
+      if (ls.staat === 'twijfel' && !ctx.perAfzender) ctx.perAfzender = keuzesPerAfzender();
+      const sb = row.status === 'beoordeeld' ? stukBasis(row) : null;
+      Object.assign(basis, binnenbak(row, sam, ls, sb ? (safeJson(sb.meta) || {}) : {}, ctx.namen, ctx.perAfzender || new Map()));
+    }
     if (row.status !== 'beoordeeld') return Object.assign(basis, { marker: sam.marker || null, soorten: Array.isArray(sam.soorten) ? sam.soorten : [] });
     const s = stukBasis(row); const meta = s ? (safeJson(s.meta) || {}) : {};
     const delen = s ? db.prepare('SELECT deel, rol, naam, mime FROM onderdeel WHERE stuk_id = ? ORDER BY deel').all(s.stuk_id) : [];
@@ -1944,7 +2107,8 @@ function maak(o) {
     const entiteiten = r ? Array.from(r.ent.values()).filter(function (e) { return e.eigen && KNOOP_RE.test(String(e.k || '')); }).map(function (e) { return { id: e.k, naam: e.naam || e.k }; }).sort(function (a, b) { return a.naam.localeCompare(b.naam); })
       : Object.values(LABEL_KNOOP).map(function (k) { return { id: k, naam: k }; });
     const lv = liveStand();
-    return { stukken: rijen.map(function (row) { return stukVoorApp(row, r, null); }), entiteiten,
+    const ctx = { namen: entNamen(r), perAfzender: null };
+    return { stukken: rijen.map(function (row) { return stukVoorApp(row, r, null, ctx); }), entiteiten,
       live: { bronnen: Object.keys(lv).filter(function (b) { return lv[b] === true; }), lenzen: lenzenLive(), kennis_entiteiten: Object.keys(KENNIS_MAP) } };
   }
   // Tellingen voor de Werkstroom: alleen aantallen (wacht op David, en wat er de laatste 48 uur buiten Gmail binnenkwam en 7 dagen af kwam)
@@ -1965,8 +2129,13 @@ function maak(o) {
       if (rg) treffers.set(rg.id, (treffers.get(rg.id) || 0) + 1);
     }
     const actief = regels.filter(function (y) { return y.actief; });
-    const stukken = db.prepare("SELECT stuk_id, versie, status, op, samenvatting FROM router_stuk WHERE status <> 'buiten_router' ORDER BY op DESC LIMIT ?").all(Math.min(Math.max(1, n | 0), 200))
-      .map(function (row) { return stukVoorApp(row, r, actief); });
+    // wv2336: wat op David wacht staat er altijd in, ook als het buiten de nieuwste n valt
+    const rijen = db.prepare("SELECT stuk_id, versie, status, op, samenvatting FROM router_stuk WHERE status <> 'buiten_router' ORDER BY op DESC LIMIT ?").all(Math.min(Math.max(1, n | 0), 200));
+    const al = new Set(rijen.map(function (x) { return x.stuk_id; }));
+    for (const x of db.prepare("SELECT r.stuk_id, r.versie, r.status, r.op, r.samenvatting FROM live_stuk l JOIN router_stuk r ON r.stuk_id = l.stuk_id AND r.versie = l.versie WHERE l.staat IN ('twijfel','vastgehouden') OR (l.staat = 'bewaard' AND l.keuze = 'hard' AND l.sinds >= ?) ORDER BY l.sinds LIMIT 200").all(nuIso(nu() - 90 * DAG)))
+      if (!al.has(x.stuk_id)) rijen.push(x);
+    const ctx = { namen: entNamen(r), perAfzender: null };
+    const stukken = rijen.map(function (row) { return stukVoorApp(row, r, actief, ctx); });
     const entiteiten = r ? Array.from(r.ent.values()).filter(function (e) { return e.eigen && KNOOP_RE.test(String(e.k || '')); }).map(function (e) { return { id: e.k, naam: e.naam || e.k }; }).sort(function (a, b) { return a.naam.localeCompare(b.naam); })
       : Object.values(LABEL_KNOOP).map(function (k) { return { id: k, naam: k }; });
     const bronnen = db.prepare("SELECT DISTINCT s.bron FROM router_stuk r JOIN stuk s ON s.stuk_id = r.stuk_id WHERE r.status <> 'buiten_router'").all().map(function (x) { return x.bron; }).filter(function (b) { return BRON_RE.test(b); });
@@ -1974,6 +2143,7 @@ function maak(o) {
     const w = wachtOpDavid();
     return { ok: true, aan: true, schaduw: !Object.keys(lv).some(function (b) { return lv[b] === true; }), regelversie: REGELVERSIE, info: info(), venster_dagen: VENSTER_DAGEN,
       live: { bronnen: Object.keys(lv).filter(function (b) { return lv[b] === true; }), lenzen: lenzenLive(), wacht_twijfel: w.twijfel.length, wacht_vastgehouden: w.vastgehouden.length,
+        vanzelf_week: db.prepare("SELECT count(*) n FROM live_stuk WHERE staat IN ('automatisch','klaar') AND keuze IS NULL AND sinds >= ?").get(nuIso(nu() - 7 * DAG)).n,
         verbeteringen: verbeteringen(nuIso(nu() - VENSTER_DAGEN * DAG)), kennis_entiteiten: Object.keys(KENNIS_MAP) },
       week: telling(nuIso(nu() - 7 * DAG), nuIso(nu() + 60000)), register: !!r,
       regels: regels.map(function (y) { return Object.assign(y, { treffers: r ? treffers.get(y.id) || 0 : null }); }),
@@ -2164,32 +2334,29 @@ function safeJson(s) { try { return JSON.parse(s); } catch (e) { return null; } 
  * In de schaduw roept niemand dit aan (geen kaarten aan David); de toets zet ze in een rollback tegen de echte RPC.
  */
 function kaartenVoorDag(x) {
-  const uit = [];
-  const herkomst = function (focus) { return { module: 'intake', handmatig: 'intake', doel: { scherm: 'intake', focus: focus ? 'stuk:' + focus : null } }; };
-  if (x.twijfel > 0) uit.push({ sleutel: 'intake-twijfel-' + x.datum, soort: 'doen', waar: 'overal', prive: true, duur_min: Math.min(30, 2 + x.twijfel), volgorde: 30,
-    titel: (x.twijfel === 1 ? '1 stuk' : x.twijfel + ' stukken') + ' in Intake — kies de bestemming',
-    waarom: 'Intake wist bij ' + (x.twijfel === 1 ? 'dit stuk' : 'deze stukken') + ' niet zeker van wie het is of waar het heen moet. Zonder jouw keuze blijft het in Intake staan en gaat het nergens heen.',
-    stappen: ['Open in de Socev-app Intake; de stukken die op je wachten staan bovenaan.', 'Kies per stuk de bestemming, of zeg van wie het is.', 'Klaar als er niets meer op je wacht; deze kaart gaat dan vanzelf dicht.'],
-    herkomst: herkomst(x.focus_twijfel) });
-  if (x.marker > 0) uit.push({ sleutel: 'intake-marker-' + x.datum, soort: 'doen', waar: 'overal', prive: true, duur_min: Math.min(30, 2 + x.marker), volgorde: 20,
-    titel: (x.marker === 1 ? '1 stuk' : x.marker + ' stukken') + ' met mogelijk patiëntgegevens — kies wat ermee gebeurt',
-    waarom: 'Intake zag kenmerken die op patiëntgegevens kunnen wijzen en hield ' + (x.marker === 1 ? 'het stuk' : 'de stukken') + ' vast: niet naar een model en niet de Second Brain in. Alleen bewaren betekent 90 dagen, daarna weg.',
-    stappen: ['Open in de Socev-app Intake; de vastgehouden stukken staan bovenaan, je ziet ze volledig.', 'Kies per stuk: gewoon verwerken, alleen bewaren of weggooien.', 'Klaar als er niets meer vastgehouden wacht; deze kaart gaat dan vanzelf dicht.'],
-    herkomst: herkomst(x.focus_marker) });
-  return uit;
+  // wv2336 (plan 3-11-2026 § 6 stap 3, "één plek"): één verwijskaart per dag, alleen als er iets wacht; de keuze zelf staat alleen in de plek Intake
+  const n = (x.twijfel || 0) + (x.marker || 0);
+  if (n <= 0) return [];
+  const focus = x.focus_twijfel || x.focus_marker || null;
+  const vast = x.marker > 0 ? ' Bij ' + (x.marker === 1 ? 'één stuk' : x.marker + ' stukken') + ' zag de patiëntcontrole iets; je ziet daar het hele stuk.' : '';
+  return [{ sleutel: 'intake-wacht-' + x.datum, soort: 'doen', waar: 'overal', prive: true, duur_min: Math.min(30, 1 + n), volgorde: 25,
+    titel: 'Intake: ' + (n === 1 ? '1 stuk wacht' : n + ' stukken wachten') + ' op je keuze',
+    waarom: 'Intake wist niet zeker waar ' + (n === 1 ? 'dit stuk' : 'deze stukken') + ' heen moet' + (n === 1 ? '' : 'en') + '. Zonder jouw keuze ' + (n === 1 ? 'blijft het' : 'blijven ze') + ' in Intake staan en ' + (n === 1 ? 'gaat het' : 'gaan ze') + ' nergens heen.' + vast,
+    stappen: ['Open Intake in de Socev-app; wat op je wacht staat bovenaan.', 'Tik per stuk op Klopt, of kies Andere plek.', 'Deze kaart gaat vanzelf dicht als er niets meer wacht.'],
+    herkomst: { module: 'intake', handmatig: 'intake', doel: { scherm: 'intake', focus: focus ? 'stuk:' + focus : null } } }];
 }
+const KAART_RE = /^intake-(twijfel|marker|wacht)-(\d{4}-\d{2}-\d{2})$/;
 async function zetKaarten(kaarten, h) {
   const gezet = [];
   for (const k of kaarten) { await h.kaartZet(k); gezet.push(k.sleutel); }
-  // de nieuwste dagkaart sluit de oudere van dezelfde soort
+  // de nieuwste verwijskaart sluit elke oudere Intake-kaart (ook de twijfel- en markerkaarten van vóór wv2336)
+  const nieuwste = gezet.filter(function (g) { return /^intake-wacht-/.test(g); }).sort().pop();
   for (const s of h.open || []) {
-    const soort = /^intake-(twijfel|marker)-/.exec(s);
-    if (!soort || gezet.indexOf(s) >= 0) continue;
-    const nieuwer = gezet.filter(function (g) { return g.indexOf('intake-' + soort[1] + '-') === 0 && g > s; }).sort().pop();
-    // samengevoegd in de nieuwste dagkaart (mk_voor_jou_status: door 'agent', samengevoegd_in = de nieuwe sleutel)
-    if (nieuwer) await h.kaartStatus(s, 'open', 'samengevoegd', nieuwer);
+    const m = KAART_RE.exec(s);
+    if (!m || gezet.indexOf(s) >= 0 || !nieuwste) continue;
+    if (m[1] !== 'wacht' || s < nieuwste) await h.kaartStatus(s, 'open', 'samengevoegd', nieuwste);
   }
   return gezet;
 }
 
-module.exports = { maak, K, kaartenVoorDag, zetKaarten, REGELVERSIE, PROFIELEN };
+module.exports = { maak, K, kaartenVoorDag, zetKaarten, REGELVERSIE, PROFIELEN, markerWeging, priveGrens };

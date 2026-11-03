@@ -224,7 +224,7 @@ test('ronde: factuur beoordeeld, gemarkeerd vastgehouden zonder tekst, alleen-ro
   assert.ok(!/ZWAARDVIS|bovengenoemde/i.test(alles));
   for (const id of [gem, scan]) {
     const st = L.db.prepare('SELECT stap FROM besluit WHERE stuk_id = ?').all(id).map((x) => x.stap);
-    assert.deepEqual(st, ['ontvangst', 'lokale_tekst', 'marker']);
+    assert.deepEqual(st, ['ontvangst', 'lokale_tekst', 'marker', 'marker_weging']);   // wv2336: weging (alleen soorten en redenen)
   }
   assert.equal(L.db.prepare("SELECT count(*) n FROM bestemming WHERE stuk_id IN (?, ?)").get(gem, scan).n, 0);
   assert.deepEqual(fs.readdirSync(path.join(L.dir, 'quarantaine')), []);
@@ -297,20 +297,24 @@ test('wv1920 (Fable-review): de poort krijgt de afzender alleen met DKIM uitgeli
   r.sluit();
 });
 
-test('kaartcode: één twijfel- en markerkaart per dag binnen de kaartgrenzen; de nieuwste sluit de oudere', async () => {
+test('kaartcode (wv2336): één verwijskaart per dag binnen de kaartgrenzen; de nieuwste sluit elke oudere Intake-kaart', async () => {
   const k = R.kaartenVoorDag({ datum: '2026-10-27', twijfel: 4, marker: 1, focus_twijfel: 'stk_20261027_00000001' });
-  assert.equal(k.length, 2);
+  assert.equal(k.length, 1);
   for (const x of k) {
     assert.ok(x.titel.length <= 90, x.titel); assert.ok(x.waarom.length <= 400);
     assert.equal(x.herkomst.module, 'intake'); assert.equal(x.herkomst.handmatig, 'intake'); assert.equal(x.herkomst.doel.scherm, 'intake');
     assert.ok(!/stk_|\/opt|wv\d/.test(x.titel + x.waarom + x.stappen.join(' ')));
   }
+  assert.equal(k[0].sleutel, 'intake-wacht-2026-10-27'); assert.equal(k[0].titel, 'Intake: 5 stukken wachten op je keuze');
   assert.equal(k[0].herkomst.doel.focus, 'stuk:stk_20261027_00000001');
   assert.equal(R.kaartenVoorDag({ datum: '2026-10-27', twijfel: 0, marker: 0 }).length, 0);
+  assert.equal(R.kaartenVoorDag({ datum: '2026-10-27', twijfel: 1, marker: 0 })[0].titel, 'Intake: 1 stuk wacht op je keuze');
   const gezet = [], dicht = [];
-  await R.zetKaarten(k, { kaartZet: async (p) => gezet.push(p.sleutel), kaartStatus: async (s, v, n, in_) => dicht.push([s, n, in_]), open: ['intake-twijfel-2026-10-26', 'intake-marker-2026-10-26', 'intake-twijfel-2026-10-28', 'iets-anders'] });
-  assert.deepEqual(gezet, ['intake-twijfel-2026-10-27', 'intake-marker-2026-10-27']);
-  assert.deepEqual(dicht, [['intake-twijfel-2026-10-26', 'samengevoegd', 'intake-twijfel-2026-10-27'], ['intake-marker-2026-10-26', 'samengevoegd', 'intake-marker-2026-10-27']]);
+  await R.zetKaarten(k, { kaartZet: async (p) => gezet.push(p.sleutel), kaartStatus: async (s, v, n, in_) => dicht.push([s, n, in_]),
+    open: ['intake-twijfel-2026-10-26', 'intake-marker-2026-10-26', 'intake-twijfel-2026-10-28', 'intake-wacht-2026-10-25', 'iets-anders'] });
+  assert.deepEqual(gezet, ['intake-wacht-2026-10-27']);
+  assert.deepEqual(dicht, [['intake-twijfel-2026-10-26', 'samengevoegd', 'intake-wacht-2026-10-27'], ['intake-marker-2026-10-26', 'samengevoegd', 'intake-wacht-2026-10-27'],
+    ['intake-twijfel-2026-10-28', 'samengevoegd', 'intake-wacht-2026-10-27'], ['intake-wacht-2026-10-25', 'samengevoegd', 'intake-wacht-2026-10-27']]);
 });
 
 test('server.js: router alleen met schakelaar, in /health, in de dagtelling; geen kaarten in de schaduw', () => {
