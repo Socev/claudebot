@@ -15308,25 +15308,37 @@ function facturenOpen() {
 // rechtstreeks aan en kent de route dus niet). Per vraag twee alleen-lezen verbindingen (docplan.sqlite readOnly, facturen.sqlite alleenLezen),
 // daarna dicht; niets opgeslagen, geen bedrag of naam in een log. Ontbreekt docplan-totaal.js (terugrol), dan 404 en draait de rest door.
 const DOCPLAN_DIR = serverPad('docplan', process.env.DOCPLAN_DIR, '/opt/data/docplan', serverProefDeel('docplan'));
+// wv2304: de twee alleen-lezen openers staan los, zodat Waarnemers (docplan-totaal.js) en Jaaropgaaf (docplan-jaaropgaaf.js) dezelfde gebruiken.
+function docplanOpenRo() {
+  const f = path.join(DOCPLAN_DIR, 'docplan.sqlite');
+  if (!fs.existsSync(f)) return null;
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(f, { readOnly: true });
+  try { db.exec('PRAGMA busy_timeout = 5000'); } catch (e) { db.close(); throw e; }
+  return db;
+}
+function facturenOpenRo() {
+  if (!facturenMagOpenen()) return null;
+  const f = facturenMod.open(FACTUREN_DIR, { alleenLezen: true });
+  return { db: f.db, sluit: function () { facturenMod.sluit(f); } };
+}
 const docplanTotaal = (function () {
   const p = path.join(__dirname, 'docplan-totaal.js');
   if (!facturenMod || !fs.existsSync(p)) return null;
+  try { return require(p).maak({ fout: logError, openDocplan: docplanOpenRo, openFacturen: facturenOpenRo }); }
+  catch (e) { logError('waarnemers', e); return null; }
+})();
+// wv2304: Facturen › Waarnemers › Jaaropgaaf — per praktijk per waarnemer betaald in het jaar (bank), NAW compleet ja/nee (docplan.sqlite tabel
+// naw, mk-scripts/docplan/naw.py) en de controle tegen het rooster (sb_dienst_maanden); POST = het exportbestand (xlsx, base64) op Davids knop,
+// zonder BSN en geboortedatum (DocPlan-ontwerp § 4.3, idee 25 meetpunt 6). Alleen de eigenaar, in appFacturen vóór facturen.js (/fac kent de route
+// niet); alles alleen-lezend, niets opgeslagen of verstuurd, geen naam, adres of bedrag in een log. Ontbreekt de module (terugrol), dan 404.
+const docplanJaaropgaaf = (function () {
+  const p = path.join(__dirname, 'docplan-jaaropgaaf.js');
+  if (!facturenMod || !docplanTotaal || !fs.existsSync(p)) return null;
   try {
-    return require(p).maak({ fout: logError,
-      openDocplan: function () {
-        const f = path.join(DOCPLAN_DIR, 'docplan.sqlite');
-        if (!fs.existsSync(f)) return null;
-        const { DatabaseSync } = require('node:sqlite');
-        const db = new DatabaseSync(f, { readOnly: true });
-        try { db.exec('PRAGMA busy_timeout = 5000'); } catch (e) { db.close(); throw e; }
-        return db;
-      },
-      openFacturen: function () {
-        if (!facturenMagOpenen()) return null;
-        const f = facturenMod.open(FACTUREN_DIR, { alleenLezen: true });
-        return { db: f.db, sluit: function () { facturenMod.sluit(f); } };
-      } });
-  } catch (e) { logError('waarnemers', e); return null; }
+    return require(p).maak({ fout: logError, openDocplan: docplanOpenRo, openFacturen: facturenOpenRo,
+      rpc: function (fn, body) { return appSbRpc(fn, body, 20000); }, xlsx: require(path.join(__dirname, 'xlsx-schrijver.js')) });
+  } catch (e) { logError('jaaropgaaf', e); return null; }
 })();
 // wv2159: Facturen › Waarnemers › Roosternamen — koppelscherm roosternaam → persoon (DocPlan-ontwerp § 3 en § 4.1 uitwerking koppelscherm;
 // docplan-koppel.js). GET leest public.sb_dienst_alias_lijst(jaar), POST schrijft public.sb_dienst_alias_zet([item], 'david'): alleen deze route
@@ -15442,7 +15454,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel, jaaropgaaf: !!docplanJaaropgaaf } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -15570,6 +15582,13 @@ async function appFacturen(req, res, a, s, d, route) {
   if (padW === '/app/facturen/roosternamen' || padW.indexOf('/app/facturen/roosternamen/') === 0) {
     if (!docplanKoppel) return appWeiger(res, 404, 'Roosternamen zit niet in deze versie van de pod', 'facturen roosternamen ontbreekt');
     const x = await docplanKoppel.app({ methode: req.method, pad: padW, d: d, rol: facturenRoutes.rolVoor(null, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' }), primair: rolPrimair() });
+    if (x.status === 200 && req.method === 'GET') res._app.stil = true;
+    res._app.reden = 'facturen ' + x.reden;
+    return appStuur(res, x.status, x.j);
+  }
+  if (padW === '/app/facturen/jaaropgaaf' || padW.indexOf('/app/facturen/jaaropgaaf/') === 0) {
+    if (!docplanJaaropgaaf) return appWeiger(res, 404, 'Jaaropgaaf zit niet in deze versie van de pod', 'facturen jaaropgaaf ontbreekt');
+    const x = await docplanJaaropgaaf.app({ methode: req.method, pad: padW, d: d, rol: facturenRoutes.rolVoor(null, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' }), primair: rolPrimair() });
     if (x.status === 200 && req.method === 'GET') res._app.stil = true;
     res._app.reden = 'facturen ' + x.reden;
     return appStuur(res, x.status, x.j);
