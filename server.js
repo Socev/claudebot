@@ -3875,6 +3875,7 @@ function handleRequest(req, res) {
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
+      kalender: typeof kalenderInfo === 'function' ? kalenderInfo() : { aan: false },   // wv2333: OVIS Calendar in de app (laatste lijst: aantal, duur; geen titels)
       shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
       memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
       ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
@@ -12624,6 +12625,7 @@ function handleApp(req, res) {
         if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
+        if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
@@ -19087,6 +19089,31 @@ async function appTripper(req, res, a, route) {
   return appStuur(res, u.status, u.body);
 }
 // ── einde OVIS Tripper ──
+// ── OVIS Calendar in de app (wv2333, 3-11-2026; idee 27 meetpunt 5) ──
+// De tijdlijn (Google-spiegel, deadlines, GAD-afval, roosterdiensten, reizen) leesbaar in Apps › Calendar. kalender-app.js leest
+// public.sb_kalender_tijdlijn via appSbRpc (service_role) en geeft alleen de vorm voor de app; de browser krijgt geen databanktoegang.
+//   GET /app/kalender                  vandaag t/m + 30 dagen
+//   GET /app/kalender/<van>/<tot>      YYYY-MM-DD, hooguit 62 dagen
+// Alleen lezen, achter de app-sessie. Titels kunnen namen bevatten: ze gaan alleen in het antwoord, nooit in een log; de audit noemt
+// alleen venster, aantal en status. /health.kalender: aan + laatste {op, regels, ms} of {op, fout}. Ontbreekt de module: 404, aan=false.
+const kalenderApp = (function () {
+  const p = path.join(__dirname, 'kalender-app.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ rpc: function (fn, body) { return appSbRpc(fn, body, 20000); } }); }
+  catch (e) { logError('kalender', e); return null; }
+})();
+function kalenderInfo() { if (!kalenderApp) return { aan: false }; try { return kalenderApp.info(); } catch (e) { return { aan: true, fout: true }; } }
+appStaat.tellers.kalender = [];
+async function appKalender(req, res, a, route) {
+  if (!kalenderApp) return appWeiger(res, 404, 'Calendar zit niet in deze versie van de pod', 'kalender ontbreekt');
+  if (!appTeller('kalender', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens kalender');
+  let u;
+  try { u = await kalenderApp.app({ methode: req.method, pad: route.replace(/^[A-Z]+ /, ''), nu: Date.now() }); }
+  catch (e) { logError('kalender', e); return appWeiger(res, 503, 'De tijdlijn is nu niet te lezen; probeer het zo opnieuw', 'kalender fout'); }
+  res._app.reden = String(u.reden || 'kalender').slice(0, 80);
+  return appStuur(res, u.status, u.body);
+}
+// ── einde OVIS Calendar ──
 // ── OVIS Shopper (wv2264, 2-11-2026; idee 23 S3, ontwerp vault "01_Ontwikkeling/OVIS Shopper - wat er al bestaat en ontwerp (2-11-2026).md"
 // § 3.3–3.4) ──
 // Apps › Shopper in de Socev-app: de zoektochten van de skill ovis-shopper. Geen eigen opslag: shopper.js leest bij elke vraag de pagina's

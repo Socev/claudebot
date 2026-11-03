@@ -386,6 +386,10 @@ jobs:
       - name: "tripper (wv2136, reizen in de app)"
         if: ${{ !cancelled() }}
         run: bash test/tripper.sh
+      # OVIS Calendar in de app (wv2333): kalender-app.js (venster, vorm, tijden in Amsterdam, 1000-rijengrens) en het server.js-blok.
+      - name: "kalender-app (wv2333, OVIS Calendar in de app)"
+        if: ${{ !cancelled() }}
+        run: bash test/kalender-app.sh
       # OVIS Shopper S3 (wv2264): shopper.js (alleen zoektochtpagina's in de vaste mappen, entiteit uit de map, id = hash, geen symlink, koop-link
       # alleen https) en het server.js-blok (routes, Niet meer nodig = enige schrijfactie, gekocht niet via de App, /health aantallen + tijdstip).
       - name: "shopper (wv2264, zoektochten in de app)"
