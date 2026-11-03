@@ -52,6 +52,8 @@ const SIGNAAL_V10 = SIGNAAL_V1.concat(['teruggeboekt']);
 const SIGNAAL_V11 = SIGNAAL_V10.concat(['afwijkend_bedrag']);
 // wv2293: DocPlan § 8.1 vaste controle rooster ↔ betaling (docplan-controle.js), migratie 17
 const SIGNAAL_V17 = SIGNAAL_V11.concat(['dienst_zonder_betaling', 'betaling_zonder_dienst', 'roosternaam_zonder_koppeling']);
+// wv2297: DocPlan § 4.2 factuurtoets (werkdagen op een waarnemersfactuur ↔ rooster; docplan-controle.js), migratie 18
+const SIGNAAL_V18 = SIGNAAL_V17.concat(['factuur_dagen_afwijkend']);
 // wv2244: categorie 'winstvoorschot' erbij (M16); M1 houdt de oorspronkelijke lijst, M16 verruimt de CHECK
 const CATEGORIE_V1 = ['loon', 'loonheffing', 'btw', 'belasting', 'declaraties', 'rekening_courant', 'eigen_overboeking', 'bankkosten', 'creditcard',
   'prive_opname', 'abonnement_zonder_factuur', 'subsidie', 'rente', 'overig'];
@@ -65,7 +67,7 @@ const L = {
   besluitBron: ['anker', 'leverancier', 'regel', 'bank', 'model', 'mens'],
   formaat: ['ing_csv', 'abn_tab', 'abn_mt940', 'triodos_csv', 'bankluis'],
   categorie: CATEGORIE_V16,
-  signaal: SIGNAAL_V17,
+  signaal: SIGNAAL_V18,
 };
 const IN = (l) => '(' + l.map((x) => "'" + x + "'").join(',') + ')';
 const ID = (k) => 'CHECK (length(' + k + ') = 16 AND ' + k + " NOT GLOB '*[^0-9a-f]*')";
@@ -677,7 +679,7 @@ function M6(db, vervang) { return M5(db, vervang || M6_VERVANG, 'migratie_6'); }
  * code zonder knoppen (SIGNALEN kent hem niet) en een koppeling met methode 'sepa_terug' telt hij als gewone betaling.
  */
 const M10_VERVANG = [
-  ['signaal', 'soort IN ' + IN(SIGNAAL_V1), 'soort IN ' + IN(SIGNAAL_V10), ['soort IN ' + IN(SIGNAAL_V11), 'soort IN ' + IN(SIGNAAL_V17)]],
+  ['signaal', 'soort IN ' + IN(SIGNAAL_V1), 'soort IN ' + IN(SIGNAAL_V10), ['soort IN ' + IN(SIGNAAL_V11), 'soort IN ' + IN(SIGNAAL_V17), 'soort IN ' + IN(SIGNAAL_V18)]],
 ];
 function M10(db, vervang) { return M5(db, vervang || M10_VERVANG, 'migratie_10'); }
 
@@ -689,7 +691,7 @@ function M10(db, vervang) { return M5(db, vervang || M10_VERVANG, 'migratie_10')
  * CHECK hindert de oude code niet; een signaalrij 'afwijkend_bedrag' toont de oude code zonder knoppen (SIGNALEN kent hem niet).
  */
 const M11_VERVANG = [
-  ['signaal', 'soort IN ' + IN(SIGNAAL_V10), 'soort IN ' + IN(SIGNAAL_V11), ['soort IN ' + IN(SIGNAAL_V17)]],   // wv2293: al verder = ook overslaan
+  ['signaal', 'soort IN ' + IN(SIGNAAL_V10), 'soort IN ' + IN(SIGNAAL_V11), ['soort IN ' + IN(SIGNAAL_V17), 'soort IN ' + IN(SIGNAAL_V18)]],   // wv2293/wv2297: al verder = ook overslaan
 ];
 function M11(db, vervang) { return M5(db, vervang || M11_VERVANG, 'migratie_11'); }
 
@@ -777,9 +779,19 @@ function M16(db, vervang) { return M5(db, vervang || M16_VERVANG, 'migratie_16')
  * `DELETE FROM schema_migratie WHERE versie = 17`: de verruimde CHECK hindert de oude code niet; zo'n signaalrij toont de oude code zonder knoppen.
  */
 const M17_VERVANG = [
-  ['signaal', 'soort IN ' + IN(SIGNAAL_V11), 'soort IN ' + IN(SIGNAAL_V17)],
+  ['signaal', 'soort IN ' + IN(SIGNAAL_V11), 'soort IN ' + IN(SIGNAAL_V17), ['soort IN ' + IN(SIGNAAL_V18)]],   // wv2297: al verder = ook overslaan
 ];
 function M17(db, vervang) { return M5(db, vervang || M17_VERVANG, 'migratie_17'); }
+
+/*
+ * wv2297 (DocPlan meetpunt 5, ontwerp § 4.2 factuurtoets): signaalsoort factuur_dagen_afwijkend uit docplan-controle.js — een waarnemersfactuur
+ * met werkdagen die niet in het rooster van die persoon bij die praktijk staan. Zelfde weg als M17. Terugrol: `DELETE FROM schema_migratie WHERE
+ * versie = 18` (de verruimde CHECK hindert de oude code niet; zo'n signaalrij toont de oude code zonder knoppen).
+ */
+const M18_VERVANG = [
+  ['signaal', 'soort IN ' + IN(SIGNAAL_V17), 'soort IN ' + IN(SIGNAAL_V18)],
+];
+function M18(db, vervang) { return M5(db, vervang || M18_VERVANG, 'migratie_18'); }
 
 /*
  * wv980 (OVIS Intake stap 2, bouwplan § 3.3/§ 9 #2): leverancier krijgt knoop_id, de id van de organisatie in het OVIS-register
@@ -1054,6 +1066,7 @@ const MIGRATIES = [
   { versie: 15, naam: "bron: soort 'intake' (OVIS Intake stap 3d, wv1919)", fn: (db) => M15(db) },
   { versie: 16, naam: "categorie 'winstvoorschot' in uitzondering en bank_transactie (wv2244)", fn: (db) => M16(db) },
   { versie: 17, naam: 'signaal: DocPlan-controle rooster ↔ betaling, drie soorten (wv2293)', fn: (db) => M17(db) },
+  { versie: 18, naam: 'signaal: DocPlan-factuurtoets, factuur_dagen_afwijkend (wv2297)', fn: (db) => M18(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -1600,7 +1613,7 @@ function health(fdb) {
 }
 
 module.exports = {
-  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M17_VERVANG, _M17: M17, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
+  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M17_VERVANG, _M17: M17, M18_VERVANG, _M18: M18, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
   terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,

@@ -15357,14 +15357,32 @@ async function docplanControleRonde() {
   const maanden = await appSbRpc('sb_dienst_maanden', { p_van: docplanControle.maandenVanaf() }, 20000);
   const lijsten = [];
   for (const j of docplanControle.jaren(nuMs)) lijsten.push(Object.assign({}, await appSbRpc('sb_dienst_alias_lijst', { p_jaar: j }, 20000), { jaar: j }));
+  // wv2297 (§ 4.2 factuurtoets): dagen per datum (sb2 0022); ontbreekt de RPC of faalt hij, dan geen factuurtoets en blijven open f-signalen staan
+  let dagen = null;
+  if (docplanControle.factuurKandidaten) { try { dagen = await appSbRpc('sb_dienst_dagen', { p_van: docplanControle.maandenVanaf() }, 20000); } catch (e) { logError('docplan-controle dagen', e); } }
   const { DatabaseSync } = require('node:sqlite');
   const dp = new DatabaseSync(f, { readOnly: true });
   try {
     dp.exec('PRAGMA busy_timeout = 5000');
-    const u = docplanControle.controle({ maanden, lijsten, dp, fac: fdb.db, nu: nuMs });
+    // waarnemersfacturen + hun tekst (pdftotext lokaal, eerste 10 pagina's; niets verlaat de pod, de tekst wordt niet bewaard); null = mislukt
+    const facturen = [];
+    if (docplanControle.factuurKandidaten && Array.isArray(dagen)) {
+      for (const k of docplanControle.factuurKandidaten(fdb.db, dp)) {
+        let tekst = '';
+        if (k.soort === 'pdf') {
+          try {   // review ZOU 1: één kapot stuk breekt de ronde niet (tekst null = geen oordeel, open signaal blijft)
+            const pad = facturenMod.stukPad(fdb, k.sha256);
+            tekst = fs.existsSync(pad) ? await intakeProces('pdftotext', ['-q', '-layout', '-l', '10', '-enc', 'UTF-8', pad, '-'], { ms: 30000 }) : null;
+          } catch (e) { tekst = null; }
+        }
+        facturen.push(Object.assign(k, { tekst }));
+      }
+    }
+    const u = docplanControle.controle({ maanden, lijsten, dp, fac: fdb.db, nu: nuMs, dagen, facturen });
     const t = docplanControle.schrijf(fdb, facturenMod, u, new Date(nuMs).toISOString());
-    const som = (k) => u.tel.TG[k] + u.tel.GH[k];
-    schrijfLog(nu() + ' docplan-controle ' + velden({ a: som('a'), b: som('b'), c: som('c'), nieuw: t.nieuw, dicht: t.vanzelf_dicht, heropend: t.heropend || undefined }));
+    const som = (k) => (u.tel.TG[k] || 0) + (u.tel.GH[k] || 0);
+    schrijfLog(nu() + ' docplan-controle ' + velden({ a: som('a'), b: som('b'), c: som('c'), f_klopt: som('f_klopt'), f_afwijkend: som('f_afwijkend'), f_onbekend: som('f_onbekend'),
+      f_overgeslagen: som('f_overgeslagen') || undefined, nieuw: t.nieuw, dicht: t.vanzelf_dicht, heropend: t.heropend || undefined, bijgewerkt: t.bijgewerkt || undefined }));
     return { ok: true, tel: u.tel, nieuw: t.nieuw, vanzelf_dicht: t.vanzelf_dicht, heropend: t.heropend, open: t.open };
   } finally { try { dp.close(); } catch (e) { /* al dicht */ } }
 }

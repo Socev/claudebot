@@ -370,6 +370,10 @@ function zaai(fdb, o) {
       details: { regel: 'b', persoon: 'oid-proef', praktijk: 'GH', praktijk_naam: 'Groenhouten', datum: dag(-20), venster_van: dag(-140), naam: 'Bram Proefsen' } }), tijd(0, 6));
     signaal(B.maakSignaal('roosternaam_zonder_koppeling', { entiteit: 'groenhouten', naam: 'Proefdag', alleen_eigenaar: true, sleutel_vast: 'GH|proef|2026',
       details: { regel: 'c', praktijk: 'GH', praktijk_naam: 'Groenhouten', roosternaam: 'Proefdag', dagen: 1, jaar: 2026, status: null, naam: 'Proefdag' } }), tijd(0, 6));
+    // wv2297: DocPlan-factuurtoets (verzonnen persoon; geen echte factuur nodig: de sleutel is het factuur-id)
+    signaal(B.maakSignaal('factuur_dagen_afwijkend', { entiteit: 'tolgaarde', naam: 'Bram Proefsen', alleen_eigenaar: true, sleutel_vast: 'proef-factuur', bedrag_centen: 74700,
+      details: { regel: 'f', persoon: 'oid-proef', praktijk: 'TG', praktijk_naam: 'Tolgaarde', factuurdatum: dag(-5), nummer: 'P-1', vorm: 'dagen', aantal: 2, mis: [dag(-12)],
+        maanden: [dag(-12).slice(0, 7)], dagen_rooster: null, naam: 'Bram Proefsen' } }), tijd(0, 6));
     if (teBetalen) signaal(B.maakSignaal('te_betalen_niet_betaald', { entiteit: teBetalen.entiteit, leverancier: teBetalen.l.id, facturen: [teBetalen.id], bedrag_centen: teBetalen.incl }), tijd(0, 6));
     if (ingevoerd) signaal(B.maakSignaal('ingevoerd_niet_gezien', { entiteit: ingevoerd.entiteit, leverancier: ingevoerd.l.id, facturen: [ingevoerd.id], bedrag_centen: ingevoerd.incl }), tijd(-10, 6),
       { afhandeling: 'opnieuw_kijken', les: 'Betaling aan ' + ingevoerd.l.naam + ' nog niet op de bank; over drie dagen opnieuw kijken.', sluimer_tot: dag(-7), wanneer: tijd(-10, 9) });

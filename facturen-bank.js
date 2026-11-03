@@ -957,7 +957,7 @@ function signaalUitleg(s) {
     (Number.isSafeInteger(d.aantal) ? ' Gerekend over ' + d.aantal + ' eerdere incasso\'s' + (d.sinds ? ' sinds ' + dagNL(d.sinds) : '') + '.' : '');
 }
 
-const DOCPLAN_SOORTEN = ['dienst_zonder_betaling', 'betaling_zonder_dienst', 'roosternaam_zonder_koppeling'];
+const DOCPLAN_SOORTEN = ['dienst_zonder_betaling', 'betaling_zonder_dienst', 'roosternaam_zonder_koppeling', 'factuur_dagen_afwijkend'];
 const MAANDEN_NL = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
 function maandNL(m) { return /^\d{4}-\d{2}$/.test(String(m || '')) ? MAANDEN_NL[Number(m.slice(5, 7)) - 1] + ' ' + m.slice(0, 4) : '?'; }
 function dagenTekst(n) { const x = Number(n) || 0; return String(x).replace('.', ',') + (x === 1 ? ' dag' : ' dagen'); }
@@ -968,8 +968,19 @@ function docplanUitleg(s) {
     ' t/m ' + dagNL(d.venster_tot) + ' geen betaling en geen factuur aan deze waarnemer (bank bijgewerkt t/m ' + dagNL(d.bank_tm) + ').';
   if (s.soort === 'betaling_zonder_dienst') return 'Betaald op ' + dagNL(d.datum) + '; in de vier maanden ervoor (vanaf ' + dagNL(d.venster_van) +
     ') staat deze persoon niet in het rooster van ' + pr + '.';
+  if (s.soort === 'factuur_dagen_afwijkend') return factuurDagenUitleg(d, pr);
   return '"' + String(d.roosternaam || '').slice(0, 80) + '" staat ' + dagenTekst(d.dagen) + ' in het rooster van ' + pr + ' (' + (d.jaar || '?') + ') en hangt aan niemand' +
     (d.status === 'nieuw' ? ' (je vroeg een nieuwe persoon; de machinekamer maakt die)' : '') + '. Koppel in Waarnemers › Roosternamen koppelen; daarna gaat dit signaal vanzelf dicht.';
+}
+// wv2297: factuurtoets (§ 4.2). d.vorm: dagen (werkdagen op de factuur), maand (alleen een maand op de factuur), factuurmaand (niets gevonden).
+function factuurDagenUitleg(d, pr) {
+  const mis = Array.isArray(d.mis) ? d.mis : [];
+  const lijst = mis.slice(0, 8).map(dagNL).join(', ') + (mis.length > 8 ? ' en nog ' + (mis.length - 8) : '');
+  const maanden = (Array.isArray(d.maanden) ? d.maanden : []).map(maandNL).join(' en ');
+  if (d.vorm === 'dagen') return 'Op deze factuur staan ' + dagenTekst(d.aantal).replace(/dag(en)?$/, 'werkdag$1') + '; ' + (mis.length === d.aantal ? (mis.length === 1 ? 'die staat' : 'geen daarvan staat') :
+    mis.length + (mis.length === 1 ? ' daarvan staat' : ' daarvan staan')) + ' niet in het rooster van ' + pr + ' bij deze waarnemer (' + lijst + '). Klopt het toch (geruild, avond- of weekenddienst), zet het dan weg met de reden.';
+  if (d.vorm === 'maand') return 'Deze factuur gaat over ' + maanden + ', maar deze waarnemer staat dan niet in het rooster van ' + pr + '.';
+  return 'Geen werkdagen of periode op de factuur gevonden; in ' + maanden + ' staat deze waarnemer niet in het rooster van ' + pr + '.';
 }
 function docplanWeg(wat) {
   return { label: 'Wegzetten (met reden)', vereist: ['toelichting'], gevolgen: () => [],
@@ -1117,6 +1128,11 @@ const SIGNALEN = {
   roosternaam_zonder_koppeling: {
     titel: 'Roosternaam zonder persoon',
     knoppen: { wegzetten: docplanWeg((s) => 'Roosternaam ' + naamVan(s) + ' zonder persoon') },
+  },
+  // wv2297 (DocPlan § 4.2, meetpunt 5): waarnemersfactuur ↔ rooster. Geen blokkade: de factuur loopt gewoon door; dit is alleen een vraag.
+  factuur_dagen_afwijkend: {
+    titel: 'Factuur wijkt af van het rooster',
+    knoppen: { wegzetten: docplanWeg((s) => 'Factuur van ' + naamVan(s) + ' die afwijkt van het rooster') },
   },
 };
 const SIGNAAL_SOORTEN = Object.keys(SIGNALEN);

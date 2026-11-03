@@ -14,7 +14,14 @@
  *  (c) roosternaam_zonder_koppeling  een roosternaam met dagen in het jaar (2026 t/m dit jaar) zonder alias of met status nieuw. Eén per
  *                               (praktijk, naam, jaar).
  *
- * Signalen staan in Facturen (tabel signaal, migratie 17) in dezelfde vorm als de bankcontrole: alleen de eigenaar, knop "Wegzetten (met reden)".
+ *  (f) factuur_dagen_afwijkend  (wv2297, meetpunt 5; ontwerp § 4.2) een factuur in de Facturen-app (vanaf 2026, niet geen_factuur/dubbel, geen
+ *                               creditnota) met een IBAN dat docplan.sqlite aan een persoon koppelt: de werkdagen uit de factuurtekst (pdftotext, regels
+ *                               met een datum en een bedrag, reiskosten niet) moeten elk in het rooster van die persoon bij die praktijk staan
+ *                               (public.sb_dienst_dagen, 0022). Geen dagen maar wel een maand ("waarneming oktober 2026"): die maand moet dagen
+ *                               hebben; niets van beide: de factuurmaand of de maand ervoor (anders "niet te beoordelen", geen signaal).
+ *                               Eén signaal per factuur (knop Open factuur in de app). Nooit een blokkade, nooit een bericht aan de waarnemer.
+ *
+ * Signalen staan in Facturen (tabel signaal, migratie 17; f: migratie 18) in dezelfde vorm als de bankcontrole: alleen de eigenaar, knop "Wegzetten (met reden)".
  * Zelfde sleutel = nooit twee keer (ON CONFLICT DO NOTHING). Is de oorzaak weg (betaling binnen, naam gekoppeld), dan sluit deze controle het
  * open signaal zelf (afhandeling vanzelf_opgelost, wie docplan-controle, auditrij); komt de oorzaak terug, dan gaat alleen zo'n vanzelf gesloten
  * signaal weer open, nooit een signaal dat David wegzette. Nooit een bericht aan een waarnemer; geen naam, IBAN of bedrag in een log.
@@ -26,7 +33,9 @@ const crypto = require('crypto');
 const B = require('./facturen-bank');
 
 const PRAKTIJK = { TG: { entiteit: 'tolgaarde', naam: 'Tolgaarde' }, GH: { entiteit: 'groenhouten', naam: 'Groenhouten' } };
-const SOORTEN = ['dienst_zonder_betaling', 'betaling_zonder_dienst', 'roosternaam_zonder_koppeling'];
+const SOORTEN = ['dienst_zonder_betaling', 'betaling_zonder_dienst', 'roosternaam_zonder_koppeling', 'factuur_dagen_afwijkend'];
+const FACTUUR_SOORT = 'factuur_dagen_afwijkend';
+const FACTUUR_MAX = 300;      // hooguit zoveel waarnemersfacturen per ronde (pdftotext per stuk)
 const VAN_JAAR = 2026;        // de controle begint bij 1-1-2026 (ontwerp § 8.1; 2025 is de leesproef)
 const NA_DAGEN = 75;          // (a) betaling verwacht binnen de maand + 75 dagen
 const TERUG_DAGEN = 120;      // (b) dienst in de vier maanden vóór de betaling
@@ -39,9 +48,103 @@ function dagAmsterdam(nu) { return new Date(nu).toLocaleDateString('sv-SE', { ti
 /* Vroegste dag waarvoor de maanden nodig zijn: (b) kijkt 120 dagen terug vanaf 1-1 van het eerste jaar. */
 function maandenVanaf() { return isoPlus(VAN_JAAR + '-01-01', -TERUG_DAGEN).slice(0, 8) + '01'; }
 
+// ───────────────────────────── factuurtoets (f, wv2297) ─────────────────────────────
+const MND = { jan: 1, januari: 1, feb: 2, februari: 2, mrt: 3, mar: 3, maart: 3, apr: 4, april: 4, mei: 5, may: 5, jun: 6, juni: 6, jul: 7, juli: 7,
+  aug: 8, augustus: 8, sep: 9, sept: 9, september: 9, okt: 10, oct: 10, oktober: 10, nov: 11, november: 11, dec: 12, december: 12 };
+const MND_RE = 'januari|februari|maart|april|mei|juni|juli|augustus|september|oktober|november|december|jan|feb|mrt|mar|apr|may|jun|jul|aug|sept|sep|okt|oct|nov|dec';
+// regels die geen werkdag zijn: kopdatums, betaaltekst, reiskosten
+const GEEN_DAGREGEL = /factuurdatum|vervaldatum|uiterlijk|dagtekening|datering|reiskost|kilomet|\bkm\b|betaal|gelieve|kvk|iban|debiteur/i;
+const BEDRAG = /€|(^|[^\d])\d{1,5}[.,]\d{2}(?![\d])/;
+function geldig(y, m, d) {
+  if (!(y >= 2000 && y < 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31)) return null;
+  const x = new Date(Date.UTC(y, m - 1, d));
+  return x.getUTCMonth() === m - 1 ? x.toISOString().slice(0, 10) : null;
+}
+const jaar4 = (y) => (y.length === 2 ? 2000 + Number(y) : Number(y));
 /*
- * controle({ maanden, lijsten, dp, fac, nu }) → { signalen, tel }. Gooit bij ontbrekende invoer (dan schrijft de ronde niets en sluit niets).
+ * dagenUitTekst(tekst, factuurdatum) → { datums: [iso…], maanden: ['YYYY-MM'…] }. Puur. Werkdag = datum op een regel met een bedrag (€ of 12,50)
+ * die geen kop-, betaal- of reiskostenregel is; vormen 22-10-2026, 1/10/26, 22 oktober 2026, 1/nov/26 en (zonder jaar) 5-10, het jaar dan
+ * van de factuurdatum (of het jaar ervoor als de dag anders na de factuurdatum + 31 valt). Alleen dagen van factuurdatum − 400 t/m + 31.
+ * Maand = "oktober 2026" of "in oktober" zonder dag ervoor, op een regel die geen kop/betaalregel is (alleen gebruikt als er geen dagen zijn).
+ */
+function dagenUitTekst(tekst, factuurdatum) {
+  const uit = { datums: [], maanden: [] };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(factuurdatum || ''))) return uit;
+  const fy = Number(factuurdatum.slice(0, 4)), laag = isoPlus(factuurdatum, -400), hoog = isoPlus(factuurdatum, 31);
+  const zonderJaar = (m, d) => { let x = geldig(fy, m, d); if (x && x > hoog) x = geldig(fy - 1, m, d); return x; };
+  const ds = new Set(), ms = new Set();
+  for (const regel of String(tekst || '').split('\n')) {
+    if (!regel.trim() || GEEN_DAGREGEL.test(regel)) continue;
+    const r = regel.toLowerCase();
+    const hier = [];
+    let m;
+    const vol = /(?<![\d:\/.,-])(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4}|\d{2})(?![\d:\/.,-])/g;
+    while ((m = vol.exec(r))) hier.push(geldig(jaar4(m[3]), Number(m[2]), Number(m[1])));
+    const tk = new RegExp('(?<![\\d:\\/.,-])(\\d{1,2})[\\s\\/-]+(' + MND_RE + ')\\.?[\\s\\/-]+(\\d{4}|\\d{2})(?![\\d])', 'g');
+    while ((m = tk.exec(r))) hier.push(geldig(jaar4(m[3]), MND[m[2]], Number(m[1])));
+    if (!hier.length) {
+      const kort = /(?<![\d:\/.,-])(\d{1,2})-(\d{1,2})(?![\d:\/.,-])/g;
+      while ((m = kort.exec(r))) hier.push(zonderJaar(Number(m[2]), Number(m[1])));
+    }
+    const goed = hier.filter((x) => x && x >= laag && x <= hoog);
+    // review MOET 3: het bedrag zoeken in de regel zónder datums (anders telt "01.10" van 01.10.2026 als bedrag)
+    const zonderDatum = r.replace(vol, ' ').replace(tk, ' ').replace(/(?<![\d:\/.,-])\d{1,2}-\d{1,2}(?![\d:\/.,-])/g, ' ');
+    if (goed.length && BEDRAG.test(zonderDatum)) { for (const x of goed) ds.add(x); continue; }
+    if (hier.some(Boolean)) continue;   // een datumregel zonder bedrag (kop, dagtekening) zegt niets over de periode
+    const mm = new RegExp('(?<![\\d]\\s*)\\b(' + MND_RE.split('|').filter((w) => w.length > 3 || w === 'mei').join('|') + ')\\b(?:\\s+(\\d{4}))?', 'g');
+    while ((m = mm.exec(r))) {
+      const mo = MND[m[1]];
+      if (!m[2] && !/waarne|gewerkt|dienst|periode|maand/.test(r)) continue;   // losse maandnaam zonder jaar alleen in een periodezin
+      let y = m[2] ? Number(m[2]) : fy;
+      if (!m[2] && y + '-' + String(mo).padStart(2, '0') > factuurdatum.slice(0, 7)) y--;
+      const k = y + '-' + String(mo).padStart(2, '0');
+      if (k + '-01' >= laag.slice(0, 8) + '01' && k + '-01' <= hoog) ms.add(k);
+    }
+  }
+  uit.datums = [...ds].sort();
+  uit.maanden = [...ms].sort();
+  return uit;
+}
+function maandTerug(m) { return isoPlus(m + '-01', -1).slice(0, 7); }
+/*
+ * factuurOordeel({ pr, obj, factuurdatum }, uit, dagSet, maandDagen) → { oordeel: 'klopt'|'afwijkend'|'onbekend', vorm, … }. Puur.
+ * dagSet: Map pr|obj → Set(iso); maandDagen: Map pr|obj|maand → dagen.
+ */
+function factuurOordeel(k, uit, dagSet, maandDagen) {
+  const sleutel = k.pr + '|' + k.obj;
+  if (uit.datums.length) {
+    const r = dagSet.get(sleutel) || new Set();
+    const mis = uit.datums.filter((d) => !r.has(d));
+    return { oordeel: mis.length ? 'afwijkend' : 'klopt', vorm: 'dagen', aantal: uit.datums.length, mis, maanden: [...new Set(uit.datums.map((d) => d.slice(0, 7)))] };
+  }
+  const fm = k.factuurdatum.slice(0, 7);
+  const vorm = uit.maanden.length ? 'maand' : 'factuurmaand';
+  const maanden = uit.maanden.length ? uit.maanden : [maandTerug(fm), fm];
+  const n = maanden.reduce((s, m) => s + (maandDagen.get(sleutel + '|' + m) || 0), 0);
+  if (!(n > 0)) return { oordeel: 'afwijkend', vorm, maanden, dagen: 0 };
+  return { oordeel: vorm === 'maand' ? 'klopt' : 'onbekend', vorm, maanden, dagen: n };
+}
+/*
+ * factuurKandidaten(fac, dp) → [{ id, entiteit, pr, obj, factuurdatum, nummer, incl, sha256, soort }], hooguit FACTUUR_MAX + 1 (meer dan MAX = de
+ * lijst is afgekapt: controle beoordeelt dan de nieuwste MAX en laat open signalen van de rest staan). Facturen-app (geen archief: dat heeft
+ * geen stuk op de pod), vanaf 2026, echte facturen (niet geen_factuur/dubbel, geen creditnota), IBAN aan een persoon in docplan.sqlite.
+ */
+function factuurKandidaten(fac, dp) {
+  const ibanVan = new Map(dp.prepare('SELECT iban, object_id FROM rekening').all().map((r) => [r.iban, r.object_id]));
+  if (!ibanVan.size) return [];
+  const ibans = [...ibanVan.keys()];
+  return fac.prepare("SELECT f.id, f.entiteit, f.iban, f.factuurdatum, f.nummer, f.incl, d.sha256, d.soort FROM factuur f JOIN document d ON d.id = f.document" +
+    " WHERE f.entiteit IN ('tolgaarde', 'groenhouten') AND f.status NOT IN ('geen_factuur', 'dubbel') AND f.soort = 'factuur' AND f.factuurdatum >= ?" +
+    ' AND f.iban IN (' + ibans.map(() => '?').join(',') + ') ORDER BY f.factuurdatum DESC, f.id LIMIT ' + (FACTUUR_MAX + 1)).all(VAN_JAAR + '-01-01', ...ibans)
+    .map((f) => ({ id: f.id, entiteit: f.entiteit, pr: f.entiteit === 'tolgaarde' ? 'TG' : 'GH', obj: ibanVan.get(f.iban), factuurdatum: f.factuurdatum,
+      nummer: f.nummer || null, incl: f.incl == null ? null : Number(f.incl), sha256: f.sha256, soort: f.soort }));
+}
+
+/*
+ * controle({ maanden, lijsten, dp, fac, nu[, dagen, facturen] }) → { signalen, tel, behoud }. Gooit bij ontbrekende invoer (dan schrijft de ronde niets en sluit niets).
  * maanden: [{pr, obj, maand, dagen}]; lijsten: [{jaar, praktijken:[{code, namen:[{naam, dagen, status}]}]}].
+ * dagen (f): [{pr, obj, datum, dagen}] uit sb_dienst_dagen, of null (RPC ontbreekt: dan geen factuurtoets en blijven open f-signalen staan).
+ * facturen (f): factuurKandidaten() met tekst (string; '' = geen tekstlaag) of tekst null (pdftotext mislukt: dan blijft een open signaal staan).
  */
 function controle(o) {
   if (!Array.isArray(o.maanden) || !o.maanden.length) throw new Error('geen roostermaanden');
@@ -78,7 +181,9 @@ function controle(o) {
     }
   }
   const signalen = [];
-  const tel = { TG: { a: 0, b: 0, c: 0, beoordeeld: 0 }, GH: { a: 0, b: 0, c: 0, beoordeeld: 0 } };
+  const tel = { TG: { a: 0, b: 0, c: 0, beoordeeld: 0, f_klopt: 0, f_afwijkend: 0, f_onbekend: 0, f_overgeslagen: 0 },
+    GH: { a: 0, b: 0, c: 0, beoordeeld: 0, f_klopt: 0, f_afwijkend: 0, f_onbekend: 0, f_overgeslagen: 0 } };
+  const behoud = [];   // sleutels van f-signalen die deze ronde niet beoordeeld konden worden: niet sluiten
   // (a) dienst zonder betaling of factuur
   for (const [k, n] of dagen) {
     const [pr, obj, m] = k.split('|');
@@ -126,7 +231,37 @@ function controle(o) {
       }
     }
   }
-  return { signalen, tel, vandaag };
+  // (f) factuurtoets: werkdagen op een waarnemersfactuur ↔ rooster van die persoon bij die praktijk
+  // review MOET 1/2: f-signalen sluiten alleen als de toets echt draaide (dagen én facturenlijst aanwezig) en de factuur beoordeeld is of
+  // de lijst compleet was; anders blijven open f-signalen staan (schrijf kijkt naar f.klaar, f.afgekapt en f.beoordeeld)
+  const fAlle = Array.isArray(o.facturen) ? o.facturen : [];
+  const fl = fAlle.slice(0, FACTUUR_MAX);
+  const f = { klaar: Array.isArray(o.dagen) && Array.isArray(o.facturen), afgekapt: fAlle.length > FACTUUR_MAX, beoordeeld: [] };
+  if (!Array.isArray(o.dagen)) {
+    for (const k of fl) { behoud.push(FACTUUR_SOORT + ':' + k.id); if (tel[k.pr]) tel[k.pr].f_overgeslagen++; }
+  } else {
+    const dagSet = new Map();
+    for (const r of o.dagen) {
+      if (!PRAKTIJK[r.pr] || !(Number(r.dagen) > 0)) continue;
+      const k = r.pr + '|' + r.obj;
+      if (!dagSet.has(k)) dagSet.set(k, new Set());
+      dagSet.get(k).add(String(r.datum).slice(0, 10));
+    }
+    for (const k of fl) {
+      if (!PRAKTIJK[k.pr]) continue;
+      if (k.tekst == null) { behoud.push(FACTUUR_SOORT + ':' + k.id); tel[k.pr].f_overgeslagen++; continue; }
+      f.beoordeeld.push(k.id);
+      const uit = dagenUitTekst(k.tekst, k.factuurdatum);
+      const u = factuurOordeel(k, uit, dagSet, dagen);
+      tel[k.pr]['f_' + u.oordeel]++;
+      if (u.oordeel !== 'afwijkend') continue;
+      signalen.push(B.maakSignaal(FACTUUR_SOORT, { entiteit: k.entiteit, naam: naam.get(k.obj) || 'onbekende persoon', alleen_eigenaar: true,
+        facturen: [k.id], bedrag_centen: k.incl, sleutel_vast: k.id,
+        details: { regel: 'f', persoon: k.obj, praktijk: k.pr, praktijk_naam: PRAKTIJK[k.pr].naam, factuurdatum: k.factuurdatum, nummer: k.nummer ? String(k.nummer).slice(0, 60) : null,
+          vorm: u.vorm, aantal: u.aantal || 0, mis: (u.mis || []).slice(0, 31), maanden: u.maanden, dagen_rooster: u.dagen == null ? null : u.dagen } }));
+    }
+  }
+  return { signalen, tel, vandaag, behoud, f };
 }
 
 /*
@@ -135,7 +270,9 @@ function controle(o) {
 function schrijf(fdb, D, u, wanneer) {
   return D.transactie(fdb, () => {
     const t = { nieuw: 0, vanzelf_dicht: 0, heropend: 0, open: 0 };
-    const nu = new Set(u.signalen.map((s) => s.sleutel));
+    const nu = new Set(u.signalen.map((s) => s.sleutel).concat(u.behoud || []));
+    // (f) een open factuursignaal krijgt de nieuwe uitkomst (welke dagen ontbreken kan veranderen als het rooster verandert)
+    const bij = fdb.db.prepare("UPDATE signaal SET details = ? WHERE sleutel = ? AND status = 'open' AND soort = '" + FACTUUR_SOORT + "' AND details IS NOT ?");
     const ins = fdb.db.prepare('INSERT INTO signaal (id, sleutel, soort, titel, entiteit, leverancier, transacties, facturen, bedrag_centen, details, alleen_eigenaar, aangemaakt_op) ' +
       'VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 1, ?) ON CONFLICT (sleutel) DO NOTHING');
     const heropen = fdb.db.prepare("UPDATE signaal SET status = 'open', afhandeling = NULL, les = NULL, wie = NULL, wanneer = NULL, details = ? " +
@@ -145,6 +282,7 @@ function schrijf(fdb, D, u, wanneer) {
       const n = ins.run(D.nieuwId(), s.sleutel, s.soort, s.titel, s.entiteit, JSON.stringify(s.transacties || []), JSON.stringify(s.facturen || []),
         s.bedrag_centen == null ? null : s.bedrag_centen, details, wanneer).changes;
       if (n) { t.nieuw += n; continue; }
+      if (s.soort === FACTUUR_SOORT && bij.run(details, s.sleutel, details).changes) { t.bijgewerkt = (t.bijgewerkt || 0) + 1; continue; }
       const h = heropen.run(details, s.sleutel).changes;
       if (h) {
         t.heropend += h;
@@ -154,8 +292,11 @@ function schrijf(fdb, D, u, wanneer) {
       }
     }
     const dicht = fdb.db.prepare("UPDATE signaal SET status = 'afgehandeld', afhandeling = 'vanzelf_opgelost', wie = ?, wanneer = ?, sluimer_tot = NULL WHERE id = ? AND status = 'open'");
+    const fu = u.f || { klaar: false };
     for (const s of fdb.db.prepare("SELECT id, sleutel, soort, entiteit FROM signaal WHERE status = 'open' AND soort IN (" + SOORTEN.map(() => '?').join(',') + ')').all(...SOORTEN)) {
       if (nu.has(s.sleutel)) { t.open++; continue; }
+      // review MOET 1/2: een f-signaal alleen sluiten na een echte toets van die factuur (of als hij niet meer in een complete lijst staat)
+      if (s.soort === FACTUUR_SOORT && (!fu.klaar || (fu.afgekapt && !fu.beoordeeld.includes(s.sleutel.slice(FACTUUR_SOORT.length + 1))))) { t.open++; continue; }
       if (!dicht.run(WIE, wanneer, s.id).changes) continue;
       t.vanzelf_dicht++;
       D.audit(fdb, { wie: WIE, wat: 'signaal_vanzelf_opgelost', object_soort: 'signaal', object_id: s.id, entiteit: s.entiteit, voor: { status: 'open' },
@@ -168,4 +309,4 @@ function schrijf(fdb, D, u, wanneer) {
 /* jaren(nu) → de jaren waarvoor (c) de roosternamenlijst vraagt: 2026 t/m dit jaar. */
 function jaren(nu) { const j = []; for (let x = VAN_JAAR; x <= Number(dagAmsterdam(nu).slice(0, 4)); x++) j.push(x); return j; }
 
-module.exports = { controle, schrijf, jaren, maandenVanaf, SOORTEN, VAN_JAAR, NA_DAGEN, TERUG_DAGEN };
+module.exports = { controle, schrijf, jaren, maandenVanaf, factuurKandidaten, dagenUitTekst, factuurOordeel, SOORTEN, FACTUUR_SOORT, VAN_JAAR, NA_DAGEN, TERUG_DAGEN };
