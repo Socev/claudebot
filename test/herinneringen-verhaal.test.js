@@ -557,7 +557,7 @@ test('wv2180 ghostwriter-verhaal met Davids aanvulling en correctie: gaat mee al
     assert.match(t, /^titel: "Zomervakantie 1995 - Proefdorpen"$/m, 'titel volgens de naamgeving, met correctie');
     assert.ok(t.split('\n').indexOf('verhaal_versie: herinneringen-verhaal-2') >= 0);
     const vr = o.ing._db.prepare('SELECT * FROM ramble_verhaal WHERE ramble_id = ?').get(ID1);
-    assert.strictEqual(vr.versie, 2); assert.match(vr.stukken_hash, /^[0-9a-f]{16}:[0-9a-f]{16}$/);
+    assert.strictEqual(vr.versie, 3); assert.match(vr.stukken_hash, /^[0-9a-f]{16}:[0-9a-f]{16}$/);
     assert.ok(!JSON.stringify(vr).includes('Gerrit'), 'geen tekst in intake.sqlite');
     // samengesteld: correctie ook bij weergave (een nieuwe correctie zonder herbouw)
     const s = o.v.samengesteld(ID1, V.correctiesUit(['Teun is Teunis']));
@@ -652,5 +652,43 @@ test('wv2180 review MOET 1: een alinea buiten het venster van zijn herinnering, 
     assert.strictEqual(u.verhalen || 0, 0); assert.strictEqual(u.niet_gelukt, 2);
     const sp = o.v._reg.prepare("SELECT soort FROM spoor WHERE soort LIKE 'toets_%' ORDER BY soort").all().map((x) => x.soort);
     assert.deepStrictEqual(sp, ['toets_alinea_venster_ongeldig', 'toets_naam_niet_gezegd'], 'Teun staat pas in de tweede minuut');
+  } finally { o.sluit(); }
+});
+
+test('wv2321: het woord dat de feitentoets niet terugvond staat alleen in register.sqlite en in de app-log; stand 2 met een mislukking wordt één keer opnieuw gemaakt', async () => {
+  const o = await omgeving();
+  try {
+    o.staat.ds = { [ID1]: [], [ID2]: [] };
+    await o.opname(ID1, TEKST);
+    await o.opname(ID2, TEKST);
+    const a = goed(); a.herinneringen[0].alineas[1].tekst = 'We speelden kaartspelletjes in de voortent met Keesje, tot iedereen een keer gewonnen had.';
+    o.staat.antwoord = (p) => (p.messages[0].content[0].text.indexOf('Proefdorp') >= 0 ? a : goed());
+    let u = await o.v.tik();
+    assert.strictEqual(u.niet_gelukt, 2, JSON.stringify(u));
+    const rij = o.v._reg.prepare('SELECT * FROM toets_woord ORDER BY ramble_id').all();
+    assert.strictEqual(rij.length, 2); assert.strictEqual(rij[0].woord, 'Keesje'); assert.strictEqual(rij[0].reden, 'naam_niet_gezegd');
+    // nergens anders: pagina, spoor, intake.sqlite, /health
+    for (const n of o.verhalen()) assert.ok(!/Keesje/.test(o.lees(n)), 'geen modeltekst op de pagina');
+    assert.ok(!JSON.stringify(o.v._reg.prepare('SELECT * FROM spoor').all()).includes('Keesje'));
+    assert.ok(!JSON.stringify(o.ing._db.prepare('SELECT * FROM ramble_verhaal').all()).includes('Keesje'));
+    assert.ok(!JSON.stringify(o.v.info()).includes('Keesje'));
+    const s = o.v.samengesteld(ID1, []);
+    assert.strictEqual(s.niet_gelukt.length, 1); assert.strictEqual(s.niet_gelukt[0].woord, 'Keesje'); assert.match(s.niet_gelukt[0].uitleg, /naam in die je niet zei/);
+    assert.strictEqual(o.ing._db.prepare('SELECT versie FROM ramble_verhaal WHERE ramble_id = ?').get(ID1).versie, 3);
+    // een mislukking van vóór wv2321 (stand 2, geen woord) krijgt één nieuwe kans; daarna niet nog eens
+    o.ing._db.prepare('UPDATE ramble_verhaal SET versie = 2').run();
+    o.v._reg.prepare('DELETE FROM toets_woord').run();
+    o.ing._db.prepare("UPDATE ramble_verhaal SET status = 'klaar', mislukt = 0, gelukt = 1 WHERE ramble_id = ?").run(ID2);   // geslaagd op stand 2: blijft
+    o.klok.t += 11 * 60000;
+    o.staat.antwoord = goed();
+    const voor = o.staat.verzoeken.length;
+    u = await o.v.tik();
+    assert.strictEqual(u.herbouw, 1, JSON.stringify(u)); assert.strictEqual(o.staat.verzoeken.length, voor + 1, 'alleen de mislukte opname opnieuw');
+    assert.strictEqual(o.ing._db.prepare('SELECT status FROM ramble_verhaal WHERE ramble_id = ?').get(ID1).status, 'klaar');
+    assert.strictEqual(o.v._reg.prepare('SELECT count(*) n FROM toets_woord').get().n, 0, 'geslaagd = woord weg');
+    assert.ok(o.v._reg.prepare("SELECT count(*) n FROM spoor WHERE soort = 'herbouw_woord'").get().n === 1);
+    o.klok.t += 11 * 60000;
+    u = await o.v.tik();
+    assert.ok(!u.herbouw, 'geen tweede herbouw'); assert.strictEqual(o.staat.verzoeken.length, voor + 1);
   } finally { o.sluit(); }
 });

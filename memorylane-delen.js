@@ -800,7 +800,7 @@ function maak(o) {
     const c = cs(h, pagina);
     uit.verhaal = { tekst: verhaalVan(h, pagina, s), stand: h.soort === 'opname' ? (s ? s.stand : null) : null,
       delen: s ? s.delen.map((d) => ({ titel: d.titel, eigen: d.eigen, alineas: d.alineas.map((a) => ({ tekst: a.tekst, t_van: a.t_van, t_tot: a.t_tot })) })) : [] };
-    uit.log = { opname: h.soort === 'opname' ? opnameTekst(h) : null, niet_gelukt: s ? s.niet_gelukt.map((m) => ({ uitleg: m.uitleg, t_van: m.t_van, t_tot: m.t_tot })) : [],
+    uit.log = { opname: h.soort === 'opname' ? opnameTekst(h) : null, niet_gelukt: s ? s.niet_gelukt.map((m) => ({ uitleg: m.uitleg, woord: m.woord || null, t_van: m.t_van, t_tot: m.t_tot })) : [],
       correcties: c.map((x) => ({ van: x.van, naar: x.naar })), stukken };
     if (h.soort === 'opname') { uit.opname = uit.log.opname; const r = q.ramble.get(h.ref); uit.ramble_id = h.ref; uit.notitie = r ? r.notitie : null; }
     if (h.soort === 'reis') uit.pagina = h.ref;

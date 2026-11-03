@@ -60,7 +60,9 @@ const path = require('path');
 const crypto = require('crypto');
 
 const VERSIE = 'herinneringen-verhaal-2';
-const VERSIE_NR = 2;
+// wv2321: standnummer 3 = versie 2 plus het woord dat de feitentoets niet terugvond (register.sqlite, tabel toets_woord). Een opname op
+// stand 2 met een mislukte herinnering wordt één keer opnieuw gemaakt; een geslaagde opname op stand 2 blijft staan.
+const VERSIE_NR = 3;
 const API = 'https://api.anthropic.com';
 const BETA_FALLBACK = 'server-side-fallback-2026-07-01';
 const MODEL = 'claude-sonnet-5-5';
@@ -93,6 +95,7 @@ CREATE TABLE IF NOT EXISTS herinnering (herinnering_id TEXT PRIMARY KEY, ramble_
 CREATE TABLE IF NOT EXISTS voorstel (id TEXT PRIMARY KEY, soort TEXT NOT NULL, herinnering_id TEXT NOT NULL, doel TEXT NOT NULL, naam TEXT,
   reden TEXT, status TEXT NOT NULL DEFAULT 'open', op TEXT NOT NULL, besluit_op TEXT);
 CREATE TABLE IF NOT EXISTS spoor (id INTEGER PRIMARY KEY, tijd TEXT NOT NULL, ramble_id TEXT, herinnering_id TEXT, soort TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS toets_woord (herinnering_id TEXT PRIMARY KEY, ramble_id TEXT NOT NULL, reden TEXT NOT NULL, woord TEXT NOT NULL, op TEXT NOT NULL);
 `;
 
 // wv2180: versie van het verhaal en hash van Davids stukken waarmee het gemaakt is (alleen hash, geen tekst)
@@ -283,10 +286,10 @@ function toetsFeiten(tekst, v, o) {
       const voor = t.slice(0, m.index).replace(/[\s"“”‘’'«»(\[*_]+$/u, '');
       const begin = !voor || /[.!?:…—–-]$/.test(voor);
       const stam = begin && n.length >= 4 && Array.from(v.w).some((x) => x.length > n.length && x.indexOf(n) === 0);
-      if (!goed(n) && !delen.every(goed) && !(begin && (ZINSBEGIN.has(n) || STOP.has(n) || stam))) return 'naam_niet_gezegd';
+      if (!goed(n) && !delen.every(goed) && !(begin && (ZINSBEGIN.has(n) || STOP.has(n) || stam))) { o.treffer = w; return 'naam_niet_gezegd'; }
     }
-    if (DATUMWOORD.has(n) && !v.w.has(n)) return 'datum_niet_gezegd';
-    for (const g of getallenVan(w, false)) if (!v.g.has(g) && !(o.extraGetal && o.extraGetal.has(g))) return 'getal_niet_gezegd';
+    if (DATUMWOORD.has(n) && !v.w.has(n)) { o.treffer = w; return 'datum_niet_gezegd'; }
+    for (const g of getallenVan(w, false)) if (!v.g.has(g) && !(o.extraGetal && o.extraGetal.has(g))) { o.treffer = w; return 'getal_niet_gezegd'; }
   }
   return null;
 }
@@ -548,6 +551,12 @@ function maak(o) {
   };
   const rq = {
     spoor: reg.prepare('INSERT INTO spoor (tijd, ramble_id, herinnering_id, soort) VALUES (?, ?, ?, ?)'),
+    // wv2321: het woord dat de feitentoets niet terugvond, alleen voor de log in de app (zelfde plek als titels en plaatsen: register.sqlite;
+    // niet op de pagina, want daar staat geen modeltekst; nooit in spoor, logs, box, /health of intake.sqlite). intake-verwijder.js ruimt hem op.
+    woordZet: reg.prepare('INSERT INTO toets_woord (herinnering_id, ramble_id, reden, woord, op) VALUES (?, ?, ?, ?, ?) ON CONFLICT (herinnering_id) DO UPDATE SET ' +
+      'ramble_id = excluded.ramble_id, reden = excluded.reden, woord = excluded.woord, op = excluded.op'),
+    woordWeg: reg.prepare('DELETE FROM toets_woord WHERE herinnering_id = ?'),
+    woord: reg.prepare('SELECT woord, reden FROM toets_woord WHERE herinnering_id = ?'),
     voorstelZet: reg.prepare("INSERT OR IGNORE INTO voorstel (id, soort, herinnering_id, doel, naam, reden, status, op) VALUES (?, ?, ?, ?, ?, ?, 'open', ?)"),
     voorstel: reg.prepare('SELECT * FROM voorstel WHERE id = ?'),
     open: reg.prepare("SELECT * FROM voorstel WHERE status = 'open' ORDER BY op, id"),
@@ -680,7 +689,7 @@ function maak(o) {
   const TITELWOORD = new Set(['zomervakantie', 'citytrip', 'weekendje', 'david']);   // vaste naamgeving + de verteller
   function toetsHerinnering(x, segs, duur, opname, geboren, ds) {
     const tv = Number.isInteger(x && x.t_van) ? x.t_van : null, tt = Number.isInteger(x && x.t_tot) ? x.t_tot : null;
-    const fout_ = (reden) => ({ ok: false, reden, t_van: tv != null ? Math.max(0, tv) : 0, t_tot: tt != null ? Math.min(Math.ceil(duur), tt) : Math.ceil(duur) });
+    const fout_ = (reden, woord) => ({ ok: false, reden, woord: woord ? schoon(woord, 60) : '', t_van: tv != null ? Math.max(0, tv) : 0, t_tot: tt != null ? Math.min(Math.ceil(duur), tt) : Math.ceil(duur) });
     if (!isObj(x) || tv == null || tt == null || tv < 0 || tt <= tv || tv > duur + 1) return fout_('venster_ongeldig');
     const alineas = Array.isArray(x.alineas) ? x.alineas : [];
     if (!alineas.length || alineas.length > 60) return fout_('geen_alineas');
@@ -698,8 +707,9 @@ function maak(o) {
     for (const a of alineas) {
       const tekst = pasCorrectiesToe(schoonModel(a.tekst, 4000), cs);
       if (woorden(tekst).length < 3) return fout_('alinea_te_kort');
-      const r = toetsFeiten(tekst, hv);
-      if (r) return fout_(r);
+      const fo = {};
+      const r = toetsFeiten(tekst, hv, fo);
+      if (r) return fout_(r, fo.treffer);   // wv2321: het woord gaat alleen naar register.sqlite (toets_woord) en de app-log, nooit naar spoor/log/box
       goed.push({ tekst, t_van: a.t_van, t_tot: Math.min(a.t_tot, Math.ceil(duur)) });
     }
     const g = toetsGeheel(goed.map((a) => a.tekst), Object.assign({}, hv, { n: lengteSet.n }));
@@ -886,7 +896,7 @@ function maak(o) {
       const hid = hidVan(r.ramble_id, i);
       const t = toetsHerinnering(x, segs, duur, opname, geboren, ds);
       if (t.ok) { gelukt++; paginas.push({ hid, h: t.h, mislukt: false }); }
-      else { mislukt++; spoor(r.ramble_id, hid, 'toets_' + t.reden); paginas.push({ hid, h: { t_van: t.t_van, t_tot: t.t_tot, reden: t.reden, uitleg: UITLEG[t.reden] || 'de server kon het verhaal niet toetsen' }, mislukt: true }); }
+      else { mislukt++; spoor(r.ramble_id, hid, 'toets_' + t.reden); paginas.push({ hid, h: { t_van: t.t_van, t_tot: t.t_tot, reden: t.reden, woord: t.woord, uitleg: UITLEG[t.reden] || 'de server kon het verhaal niet toetsen' }, mislukt: true }); }
     });
     if (grendel()) { uit.wacht = 'grendel'; return 'stop'; }   // het antwoord gaat verloren; de volgende tik vraagt opnieuw (zeldzaam: de grendel kwam tijdens de aanroep)
     const vers = q.rij.get(r.ramble_id);
@@ -903,12 +913,13 @@ function maak(o) {
       if (z === 'nieuw' || z === 'herschreven') uit.paginas = (uit.paginas || 0) + 1;
       if (z === 'eigen') uit.eigen = (uit.eigen || 0) + 1;
       if (!p.mislukt && z !== 'eigen') uit.voorstellen = (uit.voorstellen || 0) + voorstellenVoor(p.hid, p.h, rel);
+      try { if (p.mislukt && p.h.woord) rq.woordZet.run(p.hid, r.ramble_id, p.h.reden, p.h.woord, iso(nu())); else rq.woordWeg.run(p.hid); } catch (e) { fout('verhaal-woord', e); }
     }
     // overbodige codepagina's van een vorige indeling (meer herinneringen dan nu)
     for (let i = lijst.length; i < MAX_HERINNERINGEN; i++) {
       const rel = path.join(VERHAAL_MAP, hidVan(r.ramble_id, i) + '.md');
       if (!fs.existsSync(abs(rel))) continue;
-      try { if (vervang(rel)) uit.vervangen = (uit.vervangen || 0) + 1; } catch (e) { fout('verhaal-vervang', e); }
+      try { if (vervang(rel)) uit.vervangen = (uit.vervangen || 0) + 1; rq.woordWeg.run(hidVan(r.ramble_id, i)); } catch (e) { fout('verhaal-vervang', e); }
     }
     zet(lijst.length === 0 ? 'geen' : gelukt ? 'klaar' : 'niet_gelukt', { herinneringen: lijst.length, gelukt, mislukt, pogingen: v.pogingen + 1, poging_op: iso(nu()) });
     klaarMet();
@@ -926,7 +937,10 @@ function maak(o) {
       const deel = (x, i) => (x ? x.split(':')[i] || '' : '');
       const misluktDeel = v.status === 'niet_gelukt' || v.status === 'fout' || (v.mislukt || 0) > 0;
       const anders = nu_ !== null && (deel(nu_, 0) !== deel(was, 0) || (misluktDeel && deel(nu_, 1) !== deel(was, 1)));
-      const oud = (v.versie || 1) < VERSIE_NR;
+      const oud = (v.versie || 1) < 2;
+      // wv2321: stand 2 met een mislukte herinnering: één keer opnieuw, zodat de pagina het niet teruggevonden woord krijgt
+      const zonderWoord = !oud && (v.versie || 1) < VERSIE_NR && (v.status === 'niet_gelukt' || (v.status === 'klaar' && (v.mislukt || 0) > 0));
+      if (zonderWoord) { q.herbouwZet.run(v.ramble_id); spoor(v.ramble_id, null, 'herbouw_woord'); uit.herbouw = (uit.herbouw || 0) + 1; continue; }
       if (v.status === 'geen' && v.reden === 'geen_tekst' && !(anders && ds.some((s) => s.soort === 'aanvulling'))) continue;
       if (v.status === 'fout' && !anders && !oud) continue;   // review MOET 4: ook een fout uit versie 1 krijgt één nieuwe kans
       if (oud || anders) { q.herbouwZet.run(v.ramble_id); spoor(v.ramble_id, null, oud ? 'herbouw_versie' : 'herbouw_stukken'); uit.herbouw = (uit.herbouw || 0) + 1; }
@@ -1096,7 +1110,7 @@ function maak(o) {
    * wv2180: het samengestelde verhaal van één opname voor MemoryLane (app en deellink): alle verhaalpagina's van de opname behalve
    * vervangen, op tijd, met Davids correcties letterlijk toegepast (cs; ook op een pagina die hij zelf aanpaste). Geen transcript.
    * → { stand, versie, delen: [{ herinnering_id, titel, status, eigen, datum, datum_precisie, datum_van, datum_tot, alineas: [{ tekst, t_van, t_tot }] }],
-   *     niet_gelukt: [{ herinnering_id, uitleg, t_van, t_tot }] }
+   *     niet_gelukt: [{ herinnering_id, uitleg, woord, t_van, t_tot }] }   (woord: wv2321, wat de feitentoets niet terugvond; alleen app-log)
    */
   // wv2306: titel van een voorvalpagina (frontmatter titel), anders de bestandsnaam
   function voorvalTitel(link) {
@@ -1116,7 +1130,8 @@ function maak(o) {
       if (st === 'vervangen') continue;
       if (st === 'niet_gelukt') {
         const m = /kon geen verhaal gemaakt worden: ([^\n]*?)\. De letterlijke/.exec(p.tekst);
-        mis.push({ herinnering_id: hid, uitleg: m ? m[1] : 'de server kon het verhaal niet toetsen', t_van: Number(f('t_van')) || 0, t_tot: Number(f('t_tot')) || 0 });
+        const tw = rq.woord.get(hid);
+        mis.push({ herinnering_id: hid, uitleg: m ? m[1] : 'de server kon het verhaal niet toetsen', woord: tw ? String(tw.woord).slice(0, 60) : '', t_van: Number(f('t_van')) || 0, t_tot: Number(f('t_tot')) || 0 });
         continue;
       }
       const m = BLOK_BEGIN_RE.exec(p.tekst);

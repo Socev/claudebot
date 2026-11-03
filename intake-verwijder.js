@@ -221,7 +221,8 @@ function maak(o) {
     finally { r.close(); }
   }
   const REG_WAAR = { herinnering: (h, rr) => 'herinnering_id IN (' + h + ') OR ramble_id IN (' + rr + ')', voorstel: (h) => 'herinnering_id IN (' + h + ')',
-    spoor: (h, rr) => 'herinnering_id IN (' + h + ') OR ramble_id IN (' + rr + ')' };
+    spoor: (h, rr) => 'herinnering_id IN (' + h + ') OR ramble_id IN (' + rr + ')',
+    toets_woord: (h, rr) => 'herinnering_id IN (' + h + ') OR ramble_id IN (' + rr + ')' };   // wv2321
   const regArgs = (t, hids, rids) => t === 'voorstel' ? hids : hids.concat(rids);
   function registerTel(rids, hids) {
     if (!rids.length) return 0;
