@@ -6485,6 +6485,10 @@ const APP_GEVOELIG = [
   ['verwijderen', /verwijder|\bwis(sen)?\b|schrap|\bweg\b|weghal|weggooi|annule|\bzeg\b[^.?!]*\b(af|op)\b|afzeg|opzeg|intrek|trek\b[^.?!]*\bin\b|archive|leeg|opruim|ruim\b[^.?!]*\bop\b|opschon|schoon\b[^.?!]*\bop\b|vernietig|\bstop|beeindig|overschrijf|overschrijv|vervang|afsluit|sluit\b[^.?!]*\baf\b|uitzet|zet\b[^.?!]*\buit\b|reset|herstart|formatte|dichtzet|zet\b[^.?!]*\bdicht\b|ontkoppel|uittrek|inkort|\bkort\b[^.?!]*\bin\b/],
   ['agenda', /agenda|afspra|inplan|plan\b[^.?!]*\bin\b|verzet|verplaats|reserve|\bboek|verschuif|schuif\b[^.?!]*\bop\b/],
   ['geld', /betaal|betalen|overmaak|overmaken|maak\b[^.?!]*\bover\b|bestel|\bkoop|kopen|aanschaf|factur|declar|incass|\bgeld\b|€|euro|bedrag|voldoe|abonnement|contract/],
+  // wv2347: een Ja die de grondregels wijzigt (grondwet, bevoegdheden, privacy- of patiëntregels) vraagt altijd een vingerafdruk, ook als de
+  // vraag geen woord over versturen/verwijderen/agenda/geld bevat (3-11: Ja op "Grondwet 3 — mag Intake een vermoeden van patiëntgegevens
+  // zonder vraag doorlaten?" kwam zonder). Als laatste, zodat de reden van bestaande vragen niet verandert. Tweede slot: herkomst.grondwet.
+  ['grondwet', /grondwet|grondregel|\bbevoegdhe(id|den)\b|patientgegeven|patientdata|persoonsgegeven|privacyregel|privacyfilter|privacycontrole|privacygrens|patientpoort|patientcontrole/],
 ];
 function appGevoelig(tekst) {
   const t = String(tekst || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -10357,6 +10361,8 @@ function appVjKnopStand(p, rv, afgeleid) {
   if (gev === null && /^herinnering-[0-9a-f]{10}$/.test(String(p.sleutel || '')) && typeof herinneringen !== 'undefined' && herinneringen) gev = 'versturen';
   // wv2316: de vrijgavekaart van het boekstuk Google Home is altijd gevoelig (versturen aan een derde), welke woorden er ook staan
   if (gev === null && /^boekstuk-vrijgave-\d{1,9}$/.test(String(p.sleutel || ''))) gev = 'versturen';
+  // wv2347: een kaart die de grondregels raakt (vlag van werkvoorraad.py --voor-jou, via mk_voor_jou_van_wv in herkomst) is altijd gevoelig
+  if (gev === null && p.herkomst && typeof p.herkomst === 'object' && p.herkomst.grondwet === true) gev = 'grondwet';
   // gekoppeld en bruikbaar: de druk loopt via die vraag (ook de knoppen onder het oorspronkelijke bericht tonen dan beantwoord)
   const gekBruik = !!(gekRij && !appNaarTelegramNu(gekRij) && Date.now() - Date.parse(gekRij.t || 0) <= APP_VRAAG_GELDIG_MS);
   // wv1018 (Fable diffreview #2): appKnop eist een vingerafdruk zodra de chatvraag gevoelig is (rij zonder gevoelig: false); zeg het de app vooraf
@@ -13953,7 +13959,7 @@ function berichtBronJob(zin, nu, lijst) {
 // bron_job). Dezelfde vraag, strenger dan wv1018 omdat tijd en 1-op-1 hier niet meetellen (Opus-diffreview wv1820 MOET 1: "mag ik de
 // oude versie wissen?" van dezelfde klus mag niet onder een Ja op "mag ik de nachtsync repareren?" verdwijnen): de vraag deelt ten
 // minste twee inhoudswoorden met de kaarttitel, ten minste de helft van zijn woorden met titel + waarom, en heeft dezelfde
-// gevoeligheidssoort (appGevoelig: versturen/verwijderen/agenda/geld of geen) als de titel. Alleen een kaart die nog open of later
+// gevoeligheidssoort (appGevoelig: versturen/verwijderen/agenda/geld/grondwet of geen) als de titel. Alleen een kaart die nog open of later
 // is, die David beantwoordde of die hij dichtzette (review ZOU 2: een door een agent of de ronde ingetrokken kaart neemt niets over).
 // Anders dan wv1018 telt de tijd niet: een in de stille uren vastgehouden rapport komt na de kaart, soms na Davids antwoord, binnen
 // (28-10: kaart Ja 06:25, rapport 07:02 bezorgd met knoppen). Een doe-kaart neemt nooit een vraag over (Fable wv926 #6). Puur: getoetst in 23.

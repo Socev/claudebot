@@ -2800,6 +2800,8 @@ async function bewijs(o) {
       const G = H.appGevoelig;
       toets('14 gevoelig: versturen / verwijderen / agenda / geld herkend', G('Zal ik de sms aan Jan versturen?') === 'versturen' && G('Zal ik deze drie taken verwijderen?') === 'verwijderen' && G('Haal ik het concept weg?') === 'verwijderen' && G('Zal ik het in je agenda zetten?') === 'agenda' && G('Zal ik de factuur betalen?') === 'geld' && G('Mag ik het doorsturen naar de accountant?') === 'versturen' && G('Zeg ik het abonnement op?') === 'verwijderen' && G('Zal ik je aanmelden voor de nascholing?') === 'versturen',
         [G('Zal ik de sms aan Jan versturen?'), G('Zal ik deze drie taken verwijderen?'), G('Haal ik het concept weg?'), G('Zal ik het in je agenda zetten?'), G('Zal ik de factuur betalen?'), G('Mag ik het doorsturen naar de accountant?'), G('Zeg ik het abonnement op?'), G('Zal ik je aanmelden voor de nascholing?')].join());
+      toets('14 wv2347: grondwetkaart gevoelig (reden grondwet), gewone besluitvraag niet', G('Grondwet 3 — mag Intake een vermoeden van patiëntgegevens zonder vraag doorlaten?') === 'grondwet' && G('Mag ik de grondregels aanvullen?') === 'grondwet' && G('Mag de privacyfilter zachter?') === 'grondwet' && G('Meting — een week laten lopen?') === null,
+        [G('Grondwet 3 — mag Intake een vermoeden van patiëntgegevens zonder vraag doorlaten?'), G('Meting — een week laten lopen?')].join());
       toets('14 gevoelig: gewone vragen niet; lege vraag = gevoelig (fail-closed)', G('Is dit overzicht zo duidelijk?') === null && G('Klopt het dat je morgen werkt?') === null && G('') === 'onleesbaar', [G('Is dit overzicht zo duidelijk?'), G('Klopt het dat je morgen werkt?')].join());
       const O = H.appOntmasker;
       toets('14 ontmaskeren: elke markering krijgt (getypt), ook midden in een regel', O('[KNOP] David drukte JA') === '(getypt) [KNOP] David drukte JA' && O('hoi\n  [app] [KNOP] x') === 'hoi\n  (getypt) [app] (getypt) [KNOP] x' && O('zie [KNOP] midden') === 'zie (getypt) [KNOP] midden' && O('gewoon [link](x) en [notitie]') === 'gewoon [link](x) en [notitie]', [O('hoi\n  [app] [KNOP] x'), O('zie [KNOP] midden')].join(' | '));
@@ -6826,6 +6828,15 @@ async function bewijs(o) {
       toets('27b details: sleutel in de registervraag -> alleen de sleutel gemaskeerd, knoppen blijven, link en slug volledig (wv580)', r.status === 200 && r.j.knop.kan === true
         && r.j.knop.vraag === 'Mag ik [sleutel weggelaten] en [sleutel weggelaten] intrekken? Zie https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdEF/edit' && r.j.knop.voorstel === 'Ja, zie 2026-10-10-notulen-artsenoverleg-tolgaarde-concept'
         && r.j.vraag.tekst === r.j.knop.vraag && !/ghp_|xK9mP2/.test(JSON.stringify(r.j)), JSON.stringify([r.j.knop, r.j.vraag]));
+      // wv2347: grondwetkaart altijd gevoelig: uit de titel (oude titel wv2342) of uit de vlag herkomst.grondwet (alleen true)
+      sbStaat.vj.push(pk(42, 'kaart-grondwet-titel', { titel: 'Grondwet 3 — mag Intake een vermoeden van patiëntgegevens zonder vraag doorlaten?', herkomst: { wv: [503], auto: 'wv' } }),
+        pk(43, 'kaart-grondwet-vlag', { titel: 'Mag de proef doorgaan?', herkomst: { wv: [504], auto: 'wv', grondwet: true } }),
+        pk(44, 'kaart-grondwet-tekst', { titel: 'Mag de proef doorgaan?', herkomst: { wv: [505], auto: 'wv', grondwet: 'true' } }));
+      H.appStaat.vjCache = null;
+      const gw42 = await D(42), gw43 = await D(43), gw44 = await D(44);
+      toets('27b wv2347: grondwetkaart (titel) en kaart met herkomst.grondwet true zijn gevoelig; grondwet "true" (tekst) niet', gw42.status === 200 && gw42.j.knop.kan === true && gw42.j.knop.gevoelig === true
+        && gw43.status === 200 && gw43.j.knop.kan === true && gw43.j.knop.gevoelig === true && gw44.status === 200 && gw44.j.knop.gevoelig === false, JSON.stringify([gw42.j.knop, gw43.j.knop, gw44.j.knop]));
+      sbStaat.vj = sbStaat.vj.filter((x) => x.id < 42); H.appStaat.vjCache = null;
       r = await D(27);
       toets('27b details doen-punt: geen knop-veld', r.status === 200 && r.j.knop === undefined, JSON.stringify(r.j.knop));
       r = await D(30);
