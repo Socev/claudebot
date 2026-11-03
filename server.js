@@ -5059,6 +5059,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
 APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
+APP_GLIJD_ROUTES.add('POST /app/financien/rekening');   // wv2292: Bewerk in Saldi = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -11120,6 +11121,38 @@ async function appFinancien(req, res, a) {
   return appStuur(res, 200, appFinSamen({ ok: true, vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }, d, appFinVault(nu)));   // wv1337: + vault
 }
 
+// wv2292 (David 3-11-2026: "namen van de rekeningen aan kunnen passen, en koppelen bij wie ze horen ... custom labels"): Bewerk per
+// rekening in Saldi. Eigen naam, "van wie" en labels alleen voor de weergave in Socev (bank-lezer.js app-rekening → bank-archief.js
+// rekeningWeergave; niets naar de bank). Zelfde poort als GET /app/financien (sessie, niet op een vaste plek), het kenmerk uit blok saldi
+// (niet de rek-sleutel), hooguit 60 per uur; daarna het 60 s-geheugen weg zodat de App meteen de nieuwe stand leest.
+const APP_FIN_REK_PER_UUR = 60;
+async function appFinRekening(req, res, a, d) {
+  res._app.reden = 'financien-rekening';
+  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'financien vast');
+  const q = {};
+  if (!/^[a-f0-9]{16}$/.test(String(d.id || ''))) return appWeiger(res, 400, 'onbekende rekening', 'fin-rekening id');
+  q.id = String(d.id);
+  if (d.naam !== undefined) { if (typeof d.naam !== 'string' || d.naam.length > 80) return appWeiger(res, 400, 'naam: hooguit 40 tekens', 'fin-rekening naam'); q.naam = d.naam; }
+  if (d.van_wie !== undefined && d.van_wie !== null) { if (typeof d.van_wie !== 'string' || d.van_wie.length > 40) return appWeiger(res, 400, 'onbekende keuze bij van wie', 'fin-rekening van_wie'); q.van_wie = d.van_wie; }
+  if (d.labels !== undefined) {
+    if (!Array.isArray(d.labels) || d.labels.length > 8 || d.labels.some(function (x) { return typeof x !== 'string' || x.length > 60; })) return appWeiger(res, 400, 'labels: hooguit 8, elk hooguit 30 tekens', 'fin-rekening labels');
+    q.labels = d.labels;
+  }
+  if (!appTeller('fin-rekening', APP_FIN_REK_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak gewijzigd dit uur', 'grens fin-rekening');
+  let r;
+  try { r = await bankKind(['app-rekening'], { rekening: q }, APP_FIN_MAX_MS); } catch (e) { logError('app-fin-rekening', new Error('bankkind faalde')); r = null; }
+  const j = r && r.j;
+  if (!j || j.ok !== true) {
+    const oud = j && typeof j.fout === 'string' && /^gebruik:/.test(j.fout);
+    if (oud) return appWeiger(res, 503, 'Financiën wordt net bijgewerkt; probeer het over een paar minuten', 'fin-rekening oud');
+    // een weigering van het archief (tekst van de pod zelf, geen bankgegevens) gaat terug; een storing niet
+    if (j && r.code === 0 && typeof j.fout === 'string') return appWeiger(res, 400, j.fout.slice(0, 160), 'fin-rekening geweigerd');
+    return appWeiger(res, 503, 'opslaan lukte nu niet; probeer het zo opnieuw', 'fin-rekening fout');
+  }
+  appFinCache = null;
+  return appStuur(res, 200, { ok: true, id: q.id, naam: j.naam || null, van_wie: j.van_wie || null, labels: Array.isArray(j.labels) ? j.labels : [] });
+}
+
 // ── App Gezondheid (wv937; ontwerp + Fable-review mk-scripts/wv937): Davids eigen gezondheid, alleen lezen ──
 // WAAROM. David 23-10-2026: "We moeten de health pod ook nog toegankelijk maken via een App hier in OVIS." De pod-pagina zit achter de
 // Olares-login; de App toont hetzelfde in Socev-blauw. gezondheid-app.js haalt het bij de health-pod (leessleutel, vaste host, alleen GET)
@@ -12539,6 +12572,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/docs/gedeeld' || route.indexOf('POST /app/docs/') === 0) return typeof appDocs === 'function' ? appDocs(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'docs');   // wv1382: OVIS Docs › Delen
         if (route === 'GET /app/secondbrain' || route.indexOf('POST /app/secondbrain/') === 0) return typeof appSecondBrain === 'function' ? appSecondBrain(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'secondbrain');   // wv832: App Second Brain (alleen lezen)
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
+        if (route === 'POST /app/financien/rekening') return appFinRekening(req, res, a, d);   // wv2292: Bewerk in Saldi (eigen naam, van wie, labels)
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
         if (route.indexOf('GET /app/pot/') === 0) return typeof appPot === 'function' ? appPot(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1894: OVIS POT (P1: lezen)
         if (route.indexOf('POST /app/pot/') === 0) return typeof appPotSchrijf === 'function' ? appPotSchrijf(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1933: OVIS POT (P3/P4: schrijven en verzending)
@@ -20681,7 +20715,7 @@ const BANK_DIR = process.env.BANK_DIR || '/opt/data/bank';
 const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', 'saldo', 'transacties', 'toestemming', 'label',
   'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'gambia', 'ecobank-ronde', 'ontkoppel'];
 const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'verrijk-open', 'verrijk-zet',
-  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'geld-briefing',   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
+  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'app-rekening', 'geld-briefing',   // wv2292: app-rekening alleen voor POST /app/financien/rekening   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
   'gambia', 'ecobank-bekend', 'ecobank-bij',   // wv2202: de Ecobank-laag leest alleen de database
   'pot-afschrift-maanden', 'pot-afschrift', 'pot-datahub-invoer'];   // wv787 (wv815: pot-datahub-invoer alleen voor potDatahubRonde): alleen voor de App-routes en de maandronde (niet in BANK_OPDRACHTEN: niet via /smal/bank)
 const BANK_TERUG_PER_UUR = 30;

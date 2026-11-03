@@ -191,6 +191,15 @@ function open(bankDir) {
       db.exec('COMMIT');
     } catch (e) { try { db.exec('ROLLBACK'); } catch (e2) {} db.close(); throw e; }
   }
+  // wv2292: weergavenaam, van_wie en labels per rekening (alleen weergave in Socev); zelfde patroon, geen schemaversie omhoog
+  const rkOntbreekt = function () { const k = new Set(db.prepare('PRAGMA table_info(rekeningen)').all().map(function (x) { return x.name; })); return REK_KOLOMMEN.filter(function (x) { return !k.has(x[0]); }); };
+  if (rkOntbreekt().length) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      rkOntbreekt().forEach(function (k) { try { db.exec('ALTER TABLE rekeningen ADD COLUMN ' + k[0] + ' ' + k[1]); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } });
+      db.exec('COMMIT');
+    } catch (e) { try { db.exec('ROLLBACK'); } catch (e2) {} db.close(); throw e; }
+  }
   return { db: db, pad: pad, dir: bankDir };
 }
 // Afgescheiden rekeningen: extern (wv709) en POT (wv786). Alles wat privé-overzichten maakt, laat ze zonder rekening=… weg.
@@ -1023,6 +1032,95 @@ function aiZet(a, resultaten, model, gestuurd) {
   return { gezet: gezet, geweigerd: geweigerd, weigering: weigering, verrijkt: v.gewijzigd };
 }
 
+// ── weergave per rekening (wv2292) ──────────────────────────────────────────
+// WAAROM. David 3-11-2026 (app): "Ik wil de namen van de rekeningen aan kunnen passen, en koppelen bij wie ze horen (label: David, [de
+// kinderen], David en/of Cynthia (gedeelde rekening); Eventueel ook custom labels". Drie velden op de rekening, alleen voor de weergave in
+// Socev (niets gaat naar de bank; de rek-sleutel en de banknaam blijven):
+//   weergavenaam  eigen naam (1-40 tekens; leeg = de naam van de bank)
+//   van_wie       David, Cynthia, gedeeld, Gambia-hulp, extern, of een gezinslid uit meta 'van_wie_kinderen' (alleen machinekamer zet die,
+//                 via bank-lezer.js gezin; de namen staan niet in de code, zoals masker_namen)
+//   labels        JSON-lijst van hooguit 8 eigen labels (1-30 tekens), bv. "Weekend 2026"
+// "Van wie" zet ook de eigenaar van de rekening, met herkomst david (zoals corrigeer rekening=… eigenaar=…), in de bestaande woordenlijst:
+// een gezinslid wordt 'kind', gedeeld wordt 'samen'. Zo blijven zoek/maand eigenaar=…, de indeling en de OVIS-registers ongewijzigd.
+// De POT-rekening is zakelijk: daar alleen naam en labels (van wie staat vast; de afscheiding van salarisgegevens mag niet weg).
+const REK_KOLOMMEN = [['weergavenaam', 'TEXT'], ['van_wie', 'TEXT'], ['labels', 'TEXT']];
+const VAN_WIE_VAST = [['David', 'David'], ['Cynthia', 'Cynthia'], ['gedeeld', 'samen'], ['Gambia-hulp', 'Gambia-hulp'], ['extern', EXTERN]];
+const MAX_LABELS = 8;
+function vanWieKinderen(a) {
+  let l = [];
+  try { l = JSON.parse(metaLees(a, 'van_wie_kinderen') || '[]'); } catch (e) { l = []; }
+  return Array.isArray(l) ? l.filter(function (x) { return typeof x === 'string' && geldigLabel(x, 30) === x; }) : [];
+}
+// Alleen machinekamer (bank-lezer.js gezin, stdin {kinderen: [...]}): de gezinsleden die als "van wie" te kiezen zijn. Vervangt de lijst.
+function vanWieKinderenZet(a, namen) {
+  if (!Array.isArray(namen) || namen.length > 12) throw new Error('kinderen: lijst van hooguit 12 namen');
+  const l = [];
+  namen.forEach(function (x) {
+    const n = geldigLabel(String(x == null ? '' : x).normalize('NFC'), 30);
+    if (!n || VAN_WIE_VAST.some(function (v) { return v[0].toLowerCase() === n.toLowerCase(); })) throw new Error('kinderen: 1-30 tekens, geen vaste keuze');
+    if (!l.some(function (y) { return y.toLowerCase() === n.toLowerCase(); })) l.push(n);
+  });
+  metaZet(a, 'van_wie_kinderen', JSON.stringify(l));
+  return { kinderen: l.length };
+}
+// De keuzes in volgorde: [waarde, eigenaar]
+function vanWieKeuzes(a) {
+  return [VAN_WIE_VAST[0], VAN_WIE_VAST[1]].concat(vanWieKinderen(a).map(function (n) { return [n, 'kind']; }), VAN_WIE_VAST.slice(2));
+}
+// De eigenaar die bij een opgeslagen van_wie hoort (null = onbekende waarde)
+function vanWieEigenaar(a, v) { const k = vanWieKeuzes(a).find(function (x) { return x[0] === v; }); return k ? k[1] : null; }
+// Kenmerk van een rekening voor de App (niet de rek-sleutel zelf): 16 hextekens
+function rekId(rek) { return crypto.createHash('sha256').update('saldi:' + String(rek)).digest('hex').slice(0, 16); }
+function rekVanId(a, id) {
+  if (!/^[a-f0-9]{16}$/.test(String(id || ''))) return null;
+  const r = a.db.prepare('SELECT rek FROM rekeningen').all().find(function (x) { return rekId(x.rek) === id; });
+  return r ? r.rek : null;
+}
+function labelsLees(t) {
+  let l = [];
+  try { l = JSON.parse(t || '[]'); } catch (e) { l = []; }
+  return Array.isArray(l) ? l.filter(function (x) { return typeof x === 'string' && x; }).slice(0, MAX_LABELS) : [];
+}
+// o: { rek, naam?: string ('' = wissen), van_wie?: string, labels?: string[] }. Alleen meegegeven velden veranderen.
+function rekeningWeergave(a, o) {
+  const r = a.db.prepare('SELECT rek, eigenaar, eigenaar_herkomst, van_wie FROM rekeningen WHERE rek = ?').get(o && o.rek);
+  if (!r) throw new Error('rekening niet in het archief');
+  const pot = String(r.eigenaar || '').toLowerCase() === 'pot';
+  const zet = {};
+  if (o.naam !== undefined) {
+    const t = String(o.naam == null ? '' : o.naam).normalize('NFC').replace(/\s+/g, ' ').trim();
+    if (t === '') zet.weergavenaam = null;
+    else { const n = geldigLabel(t, 40); if (!n) throw new Error('naam: 1-40 tekens (letters, cijfers, spatie en . , & \' ( ) - /)'); zet.weergavenaam = n; }
+  }
+  if (o.labels !== undefined) {
+    if (!Array.isArray(o.labels) || o.labels.length > MAX_LABELS) throw new Error('labels: hooguit ' + MAX_LABELS);
+    const l = [];
+    o.labels.forEach(function (x) {
+      const n = geldigLabel(String(x == null ? '' : x).normalize('NFC').replace(/\s+/g, ' '), 30);
+      if (!n) throw new Error('label: 1-30 tekens (letters, cijfers, spatie en . , & \' ( ) - /)');
+      if (!l.some(function (y) { return y.toLowerCase() === n.toLowerCase(); })) l.push(n);
+    });
+    zet.labels = l.length ? JSON.stringify(l) : null;
+  }
+  let eigenaar = null;
+  if (o.van_wie !== undefined && o.van_wie !== null) {
+    if (pot) throw new Error('de POT-rekening is zakelijk; van wie staat vast');
+    eigenaar = vanWieEigenaar(a, String(o.van_wie));
+    if (!eigenaar) throw new Error('van wie: ' + vanWieKeuzes(a).map(function (x) { return x[0]; }).join(', '));
+    zet.van_wie = String(o.van_wie);
+  }
+  if (!Object.keys(zet).length) throw new Error('niets te wijzigen: naam, van wie of labels');
+  const eigenaarAnders = !!eigenaar && (r.eigenaar !== eigenaar);
+  inTransactie(a, function () {
+    Object.keys(zet).forEach(function (k) { a.db.prepare('UPDATE rekeningen SET ' + k + ' = ? WHERE rek = ?').run(zet[k], r.rek); });
+    if (eigenaar) a.db.prepare("UPDATE rekeningen SET eigenaar = ?, eigenaar_herkomst = 'david' WHERE rek = ?").run(eigenaar, r.rek);
+    if (eigenaarAnders) metaZet(a, 'vuil', '1');
+  });
+  const v = eigenaarAnders ? verrijk(a) : null;
+  const n = a.db.prepare('SELECT weergavenaam, van_wie, labels, eigenaar FROM rekeningen WHERE rek = ?').get(r.rek);
+  return { ok: true, naam: n.weergavenaam || null, van_wie: n.van_wie || null, labels: labelsLees(n.labels), eigenaar: n.eigenaar, posten_bijgewerkt: v ? v.gewijzigd : 0 };
+}
+
 // ── correctie door David ────────────────────────────────────────────────────
 // Per post: herkomst 'david' (wint altijd) + standaard een regel voor dezelfde tegenpartij (of hetzelfde rekeningpaar bij een
 // interne overboeking), die daarna ook nieuwe posten zo indeelt. Per rekening: eigenaar (eigenaar_herkomst 'david').
@@ -1044,6 +1142,9 @@ function corrigeer(a, o) {
       if (velden.eigenaar) {
         const r = a.db.prepare("UPDATE rekeningen SET eigenaar = ?, eigenaar_herkomst = ? WHERE rek = ? AND (? = 'david' OR eigenaar_herkomst IS NOT 'david')").run(velden.eigenaar, door, o.rek, door);
         if (!r.changes) throw new Error('eigenaar van deze rekening is door David gezet; die wint');
+        // wv2292: een "van wie" die niet meer bij de nieuwe eigenaar past, vervalt (de Saldi-groep volgt dan de eigenaar)
+        const vw = a.db.prepare('SELECT van_wie FROM rekeningen WHERE rek = ?').get(o.rek);
+        if (vw && vw.van_wie && vanWieEigenaar(a, vw.van_wie) !== velden.eigenaar) a.db.prepare('UPDATE rekeningen SET van_wie = NULL WHERE rek = ?').run(o.rek);
       }
       if (velden.categorie) {
         if (!externeRekeningen(a).has(o.rek)) throw new Error('categorie per rekening alleen voor een externe rekening of de POT-rekening (eigenaar extern of POT)');
@@ -1633,6 +1734,6 @@ function stand(a) {
   };
 }
 
-module.exports = { open, rekeningenSync, markeerOntkoppeld, bij, historieBij, HIST_MARGE, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
+module.exports = { open, rekeningWeergave, rekId, rekVanId, vanWieKeuzes, vanWieKinderen, vanWieKinderenZet, labelsLees, REK_KOLOMMEN, rekeningenSync, markeerOntkoppeld, bij, historieBij, HIST_MARGE, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
   zakelijkZet, zakelijkeIbans, potRekeningen, potOverzicht, potCategorie, potAfschriftInvoer, potAfschriftMaanden, potDatahubInvoer, metaLees, metaZet, isAfgescheiden, POT, CAT_POT, LET_OP_POT,
   categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, reeksenBereken, vastePosten, rijenVan, rijHoort, paypalStap, paypalNaam, ppTitel, rijTekst, archiefStart, machtigingVan, naamNorm, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };

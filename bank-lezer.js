@@ -1324,6 +1324,24 @@ const opdrachten = {
     else v.nr = o.nr;
     try { return x.A.corrigeer(x.a, v); } catch (e) { throw new Weigering(e.message); }
   },
+  // wv2292: eigen naam, "van wie" en labels van één rekening, vanuit Saldi in de App (POST /app/financien/rekening). Alleen het archief;
+  // stdin {rekening: {id, naam?, van_wie?, labels?}} met het kenmerk uit blok saldi (niet de rek-sleutel). Niets naar de bank.
+  async 'app-rekening'() {
+    const x = archiefKlaar(), q = geheim.rekening;
+    if (!q || typeof q !== 'object' || Array.isArray(q)) throw new Weigering('rekening ontbreekt');
+    const rek = x.A.rekVanId(x.a, q.id);
+    if (!rek) throw new Weigering('onbekende rekening');
+    const o = { rek: rek };
+    ['naam', 'van_wie', 'labels'].forEach(function (k) { if (Object.hasOwn(q, k)) o[k] = q[k]; });
+    try { return Object.assign({ id: q.id }, x.A.rekeningWeergave(x.a, o)); } catch (e) { throw new Weigering(e.message); }
+  },
+  // wv2292: de gezinsleden die in Saldi als "van wie" te kiezen zijn. Alleen machinekamer, alleen via de CLI (stdin {kinderen: [...]}),
+  // niet via /smal/bank of de App; de namen staan alleen in het archief (meta), nooit in de code.
+  async gezin() {
+    const x = archiefKlaar();
+    if (!Array.isArray(geheim.kinderen)) return { ok: true, kinderen: x.A.vanWieKinderen(x.a).length };
+    try { return Object.assign({ ok: true }, x.A.vanWieKinderenZet(x.a, geheim.kinderen)); } catch (e) { throw new Weigering(e.message); }
+  },
   async 'verrijk-open'(a) { const x = archiefKlaar(); return Object.assign({ ok: true }, x.A.aiOpen(x.a, parseInt(a.opt.max, 10) || 60)); },
   async 'verrijk-zet'() {
     const x = archiefKlaar();

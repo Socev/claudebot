@@ -135,32 +135,56 @@ function rekNaam(n, extern) { return veilig(n, 30) || (extern ? 'extern' : 'eige
 // (zoals bank.py saldo en de rest van de App): eigen, samen (gezamenlijk), kind, Gambia-hulp, extern (op Davids naam, niet van hem),
 // Cynthia, onbekend. De POT-rekening apart (zakelijk; de App-sessie is altijd de eigenaar). Geen IBAN; alleen bij twee rekeningen met
 // dezelfde naam de laatste vier cijfers, anders zijn ze niet uit elkaar te houden. Geen totaal: de App telt niets op.
+// wv2292 (David 3-11-2026: namen aanpassen, koppelen bij wie ze horen, eigen labels): per rekening een eigen naam (weergavenaam; de
+// banknaam blijft als kleine regel), "van wie" (van_wie; zonder keuze de groep uit de eigenaar) en eigen labels. Groepen in Davids
+// volgorde: David, Cynthia, de gezinsleden (meta van_wie_kinderen; 'persoon:<naam>'), kind zonder keuze, gedeeld, Gambia-hulp, extern,
+// onbekend. Elke rekening krijgt een kenmerk (id, niet de rek-sleutel) voor POST /app/financien/rekening. Bij een kinderrekening zonder
+// keuze een voorstel als de banknaam precies één gezinslid als los woord noemt. Lezen hier; schrijven doet bank-archief.js.
 const SALDO_GROEP = { david: 'eigen', samen: 'samen', kind: 'kind', 'gambia-hulp': 'gambia', extern: 'extern', cynthia: 'cynthia', pot: 'pot' };
-const SALDO_VOLGORDE = ['eigen', 'samen', 'kind', 'cynthia', 'gambia', 'extern', 'onbekend'];
+const VAN_WIE_GROEP = { David: 'eigen', Cynthia: 'cynthia', gedeeld: 'samen', 'Gambia-hulp': 'gambia', extern: 'extern' };
+const GROEP_TITEL = { eigen: 'David', cynthia: 'Cynthia', kind: 'Kind (nog niet gekozen)', samen: 'David en/of Cynthia (gedeeld)', gambia: 'Gambia-hulp', extern: 'Extern', onbekend: 'Eigenaar onbekend' };
+const VAN_WIE_TEKST = { gedeeld: 'David en/of Cynthia (gedeeld)', extern: 'Extern (niet van ons)' };
+function woordIn(tekst, naam) { const t = ' ' + norm(tekst).replace(/[^a-z0-9]+/g, ' ') + ' ', n = norm(naam).replace(/[^a-z0-9]+/g, ' ').trim(); return !!n && t.indexOf(' ' + n + ' ') >= 0; }
 function blokSaldi(a, rijen) {
+  const A = require('./bank-archief.js');
   const st = new Map((rijen || []).map(function (r) { return [r.rek, r]; }));
-  const reks = a.db.prepare('SELECT rek, bron, naam, label, status, gezamenlijk, eigenaar, iban_eind FROM rekeningen').all()
-    .filter(function (r) { return r.status !== 'ontkoppeld' && (r.bron !== 'bunq' || r.status === 'ACTIVE'); });
+  const alle = a.db.prepare('SELECT rek, bron, naam, label, status, gezamenlijk, eigenaar, iban_eind, weergavenaam, van_wie, labels FROM rekeningen').all();
+  const reks = alle.filter(function (r) { return r.status !== 'ontkoppeld' && (r.bron !== 'bunq' || r.status === 'ACTIVE'); });
+  const kinderen = A.vanWieKinderen(a);
+  const volgorde = ['eigen', 'cynthia'].concat(kinderen.map(function (n) { return 'persoon:' + n; }), ['kind', 'samen', 'gambia', 'extern', 'onbekend']);
   const uit = [], pot = [];
   let zonder = 0;
   reks.forEach(function (r) {
-    const groep = SALDO_GROEP[String(r.eigenaar || '').toLowerCase()] || 'onbekend', s = st.get(r.rek);
+    const eig = String(r.eigenaar || '').toLowerCase(), s = st.get(r.rek);
+    let groep = SALDO_GROEP[eig] || 'onbekend';
+    if (groep !== 'pot' && r.van_wie) groep = VAN_WIE_GROEP[r.van_wie] || 'persoon:' + (veilig(r.van_wie, 30) || '?');
     let j = null;
     try { j = s ? JSON.parse(s.json) : null; } catch (e) { j = null; }
     if (!j || getal(j.geboekt) === null) { zonder++; return; }
     const besch = getal(j.beschikbaar), saldo = getal(j.geboekt);
-    const x = { naam: veilig(r.label || r.naam, 40) || 'Rekening', bank: r.bron === 'bunq' ? 'bunq' : r.bron === 'abn' ? 'ABN AMRO' : 'bank', groep: groep,
+    const banknaam = veilig(r.label || r.naam, 40) || 'Rekening', eigen = veilig(r.weergavenaam, 40), labels = A.labelsLees(r.labels).map(function (l) { return veilig(l, 30); }).filter(Boolean);
+    const voorstel = groep === 'kind' ? kinderen.filter(function (n) { return woordIn((r.label || '') + ' ' + (r.naam || ''), n); }) : [];
+    const x = { id: A.rekId(r.rek), naam: eigen || banknaam, banknaam: eigen && eigen !== banknaam ? banknaam : undefined,
+      bank: r.bron === 'bunq' ? 'bunq' : r.bron === 'abn' ? 'ABN AMRO' : 'bank', groep: groep, van_wie: groep !== 'pot' && r.van_wie ? r.van_wie : undefined,
+      voorstel: voorstel.length === 1 ? voorstel[0] : undefined, labels: labels.length ? labels : undefined,
       gezamenlijk: r.gezamenlijk ? true : undefined, saldo: saldo, beschikbaar: besch !== null && besch !== saldo ? besch : undefined,
       valuta: /^[A-Z]{3}$/.test(String(j.valuta || '')) ? j.valuta : 'EUR', stand_van: /^\d{4}-\d{2}-\d{2}T/.test(String(s.opgehaald || '')) ? s.opgehaald : null, _eind: r.iban_eind };
     (groep === 'pot' ? pot : uit).push(x);
   });
+  const pos = function (g) { const i = volgorde.indexOf(g); return i < 0 ? volgorde.length - 1 : i; };   // een opgeslagen naam die niet meer in de lijst staat: bij onbekend
   [uit, pot].forEach(function (l) {
     const tel = new Map();
     l.forEach(function (x) { tel.set(x.naam.toLowerCase(), (tel.get(x.naam.toLowerCase()) || 0) + 1); });
     l.forEach(function (x) { if (tel.get(x.naam.toLowerCase()) > 1 && /^\d{4}$/.test(String(x._eind || ''))) x.eind = x._eind; delete x._eind; });
-    l.sort(function (p, q) { return SALDO_VOLGORDE.indexOf(p.groep) - SALDO_VOLGORDE.indexOf(q.groep) || p.naam.localeCompare(q.naam, 'nl') || String(p.eind || '').localeCompare(String(q.eind || '')); });
+    l.sort(function (p, q) { return pos(p.groep) - pos(q.groep) || p.naam.localeCompare(q.naam, 'nl') || String(p.eind || '').localeCompare(String(q.eind || '')); });
   });
-  return { rekeningen: uit, pot: pot, zonder_stand: zonder };
+  const groepen = [];
+  uit.forEach(function (x) { if (!groepen.some(function (g) { return g.sleutel === x.groep; })) groepen.push({ sleutel: x.groep, titel: GROEP_TITEL[x.groep] || x.groep.replace(/^persoon:/, '') }); });
+  const gebruikt = new Map();
+  alle.forEach(function (r) { A.labelsLees(r.labels).forEach(function (l) { const v = veilig(l, 30); if (v && !gebruikt.has(v.toLowerCase())) gebruikt.set(v.toLowerCase(), v); }); });
+  return { rekeningen: uit, pot: pot, zonder_stand: zonder, groepen: groepen,
+    van_wie_keuzes: A.vanWieKeuzes(a).map(function (k) { return { waarde: k[0], tekst: VAN_WIE_TEKST[k[0]] || k[0] }; }),
+    labels_in_gebruik: Array.from(gebruikt.values()).sort(function (p, q) { return p.localeCompare(q, 'nl'); }) };
 }
 
 // ── de blokken ──

@@ -201,9 +201,9 @@ toets('bewust: PayPal-dubbel gedempt; rij zonder woord van David dempt niets (Kr
   const S = F.blokSaldi(a3, rijen), t3 = JSON.stringify(S), naam = (n) => S.rekeningen.filter((x) => x.naam === n);
   toets('saldi: alle open rekeningen met een stand, gesloten niet, zonder stand geteld; POT apart', S.rekeningen.length === 7 && !/Oude vakantie|999/.test(t3) && S.zonder_stand === 1 &&
     S.pot.length === 1 && S.pot[0].naam === 'POT' && S.pot[0].groep === 'pot' && !S.rekeningen.some((x) => x.groep === 'pot'), S);
-  toets('saldi: groepen uit de eigenaar (eigen, samen+gezamenlijk, kind, Gambia-hulp, extern) in die volgorde', naam('Vaste lasten')[0].groep === 'samen' && naam('Vaste lasten')[0].gezamenlijk === true &&
+  toets('saldi: groepen uit de eigenaar (eigen, kind, samen+gezamenlijk, Gambia-hulp, extern) in die volgorde (wv2292: Davids volgorde)', naam('Vaste lasten')[0].groep === 'samen' && naam('Vaste lasten')[0].gezamenlijk === true &&
     naam('Hoofdrekening')[0].groep === 'eigen' && naam('Kids sparen')[0].groep === 'kind' && naam('Gambia Noodfonds')[0].groep === 'gambia' && naam('Rekening Petronella')[0].groep === 'extern' &&
-    JSON.stringify(S.rekeningen.map((x) => x.groep)) === JSON.stringify(['eigen', 'eigen', 'eigen', 'samen', 'kind', 'gambia', 'extern']), S.rekeningen.map((x) => [x.naam, x.groep]));
+    JSON.stringify(S.rekeningen.map((x) => x.groep)) === JSON.stringify(['eigen', 'eigen', 'eigen', 'kind', 'samen', 'gambia', 'extern']), S.rekeningen.map((x) => [x.naam, x.groep]));
   toets('saldi: bedrag, valuta, stand van; beschikbaar alleen als het afwijkt', naam('Vaste lasten')[0].saldo === 2500.5 && naam('Vaste lasten')[0].beschikbaar === 2400 && naam('Hoofdrekening')[0].beschikbaar === undefined &&
     naam('Kleedgeld')[0].beschikbaar === undefined && S.rekeningen.every((x) => x.valuta === 'EUR' && x.stand_van === op) && naam('Vaste lasten')[0].bank === 'ABN AMRO' && naam('Hoofdrekening')[0].bank === 'bunq', S.rekeningen);
   toets('saldi: geen IBAN; laatste vier cijfers alleen bij twee rekeningen met dezelfde naam', !/NL\d{2}[A-Z]{4}\d{6,}/.test(t3) && naam('Kleedgeld').map((x) => x.eind).join() === '2222,3333' &&
@@ -212,6 +212,73 @@ toets('bewust: PayPal-dubbel gedempt; rij zonder woord van David dempt niets (Kr
   toets('saldi: zonder bewaarde standen een lege lijst en het aantal zonder stand', leegS.rekeningen.length === 0 && leegS.pot.length === 0 && leegS.zonder_stand === 9, leegS);
   const u5 = F.bereken(A, a3, { vault: VAULT, saldi: rijen }), u6 = F.bereken(A, a3, { vault: VAULT });
   toets('saldi: in bereken alleen met de standen van bank-lezer (zonder: null, geen fout)', u5.saldi && u5.saldi.rekeningen.length === 7 && u6.saldi === null && u6.fouten.indexOf('saldi') < 0, [u5.saldi, u6.fouten]);
+  // ── wv2292: eigen naam, van wie en labels (Bewerk in Saldi) ──
+  const id = (n) => S.rekeningen.concat(S.pot).find((x) => x.naam === n).id;
+  toets('wv2292: elke rekening een kenmerk van 16 hextekens (niet de rek-sleutel), POT ook', S.rekeningen.concat(S.pot).every((x) => /^[a-f0-9]{16}$/.test(x.id)) &&
+    new Set(S.rekeningen.map((x) => x.id)).size === 7 && A.rekVanId(a3, id('Hoofdrekening')) === 'hr' && A.rekVanId(a3, 'hr') === null && A.rekVanId(a3, '0'.repeat(16)) === null, S.rekeningen.map((x) => x.id));
+  toets('wv2292: keuzes zonder gezinsleden: David, Cynthia, gedeeld, Gambia-hulp, extern', JSON.stringify(S.van_wie_keuzes.map((k) => k.waarde)) === JSON.stringify(['David', 'Cynthia', 'gedeeld', 'Gambia-hulp', 'extern']) &&
+    S.van_wie_keuzes[2].tekst === 'David en/of Cynthia (gedeeld)' && JSON.stringify(S.labels_in_gebruik) === '[]', S.van_wie_keuzes);
+  let fg = null; try { A.vanWieKinderenZet(a3, ['David']); } catch (e) { fg = e.message; }
+  toets('wv2292: gezinslijst weigert een vaste keuze als naam', /geen vaste keuze/.test(fg || ''), fg);
+  A.vanWieKinderenZet(a3, ['Pien', 'Bram', 'pien', 'Kees']);
+  toets('wv2292: gezinsleden uit meta (zonder dubbel), tussen Cynthia en gedeeld', JSON.stringify(A.vanWieKeuzes(a3).map((k) => k[0] + '>' + k[1])) ===
+    JSON.stringify(['David>David', 'Cynthia>Cynthia', 'Pien>kind', 'Bram>kind', 'Kees>kind', 'gedeeld>samen', 'Gambia-hulp>Gambia-hulp', 'extern>extern']), A.vanWieKeuzes(a3));
+  // posten op de kinderrekening, om de indeling na de keuze te toetsen
+  A.bij(a3, 'ki', [p('ki:1', '2026-10-10', -12.5, 'Speelgoedwinkel Proef', 'cadeau'), p('ki:2', '2026-10-12', 20, 'Opa Proef', 'zakgeld')], {});
+  const maandVoor = A.maand(a3, { maand: '2026-10', eigenaar: 'kind' });
+  const w1 = A.rekeningWeergave(a3, { rek: 'ki', naam: 'Spaarpot  Bram', van_wie: 'Bram', labels: ['Weekend 2026', 'weekend 2026', 'Sparen'] });
+  const rk = a3.db.prepare("SELECT eigenaar, eigenaar_herkomst, weergavenaam, van_wie, labels FROM rekeningen WHERE rek = 'ki'").get();
+  toets('wv2292: kind kiezen = eigenaar blijft kind (herkomst david), naam en labels (zonder dubbel) bewaard', w1.ok && rk.eigenaar === 'kind' && rk.eigenaar_herkomst === 'david' && rk.weergavenaam === 'Spaarpot Bram' &&
+    rk.van_wie === 'Bram' && rk.labels === JSON.stringify(['Weekend 2026', 'Sparen']) && w1.posten_bijgewerkt === 0, [w1, rk]);
+  const maandNa = A.maand(a3, { maand: '2026-10', eigenaar: 'kind' }), zoekNa = A.zoek(a3, { van: '2026-10-01', tot: '2026-10-31', eigenaar: 'kind' });
+  toets('wv2292: maand en zoek met eigenaar=kind ongewijzigd na de keuze voor een gezinslid', maandVoor.posten === 2 && maandNa.posten === 2 && maandNa.totaal_uit === maandVoor.totaal_uit &&
+    (zoekNa.posten || zoekNa.transacties || []).length === 2, [maandVoor.posten, maandNa.posten, Object.keys(zoekNa)]);
+  const S2 = F.blokSaldi(a3, rijen), t4 = JSON.stringify(S2), r2 = S2.rekeningen.find((x) => x.id === id('Kids sparen'));
+  toets('wv2292: Saldi toont de eigen naam, de banknaam klein, de groep persoon:Bram en de labels', r2 && r2.naam === 'Spaarpot Bram' && r2.banknaam === 'Kids sparen' && r2.groep === 'persoon:Bram' &&
+    r2.van_wie === 'Bram' && JSON.stringify(r2.labels) === JSON.stringify(['Weekend 2026', 'Sparen']) && !/"rek"|iban/i.test(t4), r2);
+  toets('wv2292: groepen in Davids volgorde met titel; labels in gebruik als suggestie', JSON.stringify(S2.groepen.map((g) => g.sleutel)) === JSON.stringify(['eigen', 'persoon:Bram', 'samen', 'gambia', 'extern']) &&
+    S2.groepen[0].titel === 'David' && S2.groepen[1].titel === 'Bram' && S2.groepen[2].titel === 'David en/of Cynthia (gedeeld)' && JSON.stringify(S2.labels_in_gebruik) === JSON.stringify(['Sparen', 'Weekend 2026']), S2.groepen);
+  // gedeeld, Cynthia en extern zetten de eigenaar; terug naar David werkt; de indeling volgt
+  const w2 = A.rekeningWeergave(a3, { rek: 'k2', van_wie: 'gedeeld' }), e2 = a3.db.prepare("SELECT eigenaar FROM rekeningen WHERE rek = 'k2'").get().eigenaar;
+  const w3 = A.rekeningWeergave(a3, { rek: 'k1', van_wie: 'Cynthia' }), e3 = a3.db.prepare("SELECT eigenaar FROM rekeningen WHERE rek = 'k1'").get().eigenaar;
+  toets('wv2292: gedeeld → samen, Cynthia → Cynthia (herkomst david); Saldi groepeert zo', e2 === 'samen' && e3 === 'Cynthia' &&
+    F.blokSaldi(a3, rijen).rekeningen.filter((x) => x.naam === 'Kleedgeld').map((x) => x.groep).sort().join() === 'cynthia,samen', [w2, w3, e2, e3]);
+  // een kinderrekening zonder keuze met een gezinslid in de banknaam: voorstel
+  a3.db.prepare("UPDATE rekeningen SET naam = 'Kees sparen' WHERE rek = 'gh'").run();
+  A.corrigeer(a3, { rek: 'gh', eigenaar: 'kind' });
+  const r5 = F.blokSaldi(a3, rijen).rekeningen.find((x) => x.naam === 'Kees sparen');
+  toets('wv2292: kind zonder keuze = groep kind met een voorstel uit de banknaam (los woord)', r5 && r5.groep === 'kind' && r5.voorstel === 'Kees' && r5.van_wie === undefined, r5);
+  // corrigeer rekening=… eigenaar=… laat een niet-passende van wie vervallen, een passende staan
+  A.rekeningWeergave(a3, { rek: 'gh', van_wie: 'Kees' });
+  A.corrigeer(a3, { rek: 'gh', eigenaar: 'kind' });
+  const vw1 = a3.db.prepare("SELECT van_wie FROM rekeningen WHERE rek = 'gh'").get().van_wie;
+  A.corrigeer(a3, { rek: 'gh', eigenaar: 'Gambia-hulp' });
+  const vw2 = a3.db.prepare("SELECT van_wie FROM rekeningen WHERE rek = 'gh'").get().van_wie;
+  toets('wv2292: corrigeer eigenaar laat een passende van wie staan en wist een niet-passende', vw1 === 'Kees' && vw2 === null, [vw1, vw2]);
+  // machinekamer kan Davids keuze niet overschrijven
+  let fm = null; try { A.corrigeer(a3, { rek: 'ki', eigenaar: 'David', door: 'machinekamer' }); } catch (e) { fm = e.message; }
+  toets('wv2292: een keuze in Saldi is van David; machinekamer kan de eigenaar niet overschrijven', /door David gezet/.test(fm || ''), fm);
+  // weigeringen
+  const fout = (o) => { try { A.rekeningWeergave(a3, o); return null; } catch (e) { return e.message; } };
+  const f1 = fout({ rek: 'pt', van_wie: 'David' }), f2 = fout({ rek: 'hr', van_wie: 'Onbekend' }), f3 = fout({ rek: 'hr', naam: '<script>' }), f4 = fout({ rek: 'hr', labels: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] }),
+    f5 = fout({ rek: 'hr', labels: ['x'.repeat(31)] }), f6 = fout({ rek: 'hr' }), f7 = fout({ rek: 'bestaatniet', naam: 'x' }), f8 = fout({ rek: 'hr', naam: 'x'.repeat(41) });
+  toets('wv2292: weigert van wie op de POT-rekening, onbekende keuze, rare tekens, > 8 labels, label > 30, niets, onbekende rekening, naam > 40',
+    /POT-rekening/.test(f1 || '') && /van wie:/.test(f2 || '') && /naam:/.test(f3 || '') && /hooguit 8/.test(f4 || '') && /label:/.test(f5 || '') && /niets te wijzigen/.test(f6 || '') && /niet in het archief/.test(f7 || '') && /naam:/.test(f8 || ''), [f1, f2, f3, f4, f5, f6, f7, f8]);
+  const wp = A.rekeningWeergave(a3, { rek: 'pt', naam: 'POT salarissen', labels: ['Zakelijk'] }), pp = F.blokSaldi(a3, rijen).pot[0];
+  toets('wv2292: POT-rekening: naam en labels wel, eigenaar blijft POT, staat in het POT-paneel', wp.eigenaar === 'POT' && pp.naam === 'POT salarissen' && pp.banknaam === 'POT' && pp.groep === 'pot' && pp.van_wie === undefined, [wp, pp]);
+  const w9 = A.rekeningWeergave(a3, { rek: 'ki', naam: '', labels: [] }), r9 = F.blokSaldi(a3, rijen).rekeningen.find((x) => x.id === id('Kids sparen'));
+  toets('wv2292: lege naam en lege labels wissen; van wie blijft', w9.naam === null && JSON.stringify(w9.labels) === '[]' && r9.naam === 'Kids sparen' && r9.banknaam === undefined && r9.labels === undefined && r9.groep === 'persoon:Bram', r9);
+  // de bank-synchronisatie raakt de nieuwe velden en Davids eigenaar niet
+  A.rekeningenSync(a3, R3);
+  const na = a3.db.prepare("SELECT eigenaar, van_wie FROM rekeningen WHERE rek = 'k1'").get();
+  toets('wv2292: rekeningenSync laat van wie en Davids eigenaar staan', na.eigenaar === 'Cynthia' && na.van_wie === 'Cynthia', na);
+  // extern kiezen: de rekening telt niet meer mee (bestaande afscheiding), terug naar David: wel
+  const voorExt = A.maand(a3, { maand: '2026-10' }).posten;
+  A.rekeningWeergave(a3, { rek: 'ki', van_wie: 'extern' });
+  const metExt = A.maand(a3, { maand: '2026-10' }).posten;
+  A.rekeningWeergave(a3, { rek: 'ki', van_wie: 'Bram' });
+  toets('wv2292: extern kiezen scheidt de rekening af zoals corrigeer; terug naar een gezinslid telt weer mee', voorExt === 2 && metExt === 0 && A.maand(a3, { maand: '2026-10' }).posten === 2 &&
+    a3.db.prepare("SELECT eigenaar FROM rekeningen WHERE rek = 'ki'").get().eigenaar === 'kind', [voorExt, metExt]);
   a3.db.close();
 }
 
@@ -231,7 +298,22 @@ toets('bewust: PayPal-dubbel gedempt; rij zonder woord van David dempt niets (Kr
   toets('bank-lezer app-financien: blok saldi uit de bewaarde standen (Privé eigen, de externe rekening gemarkeerd)', j && j.saldi && j.saldi.rekeningen.length === 2 &&
     j.saldi.rekeningen.some((x) => x.naam === 'Privé' && x.saldo === 4321 && x.groep === 'eigen') && j.saldi.rekeningen.some((x) => x.groep === 'extern' && x.saldo === 55) && j.saldi.zonder_stand === 2, j && j.saldi);
   toets('server.js: GET /app/financien geeft het blok saldi door', /'gambia', 'saldi'\]\.forEach\(function \(k\) \{ d\[k\]/.test(fs.readFileSync('server.js', 'utf8')), null);
+  // wv2292: app-rekening (Bewerk in Saldi) en gezin via de CLI, zoals de pod het aanroept
+  const kind = (op, inv) => { const q = spawnSync(process.execPath, ['--no-warnings', 'bank-lezer.js', op], { input: JSON.stringify(inv), env: { PATH: process.env.PATH, BANK_DIR: BD, TZ: 'Europe/Amsterdam' }, encoding: 'utf8', timeout: 60000 });
+    try { return JSON.parse(String(q.stdout).trim().split('\n').pop()); } catch (e) { return { stdout: String(q.stdout).slice(0, 200), stderr: String(q.stderr).slice(0, 200) }; } };
+  const pid = j && j.saldi && (j.saldi.rekeningen.find((x) => x.naam === 'Privé') || {}).id;
+  const g0 = kind('gezin', { kinderen: ['Pien', 'Bram'] }), g1 = kind('gezin', {});
+  const k1 = kind('app-rekening', { rekening: { id: pid, naam: 'Dagelijks', van_wie: 'Pien', labels: ['Proeflabel'] } });
+  const k2 = kind('app-rekening', { rekening: { id: 'f'.repeat(16), naam: 'x' } }), k3 = kind('app-rekening', { rekening: { id: pid, van_wie: 'Onbekend' } }), k4 = kind('app-rekening', {});
+  const j2 = kind('app-financien', {}), r2b = j2 && j2.saldi && j2.saldi.rekeningen.find((x) => x.id === pid);
+  toets('bank-lezer gezin + app-rekening: bewaart naam, van wie en label; app-financien toont ze; weigert onbekend kenmerk, keuze en lege invoer', g0.ok && g0.kinderen === 2 && g1.kinderen === 2 &&
+    k1.ok === true && k1.naam === 'Dagelijks' && k1.van_wie === 'Pien' && k1.eigenaar === 'kind' && k2.ok === false && /onbekende rekening/.test(k2.fout) && k3.ok === false && /van wie/.test(k3.fout) && k4.ok === false &&
+    r2b && r2b.naam === 'Dagelijks' && r2b.banknaam === 'Privé' && r2b.groep === 'persoon:Pien' && JSON.stringify(j2.saldi.labels_in_gebruik) === '["Proeflabel"]' &&
+    j2.saldi.van_wie_keuzes.map((x) => x.waarde).join() === 'David,Cynthia,Pien,Bram,gedeeld,Gambia-hulp,extern', [g0, k1, k2, k3, k4, r2b]);
   const srv = fs.readFileSync('server.js', 'utf8');
+  toets('wv2292 server.js: app-rekening in BANK_LOKAAL, niet in BANK_OPDRACHTEN; gezin nergens (alleen CLI); route POST /app/financien/rekening', /const BANK_LOKAAL = \[[^\]]*'app-rekening'/.test(srv) &&
+    !/const BANK_OPDRACHTEN = \[[^\]]*'app-rekening'/.test(srv) && !/'gezin'/.test(srv.slice(srv.indexOf('const BANK_OPDRACHTEN'), srv.indexOf('const BANK_TERUG_PER_UUR'))) &&
+    /route === 'POST \/app\/financien\/rekening'\) return appFinRekening\(/.test(srv), null);
   toets('server.js: app-financien in BANK_LOKAAL (geen kluis), niet in BANK_OPDRACHTEN (/smal/bank)', /const BANK_LOKAAL = \[[^\]]*'app-financien'/.test(srv) && !/const BANK_OPDRACHTEN = \[[^\]]*'app-financien'/.test(srv), null);
   const src = fs.readFileSync('financien-app.js', 'utf8').replace(/^\s*(\*|\/\/).*$/gm, '');
   toets('financien-app.js laadt geen netwerk- of procesmodule en schrijft niets', !/require\(['"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads)['"]\)/.test(src) && !/\bfetch\s*\(/.test(src) && !/writeFile|appendFile|unlink|INSERT|UPDATE|DELETE/.test(src), null);
