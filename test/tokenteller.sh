@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Toetst tokenteller.js (wv1742, App TokenCounter; vervolg wv1247) en de koppeling in server.js. Toetst: per soort (gesorteerd, aandeel,
 # "Agents van Socev" als niet gemeten, nooit als 0; sinds wv1803 niet meer met socev_gemeten), per dag in vaste groepen (overig vangt de rest, oplopend op datum), top 10, signalen
-# in vaste volgorde met uitleg, geen titel of sessie-id in het antwoord, vaste plek zonder kluslabels en gespreksonderdelen, dag met
+# in vaste volgorde met uitleg, per routine (wv2335: duurste eerst, 7 dagen, geen kluslabel als naam, seintjes), geen titel of sessie-id in het antwoord, vaste plek zonder kluslabels en gespreksonderdelen, dag met
 # klussen (duurste eerst, optelling per soort, kapotte regel geteld, ongeldige datum = null, ontbrekende dag = leeg), symlink en te
 # groot bestand niet gelezen, tankUit; in server.js: dispatch, 404 zonder module, teller, stil bij 200, /health, RELEASE_OPTIONEEL, CI.
 # Alle toetsdata is verzonnen. Raakt niets buiten een wegwerpmap. Gebruik: bash test/tokenteller.sh
@@ -163,6 +163,42 @@ toets('11j onbekende soort: geen vrije naam uit het bestand', sr.soorten[0].naam
 toets('11k dag met soort "constructor" telt in overig', sr.per_dag[0].delen.overig === 2 && sr.per_dag[0].eur === 3, sr.per_dag[0]);
 toets('11l signalen zonder eigen sleutel = 0', sr.signalen.every(function (x) { return x.klussen === 0; }), sr.signalen);
 fs.rmSync(R, { recursive: true, force: true });
+
+// 12 per routine (wv2335, idee 17c)
+const P = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tokens-p-')));
+const PM = path.join(P, '00_Systeem', 'Tokens'); fs.mkdirSync(PM, { recursive: true });
+// gesloten register (review MOET 2): domeinen + onderdelen uit onderdelen.json + skillmappen
+fs.writeFileSync(path.join(PM, 'onderdelen.json'), JSON.stringify({ domeinen: { overig: 'Overig', volgorde: [{ naam: 'Voorbeelddomein', trefwoorden: ['x'] }] },
+  skill_labels: { a: { onderdeel: 'heartbeat', post: 'runtime' } }, patronen: Array.from({ length: 45 }, function (_, i) { return { onderdeel: 'klein' + i }; }) }));
+fs.mkdirSync(path.join(P, '.claude', 'skills', 'proefskill'), { recursive: true });
+const samP = JSON.parse(JSON.stringify(sam));
+samP.per_routine = {
+  venster_30d: { van: '2030-01-01', tot: '2030-01-30', dagen: 30, begin_kluslabels: '2029-12-25', totaal_usd: 125, totaal_eur: 100, routines: [
+    { routine: 'Routine: heartbeat', soort: 'routine', klussen: 30, usd: 12.5, eur: 10 },
+    { routine: 'Agents: Voorbeelddomein', soort: 'werkvoorraad-agent', klussen: 5, usd: 62.5, eur: 50 },
+    { routine: 'machinekamer:wv901 geheime-klus', soort: 'werkvoorraad-agent', klussen: 1, usd: 1.25, eur: 1 },
+    { routine: 'Gesprekken machinekamer', soort: 'gesprek-machinekamer', klussen: 3, usd: 25, eur: 20 },
+    { routine: 'Bel nu 0612345678!! <b>', soort: 'routine', klussen: 1, usd: 1.25, eur: 1 },
+    { routine: 'Routine: Jan Voorbeeld 0687654321', soort: 'routine', klussen: 1, usd: 1.25, eur: 1 },
+    { routine: 'Routine: proefskill', soort: 'routine', klussen: 1, usd: 2.5, eur: 2 },
+  ].concat(Array.from({ length: 45 }, function (_, i) { return { routine: 'Routine: klein' + i, soort: 'routine', klussen: 1, usd: 0.125, eur: 0.1 }; })) },
+  venster_7d: { van: '2030-01-24', totaal_usd: 25, totaal_eur: 20, routines: [{ routine: 'Agents: Voorbeelddomein', soort: 'werkvoorraad-agent', klussen: 1, usd: 12.5, eur: 10 }] },
+};
+samP.routine_seintjes = { week: { van: '2030-01-21', tot: '2030-01-27' }, lijst: [{ routine: 'Routine: heartbeat', week_usd: 10, mediaan_usd: 2.5, factor: 4 }, { routine: 'machinekamer:wv9 x', week_usd: 1, mediaan_usd: 0.1, factor: 10 }] };
+fs.writeFileSync(path.join(PM, 'samenvatting.json'), JSON.stringify(samP));
+const sp = T.maak({ vault: P, vv: VV }).stand({ vast: true });
+const rl = sp.routines && sp.routines.lijst || [];
+toets('12a routines duurste eerst', rl[0] && rl[0].naam === 'Agents: Voorbeelddomein' && rl[1].naam === 'Gesprekken machinekamer' && rl[2].naam === 'Routine: heartbeat', rl.slice(0, 3));
+toets('12b aandeel en 7 dagen', rl[0].aandeel === 0.5 && rl[0].eur_7d === 10 && rl[0].aandeel_7d === 0.5 && rl[2].eur_7d === 0, rl.slice(0, 3));
+toets('12c geen kluslabel of vrije tekst als naam, ook op de vaste plek', JSON.stringify(sp.routines).indexOf('geheime-klus') < 0 && JSON.stringify(sp.routines).indexOf('0612345678') < 0 && JSON.stringify(sp.routines).indexOf('wv9') < 0, sp.routines);
+const onb12 = rl.find(function (x) { return x.onbekend; });
+toets('12h naam buiten het register (ook in Routine:-vorm) niet getoond, wel geteld in één post', JSON.stringify(sp.routines).indexOf('Jan Voorbeeld') < 0 && onb12 && onb12.eur === 3 && onb12.klussen === 3 && onb12.naam === 'Overige posten (naam niet getoond)', onb12);
+toets('12i skillmap telt als bekende routine', rl.some(function (x) { return x.naam === 'Routine: proefskill' && x.eur === 2; }), rl.slice(0, 6));
+toets('12d hooguit 40 plus een restregel', rl.length === 41 && rl[40].rest === true && /^\d+ kleinere routines$/.test(rl[40].naam), { n: rl.length, laatste: rl[40] });
+toets('12e venster en begin', sp.routines.van === '2030-01-01' && sp.routines.van_7d === '2030-01-24' && sp.routines.begin_kluslabels === '2029-12-25' && sp.routines.totaal_eur === 100, sp.routines);
+toets('12f seintje in euro, kluslabel eruit', sp.routines.seintjes.length === 1 && sp.routines.seintjes[0].week_eur === 8 && sp.routines.seintje_week.van === '2030-01-21', sp.routines.seintjes);
+toets('12g zonder per_routine: routines null', s.routines === null, s.routines);
+fs.rmSync(P, { recursive: true, force: true });
 
 // 10 koppeling in server.js
 const src = fs.readFileSync('server.js', 'utf8');

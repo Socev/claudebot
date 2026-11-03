@@ -55,6 +55,19 @@ function soortNaam(soort) { return heeft(SOORT_NAAM, soort) ? SOORT_NAAM[soort] 
 function onderdeelVan(v) { const s = String(v == null ? '' : v); return /^[\p{L}\p{N} ()._:-]{1,60}$/u.test(s) ? s : null; }
 function modelVan(v) { const s = String(v == null ? '' : v); return /^[a-z0-9.-]{1,40}$/i.test(s) ? s : null; }
 // Kluslabel: alleen het deel na "machinekamer:" (dat is wat de bouwer koos); het woord zelf is ruis in de lijst
+// wv2335 (idee 17c): naam van een routine of domein ("Agents: OVIS / SB2", "Routine: heartbeat"); smal, nooit een kluslabel
+// (die beginnen met "machinekamer:" of "wv") en nooit vrije tekst.
+function routineNaamVan(v) {
+  const s = String(v == null ? '' : v);
+  return /^[\p{L}\p{N} ()/._:&-]{1,60}$/u.test(s) && !/machinekamer:|\bwv\d/i.test(s) ? s : null;
+}
+const ROUTINES_MAX = 40, SEINTJES_MAX = 10, ONDERDELEN_MAX = 512 * 1024, SKILLS_MAX = 500;
+// Review wv2335 MOET 2: alleen namen uit een gesloten register (de regex alleen liet "Routine: <vrije tekst>" door). Register = de vaste
+// soortnamen + "Agents: <domein>" uit domeinen in onderdelen.json + "Routine:/Manager: <onderdeel>" voor elk onderdeel in onderdelen.json
+// en elke skillmap (de tokenmeting kent precies die bronnen). De rest telt mee in één post zonder naam.
+const VASTE_ROUTINES = ['Gesprekken machinekamer', 'Gesprekken hoofdkanaal', 'Agents van Socev', 'Cijfer-Meester', 'Proefsessies', 'Bouw op de pc (archief)',
+  'werkvoorraad-agent', 'socev-agent', 'routine', 'manager', 'gesprek-hoofd', 'gesprek-machinekamer', 'cijfer-meester', 'proef', 'onbekend'];
+const ONBEKEND_NAAM = 'Overige posten (naam niet getoond)';
 function labelVan(v) { const s = typeof v === 'string' ? tekst(v, 120) : null; return s ? s.replace(/^machinekamer:\s*/, '').trim() || null : null; }
 
 function maak(opt) {
@@ -97,6 +110,37 @@ function maak(opt) {
     const l = namen.map(function (n) { const m = KLUS_BESTAND.exec(n); return m ? m[1] : null; }).filter(Boolean).sort().reverse().slice(0, DAGEN_MAX);
     dagenBuf = { t: Date.now(), l: l };
     return l;
+  }
+  let regBuf = null;   // { t, set }
+  function routineRegister() {
+    if (regBuf && Date.now() - regBuf.t < BUF_MS) return regBuf.set;
+    const set = new Set(VASTE_ROUTINES);
+    const ond = new Set(['onbekend']);
+    try {
+      const t = leesBestand(path.join(map, 'onderdelen.json'), ONDERDELEN_MAX);
+      const o = t == null ? null : JSON.parse(t);
+      const loop = function (x, diepte) {
+        if (!x || typeof x !== 'object' || diepte > 6) return;
+        if (Array.isArray(x)) { x.slice(0, 2000).forEach(function (v) { loop(v, diepte + 1); }); return; }
+        Object.keys(x).slice(0, 2000).forEach(function (k) {
+          if (k === 'onderdeel' && typeof x[k] === 'string') { const n = onderdeelVan(x[k]); if (n) ond.add(n); }
+          else loop(x[k], diepte + 1);
+        });
+      };
+      if (o) loop(o, 0);
+      const dom = o && o.domeinen && typeof o.domeinen === 'object' ? o.domeinen : null;
+      if (dom && Array.isArray(dom.volgorde)) dom.volgorde.slice(0, 100).forEach(function (d) { const n = routineNaamVan(d && d.naam); if (n) set.add('Agents: ' + n); });
+      set.add('Agents: ' + (dom && routineNaamVan(dom.overig) ? dom.overig : 'Overig'));
+    } catch (e) { /* geen of onleesbaar register: alleen de vaste namen */ }
+    let d = null;
+    try {
+      d = fs.opendirSync(path.join(vault, '.claude', 'skills'));
+      for (let e = d.readSync(), i = 0; e && i < SKILLS_MAX; e = d.readSync(), i++) if (/^[a-z0-9-]{1,60}$/.test(e.name)) ond.add(e.name);
+    } catch (e) { /* geen skillmap */ }
+    finally { if (d) { try { d.closeSync(); } catch (e) { /* al dicht */ } } }
+    ond.forEach(function (n) { set.add('Routine: ' + n); set.add('Manager: ' + n); });
+    regBuf = { t: Date.now(), set: set };
+    return set;
   }
   const koers = function (s) { const k = getal(s && s.dollars_per_euro); return k && k > 0.5 && k < 3 ? k : null; };
 
@@ -156,6 +200,61 @@ function maak(opt) {
         aandeel: totEur && getal(r.eur) != null ? rond(getal(r.eur) / totEur, 4) : null };
     });
     const per = s.periode || {};
+    // wv2335 (idee 17c): verbruik per routine (domein bij agents, onderdeel bij vaste routines), 30 en 7 dagen
+    const routines = (function () {
+      const pr = s.per_routine && typeof s.per_routine === 'object' ? s.per_routine : null;
+      const v30 = pr && pr.venster_30d && typeof pr.venster_30d === 'object' ? pr.venster_30d : null;
+      if (!v30 || !Array.isArray(v30.routines)) return null;
+      const v7 = pr.venster_7d && Array.isArray(pr.venster_7d.routines) ? pr.venster_7d : null;
+      const reg = routineRegister();
+      const bekend = function (v) { const n = routineNaamVan(v); return n && reg.has(n) ? n : null; };
+      const zeven = Object.create(null);
+      let zevenOnbekend = 0, zevenOnbekendHeeft = false;
+      if (v7) v7.routines.slice(0, 200).forEach(function (r) {
+        const n = bekend(r && r.routine);
+        if (n) zeven[n] = r; else { const e = getal(r && r.eur) != null ? getal(r.eur) : (getal(r && r.usd) != null && dpe ? getal(r.usd) / dpe : null); if (e != null) { zevenOnbekend += e; zevenOnbekendHeeft = true; } }
+      });
+      const eurVan = function (r) { const e = getal(r && r.eur); return e != null ? e : (getal(r && r.usd) != null && dpe ? getal(r.usd) / dpe : null); };
+      const tot30 = getal(v30.totaal_eur) != null ? getal(v30.totaal_eur) : (getal(v30.totaal_usd) != null && dpe ? getal(v30.totaal_usd) / dpe : null);
+      const tot7 = v7 ? (getal(v7.totaal_eur) != null ? getal(v7.totaal_eur) : (getal(v7.totaal_usd) != null && dpe ? getal(v7.totaal_usd) / dpe : null)) : null;
+      const onb = { naam: ONBEKEND_NAAM, soort: 'onbekend', groep: 'overig', klussen: 0, eur: 0, heeft: false };
+      const alle = v30.routines.slice(0, 200).map(function (r) {
+        const naam = bekend(r && r.routine);
+        if (!naam) { const e = eurVan(r); if (e != null) { onb.eur += e; onb.heeft = true; } onb.klussen += getal(r && r.klussen) || 0; return null; }
+        const soort = soortVan(r.soort), eur = eurVan(r), z = zeven[naam];
+        const eur7 = z ? eurVan(z) : (v7 ? 0 : null);
+        return { naam: naam, soort: soort, groep: groepVan(soort), klussen: getal(r.klussen), eur: rond(eur, 2),
+          aandeel: tot30 && eur != null ? rond(eur / tot30, 4) : null,
+          eur_7d: rond(eur7, 2), aandeel_7d: tot7 && eur7 != null ? rond(eur7 / tot7, 4) : null };
+      }).filter(Boolean);
+      if (onb.heeft || zevenOnbekendHeeft) {
+        const e7 = zevenOnbekendHeeft ? zevenOnbekend : (v7 ? 0 : null);
+        alle.push({ naam: onb.naam, soort: onb.soort, groep: onb.groep, klussen: onb.klussen, eur: rond(onb.eur, 2), aandeel: tot30 ? rond(onb.eur / tot30, 4) : null,
+          eur_7d: rond(e7, 2), aandeel_7d: tot7 && e7 != null ? rond(e7 / tot7, 4) : null, onbekend: true });
+      }
+      alle.sort(function (a, b) { return (b.eur || 0) - (a.eur || 0); });
+      const lijst = alle.slice(0, ROUTINES_MAX);
+      if (alle.length > ROUTINES_MAX) {
+        const rest = alle.slice(ROUTINES_MAX);
+        const eur = rest.reduce(function (a, r) { return a + (r.eur || 0); }, 0);
+        lijst.push({ naam: rest.length + ' kleinere routines', soort: 'rest', groep: 'overig', klussen: rest.reduce(function (a, r) { return a + (r.klussen || 0); }, 0),
+          eur: rond(eur, 2), aandeel: tot30 ? rond(eur / tot30, 4) : null, eur_7d: null, aandeel_7d: null, rest: true });
+      }
+      const rs = s.routine_seintjes && typeof s.routine_seintjes === 'object' ? s.routine_seintjes : {};
+      const week = rs.week && typeof rs.week === 'object' && DATUM.test(String(rs.week.van)) && DATUM.test(String(rs.week.tot)) ? { van: rs.week.van, tot: rs.week.tot } : null;
+      const seintjes = (Array.isArray(rs.lijst) ? rs.lijst : []).slice(0, SEINTJES_MAX).map(function (x) {
+        const naam = bekend(x && x.routine);
+        if (!naam) return null;
+        const w = getal(x.week_usd), m = getal(x.mediaan_usd);
+        return { naam: naam, week_eur: w != null && dpe ? rond(w / dpe, 2) : null, mediaan_eur: m != null && dpe ? rond(m / dpe, 2) : null, factor: rond(getal(x.factor), 1) };
+      }).filter(Boolean);
+      return {
+        van: DATUM.test(String(v30.van)) ? v30.van : null, tot: DATUM.test(String(v30.tot)) ? v30.tot : null,
+        van_7d: v7 && DATUM.test(String(v7.van)) ? v7.van : null,
+        begin_kluslabels: DATUM.test(String(v30.begin_kluslabels)) ? v30.begin_kluslabels : null,
+        totaal_eur: rond(tot30, 2), totaal_7d_eur: rond(tot7, 2), lijst: lijst, seintjes: seintjes, seintje_week: week,
+      };
+    })();
     return {
       ok: true, vaste_plek: vast,
       gemeten_op: typeof s.gegenereerd_op === 'string' && !isNaN(Date.parse(s.gegenereerd_op)) ? new Date(s.gegenereerd_op).toISOString() : null,
@@ -163,7 +262,7 @@ function maak(opt) {
       dollars_per_euro: dpe,
       totaal: { eur: rond(totEur, 2), usd: rond(getal(tot.usd), 2), tokens: getal(tot.totaal_invoer) != null ? getal(tot.totaal_invoer) + (getal(tot.uitvoer) || 0) : null, calls: getal(tot.calls) },
       groepen: GROEPEN.map(function (g) { return { id: g.id, naam: g.naam }; }),
-      soorten: soorten, per_dag: perDag, duurste: duurste, signalen: signalen,
+      soorten: soorten, per_dag: perDag, duurste: duurste, signalen: signalen, routines: routines,
       dagen: dagenMetKlussen(), tank: o && o.tank ? o.tank : null,
       bron: 'tokenboekhouding', niet_gemeten: (socevGemeten ? [] : ['Agents en andere runs van Socev zelf (zijn sessiemap is voor de meting niet leesbaar)'])
         .concat(['Cowork-cloudsessies, modelaanroepen vanuit n8n en lokale modellen op Olares']),
