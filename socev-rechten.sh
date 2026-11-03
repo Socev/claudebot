@@ -11,6 +11,15 @@
 #   vol       bij elke containerstart (socev-voorbereiding.sh) en eens per dag (run.sh)
 #   na-ronde  elke 5 minuten (run.sh, ook als bisync passief is): ACL en masker herstellen op wat er veranderde, plus de
 #             bewaakte plekken
+#   eigen-masker  (wv2282) de ENIGE ronde die als socev (1002) draait, bij elke containerstart (socev-voorbereiding.sh, ná
+#             vol): eigen vaultbestanden en -mappen van socev zonder groepsleesrecht krijgen u:claude en masker rw (mappen rwx).
+#             Waarom als socev: alleen de eigenaar (of root) mag een ACL zetten, en claude is geen eigenaar; root zou hier
+#             op paden schrijven die socev beheert. Socev die zijn eigen bestanden openzet voor claude kruist geen grens.
+#             Aanleiding 3-11-2026: een PDF van socev met modus 600 en masker --- (curl -o /tmp/..., cp naar de vault) brak de
+#             vault-snapshot de hele nacht. De echte oorzaak (umask 077 in de kinderen van de loper) is sinds wv2282 weg; dit
+#             is het vangnet, over alle eigen vaultbestanden van socev (ook zonder ACL-regel voor claude). DEKT NIET: tussen
+#             twee containerstarts (dan alleen de umask 007 van de loper; een mv van een bestand zonder ACL blijft dan tot de
+#             volgende start dicht voor claude). Code-plekken blijven buiten deze ronde, zoals overal hier.
 #
 # WAT socev MAG
 #   /opt/data               alleen doorlopen (0711), niet opsommen; alle andere entries o-rwx
@@ -46,7 +55,8 @@ FOUTEN=0
 log(){ echo "$(date '+%F %T') socev-rechten $WAT: $*"; }
 acl(){ setfacl -P "$@" 2>/dev/null || FOUTEN=$((FOUTEN + 1)); }
 
-[ "$(id -un)" = "claude" ] || { log "STOP: draait als $(id -un), moet claude zijn"; exit 1; }
+VERWACHT=claude; [ "$WAT" = "eigen-masker" ] && VERWACHT=socev
+[ "$(id -un)" = "$VERWACHT" ] || { log "STOP: draait als $(id -un), moet $VERWACHT zijn"; exit 1; }
 command -v setfacl >/dev/null || { log "STOP: setfacl ontbreekt (pakket acl)"; exit 1; }
 id socev >/dev/null 2>&1 || { log "STOP: gebruiker socev ontbreekt"; exit 1; }
 
@@ -239,5 +249,19 @@ if [ "$WAT" = "na-ronde" ]; then
   exit 0
 fi
 
-log "onbekende opdracht (vol | na-ronde)"
+if [ "$WAT" = "eigen-masker" ]; then
+  # Als socev (zie de kop). find -P en setfacl -P volgen geen symlink; -execdir zoals overal. Alle eigen bestanden en mappen
+  # buiten de code-plekken (idempotent; review wv2282 MOET 1: ook een bestand mét groepsleesrecht maar zonder regel voor
+  # claude, bv. met mv uit een map zonder ACL). Geteld wordt wat geen groepsleesrecht had (-perm -g=r leest bij een ACL het
+  # masker): normaal 0. Bestanden rw, mappen rwx: rwX zou een PDF ook x geven zodra een geërfde ACL-regel x heeft.
+  [ -d "$V" ] || exit 0
+  N=$(find -P "$V" -mindepth 1 ! -type l -user socev ! -perm -g=r ! \( "${CODEPLEK[@]}" \) -printf . 2>/dev/null | wc -c)
+  A=$(find -P "$V" -mindepth 1 ! -type l -user socev ! \( "${CODEPLEK[@]}" \) -printf . 2>/dev/null | wc -c)
+  find -P "$V" -mindepth 1 -type d -user socev ! \( "${CODEPLEK[@]}" \) -execdir setfacl -P -m u:claude:rwx,m::rwx {} + 2>/dev/null || FOUTEN=$((FOUTEN + 1))
+  find -P "$V" -mindepth 1 ! -type d ! -type l -user socev ! \( "${CODEPLEK[@]}" \) -execdir setfacl -P -m u:claude:rw,m::rw {} + 2>/dev/null || FOUTEN=$((FOUTEN + 1))
+  log "klaar: $A van socev nagelopen, $N zonder groepsleesrecht hersteld, fouten: $FOUTEN"
+  exit 0
+fi
+
+log "onbekende opdracht (vol | na-ronde | eigen-masker)"
 exit 2

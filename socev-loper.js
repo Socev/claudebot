@@ -38,6 +38,19 @@
  *                                       → alleen binnen socev-thuis/.claude/projects en socev-thuis/.codex/sessions
  *                                         (transcripts zijn 0600 en voor server.js anders onleesbaar)
  * Logt nooit inhoud (geen args, env, invoer of uitvoer); alleen op, id, pid, code. Geen eigen netwerk.
+ *
+ * UMASK (wv2282, 3-11-2026). De loper zelf houdt umask 077; de kinderen (gesprekken en agents) starten met 007. Aanleiding:
+ * 2-11 15:02 haalde een gesprek een bijlage op met curl -o /tmp/..., en cp naar de vault gaf een bestand met modus 600. In een
+ * map met standaard-ACL wordt de modus van de bron de bovengrens van het ACL-masker: masker ---, u:claude telt niet meer, en
+ * de vault-snapshot (als claude) faalde de hele nacht. Met 007 houdt zo'n bestand groepsrecht rw en wordt het masker rw.
+ * Waarom dit de grens niet opent: de groep socev heeft geen leden en claude zit er niet in (gemeten 3-11), "anderen" blijft
+ * dicht; een bestand van socev buiten de vault (/tmp, de thuismap) wordt voor claude dus niet leesbaarder dan de ACL van
+ * die plek al toestond. In de vault, io en het gedeelde geheugen geeft het masker rw alleen de benoemde ACL-regels
+ * (u:claude, u:socev) hun recht terug. De andere richting (wat socev mag) verandert niet: umask gaat over eigen bestanden.
+ * HOE. process.umask wisselen rond de spawn-aanroep: spawn() doet fork/exec synchroon, het kind erft de umask van dat
+ * moment, en direct daarna (ook bij een fout) staat de loper weer op 077. De loper schrijft zelf geen bestanden (alleen
+ * openSync 'r' in opLees) en heeft geen worker-threads; er draait in dat venster niets anders. Gekozen boven
+ * sh -c 'umask 007; exec …': dan zou elk gesprek via een shell starten met de argumenten erdoorheen (meer om fout te doen).
  */
 'use strict';
 const fs = require('fs');
@@ -45,7 +58,8 @@ const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const VERSIE = 'wv785-1';
+const VERSIE = 'wv2282-1';
+const KIND_UMASK = 0o007;   // zie UMASK hierboven
 const VAULT = process.env.SOCEV_LOPER_VAULT || '/opt/data/AI_SecondBrain';
 const IO = process.env.SOCEV_LOPER_IO || '/opt/data/io';
 const THUIS = process.env.SOCEV_LOPER_THUIS || '/opt/data/socev-thuis';
@@ -138,9 +152,11 @@ function opStart(v, sock) {
   env.USER = 'socev'; env.LOGNAME = 'socev'; env.SHELL = '/bin/bash';
   if (!env.PATH) env.PATH = '/usr/local/bin:/usr/bin:/bin';
   let kind;
+  const eigenUmask = process.umask(KIND_UMASK);   // alleen voor het kind; direct terug (UMASK, wv2282)
   try {
     kind = spawn(bin, args, { cwd: cwd, env: env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
   } catch (e) { return { fout: 'spawn-mislukt', code: e.code || null }; }
+  finally { process.umask(eigenUmask); }
   const j = { id: v.id, brein: v.brein, pid: kind.pid || null, kind: kind, gestart: Date.now(), klaar: 0, code: null, signaal: null,
     uit: { delen: [], lengte: 0, totaal: 0, afgekapt: false }, fout: { delen: [], lengte: 0, totaal: 0, afgekapt: false },
     volgers: new Set([sock]) };

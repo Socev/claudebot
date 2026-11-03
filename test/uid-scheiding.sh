@@ -90,6 +90,7 @@ docker cp "$HIER/argv-hook-toets.py" "$C":/tmp/argv-hook-toets.py
 r 'chmod 644 /tmp/loper-klant.js /tmp/argv-hook-toets.py'
 echo "-- containerlog (socev-regels) --"; docker logs "$C" 2>&1 | grep -E 'socev|loper' | head -20
 ok "voorbereiding: rechten zonder fouten" "docker logs $C 2>&1 | grep -q 'socev-rechten vol: klaar in .* fouten: 0'"
+ok "voorbereiding: eigen-masker als socev, niets te doen, zonder fouten (wv2282)" "docker logs $C 2>&1 | grep -q 'socev-rechten eigen-masker: klaar: .* nagelopen, 0 zonder groepsleesrecht hersteld, fouten: 0'"
 ok "voorbereiding: thuismap ingericht" "docker logs $C 2>&1 | grep -q 'socev-thuis: klaar'"
 ok "root-lus heeft de socket gebonden" "docker logs $C 2>&1 | grep -q 'loper-bind: socket /run/socev-loper/loper.sock gebonden'"
 
@@ -209,7 +210,7 @@ PING=$(loper '{"op":"ping"}')
 echo "  ping: $PING"
 LOPER=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["antwoorden"][0]["pid"])' "$PING" 2>/dev/null)
 ok   "1001 bereikt de loper, die draait als 1002"            "python3 -c 'import json,sys; a=json.loads(sys.argv[1])[\"antwoorden\"][0]; sys.exit(0 if a[\"ok\"] and a[\"uid\"]==1002 and a[\"gid\"]==1002 else 1)' '$PING'"
-ok   "loper-versie wv785-1 (volg in één tick, socket-eigenaar)" "grep -q '\"versie\":\"wv785-1\"' <<<'$PING'"
+ok   "loper-versie wv2282-1 (kinderen met umask 007; volg in één tick, socket-eigenaar)" "grep -q '\"versie\":\"wv2282-1\"' <<<'$PING'"
 ok   "loper: uid 1002, NoNewPrivs 1, geen capabilities, geen groepen" "loper_status $LOPER"
 ok   "loper-omgeving zonder pod-sleutels"                    "zonder_sleutels $LOPER"
 LUS=$(r "pgrep -u 0 -f loper-bind.py | head -1")
@@ -253,12 +254,26 @@ ok   "managed settings: root, hook python3 -I /app/argv-wacht.py, allowManagedHo
 ok   "argv-hook in het image: 24 weigeren + 22 doorlaten"   "$(a 'python3 /tmp/argv-hook-toets.py /app/argv-wacht.py')"
 ok   "CLI-binary noemt /etc/claude-code (string; of de hook vuurt, meet fase 2 in de pod)" "cli_managed"
 
+echo "== vangnet eigen-masker (wv2282) =="
+# 2-11-2026: een gesprek zette een bijlage met curl -o in /tmp (umask 077: modus 600) en cp naar de vault: masker ---, de
+# vault-snapshot (als claude) faalde. Hier zonder loper nagedaan; de herstart hieronder draait eigen-masker als socev.
+ok   "1002 zet een 600-bestand uit /tmp met cp in de vault"   "$(s "umask 077; mkdir -p /tmp/cw && echo pdf > /tmp/cw/f.pdf && cp /tmp/cw/f.pdf $V/00_Systeem/bijlage.pdf")"
+ok   "  masker ---"                                          "r 'getfacl -p $V/00_Systeem/bijlage.pdf' | grep -q '^mask::---'"
+niet "  1001 leest het niet"                                 "$(a "cat $V/00_Systeem/bijlage.pdf")"
+ok   "1002 zet een bestand met groepsleesrecht maar zonder ACL (zoals mv van buiten)" "$(s "echo z > $V/00_Systeem/zonder-acl.md && setfacl -b $V/00_Systeem/zonder-acl.md && chmod 640 $V/00_Systeem/zonder-acl.md")"
+niet "  1001 leest het niet (groep socev)"                   "$(a "cat $V/00_Systeem/zonder-acl.md")"
+niet "eigen-masker als 1001 geweigerd (alleen socev)"       "$(a 'bash /app/socev-rechten.sh eigen-masker')"
+
 echo "== herstart: idempotent, eigendom blijft =="
 docker restart "$C" >/dev/null
 sleep 2
 for i in $(seq 1 90); do docker exec "$C" curl -fsS -m 3 http://127.0.0.1:8080/health >/dev/null 2>&1 && break; sleep 1; done
 ok   "tweede start: rechten zonder fouten"                   "[ \"\$(docker logs $C 2>&1 | grep -c 'socev-rechten vol: klaar in .* fouten: 0')\" = 2 ]"
 ok   "tweede start: niets opzij gezet"                       "! docker exec $C bash -c 'ls -d /opt/data/socev-thuis.weg-* /opt/data/socev-thuis/*.weg-* /opt/data/socev-thuis/.claude/projects/*/*.weg-* 2>/dev/null | grep -q .'"
+ok   "eigen-masker na herstart: 1 zonder groepsleesrecht hersteld, fouten 0 (wv2282)" "docker logs $C 2>&1 | grep -q 'socev-rechten eigen-masker: klaar: .* nagelopen, 1 zonder groepsleesrecht hersteld, fouten: 0'"
+ok   "  1001 leest de bijlage weer, masker rw"               "$(a "cat $V/00_Systeem/bijlage.pdf") && r 'getfacl -p $V/00_Systeem/bijlage.pdf' | grep -q '^mask::rw-'"
+ok   "  1001 leest ook het bestand zonder ACL weer (review wv2282 MOET 1)" "$(a "cat $V/00_Systeem/zonder-acl.md")"
+ok   "  bijlage blijft van socev"                            "stat_is $V/00_Systeem/bijlage.pdf '%U' socev"
 ok   "bestand van socev in de vault blijft van socev"        "stat_is $V/00_Systeem/socev.md '%U' socev"
 ok   "thuismap blijft van socev (chown slaat hem over)"      "stat_is /opt/data/socev-thuis/.claude.json '%U' socev"
 niet "na herstart: 1002 nog steeds niet bij staat.json"      "$(s 'cat /opt/data/bank/bunq/staat.json')"

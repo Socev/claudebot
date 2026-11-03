@@ -35,6 +35,8 @@ case "$1" in
   env) env | sort ;;
   fds) for f in /proc/$$/fd/*; do echo "fd $(basename $f) -> $(readlink $f)"; done ;;
   tcp) exec 5<>"/dev/tcp/127.0.0.1/$2"; echo verbonden; sleep 6 ;;
+  umask) umask ;;
+  kopieer) d=$(mktemp -d) && echo bijlage > "$d/f.pdf" && cp "$d/f.pdf" "$2/f.pdf" && rm -rf "$d" && stat -c "modus %a" "$2/f.pdf" && getfacl -p "$2/f.pdf" | grep "^mask::" ;;
   veel) for b in $(seq 1 "$2"); do for i in $(seq 1 "$3"); do echo "r$b.$i"; done; sleep 0.001; done ;;
 esac
 exit 0
@@ -53,8 +55,12 @@ loper = {"p": None}
 stoppen = {"ja": False}
 
 
+# LOPER_JS alleen voor de kruisproef (een oudere socev-loper.js tegen deze toets).
+LOPER_JS = os.environ.get("LOPER_JS") or os.path.join(REPO, "socev-loper.js")
+
+
 def start_loper():
-    loper["p"] = subprocess.Popen(["node", os.path.join(REPO, "socev-loper.js")], env=ENV, pass_fds=(3,),
+    loper["p"] = subprocess.Popen(["node", LOPER_JS], env=ENV, pass_fds=(3,),
                                   stdin=subprocess.DEVNULL, stderr=open(T + "/loper.log", "a"))
 
 
@@ -115,6 +121,22 @@ ok("smalle sleutels komen in de omgeving van het kind", all(x in r["uit"] for x 
 r = klant({"op": "start", "id": "j6d", "brein": "claude", "args": ["fds"], "cwd": VAULT}, tot_einde="j6d")
 LUISTER = os.readlink("/proc/self/fd/3")
 ok("kind erft de luistersocket van de loper niet (%s)" % LUISTER, "fd 0" in r["uit"] and LUISTER not in r["uit"], r["uit"])
+# wv2282: het kind start met umask 007, de loper zelf blijft op 077. Een bestand dat het kind eerst in een tmp-map maakt
+# (modus 600 onder 077) en daarna met cp naar een map met standaard-ACL zet, kreeg masker --- (2-11-2026: vault-snapshot faalde).
+r = klant({"op": "start", "id": "j6e", "brein": "claude", "args": ["umask"], "cwd": VAULT}, tot_einde="j6e")
+ok("kind start met umask 0007 (wv2282)", "\n0007\n" in "\n" + r["uit"], r["uit"])
+UM = [l.split()[1] for l in open("/proc/%d/status" % loper["p"].pid) if l.startswith("Umask:")]
+ok("loper zelf blijft op umask 0077 na de spawn (wv2282)", UM == ["0077"], UM)
+if shutil.which("setfacl") and shutil.which("getfacl"):
+    ACLMAP = os.path.join(VAULT, "acl-map")
+    os.makedirs(ACLMAP)
+    subprocess.run(["setfacl", "-m", "u:%d:rwx,m::rwx" % os.getuid(), "-d", "-m", "u::rwx,u:%d:rwx,g::r-x,m::rwx,o::---" % os.getuid(), ACLMAP], check=True)
+    r = klant({"op": "start", "id": "j6f", "brein": "claude", "args": ["kopieer", ACLMAP], "cwd": VAULT}, tot_einde="j6f")
+    ok("tmp-bestand van het kind, cp naar map met standaard-ACL: modus 660, masker rw (wv2282)",
+       "modus 660" in r["uit"] and "mask::rw-" in r["uit"], r["uit"])
+else:
+    print("OVERGESLAGEN ACL-deel (setfacl/getfacl ontbreekt)")
+
 r = klant({"op": "start", "id": "j7", "brein": "claude", "args": ["--x"], "cwd": IO + "/job1"}, tot_einde="j7")
 ok("cwd in io toegestaan", r["einde"] == {"code": 0, "signaal": None}, r)
 
