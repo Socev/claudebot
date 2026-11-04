@@ -19018,6 +19018,7 @@ function docsDelenInfo() {
 //   GET  /app/memorylane/h/<hid>/gevel/k (wv2314, de straat: miniatuur van de gevel, zonder fotolijst; toonmodus alleen toonbaar, anders 404)
 //   POST /app/memorylane/h/<hid>/zicht {kring, aan} · titel {titel} · wanneer {van, tot} (wv2180) · tekst {tekst, soort} · categorie {categorie, gevoelig} · toon-opname {aan} · toch-delen
 //   POST /app/memorylane/stuk/<sid>/opnemen|afwijzen|bewaren|weggooien · POST /app/memorylane/link/<kring>/aan|uit|vernieuw
+//   POST /app/memorylane/h/<hid>/verteller (verse vingerafdruk; 202, maakt op de achtergrond) · POST …/verteller/weg · GET …/verteller/<n> (wv2366)
 //   POST /app/memorylane/h/<hid>/plaatje/voorstel → {beschrijving} · POST …/plaatje {beschrijving} (naar OpenAI: verse vingerafdruk, niet vanaf
 //        een vaste plek; wv2325) · POST …/plaatje/weg. Niet in de toonmodus (niet in ML_TOON_ROUTES); de gevelroute geeft het plaatje.
 // Naar buiten (zicht aan, link aan, toch delen): verse vingerafdruk en nooit vanaf een vaste plek (zoals Docs › Delen). Dichter maken mag altijd.
@@ -19056,6 +19057,8 @@ const memorylaneDelen = (function () {
       // wv2325: Plaatje maken via openai-hulp (alleen de beschrijving gaat naar OpenAI; teller en maandgrens daar)
       beeld: function (x) { return openaiHulp && typeof openaiHulp.beeld === 'function' ? openaiHulp.beeld({ afnemer: 'memorylane-plaatje', prompt: x && x.prompt, kwaliteit: 'medium' }) : Promise.resolve({ ok: false, status: 'uit' }); },
       marker: require(path.join(__dirname, 'intake', 'patientpoort.js')), geheimen: function () { try { return openaiPodGeheimen(); } catch (e) { return []; } },
+      // wv2366: de verteller in Davids eigen stem via de Olares Router (zelfde sleutel en route als Studio/Bandjes, eigen plafond in de module)
+      eleven: { sleutel: function () { return studioSleutel(); }, routerUrl: process.env.STUDIO_ROUTER_URL },
       categorieen: HERINNERINGEN_MOD.CATEGORIEEN, onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
       fout: logError, box: function (t) { ovisBoxRij(t); },
       d1: SERVER_ECHT || process.env.ML_D1_TOETS ? async function (sql, params) {
@@ -19127,6 +19130,14 @@ async function appMemorylane(req, res, a, s, route, d) {
       if (u.status === 200) daarna();
       return antw(m[2], u);
     }
+    // wv2366: de verteller in Davids eigen stem. Maken = de tekst gaat naar ElevenLabs en kost geld: verse vingerafdruk (ook vanaf een vaste
+    // plek: er wordt niets gedeeld). Het maken loopt op de achtergrond (202); de app volgt de stand via het detail.
+    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/verteller(\/weg)?$/.exec(route))) {
+      if (m[2]) return antw('verteller weg', memorylaneDelen.vertellerWeg(m[1], toon));
+      if (!appVersOk(a, s)) { res._app.reden = 'memorylane verteller, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk: de tekst gaat naar ElevenLabs en dat kost een paar cent', vers_nodig: true }); }
+      return antw('verteller', memorylaneDelen.vertellerMaken(m[1], toon));
+    }
+    if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/verteller\/([1-9])$/.exec(route))) return antw('verteller deel', memorylaneDelen.vertellerDeel(m[1], Number(m[2]), toon));
     // wv2325: Plaatje maken (ontwerp fase R § 12.1). Maken = de beschrijving gaat naar OpenAI: verse vingerafdruk en niet vanaf een vaste plek.
     if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/plaatje(\/voorstel|\/weg)?$/.exec(route))) {
       if (m[2] === '/voorstel') return antw('plaatje voorstel', memorylaneDelen.plaatjeVoorstel(m[1], toon));

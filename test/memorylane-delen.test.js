@@ -47,7 +47,7 @@ function nepVerhaal(staat) {
       alineas: v.alineas.map((a, i) => ({ tekst: V.pasCorrectiesToe(a, cs), t_van: i * 60, t_tot: i * 60 + 60, twijfel: v.twijfel && i === 0 ? [{ woord: v.twijfel, soort: 'naam' }] : [] })) }] };
   } };
 }
-function omgeving() {
+function omgeving(extra) {
   const basis = fs.mkdtempSync(path.join(os.tmpdir(), 'ml-delen-toets-'));
   const idir = path.join(basis, 'intake'), vault = path.join(basis, 'vault'), hdir = path.join(basis, 'herinneringen');
   for (const m of [idir, vault, path.join(vault, '20_Prive/Reizen'), path.join(vault, H.NOTITIE_MAP)]) fs.mkdirSync(m, { recursive: true });
@@ -66,9 +66,9 @@ function omgeving() {
     return { ok: true, rijen: /^\s*SELECT/i.test(sql) ? st.all(...params) : (st.run(...params), []) };
   };
   const fouten = [];
-  const ml = M.maak({ db: ing._db, vault, vv: VV, dir: hdir, d1, kluis: async (n) => staat.kluis[n] || null, marker: P, geheimen: () => [NEP_GEHEIM],
+  const ml = M.maak(Object.assign({ db: ing._db, vault, vv: VV, dir: hdir, d1, kluis: async (n) => staat.kluis[n] || null, marker: P, geheimen: () => [NEP_GEHEIM],
     categorieen: H.CATEGORIEEN, onderhoudAan: () => staat.onderhoud, nachtgrendel: () => false, nu: () => klok.t, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)),
-    reisVandaag: () => '2026-10-31', verhaal: nepVerhaal(staat) });
+    reisVandaag: () => '2026-10-31', verhaal: nepVerhaal(staat) }, extra || {}));
   // een opname met notitie zoals herinneringen.js hem achterlaat (verzonnen)
   function opname(id, cat, gevoelig) {
     const rel = path.join(H.NOTITIE_MAP, '2026-10-31_' + id.slice(-6) + '.md');
@@ -667,4 +667,49 @@ test('wv2306 server.js: toonpoort vóór alle routes, alleen de leesroutes; uit 
   assert.match(src, /if \(!d\.aan && toon\.toon && !appVersOk\(a, s\)\)/, 'uitzetten alleen vers');
   assert.match(src, /if \(reden !== 'poets' && mlToonAan\(id\)\) return \{ ok: false, reden: 'toonmodus' \};/, 'geen seintjes');
   assert.match(src, /toon: !!\(a && mlToonAan\(a\.id\)\)/, '/app/status kent de toonmodus');
+});
+
+test('wv2366 verteller: detail geeft stand en kosten; alleen bij mag; Privé/gevoelig/toon = nooit; verhaal veranderd = verouderd; gevoelig geworden = weg in de tik', async () => {
+  const teksten = [];
+  const MP3 = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(400, 1)]);
+  const nf = async (u, x) => { teksten.push(JSON.parse(x.body).text); return { ok: true, status: 200, headers: { get: () => null }, text: async () => '', arrayBuffer: async () => Uint8Array.from(MP3).buffer }; };
+  const o = omgeving({ eleven: { sleutel: async () => 'nep', routerUrl: 'https://router.proef', fetch: nf } });
+  const wacht = async (hid) => { for (let i = 0; i < 100 && o.ml.detail(hid).body.herinnering.verteller.stand === 'bezig'; i++) await new Promise((r) => setTimeout(r, 5)); };
+  try {
+    o.opname(RA, 'shizzle', false); o.opname(RB, 'prive', true); o.opname(RC, 'gezin', true);
+    o.staat.verhalen[RA] = { titel: 'Proefkamp Vuur', alineas: ['Socev las het voor bij het kampvuur in Proefdorp.'] };
+    o.staat.verhalen[RB] = { titel: 'Proefgeheim Prive', alineas: ['Geheime proeftekst privé.'] };
+    o.staat.verhalen[RC] = { titel: 'Proefgeheim Vinkje', alineas: ['Geheime proeftekst met vinkje.'] };
+    o.ml.lijst();
+    const ha = o.hid('opname', RA), hb = o.hid('opname', RB), hc = o.hid('opname', RC);
+    const v = o.ml.detail(ha).body.herinnering.verteller;
+    assert.strictEqual(v.kan, null); assert.strictEqual(v.stand, null); assert.ok(v.vooraf.eur >= 0.01 && v.vooraf.past);
+    for (const h of [hb, hc]) {
+      const w = o.ml.detail(h).body.herinnering.verteller;
+      assert.match(w.kan, /Privé of gevoelig/); assert.strictEqual(w.vooraf, null);
+      assert.strictEqual(o.ml.vertellerMaken(h).status, 409);
+    }
+    assert.strictEqual(o.ml.vertellerMaken(ha, { toon: true }).status, 403);
+    assert.strictEqual(teksten.length, 0, 'niets naar ElevenLabs');
+    assert.strictEqual(o.ml.vertellerMaken(ha).status, 202);
+    await wacht(ha);
+    assert.strictEqual(teksten.length, 1);
+    assert.ok(teksten[0].includes('Zo Kef') && !/Socev/.test(teksten[0]) && teksten[0].includes('kampvuur'), 'tekst met uitspraak');
+    assert.strictEqual(o.ml.detail(ha).body.herinnering.verteller.stand, 'klaar');
+    const d = o.ml.vertellerDeel(ha, 1);
+    assert.strictEqual(d.status, 200); assert.strictEqual(d.body.mime, 'audio/mpeg');
+    assert.strictEqual(o.ml.vertellerDeel(ha, 1, { toon: true }).status, 403);
+    assert.ok(!('verteller' in o.ml.detail(ha, { toon: true }).body.herinnering), 'toonmodus: geen verteller');
+    // het verhaal verandert: niet meer afspelen
+    o.staat.verhalen[RA] = { titel: 'Proefkamp Vuur', alineas: ['Een ander verhaal over het kampvuur.'] };
+    assert.strictEqual(o.ml.detail(ha).body.herinnering.verteller.stand, 'verouderd');
+    assert.strictEqual(o.ml.vertellerDeel(ha, 1).status, 409);
+    // gevoelig geworden: de tik wist de audio meteen (review MOET 2)
+    o.ing._db.prepare('UPDATE ramble SET herinnering_gevoelig = 1 WHERE ramble_id = ?').run(RA);
+    await o.ml.tik();
+    assert.ok(!fs.existsSync(path.join(o.hdir, 'verteller', ha)), 'audio weg');
+    assert.strictEqual(o.ml.info().verteller.aantal, 0);
+    assert.ok(!/Proefkamp|kampvuur/.test(JSON.stringify(o.ml.info())), 'geen tekst in info');
+    assert.strictEqual(o.ml.vertellerWeg(ha).status, 200);
+  } finally { o.sluit(); }
 });

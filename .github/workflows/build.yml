@@ -376,6 +376,11 @@ jobs:
       - name: "memorylane-delen (wv2114, deellinks familie/vrienden)"
         if: ${{ !cancelled() }}
         run: bash test/memorylane-delen.sh
+      # MemoryLane-verteller in Davids eigen stem (wv2366): nep-ElevenLabs, plafond € 5/maand, weigeringen, verouderd, weghalen/opruimen,
+      # geen tekst in het register.
+      - name: "memorylane-verteller (wv2366, eigen stem)"
+        if: ${{ !cancelled() }}
+        run: bash test/memorylane-verteller.sh
       # MemoryLane × Immich (wv2120): witte lijst (alleen lezen + leeg album), Exif-poort, albums idempotent, foto's alleen uit een gekoppeld
       # album, foto's bij de deellinks alleen als David het aanzet en weg bij uit/gevoelig/link uit.
       - name: "memorylane-immich (wv2120, foto's uit Immich)"

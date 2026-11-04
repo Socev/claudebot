@@ -25,6 +25,8 @@
  *    neemt hooguit 8 miniaturen mee naar D1 ml_foto, alleen als David foto_delen per herinnering aanzette (standaard uit).
  *  - Plaatje maken (wv2325, ontwerp § 12.1): met o.beeld maakt memorylane-plaatje.js voor een herinnering zonder foto een gegenereerd plaatje
  *    als gevel. Alleen niet-gevoelig, met categorie, geen foto, niet in de toonmodus; de pod stelt de beschrijving voor, David past hem aan.
+ *  - Verteller in Davids eigen stem (wv2366): met o.eleven maakt memorylane-verteller.js op Davids tik de vertelling (ElevenLabs, eigen
+ *    stem, v4) en bewaart hem op de pod. Alleen actief, categorie gekozen en niet Privé, niet gevoelig, geen blok, niet in de toonmodus.
  * PRIVACY. Nooit tekst, titels of namen in logs, box, /health of fouten: alleen ids en aantallen.
  * VORM. Alleen fs, path, crypto en reizen.js (wv2136: de reispagina's, gedeeld met Tripper); D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
  *
@@ -197,6 +199,14 @@ function maak(o) {
     if (typeof o.beeld !== 'function') return null;
     try { return require('./memorylane-plaatje.js').maak({ db, dir: DIR, nu, fout, beeld: o.beeld, geheimRaak: (t) => geheimRaak(t), markerRaak: (l) => markerRaak(l) }); }
     catch (e) { fout('ml-plaatje', e); return null; }
+  })();
+  // wv2366: de verteller in Davids eigen stem (ElevenLabs via de Router; alleen met o.eleven; ontbreekt memorylane-verteller.js, dan zonder)
+  const V = (function () {
+    if (!o.eleven || typeof o.eleven.sleutel !== 'function') return null;
+    try {
+      return require('./memorylane-verteller.js').maak({ db, dir: DIR, nu, fout, sleutel: o.eleven.sleutel, routerUrl: o.eleven.routerUrl, fetch: o.eleven.fetch,
+        geheimRaak: (t) => geheimRaak(t), markerRaak: (l) => markerRaak(l), klaar: o.eleven.klaar });
+    } catch (e) { fout('ml-verteller', e); return null; }
   })();
   let laatsteWw = 0, laatsteControle = 0, laatsteOphaal = 0, vuil = new Set(KRINGEN), bezig = false, laatst = null, onleesbaar = 0, d1Fout = false;
 
@@ -710,6 +720,7 @@ function maak(o) {
     try {
       bijwerken();
       if (P) { try { P.opruim((hid) => !!q.h.get(hid)); } catch (e) { fout('ml-plaatje', e); } }
+      if (V) { try { V.opruim((hid) => { const h = q.h.get(hid); return !!h && !vertellerNiet(h); }); } catch (e) { fout('ml-verteller', e); } }   // wv2366 (review MOET 2)
       uit.vault = naarVault();
       if (F) { try { const f = await fotoSync(false); if (f && (f.nieuw || f.overgenomen || f.weg || f.deel)) { uit.albums = f.nieuw + f.overgenomen; vuilAlle(); } } catch (e) { fout('ml-immich', e); } }
       if (!o.d1) return uit;
@@ -823,6 +834,7 @@ function maak(o) {
     if (h.soort === 'reis') uit.pagina = h.ref;
     uit.pagina_stukken = paginaRel(h.hid);
     uit.voorstellen = voorstellenVan(s);
+    uit.verteller = vertellerKort(h, pagina, s);   // wv2366
     return { status: 200, body: { ok: true, herinnering: uit } };
   }
   function zicht(hid, d) {
@@ -1049,6 +1061,57 @@ function maak(o) {
     if (u.status === 200 && h.status !== 'weg') u.body.herinnering = kort(q.h.get(h.hid));
     return u;
   }
+  // ── wv2366: de verteller in Davids eigen stem ──
+  // Mag de verteller deze herinnering vertellen? → null of de reden (gewone taal). Actief, categorie gekozen en niet Privé, niet gevoelig,
+  // geen blok (geheim of patiëntmarker gezien), niet in de toonmodus. Zelfde regel bij maken, afspelen en opruimen.
+  function vertellerNiet(h, opt) {
+    if (!V) return 'de verteller in je eigen stem zit niet in deze versie';
+    if (opt && opt.toon) return 'niet in de toonmodus';
+    if (!h || h.status !== 'actief') return 'deze herinnering is (nog) niet actief';
+    const c = catVan(h);
+    if (!c.categorie || c.categorie === 'prive' || isGevoelig(h)) return 'Bij Privé of gevoelig vertelt de verteller niet.';
+    if (q.blok.all(h.hid).length) return 'Hier vertelt de verteller niet: er staat iets in dat niet naar buiten mag.';
+    return null;
+  }
+  // de tekst die de verteller voorleest (titel + het volledige samengestelde verhaal, zoals de kamer het toont)
+  function vertelTekstVan(h, pagina, s) {
+    const p = pagina === undefined ? paginaLees(h.hid) : pagina;
+    const x = s === undefined ? sam(h, p) : s;
+    return V.tekstVan(titelVan(h, p, x), verhaalVan(h, p, x));
+  }
+  function vertellerKort(h, pagina, s) {
+    if (!V) return null;
+    const niet = vertellerNiet(h);
+    const vt = niet ? { tekst: '', afgekapt: false } : vertelTekstVan(h, pagina, s);
+    const st = V.stand(h.hid, vt.tekst ? V.hashVan(vt.tekst) : null);
+    return Object.assign(st, { kan: niet || (vt.tekst ? null : 'er is nog geen verhaal om te vertellen'), afgekapt: vt.afgekapt,
+      vooraf: !niet && vt.tekst ? V.vooraf(vt.tekst) : null });
+  }
+  function vertellerMaken(hid, opt) {
+    const h = vind(hid);
+    if (!h || h.status === 'weg' || !V) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.toon) return NIET_TOON;
+    const r = vertellerNiet(h, opt);
+    if (r) return { status: 409, body: { ok: false, fout: r } };
+    const vt = vertelTekstVan(h);
+    if (!vt.tekst) return { status: 409, body: { ok: false, fout: 'er is nog geen verhaal om te vertellen' } };
+    return V.maken(h.hid, vt.tekst);
+  }
+  function vertellerDeel(hid, n, opt) {
+    const h = vind(hid);
+    if (!h || h.status === 'weg' || !V) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.toon) return NIET_TOON;
+    const r = vertellerNiet(h, opt);
+    if (r) { try { V.weg(h.hid); } catch (e) { fout('ml-verteller', e); } return { status: 409, body: { ok: false, fout: r } }; }   // mag niet meer: meteen weg
+    const vt = vertelTekstVan(h);
+    return V.deel(h.hid, n, vt.tekst ? V.hashVan(vt.tekst) : null);
+  }
+  // Weghalen mag altijd (ook als de herinnering intussen gevoelig werd), behalve in de toonmodus
+  function vertellerWeg(hid, opt) {
+    if (!V || !HID_RE.test(String(hid))) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.toon) return NIET_TOON;
+    return V.weg(hid);
+  }
   function zorgLink(k) { if (!q.link.get(k)) q.linkNieuw.run(k, b64u(rnd(16)).slice(0, 22)); return q.link.get(k); }
   function delenStand() {
     const links = KRINGEN.map((k) => {
@@ -1102,11 +1165,11 @@ function maak(o) {
   }
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
-    return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
+    return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
   return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling,
-    plaatjeVoorstel, plaatjeMaken, plaatjeWeg, _P: P,
+    plaatjeVoorstel, plaatjeMaken, plaatjeWeg, _P: P, vertellerMaken, vertellerDeel, vertellerWeg, _V: V,
     fotoSync, _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }
