@@ -947,3 +947,116 @@ test('wv2356 betalingVan: betaling vóór de factuurdatum of al van een andere f
   // gekoppeld in Facturen blijft vast, ook vóór de factuurdatum
   assert.equal(V.betalingVan(f, tx, { koppelingen: ['a1'] }).zekerheid, 'vast');
 });
+
+// ── wv2387: dezelfde transacties uit een andere export van dezelfde rekening (ABN TAB ↔ MT940, ING Nederlands ↔ Engels) ──
+const upl = (t, bytes, naam) => F.verwerkBankbestand(t.fdb, t.eig, Buffer.from(bytes), naam, NU, { modus: 'upload' });
+const refs = (t) => t.fdb.db.prepare('SELECT entry_ref FROM bank_transactie ORDER BY entry_ref').all().map((x) => x.entry_ref);
+// ABN-TAB-regel met losse boek- en rentedatum; MT940 zoals ABN hem nu levert (ABNANL2A/940-kop per afschrift, :28:, hoofdletters, 65 tekens, CRLF)
+const tabR = (boek, rente, begin, eind, c, desc) => [ACC_TG, 'EUR', boek, fmt(begin), fmt(eind), rente, fmt(c), desc].join('\t');
+const mt86 = (desc) => { const u = desc.toUpperCase(), d = []; for (let i = 0; i < u.length; i += 65) d.push(u.slice(i, i + 65)); return [':86:' + d[0], ...d.slice(1)]; };
+const ymd = (d) => d.slice(2);   // JJJJMMDD → JJMMDD
+function mt940(posten, begin) {   // posten: [boek JJJJMMDD, rente JJJJMMDD, centen, desc]
+  let s = begin, uit = [];
+  for (const [boek, rente, c, desc] of posten) {
+    const b = s; s += c;
+    const bedrag = (Math.abs(c) / 100).toFixed(2).replace('.', ',');
+    uit.push('ABNANL2A', '940', 'ABNANL2A', ':20:ABN AMRO BANK NV', ':25:' + ACC_TG, ':28:' + boek.slice(4) + '/1', ':60F:' + (b < 0 ? 'D' : 'C') + ymd(boek) + 'EUR' + (Math.abs(b) / 100).toFixed(2).replace('.', ','),
+      ':61:' + ymd(rente) + boek.slice(4) + (c < 0 ? 'D' : 'C') + bedrag + 'N426NONREF', ...mt86(desc), ':62F:' + (s < 0 ? 'D' : 'C') + ymd(boek) + 'EUR' + (Math.abs(s) / 100).toFixed(2).replace('.', ','), '-');
+  }
+  return uit.join('\r\n') + '\r\n';
+}
+const TERUG = '/RTYP/SEPA Incasso Terugboeking//CSID/NL00ZZZTEST0000000301/NAME/Leverancier C B.V./MARF/MTEST001/REMI/Termijn oktober/IBAN/' + LEV.C + '/BIC/TESTNL2A/EREF/TERMIJN10';
+const POSTEN = [
+  ['20261013', '20261013', -12100, ov(LEV.A, 'Leverancier A B.V.', 'Factuur VB-2026-0501 en nog een lange omschrijving die over de regel heen loopt')],
+  ['20261014', '20261014', -500, 'BEA, Betaalpas                   Parkeren Voorbeeld,PAS123      NR:TEST01, 14.10.26/09:00'],
+  ['20261014', '20261014', -500, 'BEA, Betaalpas                   Parkeren Voorbeeld,PAS123      NR:TEST01, 14.10.26/17:00'],
+  ['20261015', '20261002', 8412, TERUG],   // terugboeking: TAB op de rentedatum van de oorspronkelijke incasso, MT940 op de boekdatum
+];
+function tabVan(posten, begin) { let s = begin; return posten.map(([b, r, c, d]) => { const x = tabR(b, r, s, s + c, c, d); s += c; return x; }).join('\n') + '\n'; }
+
+test('wv2387 ABN: eerst TAB, dan MT940 van dezelfde periode → niets dubbel (ook de terugboeking en twee gelijke pinbetalingen), bestaande sleutels ongemoeid; een echt nieuwe regel wel', () => {
+  const t = opzet();
+  const a = upl(t, tabVan(POSTEN, 100000), 'TXT.TAB');
+  assert.equal(a.nieuw, 4);
+  const voor = refs(t);
+  const extra = ['20261016', '20261016', -2500, ov(LEV.P, 'Leverancier P', 'Factuur P-1')];
+  const m = upl(t, mt940([...POSTEN, extra], 100000), 'MT940.STA');
+  assert.equal(m.formaat, 'abn_mt940');
+  assert.equal(m.nieuw, 1, JSON.stringify(m)); assert.equal(m.andere_export, 4); assert.equal(m.al_bekend_regels, 4); assert.equal(m.check.andere_export, 4);
+  const na = refs(t);
+  assert.equal(na.length, 5);
+  for (const r of voor) assert.ok(na.includes(r), 'bestaande sleutel ' + r + ' is weg of veranderd');
+  // de nieuwe regel staat onder MT940, met de valutadatum als boekdatum; de bankcontrole geeft geen "mogelijk dubbel"
+  assert.equal(t.n("SELECT count(*) AS n FROM bank_transactie WHERE formaat = 'abn_mt940' AND boekdatum = '2026-10-16'"), 1);
+  assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE soort = 'mogelijk_dubbel_geupload'"), 0);
+  const au = JSON.parse(t.fdb.db.prepare("SELECT na FROM audit WHERE wat = 'bankbestand_upload' ORDER BY id DESC LIMIT 1").get().na);
+  assert.equal(au.andere_export, 4);
+  // hetzelfde MT940-bestand nog eens: al bekend; een TAB van daarna (overlap) geeft ook niets dubbel
+  assert.equal(upl(t, mt940([...POSTEN, extra], 100000), 'MT940.STA').al_bekend, true);
+  const tab2 = upl(t, tabVan([...POSTEN, extra], 100000), 'TXT2.TAB');
+  assert.equal(tab2.nieuw, 0, JSON.stringify(tab2)); assert.equal(tab2.andere_export, 1);
+  assert.equal(refs(t).length, 5);
+});
+
+test('wv2387 ABN: eerst MT940, dan TAB → niets dubbel; een andere transactie met zelfde dag, bedrag en tegenpartij maar andere omschrijving wordt wél ingelezen', () => {
+  const t = opzet();
+  assert.equal(upl(t, mt940(POSTEN, 100000), 'M.STA').nieuw, 4);
+  const z = upl(t, tabVan(POSTEN, 100000), 'T.TAB');
+  assert.equal(z.nieuw, 0, JSON.stringify(z)); assert.equal(z.andere_export, 4);
+  // half-dag-export: in MT940 alleen een tweede betaling aan A op 13-10 (ander factuurnummer) → geen tegenhanger, dus nieuw (geen stil gat)
+  const t2 = opzet();
+  upl(t2, tabVan([POSTEN[0]], 100000), 'T.TAB');
+  const b = upl(t2, mt940([['20261013', '20261013', -12100, ov(LEV.A, 'Leverancier A B.V.', 'Factuur VB-2026-0777')]], 87900), 'M.STA');
+  assert.equal(b.nieuw, 1); assert.equal(b.andere_export, 0);
+  // een tweede TAB (zelfde variant) dekt nooit over de variant heen: andere omschrijving zelfde dag → gewoon nieuw zoals vóór wv2387
+  const c = upl(t2, tabVan([['20261013', '20261013', -12100, ov(LEV.A, 'Leverancier A B.V.', 'Factuur VB-2026-0888')]], 75800), 'T2.TAB');
+  assert.equal(c.nieuw, 1); assert.equal(c.andere_export, 0);
+});
+
+test('wv2387 ING: Nederlandse export binnen, dan de Engelse van dezelfde dagen → niets dubbel; zelfde dag/bedrag/tegenpartij met ander tijdstip wél nieuw', () => {
+  const t = opzet();
+  const kopNl = '"Datum";"Naam / Omschrijving";"Rekening";"Tegenrekening";"Code";"Af Bij";"Bedrag (EUR)";"Mutatiesoort";"Mededelingen";"Saldo na mutatie";"Tag"';
+  const kopEn = '"Date";"Name / Description";"Account";"Counterparty";"Code";"Debit/credit";"Amount (EUR)";"Transaction type";"Notifications";"Resulting balance";"Tag"';
+  const r = (v) => v.map((x) => '"' + x + '"').join(';');
+  const nl = kopNl + '\r\n' + [
+    r(['20261020', 'Leverancier C B.V.', KM, LEV.C, 'IC', 'Af', '84,12', 'Incasso', 'Naam: Leverancier C B.V. Omschrijving: Termijn oktober IBAN: ' + LEV.C + ' Kenmerk: TERMIJN10 Machtiging ID: MTEST001 Incassant ID: NL00ZZZTEST0000000301 Doorlopende incasso Valutadatum: 20-10-2026', '915,88', '']),
+    r(['20261019', 'Leverancier Q', KM, LEV.Q, 'GT', 'Bij', '1000,00', 'Online bankieren', 'Naam: Leverancier Q Omschrijving: Terugbetaling IBAN: ' + LEV.Q + ' Datum/Tijd: 19-10-2026 09:15:00 Valutadatum: 19-10-2026', '1000,00', '']),
+  ].join('\r\n') + '\r\n';
+  const en = kopEn + '\r\n' + [
+    r(['20261020', 'Leverancier C B.V.', KM, LEV.C, 'IC', 'Debit', '84,12', 'SEPA direct debit', 'Name: Leverancier C B.V. Description: Termijn oktober IBAN: ' + LEV.C + ' Reference: TERMIJN10 Mandate ID: MTEST001 Creditor ID: NL00ZZZTEST0000000301 Recurrent SEPA direct debit Value date: 20/10/2026', '915,88', '']),
+    r(['20261019', 'Leverancier Q', KM, LEV.Q, 'GT', 'Credit', '1000,00', 'Online Banking', 'Name: Leverancier Q Description: Terugbetaling IBAN: ' + LEV.Q + ' Date/time: 19/10/2026 09:15:00 Value date: 19/10/2026', '1000,00', '']),
+  ].join('\r\n') + '\r\n';
+  assert.equal(upl(t, nl, 'nl.csv').nieuw, 2);
+  const voor = refs(t);
+  const e = upl(t, en, 'en.csv');
+  assert.equal(e.nieuw, 0, JSON.stringify(e)); assert.equal(e.andere_export, 2); assert.deepEqual(refs(t), voor);
+  // dezelfde Engelse dagen nog eens maar een tweede overboeking van Q om 14:00 (zelfde bedrag) → die is nieuw
+  const en2 = en + r(['20261019', 'Leverancier Q', KM, LEV.Q, 'GT', 'Credit', '1000,00', 'Online Banking', 'Name: Leverancier Q Description: Terugbetaling IBAN: ' + LEV.Q + ' Date/time: 19/10/2026 14:00:00 Value date: 19/10/2026', '2000,00', '']) + '\r\n';
+  const e2 = upl(t, en2, 'en2.csv');
+  assert.equal(e2.nieuw, 1, JSON.stringify(e2));
+  // een oude regel zonder sporen (alleen IBAN en valutadatum) dekt nooit: dan liever dubbel (signaal) dan stil weg
+  const t3 = opzet();
+  const kaal = (taal, d) => r(taal === 'nl' ? ['20261018', 'Leverancier Q', KM, LEV.Q, 'OV', 'Af', '7,50', 'Overschrijving', 'IBAN: ' + LEV.Q + ' Valutadatum: 18-10-2026', '1,00', '']
+    : ['20261018', 'Leverancier Q', KM, LEV.Q, 'OV', 'Debit', '7,50', 'Transfer', 'IBAN: ' + LEV.Q + ' Value date: 18/10/2026', '1,00', '']);
+  assert.equal(upl(t3, kopNl + '\r\n' + kaal('nl') + '\r\n', 'nl.csv').nieuw, 1);
+  const k3 = upl(t3, kopEn + '\r\n' + kaal('en') + '\r\n', 'en.csv');
+  assert.equal(k3.nieuw, 1); assert.equal(k3.andere_export, 0);
+  // en omgekeerd: Engels eerst, dan Nederlands
+  const t2 = opzet();
+  assert.equal(upl(t2, en, 'en.csv').nieuw, 2);
+  const n2 = upl(t2, nl, 'nl.csv');
+  assert.equal(n2.nieuw, 0, JSON.stringify(n2)); assert.equal(n2.andere_export, 2);
+});
+
+test('wv2387 een geweigerd bankbestand laat een auditregel na: code, reden, formaat, grootte; geen bestandsnaam of inhoud', () => {
+  const t = opzet();
+  assert.throws(() => upl(t, '"Date";"Amount";"Payee"\r\n"20261101";"12,00";"Geheime Naam"\r\n', 'NL00TEST0000000046_export.csv'), (e) => e.status === 422 && /kolommen date, amount, payee/.test(e.message));
+  const a = t.fdb.db.prepare("SELECT wie, na FROM audit WHERE wat = 'bankbestand_geweigerd'").all();
+  assert.equal(a.length, 1);
+  const na = JSON.parse(a[0].na);
+  assert.equal(na.code, 'formaat_onbekend'); assert.equal(na.formaat, null); assert.equal(na.extensie, 'csv'); assert.ok(na.bytes > 0);
+  assert.doesNotMatch(a[0].na, /Geheime|12,00|NL00TEST/);
+  // een droogloop schrijft geen audit
+  assert.throws(() => F.verwerkBankbestand(t.fdb, t.eig, Buffer.from('onzin'), 'x.csv', NU, { droog: true, modus: 'historisch' }));
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'bankbestand_geweigerd'"), 1);
+});

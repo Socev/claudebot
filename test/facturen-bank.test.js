@@ -387,10 +387,13 @@ test('formaatherkenning en weigeren: verkeerd formaat, onbekende rekening, bankl
   assert.equal(B.herkenFormaat(ABN_TAB), 'abn_tab');
   assert.equal(B.herkenFormaat('<?xml version="1.0"?><Document><BkToCstmrStmt/></Document>'), 'camt053');
   assert.equal(B.herkenFormaat('hallo\nwereld'), null);
-  // ABN-TAB voor een rekening die als MT940 is vastgelegd → weigeren met uitleg
+  // ABN-TAB voor een rekening die als MT940 is vastgelegd → weigeren met uitleg (wv2387: alleen MT940 op een TAB-rekening mag, niet andersom);
+  // een ander bankformaat (Triodos) blijft ook geweigerd, met de namen in gewone taal
   const tabGh = tabRij('0000000012', '20261007', '200,00', '1200,00', '1000,00', '/TRTP/SEPA OVERBOEKING/IBAN/' + LEV.ZV + '/NAME/Zorgverzekeraar Voorbeeld/REMI/x');
   const v = B.leesBankbestand(tabGh, { rekeningen: REKENINGEN });
-  assert.equal(v.ok, false); assert.equal(v.fout, 'verkeerd_formaat'); assert.match(v.uitleg, /abn_mt940/);
+  assert.equal(v.ok, false); assert.equal(v.fout, 'verkeerd_formaat'); assert.match(v.uitleg, /staat in Facturen als ABN MT940, dit bestand is ABN TAB/);
+  const v2 = B.leesBankbestand(tabGh, { rekeningen: REKENINGEN.map((r) => (r.iban === ABN_GH ? Object.assign({}, r, { bank_formaat: 'triodos_csv' }) : r)) });
+  assert.equal(v2.ok, false); assert.equal(v2.fout, 'verkeerd_formaat'); assert.match(v2.uitleg, /staat in Facturen als Triodos CSV, dit bestand is ABN TAB/);
   // onbekende rekening → hele bestand weg (ook de bekende regels), uitleg alleen de laatste vier tekens
   const metOnbekend = ABN_TAB + tabRij('0000000099', '20261009', '1,00', '0,00', '-1,00', 'BEA, Betaalpas x') + '\n';
   const o = B.leesBankbestand(metOnbekend, { rekeningen: alleControle });
@@ -1439,4 +1442,77 @@ test('wv2061 oranjePatroon en categorieVoorstel: IBAN, naam, pin (filiaalnummer 
   assert.equal(v({ tegenpartij_naam: 'bol.com' }), null, 'webwinkel: geen voorstel');
   assert.equal(v({ tegenpartij_naam: 'bol.com' }, null, 'abonnement_zonder_factuur').categorie, 'abonnement_zonder_factuur', 'eerdere keuze gaat voor');
   assert.equal(v({ tegenpartij_naam: 'bol.com' }, null, 'onzin'), null);
+});
+
+// ── wv2387: Engelstalige ING-export, MT940 op een TAB-rekening, foutzin die zegt wat er misging ──
+const ING_KOP_EN = '"Date";"Name / Description";"Account";"Counterparty";"Code";"Debit/credit";"Amount (EUR)";"Transaction type";"Notifications";"Resulting balance";"Tag"';
+const ingRijEn = (r, sch) => r.map((v) => '"' + v + '"').join(sch || ';');
+const ING_EN_RIJEN = [
+  ['20261103', 'Leverancier C B.V.', ING_KM, LEV.C, 'IC', 'Debit', '84,12', 'SEPA direct debit',
+    'Name: Leverancier C B.V. Description: Termijn november IBAN: ' + LEV.C + ' Reference: TERMIJN11 Mandate ID: MTEST001 Creditor ID: NL00ZZZTEST0000000301 Recurrent SEPA direct debit Value date: 03/11/2026', '915,88', ''],
+  ['20261102', 'Zorgverzekeraar Voorbeeld', ING_KM, LEV.ZV, 'OV', 'Credit', '1000,00', 'Transfer',
+    'Name: Zorgverzekeraar Voorbeeld Description: Declaratie oktober IBAN: ' + LEV.ZV + ' Date/time: 02/11/2026 09:15:00 Value date: 02/11/2026', '1000,00', ''],
+  ['20261101', 'Winkel Voorbeeld', ING_KM, '', 'BA', 'Debit', '5,00', 'Payment terminal',
+    'Card no: 1234 56** **** 7890 Date: 01/11/2026 Time: 12:00 Transaction: I12345 Term: CT000001 Value date: 01/11/2026', '0,00', ''],
+];
+const ING_EN = '﻿' + ING_KOP_EN + '\r\n' + ING_EN_RIJEN.map((r) => ingRijEn(r)).join('\r\n') + '\r\n';
+
+test('wv2387 ING-CSV Engels (puntkomma en komma): herkend, Debit/Credit, Reference/Mandate ID/Creditor ID, soort naar het Nederlands, saldo sluit', () => {
+  assert.equal(B.herkenFormaat(ING_EN), 'ing_csv');
+  const r = B.leesBankbestand(ING_EN, { rekeningen: REKENINGEN });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.taal, 'en');
+  const [a, b, c] = r.transacties;
+  assert.equal(a.bedrag_centen, -8412); assert.equal(a.is_incasso, true); assert.equal(a.kenmerk, 'TERMIJN11');
+  assert.equal(a.machtiging, 'MTEST001'); assert.equal(a.incassant_id, 'NL00ZZZTEST0000000301'); assert.equal(a.transactietype, 'ING:IC:Incasso');
+  assert.equal(b.bedrag_centen, 100000); assert.equal(b.transactietype, 'ING:OV:Overschrijving'); assert.equal(b.tegenpartij_iban, LEV.ZV);
+  assert.equal(c.bedrag_centen, -500); assert.equal(c.transactietype, 'ING:BA:Betaalautomaat'); assert.equal(c.tegenpartij_iban, null);
+  assert.deepEqual(r.saldo[ING_KM], { gecontroleerd: true, sluit: true, breuken: 0, regels: 3, begin_centen: 500, eind_centen: 91588 });
+  // komma-variant, ook met punt als decimaalteken en duizendtalkomma: zelfde bedragen
+  const komma = ING_KOP_EN.replace(/;/g, ',') + '\r\n' + ING_EN_RIJEN.map((x) => ingRijEn(x.map((v, i) => (i === 6 || i === 9 ? v.replace(',', '.').replace(/^1000\./, '1,000.') : v)), ',')).join('\r\n') + '\r\n';
+  assert.equal(B.herkenFormaat(komma), 'ing_csv');
+  const k = B.leesBankbestand(komma, { rekeningen: REKENINGEN });
+  assert.equal(k.ok, true, JSON.stringify(k));
+  assert.deepEqual(k.transacties.map((t) => t.bedrag_centen), [-8412, 100000, -500]);
+  assert.equal(k.saldo[ING_KM].sluit, true);
+  // een bedrag dat geen twee decimalen heeft (1.234 kan duizend of één zijn): weigeren met regelnummer, nooit raden
+  const raar = B.leesBankbestand(ING_EN.replace('"84,12"', '"1.234"'), { rekeningen: REKENINGEN });
+  assert.equal(raar.fout, 'regel_ongeldig'); assert.match(raar.uitleg, /regel 2: ongeldig bedrag/);
+  // een bedrag met teken weigeren: het teken komt uit Debit/credit (anders draait een afschrijving om)
+  assert.equal(B.leesBankbestand(ING_EN.replace('"84,12"', '"-84,12"'), { rekeningen: REKENINGEN }).fout, 'regel_ongeldig');
+  const db = B.leesBankbestand(ING_EN.replace('"Debit"', '"Af"'), { rekeningen: REKENINGEN });
+  assert.equal(db.fout, 'regel_ongeldig'); assert.match(db.uitleg, /Debit\/credit is geen Debit of Credit/);
+  // de Nederlandse export blijft ongewijzigd (zelfde entry_ref als vóór wv2387: oracle-toetsen hierboven), en taal 'nl'
+  assert.equal(B.leesBankbestand(ING_CSV, { rekeningen: REKENINGEN }).taal, 'nl');
+  assert.equal(B.ingTaalTekst(ING_EN_RIJEN[0][8]), 'en'); assert.equal(B.ingTaalTekst('Naam: X Omschrijving: Y'), 'nl'); assert.equal(B.ingTaalTekst('Factuurnr. 1'), null);
+});
+
+test('wv2387 foutzin: een onbekend bestand zegt wat er misging (kolommen, MT940-veld, tabs), zonder inhoud van een regel', () => {
+  const csv = B.leesBankbestand('"Date";"Amount";"Payee";"Jan Voorbeeld"\r\n"20261101";"12,00";"Geheime Naam";"x"\r\n', { rekeningen: REKENINGEN });
+  assert.equal(csv.fout, 'formaat_onbekend');
+  assert.match(csv.uitleg, /Nederlands of Engels/); assert.match(csv.uitleg, /kolommen date, amount, payee en 1 andere kolom/); assert.doesNotMatch(csv.uitleg, /Geheime|12,00|Jan|Voorbeeld/i);
+  // een eerste regel met alleen gegevens: geen enkele waarde in de uitleg
+  const data = B.leesBankbestand('"Jan Voorbeeld";"NL00TEST0000000001";"12,00"\r\n', { rekeningen: REKENINGEN });
+  assert.match(data.uitleg, /CSV met \d+ kolommen zonder bekende kolomnaam/); assert.doesNotMatch(data.uitleg, /Jan|NL00|12,00/);
+  const mt = B.leesBankbestand('ABNANL2A\r\n940\r\nABNANL2A\r\n:20:ABN AMRO BANK NV\r\n:28:1\r\n:60F:C261101EUR1,00\r\n:62F:C261101EUR1,00\r\n-\r\n', { rekeningen: REKENINGEN });
+  assert.equal(mt.fout, 'formaat_onbekend'); assert.match(mt.uitleg, /lijkt op MT940, maar veld :25: ontbreekt/);
+  const tabs = B.leesBankbestand('a\tb\tc\n', { rekeningen: REKENINGEN });
+  assert.match(tabs.uitleg, /3 tabkolommen/);
+  assert.match(B.leesBankbestand('', { rekeningen: REKENINGEN }).uitleg, /het bestand is leeg/);
+});
+
+test('wv2387 ABN-MT940 op een TAB-rekening: geaccepteerd, valutadatum als boekdatum (terugboeking); op een MT940-rekening blijft de boekdatum', () => {
+  const mt = ['ABNANL2A', '940', 'ABNANL2A', ':20:ABN AMRO BANK NV', ':25:0000000011', ':28:21001/1', ':60F:C261020EUR1000,00',
+    ':61:2610061021C20,00N426NONREF', ':86:/RTYP/SEPA INCASSO TERUGBOEKING//CSID/NL00ZZZTEST0000000301/NAME/LEVERANCIER C B.V./MARF/MTE',
+    'ST001/REMI/TERMIJN OKTOBER/IBAN/' + LEV.C + '/BIC/TESTNL2A/EREF/TERMIJN10',
+    ':61:2610211021D5,00N426NONREF', ':86:BEA, BETAALPAS                   WINKEL VOORBEELD,PAS123',
+    ':62F:C261021EUR1015,00', '-'].join('\r\n') + '\r\n';
+  assert.equal(B.herkenFormaat(mt), 'abn_mt940');
+  const r = B.leesBankbestand(mt, { rekeningen: REKENINGEN });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.transacties.map((t) => [t.boekdatum, t.bedrag_centen, t.formaat]), [['2026-10-06', 2000, 'abn_mt940'], ['2026-10-21', -500, 'abn_mt940']]);
+  const gh = B.leesBankbestand(mt.replace(':25:0000000011', ':25:0000000012'), { rekeningen: REKENINGEN });
+  assert.equal(gh.transacties[0].boekdatum, '2026-10-21');   // rekening met bank_formaat abn_mt940: boekdatum zoals FV2
+  assert.equal(B.formaatPast('abn_tab', 'abn_mt940'), true); assert.equal(B.formaatPast('abn_mt940', 'abn_tab'), false);
+  assert.equal(B.formaatPast('abn_tab', 'ing_csv'), false); assert.equal(B.formaatPast('ing_csv', 'abn_tab'), false);
 });

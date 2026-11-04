@@ -2394,6 +2394,67 @@ function zelfdeTegenpartij(x, t) {
   const na = K.normNaam(x.tegenpartij_naam), nb = K.normNaam(t.tegenpartij_naam);
   return na ? na === nb : !a && !b && !nb;
 }
+/*
+ * wv2387 (David 4-11-2026): dezelfde transactie uit een andere export van dezelfde rekening heeft een andere entry_ref (de omschrijving en
+ * bij TAB het saldo zitten in de hash): ABN TAB ↔ ABN MT940, ING Nederlands ↔ ING Engels. Vóór het invoegen: een regel van dit bestand die
+ * nog niet bestaat, wordt niet ingevoegd als er al een regel staat met dezelfde rekening, boekdatum, bedrag en tegenpartij, uit de ANDERE
+ * variant, waarvan de sleutel niet in dit bestand staat en waarvan de omschrijving past (ABN: zonder hoofdletters en leestekens gelijk, MT940
+ * schrijft hoofdletters; ING: kenmerk, tijdstip, machtiging en kaarttransactie gelijk waar beide ze noemen). Eén-op-één; bij meer kandidaten
+ * eerst op kenmerk. Niets aan bestaande regels of sleutels verandert. Twijfel (taal van een oude regel onbekend, omschrijving wijkt af) → niet
+ * gedekt: dan liever een signaal "mogelijk dubbel" dan een gemiste transactie (geen stil gat). → Map(entry_ref uit het bestand → bestaande)
+ */
+function exportVariant(formaat, oms, taal) {
+  if (formaat === 'ing_csv') { const t = taal || B.ingTaalTekst(oms); return t ? 'ing:' + t : null; }
+  return formaat === 'abn_tab' || formaat === 'abn_mt940' ? formaat : null;
+}
+function omsAlnum(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, ''); }
+function ingSporen(s) {
+  const t = String(s || ''), uit = {};
+  const m1 = t.match(/(?:Kenmerk|Reference): (\S+)/), m2 = t.match(/(?:Machtiging ID|Mandate ID): (\S+)/);
+  const m3 = t.match(/(?:Datum\/Tijd|Date\/time): (\d{2})[-/](\d{2})[-/](\d{4}) (\d{2}:\d{2}(?::\d{2})?)/);
+  const m4 = t.match(/(?:Transactie|Transaction): (\S+)/), m5 = t.match(/(?:^| )(?:Datum|Date): (\d{2})[-/](\d{2})[-/](\d{4}) (?:Tijd|Time): (\d{2}:\d{2})/);
+  if (m1) uit.kenmerk = m1[1];
+  if (m2) uit.machtiging = m2[1];
+  if (m3) uit.tijd = m3[3] + m3[2] + m3[1] + m3[4];
+  if (m4) uit.transactie = m4[1];
+  if (m5) uit.kaarttijd = m5[3] + m5[2] + m5[1] + m5[4];
+  const m6 = t.match(/(?:Omschrijving|Description): (.*?)(?= (?:IBAN|Kenmerk|Reference|Machtiging ID|Mandate ID|Incassant ID|Creditor ID|Datum\/Tijd|Date\/time|Valutadatum|Value date):|$)/);
+  if (m6 && m6[1].trim().length >= 3) uit.omschrijving = m6[1].trim();
+  return uit;
+}
+// een opgeslagen omschrijving is na 200 tekens afgekapt: een spoor dat daar half staat, telt als passend als het ene het begin van het andere is
+function spoorPast(a, b) { return a === b || (a.length >= 3 && b.length >= 3 && (a.startsWith(b) || b.startsWith(a))); }
+function omschrijvingPast(formaat, x, t) {
+  if (formaat === 'ing_csv') {
+    // minstens één gemeenschappelijk spoor dat klopt, en geen dat botst; zonder gemeenschappelijk spoor niet dekken (review wv2387 MOET 2)
+    const a = ingSporen(x.omschrijving), b = ingSporen(t.omschrijving);
+    const samen = Object.keys(a).filter((k) => k in b);
+    return samen.length > 0 && samen.every((k) => spoorPast(a[k], b[k]));
+  }
+  const a = omsAlnum(x.omschrijving), b = omsAlnum(t.omschrijving);
+  if (a === b) return true;
+  const k = Math.min(a.length, b.length);
+  return k >= 16 && a.slice(0, k) === b.slice(0, k);
+}
+function kruisDekking(fdb, transacties, formaat, taal) {
+  const uit = new Map();
+  const eigen = exportVariant(formaat, null, taal);
+  if (!eigen) return uit;
+  const inBestand = new Set(transacties.map((t) => t.entry_ref));
+  const bestaat = fdb.db.prepare('SELECT 1 FROM bank_transactie WHERE entry_ref = ?');
+  const zelfde = fdb.db.prepare('SELECT entry_ref, formaat, omschrijving, tegenpartij_iban, tegenpartij_naam, kenmerk FROM bank_transactie WHERE eigen_iban = ? AND boekdatum = ? AND bedrag_centen = ? AND verwijderd_op IS NULL ORDER BY entry_ref');
+  const gebruikt = new Set();
+  for (const t of transacties) {
+    if (bestaat.get(t.entry_ref)) continue;
+    const k = zelfde.all(t.eigen_iban, t.boekdatum, t.bedrag_centen).filter((x) => !inBestand.has(x.entry_ref) && !gebruikt.has(x.entry_ref) && zelfdeTegenpartij(x, t)
+      && exportVariant(x.formaat, x.omschrijving) !== null && exportVariant(x.formaat, x.omschrijving) !== eigen && omschrijvingPast(formaat, x, t));
+    if (!k.length) continue;
+    const x = (t.kenmerk && k.find((y) => y.kenmerk === t.kenmerk)) || k[0];
+    gebruikt.add(x.entry_ref);
+    uit.set(t.entry_ref, x.entry_ref);
+  }
+  return uit;
+}
 function historieCheck(fdb, transacties, start) {
   const bestaat = fdb.db.prepare('SELECT 1 FROM bank_transactie WHERE entry_ref = ?');
   const perBasis = new Map();
@@ -2503,7 +2564,17 @@ function verwerkBankbestand(fdb, r, bytes, naam, nu, opties) {
   const sha = D.sha256(bytes);
   const rekeningen = fdb.db.prepare('SELECT id, iban, entiteit, bank_formaat, controle, alleen_eigenaar FROM rekening').all();
   const lees = B.leesBankbestand(new Uint8Array(bytes), { rekeningen });
-  if (!lees.ok) weiger(422, lees.uitleg, { code: lees.fout });
+  if (!lees.ok) {
+    // wv2387: een weigering laat een spoor na (code, reden in vorm, herkend formaat, grootte); nooit inhoud of bestandsnaam (daar staat een IBAN in)
+    if (!opties.droog) {
+      try {
+        D.audit(fdb, { wie: r.wie || 'onbekend', wat: 'bankbestand_geweigerd', object_soort: 'bank_bestand', object_id: null,
+          na: { code: lees.fout, reden: kort(lees.uitleg, 300), formaat: B.herkenFormaat(new Uint8Array(bytes)) || null, bytes: bytes.length, modus,
+            extensie: (String(naam || '').match(/\.([A-Za-z0-9]{1,5})$/) || [])[1] || null }, wanneer: nuIso(nu) });
+      } catch (e) { /* een audit die faalt mag de weigering zelf niet verbergen */ }
+    }
+    weiger(422, lees.uitleg, { code: lees.fout });
+  }
   // wv1329: de ABN-historie is geen bankexport maar een overzetting van afschriften; alleen de machinekamer leest hem in
   if (B.HISTORIE_FORMATEN[lees.formaat] && modus !== 'historisch') weiger(422, 'dit historiebestand leest alleen de machinekamer in', { code: 'alleen_historisch' });
   if (!isEig(r) && lees.transacties.some((t) => t.alleen_eigenaar || !magEntiteit(r, t.entiteit))) weiger(403, 'dit bestand bevat een rekening die alleen de eigenaar mag inlezen');
@@ -2524,12 +2595,17 @@ function verwerkBankbestandTx(fdb, r, lees, sha, bron, naam, nu, opties, modus, 
       if (bron) fdb.db.prepare('UPDATE bank_bestand SET bron_bewaard = 1 WHERE id = ? AND bron_bewaard = 0').run(bekend.id);
       return { soort: 'bank', al_bekend: true, nieuw: 0, bestand: bekend.id };
     }
-    const check = historieCheck(fdb, lees.transacties, start);
+    // wv2387: al binnen onder de andere export van dezelfde rekening (TAB ↔ MT940, ING NL ↔ EN): niet invoegen, telt als al bekend
+    const hist0 = !!B.HISTORIE_FORMATEN[lees.formaat];
+    const kruis = hist0 ? new Map() : kruisDekking(fdb, lees.transacties, lees.formaat, lees.taal);
+    const eigenRegels = kruis.size ? lees.transacties.filter((t) => !kruis.has(t.entry_ref)) : lees.transacties;
+    const check = historieCheck(fdb, eigenRegels, start);
+    check.andere_export = kruis.size;
     // --koppel (wv951, alleen historisch): gekoppelde regels tellen niet meer als mogelijk dubbel; de rest moet onder de drempel blijven
     // wv1329: de ABN-historie dekt af in plaats van te koppelen (bestaande sleutels blijven); --koppel doet daar niets extra
     const hist = !!B.HISTORIE_FORMATEN[lees.formaat];
     const dekking = hist ? historieDekking(fdb, lees.transacties) : null;
-    const koppel = !hist && opties.koppel && modus === 'historisch' ? historieKoppeling(fdb, lees.transacties, start) : null;
+    const koppel = !hist && opties.koppel && modus === 'historisch' ? historieKoppeling(fdb, eigenRegels, start) : null;
     if (dekking) {
       check.te_dekken = dekking.dek.size;
       check.in_venster = dekking.in_venster;
@@ -2565,8 +2641,9 @@ function verwerkBankbestandTx(fdb, r, lees, sha, bron, naam, nu, opties, modus, 
     const aanvul = fdb.db.prepare('UPDATE bank_transactie SET incassant_id = coalesce(incassant_id, ?), machtiging = coalesce(machtiging, ?) WHERE entry_ref = ? AND (incassant_id IS NULL OR machtiging IS NULL)');
     const herkey = fdb.db.prepare('UPDATE bank_transactie SET entry_ref = ? WHERE entry_ref = ?');
     const sleutels = [];
-    let nieuw = 0, aangevuld = 0, archief = 0, gekoppeld = 0, gedekt = 0;
+    let nieuw = 0, aangevuld = 0, archief = 0, gekoppeld = 0, gedekt = 0, andere_export = 0;
     for (const t of lees.transacties) {
+      if (kruis.has(t.entry_ref)) { andere_export++; continue; }   // al binnen uit de andere export: bestaande regel en sleutel ongemoeid
       if (dekking && dekking.dek.has(t.entry_ref)) { gedekt++; continue; }   // al binnen onder een andere sleutel: niets aan veranderen
       if (koppel && koppel.has(t.entry_ref)) {
         const x = koppel.get(t.entry_ref);
@@ -2589,9 +2666,9 @@ function verwerkBankbestandTx(fdb, r, lees, sha, bron, naam, nu, opties, modus, 
     const controle = bankcontroleToepassen(fdb, nu);
     D.audit(fdb, { wie: r.wie, wat: modus === 'historisch' ? 'bankbestand_historisch' : 'bankbestand_upload', object_soort: 'bank_bestand', object_id: bid,
       na: { formaat: lees.formaat, aantal: lees.transacties.length, nieuw, archief, aangevuld, prive_weggegooid: lees.prive_weggegooid,
-        mogelijk_dubbel: check.mogelijk_dubbel, suffix_verschil: check.suffix_verschil, geforceerd: !!(check.boven_drempel && opties.forceer), gekoppeld, gedekt: dekking ? gedekt : undefined,
+        mogelijk_dubbel: check.mogelijk_dubbel, suffix_verschil: check.suffix_verschil, andere_export: andere_export || undefined, geforceerd: !!(check.boven_drempel && opties.forceer), gekoppeld, gedekt: dekking ? gedekt : undefined,
         sleutels: sleutels.length ? sleutels : undefined }, wanneer });
-    return Object.assign(kort_, { bestand: bid, aantal: lees.transacties.length, nieuw, al_bekend_regels: lees.transacties.length - nieuw - gekoppeld - gedekt, gekoppeld, gedekt, aangevuld, archief,
+    return Object.assign(kort_, { bestand: bid, aantal: lees.transacties.length, nieuw, al_bekend_regels: lees.transacties.length - nieuw - gekoppeld - gedekt, gekoppeld, gedekt, andere_export, aangevuld, archief,
       bron_bewaard: !!bron, controle });
   });
 }

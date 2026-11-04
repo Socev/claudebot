@@ -30,6 +30,15 @@ const FORMATEN = ['ing_csv', 'abn_tab', 'abn_mt940', 'triodos_csv', 'bankluis'];
 // worden opgeslagen onder het formaat van de rekening, zonder schemawijziging. Alleen abn_tab: die neemt net als de historie de
 // rentedatum als boekdatum (de MT940-lezer de boekdatum; review wv1329 #4), anders zou het afdekken op de dag niet kloppen.
 const HISTORIE_FORMATEN = { abn_historie_csv: ['abn_tab'] };
+// wv2387 (David 4-11-2026: zijn ABN-MT940 werd geweigerd omdat de rekening op TAB stond): ABN-TAB en ABN-MT940 zijn twee exports van
+// dezelfde rekening. bank_formaat is de voorkeur, geen slot; regels die al onder de andere export binnen zijn, vangt facturen.js
+// (kruisDekking) vóór het invoegen. MT940 op een TAB-rekening neemt de valutadatum als boekdatum (zoals TAB en de historie), anders
+// verschuift een terugboeking weken (gemeten: een SEPA-terugboeking staat in TAB op de rentedatum van de oorspronkelijke incasso).
+// Alleen in deze richting: een MT940-rekening (geen enkele sinds 4-11) krijgt geen TAB erbij, want TAB draagt de rentedatum en zou op zo'n
+// rekening een terugboeking op een andere dag zetten dan de MT940-regels (review wv2387 MOET 1).
+const FORMAAT_FAMILIE = { abn_tab: ['abn_tab', 'abn_mt940'] };
+function formaatPast(bankFormaat, formaat) { return bankFormaat === formaat || (FORMAAT_FAMILIE[bankFormaat] || []).includes(formaat); }
+function mt940Dag(r, bankFormaat) { return bankFormaat !== 'abn_mt940' && r.valutadatum ? r.valutadatum : r.boekdatum; }
 const OMS_HASH = 500, OMS_OPSLAG = 200, TYPE_OPSLAG = 60;
 // controle: 1 = zakelijk (inlezen), 0 = Privé (weggooien). Alles anders (NULL, leeg, onzin) is een onvolledige rekening: weigeren, nooit
 // stil als Privé behandelen (diffreview wv798 #5).
@@ -91,7 +100,7 @@ function herkenFormaat(invoer) {
   const t = alsTekst(invoer).replace(/^﻿/, '');
   const eerste = t.split('\n', 1)[0];
   if (eerste.replace(/\r$/, '') === ABN_HISTORIE_KOP.join(';')) return 'abn_historie_csv';
-  if (eerste.indexOf('"Datum";') !== -1 || eerste.indexOf('"Datum",') !== -1) return 'ing_csv';
+  if (ingTaalKop(eerste)) return 'ing_csv';
   if (/^\s*<\?xml|<BkToCstmrStmt\b/.test(t.slice(0, 2000))) return 'camt053';
   if (/^:20:/m.test(t) && /^:25:/m.test(t) && /^:6[02][FM]:/m.test(t)) return 'abn_mt940';
   if (TRIODOS_REGEL.test(t.split('\n').find((r) => r.trim()) || '')) return 'triodos_csv';
@@ -103,7 +112,49 @@ function herkenFormaat(invoer) {
   return null;
 }
 
-// ───────────────────────────── ING-CSV (puntkomma en oude komma-variant) ─────────────────────────────
+// ───────────────────────────── ING-CSV (puntkomma en oude komma-variant; Nederlands en Engels) ─────────────────────────────
+
+// wv2387: de Engelstalige ING-export (gemeten 4-11-2026 op Davids twee exports): zelfde kolommen in dezelfde volgorde, andere namen,
+// Debit/Credit in plaats van Af/Bij, en in de mededelingen Reference/Mandate ID/Creditor ID in plaats van Kenmerk/Machtiging ID/Incassant ID.
+// Engels → Nederlands; de lezer werkt daarna met de Nederlandse namen. De mededelingentekst blijft letterlijk (hij zit in de entry_ref;
+// bestaande Nederlandse sleutels veranderen niet). Dezelfde transactie uit een Nederlandse en een Engelse export vangt kruisDekking.
+const ING_KOP_EN = { 'date': 'datum', 'name / description': 'naam / omschrijving', 'account': 'rekening', 'counterparty': 'tegenrekening', 'code': 'code',
+  'debit/credit': 'af bij', 'amount (eur)': 'bedrag (eur)', 'transaction type': 'mutatiesoort', 'notifications': 'mededelingen',
+  'resulting balance': 'saldo na mutatie', 'tag': 'tag' };
+// Mutatiesoort Engels → Nederlands (alleen gemeten of eenduidige namen; een onbekende blijft Engels). Nodig omdat de validatie op de
+// Nederlandse naam leest (Betaalautomaat/Geldautomaat = kaart).
+const ING_SOORT_EN = { 'Transfer': 'Overschrijving', 'Online Banking': 'Online bankieren', 'Various': 'Diversen', 'SEPA direct debit': 'Incasso',
+  'Payment terminal': 'Betaalautomaat', 'Cash machine': 'Geldautomaat', 'Deposit': 'Storting', 'Batch payment': 'Verzamelbetaling',
+  'Telephone banking': 'Telefonisch bankieren', 'Interest': 'Rente' };
+// 'nl' | 'en' | null uit de eerste regel (kop). Engels alleen met beide kenmerkende kolommen, zodat geen ander bestand "Date" claimt.
+function ingTaalKop(eerste) {
+  const e = String(eerste || '');
+  if (e.indexOf('"Datum";') !== -1 || e.indexOf('"Datum",') !== -1) return 'nl';
+  if ((e.indexOf('"Date";') !== -1 || e.indexOf('"Date",') !== -1) && e.indexOf('"Name / Description"') !== -1 && e.indexOf('"Debit/credit"') !== -1) return 'en';
+  return null;
+}
+// Engels bedrag: ING schrijft NL-notatie ("12,50", ook in de Engelse export); een export met punt als decimaalteken ("12.50", "1,234.50")
+// ook lezen. Strikt: twee decimalen of een geheel getal, anders null (bestand geweigerd met regelnummer, nooit een verkeerd bedrag).
+function ingBedragEn(s) {
+  const t = String(s == null ? '' : s).trim();
+  if (/^[+-]/.test(t)) return null;   // het teken komt uit Debit/credit; een bedrag met teken zou dubbel draaien (review wv2387 KAN 1)
+  if (/^[+-]?\d+$/.test(t) || /^[+-]?\d+,\d{2}$/.test(t) || /^[+-]?\d{1,3}(\.\d{3})+,\d{2}$/.test(t)) return normBedrag(t);
+  if (/^[+-]?\d+\.\d{2}$/.test(t) || /^[+-]?\d{1,3}(,\d{3})+\.\d{2}$/.test(t)) { const v = Number(t.replace(/,/g, '')); return Number.isFinite(v) ? v : null; }
+  return null;
+}
+// Taal van een opgeslagen ING-mededeling (voor kruisDekking): 'en' of 'nl' alleen als er labels van één taal in staan, anders null
+// (dan wordt er niet over de taal heen gedekt: liever een signaal "mogelijk dubbel" dan een gemiste transactie).
+const ING_LABELS = { en: /(?:^| )(?:Name|Description|Value date|Card no|Date\/time|Reference|Mandate ID|Creditor ID): /, nl: /(?:^| )(?:Naam|Omschrijving|Valutadatum|Kaartnr|Datum\/Tijd|Kenmerk|Machtiging ID|Incassant ID): / };
+function ingTaalTekst(s) {
+  const t = String(s || ''), en = ING_LABELS.en.test(t), nl = ING_LABELS.nl.test(t);
+  return en && !nl ? 'en' : nl && !en ? 'nl' : null;
+}
+// Engels saldo in NL-notatie voor de saldocontrole (normBedrag); al NL of onleesbaar → ongewijzigd.
+function ingSaldoEn(s) {
+  const t = String(s == null ? '' : s).trim();
+  if (!/^[+-]?\d+\.\d{2}$/.test(t) && !/^[+-]?\d{1,3}(,\d{3})+\.\d{2}$/.test(t)) return s;
+  return t.replace(/,/g, '').replace('.', ',');
+}
 
 // CSV zoals de Python csv-module (referentie parseCsvRows), met het scheidingsteken als parameter.
 function csvRijen(tekst, scheiding) {
@@ -134,12 +185,13 @@ const ING_NODIG = ['datum', 'naam / omschrijving', 'rekening', 'tegenrekening', 
 function leesIng(tekst) {
   if (tekst.charCodeAt(0) === 0xfeff) tekst = tekst.slice(1);
   const eerste = tekst.split('\n', 1)[0];
-  const scheiding = eerste.indexOf('"Datum";') !== -1 ? ';' : ',';
+  const taal = ingTaalKop(eerste) || 'nl';
+  const scheiding = eerste.indexOf('"Datum";') !== -1 || eerste.indexOf('"Date";') !== -1 ? ';' : ',';
   const ruw = csvRijen(tekst, scheiding).filter((r) => r.length > 0 && !(r.length === 1 && r[0] === ''));
   if (!ruw.length) return [];
   // kop hoofdletterongevoelig (de oude export schrijft "MutatieSoort"); eerste voorkomen wint, zoals in de referentie het laatste
   // zou winnen bij een dubbele kolomnaam — die bestaat in geen ING-export, dus een dubbele kop weigeren we.
-  const kop = ruw[0].map((k) => String(k).trim().toLowerCase());
+  const kop = ruw[0].map((k) => String(k).trim().toLowerCase()).map((k) => (taal === 'en' && Object.hasOwn(ING_KOP_EN, k) ? ING_KOP_EN[k] : k));
   if (new Set(kop).size !== kop.length) throw new BankWeigering('kop_ongeldig', 'ING-CSV: dubbele kolomnaam in de kop');
   const ontbreekt = ING_NODIG.filter((k) => !kop.includes(k));
   if (ontbreekt.length) throw new BankWeigering('kop_ongeldig', 'ING-CSV: kolom ontbreekt (' + ontbreekt.join(', ') + ')');
@@ -154,24 +206,27 @@ function leesIng(tekst) {
     if (!/^\d{8}$/.test(dat)) throw new BankWeigering('regel_ongeldig', 'ING-CSV regel ' + (ri + 1) + ': datum is geen JJJJMMDD');
     const boekdatum = dat.slice(0, 4) + '-' + dat.slice(4, 6) + '-' + dat.slice(6, 8);
     if (!isIsoDatum(boekdatum)) throw new BankWeigering('regel_ongeldig', 'ING-CSV regel ' + (ri + 1) + ': ongeldige datum');
-    let bedrag = normBedrag(veld('bedrag (eur)'));
+    let bedrag = taal === 'en' ? ingBedragEn(veld('bedrag (eur)')) : normBedrag(veld('bedrag (eur)'));
     if (bedrag === null) throw new BankWeigering('regel_ongeldig', 'ING-CSV regel ' + (ri + 1) + ': ongeldig bedrag');
     const afBij = String(veld('af bij')).trim();
-    if (afBij !== 'Af' && afBij !== 'Bij') throw new BankWeigering('regel_ongeldig', 'ING-CSV regel ' + (ri + 1) + ': Af Bij is geen Af of Bij');
-    if (afBij === 'Af') bedrag = -bedrag;
+    const [af, bij] = taal === 'en' ? ['Debit', 'Credit'] : ['Af', 'Bij'];
+    if (afBij !== af && afBij !== bij) throw new BankWeigering('regel_ongeldig', 'ING-CSV regel ' + (ri + 1) + (taal === 'en' ? ': Debit/credit is geen Debit of Credit' : ': Af Bij is geen Af of Bij'));
+    if (afBij === af) bedrag = -bedrag;
     const code = String(veld('code')).trim();
     const med = String(veld('mededelingen')).trim();
     const naam = String(veld('naam / omschrijving')).trim();
     const tegen = String(veld('tegenrekening')).trim() || null;
-    const km = med.match(/Kenmerk: (\S+)/), inc = med.match(/Incassant ID: (\S+)/), mach = med.match(/Machtiging ID: (\S+)/);
+    const km = med.match(taal === 'en' ? /Reference: (\S+)/ : /Kenmerk: (\S+)/), inc = med.match(taal === 'en' ? /Creditor ID: (\S+)/ : /Incassant ID: (\S+)/),
+      mach = med.match(taal === 'en' ? /Mandate ID: (\S+)/ : /Machtiging ID: (\S+)/);
+    const soortRuw = String(veld('mutatiesoort')).trim(), soort = taal === 'en' && Object.hasOwn(ING_SOORT_EN, soortRuw) ? ING_SOORT_EN[soortRuw] : soortRuw;
     const eigenRuw = String(veld('rekening')).trim();
     const saldoRuw = iSaldo >= 0 && iSaldo < v.length ? v[iSaldo] : null;
     uit.push({
       eigen_iban_ruw: eigenRuw, boekdatum, tegenpartij_iban: tegen, tegenpartij_naam: naam || null, bedrag, valuta: 'EUR',
       oms_hash: med.slice(0, OMS_HASH) || null, kenmerk: km ? km[1] : null,
-      transactietype: 'ING:' + code + ':' + String(veld('mutatiesoort')).trim(), is_incasso: code === 'IC',
+      transactietype: 'ING:' + code + ':' + soort, is_incasso: code === 'IC', taal,
       incassant_id: inc ? inc[1] : null, machtiging: mach ? mach[1] : null,
-      saldo_na: String(saldoRuw === null || saldoRuw === undefined ? '' : saldoRuw).trim(), regel: ri + 1,
+      saldo_na: String(saldoRuw === null || saldoRuw === undefined ? '' : taal === 'en' ? ingSaldoEn(saldoRuw) : saldoRuw).trim(), regel: ri + 1,
     });
   }
   return uit;
@@ -365,7 +420,7 @@ function leesAbnMt940(tekst) {
         eigen_iban_ruw: b.rekening, boekdatum: p.boekdatum, tegenpartij_iban: v.tegenpartij_iban, tegenpartij_naam: v.tegenpartij_naam,
         bedrag: p.centen === 0 ? 0 : p.centen / 100, valuta: b.begin.valuta || 'EUR', oms_hash: (v.oms || '').slice(0, OMS_HASH) || null,
         kenmerk: v.kenmerk, transactietype: 'ABN:' + (v.ttype === null ? 'None' : v.ttype), is_incasso: v.is_incasso,
-        incassant_id: v.incassant_id, machtiging: v.machtiging, saldo_na: '', storno: !!p.storno,
+        incassant_id: v.incassant_id, machtiging: v.machtiging, saldo_na: '', storno: !!p.storno, valutadatum: p.valutadatum,
       });
     });
   });
@@ -443,12 +498,36 @@ function leesBankbestand(invoer, opties) {
     return { ok: false, fout: 'onleesbaar', uitleg: 'het bestand is niet te lezen (' + String(e && e.name || 'fout').slice(0, 40) + ')' };
   }
 }
+const FORMAAT_NAAM = { ing_csv: 'ING CSV', abn_tab: 'ABN TAB', abn_mt940: 'ABN MT940', triodos_csv: 'Triodos CSV', bankluis: 'bankkoppeling' };
+const KOP_WOORDEN = new Set([...ING_NODIG, 'saldo na mutatie', 'tag', 'mutatiesoort', ...Object.keys(ING_KOP_EN), 'amount', 'payee', 'balance', 'iban', 'description',
+  'currency', 'valuta', 'bedrag', 'omschrijving', 'naam', 'name', 'reference', 'kenmerk', 'datum', 'date', 'rekening', 'account', 'saldo', 'type', 'boekdatum',
+  'valutadatum', 'value date', 'debit', 'credit', 'af', 'bij', 'transaction date', 'booking date', 'tegenpartij', 'categorie', 'category']);
+// wv2387: zeg WAT er niet herkend werd (alleen vorm: kolomnamen van de kop, MT940-velden, aantal tabs), nooit inhoud uit een regel.
+function waaromOnbekend(tekst) {
+  const regels = tekst.replace(/^\uFEFF/, '').split('\n');
+  const eerste = (regels.find((r) => r.trim()) || '').replace(/\r$/, '');
+  const basis = 'geen ING CSV (Nederlands of Engels), ABN MT940, ABN TAB of Triodos CSV herkend';
+  if (!eerste) return 'het bestand is leeg';
+  if (/^\{1:|^:20:|^ABNANL/.test(eerste) || /^:(20|25|28C|60F|61|86|62F):/m.test(tekst.slice(0, 20000))) {
+    const mist = [':20:', ':25:', ':60F: of :60M:'].filter((v) => !(v.startsWith(':60') ? /^:6[0][FM]:/m.test(tekst) : new RegExp('^' + v, 'm').test(tekst)));
+    return basis + ': het lijkt op MT940, maar ' + (mist.length ? 'veld ' + mist.join(', ') + ' ontbreekt' : 'het is niet te lezen');
+  }
+  if (eerste.indexOf('\t') !== -1) return basis + ': de eerste regel heeft ' + eerste.split('\t').length + ' tabkolommen, maar is geen ABN-TAB-regel (rekeningnummer, datum, bedrag)';
+  if (/[;,]/.test(eerste)) {
+    // alleen kolomnamen uit een vaste woordenlijst noemen; de rest alleen tellen (de eerste regel kan gegevens zijn: review wv2387 MOET 3)
+    const kop = eerste.split(/[;,]/).map((k) => k.replace(/"/g, '').trim().toLowerCase()).filter(Boolean);
+    const bekend = kop.filter((k) => KOP_WOORDEN.has(k)), rest = kop.length - bekend.length;
+    if (bekend.length) return basis + ': CSV met de kolommen ' + bekend.slice(0, 12).join(', ') + (rest ? ' en ' + rest + (rest === 1 ? ' andere kolom' : ' andere kolommen') : '') + ' is geen ING-export die Facturen kent';
+    return basis + ': CSV met ' + kop.length + ' kolommen zonder bekende kolomnaam';
+  }
+  return basis;
+}
 function leesBestand(invoer, opties) {
   const tekst = alsTekst(invoer);
   if (tekst.length > MAX_BESTAND) throw new BankWeigering('te_groot', 'het bestand is groter dan 20 MB');
   const formaat = herkenFormaat(tekst);
   if (formaat === 'camt053') throw new BankWeigering('formaat_onbekend', 'CAMT.053 lezen we nog niet; exporteer als MT940, TAB of CSV');
-  if (!formaat) throw new BankWeigering('formaat_onbekend', 'geen ING-CSV, ABN-TAB, ABN-MT940 of Triodos-CSV herkend');
+  if (!formaat) throw new BankWeigering('formaat_onbekend', waaromOnbekend(tekst));
   const rijen = formaat === 'ing_csv' ? leesIng(tekst) : formaat === 'abn_tab' ? leesAbnTab(tekst) : formaat === 'triodos_csv' ? leesTriodos(tekst)
     : formaat === 'abn_historie_csv' ? leesAbnHistorie(tekst).map(abnHistorieRij) : leesAbnMt940(tekst);
   if (!rijen.length) throw new BankWeigering('leeg', 'geen transacties in het bestand');
@@ -463,8 +542,18 @@ function leesBestand(invoer, opties) {
     const rk = rekeningen.get(iban);
     if (controleVan(rk) === 0) continue;   // Privé: formaat doet er niet toe, de regels gaan hieronder weg
     if (rk.bank_formaat === 'bankluis') throw new BankWeigering('verkeerd_formaat', 'rekening ' + eind4(iban) + ' komt via de bankkoppeling binnen; een upload zou dubbel tellen');
-    const past = HISTORIE_FORMATEN[formaat] ? HISTORIE_FORMATEN[formaat].includes(rk.bank_formaat) : rk.bank_formaat === formaat;
-    if (!past) throw new BankWeigering('verkeerd_formaat', 'rekening ' + eind4(iban) + ' leest de app als ' + rk.bank_formaat + ', dit bestand is ' + formaat + '; exporteer in het vaste formaat van die rekening');
+    const past = HISTORIE_FORMATEN[formaat] ? HISTORIE_FORMATEN[formaat].includes(rk.bank_formaat) : formaatPast(rk.bank_formaat, formaat);
+    if (!past) throw new BankWeigering('verkeerd_formaat', 'rekening ' + eind4(iban) + ' staat in Facturen als ' + (FORMAAT_NAAM[rk.bank_formaat] || rk.bank_formaat) + ', dit bestand is ' + (FORMAAT_NAAM[formaat] || formaat) + '; exporteer die rekening als ' + (FORMAAT_NAAM[rk.bank_formaat] || rk.bank_formaat));
+  }
+  // wv2387: MT940 op een TAB-rekening: de valutadatum (rentedatum) als boekdatum, vóór de entry_ref (één datumconventie per rekening)
+  if (formaat === 'abn_mt940') {
+    for (const r of rijen) {
+      const rk = rekeningen.get(ibanNorm(r.eigen_iban_ruw));
+      if (controleVan(rk) !== 1) continue;
+      const d = mt940Dag(r, rk.bank_formaat);
+      if (!isIsoDatum(d)) throw new BankWeigering('mt940_ongeldig', 'MT940 rekening ' + eind4(r.eigen_iban_ruw) + ': ongeldige valutadatum');
+      r.boekdatum = d;
+    }
   }
   // over het hele bestand, zoals FV2 (Privé zit in de eigen IBAN van de hash, dus geen verschuiving); de ABN-historie heeft al een sleutel
   if (formaat !== 'abn_historie_csv') kenEntryRefsToe(rijen);
@@ -485,7 +574,8 @@ function leesBestand(invoer, opties) {
   const periode = datums.length ? { van: datums[0], tot: datums[datums.length - 1] } : null;
   // wv1329: een historieformaat wordt opgeslagen als het formaat van de rekening (één per bestand: de parser weigert een tweede rekening)
   const opslag_formaat = HISTORIE_FORMATEN[formaat] ? [...new Set([...gezien].map((i) => rekeningen.get(i).bank_formaat))].join(',') : formaat;
-  return { ok: true, formaat, opslag_formaat, transacties, prive_weggegooid: prive, per_rekening: per, saldo, periode };
+  const taal = formaat === 'ing_csv' ? ingTaalKop(tekst.replace(/^\uFEFF/, '').split('\n', 1)[0]) : undefined;
+  return { ok: true, formaat, opslag_formaat, transacties, prive_weggegooid: prive, per_rekening: per, saldo, periode, taal };
 }
 
 // Bankluis-bron (F2 leest transacties.sqlite read-only): één post naar dezelfde normalisatie. Alleen status 'booked' en niet vervangen;
@@ -1905,6 +1995,7 @@ module.exports = {
   BankWeigering, FORMATEN, HISTORIE_FORMATEN, ABN_HISTORIE_KOP, leesAbnHistorie, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, DOCPLAN_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
   // parsers
   pyStr, mkRef, kenEntryRefsToe, refBasis, saldoControle, normBedrag, herkenFormaat, csvRijen, leesIng, leesTriodos, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
+  formaatPast, mt940Dag, ingTaalKop, ingTaalTekst, FORMAAT_FAMILIE, FORMAAT_NAAM,
   // controle
   uitzonderingVoor, uitzonderingPast, INGEBOUWD_GEEN_SIGNAAL, oranjePatroon, categorieVoorstel, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
   plusWerkdagen, betaalVerwachting, dekkingVan, eigenBetaling, BETAAL_TERMIJN, betaalMeldingTekst, eurTekst,

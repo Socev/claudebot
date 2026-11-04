@@ -832,3 +832,11 @@ test('6a droog (wv1962): zelfde invoer_hash en uitkomst_hash als run op dezelfde
   assert.equal(u.uitkomst_hash, d1.uitkomst_hash);
   assert.equal(fs.readdirSync(t.rk).sort().join(','), voor);
 });
+
+test('wv2387 bronRegels: MT940 op een TAB-rekening telt op de valutadatum (zoals Facturen hem opslaat), op een MT940-rekening op de boekdatum', () => {
+  const mt = ['ABNANL2A', '940', 'ABNANL2A', ':20:ABN AMRO BANK NV', ':25:' + ACC_TG, ':28:1', ':60F:C261020EUR100,00',
+    ':61:2610061021C20,00N426NONREF', ':86:/RTYP/SEPA INCASSO TERUGBOEKING//NAME/LEVERANCIER C B.V./REMI/TERMIJN',
+    ':62F:C261021EUR120,00', '-'].join('\r\n') + '\r\n';
+  assert.deepEqual(FR.bronRegels(Buffer.from(mt), TG, 'abn_tab').rijen.map((r) => r.dag), ['2026-10-06']);
+  assert.deepEqual(FR.bronRegels(Buffer.from(mt), TG, 'abn_mt940').rijen.map((r) => r.dag), ['2026-10-21']);
+});

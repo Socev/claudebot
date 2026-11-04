@@ -170,7 +170,8 @@ function snapshotPad(dir, sha) {
 function cent(euro) { const c = Math.round(Number(euro) * 100); return Object.is(c, -0) ? 0 : c; }
 function centTekst(s) { const v = B.normBedrag(s); return v === null ? null : cent(v); }
 // Regels van één rekening uit een bronbestand → { formaat, rijen: [{ dag, c, b?, e? }] } (bestandsvolgorde). Weigert zoals de Facturen-lezer.
-function bronRegels(bytes, iban) {
+// wv2387: bankFormaat = rekening.bank_formaat; MT940 op een TAB-rekening telt op de valutadatum, zoals Facturen hem opslaat (B.mt940Dag)
+function bronRegels(bytes, iban, bankFormaat) {
   let tekst = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }).decode(bytes);
   if (tekst.charCodeAt(0) === 0xfeff) tekst = tekst.slice(1);
   const formaat = B.herkenFormaat(tekst);
@@ -179,7 +180,7 @@ function bronRegels(bytes, iban) {
   else if (formaat === 'abn_historie_csv') rijen = B.leesAbnHistorie(tekst).map((h) => ({ iban: K.ibanNorm(h.rekening), dag: h.rentedatum, c: cent(h.bedrag), e: centTekst(h.saldo_na) }));
   else if (formaat === 'ing_csv') rijen = B.leesIng(tekst).map((r) => ({ iban: K.ibanNorm(r.eigen_iban_ruw), dag: r.boekdatum, c: cent(r.bedrag), e: r.saldo_na === '' || r.saldo_na == null ? null : centTekst(r.saldo_na) }));
   else if (formaat === 'triodos_csv') rijen = B.leesTriodos(tekst).map((r) => ({ iban: K.ibanNorm(r.eigen_iban_ruw), dag: r.boekdatum, c: cent(r.bedrag), e: r.saldo_na === '' || r.saldo_na == null ? null : centTekst(r.saldo_na) }));
-  else if (formaat === 'abn_mt940') rijen = B.leesAbnMt940(tekst).map((r) => ({ iban: K.ibanNorm(r.eigen_iban_ruw), dag: r.boekdatum, c: cent(r.bedrag) }));
+  else if (formaat === 'abn_mt940') rijen = B.leesAbnMt940(tekst).map((r) => ({ iban: K.ibanNorm(r.eigen_iban_ruw), dag: B.mt940Dag(r, bankFormaat), c: cent(r.bedrag) }));
   else throw new FinFout('formaat_onbekend', 'bronbestand in een formaat dat de dekking niet leest');
   return { formaat, rijen: rijen.filter((r) => r.iban === iban) };
 }
@@ -243,7 +244,7 @@ function dekkingRekening(snap, rekening, van, tot, bankbronDir, peilVan) {
     if (sha256(bytes) !== b.sha256) { info.fout = 'bron_beschadigd'; continue; }
     info.grootte = bytes.length;
     let br;
-    try { br = bronRegels(bytes, rekening.iban); } catch (e) { info.fout = e instanceof FinFout ? e.code : 'bron_onleesbaar'; continue; }
+    try { br = bronRegels(bytes, rekening.iban, rekening.bank_formaat); } catch (e) { info.fout = e instanceof FinFout ? e.code : 'bron_onleesbaar'; continue; }
     info.formaat = br.formaat; info.regels = br.rijen.length;
     if (!br.rijen.length) { info.fout = 'geen_regels_van_rekening'; continue; }
     const dagen = br.rijen.map((r) => r.dag).sort();
