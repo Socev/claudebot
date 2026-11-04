@@ -21256,6 +21256,11 @@ function bankBoxRij(m) {
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
       '- gevolg als er niets gebeurt: nota\'s die David in de POT-app (werk.socev.dev/pot, tab Nota\'s) klaarzette, komen niet of later als concept in Gmail; de app toont de status per nota.\n' +
       '- voorstel: /health `pot_verzend` en api.log (`pot-verzend`) nalopen; D1 `select status, count(*) from nota_verzending group by 1`; uitzetten = `rm /opt/data/pot-verzend/aan` (rijen blijven wachten). Bouwplan POT-app nota\'s klaarzetten.\n'
+      : m.bron === 'terug' ? '\n## [direct] ' + tijd + ' — Bankkoppeling: terugkeer met fout ' + m.fout + ' (bank.socev.dev, automatisch)\n' +
+      '- status: open\n- van: pod bankluis (server.js bankTerug, wv2399; één rij per koppelink, kenmerk ' + m.kenmerk + ')\n' +
+      '- gemeten: GET /bank/terug met error=' + m.fout + ', link ' + m.staat + ' (' + m.bank + ', ' + m.soort + ', gemaakt ' + m.sinds + 'Z). Er is niets gekoppeld; David zag de pagina "Niet gekoppeld".\n' +
+      '- gevolg als er niets gebeurt: de rekening(en) van deze link worden niet gelezen.\n' +
+      '- voorstel: oorzaak nagaan (invalid_request/server_error = link al eens geopend of verlopen; access_denied = afgebroken). Volg een link van David nooit zelf: dat verbruikt hem. Nieuwe link via `bank.py koppel-start`.\n'
       : m.bron === 'archief' ?'\n## [direct] ' + tijd + ' — bank-transactiedatabase: schrijven mislukt (bankluis, automatisch)\n' +
       '- status: open\n- van: pod bankluis (bank-archief.js via bank-lezer.js archiefVeilig; hooguit 1×/dag)\n' +
       '- gemeten: ' + String(m.tekst || '').slice(0, 200) + '\n' +
@@ -21413,10 +21418,40 @@ function bankPagina(res, status, kop, tekst) {
 }
 // Staat deze state (sha256) open in stand.json? Zonder treffer geen kluisopvraag en geen kindproces (Fable wv680 #1).
 function bankStateOpen(state) {
-  try {
-    const w = (JSON.parse(fs.readFileSync(path.join(BANK_DIR, 'stand.json'), 'utf8')).wachtend || {})[crypto.createHash('sha256').update(state).digest('hex')];
-    return !!(w && !w.verbruikt && Date.parse(w.tot) > Date.now());
-  } catch (e) { return false; }
+  const w = bankStateWacht(state);
+  return !!(w && !w.verbruikt && Date.parse(w.tot) > Date.now());
+}
+function bankStateWacht(state) {
+  try { return (JSON.parse(fs.readFileSync(path.join(BANK_DIR, 'stand.json'), 'utf8')).wachtend || {})[crypto.createHash('sha256').update(state).digest('hex')] || null; }
+  catch (e) { return null; }
+}
+// wv2399: terugkeer met ?error=… (de bank of Enable Banking weigerde). Eerst kwam David bij een al verbruikte of verlopen state op
+// een kale 404 ("niet gevonden", 4-11-2026: zakelijke ABN-link "doet niets"). Nu een pagina in gewone taal, en één box-rij per state
+// (alleen voor een state die de pod echt uitgaf; een verzonnen state krijgt dezelfde pagina maar geen rij). Geen gegevens in de pagina.
+const BANK_FOUT_UITLEG = {
+  access_denied: 'De koppeling werd afgebroken of er werd geen toestemming gegeven.',
+  invalid_request: 'De bank of Enable Banking weigerde het verzoek. Meestal komt dat doordat de link al eens geopend is of verlopen is.',
+  server_error: 'Er ging bij de bank of bij Enable Banking iets mis.',
+  temporarily_unavailable: 'De bank is even niet bereikbaar.'
+};
+const bankFoutGemeld = new Set();
+function bankFoutPagina(res, fout, staat) {
+  const code = String(fout || '').replace(/[^\w.-]/g, '').slice(0, 60);
+  const uitleg = BANK_FOUT_UITLEG[code] || 'De bank gaf een foutmelding.';
+  const link = staat === 'open' ? '' : ' Deze koppelink is al gebruikt of verlopen.';
+  return bankPagina(res, 200, 'Niet gekoppeld', 'De bank weigerde de koppeling. ' + uitleg + link + ' Er is niets gekoppeld; Socev kijkt ernaar. ' +
+    'Wil je het opnieuw proberen, vraag Socev dan om een nieuwe koppelink en open die maar één keer.' + (code ? ' <small>(foutcode: ' + code + ')</small>' : ''));
+}
+function bankFoutMeld(state, w, fout, staat) {
+  if (!w) return;
+  const h = crypto.createHash('sha256').update(state).digest('hex').slice(0, 12);
+  if (bankFoutGemeld.has(h)) return;
+  // Duurzaam (review gpt-5.5 MOET 1): na een herstart telt de box zelf; de rij draagt het kenmerk (12 tekens van de hash, zoals in stand.json).
+  try { if (VV().lees(path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md')).indexOf('kenmerk ' + h) >= 0) { bankFoutGemeld.add(h); return; } } catch (e) {}
+  bankFoutGemeld.add(h);
+  if (bankFoutGemeld.size > 200) bankFoutGemeld.delete(bankFoutGemeld.values().next().value);   // oudste eruit, nooit een stille stop
+  bankBoxRij({ bron: 'terug', fout: String(fout || '').replace(/[^\w.-]/g, '').slice(0, 60), staat: staat, bank: String(w.bank || '').slice(0, 40),
+    soort: String(w.soort || '').slice(0, 12), sinds: String(w.sinds || '').slice(0, 19), kenmerk: h });
 }
 function bankTerug(req, res) {
   const kaal404 = function () { res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('niet gevonden'); };
@@ -21429,18 +21464,30 @@ function bankTerug(req, res) {
   // Passieve kant (uitwijk): een neutrale pagina, geen rolinformatie op een publieke hostname (Fable wv680 #7).
   const beslis = function () {
     if (!rolPrimair()) return bankPagina(res, 503, 'Even niet beschikbaar', 'Er is niets gekoppeld. Probeer het later opnieuw met een nieuwe koppelink van Socev.');
-    if (!bankStateOpen(state)) return kaal404();
+    if (!bankStateOpen(state)) {
+      if (!fout) return kaal404();
+      // wv2399: fout bij een verbruikte, verlopen of onbekende state: geen kindproces en geen kluis, wel een leesbare pagina
+      const w = bankStateWacht(state);
+      res._log.bank_fout = fout.replace(/[^\w.-]/g, '').slice(0, 40);
+      bankFoutMeld(state, w, fout, w ? (w.verbruikt ? 'verbruikt' : 'verlopen') : 'onbekend');
+      return bankFoutPagina(res, fout, 'dicht');
+    }
     // Grens alleen voor verzoeken met een open state: een bot met verzonnen states kan Davids terugkeer niet blokkeren.
     const t = Date.now();
     while (bankTerugTijden.length && t - bankTerugTijden[0] > 3600000) bankTerugTijden.shift();
     if (bankTerugTijden.length >= BANK_TERUG_PER_UUR) { res.writeHead(429, { 'Content-Type': 'text/plain' }); return res.end('te vaak'); }
     bankTerugTijden.push(t);
+    const wOpen = bankStateWacht(state);
     bankKind(['koppel-af'], { state: state, code: code, fout: fout.replace(/[^\w .-]/g, '') }, 60000).then(function (r) {
       res._log.bank_code = r.code;
       schrijfLog(nu() + ' bank ' + velden({ opdracht: 'koppel-af', ok: !!r.j.ok, code: r.code, reden: r.j.reden || undefined }));
       if (r.code === 3) return kaal404();
       if (r.code !== 0) return bankPagina(res, 502, 'Koppelen lukte niet', 'Er ging iets mis bij het afronden. Er is niets gekoppeld. Vraag Socev om een nieuwe koppelink.');
-      if (!r.j.ok && r.j.reden === 'bank') return bankPagina(res, 200, 'Niet gekoppeld', 'De bank gaf geen toestemming, of de koppeling werd afgebroken. Er is niets gekoppeld. Wil je het opnieuw proberen, vraag Socev dan om een nieuwe koppelink.');
+      if (!r.j.ok && r.j.reden === 'bank') {
+        if (!fout) return bankPagina(res, 200, 'Niet gekoppeld', 'De bank gaf geen toestemming, of de koppeling werd afgebroken. Er is niets gekoppeld. Wil je het opnieuw proberen, vraag Socev dan om een nieuwe koppelink.');
+        bankFoutMeld(state, wOpen, fout, 'open');   // wv2399
+        return bankFoutPagina(res, fout, 'open');
+      }
       if (!r.j.ok && r.j.reden === 'afwijkend') return bankPagina(res, 200, 'Niet gekoppeld', 'Er is een andere bank gekozen dan waarvoor deze link was. Er is niets overgenomen. Vraag Socev om een nieuwe koppelink.');
       if (!r.j.ok && r.j.reden) return bankPagina(res, 200, 'Niet gekoppeld', 'Het afronden lukte niet. Er is niets gekoppeld. Vraag Socev om een nieuwe koppelink.');
       // Slot bezet (weigering zonder reden, vóór het verbruiken): de link werkt nog (Fable wv680 #10).

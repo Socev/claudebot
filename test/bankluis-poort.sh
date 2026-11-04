@@ -50,7 +50,10 @@ let kluisAanroepen = 0;
 api.listen(0, '127.0.0.1', async function () {
   const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: path.join(W, 'bank'), BANK_API_BASIS: 'http://127.0.0.1:' + api.address().port,
     SUPABASE_URL: 'https://abcdef.supabase.co', SUPABASE_MCP_TOKEN: 'pat-geheim', ANDERE_SLEUTEL: 'mag-niet-mee' };
-  const g = { require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, spawn: klokSpawn, VAULT: W, SECRET: SECRET,
+  fs.mkdirSync(path.join(W, '00_Systeem', 'Meldingen'), { recursive: true });   // wv2399: box voor bankBoxRij
+  const BOX = path.join(W, '00_Systeem', 'Meldingen', 'machinekamer.md');
+  fs.writeFileSync(BOX, '# box\n\n## [direct] 2026-10-20 10:00 — oude rij\n- status: open\n');
+  const g = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, spawn: klokSpawn, VAULT: W, SECRET: SECRET,
     __dirname: process.cwd(), process: { env: env, execPath: process.execPath },
     fetch: async function (url, o) {
       kluisAanroepen++;
@@ -116,6 +119,36 @@ api.listen(0, '127.0.0.1', async function () {
     toets('pagina: no-store, no-referrer, strenge CSP', res.koppen['Cache-Control'].indexOf('no-store') === 0 && res.koppen['Referrer-Policy'] === 'no-referrer' && /default-src 'none'/.test(res.koppen['Content-Security-Policy']), res.koppen);
     res = await terug('/bank/terug?code=goed&state=' + state);
     toets('dezelfde state tweede keer: 404', res.status === 404 && M.sessies === 1, [res.status, M.sessies]);
+    // wv2399: terugkeer met ?error= — leesbare pagina i.p.v. 404, één box-rij per uitgegeven state, geen rij bij verzonnen state
+    {
+      const tel = () => (fs.readFileSync(BOX, 'utf8').match(/Bankkoppeling: terugkeer met fout/g) || []).length;
+      const s0 = M.sessies, b0 = tel(), k0 = kluisAanroepen;
+      res = await terug('/bank/terug?state=' + state + '&error=invalid_request');
+      toets('verbruikte state + error: 200 Niet gekoppeld met uitleg en foutcode, geen kind/kluis', res.status === 200 && /Niet gekoppeld/.test(res.body) &&
+        /al eens geopend/.test(res.body) && /al gebruikt of verlopen/.test(res.body) && /foutcode: invalid_request/.test(res.body) && M.sessies === s0 && kluisAanroepen === k0, [res.status, res.body.slice(-400)]);
+      toets('verbruikte state + error: één box-rij met bank, soort en staat', tel() === b0 + 1 && /error=invalid_request, link verbruikt \(ABN AMRO, personal, gemaakt/.test(fs.readFileSync(BOX, 'utf8')), fs.readFileSync(BOX, 'utf8').slice(0, 700));
+      res = await terug('/bank/terug?state=' + state + '&error=invalid_request');
+      toets('zelfde state nog eens: pagina, geen tweede box-rij', res.status === 200 && tel() === b0 + 1, tel());
+      vm.runInContext('bankFoutGemeld.clear()', ctx);   // als na een herstart: de box zelf voorkomt een tweede rij
+      res = await terug('/bank/terug?state=' + state + '&error=invalid_request');
+      toets('na herstart (geheugen leeg): geen tweede box-rij', res.status === 200 && tel() === b0 + 1, tel());
+      res = await terug('/bank/terug?state=' + 'c'.repeat(48) + '&error=access_denied');
+      toets('verzonnen state + error: pagina, geen box-rij', res.status === 200 && /afgebroken/.test(res.body) && tel() === b0 + 1, tel());
+      res = await terug('/bank/terug?state=' + 'c'.repeat(48) + '&error=<script>x');
+      toets('foutcode zonder html in de pagina', res.status === 200 && res.body.indexOf('<script>') < 0 && /foutcode: scriptx/.test(res.body), res.body.slice(-300));
+      res = await terug('/bank/terug?code=goed&state=' + 'c'.repeat(48));
+      toets('verzonnen state zonder error: nog steeds 404', res.status === 404, res.status);
+      // open state met error (bank weigerde meteen): koppel-af verbruikt, pagina met uitleg, box-rij 'open', geen POST /sessions
+      r = await h.bankSmal({ secret: 'socev', opdracht: 'koppel-start', bank: 'ABN AMRO' });
+      const state3 = M.auth[M.auth.length - 1].state;
+      res = await terug('/bank/terug?state=' + state3 + '&error=server_error');
+      toets('open state + error: Niet gekoppeld met uitleg, geen sessie', res.status === 200 && /Niet gekoppeld/.test(res.body) && /iets mis/.test(res.body) &&
+        !/al gebruikt of verlopen/.test(res.body) && M.sessies === s0, [res.status, res.body.slice(-300), M.sessies]);
+      toets('open state + error: box-rij met staat open', tel() === b0 + 2 && /error=server_error, link open/.test(fs.readFileSync(BOX, 'utf8')), fs.readFileSync(BOX, 'utf8').slice(0, 500));
+      res = await terug('/bank/terug?state=' + state3);
+      toets('open state daarna zonder error: 404 (verbruikt)', res.status === 404, res.status);
+      toets('box-rij boven de oude rij, oude rij intact', /oude rij\n- status: open/.test(fs.readFileSync(BOX, 'utf8')) && fs.readFileSync(BOX, 'utf8').indexOf('Bankkoppeling') < fs.readFileSync(BOX, 'utf8').indexOf('oude rij'), null);
+    }
     for (let i = 0; i < 40 && M.opvragen < 2; i++) await new Promise((ok) => setTimeout(ok, 250));
     toets('historie na koppelen: saldo en transacties opgehaald', M.opvragen >= 2, M.opvragen);
     r = await h.bankSmal({ secret: 'socev', opdracht: 'rekeningen' });
