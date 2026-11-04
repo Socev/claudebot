@@ -127,17 +127,55 @@ function frontmatter(tekst) {
   return { velden: velden, eind: eind, regels: regels };
 }
 
-// Waar staat het blok? { geen } | { fout } | { b, bin (na het begin), e (begin van het eind), id, hash }. Zelfde regels als vóór wv1271:
-// begin zonder eind (of omgekeerd), eind vóór begin of twee keer een begin = half of dubbel.
+// Waar staat het blok? { geen } | { fout } | { b, bin (na het begin), e (begin van het eind), id, hash, vreemd }. Zelfde regels als vóór
+// wv1271 voor ons EIGEN blok: begin zonder eind (of omgekeerd), eind vóór begin of twee keer een begin = half of dubbel.
+// wv2373: blokken van andere diensten (VREEMDE_BLOKKEN, nu de voorstelservice van OVIS Intake) mogen ernaast staan. Ze tellen niet als ons
+// blok en niet in de vingerafdruk (een nieuw voorstel is geen wijziging van de pagina), maar moeten heel zijn (begin, direct gevolgd door een
+// eind), onder de frontmatter staan en niet binnen ons blok; anders is de pagina niet eenduidig te lezen = dezelfde fout.
+// vreemd = [[begin, na het eind], ...] in volgorde.
+const VREEMDE_BLOKKEN = new Set(['nieuwe_feiten', 'bronnotitie', 'bronregister']);
+const MARKER_RE = /<!-- ovis:blok (?:begin(?: id="([^"<>]{1,80})" content_hash="([0-9a-f]{16})")? -->|eind -->)/g;
 function blokPlek(tekst) {
   const t = String(tekst);
-  const re = new RegExp(BLOK_BEGIN_RE.source, 'g'), ms = [];
+  const fout = { fout: 'gegenereerd blok half of dubbel' };
+  const ms = [], re = new RegExp(MARKER_RE.source, 'g');
   let m;
   while ((m = re.exec(t)) !== null) ms.push(m);
-  const e = t.indexOf(BLOK_EIND);
-  if (!ms.length && e < 0) return { geen: true };
-  if (ms.length !== 1 || e < 0 || e < ms[0].index) return { fout: 'gegenereerd blok half of dubbel' };
-  return { b: ms[0].index, bin: ms[0].index + ms[0][0].length, e: e, id: ms[0][1] || null, hash: ms[0][2] || null };
+  if (!ms.length) return { geen: true };
+  // CRLF hier niet normaliseren: de aanroepers snijden met deze posities in hun eigen tekst (review wv2373 ZOU 2)
+  const fmM = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(t), fmEind = fmM ? fmM[0].length : 0;
+  const vreemd = [];
+  let eigen = null;   // { m, e }
+  for (let i = 0; i < ms.length; i++) {
+    const x = ms[i], isEind = x[0] === BLOK_EIND;
+    if (!isEind && x[1] && VREEMDE_BLOKKEN.has(x[1])) {
+      const y = ms[i + 1];
+      if (!y || y[0] !== BLOK_EIND || x.index < fmEind || (eigen && eigen.e === undefined)) return fout;
+      vreemd.push([x.index, y.index + BLOK_EIND.length]);
+      i++;
+      continue;
+    }
+    if (!isEind) { if (eigen) return fout; eigen = { m: x }; continue; }
+    if (!eigen || eigen.e !== undefined) return fout;
+    eigen.e = x.index;
+  }
+  if (eigen && eigen.e === undefined) return fout;
+  if (!eigen) return { geen: true, vreemd: vreemd };
+  return { b: eigen.m.index, bin: eigen.m.index + eigen.m[0].length, e: eigen.e, id: eigen.m[1] || null, hash: eigen.m[2] || null, vreemd: vreemd };
+}
+// De tekst zonder ons blok en zonder de vreemde blokken; rond elk weggehaald blok dezelfde regel als vóór wv2373 (lege regels ervoor
+// tot één, erna weg), zodat een pagina zonder vreemd blok dezelfde vingerafdruk houdt.
+function buitenBlokken(t, pl) {
+  const r = (pl.vreemd || []).slice();
+  if (pl.b !== undefined) r.push([pl.b, pl.e + BLOK_EIND.length]);
+  r.sort(function (a, b) { return a[0] - b[0]; });
+  let uit = null, van = 0;
+  r.concat([[t.length, t.length]]).forEach(function (x, i) {
+    const stuk = t.slice(van, x[0]);
+    uit = uit === null ? stuk : uit.replace(/\n+$/, '\n') + stuk.replace(/^\n+/, '');
+    van = x[1];
+  });
+  return uit;
 }
 function blokHash(binnen) { return crypto.createHash('sha256').update(String(binnen), 'utf8').digest('hex').slice(0, 16); }
 // true = er staat een blok mét hash en de tekst erbinnen is niet meer wat de compiler schreef (handwerk; K2).
@@ -151,7 +189,7 @@ function vingerafdruk(tekst) {
   const t = String(tekst).replace(/\r\n?/g, '\n');
   const pl = blokPlek(t);
   if (pl.fout) return { fout: pl.fout };
-  const zonder = !pl.geen ? t.slice(0, pl.b).replace(/\n+$/, '\n') + t.slice(pl.e + BLOK_EIND.length).replace(/^\n+/, '') : t;
+  const zonder = buitenBlokken(t, pl);
   const regels = zonder.split('\n');
   let eind = -1;
   if (regels[0] === '---') for (let i = 1; i < regels.length; i++) if (regels[i] === '---') { eind = i; break; }
@@ -1197,7 +1235,7 @@ function leesBankregels(tekst) {
   const ov = fm.velden.ovis && typeof fm.velden.ovis === 'object' && !Array.isArray(fm.velden.ovis) ? fm.velden.ovis : {};
   if (lijst(ov.db).indexOf(BANK_REGELS_SLEUTEL) < 0) uit.fouten.push('ovis.db noemt ' + BANK_REGELS_SLEUTEL + ' niet');
   const t = String(tekst).replace(/\r\n?/g, '\n'), pl = blokPlek(t);
-  const buiten = pl.b !== undefined ? t.slice(0, pl.b) + t.slice(pl.e + BLOK_EIND.length) : t;
+  const buiten = pl.fout ? t : buitenBlokken(t, pl);
   uit.voorstellen = buiten.split('\n').slice(fm.eind + 1).filter(function (r) { return /^\s*[-*]\s*\?/.test(r); });
   return uit;
 }
@@ -2657,7 +2695,7 @@ function boxRijFout(fout, tijd) {
 module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina,
   leesPersoon: leesPersoon, persoonZegel: persoonZegel, zegelSleutelLees: zegelSleutelLees, ZEGEL_SLEUTEL_PAD: ZEGEL_SLEUTEL_PAD, persoonMetZegel: persoonMetZegel, persoonSha: persoonSha, normTel: normTel, PER_BEVINDING_RE: PER_BEVINDING_RE,
   frontmatter: frontmatter, vingerafdruk: vingerafdruk, checks: checks, blokTekst: blokTekst,
-  blokHandwerk: blokHandwerk, blokHash: blokHash, blokPlek: blokPlek,
+  blokHandwerk: blokHandwerk, blokHash: blokHash, blokPlek: blokPlek, zonderBlok: zonderBlok, VREEMDE_BLOKKEN: VREEMDE_BLOKKEN,
   rekeningRegel: rekeningRegel, rekeningenPerDoel: rekeningenPerDoel, mdwBlokTekst: mdwBlokTekst, REK_KOP: REK_KOP,
   zetBlok: zetBlok, huidigBlok: huidigBlok, schoon: schoon, rpcInvoer: rpcInvoer, handvattenVan: handvattenVan, normHandvat: normHandvat, boxRij: boxRij, slug: slug,
   BLOK_BEGIN: BLOK_BEGIN, BLOK_EIND: BLOK_EIND, SCHRIJVERS_OK: SCHRIJVERS_OK,

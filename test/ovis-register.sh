@@ -66,6 +66,42 @@ const TGP = '10_Zakelijk/Tolgaarde/Entiteit - TG.md';
   toets('2 twee keer een begin (oud + nieuw) = fout', !!R.vingerafdruk(nieuwBlok + '\n' + R.BLOK_BEGIN + '\n' + R.BLOK_EIND + '\n').fout);
   toets('2 org-id in het blok', R.blokPlek(R.blokTekst({ id: 'org:proef-energie' }, [], [])).id === 'org:proef-energie');
 }
+// ── 2c. wv2373: blok van de voorstelservice (nieuwe_feiten) naast ons blok; ons eigen blok half of dubbel blijft een fout ──
+{ const P = require('./intake-publicatie.js');
+  const a = R.vingerafdruk(TG).sha, FEITEN_RE = /<!-- ovis:blok begin id="nieuwe_feiten"[^>]*-->/g;
+  const vb = P.blokMet('nieuwe_feiten', '\n## Nieuwe feiten uit bronnen (voorstellen)\n\nGeen open voorstellen.\n');
+  const vb2 = P.blokMet('nieuwe_feiten', '\n## Nieuwe feiten uit bronnen (voorstellen)\n\n| eigenschap | voorstel |\n|---|---|\n| functie | proef |\n');
+  const eigen = R.blokTekst({ id: 'TG', compilatienummer: 3 }, [], []);
+  const beide = R.zetBlok(TG, eigen).replace(/\n*$/, '\n\n') + vb + '\n';
+  const pl = R.blokPlek(beide);
+  toets('2c eigen blok + nieuwe_feiten: geen fout, eigen id', !pl.fout && pl.id === 'TG' && pl.vreemd.length === 1, pl);
+  toets('2c nieuwe_feiten telt niet in de vingerafdruk', R.vingerafdruk(beide).sha === a);
+  toets('2c nieuw voorstel verandert de vingerafdruk niet', R.vingerafdruk(beide.replace(vb, vb2)).sha === a);
+  toets('2c leesPagina zonder fouten', R.leesPagina(TGP, beide).fouten.length === 0, R.leesPagina(TGP, beide).fouten);
+  toets('2c huidigBlok = alleen ons blok', R.huidigBlok(beide) === eigen);
+  toets('2c handwerk in nieuwe_feiten is geen handwerk in ons blok', !R.blokHandwerk(beide.replace('Geen open voorstellen.', 'Geen open voorstellen!')));
+  const nieuwEigen = R.blokTekst({ id: 'TG', compilatienummer: 4 }, [], []);
+  const gezet = R.zetBlok(beide, nieuwEigen);
+  toets('2c zetBlok vervangt ons blok en laat nieuwe_feiten staan', gezet.indexOf(nieuwEigen) >= 0 && gezet.indexOf(eigen) < 0 && gezet.indexOf(vb) > gezet.indexOf(nieuwEigen) && R.vingerafdruk(gezet).sha === a);
+  const vbP = P.vindBlok(gezet, FEITEN_RE);
+  toets('2c voorstelservice vindt haar blok nog heel na de compiler', vbP && !vbP.kapot && vbP.tekst === vb, vbP);
+  const alleenVreemd = TG.replace(/\n*$/, '\n\n') + vb + '\n';
+  toets('2c alleen nieuwe_feiten: geen eigen blok, vingerafdruk gelijk', R.blokPlek(alleenVreemd).geen === true && R.vingerafdruk(alleenVreemd).sha === a);
+  const erbij = R.zetBlok(alleenVreemd, eigen);
+  toets('2c zetBlok naast alleen nieuwe_feiten: eigen blok erbij, vreemd ongemoeid', R.huidigBlok(erbij) === eigen && erbij.indexOf(vb) >= 0 && R.vingerafdruk(erbij).sha === a && !P.vindBlok(erbij, FEITEN_RE).kapot);
+  toets('2c zonderBlok haalt alleen ons blok weg', R.blokPlek(R.zonderBlok(beide)).geen === true && R.zonderBlok(beide).indexOf(vb) >= 0 && R.vingerafdruk(R.zonderBlok(beide)).sha === a);
+  const boven = TG.replace('Tekst.', vb + '\n\nTekst.') + '\n' + eigen + '\n';
+  toets('2c nieuwe_feiten boven ons blok mag ook', R.blokPlek(boven).id === 'TG' && !R.vingerafdruk(boven).fout && R.vingerafdruk(boven.replace(vb, vb2)).sha === R.vingerafdruk(boven).sha);
+  toets('2c eigen blok twee keer naast nieuwe_feiten = fout', !!R.blokPlek(beide + eigen + '\n').fout);
+  toets('2c eigen begin zonder eind naast nieuwe_feiten = fout', !!R.vingerafdruk(TG + '\n' + eigen.slice(0, eigen.indexOf(R.BLOK_EIND)) + '\n' + vb + '\n').fout);
+  toets('2c nieuwe_feiten zonder eind = fout', !!R.vingerafdruk(R.zetBlok(TG, eigen) + '\n' + vb.slice(0, vb.indexOf(R.BLOK_EIND)) + '\n').fout);
+  toets('2c nieuwe_feiten binnen ons blok = fout', !!R.blokPlek(TG + '\n' + eigen.replace(R.BLOK_EIND, vb + '\n' + R.BLOK_EIND) + '\n').fout);
+  toets('2c nieuwe_feiten in de frontmatter = fout', !!R.vingerafdruk(TG.replace('updated: 2026-10-24', vb + '\nupdated: 2026-10-24')).fout);
+  toets('2c nieuwe_feiten in de frontmatter = fout, ook met CRLF', !!R.blokPlek(TG.replace('updated: 2026-10-24', vb + '\nupdated: 2026-10-24').replace(/\n/g, '\r\n')).fout);
+  toets('2c CRLF: eigen blok + nieuwe_feiten leest gelijk', R.vingerafdruk(beide.replace(/\n/g, '\r\n')).sha === a);
+  toets('2c losse extra eind = fout', !!R.blokPlek(beide + R.BLOK_EIND + '\n').fout);
+  toets('2c ander onbekend id telt als eigen (dubbel = fout)', !!R.blokPlek(beide + P.blokMet('iets_anders', '\nx\n') + '\n').fout);
+}
 // ── 2b. aliases (wv1271; terugval weg in wv1780): alleen aliases telt, het oude aliassen = fout (niet stil overgeslagen) ──
 { const p = R.leesPagina(TGP, TG);
   toets('2b aliases gelezen', p.fouten.length === 0 && JSON.stringify(p.aliassen) === '["Tolgaarde","Huisartsenpraktijk Tolgaarde"]', p);
