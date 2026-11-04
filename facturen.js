@@ -3009,6 +3009,8 @@ function upload(fdb, r, d, nu, o) {
  * ING en Triodos is de datum van Enable Banking nog niet gemeten (geen koppeling); gemeten is alleen de upload: in 810 ING-regels sinds
  * 2024 is Datum gelijk aan de Valutadatum uit de mededelingen, Triodos heeft één datum zonder valutadatum. Daarom daar −NAAD_MARGE..+NAAD_MARGE
  * (één op één, kleinste afstand eerst): een bankpost die een dag vóór de upload geboekt staat wordt dan niet dubbel ingelezen.
+ * Gemeten wv2405 (4-11-2026, na de koppeling): Enable Banking-datum (= booking_date) − upload-boekdatum is 0 dagen in 300/300 (ING …7624),
+ * 79/79 (ING …1012), 16/16 en 92/92 (Triodos), 0 zonder paar; ING geeft geen value_date. Het venster blijft −3..+3 (marge, geen afwijking gezien).
  */
 const NAAD_VOOR = 7, NAAD_NA = 5, NAAD_MARGE = 3;
 function naadVenster(formaat) { return formaat === 'ing_csv' || formaat === 'triodos_csv' ? [-NAAD_MARGE, NAAD_MARGE] : [0, NAAD_MARGE]; }   // onbekend → het gemeten ABN-venster (review wv2404)

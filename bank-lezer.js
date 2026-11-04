@@ -216,7 +216,15 @@ async function metSlot(fn) {
   mapKlaar();
   const eind = Date.now() + 60000;
   for (;;) {
-    try { fs.writeFileSync(SLOT, String(process.pid), { flag: 'wx', mode: 0o600 }); break; }
+    // wv2405: het slot verschijnt atomair (link) met een mtime op dezelfde klok als Date.now() hieronder. Met de vaste toetsklok
+    // (TOETS_NU, test/vaste-klok.cjs) liep Date.now() voor op de echte bestandstijd: elk slot leek > 10 min oud en werd afgepakt,
+    // twee kinderen schreven dan door elkaar heen in stand.json (CI 516/518: bankluis-poort 'open state + error' wisselend rood).
+    const nieuw = SLOT + '.nieuw.' + process.pid;
+    try {
+      fs.writeFileSync(nieuw, String(process.pid), { mode: 0o600 });
+      const n = new Date(); fs.utimesSync(nieuw, n, n);
+      try { fs.linkSync(nieuw, SLOT); break; } finally { try { fs.unlinkSync(nieuw); } catch (e3) {} }
+    }
     catch (e) {
       if (e.code !== 'EEXIST') throw e;
       // Verouderd slot (> 10 min): eerst naar een eigen naam hernoemen, zodat maar één wachtende het weghaalt (Fable wv680 #13).
