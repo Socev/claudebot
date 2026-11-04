@@ -2996,29 +2996,77 @@ function upload(fdb, r, d, nu, o) {
  * ingelezen post intussen vervangen of niet meer geboekt, dan weg (verwijderd_op) en de koppeling naar de opvolger; zonder opvolger blijft
  * hij gekoppeld en staat het in de ronde (storingen zichtbaar). Hartslag in bron_ronde. Daarna de bankcontrole.
  */
+/*
+ * wv2392 (zakelijke rekeningen via Enable Banking, ontwerp vault 01_Ontwikkeling/Zakelijke rekeningen via Enable Banking naar Facturen
+ * (ontwerp 4-11-2026)): de posten van een business-koppeling staan in een eigen database (o.padZakelijk, zakelijk.sqlite), niet in de
+ * privé-database (o.pad). Een rekening wordt gelezen uit de database waarin zijn bankluis_rek staat; staat hij in beide, dan niets (fout).
+ * NAAD. Een rekening die eerder via uploads binnenkwam (L = laatste rentedatum van een niet-bankluisregel; vast, want uploads worden voor
+ * een bankluis-rekening geweigerd): ouder dan L−NAAD_VOOR blijven de uploads de bron (bankpost niet ingelezen); van L−NAAD_VOOR tot en met
+ * L+NAAD_NA alleen een bankpost zonder upload-tegenhanger (zelfde bedrag, rentedatum 0–NAAD_MARGE dagen vóór de bankdatum, één op één,
+ * eerst zelfde tegenrekening, kleinste afstand eerst); daarna alles. Gemeten 4-11-2026: Enable Banking boekt 0–2 dagen ná de rentedatum
+ * van ABN, nooit ervóór (privé 742/25/13, POT 458/22/32). Het leesvenster loopt voor zo'n rekening minstens tot L−NAAD_VOOR terug.
+ */
+const NAAD_VOOR = 7, NAAD_NA = 5, NAAD_MARGE = 3;
+function naadAfdekken(kandidaten, uploads) {
+  // kandidaten: [{ sleutel, datum, bedrag_centen, tegen }] gesorteerd; uploads: [{ id, boekdatum, bedrag_centen, tegen }] → Set afgedekte sleutels
+  const vrij = new Set(uploads.map((u) => u.id)), af = new Set();
+  for (const c of kandidaten) {
+    let best = null;
+    for (const u of uploads) {
+      if (!vrij.has(u.id) || u.bedrag_centen !== c.bedrag_centen) continue;
+      const d = K.dagenTussen(u.boekdatum, c.datum);
+      if (d < 0 || d > NAAD_MARGE) continue;
+      const zelfde = !!(c.tegen && u.tegen && c.tegen === u.tegen) ? 0 : 1;
+      const sc = [zelfde, d, u.id];
+      if (!best || sc[0] < best.sc[0] || (sc[0] === best.sc[0] && (sc[1] < best.sc[1] || (sc[1] === best.sc[1] && sc[2] < best.sc[2])))) best = { u, sc };
+    }
+    if (best) { vrij.delete(best.u.id); af.add(c.sleutel); }
+  }
+  return af;
+}
 function bankluisRonde(fdb, o) {
   const nu = o.nu, wanneer = nuIso(nu), vandaag = dagAmsterdam(nu), van = K.plusDagen(vandaag, -BANK_DAGEN);
   const rekeningen = fdb.db.prepare("SELECT * FROM rekening WHERE bank_formaat = 'bankluis' AND controle = 1").all();
   if (!rekeningen.length) return { ok: true, rekeningen: 0, nieuw: 0, reden: 'geen bankluis-rekening' };
   const posten = {}, fouten = [];
+  // wv2392: laatste uploaddatum per rekening (naad) en het leesvenster per rekening
+  const laatsteUpload = fdb.db.prepare("SELECT max(boekdatum) AS l FROM bank_transactie WHERE rekening = ? AND formaat <> 'bankluis' AND verwijderd_op IS NULL");
+  const naad = {}, vanVoor = {};
+  for (const k of rekeningen) {
+    const l = laatsteUpload.get(k.id).l || null;
+    naad[k.id] = l;
+    vanVoor[k.id] = l && K.plusDagen(l, -NAAD_VOOR) < van ? K.plusDagen(l, -NAAD_VOOR) : van;
+  }
+  // zonder o.padZakelijk: zakelijk.sqlite naast de privé-database (beide in BANK_DIR; ook voor de route 'bankluis')
+  const padZak = o.padZakelijk !== undefined ? o.padZakelijk : (o.pad ? String(o.pad).replace(/[^/]*$/, '') + 'zakelijk.sqlite' : null);
+  const bronnen = [{ pad: o.pad, soort: 'prive' }].concat(padZak ? [{ pad: padZak, soort: 'zakelijk' }] : []);
   if (!o.pad || !fs.existsSync(o.pad)) fouten.push({ wat: 'bankluis', melding: 'transactiedatabase niet gevonden' });
   else {
     const { DatabaseSync } = require('node:sqlite');
-    let db = null;
+    const dbs = [];
     try {
-      db = new DatabaseSync(o.pad, { readOnly: true });
-      db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 5000;');
-      const q = db.prepare('SELECT nr, rek, sleutel, status, datum, bedrag, valuta, tegenpartij, tegen_iban, omschrijving, ruwe_json, vervangen_door FROM transacties WHERE rek = ? AND datum >= ?');
-      const opNr = db.prepare('SELECT nr, rek, sleutel, status, datum, bedrag, valuta, tegenpartij, tegen_iban, omschrijving, ruwe_json, vervangen_door FROM transacties WHERE nr = ?');
+      for (const b of bronnen) {
+        if (b.soort === 'zakelijk' && !fs.existsSync(b.pad)) continue;   // nog geen zakelijke koppeling: geen fout
+        const db = new DatabaseSync(b.pad, { readOnly: true });
+        dbs.push(db);
+        db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 5000;');
+        b.q = db.prepare('SELECT nr, rek, sleutel, status, datum, bedrag, valuta, tegenpartij, tegen_iban, omschrijving, ruwe_json, vervangen_door FROM transacties WHERE rek = ? AND datum >= ?');
+        b.opNr = db.prepare('SELECT nr, rek, sleutel, status, datum, bedrag, valuta, tegenpartij, tegen_iban, omschrijving, ruwe_json, vervangen_door FROM transacties WHERE nr = ?');
+        b.heeft = db.prepare('SELECT 1 AS j FROM transacties WHERE rek = ? LIMIT 1');
+      }
       for (const k of rekeningen) {
-        const lijst = q.all(k.bankluis_rek, van);
+        const in_ = bronnen.filter((b) => b.q && b.heeft.get(k.bankluis_rek));
+        if (in_.length > 1) { fouten.push({ wat: 'bankluis', melding: 'rekening ' + eind4(k.iban) + ' staat in de privé- én de zakelijke database; niets ingelezen' }); continue; }
+        const b = in_[0] || bronnen[0];
+        if (!b.q) continue;
+        const lijst = b.q.all(k.bankluis_rek, vanVoor[k.id]);
         const perNr = new Map(lijst.map((p) => [p.nr, p]));
         // een opvolger kan buiten het venster vallen: los ophalen
-        for (const p of lijst) if (p.vervangen_door != null && !perNr.has(p.vervangen_door)) { const x = opNr.get(p.vervangen_door); if (x && x.rek === k.bankluis_rek) perNr.set(x.nr, x); }
-        posten[k.id] = { lijst, perNr };
+        for (const p of lijst) if (p.vervangen_door != null && !perNr.has(p.vervangen_door)) { const x = b.opNr.get(p.vervangen_door); if (x && x.rek === k.bankluis_rek) perNr.set(x.nr, x); }
+        posten[k.id] = { lijst, perNr, bron: b.soort };
       }
     } catch (e) { fouten.push({ wat: 'bankluis', melding: 'lezen mislukt (' + kort(e && e.code || e && e.name || 'fout', 40) + ')' }); }
-    finally { if (db) try { db.close(); } catch (e) {} }
+    finally { for (const db of dbs) try { db.close(); } catch (e) {} }
   }
   const uit = D.transactie(fdb, function () {
     let bron = fdb.db.prepare("SELECT id FROM bron WHERE soort = 'bankluis' ORDER BY id LIMIT 1").get();
@@ -3030,7 +3078,23 @@ function bankluisRonde(fdb, o) {
       tel.rekeningen++;
       const rk = { rek: k.bankluis_rek, iban: k.iban, entiteit: k.entiteit, bank_formaat: 'bankluis', controle: k.controle, alleen_eigenaar: k.alleen_eigenaar };
       const viaRef = (post) => 'bankluis:' + k.bankluis_rek + '|' + post.sleutel;
+      // wv2392: naad met de uploads (zie boven). overslaan = sleutels die niet ingelezen worden (vóór de naad of afgedekt door een upload).
+      const L = naad[k.id], overslaan = new Set();
+      if (L) {
+        const begin = K.plusDagen(L, -NAAD_VOOR), eind = K.plusDagen(L, NAAD_NA), kand = [];
+        for (const post of p.perNr.values()) {
+          const n = B.normaliseerBankluis(post, rk);
+          if (!n.ok) continue;
+          if (post.datum < begin) { overslaan.add(post.sleutel); tel.voor_naad = (tel.voor_naad || 0) + 1; }
+          else if (post.datum <= eind) kand.push({ sleutel: post.sleutel, datum: post.datum, bedrag_centen: n.transactie.bedrag_centen, tegen: n.transactie.tegenpartij_iban || null });
+        }
+        kand.sort((a, b) => (a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : a.sleutel < b.sleutel ? -1 : a.sleutel > b.sleutel ? 1 : 0));
+        const ups = fdb.db.prepare("SELECT id, boekdatum, bedrag_centen, tegenpartij_iban AS tegen FROM bank_transactie WHERE rekening = ? AND formaat <> 'bankluis' AND verwijderd_op IS NULL AND boekdatum >= ?")
+          .all(k.id, K.plusDagen(begin, -NAAD_MARGE));
+        for (const sl of naadAfdekken(kand, ups)) { overslaan.add(sl); tel.afgedekt = (tel.afgedekt || 0) + 1; }
+      }
       for (const post of p.perNr.values()) {
+        if (overslaan.has(post.sleutel)) continue;
         const n = B.normaliseerBankluis(post, rk);
         if (!n.ok) continue;
         tel.gelezen++;
@@ -3040,13 +3104,13 @@ function bankluisRonde(fdb, o) {
         if (!nw) tel.terug = (tel.terug || 0) + fdb.db.prepare("UPDATE bank_transactie SET verwijderd_op = NULL, verwijderd_door = NULL WHERE entry_ref = ? AND verwijderd_door = 'bankluis'").run(n.transactie.entry_ref).changes;
       }
       // geen enkele post in het venster terwijl er wel regels zijn: verkeerde koppeling of een lege/herbouwde bankluis — niets weghalen, wel melden
-      const binnen = Number(fdb.db.prepare("SELECT count(*) AS n FROM bank_transactie WHERE rekening = ? AND formaat = 'bankluis' AND verwijderd_op IS NULL AND boekdatum >= ?").get(k.id, van).n);
+      const binnen = Number(fdb.db.prepare("SELECT count(*) AS n FROM bank_transactie WHERE rekening = ? AND formaat = 'bankluis' AND verwijderd_op IS NULL AND boekdatum >= ?").get(k.id, vanVoor[k.id]).n);
       if (!p.lijst.length && binnen > 0) { fouten.push({ wat: 'bankluis', melding: 'geen posten voor rekening ' + eind4(k.iban) + ' in de bankluis; niets weggehaald' }); continue; }
       // vervangen_door-controle over wat al binnen is (alleen binnen het venster: oudere posten worden niet opnieuw gelezen)
       const perSleutel = new Map([...p.perNr.values()].map((x) => [x.sleutel, x]));
-      for (const t of fdb.db.prepare("SELECT id, bankluis_sleutel FROM bank_transactie WHERE rekening = ? AND formaat = 'bankluis' AND verwijderd_op IS NULL AND boekdatum >= ?").all(k.id, van)) {
+      for (const t of fdb.db.prepare("SELECT id, bankluis_sleutel FROM bank_transactie WHERE rekening = ? AND formaat = 'bankluis' AND verwijderd_op IS NULL AND boekdatum >= ?").all(k.id, vanVoor[k.id])) {
         const post = perSleutel.get(t.bankluis_sleutel);
-        if (post && post.status === 'booked' && post.vervangen_door == null) continue;
+        if (post && post.status === 'booked' && post.vervangen_door == null && !overslaan.has(post.sleutel)) continue;   // wv2392: afgedekt = weg
         fdb.db.prepare("UPDATE bank_transactie SET verwijderd_op = ?, verwijderd_door = 'bankluis' WHERE id = ?").run(wanneer, t.id);
         tel.vervangen++;
         const opv = post && post.vervangen_door != null ? p.perNr.get(post.vervangen_door) : null;

@@ -295,6 +295,7 @@ jobs:
           t test/paypal-laag.sh
           t test/ecobank-laag.sh
           t test/bank-pot.sh   # wv786: POT-rekening afgescheiden van privé, indeling zonder taalmodel
+          t test/bank-zakelijk.sh   # wv2392: zakelijke rekeningen (business-koppeling) alleen in zakelijk.sqlite → Facturen, naad tegen de uploads
           t test/financien-app.sh   # wv771: App Financiën — veld-allowlist, signalen, opzeglinks met host-allowlist
           TOETS_NU=2026-11-03T10:00:00Z t test/financien-app.sh   # wv1044: ook op dag 1–9 van een maand (een toetspost in de toekomst schoof de peildag op)
           t test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)

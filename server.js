@@ -15606,6 +15606,7 @@ const facturenRoutes = (function () {
   try { return require(p).maak({ fout: logError, huisstijl: facturenHuisstijl }); } catch (e) { logError('facturen', e); return null; }
 })();
 const FACTUREN_BANKLUIS = path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite');
+const FACTUREN_BANKLUIS_ZAK = path.join(process.env.BANK_DIR || '/opt/data/bank', 'zakelijk.sqlite');   // wv2392: business-koppeling (Enable Banking)
 // ── Facturen-app, koerier (wv855, F4, 23-10-2026; bouwplan § 4.4 en § 4.5) ──
 // facturen-koerier.js doet de ronde; hier alleen de I/O: het lees-luik (mail_zoeken/mail_lezen als JSON, mail_bijlage ook als bytes) en de
 // verzender (n8n AI - Facturen-verzender: Gmail-concept met bijlagen, witte lijst + plafond in de workflow; multipart, geheim =
@@ -16002,9 +16003,9 @@ function facturenNaBankRonde() {
   if (!facturenRoutes) return null;
   const fdb = facturenOpen();
   if (!fdb) return null;
-  const r = facturenRoutes.bankluisRonde(fdb, { nu: Date.now(), pad: FACTUREN_BANKLUIS });
+  const r = facturenRoutes.bankluisRonde(fdb, { nu: Date.now(), pad: FACTUREN_BANKLUIS, padZakelijk: FACTUREN_BANKLUIS_ZAK });
   if (!r.rekeningen) return null;
-  return { ok: r.ok, nieuw: r.nieuw, vervangen: r.vervangen, signalen: r.controle ? r.controle.signalen : undefined, fouten: (r.fouten || []).length || undefined };
+  return { ok: r.ok, nieuw: r.nieuw, vervangen: r.vervangen, afgedekt: r.afgedekt || undefined, signalen: r.controle ? r.controle.signalen : undefined, fouten: (r.fouten || []).length || undefined };
 }
 // ── wv2056: PayPal zakelijk als bron in Facturen (David 30-10-2026 22:50, Ja op "lezen met een sleutel die technisch ook kan terugbetalen?") ──
 // Na de bank-ronde (na facturenNaBankRonde, zodat de bankposten van vandaag er al zijn): de transacties van de zakelijke PayPal-rekening

@@ -145,9 +145,13 @@ function eigenOnbekend(ctx, t, ext) {
 function geldigLabel(v, n) { return typeof v === 'string' && /^[\p{L}\p{N}][\p{L}\p{N} .,&'()\-/]{0,79}$/u.test(v.trim()) && v.trim().length <= (n || 40) ? v.trim() : null; }
 
 // ── openen en schema ────────────────────────────────────────────────────────
-function open(bankDir) {
+// wv2392: bestand = 'zakelijk.sqlite' voor de zakelijke rekeningen (business-sessie bij Enable Banking): zelfde schema, aparte database,
+// zodat praktijk- en personeelsposten nooit in de privé-database, de Financiën-app of de verrijking (taalmodel) komen. Facturen leest hem.
+const BESTANDEN = ['transacties.sqlite', 'zakelijk.sqlite'];
+function open(bankDir, bestand) {
+  if (bestand !== undefined && BESTANDEN.indexOf(bestand) < 0) throw new Error('onbekend archiefbestand');
   fs.mkdirSync(bankDir, { recursive: true, mode: 0o700 });
-  const pad = path.join(bankDir, 'transacties.sqlite');
+  const pad = path.join(bankDir, bestand || 'transacties.sqlite');
   const nieuw = !fs.existsSync(pad);
   if (nieuw) fs.closeSync(fs.openSync(pad, 'a', 0o600));
   try { fs.chmodSync(pad, 0o600); } catch (e) {}

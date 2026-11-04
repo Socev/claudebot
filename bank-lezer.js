@@ -356,7 +356,21 @@ function potSet(s) {
   const p = x || new Set(); p.fout = !x; return p;
 }
 function archiefBij(s, rh, lijst, opties) {
-  return archiefVeilig('bij', function (A, a) { A.rekeningenSync(a, s.rekeningen); return A.bij(a, rh, lijst, opties); });
+  return archiefVeilig('bij', function (A, a) { A.rekeningenSync(a, prive(s.rekeningen)); return A.bij(a, rh, lijst, opties); });
+}
+// wv2392: de zakelijke database (zelfde schema, eigen bestand). Geen verrijking, geen cache, geen privé-metadata.
+let zakObj;
+function zakOpen() {
+  if (zakObj) return zakObj;
+  const A = require(path.join(__dirname, 'bank-archief.js'));
+  zakObj = { A: A, a: A.open(BANK_DIR, 'zakelijk.sqlite') };
+  return zakObj;
+}
+function zakAlleen(reks) { const u = {}; Object.keys(reks || {}).forEach(function (h) { if (isZak(reks[h])) u[h] = reks[h]; }); return u; }
+function zakBij(s, rh, lijst, opties) {
+  const x = zakOpen();
+  x.A.rekeningenSync(x.a, zakAlleen(s.rekeningen));
+  return x.A.bij(x.a, rh, lijst, opties);
 }
 
 // ── saldi (naar bankmcp simplifyBalances) ─────────────────────────────────
@@ -372,13 +386,18 @@ function saldiEenvoudig(lijst) {
 }
 
 // ── rekening zoeken ───────────────────────────────────────────────────────
-function zichtbaar(r) { return r.bron !== 'bunq' || r.status === 'ACTIVE'; }
+// wv2392: een rekening uit een business-sessie is zakelijk (r.zakelijk): nooit zichtbaar in een privé-opdracht, niet te kiezen met
+// --rekening, niet in de privé-database of de cache; alleen het aantal in rekeningen. Facturen leest hem uit zakelijk.sqlite.
+const ZAK_UITLEG = 'zakelijke rekeningen (business-koppeling) staan niet in de bankluis-overzichten; hun posten staan in Facturen (skill facturen-lezen)';
+function isZak(r) { return !!(r && r.zakelijk); }
+function prive(reks) { const u = {}; Object.keys(reks || {}).forEach(function (h) { if (!isZak(reks[h])) u[h] = reks[h]; }); return u; }
+function zichtbaar(r) { return !isZak(r) && (r.bron !== 'bunq' || r.status === 'ACTIVE'); }
 function rekeningVan(s, ref, alle) {
   const n0 = String(ref || '').trim().toLowerCase();
   // Opgeheven of bevroren bunq-rekeningen alleen op hun exacte uid (anders zouden oude namen elke zoekterm dubbel maken).
   // alle (archiefopdrachten, wv687): ook opgeheven rekeningen, als een zichtbare niet past.
   const lijst = Object.keys(s.rekeningen).map(function (h) { return Object.assign({ hash: h }, s.rekeningen[h]); })
-    .filter(function (r) { return alle || zichtbaar(r) || (r.uid && String(r.uid).toLowerCase() === n0); });
+    .filter(function (r) { return !isZak(r) && (alle || zichtbaar(r) || (r.uid && String(r.uid).toLowerCase() === n0)); });
   if (!ref) { if (lijst.length === 1) return lijst[0]; throw new Weigering(lijst.length ? 'meerdere rekeningen: noem er één (label, naam, laatste 4 cijfers of uid)' : 'nog geen rekening gekoppeld'); }
   const n = String(ref).trim().toLowerCase();
   // wv786: "POT" is altijd de POT-rekening (eigenaar POT), ook zonder label
@@ -425,6 +444,7 @@ async function duidFout(s, rek, e) {
 
 // ── ophalen ───────────────────────────────────────────────────────────────
 async function haalSaldo(s, rek) {
+  if (isZak(rek)) throw new Weigering('zakelijke rekening: geen saldo in de bankluis (de posten staan in Facturen)');   // wv2392
   const t = teller(s, rek.hash);
   t.saldo++;
   const j = await api('GET', '/accounts/' + encodeURIComponent(rek.uid) + '/balances');
@@ -446,8 +466,12 @@ async function haalTransacties(s, rek, van) {
   } while (sleutel && paginas < MAX_PAGINAS);
   const lijst = eenvoudig(alle);
   // Wachtende posten alleen vervangen binnen het opgevraagde bereik en alleen bij een volledige opvraag (Fable wv680 #9).
-  cacheBij(rek.hash, lijst, sleutel ? null : van);
-  archiefBij(s, rek.hash, lijst, { volledigVanaf: sleutel ? null : van });
+  // wv2392: zakelijk alleen naar zakelijk.sqlite (geen cache, geen privé-database); een fout daar is een fout van de opvraag.
+  if (isZak(rek)) zakBij(s, rek.hash, lijst, { volledigVanaf: sleutel ? null : van });
+  else {
+    cacheBij(rek.hash, lijst, sleutel ? null : van);
+    archiefBij(s, rek.hash, lijst, { volledigVanaf: sleutel ? null : van });
+  }
   const o = s.opgehaald[rek.hash] = s.opgehaald[rek.hash] || {};
   o.transacties = new Date().toISOString();
   if (!o.vanaf || van < o.vanaf) o.vanaf = van;
@@ -547,7 +571,7 @@ function eigenIbans(s, ext, alleenExtern) {
   const m = new Map();
   Object.keys(s.rekeningen).forEach(function (h) {
     const r = s.rekeningen[h];
-    if (r.iban && !!alleenExtern === !!(ext && ext.has(h))) m.set(String(r.iban).replace(/\s+/g, '').toUpperCase(), r.label || r.naam || h.slice(0, 12));
+    if (r.iban && !isZak(r) && !!alleenExtern === !!(ext && ext.has(h))) m.set(String(r.iban).replace(/\s+/g, '').toUpperCase(), r.label || r.naam || h.slice(0, 12));
   });
   return m;
 }
@@ -564,7 +588,7 @@ async function haalArchiefBunq(s, rek, ctx) {
   let r;
   try { r = await bunqMod.transacties(ctx, rek.bunq_id, '2000-01-01', function () { t.paginas++; }, o.archief_terug || null); } finally { bunqNaRoep(ctx); }
   const lijst = bunqMod.eenvoudig(r.posten, schoon);
-  x.A.rekeningenSync(x.a, s.rekeningen);
+  x.A.rekeningenSync(x.a, prive(s.rekeningen));
   const u = x.A.bij(x.a, rek.hash, lijst, null);
   if (r.afgekapt || r.fout) { if (r.oudste_id) o.archief_terug = r.oudste_id; }
   else { o.archief_klaar = new Date().toISOString(); delete o.archief_terug; }
@@ -583,9 +607,13 @@ async function haalArchiefEb(s, rek, van) {
     sleutel = j.continuation_key || null;
   } while (sleutel && paginas < MAX_PAGINAS);
   const lijst = eenvoudig(alle);
-  const x = archiefOpen();
-  x.A.rekeningenSync(x.a, s.rekeningen);
-  const u = x.A.bij(x.a, rek.hash, lijst, { volledigVanaf: sleutel ? null : van });
+  let u;
+  if (isZak(rek)) u = zakBij(s, rek.hash, lijst, { volledigVanaf: sleutel ? null : van });   // wv2392
+  else {
+    const x = archiefOpen();
+    x.A.rekeningenSync(x.a, prive(s.rekeningen));
+    u = x.A.bij(x.a, rek.hash, lijst, { volledigVanaf: sleutel ? null : van });
+  }
   const oudste = lijst.reduce(function (m, p) { return p.datum && (!m || p.datum < m) ? p.datum : m; }, null);
   return { aantal: lijst.length, nieuw: u.nieuw, paginas: paginas, afgekapt: !!sleutel || undefined, oudste: oudste };
 }
@@ -593,7 +621,7 @@ async function haalArchiefEb(s, rek, van) {
 function archiefKlaar() {
   const x = archiefOpen(), s = standLees();
   x.A.migreerCache(x.a, path.join(BANK_DIR, 'cache.sqlite'));
-  x.A.rekeningenSync(x.a, s.rekeningen);
+  x.A.rekeningenSync(x.a, prive(s.rekeningen));
   return { A: x.A, a: x.a, s: s };
 }
 // wv765: de PayPal-laag; zelfde database, eigen tabel. Laadt pas als een PayPal-opdracht hem nodig heeft.
@@ -679,9 +707,13 @@ const opdrachten = {
         standSchrijf(s);
         return { ok: false, reden: 'afwijkend', tekst: 'gekoppelde bank (' + bankNaam + ') is niet de bank van de link (' + w.bank + '); niets overgenomen' };
       }
+      // wv2392 (review gpt-5.5 MOET 3): zakelijk zodra de link óf de bank 'business' zegt (dicht bij twijfel: nooit privé). Een afwijking
+      // tussen link en bank staat in de sessie (soort_afwijkend) en in de uitvoer.
+      const zakSessie = w.soort === 'business' || sessie.psu_type === 'business';
+      const afwijkend = !!(sessie.psu_type && w.soort && sessie.psu_type !== w.soort);
       s.sessies[sessie.session_id] = { bank: (sessie.aspsp && sessie.aspsp.name) || w.bank, land: (sessie.aspsp && sessie.aspsp.country) || w.land,
-        soort: sessie.psu_type || w.soort, sinds: nu, geldig_tot: (sessie.access && sessie.access.valid_until) || w.toestemming_tot, status: 'AUTHORIZED',
-        rekeningen: [] };
+        soort: zakSessie ? 'business' : (sessie.psu_type || w.soort), sinds: nu, geldig_tot: (sessie.access && sessie.access.valid_until) || w.toestemming_tot, status: 'AUTHORIZED',
+        rekeningen: [], zakelijk: zakSessie || undefined, soort_afwijkend: afwijkend ? (w.soort + '/' + sessie.psu_type) : undefined };
       // wv786 (Fable #6): ABN geeft beide rekeningen dezelfde naam; de zakelijke (POT) krijgt meteen het label POT
       const zak = archiefVeilig('zakelijk', function (A, x) { return A.zakelijkeIbans(x); }) || {};
       (sessie.accounts || []).forEach(function (r) {
@@ -690,7 +722,7 @@ const opdrachten = {
         const iban = (r.account_id && r.account_id.iban) || null, ent = iban ? zak[String(iban).replace(/\s+/g, '').toUpperCase()] : null;
         s.rekeningen[h] = { uid: r.uid, sessie: sessie.session_id, bank: s.sessies[sessie.session_id].bank,
           naam: r.name || null, product: r.product || null, valuta: r.currency || null, soort: r.cash_account_type || null,
-          iban: iban, label: oud.label || ent || null, gekoppeld: nu };
+          iban: iban, label: oud.label || ent || null, gekoppeld: nu, zakelijk: (zakSessie || isZak(oud)) || undefined };
         s.sessies[sessie.session_id].rekeningen.push(h);
       });
       // Oude sessies waarvan alle rekeningen nu onder deze sessie vallen: VERVANGEN (niet bij EB verwijderen zonder Davids woord).
@@ -701,7 +733,7 @@ const opdrachten = {
       });
       standSchrijf(s);
       return { ok: true, sessie: sessie.session_id, bank: s.sessies[sessie.session_id].bank, rekeningen: s.sessies[sessie.session_id].rekeningen.length,
-        geldig_tot: s.sessies[sessie.session_id].geldig_tot };
+        geldig_tot: s.sessies[sessie.session_id].geldig_tot, zakelijk: zakSessie || undefined, soort_afwijkend: s.sessies[sessie.session_id].soort_afwijkend };
     });
   },
 
@@ -788,7 +820,8 @@ const opdrachten = {
       for (const h of sessie.rekeningen) {
         const rek = Object.assign({ hash: h }, s.rekeningen[h]);
         const r = { rekening: h.slice(0, 12) };
-        try { await haalSaldo(s, rek); r.saldo = true; } catch (e) { r.saldo_fout = (await duidFout(s, rek, e)).tekst; }
+        if (isZak(rek)) r.zakelijk = true;   // wv2392: geen saldo; de posten gaan naar zakelijk.sqlite (Facturen)
+        else try { await haalSaldo(s, rek); r.saldo = true; } catch (e) { r.saldo_fout = (await duidFout(s, rek, e)).tekst; }
         try { Object.assign(r, await haalTransacties(s, rek, van)); } catch (e) { r.transacties_fout = (await duidFout(s, rek, e)).tekst; }
         resultaat.push(r);
         standSchrijf(s);
@@ -810,10 +843,12 @@ const opdrachten = {
       });
     }
     const alle = !!(a && a.opt.alle);
-    const hashes = Object.keys(s.rekeningen).filter(function (h) { return alle || zichtbaar(s.rekeningen[h]); }), ext = externSet(), pot = potSet(s);
+    const hashes = Object.keys(s.rekeningen).filter(function (h) { return !isZak(s.rekeningen[h]) && (alle || zichtbaar(s.rekeningen[h])); }), ext = externSet(), pot = potSet(s);
+    const zakN = Object.keys(s.rekeningen).filter(function (h) { return isZak(s.rekeningen[h]); }).length;   // wv2392: alleen het aantal
     // wv786: eigenaar per rekening uit het archief (POT, extern, samen, …)
     const eig = archiefVeilig('eigenaar', function (A, x) { return new Map(x.db.prepare('SELECT rek, eigenaar FROM rekeningen').all().map(function (r) { return [r.rek, r.eigenaar]; })); }) || new Map();
-    return { ok: true, let_op: let_op || undefined, let_op_extern: ext.fout ? EXTERN_ONBEKEND : undefined, verborgen: Object.keys(s.rekeningen).length - hashes.length || undefined,
+    return { ok: true, let_op: let_op || undefined, let_op_extern: ext.fout ? EXTERN_ONBEKEND : undefined, verborgen: Object.keys(s.rekeningen).length - hashes.length - zakN || undefined,
+      zakelijk: zakN ? { aantal: zakN, uitleg: ZAK_UITLEG } : undefined,
       bunq: ctx ? { lijst_van: (s.bunq && s.bunq.lijst) || null, fout: (s.bunq && s.bunq.fout && s.bunq.fout.tekst) || undefined } : (bunqCtxFout ? { fout: bunqCtxFout } : undefined),
       rekeningen: hashes.map(function (h) {
         const r = s.rekeningen[h], ss = s.sessies[r.sessie] || {}, o = s.opgehaald[h] || {}, t = (s.tellers.dag === dag() && s.tellers.per[h]) || {};
@@ -1033,7 +1068,7 @@ const opdrachten = {
         if (!ebSleutel) continue;
         const o = s.opgehaald[h] || {};
         let stop = false;
-        for (const soort of ['saldo', 'transacties']) {
+        for (const soort of isZak(rek) ? ['transacties'] : ['saldo', 'transacties']) {   // wv2392: zakelijk zonder saldo
           if (stop) break;
           if (vers(o[soort])) { tel[soort].vers++; continue; }
           if (!rondeMag(s, h, soort)) { tel[soort].grens++; continue; }
@@ -1101,7 +1136,7 @@ const opdrachten = {
           minst_over: ts.length ? ts.reduce(function (m, t) { return Math.min(m, MAX_PER_DAG - (t[soort] || 0)); }, MAX_PER_DAG) : null };
       });
       // wv687: archief bijwerken (cache incrementeel) en regels toepassen; alleen aantallen in de uitvoer
-      const arch = archiefVeilig('ronde', function (A, x) { A.migreerCache(x, path.join(BANK_DIR, 'cache.sqlite')); A.rekeningenSync(x, s.rekeningen); const v = A.verrijk(x); return { posten: v.posten, gewijzigd: v.gewijzigd }; });
+      const arch = archiefVeilig('ronde', function (A, x) { A.migreerCache(x, path.join(BANK_DIR, 'cache.sqlite')); A.rekeningenSync(x, prive(s.rekeningen)); const v = A.verrijk(x); return { posten: v.posten, gewijzigd: v.gewijzigd }; });
       // Zonder één rekening leest de ronde niets: dat is stille uitval, geen succes (Fable wv685 #6).
       if (!ebRek.length && !bunqN) fout('bank', 'leeg', 'geen enkele rekening gekoppeld of zichtbaar');
       const geslaagd = fouten.length === 0, nu = new Date().toISOString();
@@ -1311,7 +1346,7 @@ const opdrachten = {
       if (gezet) standSchrijf(s);
       x.s = s;
     });
-    x.A.rekeningenSync(x.a, x.s.rekeningen);
+    x.A.rekeningenSync(x.a, prive(x.s.rekeningen));
     const v = x.A.verrijk(x.a);
     return Object.assign({ ok: true, pot_rekeningen: x.A.potRekeningen(x.a).size, posten_bijgewerkt: v.gewijzigd }, r);
   },
@@ -1386,7 +1421,7 @@ const opdrachten = {
       delete s.sessies[id];
       standSchrijf(s);
       // wv687: het archief blijft (rekening krijgt status ontkoppeld); wissen alleen op Davids uitdrukkelijke woord, met de hand
-      archiefVeilig('ontkoppel', function (A, x) { A.markeerOntkoppeld(x, weg); A.rekeningenSync(x, s.rekeningen); });
+      archiefVeilig('ontkoppel', function (A, x) { A.markeerOntkoppeld(x, weg); A.rekeningenSync(x, prive(s.rekeningen)); });
       return { ok: true, sessie: id, bank: bank, gewist: true, archief: 'bewaard (rekening op ontkoppeld)' };
     });
   },
