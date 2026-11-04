@@ -115,7 +115,7 @@ const wacht = () => new Promise((r) => setImmediate(r));
     st.knop = { hash: 'ffff0000', antwoord: { ok: true, tekst: '  zal ik de CISO nu een ronde laten draaien?', t: st.nu - 60000, sleutel: 'j2:ffff0000' } };
     r = await m.start('ciso', 'socev', 'controle', 'ffff0000');
     toets('3 CISO: vaste zin (hoofdletters en spaties maken niet uit)', r.status === 202, r);
-    toets('3 vraagZin per manager', M.MANAGERS.map((x) => M.vraagZin(x)).join('|') === 'Zal ik de Data Manager nu een ronde laten draaien?|Zal ik de Design Manager nu een ronde laten draaien?|Zal ik de UI Manager nu een ronde laten draaien?|Zal ik de CISO nu een ronde laten draaien?|Zal ik de Bibliothecaris nu een ronde laten draaien?');
+    toets('3 vraagZin per manager', M.MANAGERS.map((x) => M.vraagZin(x)).join('|') === 'Zal ik de Data Manager nu een ronde laten draaien?|Zal ik de Design Manager nu een ronde laten draaien?|Zal ik de UI Manager nu een ronde laten draaien?|Zal ik de CISO nu een ronde laten draaien?|Zal ik de MrLean nu een ronde laten draaien?|Zal ik de Bibliothecaris nu een ronde laten draaien?');
     toets('3 ongeldig vraag-id → 403 zonder register te lezen', (await m.start('data', 'socev', '', '../../x')).status === 403);
   }
   // ── 4. twee tegelijk ──
@@ -198,11 +198,11 @@ const wacht = () => new Promise((r) => setImmediate(r));
     const sb = { ciso: { aantal: 2, per_ernst: { warning: 2 }, hartslag: { laatste_ronde: '2026-10-19T04:07:10Z', drempel_min: 12960 },
       top: [{ id: 'C1-x', ernst: 'warning', status: 'open', samenvatting: 'laag: iets', detail: 'pad /opt/data/x', eerst_gezien: '2026-10-05T10:00:00Z' }] },
       data: { aantal: 0, per_ernst: {}, hartslag: { laatste_ronde: '2026-10-01T03:00:00Z', drempel_min: 12960 }, top: [] },
-      design: { aantal: 0, per_ernst: {}, hartslag: null, top: [] }, ui: { aantal: 0, per_ernst: {}, hartslag: null, top: [] },
+      design: { aantal: 0, per_ernst: {}, hartslag: null, top: [] }, ui: { aantal: 0, per_ernst: {}, hartslag: null, top: [] }, mrlean: { aantal: 0, per_ernst: {}, hartslag: null, top: [] },
       bibliothecaris: { aantal: 0, per_ernst: {}, hartslag: null, top: [] } };
     let k = m.stand(sb, { vast: false });
     const c = k.find((x) => x.id === 'ciso'), d = k.find((x) => x.id === 'data'), ds = k.find((x) => x.id === 'design');
-    toets('8 vijf kaarten in vaste volgorde', k.map((x) => x.id).join() === 'data,design,ui,ciso,bibliothecaris', k.map((x) => x.id));
+    toets('8 zes kaarten in vaste volgorde (wv2430: MrLean)', k.map((x) => x.id).join() === 'data,design,ui,ciso,mrlean,bibliothecaris', k.map((x) => x.id));
     toets('8 hartslag op tijd / te laat / nog nooit', c.hartslag === 'op tijd' && d.hartslag === 'te laat' && ds.hartslag === 'nog nooit', k.map((x) => x.hartslag));
     toets('8 CISO: top met detail op de telefoon, kan draaien, rooster', c.bevindingen.top.length === 1 && c.bevindingen.top[0].detail === 'pad /opt/data/x' && c.kan === true && c.rooster === 'elke maandag 06:00', c);
     k = m.stand(sb, { vast: true });

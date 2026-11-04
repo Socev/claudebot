@@ -324,7 +324,7 @@ function omgeving() {
   }
   // ── 8. echte config: de vier sessies en hun paden ──
   { const c = P.config('/v', '/d');
-    toets('8 vier bewaakte sessies', Object.keys(c).sort().join() === 'ciso,data-manager,design-manager,ui-manager');
+    toets('8 vijf bewaakte sessies (wv2430: MrLean)', Object.keys(c).sort().join() === 'ciso,data-manager,design-manager,mrlean,ui-manager');
     toets('8 wachter-state.py bij alle vier in het slot', Object.values(c).every((x) => x.slot.includes('/v/.claude/skills/personeels-wachter/wachter-state.py')));
     toets('8 eigen skillmap in elk slot', Object.entries(c).every(([k, x]) => x.slot.includes('/v/.claude/skills/' + k)));
     toets('8 CISO-code: canary, healthrapporten, wv670 (Fable wv904 #7)', ['/d/beveiliging/injectie/canary/canary.mjs', '/d/bin/healthrapporten.py', '/d/mk-scripts/wv670'].every((x) => c.ciso.code.includes(x)));
@@ -333,7 +333,7 @@ function omgeving() {
   }
   // ── 9. server.js en uitrol.sh ──
   { const s = fs.readFileSync('server.js', 'utf8');
-    toets('9 sessielijst server.js = config', /MANAGER_POORT_SESSIES = new Set\(\['ciso', 'data-manager', 'design-manager', 'ui-manager'\]\)/.test(s));
+    toets('9 sessielijst server.js = config', /MANAGER_POORT_SESSIES = new Set\(\['ciso', 'data-manager', 'design-manager', 'ui-manager', 'mrlean'\]\)/.test(s));
     const pj = s.slice(s.indexOf('async function processJob('), s.indexOf('async function processAgent('));   // hele functie (wv1001: 6000 tekens was te krap)
     const iPoort = pj.indexOf('MANAGER_POORT_SESSIES.has('), iRun = pj.indexOf('runMetFallback('), iRunning = pj.indexOf("j.status = 'running'");
     toets('9 poort in processJob vóór running en vóór de run', iPoort > 0 && iPoort < iRunning && iPoort < iRun);

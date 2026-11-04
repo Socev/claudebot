@@ -46,7 +46,7 @@ const WERKMAP_MAX = 2000;
 const WERKMAP_TEKST = [
   "# Werkmap van de managerronde @@SESSIE@@ (machinekamer)",
   "",
-  "Je draait als een van de managers van Socevs machinekamer (CISO, Data Manager, Design Manager of UI Manager), sessie",
+  "Je draait als een van de managers van Socevs machinekamer (CISO, Data Manager, Design Manager, UI Manager of MrLean), sessie",
   "\"@@SESSIE@@\". Deze map is je werkmap en staat bewust buiten de vault. Deze tekst komt uit de release van de pod",
   "(managers-poort.js, wv998); de poort zet hem vóór elke ronde terug. Wijzig hem niet.",
   "",
@@ -224,7 +224,9 @@ function config(V, D) {
     'design-manager': { slot: [path.join(S, 'design-manager'), wachter], code: [path.join(D, 'mk-scripts', 'design-manager'), wv, vv] },
     'ui-manager': { slot: [path.join(S, 'ui-manager'), wachter],
       code: [path.join(D, 'mk-scripts', 'ui-manager'), wv, path.join(D, 'socev-site', 'secretpoort.js'), vv,
-        path.join(D, 'mk-scripts', 'design-manager', 'nep', 'maak-socev-app.cjs')] }
+        path.join(D, 'mk-scripts', 'design-manager', 'nep', 'maak-socev-app.cjs')] },
+    // wv2430 MrLean: meet.py leest werkvoorraad, voor_jou, hartslag (SELECT), vragen.json/audit.jsonl (tellingen) en vaultpagina's
+    mrlean: { slot: [path.join(S, 'mrlean'), wachter], code: [path.join(D, 'mk-scripts', 'mrlean'), wv, vv, path.join(D, 'socev-site', 'secretpoort.js')] }
   };
 }
 

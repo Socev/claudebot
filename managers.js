@@ -42,6 +42,12 @@ const MANAGERS = [
     bewaakt: 'De beveiliging: sleutels, toegang, versies en wat er van buitenaf bereikbaar is.',
     rooster: { dag: 1, uur: 6, min: 0 }, slot: 'CISO', slotRe: /^CISO \d{4}-\d{2}-\d{2}: \d+ checks/,
     slotFormaat: 'CISO <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open (<k> nieuw), bundel <id of geen>' },
+  // wv2430 MrLean (wo 10:00, Sonnet; David 4-11-2026): meet wat controles, vragen, vingerafdrukken en regels kosten en opleveren en
+  // legt voorstellen voor (Voor jou-kaarten); schrapt nooit zelf. Ontwerp: 01_Ontwikkeling/MrLean - de lean-manager (ontwerp 4-11-2026).md
+  { id: 'mrlean', naam: 'MrLean', skill: 'mrlean', sessie: 'mrlean', model: 'claude-sonnet-5-5', hartslag: 'mrlean', patroon: '^ML[0-9]',
+    bewaakt: 'Of alles lean blijft: controles, nacontroles, vragen aan jou, vingerafdrukken en regels die niets opleveren.',
+    rooster: { dag: 3, uur: 10, min: 0 }, slot: 'MRLEAN', slotRe: /^MRLEAN \d{4}-\d{2}-\d{2}: \d+ checks/,
+    slotFormaat: 'MRLEAN <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <k> kandidaten, voorstellen <v>, kaarten geen' },
   // wv979 Bibliothecaris (OVIS): geen sessie maar een script (ovis-run.js bibliothecaris, geen taalmodel), elke nacht 02:30 via de
   // pod-tijdklok in server.js. Op afroep: geen quotumtoets (geen model), wel dezelfde grenzen; geen hartslagstempel en geen box-rij.
   { id: 'bibliothecaris', naam: 'Bibliothecaris', soort: 'script', model: 'geen', hartslag: 'bibliothecaris', patroon: '^BB[0-9]',

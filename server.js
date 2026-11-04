@@ -128,7 +128,7 @@ const LOPER_DAVID_NA_MS = 10 * 60 * 1000;
 // (socev-rechten na-ronde, ACL-toets, zegel als slot op de skill); niet groen = geen ronde, box-rij (1×/dag per sessie), /health.
 // Ontbreekt managers-poort.js in de release, dan ook geen ronde (dicht). Herzegelen na een skillwijziging (machinekamer):
 // node /opt/data/app/current/managers-poort.js zegel <sessie|alle> --door "<wvNNN: wat>"
-const MANAGER_POORT_SESSIES = new Set(['ciso', 'data-manager', 'design-manager', 'ui-manager']);
+const MANAGER_POORT_SESSIES = new Set(['ciso', 'data-manager', 'design-manager', 'ui-manager', 'mrlean']);
 const MANAGERS_ZEGEL = serverPad('managers_zegel', process.env.MANAGERS_ZEGEL, '/opt/data/managers/zegel.json', serverProefDeel('managers-zegel.json'));
 // wv998: de vier draaien met cwd = een eigen werkmap buiten de vault (vaste CLAUDE.md uit de release, eigen geheugen); de poort maakt
 // en toetst hem. Zo laadt een ronde geen vault-CLAUDE.md, geneste CLAUDE.md of gedeeld auto-memory (socev-schrijfbaar). ws blijft vault.
@@ -2433,6 +2433,7 @@ const LESSEN_DOMEIN = {
   'data-manager': 'machine',  // wv844
   'design-manager': 'machine', // wv845
   'ui-manager': 'machine',     // wv896 (Fable diffreview #8)
+  'mrlean': 'machine',         // wv2430
   'dagsamenvatting': 'machine'  // wv589
 };
 
@@ -20734,7 +20735,11 @@ const SOCEV_ENV_EXTRA = {
   // wv896 UI Manager (vr 10:00, Sonnet): zelfde smalle omgeving als design-manager. Leest api.log, het app-auditlog en het app-log
   // (alleen tellingen en hashes de deur uit) en bouwt de app statisch in /tmp; schrijft structuur_state (MCP-token) en hooguit een
   // werkvoorraadrij of Voor jou-kaart (service role via werkvoorraad.py).
-  'ui-manager': ['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE']
+  'ui-manager': ['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE'],
+  // wv2430 MrLean (wo 10:00, Sonnet): zelfde smalle omgeving. meet.py leest met SUPABASE_MCP_TOKEN alleen vaste SELECTs (werkvoorraad,
+  // voor_jou, hartslag) en schrijft structuur_state via wachter-state.py; kaarten via werkvoorraad.py (service role). Review gpt-5.5
+  // 4-11 MOET 4: service role in een taalmodelsessie is hetzelfde als bij Design/UI (wv845/wv896), geen nieuwe grens.
+  'mrlean': ['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE']
 };
 // ── wv1030: beurtpas — de Supabase-PAT weg bij vier smalle sessies (ontwerp + Fable vooraf: /opt/data/mk-scripts/wv1030/ontwerp.md) ──
 // WAAROM. personeels-wachter, vault-concierge en de Cijfer-Meester (app en bot) hadden de Supabase-PAT (SQL als postgres) in hun
