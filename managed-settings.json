@@ -12,6 +12,18 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "WebFetch|WebSearch|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I /app/web-jev.py",
+            "timeout": 20
+          }
+        ]
+      }
     ]
   }
 }

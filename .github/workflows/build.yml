@@ -574,6 +574,10 @@ jobs:
       - name: "argv-hook (wv698/wv699, managed settings)"
         if: ${{ !cancelled() }}
         run: python3 test/argv-hook-toets.py ./argv-wacht.py
+      # Jev-label op webtekst (wv2427): beheerde PostToolUse-hook web-jev.py + jev-pod.js met nep-tooluitslagen en nep-Jev.
+      - name: "web-jev (wv2427, Jev-label op webtekst)"
+        if: ${{ !cancelled() }}
+        run: bash test/web-jev.sh
       # Uid-scheiding fase 2 (wv715): server.js start smalle beurten via de echte loper (stand, jobmap-ACL, stop via de loper,
       # wees over een herstart, sessie-overgang, dicht bij uitval). Loper en server als dezelfde gebruiker; EPERM nagebootst.
       - name: "loper fase 2 (wv715, server.js via de socev-loper)"

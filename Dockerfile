@@ -130,6 +130,10 @@ COPY syncthing-stignore.txt syncthing-filter-toets.py /app/
 # geldt ook voor sessies met een andere HOME. allowManagedHooksOnly: hooks uit HOME of de vault worden genegeerd.
 COPY argv-wacht.py /app/argv-wacht.py
 COPY managed-settings.json /etc/claude-code/managed-settings.json
+# Jev-label op webtekst (wv2427, idee 7 meetpunt 5 (e)): beheerde PostToolUse-hook web-jev.py + de Jev-module (zelfde blok als de
+# pod-terugval van OVIS Intake in de release; C10b vergelijkt de sha256). Root, 0644: socev kan de hook niet uitzetten of wijzigen.
+# Uitzetten zonder image: /opt/data/web-jev-uit (alleen claude).
+COPY jev-pod.js web-jev.py /app/
 
 # De applicatiecode staat op TWEE plekken. /app/release-bootstrap is de kopie die
 # een vers volume vult; daarna draait de pod uit /opt/data/app/current en raakt
@@ -172,6 +176,7 @@ COPY harvester.js /app/release-bootstrap/harvester.js
 COPY secondbrain.js /app/release-bootstrap/secondbrain.js
 COPY docs-delen.js /app/release-bootstrap/docs-delen.js
 COPY zoek-snel.js /app/release-bootstrap/zoek-snel.js
+COPY jev-pod.js /app/release-bootstrap/jev-pod.js
 COPY gezondheid-app.js /app/release-bootstrap/gezondheid-app.js
 COPY financien-vault.js /app/release-bootstrap/financien-vault.js
 COPY app-vast.js /app/release-bootstrap/app-vast.js
@@ -213,9 +218,9 @@ RUN npm install --omit=dev --no-audit --no-fund \
 
 RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh /app/uitrol.sh \
       /app/socev-voorbereiding.sh /app/socev-rechten.sh /app/playwright-mcp.sh \
- && chmod 0644 /app/socev-loper.js /app/loper-bind.py /app/socev-thuis.py /app/argv-wacht.py /etc/claude-code/managed-settings.json \
+ && chmod 0644 /app/socev-loper.js /app/loper-bind.py /app/socev-thuis.py /app/argv-wacht.py /etc/claude-code/managed-settings.json /app/web-jev.py /app/jev-pod.js \
       /app/bisync-filter.txt /app/bisync-filter-toets.sh /app/syncthing-stignore.txt /app/syncthing-filter-toets.py \
- && chown -R root:root /app/socev-* /app/loper-bind.py /app/argv-wacht.py /app/playwright-mcp.sh /etc/claude-code \
+ && chown -R root:root /app/socev-* /app/loper-bind.py /app/argv-wacht.py /app/playwright-mcp.sh /etc/claude-code /app/web-jev.py /app/jev-pod.js \
       /app/bisync-filter.txt /app/bisync-filter-toets.sh /app/syncthing-stignore.txt /app/syncthing-filter-toets.py
 
 EXPOSE 8080

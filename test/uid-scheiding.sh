@@ -75,6 +75,8 @@ loper_status(){ r "cat /proc/$1/status" > /tmp/st.txt && grep -qE '^NoNewPrivs:\
 managed(){
   [ "$(r 'stat -c "%U %a" /etc/claude-code/managed-settings.json')" = "root 644" ] || return 1
   [ "$(r 'stat -c %U /app/argv-wacht.py')" = "root" ] || return 1
+  [ "$(r 'stat -c "%U %a" /app/web-jev.py /app/jev-pod.js' | tr '\n' ' ')" = "root 644 root 644 " ] || return 1   # wv2427
+  r 'cat /etc/claude-code/managed-settings.json' | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["hooks"]["PostToolUse"][0]["hooks"][0]["command"]=="python3 -I /app/web-jev.py" else 1)' || return 1
   r 'cat /etc/claude-code/managed-settings.json' | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["allowManagedHooksOnly"] is True and d["hooks"]["PreToolUse"][0]["hooks"][0]["command"]=="python3 -I /app/argv-wacht.py" else 1)'
 }
 cli_managed(){ [ "$(r 'grep -a -c /etc/claude-code "$(readlink -f "$(command -v claude)")"')" -gt 0 ]; }
