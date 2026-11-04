@@ -17750,6 +17750,29 @@ const sb2Proefloper = (function () {
       argv: ['python3', '-I', SB2_SRC + '/proefloper.py', 'ronde'], pogingen: 2 }) : null;
   } catch (e) { logError('sb2-proefloper', e); return null; }
 })();
+// wv2022 (SB2 fase 6f): synapsen — de verbindingen tussen entiteiten (alleen entity-id's, tellingen, tijden en één toegangscode; nooit
+// tekst) elke nacht opnieuw uit de bron: vermeldingen/ontvangsten, afspraken, roosterdiensten, rollen en claims (één definitie in
+// socev-scripts 0024 synapse_bron). Keten-stap ná intake-voorstel en vóór sb2-proefloper (die toetst synapse = bron, extra rij SYN),
+// alleen met de schakelaar scripts-staat/sb2-synapsen/aan.json {"aan": true} (van claude, gewoon bestand); zonder schakelaar slaat de
+// keten hem stil over. Eerst herberekenen (alleen verschillen schrijven), dan een droge tweede ronde met dezelfde tot: die moet 0 geven.
+const SB2_SYN_DIR = '/opt/data/scripts-staat/sb2-synapsen';
+function sb2SynapsenAan() {
+  try {
+    const p = path.join(SB2_SYN_DIR, 'aan.json');
+    const st = fs.lstatSync(p);
+    if (!st.isFile() || (process.getuid && st.uid !== process.getuid())) return false;
+    return JSON.parse(fs.readFileSync(p, 'utf8')).aan === true;
+  } catch (e) { return false; }
+}
+async function sb2SynapsenRonde() {
+  const r = await appSbRpc('sb2_synapse_herbereken', { p: {} }, 65000);
+  if (!r || typeof r !== 'object' || r.run_id == null || !r.tot) return { ok: false, reden: 'synapsen: geen run' };
+  const detail = { synapsen: r.synapsen, nieuw: r.nieuw, gewijzigd: r.gewijzigd, weg: r.weg, ms: r.ms };
+  const d = await appSbRpc('sb2_synapse_herbereken', { p: { tot: r.tot, droog: true } }, 65000);
+  const tweede = d && typeof d === 'object' ? Number(d.nieuw) + Number(d.gewijzigd) + Number(d.weg) : NaN;
+  if (tweede !== 0) return { ok: false, reden: 'synapsen: tweede ronde gaf ' + tweede + ' verschillen', detail: detail };
+  return { ok: true, detail: detail };
+}
 function sb2ProevenInfo() {
   const uit = { aan: sb2ProefloperAan(), module: !!sb2Proefloper };
   try { if (sb2Proefloper) uit.laatste_ronde = sb2Proefloper.info().laatste; } catch (e) { /* geen stand */ }
@@ -17915,9 +17938,15 @@ const nachtketen = (function () {
         const d = { kandidaten: r.kandidaten, naar_model: r.naar_model, aanroepen: r.aanroepen, goedgekeurd: r.goedgekeurd, claims_nieuw: r.claims_nieuw, paginas: r.paginas, geschreven: r.geschreven, geblokkeerd: r.geblokkeerd, model_fout: r.model_fout };
         return r.fout ? { ok: false, reden: 'voorstel: ' + r.fout + ' fout(en)' + (r.reden ? ' (' + r.reden.slice(0, 60) + ')' : ''), detail: d } : { ok: true, detail: d };
       } },
+      // wv2022 (SB2 fase 6f): synapsen ná de voorstelservice (claims van vannacht) en vóór de proefloper; met de schakelaar uit: al_gedaan
+      { naam: 'sb2-synapsen', start_na: [2, 43], na: ['intake-voorstel'], limiet_min: 5, pogingen: 2, inProces: true, doe: async function () {
+        if (!sb2SynapsenAan()) return { ok: true, al_gedaan: true, detail: { schakelaar: 'uit' } };
+        return sb2SynapsenRonde();
+      } },
       // wv1963 (SB2 fase 6c): proefloper ná de publicatie (L3 leest de stand van vannacht); met de schakelaar uit: al_gedaan. meldtZelf:
-      // een mislukte ronde meldt socev-run zelf (box + bericht), rood per proef schrijft het script (review wv1963 ZOU 1)
-      { naam: 'sb2-proefloper', start_na: [2, 45], na: ['intake-publicatie'], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: async function (ctx) {
+      // een mislukte ronde meldt socev-run zelf (box + bericht), rood per proef schrijft het script (review wv1963 ZOU 1).
+      // wv2022: ook ná sb2-synapsen, zodat de rij SYN (synapse = bron) de herberekening van vannacht ziet
+      { naam: 'sb2-proefloper', start_na: [2, 45], na: ['intake-publicatie', 'sb2-synapsen'], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: async function (ctx) {
         if (!sb2ProefloperAan()) return { ok: true, al_gedaan: true, detail: { schakelaar: 'uit' } };
         return nachtDagStap(sb2Proefloper)(ctx);
       } },
