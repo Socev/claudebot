@@ -5072,10 +5072,16 @@ function appPriveDicht(a, id) { return appAfscherm(a) && APP_PRIVE_MODULES.index
 // wv2356 (David 4-11-2026 08:04: "Tuurlijk moet dat op elke pc kunnen!"): een gevoelige Ja telt ook vanaf een apparaat met een vaste plek,
 // met dezelfde eisen als op de telefoon: open invoerslot (de telefoon zegt dat David daar is), een verse vingerafdruk met de passkey van DIT
 // apparaat (Windows Hello op de pc), verbruikt per Ja, en dezelfde audit. Geldt voor de Poortwachter-Ja (knop-ja-vers), AIX plaatsen,
-// POT-verzending vrijgeven en het factuuradres, het boekstuk, OVIS rekeningnummer/adres. Beheer (APP_BEHEER_ROUTES) blijft telefoon-only.
+// POT-verzending vrijgeven en het factuuradres, het boekstuk, OVIS rekeningnummer/adres. Beheer (APP_BEHEER_ROUTES) blijft telefoon-only, behalve de agenda-✅ (wv2369).
 // true = het oude gedrag (een Ja van een vaste plek telt niet; terugrol). Ontwerp: Vaste plek - alles open § Log 4-11-2026.
 const APP_VAST_JA_DICHT = false;
 function appVastJaDicht(a) { return APP_VAST_JA_DICHT && !!(a && a.soort === 'vast'); }
+// wv2369 (David 4-11-2026 08:32 "Dit moet gewoon vanaf mijn pc kunnen!", Ja 09:33 op de Voor jou-kaart): de agenda-✅/❌/↩️ (POST /app/agenda)
+// mag ook vanaf een apparaat met een vaste plek. Alle eisen blijven: open invoerslot (423), een verse vingerafdruk van DIT apparaat per ✅
+// of ↩️ (vers_nodig, verbruikt vóór de eerste await), 30 per uur, de claim in n8n (dubbel uitvoeren kan niet). De rest van
+// APP_BEHEER_ROUTES blijft telefoon-only. De app volgt via agenda_knoppen in /app/slot. true = het oude gedrag (terugrol).
+// Ontwerp: vault 01_Ontwikkeling/Agenda bevestigen op de pc (bouwplan 4-11-2026).md.
+const APP_VAST_AGENDA_DICHT = false;
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
 const APP_OMZET_MAX_BODY = 5 * 1024 * 1024;   // wv1854: tekst ≤ 2 MB (omzet.js telt de bytes en geeft 413) + JSON-ontsnapping (\n, \", \uXXXX)
@@ -5198,7 +5204,15 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus',
   'POST /app/docs/delen',
   'POST /app/werkers/schakel']);   // wv1901 (Opus-review ZOU 4): een werker uit- of aanzetten raakt n8n zoals modellen; nooit vanaf een vaste plek    // wv1382: een pagina naar buiten zetten alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk; review #10). Intrekken staat in APP_SLOT_VRIJ: dat maakt alleen dichter    // wv833: boekhoud-/afschriftadres en verzendmodus alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk)
-// wv315: agenda-✅/↩️ alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot (§ 4.13)
+// wv315: agenda-✅/↩️ alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot (§ 4.13). Sinds wv2369 wel vanaf
+// een vaste plek (open slot + verse vingerafdruk), tenzij APP_VAST_AGENDA_DICHT; daarom blijft de route in de lijst (terugrol).
+// Weigert de pod deze beheerroute voor dit apparaat? Alleen op een vaste plek; zichzelf intrekken mag altijd; de agenda volgt de schakelaar.
+function appBeheerVanafVast(route, a, d) {
+  if (!(a && a.soort === 'vast') || !APP_BEHEER_ROUTES.has(route)) return false;
+  if (route === 'POST /app/apparaat/intrekken' && String((d && d.id) || '') === a.id) return false;
+  if (route === 'POST /app/agenda' && !APP_VAST_AGENDA_DICHT) return false;   // wv2369
+  return true;
+}
 // wv1931 (David 28-10: "Als ik een BSN aanlever, dan ga jij niet preventief 'Ik heb het BSN weggelaten' doen"): Davids eigen
 // invoer gaat ongemaskerd door, ook op een vaste plek (wv464 blokkeerde al niet meer, maar verving het getal). APP_BSN_MASKER blijft
 // voor het doorgeefluik (intern, doorgeefSchoon) en de vaste-plekschakelaar van Second Brain/Docs/Zoek snel (wv1901).
@@ -6345,8 +6359,9 @@ function appOpenWeg(id, o, waarom) {
 // melding van een andere plek kwam), of als de laatste melding 0-20 min oud is (op 'ontvangen'), niet 'auto', en plek = de vaste plek.
 // Al het andere is dicht, met de reden in gewone taal. Waar David wél is, staat er niet in (§ 4.11: alleen "op de plek / niet").
 async function appSlot(a) {
-  if (!a || a.soort !== 'vast') return { vast: false, open: true };
-  const uit = { vast: true, plek: a.vaste_plek || null, open: false, via: null, open_tot: null, reden: '' };
+  // wv2369: agenda_knoppen = mag dit apparaat de agenda-✅/↩️ drukken (de app toont ze anders niet; schakelaar APP_VAST_AGENDA_DICHT)
+  if (!a || a.soort !== 'vast') return { vast: false, open: true, agenda_knoppen: true };
+  const uit = { vast: true, plek: a.vaste_plek || null, open: false, via: null, open_tot: null, reden: '', agenda_knoppen: !APP_VAST_AGENDA_DICHT };
   const naam = Object.prototype.hasOwnProperty.call(APP_PLEKKEN, a.vaste_plek) ? APP_PLEKKEN[a.vaste_plek] : null;
   if (!naam) { uit.reden = 'dit apparaat heeft geen geldige vaste plek; stel hem in op je telefoon'; return uit; }
   const o = a.open && Date.parse(a.open.tot) > Date.now() && a.open.sinds ? a.open : null;
@@ -7322,7 +7337,7 @@ async function appKnopVraagTekst(jobId, kanaal, hash) {
 
 // wv393 (Fable M1): sinds een app-Ja met verse vingerafdruk de agenda direct mag aanpassen (Poortwachter groen bij exact
 // knop-ja-vers), heette een gevoelige Ja vanaf een apparaat met een vaste plek knop-ja-vers-vast (bleef oranje). Sinds wv2356 alleen nog
-// met APP_VAST_JA_DICHT = true; anders is een verse Ja van de pc gewoon knop-ja-vers (de ✅ onder /app/agenda blijft beheer, telefoon). De vraag-id gaat mee in
+// met APP_VAST_JA_DICHT = true; anders is een verse Ja van de pc gewoon knop-ja-vers (de ✅ onder /app/agenda mag sinds wv2369 ook op de pc, APP_VAST_AGENDA_DICHT). De vraag-id gaat mee in
 // Davids chat_log-tekst; de Poortwachter logt hem en de CISO-check C2-agenda-groen koppelt er de auditregel exact op.
 // wv404: een Ja op een Voor jou-kaart heet knop-ja-kaart / knop-ja-vers-kaart: de Poortwachter laat de rem alleen vallen bij exact
 // knop-ja-vers, dus een agendawijziging uit een kaart blijft oranje (✅ in de app onder het volledige voorstel; Fable M8).
@@ -12584,7 +12599,7 @@ function handleApp(req, res) {
         appHerstelVorigeWeg(reg, a);   // wv135
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10); sinds
         // wv1931 geen BSN-masker meer op Davids invoer. Daarna verder met slotKlaar = true (apparaat en sessie opnieuw gecontroleerd).
-        if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
+        if (appBeheerVanafVast(route, a, d))
           return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/sleutels/weg' ? 'sleutels weggooien' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : route === 'POST /app/docs/delen' ? 'een pagina delen' : route === 'POST /app/werkers/schakel' ? 'een werker aan- of uitzetten' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
@@ -14273,8 +14288,8 @@ async function appReactieZet(kanaal, sl, duim, x) {
 // POST /app/agenda {kanaal, job_id, knop, keuze: ja|nee}, gaat naar de ingang Knop (app) van Agenda-knoppen ({n, a} met de
 // sleutel van het schrijfluik als kop, zoals Voorwerk-knoppen wv173). Daar dezelfde claim in agenda_knoppen als bij een druk in
 // Telegram: wie eerst claimt wint, dubbel uitvoeren kan niet. De Poortwachter verandert niet (Davids druk is de bevestiging).
-// ✅ en ↩️ eisen een verse vingerafdruk van dít apparaat (§ 4.4d), verbruikt vóór de eerste await; ❌ niet. Nooit vanaf een vaste
-// plek (APP_BEHEER_ROUTES). Stand per knop: open -> bezig (tijdens de aanroep, synchroon gezet: twee drukken = één aanroep) -> klaar.
+// ✅ en ↩️ eisen een verse vingerafdruk van dít apparaat (§ 4.4d), verbruikt vóór de eerste await; ❌ niet. Sinds wv2369 ook vanaf
+// een vaste plek, daar onder het invoerslot (APP_VAST_AGENDA_DICHT = true: weer telefoon-only via APP_BEHEER_ROUTES). Stand per knop: open -> bezig (tijdens de aanroep, synchroon gezet: twee drukken = één aanroep) -> klaar.
 // Bezig ouder dan 60 s telt weer als open, ook na een herstart (Fable #2): de claim in n8n vangt een tweede druk toch op.
 const APP_AGENDA_KNOPPEN = path.join(APP_DATA, 'agenda-knoppen.json');
 const APP_AGENDA_KNOP_WF = process.env.APP_AGENDA_KNOP_WF || 'LeqoYYEvJPhAKPS3';   // AI - Agenda-knoppen, webhookknoop "Knop (app)"

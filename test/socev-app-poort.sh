@@ -5259,14 +5259,63 @@ async function bewijs(o) {
         geenVers();
         r = await app(D(idA));
         toets('23c ✅ zonder verse vingerafdruk -> 403 vers_nodig, niets aangeroepen, stand open', r.status === 403 && r.j.vers_nodig === true && nA() === 0 && agf()[idA].knoppen.uitvoeren.stand === 'open', JSON.stringify(r.j));
-        // vaste plek: 403, ook met een open slot en een verse vingerafdruk
-        await vers(P);
-        const regVoor = fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8');
-        { const rg = JSON.parse(regVoor); const ap = rg.apparaten.find((x) => x.id === pId); ap.soort = 'vast'; ap.vaste_plek = 'Thuis'; ap.open = { sinds: new Date(Date.now() - 60000).toISOString(), tot: new Date(Date.now() + 3600000).toISOString() }; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg)); }
-        r = await app(D(idA));
-        const rVastNee = await app(D(idA, { keuze: 'nee' }));
-        fs.writeFileSync(path.join(DATA, 'apparaten.json'), regVoor);
-        toets('23c vanaf een vaste plek (open slot, vers) -> 403, ook ❌; niets aangeroepen', r.status === 403 && /vaste plek/.test(r.j.fout) && rVastNee.status === 403 && nA() === 0 && agf()[idA].knoppen.uitvoeren.stand === 'open', JSON.stringify(r.j));
+        // wv2369: vaste plek (pc) mag de ✅/❌/↩️ sinds David 4-11-2026, met open slot en een verse vingerafdruk van dat apparaat; de rest
+        // van APP_BEHEER_ROUTES blijft 403. Eigen knop (idV), zodat idA hieronder open blijft.
+        {
+          const nV = nn(), nV2 = nn();
+          const idV = (await bqA(AG(nV))).j.id, idV2 = (await bqA(AG(nV2))).j.id;
+          const regVoor = fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8');
+          const zetVast = (open) => { const rg = JSON.parse(regVoor); const ap = rg.apparaten.find((x) => x.id === pId); ap.soort = 'vast'; ap.vaste_plek = 'Thuis';
+            ap.open = open ? { sinds: new Date(Date.now() - 60000).toISOString(), tot: new Date(Date.now() + 3600000).toISOString() } : null; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg)); };
+          const locVoor = sbStaat.loc, antwoordVoor = akStaat.antwoord;
+          try {
+            zetVast(true);
+            const sl = await vraag('GET', '/app/slot', undefined, { pot: P.jar });
+            toets('23c wv2369 GET /app/slot op de vaste plek: open, agenda_knoppen true', sl.status === 200 && sl.j.vast === true && sl.j.open === true && sl.j.agenda_knoppen === true, JSON.stringify(sl.j));
+            geenVers();
+            r = await app(D(idV));
+            toets('23c wv2369 vaste plek, open slot, zonder verse vingerafdruk -> 403 vers_nodig, niets aangeroepen', r.status === 403 && r.j.vers_nodig === true && nA() === 0 && agf()[idV].knoppen.uitvoeren.stand === 'open', JSON.stringify(r.j));
+            await vers(P);
+            const nVoorV = nA();
+            akStaat.antwoord = () => ({ pagina: 'uitgevoerd', tekst: 'Geplaatst: Tandarts (vanaf de pc).' });
+            r = await app(D(idV));
+            toets('23c wv2369 vaste plek, open slot, vers -> ✅ door naar Knop (app), 200 uitgevoerd, vingerafdruk verbruikt', r.status === 200 && r.j.ok === true && r.j.pagina === 'uitgevoerd' && nA() === nVoorV + 1
+              && akStaat.aanroepen[nA() - 1].body.n === nV && akStaat.aanroepen[nA() - 1].body.a === 'ja' && sessieVan(P).vers_tot === 0, JSON.stringify(r.j));
+            const audV = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').trim().split('\n').map((x) => JSON.parse(x)).filter((x) => x.route === '/app/agenda' && x.apparaat === pId);
+            toets('23c wv2369 auditregel van de ✅ vanaf de pc met het apparaat-id', audV.length > 0 && audV[audV.length - 1].status === 200, JSON.stringify(audV.slice(-1)));
+            akStaat.antwoord = () => ({ pagina: 'afgewezen', tekst: 'Niet gedaan.' });
+            const rVastNee = await app(D(idV2, { keuze: 'nee' }));
+            toets('23c wv2369 vaste plek, open slot: ❌ zonder vingerafdruk -> 200 afgewezen', rVastNee.status === 200 && rVastNee.j.pagina === 'afgewezen' && nA() === nVoorV + 2, JSON.stringify(rVastNee.j));
+            // de rest van de beheerroutes blijft dicht op een vaste plek, ook met open slot en vers
+            const nogDicht = [];
+            for (const [pad, body] of [['/app/modellen', { default: 'claude' }], ['/app/sleutels/vervang', { naam: 'X' }], ['/app/apparaat/wijzig', { id: pId, soort: 'meereizend' }], ['/app/werkers/schakel', { id: 'x', aan: false }], ['/app/docs/delen', { pad: 'x.md' }]]) {
+              await vers(P);
+              const x = await vraag('POST', pad, body, { pot: P.jar });
+              if (!(x.status === 403 && /vaste plek; gebruik je telefoon/.test(x.j.fout || ''))) nogDicht.push(pad + ' ' + x.status);
+            }
+            toets('23c wv2369 andere beheerroutes (modellen, sleutels, apparaat, werkers, delen) vanaf de vaste plek -> nog steeds 403', nogDicht.length === 0, nogDicht.join('; '));
+            // slot dicht (geen openzetting, geen locatie) -> 423, niets aangeroepen
+            zetVast(false); sbStaat.loc = null; H.appStaat.locatie = {};   // cache leeg: zoals 30 s later
+            await vers(P);
+            const nVoorD = nA();
+            r = await app(D(idA));
+            toets('23c wv2369 vaste plek, slot dicht -> 423, niets aangeroepen, idA open', r.status === 423 && nA() === nVoorD && agf()[idA].knoppen.uitvoeren.stand === 'open', r.status + JSON.stringify(r.j));
+          } finally { fs.writeFileSync(path.join(DATA, 'apparaten.json'), regVoor); sbStaat.loc = locVoor; H.appStaat.locatie = {};
+            akStaat.antwoord = antwoordVoor; akStaat.aanroepen.splice(0); for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = []; }   // de toetsen hieronder tellen vanaf 0
+        }
+        // wv2369: schakelaar APP_VAST_AGENDA_DICHT = true -> het oude gedrag (403 vanaf een vaste plek); de functie los, met de schakelaar omgezet
+        {
+          const k0 = src.indexOf('const APP_BEHEER_ROUTES = new Set('), k1 = src.indexOf('\n// wv1931', k0);
+          const helper = /^function appBeheerVanafVast\(route, a, d\) \{[\s\S]*?\n\}\n/m.exec(src)[0];
+          const c = {}; vm.createContext(c);
+          const knip = src.slice(k0, k1).replace(/^\/\/ wv315[\s\S]*$/m, '');
+          const vastA = { soort: 'vast', id: 'pc1' }, telA = { soort: 'meereizend', id: 'tel' };
+          vm.runInContext('const APP_VAST_AGENDA_DICHT = true;\n' + knip + '\n' + helper + 'this.u = [appBeheerVanafVast("POST /app/agenda", ' + JSON.stringify(vastA) + ', {}), appBeheerVanafVast("POST /app/agenda", ' + JSON.stringify(telA) + ', {}), appBeheerVanafVast("POST /app/modellen", ' + JSON.stringify(vastA) + ', {}), appBeheerVanafVast("POST /app/apparaat/intrekken", ' + JSON.stringify(vastA) + ', { id: "pc1" })];', c);
+          const c2 = {}; vm.createContext(c2);
+          vm.runInContext(/^const APP_VAST_AGENDA_DICHT = [^\n]*\n/m.exec(src)[0] + knip + '\n' + helper + 'this.u = [appBeheerVanafVast("POST /app/agenda", ' + JSON.stringify(vastA) + ', {}), appBeheerVanafVast("POST /app/modellen", ' + JSON.stringify(vastA) + ', {})];', c2);
+          toets('23c wv2369 schakelaar staat uit in de bron; true -> agenda vanaf vast weer geweigerd (telefoon niet, modellen wel, zichzelf intrekken niet)',
+            /^const APP_VAST_AGENDA_DICHT = false;$/m.test(src) && c.u.join() === 'true,false,true,false' && c2.u.join() === 'false,true', JSON.stringify([c.u, c2.u]));
+        }
         // twee drukken tegelijk: één n8n-aanroep, de ander 409 bezig
         await vers(P);
         let los; akStaat.wacht = new Promise((ok) => { los = ok; });
