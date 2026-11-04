@@ -445,6 +445,10 @@ jobs:
       - name: "intake-voorstel (wv1945, voorstelservice + citaatcontrole)"
         if: ${{ !cancelled() }}
         run: bash test/intake-voorstel.sh
+      # Berichtverbindingen (wv2383, SB2 fase 6 § 6.2): oplossen met puntgrens, scope, zet-gelijk + droge tweede ronde, nooit een adres naar Supabase.
+      - name: "sb2-berichten (wv2383, berichtverbindingen)"
+        if: ${{ !cancelled() }}
+        run: bash test/sb2-berichten.sh
       # Verwijderroute (wv1964, SB2 fase 6d, proef 11a pod-kant): plan, kaart zonder inhoud, alles weg, tombstones, poort bij binnenkomst.
       - name: "intake-verwijder (wv1964, verwijderroute + tombstones)"
         if: ${{ !cancelled() }}

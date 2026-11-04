@@ -3848,6 +3848,7 @@ function handleRequest(req, res) {
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
       sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },
       nachtketen: typeof nachtketenInfo === 'function' ? nachtketenInfo() : { aan: false },   // wv1868: nachtorkestrator (vlag, stap, lopend 0/1 voor uitrol.sh, stand per stap; geen inhoud)
+      sb2_berichten: typeof sb2BerichtenInfo === 'function' ? sb2BerichtenInfo() : { aan: false },   // wv2383: berichtverbindingen (alleen aan/op/ok)
       sb2_proeven: typeof sb2ProevenInfo === 'function' ? sb2ProevenInfo() : { aan: false },   // wv1963: proefloper (status per proef groen/rood/wacht, lagen; geen inhoud)
       sb2_herstelproef: typeof sb2HerstelproefInfo === 'function' ? sb2HerstelproefInfo() : { aan: false, lopend: 0 },   // wv2016: maandklok herstelproef (schakelaar, lopend 0/1 voor uitrol.sh, maand, laatste exit; geen inhoud)
       sb2_zoek: typeof sb2ZoekKlokInfo === 'function' ? sb2ZoekKlokInfo() : { aan: false },   // wv1788: nachtklussen feitenlijst + tekstindex (datum, exit, duur)   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
@@ -17789,6 +17790,54 @@ async function sb2SynapsenRonde() {
   if (tweede !== 0) return { ok: false, reden: 'synapsen: tweede ronde gaf ' + tweede + ' verschillen', detail: detail };
   return { ok: true, detail: detail };
 }
+// wv2383 (SB2 fase 6 § 6.2): berichtverbindingen — afzender/ontvangers/cc van de gespiegelde mailstukken opgelost tegen het register
+// (identifier email/zorgmail/domein) als verwijzing in secondbrain.mention (rolcode + kop + positie + entity-id; nooit een adres) en
+// target_org_id uit de routerbestemming; logica en waarom in sb2-berichten.js, databankkant socev-scripts 0025. Keten-stap ná
+// intake-voorstel en vóór sb2-synapsen, alleen met de schakelaar scripts-staat/sb2-berichten/aan.json {"aan": true, "routes": ["gmail.david"]}
+// (van claude, gewoon bestand); zonder schakelaar slaat de keten hem stil over. Zet-gelijk, daarna een droge tweede ronde (moet 0 geven).
+const SB2_BER_DIR = '/opt/data/scripts-staat/sb2-berichten';
+function sb2BerichtenStand() {
+  try {
+    const p = path.join(SB2_BER_DIR, 'aan.json');
+    const st = fs.lstatSync(p);
+    if (!st.isFile() || (process.getuid && st.uid !== process.getuid())) return null;
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return j && typeof j === 'object' ? j : null;
+  } catch (e) { return null; }
+}
+function sb2BerichtenAan() { const s = sb2BerichtenStand(); return !!(s && s.aan === true); }
+let sb2Berichten = null, sb2BerichtenFout = false;
+function sb2BerichtenMaak() {
+  if (sb2Berichten || sb2BerichtenFout) return sb2Berichten;
+  const p = path.join(__dirname, 'sb2-berichten.js');
+  if (!intake || !intake._db || !fs.existsSync(p)) return null;
+  try {
+    sb2Berichten = require(p).maak({ db: intake._db, schakelaar: sb2BerichtenStand,
+      rpc: function (fn, body) { return appSbRpc(fn, body, 35000); },
+      eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
+      log: function (r) { schrijfLog(nu() + ' ' + r); } });
+    return sb2Berichten;
+  } catch (e) { sb2BerichtenFout = true; logError('sb2-berichten', e); return null; }
+}
+async function sb2BerichtenRonde() {
+  const m = sb2BerichtenMaak();
+  if (!m) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+  const r = await m.ronde();
+  if (r.uit) return { ok: true, al_gedaan: true, detail: { schakelaar: 'uit' } };
+  if (r.wacht) return { wacht: r.wacht };
+  const detail = {};
+  for (const k of Object.keys(r.routes || {})) {
+    const x = r.routes[k];
+    detail[k] = { verstuurd: x.verstuurd, in_scope: x.in_scope, vermeldingen: x.vermeldingen, met_target: x.met_target,
+      nieuw: x.eerste && x.eerste.nieuw, weg: x.eerste && x.eerste.weg, geweigerd: x.geweigerd || {}, tweede: x.tweede };
+  }
+  return r.ok ? { ok: true, detail } : { ok: false, reden: 'berichten: ' + String(r.reden || '').slice(0, 80), detail };
+}
+function sb2BerichtenInfo() {
+  const uit = { aan: sb2BerichtenAan() };
+  try { const l = sb2Berichten ? sb2Berichten.laatste() : null; if (l) uit.laatste = { op: l.op, ok: l.ok, ms: l.ms }; } catch (e) { /* geen stand */ }
+  return uit;
+}
 function sb2ProevenInfo() {
   const uit = { aan: sb2ProefloperAan(), module: !!sb2Proefloper };
   try { if (sb2Proefloper) uit.laatste_ronde = sb2Proefloper.info().laatste; } catch (e) { /* geen stand */ }
@@ -17954,8 +18003,15 @@ const nachtketen = (function () {
         const d = { kandidaten: r.kandidaten, naar_model: r.naar_model, aanroepen: r.aanroepen, goedgekeurd: r.goedgekeurd, claims_nieuw: r.claims_nieuw, paginas: r.paginas, geschreven: r.geschreven, geblokkeerd: r.geblokkeerd, model_fout: r.model_fout };
         return r.fout ? { ok: false, reden: 'voorstel: ' + r.fout + ' fout(en)' + (r.reden ? ' (' + r.reden.slice(0, 60) + ')' : ''), detail: d } : { ok: true, detail: d };
       } },
+      // wv2383 (SB2 fase 6 § 6.2): berichtverbindingen (vermeldingen uit afzender/ontvangers + target_org_id) ná de voorstelservice en vóór
+      // de synapsen; met de schakelaar uit: al_gedaan
+      { naam: 'sb2-berichten', start_na: [2, 43], na: ['intake-voorstel'], limiet_min: 10, pogingen: 2, inProces: true, doe: async function () {
+        if (!sb2BerichtenAan()) return { ok: true, al_gedaan: true, detail: { schakelaar: 'uit' } };
+        return sb2BerichtenRonde();
+      } },
       // wv2022 (SB2 fase 6f): synapsen ná de voorstelservice (claims van vannacht) en vóór de proefloper; met de schakelaar uit: al_gedaan
-      { naam: 'sb2-synapsen', start_na: [2, 43], na: ['intake-voorstel'], limiet_min: 5, pogingen: 2, inProces: true, doe: async function () {
+      // wv2383: ook ná sb2-berichten (de vermeldingen van vannacht)
+      { naam: 'sb2-synapsen', start_na: [2, 43], na: ['intake-voorstel', 'sb2-berichten'], limiet_min: 5, pogingen: 2, inProces: true, doe: async function () {
         if (!sb2SynapsenAan()) return { ok: true, al_gedaan: true, detail: { schakelaar: 'uit' } };
         return sb2SynapsenRonde();
       } },
