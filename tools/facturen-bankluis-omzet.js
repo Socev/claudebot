@@ -12,8 +12,10 @@
  *
  *   node tools/facturen-bankluis-omzet.js [--echt] [--iban NL..] [--facturen-dir /opt/data/facturen] [--bank-dir /opt/data/bank]
  *
- * Alleen rekeningen met controle 1, niet Privé, niet de POT, formaat abn_tab of abn_mt940, waarvan het IBAN in stand.json bij een
- * zakelijke (business-)rekening staat die in zakelijk.sqlite voorkomt. Uitvoer: JSON met aantallen per rekening (laatste 4 cijfers),
+ * Alleen rekeningen met controle 1, niet Privé, niet de POT, formaat abn_tab, abn_mt940, ing_csv of triodos_csv (wv2404), waarvan het IBAN
+ * in stand.json bij een zakelijke (business-)rekening staat die in zakelijk.sqlite voorkomt, en waarvan de bank in Facturen (ABN, ING,
+ * TRIODOS) past bij de bank van de koppeling. De naad en de telling van mogelijke dubbelen gebruiken hetzelfde dagvenster per formaat
+ * (facturen.js naadVenster: ABN 0..3 dagen, ING en Triodos −3..3). Uitvoer: JSON met aantallen per rekening (laatste 4 cijfers),
  * geen namen of bedragen. Schrijft in de echte Facturen-database alleen met --echt (eigen verbinding, BEGIN IMMEDIATE, nooit migreren).
  */
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -26,6 +28,8 @@ const BDIR = arg('bank-dir', process.env.BANK_DIR || '/opt/data/bank');
 const ALLEEN = arg('iban', null);
 const ibanNorm = (i) => i ? String(i).replace(/\s+/g, '').toUpperCase() : null;
 const eind4 = (i) => '…' + String(i || '').slice(-4);
+const FORMATEN = ['abn_tab', 'abn_mt940', 'ing_csv', 'triodos_csv'];
+const BANK_KOPPELING = { ABN: /\bABN\b/i, ING: /\bING\b/i, TRIODOS: /\bTRIODOS\b/i };   // Facturen rekening.bank → naam van de bank in stand.json
 const uit = (o, code) => { process.stdout.write(JSON.stringify(o, null, 1) + '\n'); process.exit(code || 0); };
 
 async function hoofd() {
@@ -35,7 +39,7 @@ async function hoofd() {
   const zdb = new DatabaseSync(zakPad, { readOnly: true });
   const inZak = zdb.prepare('SELECT count(*) AS n, min(datum) AS van, max(datum) AS tot FROM transacties WHERE rek = ?');
   const zak = Object.keys(stand.rekeningen || {}).filter((h) => stand.rekeningen[h].zakelijk && stand.rekeningen[h].iban)
-    .map((h) => ({ rek: h, iban: ibanNorm(stand.rekeningen[h].iban) })).filter((z) => !ALLEEN || z.iban === ibanNorm(ALLEEN));
+    .map((h) => ({ rek: h, iban: ibanNorm(stand.rekeningen[h].iban), bank: stand.rekeningen[h].bank || '' })).filter((z) => !ALLEEN || z.iban === ibanNorm(ALLEEN));
   const echtDb = new DatabaseSync(path.join(FDIR, 'facturen.sqlite'), { readOnly: true });
   const kandidaten = [];
   for (const z of zak) {
@@ -46,7 +50,8 @@ async function hoofd() {
     r.entiteit = k.entiteit; r.id = k.id; r.formaat_nu = k.bank_formaat;
     if (k.bank_formaat === 'bankluis') r.overgeslagen = k.bankluis_rek === z.rek ? 'al omgezet' : 'al bankluis met een andere sleutel';
     else if (k.entiteit === 'prive' || k.entiteit === 'pot' || k.controle !== 1) r.overgeslagen = 'Privé, POT of zonder controle: niet omzetten';
-    else if (['abn_tab', 'abn_mt940'].indexOf(k.bank_formaat) < 0) r.overgeslagen = 'formaat ' + k.bank_formaat + ': niet in deze stap';
+    else if (FORMATEN.indexOf(k.bank_formaat) < 0) r.overgeslagen = 'formaat ' + k.bank_formaat + ': niet in deze stap';
+    else if (!BANK_KOPPELING[k.bank] || !BANK_KOPPELING[k.bank].test(z.bank)) r.overgeslagen = 'bank in Facturen (' + k.bank + ') past niet bij de koppeling';
     else if (!st.n) r.overgeslagen = 'nog geen posten in zakelijk.sqlite';
     else r._rek = z.rek;
     kandidaten.push(r);
@@ -75,12 +80,13 @@ async function hoofd() {
       const bl = fdb.db.prepare("SELECT id, boekdatum, bedrag_centen FROM bank_transactie WHERE rekening = ? AND formaat = 'bankluis' AND verwijderd_op IS NULL ORDER BY boekdatum, id").all(r.id);
       const up = fdb.db.prepare("SELECT id, boekdatum, bedrag_centen FROM bank_transactie WHERE rekening = ? AND formaat <> 'bankluis' AND verwijderd_op IS NULL").all(r.id);
       const L = up.reduce((m, u) => (!m || u.boekdatum > m ? u.boekdatum : m), null);
-      // mogelijke dubbelen: een ingelezen bankpost waarvoor nog een vrije upload-regel bestaat (zelfde bedrag, 0–3 dagen ervóór)
+      // mogelijke dubbelen: een ingelezen bankpost waarvoor nog een vrije upload-regel bestaat (zelfde bedrag, binnen het naadvenster van het formaat)
+      const [onder, boven] = F.naadVenster(r.formaat_nu);
       const vrij = new Map(); for (const u of up) { const k = u.bedrag_centen; if (!vrij.has(k)) vrij.set(k, []); vrij.get(k).push(u); }
       let dubbel = 0; const dubbelDagen = [];
       for (const b of bl) {
         const l = vrij.get(b.bedrag_centen) || [];
-        const i = l.findIndex((u) => { const d = Math.round((Date.parse(b.boekdatum) - Date.parse(u.boekdatum)) / 864e5); return d >= 0 && d <= 3; });
+        const i = l.findIndex((u) => { const d = Math.round((Date.parse(b.boekdatum) - Date.parse(u.boekdatum)) / 864e5); return d >= onder && d <= boven; });
         if (i >= 0) { dubbel++; if (dubbelDagen.length < 10) dubbelDagen.push(b.boekdatum); l.splice(i, 1); }
       }
       Object.assign(r, { laatste_upload: L, regels_voor: voor[r.id], bankluis_ingelezen: bl.length, eerste_bankluis: bl.length ? bl[0].boekdatum : null,

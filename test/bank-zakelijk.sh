@@ -4,6 +4,8 @@
 # zegt); hun posten gaan alleen naar zakelijk.sqlite (niet naar transacties.sqlite, niet naar cache.sqlite, geen saldo-opvraag); geen
 # privé-opdracht toont of kiest ze; Facturen leest ze met een naad tegen de uploads (geen dubbele boekingen, half geüploade laatste dag
 # aangevuld), weigert een rekening die in beide databases staat, en het omzet-hulpje meet droog op een kopie en zet pas met --echt om.
+# wv2404: ook een ING- (ing_csv) en een Triodos-rekening (triodos_csv) zetten om, met de naad −3..3 dagen (bankpost een dag vóór de upload
+# wordt niet dubbel ingelezen); een rekening waarvan de bank in Facturen niet bij de koppeling past wordt overgeslagen.
 # Alle IBAN's, namen en bedragen zijn verzonnen. Raakt de pod, de kluis, de bank en /opt/data niet. Gebruik: bash test/bank-zakelijk.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -24,10 +26,11 @@ function iban(bank, nr) {   // verzonnen NL-IBAN met kloppend controlegetal
   let r = 0; for (const c of num) r = (r * 10 + Number(c)) % 97;
   return 'NL' + String(98 - r).padStart(2, '0') + bban;
 }
-const IB = { zak1: iban('ABNA', '0111222333'), zak2: iban('ABNA', '0444555666'), prive: iban('ABNA', '0777888999') };
+const IB = { zak1: iban('ABNA', '0111222333'), zak2: iban('ABNA', '0444555666'), prive: iban('ABNA', '0777888999'),
+  ing: iban('INGB', '0001234567'), trio: iban('TRIO', '0212345678'), ing2: iban('INGB', '0007654321') };
 
 // ── nagebootste Enable Banking ──
-const M = { psu: 'business', accounts: [], opvragen: [], posten: {} };
+const M = { psu: 'business', bank: 'ABN AMRO', accounts: [], opvragen: [], posten: {} };
 function tx(ref, datum, bedrag, naam, tegen) {
   const af = bedrag < 0;
   return { entry_reference: ref, transaction_amount: { currency: 'EUR', amount: String(Math.abs(bedrag)) }, credit_debit_indicator: af ? 'DBIT' : 'CRDT', status: 'BOOK',
@@ -40,12 +43,12 @@ const server = http.createServer(function (req, res) {
   req.on('end', function () {
     const stuur = (st, j) => { res.writeHead(st, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(j)); };
     const p = u.pathname;
-    if (p === '/aspsps') return stuur(200, { aspsps: [{ name: 'ABN AMRO', country: 'NL', psu_types: ['personal', 'business'], maximum_consent_validity: 15552000 }] });
+    if (p === '/aspsps') return stuur(200, { aspsps: ['ABN AMRO', 'ING', 'Triodos Bank'].map((name) => ({ name, country: 'NL', psu_types: ['personal', 'business'], maximum_consent_validity: 15552000 })) });
     if (p === '/auth') { M.laatsteAuth = JSON.parse(body); return stuur(200, { url: 'https://bank.example/login', authorization_id: 'a1' }); }
     if (p === '/sessions' && req.method === 'POST') {
       const id = 'sess-' + Math.random().toString(16).slice(2, 8);
       return stuur(200, { session_id: id, accounts: M.accounts.map((a) => ({ uid: a.uid, account_id: { iban: a.iban }, name: a.naam, currency: 'EUR', identification_hash: 'h-' + a.uid })),
-        aspsp: { name: 'ABN AMRO', country: 'NL' }, psu_type: M.psu, access: { valid_until: new Date(Date.now() + 179 * 86400000).toISOString() } });
+        aspsp: { name: M.bank, country: 'NL' }, psu_type: M.psu, access: { valid_until: new Date(Date.now() + 179 * 86400000).toISOString() } });
     }
     if (/^\/sessions\//.test(p)) return stuur(200, { status: 'AUTHORIZED', access: { valid_until: new Date(Date.now() + 179 * 86400000).toISOString() } });
     const m = /^\/accounts\/([^/]+)\/(balances|transactions)$/.exec(p);
@@ -64,9 +67,9 @@ function draai(args, stdin) {
     k.stdin.end(JSON.stringify(stdin || {}));
   });
 }
-async function koppel(soort, psu, accounts) {
-  M.psu = psu; M.accounts = accounts;
-  const r1 = await draai(['koppel-start', '--bank', 'ABN AMRO', '--soort', soort], G);
+async function koppel(soort, psu, accounts, bank) {
+  M.psu = psu; M.accounts = accounts; M.bank = bank || 'ABN AMRO';
+  const r1 = await draai(['koppel-start', '--bank', M.bank, '--soort', soort], G);
   const r2 = await draai(['koppel-af'], Object.assign({ state: M.laatsteAuth.state, code: 'c' }, G));
   return { start: r1.j, af: r2.j };
 }
@@ -175,6 +178,64 @@ server.listen(0, '127.0.0.1', async function () {
     const pd = new DatabaseSync(PRIV); pd.prepare("INSERT INTO transacties (rek, sleutel, bron_id, status, datum, bedrag, herkomst_rij, eerste_gezien, laatst_gezien) VALUES ('h-uz2', 'e:dubbel', 'x', 'booked', ?, -1, 'bank', 'x', 'x')").run(dag(-1)); pd.close();
     ro = F.bankluisRonde(fdb, { nu: Date.now(), pad: PRIV, padZakelijk: ZAK });
     toets('rekening in beide databases: fout, niets ingelezen', !ro.ok && ro.fouten.some((f) => /privé- én de zakelijke/.test(f.melding)), ro);
+    { const pd2 = new DatabaseSync(PRIV); pd2.prepare("DELETE FROM transacties WHERE sleutel = 'e:dubbel'").run(); pd2.close(); }
+
+    // ── 6. wv2404: ING (ing_csv) en Triodos (triodos_csv) ──
+    const Li = dag(-3), Lt = dag(-4);   // laatste uploaddatum ING resp. Triodos
+    M.posten.ui1 = [
+      tx('i1', dag(-40), -100, 'Leverancier F'),          // vóór de naad: uploads zijn de bron
+      tx('i2', Li, -121.21, 'Leverancier G'),             // laatste uploaddag, upload heeft hem (zelfde dag)
+      tx('i3', Li, -131.31, 'Leverancier H'),             // laatste uploaddag, niet geüpload: inlezen
+      tx('i4', dag(-2), -141.41, 'Leverancier I'),        // na L, upload heeft hem op L (1 dag eerder): afgedekt
+      tx('i5', dag(0), -151.51, 'Leverancier J'),         // nieuw
+    ];
+    M.posten.ut1 = [
+      tx('t1', dag(-6), -212.12, 'Leverancier K'),        // bank boekt 1 dag VÓÓR de upload (upload dag(-5)): afgedekt (oude naad: dubbel)
+      tx('t2', Lt, -232.32, 'Leverancier L'),             // laatste uploaddag, upload heeft hem
+      tx('t3', dag(-1), -242.42, 'Leverancier M'),        // nieuw
+    ];
+    M.posten.ui2 = [tx('j1', dag(-1), -9.99, 'Leverancier N')];
+    k = await koppel('business', 'business', [{ uid: 'ui1', iban: IB.ing, naam: 'Kostenmaatschap' }, { uid: 'ui2', iban: IB.ing2, naam: 'Verkeerde bank' }], 'ING');
+    toets('ING business-koppeling: ok, zakelijk', k.af && k.af.ok && k.af.zakelijk === true, k.af);
+    await draai(['historie', k.af.sessie], G);
+    k = await koppel('business', 'business', [{ uid: 'ut1', iban: IB.trio, naam: 'Stichting T' }], 'Triodos Bank');
+    toets('Triodos business-koppeling: ok, zakelijk', k.af && k.af.ok && k.af.zakelijk === true, k.af);
+    await draai(['historie', k.af.sessie], G);
+    toets('ING- en Triodos-posten in zakelijk.sqlite', telIn(ZAK, "SELECT count(*) AS n FROM transacties WHERE rek IN ('h-ui1', 'h-ut1', 'h-ui2')") === 9, telIn(ZAK, "SELECT count(*) AS n FROM transacties WHERE rek IN ('h-ui1', 'h-ut1', 'h-ui2')"));
+    fdb.db.prepare("INSERT INTO entiteit (sleutel, naam) VALUES ('kostenmaatschap', 'Kostenmaatschap Toets')").run();
+    fdb.db.prepare("INSERT INTO entiteit (sleutel, naam) VALUES ('sel', 'Stichting Toets')").run();
+    const rI = 'd1b2c3d4e5f60718', rT = 'e1b2c3d4e5f60718', rI2 = 'f1b2c3d4e5f60718';
+    fdb.db.prepare("INSERT INTO rekening (id, entiteit, iban, bank, bank_formaat, controle) VALUES (?, 'kostenmaatschap', ?, 'ING', 'ing_csv', 1)").run(rI, IB.ing);
+    fdb.db.prepare("INSERT INTO rekening (id, entiteit, iban, bank, bank_formaat, controle) VALUES (?, 'sel', ?, 'TRIODOS', 'triodos_csv', 1)").run(rT, IB.trio);
+    fdb.db.prepare("INSERT INTO rekening (id, entiteit, iban, bank, bank_formaat, controle) VALUES (?, 'kostenmaatschap', ?, 'TRIODOS', 'triodos_csv', 1)").run(rI2, IB.ing2);   // bank past niet bij de ING-koppeling
+    fdb.db.prepare("INSERT INTO bank_bestand (id, sha256, formaat, geupload_door, geupload_op) VALUES ('c2b2c3d4e5f60718', ?, 'ing_csv', 'toets', '2026-11-01T10:00:00Z')").run('cd'.repeat(32));
+    fdb.db.prepare("INSERT INTO bank_bestand (id, sha256, formaat, geupload_door, geupload_op) VALUES ('c3b2c3d4e5f60718', ?, 'triodos_csv', 'toets', '2026-11-01T10:00:00Z')").run('ef'.repeat(32));
+    const up2 = (rek, ent, ib, best, fm, datum, centen) => fdb.db.prepare("INSERT INTO bank_transactie (id, bestand, rekening, entiteit, eigen_iban, boekdatum, bedrag_centen, entry_ref, formaat, aangemaakt_op) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '2026-11-01T10:00:00Z')")
+      .run((++i).toString(16).padStart(16, '0'), best, rek, ent, ib, datum, centen, fm + ':' + i, fm);
+    const upI = (d, c) => up2(rI, 'kostenmaatschap', IB.ing, 'c2b2c3d4e5f60718', 'ing_csv', d, c), upT = (d, c) => up2(rT, 'sel', IB.trio, 'c3b2c3d4e5f60718', 'triodos_csv', d, c);
+    upI(dag(-40), -10000); upI(Li, -12121); upI(Li, -14141);
+    upT(dag(-30), -5000); upT(dag(-5), -21212); upT(Lt, -23232);
+    up2(rI2, 'kostenmaatschap', IB.ing2, 'c3b2c3d4e5f60718', 'triodos_csv', dag(-20), -999);
+    const upVoor2 = fdb.db.prepare("SELECT count(*) AS n FROM bank_transactie WHERE formaat IN ('ing_csv', 'triodos_csv')").get().n;
+    r = hulp();
+    const xi = r.j && r.j.rekeningen.find((x) => x.id === rI), xt = r.j && r.j.rekeningen.find((x) => x.id === rT), xi2 = r.j && r.j.rekeningen.find((x) => x.id === rI2);
+    toets('omzet droog ING: niet geweigerd, 0 mogelijke dubbelen, 2 ingelezen (i3, i5)', !!xi && !xi.overgeslagen && xi.mogelijke_dubbelen === 0 && xi.bankluis_ingelezen === 2 && xi.formaat_nu === 'ing_csv', xi || r.j);
+    toets('omzet droog Triodos: niet geweigerd, 0 mogelijke dubbelen, 1 ingelezen (t3)', !!xt && !xt.overgeslagen && xt.mogelijke_dubbelen === 0 && xt.bankluis_ingelezen === 1 && xt.formaat_nu === 'triodos_csv', xt || r.j);
+    toets('omzet droog: bank in Facturen past niet bij de koppeling → overgeslagen', !!xi2 && /past niet bij de koppeling/.test(xi2.overgeslagen || ''), xi2 || r.j);
+    toets('omzet droog: afgedekt 7 (ABN 3 + i2, i4, t1, t2), voor de naad 2 (z1, i1)', r.j && r.j.ronde_op_kopie && r.j.ronde_op_kopie.afgedekt === 7 && r.j.ronde_op_kopie.voor_naad === 2, r.j && r.j.ronde_op_kopie);
+    toets('omzet droog: ABN-rekeningen al omgezet', r.j && r.j.rekeningen.filter((x) => x.overgeslagen === 'al omgezet').length === 2, r.j && r.j.rekeningen);
+    r = hulp(['--echt']);
+    toets('omzet echt: ING en Triodos omgezet, andere bank niet', r.j && r.j.ok && r.j.omgezet.length === 2 && fdb.db.prepare("SELECT bank_formaat AS f FROM rekening WHERE id = ?").get(rI2).f === 'triodos_csv', r.j);
+    ro = F.bankluisRonde(fdb, { nu: Date.now(), pad: PRIV });
+    const blI = fdb.db.prepare("SELECT bedrag_centen AS c FROM bank_transactie WHERE rekening = ? AND formaat = 'bankluis' AND verwijderd_op IS NULL ORDER BY boekdatum").all(rI).map((x) => x.c);
+    const blT = fdb.db.prepare("SELECT bedrag_centen AS c FROM bank_transactie WHERE rekening = ? AND formaat = 'bankluis' AND verwijderd_op IS NULL ORDER BY boekdatum").all(rT).map((x) => x.c);
+    toets('ronde ING: alleen i3 en i5 ingelezen', JSON.stringify(blI) === JSON.stringify([-13131, -15151]), { blI, ro });
+    toets('ronde Triodos: alleen t3 ingelezen (t1 een dag vóór de upload is afgedekt)', JSON.stringify(blT) === JSON.stringify([-24242]), { blT, ro });
+    const dubbelen = fdb.db.prepare("SELECT count(*) AS n FROM (SELECT rekening, bedrag_centen FROM bank_transactie WHERE rekening IN (?, ?) AND verwijderd_op IS NULL AND boekdatum >= ? GROUP BY rekening, bedrag_centen HAVING count(*) > 1)").get(rI, rT, dag(-10)).n;
+    toets('ING/Triodos: 0 dubbelen rond de naad, uploads onaangeroerd', dubbelen === 0 && fdb.db.prepare("SELECT count(*) AS n FROM bank_transactie WHERE formaat IN ('ing_csv', 'triodos_csv') AND verwijderd_op IS NULL").get().n === upVoor2, { dubbelen });
+    ro = F.bankluisRonde(fdb, { nu: Date.now(), pad: PRIV });
+    toets('ING/Triodos: tweede ronde niets nieuw', ro.ok && ro.nieuw === 0, ro);
+    toets('naadVenster: ABN en onbekend 0..3, ING/Triodos −3..3', JSON.stringify(F.naadVenster('abn_tab')) === '[0,3]' && JSON.stringify(F.naadVenster('ing_csv')) === '[-3,3]' && JSON.stringify(F.naadVenster('triodos_csv')) === '[-3,3]' && JSON.stringify(F.naadVenster(null)) === '[0,3]' && JSON.stringify(F.naadVenster('abn_historie_csv')) === '[0,3]', null);
   } catch (e) { fouten++; console.log('ROOD  onverwacht: ' + (e && e.stack || e)); }
   finally { server.close(); fs.rmSync(W, { recursive: true, force: true }); console.log(goed + ' groen, ' + fouten + ' rood'); process.exit(fouten ? 1 : 0); }
 });

@@ -3005,19 +3005,25 @@ function upload(fdb, r, d, nu, o) {
  * L+NAAD_NA alleen een bankpost zonder upload-tegenhanger (zelfde bedrag, rentedatum 0–NAAD_MARGE dagen vóór de bankdatum, één op één,
  * eerst zelfde tegenrekening, kleinste afstand eerst); daarna alles. Gemeten 4-11-2026: Enable Banking boekt 0–2 dagen ná de rentedatum
  * van ABN, nooit ervóór (privé 742/25/13, POT 458/22/32). Het leesvenster loopt voor zo'n rekening minstens tot L−NAAD_VOOR terug.
+ * wv2404 (ING en Triodos): het venster hangt af van het formaat van de uploads (naadVenster). ABN blijft 0..+NAAD_MARGE (gemeten). Voor
+ * ING en Triodos is de datum van Enable Banking nog niet gemeten (geen koppeling); gemeten is alleen de upload: in 810 ING-regels sinds
+ * 2024 is Datum gelijk aan de Valutadatum uit de mededelingen, Triodos heeft één datum zonder valutadatum. Daarom daar −NAAD_MARGE..+NAAD_MARGE
+ * (één op één, kleinste afstand eerst): een bankpost die een dag vóór de upload geboekt staat wordt dan niet dubbel ingelezen.
  */
 const NAAD_VOOR = 7, NAAD_NA = 5, NAAD_MARGE = 3;
-function naadAfdekken(kandidaten, uploads) {
+function naadVenster(formaat) { return formaat === 'ing_csv' || formaat === 'triodos_csv' ? [-NAAD_MARGE, NAAD_MARGE] : [0, NAAD_MARGE]; }   // onbekend → het gemeten ABN-venster (review wv2404)
+function naadAfdekken(kandidaten, uploads, venster) {
   // kandidaten: [{ sleutel, datum, bedrag_centen, tegen }] gesorteerd; uploads: [{ id, boekdatum, bedrag_centen, tegen }] → Set afgedekte sleutels
+  const [onder, boven] = venster || [0, NAAD_MARGE];
   const vrij = new Set(uploads.map((u) => u.id)), af = new Set();
   for (const c of kandidaten) {
     let best = null;
     for (const u of uploads) {
       if (!vrij.has(u.id) || u.bedrag_centen !== c.bedrag_centen) continue;
       const d = K.dagenTussen(u.boekdatum, c.datum);
-      if (d < 0 || d > NAAD_MARGE) continue;
+      if (d < onder || d > boven) continue;
       const zelfde = !!(c.tegen && u.tegen && c.tegen === u.tegen) ? 0 : 1;
-      const sc = [zelfde, d, u.id];
+      const sc = [zelfde, Math.abs(d), u.id];
       if (!best || sc[0] < best.sc[0] || (sc[0] === best.sc[0] && (sc[1] < best.sc[1] || (sc[1] === best.sc[1] && sc[2] < best.sc[2])))) best = { u, sc };
     }
     if (best) { vrij.delete(best.u.id); af.add(c.sleutel); }
@@ -3030,11 +3036,12 @@ function bankluisRonde(fdb, o) {
   if (!rekeningen.length) return { ok: true, rekeningen: 0, nieuw: 0, reden: 'geen bankluis-rekening' };
   const posten = {}, fouten = [];
   // wv2392: laatste uploaddatum per rekening (naad) en het leesvenster per rekening
-  const laatsteUpload = fdb.db.prepare("SELECT max(boekdatum) AS l FROM bank_transactie WHERE rekening = ? AND formaat <> 'bankluis' AND verwijderd_op IS NULL");
-  const naad = {}, vanVoor = {};
+  const laatsteUpload = fdb.db.prepare("SELECT boekdatum AS l, formaat FROM bank_transactie WHERE rekening = ? AND formaat <> 'bankluis' AND verwijderd_op IS NULL ORDER BY boekdatum DESC, id DESC LIMIT 1");
+  const naad = {}, vanVoor = {}, venster = {};
   for (const k of rekeningen) {
-    const l = laatsteUpload.get(k.id).l || null;
+    const lu = laatsteUpload.get(k.id), l = lu && lu.l || null;
     naad[k.id] = l;
+    venster[k.id] = naadVenster(lu && lu.formaat);
     vanVoor[k.id] = l && K.plusDagen(l, -NAAD_VOOR) < van ? K.plusDagen(l, -NAAD_VOOR) : van;
   }
   // zonder o.padZakelijk: zakelijk.sqlite naast de privé-database (beide in BANK_DIR; ook voor de route 'bankluis')
@@ -3091,7 +3098,7 @@ function bankluisRonde(fdb, o) {
         kand.sort((a, b) => (a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : a.sleutel < b.sleutel ? -1 : a.sleutel > b.sleutel ? 1 : 0));
         const ups = fdb.db.prepare("SELECT id, boekdatum, bedrag_centen, tegenpartij_iban AS tegen FROM bank_transactie WHERE rekening = ? AND formaat <> 'bankluis' AND verwijderd_op IS NULL AND boekdatum >= ?")
           .all(k.id, K.plusDagen(begin, -NAAD_MARGE));
-        for (const sl of naadAfdekken(kand, ups)) { overslaan.add(sl); tel.afgedekt = (tel.afgedekt || 0) + 1; }
+        for (const sl of naadAfdekken(kand, ups, venster[k.id])) { overslaan.add(sl); tel.afgedekt = (tel.afgedekt || 0) + 1; }
       }
       for (const post of p.perNr.values()) {
         if (overslaan.has(post.sleutel)) continue;
@@ -3513,4 +3520,4 @@ function mailStappen(fdb, max) {
     .map((x) => ({ gmail_id: String(x.gmail_id), stap: Number(x.rang) >= 2 ? 'is_betaald' : 'in_sepa' }));
 }
 
-module.exports = { eerdereBetalingen, ibanHistorie, ibanHerbereken, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek, ZONDER_FACTUUR };
+module.exports = { naadVenster, eerdereBetalingen, ibanHistorie, ibanHerbereken, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek, ZONDER_FACTUUR };
