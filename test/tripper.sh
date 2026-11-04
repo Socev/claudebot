@@ -135,7 +135,10 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('8i andere route onder /app/tripper/: 404', r.s === 404 && r.app.reden === 'tripper onbekend 404', r.app);
   r = await vraag('GET /app/tripper/lijst', { soort: 'vast' });
   toets('8j vaste plek: dezelfde lijst (wv1901: op alle pc\'s alles)', r.s === 200 && r.j.reizen.length === 10);
-  toets('8k tripperInfo: aantallen', ctx.__tr.tripperInfo().reizen === 10 && ctx.__tr.tripperInfo().komend === 3 && fl.length === 0, [ctx.__tr.tripperInfo(), fl]);
+  // wv2356: het server-blok rekent met de echte datum (geen vaste vandaag): "Nu bezig" (t/m 2026-11-03) telde tot 3-11 als komend, daarna
+  // niet meer en de toets viel om. Verwacht = wat dezelfde lijst als gepland of nu toont (2 of 3), niet een vast getal.
+  const komendLijst = r.j.reizen.filter((x) => x.stand === 'gepland' || x.stand === 'nu').length;
+  toets('8k tripperInfo: aantallen', ctx.__tr.tripperInfo().reizen === 10 && ctx.__tr.tripperInfo().komend === komendLijst && komendLijst >= 2 && fl.length === 0, [ctx.__tr.tripperInfo(), komendLijst, fl]);
   const ctx2 = vm.createContext({ require, __dirname: path.join(W, 'zonder'), path, fs, VAULT: V, VV: () => VV, memorylaneDelen: null, appStaat: { tellers: {} }, logError: () => {}, appTeller: () => true,
     appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Object, JSON, String });
   vm.runInContext(src.slice(hb, he) + ';globalThis.__tr = { appTripper, tripperInfo };', ctx2, { filename: 'server.js#tripper2' });
