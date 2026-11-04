@@ -22,7 +22,7 @@ let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (!ok && extra !== undefined ? '  [' + JSON.stringify(extra).slice(0, 700) + ']' : '')); }
 
 const TG = ['---', 'type: entiteit', 'entiteit_id: TG', 'soort: eigen', 'status: vast', 'naam: "Huisartsenpraktijk Tolgaarde B.V."',
-  'aliassen: ["Tolgaarde", "Huisartsenpraktijk Tolgaarde"]', 'kvk: "84185171"', 'agb: 01009870', 'iban: "NL98ABNA0106465317"', 'domeinen: []',
+  'aliases: ["Tolgaarde", "Huisartsenpraktijk Tolgaarde"]', 'kvk: "84185171"', 'agb: 01009870', 'iban: "NL98ABNA0106465317"', 'domeinen: []',
   'contact: {}', 'ovis:', '  db: ["supabase:secondbrain/knoop#TG", "supabase:secondbrain/knoop_vertaling#facturen:entities.key=TOLGAARDE"]',
   'updated: 2026-10-24', '---', '# TG', '', 'Tekst.', ''].join('\n');
 const TGP = '10_Zakelijk/Tolgaarde/Entiteit - TG.md';
@@ -33,7 +33,7 @@ const TGP = '10_Zakelijk/Tolgaarde/Entiteit - TG.md';
   toets('1 agb met voorloopnul blijft tekst', p.agb === '01009870');
   toets('1 inline lijst', JSON.stringify(p.aliassen) === '["Tolgaarde","Huisartsenpraktijk Tolgaarde"]');
   toets('1 ovis.db genest', p.db.length === 2 && p.db[0] === 'supabase:secondbrain/knoop#TG', p.db);
-  const blok = TG.replace('aliassen: ["Tolgaarde", "Huisartsenpraktijk Tolgaarde"]', 'aliassen:\n  - Tolgaarde\n  - "Huisartsenpraktijk Tolgaarde"')
+  const blok = TG.replace('aliases: ["Tolgaarde", "Huisartsenpraktijk Tolgaarde"]', 'aliases:\n  - Tolgaarde\n  - "Huisartsenpraktijk Tolgaarde"')
     .replace('ovis:\n  db: ["supabase:secondbrain/knoop#TG", "supabase:secondbrain/knoop_vertaling#facturen:entities.key=TOLGAARDE"]',
       'ovis:\n  db:\n    - supabase:secondbrain/knoop#TG\n    - supabase:secondbrain/knoop_vertaling#facturen:entities.key=TOLGAARDE');
   const pb = R.leesPagina(TGP, blok);
@@ -66,12 +66,16 @@ const TGP = '10_Zakelijk/Tolgaarde/Entiteit - TG.md';
   toets('2 twee keer een begin (oud + nieuw) = fout', !!R.vingerafdruk(nieuwBlok + '\n' + R.BLOK_BEGIN + '\n' + R.BLOK_EIND + '\n').fout);
   toets('2 org-id in het blok', R.blokPlek(R.blokTekst({ id: 'org:proef-energie' }, [], [])).id === 'org:proef-energie');
 }
-// ── 2b. aliases (wv1271): beide namen gelezen, allebei = fout ──
-{ const nieuw = R.leesPagina(TGP, TG.replace('aliassen:', 'aliases:'));
-  toets('2b aliases gelezen', nieuw.fouten.length === 0 && JSON.stringify(nieuw.aliassen) === '["Tolgaarde","Huisartsenpraktijk Tolgaarde"]', nieuw);
-  toets('2b aliases geeft dezelfde handvatten als aliassen', JSON.stringify(R.handvattenVan(nieuw)) === JSON.stringify(R.handvattenVan(R.leesPagina(TGP, TG))));
-  const beide = R.leesPagina(TGP, TG.replace('aliassen:', 'aliases: [X]\naliassen:'));
-  toets('2b aliases én aliassen = fout', beide.fouten.some((f) => /allebei/.test(f)), beide.fouten);
+// ── 2b. aliases (wv1271; terugval weg in wv1780): alleen aliases telt, het oude aliassen = fout (niet stil overgeslagen) ──
+{ const p = R.leesPagina(TGP, TG);
+  toets('2b aliases gelezen', p.fouten.length === 0 && JSON.stringify(p.aliassen) === '["Tolgaarde","Huisartsenpraktijk Tolgaarde"]', p);
+  toets('2b aliases geeft alias-handvatten', R.handvattenVan(p).filter((h) => h.soort === 'alias').length === 2, R.handvattenVan(p));
+  const oud = R.leesPagina(TGP, TG.replace('aliases:', 'aliassen:'));
+  toets('2b oud veld aliassen = fout met hernoem-tip', oud.fouten.some((f) => /oud veld aliassen: hernoem naar aliases/.test(f)) && oud.aliassen.length === 0, oud.fouten);
+  const oudBlok = R.leesPagina(TGP, TG.replace('aliases: ["Tolgaarde", "Huisartsenpraktijk Tolgaarde"]', 'aliassen:\n  - Tolgaarde'));
+  toets('2b oud veld als blok-lijst = ook fout', oudBlok.fouten.some((f) => /oud veld aliassen/.test(f)), oudBlok.fouten);
+  const beide = R.leesPagina(TGP, TG.replace('aliases:', 'aliases: [X]\naliassen:'));
+  toets('2b aliases én aliassen = fout', beide.fouten.some((f) => /oud veld aliassen/.test(f)), beide.fouten);
 }
 // ── 3. validatie ──
 { const f = function (t, pad) { return R.leesPagina(pad || TGP, t).fouten.join(' | '); };
@@ -86,7 +90,7 @@ const TGP = '10_Zakelijk/Tolgaarde/Entiteit - TG.md';
   toets('3 organisatie met code-id geweigerd', /org:/.test(f(ORG.replace('org:proef-energie', 'PROEF'), OP)));
   toets('3 ongeldige regex', /regex/.test(f(ORG.replace('naam: Proef Energie', 'naam: Proef Energie\nkenmerkpatronen: ["(["]'), OP)));
   toets('3 IBAN in contact geweigerd', /rekening/.test(f(ORG.replace('naam: Proef Energie', 'naam: Proef Energie\ncontact:\n  adres: "Straat 1, IBAN NL91 ABNA 0417 1643 00"'), OP)));
-  toets('3 BSN-achtig in alias geweigerd', /BSN/.test(f(ORG.replace('naam: Proef Energie', 'naam: Proef Energie\naliassen: ["Klant 123456782"]'), OP)));
+  toets('3 BSN-achtig in alias geweigerd', /BSN/.test(f(ORG.replace('naam: Proef Energie', 'naam: Proef Energie\naliases: ["Klant 123456782"]'), OP)));
   toets('3 telefoon van 10 cijfers mag', f(ORG.replace('naam: Proef Energie', 'naam: Proef Energie\ncontact:\n  telefoon: "033-4567890"'), OP) === '');
   toets('3 kvk 7 cijfers geweigerd', /kvk/.test(f(TG.replace('"84185171"', '"8418517"'))));
   toets('3 status ontbreekt', /status/.test(f(TG.replace('status: vast\n', ''))));
@@ -383,7 +387,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const pag = (pad, regels) => { const t = ['---', 'type: entiteit'].concat(regels, ['---', 'tekst', '']).join('\n'); const p = R.leesPagina(pad, t); return p; };
     const pTG = pag('10_Zakelijk/Tolgaarde/Entiteit - TG.md', ['entiteit_id: TG', 'soort: eigen', 'status: vast', 'naam: "Huisartsenpraktijk Tolgaarde B.V."', 'domeinen: [huisartsentolgaarde.nl]', 'ovis:', '  db: ["supabase:secondbrain/knoop#TG"]']);
     const pA = pag('10_Zakelijk/_Gedeeld/Relaties/Gemeente Leusden.md', ['entiteit_id: org:gemeente-leusden', 'soort: instantie', 'status: concept', 'naam: Gemeente Leusden', 'domeinen: [leusden.nl]', 'zaad: ["domein leusden.nl: praktijkmail, 5 mails (sep–okt 2026)"]', 'ovis:', '  db: ["supabase:secondbrain/knoop#org:gemeente-leusden"]']);
-    const pB = pag('20_Prive/Relaties/Aon.md', ['entiteit_id: org:aon', 'soort: verzekeraar', 'status: concept', 'naam: Aon', 'domeinen: [aon.nl]', 'aliassen: ["Aon Nederland"]', 'zaad: ["domein aon.nl: praktijkmail, 1 mail"]', 'ovis:', '  db: ["supabase:secondbrain/knoop#org:aon"]']);
+    const pB = pag('20_Prive/Relaties/Aon.md', ['entiteit_id: org:aon', 'soort: verzekeraar', 'status: concept', 'naam: Aon', 'domeinen: [aon.nl]', 'aliases: ["Aon Nederland"]', 'zaad: ["domein aon.nl: praktijkmail, 1 mail"]', 'ovis:', '  db: ["supabase:secondbrain/knoop#org:aon"]']);
     const pC = pag('10_Zakelijk/_Gedeeld/Relaties/Dubbel.md', ['entiteit_id: org:dubbel', 'soort: leverancier', 'status: concept', 'naam: Dubbel', 'domeinen: [leusden.nl]', 'ovis:', '  db: ["supabase:secondbrain/knoop#org:dubbel"]']);
     toets('7 fixtures lezen zonder fouten, zaad gelezen', [pTG, pA, pB, pC].every((p) => !p.fouten.length) && pA.zaad.length === 1, [pTG.fouten, pA.fouten, pB.fouten, pC.fouten]);
     const NU = Date.parse('2026-10-26T02:30:00+01:00');

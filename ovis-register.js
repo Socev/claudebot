@@ -178,10 +178,10 @@ function leesPagina(rel, tekst) {
   uit.soort = typeof v.soort === 'string' ? v.soort : '';
   uit.status = v.status === 'concept' ? 'concept' : v.status === 'vast' ? 'vast' : '';
   uit.naam = typeof v.naam === 'string' ? v.naam : '';
-  // SB2 fase 1a (wv1271): het veld heet voortaan `aliases` (zoals op de andere 1.236 pagina's en in Obsidian); `aliassen` blijft gelezen
-  // tot alle entiteitpagina's om zijn. Allebei = fout: welke lijst telt, beslist niemand stil.
-  if (v.aliases !== undefined && v.aliassen !== undefined) f.push('aliases en aliassen staan er allebei: hou alleen aliases');
-  uit.aliassen = lijst(v.aliases !== undefined ? v.aliases : v.aliassen);
+  // SB2 fase 1a (wv1271, terugval weg in wv1780 op 4-11-2026): het frontmatterveld heet `aliases`. Het oude `aliassen` is een fout, geen
+  // stille overslag: de pagina gaat niet door en de fout staat in het compilerverslag. uit.aliassen is het databankveld en blijft zo heten.
+  if (v.aliassen !== undefined) f.push('oud veld aliassen: hernoem naar aliases');
+  uit.aliassen = lijst(v.aliases);
   uit.kvk = typeof v.kvk === 'string' ? v.kvk.replace(/\s/g, '') : '';
   uit.agb = typeof v.agb === 'string' ? v.agb.replace(/\s/g, '') : '';
   uit.iban = typeof v.iban === 'string' ? v.iban.replace(/\s/g, '').toUpperCase() : '';
@@ -2185,7 +2185,7 @@ function metMailadres(rel, tekst, adres, zaad) {
     r.splice(na + 1, 0, veld + ': [' + JSON.stringify(String(waarde)) + ']'); fm.eind++;
     return null;
   }
-  const f1 = zet('mailadressen', adres, ['domeinen', 'aliases', 'aliassen', 'naam']);
+  const f1 = zet('mailadressen', adres, ['domeinen', 'aliases', 'naam']);
   if (f1) return { fout: f1 };
   const f2 = zet('zaad', zaad, ['voor', 'mailadressen']);
   if (f2) return { fout: f2 };
