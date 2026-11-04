@@ -85,6 +85,7 @@ api.listen(0, '127.0.0.1', async function () {
     toets('ongeldige banknaam: 400', r.status === 400, r);
     r = await h.bankSmal({ secret: 'socev', opdracht: 'koppel-start', bank: 'ABN AMRO' });
     toets('koppel-start via de poort: link', r.status === 200 && r.j.ok && /^https:/.test(r.j.url), r);
+    toets('koppel-start: link_geldig_tot ± 14 min (EB-link werkt ± 15 min, wv2399)', Math.abs(Date.parse(r.j.link_geldig_tot) - Date.now() - 14 * 60000) < 60000 && /15 minuten/.test(r.j.uitleg), r.j);
     toets('sleutel niet in de uitvoer', JSON.stringify(r.j).indexOf(pem.slice(40, 80)) < 0, null);
     const state = M.auth[0].state;
 
@@ -136,6 +137,8 @@ api.listen(0, '127.0.0.1', async function () {
       toets('verzonnen state + error: pagina, geen box-rij', res.status === 200 && /afgebroken/.test(res.body) && tel() === b0 + 1, tel());
       res = await terug('/bank/terug?state=' + 'c'.repeat(48) + '&error=<script>x');
       toets('foutcode zonder html in de pagina', res.status === 200 && res.body.indexOf('<script>') < 0 && /foutcode: scriptx/.test(res.body), res.body.slice(-300));
+      res = await terug('/bank/terug?state=' + 'c'.repeat(48) + '&error=invalid_grant');
+      toets('invalid_grant: uitleg verlopen (kwartier)', res.status === 200 && /verlopen/.test(res.body) && /kwartier/.test(res.body), res.body.slice(-300));
       res = await terug('/bank/terug?code=goed&state=' + 'c'.repeat(48));
       toets('verzonnen state zonder error: nog steeds 404', res.status === 404, res.status);
       // open state met error (bank weigerde meteen): koppel-af verbruikt, pagina met uitleg, box-rij 'open', geen POST /sessions

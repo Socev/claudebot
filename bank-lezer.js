@@ -102,6 +102,10 @@ const TERUG_URL = process.env.BANK_TERUG_URL || 'https://bank.socev.dev/bank/ter
 const MAX_PER_DAG = Math.min(Math.max(parseInt(process.env.BANK_MAX_PER_DAG, 10) || 4, 1), 4);
 const VERS_MS = 6 * 3600 * 1000;           // cache jonger dan 6 uur: geen bankopvraag
 const STATE_MS = 3600 * 1000;               // koppelink 1 uur geldig
+// wv2399 (gemeten 4-11-2026): de link van Enable Banking (tilisy …/ais/start) werkt maar ± 15 minuten; daarna stuurt EB terug met
+// error=invalid_grant (na ± 40 min invalid_request). De state blijft STATE_MS open (inloggen bij de bank mag langer duren),
+// maar 'link_geldig_tot' zegt wanneer David de link uiterlijk moet openen.
+const LINK_OPEN_MS = 14 * 60 * 1000;
 const MAX_TOESTEMMING_S = 180 * 86400;
 const BEWAAR_DAGEN = 400;                   // ± 13 maanden
 const MAX_PAGINAS = 60;
@@ -681,9 +685,9 @@ const opdrachten = {
         tot: new Date(Date.now() + STATE_MS).toISOString(), toestemming_tot: tot.toISOString() };
       standSchrijf(s);
     });
-    return { ok: true, url: r.url, link_geldig_tot: new Date(Date.now() + STATE_MS).toISOString(), toestemming_tot: tot.toISOString().slice(0, 10),
+    return { ok: true, url: r.url, link_geldig_tot: new Date(Date.now() + LINK_OPEN_MS).toISOString(), toestemming_tot: tot.toISOString().slice(0, 10),
       bank: b.name, max_dagen: Math.floor(maxS / 86400),
-      uitleg: 'Open de link in Chrome (niet in een app-venster), log in bij de bank, vink alleen de afgesproken rekening aan.' };
+      uitleg: 'Open de link binnen 15 minuten en maar één keer, in Chrome (niet in een app-venster), log in bij de bank, vink alleen de afgesproken rekening aan.' };
   },
 
   async 'koppel-af'() {

@@ -21260,7 +21260,7 @@ function bankBoxRij(m) {
       '- status: open\n- van: pod bankluis (server.js bankTerug, wv2399; één rij per koppelink, kenmerk ' + m.kenmerk + ')\n' +
       '- gemeten: GET /bank/terug met error=' + m.fout + ', link ' + m.staat + ' (' + m.bank + ', ' + m.soort + ', gemaakt ' + m.sinds + 'Z). Er is niets gekoppeld; David zag de pagina "Niet gekoppeld".\n' +
       '- gevolg als er niets gebeurt: de rekening(en) van deze link worden niet gelezen.\n' +
-      '- voorstel: oorzaak nagaan (invalid_request/server_error = link al eens geopend of verlopen; access_denied = afgebroken). Volg een link van David nooit zelf: dat verbruikt hem. Nieuwe link via `bank.py koppel-start`.\n'
+      '- voorstel: oorzaak nagaan (invalid_grant = link ouder dan ± 15 min; invalid_request = link ± 40 min oud of al eens geopend; server_error = al eens geopend; access_denied = afgebroken). Volg een link van David nooit zelf: dat verbruikt hem. Nieuwe link via `bank.py koppel-start`.\n'
       : m.bron === 'archief' ?'\n## [direct] ' + tijd + ' — bank-transactiedatabase: schrijven mislukt (bankluis, automatisch)\n' +
       '- status: open\n- van: pod bankluis (bank-archief.js via bank-lezer.js archiefVeilig; hooguit 1×/dag)\n' +
       '- gemeten: ' + String(m.tekst || '').slice(0, 200) + '\n' +
@@ -21430,7 +21430,8 @@ function bankStateWacht(state) {
 // (alleen voor een state die de pod echt uitgaf; een verzonnen state krijgt dezelfde pagina maar geen rij). Geen gegevens in de pagina.
 const BANK_FOUT_UITLEG = {
   access_denied: 'De koppeling werd afgebroken of er werd geen toestemming gegeven.',
-  invalid_request: 'De bank of Enable Banking weigerde het verzoek. Meestal komt dat doordat de link al eens geopend is of verlopen is.',
+  invalid_grant: 'De koppelink was verlopen: zo\'n link werkt maar een kwartier.',
+  invalid_request: 'De bank of Enable Banking weigerde het verzoek. Meestal komt dat doordat de link verlopen is (een link werkt maar een kwartier) of al eens geopend is.',
   server_error: 'Er ging bij de bank of bij Enable Banking iets mis.',
   temporarily_unavailable: 'De bank is even niet bereikbaar.'
 };
