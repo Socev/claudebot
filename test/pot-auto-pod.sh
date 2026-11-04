@@ -31,9 +31,9 @@ function knip(naam) {
   const iStart = knop.indexOf('appStartBeurt('), iGeen = knop.indexOf('if (!st.job_id)'), iNa = knop.indexOf('kaart.naStart(');
   toets('appKnop: naStart pas ná de controle op een gestarte beurt', iStart > 0 && iGeen > iStart && iNa > iGeen, { iStart, iGeen, iNa });
   toets('appKnop: bijVerval roept kaart.bijVerval (intrekken)', /bijVerval = function \(\) \{[\s\S]{0,200}kaart\.bijVerval\(\)/.test(knop));
-  toets('appKnopBevestiging geeft knop-ja-vers-kaart voor een verse Ja op een kaart (meereizend)', (function () {
-    const c = {}; vm.runInNewContext(knip('appKnopBevestiging') + '; out = [appKnopBevestiging("ja", true, {soort:"meereizend"}, true), appKnopBevestiging("ja", true, {soort:"vast"}, true), appKnopBevestiging("ja", false, {}, true)];', c);
-    return c.out[0] === V.AUTO_BEVESTIGING && c.out[1] === 'knop-ja-vers-vast-kaart' && c.out[2] === 'knop-ja-kaart';
+  toets('appKnopBevestiging geeft knop-ja-vers-kaart voor een verse Ja op een kaart (meereizend, en sinds wv2356 ook een vaste plek)', (function () {
+    const c = {}; vm.runInNewContext(src.match(/^const APP_VAST_JA_DICHT = (?:true|false);$/m)[0] + '\n' + knip('appVastJaDicht') + '\n' + knip('appKnopBevestiging') + '; out = [appKnopBevestiging("ja", true, {soort:"meereizend"}, true), appKnopBevestiging("ja", true, {soort:"vast"}, true), appKnopBevestiging("ja", false, {}, true)];', c);
+    return c.out[0] === V.AUTO_BEVESTIGING && c.out[1] === V.AUTO_BEVESTIGING && c.out[2] === 'knop-ja-kaart';
   })());
 }
 
@@ -52,14 +52,14 @@ const ctx = {
   potVzBox: (r, t) => boxen.push(r),
 };
 vm.createContext(ctx);
-vm.runInContext([knip('potVzKnopVoor'), knip('potVzVrijgeven'), knip('potVzIntrekken')].join('\n') + '\nthis.knopVoor = potVzKnopVoor; this.vrijgeven = potVzVrijgeven; this.intrekken = potVzIntrekken;', ctx);
+vm.runInContext([src.match(/^const APP_VAST_JA_DICHT = (?:true|false);$/m)[0], knip('appVastJaDicht'), knip('potVzKnopVoor'), knip('potVzVrijgeven'), knip('potVzIntrekken')].join('\n') + '\nthis.knopVoor = potVzKnopVoor; this.vrijgeven = potVzVrijgeven; this.intrekken = potVzIntrekken;', ctx);
 const kaart = V.kaartVrijgave({ id: 7, entiteit: 'SLOEL', plan_datum: '2026-11-02' }, [{ nummer: '2026033', praktijk: 'Korte Geer', aan: 'pm@kg.example', bedrag: 1425 }], '2026-10-30');
 vrijgave = { id: 7, kaart_sleutel: 'pot-vrijgave-7', kaart_tekst_hash: V.kaartHash(kaart), plan_datum: '2026-11-02', vraag_id: null, ingetrokken_op: null, nota_ids: '[11]' };
 (async () => {
   let r = await ctx.knopVoor(kaart, { soort: 'meereizend' });
   toets('knopVoor: geldige kaart + meereizend → geen reden, vrijgave mee', !r.reden && r.v && r.v.id === 7, r);
   r = await ctx.knopVoor(kaart, { soort: 'vast' });
-  toets('knopVoor: vaste plek → reden, niets vast te leggen', /vaste plek/.test(r.reden || ''), r);
+  toets('knopVoor: vaste plek (wv2356) → geen reden, vrijgave mee', !r.reden && r.v && r.v.id === 7, r);
   r = await ctx.knopVoor(Object.assign({}, kaart, { titel: kaart.titel.replace('1', '2') }), { soort: 'meereizend' });
   toets('knopVoor: andere kaarttekst → reden', /niet meer de kaart/.test(r.reden || ''), r);
   aantal = 0; r = await ctx.knopVoor(kaart, { soort: 'meereizend' }); aantal = 1;
@@ -73,7 +73,11 @@ vrijgave = { id: 7, kaart_sleutel: 'pot-vrijgave-7', kaart_tekst_hash: V.kaartHa
   d1Log.length = 0;
   for (const [k, g, a, b] of [['nee', false, { soort: 'meereizend' }, 'knop-nee-kaart'], ['anders', false, { soort: 'meereizend' }, 'knop-anders-kaart'], ['ja', false, { soort: 'meereizend' }, 'knop-ja-kaart'], ['ja', true, { soort: 'vast' }, 'knop-ja-vers-vast-kaart'], ['ja', true, { soort: 'meereizend' }, 'knop-ja-vers']]) ctx.vrijgeven(vrijgave, k, g, a, b, 'abcd1234');
   await new Promise((x) => setTimeout(x, 10));
-  toets('vrijgeven: Nee, Anders, Ja zonder vingerafdruk, vaste plek of verkeerde bevestiging → niets geschreven', d1Log.length === 0, d1Log);
+  toets('vrijgeven: Nee, Anders, Ja zonder vingerafdruk of verkeerde bevestiging (ook knop-ja-vers-vast-kaart) → niets geschreven', d1Log.length === 0, d1Log);
+  ctx.vrijgeven(vrijgave, 'ja', true, { soort: 'vast' }, V.AUTO_BEVESTIGING, 'abcd1234');
+  await new Promise((x) => setTimeout(x, 10));
+  toets('vrijgeven wv2356: Ja + verse vingerafdruk vanaf een vaste plek → één D1-batch', d1Log.length === 1 && d1Log[0][0].params.includes('knop-ja-vers-kaart'), d1Log);
+  d1Log.length = 0;
   ctx.intrekken(vrijgave);
   await new Promise((x) => setTimeout(x, 10));
   toets('intrekken: ingetrokken_op en rijen terug naar auto_gevraagd zonder vrijgave', d1Log.length === 1 && /ingetrokken_op/.test(d1Log[0][0].sql) && /status='auto_gevraagd', vrijgave_id=null/.test(d1Log[0][1].sql));

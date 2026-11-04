@@ -5062,13 +5062,20 @@ const APP_VAST = path.join(APP_DATA, 'vast.json');                // wv1051 (OVI
 const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften', 'mediatheek'];   // wv1269: Mediatheek (20_Prive)
 // wv1901 (David 28-10-2026 16:51: "ik wil op ALLE pc's toegang tot ALLES"): een vaste plek schermt voor David niets meer af; hij ziet
 // daar hetzelfde als op zijn telefoon. Wat blijft (beveiliging, geen afscherming): invoerslot, sessie (BSN-masker op invoer weg sinds wv1931),
-// APP_BEHEER_ROUTES, een gevoelige Ja telt niet (knop-ja-vers-vast, AIX, POT-verzending, OVIS-adres). Eén schakelaar: true = het oude
+// APP_BEHEER_ROUTES (een gevoelige Ja telt sinds wv2356 wél, met verse vingerafdruk: APP_VAST_JA_DICHT). Eén schakelaar: true = het oude
 // afschermen (terugrol). Ontwerp: vault 01_Ontwikkeling/Vaste plek - alles open (ontwerp 28-10-2026).md
 const APP_VAST_AFSCHERMEN = false;
 function appAfscherm(a) {
   return APP_VAST_AFSCHERMEN && !!(a && a.soort === 'vast');
 }
 function appPriveDicht(a, id) { return appAfscherm(a) && APP_PRIVE_MODULES.indexOf(id) >= 0; }
+// wv2356 (David 4-11-2026 08:04: "Tuurlijk moet dat op elke pc kunnen!"): een gevoelige Ja telt ook vanaf een apparaat met een vaste plek,
+// met dezelfde eisen als op de telefoon: open invoerslot (de telefoon zegt dat David daar is), een verse vingerafdruk met de passkey van DIT
+// apparaat (Windows Hello op de pc), verbruikt per Ja, en dezelfde audit. Geldt voor de Poortwachter-Ja (knop-ja-vers), AIX plaatsen,
+// POT-verzending vrijgeven en het factuuradres, het boekstuk, OVIS rekeningnummer/adres. Beheer (APP_BEHEER_ROUTES) blijft telefoon-only.
+// true = het oude gedrag (een Ja van een vaste plek telt niet; terugrol). Ontwerp: Vaste plek - alles open § Log 4-11-2026.
+const APP_VAST_JA_DICHT = false;
+function appVastJaDicht(a) { return APP_VAST_JA_DICHT && !!(a && a.soort === 'vast'); }
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
 const APP_OMZET_MAX_BODY = 5 * 1024 * 1024;   // wv1854: tekst ≤ 2 MB (omzet.js telt de bytes en geeft 413) + JSON-ontsnapping (\n, \", \uXXXX)
@@ -7314,13 +7321,13 @@ async function appKnopVraagTekst(jobId, kanaal, hash) {
 }
 
 // wv393 (Fable M1): sinds een app-Ja met verse vingerafdruk de agenda direct mag aanpassen (Poortwachter groen bij exact
-// knop-ja-vers), heet een gevoelige Ja vanaf een apparaat met een vaste plek knop-ja-vers-vast: die blijft oranje en de ✅ kan daar
-// niet (/app/agenda staat in APP_BEHEER_ROUTES), dus de agenda verandert dan alleen via de telefoon. De vraag-id gaat mee in
+// knop-ja-vers), heette een gevoelige Ja vanaf een apparaat met een vaste plek knop-ja-vers-vast (bleef oranje). Sinds wv2356 alleen nog
+// met APP_VAST_JA_DICHT = true; anders is een verse Ja van de pc gewoon knop-ja-vers (de ✅ onder /app/agenda blijft beheer, telefoon). De vraag-id gaat mee in
 // Davids chat_log-tekst; de Poortwachter logt hem en de CISO-check C2-agenda-groen koppelt er de auditregel exact op.
 // wv404: een Ja op een Voor jou-kaart heet knop-ja-kaart / knop-ja-vers-kaart: de Poortwachter laat de rem alleen vallen bij exact
 // knop-ja-vers, dus een agendawijziging uit een kaart blijft oranje (✅ in de app onder het volledige voorstel; Fable M8).
 function appKnopBevestiging(keuze, gevoeligJa, a, kaart) {
-  const b = keuze === 'anders' ? 'knop-anders' : keuze === 'nee' ? 'knop-nee' : gevoeligJa ? (a && a.soort === 'vast' ? 'knop-ja-vers-vast' : 'knop-ja-vers') : 'knop-ja';
+  const b = keuze === 'anders' ? 'knop-anders' : keuze === 'nee' ? 'knop-nee' : gevoeligJa ? (appVastJaDicht(a) ? 'knop-ja-vers-vast' : 'knop-ja-vers') : 'knop-ja';
   return kaart && keuze === 'ja' ? b + '-kaart' : b;
 }
 
@@ -10598,7 +10605,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   if (ib && ib.afgehandeld) ctxIb = context + ' (AIX: deze bundel is al afgehandeld op ' + ib.afgehandeld + '; de pod plaatst niets meer. Jij plaatst ook niets op AIX. Zeg David wat er destijds geplaatst is (/health, ideeen.plaatsing).)';   // Fable wv861 #5
   else if (ib) ctxIb = context + (keuze === 'nee' ? ' (AIX: Nee, dus de pod plaatst niets; de bundel is dicht en de kaarten blijven als concept in de catalogus. Zeg dat kort.)'
     : keuze !== 'ja' ? ' (AIX: geen Ja, dus de pod plaatst niets; de kaarten blijven klaarstaan in de App AIX. Zeg dat kort.)'
-    : a.soort !== 'vast' ? ' (AIX: de pod plaatst nu zelf de ' + ib.aangevinkt + ' stuk(ken) die op Deel staan in Socevs winkel op aix.socev.dev en zet zelf "gedeeld op" in de catalogus. Jij plaatst niets, hebt geen toegang tot AIX en hoeft de catalogus niet te openen. Kijk na een minuut in /health (ideeen.plaatsing) en bevestig het David in één zin.)'
+    : !appVastJaDicht(a) ? ' (AIX: de pod plaatst nu zelf de ' + ib.aangevinkt + ' stuk(ken) die op Deel staan in Socevs winkel op aix.socev.dev en zet zelf "gedeeld op" in de catalogus. Jij plaatst niets, hebt geen toegang tot AIX en hoeft de catalogus niet te openen. Kijk na een minuut in /health (ideeen.plaatsing) en bevestig het David in één zin.)'
       : ' (AIX: NIET geplaatst, want deze Ja kwam van een vaste plek. Jij plaatst niets. Laat David op de telefoon drukken: heropen deze kaart met voor-jou-beheer.)');
   // wv1253: OVIS-kaart (herkenningskenmerken, kritiek veld, Bibliothecaris). De pod legt Davids keuze zelf vast via ovis_handvat_activeer
   // (precies de bevroren lijst; nooit het taalmodel); Socev hoort in de staart wat er werkelijk gebeurde.
@@ -18051,7 +18058,7 @@ function ovisKnopHaak(p, toelichting) {
     staart: function (ap) {
       return Promise.race([belofte, new Promise(function (r) { setTimeout(function () { r(null); }, 15000).unref(); })]).then(function (r) {
         if (!r) staartZonderUitslag = true;
-        return OVIS_MOD.uitkomstZin(soort, null, r || uitslag, !!(ap && ap.soort === 'vast'));
+        return OVIS_MOD.uitkomstZin(soort, null, r || uitslag, appVastJaDicht(ap));   // wv2356
       });
     }
   };
@@ -18586,7 +18593,7 @@ async function appPot(req, res, a, route) {
   if (!process.env.CLOUDFLARE_API_TOKEN) return appWeiger(res, 503, 'de POT-gegevens zijn nu niet te lezen (geen Cloudflare-sleutel op de pod)', 'pot geen sleutel');
   if (!appTeller('pot', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 600)', 'grens pot');
   const pad = route.slice('GET /app/pot/'.length);
-  if (pad === 'stand') { res._app.reden = 'pot stand'; return appStuur(res, 200, { ok: true, schrijft: potAppSchrijvenOpen(), adres_hier: !(a && a.soort === 'vast') }); }
+  if (pad === 'stand') { res._app.reden = 'pot stand'; return appStuur(res, 200, { ok: true, schrijft: potAppSchrijvenOpen(), adres_hier: !appVastJaDicht(a) }); }
   const t0 = Date.now();
   let r;
   try { r = await potApp.lees(pad); } catch (e) { logError('app-pot', e); return appWeiger(res, 500, 'fout op de pod', 'pot uitzondering'); }
@@ -18603,8 +18610,8 @@ async function appPotSchrijf(req, res, a, s, d, route) {
   if (!o) return appWeiger(res, 404, 'onbekende route', 'pot onbekend');
   if (!appTeller('pot-schrijf', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens pot-schrijf');
   if (o.route === 'verzending/adres') {
-    // het bevestigde factuuradres (grondwet 1): telefoon of meereizend apparaat, verse vingerafdruk, verbruikt vóór de eerste await
-    if (a.soort === 'vast') return appWeiger(res, 403, 'een factuuradres bevestigen kan niet vanaf een pc met een vaste plek; gebruik je telefoon', 'pot adres vast');
+    // het bevestigde factuuradres (grondwet 1): verse vingerafdruk van dit apparaat, verbruikt vóór de eerste await (wv2356: ook een vaste plek)
+    if (appVastJaDicht(a)) return appWeiger(res, 403, 'een factuuradres bevestigen kan niet vanaf een pc met een vaste plek; gebruik je telefoon', 'pot adres vast');
     if (!appVersOk(a, s)) { res._app.reden = 'pot verzending/adres ' + o.id + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
     s.vers_tot = 0;
   }
@@ -22515,10 +22522,10 @@ async function potVzBericht(tekst) {
   if (!r || r.status !== 200) throw new Error('bericht niet bezorgd (' + (r && r.status) + ')');
 }
 // Knoproute (appVoorJouKnop): vóór de druk de verse kaart tegen de D1-vrijgave toetsen; na een geslaagde start vastleggen; bij verval
-// intrekken. Alleen een Ja met verse vingerafdruk van telefoon of meereizend apparaat (bevestiging knop-ja-vers-kaart) telt.
+// intrekken. Alleen een Ja met verse vingerafdruk (bevestiging knop-ja-vers-kaart) telt; sinds wv2356 ook van een vaste plek.
 async function potVzKnopVoor(p, a) {
   if (!POT_VZ_MOD || typeof POT_VZ_MOD.vrijgaveToets !== 'function') return { reden: 'deze pod kent automatisch versturen niet' };
-  if (a && a.soort === 'vast') return { reden: 'een Ja vanaf een vaste plek telt niet' };
+  if (appVastJaDicht(a)) return { reden: 'een Ja vanaf een vaste plek telt niet' };
   let v = null, nuD1 = null, aantal = -1;
   try {
     const r = await potDhD1([{ sql: 'select * from nota_vrijgave where kaart_sleutel=?', params: [String(p.sleutel)] }, { sql: "select strftime('%Y-%m-%dT%H:%M:%SZ','now') as nu", params: [] },
@@ -22529,7 +22536,7 @@ async function potVzKnopVoor(p, a) {
   return reden ? { reden: reden } : { v: v };
 }
 function potVzVrijgeven(v, keuze, gevoeligJa, a, bevestiging, vraagId) {
-  if (keuze !== 'ja' || gevoeligJa !== true || !a || a.soort === 'vast' || bevestiging !== POT_VZ_MOD.AUTO_BEVESTIGING) return;
+  if (keuze !== 'ja' || gevoeligJa !== true || !a || appVastJaDicht(a) || bevestiging !== POT_VZ_MOD.AUTO_BEVESTIGING) return;
   potDhD1(POT_VZ_MOD.vrijgaveSql(v.id, v.kaart_tekst_hash, vraagId, bevestiging)).then(function (r) {
     schrijfLog(nu() + ' pot-verzend vrijgave ' + velden({ vrijgave: v.id, vastgelegd: r[0].changes, rijen: r[1].changes }));
     if (r[0].changes !== 1) { potVzBox('vrijgave', 'een Ja op vrijgave ' + v.id + ' kon niet worden vastgelegd (al vrij, ingetrokken of verlopen); die nota\'s worden concept'); potVzNietVast(); }
@@ -22803,7 +22810,7 @@ async function bsKaartZet(fdb, voorbeeld) {
 }
 async function bsKnopVoor(p, a) {
   if (!BS_MOD) return { reden: 'deze pod kent het boekstuk niet' };
-  if (a && a.soort === 'vast') return { reden: 'een Ja vanaf een vaste plek telt niet' };
+  if (appVastJaDicht(a)) return { reden: 'een Ja vanaf een vaste plek telt niet' };
   const fdb = facturenOpen();
   if (!fdb) return { reden: 'Facturen draait niet op deze kant' };
   let v = null, aan = null;
@@ -22812,7 +22819,7 @@ async function bsKnopVoor(p, a) {
   return reden ? { reden: reden } : { v: v };
 }
 function bsVrijgeven(v, keuze, gevoeligJa, a, bevestiging, vraagId) {
-  if (keuze !== 'ja' || gevoeligJa !== true || !a || a.soort === 'vast' || bevestiging !== BS_MOD.BEVESTIGING) return;
+  if (keuze !== 'ja' || gevoeligJa !== true || !a || appVastJaDicht(a) || bevestiging !== BS_MOD.BEVESTIGING) return;
   try {
     const fdb = facturenOpen();
     if (!fdb) throw new Error('Facturen niet open');

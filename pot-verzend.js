@@ -278,9 +278,8 @@ function kaartVrijgave(v, rijen, vandaag) {
   return { sleutel: `pot-vrijgave-${v.id}`, soort: 'besluit', volgorde: 20, waar: 'overal', prive: true, duur_min: 2, deadline: voor >= vandaag ? voor : v.plan_datum,
     titel: titel.length <= 90 ? titel : `Zal ik ${n} ${ent}-nota${n > 1 ? "'s" : ''} op ${dag} om 09:00 versturen?`,
     herkomst: { handmatig: 'pot-verzend', soort: 'vrijgave', vrijgave_id: v.id, entiteit: v.entiteit, plan_datum: v.plan_datum, ...potDoel(v.entiteit) },
-    waarom: kap(`Je zette deze nota's in ${app()} klaar met "op die dag zelf versturen". Met Ja (vingerafdruk op je telefoon) geef je precies deze vrij: op ${dag} tussen 09:00 en 12:00 gaat per nota één mail van dokterschaap@gmail.com, met jouw tekst en de PDF die je maakte. Totaal ${euro(totaal)}. Nee of niets: die ochtend om 07:00 staan ze als concept klaar.`, 400),
+    waarom: kap(`Je zette deze nota's in ${app()} klaar met "op die dag zelf versturen". Met Ja (met je vingerafdruk) geef je precies deze vrij: op ${dag} tussen 09:00 en 12:00 gaat per nota één mail van dokterschaap@gmail.com, met jouw tekst en de PDF die je maakte. Totaal ${euro(totaal)}. Nee of niets: die ochtend om 07:00 staan ze als concept klaar.`, 400),
     stappen: [...rijen.map((r) => `${r.nummer} · ${r.praktijk} · ${r.aan}${r.cc ? ` (cc ${r.cc})` : ''} · ${euro(r.bedrag)}`),
-      'Een Ja vanaf een vaste plek (praktijk-pc) telt niet: dan worden het concepten.',
       'Verandert er nog iets aan een nota (adres, PDF, tekst, datum), dan gaat die nota als concept en niet vanzelf.',
       `Stoppen kan tot het verzendmoment: Annuleer bij de nota in ${appNotas()}.`].slice(0, 12) };
 }

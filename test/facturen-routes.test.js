@@ -991,28 +991,58 @@ test('wv1323: de vollere naam wordt de leverancier; een tweede onbekende rekenin
   assert.equal(t.call('POST', 'feit', { sleutel: k3.sleutel, versie: k3.versie, keuze: 'bevestig' }).status, 200);
 });
 
-test('wv1323: factuur met een bekende leverancier: Ja zet de rekening bij die leverancier (geen nieuwe), alleen als de banknaam past', () => {
+test('wv1323/wv2356: bekende leverancier met eigen betalingen onder zijn naam: IBAN bekend zonder kaart of nabellen; een andere naam blijft nabellen', () => {
   const t = opzet();
   const iban = Z.maakIban('NL', 'TEST', '0555000021');
   const f = nabelFactuur(t, iban, null, true);
   const lev = t.fdb.db.prepare('SELECT id, naam FROM leverancier WHERE id = ?').get(f.leverancier_id);
   betalingen(t, iban, [lev.naam.replace(/ B\.V\.$/, ''), lev.naam, lev.naam], 45);
-  const k = t.call('GET', 'bank').j.feiten.find((x) => x.sleutel === 'iban:' + iban);
-  assert.ok(k, 'kaart voor de bekende leverancier');
-  assert.deepEqual(k.leverancier, { id: lev.id, naam: lev.naam });
-  assert.match(k.uitleg.ja, new RegExp('^Ja: ' + lev.naam.replace(/\./g, '\\.') + ' krijgt deze rekening erbij'));
-  const levVoor = t.n('SELECT count(*) AS n FROM leverancier');
-  t.vers.ok = true;
-  const ja = t.call('POST', 'feit', { sleutel: k.sleutel, versie: k.versie, keuze: 'bevestig' });
-  assert.equal(ja.status, 200, JSON.stringify(ja.j)); assert.equal(ja.j.leverancier.nieuw, false);
-  assert.equal(t.n('SELECT count(*) AS n FROM leverancier'), levVoor);
-  assert.equal(t.n("SELECT count(*) AS n FROM leverancier_iban WHERE iban = ? AND leverancier = ? AND bron = 'bankhistorie'", [iban, lev.id]), 1);
-  assert.equal(ja.j.facturen[0].bevestigen.redenen.some((r) => /nabellen/.test(r)), false);
-  // dezelfde leverancier, een rekening onder een heel andere naam: geen kaart (nieuw IBAN bij een bekende leverancier = nabellen)
+  // wv2356 (David 4-11-2026): al eerder vanaf een eigen rekening betaald onder de naam van de leverancier = bekend; geen feitkaart meer nodig
+  assert.equal(t.call('GET', 'bank').j.feiten.filter((x) => x.sleutel === 'iban:' + iban).length, 0);
+  const d = t.call('GET', 'factuur/' + f.id).j;
+  assert.equal(d.iban_poort.iban_nieuw, false);
+  assert.match(d.iban_poort.reden, /^IBAN bekend: een eigen rekening betaalde er 3× aan \(laatst 2026-10-01\)$/);
+  assert.equal(d.bevestigen.redenen.some((r) => /nabellen/.test(r)), false);
+  // het opgeslagen iban_nieuw volgt in de ronde (koppelen aan betalingen kijkt daarnaar), met een besluitrij en één auditrij
+  const h = F.ibanHerbereken(t.fdb, Date.parse('2026-10-22T12:00:00Z'));
+  assert.ok(h.bekend >= 1, JSON.stringify(h));
+  const na = t.fdb.db.prepare('SELECT iban_nieuw, ibans_onbekend, redenen FROM factuur WHERE id = ?').get(f.id);
+  assert.equal(na.iban_nieuw, 0); assert.deepEqual(JSON.parse(na.ibans_onbekend), []);
+  assert.equal(JSON.parse(na.redenen).some((r) => /nabellen/.test(r)), false);
+  assert.equal(t.n("SELECT count(*) AS n FROM besluit WHERE factuur = ? AND stap = 'validatie' AND veld = 'iban_nieuw' AND waarde = '0' AND toelichting LIKE 'IBAN bekend:%'", [f.id]), 1);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'iban_bekend'"), 1);
+  assert.equal(F.ibanHerbereken(t.fdb, Date.parse('2026-10-22T12:05:00Z')).bekend, 0, 'herhaalbaar');
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'facturen-koerier.js'), 'utf8'), /const ih = F\.ibanHerbereken\(fdb, start\);/, 'elke koerier-ronde herberekent');
+  assert.equal(t.n("SELECT count(*) AS n FROM leverancier_iban WHERE iban = ?", [iban]), 0, 'geen nieuwe rekeningrij: alleen afgeleid');
+  // dezelfde leverancier, een rekening onder een heel andere naam: blijft nabellen, geen kaart (nieuw IBAN bij een bekende leverancier)
   const vreemd = Z.maakIban('NL', 'TEST', '0555000022');
-  nabelFactuur(t, vreemd, null, true);
+  const g = nabelFactuur(t, vreemd, null, true);
   betalingen(t, vreemd, ['Iemand Anders', 'Iemand Anders', 'Iemand Anders'], 45);
   assert.equal(t.call('GET', 'bank').j.feiten.filter((x) => x.sleutel === 'iban:' + vreemd).length, 0);
+  assert.ok(t.call('GET', 'factuur/' + g.id).j.bevestigen.redenen.some((r) => /nabellen/.test(r)));
+  F.ibanHerbereken(t.fdb, Date.parse('2026-10-22T12:10:00Z'));
+  assert.equal(t.fdb.db.prepare('SELECT iban_nieuw FROM factuur WHERE id = ?').get(g.id).iban_nieuw, 1);
+  // ontvangen geld van dat IBAN (bijschrijving) telt niet als eerdere betaling
+  const bij = Z.maakIban('NL', 'TEST', '0555000023');
+  const b = nabelFactuur(t, bij, null, true);
+  betalingen(t, bij, [lev.naam, lev.naam], 30, { bij: true });
+  assert.ok(t.call('GET', 'factuur/' + b.id).j.bevestigen.redenen.some((r) => /nabellen/.test(r)));
+});
+
+test('wv2356: IBAN uit het archief (beslist) van dezelfde leverancier telt als bekend; genegeerd of andere naam niet', () => {
+  const t = opzet();
+  const iban = Z.maakIban('NL', 'TEST', '0555000041'), ander = Z.maakIban('NL', 'TEST', '0555000042');
+  const f = nabelFactuur(t, iban, null, true);
+  const g = nabelFactuur(t, ander, null, true);
+  const lev = t.fdb.db.prepare('SELECT id, naam FROM leverancier WHERE id = ?').get(f.leverancier_id);
+  const arch = (i, naam, status) => t.fdb.db.prepare("INSERT INTO factuur_archief (id, herkomst, extern_id, entiteit, leverancier_naam, factuurdatum, incl, valuta, iban, status, aangemaakt_op) " +
+    "VALUES (?, 'fv2', ?, 'tolgaarde', ?, '2026-05-01', 1000, 'EUR', ?, ?, '2026-10-22T10:00:00Z')").run(crypto.randomBytes(8).toString('hex'), crypto.randomBytes(4).toString('hex'), naam, i, status);
+  arch(ander, lev.naam, 'genegeerd'); arch(ander, 'Iemand Anders', 'beslist');
+  assert.ok(t.call('GET', 'factuur/' + g.id).j.bevestigen.redenen.some((r) => /nabellen/.test(r)), 'genegeerd of andere naam: nabellen');
+  arch(iban, 'Info | ' + lev.naam, 'beslist');
+  const d = t.call('GET', 'factuur/' + f.id).j;
+  assert.equal(d.iban_poort.iban_nieuw, false);
+  assert.match(d.iban_poort.reden, /1 beslist archiefstuk van deze leverancier met dit IBAN/);
 });
 
 // ───────────────────────────── SEPA-batch (wv1405) ─────────────────────────────

@@ -249,14 +249,13 @@ function kaartVrijgave(x) {
   return { sleutel: 'boekstuk-vrijgave-' + x.id, soort: 'besluit', volgorde: 22, waar: 'overal', prive: true, duur_min: 2,
     titel: 'Google Home-boekstuk — elke maand zelf naar je vader versturen?',
     herkomst: { handmatig: 'facturen-boekstuk', soort: 'vrijgave', vrijgave_id: x.id, doel: { scherm: 'facturen' } },
-    waarom: kap('Je vroeg op 3-11 of het maandelijkse boekstuk voor Google Home Premium Advanced (' + eur(ABO.totaal_centen) + ', Tolgaarde) direct naar je vader mag. Met Ja (vingerafdruk op je telefoon) stuurt de pod het vanaf de 3e van elke maand op een werkdag tussen 09:00 en 12:00 zelf, als één mail met de PDF, alleen naar ' + x.aan + '. Nee of niets: elke maand een concept in Gmail, zoals nu.', 400),
+    waarom: kap('Je vroeg op 3-11 of het maandelijkse boekstuk voor Google Home Premium Advanced (' + eur(ABO.totaal_centen) + ', Tolgaarde) direct naar je vader mag. Met Ja (met je vingerafdruk) stuurt de pod het vanaf de 3e van elke maand op een werkdag tussen 09:00 en 12:00 zelf, als één mail met de PDF, alleen naar ' + x.aan + '. Nee of niets: elke maand een concept in Gmail, zoals nu.', 400),
     stappen: [
       x.voorbeeld === 'proef' ? 'Het voorbeeld (november) kreeg je net op je eigen testadres: zo ziet de mail aan je vader eruit.' : 'Het voorbeeld van november staat als concept in Gmail.',
       'Onderwerp: ' + m.onderwerp.replace('<maand>', '<maand jaar>'),
       'Tekst: ' + m.bericht.replace(/\n+/g, ' ').replace('<maand>', '<maand jaar>'),
       'Alleen als alles klopt: dit product, ' + eur(ABO.totaal_centen) + ' met ' + eur(ABO.btw_centen) + ' btw, het volgende bestelnummer, PayPal vanaf de ABN-rekening van Tolgaarde, nog niet verstuurd.',
       'Klopt iets niet (andere prijs, ander product, twijfel), dan wordt het een concept en hoor je waarom.',
-      'Een Ja vanaf een vaste plek (praktijk-pc) telt niet.',
       'Stoppen kan altijd: zeg het Socev, dan wordt het weer een concept.'] };
 }
 // p = verse kaartrij, v = boekstuk_vrijgave-rij met kaart_sleutel = p.sleutel. → null (mag) of een reden in gewone taal.

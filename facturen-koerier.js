@@ -250,6 +250,9 @@ async function ronde(fdb, io, o) {
     if (b.herbeoordeling) { uit.herbeoordeling = b.herbeoordeling; if (!b.herbeoordeling.ok) fout('herbeoordeling', { code: 'herbeoordeling' }); }   // wv1317
   }
 
+  // 0b. wv2356: facturen die op "eerst nabellen" wachten opnieuw langs de IBAN-poort (eerdere eigen betalingen, archief, nagebeld, feit)
+  try { const ih = F.ibanHerbereken(fdb, start); if (ih.bekend) uit.iban_bekend = ih.bekend; } catch (e) { fout('iban', e); }
+
   // 1. voorronde: opgehaald > 30 min mét reservering → eerst zoeken (anders maakt de claim hem bij poging 3 stil "mislukt" terwijl het
   //    concept er staat, of verstuurt hij opnieuw; Fable F4 MOET 2)
   for (const op of fdb.db.prepare("SELECT * FROM opdracht WHERE status = 'opgehaald' AND verzend_reservering IS NOT NULL AND opgehaald_op <= ? ORDER BY opgehaald_op LIMIT 20")

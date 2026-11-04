@@ -249,13 +249,20 @@ function echtKenmerk(s) { const k = genormKenmerk(s); return k.length >= 5 && !L
  * Is deze factuur betaald, wanneer, hoe en met welk bedrag? factuur: { id, entiteit, nummer, kenmerk, incl (centen), iban, factuurdatum,
  * vervaldatum, leverancier_naam?, incassant_ids? }. transacties: bankregels van die entiteit. opties: { koppelingen: [transactie-id] }
  * (uit de Facturen-koppelingen, dan staat het vast).
- * → { betaald, zekerheid ('vast'|'hoog'|'middel'|null), wanneer, hoe, bedrag_centen, transacties: [id], reden }
+ * wv2356 (David 4-11-2026, "Betaald op 08-10" bij een factuur van 2-11): opties.gekoppeldAan = Map transactie-id → Set factuur-id's (alle
+ * koppelingen). Een afschrijving die al aan een ándere factuur gekoppeld is telt in de herkenning (stap 1–3) niet; een afschrijving vóór de
+ * factuurdatum telt bij IBAN/incasso + bedrag en naam + bedrag (stap 2–3) niet (dat is bijna altijd de vorige maand met hetzelfde bedrag).
+ * Een kenmerk of factuurnummer in de betaling (stap 1) is direct bewijs en blijft gelden. Niet betaald, maar wel een eerdere afschrijving
+ * aan dit IBAN (of incassant) vóór de factuurdatum: eerder = { wanneer, bedrag_centen } ("eerdere betaling aan deze leverancier op …").
+ * → { betaald, zekerheid ('vast'|'hoog'|'middel'|null), wanneer, hoe, bedrag_centen, transacties: [id], reden, eerder? }
  */
 function betalingVan(f, transacties, opties) {
   opties = opties || {};
   // wv1415: opties.uitgesloten = afschrijvingen die een terugboeking ophief (tellen niet als betaling van deze factuur)
   const weg = new Set(opties.uitgesloten || []);
   const txs = (transacties || []).filter((t) => !t.verwijderd_op && t.bedrag_centen < 0 && (!f.entiteit || t.entiteit === f.entiteit) && !weg.has(t.id));
+  const gk = opties.gekoppeldAan instanceof Map ? opties.gekoppeldAan : null;
+  const elders = (t) => !!gk && gk.has(t.id) && Array.from(gk.get(t.id)).some((x) => x !== f.id);   // wv2356
   const uit = (lijst, zekerheid, reden) => ({
     betaald: true, zekerheid, reden, wanneer: lijst.map((t) => t.boekdatum).sort().pop(), hoe: betaalwijzeVan(lijst[0]),
     bedrag_centen: lijst.reduce((a, t) => a + Math.abs(t.bedrag_centen), 0), transacties: lijst.map((t) => t.id),
@@ -267,18 +274,28 @@ function betalingVan(f, transacties, opties) {
   // grenzen één keer berekenen en als tekst vergelijken (JJJJ-MM-DD): O(T) per factuur zonder datumobjecten (Fable diffreview wv944 #1)
   const vVan = datum ? plusDagen(datum, -45) : null, vTot = datum ? plusDagen(datum, 120) : null;
   const venster = (t) => !datum || (t.boekdatum >= vVan && t.boekdatum <= vTot);
+  const vrij = txs.filter((t) => !elders(t));                              // wv2356: niet al van een andere factuur
+  const naDatum = (t) => !datum || t.boekdatum >= datum;                   // wv2356: niet vóór de factuurdatum (stap 2–3)
   // 1. kenmerk of factuurnummer in kenmerk/omschrijving (≥ 5 tekens, anders te toevallig)
   const sleutels = [echtKenmerk(f.kenmerk), echtKenmerk(f.nummer)].filter(Boolean);
   if (sleutels.length) {
-    const l = txs.filter((t) => venster(t) && sleutels.some((s) => genormKenmerk(t.kenmerk) === s || genormKenmerk(t.omschrijving).includes(s)));
+    const l = vrij.filter((t) => venster(t) && sleutels.some((s) => genormKenmerk(t.kenmerk) === s || genormKenmerk(t.omschrijving).includes(s)));
     if (l.length) return uit(l, incl === null || l.reduce((a, t) => a + Math.abs(t.bedrag_centen), 0) === incl ? 'hoog' : 'middel', 'kenmerk of factuurnummer in de betaling');
   }
-  if (incl === null) return { betaald: false, zekerheid: null, reden: 'geen bedrag op de factuur', transacties: [] };
-  // 2. IBAN + bedrag, of incasso van deze leverancier met hetzelfde bedrag
   const iban = ibanNorm(f.iban);
   const inc = new Set((f.incassant_ids || []).map((x) => String(x).trim().toUpperCase()));
-  const kand = txs.filter((t) => venster(t) && Math.abs(t.bedrag_centen) === incl &&
-    ((iban && ibanNorm(t.tegenpartij_iban) === iban) || (t.is_incasso && t.incassant_id && inc.has(String(t.incassant_id).trim().toUpperCase()))));
+  const vanLev = (t) => (iban && ibanNorm(t.tegenpartij_iban) === iban) || (t.is_incasso && t.incassant_id && inc.has(String(t.incassant_id).trim().toUpperCase()));
+  // wv2356: niet betaald → hooguit de laatste eerdere afschrijving aan deze leverancier (vóór de factuurdatum, binnen 180 dagen)
+  const nee = (reden) => {
+    const r = { betaald: false, zekerheid: null, reden, transacties: [] };
+    const e = datum ? txs.filter((t) => vanLev(t) && t.boekdatum < datum && t.boekdatum >= plusDagen(datum, -180))
+      .sort((a, b) => (a.boekdatum !== b.boekdatum ? (a.boekdatum < b.boekdatum ? 1 : -1) : Math.abs(Math.abs(a.bedrag_centen) - (incl || 0)) - Math.abs(Math.abs(b.bedrag_centen) - (incl || 0))))[0] : null;
+    if (e) r.eerder = { wanneer: e.boekdatum, bedrag_centen: Math.abs(e.bedrag_centen) };
+    return r;
+  };
+  if (incl === null) return nee('geen bedrag op de factuur');
+  // 2. IBAN + bedrag, of incasso van deze leverancier met hetzelfde bedrag (niet vóór de factuurdatum, niet al van een andere factuur)
+  const kand = vrij.filter((t) => venster(t) && naDatum(t) && Math.abs(t.bedrag_centen) === incl && vanLev(t));
   if (kand.length) {
     // dichtst bij de factuurdatum
     kand.sort((a, b) => Math.abs(dagenTussen(datum || a.boekdatum, a.boekdatum)) - Math.abs(dagenTussen(datum || b.boekdatum, b.boekdatum)));
@@ -287,10 +304,10 @@ function betalingVan(f, transacties, opties) {
   // 3. zelfde naam en bedrag (zwakker)
   const naam = normNaam(f.leverancier_naam);
   if (naam && naam.length >= 4) {
-    const l = txs.filter((t) => venster(t) && Math.abs(t.bedrag_centen) === incl && normNaam(t.tegenpartij_naam).includes(naam));
+    const l = vrij.filter((t) => venster(t) && naDatum(t) && Math.abs(t.bedrag_centen) === incl && normNaam(t.tegenpartij_naam).includes(naam));
     if (l.length) return uit([l[0]], 'middel', 'zelfde naam en bedrag');
   }
-  return { betaald: false, zekerheid: null, reden: 'geen betaling gevonden', transacties: [] };
+  return nee('geen betaling gevonden');
 }
 
 // ───────────────────────────── controles ─────────────────────────────

@@ -1102,3 +1102,27 @@ test('wv1917 diffreview: regel botst met het stuk → een mens kiest (betaalwijz
   // alleen het tekstanker (de oude bedrijfsnaam) = niet sterk → de regel wint
   assert.equal(K.stapEntiteit({ kvks: [] }, 'factuur aan oude naam', ctx, { regel: rg }).entiteit, 'tolgaarde');
 });
+
+test('wv2356: IBAN bekend uit eigen betalingen of het archief, streng op naam; een echt nieuw IBAN blijft nabellen', () => {
+  assert.equal(K.naamZelfde('Info | Poetsdienst Proefstad', 'Poetsdienst Proefstad'), true);
+  assert.equal(K.naamZelfde('Leverancier A B.V.', 'leverancier a'), true);
+  assert.equal(K.naamZelfde('ING', 'Ingrid Jansen'), false, 'geen deelwoord');
+  assert.equal(K.naamZelfde('Jan', 'Jan Jansen'), false, 'te kort voor bevat');
+  assert.equal(K.naamZelfde('Proef Tien', 'Proef Elf'), false);
+  const iban = IBAN.A, lev = { id: 'l1', naam: 'Info | Poetsdienst Proefstad', ibans: [] };
+  const f = { iban, ibans_betaal: [iban] };
+  const hist = (lijst) => ({ entiteiten: [], ibanHistorie: (i) => (i === iban ? lijst : []) });
+  const p1 = K.ibanPoort(f, lev, hist([{ bron: 'bankhistorie', naam: 'Poetsdienst Proefstad', aantal: 17, laatste: '2026-10-08' }]));
+  assert.equal(p1.iban_nieuw, false); assert.equal(p1.reden, 'IBAN bekend: een eigen rekening betaalde er 17× aan (laatst 2026-10-08)');
+  const p2 = K.ibanPoort(f, lev, hist([{ bron: 'archief', naam: 'Poetsdienst Proefstad', aantal: 3, laatste: '2026-07-02' }]));
+  assert.equal(p2.iban_nieuw, false); assert.match(p2.reden, /3 besliste archiefstukken/);
+  const p3 = K.ibanPoort(f, lev, hist([{ bron: 'bankhistorie', naam: 'Iemand Anders', aantal: 40, laatste: '2026-10-08' }]));
+  assert.equal(p3.iban_nieuw, true, 'andere naam (bv. een medewerker): nabellen');
+  assert.equal(K.ibanPoort(f, null, hist([{ bron: 'bankhistorie', naam: 'Poetsdienst Proefstad', aantal: 5 }])).iban_nieuw, true, 'zonder leverancier geen historie');
+  assert.equal(K.ibanPoort(f, lev, { entiteiten: [] }).iban_nieuw, true, 'zonder ibanHistorie: nabellen');
+  assert.equal(K.ibanPoort(f, lev, { entiteiten: [], ibanHistorie: () => { throw new Error('db'); } }).iban_nieuw, true, 'fout = niet bekend');
+  // tweede IBAN op de factuur zonder historie: blijft nabellen
+  const tweede = IBAN.B;
+  const p4 = K.ibanPoort({ iban, ibans_betaal: [iban, tweede] }, lev, hist([{ bron: 'bankhistorie', naam: 'Poetsdienst Proefstad', aantal: 2, laatste: '2026-10-08' }]));
+  assert.equal(p4.iban_nieuw, true); assert.deepEqual(p4.onbekend, [tweede]);
+});

@@ -146,7 +146,50 @@ function kernCtx(fdb, nu) {
       actief: e.actief === 1, boekhoud_doel: e.boekhoud_doel, ibans: ibans[e.sleutel] || [] })),
     drempelCenten: Number.isSafeInteger(drempel) && drempel > 0 ? drempel : undefined,
     eerdereBetalingen: (q) => eerdereBetalingen(fdb, q),   // wv2143: de € 2.500-waarschuwing zwijgt bij een gebruikelijk bedrag (kern)
+    ibanHistorie: (iban) => ibanHistorie(fdb, iban),        // wv2356: IBAN bekend uit eigen betalingen of het archief (kern ibanPoort)
   };
+}
+/*
+ * wv2356: onder welke namen betaalde een eigen rekening al eens aan dit IBAN (afschrijvingen, niet verwijderd), en onder welke
+ * leveranciersnaam staat het in een beslist archiefstuk (fv2)? Alleen namen, aantallen en de laatste datum; de kern toetst de naam.
+ * Ook regels die alleen de eigenaar ziet tellen mee (zoals eerdereBetalingen); de kern noemt geen bedragen.
+ */
+function ibanHistorie(fdb, iban) {
+  const i = K.ibanNorm(iban);
+  if (!i) return [];
+  const bank = fdb.db.prepare("SELECT tegenpartij_naam AS naam, count(*) AS aantal, max(boekdatum) AS laatste FROM bank_transactie WHERE tegenpartij_iban = ? " +
+    "AND verwijderd_op IS NULL AND bedrag_centen < 0 AND tegenpartij_naam IS NOT NULL AND trim(tegenpartij_naam) <> '' GROUP BY tegenpartij_naam ORDER BY aantal DESC LIMIT 20").all(i);
+  const archief = fdb.db.prepare("SELECT leverancier_naam AS naam, count(*) AS aantal, max(factuurdatum) AS laatste FROM factuur_archief WHERE status = 'beslist' " +
+    "AND upper(replace(iban, ' ', '')) = ? AND leverancier_naam IS NOT NULL GROUP BY leverancier_naam ORDER BY aantal DESC LIMIT 20").all(i);
+  return bank.map((r) => ({ bron: 'bankhistorie', naam: r.naam, aantal: Number(r.aantal), laatste: r.laatste }))
+    .concat(archief.map((r) => ({ bron: 'archief', naam: r.naam, aantal: Number(r.aantal), laatste: r.laatste })));
+}
+/*
+ * wv2356: facturen die nog op "nieuw IBAN: eerst nabellen" staan opnieuw langs de IBAN-poort (elke koerier-ronde): is het IBAN intussen
+ * bekend (een nagebelde rekening, een bevestigd feit, eerdere eigen betalingen of het archief), dan vervalt iban_nieuw met een besluitrij
+ * en één auditrij. Alleen die richting (1 → 0): Bevestigen rekent de poort toch altijd vers uit (bevestigBlokkades), dus een IBAN dat weer
+ * onbekend wordt, houdt Bevestigen alsnog tegen. Versie in de WHERE (een gelijktijdige wijziging wint).
+ */
+function ibanHerbereken(fdb, nu) {
+  const ctx = kernCtx(fdb, nu), wanneer = nuIso(nu), ids = [];
+  const rijen = fdb.db.prepare("SELECT id FROM factuur WHERE status = 'te_beoordelen' AND iban_nieuw = 1 AND nagebeld_op IS NULL ORDER BY aangemaakt_op LIMIT 500").all();
+  D.transactie(fdb, function () {
+    for (const { id } of rijen) {
+      const f = D.factuurVoorKern(fdb, id);
+      if (!f) continue;
+      const ip = K.ibanPoort(f, leverancierKern(fdb, f.leverancier_id), ctx);
+      if (ip.iban_nieuw) continue;
+      const redenen = (Array.isArray(f.redenen) ? f.redenen : []).filter((x) => !/eerst nabellen/.test(String(x)));
+      const u = fdb.db.prepare("UPDATE factuur SET iban_nieuw = 0, ibans_onbekend = '[]', redenen = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND versie = ? AND status = 'te_beoordelen' AND iban_nieuw = 1")
+        .run(JSON.stringify(redenen), wanneer, f.id, f.versie);
+      if (u.changes !== 1) continue;
+      besluitRij(fdb, f.id, K.besluit('validatie', 'iban_nieuw', 0, 'regel', ip.reden), null, wanneer);
+      ids.push(f.id);
+    }
+    if (ids.length) D.audit(fdb, { wie: 'bankcontrole', wat: 'iban_bekend', object_soort: 'factuur', object_id: ids.length === 1 ? ids[0] : 'meer',
+      na: { facturen: ids.slice(0, 50), aantal: ids.length }, wanneer });
+  });
+  return { bekeken: rijen.length, bekend: ids.length };
 }
 /*
  * wv2143: afschrijvingen aan een tegenpartij (IBAN's of incassant-id's) van `van` tot vóór `tot`, zonder de betalingen die al aan deze factuur
@@ -2644,12 +2687,15 @@ function validatieInvoer(fdb, r) {
     kop.set(fid, ks.map((k) => k.transactie).filter((id) => !weg.has(id)));
     if (weg.size) uitgesloten.set(fid, [...weg]);
   }
+  // wv2356: per afschrijving de facturen waaraan hij gekoppeld is (netto, zonder terugboekingen): telt niet als betaling van een andere factuur
+  const gekoppeldAan = new Map();
+  for (const [fid, ids] of kop) for (const id of ids) { if (!gekoppeldAan.has(id)) gekoppeldAan.set(id, new Set()); gekoppeldAan.get(id).add(fid); }
   const facturen = fdb.db.prepare("SELECT f.id, f.entiteit, f.leverancier, f.leverancier_naam, f.nummer, f.kenmerk, f.incl, f.iban, f.factuurdatum, f.vervaldatum, f.betaalspoor, f.status, f.alleen_eigenaar " +
     "FROM factuur f WHERE f.entiteit IS NOT NULL AND f.entiteit <> 'prive' AND " + ff).all(...fp)
     .map((f) => Object.assign(f, { herkomst: 'facturen', incassant_ids: lev.get(f.leverancier) || [], koppelingen: kop.get(f.id) || [], uitgesloten: uitgesloten.get(f.id) || [] }));
   const archief = isEig(r) ? fdb.db.prepare('SELECT id, entiteit, leverancier_naam, nummer, kenmerk, incl, iban, factuurdatum, vervaldatum, status, alleen_eigenaar FROM factuur_archief').all()
     .map((f) => Object.assign(f, { herkomst: 'fv2', incassant_ids: [], koppelingen: [] })) : [];
-  return { txs, facturen: facturen.concat(archief), start: startdatumVan(fdb) };
+  return { txs, facturen: facturen.concat(archief), start: startdatumVan(fdb), gekoppeldAan };
 }
 function txUit(t) {
   return { id: t.id, entiteit: t.entiteit, datum: t.boekdatum, bedrag_centen: t.bedrag_centen, naam: t.tegenpartij_naam, iban: t.tegenpartij_iban,
@@ -2681,14 +2727,14 @@ function validatie(fdb, r, d, nu) {
     const id = String(d && d.id || '');
     const f = inv.facturen.find((x) => x.id === id);
     if (!f) weiger(404, 'factuur niet gevonden');
-    const b = V.betalingVan(f, inv.txs, { koppelingen: f.koppelingen, uitgesloten: f.uitgesloten });
+    const b = V.betalingVan(f, inv.txs, { koppelingen: f.koppelingen, uitgesloten: f.uitgesloten, gekoppeldAan: inv.gekoppeldAan });
     return { soort, factuur: { id: f.id, herkomst: f.herkomst, entiteit: f.entiteit, leverancier: f.leverancier_naam, nummer: f.nummer, incl_centen: f.incl,
       factuurdatum: f.factuurdatum, vervaldatum: f.vervaldatum }, betaling: Object.assign({}, b, { regels: inv.txs.filter((t) => b.transacties.includes(t.id)).map(txUit) }) };
   }
   if (soort !== 'overzicht') weiger(400, 'soort is overzicht, zoek, tegenpartij of factuur');
   const perEnt = new Map();   // betalingVan kijkt alleen binnen de entiteit: één keer groeperen (diffreview wv944 #1)
   for (const t of inv.txs) { if (!perEnt.has(t.entiteit)) perEnt.set(t.entiteit, []); perEnt.get(t.entiteit).push(t); }
-  for (const f of inv.facturen) f.betaling = V.betalingVan(f, perEnt.get(f.entiteit) || [], { koppelingen: f.koppelingen, uitgesloten: f.uitgesloten });
+  for (const f of inv.facturen) f.betaling = V.betalingVan(f, perEnt.get(f.entiteit) || [], { koppelingen: f.koppelingen, uitgesloten: f.uitgesloten, gekoppeldAan: inv.gekoppeldAan });
   const dekking = inv.start ? [{ van: inv.start, tot: null }] : [];
   if (d && d.dekking_fv2 === true) {
     const fv = inv.facturen.filter((f) => f.herkomst === 'fv2' && f.factuurdatum).map((f) => f.factuurdatum).sort();
@@ -3326,4 +3372,4 @@ function mailStappen(fdb, max) {
     .map((x) => ({ gmail_id: String(x.gmail_id), stap: Number(x.rang) >= 2 ? 'is_betaald' : 'in_sepa' }));
 }
 
-module.exports = { eerdereBetalingen, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek, ZONDER_FACTUUR };
+module.exports = { eerdereBetalingen, ibanHistorie, ibanHerbereken, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek, ZONDER_FACTUUR };

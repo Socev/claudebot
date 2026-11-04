@@ -28,7 +28,7 @@ const BUS_PAD = '01_Ontwikkeling/Ideeënbus David - vibecoden.md';
 const GENRE = 'uit AIX';
 const CATALOGUS = '01_Ontwikkeling/Ideeënbeurs - catalogus.md';
 const AIX_URL = 'https://aix.socev.dev';
-const BEVESTIGING_PLAATSEN = 'knop-ja-vers-kaart';   // server.js appKnopBevestiging: Ja op een Voor jou-kaart, verse vingerafdruk, niet van een vaste plek
+const BEVESTIGING_PLAATSEN = 'knop-ja-vers-kaart';   // server.js appKnopBevestiging: Ja op een Voor jou-kaart, verse vingerafdruk (sinds wv2356 ook van een vaste plek)
 const GRENS = { cache_ms: 30000, catalogus_bytes: 400000, bundel_max: 30, recent_dagen: 30, tips_week: 5, vragen_week: 10, antwoord: 800, plaatje_bytes: 2 * 1024 * 1024 };
 let Filter = null;
 try { Filter = require('./ideeen-filter.js'); } catch (e) { Filter = null; }   // ontbreekt hij (terugrol), dan geen catalogus en geen plaatsen

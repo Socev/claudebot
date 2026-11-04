@@ -922,3 +922,28 @@ test('wv1326: zonder Uitzoeken (Klopt) schuift de band mee — volgende maand he
   const b = routes.app(t.fdb, { methode: 'GET', pad: '/app/facturen/bank', d: {}, rol: t.eig, primair: true, nu: NU });
   assert.ok(b.j.geleerd_regels.some((g) => /dat klopt/.test(g.tekst)), JSON.stringify(b.j.geleerd_regels));
 });
+
+test('wv2356 betalingVan: betaling vóór de factuurdatum of al van een andere factuur telt niet; hooguit "eerder"', () => {
+  const iban = maakIban('NL', 'TEST', '0000002356');
+  const t = (id, datum, bedrag) => ({ id, entiteit: 'kostenmaatschap', boekdatum: datum, bedrag_centen: -bedrag, tegenpartij_naam: 'Schoonmaak Proef', tegenpartij_iban: iban, transactietype: 'overboeking' });
+  const tx = [t('a1', '2026-10-08', 12345), t('a2', '2026-10-08', 23456), t('a3', '2026-11-12', 12345)];
+  const f = { id: 'f-nov', entiteit: 'kostenmaatschap', incl: 12345, iban, factuurdatum: '2026-11-02', leverancier_naam: 'Schoonmaak Proef' };
+  // oktober (vóór de factuurdatum, zelfde bedrag) telt niet; de betaling van 12-11 wel
+  const b = V.betalingVan(f, tx);
+  assert.equal(b.betaald, true); assert.equal(b.wanneer, '2026-11-12'); assert.deepEqual(b.transacties, ['a3']);
+  // zonder de betaling ná de factuurdatum: niet betaald, met de eerdere betaling erbij
+  const b2 = V.betalingVan(f, tx.slice(0, 2));
+  assert.equal(b2.betaald, false); assert.deepEqual(b2.eerder, { wanneer: '2026-10-08', bedrag_centen: 12345 });
+  // ook naam + bedrag (stap 3) niet vóór de factuurdatum
+  assert.equal(V.betalingVan(Object.assign({}, f, { iban: null }), tx.slice(0, 2)).betaald, false);
+  // al gekoppeld aan een andere factuur: telt niet; aan deze factuur zelf: wel
+  const gk = new Map([['a3', new Set(['f-okt'])]]);
+  assert.equal(V.betalingVan(f, tx, { gekoppeldAan: gk }).betaald, false);
+  assert.equal(V.betalingVan(f, tx, { gekoppeldAan: new Map([['a3', new Set(['f-nov'])]]) }).betaald, true);
+  // een kenmerk/factuurnummer in de betaling blijft direct bewijs, maar niet als die betaling al van een andere factuur is
+  const k = Object.assign({}, t('k1', '2026-11-01', 12345), { kenmerk: 'PROEF/2356/01' });
+  assert.equal(V.betalingVan(Object.assign({}, f, { nummer: 'PROEF/2356/01' }), [k]).betaald, true);
+  assert.equal(V.betalingVan(Object.assign({}, f, { nummer: 'PROEF/2356/01' }), [k], { gekoppeldAan: new Map([['k1', new Set(['f-okt'])]]) }).betaald, false);
+  // gekoppeld in Facturen blijft vast, ook vóór de factuurdatum
+  assert.equal(V.betalingVan(f, tx, { koppelingen: ['a1'] }).zekerheid, 'vast');
+});

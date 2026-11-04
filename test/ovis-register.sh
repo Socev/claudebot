@@ -508,10 +508,11 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     // de haak in server.js (Fable #1): naStart start de RPC, de staart wacht op de echte uitkomst; herkansing bij een netwerkfout
     const b2 = src.indexOf('// ── wv1253: kaarten in Overzicht'), e2 = src.indexOf('// ── einde OVIS-register ──');
     const hk = { rpc: [], fout: 0, berichten: [] };
-    const fn2 = new Function('OVIS_MOD', 'appSbRpc', 'berichtIntern', 'schrijfLog', 'nu', 'velden', 'logError', 'ovisStaatZet', 'ovisStaatLees', 'ovis', 'appStaat', 'appVjFnv',
+    const fn2 = new Function('OVIS_MOD', 'appSbRpc', 'berichtIntern', 'schrijfLog', 'nu', 'velden', 'logError', 'ovisStaatZet', 'ovisStaatLees', 'ovis', 'appStaat', 'appVjFnv', 'appVastJaDicht',
       src.slice(b2, e2) + '\nreturn { ovisKnopHaak, ovisKaartHerkomst, ovisActiveerPoging };');
     const H = fn2(R, async (f, body) => { hk.rpc.push([f, body]); if (hk.fout-- > 0) throw new Error('fetch failed'); return { ok: true, status: body.p.keuze, actief: 2, vervallen: 0, gezet: 0, overgeslagen: [], eruit: body.p.eruit }; },
-      async (d) => { hk.berichten.push(d); return { status: 200 }; }, () => {}, () => 'nu', (o) => JSON.stringify(o), () => {}, () => {}, () => ({}), {}, {}, () => 'abcd1234');
+      async (d) => { hk.berichten.push(d); return { status: 200 }; }, () => {}, () => 'nu', (o) => JSON.stringify(o), () => {}, () => {}, () => ({}), {}, {}, () => 'abcd1234',
+      new Function(src.match(/^const APP_VAST_JA_DICHT = (?:true|false);$/m)[0] + '\n' + /\nfunction appVastJaDicht\(a\) \{[^\n]*\}\n/.exec(src)[0] + '\nreturn appVastJaDicht;')());   // wv2356
     const kaartP = { sleutel: 'intake-handvat-2026-44', titel: 't', herkomst: { module: 'intake', ovis: { kaart: 'intake-handvat-2026-44', soort: 'bundel', regels: [{ nr: 1 }, { nr: 2 }, { nr: 3 }] } } };
     toets('7 haak herkent alleen een echte intake-kaart', H.ovisKaartHerkomst(kaartP) && !H.ovisKaartHerkomst(Object.assign({}, kaartP, { sleutel: 'intake-handvat-2026-45' })) && !H.ovisKaartHerkomst({ sleutel: 'pot-vrijgave-1', herkomst: { module: 'intake', ovis: { kaart: 'pot-vrijgave-1' } } }));
     let h = H.ovisKnopHaak(kaartP, 'zonder 2');

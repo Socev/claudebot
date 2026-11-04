@@ -1013,6 +1013,38 @@ function valideer(f, ctx, opties) {
   return { controles: c, intern };
 }
 
+// wv2356 (David 4-11-2026: "Er staat dat er al eens naar deze entiteit is overgeboekt... dan is de IBAN al bekend lijkt mij?"): een IBAN
+// is ook bekend als een eigen rekening er al eerder aan betaalde onder de naam van deze leverancier (bank_transactie, afschrijving), of als
+// een beslist archiefstuk (fv2) van deze leverancier dat IBAN had. ctx.ibanHistorie(iban) → [{ bron: 'bankhistorie'|'archief', naam, aantal,
+// laatste }]. Streng op naam (gelijk, of de kortste naam als aaneengesloten hele woorden in de langste, ≥ 6 tekens): anders zou een factuur
+// met naam X en het rekeningnummer van Y (een medewerker, een andere leverancier) het nabellen omzeilen. Een echt nieuw IBAN blijft rood.
+const HISTORIE_NAAM_MIN = 6;
+function naamZelfde(a, b) {
+  const x = normNaam(a).split(' ').filter(Boolean), y = normNaam(b).split(' ').filter(Boolean);
+  if (!x.length || !y.length) return false;
+  if (x.join(' ') === y.join(' ')) return true;
+  const [k, l] = x.length <= y.length ? [x, y] : [y, x];
+  if (k.join('').length < HISTORIE_NAAM_MIN || k.length === l.length) return false;
+  for (let i = 0; i + k.length <= l.length; i++) if (k.every((w, j) => l[i + j] === w)) return true;
+  return false;
+}
+function ibanHistorieBekend(iban, leverancier, ctx) {
+  if (!leverancier || !leverancier.naam || !ctx || typeof ctx.ibanHistorie !== 'function') return null;
+  const namen = [leverancier.naam].concat(Array.isArray(leverancier.namen) ? leverancier.namen : []).filter(Boolean);
+  let lijst;
+  try { lijst = ctx.ibanHistorie(iban) || []; } catch (e) { return null; }   // fail-closed: geen historie = niet bekend
+  const passend = lijst.filter((h) => h && (h.bron === 'bankhistorie' || h.bron === 'archief') && Number(h.aantal) > 0 && namen.some((n) => naamZelfde(n, h.naam)));
+  if (!passend.length) return null;
+  const som = (b) => passend.filter((h) => h.bron === b).reduce((t, h) => t + Number(h.aantal), 0);
+  const laatste = (b) => passend.filter((h) => h.bron === b).map((h) => String(h.laatste || '')).sort().pop() || null;
+  const bank = som('bankhistorie'), archief = som('archief');
+  return { bron: bank ? 'bankhistorie' : 'archief', bank, bank_laatste: laatste('bankhistorie'), archief, archief_laatste: laatste('archief') };
+}
+function historieTekst(h) {
+  return 'IBAN bekend: ' + [h.bank ? 'een eigen rekening betaalde er ' + h.bank + '× aan (laatst ' + h.bank_laatste + ')' : '',
+    h.archief ? h.archief + ' beslist' + (h.archief === 1 ? ' archiefstuk' : 'e archiefstukken') + ' van deze leverancier met dit IBAN' : ''].filter(Boolean).join('; ');
+}
+
 // Nieuw of afwijkend IBAN → iban_nieuw; Bevestigen geblokkeerd tot Nagebeld. Getoetst wordt ELK geldig vreemd betaal-IBAN in het stuk,
 // niet alleen het gekozen (een tweede IBAN onderaan is de klassieke fraudezin). Een eigen rekening (intern) is bekend. Wijzigt een mens
 // het IBAN in Beoordelen, dan roept F2 ibanPoort opnieuw aan.
@@ -1020,10 +1052,17 @@ function ibanPoort(f, leverancier, ctx) {
   const eigen = eigenIbans(ctx), bekend = new Set(((leverancier && leverancier.ibans) || []).map(ibanNorm));
   const alle = [...new Set([f.iban].concat(f.ibans_betaal || []).map(ibanNorm).filter(Boolean))];
   const vreemd = alle.filter((i) => ibanMod97(i) && !eigen.has(i));
-  const onbekend = vreemd.filter((i) => !bekend.has(i));
-  if (!onbekend.length) return { iban_nieuw: false, onbekend, reden: !f.iban ? 'geen IBAN' : !ibanMod97(f.iban) ? 'IBAN ongeldig (zie controles)' : eigen.has(ibanNorm(f.iban)) ? 'eigen rekening' : 'IBAN bekend bij deze leverancier' };
+  const historie = {};
+  const onbekend = vreemd.filter((i) => {
+    if (bekend.has(i)) return false;
+    const h = ibanHistorieBekend(i, leverancier, ctx);   // wv2356
+    if (h) { historie[i] = h; return false; }
+    return true;
+  });
+  const hk = f.iban && historie[ibanNorm(f.iban)];
+  if (!onbekend.length) return { iban_nieuw: false, onbekend, historie, reden: !f.iban ? 'geen IBAN' : !ibanMod97(f.iban) ? 'IBAN ongeldig (zie controles)' : eigen.has(ibanNorm(f.iban)) ? 'eigen rekening' : hk ? historieTekst(hk) : 'IBAN bekend bij deze leverancier' };
   const meer = vreemd.length > 1 ? ' (de factuur noemt meer dan één IBAN)' : '';
-  return { iban_nieuw: true, onbekend, reden: (leverancier ? 'Nieuw IBAN voor een bekende leverancier: eerst nabellen' : 'Nieuwe leverancier met een nog niet nagebeld IBAN: eerst nabellen') + meer };
+  return { iban_nieuw: true, onbekend, historie, reden: (leverancier ? 'Nieuw IBAN voor een bekende leverancier: eerst nabellen' : 'Nieuwe leverancier met een nog niet nagebeld IBAN: eerst nabellen') + meer };
 }
 // Dekt het nabellen de IBAN's die nu op de factuur staan? Nodig = elk onbekend IBAN plus het gekozen IBAN; met `poort` ({ leverancier, ctx })
 // rekent hij de IBAN-poort zelf opnieuw uit in plaats van op opgeslagen vlaggen te vertrouwen (diffreview wv797 #10 en natoets #6).
@@ -1417,7 +1456,7 @@ module.exports = {
   leesXml, leesUbl, leesPdfTekst,
   // besliskader per stap (§ 4.5)
   stapDubbelBestand, stapDubbelInhoud, factuurSleutel, stapSoort, groepeerBericht, stapPatientkenmerk, stapVelden, herkenLeverancier, compactNaam, naamVerwant, ibanNaamPast, VERZAMEL_RE,
-  stapEntiteit, stapGeenFactuur, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, gebruikelijkBedrag, GEBRUIKELIJK_MIN_EERDER, ibanPoort, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
+  stapEntiteit, stapGeenFactuur, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, gebruikelijkBedrag, GEBRUIKELIJK_MIN_EERDER, ibanPoort, naamZelfde, ibanHistorieBekend, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
   // leren
   leerUitBevestiging,
   // overgangen (§ 4.4)
