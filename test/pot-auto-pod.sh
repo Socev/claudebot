@@ -92,9 +92,9 @@ vrijgave = { id: 7, kaart_sleutel: 'pot-vrijgave-7', kaart_tekst_hash: V.kaartHa
     vm.createContext(c);
     vm.runInContext(['let potVzRegCache = null;', knip('potVzAdresbron'), knip('potVzEerste'), knip('potVzRegisterAdressen')].join('\n') + '\nthis.bron = potVzAdresbron; this.eerste = potVzEerste; this.regAdr = potVzRegisterAdressen; this.leeg = function () { potVzRegCache = null; };', c);
     const b = (w) => { if (w === null) delete bestanden['/pv/adresbron']; else bestanden['/pv/adresbron'] = w; return [c.bron(), c.eerste()]; };
-    toets('adresbron: zonder bestand dossier en geen vastzetkaarten', JSON.stringify(b(null)) === '["dossier",null]');
-    toets('adresbron: proef → proef/proef; kaarten → kaarten/alle; register (met toelichting) → register/alle; onzin → dossier/null',
-      JSON.stringify(b('proef\n')) === '["proef","proef"]' && JSON.stringify(b('kaarten')) === '["kaarten","alle"]' && JSON.stringify(b('register  # sinds 3-11, Davids Ja')) === '["register","alle"]' && JSON.stringify(b('Register')) === '["dossier",null]');
+    toets('adresbron (wv2256): zonder bestand register en vastzetkaarten voor alle', JSON.stringify(b(null)) === '["register","alle"]');
+    toets('adresbron: proef → proef/proef; kaarten → kaarten/alle; register (met toelichting) → register/alle; onzin → register/alle (wv2256)',
+      JSON.stringify(b('proef\n')) === '["proef","proef"]' && JSON.stringify(b('kaarten')) === '["kaarten","alle"]' && JSON.stringify(b('register  # sinds 3-11, Davids Ja')) === '["register","alle"]' && JSON.stringify(b('Register')) === '["register","alle"]' && JSON.stringify(b('dossier')) === '["dossier",null]');
     regFout = true; let gooit = false;
     try { await c.regAdr(); } catch (e) { gooit = true; }
     toets('registerlezer: register weg → gooit (geen leeg antwoord)', gooit);

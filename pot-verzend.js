@@ -9,8 +9,9 @@
  *
  * HOE. Zijn POT-app (werk.socev.dev/pot, Pages Function) zet per nota een rij in D1 `fin.nota_verzending` (status wacht, PDF uit de
  * browser, onderwerp en tekst door de server bepaald, niet_voor = nu of de gekozen dag 07:00). Deze ronde (elke minuut, alleen de
- * primaire pod, schakelaar aan) pakt wachtende rijen op, zoekt de ontvanger op in de Second Brain (frontmatter `fin_praktijk` +
- * `facturen_aan` op de praktijkpagina; sinds wv1763 per schakelaar het vastgezette factuuradres uit het OVIS-register), controleert de PDF (sha256 + pdftotext: nummer, bedrag en praktijknaam moeten erin staan) en
+ * primaire pod, schakelaar aan) pakt wachtende rijen op, zoekt de ontvanger op in de Second Brain (sinds wv2255 het vastgezette
+ * factuuradres uit het OVIS-register; frontmatter `fin_praktijk` + `facturen_aan` op de praktijkpagina alleen nog als terugrolweg, stand
+ * dossier/proef/kaarten — de velden zijn sinds wv2256 van de pagina's gehaald), controleert de PDF (sha256 + pdftotext: nummer, bedrag en praktijknaam moeten erin staan) en
  * zet per nota één concept klaar via het bestaande mailluik. Versturen doet David zelf in Gmail; deze module kan dat niet.
  * Toestanden: wacht → bezig → concept → verzonden, of wacht_op_adres / onzeker / fout / concept_weg. Fable-review vooraf (23-10):
  * per nota (niet per ontvanger), klok in D1, bezig > 10 min = onzeker en zelfherstel via Gmail `filename:<nummer>`, voorcontrole vóór
@@ -89,6 +90,8 @@ function ontvangers(paginas) {
 // (stampagina + vastgezet adres, ovis-register.js potFactuur) in plaats van facturen_aan op de dossierpagina. Overgang per schakelaar
 // (server.js leest /opt/data/pot-verzend/adresbron): dossier = zoals tot nu; proef en kaarten = proefpraktijken P9x uit het register, de
 // rest nog van de dossierpagina; register = alles uit het register. Een praktijk op het register valt nooit terug op de dossierpagina.
+// wv2256 (fase 2d): stand register sinds 4-11-2026 en facturen_aan/facturen_cc zijn van de dossierpagina's gehaald; ontvangers() en de
+// dossierstanden blijven alleen als terugrolweg (dan eerst de velden terugzetten, anders wacht elke nota op een adres).
 const ADRESBRONNEN = ['dossier', 'proef', 'kaarten', 'register'];
 const bronVan = (bron, px) => (bron === 'register' || ((bron === 'proef' || bron === 'kaarten') && /^P9\d$/.test(String(px))) ? 'register' : 'dossier');
 // → { bron, per, problemen, onleesbaar(px), bronVan(px) }; gooit nooit (wat niet te lezen is staat in uit.fouten en in onleesbaar)

@@ -326,6 +326,7 @@ const ronde = (o) => V.ronde(io, o);
     io.vault = vaultOud;
     // KAN 6: adreskaart krijgt een andere sleutel als de rijen via het register lopen
     const kr1 = V.kaartAdres([{ id: 1, praktijk_id: 'P01', praktijk: 'KG', reden: 'x', opmerking: 'geen_adres', deadline: '2026-11-02' }], 'x', 'dossier'), kr2 = V.kaartAdres([{ id: 1, praktijk_id: 'P01', praktijk: 'KG', reden: 'x', opmerking: 'geen_adres', deadline: '2026-11-02' }], 'x', 'register');
+    toets('15 wv2256: adreskaart bij register noemt de dossierpagina en facturen_aan niet', !/facturen_aan|praktijkpagina|dossier/i.test(JSON.stringify(kr2)), kr2);
     toets('15 adreskaart: andere sleutel na een wissel naar het register, vastzetstap alleen dan', kr1.sleutel !== kr2.sleutel && !/vingerafdruk/.test(kr1.stappen.join(' ')) && /vingerafdruk/.test(kr2.stappen.join(' ')), [kr1.sleutel, kr2.sleutel]);
     // j. onbekende schakelaarwaarde = dossier
     const ev = await V.adressen(io, 'onzin', { fouten: [] });

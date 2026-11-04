@@ -17379,9 +17379,8 @@ const ovis = (function () {
   try {
     return OVIS_MOD.maak({ vault: VAULT, sbRpc: appSbRpc, lees: function (p) { return VV().lees(p, 'utf8'); },
       schrijf: function () { throw new Error('overdag schrijft de pod geen entiteitpagina'); }, log: function (r) { schrijfLog(nu() + ' ' + r); },
-      // wv981: plek 4 (POT-factuuradres) — D1 fin alleen lezen (Fable #4) en de dossierpagina's met de parser van de verzender zelf
-      pot: { d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); },
-        dossier: function () { if (!POT_VZ_MOD) throw new Error('pot-verzend ontbreekt'); return POT_VZ_MOD.ontvangers(potVzVault()); } },
+      // wv981: plek 4 (POT-factuuradres) — D1 fin alleen lezen (Fable #4); de dossierpagina's doen sinds wv2256 (fase 2d) niet meer mee
+      pot: { d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); } },
       // wv1009: plek 5 (Voor jou ⇄ Open vragen aan David) — alleen lezen; de Voor jou-ronde schrijft met ovis-run.js voorjou --schrijf
       vj: { punten: function () { return appSbRpc('mk_voor_jou_lijst', { p_alles: true }); }, register: function () { return VV().lees(path.join(VAULT, '00_Systeem', 'Open vragen aan David.md'), 'utf8'); },
         wv: function () { return appSbRpc('mk_werkvoorraad_stand', {}); } },
@@ -22623,7 +22622,8 @@ async function potDatahubRonde(o) {
 // pot-verzend.js (puur). Davids POT-app (werk.socev.dev/pot) zet per nota een rij in D1 fin.nota_verzending; deze tik (elke minuut,
 // alleen de primaire kant, schakelaar <POT_VZ_DIR>/aan) haalt ze op en zet per nota één Gmail-concept klaar via het bestaande
 // mailluik. Versturen doet David. Geen nieuwe ingang en geen nieuwe sleutel: D1 (CLOUDFLARE_API_TOKEN), het lees-luik en het mailluik
-// bestonden al. Ontvangers alleen uit de praktijkpagina's in de vault (frontmatter facturen_aan), nooit uit D1 of de browser.
+// bestonden al. Ontvangers alleen uit de Second Brain, nooit uit D1 of de browser: sinds wv2255 (adresbron register) het vastgezette
+// factuuradres uit het OVIS-register; de praktijkpagina's (frontmatter facturen_aan) alleen nog bij een terugrol naar dossier/proef/kaarten.
 // De D1-claim (status wacht → bezig in één UPDATE … RETURNING) is het enige slot: ook twee pods tegelijk maken geen dubbel concept.
 const POT_VZ_DIR = process.env.POT_VZ_DIR || '/opt/data/pot-verzend';
 const POT_VZ_MOD = (function () { const p = path.join(__dirname, 'pot-verzend.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('pot-verzend', e); return null; } })();
@@ -22643,11 +22643,13 @@ function potVzProef() {
 // wv1763 (OVIS plek 4 fase 2): waar het factuuradres vandaan komt. <POT_VZ_DIR>/adresbron, eerste woord: dossier (zonder bestand, zoals tot
 // nu: facturen_aan op de dossierpagina), proef (P9x uit het register), kaarten (idem + vastzetkaarten voor alle praktijken), register
 // (alle praktijken uit het register; de dossierpagina wordt niet meer gelezen). Alleen de machinekamer zet dit bestand.
+// wv2256 (fase 2d, 4-11-2026): stand register, en zonder (geldig) bestand ook register; facturen_aan/facturen_cc zijn van de dossierpagina's gehaald. Een terugrol naar dossier/proef/
+// kaarten werkt alleen als die velden eerst teruggezet worden (git-historie van de vault, of de lijst in mk-scripts/wv2256).
 function potVzAdresbron() {
   try {
     const w = fs.readFileSync(path.join(POT_VZ_DIR, 'adresbron'), 'utf8').trim().split(/\s+/)[0];
-    return POT_VZ_MOD && Array.isArray(POT_VZ_MOD.ADRESBRONNEN) && POT_VZ_MOD.ADRESBRONNEN.indexOf(w) >= 0 ? w : 'dossier';
-  } catch (e) { return 'dossier'; }
+    return POT_VZ_MOD && Array.isArray(POT_VZ_MOD.ADRESBRONNEN) && POT_VZ_MOD.ADRESBRONNEN.indexOf(w) >= 0 ? w : 'register';
+  } catch (e) { return 'register'; }   // wv2256 (review ZOU 1): zonder of met een onleesbaar bestand register — de dossiervelden zijn weg
 }
 // vastzetkaarten voor het eerste factuuradres (ovis-register.js kaartenKritiek): proef → alleen P9x, kaarten/register → alle POT-praktijken
 function potVzEerste() { const b = potVzAdresbron(); return b === 'proef' ? 'proef' : b === 'kaarten' || b === 'register' ? 'alle' : null; }

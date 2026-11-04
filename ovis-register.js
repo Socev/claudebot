@@ -690,9 +690,10 @@ function checks(paginas, reg, compileerFouten, pot, bank, personen, fin) {
 // ── wv981: koppelregel plek 4 (POT in D1 fin; architectuur § 4 rij 4; ontwerp + Fable vooraf mk-scripts/wv981/ontwerp.md) ──
 // De stampagina van de ontvangende praktijk is de bron van het factuuradres (contact.factuuradres, kritiek veld) en noemt haar POT-praktijk
 // met ovis.db "cloudflare:d1-fin/praktijk#Pxx". De Bibliothecaris legt dat naast wat de POT-verzender gebruikt: het adres dat David in de
-// POT-app bevestigde (praktijk.email), de dossierpagina die pot-verzend.js nu leest (facturen_aan, zelfde parser) en elke open nota met
-// een adres. Alleen lezen: dit raakt de verzender niet, en niets hier maakt een adres actief of bevestigd. Een kant die niet te meten is,
+// POT-app bevestigde (praktijk.email) en elke open nota met een adres. Alleen lezen: dit raakt de verzender niet, en niets hier maakt een adres actief of bevestigd. Een kant die niet te meten is,
 // is "niet gemeten", nooit een verschil (Fable #1). P9x zijn proefpraktijken en tellen nergens mee.
+// wv2256 (fase 2d): de dossierpagina (facturen_aan/facturen_cc) doet niet meer mee. De verzender leest sinds wv2255 (adresbron register)
+// alleen het register, en de velden zijn van de dossierpagina's gehaald; stamkaart ⇄ POT-app ⇄ open nota blijft.
 const POT_SLEUTEL_RE = /^cloudflare:d1-fin\/praktijk#(P\d{2})$/, POT_PROEF_RE = /^P9\d$/;
 const POT_MAIL_RE = /^[a-z0-9._%+'-]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/;   // = pot-verzend ADRES_RE (wv1763)
 const POT_OPEN = ['wacht_op_adres', 'concept', 'auto_gevraagd', 'auto_vrij', 'verzenden', 'onzeker'];
@@ -701,17 +702,15 @@ const POT_SQL = [
   { sql: 'select id, naam, naam_brief, email from praktijk order by id', params: [] },
   { sql: 'select id, nummer, praktijk_id, status, aan, cc from nota_verzending where status in (' + POT_OPEN.map(function (x) { return "'" + x + "'"; }).join(',') + ') order by id', params: [] },
 ];
-// io: { d1(batch) → [{ results }], dossier() → { per, problemen } (pot-verzend.ontvangers over de dossierpagina's) } → meting of { fout }
+// io: { d1(batch) → [{ results }] } → meting of { fout } (een dossier()-lezer van vóór wv2256 wordt genegeerd)
 async function potMeting(io) {
   try {
-    if (!io || typeof io.d1 !== 'function' || typeof io.dossier !== 'function') return { fout: 'geen POT-lezer' };
+    if (!io || typeof io.d1 !== 'function') return { fout: 'geen POT-lezer' };
     if (POT_SQL.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return { fout: 'alleen lezen' };
     const r = await io.d1(POT_SQL.map(function (q) { return { sql: q.sql, params: q.params.slice() }; }));
     if (!Array.isArray(r) || r.length !== 2 || !r.every(function (x) { return x && Array.isArray(x.results); })) return { fout: 'D1 gaf geen resultaat' };
     if (!r[0].results.length) return { fout: 'D1 gaf geen praktijken' };   // diffreview #2: leeg is niet gemeten (anders alles BB1 en alles "opgelost")
-    const d = io.dossier();
-    if (!d || typeof d.per !== 'object' || typeof d.problemen !== 'object') return { fout: 'dossierpagina\'s niet te lezen' };
-    return { praktijken: r[0].results, open: r[1].results, dossier: d };
+    return { praktijken: r[0].results, open: r[1].results };
   } catch (e) { return { fout: String(e && e.message || e).replace(/\d{6,}/g, '#').slice(0, 120) }; }
 }
 // zelfde normalisatie als pot-verzend.adresNorm (kleine letters, gesplitst op komma/puntkomma/spatie, volgorde blijft), zodat de
@@ -720,7 +719,7 @@ function potAdressen(x) {
   return (Array.isArray(x) ? x : [x]).join(',').split(/[,;\s]+/).map(function (a) { return a.trim().toLowerCase(); }).filter(Boolean);
 }
 function potGelijk(a, b) { return a.join(',') === b.join(','); }
-// → { gemeten, verschillen: [{ knoop, naam, px, stam, app, dossier, nota: [{ nummer, status, aan }], wacht_op_adres }] } (adressen alleen
+// → { gemeten, verschillen: [{ knoop, naam, px, stam, app, nota: [{ nummer, status, aan }], wacht_op_adres }] } (adressen alleen
 // hier, voor de kaart; nooit in bevinding of box, Fable wv979 #10)
 function potChecks(anker, pot, bev, tel) {
   const claims = {};
@@ -739,22 +738,18 @@ function potChecks(anker, pot, bev, tel) {
     tel.pot++;
     const stam = potAdressen(p.contact.filter(function (c) { return c.veld === 'factuuradres'; }).map(function (c) { return c.waarde; }));
     const app = potAdressen(prak[px].email || '');
-    const dd = pot.dossier.per[px], dp = pot.dossier.problemen[px];
-    const dossier = dd ? potAdressen(dd.aan) : [];
     const nota = (pot.open || []).filter(function (r) { return r.praktijk_id === px; });
     const kanten = [];
     if (!potGelijk(stam, app)) kanten.push('het adres dat David in de POT-app bevestigde');
-    if (dp && /onleesbaar|twee pagina/.test(dp)) kanten.push('de dossierpagina (' + (/twee/.test(dp) ? 'twee pagina\'s geven een ander adres' : 'adres onleesbaar') + ')');
-    else if (!potGelijk(stam, dossier)) kanten.push('de dossierpagina die de verzender leest');
     const notaAnders = nota.filter(function (r) { return r.aan && !potGelijk(stam, potAdressen(r.aan)); });   // een rij zonder adres (geen_adres) vergelijkt niets
     if (notaAnders.length) kanten.push(notaAnders.length + ' open nota(\'s) (' + Array.from(new Set(notaAnders.map(function (r) { return r.status; }))).join(', ') + ')');
-    const cc = (dd && dd.cc && dd.cc.length) || nota.some(function (r) { return potAdressen(r.cc || '').length; });
-    if (cc) bev('BB3', id + '-pot-cc-' + px, 'cc op de factuur van ' + px + ' staat nog niet op de stampagina', 'de dossierpagina of een open nota gebruikt een cc; de stampagina kent (nog) geen cc-veld. Voorstel: laten staan tot fase 2 (verzender leest de stampagina), dan een cc-veld toevoegen.');
+    const cc = nota.some(function (r) { return potAdressen(r.cc || '').length; });
+    if (cc) bev('BB3', id + '-pot-cc-' + px, 'cc op een open nota van ' + px + ' staat niet op de stampagina', 'een open nota gebruikt een cc; de stampagina en het register kennen geen cc-veld (bewust, wv1763 besluit 2). Voorstel: David zegt of die cc moet blijven; dan komt er een cc-veld.');
     if (!kanten.length) return;
     tel.pot_verschil++;
     bev('BB3', id + '-pot-factuuradres-' + px, 'factuuradres van ' + (p.naam || id) + ' (' + px + ') verschilt tussen stampagina en POT-verzender (kritiek)',
-      p.pad + ': stampagina (bron, veldkaart plek 4) ≠ ' + kanten.join('; ') + (stam.length ? '' : '; de stampagina heeft geen factuuradres') + '. Adressen niet in deze melding. Voorstel: David zegt welk adres klopt; Socev zet de stampagina en de dossierpagina gelijk; de POT-app vraagt bij de volgende nota zelf om bevestiging.', 'serious');
-    uit.verschillen.push({ knoop: id, naam: p.naam || id, px: px, stam: stam, app: app, dossier: dd ? dossier : null, dossier_probleem: dp || null,
+      p.pad + ': stampagina (bron, veldkaart plek 4) ≠ ' + kanten.join('; ') + (stam.length ? '' : '; de stampagina heeft geen factuuradres') + '. Adressen niet in deze melding. Voorstel: David zegt welk adres klopt; Socev zet de stampagina gelijk (David zet het daarna met zijn vingerafdruk vast); de POT-app vraagt bij de volgende nota zelf om bevestiging.', 'serious');
+    uit.verschillen.push({ knoop: id, naam: p.naam || id, px: px, stam: stam, app: app,
       nota: notaAnders.map(function (r) { return { nummer: r.nummer, status: r.status, aan: potAdressen(r.aan) }; }),
       wacht_op_adres: nota.some(function (r) { return r.status === 'wacht_op_adres'; }) });
   });
@@ -782,13 +777,13 @@ function kaartPot(meting, stand, nuKort) {
     const vv = per[id];
     if (vv.some(function (v) { return v.wacht_op_adres; })) { overgenomen.add(slugKort(id)); return; }   // pot-verzend heeft al een adreskaart (Fable #2)
     // diffreview #3: de nota's niet in de sleutel (een statusovergang is geen nieuwe situatie)
-    const sleutel = 'ovis-pot-adres-' + slugKort(id) + '-' + fnv6(JSON.stringify(vv.map(function (v) { return [v.px, v.stam, v.app, v.dossier, v.dossier_probleem]; })));
+    const sleutel = 'ovis-pot-adres-' + slugKort(id) + '-' + fnv6(JSON.stringify(vv.map(function (v) { return [v.px, v.stam, v.app]; })));
     nodig.add(sleutel);
     if (stand[sleutel]) return;   // staat er al (open), of David zette hem dicht: niet opnieuw
-    const naam = kort(vv[0].naam, 50), v0 = vv[0], pxs = vv.map(function (v) { return v.px; });
-    // houdt de verzender deze praktijk nu al tegen? (pot-verzend eist praktijkpagina == POT-app == adres van de nota)
-    const geblokkeerd = vv.some(function (v) { return !v.dossier || !v.app.length || !potGelijk(v.dossier, v.app); });
-    const alleenNota = !geblokkeerd && vv.every(function (v) { return potGelijk(v.stam, v.app); });   // stamkaart = pagina = POT-app; alleen een open nota wijkt af
+    const naam = kort(vv[0].naam, 50), pxs = vv.map(function (v) { return v.px; });
+    // houdt de verzender deze praktijk nu al tegen? (pot-verzend eist vastgezet adres == stamkaart == POT-app == adres van de nota; wv2256)
+    // Anders dan dat wijkt alleen een open nota af (stamkaart = POT-app).
+    const geblokkeerd = vv.some(function (v) { return !v.stam.length || !v.app.length || !potGelijk(v.stam, v.app); });
     const stappen = ['Zeg tegen Socev welk adres klopt, bijvoorbeeld: "factuuradres ' + kort(naam, 40) + ' is …". Socev zet de Second Brain dan op één adres.'];
     if (vv.some(function (v) { return !potGelijk(v.stam, v.app); })) stappen.push('Het adres in de POT-app hoef je nu niet aan te passen: bij de volgende nota vraagt de POT-app je het adres te bevestigen.');
     vv.forEach(function (v) { v.nota.forEach(function (n) {
@@ -797,14 +792,13 @@ function kaartPot(meting, stand, nuKort) {
       else stappen.push('Nota ' + n.nummer + ' (' + n.status + ') heeft ' + potLijst(n.aan) + '; kijk in de POT-app of dat klopt.');
     }); });
     stappen.push('Deze kaart gaat de ochtend nadat het overal gelijk is vanzelf dicht.');
-    const meting_ = vv.map(function (v) { return v.px + ': Second Brain ' + potLijst(v.stam) + '; POT-app ' + potLijst(v.app) + (v.dossier_probleem && !v.dossier ? '; praktijkpagina ' + kort(v.dossier_probleem, 60) : v.dossier && !potGelijk(v.dossier, v.stam) ? '; praktijkpagina ' + potLijst(v.dossier) : ''); }).join(' · ');
+    const meting_ = vv.map(function (v) { return v.px + ': Second Brain ' + potLijst(v.stam) + '; POT-app ' + potLijst(v.app); }).join(' · ');
     uit.zet.push({ sleutel: sleutel, soort: 'doen', volgorde: 22, waar: 'overal', prive: true, duur_min: 3,
       titel: kort(naam + ' — factuuradres gelijktrekken', KAART_TITEL),
       herkomst: { handmatig: 'bibliothecaris', soort: 'pot-adres', knoop: id, praktijken: pxs },
       waarom: kort('Het factuuradres van ' + naam + ' staat niet overal hetzelfde. Naar dat adres gaan de POT-nota\'s (SLOEL soms vanzelf). ' +
-        (geblokkeerd ? 'Zolang de praktijkpagina en de POT-app verschillen, zet Socev voor deze praktijk geen nota klaar en gaat er niets vanzelf.'
-          : alleenNota ? 'Een nota die al klaarstaat heeft nog een ander adres dan de Second Brain.'
-            : 'Nota\'s gaan nu nog naar ' + potLijst(v0.app) + ' (praktijkpagina en POT-app); de stamkaart in de Second Brain zegt iets anders.') + ' De Second Brain is de bron.', KAART_WAAROM),
+        (geblokkeerd ? 'Zolang de stamkaart in de Second Brain en de POT-app verschillen, zet Socev voor deze praktijk geen nota klaar en gaat er niets vanzelf.'
+          : 'Een nota die al klaarstaat heeft nog een ander adres dan de Second Brain.') + ' De Second Brain is de bron.', KAART_WAAROM),
       stappen: stappen.slice(0, KAART_STAPPEN).map(function (x) { return kort(x, 400); }),
       meting: kort(nuKort + ': ' + meting_, 300) });
   });
@@ -2546,7 +2540,7 @@ function maak(o) {
     const c = await compileer('afroep', { droog: !!opties.droog });   // diffreview #1: eerst bijwerken (alleen databank), fouten worden BB6
     const reg = await register(opties.sinds || new Date(nu() - 36 * 3600000).toISOString());
     const paginas = leesAlles();
-    const pot = o.pot ? await potMeting(o.pot) : null;   // wv981: plek 4 (alleen lezen); o.pot = { d1(batch), dossier() }
+    const pot = o.pot ? await potMeting(o.pot) : null;   // wv981: plek 4 (alleen lezen); o.pot = { d1(batch) } (dossier vervallen, wv2256)
     let bank = null;   // wv1010: plek 6 (alleen lezen); o.bank = bankLezer(pad)
     if (o.bank) { const lb = leesBank(); bank = Object.assign(lb, { meting: bankMeting(o.bank, bankVerwijzingen(lb)), nu: nu() }); }
     // wv1011: plek 7 — persoon-entities en de Google-contacten die een pagina noemt (alleen lezen). Niet te lezen → BB1-object/-google niet getoetst.

@@ -6,7 +6,7 @@
 # nep-databank (alleen gewijzigde pagina's; tweede pagina met hetzelfde id telt niet; nacht zonder grendel schrijft geen blok; blok
 # idempotent; pagina die tijdens de ronde verandert krijgt geen blok), Bibliothecaris BB1-BB8 met vaste gegevens (en BB5 niet bij
 # niet-dezelfde-als), opgelost/BB7-spoor blijft, afroep stempelt niet, droog schrijft niets, boxRij zonder contactwaarden.
-# wv981 (blok 8): plek 4 POT-factuuradres — vergelijking stampagina ⇄ POT-app/dossier/open nota, BB1/BB2/BB5, niet gemeten ≠ opgelost, kaart.
+# wv981 (blok 8): plek 4 POT-factuuradres — vergelijking stampagina ⇄ POT-app/open nota (dossier vervallen, wv2256), BB1/BB2/BB5, niet gemeten ≠ opgelost, kaart.
 # wv1010 (blok 10): plek 6 bank — rekeningpagina ⇄ bank (entiteit, hoofdrekening), Bankregels, blokken, niet gemeten ≠ opgelost, privacy, lezer.
 # wv1011 (blok 11): plek 7 personen — persoonspagina met ovis-blok en zegel, privégrens, alleen gekende soorten sturen (fase B hercompileert),
 #   geen blok op een persoonspagina, zegel kapot = niets sturen + BB6 (geen BB2), BB1-object, BB5 object/kenmerk, Google-telefoon, kaarten.
@@ -573,10 +573,10 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const reg = (ids) => ({ knopen: ids.map((id) => ({ id: 'org:' + id, soort: 'organisatie', naam: 'Praktijk ' + id, vault_pagina: pad(id), concept: true, laatst_door: 'compiler', bron_sha: pg(id, null, []).sha })), handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [] });
     const PR = [{ id: 'P01', naam: 'A1', email: 'factuur@a.test' }, { id: 'P02', naam: 'A2', email: 'factuur@a.test' }, { id: 'P03', naam: 'A3', email: 'factuur@a.test' },
       { id: 'P04', naam: 'B', email: 'Factuur@B.test' }, { id: 'P09', naam: 'C', email: null }, { id: 'P90', naam: 'Proef', email: 'proef@x.test' }];
-    const DOS = () => ({ per: { P01: { aan: ['factuur@a.test'], cc: [] }, P02: { aan: ['factuur@a.test'], cc: [] }, P03: { aan: ['factuur@a.test'], cc: [] }, P04: { aan: ['factuur@b.test'], cc: [] } },
-      problemen: { P09: 'op de pagina C staat nog geen factuuradres (veld facturen_aan)' } });
+    // wv2256: een dossierlezer van vóór fase 2d (oude server.js) mag nog meekomen en wordt genegeerd — ook als hij gooit
+    const DOS = () => { throw new Error('dossierpagina hoort niet meer gelezen te worden'); };
     const basis = () => [pg('a', 'factuur@a.test', ['P01', 'P02', 'P03']), pg('b', 'factuur@b.test', ['P04']), pg('c', null, ['P09'])];
-    const pot = (o) => Object.assign({ praktijken: JSON.parse(JSON.stringify(PR)), open: [], dossier: DOS() }, o || {});
+    const pot = (o) => Object.assign({ praktijken: JSON.parse(JSON.stringify(PR)), open: [] }, o || {});
     const C = (paginas, p) => R.checks(paginas, reg(['a', 'b', 'c', 'd']), [], p);
     const potB = (r) => r.bevindingen.filter((b) => /pot-/.test(b.bevinding_id));
     let r = C(basis(), pot());
@@ -593,25 +593,28 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     toets('8 POT-praktijk zonder stampagina: BB2 (P04), niet voor P90', potB(r).length === 1 && potB(r)[0].bevinding_id === 'BB2-pot-P04-geen-pagina', potB(r));
     r = C(basis().concat([pg('d', 'x@d.test', ['P07'])]), pot());
     toets('8 sleutel naar een onbekende praktijk: BB1', potB(r).some((b) => b.bevinding_id === 'BB1-org:d-pot-P07'), potB(r));
-    const pc = pot(); pc.dossier.per.P04.cc = ['boekhouding@b.test'];
+    const pc = pot({ open: [{ id: 7, nummer: 'SL-0007', praktijk_id: 'P04', status: 'concept', aan: 'factuur@b.test', cc: 'boekhouding@b.test' }] });
     r = C(basis(), pc);
-    toets('8 cc op de dossierpagina: waarschuwing, niet kritiek', potB(r).length === 1 && potB(r)[0].ernst === 'warning' && /pot-cc-P04/.test(potB(r)[0].bevinding_id), potB(r));
+    toets('8 cc op een open nota: waarschuwing, niet kritiek, geen dossierpagina in de tekst', potB(r).length === 1 && potB(r)[0].ernst === 'warning' && /pot-cc-P04/.test(potB(r)[0].bevinding_id) && !/dossierpagina/.test(JSON.stringify(potB(r))), potB(r));
     const pn = pot({ open: [{ id: 1, nummer: 'SL-0001', praktijk_id: 'P04', status: 'concept', aan: 'oud@b.test', cc: null }, { id: 2, nummer: 'SL-0002', praktijk_id: 'P90', status: 'concept', aan: 'iets@x.test' }] });
     r = C(basis(), pn);
     toets('8 open concept met een ander adres: kritiek, P90-nota telt niet', potB(r).length === 1 && /pot-factuuradres-P04/.test(potB(r)[0].bevinding_id) && r.pot.verschillen[0].nota.length === 1, [potB(r), r.pot.verschillen]);
-    const pd = pot(); delete pd.dossier.per.P04;
+    const pd = pot(); pd.dossier = { per: {}, problemen: { P04: 'op de pagina B staat nog geen factuuradres (veld facturen_aan)' } };
     r = C(basis(), pd);
-    toets('8 dossierpagina zonder adres voor P04: verschil (de verzender zou niets sturen)', potB(r).length === 1 && /de dossierpagina/.test(potB(r)[0].detail), potB(r));
+    toets('8 wv2256: dossiergegevens (ook zonder adres) tellen niet meer mee', potB(r).length === 0 && r.tel.pot_verschil === 0, potB(r));
+    const pz = pot(); pz.praktijken[4].email = 'factuur@c.test';
+    r = C(basis(), pz);
+    toets('8 stamkaart zonder factuuradres, POT-app wel: kritiek, zonder dossierpagina in de tekst', potB(r).length === 1 && /pot-factuuradres-P09/.test(potB(r)[0].bevinding_id) && /geen factuuradres/.test(potB(r)[0].detail) && !/dossierpagina/.test(potB(r)[0].detail), potB(r));
     r = C(basis(), { fout: 'D1 http 503' });
     toets('8 POT niet te lezen: geen bevindingen van plek 4, gemeten false', potB(r).length === 0 && r.pot.gemeten === false && r.tel.pot === 'niet gemeten', r.pot);
     // potMeting: alleen de twee SELECT's, fouten worden { fout }
     const gezien = [];
     let m = await R.potMeting({ d1: async (b) => { gezien.push(...b.map((q) => q.sql)); return [{ results: PR }, { results: [] }]; }, dossier: DOS });
-    toets('8 potMeting: alleen SELECT, resultaat compleet', gezien.length === 2 && gezien.every((q) => /^select /i.test(q)) && m.praktijken.length === 6 && m.dossier.per.P01, gezien);
+    toets('8 potMeting: alleen SELECT, resultaat compleet, oude dossierlezer niet aangeroepen', gezien.length === 2 && gezien.every((q) => /^select /i.test(q)) && m.praktijken.length === 6 && !m.fout && !('dossier' in m), [gezien, m]);
     m = await R.potMeting({ d1: async () => { throw new Error('D1 http 500 1234567890'); }, dossier: DOS });
     toets('8 potMeting: D1-fout → fout zonder lange cijferreeks', m.fout && !/1234567/.test(m.fout), m);
-    m = await R.potMeting({ d1: async () => [{ results: [] }, { results: [] }], dossier: () => { throw new Error('ENOENT'); } });
-    toets('8 potMeting: dossier niet te lezen → fout', !!m.fout, m);
+    m = await R.potMeting({ d1: async () => [{ results: PR }, { results: [] }] });
+    toets('8 potMeting zonder dossierlezer (wv2256): gemeten', !m.fout && m.praktijken.length === 6, m);
     toets('8 potMeting zonder lezer → fout', !!(await R.potMeting(null)).fout);
     // Bibliothecaris: niet gemeten is niet opgelost (Fable #1)
     { const v = wegwerpVault({ [pad('a')]: org('a', 'factuur@a.test', ['P01', 'P02', 'P03']), [pad('b')]: org('b', 'factuur@b.test', ['P04']), [pad('c')]: org('c', null, ['P09']) });
@@ -639,7 +642,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     toets('8 kaart: verzender houdt P02 al tegen (pagina ≠ POT-app) → dat staat in waarom', /geen nota klaar/.test(kp.waarom), kp.waarom);
     const pAlleenStam = pot(); const bs = basis(); bs[1] = pg('b', 'ander@b.test', ['P04']);
     const kS = R.kaartPot(C(bs, pAlleenStam).pot, {}, '27-10 02:31').zet[0];
-    toets('8 kaart: alleen de stamkaart wijkt af → nota\'s gaan nog naar het oude adres (waarom zegt dat)', /gaan nu nog naar factuur@b\.test/.test(kS.waarom), kS.waarom);
+    toets('8 kaart: stamkaart ≠ POT-app → de verzender houdt tegen (waarom zegt dat), geen praktijkpagina', /stamkaart in de Second Brain en de POT-app verschillen/.test(kS.waarom) && !/praktijkpagina|dossier/i.test(JSON.stringify(kS)), kS);
     const pon = pot({ open: [{ id: 4, nummer: 'SL-0004', praktijk_id: 'P04', status: 'auto_vrij', aan: 'oud@b.test' }] });
     const kN = R.kaartPot(C(basis(), pon).pot, {}, 'x').zet[0];
     toets('8 kaart: alleen een open nota wijkt af → waarom zegt dat, niet "verzender houdt tegen"', /al klaarstaat heeft nog een ander adres/.test(kN.waarom) && !/geen nota klaar/.test(kN.waarom) && kN.stappen.some((x) => /niet vanzelf/.test(x)), kN);
@@ -653,7 +656,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const pV = pot(); pV.praktijken[1].email = 'ander@a.test';
     const kV = R.kaartPot(C(basis(), pV).pot, { [kp.sleutel]: 'open' }, 'x');
     toets('8 kaart: andere adressen → oude dicht met "nieuwe kaart", nieuwe gezet', kV.zet.length === 1 && kV.dicht.length === 1 && /nieuwe kaart/.test(kV.dicht[0].bewijs), kV);
-    const pO = pot(); pO.dossier.per.P04.aan = ['factuur@b.test', 'tweede@b.test']; pO.praktijken[3].email = 'tweede@b.test, factuur@b.test';
+    const pO = pot(); pO.praktijken[3].email = 'tweede@b.test, factuur@b.test';
     const bsO = basis(); bsO[1] = R.leesPagina(pad('b'), org('b', null, ['P04']).replace('contact: {}', 'contact:\n  factuuradres:\n    - factuur@b.test\n    - tweede@b.test'));
     toets('8 volgorde telt zoals bij de verzender (a, b ≠ b, a)', potB(C(bsO, pO)).some((b) => /pot-factuuradres-P04/.test(b.bevinding_id)), potB(C(bsO, pO)));
     toets('8 checks zonder pot-argument: niet gemeten, niets kapot', (() => { const x = R.checks(basis(), reg(['a', 'b', 'c']), []); return x.pot.gemeten === false && x.tel.pot === 'niet gemeten' && potB(x).length === 0; })());
