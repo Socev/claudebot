@@ -112,6 +112,41 @@ function registerHash(tekst) {
   return { hash: sha256(b.tekst), blok: b };
 }
 
+// Eén (pad, blok) via de outbox schrijven (wv1945: ook gebruikt door intake-voorstel.js voor het blok nieuwe_feiten).
+// c = { vv, abs(rel), statVault(rel), leesVault(rel, max), rpc(fn, body) (gooit bij geen antwoord), naRename? }
+// doel = { pad, blok, revs, hash, nieuw(tekstOud) → nieuwe tekst, gevonden(tekst) → { hash, kapot }, max }
+async function publiceerMet(c, doel, open, t) {
+  const st = c.statVault(doel.pad);
+  const oud = st ? c.leesVault(doel.pad, doel.max) : null;
+  const g = doel.gevonden(oud);
+  const o1 = open.get(doel.pad + '|' + doel.blok);
+  if (o1 && o1.status === 'geblokkeerd_handmatig') { t.geblokkeerd++; t.blokkades.push(o1.outbox_id); return 'geblokkeerd'; }
+  if (!o1 && g.hash === doel.hash) { t.gelijk++; return 'gelijk'; }
+  const z = await c.rpc('sb2_publicatie_zet', { p: { doel_pad: doel.pad, blok_id: doel.blok, nieuwe_hash: doel.hash, gevonden_hash: g.hash, revision_ids: doel.revs || null } });
+  if (z.niets) { t.afgerond++; return 'afgerond'; }   // open rij van een gecrashte ronde, bestand stond al goed (proef 7)
+  if (z.geblokkeerd) { t.geblokkeerd++; t.blokkades.push(z.outbox_id); return 'geblokkeerd'; }
+  if (!z.outbox_id) throw new Error('sb2_publicatie_zet: geen outbox_id');
+  const besluit = await c.rpc('sb2_outbox_gevonden', { p_outbox_id: z.outbox_id, p_gevonden_hash: g.hash });
+  if (besluit === 'al_klaar') { t.afgerond++; return 'al_klaar'; }
+  if (besluit === 'blokkeer') { t.geblokkeerd++; t.nieuw_geblokkeerd.push(z.outbox_id); return 'blokkeer'; }
+  if (besluit !== 'schrijf') { t.overig++; return String(besluit); }
+  if (z.nieuwe_inhoud_hash && z.nieuwe_inhoud_hash !== doel.hash) { t.overig++; return 'andere_hash'; }   // hoort niet; volgende ronde opnieuw
+  // een kapot blok (twee begin-markers, geen eind) overschrijven we nooit, ook niet na vrijgeven: eerst met de hand herstellen (review #4)
+  if (g.kapot) { t.kapot++; return 'kapot'; }
+  const tekst = doel.nieuw(oud);
+  const ok = c.vv.schrijf(c.abs(doel.pad), tekst, { alsGelijk: function (nu2) {
+    if (!st) return !nu2;
+    return !!(nu2 && nu2.ino === st.ino && nu2.size === st.size && nu2.mtimeMs === st.mtimeMs);
+  } });
+  if (!ok) { t.tussendoor++; return 'tussendoor'; }   // iemand schreef intussen: rij blijft bezig, volgende ronde opnieuw
+  if (c.naRename) c.naRename(doel.pad);
+  const k = await c.rpc('sb2_outbox_klaar', { p_outbox_id: z.outbox_id, p_hash: doel.hash });
+  if (k !== 'klaar') throw new Error('sb2_outbox_klaar: ' + String(k).slice(0, 40));
+  t.geschreven++;
+  return 'geschreven';
+}
+
+
 /*
  * maak(o) → { ronde, laatste }
  * o = { db (intake.sqlite, node:sqlite; alleen lezen), vault (absoluut), vv ({ lees, schrijf } van vault-veilig), rpc(fn, body) → Promise<json>,
@@ -293,37 +328,7 @@ function maak(o) {
     if (r == null) throw new Error(fn + ': geen antwoord');
     return r;
   }
-  // doel = { pad, blok, revs, hash, nieuw(tekstOud) → nieuwe tekst, gevonden(tekst) → { hash, kapot }, max }
-  async function publiceer(doel, open, t) {
-    const st = statVault(doel.pad);
-    const oud = st ? leesVault(doel.pad, doel.max) : null;
-    const g = doel.gevonden(oud);
-    const o1 = open.get(doel.pad + '|' + doel.blok);
-    if (o1 && o1.status === 'geblokkeerd_handmatig') { t.geblokkeerd++; t.blokkades.push(o1.outbox_id); return 'geblokkeerd'; }
-    if (!o1 && g.hash === doel.hash) { t.gelijk++; return 'gelijk'; }
-    const z = await rpc('sb2_publicatie_zet', { p: { doel_pad: doel.pad, blok_id: doel.blok, nieuwe_hash: doel.hash, gevonden_hash: g.hash, revision_ids: doel.revs || null } });
-    if (z.niets) { t.afgerond++; return 'afgerond'; }   // open rij van een gecrashte ronde, bestand stond al goed (proef 7)
-    if (z.geblokkeerd) { t.geblokkeerd++; t.blokkades.push(z.outbox_id); return 'geblokkeerd'; }
-    if (!z.outbox_id) throw new Error('sb2_publicatie_zet: geen outbox_id');
-    const besluit = await rpc('sb2_outbox_gevonden', { p_outbox_id: z.outbox_id, p_gevonden_hash: g.hash });
-    if (besluit === 'al_klaar') { t.afgerond++; return 'al_klaar'; }
-    if (besluit === 'blokkeer') { t.geblokkeerd++; t.nieuw_geblokkeerd.push(z.outbox_id); return 'blokkeer'; }
-    if (besluit !== 'schrijf') { t.overig++; return String(besluit); }
-    if (z.nieuwe_inhoud_hash && z.nieuwe_inhoud_hash !== doel.hash) { t.overig++; return 'andere_hash'; }   // hoort niet; volgende ronde opnieuw
-    // een kapot blok (twee begin-markers, geen eind) overschrijven we nooit, ook niet na vrijgeven: eerst met de hand herstellen (review #4)
-    if (g.kapot) { t.kapot++; return 'kapot'; }
-    const tekst = doel.nieuw(oud);
-    const ok = o.vv.schrijf(abs(doel.pad), tekst, { alsGelijk: function (nu2) {
-      if (!st) return !nu2;
-      return !!(nu2 && nu2.ino === st.ino && nu2.size === st.size && nu2.mtimeMs === st.mtimeMs);
-    } });
-    if (!ok) { t.tussendoor++; return 'tussendoor'; }   // iemand schreef intussen: rij blijft bezig, volgende ronde opnieuw
-    if (o.naRename) o.naRename(doel.pad);
-    const k = await rpc('sb2_outbox_klaar', { p_outbox_id: z.outbox_id, p_hash: doel.hash });
-    if (k !== 'klaar') throw new Error('sb2_outbox_klaar: ' + String(k).slice(0, 40));
-    t.geschreven++;
-    return 'geschreven';
-  }
+  function publiceer(doel, open, t) { return publiceerMet({ vv: o.vv, abs, statVault, leesVault, rpc, naRename: o.naRename }, doel, open, t); }
 
   // ── de ronde ────────────────────────────────────────────────────────────────────────────────────────────────────────────
   let bezig = false;
@@ -434,4 +439,4 @@ function maak(o) {
   return { ronde, laatste };
 }
 
-module.exports = { maak, entiteitVanPad, vindBlok, notitieHash, registerHash, blokMet, ENTITEIT_MAP, REG_BEGIN_RE, NOTITIE_BEGIN_RE };
+module.exports = { maak, publiceerMet, neemSlot, laatSlot, sha256, cel, link, dagNl, entiteitVanPad, vindBlok, notitieHash, registerHash, blokMet, ENTITEIT_MAP, REG_BEGIN_RE, NOTITIE_BEGIN_RE };
