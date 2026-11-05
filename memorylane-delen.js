@@ -174,6 +174,62 @@ function fmVeld(t, veld) {
   return v;
 }
 
+// wv2449 (David 5-11-2026, MemoryLane ronde 4: "een klein stats-schermpje … de leeftijden van de main-characters"): de hoofdpersonen voor het
+// notitieboekje in het eigen MemoryLane-scherm. Welke personen dat zijn staat op één vaultpagina (HOOFD_PAGINA, een tabel Naam | Rol | Pagina's),
+// zodat er geen namen in de code staan en David of Socev de lijst kan aanvullen. Per persoon de geboortedatum (frontmatter geboortedatum of
+// geboren) en eventueel overleden van de eerste gelinkte pagina die er een heeft. De app rekent de leeftijd elke keer zelf uit (nooit een getal
+// opslaan). Niet in de toonmodus (de route staat niet in ML_TOON_ROUTES) en ook hier geweigerd als de toonmodus aan staat.
+const HOOFD_PAGINA = '20_Prive/Herinneringen/Hoofdpersonen.md';
+const HOOFD_MAX = 40;
+// "1984-01-07", "2019-10", "1990", "07-01-1984" → "1984-01-07" / "2019-10" / "1990"; anders null
+function hoofdDatum(v) {
+  const t = String(v == null ? '' : v).trim().replace(/^"|"$/g, '');
+  let m;
+  if ((m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t))) { const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))); return d.getUTCFullYear() === Number(m[1]) && d.getUTCMonth() === Number(m[2]) - 1 && d.getUTCDate() === Number(m[3]) ? t : null; }   // een echte dag (geen 29-2 in 1981)
+  if ((m = /^(\d{4})-(\d{2})$/.exec(t))) return Number(m[2]) >= 1 && Number(m[2]) <= 12 ? t : null;
+  if ((m = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(t))) return hoofdDatum(m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0'));
+  if (/^\d{4}$/.test(t)) return t;
+  return null;
+}
+// de tabel: rijen "| Naam | Rol | [[pad]] · [[pad2]] |"; kop- en scheidingsregel overslaan; alleen links binnen de vault (geen .., geen absoluut pad)
+function hoofdTabel(tekst) {
+  const uit = [];
+  for (const regel of zonderFrontmatter(String(tekst || '')).split('\n')) {
+    if (!/^\s*\|/.test(regel) || /^\s*\|\s*:?-{2,}/.test(regel)) continue;
+    const c = regel.trim().replace(/^\||\|$/g, '').split('|').map((x) => x.trim());
+    if (c.length < 3 || /^naam$/i.test(c[0]) || !c[0]) continue;
+    const links = [];
+    const re = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g;
+    let m;
+    while ((m = re.exec(c.slice(2).join('|'))) && links.length < 3) {
+      const rel = m[1].trim().replace(/\.md$/i, '');
+      if (!rel || rel.startsWith('/') || rel.split('/').some((d) => d === '..' || d === '.' || d === '')) continue;
+      links.push(rel + '.md');
+    }
+    uit.push({ naam: c[0].slice(0, 60), rol: c[1].slice(0, 60), links });
+    if (uit.length >= HOOFD_MAX) break;
+  }
+  return uit;
+}
+function hoofdpersonenLees(vault, vv) {
+  let t;
+  try { t = vv.lees(path.join(vault, HOOFD_PAGINA), 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return { pagina: false, personen: [] }; throw e; }
+  const personen = hoofdTabel(t).map((r) => {
+    let geboren = null, overleden = null;
+    for (const rel of r.links) {
+      const abs = path.join(vault, rel);
+      if (abs.indexOf(path.join(vault, path.sep)) !== 0) continue;
+      let p; try { p = vv.lees(abs, 'utf8'); } catch (e) { continue; }
+      const g = hoofdDatum(fmVeld(p, 'geboortedatum')) || hoofdDatum(fmVeld(p, 'geboren'));
+      if (!g) continue;
+      geboren = g; overleden = hoofdDatum(fmVeld(p, 'overleden')) || hoofdDatum(fmVeld(p, 'overlijdensdatum'));
+      break;
+    }
+    return { naam: r.naam, rol: r.rol, geboren, overleden };
+  });
+  return { pagina: true, personen };
+}
+
 /*
  * maak(o) → { lijst, detail, zicht, titel, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, _db }.
  * o = { db (intake._db), vault, vv (vault-veilig), dir (/opt/data/herinneringen), d1(sql, params) → Promise<{ok, rijen}>,
@@ -1163,6 +1219,12 @@ function maak(o) {
     const a = F ? F.kort(h.hid) : null;
     return { hid: h.hid, stukken: q.sVan.all(h.hid).filter((s) => s.status === 'opgenomen').length, album: a ? { status: a.status, aantal: a.aantal } : null };
   }
+  // wv2449: de hoofdpersonen voor het notitieboekje (alleen Davids eigen app; in de toonmodus geweigerd)
+  function hoofdpersonen(toon) {
+    if (toon && toon.toon) return { status: 403, body: { ok: false, fout: 'niet in de toonmodus' } };
+    const x = hoofdpersonenLees(o.vault, o.vv);
+    return { status: 200, body: { ok: true, pagina: x.pagina, personen: x.personen } };
+  }
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
     return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
@@ -1170,8 +1232,8 @@ function maak(o) {
   }
   return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling,
     plaatjeVoorstel, plaatjeMaken, plaatjeWeg, _P: P, vertellerMaken, vertellerDeel, vertellerWeg, _V: V,
-    fotoSync, _db: db, _setVoor: setVoor, _F: F,
+    fotoSync, hoofdpersonen, _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }
 
-module.exports = { maak, wanneerUit, wanneerTekst, codeWanneer, naamVoorReis, KRINGEN, KLUIS, MAP, ITER, MAX_TEKST, MAX_TITEL, MAX_NAAM, HID_RE, SID_RE, _pbkdf2: pbkdf2, _wwNorm: wwNorm, _kaleOpname: kaleOpname, _schoon: schoon };
+module.exports = { maak, wanneerUit, wanneerTekst, codeWanneer, naamVoorReis, KRINGEN, KLUIS, MAP, ITER, MAX_TEKST, MAX_TITEL, MAX_NAAM, HID_RE, SID_RE, _pbkdf2: pbkdf2, _wwNorm: wwNorm, _kaleOpname: kaleOpname, _schoon: schoon, HOOFD_PAGINA, _hoofdDatum: hoofdDatum, _hoofdTabel: hoofdTabel };

@@ -19178,7 +19178,7 @@ function docsDelenInfo() {
 // ── MemoryLane delen (wv2114, 31-10-2026; ontwerp vault fase R § 14, review vooraf OpenAI verwerkt). Logica en waarom in
 // memorylane-delen.js; hier alleen: D1 (zelfde databank `deel` als Docs › Delen), de twee wachtwoorden uit de kluis (niet op de witte lijst:
 // op het moment van gebruik via de Management-API, 10 min in het geheugen, nooit in process.env), de app-routes en de tik.
-//   GET  /app/memorylane/lijst | /app/memorylane/h/<hid> | /app/memorylane/delen
+//   GET  /app/memorylane/lijst | /app/memorylane/h/<hid> | /app/memorylane/delen | /app/memorylane/personen (wv2449, hoofdpersonen + geboortedatum; niet in de toonmodus)
 //   GET  /app/memorylane/h/<hid>/gevel/k (wv2314, de straat: miniatuur van de gevel, zonder fotolijst; toonmodus alleen toonbaar, anders 404)
 //   POST /app/memorylane/h/<hid>/zicht {kring, aan} · titel {titel} · wanneer {van, tot} (wv2180) · tekst {tekst, soort} · categorie {categorie, gevoelig} · toon-opname {aan} · toch-delen
 //   POST /app/memorylane/stuk/<sid>/opnemen|afwijzen|bewaren|weggooien · POST /app/memorylane/link/<kring>/aan|uit|vernieuw
@@ -19280,6 +19280,8 @@ async function appMemorylane(req, res, a, s, route, d) {
     }
     if (route === 'GET /app/memorylane/lijst') return antw('lijst', memorylaneDelen.lijst(toon));
     if (route === 'GET /app/memorylane/delen') return antw('delen', memorylaneDelen.delenStand());
+    // wv2449: de hoofdpersonen met geboortedatum voor het notitieboekje (vaultpagina 20_Prive/Herinneringen/Hoofdpersonen.md); niet in de toonmodus
+    if (route === 'GET /app/memorylane/personen') return antw('personen', typeof memorylaneDelen.hoofdpersonen === 'function' ? memorylaneDelen.hoofdpersonen(toon) : { status: 404, body: { ok: false, fout: 'niet in deze versie' } });
     if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})$/.exec(route))) return antw('detail', memorylaneDelen.detail(m[1], toon));
     if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/audio\/([1-9][0-9]?)$/.exec(route))) return antw('audio', memorylaneDelen.audio(m[1], Number(m[2]), toon));   // wv2306
     if ((m = /^POST \/app\/memorylane\/voorstel\/(v[pv])-([0-9a-f]{16})\/(ja|nee)$/.exec(route))) {   // wv2306: koppelvoorstel (persoon/voorval) na Davids keuze

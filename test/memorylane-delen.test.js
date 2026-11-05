@@ -713,3 +713,35 @@ test('wv2366 verteller: detail geeft stand en kosten; alleen bij mag; Privé/gev
     assert.strictEqual(o.ml.vertellerWeg(ha).status, 200);
   } finally { o.sluit(); }
 });
+
+test('wv2449 hoofdpersonen: tabel op de vaultpagina, datum van de eerste gelinkte pagina die er een heeft, nooit buiten de vault, toonmodus = 403', () => {
+  const o = omgeving();
+  try {
+    assert.deepStrictEqual(o.ml.hoofdpersonen().body, { ok: true, pagina: false, personen: [] }, 'zonder pagina: lege lijst');
+    const fam = path.join(o.vault, '20_Prive/Proeffamilie');
+    fs.mkdirSync(path.join(fam, 'Stamboom'), { recursive: true });
+    fs.writeFileSync(path.join(fam, 'Bram Proefsen.md'), '---\ntype: persoon\ngeboortedatum: 1981-02-29\n---\n# Bram\n');   // geen echte dag
+    fs.writeFileSync(path.join(fam, 'Stamboom', 'Bram Proefsen (1981).md'), '---\ngeboren: "1981-02-28"\n---\n');
+    fs.writeFileSync(path.join(fam, 'Kees Verzonnen.md'), '---\ntype: persoon\n---\n# Kees\n');
+    fs.writeFileSync(path.join(fam, 'Stamboom', 'Kees Verzonnen (1950).md'), '---\ngeboren: "1950-03-04"\noverleden: "2001-05-06"\n---\n');
+    fs.writeFileSync(path.join(fam, 'Pluis.md'), '---\ntype: huisdier\ngeboren: 2020-04\n---\n');
+    fs.writeFileSync(path.join(fam, 'Anna Fictief.md'), '---\ngeboortedatum: 07-08-1999\n---\n');
+    fs.writeFileSync(path.join(o.vault, 'geheim.md'), '---\ngeboortedatum: 1900-01-01\n---\n');
+    fs.writeFileSync(path.join(o.vault, M.HOOFD_PAGINA), ['---', 'type: lijst', '---', '# Hoofdpersonen', '', '| Naam | Rol | Pagina\'s |', '|---|---|---|',
+      '| Bram | ik | [[20_Prive/Proeffamilie/Bram Proefsen|Bram]] [[20_Prive/Proeffamilie/Stamboom/Bram Proefsen (1981)]] |',
+      '| Kees | vader | [[20_Prive/Proeffamilie/Kees Verzonnen]] · [[20_Prive/Proeffamilie/Stamboom/Kees Verzonnen (1950)]] |',
+      '| Pluis | kat | [[20_Prive/Proeffamilie/Pluis]] |', '| Anna | zus | [[20_Prive/Proeffamilie/Anna Fictief]] |',
+      '| Wim | buurman | [[../geheim]] · [[/etc/passwd]] · [[20_Prive/Proeffamilie/Bestaat Niet]] |', ''].join('\n'));
+    const r = o.ml.hoofdpersonen();
+    assert.strictEqual(r.status, 200);
+    assert.deepStrictEqual(r.body.personen, [
+      { naam: 'Bram', rol: 'ik', geboren: '1981-02-28', overleden: null },   // 29-2-1981 bestaat niet: de tweede pagina
+      { naam: 'Kees', rol: 'vader', geboren: '1950-03-04', overleden: '2001-05-06' },
+      { naam: 'Pluis', rol: 'kat', geboren: '2020-04', overleden: null },
+      { naam: 'Anna', rol: 'zus', geboren: '1999-08-07', overleden: null },
+      { naam: 'Wim', rol: 'buurman', geboren: null, overleden: null }]);
+    assert.strictEqual(o.ml.hoofdpersonen({ toon: true }).status, 403, 'toonmodus');
+    assert.ok(!/Bram|1981/.test(JSON.stringify(o.ml.hoofdpersonen({ toon: true }).body)), 'toonmodus: niets van de lijst');
+    assert.strictEqual(M._hoofdDatum('2019-13'), null); assert.strictEqual(M._hoofdDatum('2024-02-29'), '2024-02-29'); assert.strictEqual(M._hoofdDatum('1990'), '1990'); assert.strictEqual(M._hoofdDatum(''), null);
+  } finally { o.sluit(); }
+});
