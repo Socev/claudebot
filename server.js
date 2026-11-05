@@ -15669,9 +15669,78 @@ const docplanJaaropgaaf = (function () {
 const docplanKoppel = (function () {
   const p = path.join(__dirname, 'docplan-koppel.js');
   if (!fs.existsSync(p)) return null;
-  try { return require(p).maak({ fout: logError, rpc: function (fn, body) { return appSbRpc(fn, body, 20000); } }); }
+  try { return require(p).maak({ fout: logError, rpc: function (fn, body) { return appSbRpc(fn, body, 20000); }, nieuw: docplanNieuwZet, gevraagd: docplanNieuwOpzoeker }); }
   catch (e) { logError('roosternamen', e); return null; }
 })();
+// wv2531 (David 5-11-2026 21:43, Engineer-knop: "wat gebeurt hier als ik klik Nieuwe persoon?"): tot nu toe niets — status nieuw bleef liggen tot
+// de machinekamer toevallig keek. Nu zet de pod bij elke "Nieuwe persoon" (en bij het openen van het scherm voor een nieuw-naam die nog niet op de
+// werklijst staat) een werkvoorraadrij voor de machinekamer: één per uur (label machinekamer:docplan-nieuwe-persoon-<jjjjmmdduu>, niet vóór het
+// volgende hele uur, zodat meer klikken in hetzelfde uur één ronde worden; bestaat de rij nog, dan hoort de naam erbij), herkomst david. De rij
+// noemt geen namen: de machinekamer leest alle namen met status nieuw zelf uit secondbrain.dienst_alias. Per naam onthoudt de pod (sha256 van
+// praktijk + naam, geen naam op schijf) wanneer het gevraagd is en welke rij het oppakt; het scherm toont dan "wordt aangemaakt" met dat tijdstip.
+const DOCPLAN_NIEUW_STAAT = process.env.DOCPLAN_NIEUW_STAAT || '/opt/data/docplan-nieuw-staat.json';
+const DOCPLAN_NIEUW_BEWAAR_MS = 30 * 86400000;
+const DOCPLAN_NIEUW_GELDIG_MS = 24 * 3600000;   // review wv2531 MOET 1: staat een naam na een dag nog op nieuw (rij mislukt), dan opnieuw op de werklijst
+let docplanNieuwKeten = Promise.resolve();
+function docplanNieuwSleutel(pr, naam) { return crypto.createHash('sha256').update(String(pr) + '\n' + String(naam)).digest('hex').slice(0, 24); }
+function docplanNieuwOpzoeker() {
+  const st = appLeesStreng(DOCPLAN_NIEUW_STAAT, { namen: {} });
+  const namen = st.namen && typeof st.namen === 'object' ? st.namen : {};
+  const nu0 = Date.now();
+  return function (pr, naam) {
+    const g = namen[docplanNieuwSleutel(pr, naam)];
+    if (!g || !g.t || !(nu0 - Date.parse(g.tw || g.t) < DOCPLAN_NIEUW_GELDIG_MS)) return null;
+    return { t: g.t, wv: g.wv || null };
+  };
+}
+function docplanNieuwPrompt() {
+  let blok = '';
+  try { blok = fs.readFileSync(DOORGEEF_BLOK, 'utf8').trim(); } catch (e) { blok = ''; }
+  if (blok.indexOf('GRONDWET-KERN v1') < 0) blok = typeof MK_TEKST !== 'undefined' && MK_TEKST && MK_TEKST.GRONDWET ? '```\n' + MK_TEKST.GRONDWET + '\n```' : '';
+  if (!blok) throw new Error('grondwet-blok ontbreekt');
+  return blok + '\n\n' + [
+    'OPDRACHT (vaste tekst van de pod, docplan-koppel wv2531; herkomst david): David koos in Apps › Facturen › Waarnemers › Roosternamen koppelen bij één of ' +
+      'meer roosternamen "Nieuwe persoon". Maak voor elke roosternaam met status nieuw in secondbrain.dienst_alias de persoon aan en koppel hem.',
+    'Wie: select e.knoop_id, a.naam, a.bevestigd_op from secondbrain.dienst_alias a join secondbrain.entity e on e.object_id = a.praktijk where a.status = \'nieuw\' ' +
+      '(Management-API, mk-scripts/wv2149/sq.py). Zijn er geen (een eerdere rij deed ze al): klaar, rapport "niets te doen", Vervolg: geen.',
+    'Hoe: keten "Nieuwe persoon" in mk-scripts/docplan/LEESMIJ.md; voorbeeld mk-scripts/wv2531/nieuw.py (vaste lijst → docplan.sqlite persoon/alias/rol, ' +
+      'persoonspagina in 10_Zakelijk/_Gedeeld/Waarnemers + zegel onder de vaultgrendel) → wv1254/ovis.sh dag → /opt/data/docplan/rollen.sql via de ' +
+      'Management-API → diensten.py sync met --nieuw-ok TG:<naam> per naam → sb_dienst_alias_zet status bevestigd met de nieuwe persoon (bron ' +
+      '"machinekamer: nieuwe persoon op Davids keuze") → diensten.py toets. Heeft de persoon een betaling in dit jaar: de keten met rekening (entiteiten.py).',
+    'Eerst vaststellen wie het is (Google Contacts in 20_Prive/Contacten, mailkaarten, waarneemfacturen, bank in facturen.sqlite alleen-lezen). Een ' +
+      'spellingsvariant van een bestaande persoon wordt een voorstel op die persoon, geen tweede persoon. Twijfel (twee kandidaten, alleen een voornaam of ' +
+      'initialen, geen spoor): niet raden — één Voor jou-kaart met die namen (geblokkeerde vervolgrij).',
+    'Namen alleen in de databank, argv en de persoonspagina; nooit in box, werkvoorraad of log. Toets: 0 rijen met status nieuw (behalve die op Davids kaart). ' +
+      'Rapport aan David: één regel (hoeveel personen aangemaakt). Geen review nodig (vaste keten), geen uitrol.'].join('\n');
+}
+function docplanNieuwZet(items, nuMs) {
+  const p = docplanNieuwKeten.then(function () { return docplanNieuwZetNu(items, nuMs); });
+  docplanNieuwKeten = p.catch(function () {});
+  return p;
+}
+async function docplanNieuwZetNu(items, nuMs) {
+  const t = Number.isFinite(nuMs) ? nuMs : Date.now();
+  const uur = new Date(t).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 13).replace(/[^0-9]/g, '');
+  const label = 'machinekamer:docplan-nieuwe-persoon-' + uur;
+  const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: label, p_prompt: docplanNieuwPrompt(), p_status: 'open', p_volgorde: 60, p_max_minuten: 60,
+    p_niet_voor: new Date(Math.floor(t / 3600000) * 3600000 + 3600000).toISOString(),
+    p_samenvatting: 'DocPlan: nieuwe waarnemer(s) aanmaken — David koos "Nieuwe persoon" bij Roosternamen koppelen',
+    p_notitie: 'docplan-koppel wv2531: ' + items.length + (items.length === 1 ? ' naam' : ' namen') }, 20000);
+  if (!z || !z.ok || !z.id) throw new Error('werkvoorraad gaf geen rij terug');
+  // ook bij een bestaande rij (review wv2531 ZOU 1): herkomst zetten is idempotent, zo herstelt een eerdere mislukte poging zich
+  try { await appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' }, 20000); } catch (e) { logError('roosternamen', e); }
+  let st;
+  try { st = appLeesStreng(DOCPLAN_NIEUW_STAAT, { namen: {} }); } catch (e) { logError('roosternamen', e); st = { namen: {} }; }
+  if (!st.namen || typeof st.namen !== 'object') st.namen = {};
+  Object.keys(st.namen).forEach(function (k) { if (!st.namen[k] || !(t - Date.parse(st.namen[k].tw || st.namen[k].t) < DOCPLAN_NIEUW_BEWAAR_MS)) delete st.namen[k]; });
+  items.forEach(function (it) {
+    const k = docplanNieuwSleutel(it.praktijk, it.naam), oud = st.namen[k];
+    st.namen[k] = { t: it.t || (oud && oud.t) || new Date(t).toISOString(), wv: z.id, tw: new Date(t).toISOString() };
+  });
+  appSchrijfJson(DOCPLAN_NIEUW_STAAT, st);
+  try { schrijfLog(nu() + ' docplan-nieuw ' + velden({ rij: z.id, namen: items.length, bestond: z.bestond ? 'ja' : 'nee' })); } catch (e) { /* log is bijzaak */ }
+  return { ok: true, id: z.id, bestond: !!z.bestond };
+}
 // wv2293: DocPlan § 8.1 vaste controle rooster ↔ betaling (docplan-controle.js; idee 25 meetpunt 4). Na de bank-ronde: dagen per waarnemer per
 // maand (public.sb_dienst_maanden, 0021) en de roosternamen (sb_dienst_alias_lijst) naast docplan.sqlite (readOnly) en de bank in Facturen;
 // uitkomst = signalen in Facturen (alleen de eigenaar, migratie 17). Alleen aantallen naar n8n en in het log; nooit een naam, IBAN of bedrag.

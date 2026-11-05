@@ -14,6 +14,12 @@
  *
  * Puur: deze module laadt niets en raakt geen bestanden; server.js geeft rpc(fn, body) mee (appSbRpc, service_role). Niets opgeslagen op de
  * pod; namen gaan alleen in het antwoord aan Davids app, nooit in een log (de reden noemt alleen jaar of status).
+ *
+ * wv2531 (David 5-11-2026 21:43: "wat gebeurt hier als ik klik Nieuwe persoon?" — tot dan niets, de vraag bleef liggen): "Nieuwe persoon" gaat zelf
+ * naar de machinekamer. Na een geslaagde POST met status nieuw roept de module o.nieuw(items, nu) aan (server.js: één werklijstrij per uur, herkomst
+ * david); bij GET ook voor een naam met status nieuw die nog niet op de werklijst staat (eerdere keuze of mislukte poging). o.gevraagd() geeft een
+ * opzoeker (praktijk, naam) → { t, wv } | null; het scherm toont dan "wordt aangemaakt" met het tijdstip. Beide optioneel: zonder werkt alles zoals
+ * vóór wv2531. Een fout daarin breekt de keuze of de lijst nooit.
  */
 const PRAKTIJK = { TG: 'Tolgaarde', GH: 'Groenhouten' };
 const STATUS = ['bevestigd', 'geen', 'nieuw', 'weg'];
@@ -25,14 +31,20 @@ function dagAmsterdam(nu) { return new Date(nu).toLocaleDateString('sv-SE', { ti
 // volgorde op het scherm: eerst zonder persoon (ook "nieuwe persoon gevraagd"), dan voorgesteld, dan door David gekozen
 const GROEP = { zonder: 0, nieuw: 0, voorgesteld: 1, bevestigd: 2, geen: 2 };
 
-/* vorm(lijst, jaar, nu) → wat de app toont: alleen namen met dagen in het jaar; status null wordt 'zonder'. */
-function vorm(l, jaar, nu) {
+/* vorm(lijst, jaar, nu[, gevraagd]) → wat de app toont: alleen namen met dagen in het jaar; status null wordt 'zonder'. Bij status nieuw ook
+ * gevraagd_op (ISO of null) en op_werklijst (wv2531), uit gevraagd(praktijk, naam). */
+function vorm(l, jaar, nu, gevraagd) {
   const praktijken = (Array.isArray(l && l.praktijken) ? l.praktijken : []).filter((p) => PRAKTIJK[p.code]).map((p) => {
     const namen = (Array.isArray(p.namen) ? p.namen : []).filter((n) => Number(n.dagen) > 0).map((n) => ({
       naam: String(n.naam), dagen: Number(n.dagen), eerste: n.eerste || null, laatste: n.laatste || null,
       status: GROEP[n.status] !== undefined && n.status !== 'zonder' ? n.status : 'zonder', object_id: n.object_id || null,
       persoon: n.persoon || null, samengevoegd: n.samengevoegd === true,
-    })).sort((a, b) => GROEP[a.status] - GROEP[b.status] || b.dagen - a.dagen || a.naam.localeCompare(b.naam, 'nl'));
+    })).map((n) => {
+      if (n.status !== 'nieuw') return n;
+      let g = null;
+      try { g = typeof gevraagd === 'function' ? gevraagd(p.code, n.naam) : null; } catch (e) { g = null; }
+      return Object.assign(n, { gevraagd_op: g && typeof g.t === 'string' ? g.t : null, op_werklijst: !!(g && g.wv) });
+    }).sort((a, b) => GROEP[a.status] - GROEP[b.status] || b.dagen - a.dagen || a.naam.localeCompare(b.naam, 'nl'));
     const tel = (f) => namen.filter(f).length;
     const dagen = (f) => namen.filter(f).reduce((s, n) => s + n.dagen, 0);
     return { code: p.code, naam: PRAKTIJK[p.code], namen, n_namen: namen.length,
@@ -71,6 +83,18 @@ function item(d) {
  */
 function maak(o) {
   o = o || {};
+  // wv2531: naar de werklijst van de machinekamer; nooit een fout naar buiten
+  async function naarWerklijst(items, nu) {
+    if (typeof o.nieuw !== 'function' || !items.length) return null;
+    try { return (await o.nieuw(items, nu)) || { ok: false }; } catch (e) {
+      if (typeof o.fout === 'function') o.fout('roosternamen', e);
+      return { ok: false };
+    }
+  }
+  function opzoeker() {
+    if (typeof o.gevraagd !== 'function') return null;
+    try { return o.gevraagd(); } catch (e) { if (typeof o.fout === 'function') o.fout('roosternamen', e); return null; }
+  }
   async function app(v) {
     const nu = Number.isFinite(v.nu) ? v.nu : Date.now();
     const m = PAD_RE.exec(String(v.pad || ''));
@@ -83,7 +107,11 @@ function maak(o) {
       if (jaar < JAAR_MIN || jaar > dit + 1) return { status: 400, j: { ok: false, fout: 'jaar buiten bereik' }, reden: 'roosternamen jaar' };
       try {
         const l = await o.rpc('sb_dienst_alias_lijst', { p_jaar: jaar });
-        return { status: 200, j: Object.assign({ ok: true }, vorm(l, jaar, nu)), reden: 'roosternamen ' + jaar };
+        let w = vorm(l, jaar, nu, opzoeker());
+        const los = [];
+        w.praktijken.forEach((p) => p.namen.forEach((n) => { if (n.status === 'nieuw' && !n.op_werklijst) los.push({ praktijk: p.code, naam: n.naam, t: null }); }));
+        if (los.length && (await naarWerklijst(los, nu) || {}).ok) w = vorm(l, jaar, nu, opzoeker());
+        return { status: 200, j: Object.assign({ ok: true }, w), reden: 'roosternamen ' + jaar };
       } catch (e) {
         if (typeof o.fout === 'function') o.fout('roosternamen', e);
         return { status: 503, j: { ok: false, fout: 'de roosternamen zijn nu niet te lezen' }, reden: 'roosternamen fout' };
@@ -99,7 +127,12 @@ function maak(o) {
     const fouten = r && Array.isArray(r.fouten) ? r.fouten : null;
     if (!fouten) return { status: 503, j: { ok: false, fout: 'niet opgeslagen: onverwacht antwoord van de databank' }, reden: 'roosternaam fout' };
     if (fouten.length) return { status: 409, j: { ok: false, fout: 'niet opgeslagen: ' + String(fouten[0].reden || 'geweigerd').replace(/^dienst_alias:\s*/, '').replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, 'die keuze').slice(0, 200) }, reden: 'roosternaam geweigerd' };
-    return { status: 200, j: { ok: true, status: x.item.status, uitkomst: { nieuw: r.nieuw, bijgewerkt: r.bijgewerkt, ongewijzigd: r.ongewijzigd, weg: r.weg } }, reden: 'roosternaam ' + x.item.status };
+    const j = { ok: true, status: x.item.status, uitkomst: { nieuw: r.nieuw, bijgewerkt: r.bijgewerkt, ongewijzigd: r.ongewijzigd, weg: r.weg } };
+    if (x.item.status === 'nieuw' && typeof o.nieuw === 'function') {
+      const w = await naarWerklijst([{ praktijk: x.item.praktijk, naam: x.item.naam, t: new Date(nu).toISOString() }], nu);
+      j.werklijst = !!(w && w.ok);
+    }
+    return { status: 200, j, reden: 'roosternaam ' + x.item.status };
   }
   return { app };
 }

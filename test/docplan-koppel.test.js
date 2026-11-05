@@ -115,3 +115,125 @@ test('databank weigert een item: 409 met de reden; databank weg: 503 zonder inho
   const r3 = M.maak({ rpc: async () => null });
   assert.strictEqual((await r3.app(v({ methode: 'POST', d: { praktijk: 'TG', naam: 'KV', status: 'geen' } }))).status, 503);
 });
+
+// ── wv2531: "Nieuwe persoon" gaat zelf naar de werklijst van de machinekamer ──
+function routeNieuw(o) {
+  const werk = [], aanroepen = [];
+  let staat = {};
+  const r = M.maak(Object.assign({
+    rpc: async (fn, body) => { aanroepen.push({ fn, body }); return fn === 'sb_dienst_alias_lijst' ? LIJST : { nieuw: 0, bijgewerkt: 1, ongewijzigd: 0, overgeslagen: 0, weg: 0, fouten: [] }; },
+    nieuw: async (items, nu) => { werk.push({ items, nu }); items.forEach((it) => { staat[it.praktijk + '|' + it.naam] = { t: it.t || '2026-11-01T10:00:00.000Z', wv: 77 }; }); return { ok: true, id: 77 }; },
+    gevraagd: () => { const s = Object.assign({}, staat); return (p, n) => s[p + '|' + n] || null; },
+  }, o || {}));
+  return { r, werk, aanroepen, zet: (k, w) => { staat[k] = w; } };
+}
+
+test('wv2531 POST nieuw: na de keuze één werklijst-aanroep met praktijk, naam en tijdstip; werklijst true', async () => {
+  const { r, werk, aanroepen } = routeNieuw();
+  const x = await r.app(v({ methode: 'POST', d: { praktijk: 'TG', naam: 'NN', status: 'nieuw' } }));
+  assert.strictEqual(x.status, 200);
+  assert.strictEqual(x.j.werklijst, true);
+  assert.deepStrictEqual(werk, [{ items: [{ praktijk: 'TG', naam: 'NN', t: '2026-11-01T10:00:00.000Z' }], nu: NU }]);
+  assert.strictEqual(aanroepen[0].fn, 'sb_dienst_alias_zet', 'eerst de keuze in de databank, dan de werklijst');
+  for (const st of ['geen', 'weg']) await r.app(v({ methode: 'POST', d: { praktijk: 'TG', naam: 'NN', status: st } }));
+  await r.app(v({ methode: 'POST', d: { praktijk: 'TG', naam: 'KV', status: 'bevestigd', object_id: P2 } }));
+  assert.strictEqual(werk.length, 1, 'andere keuzes gaan niet naar de werklijst');
+});
+
+test('wv2531 POST nieuw: werklijst faalt of geeft niets → keuze blijft 200, werklijst false, fout gelogd zonder naam', async () => {
+  const fouten = [];
+  for (const nieuw of [async () => { throw new Error('rpc mk_werkvoorraad_zet http 500'); }, async () => null, async () => ({ ok: false })]) {
+    const { r } = routeNieuw({ nieuw, fout: (w, e) => fouten.push(w + ' ' + e.message) });
+    const x = await r.app(v({ methode: 'POST', d: { praktijk: 'TG', naam: 'NN', status: 'nieuw' } }));
+    assert.strictEqual(x.status, 200);
+    assert.strictEqual(x.j.werklijst, false);
+  }
+  assert.strictEqual(fouten.length, 1);
+  assert.ok(!/NN/.test(fouten[0]));
+  const zonder = M.maak({ rpc: async () => ({ nieuw: 1, bijgewerkt: 0, ongewijzigd: 0, overgeslagen: 0, weg: 0, fouten: [] }) });
+  const y = await zonder.app(v({ methode: 'POST', d: { praktijk: 'TG', naam: 'NN', status: 'nieuw' } }));
+  assert.strictEqual(y.status, 200);
+  assert.ok(!('werklijst' in y.j), 'zonder o.nieuw: antwoord zoals vóór wv2531');
+});
+
+test('wv2531 GET: nieuw-naam die nog niet op de werklijst staat gaat erop (t null); daarna gevraagd_op + op_werklijst; staat hij er al: geen aanroep', async () => {
+  const { r, werk, zet } = routeNieuw();
+  const x = await r.app(v());
+  assert.strictEqual(x.status, 200);
+  assert.deepStrictEqual(werk.map((w) => w.items), [[{ praktijk: 'TG', naam: 'NN', t: null }]]);
+  const nn = x.j.praktijken[0].namen.find((n) => n.naam === 'NN');
+  assert.deepStrictEqual([nn.status, nn.op_werklijst, nn.gevraagd_op], ['nieuw', true, '2026-11-01T10:00:00.000Z']);
+  assert.ok(x.j.praktijken[0].namen.filter((n) => n.status !== 'nieuw').every((n) => !('gevraagd_op' in n)), 'alleen nieuw-namen krijgen de velden');
+  zet('TG|NN', { t: '2026-11-01T09:42:00.000Z', wv: 78 });
+  const y = await r.app(v());
+  assert.strictEqual(werk.length, 1, 'staat al op de werklijst: geen tweede aanroep');
+  assert.strictEqual(y.j.praktijken[0].namen.find((n) => n.naam === 'NN').gevraagd_op, '2026-11-01T09:42:00.000Z');
+});
+
+test('wv2531 GET: werklijst of opzoeker faalt → lijst blijft 200, nieuw-naam zonder werklijst; zonder opties zoals vóór wv2531', async () => {
+  const { r } = routeNieuw({ nieuw: async () => { throw new Error('weg'); }, fout: () => {}, gevraagd: () => { throw new Error('onleesbaar'); } });
+  const x = await r.app(v());
+  assert.strictEqual(x.status, 200);
+  const nn = x.j.praktijken[0].namen.find((n) => n.naam === 'NN');
+  assert.deepStrictEqual([nn.op_werklijst, nn.gevraagd_op], [false, null]);
+  const kaal = M.maak({ rpc: async () => LIJST });
+  const k = await kaal.app(v());
+  assert.strictEqual(k.status, 200);
+  const kn = k.j.praktijken[0].namen.find((n) => n.naam === 'NN');
+  assert.deepStrictEqual([kn.status, kn.op_werklijst, kn.gevraagd_op], ['nieuw', false, null], 'zonder opzoeker: nieuw zonder werklijst');
+});
+
+// server.js: de werklijstrij zelf (knipsel docplanNieuw* in een vm met nep-rpc; verzonnen namen)
+test('wv2531 server.js: één rij per uur, label met Amsterdams uur, niet vóór het volgende hele uur, herkomst david alleen bij een nieuwe rij, geen naam in prompt of log', async () => {
+  const fs = require('fs'), vm = require('vm'), path = require('path'), crypto = require('crypto');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const a = src.indexOf("const DOCPLAN_NIEUW_STAAT = "), b = src.indexOf("return { ok: true, id: z.id, bestond: !!z.bestond };\n}", a);
+  assert.ok(a > 0 && b > a, 'knipsel gevonden');
+  const knip = src.slice(a, b) + "return { ok: true, id: z.id, bestond: !!z.bestond };\n}\nthis.zet = docplanNieuwZet; this.opz = docplanNieuwOpzoeker;";
+  const J = (x) => JSON.parse(JSON.stringify(x));   // vm-objecten komen uit een ander realm
+  const rpc = [], log = [];
+  let schijf = null, rijen = {};
+  const ctx = {
+    process: { env: {} }, crypto, Promise, Date, Number, Object, String, Math, Error, JSON,
+    fs: { readFileSync: () => 'GRONDWET-KERN v1\nblok' }, DOORGEEF_BLOK: '/x', MK_TEKST: null,
+    appLeesStreng: (f, leeg) => (schijf ? JSON.parse(schijf) : leeg), appSchrijfJson: (f, d) => { schijf = JSON.stringify(d); },
+    appSbRpc: async (fn, body) => {
+      rpc.push({ fn, body });
+      if (fn === 'mk_werkvoorraad_zet') { if (rijen[body.p_label]) return { ok: true, id: rijen[body.p_label], bestond: true }; rijen[body.p_label] = 100 + Object.keys(rijen).length; return { ok: true, id: rijen[body.p_label], bestond: false }; }
+      return { ok: true, herkomst: 'david' };
+    },
+    logError: () => {}, schrijfLog: (r) => log.push(r), nu: () => 'NU', velden: (o) => JSON.stringify(o),
+  };
+  vm.createContext(ctx);
+  vm.runInContext(knip, ctx);
+  const t1 = Date.parse('2026-11-05T20:42:09Z');   // 21:42 in Amsterdam
+  const u1 = await ctx.zet([{ praktijk: 'TG', naam: 'Proef Verzonnen', t: new Date(t1).toISOString() }], t1);
+  const u2 = await ctx.zet([{ praktijk: 'TG', naam: 'Tweede Proef', t: null }], t1 + 60000);
+  const u3 = await ctx.zet([{ praktijk: 'GH', naam: 'Derde Proef', t: null }], Date.parse('2026-11-05T21:01:00Z'));
+  assert.deepStrictEqual([u1.id, u1.bestond, u2.id, u2.bestond, u3.id, u3.bestond], [100, false, 100, true, 101, false]);
+  const zet = rpc.filter((x) => x.fn === 'mk_werkvoorraad_zet');
+  assert.deepStrictEqual(zet.map((x) => x.body.p_label), ['machinekamer:docplan-nieuwe-persoon-2026110521', 'machinekamer:docplan-nieuwe-persoon-2026110521', 'machinekamer:docplan-nieuwe-persoon-2026110522']);
+  assert.strictEqual(zet[0].body.p_niet_voor, '2026-11-05T21:00:00.000Z');
+  assert.strictEqual(zet[0].body.p_status, 'open');
+  assert.match(zet[0].body.p_prompt, /^GRONDWET-KERN v1/);
+  assert.match(zet[0].body.p_prompt, /status = 'nieuw'/);
+  assert.deepStrictEqual(J(rpc.filter((x) => x.fn === 'mk_werkvoorraad_herkomst').map((x) => x.body)), [{ p_id: 100, p_herkomst: 'david' }, { p_id: 100, p_herkomst: 'david' }, { p_id: 101, p_herkomst: 'david' }]);
+  const alles = JSON.stringify(rpc) + log.join('\n') + schijf;
+  assert.ok(!/Proef|Verzonnen/.test(alles), 'geen naam in prompt, notitie, log of staatbestand');
+  ctx.Date = class extends Date { static now() { return t1 + 3600000; } };   // opzoeker rekent met Date.now()
+  const opz = ctx.opz();
+  assert.deepStrictEqual(J(opz('TG', 'Proef Verzonnen')), { t: '2026-11-05T20:42:09.000Z', wv: 100 });
+  assert.deepStrictEqual(J(opz('TG', 'Tweede Proef')), { t: '2026-11-05T20:43:09.000Z', wv: 100 });
+  assert.strictEqual(opz('TG', 'Onbekend'), null);
+  // oud gevraagd tijdstip blijft staan als de naam later (t null) opnieuw meegaat; ouder dan 30 dagen valt weg
+  ctx.Date = class extends Date { static now() { return t1 + 25 * 3600000; } };
+  assert.strictEqual(ctx.opz()('TG', 'Proef Verzonnen'), null, 'na 24 uur telt de werklijst niet meer: de GET zet hem opnieuw');
+  await ctx.zet([{ praktijk: 'TG', naam: 'Proef Verzonnen', t: null }], t1 + 25 * 3600000);
+  assert.strictEqual(ctx.opz()('TG', 'Proef Verzonnen').t, '2026-11-05T20:42:09.000Z', 'oorspronkelijk tijdstip blijft');
+  ctx.Date = Date;
+  await ctx.zet([{ praktijk: 'GH', naam: 'Later', t: null }], Date.parse('2026-12-10T10:00:00Z'));
+  assert.strictEqual(ctx.opz()('TG', 'Proef Verzonnen'), null);
+  // werkvoorraad geeft niets terug → fout naar boven (de module vangt hem)
+  ctx.appSbRpc = async () => null;
+  await assert.rejects(ctx.zet([{ praktijk: 'TG', naam: 'x', t: null }], t1), /werkvoorraad gaf geen rij terug/);
+});

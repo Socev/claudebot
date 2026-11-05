@@ -23,6 +23,7 @@ n=$(grep -lE "['\"]sb_dienst_alias_zet['\"]" ./*.js | grep -v '^./docplan-koppel
 grep -qE "^RELEASE_OPTIONEEL=\".* docplan-koppel\.js" uitrol.sh || { echo "ROOD  uitrol.sh: docplan-koppel.js niet in RELEASE_OPTIONEEL"; f=1; }
 grep -q "^COPY docplan-koppel.js /app/release-bootstrap/docplan-koppel.js" Dockerfile || { echo "ROOD  Dockerfile: docplan-koppel.js niet in release-bootstrap"; f=1; }
 if grep -qiE "roosternamen|dienst_alias|docplan-koppel" facturen-ingang.js facturen.js; then echo "ROOD  facturen-ingang.js of facturen.js noemt de roosternamen (nooit via /fac)"; f=1; fi
+grep -q "nieuw: docplanNieuwZet, gevraagd: docplanNieuwOpzoeker" server.js || { echo "ROOD  server.js: Nieuwe persoon niet naar de werklijst (wv2531)"; f=1; }
 [ $f = 0 ] && echo "GROEN koppeling server.js, uitrol.sh en Dockerfile; /fac en facturen.js kennen de roosternamen niet"
 node --no-warnings --test --test-reporter=spec test/docplan-koppel.test.js || f=1
 exit $f
