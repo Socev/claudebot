@@ -3877,6 +3877,7 @@ function handleRequest(req, res) {
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
+      weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
       kalender: typeof kalenderInfo === 'function' ? kalenderInfo() : { aan: false },   // wv2333: OVIS Calendar in de app (laatste lijst: aantal, duur; geen titels)
       shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
       memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
@@ -17935,6 +17936,59 @@ const uitwijkCred = (function () {
       klok: function () { return ovisAms().klok; } });
   } catch (e) { logError('uitwijk-cred', e); return null; }
 })();
+// ── Weer in het ochtendbericht (wv2389, idee 28 meetpunt 3; ontwerp vault "01_Ontwikkeling/Weer in het ochtendbericht (ontwerp
+// 4-11-2026).md"; logica en waarom in weer-ochtend.js) ──
+// Nachtketenstap weer-ochtend (06:40): bij een drempel één rij bron 'weer' in ochtend_buffer; de briefing zet hem letterlijk onder de kop.
+// Sleutel openweathermap_api_key uit de kluis via de Management-API (als openai_api_key; NIET op de witte lijst, niet in de omgeving),
+// 10 min in het geheugen. Plekken met lat/lon afgerond op 1 decimaal IN de databank (exacte coördinaten verlaten hem niet). Nooit een
+// URL (appid) of fetch-foutmelding in een log. /health.weer: laatste ronde, dagteller (geen regel, geen sleutel).
+const WEER_SLEUTEL_NAAM = 'openweathermap_api_key';
+let weerSleutelCache = null;   // { w, tot }; alleen in het geheugen
+async function weerBeheer(query) {
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  if (!m || !pat) throw new Error('beheer-API niet ingesteld');
+  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
+    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-weer/1' },
+    body: JSON.stringify({ query: query }), signal: AbortSignal.timeout(20000) });
+  if (!r.ok) { await r.text().catch(function () {}); throw new Error('beheer gaf HTTP ' + r.status); }
+  return r.json();
+}
+async function weerSleutel() {
+  if (weerSleutelCache && Date.now() < weerSleutelCache.tot) return weerSleutelCache.w;
+  const rijen = await weerBeheer("select decrypted_secret as w from vault.decrypted_secrets where name = '" + WEER_SLEUTEL_NAAM + "'");
+  const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
+  weerSleutelCache = { w: w || null, tot: Date.now() + (w ? 10 : 2) * 60 * 1000 };
+  return weerSleutelCache.w;
+}
+const WEER_FILTER = { type: 'and', filters: [{ columnName: 'bron', condition: 'eq', value: 'weer' }] };
+async function weerRijZet(datum, tekst) {
+  const body = { filter: WEER_FILTER, data: { bron: 'weer', datum: datum, tekst: tekst }, returnData: true };
+  const poging = function () { return appN8nZend('POST', '/data-tables/' + APP_MELD_TABEL + '/rows/upsert', body); };
+  await poging().catch(function () { return new Promise(function (ok) { setTimeout(ok, 2000); }).then(poging); });
+  const j = await appN8nZend('GET', '/data-tables/' + APP_MELD_TABEL + '/rows?limit=5&filter=' + encodeURIComponent(JSON.stringify(WEER_FILTER)));
+  const l = (Array.isArray(j && j.data) ? j.data : []).filter(function (r) { return r && r.bron === 'weer' && r.datum === datum && r.tekst === tekst; });
+  if (!l.length) throw new Error('rij na het schrijven niet teruggelezen');
+}
+const weerOchtend = (function () {
+  const p = path.join(__dirname, 'weer-ochtend.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ staatPad: path.join(KLOKKEN_DIR, 'weer-ochtend.json'), sleutel: weerSleutel,
+      plekken: function () { return weerBeheer('select naam, klasse, round(lat::numeric, 1)::float8 as lat, round(lon::numeric, 1)::float8 as lon from secondbrain.locatie_plekken'); },
+      locatie: function () { return appSbRpc('sb_app_locatie', {}); },
+      kalender: function (d) { return appSbRpc('sb_kalender_tijdlijn', { p_van: d, p_tot: d }, 20000); },
+      ophalen: async function (url) {
+        const r = await fetch(url, { headers: { 'User-Agent': 'socev-weer/1', accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+        let j = null;
+        try { j = await r.json(); } catch (e) { j = null; }
+        return { status: r.status, json: j };
+      },
+      bufferZet: weerRijZet, boxRij: function (t) { return ovisBoxRij(t); },
+      log: function (o) { schrijfLog(nu() + ' weer ' + velden(o)); } });
+  } catch (e) { logError('weer-ochtend', e); return null; }
+})();
+function weerInfo() { if (!weerOchtend) return { aan: false }; try { return weerOchtend.info(); } catch (e) { return { aan: true, fout: true }; } }
 // ── Nachtketen (wv1868, SB2 fase 3d; ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase 3 intake, nachtketen en schrijvers (ontwerp
 // 28-10-2026).md" § 4; logica en waarom in nachtketen.js) ──
 // Elke minuut (echte pod, rol primair, vlag aan). Stappen in volgorde; elke stap gebruikt hetzelfde object en dezelfde stempel als zijn oude
@@ -18079,6 +18133,11 @@ const nachtketen = (function () {
       { naam: 'sb2-zoekindex', na: ['sb2-feitenlijst'], limiet_min: 15, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekindex) },
       { naam: 'sb2-zoekleer', na: ['sb2-zoekindex'], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekleer) },
       { naam: 'ovis-kalender', start_na: [6, 35], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisKalender) },
+      // wv2389 (idee 28): weerregel voor de briefing van 07:00; stil bij een fout (ok:true met detail.fout), box-rij pas op de tweede dag
+      { naam: 'weer-ochtend', start_na: [6, 40], limiet_min: 3, pogingen: 2, inProces: true, doe: async function (ctx) {
+        if (!weerOchtend) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        return weerOchtend.doe({ ams: ctx.ams });
+      } },
       // wv1430: ná de n8n-schrijvers (nachtconsolidatie, raw_input, Teams, WhatsApp) en ná zoeken; achter ovis-kalender zodat die voorgaat
       { naam: 'sb2-steekwoorden', start_na: [5, 0], na: ['ovis-deadlines', 'sb2-zoekleer'], limiet_min: 30, pogingen: 2, meldtZelf: true,
         voorwaarde: nachtN8nVoorwaarde([NACHT_N8N.nachtconsolidatie, NACHT_N8N.rawInput, NACHT_N8N.teams, NACHT_N8N.whatsapp], [6, 40], false),

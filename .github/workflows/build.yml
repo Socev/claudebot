@@ -437,6 +437,9 @@ jobs:
       - name: "nachtketen (wv1868, nachtorkestrator)"
         if: ${{ !cancelled() }}
         run: bash test/nachtketen.sh
+      - name: "weer-ochtend (wv2389, idee 28: weerregel in het ochtendbericht)"
+        if: ${{ !cancelled() }}
+        run: bash test/weer-ochtend.sh
       # Publicatieservice (wv1869, SB2 fase 3b): bronnotities + register via de outbox (nep-Supabase met de regels van 0012), proef 7 en 8.
       - name: "intake-publicatie (wv1869, publicatieservice)"
         if: ${{ !cancelled() }}
