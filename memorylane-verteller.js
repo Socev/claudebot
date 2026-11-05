@@ -23,6 +23,13 @@
  *  - Afspelen alleen als de sha256 van de huidige tekst gelijk is (anders 'verouderd'). Weghalen wist map en rij. opruim() wist de audio
  *    van elke herinnering die weg is of niet meer mag (Privé/gevoelig/blok): direct in de eerstvolgende tik (review ontwerp MOET 2).
  * PRIVACY. Nooit tekst in logs, box, /health of fouten: alleen aantallen en bedragen.
+ *
+ * WV2484 (David 5-11-2026 14:39, Engineer-knop: naast voorlezen ook "het verhaal te genereren als een Elevenlabs v4 verhaal … in míjn stem").
+ * Twee vormen, elk met eigen map en tabel, één gezamenlijk plafond en één aanvraag tegelijk:
+ *  - 'voorlezen' (zoals wv2366): <dir>/verteller/<hid>, tabel ml_verteller.
+ *  - 'verhaal': <dir>/verteller-verhaal/<hid>, tabel ml_verteller_verhaal. maken() krijgt dan een voorbereiding (memorylane-vertelscript.js
+ *    schrijft eerst het script met audio-tags, of hergebruikt het bewaarde); het plafond wordt vooraf op een ruime schatting getoetst
+ *    (tekens × 1,3 + € 0,10 voor Claude) en na het script opnieuw op de echte lengte; de kosten van Claude tellen mee in dezelfde aanvraag.
  */
 const fs = require('fs');
 const path = require('path');
@@ -30,6 +37,8 @@ const crypto = require('crypto');
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS ml_verteller (hid TEXT PRIMARY KEY, op TEXT NOT NULL, hash TEXT NOT NULL, stem TEXT NOT NULL, model TEXT NOT NULL,
+  delen INTEGER NOT NULL, tekens INTEGER NOT NULL, eur REAL NOT NULL, bytes INTEGER NOT NULL, credits INTEGER);
+CREATE TABLE IF NOT EXISTS ml_verteller_verhaal (hid TEXT PRIMARY KEY, op TEXT NOT NULL, hash TEXT NOT NULL, stem TEXT NOT NULL, model TEXT NOT NULL,
   delen INTEGER NOT NULL, tekens INTEGER NOT NULL, eur REAL NOT NULL, bytes INTEGER NOT NULL, credits INTEGER);
 CREATE TABLE IF NOT EXISTS ml_verteller_aanvraag (id INTEGER PRIMARY KEY, t TEXT NOT NULL, hid TEXT NOT NULL, tekens INTEGER NOT NULL,
   eur REAL NOT NULL, status TEXT NOT NULL);
@@ -40,6 +49,8 @@ const STEMGEVOEL = { stability: 0.5, similarity_boost: 0.75, speed: 0.95, use_sp
 const MAX_TEKENS = 6000, DEEL_MAX = 2400, EUR_PER_1000 = 0.10, PLAFOND_EUR = 5, PER_DAG = 20, TUSSEN_MS = 10000;
 const MAX_DEEL_BYTES = 4 * 1024 * 1024, TIMEOUT_MS = 180000, BEWAAR_AANVRAAG_DAGEN = 70;
 const HID_RE = /^h[0-9a-f]{16}$/;
+const VORMEN = { voorlezen: { map: 'verteller', tabel: 'ml_verteller' }, verhaal: { map: 'verteller-verhaal', tabel: 'ml_verteller_verhaal' } };
+function vormVan(v) { return v === 'verhaal' ? 'verhaal' : 'voorlezen'; }
 
 function sha256(x) { return crypto.createHash('sha256').update(x).digest('hex'); }
 function dagNL(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
@@ -56,23 +67,32 @@ function maandBegin(ms) { return nlMiddernacht(dagNL(ms).slice(0, 8) + '01'); }
 function euro(x) { return '€ ' + (Math.round(x * 100) / 100).toFixed(2).replace('.', ','); }
 function prijsDeel(tekens) { return Math.max(0.01, Math.ceil(tekens * EUR_PER_1000 / 10) / 100); }
 function prijs(delen) { return Math.round(delen.reduce((s, d) => s + prijsDeel(d.length), 0) * 100) / 100; }
+// ruwe schatting voor een tekst die er nog niet is (aantal tekens): verdeeld over gelijke delen ≤ DEEL_MAX
+function prijsTekens(n) {
+  n = Math.max(0, Math.round(Number(n) || 0));
+  if (!n) return 0;
+  const k = Math.ceil(n / DEEL_MAX), per = Math.ceil(n / k);
+  return Math.round(k * prijsDeel(per) * 100) / 100;
+}
 
 /*
  * De tekst die de verteller voorleest: titel + verhaal, zonder ==markering== en stuurtekens, "Socev" uitgesproken als "Zo Kef" (David 4-11),
  * hooguit MAX_TEKENS (afgekapt op een zinsgrens, zoals de app). → { tekst, afgekapt } (tekst '' = niets te vertellen)
  */
-function tekstVan(titel, verhaal) {
+function tekstVan(titel, verhaal, opt) {
   const schoon = (t) => String(t == null ? '' : t).normalize('NFC').replace(/==([^=\n]{1,200})==/g, '$1')
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g, ' ')
     .replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   const v = schoon(verhaal);
   if (!v) return { tekst: '', afgekapt: false };
-  const heel = [schoon(titel), v].filter(Boolean).join('\n\n').replace(/\bSocev\b/gi, 'Zo Kef');
+  const heel0 = [schoon(titel), v].filter(Boolean).join('\n\n');
+  const heel = opt && opt.uitspraak === false ? heel0 : uitspraak(heel0);   // wv2484: de bron voor het vertelscript zonder de uitspraak
   if (heel.length <= MAX_TEKENS) return { tekst: heel, afgekapt: false };
   const z = heel.slice(0, MAX_TEKENS);
   const r = Math.max(z.lastIndexOf('. '), z.lastIndexOf('.\n'), z.lastIndexOf('! '), z.lastIndexOf('? '));
   return { tekst: (r > MAX_TEKENS * 0.5 ? z.slice(0, r + 1) : z).trim(), afgekapt: true };
 }
+function uitspraak(t) { return String(t || '').replace(/\bSocev\b/gi, 'Zo Kef'); }
 // Tekst in delen ≤ max: op alinea's, een te lange alinea op zinnen, een te lange zin hard.
 function delenVan(tekst, max) {
   const m = max || DEEL_MAX, uit = [];
@@ -110,43 +130,60 @@ function maak(o) {
   const doeFetch = typeof o.fetch === 'function' ? o.fetch : (u, x) => fetch(u, x);
   const ROUTER = String(o.routerUrl || 'https://f3395cd5.primumnonnocere.olares.com').replace(/\/+$/, '');
   db.exec(SCHEMA_SQL);
-  const MAP = path.join(o.dir, 'verteller');
-  fs.mkdirSync(MAP, { recursive: true, mode: 0o700 });
-  try { fs.chmodSync(MAP, 0o700); } catch (e) { /* niet van ons */ }
+  const MAPPEN = {};
+  for (const [v, x] of Object.entries(VORMEN)) {
+    MAPPEN[v] = path.join(o.dir, x.map);
+    fs.mkdirSync(MAPPEN[v], { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(MAPPEN[v], 0o700); } catch (e) { /* niet van ons */ }
+  }
+  const qv = {};
+  for (const [v, x] of Object.entries(VORMEN)) {
+    const T = x.tabel;
+    qv[v] = {
+      v: db.prepare('SELECT * FROM ' + T + ' WHERE hid = ?'),
+      zet: db.prepare('INSERT INTO ' + T + ' (hid, op, hash, stem, model, delen, tekens, eur, bytes, credits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+        'ON CONFLICT (hid) DO UPDATE SET op = excluded.op, hash = excluded.hash, stem = excluded.stem, model = excluded.model, delen = excluded.delen, ' +
+        'tekens = excluded.tekens, eur = excluded.eur, bytes = excluded.bytes, credits = excluded.credits'),
+      weg: db.prepare('DELETE FROM ' + T + ' WHERE hid = ?'),
+      alle: db.prepare('SELECT hid FROM ' + T),
+      tel: db.prepare('SELECT count(*) n, COALESCE(sum(bytes), 0) bytes FROM ' + T),
+    };
+  }
   const q = {
-    v: db.prepare('SELECT * FROM ml_verteller WHERE hid = ?'),
-    zet: db.prepare('INSERT INTO ml_verteller (hid, op, hash, stem, model, delen, tekens, eur, bytes, credits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
-      'ON CONFLICT (hid) DO UPDATE SET op = excluded.op, hash = excluded.hash, stem = excluded.stem, model = excluded.model, delen = excluded.delen, ' +
-      'tekens = excluded.tekens, eur = excluded.eur, bytes = excluded.bytes, credits = excluded.credits'),
-    weg: db.prepare('DELETE FROM ml_verteller WHERE hid = ?'),
-    alle: db.prepare('SELECT hid FROM ml_verteller'),
-    tel: db.prepare('SELECT count(*) n, COALESCE(sum(bytes), 0) bytes FROM ml_verteller'),
     aNieuw: db.prepare("INSERT INTO ml_verteller_aanvraag (t, hid, tekens, eur, status) VALUES (?, ?, ?, ?, 'bezig')"),
     aZet: db.prepare('UPDATE ml_verteller_aanvraag SET status = ?, eur = ? WHERE id = ?'),
     aSinds: db.prepare('SELECT count(*) n FROM ml_verteller_aanvraag WHERE t >= ?'),
     aBesteed: db.prepare("SELECT COALESCE(sum(eur), 0) eur FROM ml_verteller_aanvraag WHERE t >= ? AND status <> 'geweigerd'"),
     aLaatst: db.prepare('SELECT max(t) t FROM ml_verteller_aanvraag'),
     aOud: db.prepare('DELETE FROM ml_verteller_aanvraag WHERE t < ?'),
+    aEen: db.prepare('SELECT eur FROM ml_verteller_aanvraag WHERE id = ?'),
   };
-  let bezig = null;   // hid waarvoor nu gemaakt wordt
-  let laatsteFout = null;   // { hid, fout } van de laatste mislukte aanvraag (gewone taal, zonder tekst)
-  function map(hid) { if (!HID_RE.test(String(hid))) throw new Error('ongeldige herinnering'); return path.join(MAP, hid); }
+  let bezig = null;   // { hid, vorm } waarvoor nu gemaakt wordt (één aanvraag tegelijk, over beide vormen)
+  const fouten = new Map();   // hid|vorm → fout (gewone taal, zonder tekst) van de laatste mislukte aanvraag
+  const isBezig = (hid, vorm) => !!bezig && bezig.hid === hid && bezig.vorm === vorm;
+  function map(hid, vorm) { if (!HID_RE.test(String(hid))) throw new Error('ongeldige herinnering'); return path.join(MAPPEN[vormVan(vorm)], hid); }
   function besteed() { return Math.round(q.aBesteed.get(maandBegin(nu())).eur * 100) / 100; }
-  function bestanden(hid, n) {
-    try { for (let i = 1; i <= n; i++) if (!fs.statSync(path.join(map(hid), i + '.mp3')).isFile()) return false; return true; } catch (e) { return false; }
+  function bestanden(hid, n, vorm) {
+    try { for (let i = 1; i <= n; i++) if (!fs.statSync(path.join(map(hid, vorm), i + '.mp3')).isFile()) return false; return true; } catch (e) { return false; }
   }
   // Stand voor de app. hash = hashVan(huidige tekst) of null (geen tekst). → { stand: 'bezig'|'klaar'|'verouderd'|null, delen, op, fout }
-  function stand(hid, hash) {
-    if (bezig === hid) return { stand: 'bezig', delen: 0, op: null, fout: null };
-    const r = q.v.get(hid);
-    const f = laatsteFout && laatsteFout.hid === hid ? laatsteFout.fout : null;
-    if (!r || !bestanden(hid, r.delen)) return { stand: null, delen: 0, op: null, fout: f };
+  function stand(hid, hash, vorm) {
+    vorm = vormVan(vorm);
+    if (isBezig(hid, vorm)) return { stand: 'bezig', delen: 0, op: null, fout: null };
+    const r = qv[vorm].v.get(hid);
+    const f = fouten.get(hid + '|' + vorm) || null;
+    if (!r || !bestanden(hid, r.delen, vorm)) return { stand: null, delen: 0, op: null, fout: f };
     return { stand: hash && r.hash === hash ? 'klaar' : 'verouderd', delen: r.delen, op: r.op, fout: f };
   }
   // Wat (opnieuw) maken ongeveer kost en of het binnen het plafond past. → { eur, tekens, delen, rest_eur, past }
-  function vooraf(tekst) {
-    const d = delenVan(tekst), e = prijs(d), rest = Math.max(0, Math.round((PLAFOND_EUR - besteed()) * 100) / 100);
-    return { eur: e, tekens: String(tekst || '').length, delen: d.length, rest_eur: rest, plafond_eur: PLAFOND_EUR, past: e <= rest + 1e-9 };
+  // wv2484: tekst mag ook een aantal tekens zijn (schatting voor een script dat er nog niet is); extraEur = de kosten van Claude erbij.
+  function vooraf(tekst, extraEur) {
+    const schat = typeof tekst === 'number';
+    const n = schat ? Math.max(0, Math.round(tekst)) : String(tekst || '').length;
+    const dl = schat ? Math.ceil(n / DEEL_MAX) : delenVan(tekst).length;
+    const e = Math.round(((schat ? prijsTekens(n) : prijs(delenVan(tekst))) + (Number(extraEur) || 0)) * 100) / 100;
+    const rest = Math.max(0, Math.round((PLAFOND_EUR - besteed()) * 100) / 100);
+    return { eur: e, tekens: n, delen: dl, rest_eur: rest, plafond_eur: PLAFOND_EUR, past: e <= rest + 1e-9, geschat: schat };
   }
   async function eenDeel(sleutel, tekst) {
     const r = await doeFetch(ROUTER + '/v1/text-to-speech/' + STEM + '/stream?output_format=' + FORMAAT, { method: 'POST', redirect: 'manual',
@@ -159,18 +196,44 @@ function maak(o) {
     return { http: r.status, buf: b, credits: Number.isFinite(cc) && cc >= 0 ? cc : null };
   }
   function isMp3(b) { return b.length > 200 && (b.toString('latin1', 0, 3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)); }
-  // De achtergrondklus: alle delen maken, pas daarna op hun plek zetten. Nooit opnieuw proberen.
-  async function doe(hid, tekst, d, aid, e) {
-    const tmp = path.join(MAP, '.' + hid + '-' + crypto.randomBytes(4).toString('hex'));
+  function weigerTekst(t) {
+    if (o.geheimRaak && o.geheimRaak(t)) return 'er staat iets in dat niet naar buiten mag; de verteller vertelt dit niet';
+    if (o.markerRaak && o.markerRaak([t])) return 'er staat iets in dat op een patiëntgegeven lijkt; de verteller vertelt dit niet';
+    return null;
+  }
+  // De achtergrondklus: (wv2484: eerst het script,) alle delen maken, pas daarna op hun plek zetten. Nooit opnieuw proberen.
+  async function doe(hid, vorm, tekst, d, aid, e, voor) {
+    const MAPV = MAPPEN[vorm];
+    const tmp = path.join(MAPV, '.' + hid + '-' + crypto.randomBytes(4).toString('hex'));
     let gemaakt = 0, credits = 0, bytes = 0, telt = 0;
+    const sleutelF = hid + '|' + vorm;
     const klaar = (status, eur, f) => {
       try { q.aZet.run(status, Math.round(eur * 100) / 100, aid); } catch (x) { fout('ml-verteller', x); }
       try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (x) { /* weg */ }
-      laatsteFout = f ? { hid, fout: f } : (laatsteFout && laatsteFout.hid === hid ? null : laatsteFout);
+      if (f) fouten.set(sleutelF, f); else fouten.delete(sleutelF);
     };
     try {
+      if (voor) {
+        // wv2484: het vertelscript (Claude) — de kosten tellen vanaf hier mee, ook als ElevenLabs daarna weigert
+        let s;
+        try { s = await voor.script(); } catch (x) { fout('ml-verteller', x); s = { fout: 'het script schrijven lukte niet', eur: 0 }; }
+        const se = Math.max(0, Number(s && s.eur) || 0);
+        telt += se;
+        if (!s || s.fout || !s.tekst) return klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, (s && s.fout) || 'het script schrijven lukte niet');
+        tekst = String(s.tekst);
+        const w = weigerTekst(tekst);
+        if (w) return klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, w);
+        d = delenVan(tekst);
+        if (!d.length) return klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, 'het script bleef leeg');
+        e = Math.round((prijs(d) + se) * 100) / 100;
+        // plafond op de echte lengte (de reservering van deze aanvraag telt niet dubbel)
+        const al = Math.round((besteed() - (q.aEen.get(aid) || { eur: 0 }).eur) * 100) / 100;
+        if (al + e > PLAFOND_EUR + 1e-9) return klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, 'het maandplafond voor de verteller (' + euro(PLAFOND_EUR) + ') is bereikt: deze maand al ' + euro(al) +
+          ', dit verhaal kost ± ' + euro(e) + '. Het script is bewaard; vraag Socev om het plafond te verhogen.');
+        try { q.aZet.run('bezig', e, aid); } catch (x) { fout('ml-verteller', x); }
+      }
       const sleutel = await o.sleutel().catch(() => null);
-      if (!sleutel) return klaar('geweigerd', 0, 'de sleutel voor ElevenLabs is nu niet te lezen; er is niets gemaakt');
+      if (!sleutel) return klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, 'de sleutel voor ElevenLabs is nu niet te lezen; er is niets ingesproken');
       fs.mkdirSync(tmp, { mode: 0o700 });
       for (let i = 0; i < d.length; i++) {
         telt += prijsDeel(d[i].length);   // vanaf hier kan ElevenLabs dit deel rekenen
@@ -184,12 +247,12 @@ function maak(o) {
         fs.writeFileSync(path.join(tmp, (i + 1) + '.mp3'), u.buf, { mode: 0o600 });
         gemaakt++; bytes += u.buf.length; if (u.credits !== null) credits += u.credits;
       }
-      const doel = map(hid), oud = doel + '.oud-' + crypto.randomBytes(4).toString('hex');
+      const doel = map(hid, vorm), oud = doel + '.oud-' + crypto.randomBytes(4).toString('hex');
       let hadOud = false;
       try { fs.renameSync(doel, oud); hadOud = true; } catch (x) { /* er was nog niets */ }
       fs.renameSync(tmp, doel);
       if (hadOud) { try { fs.rmSync(oud, { recursive: true, force: true }); } catch (x) { /* opruim haalt hem later */ } }
-      q.zet.run(hid, new Date(nu()).toISOString(), hashVan(tekst), STEM, MODEL, gemaakt, tekst.length, e, bytes, credits || null);
+      qv[vorm].zet.run(hid, new Date(nu()).toISOString(), hashVan(tekst), STEM, MODEL, gemaakt, tekst.length, e, bytes, credits || null);
       klaar('klaar', e, null);
     } catch (x) {
       fout('ml-verteller', x);
@@ -198,77 +261,87 @@ function maak(o) {
   }
   /*
    * Maken (na de toetsen in memorylane-delen.js en de vingerafdruk in server.js). tekst = tekstVan(...).tekst.
+   * wv2484: vorm 'verhaal' met voor = { tekens (schatting), extraEur, script: async () → { tekst, eur } | { fout, eur } }: tekst mag dan leeg zijn;
+   * de verteller toetst het plafond vooraf op de schatting en na het script op de echte lengte.
    * → { status: 202, body: { ok, bezig: true, eur } } of een weigering; de aanroep zelf loopt op de achtergrond (o.klaar(hid) daarna).
    */
-  function maken(hid, tekst) {
+  function maken(hid, tekst, vorm, voor) {
+    vorm = vormVan(vorm);
     if (!HID_RE.test(String(hid))) return { status: 400, body: { ok: false, fout: 'ongeldige herinnering' } };
-    if (bezig) return { status: 409, body: { ok: false, fout: bezig === hid ? 'de verteller is hier al mee bezig' : 'de verteller is nog met een andere herinnering bezig; probeer het zo opnieuw' } };
+    if (bezig) return { status: 409, body: { ok: false, fout: bezig.hid === hid ? 'de verteller is hier al mee bezig' : 'de verteller is nog met een andere herinnering bezig; probeer het zo opnieuw' } };
     const t = String(tekst || '');
-    const d = delenVan(t);
-    if (!d.length) return { status: 409, body: { ok: false, fout: 'er is nog geen verhaal om te vertellen' } };
-    if (o.geheimRaak && o.geheimRaak(t)) return { status: 409, body: { ok: false, fout: 'er staat iets in dat niet naar buiten mag; de verteller vertelt dit niet' } };
-    if (o.markerRaak && o.markerRaak([t])) return { status: 409, body: { ok: false, fout: 'er staat iets in dat op een patiëntgegeven lijkt; de verteller vertelt dit niet' } };
+    const metScript = !!(voor && typeof voor.script === 'function');
+    const d = metScript ? [] : delenVan(t);
+    if (!metScript && !d.length) return { status: 409, body: { ok: false, fout: 'er is nog geen verhaal om te vertellen' } };
+    if (!metScript) { const w = weigerTekst(t); if (w) return { status: 409, body: { ok: false, fout: w } }; }
     const n = nu();
     try { q.aOud.run(new Date(n - BEWAAR_AANVRAAG_DAGEN * 86400000).toISOString()); } catch (x) { /* volgende keer */ }
     if (q.aSinds.get(dagBegin(n)).n >= PER_DAG) return { status: 429, body: { ok: false, fout: 'vandaag al ' + PER_DAG + ' keer de verteller laten maken; morgen weer' } };
     const l = q.aLaatst.get().t;
     if (l && n - Date.parse(l) < TUSSEN_MS) return { status: 429, body: { ok: false, fout: 'even wachten (10 seconden) en dan opnieuw' } };
-    const e = prijs(d), al = besteed();
+    const e = metScript ? Math.round((prijsTekens(voor.tekens) + (Number(voor.extraEur) || 0)) * 100) / 100 : prijs(d), al = besteed();
     if (al + e > PLAFOND_EUR + 1e-9) {
       return { status: 409, body: { ok: false, plafond: true, fout: 'het maandplafond voor de verteller (' + euro(PLAFOND_EUR) + ') is bereikt: deze maand al ' + euro(al) +
         ', dit verhaal kost ± ' + euro(e) + '. Vraag Socev om het plafond te verhogen.' } };
     }
-    const aid = Number(q.aNieuw.run(new Date(n).toISOString(), hid, t.length, e).lastInsertRowid);
-    bezig = hid;
-    if (laatsteFout && laatsteFout.hid === hid) laatsteFout = null;
-    Promise.resolve().then(() => doe(hid, t, d, aid, e)).catch((x) => fout('ml-verteller', x)).finally(() => {
+    const aid = Number(q.aNieuw.run(new Date(n).toISOString(), hid, metScript ? Math.max(0, Math.round(Number(voor.tekens) || 0)) : t.length, e).lastInsertRowid);
+    bezig = { hid, vorm };
+    fouten.delete(hid + '|' + vorm);
+    Promise.resolve().then(() => doe(hid, vorm, t, d, aid, e, metScript ? voor : null)).catch((x) => fout('ml-verteller', x)).finally(() => {
       bezig = null;
       if (typeof o.klaar === 'function') { try { o.klaar(hid); } catch (x) { fout('ml-verteller', x); } }
     });
-    return { status: 202, body: { ok: true, bezig: true, eur: e, delen: d.length } };
+    return { status: 202, body: { ok: true, bezig: true, eur: e, delen: metScript ? Math.ceil((Number(voor.tekens) || 1) / DEEL_MAX) : d.length } };
   }
   // Eén deel afspelen. hash = hashVan(huidige tekst). → { status, body: { ok, n, delen, volgende, mime, data } }
-  function deel(hid, n, hash) {
-    const r = HID_RE.test(String(hid)) ? q.v.get(hid) : null;
-    if (!r) return { status: 404, body: { ok: false, fout: 'nog geen vertelling in je stem' } };
+  function deel(hid, n, hash, vorm) {
+    vorm = vormVan(vorm);
+    const r = HID_RE.test(String(hid)) ? qv[vorm].v.get(hid) : null;
+    if (!r) return { status: 404, body: { ok: false, fout: vorm === 'verhaal' ? 'nog geen vertelling als verhaal' : 'nog geen vertelling in je stem' } };
     if (!hash || r.hash !== hash) return { status: 409, body: { ok: false, fout: 'het verhaal is veranderd sinds de vertelling; maak hem opnieuw', verouderd: true } };
     const k = Number(n);
     if (!Number.isInteger(k) || k < 1 || k > r.delen) return { status: 404, body: { ok: false, fout: 'geen geluid' } };
     let b;
-    try { b = fs.readFileSync(path.join(map(hid), k + '.mp3')); } catch (e) { return { status: 404, body: { ok: false, fout: 'geen geluid' } }; }
+    try { b = fs.readFileSync(path.join(map(hid, vorm), k + '.mp3')); } catch (e) { return { status: 404, body: { ok: false, fout: 'geen geluid' } }; }
     if (!isMp3(b) || b.length > MAX_DEEL_BYTES) return { status: 404, body: { ok: false, fout: 'geen geluid' } };
     return { status: 200, body: { ok: true, n: k, delen: r.delen, volgende: k < r.delen ? k + 1 : null, mime: 'audio/mpeg', data: b.toString('base64') } };
   }
-  function wis(hid) {
-    try { fs.rmSync(map(hid), { recursive: true, force: true }); } catch (e) { fout('ml-verteller', e); return false; }
-    q.weg.run(hid);
+  function wis(hid, vorm) {
+    try { fs.rmSync(map(hid, vorm), { recursive: true, force: true }); } catch (e) { fout('ml-verteller', e); return false; }
+    qv[vorm].weg.run(hid);
     return true;
   }
-  function weg(hid) {
+  function weg(hid, vorm) {
+    vorm = vormVan(vorm);
     if (!HID_RE.test(String(hid))) return { status: 400, body: { ok: false, fout: 'ongeldige herinnering' } };
-    if (bezig === hid) return { status: 409, body: { ok: false, fout: 'de verteller is hier nog mee bezig; probeer het zo opnieuw' } };
-    if (!wis(hid)) return { status: 503, body: { ok: false, fout: 'weghalen lukte niet; probeer het opnieuw' } };
-    if (laatsteFout && laatsteFout.hid === hid) laatsteFout = null;
+    if (isBezig(hid, vorm)) return { status: 409, body: { ok: false, fout: 'de verteller is hier nog mee bezig; probeer het zo opnieuw' } };
+    if (!wis(hid, vorm)) return { status: 503, body: { ok: false, fout: 'weghalen lukte niet; probeer het opnieuw' } };
+    fouten.delete(hid + '|' + vorm);
     return { status: 200, body: { ok: true, verteller: null } };
   }
-  // houd(hid) → true = mag blijven. Wist de audio van wat weg is of niet meer mag, en achtergebleven tijdelijke mappen. → aantal gewist
+  // houd(hid) → true = mag blijven. Wist de audio (beide vormen) van wat weg is of niet meer mag, en achtergebleven tijdelijke mappen. → aantal gewist
   function opruim(houd) {
     let n = 0;
-    for (const r of q.alle.all()) { if (r.hid === bezig) continue; let h = false; try { h = !!houd(r.hid); } catch (e) { h = true; } if (!h && wis(r.hid)) n++; }
-    let namen = [];
-    try { namen = fs.readdirSync(MAP); } catch (e) { /* leeg */ }
-    for (const x of namen) {
-      if (x.startsWith('.') && !(bezig && x.startsWith('.' + bezig + '-'))) { try { fs.rmSync(path.join(MAP, x), { recursive: true, force: true }); } catch (e) { /* later */ } }
-      else if (/\.oud-[0-9a-f]{8}$/.test(x)) { try { fs.rmSync(path.join(MAP, x), { recursive: true, force: true }); } catch (e) { /* later */ } }
-      else if (HID_RE.test(x) && !q.v.get(x) && x !== bezig) { try { fs.rmSync(path.join(MAP, x), { recursive: true, force: true }); } catch (e) { /* later */ } }
+    for (const vorm of Object.keys(VORMEN)) {
+      const MAPV = MAPPEN[vorm];
+      const bz = bezig && bezig.vorm === vorm ? bezig.hid : null;
+      for (const r of qv[vorm].alle.all()) { if (r.hid === bz) continue; let h = false; try { h = !!houd(r.hid); } catch (e) { h = true; } if (!h && wis(r.hid, vorm)) n++; }
+      let namen = [];
+      try { namen = fs.readdirSync(MAPV); } catch (e) { /* leeg */ }
+      for (const x of namen) {
+        if (x.startsWith('.') && !(bz && x.startsWith('.' + bz + '-'))) { try { fs.rmSync(path.join(MAPV, x), { recursive: true, force: true }); } catch (e) { /* later */ } }
+        else if (/\.oud-[0-9a-f]{8}$/.test(x)) { try { fs.rmSync(path.join(MAPV, x), { recursive: true, force: true }); } catch (e) { /* later */ } }
+        else if (HID_RE.test(x) && !qv[vorm].v.get(x) && x !== bz) { try { fs.rmSync(path.join(MAPV, x), { recursive: true, force: true }); } catch (e) { /* later */ } }
+      }
     }
     return n;
   }
   function info() {
-    const t = q.tel.get();
-    return { aantal: t.n, mb: Math.round(t.bytes / 1048576 * 10) / 10, maand_eur: besteed(), plafond_eur: PLAFOND_EUR, bezig: !!bezig, stem: 'eigen (ElevenLabs)', model: MODEL };
+    const t = qv.voorlezen.tel.get(), tv = qv.verhaal.tel.get();
+    return { aantal: t.n, als_verhaal: tv.n, mb: Math.round((t.bytes + tv.bytes) / 1048576 * 10) / 10, maand_eur: besteed(), plafond_eur: PLAFOND_EUR, bezig: !!bezig,
+      stem: 'eigen (ElevenLabs)', model: MODEL };
   }
-  return { tekstVan, hashVan, stand, vooraf, maken, deel, weg, opruim, info };
+  return { tekstVan, hashVan, uitspraakVan: uitspraak, stand, vooraf, maken, deel, weg, opruim, info };
 }
 
-module.exports = { maak, tekstVan, delenVan, hashVan, prijs, STEM, MODEL, PLAFOND_EUR, MAX_TEKENS, DEEL_MAX };
+module.exports = { maak, tekstVan, delenVan, hashVan, prijs, prijsTekens, uitspraak, STEM, MODEL, PLAFOND_EUR, MAX_TEKENS, DEEL_MAX };

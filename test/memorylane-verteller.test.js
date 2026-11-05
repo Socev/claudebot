@@ -151,3 +151,66 @@ test('weghalen en opruimen (herinnering weg of gevoelig geworden)', async () => 
   assert.deepStrictEqual(fs.readdirSync(path.join(x.dir, 'verteller')), []);
   assert.strictEqual(x.v.info().aantal, 0);
 });
+
+// ── wv2484: vorm 'verhaal' (eerst het vertelscript, dan ElevenLabs; eigen map en tabel, gedeeld plafond) ──
+const wachtV = async (x, hid) => { for (let i = 0; i < 200 && x.v.stand(hid, null, 'verhaal').stand === 'bezig'; i++) await new Promise((r) => setTimeout(r, 5)); };
+test('verhaal: script eerst, dan de stem; eigen map en tabel; kosten van het script tellen mee; voorlezen blijft los', async () => {
+  const x = opzet();
+  const script = '[softly] Proefkamp bij het meer.\n\n[laughs] De tent lekte drie dagen.';
+  let gevraagd = 0;
+  x.v.maken(HID, 'Voorleesversie.'); await wacht(x, HID); x.schuif(11000);
+  const u = x.v.maken(HID, '', 'verhaal', { tekens: 120, extraEur: 0.1, script: async () => { gevraagd++; return { tekst: script, eur: 0.03 }; } });
+  assert.strictEqual(u.status, 202);
+  assert.strictEqual(x.v.stand(HID, null, 'verhaal').stand, 'bezig');
+  assert.strictEqual(x.v.stand(HID, V.hashVan('Voorleesversie.')).stand, 'klaar', 'voorlezen blijft speelbaar');
+  await wachtV(x, HID);
+  assert.strictEqual(gevraagd, 1);
+  const a = x.nf.aanroepen[1];
+  assert.strictEqual(a.body.text, script, 'het script met tags gaat naar ElevenLabs'); assert.strictEqual(a.body.model_id, 'eleven_v4');
+  const h = V.hashVan(script);
+  assert.strictEqual(x.v.stand(HID, h, 'verhaal').stand, 'klaar');
+  assert.ok(fs.existsSync(path.join(x.dir, 'verteller-verhaal', HID, '1.mp3')));
+  assert.strictEqual(fs.statSync(path.join(x.dir, 'verteller-verhaal')).mode & 0o777, 0o700);
+  assert.strictEqual(x.v.deel(HID, 1, h, 'verhaal').status, 200);
+  assert.strictEqual(x.v.deel(HID, 1, h).status, 409, 'de voorleesversie heeft een andere hash');
+  const r = x.db.prepare('SELECT * FROM ml_verteller_aanvraag ORDER BY id DESC LIMIT 1').get();
+  assert.strictEqual(r.status, 'klaar'); assert.strictEqual(r.eur, 0.04, 'script € 0,03 + stem € 0,01');
+  assert.ok(!/Proefkamp|tent/.test(JSON.stringify(x.db.prepare('SELECT * FROM ml_verteller_verhaal').all())), 'geen tekst in de databank');
+  assert.strictEqual(x.v.info().als_verhaal, 1); assert.strictEqual(x.v.info().aantal, 1);
+  // weghalen van de ene vorm laat de andere staan
+  assert.strictEqual(x.v.weg(HID, 'verhaal').status, 200);
+  assert.strictEqual(x.v.stand(HID, h, 'verhaal').stand, null);
+  assert.strictEqual(x.v.stand(HID, V.hashVan('Voorleesversie.')).stand, 'klaar');
+});
+test('verhaal: vooraf geschat; plafond vooraf op de schatting en na het script op de echte lengte; scriptfout = niets ingesproken', async () => {
+  const x = opzet();
+  const vo = x.v.vooraf(3000, 0.1);
+  assert.strictEqual(vo.geschat, true); assert.strictEqual(vo.delen, 2); assert.strictEqual(vo.eur, 0.4, '2 × € 0,15 + € 0,10');
+  assert.strictEqual(x.v.maken(HID, '', 'verhaal', { tekens: 60000, extraEur: 0.1, script: async () => ({ tekst: 'x', eur: 0 }) }).status, 409, 'schatting boven het plafond');
+  // script komt veel langer terug dan geschat: geen stem, wel de scriptkosten
+  const lang = ('Een lange zin over het meer. ').repeat(1900).trim();
+  assert.strictEqual(x.v.maken(HID, '', 'verhaal', { tekens: 100, extraEur: 0.1, script: async () => ({ tekst: lang, eur: 0.05 }) }).status, 202);
+  await wachtV(x, HID);
+  assert.strictEqual(x.nf.aanroepen.length, 0, 'niets naar ElevenLabs');
+  assert.match(x.v.stand(HID, null, 'verhaal').fout, /maandplafond/);
+  assert.strictEqual(x.v.info().maand_eur, 0.05);
+  x.schuif(11000);
+  x.v.maken(HID, '', 'verhaal', { tekens: 100, extraEur: 0.1, script: async () => ({ fout: 'Claude gaf geen antwoord', eur: 0 }) });
+  await wachtV(x, HID);
+  assert.strictEqual(x.v.stand(HID, null, 'verhaal').fout, 'Claude gaf geen antwoord');
+  assert.strictEqual(x.nf.aanroepen.length, 0);
+  x.schuif(11000);
+  x.v.maken(HID, '', 'verhaal', { tekens: 100, extraEur: 0.1, script: async () => ({ tekst: 'Er staat nepgeheim-0123 in.', eur: 0.02 }) });
+  await wachtV(x, HID);
+  assert.match(x.v.stand(HID, null, 'verhaal').fout, /niet naar buiten/); assert.strictEqual(x.nf.aanroepen.length, 0);
+  // één aanvraag tegelijk, over beide vormen
+  x.schuif(11000);
+  let los;
+  x.v.maken(HID, '', 'verhaal', { tekens: 100, extraEur: 0.1, script: () => new Promise((r) => { los = r; }) });
+  assert.strictEqual(x.v.maken(HID2, 'Iets anders.').status, 409);
+  await new Promise((r) => setTimeout(r, 5)); los({ tekst: 'Kort script.', eur: 0.01 }); await wachtV(x, HID);
+  assert.strictEqual(x.v.stand(HID, V.hashVan('Kort script.'), 'verhaal').stand, 'klaar');
+  // opruimen wist beide vormen
+  assert.strictEqual(x.v.opruim(() => false), 1);
+  assert.deepStrictEqual(fs.readdirSync(path.join(x.dir, 'verteller-verhaal')), []);
+});

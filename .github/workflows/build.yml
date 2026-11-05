@@ -383,6 +383,11 @@ jobs:
       - name: "memorylane-verteller (wv2366, eigen stem)"
         if: ${{ !cancelled() }}
         run: bash test/memorylane-verteller.sh
+      # MemoryLane "Als verhaal vertellen" (wv2484): nep-Claude, tags alleen uit de lijst, feitentoets (verzonnen zin weg, anders het verhaal
+      # zelf), bewaard per verhaalversie, geen tekst in info.
+      - name: "memorylane-vertelscript (wv2484, als verhaal vertellen)"
+        if: ${{ !cancelled() }}
+        run: bash test/memorylane-vertelscript.sh
       # MemoryLane × Immich (wv2120): witte lijst (alleen lezen + leeg album), Exif-poort, albums idempotent, foto's alleen uit een gekoppeld
       # album, foto's bij de deellinks alleen als David het aanzet en weg bij uit/gevoelig/link uit.
       - name: "memorylane-immich (wv2120, foto's uit Immich)"

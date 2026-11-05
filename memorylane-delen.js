@@ -27,6 +27,9 @@
  *    als gevel. Alleen niet-gevoelig, met categorie, geen foto, niet in de toonmodus; de pod stelt de beschrijving voor, David past hem aan.
  *  - Verteller in Davids eigen stem (wv2366): met o.eleven maakt memorylane-verteller.js op Davids tik de vertelling (ElevenLabs, eigen
  *    stem, v4) en bewaart hem op de pod. Alleen actief, categorie gekozen en niet Privé, niet gevoelig, geen blok, niet in de toonmodus.
+ *  - Als verhaal vertellen (wv2484): met o.claude schrijft memorylane-vertelscript.js van het verhaal eerst een luisterversie met audio-tags
+ *    (Claude, feitentoets en taglijst in code), die de verteller (vorm 'verhaal') in Davids stem inspreekt. Zelfde regels en plafond als
+ *    hierboven; script per herinnering + verhaalversie bewaard, opnieuw alleen bij een nieuwe verhaalversie of op Davids knop.
  * PRIVACY. Nooit tekst, titels of namen in logs, box, /health of fouten: alleen ids en aantallen.
  * VORM. Alleen fs, path, crypto en reizen.js (wv2136: de reispagina's, gedeeld met Tripper); D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
  *
@@ -263,6 +266,12 @@ function maak(o) {
       return require('./memorylane-verteller.js').maak({ db, dir: DIR, nu, fout, sleutel: o.eleven.sleutel, routerUrl: o.eleven.routerUrl, fetch: o.eleven.fetch,
         geheimRaak: (t) => geheimRaak(t), markerRaak: (l) => markerRaak(l), klaar: o.eleven.klaar });
     } catch (e) { fout('ml-verteller', e); return null; }
+  })();
+  // wv2484: het vertelscript voor "Als verhaal vertellen" (alleen met o.claude en de verteller; ontbreekt de module, dan zonder)
+  const S = (function () {
+    if (!V || !o.claude || typeof o.claude.sleutel !== 'function') return null;
+    try { return require('./memorylane-vertelscript.js').maak({ dir: DIR, nu, fout, sleutel: o.claude.sleutel, sdk: o.claude.sdk, basisUrl: o.claude.basisUrl }); }
+    catch (e) { fout('ml-vertelscript', e); return null; }
   })();
   let laatsteWw = 0, laatsteControle = 0, laatsteOphaal = 0, vuil = new Set(KRINGEN), bezig = false, laatst = null, onleesbaar = 0, d1Fout = false;
 
@@ -780,6 +789,7 @@ function maak(o) {
       bijwerken();
       if (P) { try { P.opruim((hid) => !!q.h.get(hid)); } catch (e) { fout('ml-plaatje', e); } }
       if (V) { try { V.opruim((hid) => { const h = q.h.get(hid); return !!h && !vertellerNiet(h); }); } catch (e) { fout('ml-verteller', e); } }   // wv2366 (review MOET 2)
+      if (S) { try { S.opruim((hid) => { const h = q.h.get(hid); return !!h && !vertellerNiet(h); }); } catch (e) { fout('ml-vertelscript', e); } }   // wv2484
       uit.vault = naarVault();
       if (F) { try { const f = await fotoSync(false); if (f && (f.nieuw || f.overgenomen || f.weg || f.deel)) { uit.albums = f.nieuw + f.overgenomen; vuilAlle(); } } catch (e) { fout('ml-immich', e); } }
       if (!o.d1) return uit;
@@ -894,6 +904,7 @@ function maak(o) {
     uit.pagina_stukken = paginaRel(h.hid);
     uit.voorstellen = voorstellenVan(s);
     uit.verteller = vertellerKort(h, pagina, s);   // wv2366
+    uit.verteller_verhaal = vertelVerhaalKort(h, pagina, s);   // wv2484
     return { status: 200, body: { ok: true, herinnering: uit } };
   }
   function zicht(hid, d) {
@@ -1171,6 +1182,82 @@ function maak(o) {
     if (opt && opt.toon) return NIET_TOON;
     return V.weg(hid);
   }
+  // ── wv2484: Als verhaal vertellen (vertelscript met audio-tags, in Davids stem) ──
+  const SCHAT_FACTOR = 1.3;
+  // De bron van het script: titel + verhaal zoals de kamer ze toont (zonder markering en zonder de uitspraak "Zo Kef"), en de hash daarvan
+  // (= de verhaalversie). → { titel, verhaal, bron, hash, afgekapt } (bron '' = niets te vertellen)
+  function scriptBron(h, pagina, s) {
+    const p = pagina === undefined ? paginaLees(h.hid) : pagina;
+    const x = s === undefined ? sam(h, p) : s;
+    const titel = titelVan(h, p, x), verhaal = verhaalVan(h, p, x);
+    const vt = V.tekstVan(titel, verhaal, { uitspraak: false });
+    if (!vt.tekst) return { titel: '', verhaal: '', bron: '', hash: null, afgekapt: false, twijfel: [] };
+    // review MOET 1: titel en verhaal precies uit de (afgekapte) bron, zodat wat naar Claude gaat = wat getoetst en gehasht is
+    const t1 = V.tekstVan('', titel, { uitspraak: false }).tekst;
+    const metTitel = !!t1 && vt.tekst.startsWith(t1 + '\n\n');
+    const tw = h.soort === 'opname' && x ? Array.from(new Set(x.delen.flatMap((d) => d.alineas.flatMap((a) => (a.twijfel || []).map((t) => t.woord))))) : [];
+    return { titel: metTitel ? t1 : '', verhaal: metTitel ? vt.tekst.slice(t1.length + 2) : vt.tekst, bron: vt.tekst,
+      hash: crypto.createHash('sha256').update('ml-vertelscript-1\n' + vt.tekst).digest('hex'), afgekapt: vt.afgekapt, twijfel: tw };
+  }
+  // het bewaarde script als het bij deze verhaalversie hoort, anders null
+  function scriptActueel(h, b) { const sc = S && b.hash ? S.lees(h.hid) : null; return sc && sc.bron_hash === b.hash ? sc : null; }
+  // wat David in de uitklap ziet: de woorden die in het verhaal nog ter controle staan, ook hier gemarkeerd
+  function scriptToon(t, tw) {
+    let u = String(t || '');
+    for (const w of tw || []) { if (!w || w.length > 80) continue; const e = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); u = u.replace(new RegExp('(^|[^\\p{L}\\p{N}=])(' + e + ')(?=$|[^\\p{L}\\p{N}=])', 'gu'), '$1==$2=='); }
+    return u;
+  }
+  function vertelVerhaalKort(h, pagina, s) {
+    if (!V || !S) return null;
+    const niet = vertellerNiet(h);
+    const b = niet ? { bron: '', hash: null } : scriptBron(h, pagina, s);
+    const sc = b.bron ? scriptActueel(h, b) : null;
+    const tts = sc ? V.uitspraakVan(sc.script) : '';
+    const st = V.stand(h.hid, tts ? V.hashVan(tts) : null, 'verhaal');
+    const oud = !!b.bron && !sc && !!S.lees(h.hid);
+    return Object.assign(st, { kan: niet || (b.bron ? null : 'er is nog geen verhaal om te vertellen'), afgekapt: !!b.afgekapt,
+      vooraf: niet || !b.bron ? null : sc ? V.vooraf(tts) : V.vooraf(Math.round(b.bron.length * SCHAT_FACTOR), S.SCHATTING_EUR),
+      script: sc ? { tekst: scriptToon(sc.script, b.twijfel), op: sc.op, weggelaten: sc.weggelaten || 0, terugval: !!sc.terugval, tags: sc.tags || 0 } : null,
+      script_verouderd: oud,
+      // review ZOU 1: wat Nieuw script ongeveer kost (nieuw script + opnieuw inspreken)
+      vooraf_opnieuw: sc && !niet ? V.vooraf(Math.round(b.bron.length * SCHAT_FACTOR), S.SCHATTING_EUR) : null });
+  }
+  // d.opnieuw = true: ook een bewaard script opnieuw laten schrijven (Davids knop)
+  function vertelVerhaalMaken(hid, d, opt) {
+    const h = vind(hid);
+    if (!h || h.status === 'weg' || !V || !S) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.toon) return NIET_TOON;
+    const r = vertellerNiet(h, opt);
+    if (r) return { status: 409, body: { ok: false, fout: r } };
+    const b = scriptBron(h);
+    if (!b.bron) return { status: 409, body: { ok: false, fout: 'er is nog geen verhaal om te vertellen' } };
+    if (geheimRaak(b.bron)) return { status: 409, body: { ok: false, fout: 'er staat iets in dat niet naar buiten mag; de verteller vertelt dit niet' } };
+    if (markerRaak([b.bron])) return { status: 409, body: { ok: false, fout: 'er staat iets in dat op een patiëntgegeven lijkt; de verteller vertelt dit niet' } };
+    const sc = d && d.opnieuw === true ? null : scriptActueel(h, b);
+    if (sc) return V.maken(h.hid, V.uitspraakVan(sc.script), 'verhaal');
+    return V.maken(h.hid, '', 'verhaal', { tekens: Math.round(b.bron.length * SCHAT_FACTOR), extraEur: S.SCHATTING_EUR,
+      script: async () => {
+        const u = await S.schrijf(h.hid, b.titel, b.verhaal, b.hash);
+        return u.ok ? { tekst: V.uitspraakVan(u.script), eur: u.eur } : { fout: u.fout, eur: u.eur };
+      } });
+  }
+  function vertelVerhaalDeel(hid, n, opt) {
+    const h = vind(hid);
+    if (!h || h.status === 'weg' || !V || !S) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.toon) return NIET_TOON;
+    const r = vertellerNiet(h, opt);
+    if (r) { try { V.weg(h.hid, 'verhaal'); S.wis(h.hid); } catch (e) { fout('ml-verteller', e); } return { status: 409, body: { ok: false, fout: r } }; }   // mag niet meer: meteen weg
+    const sc = scriptActueel(h, scriptBron(h));
+    return V.deel(h.hid, n, sc ? V.hashVan(V.uitspraakVan(sc.script)) : null, 'verhaal');
+  }
+  // Weghalen: de vertelling als verhaal én het script (opnieuw maken = nieuw script)
+  function vertelVerhaalWeg(hid, opt) {
+    if (!V || !S || !HID_RE.test(String(hid))) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.toon) return NIET_TOON;
+    const u = V.weg(hid, 'verhaal');
+    if (u.status === 200 && !S.wis(hid)) return { status: 503, body: { ok: false, fout: 'weghalen lukte niet; probeer het opnieuw' } };
+    return u;
+  }
   function zorgLink(k) { if (!q.link.get(k)) q.linkNieuw.run(k, b64u(rnd(16)).slice(0, 22)); return q.link.get(k); }
   function delenStand() {
     const links = KRINGEN.map((k) => {
@@ -1248,11 +1335,12 @@ function maak(o) {
   }
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
-    return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
+    return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, vertelscript: S ? S.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
   return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling, fotoReizen,
     plaatjeVoorstel, plaatjeMaken, plaatjeWeg, _P: P, vertellerMaken, vertellerDeel, vertellerWeg, _V: V,
+    vertelVerhaalMaken, vertelVerhaalDeel, vertelVerhaalWeg, _S: S,
     fotoSync, hoofdpersonen, _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }

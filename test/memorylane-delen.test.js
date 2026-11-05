@@ -714,6 +714,75 @@ test('wv2366 verteller: detail geeft stand en kosten; alleen bij mag; Privé/gev
   } finally { o.sluit(); }
 });
 
+test('wv2484 als verhaal vertellen: script via Claude (alleen op de tik), gecached per verhaalversie, opnieuw op de knop; Privé/toon = nooit; weg = ook het script', async () => {
+  const teksten = [], vragen = [];
+  const MP3 = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(400, 1)]);
+  const nf = async (u, x) => { teksten.push(JSON.parse(x.body).text); return { ok: true, status: 200, headers: { get: () => null }, text: async () => '', arrayBuffer: async () => Uint8Array.from(MP3).buffer }; };
+  let antw = '[thoughtful] Proefkamp Vuur.\n\n[softly] Socev las het voor bij het kampvuur in Proefdorp… [laughs]';
+  class Nep { constructor() { this.beta = { messages: { stream: (p) => ({ finalMessage: async () => { vragen.push(p); return { model: 'claude-sonnet-5-5', stop_reason: 'end_turn',
+    usage: { input_tokens: 800, output_tokens: 300 }, content: [{ type: 'text', text: JSON.stringify({ script: antw }) }] }; } }) } }; } }
+  const o = omgeving({ eleven: { sleutel: async () => 'nep', routerUrl: 'https://router.proef', fetch: nf }, claude: { sleutel: async () => 'nep-claude', sdk: () => ({ klasse: Nep }) } });
+  const wacht = async (hid) => { for (let i = 0; i < 200 && o.ml.detail(hid).body.herinnering.verteller_verhaal.stand === 'bezig'; i++) await new Promise((r) => setTimeout(r, 5)); };
+  try {
+    o.opname(RA, 'shizzle', false); o.opname(RB, 'prive', true);
+    o.staat.verhalen[RA] = { titel: 'Proefkamp Vuur', alineas: ['Socev las het voor bij het kampvuur in Proefdorp.'] };
+    o.staat.verhalen[RB] = { titel: 'Proefgeheim Prive', alineas: ['Geheime proeftekst privé.'] };
+    o.ml.lijst();
+    const ha = o.hid('opname', RA), hb = o.hid('opname', RB);
+    const v = o.ml.detail(ha).body.herinnering.verteller_verhaal;
+    assert.strictEqual(v.kan, null); assert.strictEqual(v.stand, null); assert.strictEqual(v.script, null);
+    assert.ok(v.vooraf.geschat && v.vooraf.eur >= 0.11 && v.vooraf.past, 'geschat: stem + Claude ' + JSON.stringify(v.vooraf));
+    const w = o.ml.detail(hb).body.herinnering.verteller_verhaal;
+    assert.match(w.kan, /Privé of gevoelig/); assert.strictEqual(w.vooraf, null);
+    assert.strictEqual(o.ml.vertelVerhaalMaken(hb, {}).status, 409);
+    assert.strictEqual(o.ml.vertelVerhaalMaken(ha, {}, { toon: true }).status, 403);
+    assert.strictEqual(vragen.length + teksten.length, 0, 'niets naar buiten zonder tik');
+    assert.strictEqual(o.ml.vertelVerhaalMaken(ha, {}).status, 202);
+    await wacht(ha);
+    assert.strictEqual(vragen.length, 1);
+    const inv = vragen[0].messages[0].content[0].text;
+    assert.ok(inv.includes('<titel>\nProefkamp Vuur\n</titel>') && inv.includes('Socev las het voor'), 'het verhaal zonder uitspraak naar Claude');
+    assert.ok(inv.includes('<verhaal>\nSocev las het voor bij het kampvuur in Proefdorp.\n</verhaal>'), 'precies de getoetste bron (review MOET 1)');
+    assert.strictEqual(teksten.length, 1);
+    assert.ok(teksten[0].startsWith('[thoughtful] Proefkamp Vuur.') && teksten[0].includes('Zo Kef las') && teksten[0].includes('[laughs]'), 'script met tags en uitspraak naar ElevenLabs');
+    const d1 = o.ml.detail(ha).body.herinnering;
+    assert.strictEqual(d1.verteller_verhaal.stand, 'klaar');
+    assert.ok(d1.verteller_verhaal.script.tekst.includes('Socev las'), 'David ziet het script (zonder uitspraak)');
+    assert.strictEqual(d1.verteller_verhaal.vooraf.geschat, false);
+    assert.ok(d1.verteller_verhaal.vooraf_opnieuw.geschat && d1.verteller_verhaal.vooraf_opnieuw.eur > d1.verteller_verhaal.vooraf.eur, 'prijs van Nieuw script (review ZOU 1)');
+    assert.strictEqual(d1.verteller.stand, null, 'voorlezen staat los');
+    assert.strictEqual(o.ml.vertelVerhaalDeel(ha, 1).status, 200);
+    assert.strictEqual(o.ml.vertelVerhaalDeel(ha, 1, { toon: true }).status, 403);
+    assert.ok(!('verteller_verhaal' in o.ml.detail(ha, { toon: true }).body.herinnering), 'toonmodus: niets');
+    // opnieuw inspreken met hetzelfde verhaal: geen nieuwe Claude-aanroep
+    o.klok.t += 11000;
+    assert.strictEqual(o.ml.vertelVerhaalMaken(ha, {}).status, 202); await wacht(ha);
+    assert.strictEqual(vragen.length, 1); assert.strictEqual(teksten.length, 2);
+    // op de knop: nieuw script
+    o.klok.t += 11000; antw = '[softly] Proefkamp Vuur. Het kampvuur in Proefdorp.';
+    assert.strictEqual(o.ml.vertelVerhaalMaken(ha, { opnieuw: true }).status, 202); await wacht(ha);
+    assert.strictEqual(vragen.length, 2);
+    assert.strictEqual(o.ml.detail(ha).body.herinnering.verteller_verhaal.script.tekst, antw);
+    // nieuwe verhaalversie: script en vertelling verouderd, niet afspelen
+    o.staat.verhalen[RA] = { titel: 'Proefkamp Vuur', alineas: ['Een ander verhaal over het kampvuur.'] };
+    const d2 = o.ml.detail(ha).body.herinnering.verteller_verhaal;
+    assert.strictEqual(d2.stand, 'verouderd'); assert.strictEqual(d2.script, null); assert.strictEqual(d2.script_verouderd, true); assert.ok(d2.vooraf.geschat);
+    assert.strictEqual(o.ml.vertelVerhaalDeel(ha, 1).status, 409);
+    assert.ok(!/Proefkamp|kampvuur/.test(JSON.stringify(o.ml.info())), 'geen tekst in info');
+    assert.strictEqual(o.ml.info().verteller.als_verhaal, 1);
+    // weghalen: vertelling én script
+    assert.strictEqual(o.ml.vertelVerhaalWeg(ha).status, 200);
+    assert.ok(!fs.existsSync(path.join(o.hdir, 'vertelscript', ha + '.json')) && !fs.existsSync(path.join(o.hdir, 'verteller-verhaal', ha)));
+    // gevoelig geworden: de tik wist het script ook
+    o.klok.t += 11000; o.staat.verhalen[RA] = { titel: 'Proefkamp Vuur', alineas: ['Socev las het voor bij het kampvuur in Proefdorp.'] };
+    o.ml.vertelVerhaalMaken(ha, {}); await wacht(ha);
+    assert.ok(fs.existsSync(path.join(o.hdir, 'vertelscript', ha + '.json')));
+    o.ing._db.prepare('UPDATE ramble SET herinnering_gevoelig = 1 WHERE ramble_id = ?').run(RA);
+    await o.ml.tik();
+    assert.ok(!fs.existsSync(path.join(o.hdir, 'vertelscript', ha + '.json')) && !fs.existsSync(path.join(o.hdir, 'verteller-verhaal', ha)), 'script en audio weg');
+  } finally { o.sluit(); }
+});
+
 test('wv2449 hoofdpersonen: tabel op de vaultpagina, datum van de eerste gelinkte pagina die er een heeft, nooit buiten de vault, toonmodus = 403', () => {
   const o = omgeving();
   try {

@@ -19461,6 +19461,8 @@ function docsDelenInfo() {
 //   POST /app/memorylane/h/<hid>/zicht {kring, aan} · titel {titel} · wanneer {van, tot} (wv2180) · tekst {tekst, soort} · categorie {categorie, gevoelig} · toon-opname {aan} · toch-delen
 //   POST /app/memorylane/stuk/<sid>/opnemen|afwijzen|bewaren|weggooien · POST /app/memorylane/link/<kring>/aan|uit|vernieuw
 //   POST /app/memorylane/h/<hid>/verteller (verse vingerafdruk; 202, maakt op de achtergrond) · POST …/verteller/weg · GET …/verteller/<n> (wv2366)
+//   POST /app/memorylane/h/<hid>/verteller-verhaal {opnieuw?} (verse vingerafdruk; 202: eerst het vertelscript via Claude, dan ElevenLabs) ·
+//        POST …/verteller-verhaal/weg · GET …/verteller-verhaal/<n> (wv2484, Als verhaal vertellen)
 //   POST /app/memorylane/h/<hid>/plaatje/voorstel → {beschrijving} · POST …/plaatje {beschrijving} (naar OpenAI: verse vingerafdruk, niet vanaf
 //        een vaste plek; wv2325) · POST …/plaatje/weg. Niet in de toonmodus (niet in ML_TOON_ROUTES); de gevelroute geeft het plaatje.
 // Naar buiten (zicht aan, link aan, toch delen): verse vingerafdruk en nooit vanaf een vaste plek (zoals Docs › Delen). Dichter maken mag altijd.
@@ -19501,6 +19503,8 @@ const memorylaneDelen = (function () {
       marker: require(path.join(__dirname, 'intake', 'patientpoort.js')), geheimen: function () { try { return openaiPodGeheimen(); } catch (e) { return []; } },
       // wv2366: de verteller in Davids eigen stem via de Olares Router (zelfde sleutel en route als Studio/Bandjes, eigen plafond in de module)
       eleven: { sleutel: function () { return studioSleutel(); }, routerUrl: process.env.STUDIO_ROUTER_URL },
+      // wv2484: het vertelscript voor "Als verhaal vertellen" via Claude (zelfde sleutel en SDK als het verhaal en de PDF-lezer)
+      claude: { sleutel: pdfSleutel, sdk: pdfSdk },
       categorieen: HERINNERINGEN_MOD.CATEGORIEEN, onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
       fout: logError, box: function (t) { ovisBoxRij(t); },
       d1: SERVER_ECHT || process.env.ML_D1_TOETS ? async function (sql, params) {
@@ -19582,6 +19586,13 @@ async function appMemorylane(req, res, a, s, route, d) {
       return antw('verteller', memorylaneDelen.vertellerMaken(m[1], toon));
     }
     if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/verteller\/([1-9])$/.exec(route))) return antw('verteller deel', memorylaneDelen.vertellerDeel(m[1], Number(m[2]), toon));
+    // wv2484: Als verhaal vertellen. Maken = het verhaal gaat naar Claude (script) en het script naar ElevenLabs: verse vingerafdruk, zoals hierboven.
+    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/verteller-verhaal(\/weg)?$/.exec(route))) {
+      if (m[2]) return antw('verteller-verhaal weg', memorylaneDelen.vertelVerhaalWeg(m[1], toon));
+      if (!appVersOk(a, s)) { res._app.reden = 'memorylane verteller-verhaal, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk: het verhaal gaat naar Claude en ElevenLabs en dat kost een paar cent', vers_nodig: true }); }
+      return antw('verteller-verhaal', memorylaneDelen.vertelVerhaalMaken(m[1], d, toon));
+    }
+    if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/verteller-verhaal\/([1-9])$/.exec(route))) return antw('verteller-verhaal deel', memorylaneDelen.vertelVerhaalDeel(m[1], Number(m[2]), toon));
     // wv2325: Plaatje maken (ontwerp fase R § 12.1). Maken = de beschrijving gaat naar OpenAI: verse vingerafdruk en niet vanaf een vaste plek.
     if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/plaatje(\/voorstel|\/weg)?$/.exec(route))) {
       if (m[2] === '/voorstel') return antw('plaatje voorstel', memorylaneDelen.plaatjeVoorstel(m[1], toon));
