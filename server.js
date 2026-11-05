@@ -15591,6 +15591,64 @@ async function docplanControleRonde() {
     return { ok: true, tel: u.tel, nieuw: t.nieuw, vanzelf_dicht: t.vanzelf_dicht, heropend: t.heropend, open: t.open };
   } finally { try { dp.close(); } catch (e) { /* al dicht */ } }
 }
+// wv2475: DocPlan › Bezetting — bezettingswacht (docplan-bezetting.js; vault "01_Ontwikkeling/OVIS DocPlan - bezettingswacht (ontwerp 5-11-2026).md").
+// Elke ochtend (na de DocPlan-controle in de ochtend-bankronde, één keer per dag): rooster + GEZOCHT-agenda (public.sb_dienst_bezetting, sb2 0026)
+// naast de norm (DOCPLAN_DIR/bezetting-norm.json, anders de standaard in de module); per praktijk per week met een ongedekt gat één Voor jou-kaart.
+// Route GET/POST /app/facturen/bezetting[/JJJJ-MM] (alleen de eigenaar, in appFacturen vóór facturen.js): weken, maandoverzicht, vinkje en
+// "Is goed zo". Socev schrijft niets in de GEZOCHT-agenda (grondwet 1 en 7); de app geeft per dag de vooringevulde Google-link. Administratie in
+// docplan.sqlite (tabellen bezetting_*). Geen naam in een log of kaart. Ontbreekt de module of docplan.sqlite (terugrol), dan niets.
+function docplanOpenRw() {
+  const f = path.join(DOCPLAN_DIR, 'docplan.sqlite');
+  if (!fs.existsSync(f)) return null;
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(f);
+  try { db.exec('PRAGMA busy_timeout = 5000'); } catch (e) { db.close(); throw e; }
+  return db;
+}
+function docplanBezettingNorm() {
+  try { return fs.readFileSync(path.join(DOCPLAN_DIR, 'bezetting-norm.json'), 'utf8'); } catch (e) { return null; }
+}
+const docplanBezetting = (function () {
+  const p = path.join(__dirname, 'docplan-bezetting.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ fout: logError, rpc: function (fn, body) { return appSbRpc(fn, body, 20000); }, openDb: docplanOpenRw,
+      normTekst: docplanBezettingNorm, nuKort: function () { return bankNuKort(); },
+      io: {
+        zet: async function (k) { const r = await appSbRpc('mk_voor_jou_zet', { p: k }); appStaat.vjCache = null; if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet'); return r; },
+        status: function (sleutel, van, naar, x) {
+          appStaat.vjCache = null;
+          return appSbRpc('mk_voor_jou_status', { p_sleutel: sleutel, p_van: van, p_naar: naar, p_door: 'agent', p_bewijs: x.bewijs || null, p_reden: x.reden || 'docplan-bezetting' });
+        },
+        lijst: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); return (j && j.punten) || []; },
+      } });
+  } catch (e) { logError('bezetting', e); return null; }
+})();
+async function docplanBezettingRonde() {
+  if (!docplanBezetting || !rolPrimair()) return null;
+  const x = await docplanBezetting.ochtend();
+  if (!x || !x.gedaan && x.ok) return x && x.ok === false ? x : null;
+  if (x.ok) schrijfLog(nu() + ' docplan-bezetting ' + velden({ nieuw: x.nieuw, opgelost: x.opgelost, gesloten: x.gesloten, open: x.open, fouten: x.fouten.length || undefined }));
+  else {
+    schrijfLog(nu() + ' docplan-bezetting ' + velden({ fout: String(x.reden || '?').slice(0, 80) }));
+    if (x.box) {   // tweede mislukte ochtend op rij: één boxrij (ontwerp § 4.5)
+      try {
+        const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+        const t = VV().lees(pad);
+        const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
+        if (eerste) {
+          const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+          const rij = '\n## [direct] ' + tijd + ' — DocPlan-bezettingswacht: tweede ochtend zonder ronde #bezettingswacht (pod, automatisch)\n' +
+            '- status: open\n- van: pod docplanBezettingRonde (server.js, na de ochtend-bankronde)\n- gemeten: ' + String(x.reden || '?').slice(0, 160) + '\n' +
+            '- gevolg als er niets gebeurt: een gat in de artsenbezetting wordt niet gemeld (de wacht meldt en sluit niets zolang de bron niet klopt).\n' +
+            '- voorstel: laatste_gelukt/laatste_fout van de vier roosterfeeds (rooster-tg/gh-artsen/gezocht) nakijken; GET /app/facturen/bezetting toont de reden.\n';
+          VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
+        }
+      } catch (e) { logError('bezetting-box', e); }
+    }
+  }
+  return x;
+}
 // ── Aansluiting bank ↔ inkoopfacturen (wv1864, Second Brain 2.0 fase 4a, 28-10-2026; ontwerp vault 01_Ontwikkeling/Second Brain 2.0 - fase 4
 // financiële pilot Tolgaarde (ontwerp 28-10-2026).md) ──
 // POST /smal/facturen {opdracht: 'aansluiting', entiteit?, status?, max?, regels?, vers?} (skill facturen-lezen): de laatste run uit
@@ -15773,6 +15831,14 @@ async function appFacturen(req, res, a, s, d, route) {
   // wv2158: Waarnemers (DocPlan): eigen alleen-lezen route vóór het openen van de gewone facturendatabase en vóór facturen.js; rolVoor('app')
   // raakt de database niet. De module weigert alles behalve GET van de eigenaar op de primaire kant (review wv2158 MOET 1).
   const padW = route.slice(route.indexOf(' ') + 1);
+  if (padW === '/app/facturen/bezetting' || padW.indexOf('/app/facturen/bezetting/') === 0) {   // wv2475: DocPlan › Bezetting
+    if (!docplanBezetting) return appWeiger(res, 404, 'Bezetting zit niet in deze versie van de pod', 'facturen bezetting ontbreekt');
+    const x = await docplanBezetting.app({ methode: req.method, pad: padW, d: d, rol: facturenRoutes.rolVoor(null, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' }), primair: rolPrimair() });
+    if (x.status === 200 && req.method === 'GET') res._app.stil = true;
+    if (x.status === 200 && x.j && x.j.handeling === 'goed_zo') { try { await docplanBezetting.naGoedZo(); } catch (e) { logError('bezetting', e); } }
+    res._app.reden = 'facturen ' + x.reden;
+    return appStuur(res, x.status, x.j);
+  }
   if (padW === '/app/facturen/roosternamen' || padW.indexOf('/app/facturen/roosternamen/') === 0) {
     if (!docplanKoppel) return appWeiger(res, 404, 'Roosternamen zit niet in deze versie van de pod', 'facturen roosternamen ontbreekt');
     const x = await docplanKoppel.app({ methode: req.method, pad: padW, d: d, rol: facturenRoutes.rolVoor(null, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' }), primair: rolPrimair() });
@@ -21888,6 +21954,12 @@ async function bankRonde() {
     const dc = await docplanControleRonde();
     if (dc) uit.docplan_controle = dc;
   } catch (e) { logError('docplan-controle', e); uit.docplan_controle = { ok: false, fout: 'docplan-controle faalde in de pod' }; }
+  // wv2475: daarna de bezettingswacht (alleen de ochtendronde, één keer per dag; de module toetst zelf het uur en de dag); alleen aantallen naar n8n
+  if (uit.ok) try {
+    const bz = await docplanBezettingRonde();
+    if (bz) uit.docplan_bezetting = bz.ok ? { ok: true, nieuw: bz.nieuw, opgelost: bz.opgelost, gesloten: bz.gesloten, open: bz.open, fouten: bz.fouten.length }
+      : { ok: false, fout: String(bz.reden || '?').slice(0, 80) };
+  } catch (e) { logError('docplan-bezetting', e); uit.docplan_bezetting = { ok: false, fout: 'docplan-bezetting faalde in de pod' }; }
   // box-melding ná de kaartstap, met wat die deed (Fable wv685 #9)
   (r.box || []).forEach(function (m) {
     const kaart = uit.kaarten ? (uit.kaarten.gezet.length ? 'de ronde zette Voor jou-kaart ' + uit.kaarten.gezet.join(', ') + (m.reden === 'toestemming' ? ' en een regel voor het hoofdkanaal' : '')

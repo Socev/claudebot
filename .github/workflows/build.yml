@@ -528,6 +528,9 @@ jobs:
       - name: "docplan-jaaropgaaf (wv2304, Facturen › Waarnemers › Jaaropgaaf: bedrag uit de bank, NAW, export zonder BSN)"
         if: ${{ !cancelled() }}
         run: bash test/docplan-jaaropgaaf.sh
+      - name: "docplan-bezetting (wv2475, DocPlan › Bezetting: bezettingswacht met normregels, maandoverzicht met vinkjes, nooit zelf in een agenda)"
+        if: ${{ !cancelled() }}
+        run: bash test/docplan-bezetting.sh
       # PDF-lezer via de Claude-API (wv1431): CI-poort (alleen crypto/fs/path), de echte SDK tegen een nep-API (sleutel en basis expliciet,
       # fallbacks + beta-kop, effort, structured output, cache_control), terugvallen, grens met reservering en herstart, patiëntregel
       # fail-closed (kenmerk, OCR, ingebedde PDF), schaduw zonder tekst, batches; koppeling in server.js en uitrol.sh.

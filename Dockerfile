@@ -192,6 +192,7 @@ COPY docplan-totaal.js /app/release-bootstrap/docplan-totaal.js
 COPY docplan-koppel.js /app/release-bootstrap/docplan-koppel.js
 COPY docplan-controle.js /app/release-bootstrap/docplan-controle.js
 COPY docplan-jaaropgaaf.js /app/release-bootstrap/docplan-jaaropgaaf.js
+COPY docplan-bezetting.js /app/release-bootstrap/docplan-bezetting.js
 COPY ideeen.js /app/release-bootstrap/ideeen.js
 COPY ideeen-filter.js /app/release-bootstrap/ideeen-filter.js
 COPY aix.js /app/release-bootstrap/aix.js
