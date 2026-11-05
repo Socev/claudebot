@@ -281,6 +281,10 @@ test('route verzendwijze: alleen de eigenaar, verse vingerafdruk, versie omhoog,
   assert.deepEqual(JSON.parse(a[0].na), { verzendwijze: 'direct', versie: 1 });
   assert.equal(t.call('GET', 'leveranciers').j.leveranciers.find((l) => l.id === f.leverancier).verzendwijze, 'concept');
   assert.ok(F.BEHEER.includes('POST /app/facturen/leverancier/verzendwijze'));
+  t.call('POST', 'leverancier/verzendwijze', { id: f.leverancier, verzendwijze: 'direct' });
+  assert.deepEqual(t.call('GET', '').j.direct, { vrijgegeven: false, leveranciers: 1 });
+  t.vrij();
+  assert.equal(t.call('GET', '').j.direct.vrijgegeven, true);
 });
 
 test('database-grenzen: versie gaat mee omhoog en nooit omlaag; de snapshot op de opdracht ligt vast', () => {

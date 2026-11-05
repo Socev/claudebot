@@ -290,6 +290,8 @@ function overzicht(fdb, r, nu) {
   const feiten = feitKaarten(fdb, r, nu).length;
   return {
     rol: r.soort, verzendmodus: D.metaLees(fdb, 'verzendmodus'), verstuur_instelling: verstuurInstelling(fdb),
+    // wv2480: direct verzenden per leverancier (banner in de app)
+    direct: { vrijgegeven: D.metaLees(fdb, 'versturen_vrijgegeven') === '1', leveranciers: Number(fdb.db.prepare("SELECT count(*) AS n FROM leverancier WHERE verzendwijze = 'direct'").get().n) },
     tellers: {
       beoordelen: tel("f.status = 'te_beoordelen'", []),
       wachtrij: tel("f.status IN ('in_wachtrij','wordt_verstuurd')", []),
