@@ -3310,8 +3310,8 @@ function adres(fdb, r, d, nu, o) {
 function modus(fdb, r, d, nu, o) {
   eisEigenaar(r);
   if (!['concept', 'versturen'].includes(d.modus)) weiger(400, 'modus is concept of versturen');
-  // zelf versturen pas na Davids Ja na de schaduwweek (F5): de machinekamer zet dan versturen_vrijgegeven
-  if (d.modus === 'versturen' && D.metaLees(fdb, 'versturen_vrijgegeven') !== '1') weiger(409, 'zelf versturen kan pas na de schaduwweek (fase F5); tot dan maakt de koerier alleen concepten');
+  // wv2480: alles-of-niets zelf versturen bestaat niet meer; direct verzenden kies je per leverancier (grondwet 1, aanvulling 5-11-2026)
+  if (d.modus === 'versturen') weiger(409, 'direct verzenden kies je per leverancier ("Klaarzetten als concept of direct verzenden?"), niet voor alles tegelijk');
   if (!o.versOk()) weiger(403, 'bevestig met je vingerafdruk', { vers_nodig: true });
   o.versVerbruik();
   return D.transactie(fdb, function () {

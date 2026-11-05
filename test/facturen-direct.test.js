@@ -333,6 +333,10 @@ test('route verzendwijze: alleen de eigenaar, verse vingerafdruk, versie omhoog,
   assert.deepEqual(t.call('GET', '').j.direct, { vrijgegeven: false, leveranciers: 1 });
   t.vrij();
   assert.equal(t.call('GET', '').j.direct.vrijgegeven, true);
+  // de oude alles-of-niets-schakelaar gaat ook na de vrijgave niet open
+  const m = t.call('POST', 'instellingen/modus', { modus: 'versturen' });
+  assert.equal(m.status, 409); assert.match(m.j.fout, /per leverancier/);
+  assert.equal(D.metaLees(t.fdb, 'verzendmodus'), 'concept');
 });
 
 test('database-grenzen: versie gaat mee omhoog en nooit omlaag; de snapshot op de opdracht ligt vast', () => {
