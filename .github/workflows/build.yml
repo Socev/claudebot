@@ -489,6 +489,9 @@ jobs:
       - name: "app-vast (wv1051, OVIS M1b: vastzetten in het menu)"
         if: ${{ !cancelled() }}
         run: bash test/app-vast.sh
+      - name: "apps-volgorde (wv2479, Apps-overzicht: volgorde, favorieten, openingsteller)"
+        if: ${{ !cancelled() }}
+        run: bash test/apps-volgorde.sh
       - name: "app-open (wv1712, OVIS M6-pod: Socev stuurt de weergave)"
         if: ${{ !cancelled() }}
         run: bash test/app-open.sh

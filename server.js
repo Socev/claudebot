@@ -5061,6 +5061,8 @@ const APP_HEROPEND = path.join(APP_DATA, 'koppel-heropend');      // machinekame
 const APP_HERSTEL_VERVALT = path.join(APP_DATA, 'herstel-vervalt'); // machinekamer: herstelcode én telefoon kwijt (bouwplan § 4.4c)
 const APP_SESSIES = path.join(APP_DATA, 'sessies.json');          // wv231: sessies over een herstart (alleen hash, geen token; § 4.4e)
 const APP_VAST = path.join(APP_DATA, 'vast.json');                // wv1051 (OVIS M1b): vastgezette plekken en Apps, alleen id's
+const APP_APPS_VOLGORDE = path.join(APP_DATA, 'apps-volgorde.json');   // wv2479: Apps-overzicht — eigen volgorde, favorieten, sortering (alleen App-id's)
+const APP_APPS_GEOPEND = path.join(APP_DATA, 'apps-geopend.json');     // wv2479: openingen per App per dag (alleen aantallen, 120 dagen)
 // § 4.3: de ene lijst privé-App-id's (catalogus src/modules.ts). Alleen als een vaste plek afschermt (APP_VAST_AFSCHERMEN, sinds wv1901
 // uit): dan weigeren de routes hieronder en gaat vast.json daar zonder deze id's naar de app (geen privé-App in het menu).
 const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften', 'mediatheek'];   // wv1269: Mediatheek (20_Prive)
@@ -5196,7 +5198,7 @@ const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // Schrijvende routes vallen ONDER het slot, tenzij ze hier staan (nieuwe POST-routes zijn dus vanzelf dicht; Fable § 8i K8).
 // gezien zetten is geen invoer (wv137; ook meldingen/gezien, die op een dicht vast apparaat 423 gaf)
 // wv446 (Fable #1): meldingen/af is omkeerbaar en geen invoer naar Socev, net als gezien
-const APP_SLOT_VRIJ = new Set(['POST /app/omzet', 'POST /app/docs/intrekken', 'POST /app/rij/terug', 'POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
+const APP_SLOT_VRIJ = new Set(['POST /app/omzet', 'POST /app/docs/intrekken', 'POST /app/rij/terug', 'POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/apps-geopend']);   // wv2479: een App openen tellen = lezen   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
@@ -12745,6 +12747,8 @@ function handleApp(req, res) {
         if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
         if (route === 'GET /app/facturen' || route.indexOf(' /app/facturen/') > 0) return typeof appFacturen === 'function' ? appFacturen(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'facturen');   // wv833: App Facturen
         if (route === 'GET /app/vast' || route === 'POST /app/vast') return appVastRoute(req, res, a, d);   // wv1051 (OVIS M1b): vastzetten
+        if (route === 'GET /app/apps-volgorde' || route === 'POST /app/apps-volgorde') return appAppsVolgordeRoute(req, res, a, d);   // wv2479: Apps-overzicht (volgorde, favorieten)
+        if (route === 'POST /app/apps-geopend') return appAppsGeopendRoute(req, res, a, d);   // wv2479: openingsteller per App per dag
         if (route === 'GET /app/mediatheek' || /^GET \/app\/mediatheek\/bestand\/[a-f0-9]{16}$/.test(route)) return typeof appMediatheek === 'function' ? appMediatheek(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mediatheek');   // wv1269: App Mediatheek (alleen lezen)
         if (route === 'GET /app/tokens/openai' || route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
@@ -15381,6 +15385,58 @@ function appVastRoute(req, res, a, d) {
   try { appSchrijfJson(APP_VAST, { versie: 1, bijgewerkt: new Date().toISOString(), vast: u.lijst }); }
   catch (e) { logError('vast.json schrijven', e); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo nog eens', 'vast schrijven'); }
   return antwoord(u.lijst, false);
+}
+
+// ── wv2479 (Apps-overzicht, richting 1; David Ja 5-11-2026 14:30): GET/POST /app/apps-volgorde en POST /app/apps-geopend. De logica staat
+// in app-vast.js (volgordeUitBestand, volgordePas, telOpen, meest); hier lezen, schrijven (atomisch, alleen dit proces) en antwoorden.
+// apps-volgorde.json: { versie, bijgewerkt, volgorde, favorieten, sortering } (alleen App-id's). Zonder bestand: de catalogus en als
+// favorieten de vastgezette Apps uit vast.json. apps-geopend.json: per dag per App een aantal (geen inhoud, geen apparaat).
+function appVastLijstVoorVolgorde(L) {
+  try { return L.uitBestand(appLeesStreng(APP_VAST, null)).lijst; } catch (e) { return L.STANDAARD.slice(); }
+}
+function appAppsTelling(L) {
+  try { return L.tellingUitBestand(appLeesStreng(APP_APPS_GEOPEND, null)); } catch (e) { logError('apps-geopend.json', e); return L.tellingUitBestand(null); }
+}
+function appAppsVandaag() { return new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' }); }
+function appAppsVolgordeRoute(req, res, a, d) {
+  const L = appVastModule();
+  if (!L || typeof L.volgordePas !== 'function') return appWeiger(res, 404, 'onbekend', 'volgorde ontbreekt');
+  const vp = appAfscherm(a);
+  let j = null;
+  try { j = appLeesStreng(APP_APPS_VOLGORDE, null); }
+  catch (e) {   // kapot = apart zetten (zoals vast.json) en de standaard tonen
+    logError('apps-volgorde.json', e);
+    try { fs.renameSync(APP_APPS_VOLGORDE, APP_APPS_VOLGORDE + '.kapot-' + Date.now()); } catch (e2) {}
+  }
+  const nu = L.volgordeUitBestand(j, appVastLijstVoorVolgorde(L));
+  const antwoord = function (stand, status, extra) {
+    appStuur(res, status || 200, Object.assign({ ok: status ? false : true }, L.volgordeVoorApparaat(stand, vp, APP_PRIVE_MODULES),
+      { bekend: L.APP_IDS, max: L.VOLGORDE_MAX, meest: L.meest(appAppsTelling(L), appAppsVandaag()), vaste_plek: vp }, extra || {}));
+  };
+  if (req.method !== 'POST') { res._app.reden = 'apps-volgorde'; res._app.stil = true; return antwoord(nu); }
+  const u = L.volgordePas(nu, d, vp);
+  if (!u.ok && u.status === 409) { res._app.reden = u.reden; return antwoord(nu, 409, { fout: u.fout }); }   // de app neemt de stand van nu over
+  if (!u.ok) return appWeiger(res, u.status, u.fout, u.reden);
+  res._app.reden = 'apps-volgorde ' + d.sortering + (u.veranderd ? '' : ' (al zo)');
+  if (!u.veranderd) return antwoord(nu);
+  try { appSchrijfJson(APP_APPS_VOLGORDE, L.naarBestand(u.stand, new Date().toISOString())); }
+  catch (e) { logError('apps-volgorde.json schrijven', e); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo nog eens', 'volgorde schrijven'); }
+  return antwoord(u.stand);
+}
+var appAppsLaatst = null;   // id → ms van de laatste getelde opening (dubbel binnen een minuut telt één keer); var: zie server-js-tdz
+function appAppsGeopendRoute(req, res, a, d) {
+  const L = appVastModule();
+  if (!L || typeof L.telOpen !== 'function') return appWeiger(res, 404, 'onbekend', 'geopend ontbreekt');
+  if (!appAppsLaatst) appAppsLaatst = new Map();
+  res._app.stil = true;
+  const u = L.telOpen(appAppsTelling(L), d && d.id, appAppsVandaag(), Date.now(), appAppsLaatst);
+  if (!u.ok) return appWeiger(res, u.status, u.fout, u.reden);
+  res._app.reden = 'apps-geopend' + (u.geteld ? '' : ' (dubbel)');
+  if (u.geteld) {
+    try { appSchrijfJson(APP_APPS_GEOPEND, u.t); }
+    catch (e) { logError('apps-geopend.json schrijven', e); return appWeiger(res, 500, 'tellen lukte niet', 'geopend schrijven'); }
+  }
+  return appStuur(res, 200, { ok: true, geteld: u.geteld });
 }
 
 // ── wv1712 (OVIS M6-pod, ontwerplijnen § 3.6): Socev stuurt de weergave. De logica staat in app-open.js; hier knippen, registreren

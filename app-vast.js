@@ -71,4 +71,114 @@ function pas(lijst, d, vastePlek) {
   return { ok: true, lijst: nieuw, veranderd: true };
 }
 
-module.exports = { STANDAARD, MAX, regel, schoon, uitBestand, voorApparaat, pas };
+// ── wv2479 (Apps-overzicht, richting 1 "Startscherm"; David Ja 5-11-2026 14:30): eigen volgorde, favorieten en sortering van de Apps
+// (apps-volgorde.json naast vast.json, één stand voor telefoon en laptop) en een openingsteller per App per dag (apps-geopend.json,
+// alleen aantallen). De weergave raster/lijst is per toestel en staat niet hier. Alleen App-id's uit APP_IDS (= de Apps in de
+// catalogus src/modules.ts, plek "apps"; de toets test/apps-volgorde.test.ts in socev-app houdt ze gelijk). Een App die de pod nog
+// niet kent, toont de app gewoon onderaan; ordenen en favoriet maken kan pas als hij hier staat.
+const APP_IDS = ['praktijken', 'projecten', 'bandjes', 'financien', 'gezondheid', 'facturen', 'docplan', 'bestanden', 'pot',
+  'pot-afschriften', 'studio', 'broedstoof', 'memorylane', 'tripper', 'kalender', 'shopper', 'mediatheek', 'harvester', 'ideeen',
+  'flock', 'verbruik', 'tokencounter', 'mail', 'mailman', 'cijfer-meester'];
+const VOLGORDE_MAX = 60;
+const SORTERINGEN = ['eigen', 'az', 'meest'];
+const TEL_DAGEN = 120;            // zo lang blijven dagtellingen staan
+const TEL_DUBBEL_MS = 60 * 1000;  // twee keer dezelfde App binnen een minuut = één opening
+const MEEST_NA_DAGEN = 14;        // "Meest gebruikt" pas na 14 dagen tellen
+const MEEST_HALF_DAGEN = 30;      // een opening telt na 30 dagen half zo zwaar
+
+const isAppId = function (x) { return typeof x === 'string' && APP_IDS.indexOf(x) >= 0; };
+function idLijst(l) {   // van schijf: alleen bekende id's, zonder dubbele, hooguit VOLGORDE_MAX
+  const uit = [];
+  (Array.isArray(l) ? l : []).forEach(function (x) { if (isAppId(x) && uit.indexOf(x) < 0 && uit.length < VOLGORDE_MAX) uit.push(x); });
+  return uit;
+}
+// Begin-favorieten = de Apps die in vast.json vastgezet zijn (zonder subkaarten), in die volgorde
+function beginFavorieten(vastLijst) {
+  return idLijst((Array.isArray(vastLijst) ? vastLijst : []).filter(function (r) { return r && !r.focus; }).map(function (r) { return r.scherm; }));
+}
+// Geen bestand = nog niets gekozen: volgorde leeg (= de catalogus), favorieten uit vast.json, sortering eigen, versie 0
+function volgordeUitBestand(j, vastLijst) {
+  if (!j) return { versie: 0, volgorde: [], favorieten: beginFavorieten(vastLijst), sortering: 'eigen', standaard: true };
+  const v = Number(j.versie);
+  return { versie: Number.isSafeInteger(v) && v > 0 ? v : 1, volgorde: idLijst(j.volgorde), favorieten: idLijst(j.favorieten),
+    sortering: SORTERINGEN.indexOf(j.sortering) >= 0 ? j.sortering : 'eigen', standaard: false };
+}
+function strengeLijst(l, wat) {   // van de app: elk id moet bekend zijn, geen dubbele, hooguit VOLGORDE_MAX
+  if (!Array.isArray(l)) return { fout: wat + ' ontbreekt', reden: 'volgorde ' + wat + ' vorm' };
+  if (l.length > VOLGORDE_MAX) return { fout: 'te veel Apps in ' + wat, reden: 'volgorde ' + wat + ' te lang' };
+  for (let i = 0; i < l.length; i++) {
+    if (!isAppId(l[i])) return { fout: 'onbekende App in ' + wat, reden: 'volgorde ' + wat + ' onbekend' };
+    if (l.indexOf(l[i]) !== i) return { fout: 'een App staat dubbel in ' + wat, reden: 'volgorde ' + wat + ' dubbel' };
+  }
+  return { lijst: l.slice() };
+}
+// Eén wijziging: d = { versie, volgorde, favorieten, sortering } (de hele stand). versie = de versie die de app had; is die intussen
+// veranderd (ander toestel), dan 409 met de stand van nu (de app neemt die over). Uitkomst { ok, stand, veranderd } of { ok: false, status, fout, reden }.
+function volgordePas(nu, d, vastePlek) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return { ok: false, status: 400, fout: 'ongeldige vraag', reden: 'volgorde vorm' };
+  if (vastePlek) return { ok: false, status: 403, fout: 'Rangschikken doe je op je telefoon of een meereizend apparaat.', reden: 'volgorde vaste plek' };
+  if (!Number.isSafeInteger(d.versie) || d.versie < 0) return { ok: false, status: 400, fout: 'versie ontbreekt', reden: 'volgorde versie vorm' };
+  if (d.versie !== nu.versie) return { ok: false, status: 409, fout: 'de volgorde is intussen op een ander apparaat gewijzigd', reden: 'volgorde versie oud' };
+  const v = strengeLijst(d.volgorde, 'volgorde'); if (v.fout) return { ok: false, status: 400, fout: v.fout, reden: v.reden };
+  const f = strengeLijst(d.favorieten, 'favorieten'); if (f.fout) return { ok: false, status: 400, fout: f.fout, reden: f.reden };
+  if (SORTERINGEN.indexOf(d.sortering) < 0) return { ok: false, status: 400, fout: 'onbekende sortering', reden: 'volgorde sortering' };
+  const veranderd = nu.standaard || v.lijst.join() !== nu.volgorde.join() || f.lijst.join() !== nu.favorieten.join() || d.sortering !== nu.sortering;
+  if (!veranderd) return { ok: true, stand: nu, veranderd: false };
+  return { ok: true, veranderd: true, stand: { versie: nu.versie + 1, volgorde: v.lijst, favorieten: f.lijst, sortering: d.sortering, standaard: false } };
+}
+function naarBestand(stand, nuIso) {
+  return { versie: stand.versie, bijgewerkt: nuIso, volgorde: stand.volgorde, favorieten: stand.favorieten, sortering: stand.sortering };
+}
+// Wat een apparaat ziet; vaste plek die afschermt: zonder privé-App (zoals vast.json)
+function volgordeVoorApparaat(stand, vastePlek, prive) {
+  const weg = function (l) { return vastePlek ? l.filter(function (x) { return prive.indexOf(x) < 0; }) : l.slice(); };
+  return { versie: stand.versie, volgorde: weg(stand.volgorde), favorieten: weg(stand.favorieten), sortering: stand.sortering, standaard: !!stand.standaard };
+}
+
+// Openingsteller. t = { versie: 1, sinds: 'JJJJ-MM-DD', dagen: { 'JJJJ-MM-DD': { <id>: n } } }; laatst = Map id → ms (in het geheugen
+// van het podproces: dubbel binnen een minuut telt één keer, ook van twee apparaten).
+const DAG_RE = /^\d{4}-\d{2}-\d{2}$/;
+const dagNr = function (d) { return Math.floor(Date.parse(d + 'T00:00:00Z') / 86400000); };
+function tellingUitBestand(j) {
+  const uit = { versie: 1, sinds: null, dagen: {} };
+  if (!j || typeof j !== 'object') return uit;
+  if (typeof j.sinds === 'string' && DAG_RE.test(j.sinds)) uit.sinds = j.sinds;
+  const d = j.dagen && typeof j.dagen === 'object' ? j.dagen : {};
+  Object.keys(d).forEach(function (dag) {
+    if (!DAG_RE.test(dag) || !d[dag] || typeof d[dag] !== 'object') return;
+    const r = {};
+    Object.keys(d[dag]).forEach(function (id) { const n = Number(d[dag][id]); if (isAppId(id) && Number.isSafeInteger(n) && n > 0) r[id] = n; });
+    if (Object.keys(r).length) uit.dagen[dag] = r;
+  });
+  return uit;
+}
+function telOpen(t, id, vandaag, nuMs, laatst) {
+  if (!isAppId(id)) return { ok: false, status: 400, fout: 'onbekende App', reden: 'geopend onbekend' };
+  if (!DAG_RE.test(String(vandaag))) return { ok: false, status: 500, fout: 'datum', reden: 'geopend datum' };
+  const v = laatst.get(id);
+  if (typeof v === 'number' && nuMs - v >= 0 && nuMs - v < TEL_DUBBEL_MS) return { ok: true, geteld: false, t: t };
+  laatst.set(id, nuMs);
+  const n = { versie: 1, sinds: t.sinds || vandaag, dagen: {} };
+  const grens = dagNr(vandaag) - TEL_DAGEN;
+  Object.keys(t.dagen).forEach(function (dag) { if (dagNr(dag) > grens) n.dagen[dag] = Object.assign({}, t.dagen[dag]); });
+  n.dagen[vandaag] = n.dagen[vandaag] || {};
+  n.dagen[vandaag][id] = (n.dagen[vandaag][id] || 0) + 1;
+  return { ok: true, geteld: true, t: n };
+}
+// "Meest gebruikt": score per App (openingen, halveren per 30 dagen); klaar = er wordt al 14 dagen geteld
+function meest(t, vandaag) {
+  const nu = dagNr(vandaag);
+  const dagen = t.sinds ? Math.max(0, nu - dagNr(t.sinds)) : 0;
+  const score = {};
+  Object.keys(t.dagen).forEach(function (dag) {
+    const oud = nu - dagNr(dag);
+    if (oud < 0) return;
+    const w = Math.pow(0.5, oud / MEEST_HALF_DAGEN);
+    Object.keys(t.dagen[dag]).forEach(function (id) { score[id] = Math.round(((score[id] || 0) + t.dagen[dag][id] * w) * 1000) / 1000; });
+  });
+  return { klaar: dagen >= MEEST_NA_DAGEN, dagen: dagen, na_dagen: MEEST_NA_DAGEN, score: score };
+}
+
+module.exports = { STANDAARD, MAX, regel, schoon, uitBestand, voorApparaat, pas,
+  APP_IDS, VOLGORDE_MAX, SORTERINGEN, beginFavorieten, volgordeUitBestand, volgordePas, naarBestand, volgordeVoorApparaat,
+  tellingUitBestand, telOpen, meest, TEL_DUBBEL_MS, MEEST_NA_DAGEN };
