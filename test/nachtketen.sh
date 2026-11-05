@@ -277,6 +277,36 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
   toets('uitrol.sh: wachtsom telt nachtketen.lopend', /int\(k\.get\("lopend",0\)\)/.test(ur) && /k=j\.get\("nachtketen"\)/.test(ur));
   toets('uitrol.sh: nachtketen.js in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bnachtketen\.js\b/.test(ur));
 
+  // 12b. wv2526: avgSpiegelRonde uit server.js als echt kindproces (nepscript): exit 0 met uitvoer, exit 1, tijdslimiet met kleinkind
+  {
+    const vm = require('vm');
+    const b = sv.indexOf('const AVG_SPIEGEL_SCRIPT'), e = sv.indexOf('\n// ── Nachtketen', b);
+    toets('avg-spiegel: knipsel gevonden in server.js', b > 0 && e > b);
+    const nep = path.join(d, 'avg-nep.py');
+    const knip = sv.slice(b, e).replace("'/opt/data/mk-scripts/avg-spiegel/spiegel.py'", JSON.stringify(nep)).replace("'/opt/data/scripts-staat/avg-spiegel/laatste.jsonl'", JSON.stringify(path.join(d, 'avg-staat', 'laatste.jsonl'))).replace('AVG_SPIEGEL_MAX_S = 240', 'AVG_SPIEGEL_MAX_S = 1') + '\n;({ avgSpiegelRonde });';
+    const mk = () => vm.runInContext(knip, vm.createContext({ fs: fs, path: path, spawn: require('child_process').spawn, process: process, setTimeout: setTimeout, clearTimeout: clearTimeout, JSON: JSON, String: String, Array: Array, Date: Date, Promise: Promise })).avgSpiegelRonde;
+    let pids = [];
+    fs.writeFileSync(nep, 'import json,sys\nprint(json.dumps({"praktijk":"tolgaarde","ok":True,"commit":"abc1234","overgeslagen":[]}))\nprint(json.dumps({"praktijk":"groenhouten","ok":True,"overgeslagen":[{"bestand":"x","reden":"y"}]}))\nsys.exit(0)\n');
+    let r = await mk()({ opSpawn: (pid) => pids.push(pid) });
+    toets('avg-spiegel: exit 0 → ok met stand per praktijk en opSpawn', r.ok === true && r.detail.praktijken.tolgaarde === 'gepusht abc1234' && r.detail.praktijken.groenhouten === 'gelijk, 1 niet mee' && pids.length === 1, r);
+    const um = fs.statSync(path.join(d, 'avg-staat', 'laatste.jsonl')).mode & 0o777, mm = fs.statSync(path.join(d, 'avg-staat')).mode & 0o777;
+    toets('avg-spiegel: uitvoer in een bestand 0600 in een map 0700 (geen pipe: wees na herstart zonder EPIPE)', um === 0o600 && mm === 0o700, [um.toString(8), mm.toString(8)]);
+    fs.writeFileSync(nep, 'import json,sys\nprint(json.dumps({"praktijk":"tolgaarde","ok":False,"fout":"git push: geweigerd"}))\nsys.exit(1)\n');
+    r = await mk()({});
+    toets('avg-spiegel: exit 1 → ok false, reden exit 1, fout per praktijk', r.ok === false && r.reden === 'exit 1' && /^fout: git push/.test(r.detail.praktijken.tolgaarde), r);
+    const kk = path.join(d, 'avg-kleinkind.pid');
+    fs.writeFileSync(nep, 'import subprocess,time\np=subprocess.Popen(["sleep","30"])\nopen(' + JSON.stringify(kk) + ',"w").write(str(p.pid))\ntime.sleep(30)\n');
+    const t0 = Date.now(); r = await mk()({});
+    let kpid = 0; try { kpid = Number(fs.readFileSync(kk, 'utf8')); } catch (x) {}
+    await wacht(200);
+    let kleinLeeft = false; try { const st = fs.readFileSync('/proc/' + kpid + '/stat', 'utf8'); kleinLeeft = !/\) Z /.test(st); } catch (x) {}
+    toets('avg-spiegel: tijdslimiet → ok false (tijdslimiet), hele procesgroep weg (ook het kleinkind)', r.ok === false && /^tijdslimiet/.test(r.reden) && Date.now() - t0 < 10000 && kpid > 1 && !kleinLeeft, [r, kpid, kleinLeeft]);
+    fs.unlinkSync(nep);
+    r = await mk()({});
+    toets('avg-spiegel: script weg → al_gedaan (niet in deze pod)', r.ok === true && r.al_gedaan === true, r);
+    toets('server.js: avg-spiegel in de keten om 04:00, kindstap, meldt via de keten (meldtZelf false) (wv2526)', /naam: 'avg-spiegel', start_na: \[4, 0\], limiet_min: 5, pogingen: 2, meldtZelf: false, doe: function \(ctx\) \{ return avgSpiegelRonde\(ctx\); \}/.test(sv) && !/naam: 'avg-spiegel'[^\n]*inProces/.test(sv));
+  }
+
   // 13. het echte keten-blok uit server.js in een vm met nep-objecten: één hele nacht, elke stap roept het juiste object met de juiste vorm
   {
     const vm = require('vm');
@@ -305,6 +335,7 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
       ovisAgenda: dag('agenda'), ovisDeadlines: dag('deadlines'), scriptsVeeg: dag('veeg'), sb2Feitenlijst: dag('feitenlijst'), sb2Zoekindex: dag('zoekindex'), sb2Zoekleer: dag('zoekleer'), ovisKalender: dag('kalender'), sb2Steekwoorden: dag('steekwoorden'), sb2SteekwoordenAan: () => swAan, sb2Proefloper: dag('proefloper'), sb2ProefloperAan: () => plAan,
       sb2SynapsenAan: () => plAan, sb2SynapsenRonde: async () => { roep.push('synapsen'); return { ok: true, detail: { synapsen: 2 } }; },   // wv2022
       sb2BerichtenAan: () => plAan, sb2BerichtenRonde: async () => { roep.push('berichten'); return { ok: true, detail: {} }; },   // wv2383
+      avgSpiegelRonde: async (c) => { roep.push('avg:' + c.datum + ':' + typeof c.opSpawn); return { ok: true, detail: { praktijken: {} } }; },   // wv2526
       weerOchtend: { doe: async (c) => { roep.push('weer:' + c.ams.datum + ':' + c.ams.uur + ':' + c.ams.min); return { ok: true, detail: { treffers: [] } }; } },   // wv2389
       secondbrain: { nacht: (x) => { roep.push('kaart:' + x); return true; } },
       appSbRpc: async (fn, body) => { roep.push('rpc:' + fn + ':' + body.p_component + ':' + body.p_gemeten_rijen + ':' + body.p_bevindingen); return []; },
@@ -328,15 +359,19 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     toets('vm: deadlines wacht op de n8n-run van de nachtconsolidatie (vandaag ≥ 03:00)', roep.filter(x => x !== 'publicatie').indexOf('agenda:2026-11-11:function') === 0 && roep.indexOf('publicatie') < roep.indexOf('agenda:2026-11-11:function') && roep.some(x => x === 'n8n:/workflows/lKcF3Oxt8WVeELPJ') && roep.indexOf('deadlines:2026-11-11:function') > 0, roep);
     roep.length = 0; await zetT(3, 50, 3);
     toets('vm: secondbrain-kaart met de oude datumvorm, daarna veeg', roep.join('|') === 'kaart:2026-11-11|veeg:2026-11-11:function', roep);
+    roep.length = 0; await zetT(3, 59, 2);
+    toets('vm: avg-spiegel niet vóór 04:00 (wv2526)', roep.length === 0, roep);
+    await zetT(4, 0, 2);
+    toets('vm: avg-spiegel om 04:00 met opSpawn (wv2526)', roep.join('|') === 'avg:2026-11-11:function', roep);
     roep.length = 0; await zetT(5, 0, 6);
     toets('vm: zoeken wacht op raw_input/Teams/WhatsApp (via de API) en loopt dan feitenlijst → zoekindex → zoekleer', ['vNsdkyTQIaGhU0Fj', 'vmFrhWxNc7KrpdIL', 'agntIie8d9mqOlm6'].every(id => roep.indexOf('n8n:/workflows/' + id) >= 0) &&
       roep.filter(x => !/^n8n:/.test(x)).join('|') === 'feitenlijst:2026-11-11:function|zoekindex:2026-11-11:function|zoekleer:2026-11-11:function', roep);
     roep.length = 0; await zetT(6, 35, 3);
     toets('vm: kalender 06:35; weer-ochtend nog niet vóór 06:40 (wv2389), keten nog open', roep.join('|') === 'kalender:2026-11-11:function', roep);
     roep.length = 0; await zetT(6, 40, 3);
-    toets('vm: weer-ochtend om 06:40 met de NL-klok, daarna afgesloten met één hartslag sb2_nachtketen (20 klaar, 0 bevindingen), geen box', roep.join('|') === 'weer:2026-11-11:6:40|rpc:mk_hartslag_stempel:sb2_nachtketen:20:0', roep);
+    toets('vm: weer-ochtend om 06:40 met de NL-klok, daarna afgesloten met één hartslag sb2_nachtketen (21 klaar, 0 bevindingen), geen box', roep.join('|') === 'weer:2026-11-11:6:40|rpc:mk_hartslag_stempel:sb2_nachtketen:21:0', roep);
     const inf = K2.nachtketenInfo();
-    toets('vm: /health-info zonder inhoud: stand per stap, lopend 0, afgesloten', inf.lopend === 0 && !!inf.afgesloten && Object.keys(inf.stappen).length === 20 && inf.stappen['sb2-steekwoorden'] === 'klaar:al_gedaan' && inf.stappen['intake-publicatie'] === 'klaar:al_gedaan' && inf.stappen['intake-voorstel'] === 'klaar:al_gedaan' && inf.stappen['sb2-berichten'] === 'klaar:al_gedaan' && inf.stappen['sb2-synapsen'] === 'klaar:al_gedaan' && inf.stappen['sb2-proefloper'] === 'klaar:al_gedaan' && Object.entries(inf.stappen).every(([k, x]) => x === 'klaar' || k === 'sb2-steekwoorden' || k === 'intake-publicatie' || k === 'intake-voorstel' || k === 'sb2-berichten' || k === 'sb2-synapsen' || k === 'sb2-proefloper'), inf);
+    toets('vm: /health-info zonder inhoud: stand per stap, lopend 0, afgesloten', inf.lopend === 0 && !!inf.afgesloten && Object.keys(inf.stappen).length === 21 && inf.stappen['sb2-steekwoorden'] === 'klaar:al_gedaan' && inf.stappen['intake-publicatie'] === 'klaar:al_gedaan' && inf.stappen['intake-voorstel'] === 'klaar:al_gedaan' && inf.stappen['sb2-berichten'] === 'klaar:al_gedaan' && inf.stappen['sb2-synapsen'] === 'klaar:al_gedaan' && inf.stappen['sb2-proefloper'] === 'klaar:al_gedaan' && Object.entries(inf.stappen).every(([k, x]) => x === 'klaar' || k === 'sb2-steekwoorden' || k === 'intake-publicatie' || k === 'intake-voorstel' || k === 'sb2-berichten' || k === 'sb2-synapsen' || k === 'sb2-proefloper'), inf);
     // wv1430: tweede nacht met de schakelaar aan — sb2-steekwoorden loopt na zoekleer, vóór de kalender van 06:35
     swAan = true; plAan = true; roep.length = 0;
     const zetT2 = async (u, m, n) => { tijd = { datum: '2026-11-12', uur: u, min: m }; for (let i = 0; i < (n || 4); i++) await tikk(); };
@@ -344,12 +379,12 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     toets('vm: schakelaar aan — proefloper ná de publicatie (wv1963)', roep.indexOf('publicatie') >= 0 && roep.indexOf('proefloper:2026-11-12:function') > roep.indexOf('publicatie'), roep);
     toets('vm: schakelaar aan — synapsen ná de voorstelservice en vóór de proefloper (wv2022)', roep.indexOf('voorstel') >= 0 && roep.indexOf('synapsen') > roep.indexOf('voorstel') && roep.indexOf('proefloper:2026-11-12:function') > roep.indexOf('synapsen'), roep);
     toets('vm: schakelaar aan — berichten ná de voorstelservice en vóór de synapsen (wv2383)', roep.indexOf('berichten') > roep.indexOf('voorstel') && roep.indexOf('synapsen') > roep.indexOf('berichten'), roep);
-    await zetT2(3, 30, 2); await zetT2(3, 45, 3); await zetT2(3, 50, 3);
+    await zetT2(3, 30, 2); await zetT2(3, 45, 3); await zetT2(3, 50, 3); await zetT2(4, 0, 2);   // wv2526: avg-spiegel
     roep.length = 0; await zetT2(5, 0, 8);
     toets('vm: schakelaar aan — feitenlijst → zoekindex → zoekleer → steekwoorden (via socev-run-object)', roep.filter(x => !/^n8n:/.test(x)).join('|') === 'feitenlijst:2026-11-12:function|zoekindex:2026-11-12:function|zoekleer:2026-11-12:function|steekwoorden:2026-11-12:function', roep);
     toets('vm: steekwoorden wacht op de n8n-run van de nachtconsolidatie', roep.indexOf('n8n:/workflows/lKcF3Oxt8WVeELPJ') >= 0 && roep.indexOf('n8n:/workflows/lKcF3Oxt8WVeELPJ') < roep.indexOf('steekwoorden:2026-11-12:function'), roep);
     roep.length = 0; await zetT2(6, 35, 3); await zetT2(6, 40, 3);
-    toets('vm: tweede nacht: kalender, weer-ochtend, daarna hartslag (20 klaar)', roep.join('|') === 'kalender:2026-11-12:function|weer:2026-11-12:6:40|rpc:mk_hartslag_stempel:sb2_nachtketen:20:0', roep);
+    toets('vm: tweede nacht: kalender, weer-ochtend, daarna hartslag (21 klaar)', roep.join('|') === 'kalender:2026-11-12:function|weer:2026-11-12:6:40|rpc:mk_hartslag_stempel:sb2_nachtketen:21:0', roep);
     toets('vm: nachtAmsVan zet UTC om naar Nederlandse tijd (winter +1)', JSON.stringify(K2.nachtAmsVan('2026-11-11T04:00:31Z')) === '{"datum":"2026-11-11","uur":5,"min":0}');
     ctx.jobs.x = { status: 'running', chat_id: '40687' };
     toets('vm: lopende /run-beurt in 40687 = nachtrij bezig', K2.nachtrijPodBezig() === true);

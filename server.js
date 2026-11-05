@@ -18298,6 +18298,51 @@ const weerOchtend = (function () {
   } catch (e) { logError('weer-ochtend', e); return null; }
 })();
 function weerInfo() { if (!weerOchtend) return { aan: false }; try { return weerOchtend.info(); } catch (e) { return { aan: true, fout: true }; } }
+// ── AVG-spiegel (wv2526; bouwplan vault "01_Ontwikkeling/AVG-stukken per praktijk in GitHub (bouwplan 5-11-2026).md") ──
+// Nachtketen-stap: spiegelt 10_Zakelijk/<Praktijk>/Privacy naar de privé-repo Socev/avg-<praktijk> (eenrichting; logica, BSN-elfproef en
+// grenzen in mk-scripts/avg-spiegel/spiegel.py). Kaal kindproces (geen socev-run: die meldt zelf met een bericht; hier meldt alleen de keten
+// via zijn box-rij, meldtZelf false). De harde grens zit in het kind zelf (review wv2526 MOET 2): coreutils timeout is leider van een eigen
+// procesgroep en stuurt bij verloop TERM (na 15 s KILL) aan de hele groep, ook git-kinderen, en ook als de pod intussen herstartte (de keten
+// wacht dan op die wees, dus begrensd). Uitvoer naar een bestand, niet naar een pipe: een wees na een herstart krijgt anders EPIPE (MOET 1).
+// Een Node-timer met ruimte erboven is alleen nog een vangnet. Script weg = al_gedaan (niet in deze pod).
+const AVG_SPIEGEL_SCRIPT = '/opt/data/mk-scripts/avg-spiegel/spiegel.py';
+const AVG_SPIEGEL_UIT = '/opt/data/scripts-staat/avg-spiegel/laatste.jsonl';
+const AVG_SPIEGEL_MAX_S = 240;
+function avgSpiegelRonde(ctx) {
+  return new Promise(function (resolve) {
+    if (!fs.existsSync(AVG_SPIEGEL_SCRIPT)) return resolve({ ok: true, al_gedaan: true, detail: { niet_aanwezig: true } });
+    const t0 = Date.now();
+    let klaar = false, k, fd = null, vangnet = null;
+    const groep = function (sig) { try { process.kill(-k.pid, sig); } catch (e) { try { k.kill(sig); } catch (e2) {} } };
+    try {
+      fs.mkdirSync(path.dirname(AVG_SPIEGEL_UIT), { recursive: true, mode: 0o700 });
+      try { fs.unlinkSync(AVG_SPIEGEL_UIT); } catch (e) {}
+      fd = fs.openSync(AVG_SPIEGEL_UIT, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+      k = spawn('timeout', ['-k', '15', String(AVG_SPIEGEL_MAX_S), 'python3', '-I', AVG_SPIEGEL_SCRIPT], { cwd: '/tmp', env: process.env, stdio: ['ignore', fd, 'ignore'], detached: true });
+    } catch (e) { return resolve({ ok: false, reden: 'start: ' + String(e && e.message || e).slice(0, 80) }); }
+    finally { if (fd !== null) { try { fs.closeSync(fd); } catch (e) {} } }
+    if (k.pid && ctx && typeof ctx.opSpawn === 'function') { try { ctx.opSpawn(k.pid); } catch (e) {} }
+    vangnet = setTimeout(function () { groep('SIGKILL'); }, (AVG_SPIEGEL_MAX_S + 45) * 1000);
+    const af = function (code, fout) {
+      if (klaar) return; klaar = true; clearTimeout(vangnet);
+      let uit = ''; try { uit = fs.readFileSync(AVG_SPIEGEL_UIT, 'utf8').slice(0, 20000); } catch (e) {}
+      const per = {};
+      uit.split('\n').forEach(function (r) {
+        let j = null; try { j = JSON.parse(r); } catch (e) { return; }
+        if (!j || typeof j !== 'object') return;
+        if (j.overgeslagen === 'onderhoudsstand') { per._ = 'onderhoudsstand'; return; }
+        if (typeof j.praktijk !== 'string') return;
+        per[j.praktijk.slice(0, 20)] = j.ok ? (j.commit ? 'gepusht ' + String(j.commit).slice(0, 12) : 'gelijk') + (Array.isArray(j.overgeslagen) && j.overgeslagen.length ? ', ' + j.overgeslagen.length + ' niet mee' : '')
+          : 'fout: ' + String(j.fout || '?').slice(0, 80);
+      });
+      const d = { ms: Date.now() - t0, praktijken: per };
+      if (code === 0) return resolve({ ok: true, detail: d });
+      resolve({ ok: false, reden: fout ? 'start: ' + fout : (code === 124 || code === 137) ? 'tijdslimiet ' + AVG_SPIEGEL_MAX_S + ' s' : 'exit ' + code, detail: d });
+    };
+    k.on('error', function (e) { af(127, String(e && e.message || e).slice(0, 80)); });
+    k.on('close', function (code, sig) { af(code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code); });
+  });
+}
 // ── Nachtketen (wv1868, SB2 fase 3d; ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase 3 intake, nachtketen en schrijvers (ontwerp
 // 28-10-2026).md" § 4; logica en waarom in nachtketen.js) ──
 // Elke minuut (echte pod, rol primair, vlag aan). Stappen in volgorde; elke stap gebruikt hetzelfde object en dezelfde stempel als zijn oude
@@ -18437,6 +18482,8 @@ const nachtketen = (function () {
         return { ok: true, al_gedaan: !secondbrain.nacht(d[0] + '-' + d[1] + '-' + d[2]) || undefined };
       } },
       { naam: 'veeg', start_na: [3, 50], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(scriptsVeeg) },
+      // wv2526: AVG-stukken per praktijk naar hun privé-repo; kindproces met eigen harde grens (4 min); een fout meldt alleen de keten (box-rij)
+      { naam: 'avg-spiegel', start_na: [4, 0], limiet_min: 5, pogingen: 2, meldtZelf: false, doe: function (ctx) { return avgSpiegelRonde(ctx); } },
       { naam: 'sb2-feitenlijst', start_na: [5, 0], na: ['bibliothecaris'], limiet_min: 7, pogingen: 2, meldtZelf: true,
         voorwaarde: nachtN8nVoorwaarde([NACHT_N8N.rawInput, NACHT_N8N.teams, NACHT_N8N.whatsapp], [6, 40], true), doe: nachtDagStap(sb2Feitenlijst) },
       { naam: 'sb2-zoekindex', na: ['sb2-feitenlijst'], limiet_min: 15, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekindex) },
