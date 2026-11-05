@@ -90,7 +90,7 @@ const A = { id: 'telefoon', soort: 'mee' }, B = { id: 'laptop', soort: 'mee' };
 let rs = res();
 ctx.V({ method: 'GET' }, rs, A, {});
 toets('20 GET zonder bestand: standaard, favorieten uit vast.json, bekend = 25, stil, niets geschreven', antw[0].st === 200 && antw[0].o.standaard === true && antw[0].o.favorieten.join() === 'facturen,kalender' &&
-  antw[0].o.bekend.length === 25 && antw[0].o.meest && antw[0].o.meest.klaar === false && rs._app.stil === true && schrijfTel === 0, antw[0]);
+  antw[0].o.bekend.length === L.APP_IDS.length && L.APP_IDS.length >= 26 && antw[0].o.meest && antw[0].o.meest.klaar === false && rs._app.stil === true && schrijfTel === 0, antw[0]);
 antw = [];
 ctx.V({ method: 'POST' }, res(), A, { versie: 0, volgorde: ['mail', 'pot'], favorieten: ['pot'], sortering: 'eigen' });
 ctx.V({ method: 'GET' }, res(), B, {});
