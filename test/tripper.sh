@@ -77,7 +77,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('5f een niet-reis op id (Index): 404', m.reis(R.idVan('20_Prive/Reizen/Index.md')).status === 404);
   // ── 6. info ──
   const i = m.info();
-  toets('6 info: alleen aantallen en tijd', i.aan === true && i.reizen === 8 && i.komend === 3 && i.onleesbaar === 1 && Object.keys(i).sort().join() === 'aan,komend,onleesbaar,op,reizen,uit_fotos' && i.uit_fotos === 0, i);
+  toets('6 info: alleen aantallen en tijd', i.aan === true && i.reizen === 8 && i.komend === 3 && i.onleesbaar === 1 && Object.keys(i).sort().join() === 'aan,komend,onleesbaar,op,reizen,uit_fotos,uit_fotos_periode,uit_fotos_punt' && i.uit_fotos === 0 && i.uit_fotos_punt === 0, i);
   toets('6b info vóór de eerste lijst: null-tellers', R.maak({ vault: V, vv: VV }).info().reizen === null);
   toets('6c zonder reizenmap: lege lijst, geen fout', R.maak({ vault: path.join(W, 'leeg'), vv: VV }).lijst().body.reizen.length === 0);
 
@@ -272,7 +272,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     st('Gambia 2024') === 'gambia' && st('Shizzle: goes Proefstad - 2017') === 'vrienden' && st('Mannenweekend Proefbos 2016') === 'vrienden' && st('Kesch-trek David & Proef 2025') === 'actief'
     && st('Weekendje Proefstad 2011') === 'weekend' && st('Vakantie Proefeiland 2016') === 'vakantie' && st('Proefland 2017') === 'overig' && st('Carbage Run Proef') === 'carbage-run');
   toets('13h geen namen, pagina, kaartpunt of te regelen', uf.every((x) => x.deelnemers.length === 0 && x.punt === null && x.te_regelen_open === null && !('tekst' in x) && !('pad' in x)));
-  toets('13i info telt uit_fotos', m5.info().uit_fotos === 4, m5.info());
+  toets('13i info telt uit_fotos', m5.info().uit_fotos === 4 && m5.info().uit_fotos_periode === 0 && m5.info().uit_fotos_punt === 0, m5.info());
   const m6 = R.maak({ vault: V, vv: VV, vandaag: () => '2026-11-01', koppel, fotoreizen: () => { throw new Error('ml stuk'); } });
   const L6 = m6.lijst();
   toets('13j fout in MemoryLane: reispagina\'s blijven, uit_fotos leeg', L6.status === 200 && L6.body.reizen.length === nu5 && L6.body.uit_fotos.length === 0);
@@ -280,6 +280,52 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const m7 = R.maak({ vault: V, vv: VV, vandaag: () => '2026-11-01', koppel, fotoreizen: () => fr.concat([{ hid: 'h0123456789abcdef', titel: 'Zelfde album als Proefland', wanneer: '2023', van: '2023-01-01', tot: '2023-12-31', precisie: 'jaar' }]) });
   toets('13m review MOET 1: album dat al bij een reispagina hoort (zelfde hid) komt niet dubbel in uit_fotos', m7.lijst().body.uit_fotos.length === 4 && !m7.lijst().body.uit_fotos.some((x) => x.id === 'h0123456789abcdef'));
   toets('13l server.js geeft fotoreizen uit memorylaneDelen.fotoReizen door', /fotoreizen: function \(\) \{ return memorylaneDelen && typeof memorylaneDelen\.fotoReizen === 'function' \? memorylaneDelen\.fotoReizen\(\) : \[\]; \}/.test(src));
+
+  // ── 14. periode en kaartpunt uit de foto's zelf (wv2468) ──
+  const AA = { status: 'actief', aantal: 40 };
+  const fs14 = [
+    // maand + passende foto's: periode uit de foto's
+    { hid: 'h00000000000000f1', titel: 'Zomervakantie 2014 - Proefland', wanneer: 'juni 2014', van: '2014-06-01', tot: '2014-06-30', precisie: 'maand', album: AA,
+      spoor: { van: '2014-06-28', tot: '2014-07-12', punt: { lat: 45.14, lon: 6.31 }, fotos: 40, met_gps: 30 } },
+    // jaar + foto's in een heel ander jaar: Davids wanneer wint, punt blijft
+    { hid: 'h00000000000000f2', titel: 'Citytrip Proefstad 2016', wanneer: '2016', van: '2016-01-01', tot: '2016-12-31', precisie: 'jaar', album: AA,
+      spoor: { van: '2019-05-01', tot: '2019-05-04', punt: { lat: 41.38, lon: 2.17 }, fotos: 40, met_gps: 10 } },
+    // Davids eigen dagen winnen altijd
+    { hid: 'h00000000000000f3', titel: 'Weekend Proefdorp', wanneer: '3–5 mei 2019', van: '2019-05-03', tot: '2019-05-05', precisie: 'dag', album: AA,
+      spoor: { van: '2019-05-02', tot: '2019-05-09', punt: null, fotos: 40, met_gps: 2 } },
+    // geen wanneer: periode uit de foto's
+    { hid: 'h00000000000000f4', titel: 'Proefland', wanneer: '', van: null, tot: null, precisie: null, album: AA,
+      spoor: { van: '2011-08-01', tot: '2011-08-01', punt: null, fotos: 40, met_gps: 0 } },
+    // spoor zonder periode (te verspreid) en onzinnig punt
+    { hid: 'h00000000000000f5', titel: 'Vakantie Proefeiland', wanneer: '', van: null, tot: null, precisie: null, album: AA,
+      spoor: { van: null, tot: null, punt: { lat: 0, lon: 0 }, fotos: 40, met_gps: 9 } },
+    // album weg: spoor telt niet
+    { hid: 'h00000000000000f6', titel: 'Weg album', wanneer: '', van: null, tot: null, precisie: null, album: { status: 'weg', aantal: 0 },
+      spoor: { van: '2012-01-01', tot: '2012-01-03', punt: { lat: 10, lon: 10 }, fotos: 3, met_gps: 3 } },
+    // ongeldige periode (tot vóór van) en kapot spoor
+    { hid: 'h00000000000000f7', titel: 'Kapot', wanneer: '', van: null, tot: null, precisie: null, album: AA, spoor: { van: '2013-05-09', tot: '2013-05-01', punt: { lat: 'x', lon: 5 } } },
+    { hid: 'h00000000000000f8', titel: 'Kapot 2', wanneer: '', van: null, tot: null, precisie: null, album: AA, spoor: 'onzin' },
+  ];
+  const m14 = R.maak({ vault: V, vv: VV, vandaag: () => '2026-11-01', koppel, fotoreizen: () => fs14 });
+  const L14 = m14.lijst().body.uit_fotos, g14 = (h) => L14.find((x) => x.id === h);
+  const f1 = g14('h00000000000000f1'), f2 = g14('h00000000000000f2'), f3 = g14('h00000000000000f3'), f4 = g14('h00000000000000f4');
+  toets('14a maand + passende foto\'s (± 31 dagen): van/tot/dagen uit de foto\'s, periode als data, punt op 1 decimaal',
+    f1.van === '2014-06-28' && f1.tot === '2014-07-12' && f1.dagen === 15 && f1.periode === '2014-06-28 – 2014-07-12' && f1.jaar === '2014' && f1.datum === '2014-06-28'
+    && f1.punt && f1.punt.lat === 45.1 && f1.punt.lon === 6.3 && f1.uit_fotos.periode === true && f1.uit_fotos.punt === true, f1);
+  toets('14b jaar + foto\'s in een ander jaar: Davids wanneer wint (geen van/tot), punt blijft', f2.van === null && f2.periode === '2016' && f2.jaar === '2016'
+    && f2.uit_fotos.periode === false && f2.punt.lat === 41.4 && f2.punt.lon === 2.2, f2);
+  toets('14c Davids eigen dagen winnen altijd', f3.van === '2019-05-03' && f3.tot === '2019-05-05' && f3.uit_fotos.periode === false && f3.punt === null && f3.uit_fotos.punt === false, f3);
+  toets('14d zonder wanneer: periode uit de foto\'s (één dag)', f4.van === '2011-08-01' && f4.tot === '2011-08-01' && f4.dagen === 1 && f4.jaar === '2011', f4);
+  toets('14e spoor zonder periode, punt 0,0 = geen punt', g14('h00000000000000f5').van === null && g14('h00000000000000f5').punt === null && g14('h00000000000000f5').jaar === null);
+  toets('14f album weg: spoor telt niet', g14('h00000000000000f6').van === null && g14('h00000000000000f6').punt === null);
+  toets('14g kapotte spoor-invoer: geen periode, geen punt, geen fout', g14('h00000000000000f7').van === null && g14('h00000000000000f7').punt === null && g14('h00000000000000f8').van === null && g14('h00000000000000f8').punt === null);
+  toets('14h info telt periode en punt uit de foto\'s', m14.info().uit_fotos_periode === 2 && m14.info().uit_fotos_punt === 2, m14.info());
+  toets('14i volgorde: op de begindatum uit de foto\'s', L14.findIndex((x) => x.id === 'h00000000000000f3') < L14.findIndex((x) => x.id === 'h00000000000000f1')
+    && L14.findIndex((x) => x.id === 'h00000000000000f1') < L14.findIndex((x) => x.id === 'h00000000000000f4'));
+  toets('14j pastBij: binnen maand/jaar ± 31 dagen (overlap alleen is niet genoeg); zonder wanneer past alles', R.pastBij('2014-07-12', '2014-07-20', '2014-06-01', '2014-06-30') && !R.pastBij('2014-08-05', '2014-08-09', '2014-06-01', '2014-06-30')
+    && R.pastBij('2013-12-10', '2013-12-12', '2014-01-01', '2014-12-31') && R.pastBij('2000-01-01', '2000-01-02', null, null)
+    && !R.pastBij('2014-07-21', '2014-08-20', '2014-06-01', '2014-06-30') && !R.pastBij('2014-04-10', '2014-05-10', '2014-06-01', '2014-06-30'));   // review MOET 2: overlap is niet genoeg
+  toets('14k geen steden, ids of tellers van het album naar de app buiten memorylane/uit_fotos', L14.every((x) => !('spoor' in x) && Object.keys(x.uit_fotos).sort().join() === 'periode,punt'));
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

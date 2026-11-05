@@ -44,7 +44,7 @@ function jpeg(exif) {
 
 // Nep-Immich: albums met assets per maand, miniaturen; houdt bij wat er gevraagd werd
 function nepImmich() {
-  const st = { albums: [], beelden: new Map(), video: new Set(), uit: false, log: [], patches: [], sleutel: 'proefsleutel-verzonnen-0123456789' };
+  const st = { albums: [], beelden: new Map(), video: new Set(), meta: new Map(), prullenbak: new Set(), uit: false, log: [], patches: [], sleutel: 'proefsleutel-verzonnen-0123456789' };
   const res = (status, obj, ct) => new Response(Buffer.isBuffer(obj) ? obj : JSON.stringify(obj), { status, headers: { 'content-type': ct || 'application/json; charset=utf-8' } });
   st.fetch = async (url, init) => {
     const u = new URL(url), m = init.method;
@@ -68,9 +68,14 @@ function nepImmich() {
     if (m === 'GET' && (r = /^\/api\/albums\/([0-9a-f-]{36})$/.exec(u.pathname))) { const a = st.albums.find((x) => x.id === r[1]); return a ? res(200, { id: a.id, albumName: a.albumName, description: a.description, assetCount: a.assets.length }) : res(404, {}); }
     if (m === 'GET' && u.pathname === '/api/timeline/buckets') { const a = st.albums.find((x) => x.id === u.searchParams.get('albumId')); return res(200, a && a.assets.length ? [{ timeBucket: '2020-02-01', count: Math.min(3, a.assets.length) }, ...(a.assets.length > 3 ? [{ timeBucket: '2020-03-01', count: a.assets.length - 3 }] : [])] : []); }
     if (m === 'GET' && u.pathname === '/api/timeline/bucket') {
+      if (st.bucketUit) return res(500, { message: 'nep: maand stuk' });
       const a = st.albums.find((x) => x.id === u.searchParams.get('albumId'));
       const ids = !a ? [] : u.searchParams.get('timeBucket') === '2020-02-01' ? a.assets.slice(0, 3) : a.assets.slice(3);
-      return res(200, { id: ids, isImage: ids.map((x) => !st.video.has(x)), isTrashed: ids.map(() => false), ratio: ids.map(() => 1.5) });
+      const r0 = { id: ids, isImage: ids.map((x) => !st.video.has(x)), isTrashed: ids.map((x) => st.prullenbak.has(x)), ratio: ids.map(() => 1.5),
+        fileCreatedAt: ids.map((x) => (st.meta.get(x) || {}).t || '2020-02-10T10:00:00.000Z'), localOffsetHours: ids.map((x) => (st.meta.get(x) || {}).off ?? 1) };
+      // wv2468: plek alleen met withCoordinates=true (zoals Immich 3)
+      if (u.searchParams.get('withCoordinates') === 'true') { r0.latitude = ids.map((x) => (st.meta.get(x) || {}).lat ?? null); r0.longitude = ids.map((x) => (st.meta.get(x) || {}).lon ?? null); }
+      return res(200, r0);
     }
     if (m === 'GET' && (r = /^\/api\/assets\/([0-9a-f-]{36})\/thumbnail$/.exec(u.pathname))) { const b = st.beelden.get(r[1]); return b ? res(200, b.buf, b.mime) : res(404, {}); }
     return res(404, { message: 'nep: onbekend' });
@@ -628,5 +633,120 @@ test('wv2325 zonder beeldmodel (o.beeld ontbreekt): geen knop, 409, gevel zoals 
     assert.strictEqual(o.ml.lijst().body.herinneringen[0].plaatje_kan, false);
     assert.strictEqual((await o.ml.plaatjeMaken(hr, { beschrijving: 'x' })).status, 409);
     assert.strictEqual((await o.ml.gevelBeeld(hr)).status, 404);
+  } finally { o.sluit(); }
+});
+
+// ── wv2468 (Tripper): fotospoor — periode en één afgerond punt uit de foto's van een reis uit je foto's (verzonnen tijden en plekken) ──
+test('wv2468 witte lijst: withCoordinates alleen "true" en alleen op de maandvraag; plaatselijkeDag', () => {
+  const a = uuid();
+  assert.strictEqual(IM.weiger('GET', '/api/timeline/bucket', { albumId: a, timeBucket: '2020-02-01', order: 'asc', withCoordinates: 'true' }), null);
+  for (const w of ['false', '1', 'TRUE', '']) assert.strictEqual(IM.weiger('GET', '/api/timeline/bucket', { albumId: a, timeBucket: '2020-02-01', withCoordinates: w }), 'query', w);
+  assert.strictEqual(IM.weiger('GET', '/api/timeline/buckets', { albumId: a, withCoordinates: 'true' }), 'query');
+  assert.strictEqual(IM.weiger('GET', '/api/timeline/bucket', { albumId: a, timeBucket: '2020-02-01', bbox: '1,2,3,4' }), 'query');
+  assert.strictEqual(IM.plaatselijkeDag('2020-02-10T23:30:00.000Z', 1), '2020-02-11');
+  assert.strictEqual(IM.plaatselijkeDag('2020-02-10T02:00:00.000Z', -5), '2020-02-09');
+  assert.strictEqual(IM.plaatselijkeDag('2020-02-10T02:00:00.000Z', null), '2020-02-10');
+  assert.strictEqual(IM.plaatselijkeDag('2020-02-10T02:00:00.000Z', 99), '2020-02-10', 'onzinnige afwijking = 0');
+  assert.strictEqual(IM.plaatselijkeDag('geen tijd', 1), null);
+  assert.strictEqual(IM.plaatselijkeDag(null, 1), null);
+});
+test('wv2468 spoorUit: periode = drukste 31 dagen bij ≥ 80 % en ≥ 3 foto\'s; punt = mediaan op 1 decimaal bij ≥ 5 GPS, 0,0 telt niet', () => {
+  const f = (dag, lat, lon) => ({ dag, lat: lat ?? null, lon: lon ?? null });
+  // 9 van 10 binnen 31 dagen, één uitschieter jaren later: periode = het venster, niet eerste–laatste van alles
+  const a = MF.spoorUit([f('2014-06-20'), f('2014-06-21'), f('2014-06-22'), f('2014-06-25'), f('2014-07-01'), f('2014-07-02'), f('2014-07-10'), f('2014-07-19'), f('2014-07-20'), f('2019-01-01')]);
+  assert.deepStrictEqual([a.van, a.tot, a.fotos, a.met_dag, a.met_gps, a.lat], ['2014-06-20', '2014-07-20', 10, 10, 0, null]);
+  // 31 dagen precies: 1 t/m 31 juli past; 1 juli t/m 1 augustus (32 dagen) niet als venster
+  assert.strictEqual(MF.spoorUit([f('2014-07-01'), f('2014-07-15'), f('2014-07-31')]).tot, '2014-07-31');
+  const b = MF.spoorUit([f('2014-07-01'), f('2014-07-15'), f('2014-08-01')]);
+  assert.strictEqual(b.van, null, '2 van 3 binnen 31 dagen = 67 % < 80 %');
+  assert.strictEqual(MF.spoorUit([f('2014-07-01'), f('2014-07-02')]).van, null, 'minder dan 3 foto\'s met een datum: geen periode');
+  assert.strictEqual(MF.spoorUit([f('2014-07-01'), f(null), f('2014-07-02'), f('2014-07-03')]).van, '2014-07-01', 'foto zonder datum telt niet mee in de noemer');
+  // punt
+  const g = MF.spoorUit([f('2014-07-01', 45.11, 6.31), f('2014-07-01', 45.14, 6.29), f('2014-07-02', 45.2, 6.4), f('2014-07-02', 52.0, 5.0), f('2014-07-03', 45.12, 6.33), f('2014-07-03', 0, 0)]);
+  assert.strictEqual(g.met_gps, 5, '0,0 telt niet');
+  assert.deepStrictEqual([g.lat, g.lon], [45.1, 6.3], 'mediaan (45.14, 6.31) op 1 decimaal; één punt thuis trekt hem niet weg');
+  assert.strictEqual(MF.spoorUit([f('2014-07-01', 45, 6), f('2014-07-01', 45, 6), f('2014-07-01', 45, 6), f('2014-07-01', 45, 6)]).lat, null, '4 met GPS: geen punt');
+  assert.strictEqual(MF.spoorUit([f('2014-07-01', 95, 6), f('2014-07-01', 45, 190), f('2014-07-01', NaN, 6), f('2014-07-01', '45', 6), f('2014-07-01', 45, 6)]).met_gps, 1, 'ongeldige plekken tellen niet');
+  const leeg = MF.spoorUit(null);
+  assert.deepStrictEqual([leeg.fotos, leeg.van, leeg.lat], [0, null, null]);
+});
+test('wv2468 sync: fotospoor alleen voor kandidaten met spoor, opnieuw bij een ander aantal, hooguit 8 per ronde, alleen uitkomst in ml_fotospoor', async () => {
+  const im = nepImmich();
+  const db = new DatabaseSync(':memory:');
+  const klok = { t: Date.parse('2026-11-05T12:00:00Z') };
+  const fouten = [];
+  const F = MF.maak({ db, immich: im.client, nu: () => klok.t, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)) });
+  const kand = [];
+  for (let i = 0; i < 10; i++) kand.push({ hid: 'h00000000000000a' + i, soort: 'los', ref: 'google:00000000000000a' + i, titel: 'Proefreis ' + i, jaar: '2014', auto: true, spoor: i !== 5 });
+  await F.sync(kand, true);   // maakt 6 lege albums
+  const albumVan = (hid) => im.albums.find((a) => a.id === db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(hid).album_id);
+  // album 0: 6 foto's in juli 2014 (Frankrijk-achtig verzonnen), album 1: 2 foto's; albums 2–4 leeg; album 5 heeft geen spoor
+  const a0 = albumVan('h00000000000000a0');
+  [[45.11, 6.31], [45.14, 6.29], [45.2, 6.4], [52.0, 5.0], [null, null], [null, null]].forEach(([lat, lon], i) => {
+    const id = im.foto(a0, webp(false)); im.meta.set(id, { t: '2014-07-0' + (i + 1) + 'T09:00:00.000Z', off: 2, lat, lon });
+  });
+  const verst = im.foto(a0, webp(false)); im.prullenbak.add(verst); im.meta.set(verst, { t: '2001-01-01T09:00:00.000Z', lat: 10, lon: 10 });
+  const a1 = albumVan('h00000000000000a1'); for (let i = 0; i < 2; i++) im.foto(a1, webp(false));
+  for (let i = 0; i < 3; i++) im.foto(albumVan('h00000000000000a5'), webp(false));
+  im.log.length = 0;
+  klok.t += 11 * 60000;
+  const s1 = await F.sync(kand, false);
+  assert.strictEqual(s1.spoor, 8, 'hooguit 8 per ronde');
+  assert.ok(im.log.some((l) => /withCoordinates=true/.test(l)), 'plek gevraagd met withCoordinates');
+  assert.ok(!im.log.some((l) => /withCoordinates/.test(l) && l.includes(albumVan('h00000000000000a5').id)), 'geen spoor voor een herinnering zonder spoor');
+  klok.t += 11 * 60000;
+  const s2 = await F.sync(kand, false);
+  assert.strictEqual(s2.spoor, 1, 'de negende de volgende ronde');
+  const sp0 = F.spoor('h00000000000000a0');
+  assert.deepStrictEqual([sp0.fotos, sp0.met_dag, sp0.met_gps, sp0.van, sp0.tot], [6, 6, 4, '2014-07-01', '2014-07-06'], 'prullenbak telt niet');
+  assert.strictEqual(sp0.punt, null, '4 met GPS is te weinig');
+  assert.strictEqual(F.spoor('h00000000000000a1').van, null, '2 foto\'s: geen periode');
+  assert.strictEqual(F.spoor('h00000000000000a5'), null);
+  // een vijfde GPS-foto erbij: ander aantal → opnieuw gerekend in de volgende ronde
+  const id = im.foto(a0, webp(false)); im.meta.set(id, { t: '2014-07-03T09:00:00.000Z', off: 2, lat: 45.13, lon: 6.32 });
+  klok.t += 11 * 60000;
+  const s3 = await F.sync(kand, false);
+  assert.strictEqual(s3.spoor, 1);
+  assert.deepStrictEqual(F.spoor('h00000000000000a0').punt, { lat: 45.1, lon: 6.3 });
+  // niets veranderd: geen nieuwe vraag aan Immich voor het spoor
+  im.log.length = 0; klok.t += 11 * 60000;
+  assert.strictEqual((await F.sync(kand, false)).spoor, 0);
+  assert.ok(!im.log.some((l) => /withCoordinates/.test(l)));
+  // na 7 dagen opnieuw (oudste eerst)
+  klok.t += 7 * 86400000;
+  assert.strictEqual((await F.sync(kand, false)).spoor, 8);
+  // alleen hid, aantallen, datums, afgeronde plek en tijd in de tabel
+  const kol = db.prepare('PRAGMA table_info(ml_fotospoor)').all().map((k) => k.name).sort().join();
+  assert.strictEqual(kol, 'aantal_bij,fotos,hid,lat,lon,met_dag,met_gps,op,tot,van');
+  assert.ok(db.prepare('SELECT lat, lon FROM ml_fotospoor WHERE lat IS NOT NULL').all().every((r) => Math.round(r.lat * 10) === r.lat * 10 && Math.round(r.lon * 10) === r.lon * 10));
+  assert.deepStrictEqual(F.info().fotospoor, { gerekend: 9, periode: 1, punt: 1 });
+  // Immich faalt tijdens het spoor: één fout gelogd (geen namen), de ronde stopt, de oude uitkomst blijft
+  assert.deepStrictEqual(fouten, []);
+  im.foto(a0, webp(false)); im.bucketUit = true; klok.t += 11 * 60000;
+  const s4 = await F.sync(kand, false);
+  assert.strictEqual(s4.spoor, 0);
+  assert.deepStrictEqual(F.spoor('h00000000000000a0').punt, { lat: 45.1, lon: 6.3 }, 'oude uitkomst blijft');
+  assert.deepStrictEqual(fouten, ['ml-immich-spoor: immich: HTTP 500']);
+});
+test('wv2468 fotoReizen geeft het spoor van een reis uit je foto\'s mee (periode en afgerond punt, geen ids of steden)', async () => {
+  const o = omgeving();
+  try {
+    const t = '2026-10-31T19:00:00Z';
+    const ins = o.ing._db.prepare("INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES (?, 'los', ?, ?, 0, 'actief', ?, ?)");
+    ins.run('h00000000000000f1', 'google:00000000000000f1', 'reizen', t, t);
+    ins.run('h00000000000000f2', 'google:00000000000000f2', 'gezin', t, t);
+    await o.tik();   // albums maken
+    const rij = o.album('h00000000000000f1'); assert.ok(rij && rij.album_id);
+    const a = o.im.albums.find((x) => x.id === rij.album_id);
+    for (let i = 0; i < 5; i++) { const id = o.im.foto(a, webp(false)); o.im.meta.set(id, { t: '2018-08-1' + i + 'T12:00:00.000Z', off: 2, lat: 41.38 + i * 0.01, lon: 2.17 }); }
+    const g = o.album('h00000000000000f2'), ga = o.im.albums.find((x) => x.id === g.album_id);
+    for (let i = 0; i < 5; i++) { const id = o.im.foto(ga, webp(false)); o.im.meta.set(id, { lat: 50, lon: 5 }); }
+    o.im.log.length = 0;
+    await o.tik();
+    assert.ok(!o.im.log.some((l) => /withCoordinates/.test(l) && l.includes(ga.id)), 'gezinsalbum: geen spoor');
+    const r = o.ml.fotoReizen();
+    assert.strictEqual(r.length, 1);
+    assert.deepStrictEqual(r[0].spoor, { van: '2018-08-10', tot: '2018-08-14', punt: { lat: 41.4, lon: 2.2 }, fotos: 5, met_gps: 5 });
+    assert.ok(!/[0-9a-f]{8}-[0-9a-f]{4}-/.test(JSON.stringify(r)), 'geen foto- of album-ids');
   } finally { o.sluit(); }
 });

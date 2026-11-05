@@ -10,6 +10,7 @@
  *   GET  /api/albums/<uuid>                            één album
  *   GET  /api/timeline/buckets?albumId=<uuid>          maanden met foto's in dat album (v3 geeft in een album geen fotolijst meer)
  *   GET  /api/timeline/bucket?albumId=<uuid>&timeBucket=<datum>   foto-ids van die maand
+ *        (&withCoordinates=true, wv2468: ook opnametijd en GPS voor de periode en het kaartpunt van een reis uit je foto's; alleen lezen)
  *   GET  /api/assets/<uuid>/thumbnail?size=thumbnail|preview      miniatuur of voorbeeld (nooit het origineel)
  *   POST /api/albums  {albumName, description}         album aanmaken, LEEG (geen assetIds, geen albumUsers)
  *   PATCH /api/albums/<uuid>  {albumName}              ALLEEN de naam van een album (wv2225; memorylane-fotos.js doet dat alleen bij albums
@@ -24,7 +25,16 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const BUCKET_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})?)?$/;
 const MAX_JSON = 8 * 1024 * 1024, MAX_BEELD = 4 * 1024 * 1024;
 const BEELD_MIME = { 'image/jpeg': true, 'image/webp': true, 'image/png': true };
-const MAX_NAAM = 200, MAX_OMSCHRIJVING = 1000;
+const MAX_NAAM = 200, MAX_OMSCHRIJVING = 1000, MAX_SPOOR = 3000;
+// wv2468: plaatselijke opnamedag uit een UTC-tijd en de afwijking in uren (Immich localOffsetHours); ongeldig = null
+function plaatselijkeDag(utc, offset) {
+  const t = typeof utc === 'string' ? Date.parse(utc) : NaN;
+  if (!Number.isFinite(t)) return null;
+  const o = Number.isFinite(offset) && Math.abs(offset) <= 14 ? offset : 0;
+  const d = new Date(t + o * 3600000).toISOString().slice(0, 10);
+  return /^(19|20)\d{2}-\d{2}-\d{2}$/.test(d) ? d : null;
+}
+function geldigGetal(x, grens) { return typeof x === 'number' && Number.isFinite(x) && Math.abs(x) <= grens ? x : null; }
 
 function u(x) { return typeof x === 'string' && UUID_RE.test(x); }
 async function leesBegrensd(res, max) {
@@ -52,8 +62,8 @@ function weiger(methode, pad, query, body) {
     if (pad === '/api/albums') return sleutels.length ? 'query' : null;
     if ((m = /^\/api\/albums\/([0-9a-f-]{36})$/.exec(pad)) && u(m[1])) return sleutels.length ? 'query' : null;
     if (pad === '/api/timeline/buckets') return alleen(['albumId', 'order']) && u(q.albumId) && (q.order === undefined || q.order === 'asc' || q.order === 'desc') ? null : 'query';
-    if (pad === '/api/timeline/bucket') return alleen(['albumId', 'timeBucket', 'order']) && u(q.albumId) && typeof q.timeBucket === 'string' && BUCKET_RE.test(q.timeBucket)
-      && (q.order === undefined || q.order === 'asc' || q.order === 'desc') ? null : 'query';
+    if (pad === '/api/timeline/bucket') return alleen(['albumId', 'timeBucket', 'order', 'withCoordinates']) && u(q.albumId) && typeof q.timeBucket === 'string' && BUCKET_RE.test(q.timeBucket)
+      && (q.order === undefined || q.order === 'asc' || q.order === 'desc') && (q.withCoordinates === undefined || q.withCoordinates === 'true') ? null : 'query';
     if ((m = /^\/api\/assets\/([0-9a-f-]{36})\/thumbnail$/.exec(pad)) && u(m[1])) return alleen(['size']) && (q.size === 'thumbnail' || q.size === 'preview') ? null : 'query';
     return 'pad';
   }
@@ -161,12 +171,37 @@ function maak(o) {
     }
     return uit;
   }
+  // wv2468 (Tripper): wanneer en waar de foto's van een album gemaakt zijn, voor de periode en het kaartpunt van een reis uit je foto's.
+  // → [{ dag: 'JJJJ-MM-DD' (plaatselijke opnamedag: fileCreatedAt + localOffsetHours), lat, lon (null zonder GPS) }], hooguit max, zonder
+  // prullenbak. GEEN ids, namen, steden of landen: alleen wat memorylane-fotos.js nodig heeft om één afgerond punt te rekenen.
+  // Video's tellen bewust mee (review wv2468 MOET 1 niet overgenomen): een video van de reis zegt net zo goed wanneer en waar; een verkeerde
+  // klok of plek vangt de 80 %-regel en de mediaan op, net als bij een foto.
+  async function albumSpoor(id, max) {
+    if (!u(id)) throw new Error('immich: ongeldig album');
+    const grens = Math.max(1, Math.min(MAX_SPOOR, max || MAX_SPOOR));
+    const bakken = await verzoek('GET', '/api/timeline/buckets', { albumId: id, order: 'asc' });
+    const uit = [];
+    for (const b of Array.isArray(bakken) ? bakken : []) {
+      if (uit.length >= grens) break;
+      const tb = b && typeof b.timeBucket === 'string' ? b.timeBucket : null;
+      if (!tb || !BUCKET_RE.test(tb)) continue;
+      const r = await verzoek('GET', '/api/timeline/bucket', { albumId: id, timeBucket: tb, order: 'asc', withCoordinates: 'true' });
+      const n = r && Array.isArray(r.id) ? r.id.length : 0;
+      const kol = (k) => (r && Array.isArray(r[k]) ? r[k] : []);
+      const fc = kol('fileCreatedAt'), off = kol('localOffsetHours'), la = kol('latitude'), lo = kol('longitude'), tr = kol('isTrashed');
+      for (let i = 0; i < n && uit.length < grens; i++) {
+        if (tr[i] === true) continue;
+        uit.push({ dag: plaatselijkeDag(fc[i], off[i]), lat: geldigGetal(la[i], 90), lon: geldigGetal(lo[i], 180) });
+      }
+    }
+    return uit;
+  }
   // maat 'klein' = thumbnail (± 250 px), 'groot' = preview (± 1440 px). Nooit het origineel.
   async function beeld(assetId, maat) {
     if (!u(assetId)) throw new Error('immich: ongeldige foto');
     return verzoek('GET', '/api/assets/' + assetId + '/thumbnail', { size: maat === 'groot' ? 'preview' : 'thumbnail' }, undefined, 'beeld');
   }
-  return { albums, album, maakAlbum, hernoemAlbum, albumFotos, beeld, verzoek, basis };
+  return { albums, album, maakAlbum, hernoemAlbum, albumFotos, albumSpoor, beeld, verzoek, basis };
 }
 
 // Zit er nog metadata (Exif/XMP, met mogelijk de plek of het toestel) in een beeld? Dan delen we het niet naar buiten.
@@ -213,4 +248,4 @@ function heeftMetadata(buf) {
   return true;
 }
 
-module.exports = { maak, weiger, heeftMetadata, UUID_RE };
+module.exports = { maak, weiger, heeftMetadata, plaatselijkeDag, UUID_RE };

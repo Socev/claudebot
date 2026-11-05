@@ -497,7 +497,10 @@ function maak(o) {
   // wv2225: met het (begin)jaar waar de herinnering over gaat (voor de albumnaam "<jaar> <titel> (ML)"); null = onbekend
   function albumKandidaat(h) {
     const p = paginaLees(h.hid), s = sam(h, p), w = wanneerInfo(h, p, s);
-    return { hid: h.hid, soort: h.soort, ref: h.ref, titel: titelVan(h, p, s), jaar: w.van ? String(w.van).slice(0, 4) : null, auto: h.soort === 'reis' || !!catVan(h).categorie };
+    const c = catVan(h);
+    // wv2468: spoor = een reis uit je foto's (zelfde keuze als fotoReizen): de sync rekent dan periode en punt uit de foto's
+    return { hid: h.hid, soort: h.soort, ref: h.ref, titel: titelVan(h, p, s), jaar: w.van ? String(w.van).slice(0, 4) : null, auto: h.soort === 'reis' || !!c.categorie,
+      spoor: isFotoalbum(h) && c.categorie === 'reizen' && !c.gevoeligVink };
   }
   async function fotoSync(dwing) {
     if (!F) return null;
@@ -1235,8 +1238,11 @@ function maak(o) {
       const c = catVan(h);
       if (c.categorie !== 'reizen' || c.gevoeligVink) continue;
       const p = paginaLees(h.hid), w = wanneerInfo(h, p, null), a = F ? F.kort(h.hid) : null;
+      // wv2468: spoor = wat de foto's zelf zeggen (periode en één afgerond punt, uit de foto-sync); reizen.js beslist wat telt
+      const sp = F && typeof F.spoor === 'function' ? F.spoor(h.hid) : null;
       uit.push({ hid: h.hid, titel: titelVan(h, p, null), wanneer: w.tekst || '', van: w.van, tot: w.tot, precisie: w.precisie,
-        stukken: q.sVan.all(h.hid).filter((s) => s.status === 'opgenomen').length, album: a ? { status: a.status, aantal: a.aantal } : null });
+        stukken: q.sVan.all(h.hid).filter((s) => s.status === 'opgenomen').length, album: a ? { status: a.status, aantal: a.aantal } : null,
+        spoor: sp ? { van: sp.van, tot: sp.tot, punt: sp.punt, fotos: sp.fotos, met_gps: sp.met_gps } : null });
     }
     return uit;
   }

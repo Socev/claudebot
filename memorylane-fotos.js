@@ -25,6 +25,12 @@
  *    door); no-store, niets op het toestel.
  *  - Delen (wv2114-links): foto's alleen als David foto_delen per herinnering aanzet (standaard uit) én de herinnering voor die kring
  *    zichtbaar is. Dan gaan hooguit 8 miniaturen (± 250 px) naar D1 ml_foto; een miniatuur met Exif/XMP (plek, toestel) gaat niet mee.
+ *  - Fotospoor (wv2468, Tripper): voor een reis uit je foto's (kandidaat met spoor: true) rekent sync uit de opnamedag en GPS van de foto's
+ *    (immich.js albumSpoor, alleen lezen) een periode en één punt, en bewaart alleen de uitkomst in ml_fotospoor (hid, aantallen, van/tot,
+ *    lat/lon op 1 decimaal = stadsniveau, tijd; nooit titels, ids of steden). Regels (spoorUit): periode = eerste–laatste dag van het drukste
+ *    venster van 31 dagen, alleen als daarin ≥ 80 % van de foto's met een datum valt en er ≥ 3 zijn; punt = mediaan van de GPS-punten (lat en
+ *    lon apart), alleen bij ≥ 5 foto's met GPS (0,0 telt niet). Opnieuw gerekend als het aantal in het album verandert of na 7 dagen; hooguit
+ *    MAX_SPOOR_PER_RONDE albums per ronde. Davids eigen 'wanneer' wint (memorylane-delen/reizen.js beslissen dat, niet deze module).
  * PRIVACY. Nooit albumnamen, titels of beelden in logs, box of /health: alleen aantallen.
  */
 const crypto = require('crypto');
@@ -33,12 +39,38 @@ const IM = require('./immich.js');
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS ml_album (hid TEXT PRIMARY KEY, sleutel TEXT NOT NULL, album_id TEXT UNIQUE, status TEXT NOT NULL, aantal INTEGER NOT NULL DEFAULT 0,
   omslag TEXT, gevel TEXT, foto_delen INTEGER NOT NULL DEFAULT 0, deel_fotos TEXT, gemaakt_op TEXT NOT NULL, gezien_op TEXT);
+CREATE TABLE IF NOT EXISTS ml_fotospoor (hid TEXT PRIMARY KEY, aantal_bij INTEGER NOT NULL, fotos INTEGER NOT NULL, met_dag INTEGER NOT NULL,
+  met_gps INTEGER NOT NULL, van TEXT, tot TEXT, lat REAL, lon REAL, op TEXT NOT NULL);
 `;
 const SYNC_ELKE_MS = 10 * 60000, RUST_NA_FOUT_MS = 5 * 60000, FOTO_CACHE_MS = 10 * 60000, TOEGANG_VERS_MS = 2 * 60000;
 const MAX_NIEUW_PER_RONDE = 30, MAX_DEEL = 8, MAX_DEEL_BYTES = 300 * 1024, MAX_FOTOS = 300;
 const VOORVOEGSEL = 'MemoryLane – ';   // oude vorm (wv2120): alleen nog om Socevs eigen oude namen te herkennen
 const MERK = ' (ML)', ZONDER_JAAR = '(zonder jaar)', MAX_NAAM = 200, MAX_HERNOEM_PER_RONDE = 30;
 const CODE_RE = /memorylane:([0-9a-f]{16})/;
+// wv2468: fotospoor (periode en punt van een reis uit je foto's)
+const SPOOR_VENSTER_DAGEN = 31, SPOOR_AANDEEL = 0.8, SPOOR_MIN_DAG = 3, SPOOR_MIN_GPS = 5, SPOOR_VERS_MS = 7 * 86400000, MAX_SPOOR_PER_RONDE = 8;
+const DAG_RE = /^\d{4}-\d{2}-\d{2}$/;
+function mediaan(l) { const a = l.slice().sort((x, y) => x - y), m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; }
+const een = (x) => Math.round(x * 10) / 10;
+// [{ dag, lat, lon }] (immich.js albumSpoor) → { fotos, met_dag, met_gps, van, tot, lat, lon }; van/tot/lat/lon null als de regel niet haalt
+function spoorUit(spoor) {
+  const l = Array.isArray(spoor) ? spoor : [];
+  const dagen = l.map((x) => x && x.dag).filter((d) => typeof d === 'string' && DAG_RE.test(d) && Number.isFinite(Date.parse(d))).sort();
+  const gps = l.filter((x) => x && typeof x.lat === 'number' && typeof x.lon === 'number' && Number.isFinite(x.lat) && Number.isFinite(x.lon)
+    && Math.abs(x.lat) <= 90 && Math.abs(x.lon) <= 180 && !(x.lat === 0 && x.lon === 0));
+  let van = null, tot = null;
+  if (dagen.length >= SPOOR_MIN_DAG) {
+    let best = 0, bi = 0, bj = 0;
+    for (let i = 0, j = 0; i < dagen.length; i++) {
+      while (Date.parse(dagen[i]) - Date.parse(dagen[j]) > (SPOOR_VENSTER_DAGEN - 1) * 86400000) j++;
+      if (i - j + 1 > best) { best = i - j + 1; bi = j; bj = i; }
+    }
+    if (best / dagen.length >= SPOOR_AANDEEL) { van = dagen[bi]; tot = dagen[bj]; }
+  }
+  let lat = null, lon = null;
+  if (gps.length >= SPOOR_MIN_GPS) { lat = een(mediaan(gps.map((x) => x.lat))); lon = een(mediaan(gps.map((x) => x.lon))); }
+  return { fotos: l.length, met_dag: dagen.length, met_gps: gps.length, van, tot, lat, lon };
+}
 
 function code(soort, ref) { return crypto.createHash('sha256').update(String(soort) + '|' + String(ref)).digest('hex').slice(0, 16); }
 // wv2225: "<jaar> <titel> (ML)"; jaar = "JJJJ" of leeg/null (→ "(zonder jaar)")
@@ -63,7 +95,7 @@ function omschrijving(c) {
 }
 
 /*
- * maak(o) → { sync, kort, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, _db }
+ * maak(o) → { sync, kort, spoor, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, _db }
  * o = { db, immich (immich.js-client), nu() → ms, fout(label, e) }
  */
 function maak(o) {
@@ -83,6 +115,11 @@ function maak(o) {
     deelFotos: db.prepare('UPDATE ml_album SET deel_fotos = ? WHERE hid = ?'),
     aantal: db.prepare('UPDATE ml_album SET aantal = ? WHERE hid = ?'),
     tel: db.prepare('SELECT status, count(*) n FROM ml_album GROUP BY status'),
+    spoor: db.prepare('SELECT * FROM ml_fotospoor WHERE hid = ?'),
+    spoorZet: db.prepare('INSERT INTO ml_fotospoor (hid, aantal_bij, fotos, met_dag, met_gps, van, tot, lat, lon, op) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+      'ON CONFLICT (hid) DO UPDATE SET aantal_bij = excluded.aantal_bij, fotos = excluded.fotos, met_dag = excluded.met_dag, met_gps = excluded.met_gps, ' +
+      'van = excluded.van, tot = excluded.tot, lat = excluded.lat, lon = excluded.lon, op = excluded.op'),
+    spoorTel: db.prepare('SELECT count(*) n, sum(van IS NOT NULL) periode, sum(lat IS NOT NULL) punt FROM ml_fotospoor'),
   };
   let laatsteSync = 0, laatsteFout = 0, stand = { sleutel: null, fout: null, op: null, nieuw: 0, overgenomen: 0, weg: 0 };
   const cache = new Map();   // hid → { op, fotos: [{id, beeld, ratio}] }; alleen in het geheugen
@@ -143,8 +180,35 @@ function maak(o) {
       if (rij.status !== 'actief' || !rij.foto_delen) continue;
       try { if (await zetDeelFotos(rij.hid, true)) r.deel++; } catch (e) { laatsteFout = nu(); fout('ml-immich-deel', e); break; }
     }
+    // wv2468: fotospoor van de reizen uit je foto's (alleen lezen in Immich; nieuw of veranderd aantal eerst, daarna het oudste)
+    r.spoor = 0;
+    if (typeof im.albumSpoor === 'function') {
+      const nodig = [];
+      for (const k of kandidaten || []) {
+        if (!k.spoor) continue;
+        const rij = q.a.get(k.hid), a = rij && rij.status === 'actief' && rij.album_id ? opId.get(rij.album_id) : null;
+        if (!a) continue;
+        const s = q.spoor.get(k.hid);
+        if (!s || s.aantal_bij !== a.aantal) nodig.push({ hid: k.hid, id: a.id, aantal: a.aantal, op: '' });
+        else if (nu() - Date.parse(s.op) >= SPOOR_VERS_MS) nodig.push({ hid: k.hid, id: a.id, aantal: a.aantal, op: s.op });
+      }
+      nodig.sort((x, y) => (x.op < y.op ? -1 : x.op > y.op ? 1 : 0));
+      for (const n of nodig.slice(0, MAX_SPOOR_PER_RONDE)) {
+        let u;
+        try { u = n.aantal ? spoorUit(await im.albumSpoor(n.id)) : spoorUit([]); }
+        catch (e) { laatsteFout = nu(); fout('ml-immich-spoor', e); break; }
+        q.spoorZet.run(n.hid, n.aantal, u.fotos, u.met_dag, u.met_gps, u.van, u.tot, u.lat, u.lon, t); r.spoor++;
+      }
+    }
     stand = { sleutel: true, fout: null, op: t, albums: lijst.length, ...r };
     return stand;
+  }
+  // wv2468: de uitkomst van het fotospoor van één herinnering (alleen bij een actief album); null = (nog) niet gerekend
+  function spoor(hid) {
+    const rij = q.a.get(hid), s = rij && rij.status === 'actief' ? q.spoor.get(hid) : null;
+    if (!s) return null;
+    return { fotos: s.fotos, met_dag: s.met_dag, met_gps: s.met_gps, van: s.van || null, tot: s.tot || null,
+      punt: s.lat !== null && s.lon !== null ? { lat: s.lat, lon: s.lon } : null, op: s.op };
   }
   async function albumMaken(k) {
     const rij = q.a.get(k.hid);
@@ -290,9 +354,11 @@ function maak(o) {
   }
   function info() {
     const t = Object.fromEntries(q.tel.all().map((r) => [r.status, r.n]));
-    return { albums: t, delen: q.alle.all().filter((r) => r.foto_delen).length, sleutel: stand.sleutel, fout: stand.fout, laatst: stand.op };
+    const sp = q.spoorTel.get();
+    return { albums: t, delen: q.alle.all().filter((r) => r.foto_delen).length, sleutel: stand.sleutel, fout: stand.fout, laatst: stand.op,
+      fotospoor: { gerekend: sp.n || 0, periode: sp.periode || 0, punt: sp.punt || 0 } };
   }
-  return { sync, kort, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, _db: db, _cache: cache };
+  return { sync, kort, spoor, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, _db: db, _cache: cache };
 }
 
-module.exports = { maak, code, albumNaam, socevsNaam, omschrijving, VOORVOEGSEL, MERK, MAX_DEEL };
+module.exports = { maak, code, albumNaam, socevsNaam, omschrijving, spoorUit, VOORVOEGSEL, MERK, MAX_DEEL };

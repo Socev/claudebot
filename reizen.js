@@ -28,7 +28,10 @@
  *  - wv2453: lijst geeft ook uit_fotos — de reizen uit Davids foto's (Google-fotoalbums die in MemoryLane de categorie Reizen hebben,
  *    o.fotoreizen() uit memorylane-delen.js) in de vorm van een reis uit de lijst, met bron 'fotos', id = de hid, stand altijd 'geweest',
  *    van/tot alleen bij een precieze dag (anders periode = de tekst van MemoryLane, bv. "juni 2014"), soort uit de titel (soortUitTitel),
- *    datum = sorteersleutel. Geen pagina, geen namen, geen kaartpunt; openen gaat in de app via de foto's en MemoryLane.
+ *    datum = sorteersleutel. Geen pagina, geen namen; openen gaat in de app via de foto's en MemoryLane.
+ *  - wv2468: een reis uit je foto's krijgt periode en kaartpunt uit de foto's zelf (memorylane-fotos.js spoorUit: opnamedag en GPS uit Immich,
+ *    punt op 1 decimaal). Davids eigen 'wanneer' met dagen wint altijd; een 'wanneer' van een maand of jaar wint als de foto's er niet bij
+ *    passen (fotoperiode valt niet helemaal binnen die maand/dat jaar ± 31 dagen). uit_fotos = { periode, punt } zegt wat uit de foto's komt.
  * PRIVACY. Reispagina's zijn strikt privé (namen, boekingen, bedragen). Deze module logt niets; info() geeft alleen aantallen.
  */
 const fs = require('fs');
@@ -130,16 +133,37 @@ function soortUitTitel(titel) {
   return 'overig';
 }
 const HID_RE = /^h[0-9a-f]{16}$/, DAG_RE = /^\d{4}-\d{2}-\d{2}$/;
+const PAST_MARGE_MS = 31 * 86400000;
+// wv2468: past de fotoperiode [a, b] bij Davids 'wanneer' [v, t] (maand of jaar)? Hij moet er helemaal binnen vallen, met ± 31 dagen marge
+// (review MOET 2: binnen, niet alleen overlappen); geen 'wanneer' = past
+function pastBij(a, b, v, t) {
+  if (!DAG_RE.test(String(v))) return true;
+  const tt = DAG_RE.test(String(t)) ? t : v;
+  return Date.parse(a) >= Date.parse(v) - PAST_MARGE_MS && Date.parse(b) <= Date.parse(tt) + PAST_MARGE_MS;
+}
+function puntVan(p) {
+  if (!p || typeof p !== 'object') return null;
+  const lat = Number(p.lat), lon = Number(p.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180 || (lat === 0 && lon === 0)) return null;
+  return { lat: Math.round(lat * 10) / 10, lon: Math.round(lon * 10) / 10 };
+}
 // wv2453: één reis uit je foto's (uit memorylane-delen fotoReizen) → de vorm van een reis in de lijst; ongeldig = null
 function fotoReis(x) {
   if (!x || !HID_RE.test(String(x.hid)) || typeof x.titel !== 'string' || !x.titel.trim()) return null;
   const titel = x.titel.trim().slice(0, MAX_TITEL);
   const dag = x.precisie === 'dag' && DAG_RE.test(String(x.van)) && DAG_RE.test(String(x.tot || x.van));
-  const begin = DAG_RE.test(String(x.van)) ? String(x.van) : null;
   const a = x.album && typeof x.album === 'object' ? { status: String(x.album.status || ''), aantal: Number(x.album.aantal) || 0 } : null;
-  return { id: x.hid, bron: 'fotos', titel, periode: String(x.wanneer || '').slice(0, 60), van: dag ? x.van : null, tot: dag ? (x.tot || x.van) : null,
-    dagen: dag ? dagen(x.van, x.tot || x.van) : null, jaar: begin ? begin.slice(0, 4) : null, datum: begin, stand: 'geweest', te_regelen_open: null,
-    soort: soortUitTitel(titel), deelnemers: [], vervoer: [], beschrijving: '', punt: null,
+  // wv2468: wat de foto's zeggen (memorylane-fotos spoorUit); alleen met een actief album
+  const sp = x.spoor && typeof x.spoor === 'object' && a && a.status === 'actief' ? x.spoor : null;
+  const fv = sp && DAG_RE.test(String(sp.van)) && DAG_RE.test(String(sp.tot)) && sp.van <= sp.tot ? [String(sp.van), String(sp.tot)] : null;
+  const uitFotos = !dag && fv && pastBij(fv[0], fv[1], x.van, x.tot);
+  const van = dag ? String(x.van) : uitFotos ? fv[0] : null, tot = dag ? String(x.tot || x.van) : uitFotos ? fv[1] : null;
+  const begin = van || (DAG_RE.test(String(x.van)) ? String(x.van) : null);
+  const punt = sp ? puntVan(sp.punt) : null;
+  return { id: x.hid, bron: 'fotos', titel, periode: uitFotos ? van + ' – ' + tot : String(x.wanneer || '').slice(0, 60), van, tot,
+    dagen: van ? dagen(van, tot) : null, jaar: begin ? begin.slice(0, 4) : null, datum: begin, stand: 'geweest', te_regelen_open: null,
+    soort: soortUitTitel(titel), deelnemers: [], vervoer: [], beschrijving: '', punt,
+    uit_fotos: { periode: !!uitFotos, punt: !!punt },
     memorylane: { hid: x.hid, stukken: Number(x.stukken) || 0, album: a } };
 }
 // [[doel|naam]] of [[doel]] (geen ![[insluiting]]); naam = de alias, anders de bestandsnaam zonder map
@@ -375,7 +399,7 @@ function ontleed(t, rel, vandaag) {
 /*
  * maak(o) → { paden, reisInfo, lijst, reis, info }
  * o = { vault, vv (vault-veilig), vandaag?() → 'JJJJ-MM-DD' (standaard Amsterdam), koppel?(rel) → { hid, stukken, album } | null,
- *       fotoreizen?() → [{ hid, titel, wanneer, van, tot, precisie, stukken, album }] (wv2453; memorylane-delen fotoReizen) }
+ *       fotoreizen?() → [{ hid, titel, wanneer, van, tot, precisie, stukken, album, spoor? }] (wv2453; memorylane-delen fotoReizen; spoor wv2468) }
  */
 function maak(o) {
   const vandaag = typeof o.vandaag === 'function' ? o.vandaag
@@ -427,7 +451,7 @@ function maak(o) {
     const alGekoppeld = new Set(reizen.map((r) => r.memorylane && r.memorylane.hid).filter(Boolean));
     const fotos = uitFotos().filter((x) => !alGekoppeld.has(x.id));
     laatst = { op: new Date().toISOString(), reizen: reizen.length, komend: reizen.filter((r) => r.stand === 'gepland' || r.stand === 'nu').length, onleesbaar,
-      uit_fotos: fotos.length };
+      uit_fotos: fotos.length, uit_fotos_periode: fotos.filter((x) => x.uit_fotos.periode).length, uit_fotos_punt: fotos.filter((x) => x.punt).length };
     return { status: 200, body: { ok: true, vandaag: v, soorten: SOORTEN, reizen, uit_fotos: fotos } };
   }
   function reis(id) {
@@ -443,8 +467,8 @@ function maak(o) {
       te_regelen: komend ? teRegelenVan(t) : null,
       pad: rel, tekst: zonderFrontmatter(t), memorylane: koppeling(rel) }) } };
   }
-  function info() { return Object.assign({ aan: true }, laatst || { op: null, reizen: null, komend: null, onleesbaar: null, uit_fotos: null }); }
+  function info() { return Object.assign({ aan: true }, laatst || { op: null, reizen: null, komend: null, onleesbaar: null, uit_fotos: null, uit_fotos_periode: null, uit_fotos_punt: null }); }
   return { paden, reisInfo, lijst, reis, info };
 }
 
-module.exports = { maak, ontleed, idVan, fotoReis, soortUitTitel, teRegelenVan, geannuleerd, soortVan, deelnemersVan, vervoerVan, verblijfVan, plekkenVan, kostenVan, kaartVan, kaartPunt, fmObjLijst, flowMap, fmVeld, fmLijst, VERVOER, REIS_MAP, SOORTEN, SOORT_REGELS, ID_RE, MAX_TITEL };
+module.exports = { maak, ontleed, idVan, fotoReis, pastBij, soortUitTitel, teRegelenVan, geannuleerd, soortVan, deelnemersVan, vervoerVan, verblijfVan, plekkenVan, kostenVan, kaartVan, kaartPunt, fmObjLijst, flowMap, fmVeld, fmLijst, VERVOER, REIS_MAP, SOORTEN, SOORT_REGELS, ID_RE, MAX_TITEL };
