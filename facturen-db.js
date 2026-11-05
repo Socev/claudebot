@@ -1562,7 +1562,8 @@ function directBesluit(fdb, op, o) {
   if (open) return nee('open signaal op de factuur (' + open.soort + ')');
   let controles = [];
   try { controles = JSON.parse(f.controles || '[]'); } catch (x) { return nee('controles onleesbaar'); }
-  const twijfel = (Array.isArray(controles) ? controles : []).find((c) => c && c.ok === false && (c.ernst === 'fout' || DIRECT_TWIJFEL.includes(c.naam)));
+  if (!Array.isArray(controles) || controles.some((c) => !c || typeof c !== 'object')) return nee('controles onleesbaar');   // review wv2480 MOET 1
+  const twijfel = controles.find((c) => c && c.ok === false && (c.ernst === 'fout' || DIRECT_TWIJFEL.includes(c.naam)));
   if (twijfel) return nee('controle ' + String(twijfel.naam).slice(0, 30) + ' twijfelt');
   const docs = fdb.db.prepare('SELECT soort, tekstlaag, patientkenmerk FROM document WHERE id IN (?, ?)').all(f.document, f.ubl_document || f.document);
   if (!docs.length || docs.some((d) => d.patientkenmerk)) return nee('kenmerk van patiëntgegevens op een stuk');
@@ -1580,6 +1581,8 @@ function directBesluit(fdb, op, o) {
   }
   // eerder een verzendpoging voor deze factuur (ook een andere opdracht): nooit opnieuw direct (onzeker = nooit opnieuw versturen)
   if (fdb.db.prepare('SELECT 1 FROM opdracht WHERE factuur = ? AND verzend_reservering IS NOT NULL LIMIT 1').get(f.id)) return nee('er was al een verzendpoging voor deze factuur');
+  // review wv2480 MOET 2: een eerdere opdracht voor deze factuur (teruggedraaid, geweigerd, opnieuw bevestigd) = niet "zonder twijfel"
+  if (fdb.db.prepare('SELECT 1 FROM opdracht WHERE factuur = ? AND id <> ? LIMIT 1').get(f.id, op.id)) return nee('eerder teruggedraaid of opnieuw klaargezet');
   return { direct: true, reden: 'alle eisen kloppen' };
 }
 // Directe reserveringen (modus versturen) op de Amsterdamse dag van `nu`.

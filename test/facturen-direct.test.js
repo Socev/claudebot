@@ -144,6 +144,7 @@ const EISEN = [
   ['patiëntregel vond een kenmerk', {}, (t, x) => t.fdb.db.prepare("INSERT INTO besluit (factuur, stap, veld, waarde, bron, toelichting, wanneer) VALUES (?, 'patientkenmerk', 'patientkenmerk', '1', 'regel', 'soort: bsn', '2026-10-22T10:00:00Z')").run(x.f.id), /patiëntcontrole/],
   ['scan zonder tekstlaag', {}, (t, x) => t.fdb.db.prepare('UPDATE document SET tekstlaag = 0 WHERE id = ?').run(x.f.document), /leesbaar/],
   ['stuk met patiëntkenmerk', {}, (t, x) => t.fdb.db.prepare('UPDATE document SET patientkenmerk = 1 WHERE id = ?').run(x.f.document), /patiënt/],
+  ['controles geen lijst', {}, (t, x) => t.fdb.db.prepare("UPDATE factuur SET controles = '[1]' WHERE id = ?").run(x.f.id), /controles onleesbaar/],
   ['mogelijk dubbel', {}, (t, x) => { const ander = t.fdb.db.prepare('SELECT id FROM factuur WHERE id <> ? LIMIT 1').get(x.f.id); t.fdb.db.prepare('UPDATE factuur SET dubbel_van = ? WHERE id = ?').run(ander.id, x.f.id); }, /dubbel/],
   ['Intake zonder vastgelegd label', {}, (t, x) => intakeBron(t, x.f), /Intake/],
   ['Intake met label mogelijk medisch', {}, (t, x) => { intakeBron(t, x.f); t.fdb.db.prepare("INSERT INTO besluit (factuur, stap, veld, waarde, bron, toelichting, wanneer) VALUES (?, 'herkomst', 'mogelijk_medisch', '1', 'regel', 'proef', '2026-10-22T10:00:00Z')").run(x.f.id); }, /Intake/],
@@ -176,6 +177,53 @@ for (const [naam, opt, na, reden] of EISEN) {
     }
   });
 }
+
+test('review MOET 2: bevestigd, teruggedraaid en opnieuw bevestigd → concept (eerdere opdracht), ook al staat de leverancier op direct', async () => {
+  const t = opzet(), g = nepGmail();
+  const x = t.klaarEnBevestigd();
+  assert.equal(t.call('POST', 'terugdraaien', { id: x.f.id }).status, 200);
+  const r = t.call('POST', 'bevestig', { id: x.f.id });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  t.fdb.db.prepare("UPDATE factuur SET controles = '[]' WHERE id = ?").run(x.f.id);
+  assert.equal(t.op(r.j.opdracht.id).verzendwijze_bij_bevestigen, 'direct');
+  await t.ronde(g, VERSTUUR + 5 * MIN);
+  assert.deepEqual(mijn(g, x.tok).map((c) => c.modus), ['concept']);
+  assert.match(t.besluit(x.f.id).toelichting, /eerder teruggedraaid/);
+});
+
+// review ZOU 1: het gedrag van de servercode (niet alleen de tekst): facturenVerzender en facturenDirectKlaar met nagebootste buren
+function serverFn(naam, buren) {
+  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+  const i = src.indexOf((naam === 'facturenVerzender' ? 'async ' : 'async ') + 'function ' + naam + '(');
+  assert.ok(i >= 0, naam);
+  const body = src.slice(i, src.indexOf('\n}\n', i) + 3);
+  return new Function(...Object.keys(buren), body + '\nreturn ' + naam + ';')(...Object.values(buren));
+}
+test('server: facturenVerzender — concept met het oude geheim, direct alleen met het eigen verzendgeheim + bron facturen; geen geheim = zeker niets verstuurd', async () => {
+  const gezien = [];
+  class FD { constructor() { this.v = []; } append(k, v) { this.v.push([k, typeof v === 'string' ? v : '<bestand>']); } }
+  const buren = (geheimEigen) => ({ process: { env: { N8N_WEBHOOK_MAILCONCEPT: 'oud-proef' } }, FACTUREN_VERZENDER_WF: 'MiWuPjabqip7dCNo',
+    potVzVerzendGeheim: async () => geheimEigen, appWebhookUrl: async () => 'https://n8n.invalid/webhook/x', FormData: FD, Blob: class { constructor() {} },
+    AbortSignal: { timeout: () => null }, fetch: async (url, o) => { gezien.push(Object.fromEntries(o.body.v)); return { status: 200, json: async () => ({ ok: true }) }; } });
+  const v = { aan: '453248tt@inkoop.exactonline.nl', onderwerp: 'x [ref FV0123456789abcdef]', tekst: 't', token: 'FV0123456789abcdef', bijlagen: [{ naam: 'a.pdf', bytes: Buffer.from('%PDF-') }] };
+  let fn = serverFn('facturenVerzender', buren('eigen-proef'));
+  await fn(Object.assign({ modus: 'concept' }, v));
+  assert.equal(gezien[0].secret, 'oud-proef'); assert.equal(gezien[0].bron, undefined);
+  await fn(Object.assign({ modus: 'versturen' }, v));
+  assert.equal(gezien[1].secret, 'eigen-proef'); assert.equal(gezien[1].bron, 'facturen'); assert.equal(gezien[1].modus, 'versturen');
+  fn = serverFn('facturenVerzender', buren(null));
+  await assert.rejects(fn(Object.assign({ modus: 'versturen' }, v)), (e) => e.zekerNietVerstuurd === true);
+  assert.equal(gezien.length, 2, 'zonder eigen geheim geen aanroep');
+});
+test('server: facturenDirectKlaar — alleen true als de verzender bron facturen kent; een fout = false', async () => {
+  const log = [];
+  let fn = serverFn('facturenDirectKlaar', { potVzVerzenderOk: async (b) => { log.push(b); return true; }, logError: () => {} });
+  assert.equal(await fn(), true); assert.deepEqual(log, ['facturen']);
+  fn = serverFn('facturenDirectKlaar', { potVzVerzenderOk: async () => 'ja', logError: () => {} });
+  assert.equal(await fn(), false);
+  fn = serverFn('facturenDirectKlaar', { potVzVerzenderOk: async () => { throw new Error('n8n weg'); }, logError: () => {} });
+  assert.equal(await fn(), false);
+});
 
 test('factuur zonder leverancier: geen keuze → snapshot leeg → concept', async () => {
   const t = opzet(), g = nepGmail();
