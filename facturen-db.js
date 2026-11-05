@@ -1148,6 +1148,36 @@ CREATE TRIGGER IF NOT EXISTS sepa_verzending_vooruit BEFORE UPDATE ON sepa_verze
   BEGIN SELECT RAISE(ABORT, 'sepa_verzending: alleen vooruit'); END;
 `;
 
+/*
+ * wv2480 (David 5-11-2026 ± 12:50: "Laten we dit per debiteur doen; Keuze 'Klaarzetten als concept of direct verzenden?' die bij debiteuren
+ * onthouden wordt"; Ja met verse vingerafdruk 14:31, grondwet 1 aanvulling 5-11-2026). Per leverancier de keuze concept of direct, met een
+ * versie die bij elke wijziging omhoog moet (trigger). Bevestigen legt op de opdracht een snapshot vast (keuze + versie); die ligt daarna vast.
+ * Direct alleen als snapshot en leverancier bij het reserveren nog gelijk zijn (directBesluit). Zonder leverancier: snapshot NULL = concept.
+ * Terugrol: een release van vóór wv2480 opent deze database niet (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE
+ * versie = 22` (de oude code kijkt niet naar de nieuwe kolommen) en meta versturen_vrijgegeven weghalen.
+ */
+// Herhaalbaar (een lichte terugrol haalt alleen de rij uit schema_migratie): een kolom die er al is, wordt niet opnieuw toegevoegd.
+const M22_KOLOMMEN = [
+  ['leverancier', 'verzendwijze', "TEXT NOT NULL DEFAULT 'concept' CHECK (verzendwijze IN ('concept','direct'))"],
+  ['leverancier', 'verzendwijze_versie', 'INTEGER NOT NULL DEFAULT 0 CHECK (verzendwijze_versie >= 0)'],
+  ['opdracht', 'verzendwijze_bij_bevestigen', "TEXT CHECK (verzendwijze_bij_bevestigen IS NULL OR verzendwijze_bij_bevestigen IN ('concept','direct'))"],
+  ['opdracht', 'verzendwijze_versie', 'INTEGER CHECK (verzendwijze_versie IS NULL OR verzendwijze_versie >= 0)'],
+];
+function M22(db) {
+  for (const [t, k, def] of M22_KOLOMMEN) {
+    if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k)) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k + ' ' + def);
+  }
+  db.exec(M22_TRIGGERS);
+}
+const M22_TRIGGERS = `
+CREATE TRIGGER IF NOT EXISTS leverancier_verzendwijze_versie BEFORE UPDATE ON leverancier
+  WHEN NEW.verzendwijze_versie < OLD.verzendwijze_versie OR (NEW.verzendwijze IS NOT OLD.verzendwijze AND NEW.verzendwijze_versie <= OLD.verzendwijze_versie)
+  BEGIN SELECT RAISE(ABORT, 'leverancier_verzendwijze: bij een andere keuze gaat de versie omhoog, nooit omlaag'); END;
+CREATE TRIGGER IF NOT EXISTS opdracht_verzendwijze_vast BEFORE UPDATE ON opdracht
+  WHEN NEW.verzendwijze_bij_bevestigen IS NOT OLD.verzendwijze_bij_bevestigen OR NEW.verzendwijze_versie IS NOT OLD.verzendwijze_versie
+  BEGIN SELECT RAISE(ABORT, 'opdracht: de verzendwijze van Bevestigen ligt vast'); END;
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -1169,6 +1199,7 @@ const MIGRATIES = [
   { versie: 19, naam: 'boekstuk Google Home naar de boekhouder: boekstuk_verzending, boekstuk_vrijgave (wv2316)', sql: M19 },
   { versie: 20, naam: 'SEPA-batch: ook vanaf een zakelijke bankluis-rekening; POT en Privé blijven uitgesloten (wv2445)', sql: M20 },
   { versie: 21, naam: 'SEPA-batch van Tolgaarde zelf naar nogbetalen@: sepa_verzending (wv2465)', sql: M21 },
+  { versie: 22, naam: 'per leverancier concept of direct: leverancier.verzendwijze(+versie), snapshot op opdracht (wv2480)', fn: (db) => M22(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -1501,6 +1532,104 @@ function reserveer(fdb, opId, o) {
   });
 }
 /*
+ * wv2480: mag deze opdracht DIRECT naar de boekhouding (grondwet 1, aanvulling 5-11-2026)? Alleen lezen. → { direct, reden } (reden zonder
+ * inhoud, in gewone taal; bij direct: 'alle eisen kloppen'). o.voorbeeld = de app vraagt het vooraf (factuur nog in_wachtrij, geen eerdere
+ * reservering van deze opdracht toegestaan). Wat hier NIET in zit, omdat het pas bij het reserveren kan: het dagplafond, het verse lezen
+ * van de bijlagen (koerier) en of de verzender direct kent; die doet reserveerKies. Valt één eis weg: concept.
+ */
+const DIRECT_PER_DAG = 15;
+// Mislukte controles die twijfel over het bedrag betekenen (valideer in facturen-kern.js); een controle met ernst 'fout' altijd.
+const DIRECT_TWIJFEL = ['bedrag_volgorde', 'teken', 'drempel', 'drempel_vast', 'valuta'];
+function directBesluit(fdb, op, o) {
+  o = o || {};
+  const nee = (reden) => ({ direct: false, reden });
+  if (metaLees(fdb, 'versturen_vrijgegeven') !== '1') return nee('direct verzenden is (nog) niet vrijgegeven');
+  if (!op || op.soort !== 'boekhouder_factuur' || !op.factuur) return nee('geen inkoopfactuur');
+  if (op.verzendwijze_bij_bevestigen !== 'direct') return nee(op.verzendwijze_bij_bevestigen === 'concept' ? 'leverancier stond bij Bevestigen op concept' : 'geen gekoppelde leverancier met direct');
+  const f = fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(op.factuur);
+  if (!f) return nee('factuur ontbreekt');
+  const l = f.leverancier ? fdb.db.prepare('SELECT verzendwijze, verzendwijze_versie FROM leverancier WHERE id = ?').get(f.leverancier) : null;
+  if (!l || l.verzendwijze !== 'direct' || l.verzendwijze_versie !== op.verzendwijze_versie) return nee('keuze bij de leverancier gewijzigd na Bevestigen');
+  if (!(o.voorbeeld ? ['in_wachtrij', 'wordt_verstuurd'] : ['wordt_verstuurd']).includes(f.status)) return nee('factuur staat niet onderweg (' + f.status + ')');
+  if (!f.entiteit || f.entiteit === 'prive' || f.entiteit !== op.entiteit) return nee('entiteit klopt niet');
+  const e = fdb.db.prepare('SELECT boekhoud_doel FROM entiteit WHERE sleutel = ?').get(f.entiteit);
+  if (!e || !e.boekhoud_doel || e.boekhoud_doel !== op.doeladres) return nee('doeladres wijkt af van het boekhoudadres');
+  if (!f.bevestigd_door || !f.bevestigd_op) return nee('niet bevestigd door een mens');
+  if (f.iban_nieuw || f.nagebeld_op || String(f.ibans_onbekend || '[]') !== '[]') return nee('nieuw of nagebeld IBAN');
+  if (f.dubbel_van || f.status === 'dubbel') return nee('mogelijk dubbel');
+  if (f.patientkenmerk || f.alleen_eigenaar) return nee('kenmerk van patiëntgegevens of alleen voor de eigenaar');
+  const open = fdb.db.prepare("SELECT soort FROM signaal WHERE status = 'open' AND EXISTS (SELECT 1 FROM json_each(signaal.facturen) j WHERE j.value = ?) LIMIT 1").get(f.id);
+  if (open) return nee('open signaal op de factuur (' + open.soort + ')');
+  let controles = [];
+  try { controles = JSON.parse(f.controles || '[]'); } catch (x) { return nee('controles onleesbaar'); }
+  const twijfel = (Array.isArray(controles) ? controles : []).find((c) => c && c.ok === false && (c.ernst === 'fout' || DIRECT_TWIJFEL.includes(c.naam)));
+  if (twijfel) return nee('controle ' + String(twijfel.naam).slice(0, 30) + ' twijfelt');
+  const docs = fdb.db.prepare('SELECT soort, tekstlaag, patientkenmerk FROM document WHERE id IN (?, ?)').all(f.document, f.ubl_document || f.document);
+  if (!docs.length || docs.some((d) => d.patientkenmerk)) return nee('kenmerk van patiëntgegevens op een stuk');
+  if (docs.some((d) => !(d.soort === 'ubl' || (d.soort === 'pdf' && d.tekstlaag === 1)))) return nee('stuk niet volledig leesbaar (scan of ander soort)');
+  // patiëntregel: positief bewijs (de regel legde 'geen kenmerk' vast), niet de afwezigheid van een kenmerk
+  const pk = fdb.db.prepare("SELECT waarde FROM besluit WHERE factuur = ? AND stap = 'patientkenmerk' AND veld = 'patientkenmerk'").all(f.id).map((b) => String(b.waarde));
+  if (!pk.length || pk.some((w) => w !== '0')) return nee('geen vastgelegde patiëntcontrole met uitkomst geen kenmerk');
+  if (fdb.db.prepare("SELECT 1 FROM besluit WHERE factuur = ? AND bron = 'model' AND toelichting LIKE '%niet in de lokale tekst%' LIMIT 1").get(f.id) ||
+    /Alleen door Claude gelezen/.test(String(f.redenen || ''))) return nee('een veld is alleen door Claude gelezen');
+  // OVIS Intake: alleen met een vastgelegd 'niet mogelijk medisch' (grondwet 3, label mogelijk medisch)
+  const bron = f.bericht ? fdb.db.prepare('SELECT b.soort FROM bericht be JOIN bron b ON b.id = be.bron WHERE be.id = ?').get(f.bericht) : null;
+  if (bron && bron.soort === 'intake') {
+    const mm = fdb.db.prepare("SELECT waarde FROM besluit WHERE factuur = ? AND stap = 'herkomst' AND veld = 'mogelijk_medisch'").all(f.id).map((b) => String(b.waarde));
+    if (!mm.length || mm.some((w) => w !== '0')) return nee('Intake: label mogelijk medisch of niet vastgelegd');
+  }
+  // eerder een verzendpoging voor deze factuur (ook een andere opdracht): nooit opnieuw direct (onzeker = nooit opnieuw versturen)
+  if (fdb.db.prepare('SELECT 1 FROM opdracht WHERE factuur = ? AND verzend_reservering IS NOT NULL LIMIT 1').get(f.id)) return nee('er was al een verzendpoging voor deze factuur');
+  return { direct: true, reden: 'alle eisen kloppen' };
+}
+// Directe reserveringen (modus versturen) op de Amsterdamse dag van `nu`.
+function directVandaag(fdb, nu) {
+  const dag = dagAmsterdam(nu);
+  return fdb.db.prepare("SELECT verzend_reservering_op AS t FROM opdracht WHERE modus = 'versturen' AND verzend_reservering_op >= ?").all(nuIso(nu - 2 * 86400000))
+    .filter((r) => dagAmsterdam(Date.parse(r.t)) === dag).length;
+}
+/*
+ * Reservering mét de keuze concept of direct, in één BEGIN IMMEDIATE (review MOET 2: tellen en reserveren in dezelfde transactie). Dit is ook
+ * de hercontrole vlak vóór de verzendaanroep: opdracht nog opgehaald, factuur onderweg, snapshot en versie gelijk (directBesluit op de verse
+ * rijen). o = { sleutel, nu, wie, bewijs: { ok, reden } (vers lezen door de koerier), verzender: bool (de verzender kent direct) }.
+ * Legt de keuze met reden vast in het besluitspoor van de factuur. → { ok, modus, reden, eerder }
+ */
+function reserveerKies(fdb, opId, o) {
+  o = o || {};
+  const tijd = nuIso(o.nu);
+  return transactie(fdb, function () {
+    const op = opdrachtOf(fdb, opId);
+    let k = op.soort === 'boekhouder_factuur' ? directBesluit(fdb, op, {}) : { direct: false, reden: 'geen inkoopfactuur' };
+    if (k.direct && o.verzender !== true) k = { direct: false, reden: 'de verzender kent direct verzenden nog niet' };
+    if (k.direct && !(o.bewijs && o.bewijs.ok === true)) k = { direct: false, reden: (o.bewijs && o.bewijs.reden) || 'bijlagen niet vers gelezen' };
+    if (k.direct && directVandaag(fdb, o.nu) >= DIRECT_PER_DAG) k = { direct: false, reden: 'dagplafond van ' + DIRECT_PER_DAG + ' directe verzendingen bereikt' };
+    const modus = k.direct ? 'versturen' : 'concept';
+    const r = reserveer(fdb, opId, { sleutel: o.sleutel, modus, nu: o.nu, wie: o.wie });
+    if (op.factuur && (op.verzendwijze_bij_bevestigen === 'direct' || k.direct)) {
+      fdb.db.prepare('INSERT INTO besluit (factuur, stap, veld, waarde, bron, toelichting, wie, wanneer) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(op.factuur, 'verzendwijze', 'modus', k.direct ? 'direct' : 'concept', 'regel', String(k.reden).slice(0, 500), o.wie || 'koerier', tijd);
+    }
+    return { ok: true, modus, reden: k.reden, eerder: r.eerder };
+  });
+}
+// wv2480: de verzender weigerde DIRECT vóór Gmail (zeker niets gemaakt): dezelfde reservering wordt concept, met de reden in het spoor.
+function terugNaarConcept(fdb, opId, o) {
+  o = o || {};
+  return transactie(fdb, function () {
+    const op = opdrachtOf(fdb, opId);
+    if (op.modus !== 'versturen') throw new DbFout('modus', 'alleen een directe reservering gaat terug naar concept');
+    reserveer(fdb, opId, { sleutel: o.sleutel, modus: 'concept', nu: o.nu, wie: o.wie });
+    verzendNotitie(fdb, op, o.reden || 'verzender weigerde direct: concept', o, 'concept');
+    return { ok: true };
+  });
+}
+// wv2480: één regel in het besluitspoor van de factuur over de verzending (zonder inhoud).
+function verzendNotitie(fdb, op, reden, o, waarde) {
+  if (!op || !op.factuur) return;
+  fdb.db.prepare('INSERT INTO besluit (factuur, stap, veld, waarde, bron, toelichting, wie, wanneer) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(op.factuur, 'verzendwijze', 'modus', waarde || 'onzeker', 'regel', String(reden).slice(0, 500), (o && o.wie) || 'koerier', nuIso(o && o.nu));
+}
+/*
  * Uitkomst van een verzendpoging (contract koerier-api.md "POST /api/koerier/opdracht/:id"), in één transactie:
  * - gelukt: opdracht → gelukt (extern_id, modus, vingerafdruk_koerier); factuur wordt_verstuurd → concept_klaar (concept) of verstuurd
  *   (versturen); afschrift → verstuurd bij versturen (bij concept pas na de verzend-detectie). Een tweede gelukt verandert niets.
@@ -1717,7 +1846,7 @@ function health(fdb) {
 module.exports = {
   DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M17_VERVANG, _M17: M17, M18_VERVANG, _M18: M18, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
-  terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, opdrachtResultaat, verzondenGezien,
+  terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, reserveerKies, directBesluit, directVandaag, DIRECT_PER_DAG, terugNaarConcept, verzendNotitie, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,
   backup, herstel, tellingen, health,
 };

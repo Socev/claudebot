@@ -61,10 +61,11 @@ const ROUTES = {
   POST: ['bevestig', 'terugdraaien', 'nagebeld', 'geen-factuur', 'toch-factuur', 'wijzig', 'ingevoerd', 'ingevoerd-ongedaan', 'opnieuw',
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'feit', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering',
-    'betaaldatum', 'sepa-batch', 'sepa-bestand', 'sepa-specificatie', 'regel', 'regel-weg', 'afzender-voorstel', 'maand-specificatie', 'bank-keuze'],
+    'betaaldatum', 'sepa-batch', 'sepa-bestand', 'sepa-specificatie', 'regel', 'regel-weg', 'afzender-voorstel', 'maand-specificatie', 'bank-keuze',
+    'leverancier/verzendwijze'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (nooit vanaf een vaste plek) én die hier een verse vingerafdruk vragen.
-const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus'];
+const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus', 'POST /app/facturen/leverancier/verzendwijze'];
 
 class RouteFout extends Error {
   constructor(status, fout, extra) { super(fout); this.status = status; this.fout = fout; this.extra = extra || null; }
@@ -360,7 +361,8 @@ function detail(fdb, r, id, nu) {
     iban_poort: { iban_nieuw: ip.iban_nieuw, reden: ip.reden },
     bevestigen: K.magBevestigen(f, poort),
     leverancier: lev ? { id: lev.id, naam: lev.naam, standaard_entiteit: lev.standaard_entiteit, standaard_betaalwijze: lev.standaard_betaalwijze,
-      ibans: lev.ibans, alleen_portaal: !!lev.alleen_portaal, mediaan: lev.mediaan } : null,
+      ibans: lev.ibans, alleen_portaal: !!lev.alleen_portaal, mediaan: lev.mediaan, verzendwijze: lev.verzendwijze || 'concept' } : null,
+    verzending: verzendingVoorbeeld(fdb, f, nu),   // wv2480: wordt om HH:00 direct verstuurd / wordt een concept (reden)
     documenten: { document: doc(f.document_id), ubl: doc(f.ubl_document_id) },
     besluiten: fdb.db.prepare('SELECT stap, veld, waarde, bron, toelichting, wie, wanneer FROM besluit WHERE factuur = ? ORDER BY id').all(f.id),
     opdrachten: fdb.db.prepare('SELECT id, status, verstuur_na, poging, fout, modus, aangemaakt_op, opgehaald_op FROM opdracht WHERE factuur = ? ORDER BY aangemaakt_op DESC').all(f.id),
@@ -759,7 +761,7 @@ function leveranciers(fdb, r) {
   const lijst = leverancierLijst(fdb).filter((l) => magLeverancier(r, l));
   return { leveranciers: lijst.sort((a, b) => a.naam.localeCompare(b.naam, 'nl')).slice(0, 2000).map((l) => ({ id: l.id, naam: l.naam, kvk: l.kvk,
     standaard_entiteit: l.standaard_entiteit, standaard_betaalwijze: l.standaard_betaalwijze, ibans: l.ibans, mediaan: l.mediaan, alleen_portaal: !!l.alleen_portaal,
-    incasso_tolerantie_pct: l.incasso_tolerantie_pct })) };
+    incasso_tolerantie_pct: l.incasso_tolerantie_pct, verzendwijze: l.verzendwijze || 'concept' })) };
 }
 function instellingen(fdb, r) {
   eisEigenaar(r);
@@ -827,9 +829,12 @@ function bevestig(fdb, r, d, nu) {
     if (ov.naar === 'in_wachtrij') {
       const bijlagen = bijlagenVan(fdb, f);
       const op = K.maakOpdracht(Object.assign({}, nieuw, { status: 'te_beoordelen' }), e, { id: D.nieuwId(), bijlagen, verstuur_na: K.verstuurNa(nu, verstuurInstelling(fdb)), poort });
+      // wv2480 (review MOET 3+5): de keuze concept/direct van de leverancier + haar versie, vast op de opdracht (zonder leverancier: NULL = concept)
+      const lv = f.leverancier_id ? fdb.db.prepare('SELECT verzendwijze, verzendwijze_versie FROM leverancier WHERE id = ?').get(f.leverancier_id) : null;
       D.voegToe(fdb, 'opdracht', { id: op.id, soort: op.soort, factuur: f.id, entiteit: op.entiteit, doeladres: op.doeladres, bijlagen: op.bijlagen, vingerafdruk: op.vingerafdruk,
-        verstuur_na: op.verstuur_na, idempotentiesleutel: op.idempotentiesleutel, status: 'wacht', poging: 0, aangemaakt_door: r.wie, aangemaakt_op: wanneer, bijgewerkt_op: wanneer });
-      opdracht = { id: op.id, verstuur_na: op.verstuur_na };
+        verstuur_na: op.verstuur_na, idempotentiesleutel: op.idempotentiesleutel, status: 'wacht', poging: 0, aangemaakt_door: r.wie, aangemaakt_op: wanneer, bijgewerkt_op: wanneer,
+        verzendwijze_bij_bevestigen: lv ? lv.verzendwijze : null, verzendwijze_versie: lv ? lv.verzendwijze_versie : null });
+      opdracht = { id: op.id, verstuur_na: op.verstuur_na, verzendwijze: lv ? lv.verzendwijze : null };
     }
     besluitRij(fdb, f.id, K.besluit('bevestigen', 'status', ov.naar, 'mens', (f.entiteit !== e.sleutel ? 'entiteit ' + (f.entiteit || '—') + ' → ' + e.sleutel + '; ' : '') +
       (f.betaalwijze !== betaalwijze ? 'betaalwijze ' + f.betaalwijze + ' → ' + betaalwijze : 'voorstel overgenomen')), r.wie, wanneer);
@@ -3061,6 +3066,9 @@ function verwerkBericht(fdb, invoer, o) {
         redenen: (f.redenen || []).map((x) => kort(x, 300)), controles: f.controles || [], patientkenmerk: f.patientkenmerk ? 1 : 0, alleen_eigenaar: f.alleen_eigenaar ? 1 : 0,
         dubbel_van: dubbel && dubbel.van ? dubbel.van : null, aangemaakt_op: wanneer, bijgewerkt_op: wanneer });
       for (const b of f.besluiten || []) besluitRij(fdb, id, b, null, wanneer);
+      // wv2480: OVIS Intake legt vast of het stuk het label mogelijk medisch had (grondwet 3); direct verzenden eist hier positief 'nee'
+      if (typeof o.mogelijk_medisch === 'boolean') besluitRij(fdb, id, K.besluit('herkomst', 'mogelijk_medisch', o.mogelijk_medisch ? 1 : 0, 'regel',
+        o.mogelijk_medisch ? 'OVIS Intake: label mogelijk medisch' : 'OVIS Intake: geen label mogelijk medisch'), null, wanneer);
       if (f.patientkenmerk) fdb.db.prepare('UPDATE document SET patientkenmerk = 1 WHERE id IN (?, ?)').run(docId[f.document], f.ubl_document ? docId[f.ubl_document] : docId[f.document]);
       if (f.status === 'dubbel' && dubbel && dubbel.van) {
         const van = fdb.db.prepare('SELECT alleen_eigenaar, patientkenmerk, entiteit FROM factuur WHERE id = ?').get(dubbel.van) || {};
@@ -3400,6 +3408,45 @@ function leverancierRoute(fdb, r, d, nu) {
   });
 }
 
+/*
+ * wv2480 (David 5-11-2026, grondwet 1 aanvulling): per leverancier "Klaarzetten als concept of direct verzenden?". Alleen de eigenaar, met een
+ * verse vingerafdruk (nooit vanaf een vaste plek: BEHEER). De versie gaat bij elke wijziging omhoog (trigger M22): een opdracht die eerder
+ * bevestigd is, gaat daarna alleen nog als concept (snapshot ≠ versie). Audit leverancier_verzendwijze.
+ */
+function verzendwijzeRoute(fdb, r, d, nu, o) {
+  eisEigenaar(r);
+  const id = vraagId(d, 'id');
+  if (!['concept', 'direct'].includes(d.verzendwijze)) weiger(400, 'verzendwijze is concept of direct');
+  if (!o.versOk()) weiger(403, 'bevestig met je vingerafdruk', { vers_nodig: true });
+  return D.transactie(fdb, function () {
+    const l = fdb.db.prepare('SELECT id, naam, verzendwijze, verzendwijze_versie FROM leverancier WHERE id = ?').get(id);
+    if (!l || !magLeverancier(r, l)) weiger(404, 'leverancier niet gevonden');
+    if (l.verzendwijze === d.verzendwijze) return { id, verzendwijze: l.verzendwijze, versie: l.verzendwijze_versie, gewijzigd: false };
+    o.versVerbruik();
+    const wanneer = nuIso(nu), versie = l.verzendwijze_versie + 1;
+    const u = fdb.db.prepare('UPDATE leverancier SET verzendwijze = ?, verzendwijze_versie = ?, bijgewerkt_op = ? WHERE id = ? AND verzendwijze_versie = ?').run(d.verzendwijze, versie, wanneer, id, l.verzendwijze_versie);
+    if (u.changes !== 1) weiger(409, 'de leverancier is intussen gewijzigd; laad opnieuw');
+    D.audit(fdb, { wie: r.wie, wat: 'leverancier_verzendwijze', object_soort: 'leverancier', object_id: id, voor: { verzendwijze: l.verzendwijze, versie: l.verzendwijze_versie },
+      na: { verzendwijze: d.verzendwijze, versie }, wanneer });
+    return { id, verzendwijze: d.verzendwijze, versie, gewijzigd: true, vrijgegeven: D.metaLees(fdb, 'versturen_vrijgegeven') === '1' };
+  });
+}
+// wv2480: wat gebeurt er met deze factuur richting de boekhouding? Voor de app (geen inhoud). null zonder opdracht.
+function verzendingVoorbeeld(fdb, f, nu) {
+  const op = fdb.db.prepare('SELECT * FROM opdracht WHERE factuur = ? ORDER BY aangemaakt_op DESC, rowid DESC LIMIT 1').get(f.id);
+  if (!op) return null;
+  const laatste = fdb.db.prepare("SELECT waarde, toelichting FROM besluit WHERE factuur = ? AND stap = 'verzendwijze' ORDER BY id DESC LIMIT 1").get(f.id);
+  if (['wacht', 'opgehaald', 'mislukt'].includes(op.status) && ['in_wachtrij', 'wordt_verstuurd'].includes(f.status)) {
+    let k = D.directBesluit(fdb, op, { voorbeeld: true });
+    if (k.direct && D.directVandaag(fdb, nu) >= D.DIRECT_PER_DAG) k = { direct: false, reden: 'dagplafond van ' + D.DIRECT_PER_DAG + ' directe verzendingen bereikt' };
+    if (op.verzend_reservering && laatste) k = { direct: laatste.waarde === 'direct', reden: laatste.toelichting };
+    return { wijze: k.direct ? 'direct' : 'concept', om: op.verstuur_na, reden: k.direct ? null : k.reden, keuze: op.verzendwijze_bij_bevestigen || null };
+  }
+  if (op.status === 'gelukt') return { wijze: op.modus === 'versturen' ? 'direct' : 'concept', klaar: true, reden: op.modus === 'versturen' ? null : laatste ? laatste.toelichting : null,
+    keuze: op.verzendwijze_bij_bevestigen || null };
+  return { wijze: 'concept', klaar: false, reden: laatste ? laatste.toelichting : null, keuze: op.verzendwijze_bij_bevestigen || null, status: op.status };
+}
+
 // ───────────────────────────── ronde (n8n-tik) ─────────────────────────────
 
 // Back-up nodig? De eerste ronde na 02:00 (Nederlandse tijd) op een dag zonder back-up (F4: de tik loopt elk uur; wv855).
@@ -3557,6 +3604,7 @@ function maak(opties) {
         case 'bank-keuze': return ok(bankKeuze(fdb, r, d, nu), 'bank-keuze ' + kort(d.keuze, 12));
         case 'upload': return ok(upload(fdb, r, d, nu, vo), 'upload');
         case 'leverancier': return ok(leverancierRoute(fdb, r, d, nu));
+        case 'leverancier/verzendwijze': return ok(verzendwijzeRoute(fdb, r, d, nu, vo), 'verzendwijze ' + kort(d.verzendwijze, 10));
         case 'regel': return ok(regelRoute(fdb, r, d, nu), 'regel ' + kort(d.soort, 6));
         case 'regel-weg': return ok(regelWeg(fdb, r, d, nu), 'regel weg');
         case 'afzender-voorstel': return ok(afzenderVoorstel(fdb, r, d, nu), 'afzender-voorstel ' + kort(d.keuze, 10));

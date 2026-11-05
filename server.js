@@ -4079,7 +4079,7 @@ function handleRequest(req, res) {
       const nu = Date.now();
       const p = facturenKoerier ? facturenKoerier.ronde(fdb, facturenIo(), { nu: nu })
         : Promise.resolve(facturenRoutes.backupNodig(fdb, nu) ? facturenRoutes.ronde(fdb, { nu: nu }) : { ok: true, koerier: false });
-      p.then(function (j) { stuur(j && j.ok ? 200 : 500, j); if (j && j.ok) facturenBetaalMelding(fdb); })
+      p.then(function (j) { stuur(j && j.ok ? 200 : 500, j); if (j && j.ok) facturenBetaalMelding(fdb); facturenDirectBox(j); })
         .catch(function (e) { logError('facturen-ronde', e); stuur(500, { ok: false, fout: 'facturen-ronde faalde in de pod' }); })
         .finally(function () { if (facturenRondeBezig === mijn) facturenRondeBezig = null; if (typeof facturenKaartPlan === 'function') facturenKaartPlan(0); });   // wv1705
     }); });
@@ -5208,7 +5208,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/sleutels/nieuw',      // wv2481: een nieuwe kluissleutel toevoegen (Sleutelbos) idem
   'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
   'POST /app/agenda',      // wv315 (zie hieronder)
-  'POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus',
+  'POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus', 'POST /app/facturen/leverancier/verzendwijze',   // wv2480: per leverancier direct verzenden
   'POST /app/docs/delen',
   'POST /app/werkers/schakel']);   // wv1901 (Opus-review ZOU 4): een werker uit- of aanzetten raakt n8n zoals modellen; nooit vanaf een vaste plek    // wv1382: een pagina naar buiten zetten alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk; review #10). Intrekken staat in APP_SLOT_VRIJ: dat maakt alleen dichter    // wv833: boekhoud-/afschriftadres en verzendmodus alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk)
 // wv315: agenda-✅/↩️ alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot (§ 4.13). Sinds wv2369 wel vanaf
@@ -15878,9 +15878,12 @@ async function facturenLuikBytes(body) {
 }
 // Verzender: { modus, aan, onderwerp, tekst, token, bijlagen: [{ naam, mime, bytes }] } → { status, j }. Een fout vóór de aanroep krijgt
 // zekerNietVerstuurd (dan telt hij als mislukt); een time-out of verbroken verbinding niet (dan zoekt de koerier eerst, na 30 min).
+// wv2480: modus versturen (direct naar de boekhouding) alleen met het eigen verzendgeheim (kluis, wv921; geen nieuwe credential) en bron
+// facturen; de Toetsen van de verzender laten dan alleen de boekhoudadressen toe, hooguit 15 per dag.
 async function facturenVerzender(v) {
-  const geheim = process.env.N8N_WEBHOOK_MAILCONCEPT;
   const vooraf = function (m) { const e = new Error(m); e.zekerNietVerstuurd = true; e.code = 'verzender_niet_ingericht'; return e; };
+  let geheim = process.env.N8N_WEBHOOK_MAILCONCEPT;
+  if (v.modus === 'versturen') { try { geheim = await potVzVerzendGeheim(); } catch (e) { geheim = null; } }
   if (!geheim) throw vooraf('verzender niet ingericht');
   if (!/^[A-Za-z0-9]{8,40}$/.test(FACTUREN_VERZENDER_WF)) throw vooraf('verzender-workflow onbekend');
   for (let poging = 0; poging < 2; poging++) {
@@ -15888,6 +15891,7 @@ async function facturenVerzender(v) {
     try { url = await appWebhookUrl(FACTUREN_VERZENDER_WF, null, 'facturenVerzenderUrl', poging > 0); } catch (e) { throw vooraf('verzender-webhook niet gevonden'); }
     const fd = new FormData();
     fd.append('secret', geheim); fd.append('modus', v.modus); fd.append('aan', v.aan); fd.append('onderwerp', v.onderwerp); fd.append('bericht', v.tekst); fd.append('token', v.token);
+    if (v.modus === 'versturen') fd.append('bron', 'facturen');
     for (const b of v.bijlagen || []) fd.append('bijlage', new Blob([b.bytes], { type: b.mime || 'application/octet-stream' }), b.naam);
     const r = await fetch(url, { method: 'POST', body: fd, signal: AbortSignal.timeout(120000) });
     if (r.status === 404 && poging === 0) { try { await r.arrayBuffer(); } catch (e) {} continue; }   // webhook niet geregistreerd: er is niets gemaakt
@@ -15900,8 +15904,25 @@ async function facturenVerzender(v) {
 // wv1919 (OVIS Intake stap 3d): de koerier leest ook de stukken die de Intake-router naar de facturenlens stuurde (io.intake) en vult
 // leverancier.knoop_id via het register van de router (io.knoopVoor). Router uit of niet geladen: een lege lijst (de koerier doet dan niets extra).
 function facturenIntakeRouter() { return typeof intakeRouterHaal === 'function' && typeof intakeRouterStand === 'function' && intakeRouterStand() ? intakeRouterHaal() : null; }
+// wv2480: kent de gepubliceerde verzender direct verzenden voor bron facturen (Toetsen-hash, Merk-knoop, IF op het verzendgeheim)? Twijfel = nee.
+async function facturenDirectKlaar() { try { return (await potVzVerzenderOk('facturen')) === true; } catch (e) { logError('facturen-direct-klaar', e); return false; } }
+// wv2480: een onzekere of teruggevallen directe verzending → één box-rij per dag per soort (geen bericht aan David; de factuur toont het).
+const facturenDirectBoxDag = {};
+function facturenDirectBox(j) {
+  const v = j && j.verzending;
+  if (!v || !(v.direct_onzeker > 0 || v.direct_terug > 0)) return;
+  const soort = v.direct_onzeker > 0 ? 'onzeker' : 'terug', dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  if (facturenDirectBoxDag[soort] === dag) return;
+  facturenDirectBoxDag[soort] = dag;
+  try {
+    bankBoxRij({ bron: 'facturen-direct', kop: soort === 'onzeker' ? 'directe verzending onzeker' : 'directe verzending werd concept',
+      tekst: (soort === 'onzeker' ? v.direct_onzeker + ' directe verzending(en) zonder duidelijk antwoord van de verzender (nooit opnieuw direct; na 30 min zoekt de koerier op het kenmerk, anders concept)'
+        : v.direct_terug + ' directe verzending(en) geweigerd door de verzender vóór Gmail en als concept klaargezet') + '; zie het besluitspoor (verzendwijze) bij de factuur en /health facturen.koerier.' });
+  } catch (e) { logError('facturen-direct-box', e); }
+}
 function facturenIo() {
   return { luik: appAgendaApi, luikBytes: facturenLuikBytes, verzender: facturenVerzender, pdfSchaduw: pdfSchaduw, pdfLive: pdfLive,   // wv1431: schaduw PDF-lezer; wv1921: live
+    directKlaar: facturenDirectKlaar,   // wv2480
     intake: { lijst: async function (max) { const ir = facturenIntakeRouter(); return ir && typeof ir.facturenAangeboden === 'function' ? ir.facturenAangeboden(max) : []; },
       uitkomst: async function (id, versie, r) { const ir = facturenIntakeRouter(); if (!ir || typeof ir.facturenUitkomst !== 'function') throw new Error('intake-router niet geladen'); return ir.facturenUitkomst(id, versie, r); } },
     knoopVoor: async function (x) { const ir = facturenIntakeRouter(); return ir && typeof ir.knoopVoor === 'function' ? ir.knoopVoor(x) : null; } };
@@ -15910,7 +15931,11 @@ function facturenKoerierInfo(fdb) {
   if (!facturenKoerier) return { aan: false };
   let k = null;
   try { k = JSON.parse(facturenMod.metaLees(fdb, 'koerier_ronde') || 'null'); } catch (e) { k = null; }
-  return { aan: true, laatste_ronde: k ? k.op : null, ok: k ? !!k.ok : null, fout: k && k.fout ? String(k.fout).slice(0, 120) : null, verzendmodus: facturenMod.metaLees(fdb, 'verzendmodus') };
+  let direct = null;
+  try { direct = { vrijgegeven: facturenMod.metaLees(fdb, 'versturen_vrijgegeven') === '1', vandaag: typeof facturenMod.directVandaag === 'function' ? facturenMod.directVandaag(fdb, Date.now()) : null,
+    leveranciers: Number(fdb.db.prepare("SELECT count(*) AS n FROM leverancier WHERE verzendwijze = 'direct'").get().n) }; } catch (e) { direct = null; }   // wv2480
+  return { aan: true, laatste_ronde: k ? k.op : null, ok: k ? !!k.ok : null, fout: k && k.fout ? String(k.fout).slice(0, 120) : null, verzendmodus: facturenMod.metaLees(fdb, 'verzendmodus'),
+    direct: direct, verzending: k && k.verzending ? { direct: k.verzending.direct || 0, direct_terug: k.verzending.direct_terug || 0, direct_onzeker: k.verzending.direct_onzeker || 0 } : null };
 }
 // Het klaarstaande bestand van dít apparaat en deze beurt (zelfde map als appUpload): bytes + naam, en weg() ruimt het op.
 function facturenUploadNeem(a, beurt, n) {
@@ -23059,7 +23084,10 @@ function potVzInfo() {
 const POT_VZ_GEHEIM_NAAM = 'n8n_verzender_versturen_secret';
 // sha256 van de jsCode van de Code-knoop Toetsen in AI - Facturen-verzender, zoals gepubliceerd door wv921. Wijkt de workflow af, dan
 // verstuurt de pod niets en wordt alles concept (Fable #10). Bewuste wijziging aan de verzender = deze waarde mee wijzigen (nieuw image).
-const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '6edfee1f08f03f851ba596c9c59f644694951e0894c0c3d43766f7d205746cb6';
+const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '509d97e44222f962dd6c286fa211ae82b60b06092222a29b6c909797a7984cf7';
+// wv2480: de Toetsen-code van wv2465 (bron sepa, zonder direct uit Facturen) blijft gelden voor pot, boekstuk en sepa zolang image en workflow
+// niet op dezelfde minuut wisselen; bron facturen (direct) eist de nieuwe. Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
+const POT_VZ_TOETSEN_SEPA = '6edfee1f08f03f851ba596c9c59f644694951e0894c0c3d43766f7d205746cb6';
 // wv2316: de versie van vóór bron boekstuk telt voor pot nog mee, zodat image en gepubliceerde workflow niet op dezelfde minuut hoeven te
 // wisselen; het boekstuk eist de nieuwe (potVzVerzenderOk(true)). Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
 const POT_VZ_TOETSEN_SHA_VORIG = '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7716d25994bfd241b02';
@@ -23068,6 +23096,8 @@ const POT_VZ_TOETSEN_SHA_VORIG = '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7
 const POT_VZ_TOETSEN_BOEKSTUK = '8fec24893c22a23d54e56d8749b6c186d63897634e9e10608f97ee6336ddbcbb';
 function potVzToetsenMag(ts, bron) {
   if (ts === POT_VZ_TOETSEN_SHA) return true;
+  if (bron === 'facturen') return false;   // wv2480: direct uit Facturen alleen met de nieuwe Toetsen-code
+  if (ts === POT_VZ_TOETSEN_SEPA) return true;
   if (bron === 'sepa') return false;
   if (ts === POT_VZ_TOETSEN_BOEKSTUK) return true;
   return bron === 'pot' && ts === POT_VZ_TOETSEN_SHA_VORIG;

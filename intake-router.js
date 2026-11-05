@@ -1554,7 +1554,8 @@ function maak(o) {
       }
       uit.push({ stuk_id: s.stuk_id, versie: s.versie, bron: s.bron, bron_id: s.bron_id, profiel: s.profiel, onderwerp, van, van_naam: meta.van_naam || '',
         thread_id: meta.thread_id || null, ontvangen: meta.verzonden || s.ontvangen || s.aangemaakt, dkim: sam.dkim || null, jev: sam.jev || null, na_keuze: !!sam.na_keuze,
-        doel: r.doel || sam.entiteit || null, documenten: docs, ontbreekt, te_groot: teGroot, mailtekst });
+        doel: r.doel || sam.entiteit || null, documenten: docs, ontbreekt, te_groot: teGroot, mailtekst,
+        mogelijk_medisch: !!(sam.mogelijk_medisch || sam.na_keuze) });   // wv2480: zelfde regel als de intake-weergave; direct verzenden eist false
     }
     return uit;
   }

@@ -187,6 +187,67 @@ const een = [{ naam: 'SLOEL - 2026033 - Huisartsenpraktijk Korte Geer.pdf', byte
   toets('facturen kan niet naar nogbetalen@', r.json.toets.status === 403, r.json.toets);
   r = await draai(pot(), een);
   toets('pot ongewijzigd na bron sepa', r.json.toets.fout === null && r.json.toets.pad === 'pot' && r.json.toets.aantal === 1, r.json.toets);
+  // ── wv2480: bron facturen + versturen (direct naar de boekhouding) en bron facturen_proef ──
+  const fd = (x) => Object.assign({ secret: NIEUW, bron: 'facturen', modus: 'versturen', aan: '453248tt@inkoop.exactonline.nl', token: 'FV0123456789abcdef',
+    onderwerp: 'Inkoopfactuur Tolgaarde — X 12 [ref FV0123456789abcdef]', bericht: 'Kenmerk FV0123456789abcdef' }, x);
+  const DI = Date.parse('2026-11-05T14:00:00Z');
+  let sdD = {};
+  r = await draai(fd(), een, { nu: DI, sd: sdD });
+  toets('direct: eigen geheim + boekhoudadres → in orde, pad pot, afzender vast, bron facturen', r.json.toets.fout === null && r.json.toets.pad === 'pot' && r.json.van === '"David Schaap" <dokterschaap@gmail.com>' && r.json.bron === 'facturen' && r.json.token === 'FV0123456789abcdef', r.json);
+  toets('direct: de toets telt mee in de dagteller (niet in de pot-teller)', sdD.direct.length === 1 && !(sdD.pot || []).length, sdD);
+  r = await draai(fd({ aan: 'a.schaap@actasynergia.nl' }), [{ naam: 'f.xml', bytes: Buffer.from('<Invoice/>') }], { nu: DI });
+  toets('direct: Acta Synergia + xml → in orde', r.json.toets.fout === null && r.binary.bijlage_0.mimeType === 'application/xml', r.json.toets);
+  r = await draai(fd({ aan: 'd.schaap+facturentest@gmail.com' }), een, { nu: DI });
+  toets('direct: niet naar de testalias → 403 witte_lijst', r.json.toets.status === 403 && r.json.toets.code === 'witte_lijst', r.json.toets);
+  for (const aan of ['facturen@huisartsentolgaarde.nl', 'nogbetalen@huisartsentolgaarde.nl', 'leverancier@voorbeeld.nl']) {
+    r = await draai(fd({ aan }), een, { nu: DI });
+    toets('direct: ' + aan + ' → 403', r.json.toets.status === 403 && r.json.toets.code === 'witte_lijst', r.json.toets);
+  }
+  r = await draai(fd({ secret: OUD }), een, { nu: DI });
+  toets('direct met het oude geheim → 401', r.json.toets.status === 401 && r.json.toets.code === 'secret' && !r.binary, r.json.toets);
+  r = await draai(fd({ van: 'iemand@x.nl' }), een, { nu: DI });
+  toets('direct: eigen afzender meesturen → 400', r.json.toets.status === 400 && r.json.toets.code === 'veld', r.json.toets);
+  r = await draai(fd({ cc: '61j3j624@inkoop.exactonline.nl' }), een, { nu: DI });
+  toets('direct: cc → 400', r.json.toets.status === 400 && r.json.toets.code === 'veld', r.json.toets);
+  r = await draai(fd(), [{ naam: 'afschrift.940', bytes: Buffer.from(':20:x') }], { nu: DI });
+  toets('direct: MT940 → 400 (alleen pdf en xml)', r.json.toets.status === 400 && r.json.toets.code === 'bijlagen', r.json.toets);
+  r = await draai(fd({ onderwerp: 'x [ref FV0000000000000000]' }), een, { nu: DI });
+  toets('direct: token past niet bij het onderwerp → 400', r.json.toets.status === 400 && r.json.toets.code === 'onderwerp', r.json.toets);
+  r = await draai(fd(), een, { nu: DI, sd: { direct: Array.from({ length: 15 }, () => DI - 3600000) } });
+  toets('direct: 16e op dezelfde Amsterdamse dag → 409 direct_plafond', r.json.toets.status === 409 && r.json.toets.code === 'direct_plafond' && !r.binary, r.json.toets);
+  r = await draai(fd(), een, { nu: Date.parse('2026-11-05T23:30:00Z'), sd: { direct: Array.from({ length: 15 }, () => Date.parse('2026-11-05T22:30:00Z')) } });
+  toets('direct: na middernacht Amsterdam telt de nieuwe dag (15 van gisteren tellen niet)', r.json.toets.fout === null, r.json.toets);
+  r = await draai(fd(), een, { nu: DI, sd: { pot: Array.from({ length: 24 }, () => DI - 1000), gemaakt: Array.from({ length: 30 }, () => DI - 1000) } });
+  toets('direct: pot- en conceptplafond raken direct niet', r.json.toets.fout === null, r.json.toets);
+  r = await draai(fd(), een, { nu: DI, code: code.replace('const VERSTUREN_FACTUREN = true;', 'const VERSTUREN_FACTUREN = false;') });
+  toets('direct: VERSTUREN_FACTUREN uit → 403 versturen_uit', r.json.toets.status === 403 && r.json.toets.code === 'versturen_uit', r.json.toets);
+  r = await draai(fd({ modus: 'concept', secret: OUD, aan: 'd.schaap+facturentest@gmail.com' }), een, { nu: DI });
+  toets('concept naar de testalias blijft kunnen (oud geheim), pad facturen', r.json.toets.fout === null && r.json.toets.pad === 'facturen' && r.json.van === '', r.json.toets);
+  r = await draai(fd({ modus: 'concept' }), een, { nu: DI });
+  toets('eigen geheim + concept → 403 (geheim opent alleen versturen)', r.json.toets.status === 403 && r.json.toets.code === 'secret', r.json.toets);
+  const pr = (x) => fd(Object.assign({ bron: 'facturen_proef', aan: 'd.schaap+facturentest@gmail.com' }, x));
+  let sdP = {};
+  r = await draai(pr(), een, { nu: DI, sd: sdP });
+  toets('proef: testalias → in orde, pad pot, eigen teller', r.json.toets.fout === null && r.json.toets.pad === 'pot' && r.json.bron === 'facturen_proef' && sdP.proef.length === 1 && !(sdP.direct || []).length, r.json.toets);
+  r = await draai(pr({ aan: '453248tt@inkoop.exactonline.nl' }), een, { nu: DI });
+  toets('proef: echt boekhoudadres → 403', r.json.toets.status === 403 && r.json.toets.code === 'witte_lijst', r.json.toets);
+  r = await draai(pr({ modus: 'concept', secret: OUD }), een, { nu: DI });
+  toets('proef: concept → 400', r.json.toets.status === 400 && r.json.toets.code === 'modus', r.json.toets);
+  r = await draai(pr({ secret: OUD }), een, { nu: DI });
+  toets('proef: oud geheim → 401', r.json.toets.status === 401, r.json.toets);
+  r = await draai(pr(), een, { nu: DI, sd: { proef: [DI - 1, DI - 2, DI - 3] } });
+  toets('proef: 4e op een dag → 409', r.json.toets.status === 409 && r.json.toets.code === 'direct_plafond', r.json.toets);
+  r = await draai(pot(), een);
+  toets('pot ongewijzigd na direct', r.json.toets.fout === null && r.json.toets.pad === 'pot' && r.json.bron === 'pot', r.json.toets);
+  // Tel verstuurd: direct telt niet in het gedeelde pot-plafond
+  const tel = fs.readFileSync('tools/n8n/facturen-verzender-tel-verstuurd.js', 'utf8');
+  const telDraai = (bron) => { const sd = { pot: [] }; const f = new Function('$', '$input', '$getWorkflowStaticData', tel);
+    const u = f((n) => ({ first: () => ({ json: n === 'Toetsen' ? { bron, toets: { aantal: 1 }, ref: '', token: 'FV0123456789abcdef' } : { id: 'concept1' } }) }), { first: () => ({ json: { id: 'm1', threadId: 't1', labelIds: ['SENT'] } }) }, () => sd);
+    return { sd, u: u[0].json }; };
+  let tv = telDraai('facturen');
+  toets('Tel verstuurd: facturen telt niet in sd.pot; antwoord met message_id en token', tv.sd.pot.length === 0 && tv.u.ok === true && tv.u.modus === 'versturen' && tv.u.message_id === 'm1' && tv.u.token === 'FV0123456789abcdef', tv);
+  tv = telDraai('pot');
+  toets('Tel verstuurd: pot telt wel', tv.sd.pot.length === 1, tv.sd);
   const sj = fs.readFileSync('server.js', 'utf8');
   const m = /const POT_VZ_TOETSEN_SHA = process\.env\.POT_VZ_TOETSEN_SHA_TOETS \|\| '([0-9a-f]{64})'/.exec(sj);
   toets('POT_VZ_TOETSEN_SHA in server.js = sha256 van dit bestand', m && m[1] === crypto.createHash('sha256').update(code).digest('hex'), m && m[1]);

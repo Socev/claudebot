@@ -4,7 +4,12 @@
 // Bron facturen (standaard, Facturen-app):
 //  1. WITTE LIJST: het doeladres moet exact op AAN_TOEGESTAAN staan (testalias + boekhoudadressen, F5 wv912 na Davids Ja). Eén adres;
 //     geen cc, bcc, afzender of draad.
-//  2. VERSTUREN_AAN = false: voor de Facturen-app maakt deze workflow alleen CONCEPTEN; modus "versturen" wordt hier geweigerd.
+//  2. Modus concept: elk adres van AAN_TOEGESTAAN. Modus versturen (wv2480, David Ja 5-11-2026 14:31 met verse vingerafdruk; grondwet 1,
+//     aanvulling 5-11-2026: per leverancier direct naar de boekhouding): ALLEEN met het eigen verzendgeheim, alleen naar AAN_DIRECT (de
+//     boekhoudadressen, zonder testalias), schakelaar VERSTUREN_FACTUREN, en hooguit FACTUREN_PER_DAG per Amsterdamse dag (elke geslaagde
+//     toets telt; de 16e → 409 direct_plafond, de pod maakt dan een concept). Afzender POT_VAN; verder dezelfde regels als concept.
+//  2b. Bron facturen_proef (wv2480): dezelfde vorm als bron facturen + versturen, maar alleen naar AAN_PROEF (de testalias), hooguit
+//     PROEF_PER_DAG per dag. Zo wordt het directe pad (concept → drafts.send) bewezen zonder de boekhouding te raken.
 //  3. PLAFOND: hooguit PER_UUR aangemaakte concepten per uur (static data; best effort, de pod telt ook).
 //  4. Bijlagen: 1–3 bestanden (multipart), alleen pdf/xml/940/sta/mt940, samen ≤ 20 MB, een .pdf begint met %PDF; onderwerp eindigt op
 //     [ref FV|FA + 16 hex] en dat token = het veld token.
@@ -42,7 +47,11 @@
 // de sha256 met een expressie, en zet de Code-knoop *Merk verzendgeheim* alleen op die tak json.verzendgeheim = true — buiten body,
 // dus een beller kan die vlag niet zelf meesturen (de webhook levert alleen headers/params/query/body).
 const AAN_TOEGESTAAN = ['d.schaap+facturentest@gmail.com', '453248tt@inkoop.exactonline.nl', '61j3j624@inkoop.exactonline.nl', 't17475m7@inkoop.exactonline.nl', '1435h6s3@inkoop.exactonline.nl', 'f13x@inkoop.exactonline.nl', 'a.schaap@actasynergia.nl', 'a8r1@inkoop.exactonline.nl']; // F5 (wv912, 23-10-2026, Davids Ja): testalias + boekhoudadressen uit de stamgegevens
-const VERSTUREN_AAN = false;
+const AAN_DIRECT = AAN_TOEGESTAAN.filter((a) => a !== 'd.schaap+facturentest@gmail.com');   // wv2480: nooit de testalias als echte bestemming
+const VERSTUREN_FACTUREN = true;
+const FACTUREN_PER_DAG = 15;
+const AAN_PROEF = ['d.schaap+facturentest@gmail.com'];
+const PROEF_PER_DAG = 3;
 const PER_UUR = 30;
 const MAX_AANTAL = 3, MAX_BYTES = 20 * 1024 * 1024;
 const TYPES = { pdf: 'application/pdf', xml: 'application/xml', '940': 'application/octet-stream', sta: 'application/octet-stream', mt940: 'application/octet-stream' };
@@ -86,6 +95,7 @@ function venster(ms) {   // werkdag 09:00–12:00 Europe/Amsterdam; zelfde feest
   const wd = new Date(ymd + 'T12:00:00Z').getUTCDay();
   return wd !== 0 && wd !== 6 && !feest && uur >= 9 && uur < 12;
 }
+function dagAms(ms) { return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms)); }
 function vensterSepa(ms) {   // elke dag 07:00–23:00 Europe/Amsterdam (stille uren)
   const uur = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(new Date(ms)));
   return uur >= 7 && uur < 23;
@@ -106,10 +116,11 @@ const modus = String(body.modus ?? '');
 const onderwerp = String(body.onderwerp ?? '');
 let aan = String(body.aan ?? '').trim().toLowerCase(), cc = '', van = '', ref = '', token = '';
 if (!['concept', 'versturen'].includes(modus)) zet('modus is concept of versturen', 'modus', 400);
-// 5. geheimen: versturen alleen met het eigen geheim; het eigen geheim alleen voor versturen van bron pot en boekstuk
+// 5. geheimen: versturen alleen met het eigen geheim; het eigen geheim alleen voor versturen (pot, boekstuk, sepa, facturen, facturen_proef)
 const eigen = bron === 'pot' || bron === 'boekstuk' || bron === 'sepa';
+const direct = (bron === 'facturen' || bron === 'facturen_proef') && modus === 'versturen';   // wv2480
 if (modus === 'versturen' && !versturenGeheim) zet('versturen kan alleen met het eigen verzendgeheim', 'secret', 401);
-if (versturenGeheim && !(eigen && modus === 'versturen')) zet('dit geheim opent alleen versturen voor bron pot, boekstuk en sepa', 'secret', 403);
+if (versturenGeheim && !((eigen || direct) && modus === 'versturen')) zet('dit geheim opent alleen versturen voor bron pot, boekstuk, sepa, facturen en facturen_proef', 'secret', 403);
 
 if (bron === 'pot') {
   if (modus !== 'versturen') zet('bron pot kent alleen versturen', 'modus', 400);
@@ -165,10 +176,12 @@ if (bron === 'pot') {
   if (body.bijlagen !== undefined && body.bijlagen !== '') zet('bijlagen alleen als bestanden (multipart)', 'bijlagen', 400);
   if (bestanden.length !== 2) zet('precies twee bestanden: de batch (xml) en de specificatie (pdf)', 'bijlagen', 400);
   aan = lijst.join(', ');
-} else if (bron === 'facturen') {
+} else if (bron === 'facturen' || bron === 'facturen_proef') {
   token = String(body.token ?? '');
-  if (modus === 'versturen' && !VERSTUREN_AAN) zet('versturen staat uit in de verzender (alleen concepten tot fase F5)', 'versturen_uit', 403);
-  if (!AAN_TOEGESTAAN.includes(aan)) zet('adres staat niet op de witte lijst van de verzender', 'witte_lijst', 403);
+  if (bron === 'facturen_proef' && modus !== 'versturen') zet('bron facturen_proef kent alleen versturen', 'modus', 400);
+  if (direct && !VERSTUREN_FACTUREN) zet('direct versturen staat uit in de verzender', 'versturen_uit', 403);
+  if (!(bron === 'facturen_proef' ? AAN_PROEF : direct ? AAN_DIRECT : AAN_TOEGESTAAN).includes(aan)) zet('adres staat niet op de witte lijst van de verzender' + (direct ? ' (direct)' : ''), 'witte_lijst', 403);
+  if (direct) van = POT_VAN[0];
   for (const k of ['cc', 'bcc', 'van', 'thread_id', 'antwoord_aan', 'ref']) if (body[k] !== undefined && body[k] !== '') zet('veld ' + k + ' is hier niet toegestaan', 'veld', 400);
   if (!/^F[VA][0-9a-f]{16}$/.test(token)) zet('token ontbreekt of is ongeldig', 'token', 400);
   const m = /\[ref (F[VA][0-9a-f]{16})\]\s*$/.exec(onderwerp);
@@ -183,8 +196,8 @@ for (let i = 0; !fout && i < bestanden.length; i++) {
   const k = bestanden[i], nr = 'bijlage ' + (i + 1);
   let naam = saneer(item.binary[k].fileName);
   const p = naam.lastIndexOf('.'), ext = p > 0 ? naam.slice(p + 1).toLowerCase() : '';
-  if (!naam || !TYPES[ext] || (eigen && bron !== 'sepa' && ext !== 'pdf') || (bron === 'sepa' && ext !== 'pdf' && ext !== 'xml')) {
-    zet(nr + ': alleen ' + (bron === 'sepa' ? 'xml en pdf' : eigen ? 'pdf' : 'pdf, xml of MT940'), 'bijlagen', 400); break;
+  if (!naam || !TYPES[ext] || (eigen && bron !== 'sepa' && ext !== 'pdf') || ((bron === 'sepa' || direct) && ext !== 'pdf' && ext !== 'xml')) {
+    zet(nr + ': alleen ' + (bron === 'sepa' || direct ? 'xml en pdf' : eigen ? 'pdf' : 'pdf, xml of MT940'), 'bijlagen', 400); break;
   }
   if (bron === 'sepa' && meta.some((x) => x.ext === ext)) { zet(nr + ': precies één xml en één pdf', 'bijlagen', 400); break; }
   const buf = await this.helpers.getBinaryDataBuffer(0, k);
@@ -208,13 +221,20 @@ sd.gemaakt = (Array.isArray(sd.gemaakt) ? sd.gemaakt : []).filter((t) => nu - t 
 sd.pot = (Array.isArray(sd.pot) ? sd.pot : []).filter((t) => nu - t < 86400000);
 sd.boekstuk = (Array.isArray(sd.boekstuk) ? sd.boekstuk : []).filter((t) => nu - t < 30 * 86400000);
 sd.sepa = (Array.isArray(sd.sepa) ? sd.sepa : []).filter((t) => nu - t < 86400000);
-if (!fout && !eigen && sd.gemaakt.length >= PER_UUR) zet('plafond van ' + PER_UUR + ' per uur bereikt', 'plafond', 429);
+sd.direct = (Array.isArray(sd.direct) ? sd.direct : []).filter((t) => nu - t < 2 * 86400000);   // wv2480: per Amsterdamse dag geteld
+sd.proef = (Array.isArray(sd.proef) ? sd.proef : []).filter((t) => nu - t < 2 * 86400000);
+const vandaag = dagAms(nu);
+if (!fout && bron === 'facturen' && direct && sd.direct.filter((t) => dagAms(t) === vandaag).length >= FACTUREN_PER_DAG) zet('plafond van ' + FACTUREN_PER_DAG + ' directe verzendingen per dag bereikt', 'direct_plafond', 409);
+if (!fout && bron === 'facturen' && direct) sd.direct.push(nu);
+if (!fout && bron === 'facturen_proef' && sd.proef.filter((t) => dagAms(t) === vandaag).length >= PROEF_PER_DAG) zet('plafond van ' + PROEF_PER_DAG + ' proeven per dag bereikt', 'direct_plafond', 409);
+if (!fout && bron === 'facturen_proef') sd.proef.push(nu);
+if (!fout && !eigen && !direct && sd.gemaakt.length >= PER_UUR) zet('plafond van ' + PER_UUR + ' per uur bereikt', 'plafond', 429);
 if (!fout && eigen && sd.pot.length >= POT_PER_DAG) zet('plafond van ' + POT_PER_DAG + ' verstuurde nota\'s per 24 uur bereikt', 'plafond', 429);
 if (!fout && bron === 'boekstuk' && sd.boekstuk.length >= BOEKSTUK_PER_30D) zet('plafond van ' + BOEKSTUK_PER_30D + ' boekstukken per 30 dagen bereikt', 'plafond', 429);
 if (!fout && bron === 'boekstuk') sd.boekstuk.push(nu);
 if (!fout && bron === 'sepa' && sd.sepa.length >= SEPA_PER_DAG) zet('plafond van ' + SEPA_PER_DAG + ' SEPA-batches per 24 uur bereikt', 'plafond', 429);
 if (!fout && bron === 'sepa') sd.sepa.push(nu);
 
-const uit = { aan: aan, cc: cc, van: van, modus: modus, token: token, ref: ref, onderwerp: onderwerp, bericht: fout ? '' : body.bericht,
-  toets: { fout: fout, code: code, status: fout ? status : 200, pad: !fout && eigen && modus === 'versturen' && versturenGeheim ? 'pot' : 'facturen', aantal: fout ? 0 : meta.length, props: fout ? '' : Object.keys(binary).join(',') } };
+const uit = { bron: bron, aan: aan, cc: cc, van: van, modus: modus, token: token, ref: ref, onderwerp: onderwerp, bericht: fout ? '' : body.bericht,
+  toets: { fout: fout, code: code, status: fout ? status : 200, pad: !fout && (eigen || direct) && modus === 'versturen' && versturenGeheim ? 'pot' : 'facturen', aantal: fout ? 0 : meta.length, props: fout ? '' : Object.keys(binary).join(',') } };
 return [fout ? { json: uit } : { json: uit, binary: binary }];

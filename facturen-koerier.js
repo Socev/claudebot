@@ -127,7 +127,7 @@ function naamMetExtensie(naam, mime, bytes, soort) {
   return null;
 }
 // Onderwerp en tekst van de mail aan de boekhouder: kort, zonder factuurtekst, met het token.
-function mailVoor(fdb, op) {
+function mailVoor(fdb, op, modus) {
   const e = fdb.db.prepare('SELECT naam, naam_kort FROM entiteit WHERE sleutel = ?').get(op.entiteit) || {};
   const ent = kort(e.naam_kort || e.naam || op.entiteit, 60);
   const tok = tokenVan(op);
@@ -135,7 +135,7 @@ function mailVoor(fdb, op) {
     const f = fdb.db.prepare('SELECT f.nummer, f.leverancier_naam, l.naam AS lev FROM factuur f LEFT JOIN leverancier l ON l.id = f.leverancier WHERE f.id = ?').get(op.factuur) || {};
     const wat = [kort(f.lev || f.leverancier_naam, 80), kort(f.nummer, 40)].filter(Boolean).join(' ');
     return { onderwerp: kort('Inkoopfactuur ' + ent + (wat ? ' — ' + wat : ''), 180) + ' [ref ' + tok + ']',
-      tekst: 'Kenmerk ' + tok + ', opdracht ' + op.id + '.\n\nInkoopfactuur voor ' + kort(e.naam || ent, 120) + '.\nKlaargezet door Socev (assistent van David Schaap) na zijn akkoord.\n' };
+      tekst: 'Kenmerk ' + tok + ', opdracht ' + op.id + '.\n\nInkoopfactuur voor ' + kort(e.naam || ent, 120) + '.\n' + (modus === 'versturen' ? 'Verstuurd' : 'Klaargezet') + ' door Socev (assistent van David Schaap) na zijn akkoord.\n' };
   }
   const a = fdb.db.prepare('SELECT periode FROM pot_afschrift WHERE id = ?').get(op.afschrift) || {};
   return { onderwerp: 'Bankafschrift ' + ent + ' ' + kort(a.periode, 10) + ' [ref ' + tok + ']',
@@ -270,7 +270,8 @@ async function ronde(fdb, io, o) {
       uit.voorronde.gezocht++;
       const t = await zoekToken(fdb, io, op);
       if (t && t.passend) {
-        D.opdrachtResultaat(fdb, op.id, { status: 'gelukt', extern_id: t.id, modus: op.modus || 'concept', overgenomen: true }, { nu: klok(), wie });
+        // wv2480: alleen 'versturen' als hij echt in Verzonden staat én direct gereserveerd was; een concept dat bleef staan = concept
+        D.opdrachtResultaat(fdb, op.id, { status: 'gelukt', extern_id: t.id, modus: t.verzonden && op.modus === 'versturen' ? 'versturen' : 'concept', overgenomen: true }, { nu: klok(), wie });
         uit.voorronde.overgenomen++;
       }
     } catch (e) { if (e instanceof LuikFout) { luikOk = false; fout('lees-luik', e); break; } fout('voorronde', e); }
@@ -304,7 +305,11 @@ async function ronde(fdb, io, o) {
   else if (laatsteUur >= GRENS.perUur) { uit.verzending.plafond = true; }
   else {
     // één voor één claimen zolang het rondebudget het toelaat: wat geclaimd is, wordt ook geprobeerd (diffreview wv855 #7)
-    const modus = D.metaLees(fdb, 'verzendmodus') === 'versturen' ? 'versturen' : 'concept';
+    // wv2480: concept of direct wordt per opdracht gekozen (D.reserveerKies); de oude verzendmodus telt niet meer. Of de verzender direct
+    // kent (Toetsen-hash), vraagt de koerier één keer per ronde en alleen als direct verzenden vrijgegeven is.
+    let directKlaar = false;
+    if (D.metaLees(fdb, 'versturen_vrijgegeven') === '1' && typeof io.directKlaar === 'function') { try { directKlaar = (await io.directKlaar()) === true; } catch (e) { directKlaar = false; } }
+    uit.verzending.direct = 0; uit.verzending.direct_terug = 0; uit.verzending.direct_onzeker = 0;
     const max = Math.min(GRENS.verzendingen, GRENS.perUur - laatsteUur);
     while (uit.verzending.geclaimd < max && luikOk && klok() - start <= GRENS.rondeMs) {
       let claim;
@@ -316,7 +321,7 @@ async function ronde(fdb, io, o) {
       if (!claim.opdrachten.length) break;
       uit.verzending.geclaimd++;
       const op = fdb.db.prepare('SELECT * FROM opdracht WHERE id = ?').get(claim.opdrachten[0].id);
-      try { await verstuurEen(fdb, io, op, modus, { klok, wie }, uit); }
+      try { await verstuurEen(fdb, io, op, { klok, wie, pdf, directKlaar }, uit); }
       catch (e) {
         if (e instanceof LuikFout) { luikOk = false; fout('lees-luik', e); }
         else { fout('verzending', e); if (e && e.stopVerzenden) break; }
@@ -346,7 +351,33 @@ async function ronde(fdb, io, o) {
 }
 
 // Eén opdracht: controleren, zo nodig eerst zoeken, reserveren, verzenden, uitkomst vastleggen.
-async function verstuurEen(fdb, io, op, modus, o, uit) {
+/*
+ * wv2480: de bijlagen vers lezen vlak vóór een directe verzending (review MOET 4: positief bewijs). Elke PDF met tekstlaag (≥ 40 tekens), een
+ * UBL zonder ingebedde PDF, en de patiëntregel over alle tekst samen zonder kenmerk. De tekst blijft in deze functie (vluchtig).
+ * → { ok } | { ok:false, reden }
+ */
+async function leesBewijs(bijlagen, pdf) {
+  const teksten = [];
+  for (const b of bijlagen || []) {
+    if (/\.pdf$/i.test(b.naam)) {
+      let t;
+      try { t = await pdf(b.bytes); } catch (e) { t = { ok: false }; }
+      if (!t || !t.ok || !t.tekstlaag || String(t.tekst || '').replace(/\s/g, '').length < 40) return { ok: false, reden: 'bijlage niet volledig leesbaar (geen tekstlaag)' };
+      teksten.push(t.tekst);
+    } else if (/\.xml$/i.test(b.naam)) {
+      let s;
+      try { s = K.stapSoort({ sha256: sha256(b.bytes), naam: b.naam, mime: 'application/xml', ubl_xml: b.bytes.toString('utf8') }); } catch (e) { s = null; }
+      if (!s || s.soort !== 'ubl' || !s.ubl) return { ok: false, reden: 'UBL niet te lezen' };
+      if (s.ubl.heeft_pdf) return { ok: false, reden: 'UBL met ingebedde PDF (niet lokaal gelezen)' };
+      teksten.push(s.ubl._tekst);
+    } else return { ok: false, reden: 'bijlagetype niet direct te versturen' };
+  }
+  if (!teksten.length) return { ok: false, reden: 'geen bijlage gelezen' };
+  const pk = K.stapPatientkenmerk(teksten);
+  teksten.length = 0;
+  return pk.kenmerk ? { ok: false, reden: 'kenmerk van patiëntgegevens in een bijlage' } : { ok: true };
+}
+async function verstuurEen(fdb, io, op, o, uit) {
   const wie = o.wie, klok = o.klok;
   const c = controleer(fdb, op);
   if (!c.ok) { D.opdrachtResultaat(fdb, op.id, { status: 'geweigerd', fout: c.reden }, { nu: klok(), wie }); uit.verzending.geweigerd++; return; }
@@ -362,27 +393,56 @@ async function verstuurEen(fdb, io, op, modus, o, uit) {
       return;
     }
     if (t) {
-      D.opdrachtResultaat(fdb, op.id, { status: 'gelukt', extern_id: t.id, modus: t.verzonden ? modus : 'concept', vingerafdruk_koerier: c.vingerafdruk, overgenomen: true }, { nu: klok(), wie });
+      // verzonden en eerder als direct gereserveerd → versturen; anders concept (een verzonden concept ziet de verzend-detectie)
+      const vm = t.verzonden && fdb.db.prepare("SELECT 1 FROM opdracht WHERE modus = 'versturen' AND verzend_reservering IS NOT NULL AND " + (op.factuur ? 'factuur = ?' : 'afschrift = ?')).get(op.factuur || op.afschrift) ? 'versturen' : 'concept';
+      D.opdrachtResultaat(fdb, op.id, { status: 'gelukt', extern_id: t.id, modus: vm, vingerafdruk_koerier: c.vingerafdruk, overgenomen: true }, { nu: klok(), wie });
       uit.verzending.overgenomen++;
       return;
     }
   }
-  D.reserveer(fdb, op.id, { sleutel: tok, modus, nu: klok(), wie });
-  const mail = mailVoor(fdb, op);
+  // wv2480: concept of direct. Eerst (alleen als de opdracht direct kan) de bijlagen vers lezen; dan in één transactie kiezen, het dagplafond
+  // tellen en reserveren (D.reserveerKies = ook de hercontrole op de verse rijen). Tussen die transactie en de aanroep zit geen await.
+  let bewijs = null;
+  if (!eerder && o.directKlaar && D.directBesluit(fdb, op, {}).direct) bewijs = await leesBewijs(c.bijlagen, o.pdf || pdfNaarTekst);
+  const keuze = D.reserveerKies(fdb, op.id, { sleutel: tok, nu: klok(), wie, bewijs, verzender: !!o.directKlaar });
+  let modus = keuze.modus;
+  let mail = mailVoor(fdb, op, modus);
   let antw;
   try { antw = await io.verzender({ modus, aan: op.doeladres, onderwerp: mail.onderwerp, tekst: mail.tekst, token: tok, bijlagen: c.bijlagen }); }
   catch (e) {
-    if (e && e.zekerNietVerstuurd) { D.opdrachtResultaat(fdb, op.id, { status: 'mislukt', fout: 'verzender: ' + foutSoort(e) }, { nu: klok(), wie }); uit.verzending.mislukt++; return; }
-    uit.verzending.geen_resultaat++;   // time-out of verbinding weg: misschien wél gemaakt → opgehaald laten, na 30 min eerst zoeken
-    return;
+    if (e && e.zekerNietVerstuurd && modus === 'versturen') antw = { status: 0, j: { code: 'vooraf' }, vooraf: true };   // direct kon niet: zo meteen concept
+    else if (e && e.zekerNietVerstuurd) { D.opdrachtResultaat(fdb, op.id, { status: 'mislukt', fout: 'verzender: ' + foutSoort(e) }, { nu: klok(), wie }); uit.verzending.mislukt++; return; }
+    else {
+      uit.verzending.geen_resultaat++;   // time-out of verbinding weg: misschien wél gemaakt → opgehaald laten, na 30 min eerst zoeken
+      if (modus === 'versturen') { uit.verzending.direct_onzeker++; D.verzendNotitie(fdb, op, 'direct onzeker (geen antwoord van de verzender): nooit opnieuw direct; eerst zoeken, anders concept', { nu: klok(), wie }); }
+      return;
+    }
+  }
+  // wv2480: weigerde de verzender DIRECT vóór Gmail (Toetsen 4xx, verkeerd geheim, plafond, vooraf), dan is er zeker niets gemaakt: dezelfde
+  // ronde als concept, met de reden in het besluitspoor. Een fout ná de toets (502 Gmail) is onzeker: geen tweede poging (na 30 min zoeken).
+  if (modus === 'versturen' && antw && (antw.vooraf || (antw.status >= 400 && antw.status < 500))) {
+    const code = kort((antw.j && antw.j.code) || antw.status, 30);
+    D.terugNaarConcept(fdb, op.id, { sleutel: tok, nu: klok(), wie, reden: 'verzender weigerde direct (' + code + '): concept' });
+    uit.verzending.direct_terug++;
+    modus = 'concept'; mail = mailVoor(fdb, op, modus);
+    try { antw = await io.verzender({ modus, aan: op.doeladres, onderwerp: mail.onderwerp, tekst: mail.tekst, token: tok, bijlagen: c.bijlagen }); }
+    catch (e) {
+      if (e && e.zekerNietVerstuurd) { D.opdrachtResultaat(fdb, op.id, { status: 'mislukt', fout: 'verzender: ' + foutSoort(e) }, { nu: klok(), wie }); uit.verzending.mislukt++; return; }
+      uit.verzending.geen_resultaat++; return;
+    }
   }
   const st = antw && antw.status, j = (antw && antw.j) || {};
   // extern_id = de message-id van het concept (dezelfde id die het lees-luik bij het zoeken geeft); anders de draft-id
   const ext = (typeof j.message_id === 'string' && j.message_id) || (typeof j.extern_id === 'string' && j.extern_id) || null;
   if (st === 200 && j.ok === true && ext) {
-    const r = D.opdrachtResultaat(fdb, op.id, { status: 'gelukt', extern_id: ext, modus: j.modus === 'versturen' ? 'versturen' : 'concept', vingerafdruk_koerier: c.vingerafdruk }, { nu: klok(), wie });
-    if (r.ok) uit.verzending.gelukt++;
+    const r = D.opdrachtResultaat(fdb, op.id, { status: 'gelukt', extern_id: ext, modus: j.modus === 'versturen' && modus === 'versturen' ? 'versturen' : 'concept', vingerafdruk_koerier: c.vingerafdruk }, { nu: klok(), wie });
+    if (r.ok) { uit.verzending.gelukt++; if (modus === 'versturen' && j.modus === 'versturen') uit.verzending.direct++; }
     return;
+  }
+  if (modus === 'versturen') {   // wv2480: direct, en de uitkomst is onduidelijk (Gmail-fout na de toets, 200 zonder id, 5xx): nooit opnieuw direct
+    uit.verzending.direct_onzeker++; uit.verzending.geen_resultaat++;
+    D.verzendNotitie(fdb, op, 'direct onzeker (verzender http ' + (Number(st) || 0) + (j.code ? ' ' + kort(j.code, 30) : '') + '): nooit opnieuw direct; eerst zoeken, anders concept', { nu: klok(), wie });
+    return;   // opgehaald laten: na 30 min zoekt de voorronde/verstuurEen eerst op het token; niets gevonden → concept
   }
   if (st === 403 && ['witte_lijst', 'versturen_uit'].includes(j.code)) {
     D.opdrachtResultaat(fdb, op.id, { status: 'geweigerd', fout: 'verzender weigert (' + j.code + ')' }, { nu: klok(), wie });
@@ -657,7 +717,9 @@ async function leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel) {
     D.voegToe(fdb, 'bericht', { id: nieuwId, bron: bron.id, message_id: mid, draad_id: kort(s.thread_id, 200), afzender, onderwerp: kort(s.onderwerp, 300),
       datum_lokaal: kort(s.ontvangen, 40), bron_link: s.bron === 'gmail:david' && /^[0-9a-f]{12,24}$/.test(mid) ? 'https://mail.google.com/mail/u/0/#all/' + mid : null, ontvangen_op: nuIso(o.klok()) });
     if (!documenten.length) return;
-    const v = F.verwerkBericht(fdb, { bericht: { id: nieuwId, message_id: mid, afzender, onderwerp: s.onderwerp }, documenten }, { wie: o.wie, nu: o.klok() });
+    // wv2480: het Intake-label mogelijk medisch gaat als besluit mee (alleen als de router het meegeeft; anders geen direct verzenden)
+    const v = F.verwerkBericht(fdb, { bericht: { id: nieuwId, message_id: mid, afzender, onderwerp: s.onderwerp }, documenten },
+      { wie: o.wie, nu: o.klok(), mogelijk_medisch: typeof s.mogelijk_medisch === 'boolean' ? s.mogelijk_medisch : undefined });
     vf = v.facturen;
   });
   if (al) { tel.al_ingelezen++; return 'al_ingelezen'; }

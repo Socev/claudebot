@@ -2526,9 +2526,12 @@ test('wv2465: server.js — na een batch plannen, verzender per bron (sepa eist 
   assert.match(src, /pad === '\/app\/facturen\/sepa-batch' && r\.status === 200 && r\.j && r\.j\.doorsturen && typeof sdPlan === 'function'\) sdPlan\(1500\)/);
   assert.match(src, /sepaDoor: typeof sdModus === 'function' \? sdModus\(\) : null/);
   assert.match(src, /potVzVerstuur\(\{ bron: 'sepa', modus: 'versturen', ref: v\.ref, aan: facturenRoutes\.sepaDoor\.AAN,/);
-  const i = src.indexOf('function potVzToetsenMag('), mag = new Function('POT_VZ_TOETSEN_SHA', 'POT_VZ_TOETSEN_BOEKSTUK', 'POT_VZ_TOETSEN_SHA_VORIG',
-    src.slice(i, src.indexOf('\n}\n', i) + 3) + 'return potVzToetsenMag;')('nieuw', 'boekstuk', 'vorig');
-  assert.deepEqual(['sepa', 'boekstuk', 'pot'].map((b) => mag('nieuw', b)), [true, true, true]);
+  const i = src.indexOf('function potVzToetsenMag('), mag = new Function('POT_VZ_TOETSEN_SHA', 'POT_VZ_TOETSEN_BOEKSTUK', 'POT_VZ_TOETSEN_SHA_VORIG', 'POT_VZ_TOETSEN_SEPA',
+    src.slice(i, src.indexOf('\n}\n', i) + 3) + 'return potVzToetsenMag;')('nieuw', 'boekstuk', 'vorig', 'sepa6edf');
+  assert.deepEqual(['sepa', 'boekstuk', 'pot', 'facturen'].map((b) => mag('nieuw', b)), [true, true, true, true]);
+  // wv2480: de Toetsen van wv2465 (sepa) dient pot, boekstuk en sepa nog, maar nooit direct uit Facturen
+  assert.deepEqual(['sepa', 'boekstuk', 'pot', 'facturen'].map((b) => mag('sepa6edf', b)), [true, true, true, false]);
+  assert.deepEqual(['boekstuk', 'vorig', 'anders'].map((t) => mag(t, 'facturen')), [false, false, false]);
   assert.deepEqual(['sepa', 'boekstuk', 'pot'].map((b) => mag('boekstuk', b)), [false, true, true]);
   assert.deepEqual(['sepa', 'boekstuk', 'pot'].map((b) => mag('vorig', b)), [false, false, true]);
   assert.deepEqual(['sepa', 'pot'].map((b) => mag('anders', b)), [false, false]);
