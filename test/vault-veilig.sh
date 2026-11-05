@@ -11,6 +11,9 @@
 #  G  ACL-masker: in een map met standaard-ACL houdt een tweede gebruiker rw (alleen als setfacl er is)
 #  H  wijzig (py) onder flock: 20 gelijktijdige schrijvers verliezen geen rij
 #  I  achtergebleven tijdelijk bestand ouder dan een uur wordt opgeruimd, jonger niet
+#  N  krimpgrens in wijzig (wv2439): onder 00_Systeem weigert een afkapping (rest na een bewerkte rij vergeten), een verloren
+#     '## '-kop of een krimp > 50 % én > 20 kB; krimp_ok/krimpOk laat een bewuste opruimstap door; gewone invoeging en bewerking
+#     gaan door; buiten 00_Systeem alleen met krimp_grens/krimpGrens
 set -u
 cd "$(dirname "$0")/.." || exit 1
 W=$(mktemp -d /tmp/vaultveilig-XXXXXX)
@@ -117,6 +120,35 @@ if (heeft('setfacl') && heeft('getfacl')) {
   const b = path.join(M, 'herkans.md'); fs.writeFileSync(b, 'a'); let n = 0;
   const r = VV.wijzig(b, (t) => { n++; if (n === 1) fs.utimesSync(b, 1, 1); return t + 'x'; });
   toets('M wijzig: tussendoor geschreven → opnieuw gelezen', r === true && n === 2 && fs.readFileSync(b, 'utf8') === 'ax', n);
+}
+// N  krimpgrens (wv2439)
+{
+  const NS = path.join(W, 'js-kvault', '00_Systeem', 'Meldingen'); fs.mkdirSync(NS, { recursive: true });
+  const NB = path.join(NS, 'machinekamer.md');
+  let BOX0 = '# Box\n\n**Formaat** x\n';
+  for (let i = 0; i < 40; i++) BOX0 += '\n## [week] 2026-11-0' + (1 + i % 5) + ' 0' + (i % 10) + ':00 — rij ' + i + '\n- status: open\n- ' + 'w'.repeat(900) + '\n';
+  fs.writeFileSync(NB, BOX0);
+  const afkap = (t) => { const i = t.indexOf('\n## [week]', t.indexOf('rij 3\n')); return t.slice(0, i) + '\n## [week] 2026-11-05 07:32 — rij 3 bewerkt\n- status: bezig\n'; };
+  let code = null, melding = '';
+  try { VV.wijzig(NB, afkap); } catch (e) { code = e.code; melding = e.message; }
+  toets('N afkapping onder 00_Systeem: EKRIMP', code === 'EKRIMP' && fs.readFileSync(NB, 'utf8') === BOX0, code);
+  toets('N melding noemt bytes, koppen en krimpOk', /bytes/.test(melding) && /koppen/.test(melding) && /krimpOk/.test(melding), melding);
+  toets('N geen tmp achtergebleven', fs.readdirSync(NS).filter(n => VV.TMP_PATROON.test(n)).length === 0);
+  toets('N met grendel: afkapping ook geweigerd, daarna gewoon schrijven', gooit(() => VV.wijzig(NB, afkap, { grendel: 2 }), 'EKRIMP')
+    && VV.wijzig(NB, t => t.replace('**Formaat** x', '**Formaat** y'), { grendel: 2 }) === true);
+  fs.writeFileSync(NB, BOX0);
+  toets('N gewone invoeging bovenaan gaat door', VV.wijzig(NB, t => t.replace('**Formaat** x\n', '**Formaat** x\n\n## [log] 2026-11-05 09:00 — nieuw\n- status: open\n')) === true);
+  toets('N status bijwerken en kop hernoemen gaan door', VV.wijzig(NB, t => t.replace('- status: open', '- status: afgehandeld 5-11').replace('— rij 7\n', '— rij zeven\n')) === true);
+  const eenWeg = (t) => { const a = t.indexOf('\n## [week] 2026-11-05 09:00 — rij 9\n'), b = t.indexOf('\n## [week]', a + 5); return t.slice(0, a) + t.slice(b); };
+  toets('N één rij weghalen zonder krimpOk: geweigerd', gooit(() => VV.wijzig(NB, eenWeg), 'EKRIMP') && fs.readFileSync(NB, 'utf8').includes('— rij 9\n'));
+  toets('N één rij weghalen met krimpOk gaat door', VV.wijzig(NB, eenWeg, { krimpOk: true }) === true && !fs.readFileSync(NB, 'utf8').includes('— rij 9\n'));
+  toets('N Buffer uit de functie: krimp geweigerd', gooit(() => VV.wijzig(NB, t => Buffer.from(t.slice(0, 100))), 'EKRIMP'));
+  const BU = path.join(W, 'js-kvault', '20_Prive'); fs.mkdirSync(BU); const bp = path.join(BU, 'pagina.md'); fs.writeFileSync(bp, BOX0);
+  toets('N buiten 00_Systeem: afkapping gaat (standaard) door', VV.wijzig(bp, afkap) === true);
+  fs.writeFileSync(bp, BOX0);
+  toets('N buiten 00_Systeem met krimpGrens: geweigerd', gooit(() => VV.wijzig(bp, afkap, { krimpGrens: true }), 'EKRIMP'));
+  toets('N krimpFout puur', VV.krimpFout('## a\nx\n', '## n\n## a\nx\n') === null && VV.krimpFout('## a\n## b\n', '## a\n') !== null
+    && VV.krimpFout('x'.repeat(50000), 'x'.repeat(100)) !== null && VV.krimpFout('x'.repeat(30000), 'x'.repeat(12000)) === null);
 }
 // I
 const oud = path.join(M, '.machinekamer.md.0123456789abcdef.vv.tmp'), jong = path.join(M, '.machinekamer.md.fedcba9876543210.vv.tmp');
@@ -256,6 +288,40 @@ def f(t):
     return t + "x"
 toets("M wijzig: tussendoor geschreven → opnieuw gelezen", VV.wijzig(b, f) and n[0] == 2 and lees(b) == "ax", n)
 toets("M symlink als laatste component: SymlinkFout", gooit(lambda: VV.lees(link), VV.SymlinkFout) and gooit(lambda: VV.voeg_toe(link, "x"), VV.SymlinkFout))
+# N  krimpgrens (wv2439)
+NS = os.path.join(W, "py-kvault", "00_Systeem", "Meldingen"); os.makedirs(NS)
+NB = os.path.join(NS, "machinekamer.md")
+BOX0 = "# Box\n\n**Formaat** x\n" + "".join(f"\n## [week] 2026-11-0{1 + i % 5} 0{i % 10}:00 — rij {i}\n- status: open\n- " + "w" * 900 + "\n" for i in range(40))
+open(NB, "w").write(BOX0)
+def afkap(t):   # de fout van 5-11: s[:i] + nieuw zonder s[j:]
+    i = t.index("\n## [week]", t.index("rij 3\n")); return t[:i] + "\n## [week] 2026-11-05 07:32 — rij 3 bewerkt\n- status: bezig\n"
+toets("N afkapping onder 00_Systeem: KrimpFout", gooit(lambda: VV.wijzig(NB, afkap), VV.KrimpFout) and lees(NB) == BOX0)
+try:
+    VV.wijzig(NB, afkap); melding = ""
+except VV.KrimpFout as e:
+    melding = str(e)
+toets("N melding noemt bytes, koppen en krimp_ok", "bytes" in melding and "koppen" in melding and "krimp_ok" in melding, melding)
+toets("N geen tmp achtergebleven, grendel weer vrij", not [n for n in os.listdir(NS) if VV.TMP_PATROON.match(n)]
+      and VV.wijzig(NB, lambda t: t.replace("**Formaat** x", "**Formaat** y")) and "**Formaat** y" in lees(NB))
+open(NB, "w").write(BOX0)
+toets("N gewone invoeging bovenaan gaat door", VV.wijzig(NB, lambda t: t.replace("**Formaat** x\n", "**Formaat** x\n\n## [log] 2026-11-05 09:00 — nieuw\n- status: open\n", 1))
+      and lees(NB).count("\n## ") == 41)
+toets("N status van een rij bijwerken gaat door", VV.wijzig(NB, lambda t: t.replace("- status: open", "- status: afgehandeld 5-11", 1)))
+toets("N kop hernoemen (zelfde aantal) gaat door", VV.wijzig(NB, lambda t: t.replace("— rij 7\n", "— rij zeven\n", 1)))
+een_weg = lambda t: t.replace(t[t.index("\n## [week] 2026-11-05 09:00 — rij 9\n"):t.index("\n## [week]", t.index("— rij 9\n"))], "", 1)
+toets("N één rij weghalen zonder krimp_ok: geweigerd (kop verdwenen)", gooit(lambda: VV.wijzig(NB, een_weg), VV.KrimpFout) and "— rij 9\n" in lees(NB))
+toets("N één rij weghalen met krimp_ok (archiefstap) gaat door", VV.wijzig(NB, een_weg, krimp_ok=True) and "— rij 9\n" not in lees(NB))
+toets("N afkapping met krimp_ok gaat door", VV.wijzig(NB, afkap, krimp_ok=True) and lees(NB).count("\n## ") == 6, lees(NB).count("\n## "))
+OV = os.path.join(W, "py-kvault", "00_Systeem", "Open vragen aan David.md")
+open(OV, "w").write("# Open vragen\n\n| Gesteld | Kanaal |\n|---|---|\n" + "".join(f"| 2026-10-{1 + i % 28:02d} | app | " + "v" * 500 + " |\n" for i in range(100)))
+toets("N tabelregister zonder koppen: > 50 % én > 20 kB kwijt geweigerd", gooit(lambda: VV.wijzig(OV, lambda t: t[:2000]), VV.KrimpFout))
+toets("N tabelregister: < 20 kB kwijt gaat door", VV.wijzig(OV, lambda t: t[:-15000]))
+toets("N bytes uit de functie: krimp ook geweigerd", gooit(lambda: VV.wijzig(OV, lambda t: t[:100].encode()), VV.KrimpFout))
+BU = os.path.join(W, "py-kvault", "20_Prive"); os.makedirs(BU); bp = os.path.join(BU, "pagina.md"); open(bp, "w").write(BOX0)
+toets("N buiten 00_Systeem: afkapping gaat (standaard) door", VV.wijzig(bp, afkap))
+open(bp, "w").write(BOX0)
+toets("N buiten 00_Systeem met krimp_grens=True: geweigerd", gooit(lambda: VV.wijzig(bp, afkap, krimp_grens=True), VV.KrimpFout))
+toets("N krimp_fout puur: None bij invoeging", VV.krimp_fout("## a\nx\n", "## n\n## a\nx\n") is None and VV.krimp_fout("## a\n## b\n", "## a\n") is not None)
 # I
 oud = os.path.join(M, ".machinekamer.md.0123456789abcdef.vv.tmp"); jong = os.path.join(M, ".machinekamer.md.fedcba9876543210.vv.tmp")
 open(oud, "w").write("x"); open(jong, "w").write("x")

@@ -20,6 +20,12 @@
 //     (bandjes, ideeen en harvester houden 0644: masker r--, socev leest tot de na-ronde);
 //   - aanvullen: O_APPEND | O_NOFOLLOW op het bestand zelf.
 //
+//   - krimpgrens (wv2439, 5-11-2026): de box verloor 4-11 en 5-11 alles onder een bewerkte rij, omdat de bewerkfunctie van een
+//     agent `s.slice(0, i) + nieuw` teruggaf zonder `s.slice(j)`. wijzig weigert daarom (fout EKRIMP, niets geschreven) als de
+//     nieuwe tekst meer dan de helft én meer dan 20 kB kleiner is, of als er regels die met '## ' beginnen verdwijnen. Standaard aan
+//     onder een map 00_Systeem (box, Open vragen, Systeemoverzicht, registers); elders met o.krimpGrens: true. Bewust rijen
+//     weghalen (archiefstap): o.krimpOk: true.
+//
 // Canonieke bron: claudebot-src (getoetst in CI, test/vault-veilig.sh). Kopie: /opt/data/mk-scripts/veilig/vault-veilig.cjs
 // (byte-gelijk; CISO C7-kopie-drift bewaakt dat).
 const fs = require('fs');
@@ -136,6 +142,26 @@ function voegToe(pad, tekst, o) {
   });
 }
 
+// Krimpgrens (wv2439): foutmelding als nieuw te veel krimpt ten opzichte van oud (bytes of '## '-koppen), anders null. Puur.
+const KRIMP_BYTES = 20000, KRIMP_DEEL = 0.5, KRIMP_MAP = '00_Systeem';
+function koppen(t) { let n = 0; for (const r of t.split('\n')) if (r.startsWith('## ')) n++; return n; }
+function krimpFout(oud, nieuw, pad) {
+  const ob = Buffer.isBuffer(oud) ? oud : Buffer.from(String(oud), 'utf8');
+  const nb = Buffer.isBuffer(nieuw) ? nieuw : Buffer.from(String(nieuw), 'utf8');
+  const ko = koppen(ob.toString('utf8')), kn = koppen(nb.toString('utf8'));
+  const redenen = [];
+  if (ob.length - nb.length > KRIMP_BYTES && nb.length < ob.length * (1 - KRIMP_DEEL)) redenen.push('meer dan de helft kleiner');
+  if (kn < ko) redenen.push((ko - kn) + " regel(s) met '## ' verdwenen");
+  if (!redenen.length) return null;
+  return 'krimpgrens: ' + (pad || 'bestand') + ' niet geschreven (' + redenen.join(', ') + '; oud ' + ob.length + ' bytes en ' + ko +
+    ' koppen, nieuw ' + nb.length + ' bytes en ' + kn + ' koppen). Vergat de bewerkfunctie de rest van de tekst (s.slice(0, i) + nieuw + ' +
+    's.slice(j))? Haal je bewust rijen weg (archiefstap), geef dan { krimpOk: true } mee (wv2439).';
+}
+function grensAan(pad, o) {
+  if (o.krimpGrens != null) return !!o.krimpGrens;
+  return path.dirname(path.resolve(pad)).split(path.sep).indexOf(KRIMP_MAP) >= 0;
+}
+
 // Grendel op de map, dezelfde als vault_veilig.wijzig (flock op de mapdescriptor; SB2 fase 3e R3, wv1944). Node kent geen
 // flock: een kind (util-linux flock) krijgt onze mapdescriptor als fd 3 en zet de flock op die gedeelde open file description.
 // Die blijft na het einde van het kind vast zolang wij de descriptor openhouden; metMap sluit hem = grendel los. Gemeten
@@ -149,15 +175,18 @@ function grendel(m, s) {
 // Lees, laat functie(tekst) de nieuwe tekst geven (null/undefined = niets doen) en schrijf die weg als het bestand intussen
 // niet veranderde (zelfde inode, grootte en mtime); anders tot drie keer opnieuw. Geeft true als er geschreven is.
 // o.grendel (seconden, bv. 5): eerst de mapgrendel van vault_veilig.wijzig nemen (box-schrijvers, wv1944); lukt dat niet,
-// dan o.geenGrendel() (logregel bij de aanroeper) en zonder grendel verder.
+// dan o.geenGrendel() (logregel bij de aanroeper) en zonder grendel verder. Krimpgrens (wv2439): onder 00_Systeem (of met
+// o.krimpGrens) fout EKRIMP als de nieuwe tekst te veel krimpt of '## '-koppen verliest; o.krimpOk voor een bewuste opruimstap.
 function wijzig(pad, functie, o) {
   o = o || {};
   return metMap(pad, function (m) {
     if (o.grendel && !grendel(m, o.grendel) && typeof o.geenGrendel === 'function') o.geenGrendel();
     for (let poging = 0; poging < 3; poging++) {
       const voor = statGewoon(m.binnen(m.naam));
-      const nieuw = functie(leesIn(m, 'utf8'));
+      const oud = leesIn(m, 'utf8');
+      const nieuw = functie(oud);
       if (nieuw == null) return false;
+      if (!o.krimpOk && grensAan(pad, o)) { const f = krimpFout(oud, nieuw, pad); if (f) throw fout(f, 'EKRIMP'); }
       const ok = schrijfIn(m, nieuw, Object.assign({}, o, {
         alsGelijk: function (st) { return !!(st && voor && st.size === voor.size && st.mtimeMs === voor.mtimeMs && st.ino === voor.ino); },
       }));
@@ -167,4 +196,4 @@ function wijzig(pad, functie, o) {
   });
 }
 
-module.exports = { lees, schrijf, voegToe, wijzig, opPlek, TMP_PATROON };
+module.exports = { lees, schrijf, voegToe, wijzig, opPlek, krimpFout, TMP_PATROON };

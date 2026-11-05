@@ -14,6 +14,13 @@ alleen een gewoon bestand; schrijven via een eigen tijdelijk bestand met willeke
 rename binnen die map; modus die van het bestaande bestand (de groepsbits zijn het ACL-masker: socev houdt rw op de box),
 anders 0660; aanvullen O_APPEND|O_NOFOLLOW. `wijzig` doet lezen-wijzigen-schrijven onder flock op de map.
 
+Krimpgrens (wv2439, 5-11-2026): de box verloor 4-11 en 5-11 alles onder een bewerkte rij, omdat de bewerkfunctie van een agent
+`s[:i] + nieuw` teruggaf zonder `s[j:]`. `wijzig` weigert daarom (KrimpFout, niets geschreven) als de nieuwe tekst meer dan de
+helft én meer dan 20 kB kleiner is, of als er regels die met '## ' beginnen verdwijnen (minder dan ervoor). Standaard aan voor
+bestanden onder een map 00_Systeem (box, Open vragen, Systeemoverzicht, registers); elders met krimp_grens=True. Haalt de
+aanroeper bewust rijen weg (archiefstap van de droomronde), dan krimp_ok=True. Een bewerkfunctie geeft altijd
+s[:i] + nieuw + s[j:] terug.
+
 Canonieke bron: claudebot-src (getoetst in CI, test/vault-veilig.sh). Kopie: /opt/data/mk-scripts/veilig/vault_veilig.py
 (byte-gelijk; CISO C7-kopie-drift bewaakt dat).
 """
@@ -30,6 +37,44 @@ TMP_PATROON = re.compile(r"^\..*\.[0-9a-f]{16}\.vv\.tmp$")
 
 class SymlinkFout(OSError):
     """Een padcomponent is een symlink (of staat niet op zijn plek); er is niets gelezen of geschreven."""
+
+
+class KrimpFout(ValueError):
+    """wijzig weigert: de nieuwe tekst krimpt te veel of verliest '## '-koppen (wv2439); er is niets geschreven."""
+
+
+KRIMP_BYTES = 20000      # meer dan zoveel bytes kwijt ...
+KRIMP_DEEL = 0.5         # ... én meer dan dit deel van het bestand
+KRIMP_MAP = "00_Systeem"  # grens standaard aan voor alles onder een map met deze naam
+
+
+def _koppen(t):
+    return sum(1 for r in t.split("\n") if r.startswith("## "))
+
+
+def krimp_fout(oud, nieuw, pad=""):
+    """Foutmelding als nieuw te veel krimpt ten opzichte van oud (bytes of '## '-koppen), anders None. Puur; ook voor eigen toetsen."""
+    ob = _data(oud)
+    nb = _data(nieuw)
+    ot = ob.decode("utf-8", "replace")
+    nt = nb.decode("utf-8", "replace")
+    ko, kn = _koppen(ot), _koppen(nt)
+    redenen = []
+    if len(ob) - len(nb) > KRIMP_BYTES and len(nb) < len(ob) * (1 - KRIMP_DEEL):
+        redenen.append("meer dan de helft kleiner")
+    if kn < ko:
+        redenen.append(f"{ko - kn} regel(s) met '## ' verdwenen")
+    if not redenen:
+        return None
+    return (f"krimpgrens: {pad or 'bestand'} niet geschreven ({', '.join(redenen)}; oud {len(ob)} bytes en {ko} koppen, nieuw "
+            f"{len(nb)} bytes en {kn} koppen). Vergat de bewerkfunctie de rest van de tekst (s[:i] + nieuw + s[j:])? Haal je bewust "
+            f"rijen weg (archiefstap), geef dan krimp_ok=True mee (wv2439).")
+
+
+def _grens_aan(pad, krimp_grens):
+    if krimp_grens is not None:
+        return bool(krimp_grens)
+    return KRIMP_MAP in os.path.abspath(pad).split(os.sep)[:-1]
 
 
 def _op_plek(fd, pad):
@@ -170,11 +215,13 @@ def voeg_toe(pad, tekst, maak=False, modus=0o660):
         os.close(dfd)
 
 
-def wijzig(pad, functie, modus=None, grendel=True):
+def wijzig(pad, functie, modus=None, grendel=True, krimp_ok=False, krimp_grens=None):
     """Lees pad, laat functie(tekst) de nieuwe tekst geven (None = niets doen) en schrijf die weg, alles relatief aan één
     getoetste mapdescriptor en (standaard) onder flock op die map, zodat twee Python-schrijvers elkaars rij niet verliezen.
     Geeft True als er geschreven is. Schreef een JS-schrijver (zonder flock) tussen lezen en rename, dan opnieuw (tot 3 keer;
-    zelfde toets op inode, grootte en mtime als vault-veilig.js; Fable wv900 natoets #3)."""
+    zelfde toets op inode, grootte en mtime als vault-veilig.js; Fable wv900 natoets #3).
+    Krimpgrens (wv2439): onder 00_Systeem (of met krimp_grens=True) KrimpFout als de nieuwe tekst te veel krimpt of '## '-koppen
+    verliest; krimp_ok=True voor een bewuste archief- of opruimstap."""
     map_, naam = os.path.split(os.path.abspath(pad))
     dfd = open_map(map_)
     try:
@@ -182,9 +229,14 @@ def wijzig(pad, functie, modus=None, grendel=True):
             fcntl.flock(dfd, fcntl.LOCK_EX)
         for _ in range(3):
             voor = _stempel(_stat_gewoon(dfd, naam))
-            nieuw = functie(_lees_fd(dfd, naam, pad, False))
+            oud = _lees_fd(dfd, naam, pad, False)
+            nieuw = functie(oud)
             if nieuw is None:
                 return False
+            if not krimp_ok and _grens_aan(pad, krimp_grens):
+                f = krimp_fout(oud, nieuw, pad)
+                if f:
+                    raise KrimpFout(f)
             if _schrijf_fd(dfd, naam, _data(nieuw), modus, als_gelijk=voor):
                 return True
         return False
