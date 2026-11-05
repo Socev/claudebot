@@ -1208,8 +1208,9 @@ const SEPA_WAARSCHUWING = {
   zegt_betaald: 'het stuk zegt dat hij al betaald is (niet gevonden in de bank); alleen betalen als je zeker weet dat het niet al gebeurd is',
   kenmerk_fout: 'het betalingskenmerk (16 cijfers) klopt niet volgens de controle; gaat als vrije tekst mee',
 };
+// wv2445: ook een zakelijke bankluis-rekening (Enable Banking, sinds 4-11 alle zakelijke betaalrekeningen); POT en Privé nooit (op entiteit)
 function sepaRekeningen(fdb) {
-  return fdb.db.prepare("SELECT k.* FROM rekening k JOIN entiteit e ON e.sleutel = k.entiteit WHERE k.controle = 1 AND k.bank_formaat <> 'bankluis' AND k.entiteit NOT IN ('prive','pot') " +
+  return fdb.db.prepare("SELECT k.* FROM rekening k JOIN entiteit e ON e.sleutel = k.entiteit WHERE k.controle = 1 AND k.entiteit NOT IN ('prive','pot') " +
     "AND k.bank IN ('ABN','ING','TRIODOS') AND e.actief = 1 ORDER BY k.entiteit, k.iban").all().filter((k) => K.ibanMod97(k.iban));
 }
 function lokaalTijd(nu) { return new Date(nu).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam', hourCycle: 'h23' }).replace(' ', 'T').slice(0, 19); }
@@ -1303,7 +1304,7 @@ function betaaldatum(fdb, r, d, nu) {
 function sepaSamenstellen(fdb, r, d, nu) {
   const rekId = vraagId(d, 'rekening');
   const rek = sepaRekeningen(fdb).find((k) => k.id === rekId);
-  if (!rek) weiger(409, 'met deze rekening kan geen batch (POT, Privé, bankluis of geen controle)');
+  if (!rek) weiger(409, 'met deze rekening kan geen batch (POT, Privé of geen controle)');
   const lijst = Array.isArray(d.facturen) ? d.facturen.map(String) : null;
   if (!lijst || !lijst.length) weiger(400, 'kies minstens één factuur');
   if (lijst.length > S.MAX_REGELS) weiger(400, 'hooguit ' + S.MAX_REGELS + ' facturen per batch');

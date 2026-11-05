@@ -2389,3 +2389,32 @@ test('wv2260: zonder-factuur uit — geen nieuwe geen_factuur, open exemplaren d
     assert.equal(F.validatie(t.fdb, t.eig, { soort: 'overzicht' }, NU).zonder_factuur, false);
   } finally { F.ZONDER_FACTUUR.aan = true; }
 });
+
+// wv2445 (David 5-11-2026: "geen batchfunctie meer voor Tolgaarde en Kostenmaatschap"): sinds 4-11 staan de zakelijke betaalrekeningen op
+// de bankluis. Een zakelijke bankluis-rekening kan weer een batch; de POT (ook bankluis) en Privé nooit.
+test('wv2445 SEPA: zakelijke bankluis-rekening → batch kan (route en database); POT-bankluis en Privé blijven 409', () => {
+  const t = opzet();
+  const tg = t.fdb.db.prepare("SELECT * FROM rekening WHERE entiteit = 'tolgaarde'").get();
+  t.fdb.db.prepare("UPDATE rekening SET bank_formaat = 'bankluis', bankluis_rek = 'proef-tg' WHERE id = ?").run(tg.id);
+  const pot = t.fdb.db.prepare("SELECT * FROM rekening WHERE entiteit = 'pot'").get();
+  assert.equal(pot.bank_formaat, 'bankluis');
+  const rek = sepaRek(t, 'tolgaarde');
+  assert.deepEqual(rek.map((k) => k.id), [tg.id], 'de bankluis-rekening van Tolgaarde staat weer in de batchlijst');
+  assert.ok(!t.call('GET', 'betalen').j.sepa.rekeningen.some((k) => ['pot', 'prive'].includes(k.entiteit)));
+  const a = teBetalenFactuur(t);
+  const { r } = sepaDownload(t, tg.id, [a]);
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_batch WHERE rekening = ?', [tg.id]), 1);
+  assert.equal(t.f('id = ?', [a]).betaalspoor, 'ingevoerd');
+  for (const ent of ['pot', 'prive']) {
+    const k = t.fdb.db.prepare('SELECT id FROM rekening WHERE entiteit = ?').get(ent);
+    const x = t.call('POST', 'sepa-batch', { rekening: k.id, facturen: [teBetalenFactuur(t)], voorbeeld: true });
+    assert.equal(x.status, 409, ent);
+  }
+  // de database: ook als de code zich vergist geen batch op de POT-bankluis, wel op de zakelijke bankluis
+  const rij = (r0, ent) => ({ id: D.nieuwId(), rekening: r0.id, entiteit: ent, formaat: 'pain.001.001.09', msg_id: 'X-' + D.nieuwId(), cre_dt_tm: '2026-10-22T10:00:00',
+    initg_naam: 'x', dbtr_naam: 'x', dbtr_iban: r0.iban, aantal: 1, totaal_centen: 1, sha256: 'a'.repeat(64), wie: 'x', wanneer: new Date(NU).toISOString() });
+  assert.throws(() => D.voegToe(t.fdb, 'sepa_batch', rij(pot, 'pot')), /CHECK|sepa_rekening/);
+  assert.throws(() => D.voegToe(t.fdb, 'sepa_batch', rij(pot, 'tolgaarde')), /sepa_rekening/);
+  D.voegToe(t.fdb, 'sepa_batch', rij(tg, 'tolgaarde'));
+});

@@ -1516,3 +1516,35 @@ test('wv2387 ABN-MT940 op een TAB-rekening: geaccepteerd, valutadatum als boekda
   assert.equal(B.formaatPast('abn_tab', 'abn_mt940'), true); assert.equal(B.formaatPast('abn_mt940', 'abn_tab'), false);
   assert.equal(B.formaatPast('abn_tab', 'ing_csv'), false); assert.equal(B.formaatPast('ing_csv', 'abn_tab'), false);
 });
+
+// ───────────────────────────── batchafschrijving via de bankluis (wv2445) ─────────────────────────────
+// Vorm gemeten 5-11-2026 in de zakelijke bankluis (ABN via Enable Banking): remittance_information ['SEPA Batch', 'Referentie: <PmtInfId
+// afgebroken op 32 tekens>', '<rest>', 'Aantal opdrachten: <n>'], geen tegenpartij, geen kenmerk. Alle waarden hieronder verzonnen.
+test('wv2445 bankluis: SEPA Batch van ABN via Enable Banking → kenmerk = PmtInfId, de bankcontrole koppelt de hele batch automatisch', () => {
+  const rk = { rek: 'proef-tg', iban: ABN_TG, entiteit: 'tolgaarde', bank_formaat: 'bankluis', controle: 1, alleen_eigenaar: 0 };
+  const PMT = 'SOCEV-20261020-0abcdef1-1';
+  const post = { rek: 'proef-tg', sleutel: 'e:BATCH1', status: 'booked', datum: '2026-10-21', bedrag: -700.00, valuta: 'EUR', tegenpartij: null, tegen_iban: null,
+    omschrijving: 'SEPA Batch Referentie: ' + PMT.slice(0, 20) + ' ' + PMT.slice(20) + ' Aantal opdrachten: 2', vervangen_door: null,
+    ruwe_json: JSON.stringify({ remittance_information: ['SEPA Batch', 'Referentie: ' + PMT.slice(0, 20), PMT.slice(20), 'Aantal opdrachten: 2'],
+      bank_transaction_code: { description: 'SCT BATCHES CRED HEADER', code: '655' } }) };
+  const n = B.normaliseerBankluis(post, rk);
+  assert.equal(n.ok, true, JSON.stringify(n));
+  assert.equal(n.transactie.kenmerk, PMT);
+  assert.equal(n.transactie.tegenpartij_iban, null);
+  // andere vormen: geen batch → geen kenmerk; een referentie met een spatie of te lang → geen kenmerk (liever een voorstel dan een fout id)
+  const met = (regels) => B.normaliseerBankluis(Object.assign({}, post, { ruwe_json: JSON.stringify({ remittance_information: regels }) }), rk).transactie.kenmerk;
+  assert.equal(met(['SEPA Batch Salaris', 'Referentie: X-1', 'Aantal opdrachten: 2']), null);
+  assert.equal(met(['SEPA Batch', 'Referentie: AB CD', 'Aantal opdrachten: 2']), null);
+  assert.equal(met(['SEPA Batch', 'Referentie: ' + 'A'.repeat(32), 'B'.repeat(4), 'Aantal opdrachten: 2']), null);
+  assert.equal(met(['SEPA Batch', 'Referentie: KORT-1', 'Aantal opdrachten: 1']), 'KORT-1');
+  // de bankcontrole: beide facturen van de batch automatisch gekoppeld (zonder kenmerk was dit hooguit een voorstel op bedrag)
+  const F1 = '0000000000002445', F2 = '0000000000002446';
+  const fx = [fac({ id: F1, leverancier: 'la', nummer: 'BL-1', incl: 50000, iban: LEV.A, factuurdatum: '2026-10-01', vervaldatum: '2026-10-21', betaalspoor: 'ingevoerd', uitvoer_op: '2026-10-21' }),
+    fac({ id: F2, leverancier: 'lb', nummer: 'BL-2', incl: 20000, iban: LEV.B, factuurdatum: '2026-10-01', vervaldatum: '2026-10-21', betaalspoor: 'ingevoerd', uitvoer_op: '2026-10-21' })];
+  const sepa = [{ pmtinf_id: PMT, eigen_iban: ABN_TG, entiteit: 'tolgaarde', datum: '2026-10-21', centen: 70000,
+    regels: [{ factuur: F1, centen: 50000, iban: LEV.A }, { factuur: F2, centen: 20000, iban: LEV.B }] }];
+  const af = tx(n.transactie);
+  const r = controle({ vandaag: '2026-10-23', transacties: [af], facturen: fx, sepa });
+  assert.deepEqual(r.koppelingen.map((k) => [k.transactie, k.factuur, k.methode]).sort(), [[af.id, F1, 'sepa_batch'], [af.id, F2, 'sepa_batch']].sort());
+  assert.equal(r.voorstellen.length, 0);
+});

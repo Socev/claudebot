@@ -813,7 +813,7 @@ function M8(db) {
  * (1) "al eerder in een batch" voor altijd te zien is, (2) hetzelfde bestand byte voor byte opnieuw te maken is (zelfde MsgId: de bank ziet
  * een dubbele upload) en (3) de bankcontrole de batchafschrijving (PmtInfId + totaal) aan de facturen koppelt. Alleen toevoegen (triggers),
  * zoals de audit; het bestand zelf wordt niet bewaard. De database dwingt af: nooit POT of Privé, de rekening hoort bij de entiteit en is een
- * gewone rekening met controle (geen bankluis), de factuur hoort bij die entiteit. LET OP terugrol: een release van vóór wv1405 opent deze
+ * gewone rekening met controle (geen bankluis; sinds M20/wv2445 mag bankluis wel), de factuur hoort bij die entiteit. LET OP terugrol: een release van vóór wv1405 opent deze
  * database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 9` (de oude code noemt de kolommen
  * bij naam en kent de twee tabellen niet). Herhaalbaar: na zo'n terugrol voegt M9 alleen toe wat ontbreekt.
  */
@@ -1097,6 +1097,22 @@ CREATE TABLE IF NOT EXISTS boekstuk_vrijgave (
 CREATE TRIGGER IF NOT EXISTS boekstuk_vrijgave_blijft BEFORE DELETE ON boekstuk_vrijgave BEGIN SELECT RAISE(ABORT, 'boekstuk_vrijgave: rijen blijven'); END;
 `;
 
+/*
+ * wv2445 (David 5-11-2026 08:49: "Waarom heb ik plots geen batchfunctie meer voor Tolgaarde en Kostenmaatschap in de Facturen app?"): sinds
+ * 4-11 (wv2409/wv2414) komen ook de zakelijke betaalrekeningen via de bankluis (Enable Banking) binnen. M9 sloot bankluis uit omdat dat toen
+ * alleen de POT was; daardoor kon geen enkele zakelijke rekening meer een batch. Nu: de rekening hoort bij de entiteit, heeft controle en de
+ * entiteit is geen POT of Privé (de POT blijft uitgesloten op entiteit, niet meer op het bankformaat). LET OP terugrol: een release van vóór
+ * wv2445 opent deze database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 20` (de oude code
+ * kiest zelf geen bankluis-rekening meer; de ruimere trigger hindert haar niet). Herhaalbaar: M20 vervangt de trigger altijd.
+ */
+const M20 = `
+DROP TRIGGER IF EXISTS sepa_batch_rekening;
+CREATE TRIGGER sepa_batch_rekening BEFORE INSERT ON sepa_batch
+WHEN NOT EXISTS (SELECT 1 FROM rekening r WHERE r.id = NEW.rekening AND r.entiteit = NEW.entiteit AND r.controle = 1
+  AND r.iban = NEW.dbtr_iban AND r.entiteit NOT IN ('prive','pot'))
+BEGIN SELECT RAISE(ABORT, 'sepa_rekening: de rekening hoort niet bij deze entiteit of kan geen batch'); END;
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -1116,6 +1132,7 @@ const MIGRATIES = [
   { versie: 17, naam: 'signaal: DocPlan-controle rooster ↔ betaling, drie soorten (wv2293)', fn: (db) => M17(db) },
   { versie: 18, naam: 'signaal: DocPlan-factuurtoets, factuur_dagen_afwijkend (wv2297)', fn: (db) => M18(db) },
   { versie: 19, naam: 'boekstuk Google Home naar de boekhouder: boekstuk_verzending, boekstuk_vrijgave (wv2316)', sql: M19 },
+  { versie: 20, naam: 'SEPA-batch: ook vanaf een zakelijke bankluis-rekening; POT en Privé blijven uitgesloten (wv2445)', sql: M20 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',

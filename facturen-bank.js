@@ -578,6 +578,20 @@ function leesBestand(invoer, opties) {
   return { ok: true, formaat, opslag_formaat, transacties, prive_weggegooid: prive, per_rekening: per, saldo, periode, taal };
 }
 
+// wv2445: ABN via Enable Banking geeft een batchafschrijving als remittance_information ['SEPA Batch', 'Referentie: <PmtInfId, afgebroken
+// op 32 tekens>', '<rest van de PmtInfId>', 'Aantal opdrachten: <n>'] (gemeten 5-11-2026 in de zakelijke bankluis, 5 batches 4-8 t/m 2-11,
+// ook die van de Facturen-app) en geen kenmerk. Zonder kenmerk vond de bankcontrole het batch-id niet als los stuk ("…-1Aantal"). → de
+// PmtInfId (≤ 35 tekens, zonder spaties) of null.
+function bankluisBatchRef(regels) {
+  if (!regels.length || regels[0].trim() !== 'SEPA Batch') return null;
+  const i = regels.findIndex((x) => /^\s*Referentie:/.test(x));
+  if (i < 0) return null;
+  let ref = regels[i].replace(/^\s*Referentie:\s*/, '');
+  for (let j = i + 1; j < regels.length && !/^\s*Aantal opdrachten:/.test(regels[j]); j++) ref += regels[j];
+  ref = ref.trim();
+  return ref && ref.length <= 35 && !/\s/.test(ref) ? ref : null;
+}
+
 // Bankluis-bron (F2 leest transacties.sqlite read-only): één post naar dezelfde normalisatie. Alleen status 'booked' en niet vervangen;
 // pending-posten worden later vervangen door een geboekte met een ander kenmerk. rekening = Facturen-rekening { rek, iban, entiteit,
 // bank_formaat: 'bankluis', controle, alleen_eigenaar }. → { ok:true, transactie } of { ok:false, fout }.
@@ -609,7 +623,7 @@ function normaliseerBankluis(post, rekening) {
       tegenpartij_iban: ibanNorm(post.tegen_iban) || (v && ibanNorm(v.tegenpartij_iban)) || null,
       tegenpartij_naam: post.tegenpartij || (v && v.tegenpartij_naam) || null, bedrag, bedrag_centen: centenVan(bedrag),
       valuta: String(post.valuta || 'EUR').toUpperCase(), omschrijving: oms ? oms.slice(0, OMS_OPSLAG) : null,
-      kenmerk: v ? v.kenmerk : (km ? km[1] : null), transactietype: type.slice(0, TYPE_OPSLAG),
+      kenmerk: v ? v.kenmerk : (km ? km[1] : bankluisBatchRef(regels)), transactietype: type.slice(0, TYPE_OPSLAG),
       is_incasso: v ? v.is_incasso : /incasso|direct\s?debit/i.test(code), incassant_id: v ? v.incassant_id : null, machtiging: v ? v.machtiging : null,
       entry_ref: 'bankluis:' + rekening.rek + '|' + post.sleutel, formaat: 'bankluis',
     },
