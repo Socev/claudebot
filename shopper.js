@@ -29,6 +29,13 @@
  *    MOET 2: niet de gedeelde Facturen-handle) en weer dicht. o.facturenPad() geeft het pad of null (niet op de primaire kant = geen
  *    koppeling). Faalt het lezen: facturen null; de zoektocht blijft gewoon leesbaar. Zichtbaar alleen achter de app-sessie, die in
  *    Facturen de eigenaar is (review MOET 3).
+ *  - Nu nalezen (wv2454, 5-11-2026; David 2-11: "Ik wil altijd prijs en levervoorraad weten"): een zoektocht is een momentopname; op Davids
+ *    tik leest nalezen(id) de productpagina's van de opties van een OPEN zoektocht opnieuw, via o.lezer(url) (server.js: winkel-lezen.py
+ *    uit de release, één proces per link, zonder sleutels in de omgeving; alleen GET op een https-productpagina van een openbare hostnaam).
+ *    De links komen alleen van de pagina, nooit uit de vraag. De uitkomst gaat in een eigen staatbestand (o.nalezenPad, per zoektocht en
+ *    optie; 7 dagen bewaard), NIET op de pagina: de zoektocht zelf blijft wat de agent las. Opnieuw nalezen hooguit eens per 10 minuten.
+ *  - Todoist-taak (wv2454): ontleed() geeft todoist_id (alleen [A-Za-z0-9]{6,40}); taak(id) vraagt via o.todoistTaak(tid) alleen-lezend of
+ *    de taak nog open staat (David kocht 2-11 de stellingkasten; de taak stond 5-11 nog open). Niets afvinken of wijzigen in Todoist.
  * PRIVACY. Deze module logt niets; info() geeft alleen aantallen en het tijdstip van de laatste lijst (geen wens, pad of bedrag). Er gaat niets naar buiten of naar een taalmodel.
  */
 const fs = require('fs');
@@ -48,6 +55,9 @@ const STATUSSEN = ['open', 'gekocht', 'vervallen'];
 const FAVORIETEN = '00_Systeem/Shopper - favoriete winkels.md', MAX_FAVORIETEN = 60;
 const MAX_PAGINA = 512 * 1024, MAX_OPTIES = 12;
 const ID_RE = /^[0-9a-f]{12}$/;
+const TODOIST_RE = /^[A-Za-z0-9]{6,40}$/;
+const MAX_GELIJK = 4;   // review wv2454 ZOU 1: hooguit 4 leesprocessen tegelijk over alle zoektochten heen
+const NALEZEN_OPNIEUW = 10 * 60000, NALEZEN_BEWAAR = 7 * 86400000, MAX_NALEZEN = 8, MAX_NALEZEN_STAAT = 200, TAAK_CACHE = 5 * 60000;
 
 function idVan(rel) { return crypto.createHash('sha256').update(String(rel)).digest('hex').slice(0, 12); }
 const tekstVeld = (x, max) => { const v = String(x == null ? '' : x).replace(/[\u0000-\u001f\u007f]/g, ' ').trim(); return v && v !== 'null' ? v.slice(0, max || 200) : ''; };
@@ -216,7 +226,27 @@ function ontleed(t, rel, ent, fav) {
     status: STATUSSEN.indexOf(st) >= 0 ? st : 'open', gezocht: tekstVeld(fmWaarde(t, 'gezocht'), 40), aantal: aantal(fmWaarde(t, 'aantal')),
     opties_aantal: opties.length, advies: advies ? advies.id : null, advies_totaal: advies ? advies.totaal_eur : null, advies_winkel: advies ? advies.winkel : null,
     advies_favoriet: advies ? advies.favoriet : false, favorieten_aantal: opties.filter((x) => x.favoriet).length, _opties: opties,
-    gekocht: st === 'gekocht' ? gekochtVan(t) : null };
+    gekocht: st === 'gekocht' ? gekochtVan(t) : null, todoist_id: todoistId(fmWaarde(t, 'todoist_id')) };
+}
+function todoistId(x) { const s = String(x == null ? '' : x).trim(); return TODOIST_RE.test(s) ? s : null; }
+// ── wv2454: Nu nalezen ──
+// Eén uitkomst van winkel-lezen.py → wat de app toont (tekst begrensd, bedragen als getal of null); o = de optie van de pagina
+function nuVan(o, r) {
+  const leeg = { id: o.id, prijs_eur: null, verzending_eur: null, totaal_eur: null, voorraad: null, levertijd: null, verkoper: null, varianten: false, blokkade: null, verschil: null };
+  if (!r || typeof r !== 'object' || r.url !== o.url) return Object.assign(leeg, { blokkade: 'niet te lezen (geen antwoord van het leesscript)' });
+  const getal = (x) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 && x < 1e7 ? bedrag(String(Math.round(x * 100) / 100)) : null);
+  const n = Object.assign(leeg, { prijs_eur: getal(r.prijs_eur), verzending_eur: getal(r.verzending_eur), voorraad: tekstVeld(r.voorraad, 120) || null,
+    levertijd: tekstVeld(r.levertijd, 160) || null, verkoper: tekstVeld(r.verkoper, 80) || null, blokkade: tekstVeld(r.blokkade, 160) || null,
+    varianten: Array.isArray(r.opmerkingen) && r.opmerkingen.some((x) => /^variantenpagina/.test(String(x))) });
+  const k = o.koop_aantal || 1;
+  if (n.prijs_eur != null && n.verzending_eur != null) n.totaal_eur = Math.round((k * n.prijs_eur + n.verzending_eur) * 100) / 100;
+  if (n.prijs_eur != null && o.prijs_eur != null) n.verschil = n.prijs_eur < o.prijs_eur ? 'lager' : n.prijs_eur > o.prijs_eur ? 'hoger' : 'gelijk';
+  return n;
+}
+function samenvatting(opties) {
+  const s = { lager: 0, hoger: 0, gelijk: 0, niet: 0 };
+  for (const n of opties) { if (n.verschil) s[n.verschil]++; else if (n.prijs_eur == null) s.niet++; }
+  return s;
 }
 
 /*
@@ -225,6 +255,43 @@ function ontleed(t, rel, ent, fav) {
  */
 function maak(o) {
   let laatst = null;
+  const nu = () => (typeof o.nu === 'function' ? o.nu() : new Date());
+  const bezig = new Set(), taken = new Map();
+  let actief = 0;
+  const rij = [];
+  // fn() → Promise; hooguit MAX_GELIJK tegelijk, de rest wacht in volgorde; een fout = null
+  function beperkt(fn) {
+    return new Promise(function (klaar) {
+      const start = function () {
+        actief++;
+        Promise.resolve().then(fn).then((x) => x, () => null).then(function (x) { actief--; const volgende = rij.shift(); if (volgende) volgende(); klaar(x); });
+      };
+      if (actief < MAX_GELIJK) start(); else rij.push(start);
+    });
+  }
+  // Het staatbestand van Nu nalezen: { <zoektocht-id>: { t, opties: [ { id, url, … } ] } }; onleesbaar = leeg
+  function nalezenStaat() {
+    if (!o.nalezenPad) return {};
+    try { const j = JSON.parse(fs.readFileSync(o.nalezenPad, 'utf8')); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; } catch (e) { return {}; }
+  }
+  function nalezenBewaar(st) {
+    if (!o.nalezenPad) return;
+    const grens = nu().getTime() - NALEZEN_BEWAAR;
+    const ids = Object.keys(st).filter((k) => ID_RE.test(k) && st[k] && Date.parse(st[k].t) > grens).sort((a, b) => (st[a].t < st[b].t ? 1 : -1)).slice(0, MAX_NALEZEN_STAAT);
+    const uit = {};
+    for (const k of ids) uit[k] = st[k];
+    const tmp = o.nalezenPad + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(uit), { mode: 0o600 });
+    fs.renameSync(tmp, o.nalezenPad);
+  }
+  // De bewaarde nalezing bij een open zoektocht, alleen voor opties waarvan de link nog gelijk is; ouder dan 7 dagen = niets
+  function nalezingBij(z) {
+    if (z.status !== 'open') return null;
+    const c = nalezenStaat()[z.id];
+    if (!c || !Array.isArray(c.opties) || !(Date.parse(c.t) > nu().getTime() - NALEZEN_BEWAAR)) return null;
+    const opties = c.opties.filter((n) => n && z._opties.some((x) => x.id === n.id && x.url && x.url === n.url)).map((n) => { const k = Object.assign({}, n); delete k.url; return k; });
+    return opties.length ? { t: c.t, opties, samenvatting: samenvatting(opties) } : null;
+  }
   function paden() {
     const uit = [];
     for (const ent of MAPPEN) {
@@ -295,7 +362,49 @@ function maak(o) {
       eisen: R.fmLijst(t, 'eisen').map((x) => tekstVeld(x, 200)).filter(Boolean).slice(0, 20),
       aannames: R.fmLijst(t, 'aannames').map((x) => tekstVeld(x, 300)).filter(Boolean).slice(0, 20),
       inleiding: inleiding(t), waarom: sectie(t, 'Waarom dit advies'), niet_te_lezen: sectie(t, 'Niet te lezen'),
-      facturen: z.status === 'gekocht' ? metFacturen((db) => facturenBij(db, z)) : undefined }) } };
+      facturen: z.status === 'gekocht' ? metFacturen((db) => facturenBij(db, z)) : undefined,
+      todoist_url: z.todoist_id ? 'https://app.todoist.com/app/task/' + z.todoist_id : null, nu: nalezingBij(z) }) } };
+  }
+  // POST …/nalezen (wv2454): de opties van een open zoektocht opnieuw lezen. Async; o.lezer(url) → Promise<uitkomst | null>.
+  async function nalezen(id) {
+    if (typeof o.lezer !== 'function') return { status: 404, body: { ok: false, fout: 'nalezen zit niet in deze versie van de pod' } };
+    const v = vind(id);
+    if (v.fout) return v.fout;
+    if (v.z.status !== 'open') return { status: 409, body: { ok: false, fout: 'alleen een open zoektocht kun je nalezen' } };
+    const opties = v.z._opties.filter((x) => x.url).slice(0, MAX_NALEZEN);
+    if (!opties.length) return { status: 409, body: { ok: false, fout: 'deze zoektocht heeft geen winkellinks om na te lezen' } };
+    const oud = nalezingBij(v.z);
+    if (oud && nu().getTime() - Date.parse(oud.t) < NALEZEN_OPNIEUW && oud.opties.length === opties.length) return { status: 200, body: { ok: true, al: true, nu: oud } };
+    if (bezig.has(id)) return { status: 409, body: { ok: false, fout: 'Shopper leest deze zoektocht al na; even geduld' } };
+    bezig.add(id);
+    try {
+      const uit = await Promise.all(opties.map((x) => beperkt(() => o.lezer(x.url))));
+      const t = nu().toISOString();
+      const rijen = opties.map((x, i) => Object.assign(nuVan(x, uit[i]), { url: x.url }));
+      try { const st = nalezenStaat(); st[id] = { t, opties: rijen }; nalezenBewaar(st); } catch (e) { /* niet bewaard: de uitkomst gaat toch terug */ }
+      const kaal = rijen.map((n) => { const k = Object.assign({}, n); delete k.url; return k; });
+      return { status: 200, body: { ok: true, nu: { t, opties: kaal, samenvatting: samenvatting(kaal) } } };
+    } finally { bezig.delete(id); }
+  }
+  // GET …/taak (wv2454): staat de Todoist-taak van deze zoektocht nog open? Alleen lezen; 5 min onthouden. Geen taak = taak null.
+  async function taak(id) {
+    const v = vind(id);
+    if (v.fout) return v.fout;
+    const tid = v.z.todoist_id;
+    if (!tid) return { status: 200, body: { ok: true, taak: null } };
+    const url = 'https://app.todoist.com/app/task/' + tid;
+    const c = taken.get(tid);
+    if (c && nu().getTime() - c.op < TAAK_CACHE) return { status: 200, body: { ok: true, taak: c.taak } };
+    let r = null;
+    try { r = typeof o.todoistTaak === 'function' ? await o.todoistTaak(tid) : null; } catch (e) { r = null; }
+    let tk;
+    if (r && r.status === 200 && r.taak && typeof r.taak === 'object') {
+      const x = r.taak;
+      tk = { stand: x.is_deleted === true ? 'weg' : x.checked === true ? 'afgevinkt' : 'open', titel: tekstVeld(x.content, 160) || null, url };
+    } else if (r && (r.status === 404 || r.status === 400)) tk = { stand: 'weg', titel: null, url };
+    else tk = { stand: 'onbekend', titel: null, url };
+    if (tk.stand !== 'onbekend') { taken.set(tid, { op: nu().getTime(), taak: tk }); if (taken.size > 200) taken.delete(taken.keys().next().value); }
+    return { status: 200, body: { ok: true, taak: tk } };
   }
   // POST …/status {status: 'vervallen'}: alleen van open naar vervallen; al vervallen = 200 zonder schrijven; gekocht blijft (409)
   // POST …/status {status: 'open'} (wv2275, "Toch niet gekocht"): alleen van gekocht naar open, de gekocht-regel gaat weg; al open = 200 al
@@ -403,7 +512,7 @@ function maak(o) {
     return { status: 409, body: { ok: false, fout: 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
   }
   function info() { return Object.assign({ aan: true }, laatst || { op: null, zoektochten: null, open: null, onleesbaar: null, favorieten: null }); }
-  return { paden, lijst, zoektocht, status, gekocht, info };
+  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, info };
 }
 
-module.exports = { maak, ontleed, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
+module.exports = { maak, ontleed, nuVan, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };

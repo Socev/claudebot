@@ -231,7 +231,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     const bron = fs.readFileSync('shopper.js', 'utf8');
     toets('7m shopper.js: alleen SELECT op facturen, readOnly + query_only, geen gedeelde handle', !/\b(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|ATTACH)\b/.test(bron) && /readOnly: true/.test(bron) && /query_only = ON/.test(bron) && !/facturenOpen/.test(bron));
     const srv = fs.readFileSync('server.js', 'utf8');
-    toets('7n server.js geeft shopper alleen een pad (primaire kant), geen facturenOpen()', /maak\(\{ vault: VAULT, vv: VV\(\), facturenPad: facturenPad \}\)/.test(srv) && /facturenMagOpenen\(\) \? path\.join\(FACTUREN_DIR, 'facturen\.sqlite'\) : null/.test(srv));
+    toets('7n server.js geeft shopper alleen een pad (primaire kant), geen facturenOpen()', /maak\(\{ vault: VAULT, vv: VV\(\), facturenPad: facturenPad, lezer: lezer, todoistTaak: todoistTaak,/.test(srv) && !/facturenOpen/.test(srv.slice(srv.indexOf('const shopper = (function'), srv.indexOf('function shopperInfo'))) && /facturenMagOpenen\(\) \? path\.join\(FACTUREN_DIR, 'facturen\.sqlite'\) : null/.test(srv));
   }
 
   // ── 8. de knop Gekocht (wv2275, bouwplan "OVIS Shopper - knop Gekocht (ontwerp 2-11-2026)" § 3.2 en § 7) ──
@@ -321,6 +321,115 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       && /\nupdated: 2026-11-01\nstatus: gekocht\ngekocht: \{optie: o1,[^\n]*\}\n---\n/.test(leesP()), leesP().slice(0, 700));
     const bronSh = fs.readFileSync('shopper.js', 'utf8'), gk = bronSh.slice(bronSh.indexOf('  function gekocht(id, d)'), bronSh.indexOf('  function info()'));
     toets('8v gekocht() leest geen prijs of totaal uit de optie (bedrag alleen uit de vraag)', gk.length > 500 && !/totaal_eur|prijs_eur|verzending_eur/.test(gk));
+  }
+
+  // ── 9. Nu nalezen en de Todoist-taak (wv2454) ──
+  {
+    const V9 = path.join(W, 'vault9'), GH9 = path.join(V9, '10_Zakelijk/Groenhouten/Shopper'), ST9 = path.join(W, 'nalezen.json');
+    fs.mkdirSync(GH9, { recursive: true });
+    const P9 = path.join(GH9, 'Shopper - 2026-11-03 - Proefrekken.md');
+    const bron9 = pagina(['type: shopper-zoektocht', 'wens: "Proefrekken"', 'todoist_id: "ProefTaak123"', 'status: open', 'gezocht: 2026-11-03T09:00+01:00', 'aantal: 2', 'opties:',
+      opt('o1', { p: 46.95, v: 0, t: 46.95, u: 'https://www.proefwinkel.nl/p/rek/1/' }),
+      opt('o2', { w: 'Nepmarkt', n: 2, p: 10, v: 'null', t: 'null', u: 'https://www.nepmarkt.nl/p/rek/2/' }),
+      opt('o3', { p: 5, v: 0, t: 5, u: 'http://www.onveilig.nl/p/3' }),
+      opt('o4', { p: 20, v: 0, t: 20, u: 'https://www.stilwinkel.nl/p/4' }),
+      'advies: o1'], '# Shopper — proefrekken\n');
+    fs.writeFileSync(P9, bron9);
+    const P9b = path.join(GH9, 'Shopper - 2026-11-03 - Gekocht rek.md');
+    fs.writeFileSync(P9b, bron9.replace('wens: "Proefrekken"', 'wens: "Gekocht rek"').replace('todoist_id: "ProefTaak123"\n', 'todoist_id: "../../geheim"\n').replace('status: open', 'status: gekocht'));
+    let klok = new Date('2026-11-05T10:00:00Z'), gelezen = [], antwoord = {}, taakAntwoord = null, taakVragen = 0;
+    const lezer = async (url) => { gelezen.push(url); const a = antwoord[url]; if (a instanceof Error) throw a; return a === undefined ? null : a; };
+    const m9 = S.maak({ vault: V9, vv: VV, nu: () => klok, nalezenPad: ST9, lezer,
+      todoistTaak: async (tid) => { taakVragen++; if (taakAntwoord instanceof Error) throw taakAntwoord; return taakAntwoord; } });
+    const l9 = m9.lijst().body.zoektochten, id9 = l9.find((x) => x.wens === 'Proefrekken').id, id9b = l9.find((x) => x.wens === 'Gekocht rek').id;
+    antwoord = {
+      'https://www.proefwinkel.nl/p/rek/1/': { url: 'https://www.proefwinkel.nl/p/rek/1/', prijs_eur: 39.99, verzending_eur: 0, voorraad: 'op voorraad', levertijd: 'morgen in huis', verkoper: 'Proefwinkel', blokkade: null, opmerkingen: ['variantenpagina: 3 varianten'] },
+      'https://www.nepmarkt.nl/p/rek/2/': { url: 'https://www.nepmarkt.nl/p/rek/2/', prijs_eur: 12, verzending_eur: 5, voorraad: 'x'.repeat(300), levertijd: null, verkoper: null, blokkade: null, opmerkingen: [] },
+      'https://www.stilwinkel.nl/p/4': { url: 'https://ANDERS.nl/p/4', prijs_eur: 1, verzending_eur: 0 },
+    };
+    let r9 = await m9.nalezen(id9);
+    const n9 = r9.body.nu, no = (id) => n9 && n9.opties.find((x) => x.id === id);
+    toets('9a nalezen: 200, alleen de https-links van de pagina gelezen (o3 http niet), in volgorde', r9.status === 200 && JSON.stringify(gelezen) === JSON.stringify(['https://www.proefwinkel.nl/p/rek/1/', 'https://www.nepmarkt.nl/p/rek/2/', 'https://www.stilwinkel.nl/p/4']), [r9, gelezen]);
+    toets('9b nu-prijs lager dan op de pagina, totaal = koop_aantal × prijs + verzending, variantenpagina gemarkeerd', no('o1').prijs_eur === 39.99 && no('o1').verschil === 'lager' && no('o1').totaal_eur === 39.99 && no('o1').varianten === true
+      && no('o2').totaal_eur === 29 && no('o2').verschil === 'hoger' && no('o2').voorraad.length === 120, n9);
+    toets('9c lezer-uitkomst voor een andere link telt niet (blokkade, geen bedragen); samenvatting telt', no('o4').prijs_eur === null && /niet te lezen/.test(no('o4').blokkade)
+      && JSON.stringify(n9.samenvatting) === JSON.stringify({ lager: 1, hoger: 1, gelijk: 0, niet: 1 }) && !JSON.stringify(n9).includes('https://'), n9);
+    toets('9d de zoektochtpagina blijft byte-gelijk; staatbestand 0600 met de uitkomst', fs.readFileSync(P9, 'utf8') === bron9 && (fs.statSync(ST9).mode & 0o777) === 0o600
+      && JSON.parse(fs.readFileSync(ST9, 'utf8'))[id9].opties.length === 3);
+    const z9 = m9.zoektocht(id9).body.zoektocht;
+    toets('9e zoektocht geeft de nalezing (zonder links) en de Todoist-link', z9.nu && z9.nu.t === n9.t && z9.nu.opties.length === 3 && !JSON.stringify(z9.nu).includes('http')
+      && z9.todoist_url === 'https://app.todoist.com/app/task/ProefTaak123' && z9.todoist_id === 'ProefTaak123', z9.nu);
+    gelezen = []; klok = new Date('2026-11-05T10:05:00Z');
+    r9 = await m9.nalezen(id9);
+    toets('9f binnen 10 minuten opnieuw: de bewaarde uitkomst (al), niets gelezen', r9.status === 200 && r9.body.al === true && gelezen.length === 0, r9);
+    klok = new Date('2026-11-05T10:11:00Z'); antwoord['https://www.proefwinkel.nl/p/rek/1/'] = new Error('stuk');
+    r9 = await m9.nalezen(id9);
+    toets('9g na 10 minuten opnieuw gelezen; een falende lezing = alleen die optie niet te lezen', r9.status === 200 && !r9.body.al && gelezen.length === 3 && r9.body.nu.opties[0].prijs_eur === null && r9.body.nu.opties[1].prijs_eur === 12, r9.body);
+    gelezen = []; klok = new Date('2026-11-05T10:30:00Z');
+    let los; const wacht = new Promise((k) => { los = k; });
+    const traag = S.maak({ vault: V9, vv: VV, nu: () => klok, nalezenPad: path.join(W, 'n2.json'), lezer: async () => { await wacht; return null; } });
+    const eerst = traag.nalezen(id9), tweede = await traag.nalezen(id9);
+    los(); await eerst;
+    toets('9h tegelijk twee keer nalezen: de tweede = 409 (loopt al)', tweede.status === 409, tweede);
+    // review ZOU 1: over alle zoektochten heen hooguit 4 leesprocessen tegelijk
+    {
+      const Vg = path.join(W, 'vault9g'), GHg = path.join(Vg, '10_Zakelijk/Groenhouten/Shopper');
+      fs.mkdirSync(GHg, { recursive: true });
+      const zes = (w) => pagina(['type: shopper-zoektocht', 'wens: "' + w + '"', 'status: open', 'gezocht: 2026-11-03T09:00+01:00', 'opties:']
+        .concat([1, 2, 3, 4, 5, 6].map((i) => opt('o' + i, { p: 10, v: 0, t: 10, u: 'https://www.proefwinkel.nl/p/' + w + '/' + i + '/' }))));
+      fs.writeFileSync(path.join(GHg, 'Shopper - 2026-11-03 - A.md'), zes('a'));
+      fs.writeFileSync(path.join(GHg, 'Shopper - 2026-11-03 - B.md'), zes('b'));
+      let nuActief = 0, hoogste = 0, totaal = 0;
+      const mg = S.maak({ vault: Vg, vv: VV, nu: () => klok, nalezenPad: path.join(W, 'ng.json'),
+        lezer: async (url) => { nuActief++; totaal++; hoogste = Math.max(hoogste, nuActief); await new Promise((k) => setTimeout(k, 15)); nuActief--; return { url, prijs_eur: 9 }; } });
+      const ids = mg.lijst().body.zoektochten.map((x) => x.id);
+      const rs = await Promise.all(ids.map((x) => mg.nalezen(x)));
+      toets('9h2 twee zoektochten met elk 6 links tegelijk: alle 12 gelezen, nooit meer dan 4 tegelijk', rs.every((x) => x.status === 200 && x.body.nu.samenvatting.lager === 6) && totaal === 12 && hoogste === 4, [hoogste, totaal]);
+    }
+    gelezen = [];
+    r9 = await m9.nalezen(id9b);
+    toets('9i gekochte zoektocht nalezen = 409, niets gelezen; ongeldige id = 400', r9.status === 409 && gelezen.length === 0 && (await m9.nalezen('../x')).status === 400, r9);
+    toets('9j een gekochte zoektocht toont geen nalezing; ongeldige todoist_id op de pagina = geen link', m9.zoektocht(id9b).body.zoektocht.nu === null && m9.zoektocht(id9b).body.zoektocht.todoist_url === null);
+    fs.writeFileSync(P9, bron9.replace('https://www.nepmarkt.nl/p/rek/2/', 'https://www.nepmarkt.nl/p/rek/2b/'));
+    const z9c = m9.zoektocht(id9).body.zoektocht;
+    toets('9k link op de pagina veranderd: die optie valt uit de bewaarde nalezing', z9c.nu && z9c.nu.opties.length === 2 && !z9c.nu.opties.some((x) => x.id === 'o2'), z9c.nu);
+    klok = new Date('2026-11-13T10:00:00Z');
+    toets('9l ouder dan 7 dagen: geen nalezing meer getoond', m9.zoektocht(id9).body.zoektocht.nu === null);
+    fs.writeFileSync(P9, bron9);
+    const zonder = S.maak({ vault: V9, vv: VV, nu: () => klok });
+    toets('9m zonder lezer (oude server.js) = 404; zonder staatbestand werkt zoektocht gewoon', (await zonder.nalezen(id9)).status === 404 && zonder.zoektocht(id9).body.zoektocht.nu === null);
+    // Todoist-taak
+    taakAntwoord = { status: 200, taak: { checked: false, is_deleted: false, content: 'Twee proefrekken kopen' } };
+    let t9 = await m9.taak(id9);
+    toets('9n taak open: stand, titel en link', t9.status === 200 && t9.body.taak.stand === 'open' && t9.body.taak.titel === 'Twee proefrekken kopen' && t9.body.taak.url === 'https://app.todoist.com/app/task/ProefTaak123', t9);
+    taakAntwoord = { status: 200, taak: { checked: true, is_deleted: false, content: 'Twee proefrekken kopen' } };
+    const v0 = taakVragen; t9 = await m9.taak(id9);
+    toets('9o binnen 5 minuten onthouden (geen nieuwe vraag aan Todoist)', taakVragen === v0 && t9.body.taak.stand === 'open');
+    klok = new Date(klok.getTime() + 6 * 60000); t9 = await m9.taak(id9);
+    toets('9p daarna opnieuw gevraagd: afgevinkt', taakVragen === v0 + 1 && t9.body.taak.stand === 'afgevinkt', t9);
+    const m9t = (ant) => S.maak({ vault: V9, vv: VV, nu: () => klok, todoistTaak: async () => { if (ant instanceof Error) throw ant; return ant; } });
+    toets('9q verwijderd of 404 = weg; fout of geen sleutel = onbekend', (await m9t({ status: 200, taak: { checked: false, is_deleted: true } }).taak(id9)).body.taak.stand === 'weg'
+      && (await m9t({ status: 404, taak: null }).taak(id9)).body.taak.stand === 'weg' && (await m9t(new Error('net')).taak(id9)).body.taak.stand === 'onbekend'
+      && (await m9t(null).taak(id9)).body.taak.stand === 'onbekend');
+    toets('9r zoektocht zonder (geldige) todoist_id: taak null, Todoist niet gevraagd', (await m9.taak(id9b)).body.taak === null);
+    // server.js: routes en de kale omgeving van het leesscript
+    const blok = src.slice(hb, he);
+    toets('9s server.js: leesscript met kale omgeving (geen process.env-kopie), één link per proces, timeout', /env: \{ PATH: process\.env\.PATH \|\| '\/usr\/bin:\/bin', LANG: 'C\.UTF-8', HOME: '\/tmp' \}/.test(blok)
+      && /execFile\('python3', \['-I', lezerScript, url\]/.test(blok) && !/Object\.assign\(\{\}, process\.env/.test(blok.slice(blok.indexOf('const lezerScript'), blok.indexOf('const todoistTaak'))));
+    toets('9t server.js: tellers nalezen 20/uur en taak 120/uur; uitrol-lijst heeft winkel-lezen.py', /appTeller\('shopper_nalezen', 20, 3600000\)/.test(blok) && /appTeller\('shopper_taak', 120, 3600000\)/.test(blok)
+      && /RELEASE_OPTIONEEL="[^"]*\bwinkel-lezen\.py\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));
+    const Vr = path.join(W, 'vault9r'), GHr = path.join(Vr, '10_Zakelijk/Groenhouten/Shopper');
+    fs.mkdirSync(GHr, { recursive: true });
+    fs.writeFileSync(path.join(GHr, 'Shopper - 2026-11-03 - Gekocht rek.md'), bron9.replace('status: open', 'status: gekocht').replace('todoist_id: "ProefTaak123"\n', ''));
+    const ctx9 = vm.createContext({ require, __dirname: process.cwd(), path, fs, VAULT: Vr, VV: () => VV, appStaat: { tellers: {} }, logError: () => {}, appTeller: () => true,
+      appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Object, JSON, String, Promise });
+    vm.runInContext(blok + ';globalThis.__sh = { appShopper };', ctx9, { filename: 'server.js#shopper9' });
+    const idr = S.idVan('10_Zakelijk/Groenhouten/Shopper/Shopper - 2026-11-03 - Gekocht rek.md');
+    const vr = async (route) => { const res = { _app: {} }; const n = gestuurd.length; await ctx9.__sh.appShopper({}, res, {}, route, {}); return Object.assign({ app: res._app }, gestuurd[n]); };
+    let rr = await vr('POST /app/shopper/' + idr + '/nalezen');
+    toets('9u route nalezen op een gekochte zoektocht = 409, reden "shopper nalezen <id> 409"', rr.s === 409 && rr.app.reden === 'shopper nalezen ' + idr + ' 409', rr);
+    rr = await vr('GET /app/shopper/' + idr + '/taak');
+    toets('9v route taak zonder todoist_id = 200 taak null, reden zonder titel', rr.s === 200 && rr.j.taak === null && rr.app.reden === 'shopper taak ' + idr + ' 200', rr);
   }
 
   fs.rmSync(W, { recursive: true, force: true });

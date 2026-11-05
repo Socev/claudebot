@@ -19404,6 +19404,9 @@ async function appKalender(req, res, a, route) {
 //                                     knop Gekocht (ontwerp 2-11-2026)"). Review 2-11 MOET 5 blijft: zijn tik in de eigen ingelogde app ís zijn
 //                                     woord; geen automatisme zet gekocht, het bedrag komt nooit uit de optie, de winkel bij een optie van de pagina.
 //                                     Beide schrijfroutes delen de teller shopper_status (30/uur); audit alleen soort + id + status.
+//   POST /app/shopper/<id>/nalezen    wv2454: de opties van een open zoektocht opnieuw lezen (winkel-lezen.py, alleen GET op de links van de
+//                                     pagina); uitkomst in klokken/shopper-nalezen.json, niet op de pagina; 20/uur, eens per 10 min opnieuw
+//   GET  /app/shopper/<id>/taak       wv2454: stand van de Todoist-taak (open, afgevinkt, weg), alleen lezen; 120/uur
 // wv2276 S5: bij een gekochte zoektocht geeft GET /app/shopper/<id> ook facturen (hooguit 3 passende facturen uit de Facturen-app: id,
 // leverancier, datum, bedrag, zekerheid; berekend, niets geschreven) en de lijst factuur_gevonden (aantal). De app-sessie is in Facturen de
 // eigenaar (rolVoor ingang app), dus Shopper toont niets dat de Facturen-app David niet ook toont.
@@ -19417,11 +19420,34 @@ const shopper = (function () {
   const facturenPad = function () {
     return typeof facturenMagOpenen === 'function' && typeof FACTUREN_DIR === 'string' && facturenMagOpenen() ? path.join(FACTUREN_DIR, 'facturen.sqlite') : null;
   };
-  try { return require(p).maak({ vault: VAULT, vv: VV(), facturenPad: facturenPad }); } catch (e) { logError('shopper', e); return null; }
+  // wv2454 Nu nalezen: winkel-lezen.py uit de release, één proces per link (parallel), alleen GET op een https-productpagina van een openbare
+  // hostnaam (het script weigert ip-adressen, interne namen, andere poorten, zoek-, winkelwagen- en accountpaden). Een kale omgeving: geen
+  // sleutel van de pod gaat mee naar een proces dat webpagina's leest. De link komt van de zoektochtpagina, nooit uit de vraag.
+  const lezerScript = path.join(__dirname, 'winkel-lezen.py');
+  const lezer = fs.existsSync(lezerScript) ? function (url) {
+    return new Promise(function (klaar) {
+      require('child_process').execFile('python3', ['-I', lezerScript, url], { timeout: 45000, maxBuffer: 256 * 1024,
+        env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: '/tmp' } }, function (e, uit) {
+        try { klaar(JSON.parse(String(uit || '').trim().split('\n')[0])); } catch (x) { klaar(null); }
+      });
+    });
+  } : null;
+  // wv2454: alleen-lezend de stand van de Todoist-taak van een zoektocht (open, afgevinkt, weg); dezelfde sleutel als Shopper vanzelf
+  const todoistTaak = async function (tid) {
+    if (!process.env.TODOIST_MCP_TOKEN || !/^[A-Za-z0-9]{6,40}$/.test(String(tid))) return null;
+    const r = await fetch('https://api.todoist.com/api/v1/tasks/' + tid, { headers: { Authorization: 'Bearer ' + process.env.TODOIST_MCP_TOKEN }, signal: AbortSignal.timeout(8000) });
+    let j = null;
+    try { j = await r.json(); } catch (e) { j = null; }
+    return { status: r.status, taak: r.status === 200 ? j : null };
+  };
+  try { return require(p).maak({ vault: VAULT, vv: VV(), facturenPad: facturenPad, lezer: lezer, todoistTaak: todoistTaak,
+    nalezenPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nalezen.json') : null }); } catch (e) { logError('shopper', e); return null; }
 })();
 function shopperInfo() { if (!shopper) return { aan: false }; try { return shopper.info(); } catch (e) { return { aan: true, fout: true }; } }
 appStaat.tellers.shopper = [];
 appStaat.tellers.shopper_status = [];
+appStaat.tellers.shopper_nalezen = [];
+appStaat.tellers.shopper_taak = [];
 async function appShopper(req, res, a, route, d) {
   if (!shopper) return appWeiger(res, 404, 'Shopper zit niet in deze versie van de pod', 'shopper ontbreekt');
   if (!appTeller('shopper', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens shopper');
@@ -19438,6 +19464,16 @@ async function appShopper(req, res, a, route, d) {
       soort = 'gekocht';
       if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
       u = typeof shopper.gekocht === 'function' ? shopper.gekocht(m[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
+    }
+    else if ((m = /^POST \/app\/shopper\/([^/]*)\/nalezen$/.exec(route))) {   // wv2454: prijs en voorraad nu (de opties opnieuw lezen)
+      soort = 'nalezen';
+      if (!appTeller('shopper_nalezen', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 20)', 'grens shopper nalezen');
+      u = typeof shopper.nalezen === 'function' ? await shopper.nalezen(m[1]) : { status: 404, body: { ok: false, fout: 'onbekend' } };
+    }
+    else if ((m = /^GET \/app\/shopper\/([^/]*)\/taak$/.exec(route))) {   // wv2454: stand van de Todoist-taak (alleen lezen)
+      soort = 'taak';
+      if (!appTeller('shopper_taak', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens shopper taak');
+      u = typeof shopper.taak === 'function' ? await shopper.taak(m[1]) : { status: 404, body: { ok: false, fout: 'onbekend' } };
     }
     else u = { status: 404, body: { ok: false, fout: 'onbekend' } };
   } catch (e) { logError('shopper', e); return appWeiger(res, 503, 'Shopper kon de zoektochten nu niet lezen; probeer het zo opnieuw', 'shopper fout'); }

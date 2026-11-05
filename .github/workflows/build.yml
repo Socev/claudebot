@@ -406,6 +406,11 @@ jobs:
       - name: "shopper-proactief (wv2273, Shopper vanzelf)"
         if: ${{ !cancelled() }}
         run: bash test/shopper-proactief.sh
+      # OVIS Shopper wv2454: winkel-lezen.py (leesscript van skill en pod): adresgrens (geen ip, interne naam of intern DNS-adres, ook na
+      # doorsturen), Hornbach eenvoudige User-Agent + levertijd, Praxis verzending/levering uit het ene aanbod; zonder netwerk.
+      - name: "winkel-lezen (wv2454, Shopper leesscript)"
+        if: ${{ !cancelled() }}
+        run: bash test/winkel-lezen.sh
       # MemoryLane R2 (wv2118): verhaal uit een opname (Claude zonder tools, nep-API), citaattoets, datum door code, injectie, categorie volgt,
       # voorstellen alleen na Ja, Davids aanpassing wint, plafond/dienstfout/grendel, padpoorten.
       - name: "herinneringen-verhaal (wv2118, MemoryLane R2)"

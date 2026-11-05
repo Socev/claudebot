@@ -1089,7 +1089,7 @@ async function bewijs(o) {
     r = await vraag('GET', '/app/kalender', undefined, { pot: P.jar });
     toets('9 wv2333: met sessie voorbij de poort (404 zonder appKalender in dit blok)', r.status === 404, r.status);
     // wv2264 (OVIS Shopper): zoektochten zonder sessie niet te lezen of op vervallen te zetten
-    for (const [mt, pad] of [['GET', '/app/shopper'], ['GET', '/app/shopper/0123456789ab'], ['POST', '/app/shopper/0123456789ab/status']]) {
+    for (const [mt, pad] of [['GET', '/app/shopper'], ['GET', '/app/shopper/0123456789ab'], ['POST', '/app/shopper/0123456789ab/status'], ['POST', '/app/shopper/0123456789ab/nalezen'], ['GET', '/app/shopper/0123456789ab/taak']]) {
       r = await vraag(mt, pad, mt === 'POST' ? { status: 'vervallen' } : undefined, {});
       toets('9 wv2264: ' + mt + ' ' + pad + ' zonder sessie -> 401', r.status === 401, r.status);
     }
