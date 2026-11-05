@@ -2806,7 +2806,7 @@ test('wv2218 zaakregister: lagen per draad, inbox nooit → laag blijft, eerst i
   // de lijst in de app
   let a = zakenApp(mm);
   assert.equal(a.status, 200); assert.equal(a.j.aan, true);
-  assert.deepEqual(a.j.tellers, { jij: 2, socev: 2, weg: 3, afgedaan: 1, zien: 2 });
+  assert.deepEqual(a.j.tellers, { jij: 2, socev: 2, weg: 3, afgedaan: 1, zien: 2, jij_open: 2 });   // wv2455: jij_open = jij én nog in de inbox
   // wv2291: zien = weg én nog in de inbox (nb en sys; nooit niet); weg blijft het geheel; elke zaak heeft het id van zijn nieuwste besluit
   assert.deepEqual(a.j.lagen.zien.map(function (z) { return z.draad; }).sort(), [nb.threadId, sys.threadId].sort());
   assert.equal(a.j.lagen.weg.length, 3);
@@ -3015,4 +3015,81 @@ test('wv2259 terug: niet bij TODO of ACTIE_DS (review gpt-5.5 MOET 1)', () => {
   l2Ronde(mm, gm, ids);
   geen.add(a.id); geen.add(b.id); inboxUitToestaan(dir, {});
   assert.deepEqual(soortActies(l2Ronde(mm, gm, ids), 'terug').map(function (q) { return q.gmail_id; }), [b.id]);
+});
+
+// ─────────── wv2455: proefweek "vanzelf weg" (schaduw), jij_open, voorwerkBron ───────────
+test('wv2455 zouWeg: alleen weg (nieuwsbrief, systeemmelding, geen actie); nooit beveiliging, betaling of termijn, Nooit-afzender, beantwoord', () => {
+  const b = { laag: 'weg', reden: 'nieuwsbrief', onderwerp: 'Nieuws van november', afzender: 'nieuws@vereniging.invalid' };
+  assert.equal(K.zouWeg(b), 'nieuwsbrief');
+  assert.equal(K.zouWeg(Object.assign({}, b, { reden: 'systeemmelding' })), 'systeemmelding');
+  assert.equal(K.zouWeg(Object.assign({}, b, { reden: 'geen_actie' })), 'geen_actie');
+  ['jouw_keuze', 'regel', 'vaste_regel', 'actie_mogelijk'].forEach(function (r) { assert.equal(K.zouWeg(Object.assign({}, b, { reden: r })), null, r); });
+  ['Je wachtwoord is gewijzigd', 'Nieuwe aanmelding op je account', 'Uw factuur van oktober', 'Herinnering: betaling', 'Verificatiecode 123456',
+    'Security alert', 'Je abonnement verloopt', 'Storing bij de bank', 'Aanmaning'].forEach(function (o) { assert.equal(K.zouWeg(Object.assign({}, b, { onderwerp: o })), null, o); });
+  assert.equal(K.zouWeg(Object.assign({}, b, { nooit: true })), null);
+  assert.equal(K.zouWeg(Object.assign({}, b, { beantwoord: true })), null);
+  assert.equal(K.zouWeg(Object.assign({}, b, { afzender: '' })), null);
+  assert.equal(K.zouWeg(Object.assign({}, b, { laag: 'jij' })), null);
+  assert.equal(K.zouWeg(Object.assign({}, b, { laag: 'socev' })), null);
+  assert.equal(K.zouWeg(null), null);
+});
+test('wv2455 zaakregister: zou_weg in de schaduw, Nooit per afzender, gemist en zelf, jij_open, voorwerkBron zonder tekst; Gmail onveranderd', () => {
+  const { mm, dir, gm, fouten } = b8Kamer();
+  const nb = mail({ van: 'Nieuws <Nieuws@vereniging.invalid>', onderwerp: 'Nieuwsbrief november', afmeld: true });
+  const nb2 = mail({ van: 'Blad <blad@uitgever.invalid>', onderwerp: 'Weekblad', afmeld: true });
+  const sec = mail({ van: 'Dienst <noreply@dienst.invalid>', onderwerp: 'Je wachtwoord is gewijzigd' });
+  const vraag = mail({ van: 'Iemand <iemand@voorbeeld.invalid>', onderwerp: 'Kun je dit tekenen?' });
+  const filt = mail({ onderwerp: 'Kun je dit ook tekenen?' });
+  const ms = [nb, nb2, sec, vraag, filt], ids = ms.map(function (m) { return m.id; });
+  const jev = { [nb.id]: JEV_INFO, [nb2.id]: JEV_INFO, [sec.id]: JEV_INFO, [vraag.id]: { systeem: 0.02, waarde: 0, actie: 0.9, actie_anders: 0.95 },
+    [filt.id]: { systeem: 0.99, waarde: 0, actie: 0.6 } };
+  draai(mm, 'gmail:david', ms, { jev: function (a) { return jevAntwoord(jev[a.gmail_id]); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  ms.forEach(function (m) { gm.voeg(m); });
+  gm.plek(filt.id, 'archief');
+  zakenToestaan(dir);
+  const zonder = l2Ronde(mm, gm, ids, { vlag: true, inbox: true }).l.j.acties;
+  assert.ok(zaak(mm, nb.threadId).zou_weg); assert.equal(zaak(mm, nb.threadId).zou_reden, 'nieuwsbrief');
+  assert.equal(zaak(mm, sec.threadId).laag + ':' + zaak(mm, sec.threadId).laag_reden, 'weg:systeemmelding');
+  assert.equal(zaak(mm, sec.threadId).zou_weg, null, 'beveiligingsmelding nooit vanzelf weg');
+  assert.equal(zaak(mm, vraag.threadId).zou_weg, null);
+  let a = zakenApp(mm);
+  assert.equal(a.j.tellers.jij, 2); assert.equal(a.j.tellers.jij_open, 1, 'filt kwam nooit in de inbox');
+  const w = function (g, m) { return a.j.lagen[g].find(function (z) { return z.draad === m.threadId; }); };
+  assert.equal(w('zien', nb).vanzelf, true); assert.equal(w('zien', sec).vanzelf, false); assert.equal(w('jij', vraag).vanzelf, false);
+  assert.equal(a.j.vanzelf.zou, 2); assert.equal(a.j.vanzelf.gemist, 0); assert.equal(a.j.vanzelf.zelf, 0); assert.ok(a.j.vanzelf.sinds); assert.equal(a.j.vanzelf.schaduw, true);
+  // Nooit per afzender (hoofdletters maken niet uit): meteen niet meer vanzelf, en het telt als gemist
+  let r = mm.app('POST /app/mailman/wegzet', { adres: 'NIEUWS@vereniging.invalid', nooit: true }, { apparaat: 'toets' });
+  assert.equal(r.status, 200); assert.equal(r.j.adres, 'nieuws@vereniging.invalid');
+  a = zakenApp(mm);
+  assert.equal(w('zien', nb).vanzelf, false); assert.equal(a.j.vanzelf.gemist, 1);
+  assert.deepEqual(a.j.vanzelf.nooit.map(function (x) { return x.adres; }), ['nieuws@vereniging.invalid']);
+  l2Ronde(mm, gm, ids, { vlag: true, inbox: true });
+  assert.ok(zaak(mm, nb.threadId).zou_weg, 'de eerste keer blijft bewaard voor de meting');
+  assert.equal(mm.app('POST /app/mailman/wegzet', { adres: 'onbekend@x.invalid', nooit: true }, {}).status, 404, 'alleen een bekende afzender');
+  assert.equal(mm.app('POST /app/mailman/wegzet', { adres: 'geen adres', nooit: true }, {}).status, 400);
+  assert.equal(mm.app('POST /app/mailman/wegzet', { adres: 'nieuws@vereniging.invalid' }, {}).status, 400);
+  r = mm.app('POST /app/mailman/wegzet', { adres: 'nieuws@vereniging.invalid', nooit: false }, {});
+  assert.equal(r.status, 200);
+  a = zakenApp(mm); assert.equal(w('zien', nb).vanzelf, true); assert.equal(a.j.vanzelf.gemist, 0);
+  assert.equal(mm._db.prepare("SELECT count(*) n FROM wijziging WHERE wat = 'wegzet_afzender'").get().n, 2);
+  // David archiveert nb2 zelf: dat werk had Socev kunnen doen
+  klok += 15 * 60000;
+  gm.plek(nb2.id, 'archief');
+  const met = l2Ronde(mm, gm, ids, { vlag: true, inbox: true }).l.j.acties;
+  a = zakenApp(mm); assert.equal(a.j.vanzelf.zelf, 1); assert.equal(a.j.vanzelf.zou, 2);
+  assert.ok(zonder.concat(met).every(function (x) { return !(x.eraf || []).includes('INBOX') && !(x.eraf || []).includes('UNREAD'); }), 'de proefweek haalt niets uit de inbox en markeert niets gelezen');
+  // voorwerkBron: open jij-zaken met afzender, onderwerp en Jev (geen mailtekst); één draad
+  const vb = mm.voorwerkBron({ sinds: new Date(klok - 3 * 86400000).toISOString() });
+  assert.deepEqual(vb.map(function (z) { return z.draad; }).sort(), [vraag.threadId, filt.threadId].sort());
+  const v1 = mm.voorwerkBron({ draad: vraag.threadId })[0];
+  assert.equal(v1.afzender, 'iemand@voorbeeld.invalid'); assert.equal(v1.onderwerp, 'Kun je dit tekenen?'); assert.equal(v1.jev.actie_anders, 0.95);
+  assert.equal(v1.slot, false); assert.equal(v1.inbox, 'ja'); assert.equal(v1.besluit, rij(mm, vraag.id).id); assert.equal(v1.tekst, undefined);
+  mm._db.prepare('UPDATE besluit SET marker = 1 WHERE gmail_id = ?').run(vraag.id);
+  assert.equal(mm.voorwerkBron({ draad: vraag.threadId })[0].slot, true, 'patiëntmarker = slotje');
+  assert.deepEqual(mm.voorwerkBron({ draad: 'geen' }), []);
+  zakenToestaan(dir, {});
+  assert.deepEqual(mm.voorwerkBron({ draad: vraag.threadId }), [], 'lijst uit = geen bron');
+  assert.equal(mm.app('POST /app/mailman/wegzet', { adres: 'nieuws@vereniging.invalid', nooit: true }, {}).status, 409);
+  assert.deepEqual(fouten, []);
 });

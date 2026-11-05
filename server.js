@@ -3873,7 +3873,8 @@ function handleRequest(req, res) {
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
       facturen_ingang: facturenIngangInfo(),   // wv856: smalle ingang /fac (ingericht?, uit?; geen inhoud, geen gebruikers)
       intake: intakeInfo(),
-      mailman: typeof mailmanInfo === 'function' ? mailmanInfo() : { aan: false },   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
+      mailman: typeof mailmanInfo === 'function' ? mailmanInfo() : { aan: false },
+      mail_voorwerk: typeof mailVoorwerkInfo === 'function' ? mailVoorwerkInfo() : { aan: false },   // wv2455: voorwerk bij vragen in Mail (tellingen, geen inhoud)   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
@@ -12746,6 +12747,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/tokens/openai' || route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/mailman' || route === 'GET /app/mailman/verkoop' || route.indexOf('POST /app/mailman/') === 0) return typeof appMailman === 'function' ? appMailman(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'mailman');   // wv1856: OVIS MailMan
+        if (route === 'POST /app/mail/voorwerk' || route === 'POST /app/mail/voorwerk/maak' || route === 'POST /app/mail/voorwerk/gmail') return typeof appMailVoorwerk === 'function' ? appMailVoorwerk(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'mail voorwerk');   // wv2455: voorwerk bij vragen in Mail
         if (route === 'GET /app/mail/zaken' || /^GET \/app\/mail\/zaken\/(jij|socev|weg|afgedaan|zien)\/[1-9]\d?$/.test(route)) return typeof appMailZaken === 'function' ? appMailZaken(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mail');   // wv2218: Apps › Mail (zaakregister, alleen lezen); wv2291: groep zien
         if (route === 'GET /app/werkstroom' || route.indexOf('GET /app/werkstroom/') === 0) return typeof appWerkstroom === 'function' ? appWerkstroom(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'werkstroom');   // wv2002: Werkstroom (alleen lezen)
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
@@ -16899,6 +16901,15 @@ function appMailZaken(req, res, a, route) {
   if (r.status !== 200) return appWeiger(res, r.status, 'Onbekende lijst', 'mail zaken ' + String(r.j && r.j.fout || '').slice(0, 40));
   res._app.reden = 'mail zaken' + (m ? ' ' + m[1] + ' ' + m[2] : '');
   if (m) res._app.stil = true;   // alleen de eerste pagina telt als "geopend"
+  // wv2455: per zaak of er voorwerk is (stand, concept klaar; geen tekst)
+  if (typeof mailVoorwerk !== 'undefined' && mailVoorwerk && r.j && r.j.lagen) {   // typeof: de UI-toets laadt dit blok soms zonder het voorwerkblok
+    try {
+      const alle = []; Object.keys(r.j.lagen).forEach(function (g) { (r.j.lagen[g] || []).forEach(function (z) { alle.push(z); }); });
+      const vw = mailVoorwerk.lijst(alle.map(function (z) { return z.draad; }));
+      alle.forEach(function (z) { z.voorwerk = vw[z.draad] || null; });
+      r.j.voorwerk_aan = mailVoorwerkAan();
+    } catch (e) { logError('mail-zaken-voorwerk', e); }
+  }
   return appStuur(res, 200, r.j);
 }
 const MAILMAN_MAIL_UUR = 240;
@@ -16921,6 +16932,58 @@ async function appMailmanMail(res, a, d) {
     datum: str(vol.datum_lokaal || vol.datum, 40), tekst: t.slice(0, 12000), afgekapt: t.length >= 12000, bijlagen: b.bijlagen, postvak: b.postvak } });
 }
 function mailmanInfo() { if (!mailman) return { aan: false }; try { return Object.assign({ aan: true }, mailman.info()); } catch (e) { return { aan: true, fout: true }; } }
+// ── wv2455: voorwerk bij vragen in Mail (mailvoorwerk.js; Mail-laag stap 4 eerste helft; totaalplan § Log 5-11-2026) ──
+// Logica in mailvoorwerk.js; hier de koppeling: zaken uit mailman.voorwerkBron (geen tekst), de mail via het lees-luik (mailBron: nooit een
+// slotje, alleen privé), patiëntpoort-2.0 op de volle tekst, één aanroep Sonnet zonder tools (harvesterClaude), Davids mailstem uit de skill
+// (alleen lezen), het Gmail-concept via het bestaande mailconcept-luik (potVzConcept: alleen concepten) en één regel in het conceptregister
+// (hash, geen tekst). Opslag MAILMAN_DIR/voorwerk.sqlite (0600, 14 dagen; NIET in de offsite-bundel: alleen mailman.sqlite gaat mee).
+// Schakelaar MAILMAN_DIR/voorwerk.json {"aan": true}; ontbreekt of onleesbaar = uit (geen tik, geen op-verzoek; tonen blijft).
+// Ontbreekt mailvoorwerk.js (terugrol), dan null: routes 404, /health mail_voorwerk.aan=false.
+function mailVoorwerkAan() {
+  try { const j = JSON.parse(fs.readFileSync(path.join(MAILMAN_DIR, 'voorwerk.json'), 'utf8')); return !!j && j.aan === true; } catch (e) { return false; }
+}
+async function mailVoorwerkLees(id) {
+  const b = mailman && typeof mailman.mailBron === 'function' ? mailman.mailBron(id) : null;
+  if (!b || b.postvak !== 'gmail:david') return null;
+  const vol = await appAgendaApi({ actie: 'mail_lezen', id: b.gmail_id });
+  if (!vol || typeof vol !== 'object' || vol.fout || vol.melding || String(vol.id || '') !== b.gmail_id) throw new Error('lees-luik gaf de mail niet');
+  return { van: vol.van, aan: vol.aan, onderwerp: vol.onderwerp, datum: vol.datum_lokaal || vol.datum, tekst: typeof vol.tekst === 'string' ? vol.tekst : '', bijlagen: (b.bijlagen || []).length };
+}
+const mailVoorwerk = (function () {
+  const p = path.join(__dirname, 'mailvoorwerk.js');
+  if (!fs.existsSync(p) || !mailman || typeof mailman.voorwerkBron !== 'function') return null;
+  try {
+    return require(p).maak({ dir: MAILMAN_DIR, fout: logError, log: function (r) { schrijfLog(nu() + ' ' + r); }, aan: mailVoorwerkAan,
+      bron: function (d) { return mailman.voorwerkBron(d); },
+      lees: mailVoorwerkLees,
+      poort: function (stuk) { return require(path.join(__dirname, 'intake', 'patientpoort.js')).beoordeel(stuk); },
+      claude: harvesterClaude,
+      stem: function () { const s = String(VV().lees(path.join(VAULT, '.claude', 'skills', 'mijn-mailstem', 'SKILL.md'), 'utf8') || ''); const i = s.indexOf('# Mijn mailstem'); return i >= 0 ? s.slice(i) : ''; },
+      concept: function (body) { return potVzConcept(body); },
+      register: function (regel) { return potVzRegister(regel); } });
+  } catch (e) { logError('mailvoorwerk', e); return null; }
+})();
+function mailVoorwerkInfo() { if (!mailVoorwerk) return { aan: false, module: false }; try { return mailVoorwerk.health(); } catch (e) { return { fout: true }; } }
+const MAIL_VOORWERK_UUR = { toon: 600, maak: 10, gmail: 20 };
+async function appMailVoorwerk(req, res, a, d, route) {
+  if (!mailVoorwerk) return appWeiger(res, 404, 'Voorwerk zit niet in deze versie van de pod', 'voorwerk ontbreekt');
+  if (appAfscherm(a)) return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'voorwerk afgeschermd');
+  const soort = route === 'POST /app/mail/voorwerk' ? 'toon' : route.slice('POST /app/mail/voorwerk/'.length);
+  const tel = 'mail-voorwerk-' + soort;
+  appStaat.tellers[tel] = appStaat.tellers[tel] || [];
+  if (!appTeller(tel, MAIL_VOORWERK_UUR[soort] || 10, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens voorwerk ' + soort);
+  if (soort !== 'toon' && !(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
+  d = d && typeof d === 'object' ? d : {};
+  let r;
+  try { r = soort === 'toon' ? mailVoorwerk.toon(d.draad) : soort === 'maak' ? mailVoorwerk.opVerzoek(d.draad) : await mailVoorwerk.gmail(d); }
+  catch (e) { logError('mail-voorwerk', e); return appWeiger(res, 500, 'fout op de pod', 'voorwerk uitzondering'); }
+  res._app.reden = 'mail voorwerk ' + soort + (r.status >= 300 ? ' ' + String(r.j && (r.j.reden || r.j.fout) || '').slice(0, 40) : '');
+  return appStuur(res, r.status, r.j);
+}
+if (mailVoorwerk && SERVER_ECHT) {
+  setInterval(function () { if (rolPrimair()) mailVoorwerk.tik().catch(function (e) { logError('voorwerk-tik', e); }); }, 5 * 60000).unref();
+}
+// ── einde wv2455 voorwerk ──
 let mailmanDag = '';
 // Dezelfde zorg komt niet elke dag terug in de box (grondwet 10): alleen bij een andere set postvakken met zorgen, of na 7 dagen
 function mailmanZorgNieuw(z) {
@@ -16937,6 +17000,7 @@ function mailmanTik() {
   if (t.uur < 7 || mailmanDag === t.datum) return;
   mailmanDag = t.datum;
   try { mailman.opruim(); } catch (e) { logError('mailman-opruim', e); }
+  if (typeof mailVoorwerk !== 'undefined' && mailVoorwerk) mailVoorwerk.opruim();   // wv2455: voorwerk na 14 dagen weg
   let z = [];
   try { z = mailman.zorgen(); } catch (e) { logError('mailman-zorgen', e); }
   if (!z.length || !mailmanZorgNieuw(z)) return;

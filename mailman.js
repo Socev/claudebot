@@ -123,7 +123,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-2.6';   // wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
+const VERSIE = 'mailman-2.7';   // wv2455: proefweek 'vanzelf weg' (schaduw: zaak.zou_weg, tabel wegzet_afzender, Nooit per afzender), teller jij_open, voorwerkbron voor mailvoorwerk.js; wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -740,11 +740,26 @@ function laagDraad(lijst) {
   return best ? { laag: best.r.laag, reden: best.r.reden, detail: best.r.detail || null, index: best.i } : null;
 }
 
+// wv2455 (Mail-laag stap 5/6, proefweek "vanzelf weg"; grondwet 7 aanvulling 1-11-2026 (a): algemene nieuwsbrieven en routinemeldingen van een
+// vaste afzenderlijst gelezen + archiveren, PAS na een proefweek en Davids vingerafdruk). In deze stap ALLEEN SCHADUW: de pod onthoudt per zaak
+// dat hij hem vanzelf zou wegzetten (zaak.zou_weg); in Gmail verandert niets. Nooit bij een beveiligings-, betaal- of termijnmelding (onderwerp),
+// nooit bij een afzender die David op Nooit zette, nooit bij een draad waarin David antwoordde. TODO/ACTIE_DS, slotje, Intake en factuur
+// vallen er al uit door de laag (dat is jij of socev, nooit weg). → reden (vaste code) of null.
+const VANZELF_REDENEN = ['nieuwsbrief', 'systeemmelding', 'geen_actie'];
+const VANZELF_NIET_RE = /wachtwoord|password|wacht ?woord|inlog|log ?in\b|sign.?in|aanmeld.?poging|beveilig|security|verifi|bevestig.{0,20}(account|e-?mail|adres)|\bcode\b|2fa|tweestaps|two.?(factor|step)|fraude|fraud|phishing|verdacht|suspicious|waarschuwing|warning|alert|account|toegang|access|factuur|invoice|nota\b|betaal|payment|incasso|aanmaning|herinnering|reminder|achterstand|deadline|vervalt|verloopt|expire|opzeg|contract|storing|outage|datalek|breach/i;
+function zouWeg(x) {
+  if (!isObj(x) || x.laag !== 'weg' || !VANZELF_REDENEN.includes(x.reden)) return null;
+  if (x.nooit || x.beantwoord || x.afgehandeld_door === 'david_app') return null;
+  if (!x.afzender || !/^[^@\s]+@[^@\s]+$/.test(String(x.afzender))) return null;
+  if (VANZELF_NIET_RE.test(String(x.onderwerp || ''))) return null;
+  return x.reden;
+}
+
 const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, eersteRegel, regelStroom, jevVragen,
   jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
   labelset2Lees, toetsRegelLabels, labelPlan2, alleenBetalen, ecobankMelding, DRAAD_LABELS, ERF_LABELS, DRAAD_SOORTEN, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
   authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL,
-  laagBericht, laagDraad, LAAG_VERSIE, LAGEN, LAAG_REDENEN, FACTUUR_FASEN };
+  laagBericht, laagDraad, LAAG_VERSIE, LAGEN, LAAG_REDENEN, FACTUUR_FASEN, zouWeg, VANZELF_REDENEN, VANZELF_NIET_RE };
 
 // ─────────────────────────── startset (O.5) ───────────────────────────
 
@@ -825,6 +840,7 @@ CREATE TABLE IF NOT EXISTS zaak (postvak TEXT NOT NULL, thread_id TEXT NOT NULL,
   laag_versie TEXT NOT NULL, laag_besluit INTEGER, inbox TEXT NOT NULL DEFAULT 'onbekend', inbox_tijd TEXT, inbox_gezien TEXT, eigen_archief INTEGER NOT NULL DEFAULT 0,
   afgehandeld TEXT, afgehandeld_door TEXT, heropend TEXT, beantwoord TEXT, ooit_weggezet TEXT, bijgewerkt TEXT NOT NULL, PRIMARY KEY (postvak, thread_id));
 CREATE INDEX IF NOT EXISTS zaak_laag ON zaak (postvak, laag, laatste);
+CREATE TABLE IF NOT EXISTS wegzet_afzender (postvak TEXT NOT NULL, adres TEXT NOT NULL, stand TEXT NOT NULL, tijd TEXT NOT NULL, door TEXT, PRIMARY KEY (postvak, adres));
 `;
 
 // ─────────────────────────── opslag en routes ───────────────────────────
@@ -861,7 +877,8 @@ function maak(o) {
     ['besluit', 'vangnet_tijd TEXT'], ['besluit', 'overstap_tijd TEXT'], ['besluit', 'overstap_poging INTEGER NOT NULL DEFAULT 0'],   // wv2033 B8 labelset 2
     ['aanbod', 'thread_id TEXT'], ['aanbod', 'erf TEXT'],   // wv2196 draadlabels
     ['postvak', 'inbox_lijst TEXT'], ['postvak', 'zaken_tijd TEXT'],   // wv2218 zaakregister
-    ['besluit', 'terug_tijd TEXT'], ['besluit', 'terug_poging INTEGER NOT NULL DEFAULT 0']]) {   // wv2259 terug bij Geen factuur   // wv2218 zaakregister: laatste volledige inboxlijst, laatste berekening
+    ['besluit', 'terug_tijd TEXT'], ['besluit', 'terug_poging INTEGER NOT NULL DEFAULT 0'],
+    ['zaak', 'zou_weg TEXT'], ['zaak', 'zou_reden TEXT']]) {   // wv2455 proefweek vanzelf weg   // wv2259 terug bij Geen factuur   // wv2218 zaakregister: laatste volledige inboxlijst, laatste berekening
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
   // wv2259: Ecobank-meldingen die de pod verwerkte (bron: server.js na de Ecobank-ronde) en wat MailMan ermee deed
@@ -1290,8 +1307,9 @@ function maak(o) {
     const tel = { draden: 0, jij: 0, socev: 0, weg: 0, afgedaan: 0, afgehandeld: 0, heropend: 0, nooit: 0, inbox: inbox ? 'volledig' : 'onbekend' };
     const get = db.prepare('SELECT * FROM zaak WHERE postvak = ? AND thread_id = ?');
     const zet = db.prepare(`INSERT OR REPLACE INTO zaak (postvak, thread_id, bron, eerste, laatste, laatste_besluit, berichten, laag, laag_reden, laag_detail, laag_sinds,
-      laag_versie, laag_besluit, inbox, inbox_tijd, inbox_gezien, eigen_archief, afgehandeld, afgehandeld_door, heropend, beantwoord, ooit_weggezet, bijgewerkt)
-      VALUES (?, ?, 'gmail', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      laag_versie, laag_besluit, inbox, inbox_tijd, inbox_gezien, eigen_archief, afgehandeld, afgehandeld_door, heropend, beantwoord, ooit_weggezet, bijgewerkt, zou_weg, zou_reden)
+      VALUES (?, ?, 'gmail', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const nooit = nooitSet(pv);   // wv2455
     const tijd = function (b) { return b.ontvangen || b.aangemaakt; };
     tx(function () {
       for (const [th, alle] of draden) {
@@ -1327,8 +1345,13 @@ function maak(o) {
         if (open) { af = null; afDoor = null; her = t; tel.heropend++; }
         const sinds = oud && oud.laag === l.laag ? oud.laag_sinds : t;
         const ooit = oud && oud.ooit_weggezet ? oud.ooit_weggezet : (l.laag === 'weg' ? t : null);
+        // wv2455: proefweek vanzelf weg — eerste keer dat de zaak "vanzelf weg" zou gaan blijft staan (meting: had David hem toch nodig?)
+        const nw = binnen[binnen.length - 1], adres = String(nw.afzender || '').toLowerCase();
+        const zou = af && !(oud && oud.zou_weg) ? null : zouWeg({ laag: l.laag, reden: l.reden, onderwerp: nw.onderwerp, afzender: adres, nooit: nooit.has(adres),
+          beantwoord: beantwoord && beantwoord >= laatste });
+        const zouT = oud && oud.zou_weg ? oud.zou_weg : (zou ? t : null), zouR = oud && oud.zou_reden ? oud.zou_reden : zou;
         zet.run(pv, th, tijd(binnen[0]), laatste, binnen[binnen.length - 1].id, binnen.length, l.laag, l.reden, l.detail, sinds, LAAG_VERSIE, binnen[l.index].id,
-          inb, inbT, gezien, eigen, af, afDoor, her, beantwoord, ooit, t);
+          inb, inbT, gezien, eigen, af, afDoor, her, beantwoord, ooit, t, zouT, zouR);
         tel.draden++;
         if (af) tel.afgedaan++; else tel[l.laag]++;
       }
@@ -1350,7 +1373,65 @@ function maak(o) {
       inbox: z.inbox, inbox_tijd: z.inbox_tijd || null, eigen_archief: !!z.eigen_archief, afgehandeld: z.afgehandeld || null, heropend: z.heropend || null, beantwoord: z.beantwoord || null,
       afzender: z.afzender || null, naam: z.van_naam || null, domein: z.afzender_domein || null, onderwerp: z.onderwerp || null, namen_weg: !!z.namen_weg, twijfel: tw ? tw.id : null,
       // wv2291: nieuwste bericht van de draad, voor het gesprek rechts (POST /app/mailman/mail); nooit bij een slotje (review MOET 1)
-      besluit: z.laag_reden === 'slotje' ? null : z.laatste_besluit || null };
+      besluit: z.laag_reden === 'slotje' ? null : z.laatste_besluit || null,
+      // wv2455: zou Socev deze zaak nu vanzelf wegzetten (proefweek, schaduw)? Alleen als hij er nog steeds voor in aanmerking komt
+      vanzelf: !z.afgehandeld && !!zouWeg({ laag: z.laag, reden: z.laag_reden, onderwerp: z.onderwerp, afzender: String(z.afzender || '').toLowerCase(),
+        nooit: nooitSet(z.postvak).has(String(z.afzender || '').toLowerCase()), beantwoord: z.beantwoord && z.beantwoord >= z.laatste }) };
+  }
+  // wv2455: afzenders die David op Nooit vanzelf weg zette (per postvak; adres in kleine letters)
+  const nooitCache = { t: 0, m: new Map() };
+  function nooitSet(pv) {
+    if (nu() - nooitCache.t > 2000) { nooitCache.m = new Map(); nooitCache.t = nu(); }
+    if (!nooitCache.m.has(pv)) nooitCache.m.set(pv, new Set(db.prepare("SELECT adres FROM wegzet_afzender WHERE postvak = ? AND stand = 'nooit'").all(pv).map(function (r) { return r.adres; })));
+    return nooitCache.m.get(pv);
+  }
+  // Proefweek vanzelf weg: tellingen voor Mail (laatste 14 dagen) — zou = Socev zou het vanzelf wegzetten; zelf = David haalde het daarna zelf
+  // uit zijn inbox (dat werk had Socev kunnen doen); gemist = het bleek toch iets voor David (nu jij/socev, beantwoord, of afzender op Nooit)
+  function vanzelfStand(p, grens) {
+    const sinds = db.prepare('SELECT min(zou_weg) t FROM zaak WHERE postvak = ? AND zou_weg IS NOT NULL').get(p.id).t || null;
+    const rijen = db.prepare('SELECT z.laag, z.afgehandeld_door, z.beantwoord, z.zou_weg, b.afzender FROM zaak z LEFT JOIN besluit b ON b.id = z.laatste_besluit WHERE z.postvak = ? AND z.laatste >= ? AND z.zou_weg IS NOT NULL').all(p.id, grens);
+    const nooit = nooitSet(p.id);
+    let zelf = 0, gemist = 0;
+    for (const r of rijen) {
+      if (r.laag !== 'weg' || (r.beantwoord && r.beantwoord > r.zou_weg) || nooit.has(String(r.afzender || '').toLowerCase())) gemist++;
+      else if (r.afgehandeld_door === 'david_gmail') zelf++;
+    }
+    const lijst = db.prepare("SELECT adres, tijd FROM wegzet_afzender WHERE postvak = ? AND stand = 'nooit' ORDER BY tijd DESC LIMIT 100").all(p.id);
+    return { sinds, zou: rijen.length, zelf, gemist, nooit: lijst.map(function (r) { return { adres: r.adres, tijd: r.tijd }; }), schaduw: true };
+  }
+  // POST /app/mailman/wegzet { adres, nooit: true|false } — David zet een afzender op Nooit vanzelf weg (of haalt dat weer weg). Alleen een adres
+  // dat in zijn eigen besluiten voorkomt; niets in Gmail. Geldt meteen in de zaaklijst (vanzelf) en straks voor het echte wegzetten.
+  function wegzetRoute(d, door) {
+    const p = postvak('gmail:david');
+    if (!p || !zakenAan(p)) return { status: 409, j: { ok: false, fout: 'de mail-lijst staat uit' } };
+    const adres = String(d.adres || '').trim().toLowerCase();
+    if (!/^[^@\s<>"']{1,100}@[^@\s<>"']{1,150}$/.test(adres)) return { status: 400, j: { ok: false, fout: 'geen geldig adres' } };
+    if (!db.prepare('SELECT 1 FROM besluit WHERE postvak = ? AND lower(afzender) = ? LIMIT 1').get(p.id, adres)) return { status: 404, j: { ok: false, fout: 'deze afzender kent MailMan niet (meer)' } };
+    const was = db.prepare('SELECT stand FROM wegzet_afzender WHERE postvak = ? AND adres = ?').get(p.id, adres);
+    if (d.nooit === true) {
+      if (!was) { db.prepare("INSERT INTO wegzet_afzender (postvak, adres, stand, tijd, door) VALUES (?, ?, 'nooit', ?, ?)").run(p.id, adres, iso(), door || null); wijzig('wegzet_afzender', adres, null, { stand: 'nooit' }, door); }
+    } else if (d.nooit === false) {
+      if (was) { db.prepare('DELETE FROM wegzet_afzender WHERE postvak = ? AND adres = ?').run(p.id, adres); wijzig('wegzet_afzender', adres, { stand: was.stand }, null, door); }
+    } else return { status: 400, j: { ok: false, fout: 'nooit moet true of false zijn' } };
+    nooitCache.t = 0;
+    return { status: 200, j: { ok: true, adres, nooit: d.nooit === true } };
+  }
+  // wv2455: voor mailvoorwerk.js (server.js) — de feiten van een zaak die het voorwerk nodig heeft, zonder mailtekst: laag, inbox, het nieuwste
+  // binnengekomen bericht (besluit-id, afzender, onderwerp, Jev-scores, afmeldlink, marker/zorgmail). draad = één zaak; zonder draad: de
+  // open jij-zaken met een bericht sinds `sinds` (≤ 200). Nooit doktersmaten (zaken bestaan alleen voor privé).
+  function voorwerkBron(d) {
+    d = isObj(d) ? d : {};
+    const p = postvak('gmail:david');
+    if (!p || !zakenAan(p)) return [];
+    const kol = 'SELECT z.thread_id, z.laag, z.laag_reden, z.afgehandeld, z.inbox, z.laatste, z.beantwoord, z.laatste_besluit, b.id bid, b.gmail_id, b.afzender, b.van_naam, b.onderwerp, b.afmeld, b.marker, b.marker_soorten, b.reden breden, b.jev, b.stroom, b.namen_weg FROM zaak z LEFT JOIN besluit b ON b.id = z.laatste_besluit WHERE z.postvak = ? AND ';
+    const rijen = d.draad != null
+      ? (ID_RE.test(String(d.draad)) ? db.prepare(kol + 'z.thread_id = ?').all(p.id, String(d.draad)) : [])
+      : db.prepare(kol + "z.laag = 'jij' AND z.afgehandeld IS NULL AND z.laatste >= ? ORDER BY z.laatste DESC LIMIT 200").all(p.id, String(d.sinds || iso()));
+    return rijen.map(function (r) {
+      return { draad: r.thread_id, laag: r.laag, reden: r.laag_reden, afgehandeld: r.afgehandeld || null, inbox: r.inbox, laatste: r.laatste, beantwoord: r.beantwoord || null,
+        besluit: r.bid || null, afzender: r.namen_weg ? null : r.afzender || null, naam: r.namen_weg ? null : r.van_naam || null, onderwerp: r.namen_weg ? null : r.onderwerp,
+        afmeld: !!r.afmeld, slot: r.laag_reden === 'slotje' || !!r.marker || r.marker_soorten === 'zorgmail' || r.breden === 'zorgmail', jev: ruwVan(r), stroom: r.stroom || null };
+    });
   }
   function lokaleDag(ms) { try { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); } catch (e) { return new Date(ms).toISOString().slice(0, 10); } }
   function zakenLijst(d) {
@@ -1375,8 +1456,10 @@ function maak(o) {
     const weg_vandaag = db.prepare("SELECT laatste FROM zaak WHERE postvak = ? AND laag = 'weg' AND laatste >= ?").all(p.id, new Date(nu() - 2 * 86400000).toISOString())
       .filter(function (z) { return lokaleDag(Date.parse(z.laatste)) === vandaag; }).length;
     const bij = p.zaken_tijd ? Date.parse(p.zaken_tijd) : NaN;
+    // wv2455: jij_open = de jij-zaken die nog in de inbox staan (of waarvan Socev de inbox niet kent); de rest stond er nooit in of is er al uit
+    tellers.jij_open = db.prepare('SELECT count(*) n' + basis + "z.afgehandeld IS NULL AND z.laag = 'jij' AND z.inbox IN ('ja', 'onbekend')").get(p.id, grens).n;
     return { status: 200, j: { ok: true, aan: true, versie: LAAG_VERSIE, bijgewerkt: p.zaken_tijd || null, inbox_bijgewerkt: p.inbox_lijst || null,
-      verouderd: !Number.isFinite(bij) || nu() - bij > 2 * 3600000, groep, pagina, per_pagina: ZAAK_PAGINA, tellers, weg_vandaag, lagen, meer } };
+      verouderd: !Number.isFinite(bij) || nu() - bij > 2 * 3600000, groep, pagina, per_pagina: ZAAK_PAGINA, tellers, weg_vandaag, lagen, meer, vanzelf: vanzelfStand(p, grens) } };
   }
   function zakenStand(p) {
     if (!zakenAan(p)) return { aan: false };
@@ -3041,6 +3124,7 @@ function maak(o) {
     if (route === 'POST /app/mailman/altijd') return altijdRoute(d, door);
     if (route === 'POST /app/mailman/stroom') return stroomRoute(d, door, ctx);
     if (route === 'POST /app/mailman/oordeel') return oordeelRoute(d);
+    if (route === 'POST /app/mailman/wegzet') return wegzetRoute(d, door);   // wv2455: Nooit vanzelf weg per afzender
     if (route === 'POST /app/mailman/verkoop') return verkoopRoute(d, door, ctx);   // wv1997 B7-V
     return { status: 404, j: { ok: false, fout: 'onbekend' } };
   }
@@ -3121,7 +3205,7 @@ function maak(o) {
     }
     return uit;
   }
-  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, ecobankBekend, inboxUit: function (pv) { return inboxUit(postvakken().find(function (p) { return p.id === pv; })); }, werkstroomTel, werkstroomLijst, mailBron, zakenLijst, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
+  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, ecobankBekend, inboxUit: function (pv) { return inboxUit(postvakken().find(function (p) { return p.id === pv; })); }, werkstroomTel, werkstroomLijst, mailBron, zakenLijst, voorwerkBron, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
 }
 
 function isPad(p) { return p === '/mailman' || String(p).indexOf('/mailman/') === 0; }

@@ -510,6 +510,9 @@ jobs:
       - name: "mailman (wv1856, OVIS MailMan: mailrouter vóór Intake, in de schaduw)"
         if: ${{ !cancelled() }}
         run: bash test/mailman.sh
+      - name: "mailvoorwerk (wv2455, voorwerk bij vragen in Mail)"
+        if: ${{ !cancelled() }}
+        run: bash test/mailvoorwerk.sh
       - name: "werkstroom (wv2002, Werkstroom: leesroute over MailMan, Intake en Facturen)"
         if: ${{ !cancelled() }}
         run: bash test/werkstroom.sh
