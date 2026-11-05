@@ -6500,9 +6500,19 @@ function appVraagUit(raw) {
   return { hash: h.toString(16).padStart(8, '0'), tekst: vq[1].replace(/[*_]+\s*$/, '').trim() };
 }
 // wv135 (bouwplan § 4.4d, idee Albert van der Veer): een Ja op een vraag over versturen, verwijderen, agenda of geld vraagt in
-// de app een verse vingerafdruk. De pod beslist uit de vraagzin in Socevs eigen antwoord, niet uit wat de browser zegt. Liever
-// een tik te veel dan te weinig; de CLAUDE.md-regel ([APP]) is het tweede slot voor wat de woorden missen.
-const APP_GEVOELIG = [
+// de app een verse vingerafdruk. De pod beslist uit de vraagzin in Socevs eigen antwoord, niet uit wat de browser zegt. De
+// CLAUDE.md-regel ([APP]) is het tweede slot voor wat de woorden missen.
+// wv2433 (MrLean ML5, David Ja 5-11-2026): preciezer. 'versturen' alleen bij versturen of delen naar anderen (sturen, mailen, appen,
+// publiceren, posten op een site, doorsturen, uitnodigen, namens, tekenen, bellen) of een mail/bericht/concept/antwoord mét een
+// ontvanger (aan/naar iemand anders dan jou of Socev); losse woorden als bericht, plaats, deel, reageer, meld tellen niet meer.
+// 'verwijderen' bij weggooien, wissen, eruit/uit X halen, opruimen of opzeggen; herstarten, resetten en dichtzetten niet meer, en
+// vervangen, stoppen, uitzetten, afsluiten alleen bij iets van David in de vraag; en opruimen van eigen machinekamer-werk (werkbestanden, proefbestanden, werkbomen, eigen
+// sleutelkopieën) niet zolang er niets van David in de vraag staat (APP_INTERN_RE zonder APP_DAVID_RE). 'agenda', 'geld' en
+// 'grondwet' ongewijzigd. Fail-closed blijft (lege tekst = gevoelig).
+// Regressieset: /opt/data/mk-scripts/wv135/vragen-regressie.txt en /opt/data/mk-scripts/wv2433/ (toets op 30 dagen vragen).
+// wv2433: de oude, brede woordenlijst blijft onder eigen naam voor berichtVraagOpKaart (wv1820): daar onderscheidt hij alleen
+// 'andere handeling, zelfde onderwerp' (herstarten ≠ repareren) en verandert er niets. De vingerafdruk volgt appGevoelig hieronder.
+const APP_HANDELING = [
   // Stammen zonder \b ervoor (versturen, toesturen, leeggemaakt; Fable-review diff wv135 #1). Tekst is vooraf in kleine letters en
   // zonder accenten (ë -> e). Regressieset: /opt/data/mk-scripts/wv135/vragen-regressie.txt.
   ['versturen', /stuur|sturen|zend|mail|\bsms|\bapp(en|je|jes|t)\b|whatsapp|bericht|publice|\bpost(en)?\b|plaats|doorgeef|doorgeven|geef\b[^.?!]*\bdoor\b|\bdeel\b|\bdelen\b|laten weten|laat\b[^.?!]*\bweten\b|informe|reageer|reageren|beantwoord|antwoord\b[^.?!]*\b(aan|naar)\b|uitnodig|nodig\b[^.?!]*\buit\b|meld(?!ing)|inschrijv|uitschrijv|schrijf\b[^.?!]*\b(in|uit)\b|toezeg|zeg\b[^.?!]*\btoe\b|namens|\b(onder)?teken(en|t)?\b|\bbel(len|t)?\b|terugbel|accept|indien|dien\b[^.?!]*\bin\b|aanvra|vraag\b[^.?!]*\baan\b/],
@@ -6514,10 +6524,54 @@ const APP_GEVOELIG = [
   // zonder vraag doorlaten?" kwam zonder). Als laatste, zodat de reden van bestaande vragen niet verandert. Tweede slot: herkomst.grondwet.
   ['grondwet', /grondwet|grondregel|\bbevoegdhe(id|den)\b|patientgegeven|patientdata|persoonsgegeven|privacyregel|privacyfilter|privacycontrole|privacygrens|patientpoort|patientcontrole/],
 ];
+function appHandeling(tekst) {
+  const t = String(tekst || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  if (!t.trim()) return 'onleesbaar';   // fail-closed
+  for (const [reden, re] of APP_HANDELING) if (re.test(t)) return reden;
+  return null;
+}
+
+const APP_ONTVANGER = String.raw`\b(?:aan|naar)\s+(?!(?:jou|jezelf|mij|me|mezelf|david|socev|de app|het overzicht|de machinekamer|de werklijst|de werkvoorraad|telegram|de pod|de server)\b)`;
+const APP_BERICHT = String.raw`(?:mail|bericht|antwoord|reactie|concept|\bbrief|herinnering|uitnodiging|appje|\bsms|whatsapp)`;
+const APP_GEVOELIG = [
+  // Stammen zonder \b ervoor (versturen, toesturen, leeggemaakt; Fable-review diff wv135 #1). Tekst is vooraf in kleine letters en
+  // zonder accenten (ë -> e).
+  ['versturen', new RegExp([
+    String.raw`(?<!be|aan|bij)stuur|(?<!aan|bij)sturen|\b(?:ver|door|toe|op|uit|terug|mee)?zend`,
+    String.raw`\b(?:e-?)?mail(?:en|t|de|den)\b|\bsms(?:en|t|te|ten)\b|\bapp(?:en|je|jes|t)\b|whatsapp(?:en|t)\b`,
+    String.raw`publice|\bpost(?:en|t)\b(?!\s+van\b)|\bgepost\b|\bpost\b[^.?!]*\bop\b|\bonline\b|\bop (?:de |je |een |het )?(?:site|website|forum|linkedin|facebook|instagram|deel)\b`,
+    String.raw`\bplaats(?:en|t)\b|\bdelen\b|\bdeel\b[^.?!]*\b(?:met|aan)\b|\bgedeeld|doorge(?:ef|ven)(?!luik)|\bgeef\b[^.?!]*\bdoor\b`,
+    String.raw`laten weten|laat\b[^.?!]*\bweten\b|informe|\breageren\b|\breageer\b[^.?!]*\bop\b|beantwoord|uitnodig|nodig\b[^.?!]*\buit\b`,
+    String.raw`aanmeld|afmeld|\bmeld\b[^.?!]*\b(?:aan|af)\b|\bmeld(?:en|t)?\b[^?!\n]*\bbij\b(?!\s+(?:jou|mij|david|socev)\b)|inschrijv|uitschrijv|schrijf (?:je|jou|hem|haar|ons|hen|me|mij)\b[^.?!]*\b(?:in|uit)\b`,
+    String.raw`toezeg|zeg\b[^.?!]*\btoe\b|namens|\b(?:onder)?teken(?:en|t)?\b|\bbel(?:len|t)?\b|terugbel|accept|indien|dien\b[^.?!]*\bin\b|aanvra`,
+    String.raw`vraag\b[^.?!]*` + APP_ONTVANGER, APP_BERICHT + String.raw`[^.?!]*` + APP_ONTVANGER, APP_ONTVANGER + String.raw`[^.?!]*` + APP_BERICHT,
+  ].join('|'))],
+  ['verwijderen', /verwijder|\bwis(?:sen|t)?\b|schrap|weggooi|gooi\b[^.?!]*\bweg\b|vernietig|archive|leeg(?!lo[o]?p)|opruim|ruim\b[^.?!]*\bop\b|opschon|schoon\b[^.?!]*\bop\b|weghal|haal\b[^.?!]*\bweg\b|\bweg\b|\beruit\b|afhal|\bhaal\b[^.?!]*\baf\b|\b(?:haal|halen)\b[^.?!]*\buit\b|\buit\b[^.?!]*\b(?:halen|haal|gehaald)\b|overschrijf|overschrijv|formatte|inkort|\bkort\b[^.?!]*\bin\b|annule|\bzeg\b[^.?!]*\b(?:af|op)\b|afzeg|opzeg|intrek|trek\b[^.?!]*\bin\b|beeindig/, 'intern'],
+  // Vervangen, stoppen, uitzetten, afsluiten en ontkoppelen alleen als er iets van David in de vraag staat (APP_DAVID_RE): dan raakt het
+  // zijn gegevens (back-ups, mail, Todoist); anders is het een technische handeling.
+  ['verwijderen', /vervang|\bstop(?:pen|t)?\b|uitzet|zet\b[^.?!]*\buit\b|afsluit|sluit\b[^.?!]*\baf\b|ontkoppel/, 'david'],
+  ['agenda', /agenda|afspra|inplan|plan\b[^.?!]*\bin\b|verzet|verplaats|reserve|\bboek|verschuif|schuif\b[^.?!]*\bop\b/],
+  ['geld', /betaal|betalen|overmaak|overmaken|maak\b[^.?!]*\bover\b|bestel|\bkoop|kopen|aanschaf|factur|declar|incass|\bgeld\b|€|euro|bedrag|voldoe|abonnement|contract/],
+  // wv2347: een Ja die de grondregels wijzigt (grondwet, bevoegdheden, privacy- of patiëntregels) vraagt altijd een vingerafdruk, ook als de
+  // vraag geen woord over versturen/verwijderen/agenda/geld bevat (3-11: Ja op "Grondwet 3 — mag Intake een vermoeden van patiëntgegevens
+  // zonder vraag doorlaten?" kwam zonder). Als laatste, zodat de reden van bestaande vragen niet verandert. Tweede slot: herkomst.grondwet.
+  ['grondwet', /grondwet|grondregel|\bbevoegdhe(id|den)\b|patientgegeven|patientdata|persoonsgegeven|privacyregel|privacyfilter|privacycontrole|privacygrens|patientpoort|patientcontrole/],
+];
+// wv2433: opruimen van eigen machinekamer-werk is geen verwijderen van Davids gegevens. Alleen als er zo'n werkwoord in de vraag staat en
+// niets dat van David is (mail, agenda, bestanden, rijen in zijn apps, back-ups, accounts, BSN, of 'je'/'jou'); bij twijfel blijft het verwijderen. Opzeggen, annuleren,
+// intrekken en beëindigen krijgen deze uitzondering nooit.
+const APP_INTERN_RE = /proefbestand|proefpagina|proefkopie|proefrij|testbestand|wegwerp|werkbestand|werkmap|werkboom|werkbomen|worktree|werkkopie|tussenbestand|logdump|logarchief|sleutelkopie|eigen kopie|\bwv\d{2,5}\b|mk-scripts/;
+const APP_DAVID_RE = /mail|agenda|afspra|todoist|\btaak|\btaken\b|notitie|dossier|vault|second ?brain|\bdrive\b|foto|contact|document|\bscan|back-?up|reservekopie|immich|album|factu|transactie|concept|bericht|\bchat|whatsapp|\bpagina|\brij(?:en)?\b|\bjouw\b|herinnering|patient|genoom|\bdna\b|account|\bbsn|privacy|workflow|annule|opzeg|afzeg|\bzeg\b|intrek|\btrek\b|beeindig/;
+const APP_JIJ_RE = /\b(?:je|jou|jouw|jullie|david)\b/;
 function appGevoelig(tekst) {
   const t = String(tekst || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
   if (!t.trim()) return 'onleesbaar';   // fail-closed
-  for (const [reden, re] of APP_GEVOELIG) if (re.test(t)) return reden;
+  for (const [reden, re, uitz] of APP_GEVOELIG) {
+    if (!re.test(t)) continue;
+    if (uitz === 'intern' && APP_INTERN_RE.test(t) && !APP_DAVID_RE.test(t) && !APP_JIJ_RE.test(t)) continue;   // review MOET 2: 'je'/'jou' = van David, fail-closed
+    if (uitz === 'david' && !APP_DAVID_RE.test(t)) continue;
+    return reden;
+  }
   return null;
 }
 // Getypte tekst mag geen knopdruk of andere herkomstmarkering nabootsen: Socev herkent een bevestigde knop aan een beurt die
@@ -13983,13 +14037,13 @@ function berichtBronJob(zin, nu, lijst) {
 // bron_job). Dezelfde vraag, strenger dan wv1018 omdat tijd en 1-op-1 hier niet meetellen (Opus-diffreview wv1820 MOET 1: "mag ik de
 // oude versie wissen?" van dezelfde klus mag niet onder een Ja op "mag ik de nachtsync repareren?" verdwijnen): de vraag deelt ten
 // minste twee inhoudswoorden met de kaarttitel, ten minste de helft van zijn woorden met titel + waarom, en heeft dezelfde
-// gevoeligheidssoort (appGevoelig: versturen/verwijderen/agenda/geld/grondwet of geen) als de titel. Alleen een kaart die nog open of later
+// gevoeligheidssoort (appHandeling, de brede lijst van vóór wv2433: versturen/verwijderen/agenda/geld/grondwet of geen) als de titel. Alleen een kaart die nog open of later
 // is, die David beantwoordde of die hij dichtzette (review ZOU 2: een door een agent of de ronde ingetrokken kaart neemt niets over).
 // Anders dan wv1018 telt de tijd niet: een in de stille uren vastgehouden rapport komt na de kaart, soms na Davids antwoord, binnen
 // (28-10: kaart Ja 06:25, rapport 07:02 bezorgd met knoppen). Een doe-kaart neemt nooit een vraag over (Fable wv926 #6). Puur: getoetst in 23.
 function berichtVraagOpKaart(zin, klusJobs, kaarten, kaartJobs) {
   const klus = new Set((klusJobs || []).map(String).filter(function (j) { return APP_JOB_RE.test(j); }));
-  const vw = appVjAfleidWoorden(zin), gev = appGevoelig(zin);
+  const vw = appVjAfleidWoorden(zin), gev = appHandeling(zin);
   if (!klus.size || vw.size < 2) return null;
   let best = null, bestN = 0;
   (kaarten || []).forEach(function (p) {
@@ -14001,7 +14055,7 @@ function berichtVraagOpKaart(zin, klusJobs, kaarten, kaartJobs) {
     const tw = appVjAfleidWoorden(p.titel), kw = appVjAfleidWoorden(String(p.titel || '') + ' ' + String(p.waarom || ''));
     let n = 0, nt = 0;
     vw.forEach(function (w) { if (kw.has(w)) n++; if (tw.has(w)) nt++; });
-    if (nt < 2 || n * 2 < vw.size || appGevoelig(p.titel) !== gev) return;
+    if (nt < 2 || n * 2 < vw.size || appHandeling(p.titel) !== gev) return;
     if (n > bestN) { best = p; bestN = n; }
   });
   return best;
