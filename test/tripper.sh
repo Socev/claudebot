@@ -77,7 +77,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('5f een niet-reis op id (Index): 404', m.reis(R.idVan('20_Prive/Reizen/Index.md')).status === 404);
   // ── 6. info ──
   const i = m.info();
-  toets('6 info: alleen aantallen en tijd', i.aan === true && i.reizen === 8 && i.komend === 3 && i.onleesbaar === 1 && Object.keys(i).sort().join() === 'aan,komend,onleesbaar,op,reizen', i);
+  toets('6 info: alleen aantallen en tijd', i.aan === true && i.reizen === 8 && i.komend === 3 && i.onleesbaar === 1 && Object.keys(i).sort().join() === 'aan,komend,onleesbaar,op,reizen,uit_fotos' && i.uit_fotos === 0, i);
   toets('6b info vóór de eerste lijst: null-tellers', R.maak({ vault: V, vv: VV }).info().reizen === null);
   toets('6c zonder reizenmap: lege lijst, geen fout', R.maak({ vault: path.join(W, 'leeg'), vv: VV }).lijst().body.reizen.length === 0);
 
@@ -247,6 +247,39 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('12g geannuleerd: reisInfo null (MemoryLane maakt er geen herinnering van); een gewone reis wel',
     m4.reisInfo('20_Prive/Reizen/2027 - Geannuleerd.md') === null && m4.reisInfo('20_Prive/Reizen/2027 - Gepland.md').van === '2027-03-01');
   toets('12h geannuleerd() leest alleen het statusveld', R.geannuleerd('---\nstatus: "geannuleerd"\n---\n') && !R.geannuleerd('---\nstatus: actueel\n---\ngeannuleerd\n') && !R.geannuleerd('geen fm'));
+
+  // ── 13. reizen uit je foto's (wv2453) ──
+  const fr = [
+    { hid: 'h00000000000000e1', titel: 'Zomervakantie 2014 - Proefland', wanneer: 'juni 2014', van: '2014-06-01', tot: '2014-06-30', precisie: 'maand', stukken: 1, album: { status: 'actief', aantal: 120 } },
+    { hid: 'h00000000000000e2', titel: 'Citytrip Proefstad 2016', wanneer: '2016', van: '2016-01-01', tot: '2016-12-31', precisie: 'jaar', stukken: 0, album: null },
+    { hid: 'h00000000000000e3', titel: 'Weekend Proefdorp', wanneer: '3–5 mei 2019', van: '2019-05-03', tot: '2019-05-05', precisie: 'dag', stukken: 0, album: { status: 'actief', aantal: 0 } },
+    { hid: 'h00000000000000e4', titel: 'Zonder datum', wanneer: '', van: null, tot: null, precisie: null, stukken: 0, album: null },
+    { hid: '../geheim', titel: 'Fout id', wanneer: '2015', van: '2015-01-01', tot: '2015-12-31', precisie: 'jaar' },
+    { hid: 'h00000000000000e5', titel: '   ', wanneer: '2015', van: '2015-01-01', tot: '2015-12-31', precisie: 'jaar' },
+  ];
+  const m5 = R.maak({ vault: V, vv: VV, vandaag: () => '2026-11-01', koppel, fotoreizen: () => fr });
+  const nu5 = m.lijst().body.reizen.length, L5 = m5.lijst(), uf = L5.body.uit_fotos, of = (h) => uf.find((x) => x.id === h);
+  toets('13a uit_fotos naast reizen; reizen ongewijzigd; ongeldige hid en lege titel weg', L5.body.reizen.length === nu5 && uf.length === 4 && !of('../geheim') && !of('h00000000000000e5'), uf.map((x) => x.id));
+  toets('13b volgorde: nieuwste eerst, zonder datum achteraan', JSON.stringify(uf.map((x) => x.id)) === JSON.stringify(['h00000000000000e3', 'h00000000000000e2', 'h00000000000000e1', 'h00000000000000e4']), uf.map((x) => x.id));
+  const e1 = of('h00000000000000e1'), e3 = of('h00000000000000e3');
+  toets('13c maand: geen van/tot/dagen, periode = de tekst van MemoryLane, jaar uit het begin, stand geweest, bron fotos',
+    e1.van === null && e1.tot === null && e1.dagen === null && e1.periode === 'juni 2014' && e1.jaar === '2014' && e1.stand === 'geweest' && e1.bron === 'fotos' && e1.datum === '2014-06-01', e1);
+  toets('13d precieze dagen: van/tot en dagen', e3.van === '2019-05-03' && e3.tot === '2019-05-05' && e3.dagen === 3, e3);
+  toets('13e memorylane = hid, stukken, album (zelfde vorm als bij een reispagina)', e1.memorylane.hid === 'h00000000000000e1' && e1.memorylane.stukken === 1 && e1.memorylane.album.aantal === 120 && of('h00000000000000e2').memorylane.album === null);
+  toets('13f soort uit de titel', e1.soort === 'vakantie' && of('h00000000000000e2').soort === 'weekend' && of('h00000000000000e4').soort === 'overig');
+  const st = (x) => R.soortUitTitel(x);
+  toets('13g soortUitTitel: Gambia, Shizzle/Mannenweekend = vrienden vóór weekend, Kesch-trek = actief, plaatsnaam alleen = overig',
+    st('Gambia 2024') === 'gambia' && st('Shizzle: goes Proefstad - 2017') === 'vrienden' && st('Mannenweekend Proefbos 2016') === 'vrienden' && st('Kesch-trek David & Proef 2025') === 'actief'
+    && st('Weekendje Proefstad 2011') === 'weekend' && st('Vakantie Proefeiland 2016') === 'vakantie' && st('Proefland 2017') === 'overig' && st('Carbage Run Proef') === 'carbage-run');
+  toets('13h geen namen, pagina, kaartpunt of te regelen', uf.every((x) => x.deelnemers.length === 0 && x.punt === null && x.te_regelen_open === null && !('tekst' in x) && !('pad' in x)));
+  toets('13i info telt uit_fotos', m5.info().uit_fotos === 4, m5.info());
+  const m6 = R.maak({ vault: V, vv: VV, vandaag: () => '2026-11-01', koppel, fotoreizen: () => { throw new Error('ml stuk'); } });
+  const L6 = m6.lijst();
+  toets('13j fout in MemoryLane: reispagina\'s blijven, uit_fotos leeg', L6.status === 200 && L6.body.reizen.length === nu5 && L6.body.uit_fotos.length === 0);
+  toets('13k zonder fotoreizen-functie: uit_fotos leeg', Array.isArray(L.body.uit_fotos) && L.body.uit_fotos.length === 0);
+  const m7 = R.maak({ vault: V, vv: VV, vandaag: () => '2026-11-01', koppel, fotoreizen: () => fr.concat([{ hid: 'h0123456789abcdef', titel: 'Zelfde album als Proefland', wanneer: '2023', van: '2023-01-01', tot: '2023-12-31', precisie: 'jaar' }]) });
+  toets('13m review MOET 1: album dat al bij een reispagina hoort (zelfde hid) komt niet dubbel in uit_fotos', m7.lijst().body.uit_fotos.length === 4 && !m7.lijst().body.uit_fotos.some((x) => x.id === 'h0123456789abcdef'));
+  toets('13l server.js geeft fotoreizen uit memorylaneDelen.fotoReizen door', /fotoreizen: function \(\) \{ return memorylaneDelen && typeof memorylaneDelen\.fotoReizen === 'function' \? memorylaneDelen\.fotoReizen\(\) : \[\]; \}/.test(src));
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

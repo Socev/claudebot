@@ -745,3 +745,27 @@ test('wv2449 hoofdpersonen: tabel op de vaultpagina, datum van de eerste gelinkt
     assert.strictEqual(M._hoofdDatum('2019-13'), null); assert.strictEqual(M._hoofdDatum('2024-02-29'), '2024-02-29'); assert.strictEqual(M._hoofdDatum('1990'), '1990'); assert.strictEqual(M._hoofdDatum(''), null);
   } finally { o.sluit(); }
 });
+test('wv2453 (Tripper): fotoReizen geeft alleen actieve Google-fotoalbums met categorie Reizen (niet gevoelig), met Davids titel en wanneer; maakt niets', () => {
+  const o = omgeving();
+  try {
+    const t = '2026-11-05T10:00:00Z';
+    const ins = o.ing._db.prepare("INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES (?, 'los', ?, ?, ?, ?, ?, ?)");
+    ins.run('h00000000000000d1', 'google:00000000000000d1', 'reizen', 0, 'actief', t, t);
+    ins.run('h00000000000000d2', 'google:00000000000000d2', 'gezin', 0, 'actief', t, t);      // andere categorie
+    ins.run('h00000000000000d3', 'google:00000000000000d3', 'reizen', 1, 'actief', t, t);     // gevoelig aangevinkt
+    ins.run('h00000000000000d4', 'google:00000000000000d4', 'reizen', 0, 'afgewezen', t, t);  // afgewezen
+    ins.run('h00000000000000d5', 'los:proef-bijdrage', 'reizen', 0, 'actief', t, t);         // geen fotoalbum
+    const map = path.join(o.vault, '20_Prive/Herinneringen/MemoryLane');
+    fs.mkdirSync(map, { recursive: true });
+    fs.writeFileSync(path.join(map, 'h00000000000000d1.md'), '---\ntype: herinnering-stukken\nherinnering_id: h00000000000000d1\nsoort: los\ntitel: "Zomervakantie 2014 - Proefland"\ntitel_bron: naamgeving\nwanneer: "2014-06"\n---\nFoto\'s: verzonnen.\n');
+    const voor = o.ing._db.prepare('SELECT count(*) AS n FROM ml_herinnering').get().n;
+    const r = o.ml.fotoReizen();
+    assert.deepStrictEqual(r.map((x) => x.hid), ['h00000000000000d1']);
+    assert.strictEqual(r[0].titel, 'Zomervakantie 2014 - Proefland');
+    assert.strictEqual(r[0].wanneer, 'juni 2014');
+    assert.strictEqual(r[0].van, '2014-06-01'); assert.strictEqual(r[0].precisie, 'maand');
+    assert.strictEqual(r[0].stukken, 0); assert.strictEqual(r[0].album, null, 'zonder Immich geen album');
+    assert.ok(!('ref' in r[0]) && !/google:/.test(JSON.stringify(r)), 'geen albumcode of pad naar buiten');
+    assert.strictEqual(o.ing._db.prepare('SELECT count(*) AS n FROM ml_herinnering').get().n, voor, 'maakt niets aan');
+  } finally { o.sluit(); }
+});

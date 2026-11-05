@@ -19403,6 +19403,7 @@ async function appMemorylane(req, res, a, s, route, d) {
 // Je reizen als lijst met filter in de Socev-app. Geen eigen opslag: reizen.js leest bij elke vraag de reispagina's in 20_Prive/Reizen,
 // met dezelfde functie als MemoryLane (§ 2 afspraak 1). Hier alleen de twee leesroutes achter de app-sessie:
 //   GET /app/tripper/lijst      alle reizen (komend eerst), per reis titel, periode, dagen, soort, namen, beschrijving, MemoryLane-koppeling
+//                               sinds wv2453 ook uit_fotos: de reizen uit je foto's (MemoryLane-fotoalbums met categorie Reizen, zonder reispagina)
 //   GET /app/tripper/reis/<id>  één reis met de paginatekst; id = 12 hex van sha256(vaultpad), reizen.js zoekt het pad zelf op (nooit een pad uit de vraag)
 //                               sinds T2 (wv2152) ook vervoer (ook in de lijst), verblijf, plekken en kosten (alleen met bron) uit de vaste kop
 //                               sinds T3 (wv2163) ook kaart {punten, lijn, verblijf_zonder_plek} (verblijf op plaatsnaam aan een plek, geen geocoder);
@@ -19415,7 +19416,9 @@ const tripper = (function () {
   if (!fs.existsSync(p)) return null;
   try {
     return require(p).maak({ vault: VAULT, vv: VV(),
-      koppel: function (rel) { return memorylaneDelen && typeof memorylaneDelen.reisKoppeling === 'function' ? memorylaneDelen.reisKoppeling(rel) : null; } });
+      koppel: function (rel) { return memorylaneDelen && typeof memorylaneDelen.reisKoppeling === 'function' ? memorylaneDelen.reisKoppeling(rel) : null; },
+      // wv2453: de reizen uit je foto's (Google-fotoalbums met categorie Reizen in MemoryLane), alleen lezen
+      fotoreizen: function () { return memorylaneDelen && typeof memorylaneDelen.fotoReizen === 'function' ? memorylaneDelen.fotoReizen() : []; } });
   } catch (e) { logError('tripper', e); return null; }
 })();
 function tripperInfo() { if (!tripper) return { aan: false }; try { return tripper.info(); } catch (e) { return { aan: true, fout: true }; } }

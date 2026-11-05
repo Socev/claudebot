@@ -1225,12 +1225,27 @@ function maak(o) {
     const x = hoofdpersonenLees(o.vault, o.vv);
     return { status: 200, body: { ok: true, pagina: x.pagina, personen: x.personen } };
   }
+  // wv2453 (Tripper): de reizen uit Davids foto's — Google-fotoalbums (los, google:…) die in MemoryLane de categorie Reizen hebben en geen
+  // reispagina. Tripper toont ze per jaar naast de reispagina's. Alleen lezen (geen bijwerken(), geen album maken); titel en wanneer zoals
+  // MemoryLane ze toont (Davids titel wint), album als status/aantal. Gevoelig aangevinkt = weg. Geen paden, geen tekst van de pagina.
+  function fotoReizen() {
+    const uit = [];
+    for (const h of q.hAlle.all()) {
+      if (h.status !== 'actief' || !isFotoalbum(h)) continue;
+      const c = catVan(h);
+      if (c.categorie !== 'reizen' || c.gevoeligVink) continue;
+      const p = paginaLees(h.hid), w = wanneerInfo(h, p, null), a = F ? F.kort(h.hid) : null;
+      uit.push({ hid: h.hid, titel: titelVan(h, p, null), wanneer: w.tekst || '', van: w.van, tot: w.tot, precisie: w.precisie,
+        stukken: q.sVan.all(h.hid).filter((s) => s.status === 'opgenomen').length, album: a ? { status: a.status, aantal: a.aantal } : null });
+    }
+    return uit;
+  }
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
     return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
-  return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling,
+  return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling, fotoReizen,
     plaatjeVoorstel, plaatjeMaken, plaatjeWeg, _P: P, vertellerMaken, vertellerDeel, vertellerWeg, _V: V,
     fotoSync, hoofdpersonen, _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
