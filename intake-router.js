@@ -688,6 +688,22 @@ function bestemmingenLive(s, afz, ent, x, lenzen) {
     live.push({ lens: 'kennis', doel: ent.knoop || null, zou_auto: autoKennis && !!ent.knoop, reden: autoKennis && ent.knoop ? null : (ent.knoop ? 'entiteit_niet_zeker' : 'geen_entiteit') });
   return { live, schaduw };
 }
+/*
+ * wv2464 (David 5-11-2026: het interne boekstuk Google Home voor André kwam als twee 'facturen' binnen). De Mail Processor levert de hele
+ * draad aan, ook wat David zelf verstuurde. Eigen verzonden mail AAN ANDEREN (label SENT of DRAFT in de eigen bron, en geen eigen adres
+ * onder aan/cc/bcc, ook niet als +alias) is nooit een binnengekomen factuur, aanmaning of termijn: facturen, keten en deadlines vallen af
+ * (schaduw, reden 'eigen_verzonden'); de kennislens blijft. Stuurt David een stuk zelf door aan een eigen adres (+facturen, +ai), dan telt
+ * het gewoon. Een eigen keuze van David in de app (appKeuze) blijft mogelijk.
+ */
+const EIGEN_VERZONDEN_LENZEN = ['facturen', 'keten', 'deadlines'];
+function zonderPlus(a) { const at = a.lastIndexOf('@'), p = a.indexOf('+'); return p > 0 && p < at ? a.slice(0, p) + a.slice(at) : a; }
+function eigenVerzonden(meta, eigenAdr) {
+  const lab = meta && Array.isArray(meta.labels) ? meta.labels : [];
+  if (lab.indexOf('SENT') < 0 && lab.indexOf('DRAFT') < 0) return false;
+  // review MOET 1: alle adressen uit elke waarde (ook één kopregel met meerdere ontvangers), niet alleen het eerste
+  const ontv = [].concat(meta.aan || [], meta.cc || [], meta.bcc || []).join(',').toLowerCase().match(/[a-z0-9._%+'-]{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,24}/g) || [];
+  return !ontv.some(function (x) { return eigenAdr.has(x) || eigenAdr.has(zonderPlus(x)); });
+}
 // De onderdelen die de Facturen-app kan lezen (wv1919): pdf of UBL/XML als bijlage; bij een scan het origineel (de pdf van de scanner).
 function factuurDelen(s, delen) {
   return (delen || []).filter(function (d) {
@@ -908,7 +924,7 @@ function deadlineInvoegen(tekst, regel, stukId) {
   return r.join('\n');
 }
 
-const K = { REGELVERSIE, KOP_MAX, orgDomein, adresVan, dkimUitslag, mailLees, bboxRegels, velden, letterlijk, ibanGeldig, soortBepaal, register, afzenderBepaal, entiteitBepaal, bestemmingen, normAlias, LABEL_KNOOP,
+const K = { REGELVERSIE, eigenVerzonden, KOP_MAX, orgDomein, adresVan, dkimUitslag, mailLees, bboxRegels, velden, letterlijk, ibanGeldig, soortBepaal, register, afzenderBepaal, entiteitBepaal, bestemmingen, normAlias, LABEL_KNOOP,
   regelVoorwaarden, regelPast, regelZoek, regelBestemmingen, herbereken, REGEL_LENZEN,
   bestemmingenLive, jevOordeel, kennisNaam, bijlageNaam, kennisInhoud, slug, KENNIS_MAP, KENNIS_ENTITEIT, INDELING, JEV_DREMPEL,
   systeemOordeelRegels, systeemOordeelModel, systeemNaam, systeemBoxRegel, systeemDavidRegel, stilUur, SYSTEEM_MAP, SYSTEEM_VOORSTEL, SYSTEEM_SOORTEN,
@@ -1278,7 +1294,16 @@ function maak(o) {
           const jevStop = live && (jv.boven || !jv.gemeten);   // boven de drempel of geen uitslag na 24 u: geen regel, geen model, twijfel
           const rg = jevStop ? null : regelZoek(regelsActief(), mk);
           let bs, schaduwLenzen = [];
-          if (!live) bs = rg ? regelBestemmingen(rg, en, { velden: vd.velden }) : bestemmingen(so, af, en, { velden: vd.velden, label_entiteit: labels[0] || null });
+          const eigenVerz = s.profiel === 'mail@1' && eigenVerzonden(meta, eigenAdr);
+          if (!live) { bs = rg ? regelBestemmingen(rg, en, { velden: vd.velden }) : bestemmingen(so, af, en, { velden: vd.velden, label_entiteit: labels[0] || null });
+            if (eigenVerz) {   // review ZOU 1: ook in de schaduw zichtbaar waarom
+              const weg = bs.filter(function (b) { return EIGEN_VERZONDEN_LENZEN.indexOf(b.lens) >= 0; });
+              if (weg.length) {
+                bs = bs.filter(function (b) { return EIGEN_VERZONDEN_LENZEN.indexOf(b.lens) < 0; });
+                schaduwLenzen = weg.map(function (b) { return Object.assign({}, b, { zou_auto: false, reden: 'eigen_verzonden' }); });
+                if (!bs.some(function (b) { return b.lens === 'kennis'; })) bs.push({ lens: 'kennis', doel: en.knoop || null, zou_auto: false, reden: 'eigen_verzonden' });
+              }
+            } }
           else {
             // vangnet (model): geen regel en geen entiteit hoog, en Jev onder de drempel
             if (!rg && !jevStop && en.kracht !== 'hoog' && so.soort !== 'geen_post') {
@@ -1290,6 +1315,16 @@ function maak(o) {
             if (rg) { bs = regelBestemmingen(rg, en, { velden: vd.velden }).filter(function (b) { if ((lenzenLive().indexOf(b.lens) >= 0 && !(b.lens === 'facturen' && !heeftDoc)) || b.lens === 'vragen') return true; schaduwLenzen.push(b); return false; });
               if (!bs.length) bs = [{ lens: 'kennis', doel: en.knoop || null, zou_auto: false, reden: 'regel_lens_nog_niet_live', regel: 'R' + rg.id + '@' + rg.versie }]; }
             else { const bl = bestemmingenLive(so, af, en, { velden: vd.velden, heeftDoc }, lenzenLive()); bs = bl.live; schaduwLenzen = bl.schaduw; }
+            if (eigenVerz) {   // wv2464: eigen verzonden mail aan anderen → geen facturen, keten of deadlines; de kennislens neemt hem
+              const weg = bs.filter(function (b) { return EIGEN_VERZONDEN_LENZEN.indexOf(b.lens) >= 0; });
+              if (weg.length) {
+                bs = bs.filter(function (b) { return EIGEN_VERZONDEN_LENZEN.indexOf(b.lens) < 0; });
+                schaduwLenzen = schaduwLenzen.concat(weg.map(function (b) { return Object.assign({}, b, { zou_auto: false, reden: 'eigen_verzonden' }); }));
+                const autoK = af.kracht === 'hoog' || en.kracht === 'hoog' || en.bewijs === 'model';
+                if (!bs.some(function (b) { return b.lens === 'kennis'; }) && lenzenLive().indexOf('kennis') >= 0)
+                  bs.push({ lens: 'kennis', doel: en.knoop || null, zou_auto: autoK && !!en.knoop, reden: autoK && en.knoop ? null : (en.knoop ? 'entiteit_niet_zeker' : 'geen_entiteit') });
+              }
+            }
             // de kennislens heeft een eigen entiteit met een raw_input-map nodig (Fable wv1408 #6)
             bs = bs.map(function (b) { return b.lens === 'kennis' && b.zou_auto && !KENNIS_MAP[b.doel] ? Object.assign({}, b, { zou_auto: false, reden: 'entiteit_zonder_map' }) : b; });
             if (jevStop) bs = bs.map(function (b) { return Object.assign({}, b, { zou_auto: false, reden: jv.gemeten ? 'jev' : 'jev_geen_uitslag' }); });

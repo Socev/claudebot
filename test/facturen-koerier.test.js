@@ -544,6 +544,30 @@ test('verzamelpostvak + MailMan (wv1973, bouwplan O.6): koerier_query_label kijk
   assert.equal(t.n("SELECT count(*) AS n FROM bericht WHERE message_id = 'lab0000000000001'"), 1);
 });
 
+test('wv2464: eigen verzonden mail aan anderen (boekstuk aan de boekhouder) komt niet uit het verzamelpostvak; aan de eigen +facturen-ingang wel', async () => {
+  assert.equal(KO.eigenVerzondenAanAnderen({ labels: ['SENT'], aan: 'Boekhouder <boekhouder@kantoor.invalid>' }, ['d.schaap@gmail.com']), true);
+  assert.equal(KO.eigenVerzondenAanAnderen({ labels: ['SENT', 'INBOX'], aan: 'd.schaap+facturen@gmail.com' }, ['d.schaap@gmail.com']), false);
+  assert.equal(KO.eigenVerzondenAanAnderen({ labels: ['INBOX'], aan: 'iemand@voorbeeld.invalid' }, ['d.schaap@gmail.com']), false);
+  assert.equal(KO.eigenVerzondenAanAnderen({ aan: 'iemand@voorbeeld.invalid' }, ['d.schaap@gmail.com']), false);
+  const t = opzet(), g = nepGmail();
+  const lev = t.fdb.db.prepare("SELECT l.id, i.iban FROM leverancier l JOIN leverancier_iban i ON i.leverancier = l.id WHERE l.naam = 'Leverancier A B.V.'").get();
+  const dag = '2026-10-21';
+  const stuk = (nr) => Z.pdf(['Leverancier A B.V.', 'Factuur', 'Factuurnummer: ' + nr, 'Factuurdatum: 12-10-2026', 'Totaal incl. btw: EUR 7,99', 'Huisartsenpraktijk Tolgaarde B.V.', 'IBAN ' + lev.iban]);
+  g.mails.push({ id: 'eig0000000000001', thread_id: 'eig0000000000001', van: 'David <d.schaap@gmail.com>', aan: 'boekhouder@kantoor.invalid', onderwerp: 'Boekstuk oktober',
+    labels: ['INBOX', 'SENT', 'FACTUUR'], datum: dag + 'T08:00:00.000Z', datum_lokaal: dag + 'T10:00:00+02:00', dag_lokaal: dag });
+  g.bijlagen.eig0000000000001 = [{ naam: 'boekstuk.pdf', mime: 'application/pdf', bytes: stuk('EIG-1') }];
+  g.mails.push({ id: 'eig0000000000002', thread_id: 'eig0000000000002', van: 'David <d.schaap@gmail.com>', aan: 'd.schaap+facturen@gmail.com', onderwerp: 'Fwd: factuur',
+    labels: ['INBOX', 'SENT', 'FACTUUR'], datum: dag + 'T09:00:00.000Z', datum_lokaal: dag + 'T11:00:00+02:00', dag_lokaal: dag });
+  g.bijlagen.eig0000000000002 = [{ naam: 'factuur.pdf', mime: 'application/pdf', bytes: stuk('EIG-2') }];
+  D.metaZet(t.fdb, 'koerier_query_label', 'label:FACTUUR has:attachment');
+  t.fdb.db.prepare("UPDATE bron SET actief = 1 WHERE soort = 'verzamelpostvak'").run();
+  const u = await t.ronde(g, NU);
+  assert.equal(u.postvak.ok, true, JSON.stringify(u.postvak));
+  assert.equal(t.n("SELECT count(*) AS n FROM bericht WHERE message_id = 'eig0000000000001'"), 0, 'eigen verzonden aan de boekhouder: niet ingelezen');
+  assert.equal(t.n("SELECT count(*) AS n FROM bericht WHERE message_id = 'eig0000000000002'"), 1, 'aan de eigen ingang: wel');
+  assert.equal(u.postvak.aantallen.eigen_verzonden, 1);
+});
+
 test('back-up: de eerste ronde na 02:00 (Nederlandse tijd) op een dag zonder back-up; daarna die dag niet meer', async () => {
   const t = opzet(), g = nepGmail();
   const u1 = await t.ronde(g, Date.parse('2026-10-22T23:30:00Z'));   // 01:30 lokaal op de 23e: nog niet

@@ -104,6 +104,14 @@ function isDoorgestuurd(m, eigen) {
   const van = String(m.van || '').toLowerCase();
   return /^\s*(?:fwd?|fw|doorst(?:uurd)?)\s*:/i.test(String(m.onderwerp || '')) || (eigen || []).some((x) => van.indexOf(x) >= 0);
 }
+// wv2464: eigen verzonden mail aan anderen (label SENT of DRAFT, geen eigen adres onder de ontvangers, ook niet als +alias) is nooit een
+// binnengekomen factuur (het interne boekstuk aan de boekhouder kwam zo als factuur binnen). Zonder labels geen oordeel (false).
+function eigenVerzondenAanAnderen(m, eigen) {
+  const lab = m && Array.isArray(m.labels) ? m.labels : [];
+  if (!lab.includes('SENT') && !lab.includes('DRAFT')) return false;
+  const ontv = [].concat(m.aan || [], m.cc || [], m.bcc || []).join(',').toLowerCase().match(/[a-z0-9._%+'-]{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,24}/g) || [];
+  return !ontv.some((x) => { const at = x.lastIndexOf('@'), p = x.indexOf('+'); const k = p > 0 && p < at ? x.slice(0, p) + x.slice(at) : x; return (eigen || []).includes(x) || (eigen || []).includes(k); });
+}
 function adresIn(veld, adres) { return String(veld || '').toLowerCase().indexOf(String(adres || '').toLowerCase()) >= 0; }
 function gmailDag(ymd) { return String(ymd).replace(/-/g, '/'); }
 function plusDagen(ymd, n) { return K.plusDagen(ymd, n); }
@@ -502,7 +510,9 @@ async function leesPostvak(fdb, bron, io, pdf, o) {
   catch (e) { hartslag(fdb, 'verzamelpostvak', bron.naam, o, { ok: false, aantallen: tel, fouten: [{ wat: 'mail_zoeken', melding: foutSoort(e) }] }); return { ok: false, fout: 'zoeken', aantallen: tel }; }
   if (afgekapt) nietGelezen.push('meer dan 25 mails op één dag');
   const bekend = fdb.db.prepare('SELECT 1 FROM bericht WHERE bron = ? AND message_id = ?');
-  const nieuw = [...mails.values()].filter((m) => !bekend.get(bron.id, m.id)).sort((a, b) => String(a.datum).localeCompare(String(b.datum)));
+  const eigenUit = [...mails.values()].filter((m) => eigenVerzondenAanAnderen(m, eigen)).length;   // wv2464
+  if (eigenUit) tel.eigen_verzonden = eigenUit;
+  const nieuw = [...mails.values()].filter((m) => !bekend.get(bron.id, m.id) && !eigenVerzondenAanAnderen(m, eigen)).sort((a, b) => String(a.datum).localeCompare(String(b.datum)));
   tel.berichten_gezien = mails.size;
   for (const m of nieuw.slice(0, GRENS.berichten)) {
     try { tel.facturen += await leesBericht(fdb, bron, io, pdf, m, eigen, o, tel, nietGelezen); tel.nieuw++; }
@@ -688,4 +698,4 @@ async function knoopVul(fdb, io, factuurIds, domein, o) {
   return n;
 }
 
-module.exports = { ronde, leesIntake, knoopVul, controleer, pdfNaarTekst, oorspronkelijkeAfzender, isDoorgestuurd, tokenVan, mailVoor, zoekToken, naamMetExtensie, LuikFout, GRENS, PDFTOTEXT, TOKEN_RE };
+module.exports = { ronde, leesIntake, eigenVerzondenAanAnderen, knoopVul, controleer, pdfNaarTekst, oorspronkelijkeAfzender, isDoorgestuurd, tokenVan, mailVoor, zoekToken, naamMetExtensie, LuikFout, GRENS, PDFTOTEXT, TOKEN_RE };

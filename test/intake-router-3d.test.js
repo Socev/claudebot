@@ -255,3 +255,45 @@ test('3d: Facturen-app kiezen voor een stuk zonder pdf → 400; lenzen nog niet 
   assert.equal(k.status, 400); assert.match(k.j.fout, /geen pdf- of UBL-bijlage/);
   F.r.sluit();
 });
+
+// wv2464: eigen verzonden mail aan anderen (het interne boekstuk aan de boekhouder) is nooit een binnengekomen factuur. Verzonnen data.
+test('wv2464: eigenVerzonden — SENT/DRAFT zonder eigen ontvanger; +alias en cc aan zichzelf tellen als eigen', () => {
+  const E = new Set(['david@voorbeeld.example']);
+  assert.equal(K.eigenVerzonden({ labels: ['SENT'], aan: ['Boekhouder <boekhouder@kantoor.example>'] }, E), true);
+  assert.equal(K.eigenVerzonden({ labels: ['DRAFT'], aan: ['boekhouder@kantoor.example'] }, E), true);
+  assert.equal(K.eigenVerzonden({ labels: ['SENT', 'INBOX'], aan: ['david+facturen@voorbeeld.example'] }, E), false, 'doorgestuurd aan de eigen ingang');
+  assert.equal(K.eigenVerzonden({ labels: ['SENT'], aan: ['boekhouder@kantoor.example'], cc: ['David <david@voorbeeld.example>'] }, E), false);
+  assert.equal(K.eigenVerzonden({ labels: ['INBOX'], aan: ['david@voorbeeld.example'] }, E), false, 'binnengekomen');
+  assert.equal(K.eigenVerzonden({ aan: ['boekhouder@kantoor.example'] }, E), false, 'geen labels = geen oordeel');
+  assert.equal(K.eigenVerzonden({ labels: ['SENT'], aan: 'boekhouder@kantoor.example' }, E), true, 'aan als tekst');
+  assert.equal(K.eigenVerzonden({ labels: ['SENT'], aan: 'Boekhouder <boekhouder@kantoor.example>, David <david+ai@voorbeeld.example>' }, E), false, 'meerdere ontvangers in één kopregel');
+});
+
+test('wv2464: eigen verzonden factuur-pdf aan de boekhouder → geen facturen/keten/deadlines (schaduw eigen_verzonden), wel kennis; aan +facturen gewoon facturen', async () => {
+  const E = omgeving();
+  const BOEK = ['Boekstuk', 'Huisartsenpraktijk Testgaarde', 'KvK 11112222', 'Factuur Voorbeeld Energie BV', 'Factuurnummer: VE-2026-2002', 'Factuurdatum: 02-11-2026',
+    'Vervaldatum: 16-11-2026', 'Totaal: € 7,99', 'KvK 12345678', 'www.voorbeeld-energie.example'];
+  const MV = { van: 'David <david@voorbeeld.example>', van_naam: 'David', aan: ['boekhouder@kantoor.example'], onderwerp: 'Boekstuk november (Testgaarde)',
+    labels: ['_AI_/Verwerkt', 'SENT'], verzonden: '2026-10-31T16:12:00Z' };
+  const id = E.zet({ meta: MV, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(MV.van, MV.onderwerp, 'Hoi, bijgaand het boekstuk. Groet') },
+    { deel: 'b1', rol: 'bijlage', naam: 'Boekstuk-november.pdf', mime: 'application/pdf', bytes: pdfVan(BOEK) }] });
+  // het antwoord van de boekhouder in dezelfde draad (geen bijlage)
+  const MA = { van: 'boekhouder@kantoor.example', van_naam: 'Boekhouder', aan: ['david@voorbeeld.example'], onderwerp: 'RE: Boekstuk november (Testgaarde)',
+    labels: ['INTAKE', 'AI/MailMan'], verzonden: '2026-11-01T08:26:00Z' };
+  const id2 = E.zet({ meta: MA, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(MA.van, MA.onderwerp, 'Dank, ontvangen. Groet') }] });
+  // controle: David stuurt hetzelfde stuk aan zijn eigen ingang
+  const MF = Object.assign({}, MV, { aan: ['david+facturen@voorbeeld.example'], labels: ['SENT', 'INBOX'], onderwerp: 'Fwd: factuur november' });
+  const id3 = E.zet({ meta: MF, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(MF.van, MF.onderwerp, 'Doorgestuurd. Verzonnen.') },
+    { deel: 'b1', rol: 'bijlage', naam: 'factuur-november.pdf', mime: 'application/pdf', bytes: pdfVan(FACTUUR.concat(['nov-eigen'])) }] });
+  await E.r.ronde();
+  const b1 = E.best(id);
+  assert.ok(!b1.some((b) => /^(facturen|keten|deadlines):/.test(b)), 'geen vraag aan David en niets naar de koerier: ' + JSON.stringify(b1));
+  const bw = JSON.parse(E.db.prepare("SELECT bewijs FROM besluit WHERE stuk_id = ? AND stap = 'bestemming'").get(id).bewijs);
+  assert.ok((bw.schaduw || []).some((b) => b.lens === 'facturen' && b.reden === 'eigen_verzonden'), JSON.stringify(bw));
+  assert.ok(b1.some((b) => /^kennis:/.test(b)), JSON.stringify(b1));
+  assert.ok(!(await E.r.facturenAangeboden(10)).some((x) => x.stuk_id === id), 'koerier krijgt het eigen verzonden stuk niet');
+  assert.ok(!E.best(id2).some((b) => /^facturen/.test(b)), JSON.stringify(E.best(id2)));
+  assert.ok(E.best(id3).some((b) => /^facturen:(aangeboden|schaduw:soort_of_afzender_niet_hoog)/.test(b)), 'eigen ingang telt gewoon: ' + JSON.stringify(E.best(id3)));
+  assert.ok(!E.best(id3).some((b) => /eigen_verzonden/.test(b)));
+  E.r.sluit();
+});
