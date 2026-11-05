@@ -1279,7 +1279,8 @@ function sepaOverzicht(fdb, nu) {
     '(SELECT min(uitvoerdatum) FROM sepa_regel r WHERE r.batch = b.id) AS van, (SELECT max(uitvoerdatum) FROM sepa_regel r WHERE r.batch = b.id) AS tot FROM sepa_batch b ' +
     'WHERE b.wanneer >= ? ORDER BY b.wanneer DESC LIMIT 10').all(nuIso(nu - 60 * 86400000)).map((b) => ({ id: b.id, msg_id: b.msg_id, entiteit: b.entiteit, rekening: eind4(b.dbtr_iban),
     aantal: b.aantal, totaal_centen: b.totaal_centen, wanneer: b.wanneer, van: b.van, tot: b.tot, nog_ingevoerd: b.nog,
-    opnieuw_kan: nu - Date.parse(b.wanneer) <= SEPA_OPNIEUW_DAGEN * 86400000 && b.nog === b.aantal, specificatie: specStand(fdb, b.id, nu) }));
+    opnieuw_kan: nu - Date.parse(b.wanneer) <= SEPA_OPNIEUW_DAGEN * 86400000 && b.nog === b.aantal, specificatie: specStand(fdb, b.id, nu),
+    doorsturen: sepaDoorStand(fdb, b.id) || undefined }));
   return { formaat: S.FORMAAT, vroegst: g.vroegst, uiterst: g.uiterst, rekeningen: rek, batches };
 }
 // POST betaaldatum { id, datum | null }: de uitvoerdatum voor de batch (null = terug naar de standaard). Alleen de eigenaar (review wv1405 #11).
@@ -1375,7 +1376,10 @@ function sepaBatch(fdb, r, d, nu, o) {
     D.audit(fdb, { wie: r.wie, wat: 'sepa_batch', object_soort: 'sepa_batch', object_id: batchId, entiteit: s.rek.entiteit,
       na: { msg_id: msgId, rekening: s.rek.id, rekening_eind: eind4(s.rek.iban), formaat: S.FORMAAT, aantal: s.regels.length,
         per_datum: s.overzicht.per_datum.map((p) => [p.datum, p.aantal]), facturen: s.regels.map((t) => t.factuur), sha256: sha, bewust: Array.isArray(d.bewust) ? d.bewust.length : 0 }, wanneer });
-    return { batch: batchId, msg_id: msgId, bestand: { naam: sepaBestandNaam(s.e, vandaag, msgId), type: 'application/xml', inhoud: x.tekst, sha256: sha }, overzicht: s.overzicht };
+    // wv2465: een batch van Tolgaarde die David hier zelf maakte, krijgt in dezelfde transactie zijn verzendrij (zie sepaDoorReserveer)
+    const door = sepaDoorReserveer(fdb, r, { id: batchId, msg_id: msgId, entiteit: s.rek.entiteit }, o.sepaDoor, wanneer);
+    return Object.assign({ batch: batchId, msg_id: msgId, bestand: { naam: sepaBestandNaam(s.e, vandaag, msgId), type: 'application/xml', inhoud: x.tekst, sha256: sha }, overzicht: s.overzicht },
+      door ? { doorsturen: door } : {});
   });
 }
 // POST sepa-bestand { batch }: hetzelfde bestand opnieuw (zelfde MsgId en inhoud, byte voor byte; anders 409), binnen 30 dagen. Voor een
@@ -1503,6 +1507,125 @@ function specificatieUitkomst(fdb, r, id, u, nu) {
     D.audit(fdb, { wie: r.wie, wat: u.ok ? 'sepa_specificatie_klaar' : 'sepa_specificatie_mislukt', object_soort: 'sepa_batch', object_id: b.id, entiteit: b.entiteit,
       na: u.ok ? { concept_id: kort(u.concept_id, 60) } : Object.assign({ reden: kort(u.reden || 'het mailluik nam het concept niet aan', 160) }, u.onzeker ? { onzeker: true } : {}), wanneer: nuIso(nu) });
     return { specificatie: specStand(fdb, b.id, nu) };
+  });
+}
+// ─────────────────────── SEPA-batch van Tolgaarde zelf naar nogbetalen@ (wv2465) ───────────────────────
+
+/*
+ * wv2465 (David 5-11-2026 ± 12:00: "SEPA batches van Tolgaarde, mogen zodra ik ze aangemaakt heb, automatisch naar
+ * nogbetalen@huisartsentolgaarde.nl. Niet als concept, gewoon door."; Ja met verse vingerafdruk 12:21 op de aanvulling van grondwet 1).
+ * Cynthia voert de betalingen van Tolgaarde uit vanuit dat postvak. Alleen een batch met database-entiteit tolgaarde die David zelf in zijn
+ * app maakte (sepaBatch: eigenaar, app, verse vingerafdruk) krijgt in dezelfde transactie een rij in sepa_verzending ('wacht'); hetzelfde
+ * bestand opnieuw downloaden (sepaBestand) maakt er nooit een. server.js verstuurt via AI - Facturen-verzender (bron sepa, het eigen
+ * verzendgeheim): één mail aan alleen SEPA_DOOR.aan met het batchbestand (byte-gelijk aan de download: sha256 = sepa_batch.sha256) en de
+ * specificatie. De rij gaat vóór de aanroep naar 'verzenden' en nooit terug; geen antwoord = 'onzeker' (nooit opnieuw). Twijfel (batch
+ * veranderd, bestand niet exact opnieuw te maken, te lang gewacht, verzender afwijkend, schakelaar op concept) = een Gmail-concept.
+ */
+const SEPA_DOOR = Object.freeze({ entiteit: 'tolgaarde', aan: 'nogbetalen@huisartsentolgaarde.nl' });
+const SEPA_DOOR_MAX_UUR = 36;   // langer gewacht (pod uit, buiten het venster en daarna storing): niet meer "meteen" → concept
+const SEPA_DOOR_ZET = ['status', 'reden', 'verzonden_op', 'message_id', 'xml_sha256', 'pdf_sha256'];
+const SEPA_DOOR_STATUS = ['wacht', 'verzenden', 'verstuurd', 'onzeker', 'concept_bezig', 'concept', 'concept_mislukt', 'concept_onzeker'];
+function sepaDoorAanOk(aan) { return String(aan || '').trim().toLowerCase() === SEPA_DOOR.aan; }
+// In de transactie van sepaBatch. modus = 'auto' | 'concept' (server.js); anders, of een andere entiteit: geen rij.
+function sepaDoorReserveer(fdb, r, b, modus, wanneer) {
+  if (b.entiteit !== SEPA_DOOR.entiteit || (modus !== 'auto' && modus !== 'concept')) return null;
+  if (!isEig(r) || r.ingang !== 'app') return null;   // sepaBatch eist dit al; dubbel, want alleen een batch van David zelf
+  D.voegToe(fdb, 'sepa_verzending', { batch: b.id, msg_id: b.msg_id, entiteit: b.entiteit, modus, status: 'wacht', aan: SEPA_DOOR.aan, aangemaakt_op: wanneer, bijgewerkt_op: wanneer });
+  D.audit(fdb, { wie: r.wie, wat: 'sepa_door_wacht', object_soort: 'sepa_batch', object_id: b.id, entiteit: b.entiteit, na: { modus, aan: SEPA_DOOR.aan }, wanneer });
+  return { status: 'wacht', modus, aan: SEPA_DOOR.aan };
+}
+// Voor de app: { status, op, aan, reden } of null (geen rij: andere entiteit of van vóór wv2465)
+function sepaDoorStand(fdb, id) {
+  const v = fdb.db.prepare('SELECT status, modus, verzonden_op, bijgewerkt_op, reden FROM sepa_verzending WHERE batch = ?').get(id);
+  return v ? { status: v.status, modus: v.modus, op: v.verzonden_op || v.bijgewerkt_op, aan: SEPA_DOOR.aan, reden: v.status === 'verstuurd' ? null : v.reden || null } : null;
+}
+function sepaDoorOpen(fdb) {
+  return fdb.db.prepare("SELECT batch, modus, aangemaakt_op FROM sepa_verzending WHERE status = 'wacht' ORDER BY aangemaakt_op LIMIT 10").all();
+}
+// review wv2465 MOET 1: een rij die bleef staan op 'verzenden' of 'concept_bezig' (pod gestopt midden in de aanroep) → onzeker, nooit opnieuw
+const SEPA_DOOR_HANGT_MIN = 15;
+function sepaDoorHangend(fdb, nu) {
+  const grens = nuIso(nu - SEPA_DOOR_HANGT_MIN * 60000);
+  return fdb.db.prepare("SELECT batch, msg_id, status FROM sepa_verzending WHERE status IN ('verzenden','concept_bezig') AND bijgewerkt_op < ? ORDER BY aangemaakt_op LIMIT 10").all(grens);
+}
+function sepaDoorMail(b, spec, metXml, metPdf) {
+  const van = b.van, tot = b.tot;
+  const onderwerp = 'SEPA-batch Tolgaarde ' + b.msg_id + ' — ' + b.aantal + ' betaling' + (b.aantal === 1 ? '' : 'en') + ', ' + SP.eur(b.totaal_centen);
+  const bijl = metXml && metPdf ? 'het batchbestand (SEPA-XML, pain.001) en de specificatie per factuur (PDF)' : metXml ? 'het batchbestand (SEPA-XML, pain.001)' : 'de specificatie per factuur (PDF)';
+  const bericht = 'Hallo,\n\nHierbij een nieuwe SEPA-batch van Huisartsenpraktijk Tolgaarde om in de bank te uploaden:\n' +
+    '- ' + b.aantal + ' betaling' + (b.aantal === 1 ? '' : 'en') + ', samen ' + SP.eur(b.totaal_centen) + '\n' +
+    '- van de rekening eindigend op ' + String(b.dbtr_iban).slice(-4) + '\n' +
+    '- uitvoer ' + SP.datumNl(van) + (tot && tot !== van ? ' t/m ' + SP.datumNl(tot) : '') + '\n' +
+    '- kenmerk ' + b.msg_id + '\n\n' +
+    'In de bijlage ' + bijl + '. Controleer in de bank aantal en totaal voordat je ondertekent, en upload dit bestand maar één keer.\n\n' +
+    'Deze mail is automatisch verstuurd vanuit de Facturen-app, meteen nadat David de batch maakte.\n\nGroet,\nDavid';
+  return { onderwerp, bericht };
+}
+/*
+ * Voor server.js: de rij van 'wacht' naar 'verzenden' (actie versturen) of 'concept_bezig' (concept), in één transactie met alle toetsen.
+ * o = { nu, actie: 'versturen' | 'concept', reden?, stijlVoor }. Een toets die faalt maakt van versturen een concept (met reden).
+ * → { batch, actie, aan, ref, onderwerp, bericht, bijlagen: [{ naam, mime, bytes, sha256 }], reden } of null (rij niet meer op 'wacht').
+ */
+function sepaDoorVoorbereid(fdb, id, o) {
+  id = vraagId({ batch: id }, 'batch');
+  const nu = o.nu;
+  return D.transactie(fdb, function () {
+    const v = fdb.db.prepare('SELECT * FROM sepa_verzending WHERE batch = ?').get(id);
+    if (!v || v.status !== 'wacht') return null;
+    const b = fdb.db.prepare('SELECT b.*, (SELECT min(uitvoerdatum) FROM sepa_regel r WHERE r.batch = b.id) AS van, (SELECT max(uitvoerdatum) FROM sepa_regel r WHERE r.batch = b.id) AS tot ' +
+      'FROM sepa_batch b WHERE b.id = ?').get(id);
+    let actie = o.actie === 'versturen' && v.modus === 'auto' ? 'versturen' : 'concept';
+    let reden = o.actie === 'versturen' && v.modus !== 'auto' ? 'de pod staat op concept' : o.reden || null;
+    const twijfel = (t) => { if (actie === 'versturen') { actie = 'concept'; reden = t; } else if (!reden) reden = t; };
+    if (!b || b.entiteit !== SEPA_DOOR.entiteit || b.msg_id !== v.msg_id || v.entiteit !== SEPA_DOOR.entiteit) twijfel('de batch hoort niet bij Tolgaarde of past niet bij de rij');
+    if (!sepaDoorAanOk(v.aan)) twijfel('ander adres dan nogbetalen@');
+    if (nu - Date.parse(v.aangemaakt_op) > SEPA_DOOR_MAX_UUR * 3600000) twijfel('de batch wachtte langer dan ' + SEPA_DOOR_MAX_UUR + ' uur');
+    const bijlagen = [];
+    let xmlSha = null, pdfSha = null;
+    if (b) {
+      const lopend = Number(fdb.db.prepare('SELECT count(*) AS n FROM sepa_regel r JOIN factuur f ON f.id = r.factuur WHERE r.batch = ? AND ' + SEPA_LOPEND).get(b.id).n);
+      if (lopend !== b.aantal) twijfel('een betaling uit de batch is intussen veranderd');
+      const regels = fdb.db.prepare('SELECT * FROM sepa_regel WHERE batch = ? ORDER BY positie').all(b.id)
+        .map((x) => ({ factuur: x.factuur, datum: x.uitvoerdatum, centen: x.centen, iban: x.iban, naam: x.naam, rmt: json(x.rmt, null) }));
+      let x = null;
+      try { x = S.xml({ msg_id: b.msg_id, cre_dt_tm: b.cre_dt_tm, initg_naam: b.initg_naam, dbtr_naam: b.dbtr_naam, dbtr_iban: b.dbtr_iban, dbtr_bic: b.dbtr_bic }, regels); } catch (e) { x = null; }
+      if (x && S.sha256(x.tekst) === b.sha256) {
+        const e = fdb.db.prepare('SELECT * FROM entiteit WHERE sleutel = ?').get(b.entiteit) || { sleutel: b.entiteit };
+        xmlSha = b.sha256;
+        bijlagen.push({ naam: sepaBestandNaam(e, b.wanneer.slice(0, 10), b.msg_id), mime: 'application/xml', bytes: Buffer.from(x.tekst, 'utf8'), sha256: xmlSha });
+      } else twijfel('het batchbestand is niet exact opnieuw te maken; stuur het gedownloade bestand zelf mee');
+      try {
+        const m = specMaak(fdb, b.id, nu, o.stijlVoor);
+        pdfSha = m.s.sha256;
+        bijlagen.push({ naam: m.s.naam, mime: 'application/pdf', bytes: m.s.pdf, sha256: pdfSha });
+      } catch (e) { if (!(e instanceof RouteFout)) throw e; twijfel('de specificatie klopt niet met de batch'); }
+    }
+    if (actie === 'versturen' && bijlagen.length !== 2) twijfel('niet allebei de bijlagen');
+    const naar = actie === 'versturen' ? 'verzenden' : 'concept_bezig', wanneer = nuIso(nu);
+    const u = fdb.db.prepare('UPDATE sepa_verzending SET status = ?, reden = ?, xml_sha256 = ?, pdf_sha256 = ?, bijgewerkt_op = ? WHERE batch = ? AND status = ?')
+      .run(naar, reden ? kort(reden, 300) : null, xmlSha, pdfSha, wanneer, id, 'wacht');
+    if (Number(u.changes) !== 1) return null;
+    D.audit(fdb, { wie: 'pod (sepa-doorsturen)', wat: 'sepa_door_' + naar, object_soort: 'sepa_batch', object_id: id, entiteit: v.entiteit,
+      voor: { status: 'wacht' }, na: { aan: v.aan, xml_sha256: xmlSha, pdf_sha256: pdfSha, reden: reden || null }, wanneer });
+    if (!b) return { batch: id, actie, aan: v.aan, ref: v.msg_id, onderwerp: 'SEPA-batch Tolgaarde ' + v.msg_id, bericht: 'Batch niet gevonden.', bijlagen: [], reden };
+    const m = sepaDoorMail(b, null, !!xmlSha, !!pdfSha);
+    return { batch: id, actie, aan: v.aan, ref: v.msg_id, onderwerp: m.onderwerp, bericht: m.bericht, bijlagen, reden };
+  });
+}
+// Voor server.js: de stap na de aanroep. van → naar met velden (status-overgangen bewaakt de trigger). → true als de rij zo stond.
+function sepaDoorUitkomst(fdb, id, van, naar, velden, nu) {
+  id = vraagId({ batch: id }, 'batch');
+  if (!SEPA_DOOR_STATUS.includes(naar)) weiger(400, 'status ongeldig');
+  const z = Object.assign({}, velden || {}, { status: naar });
+  const k = Object.keys(z).filter((x) => SEPA_DOOR_ZET.includes(x));
+  return D.transactie(fdb, function () {
+    const u = fdb.db.prepare('UPDATE sepa_verzending SET ' + k.map((x) => x + ' = ?').join(', ') + ', bijgewerkt_op = ? WHERE batch = ? AND status = ?')
+      .run(...k.map((x) => (z[x] == null ? null : x === 'reden' ? kort(z[x], 300) : String(z[x]).slice(0, 80))), nuIso(nu), id, van);
+    if (Number(u.changes) !== 1) return false;
+    const v = fdb.db.prepare('SELECT entiteit, aan FROM sepa_verzending WHERE batch = ?').get(id);
+    D.audit(fdb, { wie: 'pod (sepa-doorsturen)', wat: 'sepa_door_' + naar, object_soort: 'sepa_batch', object_id: id, entiteit: v.entiteit,
+      voor: { status: van }, na: { aan: v.aan, message_id: z.message_id || null, reden: z.reden ? kort(z.reden, 160) : null }, wanneer: nuIso(nu) });
+    return true;
   });
 }
 // ─────────────────────── maandspecificatie PayPal en creditcard voor de boekhouder (wv2060) ───────────────────────
@@ -3409,7 +3532,8 @@ function maak(opties) {
       if (!ROUTES.POST.includes(rest)) weiger(404, 'onbekend');
       // schrijven alleen op de primaire kant (bouwplan § 8: netheid, de borging is dat de VPS geen database heeft)
       if (v.primair !== true) weiger(409, 'Facturen draait alleen op de primaire kant');
-      const vo = { versOk: typeof v.versOk === 'function' ? v.versOk : () => false, versVerbruik: typeof v.versVerbruik === 'function' ? v.versVerbruik : () => {}, uploadNeem: v.uploadNeem };
+      const vo = { versOk: typeof v.versOk === 'function' ? v.versOk : () => false, versVerbruik: typeof v.versVerbruik === 'function' ? v.versVerbruik : () => {}, uploadNeem: v.uploadNeem,
+        sepaDoor: v.sepaDoor };   // wv2465: 'auto' | 'concept' | anders niets (server.js FACTUREN_SEPA_DOOR)
       switch (rest) {
         case 'bevestig': return ok(bevestig(fdb, r, d, nu), 'bevestig ' + kort(d.id, 16));
         case 'terugdraaien': return ok(terugdraaien(fdb, r, d, nu), 'terugdraaien ' + kort(d.id, 16));
@@ -3478,7 +3602,17 @@ function maak(opties) {
     kaart: (x) => MS.kaartIcs(x),
     aan: !!MS,
   };
-  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, maandspec, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
+  // wv2465: SEPA-batch van Tolgaarde zelf naar nogbetalen@ (server.js doet de verzender, het mailluik en de berichten)
+  const sepaDoor = {
+    open: (fdb) => sepaDoorOpen(fdb),
+    hangend: (fdb, nu) => sepaDoorHangend(fdb, nu),
+    voorbereid: (fdb, id, o) => sepaDoorVoorbereid(fdb, id, Object.assign({ stijlVoor }, o)),
+    uitkomst: (fdb, id, van, naar, velden, nu) => sepaDoorUitkomst(fdb, id, van, naar, velden, nu),
+    stand: (fdb, id) => sepaDoorStand(fdb, id),
+    aanOk: sepaDoorAanOk,
+    AAN: SEPA_DOOR.aan, ENTITEIT: SEPA_DOOR.entiteit, MAX_UUR: SEPA_DOOR_MAX_UUR,
+  };
+  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, maandspec, sepaDoor, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
 }
 function ok(j, reden) { return { status: 200, j: Object.assign({ ok: true }, j), reden: reden || null }; }
 // Fouten naar een status. Triggers van facturen-db.js geven vaste teksten ("opdracht_prive: …"): die mogen door. Een CHECK of UNIQUE noemt

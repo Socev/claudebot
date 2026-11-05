@@ -128,7 +128,65 @@ const een = [{ naam: 'SLOEL - 2026033 - Huisartsenpraktijk Korte Geer.pdf', byte
   toets('pot ongewijzigd als boekstuk uit staat', r.json.toets.fout === null && r.json.toets.pad === 'pot', r.json.toets);
   r = await draai(pot({ aan: 'a.schaap@actasynergia.nl' }), een);
   toets('pot kan niet naar Andrés adres (lijsten per bron)', r.json.toets.status === 403, r.json.toets);
-  toets('server.js kent de vorige Toetsen-hash alleen voor pot (boekstuk eist de nieuwe)', /POT_VZ_TOETSEN_SHA_VORIG = '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7716d25994bfd241b02'/.test(fs.readFileSync('server.js', 'utf8')) && /\(!alleenNieuw && ts === POT_VZ_TOETSEN_SHA_VORIG\)/.test(fs.readFileSync('server.js', 'utf8')));
+  toets('server.js: vorige Toetsen-hash alleen voor pot, die van wv2316 voor pot en boekstuk, sepa eist de nieuwe', /POT_VZ_TOETSEN_SHA_VORIG = '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7716d25994bfd241b02'/.test(fs.readFileSync('server.js', 'utf8')) && /const POT_VZ_TOETSEN_BOEKSTUK = '8fec24893c22a23d54e56d8749b6c186d63897634e9e10608f97ee6336ddbcbb'/.test(fs.readFileSync('server.js', 'utf8')) && /if \(bron === 'sepa'\) return false;/.test(fs.readFileSync('server.js', 'utf8')));
+  // ── wv2465: bron sepa (één adres: nogbetalen@, precies één xml + één pdf, MsgId in het bestand, 07–23 elke dag, 6 per 24 uur) ──
+  const REF = 'SOCEV-20261105-0a1b2c3d';
+  const SXML = Buffer.from('<?xml version="1.0" encoding="UTF-8"?>\n<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.09">\n  <CstmrCdtTrfInitn>\n    <GrpHdr>\n      <MsgId>' + REF + '</MsgId>\n    </GrpHdr>\n  </CstmrCdtTrfInitn>\n</Document>\n');
+  const sp = (x) => Object.assign({ secret: NIEUW, bron: 'sepa', modus: 'versturen', ref: REF, aan: 'nogbetalen@huisartsentolgaarde.nl', onderwerp: 'SEPA-batch Tolgaarde ' + REF + ' — 2 betalingen, € 1.234,56', bericht: 'Hallo,\n\nHierbij ...', van: '"David Schaap" <dokterschaap@gmail.com>' }, x);
+  const twee = [{ naam: 'SEPA Tolgaarde 2026-11-05 0a1b2c3d.xml', bytes: SXML }, { naam: 'Specificatie SEPA Tolgaarde 2026-11-05 0a1b2c3d.pdf', bytes: PDF }];
+  const DO = Date.parse('2026-11-05T12:30:00Z'), ZA = Date.parse('2026-11-07T20:30:00Z');
+  let sdS = {};
+  r = await draai(sp(), twee, { nu: DO, sd: sdS });
+  toets('sepa + eigen geheim + nogbetalen@ + xml en pdf → in orde, pad pot (verzendtak), twee bijlagen, xml als application/xml', r.json.toets.fout === null && r.json.toets.pad === 'pot' && r.json.toets.aantal === 2 && r.json.toets.props === 'bijlage_0,bijlage_1' && r.binary.bijlage_0.mimeType === 'application/xml' && r.binary.bijlage_1.mimeType === 'application/pdf' && r.json.aan === 'nogbetalen@huisartsentolgaarde.nl' && r.json.ref === REF, r.json.toets);
+  toets('sepa: geslaagde toets telt mee voor het plafond', Array.isArray(sdS.sepa) && sdS.sepa.length === 1, sdS);
+  r = await draai(sp(), twee, { nu: ZA });
+  toets('sepa op zaterdagavond 21:30 → in orde (elke dag 07–23)', r.json.toets.fout === null, r.json.toets);
+  for (const [nu, wat] of [['2026-11-05T05:59:00Z', 'do 06:59'], ['2026-11-05T22:00:00Z', 'do 23:00'], ['2026-07-05T21:00:00Z', 'zomer 23:00']]) {
+    r = await draai(sp(), twee, { nu: Date.parse(nu) });
+    toets('sepa buiten 07–23 (' + wat + ') → 409 buiten_venster', r.json.toets.status === 409 && r.json.toets.code === 'buiten_venster', r.json.toets);
+  }
+  for (const aan of ['facturen@huisartsentolgaarde.nl', 'a.schaap@actasynergia.nl', 'd.schaap+facturentest@gmail.com', 'nogbetalen@huisartsentolgaarde.nl.example']) {
+    r = await draai(sp({ aan }), twee, { nu: DO });
+    toets('sepa: ander adres (' + aan + ') → 403 witte_lijst', r.json.toets.status === 403 && r.json.toets.code === 'witte_lijst' && !r.binary, r.json.toets);
+  }
+  r = await draai(sp({ aan: 'nogbetalen@huisartsentolgaarde.nl, iemand@anders.example' }), twee, { nu: DO });
+  toets('sepa: twee adressen → 400', r.json.toets.status === 400 && r.json.toets.code === 'aan', r.json.toets);
+  r = await draai(sp({ cc: 'nogbetalen@huisartsentolgaarde.nl' }), twee, { nu: DO });
+  toets('sepa: cc → 400', r.json.toets.status === 400 && r.json.toets.code === 'veld', r.json.toets);
+  r = await draai(sp({ secret: OUD }), twee, { nu: DO });
+  toets('sepa met het oude geheim → 401', r.json.toets.status === 401 && r.json.toets.code === 'secret', r.json.toets);
+  r = await draai(sp({ modus: 'concept' }), twee, { nu: DO });
+  toets('sepa met modus concept → geweigerd, geen pad pot', r.json.toets.fout !== null && r.json.toets.pad !== 'pot', r.json.toets);
+  r = await draai(sp({ van: 'iemand@anders.example' }), twee, { nu: DO });
+  toets('sepa: andere afzender → 400', r.json.toets.status === 400 && r.json.toets.code === 'van', r.json.toets);
+  r = await draai(sp({ ref: 'POT12' }), twee, { nu: DO });
+  toets('sepa: ref geen MsgId → 400', r.json.toets.status === 400 && r.json.toets.code === 'ref', r.json.toets);
+  r = await draai(sp({ onderwerp: 'SEPA-batch Groenhouten ' + REF }), twee, { nu: DO });
+  toets('sepa: onderwerp niet "SEPA-batch Tolgaarde <ref>" → 400', r.json.toets.status === 400 && r.json.toets.code === 'onderwerp', r.json.toets);
+  r = await draai(sp(), [twee[0]], { nu: DO });
+  toets('sepa: alleen de xml → 400', r.json.toets.status === 400 && r.json.toets.code === 'bijlagen', r.json.toets);
+  r = await draai(sp(), [twee[1], { naam: 'tweede.pdf', bytes: PDF }], { nu: DO });
+  toets('sepa: twee pdf\'s → 400', r.json.toets.status === 400 && r.json.toets.code === 'bijlagen', r.json.toets);
+  r = await draai(sp(), [twee[0], { naam: 'x.940', bytes: Buffer.from(':20:') }], { nu: DO });
+  toets('sepa: MT940 in plaats van pdf → 400', r.json.toets.status === 400 && r.json.toets.code === 'bijlagen', r.json.toets);
+  r = await draai(sp({ ref: 'SOCEV-20261105-ffffffff', onderwerp: 'SEPA-batch Tolgaarde SOCEV-20261105-ffffffff' }), twee, { nu: DO });
+  toets('sepa: MsgId in het bestand ≠ ref → 400', r.json.toets.status === 400 && r.json.toets.code === 'bijlagen', r.json.toets);
+  r = await draai(sp(), [{ naam: 'x.xml', bytes: Buffer.from('<a/>') }, twee[1]], { nu: DO });
+  toets('sepa: xml zonder pain.001 → 400', r.json.toets.status === 400 && r.json.toets.code === 'bijlagen', r.json.toets);
+  r = await draai(sp(), [{ naam: 'groot.xml', bytes: Buffer.concat([SXML, Buffer.alloc(1100 * 1024)]) }, twee[1]], { nu: DO });
+  toets('sepa: xml groter dan 1 MB → 400', r.json.toets.status === 400 && r.json.toets.code === 'bijlagen', r.json.toets);
+  r = await draai(sp(), twee, { nu: DO, sd: { sepa: Array.from({ length: 6 }, () => DO - 1000) } });
+  toets('sepa: plafond 6 per 24 uur → 429', r.json.toets.status === 429 && r.json.toets.code === 'plafond', r.json.toets);
+  r = await draai(sp(), twee, { nu: DO, code: code.replace('const VERSTUREN_SEPA = true;', 'const VERSTUREN_SEPA = false;') });
+  toets('sepa: VERSTUREN_SEPA uit → 409', r.json.toets.status === 409 && r.json.toets.code === 'versturen_uit', r.json.toets);
+  r = await draai(pot({ aan: 'nogbetalen@huisartsentolgaarde.nl' }), een);
+  toets('pot kan niet naar nogbetalen@ (lijsten per bron)', r.json.toets.status === 403, r.json.toets);
+  r = await draai(bs({ aan: 'nogbetalen@huisartsentolgaarde.nl' }), bsPdf);
+  toets('boekstuk kan niet naar nogbetalen@', r.json.toets.status === 403, r.json.toets);
+  r = await draai({ secret: OUD, modus: 'concept', aan: 'nogbetalen@huisartsentolgaarde.nl', token: 'FV0123456789abcdef', onderwerp: 'x [ref FV0123456789abcdef]', bericht: 'b' }, twee);
+  toets('facturen kan niet naar nogbetalen@', r.json.toets.status === 403, r.json.toets);
+  r = await draai(pot(), een);
+  toets('pot ongewijzigd na bron sepa', r.json.toets.fout === null && r.json.toets.pad === 'pot' && r.json.toets.aantal === 1, r.json.toets);
   const sj = fs.readFileSync('server.js', 'utf8');
   const m = /const POT_VZ_TOETSEN_SHA = process\.env\.POT_VZ_TOETSEN_SHA_TOETS \|\| '([0-9a-f]{64})'/.exec(sj);
   toets('POT_VZ_TOETSEN_SHA in server.js = sha256 van dit bestand', m && m[1] === crypto.createHash('sha256').update(code).digest('hex'), m && m[1]);

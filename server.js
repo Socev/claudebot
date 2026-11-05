@@ -15647,7 +15647,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), boekstuk: typeof bsInfo === 'function' ? bsInfo() : undefined, waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel, jaaropgaaf: !!docplanJaaropgaaf } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), boekstuk: typeof bsInfo === 'function' ? bsInfo() : undefined, sepa_door: typeof sdInfo === 'function' ? sdInfo() : undefined, waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel, jaaropgaaf: !!docplanJaaropgaaf } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -15812,11 +15812,14 @@ async function appFacturen(req, res, a, s, d, route) {
   }
   const r = facturenRoutes.app(fdb, { methode: req.method, pad: pad, d: d || {}, rol: rol, primair: rolPrimair(),
     versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; },
-    uploadNeem: function (b, n) { return facturenUploadNeem(a, b, n); }, bankluisPad: FACTUREN_BANKLUIS });
+    uploadNeem: function (b, n) { return facturenUploadNeem(a, b, n); }, bankluisPad: FACTUREN_BANKLUIS,
+    sepaDoor: typeof sdModus === 'function' ? sdModus() : null });   // wv2465
   if (req.method === 'GET' && pad.indexOf('/app/facturen/document/') !== 0 && r.status === 200) res._app.stil = true;
   if (req.method !== 'GET' && r.status === 200) facturenKaartPlan(3000);   // wv1705: verzamelkaart bijwerken (bevestigen, terugdraaien, upload)
   // wv2025: na een nieuwe batch (bestand gemaakt) het concept met de specificatie op de achtergrond; het antwoord wacht er niet op
   if (req.method === 'POST' && pad === '/app/facturen/sepa-batch' && r.status === 200 && r.j && r.j.batch && r.j.bestand) r.j.specificatie = facturenSpecNaBatch(fdb, rol, r.j.batch);
+  // wv2465: een Tolgaarde-batch gaat meteen naar nogbetalen@ (de rij staat al op 'wacht'); het antwoord wacht er niet op
+  if (req.method === 'POST' && pad === '/app/facturen/sepa-batch' && r.status === 200 && r.j && r.j.doorsturen && typeof sdPlan === 'function') sdPlan(1500);
   // wv2060: na een ICS-overzicht in Uploads de kaart "ICS — transacties uploaden" bijwerken (dicht als het overzicht nu binnen is)
   if (req.method === 'POST' && pad === '/app/facturen/upload' && r.status === 200 && r.j && r.j.soort === 'creditcard') facturenMaandspecKaartPlan(1500);
   res._app.reden = 'facturen ' + (r.reden || pad.slice('/app/facturen'.length) || '/');
@@ -15880,8 +15883,10 @@ async function facturenSpecMailluik(c) {
   const zeker = function (m, reden) { const e = new Error(m); e.zeker = true; e.reden = reden; return e; };
   const geheim = process.env.N8N_WEBHOOK_MAILCONCEPT;
   if (!geheim) throw zeker('mailluik niet ingericht', 'het mailluik is op de pod niet ingericht');
+  // wv2465: ook meerdere bijlagen (c.bijlagen: SEPA-batch + specificatie); anders de ene c.bijlage
+  const bijl = Array.isArray(c.bijlagen) ? c.bijlagen : [c.bijlage];
   const body = JSON.stringify({ secret: geheim, aan: c.aan, onderwerp: String(c.onderwerp || '').slice(0, 150), bericht: String(c.bericht || '').slice(0, 6000),
-    bijlagen: [{ naam: c.bijlage.naam, mime: c.bijlage.mime, inhoud_base64: c.bijlage.inhoud_base64 }] });
+    bijlagen: bijl.map(function (b) { return { naam: b.naam, mime: b.mime, inhoud_base64: b.inhoud_base64 }; }) });
   for (let poging = 0; poging < 2; poging++) {
     let url;
     try { url = await appWebhookUrl(POT_AF_MAILWF, null, 'potMailUrl', poging > 0); } catch (e) { throw zeker('mailluik-webhook niet gevonden', 'het mailluik is niet te vinden'); }
@@ -15897,7 +15902,7 @@ async function facturenSpecMailluik(c) {
     if (!r.ok) throw new Error('mailconcept http ' + r.status);
     const antw = await r.json();
     if (!antw || antw.ok !== true || typeof antw.concept_id !== 'string') throw new Error('mailconcept zonder concept_id');
-    if (antw.bijlagen !== 1) throw new Error('mailconcept zonder de bijlage');
+    if (antw.bijlagen !== bijl.length) throw new Error('mailconcept zonder de bijlage');
     return antw;
   }
   throw zeker('mailluik-webhook niet gevonden', 'het mailluik is niet te vinden');
@@ -22884,10 +22889,19 @@ function potVzInfo() {
 const POT_VZ_GEHEIM_NAAM = 'n8n_verzender_versturen_secret';
 // sha256 van de jsCode van de Code-knoop Toetsen in AI - Facturen-verzender, zoals gepubliceerd door wv921. Wijkt de workflow af, dan
 // verstuurt de pod niets en wordt alles concept (Fable #10). Bewuste wijziging aan de verzender = deze waarde mee wijzigen (nieuw image).
-const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '8fec24893c22a23d54e56d8749b6c186d63897634e9e10608f97ee6336ddbcbb';
+const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '6edfee1f08f03f851ba596c9c59f644694951e0894c0c3d43766f7d205746cb6';
 // wv2316: de versie van vóór bron boekstuk telt voor pot nog mee, zodat image en gepubliceerde workflow niet op dezelfde minuut hoeven te
 // wisselen; het boekstuk eist de nieuwe (potVzVerzenderOk(true)). Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
 const POT_VZ_TOETSEN_SHA_VORIG = '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7716d25994bfd241b02';
+// wv2465: welke gepubliceerde Toetsen-code welke bron mag bedienen. Bron sepa eist de nieuwe; boekstuk en pot werken ook nog met de vorige
+// (8fec2489…, wv2316) zolang image en workflow niet op dezelfde minuut wisselen. Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
+const POT_VZ_TOETSEN_BOEKSTUK = '8fec24893c22a23d54e56d8749b6c186d63897634e9e10608f97ee6336ddbcbb';
+function potVzToetsenMag(ts, bron) {
+  if (ts === POT_VZ_TOETSEN_SHA) return true;
+  if (bron === 'sepa') return false;
+  if (ts === POT_VZ_TOETSEN_BOEKSTUK) return true;
+  return bron === 'pot' && ts === POT_VZ_TOETSEN_SHA_VORIG;
+}
 let potVzGeheimCache = null;   // { w, tot }
 async function potVzVerzendGeheim() {
   if (potVzGeheimCache && Date.now() < potVzGeheimCache.tot) return potVzGeheimCache.w;
@@ -22909,6 +22923,7 @@ async function potVzVerzendGeheim() {
 const POT_VZ_MERK_SHA = process.env.POT_VZ_MERK_SHA_TOETS || '92594dfa5edd9ea7b656dd1b4a8c1f831b86c22e0de42d7fa53c0f303b6117bb';
 const POT_VZ_GEHEIM_SHA = '675ccb2c6d979175f015301fb6b6614ccc2952f5f2f7a855a0262fd7b84019c9';
 async function potVzVerzenderOk(alleenNieuw) {
+  const bron = typeof alleenNieuw === 'string' ? alleenNieuw : alleenNieuw ? 'boekstuk' : 'pot';   // wv2465: true = boekstuk (oud gebruik)
   const w = await appN8n('/workflows/' + encodeURIComponent(FACTUREN_VERZENDER_WF));
   if (!w || !Array.isArray(w.nodes)) throw new Error('verzender niet te lezen');
   if (w.active !== true) return false;
@@ -22919,7 +22934,7 @@ async function potVzVerzenderOk(alleenNieuw) {
   const c = (((i.parameters || {}).conditions || {}).conditions) || [];
   const ifOk = c.length === 1 && c[0].rightValue === POT_VZ_GEHEIM_SHA && c[0].operator && c[0].operator.operation === 'equals' && ((i.parameters.conditions || {}).combinator === 'and');
   const ts = sha(t.parameters.jsCode);
-  return ifOk && (ts === POT_VZ_TOETSEN_SHA || (!alleenNieuw && ts === POT_VZ_TOETSEN_SHA_VORIG)) && sha(m.parameters.jsCode) === POT_VZ_MERK_SHA;
+  return ifOk && potVzToetsenMag(ts, bron) && sha(m.parameters.jsCode) === POT_VZ_MERK_SHA;
 }
 // { bron, modus, ref, aan, cc, onderwerp, bericht, van, bijlage: { naam, bytes } } → { status, j }. Vóór de aanroep mislukt = zekerNietVerstuurd.
 async function potVzVerstuur(v) {
@@ -22933,7 +22948,10 @@ async function potVzVerstuur(v) {
     const fd = new FormData();
     fd.append('secret', geheim);
     ['bron', 'modus', 'ref', 'aan', 'cc', 'onderwerp', 'bericht', 'van'].forEach(function (k) { if (v[k] != null && v[k] !== '') fd.append(k, String(v[k])); });
-    fd.append('bijlage', new Blob([v.bijlage.bytes], { type: 'application/pdf' }), v.bijlage.naam);
+    // wv2465: bron sepa stuurt twee bestanden (XML + PDF); de rest één PDF
+    (Array.isArray(v.bijlagen) ? v.bijlagen : [Object.assign({ mime: 'application/pdf' }, v.bijlage)]).forEach(function (b) {
+      fd.append('bijlage', new Blob([b.bytes], { type: b.mime || 'application/pdf' }), b.naam);   // zelfde veldnaam als de koerier (bewezen met meer bijlagen)
+    });
     const r = await fetch(url, { method: 'POST', body: fd, signal: AbortSignal.timeout(120000) });
     if (r.status === 404 && poging === 0) { try { await r.arrayBuffer(); } catch (e) {} continue; }   // webhook niet geregistreerd: er is niets verstuurd
     let j = null;
@@ -23211,6 +23229,146 @@ async function bsTik() {
   } finally { bsStaat.bezig = false; }
 }
 setInterval(function () { bsTik().catch(function (e) { logError('facturen-boekstuk', e); }); }, BS_TIK_MS).unref();
+// ── wv2465: SEPA-batch van Tolgaarde meteen zelf naar nogbetalen@ (David 5-11-2026 ± 12:00; Ja met verse vingerafdruk 12:21) ─────────────
+// Grondwet 1, aanvulling 5-11-2026. De logica en de staat staan in facturen.js (sepaDoor: rij in sepa_verzending, gemaakt in de transactie
+// van de batch). Hier: na elke batch (sdPlan) en elke 10 minuten (vangnet na een herstart) de rijen op 'wacht' afwerken, alleen op de
+// primaire kant. Versturen via AI - Facturen-verzender bron sepa met het eigen verzendgeheim van pot (geen nieuw geheim), alleen tussen
+// 07:00 en 23:00 (stille uren: dan om 07:00), alleen als de gepubliceerde Toetsen-code bron sepa kent. Anders, of bij twijfel: een
+// Gmail-concept aan hetzelfde adres via het mailluik + één regel aan David. Geen antwoord van de verzender = 'onzeker': nooit opnieuw,
+// één regel aan David. Schakelaar FACTUREN_SEPA_DOOR: uit = niets (geen rij), concept = alleen concepten, anders automatisch.
+const SD_TIK_MS = 10 * 60 * 1000;
+const SD_VAN = '"David Schaap" <dokterschaap@gmail.com>';   // zelfde afzender als bron pot en boekstuk (POT_VAN in de Toetsen-code)
+const sdStaat = { bezig: false, opnieuw: false, laatste: null, uitkomst: null, fouten_op_rij: 0, timer: null };
+function sdModus() { const w = String(process.env.FACTUREN_SEPA_DOOR || '').trim().toLowerCase(); return w === 'uit' ? 'uit' : w === 'concept' ? 'concept' : 'auto'; }
+function sdAan() { return !!facturenRoutes && !!facturenRoutes.sepaDoor && SERVER_ECHT && rolPrimair() && sdModus() !== 'uit'; }
+// 07:00–23:00 Amsterdam, elke dag (zelfde venster als bron sepa in de Toetsen-code)
+function sdVenster(ms) { const u = Number(new Date(ms).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' })); return u >= 7 && u < 23; }
+function sdPlan(ms) {
+  if (sdStaat.timer) return;
+  sdStaat.timer = setTimeout(function () { sdStaat.timer = null; sdTik().catch(function (e) { logError('facturen-sepa-door', e); }); }, ms || 1500);
+  sdStaat.timer.unref();
+}
+async function sdBericht(tekst) {
+  const r = await berichtIntern({ kanaal: 'hoofd', bron: 'facturen-sepa-door', klasse: 'normaal', soort: 'dag', tekst: tekst, sleutel: 'facturen-sepa-door-' + crypto.createHash('sha256').update(tekst).digest('hex').slice(0, 16) });
+  if (!r || r.status !== 200) throw new Error('bericht niet bezorgd (' + (r && r.status) + ')');
+}
+function sdMeld(tekst) { sdBericht(tekst).catch(function (e) { logError('facturen-sepa-door', e); }); }
+function sdKenmerk(ref) { return '…' + String(ref || '').slice(-8); }
+function sdUit(fdb, id, van, naar, velden) {
+  const ok = facturenRoutes.sepaDoor.uitkomst(fdb, id, van, naar, velden, Date.now());
+  if (!ok) logError('facturen-sepa-door', new Error('rij ' + id + ' stond niet op ' + van + ' (naar ' + naar + ')'));
+  return ok;
+}
+// Concept aan nogbetalen@ (zelfde mailluik als de specificatie). v = uitkomst van voorbereid met actie concept (rij staat op concept_bezig).
+async function sdConcept(fdb, v) {
+  let st, reden = null;
+  try {
+    if (!v.bijlagen.length) throw Object.assign(new Error('geen bijlagen'), { zeker: true, reden: 'geen bijlagen' });
+    // review wv2465 ZOU 1: ook het concept alleen naar de vaste constante, nooit naar wat in de rij staat
+    const antw = await facturenSpecMailluik({ aan: facturenRoutes.sepaDoor.AAN, onderwerp: v.onderwerp, bericht: v.bericht,
+      bijlagen: v.bijlagen.map(function (b) { return { naam: b.naam, mime: b.mime, inhoud_base64: Buffer.from(b.bytes).toString('base64') }; }) });
+    st = 'concept'; reden = v.reden || null;
+    if (antw && antw.concept_id) reden = (reden ? reden + ' · ' : '') + 'concept ' + String(antw.concept_id).slice(0, 40);
+  } catch (e) {
+    st = e && e.zeker ? 'concept_mislukt' : 'concept_onzeker';
+    reden = (v.reden ? v.reden + ' · ' : '') + (e && e.reden ? e.reden : String(e && e.message || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120));
+  }
+  sdUit(fdb, v.batch, 'concept_bezig', st, { reden: reden });
+  const k = sdKenmerk(v.ref);
+  sdMeld(st === 'concept'
+    ? 'De SEPA-batch van Tolgaarde (kenmerk ' + k + ') ging niet vanzelf naar nogbetalen@' + (v.reden ? ' (' + v.reden + ')' : '') + '. Hij staat als concept in Gmail; nakijken en versturen doe je zelf.'
+    : st === 'concept_onzeker'
+      ? 'De SEPA-batch van Tolgaarde (kenmerk ' + k + ') ging niet vanzelf naar nogbetalen@, en of het concept in Gmail staat is niet zeker. Kijk bij Concepten; staat hij er niet, stuur het gedownloade bestand dan zelf.'
+      : 'De SEPA-batch van Tolgaarde (kenmerk ' + k + ') ging niet naar nogbetalen@ en ook het concept lukte niet. Stuur het gedownloade bestand en de specificatie zelf.');
+  return st;
+}
+async function sdEen(fdb, rij) {
+  const t = Date.now();
+  const modus = sdModus();
+  // nog niet: buiten 07–23 en nog niet te oud → volgende tik
+  const oud = t - Date.parse(rij.aangemaakt_op) > facturenRoutes.sepaDoor.MAX_UUR * 3600000;
+  if (rij.modus === 'auto' && modus === 'auto' && !sdVenster(t) && !oud) return 'wacht';
+  let actie = rij.modus === 'auto' && modus === 'auto' ? 'versturen' : 'concept', reden = actie === 'concept' ? 'de pod staat op concept' : null;
+  if (actie === 'versturen') {
+    let ok = false, geheim = null;
+    try { ok = await potVzVerzenderOk('sepa'); } catch (e) { ok = false; }
+    if (!ok) { actie = 'concept'; reden = 'de verzender kent bron sepa niet of wijkt af van het image'; }
+    else {
+      try { geheim = await potVzVerzendGeheim(); } catch (e) { geheim = null; }
+      if (!geheim) { actie = 'concept'; reden = 'het verzendgeheim is niet te lezen'; }
+    }
+  }
+  const v = facturenRoutes.sepaDoor.voorbereid(fdb, rij.batch, { nu: t, actie: actie, reden: reden });
+  if (!v) return 'al';
+  if (v.actie === 'concept') return sdConcept(fdb, v);
+  // allowlist-toets vóór de aanroep (de verzender toetst nog eens): alleen het ene adres
+  if (!facturenRoutes.sepaDoor.aanOk(v.aan)) {
+    sdUit(fdb, v.batch, 'verzenden', 'concept_bezig', { reden: 'ander adres dan nogbetalen@' });
+    return sdConcept(fdb, Object.assign({}, v, { reden: 'ander adres dan nogbetalen@' }));
+  }
+  let a;
+  try { a = await potVzVerstuur({ bron: 'sepa', modus: 'versturen', ref: v.ref, aan: facturenRoutes.sepaDoor.AAN, onderwerp: v.onderwerp, bericht: v.bericht, van: SD_VAN,
+    bijlagen: v.bijlagen.map(function (b) { return { naam: b.naam, mime: b.mime, bytes: b.bytes }; }) }); }
+  catch (e) { a = e && e.zekerNietVerstuurd ? { status: -1, j: { ok: false, code: e.code || 'vooraf', fout: String(e.message || '').slice(0, 80) } } : { status: 0, j: null }; }
+  const j = a && a.j;
+  if (a && a.status === 200 && j && j.ok === true && typeof j.message_id === 'string' && j.message_id) {
+    sdUit(fdb, v.batch, 'verzenden', 'verstuurd', { message_id: j.message_id, verzonden_op: new Date().toISOString() });
+    schrijfLog(nu() + ' facturen-sepa-door verstuurd ' + velden({ batch: v.batch, bijlagen: j.bijlagen }));
+    return 'verstuurd';
+  }
+  // zeker niet verstuurd: vóór de aanroep, een weigering van Toetsen (4xx) of Gmail weigerde het concept → concept via het mailluik
+  const zeker = a && j && j.ok === false && (a.status === -1 || (a.status >= 400 && a.status < 500) || (a.status === 502 && j.code === 'gmail_concept'));
+  if (zeker) {
+    const r = 'de verzender verstuurde niet (' + (a.status === -1 ? 'vooraf' : a.status) + (j.code ? ' ' + String(j.code).slice(0, 30) : '') + ')';
+    sdUit(fdb, v.batch, 'verzenden', 'concept_bezig', { reden: r });
+    return sdConcept(fdb, Object.assign({}, v, { reden: r }));
+  }
+  sdUit(fdb, v.batch, 'verzenden', 'onzeker', { reden: 'geen bevestiging van de verzender (' + (a ? a.status : '?') + (j && j.code ? ' ' + String(j.code).slice(0, 30) : '') + ')' });
+  sdMeld('Niet zeker of de SEPA-batch van Tolgaarde (kenmerk ' + sdKenmerk(v.ref) + ') naar nogbetalen@ ging: de verzender gaf geen bevestiging. Kijk in Gmail bij Verzonden (en Concepten); ik stuur hem niet nog eens.');
+  return 'onzeker';
+}
+async function sdTik() {
+  if (!sdAan()) return;
+  if (sdStaat.bezig) { sdStaat.opnieuw = true; return; }
+  const fdb = facturenOpen();
+  if (!fdb) return;
+  sdStaat.bezig = true;
+  try {
+    // review wv2465 MOET 1: halverwege gestopt (herstart tijdens de aanroep) → onzeker, één regel, nooit opnieuw
+    for (const h of facturenRoutes.sepaDoor.hangend(fdb, Date.now())) {
+      const naar = h.status === 'verzenden' ? 'onzeker' : 'concept_onzeker';
+      if (sdUit(fdb, h.batch, h.status, naar, { reden: 'de pod stopte midden in het ' + (h.status === 'verzenden' ? 'versturen' : 'klaarzetten van het concept') })) {
+        sdMeld(h.status === 'verzenden'
+          ? 'Niet zeker of de SEPA-batch van Tolgaarde (kenmerk ' + sdKenmerk(h.msg_id) + ') naar nogbetalen@ ging: de pod stopte midden in het versturen. Kijk in Gmail bij Verzonden (en Concepten); ik stuur hem niet nog eens.'
+          : 'De SEPA-batch van Tolgaarde (kenmerk ' + sdKenmerk(h.msg_id) + ') ging niet vanzelf naar nogbetalen@, en of het concept in Gmail staat is niet zeker (de pod stopte halverwege). Kijk bij Concepten; staat hij er niet, stuur het gedownloade bestand dan zelf.');
+      }
+    }
+    do {
+      sdStaat.opnieuw = false;
+      for (const rij of facturenRoutes.sepaDoor.open(fdb)) {
+        const st = await sdEen(fdb, rij);
+        if (st !== 'wacht' && st !== 'al') { sdStaat.uitkomst = { batch: rij.batch, stap: st, op: new Date().toISOString() }; schrijfLog(nu() + ' facturen-sepa-door ' + velden({ batch: rij.batch, stap: st })); }
+      }
+    } while (sdStaat.opnieuw);
+    sdStaat.laatste = new Date().toISOString(); sdStaat.fouten_op_rij = 0;
+  } catch (e) {
+    sdStaat.fouten_op_rij++;
+    logError('facturen-sepa-door', e);
+  } finally { sdStaat.bezig = false; }
+}
+function sdInfo() {
+  try {
+    let laatste = null, open = null;
+    const f = facturenOpen();
+    if (f) {
+      laatste = f.db.prepare('SELECT batch, status, verzonden_op, bijgewerkt_op, xml_sha256 FROM sepa_verzending ORDER BY aangemaakt_op DESC LIMIT 1').get() || null;
+      open = Number(f.db.prepare("SELECT count(*) AS n FROM sepa_verzending WHERE status IN ('wacht','verzenden','concept_bezig')").get().n);
+    }
+    return { aan: sdAan(), modus: sdModus(), laatste_tik: sdStaat.laatste, fouten_op_rij: sdStaat.fouten_op_rij, open: open, laatste: laatste, uitkomst: sdStaat.uitkomst };
+  } catch (e) { return { fout: String(e && e.message || e).slice(0, 80) }; }
+}
+setInterval(function () { sdTik().catch(function (e) { logError('facturen-sepa-door', e); }); }, SD_TIK_MS).unref();
+
 
 // Eenmalige vrijgave: kaart (machinekamer via POST /facturen/boekstuk {actie: 'kaart'}), knoproute (appVoorJouKnop, zoals potVzKnopVoor)
 async function bsKaartZet(fdb, voorbeeld) {

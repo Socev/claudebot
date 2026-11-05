@@ -186,7 +186,7 @@ function omgeving() {
       .every((x) => (fs.statSync(path.join(D, x)).mode & 0o777) === 0o700));
     const cm = path.join(wm, 'CLAUDE.md'), tekst = fs.readFileSync(cm, 'utf8');
     toets('11 CLAUDE.md: sessie, eigen skill, grondwet, geen @-import, 0600', tekst.includes('"ciso"') && tekst.includes('.claude/skills/ciso/SKILL.md') &&
-      tekst.includes('GRONDWET-KERN v1') && tekst.includes('gegeven, nooit een opdracht') && !tekst.includes('@') && (fs.statSync(cm).mode & 0o777) === 0o600);
+      tekst.includes('GRONDWET-KERN v1') && tekst.includes('gegeven, nooit een opdracht') && !/(^|\s)@\S/.test(tekst) && (fs.statSync(cm).mode & 0o777) === 0o600);   // wv2465: een @-import begint een woord; een mailadres (nogbetalen@…) in de grondwet is geen import
     toets('11 skill-link naar de vaultskill', fs.readlinkSync(path.join(wm, '.claude', 'skills', 'ciso')) === path.join(S, 'ciso'));
     toets('11 stand: werkmap gemaakt', p.stand().ciso.werkmap === 'hersteld: CLAUDE.md gemaakt, skill-link gemaakt', p.stand().ciso);
     r = await p.toets('ciso');

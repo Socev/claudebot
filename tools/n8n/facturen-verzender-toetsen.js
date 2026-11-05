@@ -26,6 +26,15 @@
 // 10. VERSTUREN_BOEKSTUK: schakelaar (false = 409). Plafond BOEKSTUK_PER_30D per 30 dagen (elke geslaagde toets telt, ook als Gmail
 //     daarna faalt); zelfde venster als pot (werkdag 09:00–12:00). Precies één PDF ≤ 250 KB; onderwerp begint met
 //     "Boekstuk Google Home Premium Advanced"; bericht ≤ 1000; ref = BS of BSP + JJJJMM.
+//
+// Bron sepa (wv2465, David Ja 5-11-2026 12:21 met verse vingerafdruk; grondwet 1, aanvulling 5-11-2026): een SEPA-batch van Tolgaarde die
+// David zelf in de Facturen-app maakte, meteen naar nogbetalen@ (Cynthia voert de betalingen daar uit).
+// 11. Zelfde eigen verzendgeheim als bron pot (geen nieuw geheim); alleen modus versturen. AAN_SEPA: precies dat ene adres. Geen cc, bcc,
+//     draad of antwoordadres; afzender alleen POT_VAN. ref = MsgId van de batch (SOCEV-JJJJMMDD-8 hex); onderwerp begint met
+//     "SEPA-batch Tolgaarde <ref>"; bericht ≤ 2000.
+// 12. VERSTUREN_SEPA: schakelaar (false = 409). Plafond SEPA_PER_DAG per 24 uur (elke geslaagde toets telt) en het gedeelde dagplafond;
+//     elke dag 07:00–23:00 Amsterdam (409 buiten_venster). Precies twee bestanden: één .xml (begint met <?xml, pain.001, met
+//     <MsgId>ref</MsgId>, ≤ 1 MB) en één .pdf (%PDF, ≤ 1 MB).
 // Haalt nooit iets op. Fout → { toets: { fout, code, status } } zonder binaire data; de workflow antwoordt dan met die status.
 // De pod vergelijkt vóór elke batch de sha256 van déze code met de waarde in zijn image (Fable #10): wie hier iets wijzigt, zet de
 // automatische verzending stil tot het image mee is gewijzigd.
@@ -47,6 +56,10 @@ const AAN_BOEKSTUK = ['a.schaap@actasynergia.nl', 'd.schaap+facturentest@gmail.c
 const VERSTUREN_BOEKSTUK = true;
 const BOEKSTUK_PER_30D = 2;
 const BOEKSTUK_PDF_MAX = 250 * 1024;
+const AAN_SEPA = ['nogbetalen@huisartsentolgaarde.nl'];   // wv2465: alleen het betaalpostvak van Tolgaarde
+const VERSTUREN_SEPA = true;
+const SEPA_PER_DAG = 6;
+const SEPA_MAX = 1024 * 1024;
 
 function zichtbaar(ch) {
   const c = ch.codePointAt(0);
@@ -73,6 +86,10 @@ function venster(ms) {   // werkdag 09:00–12:00 Europe/Amsterdam; zelfde feest
   const wd = new Date(ymd + 'T12:00:00Z').getUTCDay();
   return wd !== 0 && wd !== 6 && !feest && uur >= 9 && uur < 12;
 }
+function vensterSepa(ms) {   // elke dag 07:00–23:00 Europe/Amsterdam (stille uren)
+  const uur = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(new Date(ms)));
+  return uur >= 7 && uur < 23;
+}
 const adressen = (x) => String(x ?? '').split(',').map((a) => a.trim().toLowerCase()).filter(Boolean);
 
 const nu = Date.now();
@@ -90,9 +107,9 @@ const onderwerp = String(body.onderwerp ?? '');
 let aan = String(body.aan ?? '').trim().toLowerCase(), cc = '', van = '', ref = '', token = '';
 if (!['concept', 'versturen'].includes(modus)) zet('modus is concept of versturen', 'modus', 400);
 // 5. geheimen: versturen alleen met het eigen geheim; het eigen geheim alleen voor versturen van bron pot en boekstuk
-const eigen = bron === 'pot' || bron === 'boekstuk';
+const eigen = bron === 'pot' || bron === 'boekstuk' || bron === 'sepa';
 if (modus === 'versturen' && !versturenGeheim) zet('versturen kan alleen met het eigen verzendgeheim', 'secret', 401);
-if (versturenGeheim && !(eigen && modus === 'versturen')) zet('dit geheim opent alleen versturen voor bron pot en boekstuk', 'secret', 403);
+if (versturenGeheim && !(eigen && modus === 'versturen')) zet('dit geheim opent alleen versturen voor bron pot, boekstuk en sepa', 'secret', 403);
 
 if (bron === 'pot') {
   if (modus !== 'versturen') zet('bron pot kent alleen versturen', 'modus', 400);
@@ -130,6 +147,24 @@ if (bron === 'pot') {
   if (body.bijlagen !== undefined && body.bijlagen !== '') zet('bijlagen alleen als bestanden (multipart)', 'bijlagen', 400);
   if (bestanden.length !== 1) zet('precies één PDF', 'bijlagen', 400);
   aan = lijst.join(', ');
+} else if (bron === 'sepa') {
+  if (modus !== 'versturen') zet('bron sepa kent alleen versturen', 'modus', 400);
+  if (!versturenGeheim) zet('versturen kan alleen met het eigen verzendgeheim', 'secret', 401);
+  const lijst = adressen(body.aan);
+  if (lijst.length !== 1) zet('precies één adres in aan', 'aan', 400);
+  if (lijst.some((a) => !AAN_SEPA.includes(a))) zet('adres staat niet op de witte lijst van de verzender (sepa)', 'witte_lijst', 403);
+  if (!VERSTUREN_SEPA) zet('versturen staat uit voor bron sepa', 'versturen_uit', 409);
+  if (!vensterSepa(nu)) zet('bron sepa verstuurt alleen tussen 07:00 en 23:00', 'buiten_venster', 409);
+  for (const k of ['cc', 'bcc', 'thread_id', 'antwoord_aan', 'token']) if (body[k] !== undefined && body[k] !== '') zet('veld ' + k + ' is hier niet toegestaan', 'veld', 400);
+  van = String(body.van ?? '');
+  if (!POT_VAN.includes(van)) zet('afzender niet toegestaan', 'van', 400);
+  ref = String(body.ref ?? '');
+  if (!/^SOCEV-20\d{6}-[0-9a-f]{8}$/.test(ref)) zet('ref ontbreekt of is ongeldig', 'ref', 400);
+  if (onderwerp.indexOf('SEPA-batch Tolgaarde ' + ref) !== 0 || onderwerp.length > 150 || /[\r\n]/.test(onderwerp)) zet('onderwerp past niet bij de batch', 'onderwerp', 400);
+  if (typeof body.bericht !== 'string' || !body.bericht || body.bericht.length > 2000) zet('bericht ontbreekt of is te lang', 'bericht', 400);
+  if (body.bijlagen !== undefined && body.bijlagen !== '') zet('bijlagen alleen als bestanden (multipart)', 'bijlagen', 400);
+  if (bestanden.length !== 2) zet('precies twee bestanden: de batch (xml) en de specificatie (pdf)', 'bijlagen', 400);
+  aan = lijst.join(', ');
 } else if (bron === 'facturen') {
   token = String(body.token ?? '');
   if (modus === 'versturen' && !VERSTUREN_AAN) zet('versturen staat uit in de verzender (alleen concepten tot fase F5)', 'versturen_uit', 403);
@@ -148,16 +183,23 @@ for (let i = 0; !fout && i < bestanden.length; i++) {
   const k = bestanden[i], nr = 'bijlage ' + (i + 1);
   let naam = saneer(item.binary[k].fileName);
   const p = naam.lastIndexOf('.'), ext = p > 0 ? naam.slice(p + 1).toLowerCase() : '';
-  if (!naam || !TYPES[ext] || (eigen && ext !== 'pdf')) { zet(nr + ': alleen ' + (eigen ? 'pdf' : 'pdf, xml of MT940'), 'bijlagen', 400); break; }
+  if (!naam || !TYPES[ext] || (eigen && bron !== 'sepa' && ext !== 'pdf') || (bron === 'sepa' && ext !== 'pdf' && ext !== 'xml')) {
+    zet(nr + ': alleen ' + (bron === 'sepa' ? 'xml en pdf' : eigen ? 'pdf' : 'pdf, xml of MT940'), 'bijlagen', 400); break;
+  }
+  if (bron === 'sepa' && meta.some((x) => x.ext === ext)) { zet(nr + ': precies één xml en één pdf', 'bijlagen', 400); break; }
   const buf = await this.helpers.getBinaryDataBuffer(0, k);
   if (!buf || !buf.length) { zet(nr + ': leeg bestand', 'bijlagen', 400); break; }
   totaal += buf.length;
-  if (totaal > (bron === 'pot' ? POT_PDF_MAX : bron === 'boekstuk' ? BOEKSTUK_PDF_MAX : MAX_BYTES)) { zet('bijlagen te groot', 'bijlagen', 400); break; }
+  if (totaal > (bron === 'pot' ? POT_PDF_MAX : bron === 'boekstuk' ? BOEKSTUK_PDF_MAX : bron === 'sepa' ? 2 * SEPA_MAX : MAX_BYTES) || (bron === 'sepa' && buf.length > SEPA_MAX)) { zet('bijlagen te groot', 'bijlagen', 400); break; }
+  if (bron === 'sepa' && ext === 'xml') {
+    const kop = buf.slice(0, 4096).toString('utf8');
+    if (kop.indexOf('<?xml') !== 0 || kop.indexOf('pain.001') < 0 || kop.indexOf('<MsgId>' + ref + '</MsgId>') < 0) { zet(nr + ': geen SEPA-batch met dit kenmerk', 'bijlagen', 400); break; }
+  }
   if (ext === 'pdf' && !(buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46)) { zet(nr + ': inhoud past niet bij .pdf', 'bijlagen', 400); break; }
   if (namen.has(naam.toLowerCase())) { const stam = naam.slice(0, p); let n = 2; while (namen.has((stam + ' (' + n + ').' + ext).toLowerCase())) n++; naam = stam + ' (' + n + ').' + ext; }
   namen.add(naam.toLowerCase());
   binary['bijlage_' + i] = { ...item.binary[k], mimeType: TYPES[ext], fileName: naam, fileExtension: ext };
-  meta.push({ naam: naam, bytes: buf.length });
+  meta.push({ naam: naam, bytes: buf.length, ext: ext });
 }
 
 // plafond (alleen als de rest klopt): concepten per uur (facturen), verstuurde mails per 24 uur (pot en boekstuk samen), boekstuk per 30 dagen
@@ -165,10 +207,13 @@ const sd = $getWorkflowStaticData('global');
 sd.gemaakt = (Array.isArray(sd.gemaakt) ? sd.gemaakt : []).filter((t) => nu - t < 3600000);
 sd.pot = (Array.isArray(sd.pot) ? sd.pot : []).filter((t) => nu - t < 86400000);
 sd.boekstuk = (Array.isArray(sd.boekstuk) ? sd.boekstuk : []).filter((t) => nu - t < 30 * 86400000);
+sd.sepa = (Array.isArray(sd.sepa) ? sd.sepa : []).filter((t) => nu - t < 86400000);
 if (!fout && !eigen && sd.gemaakt.length >= PER_UUR) zet('plafond van ' + PER_UUR + ' per uur bereikt', 'plafond', 429);
 if (!fout && eigen && sd.pot.length >= POT_PER_DAG) zet('plafond van ' + POT_PER_DAG + ' verstuurde nota\'s per 24 uur bereikt', 'plafond', 429);
 if (!fout && bron === 'boekstuk' && sd.boekstuk.length >= BOEKSTUK_PER_30D) zet('plafond van ' + BOEKSTUK_PER_30D + ' boekstukken per 30 dagen bereikt', 'plafond', 429);
 if (!fout && bron === 'boekstuk') sd.boekstuk.push(nu);
+if (!fout && bron === 'sepa' && sd.sepa.length >= SEPA_PER_DAG) zet('plafond van ' + SEPA_PER_DAG + ' SEPA-batches per 24 uur bereikt', 'plafond', 429);
+if (!fout && bron === 'sepa') sd.sepa.push(nu);
 
 const uit = { aan: aan, cc: cc, van: van, modus: modus, token: token, ref: ref, onderwerp: onderwerp, bericht: fout ? '' : body.bericht,
   toets: { fout: fout, code: code, status: fout ? status : 200, pad: !fout && eigen && modus === 'versturen' && versturenGeheim ? 'pot' : 'facturen', aantal: fout ? 0 : meta.length, props: fout ? '' : Object.keys(binary).join(',') } };

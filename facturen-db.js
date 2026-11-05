@@ -1113,6 +1113,41 @@ WHEN NOT EXISTS (SELECT 1 FROM rekening r WHERE r.id = NEW.rekening AND r.entite
 BEGIN SELECT RAISE(ABORT, 'sepa_rekening: de rekening hoort niet bij deze entiteit of kan geen batch'); END;
 `;
 
+/*
+ * wv2465 (David 5-11-2026 ± 12:00: "SEPA batches van Tolgaarde, mogen zodra ik ze aangemaakt heb, automatisch naar
+ * nogbetalen@huisartsentolgaarde.nl. Niet als concept, gewoon door."; Ja met verse vingerafdruk 12:21, grondwet 1 aanvulling 5-11-2026).
+ * Eén rij per batch = de grens tegen dubbel versturen: de rij ontstaat in dezelfde transactie als de batch (alleen een batch die David zelf in
+ * zijn app maakte), 'verzenden' staat vóór de aanroep van de verzender, en een rij gaat nooit weg en alleen vooruit (trigger). Hetzelfde
+ * bestand opnieuw downloaden maakt geen rij. Geen mailtekst of bijlage erin, alleen de sha256 van wat er ging.
+ */
+const M21 = `
+CREATE TABLE IF NOT EXISTS sepa_verzending (
+  batch TEXT PRIMARY KEY REFERENCES sepa_batch(id),
+  msg_id TEXT NOT NULL UNIQUE,
+  entiteit TEXT NOT NULL CHECK (entiteit IN ('tolgaarde')),
+  modus TEXT NOT NULL CHECK (modus IN ('auto','concept')),
+  status TEXT NOT NULL CHECK (status IN ('wacht','verzenden','verstuurd','onzeker','concept_bezig','concept','concept_mislukt','concept_onzeker')),
+  aan TEXT NOT NULL CHECK (aan = 'nogbetalen@huisartsentolgaarde.nl'),
+  xml_sha256 TEXT CHECK (xml_sha256 IS NULL OR (length(xml_sha256) = 64 AND xml_sha256 NOT GLOB '*[^0-9a-f]*')),
+  pdf_sha256 TEXT CHECK (pdf_sha256 IS NULL OR (length(pdf_sha256) = 64 AND pdf_sha256 NOT GLOB '*[^0-9a-f]*')),
+  message_id TEXT CHECK (message_id IS NULL OR length(message_id) <= 80),
+  reden TEXT CHECK (reden IS NULL OR length(reden) <= 300),
+  verzonden_op TEXT,
+  aangemaakt_op TEXT NOT NULL,
+  bijgewerkt_op TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS sepa_verzending_blijft BEFORE DELETE ON sepa_verzending BEGIN SELECT RAISE(ABORT, 'sepa_verzending: rijen blijven'); END;
+CREATE TRIGGER IF NOT EXISTS sepa_verzending_vooruit BEFORE UPDATE ON sepa_verzending
+  WHEN NEW.batch IS NOT OLD.batch OR NEW.msg_id IS NOT OLD.msg_id OR NEW.entiteit IS NOT OLD.entiteit OR NEW.modus IS NOT OLD.modus
+    OR NEW.aan IS NOT OLD.aan OR NEW.aangemaakt_op IS NOT OLD.aangemaakt_op
+    OR (NEW.status <> OLD.status AND NOT (
+      (OLD.status = 'wacht' AND NEW.status IN ('verzenden','concept_bezig')) OR
+      (OLD.status = 'verzenden' AND NEW.status IN ('verstuurd','onzeker','concept_bezig')) OR
+      (OLD.status = 'onzeker' AND NEW.status = 'verstuurd') OR
+      (OLD.status = 'concept_bezig' AND NEW.status IN ('concept','concept_mislukt','concept_onzeker'))))
+  BEGIN SELECT RAISE(ABORT, 'sepa_verzending: alleen vooruit'); END;
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -1133,12 +1168,13 @@ const MIGRATIES = [
   { versie: 18, naam: 'signaal: DocPlan-factuurtoets, factuur_dagen_afwijkend (wv2297)', fn: (db) => M18(db) },
   { versie: 19, naam: 'boekstuk Google Home naar de boekhouder: boekstuk_verzending, boekstuk_vrijgave (wv2316)', sql: M19 },
   { versie: 20, naam: 'SEPA-batch: ook vanaf een zakelijke bankluis-rekening; POT en Privé blijven uitgesloten (wv2445)', sql: M20 },
+  { versie: 21, naam: 'SEPA-batch van Tolgaarde zelf naar nogbetalen@: sepa_verzending (wv2465)', sql: M21 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
   'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel', 'afzender_regel',
-  'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso', 'paypal_regel', 'boekstuk_verzending', 'boekstuk_vrijgave'];
+  'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso', 'paypal_regel', 'boekstuk_verzending', 'boekstuk_vrijgave', 'sepa_verzending'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 

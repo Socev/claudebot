@@ -38,7 +38,7 @@ function opzet(o) {
       methode, pad: '/app/facturen' + (rest ? '/' + rest : ''), d: d || {}, rol: x.rol === undefined ? eig : x.rol, primair: x.primair === undefined ? true : x.primair, nu: x.nu || NU,
       versOk: () => t.vers.ok, versVerbruik: () => { t.vers.verbruikt++; t.vers.ok = false; },
       uploadNeem: (beurt, n) => { const b = t.klaar[beurt] && t.klaar[beurt][n]; if (!b) return null; return { naam: b.naam, bytes: b.bytes, weg: () => { delete t.klaar[beurt][n]; } }; },
-      bankluisPad: x.bankluisPad,
+      bankluisPad: x.bankluisPad, sepaDoor: x.sepaDoor,
     });
   };
   t.pm = () => {
@@ -2417,4 +2417,224 @@ test('wv2445 SEPA: zakelijke bankluis-rekening → batch kan (route en database)
   assert.throws(() => D.voegToe(t.fdb, 'sepa_batch', rij(pot, 'pot')), /CHECK|sepa_rekening/);
   assert.throws(() => D.voegToe(t.fdb, 'sepa_batch', rij(pot, 'tolgaarde')), /sepa_rekening/);
   D.voegToe(t.fdb, 'sepa_batch', rij(tg, 'tolgaarde'));
+});
+
+// ───────────────────────────── SEPA-batch van Tolgaarde zelf naar nogbetalen@ (wv2465) ─────────────────────────────
+
+test('wv2465: Tolgaarde-batch krijgt één verzendrij; voorbereid geeft precies het gedownloade bestand + specificatie aan alleen nogbetalen@; nooit twee keer', () => {
+  const t = opzet();
+  const a = teBetalenFactuur(t), b = teBetalenFactuur(t);
+  const [rek] = sepaRek(t, 'tolgaarde');
+  const { r } = sepaDownload(t, rek.id, [a, b], [], { sepaDoor: 'auto' });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.deepEqual(r.j.doorsturen, { status: 'wacht', modus: 'auto', aan: 'nogbetalen@huisartsentolgaarde.nl' });
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_verzending'), 1);
+  const open = t.routes.sepaDoor.open(t.fdb);
+  assert.deepEqual(open.map((x) => x.batch), [r.j.batch]);
+  const v = t.routes.sepaDoor.voorbereid(t.fdb, r.j.batch, { nu: NU + 5000, actie: 'versturen' });
+  assert.equal(v.actie, 'versturen', JSON.stringify(v.reden));
+  assert.equal(v.aan, 'nogbetalen@huisartsentolgaarde.nl');
+  assert.equal(v.ref, r.j.msg_id);
+  assert.ok(v.onderwerp.startsWith('SEPA-batch Tolgaarde ' + r.j.msg_id + ' — 2 betalingen, € '), v.onderwerp);
+  assert.ok(v.onderwerp.length <= 150 && !/[\r\n]/.test(v.onderwerp));
+  assert.ok(v.bericht.length <= 2000);
+  assert.deepEqual(v.bijlagen.map((x) => x.mime), ['application/xml', 'application/pdf']);
+  const xml = v.bijlagen[0];
+  assert.equal(xml.bytes.toString('utf8'), r.j.bestand.inhoud, 'byte-gelijk aan de download');
+  assert.equal(xml.naam, r.j.bestand.naam);
+  const sb = t.fdb.db.prepare('SELECT sha256 FROM sepa_batch WHERE id = ?').get(r.j.batch);
+  assert.equal(xml.sha256, sb.sha256);
+  assert.equal(crypto.createHash('sha256').update(xml.bytes).digest('hex'), sb.sha256);
+  assert.equal(v.bijlagen[1].bytes.slice(0, 4).toString(), '%PDF');
+  const rij = t.fdb.db.prepare('SELECT * FROM sepa_verzending WHERE batch = ?').get(r.j.batch);
+  assert.deepEqual([rij.status, rij.xml_sha256, rij.pdf_sha256], ['verzenden', sb.sha256, v.bijlagen[1].sha256]);
+  // tweede keer (tik, herstart): niets meer
+  assert.equal(t.routes.sepaDoor.voorbereid(t.fdb, r.j.batch, { nu: NU + 6000, actie: 'versturen' }), null);
+  assert.deepEqual(t.routes.sepaDoor.open(t.fdb), []);
+  assert.equal(t.routes.sepaDoor.uitkomst(t.fdb, r.j.batch, 'verzenden', 'verstuurd', { message_id: 'm1', verzonden_op: new Date(NU + 7000).toISOString() }, NU + 7000), true);
+  assert.equal(t.routes.sepaDoor.uitkomst(t.fdb, r.j.batch, 'verzenden', 'verstuurd', { message_id: 'm2' }, NU + 8000), false, 'al verstuurd');
+  // hetzelfde bestand opnieuw downloaden: geen nieuwe rij, geen tweede mail
+  t.vers.ok = true;
+  const op = t.call('POST', 'sepa-bestand', { batch: r.j.batch }, { sepaDoor: 'auto' });
+  assert.equal(op.status, 200, JSON.stringify(op.j));
+  assert.equal(op.j.doorsturen, undefined);
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_verzending'), 1);
+  assert.deepEqual(t.routes.sepaDoor.open(t.fdb), []);
+  const st = t.call('GET', 'betalen').j.sepa.batches.find((x) => x.id === r.j.batch).doorsturen;
+  assert.deepEqual([st.status, st.aan, st.op], ['verstuurd', 'nogbetalen@huisartsentolgaarde.nl', new Date(NU + 7000).toISOString()]);
+  const au = t.fdb.db.prepare("SELECT wat FROM audit WHERE object_soort = 'sepa_batch' AND object_id = ? AND wat LIKE 'sepa_door_%' ORDER BY id").all(r.j.batch).map((x) => x.wat);
+  assert.deepEqual(au, ['sepa_door_wacht', 'sepa_door_verzenden', 'sepa_door_verstuurd']);
+});
+
+test('wv2465: andere entiteit, schakelaar uit of geen schakelaar → geen rij en geen verzending', () => {
+  const t = opzet();
+  const [gh] = sepaRek(t, 'groenhouten');
+  const g = teBetalenFactuur(t, { entiteit: 'groenhouten' });
+  const x = sepaDownload(t, gh.id, [g], [], { sepaDoor: 'auto' }).r;
+  assert.equal(x.status, 200, JSON.stringify(x.j));
+  assert.equal(x.j.doorsturen, undefined);
+  const [tg] = sepaRek(t, 'tolgaarde');
+  for (const sd of [undefined, 'uit', 'ja']) {
+    const y = sepaDownload(t, tg.id, [teBetalenFactuur(t)], [], { sepaDoor: sd }).r;
+    assert.equal(y.status, 200, JSON.stringify(y.j));
+    assert.equal(y.j.doorsturen, undefined, String(sd));
+  }
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_verzending'), 0);
+  assert.deepEqual(t.routes.sepaDoor.open(t.fdb), []);
+  assert.equal(t.call('GET', 'betalen').j.sepa.batches.some((b) => b.doorsturen), false);
+  // een rij voor een andere entiteit kan de database niet eens aan
+  assert.throws(() => D.voegToe(t.fdb, 'sepa_verzending', { batch: x.j.batch, msg_id: x.j.msg_id, entiteit: 'groenhouten', modus: 'auto', status: 'wacht', aan: 'nogbetalen@huisartsentolgaarde.nl',
+    aangemaakt_op: 'x', bijgewerkt_op: 'x' }), /CHECK/);
+});
+
+test('wv2465: twijfel → concept (schakelaar concept, betaling veranderd, te lang gewacht); adres alleen de constante; rijen blijven en gaan alleen vooruit', () => {
+  const t = opzet();
+  const [tg] = sepaRek(t, 'tolgaarde');
+  // schakelaar stond op concept bij het maken
+  const c = sepaDownload(t, tg.id, [teBetalenFactuur(t)], [], { sepaDoor: 'concept' }).r;
+  assert.equal(c.j.doorsturen.modus, 'concept');
+  const vc = t.routes.sepaDoor.voorbereid(t.fdb, c.j.batch, { nu: NU + 1000, actie: 'versturen' });
+  assert.deepEqual([vc.actie, vc.reden, vc.bijlagen.length], ['concept', 'de pod staat op concept', 2]);
+  // een betaling uit de batch is teruggezet vóór het versturen
+  const f1 = teBetalenFactuur(t), f2 = teBetalenFactuur(t);
+  const w = sepaDownload(t, tg.id, [f1, f2], [], { sepaDoor: 'auto' }).r;
+  assert.equal(t.call('POST', 'ingevoerd-ongedaan', { id: f1, uit_bank: true }).status, 200);
+  const vw = t.routes.sepaDoor.voorbereid(t.fdb, w.j.batch, { nu: NU + 2000, actie: 'versturen' });
+  assert.deepEqual([vw.actie, vw.reden], ['concept', 'een betaling uit de batch is intussen veranderd']);
+  // te lang gewacht (pod uit)
+  const o = sepaDownload(t, tg.id, [teBetalenFactuur(t)], [], { sepaDoor: 'auto' }).r;
+  const vo = t.routes.sepaDoor.voorbereid(t.fdb, o.j.batch, { nu: NU + 37 * 3600000, actie: 'versturen' });
+  assert.equal(vo.actie, 'concept');
+  assert.match(vo.reden, /langer dan 36 uur/);
+  // adres: alleen de constante
+  assert.equal(t.routes.sepaDoor.aanOk('nogbetalen@huisartsentolgaarde.nl'), true);
+  assert.equal(t.routes.sepaDoor.aanOk(' NogBetalen@huisartsentolgaarde.nl '), true);
+  for (const x of ['iemand@voorbeeld.invalid', 'nogbetalen@huisartsentolgaarde.nl.voorbeeld.invalid', 'nogbetalen@huisartsentolgaarde.nl, iemand@voorbeeld.invalid', '']) assert.equal(t.routes.sepaDoor.aanOk(x), false, x);
+  assert.throws(() => t.fdb.db.prepare("UPDATE sepa_verzending SET aan = 'iemand@voorbeeld.invalid' WHERE batch = ?").run(o.j.batch), /alleen vooruit/);
+  // alleen vooruit, nooit weg
+  assert.throws(() => t.fdb.db.prepare("UPDATE sepa_verzending SET status = 'wacht' WHERE batch = ?").run(o.j.batch), /alleen vooruit/);
+  assert.throws(() => t.fdb.db.prepare("UPDATE sepa_verzending SET status = 'verstuurd' WHERE batch = ?").run(o.j.batch), /alleen vooruit/, 'concept_bezig → verstuurd kan niet');
+  assert.throws(() => t.fdb.db.prepare('DELETE FROM sepa_verzending WHERE batch = ?').run(o.j.batch), /rijen blijven/);
+  assert.equal(t.routes.sepaDoor.uitkomst(t.fdb, o.j.batch, 'concept_bezig', 'concept', { reden: 'concept x' }, NU), true);
+  // een tweede rij voor dezelfde batch of hetzelfde kenmerk kan niet
+  assert.throws(() => D.voegToe(t.fdb, 'sepa_verzending', { batch: o.j.batch, msg_id: o.j.msg_id, entiteit: 'tolgaarde', modus: 'auto', status: 'wacht', aan: 'nogbetalen@huisartsentolgaarde.nl',
+    aangemaakt_op: 'x', bijgewerkt_op: 'x' }), /UNIQUE|PRIMARY/);
+});
+
+test('wv2465: server.js — na een batch plannen, verzender per bron (sepa eist de nieuwe Toetsen-code), venster 07–23, alleen de constante als ontvanger', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+  assert.match(src, /pad === '\/app\/facturen\/sepa-batch' && r\.status === 200 && r\.j && r\.j\.doorsturen && typeof sdPlan === 'function'\) sdPlan\(1500\)/);
+  assert.match(src, /sepaDoor: typeof sdModus === 'function' \? sdModus\(\) : null/);
+  assert.match(src, /potVzVerstuur\(\{ bron: 'sepa', modus: 'versturen', ref: v\.ref, aan: facturenRoutes\.sepaDoor\.AAN,/);
+  const i = src.indexOf('function potVzToetsenMag('), mag = new Function('POT_VZ_TOETSEN_SHA', 'POT_VZ_TOETSEN_BOEKSTUK', 'POT_VZ_TOETSEN_SHA_VORIG',
+    src.slice(i, src.indexOf('\n}\n', i) + 3) + 'return potVzToetsenMag;')('nieuw', 'boekstuk', 'vorig');
+  assert.deepEqual(['sepa', 'boekstuk', 'pot'].map((b) => mag('nieuw', b)), [true, true, true]);
+  assert.deepEqual(['sepa', 'boekstuk', 'pot'].map((b) => mag('boekstuk', b)), [false, true, true]);
+  assert.deepEqual(['sepa', 'boekstuk', 'pot'].map((b) => mag('vorig', b)), [false, false, true]);
+  assert.deepEqual(['sepa', 'pot'].map((b) => mag('anders', b)), [false, false]);
+  const j = src.indexOf('function sdVenster('), venster = new Function(src.slice(j, src.indexOf('\n', j)) + '\nreturn sdVenster;')();
+  assert.deepEqual(['2026-11-05T05:59:00Z', '2026-11-05T06:00:00Z', '2026-11-05T21:59:00Z', '2026-11-05T22:00:00Z', '2026-07-05T05:00:00Z'].map((x) => venster(Date.parse(x))), [false, true, true, false, true]);
+});
+
+test('wv2465: serverronde — verstuurd één keer; weigering → concept + regel; geen antwoord → onzeker, nooit opnieuw; buiten 07–23 wachten; verzender afwijkend → concept', async () => {
+  const vm = require('vm');
+  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+  const i = src.indexOf('// ── wv2465: SEPA-batch van Tolgaarde meteen zelf naar nogbetalen@'), j = src.indexOf("setInterval(function () { sdTik()", i);
+  assert.ok(i > 0 && j > i);
+  const t = opzet();
+  const [tg] = sepaRek(t, 'tolgaarde');
+  function ronde(o) {
+    const log = { verstuur: [], concept: [], bericht: [] };
+    const ctx = vm.createContext({ crypto, Buffer, process: { env: o.env || {} }, setTimeout, Date: o.Date || Date, facturenRoutes: t.routes, SERVER_ECHT: true, rolPrimair: () => true,
+      facturenOpen: () => t.fdb, logError: () => {}, schrijfLog: () => {}, velden: (x) => JSON.stringify(x), nu: () => '',
+      potVzVerzenderOk: async (b) => (o.verzenderOk ? o.verzenderOk(b) : b === 'sepa'), potVzVerzendGeheim: async () => 'g',
+      potVzVerstuur: async (v) => { log.verstuur.push(v); return o.verstuur(v); },
+      facturenSpecMailluik: async (c) => { log.concept.push(c); if (o.concept) return o.concept(c); return { ok: true, concept_id: 'c1' }; },
+      berichtIntern: async (d) => { log.bericht.push(d.tekst); return { status: 200 }; } });
+    vm.runInContext(src.slice(i, j) + '\nthis.sdTik = sdTik;', ctx);
+    return { ctx, log };
+  }
+  // vaste klok binnen het venster (do 5-11 13:30 Amsterdam)
+  const T0 = Date.parse('2026-11-05T12:30:00Z');
+  class Klok extends Date { constructor(...a) { super(...(a.length ? a : [T0])); } static now() { return T0; } }
+  const stand = (b) => t.fdb.db.prepare('SELECT status FROM sepa_verzending WHERE batch = ?').get(b).status;
+  // 1. verstuurd
+  const a = sepaDownload(t, tg.id, [teBetalenFactuur(t)], [], { sepaDoor: 'auto', nu: T0 - 1000 }).r;
+  let x = ronde({ Date: Klok, verstuur: () => ({ status: 200, j: { ok: true, message_id: 'msg-1', bijlagen: 2 } }) });
+  await x.ctx.sdTik();
+  assert.equal(x.log.verstuur.length, 1);
+  const v = x.log.verstuur[0];
+  assert.deepEqual([v.bron, v.modus, v.aan, v.ref, v.van, v.bijlagen.length], ['sepa', 'versturen', 'nogbetalen@huisartsentolgaarde.nl', a.j.msg_id, '"David Schaap" <dokterschaap@gmail.com>', 2]);
+  assert.equal(v.bijlagen[0].bytes.toString('utf8'), a.j.bestand.inhoud);
+  assert.equal(stand(a.j.batch), 'verstuurd');
+  assert.deepEqual([x.log.concept.length, x.log.bericht.length], [0, 0], 'gelukt = stil');
+  await x.ctx.sdTik();
+  assert.equal(x.log.verstuur.length, 1, 'tweede ronde verstuurt niets');
+  // 2. Toetsen weigert (403) → concept + één regel
+  const b = sepaDownload(t, tg.id, [teBetalenFactuur(t)], [], { sepaDoor: 'auto', nu: T0 - 1000 }).r;
+  x = ronde({ Date: Klok, verstuur: () => ({ status: 403, j: { ok: false, code: 'witte_lijst' } }) });
+  await x.ctx.sdTik();
+  assert.equal(stand(b.j.batch), 'concept');
+  assert.equal(x.log.concept.length, 1);
+  assert.deepEqual([x.log.concept[0].aan, x.log.concept[0].bijlagen.map((y) => y.mime)], ['nogbetalen@huisartsentolgaarde.nl', ['application/xml', 'application/pdf']]);
+  assert.equal(Buffer.from(x.log.concept[0].bijlagen[0].inhoud_base64, 'base64').toString('utf8'), b.j.bestand.inhoud);
+  assert.equal(x.log.bericht.length, 1);
+  assert.match(x.log.bericht[0], /staat als concept in Gmail/);
+  // 3. geen antwoord (time-out) → onzeker, één regel, nooit opnieuw
+  const c = sepaDownload(t, tg.id, [teBetalenFactuur(t)], [], { sepaDoor: 'auto', nu: T0 - 1000 }).r;
+  x = ronde({ Date: Klok, verstuur: () => { throw new Error('time-out'); } });
+  await x.ctx.sdTik();
+  assert.equal(stand(c.j.batch), 'onzeker');
+  assert.equal(x.log.concept.length, 0);
+  assert.match(x.log.bericht[0], /Niet zeker/);
+  await x.ctx.sdTik();
+  assert.equal(x.log.verstuur.length, 1);
+  // 4. buiten het venster (23:30) → wacht; verzender afwijkend → concept
+  const d = sepaDownload(t, tg.id, [teBetalenFactuur(t)], [], { sepaDoor: 'auto', nu: T0 - 1000 }).r;
+  const T1 = Date.parse('2026-11-05T22:30:00Z');
+  class Nacht extends Date { constructor(...a) { super(...(a.length ? a : [T1])); } static now() { return T1; } }
+  x = ronde({ Date: Nacht, verstuur: () => ({ status: 200, j: { ok: true, message_id: 'm' } }) });
+  await x.ctx.sdTik();
+  assert.deepEqual([stand(d.j.batch), x.log.verstuur.length, x.log.concept.length], ['wacht', 0, 0]);
+  x = ronde({ Date: Klok, verzenderOk: () => false, verstuur: () => ({ status: 200, j: { ok: true, message_id: 'm' } }) });
+  await x.ctx.sdTik();
+  assert.deepEqual([stand(d.j.batch), x.log.verstuur.length, x.log.concept.length], ['concept', 0, 1]);
+  assert.match(x.log.bericht[0], /verzender kent bron sepa niet/);
+  // 5. FACTUREN_SEPA_DOOR=uit → de ronde doet niets
+  const e = sepaDownload(t, tg.id, [teBetalenFactuur(t)], [], { sepaDoor: 'auto', nu: T0 - 1000 }).r;
+  x = ronde({ Date: Klok, env: { FACTUREN_SEPA_DOOR: 'uit' }, verstuur: () => ({ status: 200, j: { ok: true, message_id: 'm' } }) });
+  await x.ctx.sdTik();
+  assert.deepEqual([stand(e.j.batch), x.log.verstuur.length], ['wacht', 0]);
+});
+
+test('wv2465 review: halverwege gestopt → onzeker (nooit opnieuw) met één regel; adres in de database alleen de constante', async () => {
+  const vm = require('vm');
+  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+  const i = src.indexOf('// ── wv2465: SEPA-batch van Tolgaarde meteen zelf naar nogbetalen@'), j = src.indexOf("setInterval(function () { sdTik()", i);
+  const t = opzet();
+  const [tg] = sepaRek(t, 'tolgaarde');
+  const T0 = Date.parse('2026-11-05T12:30:00Z');
+  const a = sepaDownload(t, tg.id, [teBetalenFactuur(t)], [], { sepaDoor: 'auto', nu: T0 - 60000 }).r;
+  const b = sepaDownload(t, tg.id, [teBetalenFactuur(t)], [], { sepaDoor: 'concept', nu: T0 - 60000 }).r;
+  assert.equal(t.routes.sepaDoor.voorbereid(t.fdb, a.j.batch, { nu: T0 - 50000, actie: 'versturen' }).actie, 'versturen');
+  assert.equal(t.routes.sepaDoor.voorbereid(t.fdb, b.j.batch, { nu: T0 - 50000, actie: 'versturen' }).actie, 'concept');
+  // nu "stopt de pod": rijen blijven op verzenden / concept_bezig
+  const log = { verstuur: 0, concept: 0, bericht: [] };
+  const T1 = T0 + 20 * 60000;
+  class Klok extends Date { constructor(...x) { super(...(x.length ? x : [T1])); } static now() { return T1; } }
+  const ctx = vm.createContext({ crypto, Buffer, process: { env: {} }, setTimeout, Date: Klok, facturenRoutes: t.routes, SERVER_ECHT: true, rolPrimair: () => true,
+    facturenOpen: () => t.fdb, logError: () => {}, schrijfLog: () => {}, velden: (x) => JSON.stringify(x), nu: () => '',
+    potVzVerzenderOk: async () => true, potVzVerzendGeheim: async () => 'g', potVzVerstuur: async () => { log.verstuur++; return { status: 200, j: { ok: true, message_id: 'm' } }; },
+    facturenSpecMailluik: async () => { log.concept++; return { ok: true, concept_id: 'c' }; }, berichtIntern: async (d) => { log.bericht.push(d.tekst); return { status: 200 }; } });
+  vm.runInContext(src.slice(i, j) + '\nthis.sdTik = sdTik;', ctx);
+  // binnen 15 minuten nog niet
+  assert.deepEqual(t.routes.sepaDoor.hangend(t.fdb, T0), []);
+  await ctx.sdTik();
+  const st = (x) => t.fdb.db.prepare('SELECT status FROM sepa_verzending WHERE batch = ?').get(x).status;
+  assert.deepEqual([st(a.j.batch), st(b.j.batch)], ['onzeker', 'concept_onzeker']);
+  assert.deepEqual([log.verstuur, log.concept, log.bericht.length], [0, 0, 2]);
+  assert.match(log.bericht[0], /stopte midden in het versturen/);
+  await ctx.sdTik();
+  assert.equal(log.bericht.length, 2, 'één keer melden');
+  assert.throws(() => t.fdb.db.prepare("INSERT INTO sepa_verzending (batch, msg_id, entiteit, modus, status, aan, aangemaakt_op, bijgewerkt_op) VALUES ('x', 'y', 'tolgaarde', 'auto', 'wacht', 'iemand@voorbeeld.invalid', 'x', 'x')").run(), /CHECK/);
 });
