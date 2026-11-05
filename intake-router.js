@@ -1754,7 +1754,7 @@ function maak(o) {
           const b = Buffer.isBuffer(t) ? t : Buffer.from(String(t), 'utf8');
           if (crypto.createHash('sha256').update(b).digest('hex') !== oud.sha256) return null;   // al bewerkt of verwerkt: niet aanraken
           return Buffer.from('---\novis_stuk: ' + id + '\novis_verplaatst: ' + yv(iso()) + '\n---\n\nDavid koos een andere plek voor dit stuk (OVIS Intake). Niet verwerken: ' + (lens === 'kennis' ? 'het staat nu in de raw_input van ' + ent : lens === 'systeem' ? 'het is post voor Socev zelf en staat nu in ' + SYSTEEM_MAP : lens === 'facturen' ? 'het gaat naar de Facturen-app' : lens === 'keten' ? 'het is een aanmaning of herinnering (Intake signaleert hem)' : 'het hoort niet in de Second Brain (alleen bewaard in Intake)') + '.\n', 'utf8');
-        });
+        }, { krimpOk: true });   // wv2439: bewust de hele pagina vervangen (sha-geborgd); Systeempost staat onder 00_Systeem (krimpgrens)
         verwijzing = ok ? oud.pad : null;
       } catch (e) { if (!e || e.code !== 'ENOENT') { if (o.fout) o.fout('intake-router-verwijzing', e); } }
     }
