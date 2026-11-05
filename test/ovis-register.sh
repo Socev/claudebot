@@ -408,9 +408,9 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
 
   // ── 7. kaarten (wv1253): bundel, kritiek, Bibliothecaris, Anders, uitkomst, haak ──
   { const src = fs.readFileSync('server.js', 'utf8');
-    const gm = /const APP_GEVOELIG = \[([\s\S]*?)\n\];/.exec(src);
-    const GEV = eval('[' + gm[1] + ']');
-    const gevoelig = (t) => { t = String(t).normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase(); for (const [r, re] of GEV) if (re.test(t)) return r; return null; };
+    // wv2433: de echte appGevoelig (met hulpconstanten en uitzonderingen) uit server.js knippen, niet alleen de lijst
+    const ga = src.indexOf('// wv135 (bouwplan § 4.4d'), gb = src.indexOf('\n}\n', src.indexOf('function appGevoelig(', ga)) + 3;
+    const gevoelig = new Function(src.slice(ga, gb) + '\nreturn appGevoelig;')();
     // kopie van machinekamer.voor_jou_verwijzing (gemeten 24-10-2026)
     const verwijzing = (t) => /(^|[^a-z0-9_])wv[0-9]+/i.test(t) || /(mk-scripts\/|\/opt\/data\/)/i.test(t) || /(^|[\s("'‘“/])[0-9]{2}_[A-Z][A-Za-z]+/.test(t) || /[\]a-z0-9)]\.md([^a-z0-9]|$)/i.test(t);
     const grenzen = (k) => k.titel.length >= 3 && k.titel.length <= 90 && k.waarom.length <= 400 && k.stappen.length <= 12 && k.sleutel.length <= 61 && R.KAART_SLEUTEL_RE.test(k.sleutel)
