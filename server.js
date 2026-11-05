@@ -15693,7 +15693,8 @@ async function docplanControleRonde() {
 // Elke ochtend (na de DocPlan-controle in de ochtend-bankronde, één keer per dag): rooster + GEZOCHT-agenda (public.sb_dienst_bezetting, sb2 0026)
 // naast de norm (DOCPLAN_DIR/bezetting-norm.json, anders de standaard in de module); per praktijk per week met een ongedekt gat één Voor jou-kaart.
 // Route GET/POST /app/facturen/bezetting[/JJJJ-MM] (alleen de eigenaar, in appFacturen vóór facturen.js): weken, maandoverzicht, vinkje en
-// "Is goed zo". Socev schrijft niets in de GEZOCHT-agenda (grondwet 1 en 7); de app geeft per dag de vooringevulde Google-link. Administratie in
+// "Is goed zo". Sinds wv2486 zet een vinkje zelf een GEZOCHT-item (docplanGezocht hieronder; grondwet 1, aanvulling 5-11-2026); lukt dat niet,
+// dan geeft de app per dag de vooringevulde Google-link. Administratie in
 // docplan.sqlite (tabellen bezetting_*). Geen naam in een log of kaart. Ontbreekt de module of docplan.sqlite (terugrol), dan niets.
 function docplanOpenRw() {
   const f = path.join(DOCPLAN_DIR, 'docplan.sqlite');
@@ -15703,6 +15704,25 @@ function docplanOpenRw() {
   try { db.exec('PRAGMA busy_timeout = 5000'); } catch (e) { db.close(); throw e; }
   return db;
 }
+// wv2486 (grondwet 1, aanvulling David 5-11-2026): vinkje in DocPlan › Bezetting → n8n *AI - GEZOCHT-agenda* zet of haalt één hele-dag-item
+// GEZOCHT in de GEZOCHT-agenda van die praktijk (staat daarmee op waarneming.tolgaarde.nl). Alleen deze vier velden gaan mee; titel, agenda,
+// hele dag en markering zet n8n zelf, en n8n haalt alleen een item weg dat de pod zette. Sleutel = de app-knopsleutel (n8n kent de sha256).
+const DOCPLAN_GEZOCHT_WF = process.env.DOCPLAN_GEZOCHT_WF || 'nprUcZeDfbL4m6U0';   // AI - GEZOCHT-agenda
+async function docplanGezocht(b) {
+  const geheim = appKnopSleutel();
+  if (!geheim) throw new Error('gezocht: sleutel ontbreekt');
+  const body = { actie: b.actie, pr: b.pr, datum: b.datum };
+  if (b.actie === 'weghalen' && b.event_id) body.event_id = b.event_id;   // zonder id: n8n haalt op datum alleen eigen items weg
+  for (let poging = 0; poging < 2; poging++) {
+    const url = await appWebhookUrl(DOCPLAN_GEZOCHT_WF, 'GEZOCHT (app)', 'gezochtUrl', poging > 0);
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json', 'x-socev-sleutel': geheim },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(30000) });
+    if (r.status === 404 && poging === 0) continue;
+    if (!r.ok) throw new Error('gezocht http ' + r.status);
+    return r.json();
+  }
+  throw new Error('gezocht: webhook niet gevonden');
+}
 function docplanBezettingNorm() {
   try { return fs.readFileSync(path.join(DOCPLAN_DIR, 'bezetting-norm.json'), 'utf8'); } catch (e) { return null; }
 }
@@ -15711,7 +15731,7 @@ const docplanBezetting = (function () {
   if (!fs.existsSync(p)) return null;
   try {
     return require(p).maak({ fout: logError, rpc: function (fn, body) { return appSbRpc(fn, body, 20000); }, openDb: docplanOpenRw,
-      normTekst: docplanBezettingNorm, nuKort: function () { return bankNuKort(); },
+      normTekst: docplanBezettingNorm, nuKort: function () { return bankNuKort(); }, gezocht: docplanGezocht,
       io: {
         zet: async function (k) { const r = await appSbRpc('mk_voor_jou_zet', { p: k }); appStaat.vjCache = null; if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet'); return r; },
         status: function (sleutel, van, naar, x) {

@@ -9,7 +9,7 @@ C=$(grep -vE '^\s*(\*|//)' docplan-bezetting.js | grep -v '^module.exports')
 if echo "$C" | grep -nE "require\(|\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new Function|\bfs\.|child_process"; then
   echo "ROOD  CI-poort: docplan-bezetting.js laadt een module, raakt het proces of bestanden, of logt"; exit 1
 fi
-# nooit zelf in een agenda schrijven (grondwet 1 en 7): geen agenda-schrijfluik, geen Google Calendar-API, alleen de render-link
+# zelf nooit rechtstreeks in een agenda: geen agenda-schrijfluik, geen Google Calendar-API, geen webhook; schrijven alleen via o.gezocht (wv2486)
 if echo "$C" | grep -nE "agenda-schrijven|agenda_schrijf|calendar/v3|googleapis|events\.insert|/webhook/"; then
   echo "ROOD  CI-poort: docplan-bezetting.js raakt een agenda-schrijfroute"; exit 1
 fi
@@ -26,6 +26,14 @@ d2=$(grep -n "const bz = await docplanBezettingRonde();" server.js | head -1 | c
 grep -qE "^RELEASE_OPTIONEEL=\".* docplan-bezetting\.js" uitrol.sh || { echo "ROOD  uitrol.sh: docplan-bezetting.js niet in RELEASE_OPTIONEEL"; f=1; }
 grep -q "^COPY docplan-bezetting.js /app/release-bootstrap/docplan-bezetting.js" Dockerfile || { echo "ROOD  Dockerfile: docplan-bezetting.js niet in release-bootstrap"; f=1; }
 if grep -qiE "bezetting" facturen-ingang.js facturen.js; then echo "ROOD  facturen-ingang.js of facturen.js noemt de bezetting (nooit via /fac)"; f=1; fi
+# wv2486: het vinkje schrijft alleen via docplanGezocht → n8n AI - GEZOCHT-agenda, met alleen actie/pr/datum(/event_id) en de app-knopsleutel
+G=$(awk '/^async function docplanGezocht\(b\) \{/{z=1} z{print} z && /^}/{exit}' server.js)
+echo "$G" | grep -q "const body = { actie: b.actie, pr: b.pr, datum: b.datum };" && echo "$G" | grep -q "if (b.actie === 'weghalen' && b.event_id) body.event_id = b.event_id;" \
+  && echo "$G" | grep -q "'x-socev-sleutel': geheim" && echo "$G" | grep -q "appWebhookUrl(DOCPLAN_GEZOCHT_WF, 'GEZOCHT (app)'" \
+  && [ "$(echo "$G" | grep -c 'JSON.stringify(')" = 1 ] && echo "$G" | grep -q "body: JSON.stringify(body)" \
+  || { echo "ROOD  server.js: docplanGezocht stuurt meer dan actie/pr/datum/event_id of niet naar AI - GEZOCHT-agenda"; f=1; }
+grep -q "gezocht: docplanGezocht," server.js || { echo "ROOD  server.js: docplanBezetting krijgt docplanGezocht niet mee"; f=1; }
+[ "$(grep -v '^\s*//' server.js | grep -c 'docplanGezocht')" = 2 ] || { echo "ROOD  server.js: docplanGezocht wordt ook elders gebruikt"; f=1; }
 [ $f = 0 ] && echo "GROEN koppeling server.js (route vóór facturen.js, ronde na de DocPlan-controle), uitrol.sh en Dockerfile; /fac kent de bezetting niet"
 node --no-warnings --test --test-reporter=spec test/docplan-bezetting.test.js || f=1
 exit $f

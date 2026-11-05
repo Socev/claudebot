@@ -278,3 +278,130 @@ test('review: geen Google-link zonder geldige GEZOCHT-agenda; inactieve oude fee
   const map = new Map(['2027-01-11', '2027-01-12', '2027-01-13', '2027-01-14', '2027-01-15'].map((d, i) => [d, { artsen: i === 0 ? 3 : 2, namen: [] }]));
   assert.strictEqual(B.week('GH', '2027-01-11', map, np, { vandaag: VANDAAG, tot: '2027-02-01' }).kleur, 'groen');
 });
+
+// ── wv2486: vinkje zet zelf een GEZOCHT-item (via o.gezocht = nep-n8n); alleen eigen items weg ──
+function routeG(dbPad, bez, antwoord) {
+  const v = vj(), roep = [];
+  const r = B.maak({ rpc: async () => bez, openDb: () => (dbPad ? new DatabaseSync(dbPad) : null), normTekst: () => null, io: v.io, nuKort: () => 'x',
+    gezocht: async (body) => { roep.push(body); return antwoord(body, roep.length); } });
+  return { r, v, roep };
+}
+const postG = (r, d) => r.app(req({ methode: 'POST', d }));
+const dagVan = (x, maandag, i) => x.j.praktijken[0].weken.find((w) => w.maandag === maandag).dagen[i || 0];
+
+test('wv2486 vink: precies één schrijfaanroep met praktijk en datum; tweede vink geen tweede; GET = op de waarneemsite, geen link', async () => {
+  const t = tmpDb();
+  try {
+    const { r, roep } = routeG(t.pad, rooster({}), () => ({ ok: true, event_id: 'abc123proef' }));
+    const x = await postG(r, { handeling: 'vink', pr: 'TG', datum: '2027-01-11' });
+    assert.strictEqual(x.status, 200); assert.strictEqual(x.j.op_site, true);
+    assert.deepStrictEqual(roep, [{ actie: 'plaatsen', pr: 'TG', datum: '2027-01-11' }], 'alleen actie, pr en datum; geen titel of agenda');
+    assert.strictEqual((await postG(r, { handeling: 'vink', pr: 'TG', datum: '2027-01-11' })).status, 200);
+    assert.strictEqual(roep.length, 1, 'al gezet = geen tweede aanroep');
+    const g = await r.app(req());
+    const d = dagVan(g, '2027-01-11');
+    assert.strictEqual(d.gekozen, true); assert.strictEqual(d.op_site, true); assert.strictEqual(d.link, null); assert.strictEqual(g.j.schrijven, 'zelf');
+  } finally { t.weg(); }
+});
+
+test('wv2486 ontvink: alleen het eigen item weg (opgeslagen event-id); vinkje zonder item = geen aanroep; mislukt weghalen = vinkje blijft', async () => {
+  const t = tmpDb();
+  try {
+    let weg = { ok: true };
+    const { r, roep } = routeG(t.pad, rooster({}), (b) => (b.actie === 'plaatsen' ? { ok: true, event_id: 'eigen' + b.datum.replace(/-/g, '') } : weg));
+    await postG(r, { handeling: 'vink', pr: 'TG', datum: '2027-01-11' });
+    weg = { ok: false, fout: 'weghalen mislukt (status 500)' };
+    let x = await postG(r, { handeling: 'ontvink', pr: 'TG', datum: '2027-01-11' });
+    assert.strictEqual(x.status, 502);
+    assert.deepStrictEqual(roep[1], { actie: 'weghalen', pr: 'TG', datum: '2027-01-11', event_id: 'eigen20270111' });
+    assert.strictEqual(dagVan(await r.app(req()), '2027-01-11').gekozen, true, 'mislukt = vinkje blijft staan');
+    weg = { ok: true };
+    x = await postG(r, { handeling: 'ontvink', pr: 'TG', datum: '2027-01-11' });
+    assert.strictEqual(x.status, 200); assert.strictEqual(roep.length, 3);
+    assert.strictEqual(dagVan(await r.app(req()), '2027-01-11').gekozen, false);
+    // ontvink van een dag zonder eigen item (nooit aangevinkt): geen aanroep naar de agenda
+    assert.strictEqual((await postG(r, { handeling: 'ontvink', pr: 'TG', datum: '2027-01-12' })).status, 200);
+    assert.strictEqual(roep.length, 3, 'zonder eigen event-id nooit weghalen');
+  } finally { t.weg(); }
+});
+
+test('wv2486 item van een ander: n8n weigert (niet_eigen) → de pod raakt het niet nog eens en vergeet alleen het vinkje', async () => {
+  const t = tmpDb();
+  try {
+    const { r, roep } = routeG(t.pad, rooster({}), (b) => (b.actie === 'plaatsen' ? { ok: true, event_id: 'xyz987proef' } : { ok: false, fout: 'niet_eigen' }));
+    await postG(r, { handeling: 'vink', pr: 'TG', datum: '2027-01-13' });
+    const x = await postG(r, { handeling: 'ontvink', pr: 'TG', datum: '2027-01-13' });
+    assert.strictEqual(x.status, 200); assert.ok(/zelf weg/.test(x.j.let_op));
+    assert.strictEqual(roep.filter((b) => b.actie === 'weghalen').length, 1);
+    assert.strictEqual(dagVan(await r.app(req()), '2027-01-11', 2).gekozen, false);
+  } finally { t.weg(); }
+});
+
+test('wv2486 feestdag, weekend, vandaag en verleden: geweigerd zonder één schrijfaanroep; Groenhouten zonder schrijfrecht = link blijft', async () => {
+  const t = tmpDb();
+  try {
+    const { r, roep } = routeG(t.pad, rooster({}), (b) => (b.pr === 'GH' ? { ok: false, fout: 'geen_schrijfrecht', status: 403 } : { ok: true, event_id: 'abc123proef' }));
+    for (const datum of ['2026-12-25', '2027-01-16', '2027-01-17', VANDAAG, '2026-11-02', '2027-12-30'])
+      assert.strictEqual((await postG(r, { handeling: 'vink', pr: 'TG', datum })).status, 400, datum);
+    for (const datum of ['2026-12-25', VANDAAG]) assert.strictEqual((await postG(r, { handeling: 'ontvink', pr: 'TG', datum })).status, 400, 'ontvink ' + datum);
+    assert.strictEqual(roep.length, 0, 'geweigerd = geen aanroep');
+    const x = await postG(r, { handeling: 'vink', pr: 'GH', datum: '2027-01-11' });
+    assert.strictEqual(x.status, 200); assert.strictEqual(x.j.op_site, false); assert.ok(/Groenhouten/.test(x.j.schrijf_fout));
+    const g = await r.app(req());
+    const gh = g.j.praktijken[1].weken.find((w) => w.maandag === '2027-01-11').dagen[0];
+    assert.strictEqual(gh.gekozen, true); assert.strictEqual(gh.op_site, false); assert.ok(gh.link && gh.link.includes('proefGH')); assert.ok(gh.schrijf_fout);
+    // n8n onbereikbaar → stand fout, link blijft, opnieuw vinken probeert opnieuw
+    const { r: r2, roep: roep2 } = routeG(t.pad, rooster({}), () => { throw new Error('n8n weg'); });
+    const y = await postG(r2, { handeling: 'vink', pr: 'TG', datum: '2027-01-14' });
+    assert.strictEqual(y.status, 200); assert.strictEqual(y.j.op_site, false); assert.ok(/lukte niet/.test(y.j.schrijf_fout));
+    await postG(r2, { handeling: 'vink', pr: 'TG', datum: '2027-01-14' });
+    assert.strictEqual(roep2.length, 2);
+  } finally { t.weg(); }
+});
+
+test('wv2486 twee tikken tegelijk op dezelfde dag: de tweede krijgt 409, één schrijfaanroep; zonder o.gezocht blijft het de link', async () => {
+  const t = tmpDb();
+  try {
+    let los; const wacht = new Promise((res) => { los = res; });
+    const { r, roep } = routeG(t.pad, rooster({}), async () => { await wacht; return { ok: true, event_id: 'abc123proef' }; });
+    const p1 = postG(r, { handeling: 'vink', pr: 'TG', datum: '2027-01-11' });
+    await new Promise((res) => setTimeout(res, 0));
+    const x2 = await postG(r, { handeling: 'vink', pr: 'TG', datum: '2027-01-11' });
+    assert.strictEqual(x2.status, 409);
+    los(); assert.strictEqual((await p1).status, 200); assert.strictEqual(roep.length, 1);
+    const { r: r0 } = route(t.pad, rooster({}));
+    const g = await r0.app(req());
+    assert.strictEqual(g.j.schrijven, 'link');
+    const x = await r0.app(req({ methode: 'POST', d: { handeling: 'vink', pr: 'TG', datum: '2027-01-15' } }));
+    assert.strictEqual(x.j.op_site, false); assert.strictEqual(x.j.schrijf_fout, null);
+  } finally { t.weg(); }
+});
+
+test('wv2486 schema: oude bezetting_keuze (zonder kolommen) krijgt event_id/stand/fout/bijgewerkt, herhaalbaar', () => {
+  const t = tmpDb();
+  try {
+    const db = new DatabaseSync(t.pad);
+    db.exec("CREATE TABLE bezetting_keuze (pr TEXT NOT NULL CHECK (pr IN ('TG','GH')), datum TEXT NOT NULL, op TEXT NOT NULL, door TEXT NOT NULL, PRIMARY KEY (pr, datum))");
+    db.prepare("INSERT INTO bezetting_keuze VALUES ('TG','2027-01-11','x','david')").run();
+    B.schema(db); B.schema(db);
+    const kol = db.prepare("SELECT name FROM pragma_table_info('bezetting_keuze')").all().map((r) => r.name);
+    for (const k of ['event_id', 'stand', 'fout', 'bijgewerkt']) assert.ok(kol.includes(k), k);
+    assert.strictEqual(B.staat(db).keuzeRij.TG.get('2027-01-11').event_id, null);
+    db.close();
+  } finally { t.weg(); }
+});
+
+test('wv2486 review MOET 2: antwoord van plaatsen verloren (stand fout) → ontvinken haalt op datum weg (zonder id); geen_recht → geen aanroep', async () => {
+  const t = tmpDb();
+  try {
+    let n = 0;
+    const { r, roep } = routeG(t.pad, rooster({}), (b) => { n++; if (b.actie === 'plaatsen' && b.pr === 'TG') throw new Error('time-out'); return b.pr === 'GH' ? { ok: false, fout: 'geen_schrijfrecht' } : { ok: true, weg: 1 }; });
+    await postG(r, { handeling: 'vink', pr: 'TG', datum: '2027-01-11' });
+    const x = await postG(r, { handeling: 'ontvink', pr: 'TG', datum: '2027-01-11' });
+    assert.strictEqual(x.status, 200);
+    assert.deepStrictEqual(roep[1], { actie: 'weghalen', pr: 'TG', datum: '2027-01-11' }, 'op datum, zonder id');
+    await postG(r, { handeling: 'vink', pr: 'GH', datum: '2027-01-11' });
+    await postG(r, { handeling: 'ontvink', pr: 'GH', datum: '2027-01-11' });
+    assert.strictEqual(roep.filter((b) => b.pr === 'GH').length, 1, 'GH zonder schrijfrecht: alleen de ene plaatspoging, geen weghalen');
+  } finally { t.weg(); }
+});
