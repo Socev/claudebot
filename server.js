@@ -5101,7 +5101,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/broedstoof/voorrang', 'POST /app/harvester/broedstoof', 'POST /app/harvester/weg', 'POST /app/harvester/terug', 'POST /app/harvester/bron-nieuw',
   'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
-  'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
+  'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/sleutels/nieuw', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/te-lezen']);   // wv2245: afvinken of bewaren = David die leest   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
@@ -5203,6 +5203,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/modellen',    // wv138: een runtimewissel raakt alle workflows; nooit vanaf een werk-pc
   'POST /app/sleutels/vervang',    // wv157: sleutels alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot
   'POST /app/sleutels/weg',        // wv1786: weggooien idem
+  'POST /app/sleutels/nieuw',      // wv2481: een nieuwe kluissleutel toevoegen (Sleutelbos) idem
   'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
   'POST /app/agenda',      // wv315 (zie hieronder)
   'POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus',
@@ -12658,7 +12659,7 @@ function handleApp(req, res) {
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10); sinds
         // wv1931 geen BSN-masker meer op Davids invoer. Daarna verder met slotKlaar = true (apparaat en sessie opnieuw gecontroleerd).
         if (appBeheerVanafVast(route, a, d))
-          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/sleutels/weg' ? 'sleutels weggooien' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : route === 'POST /app/docs/delen' ? 'een pagina delen' : route === 'POST /app/werkers/schakel' ? 'een werker aan- of uitzetten' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
+          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/sleutels/weg' ? 'sleutels weggooien' : route === 'POST /app/sleutels/nieuw' ? 'een sleutel toevoegen' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : route === 'POST /app/docs/delen' ? 'een pagina delen' : route === 'POST /app/werkers/schakel' ? 'een werker aan- of uitzetten' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
@@ -12734,6 +12735,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/sleutels') return appSleutels(req, res, a);
         if (route === 'POST /app/sleutels/vervang') return appSleutelVervang(req, res, reg, a, s, d);
         if (route === 'POST /app/sleutels/weg') return appSleutelWeg(req, res, reg, a, s, d);   // wv1786
+        if (route === 'POST /app/sleutels/nieuw') return appSleutelNieuw(req, res, reg, a, s, d);   // wv2481 (Sleutelbos)
         if (route === 'GET /app/push') return appPushStand(req, res, a);
         if (route === 'POST /app/push/abonneer') return appPushAbonneer(req, res, a, d);
         if (route === 'POST /app/push/opzeggen') return appPushOpzeggen(req, res, a);
@@ -13056,7 +13058,8 @@ async function appVerbruik(req, res) {
 // 'app-<apparaat>'). Alleen schrijven: GET geeft naam, waar gebruikt, klasse, laatst gewijzigd en "vervangen vóór" - nooit de
 // waarde, geen masker, geen vingerafdruk. POST: verse vingerafdruk van dít apparaat (verbruikt vóór de eerste await), nooit
 // vanaf een apparaat met een vaste plek (APP_BEHEER_ROUTES), alleen op de primaire kant, 10 per uur. De waarde komt niet in
-// auditlog, foutlog, Telegram of antwoord. Grens: geen nieuwe namen (het luik maakt niets aan) en geen terugzetten (portaal).
+// auditlog, foutlog, Telegram of antwoord. Grens: geen terugzetten (portaal). Sinds wv2481 (App Sleutelbos) ook een nieuwe kluisnaam:
+// appSleutelNieuw hieronder.
 const APP_SLEUTELS_PER_UUR = 10;
 const APP_SLEUTEL_KLUIS_RE = /^[a-z0-9_]{3,64}$/;
 const APP_SLEUTEL_N8N_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -13154,6 +13157,43 @@ async function appSleutelVervang(req, res, reg, a, s, d) {
   // de knop "Vorige terugzetten" bestaat alleen in het portaal
   const nazorg = (u.nazorg || []).map(function (x) { return /Vorige terugzetten/.test(x) ? 'De vorige waarde blijft bewaard; terugzetten kan in het sleutelportaal (/sleutels) of via de machinekamer.' : String(x).slice(0, 400); });
   appStuur(res, 200, { ok: true, naam: t.naam, plek: t.plek, uitkomst: String(u.uitkomst).slice(0, 200), nazorg: nazorg });
+}
+
+// wv2481 (idee 9 meetpunt 4, App Sleutelbos; David 5-11-2026 14:32): POST /app/sleutels/nieuw { naam, waarde } — een NIEUWE kluissleutel
+// aanmaken vanuit de app, zodat David voor een nieuwe sleutel niet meer via het sleutelportaal met een Telegram-code hoeft. Zelfde
+// schrijfweg als het portaalveld 'kluis-nieuw' (spSchrijfTaak met nieuw: true; de kluis-RPC weigert een bestaande naam en logt in
+// secondbrain.sleutelportaal_log) en dezelfde poort als vervangen: actieve kant, nooit vanaf een vaste plek (APP_BEHEER_ROUTES), verse
+// vingerafdruk (verbruikt vóór de eerste await), teller sleutels. De waarde gaat nooit terug en komt niet in audit, log of Telegram.
+// Alleen de kluis: n8n-credentials maak je in n8n zelf (type en velden verschillen per dienst). Een nieuwe sleutel staat niet op de
+// witte lijst: de pod leest hem pas als de machinekamer hem daar zet (nazorg zegt dat).
+async function appSleutelNieuw(req, res, reg, a, s, d) {
+  const waarde = typeof d.waarde === 'string' ? d.waarde.trim() : '';
+  d.waarde = undefined;
+  const naam = typeof d.naam === 'string' ? d.naam.trim() : '';   // geen String(): ['x'] zou dan 'x' worden
+  if (!rolPrimair()) return appWeiger(res, 409, 'deze kant van Socev is nu passief; een sleutel toevoegen kan alleen op de actieve kant', 'niet primair');
+  if (!APP_SLEUTEL_KLUIS_RE.test(naam) || /__vorige$/.test(naam) || /^weg__/.test(naam) || /__/.test(naam))
+    return appWeiger(res, 400, 'de naam mag alleen kleine letters, cijfers en _ bevatten (3 tot 64 tekens, geen dubbele _)', 'sleutel nieuw naam');
+  if (waarde.length < 8 || waarde.length > 8192 || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(waarde))
+    return appWeiger(res, 400, 'de waarde moet 8 tot 8192 tekens zijn, op één regel', 'sleutel nieuw waarde vorm');
+  if (waarde === naam) return appWeiger(res, 400, 'de waarde lijkt op de naam; plak de sleutel zelf in het waardeveld', 'sleutel nieuw waarde = naam');
+  if (!appVersOk(a, s)) { res._app.reden = 'sleutel nieuw, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het toevoegen met je vingerafdruk', vers_nodig: true }); }
+  appStaat.tellers.sleutels = appStaat.tellers.sleutels || [];
+  if (!appTeller('sleutels', APP_SLEUTELS_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens sleutels');
+  s.vers_tot = 0;
+  const k = await spRpc('sb_sleutelportaal_overzicht', {});
+  if (!k.ok || !Array.isArray(k.sleutels)) return appWeiger(res, 503, 'de kluis is nu niet te lezen; er is niets toegevoegd', 'sleutel nieuw kluis lezen');
+  if (k.sleutels.some(function (y) { return y && y.naam === naam; }) || APP_SLEUTEL_PORTAAL_KLUIS.has(naam))
+    return appWeiger(res, 409, 'deze naam bestaat al; gebruik Vervangen bij die sleutel', 'sleutel nieuw bestaat al');
+  const t = { plek: 'kluis', naam: naam, nieuw: true, waarde: waarde, v: { naam: naam } };
+  const u = await spSchrijfTaak('app-' + a.id.slice(0, 12), t, spMeta());
+  t.waarde = undefined;
+  res._app.reden = ('sleutel nieuw ' + naam + ': ' + (u.ok ? (u.actie || 'aangemaakt') : 'mislukt')).slice(0, 120);
+  appTelegram('Socev-app: nieuwe kluissleutel "' + naam + '" ' + (u.ok ? 'toegevoegd' : 'NIET toegevoegd (' + String(u.uitkomst).slice(0, 80) + ')') +
+    ' vanuit de app ("' + a.naam + '"). Niet jij? /app-noodstop en meld het de machinekamer.');
+  // review wv2481 MOET 1: twee tabbladen tegelijk -> de kluis weigert de tweede met 'naam bestaat al'; dat is een conflict (409), geen 422
+  if (!u.ok) return appStuur(res, /bestaat al/.test(String(u.uitkomst)) ? 409 : 422, { ok: false, fout: String(u.uitkomst).slice(0, 200), naam: naam });
+  appStuur(res, 200, { ok: true, naam: naam, plek: 'kluis', uitkomst: String(u.uitkomst).slice(0, 200),
+    nazorg: (u.nazorg || []).map(function (x) { return String(x).slice(0, 400); }).concat(['Laat de machinekamer hem in het sleutelregister zetten (waarvoor en wanneer vervangen); tot dan staat hij in Sleutelbos zonder uitleg.']) });
 }
 
 // wv1786 (Sleutelwissel 2 § C): POST /app/sleutels/weg { naam } — een proef_-rij of de vorige-kopie van een sleutel weggooien.

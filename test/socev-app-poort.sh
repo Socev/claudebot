@@ -288,7 +288,7 @@ async function nepFetch(url, opt) {
       }
       if (b.p_sleutel !== 'k'.repeat(64)) return antw(200, { ok: false, reden: 'portaalsleutel ongeldig' });
       if (spNep.kapot) return antw(500, { message: 'kapot' });
-      if (fn === 'sb_sleutelportaal_overzicht') return antw(200, { ok: true, sleutels: spNep.kluis });
+      if (fn === 'sb_sleutelportaal_overzicht') return antw(200, { ok: true, sleutels: spNep.kluis.filter((x) => x.naam !== spNep.kluisVerberg) });   // wv2481: kluisVerberg = race nabootsen
       if (fn === 'sb_sleutelportaal_log') { spNep.log.push(b); return antw(200, { ok: true }); }
       if (fn === 'sb_sleutelportaal_weg') {   // wv1786: nagebootst zoals de kluis (weg_kan / vorige_weg_kan)
         spNep.weg.push(b);
@@ -301,6 +301,11 @@ async function nepFetch(url, opt) {
         spNep.schrijf.push(b);
         if (spNep.schrijfReden) return antw(200, { ok: false, reden: spNep.schrijfReden.split('$W').join(b.p_waarde) });
         const k = spNep.kluis.find((x) => x.naam === b.p_naam);
+        if (b.p_nieuw) {   // wv2481: nagebootst zoals de kluis (bestaande naam geweigerd)
+          if (k) return antw(200, { ok: false, reden: 'naam bestaat al' });
+          spNep.kluis.push({ naam: b.p_naam, omschrijving: null, gewijzigd: new Date().toISOString(), witte_lijst: false, gemaskeerd: '••••', geweigerd: null, w: b.p_waarde });
+          return antw(200, { ok: true, actie: 'aangemaakt' });
+        }
         if (!k) return antw(200, { ok: false, reden: 'naam bestaat niet' });
         if (k.w === b.p_waarde) return antw(200, { ok: true, actie: 'ongewijzigd' });
         k.w = b.p_waarde; k.gewijzigd = new Date().toISOString();
@@ -3910,6 +3915,7 @@ async function bewijs(o) {
       ];
       spNep.creds = [{ id: 'TaskerAbc123', name: 'Locatie Tasker (header)', type: 'httpHeaderAuth', updatedAt: '2026-06-09T10:00:00.000Z' },
         { id: 'OauthXyz789', name: 'Gmail OAuth', type: 'gmailOAuth2', updatedAt: '2026-06-09T10:00:00.000Z' }];
+      const WN = 'GEHEIM-TOEVOEG-' + crypto.randomBytes(12).toString('hex');   // wv2481
       const W1 = 'GEHEIM-NIEUW-' + crypto.randomBytes(12).toString('hex'), W2 = 'GEHEIM-N8N-' + crypto.randomBytes(12).toString('hex'), W3 = 'GEHEIM-FOUT-' + crypto.randomBytes(12).toString('hex');
       r = await vraag('GET', '/app/sleutels', undefined, { pot: pot() });
       toets('18 GET /app/sleutels zonder apparaat/sessie -> 401', r.status === 401, r.status);
@@ -4011,6 +4017,76 @@ async function bewijs(o) {
       await vers(P);
       const rN = await vraag('POST', '/app/sleutels/vervang', { plek: 'n8n', id: 'N8nApi001', waarde: W1 }, { pot: P.jar });
       toets('18 M1 vervangen debug-bot-token / n8n-API -> 403, niets geschreven', r.status === 403 && rN.status === 403 && /sleutelportaal/.test(r.j.fout) && spNep.schrijf.length === nS && spNep.patch.length === 1, JSON.stringify([r.j, rN.j]));
+      // ── 18N. wv2481 (App Sleutelbos): een NIEUWE kluissleutel via POST /app/sleutels/nieuw — zelfde poort als vervangen, kluis-RPC met p_nieuw
+      {
+        H.appStaat.tellers.sleutels = [];
+        const nN = spNep.schrijf.length, nTg = telegram.length;
+        for (const h of Object.keys(H.appStaat.sessies)) H.appStaat.sessies[h].vers_tot = 0;
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw', waarde: WN }, { pot: P.jar });
+        toets('18N nieuw zonder verse vingerafdruk -> 403 vers_nodig, niets geschreven', r.status === 403 && r.j.vers_nodig === true && spNep.schrijf.length === nN, JSON.stringify(r.j));
+        await vers(P);
+        const v1 = await vraag('POST', '/app/sleutels/nieuw', { naam: 'Proef Nieuw', waarde: WN }, { pot: P.jar });
+        const v2 = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw__vorige', waarde: WN }, { pot: P.jar });
+        const v3 = await vraag('POST', '/app/sleutels/nieuw', { naam: 'weg__20261101__x', waarde: WN }, { pot: P.jar });
+        const v4 = await vraag('POST', '/app/sleutels/nieuw', { naam: ['proef_nieuw'], waarde: WN }, { pot: P.jar });
+        const v5 = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw', waarde: 'kort' }, { pot: P.jar });
+        const v6 = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw', waarde: 'twee\nregels-langgenoeg' }, { pot: P.jar });
+        const v7 = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw', waarde: 'proef_nieuw' }, { pot: P.jar });
+        toets('18N naamregels (hoofdletters/spatie, __vorige, weg__, lijst) en waardevorm (kort, regeleinde, = naam) -> 400, niets geschreven, vingerafdruk niet verbruikt',
+          [v1, v2, v3, v4, v5, v6, v7].every((x) => x.status === 400) && spNep.schrijf.length === nN, [v1, v2, v3, v4, v5, v6, v7].map((x) => x.status).join());
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_een', waarde: WN }, { pot: P.jar });
+        toets('18N bestaande naam -> 409 "bestaat al; gebruik Vervangen", niets geschreven', r.status === 409 && /bestaat al/.test(r.j.fout) && spNep.schrijf.length === nN, JSON.stringify(r.j));
+        await vers(P);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: ' proef_nieuw ', waarde: '  ' + WN + ' ' }, { pot: P.jar });
+        const sn = spNep.schrijf[spNep.schrijf.length - 1] || {};
+        toets('18N nieuw: 200 aangemaakt via sb_sleutelportaal_schrijven (p_nieuw true, sessie app-<apparaat>, naam en waarde afgeknipt)', r.status === 200 && r.j.ok === true && /aangemaakt/.test(r.j.uitkomst)
+          && spNep.schrijf.length === nN + 1 && sn.p_nieuw === true && sn.p_naam === 'proef_nieuw' && sn.p_waarde === WN && sn.p_sessie === 'app-' + aId.slice(0, 12), JSON.stringify(r.j));
+        toets('18N antwoord zonder waarde, nazorg witte lijst + register', !JSON.stringify(r.j).includes(WN) && r.j.nazorg.some((x) => /witte lijst/.test(x)) && r.j.nazorg.some((x) => /sleutelregister/.test(x)), JSON.stringify(r.j));
+        toets('18N één Telegram-regel met naam en noodstop, zonder waarde', telegram.length === nTg + 1 && /nieuwe kluissleutel "proef_nieuw" toegevoegd vanuit de app/.test(telegram[nTg]) && /\/app-noodstop/.test(telegram[nTg]) && !telegram[nTg].includes(WN), telegram[nTg]);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw2', waarde: WN }, { pot: P.jar });
+        toets('18N tweede toevoeging met dezelfde vingerafdruk -> 403 vers_nodig', r.status === 403 && r.j.vers_nodig === true && spNep.schrijf.length === nN + 1, JSON.stringify(r.j));
+        await vers(P);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw', waarde: WN + 'x' }, { pot: P.jar });
+        toets('18N dezelfde naam nog eens -> 409, niets geschreven', r.status === 409 && spNep.schrijf.length === nN + 1, JSON.stringify(r.j));
+        await vers(P);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'telegram_bot_token', waarde: WN }, { pot: P.jar });
+        toets('18N naam waar Socev zelf op draait -> 409, ook als de kluis hem (nog) niet toont', r.status === 409 && spNep.schrijf.length === nN + 1, JSON.stringify(r.j));
+        spNep.kapot = true; await vers(P);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw3', waarde: WN }, { pot: P.jar });
+        spNep.kapot = false;
+        toets('18N kluis onleesbaar -> 503, niets geschreven', r.status === 503 && spNep.schrijf.length === nN + 1, JSON.stringify(r.j));
+        rolStub.primair = false; await vers(P);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw3', waarde: WN }, { pot: P.jar });
+        rolStub.primair = true;
+        toets('18N passieve kant -> 409', r.status === 409 && /passief/.test(r.j.fout) && spNep.schrijf.length === nN + 1, JSON.stringify(r.j));
+        spNep.schrijfReden = 'fout bij $W in de kluis'; await vers(P);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw4', waarde: WN + 'q' }, { pot: P.jar });
+        spNep.schrijfReden = null;
+        toets('18N mislukt met de waarde in de reden -> 422, geschoond, Telegram NIET toegevoegd zonder waarde', r.status === 422 && !JSON.stringify(r.j).includes(WN) && /NIET toegevoegd/.test(telegram[telegram.length - 1])
+          && !telegram[telegram.length - 1].includes(WN), JSON.stringify(r.j));
+        // review MOET 1: race (twee tabbladen) — de lijst kende de naam nog niet, de kluis weigert hem wel -> 409
+        spNep.kluisVerberg = 'proef_een'; await vers(P);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_een', waarde: WN + 'r' }, { pot: P.jar });
+        spNep.kluisVerberg = null;
+        toets('18N race: kluis-RPC zegt "naam bestaat al" -> 409, zonder waarde', r.status === 409 && /bestaat al/.test(r.j.fout) && !JSON.stringify(r.j).includes(WN), JSON.stringify(r.j));
+        H.appStaat.tellers.sleutels = Array(10).fill(Date.now()); await vers(P);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw5', waarde: WN }, { pot: P.jar });
+        H.appStaat.tellers.sleutels = [];
+        toets('18N grens (gedeeld met vervangen) -> 429', r.status === 429, r.status);
+        const regN = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')), apN = regN.apparaten.find((x) => x.id === aId);
+        apN.soort = 'vast'; apN.vaste_plek = 'Thuis'; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regN));
+        sbStaat.loc = { plek: 'Thuis', klasse: 'thuis', ontvangen: Date.now() - 60000 }; H.appStaat.locatie = {};
+        const nV = spNep.schrijf.length; await vers(P);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw6', waarde: WN }, { pot: P.jar });
+        apN.soort = 'reist'; apN.vaste_plek = null; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regN));
+        toets('18N vaste plek (ook met open slot) -> 403 "een sleutel toevoegen kan niet …", niets geschreven', r.status === 403 && /een sleutel toevoegen kan niet vanaf een apparaat met een vaste plek/.test(r.j.fout) && spNep.schrijf.length === nV, JSON.stringify(r.j));
+        const auditN = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+        toets('18N auditlog: apparaat + naam + uitkomst', /"route":"\/app\/sleutels\/nieuw","m":"POST","status":200,"apparaat":"[a-f0-9]{16}","reden":"sleutel nieuw proef_nieuw: aangemaakt"/.test(auditN), auditN.slice(-400));
+        r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+        const xn = (r.j.sleutels || []).find((x) => x.id === 'proef_nieuw');
+        toets('18N lijst toont de nieuwe sleutel (naam, niet in register, vervangbaar), zonder waarde', xn && xn.kan === true && xn.in_register === false && !JSON.stringify(r.j).includes(WN), JSON.stringify(xn));
+        spNep.kluis = spNep.kluis.filter((x) => !/^proef_nieuw/.test(x.naam));
+      }
       // ── 18W. wv1786: weggooien (POST /app/sleutels/weg): alleen proef_-rijen en vorige-kopieën, verse vingerafdruk, de kluis beslist
       {
         spNep.kluis.push({ naam: 'proef_weg', omschrijving: 'x', gewijzigd: '2026-10-08T10:00:00Z', witte_lijst: false, gemaskeerd: '••••', geweigerd: null, w: 'z'.repeat(30),
@@ -4087,7 +4163,7 @@ async function bewijs(o) {
       const loop = (d) => { for (const f of fs.readdirSync(d)) { const pf = path.join(d, f); const st = fs.lstatSync(pf); if (st.isDirectory()) loop(pf); else if (st.isFile()) alles.push(fs.readFileSync(pf, 'latin1')); } };
       loop(DATA); if (fs.existsSync(LOGDIR)) loop(LOGDIR);
       const hooi = alles.join('\n') + logs.join('\n') + telegram.join('\n') + JSON.stringify(spNep.log);
-      toets('18 waarden nergens terug: audit, app-log, staat, foutlog, Telegram, auditlog-RPC', ![W1, W2, W3].some((w) => hooi.includes(w) || hooi.includes(w.slice(6))), 'gevonden');
+      toets('18 waarden nergens terug: audit, app-log, staat, foutlog, Telegram, auditlog-RPC', ![W1, W2, W3, WN].some((w) => hooi.includes(w) || hooi.includes(w.slice(6))), 'gevonden');
       const auditS = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
       toets('18 auditlog: apparaat + sleutelnaam + uitkomst per vervanging', /"route":"\/app\/sleutels\/vervang","m":"POST","status":200,"apparaat":"[a-f0-9]{16}","reden":"sleutel kluis proef_een: bijgewerkt"/.test(auditS)
         && /"reden":"sleutel n8n Locatie Tasker \(header\): opgeslagen"/.test(auditS), auditS.slice(-500));
@@ -4111,6 +4187,27 @@ async function bewijs(o) {
         const al = await sb('sb_sleutelportaal_auditlog', { p_aantal: 10 });
         const alT = JSON.stringify(al);
         toets('18E auditlog in de databank: regel met sessie app-…, zonder waarde', al.ok && (al.regels || []).some((x) => x.naam === naam && /^app-/.test(x.sessie || '') && x.uitkomst === 'opgeslagen') && !alT.includes(WE2) && !alT.includes(WE1), alT.slice(0, 300));
+        // wv2481 (Sleutelbos): een NIEUWE wegwerpsleutel via het luik in de echte kluis, daarna via POST /app/sleutels/weg weg (ook de wv157-proefrij)
+        const naamN = 'proef_sleutelbos_' + Date.now(), WE3 = 'proefwaarde-nieuw-' + crypto.randomBytes(16).toString('hex');
+        H.appStaat.tellers.sleutels = [];
+        await vers(P);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: naamN, waarde: WE3 }, { pot: P.jar });
+        toets('18E nieuw via het luik in de echte kluis -> 200 aangemaakt, zonder waarde', r.status === 200 && r.j.ok === true && /aangemaakt/.test(r.j.uitkomst) && !JSON.stringify(r.j).includes(WE3), JSON.stringify(r.j));
+        await vers(P);
+        r = await vraag('POST', '/app/sleutels/nieuw', { naam: naamN, waarde: WE3 + 'x' }, { pot: P.jar });
+        toets('18E dezelfde naam nog eens -> 409', r.status === 409, JSON.stringify(r.j));
+        r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+        const en = (r.j.sleutels || []).find((x) => x.id === naamN);
+        toets('18E de nieuwe sleutel staat in de lijst, weggooibaar (proefrij), zonder waarde', en && en.kan === true && en.weg_kan === true && !JSON.stringify(r.j).includes(WE3.slice(-6)), JSON.stringify(en));
+        const alN = JSON.stringify(await sb('sb_sleutelportaal_auditlog', { p_aantal: 10 }));
+        toets('18E auditlog in de databank: nieuwe naam met sessie app-…, zonder waarde', alN.includes(naamN) && !alN.includes(WE3), alN.slice(0, 300));
+        for (const nm of [naamN, naam]) {
+          await vers(P);
+          r = await vraag('POST', '/app/sleutels/weg', { naam: nm }, { pot: P.jar });
+          toets('18E opruimen: ' + nm + ' via POST /app/sleutels/weg -> 200 weggegooid', r.status === 200 && r.j.ok === true, JSON.stringify(r.j));
+        }
+        r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+        toets('18E na opruimen: geen proefrij meer in de lijst', !(r.j.sleutels || []).some((x) => x.id === naamN || x.id === naam), JSON.stringify((r.j.sleutels || []).map((x) => x.id).filter((x) => /^proef_/.test(x))));
       }
     }
 
