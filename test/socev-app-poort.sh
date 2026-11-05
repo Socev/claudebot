@@ -3907,7 +3907,8 @@ async function bewijs(o) {
       const MB = path.join(VAULT_T, '00_Systeem', 'Beveiliging');
       fs.mkdirSync(MB, { recursive: true });
       fs.writeFileSync(path.join(MB, 'Sleutelregister - portaalgegevens.json'), JSON.stringify({ kluis: { proef_een: { waarvoor: 'proef <b>vet</b>', klasse: 'A', vervangen_voor: '2026-10-18', nazorg: 'nazorg-proef' } },
-        n8n: { 'Locatie Tasker (header)': { waarvoor: 'Tasker-locatie', klasse: 'A', vervangen_voor: '2026-10-18' } } }));
+        n8n: { 'Locatie Tasker (header)': { waarvoor: 'Tasker-locatie', klasse: 'A', vervangen_voor: '2026-10-18', lek_op: '2026-06-09', vervangen_op: '2026-10-28', afhandeling: 'vervangen', stand_op: '2026-10-28' },
+          'Gmail OAuth': { klasse: 'A', vervangen_voor: '2026-10-18', lek_op: '9-6-2026', vervangen_op: '2026-13-45', afhandeling: 'weg', stand_op: 7 } } }));   // wv2491: tweede rij met foute vormen
       if (!ECHT_SP) {   // nagebootst; met ECHT_SLEUTEL=1 alleen de proef tegen de echte kluis hieronder
       spNep.kluis = [
         { naam: 'proef_een', omschrijving: 'x', gewijzigd: '2026-10-01T10:00:00Z', witte_lijst: true, gemaskeerd: '••••Q9Z8', vingerafdruk: 'f00baa', geweigerd: null, w: 'OUDE-WAARDE-proef-een-123456' },
@@ -3924,6 +3925,9 @@ async function bewijs(o) {
       const een = ls.find((x) => x.id === 'proef_een'), boot = ls.find((x) => x.id === 'pod_bootstrap_secret'), tas = ls.find((x) => x.id === 'TaskerAbc123'), oa = ls.find((x) => x.id === 'OauthXyz789');
       toets('18 lijst: kluis + n8n, waar gebruikt, klasse, gewijzigd, vervangen vóór, pod_herstart', r.status === 200 && ls.length === 4 && een && een.plek === 'kluis' && een.waarvoor === 'proef <b>vet</b>' && een.klasse === 'A'
         && een.gewijzigd === '2026-10-01T10:00:00Z' && een.vervangen_voor === '2026-10-18' && een.pod_herstart === true && een.kan === true && tas && tas.plek === 'n8n' && tas.kan === true && tas.waarvoor === 'Tasker-locatie', JSON.stringify(r.j).slice(0, 400));
+      // wv2491: afhandeling uit het register mee, alleen in vaste vorm; ontbreekt het, dan null
+      toets('18 wv2491 lijst: vervangen_op, stand_op, lek_op en afhandeling uit het register', tas && tas.vervangen_op === '2026-10-28' && tas.stand_op === '2026-10-28' && tas.lek_op === '2026-06-09' && tas.afhandeling === 'vervangen'
+        && oa && oa.vervangen_op === null && oa.stand_op === null && oa.lek_op === null && oa.afhandeling === null && een && een.afhandeling === null && een.vervangen_op === null, JSON.stringify([tas, oa, een]));
       toets('18 lijst: geweigerde kluisnaam en OAuth-type niet vervangbaar, met reden', boot && boot.kan === false && /chart/.test(boot.waarom_niet) && oa && oa.kan === false && /n8n zelf/.test(oa.waarom_niet), JSON.stringify([boot, oa]));
       const lijstTekst = JSON.stringify(r.j);
       toets('18 lijst: geen waarde, geen masker, geen vingerafdruk (ook geen begin/eind)', !/gemaskeerd|vingerafdruk|Q9Z8|f00baa|OUDE-WAARDE|••••/.test(lijstTekst) && !('w' in een), lijstTekst.slice(0, 300));

@@ -21,16 +21,19 @@ const sleutelPad = ECHT ? '/opt/data/.sleutelportaal/rpc.key' : path.join(werk, 
 if (!ECHT) fs.writeFileSync(sleutelPad, 'a'.repeat(64));
 fs.mkdirSync(path.join(werk, 'vault/00_Systeem/Beveiliging'), { recursive: true });
 fs.writeFileSync(path.join(werk, 'vault/00_Systeem/Beveiliging/Sleutelregister - portaalgegevens.json'), JSON.stringify({
-  kluis: { proef_een: { waarvoor: 'proef <b>vet</b>', klasse: 'A', vervangen_voor: '2026-10-01', nazorg: 'nazorg-proef' } },
-  n8n: { 'Anthropic account': { klasse: 'A', vervangen_voor: '2026-10-18' } },
-  handmatig: [{ naam: 'chart', plek: 'helm', waarvoor: 'x', instructie: 'via machinekamer' }],
+  // wv2491: lek_op/vervangen_op/afhandeling (verzonnen datums)
+  kluis: { proef_een: { waarvoor: 'proef <b>vet</b>', klasse: 'A', vervangen_voor: '2026-10-01', nazorg: 'nazorg-proef', lek_op: '2026-06-01' },
+    proef_drie: { klasse: 'A', vervangen_voor: '2026-10-01', vervangen_op: '2026-10-20' }, proef_vier: { klasse: 'A', vervangen_voor: '2026-10-01', vervangen_op: '2026-02-31' } },
+  n8n: { 'Anthropic account': { klasse: 'A', vervangen_voor: '2026-10-18' }, 'Gmail account': { klasse: 'A', vervangen_voor: '2026-10-18', lek_op: '2026-06-01' } },
+  handmatig: [{ naam: 'chart', plek: 'helm', waarvoor: 'x', instructie: 'via machinekamer', vervangen_voor: '2026-10-18', afhandeling: 'dood', stand_op: '2026-10-06' }],
 }));
 
 // ── nagebootste buitenwereld ──
 const telegram = [], rpcs = [], n8nAanroepen = [];
 let telegramStuk = false;
 const kluisNep = { proef_een: { waarde: 'oud-waarde-proef-een-12345678', vorige: null },
-  proef_drie: { waarde: 'proef-drie-waarde-12345678', vorige: 'proef-drie-vorige-12345678', weg: true } };   // wv1786: weg = weg_kan
+  proef_drie: { waarde: 'proef-drie-waarde-12345678', vorige: 'proef-drie-vorige-12345678', weg: true },
+  proef_vier: { waarde: 'proef-vier-waarde-12345678', vorige: null } };   // wv2491: onmogelijke vervangen_op telt niet   // wv1786: weg = weg_kan
 const kluisWeg = [];
 const echteFetch = global.fetch;
 async function nepFetch(url, opt) {
@@ -157,6 +160,11 @@ server.listen(0, '127.0.0.1', async function () {
       toets('maskering zichtbaar', r.tekst.includes('••••5678'));
       toets('XSS geëscaped', !r.tekst.includes('<script>alert') && !r.tekst.includes('<b>vet</b>'));
       toets('verlopen datum rood', r.tekst.includes('class="laat"'));
+      // wv2491: gewijzigd na het lek = waarschijnlijk vervangen; register-vervanging = vervangen; afgehandeld = niet meer nodig; OAuth telt niet
+      toets('wv2491 gewijzigd na lek: waarschijnlijk vervangen', r.tekst.includes('gewijzigd op 16-8-2026, waarschijnlijk vervangen'));
+      toets('wv2491 vervangen_op: vervangen na de streefdatum', r.tekst.includes('vervangen op 20-10-2026 (na de streefdatum)'));
+      toets('wv2491 afhandeling dood: niet meer nodig', r.tekst.includes('niet meer nodig: al ongeldig (6-10-2026)'));
+      toets('wv2491 verlopen alleen zonder wijziging na het lek (Anthropic), bij OAuth (Gmail) en met een onmogelijke vervangen_op (proef_vier)', (r.tekst.match(/\(verlopen\)/g) || []).length === 3, (r.tekst.match(/\(verlopen\)/g) || []).length);
       toets('oauth = link naar n8n', r.tekst.includes('/home/credentials/cred2') && r.tekst.includes('in n8n zelf'));
     }
     toets('wachtwoordvelden new-password', /type="password" name="w\d+" autocomplete="new-password"/.test(r.tekst));

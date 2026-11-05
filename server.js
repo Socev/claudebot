@@ -4643,12 +4643,34 @@ function spDagen(iso) {
   const d = new Date(iso); if (!iso || isNaN(d)) return '';
   return Math.floor((Date.now() - d.getTime()) / 86400000) + ' d';
 }
-function spVoor(datum) {
-  if (!datum) return '';
-  const d = new Date(datum + 'T23:59:59+02:00'); if (isNaN(d)) return spEsc(datum);
-  const dagen = Math.ceil((d.getTime() - Date.now()) / 86400000);
-  const klasse = dagen < 0 ? 'laat' : dagen <= 14 ? 'bijna' : '';
-  return '<span class="' + klasse + '">' + spEsc(spDatum(d.toISOString())) + (dagen < 0 ? ' (verlopen)' : '') + '</span>';
+// wv2491: zelfde stand als de App Sleutelbos (socev-app src/sleutelbos.ts stand): afgehandeld (ingetrokken, behouden, dood) en een
+// bewezen vervanging na het lek (vervangen_op) zijn nooit "verlopen"; een wijzigdatum na lek_op (niet bij OAuth) = waarschijnlijk vervangen.
+// m = registerrij (mag ontbreken), gewijzigd = ISO-tijd uit kluis of n8n, type = n8n-type.
+function spVoor(datum, m, gewijzigd, type) {
+  m = m && typeof m === 'object' ? m : {};
+  // review wv2491 MOET 2: strikt (2026-02-31 telt niet); MOET 1 + ZOU 1: kalenderdagen in Nederland, geen vaste offset of afronding
+  const isDag = function (v) { return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v + 'T00:00:00Z')) && new Date(v + 'T00:00:00Z').toISOString().slice(0, 10) === v; };
+  const dagNL = function (t) { return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(t); };
+  const dagnr = function (v) { return Math.round(Date.parse(v + 'T00:00:00Z') / 86400000); };
+  const af = ['ingetrokken', 'behouden', 'dood'].indexOf(m.afhandeling) >= 0 ? m.afhandeling : null;
+  const afTekst = af ? (af === 'behouden' ? 'bewust behouden' : af === 'dood' ? 'al ongeldig' : 'ingetrokken') + (isDag(m.stand_op) ? ' (' + spDatum(m.stand_op + 'T12:00:00Z') + ')' : '') : '';
+  if (!datum) return af ? '<span class="klein">' + spEsc(afTekst) + '</span>' : '';
+  if (!isDag(datum)) return spEsc(datum);
+  const dagen = dagnr(datum) - dagnr(dagNL(Date.now()));
+  const dt = spEsc(spDatum(datum + 'T12:00:00Z'));
+  if (af) return '<span>' + dt + '<br><span class="klein">niet meer nodig: ' + spEsc(afTekst) + '</span></span>';
+  if (dagen >= 0) return '<span class="' + (dagen <= 14 ? 'bijna' : '') + '">' + dt + '</span>';
+  const lek = isDag(m.lek_op) ? m.lek_op : null;
+  const vanaf = lek || new Date((dagnr(datum) - 180) * 86400000).toISOString().slice(0, 10);
+  const bewezen = isDag(m.vervangen_op) ? m.vervangen_op : m.afhandeling === 'vervangen' && isDag(m.stand_op) ? m.stand_op : null;
+  if (bewezen && bewezen > vanaf) return '<span>' + dt + '<br><span class="klein">vervangen op ' + spEsc(spDatum(bewezen + 'T12:00:00Z')) + ' (na de streefdatum)</span></span>';
+  let gew = null;
+  if (lek && gewijzigd && !/oauth/i.test(String(type || ''))) {
+    const t = Date.parse(gewijzigd);
+    if (!isNaN(t)) gew = dagNL(t);
+  }
+  if (gew && gew > lek) return '<span class="bijna">' + dt + '<br><span class="klein">gewijzigd op ' + spEsc(spDatum(gew + 'T12:00:00Z')) + ', waarschijnlijk vervangen (register bevestigt het nog niet)</span></span>';
+  return '<span class="laat">' + dt + ' (verlopen)</span>';
 }
 
 function spPagina(titel, inhoud) {
@@ -4747,7 +4769,7 @@ async function spOverzicht(req, res, sessie, uitkomsten) {
       }
       h += '<tr><td><code>' + spEsc(s.naam) + '</code>' + (s.witte_lijst ? '<br><span class="klein">pod leest hem bij start</span>' : '') + '</td><td>' +
         spEsc(m.waarvoor || s.omschrijving || '') + (m.klasse === undefined ? '<br><span class="klein">niet in het register</span>' : '') + '</td><td>' + spEsc(m.klasse || '') +
-        '</td><td>' + spEsc(spDatum(s.gewijzigd)) + '<br><span class="klein">' + spEsc(spDagen(s.gewijzigd)) + '</span></td><td>' + spVoor(m.vervangen_voor) +
+        '</td><td>' + spEsc(spDatum(s.gewijzigd)) + '<br><span class="klein">' + spEsc(spDagen(s.gewijzigd)) + '</span></td><td>' + spVoor(m.vervangen_voor, m, s.gewijzigd) +
         '</td><td><code>' + spEsc(s.gemaskeerd) + '</code>' + (s.vingerafdruk ? '<br><span class="klein">#' + spEsc(s.vingerafdruk) + '</span>' : '') + '</td><td>' + veld + '</td></tr>';
     });
     h += '</table>';
@@ -4779,7 +4801,7 @@ async function spOverzicht(req, res, sessie, uitkomsten) {
         invoer = '<a href="' + SP_N8N_UI + '/home/credentials/' + encodeURIComponent(c.id) + '" rel="noreferrer" target="_blank">in n8n zelf</a>';
       }
       h += '<tr><td>' + spEsc(c.naam) + (m.waarvoor ? '<br><span class="klein">' + spEsc(m.waarvoor) + '</span>' : '') + '</td><td><code>' + spEsc(c.type) + '</code></td><td>' + spEsc(m.klasse || '') +
-        '</td><td>' + spEsc(spDatum(c.gewijzigd)) + '<br><span class="klein">' + spEsc(spDagen(c.gewijzigd)) + '</span></td><td>' + spVoor(m.vervangen_voor) + '</td><td>' + invoer + '</td></tr>';
+        '</td><td>' + spEsc(spDatum(c.gewijzigd)) + '<br><span class="klein">' + spEsc(spDagen(c.gewijzigd)) + '</span></td><td>' + spVoor(m.vervangen_voor, m, c.gewijzigd, c.type) + '</td><td>' + invoer + '</td></tr>';
     });
     h += '</table>';
   }
@@ -4787,7 +4809,7 @@ async function spOverzicht(req, res, sessie, uitkomsten) {
 
   h += '<h2>Handmatig</h2><table><tr><th>Sleutel</th><th>Plek</th><th>Waarvoor</th><th>Klasse</th><th>Vervangen vóór</th><th>Hoe</th></tr>';
   mh.filter(function (x) { return x && typeof x === 'object'; }).forEach(function (x) {
-    h += '<tr><td>' + spEsc(x.naam) + '</td><td>' + spEsc(x.plek) + '</td><td>' + spEsc(x.waarvoor) + '</td><td>' + spEsc(x.klasse || '') + '</td><td>' + spVoor(x.vervangen_voor) + '</td><td>' + spEsc(x.instructie) + '</td></tr>';
+    h += '<tr><td>' + spEsc(x.naam) + '</td><td>' + spEsc(x.plek) + '</td><td>' + spEsc(x.waarvoor) + '</td><td>' + spEsc(x.klasse || '') + '</td><td>' + spVoor(x.vervangen_voor, x) + '</td><td>' + spEsc(x.instructie) + '</td></tr>';
   });
   h += '</table>';
 
@@ -13073,6 +13095,15 @@ const APP_SLEUTEL_PORTAAL_KLUIS = new Set(['supabase_service_role', 'n8n_api_key
 const APP_SLEUTEL_PORTAAL_N8N_TYPEN = new Set(['telegramApi', 'n8nApi', 'supabaseApi']);
 const APP_SLEUTEL_PORTAAL_TEKST = 'alleen via het sleutelportaal: Socev draait er zelf op (alarm, kluis of brein)';
 const appSleutelTekst = function (v, n) { return v == null ? null : String(v).slice(0, n); };
+// wv2491 (David 5-11-2026: "een sleutel die 28-10 is vervangen en die 18-10 verloopt..?"): de afhandeling uit het register mee,
+// zodat de app "verlopen" niet meer alleen op de streefdatum zet (stand in socev-app src/sleutelbos.ts). Alleen vaste vormen: datums
+// JJJJ-MM-DD, afhandeling uit een vaste lijst; al het andere wordt null (een tikfout in het register maakt een sleutel nooit 'afgehandeld').
+const APP_SLEUTEL_AFHANDELING = ['vervangen', 'ingetrokken', 'behouden', 'dood'];
+function appSleutelStandVelden(m) {
+  const dag = function (v) { return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v + 'T00:00:00Z')) && new Date(v + 'T00:00:00Z').toISOString().slice(0, 10) === v ? v : null; };   // ook geen 2026-02-31 (review)
+  return { vervangen_op: dag(m.vervangen_op), stand_op: dag(m.stand_op), lek_op: dag(m.lek_op),
+    afhandeling: APP_SLEUTEL_AFHANDELING.indexOf(m.afhandeling) >= 0 ? m.afhandeling : null };
+}
 async function appSleutelLijst() {
   const meta = spMeta();
   const mk = (meta.kluis && typeof meta.kluis === 'object') ? meta.kluis : {}, mn = (meta.n8n && typeof meta.n8n === 'object') ? meta.n8n : {};
@@ -13083,13 +13114,13 @@ async function appSleutelLijst() {
     if (!x || typeof x.naam !== 'string' || /__vorige$/.test(x.naam)) return;
     const m = mk[x.naam] && typeof mk[x.naam] === 'object' ? mk[x.naam] : {};
     // Bewust een witte lijst van velden: gemaskeerd en vingerafdruk uit de RPC gaan NIET mee (opdracht: ook geen begin/eind).
-    uit.push({ plek: 'kluis', id: x.naam, naam: x.naam, waarvoor: appSleutelTekst(m.waarvoor || x.omschrijving || '', 200), klasse: appSleutelTekst(m.klasse || '', 4),
+    uit.push(Object.assign({ plek: 'kluis', id: x.naam, naam: x.naam, waarvoor: appSleutelTekst(m.waarvoor || x.omschrijving || '', 200), klasse: appSleutelTekst(m.klasse || '', 4),
       in_register: m.klasse !== undefined, gewijzigd: x.gewijzigd || null, vervangen_voor: appSleutelTekst(m.vervangen_voor || null, 10),
       pod_herstart: !!x.witte_lijst, let_op: appSleutelTekst(m.nazorg || null, 400),
       kan: !!(!x.geweigerd && !APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam)),
       waarom_niet: x.geweigerd ? appSleutelTekst(x.geweigerd, 120) : APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam) ? APP_SLEUTEL_PORTAAL_TEKST : null,
       // wv1786 (Fable-review #3): de vorige van een sleutel waar Socev zelf op draait alleen via het portaal, net als vervangen
-      weg_kan: x.weg_kan === true, vorige_weg_kan: x.vorige_weg_kan === true && !APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam), vorige_van: typeof x.vorige_van === 'string' ? x.vorige_van : null });
+      weg_kan: x.weg_kan === true, vorige_weg_kan: x.vorige_weg_kan === true && !APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam), vorige_van: typeof x.vorige_van === 'string' ? x.vorige_van : null  }, appSleutelStandVelden(m)));
   });
   if (!n8n) fouten.push('n8n');
   else {
@@ -13098,11 +13129,11 @@ async function appSleutelLijst() {
     (await Promise.all(typen.map(spN8nVeld))).forEach(function (v, i) { veld[typen[i]] = v; });
     n8n.forEach(function (c) {
       const m = mn[c.naam] && typeof mn[c.naam] === 'object' ? mn[c.naam] : {};
-      uit.push({ plek: 'n8n', id: String(c.id), naam: appSleutelTekst(c.naam, 120), type: appSleutelTekst(c.type, 60), waarvoor: appSleutelTekst(m.waarvoor || '', 200),
+      uit.push(Object.assign({ plek: 'n8n', id: String(c.id), naam: appSleutelTekst(c.naam, 120), type: appSleutelTekst(c.type, 60), waarvoor: appSleutelTekst(m.waarvoor || '', 200),
         klasse: appSleutelTekst(m.klasse || '', 4), in_register: m.klasse !== undefined, gewijzigd: c.gewijzigd || null,
         vervangen_voor: appSleutelTekst(m.vervangen_voor || null, 10), let_op: appSleutelTekst(m.nazorg || null, 400),
         kan: !!veld[c.type] && !APP_SLEUTEL_PORTAAL_N8N_TYPEN.has(c.type),
-        waarom_niet: APP_SLEUTEL_PORTAAL_N8N_TYPEN.has(c.type) ? APP_SLEUTEL_PORTAAL_TEKST : veld[c.type] ? null : 'dit soort sleutel kan alleen in n8n zelf' });
+        waarom_niet: APP_SLEUTEL_PORTAAL_N8N_TYPEN.has(c.type) ? APP_SLEUTEL_PORTAAL_TEKST : veld[c.type] ? null : 'dit soort sleutel kan alleen in n8n zelf'  }, appSleutelStandVelden(m)));
     });
   }
   return { sleutels: uit, fouten: fouten };
