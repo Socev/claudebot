@@ -15410,8 +15410,10 @@ function appAppsVolgordeRoute(req, res, a, d) {
   }
   const nu = L.volgordeUitBestand(j, appVastLijstVoorVolgorde(L));
   const antwoord = function (stand, status, extra) {
+    const m = L.meest(appAppsTelling(L), appAppsVandaag());
+    if (vp) APP_PRIVE_MODULES.forEach(function (id) { delete m.score[id]; });   // review wv2479 MOET 1: ook geen gebruik van een privé-App
     appStuur(res, status || 200, Object.assign({ ok: status ? false : true }, L.volgordeVoorApparaat(stand, vp, APP_PRIVE_MODULES),
-      { bekend: L.APP_IDS, max: L.VOLGORDE_MAX, meest: L.meest(appAppsTelling(L), appAppsVandaag()), vaste_plek: vp }, extra || {}));
+      { bekend: vp ? L.APP_IDS.filter(function (id) { return APP_PRIVE_MODULES.indexOf(id) < 0; }) : L.APP_IDS, max: L.VOLGORDE_MAX, meest: m, vaste_plek: vp }, extra || {}));
   };
   if (req.method !== 'POST') { res._app.reden = 'apps-volgorde'; res._app.stil = true; return antwoord(nu); }
   const u = L.volgordePas(nu, d, vp);

@@ -116,6 +116,7 @@ const dag = Object.keys(tel.dagen)[0];
 toets('25 geopend: geteld, tweede binnen een minuut (ander apparaat) niet, onbekend 400; stil', antw[0].o.geteld === true && antw[1].o.geteld === false && antw[2].st === 400 && tel.dagen[dag].facturen === 1 && rs._app.stil === true, { antw, tel });
 toets('25b in het bestand geen apparaat of inhoud', Object.keys(tel).sort().join() === 'dagen,sinds,versie' && Object.keys(tel.dagen[dag]).join() === 'facturen', tel);
 
+toets('25c review MOET 1: afgeschermde vaste plek krijgt geen privé-id in bekend of meest', /bekend: vp \? L\.APP_IDS\.filter/.test(src) && /if \(vp\) APP_PRIVE_MODULES\.forEach\(function \(id\) \{ delete m\.score\[id\]; \}\)/.test(src));
 // ── bedrading ──
 toets('26 routes in de routetabel', /route === 'GET \/app\/apps-volgorde' \|\| route === 'POST \/app\/apps-volgorde'\) return appAppsVolgordeRoute\(req, res, a, d\)/.test(src) && /route === 'POST \/app\/apps-geopend'\) return appAppsGeopendRoute\(req, res, a, d\)/.test(src));
 toets('27 tellen valt niet onder het invoerslot, rangschikken wel', /const APP_SLOT_VRIJ = new Set\(\[[^\]]*'POST \/app\/apps-geopend'/.test(src) && !/const APP_SLOT_VRIJ = new Set\(\[[^\]]*'POST \/app\/apps-volgorde'/.test(src));
