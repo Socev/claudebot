@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS ml_verteller_aanvraag (id INTEGER PRIMARY KEY, t TEXT
 const STEM = 'V9pPvVYSDSBU5AXrsexF';   // "David HD - Vertelstem" (ElevenLabs, professional clone; gemeten 4-11 via GET /v1/voices)
 const MODEL = 'eleven_v4', ROUTER_MODEL = 'elevenlabs/eleven_v3', FORMAAT = 'mp3_44100_64';
 const STEMGEVOEL = { stability: 0.5, similarity_boost: 0.75, speed: 0.95, use_speaker_boost: true };
-const MAX_TEKENS = 6000, DEEL_MAX = 2400, EUR_PER_1000 = 0.10, PLAFOND_EUR = 5, PER_DAG = 20, TUSSEN_MS = 10000;
+const MAX_TEKENS = 6000, MAX_VERHAAL = 12000, DEEL_MAX = 2400, EUR_PER_1000 = 0.10, PLAFOND_EUR = 5, PER_DAG = 20, TUSSEN_MS = 10000;
 const MAX_DEEL_BYTES = 4 * 1024 * 1024, TIMEOUT_MS = 180000, BEWAAR_AANVRAAG_DAGEN = 70;
 const HID_RE = /^h[0-9a-f]{16}$/;
 const VORMEN = { voorlezen: { map: 'verteller', tabel: 'ml_verteller' }, verhaal: { map: 'verteller-verhaal', tabel: 'ml_verteller_verhaal' } };
@@ -79,6 +79,7 @@ function prijsTekens(n) {
  * De tekst die de verteller voorleest: titel + verhaal, zonder ==markering== en stuurtekens, "Socev" uitgesproken als "Zo Kef" (David 4-11),
  * hooguit MAX_TEKENS (afgekapt op een zinsgrens, zoals de app). → { tekst, afgekapt } (tekst '' = niets te vertellen)
  */
+// wv2522: opt.max = een eigen grens (de vertelling als verhaal neemt het hele verhaal mee tot MAX_VERHAAL; voorlezen blijft MAX_TEKENS)
 function tekstVan(titel, verhaal, opt) {
   const schoon = (t) => String(t == null ? '' : t).normalize('NFC').replace(/==([^=\n]{1,200})==/g, '$1')
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g, ' ')
@@ -87,10 +88,11 @@ function tekstVan(titel, verhaal, opt) {
   if (!v) return { tekst: '', afgekapt: false };
   const heel0 = [schoon(titel), v].filter(Boolean).join('\n\n');
   const heel = opt && opt.uitspraak === false ? heel0 : uitspraak(heel0);   // wv2484: de bron voor het vertelscript zonder de uitspraak
-  if (heel.length <= MAX_TEKENS) return { tekst: heel, afgekapt: false };
-  const z = heel.slice(0, MAX_TEKENS);
+  const max = opt && Number.isInteger(opt.max) && opt.max > 0 ? Math.min(opt.max, MAX_VERHAAL) : MAX_TEKENS;
+  if (heel.length <= max) return { tekst: heel, afgekapt: false };
+  const z = heel.slice(0, max);
   const r = Math.max(z.lastIndexOf('. '), z.lastIndexOf('.\n'), z.lastIndexOf('! '), z.lastIndexOf('? '));
-  return { tekst: (r > MAX_TEKENS * 0.5 ? z.slice(0, r + 1) : z).trim(), afgekapt: true };
+  return { tekst: (r > max * 0.5 ? z.slice(0, r + 1) : z).trim(), afgekapt: true };
 }
 function uitspraak(t) { return String(t || '').replace(/\bSocev\b/gi, 'Zo Kef'); }
 // Tekst in delen ≤ max: op alinea's, een te lange alinea op zinnen, een te lange zin hard.
@@ -344,4 +346,4 @@ function maak(o) {
   return { tekstVan, hashVan, uitspraakVan: uitspraak, stand, vooraf, maken, deel, weg, opruim, info };
 }
 
-module.exports = { maak, tekstVan, delenVan, hashVan, prijs, prijsTekens, uitspraak, STEM, MODEL, PLAFOND_EUR, MAX_TEKENS, DEEL_MAX };
+module.exports = { maak, tekstVan, delenVan, hashVan, prijs, prijsTekens, uitspraak, STEM, MODEL, PLAFOND_EUR, MAX_TEKENS, MAX_VERHAAL, DEEL_MAX };

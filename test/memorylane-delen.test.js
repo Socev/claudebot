@@ -783,6 +783,108 @@ test('wv2484 als verhaal vertellen: script via Claude (alleen op de tik), gecach
   } finally { o.sluit(); }
 });
 
+test('wv2522 automatisch vertellen: zonder tik bij een ingesproken verhaal; niet bij Privé/zonder spraak; opnieuw bij een nieuwe versie, niet na weghalen; plafond en mislukken = één box-rij', async () => {
+  const teksten = [], vragen = [], boxen = [];
+  const MP3 = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(400, 1)]);
+  let elevenStuk = false;
+  const nf = async (u, x) => { teksten.push(JSON.parse(x.body).text); if (elevenStuk) return { ok: false, status: 500, headers: { get: () => null }, text: async () => '' };
+    return { ok: true, status: 200, headers: { get: () => null }, text: async () => '', arrayBuffer: async () => Uint8Array.from(MP3).buffer }; };
+  class Nep { constructor() { this.beta = { messages: { stream: (p) => ({ finalMessage: async () => { vragen.push(p); const v = p.messages[0].content[0].text;
+    const m = /<verhaal>\n([\s\S]*?)\n<\/verhaal>/.exec(v);
+    return { model: 'claude-sonnet-5-5', stop_reason: 'end_turn', usage: { input_tokens: 800, output_tokens: 300 }, content: [{ type: 'text', text: JSON.stringify({ script: '[softly] ' + (m ? m[1] : '') }) }] }; } }) } }; } }
+  const o = omgeving({ box: (t) => boxen.push(t), eleven: { sleutel: async () => 'nep', routerUrl: 'https://router.proef', fetch: nf }, claude: { sleutel: async () => 'nep-claude', sdk: () => ({ klasse: Nep }) } });
+  const stil = async () => { for (let i = 0; i < 400 && o.ml.info().verteller.bezig; i++) await new Promise((r) => setTimeout(r, 5)); };
+  const ronde = async () => { o.klok.t += 3 * 60000; await o.ml.tik(); await stil(); };
+  try {
+    o.opname(RA, 'gezin', false); o.opname(RB, 'prive', false); o.opname(RC, 'shizzle', false);
+    const lang = Array.from({ length: 140 }, (_, i) => 'Proefzin nummer ' + (i + 1) + ' over het proeffestival in Proefveld.').join(' ') + ' Slotzin Proefeinde.';
+    o.staat.verhalen[RA] = { titel: 'Proeffestival Veld', alineas: [lang] };
+    o.staat.verhalen[RB] = { titel: 'Proefgeheim Prive', alineas: ['Geheime proeftekst privé.'] };
+    o.reis('2025 - Proefstad.md', 'reis', '2025-06-01/2025-06-05');
+    o.ml.lijst();
+    const ha = o.hid('opname', RA), hb = o.hid('opname', RB), hc = o.hid('opname', RC);
+    const hr = o.ing._db.prepare("SELECT hid FROM ml_herinnering WHERE soort = 'reis'").get().hid;
+    assert.ok(lang.length > 6000, 'proefverhaal langer dan de voorleesgrens');
+    // eerste ronde: precies één aanvraag, voor de opname met categorie
+    await ronde();
+    assert.strictEqual(vragen.length, 1, 'één script'); assert.strictEqual(teksten.length > 0, true, 'naar de stem');
+    assert.ok(vragen[0].messages[0].content[0].text.includes('Slotzin Proefeinde.'), 'het hele verhaal, niet afgekapt op 6.000');
+    const d = o.ml.detail(ha).body.herinnering.verteller_verhaal;
+    assert.strictEqual(d.stand, 'klaar', JSON.stringify(d));
+    assert.strictEqual(o.ml.detail(hb).body.herinnering.verteller_verhaal.stand, null, 'Privé: nooit');
+    assert.strictEqual(o.ml.detail(hc).body.herinnering.verteller_verhaal.stand, null, 'zonder verhaal: niets');
+    // volgende rondes: niets nieuws
+    const n0 = teksten.length;
+    await ronde(); await ronde();
+    assert.strictEqual(vragen.length, 1); assert.strictEqual(teksten.length, n0);
+    // een reis met alleen een getypte aanvulling telt niet als ingesproken; met een ingesproken aanvulling wel (na de rust)
+    assert.strictEqual(o.ml.tekst(hr, { tekst: 'Proefreis met de trein naar Proefstad.', soort: 'aanvulling' }).status, 200);
+    o.klok.t += 20 * 60000; await ronde();
+    assert.strictEqual(vragen.length, 1, 'getypt: geen vertelling');
+    o.ing._db.prepare("UPDATE ml_stuk SET vorm = 'spraak' WHERE hid = ?").run(hr);
+    await ronde();
+    assert.strictEqual(vragen.length, 2, 'ingesproken aanvulling: wel');
+    assert.strictEqual(o.ml.detail(hr).body.herinnering.verteller_verhaal.stand, 'klaar');
+    // nieuwe verhaalversie: vanzelf opnieuw
+    o.staat.verhalen[RA] = { titel: 'Proeffestival Veld', alineas: ['Een korter proefverhaal over Proefveld.'] };
+    assert.strictEqual(o.ml.detail(ha).body.herinnering.verteller_verhaal.stand, 'verouderd');
+    await ronde();
+    assert.strictEqual(vragen.length, 3); assert.strictEqual(o.ml.detail(ha).body.herinnering.verteller_verhaal.stand, 'klaar');
+    // David haalt hem weg: niet opnieuw tot het verhaal verandert
+    assert.strictEqual(o.ml.vertelVerhaalWeg(ha).status, 200);
+    await ronde(); await ronde();
+    assert.strictEqual(vragen.length, 3, 'weggehaald blijft weg');
+    // review MOET 2: wel weer bij een nieuwe versie; en een VEROUDERDE vertelling weghalen houdt de nieuwe niet tegen
+    o.staat.verhalen[RA] = { titel: 'Proeffestival Veld', alineas: ['Een tweede korter proefverhaal over Proefveld.'] };
+    await ronde();
+    assert.strictEqual(vragen.length, 4, 'nieuwe versie na weghalen: wel');
+    o.staat.verhalen[RA] = { titel: 'Proeffestival Veld', alineas: ['Een derde korter proefverhaal over Proefveld.'] };
+    assert.strictEqual(o.ml.detail(ha).body.herinnering.verteller_verhaal.stand, 'verouderd');
+    assert.strictEqual(o.ml.vertelVerhaalWeg(ha).status, 200);
+    await ronde();
+    assert.strictEqual(vragen.length, 5, 'verouderde weggehaald: de nieuwe komt toch');
+    // mislukken: twee pogingen (een uur ertussen), dan één box-rij
+    elevenStuk = true;
+    o.staat.verhalen[RA] = { titel: 'Proeffestival Veld', alineas: ['Een derde proefverhaal over Proefveld.'] };
+    const aanvragen = () => o.ing._db.prepare('SELECT count(*) n FROM ml_verteller_aanvraag').get().n;
+    const a0 = aanvragen();
+    await ronde();
+    assert.strictEqual(vragen.length, 6); assert.strictEqual(aanvragen(), a0 + 1);
+    await ronde();
+    assert.strictEqual(aanvragen(), a0 + 1, 'niet meteen opnieuw');
+    o.klok.t += 3600000; await ronde();
+    assert.strictEqual(aanvragen(), a0 + 2, 'na een uur opnieuw (met het bewaarde script: geen nieuwe Claude-vraag)');
+    assert.strictEqual(vragen.length, 6);
+    o.klok.t += 3600000; await ronde(); await ronde();
+    assert.strictEqual(aanvragen(), a0 + 2, 'na twee pogingen stopt hij');
+    assert.strictEqual(boxen.filter((b) => /vertelling lukte niet/.test(b)).length, 1, 'één box-rij');
+    // plafond: wachten met één box-rij per maand; volgende maand vanzelf
+    elevenStuk = false;
+    o.staat.verhalen[RA] = { titel: 'Proeffestival Veld', alineas: ['Een vierde proefverhaal over Proefveld.'] };
+    o.ing._db.prepare("INSERT INTO ml_verteller_aanvraag (t, hid, tekens, eur, status) VALUES (?, ?, 1, 4.99, 'klaar')").run(new Date(o.klok.t).toISOString(), hb);
+    const a1 = aanvragen();
+    await ronde(); await ronde();
+    assert.strictEqual(aanvragen(), a1, 'boven het plafond: niets');
+    assert.strictEqual(boxen.filter((b) => /maandplafond bereikt/.test(b)).length, 1, 'één box-rij per maand');
+    o.klok.t = Date.parse('2026-12-01T09:00:00Z'); await ronde();
+    assert.strictEqual(aanvragen(), a1 + 1, 'volgende maand vanzelf'); assert.strictEqual(vragen.length, 7);
+    assert.strictEqual(o.ml.detail(ha).body.herinnering.verteller_verhaal.stand, 'klaar');
+    // review ZOU 1: een weigering op de inhoud geeft één box-rij met alleen een code, nooit de tekst
+    o.staat.verhalen[RA] = { titel: 'Proeffestival Veld', alineas: ['Proefveld met de sleutel ' + NEP_GEHEIM + ' erin.'] };
+    o.klok.t += 3600000; await ronde(); await ronde();
+    const wg = boxen.filter((b) => /vertelling geweigerd/.test(b));
+    assert.strictEqual(wg.length, 1, 'één box-rij'); assert.match(wg[0], /HTTP 409, geheim/); assert.ok(!wg[0].includes(NEP_GEHEIM));
+    // geen tekst in box, register of info
+    for (const b of boxen) assert.ok(!/Proef(festival|veld|zin|reis|stad)/i.test(b), 'geen tekst in de box');
+    assert.ok(!/Proef(festival|veld|zin)/i.test(JSON.stringify(o.ing._db.prepare('SELECT * FROM ml_vertel_auto').all()) + JSON.stringify(o.ml.info())), 'geen tekst in register of info');
+    // uit-schakelaar
+    fs.writeFileSync(path.join(o.hdir, 'verteller-auto-uit'), '');
+    o.staat.verhalen[RA] = { titel: 'Proeffestival Veld', alineas: ['Een vijfde proefverhaal over Proefveld.'] };
+    await ronde();
+    assert.strictEqual(aanvragen(), a1 + 1, 'uit = niets');
+  } finally { o.sluit(); }
+});
+
 test('wv2449 hoofdpersonen: tabel op de vaultpagina, datum van de eerste gelinkte pagina die er een heeft, nooit buiten de vault, toonmodus = 403', () => {
   const o = omgeving();
   try {

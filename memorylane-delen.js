@@ -30,6 +30,9 @@
  *  - Als verhaal vertellen (wv2484): met o.claude schrijft memorylane-vertelscript.js van het verhaal eerst een luisterversie met audio-tags
  *    (Claude, feitentoets en taglijst in code), die de verteller (vorm 'verhaal') in Davids stem inspreekt. Zelfde regels en plafond als
  *    hierboven; script per herinnering + verhaalversie bewaard, opnieuw alleen bij een nieuwe verhaalversie of op Davids knop.
+ *  - Vanzelf vertellen (wv2522, David 5-11 21:26: "Alles waar wat voor ingesproken wordt moet altijd direct een verhaal op gebouwd worden"):
+ *    autoVertel() in de tik maakt de vertelling als verhaal zonder tik voor elke herinnering met iets ingesprokens, binnen hetzelfde plafond;
+ *    zie de toelichting bij autoVertel. Register ml_vertel_auto (hid, hash, tellers).
  * PRIVACY. Nooit tekst, titels of namen in logs, box, /health of fouten: alleen ids en aantallen.
  * VORM. Alleen fs, path, crypto en reizen.js (wv2136: de reispagina's, gedeeld met Tripper); D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
  *
@@ -137,6 +140,8 @@ CREATE TABLE IF NOT EXISTS ml_pub (kring TEXT NOT NULL, versie INTEGER NOT NULL,
 CREATE TABLE IF NOT EXISTS ml_d1 (kring TEXT NOT NULL, pub TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (kring, pub));
 CREATE TABLE IF NOT EXISTS ml_blok (hid TEXT NOT NULL, kring TEXT NOT NULL, reden TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (hid, kring));
 CREATE TABLE IF NOT EXISTS ml_marker_ok (hid TEXT NOT NULL, kring TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (hid, kring));
+CREATE TABLE IF NOT EXISTS ml_vertel_auto (hid TEXT PRIMARY KEY, hash TEXT NOT NULL, pogingen INTEGER NOT NULL DEFAULT 0, op TEXT NOT NULL,
+  weg INTEGER NOT NULL DEFAULT 0, gemeld INTEGER NOT NULL DEFAULT 0);
 `;
 
 function iso(ms) { return new Date(ms).toISOString(); }
@@ -308,6 +313,12 @@ function maak(o) {
     d1Leeg: db.prepare('DELETE FROM ml_d1 WHERE kring = ?'),
     // review ZOU 1: per kring (de bijdragen die een kring ziet verschillen)
     blok: db.prepare("SELECT * FROM ml_blok WHERE hid = ? ORDER BY CASE reden WHEN 'geheim' THEN 0 ELSE 1 END, kring"),
+    // wv2522: de automatische vertelling als verhaal (alleen hid, verhaalhash, tellers)
+    autoGet: db.prepare('SELECT * FROM ml_vertel_auto WHERE hid = ?'),
+    autoZet: db.prepare('INSERT INTO ml_vertel_auto (hid, hash, pogingen, op, weg, gemeld) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT (hid) DO UPDATE SET ' +
+      'hash = excluded.hash, pogingen = excluded.pogingen, op = excluded.op, weg = excluded.weg, gemeld = 0'),
+    autoGemeld: db.prepare('UPDATE ml_vertel_auto SET gemeld = 1 WHERE hid = ?'),
+    autoWeg: db.prepare('DELETE FROM ml_vertel_auto WHERE hid NOT IN (SELECT hid FROM ml_herinnering)'),
     blokZet: db.prepare('INSERT INTO ml_blok (hid, kring, reden, hash) VALUES (?, ?, ?, ?) ON CONFLICT (hid, kring) DO UPDATE SET reden = excluded.reden, hash = excluded.hash'),
     blokWeg: db.prepare('DELETE FROM ml_blok WHERE hid = ? AND kring = ?'),
     okGet: db.prepare('SELECT hash FROM ml_marker_ok WHERE hid = ? AND kring = ?'),
@@ -790,6 +801,7 @@ function maak(o) {
       if (P) { try { P.opruim((hid) => !!q.h.get(hid)); } catch (e) { fout('ml-plaatje', e); } }
       if (V) { try { V.opruim((hid) => { const h = q.h.get(hid); return !!h && !vertellerNiet(h); }); } catch (e) { fout('ml-verteller', e); } }   // wv2366 (review MOET 2)
       if (S) { try { S.opruim((hid) => { const h = q.h.get(hid); return !!h && !vertellerNiet(h); }); } catch (e) { fout('ml-vertelscript', e); } }   // wv2484
+      if (S) { try { const a = autoVertel(false); if (a && a.gestart) uit.vertelling = 1; } catch (e) { fout('ml-vertel-auto', e); } }   // wv2522
       uit.vault = naarVault();
       if (F) { try { const f = await fotoSync(false); if (f && (f.nieuw || f.overgenomen || f.weg || f.deel)) { uit.albums = f.nieuw + f.overgenomen; vuilAlle(); } } catch (e) { fout('ml-immich', e); } }
       if (!o.d1) return uit;
@@ -1183,17 +1195,18 @@ function maak(o) {
     return V.weg(hid);
   }
   // ── wv2484: Als verhaal vertellen (vertelscript met audio-tags, in Davids stem) ──
-  const SCHAT_FACTOR = 1.3;
+  const SCHAT_FACTOR = 1.3, VERHAAL_MAX = 12000;
   // De bron van het script: titel + verhaal zoals de kamer ze toont (zonder markering en zonder de uitspraak "Zo Kef"), en de hash daarvan
   // (= de verhaalversie). → { titel, verhaal, bron, hash, afgekapt } (bron '' = niets te vertellen)
   function scriptBron(h, pagina, s) {
     const p = pagina === undefined ? paginaLees(h.hid) : pagina;
     const x = s === undefined ? sam(h, p) : s;
     const titel = titelVan(h, p, x), verhaal = verhaalVan(h, p, x);
-    const vt = V.tekstVan(titel, verhaal, { uitspraak: false });
+    // wv2522: het hele verhaal (tot VERHAAL_MAX tekens), niet alleen de eerste 6.000 zoals bij voorlezen
+    const vt = V.tekstVan(titel, verhaal, { uitspraak: false, max: VERHAAL_MAX });
     if (!vt.tekst) return { titel: '', verhaal: '', bron: '', hash: null, afgekapt: false, twijfel: [] };
     // review MOET 1: titel en verhaal precies uit de (afgekapte) bron, zodat wat naar Claude gaat = wat getoetst en gehasht is
-    const t1 = V.tekstVan('', titel, { uitspraak: false }).tekst;
+    const t1 = V.tekstVan('', titel, { uitspraak: false, max: VERHAAL_MAX }).tekst;
     const metTitel = !!t1 && vt.tekst.startsWith(t1 + '\n\n');
     const tw = h.soort === 'opname' && x ? Array.from(new Set(x.delen.flatMap((d) => d.alineas.flatMap((a) => (a.twijfel || []).map((t) => t.woord))))) : [];
     return { titel: metTitel ? t1 : '', verhaal: metTitel ? vt.tekst.slice(t1.length + 2) : vt.tekst, bron: vt.tekst,
@@ -1241,6 +1254,94 @@ function maak(o) {
         return u.ok ? { tekst: V.uitspraakVan(u.script), eur: u.eur } : { fout: u.fout, eur: u.eur };
       } });
   }
+  // ── wv2522 (David 5-11-2026 21:26, Engineer-knop: "Alles waar wat voor ingesproken wordt moet altijd direct een verhaal op gebouwd worden") ──
+  // De vertelling als verhaal (script + Davids stem) komt vanzelf, zonder tik en zonder vingerafdruk. Elke AUTO_ELKE_MS in de tik hooguit één
+  // aanvraag, voor een herinnering met iets ingesprokens (een opname, of een ingesproken aanvulling van David) waar de verteller mag vertellen
+  // (zelfde poort als de knop: categorie gekozen, niet Privé of gevoelig, geen blok) en waarvan het verhaal af is (opname: verhaalstand klaar;
+  // Davids laatste eigen stuk ≥ AUTO_RUST_MS oud). Een nieuwe verhaalversie (aanvulling, correctie) = opnieuw. Grenzen: het maandplafond en de
+  // dag- en tussentijdgrens van de verteller; past het plafond niet, dan wacht hij tot de volgende maand met één box-rij per maand (nooit stil
+  // overslaan). Per verhaalversie hooguit AUTO_POGINGEN aanvragen met AUTO_OPNIEUW_MS ertussen; lukt het dan niet, één box-rij.
+  // Weggehaald door David = niet opnieuw tot het verhaal verandert. Uit: bestand <dir>/verteller-auto-uit. Geen tekst in box of register.
+  const AUTO_ELKE_MS = 2 * 60000, AUTO_RUST_MS = 10 * 60000, AUTO_OPNIEUW_MS = 3600000, AUTO_POGINGEN = 2;
+  const AUTO_UIT = path.join(DIR, 'verteller-auto-uit'), AUTO_PLAFOND = path.join(DIR, 'verteller-auto-plafond');
+  let autoVorige = 0, autoLaatst = null;
+  function ingesproken(h) {
+    if (h.soort === 'opname') return true;
+    return q.sVan.all(h.hid).some((x) => x.wie === 'david' && x.vorm === 'spraak' && x.status === 'opgenomen');
+  }
+  function autoBox(titel, regels) {
+    if (!o.box) return;
+    const t = new Date(nu()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    try { o.box('\n## [log] ' + t + ' — MemoryLane-verteller: ' + titel + ' (automatisch, wv2522)\n- status: open\n- van: pod:memorylane-delen\n' + regels.map((r) => '- ' + r + '\n').join('')); }
+    catch (e) { fout('ml-vertel-auto', e); }
+  }
+  // review MOET 1: nooit vrije fouttekst in de box, alleen een vaste code
+  function foutCode(f) {
+    const t = String(f || '');
+    if (!t) return 'onbekend (pod herstart?)';
+    for (const [re, c] of [[/maandplafond/, 'plafond'], [/sleutel/, 'sleutel'], [/ElevenLabs weigerde \(HTTP (\d{3})\)/, 'elevenlabs-http-$1'], [/ElevenLabs/, 'elevenlabs'],
+      [/script|Claude/, 'script'], [/niet naar buiten/, 'geheim'], [/patiëntgegeven/, 'patientmarker'], [/bewaren/, 'bewaren'], [/bezig/, 'bezig']]) {
+      const m = re.exec(t);
+      if (m) return c.replace('$1', m[1] || '');
+    }
+    return 'anders';
+  }
+  function maandNL(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 7); }
+  // → null (niets gedaan) of { gestart: hid | null, wacht_plafond, open }
+  function autoVertel(dwing) {
+    if (!V || !S || fs.existsSync(AUTO_UIT)) return null;
+    const t = nu();
+    if (!dwing && t - autoVorige < AUTO_ELKE_MS) return null;
+    autoVorige = t;
+    const uit = { gestart: null, wacht_plafond: 0, open: 0 };
+    let plafondEur = null;
+    for (const h of q.hAlle.all()) {
+      if (h.status !== 'actief' || !ingesproken(h) || vertellerNiet(h)) continue;
+      const p = paginaLees(h.hid), s = sam(h, p);
+      if (h.soort === 'opname' && (!s || s.stand !== 'klaar')) continue;   // het verhaal wordt nog gemaakt of bijgewerkt
+      const eigen = q.sVan.all(h.hid).filter((x) => x.wie === 'david' && x.status === 'opgenomen').reduce((m, x) => Math.max(m, Date.parse(x.binnen_op) || 0), 0);
+      if (eigen && t - eigen < AUTO_RUST_MS) continue;   // David vult misschien nog aan
+      const b = scriptBron(h, p, s);
+      if (!b.bron) continue;
+      const sc = scriptActueel(h, b);
+      const st = V.stand(h.hid, sc ? V.hashVan(V.uitspraakVan(sc.script)) : null, 'verhaal');
+      if (st.stand === 'klaar' || st.stand === 'bezig') continue;
+      const a = q.autoGet.get(h.hid), zelfde = !!a && a.hash === b.hash;
+      if (zelfde && a.weg) continue;
+      if (zelfde && a.pogingen >= AUTO_POGINGEN) {
+        if (!a.gemeld) { autoBox('vertelling lukte niet', ['gemeten: herinnering ' + h.hid + ': ' + a.pogingen + ' automatische pogingen voor deze verhaalversie; laatste fout: ' + foutCode(st.fout) + '.',
+          'voorstel: oorzaak nakijken; opnieuw proberen = rij in intake.sqlite › ml_vertel_auto weghalen (of David tikt op Als verhaal vertellen).']); q.autoGemeld.run(h.hid); }
+        continue;
+      }
+      if (zelfde && t - Date.parse(a.op) < AUTO_OPNIEUW_MS) continue;
+      uit.open++;
+      if (uit.gestart) continue;
+      const vo = V.vooraf(Math.round(b.bron.length * SCHAT_FACTOR), S.SCHATTING_EUR);
+      if (!vo.past) { uit.wacht_plafond++; plafondEur = vo.rest_eur; continue; }
+      const r = vertelVerhaalMaken(h.hid, {});
+      if (r.status === 202) { q.autoZet.run(h.hid, b.hash, zelfde ? a.pogingen + 1 : 1, iso(t), 0); uit.gestart = h.hid; continue; }
+      if (r.body && r.body.plafond) { uit.wacht_plafond++; continue; }
+      if (r.status === 429 || /bezig/.test(String(r.body && r.body.fout))) break;   // dag- of tussentijdgrens, of de verteller is bezig: volgende ronde
+      // een weigering op de inhoud (geheim, patiëntmarker): niet blijven proberen, wel één box-rij
+      q.autoZet.run(h.hid, b.hash, AUTO_POGINGEN, iso(t), 0);
+      autoBox('vertelling geweigerd', ['gemeten: herinnering ' + h.hid + ': de pod weigerde automatisch vertellen (HTTP ' + r.status + ', ' + foutCode(r.body && r.body.fout) + ').',
+        'voorstel: nakijken; de verteller vertelt deze herinnering pas weer als het verhaal verandert.']);
+      q.autoGemeld.run(h.hid);
+    }
+    if (uit.wacht_plafond) {
+      const m = maandNL(t);
+      let al = '';
+      try { al = fs.readFileSync(AUTO_PLAFOND, 'utf8').trim(); } catch (e) { /* nog nooit */ }
+      if (al !== m) {
+        autoBox('maandplafond bereikt', ['gemeten: ' + uit.wacht_plafond + ' vertelling(en) als verhaal wachten op het maandplafond van de verteller (€ ' + V.info().plafond_eur + ', nog € ' + (plafondEur === null ? 0 : plafondEur).toFixed(2).replace('.', ',') + ' over); ze komen vanzelf in de volgende maand.',
+          'voorstel: plafond verhogen (PLAFOND_EUR in memorylane-verteller.js, langs David) of wachten.']);
+        try { fs.writeFileSync(AUTO_PLAFOND, m + '\n', { mode: 0o600 }); } catch (e) { fout('ml-vertel-auto', e); }
+      }
+    }
+    try { q.autoWeg.run(); } catch (e) { fout('ml-vertel-auto', e); }
+    autoLaatst = { op: iso(t), ...uit };
+    return uit;
+  }
   function vertelVerhaalDeel(hid, n, opt) {
     const h = vind(hid);
     if (!h || h.status === 'weg' || !V || !S) return { status: 404, body: { ok: false, fout: 'onbekend' } };
@@ -1254,8 +1355,14 @@ function maak(o) {
   function vertelVerhaalWeg(hid, opt) {
     if (!V || !S || !HID_RE.test(String(hid))) return { status: 404, body: { ok: false, fout: 'onbekend' } };
     if (opt && opt.toon) return NIET_TOON;
+    // wv2522 (review MOET 2): haalt David de vertelling van de HUIDIGE verhaalversie weg, dan maakt de automatische vertelling hem niet opnieuw
+    // tot het verhaal verandert; een verouderde vertelling weghalen houdt de nieuwe niet tegen
+    let actueel = null;
+    try { const h = vind(hid); const b = h && !vertellerNiet(h) ? scriptBron(h) : null; const sc = b && b.bron ? scriptActueel(h, b) : null;
+      if (sc && V.stand(hid, V.hashVan(V.uitspraakVan(sc.script)), 'verhaal').stand === 'klaar') actueel = b.hash; } catch (e) { fout('ml-vertel-auto', e); }
     const u = V.weg(hid, 'verhaal');
     if (u.status === 200 && !S.wis(hid)) return { status: 503, body: { ok: false, fout: 'weghalen lukte niet; probeer het opnieuw' } };
+    if (u.status === 200 && actueel) { try { q.autoZet.run(hid, actueel, 0, iso(nu()), 1); } catch (e) { fout('ml-vertel-auto', e); } }
     return u;
   }
   function zorgLink(k) { if (!q.link.get(k)) q.linkNieuw.run(k, b64u(rnd(16)).slice(0, 22)); return q.link.get(k); }
@@ -1335,12 +1442,13 @@ function maak(o) {
   }
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
-    return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, vertelscript: S ? S.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
+    return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, vertelscript: S ? S.info() : null,
+      vertel_auto: S ? { uit: fs.existsSync(AUTO_UIT), laatst: autoLaatst } : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
   return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling, fotoReizen,
     plaatjeVoorstel, plaatjeMaken, plaatjeWeg, _P: P, vertellerMaken, vertellerDeel, vertellerWeg, _V: V,
-    vertelVerhaalMaken, vertelVerhaalDeel, vertelVerhaalWeg, _S: S,
+    vertelVerhaalMaken, vertelVerhaalDeel, vertelVerhaalWeg, _S: S, autoVertel,
     fotoSync, hoofdpersonen, _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }
