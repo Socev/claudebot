@@ -8444,11 +8444,29 @@ async function appAgents(req, res, a) {
     .sort(function (a, b) { return String(a.gestart).localeCompare(String(b.gestart)); });
   const recent = agents.filter(function (a) { return a.status !== 'loopt' && a.status !== 'wacht'; })
     .sort(function (a, b) { return String(b.geeindigd || b.gestart).localeCompare(String(a.geeindigd || a.gestart)); }).slice(0, 30);
-  const rij = wvItems.filter(function (w) { return w.status === 'open'; }).slice(0, 40).map(function (w) {
+  // wv2594: de app deelt de rij in (nu aan de beurt / gepland / wacht op een andere klus). Daarvoor per rij wacht_klus: de klus waar hij
+  // nu echt op wacht (zoals de claim van de tikker: item:-voorganger nog niet klaar volgens wacht_item_open, of een lopende job), null =
+  // wacht nergens op; en nacontrole (gaat in de bundelronde). na blijft voor oudere apps (alle voorgangers, ook afgeronde).
+  const wvPerId = {};
+  wvItems.forEach(function (w) { wvPerId[w.id] = w; });
+  const jobLoopt = function (j) { const x = reg[j]; return !!(x && (x.status === 'pending' || x.status === 'running')); };
+  const wachtKlus = function (w) {
+    const wo = Array.isArray(w.wacht_op) ? w.wacht_op.map(String) : [];
+    if (w.wacht_item_open === true) {
+      const v = wo.map(function (d) { const m = /^item:(\d+)$/.exec(d); return m ? { n: Number(m[1]), w: wvPerId[m[1]] } : null; })
+        .filter(function (x) { return x && !(x.w && x.w.status === 'klaar'); })[0];
+      return { wv: v ? v.n : null, label: v && v.w ? (v.w.samenvatting ? String(v.w.samenvatting).slice(0, 160) : appLabelGewoon(v.w.label)) : 'een andere klus' };
+    }
+    if (wo.some(function (d) { return !/^item:/.test(d) && jobLoopt(d); })) return { wv: null, label: 'een lopende agent' };
+    return null;
+  };
+  const open = wvItems.filter(function (w) { return w.status === 'open'; });
+  const rij = open.slice(0, 80).map(function (w) {
     return { wv: w.id, label: w.samenvatting ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(w.label), label_kort: appLabelGewoon(w.label),
       niet_voor: w.niet_voor && Date.parse(w.niet_voor) > nu ? w.niet_voor : null,
       na: (w.wacht_op || []).map(function (x) { return String(x).replace(/^item:/, 'wv').replace(/^[a-f0-9]{16}$/, 'een lopende agent'); })
         .filter(function (x, i, l) { return l.indexOf(x) === i; }).slice(0, 4),
+      wacht_klus: wachtKlus(w), nacontrole: w.soort === 'nacontrole',
       doorwerk: !!w.doorwerk_opdracht, voorrang: (w.voorrang || 0) > 0 };
   });
   const wachtOpDavid = wvItems.filter(function (w) { return w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')); })
@@ -8472,7 +8490,7 @@ async function appAgents(req, res, a) {
       try { const ooit = await appVjWvGekoppeld(); los = los.filter(function (w) { return !ooit.has(Number(w.wv)); }); } catch (e) { logError('app-agents', e); }
     }
   } catch (e) { logError('app-agents', e); voorJou = null; los = null; }
-  appStuur(res, 200, { ok: true, max: typeof MAX_AGENTS === 'number' ? MAX_AGENTS : null, lopend: lopend, rij: rij, wacht_op_david: wachtOpDavid,
+  appStuur(res, 200, { ok: true, max: typeof MAX_AGENTS === 'number' ? MAX_AGENTS : null, lopend: lopend, rij: rij, rij_totaal: open.length, wacht_op_david: wachtOpDavid,
     voor_jou: voorJou, wacht_op_david_los: los, recent: recent, ruimte: ru, fout: fout });
 }
 // ── wv1029: idee 14 fase 2 — klussen als tabjes in de machinekamer (ontwerp "Machinekamer - parallelle draden" § 4.3.2 a) ──

@@ -2179,8 +2179,9 @@ async function bewijs(o) {
         aaaaaaaaaaaaaab5: { job_id: 'aaaaaaaaaaaaaab5', label: 'socev: mail nalopen', status: 'afgebroken-containerherstart', started: t0 - 5e6, ended: t0 - 4e6, rapport: '-' } });
       sbStaat.wvItems = [
         { id: 98, idee: 9, label: 'machinekamer:socev-app fase 5a agents + bestanden', job_id: 'aaaaaaaaaaaaaab1', status: 'gestart', samenvatting: 'In de app: tab met agents en bestanden', bron: 'GEHEIM-BRON', notitie: 'GEHEIME-NOTITIE', doorwerk_opdracht: '"GEHEIME-OPDRACHT"' },
-        { id: 99, idee: 9, label: 'machinekamer:socev-app fase 5b multi-upload', status: 'open', wacht_op: ['item:98', 'aaaaaaaaaaaaaab1'], samenvatting: 'Meerdere bestanden tegelijk', doorwerk_opdracht: 'x', voorrang: 2 },
-        { id: 101, label: 'machinekamer:stille uren', status: 'open', niet_voor: new Date(t0 + 3600000).toISOString(), wacht_op: [], samenvatting: null },
+        { id: 99, idee: 9, label: 'machinekamer:socev-app fase 5b multi-upload', status: 'open', wacht_op: ['item:98', 'aaaaaaaaaaaaaab1'], wacht_item_open: true, samenvatting: 'Meerdere bestanden tegelijk', doorwerk_opdracht: 'x', voorrang: 2 },
+        { id: 101, label: 'machinekamer:stille uren', status: 'open', niet_voor: new Date(t0 + 3600000).toISOString(), wacht_op: [], samenvatting: null, soort: 'nacontrole' },
+        { id: 102, label: 'machinekamer:na-afgerond', status: 'open', wacht_op: ['item:97', 'aaaaaaaaaaaaaab3'], wacht_item_open: false, samenvatting: 'Voorganger al klaar' },
         { id: 85, label: 'machinekamer:f23-productietoets', status: 'geblokkeerd', geblokkeerd_door: 'David: laptop koppelen en eerste toets', samenvatting: 'Productietoets met jou' },
         { id: 70, label: 'machinekamer:x', status: 'geblokkeerd', geblokkeerd_door: 'wv3 meting', samenvatting: 'niet voor David' } ];
       H.appStaat.wvCache = null;
@@ -2194,8 +2195,12 @@ async function bewijs(o) {
       toets('11 status: loopt, wacht, klaar, mislukt, afgebroken; route machinekamer/socev/david', per.aaaaaaaaaaaaaab1.status === 'loopt' && per.aaaaaaaaaaaaaab2.status === 'wacht' && per.aaaaaaaaaaaaaab3.status === 'klaar'
         && per.aaaaaaaaaaaaaab4.status === 'mislukt' && per.aaaaaaaaaaaaaab5.status === 'afgebroken' && per.aaaaaaaaaaaaaab1.route === 'machinekamer' && per.aaaaaaaaaaaaaab2.route === 'socev' && per.aaaaaaaaaaaaaab4.route === 'david', JSON.stringify(per));
       toets('11 rapport bezorgd: ja / nee / onbekend', per.aaaaaaaaaaaaaab3.rapport_bezorgd === 'ja' && per.aaaaaaaaaaaaaab4.rapport_bezorgd === 'nee' && per.aaaaaaaaaaaaaab5.rapport_bezorgd === null);
-      toets('11 rij: alleen open rijen in volgorde, met niet-vóór, na wv98/lopende agent, doorwerk en voorrang', ag.rij.length === 2 && ag.rij[0].wv === 99 && ag.rij[0].na.join() === 'wv98,een lopende agent' && ag.rij[0].doorwerk && ag.rij[0].voorrang
+      toets('11 rij: alleen open rijen in volgorde, met niet-vóór, na wv98/lopende agent, doorwerk en voorrang', ag.rij.length === 3 && ag.rij[0].wv === 99 && ag.rij[0].na.join() === 'wv98,een lopende agent' && ag.rij[0].doorwerk && ag.rij[0].voorrang
         && ag.rij[1].wv === 101 && !!ag.rij[1].niet_voor && ag.rij[1].label === 'stille uren', JSON.stringify(ag.rij));
+      // wv2594: indeling in de app — wacht_klus = de open voorganger (naam), null als alle voorgangers klaar zijn en geen job loopt; nacontrole; rij_totaal
+      toets('11 wv2594 wacht_klus: open voorganger met naam; null bij afgeronde voorganger + klare job; nacontrole; rij_totaal', ag.rij[0].wacht_klus && ag.rij[0].wacht_klus.wv === 98
+        && ag.rij[0].wacht_klus.label === 'In de app: tab met agents en bestanden' && ag.rij[1].wacht_klus === null && ag.rij[1].nacontrole === true && ag.rij[0].nacontrole === false
+        && ag.rij[2].wv === 102 && ag.rij[2].wacht_klus === null && ag.rij_totaal === 3 && !/GEHEIM/.test(JSON.stringify(ag.rij)), JSON.stringify(ag.rij));
       toets('11 wacht op David: alleen de David-blokkade, zonder "David:"', ag.wacht_op_david.length === 1 && ag.wacht_op_david[0].wv === 85 && ag.wacht_op_david[0].wat === 'laptop koppelen en eerste toets', JSON.stringify(ag.wacht_op_david));
       toets('11 geen bron, notitie of doorwerk-opdracht in het antwoord', !/GEHEIM/.test(JSON.stringify(ag)));
       await slaap(30);
