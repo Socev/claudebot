@@ -13291,10 +13291,12 @@ function appWavSeconden(b) {
   if (n !== b.length - 44 || n % 2) return null;
   return n / 32000;
 }
-async function appWhisper(wav) {
+// wv2536: hint = extra woorden voor de uitschrijver (MemoryLane: de namen van Davids familie uit de vault), achter "Socev"
+async function appWhisper(wav, hint) {
+  const prompt = 'Socev' + (hint ? ', ' + String(hint).replace(/[\u0000-\u001f]+/g, ' ').slice(0, 400) : '');
   const r = await fetch(APP_STT_URL, { method: 'POST', signal: AbortSignal.timeout(50000),
     headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_AI_TOKEN_AUTO, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ audio: wav.toString('base64'), language: 'nl', vad_filter: true, initial_prompt: 'Socev' }) });
+    body: JSON.stringify({ audio: wav.toString('base64'), language: 'nl', vad_filter: true, initial_prompt: prompt }) });
   const j = await r.json().catch(function () { return {}; });
   if (!r.ok || !j.success) throw new Error('Whisper ' + r.status);
   const t = String((j.result && j.result.text) || '').replace(/\s+/g, ' ').trim();
@@ -17550,7 +17552,9 @@ const herinneringen = (function () {
   if (!intake || !HERINNERINGEN_MOD) return null;
   try {
     return HERINNERINGEN_MOD.maak({ dir: HERINNERINGEN_DIR, intake: intake, vault: VAULT, vv: VV(),
-      whisper: function (wav) { return appWhisper(wav); }, kanUitschrijven: function () { return !!process.env.CLOUDFLARE_AI_TOKEN_AUTO; },
+      // wv2536: de namen uit de vault als hint (herinneringenVerhaal bestaat pas na het laden; tot dan zonder hint)
+      whisper: function (wav) { let hint = ''; try { hint = herinneringenVerhaal && herinneringenVerhaal.namen ? herinneringenVerhaal.namen.hint(300) : ''; } catch (e) { hint = ''; } return appWhisper(wav, hint); },
+      kanUitschrijven: function () { return !!process.env.CLOUDFLARE_AI_TOKEN_AUTO; },
       onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
       primair: function () { return rolPrimair(); }, offsiteAan: function () { return SERVER_ECHT; },
       kaartZet: async function (p) { const r = await appSbRpc('mk_voor_jou_zet', { p: p }); appStaat.vjCache = null; if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet'); return r; },

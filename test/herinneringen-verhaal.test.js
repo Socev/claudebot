@@ -754,3 +754,79 @@ test('wv2322: het niet teruggevonden woord staat gemarkeerd op de (privé-)pagin
     assert.match(p0, /^twijfel: \["letterlijk"\]$/m); assert.match(p0, /speelden kaartspelletjes in de voortent met Teun/);
   } finally { o.sluit(); }
 });
+
+// ── wv2536: namencontrole (alleen verzonnen namen) ──
+test('wv2536 namencontrole (puur): klinkt hetzelfde of "naam + en" = vervangen; scheelt een letter = twijfel met voorstel; Davids woorden blijven', () => {
+  const l = V.maakNamenlijst(['Jorre Proefman', 'Lyvia', 'Marthe', 'Quinten van Verzon'], V.variantenUit('- Sjoerdje → Lyvia\n- geen regel\n- Ok = Ok'));
+  const r = V.corrigeerNamen('Marte wilde met Joreen en Livia mee. We liepen naar Marte\'s plek. Toen kwam Marta, en Sjoerdje. Maar Even later.', l, { markeer: true });
+  assert.strictEqual(r.tekst, 'Marthe wilde met Jorre en Lyvia mee. We liepen naar Marthe\'s plek. Toen kwam ==Marta==, en Lyvia. Maar Even later.');
+  assert.deepStrictEqual(r.eenduidig.map((x) => x.van + '>' + x.naar), ['Marte>Marthe', 'Joreen>Jorre', 'Livia>Lyvia', 'Marte>Marthe', 'Sjoerdje>Lyvia']);
+  assert.deepStrictEqual(r.twijfel, [{ woord: 'Marta', voorstel: ['Marthe'] }]);
+  // zonder markeren: twijfel blijft staan zoals hij was; Davids eigen woord (correctie/bevestiging) wordt nooit vervangen
+  assert.strictEqual(V.corrigeerNamen('Toen kwam Marta.', l).tekst, 'Toen kwam Marta.');
+  assert.strictEqual(V.corrigeerNamen('Livia en Marte.', l, { eigen: new Set(['livia']) }).tekst, 'Livia en Marthe.');
+  // gewone woorden, kleine letters, korte woorden, getallen en maanden blijven
+  assert.strictEqual(V.corrigeerNamen('Het was juni. Daar marte livia. Ok 12.', l).tekst, 'Het was juni. Daar marte livia. Ok 12.');
+  // twee namen die even goed passen = twijfel, niet raden
+  const l2 = V.maakNamenlijst(['Mirthe', 'Mirte Verzon'], []);
+  assert.strictEqual(l2.vast.has('mirte'), true);
+  const r2 = V.corrigeerNamen('Toen Mirtte kwam.', l2);
+  assert.deepStrictEqual(r2.eenduidig, []); assert.deepStrictEqual(r2.twijfel, [{ woord: 'Mirtte', voorstel: ['Mirthe', 'Mirte'] }]);
+  const r3 = V.corrigeerNamen('Toen Dirke kwam.', V.maakNamenlijst(['Dirk', 'Dirck'], []));
+  assert.deepStrictEqual(r3.eenduidig, []); assert.deepStrictEqual(r3.twijfel, [{ woord: 'Dirke', voorstel: ['Dirk', 'Dirck'] }]);
+  // review MOET 1: een vaste variant op een gewoon woord vervangt nooit
+  const l4 = V.maakNamenlijst(['Martijn'], [{ van: 'mijn', naar: 'Martijn' }, { van: 'Toen', naar: 'Martijn' }]);
+  assert.strictEqual(V.corrigeerNamen('Toen zag mijn vader hem.', l4).tekst, 'Toen zag mijn vader hem.');
+  // hint voor de uitschrijver: namen, kort
+  assert.ok(V.namenHint(l).startsWith('Jorre, Proefman, Lyvia') && V.namenHint(l, 12).length <= 12);
+  assert.deepStrictEqual(V.variantenUit('- Sjoerdje → Lyvia — correctie van David (5-11-2026)\n- a → b'), [{ van: 'Sjoerdje', naar: 'Lyvia' }]);
+});
+
+test('wv2536 namencontrole in de stroom: transcript gecorrigeerd vóór de aanroep, verhaal bij weergave, twijfel als naam_lijkt, correctie naar een bekende naam op de namenlijst', async () => {
+  const o = await omgeving();
+  try {
+    o.staat.ds = { [ID1]: [] };
+    await o.opname(ID1, ['We speelden kaartspelletjes in de voortent met Teunen tot iedereen een keer gewonnen had.', 'Daarna kwam Tuun nog langs met koffie.']);
+    // het model neemt de verkeerd verstane naam over (zoals het met een oud transcript deed)
+    o.staat.antwoord = { herinneringen: [{ t_van: 0, t_tot: 120, titel: 'Met Teunen in de voortent', alineas: [
+      { tekst: 'We speelden kaartspelletjes in de voortent met Teunen, tot iedereen een keer gewonnen had.', t_van: 0, t_tot: 60 },
+      { tekst: 'Daarna kwam Tuun nog langs met koffie.', t_van: 60, t_tot: 120 }], datum_citaat: '', plaats: '', personen: [], voorval_voorstel: '' }] };
+    await o.v.tik();
+    const inv = o.staat.verzoeken[0].messages[0].content[0].text;
+    assert.match(inv, /met Teun tot iedereen/, 'transcript gecorrigeerd vóór de aanroep');
+    assert.match(inv, /kwam Tuun nog/, 'twijfel gaat ongewijzigd naar het model');
+    const pag = o.lees(o.verhalen()[0]);
+    assert.ok(!/==Teunen==/.test(pag), 'de verkeerd verstane naam staat in de opname: geen markering van de feitentoets');
+    let s = o.v.samengesteld(ID1, []);
+    const d = s.delen[0];
+    assert.strictEqual(d.titel, 'Met Teun in de voortent');
+    assert.match(d.alineas[0].tekst, /met Teun, tot/);
+    assert.deepStrictEqual(d.alineas[1].twijfel, [{ woord: 'Tuun', soort: 'naam_lijkt', voorstel: ['Teun'] }]);
+    assert.deepStrictEqual(d.namen, { gecorrigeerd: 2, twijfel: 1 });
+    assert.ok(d.twijfel_open, 'een twijfelnaam gaat niet mee naar deellink of toonmodus');
+    // David: "Tuun klopt" → geen twijfel meer, niets vervangen
+    o.staat.ds[ID1] = [{ soort: 'correctie', tekst: 'Tuun klopt' }];
+    s = o.v.samengesteld(ID1, V.correctiesUit(['Tuun klopt']));
+    assert.deepStrictEqual(s.delen[0].alineas[1].twijfel, []); assert.match(s.delen[0].alineas[1].tekst, /kwam Tuun nog/);
+    // David: "Tuun is Teun" → letterlijk toegepast en op de namenlijst (geldt dan overal); een plaatsnaam niet
+    assert.strictEqual(o.v.namen.leer(['Zwitserburg is Oostenburg']), 0, 'geen bekende naam: niet op de lijst');
+    assert.strictEqual(o.v.namen.leer(['mijn is Teun']), 0, 'een gewoon woord: niet op de lijst (review MOET 1)');
+    assert.strictEqual(o.v.namen.leer(['Tuun is Teun']), 1);
+    assert.strictEqual(o.v.namen.leer(['Tuun is Teun']), 0, 'niet dubbel');
+    const np = fs.readFileSync(path.join(o.vault, '20_Prive', 'Herinneringen', 'Namen.md'), 'utf8');
+    assert.match(np, /^- Tuun → Teun — correctie van David/m); assert.match(np, /gevoelig: prive/);
+    o.staat.ds[ID1] = [];
+    s = o.v.samengesteld(ID1, []);
+    assert.match(s.delen[0].alineas[1].tekst, /kwam Teun nog/); assert.deepStrictEqual(s.delen[0].namen, { gecorrigeerd: 3, twijfel: 0 });
+    // Davids eigen aanpassing van het verhaal wint: geen namencontrole op een pagina die hij veranderde
+    const rel = path.join(V.VERHAAL_MAP, o.verhalen()[0]);
+    fs.writeFileSync(path.join(o.vault, rel), o.lees(o.verhalen()[0]).replace('kaartspelletjes', 'kaartjes'));
+    s = o.v.samengesteld(ID1, []);
+    assert.match(s.delen[0].alineas[0].tekst, /met Teunen, tot/); assert.deepStrictEqual(s.delen[0].namen, { gecorrigeerd: 0, twijfel: 0 });
+    // geen namen in /health
+    const i = o.v.info();
+    assert.deepStrictEqual(i.namen, { namen: 2, varianten: 1 });
+    assert.ok(!/Teun|Tuun/.test(JSON.stringify(i)));
+    assert.match(o.v.namen.hint(), /Teun/);
+  } finally { o.sluit(); }
+});

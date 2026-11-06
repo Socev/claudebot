@@ -89,6 +89,9 @@ const VOORVAL_MAP = '20_Prive/Herinneringen/Voorvallen';
 const OPNAME_MAP = '20_Prive/Herinneringen/Opnames';
 const INDEX = '20_Prive/Herinneringen/index.md';
 const PERSOON_MAPPEN = ['20_Prive/Familie', '20_Prive/Shizzle'];
+// wv2536: namencontrole — hoofdpersonen (tabel, eerste kolom) en de pagina met vaste varianten ("- Joreen → Jorre"; Davids correcties komen erbij)
+const HOOFDPERSONEN = '20_Prive/Herinneringen/Hoofdpersonen.md';
+const NAMEN_PAGINA = '20_Prive/Herinneringen/Namen.md';
 const HID_RE = /^hr_[0-9a-f]{16}$/;
 const ID_RE = /^r[0-9]{8}-[0-9a-f]{16}$/;
 const PRIJS = { in: 2, uit: 10, cache_lezen: 0.20, cache_schrijven: 2.5 };   // Sonnet 5.5 per miljoen (gelijk aan pdf-lezer.js)
@@ -399,6 +402,132 @@ function pasCorrectiesToe(tekst, cs) {
   return t;
 }
 
+// ─────────────────────────── namencontrole (wv2536) ───────────────────────────
+// David 5-11-2026 22:52 (Engineer-knop, MemoryLane): "het verhaal is niet gecheckt op namen. [twee voorbeelden] … Ergens een check
+// inbouwen die dat corrigeert, automatisch, tijdens maken van het transcript". De uitschrijver kent Davids familie niet en schrijft een naam
+// zoals hij klinkt. Een namenlijst uit de vault (op runtime, nooit in code: de repo is openbaar) corrigeert dat:
+//  - eenduidig (klinkt hetzelfde — v/f, y/ie/i, th/t, c/k, dubbele letters — of "naam + en" zoals "Joreen" voor "Jorre", en geen tweede
+//    naam in de buurt; of een vaste variant van de lijst): vervangen;
+//  - twijfel (scheelt een letter of twee met één of meer namen): niet raden, maar ter controle tonen met de naam als voorstel.
+// Davids eigen woorden (correcties "X is Y", bevestiging "X klopt", aanvullingen) gaan altijd voor: wat hij zelf schreef, blijft staan.
+const NAAM_RE = /\p{L}[\p{L}-]*/gu;   // geen cijfers en geen apostrof: "Marte's" → "Marte" + "'s"
+function klank(w) {
+  return norm(w).replace(/[^a-z]/g, '').replace(/ph/g, 'f').replace(/th/g, 't').replace(/ck/g, 'k').replace(/c(?=[eiy])/g, 's').replace(/[cq]/g, 'k')
+    .replace(/x/g, 'ks').replace(/ij/g, 'ei').replace(/y/g, 'i').replace(/v/g, 'f').replace(/z/g, 's').replace(/dt$|d$/, 't').replace(/ou/g, 'au')
+    .replace(/h(?![aeiou])/g, '').replace(/ie/g, 'i').replace(/(.)\1+/g, '$1');
+}
+// Damerau-afstand, met een plafond (boven max telt niet)
+function afstand(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  const d = [];
+  for (let i = 0; i <= a.length; i++) { d[i] = [i]; }
+  for (let j = 0; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const k = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + k);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[a.length][b.length];
+}
+// Variantregels uit de namenpagina: "- Joreen → Jorre" (ook ->, =, "is"); X en Y elk één woord.
+const VARIANT_RE = /^\s*[-*]\s+["'“‘]?([\p{L}][\p{L}-]{1,40})["'”’]?\s*(?:→|->|=>|=|\bis\b)\s*["'“‘]?([\p{Lu}][\p{L}-]{1,40})["'”’]?\s*(?:[—–(#].*)?$/u;
+function variantenUit(tekst) {
+  const uit = [];
+  for (const r of String(tekst || '').split('\n')) { const m = VARIANT_RE.exec(r); if (m && norm(m[1]) !== norm(m[2])) uit.push({ van: m[1], naar: m[2] }); }
+  return uit;
+}
+// → { namen: [{ naam, n, k }], vast: Set(norm), varianten: Map(norm → naam) }
+function maakNamenlijst(namen, varianten) {
+  const l = [], vast = new Set();
+  for (const x of namen || []) {
+    for (const w of String(x || '').match(NAAM_RE) || []) {
+      if (!/^\p{Lu}/u.test(w) || w.length < 3) continue;
+      const n = norm(w);
+      if (vast.has(n)) continue;
+      vast.add(n); l.push({ naam: w, n, k: klank(w) });
+    }
+  }
+  const vm = new Map();
+  for (const v of varianten || []) { const n = norm(v.van); if (n && !vast.has(n)) vm.set(n, v.naar); }
+  return { namen: l, vast, varianten: vm };
+}
+/*
+ * Namen in een tekst nalopen. o.eigen = Set van Davids eigen woorden (genormaliseerd: blijven staan), o.markeer = twijfel tussen ==…== zetten.
+ * → { tekst, eenduidig: [{ van, naar }], twijfel: [{ woord, voorstel: [namen] }] }
+ */
+function corrigeerNamen(tekst, lijst, o) {
+  o = o || {};
+  const t = String(tekst == null ? '' : tekst);
+  const uit = { tekst: t, eenduidig: [], twijfel: [] };
+  if (!lijst || !lijst.namen || (!lijst.namen.length && !lijst.varianten.size)) return uit;
+  const eigen = o.eigen || new Set();
+  const re = new RegExp(NAAM_RE.source, 'gu');
+  let m, s = '', vanaf = 0;
+  while ((m = re.exec(t)) !== null) {
+    const w = m[0], n = norm(w);
+    if (t.slice(Math.max(0, m.index - 2), m.index) === '==') continue;   // al gemarkeerd
+    if (lijst.vast.has(n) || eigen.has(n)) continue;
+    let naar = null;
+    // review MOET 1: een gewoon woord (stopwoord, zinsbegin, datum, telwoord) wordt nooit vervangen, ook niet als vaste variant
+    if (n.length < 3 || STOP.has(n) || ZINSBEGIN.has(n) || DATUMWOORD.has(n) || telwoord(n.replace(/-/g, ''))) continue;
+    if (lijst.varianten.has(n)) naar = lijst.varianten.get(n);
+    else {
+      if (!/^\p{Lu}/u.test(w) || n.length < 4) continue;
+      const k = klank(w), sterk = new Set(), zwak = new Set();
+      for (const x of lijst.namen) {
+        if (x.n.length < 3) continue;
+        if (k === x.k || (x.k.length >= 3 && (k === x.k + 'n' || k === x.k + 'en'))) sterk.add(x.naam);
+        else if (x.k.length >= 4 && afstand(k, x.k, 2) <= (Math.min(k.length, x.k.length) >= 7 ? 2 : 1)) zwak.add(x.naam);
+      }
+      if (sterk.size === 1 && !zwak.size) naar = Array.from(sterk)[0];
+      else if (sterk.size || zwak.size) {
+        if (!uit.twijfel.some((x) => x.woord === w)) uit.twijfel.push({ woord: w, voorstel: Array.from(sterk).concat(Array.from(zwak)).slice(0, 3) });
+        if (o.markeer) { s += t.slice(vanaf, m.index) + '==' + w + '=='; vanaf = m.index + w.length; }
+        continue;
+      }
+    }
+    if (!naar || naar === w) continue;
+    s += t.slice(vanaf, m.index) + naar; vanaf = m.index + w.length;
+    uit.eenduidig.push({ van: w, naar });
+  }
+  uit.tekst = s + t.slice(vanaf);
+  return uit;
+}
+// De namenlijst uit de vault: lees(rel) → tekst, lijst(rel) → bestandsnamen (beide mogen gooien). Zie namenlijst() in maak().
+function leesNamenlijst(lees, lijst) {
+  const namen = [];
+  for (const map of PERSOON_MAPPEN) {
+    let l = [];
+    try { l = lijst(map).filter((n) => /\.md$/.test(n) && !/verbonden pagina|^index\.md$/i.test(n)); } catch (e) { continue; }
+    for (const n of l) {
+      let t; try { t = lees(map + '/' + n); } catch (e) { continue; }
+      const d = fmDelen(t);
+      if (!d || fmVeld(d.regels, 'type') !== 'persoon') continue;
+      const al = fmVeld(d.regels, 'aliases');
+      namen.push(n.replace(/\.md$/, '').replace(/\s*\(.*\)$/, ''));
+      if (Array.isArray(al)) for (const x of al) if (typeof x === 'string' && x.indexOf('@') < 0) namen.push(x);
+    }
+  }
+  try {
+    for (const r of lees(HOOFDPERSONEN).split('\n')) {
+      const m = /^\|\s*([^|]{2,60}?)\s*\|/.exec(r);
+      if (m && !/^(naam|-+|:?-+:?)$/i.test(m[1])) namen.push(m[1]);
+    }
+  } catch (e) { /* geen tabel */ }
+  let varianten = [];
+  try { varianten = variantenUit(lees(NAMEN_PAGINA)); } catch (e) { /* nog geen pagina */ }
+  return maakNamenlijst(namen, varianten);
+}
+// Lijst voor de uitschrijver (Whisper initial_prompt): voornamen, kort gehouden (Whisper leest hooguit ± 224 tokens)
+function namenHint(lijst, max) {
+  const uit = [];
+  let len = 0;
+  for (const x of (lijst && lijst.namen) || []) { if (len + x.naam.length + 2 > (max || 300)) break; uit.push(x.naam); len += x.naam.length + 2; }
+  return uit.join(', ');
+}
+
 // ─────────────────────────── datum uit het citaat ───────────────────────────
 
 const MAAND = { januari: 1, februari: 2, maart: 3, april: 4, mei: 5, juni: 6, juli: 7, augustus: 8, september: 9, oktober: 10, november: 11, december: 12 };
@@ -694,9 +823,57 @@ function maak(o) {
     return h(ds.filter((x) => x.soort === 'aanvulling' || !correctiesUit([x.tekst]).length)) + ':' + h(ds);
   }
   function correctiesVan(ds) { return correctiesUit((ds || []).filter((x) => x.soort === 'correctie').map((x) => x.tekst)); }
+  // ── wv2536: namencontrole ──
+  // De namenlijst op runtime uit de vault (persoonspagina's in PERSOON_MAPPEN: bestandsnaam en aliassen; de hoofdpersonen; vaste varianten
+  // op NAMEN_PAGINA). Elke 10 minuten opnieuw gelezen. Nooit namen in code, logs of /health: alleen aantallen.
+  let namenCache = null;
+  function namenlijst() {
+    if (namenCache && nu() - namenCache.op < 600000) return namenCache.l;
+    const l = leesNamenlijst((rel) => o.vv.lees(abs(rel), 'utf8'), (rel) => fs.readdirSync(abs(rel)));
+    namenCache = { op: nu(), l };
+    return l;
+  }
+  // Davids correcties en bevestigingen ("X is Y", "X klopt"): die woorden raakt de namencontrole niet. Een aanvulling telt hier niet mee:
+  // een ingesproken aanvulling komt van dezelfde uitschrijver en kan dezelfde verkeerd verstane naam bevatten.
+  function eigenWoorden(ds) { return vensterSet((ds || []).filter((x) => x && x.soort === 'correctie').map((x) => String(x.tekst || '')).join(' ')).w; }
+  // Davids correcties eerst, dan de namencontrole (alleen eenduidige vervangingen)
+  function metNamen(t, cs, ew) {
+    const c = pasCorrectiesToe(t, cs);
+    try { return corrigeerNamen(c, namenlijst(), { eigen: ew }).tekst; } catch (e) { fout('verhaal-namen', e); return c; }
+  }
+  // Een correctie van David ("X is Y", Y één woord met een hoofdletter) komt als vaste variant op de namenpagina: dan geldt hij ook voor
+  // andere herinneringen. Alleen als Y een bekende naam van de lijst is (een correctie als "Zwitserland is Oostenrijk" blijft bij die ene
+  // herinnering); nooit tijdens onderhoud of de nachtgrendel.
+  // → aantal toegevoegde regels
+  function leerNamen(teksten) {
+    const nieuw = [];
+    const l = namenlijst();
+    for (const c of correctiesUit(teksten)) {
+      if (woorden(c.van).length !== 1 || woorden(c.naar).length !== 1 || !/^\p{Lu}/u.test(c.naar) || !/^\p{L}[\p{L}-]+$/u.test(c.van) || !/^\p{L}[\p{L}-]+$/u.test(c.naar)) continue;
+      const n = norm(c.van);
+      if (n.length < 3 || STOP.has(n) || ZINSBEGIN.has(n) || DATUMWOORD.has(n) || telwoord(n.replace(/-/g, ''))) continue;   // review MOET 1
+      if (!l.vast.has(norm(c.naar)) || l.vast.has(n) || l.varianten.get(n) === c.naar || nieuw.some((x) => norm(x.van) === n)) continue;
+      nieuw.push(c);
+    }
+    if (!nieuw.length || grendel()) return 0;
+    const regels = nieuw.map((c) => '- ' + c.van + ' → ' + c.naar + ' — correctie van David (' + dmj(nu()) + ')');
+    let bestaand = null;
+    try { bestaand = o.vv.lees(abs(NAMEN_PAGINA), 'utf8'); } catch (e) { if (!e || e.code !== 'ENOENT') { fout('verhaal-namen', e); return 0; } }
+    try {
+      if (bestaand === null) {
+        o.vv.schrijf(abs(NAMEN_PAGINA), '---\ntype: lijst\ndomein: Privé\nonderwerp: Namen in MemoryLane\ngevoelig: prive\n---\n# Namen in MemoryLane\n\n' +
+          'Hoe de uitschrijver een naam soms verstaat, en wie er bedoeld is. De pod vervangt deze varianten in elk verhaal. Eén regel per variant: `- Verkeerd → Goed`.\n\n' + regels.join('\n') + '\n');
+      } else {
+        o.vv.wijzig(abs(NAMEN_PAGINA), (t) => { const extra = regels.filter((r) => t.indexOf(r.split(' — ')[0] + ' ') < 0 && t.indexOf(r.split(' — ')[0] + '\n') < 0); return extra.length ? t.replace(/\n*$/, '\n') + extra.join('\n') + '\n' : null; });
+      }
+    } catch (e) { fout('verhaal-namen', e); return 0; }
+    namenCache = null;
+    return nieuw.length;
+  }
+  function namenInfo() { try { const l = namenlijst(); return { namen: l.namen.length, varianten: l.varianten.size }; } catch (e) { return { fout: true }; } }
   function invoer(segs, ds) {
-    const cs = correctiesVan(ds);
-    let s = '<transcript>\n' + segs.filter((x) => x.tekst).map((x) => '[t=' + Math.floor(x.van) + '-' + Math.ceil(x.tot) + '] ' + pasCorrectiesToe(x.tekst, cs)).join('\n') + '\n</transcript>\n';
+    const cs = correctiesVan(ds), ew = eigenWoorden(ds);
+    let s = '<transcript>\n' + segs.filter((x) => x.tekst).map((x) => '[t=' + Math.floor(x.van) + '-' + Math.ceil(x.tot) + '] ' + metNamen(x.tekst, cs, ew)).join('\n') + '\n</transcript>\n';
     const aan = (ds || []).filter((x) => x.soort === 'aanvulling'), cor = (ds || []).filter((x) => x.soort === 'correctie');
     if (aan.length) s += '<aanvullingen_van_david>\n' + aan.map((x) => '- ' + schoon(x.tekst, 5000)).join('\n') + '\n</aanvullingen_van_david>\n';
     if (cor.length) s += '<correcties_van_david>\n' + cor.map((x) => '- ' + schoon(x.tekst, 5000)).join('\n') + '\n</correcties_van_david>\n';
@@ -755,7 +932,7 @@ function maak(o) {
     const ruw = vensterTekst(segs, tv, tt);
     const eigen = (ds || []).map((s) => s.tekst).join(' ');
     if (!ruw.trim() && !eigen.trim()) twijfel.add('alinea_zonder_tekst_in_venster');
-    const bronTekst = ruw + ' ' + pasCorrectiesToe(ruw, cs) + ' ' + eigen;
+    const bronTekst = ruw + ' ' + pasCorrectiesToe(ruw, cs) + ' ' + metNamen(ruw, cs, eigenWoorden(ds)) + ' ' + eigen;   // wv2536: ook met de namencontrole
     const hv = vensterSet(bronTekst);
     const lengteSet = vensterSet(ruw + ' ' + eigen);
     let goed = [];
@@ -1201,7 +1378,8 @@ function maak(o) {
       const m = BLOK_BEGIN_RE.exec(p.tekst);
       const e = m ? p.tekst.indexOf(BLOK_EIND, m.index) : -1;
       const binnen = m && e >= 0 ? p.tekst.slice(m.index + m[0].length, e) : '';
-      const alineas = binnen.split(/\n{2,}/).map((x) => x.trim()).filter((x) => x && !/^#/.test(x)).map((x) => x.replace(/\s*\*\(\d[\d:]*–\d[\d:]*\)\*\s*$/, '').replace(new RegExp(MARK_RE.source, 'g'), '$1'));
+      const alineas = binnen.split(/\n{2,}/).map((x) => x.trim()).filter((x) => x && !/^#/.test(x)).map((x) => x.replace(/\s*\*\(\d[\d:]*–\d[\d:]*\)\*\s*$/, '').replace(new RegExp(MARK_RE.source, 'g'), '$1'))
+        .map((x) => (m && e >= 0 && !blokOngewijzigd(p.tekst) ? x : metNamen(x, [], new Set())));   // wv2536
       uit.push({ herinnering_id: p.rel.split('/').pop().replace(/\.md$/, ''), titel: String(fmVeld(p.fm, 'titel') || ''), alineas });
     }
     return uit;
@@ -1239,6 +1417,9 @@ function maak(o) {
     const delen = [], mis = [];
     if (ds === undefined) ds = davidStukken(rid);
     const eigenW = vensterSet((ds || []).map((x) => String(x && x.tekst || '')).join(' ')).w;
+    let nl = null;
+    try { nl = namenlijst(); } catch (e) { fout('verhaal-namen', e); }
+    const naamW = eigenWoorden(ds);
     // "Verhaal klopt" (knop Klopt zo in de app): David keurt de twijfel over het hele stuk goed (letterlijk, te lang, eigen woorden);
     // gemarkeerde woorden houden hun eigen Klopt
     const stukOk = (ds || []).some((x) => x && x.soort === 'correctie' && VERHAAL_OK_RE.test(String(x.tekst || '')));
@@ -1260,22 +1441,38 @@ function maak(o) {
       else binnen = p.tekst.slice(fmDelen(p.tekst) ? /^---\n[\s\S]*?\n---\n/.exec(p.tekst)[0].length : 0).replace(/^> \*\*Privé[^\n]*\n/m, '').replace(/\nBron: [^\n]*\n?$/, '');
       // wv2322: twijfel tonen zolang de pagina een codepagina is en niet goedgekeurd (Davids aanpassing of goedkeuring haalt hem weg)
       const eigen = !codePagina(p.tekst), metTwijfel = !eigen && st !== 'goedgekeurd';
+      // wv2536: de namencontrole op elke pagina waarvan David de tekst niet zelf aanpaste (ook goedgekeurd: dan alleen de eenduidige
+      // vervangingen, geen twijfel); twijfel = soort naam_lijkt met de naam als voorstel
+      // review MOET 2: met blok = alleen als het blok nog ongewijzigd is (ook goedgekeurd); zonder blok = alleen een codepagina
+      const namenAan = m && e >= 0 ? blokOngewijzigd(p.tekst) : !eigen;
+      let nGecor = 0, nTwijfel = 0;
       const alineas = binnen.split(/\n{2,}/).map((x) => x.trim()).filter((x) => x && !/^#/.test(x) && !/^>/.test(x)).map((x) => {
         const tm = /\s*\*\((\d[\d:]*)–(\d[\d:]*)\)\*\s*$/.exec(x);
         const sec = (s) => s.split(':').reduce((a2, b2) => a2 * 60 + Number(b2), 0);
-        const om = ontmarkeer(pasCorrectiesToe(tm ? x.slice(0, tm.index) : x, cs), eigenW, metTwijfel);
+        const c0 = pasCorrectiesToe(tm ? x.slice(0, tm.index) : x, cs);
+        let nc = null;
+        if (namenAan) { try { nc = corrigeerNamen(c0, nl, { eigen: naamW }); } catch (e2) { fout('verhaal-namen', e2); } }
+        const om = ontmarkeer(nc ? nc.tekst : c0, eigenW, metTwijfel);
+        if (nc) {
+          nGecor += nc.eenduidig.length;
+          if (metTwijfel) for (const w of nc.twijfel) if (!om.twijfel.some((y) => y.woord === w.woord)) { om.twijfel.push({ woord: w.woord, soort: 'naam_lijkt', voorstel: w.voorstel }); nTwijfel++; }
+        }
         return { tekst: om.tekst, t_van: tm ? sec(tm[1]) : null, t_tot: tm ? sec(tm[2]) : null, twijfel: om.twijfel };
       });
       const tc = Array.isArray(f('twijfel')) ? f('twijfel').filter((c) => typeof c === 'string' && Object.hasOwn(UITLEG_DEEL, c)) : [];
       // wv2306 (R3): bevestigde personen en voorval (alleen wat David met Ja koppelde) en de plaats, voor de filters in de app
       const pl = Array.isArray(f('personen')) ? f('personen').filter((x) => typeof x === 'string' && /^\[\[[^\]]+\]\]$/.test(x)) : [];
       const vl = typeof f('voorval') === 'string' && /^\[\[[^\]]+\]\]$/.test(f('voorval')) ? f('voorval') : '';
-      delen.push({ herinnering_id: hid, titel: pasCorrectiesToe(String(f('titel') || ''), cs), status: st, eigen, t_van: Number(f('t_van')) || 0,
+      const naamTitel = (t) => { if (!namenAan) return t; const r = corrigeerNamen(t, nl, { eigen: naamW }); nGecor += r.eenduidig.length; return r.tekst; };
+      const titel = naamTitel(pasCorrectiesToe(String(f('titel') || ''), cs));
+      const plaats = typeof f('plaats') === 'string' ? naamTitel(pasCorrectiesToe(f('plaats'), cs)).slice(0, 80) : '';
+      delen.push({ herinnering_id: hid, titel, status: st, eigen, t_van: Number(f('t_van')) || 0,
+        namen: { gecorrigeerd: nGecor, twijfel: nTwijfel },   // wv2536: alleen aantallen
         // review MOET 1/2: open twijfel = een gemarkeerd woord of een twijfel over het hele stuk die David nog niet goedkeurde; zo'n deel gaat niet
         // naar de deellink of de toonmodus
         twijfel: metTwijfel && !stukOk ? tc.map((c) => UITLEG_DEEL[c]) : [], twijfel_open: alineas.some((a2) => a2.twijfel.length > 0) || (metTwijfel && !stukOk && tc.length > 0),
         letterlijk: tc.indexOf('letterlijk') >= 0,
-        plaats: typeof f('plaats') === 'string' ? pasCorrectiesToe(f('plaats'), cs).slice(0, 80) : '',
+        plaats,
         personen: pl.map((x) => ({ link: x, naam: path.basename(x.slice(2, -2)).replace(/\s*\(.*\)$/, '') })), voorval: vl ? { link: vl, titel: voorvalTitel(vl) } : null,
         datum: String(f('datum') || ''), datum_precisie: String(f('datum_precisie') || 'onbekend'), datum_van: String(f('datum_van') || ''), datum_tot: String(f('datum_tot') || ''), alineas });
     }
@@ -1318,10 +1515,11 @@ function maak(o) {
     rol();
     return { aan: aan(), bezig, versie: VERSIE, opnames: per, verhalen: h ? h.g : null, twijfel: h ? h.m : null, voorstellen_open: open,
       vandaag: { aanroepen: tel.aanroepen, plafond: PER_DAG, usd: Math.round(tel.usd_dag * 100) / 100 }, maand_usd: Math.round(tel.usd_maand * 100) / 100,
-      grens_usd: { dag: GRENS_DAG_USD, maand: GRENS_MAAND_USD }, sleutel: tel.sleutel, sdk: tel.sdk, pauze: nu() < dienstPauzeTot, laatst };
+      grens_usd: { dag: GRENS_DAG_USD, maand: GRENS_MAAND_USD }, namen: namenInfo(), sleutel: tel.sleutel, sdk: tel.sdk, pauze: nu() < dienstPauzeTot, laatst };
   }
 
-  return { tik, besluit, voorstellen, verhalenVanOpname, samengesteld, info, herbouw, schrijfIndex, _db: db, _reg: reg };
+  return { tik, besluit, voorstellen, verhalenVanOpname, samengesteld, info, herbouw, schrijfIndex, _db: db, _reg: reg,
+    namen: { lijst: namenlijst, hint: (max) => namenHint(namenlijst(), max), leer: leerNamen, info: namenInfo } };   // wv2536
 }
 
 // Pad onder 20_Prive/Herinneringen? (padpoorten: deelpagina, forum, linkcheck). Hoofdletterongevoelig, ook met ./ of een vaultvoorvoegsel.
@@ -1330,4 +1528,4 @@ function isHerinneringPad(p) {
   return /(^|\/)20_prive\/herinneringen(\/|$)/i.test(s);
 }
 
-module.exports = { maak, hidVan, MAX_HERINNERINGEN, toetsTekst, toetsFeiten, markeer, bevestigdUit, twijfelSoort, toetsGeheel, correctiesUit, pasCorrectiesToe, vensterSet, rekenDatum, telwoord, getallenVan, isHerinneringPad, SCHEMA, SYSTEEM, VERHAAL_MAP, VOORVAL_MAP, OPNAME_MAP, INDEX, VERSIE };
+module.exports = { maak, corrigeerNamen, maakNamenlijst, leesNamenlijst, variantenUit, klank, namenHint, hidVan, MAX_HERINNERINGEN, toetsTekst, toetsFeiten, markeer, bevestigdUit, twijfelSoort, toetsGeheel, correctiesUit, pasCorrectiesToe, vensterSet, rekenDatum, telwoord, getallenVan, isHerinneringPad, SCHEMA, SYSTEEM, VERHAAL_MAP, VOORVAL_MAP, OPNAME_MAP, INDEX, VERSIE };

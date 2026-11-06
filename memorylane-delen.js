@@ -983,6 +983,8 @@ function maak(o) {
     const sid = nieuwSid(), nuIso = iso(nu());
     wachtZet(sid, { tekst: t, naam: 'David' });
     q.sNieuw.run(sid, h.hid, 'david', 'eigen', 'tekst', soort, 'opgenomen', 'geen', sha256(t), nuIso, null);
+    // wv2536: een correctie naar een bekende naam ("Livia is Lyvia") komt op de namenlijst, zodat hij ook in andere verhalen geldt
+    if (soort === 'correctie' && o.verhaal && o.verhaal.namen && typeof o.verhaal.namen.leer === 'function') { try { o.verhaal.namen.leer([t]); } catch (e) { fout('ml-namen', e); } }
     naarVault(); vuilAlle();
     return { status: 200, body: { ok: true, sid, vault: !!q.s.get(sid).vault } };
   }
