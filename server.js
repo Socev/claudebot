@@ -10012,7 +10012,8 @@ function appStilWeerTerug(tekst, stilte, t) {
     return !!(st && st.status === 'gezond' && st.laatste_executie && Date.parse(st.laatste_executie) > t);
   });
 }
-function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs, afgeleid, stilte) {
+function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs, afgeleid, stilte, opties) {
+  const weg = (opties && opties.weg) || {}, factuurKlaar = (opties && opties.factuurKlaar) || {};   // wv2560
   const vandaag = appYmd(nu), gekoppeld = {}, kaartWv = {}, kaartJob = {};
   // tot = tot wanneer gestelde vragen wijken: open of later (review wv594 #1: ook geparkeerd) = altijd, dicht = tot gesloten_op
   const totZet = function (o, k, tot) { if (!(o[k] >= tot)) o[k] = tot; };
@@ -10056,7 +10057,8 @@ function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs
       }
       const dag = x.meld ? x.meld === 'dag' : x.klasse === 'dringend';
       if (kanaal === 'hoofd' && x.soort === 'socev' && dag && x.klasse !== 'stil' && x.bron !== 'briefing' && x.ok !== false && appYmd(t) === vandaag
-        && !(x.bron === 'stiltewachter-david' && appStilWeerTerug(x.antwoord, stilte, t)))   // wv2317
+        && !(x.bron === 'stiltewachter-david' && appStilWeerTerug(x.antwoord, stilte, t))   // wv2317
+        && !weg[x.job_id] && !(x.bron === 'facturen-bank' && factuurKlaar[x.job_id]))   // wv2560: Weg door David; factuur weer gezien
         uit.push(Object.assign({ punt: 'd:' + x.job_id, soort: 'dag', bericht: appMoetBericht(x.antwoord, APP_MOET_DAG_MAX), afgekapt: appMoetAf(x.antwoord, APP_MOET_DAG_MAX) }, basis));
     });
   });
@@ -10091,7 +10093,14 @@ async function appMoetIets(kaarten, nu, af) {
   // wv2317: stilte_state alleen lezen als er vandaag een stiltewachter-dagbericht in het hoofdkanaal staat
   const vandaag = appYmd(nu);
   const stilNodig = (per.hoofd || []).some(function (x) { return x && x.bron === 'stiltewachter-david' && appYmd(Date.parse(x.t)) === vandaag; });
-  return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu, jobs, af && af.map, stilNodig ? await appStilteNu() : null);
+  // wv2560: een dag-bericht dat David met Weg wegzette (te-lezen.json gezien, op de pod: op alle apparaten weg) en een facturen-bank-bericht
+  // van vandaag waarvan niets meer speelt. Onleesbaar: niets weg (dan blijft het staan zoals voor wv2560).
+  let weg = {};
+  if (teLezenMod) { try { weg = appTeLezenStaat().gezien; } catch (e) { logError('te-lezen', e); weg = {}; } }
+  const fb = (per.hoofd || []).filter(function (x) { return x && x.bron === 'facturen-bank' && APP_JOB_RE.test(String(x.job_id || '')) && appYmd(Date.parse(x.t)) === vandaag; });
+  let factuurKlaar = null;
+  try { factuurKlaar = fb.length && typeof appMoetFactuurKlaar === 'function' ? appMoetFactuurKlaar(fb) : null; } catch (e) { logError('facturen-betaalmelding-klaar', e); }
+  return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu, jobs, af && af.map, stilNodig ? await appStilteNu() : null, { weg: weg, factuurKlaar: factuurKlaar });
 }
 // wv2317: stilte_state voor Moet iets, 60 s bewaard (Voor jou en de draden vragen elke paar seconden). Onleesbaar: de laatste stand
 // van hooguit 10 min, anders null (dan blijft het bericht gewoon staan, zoals vóór wv2317).
@@ -16000,11 +16009,30 @@ async function facturenBetaalMelding(fdb) {
     facturenRoutes.betaalMeldingGemeld(fdb, m, Date.now());
     const r = await berichtIntern({ kanaal: 'hoofd', bron: 'facturen-bank', klasse: 'normaal', tekst: m.tekst,
       sleutel: 'facturen-bank-' + crypto.createHash('sha256').update(String(m.sleutel)).digest('hex').slice(0, 24) });
-    if (r && r.status === 200 && r.j && r.j.ok) return;
+    if (r && r.status === 200 && r.j && r.j.ok) {
+      // wv2560: welk bericht welke sleutels had, zodat Voor jou het weghaalt zodra niets ervan nog speelt (fout = dan de dag-terugval)
+      if (typeof facturenRoutes.betaalMeldingJob === 'function') { try { facturenRoutes.betaalMeldingJob(fdb, r.j.id, m, Date.now()); } catch (e) { logError('facturen-betaalmelding-job', e); } }
+      return;
+    }
     if (r && r.status !== 0) { try { facturenRoutes.betaalMeldingTerug(fdb, m); } catch (e) { logError('facturen-betaalmelding-terug', e); } }
     logError('facturen-betaalmelding', new Error('bericht niet bezorgd (' + (r && r.status) + ')'));
   } catch (e) { logError('facturen-betaalmelding', e); }
   finally { facturenBetaalBezig = false; }
+}
+// wv2560: de facturen-bank-berichten van vandaag waarvan niets meer speelt (facturen.betaalMeldingKlaar) → {job_id: 1}; 60 s bewaard
+// (Voor jou vraagt elke paar seconden). Geen Facturen (VPS, terugrol) of een fout: null, dan blijft het bericht gewoon staan.
+function appMoetFactuurKlaar(items) {
+  if (!facturenRoutes || typeof facturenRoutes.betaalMeldingKlaar !== 'function') return null;
+  const lijst = items.map(function (x) { return { job_id: x.job_id, dag: appYmd(Date.parse(x.t)) }; });
+  const sleutel = lijst.map(function (x) { return x.job_id; }).join(',');
+  const c = appStaat.moetFactuurKlaar;
+  if (c && c.sleutel === sleutel && Date.now() - c.op < 60000) return c.uit;
+  const fdb = facturenOpen();   // review wv2560 ZOU 1: ook "geen database" 60 s onthouden
+  let uit = null;
+  if (fdb) try { uit = {}; facturenRoutes.betaalMeldingKlaar(fdb, lijst).forEach(function (j) { uit[j] = 1; }); }
+  catch (e) { logError('facturen-betaalmelding-klaar', e); uit = null; }
+  appStaat.moetFactuurKlaar = { sleutel: sleutel, op: Date.now(), uit: uit };
+  return uit;
 }
 async function facturenLuikBytes(body) {
   const geheim = process.env.N8N_WEBHOOK_AGENDA_API;

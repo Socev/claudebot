@@ -2403,6 +2403,58 @@ function betaalMeldingGemeld(fdb, m, nu) {
     return m.sleutels.length;
   });
 }
+/*
+ * wv2560 (David 6-11-2026 08:58: "Inmiddels is die factuur wel teruggezien, maar de melding blijft"). Het bericht staat in Voor jou onder
+ * Uit het gesprek; het gaat weg zodra alles wat erin staat niet meer speelt. Na het bezorgen onthoudt server.js welke sleutels in welk
+ * bericht stonden (meta BETAALMELDING_JOB, 14 dagen); een bericht van vóór wv2560 valt terug op de sleutels die die dag gemeld zijn.
+ * Een sleutel speelt niet meer als: sig: het signaal is niet meer open (afgehandeld door David of de bankcontrole) of de factuur staat
+ * niet meer op ingevoerd of is gekoppeld; vs: het voorstel is niet meer open of geen factuur staat nog op ingevoerd/te betalen; achter:
+ * de factuur staat niet meer op ingevoerd of is gekoppeld. Een onbekende sleutel speelt nog (liever te lang staan dan te vroeg weg).
+ */
+const BETAALMELDING_JOB = 'betaalmelding_job', BETAALMELDING_JOB_DAGEN = 14, BETAALMELDING_JOB_MAX = 200;
+function betaalMeldingJobLees(fdb) { const g = json(D.metaLees(fdb, BETAALMELDING_JOB), {}); return g && typeof g === 'object' && !Array.isArray(g) ? g : {}; }
+function betaalMeldingJob(fdb, job, m, nu) {
+  if (!/^[0-9a-f]{16}$/.test(String(job || '')) || !m || !Array.isArray(m.sleutels) || !m.sleutels.length) return 0;
+  const grens = K.plusDagen(dagAmsterdam(nu), -BETAALMELDING_JOB_DAGEN);
+  return D.transactie(fdb, function () {
+    const g = betaalMeldingJobLees(fdb);
+    for (const k of Object.keys(g)) if (!(g[k] && typeof g[k].d === 'string' && g[k].d >= grens && Array.isArray(g[k].s))) delete g[k];
+    g[job] = { d: dagAmsterdam(nu), s: m.sleutels.map(String) };
+    const ks = Object.keys(g);
+    if (ks.length > BETAALMELDING_JOB_MAX) ks.sort((x, y) => g[x].d.localeCompare(g[y].d)).slice(0, ks.length - BETAALMELDING_JOB_MAX).forEach((k) => { delete g[k]; });
+    D.metaZet(fdb, BETAALMELDING_JOB, JSON.stringify(g));
+    return m.sleutels.length;
+  });
+}
+function betaalSleutelSpeelt(fdb, k) {
+  const fq = fdb.db.prepare('SELECT id, betaalspoor FROM factuur WHERE id = ?');
+  const gekoppeld = (id) => !!fdb.db.prepare('SELECT 1 FROM koppeling WHERE factuur = ? LIMIT 1').get(id);
+  const nogIngevoerd = (id) => { const f = id ? fq.get(id) : null; return !!f && f.betaalspoor === 'ingevoerd' && !gekoppeld(f.id); };
+  if (k.startsWith('sig:')) {
+    const s = fdb.db.prepare('SELECT status, facturen FROM signaal WHERE sleutel = ?').get(k.slice(4));
+    if (!s || s.status !== 'open') return false;
+    return nogIngevoerd((json(s.facturen, []) || [])[0]);
+  }
+  if (k.startsWith('vs:')) {
+    const v = fdb.db.prepare('SELECT status, facturen FROM voorstel WHERE sleutel = ?').get(k.slice(3));
+    if (!v || v.status !== 'open') return false;
+    return (json(v.facturen, []) || []).some((id) => { const f = fq.get(id); return !!f && ['ingevoerd', 'te_betalen'].includes(f.betaalspoor) && !gekoppeld(f.id); });
+  }
+  const a = /^achter:([^|]+)\|/.exec(k);
+  if (a) return nogIngevoerd(a[1]);
+  return true;
+}
+// meldingen: [{ job_id, dag }] (dag = Amsterdamse dag van het bericht) → de job_ids waarvan niets meer speelt. Alleen lezen.
+function betaalMeldingKlaar(fdb, meldingen) {
+  const jobs = betaalMeldingJobLees(fdb), gemeld = betaalMeldingGemeldLees(fdb), uit = [];
+  for (const x of meldingen || []) {
+    if (!x || !x.job_id) continue;
+    const e = jobs[x.job_id];
+    const sl = e && Array.isArray(e.s) ? e.s : Object.keys(gemeld).filter((k) => gemeld[k] === x.dag);
+    if (sl.length && sl.every((k) => !betaalSleutelSpeelt(fdb, String(k)))) uit.push(x.job_id);
+  }
+  return uit;
+}
 function betaalMeldingTerug(fdb, m) {
   if (!m || !Array.isArray(m.sleutels) || !m.sleutels.length) return 0;
   return D.transactie(fdb, function () {
@@ -3662,7 +3714,7 @@ function maak(opties) {
     aanOk: sepaDoorAanOk,
     AAN: SEPA_DOOR.aan, ENTITEIT: SEPA_DOOR.entiteit, MAX_UUR: SEPA_DOOR_MAX_UUR,
   };
-  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, maandspec, sepaDoor, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
+  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, maandspec, sepaDoor, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, betaalMeldingJob, betaalMeldingKlaar, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
 }
 function ok(j, reden) { return { status: 200, j: Object.assign({ ok: true }, j), reden: reden || null }; }
 // Fouten naar een status. Triggers van facturen-db.js geven vaste teksten ("opdracht_prive: …"): die mogen door. Een CHECK of UNIQUE noemt
@@ -3707,4 +3759,4 @@ function mailStappen(fdb, max) {
     .map((x) => ({ gmail_id: String(x.gmail_id), stap: Number(x.rang) >= 2 ? 'is_betaald' : 'in_sepa' }));
 }
 
-module.exports = { naadVenster, eerdereBetalingen, ibanHistorie, ibanHerbereken, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek, ZONDER_FACTUUR };
+module.exports = { naadVenster, eerdereBetalingen, ibanHistorie, ibanHerbereken, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, betaalMeldingJob, betaalMeldingKlaar, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek, ZONDER_FACTUUR };

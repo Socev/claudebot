@@ -1848,6 +1848,15 @@ async function bewijs(o) {
         toets('9d wv2317: stand onleesbaar (null) of stroom onbekend = alles blijft (zoals vóór wv2317)', [1, 2, 3, 4, 5, 6].every((n) => m6.includes('d:' + S(n)) && m7.includes('d:' + S(n))), JSON.stringify([m6, m7]));
         const m8 = p([{ naam: 'Stroom A', status: 'gezond', laatste_executie: na }, { naam: 'Stroom C', status: 'gezond', laatste_executie: na }]);
         toets('9d wv2317: beide stromen terug = ook het bericht met twee stromen weg', !m8.includes('d:' + S(1)) && !m8.includes('d:' + S(3)), JSON.stringify(m8));
+        // wv2560: Weg door David (te-lezen gezien) en een facturen-bank-bericht waarvan niets meer speelt
+        const fb = (n) => Object.assign(st(n, 'Betaling: 2-11 zou X betaald worden, ik zie het niet op de bank.'), { bron: 'facturen-bank', klasse: 'normaal' });
+        const h3 = [fb(11), fb(12), st(13, regel('Stroom D')), st(14, regel('Stroom D'))];
+        const q = (o) => H.appMoetIetsUit({ hoofd: h3 }, {}, {}, [], nu, {}, undefined, null, o).map((x) => x.punt);
+        const w1 = q(undefined), w2 = q({ weg: { [S(13)]: new Date(nu).toISOString() }, factuurKlaar: { [S(11)]: 1, [S(14)]: 1 } });
+        toets('9d wv2560: zonder opties alles zoals voorheen', [11, 12, 13, 14].every((n) => w1.includes('d:' + S(n))), JSON.stringify(w1));
+        toets('9d wv2560: Weg = weg; factuurKlaar alleen voor bron facturen-bank', !w2.includes('d:' + S(13)) && !w2.includes('d:' + S(11)) && w2.includes('d:' + S(12)) && w2.includes('d:' + S(14)), JSON.stringify(w2));
+        const w3 = q({ weg: null, factuurKlaar: null });
+        toets('9d wv2560: onleesbaar (null) = alles blijft', w3.length === 4, JSON.stringify(w3));
       }
       // wv1004 (David 24-10): een kaart die David via Ja / Nee / Anders beantwoordde, verbergt de chatversie van dezelfde vraag.
       // Koppeling: kaartJobs (ouder_job van de rij die de kaart zette) = agent_job van het agentrapport; of een wv-nummer in de titel.

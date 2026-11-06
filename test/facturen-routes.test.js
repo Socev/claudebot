@@ -2033,6 +2033,12 @@ test('wv2057 failsafe: batch van drie met één ontbrekende betaling → precies
   assert.match(m.tekst, /^Bankcontrole: dit zie ik niet goed terug op de bank\./);
   assert.doesNotMatch(m.tekst, /NL\d\d/, 'geen rekeningnummers');
   assert.equal(F.betaalMeldingGemeld(t.fdb, m, N1), 2);
+  // wv2560: welk bericht welke sleutels had; zolang er één speelt blijft het bericht in Voor jou staan
+  const J1 = 'aaaaaaaaaaaaaaa1', J0 = 'aaaaaaaaaaaaaaa0', J2 = 'aaaaaaaaaaaaaaa2';
+  assert.equal(F.betaalMeldingJob(t.fdb, J1, m, N1), 2);
+  assert.equal(F.betaalMeldingJob(t.fdb, 'geen-job', m, N1), 0);
+  assert.deepEqual(F.betaalMeldingKlaar(t.fdb, [{ job_id: J1, dag: '2026-10-26' }, { job_id: J0, dag: '2026-10-26' }, { job_id: 'aaaaaaaaaaaaaaa9', dag: '2026-10-01' }]), [],
+    'alles speelt nog; een dag zonder gemelde sleutels = niets bekend = blijft');
   assert.equal(F.betaalMeldingen(t.fdb, N1 + 3600000), null, 'nooit twee keer hetzelfde bericht');
   F.bankcontroleToepassen(t.fdb, N1 + 7200000);
   assert.equal(F.betaalMeldingen(t.fdb, N1 + 7200000), null, 'ook niet na nog een bankcontrole');
@@ -2052,6 +2058,7 @@ test('wv2057 failsafe: batch van drie met één ontbrekende betaling → precies
   assert.match(m2.tekst, /\nOp 27-10 ging € .+ naar Proef voor factuur .+, maar die factuur is € .+ \(Tolgaarde\)\. Het bedrag wijkt af\./);
   assert.equal(t.call('GET', 'betalen', null, { nu: N2 }).j.ingevoerd_niet_gezien.find((x) => x.id === ids[1]).bank.stand, 'afwijkend');
   F.betaalMeldingGemeld(t.fdb, m2, N2);
+  F.betaalMeldingJob(t.fdb, J2, m2, N2);
   assert.equal(F.betaalMeldingen(t.fdb, N2), null);
   // David bevestigt het voorstel (toch deze betaling): het signaal "niet gezien" gaat bij de volgende controle vanzelf dicht
   const vs = t.fdb.db.prepare("SELECT id FROM voorstel WHERE status = 'open' AND facturen LIKE ?").get('%' + ids[1] + '%');
@@ -2059,6 +2066,15 @@ test('wv2057 failsafe: batch van drie met één ontbrekende betaling → precies
   F.bankcontroleToepassen(t.fdb, N2 + 60000);
   const sig = t.fdb.db.prepare("SELECT status, afhandeling, wie FROM signaal WHERE soort = 'ingevoerd_niet_gezien' AND facturen LIKE ?").get('%' + ids[1] + '%');
   assert.deepEqual([sig.status, sig.afhandeling, sig.wie], ['afgehandeld', 'vanzelf_gezien', 'bankcontrole']);
+  // wv2560: het signaal van 2 is dicht, maar het andere uit hetzelfde bericht (zaad) speelt nog → blijft; na "opnieuw kijken" door David → weg,
+  // ook voor een bericht zonder vastgelegde sleutels (terugval: de sleutels die die dag gemeld zijn). m2: het voorstel is bevestigd, de
+  // betalingen waarvan de bank achterloopt staan nog op ingevoerd → blijft.
+  assert.deepEqual(F.betaalMeldingKlaar(t.fdb, [{ job_id: J1, dag: '2026-10-26' }, { job_id: J0, dag: '2026-10-26' }]), []);
+  t.fdb.db.exec('SAVEPOINT wv2560');   // de rest van deze toets rekent op het open zaadsignaal: daarna terugdraaien
+  for (const k of m.sleutels) t.fdb.db.prepare("UPDATE signaal SET status = 'afgehandeld', afhandeling = 'opnieuw_kijken', wie = 'david (proef)', wanneer = ? WHERE sleutel = ? AND status = 'open'").run(new Date(N2).toISOString(), k.slice(4));
+  assert.deepEqual(F.betaalMeldingKlaar(t.fdb, [{ job_id: J1, dag: '2026-10-26' }, { job_id: J0, dag: '2026-10-26' }, { job_id: J2, dag: '2026-10-28' }]), [J1, J0]);
+  t.fdb.db.exec('ROLLBACK TO wv2560'); t.fdb.db.exec('RELEASE wv2560');
+  assert.equal(JSON.parse(D.metaLees(t.fdb, 'betaalmelding_job'))[J2].s.length, 4);
   assert.match(t.call('GET', 'bank', null, { nu: N2 }).j.geleerd_regels.map((x) => x.tekst).join(' '), /alsnog op de bank/);
   // zelf betaald buiten de app (leverancier zonder bekende rekening), naar het IBAN op de factuur met het factuurnummer: automatisch gekoppeld
   const ib = Z.maakIban('NL', 'TEST', '0955500001');
