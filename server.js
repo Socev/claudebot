@@ -19876,6 +19876,9 @@ async function appKalender(req, res, a, route) {
 //   POST /app/shopper/<id>/nalezen    wv2454: de opties van een open zoektocht opnieuw lezen (winkel-lezen.py, alleen GET op de links van de
 //                                     pagina); uitkomst in klokken/shopper-nalezen.json, niet op de pagina; 20/uur, eens per 10 min opnieuw
 //   GET  /app/shopper/<id>/taak       wv2454: stand van de Todoist-taak (open, afgevinkt, weg), alleen lezen; 120/uur
+//   POST /app/shopper/<id>/eisen      wv2561: {wens, eisen: [..]} van een open zoektocht (alleen die regels + aangepast; deelt shopper_status 30/uur)
+//   POST /app/shopper/<id>/opnieuw    wv2561: start een achtergrondagent "socev: Shopper opnieuw" (skill ovis-shopper) op dezelfde pagina; 6/uur,
+//                                     één ronde tegelijk per zoektocht; stand in klokken/shopper-opnieuw.json (job + tijd, geen wens)
 // wv2276 S5: bij een gekochte zoektocht geeft GET /app/shopper/<id> ook facturen (hooguit 3 passende facturen uit de Facturen-app: id,
 // leverancier, datum, bedrag, zekerheid; berekend, niets geschreven) en de lijst factuur_gevonden (aantal). De app-sessie is in Facturen de
 // eigenaar (rolVoor ingang app), dus Shopper toont niets dat de Facturen-app David niet ook toont.
@@ -19909,14 +19912,40 @@ const shopper = (function () {
     try { j = await r.json(); } catch (e) { j = null; }
     return { status: r.status, taak: r.status === 200 ? j : null };
   };
+  // wv2561 Opnieuw zoeken: een achtergrondagent (route socev, zoals Shopper vanzelf) via POST /agent op deze pod; de opdracht maakt shopper.js
+  // (vaste tekst + het grondwet-blok uit de release + pad en eisen van de pagina). agentStand leest alleen het register (loopt / klaar / mislukt).
+  const agentStart = (typeof http !== 'undefined' && typeof PORT !== 'undefined') ? function (prompt) {
+    return new Promise(function (klaar) {
+      const body = JSON.stringify({ secret: SECRET, prompt: prompt, label: 'socev: Shopper opnieuw', chat_id: '40687', max_minuten: 40 });
+      const r = http.request({ host: '127.0.0.1', port: PORT, method: 'POST', path: '/agent', timeout: 15000,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, function (res) {
+        let t = '';
+        res.on('data', function (x) { if (t.length < 4096) t += x; });
+        res.on('end', function () { let j = null; try { j = JSON.parse(t); } catch (e) { j = null; } klaar(res.statusCode === 200 && j && j.ok ? { ok: true, job_id: j.job_id } : { ok: false, status: res.statusCode }); });
+      });
+      r.on('timeout', function () { r.destroy(new Error('timeout')); });
+      r.on('error', function () { klaar({ ok: false, status: 0 }); });
+      r.end(body);
+    });
+  } : null;
+  const agentStand = function (job) {
+    const a = typeof agentsReg === 'object' && agentsReg ? agentsReg[job] : null;
+    if (!a) return null;
+    if (a.status === 'pending' || a.status === 'running') return 'loopt';
+    return a.ok === true ? 'klaar' : a.ok === false ? 'mislukt' : (a.ended ? 'klaar' : 'loopt');
+  };
+  const grondwet = function () { return typeof autoGrondwet === 'function' ? autoGrondwet() : null; };
   try { return require(p).maak({ vault: VAULT, vv: VV(), facturenPad: facturenPad, lezer: lezer, todoistTaak: todoistTaak,
-    nalezenPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nalezen.json') : null }); } catch (e) { logError('shopper', e); return null; }
+    nalezenPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nalezen.json') : null,
+    agentStart: agentStart, agentStand: agentStand, grondwet: grondwet,
+    opnieuwPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-opnieuw.json') : null }); } catch (e) { logError('shopper', e); return null; }
 })();
 function shopperInfo() { if (!shopper) return { aan: false }; try { return shopper.info(); } catch (e) { return { aan: true, fout: true }; } }
 appStaat.tellers.shopper = [];
 appStaat.tellers.shopper_status = [];
 appStaat.tellers.shopper_nalezen = [];
 appStaat.tellers.shopper_taak = [];
+appStaat.tellers.shopper_opnieuw = [];
 async function appShopper(req, res, a, route, d) {
   if (!shopper) return appWeiger(res, 404, 'Shopper zit niet in deze versie van de pod', 'shopper ontbreekt');
   if (!appTeller('shopper', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens shopper');
@@ -19943,6 +19972,16 @@ async function appShopper(req, res, a, route, d) {
       soort = 'taak';
       if (!appTeller('shopper_taak', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens shopper taak');
       u = typeof shopper.taak === 'function' ? await shopper.taak(m[1]) : { status: 404, body: { ok: false, fout: 'onbekend' } };
+    }
+    else if ((m = /^POST \/app\/shopper\/([^/]*)\/eisen$/.exec(route))) {   // wv2561: wens en eisen van een open zoektocht aanpassen
+      soort = 'eisen';
+      if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
+      u = typeof shopper.eisen === 'function' ? shopper.eisen(m[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
+    }
+    else if ((m = /^POST \/app\/shopper\/([^/]*)\/opnieuw$/.exec(route))) {   // wv2561: opnieuw zoeken met de eisen van de pagina (achtergrondagent)
+      soort = 'opnieuw';
+      if (!appTeller('shopper_opnieuw', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 6)', 'grens shopper opnieuw');
+      u = typeof shopper.opnieuw === 'function' ? await shopper.opnieuw(m[1]) : { status: 404, body: { ok: false, fout: 'onbekend' } };
     }
     else u = { status: 404, body: { ok: false, fout: 'onbekend' } };
   } catch (e) { logError('shopper', e); return appWeiger(res, 503, 'Shopper kon de zoektochten nu niet lezen; probeer het zo opnieuw', 'shopper fout'); }

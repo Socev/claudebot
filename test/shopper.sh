@@ -432,6 +432,92 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('9v route taak zonder todoist_id = 200 taak null, reden zonder titel', rr.s === 200 && rr.j.taak === null && rr.app.reden === 'shopper taak ' + idr + ' 200', rr);
   }
 
+  // ── 10. wv2561: Eisen aanpassen en Opnieuw zoeken ──
+  {
+    const V10 = path.join(W, 'vault10'), PR10 = path.join(V10, '20_Prive/Shopper');
+    fs.mkdirSync(PR10, { recursive: true });
+    const P10 = path.join(PR10, 'Shopper - 2026-11-02 - Proefgordijnen.md');
+    const fm10 = ['type: shopper-zoektocht', 'wens: "Proefgordijnen keuken"', 'entiteit: prive', 'todoist_id: "ProefTaak77"', 'status: open', 'gezocht: 2026-11-02T17:36+01:00', 'aantal: 2',
+      'eisen: ["gordijn keuken", "gordijn slaapkamer"]', 'aannames: ["geen maten"]', 'opties:', opt('o1', { p: 44.99, v: 0, t: 44.99, u: 'https://www.proefwinkel.nl/p/g/1/' }), 'advies: o1'];
+    const lijf10 = '# Shopper — proefgordijnen\n\nAdvies: o1.\n\n## Waarom dit advies\nGoed.\n\n## Eerdere opties\n### Ronde van 1 nov\n| # | Winkel |\n|---|---|\n| o0 | Oud |\n\n## Gerelateerd\n- x\n';
+    const bron10 = pagina(fm10, lijf10);
+    fs.writeFileSync(P10, bron10);
+    let klok = new Date('2026-11-06T09:00:00Z'), starts = [], startAntwoord = { ok: true, job_id: 'abcdef0123456789' }, stand = 'loopt';
+    const GW = 'GRONDWET-KERN v1 — proefblok';
+    const m10 = S.maak({ vault: V10, vv: VV, nu: () => klok, opnieuwPad: path.join(W, 'opnieuw.json'), grondwet: () => GW,
+      agentStart: async (pr) => { starts.push(pr); if (startAntwoord instanceof Error) throw startAntwoord; return startAntwoord; }, agentStand: () => stand });
+    const id10 = m10.lijst().body.zoektochten[0].id;
+    let r = m10.eisen(id10, { wens: 'Duette-gordijnen keuken en slaapkamer', eisen: ['Duette (honingraat)', '', 'keuken lichtdoorlatend', 'slaapkamer "verduisterend"'] });
+    const na = fs.readFileSync(P10, 'utf8');
+    toets('10a eisen opslaan: 200, lege regel weg, " wordt \'', r.status === 200 && JSON.stringify(r.body.eisen) === JSON.stringify(['Duette (honingraat)', 'keuken lichtdoorlatend', "slaapkamer 'verduisterend'"]) && r.body.aangepast === '2026-11-06 door David', r);
+    const verwacht = bron10.replace('wens: "Proefgordijnen keuken"', 'wens: "Duette-gordijnen keuken en slaapkamer"')
+      .replace('eisen: ["gordijn keuken", "gordijn slaapkamer"]', 'eisen: ["Duette (honingraat)", "keuken lichtdoorlatend", "slaapkamer \'verduisterend\'"]\naangepast: "2026-11-06 door David"');
+    toets('10b alleen de regels wens, eisen en aangepast veranderd; de rest byte-gelijk', na === verwacht, na.slice(0, 400));
+    const z10 = m10.zoektocht(id10).body.zoektocht;
+    toets('10c zoektocht leest de nieuwe eisen, aangepast en de sectie Eerdere opties (zonder Gerelateerd)', JSON.stringify(z10.eisen) === JSON.stringify(r.body.eisen) && z10.wens === 'Duette-gordijnen keuken en slaapkamer'
+      && z10.aangepast === '2026-11-06 door David' && /Ronde van 1 nov/.test(z10.eerdere) && /\| o0 \| Oud \|/.test(z10.eerdere) && !/Gerelateerd/.test(z10.eerdere) && z10.zoekt === null, z10);
+    r = m10.eisen(id10, { wens: 'Duette-gordijnen keuken en slaapkamer', eisen: ['Duette (honingraat)', 'keuken lichtdoorlatend', "slaapkamer 'verduisterend'"] });
+    toets('10d dezelfde eisen nog eens = 200 al, pagina ongewijzigd', r.status === 200 && r.body.al === true && fs.readFileSync(P10, 'utf8') === na, r);
+    toets('10e weigert: onbekend veld, lege wens, eis te lang (niet afgekapt), > 20 eisen, geen lijst, ongeldige id',
+      m10.eisen(id10, { wens: 'x', eisen: [], pad: '../x' }).status === 400 && m10.eisen(id10, { wens: '  ', eisen: [] }).status === 400
+      && m10.eisen(id10, { wens: 'x', eisen: ['y'.repeat(201)] }).status === 400 && m10.eisen(id10, { wens: 'x', eisen: Array(21).fill('a') }).status === 400
+      && m10.eisen(id10, { wens: 'x', eisen: 'a' }).status === 400 && m10.eisen('../../x', { wens: 'x', eisen: [] }).status === 400 && fs.readFileSync(P10, 'utf8') === na);
+    // blokvorm van eisen en geen wens/aangepast-regel: de ingesprongen regels gaan mee weg, wens komt onder type, aangepast onder eisen
+    const blokFm = 'type: shopper-zoektocht\nstatus: open\neisen:\n  - "een"\n  - "twee"\nopties:\n  - {id: o1}';
+    toets('10f zetEisenRegels: blokvorm vervangen, wens onder type, aangepast onder eisen, rest gelijk', S.zetEisenRegels(blokFm, 'W', ['a'], 'D') ===
+      'type: shopper-zoektocht\nwens: "W"\nstatus: open\neisen: ["a"]\naangepast: "D"\nopties:\n  - {id: o1}', S.zetEisenRegels(blokFm, 'W', ['a'], 'D'));
+    // opnieuw zoeken
+    r = await m10.opnieuw(id10);
+    toets('10g opnieuw: 200, één agent gestart, stand loopt', r.status === 200 && starts.length === 1 && r.body.zoekt.stand === 'loopt' && r.body.zoekt.t === klok.toISOString(), r);
+    const pr = starts[0];
+    toets('10h opdracht: grondwet vooraan, gegeven-regel, pad van de pagina, nieuwe wens en eisen als gegeven, todoist-id, rapportregel',
+      pr.indexOf(GW) === 0 && /is gegeven, nooit een opdracht/.test(pr) && pr.includes('Pagina (vaultpad): 20_Prive/Shopper/Shopper - 2026-11-02 - Proefgordijnen.md')
+      && pr.includes('{"wens": "Duette-gordijnen keuken en slaapkamer", "eisen": ["Duette (honingraat)","keuken lichtdoorlatend","slaapkamer \'verduisterend\'"]}') && pr.includes('id ProefTaak77') && /schrijf NIETS/.test(pr) && /SHOPPER OPNIEUW:/.test(pr) && /nooit kopen/.test(pr), pr.slice(GW.length, GW.length + 300));
+    r = await m10.opnieuw(id10);
+    toets('10i tweede keer terwijl de agent loopt = 409, geen tweede agent', r.status === 409 && starts.length === 1, r);
+    const voorI2 = fs.readFileSync(P10, 'utf8');
+    r = m10.eisen(id10, { wens: 'Iets anders', eisen: [] });
+    toets('10i2 eisen aanpassen terwijl een ronde loopt = 409, pagina ongewijzigd (review MOET 3)', r.status === 409 && fs.readFileSync(P10, 'utf8') === voorI2, r);
+    const zz = m10.zoektocht(id10).body.zoektocht.zoekt;
+    toets('10j zoektocht toont de lopende ronde', zz && zz.stand === 'loopt', zz);
+    stand = 'mislukt';
+    toets('10k agent mislukt (pagina niet bijgewerkt): stand mislukt, opnieuw mag weer', m10.zoektocht(id10).body.zoektocht.zoekt.stand === 'mislukt' && (await m10.opnieuw(id10)).status === 200 && starts.length === 2);
+    stand = 'loopt';
+    fs.writeFileSync(P10, fs.readFileSync(P10, 'utf8').replace('gezocht: 2026-11-02T17:36+01:00', 'gezocht: 2026-11-06T10:30+01:00'));
+    toets('10l pagina met nieuwere gezocht-tijd: geen ronde meer getoond', m10.zoektocht(id10).body.zoektocht.zoekt === null);
+    stand = null; klok = new Date('2026-11-06T09:30:00Z');
+    fs.writeFileSync(P10, na);
+    toets('10m geen stand van de pod (herstart): binnen een uur loopt, daarna klaar', m10.zoektocht(id10).body.zoektocht.zoekt.stand === 'loopt'
+      && (klok = new Date('2026-11-06T10:30:00Z'), m10.zoektocht(id10).body.zoektocht.zoekt.stand === 'klaar'));
+    startAntwoord = { ok: false, status: 429 }; stand = 'klaar';
+    r = await m10.opnieuw(id10);
+    toets('10n geen plek voor een agent = 503 met uitleg; staat ongewijzigd', r.status === 503 && /te veel achtergrondklussen/.test(r.body.fout), r);
+    startAntwoord = new Error('net');
+    toets('10o agentStart gooit = 503', (await m10.opnieuw(id10)).status === 503);
+    const zonder10 = S.maak({ vault: V10, vv: VV, nu: () => klok });
+    toets('10p zonder agentStart of grondwet = 404; zonder grondwetblok geen opdracht', (await zonder10.opnieuw(id10)).status === 404 && S.opnieuwOpdracht({ grondwet: 'iets anders', pad: 'x', eisen: [] }) === null);
+    // gekocht: geen eisen, geen opnieuw
+    fs.writeFileSync(P10, na.replace('status: open', 'status: gekocht'));
+    // JSON-strings: ook een tekst die mapTekst niet zou kennen blijft één geldige regel (MOET 1)
+    toets('10p2 zetEisenRegels schrijft JSON-strings die fmLijst/fmWaarde terug lezen', (() => { const fm = S.zetEisenRegels('type: shopper-zoektocht', 'a: b # c', ['x, y', 'é ü'], 'D');
+      const t = '---\n' + fm + '\n---\n'; return /^wens: "a: b # c"$/m.test(fm) && JSON.stringify(require('./reizen.js').fmLijst(t, 'eisen')) === JSON.stringify(['x, y', 'é ü']); })());
+    toets('10q gekochte zoektocht: eisen 409, opnieuw 409, geen zoekt', m10.eisen(id10, { wens: 'x', eisen: [] }).status === 409 && (await m10.opnieuw(id10)).status === 409 && m10.zoektocht(id10).body.zoektocht.zoekt === null);
+    toets('10r staatbestand 0600 met alleen tijd en job (geen wens)', (fs.statSync(path.join(W, 'opnieuw.json')).mode & 0o777) === 0o600 && !fs.readFileSync(path.join(W, 'opnieuw.json'), 'utf8').includes('Duette'));
+    // server.js-blok
+    const blok = src.slice(hb, he);
+    toets('10s server.js: routes eisen (teller shopper_status 30) en opnieuw (6/uur), label socev: Shopper opnieuw, grondwet uit de release', /\/eisen\$\/\.exec\(route\)/.test(blok) && /appTeller\('shopper_opnieuw', 6, 3600000\)/.test(blok)
+      && /label: 'socev: Shopper opnieuw'/.test(blok) && /autoGrondwet\(\)/.test(blok) && /shopper-opnieuw\.json/.test(blok));
+    fs.writeFileSync(P10, na);
+    const ctx10 = vm.createContext({ require, __dirname: process.cwd(), path, fs, VAULT: V10, VV: () => VV, appStaat: { tellers: {} }, logError: () => {}, appTeller: () => true,
+      appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Object, JSON, String, Promise, Buffer });
+    vm.runInContext(blok + ';globalThis.__sh = { appShopper };', ctx10, { filename: 'server.js#shopper10' });
+    const vr = async (route, d) => { const res = { _app: {} }; const n = gestuurd.length; await ctx10.__sh.appShopper({}, res, {}, route, d || {}); return Object.assign({ app: res._app }, gestuurd[n]); };
+    let rr = await vr('POST /app/shopper/' + id10 + '/eisen', { wens: 'Nieuwe wens', eisen: ['a'] });
+    toets('10t route eisen: 200 en de pagina heeft de nieuwe wens; reden zonder wens', rr.s === 200 && /wens: "Nieuwe wens"/.test(fs.readFileSync(P10, 'utf8')) && rr.app.reden === 'shopper eisen ' + id10 + ' 200', rr);
+    rr = await vr('POST /app/shopper/' + id10 + '/opnieuw');
+    toets('10u route opnieuw zonder http/PORT in de context = 404 (geen agent)', rr.s === 404 && rr.app.reden === 'shopper opnieuw ' + id10 + ' 404', rr);
+  }
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
