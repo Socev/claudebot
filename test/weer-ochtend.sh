@@ -20,7 +20,8 @@ function onecall(f, extra) {
   for (let i = 0; i < 48; i++) { const u = { dt: UUR0 + i * 3600, temp: 8, feels_like: 6, wind_gust: 6, pop: 0.1, weather: [{ id: 803 }] }; if (f) f(i, u); hourly.push(u); }
   return Object.assign({ lat: 0, lon: 0, timezone: 'Europe/Amsterdam', hourly: hourly, daily: [{ dt: UUR0 + 12 * 3600, temp: { min: 4, max: 12 } }] }, extra || {});
 }
-const PLEKKEN = [{ naam: 'Huisartsenpraktijk Tolgaarde', klasse: 'werk', lat: 52.04, lon: 5.62 }, { naam: 'Huisartsenpraktijk Groenhouten', klasse: 'werk', lat: 52.06, lon: 5.58 }, { naam: 'Thuis', klasse: 'thuis', lat: 51.87, lon: 5.31 }];
+const PLEKKEN = [{ naam: 'Huisartsenpraktijk Tolgaarde', klasse: 'werk', lat: 52.04, lon: 5.62 }, { naam: 'Huisartsenpraktijk Groenhouten', klasse: 'werk', lat: 52.06, lon: 5.58 }, { naam: 'Thuis', klasse: 'thuis', lat: 51.87, lon: 5.31 },
+  { naam: 'Nepsportclub', klasse: 'overig', lat: 53.2, lon: 6.6 }];   // wv2592: een andere opgeslagen plek telt niet mee voor de 15 km
 const DIENST = [{ soort: 'dienst', titel: 'DS', feed: 'rooster-tg-artsen', begin_datum: DATUM, eind_datum: DATUM, hele_dag: true }];
 function proef(o) {
   o = o || {};
@@ -31,11 +32,16 @@ function proef(o) {
     plekken: async () => PLEKKEN,
     locatie: async () => (o.locatie || { plek: 'Thuis', leeftijd_s: 120 }),
     kalender: async () => (o.kalender || []),
+    werkRecent: o.werkRecent === undefined ? undefined : async () => o.werkRecent,
+    afspraken: o.afspraken === undefined ? undefined : async () => { if (o.afspraken === 'fout') throw new Error('agenda-luik http 500'); return o.afspraken; },
     ophalen: async (url) => {
       st.aanroepen.push(url);
       const q = new URL(url).searchParams;
       if (o.ophalen) return o.ophalen(url, q, st.aanroepen.length);
-      const thuis = q.get('lat') === '51.9';
+      if (url.indexOf('/geo/1.0/direct') >= 0) return { status: 200, json: o.geo ? o.geo(q.get('q')) : [] };
+      const lat = q.get('lat');
+      if (lat !== '51.9' && lat !== '52.0' && lat !== '52.1') return { status: 200, json: (o.ver && o.ver(lat)) || onecall() };
+      const thuis = lat === '51.9';
       return { status: 200, json: thuis ? (o.thuis || onecall()) : (o.praktijk || onecall()) };
     },
     bufferZet: async (datum, tekst) => { st.buffer.push({ datum, tekst }); },
@@ -215,6 +221,98 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     const y = proef({ thuis: onecall((i, u) => { if (i === 12) u.wind_gust = 25; }, { alerts: lang }) });
     await y.doe();
     toets('16 lange waarschuwing: regel ≤ 160 tekens', y.buffer.length === 1 && y.buffer[0].tekst.length <= 160, y.buffer);
+  }
+  // 18. wv2592: werkdag ook uit de locatie (6-11 gemist: op het werk zonder dienst of Werk-afspraak)
+  {
+    const x = proef({ werkRecent: { dagen: 2, plek: 'Huisartsenpraktijk Groenhouten' }, praktijk: onecall(regenUur(17)) });
+    const r = await x.doe();
+    const q = x.aanroepen.map((u) => new URL(u).searchParams);
+    toets('18 ma–vr + 2 werkdagen deze week: werkdag (locatie_week), praktijk Groenhouten, terugritregen', r.detail.werkdag === true && r.detail.werk_bron === 'locatie_week' && r.detail.praktijk === 'Groenhouten' && q[1].get('lat') === '52.1' && x.buffer.length === 1 && /terugrit/.test(x.buffer[0].tekst), [r.detail, x.buffer]);
+    const y = proef({ werkRecent: { dagen: 1, plek: null }, praktijk: onecall(regenUur(17)) });
+    const ry = await y.doe();
+    toets('18 maar 1 werkdag deze week: vrije dag, geen terugritregen', ry.detail.werkdag === false && ry.detail.werk_bron === null && y.buffer.length === 0, [ry.detail, y.buffer]);
+    const z = proef({ werkRecent: { dagen: 4, plek: 'Huisartsenpraktijk Tolgaarde' } });
+    const rz = await z.doe({ datum: '2026-11-14' });
+    toets('18 zaterdag telt niet als werkdag uit de locatieweek', rz.detail.werkdag === false, rz.detail);
+    const w = proef({ locatie: { plek: 'Huisartsenpraktijk Tolgaarde', leeftijd_s: 60 }, praktijk: onecall(regenUur(17)) });
+    const rw = await w.doe();
+    toets('18 om 06:40 al op de praktijk: werkdag (locatie_nu), geen vertrekdeel, wel terugrit', rw.detail.werk_bron === 'locatie_nu' && w.buffer.length === 1 && /terugrit/.test(w.buffer[0].tekst) && !/vertrek/.test(w.buffer[0].tekst), [rw.detail, w.buffer]);
+    const v = proef({ locatie: { plek: 'Huisartsenpraktijk Tolgaarde', leeftijd_s: 7200 } });
+    const rv = await v.doe();
+    toets('18 oude locatie op de praktijk telt niet', rv.detail.werkdag === false, rv.detail);
+    const k = proef({ werkRecent: undefined }); const rk = await k.doe();
+    toets('18 zonder werkRecent (oude koppeling): als voorheen vrije dag', rk.ok && rk.detail.werkdag === false);
+  }
+  // 19. plaats uit de agendalocatie (verzonnen adressen)
+  {
+    const P = W._intern.plaatsUit;
+    const gevallen = [
+      ['Verzonnenstraat 12, 1234 AB Nepdorp, Nederland', 'Nepdorp'], ['Laan van Fop 3, 9999ZZ Fop-Stad', 'Fop-Stad'], ['Neplaan 7, Fopstad', null], ['Kamer 2, Nepinstelling', null],
+      ['Rue Imaginaire 5, 1000 Nepville, Belgique', 'Nepville'], ['Fopweg 1, 12345 Nepheim', 'Nepheim'], ['Fopstad', null], ['Zaal 2', null],
+      ['https://zoom.us/j/123', null], ['Teams-vergadering', null], ['Vergaderzaal | Gebouw - verdieping twee', null], ['Bel nep@voorbeeld.nl', null],
+      ['', null], [null, null], ['Neplaan 7, 1234 AB Fopstad (achteringang)', 'Fopstad'], ['Neplaan 7, 1234 AB', null]];
+    const fout = gevallen.filter((g) => P(g[0]) !== g[1]).map((g) => [g[0], P(g[0]), g[1]]);
+    toets('19 plaatsUit: alleen de plaats, niets bij losse woorden, links of mailadressen', fout.length === 0, fout);
+  }
+  // 20. wv2592 meetpunt 4: weer op de plek van een afspraak elders
+  {
+    const NAAM = 'Nepstraat 4, 9999 ZZ Fopstad, Nederland';
+    const geo = (q) => (q === 'Fopstad' ? [{ name: 'Fopstad', local_names: { nl: 'Fopstad' }, lat: 53.21, lon: 6.57, country: 'NL' }]
+      : q === 'Dichtbij' ? [{ name: 'Dichtbij', lat: 51.88, lon: 5.33, country: 'NL' }] : q === 'Dubbelnaam' ? [{ name: 'Dubbelnaam', lat: 40.1, lon: -75.1, country: 'US' }, { name: 'Dubbelnaam', lat: 53.21, lon: 6.57, country: 'NL' }] : q === 'Verweg' ? [{ name: 'Verweg', lat: 13.4, lon: -16.6, country: 'GM' }]
+      : [{ name: q, lat: 52.9, lon: 4.8, country: 'NL' }]);
+    const ver = () => onecall((i, u) => { if (i === 13) { u.pop = 0.9; u.rain = { '1h': 1.1 }; } if (i === 14) u.wind_gust = 21; });
+    const ev = (kal, uurNL, loc, extra) => Object.assign({ kalender: kal, start: DATUM + 'T' + String(uurNL).padStart(2, '0') + ':00:00+01:00', einde: DATUM + 'T' + String(uurNL + 1).padStart(2, '0') + ':00:00+01:00', hele_dag: false, status: 'confirmed', locatie: loc, titel: 'Geheimetitel' }, extra || {});
+    const x = proef({ afspraken: [ev('Gezin', 14, NAAM)], geo: geo, ver: ver });
+    const r = await x.doe();
+    const geoUrl = x.aanroepen.filter((u) => u.indexOf('/geo/1.0/') >= 0);
+    toets('20 afspraak elders: regel met tijd, plaats, regen en windstoten', x.buffer.length === 1 && x.buffer[0].tekst === 'Weer: 14:00 Fopstad: regen (± 1 mm), windstoten tot 75 km/u.', x.buffer);
+    toets('20 naar de Geocoding-API alleen de plaatsnaam (geen straat, postcode of titel)', geoUrl.length === 1 && new URL(geoUrl[0]).searchParams.get('q') === 'Fopstad' && !/Nepstraat|9999|Geheim/.test(x.aanroepen.join(' ')), geoUrl.map((u) => u.replace(/appid=[^&]*/, '')));
+    toets('20 One Call voor het vak van de plaats op 1 decimaal; 4 aanroepen totaal', x.aanroepen.length === 4 && x.aanroepen.some((u) => /lat=53\.2&lon=6\.6&/.test(u)), x.aanroepen.length);
+    toets('20 log en detail zonder plaatsnaam of sleutel', !/Fopstad|Nepstraat/.test(JSON.stringify([x.log, r.detail])) && JSON.stringify(x.log).indexOf(SLEUTEL) < 0 && r.detail.elders.treffers === 1, [x.log, r.detail]);
+    const w = proef({ afspraken: [ev('Werk', 14, NAAM), ev('Schapies', 15, NAAM)], geo: geo, ver: ver });
+    await w.doe();
+    toets('20 Werk-agenda (en andere dan David/Gezin/HAGRO): nooit opgezocht', w.aanroepen.length === 2 && w.buffer.length === 0, w.aanroepen.length);
+    const dz = proef({ afspraken: [ev('David', 14, 'Neplaan 1, 9998 ZZ Dichtbij')], geo: geo, ver: ver });
+    await dz.doe();
+    toets('20 binnen 15 km van Thuis/praktijk: geocode wel, geen One Call, geen regel', dz.aanroepen.length === 3 && dz.buffer.length === 0, dz.aanroepen.length);
+    const vw = proef({ afspraken: [ev('David', 14, 'Nepweg 2, 9997 ZZ Verweg')], geo: geo, ver: ver });
+    await vw.doe();
+    toets('20 buiten NL/BE/DE: geen One Call', vw.aanroepen.length === 3 && vw.buffer.length === 0, vw.aanroepen.length);
+    const hd = proef({ afspraken: [ev('David', 14, NAAM, { hele_dag: true, start: DATUM }), ev('David', 6, NAAM), ev('David', 14, NAAM, { status: 'cancelled' }), ev('David', 14, 'Zoom')], geo: geo, ver: ver });
+    await hd.doe();
+    toets('20 hele dag, vóór 07:00, geannuleerd of geen plaats: overgeslagen', hd.aanroepen.length === 2 && hd.buffer.length === 0, hd.aanroepen.length);
+    const veel = proef({ afspraken: ['Aa', 'Bb', 'Cc', 'Dd', 'Ee'].map((p, i) => ev('David', 9 + i, 'Nepweg ' + i + ', 999' + i + ' ZZ Plaats' + p)), geo: geo, ver: () => onecall() });
+    await veel.doe();
+    toets('20 hooguit 3 plaatsen (3 geocodes, 3 One Calls)', veel.aanroepen.filter((u) => /\/geo\//.test(u)).length === 3 && veel.aanroepen.length === 8, veel.aanroepen.length);
+    const dub = proef({ afspraken: [ev('David', 15, NAAM), ev('Gezin', 14, 'Ander 1, 9999 ZZ Fopstad')], geo: geo, ver: ver });
+    await dub.doe();
+    toets('20 dezelfde plaats twee keer: één opzoeking, de vroegste afspraak telt', dub.aanroepen.length === 4 && dub.buffer.length === 1 && /^Weer: 14:00 Fopstad/.test(dub.buffer[0].tekst), dub.buffer);
+    const af = proef({ afspraken: 'fout', kalender: DIENST, praktijk: onecall(regenUur(17)) });
+    const ra = await af.doe();
+    toets('20 agenda niet leesbaar: stil, thuisdeel blijft, geen box', ra.ok && ra.detail.elders.stand === 'agenda niet leesbaar' && af.buffer.length === 1 && /terugrit/.test(af.buffer[0].tekst) && af.box.length === 0, [ra.detail, af.buffer]);
+    const sam = proef({ afspraken: [ev('Gezin', 14, NAAM)], geo: geo, ver: ver, kalender: DIENST, praktijk: onecall(regenUur(17)), thuis: onecall((i, u) => { if (i === 13) u.wind_gust = 22; }) });
+    await sam.doe();
+    const ts = sam.buffer[0] && sam.buffer[0].tekst;
+    toets('20 samen met het thuisdeel: thuis eerst, plek erachter, ≤ 280 tekens', sam.buffer.length === 1 && /^Weer: Windstoten tot 80 km\/u \(vanaf 13:00\); rond 17:00 regen op je terugrit \(± 1 mm\); 14:00 Fopstad: /.test(ts) && ts.length <= 280, ts);
+    const gf = proef({ afspraken: [ev('Gezin', 14, NAAM)], ophalen: async (u) => (u.indexOf('/geo/') >= 0 ? { status: 500, json: null } : { status: 200, json: onecall() }) });
+    const rg = await gf.doe();
+    toets('20 geocode-fout: stil, ok, geen box, geen rij', rg.ok && !rg.detail.fout && gf.box.length === 0 && gf.buffer.length === 0 && rg.detail.elders.fouten === 1, rg.detail);
+    const dn = proef({ afspraken: [ev('David', 14, 'Nepweg 9, 9996 ZZ Dubbelnaam')], geo: geo, ver: ver });
+    await dn.doe();
+    toets('20 eerste geocode buiten NL/BE/DE: de eerste in NL/BE/DE telt (ronde 2 ZOU 1), limit 5', dn.buffer.length === 1 && /14:00 Dubbelnaam:/.test(dn.buffer[0].tekst) && dn.aanroepen.some((u) => /\/geo\/.*limit=5/.test(u)), dn.buffer);
+    const raar = proef({ afspraken: [ev('Gezin', 14, NAAM)], geo: geo, ver: () => onecall((i, u) => { if (i === 13) { u.pop = 0.9; u.rain = { '1h': 1 }; u.weather = null; u.temp = 'x'; } }), kalender: DIENST, praktijk: onecall(regenUur(17)) });
+    const rr = await raar.doe();
+    toets('20 raar antwoord ter plaatse: thuisdeel blijft staan (MOET 2)', rr.ok && raar.buffer.length === 1 && /terugrit/.test(raar.buffer[0].tekst), [rr.detail, raar.buffer]);
+    const droog = proef({ afspraken: [ev('Gezin', 14, NAAM)], geo: geo, ver: ver });
+    const rd = await droog.w.doe({ droog: true, ams: { datum: DATUM, uur: 6, min: 40 } });
+    toets('20 droog: regel terug, niets in de buffer', rd.droog && /Fopstad/.test(rd.regel) && droog.buffer.length === 0, rd);
+  }
+  // 21. server.js-koppeling wv2592
+  {
+    const sv = fs.readFileSync('server.js', 'utf8');
+    const blok = sv.slice(sv.indexOf('afspraken: async function (d)'), sv.indexOf('ophalen: async function (url)', sv.indexOf('afspraken: async function (d)')));
+    toets('21 afspraken: Agenda-Wachter-API van vandaag, zonder titel of omschrijving door te geven', /appAgendaApi\(\{ actie: 'agenda', start: d, end: appYmdPlus\(d, 1\) \}\)/.test(blok) && !/titel|omschrijving/.test(blok.replace(/\/\/.*$/gm, '')) && /locatie: e\.locatie \}/.test(blok), blok.slice(0, 200));
+    toets('21 werkRecent: alleen een telling en de laatste werkplek uit secondbrain.locatie', /werkRecent: async function \(\) \{\n\s+const r = await weerBeheer\("select \(select count\(distinct/.test(sv) && /as dagen, \(select plek from secondbrain\.locatie where klasse = 'werk'/.test(sv) && /::date >= \(now\(\) at time zone 'Europe\/Amsterdam'\)::date - 7 and/.test(sv));
   }
   // 17. server.js en uitrol.sh
   {

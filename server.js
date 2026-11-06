@@ -18624,6 +18624,18 @@ const weerOchtend = (function () {
       plekken: function () { return weerBeheer('select naam, klasse, round(lat::numeric, 1)::float8 as lat, round(lon::numeric, 1)::float8 as lon from secondbrain.locatie_plekken'); },
       locatie: function () { return appSbRpc('sb_app_locatie', {}); },
       kalender: function (d) { return appSbRpc('sb_kalender_tijdlijn', { p_van: d, p_tot: d }, 20000); },
+      // wv2592: werkdag ook uit de locatie (aantal ma–vr-dagen op het werk in de 7 kalenderdagen vóór vandaag, lokaal: D-7 t/m D-1, + laatste
+      // werkplek; alleen tellingen; diffreview MOET 3)
+      werkRecent: async function () {
+        const r = await weerBeheer("select (select count(distinct (gemeten at time zone 'Europe/Amsterdam')::date) from secondbrain.locatie where klasse = 'werk' and gemeten >= now() - interval '9 days' and (gemeten at time zone 'Europe/Amsterdam')::date >= (now() at time zone 'Europe/Amsterdam')::date - 7 and (gemeten at time zone 'Europe/Amsterdam')::date < (now() at time zone 'Europe/Amsterdam')::date and extract(isodow from gemeten at time zone 'Europe/Amsterdam') between 1 and 5)::int as dagen, (select plek from secondbrain.locatie where klasse = 'werk' and plek is not null and gemeten >= now() - interval '14 days' order by gemeten desc limit 1) as plek");
+        return Array.isArray(r) && r[0] ? { dagen: Number(r[0].dagen) || 0, plek: r[0].plek || null } : null;
+      },
+      // wv2592 (§ 7): afspraken van vandaag via de Agenda-Wachter-API; de module leest alleen kalender, tijden, status en locatie
+      afspraken: async function (d) {
+        const j = await appAgendaApi({ actie: 'agenda', start: d, end: appYmdPlus(d, 1) });
+        if (!j || !Array.isArray(j.events)) throw new Error('agenda zonder events');
+        return j.events.map(function (e) { return e && { kalender: e.kalender, start: e.start, einde: e.einde, hele_dag: e.hele_dag, status: e.status, locatie: e.locatie }; });
+      },
       ophalen: async function (url) {
         const r = await fetch(url, { headers: { 'User-Agent': 'socev-weer/1', accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
         let j = null;
