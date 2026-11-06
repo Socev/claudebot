@@ -25,7 +25,10 @@
  *     Vindplaats = tekenpositie in het artifact; opgeslagen citaat = precies dat stuk artifact. De databank toetst opnieuw (0023) + K4 (0009).
  *  5. Sweep: per dossierentiteit (sb2_voorstel_onderwerpen: pagina onder 10_Zakelijk/Tolgaarde/) een gegenereerd blok "Nieuwe feiten uit
  *     bronnen" onderaan de pagina via dezelfde outbox als 3b (publiceerMet, blok nieuwe_feiten): handwijziging = blokkeer + melding.
- *  6. Nieuwe kernvelden of tegenspraak: één verwijskaart per dag in Overzicht (mk_voor_jou_zet), zonder citaat of waarde.
+ *  6. Nieuwe kernvelden of tegenspraak: één verwijskaart per dag in Overzicht (mk_voor_jou_zet), zonder citaat of waarde. wv2544 (David
+ *     6-11-2026: "fix dat dit überhaupt gevraagd wordt"): alleen voor een NIEUWE claim (een tweede bron bij een al bekend voorstel of conflict
+ *     geeft geen kaart) en niet als de waarde na normalisatie (feitNorm, zelfde regels als sb2_feit_norm in 0027) al in de kernfeiten van de
+ *     pagina of haar hoofdpagina staat. De kaart opent Second Brain (module secondbrain) en noemt de plek in gewone woorden.
  *
  * Privacy: naar het model gaat alleen de mailkern van een stuk dat de router live naar een zakelijke entiteit stuurde en dat beide
  * patiëntcontroles passeerde; geen onderwerpregel, geen afzender. Naar Supabase: claim (onderwerp, eigenschap, waarde) + citaat ≤ 500 tekens
@@ -71,6 +74,61 @@ function safeJson(s) { try { return JSON.parse(s); } catch (e) { return null; } 
 function norm(s) { return String(s == null ? '' : s).normalize('NFC').replace(/\s+/g, ' ').trim(); }
 function alnum(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
 function vergelijkTekst(s) { return norm(s).toLowerCase().replace(/[“”„"'’‘`]/g, '').replace(/[.,;:!?()\[\]]/g, ' ').replace(/\s+/g, ' ').trim(); }
+// wv2544: zelfde regels als secondbrain.sb2_feit_norm (migratie 0027); test/intake-voorstel.sh vergelijkt beide op dezelfde gevallen
+function naamVormen(naam) {
+  const n = String(naam || '').normalize('NFC').toLowerCase().replace(/[,.;:|()]/g, ' ').replace(/\s+/g, ' ').trim();
+  return [n, n.replace(/\s(b ?v|v ?o ?f|n ?v)$/, '').trim()];
+}
+function feitNorm(eig, waarde, naam) {
+  if (waarde == null) return null;
+  let v = String(waarde).normalize('NFC').toLowerCase();
+  if (eig === 'adres') {
+    v = v.replace(/[,.;:|()]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (naam != null) for (const n of naamVormen(naam)) { if (n.length >= 3 && v.slice(0, n.length + 1) === n + ' ') { v = v.slice(n.length + 1); break; } }
+    v = v.replace(/\b([0-9]{4}) ?([a-z]{2})\b/g, '$1$2').replace(/\bte\b/g, ' ');
+    return v.replace(/\s+/g, ' ').trim();
+  }
+  if (eig === 'telefoon') return v.replace(/[^0-9+]/g, '').replace(/^\+31/, '0').replace(/^0031/, '0');
+  if (eig === 'website') return v.trim().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/+$/, '');
+  if (eig === 'email') return v.trim();
+  return v.replace(/\s+/g, ' ').replace(/[\s.]+$/, '').trim();
+}
+// De kernfeiten van een pagina: de frontmatter en de secties "Kernfeiten" en "Wat OVIS … weet" (regels, ruw)
+function kernRegels(tekst) {
+  const uit = [];
+  const t = String(tekst || '');
+  const fm = /^---\n([\s\S]*?)\n---\n/.exec(t);
+  if (fm) uit.push.apply(uit, fm[1].split('\n'));
+  let aan = false;
+  for (const r of t.split('\n')) {
+    if (/^#{1,6} /.test(r)) { aan = /kernfeiten|wat ovis/i.test(r); continue; }
+    if (aan) uit.push(r);
+  }
+  return uit;
+}
+function hoofdpagina(tekst) {
+  const fm = /^---\n([\s\S]*?)\n---\n/.exec(String(tekst || ''));
+  const m = fm && /^hoofdpagina:\s*["']?\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/m.exec(fm[1]);
+  return m ? m[1].trim().replace(/(\.md)?$/, '.md') : null;
+}
+// staat deze waarde (genormaliseerd) al in de kernfeiten? id: tekens zonder scheiding; telefoon/website/e-mail: één stuk van een regel;
+// overige tekst (adres, naam …): als hele woorden in de genormaliseerde regel
+function bekendIn(regels, eig, waarde, naam) {
+  const e = EIGENSCHAPPEN[eig];
+  if (!e || waarde == null || !String(waarde).trim()) return false;
+  if (e[0] === 'id') { const w = alnum(waarde); return w.length >= 6 && regels.some(function (r) { return alnum(r).indexOf(w) >= 0; }); }
+  if (e[0] !== 'tekst' || eig === 'afspraak') return false;
+  const w = feitNorm(eig, waarde, naam);
+  if (!w || w.length < 4) return false;
+  if (eig === 'telefoon' || eig === 'website' || eig === 'email') {
+    return regels.some(function (r) {
+      return r.split(eig === 'telefoon' ? /[|·,;()\/]|:\s|\bof\b/ : /[\s|·,;()<>]+/).some(function (d) { return feitNorm(eig, d, naam) === w; });
+    });
+  }
+  return regels.some(function (r) { return (' ' + feitNorm(eig, r, naam) + ' ').indexOf(' ' + w + ' ') >= 0; });
+}
+// "10_Zakelijk/Tolgaarde/Entiteit - TG.md" → "Zakelijk › Tolgaarde › Entiteit - TG" (zoals de mappen in Second Brain heten, zonder nummer)
+function plekWoorden(pad) { return String(pad || '').replace(/\.md$/, '').split('/').map(function (d) { return d.replace(/^[0-9]+_/, '').replace(/_/g, ' '); }).join(' › '); }
 function paginaPadOk(p) { return typeof p === 'string' && /^10_Zakelijk\/Tolgaarde\/([^/.][^/]*\/)*[^/.][^/]*\.md$/.test(p) && !/\/(Bronnen|raw_input)\//.test(p) && p.indexOf('..') < 0; }
 
 // ── kandidaten (pure functie op intake.sqlite) ───────────────────────────────────────────────────────────────────────────────
@@ -281,13 +339,30 @@ function maak(o) {
     bezig = true;
     const start = nu();
     const t = { kandidaten: 0, overgeslagen: {}, al_gedaan: 0, te_lang: 0, kern_kapot: 0, patientpoort: 0, naar_model: 0, aanroepen: 0, model_fout: 0,
-      voorstellen: 0, goedgekeurd: 0, geweigerd_pod: {}, geweigerd_db: 0, claims_nieuw: 0, kern_nieuw: 0, tegenspraak: 0, afwijkend: 0, artifacts: 0, alles_geweigerd: 0,
+      voorstellen: 0, goedgekeurd: 0, kaart_al_bekend: 0, kaart_op_pagina: 0, geweigerd_pod: {}, geweigerd_db: 0, claims_nieuw: 0, kern_nieuw: 0, tegenspraak: 0, afwijkend: 0, artifacts: 0, alles_geweigerd: 0,
       paginas: 0, geschreven: 0, gelijk: 0, afgerond: 0, geblokkeerd: 0, tussendoor: 0, kapot: 0, overig: 0, fout: 0, usd: 0, tokens_in: 0, tokens_uit: 0,
       blokkades: [], nieuw_geblokkeerd: [], kaart: null };
     const inst = { model: typeof s.model === 'string' && /^claude-[a-z0-9-]{3,60}$/.test(s.model) ? s.model : 'claude-sonnet-5-5',
       effort: ['low', 'medium', 'high'].indexOf(s.effort) >= 0 ? s.effort : 'medium',
       max_aanroepen: Number.isInteger(s.max_aanroepen) && s.max_aanroepen >= 0 && s.max_aanroepen <= 100 ? s.max_aanroepen : 25 };
     const kaartPunten = new Map();   // object_id → { kern, tegenspraak }
+    const kernCache = new Map();     // object_id → regels uit de kernfeiten van pagina + hoofdpagina (wv2544)
+    let perObject = new Map();
+    function opPagina(cl) {
+      const x = perObject.get(cl.onderwerp);
+      if (!x) return false;
+      if (!kernCache.has(x.object_id)) {
+        let regels = [];
+        try {
+          const eigen = leesVault(x.pad, PAGINA_MAX);
+          regels = kernRegels(eigen);
+          const hp = hoofdpagina(eigen);
+          if (hp && hp !== x.pad && paginaPadOk(hp)) regels = regels.concat(kernRegels(leesVault(hp, PAGINA_MAX)));
+        } catch (e) { regels = []; }   // niet te lezen = gewoon een kaart (fail-open naar David, nooit stil)
+        kernCache.set(x.object_id, regels);
+      }
+      return bekendIn(kernCache.get(x.object_id), cl.eigenschap, cl.waarde, x.naam);
+    }
     try {
       const codes = (Array.isArray(s.entiteiten) ? s.entiteiten : []).filter(function (c) { return c === 'TG'; });   // fase 3: alleen Tolgaarde (poort 0023)
       const k = kandidaten(db, { codes, routerLive: o.routerLive ? o.routerLive() : {} });
@@ -297,6 +372,7 @@ function maak(o) {
       const onderwerpen = ond.filter(function (x) { return x && /^[0-9a-f-]{36}$/.test(x.object_id) && paginaPadOk(x.pad); })
         .map(function (x, i) { return { kort: 'o' + (i + 1), object_id: x.object_id, naam: x.naam, soort: x.soort, pad: x.pad }; });
       const perKort = new Map(onderwerpen.map(function (x) { return [x.kort, x]; }));
+      perObject = new Map(onderwerpen.map(function (x) { return [x.object_id, x]; }));
 
       // 1-2. artifacts (alleenSweep: na een verwijdering het blok meteen opnieuw opbouwen, zonder model; Fable-review ZOU 3)
       if (!opties.alleenSweep) {
@@ -366,8 +442,11 @@ function maak(o) {
           const art = artifacts.find(function (x) { return Number(x.revision_id) === Number(a.revision_id); });
           for (const c of (Array.isArray(a.claims) ? a.claims : [])) {
             if (!(c.nieuw && c.kern) && !c.tegenspraak && !c.afwijkend) continue;
+            // wv2544: een tweede bron bij een al bekend voorstel of conflict = geen nieuwe kaart (5 en 6-11 kwam dezelfde vraag terug)
+            if (!c.nieuw) { t.kaart_al_bekend++; continue; }
             const cl = art && art.claims[c.i];
             if (!cl) continue;
+            if (opPagina(cl)) { t.kaart_op_pagina++; continue; }
             const pk = kaartPunten.get(cl.onderwerp) || { kern: 0, tegenspraak: 0, afwijkend: 0 };
             if (c.nieuw && c.kern) pk.kern++; if (c.tegenspraak) pk.tegenspraak++; if (c.afwijkend) pk.afwijkend++;
             kaartPunten.set(cl.onderwerp, pk);
@@ -419,7 +498,9 @@ function maak(o) {
       }
       // 6. één verwijskaart per dag bij nieuwe kernvelden of tegenspraak (zonder waarde of citaat)
       if (kaartPunten.size && o.kaartZet) {
-        const namen = onderwerpen.filter(function (x) { return kaartPunten.has(x.object_id); }).map(function (x) { return x.naam; });
+        const met = onderwerpen.filter(function (x) { return kaartPunten.has(x.object_id); });
+        const namen = met.map(function (x) { return x.naam; });
+        const plekken = met.slice(0, 3).map(function (x) { return plekWoorden(x.pad) + ' (' + x.naam + ')'; });
         let nk = 0, nt = 0, na = 0; kaartPunten.forEach(function (v) { nk += v.kern; nt += v.tegenspraak; na += v.afwijkend; });
         const datum = P.dagNl(new Date(nu()).toISOString());
         const delen = [];
@@ -430,10 +511,10 @@ function maak(o) {
           await o.kaartZet({ sleutel: 'sb2-feiten-' + datum, soort: 'doen', waar: 'overal', prive: false, duur_min: Math.min(15, 2 + nk + nt + na), volgorde: 40,
             titel: 'Tolgaarde: nieuwe kernfeiten uit binnengekomen post nakijken',
             waarom: 'Uit binnengekomen mail haalde de voorstelservice ' + delen.join(' en ') + '. Zulke feiten gaan nooit vanzelf de dossierpagina in; zonder jouw blik blijven ze als voorstel staan.',
-            stappen: ['Open in de Socev-app de pagina van ' + namen.slice(0, 5).join(', ') + (namen.length > 5 ? ' en ' + (namen.length - 5) + ' andere' : '') + '.',
+            stappen: ['Tik op deze kaart: Second Brain gaat open. Ga daar naar ' + plekken.join(', ') + (met.length > 3 ? ' en ' + (met.length - 3) + ' andere pagina\'s' : '') + '.',
               'Onderaan staat het blok "Nieuwe feiten uit bronnen": elk voorstel met het letterlijke citaat en een link naar de bron.',
               'Klopt het, vraag Socev het over te nemen; klopt het niet, zeg het tegen Socev, dan wordt het voorstel afgewezen.'],
-            herkomst: { module: 'sb2-voorstel', handmatig: 'brain' } });
+            herkomst: { module: 'secondbrain', handmatig: 'brain', bron: 'sb2-voorstel', doel: { scherm: 'secondbrain', focus: null } } });
           t.kaart = 'sb2-feiten-' + datum;
         } catch (e) { t.fout++; fout('intake-voorstel', e); }
       }
@@ -455,4 +536,4 @@ function maak(o) {
   return { ronde, laatste };
 }
 
-module.exports = { maak, kandidaten, toetsFeit, feitenBlok, feitenHash, systeemTekst, vraagTekst, schema, norm, paginaPadOk, EIGENSCHAPPEN, KERNVELDEN, VERSIE, MAX_TEKST };
+module.exports = { maak, kandidaten, toetsFeit, feitenBlok, feitenHash, feitNorm, kernRegels, hoofdpagina, bekendIn, plekWoorden, systeemTekst, vraagTekst, schema, norm, paginaPadOk, EIGENSCHAPPEN, KERNVELDEN, VERSIE, MAX_TEKST };

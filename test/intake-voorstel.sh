@@ -127,11 +127,14 @@ function nepSb() {
         const cl = [], weg = [];
         a.claims.forEach((c, i) => {
           if (!ONDERWERPEN.slice(0, 2).some((o) => o.object_id === c.onderwerp)) { weg.push({ i, reden: 'onderwerp' }); return; }
-          let x = S.claims.find((y) => y.onderwerp === c.onderwerp && y.eigenschap === c.eigenschap && y.waarde === c.waarde);
+          // 0027 (wv2544): tekst = zelfde feit na normalisatie (sb2_feit_norm ≙ V.feitNorm); letterlijk gelijk gaat voor
+          const naamO = (ONDERWERPEN.find((o) => o.object_id === c.onderwerp) || {}).naam;
+          const zelfde = (y) => y.onderwerp === c.onderwerp && y.eigenschap === c.eigenschap && (V.EIGENSCHAPPEN[c.eigenschap][0] === 'tekst' ? V.feitNorm(c.eigenschap, y.waarde, naamO) === V.feitNorm(c.eigenschap, c.waarde, naamO) : y.waarde === c.waarde);
+          let x = S.claims.find((y) => zelfde(y) && y.waarde === c.waarde) || S.claims.find(zelfde);
           const nieuw = !x;
           if (!x) { x = { claim_id: S.claims.length + 1, onderwerp: c.onderwerp, eigenschap: c.eigenschap, waarde: c.waarde, geldig_van: c.geldig_van, geldig_tot: c.geldig_tot, bewijs: [], tegenspraak: false }; S.claims.push(x); }
           x.bewijs.push({ revision_id: a.revision_id, stuk: c.locator.stuk, citaat: c.exact_quote });
-          const botst = S.claims.filter((y) => y.onderwerp === x.onderwerp && y.eigenschap === x.eigenschap && y.waarde !== x.waarde);
+          const botst = S.claims.filter((y) => y.onderwerp === x.onderwerp && y.eigenschap === x.eigenschap && V.feitNorm(y.eigenschap, y.waarde, naamO) !== V.feitNorm(x.eigenschap, x.waarde, naamO));
           if (botst.length) { x.tegenspraak = true; botst.forEach((y) => { y.tegenspraak = true; }); }
           cl.push({ i, claim_id: x.claim_id, nieuw, kern: V.KERNVELDEN.includes(c.eigenschap), tegenspraak: x.tegenspraak });
         });
@@ -233,6 +236,9 @@ const svc = V.maak({ db, blobDir, vault, vv, rpc: sb.rpc, schakelaar: () => scha
   toets('p12: ingeschoven IBAN staat hooguit als voorstel in het blok, de tekst van de pagina blijft gelijk', tg.startsWith('# Tolgaarde\n\nPraktijk.\n') && tg.indexOf('NL91ABNA0417164300') > tg.indexOf('<!-- ovis:blok begin id="nieuwe_feiten"'));
   toets('sweep: geen blok op een pagina buiten Tolgaarde', !fs.existsSync(path.join(vault, '10_Zakelijk/HAGRO/Buiten.md')));
   toets('sweep: 2 pagina\'s geschreven via de outbox', r1.geschreven === 2 && sb.rows.filter((x) => x.status === 'klaar').length === 2, r1);
+  toets('kaart (wv2544): opent Second Brain (module secondbrain, doel scherm secondbrain) en noemt de plek in gewone woorden, zonder vaultpad',
+    kaarten[0].herkomst.module === 'secondbrain' && kaarten[0].herkomst.doel.scherm === 'secondbrain' && /Zakelijk › Tolgaarde › Medewerkers › Proefpersoon Aap/.test(kaarten[0].stappen[0])
+    && !/[0-9]{2}_[A-Z]|\.md\b/.test(JSON.stringify(kaarten[0].stappen) + kaarten[0].waarom), kaarten[0]);
   toets('kaart: één verwijskaart, zonder waarde of citaat', kaarten.length === 1 && /^sb2-feiten-\d{4}-\d{2}-\d{2}$/.test(kaarten[0].sleutel) && !/NL91|0417|01-234567|01234567|triagist/.test(JSON.stringify(kaarten[0])), kaarten);
 
   // ronde 2: alles al gedaan → geen modelbeurt, pagina's gelijk
@@ -308,6 +314,62 @@ const svc = V.maak({ db, blobDir, vault, vv, rpc: sb.rpc, schakelaar: () => scha
   toets('ZOU 3: alleen de sweep = geen modelbeurt, blokken opnieuw opgebouwd', M.vragen.length === n9 && r9.naar_model === 0 && r9.paginas >= 1, r9);
   const vs = fs.readFileSync('intake-voorstel.js', 'utf8');
   toets('ZOU 2: SDK-timeout 120 s, één herhaling', /maxRetries: 1, timeout: 120 \* 1000/.test(vs));
+
+  // ── wv2544: zelfde feit in een andere schrijfwijze is geen tegenspraak; kaart alleen bij een nieuw conflict dat niet al in de kernfeiten staat ──
+  // (verzonnen adressen en nummers; regels gelijk aan sb2_feit_norm in 0027, de SQL-proef draait dezelfde gevallen)
+  const GEVALLEN = [
+    ['adres', 'Proefstraat 7, 9999ZZ te Nergenshuizen', 'Proefpraktijk Tolgaarde B.V.', 'proefstraat 7 9999zz nergenshuizen'],
+    ['adres', 'Proefstraat 7, 9999 ZZ Nergenshuizen', 'Proefpraktijk Tolgaarde B.V.', 'proefstraat 7 9999zz nergenshuizen'],
+    ['adres', 'Proefpraktijk Tolgaarde Proefstraat 7, 9999 ZZ Nergenshuizen', 'Proefpraktijk Tolgaarde B.V.', 'proefstraat 7 9999zz nergenshuizen'],
+    ['adres', 'Proefpraktijk Tolgaarde B.V., Proefstraat 7, 9999 zz  Nergenshuizen.', 'Proefpraktijk Tolgaarde B.V.', 'proefstraat 7 9999zz nergenshuizen'],
+    ['adres', 'Proefstraat 8, 9999 ZZ Nergenshuizen', 'Proefpraktijk Tolgaarde B.V.', 'proefstraat 8 9999zz nergenshuizen'],
+    ['adres', 'Tetterlaan 2, 9999 TE Testerdam', null, 'tetterlaan 2 9999te testerdam'],
+    ['telefoon', '099 - 123 45 67', null, '0991234567'],
+    ['telefoon', '+31 99 1234567', null, '0991234567'],
+    ['website', 'https://www.proef-tolgaarde.invalid/', null, 'proef-tolgaarde.invalid'],
+    ['email', ' Info@Proef.invalid ', null, 'info@proef.invalid'],
+    ['functie', 'Praktijk  Manager.', null, 'praktijk manager'],
+  ];
+  const misNorm = GEVALLEN.filter((g) => V.feitNorm(g[0], g[1], g[2]) !== g[3]).map((g) => [g[1], V.feitNorm(g[0], g[1], g[2])]);
+  toets('feitNorm: postcode zonder spatie, "te" weg, naam van het onderwerp ervoor weg, telefoon/website/e-mail/tekst (gelijk aan 0027)', misNorm.length === 0, misNorm);
+  toets('plekWoorden: mapnummers weg, › tussen de mappen', V.plekWoorden('10_Zakelijk/Tolgaarde/Entiteit - TG.md') === 'Zakelijk › Tolgaarde › Entiteit - TG');
+  const KERN_TG = '---\ntype: proef\nadres: Proefstraat 7, 9999 ZZ Nergenshuizen\n---\n# Proefpraktijk\n\n## Kernfeiten\n\n| veld | waarde |\n|---|---|\n| Telefoon | 099 - 123 45 67 (uit post) |\n| Website | www.proef-tolgaarde.invalid |\n\n## Profiel\n\nAnder adres 1, 9999 AA Elders staat hier niet als kernfeit.\n';
+  const kr = V.kernRegels(KERN_TG);
+  toets('bekendIn: adres in andere schrijfwijze, telefoon en website herkend; buiten de kernfeiten-sectie niet',
+    V.bekendIn(kr, 'adres', 'Proefpraktijk Tolgaarde Proefstraat 7, 9999ZZ te Nergenshuizen', 'Proefpraktijk Tolgaarde B.V.') && V.bekendIn(kr, 'telefoon', '+31 99 1234567', null)
+    && V.bekendIn(kr, 'website', 'https://proef-tolgaarde.invalid', null) && !V.bekendIn(kr, 'adres', 'Ander adres 1, 9999 AA Elders', null)
+    && !V.bekendIn(kr, 'adres', 'Proefstraat 77, 9999 ZZ Nergenshuizen', null) && !V.bekendIn(kr, 'telefoon', '099 - 123 45 68', null), kr);
+  toets('hoofdpagina: wikilink in de frontmatter → pad', V.hoofdpagina('---\nhoofdpagina: "[[10_Zakelijk/Tolgaarde/index]]"\n---\nx') === '10_Zakelijk/Tolgaarde/index.md');
+  // de pagina van Tolgaarde krijgt een hoofdpagina met kernfeiten (frontmatter erboven; het blok onderaan blijft gelijk)
+  fs.writeFileSync(path.join(vault, PAG_TG), '---\nhoofdpagina: "[[10_Zakelijk/Tolgaarde/index]]"\n---\n' + fs.readFileSync(path.join(vault, PAG_TG), 'utf8'));
+  fs.writeFileSync(path.join(vault, '10_Zakelijk/Tolgaarde/index.md'), KERN_TG);
+  function tgAntwoord(feiten) {
+    return function (p) {
+      const s = stukKort(p); const o = /- (o\d+): Tolgaarde/.exec(p.messages[0].content[0].text)[1];
+      return JSON.stringify({ feiten: feiten.map((x) => ({ stuk: Object.keys(s).find((k) => s[k].indexOf(x[2]) >= 0), onderwerp: o, eigenschap: x[0], waarde: x[1], geldig_van: '', geldig_tot: '', exact_quote: x[2] })) });
+    };
+  }
+  const k0 = kaarten.length, c0 = () => sb.claims.filter((c) => c.eigenschap === 'adres').length;
+  stuk('stk_20991207_0000c1c1', { tekst: 'Proefbrief. Ons postadres: Ander adres 1, 9999 AA Elders. Groet' });
+  M.antwoord = tgAntwoord([['adres', 'Ander adres 1, 9999 AA Elders', 'Ons postadres: Ander adres 1, 9999 AA Elders']]);
+  const e1 = await svc.ronde();
+  toets('wv2544: eerste adres zonder botsing → geen kaart', e1.claims_nieuw === 1 && kaarten.length === k0 && c0() === 1, { e1, k: kaarten.length - k0 });
+  stuk('stk_20991207_0000c2c2', { tekst: 'Proefbrief. Tolgaarde Proefstraat 7, 9999ZZ te Nergenshuizen. Groet' });
+  M.antwoord = tgAntwoord([['adres', 'Proefstraat 7, 9999ZZ te Nergenshuizen', 'Tolgaarde Proefstraat 7, 9999ZZ te Nergenshuizen']]);
+  const e2 = await svc.ronde();
+  toets('wv2544: nieuw adres dat botst maar al in de kernfeiten van de hoofdpagina staat → geen kaart', e2.tegenspraak === 1 && e2.kaart_op_pagina === 1 && kaarten.length === k0 && c0() === 2, { e2, k: kaarten.length - k0 });
+  stuk('stk_20991207_0000c3c3', { tekst: 'Nog een proefbrief: Proefstraat 7, 9999 ZZ Nergenshuizen, tel. 099 - 123 45 67.' });
+  M.antwoord = tgAntwoord([['adres', 'Proefstraat 7, 9999 ZZ Nergenshuizen', 'Proefstraat 7, 9999 ZZ Nergenshuizen, tel']]);
+  const e3 = await svc.ronde();
+  const pc = sb.claims.find((c) => c.eigenschap === 'adres' && /Proefstraat 7/.test(c.waarde));
+  toets('wv2544: zelfde adres in andere schrijfwijze = tweede bron bij dezelfde claim, geen nieuwe claim, geen kaart (al bekend conflict)',
+    e3.claims_nieuw === 0 && e3.kaart_al_bekend === 1 && c0() === 2 && pc.bewijs.length === 2 && kaarten.length === k0, { e3, c: c0(), b: pc.bewijs.length });
+  stuk('stk_20991207_0000c4c4', { tekst: 'Laatste proefbrief: vanaf nu Derde adres 9, 9999 BB Verweg.' });
+  M.antwoord = tgAntwoord([['adres', 'Derde adres 9, 9999 BB Verweg', 'vanaf nu Derde adres 9, 9999 BB Verweg']]);
+  const e4 = await svc.ronde();
+  const kk = kaarten[kaarten.length - 1];
+  toets('wv2544: echt nieuw botsend adres dat niet in de kernfeiten staat → wél een kaart, met de plek van Tolgaarde', e4.claims_nieuw === 1 && kaarten.length === k0 + 1
+    && /Zakelijk › Tolgaarde › Entiteit - TG \(Tolgaarde\)/.test(kk.stappen[0]) && kk.herkomst.module === 'secondbrain', { e4, kk });
 
   // koppeling
   const srv = fs.readFileSync('server.js', 'utf8'), uitrol = fs.readFileSync('uitrol.sh', 'utf8');
