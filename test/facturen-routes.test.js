@@ -195,6 +195,94 @@ test('leren: een andere betaalwijze bij Bevestigen wordt de standaard van de lev
   assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'leverancier_geleerd' AND object_id = ?", [f.leverancier]), 1);
 });
 
+// ───────────────────────────── wv2590: leverancier op naam bij Bevestigen ─────────────────────────────
+
+// zonder leverancier is elk IBAN onbekend (eerst nabellen); zonder ibanLaten ook het IBAN eraf en betaalwijze incasso (zoals de meeste
+// gemeten facturen zonder leverancier: incasso of al betaald)
+function losVanLeverancier(t, f, naam, ibanLaten) {
+  t.fdb.db.prepare('UPDATE factuur SET leverancier = NULL, leverancier_naam = ? WHERE id = ?').run(naam, f.id);
+  if (!ibanLaten) t.fdb.db.prepare("UPDATE factuur SET iban = NULL, ibans_betaal = '[]', iban_nieuw = 0, ibans_onbekend = '[]', betaalwijze = 'incasso' WHERE id = ?").run(f.id);
+  return t.fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(f.id);
+}
+test('wv2590: bevestigen zonder leverancier maakt er een op naam, leert entiteit + betaalwijze en koppelt open facturen met dezelfde naam', () => {
+  const t = opzet();
+  const f = losVanLeverancier(t, gewoon(t, "betaalwijze = 'zelf'"), 'Proefleverancier Nieuw B.V.');
+  const zus = losVanLeverancier(t, t.f("status = 'te_beoordelen' AND id <> ? AND patientkenmerk = 0", [f.id]), 'PROEFLEVERANCIER NIEUW BV');
+  const ander = losVanLeverancier(t, t.f("status = 'te_beoordelen' AND id NOT IN (?, ?) AND patientkenmerk = 0", [f.id, zus.id]), 'Heel Andere Partij');
+  const voor = t.n('SELECT count(*) AS n FROM leverancier');
+  const r = t.call('POST', 'bevestig', { id: f.id, entiteit: 'groenhouten' });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(t.n('SELECT count(*) AS n FROM leverancier'), voor + 1, 'één nieuwe leverancier');
+  const na = t.fdb.db.prepare('SELECT leverancier, leverancier_naam, status FROM factuur WHERE id = ?').get(f.id);
+  assert.ok(na.leverancier, 'factuur gekoppeld');
+  assert.equal(r.j.leverancier.id, na.leverancier);
+  assert.equal(r.j.leverancier.nieuw, true);
+  const lev = t.fdb.db.prepare('SELECT * FROM leverancier WHERE id = ?').get(na.leverancier);
+  assert.equal(lev.naam, 'Proefleverancier Nieuw B.V.');
+  assert.equal(lev.standaard_entiteit, 'groenhouten');
+  assert.equal(lev.standaard_betaalwijze, 'incasso');
+  assert.ok(!lev.verzendwijze || lev.verzendwijze === 'concept', 'nieuwe leverancier staat op concept');
+  assert.match(r.j.melding, /Nieuwe leverancier Proefleverancier Nieuw B\.V\. onthouden/);
+  assert.match(r.j.melding, /Ook 1 andere open factuur/);
+  assert.equal(t.fdb.db.prepare('SELECT leverancier FROM factuur WHERE id = ?').get(zus.id).leverancier, na.leverancier, 'zus gekoppeld');
+  assert.equal(t.fdb.db.prepare('SELECT versie FROM factuur WHERE id = ?').get(zus.id).versie, zus.versie + 1, 'versie van de zus omhoog');
+  assert.equal(t.fdb.db.prepare('SELECT leverancier FROM factuur WHERE id = ?').get(ander.id).leverancier, null, 'andere naam blijft los');
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'leverancier_gekoppeld'"), 2);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'leverancier_geleerd' AND object_id = ?", [na.leverancier]), 2, 'eerste bevestiging: entiteit en betaalwijze');
+  // de opdracht van dit stuk is een concept, ook al zou iemand de leverancier intussen op direct zetten
+  assert.equal(t.fdb.db.prepare('SELECT verzendwijze_bij_bevestigen AS v FROM opdracht WHERE id = ?').get(r.j.opdracht.id).v, null);
+  // een volgende factuur met deze naam: de bestaande leverancier, geen tweede
+  const derde = losVanLeverancier(t, gewoon(t, "id NOT IN ('" + [f.id, zus.id, ander.id].join("','") + "')"), 'Proefleverancier Nieuw');
+  const r3 = t.call('POST', 'bevestig', { id: derde.id });
+  assert.equal(r3.status, 200, JSON.stringify(r3.j));
+  assert.equal(t.n('SELECT count(*) AS n FROM leverancier'), voor + 1, 'geen tweede leverancier');
+  assert.equal(r3.j.leverancier.nieuw, false);
+  assert.match(r3.j.melding, /Gekoppeld aan leverancier Proefleverancier Nieuw B\.V\./);
+});
+test('wv2590: nagebeld IBAN gaat mee naar een NIEUWE leverancier, nooit naar een bestaande; praktijkmanager koppelt niets', () => {
+  const t = opzet();
+  const iban = Z.maakIban('NL', 'TEST', '0912345671');
+  const f = losVanLeverancier(t, gewoon(t, "betaalwijze = 'zelf'"), 'Nagebelde Nieuweling BV', true);
+  t.fdb.db.prepare("UPDATE factuur SET iban = ?, ibans_betaal = ?, iban_nieuw = 1, ibans_onbekend = ? WHERE id = ?").run(iban, JSON.stringify([iban]), JSON.stringify([iban]), f.id);
+  assert.equal(t.call('POST', 'bevestig', { id: f.id }).status, 409, 'nieuw IBAN: eerst nabellen');
+  t.vers.ok = true;
+  assert.equal(t.call('POST', 'nagebeld', { id: f.id }).status, 200);
+  const r = t.call('POST', 'bevestig', { id: f.id });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.match(r.j.melding, /en het nagebelde rekeningnummer/);
+  assert.equal(t.n('SELECT count(*) AS n FROM leverancier_iban WHERE iban = ? AND leverancier = ?', [iban, r.j.leverancier.id]), 1);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'nagebeld_meegenomen' AND object_id = ?", [r.j.leverancier.id]), 1);
+  // bestaande leverancier met dezelfde naam: het nagebelde IBAN blijft van de factuur, niet van de leverancier
+  const best = t.fdb.db.prepare('SELECT id, naam FROM leverancier WHERE id <> ? ORDER BY id LIMIT 1').get(r.j.leverancier.id);
+  const iban2 = Z.maakIban('NL', 'TEST', '0912345672');
+  const g = losVanLeverancier(t, gewoon(t, "id <> '" + f.id + "' AND betaalwijze = 'zelf'"), best.naam, true);
+  t.fdb.db.prepare("UPDATE factuur SET iban = ?, ibans_betaal = ?, iban_nieuw = 1, ibans_onbekend = ? WHERE id = ?").run(iban2, JSON.stringify([iban2]), JSON.stringify([iban2]), g.id);
+  t.vers.ok = true;
+  assert.equal(t.call('POST', 'nagebeld', { id: g.id }).status, 200);
+  const rg = t.call('POST', 'bevestig', { id: g.id });
+  assert.equal(rg.status, 200, JSON.stringify(rg.j));
+  assert.equal(rg.j.leverancier.id, best.id);
+  assert.equal(t.n('SELECT count(*) AS n FROM leverancier_iban WHERE iban = ?', [iban2]), 0, 'nooit naar een bestaande leverancier');
+  // praktijkmanager: geen koppeling, geen nieuwe leverancier
+  const pm = t.pm();
+  const h = losVanLeverancier(t, t.f("status = 'te_beoordelen' AND entiteit = 'groenhouten' AND betaalwijze <> 'onbekend' AND iban_nieuw = 0 AND patientkenmerk = 0 AND valuta = 'EUR'"), 'Praktijkmanager Proef BV');
+  const voor = t.n('SELECT count(*) AS n FROM leverancier');
+  const rh = t.call('POST', 'bevestig', { id: h.id }, { rol: pm });
+  assert.equal(rh.status, 200, JSON.stringify(rh.j));
+  assert.equal(t.n('SELECT count(*) AS n FROM leverancier'), voor);
+  assert.equal(t.fdb.db.prepare('SELECT leverancier FROM factuur WHERE id = ?').get(h.id).leverancier, null);
+  // achteraf (tools/facturen-leverancier-na.js): droog schrijft niets; echt koppelt, nieuwe leverancier met de standaard; tweede keer niets
+  const NA = require(path.join(ROOT, 'tools', 'facturen-leverancier-na.js'));
+  const droog = NA.naKoppelen(t.fdb, { droog: true });
+  assert.equal(droog.facturen, 1); assert.equal(droog.leveranciers_nieuw, 1);
+  assert.equal(t.n('SELECT count(*) AS n FROM leverancier'), voor);
+  const echt = NA.naKoppelen(t.fdb, {});
+  assert.equal(echt.facturen, 1);
+  const hl = t.fdb.db.prepare('SELECT l.naam, l.standaard_entiteit, l.standaard_betaalwijze FROM factuur f JOIN leverancier l ON l.id = f.leverancier WHERE f.id = ?').get(h.id);
+  assert.equal(hl.naam, 'Praktijkmanager Proef BV'); assert.equal(hl.standaard_entiteit, 'groenhouten'); assert.equal(hl.standaard_betaalwijze, 'incasso');
+  assert.equal(NA.naKoppelen(t.fdb, {}).facturen, 0, 'tweede keer niets');
+});
+
 // ───────────────────────────── Terugdraaien ─────────────────────────────
 
 test('terugdraaien kan zolang de opdracht wacht; na claimen door de koerier faalt het', () => {

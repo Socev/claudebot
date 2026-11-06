@@ -791,7 +791,7 @@ function bevestig(fdb, r, d, nu) {
   const id = vraagId(d, 'id');
   if (r.mag_bevestigen === false) weiger(403, 'bevestigen staat voor jou uit; vraag het David');   // wv856: gebruiker.mag_bevestigen
   return D.transactie(fdb, function () {
-    const f = factuurOf404(fdb, r, id);
+    let f = factuurOf404(fdb, r, id);
     if (d.versie !== undefined && d.versie !== f.versie) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw', { versie: f.versie });
     if (f.status !== 'te_beoordelen') weiger(409, 'status is ' + f.status);
     const entiteit = d.entiteit === undefined ? f.entiteit : d.entiteit;
@@ -811,20 +811,28 @@ function bevestig(fdb, r, d, nu) {
     if (!ov.ok) weiger(409, 'bevestigen kan niet: ' + ov.reden, { redenen: K.magBevestigen(nieuw, poort).redenen });
     if (ov.naar === 'in_wachtrij' && !Number.isSafeInteger(nieuw.incl)) weiger(409, 'vul eerst het totaalbedrag in');
     const wanneer = nuIso(nu);
+    // wv2590: een factuur zonder gekoppelde leverancier krijgt er bij Bevestigen een op naam (zoals Velden verbeteren), zodat het leren hieronder
+    // iets heeft om te onthouden; alleen de eigenaar (leverancierOpNaam). Pas NA de controles hierboven: die rekenden zonder leverancier, dus
+    // koppelen versoepelt niets (geen IBAN uit de bankhistorie zonder de feitkaart van wv1323, geen keuze direct; toets wv1323).
+    const koppel = !f.leverancier_id && isEig(r) && K.normNaam(f.leverancier_naam || '') ? leverancierBijBevestigen(fdb, f, r, wanneer) : null;
+    if (koppel) f = Object.assign({}, f, { leverancier_id: koppel.id, leverancier_naam: koppel.naam });
     // een eerder "ingevoerd in bank" of "betaald gezien" blijft staan na terugdraaien en opnieuw bevestigen (facturen-db terugdraaien)
     let spoor = K.betaalspoorBegin(betaalwijze, nieuw);   // creditnota → betaald_vooraf (niets te betalen; wv855)
     if (f.betaalspoor === 'betaald_gezien' || (f.betaalspoor === 'ingevoerd' && betaalwijze === 'zelf' && !K.isCreditnota(nieuw))) spoor = f.betaalspoor;
     const u = fdb.db.prepare('UPDATE factuur SET entiteit = ?, betaalwijze = ?, status = ?, betaalspoor = ?, bevestigd_door = ?, bevestigd_op = ?, controles = ?, intern = ?, ' +
-      'iban_nieuw = ?, ibans_onbekend = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = ? AND versie = ?')
+      'iban_nieuw = ?, ibans_onbekend = ?, leverancier = ?, leverancier_naam = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = ? AND versie = ?')
       .run(e.sleutel, betaalwijze, ov.naar, spoor, r.wie, wanneer, JSON.stringify(va.controles), va.intern ? 1 : 0, ip.iban_nieuw ? 1 : 0, JSON.stringify(ip.onbekend),
-        wanneer, f.id, 'te_beoordelen', f.versie);
+        f.leverancier_id || null, kort(f.leverancier_naam, 200) || null, wanneer, f.id, 'te_beoordelen', f.versie);
     if (u.changes !== 1) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw');
     // leren: wijzigt een mens de entiteit of betaalwijze, dan wordt dat de standaard van de leverancier
     // leren alleen als de bevestiger de leverancier mag beheren (een praktijkmanager nooit voor een Privé-leverancier; diffreview wv833 #2)
-    const leer = K.leerUitBevestiging({ entiteit: f.entiteit, betaalwijze: f.betaalwijze }, { entiteit: e.sleutel, betaalwijze }, magLeverancier(r, poort.leverancier) ? poort.leverancier : null);
+    const leerLev = koppel ? leverancierKern(fdb, koppel.id) : poort.leverancier;   // wv2590
+    const leer = K.leerUitBevestiging({ entiteit: f.entiteit, betaalwijze: f.betaalwijze }, { entiteit: e.sleutel, betaalwijze }, magLeverancier(r, leerLev) ? leerLev : null);
+    // wv2590: een interne factuur (eigen entiteit als leverancier, bijv. de Holding) factureert aan meer entiteiten: geen vaste entiteit onthouden
+    if (koppel && va.intern) { leer.wijzigingen = leer.wijzigingen.filter((w) => w.veld !== 'standaard_entiteit'); leer.besluiten = leer.besluiten.filter((b) => b.veld !== 'standaard_entiteit'); }
     for (const w of leer.wijzigingen) {
-      fdb.db.prepare('UPDATE leverancier SET ' + (w.veld === 'standaard_entiteit' ? 'standaard_entiteit' : 'standaard_betaalwijze') + ' = ?, bijgewerkt_op = ? WHERE id = ?').run(w.naar, wanneer, poort.leverancier.id);
-      D.audit(fdb, { wie: r.wie, wat: 'leverancier_geleerd', object_soort: 'leverancier', object_id: poort.leverancier.id, entiteit: e.sleutel, voor: { [w.veld]: w.van }, na: { [w.veld]: w.naar }, wanneer });
+      fdb.db.prepare('UPDATE leverancier SET ' + (w.veld === 'standaard_entiteit' ? 'standaard_entiteit' : 'standaard_betaalwijze') + ' = ?, bijgewerkt_op = ? WHERE id = ?').run(w.naar, wanneer, leerLev.id);
+      D.audit(fdb, { wie: r.wie, wat: 'leverancier_geleerd', object_soort: 'leverancier', object_id: leerLev.id, entiteit: e.sleutel, voor: { [w.veld]: w.van }, na: { [w.veld]: w.naar }, wanneer });
     }
     for (const b of leer.besluiten) besluitRij(fdb, f.id, b, r.wie, wanneer);
     let opdracht = null;
@@ -832,7 +840,8 @@ function bevestig(fdb, r, d, nu) {
       const bijlagen = bijlagenVan(fdb, f);
       const op = K.maakOpdracht(Object.assign({}, nieuw, { status: 'te_beoordelen' }), e, { id: D.nieuwId(), bijlagen, verstuur_na: K.verstuurNa(nu, verstuurInstelling(fdb)), poort });
       // wv2480 (review MOET 3+5): de keuze concept/direct van de leverancier + haar versie, vast op de opdracht (zonder leverancier: NULL = concept)
-      const lv = f.leverancier_id ? fdb.db.prepare('SELECT verzendwijze, verzendwijze_versie FROM leverancier WHERE id = ?').get(f.leverancier_id) : null;
+      // wv2590: een leverancier die pas bij dit Bevestigen gekoppeld werd, verstuurt deze keer als concept (de keuze direct geldt vanaf het volgende stuk)
+      const lv = f.leverancier_id && !koppel ? fdb.db.prepare('SELECT verzendwijze, verzendwijze_versie FROM leverancier WHERE id = ?').get(f.leverancier_id) : null;
       D.voegToe(fdb, 'opdracht', { id: op.id, soort: op.soort, factuur: f.id, entiteit: op.entiteit, doeladres: op.doeladres, bijlagen: op.bijlagen, vingerafdruk: op.vingerafdruk,
         verstuur_na: op.verstuur_na, idempotentiesleutel: op.idempotentiesleutel, status: 'wacht', poging: 0, aangemaakt_door: r.wie, aangemaakt_op: wanneer, bijgewerkt_op: wanneer,
         verzendwijze_bij_bevestigen: lv ? lv.verzendwijze : null, verzendwijze_versie: lv ? lv.verzendwijze_versie : null });
@@ -842,8 +851,49 @@ function bevestig(fdb, r, d, nu) {
       (f.betaalwijze !== betaalwijze ? 'betaalwijze ' + f.betaalwijze + ' → ' + betaalwijze : 'voorstel overgenomen')), r.wie, wanneer);
     D.audit(fdb, { wie: r.wie, wat: 'bevestigen', object_soort: 'factuur', object_id: f.id, entiteit: e.sleutel,
       voor: { status: f.status, entiteit: f.entiteit, betaalwijze: f.betaalwijze }, na: { status: ov.naar, entiteit: e.sleutel, betaalwijze, betaalspoor: spoor, opdracht: opdracht && opdracht.id }, wanneer });
-    return { status: ov.naar, betaalspoor: spoor, opdracht, melding: leer.melding };
+    const zussen = koppel ? zussenKoppelen(fdb, f, koppel, r.wie, wanneer) : 0;
+    const kmelding = !koppel ? null : (koppel.nieuw ? 'Nieuwe leverancier ' + koppel.naam + ' onthouden: volgende facturen krijgen deze entiteit en betaalwijze' +
+      (koppel.ibans ? ' en het nagebelde rekeningnummer' : '') + '.' : 'Gekoppeld aan leverancier ' + koppel.naam + '.') +
+      (zussen ? ' Ook ' + zussen + (zussen === 1 ? ' andere open factuur' : ' andere open facturen') + ' van ' + koppel.naam + ' gekoppeld.' : '');
+    return { status: ov.naar, betaalspoor: spoor, opdracht, melding: [leer.melding, kmelding].filter(Boolean).join(' ') || null, leverancier: koppel ? { id: koppel.id, naam: koppel.naam, nieuw: koppel.nieuw } : undefined };
   });
+}
+/*
+ * wv2590 (12 van de 35 bevestigde facturen hadden geen leverancier, gemeten 6-11-2026): bij Bevestigen zonder gekoppelde leverancier de
+ * bestaande leverancier met dezelfde genormaliseerde naam, anders een nieuwe (leverancierOpNaam, zoals Velden verbeteren). De koerier koppelt
+ * op precies die naam (herkenLeverancier via 'naam'), dus dit is niet ruimer dan wat een volgende factuur toch al kreeg. Was het IBAN van deze
+ * factuur nagebeld en is de leverancier NIEUW, dan wordt het bekend bij die leverancier (regel van wv1917); nooit bij een bestaande. bevestig
+ * roept dit pas aan nadat de IBAN-poort en de statusovergang ZONDER leverancier zijn gerekend: dit Bevestigen wordt er niet ruimer door.
+ */
+function leverancierBijBevestigen(fdb, f, r, wanneer) {
+  const lev = leverancierOpNaam(fdb, f.leverancier_naam, r, wanneer);
+  let ibans = 0;
+  if (lev.nieuw && f.nagebeld_op && f.nagebeld_door) {
+    for (const iban of (Array.isArray(f.nagebeld_ibans) ? f.nagebeld_ibans : json(f.nagebeld_ibans, []) || [])) {
+      if (fdb.db.prepare('INSERT INTO leverancier_iban (leverancier, iban, toegevoegd_door, toegevoegd_op) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING')
+        .run(lev.id, iban, f.nagebeld_door, f.nagebeld_op).changes) ibans++;
+    }
+    if (ibans) D.audit(fdb, { wie: r.wie, wat: 'nagebeld_meegenomen', object_soort: 'leverancier', object_id: lev.id, entiteit: f.entiteit,
+      na: { factuur: f.id, aantal: ibans, nagebeld_door: f.nagebeld_door }, wanneer });
+  }
+  besluitRij(fdb, f.id, K.besluit('leverancier', 'leverancier', lev.id, 'mens', (lev.nieuw ? 'nieuwe leverancier' : 'bestaande leverancier') + ' op naam bij bevestigen'), r.wie, wanneer);
+  D.audit(fdb, { wie: r.wie, wat: 'leverancier_gekoppeld', object_soort: 'factuur', object_id: f.id, entiteit: f.entiteit, na: { leverancier: lev.id, nieuw: lev.nieuw }, wanneer });
+  return Object.assign({}, lev, { ibans });
+}
+// wv2590: andere open facturen (te_beoordelen, zonder leverancier) met dezelfde genormaliseerde naam krijgen dezelfde leverancier; de koerier-ronde
+// (ibanHerbereken) laat daarna een nagebeld rekeningnummer vervallen als "eerst nabellen". Versie in de WHERE (een gelijktijdige wijziging wint).
+function zussenKoppelen(fdb, f, lev, wie, wanneer) {
+  const norm = K.normNaam(lev.naam);
+  const up = fdb.db.prepare("UPDATE factuur SET leverancier = ?, leverancier_naam = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND versie = ? AND status = 'te_beoordelen' AND leverancier IS NULL");
+  let n = 0;
+  for (const z of fdb.db.prepare("SELECT id, leverancier_naam, versie, entiteit FROM factuur WHERE status = 'te_beoordelen' AND leverancier IS NULL AND id <> ? AND leverancier_naam IS NOT NULL LIMIT 500").all(f.id)) {
+    if (K.normNaam(z.leverancier_naam) !== norm) continue;
+    if (!up.run(lev.id, kort(lev.naam, 200), wanneer, z.id, z.versie).changes) continue;
+    besluitRij(fdb, z.id, K.besluit('leverancier', 'leverancier', lev.id, 'regel', 'zelfde naam als een bevestigde factuur'), wie, wanneer);
+    D.audit(fdb, { wie, wat: 'leverancier_gekoppeld', object_soort: 'factuur', object_id: z.id, entiteit: z.entiteit, na: { leverancier: lev.id, via: f.id }, wanneer });
+    n++;
+  }
+  return n;
 }
 function bijlagenVan(fdb, f) {
   const docs = [f.document_id, f.ubl_document_id].filter(Boolean).map((id) => fdb.db.prepare('SELECT naam, mime, sha256 FROM document WHERE id = ?').get(id));
