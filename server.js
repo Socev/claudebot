@@ -3881,6 +3881,7 @@ function handleRequest(req, res) {
       weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
       kalender: typeof kalenderInfo === 'function' ? kalenderInfo() : { aan: false },   // wv2333: OVIS Calendar in de app (laatste lijst: aantal, duur; geen titels)
       shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
+      pakjes: typeof pakjesInfo === 'function' ? pakjesInfo() : { aan: false },   // wv2593: OVIS Pakjes (aantallen, laatste ronde; geen codes, winkels of postcodes)
       memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
       ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
       scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
@@ -12977,6 +12978,7 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
+        if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
@@ -20229,6 +20231,110 @@ async function appShopper(req, res, a, route, d) {
   return appStuur(res, u.status, u.body);
 }
 // ── einde OVIS Shopper ──
+// ── OVIS Pakjes (wv2593, 6-11-2026; idee 33, ontwerp vault "01_Ontwikkeling/Pakjes-tracker - ontwerp (6-11-2026).md") ──
+// WAAROM. David (6-11): "Pakjes tracker? DHL, PostNL, etc etc" en "ga daar nu maar volgas op": alle lopende zendingen op één plek in de app.
+// HOE. Een eigen ronde die MEELEEST, zonder MailMan of Gmail te wijzigen: kandidaten uit mailman.sqlite (tabel besluit, alleen lezen: id,
+// ontvangen, afzender, onderwerp van de laatste 21 dagen in gmail:david), een nieuwe kandidaat via het lees-luik (mail_lezen, alleen lezen),
+// pakjes.js herkent met vaste regels per vervoerder en volgt DHL, PostNL en GLS op hun openbare volgpagina (geen login of sleutel). Opslag
+// PAKJES_DIR (eigen sqlite + config met postcodes, 0600). Ronde elke 15 min tussen 06:30 en 23:00, alleen de primaire kant; hooguit 20
+// mails en 25 volgvragen per ronde. Log en /health alleen aantallen: nooit een code, winkel, postcode of adres.
+// Routes achter de app-sessie: GET /app/pakjes (lopend, eerder, verwacht uit Shopper), POST /app/pakjes/ververs (nu een ronde, 6/uur),
+// POST /app/pakjes/<id>/verberg {verborgen, samen?} (naar Eerder of terug; 60/uur). Ontbreekt pakjes.js in de release: 404 en aan=false.
+const PAKJES_DIR = serverPad('pakjes', process.env.PAKJES_DIR, '/opt/data/pakjes', serverProefDeel('pakjes'));
+const pakjes = (function () {
+  const p = path.join(__dirname, 'pakjes.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ dir: PAKJES_DIR }); } catch (e) { logError('pakjes', e); return null; }
+})();
+function pakjesInfo() { if (!pakjes) return { aan: false }; try { return pakjes.info(); } catch (e) { return { aan: true, fout: true }; } }
+// kandidaten: alleen de kopvelden die MailMan al bewaarde (laatste 21 dagen, privé-Gmail)
+function pakjesKandidaten() {
+  const f = path.join(MAILMAN_DIR, 'mailman.' + 'sqlite');
+  if (!fs.existsSync(f)) return [];
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(f, { readOnly: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 3000;');
+    return db.prepare("SELECT gmail_id, ontvangen, afzender_domein, onderwerp FROM besluit WHERE postvak = 'gmail:david' AND ontvangen >= ? ORDER BY ontvangen LIMIT 2000")
+      .all(new Date(Date.now() - 21 * 86400000).toISOString());
+  } finally { db.close(); }
+}
+async function pakjesLees(id) {
+  const j = await appAgendaApi({ actie: 'mail_lezen', id: String(id) });
+  if (!j || typeof j !== 'object' || j.fout || typeof j.tekst !== 'string') return null;
+  return { van: j.van, onderwerp: j.onderwerp, tekst: j.tekst, datum: j.datum };
+}
+// alleen de vaste https-adressen die pakjes.js bouwt; geen redirect volgen, hooguit 1 MB, alleen json
+const PAKJES_HOSTS = ['my.dhlecommerce.nl', 'jouw.postnl.nl', 'gls-group.com'];
+async function pakjesHaal(url) {
+  const u = new URL(url);
+  if (u.protocol !== 'https:' || PAKJES_HOSTS.indexOf(u.hostname) < 0) throw new Error('host niet toegestaan');
+  const r = await fetch(u, { headers: { 'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36', accept: 'application/json, text/plain, */*' },
+    redirect: 'manual', signal: AbortSignal.timeout(15000) });
+  const t = await r.text();
+  let j = null;
+  if (t.length <= 1024 * 1024) { try { j = JSON.parse(t); } catch (e) { j = null; } }
+  return { status: r.status, json: j };
+}
+let pakjesBezig = null;
+async function pakjesRonde(o) {
+  if (!pakjes) return { ok: false, fout: 'pakjes ontbreekt' };
+  if (pakjesBezig) return pakjesBezig;
+  pakjesBezig = (async function () {
+    const begin = Date.now();
+    let k = [];
+    try { k = pakjesKandidaten(); } catch (e) { logError('pakjes-kandidaten', e); k = []; }
+    const r = await pakjes.ronde({ kandidaten: k, lees: pakjesLees, haal: pakjesHaal, dwing: !!(o && o.dwing), max: 20 });
+    schrijfLog(nu() + ' pakjes ' + velden({ bron: (o && o.bron) || 'klok', ok: r.ok, kandidaten: r.kandidaten, gelezen: r.gelezen, herkend: r.herkend, lees_fout: r.lees_fout || undefined,
+      gevolgd: r.gevolgd, volg_onbekend: r.volg_onbekend || undefined, volg_fout: r.volg_fout || undefined, ms: Date.now() - begin }));
+    return r;
+  })();
+  try { return await pakjesBezig; } finally { pakjesBezig = null; }
+}
+function pakjesTik() {
+  if (!pakjes || !SERVER_ECHT || !rolPrimair()) return;
+  const hm = new Date().toLocaleTimeString('sv-SE', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' });
+  if (hm < '06:30' || hm > '23:00') return;
+  pakjesRonde({ bron: 'klok' }).catch(function (e) { logError('pakjes-ronde', e); });
+}
+if (pakjes && SERVER_ECHT) { setTimeout(pakjesTik, 90000).unref(); setInterval(pakjesTik, 15 * 60000).unref(); }
+// gekochte zoektochten uit Shopper (wens, winkel, datum): een berekende koppeling, er wordt niets geschreven
+function pakjesGekocht() {
+  try {
+    if (typeof shopper === 'undefined' || !shopper) return [];
+    const l = shopper.lijst();
+    return (l && l.body && Array.isArray(l.body.zoektochten) ? l.body.zoektochten : []).filter(function (z) { return z.status === 'gekocht' && z.gekocht; })
+      .map(function (z) { return { id: z.id, wens: z.wens, winkel: z.gekocht.winkel, datum: z.gekocht.datum }; });
+  } catch (e) { return []; }
+}
+appStaat.tellers.pakjes = [];
+appStaat.tellers.pakjes_ververs = [];
+appStaat.tellers.pakjes_verberg = [];
+async function appPakjes(req, res, a, route, d) {
+  if (!pakjes) return appWeiger(res, 404, 'Pakjes zit niet in deze versie van de pod', 'pakjes ontbreekt');
+  if (!appTeller('pakjes', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens pakjes');
+  let u, m = null, soort = 'onbekend';
+  try {
+    if (route === 'GET /app/pakjes') { soort = 'lijst'; u = pakjes.lijst(pakjesGekocht()); }
+    else if (route === 'POST /app/pakjes/ververs') {
+      soort = 'ververs';
+      if (!appTeller('pakjes_ververs', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 6)', 'grens pakjes ververs');
+      const r = await Promise.race([pakjesRonde({ dwing: true, bron: 'app' }), new Promise(function (ok) { setTimeout(function () { ok({ ok: true, loopt: true }); }, 25000).unref(); })]);
+      u = pakjes.lijst(pakjesGekocht());
+      u.body.ververs = { ok: !!r.ok, loopt: !!r.loopt, gelezen: r.gelezen || 0, gevolgd: r.gevolgd || 0, volg_fout: r.volg_fout || 0 };
+    }
+    else if ((m = /^POST \/app\/pakjes\/([^/]*)\/verberg$/.exec(route))) {
+      soort = 'verberg';
+      if (!appTeller('pakjes_verberg', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens pakjes verberg');
+      u = pakjes.verberg(m[1], d);
+    }
+    else u = { status: 404, body: { ok: false, fout: 'onbekend' } };
+  } catch (e) { logError('pakjes', e); return appWeiger(res, 503, 'Pakjes kon de lijst nu niet lezen; probeer het zo opnieuw', 'pakjes fout'); }
+  if (soort === 'lijst' && u.status === 200) res._app.stil = true;
+  else res._app.reden = 'pakjes ' + soort + (m ? ' ' + (/^[0-9a-f]{12}$/.test(m[1]) ? m[1] : 'ongeldig') : '') + ' ' + u.status;
+  return appStuur(res, u.status, u.body);
+}
+// ── einde OVIS Pakjes ──
 async function appDocs(req, res, a, s, d, route) {
   if (!docsDelen) return appWeiger(res, 404, 'Delen zit niet in deze versie van de pod', 'docs ontbreekt');
   if (!appTeller('docs', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs');

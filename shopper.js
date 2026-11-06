@@ -400,7 +400,7 @@ function maak(o) {
       const n = metFacturen((db) => gk.map((z) => facturenBij(db, z).length));
       gk.forEach((z, i) => { z.factuur_gevonden = n ? n[i] : null; });
     }
-    for (let i = 0; i < uit.length; i++) { uit[i] = kaal(uit[i]); if (uit[i].gekocht) uit[i].gekocht = { winkel: uit[i].gekocht.winkel }; }
+    for (let i = 0; i < uit.length; i++) { uit[i] = kaal(uit[i]); if (uit[i].gekocht) uit[i].gekocht = { winkel: uit[i].gekocht.winkel, datum: uit[i].gekocht.datum }; }   // wv2593: datum voor Pakjes (gekocht → verwacht pakje)
     uit.sort(sorteer);
     laatst = { op: new Date().toISOString(), zoektochten: uit.length, open: uit.filter((z) => z.status === 'open').length, onleesbaar, favorieten: fav.length };
     return { status: 200, body: { ok: true, entiteiten: MAPPEN.map((m) => ({ id: m[0], naam: m[1] })), zoektochten: uit } };

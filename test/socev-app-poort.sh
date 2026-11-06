@@ -1295,6 +1295,11 @@ async function bewijs(o) {
       r = await vraag(mt, pad, mt === 'POST' ? { status: 'vervallen' } : undefined, {});
       toets('9 wv2264: ' + mt + ' ' + pad + ' zonder sessie -> 401', r.status === 401, r.status);
     }
+    // wv2593 (OVIS Pakjes): lijst, verversen en Naar Eerder zonder sessie niet te bereiken
+    for (const [mt, pad] of [['GET', '/app/pakjes'], ['POST', '/app/pakjes/ververs'], ['POST', '/app/pakjes/0123456789ab/verberg']]) {
+      r = await vraag(mt, pad, mt === 'POST' ? { verborgen: true } : undefined, {});
+      toets('9 wv2593: ' + mt + ' ' + pad + ' zonder sessie -> 401', r.status === 401, r.status);
+    }
     const sP = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
     let tot0 = sP.tot = Date.now() + 60000;
     const b1 = bid();

@@ -217,8 +217,8 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       && h.facturen[0].factuurdatum === '2026-11-04' && h.facturen[0].zekerheid === 'hoog', h.facturen);
     toets('7h praktijkhouders → praktijkhouders_bv; privé alleen privé', det('Praktijkhouders').facturen.map((x) => x.id).join() === fPh && det('Prive').facturen.map((x) => x.id).join() === fPr,
       [det('Praktijkhouders').facturen, det('Prive').facturen]);
-    toets('7i lijst: factuur_gevonden alleen bij gekocht (aantal), gekocht-blok alleen de winkel; open zonder veld', z3('Met bedrag').factuur_gevonden === 2 && z3('Zonder bedrag').factuur_gevonden === 3
-      && JSON.stringify(z3('Met bedrag').gekocht) === JSON.stringify({ winkel: 'Bouwmarkt Proef' }) && !('factuur_gevonden' in z3('Open met gekocht-regel')), z3('Met bedrag'));
+    toets('7i lijst: factuur_gevonden alleen bij gekocht (aantal), gekocht-blok alleen winkel en datum (wv2593: Pakjes); open zonder veld', z3('Met bedrag').factuur_gevonden === 2 && z3('Zonder bedrag').factuur_gevonden === 3
+      && JSON.stringify(z3('Met bedrag').gekocht) === JSON.stringify({ winkel: 'Bouwmarkt Proef', datum: '2026-11-02' }) && !('factuur_gevonden' in z3('Open met gekocht-regel')), z3('Met bedrag'));
     toets('7j de facturendatabase is na alle vragen byte-gelijk (niets geschreven)', hashVan() === voorHash);
     const m4 = S.maak({ vault: V3, vv: VV, facturenPad: () => { throw new Error('kapot'); } }), m5 = S.maak({ vault: V3, vv: VV, facturenPad: () => null }), m6 = S.maak({ vault: V3, vv: VV });
     const id = z3('Met bedrag').id;
@@ -249,8 +249,8 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     const regel = 'gekocht: {optie: o1, winkel: "Bouwmarkt Proef", bedrag_eur: 51.94, datum: "2026-11-02", opmerking: "1+1 gratis", via: app}';
     toets('8a gekocht per optie: 200, statusregel gekocht + gekocht-regel direct eronder, rest byte-gelijk', r8.status === 200 && leesP() === bron.replace('status: open   # open | gekocht | vervallen', 'status: gekocht\n' + regel), [r8, leesP().slice(0, 300)]);
     const g8 = m8.zoektocht(id).body.zoektocht;
-    toets('8b GET geeft het gekocht-blok terug (via app), de lijst alleen de winkel', g8.status === 'gekocht' && JSON.stringify(g8.gekocht) === JSON.stringify({ optie: 'o1', winkel: 'Bouwmarkt Proef', bedrag_eur: 51.94, datum: '2026-11-02', opmerking: '1+1 gratis', via: 'app' })
-      && JSON.stringify(m8.lijst().body.zoektochten[0].gekocht) === JSON.stringify({ winkel: 'Bouwmarkt Proef' }), g8.gekocht);
+    toets('8b GET geeft het gekocht-blok terug (via app), de lijst alleen winkel en datum (wv2593)', g8.status === 'gekocht' && JSON.stringify(g8.gekocht) === JSON.stringify({ optie: 'o1', winkel: 'Bouwmarkt Proef', bedrag_eur: 51.94, datum: '2026-11-02', opmerking: '1+1 gratis', via: 'app' })
+      && JSON.stringify(m8.lijst().body.zoektochten[0].gekocht) === JSON.stringify({ winkel: 'Bouwmarkt Proef', datum: '2026-11-02' }), g8.gekocht);
     const ervoor = leesP();
     r8 = m8.gekocht(id, { optie: 'o1', bedrag_eur: '51.94', datum: '2026-11-02', opmerking: '1+1 gratis' });
     toets('8c nog eens met dezelfde gegevens = 200 al, niets geschreven', r8.status === 200 && r8.body.al === true && leesP() === ervoor, r8);
