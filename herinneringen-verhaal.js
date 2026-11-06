@@ -469,6 +469,8 @@ function corrigeerNamen(tekst, lijst, o) {
     const w = m[0], n = norm(w);
     if (t.slice(Math.max(0, m.index - 2), m.index) === '==') continue;   // al gemarkeerd
     if (lijst.vast.has(n) || eigen.has(n)) continue;
+    // wv2551: bezitsvorm van een bekende naam ("Pieters" bij Pieter) is goed: geen vervanging en geen twijfel
+    if (n.length > 3 && n.endsWith('s') && (lijst.vast.has(n.slice(0, -1)) || eigen.has(n.slice(0, -1)))) continue;
     let naar = null;
     // review MOET 1: een gewoon woord (stopwoord, zinsbegin, datum, telwoord) wordt nooit vervangen, ook niet als vaste variant
     if (n.length < 3 || STOP.has(n) || ZINSBEGIN.has(n) || DATUMWOORD.has(n) || telwoord(n.replace(/-/g, ''))) continue;

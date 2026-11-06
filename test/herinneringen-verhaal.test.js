@@ -777,6 +777,11 @@ test('wv2536 namencontrole (puur): klinkt hetzelfde of "naam + en" = vervangen; 
   // review MOET 1: een vaste variant op een gewoon woord vervangt nooit
   const l4 = V.maakNamenlijst(['Martijn'], [{ van: 'mijn', naar: 'Martijn' }, { van: 'Toen', naar: 'Martijn' }]);
   assert.strictEqual(V.corrigeerNamen('Toen zag mijn vader hem.', l4).tekst, 'Toen zag mijn vader hem.');
+  // wv2551: bezitsvorm van een bekende naam (naam + s) is geen twijfel en wordt niet vervangen; een andere spelling + s blijft twijfel
+  const r5 = V.corrigeerNamen('We sliepen in Marthes tent en Jorres auto, met Lyvias fiets.', l, { markeer: true });
+  assert.deepStrictEqual(r5, { tekst: 'We sliepen in Marthes tent en Jorres auto, met Lyvias fiets.', eenduidig: [], twijfel: [] });
+  assert.deepStrictEqual(V.corrigeerNamen('Toen Martes fiets.', l).twijfel, [{ woord: 'Martes', voorstel: ['Marthe'] }]);
+  assert.deepStrictEqual(V.corrigeerNamen('Bij Pietjes huis.', V.maakNamenlijst(['Pietje'], [])), { tekst: 'Bij Pietjes huis.', eenduidig: [], twijfel: [] });
   // hint voor de uitschrijver: namen, kort
   assert.ok(V.namenHint(l).startsWith('Jorre, Proefman, Lyvia') && V.namenHint(l, 12).length <= 12);
   assert.deepStrictEqual(V.variantenUit('- Sjoerdje → Lyvia — correctie van David (5-11-2026)\n- a → b'), [{ van: 'Sjoerdje', naar: 'Lyvia' }]);
