@@ -10330,7 +10330,7 @@ async function appStilteNu() {
 // grootte bewaard), de herkomst (mk_te_lezen_klussen, alleen lezen, 30 min per klus bewaard), gezien-david.json (tabs: gezien door
 // David per gesprek; punten: in beeld geweest, voor het getal) en te-lezen.json (afgevinkt, bewaard; alleen ids en tijden).
 // Ontbreekt te-lezen.js in de release, dan geen te_lezen in /app/voor-jou/kanaal en 404 op POST /app/te-lezen.
-const teLezenMod = (function () { try { return require(path.join(__dirname, 'te-lezen.js')); } catch (e) { if (!(e && e.code === 'MODULE_NOT_FOUND')) logError('te-lezen-module', e); return null; } })();
+const teLezenMod = (function () { try { if (typeof __dirname !== 'string') return null; return require(path.join(__dirname, 'te-lezen.js')); } catch (e) { if (!(e && e.code === 'MODULE_NOT_FOUND')) logError('te-lezen-module', e); return null; } })();
 const APP_TE_LEZEN = path.join(APP_DATA, 'te-lezen.json');
 const APP_TE_LEZEN_KLUS_MS = 30 * 60 * 1000;
 const APP_TE_LEZEN_FOUT_MS = 2 * 60 * 1000;

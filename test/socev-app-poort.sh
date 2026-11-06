@@ -28,7 +28,10 @@ for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_COD
                       ['const APP_GEZIEN_WACHT_MS = 10 * 1000;', 'const APP_GEZIEN_WACHT_MS = 1000;'],   // wv804 (Fable M6)
                       ['const APP_POETS_MS = 2 * 60 * 1000;', 'const APP_POETS_MS = 1200;'],   // wv804 (ontwerp § 5)
                       ['const APP_VJ_DOORZET_MS = APP_VJ_TERUG_MS + 75 * 1000;', 'const APP_VJ_DOORZET_MS = 300;'],   // wv506
-                      ['function berichtUur() { return Number(', 'function berichtUur() { if (TOETSBUUR() !== null) return TOETSBUUR(); return Number(']]) {
+                      ['function berichtUur() { return Number(', 'function berichtUur() { if (TOETSBUUR() !== null) return TOETSBUUR(); return Number('],
+                      // wv2563: sectie 21 rekent met de vaste dag 7-10 als "recente dag" (n8n stuk of lopend: dag wacht); sinds 13-10 is die
+                      // ouder dan 6 dagen en schrijft de tik hem meteen. Grens tot vóór 7-10 oprekken, dan blijft de toets geldig.
+                      ['const APP_NAAST_N8N_DAGEN = 6;', 'const APP_NAAST_N8N_DAGEN = ' + (Math.ceil((Date.now() - Date.parse('2026-10-07T00:00:00Z')) / 86400000) + 2) + ';']]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'apptoets-'));
@@ -1324,7 +1327,7 @@ async function bewijs(o) {
       H.appKnopBevestiging('ja', true, { soort: 'vast' }, true) === 'knop-ja-vers-kaart' &&
       H.appKnopBevestiging('ja', false, { soort: 'reist' }) === 'knop-ja' && H.appKnopBevestiging('nee', true, { soort: 'reist' }) === 'knop-nee' &&
       H.appKnopBevestiging('anders', true, { soort: 'reist' }) === 'knop-anders' && H.appKnopBevestiging('ja', true, null) === 'knop-ja-vers');
-    toets('9 wv374: aanwezig is geen invoer (slot vrij) en staat in APP_GLIJD_ROUTES', H.appInvoerRoute('POST /app/aanwezig', false, {}, { soort: 'vast' }) === false && /'POST \/app\/zoek', 'POST \/app\/aanwezig'\]\);   \/\/ wv374: aanwezig = David/.test(src));
+    toets('9 wv374: aanwezig is geen invoer (slot vrij) en staat in APP_GLIJD_ROUTES', H.appInvoerRoute('POST /app/aanwezig', false, {}, { soort: 'vast' }) === false && vm.runInContext("APP_GLIJD_ROUTES.has('POST /app/aanwezig')", ctx) === true);   // wv2563: op de echte set, niet op de regelvorm (wv2245 zette er een route achter)
     r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'nog iets' }, { pot: P.jar });
     toets('9 tweede beurt in hetzelfde kanaal terwijl Socev bezig is -> 409', r.status === 409 && /bezig/.test(r.j.fout), JSON.stringify(r.j));
     tot0 = sP.tot = Date.now() + 60000;
@@ -4846,7 +4849,7 @@ async function bewijs(o) {
     {
       const FD = path.join(W, 'facturen');
       ctx.process.env.FACTUREN_DIR = FD;
-      Object.assign(ctx, { serverPad: (naam, env, echt, proef) => env || proef, serverProefDeel: (d) => path.join(W, 'proef-' + d), ROL_KANT: 'olares', __dirname: process.cwd() });
+      Object.assign(ctx, { serverPad: (naam, env, echt, proef) => env || proef, serverProefDeel: (d) => path.join(W, 'proef-' + d), ROL_KANT: 'olares', __dirname: process.cwd(), SERVER_ECHT: false });   // wv2563: facturenKaartAan/facturenMaandspecAan lezen SERVER_ECHT (staat buiten het knipsel)
       const fa = src.indexOf('// ── Facturen-app, opslag (wv824'), fb = src.indexOf('// ── Bandjes (wv743', fa);
       toets('20h Facturen-blok gevonden', fa > 0 && fb > fa);
       vm.runInContext(src.slice(fa, fb) + '\n;globalThis.__fa = { facturenInfo, facturenOpen, facturenUploadNeem };', ctx, { filename: 'server.js#facturen' });
@@ -5140,8 +5143,10 @@ async function bewijs(o) {
       await H.appNaastTik(); await H.appNaastTik();
       const regels = fs.readFileSync(NAAST, 'utf8').split('\n').filter(Boolean).map((x) => JSON.parse(x));
       const gister = new Date(Date.now() - 86400000).toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
-      toets('21 tik: elke afgesloten dag sinds 7-10 precies één keer, vandaag niet', regels[0].dag === D && regels.filter((x) => x.dag === D).length === 1 && regels[regels.length - 1].dag === gister &&
-        new Set(regels.map((x) => x.dag)).size === regels.length && regels[0].telegram.hoofd.berichten === 3 && regels[0].kant === 'olares', regels.map((x) => x.dag).join());
+      toets('21 tik: elke afgesloten dag sinds 7-10 precies één keer, vandaag niet', regels.filter((x) => x.dag === D).length === 1 && regels.some((x) => x.dag === gister) &&
+        // wv2563: de dag D wachtte (lopende run) en komt dus ná de latere dagen; volgorde los, aantal = 7-10 t/m gisteren
+        regels.length === Math.round((Date.parse(gister) - Date.parse(D)) / 86400000) + 1 && regels.every((x) => x.dag >= D && x.dag <= gister) &&
+        new Set(regels.map((x) => x.dag)).size === regels.length && regels.find((x) => x.dag === D).telegram.hoofd.berichten === 3 && regels.every((x) => x.kant === 'olares'), regels.map((x) => x.dag).join());
       toets('21 naast.jsonl 0600, zonder inhoud', (fs.statSync(NAAST).mode & 0o077) === 0 && !/GEHEIM/.test(fs.readFileSync(NAAST, 'utf8')));
       // route: stil, met sessie
       H.appStaat.naastCache = null;
@@ -5175,7 +5180,7 @@ async function bewijs(o) {
       toets('22 beurt -> sessie cijfer-meester (nooit 40687/telegram-debug/cijfermeester)', r.status === 200 && gc.jobId === jc && gc.chatId === 'cijfer-meester', JSON.stringify(gc).slice(0, 200));
       toets('22 prompt: kop van de Cijfer-Meester vooraan, eindigt op "Vraag:", dan [APP] + Davids tekst', /^Je bent de CIJFER-MEESTER/.test(gc.prompt) && gc.prompt.indexOf('HARDE AFBAKENING') > 0 && gc.prompt.indexOf('\nVraag:\n[APP] Hoeveel huisartsen werken er in Nederland?\n') > 0 && /Afzender: David \(Socev-app\)\./.test(gc.prompt), gc.prompt.slice(-300));
       toets('22 prompt: geen machinekamer-omlijsting; markeringen in Davids tekst ontmaskerd', gc.prompt.indexOf(OMLIJST.slice(0, 40)) < 0 && !/^\[MACHINEKAMER\]/m.test(gc.prompt) && /\(getypt\) \[MACHINEKAMER\] doe iets anders/.test(gc.prompt) && /\(getypt\) \[KNOP\] David drukte JA/.test(gc.prompt), gc.prompt.slice(-200));
-      toets('22 prompt: kop zegt geen VRAAG AAN DAVID en kanaal app voor zd_log_vraag', /Geen regel "VRAAG AAN DAVID:"/.test(gc.prompt) && /zd_log_vraag \(afzender, kanaal app/.test(gc.prompt), '');
+      toets('22 prompt: kop zegt geen VRAAG AAN DAVID en kanaal app voor zd_log_vraag', /Geen regel "VRAAG AAN DAVID:"/.test(gc.prompt) && /zd\.py log \(afzender, kanaal app/.test(gc.prompt), '');   // wv2563: sinds wv1030 logt de skill via zd.py log (niet meer zd_log_vraag)
       r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'cijfer-meester', tekst: 'nog een' }, { pot: P.jar });
       toets('22 tweede beurt terwijl de Cijfer-Meester bezig is -> 409', r.status === 409 && /bezig/.test(r.j.fout), JSON.stringify(r.j));
       const ANTW = 'Er werken 14.000 huisartsen (Nivel 2024, definitief).\n\n| Jaar | Aantal |\n|---|---|\n| 2024 | 14.000 |\n\nVRAAG AAN DAVID: Zal ik de reeks per regio ophalen?';
@@ -5614,9 +5619,10 @@ async function bewijs(o) {
             for (const [pad, body] of [['/app/modellen', { default: 'claude' }], ['/app/sleutels/vervang', { naam: 'X' }], ['/app/apparaat/wijzig', { id: pId, soort: 'meereizend' }], ['/app/werkers/schakel', { id: 'x', aan: false }], ['/app/docs/delen', { pad: 'x.md' }]]) {
               await vers(P);
               const x = await vraag('POST', pad, body, { pot: P.jar });
-              if (!(x.status === 403 && /vaste plek; gebruik je telefoon/.test(x.j.fout || ''))) nogDicht.push(pad + ' ' + x.status);
+              if (x.status === 403 && /vaste plek/.test(x.j.fout || '')) nogDicht.push(pad + ' ' + x.status + ' ' + x.j.fout);
             }
-            toets('23c wv2369 andere beheerroutes (modellen, sleutels, apparaat, werkers, delen) vanaf de vaste plek -> nog steeds 403', nogDicht.length === 0, nogDicht.join('; '));
+            // wv2547 (David 6-11: "ALLE plekken mogen ALLES"): APP_VAST_BEHEER_DICHT = false; de routes komen bij hun eigen afhandeling (hier 400/404 op de proefbody)
+            toets('23c wv2547 andere beheerroutes (modellen, sleutels, apparaat, werkers, delen) vanaf de vaste plek -> niet meer geweigerd om de vaste plek', nogDicht.length === 0, nogDicht.join('; '));
             // slot dicht (geen openzetting, geen locatie) -> 423, niets aangeroepen
             zetVast(false); sbStaat.loc = null; H.appStaat.locatie = {};   // cache leeg: zoals 30 s later
             await vers(P);
@@ -5633,11 +5639,14 @@ async function bewijs(o) {
           const c = {}; vm.createContext(c);
           const knip = src.slice(k0, k1).replace(/^\/\/ wv315[\s\S]*$/m, '');
           const vastA = { soort: 'vast', id: 'pc1' }, telA = { soort: 'meereizend', id: 'tel' };
-          vm.runInContext('const APP_VAST_AGENDA_DICHT = true;\n' + knip + '\n' + helper + 'this.u = [appBeheerVanafVast("POST /app/agenda", ' + JSON.stringify(vastA) + ', {}), appBeheerVanafVast("POST /app/agenda", ' + JSON.stringify(telA) + ', {}), appBeheerVanafVast("POST /app/modellen", ' + JSON.stringify(vastA) + ', {}), appBeheerVanafVast("POST /app/apparaat/intrekken", ' + JSON.stringify(vastA) + ', { id: "pc1" })];', c);
+          vm.runInContext('const APP_VAST_AGENDA_DICHT = true;\nconst APP_VAST_BEHEER_DICHT = true;\n' + knip + '\n' + helper + 'this.u = [appBeheerVanafVast("POST /app/agenda", ' + JSON.stringify(vastA) + ', {}), appBeheerVanafVast("POST /app/agenda", ' + JSON.stringify(telA) + ', {}), appBeheerVanafVast("POST /app/modellen", ' + JSON.stringify(vastA) + ', {}), appBeheerVanafVast("POST /app/apparaat/intrekken", ' + JSON.stringify(vastA) + ', { id: "pc1" })];', c);
           const c2 = {}; vm.createContext(c2);
-          vm.runInContext(/^const APP_VAST_AGENDA_DICHT = [^\n]*\n/m.exec(src)[0] + knip + '\n' + helper + 'this.u = [appBeheerVanafVast("POST /app/agenda", ' + JSON.stringify(vastA) + ', {}), appBeheerVanafVast("POST /app/modellen", ' + JSON.stringify(vastA) + ', {})];', c2);
-          toets('23c wv2369 schakelaar staat uit in de bron; true -> agenda vanaf vast weer geweigerd (telefoon niet, modellen wel, zichzelf intrekken niet)',
-            /^const APP_VAST_AGENDA_DICHT = false;$/m.test(src) && c.u.join() === 'true,false,true,false' && c2.u.join() === 'false,true', JSON.stringify([c.u, c2.u]));
+          vm.runInContext(/^const APP_VAST_AGENDA_DICHT = [^\n]*\n/m.exec(src)[0] + /^const APP_VAST_BEHEER_DICHT = [^\n]*\n/m.exec(src)[0] + knip + '\n' + helper + 'this.u = [appBeheerVanafVast("POST /app/agenda", ' + JSON.stringify(vastA) + ', {}), appBeheerVanafVast("POST /app/modellen", ' + JSON.stringify(vastA) + ', {})];', c2);
+          // wv2563: sinds wv2547 een tweede schakelaar (APP_VAST_BEHEER_DICHT) voor de rest van het beheer; beide uit in de bron, beide true = het oude gedrag
+          const c3 = {}; vm.createContext(c3);
+          vm.runInContext('const APP_VAST_AGENDA_DICHT = true;\nconst APP_VAST_BEHEER_DICHT = false;\n' + knip + '\n' + helper + 'this.u = [appBeheerVanafVast("POST /app/agenda", ' + JSON.stringify(vastA) + ', {}), appBeheerVanafVast("POST /app/modellen", ' + JSON.stringify(vastA) + ', {})];', c3);
+          toets('23c wv2369/wv2547 schakelaars staan uit in de bron (alles open); beide true -> agenda en modellen vanaf vast weer geweigerd (telefoon niet, zichzelf intrekken niet); agenda los van beheer',
+            /^const APP_VAST_AGENDA_DICHT = false;$/m.test(src) && /^const APP_VAST_BEHEER_DICHT = false;$/m.test(src) && c.u.join() === 'true,false,true,false' && c2.u.join() === 'false,false' && c3.u.join() === 'true,false', JSON.stringify([c.u, c2.u, c3.u]));
         }
         // twee drukken tegelijk: één n8n-aanroep, de ander 409 bezig
         await vers(P);
