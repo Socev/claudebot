@@ -3093,3 +3093,110 @@ test('wv2455 zaakregister: zou_weg in de schaduw, Nooit per afzender, gemist en 
   assert.equal(mm.app('POST /app/mailman/wegzet', { adres: 'nieuws@vereniging.invalid', nooit: true }, {}).status, 409);
   assert.deepEqual(fouten, []);
 });
+
+// ── wv2548 (B7): Doktersmaten gelijk met privé, achter config.json gedeeld_gelijk ──
+function cfgZet(dir, f) { const p = path.join(dir, 'config.json'), c = JSON.parse(fs.readFileSync(p, 'utf8')); f(c); fs.writeFileSync(p, JSON.stringify(c), { mode: 0o600 }); }
+const GH = 'gmail:groenhouten';
+const IDS_GH = { INTAKE: 'Label_180', FACTUUR: 'Label_171', NIEUWSBRIEF: 'Label_181', SOCIAAL: 'Label_182', OVERIG: 'Label_174', TWIJFEL: 'Label_183', TODO: 'Label_172', ACTIE_DS: 'Label_184', 'AI/MailMan': 'Label_173' };
+function ghAlles(dir, gelijk) {
+  cfgZet(dir, function (c) {
+    if (gelijk) c.gedeeld_gelijk = { [GH]: { ja: '2026-11-06T08:10+01:00', door: 'proef', vraag: 'proef' } }; else delete c.gedeeld_gelijk;
+    c.labelset2 = { [GH]: { ja: 'proef', ids: IDS_GH } };
+    // alles wat privé nog meer heeft, ook voor doktersmaten aan: de code moet het toch dicht houden
+    for (const k of ['live_toegestaan', 'uitgang_toegestaan', 'statuslabels', 'actielabel_weg', 'inbox_uit']) c[k] = { [GH]: { ja: 'proef', door: 'proef', ecobank: true, facturen: true } };
+    c.zaken = { [GH]: { aan: true } };
+  });
+}
+function ghRonde(mm, ids, lijsten) {
+  const r = ronde(mm, GH);
+  mm.n8n('POST /mailman/nieuw', { ronde: r.ronde, postvak: GH, ids, volledig: true });
+  const s = mm.n8n('POST /mailman/labelstaat', { ronde: r.ronde, postvak: GH, labels: lijsten || [] });
+  const l = mm.n8n('POST /mailman/labels', { ronde: r.ronde, postvak: GH, ids });
+  return { r, s, l };
+}
+
+test('wv2548 zonder gedeeld_gelijk blijft doktersmaten dicht: geen tekst, geen Jev, niet live, geen labels — ook met alle andere schakelaars', () => {
+  const { mm, dir, fouten } = nieuweKamer();
+  ghAlles(dir, false);
+  assert.equal(ronde(mm, GH).metadata_alleen, true);
+  const m = mail({ onderwerp: 'Vraag van een collega' });
+  const u = draai(mm, GH, [m], { jev: function () { return jevAntwoord(JEV_INTAKE); } });
+  assert.equal(u.s1.j.jev.length, 0);
+  assert.equal(rij(mm, m.id).reden, 'jev_uit');
+  assert.equal(mm.app('POST /app/mailman/stand', { postvak: GH, stand: 'live' }, ctxVers(true)).status, 409);
+  mm._db.prepare("UPDATE postvak SET stand = 'live' WHERE id = ?").run(GH);   // zelfs als de databank het zou zeggen
+  const x = ghRonde(mm, [m.id]);
+  assert.equal(x.s.j.actief, false); assert.deepEqual(x.l.j.acties, []);
+  const g = mm.app('GET /app/mailman', {}).j.postvakken.find(function (p) { return p.id === GH; });
+  assert.equal(g.jev, false); assert.equal(g.tekst, false);
+  assert.deepEqual(fouten, []);
+});
+
+test('wv2548 gedeeld_gelijk: tekst en Jev zoals privé, na de poort; marker, zorgmail en een verkoopkandidaat nooit naar Jev', () => {
+  const { mm, dir, fouten } = nieuweKamer();
+  cfgZet(dir, function (c) { c.gedeeld_gelijk = { [GH]: { ja: 'proef' } }; });
+  assert.equal(ronde(mm, GH).metadata_alleen, false, 'tekst ophalen');
+  const gewoon = mail({ onderwerp: 'Vraag over het rooster' });
+  const zd = mail({ van: 'Bericht <noreply@post.zorgmail.nl>', onderwerp: 'Zorgdomein' });
+  const pat = mail({ onderwerp: 'Betreft: mw. Proef', tekst: 'Geachte collega, bovengenoemde patiënt zagen wij op de polikliniek. Geboortedatum: 01-02-1950. Diagnose en behandelplan volgen.' });
+  const vk = vkMail();
+  const u = draai(mm, GH, [gewoon, zd, pat, vk], { jev: function () { return jevAntwoord(JEV_INTAKE); } });
+  assert.deepEqual(u.s1.j.jev.map(function (a) { return a.gmail_id; }), [gewoon.id], 'alleen de gewone mail naar Jev');
+  assert.ok(JSON.stringify(u.s1.j.jev[0].body).includes('rooster'));
+  assert.equal(rij(mm, gewoon.id).stroom, 'intake');
+  assert.equal(rij(mm, pat.id).marker, 1);
+  assert.equal(rij(mm, vk.id).status, 'wacht_verkoop');
+  // de databank zegt nog steeds 0 (alleen config.json telt); zonder jev in config.json: geen Jev
+  cfgZet(dir, function (c) { c.postvakken[GH].jev = false; });
+  const twee = mail({ onderwerp: 'Nog een vraag' });
+  assert.equal(draai(mm, GH, [twee], { jev: function () { return jevAntwoord(JEV_INTAKE); } }).s1.j.jev.length, 0);
+  assert.deepEqual(fouten, []);
+});
+
+test('wv2548 gedeeld_gelijk + labelset2 + live_toegestaan: live met vingerafdruk, labelset 2 zoals privé; nooit uitgangen, afgedaan, zaken, overstap of 1.8', () => {
+  const k = b8Kamer(); const { mm, dir, gm, fouten } = k;
+  ghAlles(dir, true);
+  const zonder = mm.app('POST /app/mailman/stand', { postvak: GH, stand: 'live' });
+  assert.equal(zonder.status, 403, 'live alleen met verse vingerafdruk');
+  const c = ctxVers(true);
+  assert.equal(mm.app('POST /app/mailman/stand', { postvak: GH, stand: 'live' }, c).status, 200); assert.equal(c.verbruikt, 1);
+  // David zet ook 'gelezen' aan voor intake: in doktersmaten mag dat nooit iets doen
+  mm.app('POST /app/mailman/stroom', { stroom: 'intake', gelezen: true }, ctxVers(true));
+  const m = gm.voeg(mail({ onderwerp: 'Vraag van de assistente', labels: ['INBOX', 'UNREAD', 'CATEGORY_PERSONAL'] }));
+  const n = gm.voeg(mail({ onderwerp: 'Nieuwsbrief', afmeld: true }));
+  draai(mm, GH, [m, n], { jev: function (a) { return jevAntwoord(a.gmail_id === m.id ? { mens: 0.95, actie: 0.95, waarde: 3 } : JEV_INFO); } });
+  const lijsten = Object.keys(IDS_GH).map(function (naam) { return { naam, id: IDS_GH[naam], volledig: true, berichten: [] }; });
+  const x = ghRonde(mm, [m.id, n.id], lijsten);
+  assert.equal(x.s.j.actief, true);
+  const a = perId(x.l.j.acties);
+  assert.equal(a[m.id].soort, 'besluit');
+  assert.deepEqual(a[m.id].erbij.slice().sort(), ['ACTIE_DS', 'AI/MailMan', 'INTAKE']);
+  assert.deepEqual(a[m.id].eraf, [], 'nooit gelezen markeren in doktersmaten');
+  assert.deepEqual(a[n.id].erbij, ['NIEUWSBRIEF']);
+  for (const y of x.l.j.acties) {
+    assert.ok(!['archief', 'factuurstap', 'afgedaan', 'ecobank', 'terug', 'overstap'].includes(y.soort), y.soort);
+    for (const l of y.erbij.concat(y.eraf)) assert.ok(['UNREAD', 'INBOX', 'FACTUUR/verwerkt'].indexOf(l) < 0, l);
+  }
+  const pv = mm._db.prepare('SELECT * FROM postvak WHERE id = ?').get(GH);
+  assert.ok(pv.overstap_klaar, 'geen overstap: meteen klaar');
+  const o = mm.info().postvakken.find(function (p) { return p.id === GH; });
+  assert.equal(o.afgedaan, undefined); assert.equal(o.zaken, undefined); assert.equal(o.factuurstap, undefined);
+  const app = mm.app('GET /app/mailman', {}).j.postvakken.find(function (p) { return p.id === GH; });
+  assert.equal(app.uitgang_kan, false);
+  // zonder labelset2 maar wel live: nooit de oude 1.8-labels
+  cfgZet(dir, function (c2) { delete c2.labelset2; });
+  const m3 = gm.voeg(mail({ aan: 'facturen@praktijk.invalid' }));
+  draai(mm, GH, [m3]);
+  assert.deepEqual(ghRonde(mm, [m3.id]).l.j.acties, []);
+  assert.deepEqual(fouten, []);
+});
+
+test('wv2548 review MOET 1: ook in een inhaalronde gaat een verkoopkandidaat nooit naar Jev', () => {
+  const { mm, dir, fouten } = nieuweKamer();
+  cfgZet(dir, function (c) { c.gedeeld_gelijk = { [GH]: { ja: 'proef' } }; });
+  klok += 3 * 86400000;   // de mails liggen vóór de inhaalgrens (twee dagen terug)
+  const vk = vkMail({ datum: klok - 4 * 86400000 }), gewoon = mail({ onderwerp: 'Oude vraag', datum: klok - 4 * 86400000 });
+  const u = inhaal(mm, [vk, gewoon], { postvak: GH, jev: function () { return jevAntwoord(JEV_INTAKE); } });
+  assert.deepEqual(u.s1.j.jev.map(function (a) { return a.gmail_id; }), [gewoon.id]);
+  assert.deepEqual(fouten, []);
+});

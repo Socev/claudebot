@@ -108,8 +108,16 @@
  * van de lijst, gepagineerd + volledig ja/nee) → de id's zonder besluit · /mailman/stap1 (kop, labels, bijlagen, privé ook tekst ≤ 4.000
  * tekens) → stap 0–3 + patiëntpoort, en de Jev-aanvragen · /mailman/stap2 (de Jev-antwoorden) → besluit · /mailman/gedaan.
  *
- * GRENZEN (O.10). Patiëntpoort-2.0 en ZORGMAIL/zorgdomeinen vóór Jev: zo'n mail gaat nooit naar Jev. Doktersmaten (GEDEELD): vast in de
- * code geen tekst, geen Jev en geen labels, ook als config.json iets anders zegt. Mailtekst komt nooit in het logboek of op schijf.
+ * DOKTERSMATEN GELIJK (B7, wv2548, 6-11-2026; David 08:08 "Wanneer kan Doktersmaten ingericht worden naar Live? En Labels gelijkgetrokken aan
+ * d.schaap@gmail.com?", Ja 08:10 vraag-id af14ad51 op "Zal ik Doktersmaten in MailMan gelijktrekken met je privé-Gmail, inclusief Jev die de
+ * mailtekst leest?"). Een gedeeld postvak blijft dicht tot config.json gedeeld_gelijk[postvak].ja (de machinekamer, na die Ja). Daarna, net
+ * als privé: tekst en Jev volgens config.json postvakken[postvak].tekst/.jev (na de patiëntpoort; marker en zorgmail nooit naar Jev; een
+ * verkoopkandidaat ook niet), en labelset 2 + live met dezelfde schakelaars labelset2 en live_toegestaan (die schrijft de machinekamer pas na
+ * Davids Ja op de grondwetkaart; David zet zelf live). Nooit voor een gedeeld postvak: de 1.8-labels, gelezen/archief (uitgang_toegestaan),
+ * statuslabels, inbox_uit, afgedaan (collega's archiveren ook: archiveren is daar geen signaal van David), het zaakregister en de overstap.
+ * De Gmail-namen in doktersmaten mogen afwijken (hun eigen TODO blijft): de pod werkt op de vaste namen, config.json geeft per postvak de ID's.
+ * GRENZEN (O.10). Patiëntpoort-2.0 en ZORGMAIL/zorgdomeinen vóór Jev: zo'n mail gaat nooit naar Jev. Doktersmaten (GEDEELD): zonder
+ * gedeeld_gelijk vast in de code geen tekst, geen Jev en geen labels, ook als config.json iets anders zegt. Mailtekst komt nooit in het logboek of op schijf.
  * Afzender, naam, aan en onderwerp staan bij ELKE mail in het logboek (alle postvakken, ook marker, zorgmail en verzonden): het logboek is
  * alleen voor David, en David wordt nooit gefilterd (David 29-10-2026 16:06: "Onderwerp moet NOOIT gefilterd."; wv1980). Na 14 dagen
  * blijft van elke mail alleen het domein (secure_delete). Een mail met onopgeloste label-id's krijgt geen besluit (labellijst ontbrak).
@@ -123,7 +131,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-2.7';   // wv2455: proefweek 'vanzelf weg' (schaduw: zaak.zou_weg, tabel wegzet_afzender, Nooit per afzender), teller jij_open, voorwerkbron voor mailvoorwerk.js; wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
+const VERSIE = 'mailman-2.8';   // wv2548: Doktersmaten gelijk met privé achter config.json gedeeld_gelijk (tekst, Jev, labelset 2, live; nooit uitgangen/afgedaan/zaken/overstap); wv2455: proefweek 'vanzelf weg' (schaduw: zaak.zou_weg, tabel wegzet_afzender, Nooit per afzender), teller jij_open, voorwerkbron voor mailvoorwerk.js; wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -659,7 +667,7 @@ function todoNooit(m, instel) {
  * alleen betalen gevraagd wordt (alleenBetalen). wv2196: TWIJFEL is alleen nog hoofd (intern), nooit een label. → { hoofd, labels }
  */
 function labelPlan2(stroom, ruw, m, instel, regelLabels) {
-  if (!stroom || !L2_HOOFD[stroom] || instel.gedeeld) return { hoofd: null, labels: [] };
+  if (!stroom || !L2_HOOFD[stroom] || (instel.gedeeld && !instel.gelijk)) return { hoofd: null, labels: [] };   // wv2548
   const hoofd = L2_HOOFD[stroom];
   const uit = new Set([hoofd]);
   if (m.afmeld && hoofd !== 'INTAKE' && hoofd !== 'FACTUUR' && !ecobankMelding(m)) uit.add('NIEUWSBRIEF');   // wv2208
@@ -941,7 +949,12 @@ function maak(o) {
     if (!p) return null;
     let alt = {}; try { alt = JSON.parse(p.altijd); } catch (e) { alt = {}; }
     const g = GEDEELD.has(p.id);
-    return Object.assign({}, p, { jev: !!p.jev && !g, tekst: !!p.tekst && !g, gedeeld: g, altijd: alt });
+    if (!g) return Object.assign({}, p, { jev: !!p.jev, tekst: !!p.tekst, gedeeld: false, gelijk: false, altijd: alt });
+    // wv2548: een gedeeld postvak alleen met gedeeld_gelijk; tekst en Jev dan uit config.json (de databankkolommen blijven 0)
+    const c = config(), gg = isObj(c.gedeeld_gelijk) ? c.gedeeld_gelijk[p.id] : null;
+    const gl = isObj(gg) && typeof gg.ja === 'string' && gg.ja.length > 0;
+    const pc = gl && isObj(c.postvakken) && isObj(c.postvakken[p.id]) ? c.postvakken[p.id] : {};
+    return Object.assign({}, p, { jev: gl && pc.jev === true, tekst: gl && pc.tekst === true, gedeeld: true, gelijk: gl, altijd: alt });
   }
   function postvakken() { return db.prepare('SELECT id FROM postvak ORDER BY id').all().map(function (r) { return postvak(r.id); }); }
   function regels(pv, metWeg) {
@@ -966,7 +979,7 @@ function maak(o) {
     let eigen = [];
     try { eigen = (o.eigenAdressen ? o.eigenAdressen() : []).map(function (a) { return String(a).toLowerCase(); }); } catch (e) { eigen = []; }
     return { factuur_alias: typeof pc.factuur_alias === 'string' ? pc.factuur_alias.toLowerCase() : '', eigen, altijd: p.altijd, regels: regels(p.id),
-      stromen: stromen(), twijfel_naar: p.twijfel_naar, todo_nooit: Array.isArray(c.todo_nooit) ? c.todo_nooit.map(String).slice(0, 50) : TODO_NOOIT, gedeeld: p.gedeeld,
+      stromen: stromen(), twijfel_naar: p.twijfel_naar, todo_nooit: Array.isArray(c.todo_nooit) ? c.todo_nooit.map(String).slice(0, 50) : TODO_NOOIT, gedeeld: p.gedeeld, gelijk: !!p.gelijk,
       verkoop: p.id === VERKOOP_POSTVAK };
   }
 
@@ -1120,15 +1133,18 @@ function maak(o) {
         tel[b.stap === 'jev' ? 'jev' : b.stap]++;
         if (pt.tegenhouden) tel.marker++;
         if (zorg) tel.zorg++;
-        const magJev = p.jev && !pt.tegenhouden && !zorg && b.stap !== 'buiten' && b.reden !== 'ecobank' && Object.keys(q).length > 0;   // wv2208
+        // B7-V (wv1997): een verkoopkandidaat in doktersmaten wacht op de pdf-toets; wv2548: zo'n nota (patiënt + vaccinatie) gaat nooit naar Jev
+        // (review gpt-5.5 MOET 1: ook in een inhaalronde nooit naar Jev; alleen de verkoopstatus blijft voor de gewone rondes)
+        const vkJev = p.id === VERKOOP_POSTVAK ? verkoopKandidaat(m, p.id) : { ok: false };
+        const kand = !inhaal ? vkJev : { ok: false };
+        const magJev = p.jev && !pt.tegenhouden && !zorg && !vkJev.ok && b.stap !== 'buiten' && b.reden !== 'ecobank' && Object.keys(q).length > 0;   // wv2208
         // Zonder Jev beslist de regel; de Jev-stap valt dan op Twijfel (doktersmaten: alleen geteld; marker: Intake houdt hem vast)
         let stroom = b.stroom, status = 'klaar', reden = b.reden;
         if (b.stap === 'buiten') stroom = null;
         else if (b.stap === 'jev' && !magJev) { stroom = 'twijfel'; reden = pt.tegenhouden ? 'marker' : (zorg ? 'zorgmail' : 'jev_uit'); }
         if (magJev) status = 'wacht_jev';
-        // B7-V (wv1997): een verkoopkandidaat in doktersmaten wacht op de pdf-toets; het regelbesluit hierboven blijft staan als de gewone
-        // stappen (geen VERKOOP, 24 uur of 3 mislukte toetsen). Een al afgehandelde kandidaat komt hier niet meer (oud klaar).
-        const kand = !inhaal && p.id === VERKOOP_POSTVAK ? verkoopKandidaat(m, p.id) : { ok: false };
+        // B7-V (wv1997): het regelbesluit hierboven blijft staan als de gewone stappen (geen VERKOOP, 24 uur of 3 mislukte toetsen). Een al
+        // afgehandelde kandidaat komt hier niet meer (oud klaar). kand staat hierboven (wv2548).
         if (kand.ok) {
           const vk = verkoopRij.get(m.id);
           if (!vk) db.prepare("INSERT INTO verkoop (postvak, gmail_id, thread_id, ontvangen, van_domein, status, kandidaat_tijd, bijgewerkt) VALUES (?, ?, ?, ?, ?, 'kandidaat', ?, ?)")
@@ -1210,7 +1226,7 @@ function maak(o) {
   // grondwetkaart). → { ok, reden }
   function liveMag(p) {
     if (!p) return { ok: false, reden: 'postvak onbekend' };
-    if (p.gedeeld) return { ok: false, reden: 'gedeeld postvak: live pas na een eigen besluit van David (B7)' };
+    if (p.gedeeld && !p.gelijk) return { ok: false, reden: 'gedeeld postvak: live pas na een eigen besluit van David (B7)' };   // wv2548: gelijk = zoals privé
     const c = config(), t = isObj(c.live_toegestaan) ? c.live_toegestaan[p.id] : null;
     if (!isObj(t) || typeof t.ja !== 'string' || !t.ja) return { ok: false, reden: 'wacht op je Ja op de grondwetkaart (MailMan mag labels zetten)' };
     return { ok: true, reden: 'Ja ' + t.ja.slice(0, 16) };
@@ -1478,7 +1494,7 @@ function maak(o) {
    * verwerkt is eind; verwerkt = bewijs in Intake). Correcties: alleen een categorie die David erbij zet en die MailMan niet plande.
    */
   function l2(p) {
-    if (!p || p.gedeeld) return null;
+    if (!p || (p.gedeeld && !p.gelijk)) return null;   // wv2548
     const c = config(), r = labelset2Lees(isObj(c.labelset2) ? c.labelset2[p.id] : null);
     return r.ok ? r : null;
   }
@@ -1903,7 +1919,7 @@ function maak(o) {
     }
     // overstap (eenmalig)
     let overstapOpen = 0;
-    if (!p.overstap_klaar) {
+    if (!p.overstap_klaar && !p.gedeeld) {   // wv2548: een gedeeld postvak had nooit labelset 1, dus geen overstap
       // alleen mail die MailMan sinds live labelde (review B8a MOET 1: geen labels op mail van vóór live − 24 uur, B5 review #3)
       const kand = db.prepare("SELECT * FROM besluit WHERE postvak = ? AND inhaal = 0 AND status = 'klaar' AND stap != 'buiten' AND overstap_tijd IS NULL AND overstap_poging < ? AND labels_gezet IS NOT NULL ORDER BY id LIMIT 300")
         .all(pv, OVERSTAP_POGINGEN);
@@ -1922,7 +1938,7 @@ function maak(o) {
         if (voeg(b.gmail_id, 'overstap', erbij, eraf)) { n++; db.prepare('UPDATE besluit SET overstap_poging = overstap_poging + 1 WHERE id = ?').run(b.id); }
       }
       if (overstapOpen <= 0) db.prepare('UPDATE postvak SET overstap_klaar = ? WHERE id = ? AND overstap_klaar IS NULL').run(iso(), pv);
-    }
+    } else if (!p.overstap_klaar) db.prepare('UPDATE postvak SET overstap_klaar = ? WHERE id = ? AND overstap_klaar IS NULL').run(iso(), pv);
     // terug (wv2259): David zette in Facturen elke factuur van mail die MailMan archiveerde op Geen factuur → terug in de inbox
     const terugPogingen = [];
     if (iu.ja && typeof o.factuurGeen === 'function' && !vol()) {
@@ -2167,6 +2183,7 @@ function maak(o) {
     if (p.stand !== 'live' || !liveMag(p).ok) return { status: 200, j: { ok: true, stand: p.stand, acties: [] } };
     const set = l2(p);
     if (set) return labels2(d, r, p, set);   // wv2033 B8: labels als routering (alleen met labelset2)
+    if (p.gedeeld) return { status: 200, j: { ok: true, stand: p.stand, acties: [] } };   // wv2548: een gedeeld postvak alleen labelset 2
     const ids = new Set((Array.isArray(d.ids) ? d.ids : []).map(String).filter(function (x) { return ID_RE.test(x); }));
     const sinds = new Date(nu() - WACHTRIJ_MS).toISOString();
     let ruimte = WACHTRIJ_MAX - db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND labels_tijd >= ? AND instr(labels_gezet, ?) > 0").get(p.id, sinds, '"AI/MailMan"').n;
@@ -2719,7 +2736,8 @@ function maak(o) {
   }
   function labelset2Stand(p) {
     const c = config(), t = labelset2Lees(isObj(c.labelset2) ? c.labelset2[p.id] : null);
-    return { actief: t.ok && !p.gedeeld, live: !!l2Live(p), namen: t.ok ? t.namen : [], reden: p.gedeeld ? 'gedeeld postvak: nooit' : t.reden,
+    const dicht = p.gedeeld && !p.gelijk;   // wv2548
+    return { actief: t.ok && !dicht, live: !!l2Live(p), namen: t.ok ? t.namen : [], reden: dicht ? 'gedeeld postvak: wacht op je besluit (B7)' : t.reden,
       sinds: p.labelset2_sinds || null, overstap_klaar: p.overstap_klaar || null };
   }
   function routesOverzicht(pv) {
