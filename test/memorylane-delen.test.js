@@ -894,23 +894,26 @@ test('wv2449 hoofdpersonen: tabel op de vaultpagina, datum van de eerste gelinkt
     fs.writeFileSync(path.join(fam, 'Bram Proefsen.md'), '---\ntype: persoon\ngeboortedatum: 1981-02-29\n---\n# Bram\n');   // geen echte dag
     fs.writeFileSync(path.join(fam, 'Stamboom', 'Bram Proefsen (1981).md'), '---\ngeboren: "1981-02-28"\n---\n');
     fs.writeFileSync(path.join(fam, 'Kees Verzonnen.md'), '---\ntype: persoon\n---\n# Kees\n');
-    fs.writeFileSync(path.join(fam, 'Stamboom', 'Kees Verzonnen (1950).md'), '---\ngeboren: "1950-03-04"\noverleden: "2001-05-06"\n---\n');
+    fs.writeFileSync(path.join(fam, 'Stamboom', 'Kees Verzonnen (1950).md'), '---\ngeslacht: "man"\ngeboren: "1950-03-04"\noverleden: "2001-05-06"\n---\n');
     fs.writeFileSync(path.join(fam, 'Pluis.md'), '---\ntype: huisdier\ngeboren: 2020-04\n---\n');
     fs.writeFileSync(path.join(fam, 'Anna Fictief.md'), '---\ngeboortedatum: 07-08-1999\n---\n');
     fs.writeFileSync(path.join(o.vault, 'geheim.md'), '---\ngeboortedatum: 1900-01-01\n---\n');
     fs.writeFileSync(path.join(o.vault, M.HOOFD_PAGINA), ['---', 'type: lijst', '---', '# Hoofdpersonen', '', '| Naam | Rol | Pagina\'s |', '|---|---|---|',
       '| Bram | ik | [[20_Prive/Proeffamilie/Bram Proefsen|Bram]] [[20_Prive/Proeffamilie/Stamboom/Bram Proefsen (1981)]] |',
-      '| Kees | vader | [[20_Prive/Proeffamilie/Kees Verzonnen]] · [[20_Prive/Proeffamilie/Stamboom/Kees Verzonnen (1950)]] |',
-      '| Pluis | kat | [[20_Prive/Proeffamilie/Pluis]] |', '| Anna | zus | [[20_Prive/Proeffamilie/Anna Fictief]] |',
+      '| Kees | vader | [[20_Prive/Proeffamilie/Kees Verzonnen]] · [[20_Prive/Proeffamilie/Stamboom/Kees Verzonnen (1950)]] | 1,90 m ·  grijs   haar · groene trui |',
+      '| Pluis | kat | [[20_Prive/Proeffamilie/Pluis]] |  |', '| Anna | zus | [[20_Prive/Proeffamilie/Anna Fictief\\|Anna]] | [[20_Prive/Proeffamilie/Pluis]] |', '| Ot | neef | [[20_Prive/Proeffamilie/Bestaat Ook Niet|Ot]] | blond |',
       '| Wim | buurman | [[../geheim]] · [[/etc/passwd]] · [[20_Prive/Proeffamilie/Bestaat Niet]] |', ''].join('\n'));
     const r = o.ml.hoofdpersonen();
     assert.strictEqual(r.status, 200);
     assert.deepStrictEqual(r.body.personen, [
-      { naam: 'Bram', rol: 'ik', geboren: '1981-02-28', overleden: null },   // 29-2-1981 bestaat niet: de tweede pagina
-      { naam: 'Kees', rol: 'vader', geboren: '1950-03-04', overleden: '2001-05-06' },
-      { naam: 'Pluis', rol: 'kat', geboren: '2020-04', overleden: null },
-      { naam: 'Anna', rol: 'zus', geboren: '1999-08-07', overleden: null },
-      { naam: 'Wim', rol: 'buurman', geboren: null, overleden: null }]);
+      // 29-2-1981 bestaat niet: de tweede pagina; wv2579: geslacht van de stamboompagina, uiterlijk uit de vierde kolom (zonder links),
+      // sleutels = de paginanamen zonder "(jaar)", dubbel er één keer in
+      { naam: 'Bram', rol: 'ik', geboren: '1981-02-28', overleden: null, geslacht: null, uiterlijk: null, sleutels: ['Bram Proefsen'] },
+      { naam: 'Kees', rol: 'vader', geboren: '1950-03-04', overleden: '2001-05-06', geslacht: 'man', uiterlijk: '1,90 m · grijs haar · groene trui', sleutels: ['Kees Verzonnen'] },
+      { naam: 'Pluis', rol: 'kat', geboren: '2020-04', overleden: null, geslacht: null, uiterlijk: null, sleutels: ['Pluis'] },
+      { naam: 'Anna', rol: 'zus', geboren: '1999-08-07', overleden: null, geslacht: null, uiterlijk: null, sleutels: ['Anna Fictief'] },
+      { naam: 'Ot', rol: 'neef', geboren: null, overleden: null, geslacht: null, uiterlijk: 'blond', sleutels: ['Bestaat Ook Niet'] },
+      { naam: 'Wim', rol: 'buurman', geboren: null, overleden: null, geslacht: null, uiterlijk: null, sleutels: ['Bestaat Niet'] }]);
     assert.strictEqual(o.ml.hoofdpersonen({ toon: true }).status, 403, 'toonmodus');
     assert.ok(!/Bram|1981/.test(JSON.stringify(o.ml.hoofdpersonen({ toon: true }).body)), 'toonmodus: niets van de lijst');
     assert.strictEqual(M._hoofdDatum('2019-13'), null); assert.strictEqual(M._hoofdDatum('2024-02-29'), '2024-02-29'); assert.strictEqual(M._hoofdDatum('1990'), '1990'); assert.strictEqual(M._hoofdDatum(''), null);

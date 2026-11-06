@@ -204,17 +204,20 @@ function hoofdTabel(tekst) {
   const uit = [];
   for (const regel of zonderFrontmatter(String(tekst || '')).split('\n')) {
     if (!/^\s*\|/.test(regel) || /^\s*\|\s*:?-{2,}/.test(regel)) continue;
-    const c = regel.trim().replace(/^\||\|$/g, '').split('|').map((x) => x.trim());
+    // wv2579: een | binnen [[pad|alias]] (ook \|) splitst geen cel; de links alleen uit de derde kolom, de vierde is het uiterlijk
+    const c = regel.trim().replace(/^\||\|$/g, '').replace(/\[\[[^\]]*\]\]/g, (m) => m.replace(/\\?\|/g, '\u0000')).split('|').map((x) => x.replace(/\u0000/g, '|').trim());
     if (c.length < 3 || /^naam$/i.test(c[0]) || !c[0]) continue;
     const links = [];
     const re = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g;
     let m;
-    while ((m = re.exec(c.slice(2).join('|'))) && links.length < 3) {
+    while ((m = re.exec(c[2])) && links.length < 3) {
       const rel = m[1].trim().replace(/\.md$/i, '');
       if (!rel || rel.startsWith('/') || rel.split('/').some((d) => d === '..' || d === '.' || d === '')) continue;
       links.push(rel + '.md');
     }
-    uit.push({ naam: c[0].slice(0, 60), rol: c[1].slice(0, 60), links });
+    // wv2579: optionele vierde kolom Uiterlijk (vrije tekst: lengte, haar, kleding) voor de poppetjes in de straat; geen links, hooguit 160 tekens
+    const uit4 = c.length >= 4 && c[3].indexOf('[[') < 0 ? c[3].replace(/\s+/g, ' ').trim().slice(0, 160) : '';
+    uit.push({ naam: c[0].slice(0, 60), rol: c[1].slice(0, 60), links, uiterlijk: uit4 || null });
     if (uit.length >= HOOFD_MAX) break;
   }
   return uit;
@@ -223,17 +226,22 @@ function hoofdpersonenLees(vault, vv) {
   let t;
   try { t = vv.lees(path.join(vault, HOOFD_PAGINA), 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return { pagina: false, personen: [] }; throw e; }
   const personen = hoofdTabel(t).map((r) => {
-    let geboren = null, overleden = null;
+    let geboren = null, overleden = null, geslacht = null;
     for (const rel of r.links) {
       const abs = path.join(vault, rel);
       if (abs.indexOf(path.join(vault, path.sep)) !== 0) continue;
       let p; try { p = vv.lees(abs, 'utf8'); } catch (e) { continue; }
+      // wv2579: geslacht (man/vrouw) van de eerste gelinkte pagina die het noemt (stamboom), voor het poppetje in de straat
+      if (!geslacht) { const gs = String(fmVeld(p, 'geslacht') || '').trim().toLowerCase(); if (gs === 'man' || gs === 'vrouw') geslacht = gs; }
+      if (geboren) continue;
       const g = hoofdDatum(fmVeld(p, 'geboortedatum')) || hoofdDatum(fmVeld(p, 'geboren'));
       if (!g) continue;
       geboren = g; overleden = hoofdDatum(fmVeld(p, 'overleden')) || hoofdDatum(fmVeld(p, 'overlijdensdatum'));
-      break;
     }
-    return { naam: r.naam, rol: r.rol, geboren, overleden };
+    // wv2579: sleutels = de paginanamen zoals een herinnering ze als persoon noemt (bestandsnaam zonder "(1984)"), zodat de app het poppetje
+    // bij de juiste huizen zet; uiterlijk = de vierde kolom van de tabel
+    const sleutels = [...new Set(r.links.map((l) => path.basename(l, '.md').replace(/\s*\(.*\)$/, '').trim()).filter(Boolean))];
+    return { naam: r.naam, rol: r.rol, geboren, overleden, geslacht, uiterlijk: r.uiterlijk, sleutels };
   });
   return { pagina: true, personen };
 }
