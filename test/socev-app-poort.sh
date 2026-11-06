@@ -1071,6 +1071,200 @@ async function bewijs(o) {
     r = await vraag('GET', '/app/status', undefined, { pot: pot() });
     toets('8 browser zonder apparaatcookie: geen apparaat, alleen een aanvraag mogelijk', r.j.apparaat === null && r.j.aanvraag_mogelijk === true && r.j.koppelen_open === false, JSON.stringify(r.j));
 
+    // ── 30. wv2554: noodroute als de telefoon kwijt is (ontwerp Noodroute telefoon kwijt § Toetsen; toetsdata verzonnen) ──
+    // Eigen proefwereld (telefoon, pc met vaste plek, laptop); register, staat, Tasker en sessies worden na afloop teruggezet voor § 10.
+    {
+      const RF = path.join(DATA, 'apparaten.json'), SF30 = path.join(DATA, 'staat.json'), TF = path.join(DATA, 'tel-apparaten.json');
+      const bewaar30 = { reg: fs.readFileSync(RF, 'utf8'), staat: fs.existsSync(SF30) ? fs.readFileSync(SF30, 'utf8') : null, tel: fs.existsSync(TF) ? fs.readFileSync(TF, 'utf8') : null,
+        sessies: Object.assign({}, H.appStaat.sessies), aanvraag: H.appStaat.aanvraag, loc: sbStaat.loc, meldingen: sbStaat.meldingen };
+      const rg = () => JSON.parse(fs.readFileSync(RF, 'utf8'));
+      const st30 = () => JSON.parse(fs.readFileSync(SF30, 'utf8'));
+      const versN = async (B) => { const x = await B.p.evaluate(() => post('/api/passkey/opties', {})); return B.p.evaluate(async (y) => post('/api/passkey/bevestig', { antwoord: await bewijs(y) }), x.j.opties); };
+      const sesN = (B) => H.appStaat.sessies[crypto.createHash('sha256').update(B.jar.sessie).digest('hex')];
+      const WIN30 = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0';
+      const WW = 'proef-noodwachtwoord-13';   // verzonnen
+      const boxRijen = [];
+      ctx.werkerBoxRij = (kop, regels) => { boxRijen.push({ kop, regels }); return true; };
+      fs.writeFileSync(RF, JSON.stringify({ versie: 1, ooit_gekoppeld: true, apparaten: [] }));
+      fs.writeFileSync(SF30, '{}');
+      H.appStaat.aanvraag = null; H.appStaat.koppel = null;
+      for (const t of ['koppel', 'openen']) if (H.appStaat.tellers[t]) H.appStaat.tellers[t] = [];
+      H.appStaat.locatie = {}; sbStaat.meldingen = []; sbStaat.loc = { plek: 'Thuis', klasse: 'thuis', ontvangen: Date.now() - 3 * 60000 };
+      fs.writeFileSync(path.join(DATA, 'koppel-heropend'), '');
+      await slaap(1100);
+      const NP = await nieuweBrowser('internal');
+      await vraag('POST', '/app/koppel/code', {}, { pot: NP.jar });
+      o = await NP.p.evaluate((c) => post('/api/koppel/opties', { code: c }), codeUit(telegram[telegram.length - 1]));
+      c2 = await NP.p.evaluate((x) => maak(x), o.j.opties);
+      r = await NP.p.evaluate((c) => post('/api/koppel/registreer', { antwoord: c, naam: 'Proeftelefoon' }), c2);
+      const npId = r.j.apparaat && r.j.apparaat.id;
+      toets('30 vooraf: proeftelefoon via de coderoute is goedkeurder', r.status === 200 && r.j.apparaat.goedkeurder === true, JSON.stringify(r.j));
+      const koppelVia = async (goed, naam, ua, keus) => {
+        await slaap(1100);
+        const B = await nieuweBrowser('internal', ua);
+        const ra = await vraag('POST', '/app/koppel/aanvraag', { naam }, { pot: B.jar });
+        await versN(goed);
+        const rk = await vraag('POST', '/app/koppel/goedkeur', Object.assign({ aanvraag_id: ra.j.aanvraag && ra.j.aanvraag.id }, keus || {}), { pot: goed.jar });
+        if (rk.status !== 200) return { B, ra, rk, rr: { status: 0, j: {} }, id: null };
+        const oo = await B.p.evaluate(() => post('/api/koppel/opties', {}));
+        const cc = await B.p.evaluate((x) => maak(x), oo.j.opties);
+        const rr = await B.p.evaluate((c) => post('/api/koppel/registreer', { antwoord: c }), cc);
+        return { B, ra, rk, rr, id: rr.j.apparaat && rr.j.apparaat.id };
+      };
+      const PC = await koppelVia(NP, 'Proef-pc', WIN30, { soort: 'vast', vaste_plek: 'Tolgaarde' });
+      const LT = await koppelVia(NP, 'Proeflaptop', WIN30);
+      toets('30 vooraf: pc (vast Tolgaarde) en laptop (reist) goedgekeurd door de telefoon', PC.rr.status === 200 && PC.rr.j.apparaat.soort === 'vast' && LT.rr.status === 200 && LT.rr.j.apparaat.soort === 'reist', JSON.stringify([PC.rr.j, LT.rr.j]));
+      fs.writeFileSync(TF, JSON.stringify({ versie: 1, apparaten: [{ id: 'tproef', actief: true, sleutel_hash: 'x'.repeat(64), gekoppeld: new Date().toISOString() }] }));
+      r = await vraag('POST', '/app/proef-invoer', { x: 1 }, { pot: PC.B.jar });
+      toets('30 vooraf: pc op Tolgaarde, telefoon meldt Thuis -> invoer dicht (423)', r.status === 423, r.status);
+
+      // A. noodwachtwoord instellen: alleen op de telefoon, verse vingerafdruk, 10–128 tekens, twee keer gelijk
+      r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: WW, ontkoppelen: false }, { pot: PC.B.jar });
+      toets('30 kwijt zonder ingesteld noodwachtwoord -> 409', r.status === 409 && /nog geen noodwachtwoord/.test(r.j.fout), JSON.stringify(r.j));
+      await versN(LT.B);
+      r = await vraag('POST', '/app/nood/wachtwoord', { wachtwoord: WW, herhaling: WW }, { pot: LT.B.jar });
+      toets('30 noodwachtwoord instellen vanaf de laptop (geen goedkeurder, wel vers) -> 403, niets opgeslagen', r.status === 403 && !rg().nood_ww, JSON.stringify(r.j));
+      await versN(NP); sesN(NP).vers_tot = 0;
+      r = await vraag('POST', '/app/nood/wachtwoord', { wachtwoord: WW, herhaling: WW }, { pot: NP.jar });
+      toets('30 noodwachtwoord op de telefoon zonder verse vingerafdruk -> 403', r.status === 403 && !rg().nood_ww, JSON.stringify(r.j));
+      await versN(NP);
+      r = await vraag('POST', '/app/nood/wachtwoord', { wachtwoord: 'kort12345', herhaling: 'kort12345' }, { pot: NP.jar });
+      const r30b = await vraag('POST', '/app/nood/wachtwoord', { wachtwoord: WW, herhaling: WW + 'x' }, { pot: NP.jar });
+      toets('30 9 tekens -> 400; twee keer intypen verschilt -> 400; niets opgeslagen, vingerafdruk niet verbruikt', r.status === 400 && r30b.status === 400 && /verschillen/.test(r30b.j.fout) && !rg().nood_ww && sesN(NP).vers_tot > Date.now(), JSON.stringify([r.j, r30b.j]));
+      const nTg0 = telegram.length;
+      r = await vraag('POST', '/app/nood/wachtwoord', { wachtwoord: WW, herhaling: WW }, { pot: NP.jar });
+      toets('30 noodwachtwoord instellen op de telefoon -> 200, alleen scrypt-hash (N 32768) in het register', r.status === 200 && r.j.nood_ww.bestaat === true && /^[a-f0-9]{64}$/.test(rg().nood_ww.hash) && rg().nood_ww.n === 32768 && !fs.readFileSync(RF, 'utf8').includes(WW), JSON.stringify(r.j));
+      toets('30 Telegram: noodwachtwoord ingesteld, zonder de waarde', /noodwachtwoord ingesteld op "Proeftelefoon"/.test(telegram[telegram.length - 1]) && !telegram.slice(nTg0).join('\n').includes(WW), telegram[telegram.length - 1]);
+      r = await vraag('POST', '/app/nood/wachtwoord', { wachtwoord: WW, herhaling: WW }, { pot: NP.jar });
+      toets('30 nog een keer op dezelfde vingerafdruk -> 403 (verbruikt)', r.status === 403, JSON.stringify(r.j));
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: PC.B.jar });
+      toets('30 apparatenlijst: nood_ww bestaat, geen noodstand, niet dicht; geen hash in het antwoord', r.status === 200 && r.j.nood_ww.bestaat === true && r.j.nood === null && r.j.nood_dicht_tot === null && !JSON.stringify(r.j).includes(rg().nood_ww.hash), JSON.stringify(r.j.nood_ww));
+
+      // B. misbruik: de telefoon zelf, gestolen sessie, herhaling, raden
+      await versN(NP);
+      r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: WW, ontkoppelen: false }, { pot: NP.jar });
+      toets('30 "Telefoon is kwijt" op de telefoon zelf -> 403', r.status === 403 && /telefoon zelf/.test(r.j.fout) && !rg().nood, JSON.stringify(r.j));
+      await versN(PC.B); sesN(PC.B).vers_tot = 0;
+      r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: WW, ontkoppelen: false }, { pot: PC.B.jar });
+      toets('30 gestolen sessie op de pc (geen verse passkey) -> 403 vers_nodig, telt niet als poging', r.status === 403 && r.j.vers_nodig === true && !(st30().nood_fout || []).length && !rg().nood, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: WW, ontkoppelen: false }, { pot: { apparaat: PC.B.jar.apparaat, sessie: '', koppel: '', ua: WIN30 } });
+      const r30c = await vraag('POST', '/app/nood/kwijt', { wachtwoord: WW, ontkoppelen: false }, { pot: { apparaat: LT.B.jar.apparaat, sessie: PC.B.jar.sessie, koppel: '', ua: WIN30 } });
+      toets('30 alleen het apparaatcookie -> 401; pc-sessie met het cookie van een ander apparaat -> 401', r.status === 401 && r30c.status === 401 && !rg().nood, r.status + ' ' + r30c.status);
+      await versN(PC.B);
+      r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: WW }, { pot: PC.B.jar });
+      toets('30 zonder de keuze ontkoppelen -> 400, vingerafdruk niet verbruikt', r.status === 400 && sesN(PC.B).vers_tot > Date.now(), JSON.stringify(r.j));
+      r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: 'fout-wachtwoord-1', ontkoppelen: false }, { pot: PC.B.jar });
+      toets('30 verkeerd wachtwoord -> 403, poging 1 van 5 in staat.json, Telegram', r.status === 403 && r.j.pogingen_over === 4 && st30().nood_fout.length === 1 && /foute poging met het noodwachtwoord op "Proef-pc" \(1 van 5/.test(telegram[telegram.length - 1]) && !rg().nood, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: WW, ontkoppelen: false }, { pot: PC.B.jar });
+      toets('30 herhaling op dezelfde vingerafdruk (nu met het goede wachtwoord) -> 403 vers_nodig', r.status === 403 && r.j.vers_nodig === true && !rg().nood, JSON.stringify(r.j));
+      for (let i = 2; i <= 5; i++) { await versN(i % 2 ? PC.B : LT.B); r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: i === 3 ? 'x' : 'fout-wachtwoord-' + i, ontkoppelen: false }, { pot: (i % 2 ? PC.B : LT.B).jar }); }
+      toets('30 vijfde foute poging (ook over twee apparaten, ook een te kort wachtwoord) -> route 24 u dicht, Telegram en box-rij', r.status === 403 && r.j.pogingen_over === 0 && st30().nood_dicht_tot > Date.now() + 23 * 3600000 && /24 uur dicht/.test(telegram[telegram.length - 1]) && boxRijen.some((b) => /24 uur dicht/.test(b.kop)), JSON.stringify(r.j));
+      await versN(LT.B);
+      r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: WW, ontkoppelen: false }, { pot: LT.B.jar });
+      toets('30 dicht: het goede wachtwoord -> 429, geen noodstand, vingerafdruk niet verbruikt', r.status === 429 && !!r.j.dicht_tot && !rg().nood && sesN(LT.B).vers_tot > Date.now(), JSON.stringify(r.j));
+      { const ctxN = vm.createContext(ctxGlobals({ setInterval: () => ({ unref() {} }), setTimeout: () => ({ unref() {} }) }));
+        vm.runInContext(blok + '\n;globalThis.__hn = { appNoodDichtTot };', ctxN, { filename: 'server.js#app-nood-herstart' });
+        toets('30 na een herstart (blok opnieuw geladen) blijft de route dicht', !!ctxN.__hn.appNoodDichtTot(), ''); }
+
+      // C. goed + "niet ontkoppelen": pc is 12 u noodapparaat, telefoon blijft
+      fs.writeFileSync(SF30, '{}');   // = 24 u later
+      await versN(PC.B);
+      const nTg2 = telegram.length;
+      r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: WW, ontkoppelen: false }, { pot: PC.B.jar });
+      const n1 = rg().nood || {};
+      toets('30 goed wachtwoord + niet ontkoppelen -> 200, noodstand 12 u op de pc', r.status === 200 && n1.apparaat === PC.id && n1.ontkoppeld === false && Math.abs(Date.parse(n1.tot) - Date.now() - 12 * 3600000) < 60000 && r.j.nood.dit_apparaat === true, JSON.stringify(r.j));
+      toets('30 telefoon blijft gekoppeld en goedkeurder', rg().apparaten.find((x) => x.id === npId).actief === true && rg().apparaten.find((x) => x.id === npId).goedkeurder === true);
+      toets('30 Telegram + box-rij: noodstand, zonder het wachtwoord', /noodstand - "Telefoon is kwijt" op "Proef-pc".*blijft gekoppeld/.test(telegram[nTg2]) && boxRijen.some((b) => /^Noodstand: "Telefoon is kwijt" op "Proef-pc"/.test(b.kop)) && !telegram.join('\n').includes(WW), telegram[nTg2]);
+      r = await vraag('GET', '/app/slot', undefined, { pot: PC.B.jar });
+      const r30s = await vraag('POST', '/app/proef-invoer', { x: 1 }, { pot: PC.B.jar });
+      toets('30 pc-slot open via nood terwijl de telefoon Thuis meldt; invoer komt door het slot (404 op de proefroute, niet 423)', r.j.open === true && r.j.via === 'nood' && r30s.status === 404, JSON.stringify(r.j) + ' ' + r30s.status);
+      await versN(PC.B);
+      r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: WW, ontkoppelen: true }, { pot: PC.B.jar });
+      toets('30 tweede "kwijt" tijdens de noodstand -> 409', r.status === 409 && /loopt al/.test(r.j.fout), JSON.stringify(r.j));
+      // wat het noodapparaat NIET mag (review ZOU 1)
+      const nietMag = [], herstelVoor = JSON.stringify(rg().herstel), wwVoor = rg().nood_ww.hash;
+      for (const [pad, body] of [['/app/herstel/nieuw', {}], ['/app/apparaat/wijzig', { id: LT.id, soort: 'vast', vaste_plek: 'Thuis' }], ['/app/apparaat/open', { id: PC.id, actie: 'open' }], ['/app/nood/wachtwoord', { wachtwoord: 'nieuw-proefwachtwoord', herhaling: 'nieuw-proefwachtwoord' }]]) {
+        await versN(PC.B); const x = await vraag('POST', pad, body, { pot: PC.B.jar }); nietMag.push(pad + ' ' + x.status);
+      }
+      toets('30 noodapparaat: herstelcode, soort/plek, openzetten en noodwachtwoord -> alle 403', nietMag.every((x) => / 403$/.test(x)) && JSON.stringify(rg().herstel) === herstelVoor && rg().nood_ww.hash === wwVoor && !!rg().nood && rg().apparaten.find((x) => x.id === LT.id).soort === 'reist', nietMag.join(', '));
+      // goedkeuren vanaf het noodapparaat (een pc met een vaste plek)
+      await slaap(1100);
+      const T2 = await nieuweBrowser('internal', WIN30);
+      r = await vraag('POST', '/app/koppel/aanvraag', { naam: 'Proef-tweede' }, { pot: T2.jar });
+      const aT2 = r.j.aanvraag;
+      toets('30 aanvraag-Telegram noemt telefoon én noodapparaat', r.status === 200 && /op "Proeftelefoon" of "Proef-pc" \(noodstand\)/.test(telegram[telegram.length - 1]), telegram[telegram.length - 1]);
+      await versN(LT.B);
+      r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aT2.id }, { pot: LT.B.jar });
+      toets('30 goedkeuren vanaf de laptop (geen nood) -> 403', r.status === 403, JSON.stringify(r.j));
+      sesN(NP).vers_tot = Date.now() + 60000;   // vers zonder nieuwe passkey-bevestiging (die zou de noodstand beëindigen; zie D)
+      r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aT2.id, nieuwe_telefoon: true }, { pot: NP.jar });
+      toets('30 "nieuwe telefoon" vanaf de gewone goedkeurder -> 403', r.status === 403 && /noodstand/.test(r.j.fout), JSON.stringify(r.j));
+      await versN(PC.B);
+      r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aT2.id, soort: 'vast', vaste_plek: 'Thuis', nieuwe_telefoon: true }, { pot: PC.B.jar });
+      toets('30 "nieuwe telefoon" met een vaste plek -> 400', r.status === 400, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aT2.id, nieuwe_telefoon: true }, { pot: PC.B.jar });
+      toets('30 noodapparaat keurt goed als "nieuwe telefoon" -> 200', r.status === 200 && r.j.aanvraag.nieuwe_telefoon === true, JSON.stringify(r.j));
+      { const oo = await T2.p.evaluate(() => post('/api/koppel/opties', {})); const cc = await T2.p.evaluate((x) => maak(x), oo.j.opties);
+        r = await T2.p.evaluate((c) => post('/api/koppel/registreer', { antwoord: c }), cc); }
+      toets('30 ... maar de aanvrager is een Windows-pc -> registratie 403, geen nieuwe goedkeurder', r.status === 403 && /geen telefoon/.test(r.j.fout) && rg().apparaten.filter((x) => x.actief && x.goedkeurder).map((x) => x.id).join() === npId, JSON.stringify(r.j));
+      H.appStaat.aanvraag = null;   // = verlopen
+      const T3 = await koppelVia(PC.B, 'Proef-derde', WIN30);
+      toets('30 gewone goedkeuring vanaf het noodapparaat -> gekoppeld, geen goedkeurder, goedgekeurd door de pc', T3.rr.status === 200 && T3.rr.j.apparaat.goedkeurder === false && rg().apparaten.find((x) => x.id === T3.id).goedgekeurd_door === PC.id && /goedgekeurd vanaf "Proef-pc"/.test(telegram[telegram.length - 1]), JSON.stringify(T3.rr.j));
+      // D. de telefoon meldt zich weer (niet ontkoppeld) -> noodstand voorbij
+      await versN(NP);
+      r = await vraag('POST', '/app/proef-invoer', { x: 1 }, { pot: PC.B.jar });
+      toets('30 telefoon bevestigt met vingerafdruk -> noodstand weg, Telegram; pc weer dicht (423)', !rg().nood && /meldde zich weer/.test(telegram[telegram.length - 1]) && r.status === 423, r.status + ' ' + telegram[telegram.length - 1]);
+
+      // E. goed + "ontkoppelen": telefoon ingetrokken, sessies weg, Tasker weg
+      await versN(LT.B);
+      r = await vraag('POST', '/app/nood/kwijt', { wachtwoord: WW, ontkoppelen: true }, { pot: LT.B.jar });
+      const npNa = rg().apparaten.find((x) => x.id === npId);
+      toets('30 goed + ontkoppelen (vanaf de laptop) -> 200, telefoon ingetrokken, geen goedkeurder meer', r.status === 200 && r.j.ontkoppeld.join() === 'Proeftelefoon' && npNa.actief === false && npNa.goedkeurder === false && npNa.cookie_hash === null && /noodroute/.test(npNa.ingetrokken_door) && rg().nood.ontkoppeld === true, JSON.stringify(r.j));
+      toets('30 ... sessies van de telefoon weg, Tasker ingetrokken', !sesN(NP) && JSON.parse(fs.readFileSync(TF, 'utf8')).apparaten.every((x) => !x.actief) && r.j.tel_ingetrokken === 1, JSON.stringify(r.j));
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: NP.jar });
+      toets('30 ... de telefoon zelf krijgt 401', r.status === 401, r.status);
+      r = await vraag('GET', '/app/status', undefined, { pot: pot() });
+      toets('30 ... zonder goedkeurder is een aanvraag toch mogelijk (noodapparaat)', r.j.aanvraag_mogelijk === true, JSON.stringify(r.j));
+      // F. nieuwe telefoon via het noodapparaat wordt de goedkeurder; noodstand voorbij
+      const NT = await koppelVia(LT.B, 'Nieuwe proeftelefoon', null, { nieuwe_telefoon: true });
+      toets('30 nieuwe telefoon via het noodapparaat -> goedkeurder met een nieuwe herstelcode, noodstand weg', NT.rr.status === 200 && NT.rr.j.apparaat.goedkeurder === true && /^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$/.test(NT.rr.j.herstelcode || '') && !rg().nood && rg().herstel.apparaat === NT.id && rg().apparaten.filter((x) => x.actief && x.goedkeurder).length === 1, JSON.stringify(NT.rr.j));
+      toets('30 ... Telegram: "Dit is nu je telefoon"', /Dit is nu je telefoon/.test(telegram[telegram.length - 1]), telegram[telegram.length - 1]);
+      // G. verlopen en beëindigen (register direct gezet)
+      const zetNood = (tot, id) => { const x = rg(); x.nood = { apparaat: id || PC.id, sinds: new Date().toISOString(), tot: new Date(tot).toISOString(), ontkoppeld: false, door_naam: 'Proef-pc' }; fs.writeFileSync(RF, JSON.stringify(x)); H.appStaat.locatie = {}; };
+      zetNood(Date.now() - 1000);
+      r = await vraag('GET', '/app/slot', undefined, { pot: PC.B.jar });
+      toets('30 noodstand na 12 u verlopen: pc-slot weer dicht', r.j.open === false && r.j.via !== 'nood', JSON.stringify(r.j));
+      zetNood(Date.now() - 1000, LT.id);
+      await slaap(1100);
+      const T4 = await nieuweBrowser('internal', WIN30);
+      const ra4 = await vraag('POST', '/app/koppel/aanvraag', { naam: 'Proef-vierde' }, { pot: T4.jar });
+      await versN(LT.B);
+      const rk4 = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: ra4.j.aanvraag.id }, { pot: LT.B.jar });
+      zetNood(Date.now() + 3600000, LT.id);
+      await versN(LT.B);
+      const rk5 = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: ra4.j.aanvraag.id }, { pot: LT.B.jar });
+      toets('30 laptop: verlopen noodstand -> goedkeuren 403; lopende noodstand -> 200 (kruisproef)', rk4.status === 403 && rk5.status === 200, rk4.status + ' ' + rk5.status);
+      H.appStaat.aanvraag = null;
+      zetNood(Date.now() + 3600000);
+      r = await vraag('POST', '/app/nood/einde', {}, { pot: T3.B.jar });
+      const re2 = await vraag('POST', '/app/nood/einde', {}, { pot: PC.B.jar });
+      toets('30 "Noodstand beëindigen": ander apparaat 403, het noodapparaat zelf 200 (zonder vingerafdruk)', r.status === 403 && re2.status === 200 && !rg().nood, r.status + ' ' + re2.status);
+      // H. het wachtwoord nergens in audit, logs, staat of register
+      const auditN30 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+      toets('30 noodwachtwoord niet in audit, logs, staat, register of Telegram', [auditN30, logs.join('\n'), fs.readFileSync(SF30, 'utf8'), fs.readFileSync(RF, 'utf8'), telegram.join('\n'), JSON.stringify(boxRijen)].every((t) => !t.includes(WW) && !t.includes('fout-wachtwoord-')));
+      toets('30 audit: nood-routes met reden', /"route":"\/app\/nood\/kwijt".*"reden":"nood: wachtwoord fout \(1\/5\)"/.test(auditN30) && /noodstand aan \(telefoon ontkoppeld: 1, tasker 1\)/.test(auditN30) && /noodstand voorbij: telefoon terug/.test(auditN30), '');
+      // terugzetten voor § 10
+      fs.writeFileSync(RF, bewaar30.reg);
+      if (bewaar30.staat === null) { try { fs.unlinkSync(SF30); } catch (e) {} } else fs.writeFileSync(SF30, bewaar30.staat);
+      if (bewaar30.tel === null) { try { fs.unlinkSync(TF); } catch (e) {} } else fs.writeFileSync(TF, bewaar30.tel);
+      H.appStaat.sessies = bewaar30.sessies; H.appSessiesBewaar();
+      H.appStaat.aanvraag = bewaar30.aanvraag; H.appStaat.koppel = null; H.appStaat.locatie = {};
+      sbStaat.loc = bewaar30.loc; sbStaat.meldingen = bewaar30.meldingen;
+      try { fs.unlinkSync(path.join(DATA, 'koppel-heropend')); } catch (e) {}
+      delete ctx.werkerBoxRij;
+      for (const B of [NP, PC.B, LT.B, T2, T3.B, NT.B, T4]) { try { await B.c.close(); } catch (e) {} }
+    }
+
     // ── 9. fase 3: gesprek ──
     const bid = () => crypto.randomUUID();
     const gesprekVoor = gestart.length;

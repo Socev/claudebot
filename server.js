@@ -5174,6 +5174,14 @@ const APP_HERSTEL_SCRYPT = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 const APP_HERSTEL_WACHT_MS = 24 * 60 * 60 * 1000;
 const APP_HERSTEL_VENSTER_MS = 48 * 60 * 60 * 1000;
 const APP_HERSTEL_PER_DAG = 5;
+// wv2554: noodroute als de telefoon kwijt is (ontwerp vault 01_Ontwikkeling/Noodroute telefoon kwijt (ontwerp 6-11-2026).md). Op elk
+// gekoppeld apparaat behalve de telefoon zelf: verse passkey van DAT apparaat + het noodwachtwoord (alleen scrypt-hash in het register;
+// in te stellen op de goedkeurder). Daarna is dat apparaat 12 u noodapparaat: goedkeuren (ook een nieuwe telefoon) en invoerslot open.
+const APP_NOOD_SCRYPT = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+const APP_NOOD_MS = 12 * 60 * 60 * 1000;          // zo lang duurt een noodstand
+const APP_NOOD_FOUT_MAX = 5;                       // foute pogingen per 24 u; daarna 24 u dicht (staat.json, overleeft een herstart)
+const APP_NOOD_DICHT_MS = 24 * 60 * 60 * 1000;
+const APP_NOOD_WW_PER_DAG = 5;                     // noodwachtwoord instellen/wijzigen
 const APP_APPARAAT_COOKIE_S = 400 * 24 * 3600;
 const APP_KOPPEL_PER_UUR = 30;                 // koppel/* (streng)
 const APP_OPENEN_PER_UUR = 120;                // passkey/opties (elke start en elke terugkeer na 2 min; review wv55 #5)
@@ -5239,7 +5247,7 @@ const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // Schrijvende routes vallen ONDER het slot, tenzij ze hier staan (nieuwe POST-routes zijn dus vanzelf dicht; Fable § 8i K8).
 // gezien zetten is geen invoer (wv137; ook meldingen/gezien, die op een dicht vast apparaat 423 gaf)
 // wv446 (Fable #1): meldingen/af is omkeerbaar en geen invoer naar Socev, net als gezien
-const APP_SLOT_VRIJ = new Set(['POST /app/omzet', 'POST /app/docs/intrekken', 'POST /app/rij/terug', 'POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/apps-geopend']);   // wv2479: een App openen tellen = lezen   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
+const APP_SLOT_VRIJ = new Set(['POST /app/omzet', 'POST /app/docs/intrekken', 'POST /app/rij/terug', 'POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/apps-geopend', 'POST /app/nood/kwijt', 'POST /app/nood/einde']);   // wv2554: de noodroute moet werken juist als het slot dicht is (telefoon weg); einde maakt alleen dichter   // wv2479: een App openen tellen = lezen   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
@@ -5258,6 +5266,8 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
 function appBeheerVanafVast(route, a, d) {
   if (!(a && a.soort === 'vast') || !APP_BEHEER_ROUTES.has(route)) return false;
   if (route === 'POST /app/apparaat/intrekken' && String((d && d.id) || '') === a.id) return false;
+  // wv2554 (review MOET 2): het noodapparaat mag goedkeuren en afwijzen, ook als APP_VAST_BEHEER_DICHT weer aan zou staan
+  if (route === 'POST /app/koppel/goedkeur' || route === 'POST /app/koppel/afwijs') { try { if (appNoodApparaat(appRegister(), a)) return false; } catch (e) {} }
   if (route === 'POST /app/agenda') return APP_VAST_AGENDA_DICHT;   // wv2369; eigen terugrol, los van APP_VAST_BEHEER_DICHT (review wv2547 ZOU 1)
   if (!APP_VAST_BEHEER_DICHT) return false;   // wv2547: alle plekken mogen alles (invoerslot + verse vingerafdruk van dit apparaat)
   return true;
@@ -5993,8 +6003,21 @@ async function appHerstelKoppel(req, res, reg, k, d) {
 function appGoedkeurder(reg) {
   return reg.apparaten.find(function (a) { return a.actief && a.goedkeurder === true; }) || null;
 }
+// wv2554: de lopende noodstand ({nood, apparaat}) of null. Alleen zolang hij niet verlopen is en het noodapparaat actief is.
+function appNoodLoopt(reg) {
+  const n = reg && reg.nood;
+  if (!n || typeof n !== 'object' || !n.apparaat || !(Date.parse(n.tot) > Date.now())) return null;
+  const x = (reg.apparaten || []).find(function (y) { return y.id === n.apparaat && y.actief; });
+  return x ? { nood: n, apparaat: x } : null;
+}
+function appNoodApparaat(reg, a) { const l = appNoodLoopt(reg); return !!(l && a && l.apparaat.id === a.id); }
+// Wie in de aanvraagmelding als goedkeurder genoemd wordt: de goedkeurder en/of het noodapparaat (review MOET 3).
+function appGoedkeurNamen(reg) {
+  const g = appGoedkeurder(reg), l = appNoodLoopt(reg);
+  return [g ? '"' + g.naam + '"' : null, l ? '"' + l.apparaat.naam + '" (noodstand)' : null].filter(Boolean).join(' of ');
+}
 function appAanvraagMogelijk(reg) {
-  return !!reg.ooit_gekoppeld && !!appGoedkeurder(reg);
+  return !!reg.ooit_gekoppeld && (!!appGoedkeurder(reg) || !!appNoodLoopt(reg));
 }
 function appSysteemVan(beschrijving) { const m = / op (.+)$/.exec(String(beschrijving || '')); return m ? m[1] : ''; }
 function appAanvraagGeldig() {
@@ -6005,7 +6028,7 @@ function appAanvraagGeldig() {
 function appAanvraagVan(req) { const k = appAanvraagGeldig(); return k && appBindingOk(req, k) ? k : null; }
 function appAanvraagUit(k) {
   return { id: k.id, controle: k.controle, naam: k.naam, systeem: k.systeem, status: k.status,
-    sinds: new Date(k.sinds).toISOString(), tot: new Date(k.tot).toISOString(), soort: k.soort || null, vaste_plek: k.vaste_plek || null };
+    sinds: new Date(k.sinds).toISOString(), tot: new Date(k.tot).toISOString(), soort: k.soort || null, vaste_plek: k.vaste_plek || null, nieuwe_telefoon: k.nieuwe_telefoon === true };
 }
 
 async function appKoppelAanvraag(req, res, reg, d) {
@@ -6024,7 +6047,7 @@ async function appKoppelAanvraag(req, res, reg, d) {
     sinds: nu, tot: nu + APP_AANVRAAG_MS, status: 'open', door: null, pogingen: 0 };
   appStaat.aanvraag = n;
   const ok = await appTelegram('Socev-app: nieuw apparaat wil koppelen - "' + n.naam + '" (' + n.systeem + '), controlecode ' + n.controle +
-    '. Goedkeuren kan alleen in de app op "' + appGoedkeurder(reg).naam + '" (tab Apparaten), 10 min geldig. Niet jij? Niet goedkeuren en meld het de machinekamer.');
+    '. Goedkeuren kan alleen in de app op ' + appGoedkeurNamen(reg) + ' (tab Apparaten), 10 min geldig. Niet jij? Niet goedkeuren en meld het de machinekamer.');
   if (!ok) { appStaat.aanvraag = null; return appWeiger(res, 502, 'de melding kon niet via Telegram worden verstuurd; probeer het over een minuut opnieuw', 'telegram'); }
   res._app.reden = 'aanvraag ' + n.controle + ' (' + n.systeem + ')';
   appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(n) }, { koppel: { w: binding, s: APP_AANVRAAG_MAX_MS / 1000 } });
@@ -6047,9 +6070,10 @@ function appAanvraagLijst(req, res) {
 // De vier eisen voor goedkeuren én voor apparaatbeheer vanaf de telefoon (soort/vaste plek wijzigen, openzetten): goedkeurder in
 // het register, vingerafdruk hooguit 2 min oud, sessie geopend met de passkey van DIT apparaat (1Password-sync, § 4.4a), en
 // het systeem uit de user-agent gelijk aan dat bij het koppelen (rem, geen bewijs). Geeft [fout, reden] of null.
-function appGoedkeurderFout(req, a, s, wat) {
-  // a komt uit het register (apparaatcookie), s is aan a gebonden (appSessie)
-  if (a.goedkeurder !== true) return [wat + ' kan alleen op het apparaat dat met de Telegram-code is gekoppeld (je Pixel)', 'geen goedkeurder'];
+function appGoedkeurderFout(req, a, s, wat, noodReg) {
+  // a komt uit het register (apparaatcookie), s is aan a gebonden (appSessie). wv2554: noodReg alleen meegeven waar het noodapparaat
+  // de rol mag overnemen (goedkeuren); herstelcode, soort/plek, openzetten en het noodwachtwoord geven hem niet mee (review MOET 1).
+  if (a.goedkeurder !== true && !(noodReg && appNoodApparaat(noodReg, a))) return [wat + ' kan alleen op het apparaat dat met de Telegram-code is gekoppeld (je Pixel)', 'geen goedkeurder'];
   if (Date.now() > s.vers_tot) return ['bevestig eerst opnieuw met je vingerafdruk', 'niet vers'];
   if (!a.credential || !s.credential || !appGelijk(s.credential, a.credential.id)) return ['bevestig eerst opnieuw met je vingerafdruk', 'sessie niet met de passkey van dit apparaat'];
   const sysNu = appSysteem(req), sysReg = appSysteemVan(a.systeem);
@@ -6069,11 +6093,15 @@ function appKoppelGoedkeur(req, res, reg, a, s, d, afwijzen) {
   const k = appAanvraagGeldig();
   let keus = null;
   if (!afwijzen) {
-    const f = appGoedkeurderFout(req, a, s, 'goedkeuren');
+    const f = appGoedkeurderFout(req, a, s, 'goedkeuren', reg);
     if (f) return appWeiger(res, 403, f[0], f[1]);
     // fase 4 (wv134): meereizend of vaste plek kies je bij de goedkeuring, op de telefoon
     keus = appPlekKeus(d);
     if (keus.fout) return appWeiger(res, 400, keus.fout, 'plek-keus');
+    // wv2554: "dit is mijn nieuwe telefoon" alleen vanaf het noodapparaat en niet als vaste plek; wordt na registratie de goedkeurder
+    if (d.nieuwe_telefoon !== undefined && typeof d.nieuwe_telefoon !== 'boolean') return appWeiger(res, 400, 'ongeldige keuze', 'nieuwe_telefoon');
+    if (d.nieuwe_telefoon === true && !appNoodApparaat(reg, a)) return appWeiger(res, 403, 'een nieuwe telefoon aanwijzen kan alleen vanaf het apparaat met de noodstand', 'nieuwe telefoon: geen noodapparaat');
+    if (d.nieuwe_telefoon === true && keus.soort === 'vast') return appWeiger(res, 400, 'een telefoon reist mee; kies geen vaste plek', 'nieuwe telefoon vast');
   }
   if (!k || k.status !== 'open' || !/^[a-f0-9]{16}$/.test(id) || !appGelijk(id, k.id))
     return appWeiger(res, 409, 'deze aanvraag bestaat niet (meer); ververs de lijst', 'aanvraag-id klopt niet');
@@ -6082,7 +6110,7 @@ function appKoppelGoedkeur(req, res, reg, a, s, d, afwijzen) {
     res._app.reden = 'afgewezen ' + k.controle;
     return appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(k) });
   }
-  k.status = 'goedgekeurd'; k.door = a.id; k.soort = keus.soort; k.vaste_plek = keus.vaste_plek;
+  k.status = 'goedgekeurd'; k.door = a.id; k.soort = keus.soort; k.vaste_plek = keus.vaste_plek; k.nieuwe_telefoon = d.nieuwe_telefoon === true;
   k.tot = Math.min(k.sinds + APP_AANVRAAG_MAX_MS, Math.max(k.tot, Date.now() + 5 * 60 * 1000));   // tijd voor de passkey, binnen het cookie
   res._app.reden = 'goedgekeurd ' + k.controle + ' (' + k.systeem + ', ' + appPlekTekst(k) + ')';
   appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(k) });
@@ -6164,7 +6192,10 @@ async function appKoppelRegistreer(req, res, reg, d) {
   // wv135: kan dit de goedkeurder worden, dan nu al de nieuwe herstelcode maken (scrypt is asynchroon; na het herlezen van
   // het register hieronder komt geen await meer, zodat code en goedkeurder in één schrijfactie landen).
   const telefoon = appTelefoon(req);
-  const nieuw = bron.soort === 'code' && telefoon ? await appHerstelMaak(null) : null;
+  // wv2554: goedgekeurd als "nieuwe telefoon" door het noodapparaat: wordt de goedkeurder (met een nieuwe herstelcode, zoals de coderoute)
+  const nieuwTel = bron.soort === 'aanvraag' && k.nieuwe_telefoon === true;
+  if (nieuwTel && !telefoon) return appWeiger(res, 403, 'dit apparaat is geen telefoon; vraag opnieuw aan en laat het goedkeuren zonder "nieuwe telefoon"', 'nieuwe telefoon: geen telefoon');
+  const nieuw = (bron.soort === 'code' && telefoon) || nieuwTel ? await appHerstelMaak(null) : null;
   const vers = appRegister();   // opnieuw lezen vlak voor het schrijven
   let door = null;
   if (bron.soort === 'code') {
@@ -6172,7 +6203,9 @@ async function appKoppelRegistreer(req, res, reg, d) {
     if (appStaat.koppel !== k) return appWeiger(res, 403, 'geen geldige code; vraag een nieuwe aan', 'koppeling vervallen (intussen)');
   } else {
     // de aanvraag moet nog dezelfde zijn, en wie hem goedkeurde nog de actieve goedkeurder
-    door = vers.apparaten.find(function (x) { return x.id === k.door && x.actief && x.goedkeurder === true; });
+    // wv2554 (review MOET 4): of het noodapparaat van de lopende noodstand; een nieuwe telefoon alleen zolang die noodstand loopt
+    door = vers.apparaten.find(function (x) { return x.id === k.door && x.actief && (x.goedkeurder === true || appNoodApparaat(vers, x)); });
+    if (door && nieuwTel && !appNoodApparaat(vers, door)) door = null;
     if (appStaat.aanvraag !== k || k.status !== 'goedgekeurd' || !door) return appWeiger(res, 403, 'de goedkeuring geldt niet meer; vraag opnieuw aan', 'goedkeuring vervallen');
   }
   if (vers.apparaten.some(function (a) { return a.credential && a.credential.id === cred.id; })) return fout('deze passkey is al gekoppeld');
@@ -6182,8 +6215,8 @@ async function appKoppelRegistreer(req, res, reg, d) {
   const nu = new Date().toISOString();
   // Alleen de coderoute maakt een goedkeurder, alleen op een telefoon, en - als er een herstelcode is - alleen met die code
   // (of in het venster van herstel-vervalt). Zonder: wel gekoppeld, geen goedkeurder (zoals de laptop).
-  let goedkeurder = bron.soort === 'code' && telefoon, herstelVia = null;
-  if (goedkeurder && vers.herstel && vers.herstel.hash) {
+  let goedkeurder = (bron.soort === 'code' && telefoon) || nieuwTel, herstelVia = null;
+  if (goedkeurder && bron.soort === 'code' && vers.herstel && vers.herstel.hash) {
     if (appHerstelVervaltOpen()) herstelVia = 'vervallen';
     else if (k.herstel_ok && k.herstel_ok === vers.herstel.gemaakt) herstelVia = 'herstelcode';
     else goedkeurder = false;
@@ -6193,7 +6226,7 @@ async function appKoppelRegistreer(req, res, reg, d) {
     cookie_hash: appSha(geheim), credential: { id: cred.id, publicKey: Buffer.from(cred.publicKey).toString('base64url'), counter: cred.counter || 0,
       transports: appTransports(cred.transports) },
     passkey: { soort: v.registrationInfo.credentialDeviceType, backup: !!v.registrationInfo.credentialBackedUp, aaguid: v.registrationInfo.aaguid },
-    gekoppeld_via: bron.soort === 'code' ? 'telegram-code' : 'goedkeuring', goedgekeurd_door: door ? door.id : undefined,
+    gekoppeld_via: bron.soort === 'code' ? 'telegram-code' : nieuwTel ? 'goedkeuring (noodstand)' : 'goedkeuring', goedgekeurd_door: door ? door.id : undefined,
     // Precies één goedkeurder: de vorige verliest het recht (wisselen = machinekamer). Rem (Fable-review wv89): alleen een
     // telefoon (Android/iOS volgens de user-agent; te vervalsen, daarom sinds wv135 ook de herstelcode).
     goedkeurder: goedkeurder };
@@ -6202,6 +6235,7 @@ async function appKoppelRegistreer(req, res, reg, d) {
     nieuw.rij.apparaat = id;
     if (herstelVia === 'herstelcode' && k.herstel_code) nieuw.rij.vorige = k.herstel_code;   // de papieren code die David net gebruikte
     vers.herstel = nieuw.rij;   // de oude code is hiermee verbruikt; de nieuwe ziet David één keer in dit antwoord
+    if (vers.nood) vers.nood = null;   // wv2554: een nieuwe goedkeurder beëindigt de noodstand
   }
   vers.apparaten.push(apparaat);
   vers.ooit_gekoppeld = true;
@@ -6216,7 +6250,9 @@ async function appKoppelRegistreer(req, res, reg, d) {
       (herstelVia === 'herstelcode' ? ' (met je herstelcode; die is nu verbruikt)' : herstelVia === 'vervallen' ? ' (zonder herstelcode, na de wachttijd)' : '') + '. De app toont daar één keer een nieuwe herstelcode.'
       : telefoon ? 'Zonder je herstelcode, dus geen goedkeurder' + blijft : 'Geen telefoon, dus geen goedkeurder' + blijft) +
       ' De koppelroute met code is nu dicht. Niet jij? /app-noodstop en meld het de machinekamer.'
-    : 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + ', ' + appPlekTekst(apparaat) + '), goedgekeurd vanaf "' + door.naam + '". Niet jij? Trek het in (tab Apparaten) en meld het de machinekamer.');
+    : 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + ', ' + appPlekTekst(apparaat) + '), goedgekeurd vanaf "' + door.naam + '".' +
+      (nieuwTel ? ' Dit is nu je telefoon: alleen dit apparaat keurt voortaan nieuwe apparaten goed en de noodstand is voorbij. De app toont daar één keer een nieuwe herstelcode.' : '') +
+      ' Niet jij? Trek het in (tab Apparaten) en meld het de machinekamer.');
   appStuur(res, 200, { ok: true, apparaat: { id: id, naam: naam, soort: apparaat.soort, vaste_plek: apparaat.vaste_plek, goedkeurder: apparaat.goedkeurder },
     herstelcode: apparaat.goedkeurder ? appHerstelToon(nieuw.code) : undefined, herstel_gemaakt: apparaat.goedkeurder ? nieuw.rij.gemaakt : undefined },
     { koppel: null, apparaat: { w: id + '.' + geheim, s: APP_APPARAAT_COOKIE_S }, sessie: appNieuweSessie(apparaat, cred.id, sleutel) });
@@ -6294,7 +6330,15 @@ async function appPasskeyBevestig(req, res, reg, d) {
   if (!x || !x.actief) return appWeiger(res, 401, 'onbekend apparaat', 'intussen ingetrokken');
   x.credential.counter = v.authenticationInfo.newCounter || 0;
   x.laatst_gezien = new Date().toISOString();
-  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); }
+  // wv2554: de telefoon (goedkeurder) meldt zich weer met zijn vingerafdruk en werd niet ontkoppeld: de noodstand is voorbij
+  const noodTerug = x.goedkeurder === true && appNoodLoopt(vers) && vers.nood.ontkoppeld !== true ? vers.nood : null;
+  if (noodTerug) vers.nood = null;
+  let geschreven = true;
+  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { geschreven = false; logError('app-register', e); }
+  if (noodTerug && geschreven) {   // review diff MOET 2: alleen melden als het einde echt op schijf staat
+    appAudit({ route: 'nood', m: 'POST', status: 200, apparaat: x.id, reden: 'noodstand voorbij: telefoon terug' });
+    appTelegram('Socev-app: je telefoon "' + x.naam + '" meldde zich weer met je vingerafdruk; de noodstand op "' + noodTerug.door_naam + '" is voorbij.');
+  }
   res._app.reden = 'bevestigd' + (u.sleutel ? ' (apparaatsleutel)' : ' (zonder apparaatsleutel)');
   const sessie = appNieuweSessie(x, antw.id, u.sleutel || null);   // wv316: alleen de sleutel uit de eigen uitdaging, nooit uit deze body
   // wv205: tot wanneer deze vingerafdruk geldt; de app vraagt hem op een meereizend apparaat pas daarna opnieuw (de pod blijft rechter)
@@ -6314,7 +6358,8 @@ async function appApparatenLijst(req, res, reg, a) {
   // fase 4: de telefoon ziet of het slot open is; een ander apparaat alleen zijn eigen slot (de redenen samen zouden verraden waar
   // David is; review wv134 M2)
   for (const x of reg.apparaten) if (x.actief && x.soort === 'vast' && (a.goedkeurder === true || x.id === a.id)) sloten[x.id] = await appSlot(x);
-  appStuur(res, 200, { ok: true, herstel: appHerstelUit(reg), plekken: Object.keys(APP_PLEKKEN), apparaten: reg.apparaten.map(function (x) {
+  appStuur(res, 200, { ok: true, herstel: appHerstelUit(reg), plekken: Object.keys(APP_PLEKKEN), nood_ww: appNoodWwUit(reg), nood: appNoodUit(reg, a), nood_dicht_tot: appNoodDichtTot(),
+    apparaten: reg.apparaten.map(function (x) {
     return { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, systeem: x.systeem, aangemaakt: x.aangemaakt,
       laatst_gezien: x.laatst_gezien, actief: !!x.actief, ingetrokken_op: x.ingetrokken_op || null, dit_apparaat: x.id === a.id,
       passkey_gesynchroniseerd: !!(x.passkey && x.passkey.backup), gekoppeld_via: x.gekoppeld_via || null, goedkeurder: x.goedkeurder === true,
@@ -6346,6 +6391,159 @@ function appHerstelBevestigd(req, res, reg, a, d) {
   try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
   res._app.reden = 'herstelcode opgeschreven';
   appStuur(res, 200, { ok: true, herstel: appHerstelUit(vers) });
+}
+
+// ── wv2554: noodroute als de telefoon kwijt is (ontwerp vault 01_Ontwikkeling/Noodroute telefoon kwijt (ontwerp 6-11-2026).md) ──
+// Het noodwachtwoord staat alleen als scrypt-hash in het register (nood_ww); de waarde komt nergens anders (niet in audit, log,
+// Telegram of antwoord). Instellen alleen op de goedkeurder (vier eisen): anders kon wie één pc-sessie met passkey heeft zelf een
+// wachtwoord zetten en zo goedkeurder worden. Gebruiken op elk ander gekoppeld apparaat: verse passkey van DAT apparaat (verbruikt,
+// één vingerafdruk = één poging) + het wachtwoord; 5 fouten per 24 u = 24 u dicht (staat.json). Daarna 12 u noodapparaat.
+function appNoodWwNorm(ruw) {
+  if (typeof ruw !== 'string') return null;
+  const w = ruw.normalize('NFC');
+  const n = Array.from(w).length;
+  return n >= 10 && n <= 128 && !/\p{Cc}/u.test(w) ? w : null;
+}
+function appNoodScrypt(ww, zout, N) {
+  // asynchroon (zoals de herstelcode): 32 MB scrypt blokkeert anders de pod per poging
+  const opt = Object.assign({}, APP_NOOD_SCRYPT, N ? { N: N } : {});
+  return new Promise(function (ok, nee) { crypto.scrypt(Buffer.from(ww, 'utf8'), Buffer.from(zout, 'hex'), 32, opt, function (e, k) { if (e) nee(e); else ok(k.toString('hex')); }); });
+}
+function appNoodWwUit(reg) { const w = reg.nood_ww; return { bestaat: !!(w && w.hash), gemaakt: w && w.gemaakt || null }; }
+function appNoodUit(reg, a) {
+  const l = appNoodLoopt(reg);
+  return l ? { actief: true, dit_apparaat: !!a && l.apparaat.id === a.id, apparaat_naam: l.apparaat.naam, sinds: l.nood.sinds, tot: l.nood.tot, ontkoppeld: l.nood.ontkoppeld === true } : null;
+}
+function appNoodDichtTot() {
+  try { const t = Number(appLeesStreng(APP_STAAT, {}).nood_dicht_tot) || 0; return t > Date.now() ? new Date(t).toISOString() : null; }
+  catch (e) { return null; }
+}
+function appNoodBox(kop, regels) {
+  try { if (typeof werkerBoxRij === 'function') werkerBoxRij(kop, regels); } catch (e) { logError('app-nood', e); }
+}
+// Seintje naar elk apparaat met een (niet verlopen) abonnement; appPushStuur slaat ingetrokken apparaten zelf over.
+async function appNoodSeintjes() {
+  try {
+    if (!(await appRolOk())) return;
+    const p = appPushLees();
+    for (const id of Object.keys(p.apparaten)) if (!p.apparaten[id].verlopen) await appPushStuur(id, 'noodstand');
+  } catch (e) { logError('app-nood', e); }
+}
+// POST /app/nood/wachtwoord {wachtwoord, herhaling}: alleen op de goedkeurder, verse vingerafdruk (verbruikt), 10–128 tekens.
+async function appNoodWachtwoord(req, res, reg, a, s, d) {
+  const f = appGoedkeurderFout(req, a, s, 'het noodwachtwoord instellen');   // zonder noodrecht (review MOET 1)
+  if (f) return appWeiger(res, 403, f[0], f[1]);
+  const ww = appNoodWwNorm(d.wachtwoord), her = appNoodWwNorm(d.herhaling);
+  if (!ww) return appWeiger(res, 400, 'kies een noodwachtwoord van 10 tot 128 tekens', 'nood-ww vorm');
+  if (!her || !appGelijk(her, ww)) return appWeiger(res, 400, 'de twee keer intypen verschillen', 'nood-ww herhaling');
+  if (!appTijdslot(res, 'nood_ww_tijden', APP_NOOD_WW_PER_DAG)) return;   // synchroon: een 429 verbruikt de vingerafdruk niet
+  s.vers_tot = 0;   // verbruikt vóór de await (twee tabbladen = niet twee keer op één vingerafdruk)
+  const zout = crypto.randomBytes(16).toString('hex');
+  let hash;
+  try { hash = await appNoodScrypt(ww, zout); } catch (e) { logError('app-nood', e); return appWeiger(res, 500, 'het noodwachtwoord kon niet worden opgeslagen', 'nood-ww scrypt'); }
+  const vers = appRegister();
+  const x = vers.apparaten.find(function (y) { return y.id === a.id && y.actief && y.goedkeurder === true; });
+  if (!x) return appWeiger(res, 403, 'dit apparaat is (intussen) geen goedkeurder meer', 'geen goedkeurder (intussen)');
+  const was = !!(vers.nood_ww && vers.nood_ww.hash);
+  vers.nood_ww = { hash: hash, zout: zout, n: APP_NOOD_SCRYPT.N, gemaakt: new Date().toISOString(), apparaat: x.id };
+  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
+  res._app.reden = was ? 'noodwachtwoord gewijzigd' : 'noodwachtwoord ingesteld';
+  appTelegram('Socev-app: noodwachtwoord ' + (was ? 'gewijzigd' : 'ingesteld') + ' op "' + x.naam + '". Niet jij? /app-noodstop en meld het de machinekamer.');
+  appStuur(res, 200, { ok: true, nood_ww: appNoodWwUit(vers) });
+}
+// POST /app/nood/kwijt {wachtwoord, ontkoppelen: true|false}. In APP_SLOT_VRIJ (werkt juist met een dicht slot).
+async function appNoodKwijt(req, res, reg, a, s, d) {
+  if (!reg.nood_ww || !reg.nood_ww.hash) return appWeiger(res, 409, 'er is nog geen noodwachtwoord; stel het in op je telefoon (⚙ › Apparaten)', 'nood: geen wachtwoord');
+  if (a.goedkeurder === true) return appWeiger(res, 403, 'dit is je telefoon zelf; gebruik "Telefoon is kwijt" op een ander apparaat', 'nood: op de goedkeurder');
+  const st = appLeesStreng(APP_STAAT, {});   // kapot = gooien = 500 (dicht)
+  const dichtTot = Number(st.nood_dicht_tot) || 0;
+  if (dichtTot > Date.now()) {
+    res._app.reden = 'nood: dicht';
+    return appStuur(res, 429, { ok: false, fout: 'te veel foute pogingen; de noodroute is dicht tot ' + appDagKlok(new Date(dichtTot).toISOString()) + '. Gebruik zo nodig /app-noodstop in Telegram.', dicht_tot: new Date(dichtTot).toISOString() });
+  }
+  const loopt = appNoodLoopt(reg);
+  if (loopt) return appWeiger(res, 409, 'de noodstand loopt al (op "' + loopt.apparaat.naam + '", tot ' + appKlok(loopt.nood.tot) + ')', 'nood: loopt al');
+  if (typeof d.ontkoppelen !== 'boolean') return appWeiger(res, 400, 'kies of je telefoon ook ontkoppeld wordt', 'nood: keuze');
+  if (appStaat.noodBezig) return appWeiger(res, 429, 'er loopt al een poging; probeer het zo opnieuw', 'nood: bezig');
+  if (!appVersOk(a, s)) { res._app.reden = 'nood, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig eerst met de vingerafdruk of pincode van dit apparaat', vers_nodig: true }); }
+  s.vers_tot = 0;   // één vingerafdruk = één poging; een herhaald verzoek valt hierop af (vóór de await)
+  appStaat.noodBezig = true;
+  let goed = false;
+  try {
+    const ww = appNoodWwNorm(d.wachtwoord);
+    const h = await appNoodScrypt(ww || '-', reg.nood_ww.zout, reg.nood_ww.n);   // ook bij een ongeldige vorm rekenen (zelfde tijd)
+    goed = !!ww && appGelijk(h, reg.nood_ww.hash);
+  } catch (e) { appStaat.noodBezig = false; logError('app-nood', e); return appWeiger(res, 500, 'fout op de pod', 'nood: scrypt'); }
+  appStaat.noodBezig = false;
+  if (!goed) {
+    const nu = Date.now();
+    let n = APP_NOOD_FOUT_MAX, dicht = true;
+    try {
+      const st2 = appLeesStreng(APP_STAAT, {});
+      const fouten = (Array.isArray(st2.nood_fout) ? st2.nood_fout : []).filter(function (t) { return nu - t < APP_NOOD_DICHT_MS; });
+      fouten.push(nu);
+      n = fouten.length; dicht = n >= APP_NOOD_FOUT_MAX;
+      st2.nood_fout = dicht ? [] : fouten;
+      if (dicht) st2.nood_dicht_tot = nu + APP_NOOD_DICHT_MS;
+      appSchrijfJson(APP_STAAT, st2);
+    } catch (e) { logError('app-nood', e); }   // niet te tellen: de volgende poging leest een kapotte staat en is dicht (500)
+    res._app.reden = 'nood: wachtwoord fout (' + n + '/' + APP_NOOD_FOUT_MAX + ')' + (dicht ? ', 24 u dicht' : '');
+    appTelegram('Socev-app: foute poging met het noodwachtwoord op "' + a.naam + '" (' + n + ' van ' + APP_NOOD_FOUT_MAX + ' in 24 uur).' +
+      (dicht ? ' De noodroute is nu 24 uur dicht.' : '') + ' Niet jij? Trek dat apparaat in of gebruik /app-noodstop, en meld het de machinekamer.');
+    if (dicht) appNoodBox('Noodroute 24 uur dicht na ' + APP_NOOD_FOUT_MAX + ' foute pogingen (wv2554)', ['status: open', 'van: pod (app-nood)', 'apparaat laatste poging: "' + a.naam + '" (' + a.id + ')',
+      'te doen: nagaan of dit David was (audit.jsonl, route /app/nood/kwijt); zo niet, het apparaat intrekken']);
+    return appStuur(res, 403, { ok: false, fout: dicht ? 'noodwachtwoord klopt niet; na ' + APP_NOOD_FOUT_MAX + ' foute pogingen is de noodroute 24 uur dicht' : 'noodwachtwoord klopt niet; nog ' + (APP_NOOD_FOUT_MAX - n) + ' poging(en) in 24 uur',
+      pogingen_over: dicht ? 0 : APP_NOOD_FOUT_MAX - n, dicht_tot: dicht ? new Date(nu + APP_NOOD_DICHT_MS).toISOString() : null });
+  }
+  // goed: het register opnieuw lezen en de controles herhalen (er zat een await tussen)
+  const vers = appRegister();
+  const x = vers.apparaten.find(function (y) { return y.id === a.id && y.actief; });
+  if (!x || x.goedkeurder === true) return appWeiger(res, 403, 'dit apparaat kan (intussen) geen noodstand krijgen', 'nood: apparaat veranderd');
+  // review diff ZOU 1: tijdens de scrypt gewijzigd noodwachtwoord = deze poging telt niet (opnieuw proberen met het nieuwe)
+  if (!vers.nood_ww || vers.nood_ww.hash !== reg.nood_ww.hash) return appWeiger(res, 409, 'het noodwachtwoord is net gewijzigd; probeer het opnieuw', 'nood: wachtwoord intussen gewijzigd');
+  const l2 = appNoodLoopt(vers);
+  if (l2) return appWeiger(res, 409, 'de noodstand loopt al (op "' + l2.apparaat.naam + '")', 'nood: loopt al (intussen)');
+  const nu = Date.now(), nuIso = new Date(nu).toISOString();
+  vers.nood = { apparaat: x.id, sinds: nuIso, tot: new Date(nu + APP_NOOD_MS).toISOString(), ontkoppeld: d.ontkoppelen === true, door_naam: x.naam };
+  const weg = [];
+  if (d.ontkoppelen === true) vers.apparaten.forEach(function (y) {
+    if (!y.actief || y.goedkeurder !== true) return;
+    y.actief = false; y.cookie_hash = null; y.goedkeurder = false; y.ingetrokken_op = nuIso; y.ingetrokken_door = 'noodroute (' + x.naam + ')';
+    weg.push(y);
+  });
+  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
+  try { const st3 = appLeesStreng(APP_STAAT, {}); if (st3.nood_fout) { delete st3.nood_fout; appSchrijfJson(APP_STAAT, st3); } } catch (e) { logError('app-nood', e); }
+  weg.forEach(function (y) {
+    appSessiesWeg(y.id);
+    delete appStaat.uitdagingen[y.id];
+    appConceptWeg(y.id);
+    if (appStaat.aanvraag && appStaat.aanvraag.door === y.id) appStaat.aanvraag = null;
+  });
+  let tel = null;
+  if (d.ontkoppelen === true) { try { tel = telIntrekken('noodroute'); } catch (e) { tel = { ingetrokken: 0, fout: String(e && e.message || e).slice(0, 80) }; } }
+  res._app.reden = 'noodstand aan (' + (d.ontkoppelen ? 'telefoon ontkoppeld: ' + weg.length + (tel ? ', tasker ' + tel.ingetrokken : '') : 'telefoon blijft') + ')' + (tel && tel.fout ? ', tel-fout ' + tel.fout : '');
+  const tot = appKlok(vers.nood.tot);
+  appTelegram('Socev-app: noodstand - "Telefoon is kwijt" op "' + x.naam + '". ' +
+    (d.ontkoppelen ? 'Je telefoon' + (weg.length ? ' ("' + weg.map(function (y) { return y.naam; }).join('", "') + '")' : '') + ' is ontkoppeld.' : 'Je telefoon blijft gekoppeld; meldt hij zich met je vingerafdruk, dan stopt de noodstand.') +
+    ' Tot ' + tot + ' mag "' + x.naam + '" nieuwe apparaten goedkeuren en neemt het invoer aan zonder telefoon. Niet jij? /app-noodstop en meld het de machinekamer.');
+  appNoodBox('Noodstand: "Telefoon is kwijt" op "' + x.naam + '" (wv2554)', ['status: open', 'van: pod (app-nood), ' + nuIso,
+    'keuze: ' + (d.ontkoppelen ? 'telefoon ontkoppeld (' + weg.length + ' apparaat, Tasker ' + (tel ? tel.ingetrokken : 0) + ')' + (tel && tel.fout ? ', Tasker-fout: ' + tel.fout : '') : 'telefoon blijft gekoppeld'),
+    'loopt tot ' + vers.nood.tot + '; daarna, of bij een nieuwe telefoon, vanzelf voorbij', 'te doen: niets, tenzij David dit niet was (dan /app-noodstop)']);
+  appNoodSeintjes();
+  appStuur(res, 200, { ok: true, nood: appNoodUit(vers, x), ontkoppeld: weg.map(function (y) { return y.naam; }), tel_ingetrokken: tel ? tel.ingetrokken : 0, tel_fout: tel && tel.fout || null });
+}
+// POST /app/nood/einde: het noodapparaat of de goedkeurder beëindigt de noodstand. Geen vingerafdruk: maakt alleen dichter.
+function appNoodEinde(req, res, reg, a) {
+  const l = appNoodLoopt(reg);
+  if (!l) return appStuur(res, 200, { ok: true, al: true });
+  if (l.apparaat.id !== a.id && a.goedkeurder !== true) return appWeiger(res, 403, 'alleen het apparaat met de noodstand of je telefoon kan hem beëindigen', 'nood-einde: ander apparaat');
+  const vers = appRegister();
+  if (!vers.nood) return appStuur(res, 200, { ok: true, al: true });
+  vers.nood = null;
+  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
+  res._app.reden = 'noodstand beëindigd';
+  appTelegram('Socev-app: noodstand op "' + l.apparaat.naam + '" beëindigd (vanaf "' + a.naam + '").');
+  appStuur(res, 200, { ok: true });
 }
 
 function appIntrekken(req, res, reg, a, s, d) {
@@ -6412,6 +6610,14 @@ async function appSlot(a) {
   // wv2369: agenda_knoppen = mag dit apparaat de agenda-✅/↩️ drukken (de app toont ze anders niet; schakelaar APP_VAST_AGENDA_DICHT)
   if (!a || a.soort !== 'vast') return { vast: false, open: true, agenda_knoppen: true };
   const uit = { vast: true, plek: a.vaste_plek || null, open: false, via: null, open_tot: null, reden: '', agenda_knoppen: !APP_VAST_AGENDA_DICHT };
+  // wv2554: noodapparaat = open tot het einde van de noodstand, zonder telefoonsignaal (de telefoon is weg of meldt de verkeerde plek)
+  let nl = null;
+  try { nl = appNoodLoopt(appRegister()); } catch (e) { nl = null; }   // register onleesbaar: gewoon de regels hieronder (dicht)
+  if (nl && nl.apparaat.id === a.id) {
+    uit.open = true; uit.via = 'nood'; uit.open_tot = nl.nood.tot;
+    uit.reden = 'noodstand (telefoon kwijt): open tot ' + appKlok(nl.nood.tot);
+    return uit;
+  }
   const naam = Object.prototype.hasOwnProperty.call(APP_PLEKKEN, a.vaste_plek) ? APP_PLEKKEN[a.vaste_plek] : null;
   if (!naam) { uit.reden = 'dit apparaat heeft geen geldige vaste plek; stel hem in op je telefoon'; return uit; }
   const o = a.open && Date.parse(a.open.tot) > Date.now() && a.open.sinds ? a.open : null;
@@ -12337,7 +12543,7 @@ function appPushNaBeurt(jobId) {
 // ── wv804: één meldingenkanaal fase 3 (bouwplan § 4.2–4.4, ontwerp § 2–5, Fable-review § 11) ──
 // Alleen-Pixel (ontwerp § 3): een antwoord-seintje gaat naar de goedkeurder, of naar een apparaat met soort zoem in push.json.
 function appPushMag(id, reg, s) {
-  try { const g = appGoedkeurder(reg || appRegister()); if (g && g.id === id) return true; } catch (e) {}
+  try { const r = reg || appRegister(), g = appGoedkeurder(r); if (g && g.id === id) return true; if (appNoodApparaat(r, { id: id })) return true; } catch (e) {}   // wv2554: het noodapparaat ook
   try { if (s === undefined) s = appPushLees().apparaten[id]; } catch (e) { return false; }
   return !!s && (s.soorten || []).indexOf('zoem') >= 0;
 }
@@ -12734,6 +12940,9 @@ function handleApp(req, res) {
         if (route === 'POST /app/koppel/afwijs') return appKoppelGoedkeur(req, res, reg, a, s, d, true);
         if (route === 'POST /app/herstel/nieuw') return appHerstelNieuw(req, res, reg, a, s);
         if (route === 'POST /app/herstel/bevestigd') return appHerstelBevestigd(req, res, reg, a, d);
+        if (route === 'POST /app/nood/wachtwoord') return appNoodWachtwoord(req, res, reg, a, s, d);   // wv2554
+        if (route === 'POST /app/nood/kwijt') return appNoodKwijt(req, res, reg, a, s, d);
+        if (route === 'POST /app/nood/einde') return appNoodEinde(req, res, reg, a);
         if (upload) return appUpload(req, res, reg, a, route.slice('POST /app/upload/'.length));
         if (route === 'POST /app/beurt') return appBeurt(req, res, reg, a, s, d);
         if (route === 'POST /app/uitslag') return appUitslag(req, res, reg, a, s, d);
@@ -12886,7 +13095,9 @@ function appNoodstop(bron) {
       x.actief = false; x.cookie_hash = null; x.ingetrokken_op = nu; x.ingetrokken_door = 'noodstop';
       uit.ingetrokken.push({ id: x.id, naam: x.naam, systeem: x.systeem });
     });
-    if (uit.ingetrokken.length) appSchrijfJson(APP_REGISTER, reg);
+    uit.nood_weg = !!reg.nood;   // wv2554: een lopende noodstand vervalt mee (het noodwachtwoord blijft, zoals de herstelcode)
+    if (reg.nood) reg.nood = null;
+    if (uit.ingetrokken.length || uit.nood_weg) appSchrijfJson(APP_REGISTER, reg);
   } catch (e) { uit.ingetrokken = []; uit.fouten.push('register: ' + String(e && e.message || e).slice(0, 80)); }
   // wv264: ook de telefoon (Tasker) ontkoppelen; opnieuw koppelen in de app na /app-aan
   try { const tu = telIntrekken('noodstop'); uit.tel_ingetrokken = tu.ingetrokken; if (tu.fout) uit.fouten.push('tel: ' + tu.fout); } catch (e) { uit.fouten.push('tel: ' + String(e && e.message || e).slice(0, 80)); }
