@@ -2597,7 +2597,7 @@ async function bewijs(o) {
         const rb1901 = await vraag('POST', '/app/secondbrain/bewaar', { pad: 'x.md', md: 'x', versie: 'a'.repeat(32) }, { pot: WP.jar });
         toets('13 wv1901: vaste plek, slot dicht: Docs bewaren -> 423', rb1901.status === 423, rb1901.status);
         const rw1901 = await vraag('POST', '/app/werkers/schakel', { id: 'x', actie: 'uit' }, { pot: WP.jar });
-        toets('13 wv1901: vaste plek: een werker schakelen is beheer -> 403', rw1901.status === 403 && /werker aan- of uitzetten kan niet vanaf een apparaat met een vaste plek/.test(rw1901.j.fout || ''), JSON.stringify(rw1901.j)); }
+        toets('13 wv2547: vaste plek, slot dicht: een werker schakelen -> 423 (invoerslot), niet meer 403 beheer', rw1901.status === 423, JSON.stringify(rw1901.j)); }
       r = await vraag('POST', '/app/zoek', { kanaal: 'hoofd', term: 'xyz' }, { pot: WP.jar });
       toets('13 wv350: zoeken valt niet onder het slot (lezen; geen 423)', r.status === 200, r.status + ' ' + JSON.stringify(r.j).slice(0, 120));
       r = await vraag('POST', '/app/uitslag', { job_id: 'f'.repeat(16) }, { pot: WP.jar });
@@ -2642,10 +2642,19 @@ async function bewijs(o) {
         await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'gewoon concept' }, { pot: WP.jar });
       }
       await vers(WP);
-      r = await vraag('POST', '/app/apparaat/intrekken', { id: pixelId }, { pot: WP.jar });
-      toets('13 vaste pc (slot open, vers) trekt de Pixel in -> 403 (review M1)', r.status === 403 && /vaste plek/.test(r.j.fout) && reg13().apparaten.find((x) => x.id === pixelId).actief === true, JSON.stringify(r.j));
+      // wv2547 (David 6-11: "ALLE plekken mogen ALLES"): apparatenbeheer ook vanaf de vaste pc, met open slot en verse vingerafdruk van dit
+      // apparaat (een onbekend id: de poorten zijn door, het register blijft heel; de Pixel blijft in deze toets nodig)
+      r = await vraag('POST', '/app/apparaat/intrekken', { id: 'f'.repeat(16) }, { pot: WP.jar });
+      toets('13 wv2547: vaste pc (slot open, vers) mag intrekken -> 404 onbekend (geen beheerweigering)', r.status === 404 && /onbekend apparaat/.test(r.j.fout) && reg13().apparaten.find((x) => x.id === pixelId).actief === true, JSON.stringify(r.j));
+      {
+        const sWP = H.appStaat.sessies[crypto.createHash('sha256').update(WP.jar.sessie).digest('hex')], vt = sWP.vers_tot, cr = sWP.credential;
+        sWP.credential = 'ander-' + String(cr || '');
+        r = await vraag('POST', '/app/apparaat/intrekken', { id: pixelId }, { pot: WP.jar });
+        sWP.credential = cr; sWP.vers_tot = vt;
+        toets('13 wv2547: vaste pc, vingerafdruk niet van dit apparaat -> 403 vers_nodig, Pixel blijft', r.status === 403 && r.j.vers_nodig === true && reg13().apparaten.find((x) => x.id === pixelId).actief === true, JSON.stringify(r.j));
+      }
       r = await vraag('POST', '/app/koppel/afwijs', { aanvraag_id: 'f'.repeat(16) }, { pot: WP.jar });
-      toets('13 vaste pc kan geen aanvraag afwijzen -> 403 (review M1)', r.status === 403 && /vaste plek/.test(r.j.fout), JSON.stringify(r.j));
+      toets('13 wv2547: vaste pc mag een aanvraag afwijzen (409: deze bestaat niet)', r.status === 409 && /bestaat niet/.test(r.j.fout), JSON.stringify(r.j));
       {
         const rg = reg13(), px = rg.apparaten.find((x) => x.id === pixelId);
         px.soort = 'vast'; px.vaste_plek = 'Thuis'; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg));
@@ -2702,7 +2711,7 @@ async function bewijs(o) {
       sbStaat.kapot = false; H.appStaat.locatie = {};
       // laptop zet zichzelf om naar "reist mee" -> geweigerd (open en dicht)
       r = await vraag('POST', '/app/apparaat/wijzig', { id: wpId, soort: 'reist' }, { pot: WP.jar });
-      toets('13 vaste pc zet zichzelf op "reist mee" (slot open) -> 403', r.status === 403 && /vaste plek/.test(r.j.fout), JSON.stringify(r.j));
+      toets('13 vaste pc zet zichzelf op "reist mee" (slot open) -> 403 (alleen de Pixel, de goedkeurder; wv2547 laat dat staan)', r.status === 403 && /Pixel/.test(r.j.fout), JSON.stringify(r.j));
       meld('Thuis', 'thuis', 2);
       r = await vraag('POST', '/app/apparaat/wijzig', { id: wpId, soort: 'reist' }, { pot: WP.jar });
       toets('13 vaste pc zet zichzelf op "reist mee" (slot dicht) -> geweigerd', r.status === 403 || r.status === 423, JSON.stringify(r.j));
@@ -3530,7 +3539,9 @@ async function bewijs(o) {
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regV));
       await vers(P);
       r = await vraag('POST', '/app/modellen', { wat: 'standaard', runtime: 'claude' }, { pot: P.jar });
-      toets('16 vaste plek -> 403 "modellen wisselen kan niet vanaf een apparaat met een vaste plek"', r.status === 403 && /modellen wisselen kan niet/.test(r.j.fout) && rt.default === 'codex', JSON.stringify(r.j));
+      // wv2547: geen beheerweigering meer; wel het invoerslot (hier dicht: 423) en daarachter de verse vingerafdruk zoals op de telefoon
+      toets('16 wv2547: vaste plek -> geen "kan niet vanaf een vaste plek" meer (slot dicht: 423), niets gewisseld', !/kan niet vanaf een apparaat met een vaste plek/.test(r.j.fout || '') && (r.status === 423 || r.status === 200) && (r.status !== 423 || rt.default === 'codex'), JSON.stringify(r.j));
+      if (r.status === 200) { await vers(P); await vraag('POST', '/app/modellen', { wat: 'standaard', runtime: 'codex' }, { pot: P.jar }); }
       regV.apparaten.find((x) => x.id === ppId).soort = 'reist'; regV.apparaten.find((x) => x.id === ppId).vaste_plek = null;
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regV));
       // verbruik: nagebootste tank + werkvoorraad
@@ -4000,14 +4011,15 @@ async function bewijs(o) {
       ap.soort = 'vast'; ap.vaste_plek = 'Thuis';
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regV));
       sbStaat.loc = { plek: 'Thuis', klasse: 'thuis', ontvangen: Date.now() - 60000 }; H.appStaat.locatie = {};
-      await vers(P);
+      H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')].vers_tot = 0;   // wv2547: niet vers -> de enige poort die overblijft
       r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: W1 + 'v' }, { pot: P.jar });
       const rl = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
       ap.soort = 'reist'; ap.vaste_plek = null;
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regV));
       // wv1901: vervangen blijft beheer (alleen telefoon/meereizend); de lijst met namen (nooit waarden) ziet David ook op een vaste plek
-      toets('18 vaste plek (ook met open slot) -> 403 "sleutels vervangen kan niet …"; wv1901: lijst wel (namen), vast: true', r.status === 403 && /sleutels vervangen kan niet vanaf een apparaat met een vaste plek/.test(r.j.fout) && spNep.schrijf.length === nS
-        && rl.status === 200 && rl.j.vast === true && rl.j.sleutels.length > 0 && !JSON.stringify(rl.j).includes(W1), JSON.stringify(r.j) + JSON.stringify(rl.j).slice(0, 200));
+      // wv2547: vervangen ook op een vaste plek, met dezelfde regels als de telefoon (hier: de uurgrens van hierboven is al vol -> 429)
+      toets('18 wv2547: vaste plek (open slot, niet vers) -> 403 vers_nodig (geen beheerweigering meer), niets geschreven; lijst met namen, vast: false', r.status === 403 && r.j.vers_nodig === true && !/vaste plek/.test(r.j.fout || '') && spNep.schrijf.length === nS
+        && rl.status === 200 && rl.j.vast === false && rl.j.sleutels.length > 0 && !JSON.stringify(rl.j).includes(W1), JSON.stringify(r.j) + JSON.stringify(rl.j).slice(0, 200));
       // Fable-review wv157 M1: waar Socev zelf op draait alleen via het portaal
       spNep.kluis.push({ naam: 'telegram_debug_bot_token', omschrijving: 'x', gewijzigd: '2026-06-09T10:00:00Z', witte_lijst: true, gemaskeerd: '••••', geweigerd: null, w: 'y'.repeat(40) });
       spNep.creds.push({ id: 'N8nApi001', name: 'n8n account', type: 'n8nApi', updatedAt: '2026-06-09T10:00:00.000Z' });
@@ -4080,10 +4092,10 @@ async function bewijs(o) {
         const regN = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')), apN = regN.apparaten.find((x) => x.id === aId);
         apN.soort = 'vast'; apN.vaste_plek = 'Thuis'; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regN));
         sbStaat.loc = { plek: 'Thuis', klasse: 'thuis', ontvangen: Date.now() - 60000 }; H.appStaat.locatie = {};
-        const nV = spNep.schrijf.length; await vers(P);
+        const nV = spNep.schrijf.length; H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')].vers_tot = 0;   // wv2547: niet vers -> de enige poort die overblijft
         r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw6', waarde: WN }, { pot: P.jar });
         apN.soort = 'reist'; apN.vaste_plek = null; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regN));
-        toets('18N vaste plek (ook met open slot) -> 403 "een sleutel toevoegen kan niet …", niets geschreven', r.status === 403 && /een sleutel toevoegen kan niet vanaf een apparaat met een vaste plek/.test(r.j.fout) && spNep.schrijf.length === nV, JSON.stringify(r.j));
+        toets('18N wv2547: vaste plek (open slot, niet vers) -> 403 vers_nodig, geen beheerweigering, niets geschreven', r.status === 403 && r.j.vers_nodig === true && !/vaste plek/.test(r.j.fout || '') && spNep.schrijf.length === nV, JSON.stringify(r.j));
         const auditN = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
         toets('18N auditlog: apparaat + naam + uitkomst', /"route":"\/app\/sleutels\/nieuw","m":"POST","status":200,"apparaat":"[a-f0-9]{16}","reden":"sleutel nieuw proef_nieuw: aangemaakt"/.test(auditN), auditN.slice(-400));
         r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
@@ -4143,11 +4155,11 @@ async function bewijs(o) {
         apW.soort = 'vast'; apW.vaste_plek = 'Thuis';
         fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regW));
         sbStaat.loc = { plek: 'Thuis', klasse: 'thuis', ontvangen: Date.now() - 60000 }; H.appStaat.locatie = {};
-        await vers(P);
+        H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')].vers_tot = 0;   // wv2547: niet vers -> de enige poort die overblijft
         r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_weg2' }, { pot: P.jar });
         apW.soort = 'reist'; apW.vaste_plek = null;
         fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regW));
-        toets('18W vaste plek -> 403 "sleutels weggooien kan niet …", geen RPC', r.status === 403 && /sleutels weggooien kan niet vanaf een apparaat met een vaste plek/.test(r.j.fout) && spNep.weg.length === 2, JSON.stringify(r.j));
+        toets('18W wv2547: vaste plek (niet vers) -> 403 vers_nodig, geen beheerweigering, geen RPC', r.status === 403 && r.j.vers_nodig === true && !/vaste plek/.test(r.j.fout || '') && spNep.weg.length === 2, JSON.stringify(r.j));
         H.appStaat.tellers.sleutels = Array(10).fill(Date.now()); await vers(P);
         r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_weg2' }, { pot: P.jar });
         H.appStaat.tellers.sleutels = [];
@@ -4681,7 +4693,7 @@ async function bewijs(o) {
       toets('20h document: 200 met base64-PDF en een auditrij', r.status === 200 && Buffer.from(r.j.inhoud, 'base64').slice(0, 5).toString() === '%PDF-' && auF() === au0 + 1, JSON.stringify([r.status, auF(), au0]));
       toets('20h documentinzage = invoerroute; adres en verzendmodus in APP_BEHEER_ROUTES', H.appInvoerRoute('GET /app/facturen/document/' + docF, false, {}, { soort: 'vast' }) === true &&
         vm.runInContext("APP_BEHEER_ROUTES.has('POST /app/facturen/instellingen/adres') && APP_BEHEER_ROUTES.has('POST /app/facturen/instellingen/modus')", ctx) === true);
-      // vaste plek: boekhoudadres of verzendmodus wijzigen kan nooit, ook niet met een verse vingerafdruk (APP_BEHEER_ROUTES, vóór het slot)
+      // vaste plek: boekhoudadres of verzendmodus wijzigen (sinds wv2547 toegestaan onder invoerslot + verse vingerafdruk)
       const REGF = path.join(DATA, 'apparaten.json'), regF0 = fs.readFileSync(REGF);
       const regF = JSON.parse(regF0); const apRij = regF.apparaten.find((x) => x.id === apF);
       Object.assign(apRij, { soort: 'vast', vaste_plek: 'Thuis' }); fs.writeFileSync(REGF, JSON.stringify(regF));
@@ -4689,8 +4701,10 @@ async function bewijs(o) {
       const rAd = await vraag('POST', '/app/facturen/instellingen/adres', { entiteit: 'tolgaarde', boekhoud_doel: 'ander@acta.invalid' }, { pot: P.jar });
       const rMo = await vraag('POST', '/app/facturen/instellingen/modus', { modus: 'concept' }, { pot: P.jar });
       fs.writeFileSync(REGF, regF0);
-      toets('20h vaste plek: adres en verzendmodus -> 403 (beheer), adres ongewijzigd, vingerafdruk niet verbruikt',
-        rAd.status === 403 && /vaste plek/.test(rAd.j.fout) && rMo.status === 403 && fdbF.db.prepare("SELECT boekhoud_doel AS d FROM entiteit WHERE sleutel = 'tolgaarde'").get().d !== 'ander@acta.invalid' && sPf().vers_tot > 0, JSON.stringify([rAd, rMo]));
+      // wv2547: geen beheerweigering meer vanaf een vaste plek; invoerslot en verse vingerafdruk zoals elders (200 of 423, nooit 403 "vaste plek")
+      toets('20h wv2547: vaste plek: adres en verzendmodus -> geen 403 "vaste plek" meer',
+        [rAd, rMo].every((x) => !(x.status === 403 && /vaste plek/.test(x.j.fout || ''))), JSON.stringify([rAd, rMo]));
+      sPf().vers_tot = Date.now() + 60000;
       r = await vraag('POST', '/app/facturen/instellingen/adres', { entiteit: 'tolgaarde', boekhoud_doel: 'nieuw-tg@acta.invalid' }, { pot: P.jar });
       toets('20h telefoon met verse vingerafdruk: adres gewijzigd en vingerafdruk verbruikt', r.status === 200 && sPf().vers_tot === 0, JSON.stringify(r.j));
       // passieve kant: schrijven 409, lezen mag

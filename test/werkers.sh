@@ -157,11 +157,26 @@ toets('7t server: concept klaar = weigeren, time-out = opnieuw lezen, slot per w
 const s7f = W.stand({ workflows: live7, hartslag: hs, schakelaars: null, nu: NU });
 toets('7l schakelaarstand onleesbaar: geen knoppen, fout gemeld', [].concat(...W.SOORTEN.map((x) => s7f.groepen[x])).every((x) => x.kan.length === 0) && !!s7f.fout.schakelaar);
 toets('7m server: route, vingerafdruk pas na de keuzeregels, één per schakeling, nooit archiveren',
-  /route === 'POST \/app\/werkers\/schakel'\) return typeof appWerkerSchakel/.test(s) && /schakelKeuze\(w, actie, sk\)[\s\S]{0,800}if \(k\.vers && !appVersOk\(a, s\)\)/.test(s) &&
-  /if \(k\.vers\) s\.vers_tot = 0/.test(s) && !/\/archive|DELETE', '\/workflows/.test(s.slice(s.indexOf('wv1733 (OVIS M4b): schakelaar per werker'), s.indexOf('werkersPauzeTik(); }, 2'))));
+  /route === 'POST \/app\/werkers\/schakel'\) return typeof appWerkerSchakel/.test(s) && /schakelKeuze\(w, actie, sk\)[\s\S]{0,900}const versEis = k\.vers \|\| \(a && a\.soort === 'vast'\);[^\n]*\n\s*if \(versEis && !appVersOk\(a, s\)\)/.test(s) &&
+  /if \(versEis\) s\.vers_tot = 0/.test(s) && !/\/archive|DELETE', '\/workflows/.test(s.slice(s.indexOf('wv1733 (OVIS M4b): schakelaar per werker'), s.indexOf('werkersPauzeTik(); }, 2'))));
 toets('7n server: aanzetten alleen als de gepubliceerde versie gelijk is', /wf\.versionId !== sk\.versie/.test(s) && /p_versie: String\(wf\.activeVersionId\)/.test(s));
 toets('7o server: rij eerst, mislukt deactiveren = rij weg', /mk_schakelaar_zet[\s\S]{0,900}\/deactivate'\); \}\s*catch[\s\S]{0,900}mk_schakelaar_wis/.test(s));
-toets('7p server: vaste plek geweigerd (wv1901: ook in APP_BEHEER_ROUTES; op een vaste plek geen knoppen)', /appWerkerSchakel[\s\S]{0,300}if \(a && a\.soort === 'vast'\) return appWeiger\(res, 403/.test(s) && /'POST \/app\/werkers\/schakel'\]\);/.test(s) && /if \(a && a\.soort === 'vast'\) Object\.keys\(uit\.groepen \|\| \{\}\)\.forEach\(function \(g\) \{ \(uit\.groepen\[g\] \|\| \[\]\)\.forEach\(function \(k\) \{ k\.kan = \[\]; \}\); \}\);/.test(s));
+toets('7p server: wv2547 vaste plek mag schakelen (verse vingerafdruk), alleen dicht met APP_VAST_BEHEER_DICHT; knoppen niet meer weg', /appWerkerSchakel[\s\S]{0,300}if \(appVastBeheerDicht\(a\)\) return appWeiger\(res, 403/.test(s) && /'POST \/app\/werkers\/schakel'\]\);/.test(s) && /if \(appVastBeheerDicht\(a\)\) Object\.keys\(uit\.groepen/.test(s) && !/if \(a && a\.soort === 'vast'\) Object\.keys\(uit\.groepen/.test(s) && /^const APP_VAST_BEHEER_DICHT = false;/m.test(s));
+const vm = require('vm');
+// wv2547: schakelmatrix appBeheerVanafVast — de agenda volgt alleen APP_VAST_AGENDA_DICHT (review ZOU 1), de rest alleen APP_VAST_BEHEER_DICHT,
+// zichzelf intrekken mag altijd, een meereizend apparaat nooit geweigerd
+{
+  const g = (re) => re.exec(s)[0];
+  const code = g(/^const APP_VAST_AGENDA_DICHT = [^\n]*\n/m) + g(/^const APP_VAST_BEHEER_DICHT = [^\n]*\n/m) + g(/^const APP_BEHEER_ROUTES = new Set\([\s\S]*?\]\);/m) + '\n' + g(/^function appBeheerVanafVast[\s\S]*?\n\}\n/m);
+  const uit = [];
+  for (const [ag, bh] of [[false, false], [true, false], [false, true], [true, true]]) {
+    const c = code.replace('APP_VAST_AGENDA_DICHT = false', 'APP_VAST_AGENDA_DICHT = ' + ag).replace('APP_VAST_BEHEER_DICHT = false', 'APP_VAST_BEHEER_DICHT = ' + bh);
+    const cx = {}; vm.createContext(cx); vm.runInContext(c + ';globalThis.f = appBeheerVanafVast', cx);
+    const v = { soort: 'vast', id: 'x' };
+    uit.push([cx.f('POST /app/agenda', v, {}), cx.f('POST /app/modellen', v, {}), cx.f('POST /app/facturen/leverancier/verzendwijze', v, {}), cx.f('POST /app/apparaat/intrekken', v, { id: 'x' }), cx.f('POST /app/modellen', { soort: 'reist' }, {})].join(','));
+  }
+  toets('7z server: wv2547 schakelmatrix (agenda los van beheer; zelf intrekken en meereizend altijd)', JSON.stringify(uit) === JSON.stringify(['false,false,false,false,false', 'true,false,false,false,false', 'false,true,true,false,false', 'true,true,true,false,false']), JSON.stringify(uit));
+}
 
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');
 process.exit(fouten ? 1 : 0);

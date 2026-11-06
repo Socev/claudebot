@@ -5110,6 +5110,25 @@ function appVastJaDicht(a) { return APP_VAST_JA_DICHT && !!(a && a.soort === 'va
 // APP_BEHEER_ROUTES blijft telefoon-only. De app volgt via agenda_knoppen in /app/slot. true = het oude gedrag (terugrol).
 // Ontwerp: vault 01_Ontwikkeling/Agenda bevestigen op de pc (bouwplan 4-11-2026).md.
 const APP_VAST_AGENDA_DICHT = false;
+// wv2547 (David 6-11-2026 ± 08:15: "We hadden afgesproken: ALLE plekken mogen ALLES. Er mag echt GEEN ENKEL onderscheid zijn tussen telefoon
+// of werkplek."): de rest van APP_BEHEER_ROUTES mag nu ook vanaf een apparaat met een vaste plek — apparaten intrekken, modellen, sleutels
+// (vervangen/weg/nieuw), de telefoon (Tasker) ontkoppelen, boekhoudadres/verzendmodus/verzendwijze per leverancier, een pagina delen,
+// werkers schakelen, MemoryLane naar buiten. De beveiliging is daar wat wv2356/wv2369 al deden: open invoerslot (423, de telefoon zegt dat
+// David daar is of hij zette de pc open) en een verse vingerafdruk of pincode van DIT apparaat (Windows Hello; appVersOk), per handeling
+// verbruikt waar de route dat op de telefoon ook doet, met dezelfde audit. Wat op de telefoon zonder vingerafdruk kan (intrekken alleen
+// vers_tot, tel/ontkoppel, een werker uitzetten) vraagt op een vaste plek wél de vingerafdruk van dat apparaat (appVastVersEis).
+// Blijft op de Pixel (rol goedkeurder, geen vaste-plekregel): nieuwe apparaten goedkeuren, soort/plek wijzigen, een pc openzetten,
+// een herstelcode maken en de telefoon koppelen (dat is het invoerslot zelf). true = het oude gedrag (terugrol).
+// Ontwerp: vault 01_Ontwikkeling/Vaste plek - alles open (ontwerp 28-10-2026).md § Log 6-11-2026.
+const APP_VAST_BEHEER_DICHT = false;
+function appVastBeheerDicht(a) { return APP_VAST_BEHEER_DICHT && !!(a && a.soort === 'vast'); }
+// wv2547: op een vaste plek een verse vingerafdruk van DIT apparaat eisen, ook waar de telefoon er geen vraagt. false = geweigerd (403 vers_nodig).
+function appVastVersEis(res, a, s, wat) {
+  if (!(a && a.soort === 'vast') || appVersOk(a, s)) return true;
+  res._app.reden = wat + ', vaste plek niet vers';
+  appStuur(res, 403, { ok: false, fout: 'bevestig met de vingerafdruk of pincode van deze pc', vers_nodig: true });
+  return false;
+}
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
 const APP_OMZET_MAX_BODY = 5 * 1024 * 1024;   // wv1854: tekst ≤ 2 MB (omzet.js telt de bytes en geeft 413) + JSON-ontsnapping (\n, \", \uXXXX)
@@ -5239,7 +5258,8 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
 function appBeheerVanafVast(route, a, d) {
   if (!(a && a.soort === 'vast') || !APP_BEHEER_ROUTES.has(route)) return false;
   if (route === 'POST /app/apparaat/intrekken' && String((d && d.id) || '') === a.id) return false;
-  if (route === 'POST /app/agenda' && !APP_VAST_AGENDA_DICHT) return false;   // wv2369
+  if (route === 'POST /app/agenda') return APP_VAST_AGENDA_DICHT;   // wv2369; eigen terugrol, los van APP_VAST_BEHEER_DICHT (review wv2547 ZOU 1)
+  if (!APP_VAST_BEHEER_DICHT) return false;   // wv2547: alle plekken mogen alles (invoerslot + verse vingerafdruk van dit apparaat)
   return true;
 }
 // wv1931 (David 28-10: "Als ik een BSN aanlever, dan ga jij niet preventief 'Ik heb het BSN weggelaten' doen"): Davids eigen
@@ -6330,6 +6350,7 @@ function appHerstelBevestigd(req, res, reg, a, d) {
 
 function appIntrekken(req, res, reg, a, s, d) {
   if (Date.now() > s.vers_tot) return appWeiger(res, 403, 'bevestig eerst opnieuw met je vingerafdruk', 'niet vers');
+  if (!appVastVersEis(res, a, s, 'intrekken')) return;   // wv2547: op een vaste plek de passkey van DIT apparaat
   const id = String(d.id || '');
   const vers = appRegister();
   const x = vers.apparaten.find(function (y) { return y.id === id; });
@@ -12802,7 +12823,7 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/pot-afschriften/bestand/') === 0) return appPotBestand(req, res, a, route.slice('GET /app/pot-afschriften/bestand/'.length));
         if (route === 'GET /app/tel') return telAppStand(req, res, a);                       // wv264: ⚙ → Telefoon
         if (route === 'POST /app/tel/koppelcode') return telAppKoppelcode(req, res, reg, a, s);
-        if (route === 'POST /app/tel/ontkoppel') return telAppOntkoppel(req, res, a);
+        if (route === 'POST /app/tel/ontkoppel') return telAppOntkoppel(req, res, a, s);
         return appWeiger(res, 404, 'onbekend', 'route');
       };
       Promise.resolve().then(function () { return verder(false); }).catch(function (e) {
@@ -13143,7 +13164,7 @@ async function appSleutels(req, res, a) {
   // wv1901: de lijst (namen, nooit waarden) ook op een vaste plek; vast blijft het echte soort (vervangen en weggooien zijn beheer)
   if (appAfscherm(a)) return appStuur(res, 200, { ok: true, sleutels: [], fouten: [], vast: true, primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
   const l = await appSleutelLijst();
-  appStuur(res, 200, { ok: true, sleutels: l.sleutels, fouten: l.fouten, vast: a.soort === 'vast', primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
+  appStuur(res, 200, { ok: true, sleutels: l.sleutels, fouten: l.fouten, vast: appVastBeheerDicht(a), primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
 }
 async function appSleutelVervang(req, res, reg, a, s, d) {
   // De waarde meteen uit het verzoekobject halen; vanaf hier bestaat hij alleen in deze functie.
@@ -15144,7 +15165,9 @@ function telIntrekken(door) {
   telStaat.rij = []; telStaat.audio = {}; telStaat.delen = {}; telStaat.hartslag = {}; telRijBewaar();   // hartslag: Fable #6
   return uit;
 }
-function telAppOntkoppel(req, res, a) {
+function telAppOntkoppel(req, res, a, s) {
+  if (s && !appVastVersEis(res, a, s, 'tel ontkoppel')) return;   // wv2547: vanaf een vaste plek met de vingerafdruk van dat apparaat
+  if (s && a && a.soort === 'vast') s.vers_tot = 0;
   const u = telIntrekken('app (' + a.naam + ')');
   if (u.fout) return appWeiger(res, 503, 'ontkoppelen lukte niet helemaal: ' + u.fout, 'tel ontkoppel fout');
   res._app.reden = 'tel ontkoppeld (' + u.ingetrokken + ')';
@@ -18955,8 +18978,8 @@ async function appWerkers(req, res, a) {
     const hs = typeof ringkaartRijen === 'function' ? await ringkaartRijen() : null;
     const sk = await werkersSchakelaars(false);   // wv1733
     uit = WERKERS_MOD.stand({ workflows: wf, hartslag: hs, schakelaars: sk, vast: appAfscherm(a) });   // wv1901
-    // wv1901: alles zichtbaar, maar schakelen is beheer (APP_BEHEER_ROUTES): op een vaste plek geen knoppen
-    if (a && a.soort === 'vast') Object.keys(uit.groepen || {}).forEach(function (g) { (uit.groepen[g] || []).forEach(function (k) { k.kan = []; }); });
+    // wv1901: alles zichtbaar; schakelen is beheer. Sinds wv2547 ook op een vaste plek (verse vingerafdruk), behalve als APP_VAST_BEHEER_DICHT
+    if (appVastBeheerDicht(a)) Object.keys(uit.groepen || {}).forEach(function (g) { (uit.groepen[g] || []).forEach(function (k) { k.kan = []; }); });
     const c = uit.check;
     werkersLaatst = { t: new Date().toISOString(), n8n_actief: c.n8n_actief, ontbreekt: c.ontbreekt ? c.ontbreekt.length : null,
       niet_actief: c.niet_actief ? c.niet_actief.length : null, hartslag_zonder_werker: c.hartslag_zonder_werker ? c.hartslag_zonder_werker.length : null };
@@ -19006,7 +19029,7 @@ async function werkerAanzetten(w, sk) {
 }
 async function appWerkerSchakel(req, res, a, s, d) {
   if (!WERKERS_MOD || typeof WERKERS_MOD.schakelKeuze !== 'function') return appWeiger(res, 404, 'De schakelaar zit niet in deze versie van de pod', 'schakel ontbreekt');
-  if (a && a.soort === 'vast') return appWeiger(res, 403, 'niet op een vaste plek', 'schakel vaste plek');   // ook APP_BEHEER_ROUTES (wv1901)
+  if (appVastBeheerDicht(a)) return appWeiger(res, 403, 'niet op een vaste plek', 'schakel vaste plek');   // ook APP_BEHEER_ROUTES (wv1901; sinds wv2547 uit)
   const id = String(d.id == null ? '' : d.id).slice(0, 80), actie = String(d.actie == null ? '' : d.actie);
   const w = Object.prototype.hasOwnProperty.call(WERKERS_MOD.PER_ID, id) ? WERKERS_MOD.PER_ID[id] : null;
   const rijen = await werkersSchakelaars(true);
@@ -19017,10 +19040,11 @@ async function appWerkerSchakel(req, res, a, s, d) {
   if (k.al) return appStuur(res, 200, { ok: true, al: true, id: id });
   if (werkersSchakelBezig.has(id)) return appWeiger(res, 409, 'er loopt al een schakeling voor deze werker', 'schakel bezig');   // Opus-review wv1733 KAN-1
   // pas na de keuzeregels: geen vingerafdruk verspillen aan iets dat toch niet mag (zoals de modellenwissel)
-  if (k.vers && !appVersOk(a, s)) { res._app.reden = 'schakel, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
+  const versEis = k.vers || (a && a.soort === 'vast');   // wv2547: op een vaste plek elke schakeling met de vingerafdruk van dat apparaat
+  if (versEis && !appVersOk(a, s)) { res._app.reden = 'schakel, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
   appStaat.tellers.schakel = appStaat.tellers.schakel || [];
   if (!appTeller('schakel', 20, 3600000)) return appWeiger(res, 429, 'te vaak geschakeld dit uur', 'grens schakel');
-  if (k.vers) s.vers_tot = 0;   // één vingerafdruk = één schakeling
+  if (versEis) s.vers_tot = 0;   // één vingerafdruk = één schakeling
   const door = 'David (app, ' + String(a && a.naam || 'apparaat').slice(0, 60) + ')';
   werkersSchakelBezig.add(id);   // de has-toets staat vóór de vingerafdruk; hiertussen geen await
   try {
@@ -19695,7 +19719,7 @@ async function appMemorylane(req, res, a, s, route, d) {
   }
   if (!appTeller('memorylane', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens memorylane');
   const naarBuiten = function (wat) {
-    if (a.soort === 'vast') { res._app.reden = 'memorylane ' + wat + ', vaste plek'; appStuur(res, 403, { ok: false, fout: 'delen kan alleen vanaf je telefoon of een meereizend apparaat' }); return false; }
+    if (appVastBeheerDicht(a)) { res._app.reden = 'memorylane ' + wat + ', vaste plek'; appStuur(res, 403, { ok: false, fout: 'delen kan alleen vanaf je telefoon of een meereizend apparaat' }); return false; }
     if (!appVersOk(a, s)) { res._app.reden = 'memorylane ' + wat + ', niet vers'; appStuur(res, 403, { ok: false, fout: 'bevestig het delen met je vingerafdruk', vers_nodig: true }); return false; }
     return true;
   };
@@ -19931,10 +19955,14 @@ async function appDocs(req, res, a, s, d, route) {
   if (!docsDelen) return appWeiger(res, 404, 'Delen zit niet in deze versie van de pod', 'docs ontbreekt');
   if (!appTeller('docs', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs');
   if (route === 'POST /app/docs/delen' && !appVersOk(a, s)) { res._app.reden = 'docs delen, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het delen met je vingerafdruk', vers_nodig: true }); }
+  // wv2547 (review gpt-5.5 MOET 1): de vingerafdruk vóór de eerste await verbruiken, zodat twee gelijktijdige deelverzoeken er niet één delen;
+  // lukt het delen niet (bv. 409 namen eerst bevestigen), dan krijgt de sessie hem terug (alleen als niemand hem intussen opnieuw zette)
+  const versVoor = route === 'POST /app/docs/delen' ? s.vers_tot : null;
+  if (versVoor !== null) s.vers_tot = 0;
   let r;
-  try { r = await docsDelen.app(route, d || {}, { vast: a.soort === 'vast', afscherm: appAfscherm(a) }); }   // wv1901: delen blijft beheer
-  catch (e) { logError('app-docs', e); return appWeiger(res, 500, 'fout op de pod', 'docs uitzondering'); }
-  if (route === 'POST /app/docs/delen' && r.status === 200) s.vers_tot = 0;   // elke deling een eigen vingerafdruk
+  try { r = await docsDelen.app(route, d || {}, { vast: appVastBeheerDicht(a), afscherm: appAfscherm(a) }); }   // wv1901; wv2547: delen ook op een vaste plek (verse vingerafdruk)
+  catch (e) { if (versVoor !== null && s.vers_tot === 0) s.vers_tot = versVoor; logError('app-docs', e); return appWeiger(res, 500, 'fout op de pod', 'docs uitzondering'); }
+  if (versVoor !== null && r.status !== 200 && s.vers_tot === 0) s.vers_tot = versVoor;   // elke geslaagde deling een eigen vingerafdruk
   const actie = route === 'GET /app/docs/gedeeld' ? 'gedeeld' : route.slice('POST /app/docs/'.length);
   const au = r.audit || {};
   res._app.reden = 'docs ' + actie + (au.domein ? ' ' + au.domein : '') + (au.h ? ' h=' + au.h : '') + (r.status !== 200 ? ' (' + r.status + ')' : '');
