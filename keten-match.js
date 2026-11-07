@@ -20,7 +20,7 @@ const VENSTER_ZONDER_DATUM = 180;   // geen factuurdatum in de brief: briefdatum
 const NUMMER_MIN = 4;
 
 // betaaldiensten: een betaling "via Mollie" is geen andere tegenpartij (dossier C: Mollie en daarna de cateraar zelf, zelfde nummer)
-const BETAALDIENST = /\b(mollie|adyen|buckaroo|stripe|paypal|multisafepay|pay\.?nl|ingenico|worldline|ccv|sisow|icepay|targetpay|tikkie|online\s*betaling|ideal|cm\.?com|payvision|klarna|sumup|mypos)\b/i;
+const BETAALDIENST = /\b(mollie|adyen|buckaroo|stripe|paypal|multisafepay|pay\.?nl|ingenico|worldline|ccv|sisow|icepay|targetpay|tikkie|cm\.?com|payvision|klarna|sumup|mypos)\b/i;
 const RECHTSVORM = /\b(b\.?v\.?|n\.?v\.?|v\.?o\.?f\.?|c\.?v\.?|holding|stichting|stg|vereniging|bv|nv|vof|ltd|gmbh|inc|the|de|het|en|van|der|den|groep|group|nederland|nl)\b/g;
 
 // ── kleine hulpjes ──
@@ -74,7 +74,16 @@ const NIVEAU_RE = [
   [2, /\b(tweede|2e|derde|3e|laatste)\s+(betalings)?herinnering\b|\b(second|final)\s+(payment\s+)?reminder\b/i],
   [1, /\b(betalings)?herinnering\b|\breminder\b|\bincasso\b[^.\n]{0,60}\bniet\b|\bnog\s+niet\s+(volledig\s+)?(voldaan|ontvangen|betaald)\b|\bopenstaand(e)?\s+bedrag\b/i],
 ];
-function niveau(kop) { const t = String(kop || ''); for (const [n, re] of NIVEAU_RE) if (re.test(t)) return n; return 1; }
+// niveau 3/4 alleen uit het korte begin (onderwerp + eerste 300 tekens per deel) en niet uit een dreigzin ("… dragen wij over aan een
+// incassobureau"); 1/2 uit de hele kop (review wv2684 #7)
+const DREIG = /\b(overdragen|over\s+te\s+dragen|uit\s+handen|bij\s+uitblijven|zullen\s+wij|zien\s+wij\s+ons\s+genoodzaakt|genoodzaakt|indien|wanneer|als\s+u\s+niet)\b/i;
+function niveau(kop, kort) {
+  const t = String(kop || ''), k = String(kort == null ? t.slice(0, 300) : kort);
+  const eerste = k.indexOf('\n') >= 0 ? k.slice(0, k.indexOf('\n')) : k;   // de eerste regel (het onderwerp) telt altijd
+  const zinnen = eerste + '\n' + k.slice(eerste.length).split(/(?<=[.!?\n])\s+/).filter(function (z) { return !DREIG.test(z); }).join(' ');
+  for (const [n, re] of NIVEAU_RE) if (re.test(n >= 3 ? zinnen : t)) return n;
+  return 1;
+}
 const NIVEAU_NAAM = { 1: 'herinnering', 2: 'tweede herinnering', 3: 'aanmaning', 4: 'incassobureau of deurwaarder' };
 
 // ── doorgestuurd blok: de oorspronkelijke afzender (Gmail, Outlook, Apple Mail; NL en EN) ──
@@ -103,12 +112,17 @@ function oorspronkelijkeAfzender(tekst, eigenDomeinen) {
 
 // het nummer uit het onderwerp (zelfde regel als kopNummer in intake-router.js): eerste blok met ≥ 4 cijfers dat geen datum of jaartal is
 function kopNummer(onderwerp) {
+  const t = String(onderwerp || '');
+  const goed = function (w) { w = String(w || '').replace(/[-/]+$/, ''); return (w.match(/\d/g) || []).length >= 4 && !/^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$|^\d{4}-\d{2}-\d{2}$|^(?:19|20)\d{2}$/.test(w) ? w : null; };
+  // eerst het blok direct na factuur/nota/invoice(nr) (review wv2684 #9), dan het eerste blok dat niet na klant/debiteur/order/relatie staat
+  const na = /\b(?:factuur(?:nummer|nr\.?)?|nota(?:nummer|nr\.?)?|invoice(?:\s*(?:no\.?|number|#))?)\s*[:#]?\s*([A-Za-z]{0,4}-?\d[0-9A-Za-z\-/]{3,30})/i.exec(t);
+  if (na && goed(na[1])) return goed(na[1]);
   const re = /(?:^|[\s(#:\[])([A-Za-z]{0,4}-?\d[0-9A-Za-z\-/]{3,30})(?=$|[\s),.;:\]])/g;
   let m;
-  while ((m = re.exec(String(onderwerp || '')))) {
-    const w = m[1].replace(/[-/]+$/, '');
-    if ((w.match(/\d/g) || []).length < 4 || /^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$|^\d{4}-\d{2}-\d{2}$|^(?:19|20)\d{2}$/.test(w)) continue;
-    return w;
+  while ((m = re.exec(t))) {
+    if (/\b(klant|debiteur|order|relatie|bestel|lid|abonnement|contract)\w*\s*[:#]?\s*$/i.test(t.slice(0, m.index + 1))) continue;
+    const w = goed(m[1]);
+    if (w) return w;
   }
   return null;
 }
@@ -145,7 +159,7 @@ function briefLees(x) {
   const domein = af ? af.domein : (vanDom && !eigen.has(orgDomein(vanDom)) ? orgDomein(vanDom) : null);
   return {
     nummer, nummer_norm: nummer ? norm(nummer) : null, nummer_soort: soort,
-    niveau: niveau(kop), bedrag_centen: totaal, openstaand_centen: open,
+    niveau: niveau(kop, x && x.kort != null ? x.kort : String((x && x.onderwerp) || '') + '\n' + tekst.slice(0, 300)), bedrag_centen: totaal, openstaand_centen: open,
     factuurdatum: fd ? datumIso(fd.waarde) : null, vervaldatum: vd ? datumIso(vd.waarde) : null,
     ibans: Array.from(new Set(((x && x.ibans) || []).map(function (i) { return String(i).replace(/\s/g, '').toUpperCase(); }))).slice(0, 10),
     domein, naam: naamSchoon((af && af.naam) || (x && x.van_naam)), doorgestuurd: !!(x && x.doorgestuurd), afzender_uit_blok: !!af,
@@ -157,7 +171,8 @@ function briefLees(x) {
 // lev = { id, naam } (de leverancier in de Facturen-app via een rekening uit het stuk) | null
 function schuldeiser(brief, lev) {
   if (lev && lev.id) return { soort: 'leverancier', waarde: String(lev.id), naam: lev.naam || brief.naam || null };
-  if (brief.domein) return { soort: 'domein', waarde: brief.domein, naam: brief.naam || brief.domein };
+  // een domein uit een doorgestuurd of geciteerd blok is minder zeker (een keten via de POH levert soms het POH-domein): soort domein_door
+  if (brief.domein) return { soort: brief.doorgestuurd ? 'domein_door' : 'domein', waarde: brief.domein, naam: brief.naam || brief.domein };
   const n = naamNorm(brief.naam);
   return n ? { soort: 'naam', waarde: n, naam: brief.naam } : { soort: 'onbekend', waarde: '', naam: null };
 }
@@ -166,7 +181,9 @@ function nummerHash(nummerNorm) { return hash('nummer|' + nummerNorm, 24); }
 function schuldeiserHash(se) { return hash('se|' + se.soort + ':' + se.waarde, 24); }
 // Hoort een stuk bij een bestaand dossier met hetzelfde nummer? Alleen apart als beide een (verschillende) leverancier uit de Facturen-app hebben:
 // een doorgestuurde mail, een antwoord of een stuk zonder herkende afzender valt zo in hetzelfde dossier (één kaart per dossier).
-function zelfdeDossier(d, se) { return !(d.schuldeiser_soort === 'leverancier' && se.soort === 'leverancier' && d.schuldeiser !== schuldeiserHash(se)); }
+// review wv2684 #8: ook apart bij twee verschillende (rechtstreekse) domeinen; naam/onbekend, een domein uit een doorgestuurd blok, of leverancier
+// tegenover domein voegt samen
+function zelfdeDossier(d, se) { return !(d.schuldeiser_soort === se.soort && (se.soort === 'leverancier' || se.soort === 'domein') && d.schuldeiser !== schuldeiserHash(se)); }
 
 // ── nummer in een bankregel ──
 function nummerIn(nummerNorm, rij) {
@@ -186,7 +203,7 @@ function nummerIn(nummerNorm, rij) {
   if (grens(t1)) return true;
   return /[A-Z]/.test(nummerNorm) && grens(t1.replace(/\s+/g, ''));   // "F 2974554" in de omschrijving; alleen bij een nummer met letters (geen bedragen)
 }
-function tegenpartij(r) { return { iban: r.tegenpartij_iban ? String(r.tegenpartij_iban).replace(/\s/g, '').toUpperCase() : null, naam: naamNorm(r.tegenpartij_naam), dienst: BETAALDIENST.test(String(r.tegenpartij_naam || '') + ' ' + String(r.omschrijving || '')) }; }
+function tegenpartij(r) { return { iban: r.tegenpartij_iban ? String(r.tegenpartij_iban).replace(/\s/g, '').toUpperCase() : null, naam: naamNorm(r.tegenpartij_naam), dienst: BETAALDIENST.test(String(r.tegenpartij_naam || '')) }; }   // review wv2684 #6: alleen de naam van de tegenpartij ("iDEAL" staat in veel omschrijvingen)
 function zelfdePartij(a, b) {
   if (a.dienst || b.dienst) return true;
   if (a.iban && b.iban) return a.iban === b.iban;
@@ -198,6 +215,11 @@ function naamLijkt(tegen, namen) {
   return namen.some(function (n) { return naamNorm(n).split(' ').some(function (s) { return s.length >= 4 && w.has(s); }); });
 }
 
+// het zoekvenster (§ 3.3): factuurdatum − 7 uit de brief, anders briefdatum − 180; server.js haalt de bankregels met dezelfde regel op (review #2)
+function venster(brief, peil) {
+  const bdatum = brief.datum || peil;
+  return { van: brief.factuurdatum && brief.factuurdatum <= bdatum ? plusDagen(brief.factuurdatum, -7) : plusDagen(bdatum, -VENSTER_ZONDER_DATUM), tot: peil };
+}
 /*
  * match(brief, rijen, opt) — § 3.3. rijen = bankregels van de Facturen-app (alleen lezen): { id, rekening, boekdatum, bedrag_centen (< 0 =
  * afschrijving), tegenpartij_naam, tegenpartij_iban, omschrijving, kenmerk }. opt = { peil ('JJJJ-MM-DD': wat de bank op die dag wist; standaard
@@ -215,7 +237,7 @@ function match(brief, rijen, opt) {
   const B = brief.bedrag_centen != null ? brief.bedrag_centen : brief.openstaand_centen;
   const basis = { bedrag_centen: B == null ? null : B, openstaand_centen: brief.openstaand_centen, bank_tot: bankTot, iban_onbekend: ibanOnbekend, betalingen: [], rest_centen: null, kandidaat: null };
   if (opt.prive) return Object.assign(basis, { uitkomst: 'niet_vast', reden: 'prive' });
-  const van = brief.factuurdatum && brief.factuurdatum <= bdatum ? plusDagen(brief.factuurdatum, -7) : plusDagen(bdatum, -VENSTER_ZONDER_DATUM);
+  const van = venster(brief, peil).van;
   basis.venster = { van, tot: peil };
   const binnen = (rijen || []).filter(function (r) { const d = String(r.boekdatum || '').slice(0, 10); return d >= van && d <= peil && Number.isFinite(Number(r.bedrag_centen)); })
     .map(function (r) { return Object.assign({}, r, { boekdatum: String(r.boekdatum).slice(0, 10), bedrag_centen: Number(r.bedrag_centen), _tp: tegenpartij(r) }); })
@@ -244,31 +266,37 @@ function match(brief, rijen, opt) {
     else if (bedragen.some(function (x) { return Math.abs(c - x) <= x * ZWAK_MARGE; }) && naamLijkt(a.tegenpartij_naam, namen)) st = 'zwak';
     if (st) treffers.push({ datum: a.boekdatum, centen: c, sterkte: st, voor_brief: a.boekdatum < minWerkdagen(bdatum, VOOR_WERKDAGEN) });
   }
-  const bet = treffers.filter(function (t) { return t.sterkte !== 'zwak'; });
-  basis.betalingen = bet;
-  const hoog = bet.filter(function (t) { return t.sterkte === 'hoog'; });
-  const som = bet.reduce(function (s, t) { return s + t.centen; }, 0), somVoor = bet.filter(function (t) { return t.voor_brief; }).reduce(function (s, t) { return s + t.centen; }, 0);
+  // review wv2684 #1: rekening + bedrag VÓÓR de brief kan ook een vorige factuur zijn (abonnement): telt niet als betaald, wel als kandidaat
+  const telt = treffers.filter(function (t) { return t.sterkte === 'hoog' || (t.sterkte === 'redelijk' && !t.voor_brief); });
+  const redVoor = treffers.filter(function (t) { return t.sterkte === 'redelijk' && t.voor_brief; });
+  basis.betalingen = telt;
+  const hoog = telt.filter(function (t) { return t.sterkte === 'hoog'; });
+  const som = function (l) { return l.reduce(function (s, t) { return s + t.centen; }, 0); };
+  const voor = telt.filter(function (t) { return t.voor_brief; }), na = telt.filter(function (t) { return !t.voor_brief; });
   const dekkingOk = !!bankTot && bankTot >= minWerkdagen(bdatum, 1);
-  if (hoog.length >= 2 && (B != null ? hoog.reduce(function (s, t) { return s + t.centen; }, 0) >= 2 * B - 1 : hoog.every(function (t) { return t.centen === hoog[0].centen; })))
-    return Object.assign(basis, { uitkomst: 'twee_keer', reden: null });
-  // de brief rekent al een ontvangen deel mee (openstaand < totaal, dossier A): betalingen vanaf de brief tellen tegen het openstaande bedrag;
-  // alleen eerdere (al verrekende) betalingen = nog open
+  const kandidaatRB = function () { return Object.assign(basis, { uitkomst: 'kandidaat', reden: 'rekening_bedrag', kandidaat: redVoor[redVoor.length - 1] }); };
   const O = brief.openstaand_centen, T = brief.bedrag_centen;
-  if (bet.length && O != null && T != null && O < T) {
-    const na = bet.filter(function (t) { return !t.voor_brief; }), somNa = na.reduce(function (s, t) { return s + t.centen; }, 0);
-    if (somVoor >= T - 1) return Object.assign(basis, { uitkomst: 'al_betaald', reden: null });
+  const deelTak = O != null && T != null && O < T;   // de brief rekent al een ontvangen deel mee (dossier A)
+  // twee keer (review #5): minstens twee betalingen waarvan één op nummer, samen ≥ 2 × het bedrag (in de deel-tak: 2 × het openstaande, alleen na de brief)
+  const tk = deelTak ? na : telt, doel2 = deelTak ? O : B;
+  if (tk.length >= 2 && tk.some(function (t) { return t.sterkte === 'hoog'; }) && (doel2 != null ? som(tk) >= 2 * doel2 - 1 : hoog.length >= 2 && hoog.every(function (t) { return t.centen === hoog[0].centen; })))
+    return Object.assign(basis, { uitkomst: 'twee_keer', reden: null, betalingen: tk });
+  if (deelTak && telt.length) {
+    if (som(voor) >= T - 1) return Object.assign(basis, { uitkomst: 'al_betaald', reden: null });
     basis.betalingen = na;
-    if (somNa >= O - 1) return Object.assign(basis, { uitkomst: 'betaald', reden: 'deel_ontvangen' });
-    if (somNa > 0) return Object.assign(basis, { uitkomst: 'deels', reden: dekkingOk ? 'deel_ontvangen' : 'bank_achter', rest_centen: O - somNa });
+    if (som(na) >= O - 1) return Object.assign(basis, { uitkomst: 'betaald', reden: 'deel_ontvangen' });
+    if (som(na) > 0) return Object.assign(basis, { uitkomst: 'deels', reden: dekkingOk ? 'deel_ontvangen' : 'bank_achter', rest_centen: O - som(na) });
     if (!dekkingOk) return Object.assign(basis, { uitkomst: 'niet_vast', reden: bankTot ? 'bank_achter' : 'geen_bank' });
     return Object.assign(basis, { uitkomst: 'open', reden: 'deel_ontvangen' });
   }
-  if (bet.length) {
-    if (B == null) return Object.assign(basis, { uitkomst: somVoor > 0 ? 'al_betaald' : 'betaald', reden: 'bedrag_onbekend' });
-    if (somVoor >= B - 1) return Object.assign(basis, { uitkomst: 'al_betaald', reden: null });
-    if (som >= B - 1) return Object.assign(basis, { uitkomst: 'betaald', reden: null });
-    return Object.assign(basis, { uitkomst: 'deels', reden: dekkingOk ? null : 'bank_achter', rest_centen: B - som });
+  if (telt.length) {
+    if (B == null) return Object.assign(basis, { uitkomst: voor.length ? 'al_betaald' : 'betaald', reden: 'bedrag_onbekend' });
+    if (som(voor) >= B - 1) return Object.assign(basis, { uitkomst: 'al_betaald', reden: null });
+    if (som(telt) >= B - 1) return Object.assign(basis, { uitkomst: 'betaald', reden: null });
+    if (redVoor.length && som(redVoor) >= B - 1) return kandidaatRB();
+    return Object.assign(basis, { uitkomst: 'deels', reden: dekkingOk ? null : 'bank_achter', rest_centen: B - som(telt) });
   }
+  if (redVoor.length) return kandidaatRB();
   const zwak = treffers.filter(function (t) { return t.sterkte === 'zwak'; });
   if (zwak.length) return Object.assign(basis, { uitkomst: 'kandidaat', reden: null, kandidaat: zwak[zwak.length - 1] });
   if (!dekkingOk) return Object.assign(basis, { uitkomst: 'niet_vast', reden: bankTot ? 'bank_achter' : 'geen_bank' });
@@ -298,7 +326,7 @@ function kaart(d) {
     const b = m.betalingen.filter(function (t) { return t.voor_brief; }); const t = b[b.length - 1] || laatste;
     titel = kort('al betaald'); zin = 'al betaald op ' + nlDatum(t.datum) + ' (' + sterkteTekst(t.sterkte) + '). Niet opnieuw betalen.';
   } else if (m.uitkomst === 'betaald') {
-    if (!laatste || laatste.sterkte === 'hoog') return null;
+    if (!laatste || m.betalingen.some(function (t) { return t.sterkte === 'hoog' && !t.voor_brief; })) return null;
     titel = kort('lijkt betaald'); zin = 'lijkt betaald op ' + nlDatum(laatste.datum) + ' (' + sterkteTekst(laatste.sterkte) + '; het nummer staat niet bij de betaling). Klopt dat, zet de kaart dan op gedaan.';
   } else if (m.uitkomst === 'open') {
     titel = kort(m.reden === 'deel_ontvangen' ? 'rest nog niet betaald' : 'nog niet betaald');
@@ -307,12 +335,14 @@ function kaart(d) {
     titel = kort('deels betaald');
     zin = 'deels betaald: ' + euro(m.betalingen.reduce(function (s, t) { return s + t.centen; }, 0)) + ' op ' + m.betalingen.map(function (t) { return nlDatum(t.datum); }).join(' en ') + ', rest ' + euro(m.rest_centen) + ' (' + bank + ').';
   } else if (m.uitkomst === 'kandidaat') {
-    titel = kort('mogelijk al betaald?');
-    zin = 'mogelijk al betaald op ' + nlDatum(m.kandidaat.datum) + ' (' + euro(m.kandidaat.centen) + '; alleen naam en bedrag kloppen). Klopt dat?';
+    titel = kort(m.reden === 'rekening_bedrag' ? 'lijkt al betaald?' : 'mogelijk al betaald?');
+    zin = m.reden === 'rekening_bedrag'
+      ? 'lijkt al betaald op ' + nlDatum(m.kandidaat.datum) + ' (' + euro(m.kandidaat.centen) + '; rekening en bedrag kloppen, het factuurnummer staat er niet bij: kan ook een eerdere factuur zijn). Klopt dat?'
+      : 'mogelijk al betaald op ' + nlDatum(m.kandidaat.datum) + ' (' + euro(m.kandidaat.centen) + '; alleen naam en bedrag kloppen). Klopt dat?';
   } else if (m.uitkomst === 'twee_keer') {
-    const h = m.betalingen.filter(function (t) { return t.sterkte === 'hoog'; });
+    const h = m.betalingen, gelijk = h.every(function (t) { return t.centen === h[0].centen; });
     titel = kort('twee keer betaald?');
-    zin = 'lijkt twee keer betaald (' + h.map(function (t) { return nlDatum(t.datum); }).join(' en ') + ', elk ' + euro(h[0].centen) + '). Terugvragen of verrekenen?';
+    zin = 'lijkt twee keer betaald (' + h.map(function (t) { return nlDatum(t.datum); }).join(' en ') + ', ' + (gelijk ? 'elk ' + euro(h[0].centen) : 'samen ' + euro(h.reduce(function (s, t) { return s + t.centen; }, 0))) + '). Terugvragen of verrekenen?';
   } else {
     titel = kort('niet na te gaan');
     zin = 'niet na te gaan: ' + (m.reden === 'prive' ? 'privérekening niet gekoppeld' : (m.bank_tot ? 'bank pas bij tot ' + nlDatum(m.bank_tot) : 'bank niet bijgewerkt')) + '.';
@@ -343,5 +373,5 @@ function sluitBewijs(m) {
   return 'Betaald op ' + h.map(function (t) { return nlDatum(t.datum); }).join(' en ') + ' (op factuurnummer, ' + euro(h.reduce(function (s, t) { return s + t.centen; }, 0)) + ').';
 }
 
-module.exports = { kopNummer, norm, hash, centen, datumIso, minWerkdagen, plusDagen, niveau, NIVEAU_NAAM, oorspronkelijkeAfzender, briefLees, schuldeiser, dossierSleutel,
+module.exports = { kopNummer, venster, norm, hash, centen, datumIso, minWerkdagen, plusDagen, niveau, NIVEAU_NAAM, oorspronkelijkeAfzender, briefLees, schuldeiser, dossierSleutel,
   nummerHash, schuldeiserHash, zelfdeDossier, nummerIn, match, kaart, sluitBewijs, naamNorm, BETAALDIENST, MAX_TITEL, MAX_WAAROM };

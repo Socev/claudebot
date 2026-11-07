@@ -372,3 +372,15 @@ test('wv2684 hercontrole (P2/P3): open → betaald na de brief (kaart dicht met 
   const n1 = E.tel.betaling.length; E.klok.t += 86400000; await E.r.ronde(); assert.equal(E.tel.betaling.length, n1);
   E.r.sluit();
 });
+
+test('wv2684 review MOET 4: ketenstuk van een onbekende afzender op een consumentenadres → geen kaart buiten Davids keuze om (keten blijft schaduw)', async () => {
+  const E = omgeving({ indeling: async function () { return { ok: true, categorie: 'Iets anders' }; } });
+  const M = { van: 'voorbeeld.persoon@hotmail.com', van_naam: 'Voorbeeld Persoon', onderwerp: 'Herinnering factuur 123456', aan: ['david@voorbeeld.example'], verzonden: '2026-10-31T18:30:00Z' };
+  const id = E.zet({ meta: M, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(M.van, M.onderwerp, 'Hallo,\n\nDe factuur 123456 is nog niet voldaan.\n\nGroet') }] });
+  await E.r.ronde();
+  assert.equal(E.staat(id), 'twijfel');
+  assert.ok(E.best(id).some((b) => /^keten:schaduw/.test(b)), JSON.stringify(E.best(id)));
+  assert.equal(E.tel.betaling.length, 0); assert.equal(E.tel.kaarten.filter((k) => /^intake-keten-/.test(k.sleutel)).length, 0);
+  assert.equal(E.db.prepare("SELECT uitkomst FROM besluit WHERE stuk_id = ? AND stap = 'keten_zakelijk'").get(id).uitkomst, 'nee');
+  E.r.sluit();
+});

@@ -17490,9 +17490,9 @@ function ketenKern() {
 function intakeKetenBetaling(x) {
   const KM = ketenKern();
   if (!KM) throw new Error('keten-match.js ontbreekt');
-  const fdb = facturenOpen();
+  const fdb = facturenOpenRo();   // review wv2684 #12: eigen alleen-lezen verbinding, per aanroep open en dicht
   if (!fdb || !fdb.db) throw new Error('facturen-databank niet open');
-  return intakeKetenBetalingDb(KM, fdb.db, x);
+  try { return intakeKetenBetalingDb(KM, fdb.db, x); } finally { fdb.sluit(); }
 }
 function intakeKetenBetalingDb(KM, db, x) {
   const b = x && x.brief;
@@ -17512,17 +17512,19 @@ function intakeKetenBetalingDb(KM, db, x) {
   const namen = [lev && lev.naam].filter(Boolean);
   const ibans = new Set((b.ibans || []).concat(levIbans));
   const bedragen = [b.bedrag_centen, b.openstaand_centen].filter(function (c) { return c != null; });
-  const van = KM.plusDagen(b.datum && b.datum <= peil ? b.datum : peil, -200);
-  function op(waar, arg) {
+  const van = KM.venster(b, peil).van;   // review #2: hetzelfde venster als match()
+  function op(waar, arg, dekking) {
     // dekking per rekening: de laatste boekdatum, of de dag vóór het laatste invoermoment als dat later is (een stille rekening loopt niet achter),
-    // nooit na het peil; over de nagekeken rekeningen de nieuwste (de entiteit) — een rekening die al 60 dagen niets kreeg telt niet
-    const rek = db.prepare('SELECT r.laatste_invoer_op AS inv, (SELECT max(t.boekdatum) FROM bank_transactie t WHERE t.rekening = r.id AND t.verwijderd_op IS NULL AND t.boekdatum <= ?) AS d FROM rekening r WHERE ' + waar.replace('entiteit', 'r.entiteit')).all(peil, ...arg);
+    // nooit na het peil; over de nagekeken rekeningen de OUDSTE (review #3: anders "nog niet betaald" terwijl de betalende rekening achterloopt);
+    // een rekening die al 60 dagen niets kreeg en niet meer ingelezen wordt telt niet
+    const rek = db.prepare('SELECT r.laatste_invoer_op AS inv, (SELECT max(t.boekdatum) FROM bank_transactie t WHERE t.rekening = r.id AND t.verwijderd_op IS NULL AND t.boekdatum <= ?) AS d FROM rekening r WHERE ' + waar.replace('entiteit', 'r.entiteit') +
+      (arg.length ? '' : " AND r.bank_formaat = 'bankluis'")).all(peil, ...arg);   // alle zakelijke: de dekking van de dagelijkse bankkoppeling (handmatige CSV-rekeningen lopen per maand)
     const actief = rek.map(function (r) {
       let d = r.d ? String(r.d).slice(0, 10) : null;
       const inv = /^\d{4}-\d{2}-\d{2}/.test(String(r.inv || '')) ? KM.plusDagen(String(r.inv).slice(0, 10), -1) : null;
       if (d && inv && inv > d) d = inv > peil ? peil : inv;
       return d;
-    }).filter(function (d) { return d && d >= KM.plusDagen(peil, -60); }).sort().reverse();
+    }).filter(function (d) { return d && d >= KM.plusDagen(peil, -60); }).sort();
     const alle = db.prepare('SELECT id, rekening, boekdatum, bedrag_centen, tegenpartij_naam, tegenpartij_iban, omschrijving, kenmerk FROM bank_transactie WHERE verwijderd_op IS NULL AND boekdatum >= ? AND boekdatum <= ? AND ' + waar).all(van, peil, ...arg);
     const raak = alle.filter(function (r) {
       const c = Math.abs(Number(r.bedrag_centen));
@@ -17530,7 +17532,7 @@ function intakeKetenBetalingDb(KM, db, x) {
     });
     const afB = new Set(raak.filter(function (r) { return r.bedrag_centen < 0; }).map(function (r) { return -r.bedrag_centen; }));
     const rijen = raak.concat(alle.filter(function (r) { return r.bedrag_centen > 0 && afB.has(r.bedrag_centen) && raak.indexOf(r) < 0; }));   // storno's
-    return KM.match(b, rijen, { peil, bank_tot: actief.length ? actief[0] : null, leverancier_ibans: levIbans, namen });
+    return KM.match(b, rijen, { peil, bank_tot: dekking !== undefined ? dekking : (actief.length ? actief[0] : null), leverancier_ibans: levIbans, namen });
   }
   // eerst de rekening(en) van de entiteit; ziet die geen betaling (of is de entiteit onbekend), dan alle zakelijke (post van de POH-GGZ wordt als
   // POT ingedeeld terwijl de Kostenmaatschap betaalt). De dekking blijft die van de entiteit, tenzij de betaling elders gevonden is.
@@ -17539,7 +17541,7 @@ function intakeKetenBetalingDb(KM, db, x) {
   const eigen = ent && db.prepare('SELECT 1 FROM bank_transactie WHERE entiteit = ? AND verwijderd_op IS NULL LIMIT 1').get(ent);
   const mE = eigen ? op('entiteit = ?', [ent]) : null;
   if (mE && mE.betalingen.length) return { m: mE, leverancier: lev, factuur_bekend: factuurBekend, nagekeken: 'entiteit' };
-  const mZ = op("entiteit <> 'prive'", []);
+  const mZ = op("entiteit <> 'prive'", [], mE ? mE.bank_tot : undefined);   // terugval: de dekking blijft die van de entiteit
   if (!mE || mZ.betalingen.length || (mZ.uitkomst === 'kandidaat' && mE.uitkomst !== 'kandidaat')) return { m: mZ, leverancier: lev, factuur_bekend: factuurBekend, nagekeken: 'zakelijk' };
   return { m: mE, leverancier: lev, factuur_bekend: factuurBekend, nagekeken: 'entiteit' };
 }

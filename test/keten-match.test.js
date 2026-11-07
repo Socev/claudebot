@@ -61,8 +61,10 @@ test('P5 origineel + doorgestuurd + antwoord + tweede herinnering → één doss
   const antw = KM.briefLees({ tekst: 'Dank, wij kijken het na.\nOp 1 okt 2026 schreef Leverancier A <debiteuren@leverancier-a.example>:\n> Factuurnummer: LA-2026-0042', kop: 'Re: Herinnering',
     velden: [{ veld: 'factuurnummer', waarde: 'LA-2026-0042', letterlijk: true }], van: 'poh@praktijk.example', doorgestuurd: true, eigen_domeinen: eigen });
   const twee = KM.briefLees({ tekst: 'Factuurnummer: LA-2026-0042', kop: 'Tweede herinnering', velden: [{ veld: 'factuurnummer', waarde: 'LA-2026-0042', letterlijk: true }], van: 'debiteuren@leverancier-a.example', eigen_domeinen: eigen });
-  const sl = [orig, door, antw, twee].map(function (b) { return KM.dossierSleutel(KM.schuldeiser(b, null), b.nummer_norm); });
-  assert.equal(new Set(sl).size, 1, JSON.stringify([orig.domein, door.domein, antw.domein, twee.domein]));
+  // zelfde nummer en zelfde schuldeiser-domein (ook uit het doorgestuurde blok of het citaat) → alles valt in het dossier van het origineel
+  assert.deepEqual([orig, door, antw, twee].map((b) => b.domein + '|' + b.nummer_norm), Array(4).fill('leverancier-a.example|LA20260042'));
+  const d0 = { schuldeiser_soort: KM.schuldeiser(orig, null).soort, schuldeiser: KM.schuldeiserHash(KM.schuldeiser(orig, null)) };
+  assert.ok([door, antw, twee].every((b) => KM.nummerHash(b.nummer_norm) === KM.nummerHash(orig.nummer_norm) && KM.zelfdeDossier(d0, KM.schuldeiser(b, null))));
   assert.equal(Math.max(orig.niveau, door.niveau, antw.niveau, twee.niveau), 2);
   // een stuk zonder herkende afzender met hetzelfde nummer valt ook in het dossier; twee verschillende leveranciers niet
   const d = { schuldeiser_soort: 'domein', schuldeiser: KM.schuldeiserHash(KM.schuldeiser(orig, null)) };
@@ -97,8 +99,14 @@ test('P9 som kleiner dan het bedrag → deels met rest; redelijk = rekening + be
   assert.equal(m.uitkomst, 'deels'); assert.equal(m.rest_centen, 6000);
   const k = KM.kaart({ sleutel: 'k', schuldeiser: 'Leverancier A', nummer: 'LA-2026-0042', niveau: 1, m, afzender_herkend: true, stuk_id: 's' });
   assert.match(k.waarom, /deels betaald: € 40,00 op 10-9-2026, rest € 60,00/);
+  // rekening + bedrag (zonder nummer) vóór de brief kan een vorige factuur zijn: kandidaat, nooit "al betaald" (review wv2684 #1)
   const r = KM.match(brief(), [af('2026-09-10', 10000, { omschrijving: 'Betaling' })], OPT);
-  assert.equal(r.uitkomst, 'al_betaald'); assert.equal(r.betalingen[0].sterkte, 'redelijk');
+  assert.equal(r.uitkomst, 'kandidaat'); assert.equal(r.reden, 'rekening_bedrag');
+  assert.match(KM.kaart({ sleutel: 'k', schuldeiser: 'A', nummer: 'LA-2026-0042', niveau: 1, m: r, afzender_herkend: true, stuk_id: 's' }).titel, /lijkt al betaald\?$/);
+  // na de brief: betaald, maar geen stil dichtzetten (alleen op nummer)
+  const r2 = KM.match(brief(), [af('2026-10-02', 10000, { omschrijving: 'Betaling' })], Object.assign({}, OPT, { peil: '2026-10-03', bank_tot: '2026-10-02' }));
+  assert.equal(r2.uitkomst, 'betaald'); assert.equal(KM.sluitBewijs(r2), null);
+  assert.match(KM.kaart({ sleutel: 'k', schuldeiser: 'A', nummer: 'LA-2026-0042', niveau: 1, m: r2, afzender_herkend: true, stuk_id: 's' }).titel, /lijkt betaald$/);
 });
 
 test('P10 entiteit privé → niet vast te stellen', () => {
@@ -133,4 +141,21 @@ test('wv2684 terugtoets-lessen: nummer uit het onderwerp, schone afzendernaam, o
   const m = KM.match(br, [deel, af('2026-10-01', 60000)], OPT);
   assert.equal(m.uitkomst, 'betaald'); assert.match(KM.sluitBewijs(m), /€ 600,00/);
   assert.equal(KM.match(br, [deel, af('2026-10-01', 20000)], OPT).rest_centen, 40000);
+});
+
+test('review wv2684: twee keer met een hoge + redelijke betaling; abonnement van vorige maand geen twee keer; betaaldienst alleen op naam; niveau uit dreigzin; dossiers per domein; nummer na "factuur"', () => {
+  const OPT2 = Object.assign({}, OPT, { peil: '2026-10-30', bank_tot: '2026-10-29' });
+  assert.equal(KM.match(brief(), [af('2026-10-21', 10000), af('2026-10-22', 10000, { omschrijving: 'Betaling' })], OPT2).uitkomst, 'twee_keer');
+  assert.equal(KM.match(brief(), [af('2026-09-05', 10000, { omschrijving: 'Betaling' }), af('2026-10-21', 10000)], OPT2).uitkomst, 'betaald');
+  // "iDEAL" in de omschrijving maakt een andere partij geen betaaldienst: nummer bij twee partijen → niet hoog
+  const m = KM.match(brief({ ibans: [] }), [af('2026-09-10', 10000, { tegenpartij_iban: 'NL02RABO0123456789', tegenpartij_naam: 'Andere Partij', omschrijving: 'iDEAL LA-2026-0042' }), af('2026-09-11', 10000, { tegenpartij_iban: IBAN_X, tegenpartij_naam: 'Weer Een Ander', omschrijving: 'LA-2026-0042' })], Object.assign({}, OPT, { leverancier_ibans: [] }));
+  assert.ok(!m.betalingen.some((t) => t.sterkte === 'hoog'));
+  assert.equal(KM.niveau('Herinnering factuur 1234\nBij uitblijven van betaling dragen wij de vordering over aan een incassobureau.'), 1);
+  assert.equal(KM.niveau('Overdracht aan incassobureau'), 4); assert.equal(KM.niveau('Herinnering\nDit is een aanmaning.'), 3);
+  const sa = { soort: 'domein', waarde: 'lev-a.example' }, sb = { soort: 'domein', waarde: 'lev-b.example' };
+  assert.ok(!KM.zelfdeDossier({ schuldeiser_soort: 'domein', schuldeiser: KM.schuldeiserHash(sa) }, sb));
+  assert.ok(KM.zelfdeDossier({ schuldeiser_soort: 'domein', schuldeiser: KM.schuldeiserHash(sa) }, { soort: 'naam', waarde: 'lev a' }));
+  assert.equal(KM.kopNummer('Herinnering: klantnummer 13296, factuur 2026294'), '2026294');
+  assert.equal(KM.kopNummer('Herinnering klantnummer 13296 openstaand'), null);
+  assert.equal(KM.venster({ datum: '2026-10-01', factuurdatum: '2026-02-01' }, '2026-10-02').van, '2026-01-25');
 });
