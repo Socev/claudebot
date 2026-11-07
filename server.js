@@ -17396,6 +17396,23 @@ function mailmanIntakeBerichten(postvak, ids) {
   for (const id of ids.slice(0, 500)) if (q.get(String(postvak), String(id))) uit.add(String(id));
   return uit;
 }
+// wv2344 (plan "OVIS Intake - ideale flow" stap 3, Mail-knop "Waar hoort dit?"): per Gmail-draad uit Davids privé-Gmail het Intake-stuk
+// (stuk.bron 'gmail:david', meta.thread_id = de draad), alleen als het live wacht (twijfel, vastgehouden) of een plek kreeg (automatisch,
+// klaar); een wachtend stuk gaat voor, anders het nieuwste. Niet bij bewaard (buiten de Brain) of weg. Alleen lezen, alleen het id, geen
+// inhoud. Geeft Map draad → stk_…; zonder intake.sqlite een lege Map (dan toont de app de knop niet).
+function mailIntakeStukken(idb, draden) {
+  const uit = new Map();
+  if (!idb || !Array.isArray(draden) || !draden.length) return uit;
+  const q = idb.prepare("SELECT s.stuk_id FROM stuk s JOIN live_stuk l ON l.stuk_id = s.stuk_id WHERE s.bron = 'gmail:david' AND json_extract(s.meta, '$.thread_id') = ?"
+    + " AND l.staat IN ('twijfel', 'vastgehouden', 'automatisch', 'klaar') ORDER BY CASE WHEN l.staat IN ('twijfel', 'vastgehouden') THEN 0 ELSE 1 END, l.sinds DESC, s.stuk_id DESC LIMIT 1");
+  for (const t of draden.slice(0, 500)) {
+    const d = String(t == null ? '' : t);
+    if (!/^[0-9a-f]{12,24}$/.test(d) || uit.has(d)) continue;
+    const r = q.get(d);
+    if (r && /^stk_[0-9]{8}_[0-9a-f]{8}$/.test(String(r.stuk_id))) uit.set(d, String(r.stuk_id));
+  }
+  return uit;
+}
 // wv1988 (MailMan B6+): welke van deze Gmail-id's zijn in de Facturen-app helemaal verwerkt? = het bericht uit het verzamelpostvak heeft
 // minstens één factuur en ELKE factuur ervan staat op een status die Davids bevestiging vraagt (in_wachtrij, wordt_verstuurd, concept_klaar,
 // verstuurd, prive_archief; CHECK in facturen-db.js: bevestigd_op + bevestigd_door, door David of wie in de Facturen-app mag bevestigen).
@@ -17524,6 +17541,14 @@ function appMailZaken(req, res, a, route) {
       alle.forEach(function (z) { z.voorwerk = vw[z.draad] || null; });
       r.j.voorwerk_aan = mailVoorwerkAan();
     } catch (e) { logError('mail-zaken-voorwerk', e); }
+  }
+  // wv2344: per zaak het Intake-stuk (alleen het id) voor de knop "Waar hoort dit?" in het Mail-venster; typeof: de UI-toets laadt knipsels
+  if (r.j && r.j.lagen && typeof mailIntakeStukken === 'function' && typeof mailmanIntakeOpen === 'function') {
+    try {
+      const alle = []; Object.keys(r.j.lagen).forEach(function (g) { (r.j.lagen[g] || []).forEach(function (z) { alle.push(z); }); });
+      const st = mailIntakeStukken(mailmanIntakeOpen(), alle.map(function (z) { return z.draad; }));
+      alle.forEach(function (z) { z.intake_stuk = st.get(String(z.draad)) || null; });
+    } catch (e) { logError('mail-zaken-intake', e); }
   }
   return appStuur(res, 200, r.j);
 }

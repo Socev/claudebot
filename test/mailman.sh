@@ -34,4 +34,5 @@ grep -qE '^RELEASE_OPTIONEEL=".* mailman\.js ' uitrol.sh || { echo "ROOD  uitrol
 grep -q "^COPY mailman.js /app/release-bootstrap/mailman.js" Dockerfile || { echo "ROOD  Dockerfile: mailman.js niet in release-bootstrap"; f=1; }
 [ $f = 0 ] && echo "GROEN koppeling server.js, uitrol.sh en Dockerfile"
 node --no-warnings --test --test-reporter=spec test/mailman.test.js || f=1
+node --no-warnings --test --test-reporter=spec test/mail-intake-stuk.test.js || f=1   # wv2344: Intake-stuk per mailzaak
 exit $f
