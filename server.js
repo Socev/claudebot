@@ -9617,13 +9617,15 @@ async function appWebhookUrl(wf, naam, cacheSleutel, opnieuw) {
   return appStaat[cacheSleutel].url;
 }
 function appAgendaUrl(opnieuw) { return appWebhookUrl(APP_AGENDA_WF, null, 'agendaUrl', opnieuw); }
-async function appAgendaApi(body) {
+// opts.timeoutMs: eigen grens per aanroeper (wv2641: mail_zoeken met 25 volle nieuwsbrieven duurt gemeten 8-9 s, onder last > 15 s).
+async function appAgendaApi(body, opts) {
   const geheim = process.env.N8N_WEBHOOK_AGENDA_API;
+  const ms = opts && opts.timeoutMs > 0 ? Math.min(opts.timeoutMs, 120000) : 15000;
   if (!geheim) throw new Error('agenda-luik niet ingericht');
   for (let poging = 0; poging < 2; poging++) {
     const url = await appAgendaUrl(poging > 0);
     const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify(Object.assign({ secret: geheim }, body)), signal: AbortSignal.timeout(15000) });
+      body: JSON.stringify(Object.assign({ secret: geheim }, body)), signal: AbortSignal.timeout(ms) });
     if (r.status === 404 && poging === 0) continue;
     if (!r.ok) throw new Error('agenda-luik http ' + r.status);
     return r.json();
@@ -18179,7 +18181,7 @@ const nieuwsbrief = (function () {
   if (!fs.existsSync(p)) return null;
   try {
     const n = require(p).maak({ dir: NIEUWSBRIEF_DIR, fout: logError,
-      luik: function (b) { return appAgendaApi(b); },
+      luik: function (b) { return appAgendaApi(b, { timeoutMs: 60000 }); },   // wv2641: 15 s was te krap (TimeoutError 7-11 09:15)
       claude: harvesterClaude,
       leesVault: function (rel) { return VV().lees(path.join(VAULT, rel)); },
       bericht: async function (b) {

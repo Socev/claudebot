@@ -128,8 +128,30 @@ const goedModel = { prompts: [], antwoord: function () { return { ok: true, data
   toets('halveren: veel zoekvragen, afgekapt gemeld, hooguit 60 gelezen', L.log.zoek.length > 100 && u.afgekapt === true && L.log.lees.length === 60 && u.te_veel > 0, { zoek: L.log.zoek.length, lees: L.log.lees.length, u: u });
   toets('0 punten: één regel "niets wat je moet weten" + afgekapt', /niets wat je moet weten\./.test(M.berichten[0].tekst) && /meer nieuwsbrieven dan ik kon ophalen/.test(M.berichten[0].tekst), M.berichten[0].tekst.slice(0, 200));
 
+  // ── 7b. wv2641: zoeken per dag, één herhaling bij een time-out ──
+  const dir4 = fs.mkdtempSync(path.join(os.tmpdir(), 'nb-toets-'));
+  L = maakLuik(POST); M = maakNb(dir4, L.luik, goedModel);
+  u = await M.nb.ronde({ proef: true });
+  const breed = L.log.zoek.map(function (q) { const m = /after:(\d+) before:(\d+)/.exec(q); return +m[2] - +m[1]; });
+  toets('zoeken per dag: elk venster hooguit één dag, 7 dagen = 8 vragen', breed.every(function (w) { return w <= 86400; }) && L.log.zoek.length === 8 && u.geslaagd, { breed: breed, u: u });
+  let keer = 0;
+  const L2 = maakLuik(POST);
+  const traag = async function (b) { if (b.actie === 'mail_zoeken' && keer++ === 2) { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; } return L2.luik(b); };
+  M = maakNb(dir4, traag, goedModel);
+  u = await M.nb.ronde({ proef: true });
+  toets('één time-out bij zoeken: opnieuw gevraagd, ronde geslaagd met alle post', u.geslaagd && u.gelezen === 3 && keer === 9 && L2.log.zoek.length === 8, { u: u, keer: keer, zoek: L2.log.zoek.length });
+  const L3 = maakLuik(POST);
+  const kapot = async function (b) { if (b.actie === 'mail_zoeken' && /after:/.test(b.query) && L3.log.zoek.length >= 1) { L3.log.zoek.push(b.query); throw new Error('timeout'); } return L3.luik(b); };
+  M = maakNb(dir4, kapot, goedModel);
+  M.nb.rondeStart({ proef: true });
+  await new Promise(function (r) { setTimeout(r, 50); });
+  const uk2 = M.nb.rondeUitkomst();
+  toets('twee keer fout: ronde mislukt met regel, geen bericht', M.berichten.length === 0 && L3.log.zoek.length === 3 && /^Nieuwsbrief-bloemlezing mislukt: ronde faalde in de pod: timeout/.test(uk2.j.regel), { j: uk2.j, zoek: L3.log.zoek.length });
+  fs.rmSync(dir4, { recursive: true, force: true });
+
   // ── 8. server.js-koppeling ──
   const s = fs.readFileSync('server.js', 'utf8');
+  toets('server.js: nieuwsbrief-luik met eigen time-out 60 s', /luik: function \(b\) \{ return appAgendaApi\(b, \{ timeoutMs: 60000 \}\); \}/.test(s) && /AbortSignal\.timeout\(ms\)/.test(s));
   toets('server.js: bron nieuwsbrief bekend, soort dag', /'nieuwsbrief',\s+\/\/ wv2190/.test(s) && /nieuwsbrief: 'dag' \}/.test(s));
   toets('server.js: route met body-secret achter rolPoort', /req\.url === '\/nieuwsbrief-ronde' \|\| req\.url === '\/nieuwsbrief-ronde\/uitkomst'\)\) \{\n    return rolPoort/.test(s) && /nieuwsbrief\.rondeStart\(\{ proef: d\.proef === true \}\)/.test(s));
   toets('server.js: model via harvesterClaude (zonder tools), bericht via berichtIntern', /claude: harvesterClaude,\n      leesVault/.test(s) && /berichtIntern\(\{ kanaal: b\.kanaal, bron: 'nieuwsbrief'/.test(s));

@@ -19,6 +19,7 @@ const path = require('path');
 const QUERY = 'label:NIEUWSBRIEF';
 const DAG = 86400000;
 const EERSTE_DAGEN = 7, MAX_DAGEN = 10;
+const ZOEK_STAP_S = 86400;               // wv2641: per dag zoeken
 const MIN_VENSTER_S = 300;                 // bij 25 treffers halveren tot 5 minuten; daarna afgekapt melden
 const MAX_MAILS = 60, PER_MAIL = 6000, TOTAAL = 150000;
 const MAX_PUNTEN = 12;
@@ -110,14 +111,23 @@ function maak(o) {
   function staatLees() { try { const j = JSON.parse(fs.readFileSync(STAAT, 'utf8')); return j && typeof j === 'object' ? j : {}; } catch (e) { return {}; } }
   function staatSchrijf(s) { mkdir(); const t = STAAT + '.tmp'; fs.writeFileSync(t, JSON.stringify(s), { mode: 0o600 }); fs.renameSync(t, STAAT); }
 
-  // Mails in [s, e) (epoch-seconden); bij 25 treffers het venster halveren.
+  // Eén zoekvraag; bij een fout (gemeten 7-11: TimeoutError onder last) één keer opnieuw, daarna faalt de ronde eerlijk.
+  async function zoekVraag(s, e) {
+    const b = { actie: 'mail_zoeken', query: QUERY + ' after:' + s + ' before:' + e, max: 25 };
+    try { return await o.luik(b); } catch (x) { fout('nieuwsbrief-zoek', x); return o.luik(b); }
+  }
+  // Mails in [s, e) (epoch-seconden), per dag (wv2641: een vraag met 25 volle nieuwsbrieven duurt 8-9 s; ± 4-10 per dag gemeten);
+  // bij 25 treffers het venster halveren.
   async function zoek(s, e, uit) {
-    const j = await o.luik({ actie: 'mail_zoeken', query: QUERY + ' after:' + s + ' before:' + e, max: 25 });
+    for (let d = s; d < e; d += ZOEK_STAP_S) await zoekDeel(d, Math.min(e, d + ZOEK_STAP_S), uit);
+  }
+  async function zoekDeel(s, e, uit) {
+    const j = await zoekVraag(s, e);
     const mails = j && Array.isArray(j.mails) ? j.mails : null;
     if (!mails) throw new Error('mail_zoeken gaf geen lijst');
     if (mails.length >= 25 && e - s > MIN_VENSTER_S) {
       const m = s + Math.floor((e - s) / 2);
-      await zoek(s, m, uit); await zoek(m, e, uit); return;
+      await zoekDeel(s, m, uit); await zoekDeel(m, e, uit); return;
     }
     if (mails.length >= 25) uit.afgekapt = true;
     mails.forEach(function (x) { if (x && typeof x.id === 'string' && /^[0-9a-f]{8,24}$/.test(x.id) && !uit.mails.has(x.id)) uit.mails.set(x.id, x); });
