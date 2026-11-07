@@ -17475,32 +17475,73 @@ function intakeFacturenKent(shas) {
   for (const s of (shas || []).slice(0, 50)) if (/^[0-9a-f]{64}$/.test(String(s)) && q.get(String(s))) uit.add(String(s));
   return uit;
 }
-// ketenBetaling({ entiteit (knoop), kenmerken, ibans, ontvangen }) → { gevonden, via, bank_tot, nagekeken, prive }. Een betaling = een afschrijving
-// met het kenmerk in omschrijving of betaalkenmerk (vanaf 180 dagen vóór ontvangst), of naar een rekening op het stuk (vanaf 3 dagen vóór
-// ontvangst). Zonder eigen transacties van die entiteit (bv. privé: die rekeningen kent de Facturen-app niet) alle zakelijke rekeningen.
+// wv2684 (postketen, ontwerp § 3.3): ketenBetaling({ entiteit (knoop), brief (keten-match.briefLees), peil ('JJJJ-MM-DD') }) → { m (keten-match.match),
+// leverancier { id, naam } | null, factuur_bekend, nagekeken }. Alleen lezen op facturen.sqlite. Afschrijvingen van de rekening(en) van de entiteit, anders
+// alle zakelijke; dekking = de oudste laatste boekdatum van de rekeningen die de laatste 60 dagen nog boekingen kregen. Leverancier via een rekening uit
+// het stuk (leverancier_iban), anders via het maildomein (precies één leverancier). Niets bewaard, niets gelogd (geen nummer, bedrag of IBAN).
 const INTAKE_FACTUREN_ENT = { TG: 'tolgaarde', GH: 'groenhouten', HAGRO: 'hagro', POT: 'pot', HOLD: 'holding', PHBV: 'praktijkhouders_bv', SEL: 'sel', DBH: 'dbh',
   GHAWA: 'ghawa', KM: 'kostenmaatschap', SLOEL: 'sloel', PRIVE: 'prive' };
+let ketenKernMod = null;
+function ketenKern() {
+  if (ketenKernMod) return ketenKernMod;
+  try { ketenKernMod = require(path.join(__dirname, 'keten-match.js')); } catch (e) { logError('keten-match', e); ketenKernMod = null; }
+  return ketenKernMod;
+}
 function intakeKetenBetaling(x) {
+  const KM = ketenKern();
+  if (!KM) throw new Error('keten-match.js ontbreekt');
   const fdb = facturenOpen();
   if (!fdb || !fdb.db) throw new Error('facturen-databank niet open');
+  return intakeKetenBetalingDb(KM, fdb.db, x);
+}
+function intakeKetenBetalingDb(KM, db, x) {
+  const b = x && x.brief;
+  if (!b || !b.nummer_norm) throw new Error('ketenBetaling: geen brief');
+  const peil = /^\d{4}-\d{2}-\d{2}$/.test(String(x.peil || '')) ? String(x.peil) : ovisAms().datum;
   const ent = INTAKE_FACTUREN_ENT[x && x.entiteit] || null;
-  const eigen = ent && ent !== 'prive' && fdb.db.prepare('SELECT 1 FROM bank_transactie WHERE entiteit = ? AND verwijderd_op IS NULL LIMIT 1').get(ent);
-  const waar = eigen ? 'entiteit = ?' : "entiteit <> 'prive'", arg = eigen ? [ent] : [];
-  const tot = fdb.db.prepare('SELECT max(boekdatum) AS d FROM bank_transactie WHERE verwijderd_op IS NULL AND ' + waar).get(...arg);
-  const t0 = Date.parse(String(x && x.ontvangen || '')) || Date.now();
-  const dag = function (ms) { return new Date(ms).toISOString().slice(0, 10); };
-  let via = null;
-  const kq = fdb.db.prepare("SELECT 1 FROM bank_transactie WHERE verwijderd_op IS NULL AND bedrag_centen < 0 AND boekdatum >= ? AND " + waar +
-    " AND instr(upper(replace(replace(replace(replace(coalesce(omschrijving,'') || ' ' || coalesce(kenmerk,''), ' ', ''), '-', ''), '/', ''), '.', '')), ?) > 0 LIMIT 1");
-  for (const k of (x && x.kenmerken) || []) {
-    const n = String(k).toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (n.length >= 4 && kq.get(dag(t0 - 180 * 86400000), ...arg, n)) { via = 'kenmerk'; break; }
+  let lev = null;
+  const lq = db.prepare('SELECT l.id, l.naam FROM leverancier_iban li JOIN leverancier l ON l.id = li.leverancier WHERE li.iban = ? LIMIT 1');
+  for (const i of (b.ibans || []).slice(0, 10)) { const r = lq.get(String(i)); if (r) { lev = { id: r.id, naam: r.naam }; break; } }
+  if (!lev && b.domein) {
+    const r = db.prepare("SELECT DISTINCT l.id, l.naam FROM leverancier l, json_each(l.domeinen) d WHERE lower(d.value) = ? LIMIT 2").all(String(b.domein).toLowerCase());
+    if (r.length === 1) lev = { id: r[0].id, naam: r[0].naam };
   }
-  if (!via) {
-    const iq = fdb.db.prepare('SELECT 1 FROM bank_transactie WHERE verwijderd_op IS NULL AND bedrag_centen < 0 AND boekdatum >= ? AND ' + waar + ' AND tegenpartij_iban = ? LIMIT 1');
-    for (const i of ((x && x.ibans) || []).slice(0, 10)) if (/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(String(i)) && iq.get(dag(t0 - 3 * 86400000), ...arg, String(i))) { via = 'rekening'; break; }
+  const levIbans = lev ? db.prepare('SELECT iban FROM leverancier_iban WHERE leverancier = ?').all(lev.id).map(function (r) { return r.iban; }) : [];
+  const nq = db.prepare("SELECT nummer FROM factuur WHERE nummer IS NOT NULL AND upper(replace(replace(replace(replace(replace(nummer, ' ', ''), '-', ''), '/', ''), '.', ''), '_', '')) = ? LIMIT 1");
+  const factuurBekend = !!nq.get(b.nummer_norm);
+  const namen = [lev && lev.naam].filter(Boolean);
+  const ibans = new Set((b.ibans || []).concat(levIbans));
+  const bedragen = [b.bedrag_centen, b.openstaand_centen].filter(function (c) { return c != null; });
+  const van = KM.plusDagen(b.datum && b.datum <= peil ? b.datum : peil, -200);
+  function op(waar, arg) {
+    // dekking per rekening: de laatste boekdatum, of de dag vóór het laatste invoermoment als dat later is (een stille rekening loopt niet achter),
+    // nooit na het peil; over de nagekeken rekeningen de nieuwste (de entiteit) — een rekening die al 60 dagen niets kreeg telt niet
+    const rek = db.prepare('SELECT r.laatste_invoer_op AS inv, (SELECT max(t.boekdatum) FROM bank_transactie t WHERE t.rekening = r.id AND t.verwijderd_op IS NULL AND t.boekdatum <= ?) AS d FROM rekening r WHERE ' + waar.replace('entiteit', 'r.entiteit')).all(peil, ...arg);
+    const actief = rek.map(function (r) {
+      let d = r.d ? String(r.d).slice(0, 10) : null;
+      const inv = /^\d{4}-\d{2}-\d{2}/.test(String(r.inv || '')) ? KM.plusDagen(String(r.inv).slice(0, 10), -1) : null;
+      if (d && inv && inv > d) d = inv > peil ? peil : inv;
+      return d;
+    }).filter(function (d) { return d && d >= KM.plusDagen(peil, -60); }).sort().reverse();
+    const alle = db.prepare('SELECT id, rekening, boekdatum, bedrag_centen, tegenpartij_naam, tegenpartij_iban, omschrijving, kenmerk FROM bank_transactie WHERE verwijderd_op IS NULL AND boekdatum >= ? AND boekdatum <= ? AND ' + waar).all(van, peil, ...arg);
+    const raak = alle.filter(function (r) {
+      const c = Math.abs(Number(r.bedrag_centen));
+      return KM.nummerIn(b.nummer_norm, r) || (r.tegenpartij_iban && ibans.has(String(r.tegenpartij_iban).replace(/\s/g, '').toUpperCase())) || bedragen.some(function (B) { return Math.abs(c - B) <= B * 0.02; });
+    });
+    const afB = new Set(raak.filter(function (r) { return r.bedrag_centen < 0; }).map(function (r) { return -r.bedrag_centen; }));
+    const rijen = raak.concat(alle.filter(function (r) { return r.bedrag_centen > 0 && afB.has(r.bedrag_centen) && raak.indexOf(r) < 0; }));   // storno's
+    return KM.match(b, rijen, { peil, bank_tot: actief.length ? actief[0] : null, leverancier_ibans: levIbans, namen });
   }
-  return { gevonden: !!via, via, bank_tot: tot && tot.d ? String(tot.d).slice(0, 10) : null, nagekeken: eigen ? 'entiteit' : 'zakelijk', prive: ent === 'prive' };
+  // eerst de rekening(en) van de entiteit; ziet die geen betaling (of is de entiteit onbekend), dan alle zakelijke (post van de POH-GGZ wordt als
+  // POT ingedeeld terwijl de Kostenmaatschap betaalt). De dekking blijft die van de entiteit, tenzij de betaling elders gevonden is.
+  // privé: de privérekeningen kent de Facturen-app niet; alleen een betaling van een zakelijke rekening telt, anders niet vast te stellen (P10)
+  if (ent === 'prive') { const mP = op("entiteit <> 'prive'", []); return mP.betalingen.length ? { m: mP, leverancier: lev, factuur_bekend: factuurBekend, nagekeken: 'zakelijk' } : { m: KM.match(b, [], { prive: true, peil }), leverancier: lev, factuur_bekend: factuurBekend, nagekeken: 'prive' }; }
+  const eigen = ent && db.prepare('SELECT 1 FROM bank_transactie WHERE entiteit = ? AND verwijderd_op IS NULL LIMIT 1').get(ent);
+  const mE = eigen ? op('entiteit = ?', [ent]) : null;
+  if (mE && mE.betalingen.length) return { m: mE, leverancier: lev, factuur_bekend: factuurBekend, nagekeken: 'entiteit' };
+  const mZ = op("entiteit <> 'prive'", []);
+  if (!mE || mZ.betalingen.length || (mZ.uitkomst === 'kandidaat' && mE.uitkomst !== 'kandidaat')) return { m: mZ, leverancier: lev, factuur_bekend: factuurBekend, nagekeken: 'zakelijk' };
+  return { m: mE, leverancier: lev, factuur_bekend: factuurBekend, nagekeken: 'entiteit' };
 }
 // Pas aangemaakt (tabellen in intake.sqlite) als de schakelaar aan staat (Fable wv980 #5); daarna blijft hij tot een herstart.
 let intakeRouterMod = null, intakePriveKring = null;
@@ -17541,7 +17582,11 @@ function intakeRouterHaal() {
         regels.map(function (r) { return '- ' + r; }).join('\n') + '\n'); },
       bericht: intakeSysteemBericht,
       // wv1919 (stap 3d): staan deze pdf's al (gelezen) in de Facturen-app, en ziet de Facturen-app een betaling bij een aanmaning (alleen lezen)
-      facturenKent: intakeFacturenKent, ketenBetaling: intakeKetenBetaling });
+      facturenKent: intakeFacturenKent, ketenBetaling: intakeKetenBetaling,
+      // wv2684 (postketen): de zuivere kern (de CI-poort van intake-router.js laat geen eigen require toe) en kaartstatus met eigen bewijs
+      ketenKern: ketenKern(),
+      ketenKaartStatus: async function (sleutel, van, naar, bewijs) { appStaat.vjCache = null; return appSbRpc('mk_voor_jou_status', { p_sleutel: sleutel, p_van: van, p_naar: naar, p_door: 'agent', p_later_tot: null,
+        p_bewijs: bewijs || null, p_samengevoegd_in: null, p_reden: naar === 'gedaan' ? 'intake-keten: betaling op factuurnummer gezien' : 'intake-keten: dossier weer open (hoger niveau of tweede betaling)' }); } });
   } catch (e) { logError('intake-router', e); intakeRouterMod = null; }
   return intakeRouterMod;
 }

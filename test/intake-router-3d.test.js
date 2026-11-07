@@ -11,6 +11,7 @@ const R = require('../intake-router.js');
 const K = R.K;
 const poort = require('../intake/patientpoort.js');
 const VV = require('../vault-veilig.js');
+const KM = require('../keten-match.js');
 
 const TG = { o: 'o-tg', k: 'TG', naam: 'Huisartsenpraktijk Testgaarde', eigen: true, soort: 'entiteit', status: 'actief', concept: false, voor: [] };
 const ORG = { o: 'o-org', k: 'org:voorbeeld-energie', naam: 'Voorbeeld Energie BV', eigen: false, soort: 'organisatie', status: 'actief', concept: false, voor: ['TG'] };
@@ -59,7 +60,7 @@ function omgeving(extra) {
     });
     return id;
   };
-  const tel = { jev: [], indeling: [], kaarten: [], betaling: [], melding: [] };
+  const tel = { jev: [], indeling: [], kaarten: [], betaling: [], melding: [], status: [], bank: [], bank_tot: '2026-10-30', kaartStatus: {} };
   const bekend = new Set();
   const o = Object.assign({ dir, vault, vv: VV, nu: () => klok.t, marker: poort,
     pdfBbox: async function (p) { return bbox(fs.readFileSync(p, 'utf8')); }, ocr: async function () { return null; }, docx: async function () { return null; }, paginas: async function () { return 1; },
@@ -68,12 +69,14 @@ function omgeving(extra) {
     jev: async function (x) { tel.jev.push(x.tekst); return { ref: x.ref, gemeten: true, injectie_kans: 0.02, aanspreking: false }; },
     indeling: async function (x) { tel.indeling.push(x.tekst); return { ok: true, categorie: 'Huisartsenpraktijk Tolgaarde' }; },
     naamOk: function (nm) { return !/[\\/:*?"<>|]/.test(nm); }, vaultPauze: function () { return false; }, bewaarNa: function () { return 1; },
-    datum: function () { return '2026-10-31'; },
-    kaartZet: async function (p) { tel.kaarten.push(p); return { sleutel: p.sleutel }; },
+    datum: function () { return new Date(klok.t).toISOString().slice(0, 10); },   // wv2684: volgt de toetsklok (hercontrole één keer per dag)
+    kaartZet: async function (p) { tel.kaarten.push(p); if (!tel.kaartStatus[p.sleutel]) tel.kaartStatus[p.sleutel] = 'open'; return { sleutel: p.sleutel, status: tel.kaartStatus[p.sleutel] }; },
+    ketenKaartStatus: async function (sl, van, naar, bewijs) { tel.status.push({ sl, van, naar, bewijs }); if (tel.kaartStatus[sl] !== van) return { ok: false, fout: 'conflict' }; tel.kaartStatus[sl] = naar; return { ok: true }; },
+    ketenKern: KM,
     kaartStatus: async function () { return { ok: true }; }, kaartOpen: async function () { return []; },
     melding: function (t) { tel.melding.push(t); },
     facturenKent: function (shas) { return new Set(shas.filter(function (s) { return bekend.has(s); })); },
-    ketenBetaling: async function (x) { tel.betaling.push(x); return { gevonden: false, bank_tot: '2026-10-30', nagekeken: 'entiteit', prive: false }; },
+    ketenBetaling: async function (x) { tel.betaling.push(x); return { m: KM.match(x.brief, tel.bank, { peil: x.peil, bank_tot: tel.bank_tot, namen: [] }), leverancier: null, factuur_bekend: false, nagekeken: 'entiteit' }; },
   }, extra || {});
   const r = R.maak(o);
   const bestanden = function () { const uit = []; (function loop(d) { for (const nm of fs.readdirSync(d)) { const f = path.join(d, nm); if (fs.statSync(f).isDirectory()) loop(f); else uit.push(path.relative(vault, f)); } })(vault); return uit.filter((f) => f !== K.DL_PAD).sort(); };
@@ -86,18 +89,12 @@ function E2(rijen) { return rijen.map((b) => b.lens + ':' + b.status + (b.zou_au
 function mail(van, onderwerp, tekst) { return 'From: ' + van + '\r\nSubject: ' + onderwerp + '\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n' + tekst; }
 const META = { van: 'facturen@voorbeeld-energie.example', van_naam: 'Voorbeeld Energie', aan: ['david@voorbeeld.example'], verzonden: '2026-10-31T18:30:00Z' };
 
-test('kern 3d: datum, kenmerken, IBAN, ketenkaart (grenzen, nooit "onbetaald"), deadline-regel en invoegen', () => {
+test('kern 3d: datum, kenmerken, IBAN, deadline-regel en invoegen', () => {
   assert.equal(K.datumIso('14-11-2026'), '2026-11-14'); assert.equal(K.datumIso('1/2/27'), '2027-02-01'); assert.equal(K.datumIso('2026-11-30'), '2026-11-30');
   assert.equal(K.datumIso('3 november 2026'), '2026-11-03'); assert.equal(K.datumIso('31-02-2026'), null); assert.equal(K.datumIso('14-11-1890'), null); assert.equal(K.datumIso('morgen'), null);
   assert.deepEqual(K.ketenKenmerken([{ veld: 'kenmerk', waarde: 'AB1', letterlijk: true }, { veld: 'dossiernummer', waarde: 'D-778899', letterlijk: true }, { veld: 'factuurnummer', waarde: 'F-1234', letterlijk: false }]),
     [{ soort: 'dossiernummer', waarde: 'D-778899' }]);
   assert.deepEqual(K.ibansIn('IBAN NL91 ABNA 0417 1643 00 en NL00ABNA0000000000 fout'), ['NL91ABNA0417164300']);
-  const k = K.ketenKaart({ stuk_id: 'stk_20261031_00000001', afzender: 'Voorbeeld Energie BV '.repeat(5), kenmerk: 'D-778899', ontvangen: '2026-10-31T18:30:00Z', bank_tot: '2026-10-30', prive: true });
-  assert.equal(k.sleutel, 'intake-keten-20261031-00000001');
-  assert.ok(k.titel.length <= 90 && k.waarom.length <= 400, k.titel.length + '/' + k.waarom.length);
-  assert.match(k.waarom, /open en geëscaleerd, geen betaling gevonden — bank bijgewerkt tot 30-10-2026/); assert.match(k.waarom, /zakelijke rekeningen/);
-  assert.ok(!/onbetaald/i.test(JSON.stringify(k)));
-  assert.ok(k.stappen.every((s) => s.length <= 400 && !/\.md\b|\/opt\//.test(s)));
   const regel = K.deadlineRegel({ datum: '2026-11-14', entiteit: 'TG', wat: 'factuur', afzender: 'A | B', kenmerk: 'X', stuk_id: 'stk_20261031_00000001', ontvangen: '2026-10-31T18:30:00Z', vindplaats: { naam: 'f.pdf', regel: 5 } });
   assert.equal(regel.split(' | ').length, 6, 'zes kolommen (pipe uit de afzender weg)');
   assert.match(regel, /^\| 2026-11-14 \| Tolgaarde \| \*\*Vervaldatum factuur van A B\*\* \(kenmerk X\) — voorstel van OVIS Intake, stuk stk_20261031_00000001, ontvangen 31-10-2026; vindplaats: "f\.pdf", regel 5 \| Voorstel:/);
@@ -204,12 +201,16 @@ test('3d: aanmaning in de mailtekst → keten (logboek + kaart "geen betaling ge
   assert.deepEqual(sam.schaduw_lenzen, ['facturen']);
   // keten: betalingscontrole met kenmerk en rekening, kaart, logboek
   assert.equal(E.tel.betaling.length, 1);
-  assert.deepEqual(E.tel.betaling[0].kenmerken, ['D-778899']); assert.deepEqual(E.tel.betaling[0].ibans, ['NL91ABNA0417164300']); assert.equal(E.tel.betaling[0].entiteit, 'TG');
-  const kaart = E.tel.kaarten.find((x) => /^intake-keten-/.test(x.sleutel));
-  assert.ok(kaart); assert.match(kaart.titel, /^Aanmaning van Voorbeeld Energie BV — nakijken$/);
-  assert.match(kaart.waarom, /kenmerk D-778899: open en geëscaleerd, geen betaling gevonden — bank bijgewerkt tot 30-10-2026/);
+  assert.equal(E.tel.betaling[0].brief.nummer, 'D-778899'); assert.deepEqual(E.tel.betaling[0].brief.ibans, ['NL91ABNA0417164300']); assert.equal(E.tel.betaling[0].entiteit, 'TG');
+  assert.equal(E.tel.betaling[0].brief.niveau, 3);
+  const kaart = E.tel.kaarten.find((x) => /^intake-keten-[0-9a-f]{16}$/.test(x.sleutel));
+  assert.ok(kaart); assert.equal(kaart.titel, 'Aanmaning Voorbeeld Energie BV D-778899: nog niet betaald');
+  assert.match(kaart.waarom, /nog niet betaald \(bank bijgewerkt t\/m 30-10-2026\)/); assert.match(kaart.waarom, /Dit is een aanmaning\./); assert.ok(!/Afzender niet herkend/.test(kaart.waarom));
+  assert.ok(kaart.titel.length <= 90 && kaart.waarom.length <= 400); assert.ok(!/onbetaald/i.test(JSON.stringify(kaart)));
   const b = E.db.prepare("SELECT uitkomst, bewijs FROM besluit WHERE stuk_id = ? AND stap = 'keten'").get(id);
-  assert.equal(b.uitkomst, 'open_geescaleerd'); assert.ok(!/D-778899|NL91/.test(b.bewijs), 'geen kenmerk of rekening in het logboek');
+  assert.equal(b.uitkomst, 'open'); assert.ok(!/D-778899|NL91|778899/.test(b.bewijs), 'geen kenmerk of rekening in het logboek');
+  const dos = E.db.prepare('SELECT * FROM keten_dossier').all();
+  assert.equal(dos.length, 1); assert.equal(dos[0].kaart_staat, 'open'); assert.ok(!/D-778899|NL91|778899/.test(JSON.stringify(dos)), 'geen nummer of rekening in keten_dossier');
   // deadline: voorstel met vindplaats
   const dl = E.dl().split('\n').filter((r) => r.indexOf(id) >= 0);
   assert.equal(dl.length, 1);
@@ -223,13 +224,15 @@ test('3d: aanmaning in de mailtekst → keten (logboek + kaart "geen betaling ge
   E.r.sluit();
 });
 
-test('3d: aanmaning waarvoor de Facturen-app een betaling ziet → alleen logboek, geen kaart; zonder betalingscontrole blijft hij aangeboden', async () => {
-  const E = omgeving({ ketenBetaling: async function () { return { gevonden: true, via: 'kenmerk', bank_tot: '2026-10-30', nagekeken: 'entiteit' }; } });
+test('3d/wv2684: aanmaning die al vóór de brief betaald is → kaart "al betaald, niet opnieuw betalen"; zonder betalingscontrole blijft hij aangeboden', async () => {
+  const E = omgeving();
+  E.tel.bank.push({ id: 'b1', rekening: 'r', boekdatum: '2026-10-20', bedrag_centen: -12345, tegenpartij_naam: 'Voorbeeld Energie', tegenpartij_iban: 'NL91ABNA0417164300', omschrijving: 'Dossier D-112233', kenmerk: null });
   const M = Object.assign({ onderwerp: 'Laatste herinnering, aanmaning D-112233' }, META);
   const id = E.zet({ meta: M, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(M.van, M.onderwerp, AANMANING.replace('D-778899', 'D-112233')) }] });
   await E.r.ronde();
-  assert.equal(E.db.prepare("SELECT uitkomst FROM besluit WHERE stuk_id = ? AND stap = 'keten'").get(id).uitkomst, 'betaling_gevonden');
-  assert.equal(E.tel.kaarten.filter((x) => /^intake-keten-/.test(x.sleutel)).length, 0);
+  assert.equal(E.db.prepare("SELECT uitkomst FROM besluit WHERE stuk_id = ? AND stap = 'keten'").get(id).uitkomst, 'al_betaald');
+  const k = E.tel.kaarten.filter((x) => /^intake-keten-/.test(x.sleutel));
+  assert.equal(k.length, 1); assert.match(k[0].waarom, /al betaald op 20-10-2026 \(op factuurnummer\)\. Niet opnieuw betalen\./);
   E.r.sluit();
   const E2b = omgeving({ ketenBetaling: undefined });
   const id2 = E2b.zet({ meta: M, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(M.van, M.onderwerp, AANMANING) }] });
@@ -295,5 +298,77 @@ test('wv2464: eigen verzonden factuur-pdf aan de boekhouder → geen facturen/ke
   assert.ok(!E.best(id2).some((b) => /^facturen/.test(b)), JSON.stringify(E.best(id2)));
   assert.ok(E.best(id3).some((b) => /^facturen:(aangeboden|schaduw:soort_of_afzender_niet_hoog)/.test(b)), 'eigen ingang telt gewoon: ' + JSON.stringify(E.best(id3)));
   assert.ok(!E.best(id3).some((b) => /eigen_verzonden/.test(b)));
+  E.r.sluit();
+});
+
+// ── wv2684: postketen (ontwerp § 4: P5, P12, P13, router; hercontrole P2/P3) ──
+const HERINNERING = 'Beste,\n\nHerinnering\nOnze factuur is nog niet voldaan.\nFactuurnummer: LA-2026-0042\nFactuurdatum: 01-10-2026\nOpenstaand bedrag: € 100,00\nIBAN NL91 ABNA 0417 1643 00\n\nMet vriendelijke groet,\nLeverancier A (verzonnen)';
+test('wv2684 P12/P13: ingebrekestelling in de voorwaarden is geen keten; "Herinnering" + "nog niet voldaan" wel (keten_kracht hoog met nummer, facturen blijft redelijk)', () => {
+  const v = [{ veld: 'factuurnummer', waarde: 'LA-2026-0042' }];
+  const contract = 'Overeenkomst van opdracht\nPartijen komen het volgende overeen.\n' + 'Artikel. '.repeat(250) + '\nBij verzuim volgt een ingebrekestelling.';
+  assert.notEqual(K.soortBepaal({ tekst: contract, velden: v }).soort, 'keten');
+  const so = K.soortBepaal({ tekst: 'Herinnering\nUw factuur is nog niet voldaan.', velden: v });
+  assert.equal(so.soort, 'keten'); assert.equal(so.keten_kracht, 'hoog'); assert.equal(so.kracht, 'redelijk');
+  assert.equal(K.soortBepaal({ tekst: 'Herinnering\nDe incasso van uw factuur is helaas niet gelukt.', velden: v }).soort, 'keten');
+  assert.notEqual(K.soortBepaal({ tekst: 'Herinnering: uw afspraak morgen om 10:00', velden: [] }).soort, 'keten');
+  // keten-lens: soort hoog genoeg, afzender onbekend; facturenlens houdt zijn drempel
+  const bs = K.bestemmingen(so, { kracht: 'geen' }, { knoop: null, kracht: 'geen' }, { velden: v });
+  assert.deepEqual(bs.map((b) => b.lens + ':' + b.zou_auto), ['keten:true', 'facturen:false']);
+});
+
+test('wv2684 P5 + router: origineel, doorgestuurd, antwoord en tweede herinnering van een onbekende afzender → keten loopt (ook bij twijfel), één dossier, één kaart, niveau 2', async () => {
+  const E = omgeving({ indeling: async function () { return { ok: true, categorie: 'Iets anders' }; } });
+  const T = (o, t) => E.zet({ meta: Object.assign({}, META, o), delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(o.van, o.onderwerp, t) }] });
+  const L = { van: 'debiteuren@leverancier-a.example', van_naam: 'Leverancier A' };
+  const id1 = T(Object.assign({ onderwerp: 'Herinnering factuur LA-2026-0042' }, L), HERINNERING);
+  const id2 = T({ van: 'poh@praktijk-b.example', van_naam: 'POH', onderwerp: 'Fwd: Herinnering factuur LA-2026-0042' }, 'Zie hieronder.\n---------- Forwarded message ---------\nVan: Leverancier A <debiteuren@leverancier-a.example>\n' + HERINNERING);
+  const id3 = T({ van: 'poh@praktijk-b.example', van_naam: 'POH', onderwerp: 'Re: Herinnering factuur LA-2026-0042' }, 'Ik kijk het na.\nOp 1 okt 2026 schreef Leverancier A <debiteuren@leverancier-a.example>:\n' + HERINNERING);
+  await E.r.ronde();
+  const s1 = JSON.parse(E.db.prepare('SELECT samenvatting FROM router_stuk WHERE stuk_id = ?').get(id1).samenvatting);
+  assert.equal(s1.soort, 'keten'); assert.ok(s1.afzender_kracht !== 'hoog'); assert.equal(E.staat(id1), 'twijfel');
+  assert.ok(E.best(id1).includes('keten:bevestigd:auto'), JSON.stringify(E.best(id1)));
+  assert.equal(E.db.prepare('SELECT count(*) n FROM keten_dossier').get().n, 1);
+  const d1 = E.db.prepare('SELECT * FROM keten_dossier').get();
+  assert.deepEqual(JSON.parse(d1.stukken).sort(), [id1, id2, id3].sort()); assert.equal(d1.niveau, 1);
+  const kk = () => E.tel.kaarten.filter((k) => /^intake-keten-/.test(k.sleutel));
+  assert.equal(new Set(kk().map((k) => k.sleutel)).size, 1); assert.equal(kk().length, 1, 'kopie en antwoord zetten geen tweede kaart');
+  assert.match(kk()[0].waarom, /Afzender niet herkend/); assert.match(kk()[0].titel, /^Herinnering Leverancier A LA-2026-0042: nog niet betaald$/);
+  // tweede herinnering: dezelfde kaart, bijgewerkt (niveau 2), ook nadat David hem wegklikte
+  E.tel.kaartStatus[d1.sleutel] = 'gedaan';
+  E.klok.t += 86400000;
+  const id4 = T(Object.assign({ onderwerp: 'Tweede herinnering factuur LA-2026-0042', verzonden: '2026-11-01T09:00:00Z' }, L), HERINNERING.replace('Herinnering', 'Tweede herinnering'));
+  await E.r.ronde();
+  const d2 = E.db.prepare('SELECT * FROM keten_dossier').get();
+  assert.equal(d2.niveau, 2); assert.equal(d2.bron_stuk, id4); assert.equal(E.db.prepare('SELECT count(*) n FROM keten_dossier').get().n, 1);
+  assert.equal(new Set(kk().map((k) => k.sleutel)).size, 1);
+  assert.match(kk()[kk().length - 1].waarom, /Dit is een tweede herinnering\./);
+  assert.deepEqual(E.tel.status.map((x) => x.van + '>' + x.naar), ['gedaan>open'], 'hoger niveau: kaart weer open');
+  E.r.sluit();
+});
+
+test('wv2684 hercontrole (P2/P3): open → betaald na de brief (kaart dicht met bewijs) → tweede betaling (twee keer betaald, kaart weer open); één keer per dag', async () => {
+  const E = omgeving();
+  const M = Object.assign({ onderwerp: 'Herinnering factuur LA-2026-0042' }, META);
+  E.zet({ meta: M, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(M.van, M.onderwerp, HERINNERING) }] });
+  await E.r.ronde();
+  const d = () => E.db.prepare('SELECT * FROM keten_dossier').get();
+  assert.equal(d().uitkomst, 'open'); assert.equal(d().kaart_staat, 'open');
+  const n0 = E.tel.betaling.length;
+  await E.r.ronde();
+  assert.equal(E.tel.betaling.length, n0, 'dezelfde dag geen hercontrole');
+  const rij = (dag) => ({ id: 'b' + dag, rekening: 'r', boekdatum: dag, bedrag_centen: -10000, tegenpartij_naam: 'Leverancier A', tegenpartij_iban: 'NL91ABNA0417164300', omschrijving: 'Factuur LA-2026-0042', kenmerk: null });
+  E.tel.bank.push(rij('2026-11-02')); E.tel.bank_tot = '2026-11-02';
+  E.klok.t += 2 * 86400000;
+  await E.r.ronde();
+  assert.equal(d().uitkomst, 'betaald'); assert.equal(d().kaart_staat, 'dicht_pod');
+  assert.deepEqual(E.tel.status.map((x) => x.van + '>' + x.naar), ['open>gedaan']); assert.match(E.tel.status[0].bewijs, /^Betaald op 2-11-2026 \(op factuurnummer, € 100,00\)\.$/);
+  E.tel.bank.push(rij('2026-11-19')); E.tel.bank_tot = '2026-11-20';
+  E.klok.t += 18 * 86400000;
+  await E.r.ronde();
+  assert.equal(d().uitkomst, 'twee_keer'); assert.equal(d().kaart_staat, 'open');
+  assert.match(E.tel.kaarten[E.tel.kaarten.length - 1].waarom, /lijkt twee keer betaald \(2-11-2026 en 19-11-2026, elk € 100,00\)/);
+  assert.deepEqual(E.tel.status.map((x) => x.van + '>' + x.naar), ['open>gedaan', 'gedaan>open']);
+  // twee keer betaald: geen hercontrole meer
+  const n1 = E.tel.betaling.length; E.klok.t += 86400000; await E.r.ronde(); assert.equal(E.tel.betaling.length, n1);
   E.r.sluit();
 });

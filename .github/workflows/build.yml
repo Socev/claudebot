@@ -561,6 +561,9 @@ jobs:
       - name: "intake-router (wv980, OVIS Intake stap 2: router in de schaduw)"
         if: ${{ !cancelled() }}
         run: bash test/intake-router.sh
+      - name: "keten-match (wv2684, postketen: herinnering en aanmaning naast de bank, P1–P11)"
+        if: ${{ !cancelled() }}
+        run: bash test/keten-match.sh
       - name: "brain-web (wv2660, Chrome-extensie Naar Second Brain: webpagina als markdown via Intake)"
         if: ${{ !cancelled() }}
         run: bash test/brain-web.sh

@@ -189,6 +189,7 @@ COPY brain-entiteiten.js /app/release-bootstrap/brain-entiteiten.js
 COPY huisstijl-pod.js /app/release-bootstrap/huisstijl-pod.js
 COPY werkers.js /app/release-bootstrap/werkers.js
 COPY intake-router.js /app/release-bootstrap/intake-router.js
+COPY keten-match.js /app/release-bootstrap/keten-match.js
 COPY mailman.js /app/release-bootstrap/mailman.js
 COPY werkstroom.js /app/release-bootstrap/werkstroom.js
 COPY docplan-totaal.js /app/release-bootstrap/docplan-totaal.js

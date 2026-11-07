@@ -67,6 +67,7 @@ const TEKST_MIN = 40;                   // tekens zonder witruimte: daaronder ge
 const HANDVAT_MS = 10 * 60000;
 const PDF_PAGINAS = 20, OCR_PAGINAS = 5;   // zoveel leest de router (pdftotext -l 20, pdftoppm -l 5); meer = niet volledig gelezen
 const KOP_MAX = 1500;                  // tekens per deel die als kop tellen voor de soortwoorden
+const KETEN_BEGIN = 600;               // wv2684: de extra ketenherkenning kijkt alleen naar het begin van elk deel
 const PER_RONDE = 20;
 const RONDE_MS = 10 * 60000;            // tijdsbudget per ronde (live: Jev + model per stuk kan minuten duren)
 const UITVOER_MAX = 5;                  // pogingen om een bestemming uit te voeren; daarna terug naar David (twijfel)
@@ -357,12 +358,26 @@ function velden(delen) {
 }
 function vindplaats(r) { const v = {}; for (const k of ['pagina', 'regel', 'x', 'y']) if (r[k] != null) v[k] = r[k]; return v; }
 
+// wv2684 (postketen): het nummer staat bij een herinnering vaak alleen in het onderwerp ("Herinnering factuur 2026294", "… voor F2974554"): het eerste
+// teken-blok met minstens 4 cijfers dat geen datum of jaartal is. Dezelfde regel staat in keten-match.js (kopNummer); deze module mag hem niet laden.
+function kopNummer(onderwerp) {
+  const re = /(?:^|[\s(#:\[])([A-Za-z]{0,4}-?\d[0-9A-Za-z\-/]{3,30})(?=$|[\s),.;:\]])/g;
+  let m;
+  while ((m = re.exec(String(onderwerp || '')))) {
+    const w = m[1].replace(/[-/]+$/, '');
+    if ((w.match(/\d/g) || []).length < 4 || /^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$|^\d{4}-\d{2}-\d{2}$|^(?:19|20)\d{2}$/.test(w)) continue;
+    return w;
+  }
+  return null;
+}
 // ── soort (§ 3.2 stap 5): alleen vaste signalen ──
 const W = {
   factuur: /\b(factuur|factuurnummer|invoice|nota\s*nr|notanummer)\b/i,
   credit: /\b(creditnota|creditfactuur|credit\s*note)\b/i,
-  keten_sterk: /\b(aanmaning|betalingsherinnering|tweede\s+herinnering|laatste\s+herinnering|sommatie|ingebrekestelling|incassobureau|incassokosten|deurwaarder|dwangbevel|laatste\s+waarschuwing)\b/i,
+  keten_sterk: /\b(aanmaning|betalingsherinnering|betaalherinnering|tweede\s+herinnering|laatste\s+herinnering|sommatie|ingebrekestelling|incassobureau|incassokosten|deurwaarder|dwangbevel|laatste\s+waarschuwing)\b/i,
   herinnering: /\bherinnering\b/i,
+  keten_tekst: /\bnog\s+niet\s+(?:is\s+|zijn\s+|volledig\s+|hebben\s+)*(?:voldaan|ontvangen|betaald)\b|\b(?:incasso|incasseren|ge[iï]ncasseerd)\b[\s\S]{0,80}?\bniet\s+(?:gelukt|geslaagd|uitgevoerd|mogelijk)\b|\bopenstaande?\s+bedrag\b|\bnog\s+open\s*sta(?:at|an)\b/i,   // wv2684
+  factuur_kop: /\b(?:factuur(?:nr|nummer)?|nota|invoice)\b/i,   // wv2684: ook "(factuurnr: …)" in het onderwerp
   afschrift: /\b(rekeningafschrift|bankafschrift|jaaropgave|jaaroverzicht|polisblad|polis(?:nummer)?)\b/i,
   brief: /\b(geachte|beste|hallo|dag)\b[\s\S]{0,4000}\b(met\s+vriendelijke\s+groet|vriendelijke\s+groet|hartelijke\s+groet|groet(?:en)?|kind\s+regards)\b/i,
   nieuwsbrief: /\b(uitschrijven|afmelden\s+voor\s+(?:deze\s+)?(?:nieuwsbrief|mailing)|unsubscribe|bekijk\s+deze\s+e-?mail\s+in\s+je\s+browser)\b/i,
@@ -378,12 +393,19 @@ function soortBepaal(x) {
   const bewijs = [];
   if (x.profiel === 'webpagina@1') return { soort: 'notitie', sub: 'webpagina', kracht: 'hoog', bewijs: ['webpagina'] };   // wv2660: vast, nooit factuur of keten
   if (x.ubl) return { soort: 'bewijsstuk', sub: 'factuur', kracht: 'hoog', bewijs: ['ubl'] };
+  // wv2684 (postketen): keten_kracht is de zekerheid voor de keten-lens alleen (soort keten + een nummer om op te zoeken); kracht blijft voor de facturenlens
+  const nummer = heeft('dossiernummer') || heeft('kenmerk') || heeft('factuurnummer');
+  const nummerKop = nummer || !!kopNummer(x.onderwerp);   // alleen voor de keten-lens (de facturenlens houdt zijn eigen drempel)
   if (W.keten_sterk.test(kop)) {
     bewijs.push('ketenwoord');
-    if (heeft('dossiernummer') || heeft('kenmerk') || heeft('factuurnummer')) { bewijs.push('kenmerk'); return { soort: 'keten', kracht: 'hoog', bewijs }; }
-    return { soort: 'keten', kracht: 'redelijk', bewijs };
+    if (nummer) { bewijs.push('kenmerk'); return { soort: 'keten', kracht: 'hoog', keten_kracht: 'hoog', bewijs }; }
+    return { soort: 'keten', kracht: 'redelijk', keten_kracht: nummerKop ? 'hoog' : 'redelijk', bewijs: nummerKop ? bewijs.concat(['nummer_onderwerp']) : bewijs };
   }
-  if (W.herinnering.test(kop) && (W.factuur.test(kop) || heeft('bedrag')) && (heeft('factuurnummer') || heeft('kenmerk'))) return { soort: 'keten', kracht: 'redelijk', bewijs: ['herinnering', 'factuurcontext'] };
+  if (W.herinnering.test(kop) && (W.factuur.test(kop) || heeft('bedrag')) && (heeft('factuurnummer') || heeft('kenmerk'))) return { soort: 'keten', kracht: 'redelijk', keten_kracht: 'hoog', bewijs: ['herinnering', 'factuurcontext'] };
+  if (W.herinnering.test(x.onderwerp || '') && W.factuur_kop.test(x.onderwerp || '') && kopNummer(x.onderwerp)) return { soort: 'keten', kracht: 'redelijk', keten_kracht: 'hoog', bewijs: ['herinnering', 'factuurcontext', 'nummer_onderwerp'] };
+  // wv2684: "Herinnering" in de kop en in de eerste 600 tekens "nog niet (volledig) voldaan/ontvangen", "incasso … niet gelukt" of "openstaand bedrag" (dossiers E en G)
+  const begin = x.begin != null ? x.begin : t.slice(0, KETEN_BEGIN);
+  if (W.herinnering.test(kop) && W.keten_tekst.test(begin)) return { soort: 'keten', kracht: 'redelijk', keten_kracht: nummerKop ? 'hoog' : 'redelijk', bewijs: ['herinnering', 'ketentekst'].concat(nummerKop ? ['kenmerk'] : []) };
   if (W.credit.test(kop)) return { soort: 'bewijsstuk', sub: 'creditnota', kracht: heeft('factuurnummer') && heeft('bedrag') ? 'hoog' : 'redelijk', bewijs: ['creditwoord'] };
   if (W.factuur.test(kop)) {
     const n = ['factuurnummer', 'bedrag', 'factuurdatum'].filter(heeft).length, id = heeft('btw') || heeft('kvk');
@@ -554,7 +576,9 @@ function bestemmingen(s, afz, ent, x) {
   const hoogBeide = s.kracht === 'hoog' && afz.kracht === 'hoog';
   const lens = function (l, auto, reden) { uit.push({ lens: l, doel: ent.knoop || null, zou_auto: !!auto, reden: auto ? null : reden }); };
   if (s.soort === 'bewijsstuk') lens('facturen', hoogBeide, hoogBeide ? null : 'soort_of_afzender_niet_hoog');
-  else if (s.soort === 'keten') { lens('keten', hoogBeide, 'soort_of_afzender_niet_hoog'); lens('facturen', hoogBeide, 'soort_of_afzender_niet_hoog'); }
+  // wv2684 (postketen § 3.2 stap 3): de keten-lens zet alleen een kaart en betaalt nooit, dus soort hoog is genoeg (afzender mag onbekend of
+  // doorgestuurd zijn: 5 van 8 herinneringen kwamen doorgestuurd); de facturenlens houdt zijn drempel
+  else if (s.soort === 'keten') { const kh = (s.keten_kracht || s.kracht) === 'hoog'; lens('keten', kh, 'soort_niet_hoog'); lens('facturen', hoogBeide, 'soort_of_afzender_niet_hoog'); }
   if (x.velden.some(function (v) { return v.veld === 'vervaldatum'; }) && (s.soort === 'bewijsstuk' || s.soort === 'keten')) lens('deadlines', hoogBeide, 'soort_of_afzender_niet_hoog');
   if (s.soort === 'correspondentie' || s.soort === 'notitie' || s.soort === 'onbekend' || (s.soort === 'bewijsstuk' && ent.knoop === 'PRIVE')) {
     // entiteit 'redelijk' klopte in de herhaling over het archief maar in 53 % (hoog: 82 %): alleen hoog telt naast het routelabel
@@ -665,7 +689,7 @@ function herbereken(sam, m, regels) {
   const x = { velden: (sam.velden || []).map(function (v) { return { veld: v }; }), label_entiteit: (sam.label_route || [])[0] || null };
   const r = regelZoek(regels, m);
   if (r) return { regel: r, bestemmingen: regelBestemmingen(r, ent, x) };
-  return { regel: null, bestemmingen: bestemmingen({ soort: sam.soort, kracht: sam.soort_kracht }, { kracht: sam.afzender_kracht || 'geen' }, ent, x) };
+  return { regel: null, bestemmingen: bestemmingen({ soort: sam.soort, kracht: sam.soort_kracht, keten_kracht: sam.keten_kracht || undefined }, { kracht: sam.afzender_kracht || 'geen' }, ent, x) };
 }
 
 /*
@@ -931,23 +955,8 @@ function ibansIn(t) {
 }
 function nlDatum(iso) { const x = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || '')); return x ? (+x[3]) + '-' + (+x[2]) + '-' + x[1] : null; }
 function cel(t, n) { return String(t == null ? '' : t).replace(/[\r\n|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n || 200); }
-// sleutel van de ketenkaart: één per stuk (zetten is idempotent op de sleutel)
-function ketenSleutel(stukId) { return 'intake-keten-' + String(stukId).replace(/^stk_/, '').replace(/_/g, '-'); }
-/*
- * De ketenkaart. x = { stuk_id, afzender, kenmerk, ontvangen (iso), bank_tot ('JJJJ-MM-DD' | null), prive (de privérekeningen kijkt de
- * Facturen-app niet na) }. Grenzen van mk_voor_jou_zet: titel ≤ 90, waarom ≤ 400; geen bedragen of rekeningnummers.
- */
-function ketenKaart(x) {
-  const afz = cel(x.afzender || 'een onbekende afzender', 50);
-  const bank = x.bank_tot ? 'bank bijgewerkt tot ' + nlDatum(x.bank_tot) : 'bank niet bijgewerkt';
-  const waarom = cel('Er kwam een aanmaning of herinnering binnen van ' + afz + (x.ontvangen ? ' (ontvangen ' + nlDatum(x.ontvangen) + ')' : '') + ' met kenmerk ' + cel(x.kenmerk, 40) +
-    ': open en geëscaleerd, geen betaling gevonden — ' + bank + '. Intake zoekt alleen naar een betaling met dit kenmerk of naar de rekening op het stuk' +
-    (x.prive ? ', en alleen in de zakelijke rekeningen' : '') + '; betaald via een andere weg ziet hij niet.', 400);
-  return { sleutel: ketenSleutel(x.stuk_id), soort: 'doen', waar: 'overal', prive: true, duur_min: 5, volgorde: 25,
-    titel: cel('Aanmaning van ' + afz + ' — nakijken', 90), waarom,
-    stappen: ['Open in de Socev-app Intake het stuk en bekijk het hele stuk.', 'Ga na of het al betaald is; zo niet, betaal het of neem contact op met de afzender.', 'Klaar? Zet deze kaart op gedaan.'],
-    herkomst: { module: 'intake', handmatig: 'intake', doel: { scherm: 'intake', focus: 'stuk:' + x.stuk_id } } };
-}
+// wv2684: de ketenkaart is er één per DOSSIER (schuldeiser + nummer); sleutel en tekst maakt keten-match.js (o.ketenKern, de CI-poort van deze
+// module laat alleen fs, path, crypto en node:sqlite toe, dus server.js geeft de kern mee)
 /*
  * Eén regel voor ## Actueel in het deadline-register (vorm van de nachtconsolidatie: Datum | Entiteit | Wat | Actie | Signaleer | Bron).
  * x = { datum, entiteit (knoop), wat ('factuur' | 'aanmaning'), afzender, kenmerk?, vindplaats ({ naam, pagina?, regel? }), stuk_id, ontvangen }. Een voorstel: David of de nachtconsolidatie haalt hem weg als hij niet klopt.
@@ -977,10 +986,10 @@ function deadlineInvoegen(tekst, regel, stukId) {
 }
 
 const K = { REGELVERSIE, eigenVerzonden, KOP_MAX, orgDomein, adresVan, dkimUitslag, mailLees, bboxRegels, velden, letterlijk, ibanGeldig, soortBepaal, register, afzenderBepaal, entiteitBepaal, bestemmingen, normAlias, LABEL_KNOOP,
-  regelVoorwaarden, regelPast, regelZoek, regelBestemmingen, herbereken, REGEL_LENZEN,
+  kopNummer, regelVoorwaarden, regelPast, regelZoek, regelBestemmingen, herbereken, REGEL_LENZEN,
   bestemmingenLive, jevOordeel, kennisNaam, bijlageNaam, kennisInhoud, slug, KENNIS_MAP, KENNIS_ENTITEIT, INDELING, JEV_DREMPEL,
   systeemOordeelRegels, systeemOordeelModel, systeemNaam, systeemBoxRegel, systeemDavidRegel, stilUur, SYSTEEM_MAP, SYSTEEM_VOORSTEL, SYSTEEM_SOORTEN,
-  factuurDelen, datumIso, ketenKenmerken, ibansIn, ketenKaart, ketenSleutel, deadlineRegel, deadlineInvoegen, DL_PAD };
+  factuurDelen, datumIso, ketenKenmerken, ibansIn, deadlineRegel, deadlineInvoegen, DL_PAD };
 
 // ─────────────────────────── module ───────────────────────────
 
@@ -1010,6 +1019,11 @@ CREATE TABLE IF NOT EXISTS live_stuk (stuk_id TEXT PRIMARY KEY, versie INTEGER N
 CREATE TABLE IF NOT EXISTS uitvoering (id INTEGER PRIMARY KEY, stuk_id TEXT NOT NULL, versie INTEGER NOT NULL, lens TEXT NOT NULL, doel TEXT, pad TEXT,
   sha256 TEXT, uitkomst TEXT NOT NULL, tijd TEXT NOT NULL, door TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS uitvoering_stuk ON uitvoering (stuk_id);
+CREATE TABLE IF NOT EXISTS keten_dossier (sleutel TEXT PRIMARY KEY, nummer TEXT NOT NULL, schuldeiser TEXT NOT NULL, schuldeiser_soort TEXT NOT NULL,
+  entiteit TEXT, niveau INTEGER NOT NULL, stukken TEXT NOT NULL, bron_stuk TEXT NOT NULL, uitkomst TEXT NOT NULL, uitkomst_hash TEXT,
+  kaart_staat TEXT NOT NULL DEFAULT 'geen' CHECK (kaart_staat IN ('geen','open','dicht_pod','dicht_david')), eerste_op TEXT NOT NULL, brief_op TEXT,
+  gecontroleerd_op TEXT, bijgewerkt_op TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS keten_dossier_nummer ON keten_dossier (nummer);
 CREATE TABLE IF NOT EXISTS systeem_post (id INTEGER PRIMARY KEY, stuk_id TEXT NOT NULL, versie INTEGER NOT NULL, pad TEXT NOT NULL, onderwerp TEXT, van TEXT,
   van_adres TEXT, dkim TEXT, jev TEXT, na_keuze INTEGER NOT NULL DEFAULT 0,
   tijd TEXT NOT NULL, oordeel TEXT NOT NULL, definitief INTEGER NOT NULL DEFAULT 0, model_pogingen INTEGER NOT NULL DEFAULT 0, gebundeld_op TEXT, gemeld_op TEXT,
@@ -1328,7 +1342,8 @@ function maak(o) {
           const dkim = s.profiel === 'mail@1' ? dkimUitslag(ar, vanAdres, { authserv: 'mx.google.com' }) : null;
           const ubl = lt.delen.some(function (d) { return /\.xml$/i.test(d.naam || '') && W.ubl.test(d.tekst.slice(0, 4000)); });
           const kop = [onderwerp].concat(lt.delen.map(function (d) { return d.tekst.slice(0, KOP_MAX); })).join('\n');
-        const so = soortBepaal({ tekst, kop, velden: vd.velden, ubl, eigen_van: eigenVan, eigen_aan: eigenAan, doorgestuurd, list_unsubscribe: !!(lt.mail && lt.mail.list_unsubscribe), profiel: s.profiel });
+          const begin = [onderwerp].concat(lt.delen.map(function (d) { return d.tekst.slice(0, KETEN_BEGIN); })).join('\n');   // wv2684
+        const so = soortBepaal({ tekst, kop, begin, onderwerp, velden: vd.velden, ubl, eigen_van: eigenVan, eigen_aan: eigenAan, doorgestuurd, list_unsubscribe: !!(lt.mail && lt.mail.list_unsubscribe), profiel: s.profiel });
           B('soort', so.soort + (so.sub ? ':' + so.sub : ''), so.kracht, { signalen: so.bewijs });
           B('velden', String(vd.velden.length), null, { velden: vd.velden, kenmerken: vd.kenmerken, ibans: vd.ibans });
           if (dkim) B('dkim', dkim.uitgelijnd ? 'uitgelijnd' : (dkim.pass ? 'pass_niet_uitgelijnd' : (dkim.gelezen ? 'geen_pass' : 'geen_uitslag')), null, { dkim_d: dkim.dkim_d, dmarc: dkim.dmarc });
@@ -1400,7 +1415,7 @@ function maak(o) {
           const twijfel = bs.some(function (b) { return !b.zou_auto; });
           B('zeker_genoeg', twijfel ? 'twijfel' : 'automatisch', null, { reden: bs.filter(function (b) { return !b.zou_auto; }).map(function (b) { return b.lens + ':' + b.reden; }) });
           status = 'beoordeeld';
-          sam = { profiel: s.profiel, bron: s.bron, marker: 'geen', soort: so.soort, soort_sub: so.sub || null, soort_kracht: so.kracht,
+          sam = { profiel: s.profiel, bron: s.bron, marker: 'geen', soort: so.soort, soort_sub: so.sub || null, soort_kracht: so.kracht, keten_kracht: so.keten_kracht || undefined,
             afzender: af.knoop || null, afzender_kracht: af.kracht, afzender_kenmerken: af.kenmerken, aangeleverd_door: af.aangeleverd_door, voorgesteld_spoor: af.voorgesteld_spoor,
             dkim: dkim ? (dkim.uitgelijnd ? 'uitgelijnd' : (dkim.pass ? 'pass' : (dkim.gelezen ? 'geen_pass' : 'geen_uitslag'))) : null,
             entiteit: en.knoop || null, entiteit_kracht: en.kracht, label_route: labels, bestemmingen: bs, twijfel, regel: rg ? 'R' + rg.id + '@' + rg.versie : null, velden: vd.velden.map(function (v) { return v.veld; }), kenmerken: vd.kenmerken };
@@ -1421,7 +1436,9 @@ function maak(o) {
     tx(function () {   // alles van één stuk in één transactie (Fable wv980 #6)
       if (naKeuze) db.prepare('DELETE FROM bestemming WHERE stuk_id = ? AND versie = ?').run(s.stuk_id, s.versie);   // een vastgehouden stuk had er geen
       // live: een automatische lens wordt 'aangeboden' (uitvoeren), twijfel blijft 'schaduw' tot David kiest
-      for (const b of bestem) db.prepare('INSERT OR IGNORE INTO bestemming (stuk_id, versie, lens, doel, zou_auto, reden, status, tijd) VALUES (?,?,?,?,?,?,?,?)').run(s.stuk_id, s.versie, b.lens, b.doel, b.zou_auto ? 1 : 0, b.reden, liveStaat === 'automatisch' ? 'aangeboden' : 'schaduw', nuIso(nu()));
+      // wv2684: de keten-lens (alleen een kaart, nooit betalen) loopt ook als David over de rest van het stuk nog moet kiezen
+      for (const b of bestem) db.prepare('INSERT OR IGNORE INTO bestemming (stuk_id, versie, lens, doel, zou_auto, reden, status, tijd) VALUES (?,?,?,?,?,?,?,?)').run(s.stuk_id, s.versie, b.lens, b.doel, b.zou_auto ? 1 : 0, b.reden,
+        liveStaat === 'automatisch' || (liveStaat === 'twijfel' && b.lens === 'keten' && b.zou_auto) ? 'aangeboden' : 'schaduw', nuIso(nu()));
       for (const b of resultaat) besluit(s.stuk_id, s.versie, b[0], b[1], b[2], b[3], naKeuze && b[0] === 'marker_keuze' ? 'david' : null);
       if (naKeuze) db.prepare('UPDATE router_stuk SET status = ?, regelversie = ?, compilatienummer = ?, op = ?, samenvatting = ? WHERE stuk_id = ? AND versie = ?')
         .run(status, REGELVERSIE, reg ? reg.compilatienummer : null, nuIso(nu()), JSON.stringify(sam), s.stuk_id, s.versie);
@@ -1545,23 +1562,124 @@ function maak(o) {
   function afzenderNaam(sam, meta) {
     return naamVan(reg, sam.afzender) || domeinVan(adresVan(meta.van || '')) || null;
   }
-  async function ketenSignaal(s, rs, b) {
+  /*
+   * POSTKETEN (wv2684; ontwerp § 3). Eén dossier per schuldeiser + nummer (tabel keten_dossier: alleen hashes, niveau, stuk-id's, uitkomst en
+   * kaartstaat; geen nummer, bedrag of IBAN). Het leidende stuk (eerste, of een hoger niveau) wordt naast de bank gelegd (server.js: kern op de
+   * Facturen-databank, alleen lezen); een doorgestuurde kopie, antwoord of herhaling op hetzelfde niveau komt er alleen bij. Eén kaart per dossier;
+   * een hoger niveau werkt dezelfde kaart bij (en opent hem weer). Dagelijkse hercontrole tot 45 dagen (ketenHercontrole).
+   */
+  const DAG_MS = 86400000;
+  async function ketenBeoordeel(s, rs, entiteit) {
+    const kern = o.ketenKern;
+    if (!kern) { const e = new Error('geen keten-kern'); e.code = 'EGEENKERN'; throw e; }
     const sam = safeJson(rs.samenvatting) || {}, meta = safeJson(s.meta) || {};
     if (!reg) await registerVers().catch(function () { return null; });
     const x = await stukVelden(s);
-    const km = ketenKenmerken(x.vd.velden);
-    const ontvangen = meta.verzonden || s.ontvangen || s.aangemaakt;
-    if (!km.length) return { uitkomst: 'geen_kenmerk', bewijs: { kenmerken: 0 } };
+    const tekst = x.lt.delen.map(function (d) { return d.tekst; }).join('\n');
+    const onderwerp = String(meta.onderwerp || '');
+    const kop = [onderwerp].concat(x.lt.delen.map(function (d) { return d.tekst.slice(0, KOP_MAX); })).join('\n');
+    const van = adresVan(meta.van || '');
+    const doorgestuurd = /^\s*(fwd?|fw|doorst(?:uurd)?|tr|re|antw|aw)\s*:/i.test(onderwerp);
+    const eigen = (o.eigenAdressen ? o.eigenAdressen() : []).map(function (a) { return domeinVan(adresVan(a)); }).filter(Boolean).concat(doorgestuurd && van ? [domeinVan(van)] : []);
+    const brief = kern.briefLees({ tekst, kop, onderwerp, velden: x.vd.velden, ibans: ibansIn(tekst), van, van_naam: meta.van_naam || '', doorgestuurd, eigen_domeinen: eigen,
+      datum: String(meta.verzonden || s.ontvangen || s.aangemaakt || '').slice(0, 10) });
+    if (!brief.nummer_norm) return { geen: true, sam, meta };
     if (!o.ketenBetaling) { const e = new Error('geen betalingscontrole'); e.code = 'EGEENBANK'; throw e; }
-    const ibans = ibansIn(x.lt.delen.map(function (d) { return d.tekst; }).join('\n'));
-    const bet = await o.ketenBetaling({ entiteit: b.doel || sam.entiteit || null, kenmerken: km.map(function (k) { return k.waarde; }), ibans, ontvangen });
-    if (!bet || typeof bet.gevonden !== 'boolean') { const e = new Error('betalingscontrole gaf geen antwoord'); e.code = 'EGEENBANK'; throw e; }
-    const bewijs = { kenmerk_soort: km[0].soort, kenmerken: km.length, ibans: ibans.length, bank_tot: bet.bank_tot || null, nagekeken: bet.nagekeken || null };
-    if (bet.gevonden) return { uitkomst: 'betaling_gevonden', bewijs: Object.assign(bewijs, { via: bet.via || null }) };
+    const bank = await o.ketenBetaling({ entiteit: entiteit || null, brief, peil: o.datum ? o.datum() : iso().slice(0, 10) });
+    if (!bank || !bank.m || typeof bank.m.uitkomst !== 'string') { const e = new Error('betalingscontrole gaf geen antwoord'); e.code = 'EGEENBANK'; throw e; }
+    return { brief, bank, sam, meta, doorgestuurd };
+  }
+  function dossierBewaar(d) {
+    db.prepare(`INSERT INTO keten_dossier (sleutel, nummer, schuldeiser, schuldeiser_soort, entiteit, niveau, stukken, bron_stuk, uitkomst, uitkomst_hash, kaart_staat, eerste_op, brief_op, gecontroleerd_op, bijgewerkt_op)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(sleutel) DO UPDATE SET niveau = excluded.niveau, stukken = excluded.stukken, bron_stuk = excluded.bron_stuk, uitkomst = excluded.uitkomst,
+      uitkomst_hash = excluded.uitkomst_hash, kaart_staat = excluded.kaart_staat, brief_op = excluded.brief_op, gecontroleerd_op = excluded.gecontroleerd_op, bijgewerkt_op = excluded.bijgewerkt_op,
+      entiteit = COALESCE(keten_dossier.entiteit, excluded.entiteit)`).run(d.sleutel, d.nummer, d.schuldeiser, d.schuldeiser_soort, d.entiteit || null, d.niveau, d.stukken, d.bron_stuk, d.uitkomst,
+      d.uitkomst_hash || null, d.kaart_staat, d.eerste_op, d.brief_op || null, d.gecontroleerd_op || null, iso());
+  }
+  // kaart zetten, bijwerken, heropenen of sluiten → wat er gebeurde (voor het logboek); past d aan (uitkomst, uitkomst_hash, kaart_staat)
+  async function ketenKaartActie(d, r, opt) {
+    const kern = o.ketenKern, m = r.bank.m;
+    const h = kern.hash(JSON.stringify([m.uitkomst, m.betalingen, m.rest_centen, m.kandidaat, m.iban_onbekend, d.niveau, m.reden === 'prive']), 16);
+    const was = d.uitkomst;
+    d.uitkomst = m.uitkomst;
+    const heropen = !!opt.omhoog || (m.uitkomst === 'twee_keer' && was !== 'twee_keer');   // een hoger niveau of een tweede betaling komt terug, ook na wegklikken
+    // de bank loopt een paar dagen achter: eerst afwachten (hercontrole), pas na 3 dagen "niet na te gaan" (privé meteen)
+    if (m.uitkomst === 'niet_vast' && m.reden !== 'prive' && d.kaart_staat === 'geen' && nu() - Date.parse(d.eerste_op) < 3 * DAG_MS) { d.uitkomst = 'wacht_bank'; return 'wacht_bank'; }
+    const lev = r.bank.leverancier || null;
+    const naam = (lev && lev.naam) || (!r.doorgestuurd && (r.sam.afzender_kracht === 'hoog' || r.sam.afzender_kracht === 'redelijk') ? naamVan(reg, r.sam.afzender) : null) || r.brief.naam || r.brief.domein || null;
+    const payload = kern.kaart({ sleutel: d.sleutel, schuldeiser: naam, nummer: r.brief.nummer, niveau: d.niveau, m, afzender_herkend: !!lev || r.sam.afzender_kracht === 'hoog' || r.sam.afzender_kracht === 'redelijk',
+      factuur_bekend: typeof r.bank.factuur_bekend === 'boolean' ? r.bank.factuur_bekend : null, vervaldatum: r.brief.vervaldatum, stuk_id: d.bron_stuk });
+    if (!payload) {   // betaald na de brief (op factuurnummer): geen kaart nodig; een open kaart gaat dicht met het bewijs
+      d.uitkomst_hash = h;
+      const bewijs = kern.sluitBewijs(m);
+      if (d.kaart_staat !== 'open' || !bewijs) return 'stil';
+      if (!o.ketenKaartStatus) { const e = new Error('geen kaartstatus'); e.code = 'EGEENKAART'; throw e; }
+      for (const van of ['open', 'later']) { const x = await o.ketenKaartStatus(d.sleutel, van, 'gedaan', bewijs); if (x && x.ok) { d.kaart_staat = 'dicht_pod'; return 'dicht'; } }
+      d.kaart_staat = 'dicht_david';
+      return 'weggeklikt';
+    }
+    if ((d.kaart_staat === 'dicht_david' || d.kaart_staat === 'dicht_pod') && !heropen) { d.uitkomst_hash = h; return d.kaart_staat === 'dicht_pod' ? 'dicht' : 'weggeklikt'; }
+    if (d.kaart_staat === 'open' && d.uitkomst_hash === h) return 'gelijk';
     if (!o.kaartZet) { const e = new Error('geen kaarten'); e.code = 'EGEENKAART'; throw e; }
-    const kaart = ketenKaart({ stuk_id: s.stuk_id, afzender: afzenderNaam(sam, meta), kenmerk: km[0].waarde, ontvangen, bank_tot: bet.bank_tot || null, prive: bet.prive === true });
-    await o.kaartZet(kaart);
-    return { uitkomst: 'open_geescaleerd', bewijs: Object.assign(bewijs, { kaart: kaart.sleutel }) };
+    const res = await o.kaartZet(payload);
+    const st = res && res.status;
+    if (st && st !== 'open' && st !== 'later') {
+      if (!heropen && d.kaart_staat === 'open') { d.kaart_staat = 'dicht_david'; d.uitkomst_hash = h; return 'weggeklikt'; }   // David klikte hem weg
+      if (!o.ketenKaartStatus) { const e = new Error('geen kaartstatus'); e.code = 'EGEENKAART'; throw e; }
+      await o.ketenKaartStatus(d.sleutel, st, 'open', null);
+    }
+    const oud = d.kaart_staat;
+    d.kaart_staat = 'open'; d.uitkomst_hash = h;
+    return oud === 'geen' ? 'kaart' : (oud === 'open' ? 'kaart_bijgewerkt' : 'kaart_heropend');
+  }
+  async function ketenSignaal(s, rs, b) {
+    const sam0 = safeJson(rs.samenvatting) || {};
+    const entiteit = b.doel || sam0.entiteit || null;
+    const r = await ketenBeoordeel(s, rs, entiteit);
+    if (r.geen) return { uitkomst: 'geen_kenmerk', bewijs: { kenmerken: 0 } };
+    const kern = o.ketenKern, se = kern.schuldeiser(r.brief, r.bank.leverancier || null);
+    const nh = kern.nummerHash(r.brief.nummer_norm);
+    let d = db.prepare('SELECT * FROM keten_dossier WHERE nummer = ? AND eerste_op >= ? ORDER BY eerste_op').all(nh, nuIso(nu() - 365 * DAG_MS)).find(function (x) { return kern.zelfdeDossier(x, se); }) || null;
+    const nieuw = !d;
+    if (nieuw) d = { sleutel: kern.dossierSleutel(se, r.brief.nummer_norm), nummer: nh, schuldeiser: kern.schuldeiserHash(se), schuldeiser_soort: se.soort, entiteit, niveau: 0, stukken: '[]',
+      bron_stuk: s.stuk_id, uitkomst: 'nieuw', kaart_staat: 'geen', eerste_op: iso(), brief_op: r.brief.datum };
+    const stukken = safeJson(d.stukken) || [];
+    if (stukken.indexOf(s.stuk_id) < 0) stukken.push(s.stuk_id);
+    d.stukken = JSON.stringify(stukken.slice(-50));
+    const omhoog = !nieuw && r.brief.niveau > d.niveau;
+    const bewijs = { dossier: d.sleutel, niveau: r.brief.niveau, nummer_soort: r.brief.nummer_soort, schuldeiser_soort: se.soort, ibans: r.brief.ibans.length, bank_tot: r.bank.m.bank_tot || null,
+      nagekeken: r.bank.nagekeken || null, sterkte: r.bank.m.betalingen.map(function (t) { return t.sterkte + (t.voor_brief ? ':voor' : ':na'); }) };
+    if (!nieuw && !omhoog && d.bron_stuk !== s.stuk_id) { dossierBewaar(d); return { uitkomst: 'bij_dossier', bewijs: Object.assign(bewijs, { dossier_niveau: d.niveau }) }; }
+    d.niveau = Math.max(d.niveau, r.brief.niveau); d.bron_stuk = s.stuk_id; d.brief_op = r.brief.datum;
+    const act = await ketenKaartActie(d, r, { omhoog });
+    d.gecontroleerd_op = o.datum ? o.datum() : iso().slice(0, 10);
+    dossierBewaar(d);
+    return { uitkomst: d.uitkomst, bewijs: Object.assign(bewijs, { kaart: act }) };
+  }
+  // dagelijkse hercontrole (§ 3.4): elk dossier tot 45 dagen, behalve twee keer betaald (dan heeft David de kaart al); ook betaalde dossiers,
+  // zodat een tweede betaling "twee keer betaald" wordt (dossier C)
+  async function ketenHercontrole() {
+    if (lenzenLive().indexOf('keten') < 0 || !o.ketenKern || !o.ketenBetaling) return { nagekeken: 0 };
+    const dag = o.datum ? o.datum() : iso().slice(0, 10);
+    const rijen = db.prepare("SELECT * FROM keten_dossier WHERE uitkomst <> 'twee_keer' AND eerste_op >= ? AND (gecontroleerd_op IS NULL OR gecontroleerd_op < ?) ORDER BY eerste_op LIMIT 20").all(nuIso(nu() - 45 * DAG_MS), dag);
+    let n = 0;
+    for (const d of rijen) {
+      const s = db.prepare('SELECT * FROM stuk WHERE stuk_id = ?').get(d.bron_stuk);
+      const rs = s && db.prepare('SELECT * FROM router_stuk WHERE stuk_id = ? AND versie = ?').get(s.stuk_id, s.versie);
+      const was = d.uitkomst;
+      try {
+        if (!s || !rs) { const e = new Error('bronstuk van het dossier ontbreekt'); e.code = 'EONTBREEKT'; throw e; }
+        const r = await ketenBeoordeel(s, rs, d.entiteit);
+        if (r.geen) { const e = new Error('nummer niet meer te lezen'); e.code = 'EGEENNUMMER'; throw e; }
+        const act = await ketenKaartActie(d, r, { omhoog: false });
+        d.gecontroleerd_op = dag; dossierBewaar(d); n++;
+        if (was !== d.uitkomst || act === 'dicht' || act === 'kaart_heropend') besluit(s.stuk_id, s.versie, 'keten_hercontrole', d.uitkomst, null, { dossier: d.sleutel, was, kaart: act, bank_tot: r.bank.m.bank_tot || null }, 'router');
+      } catch (e) {
+        d.uitkomst = was; d.gecontroleerd_op = dag; dossierBewaar(d);
+        if (o.fout) o.fout('intake-keten-hercontrole', e);
+      }
+    }
+    return { nagekeken: n };
   }
   async function deadlineSchrijf(s, rs, b) {
     const sam = safeJson(rs.samenvatting) || {}, meta = safeJson(s.meta) || {};
@@ -2190,6 +2308,7 @@ function maak(o) {
     if (Object.keys(liveStand()).some(function (b) { return liveStand()[b] === true; }) || db.prepare('SELECT 1 FROM live_stuk LIMIT 1').get()) {
       try { uit.al_in_facturen = facturenAlBekend(); } catch (e) { if (o.fout) o.fout('intake-router-facturen', e); }   // wv1919
       try { const u = await uitvoerRonde(); uit.uitgevoerd = u.klaar || 0; } catch (e) { if (o.fout) o.fout('intake-router-uitvoer', e); }
+      try { const k = await ketenHercontrole(); if (k.nagekeken) uit.keten_hercontrole = k.nagekeken; } catch (e) { if (o.fout) o.fout('intake-keten-hercontrole', e); }   // wv2684
       try { if (o.datum) await kaartenRonde(o.datum()); } catch (e) { if (o.fout) o.fout('intake-router-kaarten', e); }
     }
     // Systeempost (wv2004): los van de ronde (een modeloordeel kan minuten duren); eigen slot in systeemRonde
@@ -2646,7 +2765,7 @@ function maak(o) {
       stuk_lezen: { cache: stukCache.size, rij: leesRij.length, bezig: leesBezig }, stukken: o2, wacht, overgeslagen: Array.from(mislukt.values()).filter(function (n) { return n >= 3; }).length, laatste: stand.laatste, fouten: stand.fouten, laatste_fout: stand.laatste_fout };
   }
   if (o.startregels === true) { try { startregels(); } catch (e) { if (o.fout) o.fout('intake-startregels', e); } }
-  return { ronde, verwerkStuk, telling, regel, lijst, info, appOverzicht, appGeschiedenis, verwijderMag, verwijderGevraagd, appWerkstroom, werkstroomTel, appToets, appRegel, appKeuze, appStuk, voerUit, uitvoerRonde, kaartenRonde, wachtOpDavid, verbeteringen, regels: regelsAlle,
+  return { ronde, verwerkStuk, telling, regel, lijst, info, appOverzicht, appGeschiedenis, verwijderMag, verwijderGevraagd, appWerkstroom, werkstroomTel, appToets, appRegel, appKeuze, appStuk, voerUit, uitvoerRonde, kaartenRonde, ketenHercontrole, wachtOpDavid, verbeteringen, regels: regelsAlle,
     facturenAangeboden, facturenUitkomst, knoopVoor, facturenAlBekend,
     systeemRonde, startregels, _cache: { grootte: function () { return stukCache.size; }, rij: function () { return leesRij.length; } },
     sluit: function () { gesloten = true; if (systeemTimer) { clearTimeout(systeemTimer); systeemTimer = null; } db.close(); } };
