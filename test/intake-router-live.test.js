@@ -184,7 +184,7 @@ test('live: Jev boven de drempel → geen regel, geen model, twijfel; David kies
   E.r.sluit();
 });
 
-test('live: verbetering na automatisch → nieuw bestand op de goede plek, het oude wordt een verwijzing (alleen als het ongewijzigd is)', async () => {
+test('live: verbetering na automatisch → nieuw bestand op de goede plek, het oude verhuist (vóór de nacht, alleen als het ongewijzigd is; wv2618)', async () => {
   const E = omgeving();
   const id = E.zet({ meta: { van: 'anne@voorbeeld.example', onderwerp: 'Overleg', aan: ['david@voorbeeld.example'] },
     delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Overleg', GEWOON) }] });
@@ -192,8 +192,8 @@ test('live: verbetering na automatisch → nieuw bestand op de goede plek, het o
   const oud = E.bestanden()[0];
   assert.match(oud, /Tolgaarde/);
   const k = await E.r.appKeuze({ stuk_id: id, keuze: 'bestemming', lens: 'kennis', entiteit: 'PRIVE' }, 'app:proef');
-  assert.equal(k.status, 200); assert.equal(k.j.oud_bestand_verwijzing, true);
-  assert.match(fs.readFileSync(path.join(E.vault, oud), 'utf8'), /Niet verwerken: het staat nu in de raw_input van PRIVE/);
+  assert.equal(k.status, 200); assert.equal(k.j.oud_bestand_verwijzing, true); assert.equal(k.j.verplaatst.na_nacht, false);
+  assert.ok(!fs.existsSync(path.join(E.vault, oud)));   // wv2618: geen verwijzingsbestand meer; het stuk staat alleen op de nieuwe plek
   assert.ok(E.bestanden().some((p) => /^20_Prive\/raw_input\//.test(p)));
   const v = E.r.verbeteringen('2026-01-01T00:00:00Z');
   assert.equal(v.per_bewijs.model.verbeterd, 1);
@@ -564,7 +564,7 @@ test('wv2004 review: weg uit Systeem → verwijzing en geen melding; vrijgegeven
   const sysBestand = E.bestanden().find((f) => /^00_Systeem\/Systeempost\//.test(f));
   const k2 = await E.r.appKeuze({ stuk_id: a, keuze: 'bestemming', lens: 'kennis', entiteit: 'TG' }, 'app:proef');
   assert.equal(k2.status, 200); assert.equal(k2.j.oud_bestand_verwijzing, true);
-  assert.match(fs.readFileSync(path.join(E.vault, sysBestand), 'utf8'), /Niet verwerken: het staat nu in de raw_input van TG/);
+  assert.ok(!fs.existsSync(path.join(E.vault, sysBestand)));   // wv2618: weg uit Systeempost zodra het in de raw_input van TG staat
   assert.equal(E.db.prepare('SELECT count(*) n FROM systeem_post WHERE stuk_id = ?').get(a).n, 0);
   // 2. vastgehouden → gewoon verwerken → Systeem: geen model, box zonder onderwerp of afzender
   const b = E.zet(Object.assign(m('Pricing GEHEIM2004', 'b@voorbeeld-cloud.example'), { marker: 'gemarkeerd', soorten: ['brieftaal'] }));

@@ -197,10 +197,12 @@ function maak(o) {
       if (!Array.isArray(ids) || !ids.length) continue;
       // map: router (live) eerst, anders het eerste vaultpad dat Intake schreef
       let code = null;
-      const u = db.prepare("SELECT doel, pad FROM uitvoering WHERE stuk_id = ? AND lens = 'kennis' AND doel IS NOT NULL ORDER BY id LIMIT 1").get(r.stuk_id);
+      // wv2618: na Verplaats telt de plek waar het stuk nu staat (nieuwste kennis-uitvoering die er nog is), niet de eerste
+      const u = db.prepare("SELECT doel, pad FROM uitvoering WHERE stuk_id = ? AND lens = 'kennis' AND doel IS NOT NULL AND uitkomst IN ('nieuw','gelijk') ORDER BY id DESC LIMIT 1").get(r.stuk_id);
       if (u && ENTITEIT_MAP[u.doel]) code = u.doel;
       const og = db.prepare("SELECT deel, pad, geschreven_sha FROM overgang WHERE stuk_id = ? AND stand = 'om' AND pad IS NOT NULL ORDER BY id").all(r.stuk_id);
-      if (!code && og.length) code = entiteitVanPad(og[0].pad);
+      // wv2618 review MOET: had het stuk ooit een kennis-uitvoering (en nu geen huidige meer: verplaatst buiten de Brain), dan niet terugvallen
+      if (!code && og.length && !db.prepare("SELECT 1 FROM uitvoering WHERE stuk_id = ? AND lens = 'kennis' LIMIT 1").get(r.stuk_id)) code = entiteitVanPad(og[0].pad);
       if (!code) { overgeslagen.entiteit++; continue; }
       if (r.ps !== 'registered') { overgeslagen.status++; continue; }
       const scope = codes.indexOf(code) >= 0;

@@ -196,4 +196,78 @@ function wijzig(pad, functie, o) {
   });
 }
 
-module.exports = { lees, schrijf, voegToe, wijzig, opPlek, krimpFout, TMP_PATROON };
+// wv2618 (Intake stap 5, Verplaats). Review gpt-5.5 MOET 2/3: geen controle-dan-unlink op de naam, maar eerst CLAIMEN: rename(2) van de naam naar
+// een eigen verborgen naam in dezelfde map (atomair: wat er op dat moment onder de naam stond, staat nu alleen nog onder onze naam; een
+// schrijver die daarna de naam opnieuw aanmaakt, raakt ons niet). Pas dan de inhoud toetsen via een O_NOFOLLOW-descriptor. Klopt de sha niet,
+// dan terugzetten zonder iets te overschrijven (link(2) weigert een bestaand doel; bezet → naast de naam met "(teruggezet)"). Een claim die
+// door een crash blijft liggen heet ".<naam>.<hex>.ovis-claim" (niet TMP_PATROON: ruimOp wist hem dus nooit).
+const CLAIM_ACHTER = '.ovis-claim';
+function claimNaam(n) { return '.' + kortOpBytes(n, 80) + '.' + crypto.randomBytes(8).toString('hex') + CLAIM_ACHTER; }
+function shaVanFd(m, n) {
+  const fd = fs.openSync(m.binnen(n), C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return null;
+    return crypto.createHash('sha256').update(fs.readFileSync(fd)).digest('hex');
+  } finally { fs.closeSync(fd); }
+}
+// zet een claim terug onder de oude naam (of ernaast als die intussen bezet is); nooit overschrijven
+function terug(m, claim, naam) {
+  try { fs.linkSync(m.binnen(claim), m.binnen(naam)); fs.unlinkSync(m.binnen(claim)); return; } catch (e) { if (!e || e.code !== 'EEXIST') throw e; }
+  const i = naam.lastIndexOf('.'), stam = i > 0 ? naam.slice(0, i) : naam, ext = i > 0 ? naam.slice(i) : '';
+  fs.linkSync(m.binnen(claim), m.binnen(stam + ' (teruggezet ' + crypto.randomBytes(3).toString('hex') + ')' + ext));
+  fs.unlinkSync(m.binnen(claim));
+}
+// Review ronde 2 MOET 3: een claim die een gedode schrijver achterliet, eerst terugzetten (onder de naam als die vrij is, anders ernaast),
+// zodat een volgende poging hem gewoon weer ziet en afmaakt.
+function herstelClaims(m) {
+  const voor = '.' + kortOpBytes(m.naam, 80) + '.';
+  let namen = [];
+  try { namen = fs.readdirSync(m.binnen('')); } catch (e) { return 0; }
+  let n = 0;
+  for (const x of namen) {
+    if (!x.startsWith(voor) || !x.endsWith(CLAIM_ACHTER) || !/^[0-9a-f]{16}$/.test(x.slice(voor.length, x.length - CLAIM_ACHTER.length))) continue;
+    if (!statGewoon(m.binnen(x))) continue;
+    terug(m, x, m.naam); n++;
+  }
+  return n;
+}
+function claim(m, sha) {
+  herstelClaims(m);
+  const st = statGewoon(m.binnen(m.naam));
+  if (!st) { const e = fout('geen gewoon bestand: ' + m.naam, 'ENOENT'); throw e; }
+  const c = claimNaam(m.naam);
+  fs.renameSync(m.binnen(m.naam), m.binnen(c));   // rename volgt geen symlink: een link zou zelf verhuizen en hieronder afvallen
+  let h = null;
+  try { h = shaVanFd(m, c); } catch (e) { h = null; }
+  if (!h || (sha && h !== sha)) { terug(m, c, m.naam); return null; }
+  return c;
+}
+// Verplaats van → naar (andere map). o.sha256: alleen als de inhoud precies dat is; anders false (en alles staat weer zoals het was).
+// Bestaand doel: EEXIST (het origineel staat dan weer op zijn plek). Zelfde inode, dus inhoud, modus en ACL blijven gelijk.
+function verplaats(van, naar, o) {
+  o = o || {};
+  return metMap(van, function (a) {
+    return metMap(naar, function (b) {
+      const c = claim(a, o.sha256 || null);
+      if (!c) return false;
+      try { fs.linkSync(a.binnen(c), b.binnen(b.naam)); }
+      catch (e) { terug(a, c, a.naam); throw e; }
+      fs.unlinkSync(a.binnen(c));
+      return true;
+    });
+  });
+}
+// Weghalen alleen als de inhoud nog precies sha is (een kopie die de pod zelf schreef en elders opnieuw staat); anders false.
+function wegAlsGelijk(pad, sha) {
+  if (!/^[0-9a-f]{64}$/.test(String(sha || ''))) throw fout('wegAlsGelijk zonder sha256', 'EGEENSHA');
+  return metMap(pad, function (m) {
+    let c;
+    try { c = claim(m, sha); } catch (e) { if (e && e.code === 'ENOENT') return false; throw e; }
+    if (!c) return false;
+    fs.unlinkSync(m.binnen(c));
+    return true;
+  });
+}
+
+module.exports = { lees, schrijf, voegToe, wijzig, verplaats, wegAlsGelijk, opPlek, krimpFout, TMP_PATROON };
