@@ -529,8 +529,11 @@ function hartslag(fdb, soort, naam, o, r) {
   D.transactie(fdb, function () {
     let b = fdb.db.prepare('SELECT id FROM bron WHERE soort = ? ORDER BY naam LIMIT 1').get(soort);
     if (!b) { b = { id: D.nieuwId() }; D.voegToe(fdb, 'bron', { id: b.id, soort, naam, actief: soort === 'upload' ? 1 : 0 }); }
-    D.voegToe(fdb, 'bron_ronde', { bron: b.id, start: nuIso(o.start || o.klok()), eind: nuIso(o.klok()), ok: r.ok ? 1 : 0, aantallen: r.aantallen, fouten: r.fouten || [], niet_gelezen: r.niet_gelezen || null });
+    rondeVoor(fdb, b.id, o, r);
   });
+}
+function rondeVoor(fdb, bronId, o, r) {
+  D.voegToe(fdb, 'bron_ronde', { bron: bronId, start: nuIso(o.start || o.klok()), eind: nuIso(o.klok()), ok: r.ok ? 1 : 0, aantallen: r.aantallen, fouten: r.fouten || [], niet_gelezen: r.niet_gelezen || null });
 }
 
 // ───────────────────────────── verzamelpostvak ─────────────────────────────
@@ -654,32 +657,56 @@ async function leesBericht(fdb, bron, io, pdf, m, eigen, o, tel, nietGelezen) {
  * en niet na Davids "gewoon verwerken", gelijk aan de kennislens. Eén bronrij per Intake-bron (naam 'intake:<bron>'), message_id = de id in
  * die bron (Gmail-id), zodat MailMan (factuur verwerkt, factuurstap) dit bericht vindt zoals een bericht uit het verzamelpostvak.
  */
+function intakeNaam(bron) { return 'intake:' + String(bron || 'onbekend').replace(/[^a-z0-9:-]/gi, '').slice(0, 60); }
 function intakeBron(fdb, bron) {
-  const naam = 'intake:' + String(bron || 'onbekend').replace(/[^a-z0-9:-]/gi, '').slice(0, 60);
+  const naam = intakeNaam(bron);
   let b = fdb.db.prepare("SELECT * FROM bron WHERE soort = 'intake' AND naam = ?").get(naam);
   if (!b) { b = { id: D.nieuwId(), soort: 'intake', naam, actief: 1 }; D.voegToe(fdb, 'bron', b); }
   return b;
 }
+const intakeTel = () => ({ stukken: 0, ingelezen: 0, al_ingelezen: 0, facturen: 0, documenten: 0, fout: 0, claude: 0, knoop_id: 0 });
 async function leesIntake(fdb, io, pdf, o) {
-  const tel = { stukken: 0, ingelezen: 0, al_ingelezen: 0, facturen: 0, documenten: 0, fout: 0, claude: 0, knoop_id: 0 };
+  const tel = intakeTel();
   const fouten = [];
+  const per = new Map();   // wv2617: intakeNaam → { bron, tel, fouten } (de hartslag per Intake-bron)
   let stukken;
-  try { stukken = await io.intake.lijst(GRENS.intake); } catch (e) { return { ok: false, fout: 'lijst', aantallen: tel }; }
-  if (!Array.isArray(stukken)) return { ok: false, fout: 'lijst', aantallen: tel };
+  try { stukken = await io.intake.lijst(GRENS.intake); } catch (e) { intakeHartslag(fdb, o, false, per); return { ok: false, fout: 'lijst', aantallen: tel }; }
+  if (!Array.isArray(stukken)) { intakeHartslag(fdb, o, false, per); return { ok: false, fout: 'lijst', aantallen: tel }; }
   const eigen = (json(D.metaLees(fdb, 'koerier_eigen_adressen'), null) || ['d.schaap@gmail.com', 'dokterschaap@gmail.com']).map((x) => String(x).toLowerCase());
   for (const s of stukken) {
     if (o.klok() - o.start > GRENS.rondeMs * 2) break;
-    tel.stukken++;
+    const naam = intakeNaam(s && s.bron);
+    if (!per.has(naam)) per.set(naam, { bron: s && s.bron, tel: intakeTel(), fouten: [] });
+    const p = per.get(naam);
+    p.tel.stukken++;
     try {
-      const r = await leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel);
+      const r = await leesIntakeStuk(fdb, io, pdf, s, eigen, o, p.tel);
       await io.intake.uitkomst(s.stuk_id, s.versie, { ok: true, uitkomst: r });
     } catch (e) {
-      tel.fout++; fouten.push({ wat: 'stuk', id: kort(s && s.stuk_id, 40), melding: foutSoort(e) });
+      p.tel.fout++; p.fouten.push({ wat: 'stuk', id: kort(s && s.stuk_id, 40), melding: foutSoort(e) });
       try { await io.intake.uitkomst(s.stuk_id, s.versie, { ok: false, code: foutSoort(e) }); } catch (e2) { /* volgende ronde opnieuw (blijft aangeboden) */ }
     }
   }
-  if (stukken.length) hartslag(fdb, 'intake', 'intake', o, { ok: tel.fout === 0, aantallen: tel, fouten });
+  for (const p of per.values()) { for (const k of Object.keys(tel)) tel[k] += p.tel[k]; fouten.push(...p.fouten); }
+  intakeHartslag(fdb, o, true, per);
   return { ok: tel.fout === 0, aantallen: tel };
+}
+/*
+ * wv2617 (David 7-11-2026, Engineer-knop: rode melding 'intake:gmail:david' terwijl alles liep). Vroeger alleen een ronde als er stukken waren
+ * (en op de eerste Intake-bron op naam): een dag zonder Intake-factuur kleurde de bron na 26 u rood. Nu na elke lijst-aanroep een ronde voor
+ * elke Intake-bron die de koerier kent (minstens intake:gmail:david): gelukte lijst → ok tenzij een stuk van die bron faalde; mislukte lijst
+ * → ok 0 (dan terecht rood).
+ */
+function intakeHartslag(fdb, o, lijstOk, per) {
+  D.transactie(fdb, function () {
+    intakeBron(fdb, 'gmail:david');
+    for (const p of per.values()) intakeBron(fdb, p.bron);
+    for (const b of fdb.db.prepare("SELECT id, naam FROM bron WHERE soort = 'intake' ORDER BY naam").all()) {
+      const p = per.get(b.naam);
+      const t = p ? p.tel : intakeTel();
+      rondeVoor(fdb, b.id, o, lijstOk ? { ok: t.fout === 0, aantallen: t, fouten: p ? p.fouten : [] } : { ok: false, aantallen: t, fouten: [{ wat: 'lijst' }] });
+    }
+  });
 }
 async function leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel) {
   if (!s || typeof s.stuk_id !== 'string' || !Array.isArray(s.documenten)) throw Object.assign(new Error('stuk onvolledig'), { code: 'stuk' });

@@ -803,3 +803,36 @@ test('Intake → koerier: bijlage weg uit Intake → terugmelden als fout (de ro
   const u3 = await t.ronde(g, NU + 120 * MIN);
   assert.equal(u3.intake, undefined);
 });
+
+// wv2617 (David 7-11-2026: rode melding 'intake:gmail:david' terwijl alles liep): elke gelukte lijst = een ronde per Intake-bron
+test('Intake-hartslag: lijst zonder stukken → bron groen; lijstfout → rood; twee Intake-bronnen elk een eigen ronde', async () => {
+  const t = opzet(), g = nepGmail();
+  const kleur = (nu) => Object.fromEntries(t.call('GET', '', {}, { nu }).j.gezondheid.bronnen.filter((b) => b.soort === 'intake').map((b) => [b.naam, b.kleur]));
+  const rondes = (naam) => t.n("SELECT count(*) AS n FROM bron_ronde x JOIN bron r ON r.id = x.bron WHERE r.naam = ?", [naam]);
+  // dag 1: één stuk van gmail:david
+  const n = nepIntake([intakeStuk('stk_20261022_0000a001', Z.pdf(['Factuur', 'Factuurnummer: HART-0001', 'Totaal incl. btw: EUR 7,00']))]);
+  await KO.ronde(t.fdb, n.io(g), { nu: NU, klok: () => NU });
+  assert.equal(rondes('intake:gmail:david'), 1);
+  // twee dagen lang geen stukken: elke ronde toch een hartslag → groen na > 26 u
+  for (let h = 1; h <= 48; h += 12) { const nu = NU + h * 60 * MIN; await KO.ronde(t.fdb, n.io(g), { nu, klok: () => nu }); }
+  assert.equal(rondes('intake:gmail:david'), 5);
+  assert.deepEqual(kleur(NU + 50 * 60 * MIN), { 'intake:gmail:david': 'groen' });
+  // ook zonder ooit een stuk: de vaste bron gmail:david bestaat en krijgt een ronde
+  const t2 = opzet(), g2 = nepGmail();
+  await KO.ronde(t2.fdb, nepIntake([]).io(g2), { nu: NU, klok: () => NU });
+  assert.equal(t2.n("SELECT count(*) AS n FROM bron_ronde x JOIN bron r ON r.id = x.bron WHERE r.naam = 'intake:gmail:david' AND x.ok = 1"), 1);
+  // een stuk van een tweede bron (gmail:groenhouten): elk een eigen ronde, niet allebei op de eerste naam
+  n.stukken = [intakeStuk('stk_20261022_0000a002', Z.pdf(['Factuur', 'Factuurnummer: HART-0002', 'Totaal incl. btw: EUR 8,00']), { bron: 'gmail:groenhouten', bron_id: '69a2b3c4d5e6f7a8' })];
+  const nu3 = NU + 51 * 60 * MIN;
+  await KO.ronde(t.fdb, n.io(g), { nu: nu3, klok: () => nu3 });
+  assert.equal(rondes('intake:gmail:david'), 6); assert.equal(rondes('intake:gmail:groenhouten'), 1);
+  const a = (naam) => JSON.parse(t.fdb.db.prepare("SELECT x.aantallen FROM bron_ronde x JOIN bron r ON r.id = x.bron WHERE r.naam = ? ORDER BY x.start DESC LIMIT 1").get(naam).aantallen);
+  assert.equal(a('intake:gmail:groenhouten').stukken, 1); assert.equal(a('intake:gmail:david').stukken, 0);
+  assert.deepEqual(kleur(nu3 + MIN), { 'intake:gmail:david': 'groen', 'intake:gmail:groenhouten': 'groen' });
+  // lijst faalt → beide rood (ronde ok 0)
+  n.fout = true;
+  const nu4 = nu3 + 60 * MIN;
+  const u4 = await KO.ronde(t.fdb, n.io(g), { nu: nu4, klok: () => nu4 });
+  assert.equal(u4.intake.fout, 'lijst');
+  assert.deepEqual(kleur(nu4 + MIN), { 'intake:gmail:david': 'rood', 'intake:gmail:groenhouten': 'rood' });
+});
