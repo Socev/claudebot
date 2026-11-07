@@ -137,6 +137,12 @@ function noodSchrijf(dir, refresh) {
 function noodLees(dir) {
   try { const j = JSON.parse(fs.readFileSync(noodPad(dir), 'utf8')); return j && TOKEN_VORM.test(j.refresh || '') ? j : null; } catch (e) { return null; }
 }
+// Dode koppeling (invalid_grant) onthouden met de sha256 van het dode token (review wv2625 MOET 1): de volgende rondes vragen Tibber
+// dan niets meer en melden niets meer, tot een nieuwe toestemming (ander token in de kluis, of terug() wist het bestand).
+function doodPad(dir) { return path.join(dir, 'dood.json'); }
+function doodLees(dir) { try { const j = JSON.parse(fs.readFileSync(doodPad(dir), 'utf8')); return j && typeof j.token_sha === 'string' ? j : null; } catch (e) { return null; } }
+function doodZet(dir, refresh) { const tmp = doodPad(dir) + '.' + process.pid + '.tmp'; fs.writeFileSync(tmp, JSON.stringify({ sinds: new Date().toISOString(), token_sha: sha(refresh) }), { mode: 0o600 }); fs.renameSync(tmp, doodPad(dir)); }
+function doodWis(dir) { try { fs.unlinkSync(doodPad(dir)); } catch (e) { if (e.code !== 'ENOENT') throw e; } }
 function noodWis(dir) { try { fs.unlinkSync(noodPad(dir)); } catch (e) { if (e.code !== 'ENOENT') throw e; } }
 
 // ── toestemmingslink en state (in server.js aangeroepen, geen netwerk) ────────────────────────────────────────────────
@@ -148,9 +154,11 @@ function statesSchrijf(dir, s) {
   fs.renameSync(tmp, statesPad(dir));
 }
 function sha(t) { return crypto.createHash('sha256').update(String(t)).digest('hex'); }
+// Map altijd 700, ook als hij al ruimer bestond (review wv2625 ZOU 2).
+function mapKlaar(dir) { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); fs.chmodSync(dir, 0o700); }
 function linkMaak(dir, clientId) {
   if (typeof clientId !== 'string' || !/^[\x21-\x7e]{4,200}$/.test(clientId)) throw new TibberFout('sleutel', 'client-id ontbreekt of heeft een vreemde vorm');
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  mapKlaar(dir);
   const state = crypto.randomBytes(32).toString('hex');
   const verifier = crypto.randomBytes(48).toString('base64url');   // 64 tekens
   const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
@@ -180,7 +188,7 @@ function stateNeem(dir, state) {
 function slotPad(dir) { return path.join(dir, 'ronde.lock'); }
 function pidLeeft(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 function slotNeem(dir) {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  mapKlaar(dir);
   for (let i = 0; i < 2; i++) {
     try {
       const fd = fs.openSync(slotPad(dir), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
@@ -229,7 +237,11 @@ async function ronde(deps, opdracht) {
       uit.nood_hersteld = true;
     }
     if (!refresh) return Object.assign(uit, { reden: 'toestemming', fout: 'nog geen toestemming (tibber_data_refresh ontbreekt)' });
+    const dood = doodLees(dir);
+    if (dood && dood.token_sha === sha(refresh)) return Object.assign(uit, { reden: 'dood', fout: 'koppeling dood sinds ' + String(dood.sinds).slice(0, 10) + '; wacht op nieuwe toestemming' });
+    if (dood) doodWis(dir);   // ander token in de kluis: nieuwe kans
     const v = await deps.kind('ververs', { client_id: k.client_id, client_secret: k.client_secret, refresh: refresh });
+    if (v.j && v.j.ok !== true && v.j.reden === 'grant') doodZet(dir, refresh);
     if (!v.j || v.j.ok !== true) return Object.assign(uit, { reden: (v.j && v.j.reden) || 'kind', fout: (v.j && v.j.fout) || 'verversen faalde (exit ' + v.code + ')' });
     const nieuw = v.j._refresh || null;
     if (nieuw && nieuw !== refresh) {
@@ -261,8 +273,9 @@ async function terug(deps, state, code, fout) {
     if (!w.j || w.j.ok !== true) return { status: 200, soort: (w.j && w.j.reden) === 'scope' ? 'scope' : 'mislukt', reden: (w.j && w.j.reden) || 'kind' };
     if (!w.j._refresh) { noodWis(dir); return { status: 200, soort: 'mislukt', reden: 'geen refresh token (offline_access?)' }; }
     try { await kluisBewaar(deps, w.j._refresh); }
-    catch (e) { return { status: 200, soort: 'gekoppeld', reden: 'kluis', nood: true }; }   // noodkopie staat; de ronde zet hem in de kluis
+    catch (e) { doodWis(dir); return { status: 200, soort: 'gekoppeld', reden: 'kluis', nood: true }; }   // noodkopie staat; de ronde zet hem in de kluis
     noodWis(dir);
+    doodWis(dir);
     return { status: 200, soort: 'gekoppeld' };
   } finally { slotLos(dir); }
 }
@@ -305,12 +318,11 @@ function plat(data) {
 
 // ── opslag ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 function db(dir) {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  mapKlaar(dir);
   const p = path.join(dir, 'tibber.' + 'sqlite');
-  const nieuw = !fs.existsSync(p);
   const { DatabaseSync } = require('node:sqlite');
   const d = new DatabaseSync(p);
-  if (nieuw) fs.chmodSync(p, 0o600);
+  fs.chmodSync(p, 0o600);
   d.exec("pragma busy_timeout = 10000; create table if not exists apparaat (volg integer primary key, tibber_id text unique not null, home_id text not null, " +
     "label text, merk text, model text, resoluties text, max_dagen integer, onbekend text, eerst text not null, laatst text not null);" +
     "create table if not exists apparaat_historie (apparaat integer not null, resolutie text not null, tijd text not null, veld text not null, num real, tekst text, " +
@@ -478,4 +490,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { SCOPES, REDIRECT, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodSchrijf, noodWis, verzoekToets, plat, veldMag, scopesExact, sha, TibberFout };
+module.exports = { SCOPES, REDIRECT, doodLees, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodSchrijf, noodWis, verzoekToets, plat, veldMag, scopesExact, sha, TibberFout };

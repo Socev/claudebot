@@ -129,7 +129,8 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('link: authorize-endpoint, S256, exacte scopes, redirect', lu.origin + lu.pathname === 'https://thewall.tibber.com/connect/authorize' && lu.searchParams.get('code_challenge_method') === 'S256' &&
       lu.searchParams.get('scope') === SCOPES && lu.searchParams.get('redirect_uri') === 'https://bank.socev.dev/tibber/terug' && /^[0-9a-f]{64}$/.test(st));
     toets('states.json 600 en zonder de state zelf', (fs.statSync(path.join(DIR, 'states.json')).mode & 0o777) === 0o600 && fs.readFileSync(path.join(DIR, 'states.json'), 'utf8').indexOf(st) < 0);
-    toets('dir 700', (fs.statSync(DIR).mode & 0o777) === 0o700);
+    fs.chmodSync(DIR, 0o755); TM.slotNeem(DIR); TM.slotLos(DIR);
+    toets('dir 700, ook als hij ruimer bestond', (fs.statSync(DIR).mode & 0o777) === 0o700);
     toets('state open', TM.stateOpen(DIR, st));
     toets('onbekende state dicht', !TM.stateOpen(DIR, 'a'.repeat(64)));
     // verlopen state (49 uur)
@@ -148,10 +149,10 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('extra scope → geweigerd', u.soort === 'scope' && !K.rij.tibber_data_refresh, u);
     M.scope = SCOPES;
     // goede terugkeer
-    const st4 = new URL(TM.linkMaak(DIR, 'cid-proef-0001').url).searchParams.get('state');
+    const lu4 = new URL(TM.linkMaak(DIR, 'cid-proef-0001').url), st4 = lu4.searchParams.get('state'); M.challenge4 = lu4.searchParams.get('code_challenge');
     u = await TM.terug(kluisDeps(DIR), st4, 'code-goed', '');
     toets('toestemming → gekoppeld, refresh in de kluis, noodkopie weg', u.soort === 'gekoppeld' && K.rij.tibber_data_refresh === tok(M.teller) && !TM.noodLees(DIR), u);
-    toets('PKCE-verifier hoort bij de challenge', (() => { const lu4 = null; return /^[A-Za-z0-9_-]{43,128}$/.test(M.verifier); })());
+    toets('PKCE: verifier hoort bij de challenge uit de link (S256)', crypto.createHash('sha256').update(M.verifier).digest('base64url') === M.challenge4, [M.verifier, M.challenge4]);
     const nog = await TM.terug(kluisDeps(DIR), st4, 'code-goed', '');
     toets('state hergebruik → 404', nog.status === 404 && nog.soort === 'dicht', nog);
     toets('geen GET op de Data API tijdens de terugkeer', !M.log.some((x) => x.p.indexOf('/v1/') === 0));
@@ -195,7 +196,16 @@ srv.listen(0, '127.0.0.1', async function () {
     r = await TM.ronde(kluisDeps(DIR), 'ronde');
     toets('invalid_grant → reden grant', r.ok === false && r.reden === 'grant', r);
     toets('invalid_grant: één tokenverzoek, geen GET', M.log.filter((x) => x.p === '/connect/token').length === 1 && !M.log.some((x) => x.m === 'GET'));
+    M.log = [];
+    r = await TM.ronde(kluisDeps(DIR), 'ronde');
+    toets('dode koppeling onthouden: volgende ronde vraagt Tibber niets (reden dood)', r.ok === false && r.reden === 'dood' && !M.log.length && TM.doodLees(DIR), r);
     M.refreshGeldig.add(goedTok);
+    const lu5 = new URL(TM.linkMaak(DIR, 'cid-proef-0001').url);
+    u = await TM.terug(kluisDeps(DIR), lu5.searchParams.get('state'), 'code-goed', '');
+    toets('nieuwe toestemming wist de dode koppeling', u.soort === 'gekoppeld' && !TM.doodLees(DIR), u);
+    M.log = [];
+    r = await TM.ronde(kluisDeps(DIR), 'ronde');
+    toets('na nieuwe toestemming weer een gewone ronde', r.ok === true, r);
 
     // 7. kluis faalt na refresh → noodkopie, geen lezen; volgende ronde herstelt
     M.log = []; K.zetFout = 3;
