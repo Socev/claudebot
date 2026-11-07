@@ -17,6 +17,16 @@
 //       Zonder aanwijzing alleen een signaal zonder bedrag.
 //   A4  abonnementen duurder / prijsstap / dubbel / nieuw — de signalen van financien-app.js met hun jaarbedrag (zeker: uit de bank).
 //   A5  verzekeringen die per maand betaald worden — alleen een signaal zonder bedrag (review ZOU 5).
+// A6–A8 zijn fiscaal (wv2626; ontwerp § 3.5, review MOET 7 en 8): altijd "laat toetsen", nooit een bedrag of "doe dit", alleen de ruwe cijfers.
+//   A6  lijfrente/jaarruimte — de aangiftetabel heeft geen lijfrentekolom (gemeten 7-11-2026); de tekstversie van de nieuwste aangifte
+//       wel (vraag 22a/22b: betaald bij jaarruimte en bij reserveringsruimte). Staat daar beide 0: seintje "laat de jaarruimte berekenen".
+//       Is er in de tabel een nieuwer aangiftejaar dan de nieuwste tekstversie, dan geen seintje (dan zou het over een oud jaar gaan).
+//   A7  DGA-rode vlaggen uit het Holding-blok: schuld aan de eigen BV's boven de grens excessief lenen (met en zonder woninglening; of
+//       die meetelt hangt van de voorwaarden af), het geplande dividend samen met wat dat jaar al is uitgekeerd boven de 24,5 %-schijf
+//       van box 2, de rekening-courant boven het maximum uit het contract, en het loon in de aangifte onder het normbedrag gebruikelijk
+//       loon (alleen als signaal). Een grens zonder tarief/bron voor dat jaar geeft geen vlag. Geen vlag = geen advies.
+//   A8  box 3 — alleen "laat berekenen" zolang de box 3-inventaris (beleggingen, vorderingen, schulden, rekening-courant; pagina
+//       "Box 3-inventaris" met tabel Onderdeel | Compleet) niet compleet is; nooit een bedrag.
 // Volgorde (review MOET 9): risico en deadline, dan zekerheid (zeker, schatting, laat toetsen, signaal), dan euro's per jaar. Op het
 // startscherm hooguit drie, alleen met een bedrag ≥ € 50 per jaar (bij een bandbreedte de onderkant); de rest staat in de lijst.
 // Ontbreekt een tarief of invoer, dan geen advies en een regel in "ontbreekt" (ontwerp § 3.5).
@@ -25,6 +35,7 @@
 // Schrijft niets, geen netwerk. Het antwoord gaat alleen naar Davids eigen App (GET /app/financien, blok overzicht.advies).
 'use strict';
 const crypto = require('crypto'), fs = require('fs'), path = require('path');
+const OV_T = require('./financien-overzicht.js').TARIEVEN;
 
 // Tarieven en grenzen, elk met bron en leesdatum. Ontbreekt er een, dan geen advies op die regel.
 const TARIEVEN = {
@@ -32,9 +43,18 @@ const TARIEVEN = {
     bron: 'vrij opneembaar sparen: ABN AMRO 1,25 % (raisin.com, okt 2026), bunq basisrente 1,51 % (keuze.nl); niet bij de banken zelf gecontroleerd' },
   aftrek: { 2026: 37.56, op: '2026-11-07', bron: 'maximaal aftrektarief eigen woning 2026 (Kamerantwoord; homefinance.nl, Prinsjesdag 2025); niet bij de Belastingdienst zelf gecontroleerd' },
   depositogarantie: { grens: 100000, op: '2026-11-07', bron: 'depositogarantiestelsel (DNB): € 100.000 per persoon per bank' },
+  // wv2626: box 2 uit financien-overzicht.js (één bron voor het tarief), grens per persoon
+  box2: Object.assign({ op: '2026-11-07', bron: OV_T.box2_bron + '; grens van de 24,5 %-schijf per persoon (fiscaal partners elk)' }, OV_T.box2),
+  excessief_lenen: { 2024: 500000, 2025: 500000, 2026: 500000, op: '2026-11-07',
+    bron: 'Wet excessief lenen bij eigen vennootschap: schulden van DGA en fiscaal partner samen aan de eigen BV\'s boven € 500.000 op 31-12 (SRA-advieswijzer 2026, onderneming.nl); verlaging vanaf 2027 is een voornemen; niet bij de Belastingdienst zelf gecontroleerd' },
+  gebruikelijk_loon: { 2025: 56000, 2026: 58000, op: '2026-11-07',
+    bron: 'normbedrag gebruikelijk loon DGA (SRA, dec 2025; Kamerbrief maart 2026); de echte norm kan hoger of lager zijn; niet bij de Belastingdienst zelf gecontroleerd' },
 };
 const START_MIN = 50, START_MAX = 3, PER_BEDRAG = 10000;
 const P_ENERGIE = path.join('20_Prive', 'Financien', 'Energieverbruik thuis (Tibber).md');
+// wv2626: tekstversies van de aangiftes (Belastingaangiftes § Tekstversies) en de box 3-inventaris
+const D_AANGIFTE = path.join('20_Prive', 'Bronnen', 'Financien'), RE_AANGIFTE = /^Prive - (\d{4}-\d{2}-\d{2}) - IB-aangifte (\d{4}) David \(tekst\)\.md$/;
+const P_BOX3 = path.join('20_Prive', 'Financien', 'Box 3-inventaris.md'), BOX3_DELEN = ['beleggingen', 'vorderingen', 'schulden', 'rekening-courant'];
 const ZEKER = ['zeker', 'schatting', 'laat toetsen', 'signaal'];
 const PRIO = ['risico', 'deadline'];
 
@@ -75,6 +95,28 @@ const REGELS = {
     reken: function (i) { return i.per_jaar > 0 ? { euro_jaar: r0(i.per_jaar), band: null } : null; } },
   A5: { titel: 'Verzekeringen per maand betaald', zekerheid: 'signaal', actie: 'adviseur', rekensom: 'geen bedrag (de toeslag voor maandbetaling staat niet in de bank)',
     drempel: 'minstens één verzekering met ritme maand', reken: function (i) { return i.aantal > 0 ? { euro_jaar: null, band: null } : null; } },
+  A6: { titel: 'Lijfrente: jaarruimte laten berekenen', zekerheid: 'laat toetsen', actie: 'adviseur',
+    rekensom: 'geen bedrag: lijfrentepremie bij jaarruimte en bij reserveringsruimte uit de nieuwste aangifte (vraag 22a en 22b)', drempel: 'in de nieuwste aangifte beide € 0',
+    reken: function (i) { return i.jaarruimte === 0 && i.reservering === 0 ? { euro_jaar: null, band: null } : null; } },
+  A7: { titel: 'Holding: rode vlaggen voor de adviseur', zekerheid: 'laat toetsen', actie: 'adviseur',
+    rekensom: 'geen bedrag: ruwe cijfers naast de grens (excessief lenen, 24,5 %-schijf box 2, maximum rekening-courant, normbedrag gebruikelijk loon)',
+    drempel: 'minstens één cijfer over zijn grens; zonder grens voor dat jaar geen vlag',
+    reken: function (i) {
+      const v = [];
+      if (i.lenen_grens > 0) {
+        // review wv2626 MOET 3: ook een bekende woninglening zonder bekende RC-schuld
+        if (i.schuld_bv != null && i.schuld_bv > i.lenen_grens) v.push('excessief_lenen');
+        else if ((i.schuld_bv != null || i.woninglening != null) && (i.schuld_bv || 0) + (i.woninglening || 0) > i.lenen_grens) v.push('excessief_lenen_met_woning');
+      }
+      // review wv2626 MOET 2: elk jaar met gepland dividend apart
+      if (Array.isArray(i.dividend) && i.dividend.some(function (y) { return y.grens > 0 && y.gepland > 0 && (y.al || 0) + y.gepland > y.grens; })) v.push('box2_schijf');
+      if (i.rc_max > 0 && i.rc != null && i.rc > i.rc_max) v.push('rc_boven_maximum');
+      if (i.loon_norm > 0 && i.loon != null && i.loon < i.loon_norm) v.push('gebruikelijk_loon');
+      return v.length ? { euro_jaar: null, band: null, vlaggen: v } : null;
+    } },
+  A8: { titel: 'Box 3 laten berekenen', zekerheid: 'laat toetsen', actie: 'adviseur',
+    rekensom: 'geen bedrag zolang de box 3-inventaris (beleggingen, vorderingen, schulden, rekening-courant) niet compleet is', drempel: 'inventaris niet compleet',
+    reken: function (i) { return Array.isArray(i.ontbreekt) && i.ontbreekt.length ? { euro_jaar: null, band: null } : null; } },
 };
 
 // ── invoer verzamelen ──
@@ -103,10 +145,37 @@ function leesEnergie(vault, FV) {
   return { duur: duur, goed: goed, kwh: kwh, bron: P_ENERGIE };
 }
 
+// wv2626 A6: de nieuwste tekstversie van Davids aangifte (hoogste aangiftejaar, bij gelijk jaar de nieuwste datum); alleen de twee
+// lijfrenteregels worden gelezen (de tekst bevat ook persoonsgegevens: die gaan nergens heen)
+function leesLijfrente(vault, FV) {
+  let namen = [];
+  try { namen = fs.readdirSync(path.join(vault, D_AANGIFTE)); } catch (e) { return null; }
+  const hit = namen.map(function (n) { const m = RE_AANGIFTE.exec(n); return m ? { n: n, d: m[1], jaar: Number(m[2]) } : null; }).filter(Boolean)
+    .sort(function (x, y) { return y.jaar - x.jaar || (x.d < y.d ? 1 : x.d > y.d ? -1 : 0); })[0];
+  if (!hit) return null;
+  const p = path.join(vault, D_AANGIFTE, hit.n), st = fs.statSync(p);
+  if (!st.isFile() || st.size > 2000000) return null;
+  const t = fs.readFileSync(p, 'utf8');
+  const regel = function (re) { const m = re.exec(t); return m ? FV.nlGetal('€ ' + m[1]) : null; };
+  return { jaar: hit.jaar, bestand: hit.n,
+    jaarruimte: regel(/lijfrenten bij gebruik van (?:de )?jaarruimte\s+€\s*(-?[\d.]+(?:,\d+)?)/i),
+    reservering: regel(/lijfrenten bij gebruik van (?:de )?reserveringsruimte\s+€\s*(-?[\d.]+(?:,\d+)?)/i) };
+}
+// wv2626 A8: welke onderdelen van de box 3-inventaris nog niet compleet zijn (pagina ontbreekt = alles)
+function leesBox3(vault, FV) {
+  const p = path.join(vault, P_BOX3);
+  let t = null;
+  try { const st = fs.statSync(p); if (st.isFile() && st.size <= 400000) t = fs.readFileSync(p, 'utf8'); } catch (e) { t = null; }
+  const rijen = t ? FV.tabel(FV.tabellen(t), ['onderdeel', 'compleet']) || [] : [];
+  const klaar = new Set(rijen.filter(function (r) { return /^ja\b/i.test(FV.schoon(r.compleet)); }).map(function (r) { return FV.schoon(r.onderdeel).toLowerCase().replace(/\s+/g, '-'); }));
+  return { pagina: !!t, ontbreekt: BOX3_DELEN.filter(function (d) { return !klaar.has(d); }) };
+}
+
 // o: { ov (blok overzicht), saldi (blok saldi), signalen (financien-app, met per_jaar), vaste (blok vaste_lasten), nu, vault, fv, tarieven }
 function advies(A, a, o) {
   const T = o.tarieven || TARIEVEN, FV = o.fv || require('./financien-vault.js'), nu = o.nu, uit = [], ontbreekt = [], fouten = [];
   const blok = function (n, f) { try { return f(); } catch (e) { fouten.push(n); return null; } };
+  let VL = null; const vaultLees = function () { return VL || (VL = FV.lees(o.vault)); };
   const mist = function (regel, waarom) { ontbreekt.push({ regel: regel, waarom: waarom }); };
   const sp = T.spaarrente && typeof T.spaarrente.laag === 'number' && typeof T.spaarrente.hoog === 'number' ? T.spaarrente : null;
   const jaar = Number(nu.slice(0, 4)), aftrek = T.aftrek && typeof T.aftrek[jaar] === 'number' ? T.aftrek[jaar] : null;
@@ -119,7 +188,7 @@ function advies(A, a, o) {
   };
   // A1
   blok('A1', function () {
-    const v = FV.lees(o.vault), hyp = v && v.hypotheek;
+    const v = vaultLees(), hyp = v && v.hypotheek;
     const delen = hyp && Array.isArray(hyp.delen) ? hyp.delen.filter(function (d) { return d.rente_bank > 0 && d.restschuld_bank > 0; }) : [];
     if (!delen.length) return mist('A1', 'geen leningdelen met rente en restschuld te lezen');
     if (!sp) return mist('A1', 'geen spaarrente in de tarieven');
@@ -204,6 +273,98 @@ function advies(A, a, o) {
       zin: function () { return r.length + (r.length === 1 ? ' verzekering betaal' : ' verzekeringen betaal') + ' je per maand (samen ' + eur(som) + '). Vraag na of per jaar betalen goedkoper is; de bank laat de toeslag niet zien.'; } });
     if (!ok) mist('A5', 'geen verzekering met maandbetaling');
   });
+  // A6 (wv2626): lijfrente — alleen een seintje, geen bedrag (zonder pensioenopgave is de jaarruimte niet te rekenen)
+  blok('A6', function () {
+    const l = leesLijfrente(o.vault, FV);
+    if (!l) return mist('A6', 'de aangiftetabel heeft geen kolom voor lijfrente en er is geen tekstversie van de aangifte');
+    const bel = vaultLees().belasting, laatste = bel && Array.isArray(bel.david) ? bel.david.filter(function (r) { return !r.concept; }).reduce(function (m, r) { return Math.max(m, r.jaar); }, 0) : 0;
+    if (laatste > l.jaar) return mist('A6', 'geen tekstversie van de aangifte ' + laatste + ' (nieuwste tekstversie: ' + l.jaar + ')');
+    if (l.jaarruimte == null || l.reservering == null) return mist('A6', 'de lijfrenteregels staan niet in de tekstversie van de aangifte ' + l.jaar);
+    const ok = zet('A6', 'A6|' + l.jaar, { jaar: l.jaar, jaarruimte: l.jaarruimte, reservering: l.reservering }, {
+      bronnen: [{ tekst: 'Lijfrente betaald bij jaarruimte (aangifte ' + l.jaar + ', vraag 22a)', waarde: eur(l.jaarruimte), bron: 'tekstversie van de aangifte ' + l.jaar },
+        { tekst: 'Lijfrente betaald bij reserveringsruimte (aangifte ' + l.jaar + ', vraag 22b)', waarde: eur(l.reservering), bron: 'tekstversie van de aangifte ' + l.jaar }],
+      zin: function () { return 'In de aangifte ' + l.jaar + ' staat geen lijfrentepremie (jaarruimte en reserveringsruimte € 0). Of en hoeveel ruimte je hebt, hangt af van je pensioenopgave: laat de jaarruimte berekenen door je adviseur.'; },
+    });
+    if (!ok) mist('A6', 'in de aangifte ' + l.jaar + ' staat lijfrentepremie');
+  });
+  // A7 (wv2626): DGA-rode vlaggen — alleen de ruwe cijfers en de vlag; nooit een bedrag of "doe dit" (review MOET 8)
+  blok('A7', function () {
+    const v = vaultLees(), d = v && v.dga;
+    if (!d) return mist('A7', 'geen Holding-blok te lezen');
+    const per = function (t, jr) { return t && typeof t[jr] === 'number' ? t[jr] : t && t[jr] && typeof t[jr].grens === 'number' ? t[jr].grens : null; };
+    // gepland dividend aan de DGA: een open planningsrij met "dividend" en "€ … bruto" en een datum (niet een dividend naar de Holding toe)
+    // review wv2626 MOET 1: een dividend naar de Holding in elke notatie (→, ->, =>, "naar (de) Holding", "aan (de) Holding") telt niet
+    const naarHolding = /(→|->|=>|\bnaar\b|\baan\b)\s*(de\s+)?holding\b/i;
+    const plan = (d.planning || []).filter(function (p) { return !p.klaar && /dividend/i.test(p.actie) && !naarHolding.test(p.actie); }).map(function (p) {
+      const m = /€\s*(\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?\s*bruto/i.exec(p.actie), dt = FV.datumIso(p.wanneer);
+      return m && dt && /^\d{4}-\d{2}-\d{2}$/.test(dt) ? { datum: dt, bruto: FV.nlGetal('€ ' + m[1]), actie: p.actie } : null;
+    }).filter(function (x) { return x && x.bruto > 0; }).sort(function (x, y) { return x.datum < y.datum ? -1 : 1; });
+    // per jaar: gepland (open rijen), al uitgekeerd dat jaar, de grens van dat jaar (ontbreekt die: null, dan geen vlag)
+    const pjaren = Array.from(new Set(plan.map(function (x) { return Number(x.datum.slice(0, 4)); })));
+    const div = pjaren.map(function (y) {
+      const pl = plan.filter(function (x) { return Number(x.datum.slice(0, 4)) === y; });
+      return { jaar: y, datum: pl[0].datum, gepland: r2(pl.reduce(function (s, x) { return s + x.bruto; }, 0)),
+        al: r2((d.dividend || []).filter(function (x) { return x.datum && Number(x.datum.slice(0, 4)) === y && x.bruto > 0; }).reduce(function (s, x) { return s + x.bruto; }, 0)),
+        grens: per(T.box2, y) };
+    });
+    const over = div.filter(function (y) { return y.grens > 0 && y.al + y.gepland > y.grens; });
+    const wlj = d.woninglening && Array.isArray(d.woninglening.jaarrekening) ? d.woninglening.jaarrekening.filter(function (x) { return x.stand != null; }).slice(-1)[0] : null;
+    const schuld = d.rc && d.rc.totaal != null ? d.rc.totaal : d.rc && d.rc.reconstructie ? d.rc.reconstructie.bedrag : null;
+    const rcH = d.rc && d.rc.reconstructie ? d.rc.reconstructie.bedrag : null, rcMax = d.rc_contract && d.rc_contract.maximum > 0 ? d.rc_contract.maximum : null;
+    const bel = v.belasting && Array.isArray(v.belasting.david) ? v.belasting.david.filter(function (r) { return !r.concept && r.loon != null; }).sort(function (x, y) { return y.jaar - x.jaar; })[0] : null;
+    const lg = per(T.excessief_lenen, jaar), ln = bel ? per(T.gebruikelijk_loon, bel.jaar) : null;
+    const inv = { schuld_bv: schuld, woninglening: wlj ? wlj.stand : null, lenen_grens: lg, lenen_jaar: jaar, dividend: div,
+      rc: rcH, rc_max: rcMax, loon_jaar: bel ? bel.jaar : null, loon: bel ? bel.loon : null, loon_norm: ln };
+    const stil = [];
+    if (lg == null) stil.push('geen grens excessief lenen voor ' + jaar);
+    div.filter(function (y) { return y.grens == null; }).forEach(function (y) { stil.push('geen box 2-tarief voor ' + y.jaar); });
+    if (bel && ln == null) stil.push('geen normbedrag gebruikelijk loon voor ' + bel.jaar);
+    const dgD = function (s) { return s.split('-').reverse().map(Number).join('-'); };
+    const br = [];
+    if (schuld != null) br.push({ tekst: 'Schuld aan de eigen BV\'s (rekening-courant en kortlopend' + (d.rc && d.rc.totaal != null ? ', standen boekhouder' : ', reconstructie') + ')', waarde: eur(schuld), bron: 'besluitpagina Holding' });
+    if (wlj) br.push({ tekst: 'Woninglening Holding (jaarrekening ' + wlj.jaar + ')', waarde: eur(wlj.stand), bron: 'DGA-reconstructie' });
+    if (lg != null) br.push({ tekst: 'Grens excessief lenen ' + jaar + ' (peildatum 31-12, samen met fiscaal partner)', waarde: eur(lg), bron: T.excessief_lenen.bron + ' (' + T.excessief_lenen.op + ')' });
+    div.forEach(function (y) {
+      br.push({ tekst: 'Dividend ' + y.jaar + ' al uitgekeerd (bruto)', waarde: eur(y.al), bron: 'DGA-reconstructie' });
+      br.push({ tekst: 'Dividend ' + y.jaar + ' gepland (bruto, planning ' + dgD(y.datum) + ')', waarde: eur(y.gepland), bron: 'planning op de besluitpagina Holding' });
+      if (y.grens != null) br.push({ tekst: 'Grens 24,5 %-schijf box 2 ' + y.jaar + ' (per persoon)', waarde: eur(y.grens), bron: T.box2.bron + ' (' + T.box2.op + ')' });
+    });
+    if (rcH != null && rcMax != null) {
+      br.push({ tekst: 'Rekening-courant bij de Holding (reconstructie)', waarde: eur(rcH), bron: 'DGA-reconstructie' });
+      br.push({ tekst: 'Maximum rekening-courant (contract' + (d.rc_contract.rente_pct != null ? ', rente ' + pct(d.rc_contract.rente_pct) : '') + (d.rc_contract.aflossing ? ', aflossing ' + d.rc_contract.aflossing : '') + ')', waarde: eur(rcMax), bron: 'rekening-courantovereenkomst' });
+    }
+    if (bel) {
+      br.push({ tekst: 'Loon in de aangifte ' + bel.jaar, waarde: eur(bel.loon), bron: 'Belastingaangiftes' });
+      if (ln != null) br.push({ tekst: 'Normbedrag gebruikelijk loon ' + bel.jaar, waarde: eur(ln), bron: T.gebruikelijk_loon.bron + ' (' + T.gebruikelijk_loon.op + ')' });
+    }
+    const vu = REGELS.A7.reken(inv), vl = vu ? vu.vlaggen : [];
+    const ok = zet('A7', 'A7', inv, {
+      prioriteit: vl.indexOf('excessief_lenen') >= 0 || vl.indexOf('rc_boven_maximum') >= 0 ? 'risico' : vl.indexOf('box2_schijf') >= 0 ? 'deadline' : null,
+      deadline: vl.indexOf('box2_schijf') >= 0 && over.length ? over[0].datum : null, bronnen: br,
+      zin: function () {
+        const z = [];
+        if (vl.indexOf('box2_schijf') >= 0) over.forEach(function (y) { z.push('Dividend ' + y.jaar + ': al ' + eur(y.al) + ' bruto uitgekeerd en ' + eur(y.gepland) + ' gepland (planning ' + dgD(y.datum) + '); samen boven de grens van de 24,5 %-schijf (' + eur(y.grens) + ' per persoon, met een fiscaal partner telt de verdeling).'); });
+        if (vl.indexOf('excessief_lenen') >= 0) z.push('Schuld aan de eigen BV\'s ' + eur(schuld) + ', boven de grens excessief lenen (' + eur(lg) + ' op 31-12).');
+        if (vl.indexOf('excessief_lenen_met_woning') >= 0) z.push('Met de woninglening is de schuld aan de eigen BV\'s ' + eur((schuld || 0) + (wlj ? wlj.stand : 0)) + ', boven de grens excessief lenen (' + eur(lg) + '); of de woninglening meetelt hangt van de voorwaarden af.');
+        if (vl.indexOf('rc_boven_maximum') >= 0) z.push('Rekening-courant ' + eur(rcH) + ', boven het maximum uit het contract (' + eur(rcMax) + ').');
+        if (vl.indexOf('gebruikelijk_loon') >= 0) z.push('Loon in de aangifte ' + bel.jaar + ' ' + eur(bel.loon) + ', onder het normbedrag gebruikelijk loon (' + eur(ln) + ').');
+        return z.join(' ') + ' Laat het toetsen door je adviseur.';
+      },
+    });
+    if (!ok) mist('A7', 'geen rode vlag' + (stil.length ? ' (' + stil.join('; ') + ')' : ''));
+  });
+  // A8 (wv2626): box 3 — alleen "laat berekenen" zolang de inventaris niet compleet is (review MOET 7)
+  blok('A8', function () {
+    const b = leesBox3(o.vault, FV), v = vaultLees();
+    const w = v.belasting && Array.isArray(v.belasting.woning) ? v.belasting.woning.filter(function (r) { return r.box3 != null; }).sort(function (x, y) { return y.jaar - x.jaar; })[0] : null;
+    const rc = v.dga && v.dga.rc ? (v.dga.rc.totaal != null ? v.dga.rc.totaal : v.dga.rc.reconstructie ? v.dga.rc.reconstructie.bedrag : null) : null;
+    const br = [{ tekst: 'Box 3-inventaris: nog niet compleet', waarde: b.ontbreekt.join(', ') || '—', bron: b.pagina ? 'pagina Box 3-inventaris' : 'nog geen pagina Box 3-inventaris' }];
+    if (w) br.push({ tekst: 'Box 3-grondslag ' + w.jaar + ' (samen)', waarde: eur(w.box3), bron: 'Belastingaangiftes' });
+    if (rc != null) br.push({ tekst: 'Schuld aan de eigen BV\'s (hoort in de box 3-inventaris)', waarde: eur(rc), bron: 'besluitpagina Holding' });
+    const ok = zet('A8', 'A8', { ontbreekt: b.ontbreekt, grondslag_jaar: w ? w.jaar : null, grondslag: w ? w.box3 : null }, { bronnen: br,
+      zin: function () { return (w ? 'In de aangifte ' + w.jaar + ' was de box 3-grondslag samen ' + eur(w.box3) + '. ' : '') + 'Socev rekent box 3 niet zelf zolang niet alles bekend is; nog niet compleet: ' + b.ontbreekt.join(', ') + '. Laat box 3 berekenen door je adviseur.'; } });
+    if (!ok) mist('A8', 'de box 3-inventaris is compleet; een eigen box 3-berekening is er nog niet');
+  });
   // volgorde: risico/deadline → zekerheid → euro's
   const waarde = function (x) { return x.euro_jaar != null ? x.euro_jaar : x.band ? x.band.laag : null; };
   const rang = function (x) { const p = PRIO.indexOf(x.prioriteit); return p < 0 ? PRIO.length : p; };
@@ -216,4 +377,4 @@ function advies(A, a, o) {
     uitleg: 'Vaste rekenregels met hun invoer en bron; Socev voert niets uit. Fiscaal en hypotheek: altijd laten toetsen door je adviseur. Volgorde: risico en deadline, dan zekerheid, dan euro\'s per jaar.' };
 }
 
-module.exports = { advies: advies, REGELS: REGELS, TARIEVEN: TARIEVEN, START_MIN: START_MIN, START_MAX: START_MAX, leesEnergie: leesEnergie };
+module.exports = { advies: advies, REGELS: REGELS, TARIEVEN: TARIEVEN, START_MIN: START_MIN, START_MAX: START_MAX, leesEnergie: leesEnergie, leesLijfrente: leesLijfrente, leesBox3: leesBox3 };

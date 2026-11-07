@@ -249,6 +249,66 @@ if (O) {
     const rn = adv({ saldi: { rekeningen: saldi.rekeningen.concat([{ id: 'z2', naam: 'Rood', groep: 'eigen', bank: 'bunq', valuta: 'EUR', saldo: -5000 }]) } }).adviezen.find((x) => x.regel === 'A2');
     toets('A2: netto saldi, een rekening in de min telt mee (review MOET 2)', rn && rn.invoer.saldo === 7000 && rn.euro_jaar === Math.round((7000 - 2 * lpm) * 0.0125) || (!rn && 7000 - 2 * lpm <= 0), [rn && rn.invoer, lpm]);
     toets('A3: rekent ook met een negatieve of nul-prijs (review ZOU 1)', D.REGELS.A3.reken({ kwh: 1000, duur_min: 30, duur_max: 34, goed_min: -2, goed_max: 0 }).band.hoog === 360, null);
+    // ── wv2626: A6–A8 (fiscaal: alleen ruwe cijfers + seintje/vlag, nooit een bedrag; zonder grens geen vlag). Verzonnen getallen. ──
+    const J = Number(vandaag.slice(0, 4)), DA = path.join(VAULT, '20_Prive', 'Bronnen', 'Financien'), PB3 = path.join(VAULT, '20_Prive', 'Financien', 'Box 3-inventaris.md');
+    const aangifte = (jr, jrr, res) => fs.writeFileSync(path.join(DA, 'Prive - 2026-10-26 - IB-aangifte ' + jr + ' David (tekst).md'), '---\ntype: bron\n---\n22   Uitgaven voor inkomensvoorzieningen\n' +
+      'a    Betaalde bedragen voor lijfrenten bij gebruik van jaarruimte                         €          ' + jrr + '\nb    Betaalde bedragen voor lijfrenten bij gebruik van de reserveringsruimte      €          ' + res + '\n');
+    const nv7 = Object.assign({}, nv2, { belasting: { david: [{ jaar: J - 1, concept: false, loon: 40000 }, { jaar: J - 2, concept: false, loon: 90000 }], woning: [{ jaar: J - 1, box3: 12345 }] },
+      dga: { rc: { totaal: 30000, reconstructie: { bedrag: 60000 } }, rc_contract: { maximum: 50000, rente_pct: 4 }, woninglening: { jaarrekening: [{ jaar: J - 1, stand: 480000 }] },
+        planning: [{ wanneer: 'vóór 15-12-' + J, actie: 'Besluit: interim-dividend € 40.000 bruto aan de aandeelhouder', klaar: false }, { wanneer: '1-12-' + J, actie: 'Interim-dividend Werkmaatschappij → Holding € 99.000 bruto', klaar: false },
+          { wanneer: '2-1-' + J, actie: 'dividend € 5.000 bruto', klaar: true }, { wanneer: '3-12-' + J, actie: 'Dividend werkmaatschappij -> Holding € 77.000 bruto', klaar: false },
+          { wanneer: '4-12-' + J, actie: 'Slotdividend € 1.000 bruto naar de Holding', klaar: false }, { wanneer: 'jan ' + (J + 1), actie: 'januaridividend € 9.000 bruto (datum nog open)', klaar: false },
+          { wanneer: '10-1-' + (J + 1), actie: 'Dividend € 70.000 bruto aan de aandeelhouder', klaar: false }], dividend: [{ datum: J + '-01-06', bruto: 50000 }, { datum: (J - 1) + '-01-06', bruto: 70000 }] } });
+    const T7 = Object.assign({}, D.TARIEVEN, { box2: { op: '2026-11-07', bron: 'proef', [J]: { grens: 60000, laag: 0.2, hoog: 0.3 } }, excessief_lenen: { op: '2026-11-07', bron: 'proef', [J]: 500000 },
+      gebruikelijk_loon: { op: '2026-11-07', bron: 'proef', [J - 1]: 58000 } });
+    const FV7 = Object.assign({}, FV, { lees: () => nv7 }), adv7 = (x) => adv(Object.assign({ fv: FV7, tarieven: T7 }, x || {}));
+    const r0 = adv7(), g = (r, k) => r.adviezen.find((x) => x.regel === k);
+    toets('A6 zonder tekstversie van de aangifte: geen advies, in ontbreekt (de aangiftetabel heeft geen lijfrentekolom)', !g(r0, 'A6') && r0.ontbreekt.some((x) => x.regel === 'A6' && /geen kolom voor lijfrente/.test(x.waarom)), r0.ontbreekt);
+    fs.mkdirSync(DA, { recursive: true }); aangifte(J - 2, '1.200', '0'); aangifte(J - 1, '0', '0');
+    const r7 = adv7(), a6 = g(r7, 'A6'), a7 = g(r7, 'A7'), a8 = g(r7, 'A8');
+    toets('A6: nieuwste aangifte met lijfrente € 0 bij jaar- en reserveringsruimte → seintje "laat de jaarruimte berekenen", laat toetsen, adviseur', a6 && a6.zekerheid === 'laat toetsen' && a6.actie === 'adviseur' &&
+      a6.invoer.jaar === J - 1 && a6.invoer.jaarruimte === 0 && a6.invoer.reservering === 0 && /laat de jaarruimte berekenen/.test(a6.zin), a6);
+    toets('A7: vier vlaggen uit de ruwe cijfers (met woninglening boven de grens, dividend boven de schijf, RC boven maximum, loon onder de norm); risico', a7 && a7.zekerheid === 'laat toetsen' &&
+      JSON.stringify(a7.vlaggen) === JSON.stringify(['excessief_lenen_met_woning', 'box2_schijf', 'rc_boven_maximum', 'gebruikelijk_loon']) && a7.prioriteit === 'risico' && a7.deadline === J + '-12-15', a7);
+    toets('A7: gepland per jaar = alleen open rijen aan de DGA met datum (niet naar de Holding in elke notatie, niet klaar); al uitgekeerd = dat jaar (review MOET 1/2)', a7 &&
+      JSON.stringify(a7.invoer.dividend.map((y) => [y.jaar, y.gepland, y.al, y.grens])) === JSON.stringify([[J, 40000, 50000, 60000], [J + 1, 70000, 0, null]]) &&
+      a7.invoer.schuld_bv === 30000 && a7.invoer.woninglening === 480000 && a7.invoer.rc === 60000 && a7.invoer.loon === 40000 && a7.invoer.loon_norm === 58000, a7 && a7.invoer);
+    toets('A7: zin noemt de ruwe cijfers en eindigt bij de adviseur; geen "doe dit"', a7 && /€ 50\.000/.test(a7.zin) && /€ 40\.000/.test(a7.zin) && /€ 60\.000/.test(a7.zin) && /Laat het toetsen door je adviseur\.$/.test(a7.zin) && !/\b(doe|moet je|keer uit|los af)\b/i.test(a7.zin), a7 && a7.zin);
+    toets('A8: zonder inventarispagina → seintje "laat berekenen" met alle vier onderdelen; grondslag als ruw cijfer', a8 && a8.zekerheid === 'laat toetsen' && JSON.stringify(a8.invoer.ontbreekt) === JSON.stringify(['beleggingen', 'vorderingen', 'schulden', 'rekening-courant']) &&
+      a8.invoer.grondslag === 12345 && /Laat box 3 berekenen/.test(a8.zin), a8);
+    toets('A6–A8: nooit euro_jaar of band, nooit op het startscherm; onder zeker/schatting in de volgorde', [a6, a7, a8].every((x) => x && x.euro_jaar === null && x.band === null && x.waarde === null && !x.op_start && r7.start.indexOf(x.id) < 0) &&
+      r7.adviezen.filter((x) => x.zekerheid === 'zeker' || x.zekerheid === 'schatting').every((x) => !x.prioriteit ? r7.adviezen.indexOf(x) < r7.adviezen.indexOf(a6) : true), r7.adviezen.map((x) => [x.regel, x.prioriteit, x.zekerheid]));
+    toets('elk advies (ook zonder bedrag; niet het A3-signaal zonder aanwijzing) reproduceerbaar uit zijn invoer: REGELS.reken(invoer) geeft dezelfde uitkomst en vlaggen', !r7.fouten.length && r7.adviezen.filter((x) => !(x.regel === 'A3' && x.zekerheid === 'signaal')).every((x) => {
+      const u = D.REGELS[x.regel].reken(x.invoer, T7); return u && u.euro_jaar === x.euro_jaar && JSON.stringify(u.band) === JSON.stringify(x.band) && JSON.stringify(u.vlaggen) === JSON.stringify(x.vlaggen); }), r7.fouten);
+    const zg = adv7({ tarieven: D.TARIEVEN.spaarrente ? { spaarrente: D.TARIEVEN.spaarrente } : {} }), zga7 = g(zg, 'A7');
+    toets('A7 zonder grenzen (geen tarief excessief lenen, box 2, gebruikelijk loon): alleen de contractvlag RC boven maximum', zga7 && JSON.stringify(zga7.vlaggen) === JSON.stringify(['rc_boven_maximum']) && zga7.invoer.lenen_grens === null &&
+      zga7.invoer.dividend.every((y) => y.grens === null) && zga7.invoer.loon_norm === null, zga7);
+    const nv7b = Object.assign({}, nv7, { dga: Object.assign({}, nv7.dga, { rc: { totaal: 30000, reconstructie: { bedrag: 20000 } } }) });
+    const zg2 = adv7({ fv: Object.assign({}, FV, { lees: () => nv7b }), tarieven: {} });
+    toets('A7 zonder grenzen en RC onder het maximum: geen advies, in ontbreekt met de ontbrekende grenzen', !g(zg2, 'A7') && zg2.ontbreekt.some((x) => x.regel === 'A7' && /geen rode vlag/.test(x.waarom) && /geen grens excessief lenen/.test(x.waarom) && /box 2-tarief/.test(x.waarom)), zg2.ontbreekt);
+    const nv7c = Object.assign({}, nv7, { dga: Object.assign({}, nv7.dga, { woninglening: null, rc: { totaal: 600000, reconstructie: { bedrag: 20000 } } }) });
+    const a7c = g(adv7({ fv: Object.assign({}, FV, { lees: () => nv7c }) }), 'A7');
+    toets('A7: schuld zonder woninglening boven € 500.000 → vlag excessief lenen, risico bovenaan', a7c && a7c.vlaggen[0] === 'excessief_lenen' && a7c.prioriteit === 'risico', a7c);
+    const T7b = Object.assign({}, T7, { box2: Object.assign({}, T7.box2, { [J]: { grens: 95000 }, [J + 1]: { grens: 60000 } }) }), a7j = g(adv7({ tarieven: T7b }), 'A7');
+    toets('A7: een later jaar boven de grens wordt ook gevlagd; deadline = dat jaar (review MOET 2)', a7j && a7j.vlaggen.indexOf('box2_schijf') >= 0 && a7j.deadline === (J + 1) + '-01-10' &&
+      new RegExp('Dividend ' + (J + 1)).test(a7j.zin) && !new RegExp('Dividend ' + J + ':').test(a7j.zin), a7j);
+    toets('A7: woninglening alleen (RC-schuld onbekend) boven de grens → vlag met woning (review MOET 3)', JSON.stringify(D.REGELS.A7.reken({ schuld_bv: null, woninglening: 600000, lenen_grens: 500000 }).vlaggen) === JSON.stringify(['excessief_lenen_met_woning']) &&
+      D.REGELS.A7.reken({ schuld_bv: null, woninglening: null, lenen_grens: 500000 }) === null, null);
+    const nv7d = Object.assign({}, nv7, { belasting: Object.assign({}, nv7.belasting, { david: [{ jaar: J, concept: false, loon: 99000 }].concat(nv7.belasting.david) }) });
+    const r7d = adv7({ fv: Object.assign({}, FV, { lees: () => nv7d }) });
+    toets('A6: nieuwer aangiftejaar in de tabel dan de tekstversie → geen seintje over een oud jaar', !g(r7d, 'A6') && r7d.ontbreekt.some((x) => x.regel === 'A6' && new RegExp('geen tekstversie van de aangifte ' + J).test(x.waarom)), r7d.ontbreekt);
+    aangifte(J - 1, '2.500', '0');
+    const r7e = adv7();
+    toets('A6: lijfrente betaald → geen seintje', !g(r7e, 'A6') && r7e.ontbreekt.some((x) => x.regel === 'A6' && /staat lijfrentepremie/.test(x.waarom)), r7e.ontbreekt);
+    fs.writeFileSync(PB3, '# Box 3\n\n| Onderdeel | Compleet |\n|---|---|\n| Beleggingen | ja |\n| Vorderingen | ja (proef) |\n| Rekening-courant | ja |\n| Schulden | nee |\n');
+    const a8b = g(adv7(), 'A8');
+    toets('A8: inventaris met één onderdeel nee → alleen dat onderdeel', a8b && JSON.stringify(a8b.invoer.ontbreekt) === JSON.stringify(['schulden']), a8b && a8b.invoer);
+    fs.writeFileSync(PB3, '# Box 3\n\n| Onderdeel | Compleet |\n|---|---|\n| Beleggingen | ja |\n| Vorderingen | ja |\n| Rekening-courant | ja |\n| Schulden | ja |\n');
+    const r8 = adv7();
+    toets('A8: inventaris compleet → geen seintje, in ontbreekt', !g(r8, 'A8') && r8.ontbreekt.some((x) => x.regel === 'A8' && /compleet/.test(x.waarom)), r8.ontbreekt);
+    fs.unlinkSync(PB3); [J - 2, J - 1].forEach((jr) => fs.unlinkSync(path.join(DA, 'Prive - 2026-10-26 - IB-aangifte ' + jr + ' David (tekst).md')));   // alleen de eigen proefbestanden (review MOET 4)
+    toets('TARIEVEN: box 2 uit financien-overzicht.js (één bron), excessief lenen en gebruikelijk loon met bron en datum', D.TARIEVEN.box2[2026].grens === O.TARIEVEN.box2[2026].grens &&
+      ['box2', 'excessief_lenen', 'gebruikelijk_loon'].every((k) => D.TARIEVEN[k].bron && /^\d{4}-\d{2}-\d{2}$/.test(D.TARIEVEN[k].op)), null);
     const oud = lijst({ van: mnd[0], tot: mnd[1] });
     toets('boekingenlijst: een filter buiten het 24-maandenvenster geeft alleen zijn eigen maanden (review MOET 4)', oud.boekingen.every((b) => b.datum.slice(0, 7) >= mnd[0] && b.datum.slice(0, 7) <= mnd[1]) && oud.aantal > 0, oud.aantal);
     const asrc = fs.readFileSync('financien-advies.js', 'utf8').replace(/^\s*(\*|\/\/).*$/gm, '');
