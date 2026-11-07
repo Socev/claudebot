@@ -242,6 +242,15 @@ if (O) {
       zt.ontbreekt.some((x) => x.regel === 'A1' && /spaarrente/.test(x.waarom)) && zt.ontbreekt.some((x) => x.regel === 'A2'), zt.ontbreekt);
     const zt2 = adv({ tarieven: { spaarrente: D.TARIEVEN.spaarrente } });
     toets('zonder aftrektarief voor dit jaar: geen A1', !zt2.adviezen.some((x) => x.regel === 'A1') && zt2.ontbreekt.some((x) => x.regel === 'A1' && /aftrektarief/.test(x.waarom)), zt2.ontbreekt);
+    // review wv2620: A1 niet boven de restschuld; A2 netto (een rekening in de min telt mee); signed prijzen in A3
+    const nv3 = Object.assign({}, nv2, { hypotheek: Object.assign({}, nv2.hypotheek, { delen: [{ deel: '3', rente_bank: 5, restschuld_bank: 4000, rentevast_tm: '2031-01-01', soort: 'Lineair' }] }) });
+    const k1 = adv({ fv: Object.assign({}, FV, { lees: () => nv3 }) }).adviezen.find((x) => x.regel === 'A1');
+    toets('A1: restschuld kleiner dan € 10.000 → gerekend op de restschuld (review MOET 3)', k1 && k1.invoer.bedrag === 4000 && k1.band.hoog === Math.round((5 - 1.25) * 40) && /De resterende € 4\.000/.test(k1.zin), k1);
+    const rn = adv({ saldi: { rekeningen: saldi.rekeningen.concat([{ id: 'z2', naam: 'Rood', groep: 'eigen', bank: 'bunq', valuta: 'EUR', saldo: -5000 }]) } }).adviezen.find((x) => x.regel === 'A2');
+    toets('A2: netto saldi, een rekening in de min telt mee (review MOET 2)', rn && rn.invoer.saldo === 7000 && rn.euro_jaar === Math.round((7000 - 2 * lpm) * 0.0125) || (!rn && 7000 - 2 * lpm <= 0), [rn && rn.invoer, lpm]);
+    toets('A3: rekent ook met een negatieve of nul-prijs (review ZOU 1)', D.REGELS.A3.reken({ kwh: 1000, duur_min: 30, duur_max: 34, goed_min: -2, goed_max: 0 }).band.hoog === 360, null);
+    const oud = lijst({ van: mnd[0], tot: mnd[1] });
+    toets('boekingenlijst: een filter buiten het 24-maandenvenster geeft alleen zijn eigen maanden (review MOET 4)', oud.boekingen.every((b) => b.datum.slice(0, 7) >= mnd[0] && b.datum.slice(0, 7) <= mnd[1]) && oud.aantal > 0, oud.aantal);
     const asrc = fs.readFileSync('financien-advies.js', 'utf8').replace(/^\s*(\*|\/\/).*$/gm, '');
     toets('financien-advies.js: geen netwerk, geen proces, schrijft niets', !/require\(['"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads)['"]\)/.test(asrc) && !/\bfetch\s*\(/.test(asrc) &&
       !/INSERT|UPDATE|DELETE|CREATE|db\.exec|writeFile|appendFile|unlink|rename/.test(asrc), null);

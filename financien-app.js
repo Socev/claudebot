@@ -403,7 +403,8 @@ function blokPaypal(d, links, signalen, A) {
     (r.signalen || []).forEach(function (s) {
       // titel als de rij in de vaste lasten ("PayPal — Netflix"); pp (de dienst) zorgt dat hetzelfde signaal van beide kanten één keer telt
       const naam = naamVan(r), titel = 'PayPal — ' + (naam === 'PayPal-dienst' ? ppOnbekend(r.dag) : naam), link = linkVoor(naam, links) || linkVoor(r.naam, links) || linkVoor(r.dienst, links);
-      if (s === 'duurder') signalen.push({ soort: 'prijsstap', naam: titel, toon: 'wacht', post: titel, pp: r.dienst, link: link, zin: naam + ' (via PayPal): sinds ' + mndJaar(r.gewijzigd_op) + ' ' + eur(r.bedrag_eur || r.bedrag) + (r.bedrag_vorig != null ? ' in plaats van ' + eur(r.bedrag_vorig) : '') + '.' });
+      if (s === 'duurder') signalen.push({ soort: 'prijsstap', naam: titel, toon: 'wacht', post: titel, pp: r.dienst, link: link,
+        pm: r.bedrag_vorig != null && (r.bedrag_eur || r.bedrag) > 0 && r.per_maand > 0 ? ((r.bedrag_eur || r.bedrag) - r.bedrag_vorig) * r.per_maand / (r.bedrag_eur || r.bedrag) : null, zin: naam + ' (via PayPal): sinds ' + mndJaar(r.gewijzigd_op) + ' ' + eur(r.bedrag_eur || r.bedrag) + (r.bedrag_vorig != null ? ' in plaats van ' + eur(r.bedrag_vorig) : '') + '.' });
       else if (s === 'nieuw') signalen.push({ soort: 'nieuw', naam: titel, toon: 'info', post: titel, pp: r.dienst, link: link, pm: r.per_maand, zin: naam + ' (via PayPal) is nieuw sinds ' + mndJaar(r.sinds) + ': ' + eur(r.per_maand) + ' per maand.' });
       else if (s === 'weg') signalen.push({ soort: 'weg', naam: titel, toon: 'info', post: titel, pp: r.dienst, zin: 'Navragen: ' + naam + ' (via PayPal) is sinds ' + mndJaar(r.laatst) + ' niet meer betaald.' });
     });

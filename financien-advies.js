@@ -48,7 +48,7 @@ function hid(s) { return crypto.createHash('sha256').update('advies:' + s).diges
 // ── de regels: reken(invoer, tarieven) → { euro_jaar, band } of null (drempel niet gehaald) ──
 const REGELS = {
   A1: { titel: 'Duurste leningdeel aflossen of geld laten staan?', zekerheid: 'laat toetsen', actie: 'adviseur',
-    rekensom: 'per € 10.000: bruto (rente − spaarrente laag) × 10.000; na aftrek (rente × (1 − aftrektarief) − spaarrente hoog) × 10.000',
+    rekensom: 'per € 10.000 (of de restschuld als die kleiner is): bruto (rente − spaarrente laag) × bedrag; na aftrek (rente × (1 − aftrektarief) − spaarrente hoog) × bedrag',
     drempel: 'rente duurste deel − spaarrente hoog ≥ 1 procentpunt',
     reken: function (i) {
       if (!(i.rente > 0) || i.spaar_laag == null || i.spaar_hoog == null || i.aftrek == null) return null;
@@ -67,7 +67,7 @@ const REGELS = {
   A3: { titel: 'Stroom in de duurste uren', zekerheid: 'schatting', actie: 'zelf',
     rekensom: 'schuifbare kWh per jaar × (prijs duurste uren − prijs goedkoopste uren); laag = minst gunstige grens van beide', drempel: 'jij wees de schuifbare kWh aan',
     reken: function (i) {
-      if (!(i.kwh > 0) || !(i.duur_min > 0) || !(i.goed_max > 0)) return null;
+      if (!(i.kwh > 0) || ![i.duur_min, i.duur_max, i.goed_min, i.goed_max].every(function (x) { return typeof x === 'number' && Number.isFinite(x); })) return null;
       const laag = r0(Math.max(0, i.duur_min - i.goed_max) / 100 * i.kwh), hoog = r0(Math.max(0, i.duur_max - i.goed_min) / 100 * i.kwh);
       return { euro_jaar: laag, band: { laag: laag, hoog: hoog } };
     } },
@@ -85,7 +85,7 @@ function renteRekeningen(A, a, nu) {
   return new Set(l.map(function (r) { return A.rekId(r.rek); }));
 }
 function bereik(s, FV) {
-  const d = String(s || '').split(/\s*[–-]\s*/).map(function (x) { return FV.nlGetal(x); }).filter(function (x) { return x != null; });
+  const d = String(s || '').split(/\s*–\s*/).map(function (x) { return FV.nlGetal(x); }).filter(function (x) { return x != null; });
   return d.length ? { min: Math.min.apply(null, d), max: Math.max.apply(null, d) } : null;
 }
 function leesEnergie(vault, FV) {
@@ -128,7 +128,9 @@ function advies(A, a, o) {
     const naam = 'leningdeel ' + (d.deel || '?') + (d.doel ? ' (' + d.doel + ')' : '');
     const rv = d.rentevast_tm || null, binnen = rv && rv <= plusMaanden(nu, 24);
     const ruimte = o.ov && o.ov.buffer ? r0(o.ov.buffer.liquide - 3 * o.ov.buffer.leven_per_maand) : null;
-    const ok = zet('A1', 'A1|' + (d.deel || d.doel || ''), { rente: d.rente_bank, spaar_laag: sp.laag, spaar_hoog: sp.hoog, aftrek: aftrek, bedrag: PER_BEDRAG }, {
+    // per € 10.000, of de restschuld als die kleiner is (review wv2620 MOET 3)
+    const per = Math.min(PER_BEDRAG, Math.round(d.restschuld_bank)), perTxt = per === PER_BEDRAG ? 'Elke € 10.000' : 'De resterende ' + eur(per);
+    const ok = zet('A1', 'A1|' + (d.deel || d.doel || ''), { rente: d.rente_bank, spaar_laag: sp.laag, spaar_hoog: sp.hoog, aftrek: aftrek, bedrag: per }, {
       prioriteit: binnen ? 'deadline' : null, deadline: binnen ? rv : null,
       bronnen: [{ tekst: 'Rente ' + naam + ', ' + (d.soort || 'soort onbekend'), waarde: pct(d.rente_bank), bron: hyp.bron && hyp.bron.bank ? hyp.bron.bank : 'hypotheek-json' },
         { tekst: 'Restschuld ' + naam, waarde: eur(d.restschuld_bank), bron: hyp.bron && hyp.bron.bank ? hyp.bron.bank : 'hypotheek-json' },
@@ -136,7 +138,7 @@ function advies(A, a, o) {
         { tekst: 'Spaarrente', waarde: pct(sp.laag) + ' – ' + pct(sp.hoog), bron: sp.bron + ' (' + sp.op + ')' },
         { tekst: 'Maximaal aftrektarief ' + jaar, waarde: pct(aftrek), bron: T.aftrek.bron },
         ruimte != null ? { tekst: 'Vrij beschikbaar boven 3 maanden leven (zichtbare rekeningen)', waarde: eur(Math.max(0, ruimte)), bron: 'bankstand en overzicht' } : null].filter(Boolean),
-      zin: function (u) { return 'Elke € 10.000 extra aflossen op ' + naam + ' (' + pct(d.rente_bank) + ') scheelt ' + eur(u.band.laag) + ' tot ' + eur(u.band.hoog) + ' per jaar tegenover sparen. ' +
+      zin: function (u) { return perTxt + ' extra aflossen op ' + naam + ' (' + pct(d.rente_bank) + ') scheelt ' + eur(u.band.laag) + ' tot ' + eur(u.band.hoog) + ' per jaar tegenover sparen. ' +
         (rv ? 'De rente staat vast tot ' + rv.split('-').reverse().map(Number).join('-') + '. ' : '') + 'Boete, aftrek en partnerverdeling zitten niet in deze som: laat het toetsen door je adviseur.' + (ruimte != null && ruimte <= 0 ? ' Er staat nu niet meer dan 3 maanden leven op de rekeningen.' : ''); },
     });
     if (!ok) mist('A1', 'het rentevoordeel is kleiner dan 1 procentpunt');
@@ -149,9 +151,10 @@ function advies(A, a, o) {
     if (!(lpm > 0)) return mist('A2', 'leven per maand niet te berekenen');
     if (!sp) return mist('A2', 'geen spaarrente in de tarieven');
     const rente = renteRekeningen(A, a, nu);
-    const zonder = sal.filter(function (r) { return !rente.has(r.id); }), saldo = r2(zonder.reduce(function (s, r) { return s + Math.max(0, r.saldo); }, 0));
+    // netto (review wv2620 MOET 2): een rekening in de min telt mee, anders lijkt geld werkeloos dat er netto niet is
+    const zonder = sal.filter(function (r) { return !rente.has(r.id); }), saldo = r2(zonder.reduce(function (s, r) { return s + r.saldo; }, 0));
     const perBank = new Map();
-    sal.forEach(function (r) { perBank.set(r.bank, (perBank.get(r.bank) || 0) + Math.max(0, r.saldo)); });
+    sal.forEach(function (r) { perBank.set(r.bank, (perBank.get(r.bank) || 0) + r.saldo); });
     const dg = T.depositogarantie && T.depositogarantie.grens > 0 ? T.depositogarantie : null;
     const banken = Array.from(perBank.entries()).map(function (e) { return { bank: e[0], saldo: r2(e[1]), boven_garantie: dg ? e[1] > dg.grens : null }; });
     const ok = zet('A2', 'A2', { saldo: saldo, leven_pm: r2(lpm), maanden: 2, spaar_laag: sp.laag }, {

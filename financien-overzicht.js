@@ -72,7 +72,7 @@ function sleutelVan(t) {
 function richting(b) { return b < 0 ? 'af' : 'bij'; }
 // eigenaar van een boeking (verrijking) in de vier groepen van het ontwerp § 3.3; de rest 'anders'
 const EIGENAREN = ['David', 'samen', 'kinderen', 'Gambia', 'anders'];
-function eigenaarVan(e) { const x = String(e || '').toLowerCase(); return x === 'david' ? 'David' : x === 'samen' ? 'samen' : x === 'kind' ? 'kinderen' : /gambia/.test(x) ? 'Gambia' : 'anders'; }
+function eigenaarVan(e) { const x = String(e || '').trim().toLowerCase(); return x === 'david' ? 'David' : x === 'samen' ? 'samen' : x === 'kind' || x === 'kinderen' ? 'kinderen' : /gambia/.test(x) ? 'Gambia' : 'anders'; }
 function idVan(sleutel, r) { return crypto.createHash('sha256').update('stroom:' + sleutel + '|' + r).digest('hex').slice(0, 16); }
 
 function regelsLees(a) {
@@ -443,7 +443,9 @@ function boekingenLijst(A, a, o) {
   // wv2620: hetzelfde venster als het overzicht (24 maanden terug tot nu), anders erft een post zonder categorie in een korte lijst niet de
   // categorie van de andere posten bij die tegenpartij en klopt een staaf niet met zijn eigen boekingen
   const mNu = String(o.nu || new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' })).slice(0, 7);
-  const lv = maandPlus(mNu, -24) < fl.van ? maandPlus(mNu, -24) : fl.van, lt = fl.tot > mNu ? fl.tot : mNu;
+  // alleen voor een filter binnen dat venster; een oudere lijst laadt alleen zijn eigen maanden (review wv2620 MOET 4: geen omweg om de 36 maanden)
+  const v24 = maandPlus(mNu, -24), binnen = fl.van >= v24 && fl.tot <= mNu;
+  const lv = binnen ? v24 : fl.van, lt = binnen ? mNu : fl.tot;
   const b = boekingen(a, lv, lt, afl);
   const l = b.delen.filter(function (x) {
     return x.maand >= fl.van && x.maand <= fl.tot && (fl.stroom == null || x.stroom === fl.stroom) && (fl.sub == null || x.sub === fl.sub) && (fl.cat == null || (fl.cat === '-' ? !x.cat : x.cat === fl.cat)) && (fl.eig == null || x.eig === fl.eig) &&
