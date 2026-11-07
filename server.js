@@ -17619,6 +17619,52 @@ async function intakeTik() {
 }
 if (intake && SERVER_ECHT) { setTimeout(function () { intakeTik(); }, 120000).unref(); setInterval(function () { intakeTik(); }, 5 * 60000).unref(); }
 
+// wv2672 (Fable wv1020 ZOU 6): één box-rij per dag met de lessen van domein machine/beide die tussen gisteren 07:00 en vandaag 07:00
+// (Nederlandse tijd) in machinekamer.les bijkwamen, zodat een onverwachte les binnen een dag opvalt. Stil als er niets bijkwam
+// (grondwet 10). Geen taalmodel; de box zelf is de stempel (bevinding_id lessen-nieuw-<datum>), dus na een herstart geen tweede rij.
+let lessenBoxDag = '', lessenBoxFoutDag = '';
+const LESSEN_BOX_TOON = 20;
+function lessenBoxRegel(r) {
+  const een = function (x) { return String(x == null ? '' : x).replace(/\s+/g, ' ').trim(); };
+  return 'nieuwe machine-lessen: ' + r.slice(0, LESSEN_BOX_TOON).map(function (x) { return '#' + x.uit_id + ' ' + een(x.uit_herkomst).slice(0, 80) + ' — ' + een(x.uit_kort).slice(0, 60); }).join('; ') +
+    (r.length > LESSEN_BOX_TOON ? '; en ' + (r.length - LESSEN_BOX_TOON) + ' meer (machinekamer.les, kolom aangemaakt in dit venster)' : '');
+}
+// UTC-ms van <datum> (JJJJ-MM-DD) om <uur>:00 Nederlandse tijd, ook rond de overgang naar zomer- of wintertijd (Codex-review wv2672 MOET 2)
+function nlUurUtc(datum, uur) {
+  const d = datum.split('-').map(Number), gok = Date.UTC(d[0], d[1] - 1, d[2], uur);
+  const p = {};
+  new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    .formatToParts(new Date(gok)).forEach(function (x) { p[x.type] = x.value; });
+  const ver = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute) - gok;   // Amsterdam − UTC op dat moment
+  return gok - ver;
+}
+async function lessenBoxTik() {
+  const t = ovisAms();
+  if (t.uur < 7 || lessenBoxDag === t.datum || !rolPrimair()) return;
+  const d = t.datum.split('-').map(Number), gisteren = new Date(Date.UTC(d[0], d[1] - 1, d[2] - 1)).toISOString().slice(0, 10);
+  let r;
+  try { r = await appSbRpc('mk_les_nieuw', { p_van: new Date(nlUurUtc(gisteren, 7)).toISOString(), p_tot: new Date(nlUurUtc(t.datum, 7)).toISOString() }); }
+  catch (e) { if (lessenBoxFoutDag !== t.datum) { lessenBoxFoutDag = t.datum; logError('lessen-box', e); } return; }   // volgende tik opnieuw
+  if (!Array.isArray(r)) { if (lessenBoxFoutDag !== t.datum) { lessenBoxFoutDag = t.datum; logError('lessen-box', new Error('mk_les_nieuw gaf geen lijst')); } return; }
+  if (!r.length) { lessenBoxDag = t.datum; return; }
+  const id = 'lessen-nieuw-' + t.datum;
+  let al = false, ok = false;
+  try {
+    ok = VV().wijzig(path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), function (b) {
+      if (b.indexOf('bevinding_id ' + id) >= 0) { al = true; return null; }
+      const eerste = /\n## \[[a-z]{2,16}\] \d{4}-\d{2}-\d{2}/.exec(b);
+      if (!eerste) return null;
+      return b.slice(0, eerste.index) + '\n## [log] ' + t.klok + ' — ' + r.length + ' nieuwe machine-les' + (r.length === 1 ? '' : 'sen') + ' (automatisch, wv2672)\n' +
+        '- status: afgehandeld\n- van: pod (lessen-box) — bevinding_id ' + id + '\n- ' + lessenBoxRegel(r) + '\n' +
+        '- voorstel: niets als de les klopt; anders de les in machinekamer.les nalopen (een les van domein machine of beide gaat voortaan mee in elke machinekamer-beurt)\n' +
+        b.slice(eerste.index);
+    }, { grendel: 5, geenGrendel: boxGeenGrendel }) === true;
+  } catch (e) { ok = false; if (lessenBoxFoutDag !== t.datum) { lessenBoxFoutDag = t.datum; logError('lessen-box', e); } }
+  if (ok || al) lessenBoxDag = t.datum;   // pas dicht na een geschreven of al bestaande rij (Codex-review wv2672 MOET 1); anders volgende tik opnieuw
+  else if (lessenBoxFoutDag !== t.datum) { lessenBoxFoutDag = t.datum; logError('lessen-box', new Error('box-rij ' + id + ' niet geschreven; volgende tik opnieuw')); }
+}
+if (SERVER_ECHT) { setTimeout(function () { lessenBoxTik(); }, 150000).unref(); setInterval(function () { lessenBoxTik(); }, 15 * 60000).unref(); }
+
 // ── OVIS MailMan: de mailrouter vóór OVIS Intake, in de schaduw (wv1856, 28-10-2026; bouwplan vault "01_Ontwikkeling/OVIS MailMan -
 // mailrouter vóór OVIS Intake (bouwplan 27-10-2026).md" § O.2–O.10) ──
 // mailman.js beslist per binnengekomen Gmail-mail (Altijd in → Filter Weg → Filter In → Jev) naar welke stroom hij gaat en welke labels
