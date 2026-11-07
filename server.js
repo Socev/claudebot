@@ -3918,6 +3918,7 @@ function handleRequest(req, res) {
       weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
       kalender: typeof kalenderInfo === 'function' ? kalenderInfo() : { aan: false },   // wv2333: OVIS Calendar in de app (laatste lijst: aantal, duur; geen titels)
       shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
+      osint: typeof osintInfo === 'function' ? osintInfo() : { aan: false },   // wv2694: OVIS OSINT (osint.py in deze release? venv of systeem-python; geen zoektermen)
       pakjes: typeof pakjesInfo === 'function' ? pakjesInfo() : { aan: false },   // wv2593: OVIS Pakjes (aantallen, laatste ronde; geen codes, winkels of postcodes)
       memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
       ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
@@ -13192,6 +13193,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
+        if (route === 'GET /app/osint' || route === 'POST /app/osint/zoek') return typeof appOsint === 'function' ? appOsint(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'osint');   // wv2694: OVIS OSINT (logboek, zoeken)
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
@@ -20738,6 +20740,61 @@ async function appPakjes(req, res, a, route, d) {
   return appStuur(res, u.status, u.body);
 }
 // ── einde OVIS Pakjes ──
+// ── OVIS OSINT (wv2694, 7-11-2026; ontwerp "OVIS OSINT - openbare bronnen over personen, adressen, bedrijven en nummers" § 4–5; David Ja 7-11 21:32) ──
+// osint.py (bronnenlaag, centrale poort vóór elke externe aanroep, osint.sqlite met cache 30 d en logboek 1 jaar) draait als los Python-proces
+// met de uv-venv /opt/data/venvs/osint (phonenumbers; OSINT_PYTHON overschrijft). Ontbreekt die, dan python3: de telefooningang meldt dan
+// dat de offline duiding ontbreekt. App-routes achter de app-sessie: GET /app/osint (logboek + doelen), POST /app/osint/zoek
+// {ingang, term, doel, doel_tekst, vers} met wie = david (60/uur). Socev: POST /smal/osint (skill osint; wie = socev met de Socev-sleutel,
+// anders machinekamer; herkomst bepaalt in osint.py of iets naar buiten mag; geen kaartbeelden). De zoekterm komt nooit in api.log.
+// Het kind krijgt alleen de omgevingsnamen die de eigen bronnen nodig hebben. Alleen op de primaire kant (daar staat osint.sqlite).
+const OSINT_SCRIPT = path.join(__dirname, 'osint.py');
+const OSINT_ENV = ['PATH', 'HOME', 'LANG', 'PORT', 'API_SECRET', 'SUPABASE_RPC_CONTACTEN', 'N8N_WEBHOOK_AGENDA_API', 'VAULT_DIR', 'OSINT_DB'];
+function osintPython() {
+  const v = process.env.OSINT_PYTHON || '/opt/data/venvs/osint/bin/python';
+  try { fs.accessSync(v, fs.constants.X_OK); return v; } catch (e) { return 'python3'; }
+}
+function osintInfo() { return { aan: fs.existsSync(OSINT_SCRIPT), python: osintPython() === 'python3' ? 'systeem' : 'venv' }; }
+function osintRun(args, invoer) {
+  return new Promise(function (ok) {
+    const env = {};
+    OSINT_ENV.forEach(function (k) { if (process.env[k] !== undefined) env[k] = process.env[k]; });
+    let p;
+    try {
+      p = require('child_process').execFile(osintPython(), ['-I', OSINT_SCRIPT].concat(args), { timeout: 120000, maxBuffer: 16 * 1024 * 1024, env: env }, function (e, out) {
+        if (e) { logError('osint', new Error('osint.py ' + args[0] + ': ' + String(e.code || e.signal || 'fout'))); return ok({ ok: false, fout: 'OSINT gaf geen antwoord' }); }
+        try { ok(JSON.parse(out)); } catch (x) { ok({ ok: false, fout: 'OSINT gaf onleesbare uitvoer' }); }
+      });
+    } catch (e) { logError('osint', e); return ok({ ok: false, fout: 'OSINT kon niet starten' }); }
+    p.stdin.on('error', function () {});
+    p.stdin.end(invoer === undefined ? '' : JSON.stringify(invoer));
+  });
+}
+function osintInvoer(d, wie) {
+  const t = function (x, n) { const v = String(x == null ? '' : x).slice(0, n).trim(); return v || null; };
+  return { ingang: t(d.ingang, 12) || 'auto', term: t(d.term, 200) || '', doel: t(d.doel, 20), doel_tekst: t(d.doel_tekst, 120),
+    herkomst: wie === 'david' ? 'david' : t(d.herkomst, 40), wie: wie, vers: d.vers === true, beelden: wie === 'david' };
+}
+async function appOsint(req, res, a, route, d) {
+  if (!fs.existsSync(OSINT_SCRIPT)) return appWeiger(res, 404, 'OSINT zit niet in deze versie van de pod', 'osint ontbreekt');
+  if (!rolPrimair()) return appWeiger(res, 409, 'OSINT werkt alleen op de hoofdpod', 'osint niet primair');
+  if (route === 'GET /app/osint') {
+    if (!appTeller('osint_lijst', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens osint lijst');
+    const r = await osintRun(['logboek', '60']);
+    if (r.ok) res._app.stil = true; else res._app.reden = 'osint logboek fout';
+    return appStuur(res, r.ok ? 200 : 503, r);
+  }
+  if (!appTeller('osint', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens osint');
+  const r = await osintRun(['zoek'], osintInvoer(d || {}, 'david'));
+  res._app.reden = 'osint zoek ' + String(r.ingang || '?').slice(0, 10) + ' ' + String((r.poort && r.poort.niveau) || 'fout').slice(0, 8) + ' extern ' + (Number(r.extern) || 0) + (r.cache ? ' cache' : '');
+  return appStuur(res, r.ok ? 200 : (r.fout === 'lege zoekterm' || r.fout === 'onbekende ingang' ? 400 : 503), r);
+}
+async function smalOsint(d, socev) {
+  if (!fs.existsSync(OSINT_SCRIPT)) return { status: 404, j: { ok: false, fout: 'OSINT zit niet in deze versie van de pod' } };
+  if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'OSINT werkt alleen op de hoofdpod' } };
+  const r = await osintRun(['zoek'], osintInvoer(d || {}, socev ? 'socev' : 'machinekamer'));
+  return { status: r.ok ? 200 : (r.fout === 'lege zoekterm' || r.fout === 'onbekende ingang' ? 400 : 503), j: r };
+}
+// ── einde OVIS OSINT ──
 async function appDocs(req, res, a, s, d, route) {
   if (!docsDelen) return appWeiger(res, 404, 'Delen zit niet in deze versie van de pod', 'docs ontbreekt');
   if (!appTeller('docs', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs');
@@ -22267,7 +22324,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, 'bandjes/voorstel': 30, 'health-opgaven': 20, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, 'bandjes/voorstel': 30, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata']);   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -22507,6 +22564,8 @@ async function smalActie(actie, d, wie) {
   // wv944: Facturen lezen voor Socev (skill facturen-lezen): zoeken, hoe wordt X betaald, is een factuur betaald, controles. Alleen lezen,
   // alleen op de primaire Olares-kant (facturenOpen geeft anders null → 409). Salarisregels op zakelijke rekeningen gewoon mee (David
   // 23-10-2026, wv945); de POT-rekening en Privé staan hier niet in de weg: die zijn alleen-eigenaar en Socev leest als eigenaar.
+  // wv2694: OVIS OSINT voor Socev (skill osint): adres, bedrijf, telefoon; persoon alleen met herkomst david-vraag en een doel (osint.py)
+  if (actie === 'osint') return smalOsint(d, !(wie && wie.mk));   // Socev-sleutel of beurtpas = socev; API_SECRET = machinekamer
   if (actie === 'facturen') {
     if (String(d.opdracht || '') === 'aansluiting') return finAansluiting(d);   // wv1864: aansluiting bank ↔ inkoopfacturen (fin-reconcile.js)
     if (!facturenRoutes || typeof facturenRoutes.lees !== 'function') return { status: 404, j: { ok: false, fout: 'Facturen zit niet in deze versie van de pod' } };

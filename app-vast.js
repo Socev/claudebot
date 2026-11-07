@@ -77,7 +77,7 @@ function pas(lijst, d, vastePlek) {
 // catalogus src/modules.ts, plek "apps"; de toets test/apps-volgorde.test.ts in socev-app houdt ze gelijk). Een App die de pod nog
 // niet kent, toont de app gewoon onderaan; ordenen en favoriet maken kan pas als hij hier staat.
 const APP_IDS = ['praktijken', 'projecten', 'bandjes', 'financien', 'gezondheid', 'facturen', 'docplan', 'bestanden', 'pot',
-  'pot-afschriften', 'studio', 'broedstoof', 'memorylane', 'tripper', 'kalender', 'shopper', 'pakjes', 'mediatheek', 'harvester', 'ideeen',
+  'pot-afschriften', 'studio', 'broedstoof', 'memorylane', 'tripper', 'kalender', 'shopper', 'pakjes', 'osint', 'mediatheek', 'harvester', 'ideeen',
   'flock', 'verbruik', 'tokencounter', 'sleutelbos', 'mail', 'mailman', 'cijfer-meester'];   // sleutelbos: wv2481
 const VOLGORDE_MAX = 60;
 const SORTERINGEN = ['eigen', 'az', 'meest'];
