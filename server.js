@@ -15840,8 +15840,8 @@ const studio = (function () {
 })();
 function studioInfo() { return studio ? Object.assign({ aan: true }, studio.health()) : { aan: false }; }
 // Zelfde ctx voor Studio en Bandjes (wv743): vingerafdruk van dít apparaat uit de sessie; bandjes.js bouwt er nooit zelf een.
-function appStudioCtx(a, s) { return { versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; }, apparaat: a.naam,
-  neemUpload: function (beurt, n) { return appStudioUpload(a, beurt, n); } }; }   // wv2482: foto als invoer (veldsoort beeld)
+// wv2482: neemUpload = foto als invoer (veldsoort beeld). Eén regel houden: test/bandjes.sh knipt deze functie als regel.
+function appStudioCtx(a, s) { return { versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; }, apparaat: a.naam, neemUpload: function (beurt, n) { return appStudioUpload(a, beurt, n); } }; }
 // wv2482: een via /app/upload/<beurt>/<n> klaargezet bestand van DIT apparaat overnemen voor Studio (zelfde vorm als facturenUploadNeem:
 // { naam, bytes, weg }); weg() pas als de taak in de rij staat. Hooguit 20 MB (de uploadgrens); geen koppelingen volgen.
 function appStudioUpload(a, beurt, n) {
