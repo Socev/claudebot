@@ -1062,7 +1062,38 @@ function ibanPoort(f, leverancier, ctx) {
   const hk = f.iban && historie[ibanNorm(f.iban)];
   if (!onbekend.length) return { iban_nieuw: false, onbekend, historie, reden: !f.iban ? 'geen IBAN' : !ibanMod97(f.iban) ? 'IBAN ongeldig (zie controles)' : eigen.has(ibanNorm(f.iban)) ? 'eigen rekening' : hk ? historieTekst(hk) : 'IBAN bekend bij deze leverancier' };
   const meer = vreemd.length > 1 ? ' (de factuur noemt meer dan één IBAN)' : '';
+  const eerder = onbekend.length === 1 ? eerderBetaaldOnbekend(onbekend[0], leverancier ? leverancier.naam : f.leverancier_naam, ctx) : null;   // wv2610
+  if (eerder) return { iban_nieuw: true, onbekend, historie, eerder, reden: eerderTekst(eerder, !!leverancier) + meer };
   return { iban_nieuw: true, onbekend, historie, reden: (leverancier ? 'Nieuw IBAN voor een bekende leverancier: eerst nabellen' : 'Nieuwe leverancier met een nog niet nagebeld IBAN: eerst nabellen') + meer };
+}
+/*
+ * wv2610 (David 7-11-2026, factuur van een salarisbureau: "Nieuwe IBAN volgens de app, maar ook een eerdere betaling gezien: contradictio in
+ * terminis"): een IBAN dat nagebeld moet worden maar waaraan eigen rekeningen al betaalden, heet niet "nieuw". Alleen uitleg: de poort
+ * blijft precies zoals hij is (iban_nieuw, onbekend, ibanGeborgd). → null (geen eerdere afschrijving) of { totaal, passend, naam, namen:
+ * [{ naam, aantal, laatste }] (bankregels onder deze naam), afwijkend: [{ naam, aantal, laatste }] (onder een andere naam) }.
+ */
+function eerderBetaaldOnbekend(iban, naam, ctx) {
+  if (!ctx || typeof ctx.ibanHistorie !== 'function') return null;
+  let lijst;
+  try { lijst = ctx.ibanHistorie(iban) || []; } catch (e) { return null; }
+  const bank = lijst.filter((h) => h && h.bron === 'bankhistorie' && Number(h.aantal) > 0 && h.naam)
+    .map((h) => ({ naam: String(h.naam).trim(), aantal: Number(h.aantal), laatste: h.laatste || null }));
+  if (!bank.length) return null;
+  const past = (h) => !!naam && naamZelfde(naam, h.naam);
+  const namen = bank.filter(past), afwijkend = bank.filter((h) => !past(h));
+  const som = (l) => l.reduce((t, h) => t + h.aantal, 0);
+  return { totaal: som(bank), passend: som(namen), naam: naam || null, namen, afwijkend };
+}
+function dagKort(iso) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || '')); return m ? Number(m[3]) + '-' + Number(m[2]) + '-' + m[1] : '?'; }
+function naamDatum(h) { return h.naam + (h.aantal > 1 ? ' ' + h.aantal + '×, laatst ' : ', ') + dagKort(h.laatste); }
+// Eindigt altijd op "eerst nabellen …": ibanHerbereken haalt de reden zo weg zodra het IBAN bekend wordt.
+function eerderTekst(e, metLeverancier) {
+  const af = e.afwijkend.slice(0, 3).map(naamDatum).join('; ') + (e.afwijkend.length > 3 ? '; …' : '');
+  if (!e.passend) return 'Let op: aan dit rekeningnummer is eerder alleen betaald onder een andere naam (' + af + '), niet onder ' + (e.naam || 'de naam op de factuur') +
+    ': eerst nabellen';
+  const kop = 'Al ' + e.passend + '× betaald aan ' + e.naam;
+  if (e.afwijkend.length) return kop + ', ' + (e.totaal - e.passend) + '× onder een andere naam (' + af + '): daarom niet vanzelf bekend — eerst nabellen of kijk de kaart na';
+  return kop + (metLeverancier ? '' : ', maar ' + e.naam + ' is nog geen bekende leverancier') + ': daarom niet vanzelf bekend — eerst nabellen of kijk de kaart na';
 }
 // Dekt het nabellen de IBAN's die nu op de factuur staan? Nodig = elk onbekend IBAN plus het gekozen IBAN; met `poort` ({ leverancier, ctx })
 // rekent hij de IBAN-poort zelf opnieuw uit in plaats van op opgeslagen vlaggen te vertrouwen (diffreview wv797 #10 en natoets #6).
@@ -1456,7 +1487,7 @@ module.exports = {
   leesXml, leesUbl, leesPdfTekst,
   // besliskader per stap (§ 4.5)
   stapDubbelBestand, stapDubbelInhoud, factuurSleutel, stapSoort, groepeerBericht, stapPatientkenmerk, stapVelden, herkenLeverancier, compactNaam, naamVerwant, ibanNaamPast, VERZAMEL_RE,
-  stapEntiteit, stapGeenFactuur, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, gebruikelijkBedrag, GEBRUIKELIJK_MIN_EERDER, ibanPoort, naamZelfde, ibanHistorieBekend, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
+  stapEntiteit, stapGeenFactuur, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, gebruikelijkBedrag, GEBRUIKELIJK_MIN_EERDER, ibanPoort, naamZelfde, ibanHistorieBekend, eerderBetaaldOnbekend, eerderTekst, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
   // leren
   leerUitBevestiging,
   // overgangen (§ 4.4)

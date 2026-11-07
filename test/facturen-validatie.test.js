@@ -601,6 +601,26 @@ test('wv1317 bedragpatroon: band = 10e–90e percentiel plus de laatste drie (in
   assert.equal(V.bedragPatroon(huur, 'gisteren', 1), null);
 });
 
+test('wv2610: ibanHistorie — een uitschieter ≤ 10 % mag, mits de passende betalingen zelf ≥ 3 over ≥ 60 dagen zijn; verzamelnaam nooit', () => {
+  const t = (d, n) => ({ boekdatum: d, bedrag_centen: -100, tegenpartij_naam: n, entiteit: 'tolgaarde' });
+  const reeks = (n, naam, start) => Array.from({ length: n }, (_, i) => t(K.plusDagen(start || '2026-01-01', 10 * i), naam));
+  const h = V.ibanHistorie(reeks(9, 'X Proefbureau').concat([t('2026-02-15', 'Y Anders')]));
+  assert.equal(h.ok, true, h.reden); assert.equal(h.aantal, 10); assert.equal(h.aantal_passend, 9); assert.equal(h.aantal_afwijkend, 1);
+  assert.deepEqual(h.afwijkend, [{ naam: 'Y Anders', aantal: 1, laatste: '2026-02-15' }]);
+  assert.ok(!h.namen.some((n) => n.naam === 'Y Anders'));
+  assert.equal(V.ibanHistorie(reeks(8, 'X Proefbureau').concat([t('2026-02-15', 'Y Anders'), t('2026-02-16', 'Z Anders')])).reden, 'verschillende namen', '80 %');
+  assert.equal(V.ibanHistorie(reeks(9, 'X Proefbureau', '2026-05-01').concat([t('2026-01-01', 'Y Anders')])).ok, true, '80 dagen passend');
+  assert.equal(V.ibanHistorie(Array.from({ length: 9 }, (_, i) => t(K.plusDagen('2026-05-01', 5 * i), 'X Proefbureau')).concat([t('2026-01-01', 'Y Anders')])).reden,
+    'verschillende namen', 'passend maar 40 dagen: de uitschieter rekt de periode niet op');
+  assert.equal(V.ibanHistorie(reeks(9, 'X Proefbureau').concat([t('2026-02-15', 'Stichting Mollie Payments')])).ok, false, 'verzamelrekening blijft');
+  const vier = reeks(36, 'X Proefbureau').concat(['A Een', 'B Twee', 'C Drie', 'D Vier'].map((n, i) => t(K.plusDagen('2026-02-01', i), n)));
+  assert.equal(V.ibanHistorie(vier).reden, 'verschillende namen', '4 afwijkende namen (90 %): te veel om hardop te tonen');
+  assert.equal(V.ibanHistorie(vier.slice(0, -1)).ok, true, '3 afwijkende namen mag');
+  assert.equal(V.ibanHistorie(vier.slice(0, -1)).afwijkend.length, 3);
+  const zonder = V.ibanHistorie(reeks(7, 'X Proefbureau'));
+  assert.equal(zonder.ok, true); assert.deepEqual(zonder.afwijkend, []); assert.equal(zonder.aantal_afwijkend, 0);
+});
+
 test('wv1323: ibanHistorie en naamVerwant — ≥ 3 afschrijvingen met een naam over ≥ 60 dagen, steeds dezelfde (verwante) naam', () => {
   const t = (d, naam, o) => Object.assign({ boekdatum: d, bedrag_centen: -1000, tegenpartij_naam: naam, entiteit: 'tolgaarde' }, o || {});
   // verwant: rechtsvorm, leestekens, afkorting binnen de naam, voorletters + achternaam

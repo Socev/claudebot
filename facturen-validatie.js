@@ -203,7 +203,7 @@ function afwijkendeIncassos(transacties, opties) {
  * "Mediq", "A.M.C. Roskott" / "AMC Roskott", "LvN" / "LvN Huisartswaarneming" tellen als één naam; "Xebia" / "G-company" en een
  * salarisbureau onder twee bedrijfsnamen niet — die blijven nabellen). Verwant is bewust streng: een twijfelgeval kost een telefoontje.
  */
-const FEIT_MIN_BETALINGEN = 3, FEIT_MIN_DAGEN = 60, FEIT_MIN_NAAM = 3;
+const FEIT_MIN_BETALINGEN = 3, FEIT_MIN_DAGEN = 60, FEIT_MIN_NAAM = 3, FEIT_MIN_AANDEEL = 90, FEIT_MAX_AFWIJKEND = 3;   // aandeel in procenten (wv2610)
 // Verzamelrekeningen zijn niet "uniek van bedrijf Z": een betaaldienst of derdengeldenrekening ontvangt voor velen (diffreview wv1323 ZOU 4).
 // Staat zo'n naam in de historie, dan nooit een kaart: nabellen. (VERZAMEL_RE staat sinds wv1360 in facturen-kern.js.)
 function zonderAccentenEnz(s) { return String(s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, ''); }
@@ -223,17 +223,26 @@ function ibanHistorie(lijst) {
   const l = (lijst || []).filter((t) => !t.verwijderd_op && t.bedrag_centen < 0 && isIsoDatum(t.boekdatum) && compactNaam(t.tegenpartij_naam).length >= FEIT_MIN_NAAM)
     .sort((a, b) => (a.boekdatum < b.boekdatum ? -1 : a.boekdatum > b.boekdatum ? 1 : 0));
   if (!l.length) return { aantal: 0, ok: false, reden: 'geen betalingen met een naam' };
-  const tel = new Map();
-  for (const t of l) { const n = String(t.tegenpartij_naam).trim(); tel.set(n, (tel.get(n) || 0) + 1); }
+  const tel = new Map(), datum = new Map();
+  for (const t of l) { const n = String(t.tegenpartij_naam).trim(); tel.set(n, (tel.get(n) || 0) + 1); datum.set(n, t.boekdatum); }   // l is gesorteerd: laatste datum per naam
   // meest gebruikt; bij gelijkspel de langste (meestal de volledige naam), dan alfabetisch (vaste uitkomst)
   const namen = Array.from(tel, ([naam, aantal]) => ({ naam, aantal })).sort((a, b) => b.aantal - a.aantal || b.naam.length - a.naam.length || (a.naam < b.naam ? -1 : 1));
   const hoofd = namen[0].naam;
   const eerste = l[0].boekdatum, laatste = l[l.length - 1].boekdatum, dagen = dagenTussen(eerste, laatste);
-  const uit = { aantal: l.length, eerste, laatste, dagen, naam: hoofd, namen: namen.slice(0, 4), aantal_namen: namen.length,
+  // wv2610: de namen die niet bij de hoofdnaam passen (een "uitschieter": één betaling onder een andere naam aan dit IBAN)
+  const afwijkend = namen.filter((n) => !naamVerwant(n.naam, hoofd)).map((n) => ({ naam: n.naam, aantal: n.aantal, laatste: datum.get(n.naam) }));
+  const vreemd = new Set(afwijkend.map((n) => n.naam)), p = l.filter((t) => !vreemd.has(String(t.tegenpartij_naam).trim()));
+  const uit = { aantal: l.length, eerste, laatste, dagen, naam: hoofd, namen: namen.filter((n) => !vreemd.has(n.naam)).slice(0, 4), aantal_namen: namen.length,
+    aantal_passend: p.length, afwijkend, aantal_afwijkend: l.length - p.length,
     entiteiten: Array.from(new Set(l.map((t) => t.entiteit).filter(Boolean))).sort(), ok: false, reden: null };
+  const pDagen = p.length ? dagenTussen(p[0].boekdatum, p[p.length - 1].boekdatum) : 0;
   if (l.length < FEIT_MIN_BETALINGEN) uit.reden = 'minder dan ' + FEIT_MIN_BETALINGEN + ' betalingen';
   else if (dagen < FEIT_MIN_DAGEN) uit.reden = 'korter dan ' + FEIT_MIN_DAGEN + ' dagen';
-  else if (namen.some((n) => !naamVerwant(n.naam, hoofd))) uit.reden = 'verschillende namen';
+  // wv2610 (David 7-11-2026): ≥ 90 % onder de hoofdnaam, en die alleen al ≥ 3 betalingen over ≥ 60 dagen, mag tóch een kaart; de afwijkende
+  // namen en datums staan dan hardop op de kaart en Davids Ja met verse vingerafdruk blijft de enige weg. Daaronder: nabellen.
+  // Hooguit FEIT_MAX_AFWIJKEND afwijkende namen: die passen allemaal hardop op de kaart (review wv2610 MOET 1: geen ongeziene uitschieter).
+  else if (afwijkend.length && !(afwijkend.length <= FEIT_MAX_AFWIJKEND && p.length * 100 >= FEIT_MIN_AANDEEL * l.length && p.length >= FEIT_MIN_BETALINGEN &&
+    pDagen >= FEIT_MIN_DAGEN)) uit.reden = 'verschillende namen';
   else if (namen.some((n) => VERZAMEL_RE.test(zonderAccentenEnz(n.naam)))) uit.reden = 'verzamelrekening (betaaldienst of derdengelden)';
   else uit.ok = true;
   return uit;
@@ -447,6 +456,6 @@ function zoek(transacties, vraag) {
 
 module.exports = {
   tegenpartijSleutel, betaalwijzeVan, mediaan, frequentieVan, profielen, profielVan, bedragPatroon, afwijkendeIncassos, incassoGroep, AFWIJKEND_MIN, AFWIJKEND_MARGE,
-  naamVerwant, vollereNaam, ibanHistorie, FEIT_MIN_BETALINGEN, FEIT_MIN_DAGEN, VERZAMEL_RE,
+  naamVerwant, vollereNaam, ibanHistorie, FEIT_MIN_BETALINGEN, FEIT_MIN_DAGEN, FEIT_MIN_AANDEEL, FEIT_MAX_AFWIJKEND, VERZAMEL_RE,
   genormKenmerk, echtKenmerk, betalingVan, controles, zoek,
 };

@@ -1986,7 +1986,9 @@ function feitUitleg(k) {
   const andere = (k.namen || []).map((n) => n.naam).filter((n) => n !== k.bank_naam);
   const ents = (k.entiteiten || []).filter(Boolean);
   const entTekst = ents.length ? ' vanaf ' + (ents.length > 1 ? ents.slice(0, -1).join(', ') + ' en ' + ents[ents.length - 1] : ents[0]) : '';
-  const bron = k.aantal + ' betalingen sinds ' + dagNL(k.eerste) + ' (laatste ' + dagNL(k.laatste) + ')' + entTekst + ', steeds aan ' + k.bank_naam +
+  const af = (k.afwijkend || []).filter((a) => a && a.naam);
+  const bron = k.aantal + ' betalingen sinds ' + dagNL(k.eerste) + ' (laatste ' + dagNL(k.laatste) + ')' + entTekst +
+    (af.length && Number.isSafeInteger(k.aantal_passend) ? ', waarvan ' + k.aantal_passend + ' aan ' : ', steeds aan ') + k.bank_naam +
     (andere.length ? ' (ook gespeld als ' + andere.slice(0, 3).join(', ') + ')' : '') + '.';
   const fs = (k.facturen || []).filter(Boolean);
   const fTekst = (f) => (f.nummer || 'zonder nummer') + (f.leverancier_naam ? ' van ' + f.leverancier_naam : '') + (Number.isSafeInteger(f.incl) ? ' (' + eurTekst(Math.abs(f.incl)) + ')' : '');
@@ -1994,7 +1996,11 @@ function feitUitleg(k) {
     : fs.length + ' facturen noemen deze rekening (' + fs.slice(0, 3).map(fTekst).join('; ') + (fs.length > 3 ? '; …' : '') + '); die moeten nu eerst nagebeld worden.') +
     (k.zonder_naam ? ' Let op: op ' + (fs.length === 1 ? 'de factuur' : 'een van de facturen') + ' is geen leveranciersnaam herkend; kijk op het stuk of hij van ' + k.naam +
       ' komt. Ja maakt ' + k.naam + ' de leverancier.' : '') +
-    (k.nog_onbekend ? ' Let op: er staat nog een andere onbekende rekening op; die blijft nabellen.' : '');
+    (k.nog_onbekend ? ' Let op: er staat nog een andere onbekende rekening op; die blijft nabellen.' : '') +
+    // wv2610: een uitschieter (een betaling onder een andere naam aan deze rekening) hardop, met naam en datum
+    (af.length ? ' Let op: ' + (k.aantal_afwijkend || af.reduce((t, a) => t + a.aantal, 0)) + '× betaald onder een andere naam (' +
+      af.map((a) => a.naam + (a.aantal > 1 ? ', ' + a.aantal + '×, laatst ' : ', ') + dagNL(a.laatste)).join('; ') +   // allemaal (ibanHistorie laat er hooguit 3 toe)
+      '). Kijk na of dat klopt (een doorbetaling, terugboeking of verkeerde naam) voor je Ja zegt; twijfel je, bel dan na.' : '');
   return {
     zin: rek + ' is van ' + k.naam + '.',
     bron,

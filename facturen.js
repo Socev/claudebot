@@ -339,6 +339,20 @@ function lijst(fdb, r, stap) {
   const op = fdb.db.prepare('SELECT id, status, verstuur_na, poging, fout, modus FROM opdracht WHERE factuur = ? ORDER BY aangemaakt_op DESC LIMIT 1');
   return { stap, facturen: rijen.map((f) => Object.assign(factuurKort(f, f.lev_naam), stap === 'beoordelen' ? {} : { opdracht: op.get(f.id) || null })) };
 }
+// wv2610: de reden van de IBAN-poort staat bij de intake opgeslagen ("Nieuwe leverancier met een nog niet nagebeld IBAN"); toon de verse uitleg
+// (bv. "Al 93× betaald aan …"). Alleen weergave: de db blijft zoals hij is, en zonder nabellen valt de oude regel weg (zoals ibanHerbereken).
+// alleen de redenen die K.ibanPoort maakt (review ZOU 1: een andere reden met "eerst nabellen" blijft staan)
+const IBAN_REDEN_RE = /^(Nieuw IBAN voor een bekende leverancier|Nieuwe leverancier met een nog niet nagebeld IBAN|Al \d+× betaald aan |Let op: aan dit rekeningnummer is eerder alleen betaald)[^]*eerst nabellen/;
+function redenenVers(redenen, ip) {
+  const l = Array.isArray(redenen) ? redenen : [];
+  let gezet = false;
+  return l.flatMap((x) => {
+    if (!IBAN_REDEN_RE.test(String(x))) return [x];
+    if (!ip.iban_nieuw || gezet) return [];
+    gezet = true;
+    return [ip.reden];
+  });
+}
 function detail(fdb, r, id, nu) {
   const f = factuurOf404(fdb, r, id);
   const ctx = kernCtx(fdb, nu);
@@ -357,10 +371,10 @@ function detail(fdb, r, id, nu) {
   return {
     factuur: Object.assign(factuurKort(Object.assign({}, f, { controles: f.controles }), lev ? lev.naam : null), {
       excl: f.excl, btw: f.btw, incl_eur: f.incl_eur, iban: f.iban, ibans_betaal: f.ibans_betaal, ibans_onbekend: ip.onbekend, kenmerk: f.kenmerk,
-      redenen: f.redenen, controles: f.controles, bevestigd_door: f.bevestigd_door, bevestigd_op: f.bevestigd_op, ingevoerd_door: f.ingevoerd_door,
+      redenen: redenenVers(f.redenen, ip), controles: f.controles, bevestigd_door: f.bevestigd_door, bevestigd_op: f.bevestigd_op, ingevoerd_door: f.ingevoerd_door,
       ingevoerd_op: f.ingevoerd_op, betaald_gezien_op: f.betaald_gezien_op, nagebeld_door: f.nagebeld_door, nagebeld_op: f.nagebeld_op,
       nagebeld_ibans: f.nagebeld_ibans, dubbel_van: f.dubbel_van, aangemaakt_op: f.aangemaakt_op }),
-    iban_poort: { iban_nieuw: ip.iban_nieuw, reden: ip.reden },
+    iban_poort: { iban_nieuw: ip.iban_nieuw, reden: ip.reden, eerder_betaald: ip.eerder ? ip.eerder.totaal : 0 },   // wv2610: > 0 = geen "nieuw IBAN" in de kop
     bevestigen: K.magBevestigen(f, poort),
     leverancier: lev ? { id: lev.id, naam: lev.naam, standaard_entiteit: lev.standaard_entiteit, standaard_betaalwijze: lev.standaard_betaalwijze,
       ibans: lev.ibans, alleen_portaal: !!lev.alleen_portaal, mediaan: lev.mediaan, verzendwijze: lev.verzendwijze || 'concept' } : null,
@@ -2090,7 +2104,8 @@ function voorstelRoute(fdb, r, d, nu) {
  * nabellen vervangen?". Een kaart "Rekening …1234 is van <naam>" staat er alleen als:
  *   - een factuur in Beoordelen dat IBAN noemt en het nu nagebeld moet worden (verse IBAN-poort), het geen eigen rekening is en het IBAN nog
  *     bij geen enkele leverancier hoort (dan beslist de leverancier, niet een kaart);
- *   - de bankhistorie het draagt (facturen-validatie.ibanHistorie: ≥ 3 betalingen over ≥ 60 dagen, steeds dezelfde naam);
+ *   - de bankhistorie het draagt (facturen-validatie.ibanHistorie: ≥ 3 betalingen over ≥ 60 dagen, steeds dezelfde naam; sinds wv2610 ook
+ *     als ≥ 90 % onder die naam staat en die alleen al ≥ 3 betalingen over ≥ 60 dagen telt: de afwijkende naam en datum staan dan op de kaart);
  *   - de naam op elke factuur met dat IBAN (of zijn leverancier) bij die banknaam past; noemt één factuur een andere naam ("Team Salaris"
  *     met de rekening van de Belastingdienst), dan geen kaart: nabellen (gemeten 26-10 op het FV2-archief: 33 van de 70 vreemde factuur-IBAN's
  *     krijgen een kaart, 6 vallen af op de naam);
@@ -2156,11 +2171,16 @@ function feitKaarten(fdb, r, nu) {
     }
     const facturen = k.facturen.map((f) => ({ id: f.id, nummer: f.nummer, leverancier_naam: f.leverancier_naam, incl: f.incl, valuta: f.valuta, entiteit: f.entiteit }));
     const kaart = { iban: k.iban, naam: leverancier ? leverancier.naam : naam, bank_naam: k.h.naam, namen: k.h.namen, aantal: k.h.aantal, eerste: k.h.eerste,
-      laatste: k.h.laatste, entiteiten: k.h.entiteiten.map((e) => entNamen.get(e) || e), facturen, leverancier_bestaat: !!leverancier, nog_onbekend: !!k.meer, zonder_naam: !!k.zonderNaam };
+      laatste: k.h.laatste, entiteiten: k.h.entiteiten.map((e) => entNamen.get(e) || e), facturen, leverancier_bestaat: !!leverancier, nog_onbekend: !!k.meer, zonder_naam: !!k.zonderNaam,
+      afwijkend: k.h.afwijkend || [], aantal_passend: k.h.aantal_passend, aantal_afwijkend: k.h.aantal_afwijkend || 0 };
     // wat David akkordeert, vast: naam, leverancier en de facturen die vrijkomen; Ja geldt alleen voor precies deze kaart (diffreview MOET 2)
-    const versie = D.sha256(Buffer.from(JSON.stringify([k.iban, kaart.naam, leverancier ? leverancier.id : null, k.h.naam, facturen.map((f) => f.id).sort()]), 'utf8')).slice(0, 16);
+    // wv2610: ook de afwijkende namen (een nieuwe uitschieter maakt een nieuwe kaart; een Ja geldt niet voor een uitschieter die David niet zag)
+    // (review MOET 2: de hele lijst, die ibanHistorie niet afkapt, plus het totaal afwijkende betalingen)
+    const af = (k.h.afwijkend || []).map((a) => [a.naam, a.aantal, a.laatste]);
+    const versie = D.sha256(Buffer.from(JSON.stringify([k.iban, kaart.naam, leverancier ? leverancier.id : null, k.h.naam, facturen.map((f) => f.id).sort()]
+      .concat(af.length ? [af, k.h.aantal_afwijkend] : [])), 'utf8')).slice(0, 16);
     uit.push({ sleutel: 'iban:' + k.iban, versie, soort: 'iban', rekening: eind4(k.iban), naam: kaart.naam, bank_naam: kaart.bank_naam, aantal: k.h.aantal, eerste: k.h.eerste,
-      laatste: k.h.laatste, dagen: k.h.dagen, namen: k.h.namen, entiteiten: k.h.entiteiten, facturen, leverancier, uitleg: B.feitUitleg(kaart) });
+      laatste: k.h.laatste, dagen: k.h.dagen, namen: k.h.namen, afwijkend: kaart.afwijkend, entiteiten: k.h.entiteiten, facturen, leverancier, uitleg: B.feitUitleg(kaart) });
   }
   return uit;
 }
@@ -2187,6 +2207,7 @@ function feitRoute(fdb, r, d, nu, o) {
     }
     const wanneer = nuIso(nu), iban = sleutel.slice('iban:'.length);
     const bewijs = { aantal: k.aantal, eerste: k.eerste, laatste: k.laatste, dagen: k.dagen, namen: k.namen, entiteiten: k.entiteiten, facturen: k.facturen.map((f) => f.id) };
+    if (k.afwijkend && k.afwijkend.length) bewijs.afwijkend = k.afwijkend;   // wv2610: de uitschieter die David zag
     if (keuze === 'afwijs') {
       const id = D.voegToe(fdb, 'feit', { soort: 'iban', sleutel, iban: iban, factuur: k.facturen[0].id, naam: k.naam, bewijs, status: 'afgewezen', wie: r.wie, wanneer });
       D.audit(fdb, { wie: r.wie, wat: 'feit_afgewezen', object_soort: 'feit', object_id: String(id), na: { rekening: k.rekening, naam: k.naam }, wanneer });
