@@ -9,7 +9,7 @@
  *     De kluis zelf (Management-API) zit in server.js en komt hier binnen als deps.kluisLees / deps.kluisZet.
  *  2. Kindproces (node tibber-data.js <opdracht>): de enige plek die Tibber aanroept. Omgeving alleen PATH/HOME/TZ/LANG en
  *     TIBBER_DIR; geheimen via stdin. Opdrachten: wissel (code → tokens), ververs (refresh → tokens), ronde (lezen en opslaan),
- *     apparaten (veldenlijst meten, alleen namen), stand (lokaal, geen netwerk).
+ *     apparaten (veldenlijst meten: namen, stand van witte-lijstcapabilities, één historieproef per apparaat), stand (lokaal, geen netwerk).
  *
  * NETWERK. Eén fetch, in roep(), en die gaat altijd eerst door verzoekToets: POST alleen op het tokenendpoint, GET alleen op
  * /v1/homes, /v1/homes/{id}/devices, /v1/homes/{id}/devices/{id} en .../history (cursor, since, until, resolution) van
@@ -430,11 +430,32 @@ async function kindRonde(invoer, dir) {
   d.close();
   return uit;
 }
-// Veldenlijst meten: alleen namen en eenheden, nooit waarden (een attribuut kan een locatie of VIN zijn).
+// Proef (wv2639): één echte historievraag per apparaat (7 dagen, uur), ook als supportedHistory leeg is: een leeg veld is geen
+// meting. → { status, items, velden (alleen namen op de witte lijst), onbekend (aantal) }; niets opgeslagen.
+async function historieProef(token, a) {
+  const pad = '/v1/homes/' + a.hid + '/devices/' + a.did + '/history';
+  const van = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 13) + ':00:00Z';
+  try {
+    const p = await haal(token, pad + '?' + new URLSearchParams({ since: van, resolution: 'hour' }).toString());
+    const items = Array.isArray(p.items) ? p.items : [], namen = new Set(), onb = new Set();
+    items.slice(0, 500).forEach(function (it) { const f = plat(it && it.data); f.velden.forEach(function (v) { namen.add(v[0]); }); f.onbekend.forEach(function (n) { onb.add(n); }); });
+    return { status: 200, items: items.length, velden: [...namen].sort().slice(0, 60), onbekend: onb.size, volgende: !!volgLink(p.next, pad) };
+  } catch (e) { return { status: e.status || null, reden: e.reden || 'fout' }; }
+}
+// Actuele stand van een capability: alleen als de naam op de witte lijst staat en de waarde een getal of kort standwoord is.
+function capStand(c) {
+  if (!c || typeof c.id !== 'string' || !veldMag(c.id)) return null;
+  const v = typeof c.value === 'string' && /^-?\d+(\.\d+)?$/.test(c.value) ? Number(c.value) : c.value;
+  if (typeof v === 'number' && Number.isFinite(v)) return tekst(c.id, 60) + '=' + v;
+  if (typeof v === 'string' && /^[A-Za-z_ -]{1,32}$/.test(v)) return tekst(c.id, 60) + '=' + v;
+  return null;
+}
+// Veldenlijst meten: namen en eenheden; waarden alleen van capabilities op de witte lijst (een attribuut kan een locatie of VIN zijn).
 async function kindApparaten(invoer, dir) {
   const token = invoer.access;
   if (typeof token !== 'string' || !TOKEN_VORM.test(token)) throw new TibberFout('token', 'geen access token');
   const lijst = await apparatenLijst(token);
+  for (const a of lijst) a.proef = await historieProef(token, a);
   const d = db(dir), nu = new Date().toISOString();
   const uit = lijst.map(function (a) {
     const z = apparaatZet(d, a, nu), det = a.det;
@@ -443,7 +464,10 @@ async function kindApparaten(invoer, dir) {
     return { volg: z.volg, label: r.label, merk: r.merk, model: r.model, resoluties: z.res, max_dagen: z.max,
       capabilities: (Array.isArray(det.capabilities) ? det.capabilities : []).slice(0, 60).map(function (c) { return tekst(c && c.id, 60) + (c && typeof c.unit === 'string' ? ' [' + c.unit.replace(/[^\p{L}\p{N} %°\/._-]/gu, '').slice(0, 12) + ']' : ''); }),
       attributes: (Array.isArray(det.attributes) ? det.attributes : []).slice(0, 60).map(function (x) { return tekst(x && x.id, 60); }),
-      historie_opgeslagen: opgeslagen.map(function (o) { return o.veld + ' (' + o.n + ')'; }), historie_onbekend: JSON.parse(r.onbekend || '[]') };
+      historie_opgeslagen: opgeslagen.map(function (o) { return o.veld + ' (' + o.n + ')'; }), historie_onbekend: JSON.parse(r.onbekend || '[]'),
+      stand: (Array.isArray(det.capabilities) ? det.capabilities : []).slice(0, 60).map(capStand).filter(Boolean),
+      laatst_gezien: det.status && typeof det.status.lastSeen === 'string' && !isNaN(Date.parse(det.status.lastSeen)) ? new Date(Date.parse(det.status.lastSeen)).toISOString() : null,
+      historie_proef: a.proef };
   });
   d.close();
   return { ok: true, apparaten: uit };

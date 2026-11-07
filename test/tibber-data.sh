@@ -58,8 +58,10 @@ const srv = http.createServer(function (req, res) {
     if (u.pathname === '/v1/homes/home-1/devices/dev-auto-1') return stuur(200, { id: 'dev-auto-1', externalId: VIN, info: { name: NAAM, brand: 'Volkswagen', model: 'ID.3' },
       supportedHistory: { resolutions: ['hour', 'day'], maxRetentionDays: 3 }, status: { lastSeen: '2026-11-07T10:00:00+01:00' },
       attributes: [{ $type: 'string', id: 'vin', value: VIN }, { $type: 'string', id: 'location', value: '52.1,5.3' }],
-      capabilities: [{ $type: 'float', id: 'storage.stateOfCharge', value: 61, unit: '%' }, { $type: 'float', id: 'charging.power', value: 0, unit: 'kW' }] });
+      capabilities: [{ $type: 'float', id: 'storage.stateOfCharge', value: 61, unit: '%' }, { $type: 'float', id: 'charging.power', value: 0, unit: 'kW' },
+        { $type: 'enum', id: 'charging.status', value: 'idle', availableValues: ['idle', 'charging'] }, { $type: 'float', id: 'position.latitude', value: LAT, unit: 'deg' }, { $type: 'enum', id: 'charging.location', value: 'Teststraat 1' }] });
     if (u.pathname === '/v1/homes/home-1/devices/dev-auto-1/history') {
+      if (M.histNiet) return stuur(400, { title: 'no history' });
       const cur = u.searchParams.get('cursor');
       const pagina = cur ? Number(cur.replace('p', '')) : 1;
       const items = pagina <= 2 ? [0, 1, 2].map((i) => ({ time: new Date(Date.UTC(2026, 10, 5, (pagina - 1) * 3 + i)).toISOString(),
@@ -188,6 +190,16 @@ srv.listen(0, '127.0.0.1', async function () {
     r = await TM.ronde(kluisDeps(DIR), 'apparaten');
     const aj = JSON.stringify(r);
     toets('apparaten: capability- en attribuutnamen, geen waarden', r.ok === true && aj.indexOf('storage.stateOfCharge [%]') >= 0 && aj.indexOf('vin') >= 0 && aj.indexOf(VIN) < 0 && aj.indexOf('52.1,5.3') < 0, r);
+    const ap = r.apparaten && r.apparaten[0] || {};
+    toets('apparaten: stand alleen van witte-lijstcapabilities (SoC, laadstatus), geen positie of plaatsnaam', JSON.stringify(ap.stand) === JSON.stringify(['storage.stateOfCharge=61', 'charging.power=0', 'charging.status=idle']) &&
+      aj.indexOf(String(LAT)) < 0 && aj.indexOf('Teststraat') < 0 && aj.indexOf(NAAM) < 0, ap.stand);
+    toets('apparaten: historieproef doet één echte vraag (200, items, alleen witte-lijstnamen)', ap.historie_proef && ap.historie_proef.status === 200 && ap.historie_proef.items === 3 &&
+      ap.historie_proef.velden.indexOf('energyConsumed') >= 0 && !ap.historie_proef.velden.some((x) => /location|vin|name|lat|odometer/i.test(x)) && ap.laatst_gezien === '2026-11-07T09:00:00.000Z', ap);
+    M.histNiet = true;
+    r = await TM.ronde(kluisDeps(DIR), 'apparaten');
+    M.histNiet = false;
+    const ap2 = r.apparaten && r.apparaten[0] || {};
+    toets('apparaten: historie geweigerd (400) → proef meldt de status, de ronde blijft ok', r.ok === true && ap2.historie_proef && ap2.historie_proef.status === 400 && ap2.historie_proef.items === undefined, ap2.historie_proef);
 
     // 6. invalid_grant → één melding, geen herhaling
     M.log = [];
