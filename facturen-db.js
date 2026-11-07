@@ -1555,35 +1555,45 @@ function directBesluit(fdb, op, o) {
   const e = fdb.db.prepare('SELECT boekhoud_doel FROM entiteit WHERE sleutel = ?').get(f.entiteit);
   if (!e || !e.boekhoud_doel || e.boekhoud_doel !== op.doeladres) return nee('doeladres wijkt af van het boekhoudadres');
   if (!f.bevestigd_door || !f.bevestigd_op) return nee('niet bevestigd door een mens');
-  if (f.iban_nieuw || f.nagebeld_op || String(f.ibans_onbekend || '[]') !== '[]') return nee('nieuw of nagebeld IBAN');
-  if (f.dubbel_van || f.status === 'dubbel') return nee('mogelijk dubbel');
-  if (f.patientkenmerk || f.alleen_eigenaar) return nee('kenmerk van patiëntgegevens of alleen voor de eigenaar');
+  const tw = factuurTwijfel(fdb, f, op.id);
+  if (tw) return nee(tw);
+  return { direct: true, reden: 'alle eisen kloppen' };
+}
+/*
+ * wv2661: de eisen van directBesluit die over de factuur zelf gaan (niet over de opdracht of de keuze van de leverancier), los zodat Bevestig N
+ * zonder twijfel (facturen.js bevestigGroep) precies dezelfde poort toetst. → null (geen twijfel) of de reden in gewone taal. f = de rij uit
+ * factuur (SELECT *). opId = de opdracht waarvoor directBesluit rekent; zonder (de groep, vóór Bevestigen) telt elke eerdere opdracht als twijfel.
+ */
+function factuurTwijfel(fdb, f, opId) {
+  if (f.iban_nieuw || f.nagebeld_op || String(f.ibans_onbekend || '[]') !== '[]') return 'nieuw of nagebeld IBAN';
+  if (f.dubbel_van || f.status === 'dubbel') return 'mogelijk dubbel';
+  if (f.patientkenmerk || f.alleen_eigenaar) return 'kenmerk van patiëntgegevens of alleen voor de eigenaar';
   const open = fdb.db.prepare("SELECT soort FROM signaal WHERE status = 'open' AND EXISTS (SELECT 1 FROM json_each(signaal.facturen) j WHERE j.value = ?) LIMIT 1").get(f.id);
-  if (open) return nee('open signaal op de factuur (' + open.soort + ')');
+  if (open) return 'open signaal op de factuur (' + open.soort + ')';
   let controles = [];
-  try { controles = JSON.parse(f.controles || '[]'); } catch (x) { return nee('controles onleesbaar'); }
-  if (!Array.isArray(controles) || controles.some((c) => !c || typeof c !== 'object')) return nee('controles onleesbaar');   // review wv2480 MOET 1
+  try { controles = JSON.parse(f.controles || '[]'); } catch (x) { return 'controles onleesbaar'; }
+  if (!Array.isArray(controles) || controles.some((c) => !c || typeof c !== 'object')) return 'controles onleesbaar';   // review wv2480 MOET 1
   const twijfel = controles.find((c) => c && c.ok === false && (c.ernst === 'fout' || DIRECT_TWIJFEL.includes(c.naam)));
-  if (twijfel) return nee('controle ' + String(twijfel.naam).slice(0, 30) + ' twijfelt');
+  if (twijfel) return 'controle ' + String(twijfel.naam).slice(0, 30) + ' twijfelt';
   const docs = fdb.db.prepare('SELECT soort, tekstlaag, patientkenmerk FROM document WHERE id IN (?, ?)').all(f.document, f.ubl_document || f.document);
-  if (!docs.length || docs.some((d) => d.patientkenmerk)) return nee('kenmerk van patiëntgegevens op een stuk');
-  if (docs.some((d) => !(d.soort === 'ubl' || (d.soort === 'pdf' && d.tekstlaag === 1)))) return nee('stuk niet volledig leesbaar (scan of ander soort)');
+  if (!docs.length || docs.some((d) => d.patientkenmerk)) return 'kenmerk van patiëntgegevens op een stuk';
+  if (docs.some((d) => !(d.soort === 'ubl' || (d.soort === 'pdf' && d.tekstlaag === 1)))) return 'stuk niet volledig leesbaar (scan of ander soort)';
   // patiëntregel: positief bewijs (de regel legde 'geen kenmerk' vast), niet de afwezigheid van een kenmerk
   const pk = fdb.db.prepare("SELECT waarde FROM besluit WHERE factuur = ? AND stap = 'patientkenmerk' AND veld = 'patientkenmerk'").all(f.id).map((b) => String(b.waarde));
-  if (!pk.length || pk.some((w) => w !== '0')) return nee('geen vastgelegde patiëntcontrole met uitkomst geen kenmerk');
+  if (!pk.length || pk.some((w) => w !== '0')) return 'geen vastgelegde patiëntcontrole met uitkomst geen kenmerk';
   if (fdb.db.prepare("SELECT 1 FROM besluit WHERE factuur = ? AND bron = 'model' AND toelichting LIKE '%niet in de lokale tekst%' LIMIT 1").get(f.id) ||
-    /Alleen door Claude gelezen/.test(String(f.redenen || ''))) return nee('een veld is alleen door Claude gelezen');
+    /Alleen door Claude gelezen/.test(String(f.redenen || ''))) return 'een veld is alleen door Claude gelezen';
   // OVIS Intake: alleen met een vastgelegd 'niet mogelijk medisch' (grondwet 3, label mogelijk medisch)
   const bron = f.bericht ? fdb.db.prepare('SELECT b.soort FROM bericht be JOIN bron b ON b.id = be.bron WHERE be.id = ?').get(f.bericht) : null;
   if (bron && bron.soort === 'intake') {
     const mm = fdb.db.prepare("SELECT waarde FROM besluit WHERE factuur = ? AND stap = 'herkomst' AND veld = 'mogelijk_medisch'").all(f.id).map((b) => String(b.waarde));
-    if (!mm.length || mm.some((w) => w !== '0')) return nee('Intake: label mogelijk medisch of niet vastgelegd');
+    if (!mm.length || mm.some((w) => w !== '0')) return 'Intake: label mogelijk medisch of niet vastgelegd';
   }
   // eerder een verzendpoging voor deze factuur (ook een andere opdracht): nooit opnieuw direct (onzeker = nooit opnieuw versturen)
-  if (fdb.db.prepare('SELECT 1 FROM opdracht WHERE factuur = ? AND verzend_reservering IS NOT NULL LIMIT 1').get(f.id)) return nee('er was al een verzendpoging voor deze factuur');
+  if (fdb.db.prepare('SELECT 1 FROM opdracht WHERE factuur = ? AND verzend_reservering IS NOT NULL LIMIT 1').get(f.id)) return 'er was al een verzendpoging voor deze factuur';
   // review wv2480 MOET 2: een eerdere opdracht voor deze factuur (teruggedraaid, geweigerd, opnieuw bevestigd) = niet "zonder twijfel"
-  if (fdb.db.prepare('SELECT 1 FROM opdracht WHERE factuur = ? AND id <> ? LIMIT 1').get(f.id, op.id)) return nee('eerder teruggedraaid of opnieuw klaargezet');
-  return { direct: true, reden: 'alle eisen kloppen' };
+  if (fdb.db.prepare('SELECT 1 FROM opdracht WHERE factuur = ? AND id <> ? LIMIT 1').get(f.id, opId || '')) return 'eerder teruggedraaid of opnieuw klaargezet';
+  return null;
 }
 // Directe reserveringen (modus versturen) op de Amsterdamse dag van `nu`.
 function directVandaag(fdb, nu) {
@@ -1849,7 +1859,7 @@ function health(fdb) {
 module.exports = {
   DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M17_VERVANG, _M17: M17, M18_VERVANG, _M18: M18, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
-  terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, reserveerKies, directBesluit, directVandaag, DIRECT_PER_DAG, terugNaarConcept, verzendNotitie, opdrachtResultaat, verzondenGezien,
+  terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, reserveerKies, directBesluit, factuurTwijfel, DIRECT_TWIJFEL, directVandaag, DIRECT_PER_DAG, terugNaarConcept, verzendNotitie, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,
   backup, herstel, tellingen, health,
 };

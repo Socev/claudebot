@@ -349,6 +349,7 @@ jobs:
           command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils) || echo "::warning::pdftotext niet te installeren"   # de koerier roept /usr/bin/pdftotext echt aan
           t test/facturen-koerier.sh   # wv855: koerier — wachtrij, consistentiecontrole, idempotentie (antwoord verloren → één concept), postvak, uploads
           t test/facturen-direct.sh   # wv2480: per leverancier concept of direct — elke eis + terugval, dagplafond 15, versie, onzeker = nooit opnieuw
+          t test/facturen-groep.sh   # wv2661: Bevestig N zonder twijfel en Koppel N zekere — poort per factuur/voorstel op de pod, één vingerafdruk, hooguit 25
           t test/facturen-ingang.sh   # wv856: smalle ingang /fac — poortgeheim, servicetoken- en gebruikers-JWT, nooit eigenaar, praktijkmanager-scope, uploads, audit
           exit $rood
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).

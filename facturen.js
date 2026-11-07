@@ -62,7 +62,7 @@ const ROUTES = {
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'feit', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering',
     'betaaldatum', 'sepa-batch', 'sepa-bestand', 'sepa-specificatie', 'regel', 'regel-weg', 'afzender-voorstel', 'maand-specificatie', 'bank-keuze',
-    'leverancier/verzendwijze'],
+    'leverancier/verzendwijze', 'bevestig-groep', 'koppel-zeker'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (sinds wv2547 ook vanaf een vaste plek, onder het invoerslot) én die hier een verse vingerafdruk vragen.
 const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus', 'POST /app/facturen/leverancier/verzendwijze'];
@@ -328,7 +328,7 @@ function gezondheid(fdb, r, nu) {
     kleur: kUur == null || kUur > 3 || (kr && !kr.ok) ? 'rood' : 'groen' };
   return { bronnen, rekeningen, koerier };
 }
-function lijst(fdb, r, stap) {
+function lijst(fdb, r, stap, nu) {
   const st = STAPPEN[stap];
   if (!st) weiger(404, 'onbekende stap');
   if (stap === 'prive') eisEigenaar(r);
@@ -337,7 +337,8 @@ function lijst(fdb, r, stap) {
   const rijen = fdb.db.prepare('SELECT f.*, l.naam AS lev_naam FROM factuur f LEFT JOIN leverancier l ON l.id = f.leverancier WHERE f.status IN (' +
     st.map(() => '?').join(',') + ') AND ' + ff + ' ORDER BY ' + volgorde + ' LIMIT ' + LIJST_MAX).all(...st, ...fp);
   const op = fdb.db.prepare('SELECT id, status, verstuur_na, poging, fout, modus FROM opdracht WHERE factuur = ? ORDER BY aangemaakt_op DESC LIMIT 1');
-  return { stap, facturen: rijen.map((f) => Object.assign(factuurKort(f, f.lev_naam), stap === 'beoordelen' ? {} : { opdracht: op.get(f.id) || null })) };
+  const ctx = stap === 'beoordelen' && isEig(r) ? kernCtx(fdb, Number.isFinite(nu) ? nu : Date.now()) : null;   // wv2661: mag hij mee met Bevestig N zonder twijfel?
+  return { stap, facturen: rijen.map((f) => Object.assign(factuurKort(f, f.lev_naam), stap === 'beoordelen' ? (ctx ? { zeker: zekerVeld(fdb, r, f, ctx) } : {}) : { opdracht: op.get(f.id) || null })) };
 }
 // wv2610: de reden van de IBAN-poort staat bij de intake opgeslagen ("Nieuwe leverancier met een nog niet nagebeld IBAN"); toon de verse uitleg
 // (bv. "Al 93× betaald aan …"). Alleen weergave: de db blijft zoals hij is, en zonder nabellen valt de oude regel weg (zoals ibanHerbereken).
@@ -495,7 +496,10 @@ function bank(fdb, r, nu) {
         ? V.bedragPatroon(zelfde.all(t.entiteit, t.tegenpartij_iban, K.plusDagen(vandaag, -365), ...tp0), vandaag, -t.bedrag_centen, { zonder: t.id }) : null;
       const uitleg = B.voorstelUitleg({ methode: v.methode, zekerheid: v.zekerheid, tegenpartij_geborgd: !!det.tegenpartij_geborgd, verschil_centen: det.verschil_centen,
         creditnota: det.creditnota, reden: det.reden }, t, fs.map((f) => Object.assign(kortMetNaam(f), { iban: f.iban })), alt.map(kortMetNaam), patroon);
-      return { id: v.id, methode: v.methode, zekerheid: v.zekerheid, transactie: txKort(t), facturen: fs.map(kortMetNaam), alternatieven: alt.map(kortMetNaam), uitleg, patroon };
+      // wv2661: mag hij mee met "Koppel N zekere" (alleen de eigenaar; de groepsroute toetst het opnieuw)
+      let zeker;
+      if (isEig(r)) { try { const z = voorstelZeker(fdb, v); zeker = { ok: !z, reden: z || null }; } catch (e) { zeker = { ok: false, reden: 'niet te toetsen' }; } }
+      return { id: v.id, methode: v.methode, zekerheid: v.zekerheid, transactie: txKort(t), facturen: fs.map(kortMetNaam), alternatieven: alt.map(kortMetNaam), uitleg, patroon, zeker };
     });
   // balk per week (laatste 8 weken, afschrijvingen): bij een factuur / bekende uitzondering / te bekijken
   const [tf, tp] = eigenaarFilter(r, 't');
@@ -801,13 +805,20 @@ function instellingen(fdb, r) {
  * met de verse IBAN-poort) — Privé → privé-archief zonder opdracht. versie (optioneel) = de versie die de App toonde: is de factuur intussen
  * veranderd, dan 409 en niets gebeurt.
  */
-function bevestig(fdb, r, d, nu) {
+function bevestig(fdb, r, d, nu, o) {
   const id = vraagId(d, 'id');
   if (r.mag_bevestigen === false) weiger(403, 'bevestigen staat voor jou uit; vraag het David');   // wv856: gebruiker.mag_bevestigen
   return D.transactie(fdb, function () {
     let f = factuurOf404(fdb, r, id);
     if (d.versie !== undefined && d.versie !== f.versie) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw', { versie: f.versie });
     if (f.status !== 'te_beoordelen') weiger(409, 'status is ' + f.status);
+    // wv2661: in de groep "Bevestig N zonder twijfel" de poort opnieuw, in dezelfde transactie, op de rij in de database (niet op de app);
+    // entiteit en betaalwijze zijn dan die van de factuur zelf (de groep kiest niets anders)
+    if (o && o.zeker) {
+      if (d.entiteit !== undefined || d.betaalwijze !== undefined) weiger(400, 'de groep kiest geen andere entiteit of betaalwijze');
+      const z = zekerReden(fdb, f, kernCtx(fdb, nu));
+      if (z) weiger(409, 'niet zonder twijfel: ' + z, { code: 'twijfel' });
+    }
     const entiteit = d.entiteit === undefined ? f.entiteit : d.entiteit;
     const betaalwijze = d.betaalwijze === undefined ? f.betaalwijze : d.betaalwijze;
     const e = entiteit ? fdb.db.prepare('SELECT * FROM entiteit WHERE sleutel = ?').get(String(entiteit)) : null;
@@ -871,6 +882,81 @@ function bevestig(fdb, r, d, nu) {
       (zussen ? ' Ook ' + zussen + (zussen === 1 ? ' andere open factuur' : ' andere open facturen') + ' van ' + koppel.naam + ' gekoppeld.' : '');
     return { status: ov.naar, betaalspoor: spoor, opdracht, melding: [leer.melding, kmelding].filter(Boolean).join(' ') || null, leverancier: koppel ? { id: koppel.id, naam: koppel.naam, nieuw: koppel.nieuw } : undefined };
   });
+}
+/*
+ * wv2661 (David 7-11-2026 16:04, Ja op "Facturen op de pc — werktafel met tabel en groepsknoppen?"): mag deze factuur mee met "Bevestig N
+ * zonder twijfel"? Dezelfde poort als direct verzenden (D.factuurTwijfel: geen nieuw of nagebeld IBAN, niet dubbel, geen patiëntkenmerk en niets
+ * alleen-eigenaar, geen open signaal, geen twijfelcontrole, elk stuk volledig leesbaar, vastgelegd 'geen kenmerk' door de patiëntregel, geen veld
+ * dat alleen Claude las, Intake alleen met 'niet mogelijk medisch', nooit eerder klaargezet), plus wat de groep zelf eist: een gekoppelde
+ * leverancier, entiteit (geen Privé, actief, met boekhoudadres) en betaalwijze bekend, euro, geen creditnota, een totaal, en de verse IBAN-poort,
+ * controles (ook de drempel: boven € 2.500 alleen bij een gebruikelijk bedrag) en blokkades zoals Bevestigen ze zo meteen rekent. f = factuurVoorKern. → null (zeker) of de reden; altijd op de rij in de database.
+ */
+function zekerReden(fdb, f, ctx) {
+  const rij = fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(f.id);
+  if (!rij) return 'factuur ontbreekt';
+  if (rij.status !== 'te_beoordelen') return 'status is ' + rij.status;
+  if (!rij.leverancier || !f.leverancier_id) return 'leverancier nog niet bekend';
+  if (!rij.entiteit) return 'geen entiteit';
+  if (rij.entiteit === 'prive') return 'Privé beoordeel je los';
+  const e = fdb.db.prepare('SELECT actief, boekhoud_doel FROM entiteit WHERE sleutel = ?').get(rij.entiteit);
+  if (!e || e.actief !== 1) return 'entiteit staat niet actief';
+  if (!e.boekhoud_doel) return 'entiteit heeft geen boekhoudadres';
+  if (!['zelf', 'incasso', 'betaald'].includes(rij.betaalwijze)) return 'betaalwijze onbekend';
+  if (rij.valuta !== 'EUR') return 'andere valuta dan euro';
+  if (K.isCreditnota(rij)) return 'creditnota beoordeel je los';
+  if (!Number.isSafeInteger(rij.incl) || rij.incl <= 0) return 'geen totaalbedrag';
+  const tw = D.factuurTwijfel(fdb, rij, null);
+  if (tw) return tw;
+  const poort = poortVoor(fdb, f, ctx);
+  const va = K.valideer(f, ctx, { leverancier: poort.leverancier });
+  const ip = K.ibanPoort(f, poort.leverancier, ctx);
+  if (ip.iban_nieuw || (ip.onbekend || []).length) return 'nieuw IBAN: eerst nabellen';
+  const twijfel = (va.controles || []).find((c) => !c || typeof c !== 'object' || (c.ok === false && (c.ernst === 'fout' || D.DIRECT_TWIJFEL.includes(c.naam))));
+  if (twijfel) return 'controle ' + String((twijfel && twijfel.naam) || '?').slice(0, 30) + ' twijfelt';
+  const mb = K.magBevestigen(Object.assign({}, f, { controles: va.controles, intern: !!va.intern, iban_nieuw: ip.iban_nieuw, ibans_onbekend: ip.onbekend }), poort);
+  if (!mb.ok) return mb.redenen[0] || 'bevestigen kan niet';
+  return null;
+}
+function zekerVeld(fdb, r, f, ctx) {
+  if (!isEig(r)) return undefined;
+  try { const kern = D.factuurVoorKern(fdb, f.id); const z = kern ? zekerReden(fdb, kern, ctx) : 'factuur ontbreekt'; return { ok: !z, reden: z || null }; }
+  catch (e) { return { ok: false, reden: 'niet te toetsen' }; }
+}
+/*
+ * wv2661: "Bevestig N zonder twijfel" — hooguit 25 facturen, één verse vingerafdruk voor de groep (alleen Davids eigen app). Per factuur de
+ * gewone bevestig-route (eigen transactie: wachttijd, opdracht, betaallijst, terugdraaien per factuur blijft) met de poort opnieuw op de pod;
+ * wat niet zeker is gaat niet mee, ook niet als de app hem meestuurt. versie = wat de app toonde (intussen gewijzigd = niet mee).
+ */
+const GROEP_MAX = 25;
+function groepLijst(d, sleutel, leesEen) {
+  const lijst = d && Array.isArray(d[sleutel]) ? d[sleutel] : null;
+  if (!lijst || !lijst.length) weiger(400, sleutel + ' ontbreken');
+  if (lijst.length > GROEP_MAX) weiger(400, 'hooguit ' + GROEP_MAX + ' per keer');
+  const uit = lijst.map(leesEen);
+  if (new Set(uit.map((x) => String(x.id))).size !== uit.length) weiger(400, 'er staat er een dubbel in');
+  return uit;
+}
+function bevestigGroep(fdb, r, d, nu, o) {
+  eisEigenaar(r);
+  if (r.ingang !== 'app') weiger(403, 'een groep bevestigt David in zijn eigen app');
+  const rijen = groepLijst(d, 'facturen', (x) => {
+    const id = vraagId(x, 'id');
+    if (!Number.isSafeInteger(x.versie)) weiger(400, 'versie ontbreekt');
+    return { id, versie: x.versie };
+  });
+  if (!o.versOk()) weiger(403, 'bevestig met je vingerafdruk', { vers_nodig: true });
+  o.versVerbruik();
+  const bevestigd = [], geweigerd = [];
+  for (const x of rijen) {
+    try {
+      const u = bevestig(fdb, r, { id: x.id, versie: x.versie }, nu, { zeker: true });
+      bevestigd.push({ id: x.id, status: u.status, betaalspoor: u.betaalspoor, verstuur_na: u.opdracht ? u.opdracht.verstuur_na : null });
+    } catch (e) {
+      geweigerd.push({ id: x.id, reden: e instanceof RouteFout ? kort(e.fout, 200) : 'onverwachte fout' });
+    }
+  }
+  D.audit(fdb, { wie: r.wie, wat: 'bevestigen_groep', object_soort: 'factuur', object_id: 'groep', na: { bevestigd: bevestigd.map((x) => x.id), geweigerd: geweigerd.map((x) => x.id) }, wanneer: nuIso(nu) });
+  return { bevestigd, geweigerd };
 }
 /*
  * wv2590 (12 van de 35 bevestigde facturen hadden geen leverancier, gemeten 6-11-2026): bij Bevestigen zonder gekoppelde leverancier de
@@ -2082,18 +2168,85 @@ function voorstelRoute(fdb, r, d, nu) {
   if (!Number.isSafeInteger(id) || id <= 0) weiger(400, 'id ontbreekt of is ongeldig');
   const keuze = d.keuze;
   if (!['bevestig', 'afwijs'].includes(keuze)) weiger(400, 'keuze is bevestig of afwijs');
+  return voorstelAfhandelen(fdb, r, id, keuze, nu, null);
+}
+function voorstelAfhandelen(fdb, r, id, keuze, nu, o) {
   return D.transactie(fdb, function () {
     const v = fdb.db.prepare('SELECT v.*, t.entiteit FROM voorstel v JOIN bank_transactie t ON t.id = v.transactie WHERE v.id = ?').get(id);
     if (!v || (!isEig(r) && (v.alleen_eigenaar || !magEntiteit(r, v.entiteit)))) weiger(404, 'voorstel niet gevonden');
     if (v.status === 'vervallen') weiger(409, 'dit voorstel verviel: ' + (B.VERVAL_TEKST[(json(v.details, {}) || {}).vervallen_reden] || B.VERVAL_TEKST.geen_match) + '; ververs de lijst');
     if (v.status !== 'open') weiger(409, 'het voorstel is al afgehandeld');
+    // wv2661: in de groep "Koppel N zekere" de zekerheid opnieuw, in dezelfde transactie, op de rijen in de database
+    if (o && o.zeker) { const z = voorstelZeker(fdb, v); if (z) weiger(409, 'niet zeker: ' + z, { code: 'niet_zeker' }); }
     const wanneer = nuIso(nu);
     const uit = { koppelingen: [] };
     if (keuze === 'bevestig') for (const fid of json(v.facturen, []) || []) uit.koppelingen.push(koppelIntern(fdb, r, v.transactie, fid, true, nu));
     fdb.db.prepare("UPDATE voorstel SET status = ?, afgehandeld_door = ?, afgehandeld_op = ? WHERE id = ? AND status = 'open'").run(keuze === 'bevestig' ? 'bevestigd' : 'afgewezen', r.wie, wanneer, v.id);
-    D.audit(fdb, { wie: r.wie, wat: 'voorstel_' + keuze, object_soort: 'voorstel', object_id: String(v.id), entiteit: v.entiteit, wanneer });
+    D.audit(fdb, { wie: r.wie, wat: 'voorstel_' + keuze, object_soort: 'voorstel', object_id: String(v.id), entiteit: v.entiteit, wanneer, na: o && o.zeker ? { groep: true } : undefined });
     return uit;
   });
+}
+/*
+ * wv2661: is dit koppelvoorstel zeker genoeg voor "Koppel N zekere"? Alleen een afschrijving in euro naar een tegenrekening, waarbij de facturen
+ * (één leverancier, dezelfde entiteit, euro, geen creditnota) samen precies het bedrag zijn, geen andere open factuur met hetzelfde bedrag
+ * (alternatieven), geen reden in het voorstel (bv. bedrag wijkt af), geen batch zonder kenmerk (sepa_bedrag), geen open signaal op de post of een
+ * factuur, en de tegenrekening hoorde al eerder bij die leverancier: in leverancier_iban (een mens kende hem: nagebeld of de feitkaart van wv1323)
+ * of via een eerdere afschrijving met dezelfde rekening die de bankcontrole of David aan een factuur van die leverancier koppelde (geen
+ * terugboeking, geen handmatige koppeling van een praktijkmanager). Alleen voor een factuur die al beoordeeld is en nog geen betaling heeft, op
+ * een afschrijving die nog nergens aan hangt. De rest blijft de losse Ja met de akkoordzin (wv1317). v = voorstelrij. → null (zeker) of de reden.
+ */
+function voorstelZeker(fdb, v) {
+  if (v.status !== 'open') return 'het voorstel is al afgehandeld';
+  if (v.methode === 'sepa_bedrag') return 'de bank noemt het batchkenmerk niet';
+  const t = fdb.db.prepare('SELECT * FROM bank_transactie WHERE id = ? AND verwijderd_op IS NULL').get(v.transactie);
+  if (!t) return 'bankregel ontbreekt';
+  if (!(Number.isSafeInteger(t.bedrag_centen) && t.bedrag_centen < 0)) return 'geen afschrijving';
+  if (t.valuta !== 'EUR') return 'andere valuta dan euro';
+  const tegen = K.ibanNorm(t.tegenpartij_iban);
+  if (!tegen) return 'geen tegenrekening';
+  const det = json(v.details, {}) || {};
+  if (Array.isArray(det.alternatieven) && det.alternatieven.length) return 'er staat nog een factuur met hetzelfde bedrag open';
+  if (det.reden) return String(det.reden).slice(0, 60);
+  const ids = json(v.facturen, []) || [];
+  if (!Array.isArray(ids) || !ids.length) return 'geen factuur';
+  const fs = ids.map((fid) => fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(String(fid)));
+  if (fs.some((f) => !f)) return 'factuur ontbreekt';
+  if (fs.some((f) => f.entiteit !== t.entiteit)) return 'andere entiteit';
+  if (fs.some((f) => f.valuta !== 'EUR' || !Number.isSafeInteger(f.incl))) return 'factuurbedrag niet in euro';
+  if (fs.some((f) => K.isCreditnota(f) || f.incl <= 0)) return 'creditnota';
+  // review wv2661 ZOU 2: alleen een factuur die David al beoordeelde, en niets dat al gekoppeld is (de bankcontrole van vannacht kan achterlopen)
+  if (fs.some((f) => ['te_beoordelen', 'geen_factuur', 'dubbel'].includes(f.status))) return 'factuur nog niet beoordeeld';
+  if (fdb.db.prepare('SELECT 1 FROM koppeling WHERE transactie = ? LIMIT 1').get(t.id)) return 'afschrijving is al gekoppeld';
+  if (fdb.db.prepare('SELECT 1 FROM koppeling WHERE factuur IN (' + ids.map(() => '?').join(',') + ') LIMIT 1').get(...ids.map(String))) return 'factuur heeft al een betaling';
+  const lev = fs[0].leverancier;
+  if (!lev || fs.some((f) => f.leverancier !== lev)) return 'leverancier niet eenduidig';
+  if (fs.reduce((n, f) => n + f.incl, 0) !== -t.bedrag_centen) return 'bedrag niet precies gelijk';
+  const bekend = fdb.db.prepare('SELECT iban FROM leverancier_iban WHERE leverancier = ?').all(lev).some((x) => K.ibanNorm(x.iban) === tegen) ||
+    fdb.db.prepare('SELECT DISTINCT t2.tegenpartij_iban AS i FROM koppeling k JOIN bank_transactie t2 ON t2.id = k.transactie JOIN factuur f2 ON f2.id = k.factuur ' +
+      'WHERE f2.leverancier = ? AND t2.id <> ? AND t2.verwijderd_op IS NULL AND t2.tegenpartij_iban IS NOT NULL AND t2.bedrag_centen < 0 ' +
+      // review wv2661 ZOU 1: alleen een geborgde koppeling (de bankcontrole zelf, of David), geen handmatige van een praktijkmanager of een terugboeking
+      "AND coalesce(k.methode, '') <> 'sepa_terug' AND (k.bron = 'auto' OR k.wie LIKE 'david%')").all(lev, t.id).some((x) => K.ibanNorm(x.i) === tegen);
+  if (!bekend) return 'tegenrekening hoorde nog niet eerder bij deze leverancier';
+  const sig = fdb.db.prepare("SELECT 1 FROM signaal s WHERE s.status = 'open' AND (EXISTS (SELECT 1 FROM json_each(s.transacties) j WHERE j.value = ?) OR " +
+    'EXISTS (SELECT 1 FROM json_each(s.facturen) j WHERE j.value IN (' + ids.map(() => '?').join(',') + '))) LIMIT 1').get(t.id, ...ids.map(String));
+  if (sig) return 'open signaal';
+  return null;
+}
+// wv2661: "Koppel N zekere" — hooguit 25 voorstellen, één verse vingerafdruk (alleen Davids eigen app); per voorstel de gewone Ja met de
+// zekerheid opnieuw op de pod. Wat niet zeker is gaat niet mee (ook niet als de app het meestuurt) en blijft voor de losse Ja.
+function koppelZeker(fdb, r, d, nu, o) {
+  eisEigenaar(r);
+  if (r.ingang !== 'app') weiger(403, 'koppelen in een groep doet David in zijn eigen app');
+  const ids = groepLijst(d, 'voorstellen', (x) => { const id = Number(x); if (!Number.isSafeInteger(id) || id <= 0) weiger(400, 'voorstel ongeldig'); return { id }; });
+  if (!o.versOk()) weiger(403, 'bevestig met je vingerafdruk', { vers_nodig: true });
+  o.versVerbruik();
+  const gekoppeld = [], geweigerd = [];
+  for (const x of ids) {
+    try { const u = voorstelAfhandelen(fdb, r, x.id, 'bevestig', nu, { zeker: true }); gekoppeld.push({ id: x.id, koppelingen: u.koppelingen.length }); }
+    catch (e) { geweigerd.push({ id: x.id, reden: e instanceof RouteFout ? kort(e.fout, 200) : 'onverwachte fout' }); }
+  }
+  D.audit(fdb, { wie: r.wie, wat: 'koppelen_groep', object_soort: 'voorstel', object_id: 'groep', na: { gekoppeld: gekoppeld.map((x) => x.id), geweigerd: geweigerd.map((x) => x.id) }, wanneer: nuIso(nu) });
+  return { gekoppeld, geweigerd };
 }
 
 // ───────────────────────────── feitkaarten (wv1323) ─────────────────────────────
@@ -3681,7 +3834,7 @@ function maak(opties) {
       if (v.methode === 'GET') {
         if (rest === '') return ok(overzicht(fdb, r, nu));
         let m;
-        if ((m = /^lijst\/([a-z]{3,12})$/.exec(rest))) return ok(lijst(fdb, r, m[1]));
+        if ((m = /^lijst\/([a-z]{3,12})$/.exec(rest))) return ok(lijst(fdb, r, m[1], nu));
         if ((m = /^factuur\/([0-9a-f]{16})$/.exec(rest))) return ok(detail(fdb, r, m[1], nu));
         if ((m = /^document\/([0-9a-f]{16})$/.exec(rest))) {
           if (v.primair === false) weiger(409, 'Facturen draait alleen op de primaire kant');   // inzage schrijft een auditrij
@@ -3708,6 +3861,8 @@ function maak(opties) {
         sepaDoor: v.sepaDoor };   // wv2465: 'auto' | 'concept' | anders niets (server.js FACTUREN_SEPA_DOOR)
       switch (rest) {
         case 'bevestig': return ok(bevestig(fdb, r, d, nu), 'bevestig ' + kort(d.id, 16));
+        case 'bevestig-groep': { const j = bevestigGroep(fdb, r, d, nu, vo); return ok(j, 'bevestig-groep ' + j.bevestigd.length + '/' + (j.bevestigd.length + j.geweigerd.length)); }   // wv2661
+        case 'koppel-zeker': { const j = koppelZeker(fdb, r, d, nu, vo); return ok(j, 'koppel-zeker ' + j.gekoppeld.length + '/' + (j.gekoppeld.length + j.geweigerd.length)); }   // wv2661
         case 'terugdraaien': return ok(terugdraaien(fdb, r, d, nu), 'terugdraaien ' + kort(d.id, 16));
         case 'nagebeld': return ok(nagebeld(fdb, r, d, nu, vo), 'nagebeld ' + kort(d.id, 16));
         case 'geen-factuur': return ok(gebeurtenisRoute(fdb, r, d, 'geen_factuur', nu));
