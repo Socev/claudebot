@@ -238,7 +238,7 @@ const M = {
     LL.faal = false;
     const br = ssrc.slice(ssrc.indexOf('async function bankRonde('), ssrc.indexOf('let bankRondeLaatste'));
     toets('server: bankRonde roept de Ecobank-ronde aan en vangt een fout af', /ecobankNaBankRonde\(\)/.test(br) && /catch \(e\) \{ logError\('ecobank-ronde'/.test(br));
-    toets('server: GET /app/financien geeft het blok gambia door', /'fouten', 'gambia'(, 'saldi')?\]\.forEach/.test(ssrc));
+    toets('server: GET /app/financien geeft het blok gambia door', /'fouten', 'gambia'(, '[a-z_]+')*\]\.forEach/.test(ssrc));
   } catch (e) { toets('geen uitzondering', false, String(e && e.stack || e)); }
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
