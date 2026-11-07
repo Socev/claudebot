@@ -300,6 +300,7 @@ jobs:
           TOETS_NU=2026-11-03T10:00:00Z t test/financien-app.sh   # wv1044: ook op dag 1–9 van een maand (een toetspost in de toekomst schoof de peildag op)
           t test/financien-overzicht.sh   # wv2596: Financiën 8+ — stromen (som = boekingen), kerngetallen reproduceerbaar, privé en Holding apart, keuze per tegenpartij
           TOETS_NU=2026-01-02T10:00:00Z t test/financien-overzicht.sh   # wv2596: ook op 2 januari (jaarwissel in het venster)
+          t test/financien-vooruit.sh   # wv2621: Financiën 8+ — Vooruit (prognose reproduceerbaar uit de kalender), Doelen (pagina), maandbrief (stilte als normaal)
           t test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
           t test/pot-verzend.sh   # wv911: POT-nota's als Gmail-concept — frontmatter, adres, PDF-controle, claim, onzeker-herstel, voorcontrole, kaarten

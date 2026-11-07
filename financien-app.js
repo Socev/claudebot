@@ -458,6 +458,12 @@ function bereken(A, a, o) {
   // wv2620 (Financiën 8+, stap 4): adviesregels A1–A5 (financien-advies.js) op het overzicht, de signalen en de vaste lasten; alleen tonen
   if (uit.overzicht) uit.overzicht.advies = blok('advies', function () { return require('./financien-advies.js').advies(A, a, { ov: uit.overzicht, saldi: uit.saldi, signalen: uit.signalen,
     vaste: uit.vaste_lasten, nu: nu, vault: o.vault || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain' }); });
+  // wv2621 (Financiën 8+, stap 5 en 6): doelen (vaultpagina) en de prognose voor 12 maanden (financien-vooruit.js); alleen tonen
+  if (uit.overzicht) {
+    const vlt = o.vault || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain';
+    uit.overzicht.doelen = blok('doelen', function () { return require('./financien-vooruit.js').doelen({ vault: vlt, saldi: uit.saldi, ov: uit.overzicht, nu: nu }); });
+    uit.overzicht.vooruit = blok('vooruit', function () { return require('./financien-vooruit.js').vooruit({ ov: uit.overzicht, vault: vlt, nu: nu, doelen: uit.overzicht.doelen, reeksen: uit.overzicht.reeksen_jaar || [] }); });
+  }
   uit.links = { gelezen: L.gelezen, geldig: L.links.length, genegeerd: L.genegeerd };
   uit.fouten = Array.from(new Set(fouten));
   return uit;
@@ -596,9 +602,60 @@ function briefing(A, a, o) {
     d.forEach(function (s) { sig.push({ soort: 'dubbel', sleutel: 'dubbel|' + norm(s.sleutel || s.post || s.naam), naam: s.naam, ernst: 'wacht', kaart: 'dubbel', paypal: !!s.paypal,
       bedrag: s.bedrag, aantal: s.aantal, link: s.link || null, zin: s.zin }); });
   });
+  // 5. maandbrief (wv2621, ontwerp Financiën 8+ § 3.7): hooguit vijf korte regels uit het overzicht van de App, alleen wat afwijkt. Een fout
+  // hier houdt het gewone blok niet tegen (maandbrief_fout; de pod zet één box-rij per maand)
+  try { maandbrief(A, a, o).forEach(function (s) { sig.push(s); }); } catch (e) { uit.maandbrief_fout = true; }
   // wat David al kent (Bewust-tabel in de linkslijst) dempt, net als in de App
   uit.signalen = sig.filter(function (s) { return !gedempt(s, L.bewust); });
   return uit;
+}
+
+// ── Maandbrief (wv2621) ──
+// Vijf soorten regel, elk alleen bij een afwijking (stilte als alles normaal is, grondwet 10), nooit twee keer hetzelfde (briefingNieuw):
+//   vrij       wat er de laatste volle maand overbleef (zonder eenmalig inkomen zoals het dividend, mét eenmalige uitgaven; de reeks onder
+//              Vooruit) wijkt > 25 % én > € 500 af van het 12-maandsgemiddelde (één keer per maand)
+//   buffer     minder dan 2 maanden leven op de rekeningen, of de prognose (Vooruit) is in de komende 3 maanden krap (laag onder nul);
+//              opnieuw pas als de buffer > 0,5 maand verschoof of de krapte kwam of ging (niveau, stabiel)
+//   categorie  de categorie met de grootste afwijking 'hoger' in Uitgaven, niet 'overig' (één keer per maand)
+//   advies     het eerste advies op het startscherm (overzicht.advies.start[0]); opnieuw pas als het bedrag > 5 % én > € 5 verschoof.
+//              Bij A4 (een abonnement) zonder naam: een reeks zonder machtiging kan een persoon zijn (Fable wv777 #10)
+//   doel       het eerste doel dat achter loopt (soort sparen); opnieuw na 180 dagen
+// Rekent met bereken() (dezelfde getallen als de App), zonder taalmodel.
+function eurHeel(n) { const v = Math.round(Math.abs(n)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.'); return (n < -0.5 ? '− ' : '') + '€ ' + v; }
+function mndVol(m) { return ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'][Number(m.slice(5, 7)) - 1] + ' ' + m.slice(0, 4); }
+function maandbrief(A, a, o) { return maandbriefUit(bereken(A, a, { saldi: o.saldi, paypal: o.paypal, vault: o.vault }).overzicht); }
+// puur: de regels uit een overzicht (blok overzicht van bereken)
+function maandbriefUit(ov) {
+  const uit = [];
+  if (!ov) throw new Error('geen overzicht');
+  const r = function (sleutel, zin, x) { uit.push(Object.assign({ soort: 'maand', maandbrief: true, sleutel: sleutel, naam: 'Maandbrief', ernst: 'info', zin: zin }, x || {})); };
+  // over per maand zonder eenmalig inkomen (dividend), mét eenmalige uitgaven: de reeks onder Vooruit (financien-vooruit.js basis)
+  const bv = ov.basis_vooruit, t = bv && Array.isArray(bv.per_maand_reeks) ? bv.per_maand_reeks.slice(-1)[0] : null;
+  if (t && typeof bv.per_maand === 'number' && Math.abs(t.over - bv.per_maand) > Math.max(500, 0.25 * Math.abs(bv.per_maand)))
+    r('mb-vrij|' + t.maand, 'Over in ' + mndVol(t.maand) + ': ' + eurHeel(t.over) + ', gemiddeld ' + eurHeel(bv.per_maand) + ' per maand (zonder dividend en ander eenmalig inkomen).');
+  const v = ov.vooruit && ov.vooruit.ok ? ov.vooruit : null;
+  const krap = v ? v.maanden.slice(0, 4).find(function (x) { return x.krap; }) : null;
+  if (ov.buffer && (ov.buffer.maanden < 2 || krap)) {
+    // niveau: buffer in tienden van maanden, plus 1000 als er krapte in zicht is (dan telt komen of gaan van de krapte als verschuiving)
+    r('mb-buffer', 'Buffer: ' + String(ov.buffer.maanden).replace('.', ',') + ' maand' + (ov.buffer.maanden === 1 ? '' : 'en') + ' leven op de rekeningen (' + eurHeel(ov.buffer.liquide) + ').' +
+      (krap ? ' In ' + mndVol(krap.maand) + ' kan het krap worden (laag ' + eurHeel(krap.laag) + ', verwacht ' + eurHeel(krap.verwacht) + ').' : ''),
+      { niveau: Math.round(ov.buffer.maanden * 10) + (krap ? 1000 : 0), stabiel: true });
+  }
+  const cats = ov.uitgaven && Array.isArray(ov.uitgaven.categorieen) ? ov.uitgaven.categorieen.filter(function (c) { return c.afwijking === 'hoger' && !c.zonder && c.categorie !== 'overig' && c.gem12 != null; }) : [];
+  if (cats.length) {
+    const c = cats.sort(function (x, y) { return (y.nu - y.gem12) - (x.nu - x.gem12); })[0];
+    r('mb-cat|' + ov.uitgaven.maand, 'Opvallend in ' + mndVol(ov.uitgaven.maand) + ': ' + veilig(c.categorie, 40) + ' ' + eurHeel(c.nu) + ', gemiddeld ' + eurHeel(c.gem12) + '.');
+  }
+  const ad = ov.advies && Array.isArray(ov.advies.start) && ov.advies.start.length ? ov.advies.adviezen.find(function (x) { return x.id === ov.advies.start[0]; }) : null;
+  if (ad) {
+    const bedrag = ad.band ? eurHeel(ad.band.laag) + '–' + eurHeel(ad.band.hoog).replace('€ ', '') + ' per jaar' : ad.euro_jaar != null ? eurHeel(ad.euro_jaar) + ' per jaar' : '';
+    const titel = ad.regel === 'A4' ? 'een abonnement nakijken' : String(ad.titel).replace(/\?$/, '').slice(0, 80);
+    r('mb-advies|' + ad.id, 'Beste advies: ' + titel + (bedrag ? ' (' + bedrag + (ad.zekerheid === 'laat toetsen' ? ', laat toetsen' : '') + ')' : '') + '.', { niveau: typeof ad.waarde === 'number' ? ad.waarde : null, stabiel: true });
+  }
+  const dl = ov.doelen && Array.isArray(ov.doelen.doelen) ? ov.doelen.doelen.find(function (x) { return x.status === 'achter'; }) : null;
+  if (dl) r('mb-doel|' + norm(dl.naam), 'Doel ' + veilig(dl.naam, 40) + ' loopt achter: ' + eurHeel(dl.saldo) + ' van ' + eurHeel(dl.bedrag) + '; nodig ' + eurHeel(dl.nodig_pm) + ' per maand tot ' +
+    Number(dl.datum.slice(8, 10)) + '-' + Number(dl.datum.slice(5, 7)) + '-' + dl.datum.slice(0, 4) + '.');
+  return uit.slice(0, 5);
 }
 
 // Alleen wat nog niet gemeld is. gemeld = { sleutel: { datum, niveau? } }. Bedragsignalen opnieuw pas als het bedrag sinds de vorige
@@ -615,7 +672,7 @@ function briefingNieuw(b, gemeld, o) {
     let toon = !oud;
     if (oud) {
       // een maand-op-maandsignaal is per definitie nieuw (de vergelijking schuift mee); alleen de jaarvergelijking kan blijven staan
-      if (s.niveau != null && !s.jaar) toon = !(oud.datum === D && oud.niveau === s.niveau);
+      if (s.niveau != null && !s.jaar && !s.stabiel) toon = !(oud.datum === D && oud.niveau === s.niveau);   // wv2621: stabiel = maandbrief buffer/advies
       else if (s.niveau != null && oud.niveau != null) { const d = s.niveau - oud.niveau; toon = Math.abs(d) > 5 && Math.abs(d) > 0.05 * Math.abs(oud.niveau); }
       else if (s.soort === 'dubbel') toon = oud.datum < plusDagen(D, -400);
       else if (s.soort === 'buffer') toon = false;
@@ -632,12 +689,15 @@ function briefingNieuw(b, gemeld, o) {
   return { nieuw: nieuw, gemeld: g };
 }
 // Het blok zoals het onder het ochtendbericht komt (platte regels; n8n zet de kop en escapet). Hooguit 6 regels + verwijzing.
+// wv2621: de maandbrief (hooguit vijf regels) staat er los onder, na "In het kort:"; zonder gewone signalen alleen de maandbrief.
 function briefingTekst(nieuw) {
   if (!nieuw || !nieuw.length) return '';
-  const r = nieuw.slice(0, 6).map(function (s) { return '• ' + String(s.zin).slice(0, 240) + (s.kaart ? ' (staat in Voor jou)' : ''); });
-  if (nieuw.length > 6) r.push('• en nog ' + (nieuw.length - 6) + ' kleinere; vraag Socev ernaar.');
+  const gewoon = nieuw.filter(function (s) { return !s.maandbrief; }), mb = nieuw.filter(function (s) { return s.maandbrief; });
+  const r = gewoon.slice(0, 6).map(function (s) { return '• ' + String(s.zin).slice(0, 240) + (s.kaart ? ' (staat in Voor jou)' : ''); });
+  if (gewoon.length > 6) r.push('• en nog ' + (gewoon.length - 6) + ' kleinere; vraag Socev ernaar.');
+  if (mb.length) { r.push('In het kort:'); mb.slice(0, 5).forEach(function (s) { r.push('• ' + String(s.zin).slice(0, 240)); }); }
   r.push('Overzicht in Apps › Financiën. Socev zegt niets op en betaalt niets.');
   return r.join('\n');
 }
 
-module.exports = { bereken, blokSaldi, leesLinks, linkGeldig, linkVoor, LINK_HOSTS, LINK_PAGINA, plusMaanden, maandPlus, briefing, briefingNieuw, briefingTekst, briefingDag, werkdag, feestdag, pasen };
+module.exports = { bereken, maandbriefUit, blokSaldi, leesLinks, linkGeldig, linkVoor, LINK_HOSTS, LINK_PAGINA, plusMaanden, maandPlus, briefing, briefingNieuw, briefingTekst, briefingDag, werkdag, feestdag, pasen };

@@ -397,6 +397,9 @@ function overzicht(A, a, o) {
   });
   // stap 3: uitgaven per categorie en eigenaar, uitschieters, nieuwe terugkerende posten (een fout maakt alleen dit blok leeg)
   uit.uitgaven = blok('uitgaven', function () { return uitgaven(b.delen, { mNu: mNu, twaalf: twaalf, vanaf: o.vanaf }); });
+  // wv2621 (stap 5): de basis van de prognose op dezelfde delen en 12 maanden (financien-vooruit.js; jaar/kwartaalreeksen gaan in de kalender)
+  uit.reeksen_jaar = blok('vooruit', function () { return require('./financien-vooruit.js').reeksenJaar(a); });
+  uit.basis_vooruit = blok('vooruit', function () { return require('./financien-vooruit.js').basis(b.delen, twaalf, uit.reeksen_jaar || []); });
   // somtoets per maand + het aandeel nog niet ingedeeld
   const uitg = -t12('uitgaven'), ov = -t12('overig');
   uit.controle = { som_klopt: Array.from(pm.keys()).every(function (m) { const s = pm.get(m); return Math.abs(s.leven + s.inkomen + s.verschuiven + s.intern - som.get(m)) < 0.01; }),

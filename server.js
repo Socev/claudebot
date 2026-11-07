@@ -5152,6 +5152,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
 APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/rekening');   // wv2292: Bewerk in Saldi = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/stroom');   // wv2596: stroom kiezen = David die werkt
+APP_GLIJD_ROUTES.add('POST /app/financien/doel');   // wv2621: doel erbij of weg = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -11671,6 +11672,50 @@ async function appFinStroom(req, res, a, d) {
   return appStuur(res, 200, { ok: true, id: j.id || null, stroom: j.stroom || null, subsoort: j.subsoort || null });
 }
 
+// wv2621 (Financiën 8+ stap 6, ontwerp § 3.6): Doelen staan op de vaultpagina 20_Prive/Financien/Doelen.md (tabel), zodat David ze ook
+// zonder App leest en zelf bewerkt. POST /app/financien/doel { actie: 'nieuw', doel: { naam, bedrag, datum, soort, rekening, start } } of
+// { actie: 'weg', naam }. Zelfde poort als GET /app/financien (sessie, niet op een vaste plek); invoer op vorm in financien-vooruit.js
+// (doelInvoer), de tabel bewerkt door doelenZet (puur), geschreven via vault-veilig (wijzig: alleen als de pagina intussen niet veranderde;
+// krimpgrens aan, dus de kop '## Doelen' kan niet verdwijnen). Ontbreekt de pagina, dan maakt de eerste keer hem uit het sjabloon. Hooguit 30
+// per uur; daarna het 60 s-geheugen weg. Geen bedrag of naam in api.log. Lui geladen (de app-toets draait in een vm zonder __dirname).
+const APP_FIN_DOEL_PER_UUR = 30;
+let appFinVooruitMod;   // undefined = nog niet geprobeerd, null = niet in deze release
+function appFinVooruit() {
+  if (appFinVooruitMod === undefined) {
+    appFinVooruitMod = null;
+    try { const p = typeof __dirname === 'string' ? path.join(__dirname, 'financien-vooruit.js') : ''; if (p && fs.existsSync(p)) appFinVooruitMod = require(p); } catch (e) { logError('financien-vooruit', new Error('laden faalde')); }
+  }
+  return appFinVooruitMod;
+}
+async function appFinDoel(req, res, a, d) {
+  res._app.reden = 'financien-doel';
+  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-doel vast');
+  const V = appFinVooruit();
+  if (!V) return appWeiger(res, 503, 'Financiën wordt net bijgewerkt; probeer het over een paar minuten', 'fin-doel oud');
+  if (d.actie !== 'nieuw' && d.actie !== 'weg') return appWeiger(res, 400, 'onbekende actie', 'fin-doel actie');
+  const vandaag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  let op;
+  try { op = d.actie === 'weg' ? { actie: 'weg', naam: typeof d.naam === 'string' ? d.naam.slice(0, 80) : '' } : { actie: 'nieuw', doel: V.doelInvoer(d.doel, vandaag) }; }
+  catch (e) { return appWeiger(res, 400, String(e && e.message || 'onbekend doel').slice(0, 120), 'fin-doel invoer'); }
+  if (op.actie === 'weg' && !op.naam.trim()) return appWeiger(res, 400, 'welk doel?', 'fin-doel naam');
+  if (!appTeller('fin-doel', APP_FIN_DOEL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak gewijzigd dit uur', 'grens fin-doel');
+  const pad = path.join(appProjVault(), V.P_DOELEN);
+  try {
+    let bestaat = true;
+    try { VV().lees(pad, 'utf8', { max: 200000 }); } catch (e) { if (e && e.code === 'ENOENT') bestaat = false; else throw e; }
+    if (!bestaat) {
+      if (op.actie === 'weg') return appWeiger(res, 400, 'doel niet gevonden', 'fin-doel geweigerd');
+      VV().schrijf(pad, V.doelenZet('', op, vandaag));
+    } else if (!VV().wijzig(pad, function (t) { return V.doelenZet(t, op, vandaag); }, { krimpGrens: true })) return appWeiger(res, 409, 'de pagina veranderde net; probeer het opnieuw', 'fin-doel race');
+  } catch (e) {
+    if (/^(doel niet gevonden|er is al een doel met die naam|hooguit 40 doelen|naam ontbreekt)$/.test(String(e && e.message))) return appWeiger(res, 400, e.message, 'fin-doel geweigerd');
+    logError('fin-doel', new Error('schrijven faalde (' + String(e && e.code || 'fout') + ')'));
+    return appWeiger(res, 503, 'opslaan lukte nu niet; probeer het zo opnieuw', 'fin-doel fout');
+  }
+  appFinCache = null;
+  return appStuur(res, 200, { ok: true, actie: op.actie, naam: op.actie === 'weg' ? op.naam : op.doel.naam });
+}
+
 // ── App Gezondheid (wv937; ontwerp + Fable-review mk-scripts/wv937): Davids eigen gezondheid, alleen lezen ──
 // WAAROM. David 23-10-2026: "We moeten de health pod ook nog toegankelijk maken via een App hier in OVIS." De pod-pagina zit achter de
 // Olares-login; de App toont hetzelfde in Socev-blauw. gezondheid-app.js haalt het bij de health-pod (leessleutel, vaste host, alleen GET)
@@ -13109,6 +13154,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/financien/rekening') return appFinRekening(req, res, a, d);   // wv2292: Bewerk in Saldi (eigen naam, van wie, labels)
         if (route === 'POST /app/financien/boekingen') return appFinBoekingen(req, res, a, d);   // wv2596: de boekingen achter een getal
         if (route === 'POST /app/financien/stroom') return appFinStroom(req, res, a, d);   // wv2596: stroom per tegenpartij kiezen
+        if (route === 'POST /app/financien/doel') return appFinDoel(req, res, a, d);   // wv2621: doel erbij of weg (vaultpagina Doelen)
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
         if (route.indexOf('GET /app/pot/') === 0) return typeof appPot === 'function' ? appPot(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1894: OVIS POT (P1: lezen)
         if (route.indexOf('POST /app/pot/') === 0) return typeof appPotSchrijf === 'function' ? appPotSchrijf(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1933: OVIS POT (P3/P4: schrijven en verzending)
@@ -23567,6 +23613,12 @@ async function geldBriefingRonde(o) {
   if (j.ok !== true) return fout('geld-briefing gaf geen uitkomst: ' + String(j.fout || 'exit ' + r.code).replace(/\d{6,}/g, '#').slice(0, 100), s);
   if (j.geen) return { gedaan: false, reden: 'geen vaste-lastenrekening', maand: M };
   if (Array.isArray(j.fouten) && j.fouten.length) return fout('onderdelen faalden: ' + j.fouten.join(', ').slice(0, 80), s);
+  // wv2621: de maandbrief faalde (overzicht niet te berekenen): het gewone blok gaat door, één box-rij per maand
+  if (j.maandbrief_fout) {
+    const k = M + '|maandbrief';
+    if (!(s.fouten && s.fouten[k]) && !geldGeheugen.fouten[k]) { bankBoxRij({ bron: 'geld', maand: M, tekst: 'maandbrief niet te berekenen; het gewone blok gaat wel door' }); s.fouten = s.fouten || {}; s.fouten[k] = new Date(nuMs).toISOString(); }
+    geldGeheugen.fouten[k] = true;
+  }
   // poort (Fable #3): de vaste-lastenrekening moet recent gelezen zijn (niet: alle banken)
   if (!(typeof j.nieuwste_post === 'string' && j.nieuwste_post >= geldYmd(Date.parse(vandaag + 'T12:00:00Z') - 4 * 86400000)))
     return fout('vaste-lastenrekening niet recent gelezen (nieuwste geboekte post ouder dan 4 dagen)', s);

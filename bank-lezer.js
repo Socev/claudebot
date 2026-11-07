@@ -1252,6 +1252,9 @@ const opdrachten = {
     const o = {};
     ['peil', 'vorige'].forEach(function (k) { if (a.opt[k] != null) { if (!isDatum(a.opt[k])) throw new Weigering('--' + k + ' als JJJJ-MM-DD'); o[k] = a.opt[k]; } });
     const x = archiefKlaar();
+    // wv2621: de maandbrief rekent met hetzelfde overzicht als de App (bewaarde saldi en de PayPal-laag; ontbreken ze, dan zonder)
+    try { o.saldi = db().prepare('SELECT rek, json, opgehaald FROM saldo').all(); } catch (e) { o.saldi = []; }
+    try { o.paypal = paypalModule(); } catch (e) { o.paypal = null; }
     return Object.assign({ ok: true, bron: 'archief' }, require(path.join(__dirname, 'financien-app.js')).briefing(x.A, x.a, o));
   },
   async stroom(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.stroom(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^(maand|rekening):/.test(e.message)) throw new Weigering(e.message); throw e; } },
