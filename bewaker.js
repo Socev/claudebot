@@ -26,6 +26,10 @@
  *             → losse niet-losgekoppelde kinderen opruimen (socev-auto; beurten en agents hebben een eigen procesgroep en
  *             blijven) → wachten tot /health weer ok is → vorige terugzetten → regel in supervisor.log, rij in de box,
  *             seintje via mk-scripts/bericht.py (niet 23:00–07:00).
+ *   weg       (wv2646) alleen op bewijs: een ander starttijdstip, state Z/X of ESRCH van kill(pid, 0). Een mislukte of
+ *             trage /proc-lezing is 'onbekend': geen signaal, geen 'al-weg'. Vlak vóór het stoppen nog één /health/publiek:
+ *             antwoordt hij weer, dan niet stoppen. Na een ingreep zonder stop blijft dezelfde bewaker bewaken (7-11-2026:
+ *             een pod-brede stilstand liet de bewaker een levende server 'al-weg' noemen, waarna hij zichzelf stopte).
  *   herstart  doet de supervisor (verwerkCrash): het kind sterft aan SIGKILL en telt als één crash.
  *   bewijs    (wv716) naast CPU, threads/wchan en JS-stapel ook de fd-opbouw (alleen readlink), pijpgenoten (een ander proces
  *             met de signaalpijp van server.js: K1) en pipe-lezers (pipe_read met /proc/ in de cmdline), zombie-kinderen
@@ -91,6 +95,7 @@ const API_LOG = process.env.API_LOG || path.join(BIN, 'api.log');
 const AGENTS = process.env.BEWAKER_AGENTS || path.join(process.env.HOME || '/opt/data', 'agent_jobs.json');
 const CGROUP = process.env.BEWAKER_CGROUP || '/sys/fs/cgroup';
 const RELEASE_DIR = process.env.RELEASE_DIR || '';
+const NEP_STAT = process.env.BEWAKER_NEP_STAT || '';
 const APP_ROOT = process.env.APP_ROOT || (RELEASE_DIR ? path.dirname(path.dirname(RELEASE_DIR)) : '/opt/data/app');
 const SHA = process.env.RELEASE_SHA || (RELEASE_DIR ? path.basename(RELEASE_DIR) : 'onbekend');
 
@@ -125,19 +130,43 @@ function log(regel) {
 const gemeld = {};
 function eens(sleutel, regel) { if (gemeld[sleutel]) return; gemeld[sleutel] = true; log(regel); }
 
-async function procStat(pid) {
-  const s = await lees('/proc/' + pid + '/stat', 3000);
-  if (!s) return null;
+// wv2646: {st} of {fout: 'ENOENT' | 'tijd' | …}. Een mislukte of trage lezing is GEEN bewijs dat het proces weg is: op
+// 7-11 02:04 UTC (pod-brede stilstand) gaf elke /proc-lezing een time-out en noemde dood() een levende server 'al-weg'.
+// Toetshaak (alleen test/bewaker-weg-bewijs.sh): BEWAKER_NEP_STAT = bestand; 'tijd' = lezing van de server-stat valt in
+// de tijdsgrens, 'andere-start' = de echte stat met een ander starttijdstip (pid hergebruikt). Leeg of weg = echt.
+async function procStatR(pid) {
+  let s;
+  if (pid === SERVER && NEP_STAT) {
+    const nep = String(await lees(NEP_STAT, 1000) || '').trim();
+    if (nep === 'tijd') return { fout: 'tijd' };
+    if (nep === 'andere-start') {
+      const st = await procStatR('' + pid);
+      if (st.st) st.st.start = String(Number(st.st.start) + 1);
+      return st;
+    }
+  }
+  s = await metGrens(fsp.readFile('/proc/' + pid + '/stat', 'utf8').catch((e) => ({ fout: e.code || 'fout' })), 3000, { fout: 'tijd' });
+  if (typeof s !== 'string') return s && s.fout ? s : { fout: 'leeg' };
   const na = s.slice(s.lastIndexOf(')') + 2).split(' ');
-  return { state: na[0], ppid: parseInt(na[1], 10), pgrp: parseInt(na[2], 10), utime: parseInt(na[11], 10),
-    stime: parseInt(na[12], 10), start: na[19], comm: s.slice(s.indexOf('(') + 1, s.lastIndexOf(')')) };
+  return { st: { state: na[0], ppid: parseInt(na[1], 10), pgrp: parseInt(na[2], 10), utime: parseInt(na[11], 10),
+    stime: parseInt(na[12], 10), start: na[19], comm: s.slice(s.indexOf('(') + 1, s.lastIndexOf(')')) } };
 }
+async function procStat(pid) { return (await procStatR(pid)).st || null; }
 let SERVER_START = null;
-// Leeft DIT proces nog (zelfde pid én starttijd, geen zombie)? Vóór elk signaal opnieuw gevraagd (pid-hergebruik).
-async function serverLeeft() {
-  const st = await procStat(SERVER);
-  return !!(st && st.start === SERVER_START && st.state !== 'Z' && st.state !== 'X');
+// Is DIT proces (zelfde pid én starttijd) gemeten weg? 'weg' alleen op bewijs: een ander starttijdstip, state Z/X, of
+// ESRCH van kill(pid, 0). Een mislukte of trage /proc-lezing = 'onbekend' (wv2646). Vóór elk signaal opnieuw gevraagd.
+async function serverStaat() {
+  const r = await procStatR(SERVER);
+  if (r.st) {
+    if (r.st.start !== SERVER_START) return { staat: 'weg', waarom: 'ander starttijdstip (' + r.st.start + ', was ' + SERVER_START + ')' };
+    if (r.st.state === 'Z' || r.st.state === 'X') return { staat: 'weg', waarom: 'state ' + r.st.state };
+    return { staat: 'leeft' };
+  }
+  try { process.kill(SERVER, 0); }
+  catch (e) { if (e.code === 'ESRCH') return { staat: 'weg', waarom: 'kill 0: ESRCH' }; }
+  return { staat: 'onbekend', waarom: '/proc-lezing ' + r.fout + ', kill 0 slaagt' };
 }
+async function serverWeg() { return (await serverStaat()).staat === 'weg'; }
 async function leeftMetStart(pid, start) {
   const st = pid > 1 ? await procStat(pid) : null;
   return !!(st && st.start === start && st.state !== 'Z');
@@ -469,15 +498,26 @@ function kortBewijs(b) {
 // ── doden en opvangen ───────────────────────────────────────────────────────────────────────────────────────────────
 async function wachtTotWeg(ms) {
   const tot = mono() + ms;
-  while (mono() < tot) { if (!(await serverLeeft())) return true; await wacht(250); }
-  return !(await serverLeeft());
+  while (mono() < tot) { if (await serverWeg()) return true; await wacht(250); }
+  return serverWeg();
+}
+// Signaal alleen na een geslaagde lezing met hetzelfde starttijdstip ('leeft'): bij 'onbekend' geen signaal (een pid
+// kan hergebruikt zijn) en ook geen 'al-weg' (wv2646). Drie pogingen, want één trage lezing zegt niets.
+async function staatVoorSignaal() {
+  let s;
+  for (let i = 0; i < 3; i++) { s = await serverStaat(); if (s.staat !== 'onbekend') return s; await wacht(1000); }
+  return s;
 }
 async function dood() {
-  if (!(await serverLeeft())) return 'al-weg';
-  try { process.kill(SERVER, 'SIGTERM'); } catch (e) { return 'al-weg'; }
+  const s0 = await staatVoorSignaal();
+  if (s0.staat === 'weg') { await log('server ' + SERVER + ' is al weg: ' + s0.waarom); return 'al-weg'; }
+  if (s0.staat === 'onbekend') { await log('server ' + SERVER + ' niet te meten (' + s0.waarom + ') - geen signaal'); return 'onbekend'; }
+  try { process.kill(SERVER, 'SIGTERM'); } catch (e) { return e.code === 'ESRCH' ? 'al-weg' : 'onbekend'; }
   await log('SIGTERM naar server ' + SERVER);
   if (await wachtTotWeg(C.genade)) return 'sigterm';
-  if (!(await serverLeeft())) return 'sigterm';
+  const s1 = await staatVoorSignaal();
+  if (s1.staat === 'weg') return 'sigterm';
+  if (s1.staat === 'onbekend') { await log('server ' + SERVER + ' na SIGTERM niet te meten (' + s1.waarom + ') - geen SIGKILL'); return 'onbekend'; }
   try { process.kill(SERVER, 'SIGKILL'); } catch (e) { return 'sigterm'; }
   await log('server ' + SERVER + ' stopte niet binnen ' + Math.round(C.genade / 1000) + ' s - SIGKILL');
   if (await wachtTotWeg(C.killWacht)) return 'sigkill';
@@ -541,14 +581,17 @@ function tijdKort(ms) { return amsterdam(new Date(ms)).slice(11, 16); }
 
 // ── de lus ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 let gewapend = false, laatsteOkMono = null, laatsteOkWand = null, missers = 0, laatsteContext = null, contextMono = -Infinity;
-let opgegeven = false, bezig = false, wegTeller = 0;
+let opgegeven = false, bezig = false, wegTeller = 0, onbekendGemeld = false;
 
 async function tik() {
   // Twee keer op rij: één trage /proc-lezing mag de bewaking niet beëindigen (Fable wv701-code #6).
-  if (!(await serverLeeft())) wegTeller++; else wegTeller = 0;
+  // wv2646: alleen een gemeten 'weg' telt; 'onbekend' (lezing mislukt of te traag) laat de teller staan.
+  const ss = await serverStaat();
+  if (ss.staat === 'weg') wegTeller++; else if (ss.staat === 'leeft') { wegTeller = 0; onbekendGemeld = false; }
+  if (ss.staat === 'onbekend' && !onbekendGemeld) { onbekendGemeld = true; await log('server ' + SERVER + ' even niet te meten (' + ss.waarom + ') - telt niet als weg'); }
   if (wegTeller === 1) return;
   if (wegTeller >= 2) {
-    await log('server ' + SERVER + ' is weg (gestopt of vervangen) - bewaker stopt');
+    await log('server ' + SERVER + ' is weg (' + ss.waarom + ') - bewaker stopt');
     await geefSlot();
     process.exit(0);
   }
@@ -627,7 +670,7 @@ async function ingreep(stil, s, n) {
   try { await ingreepKern(stil, s, n); }
   catch (e) {
     await log('fout in de ingreep: ' + eenRegel(e && e.stack, 400));
-    if (!(await serverLeeft())) { await geefSlot(); await log('server ' + SERVER + ' is weg - bewaker stopt'); process.exit(0); }
+    if (await serverWeg()) { await geefSlot(); await log('server ' + SERVER + ' is weg - bewaker stopt'); process.exit(0); }
   }
   finally { bezig = false; }
 }
@@ -645,10 +688,14 @@ async function ingreepKern(stil, s, n) {
   const bewijsPad = path.join(BIN, 'bewaker-bewijs-' + stempel + '.json');
   const bewaard = await schrijfAtomair(bewijsPad, JSON.stringify(bewijs, null, 1) + '\n');
   await log('momentopname: ' + kortBewijs(bewijs) + (bewaard ? ' -> ' + bewijsPad : ' (niet bewaard)'));
-  const uitkomst = await dood();
+  // wv2646: antwoordt hij intussen weer (de momentopname duurt tot een minuut, een pod-brede stilstand is dan vaak voorbij),
+  // dan niet stoppen. 'onbekend' = niet te meten of het nog hetzelfde proces is: geen signaal.
+  const alWeer = await vraag('/health/publiek');
+  const uitkomst = alWeer ? 'antwoordt-weer' : await dood();
+  const gestopt = uitkomst === 'al-weg' || uitkomst === 'sigterm' || uitkomst === 'sigkill';
   await log('server ' + SERVER + ': ' + uitkomst);
-  await geefSlot();
-  const kinderen = uitkomst === 'blijft' ? [] : await ruimKinderenOp(Array.isArray(bewijs.kinderen) ? bewijs.kinderen : [], serverPgrp);
+  if (gestopt) await geefSlot();
+  const kinderen = gestopt ? await ruimKinderenOp(Array.isArray(bewijs.kinderen) ? bewijs.kinderen : [], serverPgrp) : [];
   const terug = uitkomst === 'blijft' ? null : await wachtOpGezond(C.terug);
   if (vorige && terug) await wacht(C.bootMarge);
   const herstel = await herstelVorige(vorige);
@@ -660,11 +707,15 @@ async function ingreepKern(stil, s, n) {
   const beurtWeg = !!(ctx && ctx.lopend && (ctx.lopend.beurten || ctx.lopend.onopgehaald));
   let uitslag;
   if (uitkomst === 'blijft') uitslag = 'server ' + SERVER + ' reageert ook niet op SIGKILL (State ' + (bewijs.status && bewijs.status.State) + ') - herstart lukt niet, pod herstarten';
+  else if (!gestopt && terug) uitslag = 'zelfde server ' + SERVER + ' weer gezond zonder herstart (na ' + terug.na_s + ' s)';
+  else if (!gestopt) uitslag = 'niet gestopt (niet te meten of het nog hetzelfde proces is) en na ' + Math.round(C.terug / 1000) + ' s nog niet gezond';
   else if (terug) uitslag = 'weer gezond na ' + terug.na_s + ' s (versie ' + (terug.versie || '?') + ')';
   else uitslag = 'na ' + Math.round(C.terug / 1000) + ' s nog niet gezond - zie supervisor.log';
   if (uitkomst === 'blijft') opgegeven = true;
   await log('uitslag: ' + uitslag + (flip ? '; ' + flip : '') + '; ' + herstel);
-  await boxRij('Server reageerde ' + Math.max(1, Math.round(stilS / 60)) + ' min niet; bewaker ' + (uitkomst === 'blijft' ? 'kon hem niet stoppen' : 'herstartte hem') + ' (' + n + 'e keer dit uur)', [
+  const wat = uitkomst === 'blijft' ? 'kon hem niet stoppen' : uitkomst === 'antwoordt-weer' ? 'greep niet in, hij antwoordde weer' :
+    uitkomst === 'onbekend' ? 'stopte hem niet (niet te meten)' : 'herstartte hem';
+  await boxRij('Server reageerde ' + Math.max(1, Math.round(stilS / 60)) + ' min niet; bewaker ' + wat + ' (' + n + 'e keer dit uur)', [
     ['status', 'open — oorzaak in wv700; momentopname ' + (bewaard ? '`' + bewijsPad + '`' : 'niet bewaard')],
     ['van', 'bewaker.js (levensbewaking wv701, release ' + SHA + ')'],
     ['gemeten', 'geen antwoord op /health/publiek sinds ' + tijdKort(laatsteOkWand) + ' (' + stilS + ' s, ' + missers + ' missers op rij); ' + kortBewijs(bewijs) +
@@ -674,11 +725,18 @@ async function ingreepKern(stil, s, n) {
     ['voorstel', 'momentopname naast wv700 leggen (JS-stapel, CPU, threads); bij een herhaling de oorzaak met voorrang']]);
   let tekst;
   if (uitkomst === 'blijft') tekst = 'De server hangt en laat zich niet stoppen. Herstart de pod in Olares, dan kijk ik daarna wat er was.';
+  else if (!gestopt && terug) tekst = null;   // herstelde zelf: alleen de box (stilte is de default)
+  else if (!gestopt) tekst = 'De server reageert al ' + minuten(stilS) + ' niet en ik kon niet veilig vaststellen dat ik het goede proces zou stoppen. Herstart de pod in Olares als ik over een kwartier nog niet antwoord.';
   else if (terug) tekst = 'De server reageerde ' + minuten(stilS) + ' niet; ik heb hem om ' + tijdKort(Date.now() - terug.na_s * 1000) +
     ' zelf herstart en hij draait weer.' + (beurtWeg ? ' Er liep toen een vraag. Kwam die uit de app, dan zet ik het antwoord daar alsnog neer of meld ik daar dat het verloren ging; een vraag uit Telegram stel je gerust opnieuw.' : '');
   else tekst = 'De server reageerde ' + minuten(stilS) + ' niet. Ik heb hem herstart, maar hij is na twee minuten nog niet terug. Herstart de pod in Olares als ik over een kwartier nog niet antwoord.';
-  await seintje(tekst, 'bewaker-' + stempel);
-  if (uitkomst !== 'blijft') { await log('bewaker van server ' + SERVER + ' klaar - de nieuwe server start zijn eigen bewaker'); process.exit(0); }
+  if (tekst) await seintje(tekst, 'bewaker-' + stempel);
+  if (uitkomst === 'blijft') return;
+  // wv2646: alleen stoppen als dit proces gemeten weg is; leeft dezelfde server nog (of is het onbekend), blijven bewaken
+  // met een verse telling, zodat een volgende ingreep weer de volle grens en het minimum aan missers nodig heeft.
+  if (gestopt || await serverWeg()) { await log('bewaker van server ' + SERVER + ' klaar - de nieuwe server start zijn eigen bewaker'); process.exit(0); }
+  missers = 0; laatsteOkMono = mono(); if (terug) laatsteOkWand = Date.now();
+  await log('server ' + SERVER + ' is niet aantoonbaar weg - bewaker blijft bewaken');
 }
 
 // Een vorige-herstel dat bleef staan (bewaker stierf halverwege een ingreep): terugzetten als de links nog kloppen.
@@ -693,7 +751,16 @@ process.on('unhandledRejection', (e) => { log('fout (gaat door): ' + eenRegel(e 
 process.on('SIGTERM', () => { geefSlot().finally(() => process.exit(0)); });
 
 (async function () {
-  const st = await procStat(SERVER);
+  // wv2646: een mislukte lezing bij de start is geen 'bestaat niet'; alleen ESRCH stopt. Zolang kill 0 slaagt blijven
+  // proberen (eerst elke 2 s, na een minuut elke 15 s): zonder starttijdstip geen bewaking, maar ook niet opgeven (Codex MOET 1).
+  let st = null;
+  for (let i = 0; !st; i++) {
+    const r = await procStatR(SERVER);
+    if (r.st) { st = r.st; break; }
+    try { process.kill(SERVER, 0); } catch (e) { if (e.code === 'ESRCH') break; }
+    if (i === 3) await log('server ' + SERVER + ' bij de start niet te meten (/proc-lezing ' + r.fout + ', kill 0 slaagt) - blijft proberen');
+    await wacht(i < 30 ? 2000 : 15000);
+  }
   if (!st) { await log('server ' + SERVER + ' bestaat niet - bewaker stopt'); process.exit(0); }
   SERVER_START = st.start;
   mijnStart = (await procStat(process.pid) || {}).start || null;
