@@ -13978,12 +13978,13 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'doorgeefluik',         // wv1267: regel in de machinekamer als David een opdracht via Socev op de werklijst zette
   'manager',              // wv895: rapport van een manager-ronde op afroep (machinekamer; soort antwoord als David of Socev hem startte)
   'facturen-boekstuk',    // wv2316: boekstuk Google Home naar André (verstuurd = archief; concept of vraag = dag)
+  'weer-avond',           // wv2605: avondseintje bij vroeg vertrek (gladheid/storm/onweer/KNMI 05:00–08:00 morgen); hoofdkanaal, soort dag
   'nieuwsbrief',          // wv2190: wekelijkse bloemlezing uit de nieuwsbrieven (za 09:15, AI - Nieuwsbrief-bloemlezing); hoofdkanaal, soort dag
   'dagsamenvatting']);    // wv589: dagsamenvatting "Gebeurd" 07:15 (idee 13 § 4.6): machinekamer, geen MELD_SOORT-regel = archief, geen seintje
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
 const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', nieuwsbrief: 'dag' };
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', nieuwsbrief: 'dag', 'weer-avond': 'dag' };
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
@@ -18661,10 +18662,26 @@ const weerOchtend = (function () {
         return { status: r.status, json: j };
       },
       bufferZet: weerRijZet, boxRij: function (t) { return ovisBoxRij(t); },
+      // wv2605: avondseintje via dezelfde weg als POST /bericht (hoofdkanaal, soort dag = met seintje); sleutel = één per avond
+      melden: async function (tekst, sl) {
+        const r = await berichtIntern({ kanaal: 'hoofd', bron: 'weer-avond', klasse: 'normaal', soort: 'dag', tekst: tekst, sleutel: sl });
+        if (!r || r.status !== 200) throw new Error('bericht niet bezorgd (' + (r && r.status) + ')');
+      },
       log: function (o) { schrijfLog(nu() + ' weer ' + velden(o)); } });
   } catch (e) { logError('weer-ochtend', e); return null; }
 })();
 function weerInfo() { if (!weerOchtend) return { aan: false }; try { return weerOchtend.info(); } catch (e) { return { aan: true, fout: true }; } }
+// wv2605 (idee 28 § 9): eigen dagklok voor het avondseintje; elke 5 min (echte pod, rol primair), werk alleen 21:00–22:29 en eenmaal
+// per avond (staat in weer-ochtend.json). Bewust niet in de nachtketen (die loopt 's nachts tot ± 07:00).
+let weerAvondBezig = false;
+async function weerAvondTik() {
+  if (!weerOchtend || typeof weerOchtend.avond !== 'function' || !SERVER_ECHT || !rolPrimair() || weerAvondBezig) return;
+  weerAvondBezig = true;
+  try { await weerOchtend.avond({ ams: ovisAms() }); }
+  catch (e) { logError('weer-avond', e); }
+  finally { weerAvondBezig = false; }
+}
+if (weerOchtend && SERVER_ECHT) { setInterval(function () { weerAvondTik(); }, 5 * 60000).unref(); }
 // ── AVG-spiegel (wv2526; bouwplan vault "01_Ontwikkeling/AVG-stukken per praktijk in GitHub (bouwplan 5-11-2026).md") ──
 // Nachtketen-stap: spiegelt 10_Zakelijk/<Praktijk>/Privacy naar de privé-repo Socev/avg-<praktijk> (eenrichting; logica, BSN-elfproef en
 // grenzen in mk-scripts/avg-spiegel/spiegel.py). Kaal kindproces (geen socev-run: die meldt zelf met een bericht; hier meldt alleen de keten

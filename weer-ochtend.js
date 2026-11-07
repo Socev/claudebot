@@ -8,6 +8,9 @@
  * drempels (§ 3) in de vensters (§ 4) en zet bij een treffer één rij in ochtend_buffer (bron 'weer', datum vandaag). De Dagelijkse
  * briefing zet die regel letterlijk onder de kop (niet via het taalmodel). Geen treffer = geen rij = niets in het ochtendbericht.
  *
+ * AVOND (wv2605, idee 28 § 9). avond(): de avond vóór een werkdag één aanroep voor het Thuisvak en bij gladheid, storm, onweer of een
+ * KNMI-waarschuwing in 05:00–08:00 van morgen één appbericht aan David (21:00–22:30, nooit in de stille uren, hooguit één per avond).
+ *
  * STIL BIJ FOUT (§ 6). Geen sleutel, 401, time-out, netwerk: geen rij, geen bericht; de stap geeft ok:true met detail.fout. Pas als de
  * tweede dag op rij mislukt (laatste geslaagde ophaling ouder dan 1 dag) één box-rij (#weer-ochtend), daarna niet opnieuw tot er weer
  * een geslaagde dag was. Geen sleutel = altijd stil, ook zonder box-rij.
@@ -26,6 +29,8 @@
  *                                                              start, einde, hele_dag, status en locatie worden gelezen, nooit de titel)
  *   ophalen(url)         → Promise<{status, json}>            (fetch; gooit bij netwerk/time-out)
  *   bufferZet(datum, t)  → Promise                             (upsert ochtend_buffer bron 'weer', teruggelezen)
+ *   melden(tekst, sl)    → Promise                             (wv2605: avondseintje als appbericht in het hoofdkanaal, bron weer-avond;
+ *                                                              sl = ontdubbelsleutel per avond; gooit als het niet bezorgd is)
  *   boxRij(tekst)        → bool
  *   log(o)               → void (velden-object, nooit een URL of sleutel)
  *   staatPad             → pad van het staatbestand (600)
@@ -270,6 +275,57 @@ function regel(delen, elders) {
   return t + '.';
 }
 
+// ── wv2605 (idee 28 § 9, David Ja 7-11-2026): avondseintje bij vroeg vertrek ──
+// Op werkdagen vertrekt David vaak 05:30–06:00; de weerregel van 07:00 is dan te laat. De avond ervoor (21:00–22:30, eigen dagklok in
+// server.js) één One Call voor het Thuisvak, elke avond (ook vóór een vrije dag: geen werkpatroon uit de aanroepen), en alleen als morgen
+// een werkdag is (rooster DS, getimede Werk-afspraak of de locatieweek-regel) én er in 05:00–08:00 van morgen gladheid, storm, onweer of
+// een KNMI-waarschuwing is: één appbericht in het hoofdkanaal (bron weer-avond). Hooguit één per avond, nooit vanaf 23:00 (stille uren),
+// geen treffer = niets. Een fout is stil (geen bericht, geen box-rij: de ochtendstap bewaakt de API al).
+const AVOND_VAN = 21 * 60, AVOND_TOT = 22 * 60 + 30, STIL_VAN = 23 * 60, STIL_TOT = 7 * 60;
+const VROEG_VAN = 5 * 60, VROEG_TOT = 8 * 60;
+const AVOND_POGINGEN = 3;
+const AVOND_MAX = 200;
+function dagErna(datum) { const d = new Date(datum + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); }
+// treffers in het vroege venster van morgen (05:00–08:00), Thuisvak; zelfde drempels als § 3
+function vroegTreffers(j, morgen) {
+  const delen = [], gezien = {};
+  (Array.isArray(j && j.alerts) ? j.alerts : []).forEach(function (a) {
+    const s = Number(a.start) * 1000, e = Number(a.end) * 1000;
+    if (!Number.isFinite(s) || !Number.isFinite(e)) return;
+    const sd = ams(s), ed = ams(e);
+    const sMin = sd.datum < morgen ? -1 : sd.datum > morgen ? 24 * 60 : sd.uur * 60 + sd.min;
+    const eMin = ed.datum > morgen ? 24 * 60 : ed.datum < morgen ? -1 : ed.uur * 60 + ed.min;
+    if (!(sMin < VROEG_TOT && eMin > VROEG_VAN)) return;
+    const naam = String(a.event || 'waarschuwing').replace(/\s+/g, ' ').trim().slice(0, 50);
+    const k = naam.toLowerCase() + '|' + e;
+    if (gezien[k]) return;
+    gezien[k] = true;
+    const knmi = /knmi/i.test(naam) || !/knmi/i.test(String(a.sender_name || '')) ? '' : 'KNMI ';
+    const tot = ed.datum === morgen ? ' tot ' + hhmm(ed.uur * 60 + ed.min) : ed.datum > morgen ? ' tot na morgen' : '';
+    delen.push({ soort: 'waarschuwing', zin: knmi + naam + tot });
+  });
+  const uren = urenIn(j, morgen, VROEG_VAN, VROEG_TOT);
+  const glad = uren.filter(function (x) { return uurGlad(x.u, x.vorig); });
+  if (glad.length) delen.push({ soort: 'gladheid', zin: 'kans op gladheid (' + hhmm(glad[0].m) + '–' + hhmm(glad[glad.length - 1].m + 60) + ')' });
+  const storm = uren.filter(function (x) { return uurStorm(x.u); });
+  if (storm.length) delen.push({ soort: 'storm', zin: 'windstoten tot ' + Math.round(storm.reduce(function (a, x) { return Math.max(a, getal(x.u.wind_gust)); }, 0) * 3.6 / 5) * 5 + ' km/u' });
+  const onw = uren.filter(function (x) { return uurOnweer(x.u); });
+  if (onw.length) delen.push({ soort: 'onweer', zin: 'kans op onweer rond ' + hhmm(onw[0].m) });
+  return delen;
+}
+function avondRegel(delen) {
+  if (!delen.length) return '';
+  let t = 'Weer morgenvroeg (5–8 uur, je heenweg): ';
+  let n = 0;
+  for (const d of delen) {
+    const bij = (n ? '; ' : '') + d.zin;
+    if (n && (t + bij + '.').length > AVOND_MAX) continue;
+    t += bij; n++;
+  }
+  if (t.length + 1 > AVOND_MAX) t = t.slice(0, AVOND_MAX - 2).replace(/\s+\S*$/, '') + '…';
+  return t + '.';
+}
+
 function maak(o) {
   let laatst = null;
   let sleutelNu = null;
@@ -417,8 +473,60 @@ function maak(o) {
       werk_bron: beeld.werk_bron || 'geen', elders: el.zinnen.length + '/' + (el.ver | 0) + '/' + (el.kandidaten | 0) });
     return { ok: true, detail: detail };
   }
-  function info() { const s = staatLees(); return { aan: true, laatste: laatst, laatste_ok: s.laatste_ok || null, fout_sinds: s.fout_sinds || null, aanroepen_vandaag: s.teller_datum === ams(nu()).datum ? s.teller | 0 : 0 }; }
-  return { doe: doe, info: info };
+  // wv2605: het avondseintje. a = { datum, uur, min } (NL-tijd, van de dagklok); droog = rekenen en tonen, niets melden, staat alleen de teller
+  let laatstAvond = null;
+  async function avond(opt) {
+    opt = opt || {};
+    const a = opt.ams || ams(nu());
+    const datum = a.datum, droog = !!opt.droog, m0 = a.uur * 60 + a.min, morgen = dagErna(datum);
+    const s = staatLees();
+    if (!droog) {
+      if (s.avond_datum === datum) return { ok: true, al_gedaan: true };
+      if (m0 < AVOND_VAN || m0 >= AVOND_TOT) return { ok: true, al_gedaan: true, detail: { buiten_venster: true } };
+    }
+    const klaar = function (detail, opnieuw) {   // opnieuw = een fout die de volgende tik nog eens mag (hooguit AVOND_POGINGEN per avond)
+      laatstAvond = Object.assign({ op: new Date(nu()).toISOString(), voor: morgen }, detail);
+      if (droog) return { ok: true, droog: true, detail: detail };
+      if (s.avond_poging_datum !== datum) { s.avond_poging_datum = datum; s.avond_pogingen = 0; }
+      s.avond_pogingen = (s.avond_pogingen | 0) + 1;
+      if (!opnieuw || s.avond_pogingen >= AVOND_POGINGEN) s.avond_datum = datum;
+      try { staatZet(s); } catch (e) { /* stil */ }
+      if (o.log) o.log(Object.assign({ opdracht: 'weer-avond', voor: morgen }, detail));
+      return { ok: true, detail: detail };
+    };
+    let sl;
+    try { sl = await o.sleutel(); } catch (e) { return klaar({ ok: false, fout: 'kluis niet leesbaar' }, true); }
+    if (!sl) return klaar({ ok: false, fout: 'geen sleutel' });
+    sleutelNu = String(sl);
+    let pl;
+    try { pl = await o.plekken(); } catch (e) { return klaar({ ok: false, fout: 'plekken niet leesbaar' }, true); }
+    const pThuis = (pl || []).find(function (p) { return p && (p.naam === 'Thuis' || p.klasse === 'thuis') && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon)); });
+    if (!pThuis) return klaar({ ok: false, fout: 'plek Thuis ontbreekt' });
+    let kal = null, recent = null;
+    try { kal = await o.kalender(morgen); } catch (e) { kal = null; }
+    try { recent = o.werkRecent ? await o.werkRecent() : null; } catch (e) { recent = null; }
+    const beeld = dagBeeld(kal || [], morgen, { werkRecent: recent && recent.dagen, werkPlek: recent && recent.plek });
+    // elke avond dezelfde ene aanroep, ook vóór een vrije dag (geen werkpatroon uit de aanroepen)
+    const r = await haal(s, vak(pThuis), datum, sl);
+    if (r.fout) return klaar({ ok: false, fout: masker(r.fout).slice(0, 60) }, !/^rem|^http 401/.test(r.fout));
+    let delen;
+    try { delen = vroegTreffers(r.j, morgen); } catch (e) { return klaar({ ok: false, fout: 'antwoord niet te lezen' }); }
+    const tekst = beeld.werkdag ? masker(avondRegel(delen)) : '';
+    const detail = { ok: true, werkdag: beeld.werkdag, werk_bron: beeld.werk_bron || 'geen', treffers: delen.map(function (d) { return d.soort; }).join(',') || 'geen',
+      kalender: kal ? 'gelezen' : 'niet leesbaar', aanroepen: s.teller | 0 };
+    if (droog) return Object.assign(klaar(detail), { regel: tekst });
+    if (!tekst) return klaar(Object.assign(detail, { gemeld: false }));
+    // stille uren: is het intussen 23:00 of later (of nog vóór 07:00), dan niets meer sturen
+    const mNu = minVan(nu());
+    if (mNu >= STIL_VAN || mNu < STIL_TOT || ams(nu()).datum !== datum) return klaar(Object.assign(detail, { gemeld: false, stille_uren: true }));
+    try { await o.melden(tekst, 'weer-avond-' + datum); }
+    catch (e) { return klaar(Object.assign(detail, { ok: false, gemeld: false, fout: 'bericht niet bezorgd' }), true); }
+    s.avond_gemeld = datum;
+    return klaar(Object.assign(detail, { gemeld: true }));
+  }
+  function info() { const s = staatLees(); return { aan: true, laatste: laatst, laatste_ok: s.laatste_ok || null, fout_sinds: s.fout_sinds || null, aanroepen_vandaag: s.teller_datum === ams(nu()).datum ? s.teller | 0 : 0,
+    avond: { laatste: laatstAvond, gemeld_op: s.avond_gemeld || null } }; }
+  return { doe: doe, avond: avond, info: info };
 }
 
-module.exports = { maak: maak, _intern: { dagBeeld: dagBeeld, treffers: treffers, regel: regel, urenIn: urenIn, ams: ams, plaatsUit: plaatsUit, eldersKandidaten: eldersKandidaten, eldersZin: eldersZin } };
+module.exports = { maak: maak, _intern: { dagBeeld: dagBeeld, treffers: treffers, regel: regel, urenIn: urenIn, ams: ams, plaatsUit: plaatsUit, eldersKandidaten: eldersKandidaten, eldersZin: eldersZin, vroegTreffers: vroegTreffers, avondRegel: avondRegel, dagErna: dagErna } };

@@ -307,6 +307,107 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     const rd = await droog.w.doe({ droog: true, ams: { datum: DATUM, uur: 6, min: 40 } });
     toets('20 droog: regel terug, niets in de buffer', rd.droog && /Fopstad/.test(rd.regel) && droog.buffer.length === 0, rd);
   }
+  // 22. wv2605 (idee 28 § 9): avondseintje bij vroeg vertrek. Vandaag = di 10-11 (avond), morgen = wo 11-11 (DATUM)
+  {
+    const VANDAAG = '2026-11-10';
+    const avondProef = function (o) {
+      o = o || {};
+      const st = { aanroepen: [], berichten: [], log: [], box: [], buffer: [] };
+      const staatPad = o.staatPad || path.join(d, 'avond-' + Math.random().toString(36).slice(2) + '.json');
+      let klok = o.klok || [Date.parse(VANDAAG + 'T20:05:00Z')];   // 21:05 NL; een lijst = opeenvolgende nu()-waarden (laatste blijft)
+      const w = W.maak({ staatPad: staatPad,
+        sleutel: async () => (o.sleutel === undefined ? SLEUTEL : o.sleutel),
+        plekken: async () => PLEKKEN,
+        locatie: async () => ({ plek: 'Thuis', leeftijd_s: 60 }),
+        kalender: async (dt) => { st.kalDatum = dt; return o.kalender || []; },
+        werkRecent: async () => (o.werkRecent || { dagen: 0, plek: null }),
+        ophalen: async (url) => { st.aanroepen.push(url); if (o.ophalen) return o.ophalen(url, st.aanroepen.length); return { status: 200, json: o.thuis || onecall() }; },
+        bufferZet: async (dt, t) => { st.buffer.push(t); },
+        boxRij: (t) => { st.box.push(t); return true; },
+        melden: async (tekst, sl) => { if (o.meldFout && o.meldFout-- > 0) throw new Error('pod 500'); st.berichten.push({ tekst, sl }); },
+        log: (x) => st.log.push(JSON.stringify(x)),
+        nu: () => (klok.length > 1 ? klok.shift() : klok[0]) });
+      st.w = w; st.staatPad = staatPad;
+      st.tik = (a) => w.avond({ ams: Object.assign({ datum: VANDAAG, uur: 21, min: 5 }, a || {}) });
+      return st;
+    };
+    const vorstSneeuw = (i, u) => { if (i >= 5 && i <= 6) { u.temp = -1; u.snow = { '1h': 0.4 }; u.weather = [{ id: 600 }]; } };
+    // a. avond vóór een werkdag met vorst en neerslag in 05:00–07:00
+    const a = avondProef({ kalender: DIENST, thuis: onecall(vorstSneeuw) });
+    const ra = await a.tik();
+    toets('22a werkdag morgen + vorst/sneeuw 05–07: één bericht met gladheid en tijden', a.berichten.length === 1 && /^Weer morgenvroeg \(5–8 uur, je heenweg\): kans op gladheid \(5:00–7:00\)\.$/.test(a.berichten[0].tekst), [ra, a.berichten]);
+    toets('22a één ontdubbelsleutel per avond, kalender van morgen, één aanroep voor het Thuisvak', a.berichten[0] && a.berichten[0].sl === 'weer-avond-' + VANDAAG && a.kalDatum === DATUM && a.aanroepen.length === 1 && new URL(a.aanroepen[0]).searchParams.get('lat') === '51.9', [a.kalDatum, a.aanroepen.length]);
+    toets('22a niets in de ochtendbuffer, geen box-rij', a.buffer.length === 0 && a.box.length === 0);
+    const ra2 = await a.tik({ min: 10 });
+    toets('22a tweede tik dezelfde avond: al gedaan, geen tweede bericht of aanroep', ra2.al_gedaan === true && a.berichten.length === 1 && a.aanroepen.length === 1, ra2);
+    const ra3 = await a.tik({ datum: DATUM, uur: 21, min: 5 });
+    toets('22a volgende avond: weer een ronde (nieuwe datum)', !ra3.al_gedaan && a.aanroepen.length === 2, ra3);
+    // b. werkdag, droog en mild: niets, wel de ene aanroep
+    const b = avondProef({ kalender: DIENST });
+    const rb = await b.tik();
+    toets('22b werkdag zonder treffer: niets gemeld, één aanroep', b.berichten.length === 0 && b.aanroepen.length === 1 && rb.detail.gemeld === false && rb.detail.werkdag === true, rb);
+    // c. vrije dag morgen (geen dienst, geen Werk-afspraak, locatieweek 0) met gladheid: niets, maar de aanroep gebeurt wel (geen patroon)
+    const c = avondProef({ thuis: onecall(vorstSneeuw) });
+    const rc = await c.tik();
+    toets('22c vrije dag morgen met gladheid: niets gemeld, wel dezelfde ene aanroep', c.berichten.length === 0 && c.aanroepen.length === 1 && rc.detail.werkdag === false && rc.detail.treffers === 'gladheid', rc);
+    // d. werkdag via de locatieweek-regel (wo, ≥ 2 werkdagen); en za-avond voor zondag: geen werkdag
+    const dl = avondProef({ werkRecent: { dagen: 3, plek: 'Huisartsenpraktijk Groenhouten' }, thuis: onecall(vorstSneeuw) });
+    const rdl = await dl.tik();
+    toets('22d locatieweek-regel: werkdag, bericht', dl.berichten.length === 1 && rdl.detail.werk_bron === 'locatie_week', rdl);
+    const za = avondProef({ werkRecent: { dagen: 5, plek: 'Huisartsenpraktijk Tolgaarde' }, thuis: onecall(vorstSneeuw) });
+    const rza = await za.tik({ datum: '2026-11-14' });
+    toets('22d za-avond voor zondag (locatieweek telt niet in het weekend): niets', za.berichten.length === 0 && rza.detail.werkdag === false, rza);
+    // e. stille uren en venster
+    const e1 = avondProef({ kalender: DIENST, thuis: onecall(vorstSneeuw) });
+    const re1 = await e1.tik({ uur: 23, min: 5 });
+    const re0 = await e1.tik({ uur: 20, min: 55 });
+    const re2 = await e1.tik({ uur: 22, min: 30 });
+    toets('22e buiten 21:00–22:29 (20:55, 22:30, 23:05): geen aanroep, niets gemeld', re1.al_gedaan && re0.al_gedaan && re2.al_gedaan && e1.aanroepen.length === 0 && e1.berichten.length === 0, [re0, re2, re1]);
+    const e2 = avondProef({ kalender: DIENST, thuis: onecall(vorstSneeuw), klok: [Date.parse(VANDAAG + 'T22:01:00Z')] });   // de tik zag 22:29, bij het sturen is het 23:01
+    const re3 = await e2.tik({ uur: 22, min: 29 });
+    toets('22e ronde begon 22:29 maar het werd 23:01 vóór het sturen: niets gemeld (stille uren), avond klaar', e2.berichten.length === 0 && re3.detail.stille_uren === true && JSON.parse(fs.readFileSync(e2.staatPad, 'utf8')).avond_datum === VANDAAG, re3);
+    // f. rem 50: geen aanroep, niets
+    const fp = path.join(d, 'avond-rem.json');
+    fs.writeFileSync(fp, JSON.stringify({ teller_datum: VANDAAG, teller: 50 }));
+    const f = avondProef({ kalender: DIENST, thuis: onecall(vorstSneeuw), staatPad: fp });
+    const rf = await f.tik();
+    const rf2 = await f.tik({ min: 15 });
+    toets('22f rem 50 per dag: geen aanroep, niets gemeld, stil, avond klaar', f.aanroepen.length === 0 && f.berichten.length === 0 && /^rem 50/.test(rf.detail.fout) && rf2.al_gedaan === true && f.box.length === 0, rf);
+    // g. bezorging faalt: volgende tik opnieuw, hooguit 3 pogingen; API-fout idem stil
+    const g = avondProef({ kalender: DIENST, thuis: onecall(vorstSneeuw), meldFout: 1 });
+    const rg1 = await g.tik();
+    const rg2 = await g.tik({ min: 10 });
+    toets('22g bericht niet bezorgd: tweede tik bezorgt het (één bericht)', rg1.detail.gemeld === false && g.berichten.length === 1 && rg2.detail.gemeld === true, [rg1, rg2]);
+    const g3 = avondProef({ kalender: DIENST, ophalen: async () => ({ status: 503, json: null }) });
+    for (const mi of [5, 10, 15, 20]) await g3.tik({ min: mi });
+    toets('22g API 503: stil, geen box-rij, hooguit 3 rondes (2 aanroepen per ronde) en dan klaar', g3.berichten.length === 0 && g3.box.length === 0 && g3.aanroepen.length === 6, g3.aanroepen.length);
+    const g4 = avondProef({ kalender: DIENST, sleutel: null });
+    const rg4 = await g4.tik();
+    toets('22g geen sleutel: stil, geen aanroep', g4.aanroepen.length === 0 && g4.berichten.length === 0 && rg4.detail.fout === 'geen sleutel', rg4);
+    // h. storm, onweer en KNMI-waarschuwing in het venster; waarschuwing buiten het venster telt niet
+    const ALERT = (sU, eU, ev) => ({ sender_name: 'KNMI', event: ev, start: UUR0 + sU * 3600, end: UUR0 + eU * 3600 });
+    const h = avondProef({ kalender: DIENST, thuis: onecall((i, u) => { if (i === 6) { u.wind_gust = 23; u.weather = [{ id: 211 }]; } }, { alerts: [ALERT(3, 12, 'Code oranje wind'), ALERT(14, 20, 'Code geel onweer')] }) });
+    await h.tik();
+    const ht = h.berichten[0] && h.berichten[0].tekst;
+    toets('22h waarschuwing eerst, dan storm en onweer; waarschuwing van 14–20 niet', /^Weer morgenvroeg \(5–8 uur, je heenweg\): KNMI Code oranje wind tot 12:00; windstoten tot 85 km\/u; kans op onweer rond 6:00\.$/.test(ht || '') && !/geel/.test(ht), ht);
+    const h2 = avondProef({ kalender: DIENST, thuis: onecall((i, u) => { if (i === 9) { u.temp = -2; u.snow = { '1h': 1 }; u.weather = [{ id: 601 }]; } }, { alerts: [ALERT(10, 14, 'Code geel gladheid')] }) });
+    await h2.tik();
+    toets('22h gladheid en waarschuwing pas na 08:00: niets', h2.berichten.length === 0);
+    // i. droog: regel terug, niets gemeld, avond niet afgesloten
+    const dr = avondProef({ kalender: DIENST, thuis: onecall(vorstSneeuw) });
+    const rdr = await dr.w.avond({ ams: { datum: VANDAAG, uur: 14, min: 0 }, droog: true });
+    toets('22i droog (ook buiten het venster): regel terug, niets gemeld, avond niet afgesloten', rdr.droog && /gladheid/.test(rdr.regel) && dr.berichten.length === 0 && !JSON.parse(fs.readFileSync(dr.staatPad, 'utf8')).avond_datum, rdr);
+    // j. sleutel en appid nooit in bericht, log, staat of uitkomst; /health-info
+    const alles = JSON.stringify([a.berichten, a.log, fs.readFileSync(a.staatPad, 'utf8'), ra, g3.log, rf, a.w.info()]);
+    toets('22j sleutel en appid= nooit in bericht, log, staat of uitkomst', alles.indexOf(SLEUTEL) < 0 && !/appid=/i.test(alles), alles.slice(0, 300));
+    const inf = a.w.info();
+    toets('22j info: avond met laatste ronde en gemeld_op', inf.avond && inf.avond.gemeld_op === VANDAAG && inf.avond.laatste && inf.avond.laatste.voor, inf);
+    // k. server.js
+    const sv = fs.readFileSync('server.js', 'utf8');
+    toets('22k bron weer-avond in de vaste bronnenlijst en soort dag (seintje)', /\n\s+'weer-avond',\s+\/\/ wv2605/.test(sv.slice(sv.indexOf('const BERICHT_BRONNEN'), sv.indexOf('const MELD_SOORTEN'))) && /const MELD_SOORT = \{[^}]*'weer-avond': 'dag'/.test(sv));
+    toets('22k melden via berichtIntern naar het hoofdkanaal met ontdubbelsleutel', /berichtIntern\(\{ kanaal: 'hoofd', bron: 'weer-avond', klasse: 'normaal', soort: 'dag', tekst: tekst, sleutel: sl \}\)/.test(sv));
+    toets('22k eigen dagklok: elke 5 min, alleen echte pod en rol primair, nooit dubbel tegelijk', /if \(!weerOchtend \|\| typeof weerOchtend\.avond !== 'function' \|\| !SERVER_ECHT \|\| !rolPrimair\(\) \|\| weerAvondBezig\) return;/.test(sv) && /if \(weerOchtend && SERVER_ECHT\) \{ setInterval\(function \(\) \{ weerAvondTik\(\); \}, 5 \* 60000\)\.unref\(\); \}/.test(sv));
+  }
   // 21. server.js-koppeling wv2592
   {
     const sv = fs.readFileSync('server.js', 'utf8');
