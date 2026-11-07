@@ -117,7 +117,9 @@ fs.writeFileSync(LP, linkPagina());
 
 // ── het hele overzicht ──
 const uit = F.bereken(A, a, { vault: VAULT, paypal: null });
-const tekst = JSON.stringify(uit);
+// wv2596: het blok overzicht noemt tegenpartijen bij naam (opruimlijst, steekproef; Davids eigen App, wv1957) en heeft een eigen toets
+// (test/financien-overzicht.sh); de veld-voor-veldregels hieronder gelden voor de rest
+const tekst = JSON.stringify(Object.assign({}, uit, { overzicht: undefined }));
 toets('bereken: geen kapot blok', Array.isArray(uit.fouten) && uit.fouten.length === 0, uit.fouten);
 toets('privacy: geen IBAN, machtiging of incassant-ID in het antwoord', !/NL\d{2}[A-Z]{4}\d{6,}/.test(tekst) && !/Machtiging|Incassant|ZZZ999|43562|ST 1110/.test(tekst), tekst.match(/NL\d{2}[A-Z]{4}\d+|Machtiging|43562/));
 toets('veld voor veld: geen omschrijving en geen losse posten (Jan Jansen is een losse overboeking, Albert Heijn een losse betaling)', !/Jan Jansen|huur|vaste storting|Periodieke|SCHAAP CJ|Albert Heijn|sparen/.test(tekst), tekst.match(/Jan Jansen|SCHAAP CJ|Albert Heijn/));
@@ -173,7 +175,7 @@ toets('bewust: PayPal-dubbel gedempt; rij zonder woord van David dempt niets (Kr
 {
   const B = Object.assign({}, A, { stroom: () => { throw new Error('tegenpartij Jan Jansen kapot'); } });
   const u3 = F.bereken(B, a, { vault: VAULT });
-  toets('kapot blok: alleen stroom en buffer leeg, rest gevuld, foutnaam zonder inhoud', u3.fouten.indexOf('stroom') >= 0 && u3.buffer === null && u3.vaste_lasten && u3.verloop && !/Jan Jansen/.test(JSON.stringify(u3)), u3.fouten);
+  toets('kapot blok: alleen stroom en buffer leeg, rest gevuld, foutnaam zonder inhoud', u3.fouten.indexOf('stroom') >= 0 && u3.buffer === null && u3.vaste_lasten && u3.verloop && !/Jan Jansen/.test(JSON.stringify(Object.assign({}, u3, { overzicht: undefined }))), u3.fouten);
 }
 
 // ── wv2258: saldi per rekening (de bewaarde stand, geen bankopvraag) ──
@@ -297,7 +299,7 @@ toets('bewust: PayPal-dubbel gedempt; rij zonder woord van David dempt niets (Kr
   toets('bank-lezer app-financien: ok, zonder kluissleutels, zelfde vorm', r.status === 0 && j && j.ok === true && j.vaste_lasten && Array.isArray(j.signalen) && j.paypal && j.paypal.actief === 0, [r.status, String(r.stderr).slice(0, 300), j && Object.keys(j)]);
   toets('bank-lezer app-financien: blok saldi uit de bewaarde standen (Privé eigen, de externe rekening gemarkeerd)', j && j.saldi && j.saldi.rekeningen.length === 2 &&
     j.saldi.rekeningen.some((x) => x.naam === 'Privé' && x.saldo === 4321 && x.groep === 'eigen') && j.saldi.rekeningen.some((x) => x.groep === 'extern' && x.saldo === 55) && j.saldi.zonder_stand === 2, j && j.saldi);
-  toets('server.js: GET /app/financien geeft het blok saldi door', /'gambia', 'saldi'\]\.forEach\(function \(k\) \{ d\[k\]/.test(fs.readFileSync('server.js', 'utf8')), null);
+  toets('server.js: GET /app/financien geeft het blok saldi door', /'gambia', 'saldi'(, 'overzicht')?\]\.forEach\(function \(k\) \{ d\[k\]/.test(fs.readFileSync('server.js', 'utf8')), null);
   // wv2292: app-rekening (Bewerk in Saldi) en gezin via de CLI, zoals de pod het aanroept
   const kind = (op, inv) => { const q = spawnSync(process.execPath, ['--no-warnings', 'bank-lezer.js', op], { input: JSON.stringify(inv), env: { PATH: process.env.PATH, BANK_DIR: BD, TZ: 'Europe/Amsterdam' }, encoding: 'utf8', timeout: 60000 });
     try { return JSON.parse(String(q.stdout).trim().split('\n').pop()); } catch (e) { return { stdout: String(q.stdout).slice(0, 200), stderr: String(q.stderr).slice(0, 200) }; } };

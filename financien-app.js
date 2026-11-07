@@ -437,6 +437,8 @@ function bereken(A, a, o) {
   blok('dubbel', function () { signaalDubbel(A, a, L.links, signalen, true); });
   uit.paypal = ppD ? blok('paypal', function () { return blokPaypal(ppD, L.links, signalen, A); }) : null;
   uit.saldi = o.saldi ? blok('saldi', function () { return blokSaldi(a, o.saldi); }) : null;   // wv2258: alleen via bank-lezer (de bewaarde standen)
+  // wv2596 (Financiën 8+, stap 1 en 2): stromen en de vier kerngetallen (financien-overzicht.js); een fout maakt alleen dit blok leeg
+  uit.overzicht = blok('overzicht', function () { return require('./financien-overzicht.js').overzicht(A, a, { nu: nu, vanaf: vanaf, saldi: uit.saldi, vault: o.vault || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain' }); });
   // één signaal per soort en post (een PayPal-dienst op zijn dienst, wv909: de titel van een onbekende dienst draagt de incassodag, die
   // in de bank en in de ontvangstbewijzen een dag kan verschillen); gedempt wat David al kent (Bewust-tabel)
   const gezien = new Set();

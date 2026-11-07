@@ -1382,6 +1382,20 @@ const opdrachten = {
     ['naam', 'van_wie', 'labels'].forEach(function (k) { if (Object.hasOwn(q, k)) o[k] = q[k]; });
     try { return Object.assign({ id: q.id }, x.A.rekeningWeergave(x.a, o)); } catch (e) { throw new Weigering(e.message); }
   },
+  // wv2596 (Financiën 8+): de boekingen achter een getal van het overzicht (filter uit dat overzicht) en Davids keuze van de stroom per
+  // tegenpartij; alleen voor POST /app/financien/boekingen en /app/financien/stroom (financien-overzicht.js)
+  async 'app-boekingen'() {
+    const x = archiefKlaar(), q = geheim.boekingen;
+    if (!q || typeof q !== 'object' || Array.isArray(q)) throw new Weigering('filter ontbreekt');
+    try { return Object.assign({ ok: true }, require(path.join(__dirname, 'financien-overzicht.js')).boekingenLijst(x.A, x.a, { filter: q, vault: process.env.VAULT_DIR || '/opt/data/AI_SecondBrain' })); }
+    catch (e) { throw new Weigering(e.message); }
+  },
+  async 'app-stroom'() {
+    const x = archiefKlaar(), q = geheim.stroom;
+    if (!q || typeof q !== 'object' || Array.isArray(q)) throw new Weigering('keuze ontbreekt');
+    try { return Object.assign({ ok: true }, require(path.join(__dirname, 'financien-overzicht.js')).stroomZet(x.A, x.a, { id: q.id, stroom: q.stroom, subsoort: q.subsoort })); }
+    catch (e) { throw new Weigering(e.message); }
+  },
   // wv2292: de gezinsleden die in Saldi als "van wie" te kiezen zijn. Alleen machinekamer, alleen via de CLI (stdin {kinderen: [...]}),
   // niet via /smal/bank of de App; de namen staan alleen in het archief (meta), nooit in de code.
   async gezin() {
