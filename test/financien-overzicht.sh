@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Toetst financien-overzicht.js (wv2596, OVIS Financiën 8+ stap 1 en 2; ontwerp vault "01_Ontwikkeling/OVIS Financiën 8+ (ontwerp 7-11-2026)")
+# Toetst financien-overzicht.js en financien-advies.js (wv2596 + wv2620, OVIS Financiën 8+ stap 1–4; ontwerp vault "01_Ontwikkeling/OVIS Financiën 8+ (ontwerp 7-11-2026)")
 # op een nagebootste transactiedatabase: elke privéboeking één stroom (de hypotheektermijn in aflossing + rente), som van de stromen = som
 # van de boekingen per maand, POT en extern buiten beeld, Holding-privéopname en terugstorting = verschuiven, loon = inkomen, onzeker in de
 # opruimlijst; de vier kerngetallen reproduceerbaar uit hun onderbouwing (elke regel = de som van zijn boekingenlijst); privé en Holding
@@ -167,12 +167,104 @@ if (O) {
     k4 = kind('app-stroom', { stroom: { id: won.id, stroom: 'onzin' } }), k5 = kind('app-stroom', { stroom: { id: won.id, stroom: null } });
   toets('bank-lezer app-boekingen/app-stroom: lijst met bedragen, geen IBAN; fout filter of stroom geweigerd; null wist', k1.ok === true && k1.aantal > 0 && !/NL\d{2}[A-Z]{4}\d{6,}/.test(JSON.stringify(k1)) &&
     k2.ok === false && k3.ok === true && k3.stroom === 'leven' && k4.ok === false && k5.ok === true && k5.stroom === null, [k1.ok, k1.aantal, k2, k3, k4, k5]);
+  // ── wv2620 stap 3: uitgaven per categorie, eigenaar, uitschieters, nieuw terugkerend ──
+  const ug = o.uitgaven;
+  toets('uitgaven: blok aanwezig; maand = laatste volle maand, vorig jaar = 12 eerder', ug && ug.maand === m0 && ug.lopend === mNu && ug.vorig_jaar === F.maandPlus(m0, -12) && ug.maanden === 12, ug && [ug.maand, ug.vorig_jaar, o.fouten]);
+  if (ug) {
+    const levNu = -lijst({ van: m0, tot: m0, stroom: 'leven' }).som, lev12 = -lijst({ van: mnd[2], tot: m0, stroom: 'leven' }).som;
+    toets('uitgaven: som per categorie = som boekingen leven (laatste maand en 12 maanden), = trend', Math.abs(ug.totaal.nu - levNu) < 0.02 && Math.abs(ug.totaal.gem12 - lev12 / 12) < 0.05 &&
+      Math.abs(ug.totaal.nu - o.trend[o.trend.length - 1].leven) < 0.02, [ug.totaal, levNu, lev12 / 12]);
+    const catOk = ug.categorieen.every((c) => Math.abs(c.nu + lijst(c.filter.nu).som) < 0.02 && Math.abs(c.gem12 + lijst(c.filter.twaalf).som / 12) < 0.02 &&
+      (c.vorig_jaar == null || Math.abs(c.vorig_jaar + lijst(c.filter.vorig_jaar).som) < 0.02) && Math.abs(c.lopend + lijst(c.filter.lopend).som) < 0.02);
+    toets('uitgaven: elke staaf = zijn boekingenlijst (nu, lopend, gemiddelde, vorig jaar; zonder categorie via cat "-")', catOk, ug.categorieen.map((c) => [c.categorie, c.nu, lijst(c.filter.nu).som]));
+    const vak = ug.categorieen.find((c) => c.categorie === 'vakantie en reizen'), bo = ug.categorieen.find((c) => c.categorie === 'boodschappen');
+    toets('uitgaven: kleur alleen bij > 25 % én > € 100 (vakantie 0 tegen gemiddeld 333 = lager; boodschappen ± gelijk = geen)', vak && vak.afwijking === 'lager' && bo && bo.afwijking === null, [vak, bo]);
+    const ki = ug.eigenaren.find((e) => e.eigenaar === 'kinderen');
+    toets('uitgaven per eigenaar: som = totaal; kinderen 10 per maand, filter eig klopt', Math.abs(ug.eigenaren.reduce((s, e) => s + e.nu, 0) - ug.totaal.nu) < 0.02 && ki && ki.nu === 10 &&
+      Math.abs(lijst(ki.filter.nu).som + 10) < 0.01 && (() => { try { lijst({ van: m0, tot: m0, eig: 'Iemand' }); return false; } catch (e) { return /eigenaar/.test(e.message); } })(), ug.eigenaren);
+  }
+  // uitschieters en nieuw op losse delen (pure functie)
+  const dl = [], mk = (m, d, bedrag, extra) => dl.push(Object.assign({ nr: dl.length + 1, datum: m + '-' + String(d).padStart(2, '0'), maand: m, stroom: 'leven', deel: bedrag, bedrag: bedrag, sleutel: 't:winkel', id: 'a'.repeat(16), cat: 'huishouden', tegenpartij: 'Winkel', eig: 'David', abo: null }, extra || {}));
+  mnd.forEach((m) => mk(m, 5, -50));
+  mk(m0, 20, -400);                                                       // 8× de gebruikelijke 50: uitschieter
+  mk(m0, 21, -140);                                                       // 2,8×: geen
+  mk(F.maandPlus(mNu, -2), 3, -9.99, { sleutel: 't:dienst', tegenpartij: 'Nieuwe Dienst', abo: 'r1', cat: 'abonnementen en communicatie' });
+  mk(F.maandPlus(mNu, -1), 3, -9.99, { sleutel: 't:dienst', tegenpartij: 'Nieuwe Dienst', abo: 'r1', cat: 'abonnementen en communicatie' });
+  mk(mnd[0], 3, -5, { sleutel: 't:oud', tegenpartij: 'Oude Dienst', abo: 'r2' }); mk(m0, 3, -5, { sleutel: 't:oud', tegenpartij: 'Oude Dienst', abo: 'r2' });
+  const U = O.uitgaven(dl, { mNu: mNu, twaalf: mnd.slice(2), vanaf: mnd[0] });
+  toets('uitschieters: boven 3× de gebruikelijke post en ≥ € 100 erboven (400 tegen 50 wel, 140 niet); nieuw terugkerend alleen de reeks van < 4 maanden',
+    U.uitschieters.length === 1 && U.uitschieters[0].bedrag === 400 && U.uitschieters[0].gebruikelijk === 50 && U.uitschieters[0].basis === 'tegenpartij' &&
+    U.nieuw.length === 1 && U.nieuw[0].naam === 'Nieuwe Dienst' && U.nieuw[0].aantal === 2, [U.uitschieters, U.nieuw]);
+  toets('nieuw terugkerend: niets als het archief jonger is dan 6 maanden', O.uitgaven(dl, { mNu: mNu, twaalf: mnd.slice(2), vanaf: F.maandPlus(mNu, -3) }).nieuw.length === 0, null);
+  // ── wv2620 stap 4: adviesregels A1–A5 ──
+  let D = null; try { D = require(path.resolve('financien-advies.js')); } catch (e) { D = null; }
+  toets('financien-advies.js bestaat en laadt', !!D, null);
+  if (D) {
+    const rv = F.maandPlus(mNu, 12) + '-01';
+    const nv2 = Object.assign({}, nepVault, { hypotheek: Object.assign({}, nepVault.hypotheek, { bron: Object.assign({}, nepVault.hypotheek.bron, { bank: 'proefbank', rentevast: 'proef-excel' }),
+      delen: [{ deel: '1', rente_bank: 1.0, restschuld_bank: 100000, rentevast_tm: '2031-01-01', soort: 'Lineair' }, { deel: '2', rente_bank: 4.5, restschuld_bank: 50000, rentevast_tm: rv, soort: 'Lineair', doel: 'Proef' }] }) });
+    const FV2 = Object.assign({}, FV, { lees: () => nv2 });
+    fs.mkdirSync(path.join(VAULT, '20_Prive', 'Financien'), { recursive: true });
+    const PE = path.join(VAULT, '20_Prive', 'Financien', 'Energieverbruik thuis (Tibber).md');
+    const tab = '# Energie\n\n| Uur | 0–6 | 11–16 | 18–22 |\n|---|--:|--:|--:|\n| kWh per uur | 1,5 | 1,6 | 3,0 |\n| Prijs (ct/kWh, alles-in) | 26,7–28,9 | 20,5–25,3 | 30,8–33,8 |\n';
+    fs.writeFileSync(PE, tab);
+    const sig = [{ soort: 'duurder', titel: 'Proefstroom', per_jaar: 120, zin: 'Proefstroom kost nu meer.' }, { soort: 'nieuw', titel: 'Kleintje', per_jaar: 24, zin: 'Kleintje is nieuw.' },
+      { soort: 'weg', titel: 'Weg', zin: 'weg' }, { soort: 'dubbel', titel: 'Zonder bedrag', zin: 'dubbel' }];
+    const vaste = { rijen: [{ naam: 'Proefverzekering', ritme: 'maand', categorie: 'verzekeringen', per_maand: 30 }, { naam: 'Jaarpolis', ritme: 'jaar', categorie: 'verzekeringen', per_maand: 10 }] };
+    const adv = (x) => D.advies(A, a, Object.assign({ ov: o, saldi: saldi, signalen: sig, vaste: vaste, nu: vandaag, vault: VAULT, fv: FV2 }, x || {}));
+    const r = adv(), by = (re) => r.adviezen.filter((x) => re.test(x.regel));
+    toets('advies: zonder fout; elk advies met bedrag reproduceerbaar uit zijn invoer (REGELS.reken)', !r.fouten.length && r.adviezen.length >= 5 && r.adviezen.filter((x) => x.euro_jaar != null || x.band).every((x) => {
+      const u = D.REGELS[x.regel].reken(x.invoer, D.TARIEVEN); return u && u.euro_jaar === x.euro_jaar && JSON.stringify(u.band) === JSON.stringify(x.band); }), r);
+    const a1 = by(/A1/)[0];
+    toets('A1: duurste deel (4,5 %), alleen bandbreedte en laat toetsen, deadline bij rentevast < 24 maanden; 130–325 per € 10.000', a1 && a1.zekerheid === 'laat toetsen' && a1.euro_jaar === null &&
+      a1.band.laag === Math.round((4.5 * (1 - 0.3756) - 1.51) * 100) && a1.band.hoog === Math.round((4.5 - 1.25) * 100) && a1.prioriteit === 'deadline' && /laat het toetsen/.test(a1.zin) && /deel 2/.test(a1.zin), a1);
+    const a2 = by(/A2/)[0], lpm = o.buffer.leven_per_maand;
+    toets('A2: (saldo zonder rente − 2 × leven) × spaarrente laag; schatting', a2 && a2.zekerheid === 'schatting' && a2.invoer.saldo === 12000 && a2.euro_jaar === Math.round((12000 - 2 * lpm) * 0.0125), [a2, lpm]);
+    const a3 = by(/A3/)[0];
+    toets('A3 zonder aanwijzing: signaal zonder bedrag, niet op het startscherm', a3 && a3.zekerheid === 'signaal' && a3.euro_jaar === null && !a3.op_start && /18–22/.test(a3.zin), a3);
+    fs.writeFileSync(PE, tab + '\n## Schuifbaar\n\n| Schuifbaar | kWh per jaar |\n|---|--:|\n| auto laden | 1.000 |\n');
+    const a3b = adv().adviezen.find((x) => x.regel === 'A3');
+    toets('A3 met aanwijzing: kWh × (duurst − goedkoopst), laag = minst gunstige grens', a3b && a3b.zekerheid === 'schatting' && a3b.euro_jaar === Math.round((30.8 - 25.3) * 10) && a3b.band.hoog === Math.round((33.8 - 20.5) * 10), a3b);
+    fs.writeFileSync(PE, tab);
+    const a4 = by(/A4/);
+    toets('A4: alleen duurder/prijsstap/dubbel/nieuw met bedrag, zeker, jaarbedrag uit het signaal; < € 50 niet op het startscherm', a4.length === 2 && a4.every((x) => x.zekerheid === 'zeker') &&
+      a4.find((x) => x.euro_jaar === 120).op_start === true && a4.find((x) => x.euro_jaar === 24).op_start === false, a4);
+    const a5 = by(/A5/)[0];
+    toets('A5: signaal zonder bedrag (alleen maandbetaalde verzekeringen)', a5 && a5.euro_jaar === null && a5.invoer.aantal === 1 && a5.zekerheid === 'signaal', a5);
+    const zk = ['zeker', 'schatting', 'laat toetsen', 'signaal'], rang = (x) => (x.prioriteit === 'risico' ? 0 : x.prioriteit === 'deadline' ? 1 : 2);
+    toets('volgorde: risico/deadline → zekerheid → euro\'s; startscherm hooguit 3, alleen bedrag ≥ € 50', r.adviezen[0].regel === 'A1' && r.adviezen.every((x, i, l) => i === 0 || rang(l[i - 1]) < rang(x) ||
+      (rang(l[i - 1]) === rang(x) && (zk.indexOf(l[i - 1].zekerheid) < zk.indexOf(x.zekerheid) || (zk.indexOf(l[i - 1].zekerheid) === zk.indexOf(x.zekerheid) && (l[i - 1].waarde || 0) >= (x.waarde || 0))))) &&
+      r.start.length <= 3 && r.adviezen.filter((x) => x.op_start).every((x) => x.waarde >= 50), r.adviezen.map((x) => [x.regel, x.prioriteit, x.zekerheid, x.waarde, x.op_start]));
+    const rr = adv({ saldi: { rekeningen: saldi.rekeningen.concat([{ id: 'z1', naam: 'Groot', groep: 'eigen', bank: 'bunq', valuta: 'EUR', saldo: 150000 }]) } });
+    toets('depositogarantie: saldo boven € 100.000 bij één bank = risico, bovenaan', rr.adviezen[0].regel === 'A2' && rr.adviezen[0].prioriteit === 'risico' && rr.adviezen[0].bronnen.some((b) => /depositogarantie/.test(b.tekst)), rr.adviezen[0]);
+    const zt = adv({ tarieven: { depositogarantie: D.TARIEVEN.depositogarantie } });
+    toets('zonder tarief geen advies: zonder spaarrente en aftrektarief geen A1 en A2, wel in ontbreekt', !zt.adviezen.some((x) => /^A[12]$/.test(x.regel)) &&
+      zt.ontbreekt.some((x) => x.regel === 'A1' && /spaarrente/.test(x.waarom)) && zt.ontbreekt.some((x) => x.regel === 'A2'), zt.ontbreekt);
+    const zt2 = adv({ tarieven: { spaarrente: D.TARIEVEN.spaarrente } });
+    toets('zonder aftrektarief voor dit jaar: geen A1', !zt2.adviezen.some((x) => x.regel === 'A1') && zt2.ontbreekt.some((x) => x.regel === 'A1' && /aftrektarief/.test(x.waarom)), zt2.ontbreekt);
+    const asrc = fs.readFileSync('financien-advies.js', 'utf8').replace(/^\s*(\*|\/\/).*$/gm, '');
+    toets('financien-advies.js: geen netwerk, geen proces, schrijft niets', !/require\(['"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads)['"]\)/.test(asrc) && !/\bfetch\s*\(/.test(asrc) &&
+      !/INSERT|UPDATE|DELETE|CREATE|db\.exec|writeFile|appendFile|unlink|rename/.test(asrc), null);
+    // integratie: bereken geeft overzicht.uitgaven en overzicht.advies; signalen dragen per_jaar
+    const ub = F.bereken(A, a, { vault: VAULT, saldi: [] });
+    toets('financien-app bereken: overzicht.uitgaven en overzicht.advies zonder fout', ub.overzicht && ub.overzicht.uitgaven && ub.overzicht.advies && Array.isArray(ub.overzicht.advies.adviezen) &&
+      ub.fouten.indexOf('advies') < 0 && ub.overzicht.fouten.indexOf('uitgaven') < 0, [ub.fouten, ub.overzicht && ub.overzicht.fouten]);
+    // vaste-lastenrekening: een tweede niet-bunq-rekening op Davids naam (zoals sinds 4-11-2026) laat de gezamenlijke staan
+    const voor = F.bereken(A, a, { vault: VAULT, saldi: [] }).vaste_lasten;
+    A.rekeningenSync(a, Object.assign({}, REK, { eb: { bron: 'enablebanking', uid: 'u9', bank: 'Proefbank', label: 'Eigen', naam: 'D VOORBEELD', iban: 'NL88RABO0000000088', sessie: 's9' } }));
+    A.corrigeer(a, { rek: 'eb', eigenaar: 'David' });
+    const na = F.bereken(A, a, { vault: VAULT, saldi: [] }).vaste_lasten;
+    toets('vaste lasten: tweede niet-bunq-rekening (eigenaar David) → nog steeds de gezamenlijke rekening', voor && !voor.geen && na && !na.geen && na.rekening === voor.rekening, [voor && (voor.geen || voor.rekening), na && (na.geen || na.rekening)]);
+  }
   const src = fs.readFileSync('financien-overzicht.js', 'utf8').replace(/^\s*(\*|\/\/).*$/gm, '');
   toets('financien-overzicht.js laadt geen netwerk- of procesmodule; schrijven alleen in stroomZet', !/require\(['"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads)['"]\)/.test(src) && !/\bfetch\s*\(/.test(src) &&
     !/INSERT|UPDATE|DELETE|CREATE TABLE|db\.exec/.test(src.slice(0, src.indexOf('function stroomZet'))) && !/writeFile|appendFile|unlink/.test(src), null);
 }
 toets('uitrol.sh en Dockerfile: financien-overzicht.js gaat mee in de release', /RELEASE_OPTIONEEL="[^"]*\bfinancien-overzicht\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&
   /COPY financien-overzicht\.js \/app\/release-bootstrap\/financien-overzicht\.js/.test(fs.readFileSync('Dockerfile', 'utf8')), null);
+toets('uitrol.sh en Dockerfile: financien-advies.js gaat mee in de release (wv2620)', /RELEASE_OPTIONEEL="[^"]*\bfinancien-advies\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&
+  /COPY financien-advies\.js \/app\/release-bootstrap\/financien-advies\.js/.test(fs.readFileSync('Dockerfile', 'utf8')), null);
+toets('server.js: filter eig (uitgaven per eigenaar) doorgelaten, alleen de vijf groepen', /if \(f\.eig != null\) \{ if \(\['David', 'samen', 'kinderen', 'Gambia', 'anders'\]\.indexOf\(f\.eig\) < 0\) return null; q\.eig = f\.eig; \}/.test(fs.readFileSync('server.js', 'utf8')), null);
 const srv = fs.readFileSync('server.js', 'utf8');
 toets('server.js: overzicht doorgegeven; routes boekingen en stroom; app-boekingen/app-stroom in BANK_LOKAAL, niet in BANK_OPDRACHTEN', /'saldi', 'overzicht'\]\.forEach/.test(srv) &&
   /route === 'POST \/app\/financien\/boekingen'\) return appFinBoekingen\(/.test(srv) && /route === 'POST \/app\/financien\/stroom'\) return appFinStroom\(/.test(srv) &&

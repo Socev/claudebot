@@ -11632,6 +11632,7 @@ function appFinFilter(d) {
   if (f.sub != null) { if (!/^[a-z_]{1,20}$/.test(String(f.sub))) return null; q.sub = f.sub; }
   if (f.cat != null) { if (typeof f.cat !== 'string' || f.cat.length > 60) return null; q.cat = f.cat; }
   if (f.eenmalig != null) { if (typeof f.eenmalig !== 'boolean') return null; q.eenmalig = f.eenmalig; }
+  if (f.eig != null) { if (['David', 'samen', 'kinderen', 'Gambia', 'anders'].indexOf(f.eig) < 0) return null; q.eig = f.eig; }   // wv2620: uitgaven per eigenaar
   if (f.id != null) { if (!/^[a-f0-9]{16}$/.test(String(f.id))) return null; q.id = f.id; }
   return q;
 }

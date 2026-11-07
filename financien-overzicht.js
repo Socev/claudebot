@@ -70,6 +70,9 @@ function sleutelVan(t) {
   return GEMENGD.test(String(t.tegenpartij || '')) || ENTITEIT.test(String(t.tegenpartij || '')) ? 'g:' + tp + '|' + (t.categorie || '-') : 't:' + tp;
 }
 function richting(b) { return b < 0 ? 'af' : 'bij'; }
+// eigenaar van een boeking (verrijking) in de vier groepen van het ontwerp § 3.3; de rest 'anders'
+const EIGENAREN = ['David', 'samen', 'kinderen', 'Gambia', 'anders'];
+function eigenaarVan(e) { const x = String(e || '').toLowerCase(); return x === 'david' ? 'David' : x === 'samen' ? 'samen' : x === 'kind' ? 'kinderen' : /gambia/.test(x) ? 'Gambia' : 'anders'; }
 function idVan(sleutel, r) { return crypto.createHash('sha256').update('stroom:' + sleutel + '|' + r).digest('hex').slice(0, 16); }
 
 function regelsLees(a) {
@@ -122,7 +125,7 @@ function indelen(t, c) {
 
 // Alle privéboekingen van de maanden [van, tot] (JJJJ-MM), elk in delen. aflossing = verplichte aflossing per maand (hypotheekmodel) of null.
 function boekingen(a, van, tot, aflossing) {
-  const rijen = a.db.prepare("SELECT t.nr, t.rek, t.datum, t.bedrag, t.valuta, t.tegenpartij, t.omschrijving, v.type, v.categorie, v.subcategorie, v.abonnement_id," +
+  const rijen = a.db.prepare("SELECT t.nr, t.rek, t.datum, t.bedrag, t.valuta, t.tegenpartij, t.omschrijving, v.type, v.categorie, v.subcategorie, v.abonnement_id, v.eigenaar AS v_eigenaar," +
     ' (SELECT p.rek FROM transacties p WHERE p.nr = v.intern_paar) AS paar_rek, r.label, r.naam, r.weergavenaam FROM transacties t JOIN verrijking v ON v.nr = t.nr JOIN rekeningen r ON r.rek = t.rek' +
     " WHERE t.status IN ('booked', 'pending') AND lower(coalesce(r.eigenaar, '')) NOT IN ('extern', 'pot') AND t.datum >= ? AND t.datum <= ? ORDER BY t.datum, t.nr").all(van + '-01', tot + '-31');
   const zichtbaar = new Set(a.db.prepare("SELECT rek FROM rekeningen WHERE lower(coalesce(eigenaar, '')) NOT IN ('extern', 'pot')").all().map(function (r) { return r.rek; }));
@@ -147,7 +150,7 @@ function boekingen(a, van, tot, aflossing) {
     t._sleutel = sleutelVan(t);
     const d = indelen(t, c), m = t.datum.slice(0, 7);
     const basis = { nr: t.nr, datum: t.datum, maand: m, rekening: veilig(t.weergavenaam || t.label || t.naam, 30) || 'eigen rekening', tegenpartij: veilig(zonderIban(t.tegenpartij), 40) || null,
-      omschrijving: veilig(zonderIban(omsKern(t.omschrijving)), 80) || null, bedrag: t.bedrag, sleutel: t._sleutel, id: idVan(t._sleutel, richting(t.bedrag)), zeker: d.zeker, waarom: d.waarom, cat: d.cat || null };
+      omschrijving: veilig(zonderIban(omsKern(t.omschrijving)), 80) || null, bedrag: t.bedrag, sleutel: t._sleutel, id: idVan(t._sleutel, richting(t.bedrag)), zeker: d.zeker, waarom: d.waarom, cat: d.cat || null, eig: eigenaarVan(t.v_eigenaar), abo: t.abonnement_id || null };
     // hypotheektermijn: het aflossingsdeel (hooguit de verplichte aflossing per maand) is verschuiven/verplicht, de rest leven (rente)
     if (d.waarom.indexOf('hypotheektermijn') === 0 && aflossing > 0) {
       const deel = r2(Math.min(-t.bedrag, aflossing));   // per termijn één maand aflossing (31-12 en 1-12 zijn twee termijnen)
@@ -178,6 +181,88 @@ function perMaand(delen) {
     if (x.stroom === 'verschuiven' && x.sub) s[x.sub] += x.deel;
   });
   return m;
+}
+// ── stap 3: uitgaven die je begrijpt (ontwerp § 3.3) ──
+// Alleen de stroom leven, netto (een terugbetaling telt negatief), als positief bedrag = uitgegeven. Per categorie: de laatste volle maand,
+// de lopende maand tot nu, het gemiddelde van de 12 volledige maanden en dezelfde maand een jaar eerder (alleen als die in het archief
+// staat). Kleur (afwijking) alleen bij > 25 % én > € 100 tegen het gemiddelde. Zonder categorie = sleutel '-' (filter cat '-').
+// Uitschieters: een uitgave in de laatste drie maanden boven 3× de gebruikelijke post (mediaan van de andere posten) bij die tegenpartij
+// (≥ 3 andere posten) of anders bij die categorie (≥ 10 andere posten), en minstens € 100 erboven. Nieuw terugkerend: een reeks van de
+// verrijking (abonnement_id) met ≥ 2 posten waarvan de eerste in de laatste vier maanden valt (alleen als het archief ≥ 6 maanden ouder is).
+const AFWIJK_PCT = 0.25, AFWIJK_EUR = 100, UIT_FACTOR = 3, UIT_MIN = 100;
+function mediaan(l) { const x = l.slice().sort(function (p, q) { return p - q; }), n = x.length; return n ? (n % 2 ? x[(n - 1) / 2] : (x[n / 2 - 1] + x[n / 2]) / 2) : null; }
+function afwijking(nu, gem) { if (nu == null || gem == null) return null; const d = nu - gem; return Math.abs(d) > AFWIJK_EUR && Math.abs(d) > AFWIJK_PCT * Math.abs(gem) ? (d > 0 ? 'hoger' : 'lager') : null; }
+function zonderSleutel(g) { const x = Object.assign({}, g); delete x.sleutel; return x; }
+function uitgaven(delen, o) {
+  const mNu = o.mNu, twaalf = o.twaalf, n12 = twaalf.length, mVol = twaalf[n12 - 1] || null, mVj = mVol ? maandPlus(mVol, -12) : null;
+  const vjOk = !!(mVj && (!o.vanaf || mVj >= o.vanaf)), in12 = new Set(twaalf);
+  const leven = delen.filter(function (x) { return x.stroom === 'leven'; });
+  const groep = function (sleutel) {
+    const m = new Map();
+    leven.forEach(function (x) {
+      const k = sleutel(x);
+      if (!m.has(k)) m.set(k, { nu: 0, lopend: 0, twaalf: 0, vj: 0 });
+      const g = m.get(k);
+      if (x.maand === mVol) g.nu -= x.deel;
+      if (x.maand === mNu) g.lopend -= x.deel;
+      if (in12.has(x.maand)) g.twaalf -= x.deel;
+      if (vjOk && x.maand === mVj) g.vj -= x.deel;
+    });
+    return Array.from(m.entries()).map(function (e) {
+      const g = e[1], gem = n12 ? g.twaalf / n12 : null;
+      return { sleutel: e[0], nu: r2(g.nu), lopend: r2(g.lopend), gem12: gem == null ? null : r2(gem), vorig_jaar: vjOk ? r2(g.vj) : null, afwijking: afwijking(g.nu, gem) };
+    }).filter(function (g) { return g.nu || g.lopend || g.gem12 || g.vorig_jaar; }).sort(function (p, q) { return (q.gem12 || 0) - (p.gem12 || 0) || q.nu - p.nu; });
+  };
+  const fl = function (m, extra) { return m ? Object.assign({ van: m, tot: m, stroom: 'leven' }, extra) : null; };
+  const f12 = function (extra) { return n12 ? Object.assign({ van: twaalf[0], tot: mVol, stroom: 'leven' }, extra) : null; };
+  const cats = groep(function (x) { return x.cat || '-'; }).map(function (g) {
+    const e = { cat: g.sleutel }, naam = g.sleutel === '-' ? 'nog niet ingedeeld' : g.sleutel;
+    return Object.assign({ categorie: naam, zonder: g.sleutel === '-' || undefined }, zonderSleutel(g), { filter: { nu: fl(mVol, e), lopend: fl(mNu, e), twaalf: f12(e), vorig_jaar: vjOk ? fl(mVj, e) : null } });
+  });
+  const eig = groep(function (x) { return x.eig || 'anders'; }).map(function (g) {
+    const e = { eig: g.sleutel };
+    return Object.assign({ eigenaar: g.sleutel }, zonderSleutel(g), { filter: { nu: fl(mVol, e), lopend: fl(mNu, e), twaalf: f12(e), vorig_jaar: vjOk ? fl(mVj, e) : null } });
+  }).sort(function (p, q) { return EIGENAREN.indexOf(p.eigenaar) - EIGENAREN.indexOf(q.eigenaar); });
+  const som = function (k) { return r2(cats.reduce(function (s, c) { return s + (c[k] || 0); }, 0)); };
+  // uitschieters
+  const uitg = leven.filter(function (x) { return x.deel < 0 && x.deel === x.bedrag; });   // geen deel van een gesplitste hypotheektermijn
+  const perTp = new Map(), perCat = new Map();
+  uitg.forEach(function (x) {
+    if (!perTp.has(x.sleutel)) perTp.set(x.sleutel, []);
+    perTp.get(x.sleutel).push(x);
+    if (x.cat) { if (!perCat.has(x.cat)) perCat.set(x.cat, []); perCat.get(x.cat).push(x); }
+  });
+  const sinds3 = maandPlus(mNu, -2), uitschieters = [];
+  uitg.forEach(function (x) {
+    if (x.maand < sinds3) return;
+    const ander = function (l) { return (l || []).filter(function (y) { return y.nr !== x.nr; }).map(function (y) { return -y.deel; }); };
+    let basis = 'tegenpartij', l = ander(perTp.get(x.sleutel));
+    if (l.length < 3) { basis = 'categorie'; l = x.cat ? ander(perCat.get(x.cat)) : []; if (l.length < 10) return; }
+    const med = mediaan(l);
+    if (!(med > 0) || -x.deel <= UIT_FACTOR * med || -x.deel - med < UIT_MIN) return;
+    uitschieters.push({ datum: x.datum, naam: x.tegenpartij || x.omschrijving || 'zonder naam', categorie: x.cat, rekening: x.rekening, bedrag: r2(-x.deel), gebruikelijk: r2(med), basis: basis,
+      keer: Math.round(-x.deel / med * 10) / 10, filter: { van: x.maand, tot: x.maand, id: x.id } });
+  });
+  uitschieters.sort(function (p, q) { return q.bedrag - p.bedrag; });
+  // nieuwe terugkerende posten
+  const nieuw = [], grens = maandPlus(mNu, -3) + '-01';
+  if (!o.vanaf || o.vanaf <= maandPlus(mNu, -6)) {
+    const abo = new Map();
+    uitg.forEach(function (x) { if (!x.abo) return; if (!abo.has(x.abo)) abo.set(x.abo, []); abo.get(x.abo).push(x); });
+    abo.forEach(function (l) {
+      l.sort(function (p, q) { return p.datum < q.datum ? -1 : 1; });
+      if (l.length < 2 || l[0].datum < grens) return;
+      const laatst = l[l.length - 1];
+      nieuw.push({ naam: laatst.tegenpartij || laatst.omschrijving || 'zonder naam', categorie: laatst.cat, sinds: l[0].datum, aantal: l.length, laatste: r2(-laatst.deel),
+        som: r2(-l.reduce(function (s, y) { return s + y.deel; }, 0)), filter: { van: l[0].maand, tot: laatst.maand, id: laatst.id } });
+    });
+    nieuw.sort(function (p, q) { return q.laatste - p.laatste; });
+  }
+  return { maand: mVol, lopend: mNu, vorig_jaar: vjOk ? mVj : null, maanden: n12, categorieen: cats, eigenaren: eig,
+    totaal: { nu: som('nu'), lopend: som('lopend'), gem12: n12 ? som('gem12') : null, vorig_jaar: vjOk ? som('vorig_jaar') : null },
+    uitschieters: uitschieters.slice(0, 10), nieuw: nieuw.slice(0, 10),
+    regels: { afwijking: '> ' + Math.round(AFWIJK_PCT * 100) + ' % én > € ' + AFWIJK_EUR + ' tegen het gemiddelde', uitschieter: 'boven ' + UIT_FACTOR + '× de gebruikelijke post en ≥ € ' + UIT_MIN + ' erboven' },
+    uitleg: 'Alleen wat het gezin echt uitgaf (stroom leven), terugbetalingen eraf. Sparen, aflossen, geld naar de Holding en tussen eigen rekeningen staan hier niet in.' };
 }
 // boekingen per maand (zonder delen) voor de somtoets
 function somBoekingen(delen) {
@@ -310,6 +395,8 @@ function overzicht(A, a, o) {
     const s = pm.get(m) || {};
     return { maand: m, inkomen: r2(s.inkomen || 0), leven: r2(-(s.leven || 0)), verplicht: r2(-(s.verplicht || 0)), vrij: r2((s.inkomen || 0) + (s.leven || 0) + (s.verplicht || 0)), eenmalig: r2(-(s.leven_eenmalig || 0)) };
   });
+  // stap 3: uitgaven per categorie en eigenaar, uitschieters, nieuwe terugkerende posten (een fout maakt alleen dit blok leeg)
+  uit.uitgaven = blok('uitgaven', function () { return uitgaven(b.delen, { mNu: mNu, twaalf: twaalf, vanaf: o.vanaf }); });
   // somtoets per maand + het aandeel nog niet ingedeeld
   const uitg = -t12('uitgaven'), ov = -t12('overig');
   uit.controle = { som_klopt: Array.from(pm.keys()).every(function (m) { const s = pm.get(m); return Math.abs(s.leven + s.inkomen + s.verschuiven + s.intern - som.get(m)) < 0.01; }),
@@ -340,7 +427,8 @@ function overzicht(A, a, o) {
   return uit;
 }
 
-// De boekingen achter een getal (POST /app/financien/boekingen). filter: van, tot (JJJJ-MM), stroom, sub, cat, eenmalig, id; hooguit 300.
+// De boekingen achter een getal (POST /app/financien/boekingen). filter: van, tot (JJJJ-MM), stroom, sub, cat ('-' = zonder categorie), eig
+// (eigenaar, wv2620), eenmalig, id; hooguit 300.
 // o.vault: voor het aflossingsdeel van de hypotheek (dezelfde splitsing als het overzicht).
 function boekingenLijst(A, a, o) {
   const fl = o.filter || {};
@@ -349,11 +437,16 @@ function boekingenLijst(A, a, o) {
   if (span > 35) throw new Error('filter: hooguit 36 maanden');   // review wv2596 ZOU 1: geen zoektocht door de hele historie
   if (fl.stroom != null && STROMEN.indexOf(fl.stroom) < 0) throw new Error('filter: onbekende stroom');
   if (fl.id != null && !/^[a-f0-9]{16}$/.test(String(fl.id))) throw new Error('filter: onbekende tegenpartij');
+  if (fl.eig != null && EIGENAREN.indexOf(fl.eig) < 0) throw new Error('filter: onbekende eigenaar');
   let afl = null;
   try { afl = aflossingVan((o.fv || require('./financien-vault.js')).lees(o.vault).hypotheek); } catch (e) { afl = null; }
-  const b = boekingen(a, fl.van, fl.tot, afl);
+  // wv2620: hetzelfde venster als het overzicht (24 maanden terug tot nu), anders erft een post zonder categorie in een korte lijst niet de
+  // categorie van de andere posten bij die tegenpartij en klopt een staaf niet met zijn eigen boekingen
+  const mNu = String(o.nu || new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' })).slice(0, 7);
+  const lv = maandPlus(mNu, -24) < fl.van ? maandPlus(mNu, -24) : fl.van, lt = fl.tot > mNu ? fl.tot : mNu;
+  const b = boekingen(a, lv, lt, afl);
   const l = b.delen.filter(function (x) {
-    return (fl.stroom == null || x.stroom === fl.stroom) && (fl.sub == null || x.sub === fl.sub) && (fl.cat == null || x.cat === fl.cat) &&
+    return x.maand >= fl.van && x.maand <= fl.tot && (fl.stroom == null || x.stroom === fl.stroom) && (fl.sub == null || x.sub === fl.sub) && (fl.cat == null || (fl.cat === '-' ? !x.cat : x.cat === fl.cat)) && (fl.eig == null || x.eig === fl.eig) &&
       (fl.eenmalig == null || x.eenmalig === !!fl.eenmalig) && (fl.id == null || x.id === fl.id);
   }).sort(function (p, q) { return Math.abs(q.deel) - Math.abs(p.deel); });
   const max = Math.min(Math.max(parseInt(o.max, 10) || 300, 1), 300);
@@ -384,4 +477,4 @@ function stroomZet(A, a, o) {
 }
 
 module.exports = { zonderIban: zonderIban, overzicht: overzicht, boekingenLijst: boekingenLijst, stroomZet: stroomZet, indelen: indelen, sleutelVan: sleutelVan, idVan: idVan, box2: box2,
-  STROMEN: STROMEN, SUBSOORT: SUBSOORT, TARIEVEN: TARIEVEN, EENMALIG_GRENS: EENMALIG_GRENS };
+  STROMEN: STROMEN, SUBSOORT: SUBSOORT, TARIEVEN: TARIEVEN, EENMALIG_GRENS: EENMALIG_GRENS, EIGENAREN: EIGENAREN, uitgaven: uitgaven, mediaan: mediaan };

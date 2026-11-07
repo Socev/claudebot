@@ -125,7 +125,10 @@ function volledigVanaf(A, a, nu) {
 }
 function vasteRekening(a) {
   const l = a.db.prepare('SELECT rek, bron, eigenaar FROM rekeningen').all().filter(function (r) { return r.bron !== 'bunq' && !/^(extern|pot)$/i.test(String(r.eigenaar || '')); });
-  return l.length === 1 ? l[0].rek : null;
+  if (l.length === 1) return l[0].rek;
+  // wv2620: sinds 4-11-2026 staat er een tweede niet-bunq-rekening (Enable Banking, eigenaar David); dan de enige met eigenaar samen
+  const s = l.filter(function (r) { return /^samen$/i.test(String(r.eigenaar || '')); });
+  return s.length === 1 ? s[0].rek : null;
 }
 function rekNaam(n, extern) { return veilig(n, 30) || (extern ? 'extern' : 'eigen rekening'); }
 
@@ -287,7 +290,7 @@ function blokVasteLasten(A, a, nu, links, signalen, pp) {
       if (oud > 0 && x.ritme === j.ritme) {
         jaarGeleden = { per_maand: getal(j.per_maand), bedrag: getal(j.bedrag) };
         const dPm = naarPerMaand(x, nieuw - oud), pct = (nieuw - oud) / oud;
-        if (dPm > 5 && pct > 0.05) signalen.push({ soort: 'duurder', naam: naam, toon: 'wacht', post: naam, pp: x.paypal_dienst, rij: x.sleutel,
+        if (dPm > 5 && pct > 0.05) signalen.push({ soort: 'duurder', naam: naam, toon: 'wacht', post: naam, pp: x.paypal_dienst, rij: x.sleutel, pm: x.per_maand - j.per_maand,
           zin: naam + (x.soort_post && !isPaypal(x) ? ' (' + veilig(x.soort_post, 30).toLowerCase() + ')' : '') + ' kost nu ' + eur(x.per_maand) + ' per maand; een jaar geleden ' + eur(j.per_maand) + ' (+' + Math.round(pct * 100) + '%).', link: link });
         else if (dPm < -5 && pct < -0.05) signalen.push({ soort: 'lager', naam: naam, toon: 'info', post: naam, pp: x.paypal_dienst, rij: x.sleutel,
           zin: naam + ' kost nu ' + eur(x.per_maand) + ' per maand; een jaar geleden ' + eur(j.per_maand) + '.' });
@@ -296,14 +299,14 @@ function blokVasteLasten(A, a, nu, links, signalen, pp) {
     // recente prijsstap (laatste 90 dagen): één reeks met bedrag_vorig, of meerdere reeksen (KPN) tegen de stand van drie maanden terug
     if (!paraplu(x) && x.wijze !== 'dalend' && !wissel(x) && !signalen.some(function (s) { return s.soort === 'duurder' && s.post === naam; })) {
       if (x.reeksen === 1 && x.bedrag_vorig != null && x.gewijzigd_op && x.gewijzigd_op >= plusDagen(nu, -90) && x.bedrag > x.bedrag_vorig + 0.005)
-        signalen.push({ soort: 'prijsstap', naam: naam, toon: 'wacht', post: naam, pp: x.paypal_dienst, rij: x.sleutel, link: link,
+        signalen.push({ soort: 'prijsstap', naam: naam, toon: 'wacht', post: naam, pp: x.paypal_dienst, rij: x.sleutel, link: link, pm: x.bedrag > 0 ? (x.bedrag - x.bedrag_vorig) * x.per_maand / x.bedrag : null,
           zin: naam + ': sinds ' + mndJaar(x.gewijzigd_op) + ' ' + eur(x.bedrag) + ' in plaats van ' + eur(x.bedrag_vorig) + (x.ritme !== 'maand' ? ' per ' + x.ritme : '') + '.' });
       else if (x.reeksen > 1 && d && x.per_maand - d.per_maand >= 0.5 && d.per_maand > 0 && (x.per_maand - d.per_maand) / d.per_maand > 0.03)
-        signalen.push({ soort: 'prijsstap', naam: naam, toon: 'wacht', post: naam, pp: x.paypal_dienst, rij: x.sleutel, link: link,
+        signalen.push({ soort: 'prijsstap', naam: naam, toon: 'wacht', post: naam, pp: x.paypal_dienst, rij: x.sleutel, link: link, pm: x.per_maand - d.per_maand,
           zin: naam + ' samen nu ' + eur(x.per_maand) + ' per maand; drie maanden geleden ' + eur(d.per_maand) + '.' });
     }
     if (!j && !x.start_afgekapt && x.eerste > refJaar && x.soort === 'abonnement' && !paraplu(x))
-      signalen.push({ soort: 'nieuw', naam: naam, toon: 'info', post: naam, pp: x.paypal_dienst, rij: x.sleutel, link: link, zin: naam + ' is nieuw sinds ' + mndJaar(x.eerste) + ': ' + eur(x.per_maand) + ' per maand.' });
+      signalen.push({ soort: 'nieuw', naam: naam, toon: 'info', post: naam, pp: x.paypal_dienst, rij: x.sleutel, link: link, pm: x.per_maand, zin: naam + ' is nieuw sinds ' + mndJaar(x.eerste) + ': ' + eur(x.per_maand) + ' per maand.' });
     const n = x.onderdelen ? x.onderdelen.reduce(function (s, o) { return s + (o.aantal || 1); }, 0) : 1;
     ppDubbel(x).forEach(function (o) { signalen.push({ soort: 'dubbel', naam: o.naam, toon: 'wacht', post: o.post, link: link, zin: o.zin }); });
     return { naam: naam, soort_post: veilig(x.soort_post, 30) || null, categorie: veilig(x.categorie, 40) || null, soort: x.soort === 'vast' ? 'vast' : 'abonnement',
@@ -384,7 +387,7 @@ function signaalDubbel(A, a, links, signalen, vol) {
     const reks = new Set(l.map(function (b) { return b.rekening; }));
     if (reks.size < 2) return;
     const naam = (vol || bekend(l[0].naam, links) ? veilig(l[0].naam, 30) : '') || veilig(l[0].subcategorie, 30) || 'Een abonnement';
-    signalen.push({ soort: 'dubbel', naam: naam, toon: 'wacht', post: naam, sleutel: k, link: linkVoor(l[0].naam, links),
+    signalen.push({ soort: 'dubbel', naam: naam, toon: 'wacht', post: naam, sleutel: k, link: linkVoor(l[0].naam, links), pm: Math.min.apply(null, l.map(function (b) { return b.per_maand || 0; })),
       zin: naam + ' loopt op ' + reks.size + ' eigen rekeningen (samen ' + eur(l.reduce(function (s, b) { return s + (b.per_maand || 0); }, 0)) + ' per maand): twee abonnementen of één dubbel?' });
   });
 }
@@ -401,7 +404,7 @@ function blokPaypal(d, links, signalen, A) {
       // titel als de rij in de vaste lasten ("PayPal — Netflix"); pp (de dienst) zorgt dat hetzelfde signaal van beide kanten één keer telt
       const naam = naamVan(r), titel = 'PayPal — ' + (naam === 'PayPal-dienst' ? ppOnbekend(r.dag) : naam), link = linkVoor(naam, links) || linkVoor(r.naam, links) || linkVoor(r.dienst, links);
       if (s === 'duurder') signalen.push({ soort: 'prijsstap', naam: titel, toon: 'wacht', post: titel, pp: r.dienst, link: link, zin: naam + ' (via PayPal): sinds ' + mndJaar(r.gewijzigd_op) + ' ' + eur(r.bedrag_eur || r.bedrag) + (r.bedrag_vorig != null ? ' in plaats van ' + eur(r.bedrag_vorig) : '') + '.' });
-      else if (s === 'nieuw') signalen.push({ soort: 'nieuw', naam: titel, toon: 'info', post: titel, pp: r.dienst, link: link, zin: naam + ' (via PayPal) is nieuw sinds ' + mndJaar(r.sinds) + ': ' + eur(r.per_maand) + ' per maand.' });
+      else if (s === 'nieuw') signalen.push({ soort: 'nieuw', naam: titel, toon: 'info', post: titel, pp: r.dienst, link: link, pm: r.per_maand, zin: naam + ' (via PayPal) is nieuw sinds ' + mndJaar(r.sinds) + ': ' + eur(r.per_maand) + ' per maand.' });
       else if (s === 'weg') signalen.push({ soort: 'weg', naam: titel, toon: 'info', post: titel, pp: r.dienst, zin: 'Navragen: ' + naam + ' (via PayPal) is sinds ' + mndJaar(r.laatst) + ' niet meer betaald.' });
     });
   });
@@ -448,8 +451,12 @@ function bereken(A, a, o) {
     if (gezien.has(k) || gedempt(s, L.bewust)) return false;
     gezien.add(k); return true;
   }).slice(0, 30).map(function (s) {
-    return { soort: s.soort, toon: s.toon === 'fout' ? 'fout' : s.toon === 'wacht' ? 'wacht' : 'info', titel: veilig(s.naam, 40) || null, zin: String(s.zin).slice(0, 240), link: s.link || null };
+    return { soort: s.soort, toon: s.toon === 'fout' ? 'fout' : s.toon === 'wacht' ? 'wacht' : 'info', titel: veilig(s.naam, 40) || null, zin: String(s.zin).slice(0, 240), link: s.link || null,
+      per_jaar: typeof s.pm === 'number' && Number.isFinite(s.pm) && s.pm > 0 ? Math.round(s.pm * 12) : undefined };   // wv2620: euro per jaar voor advies A4
   });
+  // wv2620 (Financiën 8+, stap 4): adviesregels A1–A5 (financien-advies.js) op het overzicht, de signalen en de vaste lasten; alleen tonen
+  if (uit.overzicht) uit.overzicht.advies = blok('advies', function () { return require('./financien-advies.js').advies(A, a, { ov: uit.overzicht, saldi: uit.saldi, signalen: uit.signalen,
+    vaste: uit.vaste_lasten, nu: nu, vault: o.vault || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain' }); });
   uit.links = { gelezen: L.gelezen, geldig: L.links.length, genegeerd: L.genegeerd };
   uit.fouten = Array.from(new Set(fouten));
   return uit;
