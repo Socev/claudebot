@@ -769,14 +769,16 @@ function dropJob(id) {
 let chatSessions = {};
 try { chatSessions = JSON.parse(fs.readFileSync(SESS_FILE, 'utf8')); } catch (e) { chatSessions = {}; }
 function lopendeJobs() {
-  const nu = Date.now(); let beurten = 0, onopgehaald = 0;
+  const nu = Date.now(); let beurten = 0, onopgehaald = 0, agentJobs = 0;
   for (const id in jobs) {
     const j = jobs[id];
-    if (j.status === 'pending' || j.status === 'running') beurten++;
+    if (j.status === 'pending' || j.status === 'running') { beurten++; if (j.agent) agentJobs++; }
     else if (j.status === 'done' && !j.agent && !j.opgehaald && j.done_at && nu - j.done_at < 10 * 60 * 1000) onopgehaald++;
   }
   const wees = Object.keys(appWeesVast).length;   // wv722: een wees-CLI die zijn kanaal vasthoudt, is een lopende beurt (uitrol.sh wacht)
-  return { beurten: beurten + wees, onopgehaald: onopgehaald, wees: wees };
+  // wv2667: beurten telt ook de jobs van lopende agents mee (historisch); gesprekken zonder die agents, voor uitrol.sh die van de
+  // agents alleen agents.kwetsbaar telt.
+  return { beurten: beurten + wees, onopgehaald: onopgehaald, wees: wees, gesprekken: beurten - agentJobs + wees };
 }
 function saveSessions() { try { fs.writeFileSync(SESS_FILE, JSON.stringify(chatSessions)); } catch (e) {} }
 
@@ -2233,19 +2235,45 @@ function sessieInfo() {
 }
 
 // ── v2: agentsamenvatting voor /health ──────────────────────────────────────
+// wv2667 (7-11-2026, David: "Waarom maar 2 agents momenteel?"): uitrol.sh wachtte op agents.lopend = 0, dus elke klus die
+// eindigde met een uitrol liet de rij leeglopen (7-11: 14 wachters, 1-7 nov ± 15 u met een vrije plek en startklare rijen achter de
+// marker). Sinds wv211/wv216 leeft een agent een herstart van server.js gewoon door (detached, wees; 4-7 nov 11 van 11 netjes
+// afgerond en de werkvoorraadrij gesloten). Een herstart kost alleen nog iets voor een agent die (a) nog niet volledig
+// geregistreerd is (pending, geen pid, een loper-agent zonder starttijd, claude zonder transcript: weesLeeft/weesEindtekst vallen
+// dan dicht), (b) jong is (spawn en registratie nog niet zeker op schijf), (c) in zijn eindcontrole zit (voorlopig), (d) zijn
+// rapport nog aflevert (herkansing of net afgerond, < 30 s), of (e) een runtime heeft zonder weesafhandeling. Dat getal is agents.kwetsbaar; uitrol.sh
+// wacht daarop in plaats van op lopend (UITROL_AGENTS=alle zet het oude wachten terug). Jong-grens via AGENT_JONG_MS (toets).
+const AGENT_JONG_MS = Math.max(0, parseInt(process.env.AGENT_JONG_MS || '', 10) || 120000);
+const AGENT_AFROND_MS = 30000;
+function agentKwetsbaar(a, nu) {
+  if (!a) return null;
+  if (a.rapport && String(a.rapport).indexOf('herkansing-') === 0) return 'rapport';
+  if (a.status === 'pending') return 'start';
+  // Codex-review wv2667 MOET 1: net afgerond (< 30 s) = rapport, app-kopie en vervolg nog onderweg; een herstart midden in de
+  // eerste aflevering laat rapport '-' staan en niemand verstuurt hem opnieuw. Een agent die in de seconden tussen de laatste
+  // meting en de herstart afrondt, vangt de opstart op (wees_dood: eindtekst uit het transcript; voorlopig: tussenstand).
+  if (a.status !== 'running') return (a.ended && (nu - a.ended) < AGENT_AFROND_MS) ? 'afronding' : null;
+  if (a.voorlopig) return 'eindcontrole';
+  if (a.runtime !== 'claude' && a.runtime !== 'codex') return 'runtime';
+  if (!a.pid || (a.loper_id && !a.pid_start) || (a.runtime === 'claude' && !a.transcript)) return 'start';
+  if (!a.wees && (nu - (a.started || 0)) < AGENT_JONG_MS) return 'jong';
+  return null;
+}
 function agentInfo() {
-  let lopend = 0, afgerond24 = 0, mislukt24 = 0, rapportWacht = 0;
-  const grens = Date.now() - 24 * 3600 * 1000;
+  let lopend = 0, afgerond24 = 0, mislukt24 = 0, rapportWacht = 0, kwetsbaar = 0;
+  const nu = Date.now(), grens = nu - 24 * 3600 * 1000, redenen = {};
   for (const id in agentsReg) {
     const a = agentsReg[id];
     if (a.wees_rapport_wacht) rapportWacht++;   // wv216: wees afgerond op een passieve pod, rapport volgt als primair
+    const k = agentKwetsbaar(a, nu);
+    if (k) { kwetsbaar++; redenen[k] = (redenen[k] || 0) + 1; }
     if (a.status === 'running' || a.status === 'pending') lopend++;
     else if ((a.ended || 0) > grens) {
       if (a.status === 'done' && a.ok) afgerond24++;
       else mislukt24++;
     }
   }
-  return { lopend: lopend, afgerond_24u: afgerond24, mislukt_24u: mislukt24, rapport_wacht: rapportWacht };
+  return { lopend: lopend, afgerond_24u: afgerond24, mislukt_24u: mislukt24, rapport_wacht: rapportWacht, kwetsbaar: kwetsbaar, kwetsbaar_redenen: redenen };
 }
 
 // ── Uitrolmarker (7-10-2026, wv91, akkoord David) ──────────────────────────
@@ -3907,7 +3935,7 @@ function handleRequest(req, res) {
       modellen: Object.keys(MODEL_ALIASSEN),
       sync: syncInfo(), inbox: inboxInfo(), sessies: sessieInfo(),
       // de wachtrij uit de auto telt mee als lopend: een uitrol zou hem anders stil weggooien (5-10-2026)
-      agents: Object.assign(agentInfo(), { wachtrij_auto: autoWachtrij.length }, { lopend: agentInfo().lopend + autoWachtrij.length }),
+      agents: (function () { const ai = agentInfo(); return Object.assign(ai, { wachtrij_auto: autoWachtrij.length, lopend: ai.lopend + autoWachtrij.length, kwetsbaar: ai.kwetsbaar + autoWachtrij.length }); })(),   // wv2667: de auto-wachtrij leeft alleen in het geheugen
       offsite: offsiteInfo(),
       auto: autoInfo(),
       tunnel: tunnelInfo(),

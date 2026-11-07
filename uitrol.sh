@@ -4,6 +4,7 @@
 #
 # GEBRUIK:  /app/uitrol.sh <git-sha|branch>
 #           omgeving: UITROL_NU=1 (niet wachten), UITROL_WACHT_MAX=<s> (standaard 1800),
+#           UITROL_AGENTS=alle (wacht op alle lopende agents i.p.v. alleen agents.kwetsbaar, wv2667),
 #           UITROL_DROOG=1 (niet omzetten, voor toetsen), UITROL_MARKER=<pad> (standaard /opt/data/uitrol-wacht),
 #           UITROL_NACONTROLE=0 (geen echt-nacontrole), UITROL_NACONTROLE_MAX=<s> (standaard 90), UITROL_BOX=<pad>
 #           UITROL_DATAKAART=0 (datakaart-poort uit, nood), UITROL_DATAKAART_PAD=<pad>, UITROL_POORT_ALLEEN=1 (stop na de poort, toets)
@@ -236,6 +237,12 @@ fi
 # (wv1868: plus nachtketen.lopend, 1 alleen zolang een nachtstap echt draait; de keten
 # start zelf niets zolang deze marker staat). Hooguit UITROL_WACHT_MAX seconden (standaard 1800), daarna
 # toch - met een logregel. UITROL_NU=1 slaat het wachten over (noodgeval).
+# wv2667 (7-11-2026): van de agents telt alleen agents.kwetsbaar, en van de beurten alleen lopend.gesprekken (beurten telt de
+# agentjobs ook mee) (wie een herstart echt raakt: pending, jong < 2 min, in zijn
+# eindcontrole, rapport in herkansing, runtime zonder weesafhandeling, auto-wachtrij). Een gewone lopende agent leeft de herstart
+# door als wees (wv211/wv216) en levert zijn rapport daarna af; op lopend wachten liet de werkvoorraad bij elke uitrol leeglopen.
+# Kent de draaiende pod het veld niet (oudere release), of UITROL_AGENTS=alle (bv. bij een wijziging aan de weesafhandeling
+# zelf), dan telt agents.lopend zoals vroeger.
 #
 # Uitrolmarker (7-10-2026, wv91, akkoord David): zolang dit script op stilte wacht, staat MARKER er. De
 # werkvoorraad-tikker en POST /agent met een machinekamer:-label starten dan niets nieuws - anders raakt het
@@ -255,10 +262,12 @@ if [ "${UITROL_NU:-0}" != "1" ]; then
   trap 'exit 130' INT TERM HUP
   WACHT_MAX="${UITROL_WACHT_MAX:-1800}"; GEWACHT=0; TOCH=0
   while :; do
-    DRUK="$(curl -s -m 5 "http://127.0.0.1:${PORT:-8080}/health" | python3 -c 'import json,sys
+    DRUK="$(curl -s -m 5 "http://127.0.0.1:${PORT:-8080}/health" | python3 -c 'import json,sys,os
 try:
   j=json.load(sys.stdin); l=j.get("lopend") or {}; a=j.get("agents") or {}; k=j.get("nachtketen") or {}; h=j.get("sb2_herstelproef") or {}
-  print(int(l.get("beurten",0))+int(l.get("onopgehaald",0))+int(a.get("lopend",0))+int(k.get("lopend",0))+int(h.get("lopend",0)))
+  oud=os.environ.get("UITROL_AGENTS")=="alle" or "kwetsbaar" not in a or "gesprekken" not in l
+  b,ag=(l.get("beurten",0),a.get("lopend",0)) if oud else (l.get("gesprekken",0),a.get("kwetsbaar",0))
+  print(int(b)+int(l.get("onopgehaald",0))+int(ag)+int(k.get("lopend",0))+int(h.get("lopend",0)))
 except Exception: print(0)' 2>/dev/null || echo 0)"
     [ "${DRUK:-0}" = "0" ] && break
     if [ "$GEWACHT" -ge "$WACHT_MAX" ]; then log "LET OP: na ${GEWACHT}s nog ${DRUK} lopend - uitrol gaat toch door"; TOCH=1; break; fi
