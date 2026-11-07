@@ -332,6 +332,61 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('8 health zonder inhoud', JSON.stringify(sb.health()).indexOf('Verzekeringen') < 0 && sb.health().knopen > 0, sb.health());
   toets('8 onbekende route 404', (await sb.app('POST /app/secondbrain/wis', {}, {})).status === 404);
 
+  // ── 8b. wv2607: kaart in het geheugen, alleen gewijzigde pagina's opnieuw lezen, afscherming per verzoek ──
+  {
+    const V10 = path.join(W, 'vault10');
+    const zet10 = (p, t) => { fs.mkdirSync(path.dirname(path.join(V10, p)), { recursive: true }); fs.writeFileSync(path.join(V10, p), t); };
+    zet10('a.md', '# A\n[[b]] en [[nog niet]]\n');
+    zet10('b.md', '# B\n[[a]]\n');
+    fs.utimesSync(path.join(V10, 'b.md'), 1700000000, 1700000000);   // hele seconden: terugzetten verderop is dan exact (anders rondt utimes af)
+    zet10('c.md', '# C\n');
+    zet10('10_Zakelijk/Personeel/dossier.md', '# dicht op vaste plek\n[[a]]\n');
+    zet10('10_Zakelijk/Bronnen/bron.md', '# verborgen\n[[b]]\n');
+    let klok = 1e12;
+    const s10 = S.maak({ vault: V10, dir: path.join(W, 'staat10'), nu: () => klok });
+    const heeft = (r, x, y) => { const kn = r.j.knopen.map((k) => k[0]); const ix = kn.indexOf(x), iy = kn.indexOf(y); for (let i = 0; i < r.j.lijnen.length; i += 2) if (r.j.lijnen[i] === ix && r.j.lijnen[i + 1] === iy) return true; return false; };
+    const r1 = await s10.app('GET /app/secondbrain', {}, { vast: false });
+    const h1 = s10.health();
+    toets('8b eerste kaart: alle md-bestanden gelezen', r1.status === 200 && h1.gelezen === 5 && heeft(r1, 'a.md', 'b.md'), h1);
+    const k1 = s10.vers(false);
+    klok += 1000;
+    const r2 = await s10.app('GET /app/secondbrain', {}, { vast: false });
+    toets('8b tweede keer binnen de versheid: uit het geheugen (zelfde kaart, zelfde bouwtijd)', s10.vers(false) === k1 && r2.j.bijgewerkt === r1.j.bijgewerkt && s10.health().hergebruik === 0);
+    klok += 200000;
+    const r3 = await s10.app('GET /app/secondbrain', {}, { vast: false });
+    toets('8b na de versheid zonder wijziging: zelfde kaart hergebruikt, wel weer vers', s10.vers(false) === k1 && s10.health().hergebruik === 1 && r3.j.bijgewerkt !== r1.j.bijgewerkt, s10.health());
+    zet10('c.md', '# C\n[[a]]\n');
+    klok += 200000;
+    const r4 = await s10.app('GET /app/secondbrain', {}, { vast: false });
+    toets('8b pagina gewijzigd: nieuwe kaart, alleen die pagina gelezen, nieuwe link erin', s10.vers(false) !== k1 && s10.health().gelezen === 1 && heeft(r4, 'c.md', 'a.md'), s10.health());
+    zet10('nog niet.md', '# nu wel\n');
+    klok += 200000;
+    const r5 = await s10.app('GET /app/secondbrain', {}, { vast: false });
+    toets('8b nieuw bestand: oude link lost nu op zonder a.md opnieuw te lezen', s10.health().gelezen === 1 && heeft(r5, 'a.md', 'nog niet.md'), s10.health());
+    const st = fs.statSync(path.join(V10, 'b.md'));
+    fs.writeFileSync(path.join(V10, 'b.md'), '# B\n[[c]]\n');   // even lang, mtime teruggezet: alleen ctime verraadt het
+    fs.utimesSync(path.join(V10, 'b.md'), 1700000000, 1700000000);
+    klok += 200000;
+    const r6 = await s10.app('GET /app/secondbrain', {}, { vast: false });
+    toets('8b zelfde grootte en mtime teruggezet: ctime ziet de wijziging', fs.statSync(path.join(V10, 'b.md')).mtimeMs === st.mtimeMs && s10.health().gelezen === 1 && heeft(r6, 'b.md', 'c.md') && !heeft(r6, 'b.md', 'a.md'), s10.health());
+    fs.unlinkSync(path.join(V10, 'c.md'));
+    klok += 200000;
+    const r7 = await s10.app('GET /app/secondbrain', {}, { vast: false });
+    toets('8b bestand weg: uit de kaart en uit de links', r7.j.knopen.every((k) => k[0] !== 'c.md') && s10.health().gelezen === 0, s10.health());
+    // afscherming: vast en open om en om uit dezelfde kaart, elk zijn eigen filtering
+    const kv = s10.vers(false);
+    const v1 = await s10.app('GET /app/secondbrain', {}, { vast: true });
+    const o1 = await s10.app('POST /app/secondbrain/kaart', { alles: true }, { vast: false });
+    const v2 = await s10.app('POST /app/secondbrain/kaart', { alles: true }, { vast: true });
+    const o2 = await s10.app('GET /app/secondbrain', {}, { vast: false });
+    const pv = (r) => r.j.knopen.map((k) => k[0]);
+    toets('8b vaste plek: geen personeel of bronnen, ook na een open apparaat (zelfde kaart)', s10.vers(false) === kv && [v1, v2].every((r) => r.j.vaste_plek === true && pv(r).indexOf('10_Zakelijk/Personeel/dossier.md') < 0 && pv(r).indexOf('10_Zakelijk/Bronnen/bron.md') < 0), [pv(v1), pv(v2)]);
+    toets('8b open apparaat: personeel erin, bronnen alleen met alles', pv(o2).indexOf('10_Zakelijk/Personeel/dossier.md') >= 0 && pv(o2).indexOf('10_Zakelijk/Bronnen/bron.md') < 0 && pv(o1).indexOf('10_Zakelijk/Bronnen/bron.md') >= 0 && o2.j.vaste_plek === false, [pv(o1), pv(o2)]);
+    const kj = JSON.parse(fs.readFileSync(path.join(W, 'staat10', 'kaart.json'), 'utf8'));
+    toets('8b ctime en linkcache niet in kaart.json, de kaart (vers) of het antwoord', kj.bestanden.every((b) => !('c' in b) && !('doelen' in b)) && s10.vers(false).bestanden.every((b) => !('c' in b) && !('doelen' in b))
+      && [o1, o2, v1, v2].every((r) => r.j.knopen.every((k) => k.length === 5) && Object.keys(r.j).sort().join() === 'alles,bijgewerkt,domeinen,knopen,lijnen,ok,vaste_plek,verborgen_n'), kj.bestanden[0]);
+  }
+
   // ── 9. server.js ──
   const src = fs.readFileSync('server.js', 'utf8');
   toets('9 dispatch GET /app/secondbrain en POST /app/secondbrain/* via appSecondBrain', /route === 'GET \/app\/secondbrain' \|\| route\.indexOf\('POST \/app\/secondbrain\/'\) === 0\) return typeof appSecondBrain === 'function'/.test(src));

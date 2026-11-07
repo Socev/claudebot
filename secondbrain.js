@@ -214,6 +214,11 @@ function maak(opt) {
   let laatsteNacht = null;
   let bestandBezig = 0, zoekBezig = false, laatsteDwang = 0;
   let echteVault = null;
+  // wv2607: linkdoelen per md-bestand uit de vorige bouw, op pad met mtime + ctime + grootte (ctime verandert bij elke schrijfactie en is
+  // niet terug te zetten). Lezen + linksIn van ± 8.000 pagina's (± 200 MB) kostte ± 1,1 s per bouw; nu alleen gewijzigde bestanden. Het
+  // oplossen (los) gebeurt elke bouw opnieuw over de hele lijst, want een nieuw of verdwenen bestand kan elk linkdoel veranderen.
+  // Geen afscherming hier: de kaart is één ongefilterde lijst en kaartVoor/mag filtert per verzoek op {vast} (zoals voorheen).
+  let linkCache = new Map();
 
   function mkdir() {
     try { fs.mkdirSync(DIR, { recursive: true, mode: 0o700 }); fs.chmodSync(DIR, 0o700); } catch (e) { fout('secondbrain-dir', e); }
@@ -238,7 +243,7 @@ function maak(opt) {
         let st;
         try { st = fs.lstatSync(path.join(abs, naam)); } catch (e2) { continue; }
         if (!st.isFile() || st.size > MAX_BESTAND) continue;
-        lijst.push({ p: r, s: soort, m: Math.floor(st.mtimeMs), g: st.size });
+        lijst.push({ p: r, s: soort, m: Math.floor(st.mtimeMs), g: st.size, c: st.ctimeMs });   // c (wv2607): alleen voor de linkcache; bouw haalt hem er meteen weer af
       }
     };
     stap(VAULT, '');
@@ -293,20 +298,35 @@ function maak(opt) {
   function bouw() {
     const t0 = Date.now();
     const bestanden = wandel();
+    // wv2607: niets veranderd sinds de vorige bouw (zelfde paden, mtime, ctime, grootte) = dezelfde kaart, alleen weer vers
+    const sig = crypto.createHash('sha256').update(bestanden.map(function (b) { return b.p + '\u0000' + b.m + '\u0000' + b.c + '\u0000' + b.g; }).join('\u0001')).digest('hex');
+    if (kaart && kaart.sig === sig && kaart.op) { kaart.op = nu(); kaart.duur = Date.now() - t0; kaart.hergebruik = (kaart.hergebruik || 0) + 1; return kaart; }
+    const ctimes = bestanden.map(function (b) { const c = b.c; delete b.c; return c; });   // review wv2607 MOET 1: ctime niet op de kaart (vers() is te lezen)
     bestanden.forEach(function (b) { b.d = domeinVan(b.p); b.v = isVerborgen(b.p); b.x = isVastDicht(b.p); b.l = []; });
     const k = Object.assign({ bestanden: bestanden }, indexeer(bestanden));
+    const nieuwCache = new Map();
+    let gelezen = 0;
     for (let i = 0; i < bestanden.length; i++) {
       const b = bestanden[i];
       if (b.s !== 'md' || b.g > MAX_MD) continue;
-      let t;
-      try { t = fs.readFileSync(path.join(VAULT, b.p), 'utf8'); } catch (e) { continue; }
+      const c = linkCache.get(b.p);
+      let doelen;
+      if (c && c.m === b.m && c.c === ctimes[i] && c.g === b.g) doelen = c.doelen;
+      else {
+        let t;
+        try { t = fs.readFileSync(path.join(VAULT, b.p), 'utf8'); } catch (e) { continue; }
+        gelezen++;
+        doelen = linksIn(t).filter(function (l) { return l.doel; }).map(function (l) { return { doel: l.doel, md: l.md }; });
+      }
+      nieuwCache.set(b.p, { m: b.m, c: ctimes[i], g: b.g, doelen: doelen });
       const gezien = new Set();
-      for (const l of linksIn(t)) {
-        if (!l.doel) continue;
+      for (const l of doelen) {
         const r = los(l.doel, b.p, l.md, k);
         if (r && r.i !== undefined && r.i !== i && !gezien.has(r.i)) { gezien.add(r.i); b.l.push(r.i); }
       }
     }
+    linkCache = nieuwCache;
+    k.sig = sig; k.gelezen = gelezen;
     k.op = nu(); k.duur = Date.now() - t0;
     kaart = k;
     bewaar(k);
@@ -327,7 +347,7 @@ function maak(opt) {
     } catch (e) { fout('secondbrain-bewaar', e); }
   }
 
-  // Eén bouw tegelijk (Fable K9); vers genoeg = de bestaande. Synchroon onder de motorkap (± 60–300 ms).
+  // Eén bouw tegelijk (Fable K9); vers genoeg = de bestaande. Synchroon onder de motorkap (wv2607: ± 150 ms met de linkcache, ± 1,1 s zonder).
   function vers(dwing) {
     if (!dwing && kaart && nu() - kaart.op < KAART_VERS_MS) return kaart;
     if (bouwBezig) return kaart || bouw();
@@ -841,7 +861,8 @@ function maak(opt) {
   function health() {
     const k = kaart;
     return { aan: true, knopen: k ? k.bestanden.length : 0, lijnen: k ? k.bestanden.reduce(function (n, b) { return n + b.l.length; }, 0) : 0,
-      gebouwd: k && k.op ? new Date(k.op).toISOString() : null, duur_ms: k ? k.duur : null, nacht: laatsteNacht };
+      gebouwd: k && k.op ? new Date(k.op).toISOString() : null, duur_ms: k ? k.duur : null, nacht: laatsteNacht,
+      gelezen: k && typeof k.gelezen === 'number' ? k.gelezen : null, hergebruik: k ? k.hergebruik || 0 : 0 };   // wv2607: linkcache zichtbaar
   }
 
   return { mkdir: mkdir, laadBewaard: laadBewaard, app: app, health: health, vers: vers, koppelNaam: koppelNaam, nacht: nacht, bron: bron,
