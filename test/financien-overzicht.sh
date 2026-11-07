@@ -114,6 +114,16 @@ if (O) {
   toets('opruimlijst: onzeker, grootste euro\'s eerst (Holding en Winkel Onbekend erin, loon niet)', o.opruimen.some((g) => g.naam === 'Winkel Onbekend') && o.opruimen.some((g) => /PRIMUM/.test(g.naam) && g.stroom === 'verschuiven') &&
     !o.opruimen.some((g) => /Salaris/.test(g.naam)) && o.opruimen.every((g, i, l) => i === 0 || Math.abs(l[i - 1].som) >= Math.abs(g.som)), o.opruimen.map((g) => [g.naam, g.som, g.stroom]));
   toets('steekproef: hooguit 40, op euro\'s, de hypotheek met verdeling', o.steekproef.length <= 40 && o.steekproef.some((g) => g.naam === 'ABN AMRO BANK NV' && g.verdeling && g.verdeling.length === 2), o.steekproef.slice(0, 3));
+  // wv2665: leesbaar nakijken — elke regel een voorbeeldboeking (de laatste, heel bedrag), de hypotheek met waar de splitsing vandaan komt
+  const hg5 = o.steekproef.find((g) => g.naam === 'ABN AMRO BANK NV'), hypB = o.steekproef.length && hg5 ? lijst(hg5.filter) : null;
+  const laatst = (g) => lijst(g.filter).boekingen.reduce((m, b) => (b.datum > m ? b.datum : m), '');
+  toets('wv2665: elke steekproefregel heeft een voorbeeld (de laatste boeking, heel bedrag, met rekening)', o.steekproef.every((g) => g.voorbeeld && g.voorbeeld.datum === laatst(g) && g.voorbeeld.rekening &&
+    Math.sign(g.voorbeeld.bedrag) === (g.richting === 'af' ? -1 : 1)), o.steekproef.filter((g) => !g.voorbeeld || g.voorbeeld.datum !== laatst(g)).map((g) => [g.naam, g.voorbeeld]));
+  toets('wv2665: hypotheek-splitsing = aflossing 2000 per termijn uit het model, aflossing + rente = de groep, bron genoemd; andere groepen geen splitsing', !!hg5 && hg5.splitsing && hg5.splitsing.aflossing_pm === 2000 &&
+    hg5.splitsing.termijnen === hg5.aantal && Math.abs(hg5.splitsing.aflossing + hg5.splitsing.rente - hg5.som) < 0.01 && Math.abs(hg5.splitsing.aflossing + 2000 * hg5.aantal) < 0.01 && !!hg5.splitsing.bron &&
+    hg5.voorbeeld.bedrag < -2000 && o.steekproef.filter((g) => g.splitsing).length === 1, [hg5 && hg5.splitsing, hg5 && hg5.voorbeeld]);
+  toets('wv2665: banktekst alleen als hij terugkomt (≥ 2×) en niet al het voorbeeld is', o.steekproef.every((g) => !g.banktekst || (g.banktekst.keer >= 2 && g.banktekst.tekst !== g.voorbeeld.tekst)) &&
+    o.steekproef.some((g) => g.banktekst), o.steekproef.map((g) => [g.naam, g.banktekst]));
   // reproduceerbaar: elke regel van vrij per maand = (som van zijn boekingenlijst) / 12; per_maand = de som van de hoofdregels
   const regelOk = o.vrij.regels.every((r) => Math.abs(lijst(r.filter).som / 12 - r.bedrag) < 0.01);
   const hoofd = o.vrij.regels.filter((r) => !r.sub).reduce((s, r) => s + r.bedrag, 0);

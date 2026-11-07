@@ -411,17 +411,37 @@ function overzicht(A, a, o) {
     const k = x.id;
     if (!groepen.has(k)) groepen.set(k, { id: k, naam: x.tegenpartij || x.omschrijving || 'zonder naam', richting: x.bedrag < 0 ? 'af' : 'bij', aantal: 0, som: 0, stromen: new Map(), zeker: true, waarom: x.waarom, cat: x.cat, gezien: new Set() });
     const g = groepen.get(k);
-    if (!g.gezien.has(x.nr)) { g.aantal++; g.gezien.add(x.nr); }
+    if (!g.gezien.has(x.nr)) {
+      g.aantal++; g.gezien.add(x.nr);
+      // wv2665: de laatste boeking als voorbeeld (het hele bedrag zoals de bank het boekte) en de banktekst die het vaakst voorkomt
+      if (!g.voorbeeld || x.datum > g.voorbeeld.datum) g.voorbeeld = { datum: x.datum, rekening: x.rekening, bedrag: r2(x.bedrag), tekst: x.omschrijving || null };
+      if (x.omschrijving) { if (!g.teksten) g.teksten = new Map(); g.teksten.set(x.omschrijving, (g.teksten.get(x.omschrijving) || 0) + 1); }
+    }
+    if (x.stroom === 'verschuiven' && x.sub === 'verplicht' && x.waarom.indexOf('aflossingsdeel') === 0) g.hypotheek = (g.hypotheek || 0) + 1;
     g.som += x.deel; g.zeker = g.zeker && x.zeker;
     const sk = x.stroom + (x.sub ? '/' + x.sub : '');
     g.stromen.set(sk, (g.stromen.get(sk) || 0) + x.deel);
   });
+  // wv2665 (David 7-11: "Die lijst is hartstikke cryptisch … Hypotheek is plots gesplitst"): de banktekst, en bij de hypotheek waar de splitsing vandaan komt
+  const banktekst = function (g) {
+    if (!g.teksten) return undefined;
+    const e = Array.from(g.teksten.entries()).sort(function (p, q) { return q[1] - p[1]; })[0];
+    // alleen een tekst die terugkomt en niet al in het voorbeeld staat (een unieke tekst per maand zegt niets extra's)
+    return e[1] >= 2 && !(g.voorbeeld && g.voorbeeld.tekst === e[0]) ? { tekst: e[0], keer: e[1] } : undefined;
+  };
+  const splitsing = function (g, ver) {
+    if (!g.hypotheek || !(aflossing > 0)) return undefined;
+    const afl = ver.filter(function (e) { return e[0] === 'verschuiven/verplicht'; }).reduce(function (s, e) { return s + e[1]; }, 0);
+    const rente = ver.filter(function (e) { return e[0] === 'leven'; }).reduce(function (s, e) { return s + e[1]; }, 0);
+    const bron = (hyp && hyp.bron ? [hyp.bron.excel, hyp.bron.bank].filter(Boolean).join(' en ') : '') || 'je hypotheekoverzicht';
+    return { soort: 'hypotheek', termijnen: g.hypotheek, aflossing_pm: r2(aflossing), aflossing: r2(afl), rente: r2(rente), rente_pm: g.hypotheek ? r2(rente / g.hypotheek) : null, bron: veilig(bron, 120) };
+  };
   const regels = regelsLees(a), regelIds = new Set();
   regels.forEach(function (r, k) { const i = k.lastIndexOf('|'); regelIds.add(idVan(k.slice(0, i), k.slice(i + 1))); });
   const gUit = function (g) {
     const ver = Array.from(g.stromen.entries()).sort(function (p, q) { return Math.abs(q[1]) - Math.abs(p[1]); }), st = ver[0][0].split('/');
     return { verdeling: ver.length > 1 ? ver.map(function (e) { const x = e[0].split('/'); return { stroom: x[0], sub: x[1] || null, som: r2(e[1]) }; }) : undefined, id: g.id, naam: g.naam, richting: g.richting, aantal: g.aantal, som: r2(g.som), stroom: st[0], sub: st[1] || null, waarom: g.waarom, categorie: g.cat, gekozen: regelIds.has(g.id) || undefined,
-      filter: f({ id: g.id }) };
+      filter: f({ id: g.id }), voorbeeld: g.voorbeeld || undefined, banktekst: banktekst(g), splitsing: splitsing(g, ver) };
   };
   const alle = Array.from(groepen.values()).sort(function (p, q) { return Math.abs(q.som) - Math.abs(p.som); });
   uit.opruimen = alle.filter(function (g) { return !g.zeker && Math.abs(g.som) >= 50; }).slice(0, 15).map(gUit);
