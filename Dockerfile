@@ -179,6 +179,7 @@ COPY zoek-snel.js /app/release-bootstrap/zoek-snel.js
 COPY jev-pod.js /app/release-bootstrap/jev-pod.js
 COPY gezondheid-app.js /app/release-bootstrap/gezondheid-app.js
 COPY financien-vault.js /app/release-bootstrap/financien-vault.js
+COPY financien-overzicht.js /app/release-bootstrap/financien-overzicht.js
 COPY app-vast.js /app/release-bootstrap/app-vast.js
 COPY app-open.js /app/release-bootstrap/app-open.js
 COPY intake-telling.js /app/release-bootstrap/intake-telling.js

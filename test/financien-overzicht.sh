@@ -171,6 +171,8 @@ if (O) {
   toets('financien-overzicht.js laadt geen netwerk- of procesmodule; schrijven alleen in stroomZet', !/require\(['"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads)['"]\)/.test(src) && !/\bfetch\s*\(/.test(src) &&
     !/INSERT|UPDATE|DELETE|CREATE TABLE|db\.exec/.test(src.slice(0, src.indexOf('function stroomZet'))) && !/writeFile|appendFile|unlink/.test(src), null);
 }
+toets('uitrol.sh en Dockerfile: financien-overzicht.js gaat mee in de release', /RELEASE_OPTIONEEL="[^"]*\bfinancien-overzicht\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&
+  /COPY financien-overzicht\.js \/app\/release-bootstrap\/financien-overzicht\.js/.test(fs.readFileSync('Dockerfile', 'utf8')), null);
 const srv = fs.readFileSync('server.js', 'utf8');
 toets('server.js: overzicht doorgegeven; routes boekingen en stroom; app-boekingen/app-stroom in BANK_LOKAAL, niet in BANK_OPDRACHTEN', /'saldi', 'overzicht'\]\.forEach/.test(srv) &&
   /route === 'POST \/app\/financien\/boekingen'\) return appFinBoekingen\(/.test(srv) && /route === 'POST \/app\/financien\/stroom'\) return appFinStroom\(/.test(srv) &&
