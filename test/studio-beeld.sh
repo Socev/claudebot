@@ -251,6 +251,21 @@ const comfy = http.createServer((req, res) => {
   await S._vrijRonde();
   toets('6 na een herstart ruimt de nieuwe instantie de foto in ComfyUI op', !fs.existsSync(VUIL) && sha(C.bestanden['studio/fotoherstel-invoer.png']) === LEEG_SHA);
 
+  // 6b. diffreview MOET 2: staat de vlag nog en lukt leegmaken niet, dan dient ook een volgende taak niets in
+  fs.writeFileSync(VUIL, 'x'); C.bestanden['studio/fotoherstel-invoer.png'] = KLEIN; C.uploadUit = true;
+  beurt = nb(); zetUp(beurt, KLEIN); let pv = C.prompts.length;
+  r = await S.maak({ flow: 'foto-proef', beurt_id: beurt, velden: { foto: { n: 1 } } }, ctx);
+  t = await wacht(r.taak.id);
+  toets('6b vorige foto niet weg te krijgen: volgende taak dient niets in', t.status === 'mislukt' && /vorige taak/.test(t.reden) && C.prompts.length === pv, t.reden);
+  C.uploadUit = false;
+  beurt = nb(); zetUp(beurt, KLEIN);
+  r = await S.maak({ flow: 'foto-proef', beurt_id: beurt, velden: { foto: { n: 1 } } }, ctx);
+  t = await wacht(r.taak.id);
+  toets('6b daarna wel: eerst leeggemaakt, dan gewoon klaar', t.status === 'klaar' && !fs.existsSync(VUIL), t);
+  // MOET 3: herhaling van dezelfde beurt na een geslaagde taak (upload al verbruikt) = de bestaande taak
+  r = await S.maak({ flow: 'foto-proef', beurt_id: beurt, velden: { foto: { n: 1 } } }, ctx);
+  toets('6b zelfde beurt nog eens: de bestaande taak (al), geen 409', r.status === 200 && r.al === true && r.taak.id === t.id, r);
+
   // 7. uitvoergrenzen
   C.uitvoer = 'groot'; beurt = nb(); zetUp(beurt, KLEIN);
   r = await S.maak({ flow: 'foto-proef', beurt_id: beurt, velden: { foto: { n: 1 } } }, ctx);
@@ -272,6 +287,11 @@ const comfy = http.createServer((req, res) => {
   r = await S.maak({ flow: 'foto-ander-bestand', beurt_id: nb(), velden: {} }, ctxZonder);
   t = r.taak ? await wacht(r.taak.id) : null;
   toets('8 LoadImage met een ander bestand (voorbeeld.png): geweigerd door de knopentoets', t && t.status === 'mislukt' && /LoadImage mag alleen/.test(t.reden), t || r);
+  zetFlow('laad-zonder-foto', { titel: 'LoadImage zonder fotoveld', motor: 'comfyui', status: 'actief', uitvoer: 'beeld', max_seconden: 30, velden: [] }, { 1: { class_type: 'LoadImage', inputs: { image: 'studio/fotoherstel-invoer.png' } }, 9: { class_type: 'PreviewImage', inputs: { images: ['1', 0] } } });
+  pv = C.prompts.length;
+  r = await S.maak({ flow: 'laad-zonder-foto', beurt_id: nb(), velden: {} }, ctx);
+  t = r.taak ? await wacht(r.taak.id) : null;
+  toets('8 LoadImage met de vaste naam in een flow zonder fotoveld: geweigerd, niets ingediend', t && t.status === 'mislukt' && /alleen in een flow met een fotoveld/.test(t.reden) && C.prompts.length === pv, t || r);
   toets('8 knopentoets: LoadImage alleen met de vaste naam', studioMod.flowToets({ 1: { class_type: 'LoadImage', inputs: { image: 'ander/geheim.png' } }, 2: { class_type: 'PreviewImage', inputs: { images: ['1', 0] } } }, OI).fout !== undefined
     && !studioMod.flowToets({ 1: { class_type: 'LoadImage', inputs: { image: 'studio/fotoherstel-invoer.png' } }, 2: { class_type: 'PreviewImage', inputs: { images: ['1', 0] } } }, OI).fout);
   toets('8 pakketknoop op naam + map: DDColor uit ComfyUI-DDColor mag', studioMod.knoopToets('DDColor_Colorize', OI) === null && studioMod.knoopToets('FaceRestoreCFWithModel', OI) === null);

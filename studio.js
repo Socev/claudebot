@@ -728,7 +728,12 @@ function maak(deps) {
       // eerst de goedkope vingerafdrukvraag (alleen kijken; verbruiken gebeurt in het synchrone stuk), dan pas Pillow
       if (f.status === 'proef' && !ctx.versOk()) return { status: 403, fout: 'deze flow is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
       bk = await beeldKlaar(f, w.waarden, ctx, beurt);
-      if (bk && bk.fout) return { status: bk.status, fout: bk.fout };
+      if (bk && bk.fout) {
+        // diffreview MOET 3: een herhaling van dezelfde beurt terwijl de eerste de upload al verbruikte = de bestaande taak
+        const al2 = st.taken.find(function (t) { return t.beurt_id === beurt; });
+        if (al2) return { status: 200, taak: taakUit(al2), al: true };
+        return { status: bk.status, fout: bk.fout };
+      }
     }
     const r = maakSync(f, w, ctx, beurt, prijs, extra, bk);
     if (bk) bk.opruim();   // na een geslaagde taak is de map al verplaatst (niets te doen); anders weg
@@ -1172,6 +1177,14 @@ function maak(deps) {
     try { info = await objectInfo(); } catch (e) { return { fout: foutTekst(e.message) }; }
     const toets = flowToets(v.api, info);
     if (toets.fout) return { fout: 'knopentoets: ' + toets.fout };
+    // wv2482 (diffreview MOET 2): een LoadImage alleen in een taak met een eigen foto (anders leest hij wat er toevallig staat)
+    if (!t.beeld && Object.keys(toets.prompt).some(function (k) { return KNOPEN.laad_beeld.indexOf(toets.prompt[k].class_type) >= 0; }))
+      return { fout: 'knopentoets: een LoadImage kan alleen in een flow met een fotoveld' };
+    // en staat er nog een foto van een vorige taak in ComfyUI (1×1 mislukt), dan eerst die weg; lukt dat niet, dan niets indienen
+    if (fs.existsSync(VUIL)) {
+      if (await comfyLeeg()) zetVuil(false);
+      else return { fout: 'de foto van een vorige taak kon nog niet uit ComfyUI gehaald worden; niets ingediend' };
+    }
     // Gedeelde ComfyUI (§ 5.3 stap 4, Fable M3): alleen indienen bij een lege wachtrij en genoeg vrij VRAM; anders wachten.
     const tot = klok() + T.wachtMax;
     let voor;
