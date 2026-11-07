@@ -368,6 +368,12 @@ jobs:
         run: |
           python3 -c "import PIL" 2>/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil)
           bash test/studio-immich.sh
+      # wv2679: geheugenpoort voor zware ComfyUI-flows (taalmodel uit, RAM/VRAM, /free voor en na) en voorbewerking grijs-niveaus
+      - name: "studio-geheugen (wv2679, krassen weg + inkleuren)"
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -c "import PIL" 2>/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil)
+          bash test/studio-geheugen.sh
       # wv2155: schrijfLog draait al bij het laden van server.js (release zonder mk-tekst.js); geen TDZ-crash (kruisproef alleen lokaal).
       - name: "schrijflog-vroeg (wv2155, logpad vóór de initialisatie)"
         if: ${{ !cancelled() }}

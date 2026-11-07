@@ -63,6 +63,28 @@ const POLL_MS = 3000;
 // Bestanden (voor/na-schuif in de app), het resultaat als na-<n>.<ext>. Nooit een bestandsnaam of beeld in een log of audit.
 const BEELD = { naam: 'fotoherstel-invoer.png', map: 'studio', max_bytes: 20 * 1024 * 1024, max_mp_in: 4, max_mp_uit: 16,
   uit_lees_max: 96 * 1024 * 1024, jpg_boven: 10 * 1024 * 1024, py_ms: 120 * 1000 };
+// ── Geheugenpoort voor zware ComfyUI-flows (wv2679, 7-11-2026; ontwerp fotoherstel § 10 "Krassen weg weer aan") ──
+// Aanleiding: Qwen-Image-Edit (foto-herstel) liet 7-11 13:56 het geheugen van Olares vollopen; Olares stopte toen het lokale taalmodel.
+// Gemeten 7-11 20:05 (taalmodel uit): VRAM vrij 23,7 → 3,8 GB, ComfyUI-RAM vrij 55,6 → 20,4 GB, MemAvailable machine 69 → 54 GB;
+// na POST /free weer 59,8 GB / 69 GB. Het VRAM-cijfer van ComfyUI zag het draaiende taalmodel NIET (13:40: 23,7 GB vrij terwijl het
+// liep), dus die toets alleen beschermt niet. Een flow met ram_mib_schatting > 0 krijgt daarom vóór elke run (bij een lege rij):
+//   1. zonder_taalmodel: true → GET <taalmodel>/health. ALLEEN een volledig gelezen 503 met lege body telt als 'uit' (zo antwoordt
+//      Olares voor een gestopte app, gemeten 7-11). Al het andere — 2xx, 503 mét tekst (llama.cpp laadt), redirect, 401/403, 502/504,
+//      onleesbare body, time-out — = geweigerd (review wv2679 MOET 1: liever niets dan het geheugen vol).
+//   2. ComfyUI ram_free ≥ ram_mib_schatting, MemAvailable van de machine (/proc/meminfo, in de pod = Olares) ≥ ram_mib_schatting +
+//      host_marge_mib, en VRAM vrij ≥ gpu_mib_schatting. Te weinig: één keer POST /free (alleen bij een lege rij) en opnieuw meten;
+//      nog te weinig = geweigerd in gewone taal (niet 30 min wachten zoals bij gewone flows).
+//   3. vrij_na: true → na elke run (ook bij fout of stop) POST /free als de rij leeg is, zodat de gewichten niet in het RAM blijven.
+//   Restrisico (review wv2679 MOET 2, niet op te lossen): ComfyUI kent geen slot, en Davids browser gebruikt hem rechtstreeks. Binnen
+//   de pod draait één Studio-taak tegelijk; vlak vóór elke /free wordt de rij opnieuw gelezen, en direct ná het indienen nog eens:
+//   staat er dan ander werk vóór of naast de onze, dan haalt de pod zijn eigen taak weg en weigert. ComfyUI voert taken één voor één
+//   uit en /free pas tussen twee taken (het onderbreekt niets); werk dat ná ons binnenkomt wacht tot wij klaar zijn.
+const GEHEUGEN = { host_marge_mib: 10000, taalmodel: 'https://366ada1d.primumnonnocere.olares.com', taalmodel_ms: 8000, na_free_ms: 3000 };
+// Voorbewerking van de foto vóór ComfyUI (wv2679), per keuze-optie, alleen uit deze vaste lijst (studio-beeld.py 'voor'):
+//   grijs-niveaus: grijs + niveaus (1 %–99 %) gemeten in het binnenste zonder egale scanrand, toegepast op het hele beeld (maten gelijk).
+//   Gemeten op drie publieke foto's als vale sepia-scan: DDColor gaf zonder dit een roze/bruine waas (tinten 1–3, 'warm' tot 97 %),
+//   met dit echte kleuren (tinten 5–6). Het voor-beeld in Bestanden blijft het origineel.
+const VOORBEWERKING = ['grijs-niveaus'];
 // ── Immich als bron en bestemming (wv2614, fotoherstel fase 2; ontwerp § 6/§ 7; David Ja 7-11-2026 08:00) ──
 // BRON. In het fotoveld kan de app in plaats van { n } ook { immich: <asset-id> } sturen (albums en miniaturen via /app/studio/immich/*).
 // De pod haalt dan zelf het ORIGINEEL (GET /api/assets/<id>/original) als dat een foto in jpg/png/webp is van ≤ 20 MB; anders (HEIC, RAW,
@@ -254,7 +276,10 @@ function maak(deps) {
   const PIPER = deps.piper || { bin: '/opt/data/piper/piper', model: '/opt/data/piper/nl_NL-ronnie-medium.onnx', data: '/opt/data/piper/espeak-ng-data' };
   const doeFetch = deps.fetch || fetch;
   const klok = deps.nu || Date.now;
-  const T = Object.assign({ poll: POLL_MS, wachtStap: COMFY_WACHT_STAP_MS, wachtMax: COMFY_WACHT_MAX_MS, fsTimeout: 6000 }, deps.tempo || {});   // tempo: alleen de toets
+  const T = Object.assign({ poll: POLL_MS, wachtStap: COMFY_WACHT_STAP_MS, wachtMax: COMFY_WACHT_MAX_MS, fsTimeout: 6000,
+    taalmodelMs: GEHEUGEN.taalmodel_ms, naFree: GEHEUGEN.na_free_ms }, deps.tempo || {});
+  // wv2679: adres van het lokale taalmodel (alleen GET /health); deps.taalmodelUrl === null = geen taalmodel (toets)
+  const TAALMODEL = deps.taalmodelUrl === null ? null : String(deps.taalmodelUrl || GEHEUGEN.taalmodel).replace(/\/+$/, '');   // tempo: alleen de toets
   const log = deps.log || function () {};
   const fout = deps.fout || function () {};
   const st = { taken: [], rij: [], bezig: null, lokaal: { sleutel: null, flows: {} }, router: { op: 0, modellen: null, fout: null },
@@ -358,6 +383,8 @@ function maak(deps) {
           verborgen: y.verborgen === true, telefoonversie: y.telefoonversie === true, bandje: y.bandje === true,   // wv743
           stem: /^[a-z0-9]{2,20}:[A-Za-z0-9_.\/-]{1,80}$/.test(String(y.stem || '')) ? String(y.stem) : null,
           ai_model: /^[A-Za-z0-9][A-Za-z0-9 .+-]{1,39}$/.test(String(y.ai_model || '')) ? String(y.ai_model) : null,   // wv2614: beschrijving in Immich
+          // wv2679: geheugenpoort (zie GEHEUGEN); alleen strenger te maken, de marge en het taalmodeladres staan in de pod
+          ram_mib_schatting: Math.max(0, Math.min(200000, Number(y.ram_mib_schatting) || 0)), vrij_na: y.vrij_na === true, zonder_taalmodel: y.zonder_taalmodel === true,
         });
         if (['comfyui', 'piper', 'elevenlabs'].indexOf(f.motor) < 0) f.fout = 'onbekende motor';
         if (['proef', 'actief', 'uit'].indexOf(f.status) < 0) f.fout = 'onbekende status';
@@ -409,6 +436,7 @@ function maak(deps) {
           if (Object.keys(z).length) o.zet = z;
         }
         if (x && typeof x === 'object' && x.uitleg) o.uitleg = schoon(x.uitleg, 160);
+        if (x && typeof x === 'object' && VOORBEWERKING.indexOf(x.voorbewerking) >= 0) o.voorbewerking = x.voorbewerking;   // wv2679
         return o;
       }).filter(function (x) { return ['string', 'number', 'boolean'].indexOf(typeof x.waarde) >= 0; }).slice(0, 40);
       if (!opties.length) return null;
@@ -544,7 +572,7 @@ function maak(deps) {
       prijs_tabel: f.betaald ? Object.keys(ELEVEN.modellen).reduce(function (o, k) { o[k] = ELEVEN.modellen[k].eur_per_1000; return o; }, {}) : null,
       velden: (f.velden || []).map(function (v) {
         const o = Object.assign({}, v); delete o.pad;
-        if (o.opties) o.opties = o.opties.map(function (x) { const y = Object.assign({}, x); delete y.zet; return y; });   // wv2482
+        if (o.opties) o.opties = o.opties.map(function (x) { const y = Object.assign({}, x); delete y.zet; delete y.voorbewerking; return y; });   // wv2482, wv2679
         return o;
       }) };
   }
@@ -1278,12 +1306,76 @@ function maak(deps) {
     return { vram_vrij_mib: Math.round((dev.vram_free || 0) / 1048576), vram_totaal_mib: Math.round((dev.vram_total || 0) / 1048576),
       ram_vrij_mib: Math.round(((j && j.system && j.system.ram_free) || 0) / 1048576) };
   }
+  // ── wv2679: geheugenpoort (zie GEHEUGEN bovenaan) ──
+  async function taalmodelDraait() {
+    if (!TAALMODEL) return false;
+    try {
+      const r = await doeFetch(TAALMODEL + '/health', { redirect: 'manual', signal: AbortSignal.timeout(T.taalmodelMs) });
+      let tekst = null;
+      try { tekst = await r.text(); } catch (e) { tekst = null; }
+      if (r.status === 503 && tekst !== null && !tekst.trim()) return false;   // gestopte Olares-app: 503 zonder tekst
+      if (r.status >= 200 && r.status < 300) return true;
+      if (r.status === 503 && tekst) return true;   // llama.cpp laadt zijn model (503 met tekst)
+      return null;   // onverwacht (redirect, 401/403, 502, onleesbaar): niet na te gaan → geweigerd
+    } catch (e) { return null; }
+  }
+  function gb(mib) { return String(Math.round(mib / 1024)); }
+  function geheugenMeting(f, s) {
+    const host = vrijGeheugenMib();
+    const tekort = s.ram_vrij_mib < f.ram_mib_schatting || host == null || host < f.ram_mib_schatting + GEHEUGEN.host_marge_mib
+      || s.vram_vrij_mib < f.gpu_mib_schatting;
+    return { tekort: tekort, host: host };
+  }
+  async function geheugenPoort(t, f, voor, ctl) {
+    if (f.zonder_taalmodel) {
+      t.fase = 'controle: draait het taalmodel op Olares?';
+      const d = await taalmodelDraait();
+      if (d !== false) return { fout: d ? 'Kan nu niet: het lokale taalmodel op Olares draait weer, en samen lopen ze het geheugen van Olares vol. Er is niets gestart.'
+        : 'Kan nu niet: niet na te gaan of het lokale taalmodel op Olares uit staat, en samen lopen ze het geheugen vol. Er is niets gestart; probeer het straks opnieuw.' };
+    }
+    let s = voor, m = geheugenMeting(f, s);
+    if (m.tekort) {
+      // één keer opruimen, alleen als de rij NU nog leeg is (niet onder andermans werk), en opnieuw meten
+      let q;
+      try { q = await comfyRij(); } catch (e) { return { fout: foutTekst(e.message) }; }
+      if (q.lopend.length || q.wacht.length) return { fout: 'ComfyUI kreeg net ander werk; er is niets gestart. Probeer het zo opnieuw.' };
+      try { const fr = await comfyPost('/free', { unload_models: true, free_memory: true }); if (fr.ok) st.comfyFreeGedaan = true; } catch (e) { /* opnieuw meten beslist */ }
+      await wacht(T.naFree, ctl);
+      if (ctl.gestopt) return { fout: 'gestopt' };
+      try { s = await comfyStats(); } catch (e) { return { fout: foutTekst(e.message) }; }
+      m = geheugenMeting(f, s);
+    }
+    if (m.tekort) return { fout: 'Te weinig geheugen vrij op Olares voor deze bewerking: nodig ± ' + gb(f.ram_mib_schatting) + ' GB werkgeheugen en '
+      + gb(f.gpu_mib_schatting) + ' GB videogeheugen, vrij nu ' + (m.host == null ? '?' : gb(Math.max(0, Math.min(m.host - GEHEUGEN.host_marge_mib, s.ram_vrij_mib))))
+      + ' GB en ' + gb(s.vram_vrij_mib) + ' GB. Er is niets gestart. Probeer het later opnieuw, of kies Opknappen of Inkleuren: die hebben veel minder nodig.' };
+    return { voor: Object.assign({}, s, { host_vrij_mib: m.host }) };
+  }
+  async function vrijNa(t) {
+    try {
+      const pid = t.meting && t.meting.prompt_id;
+      if (!pid) return;   // Fable KAN 2: niets ingediend = niets geladen; Davids cache niet weggooien
+      let q = await comfyRij();
+      // Fable ZOU 2: na stop of time-out staat onze eigen prompt nog even als lopend (interrupt duurt even): kort wachten en herlezen
+      for (let i = 0; i < 3 && q.lopend.length === 1 && !q.wacht.length && Array.isArray(q.lopend[0]) && String(q.lopend[0][1]) === pid; i++) {
+        await wacht(T.naFree); q = await comfyRij();
+      }
+      if (q.lopend.length || q.wacht.length) return;   // iemand anders gebruikt ComfyUI: niet onder zijn handen weghalen (10-min-ronde doet het later)
+      const fr = await comfyPost('/free', { unload_models: true, free_memory: true });
+      if (!fr.ok) return;
+      st.comfyFreeGedaan = true;
+      if (t.meting) {
+        await wacht(T.naFree);
+        try { const na = await comfyStats(); t.meting.ram_vrij_na_free_mib = na.ram_vrij_mib; t.meting.vram_vrij_na_free_mib = na.vram_vrij_mib; } catch (e) {}
+      }
+    } catch (e) { fout('studio-free-na', e); }
+  }
   async function comfyRij() {
     const q = await (await comfyGet('/queue')).json();
     return { lopend: Array.isArray(q.queue_running) ? q.queue_running : [], wacht: Array.isArray(q.queue_pending) ? q.queue_pending : [] };
   }
   function vulIn(api, f, waarden) {
     const kopie = JSON.parse(JSON.stringify(api));
+    let voorbewerking = null;
     const zet = function (p, w, naam) {
       const m = /^([^.]+)\.inputs\.(.+)$/.exec(p);
       if (!m || !kopie[m[1]] || !kopie[m[1]].inputs) return 'veld ' + naam + ' wijst naar een knoop die er niet is';
@@ -1306,9 +1398,10 @@ function maak(deps) {
       if (v.soort === 'keuze') {
         const o = (v.opties || []).find(function (x) { return String(x.waarde) === String(waarden[v.naam]); });
         for (const p of Object.keys((o && o.zet) || {})) { const e = zet(p, o.zet[p], v.naam); if (e) return { fout: e }; }
+        if (o && o.voorbewerking) voorbewerking = o.voorbewerking;   // wv2679
       }
     }
-    return { api: kopie };
+    return { api: kopie, voorbewerking: voorbewerking };
   }
   // Alleen de toets (ook voor de machinekamer bij het nakijken van een nieuwe flow): geeft null of de reden.
   async function toetsFlow(api) {
@@ -1338,6 +1431,13 @@ function maak(deps) {
       if (ctl.gestopt) return { fout: 'gestopt' };
       let q;
       try { q = await comfyRij(); voor = await comfyStats(); } catch (e) { return { fout: foutTekst(e.message) }; }
+      if (!q.lopend.length && !q.wacht.length && f.ram_mib_schatting > 0) {
+        // wv2679: zware flow — geen wachten op geheugen, maar meten, één keer /free, en anders een duidelijke weigering
+        const g = await geheugenPoort(t, f, voor, ctl);
+        if (g.fout) return { fout: g.fout };
+        voor = g.voor;
+        break;
+      }
       if (!q.lopend.length && !q.wacht.length && voor.vram_vrij_mib >= f.gpu_mib_schatting) break;
       if (klok() > tot) return { fout: 'ComfyUI bleef ' + Math.round(T.wachtMax / 60000) + ' min bezig met iets anders; niets ingediend' };
       t.fase = q.lopend.length || q.wacht.length ? 'wacht: ComfyUI is bezig met iets anders' : 'wacht: te weinig vrij videogeheugen (' + voor.vram_vrij_mib + ' MiB)';
@@ -1345,12 +1445,27 @@ function maak(deps) {
     }
     const clientId = 'socev-studio-' + t.id;
     t.meting = { vram_vrij_voor_mib: voor.vram_vrij_mib, ram_vrij_voor_mib: voor.ram_vrij_mib };
+    if (voor.host_vrij_mib != null) t.meting.host_vrij_voor_mib = voor.host_vrij_mib;
+    if (!f.vrij_na) return motorComfyIn(t, f, out, ctl, toets, clientId, v.voorbewerking);
+    // wv2679: na een zware flow altijd de gewichten uit het geheugen (ook bij fout of stop)
+    try { return await motorComfyIn(t, f, out, ctl, toets, clientId, v.voorbewerking); }
+    finally { await vrijNa(t); }
+  }
+  async function motorComfyIn(t, f, out, ctl, toets, clientId, voorbewerking) {
     if (!t.beeld) return comfyDraai(t, f, out, ctl, toets, clientId);
     // wv2482: de foto pas nu naar ComfyUI (de rij is leeg), en daarna ALTIJD terug naar 1×1 — ook bij fout, stop of een uitzondering
     const invoer = path.join(WERK, t.id, 'in', 'invoer.' + t.beeld.ext);
     let buf;
     try { buf = fs.readFileSync(invoer); } catch (e) { return { fout: 'de foto van deze taak is weg (herstart?)' }; }
     try { fs.copyFileSync(invoer, path.join(out, 'voor.' + t.beeld.ext)); } catch (e) { return { fout: 'de foto kon niet klaargezet worden' }; }
+    if (voorbewerking) {
+      // wv2679: alleen wat ComfyUI krijgt verandert; voor.<ext> in Bestanden blijft het origineel
+      const vb = path.join(WERK, t.id, 'in', 'voorbewerkt.png');
+      const r = await beeldPy(['voor', invoer, vb, voorbewerking]);
+      try { if (r.ok) buf = fs.readFileSync(vb); } catch (e) { r.ok = false; } finally { try { fs.rmSync(vb, { force: true }); } catch (e) {} }
+      if (!r.ok) return { fout: 'de foto kon niet voorbewerkt worden' + (r.reden ? ': ' + r.reden : '') };
+      t.meting.voorbewerking = voorbewerking;
+    }
     t.fase = 'foto naar ComfyUI';
     zetVuil(true);
     try {
@@ -1382,12 +1497,32 @@ function maak(deps) {
     } catch (e) { ws = null; }   // zonder websocket: alleen /history pollen
     const sluit = function () { try { if (ws) ws.close(); } catch (e) {} };
     try {
+      if (f.ram_mib_schatting > 0) {
+        // wv2679 (Fable KAN 1): tussen meting en hier zitten voorbewerking en upload; de machine nog één keer meten (lokaal, gratis)
+        const host = vrijGeheugenMib();
+        if (host == null || host < f.ram_mib_schatting + GEHEUGEN.host_marge_mib) return { fout: 'Te weinig geheugen vrij op Olares voor deze bewerking (vlak voor het starten gemeten). Er is niets gestart. Probeer het later opnieuw.' };
+      }
       const p = await comfyPost('/prompt', { prompt: toets.prompt, client_id: clientId });
       if (!p.ok || !p.j || !p.j.prompt_id) return { fout: 'ComfyUI weigerde de flow: ' + foutTekst(p.j && p.j.error ? (p.j.error.message || p.j.error.type) : 'HTTP ' + p.status) };
       pid = String(p.j.prompt_id);
       t.meting.prompt_id = pid;
       t.gpu_start = klok();
-      st.comfyLaatst = klok(); st.comfyFreeGedaan = false;
+      st.comfyLaatst = klok(); st.comfyFreeGedaan = false;   // vanaf hier ruimt de 10-min-ronde ook op als alles hieronder misgaat
+      if (f.ram_mib_schatting > 0) {
+        // wv2679 (review Codex MOET 2, Fable MOET 1): kwam er tussen de geheugenmeting en het indienen werk van een ander binnen, dan klopt
+        // de meting niet meer: eigen taak uit de rij (altijd, ook als de rij niet te lezen is) of afbreken, en weigeren. Wat ná ons
+        // binnenkomt, wacht in ComfyUI tot wij klaar zijn.
+        let q = null;
+        for (let i = 0; i < 3 && !q; i++) { try { q = await comfyRij(); } catch (e) { q = null; } }
+        const ander = !q || q.lopend.some(function (x) { return !Array.isArray(x) || String(x[1]) !== pid; })
+          || (!q.lopend.length && q.wacht.length && !(Array.isArray(q.wacht[0]) && String(q.wacht[0][1]) === pid));
+        if (ander) {
+          try { await comfyPost('/queue', { delete: [pid] }); } catch (e) {}
+          await comfyEigenStop(pid);
+          return { fout: q ? 'ComfyUI kreeg net ander werk; er is niets gestart. Probeer het zo opnieuw.'
+            : 'ComfyUI antwoordde niet meer na het indienen; de taak is mogelijk toch gestart en wordt binnen 10 min opgeruimd.' };
+        }
+      }
       const grens = klok() + f.max_seconden * 1000;
       let hist = null, snel = 0;
       for (;;) {

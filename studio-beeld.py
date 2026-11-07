@@ -10,6 +10,9 @@
 #                                         groter dan max_mp: rechtop zetten (EXIF) en verkleinen tot max_mp (PNG, of JPEG 95 bij
 #                                         een JPEG-bron) naar <uit>.<ext>; anders niets schrijven (het origineel blijft zoals het kwam)
 #   uit <in> <uit.jpg> <max_mp> <max_bytes>  uitvoer van ComfyUI: decoderen, hooguit max_mp; groter dan max_bytes: JPEG 92 naar <uit.jpg>
+#   voor <in> <uit.png> <soort>           voorbewerking vóór ComfyUI (wv2679), soort uit een vaste lijst:
+#                                         grijs-niveaus = rechtop (EXIF), grijs, niveaus 1 %–99 % gemeten in het binnenste zonder egale
+#                                         scanrand en toegepast op het hele beeld (de rand wordt wit; de maten blijven gelijk)
 import json
 import os
 import resource
@@ -51,6 +54,49 @@ def open_beeld(pad):
     return im, formaat
 
 
+def rand_doos(g):
+    # egale lichte rand (scanrand, passe-partout): rijen/kolommen vanaf de buitenkant zolang ze licht (> 200) en vlak (< 60) zijn,
+    # hooguit een kwart per kant
+    w, h = g.size
+    px = g.load()
+    stap = max(1, min(w, h) // 400)
+
+    def egaal(waarden):
+        return sum(waarden) / len(waarden) > 200 and max(waarden) - min(waarden) < 60
+    t, b, l, r = 0, h - 1, 0, w - 1
+    while t < h // 4 and egaal([px[x, t] for x in range(0, w, stap)]):
+        t += 1
+    while b > 3 * h // 4 and egaal([px[x, b] for x in range(0, w, stap)]):
+        b -= 1
+    while l < w // 4 and egaal([px[l, y] for y in range(0, h, stap)]):
+        l += 1
+    while r > 3 * w // 4 and egaal([px[r, y] for y in range(0, h, stap)]):
+        r -= 1
+    return (l, t, r + 1, b + 1)
+
+
+def grijs_niveaus(im):
+    from PIL import ImageOps
+    g = ImageOps.exif_transpose(im).convert("L")
+    hist = g.crop(rand_doos(g)).histogram()
+    n, acc, lo, hi = sum(hist), 0, None, None
+    for v in range(256):
+        acc += hist[v]
+        if lo is None and acc > n * 0.01:
+            lo = v
+        if hi is None and acc >= n * 0.99:
+            hi = v
+    lo = 0 if lo is None else lo
+    hi = 255 if hi is None else hi
+    if hi <= lo:   # egaal (bv. een lege scan): niets uitrekken, anders wordt alles zwart (review wv2679 ZOU 1)
+        return g.convert("RGB"), lo, hi
+    lut = [max(0, min(255, round((v - lo) * 255 / (hi - lo)))) for v in range(256)]
+    return g.point(lut).convert("RGB"), lo, hi
+
+
+VOORBEWERKING = {"grijs-niveaus": grijs_niveaus}
+
+
 def main(a):
     grenzen()
     if len(a) == 4 and a[0] == "neem":
@@ -85,6 +131,14 @@ def main(a):
         im.convert("RGB").save(a[2], "JPEG", quality=92)
         os.chmod(a[2], 0o600)
         klaar(0, ok=True, formaat=formaat, breed=b, hoog=h, omgezet=True)
+    if len(a) == 4 and a[0] == "voor":
+        if a[3] not in VOORBEWERKING:
+            klaar(2, ok=False, reden="onbekende voorbewerking")
+        im, formaat = open_beeld(a[1])
+        uit, lo, hi = VOORBEWERKING[a[3]](im)
+        uit.save(a[2], "PNG")
+        os.chmod(a[2], 0o600)
+        klaar(0, ok=True, breed=uit.size[0], hoog=uit.size[1], niveau_laag=lo, niveau_hoog=hi)
     klaar(2, ok=False, reden="onbekende aanroep")
 
 
