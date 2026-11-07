@@ -303,7 +303,8 @@ test('publicatieservice en router laten ramble@1 liggen; oude raw_input-skill ra
   const pub = fs.readFileSync(path.join(ROOT, 'intake-publicatie.js'), 'utf8');
   assert.match(pub, /ramble@/, 'expliciete uitsluiting in de publicatieservice');
   const R = fs.readFileSync(path.join(ROOT, 'intake-router.js'), 'utf8');
-  assert.match(R, /const PROFIELEN = new Set\(\['mail@1', 'outlook-mail@1', 'scansnap@1'\]\)/);
+  assert.match(R, /const PROFIELEN = new Set\(\['mail@1', 'outlook-mail@1', 'scansnap@1', 'webpagina@1'\]\)/);   // wv2660: + webpagina@1
+  assert.equal(require(path.join(ROOT, 'intake-router.js')).PROFIELEN.has('ramble@1'), false, 'ramble@1 blijft buiten de router');
   const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
   assert.match(srv, /const s = a \? appSessie\(req, a, false\) : null;[\s\S]*route\.indexOf\('POST \/app\/ramble\/'\) === 0 \|\| route\.indexOf\('GET \/app\/ramble\/'\) === 0\) return appRamble/, 'ramble-route pas na de sessiecontrole');
   assert.match(srv, /const ruw = upload \|\| rambleStuk \|\|/, 'stuk is een ruwe route (getekende inhoudshash)');

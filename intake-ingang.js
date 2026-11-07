@@ -1180,7 +1180,9 @@ function maak(o) {
    */
   const INTERN = { scansnap: { id: 'intern-scansnap', route: 'scansnap', profielen: ['scansnap@1'], bronnen: ['scanner:scansnap'], lezen: [], intern: true },
     // wv1969 (MemoryLane R1): het transcript van een ingesproken herinnering, alleen vanuit herinneringen.js (de audio komt nooit in Intake)
-    ramble: { id: 'intern-ramble', route: 'ramble', profielen: ['ramble@1'], bronnen: ['app:ramble'], lezen: [], intern: true } };
+    ramble: { id: 'intern-ramble', route: 'ramble', profielen: ['ramble@1'], bronnen: ['app:ramble'], lezen: [], intern: true },
+    // wv2660: een webpagina die David met de Chrome-extensie aanleverde, alleen vanuit brain-web.js (POST /app/brain/webpagina, Davids app-sessie)
+    webpagina: { id: 'intern-webpagina', route: 'webpagina', profielen: ['webpagina@1'], bronnen: ['web:david'], lezen: [], intern: true } };
   function nepReq(method, headers, buf) {
     const h = {};
     const r = { method, url: '/intake/intern', headers, complete: true, resume() {}, on(ev, f) {

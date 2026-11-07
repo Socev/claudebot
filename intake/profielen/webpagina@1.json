@@ -1,0 +1,39 @@
+{
+ "profiel": "webpagina",
+ "versie": 1,
+ "omschrijving": "Eén webpagina die David met de Chrome-extensie Naar Second Brain (rechtsklik) aanleverde, als markdown (wv2660). Alleen intern aan te leveren door brain-web.js (pod-route POST /app/brain/webpagina, achter Davids app-sessie): de pagina zoals hij hem zag (DOM van het tabblad, omgezet met pandoc) of, bij een rechtsklik op een link, het adres via markdown.new. Webtekst van derden = gegeven. De router beslist (marker, Jev, entiteit); alleen de kennislens (of geen/vragen/systeem), nooit facturen, keten of deadlines.",
+ "bronnen": [
+  "web:david"
+ ],
+ "bron_id": {
+  "vorm": "^[0-9a-f]{24}$",
+  "uitleg": "24 hex van sha256(adres + markdown): dezelfde pagina met dezelfde inhoud = dubbel"
+ },
+ "herzienbaar": false,
+ "alleen_intern": true,
+ "meta": {
+  "onderwerp": { "type": "tekst", "min": 1, "max": 300, "verplicht": true },
+  "url": { "type": "tekst", "max": 2048, "vorm": "^https?://[^\\s]+$", "verplicht": true },
+  "domein": { "type": "tekst", "max": 253, "vorm": "^[a-z0-9.-]{1,253}$", "verplicht": true },
+  "opgehaald_op": { "type": "tijd", "verplicht": true },
+  "wijze": { "type": "keuze", "waarden": ["pagina", "link"], "verplicht": true },
+  "sleutels_weggelaten": { "type": "geheel", "min": 0, "verplicht": true },
+  "ingekort": { "type": "ja/nee", "verplicht": true }
+ },
+ "onderdelen": {
+  "hoofdtekst": { "min": 1, "max": 1, "mime": ["text/markdown"], "max_mb": 1 }
+ },
+ "archief": {
+  "schrijf_rol": "hoofdtekst",
+  "map": "_INBOX",
+  "naam": "^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}_web_[a-z0-9-]{1,80}\\.md$"
+ },
+ "privacy": {
+  "access_context": "strikt_prive"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "intake-router.js (kennislens → raw_input van de entiteit)",
+  "second-brain-verwerk-raw-input"
+ ]
+}

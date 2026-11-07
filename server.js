@@ -5134,6 +5134,7 @@ function appVastVersEis(res, a, s, wat) {
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
 const APP_OMZET_MAX_BODY = 5 * 1024 * 1024;   // wv1854: tekst ≤ 2 MB (omzet.js telt de bytes en geeft 413) + JSON-ontsnapping (\n, \", \uXXXX)
+const APP_BRAIN_WEB_MAX_BODY = 6 * 1024 * 1024;   // wv2660: Naar Second Brain, html ≤ 2 M tekens + JSON-ontsnapping (brain-web.js telt zelf)
 const APP_CODE_MS = 10 * 60 * 1000;
 const APP_CODE_POGINGEN = 5;
 const APP_CODE_INTERVAL_MS = 60 * 1000;
@@ -12990,8 +12991,9 @@ function handleApp(req, res) {
     const rambleStuk = req.method === 'POST' && APP_RAMBLE_STUK_RE.test(p);   // wv1969: MemoryLane, één WAV-stuk van 60 s
     const ruw = upload || rambleStuk || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
     if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
-    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : APP_MAX_BODY); })(function (fout, d, lichaam) {
+    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : APP_MAX_BODY)); })(function (fout, d, lichaam) {
       if (fout === 'groot' && p === '/app/omzet') return appWeiger(res, 413, 'de tekst is te groot om om te zetten (hooguit 2 MB)', 'body groot');   // wv1854
+      if (fout === 'groot' && p === '/app/brain/webpagina') return appWeiger(res, 413, 'deze pagina is te groot (hooguit 2 MB html)', 'body groot');   // wv2660
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
       let reg;
       try { reg = appRegister(); } catch (e) { logError('app-register', e); return appWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'register kapot'); }
@@ -13151,6 +13153,7 @@ function handleApp(req, res) {
           route === 'POST /app/ideeen/naar-ideeenbus' || /^POST \/app\/ideeen\/kaart\/[ka]\d{2,3}\/(deel|niet)$/.test(route))   // wv942: AIX lezen, Deel/Niet per kaart of antwoord
           return typeof appIdeeen === 'function' ? appIdeeen(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ideeen');   // wv761: App AIX (was Ideeën van buitenaf)
         if (route === 'GET /app/omzet' || route === 'POST /app/omzet') return typeof appOmzet === 'function' ? appOmzet(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'omzet');   // wv1854: Download als…
+        if (route === 'POST /app/brain/webpagina') return typeof appBrainWeb === 'function' ? appBrainWeb(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'brain-web');   // wv2660: Chrome-extensie Naar Second Brain
         if (route === 'GET /app/docs/gedeeld' || route.indexOf('POST /app/docs/') === 0) return typeof appDocs === 'function' ? appDocs(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'docs');   // wv1382: OVIS Docs › Delen
         if (route === 'GET /app/secondbrain' || route.indexOf('POST /app/secondbrain/') === 0) return typeof appSecondBrain === 'function' ? appSecondBrain(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'secondbrain');   // wv832: App Second Brain (alleen lezen)
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
@@ -20643,6 +20646,33 @@ async function appOmzet(req, res, a, d, route) {
   return appStuur(res, r.status, r.j);
 }
 // ── einde download als ──
+
+// ── Naar Second Brain (wv2660, 7-11-2026): de Chrome-extensie levert een webpagina aan; de app (Davids sessie + binding) stuurt hem hierheen.
+// Omzetten, grenzen en geheimenpoort in brain-web.js (alleen crypto), pandoc en het ophalen van een link met SSRF-slot in brain-web-io.js;
+// aanlevering als eigen bron bij OVIS Intake (webpagina@1, web:david, interne sleutel). Alleen met intake/router.json live › web:david.
+// Ontwerp en review: vault "01_Ontwikkeling/Chrome-extensie Naar Second Brain - pagina als markdown via Intake (ontwerp 7-11-2026).md".
+let brainWeb = null, brainWebFout = false;
+function brainWebMaak() {
+  if (brainWeb || brainWebFout) return brainWeb;
+  try {
+    const io = require(path.join(__dirname, 'brain-web-io.js'));
+    brainWeb = require(path.join(__dirname, 'brain-web.js')).maak({ pandoc: function (h) { return io.pandoc(h); }, haal: function (u) { return io.haal(u); },
+      lever: function (env) { return intake && typeof intake.leverIntern === 'function' ? intake.leverIntern('webpagina', env, {}) : Promise.resolve(null); },
+      live: function () { return intakeLiveBron('web:david'); }, fout: logError });
+  } catch (e) { brainWebFout = true; logError('brain-web', e); brainWeb = null; }
+  return brainWeb;
+}
+async function appBrainWeb(req, res, a, d) {
+  const m = brainWebMaak();
+  if (!m) return appWeiger(res, 404, 'Naar Second Brain zit niet in deze versie van de pod', 'brain-web ontbreekt');
+  if (!appTeller('brain-web', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (hooguit 60 pagina’s)', 'grens brain-web');
+  let r;
+  try { r = await m.verwerk(d || {}); }
+  catch (e) { logError('app-brain-web', e); return appWeiger(res, 500, 'fout op de pod', 'brain-web uitzondering'); }
+  const j = r.j || {};
+  res._app.reden = ('brain-web ' + (j.ok ? j.uitkomst + ' ' + (j.wijze || '') + ' ' + (j.tekens || 0) + 't' + (j.sleutels_weggelaten ? ' sleutels=' + j.sleutels_weggelaten : '') + (j.stuk_id ? ' ' + j.stuk_id : '') : 'geweigerd ' + r.status)).slice(0, 160);
+  return appStuur(res, r.status, j);
+}
 
 // ── Syncthing (wv1277, 25-10-2026) ─────────────────────────────────────────────────────────────────────────────────────────
 // run.sh start en bewaakt Syncthing (vault ↔ Synology thuis, laptop, werk-pc) en schrijft /opt/data/syncthing/status.json; hier

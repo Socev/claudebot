@@ -549,6 +549,9 @@ jobs:
       - name: "intake-router (wv980, OVIS Intake stap 2: router in de schaduw)"
         if: ${{ !cancelled() }}
         run: bash test/intake-router.sh
+      - name: "brain-web (wv2660, Chrome-extensie Naar Second Brain: webpagina als markdown via Intake)"
+        if: ${{ !cancelled() }}
+        run: bash test/brain-web.sh
       - name: "mailman (wv1856, OVIS MailMan: mailrouter vóór Intake, in de schaduw)"
         if: ${{ !cancelled() }}
         run: bash test/mailman.sh
