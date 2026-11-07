@@ -335,8 +335,79 @@ if (O) {
     const na = F.bereken(A, a, { vault: VAULT, saldi: [] }).vaste_lasten;
     toets('vaste lasten: tweede niet-bunq-rekening (eigenaar David) → nog steeds de gezamenlijke rekening', voor && !voor.geen && na && !na.geen && na.rekening === voor.rekening, [voor && (voor.geen || voor.rekening), na && (na.geen || na.rekening)]);
   }
+  // ── wv2696: personen met dezelfde achternaam, eigen rekening, kinderrekening (David 7-11-2026: "€ 91.000 naar Benthe") ──
+  {
+    const tpW = (x) => (O.tpWoorden ? O.tpWoorden(x) : null);
+    const BD2 = path.join(W, 'bank2'), a2 = A.open(BD2);
+    const J = { ho: 'NL21BUNQ0000000021', vl: 'NL22ABNA0000000022', ki: 'NL23BUNQ0000000023', ex: 'NL24BUNQ0000000024' };
+    a2.db.exec("CREATE TABLE stroom_regels (id INTEGER PRIMARY KEY, sleutel TEXT NOT NULL, richting TEXT NOT NULL, stroom TEXT NOT NULL, subsoort TEXT, herkomst TEXT NOT NULL, actief INTEGER NOT NULL DEFAULT 1, aangemaakt TEXT NOT NULL, UNIQUE (sleutel, richting))");
+    A.rekeningenSync(a2, {
+      ho: { bron: 'bunq', uid: 'bunq-21', bunq_id: 21, naam: 'Hoofd', soort: 'lopend', iban: J.ho, status: 'ACTIVE' },
+      vl: { uid: 'u22', bank: 'ABN AMRO', label: 'Gezamenlijk', naam: 'D PROEFMANS', iban: J.vl, sessie: 's2' },
+      ki: { bron: 'bunq', uid: 'bunq-23', bunq_id: 23, naam: 'Kleedgeld kind', soort: 'lopend', iban: J.ki, status: 'ACTIVE' },
+      ex: { bron: 'bunq', uid: 'bunq-24', bunq_id: 24, naam: 'Rekening van een ander', soort: 'lopend', iban: J.ex, status: 'ACTIVE' } });
+    const HO = [], KI2 = [];
+    HO.push(p(dg(m1, 3), -5000, 'D. Proefmans', 'naar gezamenlijk (zonder tegenboeking)', { tegen_iban: J.vl }));
+    HO.push(p(dg(m1, 4), -7000, 'D Proefmans', 'naar gezamenlijk, IBAN alleen in de ruwe regel', { _ruw: { id: 'r1', creditor_account: { iban: J.vl } } }));
+    HO.push(p(dg(m1, 5), -400, 'D. Proefmans', 'naar de rekening van een ander', { tegen_iban: J.ex }));
+    [6, 7, 8, 9].forEach((d) => { HO.push(p(dg(m1, d), -30, 'B. Proefmans', 'kleedgeld', { tegen_iban: J.ki })); KI2.push(p(dg(m1, d), 30, 'D. Proefmans', 'kleedgeld', { tegen_iban: J.ho })); });
+    HO.push(p(dg(m1, 10), -20, 'I. Proefmans', 'iemand anders, zonder IBAN'));
+    HO.push(p(dg(m1, 11), 900, 'C. van Proefstad', 'bijdrage'));
+    A.bij(a2, 'ho', HO, {}); A.bij(a2, 'ki', KI2, {});
+    A.corrigeer(a2, { rek: 'ki', eigenaar: 'kind' }); A.corrigeer(a2, { rek: 'ex', eigenaar: 'extern' });
+    A.verrijk(a2);
+    const oudeRegel = (s, r, st, sub) => a2.db.prepare("INSERT INTO stroom_regels (sleutel, richting, stroom, subsoort, herkomst, actief, aangemaakt) VALUES (?, ?, ?, ?, 'david', 1, '2026-11-07T21:47:56Z')").run(s, r, st, sub || null);
+    oudeRegel('t:proefmans', 'af', 'leven'); oudeRegel('t:van proefstad', 'bij', 'inkomen', 'buiten_zicht');
+    toets('wv2696: sleutel met voorletter — D./D en D.J. vallen samen, B. en I. niet, B.V. blijft weg', tpW('D. Schaap') === 'd schaap' && tpW('D Schaap') === 'd schaap' && tpW('D.J. Schaap') === 'd schaap' &&
+      tpW('B. Schaap') === 'b schaap' && tpW('Tibber Netherlands B.V.') === 'tibber netherlands' && tpW('Albert Heijn 1344 HUIZEN') === 'albert heijn huizen' &&
+      O.sleutelVan({ tegenpartij: 'B. Schaap' }) !== O.sleutelVan({ tegenpartij: 'D. Schaap' }), [O.tpWoorden && tpW('D. Schaap'), O.sleutelVan({ tegenpartij: 'B. Schaap' })]);
+    const o6 = O.overzicht(A, a2, { nu: vandaag, vanaf: mOud, saldi: null, vault: VAULT, fv: FVnep });
+    const l6 = O.boekingenLijst(A, a2, { filter: { van: m1, tot: m1 }, vault: VAULT, fv: FVnep }).boekingen;
+    const b6 = (re) => l6.filter((b) => re.test(b.omschrijving || ''));
+    const rg = a2.db.prepare('SELECT * FROM stroom_regels ORDER BY id').all();
+    toets('wv2696: oude samengevoegde keuze t:proefmans → alleen B. Proefmans (meeste boekingen), met notitie; t:van proefstad → t:c van proefstad', rg[0].sleutel === 't:b proefmans' && rg[0].sleutel_v === 2 &&
+      /samen/.test(rg[0].notitie || '') && rg[1].sleutel === 't:c van proefstad' && rg[1].sleutel_v === 2 && rg.every((r) => r.actief === 1), rg);
+    toets('wv2696: overboeking naar een eigen rekening = intern, ook met een keuze bij die naam (tegen-IBAN en IBAN uit de ruwe regel)', b6(/gezamenlijk/).length === 2 && b6(/gezamenlijk/).every((b) => b.stroom === 'intern'), b6(/gezamenlijk/));
+    toets('wv2696: kinderrekening volgt Davids keuze (B. Proefmans = leven); de rekening van een ander en I. Proefmans niet onder die keuze', b6(/kleedgeld/).filter((b) => b.bedrag < 0).length === 4 &&
+      b6(/kleedgeld/).filter((b) => b.bedrag < 0).every((b) => b.stroom === 'leven' && b.waarom === 'jouw keuze') && b6(/van een ander/)[0].stroom === 'leven' && b6(/van een ander/)[0].waarom !== 'jouw keuze' &&
+      b6(/iemand anders/)[0].waarom !== 'jouw keuze' && b6(/bijdrage/)[0].stroom === 'inkomen' && b6(/bijdrage/)[0].waarom === 'jouw keuze', l6.map((b) => [b.tegenpartij, b.bedrag, b.stroom, b.waarom]));
+    const g6 = o6.steekproef.filter((g) => /Proefmans/.test(g.naam));
+    toets('wv2696: 40 grootste posten: geen post met de eigen overboekingen; B. en D. Proefmans apart', !g6.some((g) => Math.abs(g.som) >= 5000) && new Set(g6.map((g) => g.id)).size === g6.length &&
+      g6.some((g) => g.naam === 'B. Proefmans' && g.som === -120 && g.stroom === 'leven'), g6.map((g) => [g.naam, g.som, g.stroom]));
+    // zonder keuze: kinderrekening = intern; eigen rekening + keuze = intern
+    const c6 = { regels: new Map([['t:d proefmans|af', { stroom: 'leven' }]]), zichtbaar: new Set(['x']), rekEig: new Map([['x', 'kind']]), eigenIban: new Map([[J.vl, 'samen'], [J.ki, 'kind']]), catUit: new Set(), tpCat: new Map() };
+    const i1 = O.indelen({ _sleutel: 't:b proefmans', bedrag: -30, type: 'intern', tegen_iban: J.ki, tegenpartij: 'B. Proefmans' }, c6);
+    const i2 = O.indelen({ _sleutel: 't:d proefmans', bedrag: -30, type: 'uitgave', tegen_iban: J.vl.replace(/(.{4})/g, '$1 '), tegenpartij: 'D. Proefmans' }, c6);
+    const i3 = O.indelen({ _sleutel: 't:d proefmans', bedrag: -30, type: 'intern', paar_rek: 'x', tegenpartij: 'D. Proefmans' }, c6);
+    toets('wv2696: indelen — kinderrekening zonder keuze = intern; eigen rekening (IBAN met spaties) mét keuze = intern; paar naar kinderrekening mét keuze = de keuze', i1.stroom === 'intern' && i2.stroom === 'intern' && /geldt hier niet/.test(i2.waarom) && i3.stroom === 'leven', [i1, i2, i3]);
+    let z6 = {}; try { z6 = O.stroomZet(A, a2, { id: O.idVan('t:d proefmans', 'af'), stroom: 'leven' }); } catch (e) { z6 = { fout: e.message }; }
+    let r6 = null; try { r6 = a2.db.prepare("SELECT sleutel_v FROM stroom_regels WHERE sleutel = 't:d proefmans'").get(); } catch (e) { r6 = { fout: e.message }; }
+    toets('wv2696: omzetting eenmalig (tweede keer niets); nieuwe keuze krijgt sleutel_v 2', (O.regelsHerleiden ? O.regelsHerleiden(a2).length === 0 : false) && z6.stroom === 'leven' && r6 && r6.sleutel_v === 2, [z6, r6]);
+    // review MOET 1: eigen rekening zonder eigenaar is ook eigen; MOET 3: botsing bij de omzetting — de jongste actieve keuze wint, de ander gaat opzij
+    const i4 = O.indelen({ _sleutel: 't:d proefmans', bedrag: -30, type: 'uitgave', tegen_iban: 'NL29BUNQ0000000029', tegenpartij: 'D. Proefmans' }, Object.assign({}, c6, { eigenIban: new Map([['NL29BUNQ0000000029', '']]) }));
+    const oudB = (t) => a2.db.prepare("INSERT INTO stroom_regels (sleutel, richting, stroom, herkomst, actief, aangemaakt) VALUES ('t:van proefstad', 'bij', 'leven', 'david', 1, ?)").run(t);
+    let bz = null;
+    try {
+      oudB('2026-11-01T00:00:00Z'); O.regelsHerleiden(a2);
+      const na1 = a2.db.prepare("SELECT sleutel, stroom, actief FROM stroom_regels WHERE richting = 'bij' AND sleutel LIKE '%proefstad%' ORDER BY id").all();
+      oudB('2026-12-01T00:00:00Z'); O.regelsHerleiden(a2);
+      const na2 = a2.db.prepare("SELECT sleutel, stroom, actief FROM stroom_regels WHERE richting = 'bij' AND sleutel LIKE '%proefstad%' ORDER BY id").all();
+      bz = { na1, na2 };
+    } catch (e) { bz = { fout: e.message }; }
+    const act = (l, st) => l && l.filter((r) => r.actief === 1).length === 1 && l.find((r) => r.actief === 1).sleutel === 't:c van proefstad' && l.find((r) => r.actief === 1).stroom === st;
+    const i5 = O.indelen({ _sleutel: 't:d proefmans', bedrag: 30, type: 'intern', tegen_iban: J.vl, r_eigenaar: 'kind', tegenpartij: 'D. Proefmans' }, Object.assign({}, c6, { regels: new Map([['t:d proefmans|bij', { stroom: 'inkomen' }]]) }));
+    toets('wv2696: de boeking op de kinderrekening zelf blijft intern, ook met een keuze (geen dubbel kleedgeld)', i5.stroom === 'intern' && b6(/kleedgeld/).filter((b) => b.bedrag > 0).every((b) => b.stroom === 'intern'), [i5, b6(/kleedgeld/).filter((b) => b.bedrag > 0)]);
+    toets('wv2696 review: eigen IBAN zonder eigenaar = intern; botsing: oudere oude keuze gaat opzij, jongere wint, niets gewist', i4.stroom === 'intern' && !!bz.na1 && act(bz.na1, 'inkomen') && bz.na1.length === 2 &&
+      act(bz.na2, 'leven') && bz.na2.length === 3 && bz.na2.filter((r) => /#uit/.test(r.sleutel)).length === 2, [i4, bz]);
+    // een oude keuze die niet om te zetten is (alleen-lezen) telt niet
+    const a3 = A.open(BD2, undefined);
+    a3.db.exec("INSERT INTO stroom_regels (sleutel, richting, stroom, herkomst, actief, aangemaakt) VALUES ('t:proefmans', 'bij', 'leven', 'david', 1, 'x')");
+    const nepA = { db: { prepare: (q) => /^UPDATE|^INSERT|^ALTER|^CREATE/.test(q) ? (() => { throw new Error('alleen-lezen'); })() : a3.db.prepare(q), exec: (q) => { throw new Error('alleen-lezen'); } } };
+    let rl = null; try { O.overzicht(A, nepA, { nu: vandaag, vanaf: mOud, saldi: null, vault: VAULT, fv: FVnep }); rl = 'ok'; } catch (e) { rl = e.message; }
+    toets('wv2696: lukt de omzetting niet (alleen-lezen), dan telt de oude keuze niet en werkt het overzicht', rl === 'ok' && (() => { try { return a3.db.prepare("SELECT sleutel_v FROM stroom_regels WHERE richting = 'bij' AND sleutel = 't:proefmans'").get().sleutel_v === null; } catch (e) { return false; } })(), rl);
+  }
   const src = fs.readFileSync('financien-overzicht.js', 'utf8').replace(/^\s*(\*|\/\/).*$/gm, '');
-  toets('financien-overzicht.js laadt geen netwerk- of procesmodule; schrijven alleen in stroomZet', !/require\(['"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads)['"]\)/.test(src) && !/\bfetch\s*\(/.test(src) &&
+  toets('financien-overzicht.js laadt geen netwerk- of procesmodule; schrijven alleen in stroomZet en de eenmalige sleutelomzetting (na stroomZet)', !/require\(['"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads)['"]\)/.test(src) && !/\bfetch\s*\(/.test(src) &&
     !/INSERT|UPDATE|DELETE|CREATE TABLE|db\.exec/.test(src.slice(0, src.indexOf('function stroomZet'))) && !/writeFile|appendFile|unlink/.test(src), null);
 }
 toets('uitrol.sh en Dockerfile: financien-overzicht.js gaat mee in de release', /RELEASE_OPTIONEEL="[^"]*\bfinancien-overzicht\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&

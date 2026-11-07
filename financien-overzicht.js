@@ -29,7 +29,12 @@
 //                     laatste jaarrekening (boekwaarde) met indicatief "na box 2 bij uitkeren" (tarieven TARIEVEN hieronder, met bron).
 // Alles heet "zichtbare rekeningen" (review MOET 1): Cynthia's eigen rekeningen zijn niet gekoppeld.
 //
-// Schrijft niets behalve stroomZet (alleen via bank-lezer.js app-stroom, POST /app/financien/stroom). Geen netwerk, geen taalmodel.
+// wv2696 (David 7-11-2026: "Dit kan nooit kloppen, € 91.000 naar Benthe"): (1) de sleutel van een persoon houdt de eerste voorletter
+// ("D. Schaap" en "B. Schaap" vielen samen op "schaap"); (2) een overboeking naar of van een eigen zichtbare rekening (tegen-IBAN in
+// rekeningen, of een intern paar) is altijd intern, ook bij een keuze van David, behalve de boeking op Davids kant naar of van een
+// kinderrekening (eigenaar kind): die volgt zijn keuze (de boeking op de kinderrekening zelf blijft intern); (3) bestaande keuzes met de oude sleutel worden één keer omgezet (regelsHerleiden): één partij = de nieuwe
+// sleutel, een samengevoegde sleutel = alleen de partij met de meeste boekingen in die richting (wat David zag), met een notitie in de regel.
+// Schrijft niets behalve stroomZet (alleen via bank-lezer.js app-stroom, POST /app/financien/stroom) en die eenmalige omzetting. Geen netwerk, geen taalmodel.
 // Het antwoord gaat alleen naar Davids eigen App (GET /app/financien); namen van tegenpartijen wel (wv1957), IBAN's niet.
 'use strict';
 const crypto = require('crypto'), fs = require('fs'), path = require('path');
@@ -59,12 +64,26 @@ function woorden(s) {
   return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z]+/g, ' ').trim().split(' ')
     .filter(function (w) { return w.length >= 2; }).slice(0, 4).join(' ');
 }
+// wv2696: een tegenpartij-naam als woorden, met de eerste voorletter erbij ("D. Schaap" → "d schaap", "D.J. Schaap" → "d schaap");
+// verdere losse letters vallen weg zoals vroeger ("Tibber Netherlands B.V." → "tibber netherlands")
+function tpWoorden(s) {
+  const w = String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z]+/g, ' ').trim().split(' ').filter(Boolean);
+  let i = 0; while (i < w.length && w[i].length === 1) i++;
+  const rest = w.slice(i).filter(function (x) { return x.length >= 2; });
+  return (i > 0 && rest.length ? [w[0]] : []).concat(rest).slice(0, 4).join(' ');
+}
 function omsKern(oms) { const m = /Omschrijving:\s*([\s\S]*?)(?=\s+(?:Kenmerk|IBAN|BIC|Naam|Machtiging|Incassant)\s*:|$)/i.exec(String(oms || '')); return m ? m[1] : String(oms || ''); }
 function maandPlus(m, n) { const j = Number(m.slice(0, 4)), x = Number(m.slice(5, 7)) - 1 + n; return (j + Math.floor(x / 12)) + '-' + String(((x % 12) + 12) % 12 + 1).padStart(2, '0'); }
 // sleutel van een tegenpartij (zonder richting) en de id die de App terugstuurt (geen naam of IBAN in de id)
 // Gemengd (betaaldienst) en eigen BV: tegenpartij + de categorie van de verrijking (die komt uit de omschrijving: AI-groep per
 // tegenpartij + omschrijving), zodat loon en een privéopname van de Holding, of twee soorten PayPal-posten, los te kiezen zijn.
 function sleutelVan(t) {
+  const tp = tpWoorden(t.tegenpartij);
+  if (!tp) return 'o:' + woorden(omsKern(t.omschrijving));
+  return GEMENGD.test(String(t.tegenpartij || '')) || ENTITEIT.test(String(t.tegenpartij || '')) ? 'g:' + tp + '|' + (t.categorie || '-') : 't:' + tp;
+}
+// de sleutel van vóór wv2696 (zonder voorletter): alleen om oude keuzes om te zetten (regelsHerleiden)
+function sleutelOud(t) {
   const tp = woorden(t.tegenpartij);
   if (!tp) return 'o:' + woorden(omsKern(t.omschrijving));
   return GEMENGD.test(String(t.tegenpartij || '')) || ENTITEIT.test(String(t.tegenpartij || '')) ? 'g:' + tp + '|' + (t.categorie || '-') : 't:' + tp;
@@ -78,7 +97,12 @@ function idVan(sleutel, r) { return crypto.createHash('sha256').update('stroom:'
 function regelsLees(a) {
   const m = new Map();
   if (!a.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'stroom_regels'").get()) return m;
-  a.db.prepare('SELECT sleutel, richting, stroom, subsoort, aangemaakt FROM stroom_regels WHERE actief = 1').all().forEach(function (r) {
+  // wv2696: een keuze met de oude sleutel (sleutel_v leeg) telt pas na de omzetting; lukt die niet, dan telt hij niet (nooit stil op
+  // alle partijen met die achternaam)
+  try { regelsHerleiden(a); } catch (e) { /* alleen-lezen of fout: oude keuzes tellen niet */ }
+  const v2 = a.db.prepare("SELECT 1 FROM pragma_table_info('stroom_regels') WHERE name = 'sleutel_v'").get();
+  if (!v2) return m;
+  a.db.prepare('SELECT sleutel, richting, stroom, subsoort, aangemaakt FROM stroom_regels WHERE actief = 1 AND sleutel_v = 2').all().forEach(function (r) {
     if (STROMEN.indexOf(r.stroom) >= 0) m.set(r.sleutel + '|' + r.richting, r);
   });
   return m;
@@ -88,10 +112,18 @@ function regelsLees(a) {
 // geeft { stroom, sub, zeker, waarom, cat } — cat is de categorie in het overzicht (de verrijking, met twee vaste aanvullingen)
 function indelen(t, c) {
   const cat0 = t.categorie || null, sub = String(t.subcategorie || '').toLowerCase(), tp = String(t.tegenpartij || '');
-  const r = c.regels.get(t._sleutel + '|' + richting(t.bedrag));
+  let r = c.regels.get(t._sleutel + '|' + richting(t.bedrag));
   const isBel = /belastingdienst/i.test(tp) && cat0 === 'teruggave en terugbetaling';
   const cat = isBel ? 'belastingen' : CREDITCARD.test(String(t.omschrijving || '')) && t.bedrag < 0 && (!cat0 || cat0 === 'overig') ? 'creditcard (niet uitgesplitst)' : cat0;
   const u = function (stroom, s, zeker, waarom) { return { stroom: stroom, sub: s || null, zeker: zeker, waarom: waarom, cat: cat }; };
+  // wv2696: naar of van een eigen zichtbare rekening is nooit uitgegeven of inkomen, ook niet via een keuze; behalve met een kinderrekening
+  const eigen = eigenTegen(t, c);
+  if (eigen) {
+    // alleen de boeking op Davids kant (de andere kant is de kinderrekening): de boeking op de kinderrekening zelf blijft intern, anders telt
+    // hetzelfde kleedgeld twee keer (uit bij David, in bij het kind)
+    const kind = eigen === 'kind' && String(t.r_eigenaar || '').toLowerCase() !== 'kind';
+    if (!(kind && r)) return u('intern', null, true, r ? 'tussen twee eigen rekeningen (je keuze bij deze naam geldt hier niet)' : 'tussen twee eigen rekeningen');
+  }
   if (r) return u(r.stroom, r.subsoort, true, 'jouw keuze');
   if (t.type === 'intern') {
     if (t.paar_rek && c.zichtbaar.has(t.paar_rek)) return u('intern', null, true, 'tussen twee eigen rekeningen');
@@ -116,33 +148,43 @@ function indelen(t, c) {
   if (!cat || cat === 'overig') {
     if (CONTANT.test(String(t.omschrijving || ''))) { const x = u('leven', null, true, 'contant geld (omschrijving)'); x.cat = 'contant geld'; return x; }
     // dezelfde tegenpartij heeft andere posten wél in één categorie (niet bij een betaaldienst of eigen BV)
-    const k = woorden(tp), cc = !GEMENGD.test(tp) && !ENTITEIT.test(tp) && k ? c.tpCat.get(k) : null;
+    const k = tpWoorden(tp), cc = !GEMENGD.test(tp) && !ENTITEIT.test(tp) && k ? c.tpCat.get(k) : null;
     if (cc) { const x = u('leven', null, true, 'zoals de andere posten bij deze tegenpartij'); x.cat = cc; return x; }
     return u('leven', null, false, 'uitgegeven, nog niet ingedeeld');
   }
   return u('leven', null, true, cat);
 }
 
+// de eigenaar (kleine letters) van de eigen zichtbare rekening aan de andere kant, of null: eerst het intern paar, dan het tegen-IBAN
+function eigenTegen(t, c) {
+  if (t.paar_rek && c.zichtbaar.has(t.paar_rek)) return c.rekEig.get(t.paar_rek) || 'eigen';
+  const ib = String(t.tegen_iban || '').replace(/\s+/g, '').toUpperCase();
+  return ib && c.eigenIban.has(ib) ? c.eigenIban.get(ib) || 'eigen' : null;   // review wv2696 MOET 1: eigenaar leeg is ook eigen
+}
 // Alle privéboekingen van de maanden [van, tot] (JJJJ-MM), elk in delen. aflossing = verplichte aflossing per maand (hypotheekmodel) of null.
 function boekingen(a, van, tot, aflossing) {
-  const rijen = a.db.prepare("SELECT t.nr, t.rek, t.datum, t.bedrag, t.valuta, t.tegenpartij, t.omschrijving, v.type, v.categorie, v.subcategorie, v.abonnement_id, v.eigenaar AS v_eigenaar," +
+  const rijen = a.db.prepare("SELECT t.nr, t.rek, t.datum, t.bedrag, t.valuta, t.tegenpartij, t.omschrijving, v.type, v.categorie, v.subcategorie, v.abonnement_id, v.eigenaar AS v_eigenaar, r.eigenaar AS r_eigenaar," +
+    // wv2696: bij een deel van de ABN-boekingen is tegen_iban leeg en staat het IBAN alleen in de ruwe bankregel (creditor/debtor_account)
+    " coalesce(nullif(trim(t.tegen_iban), ''), CASE WHEN json_valid(t.ruwe_json) THEN json_extract(t.ruwe_json, CASE WHEN t.bedrag < 0 THEN '$.creditor_account.iban' ELSE '$.debtor_account.iban' END) END) AS tegen_iban," +
     ' (SELECT p.rek FROM transacties p WHERE p.nr = v.intern_paar) AS paar_rek, r.label, r.naam, r.weergavenaam FROM transacties t JOIN verrijking v ON v.nr = t.nr JOIN rekeningen r ON r.rek = t.rek' +
     " WHERE t.status IN ('booked', 'pending') AND lower(coalesce(r.eigenaar, '')) NOT IN ('extern', 'pot') AND t.datum >= ? AND t.datum <= ? ORDER BY t.datum, t.nr").all(van + '-01', tot + '-31');
-  const zichtbaar = new Set(a.db.prepare("SELECT rek FROM rekeningen WHERE lower(coalesce(eigenaar, '')) NOT IN ('extern', 'pot')").all().map(function (r) { return r.rek; }));
+  const zr = a.db.prepare("SELECT rek, iban, lower(coalesce(eigenaar, '')) AS eig FROM rekeningen WHERE lower(coalesce(eigenaar, '')) NOT IN ('extern', 'pot')").all();
+  const zichtbaar = new Set(zr.map(function (r) { return r.rek; })), rekEig = new Map(zr.map(function (r) { return [r.rek, r.eig]; }));
+  const eigenIban = new Map(zr.filter(function (r) { return r.iban; }).map(function (r) { return [String(r.iban).replace(/\s+/g, '').toUpperCase(), r.eig]; }));
   const catUit = new Set(['wonen', 'verzekeringen', 'boodschappen', 'huishouden', 'vervoer', 'abonnementen en communicatie', 'kinderen', 'gezondheid', 'vrije tijd en sport',
     'horeca en uit eten', 'vakantie en reizen', 'kleding en persoonlijk', 'cadeaus en goede doelen', 'belastingen', 'bankkosten', 'contant geld', 'Gambia-hulp']);
   // per tegenpartij de categorie als al zijn ingedeelde uitgaven (minstens 2) in één categorie staan
   const tel = new Map();
   rijen.forEach(function (t) {
     if (!(t.bedrag < 0) || !t.categorie || t.categorie === 'overig' || t.type === 'intern') return;
-    const k = woorden(t.tegenpartij);
+    const k = tpWoorden(t.tegenpartij);
     if (!k) return;
     if (!tel.has(k)) tel.set(k, new Map());
     tel.get(k).set(t.categorie, (tel.get(k).get(t.categorie) || 0) + 1);
   });
   const tpCat = new Map();
   tel.forEach(function (m, k) { if (m.size === 1) { const e = Array.from(m.entries())[0]; if (e[1] >= 2) tpCat.set(k, e[0]); } });
-  const c = { regels: regelsLees(a), zichtbaar: zichtbaar, catUit: catUit, tpCat: tpCat };
+  const c = { regels: regelsLees(a), zichtbaar: zichtbaar, rekEig: rekEig, eigenIban: eigenIban, catUit: catUit, tpCat: tpCat };
   const uit = [];
   let anderValuta = 0;
   rijen.forEach(function (t) {
@@ -492,14 +534,71 @@ function stroomZet(A, a, o) {
   let hit = null;
   for (let i = 0; i < rijen.length && !hit; i++) { const s = sleutelVan(rijen[i]), r = richting(rijen[i].bedrag); if (idVan(s, r) === o.id) hit = { sleutel: s, richting: r }; }
   if (!hit) throw new Error('onbekende tegenpartij');
-  a.db.exec('CREATE TABLE IF NOT EXISTS stroom_regels (id INTEGER PRIMARY KEY, sleutel TEXT NOT NULL, richting TEXT NOT NULL, stroom TEXT NOT NULL, subsoort TEXT,' +
-    ' herkomst TEXT NOT NULL, actief INTEGER NOT NULL DEFAULT 1, aangemaakt TEXT NOT NULL, UNIQUE (sleutel, richting))');
+  regelsTabel(a);
+  try { regelsHerleiden(a); } catch (e) { /* een oude keuze blijft dan buiten beeld */ }
   if (o.stroom === null) { a.db.prepare('DELETE FROM stroom_regels WHERE sleutel = ? AND richting = ?').run(hit.sleutel, hit.richting); return { id: o.id, stroom: null }; }
-  a.db.prepare("INSERT INTO stroom_regels (sleutel, richting, stroom, subsoort, herkomst, actief, aangemaakt) VALUES (?, ?, ?, ?, 'david', 1, ?)" +
-    ' ON CONFLICT (sleutel, richting) DO UPDATE SET stroom = excluded.stroom, subsoort = excluded.subsoort, actief = 1, aangemaakt = excluded.aangemaakt')
+  a.db.prepare("INSERT INTO stroom_regels (sleutel, richting, stroom, subsoort, herkomst, actief, aangemaakt, sleutel_v) VALUES (?, ?, ?, ?, 'david', 1, ?, 2)" +
+    ' ON CONFLICT (sleutel, richting) DO UPDATE SET stroom = excluded.stroom, subsoort = excluded.subsoort, actief = 1, aangemaakt = excluded.aangemaakt, sleutel_v = 2')
     .run(hit.sleutel, hit.richting, o.stroom, o.subsoort || null, new Date().toISOString());
   return { id: o.id, stroom: o.stroom, subsoort: o.subsoort || null };
 }
 
-module.exports = { zonderIban: zonderIban, overzicht: overzicht, boekingenLijst: boekingenLijst, stroomZet: stroomZet, indelen: indelen, sleutelVan: sleutelVan, idVan: idVan, box2: box2,
+// tabel stroom_regels (herhaalbaar); wv2696: sleutel_v (2 = sleutel met voorletter) en notitie (wat de omzetting deed)
+function regelsTabel(a) {
+  a.db.exec('CREATE TABLE IF NOT EXISTS stroom_regels (id INTEGER PRIMARY KEY, sleutel TEXT NOT NULL, richting TEXT NOT NULL, stroom TEXT NOT NULL, subsoort TEXT,' +
+    ' herkomst TEXT NOT NULL, actief INTEGER NOT NULL DEFAULT 1, aangemaakt TEXT NOT NULL, sleutel_v INTEGER, notitie TEXT, UNIQUE (sleutel, richting))');
+  const k = new Set(a.db.prepare("SELECT name FROM pragma_table_info('stroom_regels')").all().map(function (r) { return r.name; }));
+  if (!k.has('sleutel_v')) a.db.exec('ALTER TABLE stroom_regels ADD COLUMN sleutel_v INTEGER');
+  if (!k.has('notitie')) a.db.exec('ALTER TABLE stroom_regels ADD COLUMN notitie TEXT');
+}
+// wv2696: zet keuzes met de oude sleutel (zonder voorletter) één keer om. Per keuze de boekingen (laatste 36 maanden, zelfde richting) met
+// die oude sleutel: geen = sleutel blijft; één nieuwe sleutel = die; meer (samengevoegde achternaam) = alleen de partij met de meeste
+// boekingen, met notitie. Botst de nieuwe sleutel met een nieuwere keuze, dan wint die en gaat de oude uit (actief 0, notitie).
+// Geeft de omzettingen terug (voor de toets en het rapport).
+function regelsHerleiden(a) {
+  if (!a.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'stroom_regels'").get()) return [];
+  const k = new Set(a.db.prepare("SELECT name FROM pragma_table_info('stroom_regels')").all().map(function (r) { return r.name; }));
+  if (k.has('sleutel_v') && !a.db.prepare('SELECT 1 FROM stroom_regels WHERE sleutel_v IS NULL').get()) return [];
+  regelsTabel(a);
+  const oud = a.db.prepare('SELECT id, sleutel, richting, actief, aangemaakt FROM stroom_regels WHERE sleutel_v IS NULL').all();
+  if (!oud.length) return [];
+  const rijen = a.db.prepare("SELECT t.tegenpartij, t.omschrijving, t.bedrag, v.categorie FROM transacties t JOIN verrijking v ON v.nr = t.nr JOIN rekeningen r ON r.rek = t.rek WHERE t.status IN ('booked', 'pending')" +
+    " AND lower(coalesce(r.eigenaar, '')) NOT IN ('extern', 'pot') AND t.datum >= date('now', '-36 months')").all();
+  const tel = new Map();
+  rijen.forEach(function (t) {
+    const ko = sleutelOud(t) + '|' + richting(t.bedrag), kn = sleutelVan(t);
+    if (!tel.has(ko)) tel.set(ko, new Map());
+    tel.get(ko).set(kn, (tel.get(ko).get(kn) || 0) + 1);
+  });
+  const nu = new Date().toISOString().slice(0, 10), uit = [], klaar = new Set();
+  a.db.exec('BEGIN IMMEDIATE');
+  try {
+    oud.forEach(function (r) {
+      if (klaar.has(r.id)) return;   // al opzij gezet door een eerdere botsing
+      const m = tel.get(r.sleutel + '|' + r.richting);
+      const l = m ? Array.from(m.entries()).sort(function (p, q) { return q[1] - p[1] || (p[0] < q[0] ? -1 : 1); }) : [];
+      let nieuw = r.sleutel, notitie = null;
+      if (!l.length) notitie = 'wv2696 ' + nu + ': geen boekingen bij de omzetting, sleutel ongewijzigd';
+      else {
+        nieuw = l[0][0];
+        if (l.length > 1) notitie = 'wv2696 ' + nu + ': oude sleutel ' + r.sleutel + ' voegde ' + l.length + ' partijen samen (' + l.map(function (e) { return e[0] + ' ' + e[1] + '×'; }).join(', ') +
+          '); geldt nu alleen voor ' + nieuw + ' (de meeste boekingen, de naam die je zag)';
+        else if (nieuw !== r.sleutel) notitie = 'wv2696 ' + nu + ': sleutel ' + r.sleutel + ' → ' + nieuw + ' (met voorletter)';
+      }
+      // review wv2696 MOET 3: bij een botsing wint de actieve, en bij twee actieve de jongste keuze; de verliezer gaat opzij (eigen sleutel
+      // met #uit, actief 0, notitie), niets wordt gewist
+      const bots = nieuw !== r.sleutel ? a.db.prepare('SELECT id, sleutel, actief, aangemaakt FROM stroom_regels WHERE sleutel = ? AND richting = ? AND id != ?').get(nieuw, r.richting, r.id) : null;
+      const wint = !bots || (bots.actief !== 1 && r.actief === 1) || (bots.actief === r.actief && String(r.aangemaakt) > String(bots.aangemaakt));
+      const opzij = function (x, door) { a.db.prepare('UPDATE stroom_regels SET sleutel = ?, actief = 0, sleutel_v = 2, notitie = ? WHERE id = ?').run(x.sleutel + '#uit' + x.id, 'wv2696 ' + nu + ': uit, regel ' + door + ' geldt voor ' + nieuw, x.id); };
+      if (bots && wint) { opzij(bots, r.id); klaar.add(bots.id); }
+      if (wint) a.db.prepare('UPDATE stroom_regels SET sleutel = ?, sleutel_v = 2, notitie = ? WHERE id = ?').run(nieuw, notitie, r.id);
+      else opzij(r, bots.id);
+      uit.push({ id: r.id, van: r.sleutel, naar: wint ? nieuw : null, richting: r.richting, partijen: l.length, uit: bots ? (wint ? bots.id : r.id) : undefined });
+    });
+    a.db.exec('COMMIT');
+  } catch (e) { try { a.db.exec('ROLLBACK'); } catch (e2) { /* niets */ } throw e; }
+  return uit;
+}
+
+module.exports = { regelsHerleiden: regelsHerleiden, tpWoorden: tpWoorden, zonderIban: zonderIban, overzicht: overzicht, boekingenLijst: boekingenLijst, stroomZet: stroomZet, indelen: indelen, sleutelVan: sleutelVan, idVan: idVan, box2: box2,
   STROMEN: STROMEN, SUBSOORT: SUBSOORT, TARIEVEN: TARIEVEN, EENMALIG_GRENS: EENMALIG_GRENS, EIGENAREN: EIGENAREN, uitgaven: uitgaven, mediaan: mediaan };
