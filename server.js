@@ -8377,6 +8377,58 @@ function appBewaardVan(jobId) {
   if (!APP_JOB_RE.test(String(jobId))) return null;
   return appBestandenIndex().find(function (m) { return m.job_id === jobId; }) || null;
 }
+// wv2663 (David 7-11: "In Werkbestanden verschijnen véél bestanden dubbel"): het bericht van een agentrapport (POST /bericht met agent_job,
+// daarna /bericht/bestand per bestand) bewaart een bestand dat byte voor byte al bij die agent staat niet opnieuw. In meta.json van het
+// bericht staat dan {n, naam, grootte, sha, van: {job_id, n}} zonder b/<n>; de berichtkaart (GET /app/bestand/<bericht>/<n>) leest via
+// appBestandPad het bestand van de agent. Werkbestanden toont alleen eigen bestanden (appBestandenZichtbaar). Is de agent-bewaring er
+// niet (vol, mislukt), dan gewoon een eigen kopie zoals voorheen.
+const APP_DUBBEL_MS = 10 * 60 * 1000;
+const APP_DUBBEL_VOOR_MS = 12 * 3600 * 1000;
+function appBestandPad(m, b) {
+  if (!m || !b || !Number.isInteger(b.n)) return null;
+  if (!b.van) return path.join(APP_BESTANDEN_DIR, m.dag, m.job_id, 'b', String(b.n));
+  const v = b.van;
+  if (!v || !APP_JOB_RE.test(String(v.job_id)) || v.job_id === m.job_id || !Number.isInteger(v.n)) return null;
+  const bron = appBewaardVan(v.job_id);
+  const bb = bron && Array.isArray(bron.bestanden) ? bron.bestanden.find(function (x) { return x && x.n === v.n && !x.van; }) : null;
+  return bb ? path.join(APP_BESTANDEN_DIR, bron.dag, bron.job_id, 'b', String(bb.n)) : null;
+}
+// Het bestand van agent agentJob met precies deze inhoud (eerst op grootte, dan byte voor byte); null als er geen is.
+function appZelfdeBijAgent(agentJob, inhoud) {
+  if (!APP_JOB_RE.test(String(agentJob || ''))) return null;
+  const bron = appBewaardVan(agentJob);
+  if (!bron || bron.soort !== 'agent' || !Array.isArray(bron.bestanden)) return null;
+  for (const x of bron.bestanden) {
+    if (!x || x.van || !Number.isInteger(x.n) || x.grootte !== inhoud.length) continue;
+    try {
+      const p = path.join(APP_BESTANDEN_DIR, bron.dag, bron.job_id, 'b', String(x.n));
+      const st = fs.lstatSync(p);
+      if (!st.isFile() || st.size !== inhoud.length) continue;
+      if (fs.readFileSync(p).equals(inhoud)) return { job_id: bron.job_id, n: x.n };
+    } catch (e) { continue; }
+  }
+  return null;
+}
+// Wat Werkbestanden (en de teller Nieuw) toont: geen verwijzingen, en bij een bericht van vóór wv2663 (eigen kopie) niet het bestand dat
+// ook bij een agent staat met dezelfde naam en grootte, van hooguit 10 min na tot 12 u vóór het bericht (een rapport uit de stille uren komt
+// pas om 07:00 in de app; gemeten 7-11). De bewaring zelf blijft (de berichtkaart leest zijn eigen kopie).
+function appBestandenZichtbaar(items) {
+  const agentOp = {};
+  items.forEach(function (m) {
+    if (m.soort !== 'agent' || !Array.isArray(m.bestanden)) return;
+    m.bestanden.forEach(function (b) { if (b && !b.van) (agentOp[b.naam + '|' + b.grootte] = agentOp[b.naam + '|' + b.grootte] || []).push(Date.parse(m.op)); });
+  });
+  return items.map(function (m) {
+    if (!Array.isArray(m.bestanden)) return m;
+    const t = Date.parse(m.op);
+    const eigen = m.bestanden.filter(function (b) {
+      if (!b || b.van) return false;
+      if (m.soort !== 'socev') return true;
+      return !(agentOp[b.naam + '|' + b.grootte] || []).some(function (x) { return x - t <= APP_DUBBEL_MS && t - x <= APP_DUBBEL_VOOR_MS; });
+    });
+    return eigen.length === m.bestanden.length ? m : Object.assign({}, m, { bestanden: eigen });
+  });
+}
 // Ouder dan 30 dagen weg; telt meteen de totale omvang (voor de bovengrens). Elk uur en kort na de start.
 function appBestandenOpruim(nu) {
   nu = nu || Date.now();
@@ -8396,7 +8448,7 @@ function appBestandenOpruim(nu) {
         try { fs.rmSync(jd, { recursive: true, force: true }); weg++; } catch (e) { logError('app-opruim', e); }
         continue;
       }
-      if (m && Array.isArray(m.bestanden)) m.bestanden.forEach(function (b) { totaal += Number(b.grootte) || 0; });
+      if (m && Array.isArray(m.bestanden)) m.bestanden.forEach(function (b) { if (b && !b.van) totaal += Number(b.grootte) || 0; });   // wv2663: verwijzing = geen ruimte
     }
     try { if (!fs.readdirSync(dagDir).length) fs.rmdirSync(dagDir); } catch (e) {}
   }
@@ -8739,7 +8791,7 @@ async function appBestanden(req, res) {
   try { items = appBestandenIndex(); } catch (e) { logError('app-bestanden', e); return appWeiger(res, 503, 'de bestandenlijst is nu niet leesbaar', 'index'); }
   let perJob = {};
   try { const wv = await appWerkvoorraad(); ((wv && wv.items) || []).forEach(function (w) { if (w.job_id) perJob[w.job_id] = w; }); } catch (e) { perJob = {}; }
-  const lijst = items.filter(function (m) { return m.bestanden && m.bestanden.length; }).slice(0, 200).map(function (m) {
+  const lijst = appBestandenZichtbaar(items).filter(function (m) { return m.bestanden && m.bestanden.length; }).slice(0, 200).map(function (m) {   // wv2663
     const w = perJob[m.job_id];
     return { job_id: m.job_id, soort: m.soort, kanaal: m.kanaal, app: m.app, op: m.op,
       label: m.soort === 'agent' ? ((w && w.samenvatting) ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(m.label)) : m.soort === 'socev' ? 'bericht · ' + String(m.label || '').slice(0, 40)
@@ -8762,8 +8814,10 @@ async function appBestand(req, res, rest) {
   const m = appBewaardVan(jobId);
   const b = m && (m.bestanden || []).find(function (x) { return x.n === n; });
   if (!b) return appWeiger(res, 404, 'dit bestand is er niet (meer); de pod bewaart bestanden 30 dagen', 'bestand ' + jobId + '/' + n + ' weg');
+  const bpad = appBestandPad(m, b);   // wv2663: een verwijzing leest het bestand van de agent
+  if (!bpad) return appWeiger(res, 404, 'dit bestand is er niet (meer); de pod bewaart bestanden 30 dagen', 'bestand ' + jobId + '/' + n + ' verwijzing weg');
   let inhoud;
-  try { inhoud = await appLeesEcht(path.join(APP_BESTANDEN_DIR, m.dag, jobId, 'b', String(n))); }
+  try { inhoud = await appLeesEcht(bpad); }
   catch (e) { logError('app-bestand', e); return appWeiger(res, 404, 'dit bestand is er niet (meer)', 'bestand ' + jobId + '/' + n + ' onleesbaar'); }
   res._app.reden = 'bestand ' + jobId + '/' + n;
   const ext = (/\.([a-z0-9]{1,5})$/i.exec(String(b.naam)) || [])[1];
@@ -9254,7 +9308,7 @@ async function appNieuwBronnen() {
   let idx = null;
   try { idx = appBestandenIndex(); } catch (e) { idx = null; }
   uit.agents = idx ? idx.filter(function (m) { return m.soort === 'agent' && m.rapport; }).map(function (m) { return Date.parse(m.op); }) : null;
-  uit.bestanden = idx ? idx.filter(function (m) { return m.bestanden && m.bestanden.length; }).map(function (m) { return Date.parse(m.op); }) : null;
+  uit.bestanden = idx ? appBestandenZichtbaar(idx).filter(function (m) { return m.bestanden && m.bestanden.length; }).map(function (m) { return Date.parse(m.op); }) : null;   // wv2663
   let auto = null;
   try { auto = await appAutoItems(); } catch (e) { auto = null; }
   uit.autokastje = auto ? auto.filter(function (x) { return x.klaar_op; }).map(function (x) { return Date.parse(x.klaar_op); }) : null;
@@ -14446,7 +14500,7 @@ async function berichtNieuw(res, d) {
     if (ag) { delete agk[id]; appAgendaKnoppenBewaar(); }   // wv315
     return berichtStuur(res, 500, { ok: false, fout: 'app-log niet schrijfbaar', terugval: true });
   }
-  idx[id] = { t: t, kanaal: kanaal, bron: bron, klasse: klasse, soort: soort, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, push: null, getikt: null, naar_telegram: vraag && d.knoppen !== true ? t : null, knoppen: d.knoppen === true };
+  idx[id] = { t: t, kanaal: kanaal, bron: bron, klasse: klasse, soort: soort, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, push: null, getikt: null, naar_telegram: vraag && d.knoppen !== true ? t : null, knoppen: d.knoppen === true };
   const plan = berichtPushPlan(id, kanaal, klasse, seintje);   // bewaart de index
   if (!idx[id].push) berichtIndexBewaar();
   const gewenst = berichtPushGewenst();
@@ -14571,23 +14625,29 @@ async function berichtBestand(res, d) {
     if (!m) m = { job_id: id, soort: 'socev', kanaal: b.kanaal, app: false, label: b.bron, ok: true, op: b.t, bestanden: [], overgeslagen: 0, vol: false, rapport: false };
     const dubbel = m.bestanden.find(function (x) { return x.sha === sha; });
     if (dubbel) return berichtStuur(res, 200, { ok: true, n: dubbel.n, naam: dubbel.naam, dubbel: true });
-    if (m.bestanden.length >= APP_BESTANDEN_JOB_MAX || m.bestanden.reduce(function (s, x) { return s + x.grootte; }, 0) + inhoud.length > APP_BESTANDEN_JOB_BYTES ||
-        (appStaat.bestandenTotaal || 0) + inhoud.length > APP_BESTANDEN_TOTAAL_BYTES)
+    // wv2663: staat dit bestand al bij de agent van dit rapport, dan alleen een verwijzing (geen tweede kopie, geen ruimte)
+    let van = null;
+    if (b.agent_job) { try { van = appZelfdeBijAgent(b.agent_job, inhoud); } catch (e) { logError('bericht-bestand', e); van = null; } }
+    const eigen = m.bestanden.filter(function (x) { return !x.van; });
+    if (m.bestanden.length >= APP_BESTANDEN_JOB_MAX || (!van && (eigen.reduce(function (s, x) { return s + x.grootte; }, 0) + inhoud.length > APP_BESTANDEN_JOB_BYTES ||
+        (appStaat.bestandenTotaal || 0) + inhoud.length > APP_BESTANDEN_TOTAAL_BYTES)))
       return berichtStuur(res, 413, { ok: false, fout: 'geen ruimte meer voor dit bestand in de app', terugval: true });
     const n = m.bestanden.length + 1;
     const naam = appVeiligeNaam(d.naam, new Set(m.bestanden.map(function (x) { return String(x.naam).toLowerCase(); })));
     try {
-      fs.mkdirSync(path.join(dir, 'b'), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(path.join(dir, 'b', String(n)), inhoud, { mode: 0o600 });
-      m.bestanden.push({ n: n, naam: naam, grootte: inhoud.length, sha: sha });
+      if (!van) {
+        fs.mkdirSync(path.join(dir, 'b'), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(path.join(dir, 'b', String(n)), inhoud, { mode: 0o600 });
+      } else fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      m.bestanden.push(van ? { n: n, naam: naam, grootte: inhoud.length, sha: sha, van: van } : { n: n, naam: naam, grootte: inhoud.length, sha: sha });
       const tmp = mpad + '.nieuw';
       fs.writeFileSync(tmp, JSON.stringify(m), { mode: 0o600 });
       fs.renameSync(tmp, mpad);
     } catch (e) { logError('bericht-bestand', e); return berichtStuur(res, 500, { ok: false, fout: 'bestand niet op te slaan', terugval: true }); }
-    appStaat.bestandenTotaal = (appStaat.bestandenTotaal || 0) + inhoud.length;
+    if (!van) appStaat.bestandenTotaal = (appStaat.bestandenTotaal || 0) + inhoud.length;
     appStaat.bestandenIndex = null;
-    res._log = { bericht: id, bestand: n };
-    berichtStuur(res, 200, { ok: true, n: n, naam: naam });
+    res._log = { bericht: id, bestand: n, verwijzing: van ? van.job_id : undefined };
+    berichtStuur(res, 200, van ? { ok: true, n: n, naam: naam, verwijzing: true } : { ok: true, n: n, naam: naam });
   });
 }
 
@@ -16992,8 +17052,8 @@ function bandjesBestandVan(jobId) {
   if (!m || !Array.isArray(m.bestanden)) return null;
   const uit = [];
   m.bestanden.forEach(function (x) {
-    const p = path.join(APP_BESTANDEN_DIR, m.dag, jobId, 'b', String(x.n));
-    try { if (Number.isInteger(x.n) && fs.lstatSync(p).isFile()) uit.push({ naam: String(x.naam), pad: p }); } catch (e) {}
+    const p = appBestandPad(m, x);   // wv2663: ook een verwijzing
+    try { if (p && fs.lstatSync(p).isFile()) uit.push({ naam: String(x.naam), pad: p }); } catch (e) {}
   });
   return uit;
 }
