@@ -319,7 +319,7 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
         sleutel: async () => (o.sleutel === undefined ? SLEUTEL : o.sleutel),
         plekken: async () => PLEKKEN,
         locatie: async () => ({ plek: 'Thuis', leeftijd_s: 60 }),
-        kalender: async (dt) => { st.kalDatum = dt; return o.kalender || []; },
+        kalender: async (dt) => { st.kalDatum = dt; if (o.kalFout && o.kalFout-- > 0) throw new Error('rpc 500'); return o.kalender || []; },
         werkRecent: async () => (o.werkRecent || { dagen: 0, plek: null }),
         ophalen: async (url) => { st.aanroepen.push(url); if (o.ophalen) return o.ophalen(url, st.aanroepen.length); return { status: 200, json: o.thuis || onecall() }; },
         bufferZet: async (dt, t) => { st.buffer.push(t); },
@@ -384,6 +384,13 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     const g4 = avondProef({ kalender: DIENST, sleutel: null });
     const rg4 = await g4.tik();
     toets('22g geen sleutel: stil, geen aanroep', g4.aanroepen.length === 0 && g4.berichten.length === 0 && rg4.detail.fout === 'geen sleutel', rg4);
+    const g5 = avondProef({ kalender: DIENST, thuis: onecall(vorstSneeuw), kalFout: 1 });
+    const rg5 = await g5.tik();
+    const rg6 = await g5.tik({ min: 10 });
+    toets('22g agenda even niet leesbaar (MOET 2): niet als vrije dag afgesloten, volgende tik meldt', rg5.detail.fout === 'kalender niet leesbaar' && g5.aanroepen.length === 1 && g5.berichten.length === 1 && rg6.detail.gemeld === true, [rg5, rg6]);
+    const g7 = avondProef({ kalender: DIENST, kalFout: 9 });
+    for (const mi of [5, 10, 15, 20]) await g7.tik({ min: mi });
+    toets('22g agenda blijft onleesbaar: hooguit 3 pogingen, geen aanroep, stil', g7.aanroepen.length === 0 && g7.berichten.length === 0 && JSON.parse(fs.readFileSync(g7.staatPad, 'utf8')).avond_datum === VANDAAG);
     // h. storm, onweer en KNMI-waarschuwing in het venster; waarschuwing buiten het venster telt niet
     const ALERT = (sU, eU, ev) => ({ sender_name: 'KNMI', event: ev, start: UUR0 + sU * 3600, end: UUR0 + eU * 3600 });
     const h = avondProef({ kalender: DIENST, thuis: onecall((i, u) => { if (i === 6) { u.wind_gust = 23; u.weather = [{ id: 211 }]; } }, { alerts: [ALERT(3, 12, 'Code oranje wind'), ALERT(14, 20, 'Code geel onweer')] }) });

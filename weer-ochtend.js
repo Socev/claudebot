@@ -506,6 +506,9 @@ function maak(o) {
     try { kal = await o.kalender(morgen); } catch (e) { kal = null; }
     try { recent = o.werkRecent ? await o.werkRecent() : null; } catch (e) { recent = null; }
     const beeld = dagBeeld(kal || [], morgen, { werkRecent: recent && recent.dagen, werkPlek: recent && recent.plek });
+    // diffreview wv2605 MOET 2: is de werkdag onbekend doordat de agenda of de locatietelling niet te lezen was, dan geen 'vrije dag' maar
+    // een volgende poging (hooguit AVOND_POGINGEN); pas daarna is de avond klaar
+    if (!beeld.werkdag && (!kal || (o.werkRecent && !recent))) return klaar({ ok: false, fout: !kal ? 'kalender niet leesbaar' : 'locatietelling niet leesbaar' }, true);
     // elke avond dezelfde ene aanroep, ook vóór een vrije dag (geen werkpatroon uit de aanroepen)
     const r = await haal(s, vak(pThuis), datum, sl);
     if (r.fout) return klaar({ ok: false, fout: masker(r.fout).slice(0, 60) }, !/^rem|^http 401/.test(r.fout));
