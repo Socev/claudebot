@@ -15941,6 +15941,8 @@ const studio = (function () {
       routerUrl: process.env.STUDIO_ROUTER_URL, comfyUrl: process.env.STUDIO_COMFY_URL, flowstudioUrl: process.env.STUDIO_FLOWSTUDIO_URL,   // wv736: geheugencontrole
       piper: process.env.STUDIO_PIPER_BIN ? { bin: process.env.STUDIO_PIPER_BIN, model: process.env.STUDIO_PIPER_MODEL, data: process.env.STUDIO_PIPER_DATA } : null,
       log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError,
+      // wv2614: Immich als bron en bestemming. Getter: immichMl staat verderop in dit bestand (pas bij een verzoek opgehaald, geen TDZ bij laden)
+      immich: function () { try { return immichMl; } catch (e) { return null; } }, leesBewaard: appStudioLeesBewaard,
       naKlaar: function (t) { return bandjes ? bandjes.naKlaar(t) : null; } });   // wv743: register bijwerken na een bandje
   } catch (e) { logError('studio', e); return null; }
 })();
@@ -15963,6 +15965,15 @@ function appStudioUpload(a, beurt, n) {
     try { fs.rmSync(p, { force: true }); fs.rmSync(p + '.json', { force: true }); if (!fs.readdirSync(dir).length) fs.rmdirSync(dir); } catch (e) { logError('studio-upload', e); }
   } };
 }
+// wv2614: een bewaard Studio-resultaat (Bestanden, b/<n>) teruglezen voor "Zet in Immich". Alleen echte bestanden, ≤ 25 MB, geen koppelingen.
+function appStudioLeesBewaard(jobId, n) {
+  const m = appBewaardVan(jobId);
+  if (!m || m.soort !== 'studio' || !Array.isArray(m.bestanden) || !m.bestanden.some(function (b) { return b.n === n; })) return null;
+  const p = path.join(APP_BESTANDEN_DIR, String(m.op).slice(0, 10), jobId, 'b', String(n));
+  try { const st = fs.lstatSync(p); if (!st.isFile() || st.size > 25 * 1024 * 1024) return null; return fs.readFileSync(p); } catch (e) { return null; }
+}
+appStaat.tellers['studio-immich'] = [];
+appStaat.tellers['studio-immich-foto'] = [];
 // Routes (bouwplan § 5.5). Maak op een flow op proef en Activeer eisen een verse vingerafdruk van dít apparaat (§ 4.4d),
 // gecontroleerd en verbruikt in studio.js zonder await ertussen. Schrijven alleen op de primaire kant (studio.js).
 async function appStudio(req, res, a, s, d, route) {
@@ -15987,6 +15998,20 @@ async function appStudio(req, res, a, s, d, route) {
   if (m) { const r = studio.stop(m[1]); return stuur(r, { taak: r.taak }); }
   m = /^POST \/app\/studio\/flow\/([a-z0-9][a-z0-9-]{1,48})\/activeer$/.exec(route);
   if (m) { const r = studio.activeer(m[1], ctx); if (r.status === 200) res._app.reden = 'studio activeer ' + m[1]; return stuur(r, { flow: r.flow }); }
+  // wv2614: Immich als bron (albums, foto's, miniaturen) en bestemming (Zet in Immich). Miniaturen eigen teller (een album = veel foto's).
+  const UU = '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})';
+  if ((m = new RegExp('^GET /app/studio/immich/f/' + UU + '/k$').exec(route))) {
+    res._app.stil = true;
+    if (!appTeller('studio-immich-foto', 3000, 3600000)) return appWeiger(res, 429, 'te veel foto\'s dit uur', 'grens studio-immich-foto');
+    const r = await studio.immichMini(m[1]); return stuur(r, { mime: r.mime, data: r.data });
+  }
+  if (route === 'GET /app/studio/immich/albums' || /^GET \/app\/studio\/immich\/album\//.test(route) || /^POST \/app\/studio\/taak\/[a-f0-9]{16}\/immich$/.test(route)) {
+    if (!appTeller('studio-immich', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens studio-immich');
+  }
+  if (route === 'GET /app/studio/immich/albums') { res._app.stil = true; const r = await studio.immichAlbums(); return stuur(r, { albums: r.albums }); }
+  if ((m = new RegExp('^GET /app/studio/immich/album/' + UU + '$').exec(route))) { res._app.stil = true; const r = await studio.immichFotos(m[1]); return stuur(r, { fotos: r.fotos }); }
+  m = /^POST \/app\/studio\/taak\/([a-f0-9]{16})\/immich$/.exec(route);
+  if (m) { const r = await studio.zetInImmich(m[1], d || {}); if (r.status === 200) res._app.reden = 'studio immich ' + m[1] + (r.al ? ' (al)' : ''); return stuur(r, { taak: r.taak, al: r.al === true }); }
   return appWeiger(res, 404, 'onbekend', 'studio route');
 }
 // ── einde studio ──

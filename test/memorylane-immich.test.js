@@ -139,11 +139,11 @@ test('witte lijst: alleen lezen, een leeg album aanmaken en (wv2225) alleen de n
     ['PATCH', '/api/albums/' + a, null, { description: 'y' }], ['PATCH', '/api/albums/' + a, null, { albumName: 'x', albumThumbnailAssetId: a }], ['PATCH', '/api/albums/' + a, null, { albumName: '' }],
     ['PATCH', '/api/albums/' + a, null, { albumName: 'x'.repeat(201) }], ['PATCH', '/api/albums/' + a, { x: '1' }, { albumName: 'x' }], ['PATCH', '/api/albums/' + a, null, { albumName: 'x', order: 'asc' }],
     ['PATCH', '/api/albums', null, { albumName: 'x' }], ['PATCH', '/api/albums/' + a + '/users', null, { albumName: 'x' }], ['PATCH', '/api/assets/' + a, null, { albumName: 'x' }],
-    ['PATCH', '/api/albums/' + a.toUpperCase(), null, { albumName: 'x' }], ['PATCH', '/api/albums/' + a], ['PUT', '/api/albums/' + a, null, { albumName: 'x' }], ['PUT', '/api/albums/' + a + '/assets', null, { ids: [a] }],
+    ['PATCH', '/api/albums/' + a.toUpperCase(), null, { albumName: 'x' }], ['PATCH', '/api/albums/' + a], ['PUT', '/api/albums/' + a, null, { albumName: 'x' }],
     ['PUT', '/api/albums/assets', null, {}], ['DELETE', '/api/albums/' + a + '/assets', null, { ids: [a] }], ['POST', '/api/assets/delete'], ['DELETE', '/api/assets', null, { ids: [a] }],
     ['POST', '/api/albums', null, { albumName: 'x', assetIds: [a] }], ['POST', '/api/albums', null, { albumName: 'x', albumUsers: [{ userId: a, role: 'editor' }] }],
-    ['POST', '/api/albums', null, {}], ['POST', '/api/albums', { x: '1' }, { albumName: 'x' }], ['GET', '/api/assets/' + a + '/original'], ['GET', '/api/assets/' + a + '/thumbnail', { size: 'original' }],
-    ['GET', '/api/assets/' + a + '/thumbnail', { size: 'fullsize' }], ['GET', '/api/assets/' + a], ['GET', '/api/albums', { shared: 'true' }], ['GET', '/api/albums/../users'],
+    ['POST', '/api/albums', null, {}], ['POST', '/api/albums', { x: '1' }, { albumName: 'x' }], ['GET', '/api/assets/' + a + '/original', { edited: 'true' }], ['GET', '/api/assets/' + a + '/thumbnail', { size: 'original' }],
+    ['GET', '/api/assets/' + a + '/thumbnail', { size: 'fullsize' }], ['GET', '/api/assets/' + a, { key: 'x' }], ['GET', '/api/albums', { shared: 'true' }], ['GET', '/api/albums/../users'],
     ['GET', '/api/albums/' + a.toUpperCase()], ['GET', '/api/timeline/buckets', { albumId: a, userId: a }], ['GET', '/api/timeline/buckets', {}], ['POST', '/api/search/metadata', null, {}],
     ['POST', '/api/shared-links', null, { type: 'ALBUM', albumId: a }], ['PUT', '/api/system-config', null, {}], ['GET', '/api/api-keys'], ['DELETE', '/api/workflows/' + a]];
   for (const [m, p, q, b] of weg) assert.notStrictEqual(IM.weiger(m, p, q, b), null, m + ' ' + p + ' ' + JSON.stringify(q || {}) + ' ' + JSON.stringify(b || {}));
@@ -749,4 +749,137 @@ test('wv2468 fotoReizen geeft het spoor van een reis uit je foto\'s mee (periode
     assert.deepStrictEqual(r[0].spoor, { van: '2018-08-10', tot: '2018-08-14', punt: { lat: 41.4, lon: 2.2 }, fotos: 5, met_gps: 5 });
     assert.ok(!/[0-9a-f]{8}-[0-9a-f]{4}-/.test(JSON.stringify(r)), 'geen foto- of album-ids');
   } finally { o.sluit(); }
+});
+
+// ── wv2614: Studio › Fotoherstel — origineel lezen, nieuwe foto, stapel en album; nooit iets aan een bestaande foto ──
+function png(n) { const b = Buffer.alloc(40 + (n || 0)); Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b); b.write('verzonnen', 16); return b; }
+function nepStudioImmich() {
+  const ik = uuid(), ander = uuid();
+  const st = { assets: new Map(), albums: new Map(), stapels: [], log: [], bodies: [], sleutel: 'proefsleutel-verzonnen-0123456789', ik, ander };
+  const res = (status, obj, ct) => new Response(Buffer.isBuffer(obj) ? obj : JSON.stringify(obj), { status, headers: { 'content-type': ct || 'application/json' } });
+  st.fetch = async (url, init) => {
+    const u = new URL(url), m = init.method;
+    st.log.push(m + ' ' + u.pathname + u.search);
+    if (init.headers['x-api-key'] !== st.sleutel) return res(401, {});
+    let r;
+    if (m === 'GET' && (r = /^\/api\/assets\/([0-9a-f-]{36})$/.exec(u.pathname))) {
+      const a = st.assets.get(r[1]); if (!a) return res(404, {});
+      return res(200, { id: a.id, type: a.type || 'IMAGE', originalMimeType: a.mime, ownerId: a.eigenaar || ik, fileCreatedAt: a.opname, isTrashed: false, originalFileName: a.naam || 'IMG.jpg',
+        stack: a.stapel ? { id: a.stapel, primaryAssetId: a.id, assetCount: 2 } : null, exifInfo: { fileSizeInByte: a.data.length, description: a.beschrijving || '' } });
+    }
+    if (m === 'GET' && (r = /^\/api\/assets\/([0-9a-f-]{36})\/original$/.exec(u.pathname))) { const a = st.assets.get(r[1]); return a ? res(200, a.data, 'application/octet-stream') : res(404, {}); }
+    if (m === 'GET' && u.pathname === '/api/albums' && u.searchParams.get('assetId')) {
+      const id = u.searchParams.get('assetId');
+      return res(200, [...st.albums.values()].filter((x) => x.assets.includes(id)).map((x) => ({ id: x.id, albumName: x.naam, description: '', assetCount: x.assets.length })));
+    }
+    if (m === 'POST' && u.pathname === '/api/assets') {
+      assert.ok(init.body instanceof FormData, 'multipart');
+      assert.strictEqual(init.headers['Content-Type'], undefined, 'fetch zet zelf de boundary');
+      const f = init.body.get('assetData'), data = Buffer.from(await f.arrayBuffer());
+      const velden = [...init.body.keys()];
+      st.bodies.push({ velden, naam: f.name, opname: init.body.get('fileCreatedAt'), xmp: init.body.get('sidecarData') ? Buffer.from(await init.body.get('sidecarData').arrayBuffer()).toString() : null });
+      const dub = [...st.assets.values()].find((a) => a.data.equals(data));
+      if (dub) return res(200, { id: dub.id, status: 'duplicate' });
+      const id = uuid(); st.assets.set(id, { id, data, mime: f.type, opname: init.body.get('fileCreatedAt'), naam: f.name });
+      return res(201, { id, status: 'created' });
+    }
+    if (m === 'POST' && u.pathname === '/api/stacks') {
+      const b = JSON.parse(init.body); const sid = uuid(); st.stapels.push(b.assetIds);
+      b.assetIds.forEach((x) => { st.assets.get(x).stapel = sid; });
+      return res(201, { id: sid, primaryAssetId: b.assetIds[0], assets: [] });
+    }
+    if (m === 'PUT' && (r = /^\/api\/albums\/([0-9a-f-]{36})\/assets$/.exec(u.pathname))) {
+      const al = st.albums.get(r[1]); const b = JSON.parse(init.body);
+      if (!al) return res(400, {});
+      return res(200, b.ids.map((x) => { if (al.assets.includes(x)) return { id: x, success: false, error: 'duplicate' }; al.assets.push(x); return { id: x, success: true }; }));
+    }
+    return res(404, {});
+  };
+  st.client = IM.maak({ basis: 'https://immich.voorbeeld.test', sleutel: async () => st.sleutel, fetch: st.fetch });
+  st.zetFoto = (o) => { const id = uuid(); st.assets.set(id, Object.assign({ id, data: png(Math.floor(Math.random() * 1000)), mime: 'image/png', opname: '1936-03-01T12:00:00.000Z' }, o || {})); return id; };
+  st.zetAlbum = (ids) => { const id = uuid(); st.albums.set(id, { id, naam: 'Proefalbum verzonnen', assets: ids.slice() }); return id; };
+  return st;
+}
+
+test('wv2614 witte lijst: origineel lezen, foto-gegevens, albums van een foto; nieuwe foto alleen in eigen vorm; stapel van twee; één id in een album', () => {
+  const a = uuid(), b = uuid(), t = 'a1b2c3d4e5f60718', P = png(), J = jpeg(false), W = webp(false), X = IM.xmpBeschrijving('Hersteld met AI (SeedVR2), origineel in de stapel');
+  const D = '1936-03-01T12:00:00.000Z';
+  const goed = [['GET', '/api/assets/' + a + '/original'], ['GET', '/api/assets/' + a], ['GET', '/api/albums', { assetId: a }], ['GET', '/api/users/me'], ['GET', '/api/api-keys/me'],
+    ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D }],
+    ['POST', '/api/assets', undefined, { assetData: J, filename: 'socev-studio-' + t + '.jpg', fileCreatedAt: '2020-01-01T10:00:00+01:00', fileModifiedAt: D, sidecarData: X }],
+    ['POST', '/api/assets', undefined, { assetData: W, filename: 'socev-studio-' + t + '.webp', fileCreatedAt: D, fileModifiedAt: D }],
+    ['POST', '/api/stacks', undefined, { assetIds: [a, b] }], ['PUT', '/api/albums/' + a + '/assets', undefined, { ids: [b] }]];
+  for (const [m, p, q, bd] of goed) assert.strictEqual(IM.weiger(m, p, q, bd), null, m + ' ' + p);
+  const fout = [
+    ['GET', '/api/albums', { assetId: a, isOwned: 'true' }], ['GET', '/api/albums', { assetId: 'x' }], ['GET', '/api/assets/' + a + '/original', { edited: 'true' }],
+    ['GET', '/api/assets/' + a + '/original/x'], ['GET', '/api/assets/' + a + '/video/playback'], ['GET', '/api/assets'], ['GET', '/api/users/me', { x: '1' }], ['GET', '/api/users'], ['GET', '/api/users/' + a], ['PUT', '/api/users/me', undefined, {}], ['GET', '/api/api-keys'], ['GET', '/api/api-keys/' + a], ['PUT', '/api/api-keys/' + a, undefined, { permissions: ['all'] }], ['POST', '/api/api-keys/' + a + '/rotate'], ['GET', '/api/api-keys/me', { x: '1' }],
+    ['POST', '/api/assets', undefined, { assetData: P, filename: 'IMG_0001.png', fileCreatedAt: D, fileModifiedAt: D }],
+    ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.jpg', fileCreatedAt: D, fileModifiedAt: D }],   // naam past niet bij de bytes
+    ['POST', '/api/assets', undefined, { assetData: Buffer.from('GIF89a-verzonnen-gif'), filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D }],
+    ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D, visibility: 'hidden' }],
+    ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D, livePhotoVideoId: a }],
+    ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D, metadata: [] }],
+    ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D, isFavorite: true }],
+    ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: 'gisteren', fileModifiedAt: D }],
+    ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D }],
+    ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D, sidecarData: Buffer.from('<x:xmpmeta><exif:GPSLatitude>52</exif:GPSLatitude></x:xmpmeta>') }],
+    ['POST', '/api/assets', undefined, { assetData: Buffer.concat([P, Buffer.alloc(25 * 1024 * 1024)]), filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D }],
+    ['POST', '/api/assets', { key: 'x' }, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D }],
+    ['POST', '/api/stacks', undefined, { assetIds: [a] }], ['POST', '/api/stacks', undefined, { assetIds: [a, a] }], ['POST', '/api/stacks', undefined, { assetIds: [a, b, uuid()] }],
+    ['POST', '/api/stacks', undefined, { assetIds: [a, b], primaryAssetId: a }], ['PUT', '/api/stacks/' + a, undefined, { primaryAssetId: b }], ['DELETE', '/api/stacks/' + a],
+    ['PUT', '/api/albums/' + a + '/assets', undefined, { ids: [b, uuid()] }], ['PUT', '/api/albums/' + a + '/assets', undefined, { ids: [] }], ['PUT', '/api/albums/' + a + '/assets', undefined, { ids: [b], x: 1 }],
+    ['PUT', '/api/assets/' + a, undefined, { description: 'x' }], ['PUT', '/api/assets', undefined, { ids: [a], isArchived: true }], ['PUT', '/api/assets/' + a + '/original', undefined, {}],
+    ['PUT', '/api/albums/assets', undefined, { albumIds: [a], assetIds: [b] }], ['POST', '/api/assets/' + a + '/edits', undefined, {}], ['DELETE', '/api/albums/' + a + '/assets', undefined, { ids: [b] }]];
+  for (const [m, p, q, bd] of fout) assert.notStrictEqual(IM.weiger(m, p, q, bd), null, m + ' ' + p + ' ' + JSON.stringify(q || {}) + ' ' + Object.keys(bd || {}).join(','));
+});
+
+test('wv2614 stapel en album alleen met de eigen nieuwe foto van deze sessie; vreemde of al bestaande foto = geweigerd vóór de lijn', async () => {
+  const st = nepStudioImmich();
+  const orig = st.zetFoto(), vreemd = st.zetFoto(), al = st.zetAlbum([orig]);
+  for (const [m, p, b] of [['POST', '/api/stacks', { assetIds: [vreemd, orig] }], ['PUT', '/api/albums/' + al + '/assets', { ids: [vreemd] }], ['PUT', '/api/albums/' + al + '/assets', { ids: [orig] }]])
+    await assert.rejects(st.client.verzoek(m, p, undefined, b), (e) => e.code === 'WITTE_LIJST', m + ' ' + p);
+  assert.strictEqual(st.log.length, 0);
+  // eigen foto, en dan het origineel bovenop willen: ook geweigerd (eigen moet de eerste zijn, het origineel niet eigen)
+  const up = await st.client.uploaden({ data: png(5), taak: 'a1b2c3d4e5f60718', opname: '1936-03-01T12:00:00.000Z', beschrijving: 'Hersteld met AI (SeedVR2), origineel in de stapel' });
+  assert.strictEqual(up.nieuw, true);
+  await assert.rejects(st.client.verzoek('POST', '/api/stacks', undefined, { assetIds: [orig, up.id] }), (e) => e.code === 'WITTE_LIJST');
+  // dubbele upload (zelfde bytes als het ORIGINEEL): duplicate → niet eigen → geen stapel, geen album
+  const dub = await st.client.uploaden({ data: st.assets.get(orig).data, taak: 'a1b2c3d4e5f60719', opname: '1936-03-01T12:00:00.000Z' });
+  assert.deepStrictEqual(dub, { id: orig, nieuw: false });
+  assert.deepStrictEqual(await st.client.stapelen(dub.id, vreemd), { gestapeld: false, reden: 'niet de eigen nieuwe foto' });
+  await assert.rejects(st.client.inAlbum(al, dub.id), (e) => e.code === 'WITTE_LIJST');
+  // velden van de upload: alleen de vaste vijf, naam in eigen vorm, XMP alleen met de beschrijving
+  assert.deepStrictEqual(st.bodies[0].velden.sort(), ['assetData', 'fileCreatedAt', 'fileModifiedAt', 'sidecarData'], 'geen formulierveld filename (Immich toetst het zijbestand daar dan op)');
+  assert.strictEqual(st.bodies[0].naam, 'socev-studio-a1b2c3d4e5f60718.png');
+  assert.match(st.bodies[0].xmp, /<dc:description><rdf:Alt><rdf:li xml:lang="x-default">Hersteld met AI \(SeedVR2\), origineel in de stapel<\/rdf:li>/);
+  assert.ok(!/GPS|DateTime|Date/i.test(st.bodies[0].xmp.replace('rdf:Description', '')), 'geen datum of plek in het zijbestand');
+  assert.strictEqual(st.bodies[1].velden.indexOf('sidecarData'), -1, 'zonder beschrijving geen zijbestand');
+});
+
+test('wv2614 stapelen: alleen als het origineel geen stapel heeft (vlak ervoor gemeten) en van hetzelfde account is; album: alleen de eigen foto', async () => {
+  const st = nepStudioImmich();
+  const orig = st.zetFoto(), alStapel = st.zetFoto({ stapel: uuid() }), vanAnder = st.zetFoto({ eigenaar: st.ander });
+  const al = st.zetAlbum([orig]);
+  const mk = async (n) => (await st.client.uploaden({ data: png(100 + n), taak: 'a1b2c3d4e5f6071' + n, opname: '1936-03-01T12:00:00.000Z' })).id;
+  const e1 = await mk(1), e2 = await mk(2), e3 = await mk(3);
+  const voor = Buffer.from(st.assets.get(orig).data);
+  assert.deepStrictEqual(await st.client.stapelen(e1, orig), { gestapeld: true });
+  assert.deepStrictEqual(st.stapels, [[e1, orig]], 'eigen foto bovenop, origineel eronder');
+  assert.deepStrictEqual(await st.client.stapelen(e2, alStapel), { gestapeld: false, reden: 'origineel zit al in een stapel' });
+  assert.deepStrictEqual(await st.client.stapelen(e2, orig), { gestapeld: false, reden: 'origineel zit al in een stapel' }, 'tweede keer: nu heeft het origineel een stapel');
+  assert.deepStrictEqual(await st.client.stapelen(e3, vanAnder), { gestapeld: false, reden: 'origineel is van een ander account' });
+  assert.strictEqual(st.stapels.length, 1);
+  assert.strictEqual(await st.client.inAlbum(al, e1), true);
+  assert.strictEqual(await st.client.inAlbum(al, e1), true, 'al erin = goed (duplicate)');
+  assert.deepStrictEqual(st.albums.get(al).assets, [orig, e1]);
+  assert.ok(st.assets.get(orig).data.equals(voor), 'origineel byte voor byte gelijk');
+  assert.ok(!st.log.some((r) => /^(PUT|PATCH|DELETE) \/api\/assets/.test(r)), 'nooit PUT/PATCH/DELETE op een foto');
+  const gegevens = await st.client.fotoInfo(orig);
+  assert.strictEqual(gegevens.stapel, true); assert.strictEqual(gegevens.opname, '1936-03-01T12:00:00.000Z');
+  assert.deepStrictEqual((await st.client.albumsVan(orig)).map((x) => x.id), [al]);
+  const o = await st.client.origineel(orig);
+  assert.strictEqual(o.soort, 'png'); assert.ok(o.data.equals(voor));
+  const gif = st.zetFoto({ data: Buffer.from('GIF89a-verzonnen-gif-bytes-hier') });
+  await assert.rejects(st.client.origineel(gif), (e) => e.code === 'SOORT');
+  assert.strictEqual(await st.client.fotoInfo(uuid()), null);
 });

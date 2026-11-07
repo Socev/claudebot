@@ -15,8 +15,21 @@
  *   POST /api/albums  {albumName, description}         album aanmaken, LEEG (geen assetIds, geen albumUsers)
  *   PATCH /api/albums/<uuid>  {albumName}              ALLEEN de naam van een album (wv2225; memorylane-fotos.js doet dat alleen bij albums
  *                                                       met zijn eigen code en naamvorm). Geen omschrijving, omslag, volgorde of delen.
- * Al het andere (PUT/DELETE, andere PATCH-velden, uploaden, foto's toevoegen of verplaatsen, delen, ander pad, andere query, andere body) weigert
- * verzoek() vóór er iets over de lijn gaat. Doorverwijzingen worden niet gevolgd.
+ * Studio › Fotoherstel (wv2614, fase 2; ontwerp vault "01_Ontwikkeling/Studio - fotoherstel op Olares (ontwerp 5-11-2026).md" § 6/§ 7; David Ja
+ * 7-11-2026 08:00). Het origineel wordt nooit gewijzigd of verwijderd; er komt alleen een NIEUWE foto naast:
+ *   GET  /api/albums?assetId=<uuid>                    in welke albums een foto zit (alleen lezen)
+ *   GET  /api/assets/<uuid>                            gegevens van één foto (soort, type, grootte, opnamedatum, stapel, eigenaar)
+ *   GET  /api/users/me                                 alleen het eigen gebruikers-id (is het origineel van dit account? anders geen stapel)
+ *   GET  /api/api-keys/me                              alleen de rechtenlijst van de eigen sleutel (mag hij stapels maken? gemeten 7-11: nog niet)
+ *   GET  /api/assets/<uuid>/original                   het origineel (alleen lezen, ≤ 20 MB; Studio toetst het type uit de bytes)
+ *   POST /api/assets  (multipart)                      ALLEEN een nieuwe foto: jpg/png/webp ≤ 25 MB, bestandsnaam socev-studio-<taak>.<ext> (als naam van het deel)
+ *        (Immich 3.3.5 kent geen deviceAssetId meer: de bestandsnaam is het eigen merk), opnamedatum, en hooguit een XMP-zijbestand
+ *        met alleen een beschrijving. Geen zichtbaarheid, favoriet, live-foto of metadata-velden.
+ *   POST /api/stacks  {assetIds: [eigen, origineel]}   stapel van precies twee: de eigen nieuwe foto bovenop + het origineel; alleen als de
+ *        eigen foto in DEZE sessie door uploaden() nieuw is gemaakt (status created) en GET /api/assets van het origineel geen stack heeft
+ *   PUT  /api/albums/<uuid>/assets  {ids: [eigen]}     precies één id, en alleen die eigen nieuwe foto (zelfde regel)
+ * Al het andere (DELETE, PUT op een foto, andere PATCH-velden, foto's verplaatsen of uit een album halen, delen, ander pad, andere query, andere
+ * body) weigert verzoek() vóór er iets over de lijn gaat. Doorverwijzingen worden niet gevolgd.
  * PRIVACY. Nooit de sleutel, albumnamen of foto-inhoud in logs of fouten; alleen HTTP-status en het soort verzoek.
  * VORM. Alleen ingebouwde modules; sleutel(), fetch en basis komen via maak({...}).
  */
@@ -24,6 +37,26 @@
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const BUCKET_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})?)?$/;
 const MAX_JSON = 8 * 1024 * 1024, MAX_BEELD = 4 * 1024 * 1024;
+// wv2614: origineel lezen ≤ 20 MB (ontwerp § 7); uploaden ≤ 25 MB (Studio-uitvoer is ≤ 10 MB of ≤ 16 MP); XMP-zijbestand ≤ 8 kB
+const MAX_ORIGINEEL = 20 * 1024 * 1024, MAX_UPLOAD = 25 * 1024 * 1024, MAX_XMP = 8 * 1024;
+const EIGEN_NAAM_RE = /^socev-studio-[a-f0-9]{16}\.(jpg|png|webp)$/;
+const DATUM_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/;
+const UPLOAD_VELDEN = ['assetData', 'filename', 'fileCreatedAt', 'fileModifiedAt', 'sidecarData'];
+function soortUitBytes(b) {
+  if (!Buffer.isBuffer(b) || b.length < 12) return null;
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpg';
+  if (b[0] === 0x89 && b.subarray(1, 4).toString('latin1') === 'PNG') return 'png';
+  if (b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
+  return null;
+}
+// XMP-zijbestand met ALLEEN dc:description (geen datum, plek of andere velden); tekst ge-escaped
+function xmpBeschrijving(tekst) {
+  const t = String(tekst || '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 300).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return Buffer.from('<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>\n<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">' +
+    '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:description><rdf:Alt><rdf:li xml:lang="x-default">' + t +
+    '</rdf:li></rdf:Alt></dc:description></rdf:Description></rdf:RDF></x:xmpmeta>\n<?xpacket end="w"?>', 'utf8');
+}
+const XMP_RE = /^<\?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"\?>\n<x:xmpmeta xmlns:x="adobe:ns:meta\/"><rdf:RDF xmlns:rdf="http:\/\/www\.w3\.org\/1999\/02\/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http:\/\/purl\.org\/dc\/elements\/1\.1\/"><dc:description><rdf:Alt><rdf:li xml:lang="x-default">[^<>]{0,1800}<\/rdf:li><\/rdf:Alt><\/dc:description><\/rdf:Description><\/rdf:RDF><\/x:xmpmeta>\n<\?xpacket end="w"\?>$/;
 const BEELD_MIME = { 'image/jpeg': true, 'image/webp': true, 'image/png': true };
 const MAX_NAAM = 200, MAX_OMSCHRIJVING = 1000, MAX_SPOOR = 3000;
 // wv2468: plaatselijke opnamedag uit een UTC-tijd en de afwijking in uren (Immich localOffsetHours); ongeldig = null
@@ -59,13 +92,49 @@ function weiger(methode, pad, query, body) {
   let m;
   if (methode === 'GET') {
     if (body !== undefined) return 'body bij GET';
-    if (pad === '/api/albums') return sleutels.length ? 'query' : null;
+    if (pad === '/api/albums') return !sleutels.length || (sleutels.length === 1 && u(q.assetId)) ? null : 'query';   // wv2614: ?assetId= (lezen)
+    if (pad === '/api/users/me') return sleutels.length ? 'query' : null;                                                // wv2614: eigen id
+    if (pad === '/api/api-keys/me') return sleutels.length ? 'query' : null;                                             // wv2614: eigen rechten
+    if ((m = /^\/api\/assets\/([0-9a-f-]{36})$/.exec(pad)) && u(m[1])) return sleutels.length ? 'query' : null;            // wv2614: gegevens
+    if ((m = /^\/api\/assets\/([0-9a-f-]{36})\/original$/.exec(pad)) && u(m[1])) return sleutels.length ? 'query' : null;   // wv2614: origineel lezen
     if ((m = /^\/api\/albums\/([0-9a-f-]{36})$/.exec(pad)) && u(m[1])) return sleutels.length ? 'query' : null;
     if (pad === '/api/timeline/buckets') return alleen(['albumId', 'order']) && u(q.albumId) && (q.order === undefined || q.order === 'asc' || q.order === 'desc') ? null : 'query';
     if (pad === '/api/timeline/bucket') return alleen(['albumId', 'timeBucket', 'order', 'withCoordinates']) && u(q.albumId) && typeof q.timeBucket === 'string' && BUCKET_RE.test(q.timeBucket)
       && (q.order === undefined || q.order === 'asc' || q.order === 'desc') && (q.withCoordinates === undefined || q.withCoordinates === 'true') ? null : 'query';
     if ((m = /^\/api\/assets\/([0-9a-f-]{36})\/thumbnail$/.exec(pad)) && u(m[1])) return alleen(['size']) && (q.size === 'thumbnail' || q.size === 'preview') ? null : 'query';
     return 'pad';
+  }
+  if (methode === 'POST' && pad === '/api/assets') {
+    // wv2614: alleen een nieuwe foto in Socevs eigen vorm (zie kop); multipart wordt pas in verzoek() gebouwd
+    if (sleutels.length) return 'query';
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return 'body';
+    const bk = Object.keys(body);
+    if (!bk.every(function (k) { return UPLOAD_VELDEN.indexOf(k) >= 0; })) return 'body';   // nooit visibility, isFavorite, livePhotoVideoId, metadata
+    if (!Buffer.isBuffer(body.assetData) || !body.assetData.length || body.assetData.length > MAX_UPLOAD) return 'body';
+    const ext = typeof body.filename === 'string' && EIGEN_NAAM_RE.exec(body.filename);
+    if (!ext || soortUitBytes(body.assetData) !== ext[1]) return 'body';
+    if (typeof body.fileCreatedAt !== 'string' || !DATUM_RE.test(body.fileCreatedAt) || !Number.isFinite(Date.parse(body.fileCreatedAt))) return 'body';
+    if (typeof body.fileModifiedAt !== 'string' || !DATUM_RE.test(body.fileModifiedAt) || !Number.isFinite(Date.parse(body.fileModifiedAt))) return 'body';
+    if (body.sidecarData !== undefined && (!Buffer.isBuffer(body.sidecarData) || body.sidecarData.length > MAX_XMP || !XMP_RE.test(body.sidecarData.toString('utf8')))) return 'body';
+    return null;
+  }
+  if (methode === 'POST' && pad === '/api/stacks') {
+    // wv2614: precies twee verschillende foto's; dat de eerste Socevs eigen nieuwe foto is, toetst verzoek() (eigen-lijst van deze sessie)
+    if (sleutels.length) return 'query';
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return 'body';
+    const bk = Object.keys(body);
+    if (bk.length !== 1 || bk[0] !== 'assetIds' || !Array.isArray(body.assetIds) || body.assetIds.length !== 2) return 'body';
+    if (!u(body.assetIds[0]) || !u(body.assetIds[1]) || body.assetIds[0] === body.assetIds[1]) return 'body';
+    return null;
+  }
+  if (methode === 'PUT') {
+    // wv2614: alleen één eigen nieuwe foto aan een album toevoegen (eigen-lijst: verzoek()); nooit PUT op een foto of iets anders
+    if (!(m = /^\/api\/albums\/([0-9a-f-]{36})\/assets$/.exec(pad)) || !u(m[1])) return 'pad';
+    if (sleutels.length) return 'query';
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return 'body';
+    const bk = Object.keys(body);
+    if (bk.length !== 1 || bk[0] !== 'ids' || !Array.isArray(body.ids) || body.ids.length !== 1 || !u(body.ids[0])) return 'body';
+    return null;
   }
   if (methode === 'POST') {
     if (pad !== '/api/albums') return 'pad';
@@ -98,31 +167,56 @@ function maak(o) {
   if (!/^https:\/\/[a-z0-9.-]+$/.test(basis) && !/^http:\/\/127\.0\.0\.1:\d+$/.test(basis)) throw new Error('immich: ongeldige basis');
   const doeFetch = o.fetch || fetch;
   const ms = o.timeoutMs || 20000;
+  // wv2614: foto's die DEZE client zelf nieuw maakte (uploaden → status created). Alleen die mogen in een stapel (bovenop) of een album.
+  // Bewust alleen in het geheugen: na een herstart kan Socev een eerdere upload niet meer stapelen (liever niets dan een vreemde foto).
+  const eigen = new Set();
+  function nietEigen(methode, pad, body) {
+    if (methode === 'POST' && pad === '/api/stacks') return !eigen.has(body.assetIds[0]) || eigen.has(body.assetIds[1]);   // origineel ≠ eigen upload
+    if (methode === 'PUT') return !eigen.has(body.ids[0]);
+    return false;
+  }
 
   async function verzoek(methode, pad, query, body, soort) {
-    const r = weiger(methode, pad, query, body);
+    const r = weiger(methode, pad, query, body) || (nietEigen(methode, pad, body) ? 'niet de eigen nieuwe foto' : null);
     if (r) { const e = new Error('immich: niet toegestaan (' + r + ')'); e.code = 'WITTE_LIJST'; throw e; }
     const k = await o.sleutel();
     if (!k) { const e = new Error('immich: geen sleutel'); e.code = 'GEEN_SLEUTEL'; throw e; }
     const qs = query && Object.keys(query).length ? '?' + new URLSearchParams(query).toString() : '';
-    const koppen = { 'x-api-key': k, Accept: soort === 'beeld' ? 'image/webp,image/jpeg,image/png' : 'application/json', 'User-Agent': 'socev-memorylane/1' };
-    if (body !== undefined) koppen['Content-Type'] = 'application/json';
+    const koppen = { 'x-api-key': k, Accept: soort === 'beeld' ? 'image/webp,image/jpeg,image/png' : soort === 'origineel' ? '*/*' : 'application/json', 'User-Agent': 'socev-memorylane/1' };
+    let lijf;
+    if (methode === 'POST' && pad === '/api/assets') {
+      // multipart: fetch zet zelf Content-Type met boundary
+      const ext = EIGEN_NAAM_RE.exec(body.filename)[1], mime = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext];
+      lijf = new FormData();
+      // de eigen naam gaat als bestandsnaam van het deel mee (wordt originalFileName), NIET als formulierveld filename: Immich 3.3.5 toetst
+      // dan ook het zijbestand op die naam ("Unsupported file type ….jpg", gemeten 7-11-2026)
+      lijf.append('assetData', new Blob([body.assetData], { type: mime }), body.filename);
+      lijf.append('fileCreatedAt', body.fileCreatedAt);
+      lijf.append('fileModifiedAt', body.fileModifiedAt);
+      if (body.sidecarData) lijf.append('sidecarData', new Blob([body.sidecarData], { type: 'application/xml' }), body.filename.replace(/\.[a-z]+$/, '.xmp'));
+    } else if (body !== undefined) { koppen['Content-Type'] = 'application/json'; lijf = JSON.stringify(body); }
     let res;
     try {
-      res = await doeFetch(basis + pad + qs, { method: methode, headers: koppen, body: body !== undefined ? JSON.stringify(body) : undefined, redirect: 'manual', signal: AbortSignal.timeout(ms) });
+      res = await doeFetch(basis + pad + qs, { method: methode, headers: koppen, body: lijf, redirect: 'manual', signal: AbortSignal.timeout(soort === 'origineel' || lijf instanceof FormData ? Math.max(ms, 120000) : ms) });
     } catch (e) { const f = new Error('immich: niet bereikbaar'); f.code = 'NET'; throw f; }
     if (res.status < 200 || res.status >= 300) {
       try { await res.arrayBuffer(); } catch (e) { /* weg */ }
       const f = new Error('immich: HTTP ' + res.status); f.code = 'HTTP'; f.status = res.status; throw f;
     }
     const ct = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-    const max = soort === 'beeld' ? MAX_BEELD : MAX_JSON;
+    const max = soort === 'beeld' ? MAX_BEELD : soort === 'origineel' ? MAX_ORIGINEEL : MAX_JSON;
     const lengte = Number(res.headers.get('content-length') || 0);
     if (lengte > max) { const f = new Error('immich: antwoord te groot'); f.code = 'GROOT'; throw f; }
     const buf = await leesBegrensd(res, max);   // review ZOU 1: harde grens tijdens het lezen, niet pas erna
     if (soort === 'beeld') {
       if (!BEELD_MIME[ct]) { const f = new Error('immich: geen beeld'); f.code = 'SOORT'; throw f; }
       return { mime: ct, data: buf };
+    }
+    // wv2614: het origineel komt als octet-stream of met het eigen type; de soort komt uit de bytes (jpg/png/webp), anders geweigerd
+    if (soort === 'origineel') {
+      const sb = soortUitBytes(buf);
+      if (!sb) { const f = new Error('immich: origineel is geen jpg, png of webp'); f.code = 'SOORT'; throw f; }
+      return { soort: sb, data: buf };
     }
     if (ct !== 'application/json') { const f = new Error('immich: geen JSON'); f.code = 'SOORT'; throw f; }
     return JSON.parse(buf.toString('utf8'));
@@ -201,7 +295,63 @@ function maak(o) {
     if (!u(assetId)) throw new Error('immich: ongeldige foto');
     return verzoek('GET', '/api/assets/' + assetId + '/thumbnail', { size: maat === 'groot' ? 'preview' : 'thumbnail' }, undefined, 'beeld');
   }
-  return { albums, album, maakAlbum, hernoemAlbum, albumFotos, albumSpoor, beeld, verzoek, basis };
+  // ── Studio › Fotoherstel (wv2614) ──
+  // Gegevens van één foto, alleen wat Studio nodig heeft; null als hij er niet (meer) is.
+  async function fotoInfo(id) {
+    if (!u(id)) throw new Error('immich: ongeldige foto');
+    let a;
+    try { a = await verzoek('GET', '/api/assets/' + id); }
+    catch (e) { if (e.code === 'HTTP' && (e.status === 404 || e.status === 400)) return null; throw e; }
+    if (!a || a.id !== id) return null;
+    const ex = a.exifInfo && typeof a.exifInfo === 'object' ? a.exifInfo : {};
+    return { id: a.id, beeld: a.type === 'IMAGE', mime: typeof a.originalMimeType === 'string' ? a.originalMimeType.toLowerCase() : null,
+      grootte: Number.isFinite(ex.fileSizeInByte) ? ex.fileSizeInByte : null, opname: typeof a.fileCreatedAt === 'string' && DATUM_RE.test(a.fileCreatedAt) ? a.fileCreatedAt : null,
+      stapel: !!(a.stack && typeof a.stack === 'object' && a.stack.id), eigenaar: u(a.ownerId) ? a.ownerId : null, prullenbak: a.isTrashed === true,
+      naam: typeof a.originalFileName === 'string' ? a.originalFileName : '', beschrijving: typeof ex.description === 'string' ? ex.description : '' };
+  }
+  let mijn = null;
+  async function mijnId() { if (mijn) return mijn; const r = await verzoek('GET', '/api/users/me'); mijn = r && u(r.id) ? r.id : null; return mijn; }   // alleen het id
+  // Mag de sleutel stapels maken (recht stack.create of all)? 5 min onthouden; David kan het recht in Immich bijzetten.
+  let recht = null;
+  async function magStapelen() {
+    if (recht && Date.now() < recht.tot) return recht.ja;
+    const r = await verzoek('GET', '/api/api-keys/me');
+    const p = r && Array.isArray(r.permissions) ? r.permissions : [];
+    recht = { ja: p.indexOf('all') >= 0 || p.indexOf('stack.create') >= 0, tot: Date.now() + 5 * 60 * 1000 };
+    return recht.ja;
+  }
+  async function origineel(id) { if (!u(id)) throw new Error('immich: ongeldige foto'); return verzoek('GET', '/api/assets/' + id + '/original', undefined, undefined, 'origineel'); }
+  async function albumsVan(id) { if (!u(id)) throw new Error('immich: ongeldige foto'); const r = await verzoek('GET', '/api/albums', { assetId: id }); return Array.isArray(r) ? r.map(albumKort).filter(Boolean) : []; }
+  // Nieuwe foto. o = { data: Buffer, taak: 16 hex, opname: ISO, beschrijving? } → { id, nieuw } (nieuw = false: Immich kende dezelfde bytes al)
+  async function uploaden(x) {
+    const ext = soortUitBytes(x && x.data);
+    if (!ext || !/^[a-f0-9]{16}$/.test(String(x.taak || ''))) throw new Error('immich: ongeldige upload');
+    const body = { assetData: x.data, filename: 'socev-studio-' + x.taak + '.' + ext, fileCreatedAt: x.opname, fileModifiedAt: x.opname };
+    if (x.beschrijving) body.sidecarData = xmpBeschrijving(x.beschrijving);
+    const r = await verzoek('POST', '/api/assets', undefined, body);
+    if (!r || !u(r.id) || (r.status !== 'created' && r.status !== 'duplicate')) throw new Error('immich: onverwacht antwoord');
+    if (r.status === 'created') eigen.add(r.id);
+    return { id: r.id, nieuw: r.status === 'created' };
+  }
+  // Stapel: eigen nieuwe foto bovenop, origineel eronder; alleen als het origineel nog geen stapel heeft (vlak ervoor gemeten). → { gestapeld, reden }
+  async function stapelen(eigenId, origId) {
+    if (!eigen.has(eigenId)) return { gestapeld: false, reden: 'niet de eigen nieuwe foto' };
+    const oi = await fotoInfo(origId);
+    if (!oi) return { gestapeld: false, reden: 'origineel niet gevonden' };
+    if (oi.stapel) return { gestapeld: false, reden: 'origineel zit al in een stapel' };
+    const ei = await fotoInfo(eigenId);
+    if (!ei || !oi.eigenaar || ei.eigenaar !== oi.eigenaar) return { gestapeld: false, reden: 'origineel is van een ander account' };
+    const r = await verzoek('POST', '/api/stacks', undefined, { assetIds: [eigenId, origId] });
+    if (!r || !u(r.id) || r.primaryAssetId !== eigenId) return { gestapeld: false, reden: 'onverwacht antwoord' };
+    return { gestapeld: true };
+  }
+  async function inAlbum(albumId, eigenId) {
+    if (!u(albumId)) throw new Error('immich: ongeldig album');
+    const r = await verzoek('PUT', '/api/albums/' + albumId + '/assets', undefined, { ids: [eigenId] });
+    const x = Array.isArray(r) ? r.find(function (y) { return y && y.id === eigenId; }) : null;
+    return !!(x && (x.success === true || x.error === 'duplicate'));
+  }
+  return { albums, album, maakAlbum, hernoemAlbum, albumFotos, albumSpoor, beeld, verzoek, basis, fotoInfo, origineel, albumsVan, uploaden, stapelen, inAlbum, mijnId, magStapelen };
 }
 
 // Zit er nog metadata (Exif/XMP, met mogelijk de plek of het toestel) in een beeld? Dan delen we het niet naar buiten.
@@ -248,4 +398,4 @@ function heeftMetadata(buf) {
   return true;
 }
 
-module.exports = { maak, weiger, heeftMetadata, plaatselijkeDag, UUID_RE };
+module.exports = { maak, weiger, heeftMetadata, plaatselijkeDag, UUID_RE, soortUitBytes, xmpBeschrijving };

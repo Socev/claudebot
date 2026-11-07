@@ -63,6 +63,17 @@ const POLL_MS = 3000;
 // Bestanden (voor/na-schuif in de app), het resultaat als na-<n>.<ext>. Nooit een bestandsnaam of beeld in een log of audit.
 const BEELD = { naam: 'fotoherstel-invoer.png', map: 'studio', max_bytes: 20 * 1024 * 1024, max_mp_in: 4, max_mp_uit: 16,
   uit_lees_max: 96 * 1024 * 1024, jpg_boven: 10 * 1024 * 1024, py_ms: 120 * 1000 };
+// ── Immich als bron en bestemming (wv2614, fotoherstel fase 2; ontwerp § 6/§ 7; David Ja 7-11-2026 08:00) ──
+// BRON. In het fotoveld kan de app in plaats van { n } ook { immich: <asset-id> } sturen (albums en miniaturen via /app/studio/immich/*).
+// De pod haalt dan zelf het ORIGINEEL (GET /api/assets/<id>/original) als dat een foto in jpg/png/webp is van ≤ 20 MB; anders (HEIC, RAW,
+// groter) het grote voorbeeldbeeld van Immich (± 1440 px), met die melding als noot. Daarna precies dezelfde toets als een upload.
+// BESTEMMING. "Zet in Immich" bij een klaar resultaat: de pod uploadt het na-bestand uit Bestanden als NIEUWE foto (naam
+// socev-studio-<taak>.<ext>, opnamedatum van het origineel, beschrijving "Hersteld met AI (<model>), …" als de flow een ai_model noemt),
+// maakt een stapel (nieuw bovenop, origineel eronder) als het origineel nog geen stapel heeft, en zet de nieuwe foto in dezelfde albums als
+// het origineel. Bij een upload als bron: alleen in het album dat David kiest. Het origineel wordt nooit gewijzigd of verwijderd (witte
+// lijst in immich.js). Eén keer per taak (taak.immich); in log en audit alleen taak-id en tellingen, nooit albumnamen of asset-ids.
+const IMMICH = { albums_max: 20, fotos_max: 500, upload_max: 25 * 1024 * 1024 };
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const LEEG_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');   // 1×1
 function beeldSoort(b) {
   if (!b || b.length < 12) return null;
@@ -346,6 +357,7 @@ function maak(deps) {
           tijd: schoon(y.tijd, 80), max_per_dag: Math.max(0, Math.min(GRENS.per_dag, Number(y.max_per_dag) || 0)),
           verborgen: y.verborgen === true, telefoonversie: y.telefoonversie === true, bandje: y.bandje === true,   // wv743
           stem: /^[a-z0-9]{2,20}:[A-Za-z0-9_.\/-]{1,80}$/.test(String(y.stem || '')) ? String(y.stem) : null,
+          ai_model: /^[A-Za-z0-9][A-Za-z0-9 .+-]{1,39}$/.test(String(y.ai_model || '')) ? String(y.ai_model) : null,   // wv2614: beschrijving in Immich
         });
         if (['comfyui', 'piper', 'elevenlabs'].indexOf(f.motor) < 0) f.fout = 'onbekende motor';
         if (['proef', 'actief', 'uit'].indexOf(f.status) < 0) f.fout = 'onbekende status';
@@ -573,7 +585,8 @@ function maak(deps) {
       reden: t.reden || null, gemaakt: t.gemaakt, start: t.start || null, eind: t.eind || null, duur_s: t.duur_s || null, velden: t.velden,
       bestanden: t.bestanden || [], plek_in_rij: t.status === 'wacht' ? st.rij.indexOf(t.id) + 1 : null, meting: t.meting || null,
       bron: t.bron || null, noot: t.noot || null,
-      beeld: t.beeld ? { breed: t.beeld.breed, hoog: t.beeld.hoog, verkleind: t.beeld.verkleind === true } : null,   // wv2482
+      beeld: t.beeld ? { breed: t.beeld.breed, hoog: t.beeld.hoog, verkleind: t.beeld.verkleind === true, immich: t.beeld.immich || null } : null,   // wv2482, wv2614
+      immich: t.immich ? { stapel: t.immich.stapel === true, albums: t.immich.albums || 0, dubbel: t.immich.dubbel === true, link: t.immich.link || null, noot: t.immich.noot || null } : null,   // wv2614
       betaald: t.betaald === true, kosten_eur: t.betaald ? (vb[t.id] ? (vb[t.id].soort === 'vrijgegeven' ? 0 : vb[t.id].eur) : t.prijs_vooraf || 0) : 0,
       kosten_staat: t.betaald && vb[t.id] ? vb[t.id].soort : null, credits: t.credits == null ? null : t.credits };
   }
@@ -606,9 +619,15 @@ function maak(deps) {
         w = w === true || w === 'true' || w === 1;
       } else if (v.soort === 'beeld') {
         // wv2482: alleen het nummer van een klaarstaande upload van dít apparaat; naam en inhoud komen van de pod
-        const n = w && typeof w === 'object' ? Number(w.n) : NaN;
-        if (!Number.isInteger(n) || n < 1 || n > 10) return { fout: v.label + ': kies eerst een foto' };
-        w = { n: n };
+        // wv2614: of het id van een foto in Immich (de pod haalt hem zelf)
+        if (w && typeof w === 'object' && typeof w.immich === 'string') {
+          if (!UUID_RE.test(w.immich)) return { fout: v.label + ': onbekende foto in Immich' };
+          w = { immich: w.immich };
+        } else {
+          const n = w && typeof w === 'object' ? Number(w.n) : NaN;
+          if (!Number.isInteger(n) || n < 1 || n > 10) return { fout: v.label + ': kies eerst een foto' };
+          w = { n: n };
+        }
       }
       uit[v.naam] = w;
     }
@@ -664,8 +683,15 @@ function maak(deps) {
   async function beeldKlaar(f, waarden, ctx, beurt) {
     const v = f.velden.find(function (x) { return x.soort === 'beeld'; });
     if (!v) return null;
-    if (typeof (ctx && ctx.neemUpload) !== 'function') return { status: 400, fout: 'foto\'s als invoer kunnen hier niet' };
-    const x = ctx.neemUpload(beurt, waarden[v.naam].n);
+    let x, bronNoot = null, immichBron = null;
+    if (waarden[v.naam].immich) {
+      const hi = await immichHaal(waarden[v.naam].immich);
+      if (hi.fout) return hi;
+      x = { bytes: hi.bytes, weg: null }; bronNoot = hi.noot; immichBron = waarden[v.naam].immich;
+    } else {
+      if (typeof (ctx && ctx.neemUpload) !== 'function') return { status: 400, fout: 'foto\'s als invoer kunnen hier niet' };
+      x = ctx.neemUpload(beurt, waarden[v.naam].n);
+    }
     if (!x || !Buffer.isBuffer(x.bytes)) return { status: 409, fout: 'de foto is niet (meer) aangekomen; kies hem opnieuw' };
     if (x.bytes.length > BEELD.max_bytes) return { status: 413, fout: 'foto groter dan 20 MB' };
     const soort = beeldSoort(x.bytes);
@@ -689,9 +715,129 @@ function maak(deps) {
         noot = 'foto verkleind van ' + mpTekst(r.breed, r.hoog) + ' naar ' + mpTekst(b, h) + ' (grens voor deze stand: ' + String(grens).replace('.', ',') + ' MP)';
       }
       fs.renameSync(invoer, path.join(map, 'invoer.' + ext));
-      return { map: map, beeld: { veld: v.naam, breed: b, hoog: h, ext: ext, verkleind: !!r.verkleind, grens_mp: grens }, noot: noot,
+      if (bronNoot) noot = noot ? bronNoot + '; ' + noot : bronNoot;
+      const bb = { veld: v.naam, breed: b, hoog: h, ext: ext, verkleind: !!r.verkleind, grens_mp: grens };
+      if (immichBron) bb.immich = immichBron;   // wv2614
+      return { map: map, beeld: bb, noot: noot,
         weg: function () { try { if (x.weg) x.weg(); } catch (e) { fout('studio-upload-weg', e); } }, opruim: opruim };
     } catch (e) { opruim(); fout('studio-beeld', e); return { status: 500, fout: 'de foto kon niet klaargezet worden' }; }
+  }
+
+  // ── Immich als bron en bestemming (wv2614; zie IMMICH bovenaan) ──
+  const immichBezig = new Set();
+  function immichClient() { const c = typeof deps.immich === 'function' ? deps.immich() : deps.immich; return c && typeof c.fotoInfo === 'function' ? c : null; }
+  function immichNiet(e) { fout('studio-immich', e); return { status: 503, fout: e && e.code === 'GEEN_SLEUTEL' ? 'Immich-sleutel ontbreekt' : 'Immich is nu niet bereikbaar' }; }
+  // → { bytes, noot } of { status, fout }. Origineel als dat jpg/png/webp ≤ 20 MB is, anders het grote voorbeeldbeeld met noot.
+  async function immichHaal(id) {
+    const im = immichClient();
+    if (!im) return { status: 409, fout: 'Immich is hier niet gekoppeld' };
+    let info;
+    try { info = await im.fotoInfo(id); } catch (e) { return immichNiet(e); }
+    if (!info) return { status: 404, fout: 'deze foto staat niet (meer) in Immich' };
+    if (!info.beeld) return { status: 415, fout: 'dit is een video; kies een foto' };
+    if (info.prullenbak) return { status: 409, fout: 'deze foto ligt in de prullenbak van Immich' };
+    const soortOk = ['image/jpeg', 'image/png', 'image/webp'].indexOf(info.mime) >= 0, maatOk = info.grootte == null || info.grootte <= BEELD.max_bytes;
+    let reden = !soortOk ? 'geen jpg, png of webp' : !maatOk ? 'groter dan 20 MB' : null;
+    if (!reden) {
+      try { const o = await im.origineel(id); return { bytes: o.data, noot: null }; }
+      catch (e) { if (e && (e.code === 'SOORT' || e.code === 'GROOT')) reden = e.code === 'GROOT' ? 'groter dan 20 MB' : 'geen jpg, png of webp'; else return immichNiet(e); }
+    }
+    try { const p = await im.beeld(id, 'groot'); return { bytes: p.data, noot: 'het origineel in Immich is ' + reden + ': gewerkt met het grote voorbeeldbeeld van Immich (± 1440 px)' }; }
+    catch (e) { return immichNiet(e); }
+  }
+  async function immichAlbums() {
+    const im = immichClient();
+    if (!im) return { status: 409, fout: 'Immich is hier niet gekoppeld' };
+    let l;
+    try { l = await im.albums(); } catch (e) { return immichNiet(e); }
+    const uit = l.map(function (a) { return { id: a.id, naam: a.naam, aantal: a.aantal, omslag: a.omslag, memorylane: /(^|\n)memorylane:[0-9a-f]{16}\s*$/.test(a.omschrijving || '') || / \(ML\)$/.test(a.naam || '') }; });
+    uit.sort(function (a, b) { return (b.memorylane ? 1 : 0) - (a.memorylane ? 1 : 0) || String(a.naam).localeCompare(String(b.naam), 'nl'); });
+    return { status: 200, albums: uit };
+  }
+  async function immichFotos(albumId) {
+    if (!UUID_RE.test(String(albumId || ''))) return { status: 400, fout: 'onbekend album' };
+    const im = immichClient();
+    if (!im) return { status: 409, fout: 'Immich is hier niet gekoppeld' };
+    try { const l = await im.albumFotos(albumId, IMMICH.fotos_max); return { status: 200, fotos: l.filter(function (x) { return x.beeld; }).map(function (x) { return { id: x.id, ratio: x.ratio }; }) }; }
+    catch (e) { if (e && e.code === 'HTTP' && (e.status === 404 || e.status === 400)) return { status: 404, fout: 'dit album bestaat niet (meer)' }; return immichNiet(e); }
+  }
+  async function immichMini(id) {
+    if (!UUID_RE.test(String(id || ''))) return { status: 400, fout: 'onbekende foto' };
+    const im = immichClient();
+    if (!im) return { status: 409, fout: 'Immich is hier niet gekoppeld' };
+    try { const b = await im.beeld(id, 'klein'); return { status: 200, mime: b.mime, data: b.data.toString('base64') }; }
+    catch (e) { if (e && e.code === 'HTTP' && (e.status === 404 || e.status === 400)) return { status: 404, fout: 'deze foto staat niet (meer) in Immich' }; return immichNiet(e); }
+  }
+  // POST /app/studio/taak/<id>/immich { n?, album? } — één keer per taak; na de upload wordt taak.immich altijd bewaard (ook bij een fout
+  // daarna), zodat een tweede tik nooit een tweede foto maakt.
+  async function zetInImmich(id, d) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    const t = st.taken.find(function (x) { return x.id === id; });
+    if (!t) return { status: 404, fout: 'deze taak bestaat niet' };
+    if (t.immich) return { status: 200, taak: taakUit(t), al: true };
+    if (t.status !== 'klaar' || !t.beeld) return { status: 409, fout: 'alleen een klaar fotoresultaat kan naar Immich' };
+    if (immichBezig.has(t.id)) return { status: 409, fout: 'is al bezig' };
+    const im = immichClient();
+    if (!im) return { status: 409, fout: 'Immich is hier niet gekoppeld' };
+    d = d && typeof d === 'object' ? d : {};
+    const na = (t.bestanden || []).filter(function (b) { return /^na-\d+\.(png|jpe?g|webp)$/.test(String(b.naam)); });
+    const b = d.n === undefined ? na[0] : na.find(function (x) { return x.n === Number(d.n); });
+    if (!b) return { status: 404, fout: 'geen resultaat om te bewaren' };
+    const bron = t.beeld.immich || null;
+    if (!bron && !UUID_RE.test(String(d.album || ''))) return { status: 400, fout: 'kies een album in Immich' };
+    if (typeof deps.leesBewaard !== 'function') return { status: 409, fout: 'Bestanden is hier niet te lezen' };
+    const data = deps.leesBewaard(t.id, b.n);
+    if (!Buffer.isBuffer(data)) return { status: 410, fout: 'het resultaat staat niet meer in Bestanden (30 dagen)' };
+    if (!beeldSoort(data) || data.length > IMMICH.upload_max) return { status: 415, fout: 'het resultaat is geen jpg, png of webp van hooguit 25 MB' };
+    immichBezig.add(t.id);
+    try {
+      let albums, opname, stapelKan = false, geenStapel = null;
+      try {
+        if (bron) {
+          const info = await im.fotoInfo(bron);
+          if (!info || info.prullenbak) return { status: 409, fout: 'het origineel staat niet meer in Immich' };
+          albums = (await im.albumsVan(bron)).slice(0, IMMICH.albums_max);
+          opname = info.opname || new Date(Date.parse(t.gemaakt)).toISOString();
+          // vooraf bepalen (de beschrijving kan na het uploaden niet meer veranderen): geen stapel als het origineel al in een stapel zit
+          // of van een ander account is (gedeelde foto; Immich stapelt alleen eigen foto's)
+          const ik = await im.mijnId(), mag = !info.stapel && await im.magStapelen();
+          stapelKan = !info.stapel && mag && !!ik && info.eigenaar === ik;
+          geenStapel = info.stapel ? 'het origineel zat al in een stapel' : !mag ? 'de Immich-sleutel mag nog geen stapels maken' : !stapelKan ? 'het origineel is van een ander account' : null;
+        } else {
+          const a = await im.album(d.album);
+          if (!a) return { status: 404, fout: 'dit album bestaat niet (meer)' };
+          albums = [a];
+          opname = new Date(Date.parse(t.gemaakt)).toISOString();
+        }
+      } catch (e) { return immichNiet(e); }
+      const f = (await catalogus(false)).flows.find(function (x) { return x.id === t.flow; });
+      const model = f && f.ai_model;
+      const beschrijving = model ? 'Hersteld met AI (' + model + ')' + (!bron ? '; het origineel staat niet in Immich' : stapelKan ? ', origineel in de stapel' : '; het origineel staat los in Immich') : null;
+      let up;
+      try { up = await im.uploaden({ data: data, taak: t.id, opname: opname, beschrijving: beschrijving }); } catch (e) { return immichNiet(e); }
+      const link = im.basis ? im.basis + '/photos/' + up.id : null;
+      if (!up.nieuw) {
+        t.immich = { asset: up.id, dubbel: true, stapel: false, albums: 0, link: link, op: new Date(klok()).toISOString(), noot: 'deze foto stond al in Immich; niets gestapeld en niets aan albums toegevoegd' };
+      } else {
+        t.immich = { asset: up.id, stapel: false, albums: 0, link: link, op: new Date(klok()).toISOString(), noot: null };
+        bewaarTaken();   // eerst vastleggen dat de foto er is (een fout hieronder mag geen tweede upload geven)
+        const noten = [];
+        if (bron && stapelKan) {
+          try { const r = await im.stapelen(up.id, bron); t.immich.stapel = r.gestapeld === true; if (!r.gestapeld) noten.push('geen stapel: ' + r.reden); }
+          catch (e) { fout('studio-immich', e); noten.push('stapel maken lukte niet'); }
+        } else if (bron) noten.push('geen stapel: ' + geenStapel);
+        let n = 0, mis = 0;
+        for (const a of albums) { try { if (await im.inAlbum(a.id, up.id)) n++; else mis++; } catch (e) { mis++; fout('studio-immich', e); } }
+        t.immich.albums = n;
+        if (mis) noten.push(mis + (mis === 1 ? ' album' : ' albums') + ' lukte niet');
+        if (bron && !albums.length) noten.push('het origineel zat in geen enkel album');
+        t.immich.noot = noten.length ? noten.join('; ') : null;
+      }
+      bewaarTaken();
+      audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: 'immich', immich_bron: !!bron, stapel: t.immich.stapel, albums: t.immich.albums, dubbel: t.immich.dubbel === true });
+      log('studio taak=' + t.id + ' immich=gezet stapel=' + t.immich.stapel + ' albums=' + t.immich.albums + (t.immich.dubbel ? ' dubbel' : ''));
+      return { status: 200, taak: taakUit(t) };
+    } finally { immichBezig.delete(t.id); }
   }
 
   // ── POST /app/studio/maak ──
@@ -1378,9 +1524,10 @@ function maak(deps) {
     flows: async function (o) {
       const c = await catalogus(false);
       return { flows: c.flows.filter(function (f) { return f.status !== 'uit' && (!f.verborgen || (o && o.verborgen === true)); }).map(flowUit), sleutel: c.sleutel,
-        router_bereikbaar: !c.router_fout, stand: stand() };
+        router_bereikbaar: !c.router_fout, stand: stand(), immich: !!immichClient() };   // wv2614: bron/bestemming Immich beschikbaar
     },
     maak: maakTaak,
+    immichAlbums: immichAlbums, immichFotos: immichFotos, immichMini: immichMini, zetInImmich: zetInImmich,   // wv2614
     taken: function () { return { taken: st.taken.slice(-60).reverse().map(taakUit), stand: stand() }; },
     // licht (Fable wv707 #2): alleen wat wacht of loopt, zonder velden; de app pollt dit tijdens een taak
     lopend: function () { return { taken: st.taken.filter(function (t) { return t.status === 'wacht' || t.status === 'bezig'; }).map(function (t) { const o = taakUit(t); delete o.velden; return o; }), stand: stand() }; },
