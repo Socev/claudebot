@@ -419,7 +419,8 @@ function blokPaypal(d, links, signalen, A) {
 // Hoofdfunctie. o.vault = vaultmap (toets), o.paypal = paypal-bewijs.js (mag ontbreken).
 function bereken(A, a, o) {
   o = o || {};
-  const nu = peildag(a), mNu = nu.slice(0, 7), fouten = [];
+  // wv2621 (review MOET 1): de maandbrief rekent op de peildatum van de briefing (o.peil), de App op de nieuwste post of vandaag
+  const nu = o.peil && /^\d{4}-\d{2}-\d{2}$/.test(o.peil) ? o.peil : peildag(a), mNu = nu.slice(0, 7), fouten = [];
   const L = leesLinks(o.vault || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain');
   const signalen = [];
   const blok = function (naam, f) { try { return f(); } catch (e) { fouten.push(naam); return null; } };
@@ -604,7 +605,7 @@ function briefing(A, a, o) {
   });
   // 5. maandbrief (wv2621, ontwerp Financiën 8+ § 3.7): hooguit vijf korte regels uit het overzicht van de App, alleen wat afwijkt. Een fout
   // hier houdt het gewone blok niet tegen (maandbrief_fout; de pod zet één box-rij per maand)
-  try { maandbrief(A, a, o).forEach(function (s) { sig.push(s); }); } catch (e) { uit.maandbrief_fout = true; }
+  try { maandbrief(A, a, o, D).forEach(function (s) { sig.push(s); }); } catch (e) { uit.maandbrief_fout = true; }
   // wat David al kent (Bewust-tabel in de linkslijst) dempt, net als in de App
   uit.signalen = sig.filter(function (s) { return !gedempt(s, L.bewust); });
   return uit;
@@ -623,7 +624,7 @@ function briefing(A, a, o) {
 // Rekent met bereken() (dezelfde getallen als de App), zonder taalmodel.
 function eurHeel(n) { const v = Math.round(Math.abs(n)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.'); return (n < -0.5 ? '− ' : '') + '€ ' + v; }
 function mndVol(m) { return ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'][Number(m.slice(5, 7)) - 1] + ' ' + m.slice(0, 4); }
-function maandbrief(A, a, o) { return maandbriefUit(bereken(A, a, { saldi: o.saldi, paypal: o.paypal, vault: o.vault }).overzicht); }
+function maandbrief(A, a, o, D) { return maandbriefUit(bereken(A, a, { saldi: o.saldi, paypal: o.paypal, vault: o.vault, peil: D }).overzicht); }
 // puur: de regels uit een overzicht (blok overzicht van bereken)
 function maandbriefUit(ov) {
   const uit = [];

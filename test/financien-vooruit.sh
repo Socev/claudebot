@@ -72,6 +72,9 @@ if (V) {
     k.later.filter((x) => x.maand === '2031-05').length === 1 && /leningdelen 2 \(1,04 %\), 3/.test(k.later.find((x) => x.maand === '2031-05').tekst), k.later);
   toets('kalender: dividend van een jaar eerder dat ook het jaar daarvoor kwam = "elk jaar" (telt); losse post = "misschien" (telt niet)', soort('elk jaar').length === 1 && soort('elk jaar')[0].maand === '2027-01' &&
     soort('elk jaar')[0].bedrag === 50000 && soort('misschien').length === 1 && soort('misschien')[0].telt === false, [soort('elk jaar'), soort('misschien')]);
+  // review MOET 3: dividend van 13 maanden terug (een jaar later is al voorbij) schuift nog een jaar door
+  const k2 = V.kalender({ nu: nu, herhaal: [{ datum: '2025-10-20', naam: 'Proef BV', bedrag: 1000, jaar_eerder: '2024-10-21' }] });
+  toets('kalender: eenmalig inkomen waarvan "een jaar later" al voorbij is, schuift nog een jaar door (binnen de horizon)', k2.posten.length === 1 && k2.posten[0].maand === '2027-10', k2.posten);
   toets('kalender: Holding-regel zonder maand bij later', k.later.some((x) => x.soort === 'mijlpaal' && x.maand === null), k.later);
 
   // ── prognose: reproduceerbaar uit de kalender ──
@@ -116,10 +119,10 @@ if (V) {
   const zw = (f) => { try { f(); return null; } catch (e) { return e.message; } };
   toets('doelenZet: dubbele naam geweigerd, onbekend doel weg geweigerd, onbekende actie geweigerd', /al een doel/.test(zw(() => V.doelenZet(tekst, op({ naam: 'nieuwe AUTO', bedrag: 1, datum: '2027-01-01', soort: 'uitgave' }), nu))) &&
     /niet gevonden/.test(zw(() => V.doelenZet(tekst, { actie: 'weg', naam: 'Bestaat niet' }, nu))) && /onbekende actie/.test(zw(() => V.doelenZet(tekst, { actie: 'wis' }, nu))), null);
-  toets('doelInvoer: datum in het verleden, bedrag 0, naam met haken, onbekende soort geweigerd; maand JJJJ-MM wordt de 1e', /datum/.test(zw(() => V.doelInvoer({ naam: 'x', bedrag: 5, datum: '2026-01-01', soort: 'sparen' }, nu))) &&
+  toets('doelInvoer: datum in het verleden of niet bestaand (31 feb), bedrag 0, naam met haken, onbekende soort geweigerd; maand JJJJ-MM wordt de 1e', /datum/.test(zw(() => V.doelInvoer({ naam: 'x', bedrag: 5, datum: '2026-01-01', soort: 'sparen' }, nu))) &&
     /bedrag/.test(zw(() => V.doelInvoer({ naam: 'x', bedrag: 0, datum: '2027-01-01', soort: 'sparen' }, nu))) && /naam/.test(zw(() => V.doelInvoer({ naam: '[[x]]', bedrag: 5, datum: '2027-01-01', soort: 'sparen' }, nu))) &&
     /soort/.test(zw(() => V.doelInvoer({ naam: 'x', bedrag: 5, datum: '2027-01-01', soort: 'beleggen' }, nu))) && V.doelInvoer({ naam: 'x', bedrag: 5, datum: '2027-02', soort: 'uitgave', rekening: 'Spaar' }, nu).datum === '2027-02-01' &&
-    V.doelInvoer({ naam: 'x', bedrag: 5, datum: '2027-02', soort: 'uitgave', rekening: 'Spaar' }, nu).rekening === null, null);
+    V.doelInvoer({ naam: 'x', bedrag: 5, datum: '2027-02', soort: 'uitgave', rekening: 'Spaar' }, nu).rekening === null && /datum/.test(zw(() => V.doelInvoer({ naam: 'x', bedrag: 5, datum: '2027-02-31', soort: 'sparen' }, nu))), null);
   const saldi = { rekeningen: [{ naam: 'Spaar Proef', valuta: 'EUR', saldo: 1400 }, { naam: 'Hoofd', valuta: 'EUR', saldo: 3000 }] };
   const dl = V.doelen({ vault: VAULT, nu: nu, saldi: saldi, ov: { buffer: { liquide: 30000 } } });
   const g = (n) => dl.doelen.find((x) => x.naam === n);
@@ -176,6 +179,8 @@ toets('financien-vooruit.js: geen netwerk, geen proces, schrijft zelf niets', !!
 const S = fs.readFileSync('server.js', 'utf8');
 toets('server.js: POST /app/financien/doel achter de Financiën-poort, met grens, via vault-veilig, geheugen weg', /route === 'POST \/app\/financien\/doel'\) return appFinDoel/.test(S) &&
   /async function appFinDoel[\s\S]{0,400}appPriveDicht\(a, 'financien'\)/.test(S) && /appTeller\('fin-doel'/.test(S) && /VV\(\)\.wijzig\(pad, function \(t\) \{ return V\.doelenZet/.test(S) && /APP_GLIJD_ROUTES\.add\('POST \/app\/financien\/doel'\)/.test(S), null);
+toets('server.js: nieuw Doelen.md alleen als het er vlak voor de rename nog niet is (anders wijzig)', /VV\(\)\.schrijf\(pad, V\.doelenZet\('', op, vandaag\), \{ alsGelijk: function \(st\) \{ return !st; \} \}\)/.test(S), null);
+toets('financien-app: de maandbrief rekent op de peildatum van de briefing', /maandbrief\(A, a, o, D\)/.test(fs.readFileSync('financien-app.js', 'utf8')) && /o\.peil && /.test(fs.readFileSync('financien-app.js', 'utf8')), null);
 toets('server.js: maandbrief_fout geeft een box-rij en houdt het gewone blok niet tegen', /if \(j\.maandbrief_fout\) \{[\s\S]{0,300}bankBoxRij/.test(S), null);
 toets('bank-lezer geld-briefing: saldi en PayPal voor de maandbrief', /'geld-briefing'\(a\)[\s\S]{0,500}o\.saldi = db\(\)\.prepare/.test(fs.readFileSync('bank-lezer.js', 'utf8')), null);
 toets('uitrol.sh en Dockerfile: financien-vooruit.js gaat mee in de release', /RELEASE_OPTIONEEL="[^"]*\bfinancien-vooruit\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&

@@ -164,7 +164,9 @@ function kalender(o) {
   // eenmalig inkomen van een jaar eerder: kwam het ook het jaar daarvoor (jaardividend), dan telt het mee; anders alleen "misschien" (telt niet)
   (o.herhaal || []).forEach(function (x) {
     if (!(x.bedrag > 0)) return;
-    const d = plusMaandenDatum(x.datum, 12);
+    // een jaar later, en zolang dat al voorbij is nog een jaar (review MOET 3: een dividend van 13 maanden terug valt anders weg)
+    let d = plusMaandenDatum(x.datum, 12);
+    for (let i = 0; i < 5 && d <= o.nu; i++) d = plusMaandenDatum(d, 12);
     if (d <= o.nu || d.slice(0, 7) > eind) return;
     if (x.jaar_eerder) uit.push({ maand: d.slice(0, 7), datum: d, soort: 'elk jaar', tekst: x.naam + ': elk jaar rond deze tijd (' + nlDatum(x.jaar_eerder) + ' en ' + nlDatum(x.datum) + '); bedrag van de laatste keer', bedrag: x.bedrag, bron: 'bank, 24 maanden terug' });
     else uit.push({ maand: d.slice(0, 7), datum: d, soort: 'misschien', telt: false, tekst: x.naam + ' bracht een jaar eerder ' + eur(x.bedrag) + ' (' + nlDatum(x.datum) + '); eenmalig, telt niet mee', bedrag: x.bedrag, bron: 'bank, 12 maanden terug' });
@@ -334,7 +336,9 @@ function doelInvoer(d, nu) {
   if (!(bedrag >= 1 && bedrag <= 10000000)) throw new Error('bedrag: € 1 tot € 10 miljoen');
   let datum = String(d.datum || '');
   if (/^\d{4}-\d{2}$/.test(datum)) datum += '-01';
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || isNaN(Date.parse(datum + 'T12:00:00Z')) || datum < nu || datum > maandPlus(nu.slice(0, 7), 240) + '-28') throw new Error('datum: vanaf vandaag, hooguit 20 jaar vooruit');
+  // strikt (review ZOU 1): 2027-02-31 bestaat niet en wordt geweigerd in plaats van stil 3 maart
+  const echt = /^\d{4}-\d{2}-\d{2}$/.test(datum) && !isNaN(Date.parse(datum + 'T12:00:00Z')) && new Date(datum + 'T12:00:00Z').toISOString().slice(0, 10) === datum;
+  if (!echt || datum < nu || datum > maandPlus(nu.slice(0, 7), 240) + '-28') throw new Error('datum: vanaf vandaag, hooguit 20 jaar vooruit');
   const soort = SOORTEN.indexOf(d.soort) >= 0 ? d.soort : null;
   if (!soort) throw new Error('soort: sparen of uitgave');
   const rekening = d.rekening == null || d.rekening === '' ? null : cel(d.rekening, 60);

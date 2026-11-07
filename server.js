@@ -11703,10 +11703,10 @@ async function appFinDoel(req, res, a, d) {
   try {
     let bestaat = true;
     try { VV().lees(pad, 'utf8', { max: 200000 }); } catch (e) { if (e && e.code === 'ENOENT') bestaat = false; else throw e; }
-    if (!bestaat) {
-      if (op.actie === 'weg') return appWeiger(res, 400, 'doel niet gevonden', 'fin-doel geweigerd');
-      VV().schrijf(pad, V.doelenZet('', op, vandaag));
-    } else if (!VV().wijzig(pad, function (t) { return V.doelenZet(t, op, vandaag); }, { krimpGrens: true })) return appWeiger(res, 409, 'de pagina veranderde net; probeer het opnieuw', 'fin-doel race');
+    if (!bestaat && op.actie === 'weg') return appWeiger(res, 400, 'doel niet gevonden', 'fin-doel geweigerd');
+    // nieuw bestand alleen als het er vlak voor de rename nog steeds niet is (review MOET 2); anders gewoon wijzigen
+    const nieuwGezet = !bestaat && VV().schrijf(pad, V.doelenZet('', op, vandaag), { alsGelijk: function (st) { return !st; } });
+    if (!nieuwGezet && !VV().wijzig(pad, function (t) { return V.doelenZet(t, op, vandaag); }, { krimpGrens: true })) return appWeiger(res, 409, 'de pagina veranderde net; probeer het opnieuw', 'fin-doel race');
   } catch (e) {
     if (/^(doel niet gevonden|er is al een doel met die naam|hooguit 40 doelen|naam ontbreekt)$/.test(String(e && e.message))) return appWeiger(res, 400, e.message, 'fin-doel geweigerd');
     logError('fin-doel', new Error('schrijven faalde (' + String(e && e.code || 'fout') + ')'));
