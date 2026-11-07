@@ -15840,7 +15840,23 @@ const studio = (function () {
 })();
 function studioInfo() { return studio ? Object.assign({ aan: true }, studio.health()) : { aan: false }; }
 // Zelfde ctx voor Studio en Bandjes (wv743): vingerafdruk van dít apparaat uit de sessie; bandjes.js bouwt er nooit zelf een.
-function appStudioCtx(a, s) { return { versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; }, apparaat: a.naam }; }
+function appStudioCtx(a, s) { return { versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; }, apparaat: a.naam,
+  neemUpload: function (beurt, n) { return appStudioUpload(a, beurt, n); } }; }   // wv2482: foto als invoer (veldsoort beeld)
+// wv2482: een via /app/upload/<beurt>/<n> klaargezet bestand van DIT apparaat overnemen voor Studio (zelfde vorm als facturenUploadNeem:
+// { naam, bytes, weg }); weg() pas als de taak in de rij staat. Hooguit 20 MB (de uploadgrens); geen koppelingen volgen.
+function appStudioUpload(a, beurt, n) {
+  if (!/^[a-z0-9-]{8,64}$/.test(String(beurt)) || !Number.isInteger(n) || n < 1 || n > APP_UPLOAD_MAX_N) return null;
+  const dir = appUploadMap(a, beurt);
+  let x;
+  try { x = appUploadLijst(dir).find(function (b) { return b.n === n; }); } catch (e) { return null; }
+  if (!x) return null;
+  const p = path.join(dir, String(n));
+  let bytes;
+  try { const st = fs.lstatSync(p); if (!st.isFile() || st.size > APP_UPLOAD_BESTAND_MAX) return null; bytes = fs.readFileSync(p); } catch (e) { return null; }
+  return { naam: x.naam, bytes: bytes, weg: function () {
+    try { fs.rmSync(p, { force: true }); fs.rmSync(p + '.json', { force: true }); if (!fs.readdirSync(dir).length) fs.rmdirSync(dir); } catch (e) { logError('studio-upload', e); }
+  } };
+}
 // Routes (bouwplan § 5.5). Maak op een flow op proef en Activeer eisen een verse vingerafdruk van dít apparaat (§ 4.4d),
 // gecontroleerd en verbruikt in studio.js zonder await ertussen. Schrijven alleen op de primaire kant (studio.js).
 async function appStudio(req, res, a, s, d, route) {

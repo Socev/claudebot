@@ -52,6 +52,25 @@ const COMFY_WACHT_MAX_MS = 30 * 60 * 1000;    // zo lang wacht een taak op een l
 const COMFY_WACHT_STAP_MS = 15 * 1000;
 const COMFY_FREE_NA_MS = 10 * 60 * 1000;
 const POLL_MS = 3000;
+// ── Veldsoort 'beeld' (wv2482, fotoherstel fase 1, 7-11-2026; ontwerp "Studio - fotoherstel op Olares (ontwerp 5-11-2026)" § 7) ──
+// De app zet de foto via de bestaande /app/upload/<beurt>/<n> klaar en noemt in maak alleen { n }; server.js geeft hem via ctx.neemUpload.
+// De pod toetst hem (type uit de bytes, ≤ 20 MB, volledig decoderen met Pillow in studio-beeld.py, ≤ 50 MP), verkleint hem tot de grens
+// van de stand (standaard 4 MP; een flow mag lager, per keuze bv. ×4 → 1 MP) en zet hem in ComfyUI onder ÉÉN vaste naam (overwrite;
+// er draait één taak tegelijk). Na afloop, ook bij fout of stop, overschrijft de pod die naam met een leeg beeld van 1×1: in ComfyUI's
+// invoermap staat zo nooit meer dan de foto van de lopende taak. Lukt dat niet (ComfyUI weg, pod herstart), dan blijft een vlag staan en
+// probeert vrijRonde het elke minuut opnieuw. Een LoadImage in een flow mag alleen die vaste naam lezen (geen andere bestanden van
+// ComfyUI). Uitvoer: hooguit 16 MP; groter dan 10 MB wordt JPEG 92 (Bestanden en de telefoon). De invoer gaat als voor.<ext> mee naar
+// Bestanden (voor/na-schuif in de app), het resultaat als na-<n>.<ext>. Nooit een bestandsnaam of beeld in een log of audit.
+const BEELD = { naam: 'fotoherstel-invoer.png', map: 'studio', max_bytes: 20 * 1024 * 1024, max_mp_in: 4, max_mp_uit: 16,
+  uit_lees_max: 96 * 1024 * 1024, jpg_boven: 10 * 1024 * 1024, py_ms: 120 * 1000 };
+const LEEG_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');   // 1×1
+function beeldSoort(b) {
+  if (!b || b.length < 12) return null;
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpg';
+  if (b[0] === 0x89 && b.subarray(1, 4).toString('latin1') === 'PNG') return 'png';
+  if (b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
+  return null;
+}
 const FS_PROJECT_MS = 60 * 1000;               // cache van FlowStudio /api/projects/<id> (estHostMemMib, status)
 
 // ── ElevenLabs via Olares Router (wv782, fase 2 deel stem, 22-10-2026; bouwplan Studio § 5.4, § 6, § 7) ──
@@ -108,7 +127,16 @@ const KNOPEN = {
   // knopen met output_node die wél mogen: ze schrijven alleen in ComfyUI's temp-map (Preview) of tonen tekst (Fable wv707 #1)
   preview_ok: ['PreviewImage', 'PreviewAudio', 'PreviewAny'],
   save_naar_preview: { SaveImage: 'PreviewImage', SaveAudio: 'PreviewAudio' },
-  custom_wit: [],
+  // wv2482: pakketknopen alleen op naam ÉN pakketmap (python_module custom_nodes.<map>, kleine letters): een ander pakket met dezelfde
+  // knoopnaam komt er niet door. Beide pakketten kozen David 7-11 (kaart "Fotoherstel … gezichten standaard trouw"): DDColor (inkleuren,
+  // houdt de helderheid van het origineel) en Facerestore CF (CodeFormer, schuif gezichten). Vaste modellijsten, geen pad- of URL-invoer.
+  custom_wit: {
+    DDColor_Colorize: ['comfyui-ddcolor'],
+    FaceRestoreModelLoader: ['facerestore_cf'],
+    FaceRestoreCFWithModel: ['facerestore_cf'],
+  },
+  // LoadImage leest een bestand uit ComfyUI's invoermap: alleen de vaste Studio-naam, nooit een ander (wv2482)
+  laad_beeld: ['LoadImage'],
 };
 function knoopToets(klasse, info) {
   if (typeof klasse !== 'string' || !/^[A-Za-z0-9_+.\- ]{1,120}$/.test(klasse)) return 'ongeldige knoopnaam';
@@ -121,7 +149,8 @@ function knoopToets(klasse, info) {
   const mod = String(k.python_module || '');
   if (mod === 'comfy_api_nodes' || mod.indexOf('comfy_api_nodes.') === 0) return 'knoop ' + klasse + ' is een betaalde partnerknoop';
   if (mod === 'nodes' || mod.indexOf('comfy_extras.') === 0) return null;
-  if (mod.indexOf('custom_nodes.') === 0 && KNOPEN.custom_wit.indexOf(klasse) >= 0) return null;
+  if (mod.indexOf('custom_nodes.') === 0 && Object.hasOwn(KNOPEN.custom_wit, klasse)
+    && KNOPEN.custom_wit[klasse].indexOf(mod.slice('custom_nodes.'.length).split('.')[0].toLowerCase()) >= 0) return null;
   return 'knoop ' + klasse + ' komt uit een pakket buiten de witte lijst (' + mod.slice(0, 60) + ')';
 }
 // Veldtypen tegen /object_info. Een link ([knoop-id, uitgang]) mag altijd (het type controleert ComfyUI); een waarde moet passen.
@@ -160,8 +189,14 @@ function flowToets(api, info) {
     const f = knoopToets(klasse, info);
     if (f) return { fout: f };
     const inputs = {};
+    // wv2482: een LoadImage leest alleen de vaste Studio-invoer; die naam staat pas na de upload in ComfyUI's keuzelijst (en object_info
+    // is 10 min gecachet), dus alleen DIE waarde slaat de lijsttoets over
+    const laadt = KNOPEN.laad_beeld.indexOf(klasse) >= 0;
+    if (laadt && n.inputs.image !== BEELD.map + '/' + BEELD.naam) return { fout: 'knoop ' + id + ': een LoadImage mag alleen de foto van deze taak lezen' };
     for (const naam of Object.keys(n.inputs)) {
       if (KNOPEN.save_naar_preview[n.class_type] && naam === 'filename_prefix') continue;   // Preview kent geen bestandsnaam
+      if (laadt && naam === 'image') { inputs[naam] = n.inputs[naam]; continue; }
+      if (laadt && naam === 'upload') continue;   // UI-veld van de knop, geen invoer
       const fv = veldToets(klasse, naam, n.inputs[naam], info);
       if (fv) return { fout: 'knoop ' + id + ': ' + fv };
       inputs[naam] = n.inputs[naam];
@@ -316,6 +351,9 @@ function maak(deps) {
         if (['proef', 'actief', 'uit'].indexOf(f.status) < 0) f.fout = 'onbekende status';
         if (f.motor === 'comfyui') f.api = JSON.parse(fs.readFileSync(path.join(FLOWS, n, 'flow.json'), 'utf8'));
         f.velden = f.velden.map(veldNorm).filter(Boolean);
+        const nBeeld = f.velden.filter(function (v) { return v.soort === 'beeld'; }).length;   // wv2482
+        if (nBeeld > 1) f.fout = 'hooguit één foto per flow';
+        else if (nBeeld && f.motor !== 'comfyui') f.fout = 'een foto als invoer kan alleen bij ComfyUI';
         if (f.motor === 'elevenlabs') {
           // wv782: betaald. Tarieven en modellen uit de pod (ELEVEN), nooit uit flow.yaml: een flow kan zichzelf niet goedkoper maken.
           f.betaald = true; f.aanbieder = 'elevenlabs'; f.uitvoer = 'geluid';
@@ -343,12 +381,23 @@ function maak(deps) {
     if (!/^[A-Za-z0-9_:.\-]{1,80}$/.test(naam)) return null;
     let soort = String(v.soort || v.type || 'tekst');
     soort = { text: 'tekst', textarea: 'tekstvak', number: 'getal', select: 'keuze', batch: 'aantal', boolean: 'schakel' }[soort] || soort;
-    if (['tekst', 'tekstvak', 'getal', 'keuze', 'aantal', 'schakel', 'seed'].indexOf(soort) < 0) return null;
+    if (['tekst', 'tekstvak', 'getal', 'keuze', 'aantal', 'schakel', 'seed', 'beeld'].indexOf(soort) < 0) return null;
     const o = { naam: naam, label: schoon(v.label || naam, 80), soort: soort, verplicht: v.verplicht === true || v.required === true,
       meer: v.meer === true, standaard: v.standaard !== undefined ? v.standaard : v.default };
     if (soort === 'keuze') {
       const opties = (Array.isArray(v.opties) ? v.opties : Array.isArray(v.options) ? v.options : []).map(function (x) {
-        return x && typeof x === 'object' ? { label: schoon(x.label, 60), waarde: x.waarde !== undefined ? x.waarde : x.value } : { label: schoon(x, 60), waarde: x };
+        const o = x && typeof x === 'object' ? { label: schoon(x.label, 60), waarde: x.waarde !== undefined ? x.waarde : x.value } : { label: schoon(x, 60), waarde: x };
+        // wv2482: een keuze mag per optie meer knoopwaarden tegelijk zetten (bv. gezichten uit/licht/sterk = sterkte + mengen); alleen
+        // gewone waarden, alleen paden van de vorm <knoop>.inputs.<veld> (de knopentoets ziet de ingevulde flow daarna nog)
+        if (x && typeof x === 'object' && x.zet && typeof x.zet === 'object' && !Array.isArray(x.zet)) {
+          const z = {};
+          Object.keys(x.zet).slice(0, 12).forEach(function (k) {
+            if (/^[A-Za-z0-9_:]{1,40}\.inputs\.[A-Za-z0-9_.]{1,80}$/.test(k) && ['string', 'number', 'boolean'].indexOf(typeof x.zet[k]) >= 0) z[k] = x.zet[k];
+          });
+          if (Object.keys(z).length) o.zet = z;
+        }
+        if (x && typeof x === 'object' && x.uitleg) o.uitleg = schoon(x.uitleg, 160);
+        return o;
       }).filter(function (x) { return ['string', 'number', 'boolean'].indexOf(typeof x.waarde) >= 0; }).slice(0, 40);
       if (!opties.length) return null;
       o.opties = opties;
@@ -356,6 +405,17 @@ function maak(deps) {
     if (soort === 'getal') { o.min = isFinite(Number(v.min)) ? Number(v.min) : null; o.max = isFinite(Number(v.max)) ? Number(v.max) : null; o.stap = Number(v.stap) || null; }
     if (soort === 'aantal') { o.min = 1; o.max = GRENS.aantal_max; if (o.standaard == null) o.standaard = 1; }
     if (soort === 'tekst' || soort === 'tekstvak') o.max = Math.min(GRENS.tekst_max, Number(v.max) || GRENS.tekst_max);
+    if (soort === 'beeld') {
+      // wv2482: grens in megapixel; de pod-grens (4 MP) is het plafond, een flow kan alleen lager. max_mp_per: { "<veld>=<waarde>": mp }
+      const mp = Number(v.max_mp);
+      o.max_mp = isFinite(mp) && mp > 0 ? Math.min(BEELD.max_mp_in, mp) : BEELD.max_mp_in;
+      o.max_mp_per = {};
+      if (v.max_mp_per && typeof v.max_mp_per === 'object') Object.keys(v.max_mp_per).slice(0, 12).forEach(function (k) {
+        const g = Number(v.max_mp_per[k]);
+        if (/^[A-Za-z0-9_:.\-]{1,80}=[A-Za-z0-9_.\-]{1,40}$/.test(k) && isFinite(g) && g > 0) o.max_mp_per[k] = Math.min(o.max_mp, g);
+      });
+      o.verplicht = true;
+    }
     if (v.pad !== undefined) o.pad = (Array.isArray(v.pad) ? v.pad : [v.pad]).map(String).filter(function (p) { return /^[A-Za-z0-9_:]{1,40}\.inputs\.[A-Za-z0-9_.]{1,80}$/.test(p); });
     if (v.associateRole === 'prompt' || v.rol === 'prompt') o.rol = 'prompt';
     return o;
@@ -470,7 +530,11 @@ function maak(deps) {
       vers_per_keer: f.status === 'proef' || f.betaald === true, bandje: f.bandje === true, stem: f.stem || null,
       betaald: f.betaald === true, aanbieder: f.aanbieder || null,
       prijs_tabel: f.betaald ? Object.keys(ELEVEN.modellen).reduce(function (o, k) { o[k] = ELEVEN.modellen[k].eur_per_1000; return o; }, {}) : null,
-      velden: (f.velden || []).map(function (v) { const o = Object.assign({}, v); delete o.pad; return o; }) };
+      velden: (f.velden || []).map(function (v) {
+        const o = Object.assign({}, v); delete o.pad;
+        if (o.opties) o.opties = o.opties.map(function (x) { const y = Object.assign({}, x); delete y.zet; return y; });   // wv2482
+        return o;
+      }) };
   }
   async function catalogus(vers) {
     let sleutelFout = false;
@@ -509,6 +573,7 @@ function maak(deps) {
       reden: t.reden || null, gemaakt: t.gemaakt, start: t.start || null, eind: t.eind || null, duur_s: t.duur_s || null, velden: t.velden,
       bestanden: t.bestanden || [], plek_in_rij: t.status === 'wacht' ? st.rij.indexOf(t.id) + 1 : null, meting: t.meting || null,
       bron: t.bron || null, noot: t.noot || null,
+      beeld: t.beeld ? { breed: t.beeld.breed, hoog: t.beeld.hoog, verkleind: t.beeld.verkleind === true } : null,   // wv2482
       betaald: t.betaald === true, kosten_eur: t.betaald ? (vb[t.id] ? (vb[t.id].soort === 'vrijgegeven' ? 0 : vb[t.id].eur) : t.prijs_vooraf || 0) : 0,
       kosten_staat: t.betaald && vb[t.id] ? vb[t.id].soort : null, credits: t.credits == null ? null : t.credits };
   }
@@ -539,6 +604,11 @@ function maak(deps) {
         if (!Number.isSafeInteger(w) || w < 0) return { fout: 'seed moet een geheel getal ≥ 0 zijn' };
       } else if (v.soort === 'schakel') {
         w = w === true || w === 'true' || w === 1;
+      } else if (v.soort === 'beeld') {
+        // wv2482: alleen het nummer van een klaarstaande upload van dít apparaat; naam en inhoud komen van de pod
+        const n = w && typeof w === 'object' ? Number(w.n) : NaN;
+        if (!Number.isInteger(n) || n < 1 || n > 10) return { fout: v.label + ': kies eerst een foto' };
+        w = { n: n };
       }
       uit[v.naam] = w;
     }
@@ -557,6 +627,72 @@ function maak(deps) {
     return o;
   }
   function bronLabel(b) { return b.praktijk + ' · ' + b.bandje + ' · v' + b.versie + (b.proef ? ' · proefzin' : ''); }
+
+  // ── foto als invoer (wv2482; zie BEELD bovenaan) ──
+  // python3 -I studio-beeld.py <stand> …: één JSON-regel terug; exit 2 = geweigerd met reden. Nooit de bestandsnaam doorgeven.
+  const PY = deps.python || { bin: 'python3', script: path.join(__dirname, 'studio-beeld.py') };
+  function beeldPy(args) {
+    return new Promise(function (klaar) {
+      let k, uit = '', af = false;
+      const eind = function (r) { if (af) return; af = true; clearTimeout(tm); klaar(r); };
+      try { k = spawn(PY.bin, ['-I', PY.script].concat(args), { env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'ignore'] }); }
+      catch (e) { return klaar({ ok: false, reden: 'de beeldcontrole start niet' }); }
+      const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} eind({ ok: false, reden: 'de beeldcontrole duurde te lang' }); }, BEELD.py_ms);
+      k.stdout.on('data', function (b) { if (uit.length < 4000) uit += b; });
+      k.on('error', function () { eind({ ok: false, reden: 'de beeldcontrole start niet' }); });
+      k.on('close', function (code) {
+        let j = null;
+        try { j = JSON.parse(uit.trim().split('\n').pop()); } catch (e) { j = null; }
+        if (!j || typeof j !== 'object') return eind({ ok: false, reden: 'de beeldcontrole gaf geen antwoord (code ' + code + ')' });
+        if (code !== 0 || j.ok !== true) return eind({ ok: false, reden: schoon(j.reden || 'foto geweigerd', 120) });
+        eind(j);
+      });
+    });
+  }
+  // Grens voor deze taak: max_mp van het veld, of lager via max_mp_per ("schaal=4": 1).
+  function beeldGrens(v, waarden) {
+    let g = v.max_mp;
+    Object.keys(v.max_mp_per || {}).forEach(function (k) {
+      const i = k.indexOf('=');
+      if (String(waarden[k.slice(0, i)]) === k.slice(i + 1)) g = Math.min(g, v.max_mp_per[k]);
+    });
+    return g;
+  }
+  const mpTekst = function (b, h) { return String(Math.round(b * h / 1e5) / 10).replace('.', ',') + ' MP'; };
+  // Neemt de klaarstaande upload over, toetst en verkleint hem in een eigen tijdelijke map. Geeft { fout, status } of
+  // { map, beeld, noot, weg } — weg() verbruikt de upload pas als de taak echt in de rij staat (een 403 vers_nodig laat hem staan).
+  async function beeldKlaar(f, waarden, ctx, beurt) {
+    const v = f.velden.find(function (x) { return x.soort === 'beeld'; });
+    if (!v) return null;
+    if (typeof (ctx && ctx.neemUpload) !== 'function') return { status: 400, fout: 'foto\'s als invoer kunnen hier niet' };
+    const x = ctx.neemUpload(beurt, waarden[v.naam].n);
+    if (!x || !Buffer.isBuffer(x.bytes)) return { status: 409, fout: 'de foto is niet (meer) aangekomen; kies hem opnieuw' };
+    if (x.bytes.length > BEELD.max_bytes) return { status: 413, fout: 'foto groter dan 20 MB' };
+    const soort = beeldSoort(x.bytes);
+    if (!soort) return { status: 415, fout: 'alleen jpg, png of webp (HEIC: eerst omzetten of een schermafdruk maken)' };
+    const grens = beeldGrens(v, waarden);
+    const map = path.join(WERK, '_in-' + hex16());
+    const opruim = function () { try { fs.rmSync(map, { recursive: true, force: true }); } catch (e) {} };
+    try {
+      mkdir(map);
+      const bron = path.join(map, 'bron.' + soort);
+      fs.writeFileSync(bron, x.bytes, { mode: 0o600 });
+      const r = await beeldPy(['neem', bron, path.join(map, 'klein'), String(grens)]);
+      if (!r.ok) { opruim(); return { status: 400, fout: 'foto geweigerd: ' + r.reden }; }
+      const fmt = { JPEG: 'jpg', PNG: 'png', WEBP: 'webp' }[r.formaat];
+      if (fmt !== soort) { opruim(); return { status: 415, fout: 'foto geweigerd: de inhoud past niet bij het bestandstype' }; }
+      let invoer = bron, ext = soort, b = r.breed, h = r.hoog, noot = null;
+      if (r.verkleind) {
+        ext = r.ext === 'jpg' ? 'jpg' : 'png'; invoer = path.join(map, 'klein.' + ext); b = r.nieuw_breed; h = r.nieuw_hoog;
+        if (!fs.existsSync(invoer)) { opruim(); return { status: 500, fout: 'verkleinen van de foto lukte niet' }; }
+        fs.rmSync(bron, { force: true });
+        noot = 'foto verkleind van ' + mpTekst(r.breed, r.hoog) + ' naar ' + mpTekst(b, h) + ' (grens voor deze stand: ' + String(grens).replace('.', ',') + ' MP)';
+      }
+      fs.renameSync(invoer, path.join(map, 'invoer.' + ext));
+      return { map: map, beeld: { veld: v.naam, breed: b, hoog: h, ext: ext, verkleind: !!r.verkleind, grens_mp: grens }, noot: noot,
+        weg: function () { try { if (x.weg) x.weg(); } catch (e) { fout('studio-upload-weg', e); } }, opruim: opruim };
+    } catch (e) { opruim(); fout('studio-beeld', e); return { status: 500, fout: 'de foto kon niet klaargezet worden' }; }
+  }
 
   // ── POST /app/studio/maak ──
   // ctx: { versOk(): bool (synchroon), versVerbruik(): void, apparaat }
@@ -585,6 +721,20 @@ function maak(deps) {
       if (!tekst) return { status: 400, fout: 'de tekst is leeg' };
       prijs = prijsVooraf(tekst.length, w.waarden.model);
     }
+    // wv2482: foto overnemen en toetsen vóór het synchrone stuk (async: Pillow). Elke weigering hieronder ruimt de map weer op.
+    let bk = null;
+    if (f.velden.some(function (v) { return v.soort === 'beeld'; })) {
+      if (f.motor !== 'comfyui') return { status: 409, fout: 'een foto als invoer kan alleen bij ComfyUI' };
+      // eerst de goedkope vingerafdrukvraag (alleen kijken; verbruiken gebeurt in het synchrone stuk), dan pas Pillow
+      if (f.status === 'proef' && !ctx.versOk()) return { status: 403, fout: 'deze flow is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
+      bk = await beeldKlaar(f, w.waarden, ctx, beurt);
+      if (bk && bk.fout) return { status: bk.status, fout: bk.fout };
+    }
+    const r = maakSync(f, w, ctx, beurt, prijs, extra, bk);
+    if (bk) bk.opruim();   // na een geslaagde taak is de map al verplaatst (niets te doen); anders weg
+    return r;
+  }
+  function maakSync(f, w, ctx, beurt, prijs, extra, bk) {
     // vanaf hier synchroon tot de taak in de rij staat (twee tabbladen = niet twee keer dezelfde vingerafdruk)
     if (st.taken.find(function (t) { return t.beurt_id === beurt; })) return { status: 200, taak: taakUit(st.taken.find(function (t) { return t.beurt_id === beurt; })), al: true };
     if (vandaagN() >= GRENS.per_dag) return { status: 429, fout: 'vandaag al ' + GRENS.per_dag + ' taken gemaakt; morgen weer' };
@@ -605,6 +755,14 @@ function maak(deps) {
       procent: null, gemaakt: new Date(klok()).toISOString(), velden: w.waarden, bestanden: [], proef: f.status === 'proef', apparaat: ctx.apparaat || null };
     const bron = bronNorm(extra && extra.bron);
     if (bron) t.bron = bron;
+    if (bk) {
+      // wv2482: de getoetste foto naar de werkmap van deze taak; in velden en taken.json alleen '(foto)' en de afmetingen
+      try { mkdir(path.join(WERK, t.id)); fs.renameSync(bk.map, path.join(WERK, t.id, 'in')); }
+      catch (e) { fout('studio-beeld', e); return { status: 500, fout: 'de foto kon niet klaargezet worden' }; }
+      t.velden[bk.beeld.veld] = '(foto)';
+      t.beeld = bk.beeld;
+      if (bk.noot) t.noot = bk.noot;
+    }
     if (f.betaald) {
       // write-ahead: eerst reserveren, dan pas in de rij (lukt het schrijven niet, dan geen taak en dus geen aanroep)
       t.betaald = true; t.aanbieder = f.aanbieder; t.prijs_vooraf = prijs;
@@ -614,6 +772,7 @@ function maak(deps) {
     st.taken.push(t);
     st.rij.push(t.id);
     bewaarTaken();
+    if (bk) bk.weg();   // pas nu de upload verbruiken
     setImmediate(volgende);
     return { status: 200, taak: taakUit(t) };
   }
@@ -925,6 +1084,37 @@ function maak(deps) {
     const j = await r.json().catch(function () { return null; });
     return { ok: r.ok, status: r.status, j: j };
   }
+  // wv2482: foto onder de vaste naam (multipart zoals de ComfyUI-UI; overwrite) en terug naar 1×1. Antwoord moet precies die naam
+  // noemen: maakt ComfyUI toch een andere naam (overwrite genegeerd), dan die óók leegmaken en weigeren.
+  async function comfyUploadNaam(buf, naam) {
+    const fd = new FormData();
+    fd.append('image', new Blob([buf], { type: 'image/png' }), naam);
+    fd.append('type', 'input'); fd.append('subfolder', BEELD.map); fd.append('overwrite', 'true');
+    const r = await doeFetch(COMFY + '/upload/image', { method: 'POST', body: fd, signal: AbortSignal.timeout(60000) });
+    const j = await r.json().catch(function () { return null; });
+    return { ok: r.ok, status: r.status, j: j };
+  }
+  async function comfyUpload(buf) {
+    let r;
+    try { r = await comfyUploadNaam(buf, BEELD.naam); } catch (e) { return { fout: 'de foto kon niet naar ComfyUI: ' + foutTekst(e && e.message || e) }; }
+    if (r.status === 503) return { fout: 'ComfyUI staat uit; zet hem aan in de ComfyUI Launcher' };
+    if (!r.ok || !r.j) return { fout: 'ComfyUI nam de foto niet aan (HTTP ' + r.status + ')' };
+    if (r.j.name !== BEELD.naam || String(r.j.subfolder || '') !== BEELD.map) {
+      const ander = String(r.j.name || '');
+      if (/^[A-Za-z0-9_.\- ()]{1,120}$/.test(ander) && String(r.j.subfolder || '') === BEELD.map) { try { await comfyUploadNaam(LEEG_PNG, ander); } catch (e) {} }
+      return { fout: 'ComfyUI gaf de foto een andere naam; niets ingediend' };
+    }
+    return { ok: true };
+  }
+  async function comfyLeeg() {
+    try { const r = await comfyUploadNaam(LEEG_PNG, BEELD.naam); return r.ok && r.j && r.j.name === BEELD.naam; }
+    catch (e) { return false; }
+  }
+  const VUIL = path.join(DIR, 'comfy-invoer-vuil');
+  function zetVuil(aan) {
+    try { if (aan) { mkdir(DIR); fs.writeFileSync(VUIL, new Date(klok()).toISOString() + '\n', { mode: 0o600 }); } else fs.rmSync(VUIL, { force: true }); }
+    catch (e) { fout('studio-beeld-vlag', e); }
+  }
   async function objectInfo() {
     if (st.info.d && klok() - st.info.op < OBJECT_INFO_MS) return st.info.d;
     const r = await comfyGet('/object_info', 60000);
@@ -943,11 +1133,28 @@ function maak(deps) {
   }
   function vulIn(api, f, waarden) {
     const kopie = JSON.parse(JSON.stringify(api));
+    const zet = function (p, w, naam) {
+      const m = /^([^.]+)\.inputs\.(.+)$/.exec(p);
+      if (!m || !kopie[m[1]] || !kopie[m[1]].inputs) return 'veld ' + naam + ' wijst naar een knoop die er niet is';
+      kopie[m[1]].inputs[m[2]] = w;
+      return null;
+    };
     for (const v of f.velden) {
-      for (const p of v.pad || []) {
-        const m = /^([^.]+)\.inputs\.(.+)$/.exec(p);
-        if (!m || !kopie[m[1]] || !kopie[m[1]].inputs) return { fout: 'veld ' + v.naam + ' wijst naar een knoop die er niet is' };
-        kopie[m[1]].inputs[m[2]] = waarden[v.naam];
+      // wv2482: een fotoveld wijst altijd naar de image-invoer van een LoadImage en krijgt de vaste Studio-naam
+      if (v.soort === 'beeld') {
+        if (!(v.pad || []).length) return { fout: 'fotoveld ' + v.naam + ' heeft geen pad' };
+        for (const p of v.pad) {
+          const m = /^([^.]+)\.inputs\.image$/.exec(p);
+          if (!m || !kopie[m[1]] || KNOPEN.laad_beeld.indexOf(kopie[m[1]].class_type) < 0) return { fout: 'fotoveld ' + v.naam + ' moet naar een LoadImage wijzen' };
+          kopie[m[1]].inputs.image = BEELD.map + '/' + BEELD.naam;
+        }
+        continue;
+      }
+      for (const p of v.pad || []) { const e = zet(p, waarden[v.naam], v.naam); if (e) return { fout: e }; }
+      // wv2482: keuze met per optie een vaste set knoopwaarden
+      if (v.soort === 'keuze') {
+        const o = (v.opties || []).find(function (x) { return String(x.waarde) === String(waarden[v.naam]); });
+        for (const p of Object.keys((o && o.zet) || {})) { const e = zet(p, o.zet[p], v.naam); if (e) return { fout: e }; }
       }
     }
     return { api: kopie };
@@ -979,6 +1186,25 @@ function maak(deps) {
     }
     const clientId = 'socev-studio-' + t.id;
     t.meting = { vram_vrij_voor_mib: voor.vram_vrij_mib, ram_vrij_voor_mib: voor.ram_vrij_mib };
+    if (!t.beeld) return comfyDraai(t, f, out, ctl, toets, clientId);
+    // wv2482: de foto pas nu naar ComfyUI (de rij is leeg), en daarna ALTIJD terug naar 1×1 — ook bij fout, stop of een uitzondering
+    const invoer = path.join(WERK, t.id, 'in', 'invoer.' + t.beeld.ext);
+    let buf;
+    try { buf = fs.readFileSync(invoer); } catch (e) { return { fout: 'de foto van deze taak is weg (herstart?)' }; }
+    try { fs.copyFileSync(invoer, path.join(out, 'voor.' + t.beeld.ext)); } catch (e) { return { fout: 'de foto kon niet klaargezet worden' }; }
+    t.fase = 'foto naar ComfyUI';
+    zetVuil(true);
+    try {
+      const u = await comfyUpload(buf);
+      if (!u.ok) return { fout: u.fout };
+      return await comfyDraai(t, f, out, ctl, toets, clientId);
+    } finally {
+      const l = await comfyLeeg();
+      if (l) zetVuil(false);
+      else fout('studio-beeld-leeg', new Error('1x1 overschrijven lukte niet; vrijRonde probeert het opnieuw'));
+    }
+  }
+  async function comfyDraai(t, f, out, ctl, toets, clientId) {
     t.fase = 'indienen bij ComfyUI';
     let pid = null, klaarWs = false, wsFout = null, ws = null;
     try {
@@ -1020,7 +1246,7 @@ function maak(deps) {
       }
       t.gpu_s = Math.round((klok() - t.gpu_start) / 1000);
       // uitvoer via /view (type temp: Preview); niets blijft in ComfyUI's uitvoermap
-      let i = 0;
+      let i = 0, uitFout = null;
       for (const nid of Object.keys(hist.outputs)) {
         const o = hist.outputs[nid];
         const lijst = [].concat(o.images || [], o.audio || []);
@@ -1029,14 +1255,28 @@ function maak(deps) {
           if (!b || typeof b.filename !== 'string' || !/^[A-Za-z0-9_.\- ()]{1,200}$/.test(b.filename)) continue;
           const q = 'filename=' + encodeURIComponent(b.filename) + '&subfolder=' + encodeURIComponent(String(b.subfolder || '')) + '&type=' + encodeURIComponent(String(b.type || 'temp'));
           const rr = await comfyGet('/view?' + q, 60000);
-          const buf = await leesMax(rr, GRENS.bestand_max);
+          const buf = await leesMax(rr, t.beeld ? BEELD.uit_lees_max : GRENS.bestand_max);
           if (!buf) continue;
+          const ext = ((/\.([a-z0-9]{2,5})$/i.exec(b.filename) || [])[1] || 'png').toLowerCase();
+          if (t.beeld && !o.audio) {
+            // wv2482: resultaat toetsen (≤ 16 MP, leesbaar) en boven 10 MB als JPEG 92; naam na-<n> naast voor.<ext>
+            const soort = beeldSoort(buf);
+            if (!soort) { uitFout = 'ComfyUI gaf iets terug dat geen jpg, png of webp is'; continue; }
+            const tmp = path.join(out, '.uit-' + (i + 1) + '.' + soort), jpg = path.join(out, '.uit-' + (i + 1) + '.jpg');
+            fs.writeFileSync(tmp, buf, { mode: 0o600 });
+            const r = await beeldPy(['uit', tmp, jpg, String(BEELD.max_mp_uit), String(BEELD.jpg_boven)]);
+            if (!r.ok) { fs.rmSync(tmp, { force: true }); fs.rmSync(jpg, { force: true }); uitFout = 'resultaat geweigerd: ' + r.reden; continue; }
+            i++;
+            if (r.omgezet) { fs.rmSync(tmp, { force: true }); fs.renameSync(jpg, path.join(out, 'na-' + i + '.jpg')); }
+            else fs.renameSync(tmp, path.join(out, 'na-' + i + '.' + soort));
+            t.meting.uit_breed = r.breed; t.meting.uit_hoog = r.hoog;
+            continue;
+          }
           i++;
-          const ext = (/\.([a-z0-9]{2,5})$/i.exec(b.filename) || [])[1] || 'png';
-          fs.writeFileSync(path.join(out, (o.audio ? 'geluid-' : 'beeld-') + i + '.' + ext.toLowerCase()), buf, { mode: 0o600 });
+          fs.writeFileSync(path.join(out, (o.audio ? 'geluid-' : 'beeld-') + i + '.' + ext), buf, { mode: 0o600 });
         }
       }
-      if (!i) return { fout: 'ComfyUI gaf geen beeld of geluid terug' };
+      if (!i) return { fout: uitFout || 'ComfyUI gaf geen beeld of geluid terug' };
       try { const na = await comfyStats(); t.meting.vram_vrij_na_mib = na.vram_vrij_mib; t.meting.ram_vrij_na_mib = na.ram_vrij_mib; } catch (e) {}
       return { ok: true };
     } finally { sluit(); }
@@ -1052,6 +1292,8 @@ function maak(deps) {
   }
   // GPU teruggeven (§ 5.3 stap 8): 10 min na de laatste Studio-taak in ComfyUI, alleen bij een lege rij, één keer.
   async function vrijRonde() {
+    // wv2482: staat er nog een foto in ComfyUI (1×1 mislukt of pod herstart midden in een taak), dan eerst die leegmaken
+    if (!st.bezig && fs.existsSync(VUIL)) { if (await comfyLeeg()) { zetVuil(false); log('studio comfy-invoer alsnog leeggemaakt'); } }
     if (st.comfyFreeGedaan || st.bezig || klok() - st.comfyLaatst < COMFY_FREE_NA_MS) return;
     try {
       const q = await comfyRij();
@@ -1135,9 +1377,10 @@ function maak(deps) {
     teller: stand,
     health: function () { return { taken_vandaag: vandaagN(), bezig: !!st.bezig, in_rij: st.rij.length }; },
     toetsFlow: toetsFlow,
+    _vrijRonde: vrijRonde,   // wv2482: alleen de toets (anders elke minuut via de timer)
     stopTimers: function () { clearInterval(st.timer); },
     _st: st,
   };
 }
 
-module.exports = { maak: maak, flowToets: flowToets, knoopToets: knoopToets, KNOPEN: KNOPEN, GRENS: GRENS };
+module.exports = { maak: maak, flowToets: flowToets, knoopToets: knoopToets, KNOPEN: KNOPEN, GRENS: GRENS, BEELD: BEELD };
