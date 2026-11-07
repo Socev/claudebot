@@ -149,7 +149,7 @@ rpc.listen(0, '127.0.0.1', async function () {
     toets('B /run met onbekende sessie: smal (fout valt naar minder rechten)', sc && lekVan(sc).length === 0, sc ? lekVan(sc).join(',') : 'geen spawn');
 
     // C. wv1030: personeels-wachter krijgt geen beheersleutel meer (ook geen SUPABASE_MCP_TOKEN), wel een beurtpas in zijn jobmap.
-    //    Alleen design-/ui-manager houden SOCEV_ENV_EXTRA (3f van mk-scripts/wv1030/ontwerp.md).
+    //    SOCEV_ENV_EXTRA is sinds wv2671 leeg (Design/UI Manager en MrLean draaien als pod-ronde, test/pod-ronde.sh).
     const c0 = await run('hd PASPROEF', 'personeels-wachter');
     const sd = await wachtOp('hd');
     toets('C personeels-wachter: geen enkele beheersleutel (ook geen SUPABASE_MCP_TOKEN) en geen pas in de omgeving', sd && lekVan(sd).length === 0 && !sd.env.some((k) => /PAS/.test(k)), sd ? lekVan(sd).join(',') : 'geen spawn');

@@ -2595,6 +2595,14 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
         return;
       }
       managerCwd = poort.werkmap.pad;
+      // wv2671: Design/UI Manager en MrLean zonder taalmodel (zie MANAGER_POD_RONDE)
+      if (Object.hasOwn(MANAGER_POD_RONDE, String(chatId))) {
+        j.status = 'running'; j.started = Date.now(); j.runtime = 'pod-ronde'; j.omgeving = 'pod-ronde';
+        const r = await podRondeDraai(MANAGER_POD_RONDE[String(chatId)], prompt);
+        j.status = 'done'; j.done_at = Date.now(); j.result = r;
+        jobEindLog(jobId, j, ws);
+        return;
+      }
     }
     // Gereedschap 'lezen': geen sessiegeheugen en geen lessenblok (machinale klus); cwd = de eigen jobmap.
     const sKey = lezen ? '' : sessieSleutel(key, keuze.runtime);
@@ -22110,23 +22118,39 @@ const SOCEV_ENV_MAG = AUTO_AGENT_ENV_MAG.concat([
   'REPO_DIR', 'RELEASE_SHA', 'IMAGE_SHA', 'CODEX_HOME', 'PORT', 'GIT_USER_NAME', 'GIT_USER_EMAIL'   // paden en namen, geen sleutels
 ]);
 const SOCEV_ENV_VOORVOEGSELS = ['SUPABASE_RPC_'];   // smalle RPC-sleutels (één functie per sleutel)
-// Per sessie extra. Restpunt (vervolgrij wv424): de Supabase-MCP is een beheertoken. Sinds wv1030 alleen nog de twee managers (3f van
-// mk-scripts/wv1030/ontwerp.md); personeels-wachter, vault-concierge en de Cijfer-Meester werken met een beurtpas (SESSIE_ROUTES).
+// Per sessie extra. Restpunt (vervolgrij wv424): de Supabase-MCP is een beheertoken. Sinds wv1030 werken personeels-wachter,
+// vault-concierge en de Cijfer-Meester met een beurtpas (SESSIE_ROUTES); sinds wv2671 draaien Design Manager, UI Manager en MrLean
+// hun ronde zonder taalmodel (MANAGER_POD_RONDE hieronder). Leeg = geen smalle sessie met beheersleutels; /health loper.nooit leeg.
+// Terug (wv2671): de drie regels hieronder terug ('design-manager'/'ui-manager'/'mrlean': ['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE']),
+// MANAGER_POD_RONDE leeg, én de skills en werkvoorraad.py terug (mk-scripts/wv2671/terug.md).
 const SOCEV_ENV_EXTRA = {
-  // wv845 Design Manager (za 10:00, Sonnet): smal, niet in MK_SESSIES (Fable wv845 #6). wachter-state.py leest alleen
-  // SUPABASE_MCP_TOKEN (structuur_state), werkvoorraad.py alleen SUPABASE_URL (al in SOCEV_ENV_MAG) + SUPABASE_SERVICE_ROLE
-  // (rij voor pure tokenvervangingen, Voor jou-kaart). Geen n8n-, Cloudflare-, Telegram- of pod-sleutel nodig: hij leest repo's
-  // en bouwt statisch in /tmp.
-  'design-manager': ['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE'],
-  // wv896 UI Manager (vr 10:00, Sonnet): zelfde smalle omgeving als design-manager. Leest api.log, het app-auditlog en het app-log
-  // (alleen tellingen en hashes de deur uit) en bouwt de app statisch in /tmp; schrijft structuur_state (MCP-token) en hooguit een
-  // werkvoorraadrij of Voor jou-kaart (service role via werkvoorraad.py).
-  'ui-manager': ['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE'],
-  // wv2430 MrLean (wo 10:00, Sonnet): zelfde smalle omgeving. meet.py leest met SUPABASE_MCP_TOKEN alleen vaste SELECTs (werkvoorraad,
-  // voor_jou, hartslag) en schrijft structuur_state via wachter-state.py; kaarten via werkvoorraad.py (service role). Review gpt-5.5
-  // 4-11 MOET 4: service role in een taalmodelsessie is hetzelfde als bij Design/UI (wv845/wv896), geen nieuwe grens.
-  'mrlean': ['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE']
 };
+// ── wv2671: managerronde zonder taalmodel (ontwerp + Codex-review: /opt/data/mk-scripts/wv2671/ontwerp.md, optie C) ──
+// WAAROM. Design Manager, UI Manager en MrLean draaiden als taalmodelsessie met de Supabase-PAT en de service role, dus als claude
+// (1001, leest /proc/<server.js>/environ) terwijl ze tekst lezen die socev schrijft (box, Open vragen). Gemeten 27-10 t/m 7-11: het
+// model deed vooral wat de scripts al bepalen; de duiding (naslag, kaart) doet de afwerkrij (wv1345, machinekamer) daarna nog eens.
+// HOE. Een /run op zo'n sessie (n8n-weekronde of op afroep via managers.js; eerst de managers-poort) start geen claude maar
+// mk-scripts/managers-pod/pod-ronde.py als kind van de pod, met alleen de namen van POD_RONDE_ENV. De laatste regel stdout is de
+// slotregel (zelfde formaat; n8n en managers.js ongewijzigd). DATUM uit de prompt; '- OP AFROEP]' in de kop = --afroep.
+// DEKT NIET: het script draait mk-scripts-code met PAT en service role (mk-scripts is 0700 claude; spoor in de managers-poort, het
+// script ook onder spoor); de afwerkrij leest socev-tekst met de volle machinekamer-omgeving (zoals elke machinekamer-beurt).
+const MANAGER_POD_RONDE = { 'design-manager': 'design', 'ui-manager': 'ui', 'mrlean': 'mrlean' };
+const POD_RONDE_SCRIPT = (!SERVER_ECHT && process.env.POD_RONDE_SCRIPT) || '/opt/data/mk-scripts/managers-pod/pod-ronde.py';
+const POD_RONDE_ENV = ['PATH', 'HOME', 'TZ', 'LANG', 'PLAYWRIGHT_BROWSERS_PATH', 'RELEASE_SHA', 'PORT', 'SUPABASE_URL', 'SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE'];
+const POD_RONDE_MAX_MS = 25 * 60 * 1000;
+function podRondeArgs(manager, prompt) {
+  const m = /DATUM = (\d{4}-\d{2}-\d{2})\b/.exec(String(prompt || ''));
+  const datum = m ? m[1] : new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam' }).format(new Date());
+  const afroep = /^\s*\[MACHINEKAMER - [^\]\n]{1,60} - OP AFROEP\]/.test(String(prompt || ''));
+  return [POD_RONDE_SCRIPT, '--manager', manager, '--datum', datum].concat(afroep ? ['--afroep'] : []);
+}
+async function podRondeDraai(manager, prompt) {
+  const env = {};
+  POD_RONDE_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
+  const r = await smalKind('python3', podRondeArgs(manager, prompt), '', POD_RONDE_MAX_MS, env);
+  const uit = String(r.stdout || '').trim();
+  return { ok: r.code === 0, exit_code: r.code, output: uit.slice(-6000), error: r.code === 0 ? undefined : 'pod-ronde exit ' + r.code + (r.signaal ? ' (' + r.signaal + ')' : '') + ': ' + String(r.stderr || '').trim().slice(-300), files: [], runtime: 'pod-ronde' };
+}
 // ── wv1030: beurtpas — de Supabase-PAT weg bij vier smalle sessies (ontwerp + Fable vooraf: /opt/data/mk-scripts/wv1030/ontwerp.md) ──
 // WAAROM. personeels-wachter, vault-concierge en de Cijfer-Meester (app en bot) hadden de Supabase-PAT (SQL als postgres) in hun
 // omgeving en draaiden daarom nooit via de loper, dus als 1001 (die /proc/<server.js>/environ kan lezen). Ze lezen data die socev kan

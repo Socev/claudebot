@@ -248,6 +248,9 @@ function config(V, D) {
   const wv = path.join(D, 'mk-scripts', 'werkvoorraad.py');
   // wv900: werkvoorraad.py, ciso-dag.mjs, datakaart.js en de datamanager-scripts laden mk-scripts/veilig (vault zonder symlinks)
   const vv = path.join(D, 'mk-scripts', 'veilig');
+  // wv2671: Design/UI Manager en MrLean draaien hun ronde als pod-script (geen taalmodel); dat script staat onder ACL + spoor, zoals
+  // hun andere mk-scripts (niet onder slot: dan zou elke uitrol van deze config eerst een herzegel vragen)
+  const pr = path.join(D, 'mk-scripts', 'managers-pod', 'pod-ronde.py');
   return {
     ciso: { slot: [path.join(S, 'ciso'), wachter, path.join(S, 'health-pod', 'hp.py')],
       code: [path.join(D, 'mk-scripts', 'mk-curl'), path.join(D, 'socev-site', 'secretpoort.js'), path.join(D, 'bin', 'health-import.py'), vv,
@@ -256,12 +259,12 @@ function config(V, D) {
         wv] },   // wv1366: de CISO zet sinds de afwerkronde (26-10) zijn afwerkrij met werkvoorraad.py
     'data-manager': { slot: [path.join(S, 'data-manager'), wachter, path.join(S, 'breed-zoeken', 'woordenlijst.py')],
       code: [path.join(D, 'mk-scripts', 'datamanager'), wv, vv] },
-    'design-manager': { slot: [path.join(S, 'design-manager'), wachter], code: [path.join(D, 'mk-scripts', 'design-manager'), wv, vv] },
+    'design-manager': { slot: [path.join(S, 'design-manager'), wachter], code: [path.join(D, 'mk-scripts', 'design-manager'), wv, vv, pr, path.join(D, 'socev-site', 'secretpoort.js')] },
     'ui-manager': { slot: [path.join(S, 'ui-manager'), wachter],
       code: [path.join(D, 'mk-scripts', 'ui-manager'), wv, path.join(D, 'socev-site', 'secretpoort.js'), vv,
-        path.join(D, 'mk-scripts', 'design-manager', 'nep', 'maak-socev-app.cjs')] },
+        path.join(D, 'mk-scripts', 'design-manager', 'nep', 'maak-socev-app.cjs'), pr] },
     // wv2430 MrLean: meet.py leest werkvoorraad, voor_jou, hartslag (SELECT), vragen.json/audit.jsonl (tellingen) en vaultpagina's
-    mrlean: { slot: [path.join(S, 'mrlean'), wachter], code: [path.join(D, 'mk-scripts', 'mrlean'), wv, vv, path.join(D, 'socev-site', 'secretpoort.js')] }
+    mrlean: { slot: [path.join(S, 'mrlean'), wachter], code: [path.join(D, 'mk-scripts', 'mrlean'), wv, vv, path.join(D, 'socev-site', 'secretpoort.js'), pr] }
   };
 }
 

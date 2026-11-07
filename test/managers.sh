@@ -238,8 +238,9 @@ const wacht = () => new Promise((r) => setImmediate(r));
     toets('8b wv1722: scriptmanager-zin gaat ook door kort()', /r && r\.zin \? \[kort\(r\.zin, 300\)\]/.test(fs.readFileSync('managers.js', 'utf8')));
     toets('8b wv1722: prompt noemt elk hooguit 300 tekens', /drie korte regels in gewone taal voor David, elk hooguit 300 tekens/.test(p));
     const s2 = fs.readFileSync('server.js', 'utf8');
-    toets('8b UI: sessie ui-manager smal met dezelfde sleutels als design-manager, niet in MK_SESSIES',
-      /'ui-manager': \['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE'\]/.test(s2) && !/const MK_SESSIES = new Set\(\[[^\]]*'ui-manager'/.test(s2));
+    // wv2671: Design/UI Manager en MrLean draaien als pod-ronde (geen taalmodel, geen beheersleutels in een sessie)
+    toets('8b UI: sessie ui-manager niet in SOCEV_ENV_EXTRA en niet in MK_SESSIES, wel in MANAGER_POD_RONDE (wv2671)',
+      /const SOCEV_ENV_EXTRA = \{\n\};/.test(s2) && !/const MK_SESSIES = new Set\(\[[^\]]*'ui-manager'/.test(s2) && /const MANAGER_POD_RONDE = \{ 'design-manager': 'design', 'ui-manager': 'ui', 'mrlean': 'mrlean' \};/.test(s2));
     toets('8b UI: lessen uit de ui-manager-sessie in domein machine (niet pa)', /\n  'ui-manager': 'machine',/.test(s2));
     toets('8b api.log: LOG_GENERATIES (standaard 10) en doorschuiven .i → .i+1 vóór log → .1',
       /const LOG_GENERATIES = Math\.max\(1, Math\.min\(20, parseInt\(process\.env\.LOG_GENERATIES \|\| '10', 10\) \|\| 10\)\);/.test(s2)
