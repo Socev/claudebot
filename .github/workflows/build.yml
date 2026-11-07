@@ -112,6 +112,18 @@ jobs:
           if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' '*.sh' | grep -vE '^(test/|paypal-zakelijk-lezer\.js$)' | xargs grep -nE "api(-m)?(\.sandbox)?\.paypal\.com|/v[12]/(oauth2|reporting|payments|checkout|billing|vault)/" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een ander bestand dan paypal-zakelijk-lezer.js noemt de PayPal-API"; exit 1; fi
           echo "paypal-zakelijk-lezer.js: alleen token + transactielijst; facturen-paypal.js: lokaal."
 
+      # tibber-data.js (wv2625): Tibber Data API alleen lezen. Eén fetch, altijd achter verzoekToets, redirects uit; POST alleen op het
+      # tokenendpoint; geen eigen netwerk- of procesmodule; geen ander bestand (tests uitgezonderd) roept data-api.tibber.com aan.
+      - name: tibber-data.js mag alleen lezen
+        if: ${{ !cancelled() }}
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' tibber-data.js)
+          if [ "$(echo "$C" | grep -cE "\bfetch\s*\(")" != "1" ] || ! echo "$C" | grep -qE "const doel = verzoekToets\(methode, url\);" || ! echo "$C" | grep -qE "redirect: 'error'"; then echo "::error::fetch buiten roep(), zonder verzoekToets of met redirects"; exit 1; fi
+          if echo "$C" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|import\(|process\.binding"; then echo "::error::tibber-data.js laadt een netwerk- of procesmodule"; exit 1; fi
+          if echo "$C" | grep -nE "roep\('(PUT|PATCH|DELETE)'"; then echo "::error::tibber-data.js schrijft naar Tibber"; exit 1; fi
+          if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' | grep -vE '^(test/|tibber-data\.js$)' | xargs grep -nE "data-api\.tibber\.com" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een ander bestand dan tibber-data.js roept de Tibber Data API aan"; exit 1; fi
+          echo "tibber-data.js: alleen lezen."
+
       # pot-afschrift.js en mt940-lezer.js (wv787): de afschriftmaker van de POT-rekening is puur (invoer erin, MT940 + PDF eruit). Geen
       # bestand-, netwerk- of procesmodule en geen fetch: bestanden schrijft bank-lezer.js, versturen doet niemand (een concept maakt server.js).
       - name: pot-afschrift.js en mt940-lezer.js moeten puur blijven
@@ -285,6 +297,7 @@ jobs:
           t test/bank-lezer.sh
           t test/bankluis-poort.sh
           t test/bank-ronde.sh
+          t test/tibber-data.sh   # wv2625: Tibber Data API — witte lijst, scopes exact, state eenmalig, rotatie vóór gebruik, noodkopie, slot, veldfilter, log zonder code/state
           # wv1225: de drie bankluis-toetsen ook op vaste momenten (toets én elk bank-lezer.js-kind op dezelfde klok): 00:30 NL met de UTC-datum
           # nog op gisteren, 1-1 00:30 NL (jaarwissel), na de zomertijdwissel, en op dag 1–9 van een maand
           for nu in 2026-12-15T23:30:00Z 2026-12-31T23:30:00Z 2027-04-10T22:30:00Z 2026-11-03T10:00:00Z; do

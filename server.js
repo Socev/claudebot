@@ -3831,6 +3831,7 @@ function handleRequest(req, res) {
       bankluis: fs.existsSync(BANK_SCRIPT),
       bunqluis: fs.existsSync(path.join(__dirname, 'bunq-lezer.js')) && fs.existsSync(path.join(BANK_DIR, 'bunq', 'staat.json')),   // wv683
       bankarchief: fs.existsSync(path.join(__dirname, 'bank-archief.js')),   // wv687: transactiedatabase in deze release
+      tibber_data: tibberInfo(),   // wv2625: Tibber Data API (module in de release?, laatste ronde, noodkopie; geen tokens)
       bankarchief_fout: bankArchiefFoutLaatst ? bankArchiefFoutLaatst.tijd : null,   // wv687: laatste schrijffout (tekst in api.log en de box)
       bank_verrijk_ai: bankVerrijkStand(true),   // wv740: stand van de AI-indeling (alleen aantallen en tijden); peilen hoeft niet meer via /smal/bank
       studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
@@ -21374,6 +21375,7 @@ const server = http.createServer(function (req, res) {
     if (openaiIsPad(req)) return openaiRoute(req, res);   // wv2055: OpenAI-hulp (intern, API_SECRET)
     if (berichtIsPad(req)) return berichtRoute(req, res);   // wv263: bericht aan David (intern, API_SECRET)
     if (bankIsPad(req)) return bankTerug(req, res);   // wv680: terugkeer van de bank na koppelen (bank.socev.dev)
+    if (tibberIsPad(req)) return tibberTerug(req, res);   // wv2625: terugkeer van Tibber na toestemming (bank.socev.dev)
     handleRequest(req, res);
   } catch (e) {
     logError('route', e);
@@ -22050,7 +22052,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30, 'health-opgaven': 20, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, 'bandjes/voorstel': 30, 'health-opgaven': 20, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata']);   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -22262,6 +22264,7 @@ async function smalActie(actie, d, wie) {
     return { status: 200, j: { ok: r.code === 0, code: r.code, stdout: r.stdout, stderr: r.stderr } };
   }
   if (actie === 'bank') return bankSmal(d);   // wv680: alleen-lezen bankluis (zie bankSmal)
+  if (actie === 'tibber') return tibberSmal(d, wie);   // wv2625: Tibber Data API, alleen API_SECRET (zie tibberSmal)
   if (actie === 'health-opgaven') return healthOpgaven();   // wv887: de body doet niet mee, het commando ligt vast
   // wv743: voorstel van Socev in het bandjesregister (skill bandjes); de pod schrijft, de skill nooit zelf (Fable #5)
   // wv820: kaart van de Verkenner (research-scout) in de Harvester; de pod controleert en schrijft (Fable wv820 #8)
@@ -23070,6 +23073,7 @@ function bankRondeStart() {
     .finally(function () {
       bankRondeLaatste.eind = new Date().toISOString(); bankRondeBezig = false;
       if (!bankVerrijkBezig) bankVerrijkStart(5);   // wv687: nieuwe posten na de ronde indelen (hooguit 5 × 60 groepen)
+      try { tibberNaBankRonde(); } catch (e) { logError('tibber-ronde', e); }   // wv2625: Tibber-laadhistorie, los, alleen de ochtendronde
     });
   return { status: 202, j: { ok: true, gestart: true, begin: begin } };
 }
@@ -23849,6 +23853,182 @@ async function potDatahubRonde(o) {
   } finally { potDhBezig = false; }
 }
 // ── einde bankluis ──
+// ── wv2625: Tibber Data API (alleen lezen, laadhistorie per auto) ────────────────────────────────────────────────────
+// WAAROM. David wil zien wanneer de twee auto's laden en hoe dat goedkoper kan (wv2583/wv2584, 6-11-2026); alleen de Tibber Data API
+// (OAuth2) toont de historie per apparaat. Bouwplan: vault 01_Ontwikkeling/Tibber Data API - laadhistorie per auto (bouwplan 7-11-2026).md.
+// HOE. tibber-data.js doet het netwerk (kindproces, alleen GET op data-api.tibber.com + POST op het tokenendpoint, geheimen via stdin) en
+// regisseert de ronde (slot, noodkopie, eerst duurzaam opslaan, dan lezen). Hier alleen: de kluis (Management-API, zelfde route als
+// bankSleutels), de terugkeer GET /tibber/terug op bank.socev.dev, POST /smal/tibber {secret: API_SECRET, opdracht: link|ronde|apparaten|stand}
+// en de dagelijkse ronde na de ochtend-bankronde (los, raakt de bank-ronde niet). De querystring van /tibber/terug (code, state) komt
+// nooit in een log: reqLog logt reqPath, en hier alleen soort en reden. Kluisregels: tibber_data_client_id, tibber_data_client_secret
+// (David) en tibber_data_refresh (de pod schrijft hem zelf: aanmaken bij de eerste toestemming, daarna bijwerken bij elke rotatie).
+const TIBBER_DIR = typeof serverPad === 'function' ? serverPad('tibber_dir', process.env.TIBBER_DIR, '/opt/data/tibber', serverProefDeel('tibber')) : (process.env.TIBBER_DIR || '/opt/data/tibber');   // proef: wegwerpmap
+const TIBBER_SCRIPT = process.env.TIBBER_SCRIPT || path.join(__dirname, 'tibber-data.js');
+const TIBBER_TERUG_PER_UUR = 30;
+const tibberTerugTijden = [];
+let tibberData = null;
+try { tibberData = require(TIBBER_SCRIPT); } catch (e) { tibberData = null; }   // niet in deze release: route 404, smal 404
+let tibberRondeBezig = false;
+function tibberIsPad(req) { return reqPath(req) === '/tibber/terug'; }
+async function tibberMgmt(query) {
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  if (!m || !pat) throw new Error('kluistoegang ontbreekt op de pod');
+  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST', redirect: 'error',
+    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-tibber/1' },
+    body: JSON.stringify({ query: query }), signal: AbortSignal.timeout(20000) });
+  // het antwoord van een fout kan de query (met het token) citeren: alleen de status
+  if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
+  const j = await r.json();
+  if (!Array.isArray(j)) throw new Error('kluis gaf geen rijen');
+  return j;
+}
+async function tibberKluisLees() {
+  const rijen = await tibberMgmt("select name, decrypted_secret as w from vault.decrypted_secrets where name in ('tibber_data_client_id', 'tibber_data_client_secret', 'tibber_data_refresh')");
+  const w = { client_id: '', client_secret: '', refresh: '' };
+  rijen.forEach(function (x) {
+    if (x && x.name === 'tibber_data_client_id') w.client_id = String(x.w || '').trim();
+    if (x && x.name === 'tibber_data_client_secret') w.client_secret = String(x.w || '').trim();
+    if (x && x.name === 'tibber_data_refresh') w.refresh = String(x.w || '').trim();
+  });
+  return w;
+}
+// Aanmaken of bijwerken, daarna teruglezen als sha256 (de waarde komt niet terug over de lijn). Vorm vooraf getoetst: geen $ of quote
+// in de waarde, dus het dollar-citaat is dicht.
+async function tibberKluisZet(waarde) {
+  if (typeof waarde !== 'string' || !/^[A-Za-z0-9._~+\/=-]{16,4096}$/.test(waarde)) throw new Error('token heeft een onverwachte vorm');
+  const n = (await tibberMgmt("select count(*)::int as n from vault.secrets where name = 'tibber_data_refresh'"))[0];
+  if (!n || (n.n !== 0 && n.n !== 1)) throw new Error('kluis: tibber_data_refresh niet eenduidig');
+  const q = n.n === 1 ? "select count(*)::int as n from (select vault.update_secret(id, $tb$" + waarde + "$tb$) from vault.secrets where name = 'tibber_data_refresh') x"
+    : "select count(*)::int as n from (select vault.create_secret($tb$" + waarde + "$tb$, 'tibber_data_refresh', 'Tibber Data API refresh token; pod schrijft zelf, rotend (wv2625)')) x";
+  const z = (await tibberMgmt(q))[0];
+  if (!z || z.n !== 1) throw new Error('kluis: niet precies één regel geschreven');
+  const t = (await tibberMgmt("select encode(sha256(convert_to(decrypted_secret, 'UTF8')), 'hex') as h from vault.decrypted_secrets where name = 'tibber_data_refresh'"))[0];
+  return t && typeof t.h === 'string' ? t.h : null;
+}
+function tibberEnv() {
+  const e = { TIBBER_DIR: TIBBER_DIR };
+  ['PATH', 'HOME', 'TZ', 'LANG'].forEach(function (k) { if (process.env[k] != null) e[k] = process.env[k]; });
+  ['TIBBER_AUTH_BASIS', 'TIBBER_API_BASIS', 'TIBBER_PAUZE_MS', 'TIBBER_MAX_PAGINAS'].forEach(function (k) { if (process.env[k] != null) e[k] = process.env[k]; });   // alleen de toets (127.0.0.1)
+  return e;
+}
+async function tibberKind(opdracht, invoer) {
+  const r = await smalKind(process.execPath, ['--no-warnings', TIBBER_SCRIPT, opdracht], JSON.stringify(invoer || {}), opdracht === 'ronde' ? 900000 : 120000, tibberEnv());
+  let j = null;
+  try { j = JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch (e) {}
+  if (r.code !== 0 && r.stderr) logError('tibber-' + opdracht, new Error(String(r.stderr).slice(0, 200)));
+  return { code: r.code, j: j && typeof j === 'object' ? j : null };
+}
+function tibberDeps() { return { dir: TIBBER_DIR, kluisLees: tibberKluisLees, kluisZet: tibberKluisZet, kind: tibberKind }; }
+function tibberSchoon(u) { const o = {}; Object.keys(u || {}).forEach(function (k) { if (k[0] !== '_') o[k] = u[k]; }); return o; }
+function tibberRondeLees() { try { return JSON.parse(fs.readFileSync(path.join(TIBBER_DIR, 'ronde.json'), 'utf8')); } catch (e) { return null; } }
+function tibberInfo() {
+  const r = tibberRondeLees();
+  return { module: !!tibberData, laatste: r ? { tijd: r.eind || null, ok: r.ok === true, reden: r.reden || undefined, apparaten: r.apparaten, punten: r.punten } : null,
+    nood: fs.existsSync(path.join(TIBBER_DIR, 'refresh.nood')) };
+}
+// Eén box-rij per reden per dag (stilte is de default). Tekst van de pod zelf; geen token, code of state.
+function tibberBoxRij(reden, tekst) {
+  try {
+    const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    const t = VV().lees(pad);
+    const kenmerk = 'tibber-' + reden + '-' + dag;
+    if (t.indexOf(kenmerk) >= 0) return;
+    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
+    if (!eerste) return;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const voorstel = reden === 'grant' ? 'koppeling dood (verlopen, ingetrokken of al gebruikt). Nieuwe toestemmingslink: `POST /smal/tibber {opdracht: link}` (API_SECRET) en die met bericht.py in de app zetten ("tik binnen twee dagen"). Niet herhalen tot David opnieuw toestemde.'
+      : reden === 'kluis' ? 'het nieuwe refresh token staat als noodkopie in `/opt/data/tibber/refresh.nood` (600); de volgende ronde zet hem eerst in de kluis. Kluis (Management-API) nagaan; `POST /smal/tibber {opdracht: ronde}` na herstel.'
+      : reden === 'scope' ? 'Tibber gaf andere rechten dan user, homes, vehicles en chargers; niets bewaard. Nagaan of David alle vinkjes aanliet of de client andere scopes heeft; daarna een nieuwe link.'
+      : 'api.log `tibber` en `/smal/tibber {opdracht: stand}` nalopen.';
+    const rij = '\n## [direct] ' + tijd + ' — Tibber Data API: ' + String(tekst || reden).replace(/[\r\n]+/g, ' ').slice(0, 90) + ' (pod, automatisch)\n' +
+      '- status: open\n- van: pod tibber-ronde (server.js, wv2625; hooguit 1× per dag per reden; kenmerk ' + kenmerk + ')\n' +
+      '- gevolg als er niets gebeurt: geen nieuwe laadhistorie per auto; de data tot nu blijft lokaal staan.\n- voorstel: ' + voorstel + '\n';
+    VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
+  } catch (e) { logError('tibber-box', e); }
+}
+async function tibberRondeDraai(opdracht, bron) {
+  if (!tibberData) return { ok: false, fout: 'tibber-data.js zit niet in deze release' };
+  if (tibberRondeBezig) return { ok: false, reden: 'bezig', fout: 'er loopt al een Tibber-ronde' };
+  tibberRondeBezig = true;
+  try {
+    const u = tibberSchoon(await tibberData.ronde(tibberDeps(), opdracht));
+    u.eind = new Date().toISOString(); u.bron = bron;
+    schrijfLog(nu() + ' tibber ' + velden({ opdracht: opdracht, bron: bron, ok: u.ok === true, reden: u.reden, apparaten: u.apparaten, paginas: u.paginas, punten: u.punten,
+      geroteerd: u.geroteerd || undefined, nood: u.nood || undefined, nood_hersteld: u.nood_hersteld || undefined }));
+    if (opdracht === 'ronde' && u.reden !== 'bezig') {
+      try { const p = path.join(TIBBER_DIR, 'ronde.json'), tmp = p + '.' + process.pid + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify({ dag: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), eind: u.eind, ok: u.ok === true, reden: u.reden || null,
+          apparaten: u.apparaten, punten: u.punten, klaar: u.klaar, geroteerd: u.geroteerd || false }), { mode: 0o600 }); fs.renameSync(tmp, p); }
+      catch (e) { logError('tibber-ronde-json', e); }
+    }
+    if (u.ok !== true && ['grant', 'kluis', 'scope', 'client', 'token'].indexOf(u.reden) >= 0) tibberBoxRij(u.reden, u.fout);
+    else if (u.nood) tibberBoxRij('kluis', u.fout);
+    return u;
+  } finally { tibberRondeBezig = false; }
+}
+// Na de ochtend-bankronde (bankRondeStart, los): één keer per dag, alleen vóór 12:00; zonder toestemming stil.
+function tibberNaBankRonde() {
+  if (!tibberData || !rolPrimair()) return;
+  const nl = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const vorige = tibberRondeLees();
+  if (Number(nl.slice(11, 13)) >= 12 || (vorige && vorige.dag === nl.slice(0, 10))) return;
+  tibberRondeDraai('ronde', 'bank-ronde').catch(function (e) { logError('tibber-ronde', e); });
+}
+async function tibberSmal(d, wie) {
+  if (!wie || !wie.mk) return { status: 403, j: { ok: false, fout: 'tibber alleen vanuit de machinekamer (API_SECRET)' } };
+  if (!tibberData) return { status: 404, j: { ok: false, fout: 'tibber-data.js zit niet in deze release' } };
+  if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
+  const opdracht = String(d.opdracht || '');
+  if (opdracht === 'link') {
+    let k; try { k = await tibberKluisLees(); } catch (e) { return { status: 503, j: { ok: false, fout: 'kluis nu niet bereikbaar' } }; }
+    if (!k.client_id || !k.client_secret) return { status: 409, j: { ok: false, fout: 'tibber_data_client_id of -secret ontbreekt in de kluis' } };
+    const l = tibberData.linkMaak(TIBBER_DIR, k.client_id);
+    schrijfLog(nu() + ' tibber ' + velden({ opdracht: 'link' }));
+    return { status: 200, j: { ok: true, url: l.url, geldig_tot: l.geldig_tot } };
+  }
+  if (opdracht === 'ronde' || opdracht === 'apparaten') {
+    const u = await tibberRondeDraai(opdracht, 'machinekamer');
+    return { status: u.reden === 'bezig' ? 409 : 200, j: u };
+  }
+  if (opdracht === 'stand') {
+    const s = await tibberKind('stand', {});
+    return { status: 200, j: Object.assign({ ok: !!(s.j && s.j.ok) }, tibberSchoon(s.j), { laatste: tibberRondeLees(), info: tibberInfo() }) };
+  }
+  return { status: 400, j: { ok: false, fout: 'opdracht: link, ronde, apparaten, stand' } };
+}
+function tibberTerug(req, res) {
+  const kaal404 = function () { res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('niet gevonden'); };
+  req.resume();
+  if (req.method !== 'GET' || !tibberData) return kaal404();
+  let q;
+  try { q = new URL(req.url, 'http://x').searchParams; } catch (e) { return kaal404(); }
+  const state = q.get('state') || '', code = q.get('code') || '', fout = q.get('error') || '';
+  if (!/^[0-9a-f]{64}$/.test(state) || code.length > 2000 || /[^\x21-\x7e]/.test(code) || fout.length > 100 || (!code && !fout)) return kaal404();
+  res._log = { tibber_terug: 1 };
+  if (!rolPrimair()) return bankPagina(res, 503, 'Even niet beschikbaar', 'Er is niets gekoppeld. Probeer het later opnieuw met een nieuwe link van Socev.');
+  if (!tibberData.stateOpen(TIBBER_DIR, state)) return kaal404();   // zonder open state: geen kluis, geen kindproces
+  const t = Date.now();
+  while (tibberTerugTijden.length && t - tibberTerugTijden[0] > 3600000) tibberTerugTijden.shift();
+  if (tibberTerugTijden.length >= TIBBER_TERUG_PER_UUR) { res.writeHead(429, { 'Content-Type': 'text/plain' }); return res.end('te vaak'); }
+  tibberTerugTijden.push(t);
+  tibberData.terug(tibberDeps(), state, code, fout ? 'ja' : '').then(function (u) {
+    res._log.tibber = u.soort;
+    schrijfLog(nu() + ' tibber ' + velden({ opdracht: 'terug', soort: u.soort, reden: u.reden, nood: u.nood || undefined }));
+    if (u.soort === 'dicht') return kaal404();
+    if (u.soort === 'bezig') return bankPagina(res, 503, 'Nog even geduld', 'Socev was net bezig met Tibber. Laad deze pagina over een minuut opnieuw; de link is nog geldig.');
+    if (u.soort === 'scope') { tibberBoxRij('scope', 'toestemming met andere rechten'); return bankPagina(res, 200, 'Niet gekoppeld', 'Tibber gaf andere rechten dan gevraagd (laat alle vinkjes aan). Er is niets bewaard. Socev zet een nieuwe link in de app.'); }
+    if (u.soort !== 'gekoppeld') return bankPagina(res, 200, 'Niet gekoppeld', 'De koppeling werd afgebroken of lukte niet. Er is niets bewaard. Wil je het opnieuw proberen, vraag dan om een nieuwe link.');
+    if (u.nood) tibberBoxRij('kluis', 'toestemming gelukt, kluis nog niet bijgewerkt');
+    bankPagina(res, 200, 'Gekoppeld', 'Tibber is gekoppeld; Socev kan de laadhistorie nu alleen lezen. Je kunt dit venster sluiten.');
+    tibberRondeDraai('ronde', 'toestemming').catch(function (e) { logError('tibber-ronde', e); });   // eerste ronde (backfill) meteen
+  }).catch(function (e) {
+    logError('tibber-terug', e);
+    if (!res.headersSent) bankPagina(res, 502, 'Koppelen lukte niet', 'Er ging iets mis. Er is niets gekoppeld. Vraag om een nieuwe link.');
+  });
+}
+// ── einde Tibber ──
 
 // (wv921: dit blok stond binnen de bankluis-sectie; daardoor faalden de bank-toetsen die die sectie in een vm laden op setInterval —
 //  CI #225–#227. Verplaatst, inhoud ongewijzigd.)
