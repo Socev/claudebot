@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot fc2517e8d6cfb4b0de3b24c0062ed9345b78d5b4 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot 8a29a87c0c4e4a837217abb5054f1a5a186e230a (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
@@ -175,6 +175,8 @@ export async function logboek(db          ) {
 
 export async function schrijf(db          , route        , b        , wie        ) {
   switch (route) {
+    case "corrigeer": return corrigeer(db, b, wie);   // wv2788: een versie verbeteren (vergissing), logboek oud → nieuw
+    case "verwijder": return verwijder(db, b, wie);   // wv2788: een per vergissing aangemaakte versie weghalen, niet als er stukken op leunen
     case "praktijk-versie": {
       const p = tekst(b.praktijk_id, "praktijk", { verplicht: true, max: 3 }) ;
       await bestaatPraktijk(db, p);
@@ -316,6 +318,7 @@ export async function behandel(db          , methode        , pad        , zoek 
       if (pad === "export") return { status: 200, body: await exportAlles(db) };
       if (pad === "naspeel") return { status: 200, body: await naspeel(db) };
       if (pad === "bewaking") return { status: 200, body: await bewaking(db, zoek.get("jaar")) };
+      if (pad === "leunt") return { status: 200, body: await leunt(db, zoek) };
       throw new Fout(404, "onbekende route");
     }
     if (methode === "POST") {
@@ -963,4 +966,597 @@ export async function schrijfJaarronde(db          , route        , b        , w
     default:
       throw new Fout(404, "onbekende route");
   }
+}
+
+// =====================================================================================================================
+// CORRIGEREN EN VERWIJDEREN (wv2788, David 8-11-2026). Naast "nieuwe versie per datum" (er verandert echt iets per een datum) kan elke
+// versie van een instelling gecorrigeerd worden (een vergissing verbeteren; logboek oud → nieuw) of verwijderd (per vergissing
+// aangemaakt; logboek met wat er stond). Verwijderen weigert zolang er stukken op leunen: nota's (ook de oude uit de factuurgenerator),
+// een vastgesteld jaarplan of een vastgestelde afrekening; dan legt de app in gewone taal uit waarom. Om dezelfde reden is de periode
+// (datum) van zo'n versie niet te corrigeren; een bedrag of tekst wel, met de waarschuwing dat de stukken die er al zijn niet meeveranderen.
+// De controle zit ook in de schrijfopdracht zelf (not exists), zodat een nota die tussen kijken en bewaren ontstaat niets laat verdwijnen.
+// =====================================================================================================================
+                                   
+                                            
+const OPEN = "9999-12-31";
+const BEGIN = "0000-01-01";
+const jr = (d        ) => Number(String(d).slice(0, 4));
+const dagVoor = (d        ) => plusDag(d, -1);
+const NOTA_TELT = "status not in ('vervallen','geannuleerd','concept')";
+
+/**
+ * Nota's in een periode (alle bronnen: ook de oude nota's leunen op de gegevens van toen). Een afrekeningsnota telt op het jaar waar hij
+ * over gaat (nota.jaar), ook als hij pas het jaar erna gedateerd is (Codex r3).
+ */
+function fNota(o                                                                                                  )       {
+  return {
+    sql: `select 'nota' as soort, entiteit || ' nota ' || nummer || ' van ' || datum as wat from nota where ${NOTA_TELT} ` +
+      "and ((datum >= ? and datum <= ?) or (soort = 'afrekening' and jaar between ? and ?))" +
+      (o.entiteit ? " and entiteit = ?" : "") + (o.praktijk ? " and praktijk_id = ?" : "") + (o.extra ? ` and ${o.extra}` : ""),
+    w: [o.van, o.tot, jr(o.van), jr(o.tot), ...(o.entiteit ? [o.entiteit] : []), ...(o.praktijk ? [o.praktijk] : [])],
+  };
+}
+/** Vastgestelde jaarplannen (met praktijk: alleen als die praktijk erin staat). */
+function fPlan(entiteit               , jVan        , jTot        , praktijk         )       {
+  return {
+    sql: "select 'jaarplan' as soort, 'het vastgestelde jaarplan ' || p.entiteit || ' ' || p.jaar as wat from jaarplan p where p.status = 'vastgesteld' and p.jaar between ? and ?" +
+      (entiteit ? " and p.entiteit = ?" : "") + (praktijk ? " and exists (select 1 from jaarplan_regel r where r.jaarplan_id = p.id and r.praktijk_id = ?)" : ""),
+    w: [jVan, jTot, ...(entiteit ? [entiteit] : []), ...(praktijk ? [praktijk] : [])],
+  };
+}
+/** Vastgestelde afrekeningen (ook die uit Davids Excel). */
+function fAfr(entiteit               , jVan        , jTot        , praktijk         )       {
+  return {
+    sql: "select distinct 'afrekening' as soort, 'de vastgestelde afrekening ' || entiteit || ' ' || jaar as wat from afrekening where status = 'vastgesteld' and jaar between ? and ?" +
+      (entiteit ? " and entiteit = ?" : "") + (praktijk ? " and praktijk_id = ?" : ""),
+    w: [jVan, jTot, ...(entiteit ? [entiteit] : []), ...(praktijk ? [praktijk] : [])],
+  };
+}
+const unie = (f        )              => (f.length ? { sql: f.map((x) => `select soort, wat from (${x.sql})`).join(" union all "), w: f.flatMap((x) => x.w) } : null);
+async function stukkenVan(db          , f        ) {
+  const u = unie(f);
+  return u ? rijen                                (db, `select distinct soort, wat from (${u.sql}) order by soort, wat limit 400`, ...u.w) : [];
+}
+/** where-aanvulling: alleen als er (nog steeds) niets op leunt */
+const vrijVan = (f        )       => { const u = unie(f); return u ? { sql: ` and not exists (select 1 from (${u.sql}))`, w: u.w } : { sql: "", w: [] }; };
+/** Stukken in gewone taal: "3 nota's (POT nota 2026-01 van 2026-01-01 … 2026-03 van 2026-03-01) en het vastgestelde jaarplan POT 2027" */
+export function stukkenTekst(st                                  )         {
+  const notas = st.filter((x) => x.soort === "nota").map((x) => x.wat).sort((a, b) => (a.slice(-10) < b.slice(-10) ? -1 : 1));
+  const rest = st.filter((x) => x.soort !== "nota").map((x) => x.wat);
+  const delen           = [];
+  if (notas.length === 1) delen.push(notas[0]);
+  else if (notas.length > 1) delen.push(`${notas.length} nota's (de eerste ${notas[0]}, de laatste ${notas.at(-1)})`);
+  delen.push(...rest);
+  return delen.length <= 1 ? delen.join("") : `${delen.slice(0, -1).join(", ")} en ${delen.at(-1)}`;
+}
+
+/** Waarde uit de invoer, of de oude als het veld niet is meegestuurd. */
+const of =     (b        , k        , oud     , f                   )              => (b[k] === undefined ? oud[k] : f(b[k]));
+const gelijk = (a         , c         ) => JSON.stringify(a ?? null) === JSON.stringify(c ?? null) || (typeof a === "number" && typeof c === "number" && Math.abs(a - c) < 1e-9);
+async function volgende(db          , sql        , ...w           )                         {
+  return (await rijen                      (db, sql, ...w))[0]?.d ?? null;
+}
+const periodeTot = (volgendeVan               ) => (volgendeVan ? dagVoor(volgendeVan) : OPEN);
+
+                                                              // onderdelen die met de hoofdregel meegaan (in het logboek bewaard)
+                 
+                                                                          
+                
+                                                                                             
+                                                                                  
+                                                                                                                          
+                                                                
+                                                           
+                                                                                               
+                                                                                                                                          
+                                                                                                                                                        
+                                                          
+                    
+                                                                                                                           
+                                                                                                                         
+                                                                                                            
+                                                                                                                                                          
+                                                                                                                                               
+                                                                                                         
+                                                                                                                     
+                                                                                                            
+                                                   
+                                                                                                                                                                                                                                               
+ 
+const setSql = (velden          ) => velden.map((k) => `${k} = ?`).join(", ");
+/** De rij zoals hij gelezen is (sleutel + alle te corrigeren kolommen): een correctie of verwijdering slaat niets over een tussentijdse wijziging heen. */
+const zoalsGelezen = (s       , r     )       => {
+  const w = s.waar(r), x = s.matchExtra?.(r) || { sql: "", w: [] };
+  return { sql: w.sql + s.kol.map((k) => ` and ${k} is ?`).join("") + x.sql, w: [...w.w, ...s.kol.map((k) => r[k] ?? null), ...x.w] };
+};
+const stempelKol = (s       ) => [...s.kol, ...(s.extraKol || [])];
+const stempel = (s       , r     ) => K.versieVan(stempelKol(s).map((k) => r[k] ?? null));
+/**
+ * Cao-keten (Codex r11): schaal en trede gelden vanaf het contract en worden per wijziging overschreven (leeg = erft de vorige).
+ * Na een correctie of verwijdering moet elke combinatie die daardoor geldt in de cao-tabel staan, ook bij latere wijzigingen.
+ */
+async function caoKeten(db          , contractId         , opties                                                  ) {
+  const c = opties.contract || (await rijen     (db, "select * from contract where id = ?", contractId))[0];
+  if (!c) return;
+  let mut = await rijen     (db, "select * from contractmutatie where contract_id = ? order by geldig_van", contractId);
+  if (opties.weg != null) mut = mut.filter((m) => m.id !== opties.weg);
+  if (opties.mutatie) mut = mut.map((m) => (m.id === opties.mutatie .id ? { ...m, ...opties.mutatie } : m)).sort((a, b) => (String(a.geldig_van) < String(b.geldig_van) ? -1 : 1));
+  let schaal = c.schaal ?? null, trede = c.trede ?? null;
+  const toets = async (wanneer        ) => {
+    if (schaal != null && trede != null && !(await rijen(db, "select 1 x from cao_tabel where cao = ? and schaal = ? and trede = ?", c.cao, schaal, trede)).length)
+      throw new Fout(400, `schaal ${schaal} met trede ${trede} (${wanneer}) staat niet in de cao-tabellen`);
+  };
+  await toets("bij de start van het contract");
+  for (const m of mut) {
+    if (m.schaal != null) schaal = m.schaal;
+    if (m.trede != null) trede = m.trede;
+    if (m.schaal != null || m.trede != null) await toets(`vanaf ${m.geldig_van}`);
+  }
+}
+/** Contract-schaal/trede en alle wijzigingen ervan, als voorwaarde (Codex r12): de cao-keten die getoetst is, is de keten die blijft. */
+async function caoKetenVast(db          , contractId         )                {
+  const fp = "(select group_concat(json_array(id, geldig_van, schaal, trede), '|') from (select id, geldig_van, schaal, trede from contractmutatie where contract_id = ? order by id))";
+  const ct = "(select json_array(schaal, trede) from contract where id = ?)";
+  const nu = (await rijen                            (db, `select ${fp} as f, ${ct} as c`, contractId, contractId))[0];
+  return { sql: ` and ${fp} is ? and ${ct} is ?`, w: [contractId, nu?.f ?? null, contractId, nu?.c ?? null] };
+}
+const CONTRACT_KOL = ["functie", "soort", "van", "tot", "uren", "schaal", "trede", "periodiekmaand"];
+/** Voorwaarde: de periodegrens is nog dezelfde als bij het kijken (anders klopt de gecontroleerde periode niet meer). */
+async function grensVast(db          , s       , r     , oud      )                {
+  if (!s.grens) return { sql: "", w: [] };
+  const g = s.grens(r, oud);
+  const nu = (await rijen                (db, `select (${g.sql}) as g`, ...g.w))[0]?.g ?? null;
+  return { sql: ` and (${g.sql}) is ?`, w: [...g.w, nu] };
+}
+/** Voorwaarde: de onderdelen die meegaan zijn nog precies zoals bij het kijken (geen tussentijds toegevoegd bedrag dat ongezien verdwijnt). */
+// per onderdeel: de vingerafdruk in SQL (voorwaarde in de batch) en het stempel van de rijen zelf (dat het scherm uit wat het toont kan narekenen)
+async function kinderenVast(db          , s       , r     )                                          {
+  const uit                                 = [];
+  for (const k of s.kinderen || []) {
+    const fp = `(select group_concat(json_array(${k.kol.join(", ")}), '|') from (select ${k.kol.join(", ")} from ${k.tabel} where ${k.fk} = ? order by id))`;
+    const nu = (await rijen                (db, `select ${fp} as f`, r.id))[0]?.f ?? null;
+    const rij = await rijen     (db, `select ${k.kol.join(", ")} from ${k.tabel} where ${k.fk} = ? order by id`, r.id);
+    uit.push({ sql: ` and ${fp} is ?`, w: [r.id, nu], stempel: K.versieVan(rij.map((x) => k.kol.map((c) => x[c] ?? null))) });
+  }
+  return uit;
+}
+/** Grens en onderdelen lezen vóór én na de stukkencontrole: zo horen voorwaarde en gecontroleerde periode bij hetzelfde moment (Codex r5). */
+async function zelfdeMoment   (lees                       , controle                  )                                    {
+  const voor = await lees();
+  const uit = await controle();
+  const na = await lees();
+  const vorm = (l        ) => JSON.stringify(l.map((x) => [x.w, (x                        ).stempel ?? null]));
+  if (vorm(voor) !== vorm(na)) throw new Fout(409, "Er veranderde intussen iets aan deze versie of de versie erna. Herlaad de pagina en kijk opnieuw.");
+  return { voor, uit };
+}
+const samen = (...f        )       => ({ sql: f.map((x) => x.sql).join(""), w: f.flatMap((x) => x.w) });
+const POT_PERIODE = (van        , tot        ) => [fNota({ entiteit: "POT", van, tot }), fPlan("POT", jr(van), jr(tot)), fAfr("POT", jr(van), jr(tot))];
+const pctVeld = (v         , naam        ) => (v == null || v === "" ? 0 : pct(v, naam));
+const ID = (r     )       => ({ sql: "id = ?", w: [r.id] });
+
+const SOORTEN                        = {
+  "praktijk-versie": {
+    naam: "praktijkversie", tabel: "praktijk_versie", periode: ["geldig_van"],
+    lees: async (db, s) => (await rijen(db, "select * from praktijk_versie where id = ?", geldigId(s, "versie")))[0] ?? null,
+    sleutel: (r) => String(r.id),
+    grens: (r) => ({ sql: "select min(geldig_van) from praktijk_versie where praktijk_id = ? and geldig_van > ? and id <> ?", w: [r.praktijk_id, r.geldig_van, r.id] }),
+    async stukken(db, r) {
+      const vg = await volgende(db, "select min(geldig_van) as d from praktijk_versie where praktijk_id = ? and geldig_van > ? and id <> ?", r.praktijk_id, r.geldig_van, r.id);
+      return [fNota({ praktijk: String(r.praktijk_id), van: String(r.geldig_van), tot: periodeTot(vg) }),
+        { sql: `select 'nota' as soort, entiteit || ' nota ' || nummer || ' van ' || datum as wat from nota where ${NOTA_TELT} and json_extract(debiteur, '$.versie_id') = ?`, w: [r.id] }];
+    },
+    async velden(_db, b, o) {
+      const v      = {
+        geldig_van: of(b, "geldig_van", o, (x) => datum(x, "geldig vanaf")), naam: of(b, "naam", o, (x) => tekst(x, "naam", { verplicht: true, max: 120 })),
+        houder: of(b, "houder", o, (x) => tekst(x, "houder", { max: 160 })), tav: of(b, "tav", o, (x) => tekst(x, "t.a.v.", { max: 120 })),
+        adres: of(b, "adres", o, (x) => tekst(x, "adres", { max: 160 })), postcode_plaats: of(b, "postcode_plaats", o, (x) => tekst(x, "postcode en plaats", { max: 80 })),
+        email: of(b, "email", o, (x) => tekst(x, "e-mail", { max: 200 })), kvk: of(b, "kvk", o, (x) => tekst(x, "kvk", { max: 12 })),
+        opmerking: of(b, "opmerking", o, (x) => tekst(x, "opmerking", { max: 400 })),
+      };
+      if (!v.naam) throw new Fout(400, "naam ontbreekt");
+      if (v.email && !EXACT.test(String(v.email))) throw new Fout(400, "e-mailadres ziet er niet goed uit");
+      if (v.kvk && !/^\d{8}$/.test(String(v.kvk))) throw new Fout(400, "kvk-nummer = 8 cijfers");
+      return v;
+    },
+    kol: ["geldig_van", "naam", "houder", "tav", "adres", "postcode_plaats", "email", "kvk", "opmerking"], waar: ID,
+    async datumBlok(db, r) {
+      return (await rijen(db, "select 1 x from overname where praktijk_id = ? and datum = ?", r.praktijk_id, r.geldig_van)).length
+        ? "Deze versie hoort bij een overname (met de IBAN en de verdeling van de afrekening op dezelfde datum); de datum is daarom niet los te corrigeren. Vraag het de machinekamer." : null;
+    },
+    // de overnameblokkade ook in de schrijfopdracht zelf: een tussentijds vastgelegde overname laat de batch niets doen (Codex r13)
+    wegVoorwaarde: (r) => ({ sql: " and (select count(*) from praktijk_versie where praktijk_id = ?) > 1 and not exists (select 1 from overname where praktijk_id = ? and datum = ?)",
+      w: [r.praktijk_id, r.praktijk_id, r.geldig_van] }),
+    corrigeerVoorwaarde: (o, n) => o.geldig_van === n.geldig_van ? { sql: "", w: [] }
+      : { sql: " and not exists (select 1 from overname where praktijk_id = ? and datum = ?)", w: [o.praktijk_id, o.geldig_van] },
+    async blok(db, r) {
+      const n = (await rijen               (db, "select count(*) as n from praktijk_versie where praktijk_id = ?", r.praktijk_id))[0].n;
+      if (n <= 1) return "Dit is de enige versie van deze praktijk; een praktijk heeft altijd gegevens nodig. Corrigeer hem met Bewerken.";
+      if ((await rijen(db, "select 1 x from overname where praktijk_id = ? and datum = ?", r.praktijk_id, r.geldig_van)).length)
+        return "Deze versie hoort bij een overname (met de IBAN en de verdeling van de afrekening). Die gaat niet met één knop weg; vraag het de machinekamer.";
+      return null;
+    },
+    async na(db, r, oud) {
+      if (!(await legacyOpen(db))) return [];
+      // de huidige stand in `praktijk` (de pod leest daar naam_brief/email) volgt de versie die vandaag geldt, net als bij een nieuwe versie
+      const nu = "(select %s from praktijk_versie v where v.praktijk_id = praktijk.id and v.geldig_van <= date('now') order by v.geldig_van desc limit 1)";
+      const k = (c        ) => nu.replace("%s", c);
+      return [{ sql: `update praktijk set naam_brief = ${k("naam")}, tav = ${k("tav")}, adres = ${k("adres")}, postcode_plaats = ${k("postcode_plaats")}, ` +
+        // e-mail: die van de versie die nu geldt; heeft die er geen, dan blijft het oude adres alleen staan als het níet van de weggehaalde of
+        // gecorrigeerde versie kwam (anders gingen nota's naar de ontvanger van een versie die er niet meer is; Codex r11)
+        `email = coalesce(${k("email")}, case when email is ? then null else email end), eigenaar = coalesce(${k("houder")}, eigenaar) where id = ? and exists ${k("1")}`,
+        w: [oud.email ?? null, r.praktijk_id] }];
+    },
+  },
+  stand: {
+    naam: "patiëntenstand", tabel: "praktijk_patienten", fin: true, periode: ["peildatum"],
+    lees: async (db, s) => (await rijen(db, "select id, praktijk_id, peildatum, aantal, status, opgegeven_door, bron_tekst from praktijk_patienten where id = ?", geldigId(s, "stand")))[0] ?? null,
+    sleutel: (r) => String(r.id),
+    async stukken(_db, r) {
+      // de stand per 1-1-J telt voor de bijdragen van J (jaarplan, maandnota's) en voor de afrekeningen (ook de nota's) van J−1 en J (gemiddelde van twee jaren);
+      // de aandelen van álle praktijken hangen ervan af, dus elke nota telt
+      const Y = jr(String(r.peildatum));
+      return [{ sql: `select 'nota' as soort, entiteit || ' nota ' || nummer || ' van ' || datum as wat from nota where ${NOTA_TELT} and (jaar = ? or (jaar = ? and soort = 'afrekening'))`, w: [Y, Y - 1] },
+        fPlan(null, Y, Y), fAfr(null, Y - 1, Y)];
+    },
+    async velden(_db, b, o) {
+      const aantal = of(b, "aantal", o, (x) => getal(x, "aantal", { min: 0, max: 100000 }));
+      if (!Number.isInteger(Number(aantal))) throw new Fout(400, "aantal = heel getal");
+      return { peildatum: of(b, "peildatum", o, (x) => datum(x, "peildatum")), aantal, status: of(b, "status", o, (x) => keuze(x || "definitief", "status", ["voorlopig", "definitief"]         )),
+        opgegeven_door: of(b, "opgegeven_door", o, (x) => tekst(x, "opgegeven door", { max: 120 })), bron_tekst: of(b, "bron_tekst", o, (x) => tekst(x, "bron", { max: 300 })) };
+    },
+    kol: ["peildatum", "aantal", "status", "opgegeven_door", "bron_tekst"], waar: ID,
+  },
+  deelname: {
+    naam: "deelname", tabel: "deelname", fin: true, periode: ["geldig_van", "geldig_tot", "geldt_voor"],
+    lees: async (db, s) => (await rijen(db, "select id, entiteit, praktijk_id, geldig_van, geldig_tot, geldt_voor, regel from deelname where id = ?", geldigId(s, "deelname")))[0] ?? null,
+    sleutel: (r) => String(r.id),
+    async stukken(_db, r) {
+      // de deelname bepaalt de verdeling over álle praktijken van de entiteit: elk stuk van die entiteit in de periode telt (Codex r4)
+      const van = String(r.geldig_van || BEGIN), tot = String(r.geldig_tot || OPEN), e = String(r.entiteit);
+      return [fNota({ entiteit: e, van, tot }), fAfr(e, jr(van), jr(tot)), fPlan(e, jr(van), jr(tot))];
+    },
+    async velden(db, b, o) {
+      const v      = { geldig_van: of(b, "geldig_van", o, (x) => datum(x, "vanaf", false)), geldig_tot: of(b, "geldig_tot", o, (x) => datum(x, "tot en met", false)),
+        geldt_voor: of(b, "geldt_voor", o, (x) => keuze(x || "beide", "geldt voor", ["beide", "bijdrage", "afrekening"]         )), regel: of(b, "regel", o, (x) => tekst(x, "regel", { max: 200 })) };
+      if (v.geldig_tot && v.geldig_van && String(v.geldig_tot) < String(v.geldig_van)) throw new Fout(400, "tot en met ligt vóór vanaf");
+      const overlap = await rijen(db, "select id from deelname where entiteit = ? and praktijk_id = ? and id <> ? and (geldig_tot is null or ? is null or geldig_tot >= ?) " +
+        "and (geldig_van is null or ? is null or geldig_van <= ?) and (geldt_voor = 'beide' or ? = 'beide' or geldt_voor = ?)",
+        o.entiteit, o.praktijk_id, o.id, v.geldig_van, v.geldig_van, v.geldig_tot, v.geldig_tot, v.geldt_voor, v.geldt_voor);
+      if (overlap.length) throw new Fout(409, "die periode overlapt een andere deelname van deze praktijk");
+      return v;
+    },
+    corrigeerVoorwaarde: (o, n) => ({ sql: " and not exists (select 1 from deelname d2 where d2.entiteit = ? and d2.praktijk_id = ? and d2.id <> ? and (d2.geldig_tot is null or ? is null or d2.geldig_tot >= ?) " +
+      "and (d2.geldig_van is null or ? is null or d2.geldig_van <= ?) and (d2.geldt_voor = 'beide' or ? = 'beide' or d2.geldt_voor = ?))",
+      w: [o.entiteit, o.praktijk_id, o.id, n.geldig_van ?? null, n.geldig_van ?? null, n.geldig_tot ?? null, n.geldig_tot ?? null, n.geldt_voor, n.geldt_voor] }),
+    kol: ["geldig_van", "geldig_tot", "geldt_voor", "regel"], waar: ID,
+  },
+  kostencomponent: {
+    naam: "kostenpost", tabel: "kostencomponent", periode: [],
+    lees: async (db, s) => (await rijen(db, "select * from kostencomponent where id = ?", geldigId(s, "kostenpost")))[0] ?? null,
+    sleutel: (r) => String(r.id),
+    async stukken(db, r) {
+      const m = await rijen                                               (db, "select geldig_van, bedrag from kostenmutatie where kostencomponent_id = ? order by geldig_van", r.id);
+      if (!m.length) return [];
+      const van = m[0].geldig_van, laatste = m.at(-1) , tot = laatste.bedrag == null ? dagVoor(laatste.geldig_van) : OPEN;
+      return [fNota({ entiteit: String(r.entiteit), van, tot }), fPlan(String(r.entiteit), jr(van), jr(tot)), fAfr(String(r.entiteit), jr(van), jr(tot))];
+    },
+    async velden(_db, b, o) {
+      return { naam: of(b, "naam", o, (x) => tekst(x, "naam", { verplicht: true, max: 120 })), soort: of(b, "soort", o, (x) => keuze(x, "soort", ["vast", "personeel", "variabel"]         )),
+        per: of(b, "per", o, (x) => keuze(x, "per", ["maand", "kwartaal", "jaar"]         )), betaalmoment: of(b, "betaalmoment", o, (x) => tekst(x, "betaalmoment", { max: 80 })),
+        opmerking: of(b, "opmerking", o, (x) => tekst(x, "opmerking", { max: 400 })) };
+    },
+    kol: ["naam", "soort", "per", "betaalmoment", "opmerking"], waar: ID,
+    kinderen: [{ tabel: "deelname_uitzondering", fk: "kostencomponent_id", kol: ["id", "praktijk_id", "geldig_van", "geldig_tot", "reden"] },
+      { tabel: "kostenmutatie", fk: "kostencomponent_id", kol: ["id", "geldig_van", "bedrag", "reden"] }],
+  },
+  kostenmutatie: {
+    naam: "bedrag van een kostenpost", tabel: "kostenmutatie", periode: ["geldig_van"],
+    lees: async (db, s) => (await rijen(db, "select m.*, c.entiteit, c.naam as component from kostenmutatie m join kostencomponent c on c.id = m.kostencomponent_id where m.id = ?", geldigId(s, "bedrag")))[0] ?? null,
+    sleutel: (r) => String(r.id),
+    grens: (r) => ({ sql: "select min(geldig_van) from kostenmutatie where kostencomponent_id = ? and geldig_van > ? and id <> ?", w: [r.kostencomponent_id, r.geldig_van, r.id] }),
+    async stukken(db, r) {
+      const vg = await volgende(db, "select min(geldig_van) as d from kostenmutatie where kostencomponent_id = ? and geldig_van > ? and id <> ?", r.kostencomponent_id, r.geldig_van, r.id);
+      const van = String(r.geldig_van), tot = periodeTot(vg);
+      return [fNota({ entiteit: String(r.entiteit), van, tot }), fPlan(String(r.entiteit), jr(van), jr(tot)), fAfr(String(r.entiteit), jr(van), jr(tot))];
+    },
+    async velden(_db, b, o) {
+      return { geldig_van: of(b, "geldig_van", o, (x) => datum(x, "vanaf")), bedrag: of(b, "bedrag", o, (x) => getal(x, "bedrag", { min: 0, max: 5e6, leeg: true })),
+        reden: of(b, "reden", o, (x) => tekst(x, "reden", { verplicht: true, max: 300 })) };
+    },
+    kol: ["geldig_van", "bedrag", "reden"], waar: ID,
+    wegVoorwaarde: (r) => ({ sql: " and (select count(*) from kostenmutatie where kostencomponent_id = ?) > 1", w: [r.kostencomponent_id] }),
+    async blok(db, r) {
+      const n = (await rijen               (db, "select count(*) as n from kostenmutatie where kostencomponent_id = ?", r.kostencomponent_id))[0].n;
+      return n <= 1 ? "Dit is het enige bedrag van deze kostenpost. Moet de hele post weg, gebruik dan 'Kostenpost verwijderen'." : null;
+    },
+  },
+  contract: {
+    naam: "contract", tabel: "contract", periode: ["van", "tot"],
+    lees: async (db, s) => (await rijen(db, "select c.*, m.naam from contract c left join medewerker m on m.id = c.medewerker_id where c.id = ?", geldigId(s, "contract")))[0] ?? null,
+    sleutel: (r) => String(r.id),
+    stukken: async (_db, r) => POT_PERIODE(String(r.van), String(r.tot || OPEN)),
+    async velden(db, b, o) {
+      const v      = {
+        naam: o.medewerker_id == null ? o.naam : of(b, "naam", o, (x) => tekst(x, "naam", { verplicht: true, max: 120 })), functie: of(b, "functie", o, (x) => tekst(x, "functie", { max: 80 })),
+        soort: of(b, "soort", o, (x) => keuze(x, "soort", ["dienst", "vacature"]         )), van: of(b, "van", o, (x) => datum(x, "vanaf")), tot: of(b, "tot", o, (x) => datum(x, "tot en met", false)),
+        uren: of(b, "uren", o, (x) => getal(x, "uren per week", { min: 1, max: 60 })), schaal: of(b, "schaal", o, (x) => tekst(x, "schaal", { max: 6 })),
+        trede: of(b, "trede", o, (x) => getal(x, "trede", { min: 0, max: 60, leeg: true })), periodiekmaand: of(b, "periodiekmaand", o, (x) => getal(x, "periodiekmaand", { min: 1, max: 12, leeg: true })),
+      };
+      if (v.tot && String(v.tot) < String(v.van)) throw new Fout(400, "tot en met ligt vóór vanaf");
+      if (v.trede != null && !Number.isInteger(Number(v.trede))) throw new Fout(400, "trede = heel getal");
+      if (v.periodiekmaand != null && !Number.isInteger(Number(v.periodiekmaand))) throw new Fout(400, "periodiekmaand = 1–12");
+      if (v.schaal !== o.schaal || v.trede !== o.trede) await caoKeten(db, o.id, { contract: { ...o, ...v } });
+      return v;
+    },
+    kol: CONTRACT_KOL, waar: ID, extraKol: ["naam"], ketenVast: (db, r) => caoKetenVast(db, r.id),
+    matchExtra: (r) => (r.medewerker_id == null ? { sql: "", w: [] } : { sql: " and (select m.naam from medewerker m where m.id = contract.medewerker_id) is ?", w: [r.naam ?? null] }),
+    kinderen: [{ tabel: "afwezigheid", fk: "contract_id", kol: ["id", "van", "tot", "soort", "loondoorbetaling_pct", "uitkering_pct", "vertraging_maanden", "opmerking"] },
+      { tabel: "contractmutatie", fk: "contract_id", kol: ["id", "geldig_van", "uren", "schaal", "trede", "reden"] }],
+    // de naam staat bij de medewerker: direct na de eigen contractregel en alleen als die doorging (changes() van die regel; gemeten op D1
+    // en node:sqlite: changes() in de where = de vorige opdracht in hetzelfde verzoek)
+    naHoofd: (o, n) => (gelijk(n.naam, o.naam) || o.medewerker_id == null ? []
+      : [{ sql: "update medewerker set naam = ? where id = ? and naam is ? and changes() > 0", w: [n.naam, o.medewerker_id, o.naam ?? null] }]),
+    // schaal, trede of periodiekmaand met de hand verbeterd = door David nagekeken
+    extraSet: (o, n, wie) => (["schaal", "trede", "periodiekmaand"].some((k) => !gelijk(n[k], o[k]))
+      ? { sql: ", bevestigd_op = strftime('%Y-%m-%dT%H:%M:%SZ','now'), bevestigd_door = ?", w: [wie] } : null),
+    na: async (_db, r) => (r.medewerker_id == null ? [] : [{ sql: "delete from medewerker where id = ? and not exists (select 1 from contract where medewerker_id = ?)", w: [r.medewerker_id, r.medewerker_id] }]),
+  },
+  contractmutatie: {
+    naam: "wijziging van een contract", tabel: "contractmutatie", periode: ["geldig_van"],
+    lees: async (db, s) => (await rijen(db, "select m.*, c.cao, c.schaal as c_schaal, c.trede as c_trede, c.tot as c_tot from contractmutatie m join contract c on c.id = m.contract_id where m.id = ?", geldigId(s, "wijziging")))[0] ?? null,
+    sleutel: (r) => String(r.id),
+    grens: (r) => ({ sql: "select tot from contract where id = ?", w: [r.contract_id] }),
+    ketenVast: (db, r) => caoKetenVast(db, r.contract_id),
+    async blok(db, r) {
+      try { await caoKeten(db, r.contract_id, { weg: r.id }); return null; }
+      catch (e) { return e instanceof Fout ? `Zonder deze wijziging klopt een latere niet meer: ${e.message}. Corrigeer eerst die latere wijziging.` : null; }
+    },
+    // het einde van het contract vers uit de databank (bewaakt door grens); niet uit de eerste lezing (Codex r6)
+    async stukken(db, r) {
+      const tot = (await rijen                        (db, "select tot from contract where id = ?", r.contract_id))[0]?.tot ?? null;
+      return POT_PERIODE(String(r.geldig_van), String(tot || OPEN));
+    },
+    async velden(db, b, o) {
+      const v      = { geldig_van: of(b, "geldig_van", o, (x) => datum(x, "vanaf")), uren: of(b, "uren", o, (x) => getal(x, "uren", { min: 1, max: 60, leeg: true })),
+        schaal: of(b, "schaal", o, (x) => tekst(x, "schaal", { max: 6 })), trede: of(b, "trede", o, (x) => getal(x, "trede", { min: 0, max: 60, leeg: true })),
+        reden: of(b, "reden", o, (x) => tekst(x, "reden", { verplicht: true, max: 300 })) };
+      if (v.uren == null && v.schaal == null && v.trede == null) throw new Fout(400, "vul uren, schaal of trede in");
+      // de schaal en trede die hierdoor gelden, ook bij latere wijzigingen die ervan erven, moeten in de cao-tabel staan (Codex r10/r11)
+      await caoKeten(db, o.contract_id, { mutatie: { ...o, ...v } });
+      return v;
+    },
+    kol: ["geldig_van", "uren", "schaal", "trede", "reden"], waar: ID,
+  },
+  afwezigheid: {
+    naam: "afwezigheid", tabel: "afwezigheid", periode: ["van", "tot"],
+    lees: async (db, s) => (await rijen(db, "select * from afwezigheid where id = ?", geldigId(s, "afwezigheid")))[0] ?? null,
+    sleutel: (r) => String(r.id),
+    stukken: async (_db, r) => POT_PERIODE(String(r.van), String(r.tot || OPEN)),
+    async velden(_db, b, o) {
+      const v      = { soort: of(b, "soort", o, (x) => keuze(x, "soort", ["ziekte", "verlof", "overig"]         )), van: of(b, "van", o, (x) => datum(x, "vanaf")),
+        tot: of(b, "tot", o, (x) => datum(x, "tot en met", false)), loondoorbetaling_pct: of(b, "loondoorbetaling_pct", o, (x) => (x == null || x === "" ? 1 : pct(x, "loondoorbetaling"))),
+        uitkering_pct: of(b, "uitkering_pct", o, (x) => pctVeld(x, "uitkering")), vertraging_maanden: of(b, "vertraging_maanden", o, (x) => getal(x === "" ? 2 : x, "vertraging", { min: 0, max: 12 })),
+        opmerking: of(b, "opmerking", o, (x) => tekst(x, "opmerking", { max: 300 })) };
+      if (v.tot && String(v.tot) < String(v.van)) throw new Fout(400, "tot en met ligt vóór vanaf");
+      if (!Number.isInteger(Number(v.vertraging_maanden))) throw new Fout(400, "vertraging = hele maanden");
+      return v;
+    },
+    kol: ["soort", "van", "tot", "loondoorbetaling_pct", "uitkering_pct", "vertraging_maanden", "opmerking"], waar: ID,
+  },
+  inhuur: {
+    naam: "inhuur", tabel: "inhuur", periode: ["van", "tot"],
+    lees: async (db, s) => (await rijen(db, "select * from inhuur where id = ?", geldigId(s, "inhuur")))[0] ?? null,
+    sleutel: (r) => String(r.id),
+    stukken: async (_db, r) => POT_PERIODE(String(r.van), String(r.tot || OPEN)),
+    async velden(_db, b, o) {
+      const v      = { omschrijving: of(b, "omschrijving", o, (x) => tekst(x, "omschrijving", { verplicht: true, max: 160 })), van: of(b, "van", o, (x) => datum(x, "vanaf")),
+        tot: of(b, "tot", o, (x) => datum(x, "tot en met", false)), uren_week: of(b, "uren_week", o, (x) => getal(x, "uren per week", { min: 0.5, max: 80 })),
+        tarief: of(b, "tarief", o, (x) => getal(x, "tarief", { min: 0, max: 500 })), opmerking: of(b, "opmerking", o, (x) => tekst(x, "opmerking", { max: 300 })) };
+      if (v.tot && String(v.tot) < String(v.van)) throw new Fout(400, "tot en met ligt vóór vanaf");
+      return v;
+    },
+    kol: ["omschrijving", "van", "tot", "uren_week", "tarief", "opmerking"], waar: ID,
+  },
+  loonparameter: {
+    naam: "loonparameters", tabel: "loonparameter", periode: [],
+    lees: async (db, s) => (await rijen(db, "select * from loonparameter where jaar = ?", jaar(s)))[0] ?? null,
+    sleutel: (r) => String(r.jaar),
+    grens: (r) => ({ sql: "select min(jaar) from loonparameter where jaar > ?", w: [r.jaar] }),
+    async stukken(db, r) {
+      // de kern neemt voor een jaar de loonparameters van het laatste jaar dat er een heeft: deze gelden tot het volgende jaar met eigen parameters
+      const vg = (await rijen                      (db, "select min(jaar) as j from loonparameter where jaar > ?", r.jaar))[0]?.j ?? null;
+      return POT_PERIODE(`${r.jaar}-01-01`, vg ? `${Number(vg) - 1}-12-31` : OPEN);
+    },
+    async velden(_db, b, o) {
+      const p = (k        , naam        ) => of(b, k, o, (x) => (x === "" ? o[k] : pct(x, naam)));
+      const md = of(b, "cao_aanname_maanddag", o, (x) => tekst(x, "ingang cao-aanname", { verplicht: true, max: 5 }));
+      if (!/^(0[1-9]|1[0-2])-01$/.test(String(md))) throw new Fout(400, "ingang cao-aanname = MM-01");
+      return { werkgeverslasten: p("werkgeverslasten", "werkgeverslasten"), vakantiegeld_res: p("vakantiegeld_res", "reservering vakantiegeld"), eindejaar_res: p("eindejaar_res", "reservering eindejaarsuitkering"),
+        verzuim_pct: p("verzuim_pct", "verzuim"), cao_aanname_pct: p("cao_aanname_pct", "cao-aanname"), cao_aanname_maanddag: md, bron: of(b, "bron", o, (x) => tekst(x, "bron", { verplicht: true, max: 300 })) };
+    },
+    kol: ["werkgeverslasten", "vakantiegeld_res", "eindejaar_res", "verzuim_pct", "cao_aanname_pct", "cao_aanname_maanddag", "bron"], waar: (r) => ({ sql: "jaar = ?", w: [r.jaar] }),
+  },
+  buffer: {
+    naam: "buffer", tabel: "buffer", periode: ["geldig_van"],
+    async lees(db, s) {
+      const [e, d] = String(s).split("@");
+      return (await rijen(db, "select * from buffer where entiteit = ? and geldig_van = ?", keuze(e, "entiteit", ENT), datum(d, "vanaf")))[0] ?? null;
+    },
+    sleutel: (r) => `${r.entiteit}@${r.geldig_van}`,
+    grens: (r, o) => ({ sql: "select min(geldig_van) from buffer where entiteit = ? and geldig_van > ? and geldig_van <> ?", w: [r.entiteit, r.geldig_van, (o ?? r).geldig_van] }),
+    async stukken(db, r, o) {
+      const vg = await volgende(db, "select min(geldig_van) as d from buffer where entiteit = ? and geldig_van > ? and geldig_van <> ?", r.entiteit, r.geldig_van, (o ?? r).geldig_van);
+      const van = String(r.geldig_van), tot = periodeTot(vg), e = String(r.entiteit);
+      return [fNota({ entiteit: e, van, tot, extra: "buffer <> 0" }), fPlan(e, jr(van), jr(tot)), fAfr(e, jr(van), jr(tot))];
+    },
+    async velden(_db, b, o) {
+      const inRuw = of(b, "opbouw_in", o, (x) => tekst(x, "opbouw in maanden", { max: 40 }));
+      const opIn = inRuw ? K.bufferMaanden(String(inRuw)) : null;
+      if (inRuw && !opIn) throw new Fout(400, "opbouw in maanden: maandnummers 1–12, met komma's (bv. 1,7)");
+      const mnd = of(b, "opbouw_maanden", o, (x) => getal(x === "" ? 12 : x, "opbouw in maanden", { min: 1, max: 12 }));
+      if (!Number.isInteger(Number(mnd))) throw new Fout(400, "opbouw in maanden = heel getal");
+      return { geldig_van: of(b, "geldig_van", o, (x) => datum(x, "vanaf")), doel: of(b, "doel", o, (x) => getal(x, "doel", { min: 0, max: 1e6 })), opbouw_maanden: mnd,
+        opbouw_in: opIn ? opIn.join(",") : null, status: of(b, "status", o, (x) => keuze(x || "voorstel", "status", ["voorstel", "besloten"]         )),
+        opmerking: of(b, "opmerking", o, (x) => tekst(x, "opmerking", { max: 300 })) };
+    },
+    kol: ["geldig_van", "doel", "opbouw_maanden", "opbouw_in", "status", "opmerking"], waar: (r) => ({ sql: "entiteit = ? and geldig_van = ?", w: [r.entiteit, r.geldig_van] }),
+  },
+  subsidie: {
+    // opbrengst staat los van de nota's: er leunt niets op
+    naam: "subsidiebedrag", tabel: "subsidie", periode: [],
+    lees: async (db, s) => (await rijen(db, "select * from subsidie where id = ?", geldigId(s, "subsidie")))[0] ?? null,
+    sleutel: (r) => String(r.id),
+    stukken: async () => [],
+    async velden(_db, b, o) {
+      return { jaar: of(b, "jaar", o, (x) => jaar(x)), soort: of(b, "soort", o, (x) => keuze(x, "soort", ["aangevraagd", "verleend", "vastgesteld", "prognose"]         )),
+        bedrag: of(b, "bedrag", o, (x) => getal(x, "bedrag", { min: 0, max: 5e6 })), bron: of(b, "bron", o, (x) => tekst(x, "bron", { max: 300 })) };
+    },
+    kol: ["jaar", "soort", "bedrag", "bron"], waar: ID,
+  },
+  "subsidie-totaal": {
+    naam: "subsidietotaal", tabel: "subsidie_totaal", periode: [],
+    async lees(db, s) {
+      const [j, soort] = String(s).split("/");
+      return (await rijen(db, "select * from subsidie_totaal where jaar = ? and soort = ?", jaar(j), keuze(soort, "soort", ["aangevraagd", "verleend", "vastgesteld", "prognose"]         )))[0] ?? null;
+    },
+    sleutel: (r) => `${r.jaar}/${r.soort}`,
+    stukken: async () => [],
+    async velden(_db, b, o) {
+      return { soort: of(b, "soort", o, (x) => keuze(x, "soort", ["aangevraagd", "verleend", "vastgesteld", "prognose"]         )),
+        bedrag: of(b, "bedrag", o, (x) => getal(x, "bedrag", { min: 0, max: 5e6 })), bron: of(b, "bron", o, (x) => tekst(x, "bron", { verplicht: true, max: 300 })) };
+    },
+    kol: ["soort", "bedrag", "bron"], waar: (r) => ({ sql: "jaar = ? and soort = ?", w: [r.jaar, r.soort] }),
+  },
+  inschrijftarief: {
+    naam: "inschrijftarief", tabel: "inschrijftarief", periode: [],
+    lees: async (db, s) => (await rijen(db, "select * from inschrijftarief where jaar = ?", jaar(s)))[0] ?? null,
+    sleutel: (r) => String(r.jaar),
+    stukken: async () => [],
+    async velden(_db, b, o) {
+      return { tarief: of(b, "tarief", o, (x) => getal(x, "tarief", { min: 0, max: 100 })), bron: of(b, "bron", o, (x) => tekst(x, "bron", { verplicht: true, max: 300 })),
+        opmerking: of(b, "opmerking", o, (x) => tekst(x, "opmerking", { max: 300 })) };
+    },
+    kol: ["tarief", "bron", "opmerking"], waar: (r) => ({ sql: "jaar = ?", w: [r.jaar] }),
+  },
+};
+export const CORRIGEERBAAR = Object.keys(SOORTEN);
+
+async function soortEnRij(db          , b                          ) {
+  const get = (k        ) => (b instanceof URLSearchParams ? b.get(k) : b[k]);
+  // "wat" = welke instelling (niet "soort": dat is bij kosten, contracten en subsidie zelf een veld)
+  const naam = String(get("wat") ?? "");
+  if (!Object.hasOwn(SOORTEN, naam)) throw new Fout(400, "onbekend wat te corrigeren");
+  const s = SOORTEN[naam];
+  const sleutel = get("sleutel");
+  if (sleutel == null || sleutel === "") throw new Fout(400, "sleutel ontbreekt");
+  const r = await s.lees(db, String(sleutel));
+  if (!r) throw new Fout(404, `${s.naam} niet gevonden (al verwijderd?)`);
+  return { s, r };
+}
+const UITLEG_WEG = "Verwijderen kan daarom niet: die stukken zijn met deze gegevens gemaakt. Was het een tikfout in een bedrag of tekst, gebruik dan Bewerken; " +
+  "verandert er per een datum echt iets, leg dat vast als nieuwe versie per datum.";
+
+/** Wat er op een versie leunt (vooraf, voor het scherm): stukken, of verwijderen kan, en de uitleg in gewone taal. */
+export async function leunt(db          , zoek                 ) {
+  const { s, r } = await soortEnRij(db, zoek);
+  const st = await stukkenVan(db, await s.stukken(db, r));
+  const blok = s.blok ? await s.blok(db, r) : null;
+  const fin = s.fin && !(await legacyOpen(db)) ? "Kan na het overstapmoment; tot dan is dit een kopie van de oude datahub." : null;
+  const verwijderbaar = !st.length && !blok && !fin;
+  return {
+    soort: s.naam, stukken: st, verwijderbaar, kol: stempelKol(s), versie: stempel(s, r), onderdelen: await onderdelenStempel(db, s, r),
+    // welke onderdelen meegaan (tabel + kolommen, in deze volgorde): het scherm rekent het stempel na uit wat het toont
+    onderdelen_kol: (s.kinderen || []).map((k) => [k.tabel, k.kol]),
+    uitleg: fin || (st.length ? `Hierop leunen al ${stukkenTekst(st)}. ${UITLEG_WEG}` : blok || ""),
+    // bij Bewerken: wat er gebeurt met de stukken die er al zijn
+    bij_bewerken: fin || (st.length ? `Hierop leunen al ${stukkenTekst(st)}. Die veranderen niet mee; de correctie telt voor wat de app hierna rekent of maakt.` +
+      (s.periode.length ? " De datum is daarom niet te corrigeren." : "") : ""),
+    datum_vast: st.length > 0 && s.periode.length > 0,
+  };
+}
+
+/** Stempel van de onderdelen die bij verwijderen meegaan (bedragen van een kostenpost, wijzigingen en afwezigheid van een contract). */
+const onderdelenVan = (kv                       ) => K.versieVan(kv.map((x) => x.stempel));
+async function onderdelenStempel(db          , s       , r     ) {
+  return onderdelenVan(await kinderenVast(db, s, r));
+}
+/** Het scherm stuurt het stempel mee van de rij waarmee het begon; anders is die rij intussen gewijzigd. */
+function zelfdeVersie(s       , r     , b        ) {
+  if (typeof b.versie !== "string" || !b.versie) throw new Fout(400, "versie ontbreekt (herlaad de pagina)");
+  if (b.versie !== stempel(s, r)) throw new Fout(409, "Deze versie is intussen gewijzigd (in een ander venster of door een andere handeling). Herlaad de pagina en kijk opnieuw.");
+}
+
+async function corrigeer(db          , b        , wie        ) {
+  const { s, r: oud } = await soortEnRij(db, b);
+  zelfdeVersie(s, oud, b);
+  if (s.fin && !(await legacyOpen(db))) throw new Fout(409, `${s.naam} is pas te wijzigen na het overstapmoment (nu nog een kopie van fin)`);
+  const leesKeten = async () => (s.ketenVast ? [await s.ketenVast(db, oud)] : []);
+  const { voor: keten, uit: nieuw } = await zelfdeMoment(leesKeten, () => s.velden(db, b, oud));
+  const anders = Object.keys(nieuw).filter((k) => !gelijk(nieuw[k], oud[k]));
+  if (!anders.length) return { ok: true, ongewijzigd: true };
+  let guard       = { sql: "", w: [] };
+  if (s.periode.some((k) => anders.includes(k))) {
+    const db0 = s.datumBlok ? await s.datumBlok(db, oud) : null;
+    if (db0) throw new Fout(409, db0);
+    const { voor, uit: f } = await zelfdeMoment(async () => [await grensVast(db, s, oud), await grensVast(db, s, { ...oud, ...nieuw }, oud)],
+      async () => [...(await s.stukken(db, oud)), ...(await s.stukken(db, { ...oud, ...nieuw }, oud))]);
+    const st = await stukkenVan(db, f);
+    if (st.length) throw new Fout(409, `De datum is niet te corrigeren: hierop leunen al ${stukkenTekst(st)}. Verandert er per een datum echt iets, leg dat dan vast als nieuwe versie per datum.`);
+    guard = samen(vrijVan(f), ...voor);
+  }
+  // één voorwaarde voor alles in de batch: de rij is nog zoals gelezen en (bij een andere periode) er leunt nog steeds niets op
+  guard = samen(guard, s.corrigeerVoorwaarde?.(oud, { ...oud, ...nieuw }) || { sql: "", w: [] }, ...keten);
+  const m = zoalsGelezen(s, oud);
+  const cond       = { sql: `exists (select 1 from ${s.tabel} where ${m.sql})${guard.sql}`, w: [...m.w, ...guard.w] };
+  const nieuwSleutel = s.sleutel({ ...oud, ...nieuw });
+  const st         = [db.prepare("insert into logboek (wie, tabel, sleutel, actie, oud, nieuw) select ?,?,?,?,?,? where " + cond.sql)
+    .bind(wie, s.tabel, nieuwSleutel === s.sleutel(oud) ? nieuwSleutel : `${s.sleutel(oud)} → ${nieuwSleutel}`, "gecorrigeerd",
+      JSON.stringify(Object.fromEntries(anders.map((k) => [k, oud[k] ?? null]))), JSON.stringify(Object.fromEntries(anders.map((k) => [k, nieuw[k] ?? null]))), ...cond.w)];
+  const kol = Object.keys(nieuw).filter((k) => s.kol.includes(k));
+  const ex = s.extraSet?.(oud, nieuw, wie) || { sql: "", w: [] };
+  st.push(db.prepare(`update ${s.tabel} set ${setSql(kol)}${ex.sql} where ${m.sql}${guard.sql}`).bind(...kol.map((k) => nieuw[k] ?? null), ...ex.w, ...m.w, ...guard.w));
+  for (const x of s.naHoofd?.(oud, nieuw) || []) st.push(db.prepare(x.sql).bind(...x.w));
+  // vervolgopdrachten alleen als de correctie echt landde (de rij staat op de nieuwe waarden)
+  const geland = zoalsGelezen(s, { ...oud, ...nieuw });
+  for (const x of (await s.na?.(db, { ...oud, ...nieuw }, oud)) || []) st.push(db.prepare(`${x.sql} and exists (select 1 from ${s.tabel} where ${geland.sql})`).bind(...x.w, ...geland.w));
+  await db.batch(st);
+  const na = await s.lees(db, nieuwSleutel);
+  if (!na || anders.some((k) => !gelijk(na[k], nieuw[k]))) throw new Fout(409, "Niet (helemaal) bewaard: er is intussen iets veranderd (bijvoorbeeld een nota gemaakt of dezelfde versie aangepast). Kijk opnieuw.");
+  return { ok: true };
+}
+
+async function verwijder(db          , b        , wie        ) {
+  if (b.bevestig !== true) throw new Fout(400, "bevestig ontbreekt");
+  const { s, r } = await soortEnRij(db, b);
+  zelfdeVersie(s, r, b);
+  if (s.fin && !(await legacyOpen(db))) throw new Fout(409, `${s.naam} is pas te wijzigen na het overstapmoment (nu nog een kopie van fin)`);
+  const { voor: keten, uit: blok } = await zelfdeMoment(async () => (s.ketenVast ? [await s.ketenVast(db, r)] : []), async () => (s.blok ? s.blok(db, r) : null));
+  if (blok) throw new Fout(409, blok);
+  // voorwaarden: niets leunt erop, de periodegrens en de onderdelen zijn nog zoals bij het kijken, de rij zelf ook (en de extra voorwaarde)
+  const { voor, uit: f } = await zelfdeMoment(async () => [await grensVast(db, s, r), ...(await kinderenVast(db, s, r))], () => s.stukken(db, r));
+  const st0 = await stukkenVan(db, f);
+  if (st0.length) throw new Fout(409, `Hierop leunen al ${stukkenTekst(st0)}. ${UITLEG_WEG}`);
+  const v = vrijVan(f), g = voor[0], kv = voor.slice(1), extra = s.wegVoorwaarde?.(r) || { sql: "", w: [] };
+  // wat er meegaat moet precies zijn wat het scherm liet zien (stempel uit leunt); de batch gebruikt dezelfde vingerafdrukken als voorwaarde
+  if (kv.length && b.onderdelen !== onderdelenVan(kv                                    ))
+    throw new Fout(409, "Er kwam intussen iets bij (bijvoorbeeld een bedrag of een afwezigheid) dat mee zou verdwijnen. Herlaad de pagina en kijk opnieuw.");
+  const m = zoalsGelezen(s, r);
+  const rijEr       = { sql: `exists (select 1 from ${s.tabel} where ${m.sql})`, w: m.w };
+  const kind = s.kinderen || [];
+  // het logboek eerst (onder alle voorwaarden), met de onderdelen die meegaan zoals ze in de databank staan
+  const kindJson = kind.map((k) => `, '${k.tabel}', (select json_group_array(json_object(${k.kol.map((c) => `'${c}', ${c}`).join(", ")})) from ${k.tabel} where ${k.fk} = ?)`).join("");
+  const alles = samen(rijEr, v, g, ...kv, extra, ...keten);
+  // elke verwijderregel hangt aan déze logboekregel (uniek verzoeknummer): ging het logboek niet door, dan gaat er niets weg (Codex r9)
+  const verzoek = crypto.randomUUID();
+  const st         = [db.prepare(`insert into logboek (wie, tabel, sleutel, actie, oud, nieuw) select ?, ?, ?, 'verwijderd', json_object('rij', json(?)${kindJson}), json_object('verzoek', ?) where ${alles.sql}`)
+    .bind(wie, s.tabel, s.sleutel(r), JSON.stringify(r), ...kind.map(() => r.id), verzoek, ...alles.w)];
+  const gelogd = "exists (select 1 from logboek where tabel = ? and actie = 'verwijderd' and nieuw = json_object('verzoek', ?))";
+  for (const k of kind) st.push(db.prepare(`delete from ${k.tabel} where ${k.fk} = ? and ${gelogd}`).bind(r.id, s.tabel, verzoek));
+  // de hoofdregel: ook alleen na de logboekregel, en als er geen onderdelen meer zijn
+  const leeg = kind.map((k) => ` and not exists (select 1 from ${k.tabel} where ${k.fk} = ?)`).join("");
+  st.push(db.prepare(`delete from ${s.tabel} where ${m.sql} and ${gelogd}${leeg}`).bind(...m.w, s.tabel, verzoek, ...kind.map(() => r.id)));
+  for (const x of (await s.na?.(db, r, r)) || []) st.push(db.prepare(`${x.sql} and ${gelogd}`).bind(...x.w, s.tabel, verzoek));
+  await db.batch(st);
+  if (await s.lees(db, s.sleutel(r))) throw new Fout(409, "Niet verwijderd: er is intussen iets veranderd (bijvoorbeeld een nota gemaakt of de versie aangepast). Kijk opnieuw.");
+  return { ok: true };
 }

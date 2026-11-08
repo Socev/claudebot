@@ -227,6 +227,16 @@ export function dagnr(d) {
   const doy = Math.floor((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + dd - 1;
   return era * 146097 + yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
 }
+/**
+ * Versiestempel van een rij (wv2788): FNV-1a (32 bit) over de JSON van de waarden. Het scherm stuurt het stempel mee van de rij waarmee het
+ * formulier begon; de API weigert als de rij in de databank intussen anders is (geen stille overschrijving vanuit een ouder venster).
+ */
+export function versieVan(waarden) {
+  const t = JSON.stringify(waarden);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16).padStart(8, "0");
+}
 /** Datum + n dagen (JJJJ-MM-DD), zonder Date. */
 export function plusDagen(d, n) {
   const z = dagnr(d) + n;   // terug van dagnummer naar datum (algoritme van H. Hinnant)
