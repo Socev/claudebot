@@ -711,10 +711,12 @@ export function uitgavenUitBegroting({ jaar, begroting, personeel = null, verdel
 /**
  * R8 — kasstroomtoets: saldo per dag vanaf `startsaldo`; per maand de laagste stand. Zakt het saldo onder de ondergrens, dan noemt
  * de toets de eerste maand waarin dat gebeurt en stelt voor: het tekort extra op de nota van de maand ervoor, of de gewone maand
- * hoger met tekort ÷ het aantal maanden tot dan.
- * @param {{ jaar:number, startsaldo:number, stromen:{datum:string, bedrag:number}[], ondergrens?:number }} a
+ * hoger met tekort ÷ het aantal maanden tot dan. Is de buffer besloten (`bufferStatus` 'besloten'; David 8-11-2026: kleine buffer,
+ * Tolgaarde als vangnet), dan luidt het voorstel dat Tolgaarde bijspringt met een extra bijdrage die de afrekening verrekent.
+ * Een saldo onder nul staat met een min-teken in de tekst (wv2781).
+ * @param {{ jaar:number, startsaldo:number, stromen:{datum:string, bedrag:number}[], ondergrens?:number, bufferStatus?:string|null }} a
  */
-export function kasstroom({ jaar, startsaldo, stromen, ondergrens = 0 }) {
+export function kasstroom({ jaar, startsaldo, stromen, ondergrens = 0, bufferStatus = null }) {
   const s = stromen.filter((x) => x.datum.startsWith(String(jaar))).slice().sort((a, b) => (a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : b.bedrag - a.bedrag));
   let saldo = Number(startsaldo);
   const maanden = Array.from({ length: 12 }, (_, i) => ({ maand: i + 1, laagste: null, laagste_op: null, eind: null, in: 0, uit: 0 }));
@@ -743,11 +745,18 @@ export function kasstroom({ jaar, startsaldo, stromen, ondergrens = 0 }) {
     const eerst = onder[0];
     const tekort = rond2(ondergrens - Math.min(...onder.map((x) => x.laagste)));
     const ervoor = eerst.maand - 1;
+    // euro() laat het teken weg (bedoeld voor "u krijgt terug"); een saldo onder nul moet als tekort leesbaar blijven (wv2781)
+    const saldoTekst = (x) => (x < -0.004 ? `− ${euro(x)}` : euro(x));
+    const grens = Math.abs(ondergrens) < 0.005 ? "" : `, onder de ondergrens van ${saldoTekst(ondergrens)}`;
+    const diepst = onder.reduce((a, b) => (b.laagste < a.laagste - 0.005 ? b : a));
+    const soort = bufferStatus === "besloten" ? "tolgaarde" : ervoor >= 1 ? "nota" : "buffer";
     voorstel = {
-      maand: eerst.maand, tekort,
-      tekst: `In ${MAANDEN[eerst.maand - 1]} zakt het saldo tot ${euro(eerst.laagste)} (ondergrens ${euro(ondergrens)}). ` +
-        (ervoor >= 1 ? `Voorstel: ${euro(tekort, { heel: true })} extra op de nota van ${MAANDEN[ervoor - 1]}, of de gewone maand ${euro(Math.ceil(tekort / ervoor), { heel: true })} hoger.`
-          : `Voorstel: de buffer verhogen met ${euro(tekort, { heel: true })} (het tekort valt al in januari).`),
+      maand: eerst.maand, tekort, soort,
+      tekst: `In ${MAANDEN[eerst.maand - 1]} zakt het saldo tot ${saldoTekst(eerst.laagste)}${grens}: ${euro(ondergrens - eerst.laagste, { heel: true })} tekort` +
+        (diepst.maand !== eerst.maand ? `; het diepste punt is ${euro(tekort, { heel: true })} tekort in ${MAANDEN[diepst.maand - 1]}. ` : ". ") +
+        (soort === "tolgaarde" ? `Tolgaarde springt dan ± ${euro(tekort, { heel: true })} bij (extra bijdrage, verrekend in de afrekening).`
+          : soort === "nota" ? `Voorstel: ${euro(tekort, { heel: true })} extra op de nota van ${MAANDEN[ervoor - 1]}, of de gewone maand ${euro(Math.ceil(tekort / ervoor), { heel: true })} hoger.`
+            : `Voorstel: de buffer verhogen met ${euro(tekort, { heel: true })} (het tekort valt al in januari).`),
     };
   }
   return { jaar, startsaldo: Number(startsaldo), ondergrens, maanden, laagste: laagste.laagste, laagste_op: laagste.laagste_op, onder: onder.map((x) => x.maand), voorstel, eind: maanden[11].eind };
@@ -917,7 +926,7 @@ export function rekenJaarplan(d, entiteit, jaar, o = {}) {
     const stromen = [...inkomstenStromen({ jaar, perMaand: inkomend, spreiding: sp }),
       ...uitgavenUitBegroting({ jaar, begroting, personeel, verdeling: param?.verdeling || undefined })];
     const start = o.startsaldo != null ? Number(o.startsaldo) : alles;
-    kas = kasstroom({ jaar, startsaldo: start, stromen, ondergrens: 0 });
+    kas = kasstroom({ jaar, startsaldo: start, stromen, ondergrens: 0, bufferStatus: bf?.status || null });
   }
   return { entiteit, jaar, personeel, begroting, aandelen, patroon, buffer, buffer_instelling: bf, kasstroom: kas, waarschuwingen, ok: patroon.ok && begroting.totaal > 0 };
 }

@@ -1,4 +1,4 @@
--- GEGENEREERD uit Socev/ovis-pot 30226e7569d40badc8d4684cb2915760b876fcd6: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql
+-- GEGENEREERD uit Socev/ovis-pot af9cf5dacb795590aa8edb37074f84c9862f3d5a: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql
 -- OVIS POT — migratie 0001: de POT-tabellen zoals ze in D1 `fin` stonden (kolommen en ids gelijk), zodat de pod-modules
 -- (pot-datahub.js, pot-verzend.js) bij het overstapmoment alleen een andere database krijgen. Gegenereerd uit fin.sqlite_master op 8-11-2026.
 -- Geen gegevens in deze repo; de inhoud komt met scripts/kopieer-uit-fin.py.

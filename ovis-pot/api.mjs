@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot 30226e7569d40badc8d4684cb2915760b876fcd6 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot af9cf5dacb795590aa8edb37074f84c9862f3d5a (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
