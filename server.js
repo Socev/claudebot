@@ -3667,8 +3667,9 @@ function tokenGeweigerd(account, http, soort) {
       (account === 1 ? '`claude_code_oauth_token` + podherstart' : '`claude_oauth_token_2` (geen herstart)') + '; Sleutelregister vervangen_op bijwerken.\n');
   }
   const uur = Number(new Date(nu).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false }));
-  if (!s.david_gemeld && nu - s.sinds >= TOKEN_DAVID_NA_MS && uur >= 7 && uur < 23) {
-    s.david_gemeld = true;
+  // Review wv2748 MOET 1: 'gemeld' pas na een geslaagde bericht.py (exit 0); mislukt het, dan opnieuw bij een volgende 401, hooguit eens per TOKEN_DAVID_NA_MS.
+  if (!s.david_gemeld && !s.bericht_bezig && nu - s.sinds >= TOKEN_DAVID_NA_MS && nu - (s.poging_t || 0) >= TOKEN_DAVID_NA_MS && uur >= 7 && uur < 23) {
+    s.bericht_bezig = true; s.poging_t = nu;
     const hm = new Date(s.sinds).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });
     const tekst = account === 1
       ? 'Claude weigert sinds ' + hm + ' de inlog van Socev (je eigen abonnement): Socev, de app en de nachtrondes staan stil. Maak op je laptop een nieuw token met "claude setup-token" (ingelogd met je eigen Claude-account), zet het in Sleutelbos bij claude_code_oauth_token en herstart daarna de pod in Olares.'
@@ -3676,9 +3677,10 @@ function tokenGeweigerd(account, http, soort) {
     try {
       const k = spawn('python3', [(!SERVER_ECHT && process.env.TOKEN_WACHT_PROEF) || '/opt/data/mk-scripts/bericht.py', '--klasse', 'normaal', '--sleutel', 'inlog-account-' + account, tekst],
         { detached: true, stdio: 'ignore', env: process.env });
-      k.on('error', function (e) { logError('inlog-david', e); });
+      k.on('error', function (e) { s.bericht_bezig = false; logError('inlog-david', e); });
+      k.on('exit', function (code) { s.bericht_bezig = false; if (code === 0) s.david_gemeld = true; else logError('inlog-david', new Error('bericht.py exit ' + code)); });
       k.unref();
-    } catch (e) { logError('inlog-david', e); }
+    } catch (e) { s.bericht_bezig = false; logError('inlog-david', e); }
   }
 }
 function tokenHersteld(account) {
