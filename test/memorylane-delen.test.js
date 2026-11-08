@@ -683,7 +683,7 @@ test('wv2366 verteller: detail geeft stand en kosten; alleen bij mag; Privé/gev
     o.ml.lijst();
     const ha = o.hid('opname', RA), hb = o.hid('opname', RB), hc = o.hid('opname', RC);
     const v = o.ml.detail(ha).body.herinnering.verteller;
-    assert.strictEqual(v.kan, null); assert.strictEqual(v.stand, null); assert.ok(v.vooraf.eur >= 0.01 && v.vooraf.past);
+    assert.strictEqual(v.kan, null); assert.strictEqual(v.stand, null); assert.ok(v.vooraf.credits >= 1 && v.vooraf.past && !('eur' in v.vooraf), 'credits, geen euro\'s (wv2751)');
     for (const h of [hb, hc]) {
       const w = o.ml.detail(h).body.herinnering.verteller;
       assert.match(w.kan, /Privé of gevoelig/); assert.strictEqual(w.vooraf, null);
@@ -731,7 +731,7 @@ test('wv2484 als verhaal vertellen: script via Claude (alleen op de tik), gecach
     const ha = o.hid('opname', RA), hb = o.hid('opname', RB);
     const v = o.ml.detail(ha).body.herinnering.verteller_verhaal;
     assert.strictEqual(v.kan, null); assert.strictEqual(v.stand, null); assert.strictEqual(v.script, null);
-    assert.ok(v.vooraf.geschat && v.vooraf.eur >= 0.11 && v.vooraf.past, 'geschat: stem + Claude ' + JSON.stringify(v.vooraf));
+    assert.ok(v.vooraf.geschat && v.vooraf.credits >= 1 && v.vooraf.past && v.vooraf.bundel && v.vooraf.bundel.limiet > 0, 'geschat in credits ' + JSON.stringify(v.vooraf));
     const w = o.ml.detail(hb).body.herinnering.verteller_verhaal;
     assert.match(w.kan, /Privé of gevoelig/); assert.strictEqual(w.vooraf, null);
     assert.strictEqual(o.ml.vertelVerhaalMaken(hb, {}).status, 409);
@@ -749,7 +749,7 @@ test('wv2484 als verhaal vertellen: script via Claude (alleen op de tik), gecach
     assert.strictEqual(d1.verteller_verhaal.stand, 'klaar');
     assert.ok(d1.verteller_verhaal.script.tekst.includes('Socev las'), 'David ziet het script (zonder uitspraak)');
     assert.strictEqual(d1.verteller_verhaal.vooraf.geschat, false);
-    assert.ok(d1.verteller_verhaal.vooraf_opnieuw.geschat && d1.verteller_verhaal.vooraf_opnieuw.eur > d1.verteller_verhaal.vooraf.eur, 'prijs van Nieuw script (review ZOU 1)');
+    assert.ok(d1.verteller_verhaal.vooraf_opnieuw.geschat && d1.verteller_verhaal.vooraf_opnieuw.credits >= 1 && d1.verteller_verhaal.vooraf_opnieuw.bundel, 'credits van Nieuw script (review ZOU 1; wv2751: Claude telt niet in de credits)');
     assert.strictEqual(d1.verteller.stand, null, 'voorlezen staat los');
     assert.strictEqual(o.ml.vertelVerhaalDeel(ha, 1).status, 200);
     assert.strictEqual(o.ml.vertelVerhaalDeel(ha, 1, { toon: true }).status, 403);
@@ -859,16 +859,17 @@ test('wv2522 automatisch vertellen: zonder tik bij een ingesproken verhaal; niet
     o.klok.t += 3600000; await ronde(); await ronde();
     assert.strictEqual(aanvragen(), a0 + 2, 'na twee pogingen stopt hij');
     assert.strictEqual(boxen.filter((b) => /vertelling lukte niet/.test(b)).length, 1, 'één box-rij');
-    // plafond: wachten met één box-rij per maand; volgende maand vanzelf
+    // wv2751 credit-rem: wachten met één box-rij per bundelperiode; na de reset (18e) vanzelf
     elevenStuk = false;
     o.staat.verhalen[RA] = { titel: 'Proeffestival Veld', alineas: ['Een vierde proefverhaal over Proefveld.'] };
-    o.ing._db.prepare("INSERT INTO ml_verteller_aanvraag (t, hid, tekens, eur, status) VALUES (?, ?, 1, 4.99, 'klaar')").run(new Date(o.klok.t).toISOString(), hb);
+    o.ing._db.prepare("INSERT INTO ml_verteller_aanvraag (t, hid, tekens, eur, status, credits) VALUES (?, ?, 1, 0, 'klaar', 114900)").run(new Date(o.klok.t).toISOString(), hb);   // verzonnen: bijna de hele bundel
     const a1 = aanvragen();
     await ronde(); await ronde();
-    assert.strictEqual(aanvragen(), a1, 'boven het plafond: niets');
-    assert.strictEqual(boxen.filter((b) => /maandplafond bereikt/.test(b)).length, 1, 'één box-rij per maand');
-    o.klok.t = Date.parse('2026-12-01T09:00:00Z'); await ronde();
-    assert.strictEqual(aanvragen(), a1 + 1, 'volgende maand vanzelf'); assert.strictEqual(vragen.length, 7);
+    assert.strictEqual(aanvragen(), a1, 'boven de rem: niets');
+    const bb = boxen.filter((b) => /ElevenLabs-bundel bijna op/.test(b));
+    assert.strictEqual(bb.length, 1, 'één box-rij per periode'); assert.match(bb[0], /credits deze periode/); assert.ok(!/€/.test(bb[0]), 'geen geld in de box');
+    o.klok.t = Date.parse('2026-11-18T09:00:00Z'); await ronde();
+    assert.strictEqual(aanvragen(), a1 + 1, 'na de reset vanzelf'); assert.strictEqual(vragen.length, 7);
     assert.strictEqual(o.ml.detail(ha).body.herinnering.verteller_verhaal.stand, 'klaar');
     // review ZOU 1: een weigering op de inhoud geeft één box-rij met alleen een code, nooit de tekst
     o.staat.verhalen[RA] = { titel: 'Proeffestival Veld', alineas: ['Proefveld met de sleutel ' + NEP_GEHEIM + ' erin.'] };

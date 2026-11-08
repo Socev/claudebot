@@ -657,7 +657,7 @@ function stemmenUit(flows, regStemmen) {
     (regStemmen || []).forEach(function (r) {
       if (!r || !ELEVEN_ID_RE.test(r.id) || uit.some(function (x) { return x.id === r.id; })) return;
       uit.push({ id: r.id, flow: el.id, naam: r.naam || 'ElevenLabs-stem', motor: 'elevenlabs', betaald: true, beschikbaar: el.klaar === true,
-        reden: el.klaar ? null : (el.reden || 'niet beschikbaar'), prijs: el.prijs || null, vers_per_keer: true, prijs_tabel: el.prijs_tabel || null,
+        reden: el.klaar ? null : (el.reden || 'niet beschikbaar'), prijs: el.prijs || null, vers_per_keer: true, credits_tabel: el.credits_tabel || null,
         modellen: (el.velden || []).filter(function (v) { return v.naam === 'model'; }).map(function (v) { return v.opties || []; })[0] || [],
         model_standaard: ((el.velden || []).find(function (v) { return v.naam === 'model'; }) || {}).standaard || null });
     });
@@ -668,7 +668,7 @@ function stemmenUit(flows, regStemmen) {
     uit.push({ id: f.stem, flow: f.id, naam: f.titel, motor: f.motor, betaald: false, beschikbaar: f.klaar === true, reden: f.klaar ? null : (f.reden || 'niet beschikbaar'),
       prijs: f.prijs || 'gratis', vers_per_keer: f.vers_per_keer === true });
   });
-  if (!el) uit.push({ id: 'elevenlabs', flow: null, naam: 'ElevenLabs (betaald)', motor: 'elevenlabs', betaald: true, beschikbaar: false,
+  if (!el) uit.push({ id: 'elevenlabs', flow: null, naam: 'ElevenLabs (credits)', motor: 'elevenlabs', betaald: true, beschikbaar: false,
     reden: 'nog niet beschikbaar — komt met Studio fase 2', prijs: null, vers_per_keer: true });
   return uit;
 }
@@ -810,7 +810,7 @@ function routes(deps) {
     if (route === 'GET /app/bandjes') {
       const pr = Object.keys(PRAKTIJKEN).map(lees).map(praktijkUit);
       let kosten = null;
-      try { const t = deps.studio && deps.studio.teller ? deps.studio.teller() : null; kosten = t && t.plafond ? t.plafond.elevenlabs || null : null; } catch (e) { kosten = null; }
+      try { const t = deps.studio && deps.studio.teller ? deps.studio.teller() : null; kosten = t && t.elevenlabs ? t.elevenlabs : null; } catch (e) { kosten = null; }   // wv2751: credits van de ElevenLabs-bundel
       return { status: 200, j: { ok: true, praktijken: pr, stemmen: await stemmen(), schrijven: !!primair(), stem_standaard: STEM_STANDAARD, grens: GRENS, kosten: kosten,
         spreek: { standaard: SPREEK_STD, grenzen: SPREEK_GRENS, max: SPREEK.MAX } } };
     }

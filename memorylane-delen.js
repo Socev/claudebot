@@ -28,10 +28,10 @@
  *  - Verteller in Davids eigen stem (wv2366): met o.eleven maakt memorylane-verteller.js op Davids tik de vertelling (ElevenLabs, eigen
  *    stem, v4) en bewaart hem op de pod. Alleen actief, categorie gekozen en niet Privé, niet gevoelig, geen blok, niet in de toonmodus.
  *  - Als verhaal vertellen (wv2484): met o.claude schrijft memorylane-vertelscript.js van het verhaal eerst een luisterversie met audio-tags
- *    (Claude, feitentoets en taglijst in code), die de verteller (vorm 'verhaal') in Davids stem inspreekt. Zelfde regels en plafond als
+ *    (Claude, feitentoets en taglijst in code), die de verteller (vorm 'verhaal') in Davids stem inspreekt. Zelfde regels en credit-rem als
  *    hierboven; script per herinnering + verhaalversie bewaard, opnieuw alleen bij een nieuwe verhaalversie of op Davids knop.
  *  - Vanzelf vertellen (wv2522, David 5-11 21:26: "Alles waar wat voor ingesproken wordt moet altijd direct een verhaal op gebouwd worden"):
- *    autoVertel() in de tik maakt de vertelling als verhaal zonder tik voor elke herinnering met iets ingesprokens, binnen hetzelfde plafond;
+ *    autoVertel() in de tik maakt de vertelling als verhaal zonder tik voor elke herinnering met iets ingesprokens, binnen dezelfde credit-rem (wv2751);
  *    zie de toelichting bij autoVertel. Register ml_vertel_auto (hid, hash, tellers).
  *  - Samengevoegd (wv2732, David 8-11-2026): status 'samengevoegd' + kolom bij (de herinnering die blijft); verborgen zoals 'afgewezen' en
  *    nooit in delen, toonmodus, albumsync of vertelronde. koppel() in de tik voegt een reis of fotoalbum vanzelf bij een opname over dezelfde
@@ -312,7 +312,7 @@ function maak(o) {
     if (!o.eleven || typeof o.eleven.sleutel !== 'function') return null;
     try {
       return require('./memorylane-verteller.js').maak({ db, dir: DIR, nu, fout, sleutel: o.eleven.sleutel, routerUrl: o.eleven.routerUrl, fetch: o.eleven.fetch,
-        geheimRaak: (t) => geheimRaak(t), markerRaak: (l) => markerRaak(l), klaar: o.eleven.klaar });
+        geheimRaak: (t) => geheimRaak(t), markerRaak: (l) => markerRaak(l), klaar: o.eleven.klaar, credits: o.eleven.credits });
     } catch (e) { fout('ml-verteller', e); return null; }
   })();
   // wv2484: het vertelscript voor "Als verhaal vertellen" (alleen met o.claude en de verteller; ontbreekt de module, dan zonder)
@@ -1391,11 +1391,11 @@ function maak(o) {
     const st = V.stand(h.hid, tts ? V.hashVan(tts) : null, 'verhaal');
     const oud = !!b.bron && !sc && !!S.lees(h.hid);
     return Object.assign(st, { kan: niet || (b.bron ? null : 'er is nog geen verhaal om te vertellen'), afgekapt: !!b.afgekapt,
-      vooraf: niet || !b.bron ? null : sc ? V.vooraf(tts) : V.vooraf(Math.round(b.bron.length * SCHAT_FACTOR), S.SCHATTING_EUR),
+      vooraf: niet || !b.bron ? null : sc ? V.vooraf(tts) : V.vooraf(Math.round(b.bron.length * SCHAT_FACTOR)),
       script: sc ? { tekst: scriptToon(sc.script, b.twijfel), op: sc.op, weggelaten: sc.weggelaten || 0, terugval: !!sc.terugval, tags: sc.tags || 0 } : null,
       script_verouderd: oud,
       // review ZOU 1: wat Nieuw script ongeveer kost (nieuw script + opnieuw inspreken)
-      vooraf_opnieuw: sc && !niet ? V.vooraf(Math.round(b.bron.length * SCHAT_FACTOR), S.SCHATTING_EUR) : null });
+      vooraf_opnieuw: sc && !niet ? V.vooraf(Math.round(b.bron.length * SCHAT_FACTOR)) : null });
   }
   // d.opnieuw = true: ook een bewaard script opnieuw laten schrijven (Davids knop)
   function vertelVerhaalMaken(hid, d, opt) {
@@ -1410,18 +1410,18 @@ function maak(o) {
     if (markerRaak([b.bron])) return { status: 409, body: { ok: false, fout: 'er staat iets in dat op een patiëntgegeven lijkt; de verteller vertelt dit niet' } };
     const sc = d && d.opnieuw === true ? null : scriptActueel(h, b);
     if (sc) return V.maken(h.hid, V.uitspraakVan(sc.script), 'verhaal');
-    return V.maken(h.hid, '', 'verhaal', { tekens: Math.round(b.bron.length * SCHAT_FACTOR), extraEur: S.SCHATTING_EUR,
+    return V.maken(h.hid, '', 'verhaal', { tekens: Math.round(b.bron.length * SCHAT_FACTOR),
       script: async () => {
         const u = await S.schrijf(h.hid, b.titel, b.verhaal, b.hash);
-        return u.ok ? { tekst: V.uitspraakVan(u.script), eur: u.eur } : { fout: u.fout, eur: u.eur };
+        return u.ok ? { tekst: V.uitspraakVan(u.script) } : { fout: u.fout };
       } });
   }
   // ── wv2522 (David 5-11-2026 21:26, Engineer-knop: "Alles waar wat voor ingesproken wordt moet altijd direct een verhaal op gebouwd worden") ──
   // De vertelling als verhaal (script + Davids stem) komt vanzelf, zonder tik en zonder vingerafdruk. Elke AUTO_ELKE_MS in de tik hooguit één
   // aanvraag, voor een herinnering met iets ingesprokens (een opname, of een ingesproken aanvulling van David) waar de verteller mag vertellen
   // (zelfde poort als de knop: categorie gekozen, niet Privé of gevoelig, geen blok) en waarvan het verhaal af is (opname: verhaalstand klaar;
-  // Davids laatste eigen stuk ≥ AUTO_RUST_MS oud). Een nieuwe verhaalversie (aanvulling, correctie) = opnieuw. Grenzen: het maandplafond en de
-  // dag- en tussentijdgrens van de verteller; past het plafond niet, dan wacht hij tot de volgende maand met één box-rij per maand (nooit stil
+  // Davids laatste eigen stuk ≥ AUTO_RUST_MS oud). Een nieuwe verhaalversie (aanvulling, correctie) = opnieuw. Grenzen: de credit-rem (wv2751: 5 % van de
+  // ElevenLabs-bundel over) en de dag- en tussentijdgrens; past het niet, dan wacht hij tot de nieuwe credits, met één box-rij per periode (nooit stil
   // overslaan). Per verhaalversie hooguit AUTO_POGINGEN aanvragen met AUTO_OPNIEUW_MS ertussen; lukt het dan niet, één box-rij.
   // Weggehaald door David = niet opnieuw tot het verhaal verandert. Uit: bestand <dir>/verteller-auto-uit. Geen tekst in box of register.
   const AUTO_ELKE_MS = 2 * 60000, AUTO_RUST_MS = 10 * 60000, AUTO_OPNIEUW_MS = 3600000, AUTO_POGINGEN = 2;
@@ -1441,7 +1441,7 @@ function maak(o) {
   function foutCode(f) {
     const t = String(f || '');
     if (!t) return 'onbekend (pod herstart?)';
-    for (const [re, c] of [[/maandplafond/, 'plafond'], [/sleutel/, 'sleutel'], [/ElevenLabs weigerde \(HTTP (\d{3})\)/, 'elevenlabs-http-$1'], [/ElevenLabs/, 'elevenlabs'],
+    for (const [re, c] of [[/maandplafond|bundel is bijna op/, 'plafond'], [/sleutel/, 'sleutel'], [/ElevenLabs weigerde \(HTTP (\d{3})\)/, 'elevenlabs-http-$1'], [/ElevenLabs/, 'elevenlabs'],
       [/script|Claude/, 'script'], [/niet naar buiten/, 'geheim'], [/patiëntgegeven/, 'patientmarker'], [/bewaren/, 'bewaren'], [/bezig/, 'bezig']]) {
       const m = re.exec(t);
       if (m) return c.replace('$1', m[1] || '');
@@ -1456,7 +1456,7 @@ function maak(o) {
     if (!dwing && t - autoVorige < AUTO_ELKE_MS) return null;
     autoVorige = t;
     const uit = { gestart: null, wacht_plafond: 0, open: 0 };
-    let plafondEur = null;
+    let bundel = null;
     for (const h of q.hAlle.all()) {
       if (h.status !== 'actief' || !ingesproken(h) || vertellerNiet(h)) continue;
       const p = paginaLees(h.hid), s = sam(h, p);
@@ -1478,8 +1478,8 @@ function maak(o) {
       if (zelfde && t - Date.parse(a.op) < AUTO_OPNIEUW_MS) continue;
       uit.open++;
       if (uit.gestart) continue;
-      const vo = V.vooraf(Math.round(b.bron.length * SCHAT_FACTOR), S.SCHATTING_EUR);
-      if (!vo.past) { uit.wacht_plafond++; plafondEur = vo.rest_eur; continue; }
+      const vo = V.vooraf(Math.round(b.bron.length * SCHAT_FACTOR));
+      if (!vo.past) { uit.wacht_plafond++; bundel = vo.bundel; continue; }
       const r = vertelVerhaalMaken(h.hid, {});
       if (r.status === 202) { q.autoZet.run(h.hid, b.hash, zelfde ? a.pogingen + 1 : 1, iso(t), 0); uit.gestart = h.hid; continue; }
       if (r.body && r.body.plafond) { uit.wacht_plafond++; continue; }
@@ -1491,12 +1491,15 @@ function maak(o) {
       q.autoGemeld.run(h.hid);
     }
     if (uit.wacht_plafond) {
-      const m = maandNL(t);
+      // wv2751: één box-rij per bundelperiode (credits, geen euro's)
+      const bd = bundel || V.info().bundel || {};
+      const m = String(bd.periode_van || maandNL(t)).slice(0, 10);
       let al = '';
       try { al = fs.readFileSync(AUTO_PLAFOND, 'utf8').trim(); } catch (e) { /* nog nooit */ }
       if (al !== m) {
-        autoBox('maandplafond bereikt', ['gemeten: ' + uit.wacht_plafond + ' vertelling(en) als verhaal wachten op het maandplafond van de verteller (€ ' + V.info().plafond_eur + ', nog € ' + (plafondEur === null ? 0 : plafondEur).toFixed(2).replace('.', ',') + ' over); ze komen vanzelf in de volgende maand.',
-          'voorstel: plafond verhogen (PLAFOND_EUR in memorylane-verteller.js, langs David) of wachten.']);
+        autoBox('ElevenLabs-bundel bijna op', ['gemeten: ' + uit.wacht_plafond + ' vertelling(en) als verhaal wachten op nieuwe ElevenLabs-credits (' + (V.info().bundel_tekst || '?') +
+          '; de rem staat op ' + (bd.rem_procent == null ? 5 : bd.rem_procent) + ' % over); ze komen vanzelf na ' + String(bd.periode_tot || '?').slice(0, 10) + '.',
+          'voorstel: wachten, of langs David de rem (rem_procent in studio/elevenlabs-bundel.json) of de bundel aanpassen.']);
         try { fs.writeFileSync(AUTO_PLAFOND, m + '\n', { mode: 0o600 }); } catch (e) { fout('ml-vertel-auto', e); }
       }
     }

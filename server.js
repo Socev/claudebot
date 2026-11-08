@@ -3870,6 +3870,7 @@ function handleRequest(req, res) {
       tibber_data: tibberInfo(),   // wv2625: Tibber Data API (module in de release?, laatste ronde, noodkopie; geen tokens)
       bankarchief_fout: bankArchiefFoutLaatst ? bankArchiefFoutLaatst.tijd : null,   // wv687: laatste schrijffout (tekst in api.log en de box)
       bank_verrijk_ai: bankVerrijkStand(true),   // wv740: stand van de AI-indeling (alleen aantallen en tijden); peilen hoeft niet meer via /smal/bank
+      elevenlabs: elevenCreditsInfo(),   // wv2751: credits van Davids ElevenLabs-bundel (gebruikt/limiet/over, rem bij 5 %)
       studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
       pot_verzend: typeof potVzInfo === 'function' ? potVzInfo() : { aan: false },   // wv911: POT-app nota's als Gmail-concept (schakelaar, laatste tik, aantallen; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
@@ -16190,6 +16191,16 @@ function appOpenUitslag(j, a) {
 // Ontbreekt studio.js in de release (terugrol), dan 404 op de routes en studio.aan=false in /health.
 const STUDIO_DIR = serverPad('studio', process.env.STUDIO_DIR, '/opt/data/studio', serverProefDeel('studio'));
 const STUDIO_SLEUTEL_NAAM = 'router_studio_key';
+// wv2751: één credit-teller voor alles wat ElevenLabs aanroept (Studio/Bandjes en de MemoryLane-verteller): Davids vooruitbetaalde
+// bundel, rem bij 5 % over. Uitleg en meting in elevenlabs-credits.js; instelling (optioneel) in <STUDIO_DIR>/elevenlabs-bundel.json.
+const elevenCredits = (function () {
+  try { return require(path.join(__dirname, 'elevenlabs-credits.js')).maak({ bestand: path.join(STUDIO_DIR, 'elevenlabs-bundel.json'), fout: function (l, e) { logError(l, e); } }); }
+  catch (e) { logError('eleven-credits', e); return null; }
+})();
+function elevenCreditsInfo() {
+  if (!elevenCredits) return { aan: false };
+  try { const s = elevenCredits.stand(); return Object.assign({ aan: true, tekst: elevenCredits.tekst(s) }, s); } catch (e) { return { aan: true, fout: true }; }
+}
 let studioSleutelCache = null;   // { w, tot }
 async function studioSleutel() {
   if (process.env.ROUTER_STUDIO_KEY) return process.env.ROUTER_STUDIO_KEY;
@@ -16212,7 +16223,7 @@ const studio = (function () {
   const p = path.join(__dirname, 'studio.js');
   if (!fs.existsSync(p)) return null;
   try {
-    return require(p).maak({ dir: STUDIO_DIR, bewaar: appBewaar, primair: function () { return rolPrimair(); }, sleutel: studioSleutel,
+    return require(p).maak({ dir: STUDIO_DIR, bewaar: appBewaar, primair: function () { return rolPrimair(); }, sleutel: studioSleutel, credits: elevenCredits || undefined,
       routerUrl: process.env.STUDIO_ROUTER_URL, comfyUrl: process.env.STUDIO_COMFY_URL, flowstudioUrl: process.env.STUDIO_FLOWSTUDIO_URL,   // wv736: geheugencontrole
       piper: process.env.STUDIO_PIPER_BIN ? { bin: process.env.STUDIO_PIPER_BIN, model: process.env.STUDIO_PIPER_MODEL, data: process.env.STUDIO_PIPER_DATA } : null,
       log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError,
@@ -20551,7 +20562,7 @@ const memorylaneDelen = (function () {
       beeld: function (x) { return openaiHulp && typeof openaiHulp.beeld === 'function' ? openaiHulp.beeld({ afnemer: 'memorylane-plaatje', prompt: x && x.prompt, kwaliteit: 'medium' }) : Promise.resolve({ ok: false, status: 'uit' }); },
       marker: require(path.join(__dirname, 'intake', 'patientpoort.js')), geheimen: function () { try { return openaiPodGeheimen(); } catch (e) { return []; } },
       // wv2366: de verteller in Davids eigen stem via de Olares Router (zelfde sleutel en route als Studio/Bandjes, eigen plafond in de module)
-      eleven: { sleutel: function () { return studioSleutel(); }, routerUrl: process.env.STUDIO_ROUTER_URL },
+      eleven: { sleutel: function () { return studioSleutel(); }, routerUrl: process.env.STUDIO_ROUTER_URL, credits: elevenCredits || undefined },
       // wv2484: het vertelscript voor "Als verhaal vertellen" via Claude (zelfde sleutel en SDK als het verhaal en de PDF-lezer)
       claude: { sleutel: pdfSleutel, sdk: pdfSdk },
       categorieen: HERINNERINGEN_MOD.CATEGORIEEN, onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
@@ -20676,18 +20687,18 @@ async function appMemorylane(req, res, a, s, route, d) {
       if (u.status === 200) daarna();
       return antw(m[2], u);
     }
-    // wv2366: de verteller in Davids eigen stem. Maken = de tekst gaat naar ElevenLabs en kost geld: verse vingerafdruk (ook vanaf een vaste
+    // wv2366: de verteller in Davids eigen stem. Maken = de tekst gaat naar ElevenLabs en kost credits van Davids bundel: verse vingerafdruk (ook vanaf een vaste
     // plek: er wordt niets gedeeld). Het maken loopt op de achtergrond (202); de app volgt de stand via het detail.
     if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/verteller(\/weg)?$/.exec(route))) {
       if (m[2]) return antw('verteller weg', memorylaneDelen.vertellerWeg(m[1], toon));
-      if (!appVersOk(a, s)) { res._app.reden = 'memorylane verteller, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk: de tekst gaat naar ElevenLabs en dat kost een paar cent', vers_nodig: true }); }
+      if (!appVersOk(a, s)) { res._app.reden = 'memorylane verteller, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk: de tekst gaat naar ElevenLabs en dat kost credits van je bundel', vers_nodig: true }); }
       return antw('verteller', memorylaneDelen.vertellerMaken(m[1], toon));
     }
     if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/verteller\/([1-9])$/.exec(route))) return antw('verteller deel', memorylaneDelen.vertellerDeel(m[1], Number(m[2]), toon));
     // wv2484: Als verhaal vertellen. Maken = het verhaal gaat naar Claude (script) en het script naar ElevenLabs: verse vingerafdruk, zoals hierboven.
     if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/verteller-verhaal(\/weg)?$/.exec(route))) {
       if (m[2]) return antw('verteller-verhaal weg', memorylaneDelen.vertelVerhaalWeg(m[1], toon));
-      if (!appVersOk(a, s)) { res._app.reden = 'memorylane verteller-verhaal, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk: het verhaal gaat naar Claude en ElevenLabs en dat kost een paar cent', vers_nodig: true }); }
+      if (!appVersOk(a, s)) { res._app.reden = 'memorylane verteller-verhaal, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk: het verhaal gaat naar Claude en ElevenLabs en dat kost credits van je ElevenLabs-bundel', vers_nodig: true }); }
       return antw('verteller-verhaal', memorylaneDelen.vertelVerhaalMaken(m[1], d, toon));
     }
     if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/verteller-verhaal\/([1-9])$/.exec(route))) return antw('verteller-verhaal deel', memorylaneDelen.vertelVerhaalDeel(m[1], Number(m[2]), toon));

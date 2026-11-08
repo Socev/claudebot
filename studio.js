@@ -110,7 +110,9 @@ const FS_PROJECT_MS = 60 * 1000;               // cache van FlowStudio /api/proj
 // GEMETEN 22-10 (mk-scripts/elevenlabs/voortgang.md): Router declareert POST /v1/audio/speech en /v1/text-to-speech/<id> NIET voor de
 // ElevenLabs-modellen (422 audio_operation_not_supported), maar stuurt POST /v1/text-to-speech/<voice_id>/stream?output_format=… 1-op-1
 // door naar api.elevenlabs.io (body { text, model_id }; ElevenLabs-kop character-cost komt terug). Router telt die aanroepen als
-// "audio_unmetered" (cost_usd 0): het Router-budget op de sleutel beschermt dus NIET; het plafond hieronder is het enige slot in Socev.
+// "audio_unmetered" (cost_usd 0): het Router-budget op de sleutel beschermt dus NIET; de credit-rem hieronder is het enige slot in Socev.
+// wv2751 (David 8-11): geen euro's meer. Elke aanroep gaat van Davids vooruitbetaalde ElevenLabs-bundel (credits) af; de rem is de
+// gezamenlijke credit-rem van elevenlabs-credits.js (met de verteller), die alleen voorkomt dat de bundel op raakt (pay-as-you-go).
 // Eén aanroep per taak (twee = dubbel betalen) in pcm_24000 (op elk ElevenLabs-abonnement; pcm_44100 vraagt Pro); de pod maakt er een
 // WAV van en audio.js de telefoonversies. Prijs vooraf = tekens × tarief (bouwplan § 6: $ 0,08 / $ 0,04 per 1.000 tekens, naar boven
 // afgerond en als euro geteld, dus ruim); achteraf blijft die schatting staan, met de ElevenLabs-credits erbij (die rekenen anders:
@@ -122,24 +124,21 @@ const FS_PROJECT_MS = 60 * 1000;               // cache van FlowStudio /api/proj
 // alle vier modellen namen dat 22-10 aan (voortgang-2.md). Pauzes vertaalt spreektekst.js per model.
 const ELEVEN = {
   modellen: {
-    eleven_v4: { naam: 'v4 (beste, standaard)', eur_per_1000: 0.10, router: 'eleven_v3' },
-    eleven_v3: { naam: 'v3 (expressiever)', eur_per_1000: 0.10, router: 'eleven_v3' },
-    eleven_multilingual_v2: { naam: 'Multilingual v2', eur_per_1000: 0.10, router: 'eleven_multilingual_v2' },
-    eleven_flash_v2_5: { naam: 'Flash v2.5 (sneller, goedkoper)', eur_per_1000: 0.05, router: 'eleven_flash_v2_5', normalisatie: 'auto' },
+    eleven_v4: { naam: 'v4 (beste, standaard)', router: 'eleven_v3' },
+    eleven_v3: { naam: 'v3 (expressiever)', router: 'eleven_v3' },
+    eleven_multilingual_v2: { naam: 'Multilingual v2', router: 'eleven_multilingual_v2' },
+    eleven_flash_v2_5: { naam: 'Flash v2.5 (sneller, minder credits)', router: 'eleven_flash_v2_5', normalisatie: 'auto' },
   },
   standaard: 'eleven_v4',
   taal: 'nl',
   stemgevoel: { snelheid: { min: 0.7, max: 1.2, standaard: 0.95 }, stabiliteit: { min: 0, max: 1, standaard: 0.5 }, gelijkenis: 0.75 },
   formaat: 'pcm_24000', rate: 24000,
   stem_re: /^[A-Za-z0-9]{8,40}$/,
-  tarief_bron: 'bouwplan Studio § 6 (prijspagina ElevenLabs 21-10-2026), naar boven afgerond',
 };
-const PLAFOND_STANDAARD = { elevenlabs: 10 };   // euro per kalendermaand (Europe/Amsterdam); David 22-10: "€ 10 tot ik anders zeg"
-function prijsVooraf(tekens, model) {
-  const m = ELEVEN.modellen[model] || ELEVEN.modellen[ELEVEN.standaard];
-  return Math.max(0.01, Math.ceil(tekens * m.eur_per_1000 / 10) / 100);   // op hele centen naar boven
-}
-function euro(x) { return '€ ' + (Math.round(x * 100) / 100).toFixed(2).replace('.', ','); }
+const CREDITS = require('./elevenlabs-credits.js');
+// wv2751: credits vooraf (ruime schatting per model; de echte komen uit de kop character-cost)
+function prijsVooraf(tekens, model) { return CREDITS.schat(tekens, Object.hasOwn(ELEVEN.modellen, model) ? model : ELEVEN.standaard); }
+function creditsTabel() { return Object.keys(ELEVEN.modellen).reduce(function (o, k) { o[k] = CREDITS.PER_TEKEN[k] || 1; return o; }, {}); }
 function pcmNaarWav(pcm, rate) {
   const h = Buffer.alloc(44);
   h.write('RIFF', 0, 'ascii'); h.writeUInt32LE(36 + pcm.length, 4); h.write('WAVE', 8, 'ascii');
@@ -298,43 +297,39 @@ function maak(deps) {
     catch (e) { fout('studio-audit', e); }
   }
 
-  // ── verbruik en plafond (wv782; bouwplan § 5.4 write-ahead, § 6 maandplafond) ──
-  // verbruik.jsonl: per betaalde taak eerst 'gereserveerd' (vóór de aanroep, synchroon in maak), daarna 'verrekend' (geleverd),
+  // ── verbruik en credit-rem (wv782 write-ahead; wv2751 credits i.p.v. euro's) ──
+  // verbruik.jsonl: per ElevenLabs-taak eerst 'gereserveerd' (vóór de aanroep, synchroon in maak), daarna 'verrekend' (geleverd),
   // 'geschat' (aanroep gedaan, uitkomst onbekend: telt mee) of 'vrijgegeven' (nooit aangeroepen of door de aanbieder geweigerd: telt niet).
-  // De laatste regel per taak telt; een open reservering telt mee. Geen tekst, alleen bedragen.
+  // De laatste regel per taak telt; een open reservering telt mee. Geen tekst, alleen credits (credits_schat vooraf, credits = de kop).
+  // Oude regels (vóór wv2751) hebben eur; die tellen alleen met hun credits mee.
   const VERBRUIK = path.join(DIR, 'verbruik.jsonl');
-  const LIMIETEN = path.join(DIR, 'studio-limieten.json');
-  const vb = {};   // taak → { aanbieder, maand, soort, eur, credits }
+  const C = deps.credits || CREDITS.maak({ nu: klok });
+  const vb = {};   // taak → { t, aanbieder, maand, soort, credits_schat, credits }
   (function laadVerbruik() {
     let t = '';
     try { t = fs.readFileSync(VERBRUIK, 'utf8'); } catch (e) { return; }
     t.split('\n').forEach(function (r) {
       if (!r.trim()) return;
-      try { const o = JSON.parse(r); if (o && typeof o.taak === 'string' && typeof o.eur === 'number') vb[o.taak] = o; } catch (e) {}
+      try { const o = JSON.parse(r); if (o && typeof o.taak === 'string' && (typeof o.eur === 'number' || typeof o.credits_schat === 'number')) vb[o.taak] = o; } catch (e) {}
     });
   })();
-  function verbruikZet(taak, aanbieder, soort, eur, extra) {
+  function verbruikZet(taak, aanbieder, soort, schat, extra) {
     const o = Object.assign({ t: new Date(klok()).toISOString(), taak: taak, aanbieder: aanbieder, maand: (vb[taak] && vb[taak].maand) || dagNL(klok()).slice(0, 7),
-      soort: soort, eur: Math.round(eur * 100) / 100 }, extra || {});
+      soort: soort, credits_schat: Math.max(0, Math.round(Number(schat) || 0)) }, extra || {});
     mkdir(DIR);
     fs.appendFileSync(VERBRUIK, JSON.stringify(o) + '\n', { mode: 0o600 });   // gooit bij een volle schijf: dan geen aanroep
     vb[taak] = o;
     return o;
   }
-  function besteed(aanbieder, maand) {
-    maand = maand || dagNL(klok()).slice(0, 7);
+  function creditsVan(o) { return o.soort === 'vrijgegeven' ? 0 : typeof o.credits === 'number' ? o.credits : typeof o.credits_schat === 'number' ? o.credits_schat : 0; }
+  // credits die Studio (en Bandjes via Studio) sinds iso bij ElevenLabs verbruikte — bron voor de gezamenlijke credit-rem
+  function creditsSinds(iso) {
     let s = 0;
-    Object.keys(vb).forEach(function (k) { const o = vb[k]; if (o.aanbieder === aanbieder && o.maand === maand && o.soort !== 'vrijgegeven') s += o.eur; });
-    return Math.round(s * 100) / 100;
+    Object.keys(vb).forEach(function (k) { const o = vb[k]; if (o.aanbieder === 'elevenlabs' && String(o.t) >= iso) s += creditsVan(o); });
+    return s;
   }
-  function plafond(aanbieder) {
-    try {
-      const j = JSON.parse(fs.readFileSync(LIMIETEN, 'utf8'));
-      const w = Number(j && j[aanbieder]);
-      if (isFinite(w) && w >= 0 && w <= 500) return w;
-    } catch (e) {}
-    return PLAFOND_STANDAARD[aanbieder] || 0;
-  }
+  C.bron('studio', creditsSinds);
+  function bundelUit() { const b = C.stand(); return Object.assign({ tekst: C.tekst(b), studio_periode: creditsSinds(b.periode_van) }, b); }
   (function laad() {
     try {
       const j = JSON.parse(fs.readFileSync(TAKEN, 'utf8'));
@@ -352,7 +347,7 @@ function maak(deps) {
     Object.keys(vb).forEach(function (k) {
       if (vb[k].soort !== 'gereserveerd') return;
       const t = st.taken.find(function (x) { return x.id === k; });
-      try { verbruikZet(k, vb[k].aanbieder, t && t.aangeroepen ? 'geschat' : 'vrijgegeven', t && t.aangeroepen ? vb[k].eur : 0, { na_herstart: true }); }
+      try { verbruikZet(k, vb[k].aanbieder, t && t.aangeroepen ? 'geschat' : 'vrijgegeven', t && t.aangeroepen ? (vb[k].credits_schat || 0) : 0, { na_herstart: true }); }
       catch (e) { fout('studio-verbruik', e); }
     });
   })();
@@ -566,10 +561,10 @@ function maak(deps) {
       motor_naam: f.motor === 'router' ? 'lokaal · FlowStudio via Router' : f.motor === 'piper' ? 'lokaal · Piper op de pod (CPU)'
         : f.motor === 'elevenlabs' ? 'betaald · ElevenLabs via Router (de tekst gaat naar ElevenLabs, VS)' : 'lokaal · ComfyUI rechtstreeks',
       status: f.status, uitvoer: f.uitvoer, klaar: klaar, reden: f.fout || f.reden || (f.status === 'uit' ? 'staat uit' : null),
-      prijs: f.betaald ? 'betaald · ± € 0,10 per 1.000 tekens (Flash € 0,05)' : 'gratis', tijd: f.tijd || '',
+      prijs: f.betaald ? 'ElevenLabs-credits · ± 1 credit per 2 tekens (v3 en Multilingual 1 per teken)' : 'gratis', tijd: f.tijd || '',
       vers_per_keer: f.status === 'proef' || f.betaald === true, bandje: f.bandje === true, stem: f.stem || null,
       betaald: f.betaald === true, aanbieder: f.aanbieder || null,
-      prijs_tabel: f.betaald ? Object.keys(ELEVEN.modellen).reduce(function (o, k) { o[k] = ELEVEN.modellen[k].eur_per_1000; return o; }, {}) : null,
+      credits_tabel: f.betaald ? creditsTabel() : null,   // wv2751: credits per teken per model
       velden: (f.velden || []).map(function (v) {
         const o = Object.assign({}, v); delete o.pad;
         if (o.opties) o.opties = o.opties.map(function (x) { const y = Object.assign({}, x); delete y.zet; delete y.voorbewerking; return y; });   // wv2482, wv2679
@@ -605,8 +600,7 @@ function maak(deps) {
     const gpuS = st.taken.filter(function (t) { return t.gpu_s > 0 && dagNL(Date.parse(t.gemaakt)).slice(0, 7) === maand; })
       .reduce(function (s, t) { return s + t.gpu_s; }, 0);
     return { vandaag: vandaagN(), per_dag: GRENS.per_dag, in_rij: st.rij.length, rij_max: GRENS.rij, bezig: st.bezig ? st.bezig.id : null,
-      gpu_minuten_maand: Math.round(gpuS / 6) / 10, kosten_maand: besteed('elevenlabs', maand),
-      plafond: { elevenlabs: { plafond_eur: plafond('elevenlabs'), besteed_eur: besteed('elevenlabs', maand), rest_eur: Math.max(0, Math.round((plafond('elevenlabs') - besteed('elevenlabs', maand)) * 100) / 100) } } };
+      gpu_minuten_maand: Math.round(gpuS / 6) / 10, elevenlabs: bundelUit() };
   }
   function taakUit(t) {
     return { id: t.id, flow: t.flow, titel: t.titel, motor: t.motor, uitvoer: t.uitvoer, status: t.status, fase: t.fase || null, procent: t.procent == null ? null : t.procent,
@@ -615,7 +609,7 @@ function maak(deps) {
       bron: t.bron || null, noot: t.noot || null,
       beeld: t.beeld ? { breed: t.beeld.breed, hoog: t.beeld.hoog, verkleind: t.beeld.verkleind === true, immich: t.beeld.immich || null } : null,   // wv2482, wv2614
       immich: t.immich ? { stapel: t.immich.stapel === true, albums: t.immich.albums || 0, dubbel: t.immich.dubbel === true, link: t.immich.link || null, noot: t.immich.noot || null } : null,   // wv2614
-      betaald: t.betaald === true, kosten_eur: t.betaald ? (vb[t.id] ? (vb[t.id].soort === 'vrijgegeven' ? 0 : vb[t.id].eur) : t.prijs_vooraf || 0) : 0,
+      betaald: t.betaald === true, kosten_credits: t.betaald ? (vb[t.id] ? creditsVan(vb[t.id]) : t.prijs_vooraf || 0) : 0,
       kosten_staat: t.betaald && vb[t.id] ? vb[t.id].soort : null, credits: t.credits == null ? null : t.credits };
   }
 
@@ -922,9 +916,9 @@ function maak(deps) {
     if (flowMax > 0 && st.taken.filter(function (t) { return t.flow === f.id && dagNL(Date.parse(t.gemaakt)) === dag; }).length >= flowMax)
       return { status: 429, fout: 'deze flow heeft vandaag al ' + flowMax + ' taken gehad; morgen weer' };
     if (f.betaald) {
-      const pl = plafond(f.aanbieder), al = besteed(f.aanbieder);
-      if (al + prijs > pl + 1e-9) return { status: 409, plafond: true, fout: 'het maandplafond voor ElevenLabs (' + euro(pl) + ') is bereikt: deze maand al ' + euro(al) + ', dit bandje kost ± ' + euro(prijs) + '. Vraag Socev om het plafond te verhogen.' };
-      if (!ctx.versOk()) return { status: 403, fout: 'betaald (± ' + euro(prijs) + ' bij ElevenLabs): bevestig met je vingerafdruk', vers_nodig: true };
+      const bs = C.stand();
+      if (!C.past(prijs, bs)) return { status: 409, plafond: true, fout: C.weigering(prijs, 'dit bandje', bs) };
+      if (!ctx.versOk()) return { status: 403, fout: 'kost ± ' + C.getal(prijs) + ' ElevenLabs-credits: bevestig met je vingerafdruk', vers_nodig: true };
       ctx.versVerbruik();
     } else if (f.status === 'proef') {
       if (!ctx.versOk()) return { status: 403, fout: 'deze flow is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
@@ -981,11 +975,11 @@ function maak(deps) {
       // 'geschat' (telt mee); nooit aangeroepen of door de aanbieder geweigerd (HTTP-fout, ElevenLabs rekent die niet) = vrijgegeven.
       if (t.betaald) {
         const soort = t.geleverd ? 'verrekend' : (t.aangeroepen && !t.geweigerd ? 'geschat' : 'vrijgegeven');
-        try { verbruikZet(t.id, t.aanbieder, soort, soort === 'vrijgegeven' ? 0 : t.prijs_vooraf, t.credits != null ? { credits: t.credits } : null); }
+        try { verbruikZet(t.id, t.aanbieder, soort, t.prijs_vooraf, t.credits != null ? { credits: t.credits } : null); }
         catch (e) { fout('studio-verbruik', e); }
       }
       audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: t.status, duur_s: t.duur_s, bestanden: (t.bestanden || []).length,
-        kosten: t.betaald && vb[t.id] && vb[t.id].soort !== 'vrijgegeven' ? vb[t.id].eur : 0, credits: t.credits == null ? undefined : t.credits,
+        kosten_credits: t.betaald && vb[t.id] ? creditsVan(vb[t.id]) : 0, credits: t.credits == null ? undefined : t.credits,
         proef: !!t.proef, reden: t.status === 'klaar' ? null : String(t.reden || '').slice(0, 160) });
       log('studio taak=' + t.id + ' flow=' + t.flow + ' motor=' + t.motor + ' uitkomst=' + t.status + ' duur_s=' + t.duur_s);
       // wv743: los van de afronding, met eigen catch (synchroon gooien én een afgewezen belofte); raakt de finally nooit
@@ -1024,7 +1018,7 @@ function maak(deps) {
     }
     // bewaren via de bestaande bewaarfunctie van Bestanden (Fable M1); bij een bandje het label uit de bron (wv743)
     const m = deps.bewaar(t.id, out, { soort: 'studio', label: t.bron ? bronLabel(t.bron) : f.titel, ok: true, app: true,
-      studio: { flow: f.id, motor: f.motor, kosten: t.betaald ? t.prijs_vooraf : 0, duur_s: Math.round((klok() - Date.parse(t.start)) / 1000) } });
+      studio: { flow: f.id, motor: f.motor, kosten_credits: t.betaald ? (t.credits != null ? t.credits : t.prijs_vooraf) : 0, duur_s: Math.round((klok() - Date.parse(t.start)) / 1000) } });
     if (!m || !m.bestanden || !m.bestanden.length) return { fout: m && m.vol ? 'de opslag op de pod zit vol (2 GB); er is niets bewaard' : 'het resultaat kon niet bewaard worden' };
     t.bestanden = m.bestanden.map(function (b) { return { n: b.n, naam: b.naam, grootte: b.grootte }; });
     return { ok: true };
@@ -1613,7 +1607,7 @@ function maak(deps) {
       st.rij = st.rij.filter(function (x) { return x !== id; });
       t.status = 'gestopt'; t.reden = 'uit de rij gehaald'; t.eind = new Date(klok()).toISOString(); t.fase = null;
       if (t.betaald) { try { verbruikZet(t.id, t.aanbieder, 'vrijgegeven', 0); } catch (e) { fout('studio-verbruik', e); } }   // wv782
-      audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: 'gestopt', duur_s: 0, bestanden: 0, kosten: 0 });
+      audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: 'gestopt', duur_s: 0, bestanden: 0, kosten_credits: 0 });
       bewaarTaken();
       return { status: 200, taak: taakUit(t) };
     }

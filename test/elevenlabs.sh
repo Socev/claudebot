@@ -4,7 +4,7 @@
 # POST /v1/text-to-speech/<voice_id>/stream?output_format=pcm_24000, body { text, model_id, model }, kop character-cost terug.
 # Toetst: zonder sleutel "wacht" en geen aanroep; betaald = verse vingerafdruk per taak (403 vers_nodig zonder, geen reservering en geen
 # aanroep); stem en model alleen uit de witte lijst; prijs vooraf = tekens × tarief (Flash goedkoper); reservering vóór de aanroep en
-# verrekend na levering (credits erbij); maandplafond weigert vóór de vingerafdruk; HTTP-fout = vrijgegeven, netwerkfout = geschat;
+# verrekend na levering (echte credits); wv2751: credit-rem (ElevenLabs-bundel, rem 5 %) weigert vóór de vingerafdruk, geen euro's; HTTP-fout = vrijgegeven, netwerkfout = geschat;
 # stoppen in de rij = vrijgegeven; herstart met open reservering (aangeroepen = geschat, niet = vrijgegeven); WAV 24 kHz + twee
 # telefoonversies; nooit automatisch opnieuw; geen tekst in audit/log/verbruik; sleutel alleen naar de Router. Bandjes: ElevenLabs-stemmen
 # uit beide registers op de flow bandje-elevenlabs, model uit invoer of praktijkinstelling of standaard, voice-id en model naar Studio.
@@ -15,6 +15,7 @@ node --no-warnings - <<'JS'
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http');
 const studioMod = require('./studio.js');
 const B = require('./bandjes.js');
+const CR = require('./elevenlabs-credits.js');
 let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (!ok && extra !== undefined ? '  [' + JSON.stringify(extra).slice(0, 600) + ']' : '')); }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'eleven-'));
@@ -65,7 +66,13 @@ const router = http.createServer((req, res) => {
   };
   let sleutel = null;
   const logs = [], fouts = [];
-  const maakStudio = () => studioMod.maak({ dir: DIR, bewaar, primair: () => true, sleutel: async () => sleutel, routerUrl: RURL,
+  // wv2751: verzonnen bundel (100.000 credits, geen meting); BUNDEL() zet hem terug
+  const BUNDEL_F = path.join(W, 'bundel.json');
+  const BUNDEL = (x) => fs.writeFileSync(BUNDEL_F, typeof x === 'string' ? x : JSON.stringify(Object.assign({ maand_bundel: 100000, reset_dag: 18, rem_procent: 5, meting: null }, x || {})));
+  BUNDEL();
+  const credits = CR.maak({ bestand: BUNDEL_F });
+  const halfG = Math.ceil(GEHEIM.length * 0.5);
+  const maakStudio = () => studioMod.maak({ dir: DIR, bewaar, credits, primair: () => true, sleutel: async () => sleutel, routerUrl: RURL,
     log: (r) => logs.push(r), fout: (w, e) => fouts.push(w + ': ' + (e && e.message)), tempo: { poll: 20 } });
   let S = maakStudio();
   let vers = false, verbruikt = 0;
@@ -81,7 +88,7 @@ const router = http.createServer((req, res) => {
   toets('1 stem-elevenlabs zichtbaar, bandje-elevenlabs alleen met verborgen', !!stem && !!band && !(await S.flows()).flows.some((f) => f.id === 'bandje-elevenlabs'));
   toets('1 zonder sleutel: wacht op de Router-sleutel, niet klaar', stem && stem.klaar === false && /Router-sleutel/.test(stem.reden || ''), stem);
   toets('1 flow kapot zonder veld stem', (c.flows.find((f) => f.id === 'eleven-zonder-stem') || {}).klaar === false);
-  toets('1 betaald, prijs, vers_per_keer, motor_naam noemt ElevenLabs VS', stem.betaald === true && stem.vers_per_keer === true && /betaald/.test(stem.prijs) && /VS/.test(stem.motor_naam) && stem.prijs_tabel && stem.prijs_tabel.eleven_flash_v2_5 === 0.05);
+  toets('1 betaald, credits, vers_per_keer, motor_naam noemt ElevenLabs VS', stem.betaald === true && stem.vers_per_keer === true && /credits/.test(stem.prijs) && !/€/.test(stem.prijs) && /VS/.test(stem.motor_naam) && !stem.prijs_tabel && stem.credits_tabel && stem.credits_tabel.eleven_flash_v2_5 === 0.5 && stem.credits_tabel.eleven_v3 === 1, stem);
   const mv = stem.velden.find((v) => v.naam === 'model');
   toets('1 model-veld uit de pod (4 modellen, standaard v4; wv803)', mv && mv.soort === 'keuze' && mv.opties.length === 4 && mv.standaard === 'eleven_v4' && mv.opties[0].waarde === 'eleven_v4', mv);
   let r = await S.maak({ flow: 'stem-elevenlabs', velden: { tekst: GEHEIM, stem: ROOS }, beurt_id: nieuweBeurt() }, ctx);
@@ -92,7 +99,7 @@ const router = http.createServer((req, res) => {
 
   // 2. vingerafdruk per taak
   r = await S.maak({ flow: 'stem-elevenlabs', velden: { tekst: GEHEIM, stem: ROOS }, beurt_id: nieuweBeurt() }, ctx);
-  toets('2 zonder verse vingerafdruk: 403 vers_nodig met prijs', r.status === 403 && r.vers_nodig === true && /€ 0,01/.test(r.fout), r);
+  toets('2 zonder verse vingerafdruk: 403 vers_nodig met credits', r.status === 403 && r.vers_nodig === true && new RegExp('± ' + halfG + ' ElevenLabs-credits').test(r.fout) && !/€/.test(r.fout), r);
   toets('2 geen reservering en geen aanroep', verbruikRegels().length === 0 && R.posts.length === 0);
   // 3. witte lijst
   vers = true;
@@ -108,7 +115,7 @@ const router = http.createServer((req, res) => {
   r = await S.maak({ flow: 'stem-elevenlabs', velden: { tekst: GEHEIM, stem: ROOS }, beurt_id: nieuweBeurt() }, ctx);
   toets('4 maak met vingerafdruk: 200, vingerafdruk verbruikt', r.status === 200 && verbruikt === 1 && vers === false, r);
   const v0 = verbruikRegels();
-  toets('4 reservering vóór de aanroep (schatting tekens × tarief)', v0.length >= 1 && v0[0].soort === 'gereserveerd' && v0[0].eur === 0.01 && v0[0].tekens === GEHEIM.length, v0);
+  toets('4 reservering vóór de aanroep (schatting tekens × 0,5 credit)', v0.length >= 1 && v0[0].soort === 'gereserveerd' && v0[0].credits_schat === halfG && !('eur' in v0[0]) && v0[0].tekens === GEHEIM.length, v0);
   await wachtKlaar(r.taak.id);
   let t = S.taak(r.taak.id);
   toets('4 taak klaar', t.status === 'klaar', t);
@@ -123,10 +130,12 @@ const router = http.createServer((req, res) => {
   const ul = fs.readFileSync(path.join(BEWAAR, t.id, 'b', '2'));
   toets('4 telefoonversie µ-law 8 kHz (formaat 7)', ul.readUInt16LE(20) === 7 && ul.readUInt32LE(24) === 8000);
   const v1 = verbruikRegels();
-  toets('4 verrekend met credits', v1[v1.length - 1].soort === 'verrekend' && v1[v1.length - 1].credits === 42 && v1[v1.length - 1].eur === 0.01, v1);
-  toets('4 taak toont kosten en credits', t.betaald === true && t.kosten_eur === 0.01 && t.credits === 42 && t.kosten_staat === 'verrekend', t);
-  toets('4 meta in Bestanden draagt kosten', bewaard[t.id] && bewaard[t.id].studio.kosten === 0.01);
-  toets('4 stand: besteed en plafond € 10', S.teller().plafond.elevenlabs.plafond_eur === 10 && S.teller().plafond.elevenlabs.besteed_eur === 0.01 && S.teller().kosten_maand === 0.01, S.teller());
+  toets('4 verrekend met de echte credits', v1[v1.length - 1].soort === 'verrekend' && v1[v1.length - 1].credits === 42, v1);
+  toets('4 taak toont credits', t.betaald === true && t.kosten_credits === 42 && t.credits === 42 && t.kosten_staat === 'verrekend' && !('kosten_eur' in t), t);
+  toets('4 meta in Bestanden draagt credits', bewaard[t.id] && bewaard[t.id].studio.kosten_credits === 42, bewaard[t.id]);
+  const tl = S.teller();
+  toets('4 stand: bundel in credits, geen euro', tl.elevenlabs && tl.elevenlabs.studio_periode === 42 && tl.elevenlabs.gebruikt === 42 && tl.elevenlabs.limiet === 100000 && tl.elevenlabs.over === 99958 &&
+    tl.elevenlabs.tekst === '42 van 100.000 credits deze periode, 99.958 over' && !('plafond' in tl) && !('kosten_maand' in tl), tl);
 
   // 5. prijs: Flash goedkoper, lange tekst duurder
   const lang = 'a'.repeat(1500);
@@ -134,22 +143,26 @@ const router = http.createServer((req, res) => {
   r = await S.maak({ flow: 'bandje-elevenlabs', velden: { tekst: lang, stem: ROOS, model: 'eleven_flash_v2_5' }, beurt_id: nieuweBeurt() }, ctx);
   await wachtKlaar(r.taak.id);
   const vf = verbruikRegels().filter((x) => x.taak === r.taak.id);
-  toets('5 Flash: 1500 tekens = € 0,08 (0,05 per 1.000, naar boven)', vf[0].eur === 0.08 && vf[0].model === 'eleven_flash_v2_5', vf);
+  toets('5 Flash: 1500 tekens = 750 credits geschat', vf[0].credits_schat === 750 && vf[0].model === 'eleven_flash_v2_5', vf);
   toets('5 bandje-flow: bestandsnaam bandje.wav', S.taak(r.taak.id).bestanden.some((b) => b.naam === 'bandje.wav'));
   vers = true;
   r = await S.maak({ flow: 'bandje-elevenlabs', velden: { tekst: lang, stem: ROOS, model: 'eleven_v3' }, beurt_id: nieuweBeurt() }, ctx);
   await wachtKlaar(r.taak.id);
-  toets('5 v3: 1500 tekens = € 0,15', verbruikRegels().filter((x) => x.taak === r.taak.id)[0].eur === 0.15);
+  toets('5 v3: 1500 tekens = 1500 credits geschat', verbruikRegels().filter((x) => x.taak === r.taak.id)[0].credits_schat === 1500);
 
-  // 6. plafond
-  fs.writeFileSync(path.join(DIR, 'studio-limieten.json'), JSON.stringify({ elevenlabs: 0.25 }));
+  // 6. credit-rem (wv2751): verzonnen meting net gedaan, bundel 700 → rem bij 665; 1500 tekens v4 = 750 credits geschat
+  await new Promise((x) => setTimeout(x, 1100));   // eerdere taken vallen vóór de meting
+  BUNDEL({ meting: { op: new Date(Date.now() - 500).toISOString(), gebruikt: 0, limiet: 700 } });
   vers = true; const vb6 = verbruikt, p6 = R.posts.length;
   r = await S.maak({ flow: 'bandje-elevenlabs', velden: { tekst: lang, stem: ROOS }, beurt_id: nieuweBeurt() }, ctx);
-  toets('6 boven het plafond: 409 plafond, met bedragen', r.status === 409 && r.plafond === true && /€ 0,25/.test(r.fout) && /€ 0,24/.test(r.fout), r);
+  toets('6 boven de rem: 409 plafond, in credits', r.status === 409 && r.plafond === true && /ElevenLabs-bundel is bijna op/.test(r.fout) && /0 van 700 credits/.test(r.fout) && /± 750 credits/.test(r.fout) && !/€/.test(r.fout), r);
   toets('6 geen vingerafdruk verbruikt, geen aanroep', verbruikt === vb6 && vers === true && R.posts.length === p6);
-  fs.writeFileSync(path.join(DIR, 'studio-limieten.json'), JSON.stringify({ elevenlabs: 'veel' }));
-  toets('6 onleesbaar plafond: standaard € 10', S.teller().plafond.elevenlabs.plafond_eur === 10);
-  fs.writeFileSync(path.join(DIR, 'studio-limieten.json'), JSON.stringify({ elevenlabs: 10 }));
+  r = await S.maak({ flow: 'bandje-elevenlabs', velden: { tekst: 'a'.repeat(1200), stem: ROOS }, beurt_id: nieuweBeurt() }, ctx);
+  toets('6 binnen de rem (600 ≤ 665): mag', r.status === 200, r);
+  if (r.taak) await wachtKlaar(r.taak.id);
+  BUNDEL('{ kapot');
+  toets('6 onleesbare instelling: standaard (maandbundel of meting), nooit 0', [CR.STANDAARD.maand_bundel, CR.STANDAARD.meting.limiet].includes(S.teller().elevenlabs.limiet), S.teller().elevenlabs);
+  BUNDEL();
 
   // 7. HTTP-fout: vrijgegeven, sleutelmelding zonder sleutel, nooit opnieuw
   R.modus = '401'; vers = true; const p7 = R.posts.length;
@@ -158,7 +171,7 @@ const router = http.createServer((req, res) => {
   toets('7 401: mislukt met gewone taal over de sleutel', t.status === 'mislukt' && /mag ElevenLabs \(nog\) niet aanroepen/.test(t.reden), t);
   toets('7 sleutel niet in de reden', t.reden.indexOf(SLEUTEL) < 0 && t.reden.indexOf('eeeeeeee') < 0, t.reden);
   toets('7 precies één aanroep (nooit opnieuw)', R.posts.length === p7 + 1);
-  toets('7 reservering vrijgegeven (telt niet)', verbruikRegels().filter((x) => x.taak === t.id).pop().soort === 'vrijgegeven' && t.kosten_eur === 0);
+  toets('7 reservering vrijgegeven (telt niet)', verbruikRegels().filter((x) => x.taak === t.id).pop().soort === 'vrijgegeven' && t.kosten_credits === 0);
   R.modus = '422'; vers = true;
   r = await S.maak({ flow: 'bandje-elevenlabs', velden: { tekst: GEHEIM, stem: ROOS }, beurt_id: nieuweBeurt() }, ctx);
   await wachtKlaar(r.taak.id);
@@ -170,10 +183,11 @@ const router = http.createServer((req, res) => {
   toets('7 502 van Router: mislukt, geschat (telt mee; Fable #2)', S.taak(r.taak.id).status === 'mislukt' && verbruikRegels().filter((x) => x.taak === r.taak.id).pop().soort === 'geschat');
 
   // 8. verbinding breekt midden in het geluid: geschat (telt mee)
-  R.modus = 'breek'; vers = true; const voor8 = S.teller().plafond.elevenlabs.besteed_eur;
+  R.modus = 'breek'; vers = true; const voor8 = S.teller().elevenlabs.studio_periode;
   r = await S.maak({ flow: 'bandje-elevenlabs', velden: { tekst: GEHEIM, stem: ROOS }, beurt_id: nieuweBeurt() }, ctx);
   await wachtKlaar(r.taak.id); t = S.taak(r.taak.id);
-  toets('8 afgebroken: mislukt, geschat, telt mee', t.status === 'mislukt' && verbruikRegels().filter((x) => x.taak === t.id).pop().soort === 'geschat' && S.teller().plafond.elevenlabs.besteed_eur === Math.round((voor8 + 0.01) * 100) / 100, { t, v: verbruikRegels().slice(-2) });
+  const l8 = verbruikRegels().filter((x) => x.taak === t.id).pop();
+  toets('8 afgebroken: mislukt, geschat, telt mee', t.status === 'mislukt' && l8.soort === 'geschat' && S.teller().elevenlabs.studio_periode === voor8 + (typeof l8.credits === 'number' ? l8.credits : l8.credits_schat) && S.teller().elevenlabs.studio_periode > voor8, { t, v: verbruikRegels().slice(-2) });
 
   // 9. stoppen in de rij = vrijgegeven; stoppen tijdens de aanroep = geschat
   R.modus = 'hang'; vers = true;
@@ -209,7 +223,7 @@ const router = http.createServer((req, res) => {
   // 11. geen tekst in audit, log of verbruik; sleutel alleen naar de Router
   const audit = fs.readFileSync(path.join(DIR, 'audit.jsonl'), 'utf8');
   toets('11 geen tekst in audit.jsonl', audit.indexOf('geheime toetszin') < 0 && audit.indexOf('aaaaaaaaaa') < 0);
-  toets('11 audit draagt kosten en credits', /"kosten":0\.01/.test(audit) && /"credits":42/.test(audit));
+  toets('11 audit draagt credits, geen euro', /"kosten_credits":42/.test(audit) && /"credits":42/.test(audit) && !/"kosten":/.test(audit));
   toets('11 geen tekst in de logregels', !logs.some((l) => l.indexOf('geheime') >= 0));
   toets('11 geen tekst in verbruik.jsonl', fs.readFileSync(path.join(DIR, 'verbruik.jsonl'), 'utf8').indexOf('geheime') < 0);
   toets('11 rechten verbruik.jsonl 0600', (fs.statSync(path.join(DIR, 'verbruik.jsonl')).mode & 0o777) === 0o600);
@@ -244,7 +258,7 @@ const router = http.createServer((req, res) => {
   const g = await rt.app('GET /app/bandjes', {}, ctx);
   const tg = g.j.praktijken.find((x) => x.id === 'tolgaarde');
   const bd = tg && tg.bandjes[0];
-  toets('13 GET: register leesbaar, Roos in stemmen, kosten met plafond', g.status === 200 && bd && g.j.stemmen.some((x) => x.id === 'elevenlabs:' + ROOS && x.beschikbaar) && g.j.kosten && g.j.kosten.plafond_eur === 10, { st: g.status, pr: g.j.praktijken && g.j.praktijken.map((x) => [x.id, x.fouten, x.bandjes.length]), stemmen: g.j.stemmen, kosten: g.j.kosten });
+  toets('13 GET: register leesbaar, Roos in stemmen, kosten in credits', g.status === 200 && bd && g.j.stemmen.some((x) => x.id === 'elevenlabs:' + ROOS && x.beschikbaar) && g.j.kosten && g.j.kosten.limiet === 100000 && /credits deze periode/.test(g.j.kosten.tekst) && g.j.stemmen.some((x) => x.credits_tabel && x.credits_tabel.eleven_v4 === 0.5), { st: g.status, pr: g.j.praktijken && g.j.praktijken.map((x) => [x.id, x.fouten, x.bandjes.length]), stemmen: g.j.stemmen, kosten: g.j.kosten });
   if (bd) {
     vers = false;
     let m = await rt.app('POST /app/bandjes/maak', { praktijk: 'tolgaarde', bandje: bd.id, versie: bd.versie, tekst_hash: bd.tekst_hash, beurt_id: nieuweBeurt() }, ctx);
@@ -273,13 +287,13 @@ const router = http.createServer((req, res) => {
     vers = true;
     m = await rt.app('POST /app/bandjes/maak', { praktijk: 'groenhouten', bandje: gh.id, versie: gh.versie, tekst_hash: gh.tekst_hash, model: 'eleven_bestaat_niet', beurt_id: nieuweBeurt() }, ctx);
     toets('13 onbekend model uit de invoer: 400, geen stille terugval (Fable #4)', m.status === 400 && /model/.test(m.j.fout), m);
-    fs.writeFileSync(path.join(DIR, 'studio-limieten.json'), JSON.stringify({ elevenlabs: 0 }));
+    BUNDEL({ rem_procent: 50, maand_bundel: 1 });
     vers = true;
     m = await rt.app('POST /app/bandjes/maak', { praktijk: 'groenhouten', bandje: gh.id, versie: gh.versie, tekst_hash: gh.tekst_hash, beurt_id: nieuweBeurt() }, ctx);
     toets('13 plafond bereikt: 409 met plafond: true via bandjes', m.status === 409 && m.j.plafond === true, m);
     const ins = await rt.app('POST /app/bandjes/instellingen', { praktijk: 'tolgaarde', praktijkstem: 'elevenlabs:' + ROOS }, ctx);
     toets('13 praktijkstem Roos nu toegestaan via instellingen', ins.status === 200, ins);
-    fs.writeFileSync(path.join(DIR, 'studio-limieten.json'), JSON.stringify({ elevenlabs: 10 }));
+    BUNDEL();
     // Fable #1: bandje met een eigen (betaalde) stem, David kiest expliciet "praktijkstem" (hier een Piper-stem die de toets niet kent)
     const ghPad = path.join(VAULT, B.PRAKTIJKEN.groenhouten.pad);
     fs.writeFileSync(ghPad, fs.readFileSync(ghPad, 'utf8').replace('- praktijkstem: elevenlabs:' + ROOS, '- praktijkstem: piper:nl_NL-ronnie-medium').replace('- stem: praktijkstem', '- stem: elevenlabs:' + ROOS));

@@ -14,22 +14,24 @@
  *    model_id "eleven_v4"; het veld model ("elevenlabs/eleven_v3") is alleen voor de Router, die eleven_v4 niet in zijn catalogus heeft maar
  *    model_id 1-op-1 doorstuurt (gemeten wv803, en 4-11 met deze stem).
  *  - Tekst ≤ 6.000 tekens in delen ≤ 2.400 (alinea-, anders zinsgrens), één aanroep per deel, nooit automatisch opnieuw. "Socev" → "Zo Kef".
- *  - Plafond € 5 per kalendermaand (Europe/Amsterdam) op een ruime schatting (€ 0,10 per 1.000 tekens, per deel op hele centen naar boven):
- *    de Router telt ElevenLabs als "audio_unmetered", dus dit plafond is het enige slot. Reservering vóór de aanroep; een 4xx op het eerste
- *    deel = niets gemaakt (vrijgegeven); al het andere telt mee. Hooguit 20 aanvragen per Nederlandse dag, ≥ 10 s ertussen, één tegelijk.
+ *  - wv2751 (David 8-11): geen euro's meer. Elke aanroep gaat van Davids vooruitbetaalde ElevenLabs-bundel af; de rem is een credit-rem
+ *    (elevenlabs-credits.js: stop bij 5 % van de bundel over, zodat er nooit pay-as-you-go aanspringt). Reservering vóór de aanroep op een
+ *    ruime schatting (0,5 credit per teken), na afloop de echte credits (kop character-cost); een 4xx op het eerste deel = niets gemaakt
+ *    (vrijgegeven); al het andere telt mee. Hooguit 20 aanvragen per Nederlandse dag, ≥ 10 s ertussen, één tegelijk.
  *  - Bewaren op de pod: <dir>/verteller/<hid>/<n>.mp3 (mappen 0700, bestanden 0600), pas na alle delen (eerst in een tijdelijke map).
- *    Register in intake.sqlite (ml_verteller, ml_verteller_aanvraag): alleen hid, tijd, aantallen, bedrag en de sha256 van de verstuurde
+ *    Register in intake.sqlite (ml_verteller, ml_verteller_aanvraag): alleen hid, tijd, aantallen, credits en de sha256 van de verstuurde
  *    tekst. GEEN tekst: die databank gaat elke nacht in de podstaat-bundel.
  *  - Afspelen alleen als de sha256 van de huidige tekst gelijk is (anders 'verouderd'). Weghalen wist map en rij. opruim() wist de audio
  *    van elke herinnering die weg is of niet meer mag (Privé/gevoelig/blok): direct in de eerstvolgende tik (review ontwerp MOET 2).
- * PRIVACY. Nooit tekst in logs, box, /health of fouten: alleen aantallen en bedragen.
+ * PRIVACY. Nooit tekst in logs, box, /health of fouten: alleen aantallen en credits.
  *
  * WV2484 (David 5-11-2026 14:39, Engineer-knop: naast voorlezen ook "het verhaal te genereren als een Elevenlabs v4 verhaal … in míjn stem").
- * Twee vormen, elk met eigen map en tabel, één gezamenlijk plafond en één aanvraag tegelijk:
+ * Twee vormen, elk met eigen map en tabel, één gezamenlijke credit-rem en één aanvraag tegelijk:
  *  - 'voorlezen' (zoals wv2366): <dir>/verteller/<hid>, tabel ml_verteller.
  *  - 'verhaal': <dir>/verteller-verhaal/<hid>, tabel ml_verteller_verhaal. maken() krijgt dan een voorbereiding (memorylane-vertelscript.js
- *    schrijft eerst het script met audio-tags, of hergebruikt het bewaarde); het plafond wordt vooraf op een ruime schatting getoetst
- *    (tekens × 1,3 + € 0,10 voor Claude) en na het script opnieuw op de echte lengte; de kosten van Claude tellen mee in dezelfde aanvraag.
+ *    schrijft eerst het script met audio-tags, of hergebruikt het bewaarde); de credit-rem wordt vooraf op een ruime schatting getoetst
+ *    (tekens × 1,3) en na het script opnieuw op de echte lengte. Claude (het script) is geen ElevenLabs en telt niet in de credits;
+ *    dat begrenzen de 20 aanvragen per dag.
  */
 const fs = require('fs');
 const path = require('path');
@@ -46,7 +48,8 @@ CREATE TABLE IF NOT EXISTS ml_verteller_aanvraag (id INTEGER PRIMARY KEY, t TEXT
 const STEM = 'V9pPvVYSDSBU5AXrsexF';   // "David HD - Vertelstem" (ElevenLabs, professional clone; gemeten 4-11 via GET /v1/voices)
 const MODEL = 'eleven_v4', ROUTER_MODEL = 'elevenlabs/eleven_v3', FORMAAT = 'mp3_44100_64';
 const STEMGEVOEL = { stability: 0.5, similarity_boost: 0.75, speed: 0.95, use_speaker_boost: true };
-const MAX_TEKENS = 6000, MAX_VERHAAL = 12000, DEEL_MAX = 2400, EUR_PER_1000 = 0.10, PLAFOND_EUR = 5, PER_DAG = 20, TUSSEN_MS = 10000;
+const MAX_TEKENS = 6000, MAX_VERHAAL = 12000, DEEL_MAX = 2400, PER_DAG = 20, TUSSEN_MS = 10000;
+const CREDITS = require('./elevenlabs-credits.js');
 const MAX_DEEL_BYTES = 4 * 1024 * 1024, TIMEOUT_MS = 180000, BEWAAR_AANVRAAG_DAGEN = 70;
 const HID_RE = /^h[0-9a-f]{16}$/;
 const VORMEN = { voorlezen: { map: 'verteller', tabel: 'ml_verteller' }, verhaal: { map: 'verteller-verhaal', tabel: 'ml_verteller_verhaal' } };
@@ -63,17 +66,11 @@ function nlMiddernacht(d) {
   return new Date(Date.parse(d + 'T00:00:00Z') - 3600000).toISOString();
 }
 function dagBegin(ms) { return nlMiddernacht(dagNL(ms)); }
-function maandBegin(ms) { return nlMiddernacht(dagNL(ms).slice(0, 8) + '01'); }
-function euro(x) { return '€ ' + (Math.round(x * 100) / 100).toFixed(2).replace('.', ','); }
-function prijsDeel(tekens) { return Math.max(0.01, Math.ceil(tekens * EUR_PER_1000 / 10) / 100); }
-function prijs(delen) { return Math.round(delen.reduce((s, d) => s + prijsDeel(d.length), 0) * 100) / 100; }
-// ruwe schatting voor een tekst die er nog niet is (aantal tekens): verdeeld over gelijke delen ≤ DEEL_MAX
-function prijsTekens(n) {
-  n = Math.max(0, Math.round(Number(n) || 0));
-  if (!n) return 0;
-  const k = Math.ceil(n / DEEL_MAX), per = Math.ceil(n / k);
-  return Math.round(k * prijsDeel(per) * 100) / 100;
-}
+// wv2751: credits (ruime schatting per deel; de echte komen uit de kop character-cost)
+function creditsDeel(tekens) { return CREDITS.schat(tekens, MODEL); }
+function prijs(delen) { return delen.reduce((s, d) => s + creditsDeel(d.length), 0); }
+// ruwe schatting voor een tekst die er nog niet is (aantal tekens)
+function prijsTekens(n) { return CREDITS.schat(n, MODEL); }
 
 /*
  * De tekst die de verteller voorleest: titel + verhaal, zonder ==markering== en stuurtekens, "Socev" uitgesproken als "Zo Kef" (David 4-11),
@@ -132,6 +129,9 @@ function maak(o) {
   const doeFetch = typeof o.fetch === 'function' ? o.fetch : (u, x) => fetch(u, x);
   const ROUTER = String(o.routerUrl || 'https://f3395cd5.primumnonnocere.olares.com').replace(/\/+$/, '');
   db.exec(SCHEMA_SQL);
+  // wv2751: credits per aanvraag (oude rijen: null → schatting op de tekens)
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('ml_verteller_aanvraag') WHERE name = 'credits'").get()) db.exec('ALTER TABLE ml_verteller_aanvraag ADD COLUMN credits INTEGER');
+  const C = o.credits || CREDITS.maak({ nu });
   const MAPPEN = {};
   for (const [v, x] of Object.entries(VORMEN)) {
     MAPPEN[v] = path.join(o.dir, x.map);
@@ -152,19 +152,21 @@ function maak(o) {
     };
   }
   const q = {
-    aNieuw: db.prepare("INSERT INTO ml_verteller_aanvraag (t, hid, tekens, eur, status) VALUES (?, ?, ?, ?, 'bezig')"),
-    aZet: db.prepare('UPDATE ml_verteller_aanvraag SET status = ?, eur = ? WHERE id = ?'),
+    aNieuw: db.prepare("INSERT INTO ml_verteller_aanvraag (t, hid, tekens, eur, status, credits) VALUES (?, ?, ?, 0, 'bezig', ?)"),
+    aZet: db.prepare('UPDATE ml_verteller_aanvraag SET status = ?, credits = ? WHERE id = ?'),
     aSinds: db.prepare('SELECT count(*) n FROM ml_verteller_aanvraag WHERE t >= ?'),
-    aBesteed: db.prepare("SELECT COALESCE(sum(eur), 0) eur FROM ml_verteller_aanvraag WHERE t >= ? AND status <> 'geweigerd'"),
+    aCredits: db.prepare("SELECT COALESCE(sum(COALESCE(credits, (tekens + 1) / 2)), 0) c FROM ml_verteller_aanvraag WHERE t >= ? AND status <> 'geweigerd'"),
     aLaatst: db.prepare('SELECT max(t) t FROM ml_verteller_aanvraag'),
     aOud: db.prepare('DELETE FROM ml_verteller_aanvraag WHERE t < ?'),
-    aEen: db.prepare('SELECT eur FROM ml_verteller_aanvraag WHERE id = ?'),
+    aEen: db.prepare('SELECT credits FROM ml_verteller_aanvraag WHERE id = ?'),
   };
   let bezig = null;   // { hid, vorm } waarvoor nu gemaakt wordt (één aanvraag tegelijk, over beide vormen)
   const fouten = new Map();   // hid|vorm → fout (gewone taal, zonder tekst) van de laatste mislukte aanvraag
   const isBezig = (hid, vorm) => !!bezig && bezig.hid === hid && bezig.vorm === vorm;
   function map(hid, vorm) { if (!HID_RE.test(String(hid))) throw new Error('ongeldige herinnering'); return path.join(MAPPEN[vormVan(vorm)], hid); }
-  function besteed() { return Math.round(q.aBesteed.get(maandBegin(nu())).eur * 100) / 100; }
+  // wv2751: credits die de verteller sinds iso verbruikte (een lopende reservering telt mee) — bron voor de gezamenlijke credit-rem
+  function creditsSinds(iso) { return Number(q.aCredits.get(String(iso)).c) || 0; }
+  C.bron('verteller', creditsSinds);
   function bestanden(hid, n, vorm) {
     try { for (let i = 1; i <= n; i++) if (!fs.statSync(path.join(map(hid, vorm), i + '.mp3')).isFile()) return false; return true; } catch (e) { return false; }
   }
@@ -177,15 +179,15 @@ function maak(o) {
     if (!r || !bestanden(hid, r.delen, vorm)) return { stand: null, delen: 0, op: null, fout: f };
     return { stand: hash && r.hash === hash ? 'klaar' : 'verouderd', delen: r.delen, op: r.op, fout: f };
   }
-  // Wat (opnieuw) maken ongeveer kost en of het binnen het plafond past. → { eur, tekens, delen, rest_eur, past }
-  // wv2484: tekst mag ook een aantal tekens zijn (schatting voor een script dat er nog niet is); extraEur = de kosten van Claude erbij.
-  function vooraf(tekst, extraEur) {
+  // Wat (opnieuw) maken ongeveer kost aan credits en of het binnen de bundel past (wv2751).
+  // → { credits, tekens, delen, past, geschat, bundel: { gebruikt, limiet, over, ruimte, periode_tot, … } }
+  // wv2484: tekst mag ook een aantal tekens zijn (schatting voor een script dat er nog niet is).
+  function vooraf(tekst) {
     const schat = typeof tekst === 'number';
     const n = schat ? Math.max(0, Math.round(tekst)) : String(tekst || '').length;
     const dl = schat ? Math.ceil(n / DEEL_MAX) : delenVan(tekst).length;
-    const e = Math.round(((schat ? prijsTekens(n) : prijs(delenVan(tekst))) + (Number(extraEur) || 0)) * 100) / 100;
-    const rest = Math.max(0, Math.round((PLAFOND_EUR - besteed()) * 100) / 100);
-    return { eur: e, tekens: n, delen: dl, rest_eur: rest, plafond_eur: PLAFOND_EUR, past: e <= rest + 1e-9, geschat: schat };
+    const c = schat ? prijsTekens(n) : prijs(delenVan(tekst)), st = C.stand();
+    return { credits: c, tekens: n, delen: dl, past: C.past(c, st), geschat: schat, bundel: Object.assign({ tekst: C.tekst(st) }, st) };
   }
   async function eenDeel(sleutel, tekst) {
     const r = await doeFetch(ROUTER + '/v1/text-to-speech/' + STEM + '/stream?output_format=' + FORMAAT, { method: 'POST', redirect: 'manual',
@@ -207,55 +209,53 @@ function maak(o) {
   async function doe(hid, vorm, tekst, d, aid, e, voor) {
     const MAPV = MAPPEN[vorm];
     const tmp = path.join(MAPV, '.' + hid + '-' + crypto.randomBytes(4).toString('hex'));
-    let gemaakt = 0, credits = 0, bytes = 0, telt = 0;
+    let gemaakt = 0, credits = 0, bytes = 0, telt = 0;   // telt = credits die ElevenLabs voor deze aanvraag (waarschijnlijk) rekende
     const sleutelF = hid + '|' + vorm;
-    const klaar = (status, eur, f) => {
-      try { q.aZet.run(status, Math.round(eur * 100) / 100, aid); } catch (x) { fout('ml-verteller', x); }
+    const klaar = (status, c, f) => {
+      try { q.aZet.run(status, Math.max(0, Math.round(c)), aid); } catch (x) { fout('ml-verteller', x); }
       try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (x) { /* weg */ }
       if (f) fouten.set(sleutelF, f); else fouten.delete(sleutelF);
     };
     try {
       if (voor) {
-        // wv2484: het vertelscript (Claude) — de kosten tellen vanaf hier mee, ook als ElevenLabs daarna weigert
+        // wv2484: het vertelscript (Claude; geen ElevenLabs-credits)
         let s;
-        try { s = await voor.script(); } catch (x) { fout('ml-verteller', x); s = { fout: 'het script schrijven lukte niet', eur: 0 }; }
-        const se = Math.max(0, Number(s && s.eur) || 0);
-        telt += se;
-        if (!s || s.fout || !s.tekst) return klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, (s && s.fout) || 'het script schrijven lukte niet');
+        try { s = await voor.script(); } catch (x) { fout('ml-verteller', x); s = { fout: 'het script schrijven lukte niet' }; }
+        if (!s || s.fout || !s.tekst) return klaar('geweigerd', 0, (s && s.fout) || 'het script schrijven lukte niet');
         tekst = String(s.tekst);
         const w = weigerTekst(tekst);
-        if (w) return klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, w);
+        if (w) return klaar('geweigerd', 0, w);
         d = delenVan(tekst);
-        if (!d.length) return klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, 'het script bleef leeg');
-        e = Math.round((prijs(d) + se) * 100) / 100;
-        // plafond op de echte lengte (de reservering van deze aanvraag telt niet dubbel)
-        const al = Math.round((besteed() - (q.aEen.get(aid) || { eur: 0 }).eur) * 100) / 100;
-        if (al + e > PLAFOND_EUR + 1e-9) return klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, 'het maandplafond voor de verteller (' + euro(PLAFOND_EUR) + ') is bereikt: deze maand al ' + euro(al) +
-          ', dit verhaal kost ± ' + euro(e) + '. Het script is bewaard; vraag Socev om het plafond te verhogen.');
+        if (!d.length) return klaar('geweigerd', 0, 'het script bleef leeg');
+        e = prijs(d);
+        // credit-rem op de echte lengte (de reservering van deze aanvraag telt niet dubbel)
+        const st = C.stand(), eigen = Number((q.aEen.get(aid) || {}).credits) || 0;
+        if (e - eigen > st.ruimte) return klaar('geweigerd', 0, C.weigering(e, 'dit verhaal', st) + ' Het script is bewaard.');
         try { q.aZet.run('bezig', e, aid); } catch (x) { fout('ml-verteller', x); }
       }
       const sleutel = await o.sleutel().catch(() => null);
       if (!sleutel) return klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, 'de sleutel voor ElevenLabs is nu niet te lezen; er is niets ingesproken');
       fs.mkdirSync(tmp, { mode: 0o700 });
       for (let i = 0; i < d.length; i++) {
-        telt += prijsDeel(d[i].length);   // vanaf hier kan ElevenLabs dit deel rekenen
+        telt += creditsDeel(d[i].length);   // vanaf hier kan ElevenLabs dit deel rekenen (schatting tot de kop er is)
         let u;
         try { u = await eenDeel(sleutel, d[i]); } catch (x) { return klaar('mislukt', telt, 'ElevenLabs gaf geen antwoord bij deel ' + (i + 1) + ' van ' + d.length); }
         if (!u.buf) {
-          if (u.http < 500) telt -= prijsDeel(d[i].length);   // 3xx/4xx: dit deel is niet gemaakt
+          if (u.http < 500) telt -= creditsDeel(d[i].length);   // 3xx/4xx: dit deel is niet gemaakt
           return klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, 'ElevenLabs weigerde (HTTP ' + u.http + ')' + (d.length > 1 ? ' bij deel ' + (i + 1) + ' van ' + d.length : ''));
         }
         if (!isMp3(u.buf) || u.buf.length > MAX_DEEL_BYTES) return klaar('mislukt', telt, 'ElevenLabs gaf geen bruikbaar geluid terug');
         fs.writeFileSync(path.join(tmp, (i + 1) + '.mp3'), u.buf, { mode: 0o600 });
-        gemaakt++; bytes += u.buf.length; if (u.credits !== null) credits += u.credits;
+        gemaakt++; bytes += u.buf.length;
+        if (u.credits !== null) { credits += u.credits; telt += u.credits - creditsDeel(d[i].length); }   // de echte credits i.p.v. de schatting
       }
       const doel = map(hid, vorm), oud = doel + '.oud-' + crypto.randomBytes(4).toString('hex');
       let hadOud = false;
       try { fs.renameSync(doel, oud); hadOud = true; } catch (x) { /* er was nog niets */ }
       fs.renameSync(tmp, doel);
       if (hadOud) { try { fs.rmSync(oud, { recursive: true, force: true }); } catch (x) { /* opruim haalt hem later */ } }
-      qv[vorm].zet.run(hid, new Date(nu()).toISOString(), hashVan(tekst), STEM, MODEL, gemaakt, tekst.length, e, bytes, credits || null);
-      klaar('klaar', e, null);
+      qv[vorm].zet.run(hid, new Date(nu()).toISOString(), hashVan(tekst), STEM, MODEL, gemaakt, tekst.length, 0, bytes, credits || null);
+      klaar('klaar', telt, null);
     } catch (x) {
       fout('ml-verteller', x);
       klaar(telt > 0 ? 'mislukt' : 'geweigerd', telt, 'het bewaren lukte niet; probeer het later opnieuw');
@@ -263,9 +263,9 @@ function maak(o) {
   }
   /*
    * Maken (na de toetsen in memorylane-delen.js en de vingerafdruk in server.js). tekst = tekstVan(...).tekst.
-   * wv2484: vorm 'verhaal' met voor = { tekens (schatting), extraEur, script: async () → { tekst, eur } | { fout, eur } }: tekst mag dan leeg zijn;
-   * de verteller toetst het plafond vooraf op de schatting en na het script op de echte lengte.
-   * → { status: 202, body: { ok, bezig: true, eur } } of een weigering; de aanroep zelf loopt op de achtergrond (o.klaar(hid) daarna).
+   * wv2484: vorm 'verhaal' met voor = { tekens (schatting), script: async () → { tekst } | { fout } }: tekst mag dan leeg zijn;
+   * de verteller toetst de credit-rem vooraf op de schatting en na het script op de echte lengte.
+   * → { status: 202, body: { ok, bezig: true, credits } } of een weigering; de aanroep zelf loopt op de achtergrond (o.klaar(hid) daarna).
    */
   function maken(hid, tekst, vorm, voor) {
     vorm = vormVan(vorm);
@@ -281,11 +281,8 @@ function maak(o) {
     if (q.aSinds.get(dagBegin(n)).n >= PER_DAG) return { status: 429, body: { ok: false, fout: 'vandaag al ' + PER_DAG + ' keer de verteller laten maken; morgen weer' } };
     const l = q.aLaatst.get().t;
     if (l && n - Date.parse(l) < TUSSEN_MS) return { status: 429, body: { ok: false, fout: 'even wachten (10 seconden) en dan opnieuw' } };
-    const e = metScript ? Math.round((prijsTekens(voor.tekens) + (Number(voor.extraEur) || 0)) * 100) / 100 : prijs(d), al = besteed();
-    if (al + e > PLAFOND_EUR + 1e-9) {
-      return { status: 409, body: { ok: false, plafond: true, fout: 'het maandplafond voor de verteller (' + euro(PLAFOND_EUR) + ') is bereikt: deze maand al ' + euro(al) +
-        ', dit verhaal kost ± ' + euro(e) + '. Vraag Socev om het plafond te verhogen.' } };
-    }
+    const e = metScript ? prijsTekens(voor.tekens) : prijs(d), st = C.stand();
+    if (!C.past(e, st)) return { status: 409, body: { ok: false, plafond: true, fout: C.weigering(e, 'dit verhaal', st) } };
     const aid = Number(q.aNieuw.run(new Date(n).toISOString(), hid, metScript ? Math.max(0, Math.round(Number(voor.tekens) || 0)) : t.length, e).lastInsertRowid);
     bezig = { hid, vorm };
     fouten.delete(hid + '|' + vorm);
@@ -293,7 +290,7 @@ function maak(o) {
       bezig = null;
       if (typeof o.klaar === 'function') { try { o.klaar(hid); } catch (x) { fout('ml-verteller', x); } }
     });
-    return { status: 202, body: { ok: true, bezig: true, eur: e, delen: metScript ? Math.ceil((Number(voor.tekens) || 1) / DEEL_MAX) : d.length } };
+    return { status: 202, body: { ok: true, bezig: true, credits: e, delen: metScript ? Math.ceil((Number(voor.tekens) || 1) / DEEL_MAX) : d.length } };
   }
   // Eén deel afspelen. hash = hashVan(huidige tekst). → { status, body: { ok, n, delen, volgende, mime, data } }
   function deel(hid, n, hash, vorm) {
@@ -340,10 +337,12 @@ function maak(o) {
   }
   function info() {
     const t = qv.voorlezen.tel.get(), tv = qv.verhaal.tel.get();
-    return { aantal: t.n, als_verhaal: tv.n, mb: Math.round((t.bytes + tv.bytes) / 1048576 * 10) / 10, maand_eur: besteed(), plafond_eur: PLAFOND_EUR, bezig: !!bezig,
+    const st = C.stand();
+    return { aantal: t.n, als_verhaal: tv.n, mb: Math.round((t.bytes + tv.bytes) / 1048576 * 10) / 10, bezig: !!bezig,
+      credits_periode: creditsSinds(st.periode_van), bundel: st, bundel_tekst: C.tekst(st),
       stem: 'eigen (ElevenLabs)', model: MODEL };
   }
   return { tekstVan, hashVan, uitspraakVan: uitspraak, stand, vooraf, maken, deel, weg, opruim, info };
 }
 
-module.exports = { maak, tekstVan, delenVan, hashVan, prijs, prijsTekens, uitspraak, STEM, MODEL, PLAFOND_EUR, MAX_TEKENS, MAX_VERHAAL, DEEL_MAX };
+module.exports = { maak, tekstVan, delenVan, hashVan, prijs, prijsTekens, uitspraak, STEM, MODEL, MAX_TEKENS, MAX_VERHAAL, DEEL_MAX };
