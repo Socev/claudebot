@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot d577651bc69340cb7ffc843a2817238679798f84 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot ecce34639cff8e47373a80c2eb7a096afe00154b (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
@@ -390,6 +390,7 @@ export async function naspeel(db          ) {
   const van = Math.min(...begr.map((h) => Number(h.jaar)));
   const tot = Math.max(van, Math.min(Number(vandaag[0].d.slice(0, 4)), Math.max(...begr.map((h) => Number(h.jaar)))));
   const entiteiten                          = {};
+  const naspeelInvoer                                          = {};
   for (const E of ENT) {
     const start = historie.find((h) => h.entiteit === E && h.categorie === "beginsaldo" && Number(h.jaar) === van - 1);
     const bf = buffers.filter((b) => b.entiteit === E).at(-1) || null;
@@ -401,11 +402,20 @@ export async function naspeel(db          ) {
       const x = david.get(k) ;
       if (h.categorie === "eind_kosten") x.kosten = Number(h.bedrag); else if (h.categorie === "eind_betaald") x.betaald = Number(h.bedrag); else x.saldo = Number(h.bedrag);
     }
-    entiteiten[E] = naspeelEntiteit({
-      entiteit: E, van, tot, standen, deelnames, jaarlasten, historie, bank: bank.filter((b) => b.entiteit === E && b.datum >= `${van}-01-01`),
+    naspeelInvoer[E] = {
+      entiteit: E, van, tot, standen, deelnames, jaarlasten, historie, bank: bank.filter((b) => b.entiteit === E && b.datum >= `${van}-01-01`), bankVorig: bank.filter((b) => b.entiteit === E && b.datum >= `${van - 1}-01-01` && b.datum < `${van}-01-01`),
       afrekeningDavid: [...david.values()], buffer: bf ? { doel: Number(bf.doel), opbouw_in: bf.opbouw_in, status: bf.status, geldig_van: bf.geldig_van } : null,
       vangnet, janFeb, startsaldo: start ? Number(start.bedrag) : 0, startbron: start ? start.bron : "geen beginsaldo in de historie: 0 aangenomen",
-    });
+    };
+    entiteiten[E] = naspeelEntiteit(naspeelInvoer[E]);
+  }
+  // blinde terugtoets (wv2789): dezelfde systematiek met de begroting die de app op 31-12 van het jaar ervoor zelf had gemaakt
+  const blind                          = {};
+  if (historie.some((h) => h.categorie === "blind_vooraf")) {
+    for (const E of ENT) {
+      const a = naspeelInvoer[E];
+      blind[E] = naspeelEntiteit({ ...a, bron: "blind" });
+    }
   }
   // de stukken zelf (één regel per stuk), zodat het scherm laat zien waar elk bedrag vandaan komt
   const stuk = new Map                                                                                                                           ();
@@ -414,7 +424,7 @@ export async function naspeel(db          ) {
     if (!stuk.has(k)) stuk.set(k, { entiteit: h.entiteit, jaar: Number(h.jaar), categorie: h.categorie, titel: h.titel, bron: h.bron, bedrag: 0, rijen: 0 });
     const x = stuk.get(k) ; x.bedrag = Math.round((x.bedrag + Number(h.bedrag)) * 100) / 100; x.rijen++;
   }
-  return { ok: true, van, tot, berekend_op: vandaag[0].d, entiteiten, stukken: [...stuk.values()] };
+  return { ok: true, van, tot, berekend_op: vandaag[0].d, entiteiten, blind: Object.keys(blind).length ? blind : null, stukken: [...stuk.values()] };
 }
 
 export async function jaarGegevens(db          , j         ) {

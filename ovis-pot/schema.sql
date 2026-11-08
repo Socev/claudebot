@@ -1,4 +1,4 @@
--- GEGENEREERD uit Socev/ovis-pot d577651bc69340cb7ffc843a2817238679798f84: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql, migrations/0007_jan_feb.sql, migrations/0009_subsidie_totaal.sql
+-- GEGENEREERD uit Socev/ovis-pot ecce34639cff8e47373a80c2eb7a096afe00154b: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql, migrations/0007_jan_feb.sql, migrations/0008_historie_blind.sql, migrations/0009_subsidie_totaal.sql
 -- OVIS POT — migratie 0001: de POT-tabellen zoals ze in D1 `fin` stonden (kolommen en ids gelijk), zodat de pod-modules
 -- (pot-datahub.js, pot-verzend.js) bij het overstapmoment alleen een andere database krijgen. Gegenereerd uit fin.sqlite_master op 8-11-2026.
 -- Geen gegevens in deze repo; de inhoud komt met scripts/kopieer-uit-fin.py.
@@ -534,6 +534,33 @@ CREATE INDEX historie_ent_jaar ON historie (entiteit, jaar, categorie);
 INSERT INTO instelling (sleutel, waarde, opmerking) VALUES
   ('pot_jan_feb', '0.03', 'POT: januari + deze fractie van de jaarbegroting, februari evenveel minder (vanaf 2027; wv2787)')
 ON CONFLICT(sleutel) DO NOTHING;
+
+-- OVIS POT — migratie 0008 (wv2789, David 8-11-2026: "doen alsof het eind van het vorige jaar is"): de blinde terugtoets in de
+-- historie. Drie categorieën erbij (de rest is ongewijzigd; SQLite kan een CHECK niet wijzigen, dus de tabel wordt herbouwd):
+--   blind_vooraf        de begroting per maand die de rekenkern op 31-12 van het jaar ervoor zelf had gemaakt, alleen met wat toen
+--                       bekend was (personeel × cao-tabel van dat moment, kosten vorig jaar uit de bank × index); entiteitstotaal
+--   blind_vakantiegeld  het vakantiegeldpakket daarin (POT, voor het maandpatroon)
+--   blind_eindejaar     het eindejaarspakket daarin (POT, voor het maandpatroon)
+-- (nummer 0008: 0007 is gereserveerd voor wv2787; de twee raken elkaar niet)
+CREATE TABLE historie_nieuw (
+  id INTEGER PRIMARY KEY,
+  soort TEXT NOT NULL DEFAULT 'historie' CHECK (soort = 'historie'),
+  entiteit TEXT NOT NULL CHECK (entiteit IN ('POT', 'KM', 'SLOEL')),
+  jaar INTEGER NOT NULL CHECK (jaar BETWEEN 2014 AND 2100),
+  maand INTEGER CHECK (maand BETWEEN 1 AND 12),
+  praktijk_id TEXT REFERENCES praktijk(id),
+  categorie TEXT NOT NULL CHECK (categorie IN ('begroting_vooraf', 'aanvulling', 'correctie_vorig_jaar', 'begroting_plan', 'begroting_vervallen',
+    'eind_kosten', 'eind_betaald', 'eind_saldo', 'beginsaldo', 'blind_vooraf', 'blind_vakantiegeld', 'blind_eindejaar')),
+  bedrag REAL NOT NULL,
+  titel TEXT NOT NULL,
+  bron TEXT NOT NULL CHECK (length(bron) > 0),
+  ingevoerd_op TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+INSERT INTO historie_nieuw (id, soort, entiteit, jaar, maand, praktijk_id, categorie, bedrag, titel, bron, ingevoerd_op)
+  SELECT id, soort, entiteit, jaar, maand, praktijk_id, categorie, bedrag, titel, bron, ingevoerd_op FROM historie;
+DROP TABLE historie;
+ALTER TABLE historie_nieuw RENAME TO historie;
+CREATE INDEX historie_ent_jaar ON historie (entiteit, jaar, categorie);
 
 -- Subsidie van de gemeente als TOTAAL per jaar (60 uur POH Jeugd-GGZ, ex btw). De app verdeelt het zelf naar rato van de patiëntaantallen
 -- (laatst bekende stand op 1 januari van dat jaar); een bedrag per praktijk in `subsidie` gaat voor. Bron = de stukken van David.

@@ -1048,3 +1048,40 @@ export function herinneringMail({ praktijk, nota, open, ondertekening = "David S
   if (fouten.length) throw new Error(`mailtekst geweigerd: ${fouten.join(", ")}`);
   return { onderwerp, bericht };
 }
+
+// ---------- bewaking (wv2789): kosten tot nu tegenover de begroting ----------
+/**
+ * Tussentijdse bewaking: de werkelijke kosten (per maand, uit de bank; null = nog niet bekend) tegenover de begroting, verdeeld over
+ * de maanden zoals het geld vorig jaar de deur uitging (`profiel`, de kosten per maand van het vorige jaar; zonder profiel twaalf
+ * gelijke delen, POT met het vakantiegeld in mei en de eindejaarsuitkering in december). Signaal = de eerste maand vanaf `vanafMaand`
+ * waarin de kosten tot nu twee maanden op rij meer dan de drempel voorlopen (standaard: de buffer, minstens 3 % van de begroting);
+ * dan is het tijd voor een herziening (R9) of een aanvulling. Gemeten op de echte jaren 2022–2026 (wv2789): de afwijking doortrekken
+ * naar het hele jaar en eerder dan april kijken gaf valse alarmen (loonheffing van december in januari, huur die later betaald wordt);
+ * deze regel ving dezelfde echte tekorten (POT 2023/2024, KM 2025) zonder die alarmen.
+ * @param {{ entiteit:string, begroting:number, vakantiegeld?:number, eindejaar?:number, werkelijk:(number|null)[], profiel?:number[]|null, drempel?:number|null, buffer?:number, vanafMaand?:number }} a
+ */
+export function kostenSignaal({ entiteit, begroting, vakantiegeld = 0, eindejaar = 0, werkelijk, profiel = null, drempel = null, buffer = 0, vanafMaand = 4 }) {
+  const B = Number(begroting) || 0;
+  const tp = profiel ? profiel.reduce((s, x) => s + Math.max(0, Number(x) || 0), 0) : 0;
+  const pot = entiteit === "POT";
+  const plan = tp > 0
+    ? profiel.map((x) => (B * Math.max(0, Number(x) || 0)) / tp)
+    : Array.from({ length: 12 }, (_, i) => (B - (pot ? vakantiegeld + eindejaar : 0)) / 12 + (pot && i === 4 ? vakantiegeld : 0) + (pot && i === 11 ? eindejaar : 0));
+  const grens = drempel != null ? Number(drempel) : Math.max(Number(buffer) || 0, 0.03 * B);
+  let cE = 0, cP = 0, signaal = null, vorigBoven = false;
+  const maanden = [];
+  for (let m = 1; m <= 12; m++) {
+    const w = werkelijk[m - 1];
+    if (w == null) break;
+    cE += Number(w); cP += plan[m - 1];
+    const afwijking = cE - cP;
+    const boven = afwijking > grens;
+    maanden.push({ maand: m, begroot_tot_nu: rond2(cP), echt_tot_nu: rond2(cE), afwijking: rond2(afwijking), boven });
+    if (!signaal && m >= vanafMaand && boven && vorigBoven) {
+      signaal = { maand: m, afwijking: rond2(afwijking), tekst: `Eind ${MAANDEN[m - 1]}: de kosten lopen ${euro(afwijking, { heel: true })} voor op de begroting, twee maanden op rij meer dan ${euro(grens, { heel: true })}. Tijd voor een herziening of aanvulling.` };
+    }
+    vorigBoven = boven;
+  }
+  const laatste = maanden.at(-1) || null;
+  return { drempel: rond2(grens), plan: plan.map(rond2), maanden, signaal, stand_jaar: laatste ? rond2(B + laatste.afwijking) : null, tot_maand: laatste ? laatste.maand : 0 };
+}

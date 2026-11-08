@@ -13,7 +13,7 @@
 // Tolgaarde is het vangnet (David 8-11-2026): zakt het modelsaldo onder nul, dan is dat het bedrag waarmee Tolgaarde had moeten
 // bijspringen (extra bijdrage, verrekend in de afrekening).
 import {
-  aandelenAfrekening, aandelenBijdrage, afrekening, bufferPlan, kostenJaar, maandpatroon, rond2, MAANDEN, euro,
+  aandelenAfrekening, aandelenBijdrage, afrekening, bufferPlan, kostenJaar, kostenSignaal, maandpatroon, rond2, MAANDEN, euro,
 } from "./pot-kern.mjs";
 
 /** Bijdragen van praktijken in de bank: die vervangt het model; al het andere (uitgaven, subsidie, onderling) blijft echt. */
@@ -41,22 +41,37 @@ export function middenDatum(posten) {
  *   bank: {datum:string, bedrag:number, soort:string|null, praktijk_id:string|null, boekjaar:number|null}[],
  *   afrekeningDavid: {jaar:number, praktijk_id:string, kosten:number, betaald:number, saldo:number}[],
  *   buffer: {doel:number, opbouw_in?:string|number[]|null} | null, startsaldo: number, startdatum?: string, betaaldag?: number,
- *   janFeb?: number }} a  janFeb: POT januari + janFeb × begroting, februari evenveel lager (zelfde f voor alle jaren; wv2787)
+ *   janFeb?: number, bron?: "david" | "blind", bankVorig?: any[], bankTot?: string }} a  janFeb: POT januari + janFeb × begroting, februari evenveel lager (zelfde f voor alle jaren; wv2787)
+ * bron "blind" (wv2789): de begroting vooraf is die van de blinde terugtoets (historie-categorie blind_vooraf: de rekenkern op
+ * 31-12 van het jaar ervoor, alleen met wat toen bekend was), zonder Davids aanvullingen; vakantiegeld en eindejaarsuitkering uit
+ * blind_vakantiegeld / blind_eindejaar. Elk jaar krijgt ook de bewaking (kostenSignaal): wanneer had de app een herziening moeten melden?
  */
 export function naspeelEntiteit(a) {
   const E = a.entiteit, dag = Math.min(28, Number(a.betaaldag) || 15);
+  const blind = a.bron === "blind";
   const vervang = new Set(BIJDRAGE_SOORTEN[E] || []);
   const isBijdrage = (b) => vervang.has(b.soort) && !(b.soort === "afrekening" && b.boekjaar != null && b.boekjaar < a.van);
   const hist = a.historie.filter((h) => h.entiteit === E);
   const bankEind = a.bank.length ? a.bank.map((b) => b.datum).sort().at(-1) : null;   // de bank is bekend t/m deze dag
+  // de laatste maand van J die helemaal in de bank staat (Codex r1 M1): een dekkingsdatum (`bankTot`, t/m welke dag de import compleet
+  // is) gaat voor; zonder dekkingsdatum telt een maand als compleet als de bank verder loopt, of als de laatste post in de laatste vijf
+  // dagen van die maand valt (de vaste lasten lopen rond de 25e; een maand zonder post op de laatste kalenderdag is dan toch compleet)
+  const dekking = a.bankTot ? String(a.bankTot) : bankEind;
+  const laatsteVolleMaand = (J) => {
+    if (!dekking || dekking < `${J}-01-01`) return 0;
+    if (dekking.slice(0, 4) > String(J)) return 12;
+    const m = Number(dekking.slice(5, 7)), d = Number(dekking.slice(8, 10));
+    const laatste = new Date(Date.UTC(J, m, 0)).getUTCDate();
+    return d >= (a.bankTot ? laatste : laatste - 4) ? m : m - 1;
+  };
   const jaren = [];
   let saldoEcht = Number(a.startsaldo), saldoModel = Number(a.startsaldo), saldoZonder = Number(a.startsaldo);
   const bufferAl = {};             // buffer per praktijk die het model al gevraagd heeft (vast tegoed)
   let vorig = null, vorigZonder = null;   // model: per praktijk gevraagd in het vorige jaar (zonder buffer), met en zonder aanvullingen
   for (let J = a.van; J <= a.tot; J++) {
     const hJ = hist.filter((h) => Number(h.jaar) === J);
-    const vooraf = hJ.filter((h) => h.categorie === "begroting_vooraf");
-    const aanv = hJ.filter((h) => h.categorie === "aanvulling");
+    const vooraf = hJ.filter((h) => h.categorie === (blind ? "blind_vooraf" : "begroting_vooraf"));
+    const aanv = blind ? [] : hJ.filter((h) => h.categorie === "aanvulling");
     const corr = hJ.filter((h) => h.categorie === "correctie_vorig_jaar");
     const B = rond2(som(vooraf, (h) => h.bedrag));
     const aanvullingen = [...new Set(aanv.map((h) => h.titel))].map((t) => {
@@ -72,7 +87,11 @@ export function naspeelEntiteit(a) {
 
     // ---- model: bijdragen J (R4 + R6) en buffer (R7)
     const aandelen = aandelenBijdrage({ entiteit: E, jaar: J, standen: a.standen, deelnames: a.deelnames });
-    const pakket = E === "POT" ? { vakantiegeld_pakket: B * POT_PAKKET.vakantiegeld, eindejaar_pakket: B * POT_PAKKET.eindejaar } : { vakantiegeld_pakket: 0, eindejaar_pakket: 0 };
+    const hPak = (c) => hJ.filter((h) => h.categorie === c);
+    const pakket = E !== "POT" ? { vakantiegeld_pakket: 0, eindejaar_pakket: 0 }
+      : blind && hPak("blind_vakantiegeld").length && hPak("blind_eindejaar").length
+        ? { vakantiegeld_pakket: som(hPak("blind_vakantiegeld"), (h) => h.bedrag), eindejaar_pakket: som(hPak("blind_eindejaar"), (h) => h.bedrag) }
+        : { vakantiegeld_pakket: B * POT_PAKKET.vakantiegeld, eindejaar_pakket: B * POT_PAKKET.eindejaar };
     const patroon = B > 0 ? maandpatroon({ entiteit: E, begroting: { totaal: B, ...pakket }, aandelen, janFeb: Number(a.janFeb) || 0 }) : { ok: false, reden: `geen begroting vooraf ${J} in de historie` };
     const eerstejaar = !Object.keys(bufferAl).length;
     const buffer = a.buffer && aandelen.ok ? bufferPlan({ doel: a.buffer.doel, aandelen, alGevraagd: bufferAl, opbouwMaanden: eerstejaar ? 12 : 1, opbouwIn: eerstejaar ? a.buffer.opbouw_in : null }) : null;
@@ -104,6 +123,19 @@ export function naspeelEntiteit(a) {
     const rest = bankJ.filter((b) => houdEcht(b, afrVorig)).map((b) => ({ datum: b.datum, bedrag: Number(b.bedrag) }));
     const restZonder = bankJ.filter((b) => houdEcht(b, afrVorigZonder)).map((b) => ({ datum: b.datum, bedrag: Number(b.bedrag) }));
     const bijdragenEcht = bankJ.filter(isBijdrage);
+    // ---- bewaking: kosten per maand uit de bank (alles behalve bijdragen en onderlinge boekingen), profiel = het jaar ervoor
+    const kostenPerMaand = (jaar, posten = a.bank) => {
+      const r = Array(12).fill(0);
+      for (const b of posten) if (b.datum.startsWith(String(jaar)) && !vervang.has(b.soort) && b.soort !== "onderling") r[Number(b.datum.slice(5, 7)) - 1] -= Number(b.bedrag);
+      return r;
+    };
+    const kJ = kostenPerMaand(J);
+    const maandBekend = laatsteVolleMaand(J);   // een dekkingsdatum gaat altijd voor (Codex r2 M1)
+    // profiel = de kosten per maand van het jaar ervoor; voor het eerste jaar uit `bankVorig` (de bank van van − 1) als die er is (Codex r1 M2)
+    const bronVorig = J === a.van && Array.isArray(a.bankVorig) ? a.bankVorig : a.bank;
+    const vorigeBank = bronVorig.some((b) => b.datum.startsWith(String(J - 1))) ? kostenPerMaand(J - 1, bronVorig) : null;
+    const signaal = B > 0 ? kostenSignaal({ entiteit: E, begroting: B, vakantiegeld: pakket.vakantiegeld_pakket, eindejaar: pakket.eindejaar_pakket,
+      werkelijk: kJ.map((x, i) => (i < maandBekend ? rond2(x) : null)), profiel: vorigeBank, buffer: a.buffer ? Number(a.buffer.doel) : 0 }) : null;
     const inModel = [];
     for (let m = 1; m <= 12; m++) {
       const x = modelMnd[m - 1] + bufferMnd[m - 1];
@@ -153,13 +185,14 @@ export function naspeelEntiteit(a) {
       bijdragen_echt: { totaal: rond2(som(bijdragenEcht, (b) => b.bedrag)), maanden: Array.from({ length: 12 }, (_, i) => rond2(som(bijdragenEcht.filter((b) => Number(b.datum.slice(5, 7)) === i + 1), (b) => b.bedrag))) },
       saldo: { echt: ksEcht, model: ksModel, zonder_aanvulling: ksZonder, laatste_post: laatstePost, volledig, vangnet: a.vangnet || "P07" },
       afrekening: afr,
+      signaal: signaal ? { ...signaal, aanvulling_maand: aanvullingen.filter((x) => x.bedrag > 0).map((x) => x.eerste_maand).filter((m) => m > 0).sort((x, y) => x - y)[0] || null } : null,
     };
     j.spaak = spaakpunten(j, a);
     jaren.push(j);
     saldoEcht = ksEcht.eind; saldoModel = ksModel.eind; saldoZonder = ksZonder.eind;
     vorig = patroon.ok ? gevraagd : null; vorigZonder = patroon.ok ? gevraagdZonder : null;
   }
-  return { entiteit: E, van: a.van, tot: a.tot, startsaldo: Number(a.startsaldo), startbron: a.startbron || null, buffer: a.buffer, jan_feb: E === "POT" ? Number(a.janFeb) || 0 : 0, jaren };
+  return { entiteit: E, van: a.van, tot: a.tot, bron: blind ? "blind" : "david", startsaldo: Number(a.startsaldo), startbron: a.startbron || null, buffer: a.buffer, jan_feb: E === "POT" ? Number(a.janFeb) || 0 : 0, jaren };
 }
 
 function rekenAfr(a, E, jaar, tegen, datum) {
@@ -236,6 +269,11 @@ export function spaakpunten(j, a) {
     for (const x of nietBetaald) uit.push({ soort: "betaling", ernst: "midden", praktijk_id: x.praktijk_id, tekst: `${x.praktijk_id} betaalde ${euro(x.gevraagd_david - x.betaald_david, { heel: true })} minder dan gevraagd (gevraagd ${euro(x.gevraagd_david, { heel: true })}, betaald ${euro(x.betaald_david, { heel: true })}).` });
     const gr = j.afrekening.totaal.uitkomst_model;
     if (b.kosten && Math.abs(gr) > 0.05 * b.kosten) uit.push({ soort: "afrekening", ernst: "midden", tekst: `Afrekening volgens het model: per saldo ${gr > 0 ? "bijbetalen" : "terug"} ${euro(gr, { heel: true })} (${Math.round(Math.abs(gr) / b.kosten * 100)} % van de kosten).` });
+  }
+  if (j.signaal && j.signaal.signaal) {
+    const s = j.signaal.signaal, am = j.signaal.aanvulling_maand;
+    uit.push({ soort: "signaal", ernst: "midden",
+      tekst: `${s.tekst}${am ? (am < s.maand ? ` Jij vroeg al eerder een aanvulling (vanaf ${MAANDEN[am - 1]}).` : am === s.maand ? ` Jij vroeg in dezelfde maand een aanvulling.` : ` Jij vroeg pas vanaf ${MAANDEN[am - 1]} een aanvulling.`) : ""}` });
   }
   // deelname: praktijk betaalde dat jaar echt bijdragen, maar doet volgens de deelname alleen mee aan de afrekening
   const bijdrageDeelnemers = new Set(aandelenBijdrage({ entiteit: j.entiteit, jaar: j.jaar, standen: a.standen, deelnames: a.deelnames }).rijen.map((r) => r.praktijk_id));
