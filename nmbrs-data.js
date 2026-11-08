@@ -542,7 +542,6 @@ async function kindLees(invoer, dir, peil) {
         historieRijen(lijsten[h[0]], h[1], V[h[0]], h[3]).forEach(function (r) { zet.run(h[2], r[0], cid, r[1], JSON.stringify(r[2])); });
       }
       tabellen.forEach(function (t) {
-        d.prepare('delete from salaristabel where bedrijf = ? and tabel = ? and versie <> ?').run(cid, t.tabel, t.versie);
         d.prepare('insert or replace into salaristabel (bedrijf, tabel, versie, data) values (?, ?, ?, ?)').run(cid, t.tabel, t.versie, JSON.stringify(t.data));
         d.prepare('delete from salaristrede where versie = ?').run(t.versie);
         const zet = d.prepare('insert or replace into salaristrede (versie, schaal, trede, data) values (?, ?, ?, ?)');
@@ -560,7 +559,7 @@ async function kindLees(invoer, dir, peil) {
     const nrNaarId = {};
     lid(d, 'select id, data from medewerker where bedrijf = ?', [cid]).forEach(function (m) { const x = JSON.parse(m.data); if (x.employeeNumber != null) nrNaarId[String(x.employeeNumber)] = m.id; });
     // review wv2797 MOET 5: herstelbare fouten (429, 5xx, wachten, netwerk) opnieuw, hooguit 5 keer; blijvend alleen bij een andere 4xx
-    const open = lid(d, "select id, data from loonrun where bedrijf = ? and (journaal is null or journaal like 'opnieuw:%')", [cid]).map(function (r) { return { id: r.id, x: JSON.parse(r.data) }; })
+    const open = lid(d, "select id, data from loonrun where bedrijf = ? and (journaal is null or journaal like 'opnieuw:%' or journaal like 'taak:%' or journaal like 'document:%')", [cid]).map(function (r) { return { id: r.id, x: JSON.parse(r.data) }; })
       .filter(function (r) { return r.x.year >= jaar - 1; }).sort(function (a, c) { return (c.x.year * 100 + (c.x.periodEnd || 0)) - (a.x.year * 100 + (a.x.periodEnd || 0)); }).slice(0, MAX_JOURNALEN);
     for (const r of open) {
       let j;
@@ -808,7 +807,7 @@ function kindPersoon(invoer, dir) {
   d.close();
   if (tr.length > 1) return { ok: true, meerdere: tr.slice(0, 10).map(function (m) { return { naam: naamVan(m.info), bedrijf: (bedrijven[m.bedrijf] || {}).naam || null, in_dienst: inDienst(m, nu) }; }) };
   return { ok: true, treffers: tr.map(function (m) {
-    const sal = geldig(m.h.salaris || [], nu) || {}, con = geldig(m.h.contract || [], nu) || {}, rst = geldig(m.h.rooster || [], nu) || {}, fn = geldig(m.h.functie || [], nu) || (m.h.functie || []).slice(-1)[0] || {}, dv = geldig(m.h.dienstverband || [], nu) || {};
+    const sal = geldig(m.h.salaris || [], nu) || {}, con = geldig(m.h.contract || [], nu) || {}, rst = geldig(m.h.rooster || [], nu) || {}, fn = geldig(m.h.functie || [], nu) || ((m.h.functie || []).some(function (f) { return f.startDate; }) ? null : (m.h.functie || []).slice(-1)[0]) || {}, dv = geldig(m.h.dienstverband || [], nu) || {};
     return { naam: naamVan(m.info), bedrijf: (bedrijven[m.bedrijf] || {}).naam || null, entiteit: (bedrijven[m.bedrijf] || {}).entiteit || null, in_dienst: inDienst(m, nu),
       functie: fn.description || null, in_dienst_sinds: dv.startDate ? dv.startDate.slice(0, 10) : null, contract: { begin: con.startDate ? con.startDate.slice(0, 10) : null, eind: con.endDate ? con.endDate.slice(0, 10) : null, onbepaald: con.indefinite === true, uren_per_week: con.hoursPerWeek != null ? con.hoursPerWeek : null },
       parttime_pct: rst.parttimePercentage != null ? rst.parttimePercentage : null, salaristabel: sal.tabel ? sal.tabel.tableName || null : null,
