@@ -85,6 +85,8 @@ const N8N = [
   // wv2177 (Data Manager DM12, 1-11-2026): actief in n8n, nog niet in het register
   {"id": "n8n-a2uQmFJuV38kcwMJ", "naam": "MailMan", "soort": "routine", "module": "intake", "n8n": "a2uQmFJuV38kcwMJ", "model": "Jev (lokaal)", "hartslag": [], "uitkomst": "labels in Davids privé-Gmail + verkoopfacturen Doktersmaten naar Exact (grondwet 1 en 7)"},
   {"id": "n8n-IXfyQbJ1eTDWQ3Qh", "naam": "Meeleespod-seintjes", "soort": "routine", "n8n": "IXfyQbJ1eTDWQ3Qh", "model": "geen", "hartslag": [], "uitkomst": "Bericht aan David (app) bij een verlopen login of inlogvenster van de meelezers"},
+  // wv2721 (Data Manager DM12, 8-11-2026): actief in n8n sinds 5-11 (wv2486), nog niet in het register
+  {"id": "n8n-nprUcZeDfbL4m6U0", "naam": "GEZOCHT-agenda", "soort": "routine", "module": "facturen", "n8n": "nprUcZeDfbL4m6U0", "model": "geen", "hartslag": [], "uitkomst": "hele-dag-item GEZOCHT in de GEZOCHT-agenda's van Tolgaarde en Groenhouten op een vinkje in DocPlan › Bezetting (grondwet 1 en 7)"},
   {"id": "n8n-OQBs2wP6YugOHhQC", "naam": "Waarnemingzoeker", "soort": "routine", "n8n": "OQBs2wP6YugOHhQC", "model": "geen", "hartslag": [], "uitkomst": "Bericht aan David (hoofd)"},
 ];
 
