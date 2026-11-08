@@ -876,6 +876,8 @@ JUR = {
     'ahn': 'Hoogtekaart (AHN, open data): geen bezwaar.',
     'bodem': 'Bodeminformatie is openbaar (Bodemloket, omgevingsdiensten): geen bezwaar.',
     'straat': 'Straatfoto\'s van anderen (CC BY-SA): kijken is licht; doorplaatsen alleen met naamsvermelding. Mensen of kentekens op een foto niet herleiden.',
+    'google': 'Google Maps Platform-voorwaarden: de foto alleen hier tonen; niet bewaren (ook niet in de cache of de Second Brain) en niet doorplaatsen. '
+              'Mensen of kentekens op de foto niet herleiden.',
     'forensiek': 'Lokaal op de pod: de foto gaat niet naar buiten en wordt na het lezen gewist. De uitkomst is een aanwijzing, geen bewijs.',
 }
 DOMEINEN_STANDAARD = ['tolgaarde.nl', 'huisartsentolgaarde.nl', 'hpgroenhouten.nl', 'hapleusden.nl', 'socev.dev']
@@ -1199,9 +1201,10 @@ def adres_links(ls):
 
 
 # ---------------------------------------------------------------- adres deel 3 (wv2712): buurt, hoogte, bodem, straatbeeld
-# Gratis sleutels (EP-online, Mapillary) komen van server.js via stdin (uit de kluis, alleen die twee namen); nooit in uitvoer, logboek of cache.
+# Sleutels (EP-online, Mapillary, wv2723: Google Street View) komen van server.js via stdin (uit de kluis, alleen deze namen); nooit in uitvoer,
+# logboek of cache. De Google-sleutel kost geld boven 10.000 foto's per maand (Davids project: dagplafond 300, budgetalarm € 5).
 SLEUTELS = {}
-SLEUTEL_ENV = {'ep_online': 'EP_ONLINE_SLEUTEL', 'mapillary': 'MAPILLARY_TOKEN'}
+SLEUTEL_ENV = {'ep_online': 'EP_ONLINE_SLEUTEL', 'mapillary': 'MAPILLARY_TOKEN', 'google_streetview': 'GOOGLE_STREETVIEW_SLEUTEL'}
 
 
 def sleutel_er(naam):
@@ -1486,6 +1489,98 @@ def straatbeeld(ctx, lon, lat):
                    klein=' '.join(klein) or None, juridisch=JUR['straat'])
 
 
+# ---------------------------------------------------------------- Google Street View (wv2723; Davids eigen sleutel, alleen App)
+# Eerst Metadata (gratis, telt niet voor het quotum); alleen bij status OK één statische foto 480x320 (10.000 per maand gratis, daarna
+# $ 7 per 1.000; Davids dagplafond 300). Geen nieuwe poging bij een weigering. De sleutel staat alleen in de aanvraag-URL: ctx.log kent
+# alleen de host, foutteksten alleen de status, en de link in het kaartje is zonder sleutel. De foto komt niet in de cache (zie cachevorm).
+GSV_META = 'https://maps.googleapis.com/maps/api/streetview/metadata'
+GSV_FOTO = 'https://maps.googleapis.com/maps/api/streetview'
+GSV_STATUS = {
+    'ZERO_RESULTS': 'Geen Google-straatfoto binnen 50 m.',
+    'NOT_FOUND': 'Geen Google-straatfoto binnen 50 m.',
+    'REQUEST_DENIED': 'Google weigerde de sleutel (REQUEST_DENIED): kijk in Google Cloud of de Street View Static API aan staat, of vervang de sleutel in Sleutelbos.',
+    'OVER_QUERY_LIMIT': 'Het dagplafond of het budget bij Google is bereikt (OVER_QUERY_LIMIT); morgen weer.',
+}
+
+
+def zonder_sleutel(t):
+    """Maskeert key=… (en signature=…) in elke tekst die een URL kan bevatten."""
+    return re.sub(r'(?i)\b(key|signature)=[^&\s"\']*', r'\1=…', str(t or ''))
+
+
+def straatbeeld_google(ctx, lon, lat):
+    tok = sleutel('google_streetview')
+    if not tok:
+        return None
+    titel, bron = 'Google Street View', 'Google Street View (Davids sleutel)'
+    basis = {'location': '%.6f,%.6f' % (lat, lon), 'radius': 50, 'source': 'outdoor'}
+    try:
+        x = haal(ctx, 'Google Street View (metadata, gratis)', GSV_META + '?' + up.urlencode(dict(basis, key=tok)),
+                 'coördinaat van het adres', timeout=15, redirects=False, maxb=20_000)
+        m = json.loads(x or 'null')
+    except PoortDicht:
+        raise
+    except Exception:
+        m = None
+    st = str((m or {}).get('status') or '') if isinstance(m, dict) else ''
+    st = st if re.fullmatch(r'[A-Z_]{2,30}', st) else ''
+    uit = dict(juridisch=JUR['google'], _gsv=[lon, lat])
+    if st != 'OK':
+        return kaartje(titel, bron, klein=GSV_STATUS.get(st) or zonder_sleutel('Google gaf geen bruikbaar antwoord%s.' % (' (%s)' % st if st else '')), **uit)
+    loc = m.get('location') if isinstance(m.get('location'), dict) else {}
+    try:
+        afst = afstand_m(lon, lat, float(loc['lng']), float(loc['lat']))
+    except (KeyError, TypeError, ValueError):
+        afst = None
+    d = re.fullmatch(r'(\d{4})-(\d{2})', str(m.get('date') or ''))
+    datum = '%s-%s' % (d.group(2), d.group(1)) if d else None
+    cr = norm(str(m.get('copyright') or ''))[:80] or None
+    src, klein = None, None
+    try:
+        code, b = haal(ctx, 'Google Street View (foto, telt voor het quotum)', GSV_FOTO + '?' + up.urlencode(
+            dict(basis, size='480x320', return_error_code='true', key=tok)), 'coördinaat van het adres', binair=True, timeout=15,
+            maxb=400_000, redirects=False, totaal=20, metcode=True)
+        if code in ('200', 'nep') and b and b[:3] == b'\xff\xd8\xff':
+            src = 'data:image/jpeg;base64,' + base64.b64encode(b).decode()
+        else:
+            klein = 'Google gaf geen foto (HTTP %s): dagplafond bereikt of sleutel geweigerd; geen nieuwe poging.' % re.sub(r'\D', '', str(code))[:3]
+    except PoortDicht:
+        raise
+    except Exception as e:
+        klein = 'De foto van Google kwam niet binnen (%s).' % type(e).__name__
+    pano = str(m.get('pano_id') or '')
+    link = 'https://www.google.com/maps/@?' + up.urlencode(dict({'api': 1, 'map_action': 'pano', 'viewpoint': '%.6f,%.6f' % (lat, lon)},
+                                                               **({'pano': pano} if re.fullmatch(r'[\w-]{5,100}', pano) else {})))
+    return kaartje(titel, bron, [('Opgenomen', datum), ('Afstand tot het adres', ('%d m' % afst) if afst is not None else None), ('Foto', cr)],
+                   beelden=[{'titel': 'Google Street View · %s%s' % (datum or '?', (' · %d m' % afst) if afst is not None else ''), 'src': src, 'foto': True}] if src else None,
+                   links=[item('Rondkijken in Google Maps', 'ook oudere opnames via de tijdlijn', link)], klein=klein, **uit)
+
+
+def cachevorm(kaarten):
+    """Wat in de cache mag: het Google-kaartje zonder foto en velden (voorwaarden Maps Platform); bij een cachetreffer haalt herstel_google het opnieuw."""
+    return [{'titel': k['titel'], '_gsv': k['_gsv']} if isinstance(k, dict) and k.get('_gsv') else k for k in kaarten]
+
+
+def herstel_google(ctx, kaarten):
+    uit = []
+    for k in kaarten:
+        if isinstance(k, dict) and k.get('_gsv'):
+            try:
+                k = straatbeeld_google(ctx, *[float(v) for v in k['_gsv'][:2]]) if ctx.beelden and sleutel_er('google_streetview') else None
+            except PoortDicht:
+                k = None
+            except Exception as e:
+                k = melding('Google Street View', 'Er ging iets mis: %s' % type(e).__name__)
+            if not k:
+                continue
+        uit.append(k)
+    return uit
+
+
+def zonder_intern(kaarten):
+    return [{a: b for a, b in k.items() if a != '_gsv'} if isinstance(k, dict) else k for k in kaarten]
+
+
 def adres_deel3(ctx, ls, beelden):
     """Buurt (CBS + Leefbaarometer), hoogte (AHN), bodem (Bodemloket) en straatbeeld bij een gevonden adres; elk kaartje los, een fout kost alleen dat kaartje."""
     bu = str(ls.get('buurtcode') or '').strip().upper()
@@ -1499,6 +1594,8 @@ def adres_deel3(ctx, ls, beelden):
         taken += [lambda: ahn(ctx, rd[0], rd[1], (beelden or {}).get('ahn')), lambda: bodem(ctx, rd[0], rd[1])]
     if len(ll) == 2 and ctx.beelden:
         taken.append(lambda: straatbeeld(ctx, ll[0], ll[1]))
+        if sleutel_er('google_streetview'):
+            taken.append(lambda: straatbeeld_google(ctx, ll[0], ll[1]))
     uit = []
     with cf.ThreadPoolExecutor(5) as ex:
         for f in [ex.submit(t) for t in taken]:
@@ -2293,7 +2390,7 @@ def zoek(v):
         kaarten, kern = [melding('Niet gezocht', 'Niet gezocht: ' + pt['reden'] + '.')], {}
     elif rij:
         u = json.loads(rij[1])
-        kaarten, kern, graaf = u['kaarten'], u['kern'], u.get('graaf')
+        kaarten, kern, graaf = herstel_google(ctx, u['kaarten']), u['kern'], u.get('graaf')   # wv2723: Google-foto nooit uit de cache
         c.execute('update zoekvraag set cache = 1 where id = ?', (zid,))
     else:
         try:
@@ -2315,7 +2412,8 @@ def zoek(v):
         graaf = ctx.graaf() if pt['niveau'] != 'niets' and ingang not in ('bestand', 'voetafdruk') and not (ingang == 'mail' and pt['niveau'] != 'alles') else None
         if cachebaar and pt['niveau'] == 'alles' and not NEP and any(l['soort'] == 'extern' and l['status'] in ('200', '204') for l in ctx.log):
             c.execute('insert or replace into cache(sleutel, tijd, json) values (?,?,?)',
-                      (sleutel, nu_iso(), json.dumps({'kaarten': kaarten, 'kern': kern, 'graaf': graaf}, ensure_ascii=False)))
+                      (sleutel, nu_iso(), json.dumps({'kaarten': cachevorm(kaarten), 'kern': kern, 'graaf': graaf}, ensure_ascii=False)))
+    kaarten = zonder_intern(kaarten)
     if pt['niveau'] != 'alles':
         kaarten.insert(0, kaartje('Poort', 'OVIS OSINT-poort', let='Deze zoekvraag ging niet naar openbare bronnen (%s).' % pt['reden']))
     for l in ctx.log:

@@ -20935,7 +20935,7 @@ function osintInvoer(d, wie) {
   if (wie === 'david' && typeof d.bestand === 'string' && d.bestand.length <= 14 * 1024 * 1024) { v.bestand = d.bestand; v.naam = t(d.naam, 120); }
   return v;
 }
-// wv2712: gratis sleutels voor OSINT (EP-online, Mapillary) uit de kluis, alleen deze twee namen, 10 minuten in het geheugen (ook 'geen').
+// wv2712: sleutels voor OSINT (EP-online, Mapillary; wv2723 Google Street View) uit de kluis, alleen deze drie namen, 10 minuten in het geheugen (ook 'geen').
 // Ze gaan via stdin naar osint.py (nooit in de omgeving, api.log of de uitkomst); de kluis niet bereikbaar = zonder sleutels verder.
 let osintSleutelCache = { t: 0, w: null };
 async function osintSleutels() {
@@ -20943,11 +20943,12 @@ async function osintSleutels() {
   const w = {};
   try {
     if (typeof tibberMgmt !== 'function') return w;
-    const r = await tibberMgmt("select name, decrypted_secret as w from vault.decrypted_secrets where name in ('ep_online_sleutel', 'mapillary_token')");
+    const r = await tibberMgmt("select name, decrypted_secret as w from vault.decrypted_secrets where name in ('ep_online_sleutel', 'mapillary_token', 'google_streetview_sleutel')");
     r.forEach(function (x) {
       const v = x && typeof x.w === 'string' ? x.w.trim() : '';
       if (v && x.name === 'ep_online_sleutel') w.ep_online = v;
       if (v && x.name === 'mapillary_token') w.mapillary = v;
+      if (v && x.name === 'google_streetview_sleutel') w.google_streetview = v;   // wv2723: Davids eigen Google-project (kost geld boven 10.000/maand; dagplafond 300)
     });
   } catch (e) { osintSleutelCache = { t: Date.now() - 480000, w: w }; return w; }   // review-ZOU 6: kluis traag/weg = 2 min zonder sleutels, niet elke zoekvraag 20 s wachten
   osintSleutelCache = { t: Date.now(), w: w };

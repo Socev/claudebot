@@ -170,9 +170,65 @@ nep2['public.ep-online.nl/api/v5/PandEnergielabel/AdresseerbaarObject'] = {'type
 json.dump(nep2, open(os.path.join(T, 'nep.json'), 'w'))
 r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True, sleutels={'ep_online': TOK})
 k = kaart(r, 'Energielabel'); eis(not k.get('velden') and 'Geen energielabel' in (k.get('klein') or ''), 'EP-online: 404-antwoord = geen label, geen ruwe velden (gemeten 8-11)')
+# wv2723: Google Street View met Davids sleutel — eerst Metadata (gratis), alleen bij OK één foto; weigering = nette melding, geen tweede poging
+GK = 'AIzaPROEF-verzonnen-GSV-0000000000000'
+def gsv(meta, foto=True):
+    n = dict(nep); n['maps.googleapis.com/maps/api/streetview/metadata'] = meta
+    if foto: n['maps.googleapis.com/maps/api/streetview'] = 'base64:' + base64.b64encode(b'\xff\xd8\xff\xe0GOOGLEPROEF').decode()
+    json.dump(n, open(os.path.join(T, 'nep.json'), 'w'))
+    u = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True, sleutels={'google_streetview': GK})
+    GSV_UIT.append(json.dumps(u)); return u
+GSV_UIT = []
+def gl(r, soort): return [l for l in r.get('logboek', []) if l['host'] == 'maps.googleapis.com' and soort in l['bron']]
+r = gsv({'status': 'OK', 'date': '2023-06', 'copyright': '© Google', 'pano_id': 'PROEFpano_01', 'location': {'lat': 52.1001, 'lng': 5.1001}})
+k = kaart(r, 'Google Street View')
+eis(len(gl(r, 'metadata')) == 1 and len(gl(r, 'foto')) == 1, 'Google: status OK = 1 metadata + 1 foto')
+eis(len(k.get('beelden') or []) == 1 and k['beelden'][0]['src'].startswith('data:image/jpeg') and veld(k, 'Opgenomen') == '06-2023' and veld(k, 'Foto') == '© Google' and (veld(k, 'Afstand tot het adres') or '').endswith(' m'), 'Google: foto met opnamedatum, afstand en copyright')
+eis(any('pano=PROEFpano_01' in (l.get('url') or '') and 'key' not in (l.get('url') or '') for l in k.get('links', [])) and bool(k.get('juridisch')) and '_gsv' not in json.dumps(r), 'Google: link zonder sleutel, juridische regel, geen interne velden')
+for st, woord in (('ZERO_RESULTS', 'Geen Google-straatfoto binnen 50 m'), ('REQUEST_DENIED', 'weigerde de sleutel'), ('OVER_QUERY_LIMIT', 'dagplafond')):
+    r = gsv({'status': st, 'error_message': 'proef met key=' + GK})
+    k = kaart(r, 'Google Street View')
+    eis(len(gl(r, 'metadata')) == 1 and not gl(r, 'foto') and woord in (k.get('klein') or '') and not k.get('beelden'), 'Google: %s = melding, geen fotoaanvraag, één metadata-aanroep' % st)
+r = gsv({'status': 'OK'}, foto=False)   # foto-antwoord geen JPEG
+eis(len(gl(r, 'foto')) == 1 and not kaart(r, 'Google Street View').get('beelden') and 'geen nieuwe poging' in (kaart(r, 'Google Street View').get('klein') or ''), 'Google: geen JPEG terug = melding, geen tweede poging')
+_z = subprocess.run([sys.executable, '-I', '-B', '-c', 'import importlib.util as u,sys; s=u.spec_from_file_location("o", sys.argv[1]); o=u.module_from_spec(s); s.loader.exec_module(o); print(o.zonder_sleutel("https://maps.googleapis.com/x?location=1,2&key=" + sys.argv[2] + "&size=1"))', py, GK], capture_output=True, text=True).stdout
+eis(GK not in _z and 'key=…&size=1' in _z, 'zonder_sleutel maskeert key= in een URL')
+r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True)
+eis(not kaart(r, 'Google Street View') and not any(l['host'] == 'maps.googleapis.com' for l in r['logboek']), 'Google: zonder sleutel geen aanroep en geen kaartje')
+r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='socev', herkomst='david-vraag', beelden=False, sleutels={'google_streetview': GK})
+eis(not any(l['host'] == 'maps.googleapis.com' for l in r['logboek']), 'Google: Socev (geen beelden) = geen aanroep, ook met sleutel')
+r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='socev', herkomst='mogelijk-medisch', sleutels={'google_streetview': GK})
+eis(not any(l['host'] == 'maps.googleapis.com' and l['status'] != 'poort dicht' for l in r['logboek']), 'Google: poort dicht (herkomst mogelijk medisch) = niets naar Google')
+# cache: de Google-foto mag niet in osint.sqlite; een cachetreffer haalt hem opnieuw (in-proces, want NEP zet de cache uit)
+sys.dont_write_bytecode = True; import importlib.util as _iu
+_s = _iu.spec_from_file_location('osint_toets', py); O = _iu.module_from_spec(_s); _s.loader.exec_module(O)
+gk = O.kaartje('Google Street View', 'x', [('Opgenomen', '06-2023')], beelden=[{'src': 'data:image/jpeg;base64,GGG'}], _gsv=[5.1, 52.1])
+cv = O.cachevorm([gk, O.kaartje('Straatbeeld', 'y')])
+eis('GGG' not in json.dumps(cv) and cv[0].get('_gsv') == [5.1, 52.1] and cv[1]['titel'] == 'Straatbeeld', 'cache: Google-kaartje zonder foto en velden, andere kaartjes ongemoeid')
+O.SLEUTELS.clear(); hc = O.herstel_google(O.Ctx('alles', False), cv)
+eis([k['titel'] for k in hc] == ['Straatbeeld'], 'cache: zonder beelden valt het Google-kaartje bij een treffer weg')
+# review-ZOU 2: het echte cachepad (NEP uit, netwerk vervangen door de verzonnen antwoorden): foto niet in osint.sqlite, treffer haalt opnieuw
+FOTO = b'\xff\xd8\xff\xe0GOOGLEPROEF'
+gsv({'status': 'OK', 'date': '2023-06', 'pano_id': 'PROEFpano_01', 'location': {'lat': 52.1001, 'lng': 5.1001}})
+def nephaal(ctx, bron, url, naar_buiten, soort='extern', binair=False, metcode=False, **_):
+    h = O.up.urlsplit(url).hostname
+    O.poort_open(ctx, bron, soort, h, naar_buiten)
+    x = O.nep_antwoord(url); x = x if x is not None else '{}'
+    if binair: x = base64.b64decode(x[7:]) if x.startswith('base64:') else x.encode()
+    ctx.log.append({'bron': bron, 'soort': soort, 'host': h, 'naar_buiten': naar_buiten, 'status': '200', 'ms': 0})
+    return ('200', x) if metcode else x
+O.NEP, O.haal = False, nephaal
+c1 = O.zoek({'ingang': 'adres', 'term': 'Proefstraat 7, 9999 ZZ Nergensdorp', 'wie': 'david', 'sleutels': {'google_streetview': GK}})
+c2 = O.zoek({'ingang': 'adres', 'term': 'Proefstraat 7, 9999 ZZ Nergensdorp', 'wie': 'david', 'sleutels': {'google_streetview': GK}})
+GSV_UIT += [json.dumps(c1), json.dumps(c2)]
+k2 = kaart(c2, 'Google Street View'); b64 = base64.b64encode(FOTO).decode()
+cdump = '\n'.join(sqlite3.connect(os.environ['OSINT_DB']).iterdump())
+eis(not c1['cache'] and c2['cache'] and len(gl(c2, 'metadata')) == 1 and len(gl(c2, 'foto')) == 1 and b64 in json.dumps((k2.get('beelden') or [{}])[0].get('src', '')), 'cache: treffer haalt de Google-foto opnieuw (1 metadata + 1 foto), rest uit de cache')
+eis(b64[:16] not in cdump and 'PROEFpano_01' not in cdump and GK not in cdump and 'Proefstraat 7' in cdump, 'cache: de echte cacherij in osint.sqlite heeft geen Google-foto, -velden of sleutel')
+eis(all(GK not in u and 'AIzaPROEF' not in u for u in GSV_UIT), 'review-ZOU 1: de Google-sleutel staat in geen enkele uitkomst of logboek (OK, weigeringen, cache)')
 json.dump(nep, open(os.path.join(T, 'nep.json'), 'w'))
 c = sqlite3.connect(os.environ['OSINT_DB']); dump = '\n'.join(c.iterdump())
-eis(TOK not in json.dumps(r) and TOK not in dump, 'sleutels niet in de uitkomst of osint.sqlite')
+eis(TOK not in json.dumps(r) and TOK not in dump and GK not in dump and 'AIzaPROEF' not in dump and 'GOOGLEPROEF' not in dump, 'sleutels (ook Google) en Google-foto niet in de uitkomst of osint.sqlite')
 r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='socev', herkomst='david-vraag', beelden=False)
 eis(not any(l['host'] in ('api.panoramax.xyz', 'graph.mapillary.com') for l in r['logboek']) and kaart(r, 'Buurtcijfers (CBS)'), 'Socev (geen beelden): geen straatbeeld, wel buurtcijfers')
 DEEL3 = {'opendata.cbs.nl', 'geo.leefbaarometer.nl', 'gis.gdngeoservices.nl', 'api.panoramax.xyz', 'graph.mapillary.com', 'foto.proef.example'}
