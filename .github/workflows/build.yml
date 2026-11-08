@@ -669,6 +669,10 @@ jobs:
       - name: "twee-accounts (wv781, tweede Max-abonnement)"
         if: ${{ !cancelled() }}
         run: bash test/twee-accounts.sh
+      # Inlogverloop-wachter andere koppelingen (wv2786): /inlog-meting (n8n-Google), nep-rclone en nep-Codex, box/bericht/herstel.
+      - name: "inlog-koppelingen (wv2786, idee 38 meetpunt 3)"
+        if: ${{ !cancelled() }}
+        run: bash test/inlog-koppelingen.sh
       # Uid-scheiding fase 1 (wv699): het protocol en de weigeringen van de socev-loper (zonder docker), en de argv-hook die
       # sinds wv699 als managed settings in het image zit (24 weigeren + 22 doorlaten, nepsleutels).
       - name: "socev-loper (wv699, protocol en weigeringen)"

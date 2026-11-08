@@ -3612,6 +3612,10 @@ function appWeesVasthouden() {
     setTimeout(function () { account2MeetRonde(); setInterval(account2MeetRonde, ACCOUNT2_MEET_MS).unref(); }, 1000).unref();
   }
   setTimeout(function () { try { appVerlorenRonde(); } catch (e) { logError('app-verloren', e); } }, 15 * 1000).unref();   // wv716
+
+  if (SERVER_ECHT || process.env.KOPPEL_MEET === '1') {   // wv2786: rclone-Drive en Codex elk kwartier (n8n-Google komt via POST /inlog-meting)
+    setTimeout(function () { koppelTik(); setInterval(koppelTik, KOPPEL_TIK_MS).unref(); }, (!SERVER_ECHT && process.env.KOPPEL_MEET === '1') ? 500 : 3 * 60 * 1000).unref();
+  }
 })();
 
 function readBody(req, cb) {
@@ -3700,6 +3704,192 @@ function tokenInfo() {
   const uit = {};
   [1, 2].forEach(function (a) { const s = tokenStaat[a]; uit[a] = s ? { geweigerd_sinds: new Date(s.sinds).toISOString(), laatst: new Date(s.laatst).toISOString(), http: s.http, soort: s.soort, david_gemeld: s.david_gemeld } : null; });
   return uit;
+}
+
+// ── wv2786 (idee 38 meetpunt 3, 8-11-2026): inlogverloop-wachter voor de andere koppelingen ──────────────────────────
+// WAAROM. Naast de Claude-inlogs (hierboven) draait Socev op koppelingen die stil kunnen verlopen of ingetrokken worden: de
+// Google-OAuth-credentials in n8n (MailMan/Facturen hebben geen foutworkflow en hun knopen lopen door bij een fout: een dode Gmail-
+// inlog gaf geen spoor), rclone-Drive (podstaat-back-up; zag alleen de Stiltewachter, na een dag, zonder handeling) en de Codex-
+// inlog (reviews vallen stil terug). Gemeten 8-11 (wv2786): de credential-test van n8n (POST /credentials/{id}/test) zegt 'OK'
+// zonder bij Google aan te kloppen (Sheets-credential van 16-6 bleef onveranderd); de echte, specifieke signalen zijn (a) een
+// Google-API-aanroep met de credential in n8n (workflow AI - Inlogwachter (Google), elk kwartier → POST /inlog-meting),
+// (b) rclone 'couldn't fetch token: invalid_grant' (exit 1, kruisproef met nep-token), (c) Codex: GET wham/usage met het eigen
+// toegangstoken = 200, nep = 401 (kost niets, telt niet mee in de weekmeter). Antigravity niet: geen productiegebruik (runtime
+// claude, geen terugval); inlog 8-11 nog geldig. Zelfde patroon als tokenGeweigerd: stand in /health (inlog_koppelingen), één
+// box-rij per dag, na KOPPEL_DAVID_NA_MS aanhoudend één bericht aan David met de handeling (7-23 uur); geslaagd = terug.
+const KOPPEL_DAVID_NA_MS = (!SERVER_ECHT && Number(process.env.KOPPEL_DAVID_NA_PROEF_MS) >= 0 && process.env.KOPPEL_DAVID_NA_PROEF_MS) ? Number(process.env.KOPPEL_DAVID_NA_PROEF_MS) : 30 * 60 * 1000;
+const KOPPEL_TIK_MS = (!SERVER_ECHT && Number(process.env.KOPPEL_TIK_PROEF_MS) > 0) ? Number(process.env.KOPPEL_TIK_PROEF_MS) : 15 * 60 * 1000;
+const KOPPEL_AUTH_RE = /invalid_grant|unauthorized_client|invalid_client|expired or revoked|invalid authentication credentials|UNAUTHENTICATED|authorization grant/i;
+// Review wv2786 ZOU 1: bij rclone telt 'couldn't fetch token' alleen met een echte OAuth-foutcode (een netwerkfout tijdens verversen is geen weigering).
+const KOPPEL_RCLONE_RE = /invalid_grant|unauthorized_client|invalid_client|expired or revoked/i;
+const KOPPEL_N8N_STIL_MS = (!SERVER_ECHT && Number(process.env.KOPPEL_N8N_STIL_PROEF_MS) > 0) ? Number(process.env.KOPPEL_N8N_STIL_PROEF_MS) : 75 * 60 * 1000;   // review MOET 3: zonder n8n-meting langer dan dit = box-rij (1x/dag)
+const KOPPEL_START = Date.now();
+const KOPPEL_DEF = {
+  'n8n-google': { naam: 'Google-koppeling(en) in n8n',
+    gevolg: 'wat via die koppeling loopt (MailMan, Intake, Facturen, agenda, contacten, Drive-uitvoer) leest of schrijft niet meer.',
+    voorstel: 'David: n8n › Credentials › <naam> › opnieuw verbinden met Google (zelfde account). Geen credential aanmaken.',
+    tekst: function (hm, det) { return 'Google weigert sinds ' + hm + ' de inlog van ' + det + ' in n8n: wat daarop draait (mail, agenda, contacten of Drive) ligt stil. Open n8n, ga naar Credentials, open ' + det + ' en kies opnieuw verbinden (Sign in with Google), met hetzelfde Google-account.'; } },
+  'rclone-drive': { naam: 'Google Drive-koppeling van de pod (rclone)',
+    gevolg: 'de nachtelijke versleutelde podstaat-back-up gaat niet meer naar Drive.',
+    voorstel: 'opnieuw autoriseren met de eigen client-id (stappenplan rclone eigen Google client-id): rclone authorize op Davids pc, blok via het sleutelportaal; daarna rclone about gdrive:.',
+    tekst: function (hm) { return 'Google weigert sinds ' + hm + ' de Drive-koppeling van de pod: de nachtelijke back-up van de pod gaat niet meer naar Drive. Zeg in de machinekamer "Drive opnieuw koppelen"; die zet de stappen voor je klaar (eenmalig inloggen met je Google-account op je pc).'; } },
+  'codex': { naam: 'Codex-inlog (ChatGPT-abonnement)',
+    gevolg: 'reviews en Codex-beurten vallen terug op Claude of het API-tegoed.',
+    voorstel: 'codex login --device-auth in de pod (CODEX_HOME /opt/data/.codex), David logt in met zijn ChatGPT-account; daarna codex login status + wham/usage 200.',
+    tekst: function (hm) { return 'OpenAI weigert sinds ' + hm + ' de Codex-inlog (je ChatGPT-abonnement): reviews lopen nu via Claude of het API-tegoed. Zeg in de machinekamer "Codex opnieuw koppelen"; je krijgt dan een link en een code om in te loggen met je ChatGPT-account.'; } },
+};
+const koppelStaat = {};
+const koppelDag = {};   // review ZOU 2: box- en berichtdag per koppeling, blijft staan na herstel (hooguit 1 rij en 1 bericht per dag)
+const koppelGWeg = {};  // review MOET 1: per n8n-credential sinds wanneer geweigerd; weg alleen na een geslaagde meting van díe credential
+const koppelLaatst = {};   // laatste meting per koppeling (ook geslaagd), voor /health
+function koppelingGeweigerd(k, http, soort, detail) {
+  const def = KOPPEL_DEF[k]; if (!def) return;
+  const nu = Date.now();
+  const s = koppelStaat[k] || (koppelStaat[k] = { sinds: nu, david_gemeld: false });
+  s.laatst = nu; s.http = http || null; s.soort = String(soort || '').replace(/[\r\n]+/g, ' ').slice(0, 80); s.detail = String(detail || '').slice(0, 200);
+  koppelEscaleer(k);
+}
+// Box-rij en bericht; ook vanuit koppelTik (review MOET 2: escalatie hangt niet af van een nieuwe meting).
+function koppelEscaleer(k) {
+  const def = KOPPEL_DEF[k], s = koppelStaat[k];
+  if (!def || !s || !tokenMeldMag()) return;
+  const nu = Date.now();
+  const kd = koppelDag[k] || (koppelDag[k] = {});
+  const dag = new Date(nu).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const sinds = new Date(s.sinds).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+  if (kd.box_dag !== dag) {
+    kd.box_dag = dag;
+    ovisBoxRij('\n## [direct] ' + new Date(nu).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16) + ' — Inlog geweigerd: ' + def.naam +
+      (s.detail ? ' (' + s.detail + ')' : '') + ' (automatisch)\n- status: open\n- van: pod server.js (wv2786, inlogverloop-wachter koppelingen; hooguit 1×/dag per koppeling)\n' +
+      '- gemeten: sinds ' + sinds + ' ' + (s.http ? 'http ' + s.http + ', ' : '') + s.soort + '; /health inlog_koppelingen toont de stand.\n' +
+      '- gevolg als er niets gebeurt: ' + def.gevolg + ' David krijgt na ' + Math.round(KOPPEL_DAVID_NA_MS / 60000) + ' min één bericht.\n' +
+      '- voorstel: ' + def.voorstel + '\n');
+  }
+  const uur = Number(new Date(nu).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false }));
+  if (kd.david_dag === dag) s.david_gemeld = true;   // vandaag al gemeld (ook vóór een tussentijds herstel): niet nog eens
+  if (!s.david_gemeld && !s.bericht_bezig && nu - s.sinds >= KOPPEL_DAVID_NA_MS && nu - (s.poging_t || 0) >= KOPPEL_DAVID_NA_MS && uur >= 7 && uur < 23) {
+    s.bericht_bezig = true; s.poging_t = nu;
+    const hm = new Date(s.sinds).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });
+    try {
+      const kb = spawn('python3', [(!SERVER_ECHT && process.env.TOKEN_WACHT_PROEF) || '/opt/data/mk-scripts/bericht.py', '--klasse', 'normaal', '--sleutel', 'inlog-' + k, def.tekst(hm, s.detail || def.naam)],
+        { detached: true, stdio: 'ignore', env: process.env });
+      kb.on('error', function (e) { s.bericht_bezig = false; logError('inlog-koppeling-david', e); });
+      kb.on('exit', function (code) { s.bericht_bezig = false; if (code === 0) { s.david_gemeld = true; kd.david_dag = dag; } else logError('inlog-koppeling-david', new Error('bericht.py exit ' + code)); });
+      kb.unref();
+    } catch (e) { s.bericht_bezig = false; logError('inlog-koppeling-david', e); }
+  }
+}
+function koppelingHersteld(k) {
+  const s = koppelStaat[k];
+  if (!s) return;
+  delete koppelStaat[k];
+  schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'inlog-koppeling-hersteld', koppeling: k, sinds: new Date(s.sinds).toISOString(), david_gemeld: s.david_gemeld }));
+}
+function koppelMeting(k, uitkomst) { koppelLaatst[k] = { t: new Date().toISOString(), uitkomst: uitkomst }; }
+function koppelingInfo() {
+  const uit = {};
+  Object.keys(KOPPEL_DEF).forEach(function (k) {
+    const s = koppelStaat[k];
+    uit[k] = { laatste_meting: koppelLaatst[k] || null, geweigerd: s ? { sinds: new Date(s.sinds).toISOString(), laatst: new Date(s.laatst).toISOString(), http: s.http, soort: s.soort, detail: s.detail, david_gemeld: s.david_gemeld } : null };
+  });
+  return uit;
+}
+// n8n-route: { metingen: [{ naam, ok, http, fout }] } van AI - Inlogwachter (Google). Alleen een inlogsoort (401 of KOPPEL_AUTH_RE) telt;
+// een time-out of 5xx verandert niets. Terug naar 'goed' pas als elke eerder geweigerde credential nu ok is.
+function koppelN8nGoogle(d) {
+  const lijst = Array.isArray(d && d.metingen) ? d.metingen.slice(0, 20) : null;
+  if (!lijst || !lijst.length) return { status: 400, j: { ok: false, fout: 'metingen ontbreken' } };
+  const goed = [], weg = [], anders = [];
+  let soort = '';
+  lijst.forEach(function (m) {
+    const naam = String(m && m.naam || '').replace(/[^A-Za-z0-9 .@()_-]/g, '').slice(0, 60) || '?';
+    const fout = String(m && m.fout || '').slice(0, 300);
+    const http = Number(m && m.http) || null;
+    if (m && m.ok === true) goed.push(naam);
+    else if (http === 401 || KOPPEL_AUTH_RE.test(fout)) { weg.push(naam); if (!soort) soort = (KOPPEL_AUTH_RE.exec(fout) || ['http 401'])[0]; }
+    else anders.push(naam);
+  });
+  koppelMeting('n8n-google', { goed: goed.length, geweigerd: weg, andere_fout: anders });
+  const nu = Date.now();
+  goed.forEach(function (n) { delete koppelGWeg[n]; });
+  weg.forEach(function (n) { if (!koppelGWeg[n]) koppelGWeg[n] = nu; });
+  const nogWeg = Object.keys(koppelGWeg).sort();
+  if (weg.length) koppelingGeweigerd('n8n-google', lijst.some(function (m) { return m && m.ok !== true && Number(m.http) === 401; }) ? 401 : null, soort, nogWeg.join(', '));
+  else if (!nogWeg.length) koppelingHersteld('n8n-google');
+  else if (koppelStaat['n8n-google']) koppelStaat['n8n-google'].detail = nogWeg.join(', ').slice(0, 200);
+  return { status: 200, j: { ok: true, geweigerd: weg, andere_fout: anders.length } };
+}
+function koppelRclone() {
+  return new Promise(function (ok) {
+    let err = '', klaar = false;
+    const bin = (!SERVER_ECHT && process.env.KOPPEL_RCLONE_PROEF) || 'rclone';
+    let p;
+    try { p = spawn(bin, ['about', 'gdrive:', '--json'], { stdio: ['ignore', 'ignore', 'pipe'], env: process.env }); } catch (e) { return ok(null); }
+    const t = setTimeout(function () { try { p.kill('SIGKILL'); } catch (e) {} }, 60000);
+    p.stderr.on('data', function (c) { if (err.length < 4000) err += c; });
+    p.on('error', function () { if (!klaar) { klaar = true; clearTimeout(t); ok(null); } });
+    p.on('close', function (code) {
+      if (klaar) return; klaar = true; clearTimeout(t);
+      const m = KOPPEL_RCLONE_RE.exec(err);
+      if (code === 0) { koppelMeting('rclone-drive', 'goed'); koppelingHersteld('rclone-drive'); }
+      else if (m) { koppelMeting('rclone-drive', 'geweigerd'); koppelingGeweigerd('rclone-drive', null, m[0], 'gdrive'); }
+      else koppelMeting('rclone-drive', 'andere fout (exit ' + code + ')');
+      ok(code);
+    });
+  });
+}
+async function koppelCodex() {
+  let tok, acc, exp = 0;
+  try {
+    const a = JSON.parse(fs.readFileSync(path.join(CODEX_HOME, 'auth.json'), 'utf8'));
+    tok = a && a.tokens && a.tokens.access_token; acc = a && a.tokens && a.tokens.account_id;
+    exp = Number(JSON.parse(Buffer.from(String(tok).split('.')[1], 'base64url').toString('utf8')).exp) * 1000 || 0;
+  } catch (e) { koppelMeting('codex', 'geen leesbare login'); return null; }
+  // Een verlopen toegangstoken ververst Codex zelf bij het volgende gebruik (verversen hier zou het ene refresh-token kunnen breken).
+  if (!tok || exp < Date.now() + 120000) {
+    // Review MOET 2: verlopen toegangstoken = Codex moest bij gebruik verversen. Lukte dat (nieuw token), dan was exp verschoven.
+    // Staan er ná het verlopen runs met fout 'inlog' (codex-verbruik.jsonl; codex_review.py herkent de inlogfout van codex-rs, review
+    // wv2786 ronde 2) en geen geslaagde, dan faalde het verversen bij echt gebruik: dat is de weigering. Andere fouten tellen niet. Geen gebruik sindsdien = niets stilgelegd, niet gemeten.
+    let mis = 0, goed = 0;
+    try {
+      const st = fs.statSync(CODEX_MK_VERBRUIK), van = Math.max(0, st.size - 65536), fd = fs.openSync(CODEX_MK_VERBRUIK, 'r');
+      const buf = Buffer.alloc(st.size - van); fs.readSync(fd, buf, 0, buf.length, van); fs.closeSync(fd);
+      buf.toString('utf8').split('\n').forEach(function (r) { try { const j = JSON.parse(r); const t = Date.parse(j.t); if (t > exp) { if (j.ok === true) goed++; else if (j.fout === 'inlog') mis++; } } catch (e) {} });
+    } catch (e) {}
+    if (mis > 0 && goed === 0) { koppelMeting('codex', 'geweigerd (verversen bij gebruik)'); koppelingGeweigerd('codex', null, 'verversen mislukt bij gebruik (' + mis + ' run(s) na verloop van het toegangstoken)', 'ChatGPT'); }
+    else { if (goed > 0) koppelingHersteld('codex'); koppelMeting('codex', 'niet gemeten: toegangstoken verlopen, ' + (goed ? 'wel geslaagd gebruik' : 'geen gebruik') + ' sindsdien'); }
+    return null;
+  }
+  let r;
+  try {
+    r = await fetch((!SERVER_ECHT && process.env.KOPPEL_CODEX_PROEF_URL) || 'https://chatgpt.com/backend-api/wham/usage', {
+      headers: { authorization: 'Bearer ' + tok, 'chatgpt-account-id': String(acc || ''), 'user-agent': 'codex_cli_rs/0.160.0', originator: 'codex_cli_rs' },
+      signal: AbortSignal.timeout(20000) });
+  } catch (e) { koppelMeting('codex', 'andere fout (call)'); return null; }
+  if (r.status === 200) { koppelMeting('codex', 'goed'); koppelingHersteld('codex'); }
+  else if (r.status === 401) {
+    let soort = 'http 401';
+    try { const j = JSON.parse(await r.text()); soort = String(j && (j.detail || (j.error && (j.error.code || j.error.message))) || soort); } catch (e) {}
+    koppelMeting('codex', 'geweigerd'); koppelingGeweigerd('codex', 401, soort, 'ChatGPT');
+  } else koppelMeting('codex', 'andere fout (http ' + r.status + ')');
+  return r.status;
+}
+function koppelTik() {
+  if (!rolPrimair()) return;
+  Object.keys(koppelStaat).forEach(function (k) { try { koppelEscaleer(k); } catch (e) { logError('inlog-escaleer', e); } });
+  // Review MOET 3: komen de n8n-metingen niet meer binnen (workflow uit, 'Naar pod' faalt), dan één box-rij per dag.
+  const lm = koppelLaatst['n8n-google'], ref = lm ? Date.parse(lm.t) : KOPPEL_START;
+  if (Date.now() - ref > KOPPEL_N8N_STIL_MS && tokenMeldMag()) {
+    const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), kd = koppelDag['n8n-stil'] || (koppelDag['n8n-stil'] = {});
+    if (kd.box_dag !== dag) {
+      kd.box_dag = dag;
+      ovisBoxRij('\n## [direct] ' + new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16) + ' — Inlogwachter Google stil: geen n8n-meting sinds ' +
+        (lm ? lm.t.slice(0, 16).replace('T', ' ') + ' UTC' : 'de podstart') + ' (automatisch)\n- status: open\n- van: pod server.js (wv2786; hooguit 1×/dag)\n' +
+        '- gevolg als er niets gebeurt: een verlopen Google-inlog in n8n valt weer stil weg.\n- voorstel: n8n AI - Inlogwachter (Google) (T3Dk2R7WUtoc9rKw) actief? laatste runs en knoop Naar pod nakijken.\n');
+    }
+  }
+  koppelRclone().catch(function (e) { logError('inlog-rclone', e); });
+  koppelCodex().catch(function (e) { logError('inlog-codex', e); });
 }
 
 async function meetTank(account) {
@@ -4045,7 +4235,9 @@ function handleRequest(req, res) {
       // wv716: rss/heap en lusvertraging (max, p99) van de laatste volle minuut; null in de eerste minuut na de start
       proces: procesInfo(),
       // wv781: twee abonnementen — agents_op (schakelaar), token2 aanwezig, bezwaar2 (waarom nu niet op 2), lopend: job -> 1|2
-      accounts: accountInfo()
+      accounts: accountInfo(),
+      // wv2786: inlogverloop-wachter andere koppelingen (n8n-Google, rclone-Drive, Codex): laatste meting + geweigerd-stand
+      inlog_koppelingen: koppelingInfo()
     }));
   }
 
@@ -4159,6 +4351,19 @@ function handleRequest(req, res) {
       });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws, runtime: keuze.runtime, model: keuze.model || '(default)', gereedschap: gereedschap || undefined }));
+    }); });
+  }
+
+  // ── wv2786: inlogverloop-wachter, metingen van n8n AI - Inlogwachter (Google) (body-secret zoals /bank-ronde) ──
+  if (req.method === 'POST' && req.url === '/inlog-meting') {
+    return rolPoort(res, function () { readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!SECRET || typeof d.secret !== 'string' || Buffer.byteLength(d.secret) !== Buffer.byteLength(SECRET) ||
+          !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
+      const r = koppelN8nGoogle(d);
+      reqLogExtra(res, { inlog_meting: r.j.ok ? (r.j.geweigerd.length ? 'geweigerd ' + r.j.geweigerd.length : 'goed') : 'fout' });
+      res.writeHead(r.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(r.j));
     }); });
   }
 
