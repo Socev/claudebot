@@ -323,8 +323,11 @@ function blokVasteLasten(A, a, nu, links, signalen, pp) {
     const naam = toonNaam(j);
     signalen.push({ soort: 'weg', naam: naam, toon: 'info', post: naam, pp: j.paypal_dienst, zin: 'Navragen: ' + naam + ' liep een jaar geleden nog (' + eur(j.per_maand) + ' per maand) en nu niet meer. Klopt dat?' });
   });
+  // wv2706 (idee 4 uit Sure): rekeningen deze maand afvinken (financien-plan.js); een fout maakt alleen dit lijstje leeg
+  let afvink = null;
+  try { afvink = require('./financien-plan.js').afvinken({ nu: nu, reeksen: reeksNu, rijen: rijen, lasten: p.lasten, naam: toonNaam, overslaan: paraplu }); } catch (e) { afvink = null; }
   return { rekening: veilig(vl.rekening, 30) || 'Vaste lasten', vanaf: vl.vanaf || null, peildatum: vl.peildatum, totaal_per_maand: getal(vl.totaal_per_maand),
-    posten: uit.length, rijen: uit,
+    posten: uit.length, rijen: uit, deze_maand: afvink,
     steun: (vl.steun || []).map(function (s) { return { naam: veilig(s.naam, 30) || 'Steun (vast)', per_maand: getal(s.per_maand), dag: s.dag | 0 }; }),
     vaste_storting: (vl.vaste_storting || []).map(function (s) { return { van: veilig(s.van, 30) || 'eigen rekening', bedrag: getal(s.bedrag), dag: s.dag | 0 }; }) };
 }

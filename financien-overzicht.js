@@ -441,6 +441,9 @@ function overzicht(A, a, o) {
   uit.uitgaven = blok('uitgaven', function () { return uitgaven(b.delen, { mNu: mNu, twaalf: twaalf, vanaf: o.vanaf }); });
   // wv2700 (David 8-11-2026): "Zelf bij te sturen" — boodschappen, uit eten, stroom, streaming en abonnementen (financien-bijsturen.js); alleen dit blok leeg bij een fout
   if (uit.uitgaven) uit.uitgaven.bijsturen = blok('bijsturen', function () { return require('./financien-bijsturen.js').bijsturen(a, b.delen, { mNu: mNu, twaalf: twaalf, vault: o.vault }); });
+  // wv2706 (ideeën uit Sure, David 8-11-2026 "1 t/m 6"): potjes per post (vaultpagina Potjes) en de geldstroom voor het Sankey-plaatje (financien-plan.js); alleen dit blok leeg bij een fout
+  if (uit.uitgaven) uit.uitgaven.potjes = blok('potjes', function () { return require('./financien-plan.js').potjes(b.delen, { mNu: mNu, twaalf: twaalf, nu: nu, vault: o.vault, fv: FV, vanafArchief: o.vanaf }); });
+  uit.geldstroom = blok('geldstroom', function () { return require('./financien-plan.js').geldstroom(b.delen, { twaalf: twaalf }); });
   // wv2621 (stap 5): de basis van de prognose op dezelfde delen en 12 maanden (financien-vooruit.js; jaar/kwartaalreeksen gaan in de kalender)
   uit.reeksen_jaar = blok('vooruit', function () { return require('./financien-vooruit.js').reeksenJaar(a); });
   uit.basis_vooruit = blok('vooruit', function () { return require('./financien-vooruit.js').basis(b.delen, twaalf, uit.reeksen_jaar || []); });

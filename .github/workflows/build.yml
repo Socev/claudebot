@@ -320,6 +320,7 @@ jobs:
           t test/financien-overzicht.sh   # wv2596: Financiën 8+ — stromen (som = boekingen), kerngetallen reproduceerbaar, privé en Holding apart, keuze per tegenpartij
           TOETS_NU=2026-01-02T10:00:00Z t test/financien-overzicht.sh   # wv2596: ook op 2 januari (jaarwissel in het venster)
           t test/financien-bijsturen.sh   # wv2700: Financiën › Uitgaven "Zelf bij te sturen" (boodschappen, uit eten, stroom, streaming, abonnementen)
+          t test/financien-plan.sh   # wv2706: Financiën — potjes, rekeningen afvinken, geldstroom (ideeën uit Sure)
           t test/stroom-tabel.sh   # wv2704: stroomtabel op de energiepagina vanzelf bij uit de Tibber-factuur
           t test/tibber-uur.sh   # wv2707: Tibber-uurverbruik dagelijks bij — alleen leesqueries, kluis alleen tibber_lezen, kind zonder andere sleutels, gevuld uur blijft
           t test/ah-bonnen.sh   # wv2703: AH-kassabonnen (koppelen, ronde, ontkoppelen, unieke bankkoppeling)

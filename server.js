@@ -5196,6 +5196,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/rekening');   // wv2292: Bewerk in Sal
 APP_GLIJD_ROUTES.add('POST /app/financien/stroom');   // wv2596: stroom kiezen = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/doel');   // wv2621: doel erbij of weg = David die werkt
 ['POST /app/financien/ah/koppel', 'POST /app/financien/ah/ontkoppel'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2703: AH koppelen = David die werkt
+APP_GLIJD_ROUTES.add('POST /app/financien/potje');   // wv2706: potje zetten of weg = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -11815,6 +11816,56 @@ async function appFinDoel(req, res, a, d) {
   return appStuur(res, 200, { ok: true, actie: op.actie, naam: op.actie === 'weg' ? op.naam : op.doel.naam });
 }
 
+// wv2706 (idee 2 uit Sure, David 8-11-2026): potjes per post staan op de vaultpagina 20_Prive/Financien/Potjes.md (tabel Post | Per maand |
+// Doorschuiven | Vanaf), zoals Doelen. POST /app/financien/potje { actie: 'zet', potje: { categorie, bedrag, doorschuiven } } (nieuw of
+// vervangen; bij vervangen met doorschuiven blijft Vanaf staan) of { actie: 'weg', categorie }. Zelfde poort als Doelen (sessie, niet op een
+// vaste plek), invoer op vorm in financien-plan.js (potjeInvoer, alleen een categorie uit de vaste lijst), tabel bewerkt door potjesZet
+// (puur), geschreven via vault-veilig (wijzig met krimpgrens; nieuw bestand alleen als het er vlak voor de rename nog niet is). Hooguit 60 per
+// uur; daarna het 60 s-geheugen weg. Geen bedrag in api.log. Lui geladen (de app-toets draait in een vm zonder __dirname).
+const APP_FIN_POTJE_PER_UUR = 60;
+let appFinPlanMod;   // undefined = nog niet geprobeerd, null = niet in deze release
+function appFinPlan() {
+  if (appFinPlanMod === undefined) {
+    appFinPlanMod = null;
+    try { const p = typeof __dirname === 'string' ? path.join(__dirname, 'financien-plan.js') : ''; if (p && fs.existsSync(p)) appFinPlanMod = require(p); } catch (e) { logError('financien-plan', new Error('laden faalde')); }
+  }
+  return appFinPlanMod;
+}
+async function appFinPotje(req, res, a, d) {
+  res._app.reden = 'financien-potje';
+  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-potje vast');
+  const P = appFinPlan();
+  if (!P) return appWeiger(res, 503, 'Financiën wordt net bijgewerkt; probeer het over een paar minuten', 'fin-potje oud');
+  if (d.actie !== 'zet' && d.actie !== 'weg') return appWeiger(res, 400, 'onbekende actie', 'fin-potje actie');
+  const vandaag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const pad = path.join(appProjVault(), P.P_POTJES);
+  let op;
+  try {
+    if (d.actie === 'weg') op = { actie: 'weg', categorie: typeof d.categorie === 'string' ? d.categorie.slice(0, 60) : '' };
+    else {
+      // het oude potje (voor Vanaf bij doorschuiven): alleen lezen; ontbreekt de pagina, dan geen oud potje
+      let oud = null;
+      try { const FV = require(path.join(__dirname, 'financien-vault.js')); oud = P.potjesLees(appProjVault(), FV).potjes.find(function (x) { return d.potje && typeof d.potje.categorie === 'string' && x.categorie.toLowerCase() === d.potje.categorie.trim().toLowerCase(); }) || null; } catch (e) { oud = null; }
+      op = { actie: 'zet', potje: P.potjeInvoer(d.potje, vandaag, oud) };
+    }
+  } catch (e) { return appWeiger(res, 400, String(e && e.message || 'onbekend potje').slice(0, 120), 'fin-potje invoer'); }
+  if (op.actie === 'weg' && !op.categorie.trim()) return appWeiger(res, 400, 'welk potje?', 'fin-potje naam');
+  if (!appTeller('fin-potje', APP_FIN_POTJE_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak gewijzigd dit uur', 'grens fin-potje');
+  try {
+    let bestaat = true;
+    try { VV().lees(pad, 'utf8', { max: 200000 }); } catch (e) { if (e && e.code === 'ENOENT') bestaat = false; else throw e; }
+    if (!bestaat && op.actie === 'weg') return appWeiger(res, 400, 'potje niet gevonden', 'fin-potje geweigerd');
+    const nieuwGezet = !bestaat && VV().schrijf(pad, P.potjesZet('', op, vandaag), { alsGelijk: function (st) { return !st; } });
+    if (!nieuwGezet && !VV().wijzig(pad, function (t) { return P.potjesZet(t, op, vandaag); }, { krimpGrens: true })) return appWeiger(res, 409, 'de pagina veranderde net; probeer het opnieuw', 'fin-potje race');
+  } catch (e) {
+    if (/^(potje niet gevonden|onbekende post|hooguit 40 potjes)$/.test(String(e && e.message))) return appWeiger(res, 400, e.message, 'fin-potje geweigerd');
+    logError('fin-potje', new Error('schrijven faalde (' + String(e && e.code || 'fout') + ')'));
+    return appWeiger(res, 503, 'opslaan lukte nu niet; probeer het zo opnieuw', 'fin-potje fout');
+  }
+  appFinCache = null;
+  return appStuur(res, 200, { ok: true, actie: op.actie, categorie: op.actie === 'weg' ? op.categorie : op.potje.categorie });
+}
+
 // ── App Gezondheid (wv937; ontwerp + Fable-review mk-scripts/wv937): Davids eigen gezondheid, alleen lezen ──
 // WAAROM. David 23-10-2026: "We moeten de health pod ook nog toegankelijk maken via een App hier in OVIS." De pod-pagina zit achter de
 // Olares-login; de App toont hetzelfde in Socev-blauw. gezondheid-app.js haalt het bij de health-pod (leessleutel, vaste host, alleen GET)
@@ -13258,6 +13309,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/financien/stroom') return appFinStroom(req, res, a, d);   // wv2596: stroom per tegenpartij kiezen
         if (route === 'POST /app/financien/doel') return appFinDoel(req, res, a, d);   // wv2621: doel erbij of weg (vaultpagina Doelen)
         if (route === 'GET /app/financien/ah' || route === 'POST /app/financien/ah/koppel' || route === 'POST /app/financien/ah/ontkoppel') return typeof appFinAh === 'function' ? appFinAh(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ah');   // wv2703: AH-kassabonnen
+        if (route === 'POST /app/financien/potje') return appFinPotje(req, res, a, d);   // wv2706: potje per post zetten of weg (vaultpagina Potjes)
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
         if (route.indexOf('GET /app/pot/') === 0) return typeof appPot === 'function' ? appPot(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1894: OVIS POT (P1: lezen)
         if (route.indexOf('POST /app/pot/') === 0) return typeof appPotSchrijf === 'function' ? appPotSchrijf(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1933: OVIS POT (P3/P4: schrijven en verzending)
