@@ -42,7 +42,10 @@ const HID_RE = /^h[0-9a-f]{16}$/;
 // Audio-tags die ElevenLabs noemt en die bij een vertelde herinnering passen (geen geluidseffecten, accenten of personages).
 // Review MOET 2: alleen tags die de manier van vertellen sturen (tempo, volume, lach, zucht, vertelhouding); geen tags die een gevoel of
 // toestand toevoegen die niet in het verhaal staat (bang, zenuwachtig, moe, geschrokken …).
-const TAGS = ['softly', 'quietly', 'whispers', 'hushed', 'slowly', 'pause', 'long pause', 'slightly pause', 'drawn out',
+// wv2730 (David 8-11: "hij start fluisterend"): [whispers], [hushed] en [quietly] gaan eruit; met Davids gekloonde stem klonken ze als
+// fluisteren (Lowlands begon met [softly]: eerste 10 s 4 à 5 dB zachter dan de rest). [softly] mag nog, maar niet in de eerste alinea
+// (schoonScript haalt hem daar weg): de verteller begint altijd in zijn gewone stem.
+const TAGS = ['softly', 'slowly', 'pause', 'long pause', 'slightly pause', 'drawn out',
   'laughs', 'sighs', 'clears throat', 'exhales', 'thoughtful', 'curious', 'peaceful', 'content', 'excited', 'playful', 'amazed', 'hopeful', 'proud'];
 const TAG_SET = new Set(TAGS);
 
@@ -56,7 +59,7 @@ const SYSTEEM = [
   '- Verzin NIETS. Gebruik alleen wat in het verhaal staat: geen nieuwe namen, plaatsen, getallen, jaartallen, maanden, seizoenen, gebeurtenissen, handelingen, gevoelens of details. Laat liever iets weg dan dat je iets toevoegt. De server controleert elke naam, elk getal en elk datumwoord en gooit zinnen weg die iets bevatten dat niet in het verhaal staat.',
   '- Begin zinnen bij voorkeur met gewone woorden of met woorden die in het verhaal staan; schrijf namen en getallen precies zoals in het verhaal.',
   '- Stuur de stem met audio-tags tussen vierkante haken, in het Engels, direct vóór de woorden waar ze voor gelden. Gebruik ALLEEN deze tags: ' + TAGS.map((t) => '[' + t + ']').join(', ') + '. Twee mogen samen in één haakje met een komma, bijvoorbeeld [softly, thoughtful]. Geen andere tags, geen geluidseffecten.',
-  '- Wees zuinig: gemiddeld één tag per twee à drie zinnen; een tag geldt tot de volgende. Kies tags die passen bij wat er staat (een grappig moment [laughs], iets ontroerends [softly] of [thoughtful], een spannend moment [hushed]). Pauzes kun je ook maken met … of een gedachtestreepje.',
+  '- Wees zuinig: gemiddeld één tag per twee à drie zinnen; een tag geldt tot de volgende. Kies tags die passen bij wat er staat (een grappig moment [laughs], iets ontroerends [softly] of [thoughtful]). Begin altijd in je gewone, heldere vertelstem: in de eerste alinea geen [softly]; gebruik [softly] hooguit voor één zin en zet daarna weer een gewone tag of niets. Pauzes kun je ook maken met … of een gedachtestreepje.',
   '- Geen markdown, geen kopjes, geen opsommingen, geen ronde of accolade-haakjes, geen aanhalingstekens rond de hele tekst. Alinea\'s scheid je met een lege regel.',
   '- Ongeveer even lang als het verhaal, hooguit een vijfde langer.',
   '- Staat er iets over een patiënt in, laat dat weg.',
@@ -86,6 +89,11 @@ function schoonScript(ruw) {
   t = t.replace(TAG_RE, (x, inh) => { const g = tagVan(inh); if (g) { tags++; bewaard.push(g); return ' \u0001' + (bewaard.length - 1) + '\u0001 '; } weg++; return ' '; })
     .replace(/[\[\]]/g, ' ').replace(/\u0001(\d+)\u0001/g, (x, n) => bewaard[Number(n)]);
   t = t.replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').replace(/ +([,.!?…;:])/g, '$1').trim();
+  // wv2730: geen [softly] in de eerste alinea (anders begint de verteller fluisterend); [softly, thoughtful] wordt [thoughtful].
+  const knip = t.search(/\n{2,}/), eerste = knip < 0 ? t : t.slice(0, knip);
+  const zonderZacht = eerste.replace(TAG_RE, (x, inh) => { const d = inh.split(',').map((y) => y.trim()).filter((y) => y && y !== 'softly'); return d.length ? '[' + d.join(', ') + ']' : ' '; })
+    .replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/ +([,.!?…;:])/g, '$1').trim();
+  if (zonderZacht !== eerste) { tags -= (eerste.match(TAG_RE) || []).length - (zonderZacht.match(TAG_RE) || []).length; t = zonderZacht + (knip < 0 ? '' : t.slice(knip)); }
   return { tekst: t, tags, weg };
 }
 function zonderTags(t) { return String(t || '').replace(TAG_RE, ' ').replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').trim(); }

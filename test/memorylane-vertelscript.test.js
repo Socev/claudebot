@@ -34,8 +34,13 @@ test('tags: alleen uit de lijst, genormaliseerd, hooguit twee per haakje; de res
   assert.strictEqual(S.tagVan(' softly ,  thoughtful '), '[softly, thoughtful]');
   for (const x of ['gunshot', 'lacht zacht', 'warm', 'softly, thoughtful, sighs', 'British accent', 'pirate voice', '']) assert.strictEqual(S.tagVan(x), null, x);
   const r = S.schoonScript('# Kop\n**[softly]** Het was ==Proefdorp== stil. [gunshot] Toen [lacht zacht] kwam de zon. <b>vet</b> [pause] Klaar.');
-  assert.strictEqual(r.tekst, 'Kop\n[softly] Het was Proefdorp stil. Toen kwam de zon. vet [pause] Klaar.');
-  assert.strictEqual(r.tags, 2); assert.strictEqual(r.weg, 2);
+  assert.strictEqual(r.tekst, 'Kop\nHet was Proefdorp stil. Toen kwam de zon. vet [pause] Klaar.', 'wv2730: geen [softly] in de eerste alinea');
+  assert.strictEqual(r.tags, 1); assert.strictEqual(r.weg, 2);
+  // wv2730: fluistertags staan niet meer op de lijst; [softly] alleen na de eerste alinea, gecombineerd blijft de andere helft
+  for (const x of ['whispers', 'hushed', 'quietly']) assert.strictEqual(S.tagVan(x), null, 'geen fluistertag ' + x);
+  const z = S.schoonScript('[softly, thoughtful] Proefkamp. [softly] Het meer.\n\n[softly] De tent lekte. [whispers] Stil.');
+  assert.strictEqual(z.tekst, '[thoughtful] Proefkamp. Het meer.\n\n[softly] De tent lekte. Stil.');
+  assert.strictEqual(z.tags, 2); assert.strictEqual(z.weg, 1);
   assert.ok(S.TAGS.every((t) => /^[a-z ]+$/.test(t)), 'tags zijn Engelse namen');
   assert.ok(!S.TAGS.some((t) => /accent|voice|gunshot|explosion|applause|fart|sings/.test(t)), 'geen geluidseffecten of personages');
 });
@@ -61,7 +66,7 @@ test('besluit: één verzonnen zin gaat eruit; te veel verzonnen = het verhaal z
   const s = '[softly] Proefkamp bij het meer. In de zomer van 1987 gingen we naar het meer. Truus was er ook. Het regende drie dagen. We sliepen in een tent. Ik weet nog hoe koud het water was.';
   const b = S.besluit(s, BRON);
   assert.strictEqual(b.terugval, false); assert.strictEqual(b.weggelaten, 1);
-  assert.ok(!/Truus/.test(b.script) && b.script.startsWith('[softly] Proefkamp'));
+  assert.ok(!/Truus/.test(b.script) && b.script.startsWith('Proefkamp'), 'wv2730: begint zonder [softly]');
   const veel = 'Truus kwam. Kees kwam. Het was 1990. Het regende drie dagen.';
   const t = S.besluit(veel, BRON);
   assert.strictEqual(t.terugval, true); assert.strictEqual(t.script, BRON); assert.strictEqual(t.tags, 0);
