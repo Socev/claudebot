@@ -421,6 +421,9 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('server: terugkeer → Gekoppeld, kluisregel aangemaakt', a.status === 200 && /^Gekoppeld/.test(a.tekst) && g.__soort === 'create' && kluis.nmbrs_refresh === tok(M.teller), a);
     for (let i = 0; i < 150 && !fs.existsSync(path.join(DIR2, 'ronde.json')); i++) await new Promise((k) => setTimeout(k, 100));
     for (let i = 0; i < 50 && !berichten.length; i++) await new Promise((k) => setTimeout(k, 100));
+    // wv2799: na de signalen volgt de vault-stap binnen dezelfde ronde; wacht tot die klaar is (anders 'bezig' op een trage CI)
+    const vaultN = () => logs.filter((x) => / opdracht=vault /.test(x + ' ')).length;
+    for (let i = 0; i < 300 && vaultN() < 1; i++) await new Promise((k) => setTimeout(k, 100));
     const rj = JSON.parse(fs.readFileSync(path.join(DIR2, 'ronde.json'), 'utf8'));
     toets('server: eerste ronde (peil) na de toestemming, geroteerd, ronde.json 600', rj.ok === true && rj.bedrijven && rj.geroteerd === true && g.__soort === 'update' && (fs.statSync(path.join(DIR2, 'ronde.json')).mode & 0o777) === 0o600, rj.reden || rj.fout);
     toets('server: één bericht met het nieuwe signaal (S2), machinekamer, zonder bedrag', berichten.length === 1 && berichten[0].kanaal === 'machinekamer' && berichten[0].bron === 'nmbrs' && /S2 Cor Toets: contract loopt af/.test(berichten[0].tekst) && !/€|\d{4}\.\d\d/.test(berichten[0].tekst), berichten);
@@ -470,7 +473,9 @@ srv.listen(0, '127.0.0.1', async function () {
     sm = await S.nmbrsSmal({ opdracht: 'link' }, { mk: true });
     a = await vraag('/nmbrs/terug?code=code-goed&state=' + new URL(sm.j.url).searchParams.get('state'));
     for (let i = 0; i < 100 && S.nmbrsInfo().laatste && S.nmbrsInfo().laatste.reden === 'dood'; i++) await new Promise((k) => setTimeout(k, 100));
+    const vn0 = vaultN();
     for (let i = 0; i < 100 && fs.existsSync(path.join(DIR2, 'ronde.lock')); i++) await new Promise((k) => setTimeout(k, 100));
+    for (let i = 0; i < 300 && vaultN() <= vn0; i++) await new Promise((k) => setTimeout(k, 100));   // wv2799: ook de vault-stap van deze ronde
     toets('server: nieuwe toestemming na intrek → weer gekoppeld', a.status === 200 && /^Gekoppeld/.test(a.tekst), a);
     M.refreshGeldig.delete(kluis.nmbrs_refresh);
     await S.nmbrsRondeDraai('ronde', 'proef'); await S.nmbrsRondeDraai('ronde', 'proef');
