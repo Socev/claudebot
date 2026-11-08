@@ -175,6 +175,12 @@ const melding = function (id, status) { return '<task-notification>\n<task-id>' 
     /^LET OP: tussenstand/.test(bewaard[0].rapport) && !fs.existsSync(path.join(werk, 'io', 'herstart1')));
   toets('na herstart: zonder voorlopig-vlag niets verstuurd, en niets dubbel', verzonden.length === 1 && !fs.existsSync(path.join(werk, 'jobout', 'herstart1.voorlopig.txt')));
   toets('eindregel noemt wachtzin en run_in_background', /wachtzin/.test(T.AGENT_EINDREGEL) && /run_in_background/.test(T.AGENT_EINDREGEL));
+  // wv2749: claude -p 2.1.318 doodt achtergrond-Bash niet meer; de regel mag dat niet meer beweren, en de agentstart
+  // zet het wachtplafond voor achtergrond-subagents op 0 (de pod begrenst zelf met INACT_MS en de bovengrens).
+  toets('wv2749: eindregel zegt niet meer dat achtergrondcommando\'s gedood worden', !/gedood/.test(T.AGENT_EINDREGEL) && /20 min/.test(T.AGENT_EINDREGEL));
+  { const src2 = fs.readFileSync('server.js', 'utf8');
+    toets('wv2749: agentstart zet CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS op 0, naast de marker',
+      /runOpts\.env\[EIND_MARKER\] = jobId;\n\s*runOpts\.env\.CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS = '0';/.test(src2)); }
   fs.rmSync(werk, { recursive: true, force: true });
   console.log(fout ? '\nROOD: ' + fout + ' toets(en) mislukt' : '\nGROEN: alle toetsen geslaagd');
   process.exit(fout ? 1 : 0);

@@ -2749,6 +2749,12 @@ function sendReport(entry, result, attempt) {
 // MONITORS wacht de CLI zelf; Bash-taken met run_in_background worden bij het einde
 // van de beurt gedood; `nohup … &` overleeft in een eigen sessie (dus NIET in onze
 // procesgroep), maar erft wel de omgeving - daarom de marker SOCEV_AGENT_RUN=<job>.
+// Hermeten met claude -p 2.1.318 (wv2749, 8-11-2026, proeven A-G): de CLI wacht nu ook op
+// achtergrond-Bash, tot diens eigen timeout (standaard 10 min, max 2 uur), en geeft het model
+// daarna het resultaat; op achtergrond-subagents en monitors wacht hij hooguit
+// CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS na de laatste beurt (standaard 10 min, daarna gestopt en
+// is de eindtekst een tussenstand). Achtergrondagents krijgen die grens op 0 (onbeperkt): de
+// pod begrenst zelf met INACT_MS (subagent-transcripts tellen als leven) en de bovengrens.
 // WAT DIT DOET. Na het einde van de agentrun drie toetsen: (1) achtergrondtaken die
 // volgens het transcript nog open stonden, (2) nog levende processen met onze marker,
 // (3) een korte eindtekst die eruitziet als een wachtzin. Is er iets: eerst wachten op
@@ -2769,8 +2775,8 @@ const EIND_LET_OP_HERSTART = 'LET OP: tussenstand — de agent stopte terwijl er
 const AGENT_EINDREGEL = '[Systeem, eindregel: eindig je beurt nooit met een wachtzin; je laatste antwoord is je eindrapport. ' +
   'Moet je wachten, wacht dan binnen je beurt met een Bash-commando in de VOORGROND: een begrensde lus ' +
   '(bv. for i in $(seq 1 35); do <controle> && break; sleep 15; done) met een expliciete timeout tot 600000 ms, zo nodig herhaald. ' +
-  'Gebruik daarvoor geen run_in_background: achtergrondcommando\'s worden gedood zodra je beurt eindigt. ' +
-  'Start subagents met run_in_background: false.]';
+  'Achtergrondwerk (run_in_background) mag voor parallel werk: aan het eind wacht de CLI erop (Bash tot zijn eigen timeout, ' +
+  'standaard 10 min, max 2 uur) en je krijgt het resultaat; verwerk dat in je eindrapport. Na 20 min zonder enig teken van leven stopt de pod de hele run.]';
 
 function eindSlaap(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
@@ -3153,6 +3159,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     let t0 = Date.now();
     const runOpts = { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS, lastFile: path.join(base, 'codex-last.md'), env: {} };
     runOpts.env[EIND_MARKER] = jobId;
+    runOpts.env.CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS = '0';   // wv2749: CLI wacht op achtergrond-subagents; INACT_MS en maxMs begrenzen
     runOpts.account = 2;   // wv781: achtergrondagents op het tweede abonnement (kiesAccount valt terug op 1 als het niet mag)
     if (accountStand().agents === 2 && !account2Klaar()) { try { await account2Token(); } catch (e) {} }   // Fable wv781 #3: ook vlak na een podstart
     const opSpawnWv781 = function () { entry.account = j.progress && j.progress.account; };
