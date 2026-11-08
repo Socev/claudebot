@@ -918,7 +918,7 @@ jobs:
       # instanties, en het Syncthing-blok van run.sh in scenario's.
       - name: "Rooktest - Syncthing-filter en -poort (wv1277)"
         run: |
-          curl -fsSL -o /tmp/st.tgz https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-linux-amd64-v2.1.7.tar.gz
+          curl -fsSL --retry 6 --retry-all-errors --retry-delay 15 -o /tmp/st.tgz https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-linux-amd64-v2.1.7.tar.gz
           echo "2edc416e7ed136b7c858ed5f3f02a3b8316589605e54c380228ceea7acbf0142  /tmp/st.tgz" | sha256sum -c -
           mkdir -p /tmp/stbin && tar -xzf /tmp/st.tgz -C /tmp/stbin --strip-components=1 syncthing-linux-amd64-v2.1.7/syncthing
           PIN=$(grep -oE '^ST_SHA256=[0-9a-f]{64}' run.sh | cut -d= -f2)
