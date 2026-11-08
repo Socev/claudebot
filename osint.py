@@ -125,6 +125,8 @@ def db():
     oud = (nu - datetime.timedelta(days=LOG_DAGEN)).isoformat()
     c.execute('delete from aanroep where zoek_id in (select id from zoekvraag where tijd < ?)', (oud,))
     c.execute('delete from zoekvraag where tijd < ?', (oud,))
+    c.execute('delete from voetafdruk where bekeken < ?', (oud,))
+    c.execute('delete from lijkend where laatst < ?', (oud,))
     c.commit()
     return c
 
@@ -143,8 +145,9 @@ def nu_nl():
 
 # ---------------------------------------------------------------- netwerk (alles via haal)
 class Ctx:
-    def __init__(self, niveau, beelden=True):
+    def __init__(self, niveau, beelden=True, wie='machinekamer'):
         self.niveau = niveau
+        self.wie = wie
         self.beelden = beelden   # False (Socev): geen kaartbeelden ophalen, dus ook geen kaartvak naar buiten
         self.log = []   # dicts: bron, soort, host, naar_buiten, status, ms
         self.knopen, self.randen = {}, []   # netwerkplaat (wv2698): entiteiten en verbanden van deze zoekvraag
@@ -641,7 +644,14 @@ def zoek_bedrijf(ctx, term):
             kaarten.append(contacten_kaartje(contacten(ctx, t), t))
         except PoortDicht:
             pass
-    naam = kern.get('naam') or vies_naam or (t if not (kvk or dom or iban or btw) else None)
+    # review-MOET 1 (Fable): een vrije naam of een VIES-naam kan een privépersoon zijn (tegenpartij uit de bank, eenmanszaak). Op een naam
+    # zoeken in Rechtspraak/ICIJ/bekendmakingen/GLEIF alleen op Davids eigen vraag (App), of op de naam uit het handelsregister als het
+    # geen eenmanszaak is; Socev met een vrije naam krijgt alleen GLEIF op KvK-nummer en de insolventie-link.
+    eenmans = bool(re.search(r'eenmans|sole|natuurlijk persoon|v\.?o\.?f|maatschap', str(kern.get('rechtsvorm') or ''), re.I))
+    if ctx.wie == 'david':
+        naam = kern.get('naam') or vies_naam or (t if not (kvk or dom or iban or btw) else None)
+    else:
+        naam = kern.get('naam') if kern.get('naam') and not eenmans else None
     if (naam or kvk) and ctx.niveau == 'alles':
         kaarten += bedrijf_breed(ctx, naam, kvk)
     elif ctx.niveau == 'alles':
@@ -822,7 +832,7 @@ JUR = {
     'big': 'Openbaar register met wettelijk doel: waarnemers en sollicitanten controleren is precies waarvoor het bestaat.',
     'eigen': 'Eigen bron: blijft binnen ons systeem.',
     'telefoon': 'Offline duiding: er gaat niets naar buiten.',
-    'vies': 'Btw-nummer controleren (EU): geen bezwaar.',
+    'vies': 'Btw-nummer controleren (EU): geen bezwaar. Bij een eenmanszaak is de naam die VIES teruggeeft een persoonsnaam.',
     'gleif': 'LEI-register (CC0): geen bezwaar.',
     'icij': 'In de Offshore Leaks staan is niet hetzelfde als iets fout gedaan hebben; een gelijke naam is niet dezelfde partij. Zorgvuldig formuleren.',
     'sru': 'Officieel gepubliceerd; voor een adres of bedrijf licht.',
@@ -851,7 +861,7 @@ def item(tekst, sub=None, url=None, nieuw=None):
 def instellingen(c=None):
     c = c or db()
     uit = {'gebruikersnamen': [], 'adressen': [], 'domeinen': list(DOMEINEN_STANDAARD)}
-    for k, j in c.execute('select sleutel, json from instelling'):
+    for k, j in c.execute("select sleutel, json from instelling where sleutel in ('gebruikersnamen', 'adressen', 'domeinen')"):
         try:
             uit[k] = json.loads(j)
         except ValueError:
@@ -1304,6 +1314,8 @@ def zoek_mail(ctx, kop):
                 ('Bekende kwetsbaarheden', ', '.join((x['kwetsbaar'] or [])[:8])), ('Kenmerken', ', '.join(x['tags'] or []))], juridisch=JUR['ip']))
     except PoortDicht:
         pass
+    except Exception as e:
+        kaarten.append(melding('Afzenderdomein en servers', 'De DNS- of IP-opzoeking mislukte (%s); de duiding hierboven komt alleen uit de kop.' % type(e).__name__))
     return kaarten, kern
 
 
@@ -1444,14 +1456,15 @@ def zoek_voetafdruk(ctx, inst):
             # per site blijft staan, zodat een volgende ronde de rest doet en de treffers optellen.
             t0 = time.time()
             ex = cf.ThreadPoolExecutor(48)
-            fut = {}
+            fut, vorig = {}, {}
             for n in namen[:3]:
-                gezien = {r[0]: r[1] for r in c.execute('select site, bekeken from voetafdruk where naam = ?', (n,))}
+                vorig[n] = {r[0]: (r[1], r[2]) for r in c.execute('select site, bekeken, uitslag from voetafdruk where naam = ?', (n,))}
+                gezien = {k: v[0] for k, v in vorig[n].items()}
                 for s_ in sorted(sites, key=lambda x: gezien.get(x['name']) or ''):
                     fut[ex.submit(wmn_een, ctx, s_, n)] = (n, s_)
             klaar, _ = cf.wait(fut, timeout=65)
             ex.shutdown(wait=False, cancel_futures=True)
-            nu, ronde = nu_iso(), {n: 0 for n in namen[:3]}
+            nu, ronde, nieuw_n = nu_iso(), {n: 0 for n in namen[:3]}, {n: [] for n in namen[:3]}
             for f in klaar:
                 n, s_ = fut[f]
                 try:
@@ -1461,6 +1474,8 @@ def zoek_voetafdruk(ctx, inst):
                 if u == 'fout':
                     continue
                 ronde[n] += 1
+                if u == 'misschien' and s_['name'] in vorig[n] and vorig[n][s_['name']][1] != 'misschien':
+                    nieuw_n[n].append(s_['name'])
                 c.execute('insert into voetafdruk(naam, site, url, cat, uitslag, bekeken, eerst_raak) values (?,?,?,?,?,?,?) on conflict(naam, site) do update set '
                           'uitslag = excluded.uitslag, bekeken = excluded.bekeken, url = excluded.url, eerst_raak = coalesce(voetafdruk.eerst_raak, excluded.eerst_raak)',
                           (n, s_['name'], s_.get('uri_pretty', s_['uri_check']).replace('{account}', up.quote(n, safe='')), s_.get('cat'), u, nu,
@@ -1471,8 +1486,7 @@ def zoek_voetafdruk(ctx, inst):
                                 'status': '%d bekeken' % ronde[n], 'ms': int((time.time() - t0) * 1000)})
                 ok = c.execute("select site, url, cat, eerst_raak from voetafdruk where naam = ? and uitslag = 'misschien' order by eerst_raak desc, site", (n,)).fetchall()
                 totaal = c.execute('select count(*) from voetafdruk where naam = ?', (n,)).fetchone()[0]
-                eerste = c.execute('select min(bekeken) from voetafdruk where naam = ?', (n,)).fetchone()[0]
-                nieuw = [r[0] for r in ok if r[3] == nu and eerste != nu]
+                nieuw = nieuw_n[n]
                 kaarten.append(kaartje('Gebruikersnaam "%s": misschien op %d sites' % (n, len(ok)), 'WhatsMyName (%d sites, gratis)' % len(sites), items=[
                     item(r[0], r[2], r[1], nieuw=r[0] in nieuw) for r in ok],
                     klein='Deze ronde %d sites bekeken; in totaal %d van %d.%s Alles is "misschien": een naam die op een site bestaat, kan van iemand anders zijn.%s' % (
@@ -1507,64 +1521,79 @@ def dnstwist_run(dom):
     exe = os.path.join(os.path.dirname(sys.executable), 'dnstwist')
     if not os.path.exists(exe):
         raise RuntimeError('dnstwist ontbreekt')
-    r = subprocess.run([sys.executable, '-I', exe, '--registered', '--format', 'json', '--threads', '16', dom], capture_output=True, text=True, timeout=120)
+    r = subprocess.run([sys.executable, '-I', exe, '--registered', '--format', 'json', '--threads', '12', dom], capture_output=True, text=True, timeout=60)
     return json.loads(r.stdout or '[]')
 
 
 def zoek_lijkend(ctx, inst):
     doms = inst.get('domeinen') or []
     c = db()
-    kaarten, nieuw_alle, tot = [], [], 0
+    # review-MOET 3 (Fable): per domein de tijd van de vorige geslaagde ronde (instelling lijkend_gemeten). Nieuw = een variant die in die
+    # vorige ronde niet geregistreerd was (ook: verdwenen en opnieuw geregistreerd). De eerste ronde per domein is de nulmeting.
+    rij_g = c.execute("select json from instelling where sleutel = 'lijkend_gemeten'").fetchone()
+    gemeten = json.loads(rij_g[0]) if rij_g else {}
     for dom in doms:
         poort_open(ctx, 'dnstwist (DNS)', 'extern', 'DNS', 'varianten van ' + dom)
-        t = time.time()
-        try:
-            res = dnstwist_run(dom)
-            status = 'nep' if NEP else '200'
-        except Exception as e:
-            res, status = None, type(e).__name__
+    t = time.time()
+    with cf.ThreadPoolExecutor(3) as ex:   # review-ZOU 4: parallel, samen ruim onder de 120 s van de pod
+        fut = {dom: ex.submit(dnstwist_run, dom) for dom in doms}
+        uit = {}
+        for dom, f in fut.items():
+            try:
+                uit[dom] = (f.result(), 'nep' if NEP else '200')
+            except Exception as e:
+                uit[dom] = (None, type(e).__name__)
+    kaarten, nieuw_alle, tot, mislukt = [], [], 0, []
+    nu = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds')   # fijn: twee rondes in één seconde blijven te onderscheiden
+    for dom in doms:
+        res, status = uit[dom]
+        ctx.log.append({'bron': 'dnstwist (DNS)', 'soort': 'extern', 'host': 'DNS', 'naar_buiten': 'varianten van %s%s' % (
+            dom, (' (%d geregistreerd)' % max(0, len(res) - 1)) if res is not None else ''), 'status': status, 'ms': int((time.time() - t) * 1000)})
         if res is None:
-            ctx.log.append({'bron': 'dnstwist (DNS)', 'soort': 'extern', 'host': 'DNS', 'naar_buiten': 'varianten van ' + dom, 'status': status, 'ms': int((time.time() - t) * 1000)})
-            kaarten.append(melding('Lijkend op %s' % dom, 'dnstwist liep niet (%s).' % status))
+            mislukt.append(dom)
+            kaarten.append(melding('Lijkend op %s' % dom, 'dnstwist liep niet (%s): niet vast te stellen.' % status))
             continue
-        ctx.log.append({'bron': 'dnstwist (DNS)', 'soort': 'extern', 'host': 'DNS', 'naar_buiten': 'varianten van %s (%d geregistreerd)' % (dom, max(0, len(res) - 1)),
-                        'status': status, 'ms': int((time.time() - t) * 1000)})
-        oud_dom = c.execute('select count(*) from lijkend where domein = ?', (dom,)).fetchone()[0]
+        vorige = gemeten.get(dom)
         rij = []
         for x in res:
             v = str(x.get('domain') or '').lower()
             if not v or x.get('fuzzer') == '*original' or v == dom:
                 continue
             a, mx, ns = [', '.join(y for y in (x.get(k) or []) if y and not str(y).startswith('!')) for k in ('dns_a', 'dns_mx', 'dns_ns')]
-            bekend = c.execute('select 1 from lijkend where variant = ?', (v,)).fetchone()
+            oud = c.execute('select laatst from lijkend where variant = ?', (v,)).fetchone()
+            nw = bool(vorige) and (not oud or str(oud[0]) < vorige)
             c.execute('insert into lijkend(variant, domein, fuzzer, a, mx, ns, eerst, laatst) values (?,?,?,?,?,?,?,?) on conflict(variant) do update set '
-                      'laatst = excluded.laatst, a = excluded.a, mx = excluded.mx, ns = excluded.ns', (v, dom, x.get('fuzzer'), a, mx, ns, nu_iso(), nu_iso()))
-            nw = not bekend and oud_dom > 0
+                      'laatst = excluded.laatst, a = excluded.a, mx = excluded.mx, ns = excluded.ns', (v, dom, x.get('fuzzer'), a, mx, ns, nu, nu))
             if nw:
                 nieuw_alle.append({'variant': v, 'domein': dom, 'mx': bool(mx)})
             rij.append((nw, v, item(v, ' · '.join(y for y in (x.get('fuzzer'), ('A ' + a) if a else None, ('mail: ' + mx) if mx else None, ('NS ' + ns) if ns else None) if y), nieuw=nw)))
-        c.commit()
+        gemeten[dom] = nu
         tot += len(rij)
         rij.sort(key=lambda z: (not z[0], z[1]))
         km = ctx.knoop('domein', dom, zoek={'ingang': 'bedrijf', 'term': dom})
         for nw, v, _ in rij[:25]:
             ctx.rand(ctx.knoop('domein', v, zoek={'ingang': 'bedrijf', 'term': v}), km, 'lijkt op')
         kaarten.append(kaartje('Lijkend op %s: %d geregistreerd' % (dom, len(rij)), 'dnstwist (Apache-2.0, alleen DNS)', items=[z[2] for z in rij[:60]] or None,
-                               klein=None if rij else 'Geen geregistreerde lijkende domeinen.', let=('Nieuw sinds de vorige keer: %s.' % ', '.join(z[1] for z in rij if z[0])) if any(z[0] for z in rij) else None,
-                               juridisch=JUR['dnstwist']))
-    return kaarten, {'nieuw': nieuw_alle, 'geregistreerd': tot, 'domeinen': len(doms)}
+                               klein=(None if rij else 'Geen geregistreerde lijkende domeinen.') if vorige else 'Eerste ronde voor dit domein (nulmeting): vanaf de volgende ronde zie je wat er nieuw bij komt.',
+                               let=('Nieuw sinds de vorige ronde: %s.' % ', '.join(z[1] for z in rij if z[0])) if any(z[0] for z in rij) else None, juridisch=JUR['dnstwist']))
+    c.execute('insert or replace into instelling(sleutel, json, tijd) values (?,?,?)', ('lijkend_gemeten', json.dumps(gemeten), nu))
+    c.commit()
+    return kaarten, {'nieuw': nieuw_alle, 'geregistreerd': tot, 'domeinen': len(doms), 'mislukt': mislukt}
 
 
 # ---------------------------------------------------------------- herkennen en zoeken
 def herken(term):
     t = norm(term)
     kaal = re.sub(r'[\s.()-]', '', t)
-    if re.search(r'(?im)^(received|authentication-results|return-path|dkim-signature):', str(term or '')):
+    if re.search(r'(?im)^(received|authentication-results|return-path|dkim-signature):', str(term or '')) or \
+            len(re.findall(r'(?im)^(from|to|cc|subject|date|reply-to|message-id|onderwerp|van|aan)\s*:', str(term or ''))) >= 2:
         return 'mail'
     if re.fullmatch(r'\d{8}', kaal):
         return 'bedrijf'
     if re.fullmatch(r'\+?\d{9,15}', kaal) and (kaal.startswith(('0', '+')) or len(kaal) >= 11):
         return 'telefoon'
+    if re.fullmatch(r'\d{4}[A-Z]{2}', kaal.upper()):
+        return 'adres'   # postcode, geen kenteken (review-ZOU 5)
     if KENTEKEN_RE.match(t.upper().replace(' ', '')):
         return 'kenteken'
     if (IBAN_RE.match(kaal.upper()) and iban_geldig(kaal)) or btw_uit(kaal) or (' ' not in t and DOMEIN_RE.match(t.lower())):
@@ -1593,6 +1622,8 @@ def zoek(v):
     wie = v.get('wie') if v.get('wie') in WIE else 'machinekamer'
     ingang = v.get('ingang') or 'auto'
     ruw = str(v.get('kop') or v.get('term') or '')
+    if ingang == 'auto' and str(v.get('kop') or '').strip():
+        ingang = 'mail'   # review-MOET 2: een geplakte kop is nooit een adres of bedrijf
     if ingang == 'auto':
         ingang = herken(ruw if '\n' in ruw else norm(ruw)[:200])
     if ingang not in INGANGEN:
@@ -1640,7 +1671,7 @@ def zoek(v):
     cachebaar = ingang in ZOEK
     rij = None if v.get('vers') or NEP or not cachebaar else c.execute('select tijd, json from cache where sleutel = ?', (sleutel,)).fetchone()
     beelden = v.get('beelden') is not False
-    ctx = Ctx(pt['niveau'], beelden)
+    ctx = Ctx(pt['niveau'], beelden, wie)
     graaf = None
     if pt['niveau'] == 'niets' and (pt['reden'].startswith('persoon') or ingang in ('voetafdruk', 'bestand')):
         kaarten, kern = [melding('Niet gezocht', 'Niet gezocht: ' + pt['reden'] + '.')], {}
@@ -1665,7 +1696,7 @@ def zoek(v):
         except Exception as e:
             kaarten, kern = [melding('Fout', 'Er ging iets mis: %s' % type(e).__name__)], {}
         met_juridisch(kaarten)
-        graaf = ctx.graaf() if pt['niveau'] != 'niets' and ingang not in ('bestand', 'voetafdruk') else None
+        graaf = ctx.graaf() if pt['niveau'] != 'niets' and ingang not in ('bestand', 'voetafdruk') and not (ingang == 'mail' and pt['niveau'] != 'alles') else None
         if cachebaar and pt['niveau'] == 'alles' and not NEP and any(l['soort'] == 'extern' and l['status'] in ('200', '204') for l in ctx.log):
             c.execute('insert or replace into cache(sleutel, tijd, json) values (?,?,?)',
                       (sleutel, nu_iso(), json.dumps({'kaarten': kaarten, 'kern': kern, 'graaf': graaf}, ensure_ascii=False)))
@@ -1748,7 +1779,7 @@ def main(a):
         # CISO-ronde (machinekamer): alleen de nieuwe geregistreerde varianten; stilte = lege lijst
         z = zoek({'ingang': 'lijkend', 'wie': 'machinekamer', 'herkomst': 'eigen-domeinen'})
         r = {'ok': z.get('ok'), 'nieuw': (z.get('kern') or {}).get('nieuw', []), 'geregistreerd': (z.get('kern') or {}).get('geregistreerd'),
-             'domeinen': (z.get('kern') or {}).get('domeinen'), 'id': z.get('id')}
+             'domeinen': (z.get('kern') or {}).get('domeinen'), 'mislukt': (z.get('kern') or {}).get('mislukt'), 'id': z.get('id')}
     else:
         r = info()
     sys.stdout.write(json.dumps(r, ensure_ascii=False))

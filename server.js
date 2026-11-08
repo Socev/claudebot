@@ -5171,8 +5171,9 @@ function appVastVersEis(res, a, s, wat) {
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
 const APP_OMZET_MAX_BODY = 5 * 1024 * 1024;   // wv1854: tekst ≤ 2 MB (omzet.js telt de bytes en geeft 413) + JSON-ontsnapping (\n, \", \uXXXX)
-const APP_BRAIN_WEB_MAX_BODY = 6 * 1024 * 1024;
-const APP_OSINT_BESTAND_MAX_BODY = 15 * 1024 * 1024;   // wv2698: OSINT › Bestand duiden, ≤ 10 MB als base64 (13,4 MB) + JSON   // wv2660: Naar Second Brain, html ≤ 2 M tekens + JSON-ontsnapping (brain-web.js telt zelf)
+const APP_BRAIN_WEB_MAX_BODY = 6 * 1024 * 1024;   // wv2660: Naar Second Brain, html ≤ 2 M tekens + JSON-ontsnapping (brain-web.js telt zelf)
+const APP_OSINT_BESTAND_MAX_BODY = 15 * 1024 * 1024;   // wv2698: OSINT › Bestand duiden, ≤ 10 MB als base64 (13,4 MB) + JSON
+const APP_OSINT_ZOEK_MAX_BODY = 256 * 1024;   // wv2698: OSINT › Mail duiden, kop ≤ 60.000 tekens + JSON-ontsnapping (review-ZOU 7)
 const APP_CODE_MS = 10 * 60 * 1000;
 const APP_CODE_POGINGEN = 5;
 const APP_CODE_INTERVAL_MS = 60 * 1000;
@@ -13083,7 +13084,7 @@ function handleApp(req, res) {
     const rambleStuk = req.method === 'POST' && APP_RAMBLE_STUK_RE.test(p);   // wv1969: MemoryLane, één WAV-stuk van 60 s
     const ruw = upload || rambleStuk || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
     if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
-    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && p === '/app/osint/bestand' ? APP_OSINT_BESTAND_MAX_BODY : APP_MAX_BODY))); })(function (fout, d, lichaam) {
+    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && p === '/app/osint/bestand' ? APP_OSINT_BESTAND_MAX_BODY : (req.method === 'POST' && p === '/app/osint/zoek' ? APP_OSINT_ZOEK_MAX_BODY : APP_MAX_BODY)))); })(function (fout, d, lichaam) {
       if (fout === 'groot' && p === '/app/omzet') return appWeiger(res, 413, 'de tekst is te groot om om te zetten (hooguit 2 MB)', 'body groot');   // wv1854
       if (fout === 'groot' && p === '/app/brain/webpagina') return appWeiger(res, 413, 'deze pagina is te groot (hooguit 2 MB html)', 'body groot');   // wv2660
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
@@ -20854,6 +20855,7 @@ async function appOsint(req, res, a, route, d) {
   const ing = String((d || {}).ingang || '');
   if ((ing === 'voetafdruk' || ing === 'lijkend' || route === 'POST /app/osint/bestand') && !appTeller('osint_zwaar', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 20 zware rondes)', 'grens osint zwaar');
   if (route === 'POST /app/osint/bestand' && ing !== 'bestand') return appWeiger(res, 400, 'alleen voor een bestand', 'osint bestand ingang');
+  if (route === 'POST /app/osint/bestand' && typeof (d || {}).bestand === 'string' && d.bestand.length > 14 * 1024 * 1024) return appWeiger(res, 413, 'bestand te groot (hooguit 10 MB)', 'osint bestand groot');
   if (route === 'POST /app/osint/zoek' && ing === 'bestand') return appWeiger(res, 400, 'een bestand gaat via /app/osint/bestand', 'osint bestand route');
   const r = await osintRun(['zoek'], osintInvoer(d || {}, 'david'));
   res._app.reden = 'osint zoek ' + String(r.ingang || '?').slice(0, 10) + ' ' + String((r.poort && r.poort.niveau) || 'fout').slice(0, 8) + ' extern ' + (Number(r.extern) || 0) + (r.cache ? ' cache' : '');

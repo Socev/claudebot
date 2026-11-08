@@ -59,9 +59,11 @@ json.dump({'sites': [
     {'name': 'ProefB', 'uri_check': 'https://proef-b.example/{account}', 'e_code': 200, 'e_string': 'Profiel van', 'm_string': 'Not found', 'm_code': 404, 'cat': 'coding'},
     {'name': 'ProefC', 'uri_check': 'https://proef-c.example/{account}', 'e_code': 200, 'e_string': 'x', 'post_body': '{}', 'cat': 'misc'}]},
     open(os.path.join(T, 'tools', 'wmn-data.json'), 'w'))
-json.dump({'proefpraktijk.example': [{'fuzzer': '*original', 'domain': 'proefpraktijk.example', 'dns_a': ['192.0.2.1']},
-                                     {'fuzzer': 'homoglyph', 'domain': 'proefpraktijk.examp1e', 'dns_a': ['192.0.2.9'], 'dns_mx': ['mx.boos.example']}]},
-          open(os.path.join(T, 'dnstwist.json'), 'w'))
+def dnstwist_nep(met_variant):
+    json.dump({'proefpraktijk.example': [{'fuzzer': '*original', 'domain': 'proefpraktijk.example', 'dns_a': ['192.0.2.1']}] + ([
+        {'fuzzer': 'homoglyph', 'domain': 'proefpraktijk.examp1e', 'dns_a': ['192.0.2.9'], 'dns_mx': ['mx.boos.example']}] if met_variant else [])},
+        open(os.path.join(T, 'dnstwist.json'), 'w'))
+dnstwist_nep(False)
 
 def run(args, invoer=None):
     r = subprocess.run([sys.executable, '-I', py] + args, input=json.dumps(invoer or {}), capture_output=True, text=True, timeout=90)
@@ -128,9 +130,14 @@ eis(any(l['bron'].startswith('WhatsMyName') and '2 sites' in l['naar_buiten'] fo
 k = kaart(r, 'Mailadres verzonnen'); eis('ProefLek' in json.dumps(k) and 'Hoog' in json.dumps(k), 'XposedOrNot: lek en risico')
 eis(bool(kaart(r, 'Datalekken op je praktijkdomeinen').get('links')), 'HIBP: uitleg + link')
 r = zoek(ingang='lijkend', wie='machinekamer')
-k = kaart(r, 'Lijkend op proefpraktijk.example'); eis(any('proefpraktijk.examp1e' == x['tekst'] and 'mx.boos.example' in x.get('sub', '') for x in k.get('items', [])), 'dnstwist: geregistreerde variant met mailserver')
-eis(r['kern'].get('nieuw') == [], 'dnstwist eerste ronde: niets "nieuw" (nulmeting)')
-l = run(['lijkend']); eis(l.get('nieuw') == [] and l.get('geregistreerd') == 1, 'lijkend (CISO): stilte als er niets nieuws is')
+eis(r['kern'].get('nieuw') == [] and 'nulmeting' in (kaart(r, 'Lijkend op proefpraktijk.example').get('klein') or ''), 'dnstwist eerste ronde (leeg): nulmeting, niets nieuw')
+dnstwist_nep(True)
+r = zoek(ingang='lijkend', wie='machinekamer')
+k = kaart(r, 'Lijkend op proefpraktijk.example'); eis(any('proefpraktijk.examp1e' == x['tekst'] and 'mx.boos.example' in x.get('sub', '') and x.get('nieuw') for x in k.get('items', [])), 'dnstwist: nieuwe variant met mailserver na een lege nulmeting (review-MOET 3)')
+eis(r['kern'].get('nieuw') == [{'variant': 'proefpraktijk.examp1e', 'domein': 'proefpraktijk.example', 'mx': True}], 'dnstwist: kern.nieuw voor de CISO-ronde')
+l = run(['lijkend']); eis(l.get('nieuw') == [] and l.get('geregistreerd') == 1 and l.get('mislukt') == [], 'lijkend (CISO): volgende ronde stilte')
+dnstwist_nep(False); run(['lijkend']); dnstwist_nep(True)
+l = run(['lijkend']); eis(len(l.get('nieuw') or []) == 1, 'lijkend: verdwenen en opnieuw geregistreerd = weer nieuw')
 # --- poort: BSN-vorm, patiëntkenmerk en medische herkomst houden ook de nieuwe ingangen tegen
 for ing, term in (('kenteken', 'ZZ-999-Q 111222333'), ('bedrijf', 'NL123456782B01 111222333'), ('adres', 'Proefstraat 1 Nergensdorp patiëntnummer 4711')):
     r = zoek(ingang=ing, term=term, wie='david')
@@ -143,6 +150,17 @@ r = zoek(ingang='mail', kop=kop, wie='socev', herkomst='mail')
 eis(r['poort']['niveau'] == 'eigen' and ext(r) == 0, 'poort: mailkop van Socev met herkomst mail → nul externe')
 r = zoek(ingang='voetafdruk', wie='socev', herkomst='david-vraag')
 eis(r['poort']['niveau'] == 'niets' and ext(r) == 0, 'voetafdruk alleen voor David (Socev: niets)')
+# review-MOET 1: Socev met een vrije naam (tegenpartij uit de bank kan een persoon zijn) → niet naar Rechtspraak/ICIJ/bekendmakingen/GLEIF
+r = zoek(ingang='bedrijf', term='P. Proefpersoon', wie='socev', herkomst='facturen')
+hosts = {l['host'] for l in r.get('logboek', []) if l['soort'] == 'extern' and l['status'] != 'poort dicht'}
+eis(r['poort']['niveau'] == 'alles' and not hosts & {'uitspraken.rechtspraak.nl', 'offshoreleaks.icij.org', 'repository.overheid.nl', 'api.gleif.org'}, 'Socev + vrije naam: geen naamzoekvraag naar Rechtspraak/ICIJ/SRU/GLEIF')
+r = zoek(ingang='bedrijf', term='P. Proefpersoon', wie='david')
+hosts = {l['host'] for l in r.get('logboek', []) if l['soort'] == 'extern'}
+eis({'uitspraken.rechtspraak.nl', 'offshoreleaks.icij.org'} <= hosts, 'David + naam: wel bedrijf breder (zijn eigen vraag)')
+# review-MOET 2: een kop zonder Received-regel is toch mail, nooit een adres naar PDOK
+r = zoek(ingang='auto', kop='From: Piet Proef <piet.proef@proef.example>\nTo: verzonnen@example.com\nSubject: Factuur Proefstraat 12', wie='david')
+eis(r.get('ingang') == 'mail' and r.get('term', '').startswith('mailkop') and not any(l['host'] == 'api.pdok.nl' for l in r.get('logboek', [])), 'kop zonder Received: ingang mail, niets naar PDOK')
+eis(zoek(ingang='auto', term='9999 ZZ', wie='david').get('ingang') == 'adres', 'postcode alleen: adres, geen kenteken')
 r = zoek(ingang='auto', term='123456782', wie='david')
 eis(r['poort']['niveau'] == 'niets', 'losse BSN-vorm blijft dicht (alleen het volledige btw-nummer is vrij)')
 # --- logboek en netwerkplaat
