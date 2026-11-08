@@ -613,7 +613,18 @@ const REGEL_KEUZE = { soort: ['correspondentie', 'bewijsstuk', 'keten', 'notitie
 const BRON_RE = /^[a-z]{2,20}:[a-z0-9-]{1,30}$/;
 const KNOOP_RE = /^[A-Z][A-Z0-9_-]{0,15}$/;
 // wv2710 (bundels): geld in het stuk (bedrag met € of EUR, een IBAN, of een betaalwoord) → nooit in een bundel. Alleen een ja/nee in de samenvatting.
-const GELD_RE = /(€|\bEUR\b)\s?\d|\d\s?(€|\bEUR\b|\beuro\b)|\b[A-Z]{2}\d{2}\s?[A-Z]{4}\s?(\d{4}\s?){2}\d{2,4}\b|\b(factu(u)?r|betal|incasso|aanmaning|creditnota|declarat|overmak|overboek|openstaand|verschuldigd|vervaldatum|invoice|payment)/i;
+const GELD_RE = /(€|\bEUR\b)\s?\d|\d\s?(€|\bEUR\b|\beuro\b)|\b(factu(u)?r|betal|incasso|aanmaning|creditnota|declarat|overmak|overboek|openstaand|verschuldigd|vervaldatum|invoice|payment)/i;
+// review wv2710 MOET 2: elk geldig IBAN (alle landen, met of zonder spaties), getoetst met de mod-97-controle (anders zou elke code in een link meetellen)
+function ibanIn(t) {
+  const re = /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b/gi;
+  let m;
+  while ((m = re.exec(String(t || '')))) {
+    const v = m[0].replace(/ /g, '').toUpperCase();
+    for (let n = v.length; n >= 15; n--) if (ibanGeldig(v.slice(0, n))) return true;   // een woord dat er direct achter staat, hoort er niet bij
+  }
+  return false;
+}
+function geldIn(t) { return GELD_RE.test(String(t || '')) || ibanIn(t); }
 function regelVoorwaarden(v) {
   if (!isObj(v)) return { ok: false, reden: 'voorwaarden ontbreken' };
   const uit = {};
@@ -994,7 +1005,7 @@ function deadlineInvoegen(tekst, regel, stukId) {
   return r.join('\n');
 }
 
-const K = { REGELVERSIE, eigenVerzonden, KOP_MAX, orgDomein, adresVan, dkimUitslag, mailLees, bboxRegels, velden, letterlijk, ibanGeldig, soortBepaal, register, afzenderBepaal, entiteitBepaal, bestemmingen, normAlias, LABEL_KNOOP,
+const K = { REGELVERSIE, eigenVerzonden, KOP_MAX, orgDomein, adresVan, dkimUitslag, mailLees, bboxRegels, velden, letterlijk, ibanGeldig, geldIn, soortBepaal, register, afzenderBepaal, entiteitBepaal, bestemmingen, normAlias, LABEL_KNOOP,
   kopNummer, regelVoorwaarden, regelPast, regelZoek, regelBestemmingen, herbereken, REGEL_LENZEN,
   bestemmingenLive, jevOordeel, kennisNaam, bijlageNaam, kennisInhoud, slug, KENNIS_MAP, KENNIS_ENTITEIT, INDELING, JEV_DREMPEL,
   systeemOordeelRegels, systeemOordeelModel, systeemNaam, systeemBoxRegel, systeemDavidRegel, stilUur, SYSTEEM_MAP, SYSTEEM_VOORSTEL, SYSTEEM_SOORTEN,
@@ -1441,7 +1452,7 @@ function maak(o) {
           sam = { profiel: s.profiel, bron: s.bron, marker: 'geen', soort: so.soort, soort_sub: so.sub || null, soort_kracht: so.kracht, keten_kracht: so.keten_kracht || undefined, keten_zakelijk: ketenZakelijk || undefined,
             afzender: af.knoop || null, afzender_kracht: af.kracht, afzender_kenmerken: af.kenmerken, aangeleverd_door: af.aangeleverd_door, voorgesteld_spoor: af.voorgesteld_spoor,
             dkim: dkim ? (dkim.uitgelijnd ? 'uitgelijnd' : (dkim.pass ? 'pass' : (dkim.gelezen ? 'geen_pass' : 'geen_uitslag'))) : null,
-            entiteit: en.knoop || null, entiteit_kracht: en.kracht, label_route: labels, bestemmingen: bs, twijfel, regel: rg ? 'R' + rg.id + '@' + rg.versie : null, velden: vd.velden.map(function (v) { return v.veld; }), kenmerken: vd.kenmerken, geld: GELD_RE.test(tekst) };
+            entiteit: en.knoop || null, entiteit_kracht: en.kracht, label_route: labels, bestemmingen: bs, twijfel, regel: rg ? 'R' + rg.id + '@' + rg.versie : null, velden: vd.velden.map(function (v) { return v.veld; }), kenmerken: vd.kenmerken, geld: geldIn(tekst) };
           if (live) { sam.live = true; sam.entiteit_bewijs = en.bewijs || (rg ? 'regel' : 'regels'); sam.jev = jv.gemeten ? (jv.boven ? 'boven' : 'onder') : 'geen_uitslag'; if (jv.overgeslagen) sam.jev_overgeslagen = jv.overgeslagen; if (schaduwLenzen.length) sam.schaduw_lenzen = schaduwLenzen.map(function (b) { return b.lens; }); if (naKeuze || zachtDoor) sam.na_keuze = true; if (zachtDoor || (naKeuze && marker !== 'geen')) sam.mogelijk_medisch = true; if (zachtDoor) sam.weging = 'zacht'; }
           sam.label_gelijk = labels.length ? labels.indexOf(en.knoop) >= 0 : null;
           if (priveSchaduw) sam.prive_schaduw = priveSchaduw;   // wv2336: de privégrens zou dit stuk bij Privé zetten; echte uitkomst prive/zakelijk/onbekend
@@ -2168,7 +2179,8 @@ function maak(o) {
   async function appBundel(d, door) {
     d = isObj(d) ? d : {};
     const sl = String(d.bundel || '');
-    if (!/^b[0-9a-f]{16}$/.test(sl)) return { status: 400, j: { ok: false, fout: 'bundel onbekend' } };
+    if (!/^b[0-9a-f]{16}(-[1-9][0-9]?)?$/.test(sl)) return { status: 400, j: { ok: false, fout: 'bundel onbekend' } };
+    const basisSl = sl.replace(/-[0-9]+$/, '');   // een deel van een grote groep heeft dezelfde onderliggende sleutel
     const lijst = Array.isArray(d.stukken) ? d.stukken : [];
     if (lijst.length < BUNDEL_MIN || lijst.length > BUNDEL_MAX) return { status: 400, j: { ok: false, fout: 'een bundel heeft ' + BUNDEL_MIN + ' tot ' + BUNDEL_MAX + ' stukken' } };
     const ids = [];
@@ -2182,8 +2194,11 @@ function maak(o) {
     if (lenzenLive().indexOf(lens) < 0) return { status: 409, j: { ok: false, fout: 'die bestemming staat nog niet live' } };
     const ent = lens === 'kennis' ? String(d.entiteit || '') : null;
     if (lens === 'kennis' && (!KENNIS_MAP[ent] || !KNOOP_RE.test(ent))) return { status: 400, j: { ok: false, fout: 'kies een entiteit met een Second Brain-map' } };
-    if (bundelBezig.has(sl) || ids.some(function (x) { return keuzeBezig.has(x.id); })) return { status: 409, j: { ok: false, fout: 'deze bundel wordt al verwerkt; ververs zo' } };
-    bundelBezig.add(sl);
+    if (bundelBezig.has(basisSl) || ids.some(function (x) { return keuzeBezig.has(x.id); })) return { status: 409, j: { ok: false, fout: 'deze bundel wordt al verwerkt; ververs zo' } };
+    // review MOET 1: alle stukken van de bundel zijn gereserveerd vanaf vóór de controle tot na de laatste keuze: een ander venster (appKeuze) krijgt
+    // 409 en de router-ronde slaat ze over, zodat niemand er tussendoor iets anders mee doet
+    bundelBezig.add(basisSl);
+    for (const x of ids) keuzeBezig.add(x.id);
     try {
       const r = await regVoorApp();
       const ctx = { namen: entNamen(r), perAfzender: keuzesPerAfzender(), bundels: true };
@@ -2197,22 +2212,26 @@ function maak(o) {
         if (ls.staat !== 'twijfel') return { status: 409, j: { ok: false, code: 'bundel_veranderd', fout: 'Een stuk uit deze bundel heeft intussen een andere plek. De lijst is ververst; kijk nog eens.' } };
         const row = db.prepare('SELECT stuk_id, versie, status, op, samenvatting FROM router_stuk WHERE stuk_id = ? AND versie = ?').get(x.id, ls.versie);
         const st = row ? stukVoorApp(row, r, null, ctx) : null;
-        if (!st || st._b !== sl) return { status: 409, j: { ok: false, code: 'bundel_veranderd', fout: 'Deze stukken horen niet (meer) bij elkaar. De lijst is ververst; kies ze los.' } };
+        if (!st || st._b !== basisSl) return { status: 409, j: { ok: false, code: 'bundel_veranderd', fout: 'Deze stukken horen niet (meer) bij elkaar. De lijst is ververst; kies ze los.' } };
         doen.push(x);
       }
       if (!doen.length) return { status: 200, j: { ok: true, uitkomst: 'al_zo', n: ids.length } };
       const res = [];
       for (const x of doen) {
         let k;
-        try { k = await appKeuze({ stuk_id: x.id, keuze: 'bestemming', lens, entiteit: ent, versie: x.versie }, door, { bundel: sl }); }
-        catch (e) { if (o.fout) o.fout('intake-router-bundel', e); k = { status: 500, j: { ok: false, fout: 'interne fout' } }; }
+        const nu2 = db.prepare('SELECT staat, versie FROM live_stuk WHERE stuk_id = ?').get(x.id);
+        if (!nu2 || nu2.staat !== 'twijfel' || nu2.versie !== x.versie) k = { status: 409, j: { ok: false, fout: 'dit stuk is intussen veranderd; ververs' } };
+        else {
+          try { k = await keuzeUit({ stuk_id: x.id, keuze: 'bestemming', lens, entiteit: ent, versie: x.versie }, door, x.id, { bundel: basisSl }); if (k && k.status < 300) cacheWis(x.id); }
+          catch (e) { if (o.fout) o.fout('intake-router-bundel', e); k = { status: 500, j: { ok: false, fout: 'interne fout' } }; }
+        }
         res.push({ stuk_id: x.id, status: k.status, uitkomst: k.j && k.j.uitkomst || null, fout: k.status === 200 ? undefined : (k.j && k.j.fout) || 'mislukt' });
       }
       const goed = res.filter(function (x) { return x.status === 200; });
       if (!goed.length) return { status: res[0].status, j: { ok: false, fout: res[0].fout, resultaten: res } };
       const uitk = goed.length < res.length ? 'deels' : (goed.every(function (x) { return x.uitkomst === 'al_zo'; }) ? 'al_zo' : (goed.some(function (x) { return x.uitkomst === 'aangeboden'; }) ? 'aangeboden' : 'uitgevoerd'));
       return { status: 200, j: { ok: true, uitkomst: uitk, n: goed.length + al, mislukt: res.length - goed.length, resultaten: res } };
-    } finally { bundelBezig.delete(sl); }
+    } finally { bundelBezig.delete(basisSl); for (const x of ids) keuzeBezig.delete(x.id); }
   }
   /*
    * SYSTEEMPOST VERWERKEN (wv2004). (1) oordeel met het model waar dat mocht (Jev onder de drempel), hooguit SYSTEEM_MODEL_MAX pogingen, anders
@@ -2549,10 +2568,16 @@ function maak(o) {
     return 'b' + crypto.createHash('sha256').update(['wv2710', sam.bron || '', sam.afzender, v ? v.lens + ':' + (v.entiteit || '') : '-'].join('|')).digest('hex').slice(0, 16);
   }
   // alleen een groep van minstens BUNDEL_MIN wachtende stukken krijgt een bundel; de rest (en elk ander overzicht) ziet geen sleutel
+  // review MOET 3: een groep boven BUNDEL_MAX wordt verdeeld in zo gelijk mogelijke delen (elk ≥ BUNDEL_MIN), met sleutel-<n> vanaf het tweede deel
   function bundelsZet(stukken) {
-    const tel = new Map();
-    for (const s of stukken) if (s._b) tel.set(s._b, (tel.get(s._b) || 0) + 1);
-    for (const s of stukken) { if (s._b && tel.get(s._b) >= BUNDEL_MIN) s.bundel = s._b; delete s._b; }
+    const groep = new Map();
+    for (const s of stukken) if (s._b) groep.set(s._b, (groep.get(s._b) || []).concat([s]));
+    for (const [sl, l] of groep) {
+      if (l.length < BUNDEL_MIN) continue;
+      const k = Math.ceil(l.length / BUNDEL_MAX), per = Math.ceil(l.length / k);
+      l.forEach(function (s, i) { const d = Math.floor(i / per); s.bundel = d ? sl + '-' + d : sl; });
+    }
+    for (const s of stukken) delete s._b;
     return stukken;
   }
   function entNamen(r) { const m = new Map(); if (r) for (const e of r.ent.values()) if (e.eigen && KNOOP_RE.test(String(e.k || ''))) m.set(e.k, e.naam || e.k); return m; }

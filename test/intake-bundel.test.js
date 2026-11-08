@@ -249,3 +249,48 @@ test('met een voorstel: na een eerdere keuze voor deze afzender krijgt de bundel
   assert.equal(E.bestanden().filter((f) => f.startsWith('10_Zakelijk/Tolgaarde/raw_input/') && /\.md$/.test(f)).length, 4);
   E.r.sluit();
 });
+
+test('review MOET 1: tijdens een bundelkeuze zijn alle stukken gereserveerd — een ander venster krijgt 409 en kan er niets tussendoor mee', async () => {
+  const E = bundelOmgeving();
+  const ids = [1, 2, 3].map((i) => levMail(E, 'Race ' + i));
+  await E.r.ronde();
+  const sl = (await E.r.appOverzicht(80)).stukken.find((s) => s.stuk_id === ids[0]).bundel;
+  const lopend = E.r.appBundel({ bundel: sl, stukken: lijstVan(E, ids), lens: 'kennis', entiteit: 'GH' }, 'app:Laptop');
+  const tussen = await E.r.appKeuze({ stuk_id: ids[2], keuze: 'bestemming', lens: 'geen', versie: versie(E, ids[2]) }, 'app:Pixel');
+  assert.equal(tussen.status, 409);
+  const r = await lopend;
+  assert.equal(r.status, 200, JSON.stringify(r.j)); assert.equal(r.j.n, 3);
+  assert.ok(ids.every((id) => staat(E, id).keuze === 'kennis:GH'));
+  // en daarna is niets meer gereserveerd: een gewone keuze (Verplaats) gaat weer
+  assert.equal((await E.r.appKeuze({ stuk_id: ids[2], keuze: 'bestemming', lens: 'kennis', entiteit: 'TG', versie: versie(E, ids[2]) }, 'app:Pixel')).status, 200);
+  E.r.sluit();
+});
+
+test('review MOET 2: geld = ook een buitenlands IBAN (mod-97), niet een willekeurige code in een link', () => {
+  assert.equal(K.geldIn('Graag naar DE89370400440532013000 (verzonnen).'), true);
+  assert.equal(K.geldIn('Rekening NL91 ABNA 0417 1643 00.'), true);
+  assert.equal(K.geldIn('Lees verder: https://nieuws.example/?t=ab12cdefghijklmnop'), false);
+  assert.equal(K.geldIn('Uitnodiging voor het overleg van dinsdag'), false);
+  assert.equal(K.geldIn('Toegang kost € 25'), true);
+  assert.equal(K.geldIn('Betaling ontvangen'), true);
+});
+
+test('review MOET 3: een groep groter dan 25 wordt verdeeld in uitvoerbare bundels van ≥ 3 (27 → 14 + 13), elk deel apart te kiezen', async () => {
+  const E = bundelOmgeving();
+  const ids = [];
+  for (let i = 1; i <= 27; i++) ids.push(levMail(E, 'Groot ' + i));
+  for (let i = 0; i < 4; i++) await E.r.ronde();   // een ronde verwerkt een beperkt aantal stukken
+  const st = (await E.r.appOverzicht(200)).stukken.filter((s) => ids.includes(s.stuk_id));
+  assert.equal(st.length, 27);
+  const per = new Map();
+  for (const s of st) per.set(s.bundel, (per.get(s.bundel) || []).concat([s.stuk_id]));
+  assert.equal(per.size, 2, JSON.stringify(Array.from(per.keys())));
+  const [k1, k2] = Array.from(per.keys()).sort();
+  assert.match(k1, /^b[0-9a-f]{16}$/); assert.equal(k2, k1 + '-1');
+  assert.deepEqual(Array.from(per.values()).map((l) => l.length).sort(), [13, 14]);
+  const r = await E.r.appBundel({ bundel: k2, stukken: lijstVan(E, per.get(k2)), lens: 'geen' }, 'app:x');
+  assert.equal(r.status, 200, JSON.stringify(r.j)); assert.equal(r.j.n, per.get(k2).length);
+  assert.equal((await E.r.appBundel({ bundel: k1, stukken: lijstVan(E, per.get(k1)), lens: 'geen' }, 'app:x')).status, 200);
+  assert.ok(ids.every((id) => staat(E, id).keuze === 'geen:'));
+  E.r.sluit();
+});
