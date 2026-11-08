@@ -42,6 +42,15 @@ const gelezen = P.potjesLees(W, FV);
 toets('potjesLees: vet weg, schrijfwijze van de lijst, vanaf als JJJJ-MM', gelezen.potjes.length === 2 && gelezen.potjes[0].categorie === 'boodschappen' && gelezen.potjes[0].bedrag === 900 && gelezen.potjes[0].doorschuiven === true && gelezen.potjes[0].vanaf === '2026-10' && gelezen.potjes[1].categorie === 'vervoer' && gelezen.potjes[1].doorschuiven === false, gelezen);
 toets('potjesLees zonder pagina: leeg, geen fout', (function () { const x = P.potjesLees(path.join(W, 'niets'), FV); return x.pagina === null && x.potjes.length === 0; })());
 
+// review ZOU 2/3: kolommen op naam, opmaak in de post-cel, ontbrekende kolom
+const anders = '## Potjes\n\n| Post | Per maand | Vanaf | Doorschuiven |\n|---|---|---|---|\n| [[x\\|boodschappen]] | € 900 | 10-2026 | ja |\n';
+const t4 = P.potjesZet(anders, { actie: 'zet', potje: { categorie: 'vervoer', bedrag: 300, doorschuiven: true, vanaf: '2026-11' } }, '2026-11-08');
+toets('andere kolomvolgorde: de rij volgt de kop (Vanaf vóór Doorschuiven)', /\| vervoer \| € 300 \| 11-2026 \| ja \|/.test(t4), t4);
+const t5 = P.potjesZet(anders, { actie: 'zet', potje: { categorie: 'boodschappen', bedrag: 500, doorschuiven: false, vanaf: '2026-11' } }, '2026-11-08');
+toets('post-cel met wikilink telt als dezelfde post: vervangen, geen tweede rij', (t5.match(/boodschappen/g) || []).length === 1 && /\| boodschappen \| € 500 \| 11-2026 \| nee \|/.test(t5), t5);
+fout = null; try { P.potjesZet('## Potjes\n\n| Post | Per maand |\n|---|---|\n', { actie: 'zet', potje: { categorie: 'vervoer', bedrag: 3 } }, '2026-11-08'); } catch (e) { fout = e.message; }
+toets('tabel zonder Doorschuiven/Vanaf: niet schrijven, nette fout', /^de tabel mist een kolom/.test(String(fout)), fout);
+
 // ── potjeInvoer ──
 const inv = (p, oud) => { try { return P.potjeInvoer(p, '2026-11-08', oud); } catch (e) { return e.message; } };
 toets('potjeInvoer: geldig', JSON.stringify(inv({ categorie: 'Boodschappen', bedrag: '1000', doorschuiven: 1 })) === JSON.stringify({ categorie: 'boodschappen', bedrag: 1000, doorschuiven: true, vanaf: '2026-11' }), inv({ categorie: 'Boodschappen', bedrag: '1000', doorschuiven: 1 }));
@@ -132,6 +141,13 @@ toets('afvinken: wisselende stroom binnen het bereik = betaald', st('Stroom').st
 toets('afvinken: PayPal-paraplu overgeslagen', !st('PayPal').naam);
 toets('afvinken: telling en volgorde (te laat eerst, betaald laatst)', JSON.stringify(av.telling) === JSON.stringify({ betaald: 2, ander_bedrag: 1, deels: 1, nog_niet: 2, te_laat: 1 }) && av.posten[0].status === 'te_laat' && av.posten[av.posten.length - 1].status === 'betaald', av.telling);
 toets('afvinken: nog te gaan = open bedragen (zorg 268,80 + sport 50 + games 7,98 + kwartaal 90)', av.nog_te_gaan === r2(268.8 + 50 + 7.98 + 90), av.nog_te_gaan);
+// review MOET: een cluster (3 per maand) met 1 betaald blijft "deels" de hele maand, ook na dag 4 + 5
+toets('afvinken: cluster 1 van 3 op 20-11 = deels, niet te laat', P.afvinken({ nu: '2026-11-20', reeksen: reeksen, rijen: rijen.slice(4, 5), lasten: lasten, naam: (x) => x.naam }).posten[0].status === 'deels');
+// review ZOU 1: een afrekening bij een kloppende post maakt hem niet "ander bedrag"
+const reeksAfr = [R({ sleutel: 'e', bedrag: 383, dag: 3, laatste: '2026-11-03', verwacht_volgende: '2026-12-03', nrs: new Map([[13, 'hoofd'], [14, 'afrekening']]) })];
+const avA = P.afvinken({ nu: '2026-11-15', reeksen: reeksAfr, rijen: [{ sleutel: 'E', sleutels: ['e'], naam: 'Stroom', ritme: 'maand', bedrag: 383, dag: 3, wijze: 'vast' }],
+  lasten: [{ nr: 13, datum: '2026-11-03', bedrag: -383 }, { nr: 14, datum: '2026-11-12', bedrag: -210 }], naam: (x) => x.naam });
+toets('afvinken: afrekening telt niet mee (betaald 383, niet 593)', avA.posten[0].status === 'betaald' && avA.posten[0].betaald === 383, avA.posten[0]);
 const av2 = P.afvinken({ nu: '2026-11-30', reeksen: reeksen, rijen: rijen.slice(2, 3), lasten: lasten, naam: (x) => x.naam });
 toets('afvinken: zorg wordt pas na 27-11 + 5 dagen te laat', av2.posten[0].status === 'nog_niet', av2.posten[0]);
 const av3 = P.afvinken({ nu: '2026-12-03', reeksen: reeksen, rijen: rijen.slice(2, 3), lasten: lasten, naam: (x) => x.naam });
@@ -165,6 +181,8 @@ toets('geldstroom gemiddeld: som links = som rechts, inkomen per maand 6.100', s
 toets('geldstroom gemiddeld: vakantie 3.000 / 12 = 250', gem.bestemmingen.some((b) => b.naam === 'vakantie en reizen' && b.bedrag === 250), gem.bestemmingen);
 const over = P.geldstroom([{ maand: '2026-10', stroom: 'inkomen', cat: 'inkomen', deel: 1000 }, { maand: '2026-10', stroom: 'leven', cat: 'wonen', deel: -400 }], { twaalf: ['2026-10'] });
 toets('geldstroom: overschot = bestemming "bleef over"', over.maand_stroom.bestemmingen.some((b) => b.soort === 'over' && b.bedrag === 600) && !over.maand_stroom.bronnen.some((b) => b.soort === 'saldo'), over.maand_stroom);
+const neg = P.geldstroom([{ maand: '2026-10', stroom: 'inkomen', cat: 'overig inkomen', deel: -300 }, { maand: '2026-10', stroom: 'inkomen', cat: 'inkomen', deel: 1000 }, { maand: '2026-10', stroom: 'leven', cat: 'wonen', deel: -400 }], { twaalf: ['2026-10'] }).maand_stroom;
+toets('geldstroom: negatief inkomen = bestemming "(terugbetaald)", sommen gelijk', neg.bestemmingen.some((b) => b.naam === 'overig inkomen (terugbetaald)' && b.bedrag === 300) && som(neg.bronnen) === som(neg.bestemmingen), neg);
 toets('geldstroom zonder volle maand: null', P.geldstroom(gd, { twaalf: [] }) === null);
 
 // ── koppelingen ──

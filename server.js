@@ -11858,7 +11858,7 @@ async function appFinPotje(req, res, a, d) {
     const nieuwGezet = !bestaat && VV().schrijf(pad, P.potjesZet('', op, vandaag), { alsGelijk: function (st) { return !st; } });
     if (!nieuwGezet && !VV().wijzig(pad, function (t) { return P.potjesZet(t, op, vandaag); }, { krimpGrens: true })) return appWeiger(res, 409, 'de pagina veranderde net; probeer het opnieuw', 'fin-potje race');
   } catch (e) {
-    if (/^(potje niet gevonden|onbekende post|hooguit 40 potjes)$/.test(String(e && e.message))) return appWeiger(res, 400, e.message, 'fin-potje geweigerd');
+    if (/^(potje niet gevonden|onbekende post|hooguit 40 potjes|de tabel mist een kolom \(Post, Per maand, Doorschuiven, Vanaf\))$/.test(String(e && e.message))) return appWeiger(res, 400, e.message, 'fin-potje geweigerd');
     logError('fin-potje', new Error('schrijven faalde (' + String(e && e.code || 'fout') + ')'));
     return appWeiger(res, 503, 'opslaan lukte nu niet; probeer het zo opnieuw', 'fin-potje fout');
   }

@@ -37,6 +37,8 @@ function dagenIn(m) { return new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.s
 function plusDagen(d, n) { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
 function cel(s, n) { return String(s == null ? '' : s).replace(/[|\r\n]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n || 60).trim(); }
 function catVan(s) { const x = cel(s, 40).toLowerCase(); return POTJE_CATS.find(function (c) { return c.toLowerCase() === x; }) || null; }
+// een cel uit de tabel zoals potjesLees hem leest (wikilink, vet en andere opmaak weg; review ZOU 3)
+function catVanCel(s) { return catVan(require('./financien-vault.js').schoon(s, 60)); }
 
 // ── 2. potjes ──
 function potjesLees(vault, FV) {
@@ -119,7 +121,12 @@ function potjesZet(tekst, op, nu) {
   let eind = k + 2;
   while (eind < regels.length && /^\s*\|/.test(regels[eind])) eind++;
   const rijen = regels.slice(k + 2, eind);
-  const catVanRij = function (r) { return catVan(r.trim().replace(/^\|/, '').split('|')[0].replace(/\*\*/g, '')); };
+  // review ZOU 2: de kolommen op naam (David kan de volgorde zelf veranderen); ontbreekt er een, dan niet schrijven
+  const kop = regels[k].trim().replace(/^\||\|$/g, '').split('|').map(function (x) { return x.trim().toLowerCase(); });
+  const ix = { post: kop.indexOf('post'), bedrag: kop.indexOf('per maand'), door: kop.indexOf('doorschuiven'), vanaf: kop.indexOf('vanaf') };
+  if (ix.door < 0 || ix.vanaf < 0) throw new Error('de tabel mist een kolom (Post, Per maand, Doorschuiven, Vanaf)');
+  const cellen = function (r) { return r.trim().replace(/^\|/, '').replace(/\|\s*$/, '').split(/(?<!\\)\|/); };   // \| in een wikilink is geen celgrens
+  const catVanRij = function (r) { return catVanCel(cellen(r)[ix.post] || ''); };
   let nieuw;
   if (op.actie === 'weg') {
     const c = catVan(op.categorie);
@@ -128,10 +135,14 @@ function potjesZet(tekst, op, nu) {
   } else if (op.actie === 'zet') {
     const p = op.potje || {}, c = catVan(p.categorie);
     if (!c) throw new Error('onbekende post');
-    const regel = tabelRegel([c, nlBedrag(p.bedrag), p.doorschuiven ? 'ja' : 'nee', nlMaand(p.vanaf || vandaag.slice(0, 7))]);
+    const c4 = new Array(kop.length).fill('');
+    c4[ix.post] = c; c4[ix.bedrag] = nlBedrag(p.bedrag); c4[ix.door] = p.doorschuiven ? 'ja' : 'nee'; c4[ix.vanaf] = nlMaand(p.vanaf || vandaag.slice(0, 7));
+    const regel = tabelRegel(c4);
+    // alle rijen van deze post gaan eruit (een dubbele rij zou potjesLees anders laten kiezen), de nieuwe komt op de plek van de eerste
     const i = rijen.findIndex(function (r) { return catVanRij(r) === c; });
     if (i < 0 && rijen.length >= 40) throw new Error('hooguit 40 potjes');
-    nieuw = i < 0 ? rijen.concat([regel]) : rijen.slice(0, i).concat([regel], rijen.slice(i + 1));
+    const rest = rijen.filter(function (r) { return catVanRij(r) !== c; });
+    nieuw = i < 0 ? rijen.concat([regel]) : rest.slice(0, i).concat([regel], rest.slice(i));
   } else throw new Error('onbekende actie');
   const uit = regels.slice(0, k + 2).concat(nieuw, regels.slice(eind)).join('\n');
   return /^---\n[\s\S]*?\nupdated:/.test(uit) ? uit.replace(/(^---\n[\s\S]*?\nupdated:)[^\n]*/, '$1 ' + vandaag) : uit;
@@ -177,7 +188,8 @@ function afvinken(o) {
     const betaald = [], beurt = [];
     rs.forEach(function (r) {
       const eigen = [];
-      if (r.nrs) r.nrs.forEach(function (soort, nr) { const t = perNr.get(nr); if (t && t.datum >= van && t.datum <= tot && t.bedrag < 0) eigen.push(t); });
+      // review ZOU 1: alleen de gewone posten (hoofd, voorlopig); een afrekening of losse extra maakt een kloppende post niet tot 'ander bedrag'
+      if (r.nrs) r.nrs.forEach(function (soort, nr) { const t = perNr.get(nr); if (t && (soort === 'hoofd' || soort === 'voorlopig') && t.datum >= van && t.datum <= tot && t.bedrag < 0) eigen.push(t); });
       const vv = volgendeVan(r);
       if (eigen.length || (vv && vv <= tot)) { beurt.push({ r: r, vv: vv, betaald: eigen }); eigen.forEach(function (t) { betaald.push(t); }); }
     });
@@ -197,7 +209,9 @@ function afvinken(o) {
         : !(Math.abs(som - bedragV) > AFWIJK_EUR && Math.abs(som - bedragV) > AFWIJK_PCT * bedragV);
       status = binnen ? 'betaald' : 'ander_bedrag';
     } else if (betaald.length && som > bedragV + Math.max(AFWIJK_EUR, AFWIJK_PCT * bedragV)) status = 'ander_bedrag';
-    else status = nu > plusDagen(verwacht, TE_LAAT_DAGEN) ? 'te_laat' : betaald.length ? 'deels' : 'nog_niet';
+    // review wv2706 MOET: deels betaald (cluster, 1 van 3) blijft deels tot de maand om is; de andere posten horen later in de maand
+    else if (betaald.length) status = nu > plusDagen(tot, TE_LAAT_DAGEN) ? 'te_laat' : 'deels';
+    else status = nu > plusDagen(verwacht, TE_LAAT_DAGEN) ? 'te_laat' : 'nog_niet';
     const laatst = betaald.slice().sort(function (p, q) { return p.datum < q.datum ? 1 : -1; })[0];
     posten.push({ naam: o.naam ? o.naam(x) : x.naam || 'zonder naam', soort_post: x.soort_post || null, ritme: x.ritme, verwacht_op: verwacht, bedrag: r2(bedragV),
       wisselend: x.wijze === 'wisselend' || x.wijze === 'schommelt' || undefined, status: status, betaald: betaald.length ? som : null, betaald_op: laatst ? laatst.datum : null, keer: betaald.length, verwacht_keer: nodig > 1 ? nodig : undefined });
@@ -244,7 +258,7 @@ function geldstroomVan(delen, maanden) {
   top.forEach(function (x) { best.set(x.naam, { naam: x.naam, bedrag: x.bedrag, soort: 'leven' }); });
   if (rest > 0) best.set('andere categorieën', { naam: (uitL.length - TOP_LEVEN) + ' andere categorieën', bedrag: rest, soort: 'leven', aantal: uitL.length - TOP_LEVEN });
   // een bron met een negatief saldo (geld de deur uit via inkomen buiten zicht of verschuiven) is een bestemming
-  bron.forEach(function (x, k) { if (x.bedrag < 0) { bron.delete(k); best.set(k, { naam: k, bedrag: -x.bedrag, soort: x.soort }); } });
+  bron.forEach(function (x, k) { if (x.bedrag < 0) { bron.delete(k); best.set(k, { naam: x.soort === 'inkomen' && !/buiten zicht/.test(k) ? k + ' (terugbetaald)' : k, bedrag: -x.bedrag, soort: x.soort }); } });
   const balans = ink + lev + ver;
   if (balans > 0.005) best.set('bleef over', { naam: 'bleef over (saldo omhoog)', bedrag: balans, soort: 'over' });
   else if (balans < -0.005) bron.set('uit het saldo', { naam: 'uit het saldo (saldo omlaag)', bedrag: -balans, soort: 'saldo' });
