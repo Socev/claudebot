@@ -1331,10 +1331,23 @@ const opdrachten = {
   // Uitvoer naar de pod (geheugen), nooit naar een sessie of log: de pod schrijft ze met parameters in D1 `fin`.
   async 'pot-datahub-invoer'(a) {
     if (a.opt.van != null && !isDatum(a.opt.van)) throw new Weigering('--van als JJJJ-MM-DD');
+    // wv2762: met een IBAN op stdin (KM of SLOEL, uit D1 bankrekening) de zakelijke database (business-koppeling); zonder: de POT-rekening
+    if (geheim.iban !== undefined) {
+      const z = zakOpen();
+      let inv;
+      try { inv = z.A.zakDatahubInvoer(z.a, geheim.iban, a.opt.van || null); } catch (e) { throw new Weigering('zakelijke rekening: ' + e.message); }
+      let opgehaald = null;
+      try { const s = standLees(); const o = s && s.opgehaald && s.opgehaald[inv.rek]; opgehaald = o && typeof o.transacties === 'string' ? o.transacties : null; } catch (e) { opgehaald = null; }
+      delete inv.rek;
+      return Object.assign({ ok: true, opgehaald: opgehaald }, inv);
+    }
     const x = archiefKlaar();
     let inv;
     try { inv = x.A.potDatahubInvoer(x.a, a.opt.van || null); } catch (e) { throw new Weigering('POT-rekening: ' + e.message); }
-    return Object.assign({ ok: true }, inv);
+    // wv2762: wanneer de bank-ronde de POT-rekening het laatst ophaalde (de laatste post kan dagen ouder zijn: geen beweging)
+    let opgehaald = null;
+    try { const s = standLees(), rk = Array.from(x.A.potRekeningen(x.a))[0]; const o = s && s.opgehaald && rk && s.opgehaald[rk]; opgehaald = o && typeof o.transacties === 'string' ? o.transacties : null; } catch (e) { opgehaald = null; }
+    return Object.assign({ ok: true, opgehaald: opgehaald }, inv);
   },
   // wv787: ontvanger van de POT-afschriften (André, Acta). Alleen machinekamer via de CLI (stdin {adres}); niet in code of vault.
   async 'pot-ontvanger'() {

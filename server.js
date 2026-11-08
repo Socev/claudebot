@@ -3944,7 +3944,8 @@ function handleRequest(req, res) {
       bank_verrijk_ai: bankVerrijkStand(true),   // wv740: stand van de AI-indeling (alleen aantallen en tijden); peilen hoeft niet meer via /smal/bank
       elevenlabs: elevenCreditsInfo(),   // wv2751: credits van Davids ElevenLabs-bundel (gebruikt/limiet/over, rem bij 5 %)
       studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
-      pot_verzend: typeof potVzInfo === 'function' ? potVzInfo() : { aan: false },   // wv911: POT-app nota's als Gmail-concept (schakelaar, laatste tik, aantallen; geen inhoud)
+      pot_verzend: typeof potVzInfo === 'function' ? potVzInfo() : { aan: false },
+      pot_maand: typeof potMaandInfo === 'function' ? potMaandInfo() : { aan: false },   // wv2762: OVIS POT maandronde (schakelaar, bundel, laatste tik; geen inhoud)   // wv911: POT-app nota's als Gmail-concept (schakelaar, laatste tik, aantallen; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
       gezondheid: typeof gezondheidInfo === 'function' ? gezondheidInfo() : { aan: false },   // wv937: App Gezondheid (gezondheid-app.js in deze release? tellers, geen inhoud)
@@ -23184,6 +23185,11 @@ function bankBoxRij(m) {
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
       '- gevolg als er niets gebeurt: geen blok "Geld deze maand" onder het ochtendbericht; elke avondronde (18:00) probeert het opnieuw voor de volgende werkdag, tot het einde van de maand. De App Financiën werkt gewoon.\n' +
       '- voorstel: `/opt/data/bank/geld-briefing.json` (600) en api.log (`opdracht=geld-briefing`) nalopen; de signalen zelf: bank-lezer `geld-briefing --peil JJJJ-MM-DD` op een VACUUM INTO-kopie. Geheugen onleesbaar: het bestand wegzetten geeft één eerste-keer-blok.\n'
+      : m.bron === 'pot-maand' ? '\n## [direct] ' + tijd + ' — OVIS POT maandronde: ' + String(m.kop || 'storing').replace(/[\r\n]+/g, ' ').slice(0, 60) + ' (pod, automatisch)\n' +
+      '- status: open\n- van: pod pot-maand-tik (server.js potMaandTik, elke 10 minuten; hooguit 1× per dag per reden)\n' +
+      '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: de nota\'s van de maand, de mailconcepten aan de praktijken en Exact of een gevraagde herinnering komen niet of later klaar; OVIS POT toont de stand (Overzicht, Nota\'s).\n' +
+      '- voorstel: /health `pot_maand` en api.log (`pot-maand`) nalopen; D1 pot `select status, count(*) from mail_concept group by 1` en `select * from instelling where sleutel like \'maandronde_%\'`; uitzetten = `rm /opt/data/pot-maand/aan` (regels blijven wachten). Ontwerp OVIS POT § 5 en Systeemoverzicht § OVIS POT fase 3.\n'
       : m.bron === 'pot-verzend' ? '\n## [direct] ' + tijd + ' — POT-app nota\'s klaarzetten: ' + String(m.kop || 'storing').replace(/[\r\n]+/g, ' ').slice(0, 40) + ' (pod, automatisch)\n' +
       '- status: open\n- van: pod pot-verzend-tik (server.js potVzTik, elke minuut; hooguit 1× per dag per reden)\n' +
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
@@ -24499,6 +24505,14 @@ async function appD1Batch(db, batch, ms) {   // wv1933: ms = eigen time-out (OVI
   if (!ok) throw new Error('D1 http ' + r.status + (j && Array.isArray(j.errors) && j.errors[0] ? ': ' + String(j.errors[0].message || '').replace(/\d{6,}/g, '#').slice(0, 120) : ''));
   return j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [], changes: x.meta && x.meta.changes }; });
 }
+// wv2762 (OVIS POT fase 3 stap 0): na de POT-rekening ook de Kostenmaatschap en de SLOEL. Hun ING-rekeningen staan sinds 4-11-2026 via de
+// business-koppeling in zakelijk.sqlite; de IBAN komt uit D1 bankrekening en gaat alleen via stdin naar de bankluis. Per entiteit dezelfde
+// stappen en grenzen als POT; een fout bij de ene entiteit houdt de andere niet tegen. Daarna zet de pod per entiteit in D1 `instelling`
+// bank_bron_<ENT> = {bron: 'bankkoppeling', opgehaald, laatste_post}, zodat OVIS POT "automatisch gekoppeld, opgehaald op …" kan tonen
+// (de laatste post kan dagen ouder zijn dan de ophaaldag: geen beweging op de rekening). Box-redenen van KM/SLOEL met een voorvoegsel.
+const POT_DH_ENT = [{ ent: 'POT', bank: 'abn', zak: false }, { ent: 'KM', bank: 'ing', zak: true }, { ent: 'SLOEL', bank: 'ing', zak: true }];
+const POT_DH_BRON_SQL = "INSERT INTO instelling (sleutel, waarde, opmerking) VALUES (?, ?, 'bankbron van deze entiteit; de pod zet hem na elke bank-ronde (wv2762)') " +
+  'ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde';
 async function potDatahubRonde(o) {
   o = o || {};
   const st = potDhStaat();
@@ -24511,7 +24525,6 @@ async function potDatahubRonde(o) {
   if (!o.droog && st.aan !== true) return { gedaan: false, reden: 'uit' };
   if (potDhBezig) return { gedaan: false, reden: 'bezig' };
   if (!process.env.CLOUDFLARE_API_TOKEN) return { gedaan: false, fout: 'geen Cloudflare-sleutel op de pod' };
-  let P = null;
   const vandaag = o.vandaag || new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
   // Box-rij per reden alleen als de toestand verandert (merk: aantal of fouttekst), of na 7 dagen dezelfde toestand (diff K4).
   const box = function (reden, kop, tekst, gevolg, merk) {
@@ -24523,28 +24536,61 @@ async function potDatahubRonde(o) {
     st.box[reden] = b[reden];
   };
   potDhBezig = true;
+  const uit = { gedaan: false, per: {} };
   try {
-    P = require(path.join(__dirname, 'pot-datahub.js'));   // binnen de try: ontbreekt hij in de release, dan een box-rij (diff K3)
-    const kop = await potDhD1([{ sql: P.SQL_LEES_REKENING, params: ['POT'] },
-      { sql: "SELECT max(boekdatum) AS d FROM bankmutatie WHERE entiteit = ? AND coalesce(bron_bestand, '') <> ?", params: ['POT', P.BRON_BESTAND] }]);
-    const rek = kop[0].results, grens = kop[1].results[0] && kop[1].results[0].d;
-    if (rek.length !== 1 || !rek[0].iban) throw new Error('datahub: ' + rek.length + ' POT-rekeningen in bankrekening');
+    // Eén keer vooraf (zoals vóór wv2762): de module en, in één D1-batch, de rekening en Davids grens van elke entiteit. Faalt dat, dan
+    // één box-rij 'fout' voor de hele stap; daarna per entiteit, waarbij een fout bij de ene de andere niet tegenhoudt.
+    let P, kop;
+    try {
+      P = require(path.join(__dirname, 'pot-datahub.js'));   // binnen de try: ontbreekt hij in de release, dan een box-rij (diff K3)
+      const q = [];
+      POT_DH_ENT.forEach(function (E) { q.push({ sql: P.SQL_LEES_REKENING, params: [E.ent] }, { sql: "SELECT max(boekdatum) AS d FROM bankmutatie WHERE entiteit = ? AND coalesce(bron_bestand, '') <> ?", params: [E.ent, P.BRON_BESTAND] }); });
+      kop = await potDhD1(q);
+    } catch (e) {
+      const tekst = String(e && e.message || e).replace(/[\r\n]+/g, ' ').replace(/\d{6,}/g, '#').slice(0, 160);
+      logError('pot-datahub', new Error(tekst));
+      box('fout', 'niet gelukt', tekst, null, tekst.replace(/\d+/g, '#'));
+      return { gedaan: false, fout: 'pot-datahub-ronde faalde in de pod' };
+    }
+    // KM/SLOEL uitzetten zonder POT te raken: "ent_uit": ["KM"] in het geheugen (alleen de machinekamer)
+    const uitgezet = (function () { try { const r = JSON.parse(fs.readFileSync(POT_DH_STAAT, 'utf8')); return Array.isArray(r.ent_uit) ? r.ent_uit : []; } catch (e) { return []; } })();
+    for (let i = 0; i < POT_DH_ENT.length; i++) {
+      const E = POT_DH_ENT[i];
+      if (Array.isArray(o.ent) && o.ent.indexOf(E.ent) < 0) continue;
+      if (E.ent !== 'POT' && uitgezet.indexOf(E.ent) >= 0) { uit.per[E.ent] = { gedaan: false, reden: 'uit' }; continue; }
+      const rek = kop[2 * i].results, grens = kop[2 * i + 1].results[0] && kop[2 * i + 1].results[0].d;
+      // KM/SLOEL zonder rekening in D1 (proefomgeving, of nog niet ingericht): stil overslaan; POT zonder rekening blijft een fout
+      if (E.ent !== 'POT' && !rek.length) { uit.per[E.ent] = { gedaan: false, reden: 'geen rekening' }; continue; }
+      const r = await potDatahubEen(E, P, rek, grens, o, st, vandaag, box);
+      uit.per[E.ent] = r;
+      if (r.gedaan) uit.gedaan = true;
+    }
+    // achterwaarts: de telling van POT bovenaan (n8n en de proef lezen telling)
+    if (uit.per.POT) { if (uit.per.POT.telling) uit.telling = uit.per.POT.telling; if (uit.per.POT.fout) uit.fout = uit.per.POT.fout; if (uit.per.POT.droog) uit.droog = true; }
+    return uit;
+  } finally { potDhBezig = false; }
+}
+async function potDatahubEen(E, P, rek, grens, o, st, vandaag, box0) {
+  const ent = E.ent, vv = ent === 'POT' ? '' : ent + '-';
+  const box = function (reden, kop, tekst, gevolg, merk) { box0(vv + reden, (vv ? ent + ': ' : '') + kop, tekst, gevolg, merk); };
+  try {
+    if (rek.length !== 1 || !rek[0].iban) throw new Error('datahub: ' + rek.length + ' ' + ent + '-rekeningen in bankrekening');
     if (!grens) throw new Error('datahub: geen eigen lading van David');
     const van = new Date(Date.parse(grens + 'T12:00:00Z') - 10 * 864e5).toISOString().slice(0, 10);
-    const k = await bankKind(['pot-datahub-invoer', '--van', van], {}, POT_DH_MAX_MS);
+    const k = await bankKind(['pot-datahub-invoer', '--van', van], E.zak ? { iban: String(rek[0].iban).replace(/\s+/g, '').toUpperCase() } : {}, POT_DH_MAX_MS);
     const j = (k && k.j) || {};
-    if (j.ok !== true || !Array.isArray(j.posten)) throw new Error('bankluis gaf geen POT-posten');
+    if (j.ok !== true || !Array.isArray(j.posten)) throw new Error('bankluis gaf geen ' + ent + '-posten');
     if (String(j.iban || '') !== String(rek[0].iban).replace(/\s+/g, '').toUpperCase()) {
-      box('rekening', 'rekening wijkt af', 'De IBAN van de POT-rekening in de bankluis is niet die in de datahub (tabel bankrekening); niets geschreven.',
-        'er komen geen POT-posten meer in de datahub tot de rekening in bankrekening en de bankluis weer gelijk zijn.');
+      box('rekening', 'rekening wijkt af', 'De IBAN van de ' + ent + '-rekening in de bankluis is niet die in de datahub (tabel bankrekening); niets geschreven.',
+        'er komen geen ' + ent + '-posten meer in de datahub tot de rekening in bankrekening en de bankluis weer gelijk zijn.');
       return { gedaan: false, fout: 'rekening wijkt af' };
     }
-    const lees = await potDhD1([{ sql: P.SQL_LEES_RIJEN, params: ['POT', P.leesVanaf(j.posten) || van] }]);
-    const v = P.voorstel({ iban: rek[0].iban, posten: j.posten, rijen: lees[0].results.map(P.rijUitD1), grootboek: st.grootboek, vandaag: vandaag });
+    const lees = await potDhD1([{ sql: P.SQL_LEES_RIJEN, params: [ent, P.leesVanaf(j.posten) || van] }]);
+    const v = P.voorstel({ iban: rek[0].iban, bank: E.bank, posten: j.posten, rijen: lees[0].results.map(P.rijUitD1), grootboek: st.grootboek, vandaag: vandaag });
     const t = v.telling;
     if (o.droog) return { gedaan: false, droog: true, telling: t };
     let geschreven = 0, toegewezen = 0;
-    for (const b of P.statements(v, { vandaag: vandaag })) {
+    for (const b of P.statements(v, { vandaag: vandaag, entiteit: ent })) {
       if (b.statements.length) {
         const res = await potDhD1(b.statements);
         b.statements.forEach(function (s, i) { if (s.sql.indexOf('INSERT OR IGNORE INTO bankmutatie') === 0) geschreven += Number(res[i].changes) || 0; else if (s.sql.indexOf('INSERT INTO bank_toewijzing') === 0) toegewezen += Number(res[i].changes) || 0; });
@@ -24552,21 +24598,26 @@ async function potDatahubRonde(o) {
       const g = {}; b.sleutels.forEach(function (s) { g[s] = vandaag; }); potDhStaatBij(g, null);
     }
     t.geschreven = geschreven; t.toewijzingen_geschreven = toegewezen;
+    // wv2762: bankbron voor OVIS POT (geen IBAN of bedrag; alleen soort, ophaaltijd en datum van de laatste post)
+    try {
+      const lp = j.posten.reduce(function (m, p) { return p && p.datum && p.datum > m ? p.datum : m; }, '');
+      await potDhD1([{ sql: POT_DH_BRON_SQL, params: ['bank_bron_' + ent, JSON.stringify({ bron: 'bankkoppeling', opgehaald: typeof j.opgehaald === 'string' ? j.opgehaald : null, laatste_post: lp || null, ronde: new Date().toISOString() })] }]);
+    } catch (e) { logError('pot-datahub', new Error('bankbron ' + ent + ': ' + String(e && e.message || e).slice(0, 80))); }
     if (t.onverklaard) box('onverklaard', t.onverklaard + ' post(en) niet geplaatst',
-      t.onverklaard + ' POT-post(en) uit de bankluis vallen binnen Davids eigen lading (t/m ' + t.grens + ') maar staan daar niet in; niet gezet.',
-      'die posten ontbreken in de POT-app; nagaan of Davids afschrift of de bankluis afwijkt (bedrag of datum).', t.onverklaard);
+      t.onverklaard + ' ' + ent + '-post(en) uit de bankluis vallen binnen Davids eigen lading (t/m ' + t.grens + ') maar staan daar niet in; niet gezet.',
+      'die posten ontbreken in OVIS POT; nagaan of Davids afschrift of de bankluis afwijkt (bedrag of datum).', t.onverklaard);
     if (t.dubbel_vermoed) box('dubbel', t.dubbel_vermoed + ' mogelijk dubbele post(en)',
-      t.dubbel_vermoed + ' rij(en) van David (eigen lading) passen op bedrag en datum bij rijen die de pod zette.',
-      'de POT-app kan die posten dubbel tellen; één van beide rijen weghalen (onze herken je aan bron_bestand enablebanking).', t.dubbel_vermoed);
-    schrijfLog(nu() + ' pot-datahub ' + velden({ nieuw: t.nieuw, geschreven: geschreven, toegewezen: toegewezen, zonder: t.zonder_toewijzing, onbekend: t.onbekend,
+      t.dubbel_vermoed + ' rij(en) van David (eigen lading, ' + ent + ') passen op bedrag en datum bij rijen die de pod zette.',
+      'OVIS POT kan die posten dubbel tellen; één van beide rijen weghalen (onze herken je aan bron_bestand enablebanking).', t.dubbel_vermoed);
+    schrijfLog(nu() + ' pot-datahub ' + velden({ ent: ent === 'POT' ? undefined : ent, nieuw: t.nieuw, geschreven: geschreven, toegewezen: toegewezen, zonder: t.zonder_toewijzing, onbekend: t.onbekend,
       onverklaard: t.onverklaard || undefined, herstel: t.herstel || undefined, dubbel: t.dubbel_vermoed || undefined, verwijderd: t.door_david_verwijderd || undefined }));
     return { gedaan: true, telling: t };
   } catch (e) {
     const tekst = String(e && e.message || e).replace(/[\r\n]+/g, ' ').replace(/\d{6,}/g, '#').slice(0, 160);
-    logError('pot-datahub', new Error(tekst));
+    logError('pot-datahub', new Error((vv ? ent + ': ' : '') + tekst));
     box('fout', 'niet gelukt', tekst, null, tekst.replace(/\d+/g, '#'));
     return { gedaan: false, fout: 'pot-datahub-ronde faalde in de pod' };
-  } finally { potDhBezig = false; }
+  }
 }
 // ── einde bankluis ──
 // ── wv2625: Tibber Data API (alleen lezen, laadhistorie per auto) ────────────────────────────────────────────────────
@@ -25269,6 +25320,76 @@ async function potVzTik() {
   } finally { potVz.bezig = false; }
 }
 setInterval(function () { potVzTik().catch(function (e) { logError('pot-verzend', e); }); }, POT_VZ_TIK_MS).unref();
+
+// ── wv2762: OVIS POT maandronde (ontwerp OVIS POT op pot.socev.dev § 5) ─────────────────────────────────────────────────────────
+// pot-maand.js (puur). Elke 10 minuten, alleen de primaire pod, schakelaar <POT_MAAND_DIR>/aan: vanaf instelling.overname_vragen op de 1e
+// de nota's van de maand maken (bundel ovis-pot/api.mjs = de API van de app), per praktijk één Gmail-concept met de stukken van die dag,
+// per entiteit één concept aan het verkoopadres in Exact (leeg = 'geen_adres', geen gok), herinneringen uit pod_verzoek; alles concept.
+// Zelfde bouwstenen als pot-verzend: D1 `pot` (potDhD1), lees-luik, mailluik, pdftotext, OVIS-register, Voor jou, conceptregister.
+const POT_MAAND_DIR = process.env.POT_MAAND_DIR || '/opt/data/pot-maand';
+const POT_MAAND_TIK_MS = 10 * 60 * 1000;
+const POT_MAAND_MOD = (function () { const p = path.join(__dirname, 'pot-maand.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('pot-maand', e); return null; } })();
+const potMaand = { bezig: false, laatste: null, laatste_meting: 0, laatste_kaarten: 0, uitkomst: null, fouten_op_rij: 0, laatste_fout: null, rij: {}, box: {}, bundel: null };
+function potMaandAan() { return !!POT_MAAND_MOD && fs.existsSync(path.join(POT_MAAND_DIR, 'aan')); }
+// De bundel (gegenereerd uit Socev/ovis-pot met scripts/pod-bundel.mjs): de API, de rekenkern en de stukken van de app, één keer geladen.
+async function potMaandBundel() {
+  if (potMaand.bundel) return potMaand.bundel;
+  const url = require('url');
+  const map = path.join(__dirname, 'ovis-pot');
+  const [api, K, S] = await Promise.all([import(url.pathToFileURL(path.join(map, 'api.mjs')).href), import(url.pathToFileURL(path.join(map, 'kern', 'pot-kern.mjs')).href), import(url.pathToFileURL(path.join(map, 'kern', 'stukken.mjs')).href)]);
+  potMaand.bundel = { api: api, K: K, S: S };
+  return potMaand.bundel;
+}
+function potMaandInfo() {
+  let bron = null; try { bron = JSON.parse(fs.readFileSync(path.join(__dirname, 'ovis-pot', 'bron.json'), 'utf8')).commit.slice(0, 7); } catch (e) { bron = null; }
+  const u = potMaand.uitkomst;
+  return { aan: potMaandAan(), module: !!POT_MAAND_MOD, bundel: bron, laatste_tik: potMaand.laatste, fouten_op_rij: potMaand.fouten_op_rij, laatste_fout: potMaand.laatste_fout,
+    laatste: u ? { geclaimd: u.geclaimd, concept: u.concept, fout: u.fout, wacht_op_adres: u.wacht_op_adres, gebundeld: u.gebundeld, notas_gemaakt: u.notas_gemaakt, fouten: u.fouten } : null };
+}
+function potMaandBox(reden, tekst) {
+  const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  if (potMaand.box[reden] === dag) return;
+  potMaand.box[reden] = dag;
+  try { bankBoxRij({ bron: 'pot-maand', kop: reden, tekst: tekst }); } catch (e) { logError('pot-maand-box', e); }
+}
+const POT_MAAND_IO = {
+  d1: function (batch) { return potDhD1(batch); },
+  bundel: potMaandBundel,
+  luik: function (body) { return appAgendaApi(body); },
+  concept: function (body) { return potVzConcept(body); },
+  pdftotext: function (b) { return potVzPdfTekst(b); },
+  registerAdressen: function () { return potVzRegisterAdressen(); },
+  kaartZet: function (p) { return appSbRpc('mk_voor_jou_zet', { p: p }); },
+  kaartLijst: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); return (j && j.punten) || []; },
+  kaartDicht: function (sleutel, van, bewijs) { return appSbRpc('mk_voor_jou_status', { p_sleutel: sleutel, p_van: van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: bewijs, p_reden: 'pot-maand: vanzelf opgelost' }); },
+  register: function (regel) { return potVzRegister(regel); },
+};
+async function potMaandTik(o) {
+  o = o || {};
+  if (potMaand.bezig || !potMaandAan() || !rolPrimair()) return null;
+  if (!process.env.CLOUDFLARE_API_TOKEN || !process.env.N8N_WEBHOOK_MAILCONCEPT || !process.env.N8N_WEBHOOK_AGENDA_API) { potMaandBox('geheim', 'CLOUDFLARE_API_TOKEN, N8N_WEBHOOK_MAILCONCEPT of N8N_WEBHOOK_AGENDA_API ontbreekt in de pod'); return null; }
+  potMaand.bezig = true;
+  const t0 = Date.now();
+  const meten = t0 - potMaand.laatste_meting > 3600e3, kaarten = t0 - potMaand.laatste_kaarten > 3600e3;
+  try {
+    const u = await POT_MAAND_MOD.ronde(POT_MAAND_IO, { meten: meten, kaarten: kaarten });
+    potMaand.uitkomst = u; potMaand.laatste = new Date().toISOString(); potMaand.fouten_op_rij = 0;
+    if (meten) potMaand.laatste_meting = t0;
+    if (kaarten && u.fouten.indexOf('kaarten') < 0) potMaand.laatste_kaarten = t0;
+    if (u.geclaimd || u.concept || u.fout || u.onzeker || u.verzonden || u.opnieuw || u.gebundeld || u.notas_gemaakt)
+      schrijfLog(nu() + ' pot-maand ' + velden({ notas: u.notas_gemaakt || undefined, gebundeld: u.gebundeld || undefined, geclaimd: u.geclaimd, concept: u.concept, adres: u.wacht_op_adres, fout: u.fout, onzeker: u.onzeker, verzonden: u.verzonden, opnieuw: u.opnieuw }));
+    if (u.fouten.indexOf('notas') >= 0 && u.notas && u.notas.reden) potMaandBox('notas', 'de nota\'s van deze maand zijn niet gemaakt: ' + String(u.notas.reden).slice(0, 160));
+    if (u.fouten.indexOf('dagplafond') >= 0) potMaandBox('dagplafond', 'meer dan ' + POT_MAAND_MOD.GRENS.perDag + ' mailconcepten vandaag; de rest wacht tot morgen');
+    ['luik', 'pdftotext', 'kaarten', 'register', 'adresregister'].forEach(function (r) { potMaand.rij[r] = u.fouten.indexOf(r) >= 0 ? (potMaand.rij[r] || 0) + 1 : 0; if (potMaand.rij[r] === 5) potMaandBox(r, 'stap ' + r + ' faalde 5 tikken op rij'); });
+    return u;
+  } catch (e) {
+    potMaand.fouten_op_rij++; potMaand.laatste_fout = new Date().toISOString();
+    logError('pot-maand', e);
+    if (potMaand.fouten_op_rij === 3) potMaandBox('ronde', 'de ronde faalde 3 keer op rij: ' + String(e && e.message || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120));
+    return null;
+  } finally { potMaand.bezig = false; }
+}
+setInterval(function () { potMaandTik().catch(function (e) { logError('pot-maand', e); }); }, POT_MAAND_TIK_MS).unref();
 
 // ── wv2316: boekstuk Google Home Premium Advanced elke maand zelf naar André (David 3-11-2026 15:51; Ja met verse vingerafdruk 16:22) ──────
 // Ontwerp: vault "01_Ontwikkeling/Boekstuk Google Home - maandelijks zelf naar André (ontwerp 3-11-2026).md"; de logica staat in

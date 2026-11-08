@@ -18,6 +18,11 @@
  * eensgezind zijn, anders geen (dan staat de post in zijn app als niet toegewezen).
  *
  * POT-regels zijn personeelsgegevens: de telling bevat alleen aantallen en een datum, nooit een naam, bedrag of IBAN.
+ *
+ * wv2762 (8-11-2026, OVIS POT fase 3 stap 0): dezelfde stap ook voor de Kostenmaatschap (KM) en de SLOEL. Hun ING-rekeningen zijn sinds
+ * 4-11-2026 via de business-koppeling gekoppeld (posten in BANK_DIR/zakelijk.sqlite); tot dan laadde David ze met de hand (KM t/m 15-9,
+ * SLOEL t/m 8-10). Alleen de bankvorm verschilt: ING geeft de bankregels als losse velden (Naam:, Omschrijving:, IBAN:, Kenmerk:,
+ * Valutadatum:), ABN als één afschriftregel. Koppelen, grens, toewijzing en grootboek zijn gelijk; de D1-sleutel blijft per IBAN uniek.
  */
 const crypto = require('crypto');
 const { parseAbnDesc } = require('./mt940-lezer.js');
@@ -26,6 +31,16 @@ const BRON_BESTAND = 'enablebanking';
 const HERKOMST = 'enablebanking v1';           // + ' ' + vandaag; Davids eigen run heet 'regels v1 <datum>'
 const BRON = { soort: 'bankkoppeling', titel: 'ABN AMRO POT via de bankkoppeling (Enable Banking, Socev-pod)',
   opmerking: 'Posten na de laatste eigen lading, na elke bank-ronde gezet door de pod (wv815); toewijzing nagebouwd uit regels v1' };
+// wv2762: per entiteit een eigen bron (zelfde soort); POT houdt zijn titel, zodat bestaande rijen hun bron_id houden
+const BRONNEN = {
+  POT: BRON,
+  KM: { soort: 'bankkoppeling', titel: 'ING Kostenmaatschap via de bankkoppeling (Enable Banking, Socev-pod)',
+    opmerking: 'Posten na de laatste eigen lading, na elke bank-ronde gezet door de pod (wv2762); toewijzing nagebouwd uit regels v1' },
+  SLOEL: { soort: 'bankkoppeling', titel: 'ING SLOEL via de bankkoppeling (Enable Banking, Socev-pod)',
+    opmerking: 'Posten na de laatste eigen lading, na elke bank-ronde gezet door de pod (wv2762); toewijzing nagebouwd uit regels v1' },
+};
+const ENTITEITEN = Object.keys(BRONNEN);
+function entVan(e) { const x = String(e == null ? 'POT' : e); if (ENTITEITEN.indexOf(x) < 0) throw new Error('onbekende entiteit'); return x; }
 const VENSTER = 3;        // dagen: ABN-pdf en API verschillen tot 2 dagen in datum (gemeten 53 van 486; 0/1/2 dagen = 433/21/32)
 const HISTORIE = 8;       // laatste toewijzingen van dezelfde tegenpartij die eensgezind moeten zijn
 const BATCH = 20;         // posten per D1-batch
@@ -58,7 +73,27 @@ function trefwoord(t) {
 // parseAbnDesc de eerste 200 tekens van de ruwe regel; David bewaart dan '' (16 van 486 paren), wij ook (Fable wv815 #8). Kenmerk laten
 // we leeg: zijn lading vulde het maar bij een deel (110 van 486, ook waar de bank er een gaf) en zijn POT-app leest het niet.
 // Gemeten op de 486 paren (22-10): banksoort 485 gelijk (1 × iDEAL/Wero), omschrijving 486 gelijk.
-function bankTekst(p) {
+// wv2762: ING (business-koppeling) geeft de velden als losse regels: 'Naam: …', 'Omschrijving: …' (met vervolgregels zonder label),
+// 'IBAN: …', 'Kenmerk: …', 'Valutadatum: …'; kaartbetalingen en bankkosten beginnen met een regel zonder label. Omschrijving = het veld
+// Omschrijving (vervolgregels met een spatie), anders de regels zonder label plus 'Periode:'; nooit IBAN, kenmerk of machtiging.
+// Gemeten 8-11 op 336 paren met Davids eigen ING-lading: 140 exact gelijk; de rest is bij David de hele mededeling, wat de toewijzing
+// niet raakt (die gaat op tegenpartij en trefwoord, en de trefwoorden staan in het veld Omschrijving). Banksoort: zoals de bank hem noemt.
+const ING_LABEL = /^(Naam|Omschrijving|IBAN|Kenmerk|Machtiging ID|Incassant ID|Valutadatum|Pasvolgnr|Transactie|Betreft IBAN|Periode|Term|Datum\/Tijd):\s?(.*)$/;
+function ingTekst(p) {
+  const rl = (Array.isArray(p.regels) ? p.regels : []).map(function (x) { return String(x == null ? '' : x).replace(/\s+/g, ' ').trim(); }).filter(Boolean);
+  const velden = []; let cur = null;
+  rl.forEach(function (x) {
+    const m = ING_LABEL.exec(x);
+    if (m) { cur = { k: m[1], w: [m[2]] }; velden.push(cur); }
+    else if (cur) cur.w.push(x);
+    else { cur = { k: '', w: [x] }; velden.push(cur); }
+  });
+  const v = function (k) { return velden.filter(function (f) { return f.k === k; }).map(function (f) { return f.w.join(' ').trim(); }).filter(Boolean).join(' '); };
+  const oms = v('Omschrijving') || [v(''), v('Periode') ? 'Periode: ' + v('Periode') : ''].filter(Boolean).join(' ');
+  return { banksoort: String(p.banksoort || '').slice(0, 100), omschrijving: oms.slice(0, 500), kenmerk: null };
+}
+function bankTekst(p, bank) {
+  if (bank === 'ing') return ingTekst(p);
   const ruw = (Array.isArray(p.regels) ? p.regels : []).map(function (x) { return String(x == null ? '' : x); }).join(' ');
   const d = ruw.replace(/\s+/g, ' ').trim();
   if (!d) return { banksoort: '', omschrijving: '', kenmerk: null };
@@ -108,7 +143,7 @@ function wijsToe(post, oms, hist, herkomst) {
   const doelen = new Set(kand.map(doel));
   if (doelen.size !== 1) return null;
   const d = JSON.parse(doel(kand[0]));
-  if (d[0] === 'voorschot' && c(post.bedrag) < 0) return null;   // een uitgaande post is nooit een voorschot
+  if ((d[0] === 'voorschot' || d[0] === 'huur') && c(post.bedrag) < 0) return null;   // een uitgaande post is nooit een voorschot of huur (wv2762)
   let boekjaar = d[4] == null ? null : jaar(post.datum) + d[4];
   if (d[0] === 'afrekening') {   // precies één jaartal in de omschrijving: dat jaar (10/10 in Davids data; niet bij andere soorten)
     const js = Array.from(new Set((String(oms || '').match(/(?<!\d)20[1-3]\d(?!\d)/g) || []).map(Number)));
@@ -124,6 +159,7 @@ function voorstel(inv) {
   if (!inv || !isDatum(inv.vandaag)) throw new Error('vandaag ontbreekt');
   const iban = ibanNorm(inv.iban);
   if (!/^NL\d{2}[A-Z]{4}\d{10}$/.test(iban)) throw new Error('rekening ontbreekt of is geen NL-IBAN');
+  const bank = inv.bank === 'ing' ? 'ing' : 'abn';   // wv2762
   const posten = (inv.posten || []).filter(function (p) { return p && isDatum(p.datum) && p.sleutel && Number.isFinite(Number(p.bedrag)); });
   const rijen = inv.rijen || [], grootboek = inv.grootboek || {};
   const davids = rijen.filter(function (r) { return !isEigen(r); });
@@ -154,7 +190,7 @@ function voorstel(inv) {
     // Al eens door ons gezet (grootboek) en nu niet meer in D1: David haalde hem weg. Niet terugzetten (Fable wv815 diff M1).
     if (Object.prototype.hasOwnProperty.call(grootboek, d1Sleutel(iban, p.sleutel))) { t.door_david_verwijderd++; return; }
     const h = hist.get(tegenSleutel(p)) || [];
-    const tekst = bankTekst(p);
+    const tekst = bankTekst(p, bank);
     const laatste = h.length ? h[h.length - 1].r : null;
     // De groep zonder IBAN en naam (bankkosten e.d.) heeft bij David verschillende namen: alleen overnemen als ze allemaal gelijk zijn (diff K2)
     const naam = !laatste ? '' : tegenSleutel(p).indexOf('leeg') === 0 && !h.every(function (x) { return x.r.naam === laatste.naam; }) ? '' : laatste.naam == null ? '' : String(laatste.naam);
@@ -215,11 +251,12 @@ function stToewijzing(sleutel, tw) {
 // Statements met parameters, in batches van hooguit BATCH posten; elke batch noemt de sleutels die daarna in het grootboek horen.
 function statements(v, o) {
   if (!o || !isDatum(o.vandaag)) throw new Error('vandaag ontbreekt');
-  const bronSt = { sql: SQL_BRON, params: ['POT', BRON.soort, BRON.titel, o.vandaag, BRON.opmerking, 'POT', BRON.soort, BRON.titel] };
+  const E = entVan(o.entiteit), B = BRONNEN[E];   // wv2762: POT (standaard), KM of SLOEL
+  const bronSt = { sql: SQL_BRON, params: [E, B.soort, B.titel, o.vandaag, B.opmerking, E, B.soort, B.titel] };
   const werk = v.nieuw.map(function (n) {
     const r = n.rij;
-    const st = [{ sql: SQL_MUTATIE, params: [r.rekening, 'POT', r.boekdatum, r.bedrag, r.tegenrekening, r.naam, r.omschrijving, r.kenmerk, r.banksoort,
-      BRON_BESTAND, r.sleutel, 'POT', BRON.soort, BRON.titel, r.geladen_op] }];
+    const st = [{ sql: SQL_MUTATIE, params: [r.rekening, E, r.boekdatum, r.bedrag, r.tegenrekening, r.naam, r.omschrijving, r.kenmerk, r.banksoort,
+      BRON_BESTAND, r.sleutel, E, B.soort, B.titel, r.geladen_op] }];
     if (n.toewijzing) st.push(stToewijzing(r.sleutel, n.toewijzing));
     return { sleutel: r.sleutel, st: st };
   }).concat(v.herstel.map(function (h) { return { sleutel: h.sleutel, st: h.toewijzing ? [stToewijzing(h.sleutel, h.toewijzing)] : [] }; }));
@@ -233,4 +270,4 @@ function statements(v, o) {
   return batches;
 }
 
-module.exports = { voorstel, statements, rijUitD1, leesVanaf, SQL_LEES_RIJEN, SQL_LEES_REKENING, koppel, bankTekst, tegenSleutel, d1Sleutel, trefwoord, wijsToe, BRON, BRON_BESTAND, HERKOMST, VENSTER, HISTORIE, BATCH };
+module.exports = { voorstel, statements, rijUitD1, leesVanaf, SQL_LEES_RIJEN, SQL_LEES_REKENING, koppel, bankTekst, ingTekst, tegenSleutel, d1Sleutel, trefwoord, wijsToe, BRON, BRONNEN, ENTITEITEN, BRON_BESTAND, HERKOMST, VENSTER, HISTORIE, BATCH };

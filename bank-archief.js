@@ -1754,6 +1754,28 @@ function potDatahubInvoer(a, van) {
   }) };
 }
 
+// wv2762: KM en SLOEL (ING, business-koppeling sinds 4-11-2026) voor OVIS POT, uit zakelijk.sqlite; zelfde vorm als potDatahubInvoer plus
+// de banksoort zoals ING hem noemt. De rekening komt van de pod (D1 bankrekening van die entiteit), alleen via stdin; nooit in de uitvoer
+// naar een sessie of log. opgehaald = wanneer de bank-ronde de posten van deze rekening het laatst ophaalde (stand.json, door de beller).
+function zakDatahubInvoer(a, iban, van) {
+  const ib = ibanNorm(iban);
+  if (!/^NL\d{2}[A-Z]{4}\d{10}$/.test(ib)) throw new Error('geen NL-IBAN');
+  const rk = a.db.prepare('SELECT rek, iban FROM rekeningen').all().filter(function (r) { return ibanNorm(r.iban) === ib; });
+  if (rk.length !== 1) throw new Error(rk.length ? 'rekening staat meer dan eens in de zakelijke database' : 'rekening staat niet in de zakelijke database');
+  const rijen = a.db.prepare('SELECT t.nr, t.sleutel, t.datum, t.valutadatum, t.bedrag, t.tegen_iban, t.tegenpartij, t.omschrijving, t.ruwe_json FROM transacties t' +
+    " WHERE t.rek = ? AND " + POT_BOEKT + " AND t.datum IS NOT NULL AND t.herkomst_rij <> 'abn-historie' ORDER BY t.datum, t.nr").all(rk[0].rek);
+  return { iban: ib, rek: rk[0].rek, posten: rijen.map(function (r) {
+    const p = { nr: r.nr, sleutel: r.sleutel, datum: r.datum, valutadatum: r.valutadatum || null, bedrag: r.bedrag, tegen_iban: r.tegen_iban ? ibanNorm(r.tegen_iban) : null,
+      tegenpartij: r.tegenpartij || '' };
+    if (!van || r.datum >= van) {
+      p.regels = potAfschriftPost(r).regels;
+      let j = null; try { j = r.ruwe_json ? JSON.parse(r.ruwe_json) : null; } catch (e) { j = null; }
+      p.banksoort = j && j.bank_transaction_code && typeof j.bank_transaction_code.description === 'string' ? j.bank_transaction_code.description : '';
+    }
+    return p;
+  }) };
+}
+
 function stand(a) {
   const db = a.db;
   const per = db.prepare('SELECT r.rek, r.bron, r.status, r.eigenaar, r.eigenaar_herkomst, count(t.nr) n, min(t.datum) van, max(t.datum) tot, sum(t.ruwe_json IS NOT NULL) ruw' +
@@ -1789,5 +1811,5 @@ function stand(a) {
 }
 
 module.exports = { open, rekeningWeergave, rekId, rekVanId, vanWieKeuzes, vanWieKinderen, vanWieKinderenZet, labelsLees, REK_KOLOMMEN, rekeningenSync, markeerOntkoppeld, bij, historieBij, HIST_MARGE, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, herstel, regelUit, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
-  zakelijkZet, zakelijkeIbans, potRekeningen, potOverzicht, potCategorie, potAfschriftInvoer, potAfschriftMaanden, potDatahubInvoer, metaLees, metaZet, isAfgescheiden, POT, CAT_POT, LET_OP_POT,
+  zakelijkZet, zakelijkeIbans, potRekeningen, potOverzicht, potCategorie, potAfschriftInvoer, potAfschriftMaanden, potDatahubInvoer, zakDatahubInvoer, metaLees, metaZet, isAfgescheiden, POT, CAT_POT, LET_OP_POT,
   categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, reeksenBereken, vastePosten, rijenVan, rijHoort, paypalStap, paypalNaam, ppTitel, rijTekst, archiefStart, machtigingVan, naamNorm, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };
