@@ -281,7 +281,7 @@ const HTML = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Proef</tit
   // ── koppeling ──
   const srv = fs.readFileSync('server.js', 'utf8');
   toets('server.js: POST /app/omzet in APP_SLOT_VRIJ, grotere body alleen voor die route, 413 bij te groot',
-    /const APP_SLOT_VRIJ = new Set\(\['POST \/app\/omzet'/.test(srv) && /p === '\/app\/omzet' \? APP_OMZET_MAX_BODY : APP_MAX_BODY/.test(srv) && /fout === 'groot' && p === '\/app\/omzet'\) return appWeiger\(res, 413/.test(srv));
+    /const APP_SLOT_VRIJ = new Set\(\['POST \/app\/omzet'/.test(srv) && /appBody\(req, cb, req\.method === 'POST' && p === '\/app\/omzet' \? APP_OMZET_MAX_BODY : (?:[^\n]*: )?APP_MAX_BODY\)+; \}\)/.test(srv) && (srv.match(/\? APP_OMZET_MAX_BODY/g) || []).length === 1 && /fout === 'groot' && p === '\/app\/omzet'\) return appWeiger\(res, 413/.test(srv));
   toets('server.js: route, teller, /health.omzet', /route === 'POST \/app\/omzet'\) return typeof appOmzet/.test(srv) && /appTeller\('omzet', 120, 3600000\)/.test(srv) && /omzet: omzetInfo\(\)/.test(srv));
   // 28-10: appTeller('omzet') gaf TypeError (geen tellers.omzet) → elke POST 500; de teller moet een nieuwe soort zelf aanmaken
   const tel = srv.slice(srv.indexOf('function appTeller('), srv.indexOf('function appCookieKop('));
