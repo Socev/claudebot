@@ -187,6 +187,10 @@ function hypotheek(vault) {
   const tot = j.volledige_excel_reeksen && j.volledige_excel_reeksen.TOTAAL && Array.isArray(j.volledige_excel_reeksen.TOTAAL.rows) ? j.volledige_excel_reeksen.TOTAAL.rows : [];
   const verloop = tot.filter(function (r) { return r && /^\d{4}-01-01$/.test(String(r.datum)) && getal(r.restschuld) != null; })
     .map(function (r) { return { jaar: Number(String(r.datum).slice(0, 4)), restschuld: Math.round(r.restschuld) }; }).slice(0, 60);
+  // wv2716 (vermogensverloop): dezelfde reeks per maand (stand na de termijn van die maand), alleen tot en met nu; de toekomst hoort niet in een verloop
+  const nuM = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 7);
+  const reeksMaand = tot.filter(function (r) { return r && /^\d{4}-\d{2}-01$/.test(String(r.datum)) && String(r.datum).slice(0, 7) <= nuM && getal(r.restschuld) != null; })
+    .map(function (r) { return { maand: String(r.datum).slice(0, 7), restschuld: getal(r.restschuld) }; }).slice(0, 600);
   // ORV-polissen (pagina): polisnummer (wv1949), verzekeraar, kapitaal, looptijd, premie, status
   const orv = (tabel(ts, ['verzekeraar', 'kapitaal start', 'einde polis', 'status']) || []).slice(0, 10).map(function (r) {
     return { polis: schoon(r.polis, 30) || null, verzekeraar: schoon(r.verzekeraar, 40) || null, verzekerde_nemer: schoon(r.nemer, 20) || null, kapitaal_start: nlGetal(r['kapitaal start']),
@@ -203,6 +207,7 @@ function hypotheek(vault) {
     eerste_renteherziening: rv ? { datum: rv.rentevast_tm, deel: rv.deel, doel: rv.doel, restschuld: rv.restschuld_bank, rente: rv.rente_bank } : null,
     bevindingen: (Array.isArray(j.bevindingen) ? j.bevindingen : []).slice(0, 12).map(function (b) { return schoon(b, 300); }),
     verloop: verloop,
+    reeks_maand: reeksMaand,
     orv: orv,
   };
 }
@@ -216,6 +221,16 @@ function woninglening(j) {
     eerste_termijn: datumIso(c.eerste_termijn), laatste_termijn: datumIso(c.laatste_termijn), doel: c.doel ? 'verbouwing zolder en badkamer' : null,
     jaarrekening: Object.keys(jr).filter(function (k) { return /^\d{4}$/.test(k); }).sort().map(function (k) { return { jaar: Number(k), stand: getal(jr[k]) }; }),
   };
+}
+// wv2716 (vermogensverloop): de stand van de rekening-courant bij de Holding per jaarrekening (DGA-json rekening_courant.jaarrekening,
+// rc_dga_eind) en de beginstand van het eerste jaar (eind − mutatie, alleen als beide er staan). Het deel bij Tolgaarde staat er niet per jaar in.
+function rcJaarrekening(j) {
+  const jr = j && j.rekening_courant && j.rekening_courant.jaarrekening;
+  if (!jr || typeof jr !== 'object') return null;
+  const jaren = Object.keys(jr).filter(function (k) { return /^\d{4}$/.test(k) && jr[k] && getal(jr[k].rc_dga_eind) != null; }).sort();
+  if (!jaren.length) return null;
+  const e = jr[jaren[0]], begin = getal(e.rc_dga_mutatie) != null ? getal(e.rc_dga_eind - e.rc_dga_mutatie) : null;
+  return { eerste_jaar: Number(jaren[0]), begin: begin, standen: jaren.map(function (k) { return { jaar: Number(k), stand: getal(jr[k].rc_dga_eind) }; }) };
 }
 
 // ── Belasting ──
@@ -277,6 +292,7 @@ function dga(vault) {
     rc_contract: j ? { maximum: getal(c.maximum), rente_pct: getal(c.rente_pct), rentevrij_onder: /17\.?500/.test(String(c.rentegrondslag || '')) ? 17500 : null,
       aflossing: schoon(c.aflossing, 80) || null, getekend: datumIso(c.getekend) } : null,
     woninglening: j ? woninglening(j) : null,
+    rc_jaarrekening: j ? rcJaarrekening(j) : null,   // wv2716
     planning: planning,
     dividend: (j && Array.isArray(j.dividend) ? j.dividend : []).slice(0, 20).map(function (d) {
       return { datum: datumIso(d.datum), bruto: getal(d.bruto), dividendbelasting: getal(d.dividendbelasting_15pct), netto_betaald: getal(d.netto_betaald), verschil: getal(d.verschil) };

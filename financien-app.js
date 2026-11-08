@@ -148,6 +148,12 @@ const VAN_WIE_GROEP = { David: 'eigen', Cynthia: 'cynthia', gedeeld: 'samen', 'G
 const GROEP_TITEL = { eigen: 'David', cynthia: 'Cynthia', kind: 'Kind (nog niet gekozen)', samen: 'David en/of Cynthia (gedeeld)', gambia: 'Gambia-hulp', extern: 'Extern', onbekend: 'Eigenaar onbekend' };
 const VAN_WIE_TEKST = { gedeeld: 'David en/of Cynthia (gedeeld)', extern: 'Extern (niet van ons)' };
 function woordIn(tekst, naam) { const t = ' ' + norm(tekst).replace(/[^a-z0-9]+/g, ' ') + ' ', n = norm(naam).replace(/[^a-z0-9]+/g, ' ').trim(); return !!n && t.indexOf(' ' + n + ' ') >= 0; }
+// wv2716: de groep van één rekening (eigenaar uit het archief, "van wie" wint behalve bij POT); ook voor het vermogensverloop (financien-vermogen.js)
+function saldoGroep(r) {
+  let groep = SALDO_GROEP[String(r.eigenaar || '').toLowerCase()] || 'onbekend';
+  if (groep !== 'pot' && r.van_wie) groep = VAN_WIE_GROEP[r.van_wie] || 'persoon:' + (veilig(r.van_wie, 30) || '?');
+  return groep;
+}
 function blokSaldi(a, rijen) {
   const A = require('./bank-archief.js');
   const st = new Map((rijen || []).map(function (r) { return [r.rek, r]; }));
@@ -158,9 +164,7 @@ function blokSaldi(a, rijen) {
   const uit = [], pot = [];
   let zonder = 0;
   reks.forEach(function (r) {
-    const eig = String(r.eigenaar || '').toLowerCase(), s = st.get(r.rek);
-    let groep = SALDO_GROEP[eig] || 'onbekend';
-    if (groep !== 'pot' && r.van_wie) groep = VAN_WIE_GROEP[r.van_wie] || 'persoon:' + (veilig(r.van_wie, 30) || '?');
+    const s = st.get(r.rek), groep = saldoGroep(r);
     let j = null;
     try { j = s ? JSON.parse(s.json) : null; } catch (e) { j = null; }
     if (!j || getal(j.geboekt) === null) { zonder++; return; }
@@ -704,4 +708,4 @@ function briefingTekst(nieuw) {
   return r.join('\n');
 }
 
-module.exports = { bereken, maandbriefUit, blokSaldi, leesLinks, linkGeldig, linkVoor, LINK_HOSTS, LINK_PAGINA, plusMaanden, maandPlus, briefing, briefingNieuw, briefingTekst, briefingDag, werkdag, feestdag, pasen };
+module.exports = { bereken, maandbriefUit, blokSaldi, saldoGroep, leesLinks, linkGeldig, linkVoor, LINK_HOSTS, LINK_PAGINA, plusMaanden, maandPlus, briefing, briefingNieuw, briefingTekst, briefingDag, werkdag, feestdag, pasen };

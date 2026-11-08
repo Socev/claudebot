@@ -328,11 +328,12 @@ function leesWoning(vault, FV) {
   return null;
 }
 function woningUit(t, FV) {
-  const rij = (FV.tabel(FV.tabellen(t), ['peildatum', 'marktwaarde', 'na verbouwing']) || []).map(function (r) {
+  const alle = (FV.tabel(FV.tabellen(t), ['peildatum', 'marktwaarde', 'na verbouwing']) || []).map(function (r) {
     const d = FV.datumIso((/(\d{1,2}-\d{1,2}-\d{4})/.exec(r.peildatum) || [])[1]), nv = FV.nlGetal(r['na verbouwing']), mw = FV.nlGetal(r.marktwaarde);
     return { datum: d, waarde: nv != null && nv > 10000 ? nv : mw };
-  }).filter(function (r) { return r.datum && r.waarde > 10000; }).sort(function (x, y) { return x.datum < y.datum ? -1 : 1; }).pop();
-  return rij ? { waarde: rij.waarde, peildatum: rij.datum } : null;
+  }).filter(function (r) { return r.datum && r.waarde > 10000; }).sort(function (x, y) { return x.datum < y.datum ? -1 : 1; });
+  const rij = alle[alle.length - 1];   // wv2716: alle taxaties mee (trap in het vermogensverloop); het punt blijft de laatste
+  return rij ? { waarde: rij.waarde, peildatum: rij.datum, taxaties: alle } : null;
 }
 function leesHolding(vault, FV) {
   const t = fs.readFileSync(path.join(vault, P_HOLD), 'utf8');
@@ -340,8 +341,11 @@ function leesHolding(vault, FV) {
   if (!tab) return null;
   const jaren = tab.kop.map(function (k) { return /^\d{4}$/.test(k) ? Number(k) : null; });
   const ev = tab.rijen.find(function (r) { return /^eigen vermogen$/i.test(FV.schoon(r[0])); }), lm = tab.rijen.find(function (r) { return /^liquide middelen$/i.test(FV.schoon(r[0])); });
+  // wv2716: alle jaren mee (trap in het vermogensverloop); het punt blijft het laatste jaar
+  const jaarlijst = [];
+  for (let i = 0; i < jaren.length; i++) if (jaren[i] && FV.nlGetal(ev[i]) != null) jaarlijst.push({ jaar: jaren[i], eigen_vermogen: FV.nlGetal(ev[i]) });
   for (let i = jaren.length - 1; i >= 0; i--) {
-    if (jaren[i] && FV.nlGetal(ev[i]) != null) return { jaar: jaren[i], eigen_vermogen: FV.nlGetal(ev[i]), liquide: lm ? FV.nlGetal(lm[i]) : null, bron: P_HOLD };
+    if (jaren[i] && FV.nlGetal(ev[i]) != null) return { jaar: jaren[i], eigen_vermogen: FV.nlGetal(ev[i]), liquide: lm ? FV.nlGetal(lm[i]) : null, bron: P_HOLD, jaren: jaarlijst };
   }
   return null;
 }
@@ -350,6 +354,48 @@ function box2(bedrag, jaar) {
   if (!t || !(bedrag > 0)) return null;
   const bel = Math.min(bedrag, t.grens) * t.laag + Math.max(0, bedrag - t.grens) * t.hoog;
   return { jaar: jaar, belasting: Math.round(bel), netto: Math.round(bedrag - bel), grens: t.grens, laag: t.laag, hoog: t.hoog, bron: TARIEVEN.box2_bron };
+}
+
+// ── wv2716: liquide en het vermogenspunt los, zodat Overzicht en het vermogensverloop (financien-vermogen.js) hetzelfde punt rekenen ──
+// groep uit blokSaldi (financien-app.js): vrij = David + gedeeld; kinderen en Gambia apart, niet in de buffer of het vermogen
+function groepVan(g) { return g === 'eigen' || g === 'samen' ? 'vrij' : g === 'gambia' ? 'geoormerkt' : g === 'kind' || /^persoon:/.test(g) ? 'kinderen' : 'anders'; }
+function liquide(saldi) {
+  // liquide uit het blok saldi (financien-app.js blokSaldi): vrij = David + gedeeld; kinderen en Gambia apart, niet in de buffer of het vermogen
+  const sal = saldi && Array.isArray(saldi.rekeningen) ? saldi.rekeningen.filter(function (r) { return r.valuta === 'EUR' && typeof r.saldo === 'number'; }) : null;
+  const liq = { vrij: 0, geoormerkt: 0, kinderen: 0, anders: 0, rekeningen: { vrij: [], geoormerkt: [], kinderen: [], anders: [] }, stand_van: null };
+  (sal || []).forEach(function (r) {
+    const g = groepVan(r.groep);
+    liq[g] += r.saldo; liq.rekeningen[g].push({ naam: r.naam, saldo: r.saldo, stand_van: r.stand_van || null });
+    if (r.stand_van && (!liq.stand_van || r.stand_van < liq.stand_van)) liq.stand_van = r.stand_van;   // de oudste stand telt
+  });
+  return { sal: sal, liq: liq };
+}
+// o: { v (FV.lees), sal, liq (liquide), vault, FV, nu, blok }; geeft { prive, holding } zoals uit.vermogen, met _woning en _hold voor het verloop (niet in het antwoord)
+function vermogenPunt(o) {
+  const v = o.v || {}, hyp = v.hypotheek || null, dga = v.dga || null, sal = o.sal, liq = o.liq, nu = o.nu, FV = o.FV;
+  const blok = o.blok || function (n, f) { try { return f(); } catch (e) { return null; } };
+  const woning = blok('woning', function () { return leesWoning(o.vault, FV); });
+  const hold = blok('holding', function () { return leesHolding(o.vault, FV); });
+  const woz = v.belasting && Array.isArray(v.belasting.woning) ? v.belasting.woning.filter(function (r) { return r.woz > 0; }).pop() : null;
+  const wl = dga && dga.woninglening && dga.woninglening.jaarrekening && dga.woninglening.jaarrekening.length ? dga.woninglening.jaarrekening[dga.woninglening.jaarrekening.length - 1] : null;
+  const rc = dga && dga.rc && dga.rc.totaal != null ? dga.rc.totaal : null;
+  const schuld = hyp && hyp.bank && hyp.bank.restschuld != null ? hyp.bank.restschuld : null;
+  const delen = [
+    sal ? { tekst: 'Vrij beschikbaar op de rekeningen', bedrag: r2(liq.vrij), bron: 'bankstand', op: liq.stand_van ? liq.stand_van.slice(0, 10) : null } : null,
+    woning ? { tekst: 'Woning (laatste taxatie, schatting)', bedrag: woning.waarde, bron: woning.bron, op: woning.peildatum } : null,
+    schuld != null ? { tekst: 'Hypotheek (bankstand)', bedrag: -schuld, bron: hyp.bron.pagina, op: hyp.bron.bank_op } : null,
+    wl ? { tekst: 'Woninglening van de Holding', bedrag: -wl.stand, bron: dga.bron.data || dga.bron.pagina, op: wl.jaar + '-12-31' } : null,
+    rc != null ? { tekst: 'Rekening-courant met Holding en Tolgaarde (schuld)', bedrag: -rc, bron: dga.bron.pagina, op: dga.bron.pagina_bijgewerkt || null } : null,
+  ].filter(Boolean);
+  const mist = [!sal && 'saldi', !woning && 'woning', schuld == null && 'hypotheek', !wl && 'woninglening', rc == null && 'rekening-courant'].filter(Boolean);
+  return {
+    prive: { bedrag: mist.length ? null : r2(delen.reduce(function (s, x) { return s + x.bedrag; }, 0)), delen: delen, ontbreekt: mist,
+      woz: woz ? { jaar: woz.jaar, waarde: woz.woz } : null,
+      niet_meegeteld: sal ? [{ tekst: 'Kinderrekeningen', bedrag: r2(liq.kinderen) }, { tekst: 'Gambia-rekeningen (geoormerkt)', bedrag: r2(liq.geoormerkt) }] : [],
+      uitleg: 'Woning op de laatste taxatie (een schatting, geen marktwaarde van nu); de Holding telt hier niet mee.' },
+    holding: hold ? { eigen_vermogen: hold.eigen_vermogen, jaar: hold.jaar, liquide: hold.liquide, bron: hold.bron, box2: box2(hold.eigen_vermogen, Math.max(hold.jaar + 1, Number(nu.slice(0, 4)))),
+      rc_schuld: rc, uitleg: 'Boekwaarde uit de laatste jaarrekening, geen marktwaarde. "Na box 2" is indicatief: alles in één jaar uitgekeerd, één aanmerkelijk belang, zonder partnerverdeling; laat het toetsen door je adviseur. Je schuld aan de Holding (rekening-courant, woninglening) zit in dit eigen vermogen als vordering.' } : null,
+  };
 }
 
 // ── stap 2: het overzicht ──
@@ -392,15 +438,7 @@ function overzicht(A, a, o) {
   uit.spaarquote = n12 && inkomen > 0 ? { pct: Math.round((inkomen - leven) / inkomen * 1000) / 10, zonder_eenmalig: Math.round((inkomen - leven + eenmalig) / inkomen * 1000) / 10,
     regels: [{ tekst: 'Inkomen, ' + n12 + ' maanden', bedrag: r2(inkomen), filter: f({ stroom: 'inkomen' }) }, { tekst: 'Leven, ' + n12 + ' maanden', bedrag: r2(-leven), filter: f({ stroom: 'leven' }) }],
     uitleg: '(inkomen − leven) ÷ inkomen. Aflossen telt hier als sparen: het blijft van jullie.' } : null;
-  // liquide uit het blok saldi (financien-app.js blokSaldi): vrij = David + gedeeld; kinderen en Gambia apart, niet in de buffer of het vermogen
-  const sal = o.saldi && Array.isArray(o.saldi.rekeningen) ? o.saldi.rekeningen.filter(function (r) { return r.valuta === 'EUR' && typeof r.saldo === 'number'; }) : null;
-  const groepVan = function (g) { return g === 'eigen' || g === 'samen' ? 'vrij' : g === 'gambia' ? 'geoormerkt' : g === 'kind' || /^persoon:/.test(g) ? 'kinderen' : 'anders'; };
-  const liq = { vrij: 0, geoormerkt: 0, kinderen: 0, anders: 0, rekeningen: { vrij: [], geoormerkt: [], kinderen: [], anders: [] }, stand_van: null };
-  (sal || []).forEach(function (r) {
-    const g = groepVan(r.groep);
-    liq[g] += r.saldo; liq.rekeningen[g].push({ naam: r.naam, saldo: r.saldo, stand_van: r.stand_van || null });
-    if (r.stand_van && (!liq.stand_van || r.stand_van < liq.stand_van)) liq.stand_van = r.stand_van;   // de oudste stand telt
-  });
+  const L = liquide(o.saldi), sal = L.sal, liq = L.liq;   // wv2716: los, zodat het vermogensverloop hetzelfde punt gebruikt
   const levenZonder = n12 ? (leven - eenmalig) / n12 : null;
   uit.buffer = sal && levenZonder > 0 ? { maanden: Math.round(liq.vrij / levenZonder * 10) / 10, liquide: r2(liq.vrij), leven_per_maand: r2(levenZonder), stand_van: liq.stand_van,
     rekeningen: liq.rekeningen.vrij.sort(function (x, y) { return y.saldo - x.saldo; }),
@@ -409,29 +447,8 @@ function overzicht(A, a, o) {
     niet_meegeteld: [{ tekst: 'Kinderrekeningen', bedrag: r2(liq.kinderen), aantal: liq.rekeningen.kinderen.length }, { tekst: 'Gambia-rekeningen (geoormerkt)', bedrag: r2(liq.geoormerkt), aantal: liq.rekeningen.geoormerkt.length }]
       .concat(liq.anders ? [{ tekst: 'Overige rekeningen (eigenaar onbekend)', bedrag: r2(liq.anders), aantal: liq.rekeningen.anders.length }] : []),
     uitleg: 'Saldo van de rekeningen van David en de gedeelde rekeningen, gedeeld door wat jullie gemiddeld per maand uitgeven zonder de eenmalige grote posten.' } : null;
-  // vermogen: privé en Holding apart
-  const woning = blok('woning', function () { return leesWoning(o.vault, FV); });
-  const hold = blok('holding', function () { return leesHolding(o.vault, FV); });
-  const woz = v.belasting && Array.isArray(v.belasting.woning) ? v.belasting.woning.filter(function (r) { return r.woz > 0; }).pop() : null;
-  const wl = dga && dga.woninglening && dga.woninglening.jaarrekening && dga.woninglening.jaarrekening.length ? dga.woninglening.jaarrekening[dga.woninglening.jaarrekening.length - 1] : null;
-  const rc = dga && dga.rc && dga.rc.totaal != null ? dga.rc.totaal : null;
-  const schuld = hyp && hyp.bank && hyp.bank.restschuld != null ? hyp.bank.restschuld : null;
-  const delen = [
-    sal ? { tekst: 'Vrij beschikbaar op de rekeningen', bedrag: r2(liq.vrij), bron: 'bankstand', op: liq.stand_van ? liq.stand_van.slice(0, 10) : null } : null,
-    woning ? { tekst: 'Woning (laatste taxatie, schatting)', bedrag: woning.waarde, bron: woning.bron, op: woning.peildatum } : null,
-    schuld != null ? { tekst: 'Hypotheek (bankstand)', bedrag: -schuld, bron: hyp.bron.pagina, op: hyp.bron.bank_op } : null,
-    wl ? { tekst: 'Woninglening van de Holding', bedrag: -wl.stand, bron: dga.bron.data || dga.bron.pagina, op: wl.jaar + '-12-31' } : null,
-    rc != null ? { tekst: 'Rekening-courant met Holding en Tolgaarde (schuld)', bedrag: -rc, bron: dga.bron.pagina, op: dga.bron.pagina_bijgewerkt || null } : null,
-  ].filter(Boolean);
-  const mist = [!sal && 'saldi', !woning && 'woning', schuld == null && 'hypotheek', !wl && 'woninglening', rc == null && 'rekening-courant'].filter(Boolean);
-  uit.vermogen = {
-    prive: { bedrag: mist.length ? null : r2(delen.reduce(function (s, x) { return s + x.bedrag; }, 0)), delen: delen, ontbreekt: mist,
-      woz: woz ? { jaar: woz.jaar, waarde: woz.woz } : null,
-      niet_meegeteld: sal ? [{ tekst: 'Kinderrekeningen', bedrag: r2(liq.kinderen) }, { tekst: 'Gambia-rekeningen (geoormerkt)', bedrag: r2(liq.geoormerkt) }] : [],
-      uitleg: 'Woning op de laatste taxatie (een schatting, geen marktwaarde van nu); de Holding telt hier niet mee.' },
-    holding: hold ? { eigen_vermogen: hold.eigen_vermogen, jaar: hold.jaar, liquide: hold.liquide, bron: hold.bron, box2: box2(hold.eigen_vermogen, Math.max(hold.jaar + 1, Number(nu.slice(0, 4)))),
-      rc_schuld: rc, uitleg: 'Boekwaarde uit de laatste jaarrekening, geen marktwaarde. "Na box 2" is indicatief: alles in één jaar uitgekeerd, één aanmerkelijk belang, zonder partnerverdeling; laat het toetsen door je adviseur. Je schuld aan de Holding (rekening-courant, woninglening) zit in dit eigen vermogen als vordering.' } : null,
-  };
+  // vermogen: privé en Holding apart (wv2716: in vermogenPunt, ook het laatste punt van het vermogensverloop)
+  uit.vermogen = vermogenPunt({ v: v, sal: sal, liq: liq, vault: o.vault, FV: FV, nu: nu, blok: blok });
   // trend: 24 maanden vrij per maand (alleen volledige maanden; woning en Holding niet als maandtrend, review ZOU 1)
   uit.trend = vol.slice().reverse().map(function (m) {
     const s = pm.get(m) || {};
@@ -605,5 +622,5 @@ function regelsHerleiden(a) {
   return uit;
 }
 
-module.exports = { boekingen: boekingen, regelsHerleiden: regelsHerleiden, tpWoorden: tpWoorden, zonderIban: zonderIban, overzicht: overzicht, boekingenLijst: boekingenLijst, stroomZet: stroomZet, indelen: indelen, sleutelVan: sleutelVan, idVan: idVan, box2: box2,
+module.exports = { liquide: liquide, vermogenPunt: vermogenPunt, leesWoning: leesWoning, leesHolding: leesHolding, groepVan: groepVan, boekingen: boekingen, regelsHerleiden: regelsHerleiden, tpWoorden: tpWoorden, zonderIban: zonderIban, overzicht: overzicht, boekingenLijst: boekingenLijst, stroomZet: stroomZet, indelen: indelen, sleutelVan: sleutelVan, idVan: idVan, box2: box2,
   STROMEN: STROMEN, SUBSOORT: SUBSOORT, TARIEVEN: TARIEVEN, EENMALIG_GRENS: EENMALIG_GRENS, EIGENAREN: EIGENAREN, uitgaven: uitgaven, mediaan: mediaan };

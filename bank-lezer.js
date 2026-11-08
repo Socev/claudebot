@@ -1414,6 +1414,14 @@ const opdrachten = {
     try { return Object.assign({ ok: true }, require(path.join(__dirname, 'financien-reis.js')).labelZet(x.A, x.a, { reizen: q.lijst, reis: String(q.reis || ''), nr: q.nr, keuze: q.keuze })); }
     catch (e) { throw new Weigering(e.message); }
   },
+  // wv2716 (idee 1 uit Sure): vermogensverloop per maand sinds 2016 (financien-vermogen.js); alleen lezen: archief, bewaarde standen, vault
+  async 'app-vermogen'() {
+    const x = archiefKlaar();
+    let saldi = null; try { saldi = db().prepare('SELECT rek, json, opgehaald FROM saldo').all(); } catch (e) { saldi = null; }
+    try { return require(path.join(__dirname, 'financien-vermogen.js')).verloop(x.A, x.a, { nu: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), saldiRijen: saldi || [],
+      vault: process.env.VAULT_DIR || '/opt/data/AI_SecondBrain' }); }
+    catch (e) { throw new Weigering(e.message); }
+  },
   // wv2292: de gezinsleden die in Saldi als "van wie" te kiezen zijn. Alleen machinekamer, alleen via de CLI (stdin {kinderen: [...]}),
   // niet via /smal/bank of de App; de namen staan alleen in het archief (meta), nooit in de code.
   async gezin() {
