@@ -3638,6 +3638,61 @@ function reqPath(req) {
 const TANK_CACHE_MS = 5 * 60 * 1000;
 let tankCache = { tijd: 0, data: null };
 
+// ── wv2748 (idee 38, inlogverloop-wachter, 8-11-2026) ─────────────────────────────────────
+// WAAROM. Beide Claude-inlogs zijn langlevende `claude setup-token`-tokens (± 1 jaar; account 1 sinds 19-8-2026, account 2 sinds
+// 22-10-2026). De einddatum is niet uit te lezen (gemeten 8-11 met CLI 2.1.318: `claude auth status` geeft loginExpiresAt null en
+// noemt ook een nep-token 'ingelogd'). Zonder dit wachtertje viel een verlopen of ingetrokken token stil weg: meetTank schreef geen
+// rij, de tikker wachtte op 'geen verse quotummeting' en niemand zei waarom. De tankmeting gebruikt het token toch al (account 1 ± elk
+// half uur, account 2 elke 10 min); een 401 daar is het echte, specifieke signaal (gemeten: authentication_error, 'OAuth access token
+// is invalid'). Bij een 401: stand in /health (accounts.inlog), één box-rij per dag, en na TOKEN_DAVID_NA_MS aanhoudend één bericht aan
+// David (niet tussen 23 en 7 uur; dan het eerste na 7 uur). Een geslaagde meting zet de stand terug. Alleen op de primaire, echte kant.
+const TOKEN_DAVID_NA_MS = (!SERVER_ECHT && Number(process.env.TOKEN_DAVID_NA_PROEF_MS) >= 0 && process.env.TOKEN_DAVID_NA_PROEF_MS) ? Number(process.env.TOKEN_DAVID_NA_PROEF_MS) : 30 * 60 * 1000;
+const tokenStaat = { 1: null, 2: null };
+function tokenMeldMag() { return (SERVER_ECHT || !!process.env.TOKEN_WACHT_PROEF) && rolPrimair(); }
+function tokenGeweigerd(account, http, soort) {
+  const nu = Date.now();
+  const s = tokenStaat[account] || (tokenStaat[account] = { sinds: nu, box_dag: null, david_gemeld: false });
+  s.laatst = nu; s.http = http; s.soort = String(soort || '').slice(0, 60);
+  if (!tokenMeldMag()) return;
+  const dag = new Date(nu).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const sinds = new Date(s.sinds).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+  if (s.box_dag !== dag) {
+    s.box_dag = dag;
+    ovisBoxRij('\n## [direct] ' + new Date(nu).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16) + ' — Claude-inlog account ' + account +
+      ' geweigerd (http ' + http + ', automatisch)\n- status: open\n- van: pod server.js (wv2748, inlogverloop-wachter in meetTank; hooguit 1×/dag)\n' +
+      '- gemeten: de tankmeting met het token van account ' + account + ' krijgt sinds ' + sinds + ' http ' + http + ' (' + s.soort + '); /health accounts.inlog toont de stand.\n' +
+      '- gevolg als er niets gebeurt: ' + (account === 1 ? 'Socev, de app, de machinekamer en de nachtrondes denken niet meer (allemaal account 1).' :
+        'agents vallen terug op account 1 en eten Davids reserve op.') + ' David krijgt na ' + Math.round(TOKEN_DAVID_NA_MS / 60000) + ' min één bericht.\n' +
+      '- voorstel: nieuw token met `claude setup-token` (' + (account === 1 ? 'Davids eigen Claude-account' : 'drsocev@gmail.com') + ') → kluis ' +
+      (account === 1 ? '`claude_code_oauth_token` + podherstart' : '`claude_oauth_token_2` (geen herstart)') + '; Sleutelregister vervangen_op bijwerken.\n');
+  }
+  const uur = Number(new Date(nu).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false }));
+  if (!s.david_gemeld && nu - s.sinds >= TOKEN_DAVID_NA_MS && uur >= 7 && uur < 23) {
+    s.david_gemeld = true;
+    const hm = new Date(s.sinds).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const tekst = account === 1
+      ? 'Claude weigert sinds ' + hm + ' de inlog van Socev (je eigen abonnement): Socev, de app en de nachtrondes staan stil. Maak op je laptop een nieuw token met "claude setup-token" (ingelogd met je eigen Claude-account), zet het in Sleutelbos bij claude_code_oauth_token en herstart daarna de pod in Olares.'
+      : 'Claude weigert sinds ' + hm + ' de inlog van het tweede abonnement (drsocev@gmail.com); de achtergrondagents draaien nu op je eigen abonnement. Is dat abonnement nog actief, maak dan een nieuw token met "claude setup-token" (ingelogd als drsocev@gmail.com) en zet het in Sleutelbos bij claude_oauth_token_2; herstarten hoeft niet.';
+    try {
+      const k = spawn('python3', [(!SERVER_ECHT && process.env.TOKEN_WACHT_PROEF) || '/opt/data/mk-scripts/bericht.py', '--klasse', 'normaal', '--sleutel', 'inlog-account-' + account, tekst],
+        { detached: true, stdio: 'ignore', env: process.env });
+      k.on('error', function (e) { logError('inlog-david', e); });
+      k.unref();
+    } catch (e) { logError('inlog-david', e); }
+  }
+}
+function tokenHersteld(account) {
+  const s = tokenStaat[account];
+  if (!s) return;
+  tokenStaat[account] = null;
+  schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'inlog-hersteld', account: account, sinds: new Date(s.sinds).toISOString(), david_gemeld: s.david_gemeld }));
+}
+function tokenInfo() {
+  const uit = {};
+  [1, 2].forEach(function (a) { const s = tokenStaat[a]; uit[a] = s ? { geweigerd_sinds: new Date(s.sinds).toISOString(), laatst: new Date(s.laatst).toISOString(), http: s.http, soort: s.soort, david_gemeld: s.david_gemeld } : null; });
+  return uit;
+}
+
 async function meetTank(account) {
   // wv781: account 2 (tweede Max-abonnement) meet met zijn eigen token en schrijft in machinekamer.tankmeting_2
   const tw = account === 2;
@@ -3660,6 +3715,13 @@ async function meetTank(account) {
   } catch (e) {
     return { ok: false, fout: 'call mislukt: ' + String(e && e.message || e).slice(0, 160) };
   }
+  // wv2748: een geweigerde inlog is geen 'geen headers' maar een eigen, gemelde fout (zie tokenGeweigerd).
+  if (r.status === 401) {
+    let soort = 'authentication_error';
+    try { const j = JSON.parse(await r.text()); soort = (j && j.error && (j.error.type + ': ' + String(j.error.message || ''))) || soort; } catch (e) {}
+    tokenGeweigerd(tw ? 2 : 1, 401, soort);
+    return { ok: false, account: tw ? 2 : 1, fout: 'inlog geweigerd (http 401)', http: 401 };
+  }
   const h = (n) => r.headers.get('anthropic-ratelimit-unified-' + n);
   const getal = (n) => { const v = h(n); return v === null ? null : Number(v); };
   const moment = (n) => { const v = getal(n); return v ? new Date(v * 1000).toISOString() : null; };
@@ -3670,6 +3732,7 @@ async function meetTank(account) {
   if (getal('7d-utilization') === null) {
     return { ok: false, fout: 'geen rate-limit-headers', http: r.status };
   }
+  tokenHersteld(tw ? 2 : 1);
   const benut7 = getal('7d-utilization');
   const reset7iso = moment('7d-reset');
   const uit = {
@@ -3837,7 +3900,7 @@ function accountInfo() {
   const stand = accountStand();
   return { agents_op: stand.agents, stand_bron: stand.bron, token2: account2Klaar(), token2_fout: account2Klaar() ? null : account2.fout,
     bezwaar2: account2Bezwaar(), tank2: (t && t.ok) ? { week: t.zeven_dagen.benut, vijf_uur: t.vijf_uur.benut, status: t.status,
-      minuten_oud: Math.round((Date.now() - account2Tank.tijd) / 60000) } : null, lopend: lopend };
+      minuten_oud: Math.round((Date.now() - account2Tank.tijd) / 60000) } : null, lopend: lopend, inlog: tokenInfo() };   // wv2748: inlog 1/2
 }
 // Meting van account 2 elke 10 minuten (wegschrijven alleen op de primaire kant; meetTank toetst dat zelf). Geeft de tikker zijn verse
 // meting in machinekamer.tankmeting_2 zonder n8n-wijziging; een mislukte meting laat de vorige staan.

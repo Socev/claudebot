@@ -40,9 +40,11 @@ setTimeout(() => {
 `, { mode: 0o755 });
 
 const rapporten = [];
-let week1 = '0.40', tankRijen = [], koppen = 'beide';   // koppen: beide | zonder5h (Anthropic sinds 31-10-2026) | alleen7d | zonder7d   // nep-tank van account 1 (headers zoals /v1/messages) en wat de pod naar de RPC's schrijft
+let week1 = '0.40', tankRijen = [], koppen = 'beide', weiger = new Set();   // koppen: beide | zonder5h (Anthropic sinds 31-10-2026) | alleen7d | zonder7d   // nep-tank van account 1 (headers zoals /v1/messages) en wat de pod naar de RPC's schrijft
 const hook = http.createServer((req, res) => { let b = ''; req.on('data', (c) => b += c); req.on('end', () => {
   if (req.url === '/v1/messages') {
+    const tokAcc = /NEP2/.test(String(req.headers.authorization)) ? 2 : 1;   // wv2748: inlog geweigerd per account
+    if (weiger.has(tokAcc)) { res.writeHead(401, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'OAuth access token is invalid.' } })); }
     const r7 = Math.floor(Date.now() / 1000) + 3 * 86400;
     const k = { 'anthropic-ratelimit-unified-5h-utilization': '0.10', 'anthropic-ratelimit-unified-7d-utilization': week1,
       'anthropic-ratelimit-unified-7d-reset': String(r7), 'anthropic-ratelimit-unified-5h-reset': String(r7 - 86400), 'anthropic-ratelimit-unified-status': 'allowed',
@@ -197,6 +199,44 @@ function stop(srv) { try { process.kill(-srv.p.pid, 'SIGKILL'); } catch (e) {} }
     const v1 = await agent(v, 'SLEUTEL:va'); await rapportVoor(v1.job_id, 15000);
     toets('E env CLAUDE_AGENTS_ACCOUNT=1 wint', (spawns().find((x) => x.sleutel === 'va') || {}).acc === 1);
     stop(v);
+
+    // I. wv2748 inlogverloop-wachter: 401 op de tankmeting -> fout 'inlog geweigerd', /health accounts.inlog, box-rij 1x/dag, bericht aan David
+    //    (TOKEN_DAVID_NA_PROEF_MS 0, buiten 23-7 uur); geslaagde meting zet de stand terug. Niets geschreven naar mk_tank_schrijf bij 401.
+    const berichtLog = path.join(W, 'bericht.log');
+    fs.writeFileSync(path.join(W, 'bin', 'nep-bericht'), 'import json, sys\nopen(' + JSON.stringify(berichtLog) + ', "a").write(json.dumps(sys.argv[1:]) + "\\n")\n', { mode: 0o755 });   // de pod start het met python3
+    const iw = maakServer('s7', vrijePoort(), { CLAUDE_OAUTH_TOKEN_2: T2, TOKEN_WACHT_PROEF: path.join(W, 'bin', 'nep-bericht'), TOKEN_DAVID_NA_PROEF_MS: '0' }); alle.push(iw);
+    fs.mkdirSync(path.join(iw.d, 'vault', '00_Systeem', 'Meldingen'), { recursive: true });
+    fs.copyFileSync('vault-veilig.js', path.join(iw.d, 'vault-veilig.js'));   // ovisBoxRij laadt hem naast server.js
+    fs.writeFileSync(path.join(iw.d, 'vault', '00_Systeem', 'Meldingen', 'machinekamer.md'), '# Box\n\n## [direct] 2026-11-01 10:00 — oude rij\n- status: open\n');
+    await wachtOp(iw);
+    weiger = new Set([1, 2]); tankRijen = [];
+    const i1 = await req(iw, 'GET', '/tank?verversen=1');
+    const i2 = await req(iw, 'GET', '/tank?account=2&verversen=1');
+    await req(iw, 'GET', '/tank?verversen=1');   // tweede 401 op dezelfde dag: geen tweede box-rij, geen tweede bericht
+    toets('I 401 account 1: 503, fout inlog geweigerd', i1._status === 503 && i1.ok === false && i1.http === 401 && /inlog geweigerd/.test(i1.fout), JSON.stringify(i1));
+    toets('I 401 account 2: 503, fout inlog geweigerd', i2._status === 503 && i2.account === 2 && /inlog geweigerd/.test(i2.fout), JSON.stringify(i2));
+    toets('I 401: niets naar mk_tank_schrijf', !tankRijen.length, JSON.stringify(tankRijen));
+    h = await req(iw, 'GET', '/health');
+    const inl = h.accounts && h.accounts.inlog;
+    toets('I /health accounts.inlog noemt beide', inl && inl['1'] && inl['2'] && inl['1'].http === 401 && /authentication_error/.test(inl['1'].soort), JSON.stringify(inl));
+    toets('I /health lekt geen token', !/NEP[12]/.test(JSON.stringify(h)));
+    await slaap(800);
+    const box = fs.readFileSync(path.join(iw.d, 'vault', '00_Systeem', 'Meldingen', 'machinekamer.md'), 'utf8');
+    toets('I box: precies één rij per account', (box.match(/Claude-inlog account 1 geweigerd/g) || []).length === 1 && (box.match(/Claude-inlog account 2 geweigerd/g) || []).length === 1, box.slice(0, 300));
+    toets('I box: nieuwe rijen boven de oude', box.indexOf('Claude-inlog account') > -1 && box.indexOf('Claude-inlog account') < box.indexOf('oude rij'));
+    const uurNL = Number(new Date().toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false }));
+    const ber = fs.existsSync(berichtLog) ? fs.readFileSync(berichtLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+    if (uurNL >= 7 && uurNL < 23) {
+      toets('I bericht: één per account, met sleutel', ber.length === 2 && ber.some((x) => x.includes('inlog-account-1')) && ber.some((x) => x.includes('inlog-account-2')), JSON.stringify(ber).slice(0, 300));
+      toets('I bericht account 1 noemt setup-token en herstart', ber.some((x) => x.includes('inlog-account-1') && /claude setup-token/.test(x[x.length - 1]) && /herstart/.test(x[x.length - 1])));
+    } else toets('I bericht: stille uren, niets', ber.length === 0, JSON.stringify(ber));
+    weiger = new Set(); tankRijen = [];
+    const i3 = await req(iw, 'GET', '/tank?verversen=1');
+    const i4 = await req(iw, 'GET', '/tank?account=2&verversen=1');
+    h = await req(iw, 'GET', '/health');
+    toets('I herstel: meting weer ok en inlog-stand leeg', i3.ok === true && i4.ok === true && h.accounts.inlog['1'] === null && h.accounts.inlog['2'] === null, JSON.stringify(h.accounts.inlog));
+    toets('I herstel staat in het log', /"soort":"inlog-hersteld"/.test(fs.readFileSync(path.join(iw.d, 'api.log'), 'utf8')));
+    stop(iw);
 
     // F. geen token 2 (geen env, geen kluisroute): agents op 1, /tank?account=2 geeft 503 met reden, /tank zonder account ongemoeid
     const g = maakServer('s4', vrijePoort(), {}); alle.push(g); await wachtOp(g);
