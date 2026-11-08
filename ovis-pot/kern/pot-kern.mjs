@@ -628,36 +628,42 @@ export function maandpatroon({ entiteit, begroting, aandelen }) {
 }
 
 // ---------- R7 buffer ----------
+/** Maanden voor de bufferopbouw uit "1,7", [1, 7] of null: oplopend, uniek, 1–12; leeg of ongeldig = null (dan gelijke maanddelen). */
+export function bufferMaanden(x) {
+  if (x == null || x === "") return null;
+  const l = (Array.isArray(x) ? x : String(x).split(/[ ,;]+/)).map(Number);
+  if (!l.length || l.some((m) => !Number.isInteger(m) || m < 1 || m > 12)) return null;
+  return [...new Set(l)].sort((a, b) => a - b);
+}
 /**
  * R7 — buffer als vast tegoed per praktijk: doel per praktijk = aandeel × doel van de entiteit; wat nog moet = doel − al gevraagd
  * (herverdeling naar de nieuwe aandelen); in `opbouwMaanden` gelijke delen vanaf `startMaand` (hele euro's, rest in de laatste).
+ * Of in gekozen maanden: `opbouwIn` = lijst maandnummers (bv. [1, 7] = helft met januari, helft met juli; wv2770); die gaat voor.
  * Is er al meer gevraagd dan het nieuwe doel, dan komt het verschil eenmalig als 'u krijgt terug' op de eerste nota.
- * Eerst de leningen: de opbouw gaat eerst naar het aflossen van open liquiditeitsleningen (per maand, tot ze af zijn).
+ * Leningen bestaan niet (David 8-11-2026, wv2773): wat een praktijk extra stort is een extra bijdrage in dat jaar en wordt in de
+ * afrekening verrekend (zie extraBijdrageTelt); de buffer lost dus niets af.
  */
-export function bufferPlan({ doel, aandelen, alGevraagd = {}, opbouwMaanden = 12, startMaand = 1, leningOpen = 0 }) {
+export function bufferPlan({ doel, aandelen, alGevraagd = {}, opbouwMaanden = 12, startMaand = 1, opbouwIn = null }) {
   if (!aandelen.ok) return { ok: false, reden: "patiëntenstand ontbreekt" };
-  const n = Math.max(1, Math.min(opbouwMaanden, 13 - startMaand));
+  const gekozen = bufferMaanden(opbouwIn);
+  const n = gekozen ? gekozen.length : Math.max(1, Math.min(opbouwMaanden, 13 - startMaand));
+  const delen = gekozen || Array.from({ length: n }, (_, i) => startMaand + i);
   const praktijken = aandelen.rijen.map((r) => {
     const d = Math.round(Number(doel) * r.aandeel);
     const al = rond2(alGevraagd[r.praktijk_id] || 0);
     const nog = rond2(d - al);
     const maanden = Array(12).fill(0);
-    if (nog < 0) maanden[startMaand - 1] = nog;
+    if (nog < 0) maanden[delen[0] - 1] = nog;
     else if (nog > 0) {
       const deel = Math.floor(nog / n);
-      for (let i = 0; i < n; i++) maanden[startMaand - 1 + i] = deel;
-      maanden[startMaand - 2 + n] += rond2(nog - deel * n);
+      for (const m of delen) maanden[m - 1] = deel;
+      maanden[delen[n - 1] - 1] += rond2(nog - deel * n);
     }
     return { praktijk_id: r.praktijk_id, aandeel: r.aandeel, doel: d, al_gevraagd: al, nog, maanden };
   });
   const perMaand = Array.from({ length: 12 }, (_, i) => praktijken.reduce((s, p) => s + p.maanden[i], 0));
-  let rest = Number(leningOpen) || 0;
-  const aflossing = perMaand.map((x) => { const a = Math.max(0, Math.min(x, rest)); rest = rond2(rest - a); return a; });
-  const opbouw = perMaand.reduce((s, x) => s + Math.max(0, x), 0);
   return {
-    ok: true, doel: Number(doel), praktijken, per_maand: perMaand, aflossing, lening_rest: rest,
-    netto_buffer: rond2(opbouw - aflossing.reduce((s, x) => s + x, 0)),
-    waarschuwing: rest > 0 ? `de opbouw is niet genoeg om de lening af te lossen: na dit jaar staat nog ${euro(rest)} open` : null,
+    ok: true, doel: Number(doel), opbouw_in: delen, praktijken, per_maand: perMaand,
   };
 }
 
@@ -843,9 +849,18 @@ export function inschrijfgeld(gemiddeld, tarief) {
 function geldend(lijst, sleutel, peil) {
   return lijst.filter((x) => String(x[sleutel]) <= String(peil)).sort((a, b) => (String(a[sleutel]) < String(b[sleutel]) ? -1 : 1)).at(-1) || null;
 }
-/** Wat een praktijk in jaar J al voldaan heeft voor de afrekening: betaald (bank) of gevraagd (nota's), uit /api/geld. */
+/**
+ * Extra bijdragen (David 8-11-2026, wv2773): er zijn geen leningen. Stort een praktijk buiten de nota's om extra (in de bank als
+ * 'liquiditeit' toegewezen aan die praktijk, bv. Tolgaarde € 10.000 aan KM in 2026), dan is dat een extra bijdrage in dat boekjaar:
+ * per praktijk telt het totaal dat ze in het jaar bijdroeg tegenover haar aandeel in de kosten, en te veel komt terug in de
+ * afrekening. Vanaf boekjaar 2026; de jaren ervoor zijn al afgerekend (toen telde zo'n storting niet mee).
+ */
+export const EXTRA_BIJDRAGE_VANAF = 2026;
+export function extraBijdrageTelt(jaar) { return Number(jaar) >= EXTRA_BIJDRAGE_VANAF; }
+/** Wat een praktijk in jaar J al voldaan heeft voor de afrekening: betaald (bank) of gevraagd (nota's), plus extra bijdragen, uit /api/geld. */
 export function tegenUitGeld(geld, entiteit, modus) {
   const tegen = {};
+  for (const x of geld.extra || []) { if (x.entiteit === entiteit) tegen[x.praktijk_id] = (tegen[x.praktijk_id] || 0) + Number(x.bedrag); }
   if (modus === "betaald") for (const b of geld.betaald) { if (b.entiteit === entiteit && (b.soort === "voorschot" || b.soort === "huur")) tegen[b.praktijk_id] = (tegen[b.praktijk_id] || 0) + Number(b.bedrag); }
   else for (const g of geld.gevraagd) { if (g.entiteit === entiteit) tegen[g.praktijk_id] = (tegen[g.praktijk_id] || 0) + Number(g.bedrag); }
   return tegen;
@@ -890,9 +905,7 @@ export function rekenJaarplan(d, entiteit, jaar, o = {}) {
   const alG = {};
   for (const g of (d.bufferGevraagd || []).filter((x) => x.entiteit === entiteit)) alG[g.praktijk_id] = Number(g.bedrag);
   const alles = Object.values(alG).reduce((s, x) => s + x, 0);
-  const lening = (d.leningen || []).filter((l) => l.entiteit === entiteit).reduce((s, l) => s + Number(l.bedrag_open), 0);
-  const buffer = bf && aandelen.ok ? bufferPlan({ doel: bf.doel, aandelen, alGevraagd: alG, opbouwMaanden: alles > 0 ? 1 : Number(bf.opbouw_maanden) || 12, leningOpen: lening }) : null;
-  if (buffer?.waarschuwing) waarschuwingen.push(buffer.waarschuwing);
+  const buffer = bf && aandelen.ok ? bufferPlan({ doel: bf.doel, aandelen, alGevraagd: alG, opbouwMaanden: alles > 0 ? 1 : Number(bf.opbouw_maanden) || 12, opbouwIn: bf.opbouw_in }) : null;
   // uitgetreden: wie buffer heeft opgebouwd maar niet meer meedoet, krijgt die terug (de app maakt het zichtbaar; terugboeken doet David) (Codex M7)
   const terug = Object.entries(alG).filter(([pid, b]) => b > 0.004 && !aandelen.rijen.some((r) => r.praktijk_id === pid)).map(([praktijk_id, bedrag]) => ({ praktijk_id, bedrag }));
   if (buffer) buffer.terug = terug;
@@ -900,7 +913,7 @@ export function rekenJaarplan(d, entiteit, jaar, o = {}) {
   let kas = null;
   if (patroon.ok) {
     const sp = spreidingUitBetalingen((d.spreiding || []).filter((x) => x.entiteit === entiteit));
-    const inkomend = patroon.per_maand.map((x, i) => x + (buffer ? buffer.per_maand[i] - buffer.aflossing[i] : 0));
+    const inkomend = patroon.per_maand.map((x, i) => x + (buffer ? buffer.per_maand[i] : 0));
     const stromen = [...inkomstenStromen({ jaar, perMaand: inkomend, spreiding: sp }),
       ...uitgavenUitBegroting({ jaar, begroting, personeel, verdeling: param?.verdeling || undefined })];
     const start = o.startsaldo != null ? Number(o.startsaldo) : alles;

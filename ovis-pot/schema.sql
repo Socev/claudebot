@@ -1,4 +1,4 @@
--- GEGENEREERD uit Socev/ovis-pot ccd151dde9025353c5db04518a8cb8407e3e76d7: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql
+-- GEGENEREERD uit Socev/ovis-pot 30226e7569d40badc8d4684cb2915760b876fcd6: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql
 -- OVIS POT — migratie 0001: de POT-tabellen zoals ze in D1 `fin` stonden (kolommen en ids gelijk), zodat de pod-modules
 -- (pot-datahub.js, pot-verzend.js) bij het overstapmoment alleen een andere database krijgen. Gegenereerd uit fin.sqlite_master op 8-11-2026.
 -- Geen gegevens in deze repo; de inhoud komt met scripts/kopieer-uit-fin.py.
@@ -485,3 +485,18 @@ WHEN (SELECT coalesce(sum(bedrag), 0) FROM koppeling WHERE bankmutatie_id = NEW.
      > abs((SELECT bedrag FROM bankmutatie WHERE id = NEW.bankmutatie_id)) + 0.004
   OR (SELECT entiteit FROM bankmutatie WHERE id = NEW.bankmutatie_id) IS NOT (SELECT entiteit FROM nota WHERE id = NEW.nota_id)
 BEGIN SELECT RAISE(ABORT, 'koppeling: meer dan de bankpost of een andere entiteit'); END;
+
+-- OVIS POT — migratie 0005 (wv2773, David 8-11-2026): er zijn geen leningen.
+-- Wat een praktijk buiten de nota's om extra stort (bank: soort 'liquiditeit' met een praktijk, bv. Tolgaarde € 10.000 aan de
+-- Kostenmaatschap in 2026) is een extra bijdrage van die praktijk in dat boekjaar; de afrekening verrekent het (kern: tegenUitGeld,
+-- vanaf boekjaar 2026). De bankposten zelf blijven zoals ze zijn. De lening-rij(en) gaan als 'vervallen' in het logboek (oud = de rij)
+-- en de tabel wordt leeg: hij blijft bestaan zolang de pod-bundel van vóór wv2773 hem nog leest; opruimen in een latere migratie.
+INSERT INTO logboek (wie, tabel, sleutel, actie, oud, nieuw)
+  SELECT 'machinekamer wv2773', 'lening', entiteit || '/' || id, 'vervallen',
+    json_object('id', id, 'entiteit', entiteit, 'verstrekt_door', verstrekt_door, 'bedrag_open', bedrag_open, 'peildatum', peildatum, 'opmerking', opmerking, 'ingevoerd_op', ingevoerd_op),
+    json_quote('geen lening (David 8-11-2026): de stortingen van ' || verstrekt_door || ' zijn een extra bijdrage in het boekjaar van de storting (bank: liquiditeit) en worden in de afrekening van dat jaar verrekend')
+  FROM lening;
+DELETE FROM lening;
+
+-- buffer in gekozen maanden (wv2770): bv. '1,7' = helft met januari, helft met juli; leeg = opbouw_maanden gelijke delen vanaf januari
+ALTER TABLE buffer ADD COLUMN opbouw_in TEXT;

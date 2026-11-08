@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot ccd151dde9025353c5db04518a8cb8407e3e76d7 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot 30226e7569d40badc8d4684cb2915760b876fcd6 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
@@ -95,13 +95,18 @@ export async function geld(db          , j         ) {
   const betaald = await rijen(db,
     "select m.entiteit, t.praktijk_id, t.soort, round(sum(t.bedrag),2) as bedrag, count(*) as n from bank_toewijzing t join bankmutatie m on m.id=t.bankmutatie_id " +
     "where t.boekjaar=? and t.praktijk_id is not null and t.soort in ('voorschot','huur','afrekening') group by 1,2,3", J);
+  // extra bijdragen (wv2773, David 8-11-2026: er zijn geen leningen): wat een praktijk buiten de nota's om stortte (bank: 'liquiditeit'),
+  // per boekjaar en praktijk, stortingen en terugbetalingen samen; telt in de afrekening mee vanaf K.EXTRA_BIJDRAGE_VANAF
+  const extra = K.extraBijdrageTelt(J) ? await rijen(db,
+    "select m.entiteit, t.praktijk_id, round(sum(t.bedrag),2) as bedrag, count(*) as n from bank_toewijzing t join bankmutatie m on m.id=t.bankmutatie_id " +
+    "where t.boekjaar=? and t.praktijk_id is not null and t.soort='liquiditeit' group by 1,2", J) : [];
   // gevraagd = vastgestelde nota's van J zonder bufferopbouw (R3); van een nota uit deze app telt alleen de regel 'bijdrage'
   // (correcties en verrekeningen gaan over een ander jaar), een afrekeningsnota telt niet mee
   const gevraagd = await rijen(db,
     "select entiteit, praktijk_id, round(sum(case when bron='ovis-pot' then (select coalesce(sum(json_extract(r.value,'$.bedrag')),0) from json_each(nota.regels) r " +
     "where json_extract(r.value,'$.soort')='bijdrage') else bedrag - coalesce(buffer,0) end),2) as bedrag, count(*) as n " +
     "from nota where jaar=? and status='definitief' and soort not in ('buffer','afrekening') group by 1,2", J);
-  return { jaar: J, betaald, gevraagd };
+  return { jaar: J, betaald, gevraagd, extra };
 }
 
 /** Betaalmonitor: verwachte termijnen (Davids stukken, nota's of reconstructie) en de betalingen uit de bank. */
@@ -145,7 +150,7 @@ export async function maandStand(db          ) {
 
 /** Alles in één keer (Excel-export, ook om over te stappen naar iets anders): elke tabel van de app als rijen. */
 const EXPORT_TABELLEN = ["entiteit", "praktijk", "praktijk_versie", "praktijk_naam", "praktijk_patienten", "deelname", "deelname_uitzondering", "kostencomponent", "kostenmutatie",
-  "subsidie", "inschrijftarief", "jaarlast", "medewerker", "contract", "contractmutatie", "afwezigheid", "inhuur", "cao_tabel", "loonparameter", "loonsom", "buffer", "lening",
+  "subsidie", "inschrijftarief", "jaarlast", "medewerker", "contract", "contractmutatie", "afwezigheid", "inhuur", "cao_tabel", "loonparameter", "loonsom", "buffer",
   "jaarplan", "jaarplan_regel", "nota", "correctie", "afrekening", "verwachting", "bankrekening", "bankmutatie", "bank_toewijzing", "koppeling", "mail_concept", "pod_verzoek",
   "overname", "ronde_stap", "instelling", "logboek"]         ;
 export async function exportAlles(db          ) {
@@ -324,7 +329,7 @@ const plusDag = (d        , n        ) => K.plusDagen(d, n);
 /** Alles wat fase 2 voor jaar J nodig heeft (personeel, buffer, jaarplannen, nota's, correcties, ronde). */
 export async function jaarGegevens(db          , j         ) {
   const J = jaar(j);
-  const [contracten, contractmutaties, afwezigheid, inhuur, cao, loonparameters, loonsom, buffers, leningen, bufferGevraagd, spreiding,
+  const [contracten, contractmutaties, afwezigheid, inhuur, cao, loonparameters, loonsom, buffers, bufferGevraagd, spreiding,
     jaarplannen, regels, notas, correcties, ronde] = await Promise.all([
     rijen(db, "select c.*, m.naam from contract c left join medewerker m on m.id=c.medewerker_id order by c.soort, m.naam, c.van"),
     rijen(db, "select * from contractmutatie order by contract_id, geldig_van"),
@@ -334,7 +339,6 @@ export async function jaarGegevens(db          , j         ) {
     rijen(db, "select * from loonparameter order by jaar"),
     rijen(db, "select * from loonsom order by jaar, maand"),
     rijen(db, "select * from buffer order by entiteit, geldig_van"),
-    rijen(db, "select * from lening order by entiteit, id"),
     // buffer die in eerdere jaren al gevraagd is (de opbouw van jaar J zelf staat in het jaarplan; anders herverdeelt een herberekening midden in het opbouwjaar)
     rijen(db, "select entiteit, praktijk_id, round(sum(buffer),2) as bedrag from nota where status='definitief' and buffer<>0 and jaar<? group by 1,2", J),
     // spreiding van de betaaldag (gemeten): bedrag per dag van de maand, bijdragen/huur sinds 2025
@@ -347,7 +351,7 @@ export async function jaarGegevens(db          , j         ) {
     rijen(db, "select * from correctie where nota_id is null or jaar>=? order by entiteit, praktijk_id, id", J - 1),
     rijen(db, "select * from ronde_stap where jaar=?", J),
   ]);
-  return { jaar: J, contracten, contractmutaties, afwezigheid, inhuur, cao, loonparameters, loonsom, buffers, leningen, bufferGevraagd, spreiding, jaarplannen, regels, notas, correcties, ronde };
+  return { jaar: J, contracten, contractmutaties, afwezigheid, inhuur, cao, loonparameters, loonsom, buffers, bufferGevraagd, spreiding, jaarplannen, regels, notas, correcties, ronde };
 }
 
 async function planInvoer(db          , J        ) {
@@ -467,10 +471,15 @@ export async function schrijfJaarronde(db          , route        , b        , w
       const van = datum(b.geldig_van, "vanaf") ;
       const doel = getal(b.doel, "doel", { min: 0, max: 1e6 }) ;
       const mnd = getal(b.opbouw_maanden ?? 12, "opbouw in maanden", { min: 1, max: 12 }) ;
+      // opbouw in gekozen maanden (wv2770/wv2773), bv. "1,7"; leeg = in opbouw_maanden gelijke delen vanaf januari
+      const inRuw = tekst(b.opbouw_in, "opbouw in maanden", { max: 40 }) || "";
+      const opIn = inRuw ? K.bufferMaanden(inRuw) : null;
+      if (inRuw && !opIn) throw new Fout(400, "opbouw in maanden: maandnummers 1–12, met komma's (bv. 1,7)");
+      const opbouwIn = opIn ? opIn.join(",") : null;
       const status = keuze(b.status ?? "voorstel", "status", ["voorstel", "besloten"]         );
       const oud = (await rijen(db, "select * from buffer where entiteit=? and geldig_van=?", e, van))[0] ?? null;
-      await db.batch([db.prepare("insert into buffer (entiteit, geldig_van, doel, opbouw_maanden, status, opmerking) values (?,?,?,?,?,?) on conflict(entiteit, geldig_van) do update set doel=excluded.doel, opbouw_maanden=excluded.opbouw_maanden, status=excluded.status, opmerking=excluded.opmerking")
-        .bind(e, van, doel, mnd, status, tekst(b.opmerking, "opmerking", { max: 300 })), log(db, wie, "buffer", `${e}@${van}`, oud ? "gewijzigd" : "nieuw", oud, { doel, opbouw_maanden: mnd, status })]);
+      await db.batch([db.prepare("insert into buffer (entiteit, geldig_van, doel, opbouw_maanden, opbouw_in, status, opmerking) values (?,?,?,?,?,?,?) on conflict(entiteit, geldig_van) do update set doel=excluded.doel, opbouw_maanden=excluded.opbouw_maanden, opbouw_in=excluded.opbouw_in, status=excluded.status, opmerking=excluded.opmerking")
+        .bind(e, van, doel, mnd, opbouwIn, status, tekst(b.opmerking, "opmerking", { max: 300 })), log(db, wie, "buffer", `${e}@${van}`, oud ? "gewijzigd" : "nieuw", oud, { doel, opbouw_maanden: mnd, opbouw_in: opbouwIn, status })]);
       return { ok: true };
     }
     case "verkoopadres": {   // verkoopadres van de entiteit in Exact (elk stuk gaat óók daarheen); leeg = ontbreekt
@@ -555,7 +564,7 @@ export async function schrijfJaarronde(db          , route        , b        , w
         personeel: r.personeel ? { totaal: r.personeel.totaal, bruto: r.personeel.bruto, hoe: r.personeel.hoe, waarschuwingen: r.personeel.waarschuwingen } : null,
         patroon: { gewoon: r.patroon.gewoon, mei: r.patroon.mei, november: r.patroon.november, hoe: r.patroon.hoe, afronding: r.patroon.afronding },
         aandelen: { uitleg: r.aandelen.uitleg, noemer: r.aandelen.noemer },
-        buffer: r.buffer ? { doel: r.buffer.doel, status: r.buffer_instelling?.status, aflossing: r.buffer.aflossing, lening_rest: r.buffer.lening_rest, waarschuwing: r.buffer.waarschuwing } : null,
+        buffer: r.buffer ? { doel: r.buffer.doel, status: r.buffer_instelling?.status, opbouw_in: r.buffer.opbouw_in } : null,
         kasstroom: r.kasstroom ? { startsaldo: r.kasstroom.startsaldo, laagste: r.kasstroom.laagste, laagste_op: r.kasstroom.laagste_op, onder: r.kasstroom.onder, voorstel: r.kasstroom.voorstel } : null,
         waarschuwingen: r.waarschuwingen, herziening: herz,
       };
@@ -658,7 +667,7 @@ export async function schrijfJaarronde(db          , route        , b        , w
       // R10 (fase 3): een overname in J met verdeling 'maanden' splitst de afrekening over oude en nieuwe houder (kosten naar maanden, wat al
       // voldaan is naar de datum van het stuk of de betaling); elk deel krijgt een eigen nota met zijn eigen debiteur.
       const overnames = await rijen                                                           (db, "select praktijk_id, datum, verdeling from overname where substr(datum,1,4)=? order by datum", String(J));
-      const voldaanVoor = async (pid        , grens        ) => {
+      const voldaanVoorZonderExtra = async (pid        , grens        ) => {
         if (r.modus === "betaald") {
           const q = await rijen               (db, "select coalesce(sum(t.bedrag),0) as s from bank_toewijzing t join bankmutatie m on m.id=t.bankmutatie_id where m.entiteit=? and t.praktijk_id=? and t.boekjaar=? and t.soort in ('voorschot','huur') and m.boekdatum<?", e, pid, J, grens);
           return Number(q[0].s);
@@ -667,6 +676,9 @@ export async function schrijfJaarronde(db          , route        , b        , w
           "from nota where entiteit=? and praktijk_id=? and jaar=? and status='definitief' and soort not in ('buffer','afrekening') and datum<?", e, pid, J, grens);
         return Number(q[0].s);
       };
+      // plus extra bijdragen vóór de grens (wv2773: er zijn geen leningen; vanaf K.EXTRA_BIJDRAGE_VANAF)
+      const voldaanVoor = async (pid        , grens        ) => Number(await voldaanVoorZonderExtra(pid, grens)) + (K.extraBijdrageTelt(J) ? Number((await rijen               (db,
+        "select coalesce(sum(t.bedrag),0) as s from bank_toewijzing t join bankmutatie m on m.id=t.bankmutatie_id where m.entiteit=? and t.praktijk_id=? and t.boekjaar=? and t.soort='liquiditeit' and m.boekdatum<?", e, pid, J, grens))[0].s) : 0);
       for (const x0 of r.rijen) {
         const ov = overnames.filter((o) => o.praktijk_id === x0.praktijk_id && o.verdeling === "maanden").at(-1) ?? null;
         if (ov) {
