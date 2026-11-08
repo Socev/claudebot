@@ -220,6 +220,13 @@ const router = http.createServer((req, res) => {
   R.hang = null;
   R.modus = 'goed';
 
+  // 10b. review wv2751 MOET 3: een regel van vóór wv2751 (alleen eur, met tekens) telt met een schatting, niet als 0
+  S.stopTimers(); S = maakStudio();
+  const voor10b = S.teller().elevenlabs.studio_periode;
+  fs.appendFileSync(path.join(DIR, 'verbruik.jsonl'), JSON.stringify({ t: new Date().toISOString(), taak: 'oud0123456789ab', aanbieder: 'elevenlabs', maand: '2026-11', soort: 'geschat', eur: 0.1, tekens: 1000, model: 'eleven_v4' }) + '\n');
+  S.stopTimers(); S = maakStudio();
+  toets('10b oude regel zonder credits: schatting uit tekens (500)', S.teller().elevenlabs.studio_periode === voor10b + 500, S.teller().elevenlabs);
+
   // 11. geen tekst in audit, log of verbruik; sleutel alleen naar de Router
   const audit = fs.readFileSync(path.join(DIR, 'audit.jsonl'), 'utf8');
   toets('11 geen tekst in audit.jsonl', audit.indexOf('geheime toetszin') < 0 && audit.indexOf('aaaaaaaaaa') < 0);

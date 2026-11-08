@@ -63,10 +63,12 @@ function maak(o) {
     x.meting = mt && Number.isFinite(Date.parse(mt.op)) && ok(mt.gebruikt, 0, 1e9) && ok(mt.limiet, 1, 1e9) ? mt : null;
     return { maand_bundel: Number(x.maand_bundel), reset_dag: Number(x.reset_dag), rem_procent: Number(x.rem_procent), meting: x.meting };
   }
-  function socevSinds(iso) {
+  // review wv2751 MOET 5: een bron die niet te lezen is, telt niet als 0 maar maakt de stand onvolledig (ruimte 0: niets nieuws)
+  function socevSinds(iso, st) {
     let s = 0;
     for (const [naam, fn] of bronnen) {
-      try { const v = Number(fn(iso)); if (Number.isFinite(v) && v > 0) s += v; } catch (e) { fout('eleven-credits-' + naam, e); }
+      try { const v = Number(fn(iso)); if (!Number.isFinite(v) || v < 0) throw new Error('geen geldige stand'); s += v; }
+      catch (e) { fout('eleven-credits-' + naam, e); if (st) st.onleesbaar = true; }
     }
     return Math.round(s);
   }
@@ -75,15 +77,16 @@ function maak(o) {
     const c = inst(), t = nu(), p = periode(t, c.reset_dag);
     const mt = c.meting, mOp = mt ? Date.parse(mt.op) : NaN;
     let gebruikt, limiet, bron;
-    const socev = socevSinds(new Date(p.begin).toISOString());
+    const ok = { onleesbaar: false };
+    const socev = socevSinds(new Date(p.begin).toISOString(), ok);
     if (mt && mOp >= p.begin && mOp <= t) {
-      gebruikt = Math.round(Number(mt.gebruikt)) + socevSinds(new Date(mOp).toISOString());
+      gebruikt = Math.round(Number(mt.gebruikt)) + socevSinds(new Date(mOp).toISOString(), ok);
       limiet = Math.round(Number(mt.limiet)); bron = 'meting';
     } else {
       gebruikt = socev; limiet = c.maand_bundel; bron = 'zonder meting';
     }
     const remVanaf = Math.floor(limiet * (1 - c.rem_procent / 100));
-    return { gebruikt, limiet, over: Math.max(0, limiet - gebruikt), rem_vanaf: remVanaf, ruimte: Math.max(0, remVanaf - gebruikt),
+    return { gebruikt, limiet, over: Math.max(0, limiet - gebruikt), rem_vanaf: remVanaf, ruimte: ok.onleesbaar ? 0 : Math.max(0, remVanaf - gebruikt), onleesbaar: ok.onleesbaar,
       periode_van: new Date(p.begin).toISOString(), periode_tot: new Date(p.eind).toISOString(), rem_procent: c.rem_procent, socev, bron };
   }
   function past(nodig, st) { st = st || stand(); return Math.max(0, Math.round(Number(nodig) || 0)) <= st.ruimte; }
@@ -95,6 +98,7 @@ function maak(o) {
   // De weigering in gewone taal (zonder geld): de bundel is bijna op.
   function weigering(nodig, wat, st) {
     st = st || stand();
+    if (st.onleesbaar) return 'het verbruik van je ElevenLabs-bundel is nu niet volledig te lezen; Socev maakt daarom even niets nieuws. Probeer het later opnieuw.';
     return 'je ElevenLabs-bundel is bijna op (' + tekst(st) + '); ' + (wat || 'dit') + ' kost ± ' + getal(nodig) + ' credits. Socev stopt bij ' +
       st.rem_procent + ' % over, zodat er niets bijbetaald wordt; op ' + datumNL(st.periode_tot) + ' komen er nieuwe credits.';
   }

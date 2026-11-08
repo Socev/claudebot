@@ -321,7 +321,9 @@ function maak(deps) {
     vb[taak] = o;
     return o;
   }
-  function creditsVan(o) { return o.soort === 'vrijgegeven' ? 0 : typeof o.credits === 'number' ? o.credits : typeof o.credits_schat === 'number' ? o.credits_schat : 0; }
+  // review wv2751 MOET 3: een open reservering van vóór wv2751 heeft alleen eur; dan een ruime schatting uit tekens en model
+  function schatVan(o) { return typeof o.credits_schat === 'number' ? o.credits_schat : typeof o.tekens === 'number' ? CREDITS.schat(o.tekens, o.model) : 0; }
+  function creditsVan(o) { return o.soort === 'vrijgegeven' ? 0 : typeof o.credits === 'number' ? o.credits : schatVan(o); }
   // credits die Studio (en Bandjes via Studio) sinds iso bij ElevenLabs verbruikte — bron voor de gezamenlijke credit-rem
   function creditsSinds(iso) {
     let s = 0;
@@ -347,7 +349,7 @@ function maak(deps) {
     Object.keys(vb).forEach(function (k) {
       if (vb[k].soort !== 'gereserveerd') return;
       const t = st.taken.find(function (x) { return x.id === k; });
-      try { verbruikZet(k, vb[k].aanbieder, t && t.aangeroepen ? 'geschat' : 'vrijgegeven', t && t.aangeroepen ? (vb[k].credits_schat || 0) : 0, { na_herstart: true }); }
+      try { verbruikZet(k, vb[k].aanbieder, t && t.aangeroepen ? 'geschat' : 'vrijgegeven', t && t.aangeroepen ? schatVan(vb[k]) : 0, { na_herstart: true }); }
       catch (e) { fout('studio-verbruik', e); }
     });
   })();

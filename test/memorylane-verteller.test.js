@@ -268,10 +268,15 @@ test('elevenlabs-credits: periode op de 18e, meting + eigen verbruik, na reset a
   assert.strictEqual(st.bron, 'zonder meting'); assert.strictEqual(st.limiet, 1000); assert.strictEqual(st.gebruikt, 100); assert.strictEqual(st.ruimte, 850);
   // jaargrens en januari
   assert.deepStrictEqual(C.periode(Date.parse('2027-01-05T00:00:00Z'), 18), { begin: Date.parse('2026-12-18T00:00:00Z'), eind: Date.parse('2027-01-18T00:00:00Z') });
-  // kapotte instelling = standaard; een bron die gooit telt als 0
+  // kapotte instelling = standaard
   fs.writeFileSync(bestand, '{ kapot');
+  st = c.stand(); assert.strictEqual(st.limiet, C.STANDAARD.maand_bundel); assert.strictEqual(st.gebruikt, 100); assert.ok(st.ruimte > 0);
+  // review MOET 5: een bron die gooit of onzin geeft = onleesbaar → geen ruimte (niets nieuws), eigen weigertekst
   c.bron('gooit', () => { throw new Error('x'); });
-  st = c.stand(); assert.strictEqual(st.limiet, C.STANDAARD.maand_bundel); assert.strictEqual(st.gebruikt, 100);
+  st = c.stand(); assert.strictEqual(st.onleesbaar, true); assert.strictEqual(st.ruimte, 0); assert.strictEqual(c.past(1), false);
+  assert.match(c.weigering(10, 'dit'), /niet volledig te lezen/);
+  c.bron('gooit', () => NaN); assert.strictEqual(c.stand().ruimte, 0);
+  c.bron('gooit', () => 0); assert.ok(c.stand().ruimte > 0, 'weer leesbaar = weer ruimte');
   // schatting: v4 0,5 per teken (naar boven), onbekend model 1
   assert.strictEqual(C.schat(7, 'eleven_v4'), 4); assert.strictEqual(C.schat(7, 'iets'), 7); assert.strictEqual(C.schat(0, 'eleven_v4'), 0);
 });
