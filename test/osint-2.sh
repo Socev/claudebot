@@ -13,7 +13,8 @@ mkdir -p "$T/vault/10_Zakelijk" "$T/tools"
 ET="${OSINT_EXIFTOOL:-/opt/data/venvs/osint/tools/exiftool/exiftool}"
 [ -f "$ET" ] && ln -s "$(dirname "$ET")" "$T/tools/exiftool" || true
 PY="${OSINT_PY:-$PWD/osint.py}"
-python3 -I - "$PY" "$T" <<'EOF'
+PYBIN="${OSINT_PYTHON:-python3}"   # wv2712: de venv (Pillow + numpy) toetst ook de fotoforensiek
+"$PYBIN" -I - "$PY" "$T" <<'EOF'
 import base64, json, os, sqlite3, subprocess, sys
 py, T = sys.argv[1], sys.argv[2]
 fout = []
@@ -36,7 +37,31 @@ nep = {
  'uitspraken.rechtspraak.nl/api/zoek': {'ResultCount': 1, 'Results': [{'Titel': 'Rechtbank Proef, 01-01-2026', 'TitelEmphasis': 'ECLI:NL:PROEF:2026:1', 'Uitspraakdatum': '01-01-2026',
      'Rechtsgebieden': ['Civiel recht'], 'Tekstfragment': 'Verzonnen fragment over Voorbeeld Leverancier.', 'DeeplinkUrl': 'https://deeplink.rechtspraak.nl/uitspraak?id=ECLI:NL:PROEF:2026:1'}]},
  'api.pdok.nl/bzk/locatieserver/search/v3_1/free': {'response': {'docs': [{'weergavenaam': 'Proefstraat 1, 9999ZZ Nergensdorp', 'straatnaam': 'Proefstraat', 'huis_nlt': '1',
-     'woonplaatsnaam': 'Nergensdorp', 'centroide_ll': 'POINT(5.1 52.1)', 'centroide_rd': 'POINT(150000 450000)', 'buurtnaam': 'Proefbuurt', 'gemeentenaam': 'Nergensdorp'}]}},
+     'woonplaatsnaam': 'Nergensdorp', 'centroide_ll': 'POINT(5.1 52.1)', 'centroide_rd': 'POINT(150000 450000)', 'buurtnaam': 'Proefbuurt', 'gemeentenaam': 'Nergensdorp',
+     'buurtcode': 'BU99990101', 'gemeentecode': '9999', 'adresseerbaarobject_id': '9999010000000001'}]}},
+ # wv2712: buurt (CBS, Leefbaarometer), hoogte (AHN), bodem, straatbeeld — verzonnen
+ 'opendata.cbs.nl/ODataApi/odata/86358NED/TypedDataSet': {'value': [{'WijkenEnBuurten': 'BU99990101', 'Gemeentenaam_1': 'Nergensdorp   ', 'AantalInwoners_5': 1300}]},
+ 'opendata.cbs.nl/ODataApi/odata/86165NED/TypedDataSet': {'value': [
+     {'WijkenEnBuurten': 'BU99990101', 'AantalInwoners_5': 1290, 'k_0Tot15Jaar_8': 129, 'k_15Tot25Jaar_9': 129, 'k_25Tot45Jaar_10': 258, 'k_45Tot65Jaar_11': 387, 'k_65JaarOfOuder_12': 387,
+      'GemiddeldeWOZWaardeVanWoningen_39': 413, 'AfstandTotHuisartsenpraktijk_110': 0.7, 'MateVanStedelijkheid_120': 4},
+     {'WijkenEnBuurten': 'GM9999    ', 'GemiddeldeWOZWaardeVanWoningen_39': 399, 'AfstandTotHuisartsenpraktijk_110': 1.1},
+     {'WijkenEnBuurten': 'NL00      ', 'GemiddeldeWOZWaardeVanWoningen_39': 350}]},
+ 'opendata.cbs.nl/ODataApi/odata/85984NED/TypedDataSet': {'value': [{'WijkenEnBuurten': 'BU99990101', 'GemiddeldeWOZWaardeVanWoningen_39': 1, 'PersonenInArmoede_81': 1.3}]},
+ 'geo.leefbaarometer.nl/lbm3/ows?typeNames=lbm3:buurtscore24': {'features': [{'properties': {'id': 'BU99990101', 'name': 'Proefbuurt', 'gemeente': 'Nergensdorp', 'year': 2024,
+     'kscore': 7, 'won': 0.02, 'fys': -0.03, 'vrz': 0.0, 'soc': 0.01, 'onv': -0.05}}]},
+ 'geo.leefbaarometer.nl/lbm3/ows?typeNames=lbm3:buurtscore22': {'features': [{'properties': {'kscore': 6}}]},
+ 'geo.leefbaarometer.nl/lbm3/ows?typeNames=lbm3:buurtscore20': {'features': [{'properties': {'kscore': 5}}]},
+ 'service.pdok.nl/rws/ahn/wms/v1_0?request=GetFeatureInfo&layers=dsm_05m': {'features': [{'properties': {'value_list': '12.5'}}]},
+ 'service.pdok.nl/rws/ahn/wms/v1_0?request=GetFeatureInfo&layers=dtm_05m': {'features': [{'properties': {'value_list': '2.5'}}]},
+ 'gis.gdngeoservices.nl/standalone/services/blk_gdn/lks_blk_rd_v1/MapServer/WMSServer': {'features': [{'properties': {'AUTHORITY_NM': 'Proefomgevingsdienst',
+     'WEBSITE_BLN': 'J', 'DOSSIER_BLN': 'N', 'WEBSITE_URL': 'https://bodem.proef.example/'}}]},
+ 'api.panoramax.xyz/api/search': {'features': [
+     {'id': 'proef-ver', 'geometry': {'type': 'Point', 'coordinates': [5.2, 52.2]}, 'properties': {'datetime': '2025-01-01T10:00:00Z', 'geovisio:thumbnail': 'https://foto.proef.example/ver.jpg'}},
+     {'id': 'proef-1', 'geometry': {'type': 'Point', 'coordinates': [5.1003, 52.1001]}, 'properties': {'datetime': '2025-05-05T10:00:00Z', 'geovisio:producer': 'proefmaker',
+      'geovisio:thumbnail': 'https://foto.proef.example/p1.jpg'}}]},
+ 'graph.mapillary.com/images': {'data': [{'id': '777', 'captured_at': 1730000000000, 'computed_geometry': {'coordinates': [5.1001, 52.1]}, 'thumb_256_url': 'https://foto.proef.example/m1.jpg'}]},
+ 'foto.proef.example/p1.jpg': 'base64:' + base64.b64encode(b'\xff\xd8\xff\xe0PROEFFOTO').decode(),
+ 'foto.proef.example/m1.jpg': 'base64:' + base64.b64encode(b'\xff\xd8\xff\xe0PROEFFOTO2').decode(),
  'api.pdok.nl/kadaster/brk-kadastrale-kaart': {'features': [{'properties': {'kadastrale_gemeente_waarde': 'Nergensdorp', 'akr_kadastrale_gemeente_code_waarde': 'NGD00',
      'sectie': 'Z', 'perceelnummer': 13, 'kadastrale_grootte_waarde': 513, 'soort_grootte_waarde': 'Vastgesteld', 'begin_geldigheid': '2010-01-01T00:00:00Z'}}]},
  'opendata.rdw.nl/resource/m9d7-ebf2.json': [{'kenteken': 'ZZ999Q', 'merk': 'PROEFMERK', 'handelsbenaming': 'MODEL X', 'eerste_kleur': 'GROEN', 'vervaldatum_apk': '20270101',
@@ -91,6 +116,32 @@ k = kaart(r, 'Perceel'); eis(veld(k, 'Kadastrale aanduiding') == 'Nergensdorp Z 
 eis(any('WOZ' in i['tekst'] for i in kaart(r, 'Meer over dit adres').get('links', [])), 'adres: WOZ/Omgevingsloket-links')
 eis(bool(kaart(r, 'Bekendmakingen over dit adres').get('items')), 'adres: bekendmakingen op straat + plaats')
 eis(any(x['soort'] == 'perceel' for x in (r.get('graaf') or {}).get('knopen', [])), 'netwerkplaat: adres → perceel')
+# --- wv2712: adres deel 3 (buurt, hoogte, bodem, straatbeeld)
+k = kaart(r, 'Buurtcijfers (CBS)')
+eis(veld(k, 'Inwoners (2026)') == '1.300' and veld(k, 'Gemiddelde WOZ-waarde (2025)') == '€ 413.000  (gemeente € 399.000; Nederland € 350.000)', 'CBS: nieuwste jaar per veld, met gemeente en NL')
+eis(veld(k, 'Leeftijd (2025)') == '0–15: 10 % · 15–25: 10 % · 25–45: 20 % · 45–65: 30 % · 65+: 30 %' and veld(k, 'In armoede (2024)') == '1,3 %', 'CBS: leeftijd in één jaar, ouder jaar als het nieuwe leeg is')
+eis(veld(k, 'Stedelijkheid (2025)') == 'weinig stedelijk' and veld(k, 'Afstand tot een huisartsenpraktijk (2025)').startswith('0,7 km'), 'CBS: stedelijkheid en afstand tot huisarts')
+eis(any(l['host'] == 'opendata.cbs.nl' and l['naar_buiten'].startswith('buurtcode BU99990101') for l in r['logboek']), 'CBS: alleen de buurtcode naar buiten')
+k = kaart(r, 'Leefbaarheid'); eis(veld(k, 'Oordeel 2024') == 'goed (7 van 9)' and veld(k, 'Door de jaren') == '2020: voldoende → 2022: ruim voldoende → 2024: goed', 'Leefbaarometer: oordeel en trend')
+eis(veld(k, 'Overlast en onveiligheid') == '−0,050 (slechter dan gemiddeld)' and veld(k, 'Voorzieningen') == '+0,000 (gemiddeld)', 'Leefbaarometer: dimensies in woorden')
+k = kaart(r, 'Hoogte (AHN)'); eis(veld(k, 'Maaiveld rond het adres') == 'ca. 2,5 m NAP' and veld(k, 'Hoogte boven maaiveld') == 'ca. 10,0 m', 'AHN: maaiveld (DTM) en hoogte (DSM − DTM)')
+k = kaart(r, 'Bodem'); eis(veld(k, 'Bevoegd gezag bodem') == 'Proefomgevingsdienst' and any(l.get('url') == 'https://bodem.proef.example/' for l in k.get('links', [])), 'Bodemloket: bevoegd gezag + eigen viewer')
+k = kaart(r, 'Straatbeeld'); eis(len(k.get('beelden') or []) == 1 and k['beelden'][0]['src'].startswith('data:image/jpeg') and 'proefmaker' in k['beelden'][0]['titel'] and 'Mapillary komt erbij' in (k.get('klein') or ''), 'Panoramax: nabije foto, verre niet; Mapillary zonder sleutel = uitleg')
+eis(any('google.com/maps' in (l.get('url') or '') for l in k.get('links', [])) and not any(l['host'] and 'google' in l['host'] for l in r['logboek']), 'Street View: alleen een link, geen aanroep naar Google')
+eis(all(k.get('juridisch') for k in r['kaarten'] if k['titel'] in ('Buurtcijfers (CBS)', 'Leefbaarheid (Leefbaarometer)', 'Hoogte (AHN)', 'Bodem (Bodemloket)', 'Straatbeeld')), 'deel 3: elke kaart heeft de juridische regel')
+TOK = 'PROEFTOKEN-verzonnen-8813'
+r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True, sleutels={'mapillary': TOK, 'ep_online': TOK + 'e'})
+k = kaart(r, 'Straatbeeld'); eis(len(k.get('beelden') or []) == 2 and any('Mapillary' in b['titel'] for b in k['beelden']) and any('pKey=777' in (l.get('url') or '') for l in k.get('links', [])), 'Mapillary met sleutel: foto + link')
+eis(any(l['host'] == 'public.ep-online.nl' for l in r['logboek']), 'EP-online: met de sleutel uit de invoer')
+c = sqlite3.connect(os.environ['OSINT_DB']); dump = '\n'.join(c.iterdump())
+eis(TOK not in json.dumps(r) and TOK not in dump, 'sleutels niet in de uitkomst of osint.sqlite')
+r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='socev', herkomst='david-vraag', beelden=False)
+eis(not any(l['host'] in ('api.panoramax.xyz', 'graph.mapillary.com') for l in r['logboek']) and kaart(r, 'Buurtcijfers (CBS)'), 'Socev (geen beelden): geen straatbeeld, wel buurtcijfers')
+DEEL3 = {'opendata.cbs.nl', 'geo.leefbaarometer.nl', 'gis.gdngeoservices.nl', 'api.panoramax.xyz', 'graph.mapillary.com', 'foto.proef.example'}
+r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='socev', herkomst='mogelijk-medisch')
+eis(r['poort']['niveau'] == 'eigen' and ext(r) == 0 and not {l['host'] for l in r['logboek'] if l['status'] != 'poort dicht'} & DEEL3, 'poort: adres met herkomst mogelijk medisch → niets naar CBS/LBM/AHN/bodem/straatbeeld')
+r = zoek(ingang='adres', term='Proefstraat 1 Nergensdorp 111222333', wie='david', sleutels={'mapillary': TOK})
+eis(r['poort']['niveau'] == 'niets' and ext(r) == 0, 'poort: adres met BSN-vorm → nul externe aanroepen (ook deel 3)')
 # --- kenteken
 r = zoek(ingang='auto', term='ZZ-999-Q', wie='david')
 k = kaart(r, 'Kenteken'); eis(r.get('ingang') == 'kenteken' and veld(k, 'Merk') == 'PROEFMERK' and veld(k, 'APK geldig tot') == '01-01-2027' and veld(k, 'Brandstof') == 'Elektriciteit', 'RDW: merk, APK, brandstof')
@@ -121,6 +172,32 @@ if os.path.exists(os.path.join(T, 'tools', 'exiftool', 'exiftool')):
         eis(r['kaarten'][0]['titel'] == 'Poort' and len(r['kaarten']) == 1 and a.decode() not in json.dumps(r), 'bestand met %s in de metadata: niets getoond' % a.decode()[:9])
 else:
     print('overslaan: ExifTool ontbreekt hier (bestand-toetsen)')
+# --- wv2712: fotoforensiek (ELA + kloondetectie, lokaal); alleen als Pillow + numpy er zijn (venv osint, of pip in CI)
+try:
+    import io, numpy as np
+    from PIL import Image, ImageFilter
+    PIL_OK = True
+except ImportError:
+    PIL_OK = False
+if PIL_OK:
+    rng = np.random.default_rng(13)
+    im = Image.fromarray((rng.random((60, 80, 3)) * 255).astype(np.uint8)).resize((640, 480), Image.BICUBIC).filter(ImageFilter.GaussianBlur(1))   # verzonnen textuur
+    def jpg(x):
+        b = io.BytesIO(); x.save(b, 'JPEG', quality=95); return base64.b64encode(b.getvalue()).decode()
+    kl = im.copy(); kl.paste(im.crop((60, 60, 220, 180)), (380, 260))
+    r = zoek(ingang='bestand', bestand=jpg(kl), naam='betaalbewijs.jpg', wie='david')
+    k = kaart(r, 'Fotoforensiek'); eis('twee keer' in (k.get('let') or '') and len(k.get('beelden') or []) == 3 and ext(r) == 0 and r['kern'].get('foto') is True, 'fotoforensiek: kopie gevonden, drie beelden, niets naar buiten')
+    eis(veld(k, 'JPEG-kwaliteit (schatting)') == 95, 'fotoforensiek: JPEG-kwaliteit uit de kwantisatietabel')
+    r = zoek(ingang='bestand', bestand=jpg(im), naam='foto.jpg', wie='david')
+    k = kaart(r, 'Fotoforensiek'); eis(not k.get('let') and r['kern'].get('klonen') == 0 and len(k.get('beelden') or []) == 2, 'fotoforensiek: onbewerkte foto = geen kopie')
+    r = zoek(ingang='bestand', bestand=jpg(kl), naam='scan 111222333.jpg', wie='david')
+    eis(r['poort']['niveau'] == 'niets' and not kaart(r, 'Fotoforensiek') and not kaart(r, 'Het bestand') and ext(r) == 0, 'fotoforensiek: BSN-vorm in de naam → niets getoond')
+    r = zoek(ingang='bestand', bestand=jpg(kl), naam='foto.jpg', wie='socev', herkomst='david-vraag')
+    eis(r['poort']['niveau'] == 'niets' and not kaart(r, 'Fotoforensiek'), 'fotoforensiek: alleen voor David (Socev: niets)')
+    r = zoek(ingang='bestand', bestand=base64.b64encode(b'%PDF-1.4 proef').decode(), naam='brief.pdf', wie='david')
+    eis(not kaart(r, 'Fotoforensiek'), 'fotoforensiek: geen foto (pdf) = geen ELA-kaart')
+else:
+    print('overslaan: Pillow/numpy ontbreken hier (fotoforensiek-toetsen; OSINT_PYTHON=/opt/data/venvs/osint/bin/python)')
 # --- voetafdruk en lijkende domeinen (alleen eigen lijsten)
 i = run(['instelling'], {'zet': {'gebruikersnamen': ['qzvproef8813', '111222333'], 'adressen': ['verzonnen.proef8813@example.com'], 'domeinen': ['proefpraktijk.example']}})
 eis(i.get('instellingen', {}).get('gebruikersnamen') == ['qzvproef8813'] and '111222333' in i.get('geweigerd', []), 'instelling: BSN-vorm geweigerd')

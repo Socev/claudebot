@@ -20852,7 +20852,7 @@ async function appPakjes(req, res, a, route, d) {
 // anders machinekamer; herkomst bepaalt in osint.py of iets naar buiten mag; geen kaartbeelden). De zoekterm komt nooit in api.log.
 // Het kind krijgt alleen de omgevingsnamen die de eigen bronnen nodig hebben. Alleen op de primaire kant (daar staat osint.sqlite).
 const OSINT_SCRIPT = path.join(__dirname, 'osint.py');
-const OSINT_ENV = ['PATH', 'HOME', 'LANG', 'PORT', 'API_SECRET', 'SUPABASE_RPC_CONTACTEN', 'N8N_WEBHOOK_AGENDA_API', 'VAULT_DIR', 'OSINT_DB', 'EP_ONLINE_SLEUTEL'];   // wv2698: EP-online pas met Davids gratis RVO-sleutel
+const OSINT_ENV = ['PATH', 'HOME', 'LANG', 'PORT', 'API_SECRET', 'SUPABASE_RPC_CONTACTEN', 'N8N_WEBHOOK_AGENDA_API', 'VAULT_DIR', 'OSINT_DB', 'EP_ONLINE_SLEUTEL'];   // wv2698: EP-online pas met Davids gratis RVO-sleutel (wv2712: liever uit de kluis via stdin, zie osintSleutels)
 function osintPython() {
   const v = process.env.OSINT_PYTHON || '/opt/data/venvs/osint/bin/python';
   try { fs.accessSync(v, fs.constants.X_OK); return v; } catch (e) { return 'python3'; }
@@ -20881,6 +20881,28 @@ function osintInvoer(d, wie) {
   if (typeof d.kop === 'string' && d.kop.trim()) v.kop = d.kop.slice(0, 60000);
   if (wie === 'david' && typeof d.bestand === 'string' && d.bestand.length <= 14 * 1024 * 1024) { v.bestand = d.bestand; v.naam = t(d.naam, 120); }
   return v;
+}
+// wv2712: gratis sleutels voor OSINT (EP-online, Mapillary) uit de kluis, alleen deze twee namen, 10 minuten in het geheugen (ook 'geen').
+// Ze gaan via stdin naar osint.py (nooit in de omgeving, api.log of de uitkomst); de kluis niet bereikbaar = zonder sleutels verder.
+let osintSleutelCache = { t: 0, w: null };
+async function osintSleutels() {
+  if (osintSleutelCache.w && Date.now() - osintSleutelCache.t < 600000) return osintSleutelCache.w;
+  const w = {};
+  try {
+    if (typeof tibberMgmt !== 'function') return w;
+    const r = await tibberMgmt("select name, decrypted_secret as w from vault.decrypted_secrets where name in ('ep_online_sleutel', 'mapillary_token')");
+    r.forEach(function (x) {
+      const v = x && typeof x.w === 'string' ? x.w.trim() : '';
+      if (v && x.name === 'ep_online_sleutel') w.ep_online = v;
+      if (v && x.name === 'mapillary_token') w.mapillary = v;
+    });
+  } catch (e) { return w; }
+  osintSleutelCache = { t: Date.now(), w: w };
+  return w;
+}
+async function osintZoekMetSleutels(v) {
+  if (v.ingang === 'auto' || v.ingang === 'adres') v.sleutels = await osintSleutels();
+  return osintRun(['zoek'], v);
 }
 async function appOsint(req, res, a, route, d) {
   if (!fs.existsSync(OSINT_SCRIPT)) return appWeiger(res, 404, 'OSINT zit niet in deze versie van de pod', 'osint ontbreekt');
@@ -20912,14 +20934,14 @@ async function appOsint(req, res, a, route, d) {
   if (route === 'POST /app/osint/bestand' && ing !== 'bestand') return appWeiger(res, 400, 'alleen voor een bestand', 'osint bestand ingang');
   if (route === 'POST /app/osint/bestand' && typeof (d || {}).bestand === 'string' && d.bestand.length > 14 * 1024 * 1024) return appWeiger(res, 413, 'bestand te groot (hooguit 10 MB)', 'osint bestand groot');
   if (route === 'POST /app/osint/zoek' && ing === 'bestand') return appWeiger(res, 400, 'een bestand gaat via /app/osint/bestand', 'osint bestand route');
-  const r = await osintRun(['zoek'], osintInvoer(d || {}, 'david'));
+  const r = await osintZoekMetSleutels(osintInvoer(d || {}, 'david'));
   res._app.reden = 'osint zoek ' + String(r.ingang || '?').slice(0, 10) + ' ' + String((r.poort && r.poort.niveau) || 'fout').slice(0, 8) + ' extern ' + (Number(r.extern) || 0) + (r.cache ? ' cache' : '');
   return appStuur(res, r.ok ? 200 : (r.fout === 'lege zoekterm' || r.fout === 'onbekende ingang' ? 400 : 503), r);
 }
 async function smalOsint(d, socev) {
   if (!fs.existsSync(OSINT_SCRIPT)) return { status: 404, j: { ok: false, fout: 'OSINT zit niet in deze versie van de pod' } };
   if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'OSINT werkt alleen op de hoofdpod' } };
-  const r = await osintRun(['zoek'], osintInvoer(d || {}, socev ? 'socev' : 'machinekamer'));
+  const r = await osintZoekMetSleutels(osintInvoer(d || {}, socev ? 'socev' : 'machinekamer'));
   return { status: r.ok ? 200 : (r.fout === 'lege zoekterm' || r.fout === 'onbekende ingang' ? 400 : 503), j: r };
 }
 // ── einde OVIS OSINT ──

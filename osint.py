@@ -21,7 +21,7 @@ OSINT_NEP_NET=1 (toets: elke netwerkaanroep geeft een nepantwoord en telt alleen
 import base64, concurrent.futures as cf, datetime, hashlib, html, json, os, re, sqlite3, subprocess, sys, time, unicodedata
 import urllib.parse as up, urllib.request, urllib.error
 
-VERSIE = 'osint-2'
+VERSIE = 'osint-3'
 HIER = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ.get('OSINT_DB') or '/opt/data/osint/osint.sqlite'
 VAULT = os.environ.get('VAULT_DIR') or '/opt/data/AI_SecondBrain'
@@ -187,8 +187,10 @@ def nep_antwoord(url):
     except Exception:
         return None
     u = up.urlsplit(url)
+    q = up.parse_qs(u.query)
     for k in sorted(m, key=len, reverse=True):
-        if (u.hostname + u.path).startswith(k):
+        basis, _, eis = k.partition('?')   # wv2712: 'host/pad?a=b&c=d' = ook deze queryparameters moeten erin staan
+        if (u.hostname + u.path).startswith(basis) and all(w in q.get(a, []) for a, w in up.parse_qsl(eis)):
             v = m[k]
             return v if isinstance(v, str) else json.dumps(v)
     return None
@@ -207,7 +209,7 @@ def haal(ctx, bron, url, naar_buiten, soort='extern', data=None, hdr=None, timeo
             status = 'nep'
             x = nep_antwoord(url)
             x = (x if x is not None else '{}')
-            x = x.encode() if binair else x
+            x = (base64.b64decode(x[7:]) if x.startswith('base64:') else x.encode()) if binair else x   # wv2712: 'base64:…' = echte bytes (foto)
             return ('200', x) if metcode else x
         h = {'User-Agent': UA, 'Accept': '*/*'}
         h.update(hdr or {})
@@ -361,7 +363,8 @@ def persoonspaginas(naam):
 WMS = {'top10nl': ('https://service.pdok.nl/brt/top10nl/wms/v1_0', 'top10nl', 'image/png', 'PDOK TOP10NL-kaart'),
        'pand': ('https://service.pdok.nl/lv/bag/wms/v2_0', 'pand', 'image/png', 'BAG-kaartlaag'),
        'foto': ('https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0', 'Actueel_orthoHR', 'image/jpeg', 'PDOK luchtfoto'),
-       'perceel': ('https://service.pdok.nl/kadaster/kadastralekaart/wms/v5_0', 'Kadastralekaart', 'image/png', 'Kadastrale kaart (PDOK WMS)')}
+       'perceel': ('https://service.pdok.nl/kadaster/kadastralekaart/wms/v5_0', 'Kadastralekaart', 'image/png', 'Kadastrale kaart (PDOK WMS)'),
+       'ahn': ('https://service.pdok.nl/rws/ahn/wms/v1_0', 'dsm_05m', 'image/png', 'AHN hoogtekaart (PDOK WMS)')}   # wv2712
 JAREN = [('2016', '2016_ortho25'), ('2019', '2019_ortho25'), ('2022', '2022_orthoHR'), ('2026', '2026_orthoHR')]
 BAG_WFS = 'https://service.pdok.nl/lv/bag/wfs/v2_0?service=WFS&version=2.0.0&request=GetFeature&outputFormat=application/json&'
 
@@ -402,11 +405,12 @@ def zoek_adres(ctx, term):
     vbo = (bag(ctx, 'bag:verblijfsobject', 'identificatie', vbo_id) or [{}])[0] if vbo_id else {}
     pand = bag(ctx, 'bag:verblijfsobject', 'pandidentificatie', vbo['pandidentificatie']) if vbo.get('pandidentificatie') else []
     xy = [float(v) for v in re.findall(r'[\d.]+', ls.get('centroide_rd') or '')]
-    beelden, tijd = [], []
+    beelden, tijd, img = [], [], {}
     if len(xy) == 2 and ctx.beelden:
         x, y = xy
         bbox = '%d,%d,%d,%d' % (x - 90, y - 60, x + 90, y + 60)
-        taken = {'kaart': ('top10nl', None, None), 'pand': ('pand', None, None), 'foto': ('foto', None, None), 'perceel': ('perceel', None, None)}
+        taken = {'kaart': ('top10nl', None, None), 'pand': ('pand', None, None), 'foto': ('foto', None, None), 'perceel': ('perceel', None, None),
+                 'ahn': ('ahn', None, None)}
         taken.update({'j' + j: ('foto', l, 'PDOK luchtfoto ' + j) for j, l in JAREN})
         with cf.ThreadPoolExecutor(6) as ex:
             fut = {k: ex.submit(wms, ctx, *v[:1], bbox, v[1], v[2]) for k, v in taken.items()}
@@ -464,6 +468,7 @@ def zoek_adres(ctx, term):
             except Exception:
                 pass
     kaarten += extra
+    kaarten += adres_deel3(ctx, ls, img)   # wv2712: buurt, hoogte, bodem, straatbeeld
     kaarten.append(adres_links(ls))
     kaarten.append(melding('Bedrijven op dit adres', 'Welke bedrijven hier gevestigd zijn, kan pas met een KvK-sleutel (betaalde keuze, niet aangezet).'))
     return kaarten, {'adres': ls.get('weergavenaam'), 'bouwjaar': vbo.get('bouwjaar'), 'adressen_in_pand': len(pand), 'perceel': perceel}
@@ -848,6 +853,12 @@ JUR = {
     'xon': 'Alleen je eigen adressen: dat is jouw keuze over jouw gegevens.',
     'hibp': 'Eigen domeinen: geen bezwaar.',
     'dnstwist': 'Eigen domeinen: geen bezwaar; alleen DNS-vragen gaan naar buiten.',
+    'cbs': 'Geaggregeerde buurtcijfers (CBS, open data): geen bezwaar; ze gaan niet over één huishouden.',
+    'lbm': 'Leefbaarometer (BZK, open data): buurtgemiddelde zonder persoonsgegevens; geen bezwaar.',
+    'ahn': 'Hoogtekaart (AHN, open data): geen bezwaar.',
+    'bodem': 'Bodeminformatie is openbaar (Bodemloket, omgevingsdiensten): geen bezwaar.',
+    'straat': 'Straatfoto\'s van anderen (CC BY-SA): kijken is licht; doorplaatsen alleen met naamsvermelding. Mensen of kentekens op een foto niet herleiden.',
+    'forensiek': 'Lokaal op de pod: de foto gaat niet naar buiten en wordt na het lezen gewist. De uitkomst is een aanwijzing, geen bewijs.',
 }
 DOMEINEN_STANDAARD = ['tolgaarde.nl', 'huisartsentolgaarde.nl', 'hpgroenhouten.nl', 'hapleusden.nl', 'socev.dev']
 TOOLS = os.environ.get('OSINT_TOOLS') or '/opt/data/venvs/osint/tools'
@@ -1089,7 +1100,7 @@ def brk_veilig(ctx, ls):
 
 
 def ep_online(ctx, vbo_id):
-    sl = os.environ.get('EP_ONLINE_SLEUTEL')
+    sl = sleutel('ep_online')
     if not sl or not vbo_id:
         return None
     r = jhaal(ctx, 'EP-online (energielabel)', 'https://public.ep-online.nl/api/v5/PandEnergielabel/AdresseerbaarObject/' + vbo_id, 'BAG-id ' + vbo_id,
@@ -1107,9 +1118,292 @@ def adres_links(ls):
     links = [item('WOZ-waarde per jaar (WOZ-waardeloket)', 'handmatig: typ het adres', 'https://www.wozwaardeloket.nl/'),
              item('Wat mag hier (Omgevingsloket, regels op de kaart)', None, 'https://omgevingswet.overheid.nl/regels-op-de-kaart'),
              item('Bestemmingsplan (Ruimtelijkeplannen)', None, 'https://www.ruimtelijkeplannen.nl/viewer?adres=' + q)]
-    if not os.environ.get('EP_ONLINE_SLEUTEL'):
+    if not sleutel('ep_online'):
         links.append(item('Energielabel (EP-online)', 'automatisch zodra de gratis RVO-sleutel er is', 'https://www.ep-online.nl/Energylabel/Search'))
     return kaartje('Meer over dit adres', 'Links naar overheidsloketten', links=links, juridisch=JUR['adreslinks'])
+
+
+# ---------------------------------------------------------------- adres deel 3 (wv2712): buurt, hoogte, bodem, straatbeeld
+# Gratis sleutels (EP-online, Mapillary) komen van server.js via stdin (uit de kluis, alleen die twee namen); nooit in uitvoer, logboek of cache.
+SLEUTELS = {}
+SLEUTEL_ENV = {'ep_online': 'EP_ONLINE_SLEUTEL', 'mapillary': 'MAPILLARY_TOKEN'}
+
+
+def sleutel_er(naam):
+    return bool(sleutel(naam))
+
+
+def sleutel(naam):
+    w = SLEUTELS.get(naam) or os.environ.get(SLEUTEL_ENV[naam]) or ''
+    return w.strip() or None
+
+
+# CBS Kerncijfers wijken en buurten (gemeten 8-11-2026: 2026 deels gevuld, 2025 meer, 2024 bijna alles); per veld het nieuwste gevulde jaar.
+CBS_TABELLEN = [('2026', '86358NED'), ('2025', '86165NED'), ('2024', '85984NED')]
+CBS_LEEFTIJD = [('k_0Tot15Jaar', '0–15'), ('k_15Tot25Jaar', '15–25'), ('k_25Tot45Jaar', '25–45'), ('k_45Tot65Jaar', '45–65'), ('k_65JaarOfOuder', '65+')]
+CBS_VELD = [('AantalInwoners', 'Inwoners', 'n'), ('HuishoudensTotaal', 'Huishoudens', 'n'), ('GemiddeldeHuishoudensgrootte', 'Gemiddelde huishoudensgrootte', 'x'),
+            ('Bevolkingsdichtheid', 'Inwoners per km²', 'n'), ('Woningvoorraad', 'Woningen', 'n'),
+            ('GemiddeldeWOZWaardeVanWoningen', 'Gemiddelde WOZ-waarde', 'k€'), ('Koopwoningen', 'Koopwoningen', '%'),
+            ('InBezitWoningcorporatie', 'Huur van een corporatie', '%'), ('GemiddeldInkomenPerInwoner', 'Gemiddeld inkomen per inwoner', 'k€'),
+            ('k_40PersonenMetLaagsteInkomen', 'Bij de 40 % laagste inkomens van NL', '%'), ('k_20PersonenMetHoogsteInkomen', 'Bij de 20 % hoogste inkomens van NL', '%'),
+            ('MediaanVermogenVanParticuliereHuish', 'Mediaan vermogen huishoudens', 'k€'), ('PersonenInArmoede', 'In armoede', '%'),
+            ('Nettoarbeidsparticipatie', 'Netto arbeidsparticipatie', '%'), ('BedrijfsvestigingenTotaal', 'Bedrijfsvestigingen', 'n'),
+            ('AfstandTotHuisartsenpraktijk', 'Afstand tot een huisartsenpraktijk', 'km'), ('MateVanStedelijkheid', 'Stedelijkheid', 'stad')]
+STEDELIJK = {1: 'zeer sterk stedelijk', 2: 'sterk stedelijk', 3: 'matig stedelijk', 4: 'weinig stedelijk', 5: 'niet stedelijk'}
+
+
+def getal_nl(v, dec=0):
+    s = ('{:,.%df}' % dec).format(v)
+    return s.replace(',', '§').replace('.', ',').replace('§', '.')
+
+
+def cbs_fmt(v, soort):
+    if v is None:
+        return None
+    if soort == 'n':
+        return getal_nl(v)
+    if soort == 'x':
+        return getal_nl(v, 1)
+    if soort == 'k€':
+        return '€ ' + getal_nl(v * 1000)
+    if soort == '%':
+        return getal_nl(v, 1 if v % 1 else 0) + ' %'
+    if soort == 'km':
+        return getal_nl(v, 1) + ' km'
+    if soort == 'stad':
+        return STEDELIJK.get(int(v), str(v))
+    return str(v)
+
+
+def cbs(ctx, bu, gm):
+    """Buurtcijfers (geaggregeerd): één aanroep per jaartabel met buurt, gemeente en Nederland; naar buiten gaat alleen de buurtcode."""
+    codes = [c for c in (bu, gm, 'NL00') if c]
+    flt = ' or '.join("WijkenEnBuurten eq '%s'" % c.ljust(10) for c in codes)
+
+    def een(jt):
+        j, t = jt
+        r = jhaal(ctx, 'CBS wijken en buurten ' + j, 'https://opendata.cbs.nl/ODataApi/odata/%s/TypedDataSet?%s' % (t, up.urlencode({'$filter': flt})),
+                  'buurtcode %s (+ gemeente en Nederland)' % bu, timeout=20)
+        rij = {}
+        for x in ((r or {}).get('value') or []) if isinstance(r, dict) else []:
+            if isinstance(x, dict):
+                rij[str(x.get('WijkenEnBuurten') or '').strip()] = {re.sub(r'_\d+$', '', k): v for k, v in x.items()}
+        return j, rij
+    with cf.ThreadPoolExecutor(3) as ex:
+        jaren = dict(ex.map(een, CBS_TABELLEN))
+    if not any(bu in r for r in jaren.values()):
+        return kaartje('Buurtcijfers (CBS)', 'CBS Kerncijfers wijken en buurten', klein='Het CBS gaf geen cijfers voor buurt %s.' % bu, juridisch=JUR['cbs'])
+
+    def waarde(code, veld):
+        for j, _ in CBS_TABELLEN:
+            v = ((jaren.get(j) or {}).get(code) or {}).get(veld)
+            if v is not None:
+                return j, v
+        return None, None
+    velden = []
+    for veld, label, soort in CBS_VELD:
+        j, v = waarde(bu, veld)
+        if v is None:
+            continue
+        rest = []
+        for code, naam in ((gm, 'gemeente'), ('NL00', 'Nederland')):
+            w = ((jaren.get(j) or {}).get(code) or {}).get(veld) if code else None
+            if w is not None and veld not in ('AantalInwoners', 'HuishoudensTotaal', 'Woningvoorraad', 'BedrijfsvestigingenTotaal'):
+                rest.append('%s %s' % (naam, cbs_fmt(w, soort)))
+        velden.append(('%s (%s)' % (label, j), cbs_fmt(v, soort) + ('  (' + '; '.join(rest) + ')' if rest else '')))
+    for j, _ in CBS_TABELLEN:   # leeftijd: het nieuwste jaar waarin alle vijf groepen er zijn
+        r = (jaren.get(j) or {}).get(bu) or {}
+        if r.get('AantalInwoners') and all(r.get(v) is not None for v, _ in CBS_LEEFTIJD):
+            velden.insert(1, ('Leeftijd (%s)' % j, ' · '.join('%s: %d %%' % (lab, round(100.0 * r[v] / r['AantalInwoners'])) for v, lab in CBS_LEEFTIJD)))
+            break
+    j = next((j for j, _ in CBS_TABELLEN if (jaren.get(j) or {}).get(bu)), None)
+    naam = (jaren.get(j) or {}).get(bu, {}).get('Gemeentenaam')
+    return kaartje('Buurtcijfers (CBS)', 'CBS Kerncijfers wijken en buurten (open data)', velden,
+                   klein='Buurt %s%s; tussen haakjes de gemeente en heel Nederland. Gemiddelden over de buurt, niet over dit adres.' % (bu, (' in ' + str(naam).strip()) if naam else ''),
+                   links=[item('CBS-buurtcijfers op de kaart', None, 'https://www.cbsinuwbuurt.nl/')], juridisch=JUR['cbs'])
+
+
+# Leefbaarometer 3.0 (BZK): WFS geo.leefbaarometer.nl, laag buurtscore<jj> (gemeten 8-11-2026). kscore 1..9; dimensies = bijdrage t.o.v. NL (+ = beter).
+LBM_WFS = 'https://geo.leefbaarometer.nl/lbm3/ows'
+LBM_KLASSE = {1: 'zeer onvoldoende', 2: 'ruim onvoldoende', 3: 'onvoldoende', 4: 'zwak', 5: 'voldoende', 6: 'ruim voldoende', 7: 'goed', 8: 'zeer goed', 9: 'uitstekend'}
+LBM_DIM = [('won', 'Woningen'), ('fys', 'Fysieke omgeving'), ('vrz', 'Voorzieningen'), ('soc', 'Sociale samenhang'), ('onv', 'Overlast en onveiligheid')]
+
+
+def leefbaarometer(ctx, bu):
+    def een(j):
+        q = {'service': 'WFS', 'version': '2.0.0', 'request': 'GetFeature', 'typeNames': 'lbm3:buurtscore' + j, 'outputFormat': 'application/json',
+             'count': 1, 'propertyName': 'id,name,gemeente,year,lbm,afw,fys,onv,soc,vrz,won,kscore', 'cql_filter': "id='%s'" % bu}
+        r = jhaal(ctx, 'Leefbaarometer 20' + j, LBM_WFS + '?' + up.urlencode(q), 'buurtcode ' + bu, timeout=20)
+        f = ((r or {}).get('features') or [None])[0] if isinstance(r, dict) else None
+        return j, (f.get('properties') if isinstance(f, dict) else None)
+    with cf.ThreadPoolExecutor(3) as ex:
+        jr = dict(ex.map(een, ('24', '22', '20')))
+    nu = jr.get('24') or jr.get('22')
+    if not isinstance(nu, dict) or nu.get('kscore') is None:
+        return kaartje('Leefbaarheid (Leefbaarometer)', 'Leefbaarometer 3.0 (BZK)', klein='Geen leefbaarheidsscore voor buurt %s.' % bu, juridisch=JUR['lbm'])
+    ks = lambda p: ('%s (%s van 9)' % (LBM_KLASSE.get(int(p['kscore']), '?'), int(p['kscore']))) if isinstance(p, dict) and p.get('kscore') is not None else None
+    tl = lambda v: (('+' if v >= 0 else '−') + getal_nl(abs(v), 3) + (' (beter dan gemiddeld)' if v > 0.005 else ' (slechter dan gemiddeld)' if v < -0.005 else ' (gemiddeld)'))
+    velden = [('Oordeel %s' % nu.get('year'), ks(nu)),
+              ('Door de jaren', ' → '.join('20%s: %s' % (j, LBM_KLASSE.get(int(jr[j]['kscore']), '?')) for j in ('20', '22', '24') if isinstance(jr.get(j), dict) and jr[j].get('kscore') is not None))]
+    velden += [(n, tl(nu[k])) for k, n in LBM_DIM if isinstance(nu.get(k), (int, float))]
+    return kaartje('Leefbaarheid (Leefbaarometer)', 'Leefbaarometer 3.0 (ministerie BZK, open data)', velden,
+                   klein='Buurt %s (%s). De vijf regels zeggen hoeveel dat onderdeel de score van de buurt omhoog of omlaag duwt ten opzichte van heel Nederland.' % (nu.get('name') or bu, nu.get('gemeente') or ''),
+                   links=[item('Leefbaarometer-kaart', None, 'https://www.leefbaarometer.nl/kaart/')], juridisch=JUR['lbm'])
+
+
+AHN_WMS = 'https://service.pdok.nl/rws/ahn/wms/v1_0'
+
+
+def ahn_punt(ctx, laag, x, y):
+    q = {'service': 'WMS', 'version': '1.3.0', 'request': 'GetFeatureInfo', 'layers': laag, 'query_layers': laag, 'styles': '', 'crs': 'EPSG:28992',
+         'bbox': '%.2f,%.2f,%.2f,%.2f' % (x - 1, y - 1, x + 1, y + 1), 'width': 3, 'height': 3, 'i': 1, 'j': 1, 'info_format': 'application/json'}
+    r = jhaal(ctx, 'AHN hoogte (PDOK)', AHN_WMS + '?' + up.urlencode(q), 'punt bij het adres (RD-coördinaat)', timeout=20)
+    for f in ((r or {}).get('features') or []) if isinstance(r, dict) else []:
+        try:
+            v = float(str(((f or {}).get('properties') or {}).get('value_list')).split(',')[0])
+            if -50 < v < 400:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def ahn(ctx, x, y, beeld=None):
+    """Maaiveld = mediaan van het terreinmodel (DTM) op 4 punten 15 m rond het adres (onder een gebouw heeft de DTM een gat);
+    hoogste punt = oppervlaktemodel (DSM: dak, boom) op het adrespunt."""
+    pt = [('dsm_05m', x, y)] + [('dtm_05m', x + dx, y + dy) for dx, dy in ((15, 0), (-15, 0), (0, 15), (0, -15))]
+    with cf.ThreadPoolExecutor(5) as ex:
+        w = list(ex.map(lambda a: ahn_punt(ctx, *a), pt))
+    dak, grond = w[0], sorted(v for v in w[1:] if v is not None)
+    mv = (grond[len(grond) // 2] if len(grond) % 2 else (grond[len(grond) // 2 - 1] + grond[len(grond) // 2]) / 2) if grond else None
+    if dak is None and mv is None and not beeld:
+        return kaartje('Hoogte (AHN)', 'Actueel Hoogtebestand Nederland (PDOK)', klein='Geen hoogte gevonden op dit punt.', juridisch=JUR['ahn'])
+    velden = [('Maaiveld rond het adres', ('ca. %s m NAP' % getal_nl(mv, 1)) if mv is not None else None),
+              ('Hoogste punt op het adrespunt (dak, boom)', ('ca. %s m NAP' % getal_nl(dak, 1)) if dak is not None else None),
+              ('Hoogte boven maaiveld', ('ca. %s m' % getal_nl(dak - mv, 1)) if dak is not None and mv is not None else None)]
+    return kaartje('Hoogte (AHN)', 'Actueel Hoogtebestand Nederland via PDOK (open data)', velden,
+                   beelden=[{'titel': 'Hoogtekaart (AHN, oppervlak: hoe warmer, hoe hoger)', 'src': beeld}] if beeld else None,
+                   klein='Indicatief: één punt uit een hoogtemodel van 50 cm, gemeten in de AHN-vliegjaren.',
+                   links=[item('AHN-viewer (zelf inzoomen, ook bijgebouwen)', None, 'https://www.ahn.nl/ahn-viewer')], juridisch=JUR['ahn'])
+
+
+BODEM_WMS = 'https://gis.gdngeoservices.nl/standalone/services/blk_gdn/lks_blk_rd_v1/MapServer/WMSServer'
+
+
+def bodem(ctx, x, y):
+    """Bodemloket (gemeten 8-11-2026): de laag Beschikbaarheid_gegevens noemt per plek het bevoegd gezag en waar de bodemgegevens staan;
+    de laag WBB_locaties gaf op alle gemeten plekken niets meer (sinds de Omgevingswet bij de omgevingsdiensten) en wordt niet gevraagd."""
+    q = {'service': 'WMS', 'version': '1.3.0', 'request': 'GetFeatureInfo', 'layers': 'Beschikbaarheid_gegevens', 'query_layers': 'Beschikbaarheid_gegevens',
+         'styles': 'default', 'crs': 'EPSG:28992', 'bbox': '%.2f,%.2f,%.2f,%.2f' % (x - 50, y - 50, x + 50, y + 50), 'width': 101, 'height': 101,
+         'i': 50, 'j': 50, 'info_format': 'application/geo+json', 'feature_count': 3}
+    r = jhaal(ctx, 'Bodemloket', BODEM_WMS + '?' + up.urlencode(q), 'punt bij het adres (RD-coördinaat)', timeout=20)
+    f = ((r or {}).get('features') or [None])[0] if isinstance(r, dict) else None
+    p = (f or {}).get('properties') or {} if isinstance(f, dict) else {}
+    jn = lambda v: {'J': 'ja', 'N': 'nee'}.get(str(v or '').upper())
+    web = str(p.get('WEBSITE_URL') or '')
+    links = [item('Bodemloket-kaart (zelf inzoomen op het adres)', None, 'https://www.bodemloket.nl/kaart')]
+    if re.match(r'^https://[\w.-]+(/[\w./?=&%-]*)?$', web):
+        links.insert(0, item('Bodeminformatie van %s' % (p.get('AUTHORITY_NM') or 'het bevoegd gezag'), 'daar staan de onderzoeken en saneringen', web))
+    return kaartje('Bodem (Bodemloket)', 'Bodemloket (Rijkswaterstaat/provincies, open data)', [
+        ('Bevoegd gezag bodem', p.get('AUTHORITY_NM')), ('Eigen bodemviewer', jn(p.get('WEBSITE_BLN'))), ('Dossiers in het Bodemloket', jn(p.get('DOSSIER_BLN')))],
+        klein=None if p else 'Het Bodemloket gaf voor dit punt geen gegevens.', links=links, juridisch=JUR['bodem'])
+
+
+def afstand_m(lon1, lat1, lon2, lat2):
+    import math
+    return int(round(math.hypot((lon2 - lon1) * 111320 * math.cos(math.radians(lat1)), (lat2 - lat1) * 110570)))
+
+
+def foto_url_ok(u):
+    h = up.urlsplit(str(u or '')).hostname or ''
+    return str(u or '').startswith('https://') and '.' in h and not re.match(r'^[\d.]+$|^\[', h) and not PRIV_IP.match(h)
+
+
+def mini(ctx, bron, url):
+    if not foto_url_ok(url):
+        return None
+    try:
+        x = haal(ctx, bron, url, 'foto-id van de dienst (geen adres)', binair=True, timeout=20, maxb=400_000)
+    except PoortDicht:
+        raise
+    except Exception:
+        return None
+    return ('data:image/jpeg;base64,' + base64.b64encode(x).decode()) if x and x[:3] == b'\xff\xd8\xff' else None
+
+
+def straatbeeld(ctx, lon, lat):
+    """Straatfoto's binnen ± 100 m: Panoramax (vrij, CC BY-SA) en Mapillary (alleen met Davids gratis sleutel); alleen in de App (beelden)."""
+    dx, dy = 0.0015, 0.001
+    bbox = '%.6f,%.6f,%.6f,%.6f' % (lon - dx, lat - dy, lon + dx, lat + dy)
+    fotos, klein = [], []
+    r = jhaal(ctx, 'Panoramax (straatbeeld)', 'https://api.panoramax.xyz/api/search?' + up.urlencode({'bbox': bbox, 'limit': 50}),
+              'kaartvak rond het adres (± 200 x 200 m)', timeout=20)
+    for f in ((r or {}).get('features') or []) if isinstance(r, dict) else []:
+        try:
+            c = f['geometry']['coordinates']
+            p = f.get('properties') or {}
+            fotos.append({'dienst': 'Panoramax', 'id': str(f.get('id') or ''), 'm': afstand_m(lon, lat, float(c[0]), float(c[1])),
+                          'datum': datum_nl(p.get('datetime')), 'door': p.get('geovisio:producer'),
+                          'mini': p.get('geovisio:thumbnail') or (((f.get('assets') or {}).get('thumb') or {}).get('href')),
+                          'url': 'https://api.panoramax.xyz/#focus=pic&pic=%s' % up.quote(str(f.get('id') or ''))})
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+    tok = sleutel('mapillary')
+    if tok:
+        r = jhaal(ctx, 'Mapillary (straatbeeld)', 'https://graph.mapillary.com/images?' + up.urlencode(
+            {'fields': 'id,captured_at,computed_geometry,thumb_256_url', 'bbox': bbox, 'limit': 50}), 'kaartvak rond het adres (± 200 x 200 m)',
+            hdr={'Authorization': 'OAuth ' + tok}, timeout=20)
+        if isinstance(r, dict) and r.get('error'):
+            klein.append('Mapillary weigerde de sleutel (fout %s): vervang hem in Sleutelbos.' % str((r.get('error') or {}).get('code'))[:6])
+        for f in ((r or {}).get('data') or []) if isinstance(r, dict) else []:
+            try:
+                c = (f.get('computed_geometry') or {})['coordinates']
+                t = datetime.datetime.fromtimestamp(int(f.get('captured_at') or 0) / 1000, datetime.timezone.utc).date().isoformat() if f.get('captured_at') else None
+                fotos.append({'dienst': 'Mapillary', 'id': str(f.get('id') or ''), 'm': afstand_m(lon, lat, float(c[0]), float(c[1])), 'datum': datum_nl(t),
+                              'mini': f.get('thumb_256_url'), 'url': 'https://www.mapillary.com/app/?pKey=%s' % up.quote(str(f.get('id') or ''))})
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+    else:
+        klein.append('Mapillary komt erbij zodra de gratis sleutel er is.')
+    fotos = sorted((f for f in fotos if f['m'] <= 150), key=lambda f: f['m'])[:4]
+    with cf.ThreadPoolExecutor(4) as ex:
+        minis = list(ex.map(lambda f: mini(ctx, f['dienst'] + ' (foto)', f['mini']), fotos))
+    beelden = [{'titel': '%s · %d m · %s%s' % (f['dienst'], f['m'], f['datum'] or '?', (' · ' + str(f['door'])[:40]) if f.get('door') else ''), 'src': m, 'foto': True}
+               for f, m in zip(fotos, minis) if m]
+    links = [item('%s, %d m, %s' % (f['dienst'], f['m'], f['datum'] or '?'), 'grote foto en rondkijken', f['url']) for f in fotos]
+    links.append(item('Google Street View (opent Google Maps; gaat pas naar Google als je tikt)', None,
+                      'https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=%.6f,%.6f' % (lat, lon)))
+    if not fotos:
+        klein.insert(0, 'Geen vrije straatfoto\'s binnen 150 m (Panoramax is dun buiten de grote steden).')
+    return kaartje('Straatbeeld', 'Panoramax (CC BY-SA)' + (', Mapillary (CC BY-SA)' if tok else ''), beelden=beelden, links=links,
+                   klein=' '.join(klein) or None, juridisch=JUR['straat'])
+
+
+def adres_deel3(ctx, ls, beelden):
+    """Buurt (CBS + Leefbaarometer), hoogte (AHN), bodem (Bodemloket) en straatbeeld bij een gevonden adres; elk kaartje los, een fout kost alleen dat kaartje."""
+    bu = str(ls.get('buurtcode') or '').strip().upper()
+    gm = ('GM' + str(ls.get('gemeentecode'))) if re.fullmatch(r'\d{4}', str(ls.get('gemeentecode') or '')) else None
+    rd = [float(v) for v in re.findall(r'[\d.]+', ls.get('centroide_rd') or '')]
+    ll = [float(v) for v in re.findall(r'-?[\d.]+', ls.get('centroide_ll') or '')]
+    taken = []
+    if re.fullmatch(r'BU\d{8}', bu):
+        taken += [lambda: cbs(ctx, bu, gm), lambda: leefbaarometer(ctx, bu)]
+    if len(rd) == 2:
+        taken += [lambda: ahn(ctx, rd[0], rd[1], (beelden or {}).get('ahn')), lambda: bodem(ctx, rd[0], rd[1])]
+    if len(ll) == 2 and ctx.beelden:
+        taken.append(lambda: straatbeeld(ctx, ll[0], ll[1]))
+    uit = []
+    with cf.ThreadPoolExecutor(5) as ex:
+        for f in [ex.submit(t) for t in taken]:
+            try:
+                k = f.result()
+                if k:
+                    uit.append(k)
+            except PoortDicht:
+                pass
+            except Exception:
+                pass
+    return uit
 
 
 # ---------------------------------------------------------------- kenteken (wv2698; RDW open data, geen eigenaar)
@@ -1344,7 +1638,12 @@ def zoek_bestand(ctx, inhoud, naam):
     import tempfile, shutil
     et = exiftool()
     if not et:
-        return [melding('Bestand', 'ExifTool ontbreekt op de pod.')], {}
+        # wv2712: zonder ExifTool alleen de poort op de naam, dan de (lokale) fotoforensiek
+        reden = poort_vorm(naam or '')
+        if reden:
+            return [kaartje('Poort', 'OVIS OSINT-poort', let='Dit bestand bevat een kenmerk dat op een patiënt kan wijzen (%s); er wordt niets getoond.' % reden)], {'poort': 'dicht'}
+        fk, fkern = forensiek(inhoud)
+        return [melding('Bestand', 'ExifTool ontbreekt op de pod: geen metadata.')] + fk, fkern
     ext = (re.search(r'\.([A-Za-z0-9]{1,5})$', naam or '') or [None, 'bin'])[1].lower()
     d = tempfile.mkdtemp(prefix='osint-')
     try:
@@ -1394,7 +1693,204 @@ def zoek_bestand(ctx, inhoud, naam):
     rest = [(k, kort(v)) for k, v in meta.items() if k not in gezien and not k.startswith('File:')]
     if rest:
         kaarten.append(kaartje('Alle overige metadata (%d velden)' % len(rest), 'ExifTool (lokaal)', rest[:300], dicht=True))
-    return kaarten, {'velden': len(meta), 'signalen': len(sig), 'soort': meta.get('File:FileType')}
+    fk, fkern = forensiek(inhoud)   # wv2712: ELA + kloondetectie (alleen een foto; lokaal)
+    kaarten[1:1] = fk
+    return kaarten, dict({'velden': len(meta), 'signalen': len(sig), 'soort': meta.get('File:FileType')}, **fkern)
+
+
+# ---------------------------------------------------------------- fotoforensiek (wv2712; alleen een bestand dat David zelf uploadt, lokaal)
+# ELA (error level analysis): de foto één keer opnieuw als JPEG (kwaliteit 90) opslaan en het verschil versterken; een stuk dat veel feller
+# oplicht dan vergelijkbare vlakken kan er later in gezet zijn. Kloondetectie: blokken van 8 x 8 (op max 512 px) met dezelfde vorm en dezelfde
+# verschuiving, als samenhangend vlak van minstens 3 x 3 blokposities. Beide zijn aanwijzingen, geen bewijs. FotoForensics (extern) is geen
+# aanroep van de pod: de site weert geautomatiseerde uploads (gemeten 8-11-2026); de App heeft een bewuste knop waarmee David zelf uploadt.
+FOTO_SOORTEN = ('JPEG', 'MPO', 'PNG', 'WEBP', 'TIFF', 'BMP')
+JPEG_STD = [16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
+            18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99]
+
+
+def data_url(im, kwaliteit=80, max_b=720):
+    import io
+    im = im.copy()
+    im.thumbnail((max_b, max_b))
+    b = io.BytesIO()
+    im.convert('RGB').save(b, 'JPEG', quality=kwaliteit)
+    return 'data:image/jpeg;base64,' + base64.b64encode(b.getvalue()).decode()
+
+
+def klonen(im, np):
+    """→ lijst gebieden {'van': (x0, y0, x1, y1), 'naar': (...), 'blokken': n} in pixels van het originele beeld.
+    Blokken van 8 x 8 op elke pixelpositie, op ware grootte (een kopie staat dan precies op hele pixels); groter dan 4 MP wordt eerst met een
+    hele factor verkleind (dan minder betrouwbaar). Kenmerk = 16 deelgemiddelden van 2 x 2 (gesorteerd op 4 hoofdcomponenten); alleen blokken
+    met tekening. Per verschuiving het grootste samenhangende vlak (≥ 40 posities én ≥ 0,05 % van de foto, ≥ 6 x 6); herhalende patronen vallen af."""
+    g = im.convert('L')
+    k = 1
+    while (g.size[0] // k) * (g.size[1] // k) > 4_000_000:
+        k += 1
+    if k > 1:
+        g = g.reduce(k)
+    A = np.asarray(g, dtype=np.float32)
+    B = 8
+    if A.shape[0] < 4 * B or A.shape[1] < 4 * B:
+        return []
+    m2 = (A[:-1, :-1] + A[1:, :-1] + A[:-1, 1:] + A[1:, 1:]) / 4.0   # gemiddelde van elk 2 x 2-vak
+    gh, gw = A.shape[0] - B + 1, A.shape[1] - B + 1
+    kol = [m2[2 * r:2 * r + gh, 2 * c:2 * c + gw].reshape(-1) for r in range(4) for c in range(4)]
+    Fv = np.stack(kol, axis=1)
+    del kol
+    sd = Fv.std(axis=1)
+    idx = np.nonzero(sd >= 4)[0]   # alleen blokken met tekening: egale vlakken (lucht, papier) lijken altijd op elkaar
+    if len(idx) < 200:
+        return []
+    F = Fv[idx]
+    # sorteren op 4 hoofdcomponenten (ruis van een JPEG-ronde blijft daarin klein), afgerond op twee verschoven rasters; dan de buren
+    # in de volgorde op alle 16 kenmerken nagaan (verschil ≤ 3,5 grijswaarde)
+    st = F[:: max(1, len(F) // 20000)]
+    V = np.linalg.svd(st - st.mean(axis=0), full_matrices=False)[2][:4]
+    P = (F - st.mean(axis=0)) @ V.T
+    pa, pb = [], []
+    for schuif in (0.0, 3.0):
+        q = np.floor((P + schuif) / 6).astype(np.int32)
+        order = np.lexsort(q.T[::-1])
+        qs = q[order]
+        for n in (1, 2, 3, 4):
+            p = np.nonzero(np.all(qs[n:] == qs[:-n], axis=1))[0]
+            a, b = order[p], order[p + n]
+            ok = np.abs(F[a] - F[b]).max(axis=1) <= 3.5
+            pa.append(a[ok]); pb.append(b[ok])
+    a, b = idx[np.concatenate(pa)], idx[np.concatenate(pb)]
+    # scherp: één pixel ernaast moet duidelijk slechter passen, anders is het een glad verloop dat overal past (geen kopie)
+    ok = (b % gw < gw - 1) & (b + gw < gh * gw) & (a % gw < gw - 1) & (a + gw < gh * gw)
+    a, b = a[ok], b[ok]
+    d0 = np.abs(Fv[a] - Fv[b]).max(axis=1)
+    d1 = np.minimum(np.abs(Fv[a] - Fv[b + 1]).max(axis=1), np.abs(Fv[a] - Fv[b + gw]).max(axis=1))
+    d2 = np.minimum(np.abs(Fv[a + 1] - Fv[b]).max(axis=1), np.abs(Fv[a + gw] - Fv[b]).max(axis=1))
+    ok = (np.minimum(d1, d2) >= np.maximum(2 * d0, 4))
+    a, b = a[ok], b[ok]
+    ay, ax = a // gw, a % gw
+    by, bx = b // gw, b % gw
+    dy, dx = by - ay, bx - ax
+    neg = (dy < 0) | ((dy == 0) & (dx < 0))
+    ay, ax = np.where(neg, by, ay), np.where(neg, bx, ax)
+    dy, dx = np.abs(dy), np.where(neg, -dx, dx)
+    ver = np.hypot(dy, dx) >= 24
+    ay, ax, dy, dx = ay[ver], ax[ver], dy[ver], dx[ver]
+    if not len(ay):
+        return []
+    sleutels = dy * 100000 + (dx + 50000)
+    uniek, aantal = np.unique(sleutels, return_counts=True)
+    sterk = [(int(u // 100000), int(u % 100000) - 50000) for u in uniek[aantal >= 20]]
+
+    def veelvoud(vy, vx, uy, ux):
+        if abs(uy - vy) <= 1 and abs(ux - vx) <= 1 or (uy, ux) == (0, 0):
+            return False
+        n = round((vy * uy + vx * ux) / float(uy * uy + ux * ux))
+        tol = max(1.5, 0.03 * (vy * vy + vx * vx) ** 0.5)
+        return n >= 2 and abs(vy - n * uy) <= tol and abs(vx - n * ux) <= tol
+    uit, gehad = [], []
+    for sl in uniek[np.argsort(-aantal, kind='stable')][:40]:
+        vy, vx = int(sl // 100000), int(sl % 100000) - 50000
+        if any(abs(vy - y) <= 1 and abs(vx - x) <= 1 for y, x in gehad):
+            continue
+        m = (np.abs(dy - vy) <= 1) & (np.abs(dx - vx) <= 1)
+        if m.sum() < 40:
+            break
+        gehad.append((vy, vx))
+        # herhalend patroon (regels, tegels, een raster): dezelfde vorm komt ook op een deel of een veelvoud van die afstand terug → geen kopie
+        if any(veelvoud(vy, vx, py, px) or veelvoud(py, px, vy, vx) for py, px in sterk):
+            continue
+        vak = set(zip(ay[m].tolist(), ax[m].tolist()))
+        beste = []
+        while vak:   # grootste samenhangende stuk (8-buren)
+            st = [vak.pop()]
+            comp = list(st)
+            while st:
+                y, x = st.pop()
+                for yy in (y - 1, y, y + 1):
+                    for xx in (x - 1, x, x + 1):
+                        if (yy, xx) in vak:
+                            vak.discard((yy, xx))
+                            st.append((yy, xx))
+                            comp.append((yy, xx))
+            if len(comp) > len(beste):
+                beste = comp
+        ys, xs = [c[0] for c in beste], [c[1] for c in beste]
+        if len(beste) < max(40, 0.0005 * gh * gw) or max(ys) - min(ys) < 6 or max(xs) - min(xs) < 6:   # losse letters of tekens tellen niet
+            continue
+        van = (min(xs), min(ys), max(xs) + B, max(ys) + B)
+        naar = (van[0] + vx, van[1] + vy, van[2] + vx, van[3] + vy)
+        uit.append({'van': tuple(int(v * k) for v in van), 'naar': tuple(int(v * k) for v in naar), 'blokken': len(beste)})
+    uit.sort(key=lambda r: -r['blokken'])
+    return uit[:3]
+
+
+def forensiek(inhoud):
+    """→ (kaartjes, kern). Geen foto (pdf, document) → ([], {})."""
+    import io, warnings
+    try:
+        from PIL import Image, ImageOps, ImageDraw
+        import numpy as np
+    except ImportError:
+        return [melding('Fotoforensiek', 'Pillow of numpy ontbreekt op de pod (venv osint): geen ELA of kloondetectie.')], {}
+    Image.MAX_IMAGE_PIXELS = 40_000_000
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', Image.DecompressionBombWarning)
+            try:
+                im = Image.open(io.BytesIO(inhoud))
+            except Exception:
+                return [], {}   # geen foto (pdf, document, onbekend)
+            soort = (im.format or '').upper()
+            if soort not in FOTO_SOORTEN:
+                return [], {}
+            kw = None
+            if soort in ('JPEG', 'MPO') and getattr(im, 'quantization', None):
+                t = im.quantization.get(0) or []
+                if t and len(t) == 64:   # schatting: verhouding tot de standaard-luminantietabel (IJG, kwaliteit 50)
+                    sc = 100.0 * sum(t) / sum(JPEG_STD)
+                    kw = max(1, min(100, round((200 - sc) / 2 if sc <= 100 else 5000 / sc)))
+            im.load()
+            im = ImageOps.exif_transpose(im).convert('RGB')
+    except Exception as e:
+        return [melding('Fotoforensiek', 'Deze foto is niet te openen voor de fotoforensiek (%s).' % type(e).__name__)], {'foto': False}
+    t0 = time.time()
+    b = io.BytesIO()
+    im.save(b, 'JPEG', quality=90)
+    her = Image.open(io.BytesIO(b.getvalue())).convert('RGB')
+    d = np.abs(np.asarray(im, dtype=np.int16) - np.asarray(her, dtype=np.int16)).max(axis=2).astype(np.float32)
+    mx = float(d.max()) or 1.0
+    ela = Image.fromarray(np.clip(d * (255.0 / mx), 0, 255).astype(np.uint8)).convert('RGB')
+    H, W = d.shape
+    h16, w16 = H // 16, W // 16
+    fel = None
+    if h16 and w16:
+        bl = d[:h16 * 16, :w16 * 16].reshape(h16, 16, w16, 16).mean(axis=(1, 3))
+        fel = float(np.percentile(bl, 99.5)) / max(float(np.median(bl)), 0.5)
+    try:
+        kl = klonen(im, np)
+    except Exception:
+        kl = None
+    sig = []
+    beelden = [{'titel': 'De foto', 'src': data_url(im), 'foto': True}, {'titel': 'ELA (foutniveau)', 'src': data_url(ela), 'foto': True}]
+    if kl:
+        mk = im.copy()
+        tk = ImageDraw.Draw(mk)
+        w = max(2, round(max(im.size) / 300))
+        for r in kl:
+            tk.rectangle(r['van'], outline=(224, 54, 44), width=w)
+            tk.rectangle(r['naar'], outline=(255, 170, 0), width=w)
+        beelden.append({'titel': 'Kloondetectie: rood = bron, oranje = kopie', 'src': data_url(mk), 'foto': True})
+        sig.append('%d %s dat twee keer in de foto voorkomt (gekopieerd en verplaatst?)' % (len(kl), 'stuk' if len(kl) == 1 else 'stukken'))
+    velden = [('Soort', soort), ('Afmeting', '%d x %d px' % im.size), ('JPEG-kwaliteit (schatting)', kw),
+              ('Felste plekken in de ELA t.o.v. de rest', ('%s x' % getal_nl(fel, 1)) if fel else None),
+              ('Kopieën in de foto', ('%d %s' % (len(kl), 'stuk' if len(kl) == 1 else 'stukken')) if kl else 'geen gevonden' if kl is not None else 'niet gelukt'),
+              ('Rekentijd', '%.1f s' % (time.time() - t0))]
+    uitleg = ('Hoe lezen: in de ELA licht een foto die in één keer is gemaakt overal ongeveer even fel op bij gelijke vlakken (randen en tekst zijn altijd '
+              'feller). Een stuk dat duidelijk feller of juist doffer is dan zijn omgeving, kan er later in gezet zijn. '
+              + ('Bij een PNG of andere verliesvrije foto zegt ELA weinig. ' if soort not in ('JPEG', 'MPO') else '')
+              + 'Herhaalde patronen (tegels, logo, dezelfde tekst) geven ook een kloontreffer.')
+    return [kaartje('Fotoforensiek (lokaal)', 'ELA en kloondetectie op de pod (Pillow, numpy)', velden, beelden=beelden,
+                    let=('Let op: ' + '; '.join(sig) + '. Dit is een aanwijzing, geen bewijs.') if sig else None, klein=uitleg,
+                    juridisch=JUR['forensiek'])], {'foto': True, 'klonen': len(kl or []), 'ela_fel': round(fel, 2) if fel else None}
 
 
 # ---------------------------------------------------------------- mijn voetafdruk (wv2698; alleen Davids eigen namen en adressen uit de instelling)
@@ -1619,6 +2115,10 @@ def met_juridisch(kaarten):
 
 
 def zoek(v):
+    SLEUTELS.clear()
+    sl = v.pop('sleutels', None)   # wv2712: gratis sleutels van server.js (kluis); niet in uitvoer, logboek of cache
+    if isinstance(sl, dict):
+        SLEUTELS.update({k: sl[k] for k in SLEUTEL_ENV if isinstance(sl.get(k), str)})
     wie = v.get('wie') if v.get('wie') in WIE else 'machinekamer'
     ingang = v.get('ingang') or 'auto'
     ruw = str(v.get('kop') or v.get('term') or '')
@@ -1661,13 +2161,16 @@ def zoek(v):
     pt = poort(poort_tekst, wie, herkomst, ingang, doel)
     if ingang == 'voetafdruk' and wie != 'david':
         pt = {'niveau': 'niets', 'reden': 'voetafdruk alleen voor David zelf (App)'}
+    elif ingang == 'bestand' and wie != 'david':
+        pt = {'niveau': 'niets', 'reden': 'bestand alleen voor David zelf (App)'}   # wv2712: ook de fotoforensiek
     elif ingang == 'lijkend' and pt['niveau'] == 'eigen':
         pt = {'niveau': 'alles', 'reden': 'eigen domeinen uit de instelling'}
     c = db()
     zid = c.execute('insert into zoekvraag(tijd, wie, doel, doel_tekst, ingang, term, herkomst, poort, poort_reden) values (?,?,?,?,?,?,?,?,?)',
                     (nu_iso(), wie, doel, doel_tekst, ingang, term, herkomst, pt['niveau'], pt['reden'])).lastrowid
     c.commit()
-    sleutel = hashlib.sha256(('%s|%s|%s|%s|%s' % (VERSIE, ingang, term.lower(), pt['niveau'], v.get('beelden') is not False)).encode()).hexdigest()
+    sleutel = hashlib.sha256(('%s|%s|%s|%s|%s|%s' % (VERSIE, ingang, term.lower(), pt['niveau'], v.get('beelden') is not False,
+                                                     ''.join(k for k in sorted(SLEUTEL_ENV) if sleutel_er(k)))).encode()).hexdigest()
     cachebaar = ingang in ZOEK
     rij = None if v.get('vers') or NEP or not cachebaar else c.execute('select tijd, json from cache where sleutel = ?', (sleutel,)).fetchone()
     beelden = v.get('beelden') is not False
