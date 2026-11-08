@@ -898,7 +898,9 @@ function dossierDeel(m, b, adminStart, nu) {
   const info = m.info || {}, r = [];
   const dvs = sorteer(m.h.dienstverband), cons = sorteer(m.h.contract), rst = sorteer(m.h.rooster), sal = sorteer(m.h.salaris);
   const fn = (m.h.functie || []).slice().sort(function (a, b2) { return String(a.createdAt || '').localeCompare(String(b2.createdAt || '')); });
+  // review wv2799 MOET 1: geen terugval op een later ingaand rooster/salaris; alleen als er nog niets geldt het eerstvolgende, met 'per … (nog niet ingegaan)'
   const rNu = geldig(rst, nu) || rst[0] || null, sNu = geldig(sal, nu) || sal[0] || null;
+  const sinds = function (x) { const t = datum(x.startDate); return t != null && t > nu ? 'per ' + dmj(t) + ' (nog niet ingegaan)' : 'sinds ' + dmjS(x.startDate); };
   r.push('| | |', '|---|---|');
   r.push('| Werkgever | ' + veilig(b ? b.naam : '?', 80) + ' · personeelsnummer ' + veilig(info.employeeNumber, 10) + ' |');
   r.push('| Status | ' + statusVan(m, nu) + ' |');
@@ -911,8 +913,8 @@ function dossierDeel(m, b, adminStart, nu) {
   }).join(' · ') : 'geen') + ' |');
   if (fn.length) r.push('| Functie | ' + fn.map(function (f) { return veilig(f.description, 60); }).filter(function (x, i, a) { return x && a.indexOf(x) === i; }).join(' → ') + ' |');
   r.push('| Uren per week | ' + (rNu ? (urenVan(rNu) == null ? 'geen vaste uren (oproep/stage)' : getal(urenVan(rNu)) + ' u') + (rNu.daysPerWeek != null ? ', ' + getal(rNu.daysPerWeek) + (Number(rNu.daysPerWeek) === 1 ? ' dag' : ' dagen') : '') +
-    (rNu.parttimePercentage != null ? ', parttime ' + getal(rNu.parttimePercentage) + ' %' : '') + ', sinds ' + dmjS(rNu.startDate) : 'geen rooster') + ' |');
-  r.push('| Salaristabel | ' + (sNu ? schaalTekst(sNu) + ', sinds ' + dmjS(sNu.startDate) : 'geen') + ' |');
+    (rNu.parttimePercentage != null ? ', parttime ' + getal(rNu.parttimePercentage) + ' %' : '') + ', ' + sinds(rNu) : 'geen rooster') + ' |');
+  r.push('| Salaristabel | ' + (sNu ? schaalTekst(sNu) + ', ' + sinds(sNu) : 'geen') + ' |');
   const vl = (m.h.verlofsaldo || []).slice().sort(function (a, b2) { return String(a.leaveGroupId || '').localeCompare(String(b2.leaveGroupId || '')); })
     .map(function (v) { return getal(v.leaveBalance); });
   if (vl.length) r.push('| Verlofsaldo (uren per verlofgroep) | ' + vl.join(' · ') + ' (Nmbrs geeft de namen van de groepen niet mee) |');
@@ -943,7 +945,7 @@ function verloopBlok(rijen, jaren, stand, begin) {
     'de lopende maand zoals nu bekend (stand Nmbrs ' + stand + '). fte = contracturen / 36. De Nmbrs-historie van deze werkgever begint in ' + begin + '.*', '',
     '### Per jaar', '', '| Jaar | Gem. in dienst | Gem. contracturen/week | Gem. fte | Instroom | Uitstroom |', '|---|---|---|---|---|---|'];
   jaren.forEach(function (j) { r.push('| ' + j.jaar + (j.deel ? ' (' + j.maanden + ' mnd)' : '') + ' | ' + getal(j.n, 1) + ' | ' + getal(j.uren, 1) + ' | ' + getal(j.fte, 2) + ' | ' + j.in + ' | ' + j.uit + ' |'); });
-  r.push('', '### Per maand (nieuwste boven)', '', '| Maand | In dienst | waarvan zonder vaste uren | Contracturen/week | fte | Instroom | Uitstroom |', '|---|---|---|---|---|---|---|');
+  r.push('', '### Per maand (nieuwste boven)', '', '| Maand | In dienst | waarvan zonder (bekende) vaste uren | Contracturen/week | fte | Instroom | Uitstroom |', '|---|---|---|---|---|---|---|');
   rijen.slice().reverse().forEach(function (x) { r.push('| ' + x.maand + ' | ' + x.n + ' | ' + x.nul + ' | ' + getal(x.uren, 2) + ' | ' + getal(x.fte, 2) + ' | ' + (x.eerste ? '— (begin)' : x.in) + ' | ' + x.uit + ' |'); });
   r.push(BLOK_EIND);
   return r.join('\n');
@@ -963,7 +965,7 @@ function verloopBereken(mws, eerste, nu) {
       });
       if (!inDienst(m, eind)) return;
       n++;
-      const u = urenVan(geldig(m.h.rooster || [], eind) || sorteer(m.h.rooster)[0]);
+      const u = urenVan(geldig(m.h.rooster || [], eind));   // review MOET 1: geen rooster dat later ingaat
       if (!u) nul++; else uren += u;
     });
     rijen.push({ maand: j + '-' + String(mm).padStart(2, '0'), jaar: j, n: n, nul: nul, uren: Math.round(uren * 100) / 100, fte: uren / 36, in: inn, uit: uit, eerste: eersteRij });
@@ -1038,7 +1040,9 @@ function kindVault(invoer, dir) {
   if (!fs.existsSync(path.join(dir, 'nmbrs.' + 'sqlite'))) return { ok: true, dossiers: [], verloop: [], ongekoppeld: 0, gekoppeld: 0 };
   const d = db(dir), geladen = laad(d);
   d.close();
-  const nu = invoer && typeof invoer.nu === 'string' && datum(invoer.nu) != null ? datum(invoer.nu) : Date.now();
+  // review wv2799 MOET 2: rekenen op kalenderdag (00:00 UTC van de Nederlandse datum), zodat een einddatum de hele dag meetelt
+  const dag = invoer && typeof invoer.nu === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(invoer.nu) ? invoer.nu : new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const nu = Date.parse(dag + 'T00:00:00Z');
   return Object.assign({ ok: true }, vaultBereken(geladen, koppelingLees(dir), nu));
 }
 async function kind(opdracht, invoer, dir) {

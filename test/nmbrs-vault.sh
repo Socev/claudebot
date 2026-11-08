@@ -46,7 +46,7 @@ mw(E(2), 2, 'Bert', 'Toets'); dv(E(2), '2022-01-01', '2023-06-30'); rst(E(2), '2
 // 3 Cor: oproep (geen vaste uren); koppeling wijst buiten 10_Zakelijk → genegeerd
 mw(E(3), 3, 'Cor', 'Nep'); dv(E(3), '2022-01-01'); rst(E(3), '2022-01-01', null, 0, 100);
 // 4 Dirk: begint pas in 2099
-mw(E(4), 4, 'Dirk', 'Later'); dv(E(4), '2099-01-01'); con(E(4), '2099-01-01', '2099-12-31', false);
+mw(E(4), 4, 'Dirk', 'Later'); dv(E(4), '2099-01-01'); con(E(4), '2099-01-01', '2099-12-31', false); rst(E(4), '2099-01-01', 40, 5, 100);
 // 5 Eva: niet gekoppeld
 mw(E(5), 5, 'Eva', 'Los'); dv(E(5), '2025-03-01'); rst(E(5), '2025-03-01', 10, 2, 26.32);
 // 6 + 7: twee records op één pagina (naam met ".."-achtige punt in de bestandsnaam)
@@ -54,6 +54,8 @@ mw(E(6), 6, 'Fee', 'Dubbel'); dv(E(6), '2023-01-01', '2023-12-31'); rst(E(6), '2
 mw(E(7), 7, 'Fee', 'Dubbel'); dv(E(7), '2025-01-01'); rst(E(7), '2025-01-01', 20, 3, 52.63); sal(E(7), '2025-01-01', '6', '12', 2345.67);
 // 8: functie met een verdacht woord → de server weigert het blok (tweede grendel)
 mw(E(8), 8, 'Gijs', 'Grendel'); dv(E(8), '2025-01-01'); rst(E(8), '2025-01-01', 12, 2, 31.58); h('functie', E(8), { description: 'Uurloon proef', createdAt: '2025-01-01T00:00:00Z' });
+// 9 Hans: in dienst sinds juni 2024, eerste rooster pas 2025 (niet gekoppeld) → vóór 2025 geen uren
+mw(E(9), 9, 'Hans', 'Laat'); dv(E(9), '2024-06-01'); rst(E(9), '2025-01-01', 20, 3, 52.63);
 d.close();
 const MAP = '10_Zakelijk/Proef/Medewerkers/';
 fs.writeFileSync(path.join(DIR, 'koppeling.json'), JSON.stringify({
@@ -75,7 +77,8 @@ const BEDRAG = /1234|2345|1\.234|2\.345|1234,56|€/;
 
     // 2. kind 'vault'
     const k = kindEcht(SCRIPT, 'vault', {});
-    toets('kind vault: ok, 6 gekoppeld, 2 ongekoppeld (Eva + buiten-pad), 5 pagina\'s, 1 urenverloop', k.ok === true && k.gekoppeld === 6 && k.ongekoppeld === 2 && k.dossiers.length === 5 && k.verloop.length === 1, [k.gekoppeld, k.ongekoppeld, (k.dossiers || []).length, k.rauw]);
+    toets('kind vault: ok, 6 gekoppeld, 3 ongekoppeld (Eva, Hans + buiten-pad), 5 pagina\'s, 1 urenverloop', k.ok === true && k.gekoppeld === 6 && k.ongekoppeld === 3 && k.dossiers.length === 5 && k.verloop.length === 1, [k.gekoppeld, k.ongekoppeld, (k.dossiers || []).length, k.rauw]);
+    const v0 = () => ((k.verloop || [])[0] || {}).blok || '';
     const blok = (naam) => ((k.dossiers || []).find((x) => x.pad.indexOf(naam) >= 0) || {}).blok || '';
     const a = blok('Anna Proef');
     toets('Anna: schaal/trede, uren, contract onbepaald, begin administratie, verlof', /schaal 5, trede 11, sinds 1-1-2024/.test(a) && /28 u, 4 dagen, parttime 73,68 %, sinds 1-1-2024/.test(a) &&
@@ -84,6 +87,13 @@ const BEDRAG = /1234|2345|1\.234|2\.345|1234,56|€/;
     toets('geen bedrag in een enkel blok (salariswaarden 1234.56/2345.67)', !(k.dossiers || []).concat(k.verloop || []).some((x) => BEDRAG.test(x.blok)));
     toets('Bert: uit dienst per 30-6-2023', /uit dienst per 30-6-2023/.test(blok('Bert Toets')));
     toets('Dirk: nog niet begonnen', /in dienst per 1-1-2099 \(nog niet begonnen\)/.test(blok('Dirk Later')));
+    // review MOET 2: op de einddatum zelf nog in dienst; de dag erna uit dienst
+    const kb = kindEcht(SCRIPT, 'vault', { nu: '2023-06-30' }), kc = kindEcht(SCRIPT, 'vault', { nu: '2023-07-01' });
+    const bb = (kk2) => ((kk2.dossiers || []).find((x) => x.pad.indexOf('Bert Toets') >= 0) || {}).blok || '';
+    toets('MOET 2: op de laatste dag nog in dienst, de dag erna uit dienst', /\| Status \| in dienst, laatste werkdag 30-6-2023 \|/.test(bb(kb)) && /uit dienst per 30-6-2023/.test(bb(kc)), [bb(kb).slice(0, 400)]);
+    // review MOET 1: Dirk heeft vanaf 2099 een rooster; vóór 2099 telt dat nergens mee, in het dossier "per … (nog niet ingegaan)"
+    const dk = blok('Dirk Later');
+    toets('MOET 1: later ingaand rooster: "nog niet ingegaan" in het dossier, niet in het verloop', /40 u, 5 dagen, parttime 100 %, per 1-1-2099 \(nog niet ingegaan\)/.test(dk) && !/\| 2026-0\d \| [0-9]+ \| [0-9]+ \| [0-9,]*4\d \|/.test(v0()), dk);
     const f = blok('Fee Dubbel');
     toets('twee records op één pagina: twee kopjes, nieuwste eerst', (f.match(/### Personeelsnummer/g) || []).length === 2 && f.indexOf('nummer 7') < f.indexOf('nummer 6'), f);
     toets('elk blok tussen de markeringen', (k.dossiers || []).every((x) => x.blok.startsWith(T.BLOK_BEGIN) && x.blok.endsWith(T.BLOK_EIND)));
@@ -93,6 +103,7 @@ const BEDRAG = /1234|2345|1\.234|2\.345|1234,56|€/;
     toets('verloop 2022-01: 3 in dienst, 1 zonder uren, 40 u, fte 1,11 (40/36), instroom = begin', /\| 2022-01 \| 3 \| 1 \| 40 \| 1,11 \| — \(begin\) \| 0 \|/.test(v), v.slice(0, 1500));
     toets('verloop 2023-06: uitstroom 1; 2023-07: Anna + Cor + Fee, 32 u', /\| 2023-06 \| 4 \| 1 \| 48 \| 1,33 \| 0 \| 1 \|/.test(v) && /\| 2023-07 \| 3 \| 1 \| 32 \| 0,89 \| 0 \| 0 \|/.test(v), v.slice(0, 3000));
     toets('verloop 2024-01: Anna 28 u (nieuw rooster), Fee weg (uitstroom dec)', /\| 2023-12 \| 3 \| 1 \| 32 \| 0,89 \| 0 \| 1 \|/.test(v) && /\| 2024-01 \| 2 \| 1 \| 28 \| 0,78 \| 0 \| 0 \|/.test(v), v.slice(0, 3000));
+    toets('MOET 1: 2024-07 telt Hans zonder uren (eerste rooster pas 2025), 2025-01 met 20 u (+ Anna 28, Fee 20, Gijs 12)', /\| 2024-07 \| 3 \| 2 \| 28 \| 0,78 \| 0 \| 0 \|/.test(v) && /\| 2025-01 \| 5 \| 1 \| 80 \|/.test(v), v.split('\n').filter((x) => /2024-07|2025-01/.test(x)));
     toets('verloop: jaartabel met 2022 en gemiddelden', /\| 2022 \| 3 \| 40 \| 1,11 \| 0 \| 0 \|/.test(v), v.slice(0, 900));
 
     // 3. blokZet
