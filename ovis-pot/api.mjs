@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot 65a566a140fab34ea3227b8a89762d710833b913 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot d577651bc69340cb7ffc843a2817238679798f84 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
@@ -69,7 +69,7 @@ function log(db          , wie        , tabel        , sleutel        , actie   
 
 // ---------- lezen ----------
 export async function basis(db          ) {
-  const [praktijken, versies, namen, deelnames, uitzonderingen, standen, componenten, mutaties, subsidie, tarieven, jaarlast, instelling, entiteit, rekeningen] =
+  const [praktijken, versies, namen, deelnames, uitzonderingen, standen, componenten, mutaties, subsidie, subsidie_totaal, tarieven, jaarlast, instelling, entiteit, rekeningen] =
     await Promise.all([
       rijen(db, "select id, naam, naam_vorig, eigenaar, naam_brief, tav, adres, postcode_plaats, email, opmerking from praktijk order by id"),
       rijen(db, "select * from praktijk_versie order by praktijk_id, geldig_van"),
@@ -80,6 +80,7 @@ export async function basis(db          ) {
       rijen(db, "select * from kostencomponent order by entiteit, volgorde, id"),
       rijen(db, "select * from kostenmutatie order by kostencomponent_id, geldig_van"),
       rijen(db, "select * from subsidie order by jaar, praktijk_id"),
+      rijen(db, "select jaar, soort, bedrag, bron from subsidie_totaal order by jaar, soort"),
       rijen(db, "select * from inschrijftarief order by jaar"),
       rijen(db, "select entiteit, jaar, bedrag, bron, opmerking from jaarlast order by jaar, entiteit"),
       rijen(db, "select sleutel, waarde, opmerking from instelling"),
@@ -87,7 +88,7 @@ export async function basis(db          ) {
       rijen(db, "select r.iban, r.entiteit, r.bank, (select max(boekdatum) from bankmutatie m where m.rekening=r.iban) as laatste_post from bankrekening r"),
     ]);
   const nu = (await rijen               (db, "select date('now') as d"))[0].d;
-  return { vandaag: nu, praktijken, versies, namen, deelnames, uitzonderingen, standen, componenten, mutaties, subsidie, tarieven, jaarlast, instelling, entiteit, rekeningen };
+  return { vandaag: nu, praktijken, versies, namen, deelnames, uitzonderingen, standen, componenten, mutaties, subsidie, subsidie_totaal, tarieven, jaarlast, instelling, entiteit, rekeningen };
 }
 
 /** Wat er per praktijk per entiteit in jaar J is betaald (bank) en gevraagd (vastgestelde nota's). */
@@ -151,7 +152,7 @@ export async function maandStand(db          ) {
 
 /** Alles in één keer (Excel-export, ook om over te stappen naar iets anders): elke tabel van de app als rijen. */
 const EXPORT_TABELLEN = ["entiteit", "praktijk", "praktijk_versie", "praktijk_naam", "praktijk_patienten", "deelname", "deelname_uitzondering", "kostencomponent", "kostenmutatie",
-  "subsidie", "inschrijftarief", "jaarlast", "medewerker", "contract", "contractmutatie", "afwezigheid", "inhuur", "cao_tabel", "loonparameter", "loonsom", "buffer",
+  "subsidie", "subsidie_totaal", "inschrijftarief", "jaarlast", "medewerker", "contract", "contractmutatie", "afwezigheid", "inhuur", "cao_tabel", "loonparameter", "loonsom", "buffer",
   "jaarplan", "jaarplan_regel", "nota", "correctie", "afrekening", "verwachting", "bankrekening", "bankmutatie", "bank_toewijzing", "koppeling", "mail_concept", "pod_verzoek",
   "overname", "ronde_stap", "instelling", "logboek"]         ;
 export async function exportAlles(db          ) {
@@ -277,6 +278,16 @@ export async function schrijf(db          , route        , b        , wie       
       const bron = tekst(b.bron, "bron", { max: 300 });
       await db.batch([db.prepare("insert into subsidie (praktijk_id, jaar, soort, bedrag, bron) values (?,?,?,?,?) on conflict(praktijk_id, jaar, soort) do update set bedrag=excluded.bedrag, bron=excluded.bron")
         .bind(p, J, soort, bedrag, bron), log(db, wie, "subsidie", `${p}/${J}/${soort}`, oud.length ? "gewijzigd" : "nieuw", oud[0] ?? null, { bedrag, bron })]);
+      return { ok: true };
+    }
+    case "subsidie_totaal": {
+      const J = jaar(b.jaar);
+      const soort = keuze(b.soort, "soort", ["aangevraagd", "verleend", "vastgesteld", "prognose"]         );
+      const bedrag = getal(b.bedrag, "bedrag", { min: 0, max: 5e7 }) ;
+      const bron = tekst(b.bron, "bron", { verplicht: true, max: 300 });
+      const oud = await rijen(db, "select bedrag, bron from subsidie_totaal where jaar=? and soort=?", J, soort);
+      await db.batch([db.prepare("insert into subsidie_totaal (jaar, soort, bedrag, bron) values (?,?,?,?) on conflict(jaar, soort) do update set bedrag=excluded.bedrag, bron=excluded.bron")
+        .bind(J, soort, bedrag, bron), log(db, wie, "subsidie_totaal", `${J}/${soort}`, oud.length ? "gewijzigd" : "nieuw", oud[0] ?? null, { bedrag, bron })]);
       return { ok: true };
     }
     case "inschrijftarief": {

@@ -1,4 +1,4 @@
--- GEGENEREERD uit Socev/ovis-pot 65a566a140fab34ea3227b8a89762d710833b913: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql, migrations/0007_jan_feb.sql
+-- GEGENEREERD uit Socev/ovis-pot d577651bc69340cb7ffc843a2817238679798f84: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql, migrations/0007_jan_feb.sql, migrations/0009_subsidie_totaal.sql
 -- OVIS POT — migratie 0001: de POT-tabellen zoals ze in D1 `fin` stonden (kolommen en ids gelijk), zodat de pod-modules
 -- (pot-datahub.js, pot-verzend.js) bij het overstapmoment alleen een andere database krijgen. Gegenereerd uit fin.sqlite_master op 8-11-2026.
 -- Geen gegevens in deze repo; de inhoud komt met scripts/kopieer-uit-fin.py.
@@ -534,3 +534,14 @@ CREATE INDEX historie_ent_jaar ON historie (entiteit, jaar, categorie);
 INSERT INTO instelling (sleutel, waarde, opmerking) VALUES
   ('pot_jan_feb', '0.03', 'POT: januari + deze fractie van de jaarbegroting, februari evenveel minder (vanaf 2027; wv2787)')
 ON CONFLICT(sleutel) DO NOTHING;
+
+-- Subsidie van de gemeente als TOTAAL per jaar (60 uur POH Jeugd-GGZ, ex btw). De app verdeelt het zelf naar rato van de patiëntaantallen
+-- (laatst bekende stand op 1 januari van dat jaar); een bedrag per praktijk in `subsidie` gaat voor. Bron = de stukken van David.
+CREATE TABLE subsidie_totaal (
+  jaar INTEGER NOT NULL,
+  soort TEXT NOT NULL CHECK (soort IN ('aangevraagd','verleend','vastgesteld','prognose')),
+  bedrag REAL NOT NULL,
+  bron TEXT,
+  ingevoerd_op TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  PRIMARY KEY (jaar, soort)
+);
