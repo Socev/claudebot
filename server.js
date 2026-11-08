@@ -3921,7 +3921,7 @@ function handleRequest(req, res) {
       osint: typeof osintInfo === 'function' ? osintInfo() : { aan: false },   // wv2694: OVIS OSINT (osint.py in deze release? venv of systeem-python; geen zoektermen)
       ah_bonnen: typeof ahInfo === 'function' ? ahInfo() : { module: false },   // wv2703: AH-kassabonnen (gekoppeld, laatste ronde; geen token)
       pakjes: typeof pakjesInfo === 'function' ? pakjesInfo() : { aan: false },   // wv2593: OVIS Pakjes (aantallen, laatste ronde; geen codes, winkels of postcodes)
-      memorylane_publiek: (function () { if (!memorylanePubliek) return { aan: false }; try { return memorylanePubliek.health(); } catch (e) { return { fout: true }; } })(),   // wv2636: alleen aantallen
+      memorylane_publiek: (function () { if (!memorylanePubliek) return { aan: false }; try { return Object.assign(memorylanePubliek.health(), { token: mlPubTokenSoort }); } catch (e) { return { fout: true }; } })(),   // wv2636: alleen aantallen; wv2738: token eigen|pod|null (nog niet gebruikt)
       memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
       ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
       scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
@@ -20515,7 +20515,8 @@ function docsDelenInfo() {
 //        een vaste plek; wv2325) · POST …/plaatje/weg. Niet in de toonmodus (niet in ML_TOON_ROUTES); de gevelroute geeft het plaatje.
 // Naar buiten (zicht aan, link aan, toch delen): verse vingerafdruk en nooit vanaf een vaste plek (zoals Docs › Delen). Dichter maken mag altijd.
 // wv2120: ook immich_api_key (David maakte hem 31-10 in Immich; rechten ruimer dan nodig, de witte lijst in immich.js is de grens)
-const ML_KLUIS = { memorylane_link_familie: true, memorylane_link_vrienden: true, immich_api_key: true };
+// wv2738: ook cloudflare_memorylane (Davids smalle Cloudflare-token: alleen D1 + R2) voor memorylanePubliek hieronder
+const ML_KLUIS = { memorylane_link_familie: true, memorylane_link_vrienden: true, immich_api_key: true, cloudflare_memorylane: true };
 const mlKluisCache = new Map();   // naam → { w, tot }; alleen in het geheugen
 async function mlKluis(naam) {
   if (!ML_KLUIS[naam]) return null;
@@ -20573,9 +20574,18 @@ async function memorylaneDelenTik() {
 }
 if (memorylaneDelen && SERVER_ECHT) { setTimeout(function () { memorylaneDelenTik(); }, 120000).unref(); setInterval(function () { memorylaneDelenTik(); }, 60000).unref(); }
 // ── wv2636: MemoryLane op memorylane.socev.dev (familie en Shizzle). Logica en waarom in memorylane-publiek.js; hier alleen D1 `memorylane`
-// (batch), R2 `memorylane` (privé emmer; put/del via de Cloudflare-API met het bestaande pod-token, alleen deze databank en emmer) en de tik.
-// Review-MOET 16 (eigen smal token voor deze D1/R2) ligt als Voor jou-kaart bij David; tot dan dit token.
+// (batch), R2 `memorylane` (privé emmer; put/del via de Cloudflare-API, alleen deze databank en emmer) en de tik.
+// wv2738 (review-MOET 16): het token komt uit kluisrij cloudflare_memorylane (Davids eigen token: alleen D1 + R2, gemeten 8-11: Workers,
+// Access, Pages en KV 403). Alleen als die rij ontbreekt valt het terug op het brede pod-token; /health.memorylane_publiek.token zegt welk
+// ('eigen' | 'pod'). Een kluisfout valt NIET terug (dan faalt de tik en probeert de volgende minuut opnieuw).
 const ML_PUB_D1 = process.env.ML_PUB_D1_ID || 'c0382ecc-f598-4656-98de-babfb60a98be', ML_PUB_R2 = 'memorylane';
+let mlPubTokenSoort = null;
+async function mlPubToken() {
+  const w = await mlKluis('cloudflare_memorylane');
+  if (w) { mlPubTokenSoort = 'eigen'; return w; }
+  if (process.env.CLOUDFLARE_API_TOKEN) { mlPubTokenSoort = 'pod'; return process.env.CLOUDFLARE_API_TOKEN; }
+  mlPubTokenSoort = null; throw new Error('geen Cloudflare-sleutel');
+}
 const memorylanePubliek = (function () {
   const p = path.join(__dirname, 'memorylane-publiek.js');
   if (!memorylaneDelen || !fs.existsSync(p) || (!SERVER_ECHT && !process.env.ML_PUB_TOETS)) return null;
@@ -20584,20 +20594,21 @@ const memorylanePubliek = (function () {
   try {
     return require(p).maak({ db: intake._db, ml: memorylaneDelen, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, fout: logError, categorieen: HERINNERINGEN_MOD.CATEGORIEEN,
       d1: async function (batch) {
-        if (!process.env.CLOUDFLARE_API_TOKEN) throw new Error('geen Cloudflare-sleutel');
-        const r = await smalCf(cfUrl('/d1/database/' + ML_PUB_D1 + '/query'), { batch: batch });
+        const r = await smalCf(cfUrl('/d1/database/' + ML_PUB_D1 + '/query'), { batch: batch }, await mlPubToken());
         const ok = r.status === 200 && r.j && r.j.success === true && Array.isArray(r.j.result) && r.j.result.length === batch.length && r.j.result.every(function (x) { return x && x.success !== false; });
         if (!ok) throw new Error('D1 gaf HTTP ' + r.status);   // nooit sql of waarden in de fout
         return r.j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [] }; });
       },
       r2: {
         put: async function (key, buf, mime) {
-          const r = await fetch(r2Url(key), { method: 'PUT', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': mime }, body: buf, signal: AbortSignal.timeout(60000) });
+          const u = r2Url(key), tok = await mlPubToken();
+          const r = await fetch(u, { method: 'PUT', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': mime }, body: buf, signal: AbortSignal.timeout(60000) });
           await r.text().catch(function () {});
           if (!r.ok) throw new Error('R2 put HTTP ' + r.status);
         },
         del: async function (key) {
-          const r = await fetch(r2Url(key), { method: 'DELETE', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN }, signal: AbortSignal.timeout(30000) });
+          const u = r2Url(key), tok = await mlPubToken();
+          const r = await fetch(u, { method: 'DELETE', headers: { Authorization: 'Bearer ' + tok }, signal: AbortSignal.timeout(30000) });
           await r.text().catch(function () {});
           if (!r.ok && r.status !== 404) throw new Error('R2 del HTTP ' + r.status);
         },
@@ -22704,8 +22715,8 @@ async function smalSbRpc(sb, naam, body) {
   if (!r.ok) throw new Error('RPC ' + naam + ' gaf HTTP ' + r.status + ': ' + t.slice(0, 200));
   return t ? JSON.parse(t) : null;
 }
-async function smalCf(url, body) {
-  const r = await fetch(url, { method: 'POST', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': 'application/json' },
+async function smalCf(url, body, tok) {   // wv2738: tok = ander token (MemoryLane); zonder = het pod-token
+  const r = await fetch(url, { method: 'POST', headers: { Authorization: 'Bearer ' + (tok || process.env.CLOUDFLARE_API_TOKEN), 'Content-Type': 'application/json' },
     body: JSON.stringify(body), signal: AbortSignal.timeout(60000) });
   let j = null; try { j = await r.json(); } catch (e) {}
   return { status: r.status, j: j };
