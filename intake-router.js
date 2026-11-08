@@ -613,14 +613,18 @@ const REGEL_KEUZE = { soort: ['correspondentie', 'bewijsstuk', 'keten', 'notitie
 const BRON_RE = /^[a-z]{2,20}:[a-z0-9-]{1,30}$/;
 const KNOOP_RE = /^[A-Z][A-Z0-9_-]{0,15}$/;
 // wv2710 (bundels): geld in het stuk (bedrag met € of EUR, een IBAN, of een betaalwoord) → nooit in een bundel. Alleen een ja/nee in de samenvatting.
-const GELD_RE = /(€|\bEUR\b)\s?\d|\d\s?(€|\bEUR\b|\beuro\b)|\b(factu(u)?r|betal|incasso|aanmaning|creditnota|declarat|overmak|overboek|openstaand|verschuldigd|vervaldatum|invoice|payment)/i;
+const GELD_RE = /(€|\bEUR\b)\s*\d|\d\s*(€|\bEUR\b|\beuro\b)|\b(factu(u)?r|betal|incasso|aanmaning|creditnota|declarat|overmak|overboek|openstaand|verschuldigd|vervaldatum|invoice|payment)/i;
 // review wv2710 MOET 2: elk geldig IBAN (alle landen, met of zonder spaties), getoetst met de mod-97-controle (anders zou elke code in een link meetellen)
 function ibanIn(t) {
   const re = /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b/gi;
   let m;
   while ((m = re.exec(String(t || '')))) {
     const v = m[0].replace(/ /g, '').toUpperCase();
-    for (let n = v.length; n >= 15; n--) if (ibanGeldig(v.slice(0, n))) return true;   // een woord dat er direct achter staat, hoort er niet bij
+    // review ronde 2 MOET 1: elk beginpunt binnen de treffer (twee codes achter elkaar) en elke lengte 15–34
+    for (let i = 0; i + 15 <= v.length; i++) {
+      if (!/^[A-Z]{2}\d{2}/.test(v.slice(i, i + 4))) continue;
+      for (let n = Math.min(v.length, i + 34); n >= i + 15; n--) if (ibanGeldig(v.slice(i, n))) return true;
+    }
   }
   return false;
 }
@@ -2553,8 +2557,9 @@ function maak(o) {
     if (sam.mogelijk_medisch || sam.na_keuze || sam.prive_schaduw || uit.mogelijk_medisch || uit.buiten_brain) return null;
     if (!sam.afzender || !BUNDEL_AFZ_RE.test(String(sam.afzender)) || sam.afzender === 'PRIVE' || sam.afzender_kracht !== 'hoog' || sam.aangeleverd_door) return null;
     const km = Array.isArray(sam.afzender_kenmerken) ? sam.afzender_kenmerken : [];
-    const sterk = (km.indexOf('mailadres+dkim') >= 0 && sam.dkim === 'uitgelijnd') || km.some(function (k) { return /^kvk\+/.test(String(k)); });
-    if (!sterk) return null;
+    // review ronde 2 MOET 3: alleen het mailadres met uitgelijnde DKIM; dat toetst stukVoorApp opnieuw tegen het register van nu (afzenderNogSterk).
+    // Een KvK-nummer telt hier niet: het staat niet in de samenvatting, dus de pod kan het niet opnieuw toetsen.
+    if (km.indexOf('mailadres+dkim') < 0 || sam.dkim !== 'uitgelijnd') return null;
     if (sam.jev && sam.jev !== 'onder') return null;
     if (sam.geld !== false || sam.soort === 'bewijsstuk' || sam.soort === 'keten') return null;   // ook een stuk van vóór wv2710 (geen geld-veld): niet bundelen
     if ((sam.velden || []).some(function (v) { return BUNDEL_GELD_VELDEN.indexOf(v) >= 0; })) return null;
@@ -2566,6 +2571,14 @@ function maak(o) {
     const v = uit.voorstel;
     if (v && (v.entiteit === 'PRIVE' || ['kennis', 'geen'].indexOf(v.lens) < 0)) return null;
     return 'b' + crypto.createHash('sha256').update(['wv2710', sam.bron || '', sam.afzender, v ? v.lens + ':' + (v.entiteit || '') : '-'].join('|')).digest('hex').slice(0, 16);
+  }
+  // het afzenderkenmerk van de bundel moet NU nog in het register staan: de afzender actief en het mailadres als actief kenmerk van die afzender
+  function afzenderNogSterk(r, sam, meta) {
+    if (!r || !sam || !sam.afzender) return false;
+    const e = Array.from(r.ent.values()).find(function (x) { return x.k === sam.afzender; });
+    if (!e || e.status === 'voorgesteld' || e.concept) return false;
+    const van = adresVan((meta && meta.van) || '');
+    return !!van && zoek(r, 'email', van).some(function (h) { return h.o === e.o && h.st === 'actief'; });
   }
   // alleen een groep van minstens BUNDEL_MIN wachtende stukken krijgt een bundel; de rest (en elk ander overzicht) ziet geen sleutel
   // review MOET 3: een groep boven BUNDEL_MAX wordt verdeeld in zo gelijk mogelijke delen (elk ≥ BUNDEL_MIN), met sleutel-<n> vanaf het tweede deel
@@ -2590,7 +2603,9 @@ function maak(o) {
       ctx = ctx || { namen: entNamen(r), perAfzender: null };
       if (ls.staat === 'twijfel' && !ctx.perAfzender) ctx.perAfzender = keuzesPerAfzender();
       const sb = row.status === 'beoordeeld' ? stukBasis(row) : null;
-      Object.assign(basis, binnenbak(row, sam, ls, sb ? (safeJson(sb.meta) || {}) : {}, ctx.namen, ctx.perAfzender || new Map()));
+      const mt = sb ? (safeJson(sb.meta) || {}) : {};
+      Object.assign(basis, binnenbak(row, sam, ls, mt, ctx.namen, ctx.perAfzender || new Map()));
+      if (basis._b && !afzenderNogSterk(r, sam, mt)) basis._b = null;   // wv2710 review ronde 2 MOET 3 (zonder register: geen bundels)
     }
     if (!ctx || !ctx.bundels) delete basis._b;   // wv2710: de bundelsleutel alleen in het overzicht (bundelsZet) en bij appBundel
     if (row.status !== 'beoordeeld') return Object.assign(basis, { marker: sam.marker || null, soorten: Array.isArray(sam.soorten) ? sam.soorten : [] });

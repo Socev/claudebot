@@ -155,9 +155,10 @@ test('bundelSleutel weigert privé, mogelijk medisch, Jev, facturen, kandidaat P
     const s = await pas(fn);
     assert.ok(s.bundel !== basis, naam + ': mag niet in de bundel');
   }
-  // KvK met tweede kenmerk is wel sterk
+  // review ronde 2 MOET 3: alleen KvK (zonder mailadres) telt niet meer: dat kenmerk kan de pod niet opnieuw tegen het register toetsen
   const s = await pas((x) => { x.afzender_kenmerken = ['kvk+domein_in_stuk']; x.dkim = 'geen_pass'; });
-  assert.equal(s.bundel, basis);
+  assert.ok(s.bundel !== basis);
+  assert.equal((await pas(() => {})).bundel, basis);
   E.r.sluit();
 });
 
@@ -273,6 +274,36 @@ test('review MOET 2: geld = ook een buitenlands IBAN (mod-97), niet een willekeu
   assert.equal(K.geldIn('Uitnodiging voor het overleg van dinsdag'), false);
   assert.equal(K.geldIn('Toegang kost € 25'), true);
   assert.equal(K.geldIn('Betaling ontvangen'), true);
+  // review ronde 2 MOET 1 en 2: een IBAN direct achter een andere code, en extra witruimte rond een bedrag
+  assert.equal(K.geldIn('Kenmerk AB00 DE89370400440532013000 (verzonnen)'), true);
+  assert.equal(K.geldIn('Prijs: €  25'), true);
+  assert.equal(K.geldIn('Prijs: €\n25'), true);
+  assert.equal(K.geldIn('Prijs: 25\tEUR'), true);
+});
+
+test('review ronde 2 MOET 3: is het mailadres van de afzender niet meer actief in het register (of de afzender zelf niet), dan geen bundel; zonder register geen bundels', async () => {
+  const H = JSON.parse(JSON.stringify(HANDVATTEN));
+  let weg = false;
+  const E = omgeving({ indeling: async function () { return { ok: true, categorie: 'Onbekend' }; }, handvatten: async function () { if (weg) throw new Error('register weg'); return H; } });
+  const ids = [1, 2, 3].map((i) => levMail(E, 'Register ' + i));
+  await E.r.ronde();
+  const sl = (await E.r.appOverzicht(80)).stukken.find((s) => s.stuk_id === ids[0]).bundel;
+  assert.ok(sl);
+  H.ids.find((x) => x.ns === 'email' && x.o === 'o-lev').st = 'voorgesteld'; H.compilatienummer++;
+  E.klok.t += 24 * 3600000;   // het register wordt opnieuw gelezen
+  assert.ok((await E.r.appOverzicht(80)).stukken.filter((s) => ids.includes(s.stuk_id)).every((s) => !s.bundel));
+  const r = await E.r.appBundel({ bundel: sl, stukken: lijstVan(E, ids), lens: 'geen' }, 'app:x');
+  assert.equal(r.status, 409); assert.ok(ids.every((id) => staat(E, id).staat === 'twijfel'));
+  H.ids.find((x) => x.ns === 'email' && x.o === 'o-lev').st = 'actief'; H.entiteiten.find((x) => x.o === 'o-lev').status = 'voorgesteld'; H.compilatienummer++;
+  E.klok.t += 24 * 3600000;
+  assert.ok((await E.r.appOverzicht(80)).stukken.filter((s) => ids.includes(s.stuk_id)).every((s) => !s.bundel));
+  H.entiteiten.find((x) => x.o === 'o-lev').status = 'actief'; H.compilatienummer++;
+  E.klok.t += 24 * 3600000;
+  assert.ok((await E.r.appOverzicht(80)).stukken.filter((s) => ids.includes(s.stuk_id)).every((s) => s.bundel === sl));
+  weg = true; E.klok.t += 24 * 3600000;
+  const ov = await E.r.appOverzicht(80);
+  assert.ok(ov.stukken.filter((s) => ids.includes(s.stuk_id)).every((s) => !s.bundel));
+  E.r.sluit();
 });
 
 test('review MOET 3: een groep groter dan 25 wordt verdeeld in uitvoerbare bundels van ≥ 3 (27 → 14 + 13), elk deel apart te kiezen', async () => {
