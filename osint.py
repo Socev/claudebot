@@ -1117,17 +1117,74 @@ def brk_veilig(ctx, ls):
         return melding('Perceel (kadastrale kaart)', 'De kadastrale kaart gaf geen antwoord.'), None
 
 
+# wv2718: EP-online v5 (PandEnergielabelV5, swagger gemeten 8-11-2026) met vaste Nederlandse labels; BAG-ids, postcode en huisnummer staan
+# al op de adreskaart, de EMG-forfaitaire varianten laten we weg. (veld, label, soort); eisen komen achter de waarde (eis ≤ / ≥).
+EP_VELDEN = [('Energieklasse', 'Energieklasse', 't'), ('Registratiedatum', 'Registratiedatum', 'd'), ('Opnamedatum', 'Opnamedatum', 'd'),
+             ('Geldig_tot', 'Geldig tot', 'd'), ('Gebouwklasse', 'Gebouwklasse', 't'), ('Gebouwtype', 'Gebouwtype', 't'),
+             ('Gebouwsubtype', 'Ligging in het gebouw', 't'), ('SBIcode', 'SBI-code (bedrijfssoort)', 't'), ('Bouwjaar', 'Bouwjaar', 't'),
+             ('Gebruiksoppervlakte_thermische_zone', 'Gebruiksoppervlakte', 'm2'), ('Compactheid', 'Compactheid (verliesoppervlak / gebruiksoppervlak)', 'x2'),
+             ('Soort_opname', 'Soort opname', 't'), ('Berekeningstype', 'Rekenmethode', 't'), ('IsVereenvoudigdLabel', 'Vereenvoudigd label', 'jn'),
+             ('Op_basis_van_referentiegebouw', 'Op basis van een referentiegebouw', 'jn'), ('Status', 'Status', 't'), ('Certificaathouder', 'Certificaathouder', 't'),
+             ('EnergieIndex', 'Energie-index', 'x2'), ('Energiebehoefte', 'Energiebehoefte', 'kwh', 'Eis_energiebehoefte', '≤'),
+             ('PrimaireFossieleEnergie', 'Primair fossiel energiegebruik', 'kwh', 'Eis_primaire_fossiele_energie', '≤'),
+             ('Aandeel_hernieuwbare_energie', 'Aandeel hernieuwbare energie', '%', 'Eis_aandeel_hernieuwbare_energie', '≥'),
+             ('Warmtebehoefte', 'Warmtebehoefte', 'kwh'), ('BerekendeEnergieverbruik', 'Berekend energieverbruik', 'kwh'),
+             ('BerekendeCO2Emissie', 'Berekende CO₂-uitstoot', 'kg'),
+             ('Temperatuuroverschrijding', 'Risico te warm in juli (TOjuli)', 'x2', 'Eis_temperatuuroverschrijding', '≤')]
+
+
+def ep_fmt(v, soort):
+    if v is None or v == '' or isinstance(v, (dict, list)):
+        return None
+    if soort == 'jn':
+        return 'ja' if v is True or str(v).lower() in ('true', 'ja', 'j', '1') else 'nee' if v is False or str(v).lower() in ('false', 'nee', 'n', '0') else str(v)[:40]
+    if soort == 'd':
+        return datum_nl(v) or str(v)[:40]
+    if soort == 't' or isinstance(v, bool):
+        return str(v)[:120]
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)[:60]
+    dec = 0 if soort == 'm2' or f == int(f) else (1 if soort in ('kwh', 'kg', '%') else 2)
+    g = getal_nl(f, dec)
+    return {'m2': g + ' m²', 'kwh': g + ' kWh/m² per jaar', 'kg': g + ' kg/m² per jaar', '%': g + ' %'}.get(soort, g)
+
+
+def ep_velden(r):
+    uit = []
+    for x in EP_VELDEN:
+        w = ep_fmt(r.get(x[0]), x[2])
+        if w is None:
+            continue
+        if len(x) > 3:
+            e = ep_fmt(r.get(x[3]), x[2])
+            if e is not None:
+                w += ' (eis %s %s)' % (x[4], re.sub(r' (kWh/m² per jaar|%)$', '', e))
+        uit.append((x[1], w))
+    return uit
+
+
 def ep_online(ctx, vbo_id):
     sl = sleutel('ep_online')
     if not sl or not vbo_id:
         return None
-    r = jhaal(ctx, 'EP-online (energielabel)', 'https://public.ep-online.nl/api/v5/PandEnergielabel/AdresseerbaarObject/' + vbo_id, 'BAG-id ' + vbo_id,
-              hdr={'Authorization': sl}, timeout=20)
-    r = r[0] if isinstance(r, list) and r else r
-    if not isinstance(r, dict):
+    try:
+        code, tekst = haal(ctx, 'EP-online (energielabel)', 'https://public.ep-online.nl/api/v5/PandEnergielabel/AdresseerbaarObject/' + vbo_id, 'BAG-id ' + vbo_id,
+                           hdr={'Authorization': sl}, timeout=20, metcode=True)
+        r = json.loads(tekst or 'null')
+    except PoortDicht:
+        raise
+    except Exception:
+        return melding('Energielabel', 'EP-online gaf geen antwoord.', bron='EP-online (RVO)')
+    if code in ('401', '403'):
+        return melding('Energielabel', 'EP-online weigerde de sleutel (fout %s): vervang hem in Sleutelbos.' % code, bron='EP-online (RVO)')
+    labels = [x for x in (r if isinstance(r, list) else [r]) if isinstance(x, dict) and x.get('Energieklasse')]
+    if not labels:   # 404 (probleem-json met status/title) of leeg: geen label, nooit de ruwe velden tonen
         return kaartje('Energielabel', 'EP-online (RVO)', klein='Geen energielabel geregistreerd voor dit adres.', juridisch=JUR['adreslinks'])
-    return kaartje('Energielabel', 'EP-online (RVO, gratis sleutel)', [(k, v) for k, v in r.items() if isinstance(v, (str, int, float)) and not isinstance(v, bool)][:24],
-                   juridisch=JUR['adreslinks'])
+    labels.sort(key=lambda x: str(x.get('Registratiedatum') or ''), reverse=True)
+    meer = ('Er staan %d labels op dit adres; dit is het nieuwste.' % len(labels)) if len(labels) > 1 else None
+    return kaartje('Energielabel', 'EP-online (RVO, gratis sleutel)', ep_velden(labels[0]), klein=meer, juridisch=JUR['adreslinks'])
 
 
 def adres_links(ls):

@@ -64,6 +64,16 @@ nep = {
      {'id': 'proef-http', 'geometry': {'type': 'Point', 'coordinates': [5.1008, 52.1002]}, 'properties': {'geovisio:thumbnail': 'http://foto.proef.example/h.jpg'}},
      {'id': 'proef-intern', 'geometry': {'type': 'Point', 'coordinates': [5.1009, 52.1002]}, 'properties': {'geovisio:thumbnail': 'https://intern.proef.example/i.jpg'}},
      {'id': 'proef-ip', 'geometry': {'type': 'Point', 'coordinates': [5.1010, 52.1002]}, 'properties': {'geovisio:thumbnail': 'https://0x7f.0.0.1/x.jpg'}}]},
+ # wv2718: EP-online v5 (verzonnen; twee labels, het nieuwste telt)
+ 'public.ep-online.nl/api/v5/PandEnergielabel/AdresseerbaarObject': [
+     {'Registratiedatum': '2019-02-02T10:00:00', 'Energieklasse': 'C', 'Gebouwklasse': 'Woningbouw'},
+     {'Registratiedatum': '2024-03-04T07:30:49.227', 'Opnamedatum': '2024-02-01T00:00:00', 'Geldig_tot': '2034-02-01T00:00:00', 'Certificaathouder': 'Proefadvies B.V.',
+      'Soort_opname': 'Basisopname', 'Status': 'Bestaand', 'Berekeningstype': 'NTA 8800:2024 (basisopname woningbouw)', 'IsVereenvoudigdLabel': False,
+      'Op_basis_van_referentiegebouw': True, 'Gebouwklasse': 'Woningbouw', 'Gebouwtype': 'Tussenwoning', 'Postcode': '9999ZZ', 'Huisnummer': 1,
+      'BAGVerblijfsobjectID': '9999010000000001', 'BAGPandIDs': ['9999100000000001'], 'Bouwjaar': 1931, 'Gebruiksoppervlakte_thermische_zone': 113.4, 'Compactheid': 1.62,
+      'Energieklasse': 'A+', 'Energiebehoefte': 98.26, 'Eis_energiebehoefte': None, 'PrimaireFossieleEnergie': 101.5, 'Eis_primaire_fossiele_energie': 120,
+      'Aandeel_hernieuwbare_energie': 31.04, 'Eis_aandeel_hernieuwbare_energie': 40, 'Temperatuuroverschrijding': 1.2, 'BerekendeCO2Emissie': 17.3,
+      'Primaire_fossiele_energie_EMG_forfaitair': 101.5}],
  'graph.mapillary.com/images': {'data': [{'id': '777', 'captured_at': 1730000000000, 'computed_geometry': {'coordinates': [5.1001, 52.1]}, 'thumb_256_url': 'https://foto.proef.example/m1.jpg'}]},
  'foto.proef.example/p1.jpg': 'base64:' + base64.b64encode(b'\xff\xd8\xff\xe0PROEFFOTO').decode(),
  'foto.proef.example/m1.jpg': 'base64:' + base64.b64encode(b'\xff\xd8\xff\xe0PROEFFOTO2').decode(),
@@ -139,11 +149,19 @@ TOK = 'PROEFTOKEN-verzonnen-8813'
 r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True, sleutels={'mapillary': TOK, 'ep_online': TOK + 'e'})
 k = kaart(r, 'Straatbeeld'); eis(len(k.get('beelden') or []) == 2 and any('Mapillary' in b['titel'] for b in k['beelden']) and any('pKey=777' in (l.get('url') or '') for l in k.get('links', [])), 'Mapillary met sleutel: foto + link')
 eis(any(l['host'] == 'public.ep-online.nl' for l in r['logboek']), 'EP-online: met de sleutel uit de invoer')
+k = kaart(r, 'Energielabel'); eis(veld(k, 'Energieklasse') == 'A+' and veld(k, 'Registratiedatum') == '04-03-2024' and veld(k, 'Geldig tot') == '01-02-2034' and veld(k, 'Gebouwtype') == 'Tussenwoning', 'EP-online: nieuwste label met Nederlandse veldnamen en datums')
+eis(veld(k, 'Primair fossiel energiegebruik') == '101,5 kWh/m² per jaar (eis ≤ 120)' and veld(k, 'Aandeel hernieuwbare energie') == '31,0 % (eis ≥ 40)' and veld(k, 'Energiebehoefte') == '98,3 kWh/m² per jaar', 'EP-online: eenheden en eisen achter de waarde')
+eis(veld(k, 'Gebruiksoppervlakte') == '113 m²' and veld(k, 'Vereenvoudigd label') == 'nee' and veld(k, 'Op basis van een referentiegebouw') == 'ja' and veld(k, 'Compactheid (verliesoppervlak / gebruiksoppervlak)') == '1,62', 'EP-online: oppervlak, ja/nee, compactheid')
+eis(all(a[0].isupper() and '_' not in a for a, _ in k['velden']) and not any(a in ('Postcode', 'Huisnummer', 'BAGVerblijfsobjectID', 'BAGPandIDs') for a, _ in k['velden']) and '2 labels' in (k.get('klein') or ''), 'EP-online: geen ruwe API-velden, wel melding meer labels')
 eis(not {l['host'] for l in r['logboek']} & {'intern.proef.example', '0x7f.0.0.1'} and sum(1 for l in r['logboek'] if l['host'] == 'foto.proef.example') == 2, 'miniaturen: geen http, interne host of IP-vorm (review-MOET 1)')
 nep2 = dict(nep); nep2['graph.mapillary.com/images'] = {'error': {'message': 'Invalid OAuth 2.0 Access Token', 'code': 190}}
 json.dump(nep2, open(os.path.join(T, 'nep.json'), 'w'))
 r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True, sleutels={'mapillary': TOK})
 eis('weigerde de sleutel (fout 190)' in (kaart(r, 'Straatbeeld').get('klein') or ''), 'Mapillary: geweigerde sleutel = uitleg met vervangen')
+nep2['public.ep-online.nl/api/v5/PandEnergielabel/AdresseerbaarObject'] = {'type': 'https://tools.ietf.org/html/rfc9110#section-15.5.5', 'title': 'Not Found', 'status': 404, 'traceId': '00-proef-01'}
+json.dump(nep2, open(os.path.join(T, 'nep.json'), 'w'))
+r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True, sleutels={'ep_online': TOK})
+k = kaart(r, 'Energielabel'); eis(not k.get('velden') and 'Geen energielabel' in (k.get('klein') or ''), 'EP-online: 404-antwoord = geen label, geen ruwe velden (gemeten 8-11)')
 json.dump(nep, open(os.path.join(T, 'nep.json'), 'w'))
 c = sqlite3.connect(os.environ['OSINT_DB']); dump = '\n'.join(c.iterdump())
 eis(TOK not in json.dumps(r) and TOK not in dump, 'sleutels niet in de uitkomst of osint.sqlite')
