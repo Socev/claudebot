@@ -320,7 +320,8 @@ test('review MOET 3/4 en ZOU 1: half gelukte upload wordt toch opgeruimd; wijzig
     o.st.r2.set = (k, v) => { if (!faalde && /^f\/familie\/.*\/g$/.test(k)) { faalde = true; throw new Error('R2 put HTTP 500'); } return echt(k, v); };   // miniatuur staat er al
     await o.pub.tik(true);
     o.st.r2.set = echt;
-    assert.strictEqual(o.rijen('foto', 'familie').length, 6, 'de half gelukte foto heeft (nog) geen D1-rij');
+    assert.ok(o.rijen('foto', 'familie').length < 7, 'de half gelukte foto heeft (nog) geen D1-rij');
+    assert.strictEqual(o.fouten.filter((f) => f.startsWith('mlp-upload')).length, 1, 'wv2737: na de eerste fout stopt de tik (één logregel)');
     const bezig = o.ing._db.prepare("SELECT count(*) n FROM mlp_obj WHERE hash LIKE '%bezig%'").get().n;
     assert.ok(bezig >= 1, 'het voornemen staat vast');
     o.klok.t += 16 * 60000;   // volgende ronde (elke 15 min) zet hem opnieuw in de wachtrij
@@ -336,5 +337,33 @@ test('review MOET 3/4 en ZOU 1: half gelukte upload wordt toch opgeruimd; wijzig
     o.st.hook = (batch) => { if (eerste && batch.some((q) => /INTO publicatie/.test(q.sql))) { eerste = false; o.ml.kring(A, { kring: 'shizzle', aan: false }); o.pub.markeerVuil(); } };
     await o.pub.tik(true);
     assert.ok(!o.rijen('detail', 'shizzle').some((r) => r.pid === o.pub._pidVan('shizzle', A)), 'de intrekking tijdens de ronde is meteen verwerkt');
+  } finally { o.sluit(); }
+});
+
+test('wv2737: rem op de Cloudflare-API: hooguit FOTO_MAX_TIK uploads per tik; bij een fout (429) stopt de tik en komt de foto later terug', async () => {
+  const o = await opgezet();
+  try {
+    const albumVan = (h) => o.im.albums.find((x) => x.id === o.ing._db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(h).album_id);
+    for (let i = 0; i < 60; i++) o.im.foto(albumVan(B), jpeg(), 'image/jpeg');
+    o.klok.t += 11 * 60000; await o.ml.fotoSync(true);
+    // Cloudflare knijpt af: elke put 429. Zonder rem werd de hele wachtrij binnen de tik geprobeerd (± 100 per seconde in productie).
+    let puts = 0; const echt = o.st.r2.set.bind(o.st.r2);
+    o.st.r2.set = () => { puts++; throw new Error('R2 put HTTP 429'); };
+    const u1 = await o.pub.tik(true);
+    assert.ok(puts >= 1 && puts <= 3, 'hooguit één poging per werker, kreeg ' + puts);
+    assert.strictEqual(o.fouten.filter((f) => f.startsWith('mlp-upload')).length, 1, 'één logregel per tik');
+    assert.ok(u1.wachtrij > 60, 'de rest blijft in de wachtrij');
+    // grens weer open: per tik hooguit 40 pogingen, de wachtrij loopt leeg over de tikken
+    o.st.r2.set = echt; puts = 0;
+    let vorige = o.st.r2.size, tikken = 0;
+    while (tikken < 10) {
+      o.klok.t += 60000; const u = await o.pub.tik(); tikken++;
+      const nieuw = o.st.r2.size - vorige; vorige = o.st.r2.size;
+      assert.ok(nieuw <= 2 * MP.FOTO_MAX_TIK, 'hooguit ' + MP.FOTO_MAX_TIK + ' uploads per tik, kreeg ' + nieuw + ' objecten');
+      if (!u.wachtrij) break;
+    }
+    assert.ok(tikken >= 2, 'de wachtrij was niet in één tik leeg');
+    assert.strictEqual(o.ing._db.prepare("SELECT count(*) n FROM mlp_obj WHERE hash LIKE '%bezig%'").get().n, 0, 'ook de foto\'s die 429 kregen kwamen terug');
+    assert.strictEqual(o.rijen('foto', 'familie').filter((r) => r.pid === o.pub._pidVan('familie', B)).length, 62, 'alle foto\'s van B staan erin');
   } finally { o.sluit(); }
 });

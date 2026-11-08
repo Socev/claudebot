@@ -32,7 +32,11 @@ const MLD = require('./memorylane-delen.js');
 
 const KRINGEN = MLD.PKRINGEN;
 const RONDE_MS = 15 * 60000, LOG_MS = 5 * 60000, HOUDBAAR_MS = 24 * 3600000;
-const FOTO_BUDGET_MS = 40000, FOTO_TEGELIJK = 3, BATCH = 40;
+const FOTO_BUDGET_MS = 40000, FOTO_TEGELIJK = 3, BATCH = 40, FOTO_MAX_TIK = 40;
+// wv2737: de Cloudflare-API staat 1.200 aanroepen per 5 min toe (header Ratelimit-Policy q=1200;w=300, gemeten 8-11). Een foto kost 3 aanroepen
+// (2x R2 put + D1). Zonder rem haalde de lus de grens in seconden en faalde daarna ±100 uploads per seconde, die elk weer meetelden: geen foto
+// meer door, api.log elk uur vol, en ook de rondes en de oude deellinks (ml-d1) faalden. Nu hooguit FOTO_MAX_TIK pogingen per tik
+// (40 x 3 = 120/min = 600 per 5 min, de helft van de grens) en stoppen bij de eerste fout; die foto gaat achteraan en komt de volgende tik terug.
 const LIJST_VELDEN = ['hid', 'soort', 'bron', 'status', 'titel', 'wanneer', 'wanneer_bron', 'datum', 'categorie', 'gevoelig', 'personen', 'plaatsen', 'voorvallen',
   'audio', 'binnen', 'vastgehouden', 'stukken', 'zicht', 'album', 'plaatje', 'plaatje_kan', 'dicht'];
 const DETAIL_VELDEN = LIJST_VELDEN.concat(['verhaal', 'stukken_lijst', 'voorstellen']);
@@ -360,11 +364,12 @@ function maak(o) {
   const fotoTel = { ok: 0, geen: 0, fout: 0 };
   async function uploads() {
     const tot = nu() + FOTO_BUDGET_MS;
+    let pogingen = 0, gestopt = false;
     const werker = async () => {
-      while (wachtrij.length && nu() < tot) {
-        const x = wachtrij.shift();
+      while (wachtrij.length && nu() < tot && !gestopt && pogingen < FOTO_MAX_TIK) {
+        const x = wachtrij.shift(); pogingen++;
         try { const r = await upload(x); if (r === 'ok') fotoTel.ok++; else if (r === 'geen') fotoTel.geen++; }
-        catch (e) { fotoTel.fout++; fout('mlp-upload', e); }
+        catch (e) { fotoTel.fout++; if (!gestopt) fout('mlp-upload', e); gestopt = true; wachtrij.push(x); }   // wv2737: één fout = deze tik stoppen
       }
     };
     await Promise.all(Array.from({ length: FOTO_TEGELIJK }, werker));
@@ -448,4 +453,4 @@ function maak(o) {
   return { tik, info, gezien, noodstop, health, markeerVuil, _pidVan: pidVan, _fidVan: fidVan, _persoonVan: persoonVan, _dichtItem: dichtItem, _wens: () => wens };
 }
 
-module.exports = { maak, strip, stripJpeg, stripWebp, lijstItem, detailItem, adresHash, LIJST_VELDEN, DETAIL_VELDEN, D1_SCHEMA, KRINGEN };
+module.exports = { maak, strip, stripJpeg, stripWebp, lijstItem, detailItem, adresHash, LIJST_VELDEN, DETAIL_VELDEN, D1_SCHEMA, KRINGEN, FOTO_MAX_TIK };
