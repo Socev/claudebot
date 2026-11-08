@@ -1422,6 +1422,20 @@ const opdrachten = {
       vault: process.env.VAULT_DIR || '/opt/data/AI_SecondBrain' }); }
     catch (e) { throw new Weigering(e.message); }
   },
+  // wv2717 (idee 6 uit Sure): zelf corrigeren in de App. stdin {corrigeer: {actie: 'zet'|'terug'|'naam'|'lijst', …}}; alles via
+  // financien-corrigeer.js (grenzen van de App) op bank-archief.js corrigeer/herstel/regelUit en de tabel tegen_naam. Niets naar de bank.
+  async 'app-corrigeer'() {
+    const x = archiefKlaar(), q = geheim.corrigeer;
+    if (!q || typeof q !== 'object' || Array.isArray(q)) throw new Weigering('keuze ontbreekt');
+    const C = require(path.join(__dirname, 'financien-corrigeer.js'));
+    try {
+      if (q.actie === 'zet') return Object.assign({ ok: true }, C.corrigeerApp(x.A, x.a, { nr: q.nr, categorie: q.categorie, eigenaar: q.eigenaar, altijd: q.altijd }));
+      if (q.actie === 'terug') return Object.assign({ ok: true }, C.herstelApp(x.A, x.a, q.regel != null ? { regel: q.regel } : { nr: q.nr }));
+      if (q.actie === 'naam') return Object.assign({ ok: true }, C.naamZet(x.A, x.a, { id: q.id, naam: q.naam }));
+      if (q.actie === 'lijst') return Object.assign({ ok: true }, C.regelsLijst(x.A, x.a));
+    } catch (e) { throw new Weigering(e.message); }
+    throw new Weigering('onbekende actie');
+  },
   // wv2292: de gezinsleden die in Saldi als "van wie" te kiezen zijn. Alleen machinekamer, alleen via de CLI (stdin {kinderen: [...]}),
   // niet via /smal/bank of de App; de namen staan alleen in het archief (meta), nooit in de code.
   async gezin() {

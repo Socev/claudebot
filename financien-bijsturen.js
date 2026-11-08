@@ -232,4 +232,4 @@ function bijsturen(a, delen, o) {
     uitleg: 'Wat jullie zelf kunnen bijsturen, uit dezelfde boekingen als hieronder (stroom uit de facturen). Adviezen zijn schattingen met de aanname erbij; Socev doet zelf niets.' };
 }
 
-module.exports = { bijsturen: bijsturen, indeling: indeling, winkel: winkel, horecaSoort: horecaSoort, mediaSoort: mediaSoort, stroomUit: stroomUit, stroomLopend: stroomLopend, lopendZin: lopendZin, stroomPost: stroomPost, P_ENERGIE: P_ENERGIE };
+module.exports = { NETJES: NETJES, bijsturen: bijsturen, indeling: indeling, winkel: winkel, horecaSoort: horecaSoort, mediaSoort: mediaSoort, stroomUit: stroomUit, stroomLopend: stroomLopend, lopendZin: lopendZin, stroomPost: stroomPost, P_ENERGIE: P_ENERGIE };

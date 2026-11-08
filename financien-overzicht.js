@@ -164,6 +164,8 @@ function eigenTegen(t, c) {
 // Alle privéboekingen van de maanden [van, tot] (JJJJ-MM), elk in delen. aflossing = verplichte aflossing per maand (hypotheekmodel) of null.
 function boekingen(a, van, tot, aflossing) {
   const rijen = a.db.prepare("SELECT t.nr, t.rek, t.datum, t.bedrag, t.valuta, t.tegenpartij, t.omschrijving, v.type, v.categorie, v.subcategorie, v.abonnement_id, v.eigenaar AS v_eigenaar, r.eigenaar AS r_eigenaar," +
+    // wv2717: wie de indeling zette (David per boeking, een regel van David, of automatisch) voor de App
+    " v.herkomst AS v_herkomst, (SELECT g.herkomst FROM regels g WHERE g.id = v.regel_id) AS regel_door," +
     // wv2696: bij een deel van de ABN-boekingen is tegen_iban leeg en staat het IBAN alleen in de ruwe bankregel (creditor/debtor_account)
     " coalesce(nullif(trim(t.tegen_iban), ''), CASE WHEN json_valid(t.ruwe_json) THEN json_extract(t.ruwe_json, CASE WHEN t.bedrag < 0 THEN '$.creditor_account.iban' ELSE '$.debtor_account.iban' END) END) AS tegen_iban," +
     ' (SELECT p.rek FROM transacties p WHERE p.nr = v.intern_paar) AS paar_rek, r.label, r.naam, r.weergavenaam FROM transacties t JOIN verrijking v ON v.nr = t.nr JOIN rekeningen r ON r.rek = t.rek' +
@@ -184,6 +186,9 @@ function boekingen(a, van, tot, aflossing) {
   });
   const tpCat = new Map();
   tel.forEach(function (m, k) { if (m.size === 1) { const e = Array.from(m.entries())[0]; if (e[1] >= 2) tpCat.set(k, e[0]); } });
+  // wv2717 (idee 6 uit Sure): Davids eigen naam per tegenpartij (alleen weergave; de logica rekent op de banknaam)
+  let namen = new Map();
+  try { namen = require('./financien-corrigeer.js').namenLees(a); } catch (e) { namen = new Map(); }
   const c = { regels: regelsLees(a), zichtbaar: zichtbaar, rekEig: rekEig, eigenIban: eigenIban, catUit: catUit, tpCat: tpCat };
   const uit = [];
   let anderValuta = 0;
@@ -192,7 +197,8 @@ function boekingen(a, van, tot, aflossing) {
     t._sleutel = sleutelVan(t);
     const d = indelen(t, c), m = t.datum.slice(0, 7);
     const basis = { nr: t.nr, datum: t.datum, maand: m, rekening: veilig(t.weergavenaam || t.label || t.naam, 30) || 'eigen rekening', tegenpartij: veilig(zonderIban(t.tegenpartij), 40) || null,
-      omschrijving: veilig(zonderIban(omsKern(t.omschrijving)), 80) || null, bedrag: t.bedrag, sleutel: t._sleutel, id: idVan(t._sleutel, richting(t.bedrag)), zeker: d.zeker, waarom: d.waarom, cat: d.cat || null, eig: eigenaarVan(t.v_eigenaar), abo: t.abonnement_id || null };
+      omschrijving: veilig(zonderIban(omsKern(t.omschrijving)), 80) || null, bedrag: t.bedrag, sleutel: t._sleutel,
+      naam: namen.get(tpWoorden(t.tegenpartij)) || null, tpk: tpWoorden(t.tegenpartij) || null, door: t.v_herkomst === 'david' ? 'jij' : t.regel_door === 'david' ? 'regel' : 'auto', v_eig: t.v_eigenaar || null, eigen: !!eigenTegen(t, c), id: idVan(t._sleutel, richting(t.bedrag)), zeker: d.zeker, waarom: d.waarom, cat: d.cat || null, eig: eigenaarVan(t.v_eigenaar), abo: t.abonnement_id || null };
     // hypotheektermijn: het aflossingsdeel (hooguit de verplichte aflossing per maand) is verschuiven/verplicht, de rest leven (rente)
     if (d.waarom.indexOf('hypotheektermijn') === 0 && aflossing > 0) {
       const deel = r2(Math.min(-t.bedrag, aflossing));   // per termijn één maand aflossing (31-12 en 1-12 zijn twee termijnen)
@@ -473,7 +479,7 @@ function overzicht(A, a, o) {
   b.delen.forEach(function (x) {
     if (x.maand < van12 || x.maand > tot12 || x.stroom === 'intern') return;
     const k = x.id;
-    if (!groepen.has(k)) groepen.set(k, { id: k, naam: x.tegenpartij || x.omschrijving || 'zonder naam', richting: x.bedrag < 0 ? 'af' : 'bij', aantal: 0, som: 0, stromen: new Map(), zeker: true, waarom: x.waarom, cat: x.cat, gezien: new Set() });
+    if (!groepen.has(k)) groepen.set(k, { id: k, naam: x.naam || x.tegenpartij || x.omschrijving || 'zonder naam', richting: x.bedrag < 0 ? 'af' : 'bij', aantal: 0, som: 0, stromen: new Map(), zeker: true, waarom: x.waarom, cat: x.cat, gezien: new Set() });
     const g = groepen.get(k);
     if (!g.gezien.has(x.nr)) {
       g.aantal++; g.gezien.add(x.nr);
@@ -540,7 +546,12 @@ function boekingenLijst(A, a, o) {
   }).sort(function (p, q) { return Math.abs(q.deel) - Math.abs(p.deel); });
   const max = Math.min(Math.max(parseInt(o.max, 10) || 300, 1), 300);
   return { aantal: l.length, som: r2(l.reduce(function (s, x) { return s + x.deel; }, 0)), getoond: Math.min(l.length, max),
-    boekingen: l.slice(0, max).map(function (x) { return { datum: x.datum, rekening: x.rekening, tegenpartij: x.tegenpartij, omschrijving: x.omschrijving, bedrag: r2(x.deel),
+    // wv2717: nr, eigenaar, wie het zette en of corrigeren kan (geen overboeking met een eigen rekening; voortaan altijd niet bij een betaaldienst
+    // of eigen BV); tegenpartij = Davids eigen naam als die er is, bank = de banknaam dan apart
+    keuzes: (function () { try { return require('./financien-corrigeer.js').keuzes(A, a); } catch (e) { return undefined; } })(),
+    boekingen: l.slice(0, max).map(function (x) { return { nr: x.nr, datum: x.datum, rekening: x.rekening, tegenpartij: x.naam || x.tegenpartij, bank: x.naam && x.naam !== x.tegenpartij ? x.tegenpartij : undefined,
+      naam_id: x.tpk ? crypto.createHash('sha256').update('naam:' + x.tpk).digest('hex').slice(0, 16) : undefined, eigenaar: x.v_eig, door: x.door, kan: !x.eigen || undefined,
+      altijd_kan: !x.eigen && !!x.tpk && !GEMENGD.test(String(x.tegenpartij || '')) && !ENTITEIT.test(String(x.tegenpartij || '')) || undefined, omschrijving: x.omschrijving, bedrag: r2(x.deel),
       heel: x.deel !== x.bedrag ? r2(x.bedrag) : undefined, stroom: x.stroom, sub: x.sub || undefined, categorie: x.cat, eenmalig: x.eenmalig || undefined, onzeker: x.zeker ? undefined : true, waarom: x.waarom, id: x.id }; }) };
 }
 
@@ -623,4 +634,4 @@ function regelsHerleiden(a) {
 }
 
 module.exports = { liquide: liquide, vermogenPunt: vermogenPunt, leesWoning: leesWoning, leesHolding: leesHolding, groepVan: groepVan, boekingen: boekingen, regelsHerleiden: regelsHerleiden, tpWoorden: tpWoorden, zonderIban: zonderIban, overzicht: overzicht, boekingenLijst: boekingenLijst, stroomZet: stroomZet, indelen: indelen, sleutelVan: sleutelVan, idVan: idVan, box2: box2,
-  STROMEN: STROMEN, SUBSOORT: SUBSOORT, TARIEVEN: TARIEVEN, EENMALIG_GRENS: EENMALIG_GRENS, EIGENAREN: EIGENAREN, uitgaven: uitgaven, mediaan: mediaan };
+  GEMENGD: GEMENGD, ENTITEIT: ENTITEIT, STROMEN: STROMEN, SUBSOORT: SUBSOORT, TARIEVEN: TARIEVEN, EENMALIG_GRENS: EENMALIG_GRENS, EIGENAREN: EIGENAREN, uitgaven: uitgaven, mediaan: mediaan };

@@ -500,6 +500,9 @@ function verrijkBinnen(a) {
           if (g.soort === 'intern') return !!doel && g.patroon === doel;
           if (g.soort === 'extern') return !!naarExt && g.patroon === naarExt;
           if (g.herkomst !== 'david') return false;
+          // wv2717 (review MOET 2): een regel van David zonder rekening geldt alleen op zijn eigen zichtbare rekeningen, nooit op een externe
+          // rekening (de POT stond al hierboven); een regel die op die rekening zelf gemaakt is (g.rek) wel
+          if (!g.rek && ext.has(t.rek)) return false;
           // wv847: David wijst een niet-gekoppelde tegenrekening aan (bv. een rekening van de zaak: inkomen in plaats van intern)
           if (g.soort === 'tegen_iban') return !doel && !naarExt && !!t.tegen_iban && g.patroon === ibanNorm(t.tegen_iban);
           if (g.soort === 'tegenpartij') return !doel && !naarExt && !!ts && g.patroon === ts;
@@ -1167,6 +1170,11 @@ function corrigeer(a, o) {
   const nr = parseInt(o.nr, 10);
   if (!(nr > 0)) throw new Error('nr ontbreekt (het nummer uit zoek)');
   if (!Object.keys(velden).length) throw new Error('niets te corrigeren: categorie, subcategorie, eigenaar of type');
+  // wv2717 (review MOET 1): lezen, rekenen, schrijven en herverrijken in één BEGIN IMMEDIATE (inTransactie nest), zodat twee correcties
+  // op dezelfde post (App en Socev, of twee tikken) elkaars veld niet verliezen
+  return inTransactie(a, function () { return corrigeerPost(a, o, nr, velden, cats, nu); });
+}
+function corrigeerPost(a, o, nr, velden, cats, nu) {
   const t = a.db.prepare('SELECT * FROM transacties WHERE nr = ?').get(nr);
   if (!t) throw new Error('post ' + nr + ' bestaat niet');
   verrijkAlsVuil(a);
@@ -1202,9 +1210,18 @@ function corrigeer(a, o) {
       const soort = naarExt ? 'extern' : doel ? 'intern' : eigenIban ? 'tegen_iban' : 'tegenpartij', patroon = naarExt || doel || eigenIban || woordSleutel(t.tegenpartij);
       if (patroon) {
         const rk = doel || ext.has(t.rek) ? t.rek : null, rt = richting(t.bedrag);
+        // wv2717 (review ronde 2 MOET 1): de velden van de bestaande regel blijven, alleen wat David nu koos verandert (anders verloor een
+        // regel met een categorie die bij een tweede correctie met alleen een eigenaar)
+        const vorig = a.db.prepare("SELECT * FROM regels WHERE herkomst = 'david' AND actief = 1 AND soort = ? AND patroon = ? AND rek IS ? AND richting = ? ORDER BY id DESC LIMIT 1").get(soort, patroon, rk, rt) || {};
+        const nieuweCat = velden.categorie !== undefined && velden.categorie !== vorig.categorie;
+        const rv = function (k) {
+          if (velden[k] !== undefined) return velden[k] || null;
+          if (k === 'subcategorie' && nieuweCat) return null;   // een subcategorie hoort bij de oude categorie
+          return vorig[k] == null ? null : vorig[k];
+        };
         a.db.prepare("UPDATE regels SET actief = 0 WHERE herkomst = 'david' AND actief = 1 AND soort = ? AND patroon = ? AND rek IS ? AND richting = ?").run(soort, patroon, rk, rt);
         regelId = Number(a.db.prepare("INSERT INTO regels (soort, patroon, rek, richting, type, categorie, subcategorie, eigenaar, herkomst, actief, aangemaakt, bron_nr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'david', 1, ?, ?)")
-          .run(soort, patroon, rk, rt, velden.type || null, velden.categorie || null, velden.subcategorie || null, velden.eigenaar || null, nu, nr).lastInsertRowid);
+          .run(soort, patroon, rk, rt, rv('type'), rv('categorie'), rv('subcategorie'), rv('eigenaar'), nu, nr).lastInsertRowid);
       }
     }
     metaZet(a, 'vuil', '1');
@@ -1212,6 +1229,39 @@ function corrigeer(a, o) {
   const v = verrijk(a);
   return { ok: true, nr: nr, herkomst: 'david', vast: davidVelden, regel: regelId, nieuwe_categorie: velden.categorie && cats.indexOf(velden.categorie) < 0 ? true : undefined,
     andere_posten_bijgewerkt: v.gewijzigd };
+}
+
+// ── terug naar automatisch (wv2717, idee 6 uit Sure) ────────────────────────
+// Per post: Davids vaste velden weg (herkomst 'regel', david_velden leeg), daarna rekent verrijk hem weer uit (regel van David, systeemregel
+// of AI). Per regel: alleen een actieve regel van David, actief = 0 (blijft staan als spoor); de posten die hem volgden rekenen weer, per
+// post gezette keuzes blijven. Niets wordt verwijderd; de oude stand van een post gaat naar verrijking_historie (verrijk schrijft die bij
+// elke oordeelwijziging). Alles in één BEGIN IMMEDIATE (review MOET 1).
+function herstel(a, o) {
+  const nr = parseInt(o && o.nr, 10);
+  if (!(nr > 0)) throw new Error('nr ontbreekt');
+  return inTransactie(a, function () {
+    const v = a.db.prepare('SELECT * FROM verrijking WHERE nr = ?').get(nr);
+    if (!v) throw new Error('post ' + nr + ' bestaat niet');
+    if (v.herkomst !== 'david') return { ok: true, nr: nr, al_automatisch: true };
+    a.db.prepare('INSERT INTO verrijking_historie (nr, versie, json, tijd) VALUES (?, ?, ?, ?)').run(nr, v.versie, JSON.stringify(v), nuIso());
+    a.db.prepare("UPDATE verrijking SET herkomst = 'regel', david_velden = NULL, versie = versie + 1, bijgewerkt = ? WHERE nr = ?").run(nuIso(), nr);
+    metaZet(a, 'vuil', '1');
+    const r = verrijk(a);
+    const na = a.db.prepare('SELECT herkomst, regel_id FROM verrijking WHERE nr = ?').get(nr) || {};
+    return { ok: true, nr: nr, herkomst: na.herkomst || null, regel: na.regel_id || null, andere_posten_bijgewerkt: r.gewijzigd };
+  });
+}
+function regelUit(a, o) {
+  const id = parseInt(o && o.id, 10);
+  if (!(id > 0)) throw new Error('regel ontbreekt');
+  return inTransactie(a, function () {
+    const g = a.db.prepare("SELECT id FROM regels WHERE id = ? AND herkomst = 'david' AND actief = 1").get(id);
+    if (!g) throw new Error('geen actieve regel van David');
+    a.db.prepare('UPDATE regels SET actief = 0 WHERE id = ?').run(id);
+    metaZet(a, 'vuil', '1');
+    const r = verrijk(a);
+    return { ok: true, regel: id, posten_bijgewerkt: r.gewijzigd };
+  });
 }
 
 // ── lezen ───────────────────────────────────────────────────────────────────
@@ -1738,6 +1788,6 @@ function stand(a) {
   };
 }
 
-module.exports = { open, rekeningWeergave, rekId, rekVanId, vanWieKeuzes, vanWieKinderen, vanWieKinderenZet, labelsLees, REK_KOLOMMEN, rekeningenSync, markeerOntkoppeld, bij, historieBij, HIST_MARGE, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
+module.exports = { open, rekeningWeergave, rekId, rekVanId, vanWieKeuzes, vanWieKinderen, vanWieKinderenZet, labelsLees, REK_KOLOMMEN, rekeningenSync, markeerOntkoppeld, bij, historieBij, HIST_MARGE, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, herstel, regelUit, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
   zakelijkZet, zakelijkeIbans, potRekeningen, potOverzicht, potCategorie, potAfschriftInvoer, potAfschriftMaanden, potDatahubInvoer, metaLees, metaZet, isAfgescheiden, POT, CAT_POT, LET_OP_POT,
   categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, reeksenBereken, vastePosten, rijenVan, rijHoort, paypalStap, paypalNaam, ppTitel, rijTekst, archiefStart, machtigingVan, naamNorm, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };

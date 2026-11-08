@@ -322,6 +322,7 @@ jobs:
           t test/financien-bijsturen.sh   # wv2700: Financiën › Uitgaven "Zelf bij te sturen" (boodschappen, uit eten, stroom, streaming, abonnementen)
           t test/financien-plan.sh   # wv2706: Financiën — potjes, rekeningen afvinken, geldstroom (ideeën uit Sure)
           t test/financien-vermogen.sh   # wv2716: Financiën — vermogensverloop per maand (dagketen, trappen, onvolledig, laatste maand = punt; kruisproef)
+          t test/financien-corrigeer.sh   # wv2717: Financiën — zelf corrigeren in de App (alleen deze/voortaan altijd, terug naar automatisch, eigen namen; kruisproeven)
           t test/financien-reis.sh   # wv2715: Financiën — kosten per reis (voorstel uit de reisperiode, Davids tik in reis_label; kruisproef reisland)
           t test/stroom-tabel.sh   # wv2704: stroomtabel op de energiepagina vanzelf bij uit de Tibber-factuur
           t test/tibber-uur.sh   # wv2707: Tibber-uurverbruik dagelijks bij — alleen leesqueries, kluis alleen tibber_lezen, kind zonder andere sleutels, gevuld uur blijft

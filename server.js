@@ -5198,6 +5198,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/doel');   // wv2621: doel erbij of weg
 ['POST /app/financien/ah/koppel', 'POST /app/financien/ah/ontkoppel'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2703: AH koppelen = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/potje');   // wv2706: potje zetten of weg = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij een reis tikken = David die werkt
+['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2717: zelf corrigeren = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -11758,7 +11759,9 @@ async function appFinBoekingen(req, res, a, d) {
   if (!appTeller('fin-boekingen', APP_FIN_BOEK_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak opgevraagd dit uur', 'grens fin-boekingen');
   const j = await appFinBankRoute(res, 'app-boekingen', { boekingen: q }, 'fin-boekingen');
   if (!j || j.ok !== true) return;
-  return appStuur(res, 200, { ok: true, aantal: j.aantal | 0, som: typeof j.som === 'number' ? j.som : null, getoond: j.getoond | 0, boekingen: Array.isArray(j.boekingen) ? j.boekingen : [] });
+  // wv2717: keuzes = de categorieën en eigenaren voor Wijzig (zelf corrigeren)
+  const kz = j.keuzes && Array.isArray(j.keuzes.categorieen) && Array.isArray(j.keuzes.eigenaren) ? { categorieen: j.keuzes.categorieen.filter(function (c) { return typeof c === 'string'; }).slice(0, 80), eigenaren: j.keuzes.eigenaren.filter(function (c) { return typeof c === 'string'; }).slice(0, 10) } : undefined;
+  return appStuur(res, 200, { ok: true, aantal: j.aantal | 0, som: typeof j.som === 'number' ? j.som : null, getoond: j.getoond | 0, boekingen: Array.isArray(j.boekingen) ? j.boekingen : [], keuzes: kz });
 }
 async function appFinStroom(req, res, a, d) {
   res._app.reden = 'financien-stroom';
@@ -11831,6 +11834,54 @@ async function appFinVermogen(req, res, a, d) {
   res._app.stil = true;
   return appStuur(res, 200, { ok: true, peildatum: j.peildatum || null, maanden: Array.isArray(j.maanden) ? j.maanden : [], eerste_totaal: j.eerste_totaal || null,
     eerste_volledig: j.eerste_volledig || null, bronnen: j.bronnen || null, fouten: Array.isArray(j.fouten) ? j.fouten : [], uitleg: typeof j.uitleg === 'string' ? j.uitleg : '' });
+}
+
+// wv2717 (idee 6 uit Sure, David 8-11-2026 "1 t/m 6"; ontwerp "Financiën - ideeën uit Sure (ontwerp 8-11-2026)" § 1c): zelf corrigeren in de
+// App. POST /app/financien/corrigeer { nr, categorie?, eigenaar?, altijd } (alleen deze of voortaan altijd bij deze tegenpartij en richting),
+// POST /app/financien/herstel { nr } of { regel } (terug naar automatisch), POST /app/financien/naam { id, naam|null } (eigen naam per
+// tegenpartij, alleen weergave), POST /app/financien/regels (Jouw regels, keuzes, namen, voorstellen). Zelfde poort als de andere
+// Financiën-routes (sessie, niet op een vaste plek); de grenzen (bestaande categorieën en eigenaren, geen POT/extern/eigen overboeking,
+// voortaan altijd niet bij een betaaldienst) legt financien-corrigeer.js via de bank-lezer op. Schrijven 60 per uur, namen 60, lijst 300.
+// Na een schrijfactie het 60 s-geheugen weg. Geen bedrag, naam of categorie in api.log.
+const APP_FIN_CORR_PER_UUR = 60, APP_FIN_NAAM_PER_UUR = 60, APP_FIN_REGELS_PER_UUR = 300;
+async function appFinCorrigeer(req, res, a, d, route) {
+  res._app.reden = 'financien-corrigeer';
+  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-corrigeer vast');
+  const tekst = function (x, n) { return x == null ? null : typeof x === 'string' && x.length <= n ? x : undefined; };
+  let q;
+  if (route === 'POST /app/financien/regels') {
+    if (!appTeller('fin-regels', APP_FIN_REGELS_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak opgevraagd dit uur', 'grens fin-regels');
+    q = { actie: 'lijst' };
+  } else if (route === 'POST /app/financien/naam') {
+    if (!/^[a-f0-9]{16}$/.test(String(d.id || ''))) return appWeiger(res, 400, 'onbekende tegenpartij', 'fin-naam id');
+    const n = tekst(d.naam, 80);
+    if (n === undefined) return appWeiger(res, 400, 'naam: hooguit 40 tekens', 'fin-naam naam');
+    if (!appTeller('fin-naam', APP_FIN_NAAM_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak gewijzigd dit uur', 'grens fin-naam');
+    q = { actie: 'naam', id: String(d.id), naam: n };
+  } else if (route === 'POST /app/financien/herstel') {
+    const metRegel = d.regel != null;
+    if (metRegel ? !(Number.isSafeInteger(d.regel) && d.regel > 0) : !(Number.isSafeInteger(d.nr) && d.nr > 0)) return appWeiger(res, 400, 'onbekende boeking of regel', 'fin-herstel id');
+    if (!appTeller('fin-corrigeer', APP_FIN_CORR_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak gewijzigd dit uur', 'grens fin-corrigeer');
+    q = metRegel ? { actie: 'terug', regel: d.regel } : { actie: 'terug', nr: d.nr };
+  } else {
+    if (!Number.isSafeInteger(d.nr) || d.nr <= 0) return appWeiger(res, 400, 'onbekende boeking', 'fin-corrigeer nr');
+    const c = tekst(d.categorie, 60), e = tekst(d.eigenaar, 30);
+    if (c === undefined || e === undefined) return appWeiger(res, 400, 'onbekende categorie of eigenaar', 'fin-corrigeer veld');
+    if (typeof d.altijd !== 'boolean') return appWeiger(res, 400, 'alleen deze of voortaan altijd?', 'fin-corrigeer altijd');
+    if (!appTeller('fin-corrigeer', APP_FIN_CORR_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak gewijzigd dit uur', 'grens fin-corrigeer');
+    q = { actie: 'zet', nr: d.nr, categorie: c, eigenaar: e, altijd: d.altijd };
+  }
+  const j = await appFinBankRoute(res, 'app-corrigeer', { corrigeer: q }, 'fin-corrigeer');
+  if (!j || j.ok !== true) return;
+  if (q.actie === 'lijst') {
+    res._app.stil = true;
+    return appStuur(res, 200, { ok: true, regels: Array.isArray(j.regels) ? j.regels : [], keuzes: Array.isArray(j.keuzes) ? j.keuzes : [], namen: Array.isArray(j.namen) ? j.namen : [],
+      voorstellen: Array.isArray(j.voorstellen) ? j.voorstellen : [], voorstellen_totaal: j.voorstellen_totaal | 0 });
+  }
+  appFinCache = null;
+  if (q.actie === 'naam') return appStuur(res, 200, { ok: true, id: j.id || null, naam: j.naam || null, bank: j.bank || null });
+  if (q.actie === 'terug') return appStuur(res, 200, { ok: true, nr: typeof j.nr === 'number' ? j.nr : null, regel: typeof j.regel === 'number' ? j.regel : null, door: j.door || null, posten: j.posten | 0 });
+  return appStuur(res, 200, { ok: true, nr: typeof j.nr === 'number' ? j.nr : null, regel: typeof j.regel === 'number' ? j.regel : null, andere: j.andere | 0 });
 }
 
 // wv2621 (Financiën 8+ stap 6, ontwerp § 3.6): Doelen staan op de vaultpagina 20_Prive/Financien/Doelen.md (tabel), zodat David ze ook
@@ -13374,6 +13425,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/financien/reizen') return appFinReizen(req, res, a, d);   // wv2715: kosten per reis (lijst of één reis)
         if (route === 'POST /app/financien/reislabel') return appFinReislabel(req, res, a, d);   // wv2715: boeking bij een reis: erbij, eraf of terug
         if (route === 'POST /app/financien/vermogen') return appFinVermogen(req, res, a, d);   // wv2716: vermogensverloop per maand sinds 2016
+        if (['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam', 'POST /app/financien/regels'].indexOf(route) >= 0) return appFinCorrigeer(req, res, a, d, route);   // wv2717: zelf corrigeren
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
         if (route.indexOf('GET /app/pot/') === 0) return typeof appPot === 'function' ? appPot(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1894: OVIS POT (P1: lezen)
         if (route.indexOf('POST /app/pot/') === 0) return typeof appPotSchrijf === 'function' ? appPotSchrijf(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1933: OVIS POT (P3/P4: schrijven en verzending)
@@ -22854,7 +22906,7 @@ const BANK_DIR = process.env.BANK_DIR || '/opt/data/bank';
 const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', 'saldo', 'transacties', 'toestemming', 'label',
   'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'gambia', 'ecobank-ronde', 'ontkoppel'];
 const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'verrijk-open', 'verrijk-zet',
-  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'app-rekening', 'app-boekingen', 'app-stroom', 'geld-briefing', 'app-reizen', 'app-reislabel', 'app-vermogen',   // wv2292: app-rekening alleen voor POST /app/financien/rekening   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
+  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'app-rekening', 'app-boekingen', 'app-stroom', 'geld-briefing', 'app-reizen', 'app-reislabel', 'app-vermogen', 'app-corrigeer',   // wv2292: app-rekening alleen voor POST /app/financien/rekening   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
   'gambia', 'ecobank-bekend', 'ecobank-bij',   // wv2202: de Ecobank-laag leest alleen de database
   'pot-afschrift-maanden', 'pot-afschrift', 'pot-datahub-invoer'];   // wv787 (wv815: pot-datahub-invoer alleen voor potDatahubRonde): alleen voor de App-routes en de maandronde (niet in BANK_OPDRACHTEN: niet via /smal/bank)
 const BANK_TERUG_PER_UUR = 30;
