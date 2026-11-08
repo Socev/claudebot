@@ -88,7 +88,7 @@ const BEDRAG = /1234|2345|1\.234|2\.345|1234,56|€/;
     toets('Bert: uit dienst per 30-6-2023', /uit dienst per 30-6-2023/.test(blok('Bert Toets')));
     toets('Dirk: nog niet begonnen', /in dienst per 1-1-2099 \(nog niet begonnen\)/.test(blok('Dirk Later')));
     // review MOET 2: op de einddatum zelf nog in dienst; de dag erna uit dienst
-    const kb = kindEcht(SCRIPT, 'vault', { nu: '2023-06-30' }), kc = kindEcht(SCRIPT, 'vault', { nu: '2023-07-01' });
+    const kb = kindEcht(SCRIPT, 'vault', { nu: '2023-06-30T14:00:00+02:00' }), kc = kindEcht(SCRIPT, 'vault', { nu: '2023-07-01T09:00:00+02:00' });   // ZOU 1: middag van de einddatum
     const bb = (kk2) => ((kk2.dossiers || []).find((x) => x.pad.indexOf('Bert Toets') >= 0) || {}).blok || '';
     toets('MOET 2: op de laatste dag nog in dienst, de dag erna uit dienst', /\| Status \| in dienst, laatste werkdag 30-6-2023 \|/.test(bb(kb)) && /uit dienst per 30-6-2023/.test(bb(kc)), [bb(kb).slice(0, 400)]);
     // review MOET 1: Dirk heeft vanaf 2099 een rooster; vóór 2099 telt dat nergens mee, in het dossier "per … (nog niet ingegaan)"

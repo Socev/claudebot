@@ -1041,7 +1041,8 @@ function kindVault(invoer, dir) {
   const d = db(dir), geladen = laad(d);
   d.close();
   // review wv2799 MOET 2: rekenen op kalenderdag (00:00 UTC van de Nederlandse datum), zodat een einddatum de hele dag meetelt
-  const dag = invoer && typeof invoer.nu === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(invoer.nu) ? invoer.nu : new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const t0 = invoer && typeof invoer.nu === 'string' ? datum(invoer.nu) : null;   // alleen de toets; anders nu
+  const dag = new Date(t0 != null ? t0 : Date.now()).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
   const nu = Date.parse(dag + 'T00:00:00Z');
   return Object.assign({ ok: true }, vaultBereken(geladen, koppelingLees(dir), nu));
 }
