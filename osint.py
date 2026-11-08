@@ -1464,7 +1464,15 @@ def straatbeeld(ctx, lon, lat):
                 continue
     else:
         klein.append('Mapillary komt erbij zodra de gratis sleutel er is.')
-    fotos = sorted((f for f in fotos if f['m'] <= 150), key=lambda f: f['m'])[:4]
+    # wv2724: eerst de 2 dichtstbijzijnde per dienst, dan aanvullen tot 4 (anders verdringt een dichtere dienst de andere helemaal)
+    binnen = sorted((f for f in fotos if f['m'] <= 150), key=lambda f: f['m'])
+    keuze, per = [], {}
+    for f in binnen:
+        if per.get(f['dienst'], 0) < 2 and len(keuze) < 4:
+            keuze.append(f)
+            per[f['dienst']] = per.get(f['dienst'], 0) + 1
+    keuze += [f for f in binnen if f not in keuze][:4 - len(keuze)]
+    fotos = sorted(keuze, key=lambda f: f['m'])
     with cf.ThreadPoolExecutor(4) as ex:
         minis = list(ex.map(lambda f: mini(ctx, f['dienst'] + ' (foto)', f['mini']), fotos))
     beelden = [{'titel': '%s · %d m · %s%s' % (f['dienst'], f['m'], f['datum'] or '?', (' · ' + str(f['door'])[:40]) if f.get('door') else ''), 'src': m, 'foto': True}

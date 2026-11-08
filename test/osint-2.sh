@@ -154,6 +154,14 @@ eis(veld(k, 'Primair fossiel energiegebruik') == '101,5 kWh/m² per jaar (eis �
 eis(veld(k, 'Gebruiksoppervlakte') == '113 m²' and veld(k, 'Vereenvoudigd label') == 'nee' and veld(k, 'Op basis van een referentiegebouw') == 'ja' and veld(k, 'Compactheid (verliesoppervlak / gebruiksoppervlak)') == '1,62', 'EP-online: oppervlak, ja/nee, compactheid')
 eis(all(a[0].isupper() and '_' not in a for a, _ in k['velden']) and not any(a in ('Postcode', 'Huisnummer', 'BAGVerblijfsobjectID', 'BAGPandIDs') for a, _ in k['velden']) and '2 labels' in (k.get('klein') or ''), 'EP-online: geen ruwe API-velden, wel melding meer labels')
 eis(not {l['host'] for l in r['logboek']} & {'intern.proef.example', '0x7f.0.0.1'} and sum(1 for l in r['logboek'] if l['host'] == 'foto.proef.example') == 2, 'miniaturen: geen http, interne host of IP-vorm (review-MOET 1)')
+# wv2724: vier dichtere Panoramax-foto's verdringen Mapillary niet meer (2 per dienst eerst, dan aanvullen tot 4)
+nep3 = dict(nep); nep3['api.panoramax.xyz/api/search'] = {'features': [{'id': 'pd-%d' % i, 'geometry': {'type': 'Point', 'coordinates': [5.1 + 0.00002 * i, 52.1]},
+    'properties': {'datetime': '2025-05-05T10:00:00Z', 'geovisio:thumbnail': 'https://foto.proef.example/d%d.jpg' % i}} for i in range(1, 6)]}
+nep3['graph.mapillary.com/images'] = {'data': [{'id': '888', 'captured_at': 1730000000000, 'computed_geometry': {'coordinates': [5.1012, 52.1]}, 'thumb_256_url': 'https://foto.proef.example/m8.jpg'}]}
+json.dump(nep3, open(os.path.join(T, 'nep.json'), 'w'))
+r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True, sleutels={'mapillary': TOK})
+k = kaart(r, 'Straatbeeld'); ls = [l.get('url') or '' for l in k.get('links', [])]
+eis(sum(1 for u in ls if 'pKey=888' in u) == 1 and sum(1 for u in ls if 'panoramax' in u) == 3 and any(u.endswith('pd-3') for u in ls) and not any(u.endswith('pd-4') for u in ls), 'straatbeeld: Mapillary verder weg blijft erin naast dichtere Panoramax (2 per dienst, aanvullen tot 4)')
 nep2 = dict(nep); nep2['graph.mapillary.com/images'] = {'error': {'message': 'Invalid OAuth 2.0 Access Token', 'code': 190}}
 json.dump(nep2, open(os.path.join(T, 'nep.json'), 'w'))
 r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True, sleutels={'mapillary': TOK})
