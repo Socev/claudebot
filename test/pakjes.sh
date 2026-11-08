@@ -166,6 +166,50 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
     toets('3 vandaag van de vervoerder zonder tijdvak: Komt vandaag, morgen niet meer', M3.lijst([]).body.lopend[0].stand === 'vandaag' && (n3 += 86400000, M3.lijst([]).body.lopend[0].stand === 'onderweg'));
     M3.sluit(); fs.rmSync(W3, { recursive: true, force: true });
   }
+  // wv2743: bestelbevestiging van een webwinkel zonder volgcode = Besteld; gaat op in het pakje van die winkel zodra de vervoerder het meldt
+  {
+    const best = (van, ond, tekst, datum) => P.herken(mail(van, ond, tekst, datum || '2026-11-03T10:00:00Z'));
+    let h = best('"Verkoop" <verkoop@proefmarkt.nl>', 'Uw ProefMarkt bestelbevestiging', 'Bedankt!\nUw bestelling #000123456 wordt zo snel mogelijk verzonden.\nAfleveradres\nProefstraat 1');
+    toets('5 winkel: bestelbevestiging = Besteld, nummer na #, naam uit het onderwerp i.p.v. "Verkoop"', h && h.vervoerder === 'winkel' && h.code === null && h.bestelnr === '000123456'
+      && h.winkel === 'ProefMarkt' && h.stand === 'besteld' && h.sleutel === 'winkel:proefmarkt.nl:000123456', h);
+    h = best('Nepwinkel <noreply@nepwinkel.nl>', 'Verzendbevestiging 9988776655', 'Je bestelling is onderweg.\nVerzendmethode: standaard');
+    toets('5 winkel: verzendbevestiging zonder code = Onderweg, los getal uit het onderwerp', h && h.stand === 'onderweg' && h.bestelnr === '9988776655' && h.winkel === 'Nepwinkel', h);
+    h = best('"nepserver.com orderbevestiging: NEP123-1" <x@nepserver.nl>', 'nepserver.com orderbevestiging: NEP123-1', 'Ordernummer:\nOrderdatum:\nVerzendadres');
+    toets('5 winkel: nummer na de dubbele punt, naam uit het domein als de afzendernaam een zin is', h && h.bestelnr === 'NEP123-1' && h.winkel === 'nepserver', h);
+    toets('5 winkel: niets bij boodschappen, factuur, doorgestuurd, Google Play of zonder bezorgwoord',
+      !best('AH <x@ah.nl>', 'Bedankt voor jouw bestelling voor donderdag', 'Bezorgadres') && !best('Proef <x@proefwinkel.nl>', 'Factuur voor uw bestelling', 'Afleveradres')
+      && !best('Ik <x@gmail.com>', 'Fwd: Bestellung #AB12345 bestätigt', 'Lieferadresse') && !best('Google <x@google.com>', 'Bevestiging van je bestelling', 'verzendkosten')
+      && !best('Hosting <x@nephost.nl>', 'Orderbevestiging 123456', 'Uw pakket hosting staat klaar') && !best('Proef <x@proefwinkel.nl>', 'Welkom bij Proefwinkel', 'Afleveradres'));
+    toets('5 winkel: bestelonderwerp is kandidaat, een gewone nieuwsbrief niet', P.isKandidaat({ afzender_domein: 'proefmarkt.nl', onderwerp: 'Uw ProefMarkt bestelbevestiging' })
+      && !P.isKandidaat({ afzender_domein: 'proefmarkt.nl', onderwerp: 'Nieuw binnen deze week' }));
+    const W5 = fs.mkdtempSync(path.join(os.tmpdir(), 'pakjes5-'));
+    let n5 = Date.parse('2026-11-03T12:00:00Z');
+    const M5 = P.maak({ dir: W5, nu: () => n5 });
+    M5.verwerkMail({ gmail_id: 'w1', van: 'Proefwinkel <x@proefwinkel.nl>', onderwerp: 'Bevestiging van je bestelling', tekst: 'Bestelnummer: PW778899\nBezorgadres', datum: '2026-11-03T10:00:00Z' });
+    M5.verwerkMail({ gmail_id: 'w2', van: 'Andere Zaak <x@anderezaak.nl>', onderwerp: 'Bedankt voor je bestelling', tekst: 'Ordernummer AZ5566\nVerzendkosten 4,95', datum: '2026-11-03T11:00:00Z' });
+    let l5 = M5.lijst([]).body;
+    toets('5 winkel: twee bestellingen staan als Besteld, "Nog geen bezorger"', l5.lopend.length === 2 && l5.lopend.every((p) => p.stand === 'besteld' && p.vervoerder === 'Nog geen bezorger' && !p.link), l5.lopend);
+    M5.verwerkMail({ gmail_id: 'w3', van: 'DHL eCommerce <noreply@dhlecommerce.nl>', onderwerp: 'Nieuw pakket onderweg (JJD000099998888777766665)',
+      tekst: 'pakket JJD000099998888777766665 van PROEFWINKEL BV naar je toe', datum: '2026-11-04T09:00:00Z' });
+    n5 = Date.parse('2026-11-04T12:00:00Z');
+    l5 = M5.lijst([]).body;
+    const pw = l5.lopend.find((p) => p.code === 'JJD000099998888777766665');
+    toets('5 winkel: Besteld gaat op in het DHL-pakje van dezelfde winkel (bestelnummer erbij), de andere bestelling blijft', l5.lopend.length === 2 && pw && pw.bestelnr === 'PW778899' && pw.samen_id
+      && l5.lopend.some((p) => p.winkel === 'Andere Zaak' && p.stand === 'besteld'), l5.lopend);
+    toets('5 winkel: Naar Eerder op het samengevoegde pakje neemt de bestelrij mee', M5.verberg(pw.id, { verborgen: true, samen: pw.samen_id }).status === 200
+      && M5.lijst([]).body.eerder.length === 1 && M5.lijst([]).body.lopend.length === 1);
+    M5.verwerkMail({ gmail_id: 'w4', van: 'PostNL <n@edm.postnl.nl>', onderwerp: 'Nieuw pakket van Andere Zaak', tekst: 'Track & trace-code\n3SANDR111222333', datum: '2026-11-25T08:00:00Z' });
+    n5 = Date.parse('2026-11-25T12:00:00Z');
+    toets('5 winkel: een pakje van die winkel ruim twee weken later voegt niet samen', M5.lijst([]).body.eerder.concat(M5.lijst([]).body.lopend).filter((p) => /Andere Zaak/.test(p.winkel)).length === 2);
+    // review Codex MOET 1: twee bestellingen van één winkel en één pakje: één gaat op, de andere blijft Besteld
+    M5.verwerkMail({ gmail_id: 'w5', van: 'Dubbelzaak <x@dubbelzaak.nl>', onderwerp: 'Bedankt voor je bestelling', tekst: 'Bestelnummer DZ1001\nBezorgadres', datum: '2026-11-20T08:00:00Z' });
+    M5.verwerkMail({ gmail_id: 'w6', van: 'Dubbelzaak <x@dubbelzaak.nl>', onderwerp: 'Bedankt voor je bestelling', tekst: 'Bestelnummer DZ1002\nBezorgadres', datum: '2026-11-21T08:00:00Z' });
+    M5.verwerkMail({ gmail_id: 'w7', van: 'PostNL <n@edm.postnl.nl>', onderwerp: 'Nieuw pakket van Dubbelzaak', tekst: 'Track & trace-code\n3SDUBB111222333', datum: '2026-11-22T08:00:00Z' });
+    const dz = M5.lijst([]).body.lopend.filter((p) => /Dubbelzaak/.test(p.winkel));
+    toets('5 winkel: twee bestellingen, één pakje: de eerste gaat op, de tweede blijft Besteld', dz.length === 2 && dz.some((p) => p.code && p.bestelnr === 'DZ1001')
+      && dz.some((p) => p.stand === 'besteld' && p.bestelnr === 'DZ1002'), dz);
+    M5.sluit(); fs.rmSync(W5, { recursive: true, force: true });
+  }
   // ── 4. server.js-blok en uitrol ──
   const src = fs.readFileSync('server.js', 'utf8');
   const b = src.slice(src.indexOf('// ── OVIS Pakjes (wv2593'), src.indexOf('// ── einde OVIS Pakjes ──'));

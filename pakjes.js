@@ -27,7 +27,7 @@ const crypto = require('crypto');
 
 const DAG = 86400000;
 const STANDEN = ['besteld', 'aangemeld', 'onderweg', 'vandaag', 'afhaalpunt', 'bezorgd'];
-const VERVOERDERS = { postnl: 'PostNL', dhl: 'DHL', dpd: 'DPD', gls: 'GLS', ups: 'UPS', amazon: 'Amazon', dragonfly: 'Dragonfly', anders: 'Anders' };
+const VERVOERDERS = { postnl: 'PostNL', dhl: 'DHL', dpd: 'DPD', gls: 'GLS', ups: 'UPS', amazon: 'Amazon', dragonfly: 'Dragonfly', anders: 'Anders', winkel: 'Nog geen bezorger' };
 const EERDER_NA = 7 * DAG, STIL_NA = 30 * DAG, STIL_MAIL_NA = 10 * DAG, WEG_NA = 90 * DAG, MAIL_WEG_NA = 60 * DAG;
 const MAX_TEKST = 200000;
 
@@ -101,7 +101,43 @@ const KANDIDAAT_DOMEINEN = ['postnl.nl', 'dhl.com', 'dhl.nl', 'dhl.de', 'dhlecom
 const KANDIDAAT_ONDERWERP = /(pakket|pakje|zending|bezorg|verzonden|verstuurd|onderweg|track|shipped|shipment|on (its|the) way|sendung|unterwegs|lieferung|versandt|afgeleverd|delivered|zugestellt)/i;
 function isKandidaat(k) {
   const dom = String(k && (k.afzender_domein || domein(k.van)) || '').toLowerCase();
-  return KANDIDAAT_DOMEINEN.some((s) => op(dom, s)) || KANDIDAAT_ONDERWERP.test(String(k && k.onderwerp || ''));
+  const ond = String(k && k.onderwerp || '');
+  return KANDIDAAT_DOMEINEN.some((s) => op(dom, s)) || KANDIDAAT_ONDERWERP.test(ond) || BESTEL_ONDERWERP.test(ond);
+}
+
+// ── wv2743 (8-11-2026, idee 33 einddoel "elk pakje uit de bezorg- én bestelmail"): een bestel- of verzendbevestiging van een webwinkel
+// zonder volgcode is een pakje in de stand Besteld (of Onderweg), "Nog geen bezorger". Gemeten 8-11: ReMarkt (7-11) en Lidl (5-11) stonden
+// pas in de lijst als de vervoerder mailde. Streng, want een vals Besteld blijft 10 dagen staan: alleen een bevestigingsonderwerp, nooit
+// boodschappen, maaltijden, digitaal, tickets of facturen, en de mail moet over een bezorging gaan (bezorgadres, verzendkosten …). De weergave
+// laat zo'n rij opgaan in het pakje van dezelfde winkel zodra de vervoerder het meldt (samenWinkel).
+const BESTEL_ONDERWERP = /(bestelbevestiging|orderbevestiging|verzendbevestiging|bevestiging van (je|jouw|uw) (bestelling|order)|(je|jouw|uw) bestelling (is )?(ontvangen|bevestigd|geplaatst|verzonden|onderweg)|bedankt voor (je|jouw|uw) (bestelling|aankoop|order)|order confirm|bestellbest[äa]tigung|versandbest[äa]tigung|bestellung[^\n]{0,40}(best[äa]tigt|eingegangen|versandt))/i;
+const BESTEL_NIET_DOMEIN = ['ah.nl', 'thuisbezorgd.nl', 'jumbo.com', 'picnic.app', 'crisp.nl', 'flink.com', 'ubereats.com', 'uber.com', 'deliveroo.nl', 'google.com',
+  'apple.com', 'microsoft.com', 'steampowered.com', 'gmail.com', 'googlemail.com', 'socev.dev', 'paypal.com', 'paypal.nl', 'booking.com', 'airbnb.com', 'ns.nl'];
+const BESTEL_NIET_ONDERWERP = /(factuur|invoice|rechnung|retour|annuler|geannuleerd|storn|minimum|abonnement|lidmaatschap|ticket|reserver|boeking|cadeaukaart|tegoed|download|licentie|domein|hosting|^\s*(fwd?|doorgestuurd|wg)\s*:)/i;
+const BESTEL_FYSIEK = /(bezorgadres|afleveradres|verzendadres|leveradres|lieferadresse|versandadresse|shipping address|delivery address|verzendkosten|bezorgkosten|versandkosten|verzendmethode|bezorgmethode|bezorgoptie|verwachte (bezorg|lever)|bezorgmoment|levertijd|lieferzeit|wordt (je|jouw|uw) (bestelling|pakket) (bezorgd|verzonden|geleverd))/i;
+const BESTEL_NR = /(?:bestelnummer|ordernummer|bestelnr\.?|ordernr\.?|order\s*(?:number|nr\.?|#)|bestellnummer|bestelling|bestellung|order)\s*[:#]?\s*#?\s*([A-Z0-9][A-Z0-9-]{3,24})\b/i;
+function winkelBestelling(ond, tekst, dom, naam, tms, mailDag) {
+  if (!dom || !BESTEL_ONDERWERP.test(ond) || BESTEL_NIET_ONDERWERP.test(ond) || BESTEL_NIET_DOMEIN.some((s) => op(dom, s))) return null;
+  if (!BESTEL_FYSIEK.test(tekst)) return null;
+  // bestelnummer: het eerste na een bestelwoord met een cijfer erin (onderwerp eerst), anders na een dubbele punt of # in het onderwerp, anders
+  // een los getal van 6–15 cijfers in het onderwerp; zonder nummer telt de maildag (twee mails van één bestelling worden dan twee rijen)
+  let bestelnr = null;
+  for (const t of [ond, tekst]) {
+    for (const k of t.matchAll(new RegExp(BESTEL_NR.source, 'gi'))) { if (/\d/.test(k[1])) { bestelnr = k[1].toUpperCase(); break; } }
+    if (bestelnr) break;
+  }
+  if (!bestelnr) { const k = /[:#]\s*([A-Z0-9][A-Z0-9-]{3,24})\b/i.exec(ond); if (k && /\d/.test(k[1])) bestelnr = k[1].toUpperCase(); }
+  if (!bestelnr) { const k = /\b(\d{6,15})\b/.exec(ond); if (k) bestelnr = k[1]; }
+  // winkelnaam: de afzendernaam, tenzij die algemeen is ("Verkoop") of een zin; dan de naam uit het domein, gespeld zoals in het onderwerp
+  const delen = dom.split('.'), stam = delen.length >= 2 ? delen[delen.length - 2] : dom;
+  const algemeen = !naam || naam.length > 30 || /[:|]/.test(naam) || /^(verkoop|sales|info|klantenservice|customer ?service|service|noreply|no-reply|orders?|bestellingen|webshop|shop|team|support|contact)$/i.test(naam.trim());
+  const inOnd = new RegExp('\\b(' + stam.replace(/[^a-z0-9-]/gi, '') + ')\\b', 'i').exec(ond);
+  const winkel = netjes(!algemeen ? naam : inOnd ? inOnd[1] : stam.charAt(0).toUpperCase() + stam.slice(1));
+  const stand = /(verzend|verzonden|verstuurd|onderweg|shipped|versandt|versandbest)/i.test(ond) ? 'onderweg' : 'besteld';
+  return {
+    sleutel: 'winkel:' + dom + ':' + (bestelnr || mailDag), vervoerder: 'winkel', code: null, bestelnr, winkel, omschrijving: null, stand,
+    verwacht_dag: null, verwacht_van: null, verwacht_tot: null, pc: null, tijd: isFinite(tms) ? new Date(tms).toISOString() : null,
+  };
 }
 
 // codes per vervoerder. 3S-codes gebruiken PostNL en DHL allebei: de afzender of de link beslist, anders 'onbekend' (beide proberen).
@@ -228,7 +264,7 @@ function herken(m) {
       const k = /(?:track(?:ing)?[- ]?(?:nummer|number|code)|track\s*&\s*trace(?:-?code)?|sendungsnummer|zendingsnummer)\s*[:#]?\s*([0-9A-Z]{8,30})\b/i.exec(tekst);
       if (k && /\d/.test(k[1])) { code = k[1].toUpperCase(); vervoerder = vervoerder || 'anders'; }
     }
-    if (!code) return null;
+    if (!code) return vervoerder ? null : winkelBestelling(ond, tekst, dom, naam, tms, mailDag);
     if (!['postnl', 'dhl', 'dpd', 'gls', 'ups', 'dragonfly'].includes(vervoerder) || !winkel) {
       winkel = winkel || naam || (dom ? dom.replace(/^(e?mail|t|m|nl|info|noreply|news|edm)\./, '') : null);
     }
@@ -572,10 +608,31 @@ function maak(o) {
     });
     return ws.filter((w) => !weg.has(w.id)).map((w) => { delete w._samen; return w; });
   }
+  // wv2743: een Besteld-rij uit de winkelmail gaat op in het pakje van dezelfde winkel (een woord van de winkelnaam gelijk) dat de vervoerder
+  // daarna meldt: eerste mail van de vervoerder tussen 1 dag vóór en 14 dagen na de bestelmail; bij meer pakjes het eerste. Elk pakje neemt
+  // hooguit één bestelling op (review Codex MOET 1: anders verdwijnen losse bestellingen van één winkel in één pakje). Alleen weergave.
+  function samenWinkel(ws, wn) {
+    const woorden = (s) => String(s || '').toLowerCase().replace(/\.(nl|com|de|be|eu)\b/g, '').split(/[^a-z0-9à-ÿ]+/)
+      .filter((w) => w.length >= 3 && !['www', 'shop', 'the', 'van', 'b.v', 'bv', 'store', 'online', 'webshop', 'nederland'].includes(w));
+    const weg = new Set(), bezet = new Set();
+    ws.filter((w) => wn.has(w.id)).sort((a, b) => String(a.eerste) < String(b.eerste) ? -1 : 1).forEach((w) => {
+      const ww = woorden(w.winkel), t = Date.parse(w.eerste);
+      if (!ww.length || !isFinite(t)) return;
+      const kand = ws.filter((p) => !wn.has(p.id) && !bezet.has(p.id) && !(p.vervoerder === 'Amazon' && p.bestelnr) && woorden(p.winkel).some((x) => ww.includes(x))
+        && Date.parse(p.eerste) >= t - DAG && Date.parse(p.eerste) <= t + 14 * DAG).sort((a, b) => String(a.eerste) < String(b.eerste) ? -1 : 1);
+      if (!kand.length) return;
+      const o = kand[0];
+      weg.add(w.id); bezet.add(o.id);
+      if (!o.samen_id) o.samen_id = w.id;
+      if (!o.bestelnr) o.bestelnr = w.bestelnr;
+    });
+    return ws.filter((w) => !weg.has(w.id));
+  }
   function lijst(gekocht) {
     const d = open(), nu = klok(), vandaag = nlDag(nu), pcs = postcodes();
     const lopend = [], eerder = [];
-    for (const w of samenAmazon(d.prepare('SELECT * FROM zending').all().map((z) => weergave(z, vandaag, pcs)))) {
+    const rijen = d.prepare('SELECT * FROM zending').all(), wn = new Set(rijen.filter((z) => z.vervoerder === 'winkel').map((z) => z.id));
+    for (const w of samenWinkel(samenAmazon(rijen.map((z) => weergave(z, vandaag, pcs))), wn)) {
       // bezorgd: 7 dagen in de lijst; niet bezorgd en 30 dagen stil (bij een vervoerder die we volgen) of 10 dagen stil (alleen mail): naar Eerder
       const volgbaar = ['PostNL', 'DHL', 'GLS', 'PostNL of DHL'].includes(w.vervoerder) || w.bron === 'vervoerder';
       const oud = w.stand === 'bezorgd' ? Date.parse(w.bezorgd_op) < nu - EERDER_NA : Date.parse(w.laatst) < nu - (volgbaar ? STIL_NA : STIL_MAIL_NA);
