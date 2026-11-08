@@ -174,6 +174,15 @@ test('gmail: alleen zonder "[nog in te vullen", in de draad, aan de afzender, é
   assert.equal((await sl.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst })).status, 409);
   const f = kamer({ conceptAntw: { status: 500, j: null } }); await f.vw.tik();
   assert.equal((await f.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst })).status, 502); assert.equal(f.st.register.length, 0);
+  // wv2729: luik weigert een tweede concept in de draad (409) → gewone taal, geen Gmail-stand, geen registerregel
+  const d9 = kamer({ conceptAntw: { status: 409, j: { ok: false, fout: 'er staat al een concept in deze draad', bestaand_concept: [{ id: 'r-1' }] } } }); await d9.vw.tik();
+  r = await d9.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst });
+  assert.equal(r.status, 409); assert.equal(r.j.bestaat_al, true); assert.equal(r.j.fout, 'Er staat al een concept in deze Gmail-draad. Gooi dat eerst weg in Gmail en tik dan opnieuw.');
+  assert.equal(d9.st.register.length, 0); assert.equal(d9.vw.toon('aa11bb22cc33dd44').j.voorwerk.gmail_tijd, null);
+  const d5 = kamer({ conceptAntw: { status: 502, j: { ok: false, fout: 'x' } } }); await d5.vw.tik();
+  r = await d5.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst }); assert.equal(r.status, 502); assert.match(r.j.fout, /kwam niet in Gmail \(502\)/);
+  const d4 = kamer({ conceptAntw: { status: 409, j: null } }); await d4.vw.tik();
+  r = await d4.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst }); assert.equal(r.status, 502, '409 zonder luikantwoord blijft een storing');
   // review MOET 1: na een nieuw bericht in de draad geen concept uit het oude voorwerk; ZOU 1: opnieuw schrijven houdt de Gmail-stand
   const nw = kamer(); await nw.vw.tik(); nw.zaken[0].besluit = 102;
   r = await nw.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst }); assert.equal(r.status, 409); assert.equal(r.j.oud, true); assert.equal(nw.st.concept.length, 0);

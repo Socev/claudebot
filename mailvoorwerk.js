@@ -275,6 +275,8 @@ function maak(io) {
       let a;
       try { a = await io.concept({ aan, onderwerp, bericht: tekst, thread_id: draad }); } catch (e) { fout('voorwerk-gmail', e); return { status: 502, j: { ok: false, fout: 'Gmail is even niet bereikbaar; probeer het zo opnieuw' } }; }
       const j = a && a.j;
+      // wv2729: het mailconcept-luik weigert sinds wv2728 een tweede concept in dezelfde draad (409); zeg dat in gewone taal
+      if (a && a.status === 409 && isObj(j) && j.ok === false) return { status: 409, j: { ok: false, bestaat_al: true, fout: 'Er staat al een concept in deze Gmail-draad. Gooi dat eerst weg in Gmail en tik dan opnieuw.' } };
       if (!a || a.status !== 200 || !isObj(j) || j.ok !== true || typeof j.concept_id !== 'string') return { status: 502, j: { ok: false, fout: 'het concept kwam niet in Gmail (' + (a ? a.status : 'geen antwoord') + ')' } };
       const td = typeof j.thread_id === 'string' ? j.thread_id : '';
       open().prepare('UPDATE voorwerk SET gmail_tijd = ?, gmail_id = ?, gmail_draad = ? WHERE postvak = ? AND draad = ? AND besluit = ?').run(iso(), j.concept_id.slice(0, 80), td.slice(0, 40), PV, draad, r.besluit);
