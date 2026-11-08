@@ -21,7 +21,7 @@ OSINT_NEP_NET=1 (toets: elke netwerkaanroep geeft een nepantwoord en telt alleen
 import base64, concurrent.futures as cf, datetime, hashlib, html, json, os, re, sqlite3, subprocess, sys, time, unicodedata
 import urllib.parse as up, urllib.request, urllib.error
 
-VERSIE = 'osint-1'
+VERSIE = 'osint-2'
 HIER = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ.get('OSINT_DB') or '/opt/data/osint/osint.sqlite'
 VAULT = os.environ.get('VAULT_DIR') or '/opt/data/AI_SecondBrain'
@@ -30,10 +30,11 @@ UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130 Safari/537.3
 CACHE_DAGEN, LOG_DAGEN = 30, 365
 NEP = os.environ.get('OSINT_NEP_NET') == '1'
 
-INGANGEN = ('adres', 'bedrijf', 'telefoon', 'persoon')
+INGANGEN = ('adres', 'bedrijf', 'telefoon', 'persoon', 'kenteken', 'mail', 'bestand', 'voetafdruk', 'lijkend')
 DOELEN = {'leverancier': 'leverancier controleren', 'waarnemer': 'waarnemer of sollicitant verifiëren', 'beller': 'beller duiden',
           'pand': 'pand of adres', 'anders': 'anders'}
-DOEL_STANDAARD = {'adres': 'pand', 'bedrijf': 'leverancier', 'telefoon': 'beller'}
+DOEL_STANDAARD = {'adres': 'pand', 'bedrijf': 'leverancier', 'telefoon': 'beller', 'kenteken': 'anders', 'mail': 'anders', 'bestand': 'anders',
+                  'voetafdruk': 'anders', 'lijkend': 'anders'}
 HERKOMST_EXTERN_OK = {'david', 'david-vraag', 'facturen', 'kvk', 'contacten-organisatie'}
 WIE = ('david', 'socev', 'machinekamer')
 
@@ -74,7 +75,9 @@ def patientpoort_soorten(term):
 def poort(term, wie, herkomst, ingang, doel):
     """→ dict(niveau='alles'|'eigen'|'niets', reden). niets = alleen offline; eigen = offline + eigen bronnen; alles = ook extern."""
     t = norm(term)
-    if any(elfproef(re.sub(r'\D', '', m.group(0))) for m in _BSN_RE.finditer(t)):
+    # een volledig btw-nummer (NL + 9 cijfers + B + 2) is geen BSN; zo leest de patiëntpoort (intake/patientpoort.js) het ook (wv2698)
+    t_bsn = re.sub(r'(?i)(?<![A-Z0-9])NL\d{9}B\d{2}(?![A-Z0-9])', ' ', t)
+    if any(elfproef(re.sub(r'\D', '', m.group(0))) for m in _BSN_RE.finditer(t_bsn)):
         return {'niveau': 'niets', 'reden': 'vorm: BSN-achtig getal (elfproef)'}
     if _PAT_RE.search(t):
         return {'niveau': 'niets', 'reden': 'vorm: patiënt- of HIS-kenmerk'}
@@ -110,7 +113,13 @@ def db():
       create table if not exists aanroep(id integer primary key, zoek_id integer not null, tijd text not null, bron text not null,
         soort text not null, host text, naar_buiten text, status text, ms integer);
       create table if not exists cache(sleutel text primary key, tijd text not null, json text not null);
-      create index if not exists aanroep_zoek on aanroep(zoek_id);''')
+      create index if not exists aanroep_zoek on aanroep(zoek_id);
+      create table if not exists instelling(sleutel text primary key, json text not null, tijd text);
+      create table if not exists lijkend(variant text primary key, domein text not null, fuzzer text, a text, mx text, ns text, eerst text, laatst text);
+      create table if not exists voetafdruk(naam text not null, site text not null, url text, cat text, uitslag text, bekeken text, eerst_raak text,
+        primary key(naam, site));''')
+    if 'graaf' not in [r[1] for r in c.execute('pragma table_info(zoekvraag)')]:
+        c.execute('alter table zoekvraag add column graaf text')
     nu = datetime.datetime.now(datetime.timezone.utc)
     c.execute('delete from cache where tijd < ?', ((nu - datetime.timedelta(days=CACHE_DAGEN)).isoformat(),))
     oud = (nu - datetime.timedelta(days=LOG_DAGEN)).isoformat()
@@ -138,20 +147,65 @@ class Ctx:
         self.niveau = niveau
         self.beelden = beelden   # False (Socev): geen kaartbeelden ophalen, dus ook geen kaartvak naar buiten
         self.log = []   # dicts: bron, soort, host, naar_buiten, status, ms
+        self.knopen, self.randen = {}, []   # netwerkplaat (wv2698): entiteiten en verbanden van deze zoekvraag
+
+    def knoop(self, soort, label, **x):
+        """Een entiteit op de netwerkplaat; id = soort:label (genormaliseerd), zodat dezelfde entiteit over zoekvragen samenvalt."""
+        label = norm(label)[:120]
+        if not label:
+            return None
+        k = '%s:%s' % (soort, label.lower())
+        if k not in self.knopen:
+            self.knopen[k] = dict({'id': k, 'soort': soort, 'label': label}, **{a: b for a, b in x.items() if b not in (None, '')})
+        return k
+
+    def rand(self, van, naar, label):
+        if van and naar and van != naar and not any(r['van'] == van and r['naar'] == naar for r in self.randen):
+            self.randen.append({'van': van, 'naar': naar, 'label': label})
+
+    def graaf(self):
+        return {'knopen': list(self.knopen.values()), 'randen': self.randen}
 
 
-def haal(ctx, bron, url, naar_buiten, soort='extern', data=None, hdr=None, timeout=25, binair=False, maxb=4_000_000):
-    """De enige weg naar het netwerk. soort extern = buiten ons systeem; eigen = eigen pod/n8n. De poort zit hier."""
+def poort_open(ctx, bron, soort, host, naar_buiten, stil=False):
+    """De poort voor elke aanroep naar buiten (HTTP én DNS). Dicht → logregel + PoortDicht. stil = de aanroeper logt zelf gebundeld."""
     if soort == 'extern' and ctx.niveau != 'alles' or soort == 'eigen' and ctx.niveau == 'niets':
-        ctx.log.append({'bron': bron, 'soort': soort, 'host': up.urlsplit(url).hostname, 'naar_buiten': 'niets (poort dicht)',
-                        'status': 'poort dicht', 'ms': 0})
+        ctx.log.append({'bron': bron, 'soort': soort, 'host': host, 'naar_buiten': 'niets (poort dicht)', 'status': 'poort dicht', 'ms': 0})
         raise PoortDicht(bron)
+
+
+def nep_antwoord(url):
+    """Toets: OSINT_NEP_ANTWOORD = json {host of host+pad-begin: antwoord (tekst of json)}; anders '{}'."""
+    f = os.environ.get('OSINT_NEP_ANTWOORD')
+    if not f:
+        return None
+    try:
+        m = json.load(open(f))
+    except Exception:
+        return None
+    u = up.urlsplit(url)
+    for k in sorted(m, key=len, reverse=True):
+        if (u.hostname + u.path).startswith(k):
+            v = m[k]
+            return v if isinstance(v, str) else json.dumps(v)
+    return None
+
+
+def haal(ctx, bron, url, naar_buiten, soort='extern', data=None, hdr=None, timeout=25, binair=False, maxb=4_000_000, stil=False, metcode=False):
+    """De enige weg naar het netwerk. soort extern = buiten ons systeem; eigen = eigen pod/n8n. De poort zit hier (poort_open).
+    stil = niet per aanroep loggen (de aanroeper zet één gebundelde regel, bijv. 700 sites voor één gebruikersnaam).
+    metcode = (status, inhoud) teruggeven."""
+    host = up.urlsplit(url).hostname
+    poort_open(ctx, bron, soort, host, naar_buiten)
     t = time.time()
     status = 'fout'
     try:
         if NEP:
             status = 'nep'
-            return b'' if binair else '{}'
+            x = nep_antwoord(url)
+            x = (x if x is not None else '{}')
+            x = x.encode() if binair else x
+            return ('200', x) if metcode else x
         h = {'User-Agent': UA, 'Accept': '*/*'}
         h.update(hdr or {})
         body = None
@@ -169,10 +223,12 @@ def haal(ctx, bron, url, naar_buiten, soort='extern', data=None, hdr=None, timeo
         except Exception as e:
             status = 'time-out' if 'timed out' in str(e) else 'fout'
             raise
-        return b if binair else b.decode('utf-8', 'replace')
+        x = b if binair else b.decode('utf-8', 'replace')
+        return (status, x) if metcode else x
     finally:
-        ctx.log.append({'bron': bron, 'soort': soort, 'host': up.urlsplit(url).hostname, 'naar_buiten': naar_buiten, 'status': status,
-                        'ms': int((time.time() - t) * 1000)})
+        if not stil:
+            ctx.log.append({'bron': bron, 'soort': soort, 'host': host, 'naar_buiten': naar_buiten, 'status': status,
+                            'ms': int((time.time() - t) * 1000)})
 
 
 def jhaal(ctx, *a, **k):
@@ -301,7 +357,8 @@ def persoonspaginas(naam):
 # ---------------------------------------------------------------- adres
 WMS = {'top10nl': ('https://service.pdok.nl/brt/top10nl/wms/v1_0', 'top10nl', 'image/png', 'PDOK TOP10NL-kaart'),
        'pand': ('https://service.pdok.nl/lv/bag/wms/v2_0', 'pand', 'image/png', 'BAG-kaartlaag'),
-       'foto': ('https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0', 'Actueel_orthoHR', 'image/jpeg', 'PDOK luchtfoto')}
+       'foto': ('https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0', 'Actueel_orthoHR', 'image/jpeg', 'PDOK luchtfoto'),
+       'perceel': ('https://service.pdok.nl/kadaster/kadastralekaart/wms/v5_0', 'Kadastralekaart', 'image/png', 'Kadastrale kaart (PDOK WMS)')}
 JAREN = [('2016', '2016_ortho25'), ('2019', '2019_ortho25'), ('2022', '2022_orthoHR'), ('2026', '2026_orthoHR')]
 BAG_WFS = 'https://service.pdok.nl/lv/bag/wfs/v2_0?service=WFS&version=2.0.0&request=GetFeature&outputFormat=application/json&'
 
@@ -346,7 +403,7 @@ def zoek_adres(ctx, term):
     if len(xy) == 2 and ctx.beelden:
         x, y = xy
         bbox = '%d,%d,%d,%d' % (x - 90, y - 60, x + 90, y + 60)
-        taken = {'kaart': ('top10nl', None, None), 'pand': ('pand', None, None), 'foto': ('foto', None, None)}
+        taken = {'kaart': ('top10nl', None, None), 'pand': ('pand', None, None), 'foto': ('foto', None, None), 'perceel': ('perceel', None, None)}
         taken.update({'j' + j: ('foto', l, 'PDOK luchtfoto ' + j) for j, l in JAREN})
         with cf.ThreadPoolExecutor(6) as ex:
             fut = {k: ex.submit(wms, ctx, *v[:1], bbox, v[1], v[2]) for k, v in taken.items()}
@@ -355,7 +412,14 @@ def zoek_adres(ctx, term):
             beelden.append({'titel': 'Kaart + BAG-panden', 'src': img['kaart'], 'over': img['pand']})
         if img['foto']:
             beelden.append({'titel': 'Luchtfoto (actueel) + BAG-panden', 'src': img['foto'], 'over': img['pand']})
+        if img['foto'] and img.get('perceel'):
+            beelden.append({'titel': 'Luchtfoto + perceelgrenzen', 'src': img['foto'], 'over': img['perceel']})
         tijd = [{'titel': j, 'src': img['j' + j]} for j, _ in JAREN if img.get('j' + j)]
+    ctx.hoofd = ctx.knoop('adres', ls.get('weergavenaam'), zoek={'ingang': 'adres', 'term': ls.get('weergavenaam')})
+    if ls.get('buurtnaam'):
+        ctx.rand(ctx.hoofd, ctx.knoop('buurt', '%s (%s)' % (ls.get('buurtnaam'), ls.get('gemeentenaam'))), 'ligt in')
+    if vbo.get('pandidentificatie'):
+        ctx.rand(ctx.hoofd, ctx.knoop('pand', 'pand ' + vbo['pandidentificatie'], label2=('bouwjaar %s' % vbo.get('bouwjaar')) if vbo.get('bouwjaar') else None), 'in pand')
     kaarten.append(kaartje('Adres', 'PDOK Locatieserver, BAG', [
         ('Adres', ls.get('weergavenaam')), ('Buurt / wijk', ' / '.join(x for x in (ls.get('buurtnaam'), ls.get('wijknaam')) if x)),
         ('Gemeente / provincie', ' / '.join(x for x in (ls.get('gemeentenaam'), ls.get('provincienaam')) if x)),
@@ -373,8 +437,33 @@ def zoek_adres(ctx, term):
             ('Bouwjaar', vbo.get('bouwjaar')), ('Status pand', vbo.get('pandstatus')), ('Adressen in het pand', len(pand)),
             ('Gebruiksdoelen in het pand', ', '.join('%s × %d' % kv for kv in sorted(doelen.items()))),
             ('Totale oppervlakte adressen', '%d m²' % sum(v.get('oppervlakte') or 0 for v in pand))]))
-    kaarten.append(melding('Bedrijven op dit adres', 'Welke bedrijven hier gevestigd zijn, kan pas met een KvK-sleutel (keuze 2, niet gemaakt).'))
-    return kaarten, {'adres': ls.get('weergavenaam'), 'bouwjaar': vbo.get('bouwjaar'), 'adressen_in_pand': len(pand)}
+    perceel = None
+    try:
+        bk = brk_veilig(ctx, ls)
+    except PoortDicht:
+        bk = None
+    if bk:
+        kaarten.append(bk[0])
+        perceel = bk[1]
+    extra = []
+    with cf.ThreadPoolExecutor(2) as ex:
+        straat = ' '.join(str(x) for x in (ls.get('straatnaam'), ls.get('huis_nlt') or ls.get('huisnummer')) if x)
+        f1 = ex.submit(bekendmakingen, ctx, straat, 'Bekendmakingen over dit adres (vergunningen e.d.)', 'straat + huisnummer + plaats',
+                       [straat, ls.get('woonplaatsnaam')]) if straat else None
+        f2 = ex.submit(ep_online, ctx, vbo_id)
+        for f in (f1, f2):
+            try:
+                x = f.result() if f else None
+                if x:
+                    extra.append(x)
+            except PoortDicht:
+                pass
+            except Exception:
+                pass
+    kaarten += extra
+    kaarten.append(adres_links(ls))
+    kaarten.append(melding('Bedrijven op dit adres', 'Welke bedrijven hier gevestigd zijn, kan pas met een KvK-sleutel (betaalde keuze, niet aangezet).'))
+    return kaarten, {'adres': ls.get('weergavenaam'), 'bouwjaar': vbo.get('bouwjaar'), 'adressen_in_pand': len(pand), 'perceel': perceel}
 
 
 # ---------------------------------------------------------------- bedrijf
@@ -460,6 +549,14 @@ def facturen_kaartje(prof, n):
         ('Voor', ', '.join(prof.get('entiteiten', []))), ('Nieuw IBAN', 'ja, let op' if prof.get('nieuw_iban') else None)])
 
 
+def iban_geldig(t):
+    x = re.sub(r'\s', '', str(t or '')).upper()
+    if not IBAN_RE.match(x):
+        return False
+    n = ''.join(str(int(ch, 36)) for ch in x[4:] + x[:4])
+    return int(n) % 97 == 1
+
+
 DOMEIN_RE = re.compile(r'^(?:https?://)?(?:www\.)?((?:[a-z0-9-]+\.)+[a-z]{2,})(?:/.*)?$', re.I)
 IBAN_RE = re.compile(r'^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$')
 
@@ -470,8 +567,12 @@ def zoek_bedrijf(ctx, term):
     kvk = re.sub(r'\D', '', t) if re.fullmatch(r'\d{8}', re.sub(r'[\s.]', '', t)) else None
     dm = DOMEIN_RE.match(t.lower()) if not kvk and ' ' not in t else None
     dom = dm.group(1) if dm else None
-    iban = re.sub(r'\s', '', t).upper() if IBAN_RE.match(re.sub(r'\s', '', t).upper()) else None
-    fac_term = None if kvk else (iban or (dom.split('.')[-2] if dom else t))
+    iban = re.sub(r'\s', '', t).upper() if IBAN_RE.match(re.sub(r'\s', '', t).upper()) and iban_geldig(t) else None
+    btw = btw_uit(t) if not (kvk or dom or iban) else None
+    fac_term = None if kvk or btw else (iban or (dom.split('.')[-2] if dom else t))
+    ctx.hoofd = ctx.knoop('domein' if dom else 'iban' if iban else 'btw' if btw else 'kvk' if kvk else 'bedrijf', ''.join(btw) if btw else (dom or iban or kvk or t),
+                          zoek={'ingang': 'bedrijf', 'term': ''.join(btw) if btw else (dom or iban or kvk or t)})
+    vies_naam = None
     prof = None
     if fac_term:
         try:
@@ -495,6 +596,13 @@ def zoek_bedrijf(ctx, term):
             kaarten.insert(0, k)
             kern.update(x)
             kern['kvk'] = kvk
+            kk = ctx.knoop('kvk', kvk, label2=x.get('naam'), zoek={'ingang': 'bedrijf', 'term': kvk})
+            ctx.rand(ctx.hoofd, kk, 'KvK-nummer')
+            vd = dict(k.get('velden') or [])
+            if vd.get('Vestigingsadres'):
+                ctx.rand(kk, ctx.knoop('adres', vd['Vestigingsadres'], zoek={'ingang': 'adres', 'term': vd['Vestigingsadres']}), 'gevestigd op')
+            if vd.get('Btw-nummer') and btw_uit(vd['Btw-nummer']):
+                btw = btw_uit(vd['Btw-nummer'])
         except PoortDicht:
             kaarten.insert(0, melding('Handelsregister', 'Niet opgehaald: de poort laat deze zoekterm niet naar buiten.'))
         kort = re.sub(r'\s*\b(b\.?v\.?|n\.?v\.?|v\.?o\.?f\.?|holding)\s*$', '', kern.get('naam') or '', flags=re.I).strip()
@@ -508,7 +616,7 @@ def zoek_bedrijf(ctx, term):
                 prof = sorted(pr, key=lambda p: -(p.get('aantal') or 0))[0]
                 kaarten.append(facturen_kaartje(prof, len(pr)))
                 kern['facturen_aantal'] = prof.get('aantal')
-    elif not dom:
+    elif not dom and not btw:
         kaarten.insert(0, melding('Handelsregister', 'Geen KvK-nummer gevonden (niet in Facturen). Typ het KvK-nummer of het domein; '
                                   'zoeken op naam kan pas met een KvK-sleutel (keuze 2, niet gemaakt).'))
     if dom:
@@ -518,11 +626,26 @@ def zoek_bedrijf(ctx, term):
             kern.update(x)
         except PoortDicht:
             kaarten.append(melding('Website', 'Niet opgehaald: de poort laat deze zoekterm niet naar buiten.'))
-    if not kvk and not iban:
+    if btw:
+        try:
+            k, vies_naam = vies(ctx, ''.join(btw))
+            if k:
+                kaarten.append(k)
+        except PoortDicht:
+            kaarten.append(melding('Btw-nummer (VIES)', 'Niet opgehaald: de poort laat deze zoekterm niet naar buiten.'))
+    if prof:
+        for ib in prof.get('ibans', [])[:3]:
+            ctx.rand(ctx.hoofd, ctx.knoop('iban', ib), 'betaalt via')
+    if not kvk and not iban and not btw:
         try:
             kaarten.append(contacten_kaartje(contacten(ctx, t), t))
         except PoortDicht:
             pass
+    naam = kern.get('naam') or vies_naam or (t if not (kvk or dom or iban or btw) else None)
+    if (naam or kvk) and ctx.niveau == 'alles':
+        kaarten += bedrijf_breed(ctx, naam, kvk)
+    elif ctx.niveau == 'alles':
+        kaarten.append(insolventie_link())
     return kaarten, kern
 
 
@@ -691,74 +814,892 @@ def zoek_persoon(ctx, term):
     return kaarten, kern
 
 
+# ---------------------------------------------------------------- juridische regel per bron (wv2698; uit de optielijst 7-11-2026, informatie, geen weigering)
+JUR = {
+    'pdok': 'Openbare overheidsdata (CC0): geen bezwaar.',
+    'kvk': 'Organisaties: licht. Eenmanszaken bevatten persoonsgegevens (naam eigenaar). Liza en OpenCorporates: één pagina per vraag, gecachet.',
+    'domein': 'Domeinregistratie, webarchief en certificaten: geen bezwaar.',
+    'big': 'Openbaar register met wettelijk doel: waarnemers en sollicitanten controleren is precies waarvoor het bestaat.',
+    'eigen': 'Eigen bron: blijft binnen ons systeem.',
+    'telefoon': 'Offline duiding: er gaat niets naar buiten.',
+    'vies': 'Btw-nummer controleren (EU): geen bezwaar.',
+    'gleif': 'LEI-register (CC0): geen bezwaar.',
+    'icij': 'In de Offshore Leaks staan is niet hetzelfde als iets fout gedaan hebben; een gelijke naam is niet dezelfde partij. Zorgvuldig formuleren.',
+    'sru': 'Officieel gepubliceerd; voor een adres of bedrijf licht.',
+    'rechtspraak': 'Namen van privépersonen zijn geanonimiseerd, bedrijven vaak niet. Strafrechtelijke gegevens (AVG art. 10) zijn gevoelig; bij bedrijven licht.',
+    'insolventie': 'Openbaar met een wettelijk doel; een leverancier of huurder controleren past. Schuldsanering van een privépersoon: alleen bij een concreet zakelijk belang.',
+    'rdw': 'Geen eigenaar, dus licht. Een kenteken van een bekende persoon blijft wel aan die persoon te koppelen.',
+    'brk': 'Perceel zonder eigenaar: geen bezwaar. De eigenaar opvragen kan alleen per geval bij het Kadaster (€ 3,70 per bericht).',
+    'adreslinks': 'WOZ-waarde is openbaar sinds 2016 (per adres handmatig); omgevingsregels en energielabel: geen bezwaar.',
+    'exif': 'Lokaal: het bestand gaat niet naar buiten en wordt na het lezen gewist.',
+    'mail': 'Eigen mail: geen bezwaar. Alleen IP-adressen en het afzenderdomein gaan naar de vrije diensten; de mailkop zelf niet.',
+    'ip': 'IP-adres van een server: geen bezwaar.',
+    'wmn': 'Op je eigen gebruikersnamen geen bezwaar. Dat een naam op een site bestaat, betekent niet dat het jouw account is: alles is "misschien".',
+    'xon': 'Alleen je eigen adressen: dat is jouw keuze over jouw gegevens.',
+    'hibp': 'Eigen domeinen: geen bezwaar.',
+    'dnstwist': 'Eigen domeinen: geen bezwaar; alleen DNS-vragen gaan naar buiten.',
+}
+DOMEINEN_STANDAARD = ['tolgaarde.nl', 'huisartsentolgaarde.nl', 'hpgroenhouten.nl', 'hapleusden.nl', 'socev.dev']
+TOOLS = os.environ.get('OSINT_TOOLS') or '/opt/data/venvs/osint/tools'
+
+
+def item(tekst, sub=None, url=None, nieuw=None):
+    return {a: b for a, b in (('tekst', tekst), ('sub', sub), ('url', url), ('nieuw', nieuw)) if b not in (None, '', False)}
+
+
+# ---------------------------------------------------------------- instellingen (alleen David, via de App)
+def instellingen(c=None):
+    c = c or db()
+    uit = {'gebruikersnamen': [], 'adressen': [], 'domeinen': list(DOMEINEN_STANDAARD)}
+    for k, j in c.execute('select sleutel, json from instelling'):
+        try:
+            uit[k] = json.loads(j)
+        except ValueError:
+            pass
+    return uit
+
+
+INST_VORM = {'gebruikersnamen': (re.compile(r'^[\w.-]{2,40}$'), 10), 'adressen': (re.compile(r'^[\w.+-]{1,64}@(?:[a-z0-9-]+\.)+[a-z]{2,}$', re.I), 10),
+             'domeinen': (re.compile(r'^(?:[a-z0-9-]+\.)+[a-z]{2,}$'), 12)}
+
+
+def zet_instellingen(v):
+    """{gebruikersnamen|adressen|domeinen: [..]} → bewaard; ongeldige of BSN-achtige waarden worden geweigerd (met reden)."""
+    c = db()
+    geweigerd = []
+    for k, (rx, n) in INST_VORM.items():
+        if k not in v or not isinstance(v[k], list):
+            continue
+        goed = []
+        for x in v[k][:n * 2]:
+            x = norm(x).lower() if k != 'gebruikersnamen' else norm(x)
+            if not x:
+                continue
+            if not rx.match(x) or any(elfproef(re.sub(r'\D', '', m.group(0))) for m in _BSN_RE.finditer(x)) or _PAT_RE.search(x):
+                geweigerd.append(x[:60])
+            elif x not in goed:
+                goed.append(x)
+        c.execute('insert or replace into instelling(sleutel, json, tijd) values (?,?,?)', (k, json.dumps(goed[:n]), nu_iso()))
+    c.commit()
+    return {'ok': True, 'instellingen': instellingen(c), 'geweigerd': geweigerd}
+
+
+# ---------------------------------------------------------------- bedrijf breder (wv2698)
+BTW_RE = re.compile(r'^([A-Z]{2})([0-9A-Z]{8,12})$')
+
+
+def btw_uit(t):
+    m = BTW_RE.match(re.sub(r'[\s.]', '', str(t or '')).upper())
+    return (m.group(1), m.group(2)) if m and re.search(r'\d{6}', m.group(2)) else None
+
+
+def vies(ctx, btw):
+    b = btw_uit(btw)
+    if not b:
+        return None, None
+    land, nr = b
+    r = jhaal(ctx, 'EU VIES (btw)', 'https://ec.europa.eu/taxation_customs/vies/rest-api/ms/%s/vat/%s' % (land, nr), 'btw-nummer ' + land + nr, timeout=20)
+    if not isinstance(r, dict) or 'isValid' not in r:
+        return melding('Btw-nummer (VIES)', 'VIES gaf geen antwoord (de EU-dienst ligt per land soms even stil).', 'EU VIES'), None
+    adres = ', '.join(x.strip() for x in str(r.get('address') or '').split('\n') if x.strip() and x.strip() != '---')
+    naam = r.get('name') if r.get('name') not in (None, '', '---') else None
+    k = ctx.knoop('btw', land + nr, zoek={'ingang': 'bedrijf', 'term': land + nr})
+    ctx.rand(getattr(ctx, 'hoofd', None), k, 'btw-nummer')
+    if adres:
+        ctx.rand(k, ctx.knoop('adres', adres, zoek={'ingang': 'adres', 'term': adres}), 'adres volgens VIES')
+    return kaartje('Btw-nummer (VIES)', 'EU VIES (gratis, geen sleutel)', [
+        ('Btw-nummer', land + nr), ('Geldig', 'ja' if r.get('isValid') else 'NEE'), ('Naam volgens de belastingdienst', naam),
+        ('Adres volgens de belastingdienst', adres), ('Gecontroleerd op', datum_nl(r.get('requestDate')))],
+        let=None if r.get('isValid') else 'Dit btw-nummer is volgens VIES niet (meer) geldig.', juridisch=JUR['vies']), naam
+
+
+def gleif(ctx, kvk=None, naam=None):
+    if kvk:
+        q, nb = {'filter[entity.registeredAs]': kvk, 'filter[entity.jurisdiction]': 'NL', 'page[size]': 3}, 'KvK-nummer ' + kvk
+    else:
+        q, nb = {'filter[fulltext]': naam, 'page[size]': 5}, 'naam: ' + naam
+    r = jhaal(ctx, 'GLEIF (LEI-register)', 'https://api.gleif.org/api/v1/lei-records?' + up.urlencode(q), nb, timeout=20)
+    data = r.get('data') if isinstance(r, dict) else None
+    if not data:
+        return kaartje('LEI-register (GLEIF)', 'GLEIF (gratis, CC0)', klein='Geen LEI gevonden. Alleen grotere bedrijven en wie in effecten handelt heeft er een.',
+                       juridisch=JUR['gleif'])
+    a = data[0].get('attributes') or {}
+    lei, e, reg = a.get('lei'), a.get('entity') or {}, a.get('registration') or {}
+    adr = lambda x: ', '.join(y for y in ((' '.join((x or {}).get('addressLines') or [])), (x or {}).get('postalCode'), (x or {}).get('city'), (x or {}).get('country')) if y)
+    fam = {}
+    with cf.ThreadPoolExecutor(3) as ex:
+        fut = {rel: ex.submit(jhaal, ctx, 'GLEIF (LEI-register)', 'https://api.gleif.org/api/v1/lei-records/%s/%s%s' % (lei, rel, '?page[size]=10' if rel == 'direct-children' else ''),
+                              'LEI ' + lei, timeout=15) for rel in ('direct-parent', 'ultimate-parent', 'direct-children')}
+        for rel, f in fut.items():
+            try:
+                fam[rel] = f.result()
+            except PoortDicht:
+                raise
+            except Exception:
+                fam[rel] = None
+    ouder = lambda x: ('%s (%s)' % (x['data']['attributes']['entity']['legalName']['name'], x['data']['attributes']['lei'])) if isinstance(x, dict) and isinstance(x.get('data'), dict) else None
+    kids = fam.get('direct-children') if isinstance(fam.get('direct-children'), dict) else {}
+    kn = [d['attributes']['entity']['legalName']['name'] for d in kids.get('data') or [] if isinstance(d, dict)]
+    ktot = ((kids.get('meta') or {}).get('pagination') or {}).get('total')
+    k = ctx.knoop('lei', lei, label2=(e.get('legalName') or {}).get('name'))
+    ctx.rand(getattr(ctx, 'hoofd', None), k, 'LEI')
+    for rel, lab in (('direct-parent', 'moeder'), ('ultimate-parent', 'uiteindelijke moeder')):
+        o = ouder(fam.get(rel))
+        if o:
+            ctx.rand(ctx.knoop('bedrijf', o.rsplit(' (', 1)[0], zoek={'ingang': 'bedrijf', 'term': o.rsplit(' (', 1)[0]}), k, lab)
+    andere = ', '.join(x.get('name') for x in e.get('otherNames') or [] if isinstance(x, dict) and x.get('name'))
+    return kaartje('LEI-register (GLEIF)', 'GLEIF (gratis, CC0)', [
+        ('LEI', lei), ('Naam', (e.get('legalName') or {}).get('name')), ('Andere namen', andere), ('Status', e.get('status')),
+        ('Registratienummer (KvK)', e.get('registeredAs')), ('Juridisch adres', adr(e.get('legalAddress'))), ('Hoofdkantoor', adr(e.get('headquartersAddress'))),
+        ('Opgericht', datum_nl(e.get('creationDate'))), ('LEI-status', reg.get('status')), ('LEI uitgegeven', datum_nl(reg.get('initialRegistrationDate'))),
+        ('Volgende verlenging', datum_nl(reg.get('nextRenewalDate'))), ('Directe moeder', ouder(fam.get('direct-parent'))),
+        ('Uiteindelijke moeder', ouder(fam.get('ultimate-parent'))), ('Dochters (direct)', ('%s: %s' % (ktot, ', '.join(kn[:10]) + (' …' if (ktot or 0) > 10 else ''))) if ktot else None)],
+        klein=('Ook %d andere treffers op deze naam.' % (len(data) - 1)) if len(data) > 1 and not kvk else None, juridisch=JUR['gleif'])
+
+
+def icij(ctx, naam):
+    r = jhaal(ctx, 'ICIJ Offshore Leaks', 'https://offshoreleaks.icij.org/api/v1/reconcile', 'naam: ' + naam, data={'queries': {'q0': {'query': naam}}}, timeout=20)
+    res = ((r or {}).get('q0') or {}).get('result') or [] if isinstance(r, dict) else []
+    res = [x for x in res if isinstance(x, dict)]
+    sterk = [x for x in res if (x.get('score') or 0) >= 70]
+    if not sterk:
+        return kaartje('Offshore Leaks (ICIJ)', 'ICIJ Offshore Leaks (gratis)', klein='Geen sterke treffer op deze naam (%d zwakke).' % len(res) if res else 'Geen treffer op deze naam.',
+                       juridisch=JUR['icij'])
+    return kaartje('Offshore Leaks (ICIJ)', 'ICIJ Offshore Leaks (Panama, Paradise, Pandora Papers e.a.)', items=[
+        item(x.get('name'), '%s · overeenkomst %d%%' % (x.get('description') or ', '.join(t.get('name', '') for t in x.get('types') or []), round(x.get('score') or 0)),
+             'https://offshoreleaks.icij.org/nodes/%s' % x.get('id')) for x in sterk[:10]],
+        klein='Een gelijke naam is niet dezelfde partij; %d sterke en %d zwakke treffers.' % (len(sterk), len(res) - len(sterk)), juridisch=JUR['icij'])
+
+
+def sru_tekst(x):
+    return x.get('$') if isinstance(x, dict) else x
+
+
+def bekendmakingen(ctx, zoekterm, titel='Officiële bekendmakingen', naar=None, delen=None):
+    """delen = lijst zoekwoorden die allemaal moeten voorkomen (bijv. straat + huisnummer en plaats)."""
+    q = ' AND '.join('cql.textAndIndexes="%s"' % d.replace('"', '') for d in (delen or [zoekterm]) if d) + ' AND c.product-area==officielepublicaties'
+    r = jhaal(ctx, 'Officiële bekendmakingen (SRU)', 'https://repository.overheid.nl/sru?' + up.urlencode({'query': q, 'maximumRecords': 25, 'httpAccept': 'application/json'}),
+              naar or ('zoekterm: ' + zoekterm), timeout=25)
+    srr = (r or {}).get('searchRetrieveResponse') or {} if isinstance(r, dict) else {}
+    n = int(srr.get('numberOfRecords') or 0)
+    rec = (srr.get('records') or {}).get('record') or []
+    rec = [rec] if isinstance(rec, dict) else rec
+    rij = []
+    for x in rec:
+        try:
+            g = x['recordData']['gzd']
+            meta = g['originalData']['meta']
+        except (KeyError, TypeError):
+            continue
+        kern, mantel, tp = meta.get('owmskern') or {}, meta.get('owmsmantel') or {}, meta.get('tpmeta') or {}
+        dt = mantel.get('available') or mantel.get('date') or kern.get('modified') or ''
+        rij.append((str(dt), item(sru_tekst(kern.get('title')), ' · '.join(y for y in (datum_nl(dt), tp.get('publicatienaam') or sru_tekst(kern.get('type')),
+                   sru_tekst(kern.get('creator'))) if y), (g.get('enrichedData') or {}).get('preferredUrl'))))
+    rij.sort(key=lambda z: z[0], reverse=True)
+    if not n:
+        return kaartje(titel, 'Officiële bekendmakingen (overheid.nl, SRU)', klein='Niets gevonden in Staatscourant, gemeente-, provincie- of waterschapsblad.', juridisch=JUR['sru'])
+    return kaartje(titel, 'Officiële bekendmakingen (overheid.nl, SRU)', items=[z[1] for z in rij[:12]],
+                   klein='%d publicaties; hier de %d nieuwste van de eerste %d.' % (n, min(12, len(rij)), len(rij)), juridisch=JUR['sru'])
+
+
+def rechtspraak(ctx, zoekterm):
+    body = {'StartRow': 0, 'PageSize': 10, 'ShouldReturnHighlights': False, 'ShouldCountFacets': False, 'SortOrder': 'Relevance',
+            'SearchTerms': [{'Term': zoekterm, 'Field': 'AlleVelden'}], 'Contentsoorten': [], 'Rechtsgebieden': [], 'Instanties': [],
+            'DatumPublicatie': [], 'DatumUitspraak': [], 'Advanced': {'PublicatieStatus': 'AlleenGepubliceerd'}, 'CorrelationId': 'osint', 'Proceduresoorten': []}
+    r = jhaal(ctx, 'Rechtspraak (uitspraken)', 'https://uitspraken.rechtspraak.nl/api/zoek', 'zoekterm: ' + zoekterm, data=body, timeout=25)
+    if not isinstance(r, dict) or 'Results' not in r:
+        return melding('Rechtspraak', 'De zoekdienst van de Rechtspraak gaf geen antwoord.', 'Rechtspraak')
+    res = [x for x in r.get('Results') or [] if isinstance(x, dict)]
+    if not res:
+        return kaartje('Rechtspraak', 'Rechtspraak (uitspraken.rechtspraak.nl)', klein='Geen gepubliceerde uitspraak met deze naam.', juridisch=JUR['rechtspraak'])
+    gebied = lambda x: ', '.join(x.get('Rechtsgebieden') or []) if isinstance(x.get('Rechtsgebieden'), list) else None
+    return kaartje('Rechtspraak', 'Rechtspraak (uitspraken.rechtspraak.nl, gratis)', items=[
+        item('%s · %s' % (x.get('Uitspraakdatum') or '', x.get('Titel') or x.get('TitelEmphasis')),
+             ' · '.join(y for y in (x.get('TitelEmphasis'), gebied(x), (re.sub(r'\s+', ' ', x.get('Tekstfragment') or '')[:220] + '…') if x.get('Tekstfragment') else None) if y),
+             x.get('DeeplinkUrl') or x.get('InterneUrl')) for x in res[:10]],
+        klein='%s uitspraken gevonden; hier de %d meest passende.' % (r.get('ResultCount'), min(10, len(res))), juridisch=JUR['rechtspraak'])
+
+
+def insolventie_link():
+    return kaartje('Faillissement of surseance', 'Centraal Insolventieregister (rechtspraak.nl)', klein='Geen open zoekroute (alleen een webservice voor vaste afnemers); '
+                   'zoek zelf op naam of KvK-nummer.', links=[item('Centraal Insolventieregister', None, 'https://insolventies.rechtspraak.nl/')], juridisch=JUR['insolventie'])
+
+
+def bedrijf_breed(ctx, naam, kvk):
+    """VIES zit apart (alleen met een btw-nummer). Hier: GLEIF, ICIJ, bekendmakingen, Rechtspraak, insolventie-link."""
+    taken = []
+    if kvk or naam:
+        taken.append(('gleif', lambda: gleif(ctx, kvk=kvk) if kvk else gleif(ctx, naam=naam)))
+    if naam:
+        taken += [('icij', lambda: icij(ctx, naam)), ('sru', lambda: bekendmakingen(ctx, naam)), ('rs', lambda: rechtspraak(ctx, naam))]
+    uit = []
+    with cf.ThreadPoolExecutor(4) as ex:
+        fut = [(k, ex.submit(f)) for k, f in taken]
+        for k, f in fut:
+            try:
+                uit.append(f.result())
+            except PoortDicht:
+                pass
+            except Exception:
+                uit.append(melding({'gleif': 'LEI-register', 'icij': 'Offshore Leaks', 'sru': 'Officiële bekendmakingen', 'rs': 'Rechtspraak'}[k], 'Deze bron gaf geen antwoord.'))
+    uit.append(insolventie_link())
+    return uit
+
+
+# ---------------------------------------------------------------- adres extra (wv2698)
+def brk(ctx, lon, lat):
+    d = 0.00001
+    r = jhaal(ctx, 'Kadastrale kaart (PDOK BRK)', 'https://api.pdok.nl/kadaster/brk-kadastrale-kaart/ogc/v1/collections/perceel/items?' + up.urlencode(
+        {'bbox': '%.6f,%.6f,%.6f,%.6f' % (lon - d, lat - d, lon + d, lat + d), 'limit': 5, 'f': 'json'}), 'punt van het adres (perceel)', timeout=20)
+    fs = [f.get('properties') or {} for f in (r or {}).get('features') or [] if isinstance(f, dict)] if isinstance(r, dict) else []
+    if not fs:
+        return kaartje('Perceel (kadastrale kaart)', 'PDOK BRK (gratis, geen eigenaar)', klein='Geen perceel gevonden op dit punt.', juridisch=JUR['brk']), None
+    p = fs[0]
+    aand = ' '.join(str(x) for x in (p.get('kadastrale_gemeente_waarde'), p.get('sectie'), p.get('perceelnummer')) if x not in (None, ''))
+    k = ctx.knoop('perceel', aand)
+    ctx.rand(getattr(ctx, 'hoofd', None), k, 'ligt op perceel')
+    return kaartje('Perceel (kadastrale kaart)', 'PDOK BRK kadastrale kaart (gratis, geen eigenaar)', [
+        ('Kadastrale aanduiding', aand), ('Kadastrale gemeente (code)', '%s (%s)' % (p.get('kadastrale_gemeente_waarde'), p.get('akr_kadastrale_gemeente_code_waarde'))),
+        ('Grootte', ('%s m²' % p.get('kadastrale_grootte_waarde')) if p.get('kadastrale_grootte_waarde') else None), ('Soort grootte', p.get('soort_grootte_waarde')),
+        ('Perceel geldig sinds', datum_nl(p.get('begin_geldigheid'))), ('Andere percelen op dit punt', len(fs) - 1 or None)],
+        links=[item('Eigenaar, hypotheek of koopsom opvragen (Kadaster, € 3,70 per bericht, alleen zelf per geval)', None,
+                    'https://www.kadaster.nl/producten/woning/eigendomsinformatie')], juridisch=JUR['brk']), aand
+
+
+def brk_veilig(ctx, ls):
+    ll = [float(v) for v in re.findall(r'-?[\d.]+', ls.get('centroide_ll') or '')]
+    if len(ll) != 2:
+        return None
+    try:
+        return brk(ctx, ll[0], ll[1])
+    except PoortDicht:
+        raise
+    except Exception:
+        return melding('Perceel (kadastrale kaart)', 'De kadastrale kaart gaf geen antwoord.'), None
+
+
+def ep_online(ctx, vbo_id):
+    sl = os.environ.get('EP_ONLINE_SLEUTEL')
+    if not sl or not vbo_id:
+        return None
+    r = jhaal(ctx, 'EP-online (energielabel)', 'https://public.ep-online.nl/api/v5/PandEnergielabel/AdresseerbaarObject/' + vbo_id, 'BAG-id ' + vbo_id,
+              hdr={'Authorization': sl}, timeout=20)
+    r = r[0] if isinstance(r, list) and r else r
+    if not isinstance(r, dict):
+        return kaartje('Energielabel', 'EP-online (RVO)', klein='Geen energielabel geregistreerd voor dit adres.', juridisch=JUR['adreslinks'])
+    return kaartje('Energielabel', 'EP-online (RVO, gratis sleutel)', [(k, v) for k, v in r.items() if isinstance(v, (str, int, float)) and not isinstance(v, bool)][:24],
+                   juridisch=JUR['adreslinks'])
+
+
+def adres_links(ls):
+    a = ls.get('weergavenaam') or ''
+    q = up.quote(a)
+    links = [item('WOZ-waarde per jaar (WOZ-waardeloket)', 'handmatig: typ het adres', 'https://www.wozwaardeloket.nl/'),
+             item('Wat mag hier (Omgevingsloket, regels op de kaart)', None, 'https://omgevingswet.overheid.nl/regels-op-de-kaart'),
+             item('Bestemmingsplan (Ruimtelijkeplannen)', None, 'https://www.ruimtelijkeplannen.nl/viewer?adres=' + q)]
+    if not os.environ.get('EP_ONLINE_SLEUTEL'):
+        links.append(item('Energielabel (EP-online)', 'automatisch zodra de gratis RVO-sleutel er is', 'https://www.ep-online.nl/Energylabel/Search'))
+    return kaartje('Meer over dit adres', 'Links naar overheidsloketten', links=links, juridisch=JUR['adreslinks'])
+
+
+# ---------------------------------------------------------------- kenteken (wv2698; RDW open data, geen eigenaar)
+KENTEKEN_RE = re.compile(r'^(?=(?:[A-Z0-9]-?){6}$)(?=.*[A-Z])(?=.*\d)[A-Z0-9]{1,3}-?[A-Z0-9]{1,4}-?[A-Z0-9]{1,3}$')
+RDW = 'https://opendata.rdw.nl/resource/'
+RDW_VELD = [('merk', 'Merk'), ('handelsbenaming', 'Model'), ('voertuigsoort', 'Soort'), ('inrichting', 'Inrichting'), ('eerste_kleur', 'Kleur'),
+            ('tweede_kleur', 'Tweede kleur'), ('datum_eerste_toelating', 'Eerste toelating'), ('datum_eerste_tenaamstelling_in_nederland', 'Eerste tenaamstelling in NL'),
+            ('datum_tenaamstelling', 'Laatste tenaamstelling'), ('vervaldatum_apk', 'APK geldig tot'), ('wam_verzekerd', 'WAM-verzekerd'),
+            ('openstaande_terugroepactie_indicator', 'Openstaande terugroepactie'), ('tellerstandoordeel', 'Tellerstand'), ('export_indicator', 'Geëxporteerd'),
+            ('taxi_indicator', 'Taxi'), ('aantal_zitplaatsen', 'Zitplaatsen'), ('cilinderinhoud', 'Cilinderinhoud (cc)'), ('massa_rijklaar', 'Massa rijklaar (kg)'),
+            ('catalogusprijs', 'Catalogusprijs (€)'), ('europese_voertuigcategorie', 'EU-categorie'), ('typegoedkeuringsnummer', 'Typegoedkeuring')]
+
+
+def zoek_kenteken(ctx, term):
+    k = re.sub(r'[^A-Z0-9]', '', norm(term).upper())
+    if len(k) != 6 or not re.search(r'[A-Z]', k) or not re.search(r'\d', k):
+        return [melding('Kenteken', 'Dit lijkt geen Nederlands kenteken (6 letters en cijfers).', 'RDW')], {}
+    nb = 'kenteken ' + k
+    sets = {'voertuig': 'm9d7-ebf2', 'brandstof': '8ys7-d773', 'terugroep': 't49b-isb7', 'keuring': 'sgfe-77wx'}
+    with cf.ThreadPoolExecutor(4) as ex:
+        fut = {n: ex.submit(jhaal, ctx, 'RDW open data (%s)' % n, RDW + s + '.json?' + up.urlencode({'kenteken': k}), nb, timeout=15) for n, s in sets.items()}
+        r = {}
+        for n, f in fut.items():
+            try:
+                r[n] = f.result()
+            except PoortDicht:
+                raise
+            except Exception:
+                r[n] = None
+    v = (r['voertuig'] or [None])[0] if isinstance(r['voertuig'], list) else None
+    if not v:
+        return [kaartje('Kenteken', 'RDW open data (gratis, geen eigenaar)', [('Kenteken', k)], klein='Niet gevonden bij de RDW.', juridisch=JUR['rdw'])], {'gevonden': False}
+    dat = lambda x: datum_nl(x) if re.fullmatch(r'\d{8}', str(x or '')) else x
+    velden = [('Kenteken', k)] + [(lab, dat(v.get(sl))) for sl, lab in RDW_VELD]
+    br = ['%s%s' % (b.get('brandstof_omschrijving'), (' (%s)' % b['emissiecode_omschrijving']) if b.get('emissiecode_omschrijving') else '') for b in r['brandstof'] or [] if isinstance(b, dict)]
+    velden.append(('Brandstof', ', '.join(br)))
+    tr = [t for t in r['terugroep'] or [] if isinstance(t, dict)]
+    kr = sorted([x for x in r['keuring'] or [] if isinstance(x, dict)], key=lambda x: str(x.get('meld_datum_door_keuringsinstantie')), reverse=True)
+    items = [item('Terugroepactie %s' % t.get('referentiecode_rdw'), t.get('status'), 'https://www.rdw.nl/terugroepacties') for t in tr[:6]]
+    items += [item('Keuring %s' % datum_nl(x.get('meld_datum_door_keuringsinstantie')), ' · '.join(y for y in (x.get('soort_melding_ki_omschrijving'), x.get('soort_erkenning_omschrijving')) if y))
+              for x in kr[:6]]
+    kn = ctx.knoop('kenteken', k, label2=' '.join(x for x in (v.get('merk'), v.get('handelsbenaming')) if x), zoek={'ingang': 'kenteken', 'term': k})
+    ctx.hoofd = kn
+    return [kaartje('Kenteken', 'RDW open data (gratis, geen eigenaar)', velden, items=items or None,
+                    let='Er staat een terugroepactie open.' if v.get('openstaande_terugroepactie_indicator') == 'Ja' else None, juridisch=JUR['rdw'])], {
+        'gevonden': True, 'merk': v.get('merk'), 'model': v.get('handelsbenaming')}
+
+
+# ---------------------------------------------------------------- mail duiden (wv2698; kop plakken in de App)
+PRIV_IP = re.compile(r'^(?:10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)')
+IP4 = r'(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])'
+
+
+def dom_van(adres):
+    m = re.search(r'@([\w.-]+\.[a-z]{2,})', str(adres or ''), re.I)
+    return m.group(1).lower() if m else None
+
+
+def dns_txt(ctx, naam, bron):
+    poort_open(ctx, bron, 'extern', 'DNS', 'domein ' + naam)
+    t = time.time()
+    status = 'fout'
+    try:
+        if NEP:
+            status = 'nep'
+            return []
+        import dns.resolver
+        try:
+            a = dns.resolver.resolve(naam, 'TXT', lifetime=6)
+            status = '200'
+            return [b''.join(x.strings).decode('utf-8', 'replace') for x in a]
+        except Exception as e:
+            status = type(e).__name__
+            return None if status == 'NXDOMAIN' else []
+    finally:
+        ctx.log.append({'bron': bron, 'soort': 'extern', 'host': 'DNS', 'naar_buiten': 'domein ' + naam, 'status': status, 'ms': int((time.time() - t) * 1000)})
+
+
+def ip_info(ctx, ip):
+    with cf.ThreadPoolExecutor(4) as ex:
+        f = {'shodan': ex.submit(jhaal, ctx, 'Shodan InternetDB', 'https://internetdb.shodan.io/' + ip, 'IP ' + ip, timeout=12),
+             'prefix': ex.submit(jhaal, ctx, 'RIPEstat', 'https://stat.ripe.net/data/prefix-overview/data.json?resource=' + ip, 'IP ' + ip, timeout=12),
+             'geo': ex.submit(jhaal, ctx, 'RIPEstat', 'https://stat.ripe.net/data/maxmind-geo-lite/data.json?resource=' + ip, 'IP ' + ip, timeout=12),
+             'rdap': ex.submit(jhaal, ctx, 'RDAP (IP-register)', 'https://rdap.org/ip/' + ip, 'IP ' + ip, timeout=12)}
+        r = {}
+        for k, x in f.items():
+            try:
+                r[k] = x.result()
+            except PoortDicht:
+                raise
+            except Exception:
+                r[k] = None
+    sh = r['shodan'] if isinstance(r['shodan'], dict) else {}
+    pd = ((r['prefix'] or {}).get('data') or {}) if isinstance(r['prefix'], dict) else {}
+    asn = ', '.join('AS%s %s' % (a.get('asn'), a.get('holder')) for a in pd.get('asns') or [] if isinstance(a, dict))
+    geo = (((r['geo'] or {}).get('data') or {}).get('located_resources') or []) if isinstance(r['geo'], dict) else []
+    plek = ', '.join(sorted({' '.join(y for y in (l.get('city'), l.get('country')) if y) for g in geo for l in g.get('locations') or [] if isinstance(l, dict)} - {''}))
+    rd = r['rdap'] if isinstance(r['rdap'], dict) else {}
+    return {'asn': asn, 'net': rd.get('name'), 'land': rd.get('country'), 'plek': plek, 'poorten': sh.get('ports'), 'namen': sh.get('hostnames'),
+            'kwetsbaar': sh.get('vulns'), 'tags': sh.get('tags'), 'prefix': pd.get('resource')}
+
+
+TECH_KOP = re.compile(r'^(received|received-spf|authentication-results|arc-[\w-]+|dkim-signature|x-google-[\w-]+|x-received|x-gm-[\w-]+|message-id|'
+                      r'mime-version|content-type|content-transfer-encoding|delivered-to|x-ms-[\w-]+|x-forefront-[\w-]+|x-microsoft-[\w-]+|feedback-id|list-unsubscribe(-post)?)$', re.I)
+
+
+def kop_voor_poort(kop):
+    """De kopregels die mensen schrijven (From, To, Subject, Reply-To, …) voor de vormcontrole van de poort; machineregels (Received,
+    Authentication-Results, DKIM, …) niet: daarin staan woorden als client-ip en lange id's die vals alarm geven. Nooit de inhoud."""
+    tekst = kop.replace('\r\n', '\n')
+    if '\n\n' in tekst.strip():
+        tekst = tekst.strip().split('\n\n', 1)[0]
+    uit, mee = [], False
+    for r in tekst.split('\n'):
+        if r[:1] in (' ', '\t'):
+            if mee:
+                uit.append(r)
+            continue
+        naam = r.split(':', 1)[0].strip()
+        mee = ':' in r and not TECH_KOP.match(naam)
+        if mee:
+            uit.append(r)
+    return '\n'.join(uit)
+
+
+def zoek_mail(ctx, kop):
+    import email
+    tekst = kop.replace('\r\n', '\n')
+    if '\n\n' in tekst.strip():
+        tekst = tekst.strip().split('\n\n', 1)[0]   # alleen de kop, nooit de inhoud
+    m = email.message_from_string(tekst + '\n\n')
+    if not m.keys():
+        return [melding('Mailkop', 'Geen mailkop herkend. Plak de volledige kop (in Gmail: ⋮ › Origineel weergeven, alles tot de eerste lege regel).')], {}
+    alle = lambda h: [str(x) for x in (m.get_all(h) or [])]
+    van, rp, rt = m.get('From'), m.get('Return-Path'), m.get('Reply-To')
+    dv, drp, drt = dom_van(van), dom_van(rp), dom_van(rt)
+    auth = ' '.join(alle('Authentication-Results') + alle('ARC-Authentication-Results'))
+    zoekw = lambda w: (re.search(r'\b%s=(\w+)' % w, auth, re.I) or [None, None])[1]
+    dkim_d = sorted(set(re.findall(r'header\.[di]=@?([\w.-]+)', auth))) or sorted(set(re.findall(r'\bd=([\w.-]+)', ' '.join(alle('DKIM-Signature')))))
+    rec = alle('Received')
+    hops, ips = [], []
+    for r in rec:
+        frm = (re.search(r'from\s+([\w.-]+)', r) or [None, None])[1]
+        by = (re.search(r'\bby\s+([\w.:-]+)', r) or [None, None])[1]
+        ip = [x for x in re.findall(IP4, r) if not PRIV_IP.match(x) and all(int(p) < 256 for p in x.split('.'))]
+        tijd = r.rsplit(';', 1)[-1].strip()[:40] if ';' in r else None
+        hops.append(item('%s → %s' % (frm or '?', by or '?'), ' · '.join(y for y in (', '.join(ip), tijd) if y)))
+        ips += [x for x in ip if x not in ips]
+    spf_ip = re.findall(r'client-ip=' + IP4, ' '.join(alle('Received-SPF')) + ' ' + auth)
+    oorsprong = (spf_ip[0] if spf_ip else None) or (ips[-1] if ips else None)
+    let = []
+    if (zoekw('spf') or '').lower() not in ('', 'pass'):
+        let.append('SPF: %s' % zoekw('spf'))
+    if (zoekw('dkim') or '').lower() not in ('', 'pass'):
+        let.append('DKIM: %s' % zoekw('dkim'))
+    if (zoekw('dmarc') or '').lower() not in ('', 'pass', 'bestguesspass'):
+        let.append('DMARC: %s' % zoekw('dmarc'))
+    if drt and dv and drt != dv:
+        let.append('antwoorden gaat naar een ander domein (%s) dan de afzender (%s)' % (drt, dv))
+    if drp and dv and not (drp == dv or drp.endswith('.' + dv) or dv.endswith('.' + drp)):
+        let.append('het retouradres hoort bij %s, de afzender bij %s (bij nieuwsbrieven en facturatiediensten normaal)' % (drp, dv))
+    if dv and dkim_d and not any(d == dv or dv.endswith('.' + d) or d.endswith('.' + dv) for d in dkim_d):
+        let.append('de DKIM-handtekening is van %s, niet van het afzenderdomein' % ', '.join(dkim_d))
+    kaarten = [kaartje('De mail (uit de kop)', 'Mailkop (lokaal gelezen)', [
+        ('Afzenderdomein', dv), ('Retourdomein (Return-Path)', drp), ('Antwoorden naar (domein)', drt), ('Datum', m.get('Date')),
+        ('Message-ID-domein', (re.search(r'@([\w.-]+)>?', m.get('Message-ID') or '') or [None, None])[1]), ('Programma', m.get('X-Mailer') or m.get('User-Agent')),
+        ('SPF', zoekw('spf')), ('DKIM', ('%s (%s)' % (zoekw('dkim'), ', '.join(dkim_d))) if zoekw('dkim') else (', '.join(dkim_d) or None)), ('DMARC', zoekw('dmarc')),
+        ('Servers onderweg', len(rec)), ('Oorspronkelijke server (IP)', oorsprong)],
+        let=('Let op: ' + '; '.join(let) + '.') if let else None, juridisch=JUR['mail'])]
+    if hops:
+        kaarten.append(kaartje('De route (nieuwste bovenaan)', 'Received-regels (lokaal)', items=hops[:15], juridisch=JUR['mail']))
+    kern = {'spf': zoekw('spf'), 'dkim': zoekw('dkim'), 'dmarc': zoekw('dmarc'), 'afzenderdomein': dv, 'oorsprong': oorsprong, 'signalen': len(let)}
+    km = ctx.knoop('mail', 'mail %s' % (dv or '?'))
+    ctx.hoofd = km
+    if dv:
+        ctx.rand(km, ctx.knoop('domein', dv, zoek={'ingang': 'bedrijf', 'term': dv}), 'afzender')
+    if drt and drt != dv:
+        ctx.rand(km, ctx.knoop('domein', drt, zoek={'ingang': 'bedrijf', 'term': drt}), 'antwoorden naar')
+    if ctx.niveau == 'niets':
+        return kaarten, kern
+    try:
+        if dv:
+            txt = dns_txt(ctx, dv, 'DNS (SPF/DMARC)')
+            if txt is None:
+                kaarten.append(kaartje('Mailbeveiliging van het afzenderdomein', 'DNS (%s)' % dv, let='Het afzenderdomein %s bestaat niet in DNS: zeer verdacht.' % dv,
+                                       juridisch=JUR['mail']))
+            else:
+                spf = [t for t in txt if t.lower().startswith('v=spf1')]
+                dm = [t for t in dns_txt(ctx, '_dmarc.' + dv, 'DNS (SPF/DMARC)') or [] if t.lower().startswith('v=dmarc1')]
+                kaarten.append(kaartje('Mailbeveiliging van het afzenderdomein', 'DNS (SPF/DMARC van %s)' % dv, [
+                    ('SPF-regel', spf[0][:300] if spf else 'geen: iedereen kan mail namens dit domein sturen'), ('DMARC-beleid', dm[0][:300] if dm else 'geen DMARC')],
+                    juridisch=JUR['mail']))
+        for ip in ([oorsprong] if oorsprong else []) + [x for x in ips if x != oorsprong][:2]:
+            x = ip_info(ctx, ip)
+            ki = ctx.knoop('ip', ip)
+            ctx.rand(km, ki, 'kwam via' if ip != oorsprong else 'verstuurd vanaf')
+            if x['asn']:
+                ctx.rand(ki, ctx.knoop('netwerk', x['asn']), 'netwerk')
+            kaarten.append(kaartje('Server %s%s' % (ip, ' (oorsprong)' if ip == oorsprong else ''), 'Shodan InternetDB, RIPEstat, RDAP (gratis)', [
+                ('Netwerk (ASN)', x['asn']), ('Netblok', x['prefix']), ('Netnaam', x['net']), ('Land (register)', x['land']), ('Plek (MaxMind, grof)', x['plek']),
+                ('Servernamen', ', '.join((x['namen'] or [])[:6])), ('Open poorten', ', '.join(map(str, x['poorten'] or []))),
+                ('Bekende kwetsbaarheden', ', '.join((x['kwetsbaar'] or [])[:8])), ('Kenmerken', ', '.join(x['tags'] or []))], juridisch=JUR['ip']))
+    except PoortDicht:
+        pass
+    return kaarten, kern
+
+
+# ---------------------------------------------------------------- bestand duiden (wv2698; ExifTool lokaal, bestand na het lezen gewist)
+EXIF_GROEPEN = [('Maker', ('Author', 'Creator', 'LastModifiedBy', 'Artist', 'Company', 'Manager', 'Owner', 'OwnerName')),
+                ('Programma', ('Producer', 'CreatorTool', 'Software', 'Application', 'AppVersion', 'HistorySoftwareAgent', 'Generator')),
+                ('Datums', ('CreateDate', 'ModifyDate', 'MetadataDate', 'DateTimeOriginal', 'CreationDate', 'LastPrinted', 'HistoryWhen')),
+                ('Plek', ('GPSPosition', 'GPSLatitude', 'GPSLongitude', 'GPSAltitude')), ('Camera', ('Make', 'Model', 'LensModel', 'SerialNumber')),
+                ('Document', ('PDFVersion', 'PageCount', 'Pages', 'Linearized', 'Encryption', 'Title', 'Subject', 'Keywords', 'DocumentID', 'InstanceID',
+                              'HistoryAction', 'TotalEditTime', 'RevisionNumber', 'Words', 'Template'))]
+BEWERKERS = re.compile(r'photoshop|gimp|ilovepdf|smallpdf|sejda|pdf-?xchange|foxit phantom|pdfescape|pdffiller|canva|paint\.net|pixlr|word|libreoffice|nitro', re.I)
+
+
+def exiftool():
+    p = os.environ.get('OSINT_EXIFTOOL') or os.path.join(TOOLS, 'exiftool', 'exiftool')
+    return p if os.path.exists(p) else None
+
+
+def poort_vorm(tekst):
+    """Alleen de vormkant van de poort (BSN, patiëntkenmerk, patiëntpoort) → reden of None."""
+    p = poort(tekst, 'david', 'david', 'bestand', 'anders')
+    return p['reden'] if p['niveau'] == 'niets' else None
+
+
+def zoek_bestand(ctx, inhoud, naam):
+    import tempfile, shutil
+    et = exiftool()
+    if not et:
+        return [melding('Bestand', 'ExifTool ontbreekt op de pod.')], {}
+    ext = (re.search(r'\.([A-Za-z0-9]{1,5})$', naam or '') or [None, 'bin'])[1].lower()
+    d = tempfile.mkdtemp(prefix='osint-')
+    try:
+        os.chmod(d, 0o700)
+        p = os.path.join(d, 'stuk.' + ext)
+        with open(p, 'wb') as f:
+            f.write(inhoud)
+        r = subprocess.run(['perl', et, '-j', '-G1', '-a', '-s', '-api', 'LargeFileSupport=1', p], capture_output=True, text=True, timeout=40)
+        js = json.loads(r.stdout or '[]')
+    except Exception as e:
+        return [melding('Bestand', 'ExifTool kon dit bestand niet lezen (%s).' % type(e).__name__)], {}
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    meta = js[0] if js and isinstance(js[0], dict) else {}
+    meta = {k: v for k, v in meta.items() if not k.startswith(('System:', 'ExifTool:')) and k != 'SourceFile'}
+    tekst = ' '.join('%s %s' % (k, v) for k, v in meta.items())
+    reden = poort_vorm((naam or '') + ' ' + tekst[:200000])
+    if reden:
+        return [kaartje('Poort', 'OVIS OSINT-poort', let='Dit bestand bevat een kenmerk dat op een patiënt kan wijzen (%s); de metadata wordt niet getoond.' % reden)], {'poort': 'dicht'}
+    kort = lambda v: (', '.join(map(str, v)) if isinstance(v, list) else str(v))[:240]
+    groepen, gezien = [], set()
+    for titel, tags in EXIF_GROEPEN:
+        rij = [(k, kort(v)) for k, v in meta.items() if k.split(':', 1)[-1] in tags]
+        gezien.update(k for k, _ in rij)
+        if rij:
+            groepen.append((titel, rij))
+    sig = []
+    cd = [v for k, v in meta.items() if k.endswith(':CreateDate') or k.endswith(':CreationDate')]
+    md = [v for k, v in meta.items() if k.endswith(':ModifyDate')]
+    if cd and md and str(cd[0])[:16] != str(md[0])[:16]:
+        sig.append('gewijzigd na het maken (%s → %s)' % (str(cd[0])[:19], str(md[0])[:19]))
+    prog = sorted({kort(v) for k, v in meta.items() if k.split(':', 1)[-1] in ('Producer', 'CreatorTool', 'Software', 'HistorySoftwareAgent')})
+    bew = [x for x in prog if BEWERKERS.search(x)]
+    if bew:
+        sig.append('gemaakt of bewerkt met %s' % ', '.join(bew))
+    if len(prog) > 1:
+        sig.append('meer dan één programma: %s' % ', '.join(prog[:4]))
+    if any(k.split(':', 1)[-1] == 'HistoryAction' for k in meta):
+        sig.append('het bestand heeft een bewerkingsgeschiedenis (XMP)')
+    versie = (js[0].get('ExifTool:ExifToolVersion') if js and isinstance(js[0], dict) else None) or ''
+    kaarten = [kaartje('Het bestand', ('ExifTool %s (lokaal)' % versie).replace('  ', ' '), [
+        ('Soort', meta.get('File:FileType')), ('Grootte', meta.get('File:FileSize')), ('MIME', meta.get('File:MIMEType'))],
+        let=('Let op: ' + '; '.join(sig) + '. Dit is een aanwijzing, geen bewijs.') if sig else None,
+        klein=None if sig else 'Geen opvallende sporen van bewerking in de metadata (ontbreken bewijst niets: metadata is makkelijk te wissen).', juridisch=JUR['exif'])]
+    for titel, rij in groepen:
+        kaarten.append(kaartje(titel, 'ExifTool (lokaal)', rij))
+    rest = [(k, kort(v)) for k, v in meta.items() if k not in gezien and not k.startswith('File:')]
+    if rest:
+        kaarten.append(kaartje('Alle overige metadata (%d velden)' % len(rest), 'ExifTool (lokaal)', rest[:300], dicht=True))
+    return kaarten, {'velden': len(meta), 'signalen': len(sig), 'soort': meta.get('File:FileType')}
+
+
+# ---------------------------------------------------------------- mijn voetafdruk (wv2698; alleen Davids eigen namen en adressen uit de instelling)
+def wmn_sites():
+    p = os.environ.get('OSINT_WMN') or os.path.join(TOOLS, 'wmn-data.json')
+    try:
+        d = json.load(open(p))
+    except Exception:
+        return []
+    return [s for s in d.get('sites') or [] if isinstance(s, dict) and s.get('uri_check') and not s.get('post_body') and not s.get('protection')
+            and s.get('valid', True) is not False and s.get('e_code') is not None]
+
+
+def wmn_een(ctx, s, naam):
+    url = s['uri_check'].replace('{account}', up.quote(naam, safe=''))
+    try:
+        code, body = haal(ctx, 'WhatsMyName', url, 'gebruikersnaam', timeout=8, maxb=600_000, stil=True, metcode=True, hdr=s.get('headers') or None)
+    except PoortDicht:
+        raise
+    except Exception:
+        return 'fout'
+    if str(code) == str(s.get('e_code')) and (s.get('e_string') or '') in body:
+        return 'misschien'
+    return 'niet'
+
+
+def zoek_voetafdruk(ctx, inst):
+    namen, adressen = inst.get('gebruikersnamen') or [], inst.get('adressen') or []
+    kaarten, kern = [], {}
+    if not namen and not adressen:
+        kaarten.append(melding('Mijn voetafdruk', 'Vul eerst bij Instellingen je eigen gebruikersnamen en mailadressen in (alleen die van jezelf).'))
+    def xon_alle():
+        xk, xn = [], {}
+        for i, a in enumerate(adressen[:5]):
+            if i:
+                time.sleep(1.1)   # XposedOrNot: ± 1 vraag per seconde
+            r = jhaal(ctx, 'XposedOrNot (datalekken)', 'https://api.xposedornot.com/v1/breach-analytics?' + up.urlencode({'email': a}), 'eigen mailadres', timeout=20)
+            det = (((r or {}).get('ExposedBreaches') or {}).get('breaches_details') or []) if isinstance(r, dict) else []
+            risico = ((((r or {}).get('BreachMetrics') or {}).get('risk') or [{}])[0] or {}) if isinstance(r, dict) else {}
+            xk.append(kaartje('Mailadres %s: in %d datalekken' % (a, len(det)), 'XposedOrNot (gratis, geen sleutel)', items=[
+                item('%s (%s)' % (b.get('breach'), b.get('xposed_date')), ' · '.join(y for y in (b.get('xposed_data'), ('%s records' % b['xposed_records']) if b.get('xposed_records') else None,
+                     ('wachtwoord: %s' % b['password_risk']) if b.get('password_risk') else None) if y), ('https://' + b['domain']) if b.get('domain') else None)
+                for b in sorted(det, key=lambda b: str(b.get('xposed_date')), reverse=True)[:25] if isinstance(b, dict)] or None,
+                velden=[('Risico volgens XposedOrNot', ('%s (%s)' % (risico.get('risk_label'), risico.get('risk_score'))) if risico.get('risk_label') else None)],
+                klein=None if det else 'Niet gevonden in bekende datalekken.', juridisch=JUR['xon']))
+            xn['adres_%d' % i] = len(det)
+        return xk, xn
+
+    c = db()
+    xon_ex = cf.ThreadPoolExecutor(1)
+    xon_f = xon_ex.submit(xon_alle) if adressen else None   # parallel aan de WhatsMyName-ronde (samen < 100 s)
+    if namen:
+        sites = wmn_sites()
+        if not sites:
+            kaarten.append(melding('Je gebruikersnamen', 'De WhatsMyName-lijst ontbreekt op de pod.'))
+        else:
+            poort_open(ctx, 'WhatsMyName', 'extern', 'diverse', 'gebruikersnaam naar %d sites' % len(sites))
+            # 2 CPU's: een ronde haalt ± 250-600 sites in 70 s. Elke ronde begint bij de sites die het langst niet bekeken zijn; de uitslag
+            # per site blijft staan, zodat een volgende ronde de rest doet en de treffers optellen.
+            t0 = time.time()
+            ex = cf.ThreadPoolExecutor(48)
+            fut = {}
+            for n in namen[:3]:
+                gezien = {r[0]: r[1] for r in c.execute('select site, bekeken from voetafdruk where naam = ?', (n,))}
+                for s_ in sorted(sites, key=lambda x: gezien.get(x['name']) or ''):
+                    fut[ex.submit(wmn_een, ctx, s_, n)] = (n, s_)
+            klaar, _ = cf.wait(fut, timeout=65)
+            ex.shutdown(wait=False, cancel_futures=True)
+            nu, ronde = nu_iso(), {n: 0 for n in namen[:3]}
+            for f in klaar:
+                n, s_ = fut[f]
+                try:
+                    u = f.result()
+                except Exception:
+                    continue
+                if u == 'fout':
+                    continue
+                ronde[n] += 1
+                c.execute('insert into voetafdruk(naam, site, url, cat, uitslag, bekeken, eerst_raak) values (?,?,?,?,?,?,?) on conflict(naam, site) do update set '
+                          'uitslag = excluded.uitslag, bekeken = excluded.bekeken, url = excluded.url, eerst_raak = coalesce(voetafdruk.eerst_raak, excluded.eerst_raak)',
+                          (n, s_['name'], s_.get('uri_pretty', s_['uri_check']).replace('{account}', up.quote(n, safe='')), s_.get('cat'), u, nu,
+                           nu if u == 'misschien' else None))
+            c.commit()
+            for n in namen[:3]:
+                ctx.log.append({'bron': 'WhatsMyName (%s)' % n, 'soort': 'extern', 'host': '%d sites' % ronde[n], 'naar_buiten': 'gebruikersnaam %s naar %d sites' % (n, ronde[n]),
+                                'status': '%d bekeken' % ronde[n], 'ms': int((time.time() - t0) * 1000)})
+                ok = c.execute("select site, url, cat, eerst_raak from voetafdruk where naam = ? and uitslag = 'misschien' order by eerst_raak desc, site", (n,)).fetchall()
+                totaal = c.execute('select count(*) from voetafdruk where naam = ?', (n,)).fetchone()[0]
+                eerste = c.execute('select min(bekeken) from voetafdruk where naam = ?', (n,)).fetchone()[0]
+                nieuw = [r[0] for r in ok if r[3] == nu and eerste != nu]
+                kaarten.append(kaartje('Gebruikersnaam "%s": misschien op %d sites' % (n, len(ok)), 'WhatsMyName (%d sites, gratis)' % len(sites), items=[
+                    item(r[0], r[2], r[1], nieuw=r[0] in nieuw) for r in ok],
+                    klein='Deze ronde %d sites bekeken; in totaal %d van %d.%s Alles is "misschien": een naam die op een site bestaat, kan van iemand anders zijn.%s' % (
+                        ronde[n], totaal, len(sites), ' Tik nog eens voor de rest.' if totaal < len(sites) else '',
+                        (' Nieuw deze ronde: %d.' % len(nieuw)) if nieuw else ''), misschien=True, juridisch=JUR['wmn']))
+                kern['naam_' + n] = len(ok)
+    if xon_f:
+        try:
+            xk, xn = xon_f.result(timeout=40)
+            kaarten += xk
+            kern.update(xn)
+        except PoortDicht:
+            pass
+        except Exception:
+            kaarten.append(melding('Datalekken', 'XposedOrNot gaf geen antwoord.'))
+    xon_ex.shutdown(wait=False)
+    kaarten.append(kaartje('Datalekken op je praktijkdomeinen (Have I Been Pwned)', 'Have I Been Pwned, gratis domeinmelding', klein=(
+        'Gratis voor eigen domeinen, maar alleen na verificatie door jou (een DNS-regel of een mail aan het domein). Daarna mailt HIBP vanzelf als een adres '
+        'op het domein in een nieuw lek staat. Stappen: open de link, kies Domain search, voer het domein in, kies de verificatie en volg de stappen.'),
+        links=[item('Have I Been Pwned › Domain search', ', '.join(inst.get('domeinen') or []), 'https://haveibeenpwned.com/DomainSearch')], juridisch=JUR['hibp']))
+    return kaarten, kern
+
+
+# ---------------------------------------------------------------- lijkende domeinen (wv2698; dnstwist op de eigen domeinen)
+def dnstwist_run(dom):
+    if NEP:
+        f = os.environ.get('OSINT_NEP_DNSTWIST')
+        try:
+            return json.load(open(f)).get(dom, []) if f else []
+        except Exception:
+            return []
+    exe = os.path.join(os.path.dirname(sys.executable), 'dnstwist')
+    if not os.path.exists(exe):
+        raise RuntimeError('dnstwist ontbreekt')
+    r = subprocess.run([sys.executable, '-I', exe, '--registered', '--format', 'json', '--threads', '16', dom], capture_output=True, text=True, timeout=120)
+    return json.loads(r.stdout or '[]')
+
+
+def zoek_lijkend(ctx, inst):
+    doms = inst.get('domeinen') or []
+    c = db()
+    kaarten, nieuw_alle, tot = [], [], 0
+    for dom in doms:
+        poort_open(ctx, 'dnstwist (DNS)', 'extern', 'DNS', 'varianten van ' + dom)
+        t = time.time()
+        try:
+            res = dnstwist_run(dom)
+            status = 'nep' if NEP else '200'
+        except Exception as e:
+            res, status = None, type(e).__name__
+        if res is None:
+            ctx.log.append({'bron': 'dnstwist (DNS)', 'soort': 'extern', 'host': 'DNS', 'naar_buiten': 'varianten van ' + dom, 'status': status, 'ms': int((time.time() - t) * 1000)})
+            kaarten.append(melding('Lijkend op %s' % dom, 'dnstwist liep niet (%s).' % status))
+            continue
+        ctx.log.append({'bron': 'dnstwist (DNS)', 'soort': 'extern', 'host': 'DNS', 'naar_buiten': 'varianten van %s (%d geregistreerd)' % (dom, max(0, len(res) - 1)),
+                        'status': status, 'ms': int((time.time() - t) * 1000)})
+        oud_dom = c.execute('select count(*) from lijkend where domein = ?', (dom,)).fetchone()[0]
+        rij = []
+        for x in res:
+            v = str(x.get('domain') or '').lower()
+            if not v or x.get('fuzzer') == '*original' or v == dom:
+                continue
+            a, mx, ns = [', '.join(y for y in (x.get(k) or []) if y and not str(y).startswith('!')) for k in ('dns_a', 'dns_mx', 'dns_ns')]
+            bekend = c.execute('select 1 from lijkend where variant = ?', (v,)).fetchone()
+            c.execute('insert into lijkend(variant, domein, fuzzer, a, mx, ns, eerst, laatst) values (?,?,?,?,?,?,?,?) on conflict(variant) do update set '
+                      'laatst = excluded.laatst, a = excluded.a, mx = excluded.mx, ns = excluded.ns', (v, dom, x.get('fuzzer'), a, mx, ns, nu_iso(), nu_iso()))
+            nw = not bekend and oud_dom > 0
+            if nw:
+                nieuw_alle.append({'variant': v, 'domein': dom, 'mx': bool(mx)})
+            rij.append((nw, v, item(v, ' · '.join(y for y in (x.get('fuzzer'), ('A ' + a) if a else None, ('mail: ' + mx) if mx else None, ('NS ' + ns) if ns else None) if y), nieuw=nw)))
+        c.commit()
+        tot += len(rij)
+        rij.sort(key=lambda z: (not z[0], z[1]))
+        km = ctx.knoop('domein', dom, zoek={'ingang': 'bedrijf', 'term': dom})
+        for nw, v, _ in rij[:25]:
+            ctx.rand(ctx.knoop('domein', v, zoek={'ingang': 'bedrijf', 'term': v}), km, 'lijkt op')
+        kaarten.append(kaartje('Lijkend op %s: %d geregistreerd' % (dom, len(rij)), 'dnstwist (Apache-2.0, alleen DNS)', items=[z[2] for z in rij[:60]] or None,
+                               klein=None if rij else 'Geen geregistreerde lijkende domeinen.', let=('Nieuw sinds de vorige keer: %s.' % ', '.join(z[1] for z in rij if z[0])) if any(z[0] for z in rij) else None,
+                               juridisch=JUR['dnstwist']))
+    return kaarten, {'nieuw': nieuw_alle, 'geregistreerd': tot, 'domeinen': len(doms)}
+
+
 # ---------------------------------------------------------------- herkennen en zoeken
 def herken(term):
     t = norm(term)
     kaal = re.sub(r'[\s.()-]', '', t)
+    if re.search(r'(?im)^(received|authentication-results|return-path|dkim-signature):', str(term or '')):
+        return 'mail'
     if re.fullmatch(r'\d{8}', kaal):
         return 'bedrijf'
     if re.fullmatch(r'\+?\d{9,15}', kaal) and (kaal.startswith(('0', '+')) or len(kaal) >= 11):
         return 'telefoon'
-    if IBAN_RE.match(kaal.upper()) or (' ' not in t and DOMEIN_RE.match(t.lower())):
+    if KENTEKEN_RE.match(t.upper().replace(' ', '')):
+        return 'kenteken'
+    if (IBAN_RE.match(kaal.upper()) and iban_geldig(kaal)) or btw_uit(kaal) or (' ' not in t and DOMEIN_RE.match(t.lower())):
         return 'bedrijf'
     if re.search(r'\b\d{4}\s?[A-Za-z]{2}\b', t) or re.search(r'[A-Za-z]{3,}\s+\d{1,5}\s?[A-Za-z]?\b', t):
         return 'adres'
     return 'bedrijf'
 
 
-ZOEK = {'adres': zoek_adres, 'bedrijf': zoek_bedrijf, 'telefoon': zoek_telefoon, 'persoon': zoek_persoon}
+ZOEK = {'adres': zoek_adres, 'bedrijf': zoek_bedrijf, 'telefoon': zoek_telefoon, 'persoon': zoek_persoon, 'kenteken': zoek_kenteken}
+ZONDER_TERM = ('voetafdruk', 'lijkend')   # werken alleen op de eigen lijsten uit de instelling, nooit op een vrije zoekterm
+JUR_BRON = [('PDOK', 'pdok'), ('BAG', 'pdok'), ('OpenCorporates', 'kvk'), ('Liza', 'kvk'), ('RDAP', 'domein'), ('BIG', 'big'), ('Facturen', 'eigen'),
+            ('Contacts', 'eigen'), ('mail', 'eigen'), ('Second Brain', 'eigen'), ('libphonenumber', 'telefoon')]
+
+
+def met_juridisch(kaarten):
+    for k in kaarten:
+        if isinstance(k, dict) and not k.get('juridisch') and k.get('titel') != 'Poort':
+            j = next((JUR[v] for a, v in JUR_BRON if a.lower() in str(k.get('bron', '')).lower()), None)
+            if j:
+                k['juridisch'] = j
+    return kaarten
 
 
 def zoek(v):
-    term = norm(v.get('term'))[:200]
-    if not term:
-        return {'ok': False, 'fout': 'lege zoekterm'}
     wie = v.get('wie') if v.get('wie') in WIE else 'machinekamer'
     ingang = v.get('ingang') or 'auto'
+    ruw = str(v.get('kop') or v.get('term') or '')
     if ingang == 'auto':
-        ingang = herken(term)
+        ingang = herken(ruw if '\n' in ruw else norm(ruw)[:200])
     if ingang not in INGANGEN:
         return {'ok': False, 'fout': 'onbekende ingang'}
+    inhoud = None
+    if ingang == 'mail':
+        kop = ruw[:60000]
+        if not kop.strip():
+            return {'ok': False, 'fout': 'lege zoekterm'}
+        poort_tekst, term = kop_voor_poort(kop), 'mailkop (%d regels)' % kop.count('\n')
+    elif ingang == 'bestand':
+        try:
+            inhoud = base64.b64decode(str(v.get('bestand') or ''), validate=False)
+        except Exception:
+            inhoud = b''
+        if not inhoud:
+            return {'ok': False, 'fout': 'lege zoekterm'}
+        if len(inhoud) > 10 * 1024 * 1024:
+            return {'ok': False, 'fout': 'bestand te groot (max 10 MB)'}
+        naam = norm(v.get('naam'))[:120]
+        ext = (re.search(r'\.([A-Za-z0-9]{1,5})$', naam) or [None, '?'])[1].lower()
+        poort_tekst, term = naam, 'bestand .%s, %d kB, sha256 %s' % (ext, len(inhoud) // 1024, hashlib.sha256(inhoud).hexdigest()[:12])
+    elif ingang in ZONDER_TERM:
+        poort_tekst, term = '', {'voetafdruk': 'eigen gebruikersnamen en mailadressen', 'lijkend': 'eigen domeinen'}[ingang]
+    else:
+        term = norm(ruw)[:200]
+        if not term:
+            return {'ok': False, 'fout': 'lege zoekterm'}
+        poort_tekst = term
     doel = v.get('doel') or DOEL_STANDAARD.get(ingang)
     if doel not in DOELEN:
         doel = None if ingang == 'persoon' else 'anders'
     doel_tekst = norm(v.get('doel_tekst'))[:120] or None
     herkomst = 'david' if wie == 'david' else (norm(v.get('herkomst')).lower()[:40] or None)
-    pt = poort(term, wie, herkomst, ingang, doel)
+    pt = poort(poort_tekst, wie, herkomst, ingang, doel)
+    if ingang == 'voetafdruk' and wie != 'david':
+        pt = {'niveau': 'niets', 'reden': 'voetafdruk alleen voor David zelf (App)'}
+    elif ingang == 'lijkend' and pt['niveau'] == 'eigen':
+        pt = {'niveau': 'alles', 'reden': 'eigen domeinen uit de instelling'}
     c = db()
     zid = c.execute('insert into zoekvraag(tijd, wie, doel, doel_tekst, ingang, term, herkomst, poort, poort_reden) values (?,?,?,?,?,?,?,?,?)',
                     (nu_iso(), wie, doel, doel_tekst, ingang, term, herkomst, pt['niveau'], pt['reden'])).lastrowid
     c.commit()
     sleutel = hashlib.sha256(('%s|%s|%s|%s|%s' % (VERSIE, ingang, term.lower(), pt['niveau'], v.get('beelden') is not False)).encode()).hexdigest()
-    rij = None if v.get('vers') or NEP else c.execute('select tijd, json from cache where sleutel = ?', (sleutel,)).fetchone()
+    cachebaar = ingang in ZOEK
+    rij = None if v.get('vers') or NEP or not cachebaar else c.execute('select tijd, json from cache where sleutel = ?', (sleutel,)).fetchone()
     beelden = v.get('beelden') is not False
     ctx = Ctx(pt['niveau'], beelden)
-    if ingang == 'persoon' and pt['niveau'] == 'niets' and pt['reden'].startswith('persoon'):
-        kaarten, kern = [melding('Persoon', 'Niet gezocht: ' + pt['reden'] + '.')], {}
+    graaf = None
+    if pt['niveau'] == 'niets' and (pt['reden'].startswith('persoon') or ingang in ('voetafdruk', 'bestand')):
+        kaarten, kern = [melding('Niet gezocht', 'Niet gezocht: ' + pt['reden'] + '.')], {}
     elif rij:
         u = json.loads(rij[1])
-        kaarten, kern = u['kaarten'], u['kern']
+        kaarten, kern, graaf = u['kaarten'], u['kern'], u.get('graaf')
         c.execute('update zoekvraag set cache = 1 where id = ?', (zid,))
     else:
         try:
-            kaarten, kern = ZOEK[ingang](ctx, term)
+            if ingang == 'mail':
+                kaarten, kern = zoek_mail(ctx, kop)
+            elif ingang == 'bestand':
+                kaarten, kern = zoek_bestand(ctx, inhoud, naam)
+            elif ingang == 'voetafdruk':
+                kaarten, kern = zoek_voetafdruk(ctx, instellingen(c))
+            elif ingang == 'lijkend':
+                kaarten, kern = zoek_lijkend(ctx, instellingen(c))
+            else:
+                kaarten, kern = ZOEK[ingang](ctx, term)
         except PoortDicht:
             kaarten, kern = [melding('Niet gezocht', 'De poort laat deze zoekterm niet naar buiten.')], {}
         except Exception as e:
             kaarten, kern = [melding('Fout', 'Er ging iets mis: %s' % type(e).__name__)], {}
-        if pt['niveau'] == 'alles' and not NEP and any(l['soort'] == 'extern' and l['status'] in ('200', '204') for l in ctx.log):
+        met_juridisch(kaarten)
+        graaf = ctx.graaf() if pt['niveau'] != 'niets' and ingang not in ('bestand', 'voetafdruk') else None
+        if cachebaar and pt['niveau'] == 'alles' and not NEP and any(l['soort'] == 'extern' and l['status'] in ('200', '204') for l in ctx.log):
             c.execute('insert or replace into cache(sleutel, tijd, json) values (?,?,?)',
-                      (sleutel, nu_iso(), json.dumps({'kaarten': kaarten, 'kern': kern}, ensure_ascii=False)))
+                      (sleutel, nu_iso(), json.dumps({'kaarten': kaarten, 'kern': kern, 'graaf': graaf}, ensure_ascii=False)))
     if pt['niveau'] != 'alles':
         kaarten.insert(0, kaartje('Poort', 'OVIS OSINT-poort', let='Deze zoekvraag ging niet naar openbare bronnen (%s).' % pt['reden']))
     for l in ctx.log:
         c.execute('insert into aanroep(zoek_id, tijd, bron, soort, host, naar_buiten, status, ms) values (?,?,?,?,?,?,?,?)',
                   (zid, nu_iso(), l['bron'], l['soort'], l['host'], l['naar_buiten'], l['status'], l['ms']))
     ext = sum(1 for l in ctx.log if l['soort'] == 'extern' and l['status'] != 'poort dicht')
-    c.execute('update zoekvraag set uitkomst = ? where id = ?', ('%d kaartjes, %d extern' % (len(kaarten), ext), zid))
+    c.execute('update zoekvraag set uitkomst = ?, graaf = ? where id = ?', ('%d kaartjes, %d extern' % (len(kaarten), ext),
+              json.dumps(graaf, ensure_ascii=False) if graaf and graaf.get('knopen') else None, zid))
     c.commit()
     return {'ok': True, 'id': zid, 'ingang': ingang, 'term': term, 'doel': doel, 'doel_tekst': doel_tekst, 'wie': wie,
-            'poort': pt, 'cache': bool(rij), 'kaarten': kaarten, 'kern': kern, 'extern': ext, 'logboek': ctx.log, 'versie': VERSIE}
+            'poort': pt, 'cache': bool(rij), 'kaarten': kaarten, 'kern': kern, 'extern': ext, 'logboek': ctx.log, 'versie': VERSIE, 'graaf': graaf}
+
+
+def grafiek(n=40):
+    """Netwerkplaat over de laatste n zoekvragen: dezelfde entiteit (soort + genormaliseerd label) valt samen; per knoop de zoekvragen."""
+    c = db()
+    kn, rd = {}, {}
+    for zid, tijd, g in c.execute("select id, tijd, graaf from zoekvraag where graaf is not null and poort != 'niets' order by id desc limit ?",
+                                  (max(1, min(int(n), 200)),)):
+        try:
+            g = json.loads(g)
+        except ValueError:
+            continue
+        for k in g.get('knopen') or []:
+            x = kn.setdefault(k['id'], dict(k, zoekvragen=[]))
+            if zid not in x['zoekvragen']:
+                x['zoekvragen'].append(zid)
+        for r in g.get('randen') or []:
+            rd.setdefault((r['van'], r['naar']), r)
+    randen = [r for r in rd.values() if r['van'] in kn and r['naar'] in kn]
+    return {'ok': True, 'knopen': list(kn.values()), 'randen': randen}
 
 
 def logboek(n=50):
@@ -785,8 +1726,8 @@ def info():
 
 
 def main(a):
-    if not a or a[0] not in ('zoek', 'logboek', 'info'):
-        sys.exit('gebruik: osint.py zoek (json op stdin) | logboek [n] | info')
+    if not a or a[0] not in ('zoek', 'logboek', 'info', 'instelling', 'grafiek', 'lijkend'):
+        sys.exit('gebruik: osint.py zoek (json op stdin) | logboek [n] | info | instelling (json op stdin: {} = lezen, {zet: {...}}) | grafiek [n] | lijkend')
     if a[0] == 'zoek':
         try:
             v = json.loads(sys.stdin.read() or '{}')
@@ -795,6 +1736,19 @@ def main(a):
         r = zoek(v) if isinstance(v, dict) else {'ok': False, 'fout': 'geen json'}
     elif a[0] == 'logboek':
         r = logboek(a[1] if len(a) > 1 and a[1].isdigit() else 50)
+    elif a[0] == 'instelling':
+        try:
+            v = json.loads(sys.stdin.read() or '{}')
+        except ValueError:
+            v = {}
+        r = zet_instellingen(v['zet']) if isinstance(v, dict) and isinstance(v.get('zet'), dict) else {'ok': True, 'instellingen': instellingen()}
+    elif a[0] == 'grafiek':
+        r = grafiek(a[1] if len(a) > 1 and a[1].isdigit() else 40)
+    elif a[0] == 'lijkend':
+        # CISO-ronde (machinekamer): alleen de nieuwe geregistreerde varianten; stilte = lege lijst
+        z = zoek({'ingang': 'lijkend', 'wie': 'machinekamer', 'herkomst': 'eigen-domeinen'})
+        r = {'ok': z.get('ok'), 'nieuw': (z.get('kern') or {}).get('nieuw', []), 'geregistreerd': (z.get('kern') or {}).get('geregistreerd'),
+             'domeinen': (z.get('kern') or {}).get('domeinen'), 'id': z.get('id')}
     else:
         r = info()
     sys.stdout.write(json.dumps(r, ensure_ascii=False))

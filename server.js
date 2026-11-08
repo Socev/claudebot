@@ -5171,7 +5171,8 @@ function appVastVersEis(res, a, s, wat) {
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
 const APP_OMZET_MAX_BODY = 5 * 1024 * 1024;   // wv1854: tekst ≤ 2 MB (omzet.js telt de bytes en geeft 413) + JSON-ontsnapping (\n, \", \uXXXX)
-const APP_BRAIN_WEB_MAX_BODY = 6 * 1024 * 1024;   // wv2660: Naar Second Brain, html ≤ 2 M tekens + JSON-ontsnapping (brain-web.js telt zelf)
+const APP_BRAIN_WEB_MAX_BODY = 6 * 1024 * 1024;
+const APP_OSINT_BESTAND_MAX_BODY = 15 * 1024 * 1024;   // wv2698: OSINT › Bestand duiden, ≤ 10 MB als base64 (13,4 MB) + JSON   // wv2660: Naar Second Brain, html ≤ 2 M tekens + JSON-ontsnapping (brain-web.js telt zelf)
 const APP_CODE_MS = 10 * 60 * 1000;
 const APP_CODE_POGINGEN = 5;
 const APP_CODE_INTERVAL_MS = 60 * 1000;
@@ -13082,7 +13083,7 @@ function handleApp(req, res) {
     const rambleStuk = req.method === 'POST' && APP_RAMBLE_STUK_RE.test(p);   // wv1969: MemoryLane, één WAV-stuk van 60 s
     const ruw = upload || rambleStuk || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
     if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
-    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : APP_MAX_BODY)); })(function (fout, d, lichaam) {
+    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && p === '/app/osint/bestand' ? APP_OSINT_BESTAND_MAX_BODY : APP_MAX_BODY))); })(function (fout, d, lichaam) {
       if (fout === 'groot' && p === '/app/omzet') return appWeiger(res, 413, 'de tekst is te groot om om te zetten (hooguit 2 MB)', 'body groot');   // wv1854
       if (fout === 'groot' && p === '/app/brain/webpagina') return appWeiger(res, 413, 'deze pagina is te groot (hooguit 2 MB html)', 'body groot');   // wv2660
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
@@ -13193,7 +13194,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
-        if (route === 'GET /app/osint' || route === 'POST /app/osint/zoek') return typeof appOsint === 'function' ? appOsint(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'osint');   // wv2694: OVIS OSINT (logboek, zoeken)
+        if (route === 'GET /app/osint' || route === 'POST /app/osint/zoek' || route === 'POST /app/osint/bestand' || route === 'GET /app/osint/instelling' || route === 'POST /app/osint/instelling' || route === 'GET /app/osint/grafiek') return typeof appOsint === 'function' ? appOsint(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'osint');   // wv2698: + bestand, instelling, grafiek   // wv2694: OVIS OSINT (logboek, zoeken)
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
@@ -20795,7 +20796,7 @@ async function appPakjes(req, res, a, route, d) {
 // anders machinekamer; herkomst bepaalt in osint.py of iets naar buiten mag; geen kaartbeelden). De zoekterm komt nooit in api.log.
 // Het kind krijgt alleen de omgevingsnamen die de eigen bronnen nodig hebben. Alleen op de primaire kant (daar staat osint.sqlite).
 const OSINT_SCRIPT = path.join(__dirname, 'osint.py');
-const OSINT_ENV = ['PATH', 'HOME', 'LANG', 'PORT', 'API_SECRET', 'SUPABASE_RPC_CONTACTEN', 'N8N_WEBHOOK_AGENDA_API', 'VAULT_DIR', 'OSINT_DB'];
+const OSINT_ENV = ['PATH', 'HOME', 'LANG', 'PORT', 'API_SECRET', 'SUPABASE_RPC_CONTACTEN', 'N8N_WEBHOOK_AGENDA_API', 'VAULT_DIR', 'OSINT_DB', 'EP_ONLINE_SLEUTEL'];   // wv2698: EP-online pas met Davids gratis RVO-sleutel
 function osintPython() {
   const v = process.env.OSINT_PYTHON || '/opt/data/venvs/osint/bin/python';
   try { fs.accessSync(v, fs.constants.X_OK); return v; } catch (e) { return 'python3'; }
@@ -20818,8 +20819,12 @@ function osintRun(args, invoer) {
 }
 function osintInvoer(d, wie) {
   const t = function (x, n) { const v = String(x == null ? '' : x).slice(0, n).trim(); return v || null; };
-  return { ingang: t(d.ingang, 12) || 'auto', term: t(d.term, 200) || '', doel: t(d.doel, 20), doel_tekst: t(d.doel_tekst, 120),
+  const v = { ingang: t(d.ingang, 12) || 'auto', term: t(d.term, 200) || '', doel: t(d.doel, 20), doel_tekst: t(d.doel_tekst, 120),
     herkomst: wie === 'david' ? 'david' : t(d.herkomst, 40), wie: wie, vers: d.vers === true, beelden: wie === 'david' };
+  // wv2698: mailkop (ingang mail, ≤ 60.000 tekens; alleen de kop wordt gelezen) en bestand (alleen App, base64 ≤ 10 MB; ExifTool lokaal)
+  if (typeof d.kop === 'string' && d.kop.trim()) v.kop = d.kop.slice(0, 60000);
+  if (wie === 'david' && typeof d.bestand === 'string' && d.bestand.length <= 14 * 1024 * 1024) { v.bestand = d.bestand; v.naam = t(d.naam, 120); }
+  return v;
 }
 async function appOsint(req, res, a, route, d) {
   if (!fs.existsSync(OSINT_SCRIPT)) return appWeiger(res, 404, 'OSINT zit niet in deze versie van de pod', 'osint ontbreekt');
@@ -20830,7 +20835,26 @@ async function appOsint(req, res, a, route, d) {
     if (r.ok) res._app.stil = true; else res._app.reden = 'osint logboek fout';
     return appStuur(res, r.ok ? 200 : 503, r);
   }
+  if (route === 'GET /app/osint/instelling' || route === 'POST /app/osint/instelling') {
+    // wv2698: Davids eigen gebruikersnamen, mailadressen en domeinen (Mijn voetafdruk, Lijkende domeinen); alleen via de App
+    if (!appTeller('osint_inst', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens osint instelling');
+    const lijst = function (x) { return Array.isArray(x) ? x.slice(0, 20).map(function (y) { return String(y == null ? '' : y).slice(0, 80); }) : undefined; };
+    const zet = route === 'POST /app/osint/instelling' ? { gebruikersnamen: lijst((d || {}).gebruikersnamen), adressen: lijst((d || {}).adressen), domeinen: lijst((d || {}).domeinen) } : null;
+    const r = await osintRun(['instelling'], zet ? { zet: zet } : {});
+    res._app.reden = 'osint instelling ' + (zet ? 'zet' : 'lees');
+    return appStuur(res, r.ok ? 200 : 503, r);
+  }
+  if (route === 'GET /app/osint/grafiek') {
+    if (!appTeller('osint_lijst', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens osint lijst');
+    const r = await osintRun(['grafiek', '60']);
+    if (r.ok) res._app.stil = true; else res._app.reden = 'osint grafiek fout';
+    return appStuur(res, r.ok ? 200 : 503, r);
+  }
   if (!appTeller('osint', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens osint');
+  const ing = String((d || {}).ingang || '');
+  if ((ing === 'voetafdruk' || ing === 'lijkend' || route === 'POST /app/osint/bestand') && !appTeller('osint_zwaar', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 20 zware rondes)', 'grens osint zwaar');
+  if (route === 'POST /app/osint/bestand' && ing !== 'bestand') return appWeiger(res, 400, 'alleen voor een bestand', 'osint bestand ingang');
+  if (route === 'POST /app/osint/zoek' && ing === 'bestand') return appWeiger(res, 400, 'een bestand gaat via /app/osint/bestand', 'osint bestand route');
   const r = await osintRun(['zoek'], osintInvoer(d || {}, 'david'));
   res._app.reden = 'osint zoek ' + String(r.ingang || '?').slice(0, 10) + ' ' + String((r.poort && r.poort.niveau) || 'fout').slice(0, 8) + ' extern ' + (Number(r.extern) || 0) + (r.cache ? ' cache' : '');
   return appStuur(res, r.ok ? 200 : (r.fout === 'lege zoekterm' || r.fout === 'onbekende ingang' ? 400 : 503), r);
