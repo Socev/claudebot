@@ -613,7 +613,7 @@ const REGEL_KEUZE = { soort: ['correspondentie', 'bewijsstuk', 'keten', 'notitie
 const BRON_RE = /^[a-z]{2,20}:[a-z0-9-]{1,30}$/;
 const KNOOP_RE = /^[A-Z][A-Z0-9_-]{0,15}$/;
 // wv2710 (bundels): geld in het stuk (bedrag met € of EUR, een IBAN, of een betaalwoord) → nooit in een bundel. Alleen een ja/nee in de samenvatting.
-const GELD_RE = /(€|\bEUR\b)\s*\d|\d\s*(€|\bEUR\b|\beuro\b)|\b(factu(u)?r|betal|incasso|aanmaning|creditnota|declarat|overmak|overboek|openstaand|verschuldigd|vervaldatum|invoice|payment)/i;
+const GELD_RE = /(€|\bEUR\b|\beuro\b)\s*\d|\d\s*(€|\bEUR\b|\beuro\b)|\b(factu(u)?r|betaa?l|tikkie|incasso|aanmaning|creditnota|declarat|overmak|overboek|openstaand|verschuldigd|vervaldatum|invoice|payment)/i;
 // review wv2710 MOET 2: elk geldig IBAN (alle landen, met of zonder spaties), getoetst met de mod-97-controle (anders zou elke code in een link meetellen)
 function ibanIn(t) {
   const re = /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b/gi;

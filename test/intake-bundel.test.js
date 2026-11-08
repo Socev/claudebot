@@ -279,6 +279,8 @@ test('review MOET 2: geld = ook een buitenlands IBAN (mod-97), niet een willekeu
   assert.equal(K.geldIn('Prijs: €  25'), true);
   assert.equal(K.geldIn('Prijs: €\n25'), true);
   assert.equal(K.geldIn('Prijs: 25\tEUR'), true);
+  // reviewronde 3: betaalwoorden en "euro 25"
+  for (const t of ['Je betaalverzoek staat klaar', 'Is al betaald', 'Kost euro 25', 'Stuur even een tikkie']) assert.equal(K.geldIn(t), true, t);
 });
 
 test('review ronde 2 MOET 3: is het mailadres van de afzender niet meer actief in het register (of de afzender zelf niet), dan geen bundel; zonder register geen bundels', async () => {
