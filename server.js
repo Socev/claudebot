@@ -5197,6 +5197,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/stroom');   // wv2596: stroom kiezen =
 APP_GLIJD_ROUTES.add('POST /app/financien/doel');   // wv2621: doel erbij of weg = David die werkt
 ['POST /app/financien/ah/koppel', 'POST /app/financien/ah/ontkoppel'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2703: AH koppelen = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/potje');   // wv2706: potje zetten of weg = David die werkt
+APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij een reis tikken = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -11772,6 +11773,50 @@ async function appFinStroom(req, res, a, d) {
   return appStuur(res, 200, { ok: true, id: j.id || null, stroom: j.stroom || null, subsoort: j.subsoort || null });
 }
 
+// wv2715 (idee 3 uit Sure, David 8-11-2026 "1 t/m 6"; ontwerp "Financiën - ideeën uit Sure (ontwerp 8-11-2026)" § 2): kosten per reis.
+// De reizen komen uit Tripper (reizen.js, de reispagina's: id, titel, van, tot, soort, stand; nooit een pad); de bank-lezer rekent de
+// voorstellen uit (financien-reis.js) en bewaart alleen Davids tik in de tabel reis_label van het archief. Zelfde poort als de andere
+// Financiën-routes (sessie, niet op een vaste plek). POST /app/financien/reizen { reis?: id } (lijst, of één reis met de posten), hooguit 300
+// per uur; POST /app/financien/reislabel { reis, nr, keuze: 'erbij' | 'eraf' | null }, hooguit 120 per uur (de bank-lezer weigert een boeking
+// buiten het venster van die reis). Geen bedrag of naam in api.log. Ontbreekt Tripper: 503.
+const APP_FIN_REIS_PER_UUR = 300, APP_FIN_REISLABEL_PER_UUR = 120;
+function appFinReizenLijst() {
+  if (typeof tripper === 'undefined' || !tripper) return null;
+  const u = tripper.lijst();
+  if (!u || u.status !== 200 || !u.body || !Array.isArray(u.body.reizen)) return null;
+  return u.body.reizen.filter(function (r) { return r && r.id && r.van && r.tot; }).map(function (r) {
+    return { id: String(r.id), titel: String(r.titel || '').slice(0, 120), van: r.van, tot: r.tot, soort: r.soort || null, stand: r.stand || null };
+  });
+}
+async function appFinReizen(req, res, a, d) {
+  res._app.reden = 'financien-reizen';
+  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-reizen vast');
+  if (d.reis != null && !/^[0-9a-f]{12}$/.test(String(d.reis))) return appWeiger(res, 400, 'onbekende reis', 'fin-reizen id');
+  if (!appTeller('fin-reizen', APP_FIN_REIS_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak opgevraagd dit uur', 'grens fin-reizen');
+  let lijst = null;
+  try { lijst = appFinReizenLijst(); } catch (e) { logError('fin-reizen', new Error('reizen lezen faalde')); lijst = null; }
+  if (!lijst) return appWeiger(res, 503, 'de reizen uit Tripper zijn nu niet te lezen; probeer het zo opnieuw', 'fin-reizen tripper');
+  const j = await appFinBankRoute(res, 'app-reizen', { reizen: { lijst: lijst, reis: d.reis == null ? null : String(d.reis) } }, 'fin-reizen');
+  if (!j || j.ok !== true) return;
+  res._app.stil = true;
+  return appStuur(res, 200, { ok: true, peildatum: j.peildatum || null, archief_vanaf: j.archief_vanaf || null, reizen: Array.isArray(j.reizen) ? j.reizen : [], reis: j.reis || null,
+    regels: j.regels || null, uitleg: typeof j.uitleg === 'string' ? j.uitleg : '' });
+}
+async function appFinReislabel(req, res, a, d) {
+  res._app.reden = 'financien-reislabel';
+  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-reislabel vast');
+  if (!/^[0-9a-f]{12}$/.test(String(d.reis || ''))) return appWeiger(res, 400, 'onbekende reis', 'fin-reislabel reis');
+  if (!Number.isSafeInteger(d.nr) || d.nr <= 0) return appWeiger(res, 400, 'onbekende boeking', 'fin-reislabel nr');
+  if (d.keuze !== null && d.keuze !== 'erbij' && d.keuze !== 'eraf') return appWeiger(res, 400, 'onbekende keuze', 'fin-reislabel keuze');
+  if (!appTeller('fin-reislabel', APP_FIN_REISLABEL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak gewijzigd dit uur', 'grens fin-reislabel');
+  let lijst = null;
+  try { lijst = appFinReizenLijst(); } catch (e) { logError('fin-reislabel', new Error('reizen lezen faalde')); lijst = null; }
+  if (!lijst) return appWeiger(res, 503, 'de reizen uit Tripper zijn nu niet te lezen; probeer het zo opnieuw', 'fin-reislabel tripper');
+  const j = await appFinBankRoute(res, 'app-reislabel', { reislabel: { lijst: lijst, reis: String(d.reis), nr: d.nr, keuze: d.keuze } }, 'fin-reislabel');
+  if (!j || j.ok !== true) return;
+  return appStuur(res, 200, { ok: true, reis: j.reis || null, nr: typeof j.nr === 'number' ? j.nr : null, keuze: j.keuze || null });
+}
+
 // wv2621 (Financiën 8+ stap 6, ontwerp § 3.6): Doelen staan op de vaultpagina 20_Prive/Financien/Doelen.md (tabel), zodat David ze ook
 // zonder App leest en zelf bewerkt. POST /app/financien/doel { actie: 'nieuw', doel: { naam, bedrag, datum, soort, rekening, start } } of
 // { actie: 'weg', naam }. Zelfde poort als GET /app/financien (sessie, niet op een vaste plek); invoer op vorm in financien-vooruit.js
@@ -13310,6 +13355,8 @@ function handleApp(req, res) {
         if (route === 'POST /app/financien/doel') return appFinDoel(req, res, a, d);   // wv2621: doel erbij of weg (vaultpagina Doelen)
         if (route === 'GET /app/financien/ah' || route === 'POST /app/financien/ah/koppel' || route === 'POST /app/financien/ah/ontkoppel') return typeof appFinAh === 'function' ? appFinAh(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ah');   // wv2703: AH-kassabonnen
         if (route === 'POST /app/financien/potje') return appFinPotje(req, res, a, d);   // wv2706: potje per post zetten of weg (vaultpagina Potjes)
+        if (route === 'POST /app/financien/reizen') return appFinReizen(req, res, a, d);   // wv2715: kosten per reis (lijst of één reis)
+        if (route === 'POST /app/financien/reislabel') return appFinReislabel(req, res, a, d);   // wv2715: boeking bij een reis: erbij, eraf of terug
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
         if (route.indexOf('GET /app/pot/') === 0) return typeof appPot === 'function' ? appPot(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1894: OVIS POT (P1: lezen)
         if (route.indexOf('POST /app/pot/') === 0) return typeof appPotSchrijf === 'function' ? appPotSchrijf(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1933: OVIS POT (P3/P4: schrijven en verzending)
@@ -22789,7 +22836,7 @@ const BANK_DIR = process.env.BANK_DIR || '/opt/data/bank';
 const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', 'saldo', 'transacties', 'toestemming', 'label',
   'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'gambia', 'ecobank-ronde', 'ontkoppel'];
 const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'verrijk-open', 'verrijk-zet',
-  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'app-rekening', 'app-boekingen', 'app-stroom', 'geld-briefing',   // wv2292: app-rekening alleen voor POST /app/financien/rekening   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
+  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'app-rekening', 'app-boekingen', 'app-stroom', 'geld-briefing', 'app-reizen', 'app-reislabel',   // wv2292: app-rekening alleen voor POST /app/financien/rekening   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
   'gambia', 'ecobank-bekend', 'ecobank-bij',   // wv2202: de Ecobank-laag leest alleen de database
   'pot-afschrift-maanden', 'pot-afschrift', 'pot-datahub-invoer'];   // wv787 (wv815: pot-datahub-invoer alleen voor potDatahubRonde): alleen voor de App-routes en de maandronde (niet in BANK_OPDRACHTEN: niet via /smal/bank)
 const BANK_TERUG_PER_UUR = 30;

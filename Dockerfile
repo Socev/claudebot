@@ -187,6 +187,7 @@ COPY stroom-tabel.js /app/release-bootstrap/stroom-tabel.js
 COPY tibber-uur.js /app/release-bootstrap/tibber-uur.js
 COPY ah-bonnen.js /app/release-bootstrap/ah-bonnen.js
 COPY financien-plan.js /app/release-bootstrap/financien-plan.js
+COPY financien-reis.js /app/release-bootstrap/financien-reis.js
 COPY app-vast.js /app/release-bootstrap/app-vast.js
 COPY app-open.js /app/release-bootstrap/app-open.js
 COPY intake-telling.js /app/release-bootstrap/intake-telling.js

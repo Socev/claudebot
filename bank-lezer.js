@@ -1399,6 +1399,21 @@ const opdrachten = {
     try { return Object.assign({ ok: true }, require(path.join(__dirname, 'financien-overzicht.js')).stroomZet(x.A, x.a, { id: q.id, stroom: q.stroom, subsoort: q.subsoort })); }
     catch (e) { throw new Weigering(e.message); }
   },
+  // wv2715 (idee 3 uit Sure): kosten per reis. De reizen (id, titel, van, tot uit reizen.js) geeft server.js mee, nooit een pad. Lezen
+  // (app-reizen) berekent de voorstellen; app-reislabel bewaart alleen Davids tik in de tabel reis_label (financien-reis.js).
+  async 'app-reizen'() {
+    const x = archiefKlaar(), q = geheim.reizen;
+    if (!q || typeof q !== 'object' || Array.isArray(q) || !Array.isArray(q.lijst)) throw new Weigering('reizen ontbreken');
+    if (q.reis != null && !/^[0-9a-f]{12}$/.test(String(q.reis))) throw new Weigering('onbekende reis');
+    try { return require(path.join(__dirname, 'financien-reis.js')).reizenOverzicht(x.A, x.a, { reizen: q.lijst, reis: q.reis == null ? null : String(q.reis), nu: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }) }); }
+    catch (e) { throw new Weigering(e.message); }
+  },
+  async 'app-reislabel'() {
+    const x = archiefKlaar(), q = geheim.reislabel;
+    if (!q || typeof q !== 'object' || Array.isArray(q) || !Array.isArray(q.lijst)) throw new Weigering('keuze ontbreekt');
+    try { return Object.assign({ ok: true }, require(path.join(__dirname, 'financien-reis.js')).labelZet(x.A, x.a, { reizen: q.lijst, reis: String(q.reis || ''), nr: q.nr, keuze: q.keuze })); }
+    catch (e) { throw new Weigering(e.message); }
+  },
   // wv2292: de gezinsleden die in Saldi als "van wie" te kiezen zijn. Alleen machinekamer, alleen via de CLI (stdin {kinderen: [...]}),
   // niet via /smal/bank of de App; de namen staan alleen in het archief (meta), nooit in de code.
   async gezin() {
