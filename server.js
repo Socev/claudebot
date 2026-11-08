@@ -3921,6 +3921,7 @@ function handleRequest(req, res) {
       osint: typeof osintInfo === 'function' ? osintInfo() : { aan: false },   // wv2694: OVIS OSINT (osint.py in deze release? venv of systeem-python; geen zoektermen)
       ah_bonnen: typeof ahInfo === 'function' ? ahInfo() : { module: false },   // wv2703: AH-kassabonnen (gekoppeld, laatste ronde; geen token)
       pakjes: typeof pakjesInfo === 'function' ? pakjesInfo() : { aan: false },   // wv2593: OVIS Pakjes (aantallen, laatste ronde; geen codes, winkels of postcodes)
+      memorylane_publiek: (function () { if (!memorylanePubliek) return { aan: false }; try { return memorylanePubliek.health(); } catch (e) { return { fout: true }; } })(),   // wv2636: alleen aantallen
       memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
       ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
       scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
@@ -20571,6 +20572,45 @@ async function memorylaneDelenTik() {
   try { await memorylaneDelen.tik(); } catch (e) { logError('ml-tik', e); } finally { mlTikLoopt = false; }
 }
 if (memorylaneDelen && SERVER_ECHT) { setTimeout(function () { memorylaneDelenTik(); }, 120000).unref(); setInterval(function () { memorylaneDelenTik(); }, 60000).unref(); }
+// ── wv2636: MemoryLane op memorylane.socev.dev (familie en Shizzle). Logica en waarom in memorylane-publiek.js; hier alleen D1 `memorylane`
+// (batch), R2 `memorylane` (privé emmer; put/del via de Cloudflare-API met het bestaande pod-token, alleen deze databank en emmer) en de tik.
+// Review-MOET 16 (eigen smal token voor deze D1/R2) ligt als Voor jou-kaart bij David; tot dan dit token.
+const ML_PUB_D1 = process.env.ML_PUB_D1_ID || 'c0382ecc-f598-4656-98de-babfb60a98be', ML_PUB_R2 = 'memorylane';
+const memorylanePubliek = (function () {
+  const p = path.join(__dirname, 'memorylane-publiek.js');
+  if (!memorylaneDelen || !fs.existsSync(p) || (!SERVER_ECHT && !process.env.ML_PUB_TOETS)) return null;
+  const cfUrl = function (rest) { return SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + rest; };
+  const r2Url = function (key) { if (!/^[fg]\/(familie|shizzle)\/[A-Za-z0-9_\/-]{1,80}$/.test(key)) throw new Error('r2-sleutel'); return cfUrl('/r2/buckets/' + ML_PUB_R2 + '/objects/' + key); };
+  try {
+    return require(p).maak({ db: intake._db, ml: memorylaneDelen, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, fout: logError, categorieen: HERINNERINGEN_MOD.CATEGORIEEN,
+      d1: async function (batch) {
+        if (!process.env.CLOUDFLARE_API_TOKEN) throw new Error('geen Cloudflare-sleutel');
+        const r = await smalCf(cfUrl('/d1/database/' + ML_PUB_D1 + '/query'), { batch: batch });
+        const ok = r.status === 200 && r.j && r.j.success === true && Array.isArray(r.j.result) && r.j.result.length === batch.length && r.j.result.every(function (x) { return x && x.success !== false; });
+        if (!ok) throw new Error('D1 gaf HTTP ' + r.status);   // nooit sql of waarden in de fout
+        return r.j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [] }; });
+      },
+      r2: {
+        put: async function (key, buf, mime) {
+          const r = await fetch(r2Url(key), { method: 'PUT', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': mime }, body: buf, signal: AbortSignal.timeout(60000) });
+          await r.text().catch(function () {});
+          if (!r.ok) throw new Error('R2 put HTTP ' + r.status);
+        },
+        del: async function (key) {
+          const r = await fetch(r2Url(key), { method: 'DELETE', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN }, signal: AbortSignal.timeout(30000) });
+          await r.text().catch(function () {});
+          if (!r.ok && r.status !== 404) throw new Error('R2 del HTTP ' + r.status);
+        },
+      } });
+  } catch (e) { logError('memorylane-publiek', e); return null; }
+})();
+let mlPubLoopt = false;
+async function memorylanePubliekTik(dwing) {
+  if (!memorylanePubliek || mlPubLoopt || !rolPrimair()) return;
+  mlPubLoopt = true;
+  try { await memorylanePubliek.tik(dwing); } catch (e) { logError('mlp-tik', e); } finally { mlPubLoopt = false; }
+}
+if (memorylanePubliek && SERVER_ECHT) { setTimeout(function () { memorylanePubliekTik(); }, 180000).unref(); setInterval(function () { memorylanePubliekTik(); }, 60000).unref(); }
 appStaat.tellers.memorylane = [];
 appStaat.tellers['memorylane-foto'] = [];
 async function appMemorylane(req, res, a, s, route, d) {
@@ -20595,7 +20635,7 @@ async function appMemorylane(req, res, a, s, route, d) {
     if (!appVersOk(a, s)) { res._app.reden = 'memorylane ' + wat + ', niet vers'; appStuur(res, 403, { ok: false, fout: 'bevestig het delen met je vingerafdruk', vers_nodig: true }); return false; }
     return true;
   };
-  const daarna = function () { setTimeout(function () { memorylaneDelenTik(); }, 0); };
+  const daarna = function () { setTimeout(function () { memorylaneDelenTik(); }, 0); if (memorylanePubliek) memorylanePubliek.markeerVuil(); };   // wv2636: ook de straat buiten bij de volgende tik
   try {
     const toon = { toon: mlToonAan(a.id) };   // wv2306
     if (route === 'GET /app/memorylane/toon') return antw('toon', { status: 200, body: { ok: true, toon: toon.toon } });
@@ -20660,6 +20700,28 @@ async function appMemorylane(req, res, a, s, route, d) {
       const u = memorylaneDelen.stukBesluit(m[1], m[2]);
       if (u.status === 200) daarna();
       return antw('stuk ' + m[2], u);
+    }
+    // wv2636: kringen op memorylane.socev.dev. Overzicht (wie ziet wat, bezoekers, laatst binnen); een kring aan = naar buiten (verse vingerafdruk,
+    // niet vanaf een vaste plek); uit, terug naar het voorstel (als dat dichter is) en de noodstop dicht mogen altijd.
+    if (route === 'GET /app/memorylane/kringen') {
+      const u = memorylaneDelen.kringen();
+      if (u.status === 200) { u.body.publiek = memorylanePubliek ? memorylanePubliek.info() : null; u.body.gezien = memorylanePubliek ? memorylanePubliek.gezien() : {}; }
+      return antw('kringen', u);
+    }
+    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(kring|kring-voorstel)$/.exec(route))) {
+      if (m[2] === 'kring' && d && d.aan === true && !naarBuiten('kring')) return;
+      if (m[2] === 'kring-voorstel' && !naarBuiten('kring-voorstel')) return;
+      const u = m[2] === 'kring' ? memorylaneDelen.kring(m[1], d) : memorylaneDelen.kringVoorstelTerug(m[1]);
+      if (u.status === 200 && memorylanePubliek) { memorylanePubliek.markeerVuil(); setTimeout(function () { memorylanePubliekTik(); }, 0); }
+      return antw(m[2], u);
+    }
+    if (route === 'POST /app/memorylane/noodstop') {
+      if (!memorylanePubliek) return antw('noodstop', { status: 404, body: { ok: false, fout: 'niet in deze versie van de pod' } });
+      if (!d || typeof d.dicht !== 'boolean') return antw('noodstop', { status: 400, body: { ok: false, fout: 'dicht' } });
+      if (!d.dicht && !naarBuiten('noodstop open')) return;
+      const st = memorylanePubliek.noodstop(d.dicht);
+      setTimeout(function () { memorylanePubliekTik(); }, 0);
+      return antw('noodstop', { status: 200, body: { ok: true, publiek: st } });
     }
     if ((m = /^POST \/app\/memorylane\/link\/(familie|vrienden)\/(aan|uit|vernieuw)$/.exec(route))) {
       if (m[2] === 'aan' && !naarBuiten('link aan')) return;

@@ -427,6 +427,9 @@ jobs:
       - name: "memorylane-delen (wv2114, deellinks familie/vrienden)"
         if: ${{ !cancelled() }}
         run: bash test/memorylane-delen.sh
+      - name: "memorylane-publiek (wv2636, memorylane.socev.dev)"
+        if: ${{ !cancelled() }}
+        run: bash test/memorylane-publiek.sh
       # MemoryLane-verteller in Davids eigen stem (wv2366): nep-ElevenLabs, plafond € 5/maand, weigeringen, verouderd, weghalen/opruimen,
       # geen tekst in het register.
       - name: "memorylane-verteller (wv2366, eigen stem)"

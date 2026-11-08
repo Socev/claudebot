@@ -116,6 +116,7 @@ function naamVoorReis(rel, i, tagLijst) {
 }
 
 const KRINGEN = ['familie', 'vrienden'];
+const PKRINGEN = ['familie', 'shizzle'];   // wv2636: de kringen van memorylane.socev.dev (los van de oude deellinks)
 const HID_RE = /^h[0-9a-f]{16}$/, SID_RE = /^s[0-9a-f]{16}$/, PUB_RE = /^[A-Za-z0-9_-]{16}$/, SLUG_RE = /^[A-Za-z0-9_-]{22}$/;
 const BIJ_ID_RE = /^[A-Za-z0-9_-]{22}$/;
 const MAP = '20_Prive/Herinneringen/MemoryLane';
@@ -253,10 +254,38 @@ function hoofdpersonenLees(vault, vv) {
  *       onderhoudAan() → bool, nachtgrendel() → bool, nu() → ms, box(tekst), fout(label, e), host?, reisVandaag?() → 'JJJJ-MM-DD',
  *       beeld?({prompt}) → Promise<openai-hulp.beeld-uitslag> (wv2325; zonder: geen Plaatje maken) }
  */
+// wv2636: de bezoekerslijst van memorylane.socev.dev (één vaultpagina, nooit namen of adressen in code). Tabel | Naam | Kring | Mailadressen | … |;
+// kring familie of shizzle; alle mailadressen uit de derde kolom. status uit de frontmatter (alleen 'bevestigd' telt voor de deur).
+const BEZOEKERS_PAGINA = '20_Prive/Herinneringen/MemoryLane-bezoekers.md';
+const MAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+function bezoekersTabel(t) {
+  const rijen = [];
+  for (const regel of zonderFrontmatter(String(t || '')).split('\n')) {
+    if (!/^\|/.test(regel)) continue;
+    const c = regel.split('|').slice(1, -1).map((x) => x.trim());
+    if (c.length < 3) continue;
+    const kring = c[1].toLowerCase().replace(/[*_`]/g, '');
+    if (kring !== 'familie' && kring !== 'shizzle') continue;
+    const naam = c[0].replace(/[*_`[\]]/g, '').trim();
+    const mails = [...new Set((c[2].match(MAIL_RE) || []).map((m) => m.trim().toLowerCase()))];
+    if (naam && mails.length) rijen.push({ naam, kring, mails });
+  }
+  return rijen;
+}
+function bezoekersLees(vault, vv) {
+  let t;
+  try { t = vv.lees(path.join(vault, BEZOEKERS_PAGINA), 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return { pagina: false, status: null, rijen: [] }; throw e; }
+  return { pagina: true, status: fmVeld(t, 'status') || null, rijen: bezoekersTabel(t) };
+}
+
 function maak(o) {
   const nu = typeof o.nu === 'function' ? o.nu : Date.now;
   const db = o.db;
   db.exec(SCHEMA_SQL);
+  // wv2636: kring per herinnering (familie, shizzle). NULL = het voorstel van de code; 0/1 = Davids keuze; kring_cat = de categorie op het moment
+  // van die keuze (wordt de herinnering daarna gevoelig met een andere categorie, dan telt de keuze niet meer).
+  { const kol = db.prepare('PRAGMA table_info(ml_herinnering)').all().map((r) => r.name);
+    for (const k of ['kring_familie INTEGER', 'kring_shizzle INTEGER', 'kring_cat TEXT']) if (kol.indexOf(k.split(' ')[0]) < 0) db.exec('ALTER TABLE ml_herinnering ADD COLUMN ' + k); }
   const CAT = o.categorieen || {};
   const DIR = o.dir, WACHT = path.join(DIR, 'ml-wacht'), SLEUTEL = path.join(DIR, 'ml-inbox.pem');
   for (const d of [DIR, WACHT]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); try { fs.chmodSync(d, 0o700); } catch (e) { /* niet van ons */ } }
@@ -297,6 +326,8 @@ function maak(o) {
     hZicht: { familie: db.prepare('UPDATE ml_herinnering SET zicht_familie = ?, gewijzigd = ? WHERE hid = ?'), vrienden: db.prepare('UPDATE ml_herinnering SET zicht_vrienden = ?, gewijzigd = ? WHERE hid = ?') },
     hCat: db.prepare('UPDATE ml_herinnering SET categorie = ?, gevoelig = ?, gewijzigd = ? WHERE hid = ?'),
     hToon: db.prepare('UPDATE ml_herinnering SET toon_opname = ?, gewijzigd = ? WHERE hid = ?'),
+    hKring: db.prepare('UPDATE ml_herinnering SET kring_familie = ?, kring_shizzle = ?, kring_cat = ?, gewijzigd = ? WHERE hid = ?'),
+    hKringWis: db.prepare('UPDATE ml_herinnering SET kring_familie = NULL, kring_shizzle = NULL, kring_cat = NULL, gewijzigd = ? WHERE hid = ?'),
     hGewijzigd: db.prepare('UPDATE ml_herinnering SET gewijzigd = ? WHERE hid = ?'),
     s: db.prepare('SELECT * FROM ml_stuk WHERE sid = ?'),
     sBron: db.prepare('SELECT * FROM ml_stuk WHERE bron_id = ?'),
@@ -867,6 +898,93 @@ function maak(o) {
       gevoelig: false, personen: k.personen, plaatsen: k.plaatsen, voorvallen: k.voorvallen, audio: k.audio, binnen: 0, vastgehouden: 0, stukken: 0,
       zicht: { familie: false, vrienden: false }, album: k.album ? { status: k.album.status, aantal: k.album.aantal } : null, plaatje: !!k.plaatje, plaatje_kan: false };
   }
+  // ── wv2636: kringen (MemoryLane delen op memorylane.socev.dev; ontwerp vault 01_Ontwikkeling "MemoryLane op een eigen adres" § 4) ──
+  // Basis: actief, geen losse bijdrage van een bezoeker, opname alleen met notitie en geen proef, geen gevoelig-vinkje. Daarbovenop per kring:
+  // Davids keuze (kring_*), anders het voorstel. Het voorstel is streng (niet gevoelig: categorie gekozen en niet Privé); Davids keuze mag ook
+  // een herinnering zonder categorie of met Privé openzetten (David 8-11-2026: "ALLES mag gelabeld"), zolang de categorie niet veranderde.
+  function basisNiet(h) {
+    if (!h || h.status !== 'actief') return 'niet actief';
+    if (h.soort === 'los' && !isFotoalbum(h)) return 'bijdrage van een bezoeker';
+    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); if (!r || r.status !== 'notitie' || r.proef) return 'opname niet beschikbaar'; }
+    if (catVan(h).gevoeligVink) return 'gevoelig';
+    return null;
+  }
+  function keuzeGeldt(h) { return h.kring_familie != null && h.kring_shizzle != null && (h.kring_cat || '') === (catVan(h).categorie || ''); }
+  function kringVoorstel(h, titel) {
+    if (isGevoelig(h)) return { familie: false, shizzle: false };
+    const t = ' ' + String(titel || '').toLowerCase().normalize('NFC').replace(/[^\p{L}\p{N}]+/gu, ' ') + ' ';
+    const sh = catVan(h).categorie === 'shizzle' || t.indexOf(' shizzle ') >= 0 || shizzleWoorden().some((w) => t.indexOf(' ' + w + ' ') >= 0);
+    return { familie: true, shizzle: sh };
+  }
+  let swCache = null;
+  // voornamen van de Shizzle-bezoekers (vaultlijst; nooit in code): een titel met zo'n naam stelt ook Shizzle voor
+  function shizzleWoorden() {
+    if (swCache && nu() - swCache.op < 60000) return swCache.w;
+    let w = [];
+    try { w = bezoekersLees(o.vault, o.vv).rijen.filter((r) => r.kring === 'shizzle').map((r) => r.naam.split(/\s+/)[0].toLowerCase()).filter((x) => x.length >= 3); }
+    catch (e) { fout('ml-bezoekers', e); }
+    swCache = { op: nu(), w };
+    return w;
+  }
+  // → { familie, shizzle, bron: 'david'|'voorstel', niet: reden|null } ; familie/shizzle = open in die kring
+  function kringVan(h, titel) {
+    const niet = basisNiet(h);
+    if (keuzeGeldt(h)) return { familie: !niet && !!h.kring_familie, shizzle: !niet && !!h.kring_shizzle, bron: 'david', niet };
+    const v = niet ? { familie: false, shizzle: false } : kringVoorstel(h, titel === undefined ? titelVan(h) : titel);
+    return { familie: v.familie, shizzle: v.shizzle, bron: 'voorstel', niet: niet || (isGevoelig(h) ? 'gevoelig of zonder categorie' : null) };
+  }
+  function magKring(h, k) { return !!h && PKRINGEN.indexOf(k) >= 0 && !!kringVan(h)[k]; }
+  function magZien(h, opt) { return opt && opt.kring ? magKring(h, opt.kring) : toonbaar(h); }
+  // Dicht huis (wel in de straat, deur dicht) = basis in orde en (gevoelig alleen met Davids keuze); anders staat hij niet in de straat van
+  // bezoekers (ontwerp § 4, keuze b: gevoelig helemaal weglaten).
+  function inStraat(h) { return !basisNiet(h) && (!isGevoelig(h) || keuzeGeldt(h)); }
+  // David zet een kring aan of uit voor één herinnering. Aan = naar buiten (server.js eist een verse vingerafdruk); uit mag altijd.
+  function kring(hid, d) {
+    const h = vind(hid), k = d && d.kring;
+    if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (PKRINGEN.indexOf(k) < 0 || typeof d.aan !== 'boolean') return { status: 400, body: { ok: false, fout: 'kring en aan' } };
+    const nu0 = kringVan(h);
+    if (d.aan && nu0.niet && nu0.niet !== 'gevoelig of zonder categorie') return { status: 409, body: { ok: false, fout: nu0.niet } };
+    const n = { familie: nu0.familie, shizzle: nu0.shizzle };
+    n[k] = d.aan;
+    q.hKring.run(n.familie ? 1 : 0, n.shizzle ? 1 : 0, catVan(h).categorie || '', iso(nu()), h.hid);
+    return { status: 200, body: { ok: true, kring: kringRij(q.h.get(h.hid)) } };
+  }
+  // terug naar het voorstel
+  function kringVoorstelTerug(hid) {
+    const h = vind(hid);
+    if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    q.hKringWis.run(iso(nu()), h.hid);
+    return { status: 200, body: { ok: true, kring: kringRij(q.h.get(h.hid)) } };
+  }
+  function kringRij(h) {
+    const p = paginaLees(h.hid), s = sam(h, p), t = titelVan(h, p, s), w = wanneerInfo(h, p, s), k = kringVan(h, t);
+    return { hid: h.hid, titel: t, wanneer: w.tekst || w.verteld, datum: sorteerSleutel(h, w), categorie: catVan(h).categorie, soort: h.soort,
+      familie: k.familie, shizzle: k.shizzle, bron: k.bron, niet: k.niet, in_straat: inStraat(h) };
+  }
+  // Overzicht voor Davids app: per herinnering wie hem ziet; tellingen per kring
+  function kringen() {
+    bijwerken();
+    const rijen = q.hAlle.all().filter((h) => h.status === 'actief').map(kringRij);
+    rijen.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : a.hid < b.hid ? -1 : 1));
+    const tel = { familie: rijen.filter((r) => r.familie).length, shizzle: rijen.filter((r) => r.shizzle).length, totaal: rijen.length,
+      dicht_familie: rijen.filter((r) => r.in_straat && !r.familie).length, dicht_shizzle: rijen.filter((r) => r.in_straat && !r.shizzle).length,
+      weg: rijen.filter((r) => !r.in_straat).length };
+    return { status: 200, body: { ok: true, kringen: PKRINGEN, tel, herinneringen: rijen } };
+  }
+  // Voor memorylane-publiek.js: per kring de straat van een bezoeker. open → het item zoals de toonmodus het geeft; dicht → alleen het jaar.
+  function publiekLijst(k) {
+    if (PKRINGEN.indexOf(k) < 0) return [];
+    bijwerken();
+    const uit = [];
+    for (const h of q.hAlle.all()) {
+      if (h.status !== 'actief' || !inStraat(h)) continue;
+      const p = paginaLees(h.hid), s = sam(h, p), t = titelVan(h, p, s);
+      if (kringVan(h, t)[k]) uit.push({ hid: h.hid, open: true, item: toonKort(kort(h, p, s)) });
+      else { const w = wanneerInfo(h, p, s); uit.push({ hid: h.hid, open: false, jaar: w.van ? String(w.van).slice(0, 4) : null }); }
+    }
+    return uit;
+  }
   function kort(h, pagina, s) {
     const p = pagina === undefined ? paginaLees(h.hid) : pagina;
     const x = s === undefined ? sam(h, p) : s;
@@ -899,8 +1017,8 @@ function maak(o) {
     const h = vind(hid);
     if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
     const pagina = paginaLees(h.hid), s = sam(h, pagina);
-    if (opt && opt.toon) {
-      if (!toonbaar(h)) return NIET_TOON;
+    if (opt && (opt.toon || opt.kring)) {
+      if (!magZien(h, opt)) return NIET_TOON;
       // alleen het samengestelde verhaal (zonder tijdcodes en zonder "door jou aangepast"); nooit de log
       const t = toonKort(kort(h, pagina, s));
       t.verhaal = { tekst: verhaalVan(h, pagina, s, true), stand: h.soort === 'opname' ? (s ? s.stand : null) : null,
@@ -1004,7 +1122,7 @@ function maak(o) {
     if (!CAT[c]) return { status: 400, body: { ok: false, fout: 'onbekende categorie' } };
     const gev = CAT[c].gevoelig ? 1 : d.gevoelig ? 1 : 0;
     q.hCat.run(c, gev, iso(nu()), h.hid);
-    if (gev) for (const k of KRINGEN) q.hZicht[k].run(0, iso(nu()), h.hid);   // gevoelig = meteen nergens meer zichtbaar
+    if (gev) { for (const k of KRINGEN) q.hZicht[k].run(0, iso(nu()), h.hid); q.hKringWis.run(iso(nu()), h.hid); }   // gevoelig = meteen nergens meer zichtbaar (wv2636: ook geen kring)
     vuilAlle();
     return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
   }
@@ -1060,6 +1178,7 @@ function maak(o) {
   function audio(hid, n, opt) {
     const h = vind(hid);
     if (!h || h.status === 'weg' || h.soort !== 'opname') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (opt && opt.kring) return NIET_TOON;   // wv2636: de opname zelf (audio) gaat nooit naar bezoekers
     if (opt && opt.toon && !toonbaar(h)) return NIET_TOON;
     if (h.status !== 'actief') return { status: 404, body: { ok: false, fout: 'onbekend' } };   // review MOET 3
     const l = audioStukken(h), k = Number(n);
@@ -1076,8 +1195,8 @@ function maak(o) {
     if (!F) return { status: 404, body: { ok: false, fout: 'geen Immich' } };
     const h = metAlbum(hid);
     if (!h) return { status: 404, body: { ok: false, fout: 'onbekend' } };
-    if (opt && opt.toon) {
-      if (!toonbaar(h)) return NIET_TOON;
+    if (opt && (opt.toon || opt.kring)) {
+      if (!magZien(h, opt)) return NIET_TOON;
       const u = await F.fotos(hid);
       if (u.status === 200 && u.body && u.body.album) u.body = { ok: true, toon: true, album: { status: u.body.album.status, aantal: u.body.album.aantal, gevel: u.body.album.gevel }, fotos: u.body.fotos };
       return u;
@@ -1087,13 +1206,13 @@ function maak(o) {
   // in de toonmodus alleen een foto uit het album van een toonbare herinnering
   async function foto(id, maat, opt) {
     if (!F) return { status: 404, body: { ok: false, fout: 'geen Immich' } };
-    return F.foto(id, maat, opt && opt.toon ? (hid) => toonbaar(vind(hid)) : null);
+    return F.foto(id, maat, opt && (opt.toon || opt.kring) ? (hid) => magZien(vind(hid), opt) : null);
   }
   // wv2314 (R6): de gevel van één huis in de straat; in de toonmodus alleen van een toonbare herinnering (anders 404, zoals f/<id>)
   // wv2325: zonder foto-gevel het gegenereerde plaatje (in de toonmodus alleen bij een toonbare); heeft het album foto's, dan wint de foto
   async function gevelBeeld(hid, opt) {
     const h = metAlbum(hid);
-    if (!h || (opt && opt.toon && !toonbaar(h)) || (!F && !P)) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    if (!h || (opt && (opt.toon || opt.kring) && !magZien(h, opt)) || (!F && !P)) return { status: 404, body: { ok: false, fout: 'onbekend' } };
     const plaatje = () => { const b = P ? P.beeld(h.hid) : null; return b ? { status: 200, body: { ok: true, mime: b.mime, data: b.data, plaatje: true } } : null; };
     if (!F || !heeftFoto(h)) return plaatje() || (F ? F.gevelBeeld(hid) : { status: 404, body: { ok: false, fout: 'geen gevel' } });
     const u = await F.gevelBeeld(hid);
@@ -1459,8 +1578,8 @@ function maak(o) {
   return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling, fotoReizen,
     plaatjeVoorstel, plaatjeMaken, plaatjeWeg, _P: P, vertellerMaken, vertellerDeel, vertellerWeg, _V: V,
     vertelVerhaalMaken, vertelVerhaalDeel, vertelVerhaalWeg, _S: S, autoVertel,
-    fotoSync, hoofdpersonen, _db: db, _setVoor: setVoor, _F: F,
+    fotoSync, hoofdpersonen, kring, kringVoorstelTerug, kringen, publiekLijst, magKring, tekstRaak: (l) => (l.some((t) => geheimRaak(t)) ? 'geheim' : markerRaak(l) ? 'marker' : null), _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }
 
-module.exports = { maak, wanneerUit, wanneerTekst, codeWanneer, naamVoorReis, KRINGEN, KLUIS, MAP, ITER, MAX_TEKST, MAX_TITEL, MAX_NAAM, HID_RE, SID_RE, _pbkdf2: pbkdf2, _wwNorm: wwNorm, _kaleOpname: kaleOpname, _schoon: schoon, HOOFD_PAGINA, _hoofdDatum: hoofdDatum, _hoofdTabel: hoofdTabel };
+module.exports = { maak, bezoekersLees, _bezoekersTabel: bezoekersTabel, BEZOEKERS_PAGINA, PKRINGEN, wanneerUit, wanneerTekst, codeWanneer, naamVoorReis, KRINGEN, KLUIS, MAP, ITER, MAX_TEKST, MAX_TITEL, MAX_NAAM, HID_RE, SID_RE, _pbkdf2: pbkdf2, _wwNorm: wwNorm, _kaleOpname: kaleOpname, _schoon: schoon, HOOFD_PAGINA, _hoofdDatum: hoofdDatum, _hoofdTabel: hoofdTabel };
