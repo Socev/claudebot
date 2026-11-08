@@ -123,6 +123,12 @@ jobs:
           if echo "$C" | grep -nE "roep\('(PUT|PATCH|DELETE)'"; then echo "::error::tibber-data.js schrijft naar Tibber"; exit 1; fi
           if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' | grep -vE '^(test/|tibber-data\.js$)' | xargs grep -nE "data-api\.tibber\.com" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een ander bestand dan tibber-data.js roept de Tibber Data API aan"; exit 1; fi
           echo "tibber-data.js: alleen lezen."
+          # tibber-uur.js (wv2707): oude GraphQL-API alleen lezen. Eén fetch (POST op /v1-beta/gql), geen netwerk- of procesmodule, geen schrijvende query.
+          U=$(grep -vE '^\s*(\*|//)' tibber-uur.js)
+          if echo "$U" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|import\(|process\.binding"; then echo "::error::tibber-uur.js laadt een netwerk- of procesmodule"; exit 1; fi
+          if [ "$(echo "$U" | grep -oE '\bfetch\(' | wc -l)" != 1 ]; then echo "::error::tibber-uur.js heeft niet precies één fetch"; exit 1; fi
+          if echo "$U" | grep -E "^const Q_" | grep -niE "mutation|subscription \{"; then echo "::error::tibber-uur.js bevat een schrijvende query"; exit 1; fi
+          echo "tibber-uur.js: alleen lezen."
 
       # pot-afschrift.js en mt940-lezer.js (wv787): de afschriftmaker van de POT-rekening is puur (invoer erin, MT940 + PDF eruit). Geen
       # bestand-, netwerk- of procesmodule en geen fetch: bestanden schrijft bank-lezer.js, versturen doet niemand (een concept maakt server.js).
@@ -315,6 +321,7 @@ jobs:
           TOETS_NU=2026-01-02T10:00:00Z t test/financien-overzicht.sh   # wv2596: ook op 2 januari (jaarwissel in het venster)
           t test/financien-bijsturen.sh   # wv2700: Financiën › Uitgaven "Zelf bij te sturen" (boodschappen, uit eten, stroom, streaming, abonnementen)
           t test/stroom-tabel.sh   # wv2704: stroomtabel op de energiepagina vanzelf bij uit de Tibber-factuur
+          t test/tibber-uur.sh   # wv2707: Tibber-uurverbruik dagelijks bij — alleen leesqueries, kluis alleen tibber_lezen, kind zonder andere sleutels, gevuld uur blijft
           t test/financien-vooruit.sh   # wv2621: Financiën 8+ — Vooruit (prognose reproduceerbaar uit de kalender), Doelen (pagina), maandbrief (stilte als normaal)
           t test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"

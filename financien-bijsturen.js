@@ -124,7 +124,22 @@ function stroomUit(tekst) {
   const slim = /goedkoopste[^|\n]*\|\s*±?\s*€\s*([\d.]+)\s*per jaar/i.exec(tekst);
   return { rijen: rijen, laad: laad ? { kwh_jaar: getalNl(laad[1]), pct: Number(laad[2]) } : null, slim: slim ? getalNl(slim[1]) : null };
 }
-function stroomPost(vault, twaalf, mNu) {
+// wv2707: lopende maand uit de Tibber-uurdata (TIBBER_DIR/uur.json, door server.js na de bankronde). Alleen kWh; het bedrag komt met de factuur.
+const MND_NAAM = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+function stroomLopend(o) {
+  let u = o && o.tibberUur;
+  if (u === undefined) { try { u = JSON.parse(fs.readFileSync(path.join(process.env.TIBBER_DIR || '/opt/data/tibber', 'uur.json'), 'utf8')); } catch (e) { u = null; } }
+  const m = u && u.maand;
+  if (!m || !/^\d{4}-\d{2}$/.test(m.maand || '') || !/^\d{4}-\d{2}-\d{2}$/.test(m.t_m || '') || m.t_m.slice(0, 7) !== m.maand) return null;
+  if (typeof m.kwh !== 'number' || !isFinite(m.kwh) || m.kwh < 0 || !(m.uren > 0) || !(m.verwacht > 0)) return null;
+  return { maand: m.maand, t_m: m.t_m, kwh: m.kwh, mist: Math.max(0, Math.round(m.verwacht - m.uren)) };
+}
+function lopendZin(l) {
+  const mn = MND_NAAM[Number(l.maand.slice(5)) - 1];
+  return mn[0].toUpperCase() + mn.slice(1) + ' t/m ' + Number(l.t_m.slice(8)) + ' ' + mn.slice(0, 3) + ': ' + Math.round(l.kwh).toLocaleString('nl-NL') + ' kWh' +
+    (l.mist ? ' (' + l.mist + ' uur ontbreekt nog)' : '') + ', uit de uurdata van Tibber; het bedrag komt met de factuur.';
+}
+function stroomPost(vault, twaalf, mNu, lopend) {
   const p = path.join(vault, P_ENERGIE);
   let st;
   try { st = fs.lstatSync(p); } catch (e) { return { id: 'stroom', naam: 'Stroom', niet: 'de energiepagina is er niet' }; }
@@ -136,8 +151,9 @@ function stroomPost(vault, twaalf, mNu) {
   return { id: 'stroom', naam: 'Stroom', eenheid: 'kWh', t_m: nu.maand, achter: nu.maand < (twaalf[twaalf.length - 1] || mNu),
     nu: r2(nu.eur), kwh: nu.kwh, ct: nu.ct, kaal: nu.kaal, gem12: r2(se / n), gem_kwh: Math.round(sk / n), ct_gem: Math.round(se / sk * 1000) / 10, maanden_tabel: n,
     reeks: laatste.map(function (r) { return { maand: r.maand, waarde: r.kwh, eur: r.eur, ct: r.ct }; }),
-    inzicht: s.laad && s.laad.pct > 0 ? ['De auto\'s laden: ± ' + s.laad.pct + ' % van de stroom (± ' + Math.round(s.laad.kwh_jaar).toLocaleString('nl-NL') + ' kWh per jaar; ondergrens uit de uurdata). Per auto is niet te zien.'] : [],
+    inzicht: (lopend && lopend.maand > nu.maand ? [lopendZin(lopend)] : []).concat(s.laad && s.laad.pct > 0 ? ['De auto\'s laden: ± ' + s.laad.pct + ' % van de stroom (± ' + Math.round(s.laad.kwh_jaar).toLocaleString('nl-NL') + ' kWh per jaar; ondergrens uit de uurdata). Per auto is niet te zien.'] : []),
     advies: s.slim > 0 ? { per_jaar: Math.round(s.slim), zekerheid: 'schatting', zin: 'Slim laden in de Tibber-app: dezelfde kWh voor de auto in de goedkoopste uren.' } : null,
+    lopend: lopend && lopend.maand > nu.maand ? lopend : undefined,
     bron: P_ENERGIE, uitleg: 'Uit de maandfacturen van Tibber (alles-in = alle kosten incl. btw en energiebelasting gedeeld door de kWh).' };
 }
 
@@ -208,7 +224,7 @@ function bijsturen(a, delen, o) {
   S.inzicht.push('Of en hoe vaak je een dienst gebruikt, ziet Socev niet.');
   [B, H, S, A].forEach(function (x) { x.delen.forEach(function (g) { delete g._klein; delete g._klein_som; }); });
   let St;
-  try { St = stroomPost(o.vault, twaalf, mNu); } catch (e) { St = { id: 'stroom', naam: 'Stroom', niet: 'de energiepagina is niet te lezen' }; }
+  try { St = stroomPost(o.vault, twaalf, mNu, stroomLopend(o)); } catch (e) { St = { id: 'stroom', naam: 'Stroom', niet: 'de energiepagina is niet te lezen' }; }
   const posten = [B, H, St, S, A];
   const gem = r2(posten.reduce(function (t, x) { return t + (x.niet ? 0 : x.gem12 || 0); }, 0));
   return { maand: mVol, lopend: mNu, maanden: n12, posten: posten, gem12: gem,
@@ -216,4 +232,4 @@ function bijsturen(a, delen, o) {
     uitleg: 'Wat jullie zelf kunnen bijsturen, uit dezelfde boekingen als hieronder (stroom uit de facturen). Adviezen zijn schattingen met de aanname erbij; Socev doet zelf niets.' };
 }
 
-module.exports = { bijsturen: bijsturen, indeling: indeling, winkel: winkel, horecaSoort: horecaSoort, mediaSoort: mediaSoort, stroomUit: stroomUit, P_ENERGIE: P_ENERGIE };
+module.exports = { bijsturen: bijsturen, indeling: indeling, winkel: winkel, horecaSoort: horecaSoort, mediaSoort: mediaSoort, stroomUit: stroomUit, stroomLopend: stroomLopend, lopendZin: lopendZin, stroomPost: stroomPost, P_ENERGIE: P_ENERGIE };

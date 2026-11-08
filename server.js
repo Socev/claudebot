@@ -23396,6 +23396,7 @@ function bankRondeStart() {
       if (!bankVerrijkBezig) bankVerrijkStart(5);   // wv687: nieuwe posten na de ronde indelen (hooguit 5 × 60 groepen)
       try { tibberNaBankRonde(); } catch (e) { logError('tibber-ronde', e); }   // wv2625: Tibber-laadhistorie, los, alleen de ochtendronde
       try { stroomTabelNaBankRonde(); } catch (e) { logError('stroom-tabel', e); }   // wv2704: stroomtabel op de energiepagina, één keer per dag
+      try { tibberUurNaBankRonde(); } catch (e) { logError('tibber-uur', e); }   // wv2707: Tibber-uurverbruik bij, één keer per dag
     });
   return { status: 202, j: { ok: true, gestart: true, begin: begin } };
 }
@@ -24247,7 +24248,8 @@ function tibberRondeLees() { try { return JSON.parse(fs.readFileSync(path.join(T
 function tibberInfo() {
   const r = tibberRondeLees();
   return { module: !!tibberData, laatste: r ? { tijd: r.eind || null, ok: r.ok === true, reden: r.reden || undefined, apparaten: r.apparaten, punten: r.punten } : null,
-    nood: fs.existsSync(path.join(TIBBER_DIR, 'refresh.nood')) };
+    nood: fs.existsSync(path.join(TIBBER_DIR, 'refresh.nood')),
+    uur: (function () { const u = tibberUurLees(); return u ? { tijd: u.eind || null, ok: u.ok === true, reden: u.reden || undefined, laatste_uur: u.laatste_uur || null, laatste_ok: u.laatste_ok || null } : null; })() };   // wv2707
 }
 // Eén box-rij per reden per dag (stilte is de default). Tekst van de pod zelf; geen token, code of state.
 function tibberBoxRij(reden, tekst) {
@@ -24262,11 +24264,12 @@ function tibberBoxRij(reden, tekst) {
     const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
     const voorstel = reden === 'grant' ? 'koppeling dood (verlopen, ingetrokken of al gebruikt). Nieuwe toestemmingslink: `POST /smal/tibber {opdracht: link}` (API_SECRET) en die met bericht.py in de app zetten ("tik binnen twee dagen"). Niet herhalen tot David opnieuw toestemde.'
       : reden === 'kluis' ? 'het nieuwe refresh token staat als noodkopie in `/opt/data/tibber/refresh.nood` (600); de volgende ronde zet hem eerst in de kluis. Kluis (Management-API) nagaan; `POST /smal/tibber {opdracht: ronde}` na herstel.'
+      : reden === 'uur' ? 'kluisregel `tibber_lezen` nagaan (bestaat, niet ingetrokken op developer.tibber.com), api.log `tibber-uur` en `/opt/data/tibber/uur.json` lezen; daarna `POST /smal/tibber {opdracht: uur}` (API_SECRET).'
       : reden === 'scope' ? 'Tibber gaf andere rechten dan user, homes, vehicles en chargers; niets bewaard. Nagaan of David alle vinkjes aanliet of de client andere scopes heeft; daarna een nieuwe link.'
       : 'api.log `tibber` en `/smal/tibber {opdracht: stand}` nalopen.';
-    const rij = '\n## [direct] ' + tijd + ' — Tibber Data API: ' + String(tekst || reden).replace(/[\r\n]+/g, ' ').slice(0, 90) + ' (pod, automatisch)\n' +
+    const rij = '\n## [direct] ' + tijd + ' — Tibber' + (reden === 'uur' ? '-uurdata' : ' Data API') + ': ' + String(tekst || reden).replace(/[\r\n]+/g, ' ').slice(0, 90) + ' (pod, automatisch)\n' +
       '- status: open\n- van: pod tibber-ronde (server.js, wv2625; hooguit 1× per dag per reden; kenmerk ' + kenmerk + ')\n' +
-      '- gevolg als er niets gebeurt: geen nieuwe laadhistorie per auto; de data tot nu blijft lokaal staan.\n- voorstel: ' + voorstel + '\n';
+      '- gevolg als er niets gebeurt: ' + (reden === 'uur' ? 'het uurverbruik en de lopende maand (Financiën › Stroom) blijven op de oude stand' : 'geen nieuwe laadhistorie per auto') + '; de data tot nu blijft lokaal staan.\n- voorstel: ' + voorstel + '\n';
     VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
   } catch (e) { logError('tibber-box', e); }
 }
@@ -24339,6 +24342,11 @@ function tibberNaBankRonde() {
 }
 async function tibberSmal(d, wie) {
   if (!wie || !wie.mk) return { status: 403, j: { ok: false, fout: 'tibber alleen vanuit de machinekamer (API_SECRET)' } };
+  if (String(d.opdracht || '') === 'uur') {   // wv2707: uurverbruik los bijhalen
+    if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
+    const u = await tibberUurDraai('machinekamer');
+    return { status: u.reden === 'bezig' ? 409 : u.reden === 'module' ? 404 : 200, j: u };
+  }
   if (!tibberData) return { status: 404, j: { ok: false, fout: 'tibber-data.js zit niet in deze release' } };
   if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
   const opdracht = String(d.opdracht || '');
@@ -24357,7 +24365,7 @@ async function tibberSmal(d, wie) {
     const s = await tibberKind('stand', {});
     return { status: 200, j: Object.assign({ ok: !!(s.j && s.j.ok) }, tibberSchoon(s.j), { laatste: tibberRondeLees(), info: tibberInfo() }) };
   }
-  return { status: 400, j: { ok: false, fout: 'opdracht: link, ronde, apparaten, stand' } };
+  return { status: 400, j: { ok: false, fout: 'opdracht: link, ronde, apparaten, stand, uur' } };
 }
 function tibberTerug(req, res) {
   const kaal404 = function () { res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('niet gevonden'); };
@@ -24388,6 +24396,61 @@ function tibberTerug(req, res) {
     logError('tibber-terug', e);
     if (!res.headersSent) bankPagina(res, 502, 'Koppelen lukte niet', 'Er ging iets mis. Er is niets gekoppeld. Vraag om een nieuwe link.');
   });
+}
+// ── wv2707: Tibber-uurverbruik dagelijks bij (oude GraphQL-API, leessleutel tibber_lezen) ─────────────────────────────────
+// WAAROM. De uurtabel verbruik in tibber.sqlite kwam eenmalig uit mk-scripts/wv2583/tibber-lees.py en stopte op 6-11; de Data API-ronde
+// hierboven geeft geen uurverbruik. HOE. Eén keer per dag na de bankronde (naast tibberNaBankRonde): de sleutel uit de kluis (Management-API,
+// alleen die naam), via stdin naar het kind tibber-uur.js (één vaste leesquery, omgeving alleen PATH/HOME/TZ/LANG/TIBBER_DIR), dat de
+// laatste 72..744 uren en de prijzen van vandaag/morgen in dezelfde tabellen zet. Uitkomst zonder sleutel of bedragen in TIBBER_DIR/uur.json
+// (dag, laatste uur, lopende maand in kWh voor Financiën › Uitgaven › Stroom). Mislukt het: hooguit 3 pogingen per dag; een box-rij pas als
+// er 3 dagen geen geslaagde ronde was (1× per dag). POST /smal/tibber {opdracht: uur} draait hem los (machinekamer).
+let tibberUurBezig = false;
+function tibberUurScript() { return process.env.TIBBER_UUR_SCRIPT || path.join(__dirname, 'tibber-uur.js'); }
+function tibberUurLees() { try { return JSON.parse(fs.readFileSync(path.join(TIBBER_DIR, 'uur.json'), 'utf8')); } catch (e) { return null; } }
+async function tibberUurSleutel() {
+  const r = await tibberMgmt("select decrypted_secret as w from vault.decrypted_secrets where name = 'tibber_lezen'");
+  return r.length === 1 && r[0] ? String(r[0].w || '').trim() : '';
+}
+async function tibberUurDraai(bron) {
+  if (tibberUurBezig) return { ok: false, reden: 'bezig', fout: 'er loopt al een Tibber-uurronde' };
+  const script = tibberUurScript();
+  if (!fs.existsSync(script)) return { ok: false, reden: 'module', fout: 'tibber-uur.js zit niet in deze release' };
+  tibberUurBezig = true;
+  try {
+    let u, sleutel = '';
+    try { sleutel = await tibberUurSleutel(); } catch (e) { u = { ok: false, reden: 'kluis', fout: 'kluis nu niet bereikbaar' }; }
+    if (!u && !sleutel) u = { ok: false, reden: 'sleutel', fout: 'tibber_lezen ontbreekt in de kluis' };
+    if (!u) {
+      const env = { TIBBER_DIR: TIBBER_DIR };
+      ['PATH', 'HOME', 'TZ', 'LANG'].forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
+      ['TIBBER_GQL_BASIS', 'TIBBER_PAUZE_MS'].forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });   // alleen de toets (127.0.0.1)
+      const r = await smalKind(process.execPath, ['--no-warnings', script, 'uur'], JSON.stringify({ sleutel: sleutel }), 180000, env);
+      sleutel = '';
+      try { u = JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch (e) { u = null; }
+      if (!u || typeof u !== 'object') u = { ok: false, reden: 'kind', fout: 'tibber-uur gaf geen uitkomst (code ' + r.code + ')' };
+      else if (u.ok !== true && !u.reden) u.reden = 'tibber';
+    }
+    const vorige = tibberUurLees() || {};
+    const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), eind = new Date().toISOString();
+    const staat = { dag: dag, eind: eind, ok: u.ok === true, reden: u.ok === true ? null : String(u.reden || ''), fout: u.ok === true ? null : String(u.fout || '').slice(0, 160),
+      pogingen: (vorige.dag === dag ? Number(vorige.pogingen) || 0 : 0) + 1, laatste_ok: u.ok === true ? eind : (vorige.laatste_ok || null),
+      fout_sinds: u.ok === true ? null : (vorige.ok === false && vorige.fout_sinds ? vorige.fout_sinds : eind),
+      gevraagd: u.gevraagd, gevuld: u.gevuld, leeg: u.leeg, prijzen: u.prijzen,
+      laatste_uur: u.ok === true ? u.laatste_uur : (vorige.laatste_uur || null), maand: u.ok === true ? u.maand : (vorige.maand || null), bron: bron };
+    try { fs.mkdirSync(TIBBER_DIR, { recursive: true, mode: 0o700 }); const p = path.join(TIBBER_DIR, 'uur.json'), tmp = p + '.' + process.pid + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(staat), { mode: 0o600 }); fs.renameSync(tmp, p); } catch (e) { logError('tibber-uur-json', e); }
+    schrijfLog(nu() + ' tibber-uur ' + velden({ bron: bron, ok: staat.ok, reden: staat.reden || undefined, gevraagd: u.gevraagd, gevuld: u.gevuld, leeg: u.leeg, prijzen: u.prijzen, laatste_uur: staat.laatste_uur || undefined }));
+    if (!staat.ok && Date.now() - Date.parse(staat.laatste_ok || staat.fout_sinds) > 3 * 86400000)   // pas na 3 dagen zonder geslaagde ronde (ook zonder eerdere: vanaf de eerste fout; review MOET 2)
+      tibberBoxRij('uur', 'uurverbruik al 3 dagen niet ververst (' + staat.reden + ')');
+    return staat;
+  } finally { tibberUurBezig = false; }
+}
+// Na de bankronde: na een geslaagde ronde vandaag niets meer; na een mislukte hooguit 3 pogingen per dag. Alleen de primaire kant.
+function tibberUurNaBankRonde() {
+  if (!rolPrimair() || !fs.existsSync(tibberUurScript())) return;
+  const v = tibberUurLees(), dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  if (v && v.dag === dag && (v.ok === true || Number(v.pogingen) >= 3)) return;
+  tibberUurDraai('bank-ronde').catch(function (e) { logError('tibber-uur', e); });
 }
 // ── einde Tibber ──
 

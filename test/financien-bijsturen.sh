@@ -53,7 +53,7 @@ const pag = ['# Energie', '', '| Maand | Verbruik (kWh) | Kale stroomprijs (ct/k
   .concat(['', '| | Waarde |', '|---|--:|', '| Geladen per jaar | 4.000 kWh (25 % van het verbruik) |', '| Zelfde kWh in de goedkoopste nachturen (18–7 uur) | ± € 110 per jaar goedkoper |']).join('\n');
 fs.writeFileSync(path.join(V, B.P_ENERGIE), pag);
 const a = { db: db };
-const u = B.bijsturen(a, delen, { mNu: mNu, twaalf: twaalf, vault: V });
+const u = B.bijsturen(a, delen, { mNu: mNu, twaalf: twaalf, vault: V, tibberUur: null });   // wv2707: zonder uurdata (de echte uur.json mag niet meetellen)
 const P = {}; u.posten.forEach((p) => { P[p.id] = p; });
 toets('vijf posten in vaste volgorde', u.posten.map((p) => p.id).join() === 'boodschappen,uit_eten,stroom,streaming,abonnementen', u.posten.map((p) => p.id));
 const somCat = (m, c) => -delen.filter((x) => x.stroom === 'leven' && x.maand === m && c(x)).reduce((s, x) => s + x.deel, 0);
@@ -87,7 +87,7 @@ toets('stroom: laatste 12 maanden van de tabel', P.stroom.reeks.length === 12 &&
 toets('stroom: gemiddelden en ct/kWh', P.stroom.gem_kwh === 1055 && P.stroom.ct === 30 && P.stroom.ct_gem === Math.round(3666 / 12660 * 1000) / 10, P.stroom);
 toets('stroom: auto-aandeel en slim laden uit de pagina', /25 %/.test(P.stroom.inzicht[0] || '') && P.stroom.advies && P.stroom.advies.per_jaar === 110, [P.stroom.inzicht, P.stroom.advies]);
 toets('stroom: niet achter', P.stroom.achter === false);
-const zonder = B.bijsturen(a, delen, { mNu: mNu, twaalf: twaalf, vault: path.join(W, 'leeg') });
+const zonder = B.bijsturen(a, delen, { mNu: mNu, twaalf: twaalf, vault: path.join(W, 'leeg'), tibberUur: null });
 toets('zonder energiepagina: stroom "niet", rest blijft', zonder.posten[2].niet && !zonder.posten[2].reeks && zonder.posten[0].gem12 === P.boodschappen.gem12, zonder.posten[2]);
 toets('totaal = som van de gemiddelden', u.gem12 === r2(P.boodschappen.gem12 + P.uit_eten.gem12 + P.stroom.gem12 + P.streaming.gem12 + P.abonnementen.gem12), u.gem12);
 toets('filters alleen voor boodschappen en uit eten', P.boodschappen.filter.nu.cat === 'boodschappen' && P.uit_eten.filter.twaalf.van === '2025-11' && P.streaming.filter === null);
