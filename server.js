@@ -23395,6 +23395,7 @@ function bankRondeStart() {
       bankRondeLaatste.eind = new Date().toISOString(); bankRondeBezig = false;
       if (!bankVerrijkBezig) bankVerrijkStart(5);   // wv687: nieuwe posten na de ronde indelen (hooguit 5 × 60 groepen)
       try { tibberNaBankRonde(); } catch (e) { logError('tibber-ronde', e); }   // wv2625: Tibber-laadhistorie, los, alleen de ochtendronde
+      try { stroomTabelNaBankRonde(); } catch (e) { logError('stroom-tabel', e); }   // wv2704: stroomtabel op de energiepagina, één keer per dag
     });
   return { status: 202, j: { ok: true, gestart: true, begin: begin } };
 }
@@ -24290,6 +24291,45 @@ async function tibberRondeDraai(opdracht, bron) {
   } finally { tibberRondeBezig = false; }
 }
 // Na de ochtend-bankronde (bankRondeStart, los): één keer per dag, alleen vóór 12:00; zonder toestemming stil.
+// ── wv2704: stroomtabel op de energiepagina vanzelf bij (Financiën › Uitgaven › Stroom, wv2700) ─────────────────────────────────────
+// WAAROM. De maandtabel op 20_Prive/Financien/Energieverbruik thuis (Tibber).md was eenmalig gevuld (t/m okt 2026); zonder bijwerken loopt
+// de post Stroom vanaf december achter. HOE. Eén keer per dag na de bankronde (zoals de Tibber-ronde): stroom-tabel.js leest de Tibber-
+// facturen van de laatste 120 dagen uit facturen.sqlite (alleen lezen, privé, niet 'geen factuur'), haalt kWh en kale prijs uit de
+// PDF-tekst (pdftotext van de koerier, vluchtig) en zet een maand die nog niet in de tabel staat erbij via vault-veilig wijzig. Een
+// afwijkende bestaande rij of een onleesbare factuur: niets schrijven, één box-rij per geval (#stroomtabel). Geen netwerk, geen bedrag in
+// een log. Staat (dag, gemelde gevallen, laatste uitkomst zonder bedragen) in KLOKKEN_DIR/stroom-tabel.json.
+// Lui geladen en zonder top-level verwijzingen: dit stuk staat in het knipsel van test/tibber-data.sh (vm zonder KLOKKEN_DIR en __dirname).
+let stroomTabelMod;   // undefined = nog niet geprobeerd, null = niet in deze release
+let stroomTabelBezig = false;
+function stroomTabelM() {
+  if (stroomTabelMod !== undefined) return stroomTabelMod;
+  stroomTabelMod = null;
+  try { const p = path.join(__dirname, 'stroom-tabel.js'); if (fs.existsSync(p)) stroomTabelMod = require(p); } catch (e) { logError('stroom-tabel', e); }
+  return stroomTabelMod;
+}
+function stroomTabelStaatPad() { return path.join(KLOKKEN_DIR, 'stroom-tabel.json'); }
+function stroomTabelStaat() { try { return JSON.parse(fs.readFileSync(stroomTabelStaatPad(), 'utf8')); } catch (e) { return null; } }
+function stroomTabelNaBankRonde() {
+  const stroomTabel = stroomTabelM();
+  if (!stroomTabel || !facturenMod || !facturenKoerier || stroomTabelBezig || !facturenMagOpenen()) return;
+  const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const vorige = stroomTabelStaat();
+  if (vorige && vorige.dag === dag) return;
+  stroomTabelBezig = true;
+  let fdb = null;
+  stroomTabel.ronde({
+    openFacturen: function () { fdb = facturenMod.open(FACTUREN_DIR, { alleenLezen: true }); const f = fdb; return { db: f.db, sluit: function () { facturenMod.sluit(f); } }; },
+    stukLees: function (sha) { return facturenMod.stukLees(fdb, sha); },
+    pdfNaarTekst: function (buf) { return facturenKoerier.pdfNaarTekst(buf); },
+    vaultWijzig: function (fn) { return VV().wijzig(path.join(VAULT, stroomTabel.P_ENERGIE), fn, { krimpGrens: true }); },
+    boxRij: ovisBoxRij, staatLees: stroomTabelStaat,
+    staatZet: function (o) { const d = stroomTabelStaatPad(), t = d + '.tmp'; fs.mkdirSync(KLOKKEN_DIR, { recursive: true }); fs.writeFileSync(t, JSON.stringify(o), { mode: 0o600 }); fs.renameSync(t, d); },
+    ams: function () { const t = ovisAms(); return { datum: dag, klok: t.klok }; }
+  }).then(function (u) {
+    schrijfLog(nu() + ' stroom-tabel ' + velden({ ok: u.ok, facturen: u.facturen, erbij: (u.toegevoegd || []).join(','), twijfel: (u.twijfel || []).join(','), reden: u.reden || '' }));
+    if (u.toegevoegd && u.toegevoegd.length) appFinCache = null;
+  }).catch(function (e) { logError('stroom-tabel', e); }).finally(function () { stroomTabelBezig = false; fdb = null; });
+}
 function tibberNaBankRonde() {
   if (!tibberData || !rolPrimair()) return;
   const nl = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' });

@@ -183,6 +183,7 @@ COPY financien-overzicht.js /app/release-bootstrap/financien-overzicht.js
 COPY financien-advies.js /app/release-bootstrap/financien-advies.js
 COPY financien-vooruit.js /app/release-bootstrap/financien-vooruit.js
 COPY financien-bijsturen.js /app/release-bootstrap/financien-bijsturen.js
+COPY stroom-tabel.js /app/release-bootstrap/stroom-tabel.js
 COPY app-vast.js /app/release-bootstrap/app-vast.js
 COPY app-open.js /app/release-bootstrap/app-open.js
 COPY intake-telling.js /app/release-bootstrap/intake-telling.js
