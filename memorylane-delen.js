@@ -33,6 +33,9 @@
  *  - Vanzelf vertellen (wv2522, David 5-11 21:26: "Alles waar wat voor ingesproken wordt moet altijd direct een verhaal op gebouwd worden"):
  *    autoVertel() in de tik maakt de vertelling als verhaal zonder tik voor elke herinnering met iets ingesprokens, binnen hetzelfde plafond;
  *    zie de toelichting bij autoVertel. Register ml_vertel_auto (hid, hash, tellers).
+ *  - Samengevoegd (wv2732, David 8-11-2026): status 'samengevoegd' + kolom bij (de herinnering die blijft); verborgen zoals 'afgewezen' en
+ *    nooit in delen, toonmodus, albumsync of vertelronde. koppel() in de tik voegt een reis of fotoalbum vanzelf bij een opname over dezelfde
+ *    dagen (zie de toelichting daar); losmaken(hid) zet hem terug. Register ml_koppel (alleen ids, periode, uitkomst, vlaggen).
  * PRIVACY. Nooit tekst, titels of namen in logs, box, /health of fouten: alleen ids en aantallen.
  * VORM. Alleen fs, path, crypto en reizen.js (wv2136: de reispagina's, gedeeld met Tripper); D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
  *
@@ -143,6 +146,8 @@ CREATE TABLE IF NOT EXISTS ml_blok (hid TEXT NOT NULL, kring TEXT NOT NULL, rede
 CREATE TABLE IF NOT EXISTS ml_marker_ok (hid TEXT NOT NULL, kring TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (hid, kring));
 CREATE TABLE IF NOT EXISTS ml_vertel_auto (hid TEXT PRIMARY KEY, hash TEXT NOT NULL, pogingen INTEGER NOT NULL DEFAULT 0, op TEXT NOT NULL,
   weg INTEGER NOT NULL DEFAULT 0, gemeld INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS ml_koppel (hid TEXT PRIMARY KEY, sleutel TEXT NOT NULL, uitkomst TEXT NOT NULL, kandidaat TEXT, titel_gezet INTEGER NOT NULL DEFAULT 0,
+  album_gezet INTEGER NOT NULL DEFAULT 0, op TEXT NOT NULL);
 `;
 
 function iso(ms) { return new Date(ms).toISOString(); }
@@ -285,7 +290,8 @@ function maak(o) {
   // wv2636: kring per herinnering (familie, shizzle). NULL = het voorstel van de code; 0/1 = Davids keuze; kring_cat = de categorie op het moment
   // van die keuze (wordt de herinnering daarna gevoelig met een andere categorie, dan telt de keuze niet meer).
   { const kol = db.prepare('PRAGMA table_info(ml_herinnering)').all().map((r) => r.name);
-    for (const k of ['kring_familie INTEGER', 'kring_shizzle INTEGER', 'kring_cat TEXT']) if (kol.indexOf(k.split(' ')[0]) < 0) db.exec('ALTER TABLE ml_herinnering ADD COLUMN ' + k); }
+    // wv2732: bij = de herinnering waarbij deze is samengevoegd (status 'samengevoegd')
+    for (const k of ['kring_familie INTEGER', 'kring_shizzle INTEGER', 'kring_cat TEXT', 'bij TEXT']) if (kol.indexOf(k.split(' ')[0]) < 0) db.exec('ALTER TABLE ml_herinnering ADD COLUMN ' + k); }
   const CAT = o.categorieen || {};
   const DIR = o.dir, WACHT = path.join(DIR, 'ml-wacht'), SLEUTEL = path.join(DIR, 'ml-inbox.pem');
   for (const d of [DIR, WACHT]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); try { fs.chmodSync(d, 0o700); } catch (e) { /* niet van ons */ } }
@@ -329,6 +335,13 @@ function maak(o) {
     hKring: db.prepare('UPDATE ml_herinnering SET kring_familie = ?, kring_shizzle = ?, kring_cat = ?, gewijzigd = ? WHERE hid = ?'),
     hKringWis: db.prepare('UPDATE ml_herinnering SET kring_familie = NULL, kring_shizzle = NULL, kring_cat = NULL, gewijzigd = ? WHERE hid = ?'),
     hGewijzigd: db.prepare('UPDATE ml_herinnering SET gewijzigd = ? WHERE hid = ?'),
+    // wv2732: samenvoegen en losmaken (alleen vanuit de verwachte status)
+    hBij: db.prepare('UPDATE ml_herinnering SET status = ?, bij = ?, gewijzigd = ? WHERE hid = ? AND status = ?'),
+    koppel: db.prepare('SELECT * FROM ml_koppel WHERE hid = ?'),
+    koppelKand: db.prepare("SELECT * FROM ml_koppel WHERE kandidaat = ? AND uitkomst = 'samengevoegd'"),
+    koppelZet: db.prepare('INSERT INTO ml_koppel (hid, sleutel, uitkomst, kandidaat, titel_gezet, album_gezet, op) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (hid) DO UPDATE SET ' +
+      'sleutel = excluded.sleutel, uitkomst = excluded.uitkomst, kandidaat = excluded.kandidaat, titel_gezet = excluded.titel_gezet, album_gezet = excluded.album_gezet, op = excluded.op'),
+    koppelUitkomst: db.prepare('UPDATE ml_koppel SET uitkomst = ?, op = ? WHERE hid = ?'),
     s: db.prepare('SELECT * FROM ml_stuk WHERE sid = ?'),
     sBron: db.prepare('SELECT * FROM ml_stuk WHERE bron_id = ?'),
     sVan: db.prepare('SELECT * FROM ml_stuk WHERE hid = ? ORDER BY binnen_op, sid'),
@@ -531,8 +544,22 @@ function maak(o) {
       else if (h.status === 'weg') q.hStatus.run('actief', t, h.hid);
     }
     for (const h of q.hAlle.all()) {
+      if (h.status === 'samengevoegd') continue;   // wv2732: blijft samengevoegd, ook als de reispagina verdwijnt (zie hieronder)
       if (h.soort === 'reis' && !gezien.has(h.ref) && !fs.existsSync(path.join(o.vault, h.ref))) { q.hStatus.run('weg', t, h.hid); vuilAlle(); }
       if (h.soort === 'opname') { const r = q.ramble.get(h.ref); if (!r || r.status !== 'notitie') { q.hStatus.run('weg', t, h.hid); vuilAlle(); } }
+    }
+    // wv2732: na de ronde hierboven (die een opname weg kan zetten): is de herinnering waarbij een samengevoegde hoort weg, dan weer actief
+    for (const h of q.hAlle.all()) {
+      if (h.status !== 'samengevoegd') continue;
+      const b = h.bij ? q.h.get(h.bij) : null;
+      if (b && b.status !== 'weg') continue;
+      // review MOET 1: ook het album terug en de koppeling op losgemaakt (zoals losmaken)
+      const k = b ? q.koppel.get(b.hid) : null;
+      tx(() => {
+        q.hBij.run('actief', null, t, h.hid, 'samengevoegd');
+        if (k && k.uitkomst === 'samengevoegd' && k.kandidaat === h.hid) { if (k.album_gezet && F) F.terugVerhuis(b.hid, h.hid, h.soort, h.ref); q.koppelUitkomst.run('losgemaakt', t, b.hid); }
+      });
+      vuilAlle();
     }
   }
   function vuilAlle() { for (const k of KRINGEN) vuil.add(k); }
@@ -582,10 +609,15 @@ function maak(o) {
     if (h.soort === 'reis') { const i = reisInfo(h.ref); return i ? i.titel : path.basename(h.ref, '.md'); }
     return standaardTitel(h);
   }
+  // een titel die niet de standaard is (David, vaste naamgeving, bezoeker, of een oude pagina zonder titel_bron met een eigen titel)
+  function eigenTitel(h, p) {
+    const t = fmVeld(p, 'titel'), b = fmVeld(p, 'titel_bron');
+    return t && (b === 'david' || b === 'naamgeving' || b === 'bezoeker' || (!b && t !== oudeStandaard(h) && t !== standaardTitel(h))) ? t : null;
+  }
   function titelVan(h, pagina, s) {
     const p = pagina === undefined ? paginaLees(h.hid) : pagina;
-    const t = fmVeld(p, 'titel'), b = fmVeld(p, 'titel_bron');
-    if (t && (b === 'david' || b === 'naamgeving' || b === 'bezoeker' || (!b && t !== oudeStandaard(h) && t !== standaardTitel(h)))) return t;
+    const t = eigenTitel(h, p);
+    if (t) return t;
     if (h.soort === 'opname') {
       const x = s === undefined ? sam(h, p) : s;
       const v = x && x.delen.find((d) => d.titel && !/^Herinnering uit de opname van /.test(d.titel));
@@ -837,6 +869,7 @@ function maak(o) {
     const uit = { vault: 0, bijdragen: 0, d1: 0 };
     try {
       bijwerken();
+      try { const k = koppel(false); if (k.samengevoegd) { uit.samengevoegd = k.samengevoegd; vuilAlle(); } } catch (e) { fout('ml-koppel', e); }   // wv2732
       if (P) { try { P.opruim((hid) => !!q.h.get(hid)); } catch (e) { fout('ml-plaatje', e); } }
       if (V) { try { V.opruim((hid) => { const h = q.h.get(hid); return !!h && !vertellerNiet(h); }); } catch (e) { fout('ml-verteller', e); } }   // wv2366 (review MOET 2)
       if (S) { try { S.opruim((hid) => { const h = q.h.get(hid); return !!h && !vertellerNiet(h); }); } catch (e) { fout('ml-vertelscript', e); } }   // wv2484
@@ -1002,7 +1035,7 @@ function maak(o) {
   function lijst(opt) {
     const toon = !!(opt && opt.toon);
     bijwerken();
-    const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen' && (!toon || toonbaar(h))).map((h) => (toon ? toonKort(kort(h)) : kort(h)));
+    const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen' && h.status !== 'samengevoegd' && (!toon || toonbaar(h))).map((h) => (toon ? toonKort(kort(h)) : kort(h)));
     alle.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : a.hid < b.hid ? -1 : 1));
     if (toon) {
       return { status: 200, body: { ok: true, toon: true, herinneringen: alle, immich: F ? { aan: true } : { aan: false },
@@ -1538,9 +1571,118 @@ function maak(o) {
     q.linkSync.run(1, k);
     vuil.delete(k);
   }
+  // ── wv2732 (David 8-11-2026, Ja op "een opname voortaan bij de bestaande herinnering zetten"; bouwplan wv2730) ──
+  // Een opname over een reis of fotoalbum dat al in MemoryLane staat werd een tweede los huis met een eigen album. Nu: zodra het verhaal van
+  // een actieve opname klaar is en een datum op dagniveau heeft, zoekt de pod actieve reis- en fotoalbum-herinneringen waarvan de periode
+  // (dagniveau, korter dan KOPPEL_MAX_DAGEN) overlapt, ± 1 dag. Precies één kandidaat zonder stukken, niet zichtbaar gezet en zonder foto's
+  // delen: die gaat op 'samengevoegd' met bij = de opname (verborgen zoals 'afgewezen'; nooit in delen, toonmodus, albumsync of vertelronde).
+  // De opname krijgt zijn titel als de opname nog de standaardtitel heeft (titel_bron naamgeving; let op: nieuwe titel = nieuwe verhaalhash =
+  // de automatische vertelling opnieuw), en zijn album als het album van de opname leeg is (alleen de koppelrij; in Immich verandert niets).
+  // Richting: de opname blijft (verhaal, vertelling, transcript en aanvullingen hangen eraan). Twijfel (0, 2+ kandidaten of een kandidaat met
+  // stukken of zichtbaar): niets samenvoegen; bij twijfel één box-rij. Per opname één beoordeling per datum (ml_koppel.sleutel); een
+  // losgemaakte opname nooit opnieuw. De sleutel is periode#vingerafdruk van de raakkandidaten (hid, periode, stukken, zichtbaar): komt er een
+  // reis of album bij (een reis wordt pas een herinnering als hij voorbij is), schuift een periode of verandert een kandidaat, dan opnieuw
+  // (review MOET 2). Hooguit elke KOPPEL_ELKE_MS. droog = alleen zeggen wat er zou gebeuren.
+  const KOPPEL_MAX_DAGEN = 31, KOPPEL_ELKE_MS = 5 * 60000;
+  let koppelVorige = 0;
+  function dagNr(d) { return Math.round(Date.parse(String(d) + 'T00:00:00Z') / 86400000); }
+  function koppelBox(regels) {
+    if (!o.box) return;
+    const t = new Date(nu()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    try { o.box('\n## [log] ' + t + ' — MemoryLane: opname niet vanzelf samengevoegd (twijfel, wv2732)\n- status: open\n- van: pod:memorylane-delen\n' + regels.map((r) => '- ' + r + '\n').join('')); }
+    catch (e) { fout('ml-koppel', e); }
+  }
+  function koppel(droog) {
+    const uit = { samengevoegd: 0, twijfel: 0, geen: 0, acties: [] };
+    if (!droog && (!kanVault() || nu() - koppelVorige < KOPPEL_ELKE_MS)) return uit;
+    if (!droog) koppelVorige = nu();
+    const t = iso(nu());
+    let kands = null;
+    const kandidaten = () => kands || (kands = q.hAlle.all().filter((c) => c.status === 'actief' && (c.soort === 'reis' || isFotoalbum(c))).map((c) => {
+      const w = wanneerInfo(c, paginaLees(c.hid), null);
+      if (!w.van || !w.tot || w.precisie !== 'dag') return null;
+      const van = dagNr(w.van), tot = dagNr(w.tot);
+      return Number.isFinite(van) && Number.isFinite(tot) && tot - van < KOPPEL_MAX_DAGEN ? { h: c, van, tot } : null;
+    }).filter(Boolean));
+    for (const h of q.hAlle.all()) {
+      if (h.status !== 'actief' || h.soort !== 'opname') continue;
+      const r = q.ramble.get(h.ref);
+      if (!r || r.status !== 'notitie' || r.proef) continue;
+      const k = q.koppel.get(h.hid);
+      if (k && (k.uitkomst === 'samengevoegd' || k.uitkomst === 'losgemaakt')) continue;
+      const p = paginaLees(h.hid), s = sam(h, p);
+      if (!s || s.stand !== 'klaar' || !s.delen || !s.delen.length) continue;   // verhaal nog niet klaar: later opnieuw
+      const w = wanneerInfo(h, p, s);
+      if (!w.van || !w.tot || w.precisie !== 'dag') continue;                   // geen datum op dagniveau: later opnieuw (David kan er een zetten)
+      const ov = dagNr(w.van), ot = dagNr(w.tot);
+      if (!Number.isFinite(ov) || !Number.isFinite(ot) || ot - ov >= KOPPEL_MAX_DAGEN) continue;
+      const rk = kandidaten().filter((c) => c.van <= ot + 1 && ov <= c.tot + 1), raak = rk.map((c) => c.h);
+      const beletsel = (c) => {
+        const a = F ? F.kort(c.hid) : null;
+        if (q.sVan.all(c.hid).some((x) => x.status !== 'weggegooid')) return 'kandidaat heeft eigen stukken';
+        if (c.zicht_familie || c.zicht_vrienden || c.kring_familie === 1 || c.kring_shizzle === 1 || (a && a.foto_delen)) return 'kandidaat staat zichtbaar gezet';
+        return '';
+      };
+      const periode = w.van + '/' + w.tot;
+      const sleutel = periode + '#' + sha256(rk.map((c) => c.h.hid + '|' + c.van + '|' + c.tot + '|' + beletsel(c.h)).sort().join(';')).slice(0, 16);
+      if (k && k.sleutel === sleutel) continue;                                 // al beoordeeld met deze datum en deze kandidaten
+      let uitkomst = raak.length === 1 ? 'samengevoegd' : raak.length ? 'twijfel' : 'geen', reden = raak.length > 1 ? raak.length + ' kandidaten' : '';
+      if (raak.length === 1) { const b = beletsel(raak[0]); if (b) { uitkomst = 'twijfel'; reden = b; } }
+      uit.acties.push({ opname: h.hid, kandidaten: raak.map((c) => c.hid), uitkomst, reden });
+      uit[uitkomst]++;
+      if (droog) continue;
+      if (uitkomst !== 'samengevoegd') {
+        q.koppelZet.run(h.hid, sleutel, uitkomst, raak.length === 1 ? raak[0].hid : null, 0, 0, t);
+        if (uitkomst === 'twijfel' && !(k && k.uitkomst === 'twijfel' && String(k.sleutel).split('#')[0] === periode))   // één box-rij per periode
+          koppelBox(['opname ' + h.hid + ', kandidaten ' + raak.map((c) => c.hid).join(', ') + ' (' + reden + '); periode ' + periode,
+          'niets samengevoegd; met de hand: python3 /opt/data/mk-scripts/wv2732/samengevoegd.py voeg <hid-weg> <hid-blijft>']);
+        continue;
+      }
+      const c = raak[0];
+      const titelNieuw = eigenTitel(h, p) ? null : titelVan(c, paginaLees(c.hid), null);
+      let album = false;
+      tx(() => {
+        if (q.hBij.run('samengevoegd', h.hid, t, c.hid, 'actief').changes !== 1) throw new Error('kandidaat niet meer actief');
+        album = F ? F.verhuis(c.hid, h.hid) : false;
+        q.koppelZet.run(h.hid, sleutel, 'samengevoegd', c.hid, titelNieuw ? 1 : 0, album ? 1 : 0, t);
+      });
+      if (titelNieuw) {
+        try { paginaZekerTitel(h, titelNieuw, 'naamgeving'); }
+        catch (e) { fout('ml-koppel-titel', e); db.prepare('UPDATE ml_koppel SET titel_gezet = 0 WHERE hid = ?').run(h.hid); }
+      }
+      kands = kands.filter((x) => x.h.hid !== c.hid);
+    }
+    return uit;
+  }
+  // wv2732: een samengevoegde herinnering weer los (status actief, bij leeg). Kwam hij van het vanzelf koppelen, dan ook het album terug naar
+  // hem en de titel van de opname terug naar de standaard (alleen als die nog de titel van de kandidaat is); die opname wordt niet opnieuw
+  // vanzelf gekoppeld. Ook voor de samenvoegingen met de hand (wv2730/wv2733: alleen de status).
+  function losmaken(hid) {
+    const c = vind(hid);
+    if (!c || c.status !== 'samengevoegd') return { status: 409, body: { ok: false, fout: 'niet samengevoegd' } };
+    const h = c.bij ? q.h.get(c.bij) : null;
+    const k = h ? q.koppel.get(h.hid) : null;
+    const vanKoppel = !!(k && k.uitkomst === 'samengevoegd' && k.kandidaat === c.hid);
+    if (vanKoppel && k.titel_gezet && !kanVault()) return { status: 503, body: { ok: false, fout: 'de Second Brain is even in onderhoud; probeer het zo opnieuw' } };
+    const t = iso(nu());
+    let album = false, titel = false;
+    tx(() => {
+      if (q.hBij.run('actief', null, t, c.hid, 'samengevoegd').changes !== 1) throw new Error('niet meer samengevoegd');
+      if (vanKoppel) { if (k.album_gezet && F) album = F.terugVerhuis(h.hid, c.hid, c.soort, c.ref); q.koppelUitkomst.run('losgemaakt', t, h.hid); }
+    });
+    if (vanKoppel && k.titel_gezet) {
+      const p = paginaLees(h.hid);
+      if (fmVeld(p, 'titel_bron') === 'naamgeving' && fmVeld(p, 'titel') === titelVan(c, paginaLees(c.hid), null)) {
+        try { paginaVelden(h, { titel: yaml(standaardTitel(h)), titel_bron: 'standaard' }); titel = true; } catch (e) { fout('ml-koppel-titel', e); }
+      }
+    }
+    vuilAlle();
+    return { status: 200, body: { ok: true, hid: c.hid, bij: h ? h.hid : null, album, titel } };
+  }
   // wv2136 (Tripper): de herinnering bij een reispagina (hid, aantal opgenomen stukken, album als status/aantal); alleen lezen, geen bijwerken()
   function reisKoppeling(rel) {
-    const h = q.hRef.get('reis', String(rel));
+    let h = q.hRef.get('reis', String(rel));
+    if (h && h.status === 'samengevoegd' && h.bij) h = q.h.get(h.bij);   // wv2732: de herinnering waarin de reis nu staat
     if (!h || h.status === 'weg') return null;
     const a = F ? F.kort(h.hid) : null;
     return { hid: h.hid, stukken: q.sVan.all(h.hid).filter((s) => s.status === 'opgenomen').length, album: a ? { status: a.status, aantal: a.aantal } : null };
@@ -1571,14 +1713,15 @@ function maak(o) {
   }
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
-    return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, vertelscript: S ? S.info() : null,
+    const ks = Object.fromEntries(db.prepare('SELECT uitkomst, count(*) n FROM ml_koppel GROUP BY uitkomst').all().map((r) => [r.uitkomst, r.n]));
+    return { herinneringen: q.hAlle.all().length, samengevoegd: q.hAlle.all().filter((h) => h.status === 'samengevoegd').length, koppel: ks, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, vertelscript: S ? S.info() : null,
       vertel_auto: S ? { uit: fs.existsSync(AUTO_UIT), laatst: autoLaatst } : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
   return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling, fotoReizen,
     plaatjeVoorstel, plaatjeMaken, plaatjeWeg, _P: P, vertellerMaken, vertellerDeel, vertellerWeg, _V: V,
     vertelVerhaalMaken, vertelVerhaalDeel, vertelVerhaalWeg, _S: S, autoVertel,
-    fotoSync, hoofdpersonen, kring, kringVoorstelTerug, kringen, publiekLijst, magKring, tekstRaak: (l) => (l.some((t) => geheimRaak(t)) ? 'geheim' : markerRaak(l) ? 'marker' : null), _db: db, _setVoor: setVoor, _F: F,
+    fotoSync, koppel, losmaken, hoofdpersonen, kring, kringVoorstelTerug, kringen, publiekLijst, magKring, tekstRaak: (l) => (l.some((t) => geheimRaak(t)) ? 'geheim' : markerRaak(l) ? 'marker' : null), _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }
 

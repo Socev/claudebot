@@ -358,7 +358,29 @@ function maak(o) {
     return { albums: t, delen: q.alle.all().filter((r) => r.foto_delen).length, sleutel: stand.sleutel, fout: stand.fout, laatst: stand.op,
       fotospoor: { gerekend: sp.n || 0, periode: sp.periode || 0, punt: sp.punt || 0 } };
   }
-  return { sync, kort, spoor, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, _db: db, _cache: cache };
+  // wv2732: een samengevoegde herinnering geeft haar album aan de herinnering die blijft (alleen de koppelrij verhuist; in Immich verandert
+  // niets). Alleen als `naar` geen album heeft of een leeg album (aantal 0) en `van` een actief album met foto's. Een leeg album van `naar`
+  // blijft in Immich staan; sync neemt het via zijn code weer over zodra de koppelrij terug is (terugVerhuis). → true als verhuisd.
+  function verhuis(van, naar) {
+    const a = q.a.get(van), b = q.a.get(naar);
+    if (!a || a.status !== 'actief' || !a.album_id || !(a.aantal > 0)) return false;
+    if (b && b.status === 'actief' && b.aantal > 0) return false;
+    if (b) db.prepare('DELETE FROM ml_album WHERE hid = ?').run(naar);
+    db.prepare('UPDATE ml_album SET hid = ? WHERE hid = ?').run(naar, van);
+    db.prepare('DELETE FROM ml_fotospoor WHERE hid IN (?, ?)').run(van, naar);
+    cache.delete(van); cache.delete(naar);
+    return true;
+  }
+  // Terug: alleen de rij die van `van` kwam (zelfde code = sha256(soort|ref) van van) en alleen als `van` nu geen rij heeft. → true als terug.
+  function terugVerhuis(naar, van, soortVan, refVan) {
+    const b = q.a.get(naar);
+    if (!b || b.sleutel !== code(soortVan, refVan) || q.a.get(van)) return false;
+    db.prepare('UPDATE ml_album SET hid = ? WHERE hid = ?').run(van, naar);
+    db.prepare('DELETE FROM ml_fotospoor WHERE hid IN (?, ?)').run(van, naar);
+    cache.delete(van); cache.delete(naar);
+    return true;
+  }
+  return { sync, kort, spoor, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, verhuis, terugVerhuis, _db: db, _cache: cache };
 }
 
 module.exports = { maak, code, albumNaam, socevsNaam, omschrijving, spoorUit, VOORVOEGSEL, MERK, MAX_DEEL };

@@ -762,7 +762,8 @@ test('wv2484 als verhaal vertellen: script via Claude (alleen op de tik), gecach
     o.klok.t += 11000; antw = '[softly] Proefkamp Vuur. Het kampvuur in Proefdorp.';
     assert.strictEqual(o.ml.vertelVerhaalMaken(ha, { opnieuw: true }).status, 202); await wacht(ha);
     assert.strictEqual(vragen.length, 2);
-    assert.strictEqual(o.ml.detail(ha).body.herinnering.verteller_verhaal.script.tekst, antw);
+    // wv2730: [softly] in de eerste alinea gaat eruit (niet fluisterend beginnen)
+    assert.strictEqual(o.ml.detail(ha).body.herinnering.verteller_verhaal.script.tekst, antw.replace('[softly] ', ''));
     // nieuwe verhaalversie: script en vertelling verouderd, niet afspelen
     o.staat.verhalen[RA] = { titel: 'Proefkamp Vuur', alineas: ['Een ander verhaal over het kampvuur.'] };
     const d2 = o.ml.detail(ha).body.herinnering.verteller_verhaal;
@@ -941,5 +942,225 @@ test('wv2453 (Tripper): fotoReizen geeft alleen actieve Google-fotoalbums met ca
     assert.strictEqual(r[0].stukken, 0); assert.strictEqual(r[0].album, null, 'zonder Immich geen album');
     assert.ok(!('ref' in r[0]) && !/google:/.test(JSON.stringify(r)), 'geen albumcode of pad naar buiten');
     assert.strictEqual(o.ing._db.prepare('SELECT count(*) AS n FROM ml_herinnering').get().n, voor, 'maakt niets aan');
+  } finally { o.sluit(); }
+});
+
+// ── wv2732: een opname bij de bestaande herinnering (status 'samengevoegd', kolom bij, vanzelf koppelen, losmaken) ──
+const ENG = '20_Prive/Reizen/2023 - Proefreis Engeland.md';
+function koppelOmgeving(extra) {
+  const o = omgeving(extra);
+  o.opname(RA, 'reizen', false);
+  o.reis('2023 - Proefreis Engeland.md', 'reis', '2023-06-29 – 2023-07-02');
+  o.staat.verhalen[RA] = { titel: 'Regen in Proefdorp', alineas: ['Het regende drie dagen.'], datum_van: '2023-07-03', datum_tot: '2023-07-03', datum_precisie: 'dag' };
+  o.ml.lijst();
+  o.verder = () => { o.klok.t += 6 * 60000; };
+  return o;
+}
+const stat = (o, hid) => o.ing._db.prepare('SELECT status, bij FROM ml_herinnering WHERE hid = ?').get(hid);
+
+test('wv2732: precies één reis met overlappende periode (± 1 dag) → samengevoegd bij de opname; titel van de reis; verborgen in lijst, delen en toonmodus', () => {
+  const o = koppelOmgeving();
+  try {
+    const ho = o.hid('opname', RA), hr = o.hid('reis', ENG);
+    assert.strictEqual(o.ml.lijst().body.herinneringen.find((h) => h.hid === ho).titel, 'Regen in Proefdorp', 'vooraf: titel van het verhaal');
+    const d = o.ml.koppel(true);
+    assert.deepStrictEqual(d.acties, [{ opname: ho, kandidaten: [hr], uitkomst: 'samengevoegd', reden: '' }]);
+    assert.strictEqual(stat(o, hr).status, 'actief', 'droog schrijft niets');
+    const u = o.ml.koppel(false);
+    assert.strictEqual(u.samengevoegd, 1);
+    assert.deepStrictEqual({ ...stat(o, hr) }, { status: 'samengevoegd', bij: ho });
+    const l = o.ml.lijst().body.herinneringen;
+    assert.ok(!l.some((h) => h.hid === hr), 'reis niet meer in de lijst');
+    assert.strictEqual(l.find((h) => h.hid === ho).titel, 'Proefreis Engeland 2023', 'opname kreeg de titel van de reis');
+    assert.strictEqual(o.ml.lijst({ toon: true }).body.herinneringen.some((h) => h.hid === hr), false, 'niet in de toonmodus');
+    assert.strictEqual(o.ml.toonbaar(hr), false);
+    assert.strictEqual(o.ml.zicht(hr, { kring: 'familie', aan: true }).status, 409, 'niet te delen');
+    assert.ok(!o.ml.kringen().body.herinneringen.some((h) => h.hid === hr), 'niet in de kringlijst');
+    assert.strictEqual(o.ml.reisKoppeling(ENG).hid, ho, 'Tripper wijst naar de opname');
+    o.ml.lijst(); o.verder(); o.ml.koppel(false);
+    assert.strictEqual(stat(o, hr).status, 'samengevoegd', 'bijwerken en een tweede ronde zetten hem niet terug');
+    assert.strictEqual(o.ing._db.prepare('SELECT uitkomst FROM ml_koppel WHERE hid = ?').get(ho).uitkomst, 'samengevoegd');
+  } finally { o.sluit(); }
+});
+
+test('wv2732: losmaken zet de reis terug, de titel terug naar de standaard en koppelt die opname niet opnieuw', () => {
+  const o = koppelOmgeving();
+  try {
+    const ho = o.hid('opname', RA), hr = o.hid('reis', ENG);
+    o.ml.koppel(false);
+    assert.strictEqual(o.ml.losmaken(ho).status, 409, 'alleen een samengevoegde');
+    const u = o.ml.losmaken(hr);
+    assert.strictEqual(u.status, 200); assert.strictEqual(u.body.titel, true);
+    assert.deepStrictEqual({ ...stat(o, hr) }, { status: 'actief', bij: null });
+    const l = o.ml.lijst().body.herinneringen;
+    assert.ok(l.some((h) => h.hid === hr));
+    assert.strictEqual(l.find((h) => h.hid === ho).titel, 'Regen in Proefdorp', 'titel terug naar die van het verhaal');
+    o.verder();
+    assert.strictEqual(o.ml.koppel(false).samengevoegd, 0, 'losgemaakt = niet opnieuw');
+    assert.strictEqual(stat(o, hr).status, 'actief');
+    assert.strictEqual(o.ml.losmaken(hr).status, 409);
+  } finally { o.sluit(); }
+});
+
+test('wv2732: Davids eigen titel op de opname blijft staan', () => {
+  const o = koppelOmgeving();
+  try {
+    const ho = o.hid('opname', RA);
+    assert.strictEqual(o.ml.titel(ho, { titel: 'Mijn eigen naam' }).status, 200);
+    o.ml.koppel(false);
+    assert.strictEqual(stat(o, o.hid('reis', ENG)).status, 'samengevoegd');
+    assert.strictEqual(o.ml.lijst().body.herinneringen.find((h) => h.hid === ho).titel, 'Mijn eigen naam');
+    assert.strictEqual(o.ml.losmaken(o.hid('reis', ENG)).body.titel, false);
+    assert.strictEqual(o.ml.lijst().body.herinneringen.find((h) => h.hid === ho).titel, 'Mijn eigen naam');
+  } finally { o.sluit(); }
+});
+
+test('wv2732: twee kandidaten → niets samengevoegd, één box-rij (niet bij elke ronde)', () => {
+  const box = [];
+  const o = koppelOmgeving({ box: (t) => box.push(t) });
+  try {
+    o.reis('2023 - Proefreis Wales.md', 'reis', '2023-07-04 – 2023-07-06');
+    o.ml.lijst();
+    const u = o.ml.koppel(false);
+    assert.strictEqual(u.samengevoegd, 0); assert.strictEqual(u.twijfel, 1);
+    assert.strictEqual(o.ml.lijst().body.herinneringen.filter((h) => h.soort === 'reis').length, 2);
+    assert.strictEqual(box.length, 1); assert.ok(/twijfel, wv2732/.test(box[0]) && box[0].includes(o.hid('opname', RA)));
+    assert.ok(!/Proefreis|Proefdorp|Regen/.test(box[0]), 'geen titels in de box');
+    o.verder(); o.ml.koppel(false);
+    o.reis('2023 - Proefreis Ierland.md', 'reis', '2022-01-01 – 2022-01-03'); o.ml.lijst(); o.verder(); o.ml.koppel(false);
+    assert.strictEqual(box.length, 1, 'geen tweede box-rij voor dezelfde periode');
+  } finally { o.sluit(); }
+});
+
+test('wv2732: kandidaat met eigen stukken of zichtbaar gezet → twijfel; buiten ± 1 dag → geen', () => {
+  const o = koppelOmgeving({ box: () => {} });
+  try {
+    const hr = o.hid('reis', ENG);
+    assert.strictEqual(o.ml.tekst(hr, { tekst: 'Het regende de hele week.' }).status, 200);
+    const u = o.ml.koppel(false);
+    assert.strictEqual(u.twijfel, 1); assert.strictEqual(u.acties[0].reden, 'kandidaat heeft eigen stukken');
+    assert.strictEqual(stat(o, hr).status, 'actief');
+  } finally { o.sluit(); }
+  const o2 = koppelOmgeving({ box: () => {} });
+  try {
+    const hr = o2.hid('reis', ENG);
+    assert.strictEqual(o2.ml.zicht(hr, { kring: 'familie', aan: true }).status, 200);
+    assert.strictEqual(o2.ml.koppel(false).acties[0].reden, 'kandidaat staat zichtbaar gezet');
+    assert.strictEqual(stat(o2, hr).status, 'actief');
+    // review MOET 2: verandert de kandidaat (zichtbaar weer uit), dan opnieuw beoordeeld
+    o2.verder(); assert.strictEqual(o2.ml.koppel(false).acties.length, 0, 'zelfde stand: niet opnieuw');
+    assert.strictEqual(o2.ml.zicht(hr, { kring: 'familie', aan: false }).status, 200);
+    o2.verder(); assert.strictEqual(o2.ml.koppel(false).samengevoegd, 1);
+    assert.strictEqual(stat(o2, hr).status, 'samengevoegd');
+  } finally { o2.sluit(); }
+  const o3 = koppelOmgeving();
+  try {
+    o3.staat.verhalen[RA].datum_van = o3.staat.verhalen[RA].datum_tot = '2023-07-04';   // 2 dagen na het einde van de reis
+    const u = o3.ml.koppel(false);
+    assert.strictEqual(u.geen, 1); assert.strictEqual(stat(o3, o3.hid('reis', ENG)).status, 'actief');
+  } finally { o3.sluit(); }
+});
+
+test('wv2732: opname zonder datum op dagniveau of zonder verhaal → niets (en later wel, als de datum er is)', () => {
+  const o = koppelOmgeving();
+  try {
+    const ho = o.hid('opname', RA), hr = o.hid('reis', ENG);
+    o.staat.verhalen[RA] = { titel: 'Regen', alineas: ['Het regende.'], datum_van: '2023-01-01', datum_tot: '2023-12-31', datum_precisie: 'jaar' };
+    assert.deepStrictEqual(o.ml.koppel(false).acties, []);
+    delete o.staat.verhalen[RA]; o.verder();
+    assert.deepStrictEqual(o.ml.koppel(false).acties, []);
+    assert.strictEqual(o.ing._db.prepare('SELECT count(*) n FROM ml_koppel').get().n, 0);
+    assert.strictEqual(stat(o, hr).status, 'actief');
+    assert.strictEqual(o.ml.wanneer(ho, { van: '2023-06-30' }).status, 200);   // David zet zelf een datum
+    o.verder();
+    assert.strictEqual(o.ml.koppel(false).samengevoegd, 0, 'zonder verhaal nog niet');
+    o.staat.verhalen[RA] = { titel: 'Regen', alineas: ['Het regende.'] }; o.verder();
+    assert.strictEqual(o.ml.koppel(false).samengevoegd, 1, 'Davids datum telt');
+  } finally { o.sluit(); }
+});
+
+test('wv2732: reis die pas later voorbij is → de opname wordt opnieuw beoordeeld en dan samengevoegd', () => {
+  const o = omgeving();
+  try {
+    o.opname(RA, 'reizen', false);
+    o.staat.verhalen[RA] = { titel: 'Kamperen', alineas: ['We kampeerden.'], datum_van: '2026-10-30', datum_tot: '2026-10-30', datum_precisie: 'dag' };
+    o.reis('2026 - Proefkamp.md', 'reis', '2026-10-29 – 2026-10-31');   // vandaag = 31-10: nog niet voorbij
+    o.ml.lijst();
+    assert.strictEqual(o.ml.koppel(false).geen, 1);
+    o.klok.t += 6 * 60000;
+    // reisVandaag staat vast op 2026-10-31; zet de reis een dag eerder af
+    o.reis('2026 - Proefkamp.md', 'reis', '2026-10-29 – 2026-10-30');
+    o.ml.lijst();
+    assert.strictEqual(o.ml.koppel(false).samengevoegd, 1);
+  } finally { o.sluit(); }
+});
+
+test('wv2732: is de opname weg, dan wordt de samengevoegde reis weer actief', () => {
+  const o = koppelOmgeving();
+  try {
+    const hr = o.hid('reis', ENG);
+    o.ml.koppel(false);
+    o.ing._db.prepare("UPDATE ramble SET status = 'weg' WHERE ramble_id = ?").run(RA);
+    o.ml.lijst();
+    assert.deepStrictEqual({ ...stat(o, hr) }, { status: 'actief', bij: null });
+  } finally { o.sluit(); }
+  // review MOET 1: met een verhuisd album gaat het album mee terug
+  const o2 = koppelOmgeving({ immich: { basis: 'https://immich.invalid', albums: async () => [] } });
+  try {
+    const db = o2.ing._db, ho = o2.hid('opname', RA), hr = o2.hid('reis', ENG);
+    const FM = require(path.join(ROOT, 'memorylane-fotos.js'));
+    db.prepare("INSERT INTO ml_album (hid, sleutel, album_id, status, aantal, gemaakt_op) VALUES (?, ?, ?, 'actief', 50, '2026-10-31T00:00:00Z')").run(hr, FM.code('reis', ENG), '00000000-0000-4000-8000-0000000000c1');
+    o2.ml.koppel(false);
+    assert.strictEqual(db.prepare('SELECT hid FROM ml_album').get().hid, ho);
+    db.prepare("UPDATE ramble SET status = 'weg' WHERE ramble_id = ?").run(RA);
+    o2.ml.lijst();
+    assert.strictEqual(stat(o2, hr).status, 'actief');
+    assert.strictEqual(db.prepare('SELECT hid FROM ml_album').get().hid, hr, 'album terug bij de reis');
+    assert.strictEqual(db.prepare('SELECT uitkomst FROM ml_koppel WHERE hid = ?').get(ho).uitkomst, 'losgemaakt');
+  } finally { o2.sluit(); }
+});
+
+test('wv2732: album van de reis gaat naar de opname als die geen of een leeg album heeft, en bij losmaken terug', () => {
+  const nepImmich = { basis: 'https://immich.invalid', albums: async () => [] };
+  const o = koppelOmgeving({ immich: nepImmich });
+  try {
+    const db = o.ing._db, ho = o.hid('opname', RA), hr = o.hid('reis', ENG);
+    const FM = require(path.join(ROOT, 'memorylane-fotos.js'));
+    const ins = db.prepare("INSERT INTO ml_album (hid, sleutel, album_id, status, aantal, gemaakt_op) VALUES (?, ?, ?, 'actief', ?, '2026-10-31T00:00:00Z')");
+    ins.run(hr, FM.code('reis', ENG), '00000000-0000-4000-8000-0000000000a1', 50);
+    ins.run(ho, FM.code('opname', RA), '00000000-0000-4000-8000-0000000000a2', 0);
+    o.ml.koppel(false);
+    assert.strictEqual(db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(ho).album_id, '00000000-0000-4000-8000-0000000000a1');
+    assert.strictEqual(db.prepare('SELECT count(*) n FROM ml_album WHERE hid = ?').get(hr).n, 0);
+    assert.strictEqual(db.prepare('SELECT album_gezet FROM ml_koppel WHERE hid = ?').get(ho).album_gezet, 1);
+    assert.strictEqual(o.ml.losmaken(hr).body.album, true);
+    assert.strictEqual(db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(hr).album_id, '00000000-0000-4000-8000-0000000000a1');
+    assert.strictEqual(db.prepare('SELECT count(*) n FROM ml_album WHERE hid = ?').get(ho).n, 0, 'opname zonder rij; sync neemt zijn eigen album via de code over');
+  } finally { o.sluit(); }
+  const o2 = koppelOmgeving({ immich: nepImmich });
+  try {
+    const db = o2.ing._db, ho = o2.hid('opname', RA), hr = o2.hid('reis', ENG);
+    const FM = require(path.join(ROOT, 'memorylane-fotos.js'));
+    const ins = db.prepare("INSERT INTO ml_album (hid, sleutel, album_id, status, aantal, gemaakt_op) VALUES (?, ?, ?, 'actief', ?, '2026-10-31T00:00:00Z')");
+    ins.run(hr, FM.code('reis', ENG), '00000000-0000-4000-8000-0000000000b1', 50);
+    ins.run(ho, FM.code('opname', RA), '00000000-0000-4000-8000-0000000000b2', 50);
+    o2.ml.koppel(false);
+    assert.strictEqual(stat(o2, hr).status, 'samengevoegd');
+    assert.strictEqual(db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(ho).album_id, '00000000-0000-4000-8000-0000000000b2', 'eigen album met foto\'s blijft');
+    assert.strictEqual(db.prepare('SELECT album_gezet FROM ml_koppel WHERE hid = ?').get(ho).album_gezet, 0);
+  } finally { o2.sluit(); }
+});
+
+test('wv2732: met de hand samengevoegd (status samengevoegd + bij, zonder koppelrij) is verborgen en los te maken', () => {
+  const o = omgeving();
+  try {
+    o.reis('2023 - Proefreis Engeland.md', 'reis', '2023-06-29 – 2023-07-02');
+    o.reis('2022 - Proefstad.md', 'reis', '2022-05-01 – 2022-05-04');
+    o.ml.lijst();
+    const a = o.hid('reis', ENG), b = o.hid('reis', '20_Prive/Reizen/2022 - Proefstad.md');
+    o.ing._db.prepare("UPDATE ml_herinnering SET status = 'samengevoegd', bij = ? WHERE hid = ?").run(b, a);
+    assert.deepStrictEqual(o.ml.lijst().body.herinneringen.map((h) => h.hid), [b]);
+    assert.strictEqual(o.ml.losmaken(a).status, 200);
+    assert.strictEqual(o.ml.lijst().body.herinneringen.length, 2);
   } finally { o.sluit(); }
 });
