@@ -10,7 +10,8 @@
 //   ter plekke  datum in [van − 2, tot + 2] en (land van de kaartbetaling hoort bij de reislanden, of categorie vakantie en reizen, of een
 //               reis-mcc). Reisland = elk land ≠ NL met ≥ 2 kaartbetalingen strikt in [van, tot]: gemeten 8-11 (een korte reis zonder het gezin) gingen de
 //               gezinsuitgaven thuis gewoon door, dus "alles in de periode" klopt niet; één losse buitenlandse webwinkel maakt geen reisland.
-//               Land alleen bij een kaartbetaling (bunq MASTERCARD: counterparty_alias.country of ", LL" in de omschrijving).
+//               Land alleen bij een kaartbetaling (bunq MASTERCARD: counterparty_alias.country of ", LL" in de omschrijving), niet bij
+//               een online betaling (mcc digitale goederen/software/geld overmaken, of een webadres als plaats).
 //   vooraf      alleen af, datum in [van − 183, van − 2), categorie vakantie en reizen of een reis-mcc; of een kenmerkend woord uit de
 //               reistitel in tegenpartij/omschrijving (dan tot 365 dagen vooraf). Naar de eerstvolgende reis. Geen kaartbetaling in het
 //               buitenland (behalve vervoer/reisbureau): dat is ter plekke van een reis, soms een reis zonder reispagina.
@@ -34,6 +35,14 @@ const REIS_CAT = 'vakantie en reizen';
 function reisMcc(m) { const n = Number(m); if (!Number.isInteger(n)) return false; return (n >= 3000 && n <= 3999) || [4411, 4511, 4722, 7011, 7012, 7033, 7512].indexOf(n) >= 0; }
 // vervoer en reisbureau: dat boek je vooraf, ook met de kaart bij een buitenlandse aanbieder (een hotel of camping betaal je ter plekke)
 function boekMcc(m) { const n = Number(m); if (!Number.isInteger(n)) return false; return (n >= 3000 && n <= 3299) || [4411, 4511, 4722].indexOf(n) >= 0; }
+// online betaald (digitale goederen, software, abonnement, geld overmaken), of een webadres als plaats ("primevideo.nl, GB", "amazon.nl, LU"):
+// zegt niets over waar je was. Gemeten 8-11: Google Play (IE), Kobo (IE) en Prime Video (GB) maakten van IE en GB een "reisland".
+const ONLINE_MCC = [4816, 4829, 5734, 5815, 5816, 5817, 5818, 5968, 7372];
+function isOnline(mcc, oms) {
+  if (ONLINE_MCC.indexOf(Number(mcc)) >= 0) return true;
+  const plek = String(oms || '').split(/,\s[A-Z]{2}(?=\s|$)/)[0];
+  return /www\.|\/|\.(com|nl|de|net|org|io|eu|uk|ie|lu|be|fr|co|app)\b/i.test(plek);
+}
 // woorden uit een reistitel die niets over de bestemming zeggen
 const STOP = new Set(['vakantie', 'zomervakantie', 'zomer', 'winter', 'herfst', 'lente', 'voorjaar', 'najaar', 'april', 'augustus', 'september', 'oktober', 'november',
   'december', 'januari', 'februari', 'maart', 'juni', 'juli', 'editie', 'edition', 'trip', 'roadtrip', 'campertrip', 'citytrip', 'stedentrip', 'weekend', 'reis',
@@ -98,7 +107,7 @@ function boekingenRond(A, a, reizen, O) {
   a.db.prepare("SELECT nr, mcc, omschrijving, tegenpartij, bedrag, CASE WHEN json_valid(ruwe_json) THEN json_extract(ruwe_json, '$.type') END AS ty," +
     " CASE WHEN json_valid(ruwe_json) THEN json_extract(ruwe_json, '$.counterparty_alias.country') END AS land," +
     " CASE WHEN json_valid(ruwe_json) THEN json_extract(ruwe_json, '$.merchant_category_code') END AS mcc2 FROM transacties WHERE datum >= ? AND datum <= ?").all(van, totN)
-    .forEach(function (t) { if (per.has(t.nr)) extra.set(t.nr, { land: landVan(t.ty, t.land, t.omschrijving), mcc: t.mcc || t.mcc2 || null, tekst: kaal(String(t.tegenpartij || '') + ' ' + String(t.omschrijving || '')),
+    .forEach(function (t) { if (per.has(t.nr)) extra.set(t.nr, { land: landVan(t.ty, t.land, t.omschrijving), mcc: t.mcc || t.mcc2 || null, online: isOnline(t.mcc || t.mcc2, t.omschrijving), tekst: kaal(String(t.tegenpartij || '') + ' ' + String(t.omschrijving || '')),
       kenmerk: t.bedrag < 0 ? kenmerkVan(t.omschrijving) : null, tp: kaal(t.tegenpartij).replace(/[^a-z]+/g, ' ').trim().split(' ').slice(0, 2).join(' ') }); });
   // termijnen van één boeking (aanbetaling + rest): zelfde tegenpartij en hetzelfde boekingsnummer in de omschrijving, ≥ 2 keer
   const tel = new Map();
@@ -106,7 +115,7 @@ function boekingenRond(A, a, reizen, O) {
   extra.forEach(function (e) { if (e.groep && tel.get(e.groep) < 2) e.groep = null; });
   return Array.from(per.values()).map(function (x) {
     const e = extra.get(x.nr) || {};
-    return Object.assign(x, { kosten: r2(x.kosten), land: e.land || null, reismcc: reisMcc(e.mcc), boekmcc: boekMcc(e.mcc), tekst: e.tekst || '', groep: e.groep || null });
+    return Object.assign(x, { kosten: r2(x.kosten), land: e.land || null, online: !!e.online, reismcc: reisMcc(e.mcc), boekmcc: boekMcc(e.mcc), tekst: e.tekst || '', groep: e.groep || null });
   }).filter(function (x) { return x.kosten !== 0; }).sort(function (p, q) { return p.datum < q.datum ? -1 : p.datum > q.datum ? 1 : p.nr - q.nr; });
 }
 
@@ -126,7 +135,7 @@ function toewijzen(reizen, rijen, labels) {
   const landen = new Map();
   reizen.forEach(function (r) {
     const tel = new Map();
-    rijen.forEach(function (x) { if (x.land && x.land !== 'NL' && x.datum >= r.van && x.datum <= r.tot) tel.set(x.land, (tel.get(x.land) || 0) + 1); });
+    rijen.forEach(function (x) { if (x.land && x.land !== 'NL' && !x.online && x.datum >= r.van && x.datum <= r.tot) tel.set(x.land, (tel.get(x.land) || 0) + 1); });
     landen.set(r.id, Array.from(tel.entries()).filter(function (e) { return e[1] >= 2; }).map(function (e) { return e[0]; }).sort());
   });
   const woorden = new Map(reizen.map(function (r) { return [r.id, titelWoorden(r.titel)]; }));
@@ -144,13 +153,13 @@ function toewijzen(reizen, rijen, labels) {
     // ter plekke
     const tp = reizen.filter(function (r) {
       if (x.datum < plusDagen(r.van, -MARGE) || x.datum > plusDagen(r.tot, MARGE)) return false;
-      return (x.land && landen.get(r.id).indexOf(x.land) >= 0) || x.categorie === REIS_CAT || x.reismcc;
+      return (x.land && !x.online && landen.get(r.id).indexOf(x.land) >= 0) || x.categorie === REIS_CAT || x.reismcc;
     }).sort(function (p, q) {
       const ip = x.datum >= p.van && x.datum <= p.tot ? 0 : 1, iq = x.datum >= q.van && x.datum <= q.tot ? 0 : 1;
       return ip - iq || p.dagen - q.dagen || (p.van < q.van ? -1 : p.van > q.van ? 1 : 0);
     });
     if (tp.length) {
-      const r = tp[0], waarom = x.land && landen.get(r.id).indexOf(x.land) >= 0 ? 'in de reisperiode, in ' + x.land : x.categorie === REIS_CAT ? 'in de reisperiode, vakantie en reizen' : 'in de reisperiode, reisboeking';
+      const r = tp[0], waarom = x.land && !x.online && landen.get(r.id).indexOf(x.land) >= 0 ? 'in de reisperiode, in ' + x.land : x.categorie === REIS_CAT ? 'in de reisperiode, vakantie en reizen' : 'in de reisperiode, reisboeking';
       return zet(r, eraf.has(x.nr + '|' + r.id) ? 'eraf' : 'voorstel', waarom, false);
     }
     // vooraf: alleen af, naar de eerstvolgende reis. Een kaartbetaling in het buitenland is geen vooraf-boeking (gemeten 8-11: de

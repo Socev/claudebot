@@ -48,6 +48,8 @@ PR.push(p('2025-07-15', -200, 'Energie Proef', 'SEPA Incasso termijn'));        
 PR.push(p('2025-07-21', -60, 'Autogrill Proef', 'Autogrill Proef Verona, IT', {}, kaart('IT')));            // tot + 1
 PR.push(p('2025-07-25', -45, 'Trattoria Laat', 'Trattoria Laat Verona, IT', {}, kaart('IT')));             // tot + 5: niet, wel in meer
 KI.push(p('2025-07-13', -25, 'Webwinkel Proef', 'Webwinkel Proef Gent, BE', {}, kaart('BE')));              // één losse buitenlandse webwinkel
+PR.push(p('2025-07-14', -4, 'Appwinkel Proef', 'Appwinkel Proef Dublin, IE', { mcc: '5818' }, kaart('IE')));  // online (digitale goederen), 2× in de periode
+PR.push(p('2025-07-16', -9, 'Boekenapp Proef', 'Boekenapp Proef boekenapp.ie, IE', {}, kaart('IE')));          // online (webadres als plaats)
 const a = A.open(BD);
 A.rekeningenSync(a, REK);
 A.bij(a, 'pr', PR, {}); A.bij(a, 'sp', SP, {}); A.bij(a, 'ki', KI, {});
@@ -75,9 +77,10 @@ if (R) {
   toets('reizenOpVorm: geannuleerd, kapotte en omgekeerde periode vallen weg; nieuwste eerst', o.reizen.map((r) => r.id).join() === [R3.id, R1.id, R2.id].join(), o.reizen.map((r) => r.id));
   const d1 = ov(R1.id).reis, d2 = ov(R2.id).reis, d3 = ov(R3.id).reis;
   const namen = (d, f) => d.posten.filter(f || (() => true)).map((x) => x.naam).sort();
-  toets('reisland: IT bij R1 en R3 (≥ 2 kaartbetalingen strikt in de periode), DK bij R2; BE (één webwinkel) en NL niet', d1.landen.join() === 'IT' && d3.landen.join() === 'IT' && d2.landen.join() === 'DK', [d1.landen, d2.landen, d3.landen]);
+  toets('reisland: IT bij R1 en R3 (≥ 2 kaartbetalingen strikt in de periode), DK bij R2; BE (één webwinkel), IE (twee online betalingen) en NL niet', d1.landen.join() === 'IT' && d3.landen.join() === 'IT' && d2.landen.join() === 'DK', [d1.landen, d2.landen, d3.landen]);
   toets('ter plekke R1: trattoria, supermarkt en de autogrill van tot + 1; niet thuis (AH), niet de webwinkel, niet tot + 5, geen vaste last, geen intern, geen USD',
     JSON.stringify(namen(d1, (x) => !x.vooraf)) === JSON.stringify(['Autogrill Proef', 'Supermercato Proef', 'Trattoria Proef']), namen(d1));
+  toets('online betalingen (appwinkel mcc 5818, webadres als plaats) zijn geen voorstel en staan wel in meer', !d1.posten.some((x) => /Appwinkel|Boekenapp/.test(x.naam)) && d1.meer.some((x) => x.naam === 'Appwinkel Proef'), namen(d1));
   toets('overlap (review MOET 1): rifugio en gelateria op 15-7 bij de kortste reis (R3), niet ook bij R1', JSON.stringify(namen(d3)) === JSON.stringify(['Gelateria Proef', 'Rifugio Proef']) &&
     !d1.posten.some((x) => /Rifugio|Gelateria/.test(x.naam)), [namen(d1), namen(d3)]);
   toets('vooraf: tickets en beide termijnen naar de eerstvolgende reis (R2), "Toscane Tours" op naam naar R1 (312 dagen vooraf)', ['Vliegmaatschappij Proef', 'Campingbureau Proef'].every((t) => d2.posten.some((x) => x.naam === t && x.vooraf && x.status === 'voorstel')) &&
@@ -112,11 +115,15 @@ if (R) {
     !lab(R1b.id, triat, null, L2).fout && a.db.prepare('SELECT count(*) AS n FROM reis_label WHERE nr = ?').get(triat).n === 0, j1.posten.map((x) => [x.naam, x.status]));
   toets('totaal = som van wat telt (erbij + voorstel ter plekke + sterk)', [R1, R2, R3].every((r) => { const d = ov(r.id).reis; return Math.abs(d.totaal - d.posten.filter((x) => x.status === 'erbij' || (x.status === 'voorstel' && (!x.vooraf || x.sterk))).reduce((s, x) => s + x.bedrag, 0)) < 0.01; }), null);
   // kruisproef: zonder de reisland-regel (elk land telt) moeten de thuisuitgave en de webwinkel bij R1 komen: de toets hierboven zou rood zijn
-  const bron = fs.readFileSync('financien-reis.js', 'utf8'), kapot = bron.replace("(x.land && landen.get(r.id).indexOf(x.land) >= 0) || x.categorie === REIS_CAT", "x.land || x.categorie === REIS_CAT");
+  const bron = fs.readFileSync('financien-reis.js', 'utf8'), kapot = bron.replace("(x.land && !x.online && landen.get(r.id).indexOf(x.land) >= 0) || x.categorie === REIS_CAT", "x.land || x.categorie === REIS_CAT");
   const kp = path.join(W, 'financien-reis-kruis.js');
   fs.writeFileSync(kp, kapot.replace("require('./financien-overzicht.js')", "require(" + JSON.stringify(path.resolve('financien-overzicht.js')) + ")"));
   const K = require(kp), kd = K.reizenOverzicht(A, a, { reizen: LIJST, reis: R1.id, nu: '2025-11-08' }).reis;
   toets('kruisproef: zonder reisland-regel komen AH thuis en de webwinkel bij de reis (de regel doet dus iets)', kapot !== bron && kd.posten.some((x) => x.naam === 'Albert Heijn 1234') && kd.posten.some((x) => x.naam === 'Webwinkel Proef'), namen(kd));
+  const kapot2 = bron.replace("if (ONLINE_MCC.indexOf(Number(mcc)) >= 0) return true;", "return false;"), kp2 = path.join(W, 'financien-reis-kruis2.js');
+  fs.writeFileSync(kp2, kapot2.replace("require('./financien-overzicht.js')", "require(" + JSON.stringify(path.resolve('financien-overzicht.js')) + ")"));
+  const kd2 = require(kp2).reizenOverzicht(A, a, { reizen: LIJST, reis: R1.id, nu: '2025-11-08' }).reis;
+  toets('kruisproef: zonder de online-uitsluiting wordt IE een reisland (de regel doet dus iets)', kapot2 !== bron && kd2.landen.indexOf('IE') >= 0, kd2.landen);
   // bank-lezer zoals de pod het aanroept
   const kind = (op, inv) => { const q = spawnSync(process.execPath, ['--no-warnings', 'bank-lezer.js', op], { input: JSON.stringify(inv), env: { PATH: process.env.PATH, BANK_DIR: BD, TZ: 'Europe/Amsterdam' }, encoding: 'utf8', timeout: 60000 });
     try { return JSON.parse(String(q.stdout).trim().split('\n').pop()); } catch (e) { return { stdout: String(q.stdout).slice(0, 200), stderr: String(q.stderr).slice(0, 300) }; } };
