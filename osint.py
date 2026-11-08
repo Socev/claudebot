@@ -196,7 +196,13 @@ def nep_antwoord(url):
     return None
 
 
-def haal(ctx, bron, url, naar_buiten, soort='extern', data=None, hdr=None, timeout=25, binair=False, maxb=4_000_000, stil=False, metcode=False):
+class GeenDoorsturen(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None   # wv2712 (review-MOET 1): een 3xx blijft een 3xx (HTTPError), er wordt niets gevolgd
+
+
+def haal(ctx, bron, url, naar_buiten, soort='extern', data=None, hdr=None, timeout=25, binair=False, maxb=4_000_000, stil=False, metcode=False,
+         redirects=True, totaal=None):
     """De enige weg naar het netwerk. soort extern = buiten ons systeem; eigen = eigen pod/n8n. De poort zit hier (poort_open).
     stil = niet per aanroep loggen (de aanroeper zet één gebundelde regel, bijv. 700 sites voor één gebruikersnaam).
     metcode = (status, inhoud) teruggeven."""
@@ -218,9 +224,21 @@ def haal(ctx, bron, url, naar_buiten, soort='extern', data=None, hdr=None, timeo
             body = data if isinstance(data, bytes) else json.dumps(data).encode()
             h.setdefault('Content-Type', 'application/json')
         rq = urllib.request.Request(url, body, h)
+        open_ = urllib.request.build_opener(GeenDoorsturen).open if not redirects else urllib.request.urlopen
         try:
-            with urllib.request.urlopen(rq, timeout=timeout) as r:
-                b = r.read(maxb)
+            with open_(rq, timeout=timeout) as r:
+                if totaal:   # wv2712: harde totaalgrens (een druppelende host houdt de zoekvraag niet op)
+                    eind, b = time.time() + totaal, bytearray()
+                    while len(b) < maxb:
+                        c = r.read(min(65536, maxb - len(b)))
+                        if not c:
+                            break
+                        b += c
+                        if time.time() > eind:
+                            raise TimeoutError('timed out (totaal)')
+                    b = bytes(b)
+                else:
+                    b = r.read(maxb)
                 status = str(r.status)
         except urllib.error.HTTPError as e:
             status = str(e.code)
@@ -1314,21 +1332,45 @@ def afstand_m(lon1, lat1, lon2, lat2):
     return int(round(math.hypot((lon2 - lon1) * 111320 * math.cos(math.radians(lat1)), (lat2 - lat1) * 110570)))
 
 
+def host_publiek(h):
+    """wv2712 (review-MOET 1): alle adressen van de host moeten publiek zijn (geen 10/8, 127/8, 169.254/16, 100.64/10, ::ffff:…, enz.).
+    Toets: OSINT_NEP_DNS = json {host: ip}; in de nepstand zonder kaart = publiek (er gaat toch niets naar buiten)."""
+    import ipaddress, socket
+    if NEP:
+        try:
+            m = json.load(open(os.environ.get('OSINT_NEP_DNS') or '/dev/null'))
+        except Exception:
+            m = {}
+        ips = [m.get(h, '93.184.216.34')]
+    else:
+        try:
+            ips = sorted({a[4][0] for a in socket.getaddrinfo(h, 443, proto=socket.IPPROTO_TCP)})
+        except OSError:
+            return False
+    try:
+        adr = [ipaddress.ip_address(str(i).split('%')[0]) for i in ips]
+    except ValueError:
+        return False
+    return bool(adr) and all(a.is_global and not a.is_multicast and (getattr(a, 'ipv4_mapped', None) is None or a.ipv4_mapped.is_global) for a in adr)
+
+
 def foto_url_ok(u):
-    h = up.urlsplit(str(u or '')).hostname or ''
-    return str(u or '').startswith('https://') and '.' in h and not re.match(r'^[\d.]+$|^\[', h) and not PRIV_IP.match(h)
+    p = up.urlsplit(str(u or ''))
+    h = p.hostname or ''
+    return p.scheme == 'https' and p.port in (None, 443) and re.fullmatch(r'(?:[a-z0-9-]+\.)+[a-z]{2,}', h) is not None and host_publiek(h)
 
 
 def mini(ctx, bron, url):
+    """Miniatuur van een straatfoto: alleen https naar een publieke host (url uit het antwoord van de dienst), geen doorsturen, ≤ 400 kB en ≤ 15 s."""
     if not foto_url_ok(url):
         return None
     try:
-        x = haal(ctx, bron, url, 'foto-id van de dienst (geen adres)', binair=True, timeout=20, maxb=400_000)
+        st, x = haal(ctx, bron, url, 'foto-id van de dienst (geen adres)', binair=True, timeout=8, maxb=400_000, redirects=False, totaal=15, metcode=True)
     except PoortDicht:
         raise
     except Exception:
         return None
-    return ('data:image/jpeg;base64,' + base64.b64encode(x).decode()) if x and x[:3] == b'\xff\xd8\xff' else None
+    return ('data:image/jpeg;base64,' + base64.b64encode(x).decode()) if st in ('200', 'nep') and x and x[:3] == b'\xff\xd8\xff' else None
 
 
 def straatbeeld(ctx, lon, lat):
@@ -1756,7 +1798,11 @@ def klonen(im, np):
             p = np.nonzero(np.all(qs[n:] == qs[:-n], axis=1))[0]
             a, b = order[p], order[p + n]
             ok = np.abs(F[a] - F[b]).max(axis=1) <= 3.5
-            pa.append(a[ok]); pb.append(b[ok])
+            a, b = a[ok], b[ok]
+            if len(a) > 400_000:   # review-ZOU 2: een glad beeld geeft miljoenen paren; gelijkmatig uitdunnen houdt geheugen en tijd begrensd
+                k_ = np.linspace(0, len(a) - 1, 400_000).astype(np.int64)
+                a, b = a[k_], b[k_]
+            pa.append(a); pb.append(b)
     a, b = idx[np.concatenate(pa)], idx[np.concatenate(pb)]
     # scherp: één pixel ernaast moet duidelijk slechter passen, anders is het een glad verloop dat overal past (geen kopie)
     ok = (b % gw < gw - 1) & (b + gw < gh * gw) & (a % gw < gw - 1) & (a + gw < gh * gw)
@@ -1837,6 +1883,8 @@ def forensiek(inhoud):
             warnings.simplefilter('error', Image.DecompressionBombWarning)
             try:
                 im = Image.open(io.BytesIO(inhoud))
+            except (Image.DecompressionBombError, Image.DecompressionBombWarning):
+                return [melding('Fotoforensiek', 'Deze foto is groter dan 40 megapixel: verklein hem eerst, dan kan de fotoforensiek hem lezen.')], {'foto': False}
             except Exception:
                 return [], {}   # geen foto (pdf, document, onbekend)
             soort = (im.format or '').upper()
@@ -1882,7 +1930,7 @@ def forensiek(inhoud):
         sig.append('%d %s dat twee keer in de foto voorkomt (gekopieerd en verplaatst?)' % (len(kl), 'stuk' if len(kl) == 1 else 'stukken'))
     velden = [('Soort', soort), ('Afmeting', '%d x %d px' % im.size), ('JPEG-kwaliteit (schatting)', kw),
               ('Felste plekken in de ELA t.o.v. de rest', ('%s x' % getal_nl(fel, 1)) if fel else None),
-              ('Kopieën in de foto', ('%d %s' % (len(kl), 'stuk' if len(kl) == 1 else 'stukken')) if kl else 'geen gevonden' if kl is not None else 'niet gelukt'),
+              ('Kopieën in de foto', ('%d %s' % (len(kl), 'stuk' if len(kl) == 1 else 'stukken')) if kl else 'geen gevonden (egale en gladde vlakken ziet deze toets niet)' if kl is not None else 'niet gelukt'),
               ('Rekentijd', '%.1f s' % (time.time() - t0))]
     uitleg = ('Hoe lezen: in de ELA licht een foto die in één keer is gemaakt overal ongeveer even fel op bij gelijke vlakken (randen en tekst zijn altijd '
               'feller). Een stuk dat duidelijk feller of juist doffer is dan zijn omgeving, kan er later in gezet zijn. '

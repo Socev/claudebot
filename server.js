@@ -20896,7 +20896,7 @@ async function osintSleutels() {
       if (v && x.name === 'ep_online_sleutel') w.ep_online = v;
       if (v && x.name === 'mapillary_token') w.mapillary = v;
     });
-  } catch (e) { return w; }
+  } catch (e) { osintSleutelCache = { t: Date.now() - 480000, w: w }; return w; }   // review-ZOU 6: kluis traag/weg = 2 min zonder sleutels, niet elke zoekvraag 20 s wachten
   osintSleutelCache = { t: Date.now(), w: w };
   return w;
 }

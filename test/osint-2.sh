@@ -9,6 +9,7 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 printf 'contacten-zoek http://127.0.0.1:9/contacten\nagenda-wachter-api http://127.0.0.1:9/agenda\n' > "$T/webhooks.txt"
 export OSINT_DB="$T/db/osint.sqlite" OSINT_NEP_NET=1 OSINT_WEBHOOKS="$T/webhooks.txt" VAULT_DIR="$T/vault" OSINT_TOOLS="$T/tools"
 export API_SECRET=toets SUPABASE_RPC_CONTACTEN=toets N8N_WEBHOOK_AGENDA_API=toets PORT=9 OSINT_NEP_ANTWOORD="$T/nep.json" OSINT_NEP_DNSTWIST="$T/dnstwist.json"
+export OSINT_NEP_DNS="$T/dns.json"   # wv2712: verzonnen DNS voor de miniaturen (intern.proef.example → 10.0.0.5)
 mkdir -p "$T/vault/10_Zakelijk" "$T/tools"
 ET="${OSINT_EXIFTOOL:-/opt/data/venvs/osint/tools/exiftool/exiftool}"
 [ -f "$ET" ] && ln -s "$(dirname "$ET")" "$T/tools/exiftool" || true
@@ -58,7 +59,11 @@ nep = {
  'api.panoramax.xyz/api/search': {'features': [
      {'id': 'proef-ver', 'geometry': {'type': 'Point', 'coordinates': [5.2, 52.2]}, 'properties': {'datetime': '2025-01-01T10:00:00Z', 'geovisio:thumbnail': 'https://foto.proef.example/ver.jpg'}},
      {'id': 'proef-1', 'geometry': {'type': 'Point', 'coordinates': [5.1003, 52.1001]}, 'properties': {'datetime': '2025-05-05T10:00:00Z', 'geovisio:producer': 'proefmaker',
-      'geovisio:thumbnail': 'https://foto.proef.example/p1.jpg'}}]},
+      'geovisio:thumbnail': 'https://foto.proef.example/p1.jpg'}},
+     # review-MOET 1: miniaturen naar http, een interne host of een IP-vorm worden niet opgehaald
+     {'id': 'proef-http', 'geometry': {'type': 'Point', 'coordinates': [5.1008, 52.1002]}, 'properties': {'geovisio:thumbnail': 'http://foto.proef.example/h.jpg'}},
+     {'id': 'proef-intern', 'geometry': {'type': 'Point', 'coordinates': [5.1009, 52.1002]}, 'properties': {'geovisio:thumbnail': 'https://intern.proef.example/i.jpg'}},
+     {'id': 'proef-ip', 'geometry': {'type': 'Point', 'coordinates': [5.1010, 52.1002]}, 'properties': {'geovisio:thumbnail': 'https://0x7f.0.0.1/x.jpg'}}]},
  'graph.mapillary.com/images': {'data': [{'id': '777', 'captured_at': 1730000000000, 'computed_geometry': {'coordinates': [5.1001, 52.1]}, 'thumb_256_url': 'https://foto.proef.example/m1.jpg'}]},
  'foto.proef.example/p1.jpg': 'base64:' + base64.b64encode(b'\xff\xd8\xff\xe0PROEFFOTO').decode(),
  'foto.proef.example/m1.jpg': 'base64:' + base64.b64encode(b'\xff\xd8\xff\xe0PROEFFOTO2').decode(),
@@ -79,6 +84,7 @@ nep = {
  'proef-b.example/qzvproef8813': '<html>Not found</html>',
 }
 json.dump(nep, open(os.path.join(T, 'nep.json'), 'w'))
+json.dump({'intern.proef.example': '10.0.0.5', 'foto.proef.example': '93.184.216.34'}, open(os.path.join(T, 'dns.json'), 'w'))
 json.dump({'sites': [
     {'name': 'ProefA', 'uri_check': 'https://proef-a.example/{account}', 'e_code': 200, 'e_string': 'Profiel van', 'm_string': 'Not found', 'm_code': 404, 'cat': 'social'},
     {'name': 'ProefB', 'uri_check': 'https://proef-b.example/{account}', 'e_code': 200, 'e_string': 'Profiel van', 'm_string': 'Not found', 'm_code': 404, 'cat': 'coding'},
@@ -133,6 +139,12 @@ TOK = 'PROEFTOKEN-verzonnen-8813'
 r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True, sleutels={'mapillary': TOK, 'ep_online': TOK + 'e'})
 k = kaart(r, 'Straatbeeld'); eis(len(k.get('beelden') or []) == 2 and any('Mapillary' in b['titel'] for b in k['beelden']) and any('pKey=777' in (l.get('url') or '') for l in k.get('links', [])), 'Mapillary met sleutel: foto + link')
 eis(any(l['host'] == 'public.ep-online.nl' for l in r['logboek']), 'EP-online: met de sleutel uit de invoer')
+eis(not {l['host'] for l in r['logboek']} & {'intern.proef.example', '0x7f.0.0.1'} and sum(1 for l in r['logboek'] if l['host'] == 'foto.proef.example') == 2, 'miniaturen: geen http, interne host of IP-vorm (review-MOET 1)')
+nep2 = dict(nep); nep2['graph.mapillary.com/images'] = {'error': {'message': 'Invalid OAuth 2.0 Access Token', 'code': 190}}
+json.dump(nep2, open(os.path.join(T, 'nep.json'), 'w'))
+r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True, sleutels={'mapillary': TOK})
+eis('weigerde de sleutel (fout 190)' in (kaart(r, 'Straatbeeld').get('klein') or ''), 'Mapillary: geweigerde sleutel = uitleg met vervangen')
+json.dump(nep, open(os.path.join(T, 'nep.json'), 'w'))
 c = sqlite3.connect(os.environ['OSINT_DB']); dump = '\n'.join(c.iterdump())
 eis(TOK not in json.dumps(r) and TOK not in dump, 'sleutels niet in de uitkomst of osint.sqlite')
 r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='socev', herkomst='david-vraag', beelden=False)
@@ -196,6 +208,9 @@ if PIL_OK:
     eis(r['poort']['niveau'] == 'niets' and not kaart(r, 'Fotoforensiek'), 'fotoforensiek: alleen voor David (Socev: niets)')
     r = zoek(ingang='bestand', bestand=base64.b64encode(b'%PDF-1.4 proef').decode(), naam='brief.pdf', wie='david')
     eis(not kaart(r, 'Fotoforensiek'), 'fotoforensiek: geen foto (pdf) = geen ELA-kaart')
+    b = io.BytesIO(); Image.new('L', (9000, 5000)).save(b, 'PNG')
+    r = zoek(ingang='bestand', bestand=base64.b64encode(b.getvalue()).decode(), naam='groot.png', wie='david')
+    eis('groter dan 40 megapixel' in json.dumps(kaart(r, 'Fotoforensiek'), ensure_ascii=False) and r['kern'].get('foto') is False, 'fotoforensiek: foto > 40 MP = duidelijke melding, geen knop')
 else:
     print('overslaan: Pillow/numpy ontbreken hier (fotoforensiek-toetsen; OSINT_PYTHON=/opt/data/venvs/osint/bin/python)')
 # --- voetafdruk en lijkende domeinen (alleen eigen lijsten)
