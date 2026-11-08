@@ -185,6 +185,7 @@ COPY financien-vooruit.js /app/release-bootstrap/financien-vooruit.js
 COPY financien-bijsturen.js /app/release-bootstrap/financien-bijsturen.js
 COPY stroom-tabel.js /app/release-bootstrap/stroom-tabel.js
 COPY tibber-uur.js /app/release-bootstrap/tibber-uur.js
+COPY nmbrs-data.js /app/release-bootstrap/nmbrs-data.js
 COPY ah-bonnen.js /app/release-bootstrap/ah-bonnen.js
 COPY financien-plan.js /app/release-bootstrap/financien-plan.js
 COPY financien-reis.js /app/release-bootstrap/financien-reis.js

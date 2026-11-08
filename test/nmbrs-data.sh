@@ -161,6 +161,7 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('één fetch in nmbrs-data.js, met redirect error', (src.match(/\bfetch\(/g) || []).length === 1 && /redirect: 'error'/.test(src));
     toets('geen eigen netwerk- of procesmodule', !/require\('(node:)?(http|https|net|tls|child_process|dgram)'\)/.test(src));
     toets('toetsbasis alleen 127.0.0.1', (() => { try { require('child_process').execFileSync(process.execPath, [SCRIPT, 'stand'], { env: { PATH: process.env.PATH, NMBRS_API_BASIS: 'http://10.0.0.1:80', NMBRS_DIR: path.join(W, 'x') }, input: '{}', stdio: 'pipe' }); return false; } catch (e) { return true; } })());
+    toets('uitrol.sh en Dockerfile: nmbrs-data.js gaat mee in de release', /^RELEASE_OPTIONEEL="[^"]*\bnmbrs-data\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY nmbrs-data\.js \/app\/release-bootstrap\/nmbrs-data\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
     toets('scopes exact: gelijk ja, ontbrekend nee, extra nee', TM.scopesExact(T.SCOPES.slice()) && !TM.scopesExact(T.SCOPES.slice(1)) && !TM.scopesExact(T.SCOPES.concat(['employee.bankaccount.read'])));
     toets('geen schrijf-, bank- of documentscope gevraagd', !T.SCOPES.some((s) => !/\.read$/.test(s) && s !== 'offline_access') && !T.SCOPES.some((s) => /bankaccount|document|payrollsettings\.read$/.test(s) && s !== 'company.payrollsettings.read'));
 
