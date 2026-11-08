@@ -989,6 +989,13 @@ export function rekenJaarplan(d, entiteit, jaar, o = {}) {
       waarschuwingen.push(...personeel.waarschuwingen);
       const onbevestigd = contracten.filter((c) => c.soort !== "vacature" && !c.bevestigd_op && (!c.tot || c.tot >= `${jaar}-01-01`));
       if (onbevestigd.length) waarschuwingen.push(`${onbevestigd.length} contract(en) met een afgeleide schaal/trede, nog niet bevestigd`);
+      // aflopende contracten voor bepaalde tijd (Nmbrs, wv2800): niet verlengd gerekend; laat zien wat verlengen zou kosten
+      const aflopend = contracten.filter((c) => /^einde contract bepaalde tijd/.test(String(c.einde_bron || "")) && c.tot && c.tot >= `${jaar - 1}-12-01` && c.tot < `${jaar}-12-31`);
+      if (aflopend.length) {
+        const verlengd = personeelJaar({ jaar, contracten: contracten.map((c) => (aflopend.includes(c) ? { ...c, tot: null } : c)), mutaties: d.contractmutaties || [], afwezigheid: d.afwezigheid || [], inhuur: d.inhuur || [], tabellen: cao, param });
+        personeel.verlenging = { contracten: aflopend.map((c) => ({ id: c.id, naam: c.naam, tot: c.tot })), extra: rond2(verlengd.totaal - personeel.totaal) };
+        waarschuwingen.push(`${aflopend.length} contract(en) voor bepaalde tijd lopen af (${aflopend.map((c) => `${c.naam} ${c.tot.split("-").reverse().join("-")}`).join(", ")}): niet verlengd gerekend; verlengen kost ± ${euro(personeel.verlenging.extra, { heel: true })} extra in ${jaar}`);
+      }
     }
   }
   const begroting = jaarbegroting({ entiteit, jaar, componenten: d.componenten, mutaties: d.mutaties, personeel });
@@ -1144,4 +1151,249 @@ export function kostenSignaal({ entiteit, begroting, vakantiegeld = 0, eindejaar
   }
   const laatste = maanden.at(-1) || null;
   return { drempel: rond2(grens), plan: plan.map(rond2), maanden, signaal, stand_jaar: laatste ? rond2(B + laatste.afwijking) : null, tot_maand: laatste ? laatste.maand : 0 };
+}
+
+// ---------- Nmbrs → personeel POT (wv2800) ----------
+// David 8-11-2026: "Je hebt schaal, trede, uren: genoeg!" Nmbrs (de salarisadministratie) is leidend voor wat Nmbrs kent; de app
+// houdt per contract bij wat de koppeling de vorige keer schreef (nmbrs_stand), zodat een handmatige correctie nooit stil wordt
+// overschreven: verschil = melding. Er gaan geen bedragen door deze koppeling (alleen schaal, trede, uren, data, functie).
+export const NMBRS_WIE = "Nmbrs";
+export const NMBRS_VELDEN = /** @type {const} */ (["functie", "van", "tot", "einde_bron", "uren", "cao", "schaal", "trede", "trede_peildatum", "periodiekmaand", "trede_bron"]);
+const maandBegin = (d) => `${String(d).slice(0, 7)}-01`;
+const recVolg = (a, b) => (a.begin < b.begin ? -1 : a.begin > b.begin ? 1 : String(a.aangemaakt || "") < String(b.aangemaakt || "") ? -1 : String(a.aangemaakt || "") > String(b.aangemaakt || "") ? 1 : 0);
+/** Vergelijkbare waarde: leeg = null, een getal (ook '9' of 24.0) = getal, anders tekst. */
+export function nmbrsNorm(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "number") return v;
+  const s = String(v);
+  return /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : s;
+}
+const zelfde = (a, b) => nmbrsNorm(a) === nmbrsNorm(b);
+/** Naam in kleine letters zonder accenten en tekens, als woorden (voor het koppelen: zelfde voornaam). */
+const naamDelen = (n) => String(n || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z ]+/g, " ").split(/\s+/).filter(Boolean);
+
+/** Tijdlijn van één soort gegeven (uren, schaal/trede) binnen een dienstverband: de waarde op de begindatum en de wijzigingen daarna. */
+function nmbrsTijdlijn(recs, van, waarde) {
+  const r = recs.filter((x) => waarde(x) != null).sort(recVolg);
+  if (!r.length) return { basis: null, basisDatum: null, wijzigingen: [], onbekendTot: null };
+  let basis = null, basisDatum = van;
+  const na = [];
+  for (const x of r) { if (x.begin <= van) basis = waarde(x); else na.push(x); }
+  let onbekendTot = null;
+  if (basis == null) { basis = waarde(na[0]); basisDatum = na[0].begin; if (na[0].begin > maandBegin(van)) onbekendTot = na[0].begin; }
+  const perDag = new Map();
+  for (const x of na) perDag.set(x.begin, waarde(x));   // zelfde dag: de laatst aangemaakte telt
+  let vorig = basis;
+  const wijzigingen = [];
+  for (const [datum, w] of [...perDag].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    if (datum === basisDatum) { vorig = w; basis = w; continue; }
+    if (JSON.stringify(w) !== JSON.stringify(vorig)) wijzigingen.push({ datum, waarde: w });
+    vorig = w;
+  }
+  return { basis, basisDatum, wijzigingen, onbekendTot };
+}
+
+/**
+ * Eén Nmbrs-dienstverband als contract van de app: van/tot, uren, schaal/trede met hun wijzigingen per datum, periodiekmaand.
+ * Einde: uit dienst (Nmbrs) of het einde van het lopende contract voor bepaalde tijd (verlenging wordt NIET aangenomen).
+ * Periodiekmaand: de maand van de laatste trede +1 in de historie; anders de maand van indiensttreding (cao Huisartsenzorg art. 4.6c).
+ * @param {{id:string, naam?:string, dienst:any[], contract?:any[], rooster?:any[], functie?:any[], salaris?:any[]}} m
+ * @param {{id:string, begin:string, eind?:string|null}} dienst
+ * @param {any[]} [diensten] alle dienstverbanden van deze medewerker (records horen bij het dienstverband waarin ze beginnen)
+ */
+export function nmbrsContract(m, dienst, diensten = [dienst]) {
+  const ds = diensten.slice().sort((a, b) => (a.begin < b.begin ? -1 : 1));
+  const eerste = ds[0] === dienst || ds[0]?.id === dienst.id;
+  const volgende = ds.filter((d) => d.begin > dienst.begin).map((d) => maandBegin(d.begin)).sort()[0] || null;
+  const vanM = maandBegin(dienst.begin);
+  const eind = dienst.eind || null;
+  const hoort = (r) => isDatum(r.begin) && (eerste || r.begin >= vanM) && (!volgende || r.begin < volgende) && (!eind || r.begin <= eind);
+  const van = dienst.begin;
+  const uren = nmbrsTijdlijn((m.rooster || []).filter(hoort), van, (x) => (x.uren != null && x.uren !== "" && Number(x.uren) >= 0 && Number(x.uren) <= 60 ? Number(x.uren) : null));
+  const sal = nmbrsTijdlijn((m.salaris || []).filter(hoort), van, (x) => (x.schaal != null && x.schaal !== "" && x.trede != null && x.trede !== "" && Number.isInteger(Number(x.trede))
+    ? { schaal: String(x.schaal), trede: Number(x.trede) } : null));
+  const tabel = (m.salaris || []).filter(hoort).sort(recVolg).map((x) => x.tabel).filter(Boolean).at(-1) || "";
+  const cao = /hidha/i.test(tabel) ? "hidha" : "huisartsenzorg";
+  // einde
+  let tot = eind, einde_bron = eind ? "uit dienst (Nmbrs)" : null;
+  if (!tot) {
+    const lopend = (m.contract || []).filter((c) => isDatum(c.begin) && c.begin >= vanM && (!volgende || c.begin < volgende)).sort(recVolg).at(-1);
+    if (lopend && !lopend.onbepaald && isDatum(lopend.eind)) { tot = lopend.eind; einde_bron = "einde contract bepaalde tijd (Nmbrs); verlenging niet meegerekend"; }
+  }
+  // periodiekmaand
+  let periodiekmaand = null, pbron = null;
+  if (sal.basis) {
+    const reeks = [{ datum: sal.basisDatum, waarde: sal.basis }, ...sal.wijzigingen];
+    for (let i = 1; i < reeks.length; i++) {
+      const a = reeks[i - 1].waarde, b = reeks[i].waarde;
+      if (a.schaal === b.schaal && b.trede === a.trede + 1) { periodiekmaand = Number(reeks[i].datum.slice(5, 7)); pbron = `trede +1 per ${reeks[i].datum.split("-").reverse().join("-")}`; }
+    }
+    if (!periodiekmaand) { periodiekmaand = Number(van.slice(5, 7)); pbron = "maand van indiensttreding (cao art. 4.6c)"; }
+  }
+  const functie = (m.functie || []).slice().sort((a, b) => (String(a.aangemaakt || "") < String(b.aangemaakt || "") ? -1 : 1)).map((f) => f.omschrijving).filter(Boolean).at(-1) || null;
+  // wijzigingen per datum (na de begindatum, tot en met het einde)
+  const per = new Map();
+  for (const w of uren.wijzigingen) per.set(w.datum, { ...(per.get(w.datum) || {}), uren: w.waarde });
+  for (const w of sal.wijzigingen) per.set(w.datum, { ...(per.get(w.datum) || {}), schaal: w.waarde.schaal, trede: w.waarde.trede });
+  const mutaties = [...per].filter(([d]) => d > van && (!tot || d <= tot)).sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([geldig_van, v]) => ({
+    geldig_van, uren: v.uren ?? null, schaal: v.schaal ?? null, trede: v.trede ?? null,
+    reden: `Nmbrs: ${[v.uren != null && "rooster", v.trede != null && "schaal/trede"].filter(Boolean).join(" en ")}`,
+  }));
+  const fout = uren.basis == null ? "geen rooster (uren) in Nmbrs" : !(uren.basis > 0) ? "rooster 0 uur bij het begin" : null;
+  // uren of schaal/trede die pas later in Nmbrs staan: de app rekent ervóór met de eerste bekende waarde (aanname, in beeld)
+  const aannames = [[uren.onbekendTot, "uren"], [sal.onbekendTot, "schaal/trede"]].filter(([d]) => d).map(([d, w]) => ({ tot: d, wat: w }));
+  return {
+    nmbrs_dienst: dienst.id, nmbrs_medewerker: m.id, naam: m.naam || null, functie, van, tot, einde_bron,
+    uren: uren.basis, cao, schaal: sal.basis ? sal.basis.schaal : null, trede: sal.basis ? sal.basis.trede : null,
+    trede_peildatum: sal.basis ? (sal.basisDatum > van ? sal.basisDatum : van) : null, periodiekmaand,
+    trede_bron: sal.basis ? `Nmbrs (salarisadministratie); periodiek: ${pbron}` : "Nmbrs: geen schaal/trede (vast salaris, niet in Nmbrs-koppeling)",
+    mutaties, fout, aannames,
+  };
+}
+
+/** Stand (uren, schaal, trede) van een gewenst Nmbrs-contract op een datum. */
+function nmbrsOp(g, datum) {
+  const st = { uren: g.uren, schaal: g.schaal, trede: g.trede };
+  for (const m of g.mutaties) if (m.geldig_van <= datum) { if (m.uren != null) st.uren = m.uren; if (m.trede != null) { st.schaal = m.schaal; st.trede = m.trede; } }
+  return st;
+}
+
+/**
+ * Plan van de dagelijkse koppeling Nmbrs → personeel POT. Puur: rekent uit wat er moet gebeuren, schrijft niets.
+ * Koppelen: een contract met hetzelfde Nmbrs-dienstverband; anders (eerste keer) het enige contract zonder koppeling met dezelfde begindatum.
+ * Per veld drie-weg: app = vorige Nmbrs-stand → bijwerken; app ≠ vorige stand (met de hand gewijzigd) → melding, niets overschrijven.
+ * Eerste koppeling: een door David bevestigd contract geldt als met de hand; een afgeleid (onbevestigd) contract wordt bijgewerkt.
+ * Wijzigingen per datum: die met reden 'Nmbrs…' zijn van de koppeling (bijwerken/weghalen); een handmatige wijziging blijft staan
+ * en geeft een melding als ze afwijkt van Nmbrs op die datum (alleen datums tot en met de peildatum van Nmbrs).
+ * @param {{ stand: {peil:string, medewerkers:any[]}, contracten: any[], mutaties: any[] }} a
+ */
+export function nmbrsSyncPlan({ stand, contracten, mutaties }) {
+  const nieuw = [], bijwerk = [], mutNieuw = [], mutBij = [], mutWeg = [], verschillen = [], meldingen = [];
+  const gewenst = [];
+  for (const m of stand.medewerkers || []) {
+    const ds = (m.dienst || []).filter((d) => isDatum(d.begin));
+    for (const d of ds) gewenst.push(nmbrsContract(m, d, ds));
+  }
+  const gekoppeld = new Map(contracten.filter((c) => c.nmbrs_dienst).map((c) => [String(c.nmbrs_dienst), c]));
+  const vrij = contracten.filter((c) => !c.nmbrs_dienst && c.soort !== "vacature");
+  const veld = (c) => (c.naam || `contract ${c.id}`);
+  for (const g of gewenst) {
+    if (g.fout) {   // niet over te nemen; alleen melden als het dienstverband de laatste twee jaar raakt (oud = stil)
+      if (!g.tot || g.tot >= `${Number(String(stand.peil).slice(0, 4)) - 1}-01-01`) meldingen.push({ soort: "overgeslagen", naam: g.naam, tekst: `${g.naam || "medewerker"} (in dienst ${g.van}): ${g.fout}; niet overgenomen` });
+      continue;
+    }
+    let c = gekoppeld.get(String(g.nmbrs_dienst));
+    let koppel = false;
+    if (!c) {
+      const opDatum = vrij.filter((x) => x.van === g.van);
+      const kand = opDatum.filter((x) => naamDelen(x.naam)[0] && naamDelen(x.naam)[0] === naamDelen(g.naam)[0]);
+      if (kand.length > 1) { meldingen.push({ soort: "niet_eenduidig", naam: g.naam, tekst: `${g.naam || "medewerker"}: ${kand.length} contracten in de app beginnen op ${g.van}; niet gekoppeld` }); continue; }
+      if (!kand.length && opDatum.length) { meldingen.push({ soort: "niet_eenduidig", naam: g.naam, tekst: `${g.naam || "medewerker"}: een contract in de app begint ook op ${g.van} maar met een andere voornaam; niet gekoppeld en niets toegevoegd` }); continue; }
+      if (kand.length === 1) {
+        c = kand[0]; vrij.splice(vrij.indexOf(c), 1); koppel = true;
+        if (naamDelen(c.naam).join(" ") !== naamDelen(g.naam).join(" ")) meldingen.push({ soort: "naam", naam: g.naam, tekst: `${veld(c)} gekoppeld aan ${g.naam || "?"} in Nmbrs (zelfde begindatum en voornaam; de naam verschilt)` });
+      }
+    }
+    const standNieuw = Object.fromEntries(NMBRS_VELDEN.map((f) => [f, g[f] ?? null]));
+    for (const x of g.aannames || []) if (x.tot >= `${Number(String(stand.peil).slice(0, 4)) - 1}-01-01`)
+      meldingen.push({ soort: "aanname", naam: g.naam, tekst: `${g.naam || "medewerker"}: ${x.wat} vóór ${x.tot.split("-").reverse().join("-")} staan niet in Nmbrs; de app rekent vanaf het begin (${g.van.split("-").reverse().join("-")}) met de eerste bekende waarde` });
+    if (!c) { nieuw.push(g); continue; }
+    let vorige = null;
+    try { vorige = c.nmbrs_stand ? JSON.parse(c.nmbrs_stand) : null; } catch { vorige = null; }
+    const hand = !vorige && !!c.bevestigd_op && c.bevestigd_door !== NMBRS_WIE;
+    const zet = {}, oud = {};
+    for (const f of NMBRS_VELDEN) {
+      if (zelfde(c[f], g[f])) continue;
+      if (vorige ? zelfde(c[f], vorige[f]) : !hand) { zet[f] = g[f] ?? null; oud[f] = c[f] ?? null; }
+      else verschillen.push({ contract_id: c.id, naam: veld(c), veld: f, app: c[f] ?? null, nmbrs: g[f] ?? null });
+    }
+    const bevestig = !c.bevestigd_op && g.schaal != null;
+    if (koppel || bevestig || Object.keys(zet).length || JSON.stringify(vorige) !== JSON.stringify(standNieuw))
+      bijwerk.push({ id: c.id, naam: veld(c), koppel: koppel ? { nmbrs_dienst: g.nmbrs_dienst, nmbrs_medewerker: g.nmbrs_medewerker } : null, zet, oud, stand: standNieuw, bevestig });
+    // wijzigingen per datum
+    // van de koppeling = nmbrs_stand gevuld (wat de koppeling schreef); met de hand gewijzigd sindsdien = melding, niet overschrijven
+    const eigen = mutaties.filter((x) => x.contract_id === c.id && x.nmbrs_stand);
+    const handM = mutaties.filter((x) => x.contract_id === c.id && !x.nmbrs_stand);
+    const mStand = (x) => { try { return JSON.parse(x.nmbrs_stand); } catch { return {}; } };
+    const gelijk = (a, b) => zelfde(a.uren, b.uren) && zelfde(a.schaal, b.schaal) && zelfde(a.trede, b.trede);
+    // ongewijzigd sinds de koppeling: zelfde waarden én zelfde datum als wat de koppeling schreef (een verplaatste regel = met de hand)
+    const onaangeroerd = (o) => gelijk(o, mStand(o)) && (mStand(o).geldig_van == null || mStand(o).geldig_van === o.geldig_van);
+    const tekstM = (x) => [x.uren != null && `${x.uren} uur`, x.trede != null && `schaal ${x.schaal} trede ${x.trede}`].filter(Boolean).join(", ") || "leeg";
+    const gezien = new Set();
+    for (const w of g.mutaties) {
+      const o = eigen.find((x) => x.geldig_van === w.geldig_van && !gezien.has(x.id)) || eigen.find((x) => mStand(x).geldig_van === w.geldig_van && !gezien.has(x.id));
+      if (o) {
+        gezien.add(o.id);
+        if (o.geldig_van !== w.geldig_van) { verschillen.push({ contract_id: c.id, naam: veld(c), veld: `wijziging per ${w.geldig_van}`, app: `verplaatst naar ${o.geldig_van.split("-").reverse().join("-")}: ${tekstM(o)}`, nmbrs: tekstM(w) }); continue; }
+        if (gelijk(o, w)) { if (!gelijk(mStand(o), w) || mStand(o).geldig_van !== w.geldig_van) mutBij.push({ id: o.id, contract_id: c.id, oud: o, nieuw: w }); continue; }
+        if (onaangeroerd(o)) mutBij.push({ id: o.id, contract_id: c.id, oud: o, nieuw: w });
+        else verschillen.push({ contract_id: c.id, naam: veld(c), veld: `wijziging per ${w.geldig_van}`, app: tekstM(o), nmbrs: tekstM(w) });
+        continue;
+      }
+      const h = handM.find((x) => x.geldig_van === w.geldig_van);
+      if (h) {
+        // per veld: de handmatige regel wint; elk veld waarin Nmbrs iets anders (of iets extra) zegt, is een melding
+        if (w.uren != null && !zelfde(h.uren, w.uren)) verschillen.push({ contract_id: c.id, naam: veld(c), veld: `uren per ${w.geldig_van}`, app: h.uren != null ? `${h.uren} uur` : "niet ingevuld (handmatige wijziging op die datum)", nmbrs: `${w.uren} uur` });
+        if (w.trede != null && (!zelfde(h.trede, w.trede) || !zelfde(h.schaal ?? c.schaal, w.schaal))) verschillen.push({ contract_id: c.id, naam: veld(c), veld: `schaal/trede per ${w.geldig_van}`,
+          app: h.trede != null ? `schaal ${h.schaal ?? c.schaal} trede ${h.trede}` : "niet ingevuld (handmatige wijziging op die datum)", nmbrs: `schaal ${w.schaal} trede ${w.trede}` });
+        continue;
+      }
+      mutNieuw.push({ contract_id: c.id, ...w });
+    }
+    for (const o of eigen) {
+      if (gezien.has(o.id)) continue;
+      if (onaangeroerd(o)) mutWeg.push({ id: o.id, contract_id: c.id, oud: o });
+      else verschillen.push({ contract_id: c.id, naam: veld(c), veld: `wijziging per ${o.geldig_van}`, app: tekstM(o), nmbrs: "staat niet (meer) in Nmbrs" });
+    }
+    for (const h of handM) {
+      if (h.geldig_van > stand.peil || g.mutaties.some((w) => w.geldig_van === h.geldig_van)) continue;
+      const st = nmbrsOp(g, h.geldig_van);
+      const af = (h.uren != null && !zelfde(h.uren, st.uren)) || (h.trede != null && (!zelfde(h.trede, st.trede) || !zelfde(h.schaal ?? c.schaal, st.schaal)));
+      if (af) verschillen.push({ contract_id: c.id, naam: veld(c), veld: `wijziging per ${h.geldig_van}`, app: [h.uren != null && `${h.uren} uur`, h.trede != null && `schaal ${h.schaal ?? c.schaal} trede ${h.trede}`].filter(Boolean).join(", "),
+        nmbrs: [h.uren != null && `${st.uren} uur`, h.trede != null && `schaal ${st.schaal} trede ${st.trede}`].filter(Boolean).join(", ") });
+    }
+  }
+  const bekend = new Set(gewenst.map((g) => String(g.nmbrs_dienst)));
+  for (const c of contracten) if (c.nmbrs_dienst && !bekend.has(String(c.nmbrs_dienst))) meldingen.push({ soort: "weg_uit_nmbrs", naam: veld(c), tekst: `${veld(c)}: staat niet meer in Nmbrs; niets veranderd` });
+  return { nieuw, bijwerk, mutNieuw, mutBij, mutWeg, verschillen, meldingen, gewenst: gewenst.length };
+}
+
+/**
+ * Verwachte kosten en het verwachte jaarresultaat per praktijk (POT, lopend jaar; informatie, geen nota's). Personeel per maand:
+ * de loonkosten van de loonstrook waar die er is, anders de rekenkern op het personeel (Nmbrs) — op dezelfde (toerekenings)basis als de
+ * loonstrook: bruto × (1 + werkgeverslasten + reserveringen vakantiegeld en eindejaars) × (1 + verzuim) + inhuur. Overige kosten
+ * uit de kostenposten van het jaar (of de aanname van het jaar ervoor), minus de uitkering van de verzuimverzekering (bank).
+ * Uitkomst per praktijk = aandeel × verwachte kosten − wat voor het jaar gevraagd is (positief = bijbetalen).
+ * @param {{ jaar:number, personeel: ReturnType<typeof personeelJaar>, param:any, loonsom:any[], overige:{bedrag:number, bron:string},
+ *   uitkering?:number, aandelen:any, gevraagd:Record<string,number>, betaald?:Record<string,number>, gevraagd_bron?:string }} a
+ */
+export function verwachtJaar(a) {
+  const J = Number(a.jaar), P = { werkgeverslasten: 0, vakantiegeld_res: 0, eindejaar_res: 0, verzuim_pct: 0, ...(a.param || {}) };
+  const fac = (1 + Number(P.werkgeverslasten) + Number(P.vakantiegeld_res) + Number(P.eindejaar_res)) * (1 + Number(P.verzuim_pct));
+  const maanden = a.personeel.maanden.map((x) => {
+    const model = rond2(x.bruto * fac + x.inhuur + x.uitkering);
+    const ls = (a.loonsom || []).find((l) => Number(l.jaar) === J && Number(l.maand) === x.maand);
+    // inhuur staat niet op de loonstrook en telt dus ook in een loonstrookmaand mee; een uitkering verzuimverzekering telt daar via de bank
+    return ls ? { maand: x.maand, bron: "loonstrook", kosten: rond2(Number(ls.loonkosten) + x.inhuur), model } : { maand: x.maand, bron: "prognose", kosten: model, model };
+  });
+  const echt = maanden.filter((m) => m.bron === "loonstrook");
+  const sEcht = echt.reduce((s, m) => s + m.kosten, 0), sModel = echt.reduce((s, m) => s + m.model, 0);
+  const personeel = rond2(maanden.reduce((s, m) => s + m.kosten, 0));
+  const uitkering = rond2(Number(a.uitkering) || 0);
+  const totaal = rond2(personeel + Number(a.overige.bedrag) - uitkering);
+  const r = afrekening({ aandelen: a.aandelen, kosten: totaal, tegen: a.gevraagd, modus: "gevraagd" });
+  const rijen = (r.rijen || []).map((x) => ({ ...x, betaald: rond2((a.betaald || {})[x.praktijk_id] || 0) }));
+  const tot = echt.length ? echt.at(-1).maand : 0;
+  return {
+    jaar: J, ok: r.ok, reden: r.reden || null, maanden, personeel, overige: a.overige, uitkering, totaal,
+    kalibratie: echt.length ? { maanden: echt.length, echt: rond2(sEcht), model: rond2(sModel), afwijking: sEcht ? rond2((sModel - sEcht) / sEcht) : null } : null,
+    rijen, som: r.ok ? r.totaal : null,
+    hoe: [
+      tot ? `personeel januari t/m ${MAANDEN[tot - 1]}: loonkosten van de loonstroken; daarna de rekenkern op het personeel uit Nmbrs` : "personeel: de rekenkern op het personeel uit Nmbrs",
+      `prognosemaand = bruto (schaal, trede, uren) × ${rond2(fac).toString().replace(".", ",")} (werkgeverslasten, reservering vakantiegeld en eindejaars, verzuim)`,
+      `overige kosten ${euro(a.overige.bedrag, { heel: true })} (${a.overige.bron})`,
+      ...(uitkering ? [`uitkering verzuimverzekering ${euro(uitkering, { heel: true })} eraf (bank)`] : []),
+      `per praktijk: aandeel × ${euro(totaal, { heel: true })} − gevraagd (${a.gevraagd_bron || "nota's"}); positief = bijbetalen, negatief = terug`,
+    ],
+  };
 }

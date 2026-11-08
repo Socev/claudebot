@@ -1,4 +1,4 @@
--- GEGENEREERD uit Socev/ovis-pot a0e1771eee5a87f244bbbdc44dccdf8f51e7ef75: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql, migrations/0007_jan_feb.sql, migrations/0008_historie_blind.sql, migrations/0009_subsidie_totaal.sql, migrations/0010_notadag_25.sql
+-- GEGENEREERD uit Socev/ovis-pot 4fd0303cb2b6440872d6405e9ab9b7858e0cc2b7: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql, migrations/0007_jan_feb.sql, migrations/0008_historie_blind.sql, migrations/0009_subsidie_totaal.sql, migrations/0010_notadag_25.sql, migrations/0011_nmbrs_koppeling.sql
 -- OVIS POT — migratie 0001: de POT-tabellen zoals ze in D1 `fin` stonden (kolommen en ids gelijk), zodat de pod-modules
 -- (pot-datahub.js, pot-verzend.js) bij het overstapmoment alleen een andere database krijgen. Gegenereerd uit fin.sqlite_master op 8-11-2026.
 -- Geen gegevens in deze repo; de inhoud komt met scripts/kopieer-uit-fin.py.
@@ -579,3 +579,15 @@ CREATE TABLE subsidie_totaal (
 update instelling set waarde = '25', opmerking = 'maandnota''s als concept op deze dag van de maand ervoor (1 = de 1e van de maand zelf); per entiteit notadag_<E>; januari = januari-ronde (wv2795)' where sleutel = 'notadag';
 insert or ignore into instelling (sleutel, waarde, opmerking) values ('notadag', '25', 'maandnota''s als concept op deze dag van de maand ervoor (1 = de 1e van de maand zelf); per entiteit notadag_<E>; januari = januari-ronde (wv2795)');
 update instelling set opmerking = 'de pod maakt op de notadag vanaf dit uur (Nederlandse tijd) de nota''s van de volgende maand en zet de concepten klaar (wv2795)' where sleutel = 'maandronde_uur';
+
+-- OVIS POT — migratie 0011 (wv2800): personeel POT uit Nmbrs (salarisadministratie). Een contract kan gekoppeld zijn aan een
+-- Nmbrs-dienstverband; nmbrs_stand = wat de koppeling de vorige keer schreef (drie-weg: een handmatige correctie wordt nooit stil
+-- overschreven). einde_bron = waarom het contract een einddatum heeft (uit dienst, of einde bepaalde tijd zonder aangenomen verlenging).
+-- Geen bedragen: de koppeling kent alleen schaal, trede, uren, data en functie.
+ALTER TABLE contract ADD COLUMN nmbrs_dienst TEXT;
+ALTER TABLE contract ADD COLUMN nmbrs_medewerker TEXT;
+ALTER TABLE contract ADD COLUMN nmbrs_stand TEXT;
+ALTER TABLE contract ADD COLUMN einde_bron TEXT;
+-- Een wijziging per datum is van de koppeling als nmbrs_stand gevuld is (wat de koppeling schreef: uren, schaal, trede); dezelfde drie-weg.
+ALTER TABLE contractmutatie ADD COLUMN nmbrs_stand TEXT;
+CREATE UNIQUE INDEX ux_contract_nmbrs ON contract(nmbrs_dienst) WHERE nmbrs_dienst IS NOT NULL;

@@ -260,6 +260,16 @@ srv.listen(0, '127.0.0.1', async function () {
     const kp = await kindEcht('koppel', { bedrijf: C1, entiteit: 'TG' }, DIR);
     const kpFout = await kindEcht('koppel', { bedrijf: C1, entiteit: 'tg; drop' }, DIR);
     toets('koppel: bedrijf → entiteit; vreemde entiteit geweigerd', kp.j && kp.j.ok && kpFout.j && kpFout.j.ok === false);
+    // wv2800: stand voor OVIS POT — alleen het aan POT gekoppelde bedrijf, nooit een bedrag (value), BSN, IBAN, geboortedatum of mail
+    const potGeen = await kindEcht('pot', {}, DIR);
+    toets('pot: zonder POT-koppeling geen stand', potGeen.j && potGeen.j.ok === false && potGeen.j.reden === 'koppeling', potGeen.j);
+    await kindEcht('koppel', { bedrijf: C1, entiteit: 'POT' }, DIR);
+    const pot = await kindEcht('pot', {}, DIR);
+    const potT = JSON.stringify(pot.j || {});
+    const potM = pot.j && pot.j.ok && pot.j.stand.medewerkers.find((x) => x.id === E1);
+    toets('pot: stand met dienst, rooster en schaal/trede per datum', !!potM && potM.salaris.length === 1 && potM.salaris[0].schaal === 'A' && potM.salaris[0].trede === 3 && potM.salaris[0].begin === '2025-01-01' && /^\d{4}-\d{2}-\d{2}$/.test(pot.j.stand.peil), pot.j);
+    toets('pot: geen bedrag, BSN, IBAN, geboortedatum of mail', !/:(4000|1500|25)[,}]/.test(potT) && potT.indexOf(BSN) < 0 && potT.indexOf(IBAN) < 0 && potT.indexOf(GEB) < 0 && potT.indexOf(MAIL) < 0 && !/"value"/.test(potT), potT.slice(0, 300));
+    await kindEcht('koppel', { bedrijf: C1, entiteit: 'TG' }, DIR);
     sg = await kindEcht('signalen', { vault: [{ entiteit: 'TG', naam: 'Anna Proef', namen: ['Anna Proef'], actief: true }, { entiteit: 'TG', naam: 'Dirk Weg', namen: ['Dirk Weg'], actief: true }, { entiteit: 'GH', naam: 'Elders', namen: ['Elders'], actief: true }] }, DIR);
     toets('S6: Bert en Cor zonder pagina, pagina Dirk zonder Nmbrs; niet-gekoppelde entiteit telt niet', per('S6') === 'Bert Voorbeeld,Cor Toets,Dirk Weg', sg.j.signalen.filter((s) => s.soort === 'S6'));
     const g1 = await kindEcht('gemeld', { sleutels: sg.j.nieuw.map((x) => x.sleutel) }, DIR);

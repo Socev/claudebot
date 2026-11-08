@@ -826,6 +826,36 @@ function kindStand(dir) {
   let laatste = null; try { laatste = r ? JSON.parse(r.uitkomst) : null; } catch (e) {}
   return { ok: true, bedrijven: b, historie: h, laatste_ronde: laatste ? { vragen: laatste.vragen, eindpunten: laatste.eindpunten } : null, nood: !!noodLees(dir), dood: !!doodLees(dir), instellingen: instellingenLees(dir) };
 }
+// wv2800: de stand van het POT-personeel voor de app OVIS POT (koppeling Nmbrs → D1 pot, in server.js). Alleen het bedrijf dat in de
+// koppeltabel aan POT hangt; per medewerker naam, dienstverbanden, contracten (data, bepaald/onbepaald), rooster (uren), functie en
+// salaris als tabel/schaal/trede met ingangsdatum. NOOIT een bedrag (value), BSN of andere persoonsgegevens.
+function kindPot(dir) {
+  if (!fs.existsSync(path.join(dir, 'nmbrs.' + 'sqlite'))) return { ok: false, reden: 'leeg', fout: 'nog geen Nmbrs-gegevens' };
+  const d = db(dir);
+  try {
+    const b = lid(d, "select bedrijf from bedrijf_entiteit where entiteit = 'POT'");
+    if (b.length !== 1) return { ok: false, reden: 'koppeling', fout: b.length ? 'meer dan één bedrijf aan POT gekoppeld' : 'geen bedrijf aan POT gekoppeld (opdracht koppel)' };
+    const L = laad(d);
+    const d10 = function (v) { return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : null; };
+    const medewerkers = Object.keys(L.mw).map(function (k) { return L.mw[k]; }).filter(function (m) { return m.bedrijf === b[0].bedrijf; }).map(function (m) {
+      const h = function (s) { return m.h[s] || []; };
+      return {
+        id: m.id, naam: naamVan(m.info), nummer: m.info.employeeNumber == null ? null : String(m.info.employeeNumber),
+        dienst: h('dienstverband').filter(function (x) { return idVan(x.employmentId) && d10(x.startDate); }).map(function (x) { return { id: x.employmentId, begin: d10(x.startDate), eind: d10(x.endDate) }; }),
+        contract: h('contract').map(function (x) { return { begin: d10(x.startDate), eind: d10(x.endDate), onbepaald: x.indefinite === true, aangemaakt: x.createdAt || null }; }),
+        rooster: h('rooster').map(function (x) { const u = x.weekuren != null ? x.weekuren : x.hoursPerWeek; return { begin: d10(x.startDate), uren: typeof u === 'number' ? u : null, aangemaakt: x.createdAt || null }; }),
+        functie: h('functie').map(function (x) { return { omschrijving: x.description || null, aangemaakt: x.createdAt || null }; }),
+        salaris: h('salaris').map(function (x) {
+          return { begin: d10(x.startDate), schaal: x.schaal && x.schaal.scaleCode != null ? String(x.schaal.scaleCode) : null, trede: x.trede && x.trede.stepCode != null && /^\d{1,2}$/.test(String(x.trede.stepCode)) ? Number(x.trede.stepCode) : null,
+            tabel: x.tabel && x.tabel.tableName ? String(x.tabel.tableName) : null, aangemaakt: x.createdAt || null };
+        }),
+      };
+    });
+    const r = d.prepare('select eind from ronde where ok = 1 order by volg desc limit 1').get();
+    const peil = r && r.eind ? new Date(r.eind).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }) : null;
+    return { ok: true, stand: { peil: peil || new Date().toISOString().slice(0, 10), medewerkers: medewerkers } };
+  } finally { d.close(); }
+}
 const ENTITEITEN = /^(TG|GH|HOLD|PH|POT|KM|SLOEL|[A-Z]{2,6})$/;
 function kindKoppel(invoer, dir) {
   const bedrijf = idVan(invoer.bedrijf), ent = String(invoer.entiteit || '');
@@ -1048,6 +1078,7 @@ function kindVault(invoer, dir) {
 }
 async function kind(opdracht, invoer, dir) {
   if (opdracht === 'stand') return kindStand(dir);
+  if (opdracht === 'pot') return kindPot(dir);
   if (opdracht === 'signalen') return kindSignalen(invoer, dir);
   if (opdracht === 'gemeld') return kindGemeld(invoer, dir);
   if (opdracht === 'persoon') return kindPersoon(invoer, dir);

@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot a0e1771eee5a87f244bbbdc44dccdf8f51e7ef75 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot 4fd0303cb2b6440872d6405e9ab9b7858e0cc2b7 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
@@ -318,6 +318,7 @@ export async function behandel(db          , methode        , pad        , zoek 
       if (pad === "export") return { status: 200, body: await exportAlles(db) };
       if (pad === "naspeel") return { status: 200, body: await naspeel(db) };
       if (pad === "bewaking") return { status: 200, body: await bewaking(db, zoek.get("jaar")) };
+      if (pad === "verwachting") return { status: 200, body: await verwachting(db, zoek.get("jaar")) };
       if (pad === "leunt") return { status: 200, body: await leunt(db, zoek) };
       throw new Fout(404, "onbekende route");
     }
@@ -485,6 +486,149 @@ export async function bewaking(db          , j         ) {
   return { jaar: J, berekend_op: vandaag, entiteiten };
 }
 
+/**
+ * Verwacht jaarresultaat POT (wv2800): wat de kosten van jaar J worden (loonstroken tot nu + rekenkern op het personeel uit Nmbrs, overige
+ * kosten, uitkering verzuimverzekering) en wat dat per praktijk betekent bij de afrekening. Alleen informatie: maakt geen nota's.
+ */
+export async function verwachting(db          , j         ) {
+  const vandaag = (await rijen               (db, "select date('now') as d"))[0].d;
+  const J = j == null || j === "" ? Number(vandaag.slice(0, 4)) : jaar(j);
+  const [b, g, gl, hist, uitk, bank] = await Promise.all([
+    basis(db), jaarGegevens(db, J), geld(db, J),
+    rijen                                         (db, "select praktijk_id, round(sum(bedrag),2) as bedrag from historie where entiteit='POT' and jaar=? and categorie in ('begroting_vooraf','aanvulling') and praktijk_id is not null group by 1", J),
+    rijen                                            (db, "select round(coalesce(sum(t.bedrag),0),2) as bedrag, max(m.boekdatum) as laatste from bank_toewijzing t join bankmutatie m on m.id=t.bankmutatie_id where m.entiteit='POT' and t.soort='verzekering_uitkering' and m.boekdatum between ? and ?", `${J}-01-01`, `${J}-12-31`),
+    rijen                            (db, "select max(boekdatum) as laatste from bankmutatie where entiteit='POT'"),
+  ]);
+  const lp = g.loonparameters.filter((x) => Number(x.jaar) <= J).sort((x, y) => Number(x.jaar) - Number(y.jaar)).at(-1);
+  if (!lp) return { jaar: J, ok: false, reden: `geen loonparameters voor ${J} of eerder (scherm Personeel)` };
+  const param = { ...lp, verdeling: typeof lp.verdeling === "string" ? JSON.parse(String(lp.verdeling)) : lp.verdeling };
+  const cao = g.cao.map((t) => ({ cao: String(t.cao), ingang: String(t.ingang), schaal: String(t.schaal), trede: Number(t.trede), bruto: Number(t.bruto), uren_voltijd: Number(t.uren_voltijd) }));
+  const contracten = g.contracten.map((c) => ({ ...c, naam: c.naam || `contract ${c.id}` }));
+  const personeel = K.personeelJaar({ jaar: J, contracten, mutaties: g.contractmutaties, afwezigheid: g.afwezigheid, inhuur: g.inhuur, tabellen: cao, param });
+  // overige kosten: de kostenposten van J (niet-personeel); zonder posten de aanname 'zoals het jaar ervoor' (jaarlast − loonkosten)
+  const comps = b.componenten.filter((c) => c.entiteit === "POT" && c.soort !== "personeel");
+  const begr = K.jaarbegroting({ entiteit: "POT", jaar: J, componenten: comps, mutaties: b.mutaties, personeel: null });
+  let overige = { bedrag: K.rond2(begr.totaal), bron: `kostenposten ${J}` };
+  if (!(begr.totaal > 0)) {
+    const jl = K.kostenJaar(b.jaarlast           , "POT", J - 1);
+    const lk = g.loonsom.filter((l) => Number(l.jaar) === J - 1);
+    // inhuur van J−1 zit in de kosten van J−1 maar telt in J al bij het personeel: die gaat er ook af
+    const inhuurVorig = K.personeelJaar({ jaar: J - 1, contracten: [], inhuur: g.inhuur, tabellen: cao, param }).inhuur;
+    overige = jl && lk.length === 12
+      ? { bedrag: K.rond2(jl.bedrag - lk.reduce((s, l) => s + Number(l.loonkosten), 0) - inhuurVorig), bron: `aanname: zoals ${J - 1} (kosten ${J - 1} min de loonkosten van de loonstroken${inhuurVorig ? " en de inhuur" : ""})` }
+      : { bedrag: 0, bron: `onbekend: geen kostenposten ${J} en geen volledig jaar ${J - 1}` };
+  }
+  // aandeel zoals de afrekening (gemiddelde van 1-1-J en 1-1-(J+1)); is de stand van 1-1-(J+1) er nog niet, dan telt 1-1-J ook als eind (aanname, in beeld)
+  let aandelen = K.aandelenAfrekening({ entiteit: "POT", jaar: J, standen: b.standen           , deelnames: b.deelnames            });
+  let aandeelAanname = false;
+  if (!aandelen.ok && aandelen.ontbreekt.every((o                       ) => o.peildatum === `${J + 1}-01-01`)) {
+    const extra = (b.standen                                                                ).filter((x) => x.peildatum === `${J}-01-01`).map((x) => ({ ...x, peildatum: `${J + 1}-01-01` }));
+    aandelen = K.aandelenAfrekening({ entiteit: "POT", jaar: J, standen: [...(b.standen           ), ...extra]           , deelnames: b.deelnames            });
+    aandeelAanname = aandelen.ok;
+  }
+  // gevraagd: de nota's van J als die er zijn (vanaf de overname), anders Davids stukken (historie) — plus extra bijdragen (liquiditeit)
+  const notaG = gl.gevraagd.filter((x) => x.entiteit === "POT");
+  const gevraagd                         = {};
+  // Davids stukken (historie, vóór de overname) en de nota's van de app (erna) dekken verschillende maanden: samen tellen
+  for (const x of [...hist, ...notaG]) gevraagd[String(x.praktijk_id)] = (gevraagd[String(x.praktijk_id)] || 0) + Number(x.bedrag);
+  for (const x of gl.extra.filter((x) => x.entiteit === "POT")) gevraagd[String(x.praktijk_id)] = (gevraagd[String(x.praktijk_id)] || 0) + Number(x.bedrag);
+  const betaald                         = {};
+  for (const x of gl.betaald.filter((x) => x.entiteit === "POT" && x.soort === "voorschot")) betaald[String(x.praktijk_id)] = (betaald[String(x.praktijk_id)] || 0) + Number(x.bedrag);
+  const v = K.verwachtJaar({ jaar: J, personeel, param, loonsom: g.loonsom, overige, uitkering: Number(uitk[0]?.bedrag) || 0, aandelen, gevraagd, betaald,
+    gevraagd_bron: notaG.length && hist.length ? "jouw stukken en de vastgestelde nota's" : notaG.length ? "vastgestelde nota's" : "jouw stukken (begroting en aanvullingen)" });
+  // waarschuwingen over maanden van het jaar ervoor (alleen de vakantiegeldbasis van de rekenkern) doen hier niet mee
+  return { ...v, berekend_op: vandaag, bank_tot: bank[0]?.laatste || null, nmbrs: g.nmbrs, aandeel_aanname: aandeelAanname ? `patiënten 1-1-${J + 1} nog niet bekend: gerekend met 1-1-${J}` : null,
+    waarschuwingen: personeel.waarschuwingen.filter((w) => !w.includes(`${J - 1}-`)) };
+}
+
+/** Invoer van de pod (nmbrs-data.js 'pot'): alleen data, uren, schaal, trede, functie en namen; streng gecontroleerd. */
+function nmbrsStandGeldig(x         )                                                           {
+  const s = x                                             ;
+  if (!s || typeof s !== "object" || typeof s.peil !== "string" || !DATUM.test(s.peil) || !Array.isArray(s.medewerkers) || s.medewerkers.length > 500) throw new Fout(400, "nmbrs: ongeldige stand");
+  const d = (v         , leeg = true) => { if (v == null || v === "") { if (leeg) return null; throw new Fout(400, "nmbrs: datum ontbreekt"); } const t = String(v).slice(0, 10); if (!DATUM.test(t)) throw new Fout(400, "nmbrs: ongeldige datum"); return t; };
+  const t = (v         , max = 120) => (v == null || v === "" ? null : String(v).slice(0, max));
+  const lijst = (v         ) => { if (v == null) return []; if (!Array.isArray(v) || v.length > 200) throw new Fout(400, "nmbrs: ongeldige lijst"); return v                             ; };
+  const id = (v         ) => { const r = String(v ?? ""); if (!/^[A-Za-z0-9-]{1,64}$/.test(r)) throw new Fout(400, "nmbrs: ongeldige id"); return r; };
+  const n = (v         , min        , max        ) => (v == null || v === "" ? null : Number.isFinite(Number(v)) && Number(v) >= min && Number(v) <= max ? Number(v) : null);
+  return {
+    peil: s.peil,
+    medewerkers: (s.medewerkers                             ).map((m) => ({
+      id: id(m.id), naam: t(m.naam), nummer: t(m.nummer, 20),
+      dienst: lijst(m.dienst).map((x) => ({ id: id(x.id), begin: d(x.begin, false), eind: d(x.eind) })),
+      contract: lijst(m.contract).map((x) => ({ begin: d(x.begin), eind: d(x.eind), onbepaald: x.onbepaald === true, aangemaakt: t(x.aangemaakt, 40) })),
+      rooster: lijst(m.rooster).map((x) => ({ begin: d(x.begin), uren: n(x.uren, 0, 80), aangemaakt: t(x.aangemaakt, 40) })),
+      functie: lijst(m.functie).map((x) => ({ omschrijving: t(x.omschrijving, 80), aangemaakt: t(x.aangemaakt, 40) })),
+      salaris: lijst(m.salaris).map((x) => ({ begin: d(x.begin), schaal: t(x.schaal, 6), trede: n(x.trede, 0, 99), tabel: t(x.tabel, 60), aangemaakt: t(x.aangemaakt, 40) })),
+    })),
+  };
+}
+
+/**
+ * Dagelijkse koppeling Nmbrs → personeel POT (wv2800). Alleen de pod roept dit aan (geen route): de stand komt uit nmbrs.sqlite,
+ * zonder bedragen. Schrijft contracten, wijzigingen per datum en het logboek in één batch; elke update alleen als de rij nog is wat
+ * de koppeling las (anders slaat hij over: een handmatige wijziging tussendoor wint). Verschillen met handmatige invoer = melding.
+ * Uitkomst in instelling `nmbrs_sync` (scherm Personeel); `nieuwe_verschillen` = wat er sinds de vorige keer bij kwam (voor het bericht).
+ */
+export async function nmbrsSync(db          , ruweStand         , wie = K.NMBRS_WIE) {
+  const stand = nmbrsStandGeldig(ruweStand);
+  const [contracten, mutaties, vorigRij, nuRij] = await Promise.all([
+    rijen                         (db, "select c.*, m.naam from contract c left join medewerker m on m.id=c.medewerker_id"),
+    rijen                         (db, "select * from contractmutatie"),
+    rijen                    (db, "select waarde from instelling where sleutel='nmbrs_sync'"),
+    rijen                (db, "select strftime('%Y-%m-%dT%H:%M:%SZ','now') as nu"),
+  ]);
+  const plan = K.nmbrsSyncPlan({ stand, contracten, mutaties });
+  const mutStand = (w                                                                        ) => JSON.stringify({ geldig_van: w.geldig_van, uren: w.uren ?? null, schaal: w.schaal ?? null, trede: w.trede ?? null });
+  const st         = [];
+  for (const g of plan.nieuw) {
+    st.push(db.prepare("insert into medewerker (naam, opmerking) values (?, ?)").bind(g.naam || "medewerker (Nmbrs)", "uit Nmbrs"));
+    st.push(db.prepare("insert into contract (medewerker_id, soort, functie, van, tot, uren, cao, schaal, trede, trede_peildatum, periodiekmaand, trede_bron, bevestigd_op, bevestigd_door, herkomst, " +
+      "nmbrs_dienst, nmbrs_medewerker, nmbrs_stand, einde_bron) values ((select max(id) from medewerker), 'dienst', ?,?,?,?,?,?,?,?,?,?, case when ? is null then null else strftime('%Y-%m-%dT%H:%M:%SZ','now') end, ?, 'Nmbrs', ?,?,?,?)")
+      .bind(g.functie, g.van, g.tot, g.uren, g.cao, g.schaal, g.trede, g.trede_peildatum, g.periodiekmaand, g.trede_bron, g.schaal, g.schaal == null ? null : wie,
+        g.nmbrs_dienst, g.nmbrs_medewerker, JSON.stringify(Object.fromEntries(K.NMBRS_VELDEN.map((f) => [f, (g                                      )[f] ?? null]))), g.einde_bron));
+    for (const w of g.mutaties) st.push(db.prepare("insert into contractmutatie (contract_id, geldig_van, uren, schaal, trede, reden, nmbrs_stand) values ((select id from contract where nmbrs_dienst=?), ?,?,?,?,?,?)")
+      .bind(g.nmbrs_dienst, w.geldig_van, w.uren, w.schaal, w.trede, w.reden, mutStand(w)));
+    st.push(log(db, wie, "contract", g.naam || g.nmbrs_dienst, "nieuw uit Nmbrs", null, { van: g.van, tot: g.tot, uren: g.uren, schaal: g.schaal, trede: g.trede, wijzigingen: g.mutaties.length }));
+  }
+  for (const u of plan.bijwerk) {
+    const zet = Object.keys(u.zet);
+    // alleen bijwerken als de rij nog is wat de koppeling las (een handmatige wijziging tussendoor wint)
+    const waar = zet.map((f) => `${f} is ?`).join(" and ");
+    const velden = [...zet.map((f) => `${f}=?`), "nmbrs_stand=?",
+      ...(u.koppel ? ["nmbrs_dienst=?", "nmbrs_medewerker=?"] : []),
+      ...(u.bevestig ? ["bevestigd_op=coalesce(bevestigd_op, strftime('%Y-%m-%dT%H:%M:%SZ','now'))", "bevestigd_door=coalesce(bevestigd_door, ?)"] : [])];
+    const w = [...zet.map((f) => u.zet[f]), JSON.stringify(u.stand), ...(u.koppel ? [u.koppel.nmbrs_dienst, u.koppel.nmbrs_medewerker] : []), ...(u.bevestig ? [wie] : []), u.id, ...zet.map((f) => u.oud[f])];
+    st.push(db.prepare(`update contract set ${velden.join(", ")} where id=?${waar ? ` and ${waar}` : ""}${u.koppel ? " and nmbrs_dienst is null" : ""}`).bind(...w));
+    if (zet.length || u.koppel) st.push(log(db, wie, "contract", String(u.id), u.koppel ? "gekoppeld aan Nmbrs" : "bijgewerkt uit Nmbrs", zet.length ? u.oud : null, zet.length ? u.zet : null));
+  }
+  for (const m of plan.mutNieuw) {
+    st.push(db.prepare("insert into contractmutatie (contract_id, geldig_van, uren, schaal, trede, reden, nmbrs_stand) values (?,?,?,?,?,?,?)").bind(m.contract_id, m.geldig_van, m.uren, m.schaal, m.trede, m.reden, mutStand(m)));
+    st.push(log(db, wie, "contractmutatie", `${m.contract_id}@${m.geldig_van}`, "nieuw uit Nmbrs", null, { uren: m.uren, schaal: m.schaal, trede: m.trede }));
+  }
+  for (const m of plan.mutBij) {
+    st.push(db.prepare("update contractmutatie set uren=?, schaal=?, trede=?, reden=?, nmbrs_stand=? where id=? and nmbrs_stand is ? and geldig_van is ? and uren is ? and schaal is ? and trede is ?")
+      .bind(m.nieuw.uren, m.nieuw.schaal, m.nieuw.trede, m.nieuw.reden, mutStand(m.nieuw), m.id, m.oud.nmbrs_stand ?? null, m.oud.geldig_van ?? null, m.oud.uren ?? null, m.oud.schaal ?? null, m.oud.trede ?? null));
+    st.push(log(db, wie, "contractmutatie", `${m.contract_id}@${m.oud.geldig_van}`, "bijgewerkt uit Nmbrs", { uren: m.oud.uren, schaal: m.oud.schaal, trede: m.oud.trede }, { uren: m.nieuw.uren, schaal: m.nieuw.schaal, trede: m.nieuw.trede }));
+  }
+  for (const m of plan.mutWeg) {
+    st.push(db.prepare("delete from contractmutatie where id=? and nmbrs_stand is ? and geldig_van is ? and uren is ? and schaal is ? and trede is ?")
+      .bind(m.id, m.oud.nmbrs_stand ?? null, m.oud.geldig_van ?? null, m.oud.uren ?? null, m.oud.schaal ?? null, m.oud.trede ?? null));
+    st.push(log(db, wie, "contractmutatie", `${m.contract_id}@${m.oud.geldig_van}`, "weg (niet meer in Nmbrs)", { uren: m.oud.uren, schaal: m.oud.schaal, trede: m.oud.trede }, null));
+  }
+  let vorig                                                                                   = null;
+  try { vorig = JSON.parse(vorigRij[0]?.waarde || "null"); } catch { vorig = null; }
+  const sleutel = (v                                                       ) => `${v.contract_id}|${v.veld}|${JSON.stringify(v.nmbrs)}`;
+  const oudS = new Set((vorig?.verschillen || []).map(sleutel));
+  const nieuweVerschillen = plan.verschillen.filter((v) => !oudS.has(sleutel(v)));
+  const uitkomst = { op: nuRij[0].nu, peil: stand.peil, medewerkers: stand.medewerkers.length, dienstverbanden: plan.gewenst, nieuw: plan.nieuw.length,
+    bijgewerkt: plan.bijwerk.filter((u) => Object.keys(u.zet).length || u.koppel).length, gekoppeld: plan.bijwerk.filter((u) => u.koppel).length,
+    wijzigingen: { nieuw: plan.mutNieuw.length, bijgewerkt: plan.mutBij.length, weg: plan.mutWeg.length }, verschillen: plan.verschillen, meldingen: plan.meldingen };
+  st.push(db.prepare("insert into instelling (sleutel, waarde, opmerking) values ('nmbrs_sync', ?, 'laatste koppeling Nmbrs → personeel POT (wv2800): aantallen, verschillen met handmatige invoer, meldingen; geen bedragen') " +
+    "on conflict(sleutel) do update set waarde=excluded.waarde").bind(JSON.stringify(uitkomst)));
+  await db.batch(st);
+  return { ok: true, ...uitkomst, nieuwe_verschillen: nieuweVerschillen };
+}
+
 export async function jaarGegevens(db          , j         ) {
   const J = jaar(j);
   const [contracten, contractmutaties, afwezigheid, inhuur, cao, loonparameters, loonsom, buffers, bufferGevraagd, spreiding,
@@ -509,7 +653,9 @@ export async function jaarGegevens(db          , j         ) {
     rijen(db, "select * from correctie where nota_id is null or jaar>=? order by entiteit, praktijk_id, id", J - 1),
     rijen(db, "select * from ronde_stap where jaar=?", J),
   ]);
-  return { jaar: J, contracten, contractmutaties, afwezigheid, inhuur, cao, loonparameters, loonsom, buffers, bufferGevraagd, spreiding, jaarplannen, regels, notas, correcties, ronde };
+  let nmbrs          = null;
+  try { nmbrs = JSON.parse((await rijen                    (db, "select waarde from instelling where sleutel='nmbrs_sync'"))[0]?.waarde || "null"); } catch { nmbrs = null; }
+  return { jaar: J, contracten, contractmutaties, afwezigheid, inhuur, cao, loonparameters, loonsom, buffers, bufferGevraagd, spreiding, jaarplannen, regels, notas, correcties, ronde, nmbrs };
 }
 
 async function planInvoer(db          , J        ) {

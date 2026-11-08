@@ -25264,6 +25264,30 @@ async function nmbrsVaultNa(droog) {
   schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'vault', droog: droog ? 1 : undefined, dossiers: uit.dossiers, verloop: uit.verloop, gelijk: uit.gelijk, ontbreekt: uit.ontbreekt, geweigerd: uit.geweigerd, fout: uit.fout, ongekoppeld: uit.ongekoppeld }));
   return uit;
 }
+// wv2800: Nmbrs → personeel POT in D1 pot (OVIS POT). De stand (nmbrs-data.js 'pot') kent geen bedragen; de app-API (bundel ovis-pot/api.mjs,
+// nmbrsSync) koppelt, werkt bij (drie-weg: een handmatige correctie wordt nooit stil overschreven) en logt in het logboek van de app.
+// Schakelaar <POT_MAAND_DIR>/nmbrs-aan (uitzetten = rm). Nieuwe verschillen/meldingen: één bericht in de machinekamer (namen, geen bedragen).
+async function potNmbrsNa() {
+  if (!POT_MAAND_MOD || !fs.existsSync(path.join(POT_MAAND_DIR, 'nmbrs-aan'))) return { ok: false, reden: 'uit' };
+  const s = await nmbrsKind('pot', {});
+  if (!s.j || s.j.ok !== true) { schrijfLog(nu() + ' pot-nmbrs ' + velden({ ok: false, reden: s.j ? s.j.reden : 'kind' })); return { ok: false, reden: s.j ? s.j.reden : 'kind' }; }
+  const B = await potMaandBundel();
+  if (!B.api || typeof B.api.nmbrsSync !== 'function') return { ok: false, reden: 'bundel' };
+  const r = await B.api.nmbrsSync(POT_MAAND_MOD.d1Achtig(function (batch) { return potDhD1(batch); }), s.j.stand, 'Nmbrs');
+  schrijfLog(nu() + ' pot-nmbrs ' + velden({ ok: r.ok === true, dienstverbanden: r.dienstverbanden, nieuw: r.nieuw, bijgewerkt: r.bijgewerkt, gekoppeld: r.gekoppeld,
+    wijzigingen: (r.wijzigingen.nieuw + r.wijzigingen.bijgewerkt + r.wijzigingen.weg), verschillen: r.verschillen.length, nieuwe_verschillen: r.nieuwe_verschillen.length, meldingen: r.meldingen.length }));
+  const nieuw = r.nieuwe_verschillen || [];
+  if (nieuw.length) {
+    const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    const tekst = 'OVIS POT: ' + nieuw.length + ' nieuw verschil' + (nieuw.length === 1 ? '' : 'len') + ' tussen de app en Nmbrs (personeel); de app overschreef niets\n' +
+      nieuw.slice(0, 15).map(function (v) { return '- ' + String(v.naam || '').slice(0, 60) + ': ' + String(v.veld).slice(0, 40) + ' app ' + String(v.app == null ? 'leeg' : v.app).slice(0, 60) + ', Nmbrs ' + String(v.nmbrs == null ? 'leeg' : v.nmbrs).slice(0, 60); }).join('\n') +
+      (nieuw.length > 15 ? '\n- en ' + (nieuw.length - 15) + ' meer (scherm Personeel)' : '');
+    const sl = crypto.createHash('sha256').update(JSON.stringify(nieuw)).digest('hex').slice(0, 16);
+    const b = await berichtIntern({ kanaal: 'machinekamer', bron: 'pot-nmbrs', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: 'pot-nmbrs:' + dag + ':' + sl });
+    if (b.status !== 200) logError('pot-nmbrs', new Error('bericht gaf ' + b.status));
+  }
+  return { ok: r.ok === true, nieuw: r.nieuw, bijgewerkt: r.bijgewerkt, verschillen: r.verschillen.length, nieuwe_verschillen: nieuw.length };
+}
 async function nmbrsRondeDraai(opdracht, bron) {
   if (!nmbrsData) return { ok: false, fout: 'nmbrs-data.js zit niet in deze release' };
   if (nmbrsRondeBezig) return { ok: false, reden: 'bezig', fout: 'er loopt al een Nmbrs-ronde' };
@@ -25284,6 +25308,9 @@ async function nmbrsRondeDraai(opdracht, bron) {
       catch (e) { logError('nmbrs-signalen', e); }
       try { const v = await nmbrsVaultNa(false); u.vault = { ok: v.ok, dossiers: v.dossiers, verloop: v.verloop, gelijk: v.gelijk, ontbreekt: v.ontbreekt, fout: v.fout }; }   // wv2799
       catch (e) { logError('nmbrs-vault', e); }
+    }
+    if (u.ok === true && opdracht === 'ronde') {   // wv2800: daarna het POT-personeel overnemen in OVIS POT (schakelaar, zie potNmbrsNa)
+      try { const p = await potNmbrsNa(); u.pot = { ok: p.ok === true, reden: p.reden }; } catch (e) { logError('pot-nmbrs', e); }
     }
     return u;
   } finally { nmbrsRondeBezig = false; }
@@ -25332,6 +25359,11 @@ async function nmbrsSmal(d, wie) {
     const v = await nmbrsVaultNa(d.droog === true);
     return { status: v.ok ? 200 : 500, j: v };
   }
+  if (opdracht === 'pot') {   // wv2800: de POT-koppeling nu draaien (machinekamer); zelfde schakelaar als na de ronde
+    if (nmbrsRondeBezig) return { status: 409, j: { ok: false, fout: 'er loopt een Nmbrs-ronde; probeer het straks' } };
+    const u = await potNmbrsNa();
+    return { status: 200, j: u };
+  }
   if (opdracht === 'koppel' || opdracht === 'instel') {
     const s = await nmbrsKind(opdracht, opdracht === 'koppel' ? { bedrijf: d.bedrijf, entiteit: d.entiteit, door: 'machinekamer' } : { signalen_aan: d.signalen_aan });
     schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: opdracht, ok: !!(s.j && s.j.ok) }));
@@ -25352,7 +25384,7 @@ async function nmbrsSmal(d, wie) {
       return { status: 200, j: { ok: ok === tokens.length, tokens: tokens.length, ingetrokken: ok } };
     } finally { nmbrsData.slotLos(NMBRS_DIR); }
   }
-  return { status: 400, j: { ok: false, fout: 'opdracht: link, ronde, peil, stand, signalen, persoon, koppel, instel, intrek, vault' } };
+  return { status: 400, j: { ok: false, fout: 'opdracht: link, ronde, peil, stand, signalen, persoon, koppel, instel, intrek, vault, pot' } };
 }
 function nmbrsTerug(req, res) {
   const kaal404 = function () { res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('niet gevonden'); };
