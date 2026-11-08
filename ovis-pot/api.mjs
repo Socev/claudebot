@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot ecce34639cff8e47373a80c2eb7a096afe00154b (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot fc2517e8d6cfb4b0de3b24c0062ed9345b78d5b4 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
@@ -6,7 +6,7 @@
 // (instelling.overstap_fin gevuld): daarvóór is `pot` een kopie die scripts/kopieer-uit-fin.py ververst en zou een wijziging stil verdwijnen.
 
 import * as K from "./kern/pot-kern.mjs";
-import { naspeelEntiteit } from "./kern/naspelen.mjs";
+import { POT_PAKKET, bewakingJaar, naspeelEntiteit } from "./kern/naspelen.mjs";
 
                            
                                                                                                                               
@@ -315,6 +315,7 @@ export async function behandel(db          , methode        , pad        , zoek 
       if (pad === "maand") return { status: 200, body: await maandStand(db) };
       if (pad === "export") return { status: 200, body: await exportAlles(db) };
       if (pad === "naspeel") return { status: 200, body: await naspeel(db) };
+      if (pad === "bewaking") return { status: 200, body: await bewaking(db, zoek.get("jaar")) };
       throw new Fout(404, "onbekende route");
     }
     if (methode === "POST") {
@@ -425,6 +426,60 @@ export async function naspeel(db          ) {
     const x = stuk.get(k) ; x.bedrag = Math.round((x.bedrag + Number(h.bedrag)) * 100) / 100; x.rijen++;
   }
   return { ok: true, van, tot, berekend_op: vandaag[0].d, entiteiten, blind: Object.keys(blind).length ? blind : null, stukken: [...stuk.values()] };
+}
+
+/**
+ * Bewaking lopend jaar (wv2793): per entiteit de kosten tot nu (bank, alleen volle maanden) tegenover de begroting, met kostenSignaal.
+ * De begroting komt uit het vastgestelde jaarplan van dat jaar (grondslag.begroting: na een herziening R9 de nieuwe); zonder vastgesteld
+ * jaarplan (2026 en eerder: David vroeg zelf) uit de historie (zijn begroting vooraf + aanvullingen). Bankdekking: bij een bankkoppeling
+ * t/m de dag vóór de ophaaldag (instelling bank_bron_<E>), anders de laatste post (ook een post na jaar J telt). Drempel = de buffer die
+ * op de peildatum geldt (de bankdekking, binnen jaar J; alleen besloten buffers, anders de laatst besloten), minstens 3 % van de begroting (Codex r1 M1). `gemeld` = wanneer de pod het signaal in de maandronde noemde (eenmalig per entiteit per jaar).
+ * Alleen lezen.
+ */
+export async function bewaking(db          , j         ) {
+  const vandaag = (await rijen               (db, "select date('now') as d"))[0].d;
+  const J = j == null || j === "" ? Number(vandaag.slice(0, 4)) : jaar(j);
+  const [plannen, hist, buffers, bankRuw, inst, eind] = await Promise.all([
+    rijen                                                                                                        (db,
+      "select entiteit, totaal, grondslag, versie, vastgesteld_op from jaarplan where jaar=? and status='vastgesteld'", J),
+    rijen                                                         (db,
+      "select entiteit, categorie, round(sum(bedrag),2) as bedrag from historie where jaar=? and categorie in ('begroting_vooraf','aanvulling') group by 1,2", J),
+    rijen                                                                        (db, "select entiteit, geldig_van, doel, status from buffer order by geldig_van"),
+    rijen                                                                                                                                                                 (db,
+      `select b.id, b.entiteit, b.boekdatum as datum, b.bedrag, t.bedrag as deel, t.soort, t.praktijk_id, t.boekjaar from bankmutatie b
+       left join bank_toewijzing t on t.bankmutatie_id = b.id where b.boekdatum >= ? and b.boekdatum < ? order by b.boekdatum, b.id`, `${J - 1}-01-01`, `${J + 1}-01-01`),
+    rijen                                     (db, "select sleutel, waarde from instelling where sleutel like 'bank_bron_%' or sleutel like ?", `bewaking_gemeld_%_${J}`),
+    rijen                                       (db, "select entiteit, max(boekdatum) as laatste from bankmutatie group by entiteit"),
+  ]);
+  const bank = bankPosten(bankRuw);
+  const entiteiten                          = {};
+  for (const E of ENT) {
+    const plan = plannen.find((p) => p.entiteit === E);
+    let g                                                                                               = {};
+    try { g = plan ? JSON.parse(String(plan.grondslag)) : {}; } catch { g = {}; }
+    const hB = hist.filter((h) => h.entiteit === E);
+    const vooraf = hB.find((h) => h.categorie === "begroting_vooraf")?.bedrag || 0, aanv = hB.find((h) => h.categorie === "aanvulling")?.bedrag || 0;
+    const B = plan ? Number(g.begroting?.totaal ?? plan.totaal) : vooraf + aanv;
+    const bron = plan ? `jaarplan ${J} versie ${plan.versie}` : vooraf > 0 ? `jouw stukken ${J}${aanv ? " met aanvulling" : ""}` : "geen begroting";
+    const pakket = E !== "POT" ? { vg: 0, ej: 0 } : plan ? { vg: Number(g.begroting?.vakantiegeld_pakket) || 0, ej: Number(g.begroting?.eindejaar_pakket) || 0 }
+      : { vg: B * POT_PAKKET.vakantiegeld, ej: B * POT_PAKKET.eindejaar };
+    const bf = buffers.filter((b) => b.entiteit === E);
+    const laatstePost = eind.find((x) => x.entiteit === E)?.laatste || null;
+    let bb                                                      = null;
+    try { bb = JSON.parse(inst.find((i) => i.sleutel === `bank_bron_${E}`)?.waarde || "null"); } catch { bb = null; }
+    const op = bb && bb.bron === "bankkoppeling" && typeof bb.opgehaald === "string" && DATUM.test(bb.opgehaald.slice(0, 10)) ? bb.opgehaald.slice(0, 10) : null;
+    const bankTot = op ? K.plusDagen(op, -1) : null;
+    const peil = [bankTot || laatstePost || vandaag, `${J}-01-01`, `${J}-12-31`].sort()[1];   // de bankdekking, binnen jaar J
+    // alleen een besloten buffer: een voorstel (nog niet besloten verhoging) mag geen alarm onderdrukken (Codex r2 M1)
+    const besloten = bf.filter((b) => b.status === "besloten");
+    const buffer = (besloten.filter((b) => b.geldig_van <= peil).at(-1) || besloten.at(-1))?.doel || 0;
+    let gemeld          = null;
+    try { gemeld = JSON.parse(inst.find((i) => i.sleutel === `bewaking_gemeld_${E}_${J}`)?.waarde || "null"); } catch { gemeld = null; }
+    entiteiten[E] = { ...bewakingJaar({ entiteit: E, jaar: J, begroting: B, vakantiegeld: pakket.vg, eindejaar: pakket.ej, bank: bank.filter((b) => b.entiteit === E), bankTot,
+      bankEind: laatstePost, buffer, bron }),
+      buffer, gemeld };
+  }
+  return { jaar: J, berekend_op: vandaag, entiteiten };
 }
 
 export async function jaarGegevens(db          , j         ) {

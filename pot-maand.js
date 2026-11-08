@@ -17,7 +17,8 @@
  *   3 bezig > 10 min → onzeker; onzeker zelf terugzoeken in Gmail (lees-luik); wachtende regels klaarzetten via het mailluik met de pdf's
  *     uit dezelfde stukken-code als de app (notaPdf), na een pdftotext-controle (nummer, bedrag, naam) en een voorcontrole in Gmail;
  *   4 elk uur nameten: concept → verzonden of weg;
- *   5 Voor jou: één kaart per notadatum ("9 concepten van 1 feb klaar"), met wat er van eerdere nota's nog open staat; één kaart voor
+ *   5 Voor jou: één kaart per notadatum ("9 concepten van 1 feb klaar"), met wat er van eerdere nota's nog open staat (en, eenmalig per
+ *     entiteit per jaar, één regel als de kosten voorlopen op de begroting: bewaking wv2793); één kaart voor
  *     regels die niet lukten of op een adres wachten.
  * Ontvanger praktijk = het vastgezette factuuradres uit het OVIS-register (zelfde bron als pot-verzend); verschilt het van het e-mailadres op
  * de nota (debiteur van die datum), dan wacht de regel (wacht_op_adres) tot het gelijk is. Klok en tijdstempels uit D1, niet van de pod.
@@ -280,14 +281,15 @@ async function klaarzetten(io, B, nu, inst, uit, zet) {
 // ── 5. Voor jou ──────────────────────────────────────────────────────────────
 const POT_DOEL = { module: 'pot', doel: { scherm: 'pot', focus: 'notas:alle' } };
 function kaartGrens(p) { return Object.assign(p, { titel: kap(p.titel, 90), waarom: kap(p.waarom, 400), meting: kap(p.meting, 300), stappen: (p.stappen || []).slice(0, 12) }); }
-function kaartKlaar(datum, rijen, open, nuKort) {
+function kaartKlaar(datum, rijen, open, nuKort, bewaking) {
   const n = rijen.length;
+  bewaking = bewaking || [];
   return kaartGrens({ sleutel: `ovis-pot-maand-${datum}`, soort: 'doen', volgorde: 25, deadline: datum.slice(0, 8) + '05', waar: 'overal', prive: true, duur_min: 2 + n,
     titel: `OVIS POT — ${n} concept${n > 1 ? 'en' : ''} van ${dm(datum)} versturen`,
     herkomst: { handmatig: 'pot-maand', datum: datum, ...POT_DOEL },
     waarom: `Socev maakte de stukken van ${datumWoord(datum)} (bijdragen POT en Kostenmaatschap, doorbelaste huur SLOEL) en zette per praktijk één mail met de pdf's als concept in Gmail, aan het vastgezette mailadres van de praktijk uit de Second Brain. Iedereen betaalt op de 15e. Versturen doe je zelf.` +
       (open.length ? ` Nog open van eerder: ${open.join('; ')}.` : ''),
-    stappen: ['Open Gmail en ga naar Concepten.', `Kijk per praktijk de mail na (onderwerp begint met "POH-GGZ"): ontvanger, tekst en de pdf's.`, 'Verstuur ze.',
+    stappen: [...bewaking.map((b) => `Let op, ${ENT_KORT[b.entiteit] || b.entiteit}: ${b.tekst} Kijk in OVIS POT › Wat nu.`), 'Open Gmail en ga naar Concepten.', `Kijk per praktijk de mail na (onderwerp begint met "POH-GGZ"): ontvanger, tekst en de pdf's.`, 'Verstuur ze.',
       ...(open.length ? ['Wil je een praktijk herinneren aan een open nota: OVIS POT › Betalingen, "herinnering als concept".'] : []),
       'Binnen een uur na versturen ziet Socev ze als verzonden; deze kaart gaat dan vanzelf dicht.'],
     meting: `${nuKort}: ${n} concept${n > 1 ? 'en staan' : ' staat'} klaar in Gmail.` });
@@ -302,6 +304,24 @@ function kaartProbleem(rijen, nuKort) {
     stappen: ['Gaat het om een factuuradres: zeg tegen Socev "factuuradres <praktijk> is …"; Socev zet het in de Second Brain en daarna komt er een kaart om het vast te zetten. Of pas in OVIS POT › Praktijken het e-mailadres van de praktijk aan.',
       'Gaat het om iets anders: zeg het in de machinekamer.', 'Socev probeert het elke tien minuten opnieuw; deze kaart gaat vanzelf dicht als het gelukt is.'],
     meting: `${nuKort}: ${rijen.length} mail${rijen.length > 1 ? 's wachten' : ' wacht'}.` });
+}
+// ── bewaking (wv2793) ────────────────────────────────────────────────────────
+// De kosten van een entiteit lopen voor op de begroting (kostenSignaal, en nu nog steeds boven de drempel) en dat is dit jaar nog niet
+// gemeld: hooguit één regel op de maandkaart, eenmalig per entiteit per jaar (instelling bewaking_gemeld_<E>_<J>). Verder niets: geen
+// melding buiten de app (de stand staat altijd in OVIS POT › Wat nu).
+async function bewakingNieuw(io, B, jaar) {
+  const r = await B.api.behandel(d1Achtig(io.d1), 'GET', 'bewaking', new URLSearchParams('jaar=' + jaar), null, 'pod maandronde');
+  if (!r || r.status !== 200 || !r.body || !r.body.entiteiten) return [];
+  const uit = [];
+  for (const e of ['POT', 'KM', 'SLOEL']) {
+    const x = r.body.entiteiten[e];
+    if (x && x.ok && x.signaal && x.nu && x.nu.boven && !x.gemeld) uit.push({ entiteit: e, jaar: Number(jaar), maand: x.signaal.maand, tot_maand: x.tot_maand, tekst: String(x.signaal.tekst) });
+  }
+  return uit;
+}
+async function bewakingGemeld(io, lijst, kaartSleutel, nuIso) {
+  for (const b of lijst) await io.d1([{ sql: 'insert into instelling (sleutel, waarde, opmerking) values (?,?,?) on conflict(sleutel) do nothing',
+    params: [`bewaking_gemeld_${b.entiteit}_${b.jaar}`, JSON.stringify({ maand: b.maand, tot_maand: b.tot_maand, op: nuIso, kaart: kaartSleutel }), 'pod maandronde: kostensignaal op de maandkaart genoemd (wv2793)'] }]);
 }
 // open nota's van eerder (te laat of deels), per praktijk één regel, voor op de kaart van de nieuwe ronde
 async function openVanEerder(io, B, nu) {
@@ -321,7 +341,8 @@ async function openVanEerder(io, B, nu) {
   }
   return uit.slice(0, 9);
 }
-async function kaarten(io, B, nu, nuKort) {
+async function kaarten(io, B, nu, nuKort, uitK) {
+  uitK = uitK || { fouten: [], bewaking: [] };
   const rijen = (await io.d1([{ sql: `select id, soort, praktijk_id, datum, status, reden, bijgewerkt_op from mail_concept where aangemaakt_op >= strftime('%Y-%m-%dT%H:%M:%SZ','now','-45 days') order by id`, params: [] }]))[0].results;
   const kortGeleden = new Date(Date.parse(nu.iso) - 14 * 864e5).toISOString().slice(0, 19) + 'Z';
   const lijst = await io.kaartLijst();
@@ -342,7 +363,10 @@ async function kaarten(io, B, nu, nuKort) {
     if (!rr.every((r) => ['concept', 'verzonden', 'concept_weg'].includes(r.status))) continue;   // nog niet alles klaar
     let openE = [];
     try { openE = await openVanEerder(io, B, nu); } catch (e) { openE = []; }
-    await io.kaartZet(kaartKlaar(datum, rr, openE, nuKort));
+    let bew = [];
+    try { bew = await bewakingNieuw(io, B, Number(String(datum).slice(0, 4))); } catch (e) { bew = []; uitK.fouten.push('bewaking'); }
+    await io.kaartZet(kaartKlaar(datum, rr, openE, nuKort, bew));
+    if (bew.length) { await bewakingGemeld(io, bew, s, nu.iso); uitK.bewaking.push(...bew.map((b) => b.entiteit)); }
   }
   // problemen: één bundelkaart; een oudere gaat dicht als hij niet meer klopt
   // een weggegooid concept (niet verzonden) is ook iets om te besluiten: hooguit 14 dagen op de kaart
@@ -356,7 +380,7 @@ async function kaarten(io, B, nu, nuKort) {
 // ── de tik ───────────────────────────────────────────────────────────────────
 async function ronde(io, o) {
   o = o || {};
-  const uit = { geclaimd: 0, concept: 0, verzonden: 0, onzeker: 0, fout: 0, wacht_op_adres: 0, opnieuw: 0, gebundeld: 0, notas_gemaakt: 0, fouten: [], gewijzigd: false };
+  const uit = { geclaimd: 0, concept: 0, verzonden: 0, onzeker: 0, fout: 0, wacht_op_adres: 0, opnieuw: 0, gebundeld: 0, notas_gemaakt: 0, fouten: [], gewijzigd: false, bewaking: [] };
   const B = await io.bundel();
   if (!B || !B.api || !B.K || !B.S) throw new Error('bundel ovis-pot ontbreekt');
   const nuD1 = (await io.d1([{ sql: `select ${D1_NU} as nu`, params: [] }]))[0].results[0].nu;
@@ -403,8 +427,8 @@ async function ronde(io, o) {
     }
   }
   // 5 kaarten (bij een wijziging of op verzoek)
-  if (uit.gewijzigd || o.kaarten) { try { await kaarten(io, B, nu, nuKort); } catch (e) { uit.fouten.push('kaarten'); } }
+  if (uit.gewijzigd || o.kaarten) { try { await kaarten(io, B, nu, nuKort, uit); } catch (e) { uit.fouten.push('kaarten'); } }
   return uit;
 }
 
-module.exports = { ronde, d1Achtig, amsterdam, pdfHoortBij, bestandsnaam, zoekInGmail, kaartKlaar, kaartProbleem, afzenderVan, GRENS, VAN };
+module.exports = { ronde, d1Achtig, amsterdam, pdfHoortBij, bestandsnaam, zoekInGmail, kaartKlaar, kaartProbleem, afzenderVan, bewakingNieuw, GRENS, VAN };

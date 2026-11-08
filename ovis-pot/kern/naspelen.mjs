@@ -35,6 +35,55 @@ export function middenDatum(posten) {
 }
 
 /**
+ * Kosten per maand van entiteit E in jaar J uit de bank (positief = geld de deur uit): alles behalve de bijdragen van de praktijken
+ * (BIJDRAGE_SOORTEN) en onderlinge boekingen; overige inkomsten (subsidie, uitkering, extern) tellen als min-kosten. Eén definitie
+ * voor naspelen en de bewaking in de lopende app (wv2793).
+ */
+export function kostenPerMaand(bank, E, J) {
+  const vervang = new Set(BIJDRAGE_SOORTEN[E] || []);
+  const r = Array(12).fill(0);
+  for (const b of bank) if ((b.entiteit == null || b.entiteit === E) && String(b.datum).startsWith(String(J)) && !vervang.has(b.soort) && b.soort !== "onderling") r[Number(b.datum.slice(5, 7)) - 1] -= Number(b.bedrag);
+  return r;
+}
+/**
+ * De laatste maand van J die helemaal in de bank staat (Codex r1 M1, wv2789): een dekkingsdatum (`bankTot`, t/m welke dag de import
+ * compleet is) gaat voor; zonder dekkingsdatum telt een maand als compleet als de bank verder loopt (`bankEind` = laatste post), of als de
+ * laatste post in de laatste vijf dagen van die maand valt (de vaste lasten lopen rond de 25e).
+ */
+export function volleMaanden({ jaar: J, bankTot = null, bankEind = null }) {
+  const dekking = bankTot ? String(bankTot) : bankEind;
+  if (!dekking || dekking < `${J}-01-01`) return 0;
+  if (dekking.slice(0, 4) > String(J)) return 12;
+  const m = Number(dekking.slice(5, 7)), d = Number(dekking.slice(8, 10));
+  const laatste = new Date(Date.UTC(J, m, 0)).getUTCDate();
+  return d >= (bankTot ? laatste : laatste - 4) ? m : m - 1;
+}
+
+/**
+ * Bewaking in de lopende app (wv2793): de kosten tot nu (bank) tegenover de begroting van het lopende jaar, met kostenSignaal (zoals in de
+ * blinde terugtoets, wv2789). Alleen volle maanden tellen; het profiel is de bank van het jaar ervoor. Puur: alles komt binnen.
+ * @param {{ entiteit:string, jaar:number, begroting:number, vakantiegeld?:number, eindejaar?:number, bank:{entiteit?:string,datum:string,bedrag:number,soort:string|null}[],
+ *   bankTot?:string|null, bankEind?:string|null, buffer?:number, bron:string }} a  bank = de posten van J−1 en J (meer mag); bron = waar de begroting vandaan komt (tekst)
+ */
+export function bewakingJaar(a) {
+  const E = a.entiteit, J = Number(a.jaar), B = rond2(Number(a.begroting) || 0);
+  const bankE = (a.bank || []).filter((b) => b.entiteit == null || b.entiteit === E);
+  // de laatste post van de entiteit; mag van buiten de meegegeven posten komen (een post in januari J+1 maakt december compleet; Codex r1 Z1)
+  const bankEind = a.bankEind || (bankE.length ? bankE.map((b) => b.datum).sort().at(-1) : null);
+  const tot = volleMaanden({ jaar: J, bankTot: a.bankTot || null, bankEind });
+  const dekking = a.bankTot || bankEind;
+  const basis = { entiteit: E, jaar: J, bron: a.bron, begroting: B, bank_tot: dekking && dekking.startsWith(String(J)) ? dekking : null, bank_tot_bron: a.bankTot ? "ophaaldag" : "laatste post" };
+  if (!(B > 0)) return { ...basis, ok: false, reden: `geen begroting voor ${J}`, signaal: null, tot_maand: 0, maanden: [] };
+  const kJ = kostenPerMaand(bankE, E, J);
+  const vorig = bankE.some((b) => String(b.datum).startsWith(String(J - 1))) ? kostenPerMaand(bankE, E, J - 1) : null;
+  const s = kostenSignaal({ entiteit: E, begroting: B, vakantiegeld: Number(a.vakantiegeld) || 0, eindejaar: Number(a.eindejaar) || 0,
+    werkelijk: kJ.map((x, i) => (i < tot ? rond2(x) : null)), profiel: vorig, buffer: Number(a.buffer) || 0 });
+  const laatste = s.maanden.at(-1) || null;
+  return { ...basis, ok: true, reden: tot ? null : "nog geen volle maand in de bank", profiel: vorig ? "vorig jaar" : "gelijke maanden", ...s,
+    nu: laatste ? { maand: laatste.maand, begroot: laatste.begroot_tot_nu, echt: laatste.echt_tot_nu, afwijking: laatste.afwijking, boven: laatste.boven } : null };
+}
+
+/**
  * Speel één entiteit na over de jaren `van`..`tot`.
  * @param {{ entiteit: string, van: number, tot: number, standen: any[], deelnames: any[], jaarlasten: any[],
  *   historie: {entiteit:string, jaar:number, maand:number|null, praktijk_id:string|null, bedrag:number, categorie:string, titel:string}[],
@@ -56,14 +105,7 @@ export function naspeelEntiteit(a) {
   // de laatste maand van J die helemaal in de bank staat (Codex r1 M1): een dekkingsdatum (`bankTot`, t/m welke dag de import compleet
   // is) gaat voor; zonder dekkingsdatum telt een maand als compleet als de bank verder loopt, of als de laatste post in de laatste vijf
   // dagen van die maand valt (de vaste lasten lopen rond de 25e; een maand zonder post op de laatste kalenderdag is dan toch compleet)
-  const dekking = a.bankTot ? String(a.bankTot) : bankEind;
-  const laatsteVolleMaand = (J) => {
-    if (!dekking || dekking < `${J}-01-01`) return 0;
-    if (dekking.slice(0, 4) > String(J)) return 12;
-    const m = Number(dekking.slice(5, 7)), d = Number(dekking.slice(8, 10));
-    const laatste = new Date(Date.UTC(J, m, 0)).getUTCDate();
-    return d >= (a.bankTot ? laatste : laatste - 4) ? m : m - 1;
-  };
+  const laatsteVolleMaand = (J) => volleMaanden({ jaar: J, bankTot: a.bankTot, bankEind });
   const jaren = [];
   let saldoEcht = Number(a.startsaldo), saldoModel = Number(a.startsaldo), saldoZonder = Number(a.startsaldo);
   const bufferAl = {};             // buffer per praktijk die het model al gevraagd heeft (vast tegoed)
@@ -124,16 +166,11 @@ export function naspeelEntiteit(a) {
     const restZonder = bankJ.filter((b) => houdEcht(b, afrVorigZonder)).map((b) => ({ datum: b.datum, bedrag: Number(b.bedrag) }));
     const bijdragenEcht = bankJ.filter(isBijdrage);
     // ---- bewaking: kosten per maand uit de bank (alles behalve bijdragen en onderlinge boekingen), profiel = het jaar ervoor
-    const kostenPerMaand = (jaar, posten = a.bank) => {
-      const r = Array(12).fill(0);
-      for (const b of posten) if (b.datum.startsWith(String(jaar)) && !vervang.has(b.soort) && b.soort !== "onderling") r[Number(b.datum.slice(5, 7)) - 1] -= Number(b.bedrag);
-      return r;
-    };
-    const kJ = kostenPerMaand(J);
+    const kJ = kostenPerMaand(a.bank, E, J);
     const maandBekend = laatsteVolleMaand(J);   // een dekkingsdatum gaat altijd voor (Codex r2 M1)
     // profiel = de kosten per maand van het jaar ervoor; voor het eerste jaar uit `bankVorig` (de bank van van − 1) als die er is (Codex r1 M2)
     const bronVorig = J === a.van && Array.isArray(a.bankVorig) ? a.bankVorig : a.bank;
-    const vorigeBank = bronVorig.some((b) => b.datum.startsWith(String(J - 1))) ? kostenPerMaand(J - 1, bronVorig) : null;
+    const vorigeBank = bronVorig.some((b) => b.datum.startsWith(String(J - 1))) ? kostenPerMaand(bronVorig, E, J - 1) : null;
     const signaal = B > 0 ? kostenSignaal({ entiteit: E, begroting: B, vakantiegeld: pakket.vakantiegeld_pakket, eindejaar: pakket.eindejaar_pakket,
       werkelijk: kJ.map((x, i) => (i < maandBekend ? rond2(x) : null)), profiel: vorigeBank, buffer: a.buffer ? Number(a.buffer.doel) : 0 }) : null;
     const inModel = [];

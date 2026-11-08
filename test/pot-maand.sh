@@ -80,6 +80,16 @@ const M = require(path.resolve('pot-maand.js'));
   const voor = conceptAanroepen;
   u = await M.ronde(io, {});
   toets('ronde 2: geen nieuwe nota\'s, geen tweede concept', db.prepare('select count(*) n from nota').get().n === 6 && conceptAanroepen === voor && mc().length === 5, [u, conceptAanroepen]);
+  // ── bewaking (wv2793): KM-kosten dit jaar anderhalf keer de begroting (vorig jaar vlak) → één regel op de maandkaart, eenmalig ──
+  const kanSignaal = maand >= 6;   // signaal pas vanaf april, met twee volle maanden boven de drempel
+  {
+    const Bkm = JSON.parse(db.prepare("select grondslag from jaarplan where entiteit='KM' and status='vastgesteld'").get().grondslag).begroting.totaal;
+    db.exec("insert into bankrekening (iban, entiteit, bank) values ('NL00PROE0000000002','KM','Proefbank')");
+    const mut = db.prepare("insert into bankmutatie (rekening, entiteit, boekdatum, bedrag, sleutel, geladen_op) values ('NL00PROE0000000002','KM',?,?,?,'x')");
+    for (let m = 1; m <= 12; m++) mut.run(`${J - 1}-${String(m).padStart(2, '0')}-20`, -Bkm / 12, `bw-${J - 1}-${m}`);
+    for (let m = 1; m < maand; m++) mut.run(`${J}-${String(m).padStart(2, '0')}-20`, -1.5 * Bkm / 12, `bw-${J}-${m}`);
+    db.prepare("insert or replace into instelling (sleutel, waarde) values ('bank_bron_KM', ?)").run(JSON.stringify({ bron: 'bankkoppeling', opgehaald: nu.toISOString(), laatste_post: null }));
+  }
   // ── adres goed → concept + maandkaart ──
   reg.per.P92.aan = ['twee@proef.example'];
   db.exec("update mail_concept set bijgewerkt_op='2000-01-01T00:00:00Z' where status='wacht_op_adres'");
@@ -88,6 +98,19 @@ const M = require(path.resolve('pot-maand.js'));
   const mk = kaartenL.find((k) => /^ovis-pot-maand-\d/.test(k.sleutel));
   toets('maandkaart: alle praktijken klaar → één kaart, probleemkaart dicht', !!mk && /2 concepten/.test(mk.p.titel) && kaartenL.filter((k) => /probleem/.test(k.sleutel)).every((k) => k.status === 'gedaan'), kaartenL.map((k) => [k.sleutel, k.status, k.p.titel]));
   toets('kaarttekst zonder factuur/btw en binnen de grenzen', B.K.controleerStukTekst(JSON.stringify(mk && mk.p)).length === 0 && mk.p.titel.length <= 90 && mk.p.waarom.length <= 400);
+  {
+    const regels = (mk.p.stappen || []).filter((x) => /^Let op/.test(x));
+    const gemeld = db.prepare("select sleutel, waarde from instelling where sleutel like 'bewaking_gemeld_%'").all();
+    if (kanSignaal) {
+      toets('bewaking: één regel "Let op, Kostenmaatschap: …" op de maandkaart, alleen KM', regels.length === 1 && /^Let op, Kostenmaatschap: Eind \w+: de kosten lopen/.test(regels[0]) && /OVIS POT › Wat nu/.test(regels[0]), mk.p.stappen);
+      toets('bewaking: gemeld vastgelegd (instelling bewaking_gemeld_KM_<jaar>, met de kaart)', gemeld.length === 1 && gemeld[0].sleutel === `bewaking_gemeld_KM_${J}` && JSON.parse(gemeld[0].waarde).kaart === mk.sleutel, gemeld);
+      toets('bewaking: uitkomst van de ronde noemt KM', Array.isArray(u.bewaking) && u.bewaking.join() === 'KM', u.bewaking);
+      toets('bewaking: eenmalig per entiteit per jaar (daarna niets nieuws)', (await M.bewakingNieuw(io, B, J)).length === 0);
+      const m2 = M.kaartKlaar(`${J}-12-01`, [{ id: 1 }], [], 'x', await M.bewakingNieuw(io, B, J));
+      toets('bewaking: volgende maandkaart zonder Let op-regel', !(m2.stappen || []).some((x) => /^Let op/.test(x)), m2.stappen);
+    } else toets('bewaking: vóór juni geen signaal en geen regel', regels.length === 0 && gemeld.length === 0, [regels, gemeld]);
+    toets('bewaking: tekst zonder factuur/btw', B.K.controleerStukTekst(regels.join('\n')).length === 0);
+  }
   // ── verkoopadres Exact komt later → achterstand alsnog ──
   await B.api.behandel(A, 'POST', 'verkoopadres', Z, { entiteit: 'POT', email: 'verkoop-pot@proef.example' }, 'proef');
   u = await M.ronde(io, {});

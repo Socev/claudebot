@@ -25581,8 +25581,8 @@ async function potMaandTik(o) {
     potMaand.uitkomst = u; potMaand.laatste = new Date().toISOString(); potMaand.fouten_op_rij = 0;
     if (meten) potMaand.laatste_meting = t0;
     if (kaarten && u.fouten.indexOf('kaarten') < 0) potMaand.laatste_kaarten = t0;
-    if (u.geclaimd || u.concept || u.fout || u.onzeker || u.verzonden || u.opnieuw || u.gebundeld || u.notas_gemaakt)
-      schrijfLog(nu() + ' pot-maand ' + velden({ notas: u.notas_gemaakt || undefined, gebundeld: u.gebundeld || undefined, geclaimd: u.geclaimd, concept: u.concept, adres: u.wacht_op_adres, fout: u.fout, onzeker: u.onzeker, verzonden: u.verzonden, opnieuw: u.opnieuw }));
+    if (u.geclaimd || u.concept || u.fout || u.onzeker || u.verzonden || u.opnieuw || u.gebundeld || u.notas_gemaakt || (u.bewaking && u.bewaking.length))
+      schrijfLog(nu() + ' pot-maand ' + velden({ notas: u.notas_gemaakt || undefined, gebundeld: u.gebundeld || undefined, geclaimd: u.geclaimd, concept: u.concept, adres: u.wacht_op_adres, fout: u.fout, onzeker: u.onzeker, verzonden: u.verzonden, opnieuw: u.opnieuw, bewaking: u.bewaking && u.bewaking.length ? u.bewaking.join('+') : undefined }));
     if (u.fouten.indexOf('notas') >= 0 && u.notas && u.notas.reden) potMaandBox('notas', 'de nota\'s van deze maand zijn niet gemaakt: ' + String(u.notas.reden).slice(0, 160));
     if (u.fouten.indexOf('dagplafond') >= 0) potMaandBox('dagplafond', 'meer dan ' + POT_MAAND_MOD.GRENS.perDag + ' mailconcepten vandaag; de rest wacht tot morgen');
     ['luik', 'pdftotext', 'kaarten', 'register', 'adresregister'].forEach(function (r) { potMaand.rij[r] = u.fouten.indexOf(r) >= 0 ? (potMaand.rij[r] || 0) + 1 : 0; if (potMaand.rij[r] === 5) potMaandBox(r, 'stap ' + r + ' faalde 5 tikken op rij'); });
