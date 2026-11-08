@@ -209,8 +209,9 @@ function slotNeem(dir) {
       return true;
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      let w = null; try { w = JSON.parse(fs.readFileSync(slotPad(dir), 'utf8')); } catch (e2) {}
-      const oud = !w || (Date.now() - Date.parse(w.sinds) > SLOT_OUD_MS && !pidLeeft(Number(w.pid)));
+      let w = null, mt = Date.now(); try { mt = fs.statSync(slotPad(dir)).mtimeMs; w = JSON.parse(fs.readFileSync(slotPad(dir), 'utf8')); } catch (e2) {}
+      // review wv2797 MOET 1: een (nog) leeg of onleesbaar slot is pas oud na SLOT_OUD_MS op zijn mtime, nooit meteen
+      const oud = w && w.sinds ? Date.now() - Date.parse(w.sinds) > SLOT_OUD_MS && !pidLeeft(Number(w.pid)) : Date.now() - mt > SLOT_OUD_MS;
       if (!oud || i) return false;
       try { fs.unlinkSync(slotPad(dir)); } catch (e3) {}
     }
@@ -439,11 +440,16 @@ function journaalRegels(boom) {
     const blad = {};
     el.k.forEach(function (c) { if (!c.k.length && c.t) blad[c.n.toLowerCase()] = c.t; });   // bladeren en attributen
     const nr = Object.keys(blad).find(function (k) { return /^(employee_?number|employeenr|personeelsnummer|empnr|employeeid)$/.test(k); });
-    const bedrag = Object.keys(blad).find(function (k) { return /^(amount|bedrag|value|waarde|debit|credit)$/.test(k); });
+    const getal = function (k) { return blad[k] != null && /^-?\d+([.,]\d+)?$/.test(blad[k]) ? Number(String(blad[k]).replace(',', '.')) : null; };
     const oms = Object.keys(blad).find(function (k) { return /^(description|omschrijving|wagecodedescription|looncodeomschrijving|name)$/.test(k); });
-    if (nr && bedrag && oms && /^-?\d+([.,]\d+)?$/.test(blad[bedrag])) {
+    // review wv2797 MOET 2: het teken telt (correcties verlagen); debet/credit als debet − credit. Het formaat is nog niet gemeten:
+    // de som per soort wordt pas na het optellen absoluut (zie journaal()), en de signalen S4/S5 staan uit tot de peiling.
+    let bedrag = null;
+    if (getal('debit') != null || getal('credit') != null) bedrag = (getal('debit') || 0) - (getal('credit') || 0);
+    else { const k = Object.keys(blad).find(function (x) { return /^(amount|bedrag|value|waarde)$/.test(x) && getal(x) != null; }); if (k) bedrag = getal(k); }
+    if (nr && oms && bedrag != null) {
       const s = SOORT_RE.find(function (x) { return x[1].test(blad[oms]); });
-      if (s) regels.push({ nr: String(blad[nr]).slice(0, 40), soort: s[0], bedrag: Math.abs(Number(String(blad[bedrag]).replace(',', '.'))) });
+      if (s) regels.push({ nr: String(blad[nr]).slice(0, 40), soort: s[0], bedrag: bedrag });
     }
     el.k.forEach(loop);
   })(boom);
@@ -536,6 +542,7 @@ async function kindLees(invoer, dir, peil) {
         historieRijen(lijsten[h[0]], h[1], V[h[0]], h[3]).forEach(function (r) { zet.run(h[2], r[0], cid, r[1], JSON.stringify(r[2])); });
       }
       tabellen.forEach(function (t) {
+        d.prepare('delete from salaristabel where bedrijf = ? and tabel = ? and versie <> ?').run(cid, t.tabel, t.versie);
         d.prepare('insert or replace into salaristabel (bedrijf, tabel, versie, data) values (?, ?, ?, ?)').run(cid, t.tabel, t.versie, JSON.stringify(t.data));
         d.prepare('delete from salaristrede where versie = ?').run(t.versie);
         const zet = d.prepare('insert or replace into salaristrede (versie, schaal, trede, data) values (?, ?, ?, ?)');
@@ -552,10 +559,17 @@ async function kindLees(invoer, dir, peil) {
     // journalen van nieuwe loonruns (laatste 13 maanden, nieuwste eerst, hooguit MAX_JOURNALEN per ronde)
     const nrNaarId = {};
     lid(d, 'select id, data from medewerker where bedrijf = ?', [cid]).forEach(function (m) { const x = JSON.parse(m.data); if (x.employeeNumber != null) nrNaarId[String(x.employeeNumber)] = m.id; });
-    const open = lid(d, "select id, data from loonrun where bedrijf = ? and (journaal is null or journaal like 'document:wacht%')", [cid]).map(function (r) { return { id: r.id, x: JSON.parse(r.data) }; })
+    // review wv2797 MOET 5: herstelbare fouten (429, 5xx, wachten, netwerk) opnieuw, hooguit 5 keer; blijvend alleen bij een andere 4xx
+    const open = lid(d, "select id, data from loonrun where bedrijf = ? and (journaal is null or journaal like 'opnieuw:%')", [cid]).map(function (r) { return { id: r.id, x: JSON.parse(r.data) }; })
       .filter(function (r) { return r.x.year >= jaar - 1; }).sort(function (a, c) { return (c.x.year * 100 + (c.x.periodEnd || 0)) - (a.x.year * 100 + (a.x.periodEnd || 0)); }).slice(0, MAX_JOURNALEN);
     for (const r of open) {
-      const j = await journaal(L, cid, r.id, r.x.year);
+      let j;
+      try { j = await journaal(L, cid, r.id, r.x.year); }
+      catch (e) { if (e.reden === 'token' || e.reden === 'grens') throw e; j = { status: 'netwerk' }; }
+      const vorig = /^opnieuw:.*:(\d+)$/.exec(d.prepare('select journaal from loonrun where id = ?').get(r.id).journaal || '');
+      const poging = vorig ? Number(vorig[1]) + 1 : 1;
+      const code = Number((/:(\d{3})/.exec(j.status) || [])[1]);
+      const status = j.status === 'ok' ? 'ok:' : (code >= 400 && code < 500 && code !== 429) || poging >= 5 ? 'blijvend:' + j.status : 'opnieuw:' + j.status + ':' + poging;
       if (peil && j.namen) extra.journaal_elementen = j.namen;
       d.exec('begin');
       try {
@@ -563,21 +577,25 @@ async function kindLees(invoer, dir, peil) {
         (j.regels || []).forEach(function (g) { const mw = nrNaarId[g.nr]; if (!mw) return; const k = mw + '|' + g.soort; som[k] = (som[k] || 0) + g.bedrag; });
         d.prepare('delete from loonrun_regel where run = ?').run(r.id);
         const zet = d.prepare('insert into loonrun_regel (run, medewerker, soort, bedrag) values (?, ?, ?, ?)');
-        Object.keys(som).forEach(function (k) { const [mw, s] = k.split('|'); zet.run(r.id, mw, s, Math.round(som[k] * 100) / 100); uit.regels++; });
-        d.prepare('update loonrun set journaal = ?, journaal_tijd = ? where id = ?').run(j.status + (j.status === 'ok' ? ':' + Object.keys(som).length : ''), nu, r.id);
+        Object.keys(som).forEach(function (k) { const [mw, s] = k.split('|'); zet.run(r.id, mw, s, Math.round(Math.abs(som[k]) * 100) / 100); uit.regels++; });
+        d.prepare('update loonrun set journaal = ?, journaal_tijd = ? where id = ?').run(status + (j.status === 'ok' ? Object.keys(som).length : ''), nu, r.id);
         d.exec('commit');
       } catch (e) { d.exec('rollback'); throw e; }
-      if (j.status === 'ok') uit.journalen++;
+      if (j.status !== 'ok') continue;
+      uit.journalen++;
       // uurloners: betaalde uren van die periode (vaste + variabele urencomponenten; onbetaald telt niet)
       for (const m of lid(d, "select distinct medewerker from historie where soort = 'salaris' and bedrijf = ? and json_extract(data, '$.type') in ('grossHourlyWage', 'netHourlyWageExclWageComp', 'netHourlyWageInclWageComp')", [cid])) {
-        let totaal = 0, gezien = false;
+        // review wv2797 MOET 4: alleen een urentotaal als beide lijsten (vast én variabel) beschikbaar waren; anders geen S4 voor die persoon
+        let totaal = 0, beide = 0;
+        const per = r.x.periodStart || r.x.periodEnd || 1;
         for (const soort of ['fixedhours', 'variablehours']) {
-          const l = await L.alle('/api/employees/' + m.medewerker + '/' + soort, { year: String(r.x.year), period: String(r.x.periodStart || r.x.periodEnd || 1) });
+          const l = await L.alle('/api/employees/' + m.medewerker + '/' + soort, { year: String(r.x.year), period: String(per) });
           if (l === null) continue;
-          gezien = true;
+          beide++;
           l.forEach(function (x) { const u = kies(x, V.uren); if (!/onbetaald|unpaid/i.test(String(u.hourCodeDescription || ''))) totaal += Number(u.hours) || 0; });
         }
-        if (gezien) { d.prepare('insert or replace into uren (medewerker, jaar, periode, uren, gezien) values (?, ?, ?, ?, ?)').run(m.medewerker, r.x.year, r.x.periodStart || r.x.periodEnd || 1, totaal, nu); uit.uren++; }
+        if (beide === 2) { d.prepare('insert or replace into uren (medewerker, jaar, periode, uren, gezien) values (?, ?, ?, ?, ?)').run(m.medewerker, r.x.year, per, totaal, nu); uit.uren++; }
+        else d.prepare('delete from uren where medewerker = ? and jaar = ? and periode = ?').run(m.medewerker, r.x.year, per);
       }
     }
   }
@@ -624,11 +642,16 @@ function inDienst(m, op) {
   const e = m.h.dienstverband || [];
   return e.some(function (x) { const s = datum(x.startDate), t = datum(x.endDate); return s != null && s <= op && (t == null || t >= op); });
 }
-function trede(d, bedrijf, sal) {
+// review wv2797 MOET 3: de versie die geldig is op de controledatum (jaar/maand ≤ op, nieuwste eerst), niet zomaar de eerste
+function trede(d, bedrijf, sal, op) {
   if (!sal.tabel || !sal.schaal || !sal.trede || sal.schaal.scaleCode == null || sal.trede.stepCode == null) return null;
-  const v = d.prepare("select versie from salaristabel where bedrijf = ? and tabel = ?").all(bedrijf, String(sal.tabel.tableId || ''));
-  for (const x of v) { const r = d.prepare('select data from salaristrede where versie = ? and schaal = ? and trede = ?').get(x.versie, String(sal.schaal.scaleCode), String(sal.trede.stepCode)); if (r) return JSON.parse(r.data); }
-  return null;
+  const opJm = new Date(op).getUTCFullYear() * 100 + new Date(op).getUTCMonth() + 1;
+  const v = d.prepare('select versie, data from salaristabel where bedrijf = ? and tabel = ?').all(bedrijf, String(sal.tabel.tableId || ''))
+    .map(function (x) { const j = JSON.parse(x.data).versie || {}; return { versie: x.versie, jm: (Number(j.year) || 0) * 100 + (Number(j.month) || 0), nr: Number(j.version) || 0 }; })
+    .filter(function (x) { return x.jm > 0 && x.jm <= opJm; }).sort(function (a, b) { return b.jm - a.jm || b.nr - a.nr; })[0];
+  if (!v) return null;
+  const r = d.prepare('select data from salaristrede where versie = ? and schaal = ? and trede = ?').get(v.versie, String(sal.schaal.scaleCode), String(sal.trede.stepCode));
+  return r ? JSON.parse(r.data) : null;
 }
 // → [{ sleutel, soort, entiteit, naam, datum, tekst }]; nooit een bedrag in de tekst (die gaat naar de wachter en de app)
 function signalenBereken(d, invoer, nu) {
@@ -642,7 +665,7 @@ function signalenBereken(d, invoer, nu) {
     const pt = rst && Number(rst.parttimePercentage) > 0 ? Number(rst.parttimePercentage) / 100 : null;
     // S1: salaris lager dan schaal/trede (Nmbrs-salaristabel)
     if (sal && sal.value != null) {
-      const t = trede(d, m.bedrijf, sal);
+      const t = trede(d, m.bedrijf, sal, vandaag);
       if (t) {
         const soort = b.soort || 'month';
         const tab = sal.type === 'grossHourlyWage' ? t.amountHour : soort === '4-weeks' ? t.amountFourWeeks : soort === '1-week' ? t.amountWeek : t.amountMonth;
@@ -738,7 +761,7 @@ function signalenBereken(d, invoer, nu) {
       paginaNamen[ent].forEach(function (x) {
         if (!x.p.actief) return;
         const n = new Set(nmbrsNamen[ent] || []);
-        if (![...x.n].some(function (y) { return n.has(y); })) zet({ sleutel: 'S6:pagina:' + ent + ':' + norm(x.p.naam), soort: 'S6', entiteit: ent, naam: String(x.p.naam || '').slice(0, 80), datum: null, tekst: String(x.p.naam || '').slice(0, 80) + ' (' + ent + '): actieve medewerkerpagina, niet in dienst volgens Nmbrs' });
+        if (![...x.n].some(function (y) { return n.has(y); })) zet({ sleutel: 'S6:pagina:' + ent + ':' + String(x.p.naam || '').slice(0, 120), soort: 'S6', entiteit: ent, naam: String(x.p.naam || '').slice(0, 80), datum: null, tekst: String(x.p.naam || '').slice(0, 80) + ' (' + ent + '): actieve medewerkerpagina, niet in dienst volgens Nmbrs' });
       });
     });
   }
@@ -785,7 +808,7 @@ function kindPersoon(invoer, dir) {
   d.close();
   if (tr.length > 1) return { ok: true, meerdere: tr.slice(0, 10).map(function (m) { return { naam: naamVan(m.info), bedrijf: (bedrijven[m.bedrijf] || {}).naam || null, in_dienst: inDienst(m, nu) }; }) };
   return { ok: true, treffers: tr.map(function (m) {
-    const sal = geldig(m.h.salaris || [], nu) || {}, con = geldig(m.h.contract || [], nu) || {}, rst = geldig(m.h.rooster || [], nu) || {}, fn = (m.h.functie || [])[0] || {}, dv = geldig(m.h.dienstverband || [], nu) || {};
+    const sal = geldig(m.h.salaris || [], nu) || {}, con = geldig(m.h.contract || [], nu) || {}, rst = geldig(m.h.rooster || [], nu) || {}, fn = geldig(m.h.functie || [], nu) || (m.h.functie || []).slice(-1)[0] || {}, dv = geldig(m.h.dienstverband || [], nu) || {};
     return { naam: naamVan(m.info), bedrijf: (bedrijven[m.bedrijf] || {}).naam || null, entiteit: (bedrijven[m.bedrijf] || {}).entiteit || null, in_dienst: inDienst(m, nu),
       functie: fn.description || null, in_dienst_sinds: dv.startDate ? dv.startDate.slice(0, 10) : null, contract: { begin: con.startDate ? con.startDate.slice(0, 10) : null, eind: con.endDate ? con.endDate.slice(0, 10) : null, onbepaald: con.indefinite === true, uren_per_week: con.hoursPerWeek != null ? con.hoursPerWeek : null },
       parttime_pct: rst.parttimePercentage != null ? rst.parttimePercentage : null, salaristabel: sal.tabel ? sal.tabel.tableName || null : null,
@@ -868,5 +891,5 @@ if (require.main === module) {
   });
 }
 
-module.exports = { SCOPES, REDIRECT, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodSchrijf, noodWis, doodLees, verzoekToets, kies, scopesExact,
+module.exports = { SCOPES, REDIRECT, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodSchrijf, noodWis, doodLees, doodZet, verzoekToets, kies, scopesExact,
   sha, xmlBoom, journaalRegels, signalenBereken, periodeStart, NmbrsFout };

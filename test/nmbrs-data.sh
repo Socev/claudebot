@@ -68,7 +68,7 @@ const API = {
   ['/api/employees/' + E2 + '/fixedhours']: (q) => pagina([], q),
   ['/api/companies/' + C1 + '/employees/privateInfos']: (q) => pagina([{ employeeId: E1, bsn: BSN }], q),
 };
-const JOURNAAL = '<?xml version="1.0"?><Journals><Employee><EmployeeNumber>101</EmployeeNumber><BSN>' + BSN + '</BSN><Line><EmployeeNumber>101</EmployeeNumber><Description>Salaris</Description><Amount>3500.00</Amount></Line>' +
+const JOURNAAL = '<?xml version="1.0"?><Journals><Employee><EmployeeNumber>101</EmployeeNumber><BSN>' + BSN + '</BSN><Line><EmployeeNumber>101</EmployeeNumber><Description>Salaris</Description><Amount>3600.00</Amount></Line><Line><EmployeeNumber>101</EmployeeNumber><Description>Salaris</Description><Amount>-100.00</Amount></Line>' +
   '<Line><EmployeeNumber>101</EmployeeNumber><Description>Pensioenpremie werknemer</Description><Amount>-120.00</Amount></Line></Employee>' +
   '<Employee><EmployeeNumber>102</EmployeeNumber><Line><EmployeeNumber>102</EmployeeNumber><Description>Uurloon</Description><Amount>2000.00</Amount></Line><Line><EmployeeNumber>102</EmployeeNumber><Description>IBAN ' + IBAN + '</Description><Amount>1</Amount></Line></Employee></Journals>';
 const srv = http.createServer(function (req, res) {
@@ -104,6 +104,8 @@ const srv = http.createServer(function (req, res) {
       if (M.doc202-- > 0) return stuur(202, 'Document is being processed');
       res.writeHead(200, { 'Content-Type': 'application/octet-stream' }); return res.end(JOURNAAL);
     }
+    if (M.vast403 && /fixedhours$/.test(u.pathname)) return stuur(403, { title: 'Forbidden' });
+    if (M.taak503 > 0 && /journalsemployee$/.test(u.pathname)) { M.taak503--; return stuur(503, { title: 'Unavailable' }); }
     const f = API[u.pathname];
     if (f) return stuur(200, f(req));
     if (/^\/api\/employees\/[^/]+\/(fixedhours|variablehours)$/.test(u.pathname)) return stuur(200, pagina([], req));
@@ -213,7 +215,9 @@ srv.listen(0, '127.0.0.1', async function () {
     const soorten = d.prepare('select soort, count(*) as n from historie group by soort order by soort').all().map((x) => x.soort + ':' + x.n).join(',');
     toets('historie per soort opgeslagen', soorten === 'afdeling:1,contract:3,dienstverband:3,functie:1,rooster:3,salaris:3,verlofsaldo:1', soorten);
     const regels = d.prepare('select medewerker, soort, bedrag from loonrun_regel order by medewerker, soort').all().map((x) => x.medewerker.slice(-1) + ':' + x.soort + ':' + x.bedrag).join(',');
-    toets('journaal: alleen bruto/pensioen per medewerker, geen IBAN-regel', regels === '1:bruto:3500,1:pensioen:120,2:bruto:2000', regels);
+    toets('journaal: alleen bruto/pensioen per medewerker, correctie verlaagt (3600 − 100), geen IBAN-regel', regels === '1:bruto:3500,1:pensioen:120,2:bruto:2000', regels);
+    const dc = TM.journaalRegels(TM.xmlBoom('<J><L><EmployeeNumber>5</EmployeeNumber><Description>Salaris</Description><Debit>100</Debit><Credit>30</Credit></L></J>'));
+    toets('journaal: debet − credit met teken (review MOET 2)', dc.length === 1 && dc[0].bedrag === 70 && dc[0].soort === 'bruto', dc);
     const uren = d.prepare('select uren from uren where medewerker = ?').get(E2);
     toets('uurloner: betaalde uren van de periode (onbetaald telt niet)', uren && uren.uren === 80, uren);
     toets('salaristabel: alleen de geldige versie, trede A/3', d.prepare('select count(*) as n from salaristabel').get().n === 1 && !!d.prepare("select 1 from salaristrede where schaal = 'A' and trede = '3'").get());
@@ -318,6 +322,32 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('peil: bedrijven, statussen per endpoint, veldnamen zonder waarden', r.ok === true && r.bedrijven && r.bedrijven[0].naam === 'Proefpraktijk BV' && r.eindpunten['/api/companies/{id}/employees'] === 200 &&
       r.veldnamen['/api/companies/{id}/employees'].indexOf('data[].employeeBasicInfo.socialSecurityNumber') >= 0 && pj.indexOf(BSN) < 0 && pj.indexOf(MAIL) < 0 && pj.indexOf(IBAN) < 0 && r.gebruiker.profielen === 1, r.eindpunten);
 
+    // 9b. review-punten
+    fs.writeFileSync(path.join(DIR, 'ronde.lock'), '');
+    toets('leeg (vers) slot blijft staan: geen tweede ronde (review MOET 1)', TM.slotNeem(DIR) === false);
+    const oudT = (Date.now() - 40 * 60000) / 1000; fs.utimesSync(path.join(DIR, 'ronde.lock'), oudT, oudT);
+    toets('leeg slot ouder dan 30 min wordt opgeruimd', TM.slotNeem(DIR) === true); TM.slotLos(DIR);
+    d = sqlite(DIR);
+    d.prepare("insert into salaristabel values (?, ?, 'v-oud', ?)").run(C1, TB, JSON.stringify({ versie: { versionId: 'v-oud', version: 0, year: JAAR - 1, month: 1 } }));
+    d.prepare("insert into salaristrede values ('v-oud', 'A', '3', ?)").run(JSON.stringify({ stepCode: '3', amountMonth: 3900 }));
+    d.prepare("insert into salaristabel values (?, ?, 'v-later', ?)").run(C1, TB, JSON.stringify({ versie: { versionId: 'v-later', version: 9, year: JAAR + 1, month: 1 } }));
+    d.prepare("insert into salaristrede values ('v-later', 'A', '3', ?)").run(JSON.stringify({ stepCode: '3', amountMonth: 3000 }));
+    d.close();
+    sg = await kindEcht('signalen', {}, DIR);
+    toets('S1 kiest de versie die nu geldt, niet een oude of toekomstige (review MOET 3)', per('S1') === 'Anna Proef', sg.j.signalen.filter((x) => x.soort === 'S1'));
+    const D4 = path.join(W, 'nmbrs-uren'); M.vast403 = true; M.doc202 = 0;
+    let k4 = await kindEcht('ronde', { access: 'at-' + 'a'.repeat(30) + '1', sub: SUB }, D4);
+    M.vast403 = false;
+    d = sqlite(D4); const u4 = d.prepare('select count(*) as n from uren').get().n; d.close();
+    toets('uren: vaste uren 403 → geen (half) urentotaal opgeslagen (review MOET 4)', k4.j && k4.j.ok === true && u4 === 0, [k4.j && k4.j.reden, u4]);
+    const D5 = path.join(W, 'nmbrs-503'); M.taak503 = 5; M.doc202 = 0;
+    let k5 = await kindEcht('ronde', { access: 'at-' + 'a'.repeat(30) + '1', sub: SUB }, D5);
+    d = sqlite(D5); const j5 = d.prepare('select journaal from loonrun').get().journaal; d.close();
+    toets('journaal 503 → opnieuw (niet blijvend dicht)', k5.j && k5.j.ok === true && /^opnieuw:taak:503:1$/.test(j5), [k5.j && k5.j.reden, j5]);
+    k5 = await kindEcht('ronde', { access: 'at-' + 'a'.repeat(30) + '1', sub: SUB }, D5);
+    d = sqlite(D5); const j5b = d.prepare('select journaal from loonrun').get().journaal; d.close();
+    toets('volgende ronde haalt het journaal alsnog (review MOET 5)', /^ok:/.test(j5b) && k5.j.journalen === 1, j5b);
+
     // 10. kruisproef: veldfilter uit → de BSN-toets moet rood worden
     const KRUIS = path.join(W, 'kruis'); fs.mkdirSync(KRUIS);
     const kopie = path.join(KRUIS, 'nmbrs-data.js');
@@ -397,6 +427,17 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('server: dezelfde state nog eens → 404', a.status === 404);
     await S.nmbrsRondeDraai('ronde', 'proef');
     toets('server: volgende ronde zonder nieuw signaal → geen tweede bericht', berichten.length === 1, berichten.length);
+    // review MOET 7: meer dan 25 nieuwe signalen → 25 in het bericht en als gemeld, de rest de ronde erna
+    for (let i = 1; i <= 30; i++) fs.writeFileSync(path.join(W, '10_Zakelijk', 'Tolgaarde', 'Medewerkers', 'Proefpagina ' + i + '.md'), '---\ntype: medewerker\nentiteit_id: TG\nstatus: actief\n---\n');
+    await kindEcht('koppel', { bedrijf: C1, entiteit: 'TG' }, DIR2);
+    await kindEcht('instel', { signalen_aan: ['S2', 'S6'] }, DIR2);
+    await S.nmbrsRondeDraai('ronde', 'proef');
+    const bt2 = berichten[1] || { tekst: '' };
+    toets('server: 32 nieuwe S6 → één bericht met 25 regels en "7 meer"', berichten.length === 2 && (bt2.tekst.match(/\n- S6 /g) || []).length === 25 && /en 7 meer/.test(bt2.tekst), bt2.tekst.slice(0, 300));
+    const rx = await S.nmbrsRondeDraai('ronde', 'proef');
+    toets('server: de 7 die niet in het bericht stonden komen de ronde erna (review MOET 7)', berichten.length === 3 && (berichten[2].tekst.match(/\n- S6 /g) || []).length === 7 && berichten[2].sleutel !== berichten[1].sleutel, [rx.ok, rx.reden, rx.fout, rx.signalen_nieuw, berichten.length, logs.slice(-3)]);
+    await S.nmbrsRondeDraai('ronde', 'proef');
+    toets('server: daarna niets meer', berichten.length === 3);
     sm = await S.nmbrsSmal({ opdracht: 'signalen' }, { mk: false });
     toets('server: signalen met de Socev-sleutel (wachter): naam, soort, datum, tekst; geen sleutel of bedrag', sm.status === 200 && sm.j.signalen.length >= 1 && sm.j.signalen.every((x) => JSON.stringify(Object.keys(x)) === JSON.stringify(['soort', 'entiteit', 'naam', 'datum', 'tekst'])), sm.j);
     sm = await S.nmbrsSmal({ opdracht: 'persoon', naam: 'Cor Toets' }, { mk: false });
@@ -404,12 +445,32 @@ srv.listen(0, '127.0.0.1', async function () {
     sm = await S.nmbrsSmal({ opdracht: 'stand' }, { mk: true });
     toets('server: stand lokaal (bedrijf, aantallen)', sm.status === 200 && sm.j.bedrijven && sm.j.bedrijven[0].medewerkers === 3 && sm.j.info.module === true, sm.j);
     const vm0 = S.nmbrsVaultMedewerkers();
-    toets('server: medewerkerpagina\'s gelezen (type medewerker, aliassen, actief), index overgeslagen', vm0.length === 1 && vm0[0].entiteit === 'TG' && vm0[0].actief === true && vm0[0].namen.indexOf('A. Proef') >= 0, vm0);
+    const va = vm0.find((x) => x.naam === 'Anna Proef') || {};
+    toets('server: medewerkerpagina\'s gelezen (type medewerker, aliassen, actief), index overgeslagen', vm0.length === 31 && va.entiteit === 'TG' && va.actief === true && va.namen.indexOf('A. Proef') >= 0 && !vm0.some((x) => x.naam === 'Overzicht'), vm0.length);
     const alles = logs.join('\n');
     toets('server: log zonder code, state of token', alles.indexOf('code-goed') < 0 && alles.indexOf(sst) < 0 && alles.indexOf('rt-') < 0 && alles.indexOf('at-') < 0 && /nmbrs opdracht=terug soort=gekoppeld/.test(alles), logs);
     toets('server: kind krijgt alleen PATH/HOME/TZ/LANG + NMBRS_*', ssrc.slice(b1, b2).indexOf("['PATH', 'HOME', 'TZ', 'LANG']") > 0 && !/ANDERE_SLEUTEL|SUPABASE/.test(ssrc.slice(ssrc.indexOf('function nmbrsEnv'), ssrc.indexOf('async function nmbrsKind'))));
     const info = S.nmbrsInfo();
     toets('server: /health-info zonder tokens of namen', info.module === true && info.laatste && info.laatste.ok === true && JSON.stringify(info).indexOf('rt-') < 0 && JSON.stringify(info).indexOf('Proef') < 0, info);
+    // review MOET 6: intrekken onder het slot, ook het noodtoken, daarna stil
+    const noodTok = tok(9999); M.refreshGeldig.add(noodTok); require(SCRIPT).noodSchrijf(DIR2, noodTok); M.intrek = [];
+    sm = await S.nmbrsSmal({ opdracht: 'intrek' }, { mk: false });
+    toets('server: intrek met de Socev-sleutel → 403', sm.status === 403);
+    fs.writeFileSync(path.join(DIR2, 'ronde.lock'), JSON.stringify({ pid: process.pid, sinds: new Date().toISOString() }));
+    sm = await S.nmbrsSmal({ opdracht: 'intrek' }, { mk: true });
+    toets('server: intrek tijdens een ronde (slot) → 409', sm.status === 409, sm);
+    fs.unlinkSync(path.join(DIR2, 'ronde.lock'));
+    sm = await S.nmbrsSmal({ opdracht: 'intrek' }, { mk: true });
+    toets('server: intrek trekt kluistoken én noodtoken in, noodkopie weg', sm.status === 200 && sm.j.ok === true && sm.j.tokens === 2 && M.intrek.length === 2 && !M.refreshGeldig.has(noodTok) && !require(SCRIPT).noodLees(DIR2), [sm, M.intrek]);
+    M.log = []; const nb = berichten.length;
+    let ri = await S.nmbrsRondeDraai('ronde', 'proef');
+    toets('server: na intrek blijven de rondes stil (dood, geen vraag aan Nmbrs, geen box-rij)', ri.reden === 'dood' && !M.log.length && fs.readFileSync(path.join(W, '00_Systeem', 'Meldingen', 'machinekamer.md'), 'utf8').indexOf('nmbrs-') < 0 && berichten.length === nb, ri);
+    // nieuwe toestemming, daarna invalid_grant → één box-rij
+    sm = await S.nmbrsSmal({ opdracht: 'link' }, { mk: true });
+    a = await vraag('/nmbrs/terug?code=code-goed&state=' + new URL(sm.j.url).searchParams.get('state'));
+    for (let i = 0; i < 100 && S.nmbrsInfo().laatste && S.nmbrsInfo().laatste.reden === 'dood'; i++) await new Promise((k) => setTimeout(k, 100));
+    for (let i = 0; i < 100 && fs.existsSync(path.join(DIR2, 'ronde.lock')); i++) await new Promise((k) => setTimeout(k, 100));
+    toets('server: nieuwe toestemming na intrek → weer gekoppeld', a.status === 200 && /^Gekoppeld/.test(a.tekst), a);
     M.refreshGeldig.delete(kluis.nmbrs_refresh);
     await S.nmbrsRondeDraai('ronde', 'proef'); await S.nmbrsRondeDraai('ronde', 'proef');
     const box = fs.readFileSync(path.join(W, '00_Systeem', 'Meldingen', 'machinekamer.md'), 'utf8');

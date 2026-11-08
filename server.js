@@ -25232,11 +25232,14 @@ async function nmbrsSignalenNa() {
   if (!nieuw.length) return { ok: true, nieuw: 0 };
   const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
   const tekst = 'Nmbrs: ' + nieuw.length + ' nieuw' + (nieuw.length === 1 ? ' signaal' : 'e signalen') + ' uit de salarisadministratie\n' +
-    nieuw.slice(0, 25).map(function (x) { return '- ' + x.soort + ' ' + String(x.tekst || '').slice(0, 200); }).join('\n') + (nieuw.length > 25 ? '\n- en ' + (nieuw.length - 25) + ' meer' : '');
-  const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'nmbrs', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: 'nmbrs-signalen:' + dag });
+    nieuw.slice(0, 25).map(function (x) { return '- ' + x.soort + ' ' + String(x.tekst || '').slice(0, 200); }).join('\n') + (nieuw.length > 25 ? '\n- en ' + (nieuw.length - 25) + ' meer (volgen bij de volgende ronde)' : '');
+  // sleutel per inhoud: de pod ontdubbelt op sleutel (24 uur); een tweede, ander bericht op dezelfde dag mag niet stil wegvallen
+  const sl = crypto.createHash('sha256').update(nieuw.slice(0, 25).map(function (x) { return x.sleutel; }).join('\n')).digest('hex').slice(0, 16);
+  const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'nmbrs', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: 'nmbrs-signalen:' + dag + ':' + sl });
   if (r.status !== 200) { logError('nmbrs-signalen', new Error('bericht gaf ' + r.status)); return { ok: false, nieuw: nieuw.length }; }
-  await nmbrsKind('gemeld', { sleutels: nieuw.map(function (x) { return x.sleutel; }) });
-  return { ok: true, nieuw: nieuw.length };
+  // review wv2797 MOET 7: alleen wat echt in het bericht stond als gemeld; de rest blijft nieuw voor de volgende ronde
+  await nmbrsKind('gemeld', { sleutels: nieuw.slice(0, 25).map(function (x) { return x.sleutel; }) });
+  return { ok: true, nieuw: Math.min(nieuw.length, 25), over: Math.max(0, nieuw.length - 25) };
 }
 async function nmbrsRondeDraai(opdracht, bron) {
   if (!nmbrsData) return { ok: false, fout: 'nmbrs-data.js zit niet in deze release' };
@@ -25304,12 +25307,20 @@ async function nmbrsSmal(d, wie) {
     schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: opdracht, ok: !!(s.j && s.j.ok) }));
     return { status: s.j && s.j.ok ? 200 : 400, j: s.j || { ok: false } };
   }
-  if (opdracht === 'intrek') {   // terugrol (ontwerp punt 10): refresh token bij Nmbrs intrekken; de kluisregels leegt David
-    let k; try { k = await nmbrsKluisLees(); } catch (e) { return { status: 503, j: { ok: false, fout: 'kluis nu niet bereikbaar' } }; }
-    if (!k.refresh) return { status: 409, j: { ok: false, fout: 'geen nmbrs_refresh in de kluis' } };
-    const s = await nmbrsKind('intrek', { client_id: k.client_id, client_secret: k.client_secret, refresh: k.refresh });
-    schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'intrek', ok: !!(s.j && s.j.ok) }));
-    return { status: 200, j: { ok: !!(s.j && s.j.ok) } };
+  if (opdracht === 'intrek') {   // terugrol (ontwerp punt 10): refresh token(s) bij Nmbrs intrekken; de kluisregels leegt David
+    // review wv2797 MOET 6: onder hetzelfde slot als de ronde, en ook het noodtoken (nieuwer dan de kluis als de kluis faalde)
+    if (nmbrsRondeBezig || !nmbrsData.slotNeem(NMBRS_DIR)) return { status: 409, j: { ok: false, fout: 'er loopt een Nmbrs-ronde; probeer het straks' } };
+    try {
+      let k; try { k = await nmbrsKluisLees(); } catch (e) { return { status: 503, j: { ok: false, fout: 'kluis nu niet bereikbaar' } }; }
+      const nood = nmbrsData.noodLees(NMBRS_DIR);
+      const tokens = [k.refresh, nood && nood.refresh].filter(function (x, i, a) { return x && a.indexOf(x) === i; });
+      if (!tokens.length) return { status: 409, j: { ok: false, fout: 'geen nmbrs_refresh in de kluis en geen noodkopie' } };
+      let ok = 0;
+      for (const t of tokens) { const s = await nmbrsKind('intrek', { client_id: k.client_id, client_secret: k.client_secret, refresh: t }); if (s.j && s.j.ok) ok++; }
+      if (ok === tokens.length) { nmbrsData.noodWis(NMBRS_DIR); if (k.refresh) nmbrsData.doodZet(NMBRS_DIR, k.refresh); }   // rondes daarna stil tot een nieuwe toestemming
+      schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'intrek', tokens: tokens.length, ingetrokken: ok }));
+      return { status: 200, j: { ok: ok === tokens.length, tokens: tokens.length, ingetrokken: ok } };
+    } finally { nmbrsData.slotLos(NMBRS_DIR); }
   }
   return { status: 400, j: { ok: false, fout: 'opdracht: link, ronde, peil, stand, signalen, persoon, koppel, instel, intrek' } };
 }
