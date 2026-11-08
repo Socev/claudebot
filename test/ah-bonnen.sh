@@ -69,6 +69,12 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('losse code', A.codeUit('  abcdefgh12345 ') === 'abcdefgh12345');
     toets('geen code in rommel', A.codeUit('hallo daar <script>') === null && A.codeUit('') === null);
     toets('productsoort', A.soortVan('AH HALFVOLLE MELK') === 'zuivel en eieren' && A.soortVan('BANANEN') === 'groente en fruit' && A.soortVan('STATIEGELD') === 'statiegeld en tasjes' && A.soortVan('HEINEKEN PILS 6X33') === 'alcohol' && A.soortVan('XQZ') === 'overig');
+    // wv2714: echte bonnamen zijn afgekort tot 12 tekens en vaak een merk (gemeten 8-11-2026 op 309 echte bonnen)
+    const AFGEKORT = { 'OLD AMSTERDM': 'zuivel en eieren', 'PAGE TOILET': 'huishouden', 'LAVAZZA': 'drinken', 'TEXELS 0.0': 'drinken', 'HEINEKEN 0.0': 'drinken',
+      'AVIKO FRITES': 'diepvries', 'FRITESSAUS': 'pasta, rijst en voorraad', 'CHIQUITA LOS': 'groente en fruit', 'UNOX KNAKS': 'vlees, vis en vega', 'LU MIKADO': 'snoep, koek en chips',
+      'WITTE BOLLEN': 'brood en ontbijt', 'ELV NUT COND': 'verzorging', 'DESPERADOS V': 'alcohol', 'BERTOLLI': 'pasta, rijst en voorraad', 'TEFAL PAN': 'overig' };
+    const misAfg = Object.keys(AFGEKORT).filter(function (n) { return A.soortVan(n) !== AFGEKORT[n]; }).map(function (n) { return n + '=' + A.soortVan(n); });
+    toets('productsoort op afgekorte bonnamen (merken, 0.0 = drinken)', misAfg.length === 0, misAfg);
     // koppelen met verkeerde code
     let k = await A.koppel(deps, 'appie://login-exit?code=verkeerd-12345678');
     toets('verkeerde code: niet gekoppeld, gewone-taalreden', k.ok === false && k.reden === 'code' && /verlopen of al gebruikt/.test(k.fout) && kluis.w === '', k);
@@ -115,7 +121,10 @@ srv.listen(0, '127.0.0.1', async function () {
       { nr: 3, datum: '2026-10-01', bedrag: -999 },             // geen bon
       { nr: 4, datum: '2026-11-03', bedrag: -12 }, { nr: 5, datum: '2026-11-04', bedrag: -12 }   // proefbon-2 (3-11): twee kandidaten → onbeslist
     ];
+    // wv2714: een oud opgeslagen soort telt niet; het overzicht deelt opnieuw in met de huidige woordregels
+    { const dbw = new DatabaseSync(path.join(dir, 'ah.sqlite')); dbw.exec("UPDATE regel SET soort = 'overig'"); dbw.close(); }
     const o = A.overzicht(dir, bank, { twaalf: twaalf });
+    toets('overzicht: soort uit de huidige woordregels, niet uit de opgeslagen kolom', o.soorten.some(function (x) { return x.naam === 'alcohol' && x.som > 0; }) && o.duurst.every(function (p) { return p.soort === A.soortVan(p.naam); }), o.soorten.map(function (x) { return x.naam; }));
     toets('overzicht: gekoppeld, soorten, duurst/vaakst zonder statiegeld', o.gekoppeld === true && o.soorten.length >= 4 && o.duurst.every(function (p) { return p.soort !== 'statiegeld en tasjes'; }) && o.vaakst[0].keer > 1, { s: o.soorten.map(function (x) { return x.naam; }), v: o.vaakst[0] });
     toets('bank: 2 uniek gekoppeld, 1 onbeslist, dekking', o.bank.posten_met_bon === 2 && o.bank.onbeslist === 1 && o.bank.met_bon === 21 && o.bank.dekking === Math.round(100 * 21 / (10 + 11 + 999 + 24)), o.bank);
     toets('overzicht zonder bonnummers of token', JSON.stringify(o).indexOf('proefbon') < 0 && JSON.stringify(o).indexOf('ref-') < 0);
