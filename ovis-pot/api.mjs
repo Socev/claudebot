@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot af9cf5dacb795590aa8edb37074f84c9862f3d5a (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot 6f61aeee87fa9bf4ce89b83d49abf4722003f040 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
@@ -6,6 +6,7 @@
 // (instelling.overstap_fin gevuld): daarvóór is `pot` een kopie die scripts/kopieer-uit-fin.py ververst en zou een wijziging stil verdwijnen.
 
 import * as K from "./kern/pot-kern.mjs";
+import { naspeelEntiteit } from "./kern/naspelen.mjs";
 
                            
                                                                                                                               
@@ -302,6 +303,7 @@ export async function behandel(db          , methode        , pad        , zoek 
       if (pad === "jaar") return { status: 200, body: await jaarGegevens(db, zoek.get("jaar")) };
       if (pad === "maand") return { status: 200, body: await maandStand(db) };
       if (pad === "export") return { status: 200, body: await exportAlles(db) };
+      if (pad === "naspeel") return { status: 200, body: await naspeel(db) };
       throw new Fout(404, "onbekende route");
     }
     if (methode === "POST") {
@@ -327,6 +329,80 @@ const json = (x         ) => JSON.stringify(x);
 const plusDag = (d        , n        ) => K.plusDagen(d, n);
 
 /** Alles wat fase 2 voor jaar J nodig heeft (personeel, buffer, jaarplannen, nota's, correcties, ronde). */
+/**
+ * Naspelen (wv2782): de systematiek zoals gebouwd op de geschiedenis — tabel `historie` (Davids begrotingen, aanvullingen,
+ * eindafrekeningen, beginsaldo), de bank (alle posten met hun toewijzing), standen, deelname, kosten en de besloten buffer.
+ * Alleen lezen; de kern (kern/naspelen.mjs) rekent.
+ */
+/** Bankposten per toewijzing: elk toegewezen deel met zijn eigen bedrag; wat van een post niet is toegewezen blijft als rest (Codex r1 M1). */
+export function bankPosten(r                                                                                                                                                                   ) {
+  const uit                                                                                                                                   = [];
+  const toegewezen = new Map                ();
+  for (const x of r) {
+    if (x.deel == null) continue;
+    uit.push({ entiteit: x.entiteit, datum: x.datum, bedrag: Number(x.deel), soort: x.soort, praktijk_id: x.praktijk_id, boekjaar: x.boekjaar });
+    toegewezen.set(x.id, (toegewezen.get(x.id) || 0) + Number(x.deel));
+  }
+  const gezien = new Set        ();
+  for (const x of r) {
+    if (gezien.has(x.id)) continue;
+    gezien.add(x.id);
+    const rest = Math.round((Number(x.bedrag) - (toegewezen.get(x.id) || 0)) * 100) / 100;
+    if (Math.abs(rest) > 0.004) uit.push({ entiteit: x.entiteit, datum: x.datum, bedrag: rest, soort: null, praktijk_id: null, boekjaar: null });
+  }
+  return uit.sort((a, b) => (a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : 0));
+}
+
+export async function naspeel(db          ) {
+  const [historie, standen, deelnames, jaarlasten, buffers, bankRuw, vandaag] = await Promise.all([
+    rijen                                                                                                                                                      (db,
+      "select entiteit, jaar, maand, praktijk_id, categorie, bedrag, titel, bron from historie order by entiteit, jaar, categorie, maand, praktijk_id"),
+    rijen(db, "select praktijk_id, peildatum, aantal from praktijk_patienten"),
+    rijen(db, "select entiteit, praktijk_id, geldig_van, geldig_tot, geldt_voor from deelname"),
+    rijen(db, "select entiteit, jaar, bedrag, bron, opmerking from jaarlast"),
+    rijen                                                                                                  (db, "select entiteit, geldig_van, doel, opbouw_in, status from buffer order by geldig_van"),
+    rijen                                                                                                                                                                 (db,
+      `select b.id, b.entiteit, b.boekdatum as datum, b.bedrag, t.bedrag as deel, t.soort, t.praktijk_id, t.boekjaar from bankmutatie b
+       left join bank_toewijzing t on t.bankmutatie_id = b.id order by b.boekdatum, b.id`),
+    rijen               (db, "select date('now') as d"),
+  ]);
+  // Tolgaarde is het vangnet (David 8-11-2026): springt bij als het saldo onder nul zou gaan (extra bijdrage, verrekend in de afrekening)
+  // (instelling vangnet_praktijk gaat voor; anders de praktijk die Tolgaarde heet)
+  const vangnet = (await rijen                (db, `select coalesce((select waarde from instelling where sleutel = 'vangnet_praktijk' and waarde <> ''),
+    (select id from praktijk where naam = 'Tolgaarde' or naam_vorig = 'Tolgaarde' order by id limit 1)) as id`))[0]?.id || null;
+  const bank = bankPosten(bankRuw);
+  const begr = historie.filter((h) => h.categorie === "begroting_vooraf");
+  if (!begr.length) return { ok: false, reden: "er staat nog geen historie in de databank" };
+  const van = Math.min(...begr.map((h) => Number(h.jaar)));
+  const tot = Math.max(van, Math.min(Number(vandaag[0].d.slice(0, 4)), Math.max(...begr.map((h) => Number(h.jaar)))));
+  const entiteiten                          = {};
+  for (const E of ENT) {
+    const start = historie.find((h) => h.entiteit === E && h.categorie === "beginsaldo" && Number(h.jaar) === van - 1);
+    const bf = buffers.filter((b) => b.entiteit === E).at(-1) || null;
+    const david = new Map                                                                                               ();
+    for (const h of historie) {
+      if (h.entiteit !== E || !h.categorie.startsWith("eind_") || !h.praktijk_id) continue;
+      const k = `${h.jaar}/${h.praktijk_id}`;
+      if (!david.has(k)) david.set(k, { jaar: Number(h.jaar), praktijk_id: h.praktijk_id, kosten: 0, betaald: 0, saldo: 0 });
+      const x = david.get(k) ;
+      if (h.categorie === "eind_kosten") x.kosten = Number(h.bedrag); else if (h.categorie === "eind_betaald") x.betaald = Number(h.bedrag); else x.saldo = Number(h.bedrag);
+    }
+    entiteiten[E] = naspeelEntiteit({
+      entiteit: E, van, tot, standen, deelnames, jaarlasten, historie, bank: bank.filter((b) => b.entiteit === E && b.datum >= `${van}-01-01`),
+      afrekeningDavid: [...david.values()], buffer: bf ? { doel: Number(bf.doel), opbouw_in: bf.opbouw_in, status: bf.status, geldig_van: bf.geldig_van } : null,
+      vangnet, startsaldo: start ? Number(start.bedrag) : 0, startbron: start ? start.bron : "geen beginsaldo in de historie: 0 aangenomen",
+    });
+  }
+  // de stukken zelf (één regel per stuk), zodat het scherm laat zien waar elk bedrag vandaan komt
+  const stuk = new Map                                                                                                                           ();
+  for (const h of historie) {
+    const k = `${h.entiteit}|${h.jaar}|${h.categorie}|${h.titel}`;
+    if (!stuk.has(k)) stuk.set(k, { entiteit: h.entiteit, jaar: Number(h.jaar), categorie: h.categorie, titel: h.titel, bron: h.bron, bedrag: 0, rijen: 0 });
+    const x = stuk.get(k) ; x.bedrag = Math.round((x.bedrag + Number(h.bedrag)) * 100) / 100; x.rijen++;
+  }
+  return { ok: true, van, tot, berekend_op: vandaag[0].d, entiteiten, stukken: [...stuk.values()] };
+}
+
 export async function jaarGegevens(db          , j         ) {
   const J = jaar(j);
   const [contracten, contractmutaties, afwezigheid, inhuur, cao, loonparameters, loonsom, buffers, bufferGevraagd, spreiding,

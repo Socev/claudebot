@@ -23,7 +23,7 @@ const M = require(path.resolve('pot-maand.js'));
   const repo = '/opt/data/ovis-pot';
   if (fs.existsSync(path.join(repo, '.git'))) {
     let gelijk = true;
-    for (const f of ['kern/pot-kern.mjs', 'kern/stukken.mjs']) { try { gelijk = gelijk && execFileSync('git', ['-C', repo, 'show', bron.commit + ':' + f], { encoding: 'utf8' }) === fs.readFileSync(path.join(map, f), 'utf8'); } catch (e) { gelijk = false; } }
+    for (const f of ['kern/pot-kern.mjs', 'kern/stukken.mjs', 'kern/naspelen.mjs']) { try { gelijk = gelijk && execFileSync('git', ['-C', repo, 'show', bron.commit + ':' + f], { encoding: 'utf8' }) === fs.readFileSync(path.join(map, f), 'utf8'); } catch (e) { gelijk = false; } }
     toets('bundel: kern = Socev/ovis-pot op de commit uit bron.json', gelijk, bron.commit);
   }
   // ── nep-D1 ──

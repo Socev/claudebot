@@ -1,4 +1,4 @@
--- GEGENEREERD uit Socev/ovis-pot af9cf5dacb795590aa8edb37074f84c9862f3d5a: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql
+-- GEGENEREERD uit Socev/ovis-pot 6f61aeee87fa9bf4ce89b83d49abf4722003f040: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql
 -- OVIS POT — migratie 0001: de POT-tabellen zoals ze in D1 `fin` stonden (kolommen en ids gelijk), zodat de pod-modules
 -- (pot-datahub.js, pot-verzend.js) bij het overstapmoment alleen een andere database krijgen. Gegenereerd uit fin.sqlite_master op 8-11-2026.
 -- Geen gegevens in deze repo; de inhoud komt met scripts/kopieer-uit-fin.py.
@@ -500,3 +500,30 @@ DELETE FROM lening;
 
 -- buffer in gekozen maanden (wv2770): bv. '1,7' = helft met januari, helft met juli; leeg = opbouw_maanden gelijke delen vanaf januari
 ALTER TABLE buffer ADD COLUMN opbouw_in TEXT;
+
+-- OVIS POT — migratie 0006 (wv2782, David 8-11-2026: "alles mag gerust in 1 grote databank"): de geschiedenis 2022–2026 voor het
+-- naspelen. Eén rij per bedrag uit één stuk van David (begroting vooraf, aanvulling, correctie op de huur, eindafrekening) of een
+-- beginsaldo, altijd met de bron. Alleen lezen voor de app; raakt de lopende stand (jaarplan, nota's, buffer) niet.
+-- categorie:
+--   begroting_vooraf      wat vooraf per maand gevraagd is (per praktijk; SLOEL 2022 alleen als jaartotaal, maand en praktijk leeg)
+--   aanvulling            tussentijds extra (of minder) gevraagd
+--   correctie_vorig_jaar  SLOEL: afrekening van het vorige jaar als regel op de huur
+--   begroting_plan        een begroting die zo niet als nota's de deur uitging (ter info)
+--   begroting_vervallen   een vervangen versie (ter info)
+--   eind_kosten / eind_betaald / eind_saldo   Davids eindafrekening per praktijk (kosten toegerekend, betaald, verschil)
+--   beginsaldo            saldo op de rekening op 31-12 van `jaar` (jaarrekening of bankketen)
+CREATE TABLE historie (
+  id INTEGER PRIMARY KEY,
+  soort TEXT NOT NULL DEFAULT 'historie' CHECK (soort = 'historie'),
+  entiteit TEXT NOT NULL CHECK (entiteit IN ('POT', 'KM', 'SLOEL')),
+  jaar INTEGER NOT NULL CHECK (jaar BETWEEN 2014 AND 2100),
+  maand INTEGER CHECK (maand BETWEEN 1 AND 12),
+  praktijk_id TEXT REFERENCES praktijk(id),
+  categorie TEXT NOT NULL CHECK (categorie IN ('begroting_vooraf', 'aanvulling', 'correctie_vorig_jaar', 'begroting_plan', 'begroting_vervallen',
+    'eind_kosten', 'eind_betaald', 'eind_saldo', 'beginsaldo')),
+  bedrag REAL NOT NULL,
+  titel TEXT NOT NULL,
+  bron TEXT NOT NULL CHECK (length(bron) > 0),
+  ingevoerd_op TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX historie_ent_jaar ON historie (entiteit, jaar, categorie);

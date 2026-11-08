@@ -1,10 +1,11 @@
 {
   "repo": "Socev/ovis-pot",
-  "commit": "af9cf5dacb795590aa8edb37074f84c9862f3d5a",
+  "commit": "6f61aeee87fa9bf4ce89b83d49abf4722003f040",
   "bestanden": {
     "kern/pot-kern.mjs": "5726684b0499883266920e4781d16fbd07d5f1e86975d8fcc95c5edc9ae4d9ee",
     "kern/stukken.mjs": "4b626be7612d450887e9759f7141b0e6acc20e38ada3ee0a56e13db232a4efeb",
-    "api.mjs": "60c6038e51026a8edc50d8e5311ded9fe418f41d5956fcc1764b46a513c81f01",
-    "schema.sql": "89be1b5fc1b121af68d3b7d546d80575d812ded2ff39d2dbae188679545553db"
+    "kern/naspelen.mjs": "8e13be6eb706f8431b2cbd7255c16b6d6520f172af5ea3d1c44fb7825267c231",
+    "api.mjs": "c40b38d93b075daf54ad28eb399fa9ae11bc412c7b2a7520ba236d023f12d94c",
+    "schema.sql": "b20d768d2fa77e2ea187b143991f1e77a9b1e5dfa4352b11cbf75618b57afafa"
   }
 }
