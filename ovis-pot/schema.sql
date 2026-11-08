@@ -1,4 +1,4 @@
--- GEGENEREERD uit Socev/ovis-pot 6f61aeee87fa9bf4ce89b83d49abf4722003f040: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql
+-- GEGENEREERD uit Socev/ovis-pot 65a566a140fab34ea3227b8a89762d710833b913: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql, migrations/0007_jan_feb.sql
 -- OVIS POT — migratie 0001: de POT-tabellen zoals ze in D1 `fin` stonden (kolommen en ids gelijk), zodat de pod-modules
 -- (pot-datahub.js, pot-verzend.js) bij het overstapmoment alleen een andere database krijgen. Gegenereerd uit fin.sqlite_master op 8-11-2026.
 -- Geen gegevens in deze repo; de inhoud komt met scripts/kopieer-uit-fin.py.
@@ -527,3 +527,10 @@ CREATE TABLE historie (
   ingevoerd_op TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX historie_ent_jaar ON historie (entiteit, jaar, categorie);
+
+-- OVIS POT (wv2787, David 8-11-2026): POT-bijdrage in januari zwaarder, in februari evenveel lichter.
+-- Januari + f × jaarbegroting, februari − f × jaarbegroting (jaarpremies en loonheffing over de eindejaarsuitkering vallen in januari);
+-- het jaar per praktijk blijft gelijk. Geldt voor de jaarbegroting vanaf 2027 (kern JAN_FEB.vanaf). Wijzigen: scherm Begroting (POT).
+INSERT INTO instelling (sleutel, waarde, opmerking) VALUES
+  ('pot_jan_feb', '0.03', 'POT: januari + deze fractie van de jaarbegroting, februari evenveel minder (vanaf 2027; wv2787)')
+ON CONFLICT(sleutel) DO NOTHING;

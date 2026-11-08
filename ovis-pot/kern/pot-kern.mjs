@@ -598,17 +598,43 @@ export function jaarbegroting({ entiteit, jaar, componenten, mutaties, personeel
 
 // ---------- R6 maandpatroon ----------
 /**
+ * Januari zwaarder, februari evenveel lichter (POT; David 8-11-2026, wv2787): januari heeft hoge uitgaven (jaarpremies, loonheffing over
+ * de eindejaarsuitkering) die de gewone maandbijdrage niet dekt. Januari + f × jaarbegroting, februari − f × jaarbegroting; het jaar
+ * blijft gelijk. f staat in instelling `pot_jan_feb` (fractie, 0,03 = 3 %); zonder instelling de standaard. Geldt vanaf `vanaf`
+ * (jaarplannen daarvóór blijven zoals ze waren); het naspelen past dezelfde f op alle jaren toe (de systematiek zoals besloten).
+ */
+export const JAN_FEB = { standaard: 0.03, vanaf: 2027, max: 0.06 };
+/** De f uit de instellingen (lijst {sleutel, waarde} of object), zonder rekening te houden met het jaar; ongeldig of leeg = standaard. */
+export function janFebWaarde(instelling) {
+  const l = Array.isArray(instelling) ? instelling : Object.entries(instelling || {}).map(([sleutel, waarde]) => ({ sleutel, waarde }));
+  const r = l.find((x) => x && x.sleutel === "pot_jan_feb");
+  if (!r || r.waarde == null || String(r.waarde).trim() === "") return JAN_FEB.standaard;
+  const v = Number(String(r.waarde).replace(",", "."));
+  return Number.isFinite(v) && v >= 0 && v <= JAN_FEB.max ? v : JAN_FEB.standaard;
+}
+/** De f voor de jaarbegroting van jaar J: vóór JAN_FEB.vanaf 0. */
+export function janFebFractie(instelling, jaar) {
+  return Number(jaar) < JAN_FEB.vanaf ? 0 : janFebWaarde(instelling);
+}
+
+/**
  * R6 — maandbedragen per praktijk. POT: gewone maand = (jaar − vakantiegeldpakket − eindejaarspakket) ÷ 12, mei + vakantiegeld,
- * november + eindejaarsuitkering (de bijdrage komt een maand vóór het geld de deur uitgaat). KM en SLOEL: twaalf gelijke maanden.
+ * november + eindejaarsuitkering (de bijdrage komt een maand vóór het geld de deur uitgaat); januari + janFeb × jaar en februari
+ * evenveel minder (zie JAN_FEB). KM en SLOEL: twaalf gelijke maanden.
  * Per praktijk = aandeel × maandbedrag, afgerond op hele euro's; het afrondingsverschil verdwijnt in de afrekening (zichtbaar).
  * vanafMaand: een praktijk die later instapt betaalt pas vanaf die maand (R1-maanden).
  */
-export function maandpatroon({ entiteit, begroting, aandelen }) {
+export function maandpatroon({ entiteit, begroting, aandelen, janFeb = 0 }) {
   if (!aandelen.ok) return { ok: false, reden: "patiëntenstand ontbreekt", ontbreekt: aandelen.ontbreekt };
   const pot = entiteit === "POT";
   const vg = pot ? begroting.vakantiegeld_pakket : 0, eju = pot ? begroting.eindejaar_pakket : 0;
   const gewoon = (begroting.totaal - vg - eju) / 12;
-  const perMaand = Array.from({ length: 12 }, (_, i) => gewoon + (i === 4 ? vg : 0) + (i === 10 ? eju : 0));
+  const gevraagdF = pot && Number.isFinite(Number(janFeb)) ? Math.min(JAN_FEB.max, Math.max(0, Number(janFeb))) : 0;
+  // februari nooit onder nul (Codex r1 M1): f hooguit gewone maand ÷ jaar; dan zichtbaar begrensd (rekenJaarplan waarschuwt)
+  const fMax = begroting.totaal > 0 ? Math.max(0, gewoon / begroting.totaal) : 0;
+  const f = Math.min(gevraagdF, fMax), begrensd = gevraagdF > f + 1e-12;
+  const jf = f * begroting.totaal;
+  const perMaand = Array.from({ length: 12 }, (_, i) => gewoon + (i === 4 ? vg : 0) + (i === 10 ? eju : 0) + (i === 0 ? jf : i === 1 ? -jf : 0));
   const praktijken = aandelen.rijen.map((r) => {
     // alleen in de maanden dat de praktijk meedoet (R1-maanden); dan × 12 ÷ aantal maanden, zodat het jaar ≈ aandeel × begroting blijft (Codex M3)
     const actief = r.masker || Array(12).fill(true);
@@ -618,11 +644,13 @@ export function maandpatroon({ entiteit, begroting, aandelen }) {
     return { praktijk_id: r.praktijk_id, aandeel: r.aandeel, stand: r.stand_begin, maanden, jaar: maanden.reduce((s, x) => s + x, 0) };
   });
   const somP = praktijken.reduce((s, p) => s + p.jaar, 0);
+  const pct = `${String(rond2(f * 100)).replace(".", ",")} %`;
   return {
-    ok: true, entiteit, gewoon, mei: perMaand[4], november: perMaand[10], per_maand: perMaand, praktijken,
+    ok: true, entiteit, gewoon, januari: perMaand[0], februari: perMaand[1], mei: perMaand[4], november: perMaand[10], jan_feb: f, jan_feb_begrensd: begrensd ? gevraagdF : null, jan_feb_bedrag: jf, per_maand: perMaand, praktijken,
     totaal: begroting.totaal, afronding: rond2(somP - begroting.totaal),
     hoe: pot
-      ? `gewone maand = (${euro(begroting.totaal, { heel: true })} − vakantiegeld ${euro(vg, { heel: true })} − eindejaarsuitkering ${euro(eju, { heel: true })}) ÷ 12 = ${euro(gewoon, { heel: true })}; mei + vakantiegeld, november + eindejaarsuitkering; per praktijk × aandeel, op hele euro's`
+      ? `gewone maand = (${euro(begroting.totaal, { heel: true })} − vakantiegeld ${euro(vg, { heel: true })} − eindejaarsuitkering ${euro(eju, { heel: true })}) ÷ 12 = ${euro(gewoon, { heel: true })}; mei + vakantiegeld, november + eindejaarsuitkering` +
+        (f > 0 ? `; januari + ${pct} van de begroting (${euro(jf, { heel: true })}) voor de hoge januari-uitgaven, februari evenveel minder` : "") + "; per praktijk × aandeel, op hele euro's"
       : `maand = ${euro(begroting.totaal, { heel: true })} ÷ 12 = ${euro(gewoon, { heel: true })}; per praktijk × aandeel, op hele euro's`,
   };
 }
@@ -909,7 +937,8 @@ export function rekenJaarplan(d, entiteit, jaar, o = {}) {
   const begroting = jaarbegroting({ entiteit, jaar, componenten: d.componenten, mutaties: d.mutaties, personeel });
   if (!(begroting.totaal > 0)) waarschuwingen.push(`geen kosten voor ${jaar}: voeg kostenposten toe (scherm Kosten)`);
   const aandelen = aandelenBijdrage({ entiteit, jaar, standen: d.standen, deelnames: d.deelnames });
-  const patroon = maandpatroon({ entiteit, begroting, aandelen });
+  const patroon = maandpatroon({ entiteit, begroting, aandelen, janFeb: janFebFractie(d.instelling, jaar) });
+  if (patroon.ok && patroon.jan_feb_begrensd != null) waarschuwingen.push(`januari-extra ${rond2(patroon.jan_feb_begrensd * 100)} % zou februari onder nul brengen: begrensd op ${rond2(patroon.jan_feb * 100)} % (februari € 0)`);
   const bf = geldend((d.buffers || []).filter((b) => b.entiteit === entiteit), "geldig_van", `${jaar}-01-01`);
   const alG = {};
   for (const g of (d.bufferGevraagd || []).filter((x) => x.entiteit === entiteit)) alG[g.praktijk_id] = Number(g.bedrag);

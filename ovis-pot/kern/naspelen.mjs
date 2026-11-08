@@ -3,7 +3,8 @@
 //
 // Per entiteit en jaar zet het naast elkaar:
 //  - begroot (Davids begroting vooraf + tussentijdse aanvullingen) tegenover de werkelijke kosten (jaarrekening/eindafrekening);
-//  - wat het model had gevraagd: begroting vooraf op de 1-1-aantallen (R4), maandpatroon (R6, POT mei/november hoger), buffer (R7,
+//  - wat het model had gevraagd: begroting vooraf op de 1-1-aantallen (R4), maandpatroon (R6, POT mei/november hoger, januari + janFeb ×
+//    begroting en februari evenveel lager; wv2787), buffer (R7,
 //    zoals nu besloten: vast tegoed, opbouw in de gekozen maanden van het eerste jaar), de afrekening van het jaar ervoor (R1–R3,
 //    gemiddelde van 1-1 oud en 1-1 nieuw, tegen wat met nota's gevraagd is; SLOEL als correctie op de eerstvolgende huur);
 //  - de afrekening per praktijk: model tegenover Davids eindafrekening;
@@ -39,7 +40,8 @@ export function middenDatum(posten) {
  *   historie: {entiteit:string, jaar:number, maand:number|null, praktijk_id:string|null, bedrag:number, categorie:string, titel:string}[],
  *   bank: {datum:string, bedrag:number, soort:string|null, praktijk_id:string|null, boekjaar:number|null}[],
  *   afrekeningDavid: {jaar:number, praktijk_id:string, kosten:number, betaald:number, saldo:number}[],
- *   buffer: {doel:number, opbouw_in?:string|number[]|null} | null, startsaldo: number, startdatum?: string, betaaldag?: number }} a
+ *   buffer: {doel:number, opbouw_in?:string|number[]|null} | null, startsaldo: number, startdatum?: string, betaaldag?: number,
+ *   janFeb?: number }} a  janFeb: POT januari + janFeb × begroting, februari evenveel lager (zelfde f voor alle jaren; wv2787)
  */
 export function naspeelEntiteit(a) {
   const E = a.entiteit, dag = Math.min(28, Number(a.betaaldag) || 15);
@@ -71,7 +73,7 @@ export function naspeelEntiteit(a) {
     // ---- model: bijdragen J (R4 + R6) en buffer (R7)
     const aandelen = aandelenBijdrage({ entiteit: E, jaar: J, standen: a.standen, deelnames: a.deelnames });
     const pakket = E === "POT" ? { vakantiegeld_pakket: B * POT_PAKKET.vakantiegeld, eindejaar_pakket: B * POT_PAKKET.eindejaar } : { vakantiegeld_pakket: 0, eindejaar_pakket: 0 };
-    const patroon = B > 0 ? maandpatroon({ entiteit: E, begroting: { totaal: B, ...pakket }, aandelen }) : { ok: false, reden: `geen begroting vooraf ${J} in de historie` };
+    const patroon = B > 0 ? maandpatroon({ entiteit: E, begroting: { totaal: B, ...pakket }, aandelen, janFeb: Number(a.janFeb) || 0 }) : { ok: false, reden: `geen begroting vooraf ${J} in de historie` };
     const eerstejaar = !Object.keys(bufferAl).length;
     const buffer = a.buffer && aandelen.ok ? bufferPlan({ doel: a.buffer.doel, aandelen, alGevraagd: bufferAl, opbouwMaanden: eerstejaar ? 12 : 1, opbouwIn: eerstejaar ? a.buffer.opbouw_in : null }) : null;
     // alleen bijhouden wat het model echt vraagt: zonder modelbegroting dit jaar ook geen buffer (Codex r2 M2)
@@ -157,7 +159,7 @@ export function naspeelEntiteit(a) {
     saldoEcht = ksEcht.eind; saldoModel = ksModel.eind; saldoZonder = ksZonder.eind;
     vorig = patroon.ok ? gevraagd : null; vorigZonder = patroon.ok ? gevraagdZonder : null;
   }
-  return { entiteit: E, van: a.van, tot: a.tot, startsaldo: Number(a.startsaldo), startbron: a.startbron || null, buffer: a.buffer, jaren };
+  return { entiteit: E, van: a.van, tot: a.tot, startsaldo: Number(a.startsaldo), startbron: a.startbron || null, buffer: a.buffer, jan_feb: E === "POT" ? Number(a.janFeb) || 0 : 0, jaren };
 }
 
 function rekenAfr(a, E, jaar, tegen, datum) {

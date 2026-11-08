@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot 6f61aeee87fa9bf4ce89b83d49abf4722003f040 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot 65a566a140fab34ea3227b8a89762d710833b913 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
@@ -354,7 +354,7 @@ export function bankPosten(r                                                    
 }
 
 export async function naspeel(db          ) {
-  const [historie, standen, deelnames, jaarlasten, buffers, bankRuw, vandaag] = await Promise.all([
+  const [historie, standen, deelnames, jaarlasten, buffers, bankRuw, vandaag, inst] = await Promise.all([
     rijen                                                                                                                                                      (db,
       "select entiteit, jaar, maand, praktijk_id, categorie, bedrag, titel, bron from historie order by entiteit, jaar, categorie, maand, praktijk_id"),
     rijen(db, "select praktijk_id, peildatum, aantal from praktijk_patienten"),
@@ -365,7 +365,10 @@ export async function naspeel(db          ) {
       `select b.id, b.entiteit, b.boekdatum as datum, b.bedrag, t.bedrag as deel, t.soort, t.praktijk_id, t.boekjaar from bankmutatie b
        left join bank_toewijzing t on t.bankmutatie_id = b.id order by b.boekdatum, b.id`),
     rijen               (db, "select date('now') as d"),
+    rijen                                     (db, "select sleutel, waarde from instelling where sleutel='pot_jan_feb'"),
   ]);
+  // POT januari zwaarder, februari evenveel lichter (wv2787): dezelfde f als in de jaarbegroting, hier op alle jaren (de systematiek zoals besloten)
+  const janFeb = K.janFebWaarde(inst);
   // Tolgaarde is het vangnet (David 8-11-2026): springt bij als het saldo onder nul zou gaan (extra bijdrage, verrekend in de afrekening)
   // (instelling vangnet_praktijk gaat voor; anders de praktijk die Tolgaarde heet)
   const vangnet = (await rijen                (db, `select coalesce((select waarde from instelling where sleutel = 'vangnet_praktijk' and waarde <> ''),
@@ -390,7 +393,7 @@ export async function naspeel(db          ) {
     entiteiten[E] = naspeelEntiteit({
       entiteit: E, van, tot, standen, deelnames, jaarlasten, historie, bank: bank.filter((b) => b.entiteit === E && b.datum >= `${van}-01-01`),
       afrekeningDavid: [...david.values()], buffer: bf ? { doel: Number(bf.doel), opbouw_in: bf.opbouw_in, status: bf.status, geldig_van: bf.geldig_van } : null,
-      vangnet, startsaldo: start ? Number(start.bedrag) : 0, startbron: start ? start.bron : "geen beginsaldo in de historie: 0 aangenomen",
+      vangnet, janFeb, startsaldo: start ? Number(start.bedrag) : 0, startbron: start ? start.bron : "geen beginsaldo in de historie: 0 aangenomen",
     });
   }
   // de stukken zelf (één regel per stuk), zodat het scherm laat zien waar elk bedrag vandaan komt
@@ -558,6 +561,14 @@ export async function schrijfJaarronde(db          , route        , b        , w
         .bind(e, van, doel, mnd, opbouwIn, status, tekst(b.opmerking, "opmerking", { max: 300 })), log(db, wie, "buffer", `${e}@${van}`, oud ? "gewijzigd" : "nieuw", oud, { doel, opbouw_maanden: mnd, opbouw_in: opbouwIn, status })]);
       return { ok: true };
     }
+    case "jan-feb": {   // POT: januari + f × jaarbegroting, februari evenveel minder (wv2787); invoer in procenten, 0 = uit
+      const f = Math.round(getal(b.procent, "procent", { min: 0, max: K.JAN_FEB.max * 100 })  * 100) / 10000;
+      const oud = await rijen                    (db, "select waarde from instelling where sleutel='pot_jan_feb'");
+      await db.batch([db.prepare("insert into instelling (sleutel, waarde, opmerking) values ('pot_jan_feb', ?, ?) on conflict(sleutel) do update set waarde=excluded.waarde")
+        .bind(String(f), `POT: januari + deze fractie van de jaarbegroting, februari evenveel minder (vanaf ${K.JAN_FEB.vanaf}; wv2787)`),
+        log(db, wie, "instelling", "pot_jan_feb", oud.length ? "gewijzigd" : "nieuw", oud[0]?.waarde ?? null, String(f))]);
+      return { ok: true };
+    }
     case "verkoopadres": {   // verkoopadres van de entiteit in Exact (elk stuk gaat óók daarheen); leeg = ontbreekt
       const e = keuze(b.entiteit, "entiteit", ENT);
       const a = tekst(b.email, "verkoopadres", { max: 200 }) || "";
@@ -638,7 +649,7 @@ export async function schrijfJaarronde(db          , route        , b        , w
         begroting: { totaal: r.begroting.totaal, maanden: r.begroting.maanden, regels: r.begroting.regels.map((x) => ({ naam: x.naam, per: x.per, jaar: x.jaar })), vervangen: r.begroting.vervangen,
           vakantiegeld_pakket: r.begroting.vakantiegeld_pakket, eindejaar_pakket: r.begroting.eindejaar_pakket },
         personeel: r.personeel ? { totaal: r.personeel.totaal, bruto: r.personeel.bruto, hoe: r.personeel.hoe, waarschuwingen: r.personeel.waarschuwingen } : null,
-        patroon: { gewoon: r.patroon.gewoon, mei: r.patroon.mei, november: r.patroon.november, hoe: r.patroon.hoe, afronding: r.patroon.afronding },
+        patroon: { gewoon: r.patroon.gewoon, januari: r.patroon.januari, februari: r.patroon.februari, jan_feb: r.patroon.jan_feb, mei: r.patroon.mei, november: r.patroon.november, hoe: r.patroon.hoe, afronding: r.patroon.afronding },
         aandelen: { uitleg: r.aandelen.uitleg, noemer: r.aandelen.noemer },
         buffer: r.buffer ? { doel: r.buffer.doel, status: r.buffer_instelling?.status, opbouw_in: r.buffer.opbouw_in } : null,
         kasstroom: r.kasstroom ? { startsaldo: r.kasstroom.startsaldo, laagste: r.kasstroom.laagste, laagste_op: r.kasstroom.laagste_op, onder: r.kasstroom.onder, voorstel: r.kasstroom.voorstel } : null,
