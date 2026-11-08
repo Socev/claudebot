@@ -17,7 +17,7 @@ let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (!ok && extra !== undefined ? '  [' + JSON.stringify(extra).slice(0, 600) + ']' : '')); }
 
 const db = new DatabaseSync(':memory:', { enableForeignKeyConstraints: false });
-db.exec(fs.readFileSync('test/pot-app-schema.sql', 'utf8'));
+db.exec(fs.readFileSync(process.env.POT_TOETS_SCHEMA || 'test/pot-app-schema.sql', 'utf8'));   // wv2764: ook op het schema van D1 pot
 const ins = (t, o) => db.prepare(`insert into ${t} (${Object.keys(o).join(',')}) values (${Object.keys(o).map(() => '?').join(',')})`).run(...Object.values(o)).lastInsertRowid;
 for (const code of ['POT', 'KM', 'SLOEL', 'PROEF']) ins('entiteit', { code, naam: 'Toets ' + code, naam_document: 'TOETS ' + code, iban: 'NL00TEST0000000' + String(code.length).padStart(3, '0') });
 for (const [id, naam, brief, tav] of [['P01', 'Praktijk Aap', 'Huisartsenpraktijk Aap', 't.a.v. A. Proef'], ['P02', 'Praktijk Noot', 'Huisartsen Noot', 't.a.v. B. Proef'],
@@ -424,7 +424,7 @@ const dag = (iso) => new Date(iso + 'T12:00:00Z').getUTCDay();
     toets('klaarzetten zonder vingerafdruk → door (het anker is de vrijgave in Voor jou); auditregel zonder PDF', r.uit.st === 200 && kaal.length === 3 && /^pot: verzend nota 9 /.test(r._app.reden) && !/JVBER/.test(r._app.reden), r._app.reden);
     r = await ctx.f({}, res(), mob, s, {}, 'POST /app/pot/onzin');
     toets('onbekende schrijfroute → 404', r.uit.st === 404 && kaal.length === 3);
-    toets('potDhD1 kent een eigen time-out; schrijven met 15 s', /async function potDhD1\(batch, ms\)/.test(src) && /AbortSignal\.timeout\(ms \|\| 30000\)/.test(src) && /schrijf: function \(batch\) \{ return potDhD1\(batch, 15000\); \}/.test(src));
+    toets('potDhD1 kent een eigen time-out; schrijven met 15 s', /function potDhD1\(batch, ms\) \{ return appD1Batch\(APP_POT_DB, batch, ms\); \}/.test(src) && /async function appD1Batch\(db, batch, ms\)/.test(src) && /AbortSignal\.timeout\(ms \|\| 30000\)/.test(src) && /schrijf: function \(batch\) \{ return potDhD1\(batch, 15000\); \}/.test(src));
     toets('schrijven alleen via io.schrijf; io.d1 blijft alleen SELECT', /d1: function \(batch\) \{ if \(batch\.some\(function \(q\) \{ return !\/\^\\s\*select\\b\/i\.test\(q\.sql\); \}\)\) return Promise\.reject/.test(src));
     toets('schakelaar: <POT_VZ_DIR>/ovis-pot-schrijft; kaartteksten volgen hem vóór elke ronde', /path\.join\(POT_VZ_DIR, 'ovis-pot-schrijft'\)/.test(src) && /POT_VZ_MOD\.zetOvis\(typeof potAppSchrijvenOpen === 'function' && potAppSchrijvenOpen\(\)\);[^\n]*\n    const u = await POT_VZ_MOD\.ronde\(/.test(src));
     toets('GET /app/pot/stand zegt of OVIS POT schrijft', /if \(pad === 'stand'\) \{[^\n]*schrijft: potAppSchrijvenOpen\(\)/.test(src));

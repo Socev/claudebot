@@ -44,7 +44,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fout++; console.log((ok ?
 
 // ── de ronde tegen een nagebootste D1 ──────────────────────────────────────
 const db = new DatabaseSync(':memory:');
-db.exec(fs.readFileSync('test/pot-verzend-schema.sql', 'utf8'));
+db.exec(fs.readFileSync(process.env.POT_TOETS_SCHEMA || 'test/pot-verzend-schema.sql', 'utf8'));   // wv2764: idem
 db.exec(`insert into entiteit (code, naam) values ('SLOEL','Stichting Leusden op één Lijn');
 insert into praktijk (id, naam, naam_brief, tav, email) values ('P01','KG - Leest','Huisartsenpraktijk Korte Geer','t.a.v. M. van der Leest','pm@kg.example'),
  ('P04','Berkenlaan','Huisartsenpraktijk Berkenlaan','t.a.v. praktijkmanager','pm@bk.example'),('P08','Lepelaar','Huisartsen Lepelaar','t.a.v. M. Schoonman','ms@lep.example'),

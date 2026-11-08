@@ -16,7 +16,7 @@ let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (!ok && extra !== undefined ? '  [' + JSON.stringify(extra).slice(0, 700) + ']' : '')); }
 
 const db = new DatabaseSync(':memory:', { enableForeignKeyConstraints: false });
-db.exec(fs.readFileSync('test/pot-app-schema.sql', 'utf8'));
+db.exec(fs.readFileSync(process.env.POT_TOETS_SCHEMA || 'test/pot-app-schema.sql', 'utf8'));   // wv2764: machinekamer draait hem ook op het schema van D1 pot
 const NU = new Date('2026-10-15T10:00:00Z');
 const ins = (t, o) => db.prepare(`insert into ${t} (${Object.keys(o).join(',')}) values (${Object.keys(o).map(() => '?').join(',')})`).run(...Object.values(o));
 for (const [code, naam] of [['POT', 'Toets POT bv'], ['KM', 'Toets Kostenmaatschap'], ['SLOEL', 'Toets SLOEL']])

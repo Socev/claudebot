@@ -25,7 +25,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fout++; console.log((ok ?
 
 // ── D1 nagebootst met vaste klok ──────────────────────────────────────────
 const db = new DatabaseSync(':memory:');
-db.exec(fs.readFileSync('test/pot-verzend-schema.sql', 'utf8'));
+db.exec(fs.readFileSync(process.env.POT_TOETS_SCHEMA || 'test/pot-verzend-schema.sql', 'utf8'));   // wv2764: ook op het schema van D1 pot
 db.exec(`insert into entiteit (code, naam) values ('SLOEL','Stichting Leusden op één Lijn');
 insert into praktijk (id, naam, naam_brief, tav, email) values ('P01','KG - Leest','Huisartsenpraktijk Korte Geer','t.a.v. M. van der Leest','pm@kg.example'),
  ('P05','Groenhouten','Huisartsenpraktijk Groenhouten',null,'facturen@gh.example'),('P08','Lepelaar','Huisartsen Lepelaar','t.a.v. M. Schoonman','ms@lep.example');`);

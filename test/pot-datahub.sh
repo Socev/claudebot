@@ -236,7 +236,7 @@ function scenario() {
     const logs = [];
     const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD, CLOUDFLARE_API_TOKEN: 'cf-test' };
     const g2 = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT, SECRET: 'x'.repeat(40),
-      __dirname: process.cwd(), process: { env, execPath: process.execPath, pid: process.pid }, spawn, APP_CF_ACCOUNT: 'acc', APP_FIN_DB: 'db',
+      __dirname: process.cwd(), process: { env, execPath: process.execPath, pid: process.pid }, spawn, APP_CF_ACCOUNT: 'acc', APP_FIN_DB: 'fin-db', APP_POT_DB: 'db',   // wv2764: de ronde schrijft in `pot`; een vraag aan `fin` faalt hier (onverwachte url)
       fetch: async function (url, o) {
         if (!/\/d1\/database\/db\/query$/.test(url) || o.headers.Authorization !== 'Bearer cf-test') throw new Error('onverwachte url');
         d1Batches++;
@@ -331,7 +331,7 @@ function scenario() {
   // ── 5. droog op een kopie van de echte bankluis + echte D1 (alleen machinekamer: POT_DH_DROOG_BANK_DIR) ──
   if (process.env.POT_DH_DROOG_BANK_DIR) {
     const a = A.open(process.env.POT_DH_DROOG_BANK_DIR);
-    const ACC = '23df9b0607bb70f6d7f15a63ec843d6d', DB = 'ffcb09ad-fc50-4c83-aa7b-ad6409b44e03';
+    const ACC = '23df9b0607bb70f6d7f15a63ec843d6d', DB = '289701d1-357d-4a44-9715-2faae71bdbf8';   // wv2764: D1 `pot`
     const d1 = async (batch) => { const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + ACC + '/d1/database/' + DB + '/query', { method: 'POST', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': 'application/json' }, body: JSON.stringify({ batch }) }); const j = await r.json(); if (!j.success) throw new Error('d1 ' + r.status); return j.result.map((x) => x.results); };
     const [rek, gr] = await d1([{ sql: P.SQL_LEES_REKENING, params: ['POT'] }, { sql: "SELECT max(boekdatum) AS d FROM bankmutatie WHERE entiteit = ? AND coalesce(bron_bestand, '') <> ?", params: ['POT', P.BRON_BESTAND] }]);
     const inv = A.potDatahubInvoer(a, new Date(Date.parse(gr[0].d + 'T12:00:00Z') - 10 * 864e5).toISOString().slice(0, 10));

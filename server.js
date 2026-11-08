@@ -11440,6 +11440,7 @@ async function appVandaagActieDetail(req, res, a, rest) {
 // is, zegt dat. 30 min in het geheugen van de pod, niets op schijf; stil in het auditlog. Sinds 8-10 (David) ook op een vaste plek.
 const APP_PRAKTIJKEN_CACHE_MS = 30 * 60 * 1000;
 const APP_FIN_DB = process.env.APP_FIN_DB || 'ffcb09ad-fc50-4c83-aa7b-ad6409b44e03';   // D1 `fin` (skill fin-datahub)
+const APP_POT_DB = process.env.APP_POT_DB || '289701d1-357d-4a44-9715-2faae71bdbf8';   // wv2764: D1 `pot` (OVIS POT, repo Socev/ovis-pot), zie potDhD1
 const APP_CF_ACCOUNT = process.env.CF_ACCOUNT_ID || '23df9b0607bb70f6d7f15a63ec843d6d';   // = LESSEN_CF_ACCOUNT (buiten dit blok)
 const APP_FIN_LABEL = {
   omzet_totaal: 'Omzet', resultaat: 'Resultaat', personeel: 'Personeelskosten', uitbesteed: 'Waarneming en uitbesteed werk',
@@ -18747,7 +18748,7 @@ const ovis = (function () {
   try {
     return OVIS_MOD.maak({ vault: VAULT, sbRpc: appSbRpc, lees: function (p) { return VV().lees(p, 'utf8'); },
       schrijf: function () { throw new Error('overdag schrijft de pod geen entiteitpagina'); }, log: function (r) { schrijfLog(nu() + ' ' + r); },
-      // wv981: plek 4 (POT-factuuradres) — D1 fin alleen lezen (Fable #4); de dossierpagina's doen sinds wv2256 (fase 2d) niet meer mee
+      // wv981: plek 4 (POT-factuuradres) — D1 alleen lezen (Fable #4), sinds wv2764 `pot`; de dossierpagina's doen sinds wv2256 (fase 2d) niet meer mee
       pot: { d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); } },
       // wv1009: plek 5 (Voor jou ⇄ Open vragen aan David) — alleen lezen; de Voor jou-ronde schrijft met ovis-run.js voorjou --schrijf
       vj: { punten: function () { return appSbRpc('mk_voor_jou_lijst', { p_alles: true }); }, register: function () { return VV().lees(path.join(VAULT, '00_Systeem', 'Open vragen aan David.md'), 'utf8'); },
@@ -18755,11 +18756,11 @@ const ovis = (function () {
       // wv1010: plek 6 (bank) — de bankdatabank alleen lezen (readOnly, query_only, alleen SELECT); ontbreekt de lezer (oude module): niet gemeten
       bank: typeof OVIS_MOD.bankLezer === 'function' ? OVIS_MOD.bankLezer(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite')) : null,
       // wv1012: plek 8 (D1 fin: entiteit, medewerker, kerncijfers) — dezelfde D1-lezer, alleen SELECT
-      fin: { d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); } },
+      fin: { d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return finD1(batch); } },
       // wv1013: plek 9 (R2 fin-bronnen ⇄ D1 fin.bron) — D1 alleen SELECT, R2 alleen de objectlijst; plek 10–12 lezen vault en Supabase (sbRpc)
       // wv1774: plek 13 (kn: D1 knie, alleen SELECT) met dezelfde sleutel; plek 14 (hp: health-pod via hp.py) ook zonder Cloudflare-sleutel
       rest: fs.existsSync(path.join(__dirname, 'ovis-plekken.js')) ? Object.assign({ hp: ovisHp }, process.env.CLOUDFLARE_API_TOKEN ? {
-        d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); },
+        d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return finD1(batch); },
         r2: function () { return require('./ovis-plekken.js').r2Lijst(fetch, process.env.CLOUDFLARE_API_TOKEN, APP_CF_ACCOUNT, 'fin-bronnen'); },
         kn: ovisKnieD1 } : {}) : null });
   } catch (e) { logError('ovis', e); return null; }
@@ -20228,7 +20229,7 @@ async function appMediatheek(req, res, a, route) {
 // ── OVIS POT (wv1894, fase P1: lezen; bouwplan vault "01_Ontwikkeling/OVIS POT - POT POH-GGZ-app in de Socev-app (bouwplan 28-10-2026).md") ──
 // De POT-cyclus (werk.socev.dev/pot) als App in de Socev-app. Logica in pot-app.js (puur: de 10 leesroutes van de Function, letterlijk,
 // met gebundelde D1-vragen); hier alleen GET /app/pot/<pad> (padstukken, zie pot-app.js), de sessie (zoals elke app-route), een
-// auditregel per opvraging (route, status, rondgangen, duur; geen bedragen) en /health.pot_app. D1 `fin` via potDhD1, alleen SELECT.
+// auditregel per opvraging (route, status, rondgangen, duur; geen bedragen) en /health.pot_app. D1 `pot` via potDhD1 (sinds wv2764; personeel uit `fin` via finD1), alleen SELECT.
 // Op een vaste plek gewoon open (David 28-10 16:51: "op ALLE pc's toegang tot ALLES"; wv1901).
 // wv1933 (P3 + P4): POST /app/pot/<pad> schrijft (planning, vaststellen, correctie, patiënten, nota-status, klaarzetten, annuleren, adres).
 // Elke schrijfroute is één D1-batch (= één transactie, gemeten 29-10), met 15 s time-out. Op een vaste plek onder het invoerslot
@@ -20244,10 +20245,13 @@ function potAppSchrijvenOpen() {
 const potApp = (function () {
   try {
     return POT_APP_MOD ? POT_APP_MOD.maak({ d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); },
+      // wv2764: de personeelsregel (dienstverband_maand) staat alleen in `fin`: aparte leesweg, alleen SELECT
+      d1Fin: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return finD1(batch); },
       schrijf: function (batch) { return potDhD1(batch, 15000); }, schrijvenOpen: potAppSchrijvenOpen }) : null;
   } catch (e) { logError('pot-app', e); return null; }
 })();
-function potAppInfo() { return { aan: !!potApp, sleutel: !!process.env.CLOUDFLARE_API_TOKEN, schrijft: !!potApp && !!POT_APP_MOD.SCHRIJF_ROUTES && potAppSchrijvenOpen() }; }
+function potAppInfo() { return { aan: !!potApp, sleutel: !!process.env.CLOUDFLARE_API_TOKEN, schrijft: !!potApp && !!POT_APP_MOD.SCHRIJF_ROUTES && potAppSchrijvenOpen(),
+  db: APP_POT_DB === '289701d1-357d-4a44-9715-2faae71bdbf8' ? 'pot' : 'APP_POT_DB' }; }   // wv2764: welke D1 de POT-modules gebruiken
 async function appPot(req, res, a, route) {
   if (!potApp) return appWeiger(res, 404, 'POT zit niet in deze versie van de pod', 'pot ontbreekt');
   if (!process.env.CLOUDFLARE_API_TOKEN) return appWeiger(res, 503, 'de POT-gegevens zijn nu niet te lezen (geen Cloudflare-sleutel op de pod)', 'pot geen sleutel');
@@ -24480,9 +24484,14 @@ function potDhStaatBij(grootboek, box) {
   fs.writeFileSync(tmp, JSON.stringify(s), { mode: 0o600 });
   fs.renameSync(tmp, POT_DH_STAAT);
 }
-// D1 `fin`, één batch (transactie) met parameters. Foutteksten zonder statement of parameters, cijferreeksen gemaskeerd (Fable wv815 #2).
-async function potDhD1(batch, ms) {   // wv1933: ms = eigen time-out (OVIS POT schrijft met 15 s, bouwplan § 3.3); standaard 30 s
-  const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + APP_CF_ACCOUNT + '/d1/database/' + APP_FIN_DB + '/query', {
+// wv2764: sinds het overstapmoment (ontwerp OVIS POT op pot.socev.dev § 9) staan de POT-tabellen in een eigen D1 `pot`; in `fin` zijn ze
+// alleen lezen (triggers). potDhD1 = `pot` (pot-datahub, pot-verzend, pot-app, vrijgave, OVIS-plek 4); finD1 = `fin` (OVIS-plekken 8/9,
+// de personeelsregel van pot-app). Zelfde sleutel, zelfde REST-route; alleen de database verschilt.
+// D1, één batch (transactie) met parameters. Foutteksten zonder statement of parameters, cijferreeksen gemaskeerd (Fable wv815 #2).
+function potDhD1(batch, ms) { return appD1Batch(APP_POT_DB, batch, ms); }
+function finD1(batch, ms) { return appD1Batch(APP_FIN_DB, batch, ms); }
+async function appD1Batch(db, batch, ms) {   // wv1933: ms = eigen time-out (OVIS POT schrijft met 15 s, bouwplan § 3.3); standaard 30 s
+  const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + APP_CF_ACCOUNT + '/d1/database/' + db + '/query', {
     method: 'POST', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': 'application/json' },
     body: JSON.stringify({ batch: batch }), signal: AbortSignal.timeout(ms || 30000) });
   const j = await r.json().catch(function () { return null; });

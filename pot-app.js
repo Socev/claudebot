@@ -1,7 +1,8 @@
 // pot-app.js — OVIS POT, lezen (wv1894, fase P1; bouwplan vault "01_Ontwikkeling/OVIS POT - POT POH-GGZ-app in de Socev-app
 // (bouwplan 28-10-2026).md" § 3.2). De 10 leesroutes van de POT-app (werk.socev.dev/pot, functions/api/pot/[[pad]].js in
 // Socev/werkkamer.socev.dev, commit c903ac2) als pure module: geen fetch, geen fs. De pod geeft io mee:
-//   io.d1(batch)  → Promise<[{ results: [...] }]> — één rondgang naar D1 `fin` (REST /query met {batch}); alleen SELECT
+//   io.d1(batch)  → Promise<[{ results: [...] }]> — één rondgang naar D1 `pot` (sinds wv2764; daarvoor `fin`); alleen SELECT
+//   io.d1Fin(batch) (optioneel, wv2764) — idem naar D1 `fin`, alleen voor dienstverband_maand (personeel); zonder: io.d1
 //   io.nu()       → Date (de toets zet de klok vast)
 // De berekeningen zijn letterlijk overgenomen uit de Function (zelfde validaties, teksten en JSON); alleen dit verschilt:
 //   - routevorm: padstukken in kleine letters (doorgeefluik: alleen GET/POST, ^[a-z0-9/-]{1,64}$, geen querystring), zie ROUTES;
@@ -43,6 +44,8 @@ function leesEntiteit(url) {
 }
 const q = (env, sql, ...p) => env.vraag(sql, p);
 const q1 = (env, sql, ...p) => env.vraag(sql, p).then((r) => (r.length ? r[0] : null));
+// wv2764: personeelsgegevens (dienstverband_maand) staan alleen in D1 `fin`, de POT-tabellen sinds het overstapmoment in `pot`
+const q1Fin = (env, sql, ...p) => (env.vraagFin || env.vraag)(sql, p).then((r) => (r.length ? r[0] : null));
 const rond = (x) => Math.round((Number(x) || 0) * 100) / 100;
 const perSleutel = (rijen, f) => { const m = {}; for (const r of rijen) (m[f(r)] ||= []).push(r); return m; };
 
@@ -134,7 +137,7 @@ async function overzicht(env, url) {
       begroting(env, ent, jaar),
       q(env, "select bt.praktijk_id, sum(bt.bedrag) as bedrag, count(*) as n from bank_toewijzing bt join bankmutatie bm on bm.id=bt.bankmutatie_id where bm.entiteit=? and bt.boekjaar=? and bt.soort in ('voorschot','huur') and bt.praktijk_id is not null group by bt.praktijk_id", ent, jaar),
       q(env, "select bt.praktijk_id, max(bm.boekdatum) as datum from bank_toewijzing bt join bankmutatie bm on bm.id=bt.bankmutatie_id where bm.entiteit=? and bt.soort in ('voorschot','huur') and bt.praktijk_id is not null group by bt.praktijk_id", ent),
-      q1(env,
+      q1Fin(env,
         'select jaar, maand, sum(in_dienst) as in_dienst, count(*) as dienstverbanden, round(sum(case when in_dienst=1 then uren_week else 0 end),1) as uren_week, round(sum(case when in_dienst=1 then bruto_maand_contract else 0 end),2) as bruto_maand from dienstverband_maand where entiteit=? and jaar=? and maand<=? group by jaar, maand order by maand desc limit 1',
         ent, jaar, jaar === vandaag.getUTCFullYear() ? vandaag.getUTCMonth() + 1 : 12),
     ]);
@@ -1181,7 +1184,8 @@ function maak(io) {
     const o = ontleed(pad);
     if (!o) return { ...fout('onbekende route', 404), rondgangen: 0, vragen: 0, route: null };
     const b = vraagBundel(io.d1);
-    const env = { nu: klok(), vraag: b.vraag };
+    const bf = typeof io.d1Fin === 'function' ? vraagBundel(io.d1Fin) : null;   // wv2764: personeel uit `fin`
+    const env = { nu: klok(), vraag: b.vraag, vraagFin: bf ? bf.vraag : null };
     let uit;
     try {
       const p = { ...o.params };
@@ -1201,7 +1205,8 @@ function maak(io) {
       if (e instanceof Gebruikersfout) uit = fout(e.message, e.status);
       else uit = fout('serverfout: ' + (e && e.message), 500);
     }
-    return { ...uit, rondgangen: b.teller.rondgangen, vragen: b.teller.vragen, route: o.route };
+    // rondgangen: de `fin`-vraag loopt naast de eerste `pot`-batch, dus het maximum (de wachttijd), niet de som; vragen = beide
+    return { ...uit, rondgangen: Math.max(b.teller.rondgangen, bf ? bf.teller.rondgangen : 0), vragen: b.teller.vragen + (bf ? bf.teller.vragen : 0), route: o.route };
   }
   // POST /app/pot/<pad> met een JSON-object → { status, j, rondgangen, vragen, schrijfacties, route, id }
   // io.schrijf(batch) → [{ results, changes }] (één transactie); io.schrijvenOpen() → true na de overstap.
