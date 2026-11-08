@@ -847,6 +847,200 @@ function kindInstel(invoer, dir) {
   fs.writeFileSync(tmp, JSON.stringify(inst), { mode: 0o600 }); fs.renameSync(tmp, p);
   return { ok: true, instellingen: inst };
 }
+// ── wv2799: personeelsdossiers en urenverloop in de vault ─────────────────────────────────────────────────────────────────
+// David 8-11-2026: "schaal, trede, uren: genoeg" → per gekoppeld dossier één blok "Stand in Nmbrs" en per entiteit een tabel
+// urenverloop per maand. Alleen data, functie, uren, parttime, tabel/schaal/trede en verlofsaldo-uren: NOOIT een bedrag
+// (salaris, uurloon) en niets van de verboden velden. Koppeling (alleen de machinekamer schrijft hem, 600):
+// koppeling.json = { bedrijven: { <companyId>: { entiteit, verloop: '<vaultpad>' } }, medewerkers: { <employeeId>: '<vaultpad>' } }.
+// Ongekoppeld = niets in de vault (alleen geteld). De server schrijft; dit kind rekent alleen.
+const BLOK_BEGIN = '<!-- nmbrs:blok begin -->', BLOK_EIND = '<!-- nmbrs:blok eind -->';
+const STAND_RE = /\(stand Nmbrs [0-9-]+\)/g;
+function vaultPadGoed(p) {
+  return typeof p === 'string' && p.length < 300 && /^10_Zakelijk\/.+\.md$/.test(p) && !/[\x00-\x1f\\]/.test(p) && !/<!--|-->/.test(p) &&
+    p.split('/').every(function (s) { return s && s !== '.' && s !== '..'; });
+}
+function koppelingLees(dir) {
+  let j = {};
+  try { j = JSON.parse(fs.readFileSync(path.join(dir, 'koppeling.json'), 'utf8')) || {}; } catch (e) { j = {}; }
+  const b = {}, m = {};
+  Object.keys(j.bedrijven || {}).forEach(function (id) {
+    const x = j.bedrijven[id] || {};
+    if (idVan(id) && /^[A-Z]{2,6}$/.test(String(x.entiteit || ''))) b[id] = { entiteit: x.entiteit, verloop: vaultPadGoed(x.verloop) ? x.verloop : null };
+  });
+  Object.keys(j.medewerkers || {}).forEach(function (id) { if (idVan(id) && vaultPadGoed(j.medewerkers[id])) m[id] = j.medewerkers[id]; });
+  return { bedrijven: b, medewerkers: m };
+}
+function getal(n, dec) {   // 30.5 → '30,5'; 63.160004 → '63,16'
+  if (n == null || isNaN(Number(n))) return '?';
+  const f = Math.pow(10, dec == null ? 2 : dec);
+  return String(Math.round(Number(n) * f) / f).replace('-', '−').replace('.', ',');
+}
+function dmjS(s) { const t = datum(s); return t == null ? '?' : dmj(t); }
+function veilig(s, n) { return String(s == null ? '' : s).replace(/[\r\n|<>[\]`*_]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n || 80); }
+function maandEind(j, m) { return Date.UTC(j, m, 0); }   // m 1-12; 00:00 op de laatste dag (einddata staan op 00:00 en tellen mee)
+function sorteer(r) { return (r || []).slice().sort(function (a, b) { return (datum(a.startDate) || 0) - (datum(b.startDate) || 0) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')); }); }
+function urenVan(r) { if (!r) return null; const u = r.hoursPerWeek != null ? Number(r.hoursPerWeek) : (r.weekuren != null ? Number(r.weekuren) : null); return u == null || isNaN(u) ? null : u; }
+function schaalTekst(s) {
+  if (!s || !s.schaal || s.schaal.scaleCode == null) return s && s.type === 'employerCosts' ? 'geen (werkgeverskosten)' : 'geen tabel';
+  return (s.tabel && s.tabel.tableName ? veilig(s.tabel.tableName, 40) + ', ' : '') + 'schaal ' + veilig(s.schaal.scaleCode, 8) + ', trede ' + veilig(s.trede ? s.trede.stepCode : '?', 8);
+}
+function laatsteDienst(m) { return sorteer(m.h.dienstverband).slice(-1)[0] || null; }
+function statusVan(m, nu) {
+  const dv = laatsteDienst(m);
+  if (!dv) return 'onbekend (geen dienstverband in Nmbrs)';
+  const s = datum(dv.startDate), e = datum(dv.endDate);
+  if (s != null && s > nu) return 'in dienst per ' + dmj(s) + ' (nog niet begonnen)';
+  if (e != null && e < nu) return 'uit dienst per ' + dmj(e);
+  return e != null ? 'in dienst, laatste werkdag ' + dmj(e) : 'in dienst';
+}
+// één medewerkerrecord → markdown (zonder bedragen)
+function dossierDeel(m, b, adminStart, nu) {
+  const info = m.info || {}, r = [];
+  const dvs = sorteer(m.h.dienstverband), cons = sorteer(m.h.contract), rst = sorteer(m.h.rooster), sal = sorteer(m.h.salaris);
+  const fn = (m.h.functie || []).slice().sort(function (a, b2) { return String(a.createdAt || '').localeCompare(String(b2.createdAt || '')); });
+  const rNu = geldig(rst, nu) || rst[0] || null, sNu = geldig(sal, nu) || sal[0] || null;
+  r.push('| | |', '|---|---|');
+  r.push('| Werkgever | ' + veilig(b ? b.naam : '?', 80) + ' · personeelsnummer ' + veilig(info.employeeNumber, 10) + ' |');
+  r.push('| Status | ' + statusVan(m, nu) + ' |');
+  r.push('| Dienstverband | ' + (dvs.length ? dvs.map(function (d) {
+    const s = datum(d.startDate);
+    return dmjS(d.startDate) + (d.endDate ? ' t/m ' + dmjS(d.endDate) : ' – heden') + (s != null && s === adminStart ? ' (begin van de Nmbrs-administratie; de echte indiensttreding kan eerder liggen)' : '');
+  }).join(' · ') : 'geen') + ' |');
+  r.push('| Contract(en) | ' + (cons.length ? cons.map(function (c) {
+    return dmjS(c.startDate) + (c.endDate ? ' t/m ' + dmjS(c.endDate) : '') + (c.indefinite === true ? ' onbepaalde tijd' : ' bepaalde tijd') + (c.hoursPerWeek != null ? ', ' + getal(c.hoursPerWeek) + ' u/week' : '') + (c.writtenContract === true ? ', schriftelijk' : '');
+  }).join(' · ') : 'geen') + ' |');
+  if (fn.length) r.push('| Functie | ' + fn.map(function (f) { return veilig(f.description, 60); }).filter(function (x, i, a) { return x && a.indexOf(x) === i; }).join(' → ') + ' |');
+  r.push('| Uren per week | ' + (rNu ? (urenVan(rNu) == null ? 'geen vaste uren (oproep/stage)' : getal(urenVan(rNu)) + ' u') + (rNu.daysPerWeek != null ? ', ' + getal(rNu.daysPerWeek) + (Number(rNu.daysPerWeek) === 1 ? ' dag' : ' dagen') : '') +
+    (rNu.parttimePercentage != null ? ', parttime ' + getal(rNu.parttimePercentage) + ' %' : '') + ', sinds ' + dmjS(rNu.startDate) : 'geen rooster') + ' |');
+  r.push('| Salaristabel | ' + (sNu ? schaalTekst(sNu) + ', sinds ' + dmjS(sNu.startDate) : 'geen') + ' |');
+  const vl = (m.h.verlofsaldo || []).slice().sort(function (a, b2) { return String(a.leaveGroupId || '').localeCompare(String(b2.leaveGroupId || '')); })
+    .map(function (v) { return getal(v.leaveBalance); });
+  if (vl.length) r.push('| Verlofsaldo (uren per verlofgroep) | ' + vl.join(' · ') + ' (Nmbrs geeft de namen van de groepen niet mee) |');
+  // historie: elke ingang van een rooster of salarisregel, met wat er op die dag gold
+  const data = [];
+  rst.concat(sal).forEach(function (x) { const t = datum(x.startDate); if (t != null && data.indexOf(t) < 0) data.push(t); });
+  data.sort(function (a, b2) { return a - b2; });
+  if (data.length > 1) {
+    r.push('', '| Ingang | Uren/week | Dagen | Parttime | Schaal/trede |', '|---|---|---|---|---|');
+    let vorige = '';
+    data.slice(-30).forEach(function (t) {
+      const ro = geldig(rst, t), sa = geldig(sal, t);
+      const rij = '| ' + (ro ? (urenVan(ro) == null ? '—' : getal(urenVan(ro))) : '?') + ' | ' + (ro && ro.daysPerWeek != null ? getal(ro.daysPerWeek) : '?') + ' | ' +
+        (ro && ro.parttimePercentage != null ? getal(ro.parttimePercentage) + ' %' : '?') + ' | ' + (sa && sa.schaal && sa.schaal.scaleCode != null ? veilig(sa.schaal.scaleCode, 8) + '/' + veilig(sa.trede ? sa.trede.stepCode : '?', 8) : '—') + ' |';
+      if (rij !== vorige) r.push('| ' + dmj(t) + ' ' + rij);
+      vorige = rij;
+    });
+  }
+  return r.join('\n');
+}
+function dossierBlok(delen, stand) {
+  return BLOK_BEGIN + '\n## Stand in Nmbrs (salarisadministratie)\n\n' +
+    '*Automatisch bijgewerkt na de dagelijkse Nmbrs-ronde (alleen lezen; wv2799). Niet met de hand bewerken: de volgende ronde zet het terug. ' +
+    'Alleen data, uren, schaal en trede, geen bedragen (stand Nmbrs ' + stand + ').*\n\n' + delen.join('\n\n') + '\n' + BLOK_EIND;
+}
+function verloopBlok(rijen, jaren, stand, begin) {
+  const r = [BLOK_BEGIN, '*Automatisch bijgewerkt na de dagelijkse Nmbrs-ronde (wv2799); niet met de hand bewerken. Stand per de laatste dag van de maand; ' +
+    'de lopende maand zoals nu bekend (stand Nmbrs ' + stand + '). fte = contracturen / 36. De Nmbrs-historie van deze werkgever begint in ' + begin + '.*', '',
+    '### Per jaar', '', '| Jaar | Gem. in dienst | Gem. contracturen/week | Gem. fte | Instroom | Uitstroom |', '|---|---|---|---|---|---|'];
+  jaren.forEach(function (j) { r.push('| ' + j.jaar + (j.deel ? ' (' + j.maanden + ' mnd)' : '') + ' | ' + getal(j.n, 1) + ' | ' + getal(j.uren, 1) + ' | ' + getal(j.fte, 2) + ' | ' + j.in + ' | ' + j.uit + ' |'); });
+  r.push('', '### Per maand (nieuwste boven)', '', '| Maand | In dienst | waarvan zonder vaste uren | Contracturen/week | fte | Instroom | Uitstroom |', '|---|---|---|---|---|---|---|');
+  rijen.slice().reverse().forEach(function (x) { r.push('| ' + x.maand + ' | ' + x.n + ' | ' + x.nul + ' | ' + getal(x.uren, 2) + ' | ' + getal(x.fte, 2) + ' | ' + (x.eerste ? '— (begin)' : x.in) + ' | ' + x.uit + ' |'); });
+  r.push(BLOK_EIND);
+  return r.join('\n');
+}
+function verloopBereken(mws, eerste, nu) {
+  const rijen = [];
+  const n0 = new Date(nu), jEind = n0.getUTCFullYear(), mEind = n0.getUTCMonth() + 1;
+  let j = new Date(eerste).getUTCFullYear(), mm = new Date(eerste).getUTCMonth() + 1, eersteRij = true;
+  while (j < jEind || (j === jEind && mm <= mEind)) {
+    const eind = maandEind(j, mm), begin = Date.UTC(j, mm - 1, 1);
+    let n = 0, nul = 0, uren = 0, inn = 0, uit = 0;
+    mws.forEach(function (m) {
+      (m.h.dienstverband || []).forEach(function (d) {
+        const s = datum(d.startDate), e = datum(d.endDate);
+        if (s != null && s >= begin && s <= eind) inn++;
+        if (e != null && e >= begin && e <= eind) uit++;
+      });
+      if (!inDienst(m, eind)) return;
+      n++;
+      const u = urenVan(geldig(m.h.rooster || [], eind) || sorteer(m.h.rooster)[0]);
+      if (!u) nul++; else uren += u;
+    });
+    rijen.push({ maand: j + '-' + String(mm).padStart(2, '0'), jaar: j, n: n, nul: nul, uren: Math.round(uren * 100) / 100, fte: uren / 36, in: inn, uit: uit, eerste: eersteRij });
+    eersteRij = false;
+    mm++; if (mm > 12) { mm = 1; j++; }
+  }
+  const jaren = [];
+  rijen.forEach(function (x) {
+    let y = jaren.find(function (z) { return z.jaar === x.jaar; });
+    if (!y) { y = { jaar: x.jaar, maanden: 0, n: 0, uren: 0, fte: 0, in: 0, uit: 0 }; jaren.push(y); }
+    y.maanden++; y.n += x.n; y.uren += x.uren; y.fte += x.fte; if (!x.eerste) y.in += x.in; y.uit += x.uit;
+  });
+  jaren.forEach(function (y) { y.n /= y.maanden; y.uren /= y.maanden; y.fte /= y.maanden; y.deel = y.maanden < 12; });
+  return { rijen: rijen, jaren: jaren.reverse() };
+}
+function vaultBereken(geladen, kop, nu) {
+  const { bedrijven, mw } = geladen;
+  const stand = dmj(nu), perPad = {}, uit = { dossiers: [], verloop: [], ongekoppeld: 0, gekoppeld: 0 };
+  const perBedrijf = {};
+  Object.values(mw).forEach(function (m) { (perBedrijf[m.bedrijf] || (perBedrijf[m.bedrijf] = [])).push(m); });
+  const adminStart = {};
+  Object.keys(perBedrijf).forEach(function (b) {
+    const tel = {};
+    perBedrijf[b].forEach(function (m) { (m.h.dienstverband || []).forEach(function (d) { const s = datum(d.startDate); if (s != null) tel[s] = (tel[s] || 0) + 1; }); });
+    const vroegst = Object.keys(tel).map(Number).sort(function (a, c) { return a - c; })[0];
+    adminStart[b] = vroegst != null && tel[vroegst] >= 3 ? vroegst : null;   // de dag waarop iedereen "in dienst kwam" = overstap naar Nmbrs
+  });
+  Object.values(mw).forEach(function (m) {
+    const pad = kop.medewerkers[m.id];
+    if (!pad) { uit.ongekoppeld++; return; }
+    uit.gekoppeld++;
+    (perPad[pad] || (perPad[pad] = [])).push(m);
+  });
+  Object.keys(perPad).sort().forEach(function (pad) {
+    const lijst = perPad[pad].sort(function (a, c) { return (datum((laatsteDienst(c) || {}).startDate) || 0) - (datum((laatsteDienst(a) || {}).startDate) || 0); });
+    const delen = lijst.map(function (m) {
+      const kop2 = lijst.length > 1 ? '### Personeelsnummer ' + veilig(m.info.employeeNumber, 10) + '\n\n' : '';
+      return kop2 + dossierDeel(m, bedrijven[m.bedrijf], adminStart[m.bedrijf], nu);
+    });
+    uit.dossiers.push({ pad: pad, blok: dossierBlok(delen, stand) });
+  });
+  Object.keys(kop.bedrijven).forEach(function (b) {
+    const k = kop.bedrijven[b];
+    if (!k.verloop || !perBedrijf[b]) return;
+    // begin = het eerste rooster bij deze werkgever (daarvóór is de historie onvolledig: wie eerder vertrok staat niet in Nmbrs)
+    const eerste = perBedrijf[b].map(function (m) { return sorteer(m.h.rooster)[0]; }).filter(Boolean).map(function (r) { return datum(r.startDate); })
+      .filter(function (t) { return t != null; }).sort(function (a, c) { return a - c; })[0];
+    if (eerste == null) return;
+    const v = verloopBereken(perBedrijf[b], eerste, nu);
+    const d0 = new Date(eerste);
+    uit.verloop.push({ pad: k.verloop, entiteit: k.entiteit, maanden: v.rijen.length, blok: verloopBlok(v.rijen, v.jaren, stand, ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'][d0.getUTCMonth()] + ' ' + d0.getUTCFullYear()) });
+  });
+  return uit;
+}
+// Zet het blok in de paginatekst: vervang tussen de markeringen, of voeg het in vóór de eerste gegenereerde blokken (ovis/sb) of
+// achteraan. Geeft null als er inhoudelijk niets verandert (alleen de standdatum telt niet), zodat de vault niet elke dag schuift.
+function blokZet(tekst, blok, invoegen) {
+  const t = String(tekst), i = t.indexOf(BLOK_BEGIN), j = t.indexOf(BLOK_EIND);
+  if (i >= 0 && t.indexOf(BLOK_BEGIN, i + 1) >= 0) return null;   // twee blokken: niet raden
+  if (i >= 0 && j > i) {
+    const oud = t.slice(i, j + BLOK_EIND.length);
+    if (oud.replace(STAND_RE, '') === blok.replace(STAND_RE, '')) return null;
+    return t.slice(0, i) + blok + t.slice(j + BLOK_EIND.length);
+  }
+  if (i >= 0 || j >= 0 || !invoegen) return null;   // half blok of (verloop) geen plek: niets
+  const kand = [t.indexOf('\n<!-- ovis:blok begin'), t.indexOf('\n<!-- sb:generated')].filter(function (x) { return x >= 0; }).sort(function (a, b) { return a - b; });
+  const k = kand.length ? kand[0] + 1 : t.length;
+  const voor = t.slice(0, k).replace(/\n*$/, '\n\n'), na = t.slice(k);
+  return voor + blok + '\n' + (na ? '\n' + na : '');
+}
+function kindVault(invoer, dir) {
+  if (!fs.existsSync(path.join(dir, 'nmbrs.' + 'sqlite'))) return { ok: true, dossiers: [], verloop: [], ongekoppeld: 0, gekoppeld: 0 };
+  const d = db(dir), geladen = laad(d);
+  d.close();
+  const nu = invoer && typeof invoer.nu === 'string' && datum(invoer.nu) != null ? datum(invoer.nu) : Date.now();
+  return Object.assign({ ok: true }, vaultBereken(geladen, koppelingLees(dir), nu));
+}
 async function kind(opdracht, invoer, dir) {
   if (opdracht === 'stand') return kindStand(dir);
   if (opdracht === 'signalen') return kindSignalen(invoer, dir);
@@ -854,6 +1048,7 @@ async function kind(opdracht, invoer, dir) {
   if (opdracht === 'persoon') return kindPersoon(invoer, dir);
   if (opdracht === 'koppel') return kindKoppel(invoer, dir);
   if (opdracht === 'instel') return kindInstel(invoer, dir);
+  if (opdracht === 'vault') return kindVault(invoer, dir);
   if (opdracht === 'ronde') return kindLees(invoer, dir, false);
   if (opdracht === 'peil') return kindLees(invoer, dir, true);
   if (opdracht !== 'wissel' && opdracht !== 'ververs' && opdracht !== 'intrek') throw new NmbrsFout('opdracht', 'opdracht: wissel, ververs, intrek, ronde, peil, stand, signalen, gemeld, persoon, koppel, instel');
@@ -891,4 +1086,4 @@ if (require.main === module) {
 }
 
 module.exports = { SCOPES, REDIRECT, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodSchrijf, noodWis, doodLees, doodZet, verzoekToets, kies, scopesExact,
-  sha, xmlBoom, journaalRegels, signalenBereken, periodeStart, NmbrsFout };
+  sha, xmlBoom, journaalRegels, signalenBereken, periodeStart, NmbrsFout, vaultBereken, blokZet, vaultPadGoed, BLOK_BEGIN, BLOK_EIND };

@@ -314,6 +314,7 @@ jobs:
           t test/bankluis-poort.sh
           t test/bank-ronde.sh
           t test/nmbrs-data.sh   # wv2797: Nmbrs REST — witte lijst verzoeken en velden, scopes exact (+ intrekken), state eenmalig, rotatie vóór gebruik, noodkopie, slot, journaal, signalen S1–S6 (S4 maand- en uurloon), kruisproef veldfilter
+          t test/nmbrs-vault.sh   # wv2799: blok "Stand in Nmbrs" in dossiers + urenverloop per entiteit; geen bedrag in de vault (kruisproef), alleen gekoppelde bestaande pagina's
           t test/tibber-data.sh   # wv2625: Tibber Data API — witte lijst, scopes exact, state eenmalig, rotatie vóór gebruik, noodkopie, slot, veldfilter, log zonder code/state
           # wv1225: de drie bankluis-toetsen ook op vaste momenten (toets én elk bank-lezer.js-kind op dezelfde klok): 00:30 NL met de UTC-datum
           # nog op gisteren, 1-1 00:30 NL (jaarwissel), na de zomertijdwissel, en op dag 1–9 van een maand

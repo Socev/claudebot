@@ -25241,6 +25241,29 @@ async function nmbrsSignalenNa() {
   await nmbrsKind('gemeld', { sleutels: nieuw.slice(0, 25).map(function (x) { return x.sleutel; }) });
   return { ok: true, nieuw: Math.min(nieuw.length, 25), over: Math.max(0, nieuw.length - 25) };
 }
+// wv2799: na een geslaagde ronde de blokken "Stand in Nmbrs" in de gekoppelde dossiers en de urenverloop-tabellen per entiteit
+// bijwerken. Alleen bestaande pagina's onder 10_Zakelijk uit koppeling.json; nooit een pagina aanmaken of buiten het blok schrijven;
+// een urenverloop-pagina alleen als de markeringen er al staan. Ongewijzigd (afgezien van de standdatum) = niet schrijven.
+async function nmbrsVaultNa(droog) {
+  const s = await nmbrsKind('vault', {});
+  if (!s.j || s.j.ok !== true) return { ok: false, fout: s.j && s.j.fout ? String(s.j.fout).slice(0, 120) : 'vault-kind faalde' };
+  const uit = { ok: true, droog: !!droog, gekoppeld: s.j.gekoppeld || 0, ongekoppeld: s.j.ongekoppeld || 0, dossiers: 0, verloop: 0, gelijk: 0, ontbreekt: 0, geweigerd: 0, fout: 0 };
+  const zet = function (rel, blok, invoegen, soort) {
+    // geen bedrag in de vault (David 8-11-2026: schaal, trede, uren); het kind zet er geen in, dit is de tweede grendel
+    if (!nmbrsData.vaultPadGoed(rel) || typeof blok !== 'string' || blok.length > 200000 || /€|\bEUR\b|\bbruto\b|salarisbedrag|uurloon/i.test(blok)) { uit.geweigerd++; return; }
+    const p = path.join(VAULT, rel);
+    try {
+      let veranderd = false;
+      if (droog) veranderd = nmbrsData.blokZet(VV().lees(p), blok, invoegen) != null;
+      else VV().wijzig(p, function (t) { const n = nmbrsData.blokZet(t, blok, invoegen); if (n != null) veranderd = true; return n; });
+      if (veranderd) uit[soort]++; else uit.gelijk++;
+    } catch (e) { if (e && e.code === 'ENOENT') uit.ontbreekt++; else { uit.fout++; logError('nmbrs-vault', e); } }
+  };
+  (Array.isArray(s.j.dossiers) ? s.j.dossiers : []).slice(0, 500).forEach(function (x) { zet(x && x.pad, x && x.blok, true, 'dossiers'); });
+  (Array.isArray(s.j.verloop) ? s.j.verloop : []).slice(0, 20).forEach(function (x) { zet(x && x.pad, x && x.blok, false, 'verloop'); });
+  schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'vault', droog: droog ? 1 : undefined, dossiers: uit.dossiers, verloop: uit.verloop, gelijk: uit.gelijk, ontbreekt: uit.ontbreekt, geweigerd: uit.geweigerd, fout: uit.fout, ongekoppeld: uit.ongekoppeld }));
+  return uit;
+}
 async function nmbrsRondeDraai(opdracht, bron) {
   if (!nmbrsData) return { ok: false, fout: 'nmbrs-data.js zit niet in deze release' };
   if (nmbrsRondeBezig) return { ok: false, reden: 'bezig', fout: 'er loopt al een Nmbrs-ronde' };
@@ -25259,6 +25282,8 @@ async function nmbrsRondeDraai(opdracht, bron) {
     if (u.ok === true) {
       try { const s = await nmbrsSignalenNa(); u.signalen_nieuw = s.nieuw || 0; schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'signalen', ok: s.ok, nieuw: s.nieuw || 0 })); }
       catch (e) { logError('nmbrs-signalen', e); }
+      try { const v = await nmbrsVaultNa(false); u.vault = { ok: v.ok, dossiers: v.dossiers, verloop: v.verloop, gelijk: v.gelijk, ontbreekt: v.ontbreekt, fout: v.fout }; }   // wv2799
+      catch (e) { logError('nmbrs-vault', e); }
     }
     return u;
   } finally { nmbrsRondeBezig = false; }
@@ -25302,6 +25327,11 @@ async function nmbrsSmal(d, wie) {
     schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'persoon', treffers: s.j && s.j.treffers ? s.j.treffers.length : (s.j && s.j.meerdere ? 'meerdere' : 0) }));
     return { status: s.j && s.j.ok ? 200 : 400, j: s.j || { ok: false } };
   }
+  if (opdracht === 'vault') {   // wv2799: dossierblokken + urenverloop nu bijwerken (droog: true = alleen tellen)
+    if (nmbrsRondeBezig) return { status: 409, j: { ok: false, fout: 'er loopt een Nmbrs-ronde' } };
+    const v = await nmbrsVaultNa(d.droog === true);
+    return { status: v.ok ? 200 : 500, j: v };
+  }
   if (opdracht === 'koppel' || opdracht === 'instel') {
     const s = await nmbrsKind(opdracht, opdracht === 'koppel' ? { bedrijf: d.bedrijf, entiteit: d.entiteit, door: 'machinekamer' } : { signalen_aan: d.signalen_aan });
     schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: opdracht, ok: !!(s.j && s.j.ok) }));
@@ -25322,7 +25352,7 @@ async function nmbrsSmal(d, wie) {
       return { status: 200, j: { ok: ok === tokens.length, tokens: tokens.length, ingetrokken: ok } };
     } finally { nmbrsData.slotLos(NMBRS_DIR); }
   }
-  return { status: 400, j: { ok: false, fout: 'opdracht: link, ronde, peil, stand, signalen, persoon, koppel, instel, intrek' } };
+  return { status: 400, j: { ok: false, fout: 'opdracht: link, ronde, peil, stand, signalen, persoon, koppel, instel, intrek, vault' } };
 }
 function nmbrsTerug(req, res) {
   const kaal404 = function () { res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('niet gevonden'); };
