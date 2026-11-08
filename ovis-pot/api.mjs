@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot 8a29a87c0c4e4a837217abb5054f1a5a186e230a (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot a0e1771eee5a87f244bbbdc44dccdf8f51e7ef75 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
@@ -648,6 +648,16 @@ export async function schrijfJaarronde(db          , route        , b        , w
         log(db, wie, "instelling", "pot_jan_feb", oud.length ? "gewijzigd" : "nieuw", oud[0]?.waarde ?? null, String(f))]);
       return { ok: true };
     }
+    case "notadag": {   // wanneer de maandnota's van een entiteit komen (wv2795): 1 = de 1e van de maand zelf, 2–28 = die dag van de maand ervoor
+      const e = keuze(b.entiteit, "entiteit", ENT);
+      const dag = getal(b.dag, "dag", { min: K.NOTADAG.min, max: K.NOTADAG.max }) ;
+      if (!Number.isInteger(dag)) throw new Fout(400, `dag = ${K.NOTADAG.min}–${K.NOTADAG.max}`);
+      const oud = await rijen                    (db, "select waarde from instelling where sleutel=?", `notadag_${e}`);
+      await db.batch([db.prepare("insert into instelling (sleutel, waarde, opmerking) values (?,?,?) on conflict(sleutel) do update set waarde=excluded.waarde")
+        .bind(`notadag_${e}`, String(dag), `${e}: maandnota's ${dag === 1 ? "op de 1e van de maand zelf" : `op de ${dag}e van de maand ervoor`} (wv2795)`),
+        log(db, wie, "instelling", `notadag_${e}`, oud.length ? "gewijzigd" : "nieuw", oud[0]?.waarde ?? null, String(dag))]);
+      return { ok: true };
+    }
     case "verkoopadres": {   // verkoopadres van de entiteit in Exact (elk stuk gaat óók daarheen); leeg = ontbreekt
       const e = keuze(b.entiteit, "entiteit", ENT);
       const a = tekst(b.email, "verkoopadres", { max: 200 }) || "";
@@ -770,19 +780,30 @@ export async function schrijfJaarronde(db          , route        , b        , w
       const J = jaar(b.jaar);
       const m = getal(b.maand, "maand", { min: 1, max: 12 }) ;
       if (!Number.isInteger(m)) throw new Fout(400, "maand = 1–12");
-      const dat = datum(b.datum ?? `${J}-${String(m).padStart(2, "0")}-01`, "notadatum") ;
-      if (dat < (await overnameVanaf(db))) throw new Fout(409, `nota's maakt de app pas vanaf ${await overnameVanaf(db)}; ${J < 2027 ? "2026 vroeg David zelf" : "eerder niet"}`);
-      const verval = datum(b.vervaldag ?? (m === 1 ? plusDag(dat, 14) : `${J}-${String(m).padStart(2, "0")}-15`), "vervaldag") ;
-      if (verval < dat) throw new Fout(400, "vervaldag ligt vóór de notadatum");
+      // welke entiteiten (leeg = alle drie; de pod vraagt per entiteit op haar eigen notadag, wv2795)
+      const alleen = b.entiteiten == null ? [...ENT] : Array.isArray(b.entiteiten) ? b.entiteiten.map((x         ) => keuze(x, "entiteit", ENT)) : (() => { throw new Fout(400, "entiteiten = lijst"); })();
+      // notadatum: opgegeven, anders volgens de notadag van de entiteit (standaard de 25e van de maand ervoor; januari de 1e); vervaldag: opgegeven,
+      // anders de 15e en minstens 14 dagen na de notadatum (wv2795)
+      const instRij = await rijen                                     (db, "select sleutel, waarde from instelling where sleutel = 'notadag' or sleutel in ('notadag_POT', 'notadag_KM', 'notadag_SLOEL')");
+      const vanaf = await overnameVanaf(db);
+      const datumVan                         = {}, vervalVan                         = {};
+      for (const e of alleen) {
+        const dat = datum(b.datum ?? K.notaDatumVoor(J, m, K.notaDag(instRij, e)), "notadatum") ;
+        if (dat < vanaf) throw new Fout(409, `nota's maakt de app pas vanaf ${vanaf}; ${J < 2027 ? "2026 vroeg David zelf" : "eerder niet"}`);
+        const verval = datum(b.vervaldag ?? K.vervaldagVoor(J, m, dat), "vervaldag") ;
+        if (verval < dat) throw new Fout(400, "vervaldag ligt vóór de notadatum");
+        datumVan[e] = dat; vervalVan[e] = verval;
+      }
       const d = await planInvoer(db, J);
       // alle onverrekende tegoeden (afrekeningsnota's 'u krijgt terug'), ongeacht het jaar (Codex M2)
       const tegoeden = await rijen(db, "select id, entiteit, praktijk_id, nummer, bedrag, verrekend, datum from nota where soort='afrekening' and status='definitief' and bedrag<0 and -bedrag-verrekend>0.004");
       const st         = [];
       const gemaakt           = [];
       const token = `aanvraag:${crypto.randomUUID()}`;   // koppelt invoegen, neveneffecten en controle aan deze aanvraag (Codex r3 M1)
-      for (const e of ENT) {
+      for (const e of alleen) {
         const plan = (d.jaarplannen                             ).find((p) => p.entiteit === e && p.status === "vastgesteld");
         if (!plan) continue;
+        const dat = datumVan[e], verval = vervalVan[e];
         const grond = JSON.parse(String(plan.grondslag));
         const nummers = (await rijen                    (db, "select nummer from nota where entiteit=?", e)).map((x) => x.nummer);
         for (const r of (d.regels                             ).filter((x) => x.jaarplan_id === plan.id)) {
@@ -795,8 +816,10 @@ export async function schrijfJaarronde(db          , route        , b        , w
           const voor = bijdrage + buf + corr.reduce((s, c) => s + Number(c.bedrag), 0);
           const verr = K.verrekenTegoeden(teg, voor);
           if (Math.abs(voor) < 0.005 && !verr.length) continue;
-          const deb = K.debiteurOp(d.versies         , pid, dat);
-          if (!deb) throw new Fout(409, `geen praktijkgegevens (debiteur) voor ${pid} op ${dat}: vul eerst een praktijkversie in`);
+          // de houder van de maand zelf (R10: overname op of vóór de 15e → nieuwe houder), ook als de nota eerder komt (de 25e ervoor, wv2795)
+          const peil = K.debiteurPeil(J, m);
+          const deb = K.debiteurOp(d.versies         , pid, peil);
+          if (!deb) throw new Fout(409, `geen praktijkgegevens (debiteur) voor ${pid} op ${peil}: vul eerst een praktijkversie in`);
           const nummer = K.volgendNummer(nummers, J);
           nummers.push(nummer);
           const n = K.maakMaandNota({ entiteit: e, jaar: J, maand: m, praktijk_id: pid, nummer, datum: dat, vervaldag: verval, debiteur: deb, bijdrage, buffer: buf,

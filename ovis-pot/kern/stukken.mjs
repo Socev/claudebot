@@ -1,5 +1,5 @@
 // OVIS POT — stukken: pdf (nota's, overzichten) en Excel (.xlsx), zonder bibliotheken, zonder netwerk of klok.
-// Dezelfde code in de browser (downloaden), de Functions en de pod (concepten op de 1e, fase 3): één opmaak per entiteit.
+// Dezelfde code in de browser (downloaden), de Functions en de pod (concepten op de notadag, fase 3): één opmaak per entiteit.
 // Woorden (David 8-11-2026): POT/KM = BIJDRAGENOTA, SLOEL = NOTA DOORBELASTE HUUR; nooit "factuur", geen btw-regel; bedragen
 // zonder min-teken ("af € x", "u krijgt € x terug").
 import { euro, entiteitNaam, notaTitel, controleerStukTekst, uitkomstInWoorden, rond2 } from "./pot-kern.mjs";
@@ -98,7 +98,7 @@ export function notaPdf({ nota, afzender }) {
   y = 610;
   d.tekst(L, y, nota.titel || notaTitel(nota.entiteit), { maat: 16, vet: true });
   y -= 24;
-  const kv = [["Nummer (betalingskenmerk)", String(nota.nummer)], ["Datum", datumNl(nota.datum)], ["Te betalen vóór", datumNl(nota.vervaldag)], ["Periode", nota.periode || ""]];
+  const kv = [["Nummer (betalingskenmerk)", String(nota.nummer)], ["Datum", datumNl(nota.datum)], [rond2(nota.bedrag) < 0 ? "Vervaldag" : "Uiterlijk bijgeschreven", datumNl(nota.vervaldag)], ["Periode", nota.periode || ""]];
   for (const [k, v] of kv) { if (!v) continue; d.tekst(L, y, k, { maat: 9 }); d.tekst(L + 150, y, v, { maat: 9, vet: true }); y -= 13; }
   y -= 12;
   d.vlak(L - 4, y - 4, R - L + 8, 16);
@@ -123,7 +123,7 @@ export function notaPdf({ nota, afzender }) {
   y -= 6;
   const betaal = totaal < 0
     ? "Dit bedrag wordt verrekend met uw volgende nota."
-    : `Graag vóór ${datumNl(nota.vervaldag)} overmaken naar ${afzender.iban || "(IBAN)"} t.n.v. ${afzender.naam_document || afzender.naam}, onder vermelding van ${nota.nummer}.`;
+    : `Graag na binnenkomst meteen inboeken en overmaken naar ${afzender.iban || "(IBAN)"} t.n.v. ${afzender.naam_document || afzender.naam}, onder vermelding van ${nota.nummer}, zodat het bedrag uiterlijk ${datumNl(nota.vervaldag)} bijgeschreven is.`;
   y = d.alinea(L, y, betaal, R - L, { maat: 9 });
   if (nota.entiteit !== "SLOEL") {
     y -= 4;

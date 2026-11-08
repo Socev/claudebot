@@ -1,4 +1,4 @@
--- GEGENEREERD uit Socev/ovis-pot 8a29a87c0c4e4a837217abb5054f1a5a186e230a: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql, migrations/0007_jan_feb.sql, migrations/0008_historie_blind.sql, migrations/0009_subsidie_totaal.sql
+-- GEGENEREERD uit Socev/ovis-pot a0e1771eee5a87f244bbbdc44dccdf8f51e7ef75: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql, migrations/0007_jan_feb.sql, migrations/0008_historie_blind.sql, migrations/0009_subsidie_totaal.sql, migrations/0010_notadag_25.sql
 -- OVIS POT — migratie 0001: de POT-tabellen zoals ze in D1 `fin` stonden (kolommen en ids gelijk), zodat de pod-modules
 -- (pot-datahub.js, pot-verzend.js) bij het overstapmoment alleen een andere database krijgen. Gegenereerd uit fin.sqlite_master op 8-11-2026.
 -- Geen gegevens in deze repo; de inhoud komt met scripts/kopieer-uit-fin.py.
@@ -572,3 +572,10 @@ CREATE TABLE subsidie_totaal (
   ingevoerd_op TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
   PRIMARY KEY (jaar, soort)
 );
+
+-- wv2795 (David 8-11-2026): de maandnota's niet meer op de 1e maar bijtijds, de 25e van de maand ervoor, met het verzoek ze na binnenkomst meteen in te
+-- boeken zodat het bedrag de 15e binnen is. notadag = de dag voor alle drie (1 = de 1e van de maand zelf, 2–28 = die dag van de maand ervoor);
+-- per entiteit kan notadag_<E> (scherm Nota's) ervan afwijken. Januari blijft de januari-ronde.
+update instelling set waarde = '25', opmerking = 'maandnota''s als concept op deze dag van de maand ervoor (1 = de 1e van de maand zelf); per entiteit notadag_<E>; januari = januari-ronde (wv2795)' where sleutel = 'notadag';
+insert or ignore into instelling (sleutel, waarde, opmerking) values ('notadag', '25', 'maandnota''s als concept op deze dag van de maand ervoor (1 = de 1e van de maand zelf); per entiteit notadag_<E>; januari = januari-ronde (wv2795)');
+update instelling set opmerking = 'de pod maakt op de notadag vanaf dit uur (Nederlandse tijd) de nota''s van de volgende maand en zet de concepten klaar (wv2795)' where sleutel = 'maandronde_uur';

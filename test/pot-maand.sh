@@ -42,6 +42,7 @@ const M = require(path.resolve('pot-maand.js'));
     insert into kostenmutatie (kostencomponent_id, geldig_van, bedrag, reden) values (1,'2020-01-01',12000,'x'),(2,'2020-01-01',3000,'x'),(3,'2020-01-01',24000,'x');
     update instelling set waarde='${J}-01-01' where sleutel='overname_vragen';
     update instelling set waarde='00:00' where sleutel='maandronde_uur';
+    update instelling set waarde='1' where sleutel='notadag';
     update instelling set waarde='2020-01-01T00:00:00Z' where sleutel='overstap_fin';`);
   const A = M.d1Achtig(d1), Z = new URLSearchParams();
   for (const e of ['POT', 'KM', 'SLOEL']) { const r = await B.api.behandel(A, 'POST', 'jaarplan', Z, { entiteit: e, jaar: J, reden: 'proef' }, 'proef'); if (r.status !== 200) console.log('jaarplan', e, r.body); }
@@ -183,6 +184,43 @@ const M = require(path.resolve('pot-maand.js'));
   const nN = db.prepare('select count(*) n from nota').get().n;
   u = await M.ronde(io, {});
   toets('vóór overname_vragen: geen nota\'s gemaakt', db.prepare('select count(*) n from nota').get().n === nN && !u.notas_gemaakt);
+  // ── notadag (wv2795): de 25e van de maand ervoor, met een vaste klok (D1 'now' vervangen); per entiteit; inhalen; januari nooit ──
+  {
+    const inst0 = { overname_vragen: `${J}-01-01`, maandronde_uur: '06:00', notadag: '25' };
+    const N = (ymd, hm = '07:00') => ({ ymd, hm, iso: `${ymd}T05:00:00Z`, jaar: Number(ymd.slice(0, 4)), maand: Number(ymd.slice(5, 7)), dag: Number(ymd.slice(8, 10)) });
+    const td = (ymd, inst = inst0, hm) => M.maandTeDoen(B, N(ymd, hm), inst).map((x) => `${x.entiteit} ${x.periode} ${x.notadatum}`).join(', ');
+    toets('notadag: 24 januari niets (januari = januari-ronde), 25 januari februari voor alle drie', td(`${J}-01-24`) === '' && td(`${J}-01-25`) === `POT ${J}-02 ${J}-01-25, KM ${J}-02 ${J}-01-25, SLOEL ${J}-02 ${J}-01-25`, [td(`${J}-01-24`), td(`${J}-01-25`)]);
+    toets('notadag: vóór maandronde_uur niets', td(`${J}-01-25`, inst0, '05:59') === '');
+    toets('notadag: december op 25 november; nooit januari van het nieuwe jaar', td(`${J}-11-25`).includes(`POT ${J}-12 ${J}-11-25`) && !td(`${J}-12-27`).includes(`${J + 1}-01`), td(`${J}-12-27`));
+    toets('notadag: februari klaar → op 3 februari niets meer; niet klaar → ingehaald', td(`${J}-02-03`, { ...inst0, [`maandronde_${J}-02_POT`]: '{"klaar":true}', [`maandronde_${J}-02_KM`]: '{"klaar":true}', [`maandronde_${J}-02_SLOEL`]: '{"klaar":true}' }) === '' && td(`${J}-02-03`).split(', ').length === 3);
+    toets('notadag: oude stand maandronde_JJJJ-MM met klaar telt voor alle drie', td(`${J}-02-03`, { ...inst0, [`maandronde_${J}-02`]: '{"klaar":true}' }) === '');
+    toets('notadag per entiteit: SLOEL op de 1e, rest de 25e', td(`${J}-02-26`, { ...inst0, notadag_SLOEL: '1' }) === `POT ${J}-02 ${J}-01-25, KM ${J}-02 ${J}-01-25, SLOEL ${J}-02 ${J}-02-01, POT ${J}-03 ${J}-02-25, KM ${J}-03 ${J}-02-25`, td(`${J}-02-26`, { ...inst0, notadag_SLOEL: '1' }));
+    toets('notadag: vóór overname_vragen niets', td(`${J}-01-25`, { ...inst0, overname_vragen: `${J}-02-01` }) === '');
+    // van begin tot eind met een vaste klok: 25 mei → de nota's van juni, gedateerd 25 mei, vervaldag 15 juni, mail "juni", kaart tot 29 mei
+    db.exec(`update instelling set waarde='${J}-01-01' where sleutel='overname_vragen'; update instelling set waarde='25' where sleutel='notadag'; delete from instelling where sleutel like 'maandronde_20%';
+      insert into instelling (sleutel, waarde) values ('maandronde_${J}-05_POT','{"klaar":true}'),('maandronde_${J}-05_KM','{"klaar":true}'),('maandronde_${J}-05_SLOEL','{"klaar":true}');
+      update mail_concept set status='verzonden' where status not in ('verzonden')`);
+    const klok = `${J}-05-25T05:00:00Z`;   // 07:00 Nederlandse tijd
+    const d1k = async (batch) => d1(batch.map((x) => (/^select strftime\('%Y-%m-%dT%H:%M:%SZ','now'\) as nu$/.test(x.sql) ? { sql: `select '${klok}' as nu`, params: [] } : x)));
+    const io2 = Object.assign({}, io, { d1: d1k });
+    const g0 = gmail.length;
+    const u5 = await M.ronde(io2, { kaarten: true });
+    const jun = db.prepare(`select entiteit, praktijk_id, datum, vervaldag, json_extract(regels,'$[0].omschrijving') oms from nota where periode='${J}-06' and status<>'vervallen' order by entiteit, praktijk_id`).all();
+    toets('25 mei: 6 nota\'s van juni, gedateerd 25 mei, vervaldag 15 juni', jun.length === 6 && u5.notas_gemaakt === 6 && jun.every((x) => x.datum === `${J}-05-25` && x.vervaldag === `${J}-06-15`), [jun, u5.notas]);
+    toets('25 mei: omschrijving "Bijdrage juni" / "Doorbelaste huur juni"', jun.every((x) => new RegExp(`(Bijdrage|Doorbelaste huur) juni ${J}`).test(x.oms)), jun.map((x) => x.oms));
+    toets('25 mei: geen nota\'s van mei (al klaar) en niets van juli', db.prepare(`select count(*) n from nota where periode in ('${J}-05','${J}-07') and status<>'vervallen' and datum='${J}-05-25'`).get().n === 0);
+    const st = db.prepare("select sleutel, waarde from instelling where sleutel like 'maandronde_%-06_%' order by sleutel").all();
+    toets('25 mei: stand per entiteit maandronde_JJJJ-06_<E> klaar', st.length === 3 && st.every((x) => JSON.parse(x.waarde).klaar === true), st);
+    const nieuw = gmail.slice(g0).filter((g) => /^POH-GGZ/.test(g.onderwerp));
+    toets('25 mei: mail aan de praktijk heet "POH-GGZ juni …" en vraagt om meteen inboeken (de 15e)', nieuw.length >= 1 && nieuw.every((g) => g.onderwerp.startsWith(`POH-GGZ juni ${J}:`) && /meteen inboeken/.test(g.bericht) && /uiterlijk 15 juni/.test(g.bericht)), nieuw.map((g) => g.onderwerp));
+    const pdfT = nieuw.length ? execFileSync('/usr/bin/pdftotext', ['-q', '-', '-'], { input: nieuw[0].pdfs[0], encoding: 'utf8' }) : '';
+    toets('25 mei: op de nota "Uiterlijk bijgeschreven" 15-06 en de inboekzin, geen factuur', /Uiterlijk bijgeschreven/.test(pdfT) && /meteen inboeken/.test(pdfT) && !/factu/i.test(pdfT), pdfT.slice(0, 300));
+    toets('kaartKlaar: deadline vier dagen na de notadatum (25-11 → 29-11)', M.kaartKlaar(`${J}-11-25`, [{ id: 1 }], [], 'x', []).deadline === `${J}-11-29`);
+    const n6 = db.prepare('select count(*) n from nota').get().n;
+    await M.ronde(io2, {});
+    toets('25 mei tweede tik: niets dubbel', db.prepare('select count(*) n from nota').get().n === n6);
+    db.exec(`update instelling set waarde='1' where sleutel='notadag'`);
+  }
   // ── de module verstuurt nooit: alleen concept- en zoekaanroepen ──
   const bron2 = fs.readFileSync('pot-maand.js', 'utf8');
   const code = bron2.replace(/\/\/.*|\/\*[\s\S]*?\*\//g, '').replace(/'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/g, "''");

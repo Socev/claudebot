@@ -1,16 +1,16 @@
 'use strict';
 /*
  * pot-maand.js — OVIS POT maandronde (wv2762, 8-11-2026). Ontwerp: vault "01_Ontwikkeling/OVIS POT op pot.socev.dev (ontwerp 8-11-2026).md"
- * § 5 (elke 1e), § 6 (bank, betaalstatus, nota's), § 9 (één rekenkern voor app en pod).
+ * § 5 (de notadag: sinds wv2795 de 25e van de maand ervoor), § 6 (bank, betaalstatus, nota's), § 9 (één rekenkern voor app en pod).
  *
  * WAAROM. David 8-11-2026: de POT-afhandeling moet "gemakkelijk, alles gericht op orde en overzicht"; vanaf 1-1-2027 neemt de app het vragen
- * over (besluit 8-11 15:48). Elke 1e maakt de pod de nota's van de maand uit het vastgestelde jaarplan en zet per praktijk één Gmail-concept
+ * over (besluit 8-11 15:48). Op de notadag (standaard de 25e) maakt de pod de nota's van de volgende maand uit het vastgestelde jaarplan en zet per praktijk één Gmail-concept
  * met alle stukken van die dag klaar (9 in plaats van 26); elk stuk gaat óók als concept naar het verkoopadres van de entiteit in Exact
  * (David 8-11 16:19). Een herinnering voor een open nota zet hij klaar als David erom vraagt in de app. ALLES CONCEPT: grondwet regel 1;
  * de SLOEL-verzenduitzondering (pot-verzend.js) wordt hier niet gebruikt.
  *
  * HOE. Eén tik (server.js potMaandTik, elke 10 minuten, alleen de primaire pod, schakelaar <POT_MAAND_DIR>/aan):
- *   1 nota's van de maand maken (vanaf instelling.overname_vragen, op/na de 1e vanaf maandronde_uur, niet in januari: die maakt David in de
+ *   1 nota's van de volgende maand maken (vanaf instelling.overname_vragen, op/na de notadag vanaf maandronde_uur, niet januari: die maakt David in de
  *     januari-ronde) met precies de API van de app (bundel ovis-pot/api.mjs, gegenereerd uit Socev/ovis-pot): notas-maken;
  *   2 nieuwe stukken bundelen tot mailregels (D1 mail_concept): per praktijk per notadatum, per entiteit per notadatum voor Exact
  *     (zonder verkoopadres: 'geen_adres', geen gok), herinneringen uit pod_verzoek;
@@ -43,6 +43,8 @@ const dm = (ymd) => { const [, m, d] = String(ymd).slice(0, 10).split('-'); retu
 const MND = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
 const datumWoord = (ymd) => { const [j, m, d] = String(ymd).slice(0, 10).split('-').map(Number); return `${d} ${MND[m - 1]} ${j}`; };
 const kap = (t, n) => { t = String(t || ''); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
+// deadline van de maandkaart: vier dagen na de notadatum (25-1 → 29-1; vroeger de 1e → de 5e)
+const plus4 = (ymd) => new Date(Date.parse(String(ymd).slice(0, 10) + 'T12:00:00Z') + 4 * 864e5).toISOString().slice(0, 10);
 const korteHash = (s) => crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 8);
 const plat = (s) => String(s || '').replace(/[\u00a0\u202f\u2009]/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -93,32 +95,58 @@ async function zoekInGmail(io, rij, vanaf) {
 }
 
 // ── 1. nota's van de maand ───────────────────────────────────────────────────
-async function maandNotas(io, B, nu, inst, uit) {
-  const vanaf = inst.overname_vragen || '2027-01-01';
-  if (nu.ymd < vanaf || nu.maand === 1) return;   // januari: de januari-ronde (David) maakt ze, iets na de 1e
-  if (nu.hm < (inst.maandronde_uur || '06:00')) return;
-  const periode = `${nu.jaar}-${String(nu.maand).padStart(2, '0')}`;
-  const merk = inst['maandronde_' + periode];
-  let vorig = null; try { vorig = merk ? JSON.parse(merk) : null; } catch (e) { vorig = null; }
-  if (vorig && vorig.klaar) return;
-  // niet vaker dan eens per uur opnieuw proberen (bijv. nog geen vastgesteld jaarplan)
-  if (vorig && vorig.op && Date.parse(nu.iso) - Date.parse(vorig.op) < 3600e3) return;
-  const db = d1Achtig(io.d1);
-  const plannen = (await io.d1([{ sql: "select entiteit from jaarplan where jaar=? and status='vastgesteld'", params: [nu.jaar] }]))[0].results.map((x) => x.entiteit);
-  let st;
-  if (!plannen.length) st = { klaar: false, reden: `geen vastgesteld jaarplan ${nu.jaar}`, op: nu.iso };
-  else {
-    const r = await B.api.behandel(db, 'POST', 'notas-maken', new URLSearchParams(), { jaar: nu.jaar, maand: nu.maand }, 'pod maandronde');
-    if (r.status === 200) { st = { klaar: true, gemaakt: (r.body.gemaakt || []).length, op: nu.iso }; uit.notas_gemaakt = st.gemaakt; }
-    else if (r.status === 409 && /bestaan al/.test(String(r.body && r.body.fout))) {
-      // 'niets te maken': bestaan ze echt al voor elke entiteit met een vastgesteld plan?
-      const n = (await io.d1([{ sql: "select count(distinct entiteit) as n from nota where soort='maand' and periode=? and bron='ovis-pot' and status<>'vervallen'", params: [periode] }]))[0].results[0];
-      st = Number(n && n.n) >= plannen.length ? { klaar: true, gemaakt: 0, op: nu.iso } : { klaar: false, reden: String(r.body.fout).slice(0, 200), op: nu.iso };
-    } else st = { klaar: false, reden: String((r.body && r.body.fout) || 'http ' + r.status).slice(0, 200), op: nu.iso };
+// Sinds wv2795 (David 8-11-2026) niet meer op de 1e maar op de notadag: standaard de 25e van de maand ervoor (instelling notadag, per entiteit
+// notadag_<E>; 1 = de 1e van de maand zelf), zodat de praktijk de nota kan inboeken en het bedrag de 15e binnen is. Welke (periode, entiteit)
+// aan de beurt is, zegt de rekenkern (maandRondeTeDoen; januari nooit: de januari-ronde). Stand per periode en entiteit in
+// instelling maandronde_<JJJJ-MM>_<E>; een oude stand maandronde_<JJJJ-MM> met klaar telt voor alle drie.
+const ENTS = ['POT', 'KM', 'SLOEL'];
+function rondeStand(inst, periode, e) {
+  for (const k of ['maandronde_' + periode + '_' + e, 'maandronde_' + periode]) {
+    if (!inst[k]) continue;
+    try { const v = JSON.parse(inst[k]); if (v && (v.klaar || k.endsWith('_' + e))) return v; } catch (e2) { /* stuk: opnieuw */ }
   }
-  if (!st.klaar) uit.fouten.push('notas');
-  uit.notas = st;
-  await io.d1([{ sql: "insert into instelling (sleutel, waarde, opmerking) values (?, ?, 'maandronde van de pod (wv2762): klaar of de reden') on conflict(sleutel) do update set waarde=excluded.waarde", params: ['maandronde_' + periode, JSON.stringify(st)] }]);
+  return null;
+}
+/** Wat er op dit moment aan de beurt is (puur; ook voor de toets): lijst {jaar, maand, periode, entiteit, notadatum}. */
+function maandTeDoen(B, nu, inst) {
+  const vanaf = inst.overname_vragen || '2027-01-01';
+  if (nu.ymd < vanaf || nu.hm < (inst.maandronde_uur || '06:00')) return [];
+  const dagen = Object.fromEntries(ENTS.map((e) => [e, B.K.notaDag(inst, e)]));
+  return B.K.maandRondeTeDoen(nu.ymd, dagen).filter((x) => x.notadatum >= vanaf && !(rondeStand(inst, x.periode, x.entiteit) || {}).klaar);
+}
+async function maandNotas(io, B, nu, inst, uit) {
+  const teDoen = maandTeDoen(B, nu, inst);
+  if (!teDoen.length) return;
+  const db = d1Achtig(io.d1);
+  const perP = new Map();
+  for (const x of teDoen) { if (!perP.has(x.periode)) perP.set(x.periode, []); perP.get(x.periode).push(x); }
+  const standen = {};
+  for (const [periode, lijst] of [...perP.entries()].sort()) {
+    // niet vaker dan eens per uur opnieuw proberen (bijv. nog geen vastgesteld jaarplan)
+    const nuOk = lijst.filter((x) => { const v = rondeStand(inst, periode, x.entiteit); return !(v && v.op && Date.parse(nu.iso) - Date.parse(v.op) < 3600e3); });
+    if (!nuOk.length) continue;
+    const J = nuOk[0].jaar, M = nuOk[0].maand;
+    const plannen = (await io.d1([{ sql: "select entiteit from jaarplan where jaar=? and status='vastgesteld'", params: [J] }]))[0].results.map((x) => x.entiteit);
+    const met = nuOk.filter((x) => plannen.includes(x.entiteit)).map((x) => x.entiteit);
+    for (const x of nuOk) if (!plannen.includes(x.entiteit)) standen[periode + '_' + x.entiteit] = { klaar: false, reden: `geen vastgesteld jaarplan ${J}`, op: nu.iso };
+    if (!met.length) continue;
+    // notadatum = vandaag (op tijd = de notadag zelf; later = ingehaald, nooit teruggedateerd); vervaldag en debiteur bepaalt de API
+    const r = await B.api.behandel(db, 'POST', 'notas-maken', new URLSearchParams(), { jaar: J, maand: M, datum: nu.ymd, entiteiten: met }, 'pod maandronde');
+    if (r.status === 200) {
+      const gem = r.body.gemaakt || [];
+      for (const e of met) standen[periode + '_' + e] = { klaar: true, gemaakt: gem.filter((g) => String(g).startsWith(e + ' ')).length, datum: nu.ymd, op: nu.iso };
+      uit.notas_gemaakt += gem.length;
+    } else if (r.status === 409 && /bestaan al/.test(String(r.body && r.body.fout))) {
+      // 'niets te maken': bestaan ze echt al voor elke entiteit met een vastgesteld plan?
+      const n = (await io.d1([{ sql: "select entiteit, count(*) as n from nota where soort='maand' and periode=? and bron='ovis-pot' and status<>'vervallen' group by entiteit", params: [periode] }]))[0].results;
+      for (const e of met) standen[periode + '_' + e] = n.some((x) => x.entiteit === e && Number(x.n) > 0) ? { klaar: true, gemaakt: 0, op: nu.iso } : { klaar: false, reden: String(r.body.fout).slice(0, 200), op: nu.iso };
+    } else for (const e of met) standen[periode + '_' + e] = { klaar: false, reden: String((r.body && r.body.fout) || 'http ' + r.status).slice(0, 200), op: nu.iso };
+  }
+  const sl = Object.keys(standen);
+  if (!sl.length) return;
+  if (sl.some((k) => !standen[k].klaar)) uit.fouten.push('notas');
+  uit.notas = standen;
+  await io.d1(sl.map((k) => ({ sql: "insert into instelling (sleutel, waarde, opmerking) values (?, ?, 'maandronde van de pod (wv2762/wv2795): klaar of de reden, per periode en entiteit') on conflict(sleutel) do update set waarde=excluded.waarde", params: ['maandronde_' + k, JSON.stringify(standen[k])] })));
 }
 
 // ── 2. bundelen tot mailregels ───────────────────────────────────────────────
@@ -284,7 +312,7 @@ function kaartGrens(p) { return Object.assign(p, { titel: kap(p.titel, 90), waar
 function kaartKlaar(datum, rijen, open, nuKort, bewaking) {
   const n = rijen.length;
   bewaking = bewaking || [];
-  return kaartGrens({ sleutel: `ovis-pot-maand-${datum}`, soort: 'doen', volgorde: 25, deadline: datum.slice(0, 8) + '05', waar: 'overal', prive: true, duur_min: 2 + n,
+  return kaartGrens({ sleutel: `ovis-pot-maand-${datum}`, soort: 'doen', volgorde: 25, deadline: plus4(datum), waar: 'overal', prive: true, duur_min: 2 + n,
     titel: `OVIS POT — ${n} concept${n > 1 ? 'en' : ''} van ${dm(datum)} versturen`,
     herkomst: { handmatig: 'pot-maand', datum: datum, ...POT_DOEL },
     waarom: `Socev maakte de stukken van ${datumWoord(datum)} (bijdragen POT en Kostenmaatschap, doorbelaste huur SLOEL) en zette per praktijk één mail met de pdf's als concept in Gmail, aan het vastgezette mailadres van de praktijk uit de Second Brain. Iedereen betaalt op de 15e. Versturen doe je zelf.` +
@@ -387,7 +415,7 @@ async function ronde(io, o) {
   if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(String(nuD1))) throw new Error('D1 gaf geen tijd');
   const nu = Object.assign({ iso: nuD1 }, amsterdam(nuD1));
   const nuKort = `${dm(nu.ymd)} ${nu.hm}`;
-  const inst = Object.fromEntries((await io.d1([{ sql: "select sleutel, waarde from instelling where sleutel in ('overname_vragen','maandronde_uur','ondertekening','verkoopadres_exact_POT','verkoopadres_exact_KM','verkoopadres_exact_SLOEL') or sleutel like 'maandronde_20%'", params: [] }]))[0].results.map((x) => [x.sleutel, x.waarde]));
+  const inst = Object.fromEntries((await io.d1([{ sql: "select sleutel, waarde from instelling where sleutel in ('overname_vragen','maandronde_uur','ondertekening','verkoopadres_exact_POT','verkoopadres_exact_KM','verkoopadres_exact_SLOEL','notadag','notadag_POT','notadag_KM','notadag_SLOEL') or sleutel like 'maandronde_20%'", params: [] }]))[0].results.map((x) => [x.sleutel, x.waarde]));
   const zet = async (id, velden, vanStatus) => {
     const k = Object.keys(velden);
     const r = await io.d1([{ sql: `update mail_concept set ${k.map((x) => x + '=?').join(', ')}, bijgewerkt_op=${D1_NU} where id=? and status=?`, params: [...k.map((x) => velden[x]), id, vanStatus] }]);
@@ -431,4 +459,4 @@ async function ronde(io, o) {
   return uit;
 }
 
-module.exports = { ronde, d1Achtig, amsterdam, pdfHoortBij, bestandsnaam, zoekInGmail, kaartKlaar, kaartProbleem, afzenderVan, bewakingNieuw, GRENS, VAN };
+module.exports = { ronde, d1Achtig, amsterdam, maandTeDoen, rondeStand, pdfHoortBij, bestandsnaam, zoekInGmail, kaartKlaar, kaartProbleem, afzenderVan, bewakingNieuw, GRENS, VAN };

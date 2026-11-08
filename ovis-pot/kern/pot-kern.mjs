@@ -395,6 +395,53 @@ export function laatsteDag(jaar, m) {
 }
 export const MAANDEN = ["januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"];
 
+// ---------- moment van de maandnota's (wv2795) ----------
+/**
+ * David 8-11-2026: "de facturen niet per se de 1e van de maand versturen, maar misschien zelfs nog wat eerder, bijv. de 25e van de maand
+ * ervoor", met het verzoek de nota na binnenkomst meteen in te boeken, zodat het bedrag de 15e binnen is. Per entiteit instelbaar
+ * (instelling notadag_<E>, anders notadag voor alle drie): 1 = de 1e van de maand zelf (de oude werkwijze), 2–28 = die dag van de maand ervoor. Standaard de 25e.
+ * Januari hoort niet bij de maandronde: die nota's maakt David in de januari-ronde (nooit in het oude jaar).
+ */
+export const NOTADAG = { standaard: 25, min: 1, max: 28 };
+/** De ingestelde notadag van een entiteit (instelling als lijst {sleutel, waarde} of als object sleutel → waarde). */
+export function notaDag(instelling, entiteit) {
+  const lees = (k) => (Array.isArray(instelling) ? instelling.find((i) => i && i.sleutel === k)?.waarde : instelling?.[k]);
+  const geldig = (w) => { const d = Number(w); return w != null && w !== "" && Number.isInteger(d) && d >= NOTADAG.min && d <= NOTADAG.max ? d : null; };
+  // eigen dag van de entiteit, anders de algemene (instelling notadag, sinds migratie 0010 de 25e), anders de 25e
+  return geldig(lees(`notadag_${entiteit}`)) ?? geldig(lees("notadag")) ?? NOTADAG.standaard;
+}
+/** De notadatum van de maandnota van (jaar, maand) bij notadag `dag`; januari altijd 1 januari van dat jaar (de januari-ronde). */
+export function notaDatumVoor(jaar, maand, dag) {
+  if (maand === 1 || dag === 1) return `${jaar}-${p2(maand)}-01`;
+  return `${maand === 1 ? jaar - 1 : jaar}-${p2(maand - 1)}-${p2(dag)}`;
+}
+/** Vervaldag van een maandnota: de 15e van de maand zelf, en altijd minstens 14 dagen na de notadatum (januari: 14 dagen). */
+export function vervaldagVoor(jaar, maand, datum) {
+  const min = plusDagen(datum, 14);
+  if (maand === 1) return min;
+  const v = `${jaar}-${p2(maand)}-15`;
+  return v >= min ? v : min;
+}
+/** Peildatum voor de debiteur van een maandnota: de 15e van de maand zelf (R10: een overname op of vóór de 15e → de nieuwe houder), niet de notadatum. */
+export const debiteurPeil = (jaar, maand) => `${jaar}-${p2(maand)}-15`;
+/**
+ * Welke maandnota's zijn op dag `ymd` aan de beurt: per entiteit de lopende en de volgende maand (nooit januari), zodra ymd op of na
+ * de notadatum ligt. De lopende maand blijft op de lijst zolang hij niet klaar is (inhalen als de pod of het jaarplan er op de dag niet was).
+ * @param {string} ymd JJJJ-MM-DD (Nederlandse tijd)  @param {Record<string, number>} dagen notadag per entiteit
+ */
+export function maandRondeTeDoen(ymd, dagen) {
+  const [j, m] = String(ymd).split("-").map(Number);
+  const uit = [];
+  for (const [J, M] of [[j, m], m === 12 ? [j + 1, 1] : [j, m + 1]]) {
+    if (M === 1) continue;
+    for (const [e, dag] of Object.entries(dagen)) {
+      const d = notaDatumVoor(J, M, dag);
+      if (ymd >= d) uit.push({ jaar: J, maand: M, periode: `${J}-${p2(M)}`, entiteit: e, notadatum: d });
+    }
+  }
+  return uit;
+}
+
 // ---------- R5 personeel ----------
 /**
  * Bruto voltijdsalaris uit de cao-tabellen op een datum: de nieuwste tabel (ingang ≤ datum) voor cao+schaal; een trede boven het
@@ -1022,18 +1069,21 @@ export function verdeelAfrekening({ jaar, kosten, alVoldaanOud = 0, alVoldaanNie
 
 const MND_LANG = ["januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"];
 const datumWoorden = (d) => { const [j, m, dd] = String(d).slice(0, 10).split("-").map(Number); return `${dd} ${MND_LANG[m - 1]} ${j}`; };
-const stukRegel = (n) => `- ${entiteitNaam(n.entiteit)}: ${stukNaam(n.entiteit)} ${n.nummer}, ${Number(n.bedrag) < 0 ? `u krijgt ${euro(n.bedrag)} terug` : euro(n.bedrag)}${Number(n.bedrag) > 0 ? ` (graag vóór ${datumWoorden(n.vervaldag || n.datum)})` : ""}`;
+const stukRegel = (n) => `- ${entiteitNaam(n.entiteit)}: ${stukNaam(n.entiteit)} ${n.nummer}, ${Number(n.bedrag) < 0 ? `u krijgt ${euro(n.bedrag)} terug` : euro(n.bedrag)}${Number(n.bedrag) > 0 ? ` (uiterlijk ${datumWoorden(n.vervaldag || n.datum)} bijgeschreven)` : ""}`;
 /**
  * De mail aan een praktijk met de stukken van één notadatum (één mail per praktijk, de nota's als pdf-bijlagen). Concept: David
  * verstuurt. Zelfde woordtoets als de stukken (geen 'factuur', geen btw, geen min-teken).
  */
 export function praktijkMail({ praktijk, datum, notas, ondertekening = "David Schaap" }) {
-  const maand = (() => { const [j, m] = String(datum).split("-").map(Number); return `${MND_LANG[m - 1]} ${j}`; })();
-  const alleenMaand = notas.every((n) => n.soort === "maand");
+  // de maand van de stukken zelf (periode), niet van de notadatum: de nota's van februari komen op 25 januari (wv2795)
+  const perioden = [...new Set(notas.map((n) => String(n.periode || "")))];
+  const alleenMaand = notas.every((n) => n.soort === "maand") && perioden.length === 1 && /^\d{4}-\d\d$/.test(perioden[0]);
+  const maand = alleenMaand ? (() => { const [j, m] = perioden[0].split("-").map(Number); return `${MND_LANG[m - 1]} ${j}`; })() : "";
   const onderwerp = alleenMaand ? `POH-GGZ ${maand}: bijdragen en doorbelaste huur — ${praktijk}` : `POH-GGZ: stukken van ${datumWoorden(datum)} — ${praktijk}`;
   const bedragen = notas.map(stukRegel).join("\n");
   const bericht = `Beste collega's,\n\nIn de bijlage de stukken van ${alleenMaand ? maand : datumWoorden(datum)} voor de POH-GGZ:\n\n${bedragen}\n\n` +
     `Het nummer van elk stuk is ook het betalingskenmerk; graag per stuk overmaken naar de rekening die erop staat. ` +
+    `Willen jullie de stukken na binnenkomst meteen inboeken, zodat elk bedrag uiterlijk op de genoemde datum bijgeschreven is? Zelf bedragen overnemen uit een lijst is niet meer nodig. ` +
     `Het gaat om bijdragen in de gezamenlijke kosten (POT en Kostenmaatschap) en om doorbelaste huur (SLOEL).\n\nMet vriendelijke groet,\n${ondertekening}`;
   const fouten = controleerStukTekst(onderwerp + "\n" + bericht);
   if (fouten.length) throw new Error(`mailtekst geweigerd: ${fouten.join(", ")}`);
