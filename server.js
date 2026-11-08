@@ -13290,7 +13290,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/mail/zaken' || /^GET \/app\/mail\/zaken\/(jij|socev|weg|afgedaan|zien)\/[1-9]\d?$/.test(route)) return typeof appMailZaken === 'function' ? appMailZaken(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mail');   // wv2218: Apps › Mail (zaakregister, alleen lezen); wv2291: groep zien
         if (route === 'GET /app/werkstroom' || route.indexOf('GET /app/werkstroom/') === 0) return typeof appWerkstroom === 'function' ? appWerkstroom(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'werkstroom');   // wv2002: Werkstroom (alleen lezen)
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
-        if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk' || route === 'POST /app/intake/geschiedenis' || route === 'POST /app/intake/verwijder') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
+        if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk' || route === 'POST /app/intake/geschiedenis' || route === 'POST /app/intake/verwijder' || route === 'POST /app/intake/bundel') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
         if (route === 'GET /app/brain/entiteiten' || route.indexOf('GET /app/brain/entiteit/') === 0 || route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
@@ -17667,6 +17667,12 @@ async function appIntakeRouter(req, res, a, s, d, route) {
       if (!rolPrimair()) return appWeiger(res, 503, 'niet de actieve kant', 'intake-verwijder niet primair');
       if (typeof ir.verwijderMag !== 'function') return appWeiger(res, 404, 'Verwijderen zit niet in deze versie van de pod', 'intake-verwijder');
       r = await intakeVerwijderVraag(ir, d || {}, 'app:' + String(appStudioCtx(a, s).apparaat || '').slice(0, 40));
+    }
+    else if (route === 'POST /app/intake/bundel') {   // wv2710 (stap 6): één keuze voor een bundel; de router toetst elk stuk opnieuw
+      if (!rolPrimair()) return appWeiger(res, 503, 'niet de actieve kant', 'intake-bundel niet primair');
+      if (typeof ir.appBundel !== 'function') return appWeiger(res, 404, 'Bundels zitten niet in deze versie van de pod', 'intake-bundel');
+      r = await ir.appBundel(d || {}, 'app:' + String(appStudioCtx(a, s).apparaat || '').slice(0, 40));
+      if (r.status === 200) res._app.reden = 'intake-bundel ' + String(r.j && r.j.uitkomst || '').slice(0, 10) + ' ' + String(r.j && r.j.n || 0);
     }
     else if (route === 'POST /app/intake/keuze') {
       if (!rolPrimair()) return appWeiger(res, 503, 'niet de actieve kant', 'intake-keuze niet primair');
