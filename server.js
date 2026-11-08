@@ -3919,6 +3919,7 @@ function handleRequest(req, res) {
       kalender: typeof kalenderInfo === 'function' ? kalenderInfo() : { aan: false },   // wv2333: OVIS Calendar in de app (laatste lijst: aantal, duur; geen titels)
       shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
       osint: typeof osintInfo === 'function' ? osintInfo() : { aan: false },   // wv2694: OVIS OSINT (osint.py in deze release? venv of systeem-python; geen zoektermen)
+      ah_bonnen: typeof ahInfo === 'function' ? ahInfo() : { module: false },   // wv2703: AH-kassabonnen (gekoppeld, laatste ronde; geen token)
       pakjes: typeof pakjesInfo === 'function' ? pakjesInfo() : { aan: false },   // wv2593: OVIS Pakjes (aantallen, laatste ronde; geen codes, winkels of postcodes)
       memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
       ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
@@ -5194,6 +5195,7 @@ APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David
 APP_GLIJD_ROUTES.add('POST /app/financien/rekening');   // wv2292: Bewerk in Saldi = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/stroom');   // wv2596: stroom kiezen = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/doel');   // wv2621: doel erbij of weg = David die werkt
+['POST /app/financien/ah/koppel', 'POST /app/financien/ah/ontkoppel'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2703: AH koppelen = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -13255,6 +13257,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/financien/boekingen') return appFinBoekingen(req, res, a, d);   // wv2596: de boekingen achter een getal
         if (route === 'POST /app/financien/stroom') return appFinStroom(req, res, a, d);   // wv2596: stroom per tegenpartij kiezen
         if (route === 'POST /app/financien/doel') return appFinDoel(req, res, a, d);   // wv2621: doel erbij of weg (vaultpagina Doelen)
+        if (route === 'GET /app/financien/ah' || route === 'POST /app/financien/ah/koppel' || route === 'POST /app/financien/ah/ontkoppel') return typeof appFinAh === 'function' ? appFinAh(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ah');   // wv2703: AH-kassabonnen
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
         if (route.indexOf('GET /app/pot/') === 0) return typeof appPot === 'function' ? appPot(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1894: OVIS POT (P1: lezen)
         if (route.indexOf('POST /app/pot/') === 0) return typeof appPotSchrijf === 'function' ? appPotSchrijf(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1933: OVIS POT (P3/P4: schrijven en verzending)
@@ -22397,7 +22400,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, 'bandjes/voorstel': 30, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, ah: 20, 'bandjes/voorstel': 30, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata']);   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -22610,6 +22613,7 @@ async function smalActie(actie, d, wie) {
   }
   if (actie === 'bank') return bankSmal(d);   // wv680: alleen-lezen bankluis (zie bankSmal)
   if (actie === 'tibber') return tibberSmal(d, wie);   // wv2625: Tibber Data API, alleen API_SECRET (zie tibberSmal)
+  if (actie === 'ah') return typeof ahSmal === 'function' ? ahSmal(d, wie) : { status: 404, j: { ok: false, fout: 'niet in deze release' } };   // wv2703: AH-kassabonnen (stand, ronde), alleen API_SECRET
   if (actie === 'health-opgaven') return healthOpgaven();   // wv887: de body doet niet mee, het commando ligt vast
   // wv743: voorstel van Socev in het bandjesregister (skill bandjes); de pod schrijft, de skill nooit zelf (Fable #5)
   // wv820: kaart van de Verkenner (research-scout) in de Harvester; de pod controleert en schrijft (Fable wv820 #8)
@@ -23423,6 +23427,7 @@ function bankRondeStart() {
       try { tibberNaBankRonde(); } catch (e) { logError('tibber-ronde', e); }   // wv2625: Tibber-laadhistorie, los, alleen de ochtendronde
       try { stroomTabelNaBankRonde(); } catch (e) { logError('stroom-tabel', e); }   // wv2704: stroomtabel op de energiepagina, één keer per dag
       try { tibberUurNaBankRonde(); } catch (e) { logError('tibber-uur', e); }   // wv2707: Tibber-uurverbruik bij, één keer per dag
+      try { if (typeof ahNaBankRonde === 'function') ahNaBankRonde(); } catch (e) { logError('ah-ronde', e); }   // wv2703: AH-kassabonnen, één keer per dag
     });
   return { status: 202, j: { ok: true, gestart: true, begin: begin } };
 }
@@ -24479,6 +24484,149 @@ function tibberUurNaBankRonde() {
   tibberUurDraai('bank-ronde').catch(function (e) { logError('tibber-uur', e); });
 }
 // ── einde Tibber ──
+// ── wv2703: AH-kassabonnen in Financiën (alleen lezen) ────────────────────────────────────────────────────────────────────────────
+// WAAROM. David 8-11-2026: "boodschappen (uitsplitsing? Kunnen we lijstjes van AH verzamelen met wat we kopen?)"; Ja op koppelen met zijn
+// eigen AH-inlog (8-11 08:00). Ontwerp: vault 01_Ontwikkeling/OVIS Financiën 8+ (ontwerp 7-11-2026).md § 10 (review Codex, MOET 1-3 verwerkt).
+// HOE. ah-bonnen.js doet het netwerk (alleen api.ah.nl: token ruilen/verversen + twee vaste GraphQL-queries) en de opslag (AH_DIR/ah.sqlite).
+// Hier: de kluis (Management-API, zelfde route als Tibber; naam ah_refresh, de pod schrijft hem zelf), de routes van de app (zelfde poort als
+// GET /app/financien: privé, niet op een pc met vaste plek), /smal/ah voor de machinekamer en de dagelijkse ronde na de ochtend-bankronde.
+// De geplakte terugsprong (met de code) komt nooit in een log of antwoord. Lui geladen, geen top-level verwijzingen naar latere consts.
+const AH_DIR = typeof serverPad === 'function' ? serverPad('ah_dir', process.env.AH_DIR, '/opt/data/ah', serverProefDeel('ah')) : (process.env.AH_DIR || '/opt/data/ah');
+let ahMod;   // undefined = nog niet geprobeerd, null = niet in deze release
+let ahRondeBezig = false;
+function ahM() {
+  if (ahMod !== undefined) return ahMod;
+  ahMod = null;
+  try { const p = path.join(__dirname, 'ah-bonnen.js'); if (fs.existsSync(p)) ahMod = require(p); } catch (e) { logError('ah-bonnen', e); }
+  return ahMod;
+}
+async function ahKluisLees() {
+  const rijen = await tibberMgmt("select decrypted_secret as w from vault.decrypted_secrets where name = 'ah_refresh'");
+  return { refresh: rijen.length === 1 ? String(rijen[0].w || '').trim() : '' };
+}
+async function ahKluisZet(waarde) {
+  if (typeof waarde !== 'string' || !/^[A-Za-z0-9._~+\/=-]{16,4096}$/.test(waarde)) throw new Error('token heeft een onverwachte vorm');
+  return ahKluisSchrijf(waarde, true);
+}
+// Ontkoppelen: de regel blijft bestaan (geen DELETE, kluisregel nooit los weghalen), de waarde wordt een markering zonder tokenvorm.
+async function ahKluisLeeg() { const n = (await tibberMgmt("select count(*)::int as n from vault.secrets where name = 'ah_refresh'"))[0]; if (n && n.n === 0) return null; return ahKluisSchrijf('ontkoppeld', false); }
+async function ahKluisSchrijf(waarde, aanmaken) {
+  const n = (await tibberMgmt("select count(*)::int as n from vault.secrets where name = 'ah_refresh'"))[0];
+  if (!n || (n.n !== 0 && n.n !== 1)) throw new Error('kluis: ah_refresh niet eenduidig');
+  if (n.n === 0 && !aanmaken) return null;
+  const q = n.n === 1 ? "select count(*)::int as n from (select vault.update_secret(id, $ah$" + waarde + "$ah$) from vault.secrets where name = 'ah_refresh') x"
+    : "select count(*)::int as n from (select vault.create_secret($ah$" + waarde + "$ah$, 'ah_refresh', 'Albert Heijn (app-inlog David) refresh token; pod schrijft zelf, alleen lezen kassabonnen (wv2703)')) x";
+  const z = (await tibberMgmt(q))[0];
+  if (!z || z.n !== 1) throw new Error('kluis: niet precies één regel geschreven');
+  const t = (await tibberMgmt("select encode(sha256(convert_to(decrypted_secret, 'UTF8')), 'hex') as h from vault.decrypted_secrets where name = 'ah_refresh'"))[0];
+  return t && typeof t.h === 'string' ? t.h : null;
+}
+function ahDeps() { return { dir: AH_DIR, kluisLees: ahKluisLees, kluisZet: ahKluisZet, kluisLeeg: ahKluisLeeg }; }
+// Eén box-rij per reden per dag; tekst van de pod zelf (geen token, code of bonnummer).
+function ahBoxRij(reden, tekst) {
+  try {
+    const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), kenmerk = 'ah-bonnen-' + reden + '-' + dag;
+    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    if (VV().lees(pad).indexOf(kenmerk) >= 0) return;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const voorstel = reden === 'grant' ? 'AH weigert de sleutel (verlopen of ingetrokken). David opnieuw laten koppelen: Financiën › Uitgaven › Boodschappen › Koppel AH (Voor jou-kaart met de inlogstappen). Niet herhalen tot hij opnieuw koppelde.'
+      : reden === 'kluis' ? 'het nieuwe AH-token staat als noodkopie in AH_DIR/refresh.nood (600); de volgende ronde zet hem eerst in de kluis. Kluis (Management-API) nagaan; daarna `POST /smal/ah {opdracht: ronde}`.'
+      : 'de AH-app-backend gaf iets onverwachts (onofficiële API; kan veranderd zijn). api.log `ah-bonnen` en `/smal/ah {opdracht: stand}` nalopen; queries in ah-bonnen.js.';
+    ovisBoxRij('\n## [direct] ' + tijd + ' — AH-kassabonnen: ' + String(tekst || reden).replace(/[\r\n]+/g, ' ').slice(0, 90) + ' (pod, automatisch) #fin-beinvloedbaar\n' +
+      '- status: open\n- van: pod ah-ronde (server.js, wv2703; hooguit 1× per dag per reden; kenmerk ' + kenmerk + ')\n' +
+      '- gevolg als er niets gebeurt: geen nieuwe kassabonnen in Financiën; wat er al staat blijft.\n- voorstel: ' + voorstel + '\n');
+  } catch (e) { logError('ah-box', e); }
+}
+async function ahRondeDraai(bron) {
+  const A = ahM();
+  if (!A) return { ok: false, fout: 'ah-bonnen.js zit niet in deze release' };
+  if (ahRondeBezig) return { ok: false, reden: 'bezig' };
+  ahRondeBezig = true;
+  try {
+    const u = await A.ronde(ahDeps());
+    if (u.reden !== 'bezig' && u.reden !== 'niet-gekoppeld') A.laatsteZet(AH_DIR, u);
+    schrijfLog(nu() + ' ah-bonnen ' + velden({ bron: bron, ok: u.ok === true, reden: u.reden || '', nieuw: u.bonnen_nieuw, paginas: u.paginas, bonnen: u.bonnen, achterstand: u.achterstand || undefined,
+      geroteerd: u.geroteerd || undefined, nood: u.nood || undefined }));
+    if (u.ok !== true && ['grant', 'vorm', 'api', 'token'].indexOf(u.reden) >= 0) ahBoxRij(u.reden === 'grant' ? 'grant' : 'api', u.reden === 'grant' ? 'AH weigert de koppeling' : 'ophalen lukte niet (' + u.reden + ')');
+    else if (u.nood) ahBoxRij('kluis', 'kluis niet bijgewerkt na een nieuwe sleutel');
+    return u;
+  } finally { ahRondeBezig = false; }
+}
+// Na de ochtend-bankronde, één keer per dag vóór 12:00, alleen de primaire kant; zonder koppeling stil.
+function ahNaBankRonde() {
+  const A = ahM();
+  if (!A || !rolPrimair() || !A.gekoppeldLokaal(AH_DIR)) return;
+  const nl = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const s = A.staatLees(AH_DIR), vorige = s.laatste && s.laatste.tijd ? new Date(s.laatste.tijd).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }) : null;
+  if (Number(nl.slice(11, 13)) >= 12 || vorige === nl.slice(0, 10)) return;
+  ahRondeDraai('bank-ronde').catch(function (e) { logError('ah-ronde', e); });
+}
+// AH-afschrijvingen uit het bankarchief (alleen lezen), voor de koppeling bon ↔ bankpost.
+function ahBankPosten(van) {
+  let db = null;
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    db = new DatabaseSync(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite'), { readOnly: true });
+    const B = require(path.join(__dirname, 'financien-bijsturen.js'));
+    return db.prepare("SELECT t.nr, t.datum, t.bedrag, t.tegenpartij, t.omschrijving FROM transacties t JOIN rekeningen r ON r.rek = t.rek WHERE t.status IN ('booked', 'pending')" +
+      " AND lower(coalesce(r.eigenaar, '')) NOT IN ('extern', 'pot') AND t.bedrag < 0 AND (t.valuta IS NULL OR t.valuta = 'EUR') AND t.datum >= ?").all(van)
+      .filter(function (t) { return B.winkel(t) === 'Albert Heijn'; }).map(function (t) { return { nr: t.nr, datum: String(t.datum).slice(0, 10), bedrag: t.bedrag }; });
+  } catch (e) { logError('ah-bank', new Error('bankarchief niet te lezen')); return null; }
+  finally { try { if (db) db.close(); } catch (e) {} }
+}
+function ahTwaalf() {   // laatste 12 maanden incl. de lopende (bonnen zijn per dag; de app zegt "laatste 12 maanden")
+  const nl = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  let j = Number(nl.slice(0, 4)), m = Number(nl.slice(5, 7));
+  const l = [];
+  for (let i = 0; i < 12; i++) { l.unshift(j + '-' + String(m).padStart(2, '0')); m--; if (m === 0) { m = 12; j--; } }
+  return l;
+}
+const AH_KOPPEL_PER_UUR = 10;
+async function appFinAh(req, res, a, d, route) {
+  res._app.reden = 'financien-ah';
+  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'financien vast');
+  const A = ahM();
+  if (!A) return appWeiger(res, 404, 'de AH-koppeling zit nog niet in deze versie van de pod', 'ah ontbreekt');
+  if (route === 'GET /app/financien/ah') {
+    const twaalf = ahTwaalf();
+    const bank = ahBankPosten(twaalf[0] + '-01');
+    let o;
+    try { o = A.overzicht(AH_DIR, bank || [], { twaalf: twaalf }); } catch (e) { logError('ah-overzicht', e); return appWeiger(res, 503, 'de kassabonnen zijn nu niet te lezen', 'ah overzicht'); }
+    o.bank_leesbaar = !!bank; o.bezig = ahRondeBezig;
+    return appStuur(res, 200, Object.assign({ ok: true }, o));
+  }
+  if (!rolPrimair()) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'ah reserve');
+  if (route === 'POST /app/financien/ah/koppel') {
+    if (!appTeller('ah-koppel', AH_KOPPEL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak geprobeerd dit uur', 'grens ah-koppel');
+    if (typeof d.tekst !== 'string' || d.tekst.length > 6000) return appWeiger(res, 400, 'plak de regel die met appie://login-exit begint', 'ah tekst');
+    const u = await A.koppel(ahDeps(), d.tekst);
+    schrijfLog(nu() + ' ah-bonnen ' + velden({ opdracht: 'koppel', ok: u.ok === true, reden: u.reden || '', nood: u.nood || undefined }));
+    if (u.ok !== true) return appStuur(res, 200, { ok: false, gekoppeld: false, fout: u.fout || 'koppelen lukte niet' });
+    if (u.nood) ahBoxRij('kluis', 'gekoppeld, kluis nog niet bijgewerkt');
+    setTimeout(function () { ahRondeDraai('koppel').catch(function (e) { logError('ah-ronde', e); }); }, 1000);   // eerste ronde (alles terug) meteen, los van dit antwoord
+    return appStuur(res, 200, { ok: true, gekoppeld: true, melding: 'Gekoppeld. Socev haalt nu je kassabonnen op; dat kan een paar minuten duren.' });
+  }
+  if (route === 'POST /app/financien/ah/ontkoppel') {
+    if (!appTeller('ah-koppel', AH_KOPPEL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ah-koppel');
+    const u = await A.ontkoppel(ahDeps());
+    schrijfLog(nu() + ' ah-bonnen ' + velden({ opdracht: 'ontkoppel', ok: u.ok === true }));
+    return appStuur(res, 200, { ok: true, gekoppeld: false, melding: u.ok ? 'Ontkoppeld. De bonnen die er al zijn blijven staan.' : 'Ontkoppeld; de kluis wordt bij de volgende ronde leeggemaakt.' });
+  }
+  return appWeiger(res, 404, 'onbekend', 'ah route');
+}
+async function ahSmal(d, wie) {
+  if (!wie || !wie.mk) return { status: 403, j: { ok: false, fout: 'ah alleen vanuit de machinekamer (API_SECRET)' } };
+  const A = ahM();
+  if (!A) return { status: 404, j: { ok: false, fout: 'ah-bonnen.js zit niet in deze release' } };
+  const opdracht = String(d.opdracht || '');
+  if (opdracht === 'ronde') { if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'reservekant' } }; const u = await ahRondeDraai('machinekamer'); return { status: u.reden === 'bezig' ? 409 : 200, j: u }; }
+  if (opdracht === 'stand') { const s = A.staatLees(AH_DIR); const o = A.overzicht(AH_DIR, [], { twaalf: ahTwaalf() });
+    return { status: 200, j: { ok: true, gekoppeld: o.gekoppeld, dood: o.dood, achterstand: o.achterstand, laatste: s.laatste || null, bonnen: o.bonnen, oudste: o.oudste || null, nieuwste: o.nieuwste || null,
+      nood: fs.existsSync(path.join(AH_DIR, 'refresh.nood')), bezig: ahRondeBezig } }; }
+  return { status: 400, j: { ok: false, fout: 'opdracht: stand, ronde' } };
+}
+function ahInfo() { const A = ahM(); if (!A) return { module: false }; const s = A.staatLees(AH_DIR); return { module: true, gekoppeld: A.gekoppeldLokaal(AH_DIR), dood: !!s.dood, laatste: s.laatste ? { tijd: s.laatste.tijd, ok: s.laatste.ok, bonnen: s.laatste.bonnen } : null }; }
+// ── einde AH-kassabonnen ──
 
 // (wv921: dit blok stond binnen de bankluis-sectie; daardoor faalden de bank-toetsen die die sectie in een vm laden op setInterval —
 //  CI #225–#227. Verplaatst, inhoud ongewijzigd.)

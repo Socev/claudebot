@@ -322,6 +322,7 @@ jobs:
           t test/financien-bijsturen.sh   # wv2700: Financiën › Uitgaven "Zelf bij te sturen" (boodschappen, uit eten, stroom, streaming, abonnementen)
           t test/stroom-tabel.sh   # wv2704: stroomtabel op de energiepagina vanzelf bij uit de Tibber-factuur
           t test/tibber-uur.sh   # wv2707: Tibber-uurverbruik dagelijks bij — alleen leesqueries, kluis alleen tibber_lezen, kind zonder andere sleutels, gevuld uur blijft
+          t test/ah-bonnen.sh   # wv2703: AH-kassabonnen (koppelen, ronde, ontkoppelen, unieke bankkoppeling)
           t test/financien-vooruit.sh   # wv2621: Financiën 8+ — Vooruit (prognose reproduceerbaar uit de kalender), Doelen (pagina), maandbrief (stilte als normaal)
           t test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
