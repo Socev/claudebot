@@ -173,6 +173,8 @@ function ingress() {
     { hostname: BANK, path: '^/bank/terug$', service: 'http://localhost:8080' },
     // Tibber Data API (wv2625): terugkeer na Davids toestemming; zelfde soort deur (alleen GET met bekende, onverbruikte state, anders 404)
     { hostname: BANK, path: '^/tibber/terug$', service: 'http://localhost:8080' },
+    // Nmbrs (wv2797): terugkeer na Davids toestemming; zelfde soort deur (alleen GET met bekende, onverbruikte state, anders 404)
+    { hostname: BANK, path: '^/nmbrs/terug$', service: 'http://localhost:8080' },
     { hostname: BANK, service: 'http_status:404' },
     // Facturen-ingang (wv856): alleen /fac/<kleine letters, cijfers, / en ->, en alleen met het Access-bewijs van fac-pod.
     { hostname: FAC_POD, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
@@ -464,15 +466,18 @@ async function toetsBank(n404) {
   const regel = function (goed, wat, r, extra) { if (!goed) fout++; console.log((goed ? 'GROEN ' : 'ROOD  ') + wat + '  [' + extra + ' -> ' + r.status + (r.location ? ' ' + r.location.slice(0, 50) : '') + ']'); };
   const neppe = '/bank/terug?code=x&state=' + 'a'.repeat(48);
   const neppeTb = '/tibber/terug?code=x&state=' + 'a'.repeat(64);   // wv2625
+  const neppeNm = '/nmbrs/terug?code=x&state=' + 'a'.repeat(64);   // wv2797
   for (const [m, p, wat] of [['GET', '/', 'bank / dicht'], ['GET', '/health', 'bank /health dicht'], ['GET', '/health/publiek', 'bank /health/publiek dicht'],
     ['GET', '/bank/terug', 'terugkeer zonder state 404'], ['GET', neppe, 'terugkeer met onbekende state 404'], ['POST', neppe, 'POST op terugkeer 404'],
     ['GET', '/bank/terug/x', 'subpad dicht'], ['GET', '/app/sessie', 'app-pad niet via bank'], ['GET', '/sleutels', 'sleutelportaal niet via bank'], ['POST', '/smal/bank', 'smalle route niet via bank'],
     ['GET', '/tibber/terug', 'tibber-terugkeer zonder state 404'], ['GET', neppeTb, 'tibber-terugkeer met onbekende state 404'], ['POST', neppeTb, 'POST op tibber-terugkeer 404'],
-    ['GET', '/tibber/terug/x', 'tibber-subpad dicht'], ['POST', '/smal/tibber', 'smalle tibber-route niet via bank']]) {
+    ['GET', '/tibber/terug/x', 'tibber-subpad dicht'], ['POST', '/smal/tibber', 'smalle tibber-route niet via bank'],
+    ['GET', '/nmbrs/terug', 'nmbrs-terugkeer zonder state 404'], ['GET', neppeNm, 'nmbrs-terugkeer met onbekende state 404'], ['POST', neppeNm, 'POST op nmbrs-terugkeer 404'],
+    ['GET', '/nmbrs/terug/x', 'nmbrs-subpad dicht'], ['POST', '/smal/nmbrs', 'smalle nmbrs-route niet via bank']]) {
     const r = await http(m, 'https://' + BANK + p);
     regel(n404(r), wat, r, m + ' ' + p.slice(0, 40));
   }
-  for (const p of ['/bank/terug/../health', '/bank/terug/%2e%2e/health', '/bank/%2e%2e/sleutels', '/BANK/terug', '/tibber/terug/../health', '/tibber/%2e%2e/sleutels', '/TIBBER/terug']) {
+  for (const p of ['/bank/terug/../health', '/bank/terug/%2e%2e/health', '/bank/%2e%2e/sleutels', '/BANK/terug', '/tibber/terug/../health', '/tibber/%2e%2e/sleutels', '/TIBBER/terug', '/nmbrs/terug/../health', '/nmbrs/%2e%2e/sleutels', '/NMBRS/terug']) {
     const r = await rauw('GET', BANK, p);
     regel(r.status === 404 || r.status === 400, 'bank padtruc dicht', r, 'GET ' + p);
   }

@@ -123,6 +123,16 @@ jobs:
           if echo "$C" | grep -nE "roep\('(PUT|PATCH|DELETE)'"; then echo "::error::tibber-data.js schrijft naar Tibber"; exit 1; fi
           if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' | grep -vE '^(test/|tibber-data\.js$)' | xargs grep -nE "data-api\.tibber\.com" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een ander bestand dan tibber-data.js roept de Tibber Data API aan"; exit 1; fi
           echo "tibber-data.js: alleen lezen."
+          # nmbrs-data.js (wv2797): Nmbrs REST alleen lezen. Eén fetch, altijd achter verzoekToets, redirects uit; POST alleen token/revocation;
+          # geen eigen netwerk- of procesmodule; geen schrijvende methode; geen ander bestand (tests uitgezonderd) roept api.nmbrsapp.com aan;
+          # verboden endpoints (BSN, adres, bank, gezin, verzuim, loonstroken) staan niet op de witte lijst.
+          N=$(grep -vE '^\s*(\*|//)' nmbrs-data.js)
+          if [ "$(echo "$N" | grep -cE "\bfetch\s*\(")" != "1" ] || ! echo "$N" | grep -qE "const doel = verzoekToets\(methode, url\);" || ! echo "$N" | grep -qE "redirect: 'error'"; then echo "::error::nmbrs-data.js: fetch buiten roep(), zonder verzoekToets of met redirects"; exit 1; fi
+          if echo "$N" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|import\(|process\.binding"; then echo "::error::nmbrs-data.js laadt een netwerk- of procesmodule"; exit 1; fi
+          if echo "$N" | grep -nE "roep\('(PUT|PATCH|DELETE)'"; then echo "::error::nmbrs-data.js schrijft naar Nmbrs"; exit 1; fi
+          if echo "$N" | grep -nE "\['\^/api/.*(privateInfos|personalinfo|addresses|bankaccounts|children|partner|absences|payslip|documents/folders|wagetax|svw)"; then echo "::error::nmbrs-data.js: verboden endpoint op de witte lijst"; exit 1; fi
+          if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' | grep -vE '^(test/|nmbrs-data\.js$)' | xargs grep -nE "api\.nmbrsapp\.com|identityservice\.nmbrs\.com" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een ander bestand dan nmbrs-data.js roept Nmbrs aan"; exit 1; fi
+          echo "nmbrs-data.js: alleen lezen."
           # tibber-uur.js (wv2707): oude GraphQL-API alleen lezen. Eén fetch (POST op /v1-beta/gql), geen netwerk- of procesmodule, geen schrijvende query.
           U=$(grep -vE '^\s*(\*|//)' tibber-uur.js)
           if echo "$U" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|import\(|process\.binding"; then echo "::error::tibber-uur.js laadt een netwerk- of procesmodule"; exit 1; fi
@@ -303,6 +313,7 @@ jobs:
           t test/bank-lezer.sh
           t test/bankluis-poort.sh
           t test/bank-ronde.sh
+          t test/nmbrs-data.sh   # wv2797: Nmbrs REST — witte lijst verzoeken en velden, scopes exact (+ intrekken), state eenmalig, rotatie vóór gebruik, noodkopie, slot, journaal, signalen S1–S6 (S4 maand- en uurloon), kruisproef veldfilter
           t test/tibber-data.sh   # wv2625: Tibber Data API — witte lijst, scopes exact, state eenmalig, rotatie vóór gebruik, noodkopie, slot, veldfilter, log zonder code/state
           # wv1225: de drie bankluis-toetsen ook op vaste momenten (toets én elk bank-lezer.js-kind op dezelfde klok): 00:30 NL met de UTC-datum
           # nog op gisteren, 1-1 00:30 NL (jaarwissel), na de zomertijdwissel, en op dag 1–9 van een maand

@@ -4130,6 +4130,7 @@ function handleRequest(req, res) {
       bunqluis: fs.existsSync(path.join(__dirname, 'bunq-lezer.js')) && fs.existsSync(path.join(BANK_DIR, 'bunq', 'staat.json')),   // wv683
       bankarchief: fs.existsSync(path.join(__dirname, 'bank-archief.js')),   // wv687: transactiedatabase in deze release
       tibber_data: tibberInfo(),   // wv2625: Tibber Data API (module in de release?, laatste ronde, noodkopie; geen tokens)
+      nmbrs: nmbrsInfo(),   // wv2797: Nmbrs (module in de release?, laatste ronde in aantallen, noodkopie, dood; geen tokens of namen)
       bankarchief_fout: bankArchiefFoutLaatst ? bankArchiefFoutLaatst.tijd : null,   // wv687: laatste schrijffout (tekst in api.log en de box)
       bank_verrijk_ai: bankVerrijkStand(true),   // wv740: stand van de AI-indeling (alleen aantallen en tijden); peilen hoeft niet meer via /smal/bank
       elevenlabs: elevenCreditsInfo(),   // wv2751: credits van Davids ElevenLabs-bundel (gebruikt/limiet/over, rem bij 5 %)
@@ -14628,6 +14629,7 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'agentrapport-david', 'stiltewachter-david',   // wv300: eigen bron per kanaal (agentrapport en stiltewachter dienen ook de machinekamer)
   'droomronde-wachter',   // wv390: Wachter melden van de droomronde (wv299). Bewust NIET 'echt-alarm' (Werkvoorraad-tikker, wv358): dat alarm
                           // meldt juist een pod in een wegwerpmap, waar /bericht 200 geeft in lege data; het blijft op Telegram (§ 4.6).
+  'nmbrs',                // wv2797: nieuwe Nmbrs-signalen (S1–S6, zonder bedragen), gebundeld na de dagronde; machinekamer
   'bank-ronde',           // wv685: één regel in het hoofdkanaal als een banktoestemming verlopen is (AI - Bank-ronde)
   'facturen-bank',        // wv2057: failsafe na het inschieten (betaling niet op de bank, bedrag wijkt af); hoofdkanaal, soort dag
   'doorgeefluik',         // wv1267: regel in de machinekamer als David een opdracht via Socev op de werklijst zette
@@ -22271,6 +22273,7 @@ const server = http.createServer(function (req, res) {
     if (berichtIsPad(req)) return berichtRoute(req, res);   // wv263: bericht aan David (intern, API_SECRET)
     if (bankIsPad(req)) return bankTerug(req, res);   // wv680: terugkeer van de bank na koppelen (bank.socev.dev)
     if (tibberIsPad(req)) return tibberTerug(req, res);   // wv2625: terugkeer van Tibber na toestemming (bank.socev.dev)
+    if (nmbrsIsPad(req)) return nmbrsTerug(req, res);   // wv2797: terugkeer van Nmbrs na toestemming (bank.socev.dev)
     handleRequest(req, res);
   } catch (e) {
     logError('route', e);
@@ -22963,7 +22966,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, ah: 20, 'bandjes/voorstel': 30, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata']);   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -23176,6 +23179,7 @@ async function smalActie(actie, d, wie) {
   }
   if (actie === 'bank') return bankSmal(d);   // wv680: alleen-lezen bankluis (zie bankSmal)
   if (actie === 'tibber') return tibberSmal(d, wie);   // wv2625: Tibber Data API, alleen API_SECRET (zie tibberSmal)
+  if (actie === 'nmbrs') return nmbrsSmal(d, wie);   // wv2797: Nmbrs (salarisadministratie), alleen API_SECRET (zie nmbrsSmal)
   if (actie === 'ah') return typeof ahSmal === 'function' ? ahSmal(d, wie) : { status: 404, j: { ok: false, fout: 'niet in deze release' } };   // wv2703: AH-kassabonnen (stand, ronde), alleen API_SECRET
   if (actie === 'health-opgaven') return healthOpgaven();   // wv887: de body doet niet mee, het commando ligt vast
   // wv743: voorstel van Socev in het bandjesregister (skill bandjes); de pod schrijft, de skill nooit zelf (Fable #5)
@@ -23995,6 +23999,7 @@ function bankRondeStart() {
       try { tibberNaBankRonde(); } catch (e) { logError('tibber-ronde', e); }   // wv2625: Tibber-laadhistorie, los, alleen de ochtendronde
       try { stroomTabelNaBankRonde(); } catch (e) { logError('stroom-tabel', e); }   // wv2704: stroomtabel op de energiepagina, één keer per dag
       try { tibberUurNaBankRonde(); } catch (e) { logError('tibber-uur', e); }   // wv2707: Tibber-uurverbruik bij, één keer per dag
+      try { nmbrsNaBankRonde(); } catch (e) { logError('nmbrs-ronde', e); }   // wv2797: Nmbrs (personeel, contracten, loonruns), één keer per dag
       try { if (typeof ahNaBankRonde === 'function') ahNaBankRonde(); } catch (e) { logError('ah-ronde', e); }   // wv2703: AH-kassabonnen, één keer per dag
     });
   return { status: 202, j: { ok: true, gestart: true, begin: begin } };
@@ -25102,6 +25107,243 @@ function tibberUurNaBankRonde() {
   tibberUurDraai('bank-ronde').catch(function (e) { logError('tibber-uur', e); });
 }
 // ── einde Tibber ──
+// ── wv2797: Nmbrs (salarisadministratie via Aurore), alleen lezen ────────────────────────────────────────────────────────────────
+// WAAROM. David 8-11-2026: Socev moet altijd bij zijn met personeel, contracten, uren, schaal/trede en loonruns uit Nmbrs, en zelf
+// signaleren als contract en salaris niet kloppen. De SOAP-API stopt 1-3-2027: REST + OAuth (ontwerp: vault 01_Ontwikkeling/
+// Nmbrs-koppeling (ontwerp 8-11-2026).md, review Codex verwerkt). HOE. nmbrs-data.js doet het netwerk (kindproces; GET alleen de witte
+// lijst op api.nmbrsapp.com, POST alleen token/revocation op identityservice; geheimen via stdin). Hier: de kluis (Management-API, alleen
+// de vier namen), de terugkeer GET /nmbrs/terug op bank.socev.dev, POST /smal/nmbrs {secret: API_SECRET, opdracht: link|ronde|peil|stand|
+// signalen|persoon|koppel|instel|intrek} en de dagelijkse ronde na de ochtend-bankronde. Signalen S1–S6 rekenen lokaal; nieuwe signalen
+// (alleen die David aanzette, instellingen.json) gaan gebundeld als één bericht naar de machinekamer in de app, zonder bedragen.
+// Kluisregels: nmbrs_client_id, nmbrs_client_secret, nmbrs_subscription_key (David) en nmbrs_refresh (de pod schrijft hem zelf, rotend).
+// De querystring van /nmbrs/terug (code, state) komt nooit in een log. Opslag /opt/data/nmbrs (700), nmbrs.sqlite 600, niet in de vault.
+const NMBRS_DIR = typeof serverPad === 'function' ? serverPad('nmbrs_dir', process.env.NMBRS_DIR, '/opt/data/nmbrs', serverProefDeel('nmbrs')) : (process.env.NMBRS_DIR || '/opt/data/nmbrs');
+const NMBRS_SCRIPT = process.env.NMBRS_SCRIPT || path.join(__dirname, 'nmbrs-data.js');
+const NMBRS_TERUG_PER_UUR = 30;
+const nmbrsTerugTijden = [];
+let nmbrsData = null;
+try { nmbrsData = require(NMBRS_SCRIPT); } catch (e) { nmbrsData = null; }   // niet in deze release: route 404, smal 404
+let nmbrsRondeBezig = false;
+function nmbrsIsPad(req) { return reqPath(req) === '/nmbrs/terug'; }
+async function nmbrsMgmt(query) {
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  if (!m || !pat) throw new Error('kluistoegang ontbreekt op de pod');
+  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST', redirect: 'error',
+    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-nmbrs/1' },
+    body: JSON.stringify({ query: query }), signal: AbortSignal.timeout(20000) });
+  if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }   // het antwoord kan de query citeren
+  const j = await r.json();
+  if (!Array.isArray(j)) throw new Error('kluis gaf geen rijen');
+  return j;
+}
+async function nmbrsKluisLees() {
+  const rijen = await nmbrsMgmt("select name, decrypted_secret as w from vault.decrypted_secrets where name in ('nmbrs_client_id', 'nmbrs_client_secret', 'nmbrs_subscription_key', 'nmbrs_refresh')");
+  const w = { client_id: '', client_secret: '', sub: '', refresh: '' };
+  rijen.forEach(function (x) {
+    if (x && x.name === 'nmbrs_client_id') w.client_id = String(x.w || '').trim();
+    if (x && x.name === 'nmbrs_client_secret') w.client_secret = String(x.w || '').trim();
+    if (x && x.name === 'nmbrs_subscription_key') w.sub = String(x.w || '').trim();
+    if (x && x.name === 'nmbrs_refresh') w.refresh = String(x.w || '').trim();
+  });
+  return w;
+}
+// Aanmaken of bijwerken, daarna teruglezen als sha256. Vorm vooraf getoetst: geen $ of quote, dus het dollar-citaat is dicht.
+async function nmbrsKluisZet(waarde) {
+  if (typeof waarde !== 'string' || !/^[A-Za-z0-9._~+\/=-]{16,4096}$/.test(waarde)) throw new Error('token heeft een onverwachte vorm');
+  const n = (await nmbrsMgmt("select count(*)::int as n from vault.secrets where name = 'nmbrs_refresh'"))[0];
+  if (!n || (n.n !== 0 && n.n !== 1)) throw new Error('kluis: nmbrs_refresh niet eenduidig');
+  const q = n.n === 1 ? "select count(*)::int as n from (select vault.update_secret(id, $nm$" + waarde + "$nm$) from vault.secrets where name = 'nmbrs_refresh') x"
+    : "select count(*)::int as n from (select vault.create_secret($nm$" + waarde + "$nm$, 'nmbrs_refresh', 'Nmbrs REST refresh token; pod schrijft zelf, rotend (wv2797)')) x";
+  const z = (await nmbrsMgmt(q))[0];
+  if (!z || z.n !== 1) throw new Error('kluis: niet precies één regel geschreven');
+  const t = (await nmbrsMgmt("select encode(sha256(convert_to(decrypted_secret, 'UTF8')), 'hex') as h from vault.decrypted_secrets where name = 'nmbrs_refresh'"))[0];
+  return t && typeof t.h === 'string' ? t.h : null;
+}
+function nmbrsEnv() {
+  const e = { NMBRS_DIR: NMBRS_DIR };
+  ['PATH', 'HOME', 'TZ', 'LANG'].forEach(function (k) { if (process.env[k] != null) e[k] = process.env[k]; });
+  ['NMBRS_AUTH_BASIS', 'NMBRS_API_BASIS', 'NMBRS_PAUZE_MS'].forEach(function (k) { if (process.env[k] != null) e[k] = process.env[k]; });   // alleen de toets (127.0.0.1)
+  return e;
+}
+async function nmbrsKind(opdracht, invoer) {
+  const r = await smalKind(process.execPath, ['--no-warnings', NMBRS_SCRIPT, opdracht], JSON.stringify(invoer || {}), opdracht === 'ronde' || opdracht === 'peil' ? 1800000 : 120000, nmbrsEnv());
+  let j = null;
+  try { j = JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch (e) {}
+  if (r.code !== 0 && r.stderr) logError('nmbrs-' + opdracht, new Error(String(r.stderr).slice(0, 200)));
+  return { code: r.code, j: j && typeof j === 'object' ? j : null };
+}
+function nmbrsDeps() { return { dir: NMBRS_DIR, kluisLees: nmbrsKluisLees, kluisZet: nmbrsKluisZet, kind: nmbrsKind }; }
+function nmbrsSchoon(u) { const o = {}; Object.keys(u || {}).forEach(function (k) { if (k[0] !== '_') o[k] = u[k]; }); return o; }
+function nmbrsRondeLees() { try { return JSON.parse(fs.readFileSync(path.join(NMBRS_DIR, 'ronde.json'), 'utf8')); } catch (e) { return null; } }
+function nmbrsInfo() {
+  const r = nmbrsRondeLees();
+  return { module: !!nmbrsData, laatste: r ? { tijd: r.eind || null, ok: r.ok === true, reden: r.reden || undefined, bedrijven: r.bedrijven, medewerkers: r.medewerkers, journalen: r.journalen, vragen: r.vragen } : null,
+    nood: fs.existsSync(path.join(NMBRS_DIR, 'refresh.nood')), dood: fs.existsSync(path.join(NMBRS_DIR, 'dood.json')) };
+}
+// Eén box-rij per reden per dag (stilte is de default). Geen token, code, state, naam of bedrag.
+function nmbrsBoxRij(reden, tekst) {
+  try {
+    const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    const t = VV().lees(pad);
+    const kenmerk = 'nmbrs-' + reden + '-' + dag;
+    if (t.indexOf(kenmerk) >= 0) return;
+    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
+    if (!eerste) return;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const voorstel = reden === 'grant' ? 'koppeling dood (verlopen, ingetrokken of al gebruikt). Nieuwe toestemmingslink: `POST /smal/nmbrs {opdracht: link}` (API_SECRET) en die met bericht.py in de app zetten. Niet herhalen tot David opnieuw toestemde.'
+      : reden === 'kluis' ? 'het nieuwe refresh token staat als noodkopie in `/opt/data/nmbrs/refresh.nood` (600); de volgende ronde zet hem eerst in de kluis. Kluis (Management-API) nagaan; `POST /smal/nmbrs {opdracht: ronde}` na herstel.'
+      : reden === 'scope' ? 'Nmbrs gaf andere rechten dan de elf gevraagde scopes; de tokens zijn ingetrokken, niets bewaard. Nagaan welke scopes de app in het portaal heeft; daarna een nieuwe link.'
+      : 'api.log `nmbrs` en `POST /smal/nmbrs {opdracht: stand}` nalopen.';
+    const rij = '\n## [direct] ' + tijd + ' — Nmbrs: ' + String(tekst || reden).replace(/[\r\n]+/g, ' ').slice(0, 90) + ' (pod, automatisch) #nmbrs\n' +
+      '- status: open\n- van: pod nmbrs-ronde (server.js, wv2797; hooguit 1× per dag per reden; kenmerk ' + kenmerk + ')\n' +
+      '- gevolg als er niets gebeurt: geen nieuwe stand uit Nmbrs en geen signalen; de data tot nu blijft lokaal staan.\n- voorstel: ' + voorstel + '\n';
+    VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
+  } catch (e) { logError('nmbrs-box', e); }
+}
+// Medewerkerpagina's in de vault (alleen naam, aliassen, entiteit en of de status actief/in dienst is) voor S6; blijft in de pod.
+function nmbrsVaultMedewerkers() {
+  const uit = [], mappen = [['Tolgaarde', 'TG'], ['Groenhouten', 'GH'], ['POT_POH_GGZ', 'POT']];
+  mappen.forEach(function (m) {
+    const dir = path.join(VAULT, '10_Zakelijk', m[0], 'Medewerkers');
+    let namen = [];
+    try { namen = fs.readdirSync(dir).filter(function (f) { return /\.md$/.test(f); }).slice(0, 300); } catch (e) { return; }
+    namen.forEach(function (f) {
+      let t = '';
+      try { t = VV().lees(path.join(dir, f)).slice(0, 4000); } catch (e) { return; }
+      const kop = /^---\n([\s\S]*?)\n---/.exec(t); if (!kop || !/^type:\s*medewerker\s*$/m.test(kop[1])) return;
+      const veld = function (n) { const x = new RegExp('^' + n + ':\\s*(.*)$', 'm').exec(kop[1]); return x ? x[1].trim() : ''; };
+      const status = veld('status').toLowerCase();
+      let alias = [];
+      try { const a = veld('aliases'); if (/^\[/.test(a)) alias = JSON.parse(a); } catch (e) { alias = []; }
+      const ent = /^[A-Z]{2,6}$/.test(veld('entiteit_id')) ? veld('entiteit_id') : m[1];
+      uit.push({ entiteit: ent, naam: f.replace(/\.md$/, ''), namen: [f.replace(/\.md$/, '')].concat(Array.isArray(alias) ? alias.filter(function (x) { return typeof x === 'string'; }) : []),
+        actief: /^(actief|in dienst)/.test(status) && !/zzp|waarne/.test(status) });
+    });
+  });
+  return uit;
+}
+// Na een geslaagde ronde: nieuwe signalen (alleen die aan staan) als één bericht naar de machinekamer; pas na bezorging als gemeld vastgelegd.
+async function nmbrsSignalenNa() {
+  const s = await nmbrsKind('signalen', { vault: nmbrsVaultMedewerkers() });
+  if (!s.j || s.j.ok !== true) return { ok: false };
+  const nieuw = Array.isArray(s.j.nieuw) ? s.j.nieuw : [];
+  if (!nieuw.length) return { ok: true, nieuw: 0 };
+  const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const tekst = 'Nmbrs: ' + nieuw.length + ' nieuw' + (nieuw.length === 1 ? ' signaal' : 'e signalen') + ' uit de salarisadministratie\n' +
+    nieuw.slice(0, 25).map(function (x) { return '- ' + x.soort + ' ' + String(x.tekst || '').slice(0, 200); }).join('\n') + (nieuw.length > 25 ? '\n- en ' + (nieuw.length - 25) + ' meer' : '');
+  const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'nmbrs', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: 'nmbrs-signalen:' + dag });
+  if (r.status !== 200) { logError('nmbrs-signalen', new Error('bericht gaf ' + r.status)); return { ok: false, nieuw: nieuw.length }; }
+  await nmbrsKind('gemeld', { sleutels: nieuw.map(function (x) { return x.sleutel; }) });
+  return { ok: true, nieuw: nieuw.length };
+}
+async function nmbrsRondeDraai(opdracht, bron) {
+  if (!nmbrsData) return { ok: false, fout: 'nmbrs-data.js zit niet in deze release' };
+  if (nmbrsRondeBezig) return { ok: false, reden: 'bezig', fout: 'er loopt al een Nmbrs-ronde' };
+  nmbrsRondeBezig = true;
+  try {
+    const u = nmbrsSchoon(await nmbrsData.ronde(nmbrsDeps(), opdracht));
+    u.eind = new Date().toISOString(); u.bron = bron; u.dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: opdracht, bron: bron, ok: u.ok === true, reden: u.reden, bedrijven: u.bedrijven, medewerkers: u.medewerkers, loonruns: u.loonruns,
+      journalen: u.journalen, vragen: u.vragen, geroteerd: u.geroteerd || undefined, nood: u.nood || undefined, nood_hersteld: u.nood_hersteld || undefined }));
+    if (u.reden !== 'bezig') {
+      try { fs.mkdirSync(NMBRS_DIR, { recursive: true, mode: 0o700 }); const p = path.join(NMBRS_DIR, 'ronde.json'), tmp = p + '.' + process.pid + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(u), { mode: 0o600 }); fs.renameSync(tmp, p); }
+      catch (e) { logError('nmbrs-ronde-json', e); }
+    }
+    if (u.ok !== true && ['grant', 'kluis', 'scope', 'client', 'token'].indexOf(u.reden) >= 0) nmbrsBoxRij(u.reden, u.fout);
+    else if (u.nood) nmbrsBoxRij('kluis', u.fout);
+    if (u.ok === true) {
+      try { const s = await nmbrsSignalenNa(); u.signalen_nieuw = s.nieuw || 0; schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'signalen', ok: s.ok, nieuw: s.nieuw || 0 })); }
+      catch (e) { logError('nmbrs-signalen', e); }
+    }
+    return u;
+  } finally { nmbrsRondeBezig = false; }
+}
+// Na de ochtend-bankronde (bankRondeStart, los): één keer per dag, alleen vóór 12:00; zonder toestemming stil (geen netwerk).
+function nmbrsNaBankRonde() {
+  if (!nmbrsData || !rolPrimair()) return;
+  const nl = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const vorige = nmbrsRondeLees();
+  if (Number(nl.slice(11, 13)) >= 12 || (vorige && vorige.dag === nl.slice(0, 10))) return;
+  nmbrsRondeDraai('ronde', 'bank-ronde').catch(function (e) { logError('nmbrs-ronde', e); });
+}
+async function nmbrsSmal(d, wie) {
+  const opdracht = String(d.opdracht || '');
+  // signalen (Personeels-Wachter) en persoon (contractgenerator) ook met de Socev-sleutel; al het andere alleen de machinekamer.
+  if (!wie || wie.pas || (!wie.mk && opdracht !== 'signalen' && opdracht !== 'persoon')) return { status: 403, j: { ok: false, fout: 'nmbrs: deze opdracht alleen vanuit de machinekamer (API_SECRET)' } };
+  if (!nmbrsData) return { status: 404, j: { ok: false, fout: 'nmbrs-data.js zit niet in deze release' } };
+  if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
+  if (opdracht === 'link') {
+    let k; try { k = await nmbrsKluisLees(); } catch (e) { return { status: 503, j: { ok: false, fout: 'kluis nu niet bereikbaar' } }; }
+    if (!k.client_id || !k.client_secret || !k.sub) return { status: 409, j: { ok: false, fout: 'nmbrs_client_id, -secret of -subscription_key ontbreekt in de kluis' } };
+    const l = nmbrsData.linkMaak(NMBRS_DIR, k.client_id);
+    schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'link' }));
+    return { status: 200, j: { ok: true, url: l.url, geldig_tot: l.geldig_tot } };
+  }
+  if (opdracht === 'ronde' || opdracht === 'peil') {
+    const u = await nmbrsRondeDraai(opdracht, 'machinekamer');
+    return { status: u.reden === 'bezig' ? 409 : 200, j: u };
+  }
+  if (opdracht === 'stand') {
+    const s = await nmbrsKind('stand', {});
+    return { status: 200, j: Object.assign({ ok: !!(s.j && s.j.ok) }, nmbrsSchoon(s.j), { info: nmbrsInfo() }) };
+  }
+  if (opdracht === 'signalen') {   // Personeels-Wachter: alleen naam, soort, datum en tekst zonder bedragen
+    const s = await nmbrsKind('signalen', { vault: nmbrsVaultMedewerkers() });
+    return { status: s.j && s.j.ok ? 200 : 500, j: s.j ? { ok: s.j.ok === true, aan: s.j.aan, signalen: (s.j.signalen || []).map(function (x) { return { soort: x.soort, entiteit: x.entiteit, naam: x.naam, datum: x.datum, tekst: x.tekst }; }), fout: s.j.fout } : { ok: false } };
+  }
+  if (opdracht === 'persoon') {   // contractgenerator: alleen op Davids vraag, één genoemde persoon
+    if (typeof d.naam !== 'string' || d.naam.trim().length < 3 || d.naam.length > 80) return { status: 400, j: { ok: false, fout: 'naam (3–80 tekens) nodig' } };
+    const s = await nmbrsKind('persoon', { naam: d.naam });
+    schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'persoon', treffers: s.j && s.j.treffers ? s.j.treffers.length : (s.j && s.j.meerdere ? 'meerdere' : 0) }));
+    return { status: s.j && s.j.ok ? 200 : 400, j: s.j || { ok: false } };
+  }
+  if (opdracht === 'koppel' || opdracht === 'instel') {
+    const s = await nmbrsKind(opdracht, opdracht === 'koppel' ? { bedrijf: d.bedrijf, entiteit: d.entiteit, door: 'machinekamer' } : { signalen_aan: d.signalen_aan });
+    schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: opdracht, ok: !!(s.j && s.j.ok) }));
+    return { status: s.j && s.j.ok ? 200 : 400, j: s.j || { ok: false } };
+  }
+  if (opdracht === 'intrek') {   // terugrol (ontwerp punt 10): refresh token bij Nmbrs intrekken; de kluisregels leegt David
+    let k; try { k = await nmbrsKluisLees(); } catch (e) { return { status: 503, j: { ok: false, fout: 'kluis nu niet bereikbaar' } }; }
+    if (!k.refresh) return { status: 409, j: { ok: false, fout: 'geen nmbrs_refresh in de kluis' } };
+    const s = await nmbrsKind('intrek', { client_id: k.client_id, client_secret: k.client_secret, refresh: k.refresh });
+    schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'intrek', ok: !!(s.j && s.j.ok) }));
+    return { status: 200, j: { ok: !!(s.j && s.j.ok) } };
+  }
+  return { status: 400, j: { ok: false, fout: 'opdracht: link, ronde, peil, stand, signalen, persoon, koppel, instel, intrek' } };
+}
+function nmbrsTerug(req, res) {
+  const kaal404 = function () { res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('niet gevonden'); };
+  req.resume();
+  if (req.method !== 'GET' || !nmbrsData) return kaal404();
+  let q;
+  try { q = new URL(req.url, 'http://x').searchParams; } catch (e) { return kaal404(); }
+  const state = q.get('state') || '', code = q.get('code') || '', fout = q.get('error') || '';
+  if (!/^[0-9a-f]{64}$/.test(state) || code.length > 2000 || /[^\x21-\x7e]/.test(code) || fout.length > 100 || (!code && !fout)) return kaal404();
+  res._log = { nmbrs_terug: 1 };
+  if (!rolPrimair()) return bankPagina(res, 503, 'Even niet beschikbaar', 'Er is niets gekoppeld. Probeer het later opnieuw met een nieuwe link van Socev.');
+  if (!nmbrsData.stateOpen(NMBRS_DIR, state)) return kaal404();   // zonder open state: geen kluis, geen kindproces
+  const t = Date.now();
+  while (nmbrsTerugTijden.length && t - nmbrsTerugTijden[0] > 3600000) nmbrsTerugTijden.shift();
+  if (nmbrsTerugTijden.length >= NMBRS_TERUG_PER_UUR) { res.writeHead(429, { 'Content-Type': 'text/plain' }); return res.end('te vaak'); }
+  nmbrsTerugTijden.push(t);
+  nmbrsData.terug(nmbrsDeps(), state, code, fout ? 'ja' : '').then(function (u) {
+    res._log.nmbrs = u.soort;
+    schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'terug', soort: u.soort, reden: u.reden, nood: u.nood || undefined }));
+    if (u.soort === 'dicht') return kaal404();
+    if (u.soort === 'bezig') return bankPagina(res, 503, 'Nog even geduld', 'Socev was net bezig met Nmbrs. Laad deze pagina over een minuut opnieuw; de link is nog geldig.');
+    if (u.soort === 'scope') { nmbrsBoxRij('scope', 'toestemming met andere rechten'); return bankPagina(res, 200, 'Niet gekoppeld', 'Nmbrs gaf andere rechten dan gevraagd. Socev heeft de toestemming meteen weer ingetrokken en niets bewaard. Socev zet een nieuwe link in de app.'); }
+    if (u.soort !== 'gekoppeld') return bankPagina(res, 200, 'Niet gekoppeld', 'De koppeling werd afgebroken of lukte niet. Er is niets bewaard. Wil je het opnieuw proberen, vraag dan om een nieuwe link.');
+    if (u.nood) nmbrsBoxRij('kluis', 'toestemming gelukt, kluis nog niet bijgewerkt');
+    bankPagina(res, 200, 'Gekoppeld', 'Nmbrs is gekoppeld; Socev kan personeel, contracten en loonruns nu alleen lezen. Je kunt dit venster sluiten.');
+    nmbrsRondeDraai('peil', 'toestemming').catch(function (e) { logError('nmbrs-ronde', e); });   // eerste ronde meteen, als peiling
+  }).catch(function (e) {
+    logError('nmbrs-terug', e);
+    if (!res.headersSent) bankPagina(res, 502, 'Koppelen lukte niet', 'Er ging iets mis. Er is niets gekoppeld. Vraag om een nieuwe link.');
+  });
+}
+// ── einde Nmbrs ──
 // ── wv2703: AH-kassabonnen in Financiën (alleen lezen) ────────────────────────────────────────────────────────────────────────────
 // WAAROM. David 8-11-2026: "boodschappen (uitsplitsing? Kunnen we lijstjes van AH verzamelen met wat we kopen?)"; Ja op koppelen met zijn
 // eigen AH-inlog (8-11 08:00). Ontwerp: vault 01_Ontwikkeling/OVIS Financiën 8+ (ontwerp 7-11-2026).md § 10 (review Codex, MOET 1-3 verwerkt).
