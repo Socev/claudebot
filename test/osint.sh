@@ -48,8 +48,8 @@ eis(r.get('poort', {}).get('niveau') == 'niets' and tel(r, 'extern') + tel(r, 'e
 r = zoek(ingang='persoon', term='J. Voorbeeld', wie='socev', herkomst='facturen', doel='waarnemer')
 eis(r.get('poort', {}).get('niveau') == 'niets' and tel(r, 'extern') + tel(r, 'eigen') == 0, 'persoon door Socev zonder Davids vraag: niets')
 r = zoek(ingang='persoon', term='J. Voorbeeld', wie='socev', herkomst='david-vraag', doel='waarnemer')
-eis(r.get('poort', {}).get('niveau') == 'alles' and tel(r, 'extern') >= 1 and all(l['bron'].startswith('BIG') for l in r['logboek'] if l['soort'] == 'extern'),
-    'persoon op Davids vraag met doel: alleen het BIG-register naar buiten')
+eis(r.get('poort', {}).get('niveau') == 'alles' and tel(r, 'extern') >= 1 and all(l['bron'].startswith(('BIG', 'Tuchtrecht', 'Wikidata')) for l in r['logboek'] if l['soort'] == 'extern'),
+    'persoon op Davids vraag met doel: alleen BIG, tuchtrecht en Wikidata naar buiten (wv2848)')
 # 4. groene controle: een schone term van David gaat wel naar buiten (anders bewijst nul niets)
 r = zoek(ingang='adres', term='Kerkstraat 1, 3831 AA Leusden', wie='david')
 eis(r.get('poort', {}).get('niveau') == 'alles' and tel(r, 'extern') >= 1, 'schoon adres van David: externe aanroep geteld')

@@ -17,6 +17,7 @@ PY="${OSINT_PY:-$PWD/osint.py}"
 PYBIN="${OSINT_PYTHON:-python3}"   # wv2712: de venv (Pillow + numpy) toetst ook de fotoforensiek
 "$PYBIN" -I - "$PY" "$T" <<'EOF'
 import base64, json, os, sqlite3, subprocess, sys
+import urllib.parse as up
 py, T = sys.argv[1], sys.argv[2]
 fout = []
 def eis(ok, wat):
@@ -337,6 +338,111 @@ eis(r.get('ingang') == 'mail' and r.get('term', '').startswith('mailkop') and no
 eis(zoek(ingang='auto', term='9999 ZZ', wie='david').get('ingang') == 'adres', 'postcode alleen: adres, geen kenteken')
 r = zoek(ingang='auto', term='123456782', wie='david')
 eis(r['poort']['niveau'] == 'niets', 'losse BSN-vorm blijft dicht (alleen het volledige btw-nummer is vrij)')
+# --- wv2848: deel 2 registers en archief (verzonnen antwoorden; geen echte personen of bedrijven)
+WDE = {'entities': {
+    'Q999001': {'labels': {'nl': {'value': 'Proefzorg B.V.'}}, 'descriptions': {'nl': {'value': 'verzonnen zorgorganisatie'}}, 'claims': {
+        'P31': [{'mainsnak': {'datavalue': {'value': {'id': 'Q4830453'}}}}], 'P749': [{'mainsnak': {'datavalue': {'value': {'id': 'Q999012'}}}}],
+        'P856': [{'mainsnak': {'datavalue': {'value': 'https://proefzorg.example'}}}]}},
+    'Q999002': {'labels': {'nl': {'value': 'Piet Proefpersoon'}}, 'descriptions': {'nl': {'value': 'verzonnen politicus'}}, 'claims': {
+        'P31': [{'mainsnak': {'datavalue': {'value': {'id': 'Q5'}}}}], 'P39': [{'mainsnak': {'datavalue': {'value': {'id': 'Q999010'}}}}],
+        'P102': [{'mainsnak': {'datavalue': {'value': {'id': 'Q999011'}}}}]}},
+    'Q999003': {'labels': {'nl': {'value': 'Proefpersoon (band)'}}, 'claims': {'P31': [{'mainsnak': {'datavalue': {'value': {'id': 'Q215380'}}}}]}}}}
+DELPHER = ('<?xml version="1.0"?><srw:searchRetrieveResponse xmlns:srw="x"><srw:numberOfRecords>37</srw:numberOfRecords><srw:records><srw:record><srw:recordData>'
+           '<dc:date>1931/05/06 00:00:00</dc:date><dc:title>Proefpand verbouwd</dc:title><dc:type>artikel</dc:type><ddd:metadataKey>ddd:000000001:mpeg21:a0001</ddd:metadataKey>'
+           '<ddd:papertitle>Proefkrant</ddd:papertitle><ddd:spatial>Regionaal/lokaal</ddd:spatial></srw:recordData></srw:record><srw:record><srw:recordData>'
+           '<dc:date>1950/01/02 00:00:00</dc:date><dc:title>Zonder sleutel</dc:title><ddd:metadataKey>javascript:alert(1)</ddd:metadataKey></srw:recordData></srw:record></srw:records></srw:searchRetrieveResponse>')
+SRU_TUCHT = 'repository.overheid.nl/sru?' + up.urlencode({'query': 'c.product-area==tuchtrecht AND cql.textAndIndexes="Proefpersoon" sortBy dt.modified/sort.descending'})
+nep4 = dict(nep)
+nep4.update({
+ 'zoeken.zorgaanbiedersportaal.nl/api/v1/Organisatie/99999999': {'kvknummer': '99999999', 'naam': 'Proefzorg B.V.', 'agbregistraties': [{'code': '01999999', 'omschrijving': 'Huisartsen'}],
+     'rechtsvorm': 'Besloten Vennootschap', 'adres': {'isafgeschermd': False, 'adresRegels': ['Proefstraat 1', '9999 ZZ Nergensdorp']}, 'datumInschrijving': {'jaar': 2020, 'maand': 2, 'dag': 3},
+     'datumUitschrijving': None, 'sbicodes': ['Huisartsenzorg (86.21.0)'], 'melding': {'isZorgaanbieder': True, 'isJeugdhulpaanbieder': False},
+     'vestigingen': [{'handelsnamen': ['Proefzorg'], 'isHoofdvestiging': True, 'adres': {'isafgeschermd': True}, 'agbregistraties': [{'code': '71999999', 'omschrijving': 'Huisartsen'}]}],
+     'verantwoordingen': [{'url': 'https://toezicht.proef.example/', 'tekst': 'Inspectierapportages'}, {'url': 'javascript:alert(1)', 'tekst': 'boos'}]},
+ 'zoeken.zorgaanbiedersportaal.nl/api/v1/Zoeken': {'aantal': 2, 'zorgaanbieders': [{'kvknummer': '99999999', 'naam': 'Proefzorg B.V.'}, {'kvknummer': '99999998', 'naam': 'Proefzorg Twee'}]},
+ 'opendata.kvk.nl/api/v1/hvds/basisbedrijfsgegevens/kvknummer/99999999': {'datumAanvang': '20200203', 'actief': 'J', 'insolventieCode': 'FAIL', 'rechtsvormCode': 'BV', 'postcodeRegio': 99,
+     'activiteiten': [{'sbiCode': '4791', 'soortActiviteit': 'Nevenactiviteit'}, {'sbiCode': '86210', 'soortActiviteit': 'Hoofdactiviteit'}], 'lidstaat': 'NL'},
+ 'opendata.kvk.nl/api/v1/hvds/basisbedrijfsgegevens/kvknummer/99999997': {'fout': [{'code': 'IPD0005', 'omschrijving': 'Op basis van het KVK-nummer kan het product niet worden geleverd.'}]},
+ 'www.wikidata.org/w/api.php?action=query': {'query': {'search': [{'title': 'Q999001'}]}},
+ 'www.wikidata.org/w/api.php?action=wbsearchentities': {'search': [{'id': 'Q999002'}, {'id': 'Q999003'}]},
+ 'www.wikidata.org/w/api.php?action=wbgetentities&props=labels|descriptions|claims': WDE,
+ 'www.wikidata.org/w/api.php?action=wbgetentities&props=labels': {'entities': {'Q999010': {'labels': {'nl': {'value': 'lid van de proefraad'}}},
+     'Q999011': {'labels': {'nl': {'value': 'Proefpartij'}}}, 'Q999012': {'labels': {'nl': {'value': 'Proef Moeder N.V.'}}}}},
+ SRU_TUCHT: {'searchRetrieveResponse': {'numberOfRecords': 2, 'records': {'record': [
+     {'recordData': {'gzd': {'originalData': {'meta': {'owmskern': {'identifier': 'ECLI:NL:TGZPROEF:2024:1', 'creator': 'Regionaal Tuchtcollege voor de Gezondheidszorg Proefstad'},
+      'owmsmantel': {'description': 'Verzonnen klacht.'}, 'tpmeta': {'instantieDomein': 'Gezondheidszorg', 'beslissing': 'Ongegrond', 'uitspraakdatum': '2024-01-02'}}},
+      'enrichedData': {'preferredUrl': 'https://tuchtrecht.overheid.nl/ECLI:NL:TGZPROEF:2024:1'}}}},
+     {'recordData': {'gzd': {'originalData': {'meta': {'owmskern': {'identifier': 'ECLI:NL:TGZPROEF:2026:9', 'creator': 'Centraal Tuchtcollege voor de Gezondheidszorg'},
+      'owmsmantel': {}, 'tpmeta': {'instantieDomein': 'Gezondheidszorg', 'beslissing': 'Gegrond, waarschuwing', 'uitspraakdatum': '2026-03-04'}}}, 'enrichedData': {}}}}]}}},
+ 'jsru.kb.nl/sru/sru': DELPHER,
+ 'api.openarch.nl/1.0/records/search.json': {'response': {'number_found': 3, 'docs': [{'personname': 'Pieter Proefpersoon', 'relationtype': 'Bruidegom', 'eventtype': 'Huwelijk',
+     'eventdate': {'day': 1, 'month': 5, 'year': 1890}, 'eventplace': ['Nergensdorp'], 'sourcetype': 'BS Huwelijk', 'archive': 'Proefarchief', 'url': 'https://www.openarchieven.nl/proef:1'},
+     {'personname': 'Anna Proefpersoon', 'eventtype': 'Doop', 'eventdate': {'year': 1801}, 'url': 'https://elders.example/x'}]}},
+ 'api.hackertarget.com/hostsearch': 'mail.proefzorg.example,192.0.2.10\nwww.proefzorg.example,192.0.2.11\nboos.ander.example,192.0.2.12\n',
+ 'www.proefzorg.example/contact': '<p>balie@proefzorg.example</p>',
+ 'www.proefzorg.example/': '<a href="mailto:info@proefzorg.example">info&#64;proefzorg.example</a> ander@elders.example logo@2x.proefzorg.example.png',
+ 'intern.proefzorg.example/': '<p>geheim@intern.proefzorg.example</p>',
+})
+json.dump(nep4, open(os.path.join(T, 'nep.json'), 'w'))
+json.dump({'intern.proef.example': '10.0.0.5', 'foto.proef.example': '93.184.216.34', 'www.intern.proefzorg.example': '10.0.0.6', 'intern.proefzorg.example': '127.0.0.1'},
+          open(os.path.join(T, 'dns.json'), 'w'))
+def hosts_van(r, voorvoegsel=''):
+    return {l['host'] for l in r.get('logboek', []) if l['soort'] == 'extern' and l['status'] != 'poort dicht' and l['naar_buiten'].startswith(voorvoegsel)}
+r = zoek(ingang='bedrijf', term='99999999', wie='david', vers=True)
+k = kaart(r, 'Zorgaanbieder (LRZa)')
+eis(veld(k, 'AGB-code organisatie') == '01999999 (Huisartsen)' and veld(k, 'Ingeschreven') == '03-02-2020' and veld(k, 'Soort (Wtza-melding)') == 'zorgaanbieder', 'LRZa: AGB-code, inschrijving, Wtza')
+eis('afgeschermd · AGB 71999999 (Huisartsen)' == (k.get('items') or [{}])[0].get('sub') and [l['url'] for l in k.get('links', [])] == ['https://toezicht.proef.example/', 'https://zoeken.zorgaanbiedersportaal.nl/'], 'LRZa: vestiging met AGB, afgeschermd adres, alleen https-links')
+eis(any(x['id'] == 'agb:71999999' for x in (r.get('graaf') or {}).get('knopen', [])), 'netwerkplaat: KvK → AGB-code')
+k = kaart(r, 'KvK open data')
+eis(veld(k, 'Faillissement, surseance of schuldsanering') == 'faillissement' and 'faillissement' in (k.get('let') or '') and veld(k, 'Activiteiten (SBI)') == '86210 (hoofd), 4791 (neven)' and veld(k, 'Gestart op') == '03-02-2020', 'KvK open data: faillissement als let, hoofdactiviteit eerst')
+k = kaart(r, 'Wikidata'); eis('Proefzorg B.V.' in (k.get('items') or [{}])[0].get('tekst', '') and 'Moederorganisatie: Proef Moeder N.V.' in k['items'][0].get('sub', ''), 'Wikidata op KvK-nummer: organisatie met moeder')
+eis(any(l['host'] == 'www.wikidata.org' and l['naar_buiten'] == 'KvK-nummer 99999999' for l in r['logboek']), 'Wikidata: alleen het KvK-nummer naar buiten')
+eis(all(kaart(r, t).get('juridisch') for t in ('Zorgaanbieder (LRZa)', 'KvK open data', 'Wikidata')), 'deel 2 bedrijf: juridische regel op elk kaartje')
+r = zoek(ingang='bedrijf', term='99999997', wie='david', vers=True)
+eis('alleen bv' in (kaart(r, 'KvK open data').get('klein') or ''), 'KvK open data: 404/fout = niet in de dataset (geen bv/nv)')
+r = zoek(ingang='bedrijf', term='Proefzorg', wie='david', vers=True)
+k = kaart(r, 'Zorgaanbieder (LRZa)'); eis(len(k.get('items') or []) == 2 and 'KvK 99999998' in k['items'][1].get('sub', ''), 'LRZa op naam (David): lijst met KvK-nummers')
+eis(not any(l['host'] == 'opendata.kvk.nl' for l in r['logboek']), 'KvK open data: zonder KvK-nummer geen aanroep')
+# theHarvester-achtig
+r = zoek(ingang='bedrijf', term='proefzorg.example', wie='david', vers=True)
+k = kaart(r, 'Subdomeinen en mailadressen'); tk = [i['tekst'] for i in k.get('items', [])]
+eis('mail.proefzorg.example' in tk and 'boos.ander.example' not in tk and 'info@proefzorg.example' in tk and 'balie@proefzorg.example' in tk and 'ander@elders.example' not in tk, 'harvester: eigen subdomeinen + mailadressen van het domein, niets van elders')
+eis(not any(t.endswith('.png') for t in tk) and k.get('juridisch'), 'harvester: geen afbeeldingsnamen, juridische regel')
+r = zoek(ingang='bedrijf', term='intern.proefzorg.example', wie='david', vers=True)
+eis(not {l['host'] for l in r['logboek']} & {'intern.proefzorg.example', 'www.intern.proefzorg.example'}, 'harvester: website met een intern adres wordt niet opgehaald')
+# persoon (David, met doel)
+r = zoek(ingang='persoon', term='P. Proefpersoon', wie='david', doel='waarnemer', vers=True)
+k = kaart(r, 'Tuchtrecht'); eis([i['tekst'][:10] for i in k.get('items', [])] == ['04-03-2026', '02-01-2024'] and 'Gegrond, waarschuwing' in k['items'][0].get('sub', '') and 'geanonimiseerd' in (k.get('klein') or ''), 'tuchtrecht: nieuwste eerst, beslissing, anonimisering uitgelegd')
+eis(any(l['host'] == 'repository.overheid.nl' and l['naar_buiten'] == 'achternaam: Proefpersoon' for l in r['logboek']), 'tuchtrecht: alleen de achternaam naar buiten')
+k = kaart(r, 'Wikidata (publieke functies)'); eis(len(k.get('items') or []) == 1 and 'Functies: lid van de proefraad' in k['items'][0].get('sub', '') and 'Partij: Proefpartij' in k['items'][0]['sub'], 'Wikidata persoon: alleen mensen, met functie en partij')
+k = kaart(r, 'Zelf na te kijken'); eis({'https://www.vektis.nl/agb-register/zoeken', 'https://ccbr.rechtspraak.nl/'} <= {l['url'] for l in k.get('links', [])} and not hosts_van(r) & {'www.vektis.nl', 'ccbr.rechtspraak.nl'}, 'AGB en curatele: alleen hulplinks, geen aanroep')
+eis(not any(x['soort'] in ('persoon', 'wikidata') for x in (r.get('graaf') or {}).get('knopen', [])), 'persoon: geen personen op de netwerkplaat')
+# archief
+r = zoek(ingang='archief', term='Proefpersoon Nergensdorp', wie='david', doel='geschiedenis', vers=True)
+k = kaart(r, 'Kranten (Delpher)'); it = k.get('items') or []
+eis(len(it) == 2 and it[0]['tekst'] == '06-05-1931 · Proefpand verbouwd' and 'identifier=ddd%3A000000001%3Ampeg21%3Aa0001' in it[0].get('url', '') and not it[1].get('url') and '37 artikelen' in (k.get('klein') or ''), 'Delpher: datum, titel, link alleen bij een geldige sleutel')
+k = kaart(r, 'Akten (Open Archieven)'); it = k.get('items') or []
+eis(it[0]['tekst'] == 'Pieter Proefpersoon · Bruidegom' and '1-5-1890' in it[0].get('sub', '') and it[0].get('url') == 'https://www.openarchieven.nl/proef:1' and not it[1].get('url'), 'Open Archieven: akte met datum; link alleen naar openarchieven.nl')
+eis(all(kaart(r, t).get('juridisch') for t in ('Kranten (Delpher)', 'Akten (Open Archieven)')) and r.get('graaf') in (None, {'knopen': [], 'randen': []}), 'archief: juridische regel, geen netwerkplaat-knopen')
+# poort (kruisproef): BSN-vorm, medische herkomst, geen doel, Socev zonder Davids vraag → niets naar de nieuwe bronnen
+NIEUW = {'zoeken.zorgaanbiedersportaal.nl', 'opendata.kvk.nl', 'www.wikidata.org', 'jsru.kb.nl', 'api.openarch.nl', 'api.hackertarget.com', 'repository.overheid.nl'}
+for v, wat in ((dict(ingang='archief', term='Proefpersoon 111222333', wie='david', doel='geschiedenis'), 'archief met BSN-vorm'),
+               (dict(ingang='archief', term='Proefpersoon', wie='david'), 'archief zonder doel'),
+               (dict(ingang='archief', term='Proefpersoon', wie='socev', herkomst='mogelijk-medisch', doel='geschiedenis'), 'archief door Socev, herkomst mogelijk medisch'),
+               (dict(ingang='archief', term='Proefpersoon', wie='machinekamer', herkomst='facturen', doel='geschiedenis'), 'archief door de machinekamer zonder Davids vraag'),
+               (dict(ingang='persoon', term='P. Proefpersoon', wie='socev', herkomst='mogelijk-medisch', doel='waarnemer'), 'persoon door Socev, herkomst mogelijk medisch'),
+               (dict(ingang='persoon', term='P. Proefpersoon 111222333', wie='david', doel='waarnemer'), 'persoon met BSN-vorm'),
+               (dict(ingang='bedrijf', term='99999999 111222333', wie='david'), 'bedrijf met BSN-vorm'),
+               (dict(ingang='bedrijf', term='proefzorg.example patiëntnummer 4711', wie='david'), 'domein met patiëntkenmerk')):
+    r = zoek(vers=True, **v)
+    eis(r['poort']['niveau'] == 'niets' and ext(r) == 0 and not hosts_van(r) & NIEUW, 'poort: %s → niets naar buiten' % wat)
+r = zoek(ingang='bedrijf', term='99999999', wie='socev', herkomst='mogelijk-medisch', vers=True)
+eis(r['poort']['niveau'] == 'eigen' and ext(r) == 0 and not hosts_van(r) & NIEUW, 'poort: KvK-nummer met herkomst mogelijk medisch → niet naar LRZa/KvK/Wikidata')
+r = zoek(ingang='bedrijf', term='P. Proefpersoon', wie='socev', herkomst='facturen', vers=True)
+eis(not hosts_van(r, 'naam') & NIEUW, 'Socev + vrije naam: geen naam naar LRZa of Wikidata (review-MOET 1 wv2698)')
+r = zoek(ingang='persoon', term='P. Proefpersoon', wie='socev', herkomst='david-vraag', doel='waarnemer', vers=True)
+eis(r['poort']['niveau'] == 'alles' and 'repository.overheid.nl' in hosts_van(r) and 'api.hackertarget.com' not in hosts_van(r), 'Socev op Davids vraag: persoon wel naar tuchtrecht, nooit naar HackerTarget')
+json.dump(nep, open(os.path.join(T, 'nep.json'), 'w'))
 # --- logboek en netwerkplaat
 c = sqlite3.connect(os.environ['OSINT_DB'])
 termen = ' '.join(x[0] for x in c.execute('select term from zoekvraag'))

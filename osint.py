@@ -9,6 +9,9 @@ Per bron één functie; elke aanroep loopt via haal(), en haal() vraagt bij een 
            kvk, contacten-organisatie). Zonder of met een andere herkomst (mail, intake, mogelijk-medisch, …) → alleen offline en
            eigen bronnen (Facturen, Contacten, mail, vault).
   persoon  alleen met een doel; Socev alleen met herkomst david-vraag (persoonsingang nooit uit zichzelf).
+  archief  (wv2848: Delpher-kranten, Open Archieven-akten) dezelfde regel als persoon: doel verplicht, alleen David of herkomst david-vraag.
+  wv2848   deel 2 registers: LRZa (+ AGB-codes), KvK open dataset, Wikidata, tuchtrecht, hulplinks (AGB, curatele, insolventie, Kiesraad),
+           theHarvester-achtig (HackerTarget + mailadressen op de eigen site) alleen op het domein van een bedrijfsingang.
 Opslag: osint.sqlite (0600, map 0700): cache 30 dagen, logboek (zoekvraag + aanroep: wie, doel, ingang, zoekterm, bron, wat ging
 naar buiten) 1 jaar. Niets wordt gepubliceerd; naar buiten gaat alleen de zoekterm (of een kaartvak/BAG-id) naar de gekozen bron.
 
@@ -21,7 +24,7 @@ OSINT_NEP_NET=1 (toets: elke netwerkaanroep geeft een nepantwoord en telt alleen
 import base64, concurrent.futures as cf, datetime, hashlib, html, json, os, re, sqlite3, subprocess, sys, time, unicodedata
 import urllib.parse as up, urllib.request, urllib.error
 
-VERSIE = 'osint-3'
+VERSIE = 'osint-4'
 HIER = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ.get('OSINT_DB') or '/opt/data/osint/osint.sqlite'
 VAULT = os.environ.get('VAULT_DIR') or '/opt/data/AI_SecondBrain'
@@ -30,9 +33,10 @@ UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130 Safari/537.3
 CACHE_DAGEN, LOG_DAGEN = 30, 365
 NEP = os.environ.get('OSINT_NEP_NET') == '1'
 
-INGANGEN = ('adres', 'bedrijf', 'telefoon', 'persoon', 'kenteken', 'mail', 'bestand', 'voetafdruk', 'lijkend')
+INGANGEN = ('adres', 'bedrijf', 'telefoon', 'persoon', 'kenteken', 'mail', 'bestand', 'voetafdruk', 'lijkend', 'archief')
+MET_DOEL = ('persoon', 'archief')   # wv2848: archief (Delpher, Open Archieven) gaat op namen, dus dezelfde regel als persoon
 DOELEN = {'leverancier': 'leverancier controleren', 'waarnemer': 'waarnemer of sollicitant verifiëren', 'beller': 'beller duiden',
-          'pand': 'pand of adres', 'anders': 'anders'}
+          'pand': 'pand of adres', 'geschiedenis': 'geschiedenis of stamboom', 'anders': 'anders'}
 DOEL_STANDAARD = {'adres': 'pand', 'bedrijf': 'leverancier', 'telefoon': 'beller', 'kenteken': 'anders', 'mail': 'anders', 'bestand': 'anders',
                   'voetafdruk': 'anders', 'lijkend': 'anders'}
 HERKOMST_EXTERN_OK = {'david', 'david-vraag', 'facturen', 'kvk', 'contacten-organisatie'}
@@ -86,11 +90,11 @@ def poort(term, wie, herkomst, ingang, doel):
         return {'niveau': 'niets', 'reden': 'vorm: patiëntpoort niet te bepalen (dicht)'}
     if s:
         return {'niveau': 'niets', 'reden': 'vorm: patiëntpoort ziet ' + ', '.join(sorted(set(map(str, s))))}
-    if ingang == 'persoon':
+    if ingang in MET_DOEL:
         if doel not in DOELEN:
-            return {'niveau': 'niets', 'reden': 'persoon zonder doel'}
-        if wie == 'socev' and herkomst != 'david-vraag':
-            return {'niveau': 'niets', 'reden': 'persoon alleen op Davids vraag'}
+            return {'niveau': 'niets', 'reden': ingang + ' zonder doel'}
+        if wie != 'david' and herkomst != 'david-vraag':
+            return {'niveau': 'niets', 'reden': ingang + ' alleen op Davids vraag'}
     if wie == 'david':
         return {'niveau': 'alles', 'reden': 'Davids eigen invoer'}
     if herkomst in HERKOMST_EXTERN_OK:
@@ -652,6 +656,13 @@ def zoek_bedrijf(ctx, term):
             kern.update(x)
         except PoortDicht:
             kaarten.append(melding('Website', 'Niet opgehaald: de poort laat deze zoekterm niet naar buiten.'))
+        if ctx.niveau == 'alles':
+            try:
+                kaarten.append(harvester(ctx, dom))   # wv2848: theHarvester-achtig, alleen op het domein van deze bedrijfsingang
+            except PoortDicht:
+                pass
+            except Exception:
+                kaarten.append(melding('Subdomeinen en mailadressen', 'Deze bron gaf geen antwoord.'))
     if btw:
         try:
             k, vies_naam = vies(ctx, ''.join(btw))
@@ -822,10 +833,13 @@ def big(ctx, naam):
 
 def zoek_persoon(ctx, term):
     kaarten, kern = [], {}
-    with cf.ThreadPoolExecutor(3) as ex:
+    with cf.ThreadPoolExecutor(5) as ex:
         a = ex.submit(big, ctx, term)
         b = ex.submit(contacten, ctx, norm(term))
         c = ex.submit(mail_zoeken, ctx, '"%s"' % norm(term).replace('"', ''), 8)
+        # wv2848: tuchtrecht (achternaam) en Wikidata (alleen publieke personen); de poort staat hier al open (doel + Davids vraag)
+        d = ex.submit(tuchtrecht, ctx, term)
+        e = ex.submit(wikidata, ctx, norm(term), None, True)
         try:
             k, kern = a.result()
             kaarten.append(k)
@@ -840,6 +854,14 @@ def zoek_persoon(ctx, term):
                 pass
             except Exception:
                 kaarten.append(melding('Eigen bron', 'Een eigen bron gaf geen antwoord.'))
+        for f, titel in ((d, 'Tuchtrecht'), (e, 'Wikidata (publieke functies)')):
+            try:
+                kaarten.append(f.result())
+            except PoortDicht:
+                pass
+            except Exception:
+                kaarten.append(melding(titel, 'Deze bron gaf geen antwoord.'))
+    kaarten.append(hulplinks_persoon())
     pp = persoonspaginas(term)
     kaarten.append(kaartje('OVIS-persoonspagina', 'Second Brain (lokaal)', lijst=pp) if pp else
                    kaartje('OVIS-persoonspagina', 'Second Brain (lokaal)', klein='Geen persoonspagina met deze naam.'))
@@ -879,6 +901,15 @@ JUR = {
     'google': 'Google Maps Platform-voorwaarden: de foto alleen hier tonen; niet bewaren (ook niet in de cache of de Second Brain) en niet doorplaatsen. '
               'Mensen of kentekens op de foto niet herleiden.',
     'forensiek': 'Lokaal op de pod: de foto gaat niet naar buiten en wordt na het lezen gewist. De uitkomst is een aanwijzing, geen bewijs.',
+    # wv2848 (deel 2: registers en archief)
+    'lrza': 'Openbaar register van zorgaanbieders (CIBG): organisaties, licht. Bij een eenmanszaak staat de naam van de zorgverlener erin.',
+    'kvkopen': 'KvK open dataset (CC BY 4.0, zonder persoonsgegevens): geen bezwaar. Voorwaarde van de KvK: niet verrijken tot iets dat naar één persoon te herleiden is.',
+    'wikidata': 'Wikidata (CC0): bekende organisaties en publieke personen. Een gelijke naam is niet dezelfde persoon; een publieke functie is licht.',
+    'tuchtrecht': 'Tuchtuitspraken (overheid.nl) zijn geanonimiseerd: een treffer op een naam kan een gemachtigde of een ander zijn. Maatregelen bij naam staan in het BIG-register.',
+    'openarch': 'Historische akten (Open Archieven): overleden personen vallen buiten de AVG, recente akten zijn afgeschermd. Een gelijke naam is niet dezelfde familie.',
+    'delpher': 'Historische kranten (Delpher, KB, 1618–1995): licht. Een gelijke naam is niet dezelfde persoon.',
+    'harvester': 'Organisatiedomein: licht. Gevonden mailadressen van medewerkers zijn persoonsgegevens: alleen gebruiken voor het doel van deze zoekvraag.',
+    'hulplinks': 'Openbare registers met een wettelijk doel. Zoek zelf en alleen met een concreet belang (bijv. wie mag tekenen); vanuit OVIS gaat er niets heen.',
 }
 DOMEINEN_STANDAARD = ['tolgaarde.nl', 'huisartsentolgaarde.nl', 'hpgroenhouten.nl', 'hapleusden.nl', 'socev.dev']
 TOOLS = os.environ.get('OSINT_TOOLS') or '/opt/data/venvs/osint/tools'
@@ -1067,14 +1098,19 @@ def insolventie_link():
 
 
 def bedrijf_breed(ctx, naam, kvk):
-    """VIES zit apart (alleen met een btw-nummer). Hier: GLEIF, ICIJ, bekendmakingen, Rechtspraak, insolventie-link."""
+    """VIES zit apart (alleen met een btw-nummer). Hier: GLEIF, ICIJ, bekendmakingen, Rechtspraak, insolventie-link.
+    wv2848: + LRZa (zorgaanbieder, AGB-codes), KvK open dataset (alleen met KvK-nummer) en Wikidata (op KvK-nummer; op naam alleen zonder KvK)."""
     taken = []
     if kvk or naam:
         taken.append(('gleif', lambda: gleif(ctx, kvk=kvk) if kvk else gleif(ctx, naam=naam)))
+        taken.append(('lrza', lambda: lrza(ctx, kvk=kvk) if kvk else lrza(ctx, naam=naam)))
+        taken.append(('wd', lambda: wikidata(ctx, kvk=kvk) if kvk else wikidata(ctx, naam=naam)))
+    if kvk:
+        taken.append(('kvkopen', lambda: kvk_open(ctx, kvk)))
     if naam:
         taken += [('icij', lambda: icij(ctx, naam)), ('sru', lambda: bekendmakingen(ctx, naam)), ('rs', lambda: rechtspraak(ctx, naam))]
     uit = []
-    with cf.ThreadPoolExecutor(4) as ex:
+    with cf.ThreadPoolExecutor(7) as ex:
         fut = [(k, ex.submit(f)) for k, f in taken]
         for k, f in fut:
             try:
@@ -1082,7 +1118,8 @@ def bedrijf_breed(ctx, naam, kvk):
             except PoortDicht:
                 pass
             except Exception:
-                uit.append(melding({'gleif': 'LEI-register', 'icij': 'Offshore Leaks', 'sru': 'Officiële bekendmakingen', 'rs': 'Rechtspraak'}[k], 'Deze bron gaf geen antwoord.'))
+                uit.append(melding({'gleif': 'LEI-register', 'icij': 'Offshore Leaks', 'sru': 'Officiële bekendmakingen', 'rs': 'Rechtspraak', 'lrza': 'Zorgaanbieder (LRZa)',
+                                    'wd': 'Wikidata', 'kvkopen': 'KvK open data'}[k], 'Deze bron gaf geen antwoord.'))
     uit.append(insolventie_link())
     return uit
 
@@ -2287,6 +2324,357 @@ def zoek_lijkend(ctx, inst):
     return kaarten, {'nieuw': nieuw_alle, 'geregistreerd': tot, 'domeinen': len(doms), 'mislukt': mislukt}
 
 
+# ---------------------------------------------------------------- deel 2 (wv2848): registers en archief
+# Gemeten vanaf de pod 9-11-2026, zonder sleutel: LRZa (zorgaanbiedersportaal, json), KvK open dataset (HVDS, 1 vraag per minuut per IP),
+# Wikidata (wbsearchentities/wbgetentities/SPARQL), tuchtrecht (SRU van overheid.nl), Open Archieven (api.openarch.nl), Delpher (jsru.kb.nl),
+# HackerTarget hostsearch (50 per dag). Niet automatisch: AGB-register (Vektis, robotcontrole), curatele- en bewindregister (geboortedatum),
+# Kiesraad (geen zoekroute) → hulplinks. Namen gaan alleen naar buiten via de persoons- of archiefingang (doel, Davids vraag) of als
+# naam uit bedrijf_breed (dezelfde regel als Rechtspraak/ICIJ: review-MOET 1 van wv2698).
+LRZA = 'https://zoeken.zorgaanbiedersportaal.nl/api/v1/'
+LRZA_BRON = 'Landelijk Register Zorgaanbieders (CIBG, gratis)'
+
+
+def lrza_datum(d):
+    return '%02d-%02d-%04d' % (d['dag'], d['maand'], d['jaar']) if isinstance(d, dict) and all(isinstance(d.get(k), int) for k in ('dag', 'maand', 'jaar')) else None
+
+
+def lrza_adres(a):
+    if not isinstance(a, dict):
+        return None
+    return 'afgeschermd' if a.get('isafgeschermd') else ', '.join(str(x) for x in a.get('adresRegels') or [] if x) or None
+
+
+def lrza_agb(lijst):
+    return ', '.join('%s (%s)' % (x.get('code'), x.get('omschrijving') or '?') for x in lijst or [] if isinstance(x, dict) and x.get('code'))
+
+
+def lrza(ctx, kvk=None, naam=None):
+    if not kvk:
+        r = jhaal(ctx, 'LRZa (zorgaanbieders)', LRZA + 'Zoeken', 'naam: ' + naam, data={'naam': naam}, timeout=20)
+        if not isinstance(r, dict) or not isinstance(r.get('zorgaanbieders'), list):
+            return melding('Zorgaanbieder (LRZa)', 'Het Landelijk Register Zorgaanbieders gaf geen antwoord.', LRZA_BRON)
+        za = [x for x in r['zorgaanbieders'] if isinstance(x, dict) and re.fullmatch(r'\d{8}', str(x.get('kvknummer') or ''))]
+        if not za:
+            return kaartje('Zorgaanbieder (LRZa)', LRZA_BRON, klein='Geen zorgaanbieder met deze naam in het register.', juridisch=JUR['lrza'])
+        if len(za) > 1:
+            return kaartje('Zorgaanbieder (LRZa)', LRZA_BRON, items=[item(x.get('naam'), 'KvK ' + x['kvknummer']) for x in za[:12]],
+                           klein='%d zorgaanbieders met deze naam; zoek op het KvK-nummer voor AGB-codes en vestigingen.' % len(za), juridisch=JUR['lrza'])
+        kvk = za[0]['kvknummer']
+    st, x = haal(ctx, 'LRZa (zorgaanbieders)', LRZA + 'Organisatie/' + kvk, 'KvK-nummer ' + kvk, timeout=20, metcode=True)
+    try:
+        o = json.loads(x or 'null')
+    except ValueError:
+        o = None
+    if st == '404' or isinstance(o, dict) and not o.get('kvknummer') and o.get('status') == 404:
+        return kaartje('Zorgaanbieder (LRZa)', LRZA_BRON, klein='Geen zorgaanbieder: dit KvK-nummer staat niet in het register.', juridisch=JUR['lrza'])
+    if not isinstance(o, dict) or not o.get('kvknummer'):
+        return melding('Zorgaanbieder (LRZa)', 'Het Landelijk Register Zorgaanbieders gaf geen antwoord.', LRZA_BRON)
+    vest = [v for v in o.get('vestigingen') or [] if isinstance(v, dict)]
+    m = o.get('melding') if isinstance(o.get('melding'), dict) else {}
+    soort = ', '.join(y for y, ja in (('zorgaanbieder', m.get('isZorgaanbieder')), ('jeugdhulpaanbieder', m.get('isJeugdhulpaanbieder'))) if ja)
+    hoofd = getattr(ctx, 'hoofd', None)
+    kk = ctx.knoop('kvk', kvk, label2=o.get('naam'), zoek={'ingang': 'bedrijf', 'term': kvk})
+    ctx.rand(hoofd, kk, 'KvK-nummer')
+    for a in [x for x in o.get('agbregistraties') or [] if isinstance(x, dict) and x.get('code')] + \
+             [x for v in vest for x in v.get('agbregistraties') or [] if isinstance(x, dict) and x.get('code')]:
+        ctx.rand(kk, ctx.knoop('agb', str(a['code'])), 'AGB-code')
+    links = [item(v.get('tekst'), None, v.get('url')) for v in o.get('verantwoordingen') or [] if isinstance(v, dict) and str(v.get('url', '')).startswith('https://')]
+    return kaartje('Zorgaanbieder (LRZa)', LRZA_BRON, [
+        ('Naam', o.get('naam')), ('KvK-nummer', o.get('kvknummer')), ('Rechtsvorm', o.get('rechtsvorm')), ('Adres', lrza_adres(o.get('adres'))),
+        ('AGB-code organisatie', lrza_agb(o.get('agbregistraties'))), ('Soort (Wtza-melding)', soort),
+        ('Activiteit (SBI)', ', '.join(map(str, o.get('sbicodes') or []))), ('Ingeschreven', lrza_datum(o.get('datumInschrijving'))),
+        ('Uitgeschreven', lrza_datum(o.get('datumUitschrijving'))), ('Vestigingen', str(len(vest)) if vest else None)],
+        items=[item(' · '.join(y for y in (', '.join(v.get('handelsnamen') or []) or v.get('naam') or 'vestiging', 'hoofdvestiging' if v.get('isHoofdvestiging') else None) if y),
+                    ' · '.join(y for y in (lrza_adres(v.get('adres')), ('AGB ' + lrza_agb(v.get('agbregistraties'))) if v.get('agbregistraties') else None) if y))
+               for v in vest[:10]],
+        links=links + [item('Zorgaanbiedersportaal (zelf bekijken)', None, 'https://zoeken.zorgaanbiedersportaal.nl/')],
+        let='Volgens het register uitgeschreven.' if o.get('datumUitschrijving') else None, juridisch=JUR['lrza'])
+
+
+KVK_OPEN = 'https://opendata.kvk.nl/api/v1/hvds/basisbedrijfsgegevens/kvknummer/'
+KVK_INSOLVENTIE = {'FAIL': 'faillissement', 'SSAN': 'schuldsanering (WSNP)', 'SURS': 'surseance van betaling'}
+KVK_RV = {'BV': 'besloten vennootschap (bv)', 'NV': 'naamloze vennootschap (nv)'}
+
+
+def kvk_open(ctx, kvk):
+    bron = 'KvK open dataset (gratis, zonder sleutel, CC BY 4.0)'
+    st, x = haal(ctx, 'KvK open dataset', KVK_OPEN + kvk, 'KvK-nummer ' + kvk, timeout=15, metcode=True)
+    if st == '429':
+        return kaartje('KvK open data', bron, klein='De KvK geeft hier één antwoord per minuut; probeer het over een minuut opnieuw (Opnieuw ophalen).', juridisch=JUR['kvkopen'])
+    try:
+        o = json.loads(x or 'null')
+    except ValueError:
+        o = None
+    if st == '404' or isinstance(o, dict) and o.get('fout'):
+        return kaartje('KvK open data', bron, klein='Niet in de open dataset: die bevat alleen bv\'s en nv\'s.', juridisch=JUR['kvkopen'])
+    if not isinstance(o, dict) or not o.get('actief'):
+        return melding('KvK open data', 'De open dataset van de KvK gaf geen antwoord.', bron)
+    ins = str(o.get('insolventieCode') or '').strip().upper()
+    act = [a for a in o.get('activiteiten') or [] if isinstance(a, dict) and a.get('sbiCode')]
+    act.sort(key=lambda a: 0 if 'hoofd' in str(a.get('soortActiviteit', '')).lower() else 1)
+    start = datum_nl(o.get('datumAanvang')) if re.fullmatch(r'\d{8}', str(o.get('datumAanvang') or '')) and str(o.get('datumAanvang')) != '00000000' else None
+    let = []
+    if ins:
+        let.append('Volgens de KvK: %s.' % KVK_INSOLVENTIE.get(ins, ins))
+    if str(o.get('actief') or '').upper() == 'N':
+        let.append('Volgens de KvK niet meer actief.')
+    return kaartje('KvK open data', bron, [
+        ('Actief', {'J': 'ja', 'N': 'NEE'}.get(str(o.get('actief') or '').upper())), ('Rechtsvorm', KVK_RV.get(o.get('rechtsvormCode'), o.get('rechtsvormCode'))),
+        ('Gestart op', start), ('Faillissement, surseance of schuldsanering', KVK_INSOLVENTIE.get(ins, ins) if ins else 'geen'),
+        ('Activiteiten (SBI)', ', '.join('%s (%s)' % (a['sbiCode'], 'hoofd' if 'hoofd' in str(a.get('soortActiviteit', '')).lower() else 'neven') for a in act[:6])),
+        ('Postcodegebied', ('%s..' % o['postcodeRegio']) if o.get('postcodeRegio') not in (None, '') else None)],
+        let=' '.join(let) or None, juridisch=JUR['kvkopen'])
+
+
+WD_API = 'https://www.wikidata.org/w/api.php?'
+WD_EIG = [('P39', 'Functies'), ('P102', 'Partij'), ('P108', 'Werkgever'), ('P106', 'Beroep'), ('P749', 'Moederorganisatie'), ('P127', 'Eigenaar'),
+          ('P452', 'Sector'), ('P159', 'Hoofdkantoor')]
+
+
+def wd_label(e):
+    l = e.get('labels') or {}
+    return ((l.get('nl') or l.get('en') or {}).get('value')) if isinstance(l, dict) else None
+
+
+def wd_items(e, p):
+    uit = []
+    for c in ((e.get('claims') or {}).get(p) or []):
+        try:
+            v = c['mainsnak']['datavalue']['value']
+        except (KeyError, TypeError):
+            continue
+        if isinstance(v, dict) and re.fullmatch(r'Q\d+', str(v.get('id', ''))):
+            uit.append(v['id'])
+        elif isinstance(v, str):
+            uit.append(v)
+    return uit
+
+
+def wd_entiteiten(ctx, ids, naar, props='labels|descriptions|claims'):
+    ids = [i for i in dict.fromkeys(ids) if re.fullmatch(r'Q\d+', i)][:50]
+    if not ids:
+        return {}
+    r = jhaal(ctx, 'Wikidata', WD_API + up.urlencode({'action': 'wbgetentities', 'ids': '|'.join(ids), 'props': props, 'languages': 'nl|en', 'format': 'json'}),
+              naar, hdr={'User-Agent': 'OVIS-OSINT/1 (socev.dev)'}, timeout=20)
+    e = (r or {}).get('entities') if isinstance(r, dict) else None
+    if not isinstance(e, dict):
+        raise ValueError('wikidata: geen entiteiten')   # geen antwoord ≠ 'niet in Wikidata'
+    return {k: v for k, v in e.items() if isinstance(v, dict) and 'missing' not in v}
+
+
+def wikidata(ctx, naam=None, kvk=None, mens=False):
+    titel = 'Wikidata (publieke functies)' if mens else 'Wikidata'
+    bron = 'Wikidata (gratis, CC0)'
+    wd_hdr = {'User-Agent': 'OVIS-OSINT/1 (socev.dev)'}
+    if kvk:   # haswbstatement:P3220 (KvK-nummer) via de zoek-API; de SPARQL-dienst gaf 9-11 wisselend 429
+        q, nb = {'action': 'query', 'list': 'search', 'srsearch': 'haswbstatement:P3220=%s' % kvk, 'srlimit': 3, 'format': 'json'}, 'KvK-nummer ' + kvk
+    else:
+        q, nb = {'action': 'wbsearchentities', 'search': naam, 'language': 'nl', 'uselang': 'nl', 'type': 'item', 'limit': 7, 'format': 'json'}, 'naam: ' + naam
+    st, x = haal(ctx, 'Wikidata', WD_API + up.urlencode(q), nb, hdr=wd_hdr, timeout=20, metcode=True)
+    try:
+        r = json.loads(x or 'null') if st in ('200', 'nep') else None
+    except ValueError:
+        r = None
+    if not isinstance(r, dict) or 'error' in r or ('query' if kvk else 'search') not in r:
+        return melding(titel, 'Wikidata gaf nu geen antwoord (%s); probeer het later opnieuw.' % st, bron)
+    if kvk:
+        ids = [x.get('title') for x in ((r.get('query') or {}).get('search') or []) if isinstance(x, dict)]
+    else:
+        ids = [x.get('id') for x in r.get('search') or [] if isinstance(x, dict)]
+    ents = wd_entiteiten(ctx, [i for i in ids if i], 'Wikidata-nummers uit de vorige vraag')
+    ents = {k: e for k, e in ents.items() if ('Q5' in wd_items(e, 'P31')) == mens}
+    if not ents:
+        return kaartje(titel, bron, klein=('Geen publiek persoon met deze naam in Wikidata.' if mens else 'Niet in Wikidata (daar staan vooral bekende organisaties).'),
+                       juridisch=JUR['wikidata'])
+    ref = [q for e in ents.values() for p, _ in WD_EIG for q in wd_items(e, p)[:6] if re.fullmatch(r'Q\d+', q)]
+    try:
+        lab = {k: wd_label(e) for k, e in wd_entiteiten(ctx, ref, 'Wikidata-nummers van functies en organisaties', 'labels').items()}
+    except PoortDicht:
+        raise
+    except Exception:
+        lab = {}   # zonder namen van functies; het kaartje blijft
+    rij = []
+    for q in [i for i in ids if i in ents][:5]:
+        e = ents[q]
+        d = (e.get('descriptions') or {})
+        oms = ((d.get('nl') or d.get('en') or {}).get('value')) if isinstance(d, dict) else None
+        extra = ['%s: %s' % (nm, ', '.join(dict.fromkeys(lab.get(x) for x in wd_items(e, p)[:6] if lab.get(x)))) for p, nm in WD_EIG
+                 if any(lab.get(x) for x in wd_items(e, p)[:6])]
+        web = next((w for w in wd_items(e, 'P856') if str(w).startswith('https://')), None)
+        rij.append(item(' · '.join(y for y in (wd_label(e) or q, oms) if y), ' · '.join(extra + ([web] if web else [])) or None, 'https://www.wikidata.org/wiki/' + q))
+        if not mens:
+            ctx.rand(getattr(ctx, 'hoofd', None), ctx.knoop('wikidata', q, label2=wd_label(e)), 'Wikidata')
+    return kaartje(titel, bron, items=rij, klein=('Een gelijke naam is niet dezelfde persoon; %d treffer(s).' % len(rij)) if mens else None, juridisch=JUR['wikidata'])
+
+
+def sru_s(x):
+    """SRU-veld als tekst: een lijst (bijv. twee beslissingen, gemeten 9-11), een {'$': …} of een kale waarde."""
+    if isinstance(x, list):
+        return ', '.join(t for t in (sru_s(i) for i in x) if t) or None
+    if isinstance(x, dict):
+        return sru_s(x.get('$'))
+    return str(x) if x not in (None, '') else None
+
+
+def tuchtrecht(ctx, naam):
+    vl, vv, achter = splits_naam(naam)
+    zoek = ' '.join(y for y in (vv, achter) if y)
+    if not zoek:
+        return melding('Tuchtrecht', 'Geen achternaam herkend.', 'Tuchtrecht (overheid.nl)')
+    # review-ZOU 1 (Codex): de bron sorteert zelf op publicatie (dt.modified aflopend, gemeten 9-11), anders zijn 25 treffers niet de nieuwste
+    q = 'c.product-area==tuchtrecht AND cql.textAndIndexes="%s" sortBy dt.modified/sort.descending' % zoek.replace('"', '')
+    r = jhaal(ctx, 'Tuchtrecht (SRU)', 'https://repository.overheid.nl/sru?' + up.urlencode({'query': q, 'maximumRecords': 25, 'httpAccept': 'application/json'}),
+              'achternaam: ' + zoek, timeout=25)
+    srr = (r or {}).get('searchRetrieveResponse') or {} if isinstance(r, dict) else {}
+    if not srr:
+        return melding('Tuchtrecht', 'De zoekdienst van overheid.nl gaf geen antwoord.', 'Tuchtrecht (overheid.nl)')
+    n = int(srr.get('numberOfRecords') or 0)
+    rec = (srr.get('records') or {}).get('record') or []
+    rec = [rec] if isinstance(rec, dict) else rec
+    rij = []
+    for x in rec:
+        try:
+            g = x['recordData']['gzd']
+            meta = g['originalData']['meta']
+        except (KeyError, TypeError):
+            continue
+        kern, mantel, tp = meta.get('owmskern') or {}, meta.get('owmsmantel') or {}, meta.get('tpmeta') or {}
+        dt = sru_s(tp.get('uitspraakdatum')) or sru_s(mantel.get('available')) or ''
+        rij.append((dt, item(' · '.join(y for y in (datum_nl(dt), sru_s(kern.get('creator')) or sru_s(kern.get('type'))) if y),
+                             ' · '.join(y for y in (sru_s(tp.get('instantieDomein')), sru_s(tp.get('beslissing')), (re.sub(r'\s+', ' ', sru_s(mantel.get('description')) or '')[:200] or None),
+                                                    sru_s(kern.get('identifier'))) if y),
+                             (g.get('enrichedData') or {}).get('preferredUrl'))))
+    rij.sort(key=lambda z: z[0], reverse=True)
+    if not n:
+        return kaartje('Tuchtrecht', 'Tuchtrecht (overheid.nl, gratis)', klein='Geen tuchtuitspraak met deze naam in de tekst.', juridisch=JUR['tuchtrecht'])
+    return kaartje('Tuchtrecht', 'Tuchtrecht (overheid.nl, gratis)', items=[z[1] for z in rij[:10]],
+                   klein='%d uitspraken met deze naam ergens in de tekst; hier de %d laatst gepubliceerde. Uitspraken zijn geanonimiseerd: de naam kan van een gemachtigde of een ander zijn.' % (n, min(10, len(rij))),
+                   juridisch=JUR['tuchtrecht'])
+
+
+def hulplinks_persoon():
+    return kaartje('Zelf na te kijken', 'Registers zonder open zoekroute (handmatig)', links=[
+        item('AGB-register (Vektis)', 'zorgverlener op naam of AGB-code; met een robotcontrole, dus niet automatisch', 'https://www.vektis.nl/agb-register/zoeken'),
+        item('Curatele- en bewindregister', 'vraagt naam en geboortedatum; alleen zelf, OVIS stuurt niets', 'https://ccbr.rechtspraak.nl/'),
+        item('Centraal Insolventieregister', 'faillissement of schuldsanering (WSNP) op naam', 'https://insolventies.rechtspraak.nl/'),
+        item('Kiesraad (kandidaten en gekozenen)', 'raadsleden en kandidatenlijsten per verkiezing', 'https://www.kiesraad.nl/verkiezingen')],
+        klein='Deze registers hebben geen open zoekroute of vragen een geboortedatum; daarom alleen de link.', juridisch=JUR['hulplinks'])
+
+
+# ---------------------------------------------------------------- archief (wv2848): Delpher-kranten en Open Archieven-akten
+def delpher(ctx, term):
+    # jsru vindt niets met aanhalingstekens rond losse woorden (gemeten 9-11): kale woorden, zonder CQL-sleutelwoorden
+    woorden = [w for w in re.findall(r'\w+', term) if len(w) > 1 and w.lower() not in ('and', 'or', 'not', 'prox', 'sortby', 'any', 'all', 'adj')][:6]
+    if not woorden:
+        return melding('Kranten (Delpher)', 'Geen zoekwoord herkend.', 'Delpher (KB)')
+    q = ' AND '.join(woorden)
+    x = haal(ctx, 'Delpher (KB, kranten)', 'https://jsru.kb.nl/sru/sru?' + up.urlencode({'query': q, 'x-collection': 'DDD_artikel', 'maximumRecords': 10,
+             'recordSchema': 'ddd', 'version': '1.2', 'operation': 'searchRetrieve'}), 'zoekwoorden: ' + ' '.join(woorden), timeout=25) or ''
+    m = re.search(r'<(?:srw:)?numberOfRecords>(\d+)<', x)
+    if not m:
+        return melding('Kranten (Delpher)', 'Delpher gaf geen antwoord.', 'Delpher (KB)')
+    g = lambda t, k: html.unescape((re.search(r'<%s>(.*?)</%s>' % (k, k), t, re.S) or [None, ''])[1]).strip()
+    rij = []
+    for t in re.findall(r'<(?:srw:)?recordData>(.*?)</(?:srw:)?recordData>', x, re.S)[:10]:
+        sleutel = g(t, 'ddd:metadataKey')
+        dt = re.sub(r'^(\d{4})/(\d{2})/(\d{2}).*$', r'\3-\2-\1', g(t, 'dc:date'))
+        rij.append(item(' · '.join(y for y in (dt, g(t, 'dc:title') or 'artikel') if y), ' · '.join(y for y in (g(t, 'ddd:papertitle'), g(t, 'dc:type'), g(t, 'ddd:spatial')) if y),
+                        ('https://www.delpher.nl/nl/kranten/view?' + up.urlencode({'coll': 'ddd', 'identifier': sleutel})) if re.fullmatch(r'[A-Za-z0-9]+(?::[A-Za-z0-9]+){2,5}', sleutel) else None))   # ddd:… of KBPERS01:… (gemeten 9-11)
+    n = int(m.group(1))
+    if not n:
+        return kaartje('Kranten (Delpher)', 'Delpher (KB, kranten 1618–1995, gratis)', klein='Geen krantenartikel met deze woorden.', juridisch=JUR['delpher'])
+    return kaartje('Kranten (Delpher)', 'Delpher (KB, kranten 1618–1995, gratis)', items=rij,
+                   klein='%d artikelen met al deze woorden; hier de eerste %d.' % (n, len(rij)),
+                   links=[item('Verder zoeken in Delpher', None, 'https://www.delpher.nl/nl/kranten/results?' + up.urlencode({'query': ' '.join(woorden), 'coll': 'ddd'}))],
+                   juridisch=JUR['delpher'])
+
+
+def open_archieven(ctx, term):
+    r = jhaal(ctx, 'Open Archieven', 'https://api.openarch.nl/1.0/records/search.json?' + up.urlencode({'name': term, 'number_show': 10, 'lang': 'nl'}),
+              'naam: ' + term, timeout=25)
+    res = (r or {}).get('response') if isinstance(r, dict) else None
+    if not isinstance(res, dict):
+        return melding('Akten (Open Archieven)', 'Open Archieven gaf geen antwoord.', 'Open Archieven')
+    docs = [d for d in res.get('docs') or [] if isinstance(d, dict)]
+    if not docs:
+        return kaartje('Akten (Open Archieven)', 'Open Archieven (gratis)', klein='Geen akte of registratie met deze naam.', juridisch=JUR['openarch'])
+    def jaar(d):
+        e = d.get('eventdate') if isinstance(d.get('eventdate'), dict) else {}
+        return '-'.join(str(e[k]) for k in ('day', 'month', 'year') if e.get(k)) or None
+    rij = [item(' · '.join(y for y in (re.sub(r'\s+', ' ', sru_s(d.get('personname')) or '')[:160], sru_s(d.get('relationtype'))) if y),
+                ' · '.join(y for y in (sru_s(d.get('eventtype')), jaar(d), sru_s(d.get('eventplace')), sru_s(d.get('sourcetype')), sru_s(d.get('archive'))) if y),
+                d.get('url') if str(d.get('url', '')).startswith('https://www.openarchieven.nl/') else None) for d in docs[:10]]
+    return kaartje('Akten (Open Archieven)', 'Open Archieven (gratis; honderden archieven)', items=rij,
+                   klein='%s treffers; hier de eerste %d. Een gelijke naam is niet dezelfde familie.' % (res.get('number_found'), len(rij)),
+                   links=[item('Verder zoeken in Open Archieven', None, 'https://www.openarchieven.nl/search.php?' + up.urlencode({'name': term}))], juridisch=JUR['openarch'])
+
+
+def zoek_archief(ctx, term):
+    kaarten = []
+    with cf.ThreadPoolExecutor(2) as ex:
+        fut = [('Kranten (Delpher)', ex.submit(delpher, ctx, term)), ('Akten (Open Archieven)', ex.submit(open_archieven, ctx, term))]
+        for titel, f in fut:
+            try:
+                kaarten.append(f.result())
+            except PoortDicht:
+                kaarten.append(melding(titel, 'Niet opgehaald: de poort laat deze zoekterm niet naar buiten.'))
+            except Exception:
+                kaarten.append(melding(titel, 'Deze bron gaf geen antwoord.'))
+    return kaarten, {'archief': len([k for k in kaarten if k.get('items')])}
+
+
+# ---------------------------------------------------------------- theHarvester-achtig (wv2848): alleen een domein uit de bedrijfsingang
+def site_pagina(ctx, url):
+    try:
+        st, x = haal(ctx, 'Website (mailadressen)', url, 'de pagina zelf (geen zoekterm)', timeout=8, maxb=600_000, redirects=False, totaal=12, metcode=True)
+    except PoortDicht:
+        raise
+    except Exception:
+        return None
+    return x if st in ('200', 'nep') else None
+
+
+def harvester(ctx, dom):
+    """Subdomeinen en servers (HackerTarget hostsearch, gratis 50 per dag) en mailadressen op de eigen website van het domein (voorpagina
+    en /contact; alleen https, publieke host, niet doorsturen). Geen zoekmachines, geen persoonsnamen. theHarvester zelf draait niet op
+    de pod (Python 3.12 + tientallen pakketten); dit zijn de twee bronnen daarvan die zonder sleutel werken."""
+    hosts, mails, noot = [], set(), []
+    try:
+        st, x = haal(ctx, 'HackerTarget (hostsearch)', 'https://api.hackertarget.com/hostsearch/?' + up.urlencode({'q': dom}), dom, timeout=15, metcode=True)
+    except PoortDicht:
+        raise
+    except Exception:
+        st, x = 'fout', ''
+    if 'API count exceeded' in (x or '') or st == '429':
+        noot.append('HackerTarget: daglimiet bereikt (50 per dag zonder sleutel).')
+    elif st in ('200', 'nep'):
+        for l in (x or '').splitlines()[:200]:
+            h, _, ip = l.strip().partition(',')
+            if h.lower() == dom or h.lower().endswith('.' + dom):
+                hosts.append((h.lower(), ip.strip()))
+    else:
+        noot.append('HackerTarget gaf geen antwoord.')
+    basis = None
+    for b in ('https://www.%s' % dom, 'https://%s' % dom):
+        if foto_url_ok(b + '/'):
+            p = site_pagina(ctx, b + '/')
+            if p is not None:
+                basis = b
+                mails |= set(m.lower() for m in re.findall(r'[\w.+-]+@(?:[\w-]+\.)*' + re.escape(dom) + r'\b', html.unescape(p), re.I))
+                break
+    if basis:
+        p = site_pagina(ctx, basis + '/contact')
+        if p:
+            mails |= set(m.lower() for m in re.findall(r'[\w.+-]+@(?:[\w-]+\.)*' + re.escape(dom) + r'\b', html.unescape(p), re.I))
+    else:
+        noot.append('De website gaf geen pagina zonder doorsturen.')
+    mails = sorted(m for m in mails if not re.search(r'\.(png|jpe?g|gif|svg|webp)$', m))[:20]
+    return kaartje('Subdomeinen en mailadressen', 'HackerTarget en de eigen website (theHarvester-achtig, gratis)', [
+        ('Servers', str(len(hosts)) if hosts or not noot else None), ('Mailadressen op de site', str(len(mails)) if basis else None)],
+        items=[item(h, ip) for h, ip in sorted(set(hosts))[:15]] + [item(m, 'op de website') for m in mails],
+        klein=' '.join(noot) or None, juridisch=JUR['harvester'])
+
+
 # ---------------------------------------------------------------- herkennen en zoeken
 def herken(term):
     t = norm(term)
@@ -2309,10 +2697,12 @@ def herken(term):
     return 'bedrijf'
 
 
-ZOEK = {'adres': zoek_adres, 'bedrijf': zoek_bedrijf, 'telefoon': zoek_telefoon, 'persoon': zoek_persoon, 'kenteken': zoek_kenteken}
+ZOEK = {'adres': zoek_adres, 'bedrijf': zoek_bedrijf, 'telefoon': zoek_telefoon, 'persoon': zoek_persoon, 'kenteken': zoek_kenteken, 'archief': zoek_archief}
 ZONDER_TERM = ('voetafdruk', 'lijkend')   # werken alleen op de eigen lijsten uit de instelling, nooit op een vrije zoekterm
 JUR_BRON = [('PDOK', 'pdok'), ('BAG', 'pdok'), ('OpenCorporates', 'kvk'), ('Liza', 'kvk'), ('RDAP', 'domein'), ('BIG', 'big'), ('Facturen', 'eigen'),
-            ('Contacts', 'eigen'), ('mail', 'eigen'), ('Second Brain', 'eigen'), ('libphonenumber', 'telefoon')]
+            ('Contacts', 'eigen'), ('mail', 'eigen'), ('Second Brain', 'eigen'), ('libphonenumber', 'telefoon'),
+            ('Zorgaanbieders', 'lrza'), ('KvK open', 'kvkopen'), ('Wikidata', 'wikidata'), ('Tuchtrecht', 'tuchtrecht'), ('Delpher', 'delpher'),
+            ('Open Archieven', 'openarch'), ('HackerTarget', 'harvester')]   # wv2848: ook de meldingen 'gaf geen antwoord' van deel 2
 
 
 def met_juridisch(kaarten):
@@ -2365,7 +2755,7 @@ def zoek(v):
         poort_tekst = term
     doel = v.get('doel') or DOEL_STANDAARD.get(ingang)
     if doel not in DOELEN:
-        doel = None if ingang == 'persoon' else 'anders'
+        doel = None if ingang in MET_DOEL else 'anders'
     doel_tekst = norm(v.get('doel_tekst'))[:120] or None
     herkomst = 'david' if wie == 'david' else (norm(v.get('herkomst')).lower()[:40] or None)
     pt = poort(poort_tekst, wie, herkomst, ingang, doel)
@@ -2386,7 +2776,7 @@ def zoek(v):
     beelden = v.get('beelden') is not False
     ctx = Ctx(pt['niveau'], beelden, wie)
     graaf = None
-    if pt['niveau'] == 'niets' and (pt['reden'].startswith('persoon') or ingang in ('voetafdruk', 'bestand')):
+    if pt['niveau'] == 'niets' and (pt['reden'].startswith(MET_DOEL) or ingang in ('voetafdruk', 'bestand')):
         kaarten, kern = [melding('Niet gezocht', 'Niet gezocht: ' + pt['reden'] + '.')], {}
     elif rij:
         u = json.loads(rij[1])
