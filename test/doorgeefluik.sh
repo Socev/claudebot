@@ -178,6 +178,15 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
   const z7 = await D.doorgeefZet({ sleutel: 'bbbbbbbbbbbbbbbb:' + q1.hash, jobId: 'bbbbbbbbbbbbbbbb', hash: q1.hash, zin: 'een Mediatheek-app in Socev-app › Apps', tDruk: morgen });
   toets('7 zelfde zin, andere dag (andere beurt): nieuwe rij', z7.ok && !z7.al && !z7.bestond && wv.length === 2 && wv[1].label !== wv[0].label, { z7, labels: wv.map(function (x) { return x.label; }) });
 
+  // ── (8) wv2831: zelfde vraag (hash) uit een andere beurt op dezelfde dag ──
+  const nRpc8 = rpc.length, nWv8 = wv.length;
+  const z8 = await D.doorgeefZet({ sleutel: 'aaaa8888aaaa8888:' + q1.hash, jobId: 'aaaa8888aaaa8888', hash: q1.hash, zin: 'een Mediatheek-app in Socev-app › Apps', tDruk: Date.now() });
+  toets('8 zelfde hash, andere beurt, zelfde dag: stond er al (rij 900), geen RPC, geen nieuwe rij', z8.ok && z8.al && z8.id === 900 && rpc.length === nRpc8 && wv.length === nWv8, z8);
+  const z8b = await D.doorgeefZet({ sleutel: 'aaaa9999aaaa9999:' + q1.hash, jobId: 'aaaa9999aaaa9999', hash: q1.hash, zin: 'een Mediatheek-app in Socev-app › Apps', tDruk: morgen + 3600000 });
+  toets('8 en op de dag van rij 7 (morgen) wijst hij naar rij 7', z8b.ok && z8b.al && z8b.id === wv[1].id && wv.length === nWv8, z8b);
+  const z8c = await D.doorgeefZet({ sleutel: 'aaaa7777aaaa7777:' + q1.hash.replace(/^./, function (c) { return c === 'f' ? '0' : 'f'; }), jobId: 'aaaa7777aaaa7777', hash: q1.hash.replace(/^./, function (c) { return c === 'f' ? '0' : 'f'; }), zin: 'andere vraag', tDruk: Date.now() });
+  toets('8 andere hash, zelfde dag: nieuwe rij', z8c.ok && !z8c.al && wv.length === nWv8 + 1, z8c);
+
   // ── gelijktijdig: één schrijver ──
   const nZet = wv.length;
   const [g1, g2, g3] = await Promise.all([

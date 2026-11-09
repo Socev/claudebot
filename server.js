@@ -21784,6 +21784,10 @@ async function doorgeefZetNu(o) {
     const al = st.rijen[o.sleutel];
     if (al) return { ok: true, al: true, id: al.id };
     const dag = doorgeefDag(o.tDruk);
+    // wv2831: dezelfde vraag (hash) uit een andere beurt op dezelfde dag = stond er al (9-11-2026: twee Ja's op 5433f2a2 gaven twee rijen).
+    // Op een andere dag blijft het een nieuwe rij (ontwerp wv1267, toets 7).
+    const zelfde = Object.keys(st.rijen).filter(function (k) { const r = st.rijen[k]; return r && r.dag === dag && k.slice(-(o.hash.length + 1)) === ':' + o.hash; })[0];
+    if (zelfde) return { ok: true, al: true, id: st.rijen[zelfde].id };
     if (Object.keys(st.rijen).filter(function (k) { return st.rijen[k] && st.rijen[k].dag === dag; }).length >= DOORGEEF_DAG_MAX)
       return { ok: false, reden: 'vandaag zijn er al ' + DOORGEEF_DAG_MAX + ' opdrachten doorgegeven (dagmaximum)' };
     let items = [];
