@@ -174,7 +174,7 @@ test('migratie 5 (wv1299): schema 4 → 5 verruimt bank/formaat met TRIODOS/trio
   const dir = map('m5');
   dbOpSchema4(dir).close();
   const f = D.open(dir);
-  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
+  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
   assert.equal(f.schema, D.SCHEMA_VERSIE);
   assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
@@ -232,7 +232,7 @@ test('migratie 5 (wv1299): een fout ná het bijwerken van sqlite_master rolt vol
   assert.deepEqual(tabelSql(db), voor);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   db.close();
-  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
+  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
 });
 
 test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets', () => {
@@ -1085,7 +1085,7 @@ test("migratie 11 (wv1326): signaal krijgt soort 'afwijkend_bedrag'; vanaf schem
   const dir2 = path.dirname(d2.pad);
   D.sluit(d2);
   const e2 = D.open(dir2);
-  assert.deepEqual(e2.toegepast, [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
+  assert.deepEqual(e2.toegepast, [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
   assert.equal(sigSql(e2.db), vers);
   D.sluit(e2);
 });
@@ -1163,7 +1163,7 @@ test("migratie 16 (wv2244): categorie 'winstvoorschot' in uitzondering en bank_t
 });
 
 // wv2445: sinds 4-11 staan de zakelijke betaalrekeningen op de bankluis; M20 laat de batch daar weer toe, POT en Privé blijven uitgesloten.
-test('migratie 20 (wv2445): sepa_batch_rekening laat een zakelijke bankluis-rekening toe, POT (bankluis) en Privé niet; herhaalbaar na lichte terugrol', () => {
+test('migratie 20 (wv2445) + 23 (wv2842): sepa_batch_rekening laat een zakelijke bankluis-rekening en de POT toe, Privé niet; herhaalbaar na lichte terugrol', () => {
   const dir = map();
   let f = basis(dir);
   const tgLuis = { id: 'aaaaaaaaaaaa0003', entiteit: 'tolgaarde', iban: Z.maakIban('NL', 'TEST', '0000000013'), bank_formaat: 'bankluis', bankluis_rek: 'proef-tg', controle: 1 };
@@ -1176,7 +1176,7 @@ test('migratie 20 (wv2445): sepa_batch_rekening laat een zakelijke bankluis-reke
     batch(tgLuis.id, tgLuis.iban, 'tolgaarde');                                   // zakelijke bankluis: mag
     batch('aaaaaaaaaaaa0001', Z.maakIban('NL', 'TEST', '0000000011'), 'tolgaarde');  // gewone rekening: mag nog steeds
     gooit(() => batch('aaaaaaaaaaaa0002', potIban, 'tolgaarde'), /sepa_rekening/);    // POT-rekening onder een andere entiteit
-    gooit(() => batch('aaaaaaaaaaaa0002', potIban, 'pot'), /CHECK|sepa_rekening/);
+    batch('aaaaaaaaaaaa0002', potIban, 'pot');                                       // wv2842 (M23): de POT op zijn eigen rekening mag
     gooit(() => batch(tgLuis.id, potIban, 'tolgaarde'), /sepa_rekening/);              // IBAN hoort niet bij de rekening
     const priveIban = Z.maakIban('NL', 'TEST', '0000000019');
     gooit(() => batch('aaaaaaaaaaaa0009', priveIban, 'prive'), /CHECK|sepa_rekening/);    // Privé
@@ -1186,12 +1186,74 @@ test('migratie 20 (wv2445): sepa_batch_rekening laat een zakelijke bankluis-reke
   const sql = () => f.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'sepa_batch_rekening'").get().sql;
   assert.doesNotMatch(sql(), /bankluis/);
   // lichte terugrol: oude trigger terug en de rij weg → opnieuw openen past M20 opnieuw toe
-  f.db.exec("DELETE FROM schema_migratie WHERE versie = 20; DROP TRIGGER sepa_batch_rekening; CREATE TRIGGER sepa_batch_rekening BEFORE INSERT ON sepa_batch " +
+  // (wv2842: een release van vóór wv2445 kent M23 ook niet, dus de lichte terugrol haalt 20 én 23 weg; M23 zet daarna de POT weer open)
+  f.db.exec("DELETE FROM schema_migratie WHERE versie IN (20, 23); DROP TRIGGER sepa_batch_rekening; CREATE TRIGGER sepa_batch_rekening BEFORE INSERT ON sepa_batch " +
     "WHEN NOT EXISTS (SELECT 1 FROM rekening r WHERE r.id = NEW.rekening AND r.bank_formaat <> 'bankluis') BEGIN SELECT RAISE(ABORT, 'sepa_rekening: oud'); END;");
   D.sluit(f);
   f = D.open(dir);
-  assert.deepEqual(f.toegepast, [20]);
+  assert.deepEqual(f.toegepast, [20, 23]);
   assert.doesNotMatch(sql(), /bankluis/);
   toets();
   D.sluit(f);
+});
+
+
+// wv2842 (David 9-11-2026: "Mag wel ook batch voor gemaakt, we hebben tegenwoordig de Batch-extensie"): M23 verruimt de CHECK op
+// sepa_batch.entiteit (POT mag, Privé niet) en vervangt de trigger. Vanuit schema 22 (oude CHECK en trigger): bestaande batches blijven,
+// integrity ok, schema gelijk aan een nieuw aangemaakte database; al verruimd = overslaan; sepa_verzending blijft alleen Tolgaarde.
+test('migratie 23 (wv2842): vanaf schema 22 mag de POT een batch, Privé nooit; rijen blijven; herhaalbaar; sepa_verzending blijft Tolgaarde', () => {
+  const schemaVan = (db) => db.prepare("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").all().map((x) => x.type + ' ' + x.name + ' ' + x.sql).join('\n');
+  const leeg = map(); const v = D.open(leeg); const verwacht = schemaVan(v.db); D.sluit(v);
+  const dir = map();
+  let f = basis(dir);
+  let nr = 0;
+  const batch = (rekId, iban, ent) => D.voegToe(f, 'sepa_batch', { id: 'eeeeeeeeeeee00' + String(++nr).padStart(2, '0'), rekening: rekId, entiteit: ent, formaat: 'pain.001.001.09',
+    msg_id: 'PROEF-M23-' + nr, cre_dt_tm: '2026-11-09T10:00:00', initg_naam: 'x', dbtr_naam: 'x', dbtr_iban: iban, aantal: 1, totaal_centen: 1, sha256: 'a'.repeat(64), wie: 'x', wanneer: iso(NU) });
+  const tgIban = Z.maakIban('NL', 'TEST', '0000000011'), potIban = Z.maakIban('NL', 'TEST', '0000000015'), priveIban = Z.maakIban('NL', 'TEST', '0000000019');
+  batch('aaaaaaaaaaaa0001', tgIban, 'tolgaarde');   // een bestaande batch vóór de migratie
+  // terug naar schema 22: oude CHECK-tekst in sqlite_master, oude trigger (M20), rij 23 weg
+  const sql = f.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sepa_batch'").get().sql;
+  assert.equal(sql.split("CHECK (entiteit <> 'prive')").length - 1, 1, 'nieuwe database: verruimde CHECK');
+  const sv = Number(f.db.prepare('PRAGMA schema_version').get().schema_version);
+  f.db.exec('PRAGMA writable_schema = ON');
+  f.db.prepare("UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = 'sepa_batch'").run(sql.replace("CHECK (entiteit <> 'prive')", "CHECK (entiteit NOT IN ('prive','pot'))"));
+  f.db.exec('PRAGMA schema_version = ' + (sv + 1)); f.db.exec('PRAGMA writable_schema = OFF');
+  f.db.exec("DELETE FROM schema_migratie WHERE versie = 23; DROP TRIGGER sepa_batch_rekening; CREATE TRIGGER sepa_batch_rekening BEFORE INSERT ON sepa_batch " +
+    "WHEN NOT EXISTS (SELECT 1 FROM rekening r WHERE r.id = NEW.rekening AND r.entiteit = NEW.entiteit AND r.controle = 1 AND r.iban = NEW.dbtr_iban AND r.entiteit NOT IN ('prive','pot')) " +
+    "BEGIN SELECT RAISE(ABORT, 'sepa_rekening: de rekening hoort niet bij deze entiteit of kan geen batch'); END;");
+  D.sluit(f);
+  f = new (require('node:sqlite').DatabaseSync)(path.join(dir, 'facturen.sqlite'));   // kruisproef: op schema 22 weigert de database de POT
+  f.exec('PRAGMA foreign_keys = ON');
+  assert.throws(() => f.prepare("INSERT INTO sepa_batch (id, rekening, entiteit, formaat, msg_id, cre_dt_tm, initg_naam, dbtr_naam, dbtr_iban, aantal, totaal_centen, sha256, wie, wanneer) " +
+    "VALUES ('eeeeeeeeeeee0099', 'aaaaaaaaaaaa0002', 'pot', 'pain.001.001.09', 'K', '2026-11-09T10:00:00', 'x', 'x', ?, 1, 1, ?, 'x', 'x')").run(potIban, 'a'.repeat(64)), /CHECK|sepa_rekening/);
+  f.close();
+  f = D.open(dir);
+  assert.deepEqual(f.toegepast, [23]);
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  assert.equal(schemaVan(f.db), verwacht, 'schema na M23 = nieuw aangemaakt');
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM sepa_batch').get().n, 1, 'bestaande batch blijft');
+  batch('aaaaaaaaaaaa0002', potIban, 'pot');                                      // POT op de eigen rekening: mag
+  gooit(() => batch('aaaaaaaaaaaa0002', potIban, 'tolgaarde'), /sepa_rekening/);    // POT-rekening onder een andere entiteit
+  gooit(() => batch('aaaaaaaaaaaa0001', tgIban, 'pot'), /sepa_rekening/);           // Tolgaarde-rekening onder de POT
+  gooit(() => batch('aaaaaaaaaaaa0009', priveIban, 'prive'), /CHECK|sepa_rekening/);  // Privé nooit
+  gooit(() => f.db.prepare("UPDATE rekening SET controle = 0 WHERE id = 'aaaaaaaaaaaa0002'").run() && batch('aaaaaaaaaaaa0002', potIban, 'pot'), /sepa_rekening/);   // zonder controle niet
+  f.db.prepare("UPDATE rekening SET controle = 1 WHERE id = 'aaaaaaaaaaaa0002'").run();
+  // grondwet 1: een POT-batch kan nooit een verzendrij naar nogbetalen@ krijgen (CHECK entiteit IN ('tolgaarde'))
+  const potBatch = f.db.prepare("SELECT id, msg_id FROM sepa_batch WHERE entiteit = 'pot'").get();
+  gooit(() => D.voegToe(f, 'sepa_verzending', { batch: potBatch.id, msg_id: potBatch.msg_id, entiteit: 'pot', modus: 'auto', status: 'wacht', aan: 'nogbetalen@huisartsentolgaarde.nl',
+    aangemaakt_op: iso(NU), bijgewerkt_op: iso(NU) }), /CHECK/);
+  gooit(() => D.voegToe(f, 'sepa_verzending', { batch: potBatch.id, msg_id: potBatch.msg_id, entiteit: 'tolgaarde', modus: 'auto', status: 'wacht', aan: 'nogbetalen@huisartsentolgaarde.nl',
+    aangemaakt_op: iso(NU), bijgewerkt_op: iso(NU) }), /sepa_verzending: de rij hoort bij een batch van dezelfde entiteit/);   // ook niet onder de naam tolgaarde
+  const tgBatch = f.db.prepare("SELECT id, msg_id FROM sepa_batch WHERE entiteit = 'tolgaarde'").get();
+  D.voegToe(f, 'sepa_verzending', { batch: tgBatch.id, msg_id: tgBatch.msg_id, entiteit: 'tolgaarde', modus: 'auto', status: 'wacht', aan: 'nogbetalen@huisartsentolgaarde.nl',
+    aangemaakt_op: iso(NU), bijgewerkt_op: iso(NU) });   // Tolgaarde-batch: mag (de route van wv2465 blijft)
+  // herhaalbaar: rij 23 weg (lichte terugrol) → opnieuw openen past M23 toe zonder iets te veranderen (CHECK al verruimd)
+  f.db.exec('DELETE FROM schema_migratie WHERE versie = 23');
+  D.sluit(f);
+  f = D.open(dir);
+  assert.deepEqual(f.toegepast, [23]);
+  assert.equal(schemaVan(f.db), verwacht);
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM sepa_batch').get().n, 2);
+  D.sluit(f);
+  fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(leeg, { recursive: true, force: true });
 });

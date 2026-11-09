@@ -65,15 +65,17 @@ function mail(g) {
   const een = g.blokken.length === 1;
   const onderwerp = 'Specificatie SEPA-batch ' + g.entiteit_kort + ' (' + (een ? 'uitvoer ' + datumNl(g.blokken[0].datum) : g.blokken.length + ' uitvoerdatums') + ', ' + eur(g.totaal_centen) + ')';
   const r = ['Ha pa,', '',
-    'Ik heb een SEPA-batch gemaakt voor ' + g.entiteit_naam + ' (rekening …' + g.rekening_eind + '). In Exact zie je ' +
-    (een ? 'die als één afschrijving' : 'per uitvoerdatum één afschrijving') + '; hieronder en in de PDF staat welke facturen erin zitten.', ''];
+    'Ik heb een SEPA-batch gemaakt voor ' + g.entiteit_naam + ' (rekening …' + g.rekening_eind + '). ' +
+    // wv2842: de POT voert een batch per betaling in (extensie POT-invoer, ABN-takenlijst): op het afschrift staat elke betaling apart
+    (g.entiteit === 'pot' ? 'Op het afschrift staat elke betaling apart' : 'In Exact zie je ' + (een ? 'die als één afschrijving' : 'per uitvoerdatum één afschrijving')) +
+    '; hieronder en in de PDF staat welke facturen erin zitten.', ''];
   const lijst = g.aantal <= MAIL_REGELS;
   for (const b of g.blokken) {
     r.push('Uitvoerdatum ' + datumNl(b.datum, true) + ': ' + eur(b.totaal_centen) + ' (' + b.aantal + (b.aantal === 1 ? ' factuur' : ' facturen') + ')');
     if (lijst) for (const x of b.regels) r.push('- ' + x.leverancier + ' - ' + x.nummer + ' - ' + eur(x.centen));
     if (lijst) r.push('');
   }
-  if (!lijst) r.push('', 'De facturen per afschrijving staan in de PDF.', '');
+  if (!lijst) r.push('', g.entiteit === 'pot' ? 'De facturen per uitvoerdatum staan in de PDF.' : 'De facturen per afschrijving staan in de PDF.', '');
   r.push('Totaal ' + eur(g.totaal_centen) + ', batchkenmerk ' + g.msg_id + '.', '', 'Groet,', 'David');
   return { onderwerp: onderwerp.slice(0, 150), bericht: r.join('\n') };
 }
@@ -163,7 +165,8 @@ function maakPdf(g, o) {
   if (st && st.ondertitel) { txt('F1', 8.5, M, y - 9, pas('F1', 8.5, st.ondertitel, W - 2 * M), false, kCaps); y -= 13; }
   y -= 6; lijn(y, kAccent, 1.2); y -= 26;
   txt('F2', 13, M, y, 'Specificatie SEPA-batch'); y -= 18;
-  txt('F1', 9, M, y, 'Per uitvoerdatum één afschrijving op de bank; hieronder welke facturen daarin zitten.', false, kCaps); y -= 20;
+  const los = g.entiteit === 'pot';   // wv2842: POT per betaling ingevoerd (extensie), geen batchafschrijving
+  txt('F1', 9, M, y, los ? 'Per uitvoerdatum de betalingen; op het afschrift staat elke betaling apart.' : 'Per uitvoerdatum één afschrijving op de bank; hieronder welke facturen daarin zitten.', false, kCaps); y -= 20;
   const kv = [['Entiteit', g.entiteit_naam], ['Van rekening', '…' + g.rekening_eind], ['Batchkenmerk', g.msg_id], ['Aangemaakt op', datumNl(g.dag)],
     ['Aantal betalingen', String(g.aantal)], ['Totaal', eur(g.totaal_centen)]];
   for (const [k, v] of kv) { txt('F1', 9, M, y, k); txt('F2', 9, M + 110, y, pas('F2', 9, v, W - 2 * M - 110)); y -= 13; }
@@ -179,7 +182,7 @@ function maakPdf(g, o) {
     // kop van het blok + kopregel + minstens één regel en het subtotaal op dezelfde pagina
     if (y - (22 + RIJ * 3) < onder) nieuwePagina();
     txt('F2', 10, M, y, 'Uitvoerdatum ' + datumNl(b.datum, true), false, kTitel);
-    txt('F1', 9, W - M, y, b.aantal + (b.aantal === 1 ? ' factuur' : ' facturen') + ' · afschrijving ' + eur(b.totaal_centen), true);
+    txt('F1', 9, W - M, y, b.aantal + (b.aantal === 1 ? ' factuur' : ' facturen') + (los ? ' · samen ' : ' · afschrijving ') + eur(b.totaal_centen), true);
     y -= 16;
     kopRegel();
     b.regels.forEach((r, i) => {

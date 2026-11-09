@@ -1345,7 +1345,7 @@ function ingevoerd(fdb, r, d, nu, ongedaan) {
  * dezelfde sleutel (anders 409: er veranderde iets), en doet in één BEGIN IMMEDIATE: alles opnieuw toetsen, sepa_batch + sepa_regel,
  * facturen op 'ingevoerd' (WHERE betaalspoor = 'te_betalen', elk precies één rij) en de audit. Alles of niets. Het bestand gaat alleen naar
  * de browser; uit sepa_batch/sepa_regel is hetzelfde bestand opnieuw te maken (zelfde MsgId: de bank herkent een dubbele upload).
- * Nooit in een batch: POT, Privé, creditnota, geen euro, bedrag ≤ 0, geen of fout IBAN, IBAN buiten de EER, IBAN nog niet nagebeld, geen
+ * Nooit in een batch: Privé (de POT wel sinds wv2842: invoer per betaling met de extensie POT-invoer), creditnota, geen euro, bedrag ≤ 0, geen of fout IBAN, IBAN buiten de EER, IBAN nog niet nagebeld, geen
  * begunstigde, al een bankbetaling of open koppelvoorstel, uitvoerdatum te ver. Alleen met een uitdrukkelijke keuze (`bewust`): al eerder
  * in een batch, mogelijk al betaald (afschrijving naar dat IBAN met dat bedrag sinds de factuurdatum), kenmerk van 16 cijfers dat de
  * elfproef niet haalt. Redenen noemen nooit een bedrag of naam.
@@ -1365,9 +1365,13 @@ const SEPA_WAARSCHUWING = {
   zegt_betaald: 'het stuk zegt dat hij al betaald is (niet gevonden in de bank); alleen betalen als je zeker weet dat het niet al gebeurd is',
   kenmerk_fout: 'het betalingskenmerk (16 cijfers) klopt niet volgens de controle; gaat als vrije tekst mee',
 };
-// wv2445: ook een zakelijke bankluis-rekening (Enable Banking, sinds 4-11 alle zakelijke betaalrekeningen); POT en Privé nooit (op entiteit)
+// wv2445: ook een zakelijke bankluis-rekening (Enable Banking, sinds 4-11 alle zakelijke betaalrekeningen); Privé nooit (op entiteit).
+// wv2842 (David 9-11-2026: "Mag wel ook batch voor gemaakt, we hebben tegenwoordig de Batch-extensie die batches invoert"): de POT wel.
+// ABN neemt op de POT-rekening (particulier) geen batchbestand aan; David zet het bestand met de Chrome-extensie POT-invoer als losse
+// overboekingen in de ABN-takenlijst. Een POT-batch gaat nooit vanzelf ergens heen (sepaDoorReserveer: alleen Tolgaarde; M21-CHECK).
+const SEPA_LOS = Object.freeze(['pot']);   // batch wordt per betaling ingevoerd (extensie), niet als bestand geüpload
 function sepaRekeningen(fdb) {
-  return fdb.db.prepare("SELECT k.* FROM rekening k JOIN entiteit e ON e.sleutel = k.entiteit WHERE k.controle = 1 AND k.entiteit NOT IN ('prive','pot') " +
+  return fdb.db.prepare("SELECT k.* FROM rekening k JOIN entiteit e ON e.sleutel = k.entiteit WHERE k.controle = 1 AND k.entiteit <> 'prive' " +
     "AND k.bank IN ('ABN','ING','TRIODOS') AND e.actief = 1 ORDER BY k.entiteit, k.iban").all().filter((k) => K.ibanMod97(k.iban));
 }
 function lokaalTijd(nu) { return new Date(nu).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam', hourCycle: 'h23' }).replace(' ', 'T').slice(0, 19); }
@@ -1392,7 +1396,7 @@ function sepaBeoordeel(fdb, f, lev, ctx, vandaag, rek) {
   const uit = { reden: null, waarschuwingen: [], uitvoer, eerder };
   const nee = (r) => { uit.reden = r; return uit; };
   if (K.isCreditnota(f)) return nee('creditnota: niets te betalen');
-  if (f.entiteit === 'prive' || f.entiteit === 'pot') return nee('POT en Privé kunnen geen batch (met de hand)');
+  if (f.entiteit === 'prive') return nee('Privé kan geen batch (met de hand)');
   if (!ONDERWEG_BETAAL.includes(f.status)) return nee('nog niet bevestigd');
   if (f.betaalspoor !== 'te_betalen') return nee(f.betaalspoor === 'ingevoerd' ? 'al ingevoerd in de bank' : 'staat niet op te betalen');
   if (rek && f.entiteit !== rek.entiteit) return nee('hoort bij een andere entiteit dan deze rekening');
@@ -1462,7 +1466,7 @@ function betaaldatum(fdb, r, d, nu) {
 function sepaSamenstellen(fdb, r, d, nu) {
   const rekId = vraagId(d, 'rekening');
   const rek = sepaRekeningen(fdb).find((k) => k.id === rekId);
-  if (!rek) weiger(409, 'met deze rekening kan geen batch (POT, Privé of geen controle)');
+  if (!rek) weiger(409, 'met deze rekening kan geen batch (Privé of geen controle)');
   const lijst = Array.isArray(d.facturen) ? d.facturen.map(String) : null;
   if (!lijst || !lijst.length) weiger(400, 'kies minstens één factuur');
   if (lijst.length > S.MAX_REGELS) weiger(400, 'hooguit ' + S.MAX_REGELS + ' facturen per batch');
@@ -1536,7 +1540,7 @@ function sepaBatch(fdb, r, d, nu, o) {
     // wv2465: een batch van Tolgaarde die David hier zelf maakte, krijgt in dezelfde transactie zijn verzendrij (zie sepaDoorReserveer)
     const door = sepaDoorReserveer(fdb, r, { id: batchId, msg_id: msgId, entiteit: s.rek.entiteit }, o.sepaDoor, wanneer);
     return Object.assign({ batch: batchId, msg_id: msgId, bestand: { naam: sepaBestandNaam(s.e, vandaag, msgId), type: 'application/xml', inhoud: x.tekst, sha256: sha }, overzicht: s.overzicht },
-      door ? { doorsturen: door } : {});
+      door ? { doorsturen: door } : {}, SEPA_LOS.includes(s.rek.entiteit) ? { los_invoer: true } : {});   // wv2842: server.js zet dan geen specificatie-concept klaar
   });
 }
 // POST sepa-bestand { batch }: hetzelfde bestand opnieuw (zelfde MsgId en inhoud, byte voor byte; anders 409), binnen 30 dagen. Voor een

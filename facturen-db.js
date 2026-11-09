@@ -1178,6 +1178,33 @@ CREATE TRIGGER IF NOT EXISTS opdracht_verzendwijze_vast BEFORE UPDATE ON opdrach
   BEGIN SELECT RAISE(ABORT, 'opdracht: de verzendwijze van Bevestigen ligt vast'); END;
 `;
 
+/*
+ * wv2842 (David 9-11-2026 15:32: "Mag wel ook batch voor gemaakt, we hebben tegenwoordig de Batch-extensie die batches invoert voor ons"):
+ * de POT mag een SEPA-batch. ABN neemt op de POT-rekening (particulier) geen batchbestand aan; David zet het bestand met de Chrome-extensie
+ * POT-invoer als losse overboekingen in de ABN-takenlijst en ondertekent daar zelf. Privé blijft uitgesloten. Twee stappen in één transactie:
+ * (1) de CHECK op sepa_batch.entiteit verruimen van NOT IN ('prive','pot') naar <> 'prive' (zelfde weg als M5: writable_schema, één vervanging,
+ * al verruimd = overslaan; een CHECK verruimen verandert niets aan de opgeslagen rijen) en (2) de trigger sepa_batch_rekening vervangen
+ * (rekening hoort bij de entiteit, controle, zelfde IBAN, entiteit niet prive). sepa_verzending (M21) blijft vast op Tolgaarde (CHECK); de
+ * nieuwe trigger sepa_verzending_batch_entiteit eist bovendien dat de rij dezelfde entiteit en MsgId heeft als zijn batch. Een POT-batch kan
+ * daar dus nooit een rij krijgen (ook niet onder de naam tolgaarde) en wordt nooit vanzelf gemaild (grondwet 1). LET OP terugrol: een release van vóór wv2842 opent deze database niet meer
+ * (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 23` (de oude code kiest zelf nooit een POT-rekening;
+ * de ruimere CHECK en trigger hinderen haar niet; een bestaande POT-batch toont zij gewoon in de lijst). Herhaalbaar.
+ */
+const M23_VERVANG = [
+  ['sepa_batch', "CHECK (entiteit NOT IN ('prive','pot'))", "CHECK (entiteit <> 'prive')"],
+];
+const M23_TRIGGER = `
+DROP TRIGGER IF EXISTS sepa_batch_rekening;
+CREATE TRIGGER sepa_batch_rekening BEFORE INSERT ON sepa_batch
+WHEN NOT EXISTS (SELECT 1 FROM rekening r WHERE r.id = NEW.rekening AND r.entiteit = NEW.entiteit AND r.controle = 1
+  AND r.iban = NEW.dbtr_iban AND r.entiteit <> 'prive')
+BEGIN SELECT RAISE(ABORT, 'sepa_rekening: de rekening hoort niet bij deze entiteit of kan geen batch'); END;
+CREATE TRIGGER IF NOT EXISTS sepa_verzending_batch_entiteit BEFORE INSERT ON sepa_verzending
+WHEN NOT EXISTS (SELECT 1 FROM sepa_batch b WHERE b.id = NEW.batch AND b.entiteit = NEW.entiteit AND b.msg_id = NEW.msg_id)
+BEGIN SELECT RAISE(ABORT, 'sepa_verzending: de rij hoort bij een batch van dezelfde entiteit en MsgId'); END;
+`;
+function M23(db, vervang) { M5(db, vervang || M23_VERVANG, 'migratie_23'); db.exec(M23_TRIGGER); }
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -1200,6 +1227,7 @@ const MIGRATIES = [
   { versie: 20, naam: 'SEPA-batch: ook vanaf een zakelijke bankluis-rekening; POT en Privé blijven uitgesloten (wv2445)', sql: M20 },
   { versie: 21, naam: 'SEPA-batch van Tolgaarde zelf naar nogbetalen@: sepa_verzending (wv2465)', sql: M21 },
   { versie: 22, naam: 'per leverancier concept of direct: leverancier.verzendwijze(+versie), snapshot op opdracht (wv2480)', fn: (db) => M22(db) },
+  { versie: 23, naam: 'SEPA-batch: ook de POT (invoer per betaling met de extensie POT-invoer); Privé blijft uitgesloten (wv2842)', fn: (db) => M23(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',

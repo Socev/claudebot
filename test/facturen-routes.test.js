@@ -1276,7 +1276,8 @@ test('wv1405 SEPA: voorbeeld → download met verse vingerafdruk; bestand geldig
   assert.deepEqual([ra.uitvoer, ra.uitvoer_bron, ra.batch_reden], ['2026-10-22', 'eerstvolgende_werkdag', null], 'standaard de dag van de batch');
   assert.deepEqual([rb.uitvoer, rb.uitvoer_bron], ['2026-10-27', 'belastingdienst_marge']);
   assert.equal(bet.sepa.vroegst, '2026-10-22');
-  assert.ok(!bet.sepa.rekeningen.some((k) => ['pot', 'prive'].includes(k.entiteit)), 'POT en Privé niet als batchrekening');
+  assert.ok(!bet.sepa.rekeningen.some((k) => k.entiteit === 'prive'), 'Privé niet als batchrekening');
+  assert.equal(bet.sepa.rekeningen.filter((k) => k.entiteit === 'pot').length, 1, 'wv2842: de POT wel (extensie POT-invoer)');
   const [rek] = sepaRek(t, 'tolgaarde');
   const v = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [a, b], voorbeeld: true });
   assert.equal(v.status, 200, JSON.stringify(v.j));
@@ -1375,11 +1376,13 @@ test('wv1405 SEPA: weigeringen (creditnota, IBAN niet nagebeld, valuta, buiten d
   assert.equal(r.status, 409);
   assert.equal(t.f('id = ?', [goed]).betaalspoor, 'te_betalen');
   assert.equal(t.n('SELECT count(*) AS n FROM sepa_batch'), 0);
-  // POT- en Privé-rekening, een onbekende rekening: nooit
-  for (const ent of ['pot', 'prive']) {
-    const k = t.fdb.db.prepare('SELECT id FROM rekening WHERE entiteit = ?').get(ent);
-    assert.equal(t.call('POST', 'sepa-batch', { rekening: k.id, facturen: [goed], voorbeeld: true }).status, 409, ent);
-  }
+  // Privé-rekening, een onbekende rekening: nooit; de POT-rekening wel (wv2842), maar niet met een factuur van Tolgaarde
+  const kp = t.fdb.db.prepare("SELECT id FROM rekening WHERE entiteit = 'prive'").get();
+  assert.equal(t.call('POST', 'sepa-batch', { rekening: kp.id, facturen: [goed], voorbeeld: true }).status, 409, 'prive');
+  const kpot = t.fdb.db.prepare("SELECT id FROM rekening WHERE entiteit = 'pot'").get();
+  const vpot = t.call('POST', 'sepa-batch', { rekening: kpot.id, facturen: [goed], voorbeeld: true });
+  assert.equal(vpot.status, 200);
+  assert.deepEqual(vpot.j.geweigerd.map((g) => g.reden), ['hoort bij een andere entiteit dan deze rekening']);
   assert.equal(t.call('POST', 'sepa-batch', { rekening: '0123456789abcdef', facturen: [goed], voorbeeld: true }).status, 409);
   // de database weigert een batch op de POT-rekening ook als de code zich vergist
   const pot = t.fdb.db.prepare("SELECT * FROM rekening WHERE entiteit = 'pot'").get();
@@ -2048,7 +2051,7 @@ test('wv2025 server.js: na een batch het concept op de achtergrond (luik gemockt
   const van = src.indexOf('// ── wv2025: specificatie per SEPA-batch'), tot = src.indexOf('// Na de bank-ronde: bankluis-rekeningen', van);
   assert.ok(van > 0 && tot > van, 'blok gevonden');
   // de koppeling in appFacturen: na een geslaagde sepa-batch met bestand, en de knop concept: true
-  assert.match(src, /pad === '\/app\/facturen\/sepa-batch' && r\.status === 200 && r\.j && r\.j\.batch && r\.j\.bestand\) r\.j\.specificatie = facturenSpecNaBatch\(fdb, rol, r\.j\.batch\)/);
+  assert.match(src, /pad === '\/app\/facturen\/sepa-batch' && r\.status === 200 && r\.j && r\.j\.batch && r\.j\.bestand && !r\.j\.los_invoer\) r\.j\.specificatie = facturenSpecNaBatch\(fdb, rol, r\.j\.batch\)/);
   assert.match(src, /pad === '\/app\/facturen\/sepa-specificatie' && d && d\.concept === true/);
   const t = opzet();
   const routes = F.maak({ fout: () => {} });
@@ -2591,7 +2594,7 @@ test('wv2260: zonder-factuur uit — geen nieuwe geen_factuur, open exemplaren d
 
 // wv2445 (David 5-11-2026: "geen batchfunctie meer voor Tolgaarde en Kostenmaatschap"): sinds 4-11 staan de zakelijke betaalrekeningen op
 // de bankluis. Een zakelijke bankluis-rekening kan weer een batch; de POT (ook bankluis) en Privé nooit.
-test('wv2445 SEPA: zakelijke bankluis-rekening → batch kan (route en database); POT-bankluis en Privé blijven 409', () => {
+test('wv2445 SEPA: zakelijke bankluis-rekening → batch kan (route en database); Privé blijft 409 (POT sinds wv2842 wel)', () => {
   const t = opzet();
   const tg = t.fdb.db.prepare("SELECT * FROM rekening WHERE entiteit = 'tolgaarde'").get();
   t.fdb.db.prepare("UPDATE rekening SET bank_formaat = 'bankluis', bankluis_rek = 'proef-tg' WHERE id = ?").run(tg.id);
@@ -2599,21 +2602,20 @@ test('wv2445 SEPA: zakelijke bankluis-rekening → batch kan (route en database)
   assert.equal(pot.bank_formaat, 'bankluis');
   const rek = sepaRek(t, 'tolgaarde');
   assert.deepEqual(rek.map((k) => k.id), [tg.id], 'de bankluis-rekening van Tolgaarde staat weer in de batchlijst');
-  assert.ok(!t.call('GET', 'betalen').j.sepa.rekeningen.some((k) => ['pot', 'prive'].includes(k.entiteit)));
+  assert.ok(!t.call('GET', 'betalen').j.sepa.rekeningen.some((k) => k.entiteit === 'prive'));
   const a = teBetalenFactuur(t);
   const { r } = sepaDownload(t, tg.id, [a]);
   assert.equal(r.status, 200, JSON.stringify(r.j));
   assert.equal(t.n('SELECT count(*) AS n FROM sepa_batch WHERE rekening = ?', [tg.id]), 1);
   assert.equal(t.f('id = ?', [a]).betaalspoor, 'ingevoerd');
-  for (const ent of ['pot', 'prive']) {
-    const k = t.fdb.db.prepare('SELECT id FROM rekening WHERE entiteit = ?').get(ent);
+  {
+    const k = t.fdb.db.prepare("SELECT id FROM rekening WHERE entiteit = 'prive'").get();
     const x = t.call('POST', 'sepa-batch', { rekening: k.id, facturen: [teBetalenFactuur(t)], voorbeeld: true });
-    assert.equal(x.status, 409, ent);
+    assert.equal(x.status, 409, 'prive');
   }
-  // de database: ook als de code zich vergist geen batch op de POT-bankluis, wel op de zakelijke bankluis
+  // de database: ook als de code zich vergist geen batch op de POT-rekening onder een andere entiteit, wel op de zakelijke bankluis
   const rij = (r0, ent) => ({ id: D.nieuwId(), rekening: r0.id, entiteit: ent, formaat: 'pain.001.001.09', msg_id: 'X-' + D.nieuwId(), cre_dt_tm: '2026-10-22T10:00:00',
     initg_naam: 'x', dbtr_naam: 'x', dbtr_iban: r0.iban, aantal: 1, totaal_centen: 1, sha256: 'a'.repeat(64), wie: 'x', wanneer: new Date(NU).toISOString() });
-  assert.throws(() => D.voegToe(t.fdb, 'sepa_batch', rij(pot, 'pot')), /CHECK|sepa_rekening/);
   assert.throws(() => D.voegToe(t.fdb, 'sepa_batch', rij(pot, 'tolgaarde')), /sepa_rekening/);
   D.voegToe(t.fdb, 'sepa_batch', rij(tg, 'tolgaarde'));
 });
@@ -2838,5 +2840,86 @@ test('wv2465 review: halverwege gestopt → onzeker (nooit opnieuw) met één re
   assert.match(log.bericht[0], /stopte midden in het versturen/);
   await ctx.sdTik();
   assert.equal(log.bericht.length, 2, 'één keer melden');
-  assert.throws(() => t.fdb.db.prepare("INSERT INTO sepa_verzending (batch, msg_id, entiteit, modus, status, aan, aangemaakt_op, bijgewerkt_op) VALUES ('x', 'y', 'tolgaarde', 'auto', 'wacht', 'iemand@voorbeeld.invalid', 'x', 'x')").run(), /CHECK/);
+  // wv2842: de trigger sepa_verzending_batch_entiteit vuurt vóór de CHECK; met een echte Tolgaarde-batch zonder rij toetst dit weer het adres
+  const zonder = sepaDownload(t, sepaRek(t, 'tolgaarde')[0].id, [teBetalenFactuur(t)]).r;
+  assert.equal(zonder.status, 200);
+  assert.throws(() => t.fdb.db.prepare("INSERT INTO sepa_verzending (batch, msg_id, entiteit, modus, status, aan, aangemaakt_op, bijgewerkt_op) VALUES (?, ?, 'tolgaarde', 'auto', 'wacht', 'iemand@voorbeeld.invalid', 'x', 'x')").run(zonder.j.batch, zonder.j.msg_id), /CHECK/);
+  assert.throws(() => t.fdb.db.prepare("INSERT INTO sepa_verzending (batch, msg_id, entiteit, modus, status, aan, aangemaakt_op, bijgewerkt_op) VALUES ('x', 'y', 'tolgaarde', 'auto', 'wacht', 'iemand@voorbeeld.invalid', 'x', 'x')").run(), /CHECK|sepa_verzending/);
+});
+
+// ───────────────────────────── SEPA-batch voor de POT (wv2842) ─────────────────────────────
+// David 9-11-2026 15:32: "Mag wel ook batch voor gemaakt, we hebben tegenwoordig de Batch-extensie die batches invoert voor ons". De POT-rekening
+// (ABN particulier) neemt geen batchbestand aan; de extensie POT-invoer zet elk regel als losse overboeking in de ABN-takenlijst. Grondwet 1:
+// alleen een batch van Tolgaarde gaat vanzelf naar nogbetalen@; een POT-batch nooit, ook niet met de schakelaar op auto.
+test('wv2842 POT-batch: download kan (pain.001 met de POT als betaler); nooit een verzendrij of mail, ook met sepaDoor auto; geen automatisch specificatie-concept; Privé blijft 409', () => {
+  const t = opzet();
+  const [rek] = sepaRek(t, 'pot');
+  assert.ok(rek, 'POT-rekening in de batchlijst');
+  const potRek = t.fdb.db.prepare("SELECT * FROM rekening WHERE entiteit = 'pot'").get();
+  const a = teBetalenFactuur(t, { entiteit: 'pot' }), b = teBetalenFactuur(t, { entiteit: 'pot' });
+  const tg = teBetalenFactuur(t);   // Tolgaarde: hoort niet in de POT-batch
+  const v0 = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [a, tg], voorbeeld: true });
+  assert.equal(v0.status, 200);
+  assert.deepEqual(v0.j.geweigerd.map((g) => [g.id, g.reden]), [[tg, 'hoort bij een andere entiteit dan deze rekening']]);
+  const verzendVoor = t.n('SELECT count(*) AS n FROM sepa_verzending');
+  const { r } = sepaDownload(t, rek.id, [a, b], [], { sepaDoor: 'auto' });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(r.j.doorsturen, undefined, 'geen doorsturen bij de POT');
+  assert.equal(r.j.los_invoer, true, 'invoer per betaling (extensie): server.js zet geen specificatie-concept klaar');
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_verzending'), verzendVoor, 'geen verzendrij');
+  assert.deepEqual(t.routes.sepaDoor.open(t.fdb), []);
+  assert.equal(t.routes.sepaDoor.voorbereid(t.fdb, r.j.batch, { nu: NU + 5000, actie: 'versturen' }), null, 'voorbereid vindt niets om te versturen');
+  assert.equal(t.call('GET', 'betalen').j.sepa.batches.find((x) => x.id === r.j.batch).doorsturen, undefined);
+  // het bestand: één betaler = de POT-rekening, twee regels, EndToEndId = factuur-id (dubbelcheck van de extensie), entiteit pot in de database
+  const xml = r.j.bestand.inhoud;
+  assert.equal(xml.split('<DbtrAcct>').length - 1, xml.split('<PmtInf>').length - 1);
+  assert.ok(xml.includes('<IBAN>' + potRek.iban + '</IBAN>'));
+  assert.equal(xml.split('<CdtTrfTxInf>').length - 1, 2);
+  for (const id of [a, b]) { assert.ok(xml.includes('<EndToEndId>' + id + '</EndToEndId>'), id); assert.equal(t.f('id = ?', [id]).betaalspoor, 'ingevoerd'); }
+  assert.match(r.j.bestand.naam, /^SEPA POT /);
+  const sb = t.fdb.db.prepare('SELECT entiteit, rekening FROM sepa_batch WHERE id = ?').get(r.j.batch);
+  assert.deepEqual([sb.entiteit, sb.rekening], ['pot', potRek.id]);
+  // de Tolgaarde-route blijft zoals hij was (kruisproef op dezelfde database): wel een verzendrij
+  const [tgRek] = sepaRek(t, 'tolgaarde');
+  const rt = sepaDownload(t, tgRek.id, [tg], [], { sepaDoor: 'auto' }).r;
+  assert.equal(rt.status, 200);
+  assert.equal(rt.j.doorsturen.aan, 'nogbetalen@huisartsentolgaarde.nl');
+  assert.equal(rt.j.los_invoer, undefined);
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_verzending'), verzendVoor + 1);
+  assert.deepEqual(t.fdb.db.prepare('SELECT entiteit FROM sepa_verzending').all().map((x) => x.entiteit), ['tolgaarde']);
+  // de database: een verzendrij voor de POT-batch kan niet, ook niet met de hand
+  assert.throws(() => D.voegToe(t.fdb, 'sepa_verzending', { batch: r.j.batch, msg_id: r.j.msg_id, entiteit: 'pot', modus: 'auto', status: 'wacht', aan: 'nogbetalen@huisartsentolgaarde.nl',
+    aangemaakt_op: new Date(NU).toISOString(), bijgewerkt_op: new Date(NU).toISOString() }), /CHECK/);
+  assert.throws(() => D.voegToe(t.fdb, 'sepa_verzending', { batch: r.j.batch, msg_id: r.j.msg_id, entiteit: 'tolgaarde', modus: 'auto', status: 'wacht', aan: 'nogbetalen@huisartsentolgaarde.nl',
+    aangemaakt_op: new Date(NU).toISOString(), bijgewerkt_op: new Date(NU).toISOString() }), /sepa_verzending: de rij hoort bij een batch van dezelfde entiteit/);
+  // Privé blijft dicht (route) en kan geen batch (database)
+  const kp = t.fdb.db.prepare("SELECT * FROM rekening WHERE entiteit = 'prive'").get();
+  assert.equal(t.call('POST', 'sepa-batch', { rekening: kp.id, facturen: [teBetalenFactuur(t)], voorbeeld: true }).status, 409);
+  assert.ok(!t.call('GET', 'betalen').j.sepa.rekeningen.some((k) => k.entiteit === 'prive'));
+  // de specificatie (knop, PDF) zegt bij de POT niet "één afschrijving in Exact"
+  const SP = require(path.join(ROOT, 'facturen-specificatie.js'));
+  const g = (ent) => ({ entiteit: ent, entiteit_naam: ent.toUpperCase(), entiteit_kort: ent.toUpperCase(), rekening_eind: '8301', aantal: 1, totaal_centen: 12345, msg_id: 'SOCEV-PROEF',
+    dag: '2026-11-09', wanneer: '2026-11-09T10:00:00Z', blokken: [{ datum: '2026-11-10', aantal: 1, totaal_centen: 12345, regels: [{ leverancier: 'Proef BV', nummer: 'F-1', centen: 12345 }] }] });
+  assert.doesNotMatch(SP.mail(g('pot')).bericht, /Exact|één afschrijving/);
+  assert.match(SP.mail(g('pot')).bericht, /elke betaling apart/);
+  assert.match(SP.mail(g('tolgaarde')).bericht, /In Exact zie je die als één afschrijving/, 'Tolgaarde ongewijzigd');
+});
+
+test('wv2842 POT-batch: de extensie boekt per betaling (geen batch- of EndToEnd-kenmerk); de bankluis koppelt via rekeningnummer en bedrag', () => {
+  const t = opzet();
+  const [rek] = sepaRek(t, 'pot');
+  const a = teBetalenFactuur(t, { entiteit: 'pot' }), b = teBetalenFactuur(t, { entiteit: 'pot' });
+  const r = sepaDownload(t, rek.id, [a, b]).r;
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  const fa = t.f('id = ?', [a]), fb = t.f('id = ?', [b]);
+  const pad = bankluis(t.dir, [
+    { nr: 1, sleutel: 'pa', status: 'booked', datum: fa.uitvoer_op, bedrag: -fa.incl / 100, tegen_iban: fa.iban, tegenpartij: fa.leverancier_naam, omschrijving: fa.nummer },
+    { nr: 2, sleutel: 'pb', status: 'booked', datum: fb.uitvoer_op, bedrag: -fb.incl / 100, tegen_iban: fb.iban, tegenpartij: fb.leverancier_naam, omschrijving: fb.nummer },
+  ]);
+  const x = t.call('POST', 'bankluis', {}, { bankluisPad: pad, nu: Date.parse(fa.uitvoer_op + 'T12:00:00Z') + 86400000 });
+  assert.equal(x.status, 200, JSON.stringify(x.j));
+  const stand = [a, b].map((id) => [t.f('id = ?', [id]).betaalspoor, t.n('SELECT count(*) AS n FROM koppeling WHERE factuur = ?', [id]),
+    t.n("SELECT count(*) AS n FROM voorstel WHERE status = 'open' AND EXISTS (SELECT 1 FROM json_each(facturen) j WHERE j.value = ?)", [id])]);
+  // review wv2842 ZOU 1: ondubbelzinnig (eigen IBAN, precies het bedrag, op de uitvoerdatum) = automatisch gekoppeld, geen voorstel
+  assert.deepEqual(stand, [['betaald_gezien', 1, 0], ['betaald_gezien', 1, 0]]);
 });

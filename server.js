@@ -17125,7 +17125,9 @@ async function appFacturen(req, res, a, s, d, route) {
   if (req.method === 'GET' && pad.indexOf('/app/facturen/document/') !== 0 && r.status === 200) res._app.stil = true;
   if (req.method !== 'GET' && r.status === 200) facturenKaartPlan(3000);   // wv1705: verzamelkaart bijwerken (bevestigen, terugdraaien, upload)
   // wv2025: na een nieuwe batch (bestand gemaakt) het concept met de specificatie op de achtergrond; het antwoord wacht er niet op
-  if (req.method === 'POST' && pad === '/app/facturen/sepa-batch' && r.status === 200 && r.j && r.j.batch && r.j.bestand) r.j.specificatie = facturenSpecNaBatch(fdb, rol, r.j.batch);
+  // wv2842: niet bij een POT-batch (los_invoer): de extensie zet elke betaling apart in de ABN-takenlijst, dus geen "één afschrijving in Exact";
+  // de PDF en de knop "Concept voor André" blijven bij de batch staan.
+  if (req.method === 'POST' && pad === '/app/facturen/sepa-batch' && r.status === 200 && r.j && r.j.batch && r.j.bestand && !r.j.los_invoer) r.j.specificatie = facturenSpecNaBatch(fdb, rol, r.j.batch);
   // wv2465: een Tolgaarde-batch gaat meteen naar nogbetalen@ (de rij staat al op 'wacht'); het antwoord wacht er niet op
   if (req.method === 'POST' && pad === '/app/facturen/sepa-batch' && r.status === 200 && r.j && r.j.doorsturen && typeof sdPlan === 'function') sdPlan(1500);
   // wv2060: na een ICS-overzicht in Uploads de kaart "ICS — transacties uploaden" bijwerken (dicht als het overzicht nu binnen is)
