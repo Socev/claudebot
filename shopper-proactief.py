@@ -161,7 +161,9 @@ def opdracht(taak, term, kand, entiteit_hint):
             'OVIS SHOPPER VANZELF (S4, wv2273). David vroeg hier NIET om: Socev zet Shopper zelf in op een open koopwens in Todoist.\n'
             'Volg de skill ovis-shopper (lees .claude/skills/ovis-shopper/SKILL.md), stap 1, 2 en 4 t/m 7. Stap 3 (zoeken) is al gedaan via het\n'
             'OpenAI-tegoed; de kandidaten staan hieronder. Zoek zelf alleen als er minder dan 3 bruikbare kandidaten zijn, en dan hooguit 3\n'
-            'WebSearch-vragen, alleen met de productomschrijving (nooit een naam, entiteit of patiëntgegeven in een zoekvraag).\n\n'
+            'WebSearch-vragen, alleen met de productomschrijving (nooit een naam, entiteit of patiëntgegeven in een zoekvraag). Zoek zo ook\n'
+            'als er geen kandidaat uit het goedkope eind bij zit (alleen professionele of dure varianten): ook de gewone variant (wv2845).\n'
+            'Eisen zijn alleen wat in de taak staat; voeg zelf geen eis toe (skill § Eisen en advies).\n\n'
             'Todoist-taak: id ' + taak['id'] + '\nTitel: ' + (taak.get('content') or '') + '\n'
             + ('Beschrijving: ' + (taak.get('description') or '')[:1500] + '\n' if taak.get('description') else '')
             + 'Zoekterm die naar OpenAI ging: ' + term + '\n'

@@ -493,6 +493,17 @@ test('zoek: web_search met NL en domeinfilter, kosten = tokens + $0,01 per zoeka
   assert.strictEqual(t.h.verbruik().deze_maand.niet_toegedeeld_usd, 0.02);
   n.srv.close(); t.h.sluit();
 });
+test('zoek: instructie vraagt kandidaten over de hele prijsrange en geen eigen eisen (wv2845)', async function () {
+  const n = await nepApi(); const t = nieuw(n.url, { aan: true });
+  n.antwoord = zoekAntwoord(KAND.slice(0, 1));
+  try {
+    await t.h.zoek({ afnemer: 'shopper', vraag: 'personenweegschaal' });
+    const ins = JSON.parse(n.verzoeken[0].body).instructions.replace(/\s+/g, ' ');
+    assert.ok(ins.indexOf('over de hele prijsrange') >= 0, ins);
+    assert.ok(ins.indexOf('de goedkoopste die aan de koopwens voldoet') >= 0, ins);
+    assert.ok(ins.indexOf('voeg zelf geen eisen toe aan de koopwens') >= 0, ins);
+  } finally { n.srv.close(); t.h.sluit(); }
+});
 test('zoek: kandidaat buiten het domeinfilter weg; zonder filter blijft hij', async function () {
   const n = await nepApi(); const t = nieuw(n.url, { aan: true });
   n.antwoord = zoekAntwoord(KAND.slice(0, 2));

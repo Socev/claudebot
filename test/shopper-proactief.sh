@@ -44,7 +44,7 @@ class H(BaseHTTPRequestHandler):
             return self.stuur(200, {'ok': True, 'usd': 0.02, 'kandidaten': [{'winkel': 'bol', 'product': 'p', 'url': 'https://www.bol.com/nl/nl/p/x/1/', 'gezien': True}]})
         if self.path == '/agent':
             modus = open(os.path.join(T, 'agentmodus')).read().strip() if os.path.exists(os.path.join(T, 'agentmodus')) else 'ok'
-            log({'agent': d.get('label'), 'prompt_heeft_taak': 'BBBBBB2' in d.get('prompt', '') or 'GGGGGG7' in d.get('prompt', '') or 'HHHHHH8' in d.get('prompt', ''), 'modus': modus})
+            log({'agent': d.get('label'), 'prompt_heeft_taak': 'BBBBBB2' in d.get('prompt', '') or 'GGGGGG7' in d.get('prompt', '') or 'HHHHHH8' in d.get('prompt', ''), 'prompt_goedkoop': 'goedkope eind' in d.get('prompt', '') and 'voeg zelf geen eis toe' in d.get('prompt', ''), 'modus': modus})
             if modus == 'vol': return self.stuur(429, {'ok': False})
             return self.stuur(200, {'ok': True, 'job_id': 'job1'})
         self.stuur(404, {})
@@ -71,6 +71,7 @@ toets "7 staat: wacht_plek met kandidaten, kaartjes overgeslagen" "$(python3 -c 
 rm -f "$T/agentmodus"; : > "$T/log.jsonl"
 draai 2026-11-03T10:15:00+01:00 > "$T/uit2"; rc=$?
 toets "8 tweede tik: exit 0, agents gestart zonder nieuwe zoekronde" "$(j "len([x for x in d if 'zoek' in x])==0 and len([x for x in d if 'agent' in x])==2 and all(x['prompt_heeft_taak'] for x in d if 'agent' in x)")"
+toets "8c agentopdracht: goedkope eind aanvullen, geen eigen eis (wv2845)" "$(j "all(x.get('prompt_goedkoop') for x in d if 'agent' in x) and len([x for x in d if 'agent' in x])>0")"
 toets "8b exit 0 na de tweede tik" $([ $rc = 0 ] && echo 1 || echo 0)
 : > "$T/log.jsonl"
 draai 2026-11-03T10:20:00+01:00 > /dev/null
