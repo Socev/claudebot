@@ -62,6 +62,16 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('2d bedragen: null = null, geen getal = null; komma in de verkoper blijft', o('o2').totaal_eur === null && o('o2').verzending_eur === null && o('o2').prijs_eur === 69 && o('o2').koop_aantal === 2
     && o('o4').prijs_eur === null && o('o1').verkoper === 'Verkoper, met komma', [o('o2'), o('o4')]);
   toets('2e koopUrl los', S.koopUrl('https://bol.com/nl/p/x/') === 'https://bol.com/nl/p/x/' && S.koopUrl('https://localhost/x') === null && S.koopUrl('https://a.nl/x y') === null && S.koopUrl('data:text/html,x') === null && S.koopUrl('') === null);
+  // wv2833: optieveld btw ("incl" of "omgerekend 21%/9%", anders null)
+  toets('2e2 btwVeld: incl en omgerekend 21%/9% blijven; al het andere null', S.btwVeld('incl') === 'incl' && S.btwVeld('omgerekend 21%') === 'omgerekend 21%' && S.btwVeld('omgerekend 9%') === 'omgerekend 9%'
+    && [null, undefined, '', 'excl', 'omgerekend 6%', 'omgerekend 21', ' incl x', 'INCL', 'omgerekend 21%<b>', 'null', 7].every((x) => S.btwVeld(x) === null));
+  {
+    const bt = (b) => '---\ntype: shopper-zoektocht\nopties:\n  - {id: o1, winkel: "A", prijs_eur: 10, verzending_eur: 0, totaal_eur: 10, ' + b + 'url: "https://a.nl/p"}\n---\n';
+    const ob = (b) => S.optiesVan(bt(b), [])[0].btw;
+    toets('2e3 optiesVan geeft btw door: "incl", omgerekend 21%, kaal incl; ontbreekt of onzin = null', ob('btw: "incl", ') === 'incl' && ob('btw: "omgerekend 21%", ') === 'omgerekend 21%' && ob('btw: incl, ') === 'incl'
+      && ob('') === null && ob('btw: "excl", ') === null && ob('btw: null, ') === null, [ob('btw: "incl", '), ob('btw: "omgerekend 21%", '), ob('btw: incl, ')]);
+  }
+  toets('2e4 optie zonder btw-veld (oude pagina) = btw null', o('o1').btw === null && 'btw' in o('o1'));
   const slecht = ['../10_Zakelijk/Geheim/geheim.md', zt.pad, k.id + '0', k.id.toUpperCase(), '', null, { id: k.id }];
   toets('2f pad-achtige of verkeerde id = 400', slecht.every((x) => m.zoektocht(x).status === 400), slecht.map((x) => m.zoektocht(x).status));
   toets('2g onbekende id = 404; symlink-pagina en niet-zoektocht op id = 404', m.zoektocht('0123456789ab').status === 404 && m.zoektocht(S.idVan('10_Zakelijk/Groenhouten/Shopper/Shopper - 2026-11-02 - Koppeling.md')).status === 404

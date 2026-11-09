@@ -107,6 +107,8 @@ function isFavoriet(url, fav) {
   try { h = new URL(url).hostname.toLowerCase().replace(/\.$/, ''); } catch (e) { return false; }
   return fav.some((d) => h === d || h.endsWith('.' + d));
 }
+// wv2833: hoe het bedrag incl. btw is: "incl" (zo op de pagina) of "omgerekend 21%"/"omgerekend 9%" (excl. op de pagina, met het tarief van de winkel); anders null
+function btwVeld(x) { const v = tekstVeld(x, 20); return v === 'incl' || /^omgerekend (21|9)%$/.test(v) ? v : null; }
 function optiesVan(t, fav) {
   const uit = [];
   for (const o of R.fmObjLijst(t, 'opties').slice(0, MAX_OPTIES)) {
@@ -115,7 +117,7 @@ function optiesVan(t, fav) {
     const ruw = tekstVeld(o.url, 2000);
     uit.push({ id, winkel: tekstVeld(o.winkel, 80), verkoper: tekstVeld(o.verkoper, 120), product: tekstVeld(o.product, 300),
       koop_eenheid: tekstVeld(o.koop_eenheid, 60), koop_aantal: aantal(o.koop_aantal), prijs_eur: bedrag(o.prijs_eur), verzending_eur: bedrag(o.verzending_eur),
-      totaal_eur: bedrag(o.totaal_eur), levertijd: tekstVeld(o.levertijd, 160), voorraad: tekstVeld(o.voorraad, 120),
+      totaal_eur: bedrag(o.totaal_eur), btw: btwVeld(o.btw), levertijd: tekstVeld(o.levertijd, 160), voorraad: tekstVeld(o.voorraad, 120),
       url: koopUrl(ruw), url_geweigerd: !!ruw && !koopUrl(ruw), favoriet: isFavoriet(koopUrl(ruw), fav), gelezen: tekstVeld(o.gelezen, 40) });
   }
   return uit;
@@ -661,4 +663,4 @@ function maak(o) {
   return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, info };
 }
 
-module.exports = { maak, ontleed, nuVan, zetEisenRegels, opnieuwOpdracht, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
+module.exports = { maak, ontleed, nuVan, btwVeld, zetEisenRegels, opnieuwOpdracht, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
