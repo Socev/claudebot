@@ -4,6 +4,7 @@
 Gebruik:  python3 -I .claude/skills/ovis-shopper/winkel_lezen.py <productpagina-url> [<url> …]
 Uit:      één JSON-regel per url: winkel, prijs_eur, verzending_eur (+ verzending_tekst), voorraad, levertijd,
           verkoper, bron (jsonld / microdata / html), blokkade, opmerkingen. Onbekend = null, nooit geschat.
+          prijs_eur is altijd INCLUSIEF btw (wv2832): btw "incl"/"excl"/null, btw_tarief, prijs_excl_eur, prijs_omgerekend.
 
 Waarom: David (2-11-2026) "Ik wil altijd prijs en levervoorraad weten". Per winkel gemeten welke route werkt
 (SKILL.md, tabel Favoriete winkels). Dit script doet die route zodat elke zoektocht hetzelfde leest.
@@ -59,7 +60,7 @@ BLOK_TEKENS = ["Just a moment", "cf-chl", "Performing security verification", "/
 def winkel_van(host):
     h = host.lower()
     for sleutel in ("coolblue", "bol", "amazon", "tweakers", "azerty", "remarkt", "123inkt", "123encre", "123ink",
-                    "123accu", "123led", "123-3d", "123schoon", "hornbach", "praxis"):
+                    "123accu", "123led", "123-3d", "123schoon", "hornbach", "praxis", "ikea"):
         if re.search(r"(^|\.)" + re.escape(sleutel) + r"\.", h):
             return sleutel
     return "anders"
@@ -277,6 +278,97 @@ def aanbod_uit_jsonld(producten):
     return a
 
 
+# ── Btw (wv2832, 9-11-2026) ── David: "Altijd inclusief de BTW". Consumentenwinkels tonen wettelijk incl. btw; medische en zakelijke
+# winkels zetten in hun gestructureerde data vaak de prijs EXCL. btw (gemeten 9-11-2026: Praxisdienst JSON-LD 263,45 bij "263,45 netto
+# 318,77 bruto"; Bloeddrukmeterswebshop microdata 314,01 bij 379,95 en "Alle prijzen zijn inclusief 21% BTW"). Daarom: de prijs uit de
+# gestructureerde data altijd terugzoeken in de paginatekst met zijn btw-label. Alleen 21 en 9 % (NL); nooit gokken.
+CONSUMENT = {"coolblue", "bol", "amazon", "remarkt", "hornbach", "praxis", "ikea", "123inkt", "123accu", "123led", "123-3d", "123schoon"}
+_BEDRAG = r"(\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2,6})(?![\d,])"
+_LABEL_BTW = re.compile(r"(?:€\s?)?" + _BEDRAG + r"\s?(?:€\s?)?\(?\s*(incl|excl)(?:\.|usief|\b)\s*(?:(\d{1,2})\s?%\s*)?(?:btw|vat)\b", re.I)
+_LABEL_NB = re.compile(r"(?:€\s?)?" + _BEDRAG + r"\s?(?:€\s?)?\(?\s*(netto|bruto)\b", re.I)
+_ALLE_INCL = re.compile(r"(?:alle\s+)?prijzen\s+(?:zijn\s+)?(?:inclusief|incl\.?)\s+(?:(\d{1,2})\s?%\s*)?btw", re.I)
+_INCL_ERGENS = re.compile(r"\b(?:incl(?:\.|usief)?)\s*(?:\d{1,2}\s?%\s*)?(?:btw|vat)\b", re.I)
+_EXCL_ERGENS = re.compile(r"\b(?:excl(?:\.|usief)?)\s*(?:\d{1,2}\s?%\s*)?(?:btw|vat)\b|\bnetto\b|\bbruto\b", re.I)
+_TARIEVEN = (21, 9)
+
+
+def _gelijk(a, b):
+    return a is not None and b is not None and abs(a - b) < 0.006
+
+
+def _met_btw(excl, tarief):
+    return round(excl * (100 + tarief) / 100 + 1e-9, 2)
+
+
+def btw_lezen(r, s, winkel):
+    """Zet r["prijs_eur"] op de prijs INCL. btw en vult btw, btw_tarief, prijs_excl_eur, prijs_omgerekend; s = platte paginatekst."""
+    p = r["prijs_eur"]
+    if p is None:
+        return
+    if winkel in CONSUMENT:
+        r["btw"] = "incl"
+        return
+    incl, excl = [], []          # (bedrag, tarief uit het label of None)
+    for m in _LABEL_BTW.finditer(s):
+        b = bedrag(m.group(1))
+        if b is not None:
+            (incl if m.group(2).lower() == "incl" else excl).append((b, int(m.group(3)) if m.group(3) else None))
+    for m in _LABEL_NB.finditer(s):
+        b = bedrag(m.group(1))
+        if b is not None:
+            (incl if m.group(2).lower() == "bruto" else excl).append((b, None))
+    # Een tarief dat de winkel bij een bedrag noemt, wint altijd van het afgeleide (review MOET 2)
+    paren = [(i, e, t) for i, ti in incl for e, te in excl for t in _TARIEVEN
+             if e > 0 and abs(i - _met_btw(e, t)) <= 0.011 and ti in (None, t) and te in (None, t)]
+
+    def zet(i, e, t, bron):
+        r["prijs_eur"], r["prijs_excl_eur"], r["btw"], r["btw_tarief"] = i, e, "incl", t
+        if bron:
+            r["opmerkingen"].append(bron)
+
+    for i, e, t in paren:
+        if _gelijk(i, p):
+            return zet(i, e, t, None)
+    for i, e, t in paren:
+        if _gelijk(e, p):
+            return zet(i, e, t, "gestructureerde data gaf de prijs excl. btw (%.2f); prijs incl. %d%% btw van de pagina" % (e, t))
+    for b, t in incl:
+        if _gelijk(b, p):
+            return zet(p, None, t, None)
+    for b, t in excl:
+        if _gelijk(b, p):
+            r["prijs_excl_eur"], r["btw"] = p, "excl"
+            if t in _TARIEVEN:
+                r["prijs_eur"], r["btw_tarief"], r["prijs_omgerekend"] = _met_btw(p, t), t, True
+                r["opmerkingen"].append("prijs op de pagina excl. %d%% btw; omgerekend naar incl. btw met het tarief dat de winkel noemt" % t)
+            else:
+                r["prijs_eur"] = None
+                r["opmerkingen"].append("prijs alleen excl. btw te lezen (%.2f), tarief niet op de pagina: reken om met het tarief van dit product "
+                                        "(21%% of 9%%, controleer per product) en zeg dat het omgerekend is" % p)
+            return
+    # Prijs uit de gestructureerde data staat niet als bedrag op de pagina, maar het bedrag met btw wel, en de winkel zegt "prijzen incl. btw"
+    bedragen = [bedrag(m.group(1)) for m in re.finditer(_BEDRAG, s)]
+    alle = _ALLE_INCL.search(s)
+    genoemd = int(alle.group(1)) if alle and alle.group(1) else None
+    if alle and not any(_gelijk(b, p) for b in bedragen):
+        kand = [(t, _met_btw(p, t)) for t in _TARIEVEN if genoemd in (None, t) and any(_gelijk(b, _met_btw(p, t)) for b in bedragen)]
+        if len(kand) == 1:
+            t, i = kand[0]
+            return zet(i, p, t, "gestructureerde data gaf de prijs excl. btw (%.2f); op de pagina %.2f en 'prijzen incl. btw'" % (p, i))
+    if alle and any(_gelijk(b, p) for b in bedragen):
+        r["btw"] = "incl"
+        r["opmerkingen"].append("btw: de winkel zegt 'prijzen incl. btw'")
+        return
+    # Alleen "incl. btw" op de pagina en nergens "excl. btw"/netto/bruto: een gewone consumentenwinkel
+    if _INCL_ERGENS.search(s) and not _EXCL_ERGENS.search(s) and any(_gelijk(b, p) for b in bedragen):
+        r["btw"] = "incl"
+        r["opmerkingen"].append("btw: de pagina noemt alleen 'incl. btw'")
+        return
+    # Niet vast te stellen: geen prijs tonen als incl. (review MOET 1)
+    r["prijs_eur"] = None
+    r["opmerkingen"].append("prijs %.2f gelezen, maar niet of die incl. btw is: lees de pagina in de browser" % p)
+
+
 VOORRAAD_NL = {"InStock": "op voorraad", "OutOfStock": "niet op voorraad", "PreOrder": "pre-order",
                "BackOrder": "nabestelling", "LimitedAvailability": "beperkt op voorraad", "SoldOut": "uitverkocht",
                "Discontinued": "uit het assortiment", "InStoreOnly": "alleen in de winkel", "OnlineOnly": "op voorraad (online)"}
@@ -285,7 +377,7 @@ VOORRAAD_NL = {"InStock": "op voorraad", "OutOfStock": "niet op voorraad", "PreO
 def lees(url):
     r = {"url": url, "winkel": None, "status": None, "product": None, "prijs_eur": None, "verzending_eur": None,
          "verzending_tekst": None, "voorraad": None, "levertijd": None, "verkoper": None, "bron": None,
-         "blokkade": None, "opmerkingen": []}
+         "blokkade": None, "opmerkingen": [], "btw": None, "btw_tarief": None, "prijs_excl_eur": None, "prijs_omgerekend": False}
     reden = toegestaan(url)
     try:
         r["winkel"] = winkel_van(urllib.parse.urlsplit(url).hostname or "")
@@ -491,6 +583,7 @@ def lees(url):
                     r["voorraad"] = "op voorraad" + (" (%d stuks)" % st["stockLevel"] if isinstance(st.get("stockLevel"), int) and not isinstance(st.get("stockLevel"), bool) else "")
                 elif st.get("stockLevelStatus") == "outOfStock":
                     r["voorraad"] = "niet op voorraad"
+    btw_lezen(r, s, w)
     if r["prijs_eur"] is None:
         r["opmerkingen"].append("prijs niet te lezen")
     if r["voorraad"] is None:
