@@ -118,12 +118,15 @@ function plusDagen(ymd, n) { return K.plusDagen(ymd, n); }
 
 // De verzender neemt alleen PDF, UBL-XML en (bij een afschrift) MT940 aan. De extensie volgt uit de inhoud, niet uit de naam; iets anders
 // (een foto, een kantoorbestand) is niet verzendbaar → null, dan weigert de controle (diffreview wv855 #2 en natoets).
+// MT940 begint met ':20:', of (ABN-export, ook wat pot-afschrift.js maakt) met de kop BIC / 940 / BIC en dan ':20:' (wv2852: zonder
+// die kop werd elk ABN-afschrift geweigerd). Streng: alleen die drie regels mogen vóór ':20:' staan.
+const MT940_KOP = /^\s*(?:[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\r?\n940\r?\n[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\r?\n)?:20:/;
 function naamMetExtensie(naam, mime, bytes, soort) {
   const stam = String(naam || 'stuk').replace(/[\\/]/g, '_').replace(/\.(pdf|xml|940|sta|mt940)$/i, '').slice(0, 110) || 'stuk';
   const b = bytes || Buffer.alloc(0);
   if (b.subarray(0, 5).toString('latin1') === '%PDF-') return stam + '.pdf';
   if (/^\s*(?:\ufeff)?<(?:\?xml|(?:\w+:)?(?:Invoice|CreditNote)\b)/.test(b.subarray(0, 300).toString('utf8'))) return stam + '.xml';
-  if (soort === 'boekhouder_afschrift' && /^\s*:20:/.test(b.subarray(0, 50).toString('latin1'))) return stam + '.940';
+  if (soort === 'boekhouder_afschrift' && MT940_KOP.test(b.subarray(0, 80).toString('latin1'))) return stam + '.940';
   return null;
 }
 // Onderwerp en tekst van de mail aan de boekhouder: kort, zonder factuurtekst, met het token.

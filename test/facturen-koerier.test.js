@@ -347,6 +347,15 @@ test('bijlagetype: alleen PDF, UBL of (afschrift) MT940 gaat mee; een foto of on
   assert.equal(KO.naamMetExtensie('nep.pdf', 'application/pdf', Buffer.from('geen pdf'), 'boekhouder_factuur'), null);
   assert.equal(KO.naamMetExtensie('POT.sta', 'application/octet-stream', Buffer.from(':20:PROEF'), 'boekhouder_afschrift'), 'POT.940');
   assert.equal(KO.naamMetExtensie('x.940', 'application/octet-stream', Buffer.from(':20:PROEF'), 'boekhouder_factuur'), null);
+  // wv2852: ABN-MT940 begint met de kop BIC / 940 / BIC vóór ':20:' (zo maakt pot-afschrift.js hem ook) → verzendbaar; andere tekst ervoor niet
+  const abn = 'ABNANL2A\r\n940\r\nABNANL2A\r\n:20:ABN AMRO BANK NV\r\n:25:NL00TEST0000000001\r\n-';
+  assert.equal(KO.naamMetExtensie('POT-2026-10.sta', 'application/octet-stream', Buffer.from(abn), 'boekhouder_afschrift'), 'POT-2026-10.940');
+  assert.equal(KO.naamMetExtensie('a.sta', 'application/octet-stream', Buffer.from('ABNANL2AXXX\n940\nABNANL2AXXX\n:20:X'), 'boekhouder_afschrift'), 'a.940');
+  assert.equal(KO.naamMetExtensie('a.sta', 'application/octet-stream', Buffer.from(abn), 'boekhouder_factuur'), null);
+  assert.equal(KO.naamMetExtensie('a.sta', 'application/octet-stream', Buffer.from('Hallo wereld\r\n940\r\nABNANL2A\r\n:20:X'), 'boekhouder_afschrift'), null);
+  assert.equal(KO.naamMetExtensie('a.sta', 'application/octet-stream', Buffer.from('ABNANL2A\r\n941\r\nABNANL2A\r\n:20:X'), 'boekhouder_afschrift'), null);
+  assert.equal(KO.naamMetExtensie('a.sta', 'application/octet-stream', Buffer.from('ABNANL2A\r\n940\r\n:20:X'), 'boekhouder_afschrift'), null);
+  assert.equal(KO.naamMetExtensie('a.sta', 'application/octet-stream', Buffer.from('tekst\n:20:X'), 'boekhouder_afschrift'), null);
 });
 
 test('mislukt max 3× dan signaal; daarna geen poging meer; Opnieuw proberen vindt een eerder concept via het token', async (tc) => {
@@ -434,7 +443,7 @@ test('rondebudget en pod-plafond: wat niet past blijft opgehaald zonder reserver
 test('POT-afschrift: klaarzetten → opdracht naar het afschriftadres met MT940 + PDF; concept; detectie → verstuurd; zonder adres 409', async () => {
   const t = opzet(), g = nepGmail();
   const rek = t.fdb.db.prepare("SELECT id FROM rekening WHERE entiteit = 'pot'").get();
-  const inv = { rekening: rek.id, periode: '2026-10', mt940: { naam: 'POT-2026-10.940', bytes: Buffer.from(':20:PROEF\r\n:25:NL00TEST0000000001\r\n-') }, pdf: { naam: 'POT-2026-10.pdf', bytes: Z.pdf(['Afschrift POT 2026-10', 'synthetisch']) } };
+  const inv = { rekening: rek.id, periode: '2026-10', mt940: { naam: 'POT-2026-10.sta', bytes: Buffer.from('ABNANL2A\r\n940\r\nABNANL2A\r\n:20:PROEF\r\n:25:NL00TEST0000000001\r\n-') }, pdf: { naam: 'POT-2026-10.pdf', bytes: Z.pdf(['Afschrift POT 2026-10', 'synthetisch']) } };
   const pm = { soort: 'praktijkmanager', wie: 'pm', entiteiten: ['pot'] };
   assert.throws(() => F.afschriftKlaarzetten(t.fdb, pm, inv, { nu: NU }), /eigenaar/);
   const r = F.afschriftKlaarzetten(t.fdb, t.eig, inv, { nu: NU });
