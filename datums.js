@@ -23,7 +23,9 @@ const MAX_TEKST = 50000;   // de Mail Processor stuurt hooguit 12.000 tekens; 50
 const MAX_TEGELIJK = 4;
 const BEWAAR_DAGEN = 30;
 const GEHEIM = new Set(['geboortedatum', 'mogelijk_geboortedatum']);
-const CODE = 'import sys; sys.path.insert(0, sys.argv[1]); from socev_datum.cli import main; sys.exit(main(["--json"]))';
+const CODE = 'import sys; sys.path.insert(0, sys.argv[1]); from socev_datum.cli import main; sys.exit(main(sys.argv[2:]))';
+const GEEN_BLOK = new Set(['geboortedatum', 'mogelijk_geboortedatum', 'citaatkop']);
+const BLOK_MAX = 20;
 
 function dagNl(ms) {
   return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });   // JJJJ-MM-DD
@@ -40,14 +42,14 @@ function maak(opts) {
   let lopend = 0;
   let laatsteVeeg = '';
 
-  function detecteer(invoer) {
+  function detecteer(invoer, metBlok) {
     return new Promise(function (klaar) {
       let rel;
       try { rel = fs.realpathSync(huidig); } catch (e) { return klaar({ status: 503, j: { ok: false, fout: 'scripts-release ontbreekt' } }); }
       const src = path.join(rel, 'packages', 'datum', 'src');
       if (!fs.existsSync(path.join(src, 'socev_datum', 'cli.py'))) return klaar({ status: 503, j: { ok: false, fout: 'detector ontbreekt in de release' } });
       const t0 = Date.now();
-      const kind = spawn(python, ['-I', '-c', CODE, src], { env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', PYTHONIOENCODING: 'utf-8' }, stdio: ['pipe', 'pipe', 'pipe'] });
+      const kind = spawn(python, ['-I', '-c', CODE, src, '--json'].concat(metBlok ? ['--frontmatter'] : []), { env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', PYTHONIOENCODING: 'utf-8' }, stdio: ['pipe', 'pipe', 'pipe'] });
       let uit = '', err = '', af = false;
       kind.stdout.setEncoding('utf8');
       kind.stderr.setEncoding('utf8');
@@ -146,12 +148,33 @@ function maak(opts) {
       });
   }
 
+  /*
+   * wv1276 (inzet fase 3, ontwerp § 2.5): het compacte frontmatter-blok voor het kennisbestand van OVIS Intake. Dezelfde detector en
+   * dezelfde grenzen als /datums (≤ 50.000 tekens, hooguit 4 tegelijk, 10 s); het blok zelf maakt de detector (frontmatter_blok), de pod
+   * filtert nog eens op (mogelijke) geboortedatum en citaatkop. Nooit een fout naar buiten: { ok: false, fout } en de router schrijft dan
+   * geen blok. Geen schaduwlog.
+   */
+  function blok(d) {
+    const tekst = d && d.tekst != null ? String(d.tekst).slice(0, MAX_TEKST) : '';
+    if (lopend >= MAX_TEGELIJK) return Promise.resolve({ ok: false, fout: 'bezet' });
+    lopend++;
+    const anker = d && d.anker ? String(d.anker).slice(0, 64) : null;
+    return detecteer({ tekst: tekst, anker: anker, taal: 'auto', soort: d && d.soort ? String(d.soort).slice(0, 32) : null }, true)
+      .finally(function () { lopend--; })
+      .then(function (r) {
+        const f = r.status === 200 && r.j && r.j.frontmatter;
+        if (!f || !Array.isArray(f.datums)) return { ok: false, fout: (r.j && r.j.fout) || 'geen blok' };
+        const datums = f.datums.filter(function (x) { return x && x.start && !GEHEIM.has(x.rol) && !GEEN_BLOK.has(x.rol); }).slice(0, BLOK_MAX)
+          .map(function (x) { return { tekst: String(x.tekst || '').replace(/[\s\u0085]+/g, ' ').slice(0, 120), start: String(x.start).slice(0, 40), rol: String(x.rol || '').slice(0, 24), zekerheid: String(x.zekerheid || '').slice(0, 12) }; });
+        return { ok: true, detector: String(f.datums_detector || '').slice(0, 40), release: r.j.release, datums: datums };
+      });
+  }
   try { veeg(true); } catch (e) { fout('datums-veeg', e); }
   if (o.veegElkeMs !== 0) {
     const t = setInterval(function () { try { veeg(true); } catch (e) { fout('datums-veeg', e); } }, o.veegElkeMs || 6 * 3600 * 1000);
     if (t.unref) t.unref();
   }
-  return { verwerk: verwerk, veeg: veeg, info: function () { return { lopend: lopend, huidig: huidig }; } };
+  return { verwerk: verwerk, blok: blok, veeg: veeg, info: function () { return { lopend: lopend, huidig: huidig }; } };
 }
 
 module.exports = { maak: maak, MAX_TEKST: MAX_TEKST };

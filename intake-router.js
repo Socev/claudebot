@@ -52,6 +52,7 @@ const JEV_WACHT_MS = 24 * 3600000;      // zo lang wacht een stuk op een Jev-uit
 const JEV_PAUZE_MS = 15 * 60000;        // na een mislukte Jev-aanroep niet elke ronde opnieuw
 const VANGNET_MAX = 20000;              // tekens lokale tekst voor de vangnet-indeling (kop + tekst)
 const BEWAAR_MS = 90 * 86400000;        // 'alleen bewaren' en de lens 'geen'
+const DATUM_BUDGET_MS = 15000;         // wv1276: datumdetector hooguit ± 15 s per stuk (daarna onvolledig)
 const KENNIS_TEKST_MAX = 200000;        // tekens per onderdeel in het kennisbestand
 // eigen entiteit → raw_input-map (gelijk aan mail@1 archief.mappen); een eigen knoop zonder map (KM, SLOEL) = twijfel
 const KENNIS_MAP = { TG: '10_Zakelijk/Tolgaarde/raw_input', GH: '10_Zakelijk/Groenhouten/raw_input', HAGRO: '10_Zakelijk/HAGRO/raw_input',
@@ -803,6 +804,24 @@ function bijlageNaam(stam, naam) {
 // YAML-veilige waarde (JSON-string is geldige YAML)
 function yv(v) { return JSON.stringify(v == null ? '' : String(v)); }
 /*
+ * wv1276 (ontwerp datumdetector § 2.4/2.5): blok datums in de kop van het kennisbestand. x = { detector, datums: [{ tekst, start, rol,
+ * zekerheid }] } (al gefilterd: geen (mogelijke) geboortedatum, geen citaatkop, hooguit 20) of { fout } of null (geen detector gekoppeld).
+ * Bij een fout alleen datums_detector "niet gelukt": de lezer (raw_input-skill, datumcontrole) weet dan dat het blok ontbreekt, niet leeg is.
+ */
+function zonderDatumKop(t) {
+  return String(t).split('\n').filter(function (r) { return !/^(datums_detector: |datums_onvolledig: |datums:|  - \{tekst: )/.test(r); }).join('\n');
+}
+function datumKop(x) {
+  if (!x) return [];
+  if (x.fout || !x.detector) return ['datums_detector: "niet gelukt"'];
+  const l = (x.datums || []).slice(0, 20);
+  const vooraf = ['datums_detector: ' + yv(x.detector)].concat(x.onvolledig ? ['datums_onvolledig: true'] : []);
+  if (!l.length) return vooraf.concat(['datums: []']);
+  return vooraf.concat(['datums:']).concat(l.map(function (d) {
+    return '  - {tekst: ' + yv(String(d.tekst || '').replace(/[\s\u0085]+/g, ' ')) + ', start: ' + yv(d.start) + ', rol: ' + yv(d.rol) + ', zekerheid: ' + yv(d.zekerheid) + '}';
+  }));
+}
+/*
  * Kennisbestand (§ 12.4.4): kop met ovis_stuk, bron, afzender + kracht, soort, entiteit (schrijfwijze van de vault) + entiteit_id (knoop) +
  * entiteit_zekerheid (kracht + bewijs; wv2177, vroeger alles in entiteit:), regel, ontvangen; daarna de lokale
  * tekst (mail en bijlagen, door de pod zelf gelezen; geen AI-samenvatting). x = { stuk_id, bron, profiel, onderwerp, van, van_naam, ontvangen,
@@ -819,6 +838,7 @@ function kennisInhoud(x) {
       ...(KENNIS_ENTITEIT[x.entiteit] ? ['entiteit_id: ' + x.entiteit] : []),
       'entiteit_zekerheid: ' + yv(x.entiteit_kracht + ', bewijs ' + (x.entiteit_bewijs || 'regels'))]),
     'regel: ' + yv(x.regel || 'standaard'), 'ontvangen: ' + yv(x.ontvangen || '')];
+  kop.push(...datumKop(x.datums));   // wv1276: datumdetector (stap 6, op de lokale tekstlaag ná de markers)
   if (x.documentbron) kop.push('documentbron: ' + yv(x.documentbron));
   if (x.verplaatst_van) kop.push('ovis_verplaatst_van: ' + yv(x.verplaatst_van));   // wv2618: na de nacht verplaatst; de oude plek krijgt een rechtzet-notitie
   const geplaatst = (x.bijlagen || []).filter(function (b) { return b.bestand; }), niet = (x.bijlagen || []).filter(function (b) { return !b.bestand; });
@@ -1514,6 +1534,8 @@ function maak(o) {
       let oud = null;
       try { oud = o.vv.lees(path.join(mapAbs, k), null); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
       if (oud !== null && crypto.createHash('sha256').update(oud).digest('hex') === sha) return { pad: path.join(mapRel, k), sha256: sha, uitkomst: 'gelijk' };
+      // wv1276 (review ZOU 1): het datumblok kan per ronde verschillen (fout, bezet, nieuwe detectorversie); verder gelijk = hetzelfde bestand
+      if (oud !== null && /\.md$/i.test(k) && zonderDatumKop(oud) === zonderDatumKop(inhoud)) return { pad: path.join(mapRel, k), sha256: crypto.createHash('sha256').update(oud).digest('hex'), uitkomst: 'gelijk' };
       if (oud === null) { o.vv.schrijf(path.join(mapAbs, k), inhoud); return { pad: path.join(mapRel, k), sha256: sha, uitkomst: 'nieuw' }; }
     }
     const e = new Error('naam bezet tot (9)'); e.code = 'EBEZET'; throw e;
@@ -1523,6 +1545,40 @@ function maak(o) {
     const r = db.prepare("SELECT wat FROM correctie WHERE stuk_id = ? AND json_extract(wat, '$.keuze') = 'verplaats_vault' ORDER BY id DESC LIMIT 1").get(id);
     const w = r ? safeJson(r.wat) : null;
     return w && w.na_nacht && w.naar_lens === 'kennis' && w.naar === doel && w.van ? (KENNIS_ENTITEIT[w.van] || w.van) : null;
+  }
+  // wv1276: treffers van alle onderdelen samen (eerst de mailtekst), dubbel op tekst + start + rol weg, hooguit 20. Een fout of te druk:
+  // { fout } (één keer opnieuw bij 'bezet'); het kennisbestand wordt toch geschreven.
+  async function datumsVan(delen, anker) {
+    if (typeof o.datums !== 'function') return null;
+    const uit = [], gezien = new Set();
+    let detector = null, onvolledig = false;
+    const t0 = Date.now();
+    const volg = delen.filter(function (d) { return d.rol !== 'bijlage'; }).concat(delen.filter(function (d) { return d.rol === 'bijlage'; }));
+    for (const d of volg) {   // de mailtekst eerst, dan de bijlagen
+      const t = String(d.tekst || '');
+      if (!t.trim()) continue;
+      if (uit.length >= 20) break;   // review ZOU 2: vol, de rest niet meer lezen
+      if (Date.now() - t0 > DATUM_BUDGET_MS) { onvolledig = true; break; }   // review ZOU 2: hooguit ± 15 s per stuk
+      let r = null;
+      for (let poging = 0; poging < 2; poging++) {
+        try { r = await o.datums({ tekst: t, anker: anker, soort: anker && d.rol !== 'bijlage' ? 'mail' : null }); } catch (e) { r = null; }
+        if (!r || r.ok || r.fout !== 'bezet') break;
+        await new Promise(function (k) { setTimeout(k, 500); });
+      }
+      if (!r || !r.ok) {
+        if (o.fout) o.fout('intake-datums', new Error(String((r && r.fout) || 'detector faalde').slice(0, 80)));
+        if (!detector) return { fout: true };
+        onvolledig = true; break;   // de mailtekst lukte wel: die treffers blijven, gemarkeerd als onvolledig
+      }
+      detector = r.detector || detector;
+      for (const x of r.datums || []) {
+        const k = x.tekst + '|' + x.start + '|' + x.rol;
+        if (gezien.has(k) || uit.length >= 20) continue;
+        gezien.add(k); uit.push(x);
+      }
+    }
+    if (!detector) return onvolledig ? { fout: true } : null;   // geen tekst om te lezen: geen blok
+    return { detector: detector, datums: uit, onvolledig: onvolledig };
   }
   async function kennisSchrijf(s, rs, b) {
     const systeem = b.lens === 'systeem';
@@ -1571,7 +1627,10 @@ function maak(o) {
         if (r && r.ok && zonderWit(r.markdown) >= TEKST_MIN) { d.tekst = r.markdown; d.door = 'claude'; }
       }
     }
-    const inhoud = Buffer.from(kennisInhoud({ stuk_id: s.stuk_id, bron: s.bron, profiel: s.profiel, onderwerp, van: adresVan(meta.van || ''), van_naam: meta.van_naam || '', ontvangen,
+    // wv1276: datumdetector op de lokale tekst van elk onderdeel (geen model, geen netwerk; ná de markers: dit stuk is vrijgegeven).
+    // Anker = verzenddatum (Outlook: ontvangen, review ZOU 3); een scan heeft geen verzenddatum (§ 2.3: dan alleen datums met een jaar). Webpagina: geen blok.
+    const datums = s.profiel === 'webpagina@1' ? null : await datumsVan(tekstDelen, s.profiel === 'scansnap@1' ? null : meta.verzonden || (s.profiel === 'outlook-mail@1' ? meta.ontvangen : null) || null);
+    const inhoud = Buffer.from(kennisInhoud({ stuk_id: s.stuk_id, bron: s.bron, profiel: s.profiel, onderwerp, van: adresVan(meta.van || ''), van_naam: meta.van_naam || '', ontvangen, datums,
       soort: sam.soort, soort_kracht: sam.soort_kracht, afzender: sam.afzender, afzender_naam: naamVan(r, sam.afzender), afzender_kracht: sam.afzender_kracht,
       entiteit: b.doel, entiteit_kracht: b.reden === 'david' ? 'david' : sam.entiteit_kracht, entiteit_bewijs: b.reden === 'david' ? 'keuze van David' : sam.entiteit_bewijs, regel: sam.regel,
       jev: sam.jev === 'boven' ? { boven: true } : (sam.jev_overgeslagen ? { overgeslagen: sam.jev_overgeslagen } : null), delen: tekstDelen, bijlagen: bijNamen,

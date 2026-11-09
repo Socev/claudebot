@@ -18023,6 +18023,7 @@ function intakeRouterHaal() {
       paginas: async function (pad) { const t = await intakeProces('pdfinfo', [pad], { ms: 15000 }); const m = t && /^Pages:\s+(\d+)/m.exec(t); return m ? Number(m[1]) : null; },
       ocr: intakeOcr, docx: intakeDocx, pdfSchaduw: pdfSchaduw,   // wv1431: schaduw PDF-lezer (alleen beoordeelde stukken)
       pdfLees: pdfLeesIntake,   // wv1921: PDF-lezer live (markdown in het kennisbestand; lokale tekst als terugval)
+      datums: datums ? function (d) { return datums.blok(d); } : null,   // wv1276: datumdetector → blok datums in de kop van het kennisbestand
       handvatten: function () { return appSbRpc('ovis_intake_handvatten', {}); },
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
       // live (wv1916)

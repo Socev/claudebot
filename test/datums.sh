@@ -32,7 +32,14 @@ def main(argv):
          {"tekst": "27-10", "begin": 20, "eind": 25, "soort": "datum", "start": "2026-10-27", "eind_waarde": None, "precisie": "dag",
           "jaar": "dichtstbij", "relatief": False, "rol": "onbekend", "zekerheid": "redelijk", "regel": "num.d_m@1", "let_op": []}]
     print(json.dumps({"detector": "socev-datum", "versie": "${versie}", "anker": {"verzonden": d["anker"], "tz": "Europe/Amsterdam"},
-                      "treffers": t, "samenvatting": {"aantal": 2}, "milieu": sorted(os.environ), "taal": d["taal"]}))
+                      "treffers": t, "samenvatting": {"aantal": 2}, "milieu": sorted(os.environ), "taal": d["taal"],
+                      "argv": list(argv or []), "soort": d.get("soort"),
+                      **({"frontmatter": {"datums_detector": "socev-datum@${versie}", "datums": [
+                          {"tekst": "4 juni 2014", "start": "2014-06-04", "rol": "geboortedatum", "zekerheid": "hoog"},
+                          {"tekst": "Op 1-10 schreef", "start": "2026-10-01", "rol": "citaatkop", "zekerheid": "hoog"},
+                          {"tekst": "27-10\\n overleg", "start": "2026-10-27", "rol": "afspraak", "zekerheid": "redelijk"}]
+                          + [{"tekst": "dag %d" % i, "start": "2026-11-%02d" % i, "rol": "deadline", "zekerheid": "hoog"} for i in range(1, 26)]}}
+                         if "--frontmatter" in (argv or []) else {})}))
     return 0
 `;
 release('vA', NEP('1.0.0-a'));
@@ -44,6 +51,7 @@ let klok = Date.parse('2026-10-26T12:00:00Z');
 const fout = [];
 const m = D.maak({ huidig: huidig, schaduwDir: S, nu: () => klok, fout: (w, e) => fout.push(w), timeoutMs: 1500, veegElkeMs: 0 });
 process.env.API_SECRET = 'geheim-mag-niet-mee';
+const srv0 = () => fs.readFileSync('server.js', 'utf8');
 (async function () {
   let r = await m.verwerk({ tekst: 'Geboren 4 juni 2014; op 27-10 overleg.', anker: '2026-10-23T16:17:00+02:00' });
   toets('1 uitkomst met release en versie', r.status === 200 && r.j.ok === true && r.j.release === 'vA' && r.j.versie === '1.0.0-a' && r.j.treffers.length === 2, r);
@@ -101,6 +109,18 @@ process.env.API_SECRET = 'geheim-mag-niet-mee';
   // 9. geen release
   const m2 = D.maak({ huidig: path.join(d, 'bestaat-niet'), schaduwDir: S, veegElkeMs: 0 });
   toets('9 geen release = 503', (await m2.verwerk({ tekst: 'x' })).status === 503);
+  // 11. blok voor het kennisbestand van OVIS Intake (wv1276)
+  r = await m.verwerk({ tekst: 'x' });
+  toets('11 /datums vraagt geen frontmatter', r.status === 200 && !r.j.frontmatter && JSON.stringify(r.j.argv) === '["--json"]', r.j);
+  let bl = await m.blok({ tekst: 'Geboren 4 juni 2014; op 27-10 overleg.', anker: '2026-10-23T16:17:00+02:00', soort: 'mail' });
+  toets('11 blok: ok, detector met versie, release-onafhankelijk', bl.ok === true && bl.detector === 'socev-datum@1.0.0-b', bl);
+  toets('11 blok: geen (mogelijke) geboortedatum en geen citaatkop', !JSON.stringify(bl.datums).includes('2014-06-04') && !bl.datums.some((x) => x.rol === 'citaatkop'), bl.datums);
+  toets('11 blok: hooguit 20, witruimte samengevoegd, alleen vier velden', bl.datums.length === 20 && bl.datums[0].tekst === '27-10 overleg' && Object.keys(bl.datums[0]).join() === 'tekst,start,rol,zekerheid', bl.datums[0]);
+  bl = await m.blok({ tekst: 'CRASH' });
+  toets('11 blok: crash = ok false, geen worp', bl.ok === false, bl);
+  const bezet = await Promise.all([1, 2, 3, 4, 5].map(() => m.blok({ tekst: 'SLAAP' })));
+  toets('11 blok: telt mee in de 4 tegelijk (de vijfde bezet)', bezet.filter((x) => x.fout === 'bezet').length === 1, bezet);
+  toets('11 server.js geeft datums.blok aan de router', /datums: datums \? function \(d\) \{ return datums\.blok\(d\); \}/.test(srv0()));
   // 10. koppeling in server.js en uitrol.sh
   const srv = fs.readFileSync('server.js', 'utf8');
   const blok = srv.slice(srv.indexOf("reqPath(req) === '/datums'"), srv.indexOf("reqPath(req) === '/datums'") + 1200);

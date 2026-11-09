@@ -742,3 +742,96 @@ test('wv2336 privégrens (schaduw): kring + gezondheid = besluitregel zonder nam
   assert.match(E.r.regel(E.r.telling('2026-10-28T00:00:00Z', '2026-10-29T00:00:00Z')), /privégrens schaduw: zou privé 1, waarvan nu niet bij Privé 1/);
   E.r.sluit();
 });
+
+test('wv1276 datumdetector: blok datums in de kop (mailtekst eerst, dubbel weg, anker = verzenddatum); fout = "niet gelukt"; zonder koppeling geen blok', async () => {
+  const vragen = [];
+  const E = omgeving({ datums: async function (d) {
+    vragen.push({ anker: d.anker, soort: d.soort, lang: d.tekst.length });
+    if (!/Rooster week 45/.test(d.tekst)) return { ok: true, detector: 'socev-datum@9.9.9', datums: [{ tekst: 'volgende week dinsdag om 20.00 uur', start: '2026-11-03T20:00:00+01:00', rol: 'afspraak', zekerheid: 'redelijk' }] };
+    return { ok: true, detector: 'socev-datum@9.9.9', datums: [{ tekst: 'volgende week dinsdag om 20.00 uur', start: '2026-11-03T20:00:00+01:00', rol: 'afspraak', zekerheid: 'redelijk' }, { tekst: 'week 45', start: '2026-11-02', rol: 'onbekend', zekerheid: 'hoog' }] };
+  } });
+  E.zet({ meta: { van: 'anne@voorbeeld.example', van_naam: 'Anne Proef', onderwerp: 'Re: Overleg roosters', verzonden: '2026-10-28T18:30:00Z' },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Re: Overleg roosters', GEWOON) },
+      { deel: 'b1', rol: 'bijlage', naam: 'Rooster week 45.pdf', mime: 'application/pdf', bytes: '%PDF-1.4 rooster' }] });
+  const u = await E.r.ronde();
+  assert.equal(u.verwerkt, 1); assert.equal(u.fout, 0);
+  const f = E.bestanden().filter((x) => /\.md$/.test(x));
+  const t = fs.readFileSync(path.join(E.vault, f[0]), 'utf8');
+  const kop = t.slice(0, t.indexOf('\n---\n', 4));
+  assert.match(kop, /\nontvangen: "2026-10-28T18:30:00Z"\ndatums_detector: "socev-datum@9\.9\.9"\ndatums:\n  - \{tekst: "volgende week dinsdag om 20\.00 uur", start: "2026-11-03T20:00:00\+01:00", rol: "afspraak", zekerheid: "redelijk"\}\n  - \{tekst: "week 45", start: "2026-11-02", rol: "onbekend", zekerheid: "hoog"\}/);
+  assert.equal((kop.match(/dinsdag om 20/g) || []).length, 1);   // dubbel weg
+  assert.equal(vragen.length, 2);
+  assert.deepEqual(vragen.map((v) => [v.anker, v.soort]), [['2026-10-28T18:30:00Z', 'mail'], ['2026-10-28T18:30:00Z', null]]);
+  E.r.sluit();
+  // fout van de detector: kennisbestand komt er toch, met "niet gelukt"
+  const F = omgeving({ datums: async function () { return { ok: false, fout: 'detector faalde (exit 1)' }; } });
+  F.zet({ meta: { van: 'anne@voorbeeld.example', onderwerp: 'Re: Overleg roosters', verzonden: '2026-10-28T18:30:00Z' },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Re: Overleg roosters', GEWOON) }] });
+  assert.equal((await F.r.ronde()).fout, 0);
+  const tf = fs.readFileSync(path.join(F.vault, F.bestanden()[0]), 'utf8');
+  assert.match(tf, /\ndatums_detector: "niet gelukt"\n/); assert.doesNotMatch(tf, /\ndatums:/);
+  F.r.sluit();
+  // bezet: één keer opnieuw
+  let n = 0;
+  const B = omgeving({ datums: async function () { n++; return n === 1 ? { ok: false, fout: 'bezet' } : { ok: true, detector: 'socev-datum@9.9.9', datums: [] }; } });
+  B.zet({ meta: { van: 'anne@voorbeeld.example', onderwerp: 'Re: Overleg roosters', verzonden: '2026-10-28T18:30:00Z' },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Re: Overleg roosters', GEWOON) }] });
+  await B.r.ronde();
+  assert.equal(n, 2);
+  assert.match(fs.readFileSync(path.join(B.vault, B.bestanden()[0]), 'utf8'), /\ndatums_detector: "socev-datum@9\.9\.9"\ndatums: \[\]\n/);
+  B.r.sluit();
+  // zonder koppeling (oude server.js): geen regel datums
+  const G = omgeving();
+  G.zet({ meta: { van: 'anne@voorbeeld.example', onderwerp: 'Re: Overleg roosters', verzonden: '2026-10-28T18:30:00Z' },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Re: Overleg roosters', GEWOON) }] });
+  await G.r.ronde();
+  assert.doesNotMatch(fs.readFileSync(path.join(G.vault, G.bestanden()[0]), 'utf8'), /datums/);
+  G.r.sluit();
+});
+
+test('wv1276 datumdetector: vastgehouden stuk → detector niet aangeroepen', async () => {
+  let n = 0;
+  const E = omgeving({ datums: async function () { n++; return { ok: true, detector: 'x@1', datums: [] }; } });
+  E.zet({ marker: 'patient', soorten: ['brieftaal'], meta: { van: 'poli@ziekenhuis.example', onderwerp: 'Brief', verzonden: '2026-10-28T18:30:00Z' },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('poli@ziekenhuis.example', 'Brief', PATIENT_TEKST) }] });
+  await E.r.ronde();
+  assert.equal(n, 0); assert.equal(E.bestanden().length, 0);
+  E.r.sluit();
+});
+
+test('wv1276 review: ander datumblok bij een herhaalde ronde = hetzelfde bestand (geen "(2)"); bijlage faalt na de mailtekst = onvolledig; vol bij 20', async () => {
+  let n = 0;
+  const E = omgeving({ datums: async function (d) { n++; return /Rooster/.test(d.tekst) ? { ok: false, fout: 'detector te traag' } : { ok: true, detector: 'socev-datum@9.9.9', datums: [{ tekst: 'dinsdag', start: '2026-11-03', rol: 'afspraak', zekerheid: 'redelijk' }] }; } });
+  const id = E.zet({ meta: { van: 'anne@voorbeeld.example', onderwerp: 'Re: Overleg roosters', verzonden: '2026-10-28T18:30:00Z' },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Re: Overleg roosters', GEWOON) },
+      { deel: 'b1', rol: 'bijlage', naam: 'Rooster week 45.pdf', mime: 'application/pdf', bytes: '%PDF-1.4 rooster' }] });
+  await E.r.ronde();
+  const md = E.bestanden().filter((x) => /\.md$/.test(x));
+  const t = fs.readFileSync(path.join(E.vault, md[0]), 'utf8');
+  assert.match(t, /\ndatums_detector: "socev-datum@9\.9\.9"\ndatums_onvolledig: true\ndatums:\n  - \{tekst: "dinsdag"/);
+  // dezelfde stuk opnieuw laten schrijven (bv. tx mislukte na het schrijven) met een ander blok: 'gelijk', geen tweede .md
+  E.db.prepare("UPDATE bestemming SET status = 'aangeboden' WHERE stuk_id = ? AND lens = 'kennis'").run(id);
+  E.db.prepare('DELETE FROM uitvoering WHERE stuk_id = ?').run(id);
+  const voor = n;
+  await E.r.ronde();
+  assert.ok(n > voor, 'tweede ronde schreef het kennisbestand opnieuw (' + voor + ' → ' + n + ')');
+  assert.deepEqual(E.bestanden().filter((x) => /\.md$/.test(x)), md);
+  E.r.sluit();
+  // vol bij 20: de bijlage wordt niet meer gelezen
+  const twintig = Array.from({ length: 20 }, (_, i) => ({ tekst: 'dag ' + i, start: '2026-11-' + String(i + 1).padStart(2, '0'), rol: 'deadline', zekerheid: 'hoog' }));
+  const vragen = [];
+  const F = omgeving({ datums: async function (d) { vragen.push(d.soort); return { ok: true, detector: 'socev-datum@9.9.9', datums: twintig }; } });
+  F.zet({ meta: { van: 'anne@voorbeeld.example', onderwerp: 'Re: Overleg roosters', verzonden: '2026-10-28T18:30:00Z' },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Re: Overleg roosters', GEWOON) },
+      { deel: 'b1', rol: 'bijlage', naam: 'Rooster week 45.pdf', mime: 'application/pdf', bytes: '%PDF-1.4 rooster' }] });
+  await F.r.ronde();
+  assert.deepEqual(vragen, ['mail']);
+  F.r.sluit();
+});
+
+test('wv1276 review: kern — datumKop: JSON-strings, NEL weg', () => {
+  const tekst = K.kennisInhoud({ stuk_id: 'stk_1', bron: 'outlook:tolgaarde', profiel: 'outlook-mail@1', onderwerp: 'x', soort: 'correspondentie', soort_kracht: 'hoog', entiteit: 'TG', entiteit_kracht: 'hoog', delen: [],
+    datums: { detector: 'socev-datum@1.0.1', datums: [{ tekst: 'a\u0085b "c" \\ d: {e}', start: '2026-11-03', rol: 'afspraak', zekerheid: 'hoog' }] } });
+  assert.match(tekst, /\n  - \{tekst: "a b \\"c\\" \\\\ d: \{e\}", start: "2026-11-03", rol: "afspraak", zekerheid: "hoog"\}\n/);
+  assert.ok(!/\u0085/.test(tekst));
+});
