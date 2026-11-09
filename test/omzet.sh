@@ -80,7 +80,7 @@ const HTML = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Proef</tit
   }
   const tekstvelden = JSON.stringify(Object.values(HS.STIJLEN).map((x) => Object.assign({}, x, { logo: '', docx: '' })));
   toets('huisstijlen zonder IBAN, KvK, btw of adres (alleen naam, website, kleuren, briefhoofd)', !/NL\d{2}\s?[A-Z]{4}|kvk|iban|btw|straat|postcode/i.test(tekstvelden) &&
-    Object.values(HS.STIJLEN).every((x) => Object.keys(x).every((k) => ['label', 'naam', 'website', 'kleuren', 'briefhoofd', 'font', 'logo', 'logo_maat', 'docx'].indexOf(k) >= 0)), tekstvelden.slice(0, 300));
+    Object.values(HS.STIJLEN).every((x) => Object.keys(x).every((k) => ['label', 'naam', 'website', 'kleuren', 'briefhoofd', 'font', 'logo', 'logo_maat', 'logo_mm', 'docx'].indexOf(k) >= 0)), tekstvelden.slice(0, 300));
 
   // ── Word ──
   r = await M.omzet({ naam: 'Werkplan.md', soort: 'md', tekst: MD, formaat: 'docx', huisstijl: 'groenhouten' });
@@ -92,6 +92,14 @@ const HTML = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Proef</tit
   const media = sh('unzip -l ' + JSON.stringify(p)).split('\n').filter((l) => /word\/media\//.test(l));
   toets('docx huisstijl: kop met logo, voet met naam en paginaveld, A4', media.length === 1 && /logo\.png/.test(media[0]) && /<w:drawing>/.test(unzipP(p, 'word/header1.xml')) &&
     /Huisartsenpraktijk Groenhouten/.test(unzipP(p, 'word/footer1.xml')) && /NUMPAGES/.test(unzipP(p, 'word/footer1.xml')) && /w:w="11906"/.test(doc), media);
+  // wv2829: Tolgaarde huisstijlpakket v1.0 — horizontaal logo (18 mm, naam en motto zitten erin), Arial, kleuren uit het pakket
+  const tg = HS.STIJLEN.tolgaarde;
+  toets('tolgaarde v1.0: kleuren 5B5C60/88898C, accent ED1C24, liggend logo 18 mm', tg.kleuren.titel === '5B5C60' && tg.kleuren.caps === '88898C' && tg.kleuren.accent === 'ED1C24' &&
+    tg.logo_mm === 18 && tg.logo_maat[0] > 2 * tg.logo_maat[1] && tg.logo.length < 60000, [tg.kleuren, tg.logo_maat, tg.logo_mm, tg.logo.length]);
+  r = await M.omzet({ naam: 'Werkplan.md', soort: 'md', tekst: MD, formaat: 'docx', huisstijl: 'tolgaarde' });
+  p = bewaar('tg.docx', r);
+  toets('docx tolgaarde: logo 18 mm in de kop, geen losse naam/motto, thema Arial', r.status === 200 && /<wp:extent cx="\d+" cy="648000"\/>/.test(unzipP(p, 'word/header1.xml')) &&
+    !/Betrokken|HUISARTSENPRAKTIJK/.test(unzipP(p, 'word/header1.xml')) && /<a:latin typeface="Arial"/.test(unzipP(p, 'word/theme/theme1.xml')), r.j.fout);
   r = await M.omzet({ naam: 'Werkplan.md', soort: 'md', tekst: '## Alleen een tussenkop\n\nTekst.', formaat: 'docx' });
   p = bewaar('n.docx', r);
   toets('docx neutraal: titel uit de bestandsnaam erboven, geen kop, wel paginavoet', /Werkplan/.test(unzipP(p, 'word/document.xml')) && !/header1/.test(sh('unzip -l ' + JSON.stringify(p))) && /PAGE/.test(unzipP(p, 'word/footer1.xml')));

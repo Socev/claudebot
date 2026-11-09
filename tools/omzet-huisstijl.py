@@ -23,8 +23,8 @@ ENT = os.path.join(SKILLS, 'factuurgenerator', 'entiteiten')
 
 # sleutel → (label in het menu, entiteit-json of None, logo of None, kleur-overschrijving, lettertype in de PDF)
 STIJLEN = [
-    ('tolgaarde', 'Tolgaarde', 'tolgaarde.json', os.path.join(SKILLS, 'tolgaarde-brand-communication/assets/logo-transparant.png'),
-     {'accent': 'E2232A'}, None),
+    ('tolgaarde', 'Tolgaarde', 'tolgaarde.json', os.path.join(SKILLS, 'tolgaarde-brand-communication/assets/huisstijl-v1/Tolgaarde_horizontaal.png'),
+     {'accent': 'ED1C24'}, None),   # huisstijlpakket v1.0 (wv2829): horizontaal logo met naam en motto, rood alleen als accent
     ('groenhouten', 'Groenhouten', 'groenhouten.json',
      os.path.join(SKILLS, 'groenhouten-brand-communication/assets/Logo_met_text_rechts_-_transparant_-_Open.png'), {}, 'montserrat'),
     ('pot', 'POT POH-GGZ', 'pot.json', None, {}, None),
@@ -41,16 +41,25 @@ VOETNAAM = {'pot': 'POT POH-GGZ Leusden'}
 GEEN_ONDERTITEL = {'pot'}
 HEX = re.compile(r'^[0-9A-Fa-f]{6}$')
 LOGO_HOOGTE = 200          # px; in de kop ± 14 mm hoog
+# Per stijl een afwijkend logo (wv2829): bijsnijden tot de inkt (het pakket-PNG heeft ± 4 % rand), eigen pixelhoogte en hoogte in de kop
+# (mm, PDF en Word). Tolgaarde v1.0: het motto staat ín het logo en wordt op 14 mm te klein, dus 18 mm en meer pixels.
+LOGO_OPTIES = {'tolgaarde': {'bijsnijden': True, 'px': 280, 'mm': 18}}
+# Lettertype van de Word-reference-doc (thema): standaard Calibri; Tolgaarde v1.0 is Helvetica met terugval Arial.
+DOCX_FONT = {'tolgaarde': 'Arial'}
 CM = 360000                # EMU per cm
 
 
-def logo_png(pad):
+def logo_png(pad, bijsnijden=False, hoogte=LOGO_HOOGTE):
     im = Image.open(pad).convert('RGBA')
-    b = max(1, round(im.width * LOGO_HOOGTE / im.height))
-    im = im.resize((b, LOGO_HOOGTE), Image.LANCZOS).quantize(256, method=Image.Quantize.FASTOCTREE)   # palet: ± een derde van de bytes
+    if bijsnijden:
+        vak = im.split()[3].getbbox()
+        if vak:
+            im = im.crop(vak)
+    b = max(1, round(im.width * hoogte / im.height))
+    im = im.resize((b, hoogte), Image.LANCZOS).quantize(256, method=Image.Quantize.FASTOCTREE)   # palet: ± een derde van de bytes
     uit = io.BytesIO()
     im.save(uit, 'PNG', optimize=True)
-    return uit.getvalue(), b, LOGO_HOOGTE
+    return uit.getvalue(), b, hoogte
 
 
 def xml_esc(s):
@@ -73,12 +82,12 @@ NS = ('xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
       'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"')
 
 
-def kop_xml(st, logo_maat):
+def kop_xml(st, logo_maat, logo_mm=14):
     k = st['kleuren']
     rand = '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="%s"/></w:pBdr>' % k['lijn']
     if logo_maat:
         b, h = logo_maat
-        cy = int(1.4 * CM)
+        cy = int(logo_mm / 10 * CM)
         cx = int(cy * b / h)
         beeld = ('<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="%d" cy="%d"/>'
                  '<wp:docPr id="1" name="Logo"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
@@ -115,13 +124,13 @@ def voet_xml(st):
     return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:ftr %s>%s</w:ftr>' % (NS, p)
 
 
-def reference_docx(st, logo):
+def reference_docx(st, logo, font='Calibri'):
     """Pandoc-standaard → A4, Calibri, kopkleur, kop (logo of naam) en voet (naam · website · pagina x van y)."""
     basis = subprocess.check_output(['pandoc', '--print-default-data-file', 'reference.docx'])
     zin = zipfile.ZipFile(io.BytesIO(basis))
     delen = {n: zin.read(n) for n in zin.namelist()}
     thema = delen['word/theme/theme1.xml'].decode('utf-8')
-    thema = re.sub(r'(<a:(?:major|minor)Font>\s*<a:latin typeface=")[^"]*(")', r'\1Calibri\2', thema)
+    thema = re.sub(r'(<a:(?:major|minor)Font>\s*<a:latin typeface=")[^"]*(")', lambda m: m.group(1) + font + m.group(2), thema)
     delen['word/theme/theme1.xml'] = thema.encode('utf-8')
     stijl = delen['word/styles.xml'].decode('utf-8')
     titel = st['kleuren']['titel'] if st else '1F2937'
@@ -135,7 +144,7 @@ def reference_docx(st, logo):
                             'Id="rIdKop" Target="header1.xml" /></Relationships>')
         typen = typen.replace('</Types>', '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.'
                               'wordprocessingml.header+xml" /></Types>')
-        delen['word/header1.xml'] = kop_xml(st, logo[1:] if logo else None).encode('utf-8')
+        delen['word/header1.xml'] = kop_xml(st, logo[1:] if logo else None, (st or {}).get('logo_mm') or 14).encode('utf-8')
         if logo:
             delen['word/media/logo.png'] = logo[0]
             delen['word/_rels/header1.xml.rels'] = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.'
@@ -189,11 +198,14 @@ def main():
               'briefhoofd': {x: str((e.get('briefhoofd') or {}).get(x) or '') for x in ('caps', 'naam', 'ondertitel')}, 'font': font}
         if sleutel in GEEN_ONDERTITEL:
             st['briefhoofd']['ondertitel'] = ''
-        logo = logo_png(logo_pad) if logo_pad else None
+        lo = LOGO_OPTIES.get(sleutel, {})
+        logo = logo_png(logo_pad, lo.get('bijsnijden', False), lo.get('px', LOGO_HOOGTE)) if logo_pad else None
         if logo:
             st['logo'] = 'data:image/png;base64,' + base64.b64encode(logo[0]).decode()
             st['logo_maat'] = [logo[1], logo[2]]
-        st['docx'] = base64.b64encode(reference_docx(st, logo)).decode()
+            if lo.get('mm'):
+                st['logo_mm'] = lo['mm']
+        st['docx'] = base64.b64encode(reference_docx(st, logo, DOCX_FONT.get(sleutel, 'Calibri'))).decode()
         stijlen[sleutel] = st
     neutraal = base64.b64encode(reference_docx(None, None)).decode()
     with open(FONT, 'rb') as f:

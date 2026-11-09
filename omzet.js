@@ -200,6 +200,10 @@ function stijlCss(st, fonts) {
 
 // Chromium tekent kop en voet in de paginamarge: breedte 100 % van het papier, dus de zijmarge als padding (margin schuift ze van het blad).
 const staand = (st) => !!(st && st.logo && st.logo_maat && st.logo_maat[0] < 2 * st.logo_maat[1]);   // logo eerder hoog dan breed
+// Logohoogte in de kop: logo_mm uit de huisstijl (wv2829, Tolgaarde v1.0 18 mm: motto in het logo), anders staand 20, liggend 14.
+const logoMm = (st) => (st && Number(st.logo_mm) > 0 && Number(st.logo_mm) <= 30) ? Number(st.logo_mm) : staand(st) ? 20 : 14;
+// Bovenmarge: kop 9 mm + logo + 2 mm + ± 9 mm lucht (14 → 34, 20 → 42 zoals voorheen).
+const kopMarge = (st) => !st ? '16mm' : !st.logo ? '34mm' : (st.logo_mm ? logoMm(st) + 20 : staand(st) ? 42 : 34) + 'mm';
 const TPL_FONT = 'font-family:\'Liberation Sans\',Arial,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact;box-sizing:border-box;width:100%;';
 function kopTemplate(st) {
   if (!st) return '<span></span>';
@@ -207,7 +211,7 @@ function kopTemplate(st) {
   const lijn = 'border-bottom:1px solid #' + k.lijn + ';';
   if (st.logo) {
     return '<div style="' + TPL_FONT + 'padding:9mm 18mm 0"><div style="padding-bottom:2mm;' + lijn + '">' +
-      '<img src="' + st.logo + '" style="height:' + (staand(st) ? 20 : 14) + 'mm;width:auto;display:block"></div></div>';   // rechtop logo (Tolgaarde) wat groter
+      '<img src="' + st.logo + '" style="height:' + logoMm(st) + 'mm;width:auto;display:block"></div></div>';
   }
   return '<div style="' + TPL_FONT + 'padding:9mm 18mm 0"><div style="padding-bottom:2mm;' + lijn + '">' +
     (b.caps ? '<div style="font-size:7.5pt;font-weight:700;letter-spacing:.12em;color:#' + k.caps + '">' + esc(b.caps) + '</div>' : '') +
@@ -346,7 +350,7 @@ function maak(opt) {
         page.on('request', function (q) { const u = q.url(); if (!(u === DOC_URL && q.frame() === page.mainFrame() && q.isNavigationRequest()) && !/^data:/i.test(u)) pogingen++; });
         await page.goto(DOC_URL, { waitUntil: 'load', timeout: rest() });
         return page.pdf({ format: 'A4', printBackground: true, displayHeaderFooter: true, headerTemplate: kopTemplate(st), footerTemplate: voetTemplate(st),
-          margin: { top: !st ? '16mm' : staand(st) ? '42mm' : '34mm', bottom: '18mm', left: '18mm', right: '18mm' }, timeout: rest() });
+          margin: { top: kopMarge(st), bottom: '18mm', left: '18mm', right: '18mm' }, timeout: rest() });
       })();
       const grens = new Promise(function (res, rej) { timer = setTimeout(function () { rej(Object.assign(new Error('tijd'), { tijd: true })); }, rest()); });
       const buf = await Promise.race([werk, grens]);
