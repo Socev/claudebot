@@ -482,7 +482,8 @@ async function kindLees(invoer, dir, peil) {
   if (typeof token !== 'string' || !TOKEN_VORM.test(token)) throw new NmbrsFout('token', 'geen access token');
   if (typeof sub !== 'string' || !/^[\x21-\x7e]{8,200}$/.test(sub)) throw new NmbrsFout('sleutel', 'geen subscription key');
   const L = nieuweLezer(token, sub, peil), nu = new Date().toISOString(), jaar = new Date().getFullYear();
-  const uit = { ok: true, bedrijven: 0, medewerkers: 0, loonruns: 0, journalen: 0, regels: 0, uren: 0 };
+  const uit = { ok: true, bedrijven: 0, medewerkers: 0, loonruns: 0, journalen: 0, regels: 0, uren: 0,
+    tabellen: { gelijst: 0, verwezen: 0, zonder_versie: 0, geen_geldige: 0, zonder_inhoud: 0, opgeslagen: 0 } };   // wv2798: telling, geen inhoud
   const extra = {};
   if (peil) {
     const ui = await L.alle('/api/user/info');
@@ -508,15 +509,28 @@ async function kindLees(invoer, dir, peil) {
     lijsten.employees = await L.alle('/api/companies/' + cid + '/employees');
     for (const h of HIST) lijsten[h[0]] = await L.alle('/api/companies/' + cid + '/employees/' + h[0]);
     // salaristabellen (schaal en trede; geen persoonsgegevens): per tabel de laatste geldige versie
-    const tabellen = [];
-    for (const t of ((await L.alle('/api/companies/' + cid + '/salarytables')) || []).slice(0, 15)) {
-      const tid = idVan(t && t.salaryTableId); if (!tid) continue;
+    // wv2798: de lijst per bedrijf gaf 9-11-2026 alleen 'DGA loon'; de CAO-tabel waar de salarissen naar verwijzen (salaryTable.tableId)
+    // ontbrak, waardoor S1 nooit rekende. Daarom ook de tabellen ophalen waar de salarissen van dit bedrijf naar verwijzen.
+    const tabellen = [], tMeta = {}, tIds = [];
+    ((await L.alle('/api/companies/' + cid + '/salarytables')) || []).forEach(function (t) {
+      const tid = idVan(t && t.salaryTableId); if (!tid || tMeta[tid]) return;
+      tMeta[tid] = kies(t, V.tabel); tIds.push(tid); uit.tabellen.gelijst++;
+    });
+    (lijsten.salaries || []).forEach(function (e) {
+      (Array.isArray(e && e.salaries) ? e.salaries : []).forEach(function (x) {
+        const st = x && x.salaryTable, tid = idVan(st && st.tableId); if (!tid || tMeta[tid]) return;
+        tMeta[tid] = { salaryTableId: tid, tableCode: st.tableCode, tableName: st.tableName }; tIds.push(tid); uit.tabellen.verwezen++;
+      });
+    });
+    for (const tid of tIds.slice(0, 15)) {
       const versies = ((await L.alle('/api/salarytable/' + tid)) || []).map(function (x) { return kies(x, V.versie); }).filter(function (x) { return idVan(x.versionId); });
+      if (!versies.length) { uit.tabellen.zonder_versie++; continue; }
       const nuJm = jaar * 100 + new Date().getMonth() + 1;
       const geldig = versies.filter(function (x) { return (x.year || 0) * 100 + (x.month || 0) <= nuJm; }).sort(function (a, c) { return (c.year * 100 + c.month) - (a.year * 100 + a.month) || (c.version || 0) - (a.version || 0); })[0];
-      if (!geldig) continue;
+      if (!geldig) { uit.tabellen.geen_geldige++; continue; }
       const inhoud = (await L.alle('/api/companies/' + cid + '/salarytable/' + geldig.versionId + '/content')) || [];
-      tabellen.push({ tabel: tid, versie: geldig.versionId, data: Object.assign(kies(t, V.tabel), { versie: geldig }), inhoud: inhoud });
+      if (!inhoud.length) uit.tabellen.zonder_inhoud++;
+      tabellen.push({ tabel: tid, versie: geldig.versionId, data: Object.assign({}, tMeta[tid], { versie: geldig }), inhoud: inhoud });
     }
     // loonruns van dit en vorig jaar
     const runs = [];
@@ -542,6 +556,7 @@ async function kindLees(invoer, dir, peil) {
         historieRijen(lijsten[h[0]], h[1], V[h[0]], h[3]).forEach(function (r) { zet.run(h[2], r[0], cid, r[1], JSON.stringify(r[2])); });
       }
       tabellen.forEach(function (t) {
+        if (t.inhoud.length) uit.tabellen.opgeslagen++;
         d.prepare('insert or replace into salaristabel (bedrijf, tabel, versie, data) values (?, ?, ?, ?)').run(cid, t.tabel, t.versie, JSON.stringify(t.data));
         d.prepare('delete from salaristrede where versie = ?').run(t.versie);
         const zet = d.prepare('insert or replace into salaristrede (versie, schaal, trede, data) values (?, ?, ?, ?)');
@@ -663,7 +678,7 @@ function signalenBereken(d, invoer, nu) {
     const sal = geldig(m.h.salaris || [], vandaag), rst = geldig(m.h.rooster || [], vandaag), con = geldig(m.h.contract || [], vandaag);
     const pt = rst && Number(rst.parttimePercentage) > 0 ? Number(rst.parttimePercentage) / 100 : null;
     // S1: salaris lager dan schaal/trede (Nmbrs-salaristabel)
-    if (sal && sal.value != null) {
+    if (sal && Number(sal.value) > 0) {   // wv2798: bedrag 0 = geen eigen bedrag in Nmbrs (3 van 156 regels), niet 'onder de schaal'
       const t = trede(d, m.bedrijf, sal, vandaag);
       if (t) {
         const soort = b.soort || 'month';
@@ -742,23 +757,31 @@ function signalenBereken(d, invoer, nu) {
       });
     });
   });
-  // S6: in dienst volgens Nmbrs zonder medewerkerpagina, of een actieve pagina zonder Nmbrs (alleen gekoppelde entiteiten)
+  // S6: in dienst volgens Nmbrs zonder medewerkerpagina, of een actieve pagina zonder Nmbrs (alleen gekoppelde entiteiten).
+  // wv2798: eerst de koppeling uit koppeling.json (employeeId → dossier; meisjes- en getrouwde namen verschillen vaak tussen Nmbrs
+  // en de vault: 22 van 23 S6 waren vals op naam alleen), daarna pas de naam. bewust_niet = met opzet geen dossier (DGA, familie).
   const vault = Array.isArray(invoer.vault) ? invoer.vault : null;
+  const kop = invoer.koppeling || {}, kopMw = kop.medewerkers || {}, bewust = kop.bewust || {};
+  // review wv2798 MOET 1/2: een koppeling telt alleen als het dossier echt in de vault staat, binnen dezelfde entiteit (sleutel entiteit + naam)
+  const kopNaam = function (m) { return path.basename(kopMw[m.id]).replace(/\.md$/, ''); };
+  const kopPag = new Set();
   if (vault) {
     const gekoppeld = new Set(Object.values(bedrijven).map(function (b) { return b.entiteit; }).filter(Boolean));
     const paginaNamen = {};
     vault.forEach(function (p) { if (!gekoppeld.has(p.entiteit)) return; (paginaNamen[p.entiteit] || (paginaNamen[p.entiteit] = [])).push({ p: p, n: new Set((p.namen || []).map(norm).filter(Boolean)) }); });
-    const nmbrsNamen = {};
+    const nmbrsNamen = {}, inVault = new Set(vault.map(function (p) { return p.entiteit + '\n' + String(p.naam || ''); }));
+    const gekoppeldDossier = function (m, ent) { return !!kopMw[m.id] && inVault.has(ent + '\n' + kopNaam(m)); };
     Object.values(mw).forEach(function (m) {
       const ent = (bedrijven[m.bedrijf] || {}).entiteit; if (!ent || !inDienst(m, vandaag)) return;
       const n = norm(naamVan(m.info)), kort = norm([m.info.firstName, m.info.lastName].filter(Boolean).join(' '));
       (nmbrsNamen[ent] || (nmbrsNamen[ent] = [])).push(n, kort);
-      const pag = (paginaNamen[ent] || []).some(function (x) { return x.n.has(n) || x.n.has(kort); });
+      if (gekoppeldDossier(m, ent)) kopPag.add(ent + '\n' + kopNaam(m));
+      const pag = gekoppeldDossier(m, ent) || !!bewust[m.id] || (paginaNamen[ent] || []).some(function (x) { return x.n.has(n) || x.n.has(kort); });
       if (!pag) zet({ sleutel: 'S6:nmbrs:' + m.id, soort: 'S6', entiteit: ent, naam: naamVan(m.info), datum: null, tekst: naamVan(m.info) + ' (' + ent + '): in dienst volgens Nmbrs, geen medewerkerpagina gevonden' });
     });
     Object.keys(paginaNamen).forEach(function (ent) {
       paginaNamen[ent].forEach(function (x) {
-        if (!x.p.actief) return;
+        if (!x.p.actief || kopPag.has(ent + '\n' + String(x.p.naam || ''))) return;
         const n = new Set(nmbrsNamen[ent] || []);
         if (![...x.n].some(function (y) { return n.has(y); })) zet({ sleutel: 'S6:pagina:' + ent + ':' + String(x.p.naam || '').slice(0, 120), soort: 'S6', entiteit: ent, naam: String(x.p.naam || '').slice(0, 80), datum: null, tekst: String(x.p.naam || '').slice(0, 80) + ' (' + ent + '): actieve medewerkerpagina, niet in dienst volgens Nmbrs' });
       });
@@ -773,7 +796,8 @@ function kindSignalen(invoer, dir) {
   if (!fs.existsSync(path.join(dir, 'nmbrs.' + 'sqlite'))) return { ok: true, aan: [], signalen: [], nieuw: [], totaal: 0 };
   const inst = instellingenLees(dir), aan = new Set(Array.isArray(inst.signalen_aan) ? inst.signalen_aan : []);
   const d = db(dir), nu = new Date().toISOString();
-  const lijst = signalenBereken(d, Object.assign({}, invoer, { instellingen: inst }), invoer.nu ? Date.parse(invoer.nu) : undefined);
+  const kp = koppelingLees(dir);
+  const lijst = signalenBereken(d, Object.assign({}, invoer, { instellingen: inst, koppeling: { medewerkers: kp.medewerkers, bewust: kp.bewust } }), invoer.nu ? Date.parse(invoer.nu) : undefined);
   const nieuw = [];
   d.exec('begin');
   try {
@@ -898,7 +922,10 @@ function koppelingLees(dir) {
     if (idVan(id) && /^[A-Z]{2,6}$/.test(String(x.entiteit || ''))) b[id] = { entiteit: x.entiteit, verloop: vaultPadGoed(x.verloop) ? x.verloop : null };
   });
   Object.keys(j.medewerkers || {}).forEach(function (id) { if (idVan(id) && vaultPadGoed(j.medewerkers[id])) m[id] = j.medewerkers[id]; });
-  return { bedrijven: b, medewerkers: m };
+  // wv2798: bewust_niet = [employeeId] zonder dossier met opzet (DGA, familie); alleen S6 kijkt ernaar
+  const bw = {};
+  (Array.isArray(j.bewust_niet) ? j.bewust_niet : []).forEach(function (id) { if (idVan(id)) bw[id] = true; });
+  return { bedrijven: b, medewerkers: m, bewust: bw };
 }
 function getal(n, dec) {   // 30.5 → '30,5'; 63.160004 → '63,16'
   if (n == null || isNaN(Number(n))) return '?';

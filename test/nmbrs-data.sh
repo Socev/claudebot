@@ -202,6 +202,7 @@ srv.listen(0, '127.0.0.1', async function () {
     let r = await TM.ronde(kluisDeps(DIR), 'ronde');
     const eersteGet = M.log.find((x) => x.m === 'GET');
     toets('ronde ok (1 bedrijf, 3 medewerkers via 2 pagina\'s, 1 loonrun, 1 journaal)', r.ok === true && r.bedrijven === 1 && r.medewerkers === 3 && r.loonruns === 1 && r.journalen === 1, r);
+    toets('tabellen (wv2798): 1 gelijst, 0 alleen verwezen, 1 opgeslagen', r.tabellen && r.tabellen.gelijst === 1 && r.tabellen.verwezen === 0 && r.tabellen.opgeslagen === 1, r.tabellen);
     toets('rotatie: nieuw token in de kluis vóór de eerste GET', r.geroteerd === true && K.zetten.length === 1 && eersteGet && K.zetten[0].t <= eersteGet.t && K.rij.refresh !== oud, K.zetten.length);
     toets('elke API-vraag met X-Subscription-Key, het tokenendpoint zonder', M.log.filter((x) => x.p.indexOf('/api/') === 0).every((x) => x.sub === SUB) && M.log.filter((x) => x.p.indexOf('/connect/') === 0).every((x) => !x.sub));
     toets('verboden endpoints nooit aangeroepen', !M.log.some((x) => /privateInfos|personalinfo|addresses|bankaccounts|absences|payslip|children|partner/i.test(x.p)), M.log.map((x) => x.p));
@@ -223,10 +224,19 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('uurloner: betaalde uren van de periode (onbetaald telt niet)', uren && uren.uren === 80, uren);
     toets('salaristabel: alleen de geldige versie, trede A/3', d.prepare('select count(*) as n from salaristabel').get().n === 1 && !!d.prepare("select 1 from salaristrede where schaal = 'A' and trede = '3'").get());
     d.close();
-    // tweede ronde: journaal niet opnieuw
+    // tweede ronde: journaal niet opnieuw. wv2798: de bedrijfslijst geeft de tabel nu niet (zoals de CAO-tabel bij Nmbrs op 9-11-2026);
+    // de tabel waar het salaris naar verwijst moet toch binnenkomen, anders rekent S1 nooit
+    const lijstOud = API['/api/companies/' + C1 + '/salarytables'];
+    API['/api/companies/' + C1 + '/salarytables'] = (q) => pagina([], q);
+    d = sqlite(DIR); d.exec('delete from salaristabel; delete from salaristrede'); d.close();
     M.log = [];
     r = await TM.ronde(kluisDeps(DIR), 'ronde');
+    API['/api/companies/' + C1 + '/salarytables'] = lijstOud;
     toets('tweede ronde: journaal van dezelfde loonrun niet opnieuw', r.ok === true && !M.log.some((x) => /journalsemployee|documents/.test(x.p)), r);
+    d = sqlite(DIR);
+    toets('tabel niet in de bedrijfslijst maar wel verwezen vanuit het salaris → toch opgehaald (wv2798)', r.tabellen && r.tabellen.gelijst === 0 && r.tabellen.verwezen === 1 && r.tabellen.opgeslagen === 1 &&
+      !!d.prepare("select 1 from salaristrede where schaal = 'A' and trede = '3'").get() && JSON.parse(d.prepare('select data from salaristabel').get().data).tableName === 'Proeftabel', r.tabellen);
+    d.close();
 
     // 5. signalen
     let sg = await kindEcht('signalen', {}, DIR);
@@ -235,6 +245,10 @@ srv.listen(0, '127.0.0.1', async function () {
     sg = await kindEcht('signalen', { vault: [{ entiteit: 'TG', naam: 'Anna Proef', namen: ['Anna Proef'], actief: true }, { entiteit: 'TG', naam: 'Dirk Weg', namen: ['Dirk Weg'], actief: true }] }, DIR);
     const per = (x) => (sg.j.signalen || []).filter((s) => s.soort === x).map((s) => s.naam).sort().join(',');
     toets('S1: salaris onder schaal A trede 3', per('S1') === 'Anna Proef', sg.j.signalen);
+    d = sqlite(DIR); d.prepare("update historie set data = json_set(data, '$.value', 0) where medewerker = ? and soort = 'salaris'").run(E1); d.close();
+    const sg0 = await kindEcht('signalen', {}, DIR);
+    toets('S1: salarisbedrag 0 (geen eigen bedrag in Nmbrs) is geen signaal (wv2798)', !(sg0.j.signalen || []).some((s) => s.soort === 'S1'), sg0.j.signalen);
+    d = sqlite(DIR); d.prepare("update historie set data = json_set(data, '$.value', 4000) where medewerker = ? and soort = 'salaris'").run(E1); d.close();
     toets('S2: contract loopt binnen 6 weken af zonder opvolger', per('S2') === 'Cor Toets');
     toets('S3: roosteruren wijken af van contracturen', per('S3') === 'Cor Toets');
     toets('S4 maandloon: 3500 tegen 4000 × 80 % = 3200 → signaal; uurloon 25 × 80 u = 2000 → geen', per('S4') === 'Anna Proef', sg.j.signalen.filter((s) => s.soort === 'S4'));
@@ -275,6 +289,16 @@ srv.listen(0, '127.0.0.1', async function () {
     const g1 = await kindEcht('gemeld', { sleutels: sg.j.nieuw.map((x) => x.sleutel) }, DIR);
     const sg2 = await kindEcht('signalen', { vault: [{ entiteit: 'TG', naam: 'Anna Proef', namen: ['Anna Proef'], actief: true }, { entiteit: 'TG', naam: 'Dirk Weg', namen: ['Dirk Weg'], actief: true }] }, DIR);
     toets('na gemeld: dezelfde signalen niet opnieuw nieuw', g1.j.gemeld === sg.j.nieuw.length && sg2.j.nieuw.length === 0 && sg2.j.signalen.length === sg.j.signalen.length, [g1.j, sg2.j.nieuw]);
+    // wv2798: S6 kijkt eerst naar koppeling.json (getrouwde naam in de vault, meisjesnaam in Nmbrs) en naar bewust_niet (DGA/familie)
+    fs.writeFileSync(path.join(DIR, 'koppeling.json'), JSON.stringify({ medewerkers: { [E2]: '10_Zakelijk/Tolgaarde/Medewerkers/Bert Getrouwd-Voorbeeld - assistent.md' }, bewust_niet: [E3, 'geen-id'] }));
+    const sg6 = await kindEcht('signalen', { vault: [{ entiteit: 'TG', naam: 'Anna Proef', namen: ['Anna Proef'], actief: true }, { entiteit: 'TG', naam: 'Bert Getrouwd-Voorbeeld - assistent', namen: ['Bert Getrouwd-Voorbeeld - assistent'], actief: true }, { entiteit: 'TG', naam: 'Dirk Weg', namen: ['Dirk Weg'], actief: true }] }, DIR);
+    const s6 = (sg6.j.signalen || []).filter((s) => s.soort === 'S6').map((s) => s.naam).sort().join(',');
+    toets('S6 met koppeling: Bert gekoppeld (andere naam), Cor bewust niet → alleen pagina Dirk', s6 === 'Dirk Weg', sg6.j.signalen.filter((s) => s.soort === 'S6'));
+    // review wv2798 MOET 1/2: koppeling naar een dossier dat niet (of alleen bij een andere entiteit) in de vault staat telt niet
+    const sg6b = await kindEcht('signalen', { vault: [{ entiteit: 'TG', naam: 'Anna Proef', namen: ['Anna Proef'], actief: true }, { entiteit: 'GH', naam: 'Bert Getrouwd-Voorbeeld - assistent', namen: ['Bert Getrouwd-Voorbeeld - assistent'], actief: true }] }, DIR);
+    const s6b = (sg6b.j.signalen || []).filter((s) => s.soort === 'S6').map((s) => s.naam).sort().join(',');
+    toets('S6: gekoppeld dossier ontbreekt in de vault (of staat bij een andere entiteit) → Bert toch gemeld', s6b === 'Bert Voorbeeld', sg6b.j.signalen.filter((s) => s.soort === 'S6'));
+    fs.unlinkSync(path.join(DIR, 'koppeling.json'));
     // persoon
     const ps = await kindEcht('persoon', { naam: 'anna proef' }, DIR);
     const p0 = ps.j && ps.j.treffers && ps.j.treffers[0] || {};
