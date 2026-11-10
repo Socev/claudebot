@@ -247,17 +247,25 @@ function wieOrg(w) {
 }
 
 // ── GHAWA-blok (alleen op de pod: elke giftregel met jaar en bedrag van het vorige gepubliceerde blok) ──
-function ghawaBlok(rijen, vorigeGiften, stand) {
+function ghawaBlok(rijen, vorigeGiften, stand, vorigeGroepen) {
   const gift = (r) => GIFT.indexOf(r.soort) >= 0;
   const tot = rijen.filter((r) => r.datum <= stand);
   const standJaar = Number(stand.slice(0, 4));
   const jaren = [...new Set(tot.map((r) => r.jaar))].sort((a, b) => a - b);
   const telJaar = (j) => tot.filter((r) => r.jaar === j && gift(r)).length;
-  // jaren met < 10 giftregels samen met het volgende (of het vorige) jaar
-  const groepen = [];
+  // jaren met < 10 giftregels samen met het volgende (of het vorige) jaar. Een eenmaal gepubliceerde groep blijft bij elkaar (review wv2889
+  // ronde 1 MOET 3: splitsen zou het verschil tussen het oude samengevoegde en het nieuwe losse totaal prijsgeven); groepen kunnen alleen groeien.
+  const groepen = (vorigeGroepen || []).map((gr) => gr.slice()).filter((gr) => gr.length);
+  const inOud = new Set(groepen.flat());
   let g = [];
-  for (const j of jaren) { g.push(j); if (g.reduce((n, x) => n + telJaar(x), 0) >= 10) { groepen.push(g); g = []; } }
+  for (const j of jaren) {
+    if (inOud.has(j)) continue;
+    if (groepen.length && j < groepen[groepen.length - 1][0]) { groepen[groepen.length - 1].push(j); continue; }   // een vergeten vroeg jaar: bij de vroegste groep
+    g.push(j); if (g.reduce((n, x) => n + telJaar(x), 0) >= 10) { groepen.push(g); g = []; }
+  }
   if (g.length) { if (groepen.length) groepen[groepen.length - 1].push(...g); else groepen.push(g); }
+  for (const gr of groepen) gr.sort((a, b) => a - b);
+  groepen.sort((a, b) => a[0] - b[0]);
   const groepVan = new Map(); for (const gr of groepen) for (const j of gr) groepVan.set(j, gr);
   const naam = (gr) => (gr.length === 1 ? String(gr[0]) : gr[0] + '–' + gr[gr.length - 1]);
   const som = (l) => l.reduce((s, r) => s + r.bedrag_cent, 0);
@@ -281,7 +289,7 @@ function ghawaBlok(rijen, vorigeGiften, stand) {
   if (telJaar(standJaar) < 10) redenen.push('lopend jaar < 10 giftregels');
   for (const [k, n] of per) if (!telOk(n)) redenen.push('jaar ' + k + ': ' + n + ' gewijzigd');
   if (!telOk(totaal)) redenen.push('saldo: ' + totaal + ' gewijzigd');
-  return { blok, giften: nu, mag: redenen.length === 0, redenen, gewijzigd: totaal };
+  return { blok, giften: nu, groepen, mag: redenen.length === 0, redenen, gewijzigd: totaal };
 }
 
 // ── pakketten ──
@@ -298,7 +306,15 @@ function bouwPakketten(x) {
     nieuw.push({ hash: h, tekst: t, onderdeel, waar });
     return PENDING;
   };
-  const ref = (v) => (v == null || v === '' ? null : maskeer(String(v).trim()));
+  // referentie, cheque, aantal: alleen een vaste vorm (elk woord heeft een cijfer, is ≤ 3 tekens of een vast woord); anders langs de tekstgoedkeuring
+  // (review wv2889 ronde 1 MOET 1: een naam in een referentieveld ging anders zonder Share en zonder vervangen naar buiten)
+  const REF_WOORD = /^(invoice|receipt|inv|ref|no|nr|chq|cheque|part|of|and)$/i;
+  const ref = (v, onderdeel, waar) => {
+    if (v == null || v === '') return null;
+    const m = maskeer(String(v).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim());
+    const vorm = m.length <= 40 && /^[A-Za-z0-9…][A-Za-z0-9 .,&\/#…-]*$/.test(m) && m.split(/[ .,&\/#-]+/).filter(Boolean).every((w) => /\d/.test(w) || w.length <= 3 || REF_WOORD.test(w));
+    return vorm ? m : tekst(v, onderdeel || 'reference', waar || 'reference');
+  };
   const datum = (v) => (v && /^\d{4}-\d{2}-\d{2}/.test(String(v)) ? String(v).slice(0, 10) : null);
   const k = x.k, d = x.d, r = x.rijen;
   const asOf = { expenditure: k.standen.uitgaven, ecg_gmd: k.standen.ecg_gmd, ecg_eur: k.standen.ecg_eur };
@@ -341,19 +357,19 @@ function bouwPakketten(x) {
       phases: fasen.map((f) => ({ id: f.id, name: f.id, description: FASE_EN[f.id] || null, budget: f.begroot, realised: f.gerealiseerd, not_needed: f.niet_nodig, open: f.open, overrun: f.overschrijding || 0 })),
       activities: acts.map((a) => ({ nr: a.nr, phase: a.fase, name: tekst(a.naam, id, 'activity ' + a.nr), status: tekst(a.status, id, 'activity ' + a.nr + ' status'),
         note: tekst(r.actToel.get(a.nr), id, 'activity ' + a.nr + ' note'), budget: a.begroot, realised: a.gerealiseerd, not_needed: a.niet_nodig, open: a.open, overrun: a.overschrijding })),
-      lines: regels.map((g) => { const kk = regelK.get(g.id) || {}; return { id: g.id, activity: g.activiteit, item: tekst(g.post, id, 'line ' + g.id), qty: g.aantal == null ? null : ref(g.aantal),
+      lines: regels.map((g) => { const kk = regelK.get(g.id) || {}; return { id: g.id, activity: g.activiteit, item: tekst(g.post, id, 'line ' + g.id), qty: g.aantal == null ? null : ref(g.aantal, id, 'line ' + g.id + ' qty'),
         price: g.prijs_cent, budget: g.begroot_cent, realised: kk.gerealiseerd || 0, open: kk.open == null ? null : kk.open, status: tekst(g.status, id, 'line ' + g.id + ' status') }; }),
       expenditures: r.uitgaven.filter((u) => rIds.has(u.regel)).map((u) => ({ id: u.id, date: datum(u.datum), line: u.regel, description: tekst(u.omschrijving, id, 'expenditure ' + u.id),
-        reference: ref(u.referentie), gmd: u.gmd_cent, paid_from: rekLabel(u.betaald_van), method: tekst(u.betaalwijze, id, 'expenditure ' + u.id + ' method'),
-        cheque: ref(u.cheque), evidence: tekst(u.bewijs, id, 'expenditure ' + u.id + ' evidence') })) };
+        reference: ref(u.referentie, id, 'expenditure ' + u.id + ' reference'), gmd: u.gmd_cent, paid_from: rekLabel(u.betaald_van), method: tekst(u.betaalwijze, id, 'expenditure ' + u.id + ' method'),
+        cheque: ref(u.cheque, id, 'expenditure ' + u.id + ' cheque'), evidence: tekst(u.bewijs, id, 'expenditure ' + u.id + ' evidence') })) };
   }
   // ECG accounts
   pakket.accounts = { as_of: asOf,
     balances: [{ account: 'ECG GMD account', currency: 'GMD', balance: k.ecg.gmd.saldo, date: k.ecg.gmd.datum }, { account: 'ECG EUR account', currency: 'EUR', balance: k.ecg.eur.saldo, date: k.ecg.eur.datum }],
-    bank: r.bank.map((b) => ({ account: b.munt === 'GMD' ? 'ECG GMD account' : b.munt === 'EUR' ? 'ECG EUR account' : rekLabel(b.rekening), date: datum(b.datum), reference: ref(b.referentie),
-      amount: b.bedrag_cent, currency: b.munt, balance: b.saldo_cent, kind: tekst(b.soort, 'accounts', 'bank kind'), cheque: ref(b.cheque), payee: b.begunstigde ? x.lab.payee(b.begunstigde) : null })),
+    bank: r.bank.map((b) => ({ account: b.munt === 'GMD' ? 'ECG GMD account' : b.munt === 'EUR' ? 'ECG EUR account' : rekLabel(b.rekening), date: datum(b.datum), reference: ref(b.referentie, 'accounts', 'bank reference'),
+      amount: b.bedrag_cent, currency: b.munt, balance: b.saldo_cent, kind: tekst(b.soort, 'accounts', 'bank kind'), cheque: ref(b.cheque, 'accounts', 'bank cheque'), payee: b.begunstigde ? x.lab.payee(b.begunstigde) : null })),
     flows: r.stromen.map((s) => ({ id: s.id, date: datum(s.datum), kind: tekst(s.soort, 'accounts', 'flow ' + s.id), from: rekLabel(s.van), to: rekLabel(s.naar), eur: s.eur_cent, gmd: s.gmd_cent,
-      rate: s.eur_cent && s.gmd_cent ? Math.round((s.gmd_cent / s.eur_cent) * 100) / 100 : null, reference: ref(s.referentie), purpose: tekst(s.doel, 'accounts', 'flow ' + s.id + ' purpose') })) };
+      rate: s.eur_cent && s.gmd_cent ? Math.round((s.gmd_cent / s.eur_cent) * 100) / 100 : null, reference: ref(s.referentie, 'accounts', 'flow ' + s.id + ' reference'), purpose: tekst(s.doel, 'accounts', 'flow ' + s.id + ' purpose') })) };
   // Funds (alleen Grant / Sponsor / Own funds)
   pakket.funds = { as_of: asOf, funds: r.fondsen.filter((f) => /^(grant|sponsor|own funds)$/i.test(String(f.soort || ''))).map((f) => ({ id: f.id, giver: tekst(f.gever, 'funds', 'fund ' + f.id),
     kind: f.soort, project: f.project, purpose: tekst(f.doel, 'funds', 'fund ' + f.id + ' purpose'), eur: f.eur_cent, date: datum(f.datum), status: tekst(f.status, 'funds', 'fund ' + f.id + ' status'), deadline: datum(f.termijn) })) };
@@ -399,7 +415,7 @@ function maak(o) {
   const { DatabaseSync } = require('node:sqlite');
   const fout = (l, e) => { if (o.fout) o.fout(l, e); };
   const open = (lezen) => { const db = new DatabaseSync(o.dbPad, lezen ? { readOnly: true } : {}); db.exec('PRAGMA busy_timeout = 5000'); return db; };
-  { const db = open(false); try { db.exec(LOKAAL_SCHEMA); } finally { db.close(); } }
+  { const db = open(false); try { db.exec(LOKAAL_SCHEMA); try { db.exec('ALTER TABLE deel_kijker ADD COLUMN weg_bevestigd TEXT'); } catch (e) { /* bestaat al */ } } finally { db.close(); } }
   const metDb = (fn) => { const db = open(false); try { return fn(db); } finally { db.close(); } };
   const stand = (k) => metDb((db) => { const r = db.prepare('SELECT waarde FROM deel_stand WHERE sleutel = ?').get(k); return r ? r.waarde : null; });
   const standZet = (k, v) => metDb((db) => db.prepare('INSERT INTO deel_stand (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde').run(k, String(v)));
@@ -414,7 +430,7 @@ function maak(o) {
     const d = G.leesData(o.dbPad); d.vandaag = amsDag(nu());
     const k = G.bereken(d);
     const db = open(true);
-    let rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud;
+    let rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud, groepen, kandidaat;
     try {
       const a = (sql, ...p) => db.prepare(sql).all(...p);
       rijen = { regels: a('SELECT id, activiteit, post, aantal, prijs_cent, begroot_cent, status FROM begrotingsregel ORDER BY volgorde'),
@@ -431,17 +447,26 @@ function maak(o) {
       ghawaRijen = a('SELECT id, datum, jaar, bedrag_cent, soort FROM bankregel_ghawa');   // INTERN: alleen voor het blok, nooit in een pakket
       const b = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_blok'").get();
       blokOud = b ? JSON.parse(b.waarde) : null;
+      const gr = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_groepen'").get();
+      groepen = gr ? JSON.parse(gr.waarde) : null;
+      const kd = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_kandidaat'").get();
+      kandidaat = kd && kd.waarde ? new Map(JSON.parse(kd.waarde)) : null;
     } finally { db.close(); }
     let stichting = null;
     try { stichting = S.leesVault(o.vault); } catch (e) { fout('ghawa-deel-vault', e); }
     const mp = mijlpalenEngels(o.vault, S);
     const personenSoort = new Map([...l.personen.entries()].map(([n, s]) => [norm(n), s]));
-    return { d, k, rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud, stichting, mp, personenSoort };
+    return { d, k, rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud, groepen, kandidaat, stichting, mp, personenSoort };
   }
   function bouw(x, opties) {
     const lab = maakLabels(x.l, sleutel);
-    const sb = ghawaBlok(x.ghawaRijen, x.vorig, eindVorigeMaand(nu()));
+    const st = eindVorigeMaand(nu());
+    const sb = ghawaBlok(x.ghawaRijen, x.vorig, st, x.groepen);
+    // review wv2889 ronde 1 MOET 4: een blok dat misschien buiten staat (push zonder bevestiging) telt ook als vergelijking
+    const sbK = x.kandidaat ? ghawaBlok(x.ghawaRijen, x.kandidaat, st, x.groepen) : null;
+    if (sbK && !sbK.mag) { sb.mag = false; sb.redenen = sb.redenen.concat(sbK.redenen.map((r) => 'kandidaat: ' + r)); }
     const blok = sb.mag ? sb.blok : x.blokOud;
+    sb.nieuw = sb.mag && JSON.stringify(sb.blok) !== JSON.stringify(x.blokOud);
     const b = bouwPakketten({ k: x.k, d: x.d, rijen: x.rijen, stichting: x.stichting, lab, goed: x.goed, mijlpalen: x.mp.rijen, gedeeldeOverleggen: x.gedeeld, blok, personenSoort: x.personenSoort });
     const p = poortLijsten(x.l);
     // een nieuwe tekst die zelf de poort niet haalt, kan David niet delen
@@ -546,20 +571,28 @@ function maak(o) {
     for (const ob of objs) if (!aan.includes(ob.onderdeel) && (ob.hash || (ob.dicht && !ob.dicht_bevestigd) || !ob.dicht)) { await sluitOnderdeel(ob.onderdeel, 'uit'); uit.dicht.push(ob.onderdeel); }
     if (!aan.length) return uit;
     const x = lees(), b = bouw(x);
-    // het GHAWA-blok vastleggen als het mee mag (dan is het nieuwe blok de vergelijking voor de volgende keer)
-    if (b.sb.mag && (aan.includes('totals') || aan.includes('overview'))) {
+    // het GHAWA-blok: vóór de push als kandidaat (telt mee als vergelijking als de push onbevestigd blijft), na een bevestigde push vastgelegd
+    // als de nieuwe vergelijking (review wv2889 ronde 1 MOET 4)
+    const metBlok = ['totals', 'overview'];
+    let blokVast = false;
+    const legVast = () => {
+      if (blokVast) return;
       metDb((db) => {
         db.exec('BEGIN IMMEDIATE');
         try {
           db.prepare('DELETE FROM deel_gift').run();
           const ins = db.prepare('INSERT INTO deel_gift (id, jaar, bedrag_cent) VALUES (?, ?, ?)');
-          for (const [id, g] of b.sb.giften) ins.run(id, g.jaar, g.bedrag_cent);
-          db.prepare("INSERT INTO deel_stand (sleutel, waarde) VALUES ('ghawa_blok', ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde").run(JSON.stringify(b.sb.blok));
+          for (const [gid, g] of b.sb.giften) ins.run(gid, g.jaar, g.bedrag_cent);
+          const zetS = db.prepare('INSERT INTO deel_stand (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde');
+          zetS.run('ghawa_blok', JSON.stringify(b.sb.blok)); zetS.run('ghawa_groepen', JSON.stringify(b.sb.groepen));
+          db.prepare("DELETE FROM deel_stand WHERE sleutel = 'ghawa_kandidaat'").run();
           db.exec('COMMIT');
         } catch (e) { db.exec('ROLLBACK'); throw e; }
       });
-    }
-    uit.blok = { nieuw: b.sb.mag, gewijzigd: b.sb.gewijzigd, redenen: b.sb.redenen.length };
+      blokVast = true;
+    };
+    if (b.sb.nieuw && metBlok.some(isAan)) standZet('ghawa_kandidaat', JSON.stringify([...b.sb.giften]));
+    uit.blok = { nieuw: !!b.sb.nieuw, gewijzigd: b.sb.gewijzigd, redenen: b.sb.redenen.length };
     for (const id of IDS.filter(isAan)) {   // opnieuw gelezen: tussendoor uitgezet = niet meer zetten
       const doc = b.pakket[id];
       if (!doc) continue;
@@ -572,7 +605,7 @@ function maak(o) {
       }
       const h = sha256(JSON.stringify(doc));
       const ob = metDb((db) => db.prepare('SELECT * FROM deel_obj WHERE onderdeel = ?').get(id)) || {};
-      if (ob.hash !== h) { if (await zet(id, doc)) uit.gezet.push(id); }
+      if (ob.hash !== h) { if (await zet(id, doc)) { uit.gezet.push(id); if (b.sb.nieuw && metBlok.includes(id)) legVast(); } }
       else if (!ob.vers_op || nu() - Date.parse(ob.vers_op) >= VERS_MS) uit.vers.push(id);
     }
     await verleng(uit.vers);
@@ -630,10 +663,17 @@ function maak(o) {
   async function tik(dwing) {
     const u = { op: iso(nu()) };
     try {
-      if (!IDS.some(isAan) && !metDb((db) => db.prepare('SELECT 1 FROM deel_obj LIMIT 1').get()) && !metDb((db) => db.prepare('SELECT 1 FROM deel_kijker LIMIT 1').get()) && stand('noodstop') !== '1') { laatst = u; return u; }
+      if (!IDS.some(isAan) && !metDb((db) => db.prepare('SELECT 1 FROM deel_obj LIMIT 1').get()) && !metDb((db) => db.prepare('SELECT 1 FROM deel_kijker LIMIT 1').get()) && stand('noodstop') !== '1' && stand('noodstop_d1') !== '1') { laatst = u; return u; }
       // intrekkingen die nog niet bevestigd zijn: elke minuut opnieuw, vooraan
       const open1 = metDb((db) => db.prepare('SELECT onderdeel FROM deel_obj WHERE dicht IS NOT NULL AND dicht_bevestigd IS NULL').all()).map((r) => r.onderdeel);
       for (const id of open1) await inRij(() => sluitOnderdeel(id, 'opnieuw'), true);
+      // review wv2889 ronde 1 MOET 2: ook een noodstop of iemand eraf die D1 nog niet bevestigde, elke minuut opnieuw en vooraan
+      const nood = stand('noodstop') === '1';
+      if (stand('noodstop_d1') !== (nood ? '1' : '0') && (nood || stand('noodstop_d1') === '1')) await inRij(() => noodD1(nood), true);
+      for (const r of metDb((db) => db.prepare('SELECT hash FROM deel_kijker WHERE weg_op IS NOT NULL AND weg_bevestigd IS NULL').all())) {
+        await inRij(() => kijkerD1(r.hash, false), true);
+        metDb((db) => db.prepare('UPDATE deel_kijker SET weg_bevestigd = ? WHERE hash = ? AND weg_op IS NOT NULL').run(iso(nu()), r.hash));
+      }
       if (dwing || (vuil !== gedaan && nu() - laatsteRonde >= RONDE_MS) || nu() - laatsteRonde >= VERS_MS) {
         const start = vuil;
         u.ronde = await inRij(ronde); laatsteRonde = nu(); gedaan = start;
@@ -675,15 +715,15 @@ function maak(o) {
     if (naam.length < 2 || !/^[^\s@<>"]{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,24}$/.test(adres)) return { status: 400, body: { ok: false, fout: 'naam en een geldig mailadres nodig' } };
     const rol = b && b.rol === 'eigenaar' ? 'eigenaar' : 'ecg';
     const h = adresHash(adres);
-    metDb((db) => db.prepare('INSERT INTO deel_kijker (hash, naam, adres, rol, op, door) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (hash) DO UPDATE SET naam = excluded.naam, rol = excluded.rol, op = excluded.op, door = excluded.door, weg_op = NULL')
+    metDb((db) => db.prepare('INSERT INTO deel_kijker (hash, naam, adres, rol, op, door) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (hash) DO UPDATE SET naam = excluded.naam, rol = excluded.rol, op = excluded.op, door = excluded.door, weg_op = NULL, weg_bevestigd = NULL')
       .run(h, naam, adres, rol, iso(nu()), String(door || '').slice(0, 40)));
     try { await inRij(() => kijkerD1(h, true, rol), true); standZet('bezoekers_hash', ''); } catch (e) { fout('ghawa-deel-kijker', e); }
     return { status: 200, body: { ok: true, hash: h, rol, toegang_nodig: true } };
   }
   async function kijkerEraf(hash) {
     if (!/^[0-9a-f]{64}$/.test(String(hash || ''))) return { status: 400, body: { ok: false, fout: 'onbekend' } };
-    metDb((db) => db.prepare('UPDATE deel_kijker SET weg_op = ? WHERE hash = ?').run(iso(nu()), hash));
-    try { await inRij(() => kijkerD1(hash, false), true); standZet('bezoekers_hash', ''); return { status: 200, body: { ok: true, dicht: true } }; }
+    metDb((db) => db.prepare('UPDATE deel_kijker SET weg_op = ?, weg_bevestigd = NULL WHERE hash = ?').run(iso(nu()), hash));
+    try { await inRij(() => kijkerD1(hash, false), true); metDb((db) => db.prepare('UPDATE deel_kijker SET weg_bevestigd = ? WHERE hash = ?').run(iso(nu()), hash)); standZet('bezoekers_hash', ''); return { status: 200, body: { ok: true, dicht: true } }; }
     catch (e) { fout('ghawa-deel-kijker', e); return { status: 200, body: { ok: true, dicht: false, fout: 'nog niet dicht; de pod probeert het elke minuut opnieuw' } }; }
   }
   function tekstBesluit(hash, besluit, door, opties) {
