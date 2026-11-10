@@ -170,11 +170,6 @@ function leesCsvMap(csvMap) {
 function invoer(csvMap, dbPad, opties) {
   const o = opties || {};
   const BIJ = require('./ghawa-bij.js');
-  if (fs.existsSync(dbPad) && !o.forceer) {   // wv2880: een herinvoer zou de bijgehouden regels (bank, afschriften, fondsen) wissen
-    const x = new (require('node:sqlite').DatabaseSync)(dbPad, { readOnly: true });
-    let n = 0; try { n = BIJ.fase2Gegevens(x); } finally { x.close(); }
-    if (n > 0) throw new Error('invoer geweigerd: de databank heeft ' + n + ' bijgehouden regels (fase 2); alleen met --forceer');
-  }
   const b = leesCsvMap(csvMap);
   const fouten = [];
   const actNrs = new Set(b.act.map((x) => x.activity_no));
@@ -193,6 +188,10 @@ function invoer(csvMap, dbPad, opties) {
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('BEGIN IMMEDIATE');
     try {
+      // wv2880 (review MOET 4): binnen dezelfde schrijftransactie kijken of er bijgehouden regels zijn (bank, afschriften, fondsen); die wist
+      // een herinvoer alleen met --forceer
+      const f2 = BIJ.fase2Gegevens(db);
+      if (f2 > 0 && !o.forceer) throw new Error('invoer geweigerd: de databank heeft ' + f2 + ' bijgehouden regels (fase 2); alleen met --forceer');
       // de invoer vervangt alles: tabellen opnieuw opbouwen, zodat een databank van een oudere versie (zonder kolom volg) geen half schema houdt
       for (const t of TABELLEN.concat(BIJ.BIJ_TABELLEN)) db.exec('DROP TABLE IF EXISTS ' + t);
       db.exec(SCHEMA);
@@ -601,10 +600,11 @@ function rondeRoute(d, k, bijInfo) {
   const ecgOud = Math.max(oud(k.standen.ecg_gmd) || 0, oud(k.standen.ecg_eur) || 0);
   const onb = (d.ghawaBank && d.ghawaBank.onbekend) || 0;
   const vragenOpen = d.vragen.filter((v) => STATUS_OPEN.test(v.status || '')).length;
+  const nl = (x) => (x && /^\d{4}-\d{2}-\d{2}/.test(x) ? Number(x.slice(8, 10)) + '-' + Number(x.slice(5, 7)) + '-' + x.slice(0, 4) : '—');
   const stappen = [
     { id: 'afschriften', titel: 'Afschriften erin', klaar: ecgOud <= 35 && (!spaar || oud(spaar) <= 35),
-      tekst: 'ECG euro t/m ' + (k.standen.ecg_eur || '—') + ', dalasi t/m ' + (k.standen.ecg_gmd || '—') + '; GHAWA-bank vanzelf t/m ' + (k.standen.ghawa || '—') +
-        (spaar ? '; spaarrekening laatst in Facturen gezet op ' + spaar.slice(0, 10) : '') },
+      tekst: 'ECG euro t/m ' + nl(k.standen.ecg_eur) + ', dalasi t/m ' + nl(k.standen.ecg_gmd) + '; GHAWA-bank vanzelf t/m ' + nl(k.standen.ghawa) +
+        (spaar ? '; spaarrekening laatst in Facturen gezet op ' + nl(spaar) : '') },
     { id: 'indelen', titel: 'Onbekende posten indelen', klaar: onb === 0, tekst: onb ? onb + ' nog in te delen' : 'alles ingedeeld' },
     { id: 'aansluiting', titel: 'Aansluiting bekijken', klaar: af.has('aansluiting'), sluit: k.sluit, tekst: k.sluit ? 'sluit op de cent' : 'een aansluiting sluit niet', afvinken: true },
     { id: 'vragen', titel: 'Open vragen als concept naar ECG', klaar: af.has('vragen'), tekst: vragenOpen + ' open vragen; jij verstuurt', afvinken: true },

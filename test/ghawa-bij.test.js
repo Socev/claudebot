@@ -220,3 +220,36 @@ test('interne routes: donateurs en indelen alleen met intern:true, nooit rekenin
   }
   void maakFixture; void fs; void path;
 });
+
+test('review wv2880: lege bronrekening, rekening alleen uit de pdf-kop, geldstroom volgt een latere export, herinvoer in de transactie', () => {
+  // MOET 1: spaarregels overgenomen, daarna staat de spaarrekening helemaal niet meer in Facturen → geweigerd
+  { const { db } = vers(); const x = open(db);
+    const spaar = [['s1', '2026-02-01', 1000, { eigen_iban: 'NL99', tegenpartij_iban: 'NL00' }]];
+    assert.strictEqual(B.bankBij(x, null, Object.assign({ facturen: fac(nieuw.concat(spaar)), rekeningen: REKS }, NU)).nieuw, 6);
+    const r = B.bankBij(x, null, Object.assign({ facturen: fac(nieuw), rekeningen: REKS }, NU));
+    assert.strictEqual(r.uitkomst, 'geweigerd'); assert.match(r.fout, /spaarrekening: 1 eerder overgenomen/); x.close(); }
+  // MOET 2: kop noemt een andere rekening, een ECG-nummer staat alleen in een omschrijving → geweigerd (andere rekening)
+  { const tekst = ['ECOBANK', 'Account Number: 6240099857   Currency: GMD', 'Opening Balance 595.00', '',
+      '03-AUG-26   TRANSFER TO 6240042907 ELITE CARE      I64X0006AB     100.00        495.00'].join('\n');
+    const r = B.leesEcgPdfTekst(tekst); assert.strictEqual(r.rekening, '6240099857');
+    const { db } = vers(); const x = open(db);
+    assert.match(B.ecgAfschrift(x, { naam: 'v.pdf', bytes: Buffer.from('%PDF-1.4 v') }, { csvLees: G.csvLees, pdfNaarTekst: () => ({ tekst }) }, NU).fout, /andere rekening/);
+    assert.match(B.leesEcgPdfTekst(tekst.replace('Account Number: 6240099857', 'Statement')).fout, /niet in de kop/);
+    assert.match(B.leesEcgPdfTekst(tekst.replace('Currency: GMD', 'Account 6240042909')).fout, /meerdere/); x.close(); }
+  // MOET 3: eerst alleen de kosten van een omwisseling (lijkt de grootste), daarna de hele dag: de geldstroom krijgt het echte bedrag
+  { const { db } = vers(); const x = open(db);
+    B.ecgAfschrift(x, { naam: 'g.csv', bytes: eco('6240042907', 'GMD', [['01 Aug 2026', 'B/O ELITE CARE GROUP, IFO ELITE CARE GROUP, Cheque 7', 'I61X0007AB', 80000, 139500]]) }, hulp, NU);
+    const fee = ['01 Aug 2026', 'B/O ELITE CARE GROUP, IFO ELITE CARE GROUP, Cheque 7', 'I61X0007AB', -5, 3970], hoofd = ['01 Aug 2026', 'B/O ELITE CARE GROUP, IFO ELITE CARE GROUP, Cheque 7', 'I61X0007AB', -1000, 2970];
+    B.ecgAfschrift(x, { naam: 'e1.csv', bytes: eco('6240042909', 'EUR', [fee]) }, hulp, NU);
+    assert.strictEqual(x.prepare("SELECT eur_cent FROM geldstroom WHERE herkomst = 'afschrift' AND soort LIKE 'Conversion%'").get().eur_cent, 5);
+    const r = B.ecgAfschrift(x, { naam: 'e2.csv', bytes: eco('6240042909', 'EUR', [fee, hoofd]) }, hulp, NU);
+    assert.deepStrictEqual([r.uitkomst, r.nieuw, r.al_bekend], ['overgenomen', 1, 1]);
+    assert.deepStrictEqual(x.prepare("SELECT eur_cent, gmd_cent FROM geldstroom WHERE herkomst = 'afschrift'").all().map((y) => [y.eur_cent, y.gmd_cent]), [[1000, 80000]]);
+    assert.deepStrictEqual(x.prepare("SELECT soort FROM bankregel_ecg WHERE herkomst = 'afschrift' AND munt = 'EUR' ORDER BY volg").all().map((y) => y.soort), ['Bank charge', 'Conversion out']);
+    x.close(); }
+  // MOET 4: de controle zit in de schrijftransactie (een open schrijver houdt de herinvoer tegen in plaats van dat die erlangs glipt)
+  { const { db, map } = vers(); const x = open(db);
+    B.bankBij(x, null, Object.assign({ facturen: fac(nieuw), rekeningen: REKS }, NU)); x.close();
+    assert.throws(() => G.invoer(map, db), /bijgehouden regels/);
+    const z = new DatabaseSync(db, { readOnly: true }); assert.strictEqual(z.prepare("SELECT COUNT(*) AS n FROM bankregel_ghawa WHERE herkomst = 'bank'").get().n, 5); z.close(); }
+});
