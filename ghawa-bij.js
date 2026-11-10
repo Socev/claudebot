@@ -173,7 +173,11 @@ function bankBij(db, facPad, o) {
       const go = g.filter((x) => x.herkomst === 'overdracht');
       const gEind = go.reduce((m, x) => (x.datum > m ? x.datum : m), '');
       const ft = F.regels.filter((t) => t.eigen_iban === iban);
-      if (!ft.length) continue;
+      if (!ft.length) {   // review MOET 1: ook zonder regels in de bron moet wat al binnen was er nog staan
+        const al = g.filter((x) => x.herkomst === 'bank').length;
+        if (al) breuken.push(naam + ': ' + al + ' eerder overgenomen regel(s) staan niet meer in de bank');
+        continue;
+      }
       const fStart = ft.reduce((m, t) => (t.boekdatum < m ? t.boekdatum : m), '9999');
       const sl = (d, c) => d + '|' + c;
       // a. overlap
@@ -299,7 +303,11 @@ const DATUM_VOOR = /^\s*(\d{1,2}[\-/. ](?:[A-Za-z]{3,9}|\d{1,2})[\-/., ]+\d{2,4}
 const BEDRAG_G = /(?:^|\s)(-?\d{1,3}(?:,\d{3})*\.\d{2}|-?\d+\.\d{2})(?=\s|$)/g;
 function leesEcgPdfTekst(tekst) {
   const t = String(tekst || '');
-  const nrs = [...new Set((t.match(/\b\d{10}\b/g) || []).filter((n) => ECG_REK[n] || /^62400\d{5}$/.test(n)))];
+  // review MOET 2: het rekeningnummer alleen uit de kop (regels vóór de eerste boeking met "account", "a/c" of "rekening"); precies één nummer
+  const kopRegels = [];
+  const heeftBedrag = new RegExp(BEDRAG_G.source);
+  for (const r of t.split(/\r?\n/)) { if (DATUM_VOOR.test(r) && heeftBedrag.test(r)) break; kopRegels.push(r); }
+  const nrs = [...new Set(kopRegels.filter((r) => /account|a\/c|rekening/i.test(r)).flatMap((r) => r.match(/\b\d{10}\b/g) || []))];
   let opening = null;
   const mo = /(opening\s+balance|balance\s+b\/?f|brought\s+forward)[^\d\-]*(-?[\d,]+\.\d{2})/i.exec(t);
   if (mo) opening = centEco(mo[2]);
@@ -338,7 +346,8 @@ function leesEcgPdfTekst(tekst) {
     if (r.bedrag !== null && r.kolom !== null && Math.abs(r.bedrag) !== r.kolom) return { fout: 'de saldi in het pdf sluiten niet op ' + r.datum + ' (bedrag ' + centTekst(r.kolom) + ', saldoverschil ' + centTekst(r.bedrag) + '); zet de csv-export erin' };
     if (r.bedrag === null && r.kolom === null) return { fout: 'bij de eerste boeking staat geen bedrag; zet de csv-export erin' };
   }
-  return { rekening: nrs.length === 1 ? nrs[0] : (nrs.filter((n) => ECG_REK[n]).length === 1 ? nrs.filter((n) => ECG_REK[n])[0] : ''), formaat: 'pdf', opening,
+  if (nrs.length !== 1) return { fout: nrs.length ? 'in de kop van het pdf staan meerdere rekeningnummers' : 'het rekeningnummer staat niet in de kop van het pdf', formaat: 'pdf' };
+  return { rekening: nrs[0], formaat: 'pdf', opening,
     rijen: oudNieuw.map((r) => ({ datum: r.datum, omschrijving: r.omschrijving, referentie: r.referentie, bedrag: r.bedrag, kolom: r.kolom, saldo: r.saldo })) };
 }
 function pdfNaarTekst(bytes) {
@@ -484,6 +493,9 @@ function ecgAfschrift(db, inv, hulp, o) {
 // Omwisselingen (GMD in ↔ EUR uit met dezelfde referentie) en overboekingen naar ECG worden geldstromen; alleen voor regels uit een afschrift
 // en nooit dubbel (referentie al in een geldstroom, ook in de toelichting van de overdracht).
 function koppelStromen(db) {
+  // review MOET 3: de geldstromen uit afschriften worden telkens opnieuw opgebouwd uit de huidige indeling van de bankregels (een latere export
+  // kan een kleine boeking van kosten naar omwisseling verschuiven of omgekeerd); die uit het overdrachtsbestand blijven ongemoeid
+  db.prepare("DELETE FROM geldstroom WHERE herkomst = 'afschrift'").run();
   const al = (ref) => !!db.prepare('SELECT 1 FROM geldstroom WHERE referentie = ? OR notitie LIKE ?').get(ref, '%' + ref + '%');
   const mid = volgendId(db, 'geldstroom', 'M');
   const zet = db.prepare('INSERT INTO geldstroom (id, datum, soort, van, naar, eur_cent, gmd_cent, project, doel, bron, notitie, herkomst, referentie) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
