@@ -13532,7 +13532,7 @@ function handleApp(req, res) {
     const rambleStuk = req.method === 'POST' && APP_RAMBLE_STUK_RE.test(p);   // wv1969: MemoryLane, één WAV-stuk van 60 s
     const ruw = upload || rambleStuk || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
     if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
-    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && (p === '/app/osint/bestand' || p === '/app/ghawa/afschrift') ? APP_OSINT_BESTAND_MAX_BODY : (req.method === 'POST' && p === '/app/osint/zoek' ? APP_OSINT_ZOEK_MAX_BODY : APP_MAX_BODY)))); })(function (fout, d, lichaam) {
+    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && (p === '/app/osint/bestand' || p === '/app/ghawa/afschrift' || p === '/app/ghawa/website/concept') ? APP_OSINT_BESTAND_MAX_BODY : (req.method === 'POST' && p === '/app/osint/zoek' ? APP_OSINT_ZOEK_MAX_BODY : APP_MAX_BODY)))); })(function (fout, d, lichaam) {
       if (fout === 'groot' && p === '/app/omzet') return appWeiger(res, 413, 'de tekst is te groot om om te zetten (hooguit 2 MB)', 'body groot');   // wv1854
       if (fout === 'groot' && p === '/app/brain/webpagina') return appWeiger(res, 413, 'deze pagina is te groot (hooguit 2 MB html)', 'body groot');   // wv2660
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
@@ -13641,7 +13641,8 @@ function handleApp(req, res) {
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
         if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|fondsen|ronde|donateurs|indelen|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)
-          || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank)$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
+          || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank)$/.test(route)
+          || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
@@ -21131,11 +21132,83 @@ const ghawaApp = (function () {
     facturenPad: path.join(FACTUREN_DIR, 'facturen.sqlite'), fout: function (e) { logError('ghawa-bank', e); } }); }   // wv2880: GHAWA-bank uit Facturen (alleen lezen)
   catch (e) { logError('ghawa', e); return null; }
 })();
-function ghawaInfo() { if (!ghawaApp) return { aan: false }; try { return ghawaApp.info(); } catch (e) { return { aan: true, fout: true }; } }
+// wv2883 (fase 3, plan § 2.3 punt 3): Website zonder Telegram. Eigen werkkopie van Socev/ghawa-site (GHAWA_SITE_DIR, niet de kapotte
+// /opt/data/repo), Socev-sleutel. Concept = commit op staging (proefsite), Publiceer = staging → main, alleen op Davids knop met een verse
+// vingerafdruk van dit apparaat en nooit vanaf een vaste plek. Beide pas als het aan-bestand er is (Davids Ja op de grondwet-aanvulling).
+//   GET  /app/ghawa/website                    berichten, pagina's, wat Publiceer meeneemt, cijfers site tegenover app
+//   POST /app/ghawa/website/concept            {titel, tekst, categorie?, fotos?: [{naam, bestand (base64), alt?}]}
+//   POST /app/ghawa/website/weg                {slug}  (alleen een concept dat nog niet live staat)
+//   POST /app/ghawa/website/publiceer          {sha}   (de staging-sha die David zag; anders 409)
+// Donateursnamen alleen hier in het geheugen, om David vóór Publiceer te waarschuwen; nooit in een antwoord buiten die waarschuwing of in een log.
+function ghawaDonateurNamen() {
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(GHAWA_DB, { readOnly: true });
+    try { return db.prepare('SELECT naam FROM donateur UNION SELECT DISTINCT donateur FROM bankregel_ghawa WHERE donateur IS NOT NULL').all().map((r) => r.naam).filter(Boolean); }
+    finally { db.close(); }
+  } catch (e) { return []; }
+}
+const ghawaSite = (function () {
+  const p = path.join(__dirname, 'ghawa-site.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const M = require(p);
+    const e = process.env;
+    return { M, s: M.maak({ map: e.GHAWA_SITE_DIR || '/opt/data/ghawa/site', url: e.GHAWA_SITE_URL || 'https://github.com/Socev/ghawa-site.git',
+      cred: e.GHAWA_SITE_CRED || '/opt/data/.git-credentials-socev', aanPad: e.GHAWA_SITE_AAN || '/opt/data/ghawa/site-aan.json',
+      logPad: e.GHAWA_SITE_LOG || '/opt/data/ghawa/site-log.jsonl', bouwen: e.GHAWA_SITE_BOUW !== '0', sharpPad: e.GHAWA_SITE_SHARP || undefined,
+      proefsite: e.GHAWA_PROEFSITE || 'https://staging-ghawa.david-e5f.workers.dev', site: e.GHAWA_SITE || 'https://www.ghawa.org', namen: ghawaDonateurNamen }) };
+  } catch (err) { logError('ghawa-site', err); return null; }
+})();
+let ghawaSiteCijfersOp = 0;
+async function ghawaSiteCijfers() {   // bedragen op ghawa.org (main) tegenover de app; bewaard voor Vraagt aandacht
+  if (!ghawaSite || !ghawaApp) return null;
+  const tot = ghawaApp.totalen();
+  if (!tot) return null;
+  const v = ghawaSite.M.vergelijk(await ghawaSite.s.sitePaginas(), tot);
+  ghawaApp.siteCijfersZet(v);
+  ghawaSiteCijfersOp = Date.now();
+  return v;
+}
+async function appGhawaWebsite(req, res, a, s, route, d) {
+  if (!ghawaSite) return appWeiger(res, 404, 'De website zit niet in deze versie van de pod', 'ghawa-site ontbreekt');
+  const wat = route.replace(/^(GET|POST) \/app\/ghawa\/website\/?/, '') || 'stand';
+  if (wat !== 'stand' && !appTeller('ghawa-site', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa-site');
+  if (wat === 'publiceer') {
+    // grondwet 1: publiceren alleen op Davids eigen knop, verse vingerafdruk van dit apparaat (verbruikt vóór de eerste await), nooit vanaf een vaste plek
+    if (a && a.soort === 'vast') return appWeiger(res, 403, 'publiceren kan niet vanaf een pc met een vaste plek; gebruik je telefoon', 'ghawa publiceer vast');
+    if (!appVersOk(a, s)) { res._app.reden = 'ghawa publiceer, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het publiceren met je vingerafdruk', vers_nodig: true }); }
+    s.vers_tot = 0;
+  }
+  let r;
+  try {
+    if (wat === 'stand') {
+      const st = await ghawaSite.s.stand();
+      let cijfers = null;
+      try { cijfers = await ghawaSiteCijfers(); } catch (e) { logError('ghawa-site', e); }
+      res._app.stil = true;
+      return appStuur(res, 200, Object.assign({ ok: true }, st, { cijfers }));
+    }
+    if (wat === 'concept') r = await ghawaSite.s.concept(d || {});
+    else if (wat === 'weg') r = await ghawaSite.s.weg(d || {});
+    else if (wat === 'publiceer') r = await ghawaSite.s.publiceer(d || {});
+    else return appWeiger(res, 404, 'onbekend', 'ghawa-site onbekend');
+  } catch (e) { logError('ghawa-site', e); return appWeiger(res, 503, 'De site is nu niet te bereiken; probeer het zo opnieuw', 'ghawa-site fout'); }
+  res._app.reden = ('ghawa website ' + wat + ' ' + (r.slug || (r.sha ? String(r.sha).slice(0, 12) : '')) + ' (' + r.status + ')').slice(0, 80);   // geen titel of tekst
+  const body = Object.assign({}, r); delete body.status;
+  return appStuur(res, r.status, body);
+}
+function ghawaInfo() {
+  if (!ghawaApp) return { aan: false };
+  let u; try { u = ghawaApp.info(); } catch (e) { return { aan: true, fout: true }; }
+  if (ghawaSite) { try { u.site = { bewerken: ghawaSite.s.aan(), cijfers_op: ghawaSiteCijfersOp ? new Date(ghawaSiteCijfersOp).toISOString() : null }; } catch (e) { u.site = { fout: true }; } }
+  return u;
+}
 appStaat.tellers.ghawa = [];
-async function appGhawa(req, res, a, route, d) {
+async function appGhawa(req, res, a, route, d, s) {
   if (!ghawaApp) return appWeiger(res, 404, 'GHAWA zit niet in deze versie van de pod', 'ghawa ontbreekt');
   if (!appTeller('ghawa', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa');
+  if (/^(GET|POST) \/app\/ghawa\/website/.test(route)) return appGhawaWebsite(req, res, a, s, route, d);   // wv2883
   const post = route.indexOf('POST ') === 0;
   if (post && !appTeller('ghawa-schrijf', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa-schrijf');
   let u;
@@ -21149,6 +21222,7 @@ async function appGhawa(req, res, a, route, d) {
 const GHAWA_TIKKEN = !!(ghawaApp && ((typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) || process.env.GHAWA_RONDE === '1'));
 async function ghawaRondeTik() {
   ghawaApp.bankBij(false);
+  if (ghawaSite && Date.now() - ghawaSiteCijfersOp > 6 * 3600000) { try { await ghawaSiteCijfers(); } catch (e) { logError('ghawa-site', e); ghawaSiteCijfersOp = Date.now(); } }   // wv2883
   const k = ghawaApp.maandKaart();
   if (!k) return null;
   await aixVoorJou(k);

@@ -477,6 +477,14 @@ function overzicht(d, k) {
   const afas = afasBank(d);
   if (afas.binnen_niet_geboekt > 0) aandacht.push({ toon: 'info', label: 'fonds', titel: 'AFAS-geld binnen op de bank, nog als toegezegd geboekt',
     sub: '€ ' + Math.round(afas.binnen_niet_geboekt / 100).toLocaleString('nl-NL') + ' · zet de toezegging op ontvangen', scherm: 'fondsen' });
+  // wv2883 (fase 3): wijkt een bedrag op ghawa.org af van de app, dan één regel (de vergelijking zet de server in meta 'site:cijfers')
+  let sc = null; try { sc = d.meta['site:cijfers'] ? JSON.parse(d.meta['site:cijfers']) : null; } catch (e) { sc = null; }
+  if (sc && sc.verschillen > 0) {
+    const r = (sc.rijen || []).filter((x) => x.gelijk === false);
+    const fmt = (x, v) => (x.eenheid === '€' ? '€ ' : x.id === 'koers' ? '' : 'GMD ') + Math.round(v).toLocaleString('nl-NL');
+    aandacht.push({ toon: 'info', label: 'website', titel: 'De site toont andere bedragen dan de app',
+      sub: r.slice(0, 2).map((x) => x.wat.toLowerCase() + ': ' + fmt(x, x.site) + ' op de site, ' + fmt(x, x.app) + ' in de app').join('; ') + (r.length > 2 ? ' (en ' + (r.length - 2) + ' meer)' : ''), scherm: 'website' });
+  }
   return { datastand: k.datastand, standen: k.standen, sluit: k.sluit, koers: k.koers, werven: k.werven,
     bouw: { begroot: k.bouw.begroot, gerealiseerd: k.bouw.gerealiseerd, niet_nodig: k.bouw.niet_nodig, open: k.bouw.open, open_eur: k.bouw.open_eur, pct: k.bouw.pct },
     apotheek: { begroot: k.apotheek.begroot, open: k.apotheek.open, open_eur: k.apotheek.open_eur },
@@ -721,8 +729,18 @@ function maak(cfg) {
     const u = { aan: true, databank: !!(c.dbPad && fs.existsSync(c.dbPad)), laatste, bank: bijUitkomst ? { op: bijUitkomst.op, uitkomst: bijUitkomst.uitkomst, nieuw: bijUitkomst.nieuw || 0 } : null };
     return u;
   }
+  // wv2883: totalen voor de vergelijking met ghawa.org (alleen totalen; nooit donateur- of bankregelvelden) en de uitkomst bewaren
+  function totalen() {
+    if (!c.dbPad || !fs.existsSync(c.dbPad)) return null;
+    if (!gemigreerd) schrijf(() => null);
+    const d = lees(); const k = bereken(d);
+    const afas = d.fondsen.filter((f) => /AFAS/i.test(f.gever || '') && f.eur_cent != null);
+    return { bouw_gmd: k.bouw.begroot / 100, koers: k.koers, afas_eur: afas.length ? afas.reduce((t, f) => t + f.eur_cent, 0) / 100 : null };
+  }
+  function siteCijfersZet(v) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('site:cijfers', JSON.stringify(Object.assign({ op: nuIso() }, v)))); }
+  function siteCijfers() { try { const d = lees(); return d.meta['site:cijfers'] ? JSON.parse(d.meta['site:cijfers']) : null; } catch (e) { return null; } }
   function kaartGezet(sleutel) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('kaart:' + String(sleutel).slice(0, 60), nuIso())); }
-  return { app, info, bankBij, maandKaart, kaartGezet };
+  return { app, info, bankBij, maandKaart, kaartGezet, totalen, siteCijfersZet, siteCijfers };
 }
 
 module.exports = { maak, invoer, leesData, bereken, csvLees, cent, SCHEMA, TABELLEN, GHAWA_SOORTEN, donateursRoute, indelenRoute };
