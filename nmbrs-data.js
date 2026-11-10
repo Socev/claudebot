@@ -667,9 +667,35 @@ function trede(d, bedrijf, sal, op) {
   const r = d.prepare('select data from salaristrede where versie = ? and schaal = ? and trede = ?').get(v.versie, String(sal.schaal.scaleCode), String(sal.trede.stepCode));
   return r ? JSON.parse(r.data) : null;
 }
+// wv2817: Nmbrs geeft voor de CAO-tabellen (Huisartsenzorg 721, Huisartsen in loondienst 2520) een lege versielijst (/api/salarytable/{id},
+// gemeten 10-11-2026: 7 van 8 tabellen, alleen de eigen tabel 'DGA loon' heeft versies), dus S1 rekende nooit. Terugval: de lookup van de
+// contractgenerator in de vault (10_Zakelijk/_Gedeeld/CAO_Huisartsenzorg/salaristabellen.md; maandbedrag voltijd 38 uur, sleutel
+// 'schaal-trede'), alleen voor tabel 721 en maandsalaris. Eén onleesbaar blok → geen terugval (anders rekent S1 stil op een oudere tabel).
+const CAO_HUISARTSENZORG = 721;
+function caoBlokken(tekst) {
+  if (typeof tekst !== 'string' || !tekst || tekst.length > 1000000) return [];
+  const uit = [], re = /Machineleesbare lookup \(geldig vanaf (\d{4})-(\d{2})-(\d{2})\)[^\n]*\n(?:(?!```|##)[^\n]*\n)*?```json\s*([\s\S]*?)```/g;
+  let m;
+  while ((m = re.exec(tekst))) {
+    let b;
+    try { b = JSON.parse(m[4]); } catch (e) { return []; }
+    if (!b || typeof b !== 'object' || Array.isArray(b)) return [];
+    uit.push({ vanaf: Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])), bedragen: b });
+  }
+  // review wv2817 MOET 1: elke lookupkop moet een volledig blok opleveren (ook een ontbrekende sluitfence = onleesbaar)
+  if ((tekst.match(/Machineleesbare lookup \(geldig vanaf/g) || []).length !== uit.length) return [];
+  return uit.sort(function (a, c) { return c.vanaf - a.vanaf; });
+}
+function caoBedrag(cao, sal, op) {
+  if (!cao.length || !sal.tabel || Number(sal.tabel.tableCode) !== CAO_HUISARTSENZORG || !sal.schaal || !sal.trede || sal.schaal.scaleCode == null || sal.trede.stepCode == null) return NaN;
+  const blok = cao.find(function (x) { return x.vanaf <= op; });
+  const v = blok ? blok.bedragen[String(sal.schaal.scaleCode).trim() + '-' + String(sal.trede.stepCode).trim()] : undefined;
+  return typeof v === 'number' && v > 0 ? v : NaN;
+}
 // → [{ sleutel, soort, entiteit, naam, datum, tekst }]; nooit een bedrag in de tekst (die gaat naar de wachter en de app)
 function signalenBereken(d, invoer, nu) {
   const { bedrijven, mw } = laad(d), uit = [];
+  const cao = caoBlokken(invoer && invoer.cao_tekst);   // wv2817
   const vandaag = nu || Date.now();
   const zet = function (s) { uit.push(s); };
   Object.values(mw).forEach(function (m) {
@@ -677,18 +703,17 @@ function signalenBereken(d, invoer, nu) {
     const b = bedrijven[m.bedrijf] || {}, naam = naamVan(m.info), ent = b.entiteit;
     const sal = geldig(m.h.salaris || [], vandaag), rst = geldig(m.h.rooster || [], vandaag), con = geldig(m.h.contract || [], vandaag);
     const pt = rst && Number(rst.parttimePercentage) > 0 ? Number(rst.parttimePercentage) / 100 : null;
-    // S1: salaris lager dan schaal/trede (Nmbrs-salaristabel)
+    // S1: salaris lager dan schaal/trede (Nmbrs-salaristabel; wv2817: anders de CAO-tabel uit de vault, zie caoBedrag)
     if (sal && Number(sal.value) > 0) {   // wv2798: bedrag 0 = geen eigen bedrag in Nmbrs (3 van 156 regels), niet 'onder de schaal'
-      const t = trede(d, m.bedrijf, sal, vandaag);
-      if (t) {
-        const soort = b.soort || 'month';
-        const tab = sal.type === 'grossHourlyWage' ? t.amountHour : soort === '4-weeks' ? t.amountFourWeeks : soort === '1-week' ? t.amountWeek : t.amountMonth;
-        let min = Number(tab);
-        if (sal.type === 'grossParttimeSalary') min = pt ? min * pt : NaN;
-        if (['grossFulltimeSalary', 'grossParttimeSalary', 'grossHourlyWage'].indexOf(sal.type) >= 0 && min > 0 && Number(sal.value) < min * 0.995)
-          zet({ sleutel: 'S1:' + m.id + ':' + (sal.salaryId || sal.startDate), soort: 'S1', entiteit: ent, naam: naam, datum: sal.startDate ? sal.startDate.slice(0, 10) : null,
-            tekst: naam + ': salaris lager dan schaal ' + sal.schaal.scaleCode + ' trede ' + sal.trede.stepCode + ' in de salaristabel' });
-      }
+      const t = trede(d, m.bedrijf, sal, vandaag), soort = b.soort || 'month';
+      let tab = NaN, bron = 'de salaristabel';
+      if (t) tab = Number(sal.type === 'grossHourlyWage' ? t.amountHour : soort === '4-weeks' ? t.amountFourWeeks : soort === '1-week' ? t.amountWeek : t.amountMonth);
+      else if (soort === 'month' && sal.type !== 'grossHourlyWage') { tab = caoBedrag(cao, sal, vandaag); bron = 'de CAO-tabel (vault)'; }
+      let min = tab;
+      if (sal.type === 'grossParttimeSalary') min = pt ? min * pt : NaN;
+      if (['grossFulltimeSalary', 'grossParttimeSalary', 'grossHourlyWage'].indexOf(sal.type) >= 0 && min > 0 && Number(sal.value) < min * 0.995)
+        zet({ sleutel: 'S1:' + m.id + ':' + (sal.salaryId || sal.startDate), soort: 'S1', entiteit: ent, naam: naam, datum: sal.startDate ? sal.startDate.slice(0, 10) : null,
+          tekst: naam + ': salaris lager dan schaal ' + sal.schaal.scaleCode + ' trede ' + sal.trede.stepCode + ' in ' + bron });
     }
     // S2: contract loopt binnen 6 weken af zonder opvolger
     if (con && con.indefinite !== true && datum(con.endDate) != null) {
@@ -1149,4 +1174,4 @@ if (require.main === module) {
 }
 
 module.exports = { SCOPES, REDIRECT, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodSchrijf, noodWis, doodLees, doodZet, verzoekToets, kies, scopesExact,
-  sha, xmlBoom, journaalRegels, signalenBereken, periodeStart, NmbrsFout, vaultBereken, blokZet, vaultPadGoed, BLOK_BEGIN, BLOK_EIND };
+  sha, xmlBoom, journaalRegels, signalenBereken, caoBlokken, periodeStart, NmbrsFout, vaultBereken, blokZet, vaultPadGoed, BLOK_BEGIN, BLOK_EIND };

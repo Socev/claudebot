@@ -25210,6 +25210,11 @@ function nmbrsBoxRij(reden, tekst) {
   } catch (e) { logError('nmbrs-box', e); }
 }
 // Medewerkerpagina's in de vault (alleen naam, aliassen, entiteit en of de status actief/in dienst is) voor S6; blijft in de pod.
+// wv2817: CAO-salaristabel Huisartsenzorg uit de vault (dezelfde lookup als de contractgenerator) voor S1, omdat Nmbrs de versies van
+// CAO-tabellen niet geeft. Ontbreekt de pagina: lege tekst, S1 rekent dan alleen op een Nmbrs-tabel.
+function nmbrsCaoTekst() {
+  try { return VV().lees(path.join(VAULT, '10_Zakelijk', '_Gedeeld', 'CAO_Huisartsenzorg', 'salaristabellen.md')).slice(0, 1000000); } catch (e) { return ''; }
+}
 function nmbrsVaultMedewerkers() {
   const uit = [], mappen = [['Tolgaarde', 'TG'], ['Groenhouten', 'GH'], ['POT_POH_GGZ', 'POT']];
   mappen.forEach(function (m) {
@@ -25233,7 +25238,7 @@ function nmbrsVaultMedewerkers() {
 }
 // Na een geslaagde ronde: nieuwe signalen (alleen die aan staan) als één bericht naar de machinekamer; pas na bezorging als gemeld vastgelegd.
 async function nmbrsSignalenNa() {
-  const s = await nmbrsKind('signalen', { vault: nmbrsVaultMedewerkers() });
+  const s = await nmbrsKind('signalen', { vault: nmbrsVaultMedewerkers(), cao_tekst: nmbrsCaoTekst() });
   if (!s.j || s.j.ok !== true) return { ok: false };
   const nieuw = Array.isArray(s.j.nieuw) ? s.j.nieuw : [];
   if (!nieuw.length) return { ok: true, nieuw: 0 };
@@ -25352,7 +25357,7 @@ async function nmbrsSmal(d, wie) {
     return { status: 200, j: Object.assign({ ok: !!(s.j && s.j.ok) }, nmbrsSchoon(s.j), { info: nmbrsInfo() }) };
   }
   if (opdracht === 'signalen') {   // Personeels-Wachter: alleen naam, soort, datum en tekst zonder bedragen
-    const s = await nmbrsKind('signalen', { vault: nmbrsVaultMedewerkers() });
+    const s = await nmbrsKind('signalen', { vault: nmbrsVaultMedewerkers(), cao_tekst: nmbrsCaoTekst() });
     return { status: s.j && s.j.ok ? 200 : 500, j: s.j ? { ok: s.j.ok === true, aan: s.j.aan, signalen: (s.j.signalen || []).map(function (x) { return { soort: x.soort, entiteit: x.entiteit, naam: x.naam, datum: x.datum, tekst: x.tekst }; }), fout: s.j.fout } : { ok: false } };
   }
   if (opdracht === 'persoon') {   // contractgenerator: alleen op Davids vraag, één genoemde persoon

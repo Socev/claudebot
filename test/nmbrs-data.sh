@@ -249,6 +249,31 @@ srv.listen(0, '127.0.0.1', async function () {
     const sg0 = await kindEcht('signalen', {}, DIR);
     toets('S1: salarisbedrag 0 (geen eigen bedrag in Nmbrs) is geen signaal (wv2798)', !(sg0.j.signalen || []).some((s) => s.soort === 'S1'), sg0.j.signalen);
     d = sqlite(DIR); d.prepare("update historie set data = json_set(data, '$.value', 4000) where medewerker = ? and soort = 'salaris'").run(E1); d.close();
+    // wv2817: Nmbrs geeft geen versies van CAO-tabellen → S1 valt terug op de CAO-tabel uit de vault (alleen tabel 721, maandsalaris)
+    {
+      const caoT = (bl) => bl.map(([dt, js]) => '### Machineleesbare lookup (geldig vanaf ' + dt + ')\n\n```json\n' + js + '\n```\n').join('\n## Tabel\n\n');
+      const zetTabel = (code, id) => { const x = sqlite(DIR); x.prepare("update historie set data = json_set(data, '$.tabel.tableCode', ?, '$.tabel.tableId', ?) where medewerker = ? and soort = 'salaris'").run(code, id, E1); x.close(); };
+      const s1 = async (tekst) => ((await kindEcht('signalen', { cao_tekst: tekst }, DIR)).j.signalen || []).filter((x) => x.soort === 'S1');
+      zetTabel(721, 't-cao-zonder-versies');
+      let r1 = await s1(caoT([['2020-01-01', '{"A-3": 4100}']]));
+      toets('S1 CAO-terugval: geen Nmbrs-tabel, vault-tabel 4100 > 4000 → signaal met bron vault (wv2817)', r1.length === 1 && r1[0].naam === 'Anna Proef' && /CAO-tabel \(vault\)/.test(r1[0].tekst) && !/4100|4000/.test(r1[0].tekst), r1);
+      r1 = await s1(caoT([['2020-01-01', '{"A-3": 3900}']]));
+      toets('S1 CAO-terugval: vault-tabel 3900 ≤ 4000 → geen signaal', r1.length === 0, r1);
+      r1 = await s1(caoT([['2020-01-01', '{"A-3": 3900}'], ['2021-01-01', '{"A-3": 4100}'], [(JAAR + 1) + '-01-01', '{"A-3": 3900}']]));
+      toets('S1 CAO-terugval: kiest het blok dat nu geldt (niet oud, niet toekomstig)', r1.length === 1, r1);
+      r1 = await s1(caoT([['2020-01-01', '{"A-3": 4100}'], ['2021-01-01', '{"A-3": 41']]));
+      toets('S1 CAO-terugval: één onleesbaar blok → geen terugval (niet stil op een oudere tabel)', r1.length === 0, r1);
+      r1 = await s1(caoT([['2020-01-01', '{"A-3": 4100}']]) + '\n## Tabel\n\n### Machineleesbare lookup (geldig vanaf 2021-01-01)\n\n```json\n{"A-3": 3900}\n');
+      toets('S1 CAO-terugval: lookupblok zonder sluitfence → geen terugval (review MOET 1)', r1.length === 0, r1);
+      r1 = await s1(caoT([['2020-01-01', '{"B-3": 4100}']]));
+      toets('S1 CAO-terugval: schaal/trede niet in de vault-tabel → geen signaal', r1.length === 0, r1);
+      r1 = await s1('');
+      toets('S1 CAO-terugval: zonder vault-tabel → geen signaal', r1.length === 0, r1);
+      zetTabel(9, 't-andere-zonder-versies');
+      r1 = await s1(caoT([['2020-01-01', '{"A-3": 4100}']]));
+      toets('S1 CAO-terugval: alleen tabel 721 (andere tabel zonder Nmbrs-versies → geen signaal)', r1.length === 0, r1);
+      zetTabel(9, TB);
+    }
     toets('S2: contract loopt binnen 6 weken af zonder opvolger', per('S2') === 'Cor Toets');
     toets('S3: roosteruren wijken af van contracturen', per('S3') === 'Cor Toets');
     toets('S4 maandloon: 3500 tegen 4000 × 80 % = 3200 → signaal; uurloon 25 × 80 u = 2000 → geen', per('S4') === 'Anna Proef', sg.j.signalen.filter((s) => s.soort === 'S4'));
