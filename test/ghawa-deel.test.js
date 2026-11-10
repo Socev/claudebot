@@ -324,8 +324,10 @@ test('ronde 3 MOET 2: een gift die binnen één jaargroep van jaar wisselt telt 
   const b0 = D.ghawaBlok(r0, new Map(), '2026-10-31');
   assert.strictEqual(b0.blok.years[0].year, '2023–2024');
   // gift a van 2023 naar 2024 (zelfde groep) + één nieuwe in 2024 = 2 unieke giften in die groep → mag niet
-  const r1 = r0.map((r) => (r.id === 'a' ? rij('a', 2024, 500) : r)).concat([rij('n1', 2024, 77)]);
-  assert.ok(!D.ghawaBlok(r1, [b0.giften], '2026-10-31', b0.groepen).mag);
+  // + drie nieuwe in 2025, zodat het saldo (5 gewijzigd) het niet tegenhoudt: alleen de groepstelling mag het blok weigeren (review ronde 4 ZOU 1)
+  const r1 = r0.map((r) => (r.id === 'a' ? rij('a', 2024, 500) : r)).concat([rij('n1', 2024, 77), rij('m1', 2025, 5), rij('m2', 2025, 6), rij('m3', 2025, 7)]);
+  const u1 = D.ghawaBlok(r1, [b0.giften], '2026-10-31', b0.groepen);
+  assert.ok(!u1.mag && u1.redenen.length === 1 && /2023–2024: 2/.test(u1.redenen[0]), JSON.stringify(u1.redenen));
 });
 
 test('MOET 3: een gepubliceerde jaargroep wordt later niet gesplitst', () => {
