@@ -13532,7 +13532,7 @@ function handleApp(req, res) {
     const rambleStuk = req.method === 'POST' && APP_RAMBLE_STUK_RE.test(p);   // wv1969: MemoryLane, één WAV-stuk van 60 s
     const ruw = upload || rambleStuk || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
     if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
-    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && p === '/app/osint/bestand' ? APP_OSINT_BESTAND_MAX_BODY : (req.method === 'POST' && p === '/app/osint/zoek' ? APP_OSINT_ZOEK_MAX_BODY : APP_MAX_BODY)))); })(function (fout, d, lichaam) {
+    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && (p === '/app/osint/bestand' || p === '/app/ghawa/afschrift') ? APP_OSINT_BESTAND_MAX_BODY : (req.method === 'POST' && p === '/app/osint/zoek' ? APP_OSINT_ZOEK_MAX_BODY : APP_MAX_BODY)))); })(function (fout, d, lichaam) {
       if (fout === 'groot' && p === '/app/omzet') return appWeiger(res, 413, 'de tekst is te groot om om te zetten (hooguit 2 MB)', 'body groot');   // wv1854
       if (fout === 'groot' && p === '/app/brain/webpagina') return appWeiger(res, 413, 'deze pagina is te groot (hooguit 2 MB html)', 'body groot');   // wv2660
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
@@ -13640,7 +13640,8 @@ function handleApp(req, res) {
         if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
-        if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2877: OVIS GHAWA (alleen lezen)
+        if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|fondsen|ronde|donateurs|indelen|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)
+          || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank)$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
@@ -21126,19 +21127,41 @@ const GHAWA_DB = process.env.GHAWA_DB || '/opt/data/ghawa/ghawa.sqlite';
 const ghawaApp = (function () {
   const p = path.join(__dirname, 'ghawa.js');
   if (!fs.existsSync(p)) return null;
-  try { return require(p).maak({ dbPad: GHAWA_DB, bronnenMap: path.join(VAULT, '10_Zakelijk', 'GHAWA-ECG', 'Bronnen', 'Overdracht financien ECG 2026-10-06'), vaultMap: VAULT }); }
+  try { return require(p).maak({ dbPad: GHAWA_DB, bronnenMap: path.join(VAULT, '10_Zakelijk', 'GHAWA-ECG', 'Bronnen', 'Overdracht financien ECG 2026-10-06'), vaultMap: VAULT,
+    facturenPad: path.join(FACTUREN_DIR, 'facturen.sqlite'), fout: function (e) { logError('ghawa-bank', e); } }); }   // wv2880: GHAWA-bank uit Facturen (alleen lezen)
   catch (e) { logError('ghawa', e); return null; }
 })();
 function ghawaInfo() { if (!ghawaApp) return { aan: false }; try { return ghawaApp.info(); } catch (e) { return { aan: true, fout: true }; } }
 appStaat.tellers.ghawa = [];
-async function appGhawa(req, res, a, route) {
+async function appGhawa(req, res, a, route, d) {
   if (!ghawaApp) return appWeiger(res, 404, 'GHAWA zit niet in deze versie van de pod', 'ghawa ontbreekt');
   if (!appTeller('ghawa', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa');
+  const post = route.indexOf('POST ') === 0;
+  if (post && !appTeller('ghawa-schrijf', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa-schrijf');
   let u;
-  try { u = ghawaApp.app({ pad: route.replace(/^GET /, '') }); }
+  try { u = ghawaApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined, door: a && a.id ? 'app ' + String(a.id).slice(0, 8) : 'app' }); }
   catch (e) { logError('ghawa', e); return appWeiger(res, 503, 'De GHAWA-cijfers zijn nu niet te lezen; probeer het zo opnieuw', 'ghawa fout'); }
-  if (u.status === 200) res._app.stil = true; else res._app.reden = String(u.reden || 'ghawa').slice(0, 80);
+  // wv2880: schrijfacties altijd in de auditregel (id's en aantallen, geen namen of bedragen); lezen stil
+  if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'ghawa').slice(0, 80);
   return appStuur(res, u.status, u.body);
+}
+// wv2880: elk uur tussen 9 en 21 uur de GHAWA-bank bij (ook als niemand kijkt) en de maandronde: ECG-cijfers ouder dan 35 dagen = één kaart per maand.
+const GHAWA_TIKKEN = !!(ghawaApp && ((typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) || process.env.GHAWA_RONDE === '1'));
+async function ghawaRondeTik() {
+  ghawaApp.bankBij(false);
+  const k = ghawaApp.maandKaart();
+  if (!k) return null;
+  await aixVoorJou(k);
+  ghawaApp.kaartGezet(k.sleutel);
+  return k.sleutel;
+}
+if (GHAWA_TIKKEN) {
+  setInterval(function () {
+    if (!rolPrimair()) return;
+    const u = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' })).getHours();
+    if (u < 9 || u >= 21) return;
+    ghawaRondeTik().catch(function (e) { logError('ghawa-ronde', e); });
+  }, 60 * 60000).unref();
 }
 // ── einde OVIS GHAWA ──
 // ── OVIS Shopper (wv2264, 2-11-2026; idee 23 S3, ontwerp vault "01_Ontwikkeling/OVIS Shopper - wat er al bestaat en ontwerp (2-11-2026).md"

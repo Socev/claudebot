@@ -481,7 +481,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash test/pakjes.sh
       # OVIS GHAWA (wv2877): ghawa.js (invoer, rekenkern op de cent, routes zonder donateurs of GHAWA-bankvelden) en het server.js-blok.
-      - name: "ghawa (wv2877, OVIS GHAWA fase 1)"
+      # wv2880: + ghawa-bij.js (fase 2: GHAWA-bank uit Facturen, Ecobank-afschriften, fondsen, maandronde) in test/ghawa-bij.test.js.
+      - name: "ghawa (wv2877, OVIS GHAWA fase 1 en 2)"
         if: ${{ !cancelled() }}
         run: bash test/ghawa.sh
       # OVIS OSINT (wv2694): osint.py — centrale poort vóór elke externe aanroep (BSN-/HIS-vorm → niets, herkomst mogelijk medisch → alleen
