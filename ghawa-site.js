@@ -210,7 +210,10 @@ function maak(cfg) {
   // Review wv2883 MOET 1: wat de pod bouwt en naar main zet, verschilt van main ALLEEN in berichten en hun foto's. Bouwcode, pakketten en
   // pagina's komen dus altijd van main (wat Cloudflare al bouwt); een andere wijziging op staging gaat via de machinekamer, niet via de app.
   async function alleenBerichten(wb) {
-    const ns = (await gitOk(['diff', '--name-only', '--no-renames', 'origin/main', 'HEAD'], { cwd: wb })).trim().split('\n').filter(Boolean);
+    const raw = (await gitOk(['diff', '--raw', '--no-renames', 'origin/main', 'HEAD'], { cwd: wb })).trim().split('\n').filter(Boolean);
+    // review ronde 2 MOET 1: geen symlink in wat afwijkt (een link onder de fotomap zou bij het schrijven een podbestand kunnen raken)
+    if (raw.some((r) => /^:\d{6} 120000 /.test(r) || /^:120000 /.test(r))) return 'De proefsite bevat een snelkoppeling (symlink); dat gaat via de machinekamer.';
+    const ns = raw.map((r) => r.split('\t').slice(1).join('\t'));
     const anders = ns.filter((p) => !(p.indexOf(NIEUWS + '/') === 0 || p.indexOf(ASSETS + '/') === 0));
     return anders.length ? 'De proefsite bevat ook andere wijzigingen dan berichten (' + anders.slice(0, 3).join(', ') + (anders.length > 3 ? ', …' : '') + '); dat gaat via de machinekamer.' : null;
   }
@@ -282,13 +285,18 @@ function maak(cfg) {
           const m = await git(['merge', '--no-ff', '--no-edit', '-m', 'Staging bijgewerkt met main (OVIS GHAWA)', 'origin/main'], { cwd: wb });
           if (!m.ok) { await git(['merge', '--abort'], { cwd: wb }); return { status: 409, ok: false, fout: 'De proefsite loopt uit de pas met de site (samenvoegen lukt niet); dat moet de machinekamer oplossen.' }; }
         }
-        const md = path.join(wb, NIEUWS, slug + '.md');
-        fs.writeFileSync(md, markdown(v));
+        // eerst de controle (alleen berichten, geen symlink), dan pas schrijven; elke map op het pad moet een echte map zijn en elk bestand nieuw
+        const ab = await alleenBerichten(wb);
+        if (ab) return { status: 422, ok: false, fout: 'Er is niets op de proefsite gezet. ' + ab };
+        const echteMap = (rel) => { let p = wb; for (const d of rel.split('/')) { p = path.join(p, d); if (!fs.existsSync(p)) fs.mkdirSync(p); else if (!fs.lstatSync(p).isDirectory()) return false; } return true; };
+        if (!echteMap(NIEUWS) || (fotos.length && !echteMap(ASSETS))) return { status: 409, ok: false, fout: 'De mappen van de site zijn niet zoals verwacht; dat moet de machinekamer bekijken.' };
+        fs.writeFileSync(path.join(wb, NIEUWS, slug + '.md'), markdown(v), { flag: 'wx' });
         const toe = [path.join(NIEUWS, slug + '.md')];
         if (fotos.length) {
           const am = path.join(wb, ASSETS, slug);
-          fs.mkdirSync(am, { recursive: true });
-          for (const f of fotos) fs.writeFileSync(path.join(am, f.bestand), f.bytes);
+          if (fs.existsSync(am)) return { status: 409, ok: false, fout: 'Er staan al foto\'s onder deze naam op de proefsite; kies een andere titel.' };
+          fs.mkdirSync(am);
+          for (const f of fotos) fs.writeFileSync(path.join(am, f.bestand), f.bytes, { flag: 'wx' });
           toe.push(path.join(ASSETS, slug));
         }
         const fb = await bouw(wb);

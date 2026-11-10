@@ -187,3 +187,18 @@ test('review MOET 1/2: staging met een codewijziging → geen concept en geen pu
   fs.unlinkSync(x.aanPad);
   assert.strictEqual((await maak(x).weg({ slug: r.slug })).status, 403);
 });
+
+test('review ronde 2 MOET 1: een symlink op staging onder de fotomap → geen concept, niets geschreven buiten de werkboom', async () => {
+  const x = bouwSite(); aanZet(x);
+  const doel = path.join(x.t, 'podbestand'); fs.writeFileSync(doel, 'ongemoeid');
+  const w = path.join(x.t, 'ander');
+  sh(x.t, 'clone', '-q', '-b', 'staging', x.bare, w);
+  fs.mkdirSync(path.join(w, 'src/content/assets/nieuws/2026-11-10-met-foto'), { recursive: true });
+  fs.symlinkSync(doel, path.join(w, 'src/content/assets/nieuws/2026-11-10-met-foto/foto-01.jpg'));
+  sh(w, 'add', '-A'); sh(w, 'commit', '-qm', 'link'); sh(w, 'push', '-q', 'origin', 'staging');
+  const r = await maak(x, { sharpPad: sharp ? (process.env.GHAWA_SITE_SHARP || '/opt/data/ghawa/site/node_modules/sharp') : '/bestaat/niet' })
+    .concept({ titel: 'Met foto', tekst: 'Een verzonnen bericht met een foto erbij.', fotos: sharp ? [{ naam: 'a.png', bestand: (await sharp({ create: { width: 10, height: 10, channels: 3, background: '#000' } }).png().toBuffer()).toString('base64') }] : [] });
+  assert.strictEqual(r.status, 422, JSON.stringify(r));
+  assert.ok(/snelkoppeling/.test(r.fout), r.fout);
+  assert.strictEqual(fs.readFileSync(doel, 'utf8'), 'ongemoeid');
+});
