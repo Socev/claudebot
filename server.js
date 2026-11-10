@@ -657,16 +657,10 @@ const WORKSPACES = {
       return '[Systeem: invoerbestanden staan in de map ' + indir +
         '. Sla elk bestand dat je als resultaat oplevert (bijvoorbeeld een .docx) op in de map ' + outdir + '.]';
     }
-  },
-  ghawa: {
-    dir: REPO,
-    hint: function (indir, outdir) {
-      return '[Systeem: je werkt in de git-clone van de GHAWA-website. Houd je aan CLAUDE.md in deze repo. ' +
-        'Eventuele meegestuurde bestanden (bv. foto\'s) staan in de map ' + indir +
-        '. Verplaats foto\'s die op de site moeten naar de juiste map in de repo en verwijs ernaar. ' +
-        'Bestanden die je als download wilt teruggeven, zet je in ' + outdir + '.]';
-    }
   }
+  // wv2885: de werkruimte 'ghawa' (git-clone /opt/data/repo, voor n8n GHAWA Website via Telegram) is weg. Die workflow is
+  // gearchiveerd; de website loopt via Apps › GHAWA › Website (ghawa-site.js, publiceren alleen op Davids knop). Een agent in een
+  // site-clone zou anders zelf naar main kunnen pushen. workspace 'ghawa' geeft nu 400 onbekende-workspace.
 };
 
 function resolveWorkspace(name) {
@@ -2614,7 +2608,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
       sessionId = '';
     }
     const lesblok = lezen ? '' : await lessenBlok(prompt, chatId, '');
-    // 'lezen' werkt in de jobmap, niet in de workspace: altijd de kale map-hint (de ghawa-hint noemt een repo).
+    // 'lezen' werkt in de jobmap, niet in de workspace: altijd de kale map-hint.
     const misRegel = invoerMis.length ? '\n\n[Systeem: ' + invoerMis.length + ' meegestuurd(e) bestand(en) kon(den) niet in de invoermap worden gezet: ' + invoerMis.join(', ') + '. Zeg dat tegen David.]' : '';
     const fullPrompt = lesblok + prompt + misRegel + '\n\n' + (lezen ? WORKSPACES.vault : space).hint(indir, outdir);
     j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
@@ -2634,7 +2628,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
       fs.writeFileSync(path.join(base, BEURTPAS_BESTAND), beurtpasVoor(jobId, String(chatId)), { mode: 0o600 });
     }
     // wv1001: mk = eigen instructie en geheugen, geen vaulttekst; smal = Socevs eigen CLAUDE.md en geheugen, geen geneste. Managers hebben
-    // hun werkmap (wv998), lezen de jobmap; andere workspaces (ghawa) houden hun repo-CLAUDE.md.
+    // hun werkmap (wv998), lezen de jobmap; een andere workspace zou zijn eigen CLAUDE.md houden (sinds wv2885 is er alleen vault).
     if (!lezen && !managerCwd && ws === DEFAULT_WS) runOpts.tekst = runIsMk(chatId, ws) ? 'mk' : 'smal';
     j.omgeving = lezen ? 'lezen' : (runIsMk(chatId, ws) ? 'mk' : 'smal');
     // wv715: smal en in de stand → als socev via de loper; de jobmap gaat dan open voor socev (faalt dat: de beurt faalt, dicht)
