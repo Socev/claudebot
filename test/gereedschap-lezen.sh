@@ -109,13 +109,16 @@ const run = (extra) => req('POST', '/run', Object.assign({ secret: 'proef', work
     toets('E schakelaar op codex: lezen draait claude in beperkte stand', e.ok && e.runtime === 'claude' && se && se.args.includes('--restricted') && re && re.ok && !fs.existsSync(path.join(W, 'codex.log')));
     fs.unlinkSync(path.join(d, 'runtime.json'));
 
-    // G. Uitvoer begrensd op 30 MB totaal (3 x 12 MB -> 2 mee), en bij workspace ghawa toch de kale map-hint.
-    const g = await run({ prompt: 'SLEUTEL:gg GROOT', gereedschap: 'lezen', workspace: 'ghawa' });
+    // G. Uitvoer begrensd op 30 MB totaal (3 x 12 MB -> 2 mee), met de kale map-hint en de jobmap als werkmap.
+    // wv2885: de werkruimte ghawa bestaat niet meer; 'lezen' met workspace ghawa wordt aan de routegrens geweigerd (geen job).
+    const gw = await run({ prompt: 'SLEUTEL:gw weg', gereedschap: 'lezen', workspace: 'ghawa' });
+    toets('G workspace ghawa bestaat niet meer: 400 onbekende-workspace, geen job', gw._status === 400 && gw.error === 'onbekende-workspace' && !gw.job_id && !spawns().some((x) => x.sleutel === 'gw'), JSON.stringify(gw).slice(0, 160));
+    const g = await run({ prompt: 'SLEUTEL:gg GROOT', gereedschap: 'lezen' });
     const rg = await resultaat(g.job_id);
     const sg = spawns().find((x) => x.sleutel === 'gg');
     const groot = rg ? (rg.files || []).filter((f) => /^groot-/.test(f.name)).length : -1;
     toets('G uitvoer begrensd op 30 MB', rg && groot === 2 && rg.bestanden_weggelaten >= 1, 'groot=' + groot + ' weggelaten=' + (rg && rg.bestanden_weggelaten));
-    toets('G ghawa + lezen: geen repo-hint, wel de map-hint', sg && !/GHAWA/.test(sg.prompt) && /Sla elk bestand/.test(sg.prompt) && sg.cwd === path.join(d, 'io', g.job_id));
+    toets('G lezen: geen repo-hint, wel de map-hint', sg && !/GHAWA/.test(sg.prompt) && /Sla elk bestand/.test(sg.prompt) && sg.cwd === path.join(d, 'io', g.job_id));
 
     // H. In de pod: geen CLAUDE.md boven de jobmap of in ~/.claude, want --restricted laadt die wel (review Fable 5-10).
     if (fs.existsSync('/opt/data/io')) {

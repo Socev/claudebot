@@ -200,9 +200,9 @@ rpc.listen(0, '127.0.0.1', async function () {
     await run('hdm', 'data-manager');   // wv844: weekronde Data Manager draait als machinekamer
     const sdm = await wachtOp('hdm');
     toets('D data-manager: wel SUPABASE_MCP_TOKEN, N8N_API_KEY, CLOUDFLARE_API_TOKEN', sdm && ['SUPABASE_MCP_TOKEN', 'N8N_API_KEY', 'CLOUDFLARE_API_TOKEN'].every((k) => sdm.env.includes(k)), sdm ? lekVan(sdm).join(',') : 'geen spawn');
-    await run('hf', 'telegram-debug', { workspace: 'ghawa' });
-    const sf = await wachtOp('hf');
-    toets('D telegram-debug in een andere werkruimte (ghawa): smal', sf && lekVan(sf).length === 0, sf ? lekVan(sf).join(',') : 'geen spawn');
+    // wv2885: de werkruimte ghawa is weg; een niet-bestaande werkruimte start niets (400 aan de routegrens).
+    const rf = await run('hf', 'telegram-debug', { workspace: 'ghawa' });
+    toets('D telegram-debug in een niet-bestaande werkruimte (ghawa): 400, geen spawn', rf._status === 400 && rf.error === 'onbekende-workspace' && !spawns().some((x) => x.sleutel === 'hf'), JSON.stringify(rf).slice(0, 160));
 
     // E. Agents.
     const e1 = await agent('ag', { label: 'machinekamer: proef ag' });
