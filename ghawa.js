@@ -81,6 +81,7 @@ const GHAWA_SOORTEN = [
   ['Bank costs', 'kosten', 'Bankkosten'], ['Bank fee foreign payment', 'kosten', 'Kosten buitenlandse betaling'], ['Other costs', 'kosten', 'Overige kosten'],
   ['Transfer to Wilde Ganzen', 'wg', 'Naar Wilde Ganzen'], ['Transfer to ECG', 'ecg', 'Naar ECG'],
   ['Internal transfer (current/savings)', 'intern', 'Tussen eigen rekeningen'],
+  ['Unknown', 'onbekend', 'Nog in te delen'],   // wv2880: uit de bank, nog niet ingedeeld (één tik van David)
 ];
 const OORMERK_STATUS = ['Received by GHAWA NL', 'Committed - not yet received'];
 
@@ -168,6 +169,12 @@ function leesCsvMap(csvMap) {
 
 function invoer(csvMap, dbPad, opties) {
   const o = opties || {};
+  const BIJ = require('./ghawa-bij.js');
+  if (fs.existsSync(dbPad) && !o.forceer) {   // wv2880: een herinvoer zou de bijgehouden regels (bank, afschriften, fondsen) wissen
+    const x = new (require('node:sqlite').DatabaseSync)(dbPad, { readOnly: true });
+    let n = 0; try { n = BIJ.fase2Gegevens(x); } finally { x.close(); }
+    if (n > 0) throw new Error('invoer geweigerd: de databank heeft ' + n + ' bijgehouden regels (fase 2); alleen met --forceer');
+  }
   const b = leesCsvMap(csvMap);
   const fouten = [];
   const actNrs = new Set(b.act.map((x) => x.activity_no));
@@ -187,7 +194,7 @@ function invoer(csvMap, dbPad, opties) {
     db.exec('BEGIN IMMEDIATE');
     try {
       // de invoer vervangt alles: tabellen opnieuw opbouwen, zodat een databank van een oudere versie (zonder kolom volg) geen half schema houdt
-      for (const t of TABELLEN) db.exec('DROP TABLE IF EXISTS ' + t);
+      for (const t of TABELLEN.concat(BIJ.BIJ_TABELLEN)) db.exec('DROP TABLE IF EXISTS ' + t);
       db.exec(SCHEMA);
       const z = (sql) => db.prepare(sql);
       const pP = z('INSERT INTO project VALUES (?,?,?)'); for (const p of PROJECTEN) pP.run(...p);
@@ -219,6 +226,7 @@ function invoer(csvMap, dbPad, opties) {
       for (const d of b.don) pD.run(d.donor, leeg(d.type), leeg(d.recurring), cent(d.expected_per_year), d.gifts === '' ? null : Number(d.gifts), leeg(d.last_gift), leeg(d.notes));
       const pMe = z('INSERT OR REPLACE INTO meta VALUES (?,?)');
       pMe.run('invoer_op', o.nu || new Date().toISOString()); pMe.run('invoer_bron', o.bron || 'csv'); pMe.run('schema', '2');
+      BIJ.migreer(db);   // wv2880: kolommen en tabellen van fase 2 (bijhouden) erbij, schema 3
       db.exec('COMMIT');
     } catch (e) { db.exec('ROLLBACK'); throw e; }
   } finally { db.close(); }
@@ -264,6 +272,16 @@ function leesData(dbPad) {
       donateurVerwacht: a("SELECT vast, SUM(verwacht_cent) AS cent, COUNT(*) AS n FROM donateur WHERE vast IS NOT NULL GROUP BY vast"),
       meta: Object.fromEntries(a('SELECT sleutel, waarde FROM meta').map((r) => [r.sleutel, r.waarde])),
     };
+    // wv2880 (fase 2): wat bijgehouden wordt; op een databank van fase 1 (nog niet gemigreerd) leeg
+    const heeft = (t) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t);
+    const f2 = heeft('signaal') && db.prepare('PRAGMA table_info(bankregel_ghawa)').all().some((r) => r.name === 'herkomst');
+    uit.fase2 = f2;
+    uit.signalen = f2 ? a('SELECT soort, tekst, op FROM signaal WHERE dicht_op IS NULL ORDER BY op') : [];
+    uit.afschriften = f2 ? a('SELECT naam, formaat, munt, van, tot, regels, nieuw, al_bekend, uitkomst, fout, op FROM afschrift ORDER BY op DESC LIMIT 12') : [];
+    uit.ronde = f2 ? a('SELECT maand, stap, op FROM ronde') : [];
+    uit.fondsLog = f2 ? a('SELECT fonds, veld, oud, nieuw, op FROM fonds_log ORDER BY nr DESC LIMIT 50') : [];
+    uit.ghawaBank = f2 ? db.prepare("SELECT COUNT(*) AS n, SUM(soort = 'Unknown') AS onbekend, MAX(datum) AS tot FROM bankregel_ghawa WHERE herkomst = 'bank'").get() : { n: 0, onbekend: 0, tot: null };
+    uit.ecgAfschrift = f2 ? db.prepare("SELECT COUNT(*) AS n FROM bankregel_ecg WHERE herkomst = 'afschrift'").get().n : 0;
     db.exec('COMMIT');
     return uit;
   } finally { db.close(); }
@@ -375,7 +393,8 @@ function bereken(d) {
   const groep = (gr) => som(GHAWA_SOORTEN.filter((s) => s[1] === gr), (s) => gs(s[0]));
   const jaren = [...new Set(d.ghawaPerSoortJaar.map((x) => x.jaar))].sort();
   const ghawaPerJaar = GHAWA_SOORTEN.map((s) => ({ soort: s[0], naam: s[2], groep: s[1],
-    jaren: Object.fromEntries(jaren.map((j) => [j, som(d.ghawaPerSoortJaar.filter((x) => x.soort === s[0] && x.jaar === j), (x) => x.cent)])), totaal: gs(s[0]) }));
+    jaren: Object.fromEntries(jaren.map((j) => [j, som(d.ghawaPerSoortJaar.filter((x) => x.soort === s[0] && x.jaar === j), (x) => x.cent)])), totaal: gs(s[0]) }))
+    .filter((s) => s.groep !== 'onbekend' || d.ghawaPerSoortJaar.some((x) => x.soort === s.soort));   // wv2880: "nog in te delen" alleen als er zulke regels zijn
   let cum = 0;
   const ghawaEindJaar = jaren.map((j) => { cum += som(d.ghawaPerSoortJaar.filter((x) => x.jaar === j), (x) => x.cent); return { jaar: j, saldo: cum }; });
   const ghawaSaldo = som(d.ghawaPerSoortJaar, (x) => x.cent);
@@ -418,7 +437,8 @@ function bereken(d) {
     contant_gmd: contantGmd, niet_gespecificeerd: uitbetaald - gespec + contantGmd };
   D.niet_gespecificeerd_eur = r2(D.niet_gespecificeerd / 100 / koers);
   const E = { opgehaald: groep('opgehaald'), kosten: -groep('kosten'), wilde_ganzen: -groep('wg'), naar_ecg: -groep('ecg'), intern: groep('intern') };
-  E.berekend = E.opgehaald - E.kosten - E.wilde_ganzen - E.naar_ecg;
+  E.onbekend = groep('onbekend');   // wv2880: uit de bank, nog niet ingedeeld; telt mee zodat het saldo sluit
+  E.berekend = E.opgehaald - E.kosten - E.wilde_ganzen - E.naar_ecg + E.onbekend;
   E.afschrift = ghawaAfschrift; E.verschil = E.berekend - E.afschrift; E.keten_breuken = d.ghawaKetenBreuken;
   E.ecg_2026 = som(naarEcg.filter((x) => x.van === 'Stichting GHAWA (Triodos)' && x.datum >= '2026-01-01'), (x) => x.eur)
     - som(rek.EUR.filter((b) => b.soort === 'Transfer in from NL' && b.datum >= '2026-01-01'), (b) => b.bedrag_cent);
@@ -428,7 +448,10 @@ function bereken(d) {
   const aansluiting = { A, B, C, D, E, F, G };
   const sluit = A.verschil === 0 && A.breuken === 0 && E.verschil === 0 && E.keten_breuken === 0 && F.verschil === 0 && bouw.controle === 0;
 
-  return { koers, datastand: inst.as_of_date || null, regels, activiteiten, fasen, bouw, apotheek: apo, ecg: { eur: ecgEur, gmd: ecgGmd, keten },
+  // wv2880: per bron tot wanneer de cijfers lopen (uitgaven en bonnen nog uit de overdracht; bank en afschriften bijgehouden)
+  const vandaag = d.vandaag || new Date().toISOString().slice(0, 10);
+  const standen = { uitgaven: inst.as_of_date || null, ghawa: ghawaDatum || null, ecg_gmd: laatsteDatum.GMD, ecg_eur: laatsteDatum.EUR };
+  return { koers, datastand: inst.as_of_date || null, standen, vandaag, regels, activiteiten, fasen, bouw, apotheek: apo, ecg: { eur: ecgEur, gmd: ecgGmd, keten },
     omwisselingen: omw, naar_ecg: naarEcg, naar_wg: naarWg, ghawa: { per_jaar: ghawaPerJaar, jaren, eind_jaar: ghawaEindJaar, saldo: ghawaSaldo,
       afschrift: ghawaAfschrift, datum: ghawaDatum, geoormerkt: bijGhawaGeoormerkt }, werven, aansluiting, sluit, signalen };
 }
@@ -446,7 +469,16 @@ function overzicht(d, k) {
   for (const f of d.fondsen.filter((x) => x.status === 'Committed - not yet received')) aandacht.push({ toon: 'info', label: 'toezegging',
     titel: f.gever + ': € ' + Math.round(f.eur_cent / 100).toLocaleString('nl-NL') + ' nog niet binnen', sub: 'bedoeld voor ' + (f.doel || f.project || '').toLowerCase() });
   if (!k.sluit) aandacht.push({ toon: 'fout', label: 'sluit niet', titel: 'Een aansluiting sluit niet op de cent', sub: 'zie Geldstromen › Sluit het?' });
-  return { datastand: k.datastand, sluit: k.sluit, koers: k.koers, werven: k.werven,
+  // wv2880 (fase 2): signalen van het bijhouden, posten om in te delen, termijnen van fondsen, AFAS-geld binnen maar nog toegezegd
+  for (const s of d.signalen || []) aandacht.push({ toon: 'fout', label: s.soort === 'bank' ? 'bank' : 'afschrift', titel: s.tekst, sub: 'sinds ' + String(s.op).slice(0, 10), scherm: 'ronde' });
+  const onb = (d.ghawaBank && d.ghawaBank.onbekend) || 0;
+  if (onb) aandacht.push({ toon: 'wacht', label: 'indelen', titel: onb + (onb === 1 ? ' bankregel' : ' bankregels') + ' van GHAWA nog in te delen', sub: 'één tik per regel', scherm: 'indelen' });
+  for (const t of termijnen(d, k.vandaag)) aandacht.push({ toon: t.dagen < 0 ? 'fout' : 'info', label: 'termijn', titel: t.gever + ': ' + (t.dagen < 0 ? 'termijn verlopen' : 'termijn over ' + t.dagen + (t.dagen === 1 ? ' dag' : ' dagen')),
+    sub: 'op ' + t.termijn, scherm: 'fondsen' });
+  const afas = afasBank(d);
+  if (afas.binnen_niet_geboekt > 0) aandacht.push({ toon: 'info', label: 'fonds', titel: 'AFAS-geld binnen op de bank, nog als toegezegd geboekt',
+    sub: '€ ' + Math.round(afas.binnen_niet_geboekt / 100).toLocaleString('nl-NL') + ' · zet de toezegging op ontvangen', scherm: 'fondsen' });
+  return { datastand: k.datastand, standen: k.standen, sluit: k.sluit, koers: k.koers, werven: k.werven,
     bouw: { begroot: k.bouw.begroot, gerealiseerd: k.bouw.gerealiseerd, niet_nodig: k.bouw.niet_nodig, open: k.bouw.open, open_eur: k.bouw.open_eur, pct: k.bouw.pct },
     apotheek: { begroot: k.apotheek.begroot, open: k.apotheek.open, open_eur: k.apotheek.open_eur },
     fasen: k.fasen.map((f) => ({ id: f.id, naam: f.naam, omschrijving: f.omschrijving, begroot: f.begroot, gerealiseerd: f.gerealiseerd, niet_nodig: f.niet_nodig, open: f.open, pct: f.pct })),
@@ -477,12 +509,109 @@ function activiteitRoute(d, k, nr) {
   return { datastand: k.datastand, koers: k.koers, activiteit: a, regels };
 }
 function geldRoute(d, k) {
-  return { datastand: k.datastand, koers: k.koers, ghawa: k.ghawa, naar_wg: k.naar_wg, naar_ecg: k.naar_ecg, omwisselingen: k.omwisselingen, ecg: k.ecg,
+  return { datastand: k.datastand, standen: k.standen, koers: k.koers, ghawa: k.ghawa, naar_wg: k.naar_wg, naar_ecg: k.naar_ecg, omwisselingen: k.omwisselingen, ecg: k.ecg,
     fondsen: d.fondsen.map((f) => ({ id: f.id, gever: f.gever, soort: f.soort, project: f.project, doel: f.doel, eur: f.eur_cent, datum: f.datum, status: f.status, waar: f.waar })),
     werven: k.werven, aansluiting: k.aansluiting, sluit: k.sluit };
 }
 function vragenRoute(d, k) {
-  return { datastand: k.datastand, vragen: d.vragen.map((v) => ({ id: v.id, onderwerp: v.onderwerp, vraag: v.vraag, gmd: v.gmd_cent, wie: v.wie, status: v.status, antwoord: v.antwoord })) };
+  return { datastand: k.datastand, vragen: d.vragen.map((v) => ({ id: v.id, onderwerp: v.onderwerp, vraag: v.vraag, gmd: v.gmd_cent, wie: v.wie, status: v.status, antwoord: v.antwoord })),
+    concept: vragenConcept(d) };
+}
+// wv2880: de open vragen als één conceptbericht in het Engels (David kopieert en verstuurt zelf; de pod stuurt niets naar ECG)
+function vragenConcept(d) {
+  const open = d.vragen.filter((v) => STATUS_OPEN.test(v.status || '') && !/david|ghawa/i.test(v.wie || ''));
+  if (!open.length) return null;
+  const r = ['Dear Momodou,', '', 'To keep the finances of the health centre up to date, could you help me with these open questions?', ''];
+  for (const v of open) r.push('- ' + v.id + ' (' + (v.onderwerp || 'question') + '): ' + String(v.vraag || '').replace(/\s+/g, ' ').trim() +
+    (v.gmd_cent ? ' [GMD ' + Math.round(v.gmd_cent / 100).toLocaleString('en-GB') + ']' : ''));
+  r.push('', 'Thank you very much.', '', 'Kind regards,', 'David');
+  return r.join('\n');
+}
+// ── wv2880 (fase 2): fondsen en dossiers, donateurs (INTERN), indelen (INTERN), maandronde ──
+const DOSSIER = [[/wilde ganzen/i, 'Wilde Ganzen'], [/afas/i, 'AFAS Foundation'], [/rotary/i, 'Rotary Club Leusden'], [/rota\b/i, 'ROTA'], [/ghawa/i, 'Stichting GHAWA']];
+const dossierVan = (g) => { const x = DOSSIER.find((d) => d[0].test(g || '')); return x ? x[1] : g; };
+function termijnen(d, vandaag) {
+  return d.fondsen.filter((f) => f.termijn && !/^Received/.test(f.status || '') && f.status !== 'Withdrawn').map((f) => ({ id: f.id, gever: dossierVan(f.gever), termijn: f.termijn,
+    dagen: Math.round((Date.parse(f.termijn) - Date.parse(vandaag)) / 86400000) })).filter((t) => t.dagen <= 30).sort((a, b) => a.dagen - b.dagen);
+}
+function afasBank(d) {   // AFAS-betalingen volgens de GHAWA-bank tegenover wat als ontvangen geboekt staat
+  const bank = som(d.ghawaPerSoortJaar.filter((x) => x.soort === 'Sponsor AFAS (pharmacy)'), (x) => x.cent);
+  const geboekt = som(d.fondsen.filter((f) => /afas/i.test(f.gever) && /^Received/.test(f.status || '')), (f) => f.eur_cent);
+  return { bank, geboekt, binnen_niet_geboekt: Math.max(0, bank - geboekt) };
+}
+function fondsenRoute(d, k) {
+  const BIJ = require('./ghawa-bij.js');
+  const groepen = new Map();
+  for (const f of d.fondsen) {
+    const n = dossierVan(f.gever);
+    if (!groepen.has(n)) groepen.set(n, []);
+    groepen.get(n).push(f);
+  }
+  const log = d.fondsLog || [];
+  const dossiers = [...groepen.entries()].map(([naam, fs]) => {
+    const s = (re) => som(fs.filter((f) => re.test(f.status || '')), (f) => f.eur_cent);
+    const t = fs.map((f) => f.termijn).filter(Boolean).sort();
+    return { naam, toegezegd: s(/^Committed/), ontvangen: s(/^Received/), verwacht_per_jaar: s(/^Expected/),
+      oormerk: [...new Set(fs.map((f) => f.doel || f.project).filter(Boolean))].join(', ') || null, termijn: t[0] || null,
+      fondsen: fs.map((f) => ({ id: f.id, gever: f.gever, soort: f.soort, project: f.project, doel: f.doel, eur: f.eur_cent, datum: f.datum, status: f.status,
+        waar: f.waar, notitie: f.notitie, termijn: f.termijn || null, gewijzigd_op: f.gewijzigd_op || null })),
+      log: log.filter((l) => fs.some((f) => f.id === l.fonds)).slice(0, 5) };
+  });
+  return { datastand: k.datastand, standen: k.standen, dossiers, statussen: BIJ.FONDS_STATUS, afas: afasBank(d), termijnen: termijnen(d, k.vandaag) };
+}
+// INTERN (eigen app, nooit in een gedeelde route): giften per donateur per jaar. Geen rekeningnummers.
+function donateursRoute(dbPad) {
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(dbPad, { readOnly: true });
+  try {
+    const rijen = db.prepare("SELECT COALESCE(donateur, '(zonder naam)') AS naam, jaar, SUM(bedrag_cent) AS cent, COUNT(*) AS n, MAX(datum) AS laatste " +
+      "FROM bankregel_ghawa WHERE soort LIKE 'Donation%' GROUP BY 1, 2").all();
+    const vast = new Map(db.prepare('SELECT naam, soort, vast, verwacht_cent FROM donateur').all().map((x) => [x.naam, x]));
+    const jaren = [...new Set(rijen.map((r) => r.jaar))].sort();
+    const per = new Map();
+    for (const r of rijen) {
+      if (!per.has(r.naam)) per.set(r.naam, { naam: r.naam, per_jaar: {}, totaal: 0, giften: 0, laatste: '' });
+      const p = per.get(r.naam); p.per_jaar[r.jaar] = (p.per_jaar[r.jaar] || 0) + r.cent; p.totaal += r.cent; p.giften += r.n; if (r.laatste > p.laatste) p.laatste = r.laatste;
+    }
+    const donateurs = [...per.values()].map((p) => { const v = vast.get(p.naam); return Object.assign(p, { soort: v ? v.soort : null, vast: v ? v.vast : null, verwacht: v ? v.verwacht_cent : null }); })
+      .sort((a, b) => b.totaal - a.totaal);
+    const totaal = Object.fromEntries(jaren.map((j) => [j, som(rijen.filter((r) => r.jaar === j), (r) => r.cent)]));
+    return { intern: true, jaren, donateurs, totaal, aantal: donateurs.length };
+  } finally { db.close(); }
+}
+function indelenRoute(dbPad, vandaag) {
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(dbPad, { readOnly: true });
+  try {
+    const vanaf = new Date(Date.parse(vandaag) - 60 * 86400000).toISOString().slice(0, 10);
+    const vorm = (r) => ({ id: r.id, rekening: /^Savings/.test(r.rekening) ? 'spaar' : 'betaal', datum: r.datum, bedrag: r.bedrag_cent, tegenpartij: r.tegenpartij,
+      omschrijving: r.omschrijving ? String(r.omschrijving).slice(0, 60) : null, soort: r.soort, door: r.soort_door });
+    const sel = 'SELECT id, rekening, datum, bedrag_cent, tegenpartij, omschrijving, soort, soort_door FROM bankregel_ghawa WHERE herkomst = \'bank\' ';
+    return { intern: true, soorten: GHAWA_SOORTEN.filter((s) => s[1] !== 'onbekend').map((s) => ({ id: s[0], naam: s[2], groep: s[1] })),
+      onbekend: db.prepare(sel + "AND soort = 'Unknown' ORDER BY datum, volg").all().map(vorm),
+      recent: db.prepare(sel + "AND soort <> 'Unknown' AND datum >= ? ORDER BY datum DESC, volg DESC LIMIT 60").all(vanaf).map(vorm) };
+  } finally { db.close(); }
+}
+function rondeRoute(d, k, bijInfo) {
+  const BIJ = require('./ghawa-bij.js');
+  const nu = k.vandaag, maand = nu.slice(0, 7);
+  const af = new Set((d.ronde || []).filter((r) => r.maand === maand).map((r) => r.stap));
+  const oud = (x) => BIJ.dagen(x, nu);
+  const spaar = d.meta.spaar_upload_op || null;
+  const ecgOud = Math.max(oud(k.standen.ecg_gmd) || 0, oud(k.standen.ecg_eur) || 0);
+  const onb = (d.ghawaBank && d.ghawaBank.onbekend) || 0;
+  const vragenOpen = d.vragen.filter((v) => STATUS_OPEN.test(v.status || '')).length;
+  const stappen = [
+    { id: 'afschriften', titel: 'Afschriften erin', klaar: ecgOud <= 35 && (!spaar || oud(spaar) <= 35),
+      tekst: 'ECG euro t/m ' + (k.standen.ecg_eur || '—') + ', dalasi t/m ' + (k.standen.ecg_gmd || '—') + '; GHAWA-bank vanzelf t/m ' + (k.standen.ghawa || '—') +
+        (spaar ? '; spaarrekening laatst in Facturen gezet op ' + spaar.slice(0, 10) : '') },
+    { id: 'indelen', titel: 'Onbekende posten indelen', klaar: onb === 0, tekst: onb ? onb + ' nog in te delen' : 'alles ingedeeld' },
+    { id: 'aansluiting', titel: 'Aansluiting bekijken', klaar: af.has('aansluiting'), sluit: k.sluit, tekst: k.sluit ? 'sluit op de cent' : 'een aansluiting sluit niet', afvinken: true },
+    { id: 'vragen', titel: 'Open vragen als concept naar ECG', klaar: af.has('vragen'), tekst: vragenOpen + ' open vragen; jij verstuurt', afvinken: true },
+    { id: 'delen', titel: 'Gedeelde stand verversen', klaar: false, later: true, tekst: 'komt met het delen met ECG (fase 5)' },
+  ];
+  return { maand, stappen, afschriften: d.afschriften || [], signalen: d.signalen || [], standen: k.standen, bank: bijInfo || null,
+    ecg_dagen: ecgOud, stil: ecgOud <= 35 };
 }
 const SOORT = { md: 'tekst', pdf: 'pdf', xlsx: 'Excel', docx: 'Word', html: 'webpagina', jpg: 'foto', jpeg: 'foto', png: 'foto', csv: 'csv' };
 function documentenRoute(bronnenMap, vaultMap) {
@@ -507,16 +636,43 @@ function documentenRoute(bronnenMap, vaultMap) {
 
 function maak(cfg) {
   const c = cfg || {};
-  let laatste = null;
+  const BIJ = require('./ghawa-bij.js');
+  let laatste = null, bijLaatst = 0, bijUitkomst = null, gemigreerd = false;
+  const nuIso = () => (c.nu ? c.nu() : new Date().toISOString());
+  const vandaag = () => nuIso().slice(0, 10);
+  function schrijf(fn) {   // korte schrijfverbinding; schema van fase 2 bij de eerste keer
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(c.dbPad);
+    try {
+      db.exec('PRAGMA busy_timeout = 5000');
+      if (!gemigreerd) { db.exec('BEGIN IMMEDIATE'); try { BIJ.migreer(db); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; } gemigreerd = true; }
+      return fn(db);
+    } finally { db.close(); }
+  }
+  // GHAWA-bank bijwerken uit Facturen: bij het openen van een scherm, hooguit eens per 10 minuten (of direct met dwing)
+  function bankBij(dwing) {
+    if (!c.facturenPad || !c.dbPad || !fs.existsSync(c.dbPad)) return null;
+    const t = Date.now();
+    if (!dwing && t - bijLaatst < 10 * 60000) return bijUitkomst;
+    bijLaatst = t;
+    try { bijUitkomst = Object.assign({ op: nuIso() }, schrijf((db) => BIJ.bankBij(db, c.facturenPad, { nu: nuIso(), rekeningen: c.ghawaRekeningen }))); }
+    catch (e) { bijUitkomst = { op: nuIso(), uitkomst: 'fout' }; if (c.fout) c.fout(e); }
+    return bijUitkomst;
+  }
+  function lees() { const d = leesData(c.dbPad); d.vandaag = vandaag(); return d; }
   function app(v) {
     const pad = String((v && v.pad) || '');
+    const post = !!(v && v.methode === 'POST');
     const m = /^\/app\/ghawa(?:\/([a-z]+))?(?:\/([A-Za-z0-9]{1,4}))?$/.exec(pad);
     if (!m) return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'ghawa onbekend' };
     const scherm = m[1] || 'overzicht';
-    if (scherm === 'documenten') return { status: 200, body: Object.assign({ ok: true }, documentenRoute(c.bronnenMap, c.vaultMap)), reden: 'ghawa documenten' };
+    if (!post && scherm === 'documenten') return { status: 200, body: Object.assign({ ok: true }, documentenRoute(c.bronnenMap, c.vaultMap)), reden: 'ghawa documenten' };
     if (!c.dbPad || !fs.existsSync(c.dbPad)) return { status: 503, body: { ok: false, fout: 'De GHAWA-databank is er nog niet' }, reden: 'ghawa geen databank' };
+    if (post) return schrijfRoute(scherm, (v && v.body) || {}, v);
     const t0 = Date.now();
-    const d = leesData(c.dbPad);
+    if (!gemigreerd) schrijf(() => null);
+    const bij = ['overzicht', 'geld', 'indelen', 'ronde', 'donateurs', 'fondsen'].indexOf(scherm) >= 0 ? bankBij(false) : bijUitkomst;
+    const d = lees();
     const k = bereken(d);
     let body;
     if (scherm === 'overzicht') body = overzicht(d, k);
@@ -525,19 +681,55 @@ function maak(cfg) {
     else if (scherm === 'activiteit' && m[2]) body = activiteitRoute(d, k, m[2]);
     else if (scherm === 'geld') body = geldRoute(d, k);
     else if (scherm === 'vragen') body = vragenRoute(d, k);
+    else if (scherm === 'fondsen') body = fondsenRoute(d, k);
+    else if (scherm === 'ronde') body = rondeRoute(d, k, bij);
+    else if (scherm === 'donateurs') body = donateursRoute(c.dbPad);   // INTERN
+    else if (scherm === 'indelen') body = indelenRoute(c.dbPad, k.vandaag);   // INTERN
     if (!body) return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'ghawa onbekend ' + scherm };
-    laatste = { op: new Date().toISOString(), scherm, ms: Date.now() - t0, sluit: k.sluit };
+    laatste = { op: nuIso(), scherm, ms: Date.now() - t0, sluit: k.sluit };
     return { status: 200, body: Object.assign({ ok: true, invoer_op: d.meta.invoer_op || null }, body), reden: 'ghawa ' + scherm + (k.sluit ? '' : ' sluit niet') };
   }
-  function info() { return { aan: true, databank: !!(c.dbPad && fs.existsSync(c.dbPad)), laatste }; }
-  return { app, info };
+  // POST /app/ghawa/{indelen,fonds,afschrift,ronde,bank}. Geen inhoud in de reden (die komt in de auditregel): alleen id's en aantallen.
+  function schrijfRoute(scherm, b, v) {
+    const nu = nuIso();
+    let r;
+    if (scherm === 'indelen') r = schrijf((db) => BIJ.indelen(db, b.id, b.soort, GHAWA_SOORTEN, nu));
+    else if (scherm === 'fonds') r = schrijf((db) => BIJ.fondsZet(db, b.id, { status: b.status, termijn: b.termijn, bevestigd: b.bevestigd }, nu, (v && v.door) || 'app'));
+    else if (scherm === 'ronde') r = schrijf((db) => BIJ.rondeZet(db, String(b.stap || ''), b.aan !== false, nu));
+    else if (scherm === 'bank') r = Object.assign({ ok: true }, bankBij(true));
+    else if (scherm === 'afschrift') {
+      const b64 = typeof b.bestand === 'string' ? b.bestand : '';
+      if (!b64 || b64.length > 14 * 1024 * 1024 || !/^[A-Za-z0-9+/=\s]+$/.test(b64)) return { status: 400, body: { ok: false, fout: 'geen bestand (hooguit 10 MB)' }, reden: 'ghawa afschrift leeg' };
+      const bytes = Buffer.from(b64, 'base64');
+      r = schrijf((db) => BIJ.ecgAfschrift(db, { naam: b.naam, bytes }, { csvLees }, { nu }));
+    } else return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'ghawa onbekend POST ' + scherm };
+    const st = r.ok === false ? (r.status || 400) : 200;
+    const kort = scherm === 'afschrift' ? (r.uitkomst || '') + ' ' + (r.munt || '') + ' nieuw ' + (r.nieuw || 0) : scherm === 'bank' ? (r.uitkomst || '') + ' ' + (r.nieuw || 0)
+      : scherm === 'indelen' ? String(b.id || '').slice(0, 8) : scherm === 'fonds' ? String(b.id || '').slice(0, 6) : String(b.stap || '').slice(0, 12);
+    const body = Object.assign({}, r); delete body.status;
+    return { status: st, body: Object.assign({ ok: st === 200 }, body), reden: 'ghawa POST ' + scherm + ' ' + kort };
+  }
+  // Maandronde: kaart als de ECG-cijfers ouder zijn dan 35 dagen (één per maand); de server roept dit eens per dag aan.
+  function maandKaart() {
+    if (!c.dbPad || !fs.existsSync(c.dbPad)) return null;
+    if (!gemigreerd) schrijf(() => null);
+    const d = lees(); const k = bereken(d);
+    if (d.meta['kaart:ghawa-maandronde-' + nuIso().slice(0, 7)]) return null;   // deze maand al gezet: nooit dubbel
+    return BIJ.rondeKaart({ afschrift_ooit: (d.afschriften || []).some((a) => a.uitkomst === 'overgenomen') || d.ecgAfschrift > 0, ecg_gmd: k.standen.ecg_gmd, ecg_eur: k.standen.ecg_eur }, nuIso());
+  }
+  function info() {
+    const u = { aan: true, databank: !!(c.dbPad && fs.existsSync(c.dbPad)), laatste, bank: bijUitkomst ? { op: bijUitkomst.op, uitkomst: bijUitkomst.uitkomst, nieuw: bijUitkomst.nieuw || 0 } : null };
+    return u;
+  }
+  function kaartGezet(sleutel) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('kaart:' + String(sleutel).slice(0, 60), nuIso())); }
+  return { app, info, bankBij, maandKaart, kaartGezet };
 }
 
-module.exports = { maak, invoer, leesData, bereken, csvLees, cent, SCHEMA, TABELLEN, GHAWA_SOORTEN };
+module.exports = { maak, invoer, leesData, bereken, csvLees, cent, SCHEMA, TABELLEN, GHAWA_SOORTEN, donateursRoute, indelenRoute };
 
 if (require.main === module) {
   const [cmd, a1, a2] = process.argv.slice(2);
-  if (cmd === 'invoer' && a1 && a2) { process.stdout.write(JSON.stringify(invoer(a1, a2)) + '\n'); }
+  if (cmd === 'invoer' && a1 && a2) { process.stdout.write(JSON.stringify(invoer(a1, a2, { forceer: process.argv.includes('--forceer') })) + '\n'); }
   else if (cmd === 'reken' && a1) {
     const k = bereken(leesData(a1));
     process.stdout.write(JSON.stringify({ datastand: k.datastand, sluit: k.sluit, bouw: k.bouw, apotheek: k.apotheek, werven: k.werven,
