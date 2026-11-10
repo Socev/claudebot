@@ -19295,6 +19295,13 @@ const sb2Zoekindex = sb2ZoekKlok('sb2-zoekindex', { van: [5, 5], tot: [6, 0] }, 
 // vault (box): zelf onder de vault-grendel (gedeeld) en niet in de onderhoudsstand (exit 3 = onvolledig, nog één poging). Schakelaar SB2_ZOEKLEER=uit.
 const sb2Zoekleer = process.env.SB2_ZOEKLEER === 'uit' ? null : sb2ZoekKlok('sb2-zoekleer', { van: [6, 0], tot: [7, 0] }, 5,
   ['python3', '-I', SB2_SRC + '/zoekleer.py', '--vault', VAULT, '--index', '/opt/data/scripts-staat/sb2-zoekindex/index.sqlite', '--grendel', OVIS_LOCK]);
+// wv2839 (SB2 datumdetector § 2.8, fase a = meetstand): datumcontrole.py — afspraken en deadlines uit de kennisbestanden van OVIS Intake die
+// niet in de agenda (tijdlijn), Deadlines of Todoist staan; elke treffer als kandidaat op de tijdlijn, één regel per nacht in
+// 00_Systeem/Meldingen/datumcontrole-meetstand.md (alleen bronpad/offset/datum/regel-id, nooit de zin). Waarom en hoe in het script.
+// In de nachtketen ná sb2-feitenlijst (= ná de n8n-schrijvers raw_input/Teams/WhatsApp) en ná ovis-deadlines (Google-spiegel + register
+// van vannacht); zonder keten 05:30–06:59. Exit 0 ook bij onvolledig (staat in de regel), dus een herhaling betekent een echte fout.
+const sb2Datumcontrole = sb2ZoekKlok('sb2-datumcontrole', { van: [5, 30], tot: [7, 0] }, 5,
+  ['python3', '-I', SB2_SRC + '/datumcontrole.py', '--vault', VAULT]);
 // wv1430: nachtronde steekwoorden (socev-scripts sw.py nacht; vault "01_Ontwikkeling/Second Brain 2.0 - steekwoordenlijst en vaste links
 // (bouwplan 27-10-2026).md" § 6–7). Intakestap: elk nieuw of gewijzigd stuk (aan zijn inhoud, wie het ook schreef) laat Sonnet op steekwoorden
 // lezen; daarna lijst, telling → linkronde → telling onder de vault-grendel (exclusief; het script neemt hem zelf, niet tijdens de
@@ -19431,13 +19438,13 @@ function sb2ProevenInfo() {
 }
 function sb2ZoekKlokInfo() {
   const een = function (k) { if (!k) return { aan: false }; try { return k.info(); } catch (e) { return { fout: true }; } };
-  return { feitenlijst: een(sb2Feitenlijst), zoekindex: een(sb2Zoekindex), zoekleer: een(sb2Zoekleer) };
+  return { feitenlijst: een(sb2Feitenlijst), zoekindex: een(sb2Zoekindex), zoekleer: een(sb2Zoekleer), datumcontrole: een(sb2Datumcontrole) };
 }
 async function sb2ZoekKlokTik() {
   if (!SERVER_ECHT || !rolPrimair()) return;
   if (nachtketenActief()) return;   // wv1868: de nachtketen doet dit
   const ctx = { ams: ovisAms(), mag: function () { return !onderhoud.stand().aan && ovisLoopt.nu !== 'nacht'; } };
-  for (const [naam, k] of [['sb2-feitenlijst', sb2Feitenlijst], ['sb2-zoekindex', sb2Zoekindex], ['sb2-zoekleer', sb2Zoekleer]]) {
+  for (const [naam, k] of [['sb2-feitenlijst', sb2Feitenlijst], ['sb2-zoekindex', sb2Zoekindex], ['sb2-zoekleer', sb2Zoekleer], ['sb2-datumcontrole', sb2Datumcontrole]]) {
     if (!k) continue;
     try {
       const u = await k.tik(ctx);
@@ -19445,7 +19452,7 @@ async function sb2ZoekKlokTik() {
     } catch (e) { logError(naam + '-tik', e); }
   }
 }
-if ((sb2Feitenlijst || sb2Zoekindex || sb2Zoekleer) && SERVER_ECHT) { setInterval(function () { sb2ZoekKlokTik(); }, 5 * 60000).unref(); }
+if ((sb2Feitenlijst || sb2Zoekindex || sb2Zoekleer || sb2Datumcontrole) && SERVER_ECHT) { setInterval(function () { sb2ZoekKlokTik(); }, 5 * 60000).unref(); }
 // wv1962 (SB2 fase 6a): referentie voor de herstelproef — droge finance.reconcile op de facturendump uit de podstaat-bundel van vannacht
 // (logica en waarom in herstelreferentie.js). Uitvoer alleen hashes/codes in scripts-staat/sb2-herstelproef/referentie/.
 // finCli = fin-reconcile.js zelf (eigen CLI): tools/ zit niet in de release (uitrol.sh), nacht 30-10 faalde de stap daarop (wv1970).
@@ -19752,6 +19759,8 @@ const nachtketen = (function () {
         voorwaarde: nachtN8nVoorwaarde([NACHT_N8N.rawInput, NACHT_N8N.teams, NACHT_N8N.whatsapp], [6, 40], true), doe: nachtDagStap(sb2Feitenlijst) },
       { naam: 'sb2-zoekindex', na: ['sb2-feitenlijst'], limiet_min: 15, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekindex) },
       { naam: 'sb2-zoekleer', na: ['sb2-zoekindex'], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekleer) },
+      // wv2839: datumcontrole (meetstand § 2.8) ná de n8n-schrijvers (via sb2-feitenlijst) en ná ovis-deadlines (spiegel + register van vannacht)
+      { naam: 'sb2-datumcontrole', start_na: [5, 0], na: ['ovis-deadlines', 'sb2-feitenlijst'], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Datumcontrole) },
       { naam: 'ovis-kalender', start_na: [6, 35], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisKalender) },
       // wv2389 (idee 28): weerregel voor de briefing van 07:00; stil bij een fout (ok:true met detail.fout), box-rij pas op de tweede dag
       { naam: 'weer-ochtend', start_na: [6, 40], limiet_min: 3, pogingen: 2, inProces: true, doe: async function (ctx) {
