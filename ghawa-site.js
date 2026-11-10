@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
+const crypto = require('crypto');
 
 const CATEGORIEEN = ['bouw', 'fondsenwerving', 'bestuur', 'ter-plaatse', 'overig'];
 const MAX_FOTOS = 6;
@@ -112,9 +113,11 @@ function maak(cfg) {
   let gehaald = 0;
   function opRij(fn) { const p = rij.then(fn, fn); rij = p.then(() => null, () => null); return p; }   // één git-handeling tegelijk
   function draai(cmd, args, opt) {
+    // review wv2883 MOET 1: npm (install en bouw) krijgt een kale omgeving zonder één variabele van de pod (geen sleutels) en een eigen HOME
+    const kaal = { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: path.join(os.tmpdir(), 'ghawa-site-home'), LANG: 'C.UTF-8', CI: '1', ASTRO_TELEMETRY_DISABLED: '1' };
+    const env = cmd === 'npm' ? Object.assign(kaal, (opt && opt.env) || {}) : Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/false' }, (opt && opt.env) || {});
     return new Promise((ok) => {
-      execFile(cmd, args, { cwd: (opt && opt.cwd) || c.map, timeout: (opt && opt.timeout) || 120000, maxBuffer: 32 * 1024 * 1024,
-        env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/false' }, (opt && opt.env) || {}) },
+      execFile(cmd, args, { cwd: (opt && opt.cwd) || c.map, timeout: (opt && opt.timeout) || 120000, maxBuffer: 32 * 1024 * 1024, env },
       (fout, stdout, stderr) => ok({ ok: !fout, code: fout ? (fout.code == null ? -1 : fout.code) : 0, out: String(stdout || ''), err: String(stderr || '') }));
     });
   }
@@ -150,7 +153,8 @@ function maak(cfg) {
   const toon = (ref, p) => gitOk(['show', ref + ':' + p]);
   const lijstUrl = (basis, slug) => basis.replace(/\/+$/, '') + '/voortgang/' + slug + '/';
 
-  async function stand() {
+  function stand() { return opRij(standNu); }   // review MOET 3: ook lezen in de wachtrij (één git-handeling tegelijk, één stel refs)
+  async function standNu() {
     await haal(false);
     const [live, proef] = [await sha('origin/main'), await sha('origin/staging')];
     const bm = await boom('origin/main', NIEUWS), bs = await boom('origin/staging', NIEUWS);
@@ -203,15 +207,34 @@ function maak(cfg) {
       await git(['worktree', 'prune']);
     }
   }
+  // Review wv2883 MOET 1: wat de pod bouwt en naar main zet, verschilt van main ALLEEN in berichten en hun foto's. Bouwcode, pakketten en
+  // pagina's komen dus altijd van main (wat Cloudflare al bouwt); een andere wijziging op staging gaat via de machinekamer, niet via de app.
+  async function alleenBerichten(wb) {
+    const ns = (await gitOk(['diff', '--name-only', '--no-renames', 'origin/main', 'HEAD'], { cwd: wb })).trim().split('\n').filter(Boolean);
+    const anders = ns.filter((p) => !(p.indexOf(NIEUWS + '/') === 0 || p.indexOf(ASSETS + '/') === 0));
+    return anders.length ? 'De proefsite bevat ook andere wijzigingen dan berichten (' + anders.slice(0, 3).join(', ') + (anders.length > 3 ? ', …' : '') + '); dat gaat via de machinekamer.' : null;
+  }
+  // node_modules van de kopie volgt het lockbestand van main (stempel = sha256), zonder installatiescripts (ZOU 1)
+  async function zorgPakketten() {
+    const lock = path.join(c.map, 'package-lock.json'), stempel = path.join(c.map, 'node_modules', '.ghawa-lock');
+    await gitOk(['checkout', '--quiet', '--detach', '--force', 'origin/main']);
+    const h = fs.existsSync(lock) ? crypto.createHash('sha256').update(fs.readFileSync(lock)).digest('hex') : 'geen';
+    let oud = ''; try { oud = fs.readFileSync(stempel, 'utf8').trim(); } catch (e) { oud = ''; }
+    if (oud === h) return null;
+    const i = await draai('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: c.map, timeout: 600000 });
+    if (!i.ok) return 'npm ci: ' + kortFout(i.err || i.out);
+    fs.writeFileSync(stempel, h + '\n');
+    return null;
+  }
   async function bouw(wb) {
+    const ab = await alleenBerichten(wb);
+    if (ab) return ab;
     if (!c.bouwen) return null;
-    if (!fs.existsSync(path.join(c.map, 'node_modules'))) {
-      const i = await draai('npm', ['ci', '--no-audit', '--no-fund'], { cwd: c.map, timeout: 600000 });
-      if (!i.ok) return 'npm ci: ' + kortFout(i.err || i.out);
-      fs.symlinkSync(path.join(c.map, 'node_modules'), path.join(wb, 'node_modules'));
-    }
-    const r = await draai('npm', ['run', 'build'], { cwd: wb, timeout: 300000, env: { ASTRO_TELEMETRY_DISABLED: '1' } });
-    return r.ok ? null : 'bouwen mislukt: ' + kortFout((r.out + '\n' + r.err).split('\n').filter((x) => /error|fout|invalid|Error/i.test(x)).join('\n') || r.err || r.out);
+    const pk = await zorgPakketten();
+    if (pk) return pk;
+    if (!fs.existsSync(path.join(wb, 'node_modules'))) fs.symlinkSync(path.join(c.map, 'node_modules'), path.join(wb, 'node_modules'));
+    const r = await draai('npm', ['run', 'build'], { cwd: wb, timeout: 300000 });
+    return r.ok ? null : 'Het bouwen van de site mislukt: ' + kortFout((r.out + '\n' + r.err).split('\n').filter((x) => /error|fout|invalid|Error/i.test(x)).join('\n') || r.err || r.out);
   }
   function sharpLaad() {
     const p = c.sharpPad || path.join(c.map, 'node_modules', 'sharp');
@@ -269,7 +292,7 @@ function maak(cfg) {
           toe.push(path.join(ASSETS, slug));
         }
         const fb = await bouw(wb);
-        if (fb) return { status: 422, ok: false, fout: 'Het bericht bouwt niet; er is niets op de proefsite gezet. ' + fb };
+        if (fb) return { status: 422, ok: false, fout: 'Er is niets op de proefsite gezet. ' + fb };
         await gitOk(['add', '--'].concat(toe), { cwd: wb });
         await gitOk(['commit', '--quiet', '-m', 'Nieuw bericht (concept, OVIS GHAWA): ' + titel], { cwd: wb });
         const p = await git(['push', '--quiet', 'origin', 'HEAD:refs/heads/staging'], { cwd: wb });
@@ -287,6 +310,7 @@ function maak(cfg) {
   }
 
   async function weg(b) {
+    if (!aan()) return { status: 403, ok: false, fout: 'Website bewerken staat nog uit (wacht op je Ja op de kaart over publiceren).' };   // review MOET 2
     const slug = String((b && b.slug) || '');
     if (!/^\d{4}-\d{2}-\d{2}-[a-z0-9-]{1,60}$/.test(slug)) return { status: 400, ok: false, fout: 'onbekend bericht' };
     return opRij(async () => {
@@ -325,7 +349,7 @@ function maak(cfg) {
         const m = await git(['merge', '--no-ff', '--no-edit', '-m', 'Publiceren op www.ghawa.org (OVIS GHAWA, David met vingerafdruk ' + tijd + ')' + (slugs.length ? ': ' + slugs.join(', ') : ''), proef], { cwd: wb });
         if (!m.ok) { await git(['merge', '--abort'], { cwd: wb }); return { status: 409, ok: false, fout: 'Samenvoegen met de site lukt niet; er is niets gepubliceerd. Dat moet de machinekamer oplossen.' }; }
         const fb = await bouw(wb);
-        if (fb) return { status: 422, ok: false, fout: 'De site bouwt niet met deze wijziging; er is niets gepubliceerd. ' + fb };
+        if (fb) return { status: 422, ok: false, fout: 'Er is niets gepubliceerd. ' + fb };
         const r = await git(['push', '--quiet', 'origin', 'HEAD:refs/heads/main'], { cwd: wb });
         if (!r.ok) return { status: 409, ok: false, fout: 'Publiceren lukte niet (' + kortFout(r.err) + '); er is niets veranderd. Probeer het zo opnieuw.' };
         const nieuw = (await gitOk(['rev-parse', 'HEAD'], { cwd: wb })).trim();
@@ -337,10 +361,12 @@ function maak(cfg) {
   }
 
   // De pagina's met bedragen zoals ze op main staan (= wat Cloudflare op www.ghawa.org zet).
-  async function sitePaginas() {
-    await haal(false);
-    const lees = async (p) => { try { return await toon('origin/main', p); } catch (e) { return ''; } };
-    return { donatiedoelen: await lees('src/pages/donatiedoelen.astro'), doneren: await lees('src/pages/doneren.astro') };
+  function sitePaginas() {
+    return opRij(async () => {
+      await haal(false);
+      const lees = async (p) => { try { return await toon('origin/main', p); } catch (e) { return ''; } };
+      return { donatiedoelen: await lees('src/pages/donatiedoelen.astro'), doneren: await lees('src/pages/doneren.astro') };
+    });
   }
   return { stand, concept, weg, publiceer, sitePaginas, aan };
 }

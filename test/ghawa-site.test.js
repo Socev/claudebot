@@ -165,3 +165,25 @@ test('samenvatting: eerste zinnen tot 280 tekens; slug zonder leestekens', () =>
   assert.deepStrictEqual(S.namenIn('Dank aan proefgever veldhuizen!', [DONOR, 'Kort']), [DONOR]);
   assert.deepStrictEqual(S.namenIn('Een kortere tekst', ['Kort']), []);
 });
+
+test('review MOET 1/2: staging met een codewijziging → geen concept en geen publicatie; weghalen dicht zonder aan-bestand', async () => {
+  const x = bouwSite(); aanZet(x); const s = maak(x);
+  const r = await s.concept({ titel: 'Proef', tekst: 'Een verzonnen proefbericht van genoeg tekens.' });
+  assert.strictEqual(r.status, 200);
+  // iemand zet buiten de app een bouwwijziging op staging
+  const w = path.join(x.t, 'ander');
+  sh(x.t, 'clone', '-q', '-b', 'staging', x.bare, w);
+  fs.writeFileSync(path.join(w, 'package.json'), '{"scripts":{"build":"echo kwaad"}}');
+  sh(w, 'add', '-A'); sh(w, 'commit', '-qm', 'bouw'); sh(w, 'push', '-q', 'origin', 'staging');
+  const main0 = tak(x, 'main');
+  const st = await (maak(x)).stand();
+  assert.strictEqual(st.proef.andere_aantal, 1);
+  const p = await maak(x).publiceer({ sha: st.proef.sha });
+  assert.strictEqual(p.status, 422, JSON.stringify(p));
+  assert.ok(/andere wijzigingen dan berichten \(package\.json\)/.test(p.fout), p.fout);
+  assert.strictEqual(tak(x, 'main'), main0, 'main ongemoeid');
+  const c2 = await maak(x).concept({ titel: 'Nog een', tekst: 'Weer een verzonnen proefbericht met genoeg tekens.' });
+  assert.strictEqual(c2.status, 422);
+  fs.unlinkSync(x.aanPad);
+  assert.strictEqual((await maak(x).weg({ slug: r.slug })).status, 403);
+});
