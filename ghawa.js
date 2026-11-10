@@ -469,7 +469,7 @@ function overzicht(d, k) {
     titel: f.gever + ': € ' + Math.round(f.eur_cent / 100).toLocaleString('nl-NL') + ' nog niet binnen', sub: 'bedoeld voor ' + (f.doel || f.project || '').toLowerCase() });
   if (!k.sluit) aandacht.push({ toon: 'fout', label: 'sluit niet', titel: 'Een aansluiting sluit niet op de cent', sub: 'zie Geldstromen › Sluit het?' });
   // wv2880 (fase 2): signalen van het bijhouden, posten om in te delen, termijnen van fondsen, AFAS-geld binnen maar nog toegezegd
-  for (const s of d.signalen || []) aandacht.push({ toon: 'fout', label: s.soort === 'bank' ? 'bank' : 'afschrift', titel: s.tekst, sub: 'sinds ' + String(s.op).slice(0, 10), scherm: 'ronde' });
+  for (const s of d.signalen || []) aandacht.push({ toon: 'fout', label: s.soort === 'bank' ? 'bank' : s.soort === 'delen' ? 'delen' : 'afschrift', titel: s.tekst, sub: 'sinds ' + String(s.op).slice(0, 10), scherm: s.soort === 'delen' ? 'delen' : 'ronde' });   // wv2889: poort van Delen met ECG
   const onb = (d.ghawaBank && d.ghawaBank.onbekend) || 0;
   if (onb) aandacht.push({ toon: 'wacht', label: 'indelen', titel: onb + (onb === 1 ? ' bankregel' : ' bankregels') + ' van GHAWA nog in te delen', sub: 'één tik per regel', scherm: 'indelen' });
   for (const t of termijnen(d, k.vandaag)) aandacht.push({ toon: t.dagen < 0 ? 'fout' : 'info', label: 'termijn', titel: t.gever + ': ' + (t.dagen < 0 ? 'termijn verlopen' : 'termijn over ' + t.dagen + (t.dagen === 1 ? ' dag' : ' dagen')),

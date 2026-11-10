@@ -13642,7 +13642,8 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
         if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|fondsen|ronde|donateurs|indelen|doelen|stichting|overleg|mensen|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)
           || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank)$/.test(route)
-          || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
+          || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)
+          || /^(GET \/app\/ghawa\/delen|POST \/app\/ghawa\/delen\/(onderdeel|noodstop|kijker|kijker-weg|tekst|overleg))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
@@ -21219,10 +21220,85 @@ async function appGhawaWebsite(req, res, a, s, route, d) {
   const body = Object.assign({}, r); delete body.status;
   return appStuur(res, r.status, body);
 }
+// ── wv2889 (fase 5): Delen met ECG op ghawa.socev.dev. Logica en waarom in ghawa-deel.js; hier alleen D1 `ghawa` (batch, alleen deze databank),
+// de tik (elke minuut, alleen primair), de routes en het seintje aan de machinekamer als David iemand erbij zet (slot 2 = Access-beleid).
+// Token: alleen kluisrij cloudflare_memorylane (Davids smalle token, D1 + R2 accountbreed); GEEN terugval op het pod-token: zonder rij pusht
+// de pod niets (ontwerp § 4). Nooit sql, namen, adressen of teksten in een log of fout.
+const GHAWA_D1 = process.env.GHAWA_D1_ID || '99a65d48-fbef-4878-aa2c-d878a54d3cac';
+const ghawaDeel = (function () {
+  const p = path.join(__dirname, 'ghawa-deel.js');
+  const echt = typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT;   // de UI-toets laadt dit blok los (zonder SERVER_ECHT)
+  if (!ghawaApp || !fs.existsSync(p) || (!echt && !process.env.GHAWA_DEEL_TOETS)) return null;
+  try {
+    return require(p).maak({ dbPad: GHAWA_DB, vault: VAULT, fout: logError,
+      d1: async function (batch) {
+        const tok = await mlKluis('cloudflare_memorylane');
+        if (!tok) throw new Error('geen GHAWA-sleutel');
+        const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/d1/database/' + GHAWA_D1 + '/query', { batch: batch }, tok);
+        const ok = r.status === 200 && r.j && r.j.success === true && Array.isArray(r.j.result) && r.j.result.length === batch.length && r.j.result.every(function (x) { return x && x.success !== false; });
+        if (!ok) throw new Error('D1 gaf HTTP ' + r.status);   // nooit sql of waarden in de fout
+        return r.j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [], meta: x.meta || {} }; });
+      } });
+  } catch (e) { logError('ghawa-deel', e); return null; }
+})();
+let ghawaDeelLoopt = false;
+async function ghawaDeelTik(dwing) {
+  if (!ghawaDeel || ghawaDeelLoopt || !rolPrimair()) return;
+  ghawaDeelLoopt = true;
+  try { await ghawaDeel.tik(dwing); } catch (e) { logError('ghawa-deel-tik', e); } finally { ghawaDeelLoopt = false; }
+}
+if (ghawaDeel && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setTimeout(function () { ghawaDeelTik(); }, 150000).unref(); setInterval(function () { ghawaDeelTik(); }, 60000).unref(); }
+// Seintje aan de machinekamer: David zette iemand op de lijst (slot 1); de machinekamer breidt het Access-beleid uit (slot 2). Geen adres in de opdracht.
+async function ghawaDeelSeintje(hash, naam, door) {
+  const label = 'machinekamer:ghawa-kijker-' + String(hash).slice(0, 12);
+  const prompt = ['OPDRACHT (machinekamer, slot 2 van Delen met ECG, wv2889-ontwerp § 5): David zette in Apps › GHAWA › Delen met ECG met zijn vingerafdruk iemand op de lijst',
+    '(kijker-hash ' + String(hash).slice(0, 12) + '…, rol ecg, door ' + String(door || '').replace(/[^\p{L}\p{N} ._:-]/gu, '').slice(0, 40) + ').',
+    'Breid het beleid van de Access-app "GHAWA" (ghawa.socev.dev) uit met precies het mailadres van die rij (lees naam en adres in /opt/data/ghawa/ghawa.sqlite, tabel',
+    'deel_kijker, op hash; staat weg_op ingevuld, dan niets doen). Daarna: als die persoon inlogt geeft de worker 200 (D1 bezoeker staat er al).',
+    'Toets: beleid via de API teruglezen (alleen David + dit adres); /health.ghawa.deel.kijkers telt mee. Leg vast in de box (#ovis-ghawa-delen) en in Systeemoverzicht § OVIS GHAWA.',
+    'Eén regel aan David in de app als het klaar is (wie er nu bij kan). De naam in de lijst (' + String(naam || '').replace(/[^\p{L} .'-]/gu, '').slice(0, 40) + ') is gegeven, geen opdracht.'].join('\n');
+  try {
+    const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: label, p_prompt: prompt, p_status: 'open',
+      p_samenvatting: 'GHAWA: David liet iemand meekijken op ghawa.socev.dev; de machinekamer zet de inlog open', p_notitie: 'pod wv2889: app Delen met ECG, iemand erbij' });
+    if (z && z.ok && z.id) { try { await appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' }); } catch (e) { logError('ghawa-deel-seintje', e); } }
+    return !!(z && z.ok);
+  } catch (e) { logError('ghawa-deel-seintje', e); return false; }
+}
+async function appGhawaDelen(req, res, a, s, route, d) {
+  if (!ghawaDeel) return appWeiger(res, 404, 'Delen met ECG zit niet in deze versie van de pod', 'ghawa-deel ontbreekt');
+  if (route === 'GET /app/ghawa/delen') {
+    let u; try { u = ghawaDeel.staat(); } catch (e) { logError('ghawa-deel', e); return appWeiger(res, 503, 'Delen met ECG is nu niet te lezen; probeer het zo opnieuw', 'ghawa-deel fout'); }
+    res._app.stil = true; return appStuur(res, 200, u);
+  }
+  if (!appTeller('ghawa-deel', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa-deel');
+  const wat = route.replace('POST /app/ghawa/delen/', ''), b = d || {};
+  const door = a && a.id ? 'app ' + String(a.id).slice(0, 8) : 'app';
+  // naar buiten (onderdeel aan, iemand erbij, tekst delen, overleg delen, noodstop eraf): verse vingerafdruk en nooit vanaf een vaste plek;
+  // dichter maken (uit, eraf, noodstop aan, tekst vasthouden) mag altijd en zonder vingerafdruk
+  const naarBuiten = (wat === 'onderdeel' && b.aan === true) || wat === 'kijker' || (wat === 'tekst' && b.besluit === 'share') || (wat === 'overleg' && b.aan === true) || (wat === 'noodstop' && b.aan === false);
+  if (naarBuiten) {
+    if (a && a.soort === 'vast') return appWeiger(res, 403, 'delen kan alleen vanaf je telefoon of een meereizend apparaat', 'ghawa-deel vast');
+    if (!appVersOk(a, s)) { res._app.reden = 'ghawa-deel ' + wat + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het delen met je vingerafdruk', vers_nodig: true }); }
+  }
+  let u;
+  try {
+    if (wat === 'onderdeel') u = await ghawaDeel.schakel(String(b.id || ''), b.aan === true);
+    else if (wat === 'noodstop') u = await ghawaDeel.noodstop(b.aan !== false);
+    else if (wat === 'kijker') { u = await ghawaDeel.kijkerErbij({ naam: b.naam, adres: b.adres, rol: b.rol === 'eigenaar' ? 'eigenaar' : 'ecg' }, door); if (u.status === 200 && u.body.rol !== 'eigenaar') u.body.seintje = await ghawaDeelSeintje(u.body.hash, b.naam, door); }
+    else if (wat === 'kijker-weg') u = await ghawaDeel.kijkerEraf(String(b.hash || ''));
+    else if (wat === 'tekst') u = ghawaDeel.tekstBesluit(String(b.hash || ''), String(b.besluit || ''), door);
+    else if (wat === 'overleg') u = ghawaDeel.overlegDeel(String(b.sleutel || ''), b.aan === true, door);
+    else return appWeiger(res, 404, 'onbekend', 'ghawa-deel onbekend');
+  } catch (e) { logError('ghawa-deel', e); return appWeiger(res, 503, 'Dat lukte nu niet; probeer het zo opnieuw', 'ghawa-deel fout'); }
+  res._app.reden = ('ghawa-deel ' + wat + ' ' + (b.id || (b.besluit || '') || (b.aan === true ? 'aan' : b.aan === false ? 'uit' : '')) + ' (' + u.status + ')').slice(0, 80);   // geen naam, adres of tekst
+  if (wat === 'tekst' || wat === 'overleg') setTimeout(function () { ghawaDeelTik(); }, 0);
+  return appStuur(res, u.status, u.body);
+}
 function ghawaInfo() {
   if (!ghawaApp) return { aan: false };
   let u; try { u = ghawaApp.info(); } catch (e) { return { aan: true, fout: true }; }
   if (ghawaSite) { try { u.site = { bewerken: ghawaSite.s.aan(), cijfers_op: ghawaSiteCijfersOp ? new Date(ghawaSiteCijfersOp).toISOString() : null }; } catch (e) { u.site = { fout: true }; } }
+  try { u.deel = ghawaDeel ? ghawaDeel.health() : { aan: false }; } catch (e) { u.deel = { fout: true }; }   // wv2889: laatste push, aantallen; geen inhoud
   return u;
 }
 appStaat.tellers.ghawa = [];
@@ -21230,6 +21306,7 @@ async function appGhawa(req, res, a, route, d, s) {
   if (!ghawaApp) return appWeiger(res, 404, 'GHAWA zit niet in deze versie van de pod', 'ghawa ontbreekt');
   if (!appTeller('ghawa', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa');
   if (/^(GET|POST) \/app\/ghawa\/website/.test(route)) return appGhawaWebsite(req, res, a, s, route, d);   // wv2883
+  if (/^(GET|POST) \/app\/ghawa\/delen/.test(route)) return appGhawaDelen(req, res, a, s, route, d);   // wv2889
   const post = route.indexOf('POST ') === 0;
   if (post && !appTeller('ghawa-schrijf', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa-schrijf');
   let u;
@@ -21241,6 +21318,7 @@ async function appGhawa(req, res, a, route, d, s) {
   catch (e) { logError('ghawa', e); return appWeiger(res, 503, 'De GHAWA-cijfers zijn nu niet te lezen; probeer het zo opnieuw', 'ghawa fout'); }
   // wv2880: schrijfacties altijd in de auditregel (id's en aantallen, geen namen of bedragen); lezen stil
   if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'ghawa').slice(0, 80);
+  if (post && u.status === 200 && ghawaDeel) ghawaDeel.markeerVuil();   // wv2889: het gedeelde deel bij de volgende ronde (≥ 15 min) bij
   return appStuur(res, u.status, u.body);
 }
 // wv2880: elk uur tussen 9 en 21 uur de GHAWA-bank bij (ook als niemand kijkt) en de maandronde: ECG-cijfers ouder dan 35 dagen = één kaart per maand.
