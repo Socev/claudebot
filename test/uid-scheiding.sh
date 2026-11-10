@@ -276,7 +276,9 @@ ok   "  nieuw bestand: masker rw, 1001 leest het"            "r 'getfacl -p $V/0
 ok   "  nieuw bestand blijft van socev"                      "stat_is $V/00_Systeem/pot-mkstemp.md '%U' socev"
 ok   "  oud bestand (vóór sinds) ongemoeid: masker ---"      "r 'getfacl -p $V/00_Systeem/oud-mkstemp.md' | grep -q '^mask::---'"
 ok   "  code-plek (.py) ongemoeid: masker ---"               "r 'getfacl -p $V/00_Systeem/mk-code.py' | grep -q '^mask::---'"
-ok   "  symlinkdoel buiten de vault ongemoeid (geen regel voor claude, 600)" "! r 'getfacl -p /opt/data/socev-thuis/doel-mk' | grep -q '^user:claude' && stat_is /opt/data/socev-thuis/doel-mk '%a' 600"
+# socev-thuis geeft via zijn standaard-ACL u:claude:r-x mee (socev-thuis.py); chmod 600 zet het masker op ---. Een ronde die de
+# symlink zou volgen, maakt het masker rw (modus 660).
+ok   "  symlinkdoel buiten de vault ongemoeid (masker ---, 600)" "r 'getfacl -p /opt/data/socev-thuis/doel-mk' | grep -q '^mask::---' && stat_is /opt/data/socev-thuis/doel-mk '%a' 600"
 ok   "  logregel van de loper met aantal hersteld"           "docker logs $C 2>&1 | grep -qE 'socev-loper: masker sinds=[0-9]+ code=0 signaal=null hersteld=1 fouten=0'"
 VOOR=$(masker_rondes)
 ok   "op masker: volle ronde gestart"                        "loper '{\"op\":\"masker\"}' | grep -q '\"masker\":\"gestart\"'"
