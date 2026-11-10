@@ -30,8 +30,10 @@ function nepD1() {
         if (/^\s*SELECT/i.test(q.sql)) return { results: st.all(...q.params).map((r) => ({ ...r })), meta: { changes: 0 } };
         const r = st.run(...q.params); return { results: [], meta: { changes: Number(r.changes) } };
       });
-      db.exec('COMMIT'); return uit;
-    } catch (e) { db.exec('ROLLBACK'); throw e; }
+      db.exec('COMMIT');
+      if (f.naFout) throw new Error('antwoord kwijt');   // toegepast, maar de pod hoort het nooit
+      return uit;
+    } catch (e) { if (db.isTransaction) db.exec('ROLLBACK'); throw e; }
   };
   f.db = db; f.log = log; return f;
 }
@@ -284,6 +286,14 @@ test('noodstop: D1 stand meteen 1; uit weer 0; health zonder inhoud', async () =
 });
 
 // ── review wv2889 ronde 1 ──
+test('MOET 1 (ronde 2): ook een naam van korte woorden in een referentieveld gaat niet zonder Share mee', async () => {
+  const o = omgeving();
+  await keurAlles(o); await alleAan(o, ['construction']); await o.m.ronde();
+  const db = o.sql(); db.prepare("UPDATE uitgave SET referentie = 'Jan Vos' WHERE id = 'T0002'").run(); db.close();
+  o.m.markeerVuil(); await o.m.ronde();
+  assert.strictEqual(deelVan(o, 'construction').expenditures.find((x) => x.id === 'T0002').reference, D.PENDING);
+});
+
 test('MOET 1: een naam in een referentieveld gaat niet zonder Share mee (vaste vorm of tekstgoedkeuring)', async () => {
   const o = omgeving();
   await keurAlles(o); await alleAan(o, ['construction']); await o.m.ronde();
@@ -320,21 +330,35 @@ test('MOET 3: een gepubliceerde jaargroep wordt later niet gesplitst', () => {
   assert.deepStrictEqual(zonder.blok.years.map((y) => y.year), ['2023', '2024', '2025'], 'kruisproef: zonder vaste groepen zou hij splitsen');
 });
 
-test('MOET 4: na een push zonder bevestiging telt het kandidaat-blok mee; 1 gift erna = geen nieuw blok', async () => {
+test('MOET 4 (ronde 1 en 2): elk blok dat buiten kán staan telt mee — push mislukt, push toegepast maar bevestiging kwijt, en een keten van blokken', async () => {
   const o = omgeving();
-  await keurAlles(o); await alleAan(o, ['totals']); await o.m.ronde();
+  await keurAlles(o); await alleAan(o, ['totals', 'overview']); await o.m.ronde();
   const s0 = deelVan(o, 'totals').balance.eur_cent;
-  const voeg = (id, b) => { const db = o.sql(); db.prepare("INSERT INTO bankregel_ghawa (id, rekening, datum, jaar, bedrag_cent, soort, volg) VALUES (?, 'Current NL00', '2026-10-05', 2026, ?, 'Donation (bank transfer)', ?)").run(id, b, 900 + Number(id.slice(1))); db.close(); };
+  let volg = 900;
+  const voeg = (id, b) => { const db = o.sql(); db.prepare("INSERT INTO bankregel_ghawa (id, rekening, datum, jaar, bedrag_cent, soort, volg) VALUES (?, 'Current NL00', '2026-10-05', 2026, ?, 'Donation (bank transfer)', ?)").run(id, b, volg++); db.close(); };
+  const weg = (id) => { const db = o.sql(); db.prepare('DELETE FROM bankregel_ghawa WHERE id = ?').run(id); db.close(); };
+  const hist = () => { const d = o.sql(); const r = d.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_historie'").get(); d.close(); return r ? JSON.parse(r.waarde).length : 0; };
+  assert.strictEqual(hist(), 1);
+  // push toegepast in D1, maar het antwoord komt nooit aan
   voeg('x1', 300); voeg('x2', 301); voeg('x3', 302);
-  o.d1.stuk = true; o.m.markeerVuil();
+  o.d1.naFout = true; o.m.markeerVuil();
   await assert.rejects(o.m.ronde());
-  o.d1.stuk = false;
-  const d = o.sql(); const k = d.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_kandidaat'").get(); const g = d.prepare('SELECT count(*) n FROM deel_gift').get().n; d.close();
-  assert.ok(k, 'kandidaat bewaard'); 
+  o.d1.naFout = false;
+  assert.strictEqual(hist(), 2, 'het blok staat al in de historie vóór de push');
+  const s1 = s0 + 903;
+  assert.strictEqual(deelVan(o, 'totals').balance.eur_cent, s1, 'buiten staat het nieuwe blok (toegepast)');
+  // één gift erbij: t.o.v. het toegepaste blok maar 1 → blijft dat blok
   voeg('x4', 303); o.m.markeerVuil(); await o.m.ronde();
-  assert.strictEqual(deelVan(o, 'totals').balance.eur_cent, s0, 'blok blijft het oude (t.o.v. de kandidaat maar 1 gewijzigd)');
-  const d2 = o.sql(); assert.strictEqual(d2.prepare('SELECT count(*) n FROM deel_gift').get().n, g, 'vergelijking niet verschoven'); d2.close();
-  voeg('x5', 304); voeg('x6', 305); o.m.markeerVuil(); await o.m.ronde();
-  assert.strictEqual(deelVan(o, 'totals').balance.eur_cent, s0 + 300 + 301 + 302 + 303 + 304 + 305, 'nu ≥ 3 t.o.v. beide: nieuw blok');
-  const d3 = o.sql(); assert.ok(!d3.prepare("SELECT 1 FROM deel_stand WHERE sleutel = 'ghawa_kandidaat'").get(), 'kandidaat opgeruimd na bevestiging'); d3.close();
+  assert.strictEqual(deelVan(o, 'totals').balance.eur_cent, s1);
+  // keten: twee van de drie weer weg + x4 → t.o.v. het oudste blok maar 2 gewijzigd (x3, x4) → mag niet, ook al is het t.o.v. het laatste blok 3
+  weg('x1'); weg('x2'); o.m.markeerVuil(); await o.m.ronde();
+  assert.strictEqual(deelVan(o, 'totals').balance.eur_cent, s1, 'vergelijking met álle eerdere blokken');
+  const ov = deelVan(o, 'overview'); assert.strictEqual(ov.to_raise_as_of, '2026-10-31');
+  // push mislukt helemaal: het blok blijft in de historie en gaat de volgende keer precies zo opnieuw
+  voeg('x5', 304); voeg('x6', 305); voeg('x7', 306); voeg('x8', 307);
+  o.d1.stuk = true; o.m.markeerVuil(); await assert.rejects(o.m.ronde()); o.d1.stuk = false;
+  const h3 = hist(); assert.strictEqual(h3, 3);
+  o.m.markeerVuil(); await o.m.ronde();
+  assert.strictEqual(hist(), h3, 'zelfde blok, geen nieuwe historie');
+  assert.strictEqual(deelVan(o, 'totals').balance.eur_cent, s0 + 302 + 303 + 304 + 305 + 306 + 307);
 });
