@@ -487,6 +487,10 @@ jobs:
       - name: "ghawa (wv2877, OVIS GHAWA fase 1 t/m 4)"
         if: ${{ !cancelled() }}
         run: bash test/ghawa.sh
+      # wv2889: ghawa-deel.js (witte lijst, labels, goedgekeurde teksten, GHAWA-blok, poort, één wachtrij met blok-rij) op verzonnen gegevens.
+      - name: "ghawa-deel (wv2889, OVIS GHAWA fase 5: Delen met ECG op ghawa.socev.dev)"
+        if: ${{ !cancelled() }}
+        run: bash test/ghawa-deel.sh
       # OVIS OSINT (wv2694): osint.py — centrale poort vóór elke externe aanroep (BSN-/HIS-vorm → niets, herkomst mogelijk medisch → alleen
       # eigen bronnen, persoon alleen met doel en Davids vraag), logboek in osint.sqlite (0600) telt hetzelfde; zonder netwerk (OSINT_NEP_NET).
       - name: "osint (wv2694, OVIS OSINT-poort)"
