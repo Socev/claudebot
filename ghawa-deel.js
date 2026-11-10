@@ -94,7 +94,6 @@ const LOKAAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS deel_stand (sleutel TEXT PRIMARY KEY, waarde TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deel_tekst (hash TEXT PRIMARY KEY, besluit TEXT NOT NULL, op TEXT NOT NULL, door TEXT);
 CREATE TABLE IF NOT EXISTS deel_kijker (hash TEXT PRIMARY KEY, naam TEXT NOT NULL, adres TEXT NOT NULL, rol TEXT NOT NULL, op TEXT NOT NULL, door TEXT, weg_op TEXT);
-CREATE TABLE IF NOT EXISTS deel_gift (id TEXT PRIMARY KEY, jaar INTEGER NOT NULL, bedrag_cent INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS deel_obj (onderdeel TEXT PRIMARY KEY, hash TEXT, stukken INTEGER, versie INTEGER NOT NULL DEFAULT 0, op TEXT, vers_op TEXT, dicht TEXT, dicht_bevestigd TEXT);
 CREATE TABLE IF NOT EXISTS deel_overleg (sleutel TEXT PRIMARY KEY, op TEXT NOT NULL, door TEXT);
 CREATE TABLE IF NOT EXISTS deel_log (id INTEGER PRIMARY KEY, hash TEXT NOT NULL, onderdeel TEXT NOT NULL, op TEXT NOT NULL);
@@ -275,20 +274,26 @@ function ghawaBlok(rijen, vorigeGiften, stand, vorigeGroepen) {
       to_wilde_ganzen: -som(rs.filter((r) => r.soort === 'Transfer to Wilde Ganzen')), to_ecg: -som(rs.filter((r) => r.soort === 'Transfer to ECG')) };
   });
   const blok = { as_of: stand, years, balance: { eur_cent: som(tot), date: stand } };
-  // gewijzigde giften per getal: nieuw, ander bedrag of jaar, verdwenen
+  // gewijzigde giften per getal: nieuw, ander bedrag of jaar, verdwenen — tegen ELKE stand die ooit buiten kan zijn gekomen (review wv2889 ronde 2
+  // MOET 2/4: ook een push zonder bevestiging, en per onderdeel een andere stand); iemand die oude cijfers bewaarde kan met elk ervan vergelijken
   const nu = new Map(tot.filter(gift).map((r) => [r.id, { jaar: r.jaar, bedrag_cent: r.bedrag_cent }]));
-  const per = new Map(); let totaal = 0;
-  const tel = (jaar) => { const gr = groepVan.get(jaar); const k = gr ? naam(gr) : String(jaar); per.set(k, (per.get(k) || 0) + 1); };
-  for (const [id, x] of nu) {
-    const o = vorigeGiften.get(id);
-    if (!o) { tel(x.jaar); totaal++; } else if (o.jaar !== x.jaar || o.bedrag_cent !== x.bedrag_cent) { tel(x.jaar); if (o.jaar !== x.jaar) tel(o.jaar); totaal++; }
-  }
-  for (const [id, o] of vorigeGiften) if (!nu.has(id)) { tel(o.jaar); totaal++; }
-  const telOk = (n) => n === 0 || n >= 3;
+  const historie = vorigeGiften instanceof Map ? [vorigeGiften] : (vorigeGiften || []);
   const redenen = [];
   if (telJaar(standJaar) < 10) redenen.push('lopend jaar < 10 giftregels');
-  for (const [k, n] of per) if (!telOk(n)) redenen.push('jaar ' + k + ': ' + n + ' gewijzigd');
-  if (!telOk(totaal)) redenen.push('saldo: ' + totaal + ' gewijzigd');
+  const telOk = (n) => n === 0 || n >= 3;
+  let totaal = 0;
+  for (const oud of historie) {
+    const per = new Map(); let t = 0;
+    const tel = (jaar) => { const gr = groepVan.get(jaar); const k = gr ? naam(gr) : String(jaar); per.set(k, (per.get(k) || 0) + 1); };
+    for (const [id, x] of nu) {
+      const o = oud.get(id);
+      if (!o) { tel(x.jaar); t++; } else if (o.jaar !== x.jaar || o.bedrag_cent !== x.bedrag_cent) { tel(x.jaar); if (o.jaar !== x.jaar) tel(o.jaar); t++; }
+    }
+    for (const [id, o] of oud) if (!nu.has(id)) { tel(o.jaar); t++; }
+    for (const [k, n] of per) if (!telOk(n)) redenen.push('jaar ' + k + ': ' + n + ' gewijzigd');
+    if (!telOk(t)) redenen.push('saldo: ' + t + ' gewijzigd');
+    totaal = t;
+  }
   return { blok, giften: nu, groepen, mag: redenen.length === 0, redenen, gewijzigd: totaal };
 }
 
@@ -312,7 +317,7 @@ function bouwPakketten(x) {
   const ref = (v, onderdeel, waar) => {
     if (v == null || v === '') return null;
     const m = maskeer(String(v).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim());
-    const vorm = m.length <= 40 && /^[A-Za-z0-9…][A-Za-z0-9 .,&\/#…-]*$/.test(m) && m.split(/[ .,&\/#-]+/).filter(Boolean).every((w) => /\d/.test(w) || w.length <= 3 || REF_WOORD.test(w));
+    const vorm = m.length <= 40 && /^[A-Za-z0-9…][A-Za-z0-9 .,&\/#…-]*$/.test(m) && m.split(/[ .,&\/#-]+/).filter(Boolean).every((w) => /\d/.test(w) || REF_WOORD.test(w));   // ronde 2 MOET 1: geen korte woorden
     return vorm ? m : tekst(v, onderdeel || 'reference', waar || 'reference');
   };
   const datum = (v) => (v && /^\d{4}-\d{2}-\d{2}/.test(String(v)) ? String(v).slice(0, 10) : null);
@@ -430,7 +435,7 @@ function maak(o) {
     const d = G.leesData(o.dbPad); d.vandaag = amsDag(nu());
     const k = G.bereken(d);
     const db = open(true);
-    let rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud, groepen, kandidaat;
+    let rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud, groepen;
     try {
       const a = (sql, ...p) => db.prepare(sql).all(...p);
       rijen = { regels: a('SELECT id, activiteit, post, aantal, prijs_cent, begroot_cent, status FROM begrotingsregel ORDER BY volgorde'),
@@ -443,28 +448,24 @@ function maak(o) {
       l = lijstenVan(db, o.vault, S);
       goed = new Map(a('SELECT hash, besluit FROM deel_tekst').map((x) => [x.hash, x.besluit]));
       gedeeld = new Set(a('SELECT sleutel FROM deel_overleg').map((x) => x.sleutel));
-      vorig = new Map(a('SELECT id, jaar, bedrag_cent FROM deel_gift').map((x) => [x.id, { jaar: x.jaar, bedrag_cent: x.bedrag_cent }]));
+      const hs = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_historie'").get();
+      vorig = hs ? JSON.parse(hs.waarde).map((l) => new Map(l)) : [];   // alle standen die ooit naar buiten konden gaan
       ghawaRijen = a('SELECT id, datum, jaar, bedrag_cent, soort FROM bankregel_ghawa');   // INTERN: alleen voor het blok, nooit in een pakket
       const b = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_blok'").get();
       blokOud = b ? JSON.parse(b.waarde) : null;
       const gr = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_groepen'").get();
       groepen = gr ? JSON.parse(gr.waarde) : null;
-      const kd = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_kandidaat'").get();
-      kandidaat = kd && kd.waarde ? new Map(JSON.parse(kd.waarde)) : null;
     } finally { db.close(); }
     let stichting = null;
     try { stichting = S.leesVault(o.vault); } catch (e) { fout('ghawa-deel-vault', e); }
     const mp = mijlpalenEngels(o.vault, S);
     const personenSoort = new Map([...l.personen.entries()].map(([n, s]) => [norm(n), s]));
-    return { d, k, rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud, groepen, kandidaat, stichting, mp, personenSoort };
+    return { d, k, rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud, groepen, stichting, mp, personenSoort };
   }
   function bouw(x, opties) {
     const lab = maakLabels(x.l, sleutel);
     const st = eindVorigeMaand(nu());
     const sb = ghawaBlok(x.ghawaRijen, x.vorig, st, x.groepen);
-    // review wv2889 ronde 1 MOET 4: een blok dat misschien buiten staat (push zonder bevestiging) telt ook als vergelijking
-    const sbK = x.kandidaat ? ghawaBlok(x.ghawaRijen, x.kandidaat, st, x.groepen) : null;
-    if (sbK && !sbK.mag) { sb.mag = false; sb.redenen = sb.redenen.concat(sbK.redenen.map((r) => 'kandidaat: ' + r)); }
     const blok = sb.mag ? sb.blok : x.blokOud;
     sb.nieuw = sb.mag && JSON.stringify(sb.blok) !== JSON.stringify(x.blokOud);
     const b = bouwPakketten({ k: x.k, d: x.d, rijen: x.rijen, stichting: x.stichting, lab, goed: x.goed, mijlpalen: x.mp.rijen, gedeeldeOverleggen: x.gedeeld, blok, personenSoort: x.personenSoort });
@@ -571,27 +572,21 @@ function maak(o) {
     for (const ob of objs) if (!aan.includes(ob.onderdeel) && (ob.hash || (ob.dicht && !ob.dicht_bevestigd) || !ob.dicht)) { await sluitOnderdeel(ob.onderdeel, 'uit'); uit.dicht.push(ob.onderdeel); }
     if (!aan.length) return uit;
     const x = lees(), b = bouw(x);
-    // het GHAWA-blok: vóór de push als kandidaat (telt mee als vergelijking als de push onbevestigd blijft), na een bevestigde push vastgelegd
-    // als de nieuwe vergelijking (review wv2889 ronde 1 MOET 4)
-    const metBlok = ['totals', 'overview'];
-    let blokVast = false;
-    const legVast = () => {
-      if (blokVast) return;
+    // het GHAWA-blok: VÓÓR de push vastleggen als mogelijk gepubliceerd (historie, groepen, blok) — wat daarna ook misgaat, elke latere stand
+    // wordt ook tegen deze getoetst, en bij een mislukte push gaat precies dit blok opnieuw (review wv2889 ronde 1 MOET 4, ronde 2 MOET 2–4)
+    if (b.sb.nieuw && ['totals', 'overview'].some(isAan)) {
       metDb((db) => {
         db.exec('BEGIN IMMEDIATE');
         try {
-          db.prepare('DELETE FROM deel_gift').run();
-          const ins = db.prepare('INSERT INTO deel_gift (id, jaar, bedrag_cent) VALUES (?, ?, ?)');
-          for (const [gid, g] of b.sb.giften) ins.run(gid, g.jaar, g.bedrag_cent);
+          const hs = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_historie'").get();
+          const h = hs ? JSON.parse(hs.waarde) : [];
+          h.push([...b.sb.giften]);
           const zetS = db.prepare('INSERT INTO deel_stand (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde');
-          zetS.run('ghawa_blok', JSON.stringify(b.sb.blok)); zetS.run('ghawa_groepen', JSON.stringify(b.sb.groepen));
-          db.prepare("DELETE FROM deel_stand WHERE sleutel = 'ghawa_kandidaat'").run();
+          zetS.run('ghawa_historie', JSON.stringify(h)); zetS.run('ghawa_blok', JSON.stringify(b.sb.blok)); zetS.run('ghawa_groepen', JSON.stringify(b.sb.groepen));
           db.exec('COMMIT');
         } catch (e) { db.exec('ROLLBACK'); throw e; }
       });
-      blokVast = true;
-    };
-    if (b.sb.nieuw && metBlok.some(isAan)) standZet('ghawa_kandidaat', JSON.stringify([...b.sb.giften]));
+    }
     uit.blok = { nieuw: !!b.sb.nieuw, gewijzigd: b.sb.gewijzigd, redenen: b.sb.redenen.length };
     for (const id of IDS.filter(isAan)) {   // opnieuw gelezen: tussendoor uitgezet = niet meer zetten
       const doc = b.pakket[id];
@@ -605,7 +600,7 @@ function maak(o) {
       }
       const h = sha256(JSON.stringify(doc));
       const ob = metDb((db) => db.prepare('SELECT * FROM deel_obj WHERE onderdeel = ?').get(id)) || {};
-      if (ob.hash !== h) { if (await zet(id, doc)) { uit.gezet.push(id); if (b.sb.nieuw && metBlok.includes(id)) legVast(); } }
+      if (ob.hash !== h) { if (await zet(id, doc)) uit.gezet.push(id); }
       else if (!ob.vers_op || nu() - Date.parse(ob.vers_op) >= VERS_MS) uit.vers.push(id);
     }
     await verleng(uit.vers);
