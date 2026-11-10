@@ -373,7 +373,12 @@ function maak(cfg) {
     return opRij(async () => {
       await haal(false);
       const lees = async (p) => { try { return await toon('origin/main', p); } catch (e) { return ''; } };
-      return { donatiedoelen: await lees('src/pages/donatiedoelen.astro'), doneren: await lees('src/pages/doneren.astro') };
+      // wv2886 (fase 4): ook de ANBI-pagina's en welke stukken er in public/anbi staan (pad → blob, om een gekopieerd jaarformulier te zien)
+      let anbiBestanden = [];
+      try { anbiBestanden = [...(await boom('origin/main', 'public/anbi'))]; } catch (e) { anbiBestanden = []; }
+      return { donatiedoelen: await lees('src/pages/donatiedoelen.astro'), doneren: await lees('src/pages/doneren.astro'),
+        anbi: { statuten: await lees('src/pages/anbi/statuten.astro'), beleidsplan: await lees('src/pages/anbi/beleidsplan.astro'),
+          publicatieplicht: await lees('src/pages/anbi/publicatieplicht.astro') }, anbiBestanden };
     });
   }
   return { stand, concept, weg, publiceer, sitePaginas, aan };

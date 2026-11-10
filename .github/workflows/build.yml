@@ -483,7 +483,8 @@ jobs:
       # OVIS GHAWA (wv2877): ghawa.js (invoer, rekenkern op de cent, routes zonder donateurs of GHAWA-bankvelden) en het server.js-blok.
       # wv2880: + ghawa-bij.js (fase 2: GHAWA-bank uit Facturen, Ecobank-afschriften, fondsen, maandronde) in test/ghawa-bij.test.js.
       # wv2883: + ghawa-site.js (fase 3: website via git op een lokale bare repo; foto-toets alleen met sharp, anders overgeslagen).
-      - name: "ghawa (wv2877, OVIS GHAWA fase 1, 2 en 3)"
+      # wv2886: + ghawa-stichting.js (fase 4: doelen, statuten en ANBI, overleg, mensen; verzonnen vault) in test/ghawa-stichting.test.js.
+      - name: "ghawa (wv2877, OVIS GHAWA fase 1 t/m 4)"
         if: ${{ !cancelled() }}
         run: bash test/ghawa.sh
       # OVIS OSINT (wv2694): osint.py — centrale poort vóór elke externe aanroep (BSN-/HIS-vorm → niets, herkomst mogelijk medisch → alleen

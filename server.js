@@ -13640,9 +13640,9 @@ function handleApp(req, res) {
         if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
-        if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|fondsen|ronde|donateurs|indelen|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)
+        if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|fondsen|ronde|donateurs|indelen|doelen|stichting|overleg|mensen|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)
           || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank)$/.test(route)
-          || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
+          || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
@@ -21161,11 +21161,32 @@ const ghawaSite = (function () {
   } catch (err) { logError('ghawa-site', err); return null; }
 })();
 let ghawaSiteCijfersOp = 0;
+// wv2886 (fase 4): de sitepagina's (main, alleen lezen) voor Doelen en Statuten en ANBI; hooguit eens per 6 uur opnieuw uit git
+let ghawaSitePagLaatst = null;
+async function ghawaSitePag(dwing) {
+  if (!ghawaSite) return null;
+  if (!dwing && ghawaSitePagLaatst && Date.now() - ghawaSitePagLaatst.op < 6 * 3600000) return ghawaSitePagLaatst.pag;
+  try { const pag = await ghawaSite.s.sitePaginas(); ghawaSitePagLaatst = { op: Date.now(), pag }; return pag; }
+  catch (e) { logError('ghawa-site', e); return ghawaSitePagLaatst ? ghawaSitePagLaatst.pag : null; }
+}
+// wv2886: Actie-Bewaker (n8n-tabel actie_state) alleen lezen, alleen entiteit GHAWA (ghawa-stichting.js laat Prive/Gambia ook nog weg);
+// alleen de velden die Overleg toont; hooguit eens per 10 minuten
+let ghawaBewakerLaatst = null;
+async function ghawaBewaker() {
+  if (ghawaBewakerLaatst && Date.now() - ghawaBewakerLaatst.t < 10 * 60000) return ghawaBewakerLaatst.u;
+  let u;
+  try {
+    const rijen = await appN8nRijen(APP_ACTIE_STATE_TABEL, { type: 'and', filters: [{ columnName: 'entiteit', condition: 'ilike', value: '%ghawa%' }] }, 200);
+    u = { op: new Date().toISOString(), rijen: rijen.map(function (r) { return { actie_id: r.actie_id, entiteit: r.entiteit, actie: r.actie, eigenaar: r.eigenaar, status: r.status, deadline: r.deadline, bron: r.bron, laatst_gecheckt: r.laatst_gecheckt }; }) };
+  } catch (e) { logError('ghawa-bewaker', e); u = { op: new Date().toISOString(), rijen: null, fout: 'de Actie-Bewaker is nu niet te lezen' }; }
+  ghawaBewakerLaatst = { t: Date.now(), u };
+  return u;
+}
 async function ghawaSiteCijfers() {   // bedragen op ghawa.org (main) tegenover de app; bewaard voor Vraagt aandacht
   if (!ghawaSite || !ghawaApp) return null;
   const tot = ghawaApp.totalen();
   if (!tot) return null;
-  const v = ghawaSite.M.vergelijk(await ghawaSite.s.sitePaginas(), tot);
+  const v = ghawaSite.M.vergelijk(await ghawaSitePag(true), tot);
   ghawaApp.siteCijfersZet(v);
   ghawaSiteCijfersOp = Date.now();
   return v;
@@ -21212,7 +21233,11 @@ async function appGhawa(req, res, a, route, d, s) {
   const post = route.indexOf('POST ') === 0;
   if (post && !appTeller('ghawa-schrijf', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa-schrijf');
   let u;
-  try { u = ghawaApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined, door: a && a.id ? 'app ' + String(a.id).slice(0, 8) : 'app' }); }
+  // wv2886: Doelen en Statuten lezen de site (git, alleen lezen), Overleg de Actie-Bewaker; beide met een eigen cache, een fout = scherm zonder dat deel
+  const extra = {};
+  if (route === 'GET /app/ghawa/doelen' || route === 'GET /app/ghawa/stichting') extra.site = await ghawaSitePag(false);
+  if (route === 'GET /app/ghawa/overleg') extra.bewaker = await ghawaBewaker();
+  try { u = ghawaApp.app(Object.assign({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined, door: a && a.id ? 'app ' + String(a.id).slice(0, 8) : 'app' }, extra)); }
   catch (e) { logError('ghawa', e); return appWeiger(res, 503, 'De GHAWA-cijfers zijn nu niet te lezen; probeer het zo opnieuw', 'ghawa fout'); }
   // wv2880: schrijfacties altijd in de auditregel (id's en aantallen, geen namen of bedragen); lezen stil
   if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'ghawa').slice(0, 80);

@@ -621,6 +621,7 @@ function rondeRoute(d, k, bijInfo) {
   return { maand, stappen, afschriften: d.afschriften || [], signalen: d.signalen || [], standen: k.standen, bank: bijInfo || null,
     ecg_dagen: ecgOud, stil: ecgOud <= 35 };
 }
+const STICHTING = new Set(['doelen', 'stichting', 'overleg', 'mensen']);   // wv2886
 const SOORT = { md: 'tekst', pdf: 'pdf', xlsx: 'Excel', docx: 'Word', html: 'webpagina', jpg: 'foto', jpeg: 'foto', png: 'foto', csv: 'csv' };
 function documentenRoute(bronnenMap, vaultMap) {
   const uit = [];
@@ -674,6 +675,7 @@ function maak(cfg) {
     const m = /^\/app\/ghawa(?:\/([a-z]+))?(?:\/([A-Za-z0-9]{1,4}))?$/.exec(pad);
     if (!m) return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'ghawa onbekend' };
     const scherm = m[1] || 'overzicht';
+    if (!post && STICHTING.has(scherm) && !m[2]) return stichtingRoute(scherm, v);   // wv2886: fase 4
     if (!post && scherm === 'documenten') return { status: 200, body: Object.assign({ ok: true }, documentenRoute(c.bronnenMap, c.vaultMap)), reden: 'ghawa documenten' };
     if (!c.dbPad || !fs.existsSync(c.dbPad)) return { status: 503, body: { ok: false, fout: 'De GHAWA-databank is er nog niet' }, reden: 'ghawa geen databank' };
     if (post) return schrijfRoute(scherm, (v && v.body) || {}, v);
@@ -696,6 +698,27 @@ function maak(cfg) {
     if (!body) return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'ghawa onbekend ' + scherm };
     laatste = { op: nuIso(), scherm, ms: Date.now() - t0, sluit: k.sluit };
     return { status: 200, body: Object.assign({ ok: true, invoer_op: d.meta.invoer_op || null }, body), reden: 'ghawa ' + scherm + (k.sluit ? '' : ' sluit niet') };
+  }
+  // wv2886 (fase 4, Stichting): doelen, stichting (statuten en ANBI), overleg, mensen. Leest de vault (ghawa-stichting.js) en houdt de afgeleide
+  // tabellen overleg/besluit/actiepunt/mijlpaal bij; de server geeft de sitepagina's (v.site) en de Actie-Bewaker-rijen (v.bewaker) mee.
+  // Zonder databank werkt het scherm ook (dan rechtstreeks uit de vault, zonder fondsen en zonder de cijfers van de app).
+  function stichtingRoute(scherm, v) {
+    const S = require('./ghawa-stichting.js');
+    const t0 = Date.now();
+    let data = S.leesVault(c.vaultMap || '');
+    let tot = null, fondsen = [];
+    if (c.dbPad && fs.existsSync(c.dbPad)) {
+      try {
+        const uit = schrijf((db) => { S.bewaar(db, data, nuIso()); return S.leesDb(db); });
+        if (uit) data = Object.assign({}, data, uit);
+        const d = lees();
+        fondsen = d.fondsen.map((f) => ({ gever: f.gever, soort: f.soort }));
+        tot = totalen();
+      } catch (e) { if (c.fout) c.fout(e); }
+    }
+    const body = S.route(scherm, { data, site: (v && v.site) || null, bewaker: (v && v.bewaker) || null, vault: c.vaultMap || '', totalen: tot, fondsen });
+    laatste = { op: nuIso(), scherm, ms: Date.now() - t0, sluit: null };
+    return { status: 200, body: Object.assign({ ok: true }, body), reden: 'ghawa ' + scherm };
   }
   // POST /app/ghawa/{indelen,fonds,afschrift,ronde,bank}. Geen inhoud in de reden (die komt in de auditregel): alleen id's en aantallen.
   function schrijfRoute(scherm, b, v) {
