@@ -282,3 +282,59 @@ test('noodstop: D1 stand meteen 1; uit weer 0; health zonder inhoud', async () =
   const h = JSON.stringify(o.m.health());
   assert.ok(!/Pietersen|Proef|@/.test(h));
 });
+
+// ── review wv2889 ronde 1 ──
+test('MOET 1: een naam in een referentieveld gaat niet zonder Share mee (vaste vorm of tekstgoedkeuring)', async () => {
+  const o = omgeving();
+  await keurAlles(o); await alleAan(o, ['construction']); await o.m.ronde();
+  const db = o.sql(); db.prepare("UPDATE uitgave SET referentie = 'Paid Zilverbaard' WHERE id = 'T0002'").run(); db.close();
+  o.m.markeerVuil(); await o.m.ronde();
+  const u = deelVan(o, 'construction').expenditures.find((x) => x.id === 'T0002');
+  assert.strictEqual(u.reference, D.PENDING);
+  assert.strictEqual(deelVan(o, 'construction').expenditures.find((x) => x.id === 'T0001').reference, 'INV1', 'code blijft gewoon');
+  assert.ok(!JSON.stringify(o.d1.log).includes('Zilverbaard'));
+});
+
+test('MOET 2: noodstop en iemand eraf die D1 niet bevestigde, worden elke tik opnieuw gestuurd', async () => {
+  const o = omgeving();
+  const r = await o.m.kijkerErbij({ naam: 'Proef Kijker', adres: 'kijker@voorbeeld.invalid' }, 'toets');
+  o.d1.stuk = true;
+  assert.strictEqual((await o.m.noodstop(true)).body.bevestigd, false);
+  assert.strictEqual((await o.m.kijkerEraf(r.body.hash)).body.dicht, false);
+  o.d1.stuk = false;
+  await o.m.tik();
+  assert.strictEqual(o.d1.db.prepare("SELECT waarde FROM stand WHERE sleutel = 'noodstop'").get().waarde, '1', 'noodstop alsnog buiten');
+  assert.ok(!o.d1.db.prepare('SELECT 1 FROM bezoeker WHERE hash = ?').get(r.body.hash), 'eraf alsnog buiten');
+  assert.ok(o.d1.db.prepare("SELECT 1 FROM blok WHERE soort = 'bezoeker' AND sleutel = ?").get(r.body.hash));
+});
+
+test('MOET 3: een gepubliceerde jaargroep wordt later niet gesplitst', () => {
+  const rij = (id, jaar, b) => ({ id, datum: jaar + '-05-01', jaar, bedrag_cent: b, soort: 'Donation (bank transfer)' });
+  const r0 = [rij('a', 2023, 500)]; for (let i = 0; i < 12; i++) r0.push(rij('b' + i, 2024, 100 + i), rij('c' + i, 2025, 100 + i));
+  const b0 = D.ghawaBlok(r0, new Map(), '2025-10-31');
+  assert.deepStrictEqual(b0.blok.years.map((y) => y.year), ['2023–2024', '2025']);
+  const r1 = r0.slice(); for (let i = 0; i < 9; i++) r1.push(rij('n' + i, 2023, 50 + i));   // 2023 heeft nu 10 giften
+  const b1 = D.ghawaBlok(r1, b0.giften, '2025-10-31', b0.groepen);
+  assert.deepStrictEqual(b1.blok.years.map((y) => y.year), ['2023–2024', '2025'], 'blijft samen');
+  const zonder = D.ghawaBlok(r1, b0.giften, '2025-10-31');
+  assert.deepStrictEqual(zonder.blok.years.map((y) => y.year), ['2023', '2024', '2025'], 'kruisproef: zonder vaste groepen zou hij splitsen');
+});
+
+test('MOET 4: na een push zonder bevestiging telt het kandidaat-blok mee; 1 gift erna = geen nieuw blok', async () => {
+  const o = omgeving();
+  await keurAlles(o); await alleAan(o, ['totals']); await o.m.ronde();
+  const s0 = deelVan(o, 'totals').balance.eur_cent;
+  const voeg = (id, b) => { const db = o.sql(); db.prepare("INSERT INTO bankregel_ghawa (id, rekening, datum, jaar, bedrag_cent, soort, volg) VALUES (?, 'Current NL00', '2026-10-05', 2026, ?, 'Donation (bank transfer)', ?)").run(id, b, 900 + Number(id.slice(1))); db.close(); };
+  voeg('x1', 300); voeg('x2', 301); voeg('x3', 302);
+  o.d1.stuk = true; o.m.markeerVuil();
+  await assert.rejects(o.m.ronde());
+  o.d1.stuk = false;
+  const d = o.sql(); const k = d.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_kandidaat'").get(); const g = d.prepare('SELECT count(*) n FROM deel_gift').get().n; d.close();
+  assert.ok(k, 'kandidaat bewaard'); 
+  voeg('x4', 303); o.m.markeerVuil(); await o.m.ronde();
+  assert.strictEqual(deelVan(o, 'totals').balance.eur_cent, s0, 'blok blijft het oude (t.o.v. de kandidaat maar 1 gewijzigd)');
+  const d2 = o.sql(); assert.strictEqual(d2.prepare('SELECT count(*) n FROM deel_gift').get().n, g, 'vergelijking niet verschoven'); d2.close();
+  voeg('x5', 304); voeg('x6', 305); o.m.markeerVuil(); await o.m.ronde();
+  assert.strictEqual(deelVan(o, 'totals').balance.eur_cent, s0 + 300 + 301 + 302 + 303 + 304 + 305, 'nu ≥ 3 t.o.v. beide: nieuw blok');
+  const d3 = o.sql(); assert.ok(!d3.prepare("SELECT 1 FROM deel_stand WHERE sleutel = 'ghawa_kandidaat'").get(), 'kandidaat opgeruimd na bevestiging'); d3.close();
+});
