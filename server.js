@@ -4139,6 +4139,7 @@ function handleRequest(req, res) {
       pot_maand: typeof potMaandInfo === 'function' ? potMaandInfo() : { aan: false },   // wv2762: OVIS POT maandronde (schakelaar, bundel, laatste tik; geen inhoud)   // wv911: POT-app nota's als Gmail-concept (schakelaar, laatste tik, aantallen; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
+      ghawa: typeof ghawaInfo === 'function' ? ghawaInfo() : { aan: false },   // wv2877: OVIS GHAWA (databank aanwezig?, laatste scherm en of het sluit; geen inhoud)
       gezondheid: typeof gezondheidInfo === 'function' ? gezondheidInfo() : { aan: false },   // wv937: App Gezondheid (gezondheid-app.js in deze release? tellers, geen inhoud)
       doorgeefluik: typeof doorgeefInfo === 'function' ? doorgeefInfo() : { aan: false },   // wv1267: schakelaar en laatste uitkomst (geen inhoud)
       syncthing: typeof syncthingInfo === 'function' ? syncthingInfo() : { aan: false },   // wv1277: Syncthing (schakelaar, poort, map, apparaten, filtertoets; geen inhoud of sleutel)
@@ -13639,6 +13640,7 @@ function handleApp(req, res) {
         if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
+        if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2877: OVIS GHAWA (alleen lezen)
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
@@ -21114,6 +21116,31 @@ async function appKalender(req, res, a, route) {
   return appStuur(res, u.status, u.body);
 }
 // ── einde OVIS Calendar ──
+// ── OVIS GHAWA (wv2877, 10-11-2026; plan vault "01_Ontwikkeling/OVIS GHAWA - plan naar een 8 (Fable 5.2, 10-11-2026)" § 8 fase 1) ──
+// Apps › GHAWA: de cijfers van de bouw in Sukuta (ECG) en van Stichting GHAWA, uit de eigen databank /opt/data/ghawa/ghawa.sqlite (één keer
+// gevuld uit het overdrachtsbestand, datastand 6-10-2026). ghawa.js rekent bij elke vraag na (dalasi leidend, nog open per regel, verrekening
+// per activiteit, oormerken één keer, aansluitingen A-G). Alleen lezen, achter de app-sessie:
+//   GET /app/ghawa[/overzicht|/bouw|/apotheek|/geld|/vragen|/documenten]   GET /app/ghawa/activiteit/<nr>
+// Donateurs en de bankregels van GHAWA staan in de databank maar komen in geen antwoord (alleen totalen); geen inhoud in een log.
+const GHAWA_DB = process.env.GHAWA_DB || '/opt/data/ghawa/ghawa.sqlite';
+const ghawaApp = (function () {
+  const p = path.join(__dirname, 'ghawa.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ dbPad: GHAWA_DB, bronnenMap: path.join(VAULT, '10_Zakelijk', 'GHAWA-ECG', 'Bronnen', 'Overdracht financien ECG 2026-10-06'), vaultMap: VAULT }); }
+  catch (e) { logError('ghawa', e); return null; }
+})();
+function ghawaInfo() { if (!ghawaApp) return { aan: false }; try { return ghawaApp.info(); } catch (e) { return { aan: true, fout: true }; } }
+appStaat.tellers.ghawa = [];
+async function appGhawa(req, res, a, route) {
+  if (!ghawaApp) return appWeiger(res, 404, 'GHAWA zit niet in deze versie van de pod', 'ghawa ontbreekt');
+  if (!appTeller('ghawa', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa');
+  let u;
+  try { u = ghawaApp.app({ pad: route.replace(/^GET /, '') }); }
+  catch (e) { logError('ghawa', e); return appWeiger(res, 503, 'De GHAWA-cijfers zijn nu niet te lezen; probeer het zo opnieuw', 'ghawa fout'); }
+  if (u.status === 200) res._app.stil = true; else res._app.reden = String(u.reden || 'ghawa').slice(0, 80);
+  return appStuur(res, u.status, u.body);
+}
+// ── einde OVIS GHAWA ──
 // ── OVIS Shopper (wv2264, 2-11-2026; idee 23 S3, ontwerp vault "01_Ontwikkeling/OVIS Shopper - wat er al bestaat en ontwerp (2-11-2026).md"
 // § 3.3–3.4) ──
 // Apps › Shopper in de Socev-app: de zoektochten van de skill ovis-shopper. Geen eigen opslag: shopper.js leest bij elke vraag de pagina's

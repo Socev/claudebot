@@ -480,6 +480,10 @@ jobs:
       - name: "pakjes (wv2593, pakjes in de app)"
         if: ${{ !cancelled() }}
         run: bash test/pakjes.sh
+      # OVIS GHAWA (wv2877): ghawa.js (invoer, rekenkern op de cent, routes zonder donateurs of GHAWA-bankvelden) en het server.js-blok.
+      - name: "ghawa (wv2877, OVIS GHAWA fase 1)"
+        if: ${{ !cancelled() }}
+        run: bash test/ghawa.sh
       # OVIS OSINT (wv2694): osint.py — centrale poort vóór elke externe aanroep (BSN-/HIS-vorm → niets, herkomst mogelijk medisch → alleen
       # eigen bronnen, persoon alleen met doel en Davids vraag), logboek in osint.sqlite (0600) telt hetzelfde; zonder netwerk (OSINT_NEP_NET).
       - name: "osint (wv2694, OVIS OSINT-poort)"
