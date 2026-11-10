@@ -283,14 +283,14 @@ function ghawaBlok(rijen, vorigeGiften, stand, vorigeGroepen) {
   const telOk = (n) => n === 0 || n >= 3;
   let totaal = 0;
   for (const oud of historie) {
-    const per = new Map(); let t = 0;
-    const tel = (jaar) => { const gr = groepVan.get(jaar); const k = gr ? naam(gr) : String(jaar); per.set(k, (per.get(k) || 0) + 1); };
+    const per = new Map(); let t = 0;   // per jaargroep de UNIEKE gift-id's (ronde 3 MOET 2: een jaarwissel binnen één groep telt één keer)
+    const tel = (jaar, id) => { const gr = groepVan.get(jaar); const k = gr ? naam(gr) : String(jaar); if (!per.has(k)) per.set(k, new Set()); per.get(k).add(id); };
     for (const [id, x] of nu) {
       const o = oud.get(id);
-      if (!o) { tel(x.jaar); t++; } else if (o.jaar !== x.jaar || o.bedrag_cent !== x.bedrag_cent) { tel(x.jaar); if (o.jaar !== x.jaar) tel(o.jaar); t++; }
+      if (!o) { tel(x.jaar, id); t++; } else if (o.jaar !== x.jaar || o.bedrag_cent !== x.bedrag_cent) { tel(x.jaar, id); if (o.jaar !== x.jaar) tel(o.jaar, id); t++; }
     }
-    for (const [id, o] of oud) if (!nu.has(id)) { tel(o.jaar); t++; }
-    for (const [k, n] of per) if (!telOk(n)) redenen.push('jaar ' + k + ': ' + n + ' gewijzigd');
+    for (const [id, o] of oud) if (!nu.has(id)) { tel(o.jaar, id); t++; }
+    for (const [k, ids] of per) if (!telOk(ids.size)) redenen.push('jaar ' + k + ': ' + ids.size + ' gewijzigd');
     if (!telOk(t)) redenen.push('saldo: ' + t + ' gewijzigd');
     totaal = t;
   }
@@ -450,6 +450,13 @@ function maak(o) {
       gedeeld = new Set(a('SELECT sleutel FROM deel_overleg').map((x) => x.sleutel));
       const hs = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_historie'").get();
       vorig = hs ? JSON.parse(hs.waarde).map((l) => new Map(l)) : [];   // alle standen die ooit naar buiten konden gaan
+      // ronde 3 MOET 1: een vergelijkingsstand van een tussenversie (deel_gift / ghawa_kandidaat, nooit uitgerold) telt ook mee
+      if (!hs && db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'deel_gift'").get()) {
+        const g = a('SELECT id, jaar, bedrag_cent FROM deel_gift');
+        if (g.length) vorig.push(new Map(g.map((x) => [x.id, { jaar: x.jaar, bedrag_cent: x.bedrag_cent }])));
+        const kd = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_kandidaat'").get();
+        if (kd && kd.waarde) vorig.push(new Map(JSON.parse(kd.waarde)));
+      }
       ghawaRijen = a('SELECT id, datum, jaar, bedrag_cent, soort FROM bankregel_ghawa');   // INTERN: alleen voor het blok, nooit in een pakket
       const b = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_blok'").get();
       blokOud = b ? JSON.parse(b.waarde) : null;

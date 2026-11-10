@@ -318,6 +318,16 @@ test('MOET 2: noodstop en iemand eraf die D1 niet bevestigde, worden elke tik op
   assert.ok(o.d1.db.prepare("SELECT 1 FROM blok WHERE soort = 'bezoeker' AND sleutel = ?").get(r.body.hash));
 });
 
+test('ronde 3 MOET 2: een gift die binnen één jaargroep van jaar wisselt telt één keer', () => {
+  const rij = (id, jaar, b) => ({ id, datum: jaar + '-05-01', jaar, bedrag_cent: b, soort: 'Donation (bank transfer)' });
+  const r0 = [rij('a', 2023, 500)]; for (let i = 0; i < 12; i++) r0.push(rij('b' + i, 2024, 100 + i), rij('c' + i, 2025, 100 + i), rij('d' + i, 2026, 100 + i));
+  const b0 = D.ghawaBlok(r0, new Map(), '2026-10-31');
+  assert.strictEqual(b0.blok.years[0].year, '2023–2024');
+  // gift a van 2023 naar 2024 (zelfde groep) + één nieuwe in 2024 = 2 unieke giften in die groep → mag niet
+  const r1 = r0.map((r) => (r.id === 'a' ? rij('a', 2024, 500) : r)).concat([rij('n1', 2024, 77)]);
+  assert.ok(!D.ghawaBlok(r1, [b0.giften], '2026-10-31', b0.groepen).mag);
+});
+
 test('MOET 3: een gepubliceerde jaargroep wordt later niet gesplitst', () => {
   const rij = (id, jaar, b) => ({ id, datum: jaar + '-05-01', jaar, bedrag_cent: b, soort: 'Donation (bank transfer)' });
   const r0 = [rij('a', 2023, 500)]; for (let i = 0; i < 12; i++) r0.push(rij('b' + i, 2024, 100 + i), rij('c' + i, 2025, 100 + i));
