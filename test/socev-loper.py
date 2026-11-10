@@ -42,6 +42,21 @@ esac
 exit 0
 """)
 os.chmod(NEP, 0o755)
+# wv2859: nep-socev-rechten.sh. Legt per ronde vast: begin/einde, argumenten, umask, omgeving, procesgroep, en of er al een
+# andere ronde liep (TEGELIJK). Slaapt even, zodat jobs die intussen eindigen moeten wachten.
+MASKER_LOG = os.path.join(T, "masker.log")
+NEP_RECHTEN = os.path.join(T, "nep-rechten.sh")
+open(NEP_RECHTEN, "w").write("""#!/bin/bash
+L=%(log)s
+[ -e %(t)s/masker.loopt ] && echo TEGELIJK >> $L
+touch %(t)s/masker.loopt
+echo "begin $(date +%%s.%%N) args=$* umask=$(umask) vault=$VAULT_DIR home=$HOME pgid=$(ps -o pgid= $$ | tr -d ' ') pid=$$ envn=$(env | grep -cv '^_=\\|^PWD=\\|^SHLVL=')" >> $L
+sleep "${NEP_MASKER_SLAAP:-2}"
+rm -f %(t)s/masker.loopt
+echo "einde $(date +%%s.%%N)" >> $L
+echo "2026-11-10 05:16:00 socev-rechten eigen-masker: klaar: 3 van socev nagelopen, 2 zonder groepsleesrecht hersteld, fouten: 0"
+""" % {"log": MASKER_LOG, "t": T})
+os.chmod(NEP_RECHTEN, 0o755)
 SOCK = os.path.join(T, "loper.sock")
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.bind(SOCK)
@@ -50,7 +65,7 @@ if s.fileno() != 3:
     os.dup2(s.fileno(), 3)
 os.set_inheritable(3, True)
 ENV = {"PATH": os.environ["PATH"], "SOCEV_LOPER_VAULT": VAULT, "SOCEV_LOPER_IO": IO, "SOCEV_LOPER_THUIS": THUIS,
-       "SOCEV_LOPER_BREINEN": json.dumps({"claude": NEP, "codex": NEP})}
+       "SOCEV_LOPER_BREINEN": json.dumps({"claude": NEP, "codex": NEP}), "SOCEV_LOPER_RECHTEN": NEP_RECHTEN}
 loper = {"p": None}
 stoppen = {"ja": False}
 
@@ -143,6 +158,53 @@ ok("cwd in io toegestaan", r["einde"] == {"code": 0, "signaal": None}, r)
 r = klant({"op": "start", "id": "j8", "brein": "codex", "args": ["lees-stdin"], "cwd": VAULT, "invoer": "hallo via stdin"},
           tot_einde="j8")
 ok("invoer bij start gaat naar stdin (codex)", "hallo via stdin" in r["uit"], r)
+
+# wv2859: na elke job één maskerronde (socev-rechten.sh eigen-masker --sinds <start - 5 s>), nooit twee tegelijk; wat intussen
+# eindigt wordt één vervolgronde met de vroegste sinds; op masker = volle ronde (zonder --sinds).
+def masker_stil(max_s=15):
+    t0 = time.time()
+    while time.time() - t0 < max_s:
+        m = klant({"op": "ping"})["antwoorden"][0].get("masker")
+        if m is not None and not m["loopt"] and m["wacht"] is None:
+            return m
+        time.sleep(0.2)
+    return None
+
+
+def masker_rondes():
+    if not os.path.exists(MASKER_LOG):
+        return []
+    return [dict(kv.split("=", 1) for kv in l.split()[2:] if "=" in kv) | {"_regel": l}
+            for l in open(MASKER_LOG).read().splitlines() if l.startswith("begin ")]
+
+
+m0 = masker_stil()
+ok("masker: ping meldt de maskerstand; eerdere jobs gaven rondes", m0 is not None and m0["rondes"] >= 1, m0)
+ok("masker: laatste ronde gelezen (hersteld 2, fouten 0)", m0 and m0["laatste"]["hersteld"] == 2 and m0["laatste"]["fouten"] == 0
+   and m0["laatste"]["code"] == 0, m0)
+open(MASKER_LOG, "w").close()
+r = klant([{"op": "start", "id": "jm1", "brein": "claude", "args": ["--x"], "cwd": VAULT}], tot_einde="jm1")
+r2 = klant([{"op": "start", "id": "jm2", "brein": "claude", "args": ["--x"], "cwd": VAULT}], tot_einde="jm2")
+r3 = klant([{"op": "start", "id": "jm3", "brein": "codex", "args": ["--x"], "cwd": VAULT}], tot_einde="jm3")
+GEST = {j["id"]: j["gestart"] for j in klant({"op": "lijst"})["antwoorden"][0]["jobs"]}
+m1 = masker_stil()
+R = masker_rondes()
+LOG_M = open(MASKER_LOG).read()
+ok("masker: drie jobs kort na elkaar = twee rondes, nooit tegelijk", len(R) == 2 and "TEGELIJK" not in LOG_M, LOG_M)
+ok("masker: eerste ronde --sinds = start jm1 - 5 s", R and R[0]["_regel"].split("args=")[1].split(" umask")[0]
+   == "eigen-masker --sinds %d" % (GEST["jm1"] // 1000 - 5), (LOG_M, GEST))
+ok("masker: vervolgronde met de vroegste sinds van jm2/jm3", len(R) == 2 and R[1]["_regel"].split("args=")[1].split(" umask")[0]
+   == "eigen-masker --sinds %d" % (min(GEST["jm2"], GEST["jm3"]) // 1000 - 5), (LOG_M, GEST))
+ok("masker: umask 0007, VAULT_DIR = de vault, HOME = thuis, eigen procesgroep", R and all(
+    x["umask"] == "0007" and x["vault"] == VAULT and x["home"] == THUIS and x["pgid"] == x["pid"] for x in R), LOG_M)
+ok("masker: kale omgeving (PATH, HOME, VAULT_DIR, LANG)", R and all(x["envn"] == "4" for x in R), LOG_M)
+open(MASKER_LOG, "w").close()
+r = klant([{"op": "masker"}, {"op": "masker"}])
+ok("op masker: gestart, tweede verzoek wacht", [a.get("masker") for a in r["antwoorden"]] == ["gestart", "wacht"], r)
+masker_stil()
+R = masker_rondes()
+ok("op masker: volle ronde zonder --sinds (twee keer, nooit tegelijk)", len(R) == 2 and all(
+    x["_regel"].split("args=")[1].split(" umask")[0] == "eigen-masker" for x in R) and "TEGELIJK" not in open(MASKER_LOG).read(), R)
 
 # leeft + stop
 r = klant([{"op": "start", "id": "j9", "brein": "claude", "args": ["slaap"], "cwd": VAULT, "env": {"SOCEV_AGENT_RUN": "abc123"}}],
@@ -308,6 +370,7 @@ while time.time() - t0 < 5:
 ok("na kill terug op dezelfde socket binnen 5 s", terug, r)
 
 log = open(T + "/loper.log").read()
+ok("log: één regel per maskerronde met aantal hersteld (wv2859)", "masker sinds=" in log and "hersteld=2 fouten=0" in log, log[-400:])
 ok("log bevat geen inhoud (geen args, env of uitvoer)", "hallo via stdin" not in log and "abc123" not in log and "--version" not in log, log[-400:])
 
 loper["p"].kill()

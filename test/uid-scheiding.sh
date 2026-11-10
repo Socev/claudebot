@@ -212,7 +212,7 @@ PING=$(loper '{"op":"ping"}')
 echo "  ping: $PING"
 LOPER=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["antwoorden"][0]["pid"])' "$PING" 2>/dev/null)
 ok   "1001 bereikt de loper, die draait als 1002"            "python3 -c 'import json,sys; a=json.loads(sys.argv[1])[\"antwoorden\"][0]; sys.exit(0 if a[\"ok\"] and a[\"uid\"]==1002 and a[\"gid\"]==1002 else 1)' '$PING'"
-ok   "loper-versie wv2282-1 (kinderen met umask 007; volg in één tick, socket-eigenaar)" "grep -q '\"versie\":\"wv2282-1\"' <<<'$PING'"
+ok   "loper-versie wv2859-1 (umask 007, maskerronde na elke job; volg in één tick, socket-eigenaar)" "grep -q '\"versie\":\"wv2859-1\"' <<<'$PING'"
 ok   "loper: uid 1002, NoNewPrivs 1, geen capabilities, geen groepen" "loper_status $LOPER"
 ok   "loper-omgeving zonder pod-sleutels"                    "zonder_sleutels $LOPER"
 LUS=$(r "pgrep -u 0 -f loper-bind.py | head -1")
@@ -255,6 +255,34 @@ ok   "1001 leest zijn eigen bestanden nog"                   "$(a 'cat /opt/data
 ok   "managed settings: root, hook python3 -I /app/argv-wacht.py, allowManagedHooksOnly" "managed"
 ok   "argv-hook in het image: 24 weigeren + 22 doorlaten"   "$(a 'python3 /tmp/argv-hook-toets.py /app/argv-wacht.py')"
 ok   "CLI-binary noemt /etc/claude-code (string; of de hook vuurt, meet fase 2 in de pod)" "cli_managed"
+
+echo "== maskerronde na elke job (wv2859) =="
+# 10-11-2026: een smalle agent schreef vaultpagina's met Python tempfile.mkstemp + os.replace (altijd 0600: masker ---, ook
+# onder umask 007 en met standaard-ACL). Sinds wv2859 draait de loper na elke job socev-rechten.sh eigen-masker --sinds
+# <start - 5 s>. Hier: een oud bestand (ruim vóór de job) blijft dicht, een nieuw wordt leesbaar; code-plek en symlinkdoel ongemoeid.
+MKSTEMP="import tempfile,os,sys; fd,t=tempfile.mkstemp(dir=os.path.dirname(sys.argv[1])); os.write(fd,b'x'); os.close(fd); os.replace(t,sys.argv[1])"
+masker_rondes(){ loper '{"op":"ping"}' | python3 -c 'import json,sys; m=json.load(sys.stdin)["antwoorden"][0]["masker"]; print(m["rondes"] if not m["loopt"] and m["wacht"] is None else -1)'; }
+masker_wacht(){ local n; for i in $(seq 1 60); do n=$(masker_rondes); [ "${n:--1}" -gt "$1" ] 2>/dev/null && return 0; sleep 1; done; return 1; }
+export -f masker_rondes masker_wacht
+ok   "1002: oud bestand met mkstemp + os.replace (600)"      "$(s "python3 -I -c \"$MKSTEMP\" $V/00_Systeem/oud-mkstemp.md")"
+sleep 8
+VOOR=$(masker_rondes)   # vóór het nieuwe bestand: tussen bestand en jobstart zit dan weinig (marge is 5 s)
+ok   "1002: nieuw bestand met mkstemp + os.replace, ook een .py (code-plek) en een symlink" \
+  "$(s "python3 -I -c \"$MKSTEMP\" $V/00_Systeem/pot-mkstemp.md && python3 -I -c \"$MKSTEMP\" $V/00_Systeem/mk-code.py && echo d > /opt/data/socev-thuis/doel-mk && chmod 600 /opt/data/socev-thuis/doel-mk && ln -s /opt/data/socev-thuis/doel-mk $V/00_Systeem/link-mk")"
+ok   "  nieuw bestand: masker --- (vóór de job)"             "r 'getfacl -p $V/00_Systeem/pot-mkstemp.md' | grep -q '^mask::---'"
+loper '{"op":"start","id":"maskerjob","brein":"claude","args":["--version"],"cwd":"/opt/data/AI_SecondBrain","env":{"PATH":"/usr/local/bin:/usr/bin:/bin"}}' maskerjob >/dev/null
+ok   "na de job één maskerronde (rondes $VOOR -> meer)"      "masker_wacht $VOOR"
+ok   "  nieuw bestand: masker rw, 1001 leest het"            "r 'getfacl -p $V/00_Systeem/pot-mkstemp.md' | grep -q '^mask::rw-' && $(a "cat $V/00_Systeem/pot-mkstemp.md")"
+ok   "  nieuw bestand blijft van socev"                      "stat_is $V/00_Systeem/pot-mkstemp.md '%U' socev"
+ok   "  oud bestand (vóór sinds) ongemoeid: masker ---"      "r 'getfacl -p $V/00_Systeem/oud-mkstemp.md' | grep -q '^mask::---'"
+ok   "  code-plek (.py) ongemoeid: masker ---"               "r 'getfacl -p $V/00_Systeem/mk-code.py' | grep -q '^mask::---'"
+ok   "  symlinkdoel buiten de vault ongemoeid (geen regel voor claude, 600)" "! r 'getfacl -p /opt/data/socev-thuis/doel-mk' | grep -q '^user:claude' && stat_is /opt/data/socev-thuis/doel-mk '%a' 600"
+ok   "  logregel van de loper met aantal hersteld"           "docker logs $C 2>&1 | grep -qE 'socev-loper: masker sinds=[0-9]+ code=0 signaal=null hersteld=1 fouten=0'"
+VOOR=$(masker_rondes)
+ok   "op masker: volle ronde gestart"                        "loper '{\"op\":\"masker\"}' | grep -q '\"masker\":\"gestart\"'"
+ok   "  klaar, oud bestand nu ook leesbaar voor 1001"        "masker_wacht $VOOR && $(a "cat $V/00_Systeem/oud-mkstemp.md")"
+ok   "  code-plek blijft dicht na de volle ronde"            "r 'getfacl -p $V/00_Systeem/mk-code.py' | grep -q '^mask::---'"
+r "rm -f $V/00_Systeem/link-mk"
 
 echo "== vangnet eigen-masker (wv2282) =="
 # 2-11-2026: een gesprek zette een bijlage met curl -o in /tmp (umask 077: modus 600) en cp naar de vault: masker ---, de

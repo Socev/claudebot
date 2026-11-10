@@ -34,6 +34,7 @@
  *                                         waarde van marker naam (standaard SOCEV_TEL_BEURT), of {pid: null} (wv785, Fable wv715 #5).
  *                                         Alleen processen die de marker dragen; begrensd (fout te-groot). De waarde is een
  *                                         hint, geen bewijs: elk 1002-proces kan elke SOCEV_-marker in zijn omgeving zetten.
+ *   masker                              → volle ronde socev-rechten.sh eigen-masker nu (wv2859; zie MASKER). {gestart|wacht}
  *   stat {pad} | map {pad} | lees {pad, vanaf?, max?}
  *                                       → alleen binnen socev-thuis/.claude/projects en socev-thuis/.codex/sessions
  *                                         (transcripts zijn 0600 en voor server.js anders onleesbaar)
@@ -51,6 +52,16 @@
  * moment, en direct daarna (ook bij een fout) staat de loper weer op 077. De loper schrijft zelf geen bestanden (alleen
  * openSync 'r' in opLees) en heeft geen worker-threads; er draait in dat venster niets anders. Gekozen boven
  * sh -c 'umask 007; exec …': dan zou elk gesprek via een shell starten met de argumenten erdoorheen (meer om fout te doen).
+ *
+ * MASKER (wv2859, 10-11-2026). umask 007 dekt niet alles: Python tempfile.mkstemp maakt altijd 0600, en na os.replace in de
+ * vault is het masker --- (10-11 05:16, vijf POT-pagina's van een smalle agent; Syncthing en de snapshot konden er niet bij).
+ * Daarom start de loper na ELKE job (close of error) één keer `bash socev-rechten.sh eigen-masker --sinds <start job - 5 s>`:
+ * eigen vaultbestanden van socev die in dat venster veranderden krijgen u:claude en masker rw terug. Dat kan alleen als socev
+ * (eigenaar), en de loper is socev. Vaste binary en argumenten, geen invoer van server.js (alleen het tijdstip uit de eigen
+ * jobadministratie), umask 007, eigen procesgroep, na 60 s SIGKILL. Hooguit één tegelijk; komt er intussen een job bij, dan
+ * daarna nog één ronde met de vroegste sinds (sinds 0 = volle ronde, via de op masker). Eén logregel per ronde (aantal
+ * hersteld, fouten), nooit paden. DEKT NIET: een kleinkind dat na het einde van zijn job nog schrijft (zie de kop van
+ * socev-rechten.sh); de volle ronde bij elke containerstart blijft het vangnet.
  */
 'use strict';
 const fs = require('fs');
@@ -58,7 +69,7 @@ const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const VERSIE = 'wv2282-1';
+const VERSIE = 'wv2859-1';
 const KIND_UMASK = 0o007;   // zie UMASK hierboven
 const VAULT = process.env.SOCEV_LOPER_VAULT || '/opt/data/AI_SecondBrain';
 const IO = process.env.SOCEV_LOPER_IO || '/opt/data/io';
@@ -66,6 +77,10 @@ const THUIS = process.env.SOCEV_LOPER_THUIS || '/opt/data/socev-thuis';
 // Vaste paden; alleen de toets (test/socev-loper.sh) zet ze anders, via de omgeving die root meegeeft.
 const BREINEN = process.env.SOCEV_LOPER_BREINEN ? JSON.parse(process.env.SOCEV_LOPER_BREINEN)
   : { claude: '/usr/local/bin/claude', codex: '/usr/local/bin/codex' };
+// Maskerronde na elke job (MASKER). Alleen de toets zet het pad anders.
+const RECHTEN = process.env.SOCEV_LOPER_RECHTEN || '/app/socev-rechten.sh';
+const MASKER_MS = 60 * 1000;
+const MASKER_MARGE_S = 5;
 const LEESBAAR = [path.join(THUIS, '.claude', 'projects'), path.join(THUIS, '.codex', 'sessions')];
 const MAX_REGEL = 8 * 1024 * 1024;        // verzoekregel (de prompt kan in args staan)
 const MAX_BUF = 64 * 1024 * 1024;         // uitvoerbuffer per stroom per job
@@ -169,16 +184,61 @@ function opStart(v, sock) {
     j.klaar = Date.now(); j.code = null; j.signaal = null;
     log('fout id=' + j.id + ' ' + (e.code || 'onbekend'));
     j.volgers.forEach(function (s) { stuur(s, { ev: 'einde', id: j.id, code: null, signaal: null, fout: e.code || 'spawn' }); });
+    maskerNaJob(j);
   });
   kind.on('close', function (code, signaal) {
     if (j.klaar) return;
     j.klaar = Date.now(); j.code = code; j.signaal = signaal;
     log('einde id=' + j.id + ' pid=' + j.pid + ' code=' + code + ' signaal=' + signaal + ' ms=' + (j.klaar - j.gestart));
     j.volgers.forEach(function (s) { stuur(s, { ev: 'einde', id: j.id, code: code, signaal: signaal }); });
+    maskerNaJob(j);
   });
   if (typeof v.invoer === 'string') { kind.stdin.end(v.invoer); }
   log('start id=' + j.id + ' pid=' + j.pid + ' brein=' + v.brein);
   return { id: j.id, pid: j.pid };
+}
+
+// MASKER: hooguit één ronde tegelijk; wat er intussen bij komt wordt één vervolgronde met de vroegste sinds (0 = vol).
+const masker = { kind: null, wacht: null, rondes: 0, laatste: null };
+function vraagMasker(sinds) {
+  sinds = Math.max(0, Math.floor(Number(sinds) || 0));
+  if (masker.kind) { masker.wacht = masker.wacht === null ? sinds : Math.min(masker.wacht, sinds); return 'wacht'; }
+  startMasker(sinds);
+  return 'gestart';
+}
+function startMasker(sinds) {
+  const args = [RECHTEN, 'eigen-masker'];
+  if (sinds > 0) args.push('--sinds', String(sinds));
+  const t0 = Date.now();
+  let uit = '', kind, klaar = false;
+  const eigenUmask = process.umask(KIND_UMASK);
+  try {
+    kind = spawn('/bin/bash', args, { cwd: '/', detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: THUIS, VAULT_DIR: VAULT, LANG: 'C.UTF-8' } });
+  } catch (e) { log('masker niet gestart ' + (e.code || '')); return; }
+  finally { process.umask(eigenUmask); }
+  masker.kind = kind;
+  function lees(c) { if (uit.length < 8192) uit += c.toString('utf8'); }
+  kind.stdout.on('data', lees);
+  kind.stderr.on('data', lees);
+  const wekker = setTimeout(function () { try { process.kill(-kind.pid, 'SIGKILL'); } catch (e) {} }, MASKER_MS);
+  function af(code, signaal) {
+    if (klaar) return; klaar = true;
+    clearTimeout(wekker);
+    masker.kind = null; masker.rondes++;
+    const m = /(\d+) zonder groepsleesrecht hersteld, fouten: (\d+)/.exec(uit);
+    masker.laatste = { sinds: sinds, code: code, signaal: signaal || null, hersteld: m ? Number(m[1]) : null,
+      fouten: m ? Number(m[2]) : null, ms: Date.now() - t0, klaar: Date.now() };
+    log('masker sinds=' + sinds + ' code=' + code + ' signaal=' + (signaal || null) + ' hersteld=' + masker.laatste.hersteld
+      + ' fouten=' + masker.laatste.fouten + ' ms=' + masker.laatste.ms);
+    if (masker.wacht !== null) { const s2 = masker.wacht; masker.wacht = null; startMasker(s2); }
+  }
+  kind.on('error', function (e) { log('masker fout ' + (e.code || '')); af(null, null); });
+  kind.on('close', af);
+}
+function maskerNaJob(j) { vraagMasker(Math.floor(j.gestart / 1000) - MASKER_MARGE_S); }
+function maskerInfo() {
+  return { loopt: !!masker.kind, wacht: masker.wacht, rondes: masker.rondes, laatste: masker.laatste };
 }
 
 function opInvoer(v) {
@@ -332,7 +392,7 @@ function opLees(v) {
 
 function behandel(v, sock) {
   switch (v.op) {
-    case 'ping': return { uid: EIGEN_UID, gid: typeof process.getgid === 'function' ? process.getgid() : -1, pid: process.pid, versie: VERSIE, lopend: lopend(), sinds: sinds };
+    case 'ping': return { uid: EIGEN_UID, gid: typeof process.getgid === 'function' ? process.getgid() : -1, pid: process.pid, versie: VERSIE, lopend: lopend(), sinds: sinds, masker: maskerInfo() };
     case 'start': return opStart(v, sock);
     case 'invoer': return opInvoer(v);
     case 'stop': return opStop(v);
@@ -340,6 +400,7 @@ function behandel(v, sock) {
     case 'lijst': { const l = []; jobs.forEach(function (j) { l.push(jobInfo(j)); }); return { jobs: l }; }
     case 'leeft': return opLeeft(v);
     case 'socket-eigenaar': return opSocketEigenaar(v);
+    case 'masker': return { masker: vraagMasker(0) };
     case 'stat': return opStat(v);
     case 'map': return opMap(v);
     case 'lees': return opLees(v);
@@ -375,6 +436,7 @@ function verbinding(sock) {
 function afsluiten(sig) {
   // Lopende gesprekken verliezen hun pijp toch; netjes stoppen in plaats van ze als wees te laten schrijven.
   jobs.forEach(function (j) { if (!j.klaar && j.pid) { try { process.kill(-j.pid, 'SIGTERM'); } catch (e) {} } });
+  if (masker.kind) { try { process.kill(-masker.kind.pid, 'SIGTERM'); } catch (e) {} }
   log('gestopt (' + sig + ')');
   process.exit(0);
 }

@@ -20,6 +20,12 @@
 #             is het vangnet, over alle eigen vaultbestanden van socev (ook zonder ACL-regel voor claude). DEKT NIET: tussen
 #             twee containerstarts (dan alleen de umask 007 van de loper; een mv van een bestand zonder ACL blijft dan tot de
 #             volgende start dicht voor claude). Code-plekken blijven buiten deze ronde, zoals overal hier.
+#   eigen-masker --sinds <epoch>  (wv2859, 10-11-2026) dezelfde ronde, alleen over wat sinds dat moment veranderde (mtime of
+#             ctime). De socev-loper start hem na ELKE job (sinds = start van de job - 5 s), zodat een bestand met masker ---
+#             niet meer tot de volgende containerstart dicht blijft. Aanleiding 10-11: een smalle agent schreef vaultpagina's
+#             met Python tempfile.mkstemp + os.replace; mkstemp maakt altijd 0600, en dan helpen umask 007 en de
+#             standaard-ACL niet (de create-modus begrenst het masker). DEKT NIET: een kleinkind dat na het einde van zijn
+#             job nog schrijft (alleen gedekt als een andere job dan net loopt), en wat socev buiten de loper schrijft.
 #
 # WAT socev MAG
 #   /opt/data               alleen doorlopen (0711), niet opsommen; alle andere entries o-rwx
@@ -57,6 +63,13 @@ acl(){ setfacl -P "$@" 2>/dev/null || FOUTEN=$((FOUTEN + 1)); }
 
 VERWACHT=claude; [ "$WAT" = "eigen-masker" ] && VERWACHT=socev
 [ "$(id -un)" = "$VERWACHT" ] || { log "STOP: draait als $(id -un), moet $VERWACHT zijn"; exit 1; }
+# eigen-masker --sinds <epoch-seconden> (wv2859): alleen wat sinds dat moment veranderde (mtime of ctime). Andere argumenten
+# of een andere opdracht met argumenten: weigeren, zodat een tikfout nooit stil een volle ronde wordt.
+SINDS=""
+if [ "$#" -gt 1 ]; then
+  if [ "$WAT" = "eigen-masker" ] && [ "$#" -eq 3 ] && [ "$2" = "--sinds" ] && [[ "$3" =~ ^[0-9]{1,12}$ ]]; then SINDS=$3
+  else log "STOP: onbekende argumenten (alleen: eigen-masker --sinds <epoch-seconden>)"; exit 2; fi
+fi
 command -v setfacl >/dev/null || { log "STOP: setfacl ontbreekt (pakket acl)"; exit 1; }
 id socev >/dev/null 2>&1 || { log "STOP: gebruiker socev ontbreekt"; exit 1; }
 
@@ -254,14 +267,18 @@ if [ "$WAT" = "eigen-masker" ]; then
   # buiten de code-plekken (idempotent; review wv2282 MOET 1: ook een bestand mét groepsleesrecht maar zonder regel voor
   # claude, bv. met mv uit een map zonder ACL). Geteld wordt wat geen groepsleesrecht had (-perm -g=r leest bij een ACL het
   # masker): normaal 0. Bestanden rw, mappen rwx: rwX zou een PDF ook x geven zodra een geërfde ACL-regel x heeft.
+  # Met --sinds (wv2859, de loper na elke job): alleen wat sinds dat moment veranderde, mtime óf ctime (os.replace en mv
+  # houden de mtime van het tijdelijke bestand, de ctime van de rename telt wel). Zelfde regels, kleiner venster.
   [ -d "$V" ] || exit 0
-  N=$(find -P "$V" -mindepth 1 ! -type l -user socev ! -perm -g=r ! \( "${CODEPLEK[@]}" \) -printf . 2>/dev/null | wc -c)
-  A=$(find -P "$V" -mindepth 1 ! -type l -user socev ! \( "${CODEPLEK[@]}" \) -printf . 2>/dev/null | wc -c)
-  find -P "$V" -mindepth 1 -type d -user socev ! \( "${CODEPLEK[@]}" \) -execdir setfacl -P -m u:claude:rwx,m::rwx {} + 2>/dev/null || FOUTEN=$((FOUTEN + 1))
-  find -P "$V" -mindepth 1 ! -type d ! -type l -user socev ! \( "${CODEPLEK[@]}" \) -execdir setfacl -P -m u:claude:rw,m::rw {} + 2>/dev/null || FOUTEN=$((FOUTEN + 1))
-  log "klaar: $A van socev nagelopen, $N zonder groepsleesrecht hersteld, fouten: $FOUTEN"
+  NIEUWER=()
+  [ -n "$SINDS" ] && NIEUWER=( \( -newermt "@$SINDS" -o -newerct "@$SINDS" \) )
+  N=$(find -P "$V" -mindepth 1 ! -type l -user socev "${NIEUWER[@]}" ! -perm -g=r ! \( "${CODEPLEK[@]}" \) -printf . 2>/dev/null | wc -c)
+  A=$(find -P "$V" -mindepth 1 ! -type l -user socev "${NIEUWER[@]}" ! \( "${CODEPLEK[@]}" \) -printf . 2>/dev/null | wc -c)
+  find -P "$V" -mindepth 1 -type d -user socev "${NIEUWER[@]}" ! \( "${CODEPLEK[@]}" \) -execdir setfacl -P -m u:claude:rwx,m::rwx {} + 2>/dev/null || FOUTEN=$((FOUTEN + 1))
+  find -P "$V" -mindepth 1 ! -type d ! -type l -user socev "${NIEUWER[@]}" ! \( "${CODEPLEK[@]}" \) -execdir setfacl -P -m u:claude:rw,m::rw {} + 2>/dev/null || FOUTEN=$((FOUTEN + 1))
+  log "klaar: $A van socev nagelopen${SINDS:+ (sinds $SINDS)}, $N zonder groepsleesrecht hersteld, fouten: $FOUTEN"
   exit 0
 fi
 
-log "onbekende opdracht (vol | na-ronde | eigen-masker)"
+log "onbekende opdracht (vol | na-ronde | eigen-masker [--sinds <epoch-seconden>])"
 exit 2
