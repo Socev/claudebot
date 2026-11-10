@@ -51,6 +51,14 @@ function migreer(db) {
   }
   db.exec(SCHEMA_BIJ);
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS bankregel_ghawa_bron ON bankregel_ghawa (bron_sleutel) WHERE bron_sleutel IS NOT NULL');
+  // wv2886: begunstigden van ingelezen cheques die de staart van de omschrijving meenamen eenmalig opnieuw knippen (alleen herkomst afschrift;
+  // de overdracht is de bron van waarheid en blijft zoals hij is)
+  const kol = new Set(db.prepare('PRAGMA table_info(bankregel_ecg)').all().map((r) => r.name));
+  if (kol.has('herkomst')) {
+    const her = db.prepare("SELECT id, omschrijving, begunstigde FROM bankregel_ecg WHERE herkomst = 'afschrift' AND soort IN ('Cheque withdrawal', 'Reversal') AND begunstigde IS NOT NULL").all();
+    const zet = db.prepare('UPDATE bankregel_ecg SET begunstigde = ? WHERE id = ?');
+    for (const r of her) { const n = chequeNaam(r.omschrijving); if (n && n !== r.begunstigde) zet.run(n, r.id); }
+  }
   db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('schema', '3');
 }
 // Wat fase 2 aan gegevens heeft (een herinvoer uit het Excel-bestand zou dat wissen).
@@ -363,6 +371,13 @@ function pdfNaarTekst(bytes) {
 }
 // Indeling volgens § 12 van de overdracht. rijen (één rekening, oud → nieuw) krijgen soort, cheque en begunstigde.
 const KOSTEN = /COMMISSION|VALUE ADDED|E-? ?BANKING|E-? ?SERVICE|CHEQUE BOOK|MONTHLY|CHARGE|\bFEE|STAMP DUTY|SMS ALERT/;
+// wv2886: begunstigde van een cheque = de naam na het eerste PAID TO/IFO, zonder herhaald "PAID TO", en vóór het chequenummer (00000042), een datum,
+// een tweede "PAID TO" of "@" ("EGM CHQ NO - 42 PAID TO YAYA O JAMMEH 00000042 2026-11-03 PAID TO SELF @ EGM ECOBANK…" → "Yaya O Jammeh")
+function chequeNaam(o) {
+  const p = /\bPAID\s+(?:TO|IFO)\s+(.+)$/.exec(String(o || '').toUpperCase()); if (!p) return null;
+  const n = p[1].replace(/^(?:PAID\s+(?:TO|IFO)\s+)+/, '').split(/\s+\d{5,}\b|\s+\d{4}-\d{2}-\d{2}\b|\s+PAID\s+(?:TO|IFO)\b|\s*@/)[0].trim();
+  return n ? titel(n) : null;
+}
 function titel(s) { return schoon(s, 60).toLowerCase().replace(/(^|[\s(/.-])([a-z])/g, (m, a, b) => a + b.toUpperCase()); }
 function deelInEcg(rijen, munt) {
   const groep = new Map();   // (datum, referentie) → grootste bedrag (de echte boeking; kleinere zijn kosten)
@@ -377,7 +392,7 @@ function deelInEcg(rijen, munt) {
     else if (/\bCHQ\b/.test(o)) {
       soort = inn ? 'Reversal' : 'Cheque withdrawal';
       const m = /\bCHQ\s*(?:N[O0](?=[\s\-.:]))?[\s\-.:]*0*(\d+)/.exec(o); if (m) cheque = m[1];   // ook "CHQ N0- 40" (nul i.p.v. O, gemeten B0174)
-      const p = /\bPAID\s+(?:TO|IFO)\s+(.+)$/.exec(o); if (p) begunstigde = titel(p[1]);
+      begunstigde = chequeNaam(o);
     } else if (/PURCH OF EUR/.test(o) || (ifo && /^ELITE CARE GROUP\b/.test(ifo[1]))) {
       if (munt === 'GMD') soort = inn ? 'Conversion in' : 'Bank charge';
       else soort = !inn && grootste(r) ? 'Conversion out' : 'Bank charge';
@@ -576,5 +591,5 @@ function rondeKaart(st, nu) {
 }
 
 module.exports = { REK_GHAWA, ECG_REK, SOORT_ONBEKEND, FONDS_STATUS, RONDE_STAPPEN, AFVINKBAAR, BIJ_TABELLEN, SCHEMA_BIJ, migreer, fase2Gegevens,
-  leesFacturen, bankBij, deelInGhawa, leerKaart, indelen, datumEco, centEco, leesEcgCsv, leesEcgPdfTekst, pdfNaarTekst, deelInEcg, ecgAfschrift,
+  leesFacturen, bankBij, deelInGhawa, chequeNaam, leerKaart, indelen, datumEco, centEco, leesEcgCsv, leesEcgPdfTekst, pdfNaarTekst, deelInEcg, ecgAfschrift,
   koppelStromen, fondsZet, rondeZet, rondeKaart, maandVan, dagen, ibanUit };
