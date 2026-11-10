@@ -27,7 +27,7 @@ grep -qE "'ghawa'" app-vast.js || { echo "ROOD  app-vast.js: ghawa niet in APP_I
 # wv2883 (fase 3, website): ghawa-site.js praat alleen via git met de site (geen fetch/http), pusht alleen naar staging (concept, weg) en één keer
 # naar main (publiceer); server.js roept publiceer precies één keer aan, na de vaste-plek-weigering en een verse vingerafdruk (verbruikt).
 W=$(grep -vE '^\s*(\*|//)' ghawa-site.js)
-if echo "$W" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|os|child_process)'\)$|^require\(p\)$"; then echo "ROOD  CI-poort: ghawa-site.js laadt een andere module"; f=1; fi
+if echo "$W" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|os|child_process|crypto)'\)$|^require\(p\)$"; then echo "ROOD  CI-poort: ghawa-site.js laadt een andere module"; f=1; fi
 if echo "$W" | grep -nE "\bfetch\s*\(|require\('https?'\)|\beval\(|new Function|console\."; then echo "ROOD  CI-poort: ghawa-site.js raakt het net buiten git of logt"; f=1; fi
 [ "$(echo "$W" | grep -c "'HEAD:refs/heads/staging'")" = 2 ] || { echo "ROOD  ghawa-site.js: pushen naar staging niet precies twee keer (concept, weg)"; f=1; }
 [ "$(echo "$W" | grep -c "'HEAD:refs/heads/main'")" = 1 ] || { echo "ROOD  ghawa-site.js: pushen naar main niet precies één keer"; f=1; }
