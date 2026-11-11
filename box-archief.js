@@ -74,7 +74,8 @@ function boxRij(L, g) {
   const m = /^## \[[^\]]*\] (\d{4})-(\d{2})-(\d{2})/.exec(g.kop);
   const r = { s: g.s, e: g.e, kop: g.kop, rij: !!m, jaar: m ? +m[1] : null, kopdatum: m ? iso(+m[1], +m[2], +m[3]) : null, cut: g.e, stj: null, woord: null, datum: null };
   for (let j = g.s + 1; j < g.e; j++) if (L[j].startsWith('**Formaat van een rij')) { r.cut = j; break; }
-  for (let j = g.s + 1; j < r.cut; j++) if (L[j].startsWith('- status:')) { r.stj = j; break; }
+  let fence = false;   // review wv2902 MOET 1: een voorbeeld-statusregel in een ```-blok telt niet
+  for (let j = g.s + 1; j < r.cut; j++) { if (/^\s*```/.test(L[j])) fence = !fence; else if (!fence && L[j].startsWith('- status:')) { r.stj = j; break; } }
   if (!r.rij || r.stj === null) return r;
   const s = L[r.stj].slice('- status:'.length).trim();
   const w = BOX_SLOT.exec(s);
@@ -117,7 +118,9 @@ function boxNieuw(tekst, vandaag, grens, bewaard, maanden) {
     const b = L.slice(r.s, r.e);
     if (r.woord && !r.datum && r.stj !== null) {
       const i = r.stj - r.s;
-      const n = b[i].replace(new RegExp('^(- status:\\s*\\**' + r.woord + ')'), '$1 ' + dm(vandaag));
+      // review wv2902 MOET 2: valt vandaag in een ander jaar dan de rijkop, dan het jaar erbij (d-m-jjjj), anders leest de parser rijkop-jaar
+      const stempel = dm(vandaag) + (r.jaar && String(r.jaar) !== vandaag.slice(0, 4) ? '-' + vandaag.slice(0, 4) : '');
+      const n = b[i].replace(new RegExp('^(- status:\\s*\\**' + r.woord + ')'), '$1 ' + stempel);
       if (n !== b[i]) { b[i] = n; gestempeld++; }
     }
     return b;

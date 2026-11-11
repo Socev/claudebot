@@ -36,6 +36,8 @@ function vault(naam) {
     '## [direct|week|log] JJJJ-MM-DD HH:MM — kern in één regel', '- status: open | afgehandeld <datum>', '```', '', '`log` = alleen vastleggen.', '',
     '## [log] 2026-10-14 10:00 — status later in de rij #i', '- van: x', '- status: afgehandeld 15-10', '',
     '## [week] 2026-10-01 10:00 — open oud #j', '- status: open — wacht', '',
+    '## [log] 2025-10-05 10:00 — vorig jaar zonder datum #m', '- status: afgehandeld — ooit', '',
+    '## [week] 2026-10-03 10:00 — voorbeeld in codeblok #n', '```', '- status: afgehandeld 1-10', '```', '- status: open', '',
     '## Archief', 'Gearchiveerd: [[00_Systeem/Meldingen/Archief/machinekamer-2026-10|oktober 2026]] · [[00_Systeem/Meldingen/Archief/machinekamer-archief-t-m-2026-10-17|alles tot en met 17-10-2026]]. Nieuwe rijen horen bovenaan.',
     '', '## [log] 2026-11-10 23:00 — onder archief open #k', '- status: open', '', '## [log] 2026-10-10 23:00 — onder archief dicht #l', '- status: afgehandeld 12-10', ''].join('\n');
   fs.writeFileSync(path.join(v, '00_Systeem', 'Meldingen', 'machinekamer.md'), box);
@@ -70,7 +72,7 @@ function sha(v) { const h = crypto.createHash('sha256'); (function loop(d) { for
   const box = lees(v, BOX), a10 = lees(v, AR + 'machinekamer-2026-10.md');
   toets('ronde ok', r.ok === true && !r.al_gedaan, r);
   // A
-  const blijft = ['#a', '#b', '#c', '#f', '#j', '#k'], weg = ['#d', '#e', '#h', '#i', '#l', '#g'];
+  const blijft = ['#a', '#b', '#c', '#f', '#j', '#k', '#m', '#n'], weg = ['#d', '#e', '#h', '#i', '#l', '#g'];
   toets('A: open, bezig, recent dicht en datumloos blijven in de box', blijft.every(k => box.includes(k)), blijft.filter(k => !box.includes(k)));
   toets('A: oude afgesloten rijen weg uit de box', weg.every(k => !box.includes('— ' + k.slice(1) + ' ') && !new RegExp('#' + k.slice(1) + '$', 'm').test(box)), weg.filter(k => new RegExp(k + '$', 'm').test(box)));
   toets('A: oktober-rijen letterlijk in machinekamer-2026-10, direct onder de inleidende regel, nieuwste bovenaan',
@@ -78,11 +80,13 @@ function sha(v) { const h = crypto.createHash('sha256'); (function loop(d) { for
     a10.indexOf('#d') < a10.indexOf('#e') && a10.indexOf('#e') < a10.indexOf('#h') && a10.indexOf('#l') < a10.indexOf('al gearchiveerd') &&
     /nieuwste bovenaan\.\n\n## \[log\] 2026-10-20 10:00 — oud dicht #d/.test(a10) && /^updated: 2026-11-11$/m.test(a10), a10);
   toets('A: niets in machinekamer-archief-t-m-*', lees(v, AR + 'machinekamer-archief-t-m-2026-10-17.md') === '---\ntype: meldingenarchief\n---\n\nOngewijzigd overgenomen uit de box.\n');
-  toets('A: telling: 12 rijkoppen voor = 6 na + 6 archief', r.detail.box.rijen_voor === 12 && r.detail.box.rijen_na === 6 && r.detail.box.archief === 6, r.detail.box);
+  toets('A: telling: 14 rijkoppen voor = 8 na + 6 archief', r.detail.box.rijen_voor === 14 && r.detail.box.rijen_na === 8 && r.detail.box.archief === 6, r.detail.box);
   // B
   toets('B: december-rij die 2-1 sloot = 2026-01-02 → archief 2026-01 (nieuw bestand met kop en inleiding)',
     fs.existsSync(path.join(v, AR, 'machinekamer-2026-01.md')) && /type: meldingenarchief[\s\S]*# Machinekamer-box — archief 2026-01[\s\S]*Ongewijzigd overgenomen[^\n]*\n\n## \[log\] 2025-12-30 10:00 — jaarwissel #g/.test(lees(v, AR + 'machinekamer-2026-01.md')));
   toets('B: datumloos "klaar" krijgt de datum van vandaag en blijft', box.includes('- status: klaar 11-11 — gebouwd'), box.match(/.*#f\n.*/));
+  toets('B: datumloze rij uit 2025 krijgt d-m-jjjj (review MOET 2)', box.includes('- status: afgehandeld 11-11-2026 — ooit'), box.match(/.*#m\n.*/));
+  toets('C: statusregel in een codeblok telt niet; open rij #n blijft (review MOET 1)', box.includes('#n\n```\n- status: afgehandeld 1-10\n```\n- status: open'));
   toets('B: "bezig — afgehandeld 1-11" telt niet als afgesloten', box.includes('- status: bezig — afgehandeld 1-11 staat later'));
   // C
   toets('C: formaatblok en codeblok blijven in de box, rij #h ervoor weg', box.includes('**Formaat van een rij:**\n\n```\n\n## [direct|week|log] JJJJ-MM-DD HH:MM — kern in één regel') && box.includes('`log` = alleen vastleggen.') && !box.includes('- regel h'));
@@ -108,7 +112,7 @@ function sha(v) { const h = crypto.createHash('sha256'); (function loop(d) { for
   const r3 = await B.ronde({ vault: v, VV, vandaag: '2026-11-11', staatMap: st, forceer: true, kaarten: async () => kaarten });
   toets('F: geforceerde tweede ronde verandert niets (byte-gelijk)', r3.ok && r3.detail.box.archief === 0 && r3.detail.register.archief === 0 && sha(v) === s1, r3.detail);
   const r4 = await B.ronde({ vault: v, VV, vandaag: '2026-11-19', staatMap: st, kaarten: async () => kaarten });
-  toets('F: een week later weer aan de beurt (datumloze #f van 11-11 nu > 7 d → archief 2026-11)', r4.ok && !r4.al_gedaan && fs.existsSync(path.join(v, AR, 'machinekamer-2026-11.md')) && !lees(v, BOX).includes('#f'), r4.detail);
+  toets('F: een week later weer aan de beurt (datumloze #f en #m van 11-11 nu > 7 d → archief 2026-11)', r4.ok && !r4.al_gedaan && fs.existsSync(path.join(v, AR, 'machinekamer-2026-11.md')) && !lees(v, BOX).includes('#f') && !lees(v, BOX).includes('#m') && lees(v, BOX).includes('#n'), r4.detail);
   // E2: kaarten niet leesbaar
   const v2 = vault('b'); const reg2 = lees(v2, REG);
   const r5 = await B.ronde({ vault: v2, VV, vandaag: '2026-11-11', staatMap: path.join(W, 'staat-b'), kaarten: async () => { throw new Error('rpc stuk'); } });
