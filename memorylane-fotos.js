@@ -270,6 +270,13 @@ function maak(o) {
     }
     return false;
   }
+  // wv2938: is dit id NU een video in een gekoppeld album (en, met mag, van een herinnering die mag)? Zelfde versheid als foto().
+  async function isVideo(id, magHid) {
+    if (!IM.UUID_RE.test(String(id))) return false;
+    if (!(await toegestaan(id, magHid))) return false;
+    for (const [hid, c] of cache) if ((!magHid || magHid(hid)) && c.fotos.some((f) => f.id === id && f.beeld === false)) return true;
+    return false;
+  }
   async function foto(id, maat, magHid) {
     if (!IM.UUID_RE.test(String(id))) return { status: 404, body: { ok: false, fout: 'onbekend' } };
     let mag;
@@ -380,7 +387,7 @@ function maak(o) {
     cache.delete(van); cache.delete(naar);
     return true;
   }
-  return { sync, kort, spoor, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, verhuis, terugVerhuis, _db: db, _cache: cache };
+  return { sync, kort, spoor, fotos, foto, isVideo, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, verhuis, terugVerhuis, _db: db, _cache: cache };
 }
 
 module.exports = { maak, code, albumNaam, socevsNaam, omschrijving, spoorUit, VOORVOEGSEL, MERK, MAX_DEEL };
