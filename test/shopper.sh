@@ -2,7 +2,7 @@
 # Toetst OVIS Shopper S3 (wv2264, 2-11-2026; favorieten wv2267 § 6): shopper.js (alleen type: shopper-zoektocht direct in de vaste Shopper-mappen, entiteit uit de map,
 # geen symlink volgen, id = hash van het pad en nooit een pad uit de vraag, koop-link alleen https, totaal/advies uit de opties) en het
 # server.js-blok (routes, audit zonder wens, Niet meer nodig = de enige schrijfactie, gekocht niet via de App, /health alleen aantallen + tijdstip,
-# uitrol-lijst; § 12 Snel vergelijken wv2934 met nep-zoekhulp en nep-winkels; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase; § 8 de knop Gekocht en Toch niet gekocht, wv2275). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
+# uitrol-lijst; § 12 Snel vergelijken wv2934 met nep-zoekhulp en nep-winkels; § 13 Winkels, categorieën, verzendtabel en winkelscore wv2935; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase; § 8 de knop Gekocht en Toch niet gekocht, wv2275). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
 if grep -nE "console\.|eval\(" shopper.js; then echo "ROOD  shopper.js logt naar de console of gebruikt eval"; exit 1; fi
@@ -699,9 +699,9 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     const id = r.body.vergelijk.id;
     let u = await wacht(id);
     const zv = zoeken.slice(-2);
-    toets('12d twee zoekvragen tegelijk: wens + eisen, en de kale wens; afnemer shopper-snel; domeinen = favorieten aan zonder vergelijker + bol.com + amazon.nl', zoeken.length === 2
+    toets('12d twee zoekvragen tegelijk: wens + eisen, en de kale wens; afnemer shopper-snel; domeinen = bol.com + amazon.nl eerst (wv2935), dan favorieten aan zonder vergelijker', zoeken.length === 2
       && /Eisen van de koper: 180 cm hoog/.test(zv[0].vraag) && !/Eisen/.test(zv[1].vraag) && /Aantal: 2/.test(zv[1].vraag) && zv.every((z) => z.afnemer === 'shopper-snel')
-      && JSON.stringify(zv[0].domeinen) === JSON.stringify(['proefwinkel.nl', 'bol.com', 'amazon.nl']), zv);
+      && JSON.stringify(zv[0].domeinen) === JSON.stringify(['bol.com', 'amazon.nl', 'proefwinkel.nl']), zv);
     const op = (n) => u.opties.find((x) => x.url === K(n).url), ng = (n) => u.niet_gelezen.find((x) => x.url === K(n).url);
     toets('12e alleen gelezen waarden: prijs van de pagina (niet het zoekfragment € 1,00), totaal = aantal × prijs + verzending', u.stand === 'klaar' && op(1).prijs_eur === 48.99 && op(1).totaal_eur === 97.98 && op(1).koop_aantal === 2 && op(1).btw === 'incl', u);
     toets('12f set van 2 bij aantal 2 = één keer kopen (€ 40,99); goedkoopste bovenaan', op(2).koop_eenheid === 'set van 2' && op(2).koop_aantal === 1 && op(2).totaal_eur === 40.99 && u.opties[0].url === K(2).url, u.opties);
@@ -836,10 +836,136 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     // server.js en uitrol
     const src = fs.readFileSync('server.js', 'utf8'), s0 = src.indexOf('const shopper = (function () {'), s1 = src.indexOf('// ── einde OVIS Shopper ──'), bl = src.slice(s0, s1);
     toets('12y server.js: POST vergelijk 10/uur, GET stand stil in het app-log, bewaar via shopper_status, staat shopper-vergelijk.json, zoek via openaiHulp.zoek; reden zonder wens',
-      /route === 'POST \/app\/shopper\/vergelijk'/.test(bl) && /appTeller\('shopper_vergelijk', 10, 3600000\)/.test(bl) && /soort === 'vergelijk-stand'\) && u\.status === 200\) res\._app\.stil = true/.test(bl)
+      /route === 'POST \/app\/shopper\/vergelijk'/.test(bl) && /appTeller\('shopper_vergelijk', 10, 3600000\)/.test(bl) && /soort === 'vergelijk-stand'[^)]*\) && u\.status === 200\) res\._app\.stil = true/.test(bl)
       && /shopper-vergelijk\.json/.test(bl) && /openaiHulp\.zoek\(z\)/.test(bl) && /res\._app\.reden = 'shopper ' \+ soort \+ \(m \? ' ' \+ \(\/\^\[0-9a-f\]\{12\}\$\/\.test\(m\[1\]\)/.test(bl)
       && /RELEASE_OPTIONEEL="[^"]*\bshopper-vergelijk\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
     toets('12z module logt niets en kent geen sleutel', !/console\.|process\.env|eval\(/.test(fs.readFileSync('shopper-vergelijk.js', 'utf8')));
+  }
+
+  // ── 13. wv2935: Winkels (shopper-winkels.js), scoreleesscript (winkel-score.py), categorie en verzendtabel in Snel vergelijken ──
+  {
+    const WM = require('./shopper-winkels.js'), SV = require('./shopper-vergelijk.js'), cp = require('child_process');
+    const PP = require('./intake/patientpoort.js'), POORT = (t) => PP.beoordeel({ teksten: t }, { eigen: PP.maakEigen(null, {}) });
+    const F = path.join(W, 'w13'); fs.mkdirSync(F, { recursive: true });
+    const ontleed = (soort, html, dom) => { fs.writeFileSync(path.join(F, 'p.html'), html); return JSON.parse(cp.execFileSync('python3', ['-I', 'winkel-score.py', '--ontleed', soort, path.join(F, 'p.html')].concat(dom ? [dom] : []), { encoding: 'utf8' })); };
+    const KK = (n, c) => '<html><body><div>Gemiddelde beoordeling</div><p>Gebaseerd op ' + n + ' ervaringen met Proefwinkel.nl</p><b>' + c + '</b><script type="application/ld+json">{"@type":"LocalBusiness","aggregateRating":{"ratingValue":1,"reviewCount":99999}}</script></body></html>';
+    let x = ontleed('kieskeurig', KK(744, '8.9'));
+    toets('13a Kieskeurig: zichtbaar cijfer en aantal ervaringen (niet het grotere JSON-LD-aantal)', x.cijfer === 8.9 && x.aantal === 744, x);
+    x = ontleed('kieskeurig', KK(0, '0'));
+    const x2 = ontleed('kieskeurig', '<html>niets</html>');
+    toets('13b Kieskeurig: 0 ervaringen = geen cijfer; geen regel = fout', x.cijfer === null && x.aantal === 0 && /geen beoordeling/.test(x2.fout), [x, x2]);
+    x = ontleed('kiyoh', '<script type="application/ld+json">{"@graph":[{"@type":"Product","aggregateRating":{"ratingValue":2,"reviewCount":3,"bestRating":10}},{"@type":"Organization","aggregateRating":{"ratingValue":8.8,"reviewCount":107,"bestRating":10}}]}</script>');
+    const x3 = ontleed('kiyoh', '<script type="application/ld+json">{"@type":"Organization","aggregateRating":{"ratingValue":4.5,"reviewCount":10,"bestRating":5}}</script>');
+    toets('13c Kiyoh: cijfer van het bedrijf (niet van een product); andere schaal dan 10 = fout', x.cijfer === 8.8 && x.aantal === 107 && x3.fout, [x, x3]);
+    const TW = (site) => '<html><p>Proefwinkel werd voor het eerst gecertificeerd</p><p>Website URL http://www.' + site + '</p><p>Lid sinds 31 mei 2009</p></html>';
+    x = ontleed('thuiswinkel', TW('proefwinkel.nl'), 'proefwinkel.nl');
+    const x4 = ontleed('thuiswinkel', TW('anderewinkel.nl'), 'proefwinkel.nl');
+    toets('13d Thuiswinkel: lid sinds als datum, alleen als de website van de winkel is', x.sinds === '2009-05-31' && /andere website/.test(x4.fout), [x, x4]);
+    const uit = JSON.parse(cp.execFileSync('python3', ['-I', 'winkel-score.py'], { input: JSON.stringify({ winkels: [{ domein: 'proef.nl', kieskeurig: '../x', kiyoh: 'https://evil.example/reviews/1/x/', thuiswinkel: 'A B' }, { domein: 'http://kapot' }] }), encoding: 'utf8', timeout: 20000 }));
+    toets('13e scoreleesscript: ongeldige slug/kiyoh-adres/domein = geen vraag (alleen de drie vaste hosts)', uit.winkels['proef.nl'] && uit.winkels['proef.nl'].kieskeurig === null && uit.winkels['proef.nl'].kiyoh === null
+      && uit.winkels['proef.nl'].thuiswinkel === null && Object.keys(uit.winkels).length === 1 && /^\d{4}-\d{2}-\d{2}T/.test(uit.op), uit);
+    const pyB = fs.readFileSync('winkel-score.py', 'utf8');
+    toets('13f scoreleesscript: haal() alleen https op de drie vaste hosts, doorsturen alleen binnen dezelfde host, eigen User-Agent, geen Trustpilot',
+      /u\.hostname not in HOSTS\.values\(\)/.test(pyB) && /doorsturen naar een andere host geweigerd/.test(pyB) && /Socev-Shopper\/1\.0/.test(pyB) && !/trustpilot\.com/i.test(pyB.replace(/^\s*(#|""").*$/gm, '').replace(/"""[\s\S]*?"""/, '')));
+    const FAV = ['---', 'type: shopper-favorieten', 'winkels:',
+      '  - {domein: bol.com, naam: "bol", aan: true, categorie: "alles", lezen: script, kieskeurig: "bol.", thuiswinkel: bol}',
+      '  - {domein: amazon.nl, naam: "Amazon.nl", aan: true, categorie: alles, lezen: script, kieskeurig: amazon}',
+      '  - {domein: vosproef.nl, naam: "Vosproef", aan: true, categorie: "medisch", lezen: script, verzend_eur: 6.50, drempel_eur: 85, boven_drempel_eur: 0, verzend_gemeten: "2026-11-09", kiyoh: "https://www.kiyoh.com/reviews/1043906/vosproef_nl/"}',
+      '  - {domein: inktproef.nl, naam: "Inktproef", aan: true, categorie: "kantoor huis onzin", lezen: script, verzend_eur: 5.95, drempel_eur: 50.01, boven_drempel_eur: 4.95, verzend_gemeten: "2026-11-02", kieskeurig: "inktproef.nl"}',
+      '  - {domein: vakproef.nl, naam: "Vakproef", aan: false, categorie: medisch, lezen: browser, verzend_eur: "veel", kiyoh: "https://evil.example/x"}',
+      '  - {domein: gammaproef.nl, naam: "Gammaproef", aan: false, categorie: bouw, lezen: niet}',
+      '  - {domein: bouwproef.nl, naam: "Bouwproef", aan: true, categorie: bouw, lezen: script, verzend_tekst: "afhalen gratis"}',
+      '  - {domein: "https://www.vosproef.nl/dubbel", naam: "Dubbel", aan: true}',
+      '---', ''].join('\n');
+    const ws = WM.winkelsVan(FAV);
+    const vos = ws.find((w) => w.domein === 'vosproef.nl'), ink = ws.find((w) => w.domein === 'inktproef.nl'), vak = ws.find((w) => w.domein === 'vakproef.nl');
+    toets('13g winkelsVan: categorieën (onbekende weg), lezen, verzendtabel, bronnen; ongeldig veld valt weg; dubbel domein telt één keer',
+      ws.length === 7 && vos.categorie.join() === 'medisch' && ink.categorie.join() === 'kantoor,huis' && vos.verzend.eur === 6.5 && vos.verzend.gemeten === '2026-11-09'
+      && vak.verzend === null && vak.bronnen.kiyoh === null && vak.lezen === 'browser' && vos.bronnen.kiyoh && WM.winkelsVan(FAV.replace('shopper-favorieten', 'iets')).length === 0, ws);
+    toets('13h verzendUitTabel: onder de drempel het bedrag, vanaf de drempel het andere bedrag (gratis of lager), zonder tabel null',
+      WM.verzendUitTabel(vos, 40).eur === 6.5 && WM.verzendUitTabel(vos, 85).eur === 0 && WM.verzendUitTabel(ink, 50).eur === 5.95 && WM.verzendUitTabel(ink, 60).eur === 4.95
+      && WM.verzendUitTabel(vos, 40).gemeten === '2026-11-09' && WM.verzendUitTabel(ws.find((w) => w.domein === 'bouwproef.nl'), 40) === null && WM.verzendUitTabel(vos, 0) === null);
+    toets('13i domeinenVoor: per categorie alleen wat aan staat en te lezen is (plus "alles"); zonder categorie alle leesbare die aan staan',
+      WM.domeinenVoor(ws, 'medisch').join() === 'bol.com,amazon.nl,vosproef.nl' && WM.domeinenVoor(ws, 'bouw').join() === 'bol.com,amazon.nl,bouwproef.nl'
+      && WM.domeinenVoor(ws, null).join() === 'bol.com,amazon.nl,vosproef.nl,inktproef.nl,bouwproef.nl', [WM.domeinenVoor(ws, 'medisch'), WM.domeinenVoor(ws, null)]);
+    const SC = { op: '2026-11-11T16:00:00Z', winkels: { 'bol.com': { kieskeurig: { cijfer: 8.9, aantal: 744 }, kiyoh: null, thuiswinkel: { sinds: '2009-07-31' } },
+      'amazon.nl': { kieskeurig: { cijfer: 1, aantal: 1 } }, 'vosproef.nl': { kiyoh: { cijfer: 8.8, aantal: 107 } }, 'inktproef.nl': { kieskeurig: { cijfer: 3.9, aantal: 11 } } } };
+    const bolP = WM.scoreBij('https://www.bol.com/nl/nl/p/x/9300000001/', 'Raamdecoratie.com', ws, SC), bolE = WM.scoreBij('https://www.bol.com/nl/nl/p/x/9300000001/', 'bol', ws, SC);
+    const bolO = WM.scoreBij('https://www.bol.com/nl/nl/p/x/9300000001/', null, ws, SC), amz = WM.scoreBij('https://www.amazon.nl/dp/B000000001', 'Amazon', ws, SC);
+    toets('13j score bij de echte verkoper: bol-partner = partner (geen bol-score), bol zelf = bol-score + Thuiswinkel, verkoper onbekend = geen score',
+      bolP.soort === 'partner' && bolP.verkoper === 'Raamdecoratie.com' && !bolP.bronnen && bolE.soort === 'score' && bolE.bronnen[0].cijfer === 8.9 && bolE.thuiswinkel_sinds === '2009-07-31'
+      && bolO.soort === 'onbekend_verkoper', [bolP, bolE, bolO]);
+    const vs = WM.scoreBij('https://shop.vosproef.nl/p/1', null, ws, SC), onb = WM.scoreBij('https://www.nergens.nl/p', null, ws, SC), gb = WM.scoreBij('https://bouwproef.nl/p', null, ws, SC);
+    toets('13k Kieskeurig onder 10 ervaringen: geen cijfer (wel aantal, "weinig"); vakwinkel op subdomein = Kiyoh; winkel zonder score = geen; onbekende winkel = null',
+      amz.soort === 'score' && amz.bronnen[0].cijfer === null && amz.bronnen[0].weinig === true && vs.bronnen[0].bron === 'Kiyoh' && vs.bronnen[0].cijfer === 8.8
+      && gb.soort === 'geen' && onb === null && WM.scoreBij('https://www.inktproef.nl/p', null, ws, SC).bronnen[0].cijfer === 3.9, [amz, vs, gb]);
+    const ak = WM.aankopen([{ winkel: 'Vosproef', url: null, datum: '2026-11-09' }, { winkel: 'Iets', url: 'https://www.vosproef.nl/p/2', datum: '2026-11-01' },
+      { winkel: 'Gammaproef', datum: '2026-11-02' }, { winkel: 'eBay.co.uk (proefverkoper)', datum: '2026-11-11' }, { winkel: null }], ws);
+    toets('13l eigen aankopen: koppeling op link of winkelnaam, aantal en laatste datum; de rest als "elders" (zonder verkopersnaam)',
+      ak.per['vosproef.nl'].aantal === 2 && ak.per['vosproef.nl'].laatst === '2026-11-09' && ak.per['gammaproef.nl'].aantal === 1 && ak.elders.length === 1 && ak.elders[0].naam === 'eBay.co.uk', ak);
+    // maak(): leesronde alleen bij openen en ouder dan 30 dagen, hooguit eens per 6 uur; bewaard 0600
+    let klok13 = new Date('2026-11-11T16:00:00Z'), lezerRonden = [];
+    const SP = path.join(F, 'shopper-winkelscore.json');
+    const wm = WM.maak({ scorePad: SP, nu: () => klok13, scoreLezer: async (inv) => { lezerRonden.push(inv); return SC; } });
+    let o = wm.overzicht(FAV, [{ winkel: 'Vosproef', datum: '2026-11-09' }]).body;
+    await new Promise((r) => setTimeout(r, 20));
+    const o2 = wm.overzicht(FAV, []).body;
+    toets('13m eerste keer openen zonder scores: stand leest, één leesronde met alleen winkels met een bron; daarna bewaard (0600) en zichtbaar',
+      o.score_stand === 'leest' && lezerRonden.length === 1 && lezerRonden[0].winkels.map((w) => w.domein).join() === 'bol.com,amazon.nl,vosproef.nl,inktproef.nl'
+      && (fs.statSync(SP).mode & 0o777) === 0o600 && o2.score_stand === 'klaar' && o2.winkels.find((w) => w.domein === 'vosproef.nl').score.bronnen[0].cijfer === 8.8, [o.score_stand, lezerRonden.length, o2.score_stand]);
+    const vo = o.winkels.find((w) => w.domein === 'vosproef.nl'), go = o.winkels.find((w) => w.domein === 'gammaproef.nl');
+    toets('13n overzicht: hier kocht je eerder (aantal, laatst), onbekende winkel = geen aankoop en geen score; categorieën in de vaste volgorde',
+      vo.gekocht.aantal === 1 && vo.onbekend === false && go.onbekend === true && o.categorieen.map((c) => c.id).join() === 'medisch,bouw,huis,elektronica,kantoor', [vo, go]);
+    klok13 = new Date(klok13.getTime() + 31 * 86400000);
+    wm.overzicht(FAV, []); await new Promise((r) => setTimeout(r, 20));
+    const n1 = lezerRonden.length;
+    fs.writeFileSync(SP, JSON.stringify({ op: '2020-01-01T00:00:00Z', winkels: {} }));
+    klok13 = new Date(klok13.getTime() + 3600000); wm.overzicht(FAV, []);
+    klok13 = new Date(klok13.getTime() + 6 * 3600000); wm.overzicht(FAV, []); await new Promise((r) => setTimeout(r, 20));
+    toets('13o na 30 dagen opnieuw lezen; mislukt of oud: hooguit eens per 6 uur een nieuwe poging', n1 === 2 && lezerRonden.length === 3, [n1, lezerRonden.length]);
+    const kap = WM.maak({ scorePad: SP, nu: () => klok13, scoreLezer: async () => ({ kapot: true }) });
+    fs.writeFileSync(SP, JSON.stringify(SC));
+    klok13 = new Date('2027-06-01T00:00:00Z'); kap.overzicht(FAV, []); await new Promise((r) => setTimeout(r, 20));
+    toets('13p ongeldige uitkomst van het script: de oude scores blijven staan', JSON.parse(fs.readFileSync(SP, 'utf8')).op === SC.op);
+    // shopper.js: route winkels en score per optie in een zoektocht
+    const V13 = path.join(F, 'vault'), VT = path.join(V13, '10_Zakelijk/Tolgaarde/Shopper');
+    fs.mkdirSync(VT, { recursive: true }); fs.mkdirSync(path.join(V13, '00_Systeem'), { recursive: true });
+    fs.writeFileSync(path.join(V13, '00_Systeem/Shopper - favoriete winkels.md'), FAV);
+    fs.writeFileSync(path.join(VT, 'Shopper - 2026-11-09 - Proefweegschaal.md'), ['---', 'type: shopper-zoektocht', 'wens: "Proefweegschaal"', 'status: gekocht',
+      'gekocht: {optie: o2, winkel: "Vosproef", bedrag_eur: 99.9, datum: "2026-11-09", opmerking: null, via: app}', 'gezocht: 2026-11-09T09:00+01:00', 'aantal: 1', 'opties:',
+      '  - {id: o1, winkel: "bol", verkoper: "Proefpartner", product: "Weegschaal", koop_aantal: 1, prijs_eur: 50, verzending_eur: 0, totaal_eur: 50, url: "https://www.bol.com/nl/nl/p/w/9300000002/"}',
+      '  - {id: o2, winkel: "Vosproef", verkoper: "Vosproef", product: "Weegschaal", koop_aantal: 1, prijs_eur: 93.4, verzending_eur: 6.5, totaal_eur: 99.9, url: "https://www.vosproef.nl/p/w"}',
+      'advies: o2', '---', ''].join('\n'));
+    fs.writeFileSync(SP, JSON.stringify(SC));
+    const m13 = S.maak({ vault: V13, vv: VV, scorePad: SP, scoreLezer: null });
+    const wr = m13.winkels(), zid = m13.lijst().body.zoektochten[0].id, zd = m13.zoektocht(zid).body.zoektocht;
+    toets('13q shopper.js winkels(): Gekocht in Shopper telt bij de winkel van de gekozen optie; zoektocht: score per optie bij de echte verkoper',
+      wr.status === 200 && wr.body.winkels.find((w) => w.domein === 'vosproef.nl').gekocht.aantal === 1 && zd.opties[0].winkelscore.soort === 'partner'
+      && zd.opties[1].winkelscore.bronnen[0].cijfer === 8.8 && zd.advies_controle, [wr.body.winkels && wr.body.winkels.map((w) => w.gekocht), zd.opties.map((q) => q.winkelscore)]);
+    toets('13r lijst ongewijzigd: geen winkelscore in de lijst, wel in het detail', m13.lijst().body.zoektochten[0].winkelscore === undefined);
+    // Snel vergelijken met categorie en verzendtabel
+    const zv = [];
+    const vg = SV.maak({ vault: V13, vv: VV, poort: POORT, staatPad: path.join(F, 'vg.json'), opruimTik: false,
+      zoek: async (z) => { zv.push(z); return { ok: true, usd: 0.01, kandidaten: [{ winkel: 'Vosproef', product: 'Proefweegschaal digitaal', url: 'https://www.vosproef.nl/p/weeg' }] }; },
+      lezer: async (url) => ({ url, winkel: 'anders', product: 'Proefweegschaal digitaal', prijs_eur: 40, verzending_eur: null, levertijd: '3 - 5 werkdagen' }) });
+    const fout13 = vg.start({ wens: 'Proefweegschaal', categorie: 'snoep' });
+    const ok13 = vg.start({ wens: 'Proefweegschaal', categorie: 'medisch', aantal: 2 });
+    let sv = null;
+    for (let i = 0; i < 200; i++) { sv = vg.stand(ok13.body.vergelijk.id).body.vergelijk; if (sv.stand === 'klaar' || sv.stand === 'mislukt') break; await new Promise((r) => setTimeout(r, 5)); }
+    const op13 = sv.opties[0];
+    toets('13s categorie: onbekend = 400; medisch = domeinfilter bol, Amazon + de leesbare medische winkels die aan staan',
+      fout13.status === 400 && zv.length >= 1 && zv[0].domeinen.join() === 'bol.com,amazon.nl,vosproef.nl' && sv.categorie === 'medisch', [fout13, zv[0] && zv[0].domeinen]);
+    toets('13t verzending niet op de pagina: uit de gemeten tabel (bron tabel, meetdatum), totaal = 2 × 40 + 0 (vanaf € 85 gratis… 80 < 85: € 6,50)',
+      op13 && op13.verzending_eur === 6.5 && op13.verzending_bron === 'tabel' && op13.verzending_gemeten === '2026-11-09' && op13.totaal_eur === 86.5 && /verzendtabel van Vosproef/.test(op13.verzending_tekst), op13);
+    const m13b = S.maak({ vault: V13, vv: VV, scorePad: SP, vergelijk: vg });
+    const sv2 = m13b.vergelijk.stand(ok13.body.vergelijk.id).body.vergelijk;
+    toets('13u Snel vergelijken via shopper.js: score per optie; de module zelf blijft zonder score', sv2.opties[0].winkelscore.bronnen[0].bron === 'Kiyoh' && sv.opties[0].winkelscore === undefined, sv2.opties[0]);
+    const src13 = fs.readFileSync('server.js', 'utf8'), b0 = src13.indexOf('const shopper = (function () {'), b1 = src13.indexOf('// ── einde OVIS Shopper ──'), bl13 = src13.slice(b0, b1);
+    toets('13v server.js: GET /app/shopper/winkels vóór de id-route, stil in het app-log, scorePad shopper-winkelscore.json, script kaal en begrensd; uitrol-lijst',
+      bl13.indexOf("route === 'GET /app/shopper/winkels'") > 0 && bl13.indexOf("route === 'GET /app/shopper/winkels'") < bl13.indexOf("soort = 'zoektocht'") && /soort === 'winkels'\) && u\.status === 200\) res\._app\.stil = true/.test(bl13)
+      && /shopper-winkelscore\.json/.test(bl13) && /'winkel-score\.py'/.test(bl13) && /timeout: 180000/.test(bl13) && /env: \{ PATH: process\.env\.PATH \|\| '\/usr\/bin:\/bin', LANG: 'C\.UTF-8', HOME: '\/tmp' \}/.test(bl13)
+      && /RELEASE_OPTIONEEL="[^"]*\bshopper-winkels\.js winkel-score\.py\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
+    toets('13w shopper-winkels.js logt niets en kent geen sleutel', !/console\.|process\.env|eval\(/.test(fs.readFileSync('shopper-winkels.js', 'utf8')));
   }
 
   fs.rmSync(W, { recursive: true, force: true });
