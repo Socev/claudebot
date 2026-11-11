@@ -36,6 +36,7 @@
  *  - Samengevoegd (wv2732, David 8-11-2026): status 'samengevoegd' + kolom bij (de herinnering die blijft); verborgen zoals 'afgewezen' en
  *    nooit in delen, toonmodus, albumsync of vertelronde. koppel() in de tik voegt een reis of fotoalbum vanzelf bij een opname over dezelfde
  *    dagen (zie de toelichting daar); losmaken(hid) zet hem terug. Register ml_koppel (alleen ids, periode, uitkomst, vlaggen).
+ *    wv2932 (David 11-11-2026): ook een fotoalbum (los, google:…) bij een reis, als de dagen van zijn foto's binnen de reis vallen.
  * PRIVACY. Nooit tekst, titels of namen in logs, box, /health of fouten: alleen ids en aantallen.
  * VORM. Alleen fs, path, crypto en reizen.js (wv2136: de reispagina's, gedeeld met Tripper); D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
  *
@@ -584,9 +585,10 @@ function maak(o) {
   function albumKandidaat(h) {
     const p = paginaLees(h.hid), s = sam(h, p), w = wanneerInfo(h, p, s);
     const c = catVan(h);
-    // wv2468: spoor = een reis uit je foto's (zelfde keuze als fotoReizen): de sync rekent dan periode en punt uit de foto's
+    // wv2468: spoor = de sync rekent periode en punt uit de foto's. wv2932: voor elk fotoalbum zonder gevoelig-vinkje (niet alleen Reizen),
+    // want koppel() legt de fotodata naast de reizen; fotoReizen kiest zelf nog alleen Reizen.
     return { hid: h.hid, soort: h.soort, ref: h.ref, titel: titelVan(h, p, s), jaar: w.van ? String(w.van).slice(0, 4) : null, auto: h.soort === 'reis' || !!c.categorie,
-      spoor: isFotoalbum(h) && c.categorie === 'reizen' && !c.gevoeligVink };
+      spoor: isFotoalbum(h) && !c.gevoeligVink };
   }
   async function fotoSync(dwing) {
     if (!F) return null;
@@ -1587,12 +1589,13 @@ function maak(o) {
   // reis of album bij (een reis wordt pas een herinnering als hij voorbij is), schuift een periode of verandert een kandidaat, dan opnieuw
   // (review MOET 2). Hooguit elke KOPPEL_ELKE_MS. droog = alleen zeggen wat er zou gebeuren.
   const KOPPEL_MAX_DAGEN = 31, KOPPEL_ELKE_MS = 5 * 60000;
+  const KOPPEL_KLAAR = ['samengevoegd', 'losgemaakt', 'wacht'];   // niet opnieuw beoordelen (wacht = wv2932, de machinekamer houdt het paar vast)
   let koppelVorige = 0;
   function dagNr(d) { return Math.round(Date.parse(String(d) + 'T00:00:00Z') / 86400000); }
-  function koppelBox(regels) {
+  function koppelBox(regels, kop) {
     if (!o.box) return;
     const t = new Date(nu()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
-    try { o.box('\n## [log] ' + t + ' — MemoryLane: opname niet vanzelf samengevoegd (twijfel, wv2732)\n- status: open\n- van: pod:memorylane-delen\n' + regels.map((r) => '- ' + r + '\n').join('')); }
+    try { o.box('\n## [log] ' + t + ' — MemoryLane: ' + (kop || 'opname niet vanzelf samengevoegd (twijfel, wv2732)') + '\n- status: open\n- van: pod:memorylane-delen\n' + regels.map((r) => '- ' + r + '\n').join('')); }
     catch (e) { fout('ml-koppel', e); }
   }
   function koppel(droog) {
@@ -1612,7 +1615,7 @@ function maak(o) {
       const r = q.ramble.get(h.ref);
       if (!r || r.status !== 'notitie' || r.proef) continue;
       const k = q.koppel.get(h.hid);
-      if (k && (k.uitkomst === 'samengevoegd' || k.uitkomst === 'losgemaakt')) continue;
+      if (k && KOPPEL_KLAAR.indexOf(k.uitkomst) >= 0) continue;
       const p = paginaLees(h.hid), s = sam(h, p);
       if (!s || s.stand !== 'klaar' || !s.delen || !s.delen.length) continue;   // verhaal nog niet klaar: later opnieuw
       const w = wanneerInfo(h, p, s);
@@ -1624,6 +1627,8 @@ function maak(o) {
         const a = F ? F.kort(c.hid) : null;
         if (q.sVan.all(c.hid).some((x) => x.status !== 'weggegooid')) return 'kandidaat heeft eigen stukken';
         if (c.zicht_familie || c.zicht_vrienden || c.kring_familie === 1 || c.kring_shizzle === 1 || (a && a.foto_delen)) return 'kandidaat staat zichtbaar gezet';
+        const kk = q.koppel.get(c.hid);   // wv2932: een reis met een samengevoegd fotoalbum (album is van dat fotoalbum; losmaken zou het niet terugvinden)
+        if (kk && kk.uitkomst === 'samengevoegd') return 'kandidaat heeft al een samengevoegd fotoalbum';
         return '';
       };
       const periode = w.van + '/' + w.tot;
@@ -1655,7 +1660,73 @@ function maak(o) {
       }
       kands = kands.filter((x) => x.h.hid !== c.hid);
     }
+    koppelReis(droog, uit, t);
     return uit;
+  }
+  // ── wv2932 (David 11-11-2026: "Memorylane: Shizzle - Versacer Revisited = Willingen, staat er 2x") ──
+  // Een fotoalbum (los, google:…) van een weekend waarvoor ook een reispagina bestaat, stond als tweede huis naast de reis. Nu: valt de
+  // periode uit de foto's (fotospoor van de sync: ≥ 80 % van de foto's met een dag binnen een venster van ≤ 31 dagen) binnen de dagen van
+  // een voorbije reis (± 1 dag), dan gaat het fotoalbum op 'samengevoegd' met bij = de reis en krijgt de reis zijn album (alleen de koppelrij,
+  // F.verhuis; in Immich verandert niets). Richting: de reis blijft (reispagina, deelnemers, Tripper). Alleen bij één duidelijk paar: de reis
+  // heeft precies één zo'n fotoalbum en dat album past bij geen andere reis. Twijfel (2+ albums, album bij 2+ reizen, het album heeft eigen
+  // stukken, staat zichtbaar gezet of zou zichtbaar worden voor een kring of toonmodus die het album nu niet ziet, de reis heeft al foto's):
+  // niets samenvoegen; één box-rij per reisperiode. Register ml_koppel met hid = de reis, kandidaat = het fotoalbum (losmaken(album) zet het
+  // album terug; die reis koppelt daarna niet opnieuw). Uitkomst 'wacht' (machinekamer, mk-scripts/wv2932/voeg.py) = niet vanzelf.
+  function koppelReis(droog, uit, t) {
+    if (!F) return;
+    const dagIn = (d) => { const n = dagNr(d); return Number.isFinite(n) ? n : null; };
+    const reizen0 = q.hAlle.all().filter((c) => c.status === 'actief' && c.soort === 'reis').map((c) => {
+      const w = wanneerInfo(c, paginaLees(c.hid), null);
+      if (!w.van || !w.tot || w.precisie !== 'dag') return null;
+      const van = dagIn(w.van), tot = dagIn(w.tot);
+      return van !== null && tot !== null && tot >= van && tot - van < KOPPEL_MAX_DAGEN ? { h: c, van, tot, periode: w.van + '/' + w.tot } : null;
+    }).filter(Boolean);
+    let albums = q.hAlle.all().filter((c) => c.status === 'actief' && isFotoalbum(c)).map((c) => {
+      const a = F.kort(c.hid), sp = F.spoor(c.hid);
+      if (!a || a.status !== 'actief' || !(a.aantal > 0) || !sp || !sp.van || !sp.tot) return null;
+      const van = dagIn(sp.van), tot = dagIn(sp.tot);
+      return van !== null && tot !== null ? { h: c, a, van, tot } : null;
+    }).filter(Boolean);
+    const binnen = (x, r) => x.van >= r.van - 1 && x.tot <= r.tot + 1;
+    const beletsel = (x, r) => {
+      if (reizen0.filter((y) => binnen(x, y)).length > 1) return 'fotoalbum past bij meer reizen';
+      if (q.sVan.all(x.h.hid).some((s) => s.status !== 'weggegooid')) return 'fotoalbum heeft eigen stukken';
+      if (x.h.zicht_familie || x.h.zicht_vrienden || x.h.kring_familie === 1 || x.h.kring_shizzle === 1 || x.a.foto_delen) return 'fotoalbum staat zichtbaar gezet';
+      if (PKRINGEN.some((k) => magKring(r.h, k) && !magKring(x.h, k)) || (toonbaar(r.h) && !toonbaar(x.h))) return 'reis is zichtbaar waar het fotoalbum dat niet is';
+      const ra = F.kort(r.h.hid);
+      if (ra && ra.status === 'actief' && ra.aantal > 0) return 'reis heeft al foto\'s';
+      return '';
+    };
+    for (const r of reizen0) {
+      const k = q.koppel.get(r.h.hid);
+      if (k && KOPPEL_KLAAR.indexOf(k.uitkomst) >= 0) continue;
+      const raak = albums.filter((x) => binnen(x, r));
+      if (!raak.length) { if (k && k.uitkomst !== 'geen' && !droog) q.koppelUitkomst.run('geen', t, r.h.hid); continue; }
+      const sleutel = 'reis:' + r.periode + '#' + sha256(raak.map((x) => x.h.hid + '|' + x.van + '|' + x.tot + '|' + beletsel(x, r)).sort().join(';')).slice(0, 16);
+      if (k && k.sleutel === sleutel) continue;                                 // al beoordeeld met deze periode en deze albums
+      let uitkomst = raak.length === 1 ? 'samengevoegd' : 'twijfel', reden = raak.length > 1 ? raak.length + ' fotoalbums' : '';
+      if (raak.length === 1) { const b = beletsel(raak[0], r); if (b) { uitkomst = 'twijfel'; reden = b; } }
+      uit.acties.push({ reis: r.h.hid, fotoalbums: raak.map((x) => x.h.hid), uitkomst, reden });
+      uit[uitkomst]++;
+      if (droog) continue;
+      if (uitkomst !== 'samengevoegd') {
+        q.koppelZet.run(r.h.hid, sleutel, uitkomst, raak.length === 1 ? raak[0].h.hid : null, 0, 0, t);
+        if (!(k && k.uitkomst === 'twijfel' && String(k.sleutel).split('#')[0] === sleutel.split('#')[0]))   // één box-rij per reisperiode
+          koppelBox(['reis ' + r.h.hid + ', fotoalbums ' + raak.map((x) => x.h.hid).join(', ') + ' (' + reden + '); periode ' + r.periode,
+            'niets samengevoegd; met de hand: python3 /opt/data/mk-scripts/wv2932/voeg.py voeg <album-hid> <reis-hid>'], 'fotoalbum niet vanzelf bij de reis gezet (twijfel, wv2932)');
+        continue;
+      }
+      const x = raak[0];
+      try {
+        tx(() => {
+          if (q.hBij.run('samengevoegd', r.h.hid, t, x.h.hid, 'actief').changes !== 1) throw new Error('fotoalbum niet meer actief');
+          if (!q.h.get(r.h.hid) || q.h.get(r.h.hid).status !== 'actief') throw new Error('reis niet meer actief');
+          if (!F.verhuis(x.h.hid, r.h.hid)) throw new Error('album niet verhuisd');   // zonder album niet samenvoegen: dan zouden de foto's verdwijnen
+          q.koppelZet.run(r.h.hid, sleutel, 'samengevoegd', x.h.hid, 0, 1, t);
+        });
+      } catch (e) { fout('ml-koppel-reis', e); uit.samengevoegd--; uit.acties[uit.acties.length - 1].uitkomst = 'mislukt'; continue; }
+      albums = albums.filter((y) => y.h.hid !== x.h.hid);
+    }
   }
   // wv2732: een samengevoegde herinnering weer los (status actief, bij leeg). Kwam hij van het vanzelf koppelen, dan ook het album terug naar
   // hem en de titel van de opname terug naar de standaard (alleen als die nog de titel van de kandidaat is); die opname wordt niet opnieuw
