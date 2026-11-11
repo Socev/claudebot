@@ -145,6 +145,18 @@ const NR = /\d{8,}/;
     }
   }
 
+  // review r2: na 07:00 klaar met ophalen → niets schrijven, niemand gemeld, één box-rij
+  { let klok = 1000; const sp5 = path.join(d, 'cr5', 'staat.json');
+    x = maak({ staatPad: sp5, nu: () => klok, datums: async (ids) => { klok += 21 * 60000; const u = {}; ids.forEach(i => { u[i] = DATUMS[i] || null; }); return { datums: u }; } });
+    u = await x.k.doe({ ams: { datum: '2027-06-06', uur: 6, min: 40 } });
+    const s5 = JSON.parse(fs.readFileSync(sp5, 'utf8'));
+    toets('na 07:00 klaar: geen rij, niemand gemeld, één box-rij', x.buf.length === 0 && /te laat/.test(u.detail.fout) && x.box.length === 1 && Object.values(s5.personen).every(p => !p.gemeld_op), [u, x.buf]); }
+  // review r2 MOET 2: extra contactnaam vult de paginanaam aan (Dirk: vaste lijn onder de paginanaam + mobiel onder 'Pa Nep Mob')
+  { fs.writeFileSync(path.join(d, 'config2.json'), JSON.stringify({ contactnamen: { '20_Prive/Familie/Dirk Nepper': ['Pa Nep Mob'] } }));
+    x = maak({ configPad: path.join(d, 'config2.json'), staatPad: path.join(d, 'cr6', 'staat.json') }); await x.k.doe({ ams: ZO });
+    toets('config vult aan: paginanaam én extra naam opgezocht', x.vraag.contacten.indexOf('Dirk Nepper') >= 0 && x.vraag.contacten.indexOf('Pa Nep Mob') >= 0, x.vraag.contacten); }
+  toets('isDatum: 2026-13-01 geeft false (geen uitzondering)', C._intern.isDatum('2026-13-01') === false);
+
   // 9. meer dan 30 ids → porties van ≤ 30
   const veel = { contactnamen: {} };
   let ring2 = '## Ring 1\n### Overig ring 1\n';

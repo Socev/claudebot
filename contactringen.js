@@ -47,7 +47,11 @@ function ams(ms) {
     .formatToParts(new Date(ms)).forEach(function (x) { p[x.type] = x.value; });
   return { datum: p.year + '-' + p.month + '-' + p.day, uur: Number(p.hour), min: Number(p.minute) };
 }
-function isDatum(d) { return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && new Date(d + 'T12:00:00Z').toISOString().slice(0, 10) === d; }
+function isDatum(d) {
+  if (typeof d !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+  const t = Date.parse(d + 'T12:00:00Z');
+  return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === d;   // ook 2026-13-01 en 2026-02-30 = geen datum (review r2 ZOU 1)
+}
 function dagNr(d) { return Math.round(Date.parse(d + 'T12:00:00Z') / DAG); }
 function zondag(d) { return new Date(d + 'T12:00:00Z').getUTCDay() === 0; }
 function norm(x) { return String(x == null ? '' : x).normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim(); }
@@ -130,6 +134,7 @@ function maak(o) {
   async function doe(opt) {
     opt = opt || {};
     const a = opt.ams || ams(nu());
+    const start = nu();
     const datum = a.datum, droog = !!opt.droog;
     if (!droog && !zondag(datum)) return { ok: true, al_gedaan: true, detail: { geen_zondag: true } };
     const s = staatLees();
@@ -165,7 +170,8 @@ function maak(o) {
     // nummers per persoon (alleen in het geheugen)
     const perPersoon = [];
     for (const p of doel) {
-      const namen = Array.isArray(extra[p.pad]) && extra[p.pad].length ? extra[p.pad].map(String) : [naamUitPad(p.pad)];
+      // paginanaam altijd, plus extra contactnamen uit de config (review r2 MOET 2: aanvullen, niet vervangen)
+      const namen = [naamUitPad(p.pad)].concat(Array.isArray(extra[p.pad]) ? extra[p.pad].map(String) : []).filter(function (n, i, l) { return n && l.map(norm).indexOf(norm(n)) === i; });
       const ids = new Set();
       let jarig = null;
       for (const n of namen) {
@@ -226,6 +232,8 @@ function maak(o) {
     const detail = { personen: doel.length, met_datum: gezien, blind: blind, geen_signaal: uitgezet, stil: keus.stil.length, jarig: keus.jarig.length,
       wacht: (stil.length - keus.stil.length) + (jarig.length - keus.jarig.length) };
     if (droog) { laatst = { op: new Date(nu()).toISOString(), droog: true }; return { ok: true, droog: true, regel: t, detail: detail }; }
+    // review r2 MOET 1: na alle aanroepen opnieuw de klok: na 07:00 is de briefing weg → niets schrijven, niemand als gemeld
+    if (t && a.uur * 60 + a.min + (nu() - start) / 60000 >= 7 * 60) return mislukt('te laat voor de briefing van 07:00');
     if (t) {
       try { await o.bufferZet(datum, t); } catch (e) { return mislukt('buffer niet gezet'); }
     }
