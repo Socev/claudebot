@@ -982,6 +982,20 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       toets('13y (ZOU 2) mislukte bron overschrijft de eerdere goede meting niet; met fouten na 6 uur (niet na 30 dagen) een nieuwe poging',
         naM.winkels['vosproef.nl'].kiyoh.cijfer === 8.8 && naM.fouten === 1 && r1 === 1 && rondes === 2, [naM, r1, rondes]);
     }
+    {
+      const ak2 = WM.aankopen([{ winkel: 'bol', url: 'https://www.bol.com/nl/nl/p/x/9300000003/', verkoper: 'Proefpartner', datum: '2026-11-10' },
+        { winkel: 'bol', url: 'https://www.bol.com/nl/nl/p/x/9300000004/', verkoper: 'bol', datum: '2026-11-08' }], ws);
+      toets('13za (ronde 2 ZOU 2) gekocht bij een bol-partner telt bij de partner (Ook gekocht bij), niet bij bol; bij bol zelf wel bij bol',
+        ak2.per['bol.com'].aantal === 1 && ak2.elders.length === 1 && ak2.elders[0].naam === 'Proefpartner', ak2);
+      const SPd = path.join(F, 'datum.json');
+      fs.writeFileSync(SPd, JSON.stringify({ op: '2026-10-01T00:00:00Z', winkels: { 'vosproef.nl': { kiyoh: { cijfer: 8.8, aantal: 107 } }, 'bol.com': { kieskeurig: { cijfer: 8.9, aantal: 744 } } } }));
+      const wmD = WM.maak({ scorePad: SPd, nu: () => new Date('2026-11-11T16:00:00Z'), scoreLezer: async () => ({ op: '2026-11-11T16:00:00Z', winkels: {
+        'vosproef.nl': { kiyoh: { fout: 'niet te lezen (HTTP 503)' } }, 'bol.com': { kieskeurig: { cijfer: 9.0, aantal: 750 } } } }) });
+      wmD.overzicht(FAV, []); await new Promise((r) => setTimeout(r, 20));
+      const oD = wmD.overzicht(FAV, []).body, vD = oD.winkels.find((w) => w.domein === 'vosproef.nl'), bD = oD.winkels.find((w) => w.domein === 'bol.com');
+      toets('13zb (ronde 2 ZOU 1) leesdatum per bron: de bewaarde oude Kiyoh-meting houdt 1-10, de nieuwe bol-meting 11-11; de app krijgt de oudste',
+        vD.score.op === '2026-10-01T00:00:00Z' && bD.score.op === '2026-11-11T16:00:00Z' && oD.score_op === '2026-10-01T00:00:00Z' && bD.score.bronnen[0].cijfer === 9, [vD.score, bD.score, oD.score_op]);
+    }
     toets('13z (ZOU 1) scoreleesscript: na 140 s geen nieuwe vraag meer (rest "tijd op"), ruim binnen de 180 s van de pod',
       /DEADLINE_S = 140/.test(pyB) && /time\.monotonic\(\) - t0 > DEADLINE_S/.test(pyB) && /niet gelezen \(tijd op\)/.test(pyB));
   }

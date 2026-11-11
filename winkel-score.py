@@ -18,7 +18,7 @@ GEBRUIK
   python3 -I winkel-score.py --ontleed kieskeurig|kiyoh|thuiswinkel <bestand> [domein]   (toets: alleen ontleden, geen netwerk)
 
 GRENZEN. Alleen GET op deze drie vaste hosts via https, doorsturen alleen binnen dezelfde host, ≤ 4 MB per pagina, 20 s per vraag, 1 s pauze
-tussen vragen, hooguit 60 winkels, na 140 s geen nieuwe vraag meer (de rest = "tijd op"; de pod stopt het proces na 180 s). Geen cookies, geen sleutel, geen gegevens van David.
+tussen vragen, hooguit 80 winkels, na 140 s geen nieuwe vraag meer (de rest = "tijd op"; de pod stopt het proces na 180 s). Geen cookies, geen sleutel, geen gegevens van David.
 """
 import gzip
 import html
@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 
 UA = "Socev-Shopper/1.0 (persoonlijke prijscheck, alleen lezen)"
 MAX_BYTES = 4 * 1024 * 1024
-MAX_WINKELS = 60
+MAX_WINKELS = 80   # review ronde 2 ZOU 3: gelijk aan de module (shopper-winkels.js MAX_WINKELS); de tijdgrens begrenst de duur
 DEADLINE_S = 140   # review wv2935 ZOU 1: de pod stopt het proces na 180 s; daarna geen nieuwe vraag meer (rest = "tijd op"), wel een uitkomst
 HOSTS = {"kieskeurig": "www.kieskeurig.nl", "kiyoh": "www.kiyoh.com", "thuiswinkel": "www.thuiswinkel.org"}
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,79}$")
