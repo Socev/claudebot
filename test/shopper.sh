@@ -709,6 +709,9 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       && !gelezen.some((x) => /onveilig/.test(x)) && !op(3), u.niet_gelezen);
     toets('12h verzending niet te lezen = totaal null (nooit geschat); in huis uit de levertijd (vrijdag = 13-11, uiterlijk 18 november, 3 werkdagen = 16-11)', op(6).totaal_eur === null && op(6).verzending_eur === null
       && op(2).in_huis === '2026-11-13' && op(1).in_huis === '2026-11-18' && op(6).in_huis === '2026-11-16', u.opties);
+    const nu12 = new Date('2026-11-11T15:00:00Z');
+    toets('12ha review ronde 3: "vandaag besteld, morgen in huis" = morgen; "voor vrijdag besteld, maandag in huis" = maandag; overmorgen ≠ morgen',
+      SV.inHuis('Vandaag besteld, morgen in huis', nu12) === '2026-11-12' && SV.inHuis('Voor vrijdag besteld, maandag in huis', nu12) === '2026-11-16' && SV.inHuis('overmorgen in huis', nu12) === '2026-11-13' && SV.inHuis('vandaag verzonden', nu12) === null);
     toets('12i favoriet en refurbished per optie; kosten opgeteld (2 × $ 0,05)', op(1).favoriet === false && op(1).refurbished === false && u.usd === 0.1, u);
     // eerste kaart zodra hij er is; hooguit 8 lezen, hooguit 4 tegelijk
     zoekAntw = { ok: true, usd: 0.01, kandidaten: Array.from({ length: 12 }, (_, i) => K(20 + i)) };
