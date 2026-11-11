@@ -398,7 +398,7 @@ const POORT_TOEGESTAAN = ['medisch', 'medisch_3', 'medisch_4'];
 // "VOOR JAN"). Uitzondering alleen als ELK woord van die reeks op een korte vaste lijst staat (eigen entiteiten, plaatsen, feestdagen,
 // veelgebruikte merken). Liever een keer te streng (David schrijft "Samsung-oplader") dan een naam naar de zoekronde.
 const NAAM_VOORZETSEL = new Set(['voor', 'van', 'namens', 'aan', 'bij', 'met', 'tbv', 'from', 'for']);   // vergeleken zonder punten: t.b.v., tbv., t.b.v = tbv
-const NAAM_TUSSEN = new Set(['van', 'de', 'der', 'den', 'ter', 'ten', 'te', 'het', "'t"]);
+const NAAM_TUSSEN = new Set(['van', 'de', 'der', 'den', 'ter', 'ten', 'te', 'het', 't', 'in', 'op', 'la', 'le', 'du', 'des', 'di', 'da', 'del', 'von', 'zu', 'vd', 'v.d', 'v']);   // 't = t na het afknippen van de apostrof (ronde 7)
 const POORT_NAAM_MAG = new Set(['tolgaarde', 'groenhouten', 'pot', 'holding', 'praktijkhouders', 'privé', 'prive', 'sloel', 'leusden', 'amersfoort', 'nederland', 'kerst', 'kerstmis',
   'sinterklaas', 'pasen', 'koningsdag', 'moederdag', 'vaderdag',
   // veelgebruikte merken (een merk na "van"/"voor" is geen naam): liever een korte vaste lijst dan een naamherkenner
