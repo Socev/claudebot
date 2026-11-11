@@ -393,19 +393,31 @@ function adviesControle(z, eisen) {
 // telt ook (de poort ziet een naam zonder datum niet). Medische productwoorden mogen (bloeddrukmeter). Geen poort of een fout = dicht.
 const POORT_PERSOON = /(^|[^\p{L}])(mw|mevr|mevrouw|dhr|de heer|meneer|patiënt(e|en)?|patient(e|en)?|cliënt(e|en)?|client(e|en)?|pt|bsn|geb\.?|geboren)([^\p{L}]|$)/iu;
 const POORT_TOEGESTAAN = ['medisch', 'medisch_3', 'medisch_4'];
-// review wv2850 MOET 2: een losse naam ziet de patiëntpoort niet. Daarom ook dicht bij een voorzetsel met een woord met hoofdletter erna
-// ("voor Jan", "van Jansen", "t.b.v. Pietersen"), behalve de eigen entiteiten, feestdagen en woorden in hoofdletters (merken als KERN).
-// Liever een keer te streng (David haalt het woord weg of schrijft "Samsung-oplader") dan een naam naar de zoekronde.
-const POORT_NAAM = /(?:^|[\s(,;:])(?:voor|van|namens|aan|bij|met|t\.?b\.?v\.?|tbv|from|for)\s+((?:\p{Lu}[\p{Ll}'’-]+)(?:\s+(?:van|de|der|den|ter|ten|\p{Lu}[\p{Ll}'’-]+))*)/gu;
+// review wv2850 MOET 2 (ronde 1 en 2): een losse naam ziet de patiëntpoort niet. Daarom ook dicht bij een voorzetsel (ongeacht hoofdletters:
+// voor, van, namens, aan, bij, met, t.b.v., tbv) met daarna een woord dat met een hoofdletter begint ("voor Jan", "Voor Jan", "voor De Vries",
+// "VOOR JAN"). Uitzondering alleen als ELK woord van die reeks op een korte vaste lijst staat (eigen entiteiten, plaatsen, feestdagen,
+// veelgebruikte merken). Liever een keer te streng (David schrijft "Samsung-oplader") dan een naam naar de zoekronde.
+const NAAM_VOORZETSEL = new Set(['voor', 'van', 'namens', 'aan', 'bij', 'met', 'tbv', 't.b.v.', 't.b.v', 'from', 'for']);
+const NAAM_TUSSEN = new Set(['van', 'de', 'der', 'den', 'ter', 'ten', 'te', 'het', "'t"]);
 const POORT_NAAM_MAG = new Set(['tolgaarde', 'groenhouten', 'pot', 'holding', 'praktijkhouders', 'privé', 'prive', 'sloel', 'leusden', 'amersfoort', 'nederland', 'kerst', 'kerstmis',
-  'sinterklaas', 'pasen', 'koningsdag', 'moederdag', 'vaderdag', 'oud', 'nieuw', 'de', 'het', 'een',
+  'sinterklaas', 'pasen', 'koningsdag', 'moederdag', 'vaderdag',
   // veelgebruikte merken (een merk na "van"/"voor" is geen naam): liever een korte vaste lijst dan een naamherkenner
   'samsung', 'philips', 'apple', 'bosch', 'miele', 'sony', 'dell', 'lenovo', 'ikea', 'google', 'microsoft', 'logitech', 'canon', 'epson', 'brother', 'siemens',
-  'makita', 'dyson', 'nespresso', 'sonos', 'garmin', 'omron', 'braun', 'tefal', 'riester', 'heine', 'seca', 'kern', 'littmann', 'hama', 'gazelle', 'lego', 'nintendo']);
+  'makita', 'dyson', 'nespresso', 'sonos', 'garmin', 'omron', 'braun', 'tefal', 'riester', 'heine', 'seca', 'kern', 'littmann', 'hama', 'gazelle', 'lego', 'nintendo',
+  'hp', 'lg', 'aeg', 'jbl', 'asus', 'acer']);
 function naamIn(x) {
-  POORT_NAAM.lastIndex = 0;
-  let m;
-  while ((m = POORT_NAAM.exec(String(x)))) { const w = m[1].split(/\s+/)[0].toLowerCase(); if (!POORT_NAAM_MAG.has(w)) return true; }
+  const w = String(x).split(/[\s,;:()"“”]+/).filter(Boolean);
+  for (let i = 0; i < w.length - 1; i++) {
+    if (!NAAM_VOORZETSEL.has(w[i].toLowerCase())) continue;
+    let k = i + 1;
+    const reeks = [];
+    // tussenvoegsels ("van der", "de") horen bij de naam als er verderop een woord met hoofdletter volgt ("voor van der Proefnaam")
+    const tussenNaarNaam = (j) => { while (j < w.length && NAAM_TUSSEN.has(w[j].toLowerCase())) j++; return j < w.length && /^\p{Lu}/u.test(w[j]); };
+    while (k < w.length && (/^\p{Lu}/u.test(w[k]) || (NAAM_TUSSEN.has(w[k].toLowerCase()) && tussenNaarNaam(k)))) { reeks.push(w[k]); k++; }
+    const kern = reeks.filter((r) => /^\p{Lu}/u.test(r) && !NAAM_TUSSEN.has(r.toLowerCase()));
+    if (kern.length && !kern.every((r) => POORT_NAAM_MAG.has(r.toLowerCase().replace(/[.!?'’]+$/, '')))) return true;
+    if (!kern.length && reeks.some((r) => /^\p{Lu}/u.test(r))) return true;   // "voor De Van": alleen tussenvoegsels met hoofdletter = toch een naam
+  }
   return false;
 }
 function poortVrij(poort, teksten) {
