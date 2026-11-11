@@ -107,7 +107,9 @@ function scoreVan(domein, scores) {
   }
   const thuis = tw && typeof tw.sinds === 'string' && DATUM_RE.test(tw.sinds) ? tw.sinds : null;
   if (!uit.length && !thuis) return null;
-  return { bronnen: uit, thuiswinkel_sinds: thuis, op: typeof scores.op === 'string' ? scores.op : null };
+  // de oudste leesdatum van wat getoond wordt (per bron bewaard; oudere staat zonder: de datum van de ronde)
+  const ops = [ky, ks, tw].filter((x) => x && typeof x === 'object' && !x.fout).map((x) => (typeof x.op === 'string' ? x.op : scores.op)).filter((x) => typeof x === 'string').sort();
+  return { bronnen: uit, thuiswinkel_sinds: thuis, op: ops[0] || (typeof scores.op === 'string' ? scores.op : null) };
 }
 function scoreBij(url, verkoper, winkels, scores) {
   const h = hostVan(url);
@@ -128,12 +130,17 @@ function naamKern(s) {
   const w = norm(s).replace(/\(.*?\)/g, ' ').replace(/[^a-z0-9.-]+/g, ' ').trim().split(' ').filter(Boolean);
   return w.length ? w[0].replace(/^www\./, '').split('.')[0] : null;
 }
-// gekocht[]: { winkel, url?, datum } per gekochte zoektocht. → { per: {domein: {aantal, laatst}}, elders: [{naam, aantal, laatst}] }
+// gekocht[]: { winkel, url?, verkoper?, datum } per gekochte zoektocht. → { per: {domein: {aantal, laatst}}, elders: [{naam, aantal, laatst}] }
 function aankopen(gekocht, winkels) {
   const per = {}, elders = {};
   for (const g of gekocht || []) {
     if (!g) continue;
     let w = g.url ? winkelBij(g.url, winkels) : null;
+    // review ronde 2 ZOU 2: gekocht bij een partner op bol/Amazon = ervaring met die verkoper, niet met het platform
+    const plat = g.url ? Object.keys(PLATFORM).find((d) => opDomein(hostVan(g.url), d)) : null;
+    const partner = plat && norm(g.verkoper) && PLATFORM[plat].indexOf(norm(g.verkoper)) < 0 ? tekst(g.verkoper, 60) : null;
+    if (partner) { const e = elders[partner] = elders[partner] || { naam: partner, aantal: 0, laatst: null }; e.aantal++; if (DATUM_RE.test(String(g.datum || '')) && (!e.laatst || g.datum > e.laatst)) e.laatst = g.datum; continue; }
+    if (plat && !norm(g.verkoper) && g.url) w = null;   // verkoper onbekend op een platform: alleen via de winkelnaam die David opgaf
     if (!w) {
       const k = naamKern(g.winkel);
       if (k && k.length >= 3) w = (winkels || []).find((x) => x.domein.split('.')[0] === k || naamKern(x.naam) === k) || null;
@@ -183,7 +190,8 @@ function maak(o) {
         uit[d] = {};
         for (const b of BRONNEN) {
           if (n[b] && n[b].fout) fouten++;
-          uit[d][b] = goedeMeting(n[b]) ? n[b] : goedeMeting(v[b]) ? v[b] : (n[b] || null);
+          // review ronde 2 ZOU 1: elke meting houdt haar eigen leesdatum (een bewaarde oude meting lijkt niet vers)
+          uit[d][b] = goedeMeting(n[b]) ? Object.assign({}, n[b], { op: j.op }) : goedeMeting(v[b]) ? Object.assign({ op: v[b].op || oud.op || null }, v[b]) : (n[b] || null);
         }
       }
       return bewaar({ op: j.op, winkels: uit, fouten });
@@ -208,7 +216,8 @@ function maak(o) {
       return { domein: w.domein, naam: w.naam, aan: w.aan, soort: w.soort, categorie: w.categorie, refurbished: w.refurbished, lezen: w.lezen,
         verzend: w.verzend, score: sc, gekocht: eigen, onbekend: !eigen && !(sc && (sc.bronnen.some((b) => b.cijfer != null) || sc.thuiswinkel_sinds)) };
     });
-    return { status: 200, body: { ok: true, categorieen: CATEGORIEEN, winkels: lijst, elders: a.elders, score_op: s ? s.op : null, score_stand: stand,
+    const oudste = lijst.map((w) => w.score && w.score.op).filter(Boolean).sort()[0] || (s ? s.op : null);   // ronde 2 ZOU 1: de oudste getoonde meting
+    return { status: 200, body: { ok: true, categorieen: CATEGORIEEN, winkels: lijst, elders: a.elders, score_op: oudste, score_stand: stand,
       pagina: pagina == null ? 'onleesbaar' : 'ok' } };
   }
   return { overzicht, scores, ververs, info: () => ({ bezig, poging: poging ? new Date(poging).toISOString() : null }) };

@@ -960,7 +960,7 @@ function maak(o) {
       const z = t == null ? null : ontleed(t, p.rel, p.ent, []);
       if (!z || z.status !== 'gekocht' || !z.gekocht) continue;
       const opt = z.gekocht.optie ? z._opties.find((x) => x.id === z.gekocht.optie) : null;
-      gekocht.push({ winkel: z.gekocht.winkel || (opt && opt.winkel) || null, url: opt && opt.url ? opt.url : null, datum: z.gekocht.datum });
+      gekocht.push({ winkel: z.gekocht.winkel || (opt && opt.winkel) || null, url: opt && opt.url ? opt.url : null, verkoper: opt ? opt.verkoper || null : null, datum: z.gekocht.datum });
     }
     return winkelsMod.overzicht(lees(FAVORIETEN), gekocht);
   }
