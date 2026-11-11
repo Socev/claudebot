@@ -4176,6 +4176,7 @@ function handleRequest(req, res) {
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
       weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
+      contactringen: typeof contactringenInfo === 'function' ? contactringenInfo() : { aan: false },   // wv2894: zondagseintje binnenste kring (stand, geen namen of nummers)
       kalender: typeof kalenderInfo === 'function' ? kalenderInfo() : { aan: false },   // wv2333: OVIS Calendar in de app (laatste lijst: aantal, duur; geen titels)
       shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
       osint: typeof osintInfo === 'function' ? osintInfo() : { aan: false },   // wv2694: OVIS OSINT (osint.py in deze release? venv of systeem-python; geen zoektermen)
@@ -19598,6 +19599,46 @@ async function weerAvondTik() {
   finally { weerAvondBezig = false; }
 }
 if (weerOchtend && SERVER_ECHT) { setInterval(function () { weerAvondTik(); }, 5 * 60000).unref(); }
+// ── Contactringen: zondagseintje binnenste kring (wv2894, idee 19d meetpunt 6; ontwerp mk-scripts/wv2876/ontwerp.md, David JA 10-11) ──
+// Nachtketenstap contactringen (zondag, na weer-ochtend): alleen de DATUM van het laatste 1-op-1-appje via het zoekluik (datums_voor),
+// nummers vers uit de contacten-webhook (nooit gelogd of bewaard); hooguit één rij bron 'contactringen' in ochtend_buffer. Logica in
+// contactringen.js. Staat en config (extra contactnamen per vaultpad) in /opt/data/contactringen (700/600), niet in de vault.
+const CONTACTRINGEN_DIR = process.env.CONTACTRINGEN_DIR || '/opt/data/contactringen';
+const CR_WA_WF = '02Jga3TIAEigwgw0', CR_CONTACTEN_WF = '8o2bg3RXj6EJ02yF';
+async function crPost(wf, naam, sleutel, geheim, body) {
+  if (!geheim) throw new Error('luik niet ingericht');
+  for (let poging = 0; poging < 2; poging++) {
+    const url = await appWebhookUrl(wf, naam, sleutel, poging > 0);
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(Object.assign({ secret: geheim }, body)), signal: AbortSignal.timeout(90000) });
+    if (r.status === 404 && poging === 0) continue;
+    if (!r.ok) throw new Error('http ' + r.status);
+    return r.json();
+  }
+  throw new Error('luik niet gevonden');
+}
+const CR_FILTER = { type: 'and', filters: [{ columnName: 'bron', condition: 'eq', value: 'contactringen' }] };
+async function crRijZet(datum, tekst) {
+  const body = { filter: CR_FILTER, data: { bron: 'contactringen', datum: datum, tekst: tekst }, returnData: true };
+  const poging = function () { return appN8nZend('POST', '/data-tables/' + APP_MELD_TABEL + '/rows/upsert', body); };
+  await poging().catch(function () { return new Promise(function (ok) { setTimeout(ok, 2000); }).then(poging); });
+  const j = await appN8nZend('GET', '/data-tables/' + APP_MELD_TABEL + '/rows?limit=5&filter=' + encodeURIComponent(JSON.stringify(CR_FILTER)));
+  const l = (Array.isArray(j && j.data) ? j.data : []).filter(function (r) { return r && r.bron === 'contactringen' && r.datum === datum && r.tekst === tekst; });
+  if (!l.length) throw new Error('rij na het schrijven niet teruggelezen');
+}
+const contactringen = (function () {
+  const p = path.join(__dirname, 'contactringen.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ staatPad: path.join(CONTACTRINGEN_DIR, 'staat.json'), configPad: path.join(CONTACTRINGEN_DIR, 'config.json'),
+      ringTekst: async function () { return VV().lees(path.join(VAULT, '20_Prive', 'Contactringen.md'), 'utf8', { max: 200000 }); },   // geen symlink volgen
+      contacten: function (q) { return crPost(CR_CONTACTEN_WF, 'Webhook zoek', 'crContactenUrl', process.env.SUPABASE_RPC_CONTACTEN, { q: q, limiet: 10 }); },
+      datums: function (ids) { return crPost(CR_WA_WF, null, 'crWaUrl', process.env.N8N_WEBHOOK_WHATSAPP, { sessie: 'nl', datums_voor: ids }); },
+      bufferZet: crRijZet, boxRij: function (t) { return ovisBoxRij(t); },
+      log: function (o) { schrijfLog(nu() + ' contactringen ' + velden(o)); } });
+  } catch (e) { logError('contactringen', e); return null; }
+})();
+function contactringenInfo() { if (!contactringen) return { aan: false }; try { return contactringen.info(); } catch (e) { return { aan: true, fout: true }; } }
 // ── AVG-spiegel (wv2526; bouwplan vault "01_Ontwikkeling/AVG-stukken per praktijk in GitHub (bouwplan 5-11-2026).md") ──
 // Nachtketen-stap: spiegelt 10_Zakelijk/<Praktijk>/Privacy naar de privé-repo Socev/avg-<praktijk> (eenrichting; logica, BSN-elfproef en
 // grenzen in mk-scripts/avg-spiegel/spiegel.py). Kaal kindproces (geen socev-run: die meldt zelf met een bericht; hier meldt alleen de keten
@@ -19795,6 +19836,11 @@ const nachtketen = (function () {
       { naam: 'weer-ochtend', start_na: [6, 40], limiet_min: 3, pogingen: 2, inProces: true, doe: async function (ctx) {
         if (!weerOchtend) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
         return weerOchtend.doe({ ams: ctx.ams });
+      } },
+      // wv2894 (idee 19d): zondag één regel over de binnenste kring voor de briefing van 07:00; stil bij een fout (box-rij), anders al_gedaan
+      { naam: 'contactringen', start_na: [6, 40], na: ['weer-ochtend'], limiet_min: 5, pogingen: 2, inProces: true, doe: async function (ctx) {
+        if (!contactringen) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        return contactringen.doe({ ams: ctx.ams });
       } },
       // wv1430: ná de n8n-schrijvers (nachtconsolidatie, raw_input, Teams, WhatsApp) en ná zoeken; achter ovis-kalender zodat die voorgaat
       { naam: 'sb2-steekwoorden', start_na: [5, 0], na: ['ovis-deadlines', 'sb2-zoekleer'], limiet_min: 30, pogingen: 2, meldtZelf: true,
