@@ -11,9 +11,9 @@ BRON (gemeten 11-11-2026, eigen User-Agent, robots.txt "Allow: /" met een paar D
   - product https://www.kieskeurig.nl/<categorie>/product/<nr>-<slug>  → astro-island props met "priceHistory" (per dag {ean, amount,
     date}; amount = laagste prijs die dag) en "hidePriceHistory"; gemeten: 227 punten over 268 dagen (Philips NA552/00), soms leeg.
 
-ZELFDE PRODUCT (review MOET 1). Alleen als (a) het merk van Kieskeurig als woord in de productnaam van het advies staat, (b) er een exact
-modelnummer in beide namen staat (woord met letters én cijfers, ≥ 4 tekens zonder streepjes/schuine strepen, geen maat of eenheid zoals
-2750W of 180kg), en (c) de uitvoeringskenmerken (aantal/set, maat in mm/cm/m, inhoud in GB/TB/l/ml/kg/g, kleur) in beide namen gelijk zijn;
+ZELFDE PRODUCT (review MOET 1). Alleen als (a) het merk van Kieskeurig als woord in de productnaam van het advies staat, (b) de typenummers
+in beide namen precies gelijk zijn (woord met letters én cijfers, ≥ 4 tekens zonder streepjes/schuine strepen, geen maat of eenheid zoals
+2750W of 180kg; een los voorvoegsel van 2-4 hoofdletters ervoor hoort erbij: GSR 18V-55 ≠ GSB 18V-55; diff-review wv2946 MOET 1), en (c) de uitvoeringskenmerken (aantal/set, maat in mm/cm/m, inhoud in GB/TB/l/ml/kg/g, kleur) in beide namen gelijk zijn;
 staat een kenmerk maar aan één kant, dan geen zin. Woordoverlap alleen is nooit genoeg.
 
 REKENREGELS (review MOET 2). Punten = (dag, laagste bedrag) met een geldige datum en een bedrag > 0; per dag de laagste. Venster = de 90 dagen
@@ -28,11 +28,10 @@ GEBRUIK
   stdout: één regel JSON {"op": ISO, "zin": "…"|null, "reden": "…", "url": productpagina|null, "naam": naam op Kieskeurig|null}
   python3 -I prijshistorie.py --toets <bestanden-map>   (toets: leest zoek.html / <nr>.html uit die map in plaats van het net)
 
-GRENZEN. Alleen GET via https op www.kieskeurig.nl, doorsturen alleen binnen die host en niet naar een pad dat robots.txt verbiedt, ≤ 4 MB per
-pagina, 20 s per vraag, 1 s pauze, hooguit 2 zoekvragen en 1 productpagina. Geen cookies, geen sleutel; de productnaam gaat alleen als
+GRENZEN. Alleen GET via https op www.kieskeurig.nl, doorsturen alleen binnen die host en niet naar een pad dat robots.txt verbiedt; de
+productpagina niet doorgestuurd en met hetzelfde product in haar JSON-LD (diff-review MOET 2); ≤ 4 MB per pagina, ook uitgepakt (MOET 3), 20 s per vraag, 1 s pauze, hooguit 2 zoekvragen en 1 productpagina. Geen cookies, geen sleutel; de productnaam gaat alleen als
 zoekterm naar Kieskeurig en komt in geen log (dit script schrijft niets weg).
 """
-import gzip
 import html
 import json
 import os
@@ -42,6 +41,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from datetime import date, datetime, timedelta, timezone
 
 UA = "Socev-Shopper/1.0 (persoonlijke prijscheck, alleen lezen)"
@@ -58,23 +58,41 @@ KLEUREN = {"zwart", "wit", "grijs", "antraciet", "zilver", "zilverkleurig", "roo
            "roze", "paars", "oranje", "bruin", "beige", "goud", "goudkleurig", "creme", "crème", "taupe", "black", "white", "grey", "gray",
            "silver", "red", "blue", "green", "yellow", "pink", "purple", "orange", "brown", "gold", "navy", "mint", "turquoise", "turquoise",
            "middernachtblauw"}
-EENHEID_MODEL = re.compile(r"^\d+([.,]\d+)?(w|kw|kg|g|gr|l|ml|cl|cm|mm|m|gb|tb|mb|mah|v|hz|inch|x|st|stuks|p|mp)$")
+EENHEID_MODEL = re.compile(r"^\d+([.,]\d+)?(w|kw|kg|g|gr|l|ml|cl|cm|mm|m|gb|tb|mb|mah|ah|wh|v|hz|inch|x|st|stuks|p|mp)$")
 
 
 def norm(s):
     return re.sub(r"\s+", " ", str(s or "").replace(" ", " ")).strip().lower()
 
 
-def modelnummers(naam):
-    """Woorden met letters én cijfers, ≥ 4 tekens zonder - / . , geen maat of eenheid (2750W, 180kg, 9L)."""
-    uit = set()
-    for w in re.split(r"[\s,;:()\[\]+|]+", norm(naam)):
+def _modelwoorden(naam):
+    """[(woord zoals geschreven, sleutel)] voor elk woord met letters én cijfers, ≥ 4 tekens zonder - / . (geen maat of eenheid)."""
+    uit = []
+    for w in re.split(r"[\s,;:()\[\]+|]+", str(naam or "").replace("\u00a0", " ")):
         w = w.strip("-/.'\"")
-        if not w or EENHEID_MODEL.match(w):
+        k = re.sub(r"[-/.]", "", w.lower())
+        if not w or EENHEID_MODEL.match(w.lower()):
             continue
-        k = re.sub(r"[-/.]", "", w)
         if len(k) >= 4 and re.search(r"\d", k) and re.search(r"[a-z]", k) and re.match(r"^[a-z0-9]+$", k):
-            uit.add(k)
+            uit.append((w, k))
+    return uit
+
+
+def modelnummers(naam, merk=None):
+    """Volledige typenummers: het modelwoord met een los typevoorvoegsel ervoor (2-4 hoofdletters, niet het merk), zodat "GSR 18V-55" en
+    "GSB 18V-55" verschillen (review wv2946 MOET 1). Zonder voorvoegsel alleen het modelwoord."""
+    woorden = [w for w in re.split(r"[\s,;:()\[\]+|]+", str(naam or "").replace("\u00a0", " ")) if w]
+    merk_k = norm(merk) if merk else ""
+    uit = set()
+    for i, w in enumerate(woorden):
+        mw = _modelwoorden(w)
+        if not mw:
+            continue
+        k = mw[0][1]
+        v = woorden[i - 1].strip("-/.'\"") if i > 0 else ""
+        if re.match(r"^[A-Z]{2,4}$", v) and v.lower() != merk_k:
+            k = v.lower() + k
+        uit.add(k)
     return uit
 
 
@@ -95,7 +113,7 @@ def kenmerken(naam):
     for m in re.finditer(r"(?<![\w.,])(\d{1,5}(?:[.,]\d{1,2})?(?:\s?x\s?\d{1,5}(?:[.,]\d{1,2})?){0,2})\s?(mm|cm|m|meter)(?!\w)", t):
         e = "m" if m.group(2) == "meter" else m.group(2)
         k["maat"].add("x".join(_getal(x) for x in re.split(r"\s?x\s?", m.group(1))) + e)
-    for m in re.finditer(r"(?<![\w.,])(\d{1,5}(?:[.,]\d{1,2})?)\s?(gb|tb|l|liter|ltr|ml|kg|g|gram)(?!\w)", t):
+    for m in re.finditer(r"(?<![\w.,])(\d{1,5}(?:[.,]\d{1,2})?)\s?(gb|tb|l|liter|ltr|ml|kg|g|gram|ah|mah|wh)(?!\w)", t):
         e = {"liter": "l", "ltr": "l", "gram": "g"}.get(m.group(2), m.group(2))
         k["inhoud"].add(_getal(m.group(1)) + e)
     for w in re.split(r"[^\wÀ-ÿ]+", t):
@@ -111,10 +129,10 @@ def zelfde_product(advies, kk_naam, kk_merk):
         return False, "geen merk bij Kieskeurig"
     if not re.search(r"(?<![\w])" + re.escape(merk) + r"(?![\w])", norm(advies)):
         return False, "ander merk"
-    a, b = modelnummers(advies), modelnummers(kk_naam)
+    a, b = modelnummers(advies, kk_merk), modelnummers(kk_naam, kk_merk)
     if not a:
         return False, "geen modelnummer in het advies"
-    if not b or not (a & b):
+    if a != b:   # review MOET 1: alle typenummers gelijk, niet één gedeeld stuk
         return False, "ander of geen modelnummer"
     ka, kb = kenmerken(advies), kenmerken(kk_naam)
     for soort in ("aantal", "maat", "inhoud", "kleur"):
@@ -195,24 +213,36 @@ class _ZelfdeHost(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, doel)
 
 
+def uitpakken(body):
+    """gzip uitpakken met dezelfde grens als het lezen (review wv2946 MOET 3: anders kan een klein antwoord het geheugen vullen)."""
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        uit = d.decompress(body, MAX_BYTES + 1)
+    except zlib.error:
+        raise ValueError("pagina niet uit te pakken")
+    if len(uit) > MAX_BYTES or d.unconsumed_tail:
+        raise ValueError("pagina te groot")
+    return uit
+
+
 def haal_net(url):
+    """GET → (status, tekst, eind-url na doorsturen)."""
     if not mag(url):
         raise ValueError("alleen Kieskeurig")
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html", "Accept-Language": "nl-NL,nl;q=0.9",
                                                "Accept-Encoding": "gzip"})
     try:
         r = urllib.request.build_opener(_ZelfdeHost()).open(req, timeout=20)
-        code, body, hdr = r.status, r.read(MAX_BYTES), r.headers
+        code, body, hdr, eind = r.status, r.read(MAX_BYTES + 1), r.headers, r.geturl()
     except urllib.error.HTTPError as e:
         if e.code == 399:
             raise ValueError(e.msg)
-        return e.code, ""
+        return e.code, "", url
+    if len(body) > MAX_BYTES:
+        raise ValueError("pagina te groot")
     if (hdr.get("Content-Encoding") or "").lower() == "gzip":
-        try:
-            body = gzip.decompress(body)
-        except OSError:
-            pass
-    return code, body.decode("utf-8", "replace")
+        body = uitpakken(body)
+    return code, body.decode("utf-8", "replace"), eind
 
 
 def haal_toets(map_):
@@ -225,8 +255,11 @@ def haal_toets(map_):
         naam = "zoek.html" if u.path == "/search" else (m.group(1) + ".html") if m else "lijst.html"
         p = os.path.join(map_, naam)
         if not os.path.exists(p):
-            return 404, ""
-        return 200, open(p, encoding="utf-8", errors="replace").read()
+            return 404, "", url
+        eind = url
+        if os.path.exists(p + ".doorsturen"):   # toets: de eind-url na doorsturen
+            eind = open(p + ".doorsturen", encoding="utf-8").read().strip()
+        return 200, open(p, encoding="utf-8", errors="replace").read(), eind
     return haal
 
 
@@ -236,6 +269,19 @@ def jsonld(t):
             yield json.loads(m.group(1))
         except ValueError:
             continue
+
+
+def product_op_pagina(t):
+    """(naam, merk) uit de JSON-LD Product van een productpagina, of None."""
+    for d in jsonld(t):
+        graaf = d.get("@graph") if isinstance(d, dict) and isinstance(d.get("@graph"), list) else [d]
+        for g in graaf:
+            if isinstance(g, dict) and g.get("@type") == "Product" and isinstance(g.get("name"), str):
+                merk = g.get("brand")
+                merk = merk.get("name") if isinstance(merk, dict) else merk
+                if isinstance(merk, str):
+                    return g["name"][:300], merk[:80]
+    return None
 
 
 def kandidaten(t):
@@ -293,7 +339,7 @@ def prijsreeks(t):
 def zoektermen(product):
     p = re.sub(r"\s+", " ", product).strip()[:120]
     termen = [p]
-    mods = [w for w in re.split(r"\s+", p) if re.sub(r"[-/.]", "", w.lower()) in modelnummers(p)]
+    mods = [w for w, _ in _modelwoorden(p)]
     if mods:
         termen.append(" ".join(mods[:2]))
     return [x for i, x in enumerate(termen) if x and x not in termen[:i]][:MAX_ZOEK]
@@ -313,7 +359,7 @@ def lees(product, vandaag, haal, pauze=1.0):
             time.sleep(pauze)
         eerste = False
         try:
-            code, t = haal("https://%s/search?%s" % (HOST, urllib.parse.urlencode({"q": term})))
+            code, t, _ = haal("https://%s/search?%s" % (HOST, urllib.parse.urlencode({"q": term})))
         except Exception as e:  # netwerk, time-out, doorsturen
             uit["reden"] = "fout: zoeken niet te lezen (%s)" % str(e)[:80]
             return uit
@@ -337,12 +383,20 @@ def lees(product, vandaag, haal, pauze=1.0):
     uit["url"], uit["naam"] = url, naam
     time.sleep(pauze)
     try:
-        code, t = haal(url)
+        code, t, eind = haal(url)
     except Exception as e:
         uit["reden"] = "fout: productpagina niet te lezen (%s)" % str(e)[:80]
         return uit
     if code != 200:
         uit["reden"] = "fout: productpagina gaf HTTP %s" % code
+        return uit
+    # review MOET 2: doorgestuurd naar een andere pagina, of de pagina zelf noemt een ander product = geen zin
+    if urllib.parse.urlsplit(eind).path != urllib.parse.urlsplit(url).path:
+        uit["reden"] = "productpagina doorgestuurd naar een andere pagina"
+        return uit
+    pp = product_op_pagina(t)
+    if not pp or not zelfde_product(product, pp[0], pp[1])[0]:
+        uit["reden"] = "productpagina noemt een ander product"
         return uit
     reeks, verborgen = prijsreeks(t)
     if verborgen:
