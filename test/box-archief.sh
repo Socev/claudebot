@@ -121,6 +121,9 @@ function sha(v) { const h = crypto.createHash('sha256'); (function loop(d) { for
   const v3 = vault('c'); const s3 = sha(v3);
   const r6 = await B.ronde({ vault: v3, VV, vandaag: '2026-11-11', droog: true, staatMap: path.join(W, 'staat-c'), kaarten: async () => kaarten });
   toets('G: droog schrijft niets en telt wel', r6.ok && r6.detail.box.archief === 6 && r6.detail.register.archief === 3 && sha(v3) === s3 && !fs.existsSync(path.join(W, 'staat-c')), r6.detail);
+  toets('B: 29-2 bij een rijkop uit december 2023 = 2024-02-29 (review ZOU 2)', B.datumVooraan(' 29-2', 2023, '2023-12-20') === '2024-02-29' && B.datumVooraan(' 30-2', 2023, '2023-12-20') === null && B.datumVooraan(' 2-1', 2025, '2025-12-30') === '2026-01-02' && B.datumVooraan(' 25-10', 2026, '2026-10-20') === '2026-10-25');
+  let weiger = 0; for (const x of [{ dagen: NaN }, { dagen: 'abc' }, { dagen: 0 }, { vandaag: '2026-13-01' }]) { try { await B.ronde(Object.assign({ vault: v3, VV, vandaag: '2026-11-11', droog: true }, x)); } catch (e) { weiger++; } }
+  toets('ZOU 1: ongeldige grens of datum → weigert vóór er iets gebeurt', weiger === 4 && sha(v3) === s3, weiger);
   console.log('\n' + goed + ' groen, ' + fout + ' rood');
   process.exit(fout ? 1 : 0);
 })().catch(e => { console.log('ROOD  uitzondering: ' + (e && e.stack || e)); process.exit(1); });

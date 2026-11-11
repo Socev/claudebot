@@ -56,11 +56,12 @@ function datumVooraan(rest, jaar, basis) {
   return datumDm(+m[1], +m[2], m[3] ? +m[3] : null, jaar, basis);
 }
 function datumDm(d, mnd, j, jaar, basis) {
-  let y = j || jaar;
-  if (!y || !geldig(y, mnd, d)) return null;
-  let s = iso(y, mnd, d);
-  if (!j && basis && s < basis && dagen(s, basis) > 2) { if (!geldig(y + 1, mnd, d)) return null; s = iso(y + 1, mnd, d); }
-  return s;
+  const y = j || jaar;
+  if (!y) return null;
+  // review wv2902 ZOU 2: eerst het jaar bepalen (d-m vóór de rijkop = volgend jaar), dan pas de datum toetsen (29-2)
+  const voor = !j && basis && geldig(y, mnd, d) ? iso(y, mnd, d) : null;
+  const jj = !j && basis && (!voor || (voor < basis && dagen(voor, basis) > 2)) && iso(y + 1, mnd, d) > basis ? y + 1 : y;
+  return geldig(jj, mnd, d) ? iso(jj, mnd, d) : null;
 }
 
 // ── Box ──
@@ -279,6 +280,9 @@ function schrijfArchief(VV, pad, maak, voegIn, items, vandaag, droog, isIn) {
 // o: { vault, VV, vandaag, dagen (7), staatMap, kaarten: async () => [...] | null (null = register overslaan), droog, forceer, log }
 async function ronde(o) {
   const VV = o.VV, vandaag = o.vandaag || amsVandaag(), grens = o.dagen == null ? 7 : o.dagen;
+  // review wv2902 ZOU 1: ongeldige datum of grens = niets doen
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(vandaag) || !geldig(+vandaag.slice(0, 4), +vandaag.slice(5, 7), +vandaag.slice(8))) throw new Error('box-archief: ongeldige datum ' + vandaag);
+  if (typeof grens !== 'number' || !Number.isInteger(grens) || grens < 1) throw new Error('box-archief: ongeldige dagengrens ' + grens);
   const stPad = o.staatMap ? path.join(o.staatMap, 'laatste.json') : null;
   if (stPad && !o.forceer) {
     try { const s = JSON.parse(fs.readFileSync(stPad, 'utf8')); if (s && s.ok && s.datum && dagen(s.datum, vandaag) < 7 && dagen(s.datum, vandaag) >= 0) return { ok: true, al_gedaan: true, detail: { vorige: s.datum } }; } catch (e) { /* geen stempel */ }
