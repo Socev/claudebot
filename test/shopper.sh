@@ -796,6 +796,43 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       SV.maak({ vault: V, vv: VV, lezer: nepLezer, zoek: nepZoek, poort: POORT, staatPad: STAAT, nu: () => klok, opruimTik: false });
       toets('12xc achtergebleven tijdelijk staatbestand (crash) weg bij het opstarten; andere bestanden blijven', !fs.existsSync(STAAT + '.123.abcdef01.tmp') && fs.existsSync(STAAT + '.niet-van-ons'));
     }
+    {   // wv2940: tweedehands = een ronde extra op eBay en marktplaatsen (EU + VK); eBay niet lezen maar 'niet nagelezen'; alleen geziene itemlinks
+      const zk = [], gl = [];
+      const EB = (n, extra) => Object.assign({ winkel: 'eBay UK', product: 'Proefscanner model ' + n + ' (gebruikt)', url: 'https://www.ebay.co.uk/itm/10000000' + n, prijs_tekst: '£' + (100 + n) + '.00', opmerking: null, gezien: true }, extra || {});
+      const MP = { winkel: 'Marktplaats', product: 'Proefscanner model 9', url: 'https://www.marktplaats.nl/v/zakelijke-goederen/m200000009-proefscanner', prijs_tekst: '€ 300,00', opmerking: null, gezien: true };
+      const markt = [EB(1), EB(2, { gezien: false }), EB(3, { url: 'https://www.ebay.de/shop/proefscanner?_nkw=proefscanner' }), EB(4), EB(5), EB(6), MP,
+        { winkel: 'Marktplaats', product: 'zoekpagina', url: 'https://www.marktplaats.nl/l/zakelijke-goederen/q/proefscanner/', prijs_tekst: null, opmerking: null, gezien: true }];
+      const zoekT = async (z) => { zk.push(z); return z.domeinen.indexOf('ebay.co.uk') >= 0 ? { ok: true, usd: 0.03, kandidaten: markt } : { ok: true, usd: 0.05, kandidaten: [K(70)] }; };
+      const lezerT = async (url) => { gl.push(url); return url === MP.url ? { url, winkel: 'anders', product: 'Proefscanner model 9', prijs_eur: 300, verzending_eur: null } : { url, winkel: 'bol', product: 'Proefkast metaal 180 cm 70', prijs_eur: 30, verzending_eur: 0 }; };
+      const vt = SV.maak({ vault: V, vv: VV, lezer: lezerT, zoek: zoekT, poort: POORT, staatPad: path.join(W, 'shopper-vergelijk-2e.json'), nu: () => klok, opruimTik: false });
+      const wachtT = async (id) => { for (let i = 0; i < 200; i++) { const x = vt.stand(id).body.vergelijk; if (x && ['klaar', 'mislukt'].indexOf(x.stand) >= 0) return x; await new Promise((y) => setTimeout(y, 5)); } return null; };
+      const ut = await wachtT(vt.start({ wens: 'Proefscanner tweedehands', eisen: ['met probe'] }).body.vergelijk.id);
+      const mr = zk.filter((z) => z.domeinen.indexOf('ebay.co.uk') >= 0);
+      toets('12za tweedehands in de wens: drie zoekrondes, de derde alleen op eBay (VK/DE/NL/FR) en de marktplaatsen; afnemer shopper-snel', zk.length === 3 && mr.length === 1
+        && JSON.stringify(mr[0].domeinen) === JSON.stringify(['ebay.co.uk', 'ebay.de', 'ebay.nl', 'ebay.fr', 'marktplaats.nl', '2dehands.be', 'kleinanzeigen.de'])
+        && /ook uit het VK/.test(mr[0].vraag) && mr[0].afnemer === 'shopper-snel' && ut.usd === 0.13, { zk, usd: ut.usd });
+      const urls = (ut.niet_gelezen || []).map((x) => x.url);
+      toets('12zb eBay niet gelezen (403) maar als niet nagelezen, prijs onbekend (geen ongecontroleerde zoekprijs), hooguit 3; nooit een link die niet in de bronnen stond of een zoekpagina',
+        !gl.some((x) => /ebay\./.test(x)) && urls.length === 3 && urls[0] === EB(1).url && /niet nagelezen, prijs onbekend/.test(ut.niet_gelezen[0].reden) && !JSON.stringify(ut).includes('£10')
+        && !JSON.stringify(ut).includes(EB(2).url) && !JSON.stringify(ut).includes('/shop/proefscanner') && !JSON.stringify(ut).includes('/l/zakelijke-goederen'), ut.niet_gelezen);
+      toets('12zc de advertentie op Marktplaats wordt gewoon gelezen (refurbished/tweedehands-optie)', gl.indexOf(MP.url) >= 0 && ut.opties.some((x) => x.url === MP.url && x.prijs_eur === 300), ut.opties);
+      const kd = vt.kandidaten(ut.id), eb = kd.rest.find((x) => x.url === EB(1).url), eb6 = kd.rest.find((x) => x.url === EB(6).url);
+      const blok = S.kandidatenBlok(kd);
+      toets('12zd naar de grondige agent: eBay-kandidaten met niet_nagelezen (ook boven de 3), zonder zoekprijs; het blok zegt ze niet te laten vallen',
+        eb && /403/.test(eb.niet_nagelezen) && eb.prijs_zoekresultaat === undefined && !blok.includes('£10') && eb6 && /403/.test(eb6.niet_nagelezen) && /niet_nagelezen kon de pod niet lezen: laat hem niet vallen/.test(blok)
+        && /eBay en marktplaatsen in de EU en het VK/.test(blok) && blok.indexOf(EB(1).url) > 0, { kd, blok: blok.slice(0, 400) });
+      zk.length = 0;
+      await wachtT(vt.start({ wens: 'Proefkast metaal' }).body.vergelijk.id);
+      const zk2 = zk.length; zk.length = 0;
+      await wachtT(vt.start({ wens: 'Proefkast metaal', refurbished: true }).body.vergelijk.id);
+      const zk3 = zk.length; zk.length = 0;
+      const zkand = await vt.zoekKandidaten({ wens: 'Proefscanner 2e hands', eisen: [] });
+      toets('12ze zonder tweedehandswens geen marktplaatsronde; vinkje refurbished of "2e hands" (ook Laat Shopper zoeken) wel', zk2 === 1 && zk3 === 2 && zk.length === 2
+        && zkand.rest.some((x) => x.url === EB(1).url && /niet nagelezen/.test(x.niet_nagelezen)), { zk2, zk3, n: zk.length });
+      toets('12zf hulpfuncties: tweedehands, onleesbaar en marktItem', SV.tweedehands({ wens: 'Bladderscan', eisen: ['mag gebruikt'] }) && SV.tweedehands({ wens: 'x', refurbished: true }) && !SV.tweedehands({ wens: 'Bladderscan', eisen: [] })
+        && SV.onleesbaar('https://www.ebay.co.uk/itm/1') && !SV.onleesbaar('https://www.marktplaats.nl/v/a/m1-x') && !SV.onleesbaar('https://nepebay.nl/itm/1')
+        && SV.marktItem('https://www.ebay.de/p/2326106066') && !SV.marktItem('https://www.ebay.co.uk/sch/i.html?_nkw=x') && SV.marktItem('https://www.kleinanzeigen.de/s-anzeige/x/1'));
+    }
     // server.js en uitrol
     const src = fs.readFileSync('server.js', 'utf8'), s0 = src.indexOf('const shopper = (function () {'), s1 = src.indexOf('// ── einde OVIS Shopper ──'), bl = src.slice(s0, s1);
     toets('12y server.js: POST vergelijk 10/uur, GET stand stil in het app-log, bewaar via shopper_status, staat shopper-vergelijk.json, zoek via openaiHulp.zoek; reden zonder wens',
