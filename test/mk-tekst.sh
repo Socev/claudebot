@@ -86,6 +86,13 @@ fs.writeFileSync(pagina, '# Grondwet\n\n## Het blok\n\n```\n' + M.GRONDWET + '\n
 fs.writeFileSync(kopie, '\n```\n' + M.GRONDWET + '\n```\n\nWERKVOORRAAD-SLOTREGEL ...\n');
 toets('blokUitPagina = vaste kopie (zelfde ontleding als het oude autoGrondwet)', M.blokUitPagina(fs.readFileSync(pagina, 'utf8')) === M.GRONDWET);
 toets('GRONDWET begint met GRONDWET-KERN v1', M.GRONDWET.indexOf('GRONDWET-KERN v1') === 0 && M.GRONDWET.split('\n').length > 30);
+// wv2918 (Davids Ja 11-11 12:20, 1c8b33e5): de grondwet is een korte kern; toestemmingen voor pod-onderdelen staan in het register
+// /opt/data/mk-scripts/toestemmingen.json, niet in het blok. Rem: meer dan 50 regels of 3.500 tekens, of een aanvulling erin = rood.
+toets('wv2918 rem: kern <= 50 regels en <= 3.500 tekens', M.GRONDWET.split('\n').length <= 50 && M.GRONDWET.length <= 3500, [M.GRONDWET.split('\n').length, M.GRONDWET.length]);
+toets('wv2918 rem: geen "Aanvulling (David" in de kern', M.GRONDWET.indexOf('Aanvulling (David') < 0);
+toets('wv2918: kern verwijst naar het toestemmingenregister, machinekamertekst ook', M.GRONDWET.indexOf('/opt/data/mk-scripts/toestemmingen.json (alleen die bron telt') >= 0 &&
+  M.MK_INSTRUCTIE.indexOf('lees dan eerst zijn rij in /opt/data/mk-scripts/toestemmingen.json') >= 0);
+toets('wv2918: WERKMAP_TEKST (managers) draagt dezelfde kern', fs.readFileSync('managers-poort.js', 'utf8').indexOf(M.GRONDWET.split('\n').map(function (r) { return '  ' + JSON.stringify(r); }).join(',\n')) >= 0);
 r = M.grondwetDrift(pagina, kopie); toets('geen drift', r.drift === false && r.vault === 'gelijk' && r.kopie === 'gelijk', r);
 fs.writeFileSync(pagina, fs.readFileSync(pagina, 'utf8').replace('NIETS NAAR BUITEN', 'KANARIE'));
 r = M.grondwetDrift(pagina, kopie); toets('vaultblok gewijzigd: drift', r.drift === true && r.vault === 'wijkt af', r);
