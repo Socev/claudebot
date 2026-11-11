@@ -407,7 +407,8 @@ const POORT_NAAM_MAG = new Set(['tolgaarde', 'groenhouten', 'pot', 'holding', 'p
   'hp', 'lg', 'aeg', 'jbl', 'asus', 'acer']);
 function naamIn(x) {
   // review ronde 5: alles behalve letters, cijfers, punt, apostrof en koppelteken scheidt woorden ([Naam], {Naam}, <Naam>, «Naam», /Naam)
-  const w = String(x).split(/[^\p{L}\p{N}.'’-]+/u).filter(Boolean);
+  // ronde 6: tekens om een woord heen ('Jan', "Jan", -Jan-, Jan.) gaan eraf vóór de hoofdlettercontrole
+  const w = String(x).split(/[^\p{L}\p{N}.'’-]+/u).map((t) => t.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')).filter(Boolean);
   for (let i = 0; i < w.length - 1; i++) {
     if (!NAAM_VOORZETSEL.has(w[i].toLowerCase().replace(/\./g, ''))) continue;
     let k = i + 1;
