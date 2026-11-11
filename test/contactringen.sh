@@ -46,7 +46,7 @@ const CONTACT = {
   'cees verzonnen': [{ weergavenaam: 'Cees Verzonnen', telefoons_e164: ['+31600000103'] }],
   'dirk nepper': [{ weergavenaam: 'Dirk Nepper', telefoons_e164: ['+31330000104'] }],
   'pa nep mob': [{ weergavenaam: 'Pa Nep Mob', telefoons_e164: ['+31600000105'] }],
-  'eef nepper': [{ weergavenaam: 'Eef Nepper', telefoons_e164: ['+31600000106'] }],
+  'eef nepper': [{ weergavenaam: 'Eef Nepper', telefoons_e164: ['+31600000106'], verjaardag: '1950-11-25' }],   // geen_signaal: ook geen verjaardag
   'fien onvindbaar': []
 };
 let DATUMS = { '31600000101@c.us': '2026-11-01', '31600000102@c.us': '2026-09-20', '31600000103@c.us': '2026-09-01', '31330000104@c.us': null, '31600000105@c.us': '2026-09-10', '31600000106@c.us': '2026-01-01', '31600000999@c.us': '2026-11-14' };
@@ -119,7 +119,8 @@ const NR = /\d{8,}/;
   const gevallen = [
     ['ringpagina weg', { ringTekst: async () => { throw new Error('ENOENT'); } }, /ringpagina niet leesbaar/],
     ['ringpagina andere vorm', { ringTekst: async () => '# leeg\n' }, /verwachte vorm/],
-    ['contacten fout secret', { contacten: async () => ({ ok: false, fout: 'secret' }) }, /contacten-webhook gaf fout secret/],
+    ['contacten fout secret', { contacten: async () => ({ ok: false, fout: 'secret' }) }, /contacten-webhook weigerde de sleutel/],
+    ['contacten fout met tekst', { contacten: async () => ({ ok: false, fout: 'Jan Nepnaam 06-12 34 56 78 onbekend' }) }, /^contacten-webhook gaf een fout$/],
     ['contacten onbereikbaar', { contacten: async () => { throw new Error('http 500 +31600000101'); } }, /contacten-webhook onbereikbaar/],
     ['luik onbereikbaar', { datums: async () => { throw new Error('http 500'); } }, /zoekluik onbereikbaar/],
     ['luik oude vorm (chats)', { datums: async () => ({ aantal: 1, chats: [{ id: '31600000101@c.us', naam: 'x' }] }) }, /ander antwoord/],
@@ -132,7 +133,8 @@ const NR = /\d{8,}/;
     const dag = new Date(zo).toISOString().slice(0, 10); zo += 7 * 86400000;
     x = maak(Object.assign({ staatPad: path.join(d, 'fc' + (nr++), 'staat.json') }, over)); u = await x.k.doe({ ams: { datum: dag, uur: 6, min: 40 } });
     const box = x.box.join('');
-    toets('fail-closed ' + naam + ': ok, geen regel, één box-rij, geen nummer', u.ok === true && re.test(u.detail.fout) && (naam === 'buffer faalt' || x.buf.length === 0) && x.box.length === 1 && /#contactringen/.test(box) && !NR.test(box + JSON.stringify(u) + JSON.stringify(x.log)), [u, box.slice(0, 200)]);
+    const alles = box + JSON.stringify(u) + JSON.stringify(x.log) + fs.readFileSync(x.o.staatPad, 'utf8');
+    toets('fail-closed ' + naam + ': ok, geen regel, één box-rij, geen nummer of externe tekst', u.ok === true && re.test(u.detail.fout) && (naam === 'buffer faalt' || x.buf.length === 0) && x.box.length === 1 && /#contactringen/.test(box) && !NR.test(alles) && !/Nepnaam|34 56/.test(alles), [u, box.slice(0, 200)]);
     if (naam === 'buffer faalt') {
       const s3 = JSON.parse(fs.readFileSync(x.o.staatPad, 'utf8'));
       toets('buffer faalt: niemand als gemeld vastgelegd (volgende zondag opnieuw)', Object.values(s3.personen).every(p => !p.gemeld_op && !p.jarig_jaar), s3);
@@ -150,6 +152,24 @@ const NR = /\d{8,}/;
   x = maak({ ringTekst: async () => ring2, staatPad: path.join(d, 'cr2', 'staat.json') });
   u = await x.k.doe({ ams: ZO });
   toets('35 personen: twee luikaanroepen (30 + 5)', x.vraag.datums.length === 2 && x.vraag.datums[0].length === 30 && x.vraag.datums[1].length === 5 && u.ok, x.vraag.datums.map(a => a.length));
+  // review MOET 2: 35 stil → hooguit 5 in de regel, alleen die 5 als gemeld; volgende week de volgende 5
+  for (let i = 0; i < 35; i++) DATUMS['316100000' + String(i).padStart(2, '0') + '@c.us'] = '2026-08-01';
+  const sp2 = path.join(d, 'cr3', 'staat.json');
+  x = maak({ ringTekst: async () => ring2, staatPad: sp2 }); u = await x.k.doe({ ams: ZO });
+  let gem = Object.values(JSON.parse(fs.readFileSync(sp2, 'utf8')).personen).filter(p => p.gemeld_op).length;
+  const n1 = (x.buf[0][1].match(/P\d+/g) || []).length;
+  toets('35 stil: 5 in de regel (≤ 400 tekens, niet afgekapt), 5 als gemeld, 30 wachten', n1 === 5 && x.buf[0][1].length <= 400 && !/…/.test(x.buf[0][1]) && gem === 5 && u.detail.wacht === 30, [n1, gem, u.detail, x.buf[0][1].length]);
+  x = maak({ ringTekst: async () => ring2, staatPad: sp2 }); u = await x.k.doe({ ams: { datum: '2026-11-22', uur: 6, min: 40 } });
+  gem = Object.values(JSON.parse(fs.readFileSync(sp2, 'utf8')).personen).filter(p => p.gemeld_op).length;
+  toets('week erna: de volgende 5 (andere namen), 10 als gemeld', x.buf.length === 1 && gem === 10 && u.detail.stil === 5, [gem, u.detail]);
+  toets('kies: lange namen → minder personen, nooit boven 400', (() => { const s = Array.from({ length: 5 }, (_, i) => ({ voornaam: 'X'.repeat(90) + i, weken: 9 })); const k = C._intern.kies(s, []); return k.tekst.length <= 400 && k.stil.length < 5 && k.stil.length > 0; })());
+  // review ZOU 1: toekomstige of onechte datum telt niet en wekt geen melding op een oude opgeslagen datum
+  toets('isDatum: 2026-02-30 en vrije tekst niet', !C._intern.isDatum('2026-02-30') && !C._intern.isDatum('gisteren') && C._intern.isDatum('2026-02-28'));
+  const sp4 = path.join(d, 'cr4', 'staat.json'); fs.mkdirSync(path.dirname(sp4), { recursive: true });
+  fs.writeFileSync(sp4, JSON.stringify({ personen: { '20_Prive/Nep/Persoon 0': { laatst_gezien: '2026-01-01', gemeld_op: null, jarig_jaar: null } } }));
+  x = maak({ ringTekst: async () => '## Ring 1\n### Overig ring 1\n- [[20_Prive/Nep/Persoon 0|P0]]\n', staatPad: sp4, datums: async (ids) => ({ datums: { [ids[0]]: '2027-05-01' } }) });
+  u = await x.k.doe({ ams: ZO });
+  toets('toekomstige datum: blind, geen melding op de oude opgeslagen datum', x.buf.length === 0 && u.detail.blind === 1 && u.detail.stil === 0, [u, x.buf]);
 
   // 10. verjaardag zonder jaar ('--MM-DD') en over de jaargrens
   toets('verjaardag --01-03 vanaf 28-12 → volgend jaar', C._intern.volgendeJarig('--01-03', '2026-12-28') === '2027-01-03');
