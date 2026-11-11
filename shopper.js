@@ -406,7 +406,8 @@ const POORT_NAAM_MAG = new Set(['tolgaarde', 'groenhouten', 'pot', 'holding', 'p
   'makita', 'dyson', 'nespresso', 'sonos', 'garmin', 'omron', 'braun', 'tefal', 'riester', 'heine', 'seca', 'kern', 'littmann', 'hama', 'gazelle', 'lego', 'nintendo',
   'hp', 'lg', 'aeg', 'jbl', 'asus', 'acer']);
 function naamIn(x) {
-  const w = String(x).split(/[\s,;:()"“”]+/).filter(Boolean);
+  // review ronde 5: alles behalve letters, cijfers, punt, apostrof en koppelteken scheidt woorden ([Naam], {Naam}, <Naam>, «Naam», /Naam)
+  const w = String(x).split(/[^\p{L}\p{N}.'’-]+/u).filter(Boolean);
   for (let i = 0; i < w.length - 1; i++) {
     if (!NAAM_VOORZETSEL.has(w[i].toLowerCase().replace(/\./g, ''))) continue;
     let k = i + 1;
