@@ -5402,6 +5402,7 @@ const APP_HERSTEL_VERVALT = path.join(APP_DATA, 'herstel-vervalt'); // machineka
 const APP_SESSIES = path.join(APP_DATA, 'sessies.json');          // wv231: sessies over een herstart (alleen hash, geen token; § 4.4e)
 const APP_VAST = path.join(APP_DATA, 'vast.json');                // wv1051 (OVIS M1b): vastgezette plekken en Apps, alleen id's
 const APP_APPS_VOLGORDE = path.join(APP_DATA, 'apps-volgorde.json');   // wv2479: Apps-overzicht — eigen volgorde, favorieten, sortering (alleen App-id's)
+const APP_WERKRUIMTES = path.join(APP_DATA, 'werkruimtes.json');   // wv2929: eigen werkruimtes (sets tabs + indeling; alleen id's)
 const APP_APPS_GEOPEND = path.join(APP_DATA, 'apps-geopend.json');     // wv2479: openingen per App per dag (alleen aantallen, 120 dagen)
 // § 4.3: de ene lijst privé-App-id's (catalogus src/modules.ts). Alleen als een vaste plek afschermt (APP_VAST_AFSCHERMEN, sinds wv1901
 // uit): dan weigeren de routes hieronder en gaat vast.json daar zonder deze id's naar de app (geen privé-App in het menu).
@@ -13706,6 +13707,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/facturen' || route.indexOf(' /app/facturen/') > 0) return typeof appFacturen === 'function' ? appFacturen(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'facturen');   // wv833: App Facturen
         if (route === 'GET /app/vast' || route === 'POST /app/vast') return appVastRoute(req, res, a, d);   // wv1051 (OVIS M1b): vastzetten
         if (route === 'GET /app/apps-volgorde' || route === 'POST /app/apps-volgorde') return appAppsVolgordeRoute(req, res, a, d);   // wv2479: Apps-overzicht (volgorde, favorieten)
+        if (route === 'GET /app/werkruimtes' || route === 'POST /app/werkruimtes') return appWerkruimtesRoute(req, res, a, d);   // wv2929: eigen werkruimtes
         if (route === 'POST /app/apps-geopend') return appAppsGeopendRoute(req, res, a, d);   // wv2479: openingsteller per App per dag
         if (route === 'GET /app/mediatheek' || /^GET \/app\/mediatheek\/bestand\/[a-f0-9]{16}$/.test(route)) return typeof appMediatheek === 'function' ? appMediatheek(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mediatheek');   // wv1269: App Mediatheek (alleen lezen)
         if (route === 'GET /app/tokens/openai' || route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
@@ -16414,6 +16416,33 @@ function appAppsVolgordeRoute(req, res, a, d) {
   if (!u.veranderd) return antwoord(nu);
   try { appSchrijfJson(APP_APPS_VOLGORDE, L.naarBestand(u.stand, new Date().toISOString())); }
   catch (e) { logError('apps-volgorde.json schrijven', e); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo nog eens', 'volgorde schrijven'); }
+  return antwoord(u.stand);
+}
+// wv2929 (OVIS als besturingssysteem, fase 4): GET/POST /app/werkruimtes. Logica in app-vast.js (werkruimtesUitBestand, werkruimtePas,
+// werkruimtesVoorApparaat); hier lezen, schrijven (atomisch, alleen dit proces) en antwoorden, zoals de Apps-volgorde. werkruimtes.json:
+// { versie, bijgewerkt, sets: { <id>: { tabs, naast } } } (alleen id's). Op een vaste plek: lezen zonder privé-App, bewaren 403.
+function appWerkruimtesRoute(req, res, a, d) {
+  const L = appVastModule();
+  if (!L || typeof L.werkruimtePas !== 'function') return appWeiger(res, 404, 'onbekend', 'werkruimtes ontbreekt');
+  const vp = appAfscherm(a);
+  let j = null;
+  try { j = appLeesStreng(APP_WERKRUIMTES, null); }
+  catch (e) {
+    logError('werkruimtes.json', e);
+    try { fs.renameSync(APP_WERKRUIMTES, APP_WERKRUIMTES + '.kapot-' + Date.now()); } catch (e2) {}
+  }
+  const nu = L.werkruimtesUitBestand(j);
+  const antwoord = function (stand, status, extra) {
+    appStuur(res, status || 200, Object.assign({ ok: status ? false : true }, L.werkruimtesVoorApparaat(stand, vp, APP_PRIVE_MODULES), { vaste_plek: vp }, extra || {}));
+  };
+  if (req.method !== 'POST') { res._app.reden = 'werkruimtes'; res._app.stil = true; return antwoord(nu); }
+  const u = L.werkruimtePas(nu, d, vp);
+  if (!u.ok && u.status === 409) { res._app.reden = u.reden; return antwoord(nu, 409, { fout: u.fout }); }
+  if (!u.ok) return appWeiger(res, u.status, u.fout, u.reden);
+  res._app.reden = 'werkruimte ' + d.id + (d.set === null ? ' standaard' : '') + (u.veranderd ? '' : ' (al zo)');
+  if (!u.veranderd) return antwoord(nu);
+  try { appSchrijfJson(APP_WERKRUIMTES, L.werkruimtesNaarBestand(u.stand, new Date().toISOString())); }
+  catch (e) { logError('werkruimtes.json schrijven', e); return appWeiger(res, 500, 'bewaren lukte niet; probeer het zo nog eens', 'werkruimte schrijven'); }
   return antwoord(u.stand);
 }
 var appAppsLaatst = null;   // id → ms van de laatste getelde opening (dubbel binnen een minuut telt één keer); var: zie server-js-tdz
