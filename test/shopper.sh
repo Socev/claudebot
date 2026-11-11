@@ -580,7 +580,10 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       && S.poortVrij(POORT, ['weegschaal voor de spreekkamer']) && S.poortVrij(POORT, ['meter van KERN']) && S.poortVrij(POORT, ['hoesje voor iPhone 15'])
       // ronde 2: voorzetsel met hoofdletter, tussenvoegsel met hoofdletter, alles in hoofdletters; entiteit + plaats samen mag
       && !S.poortVrij(POORT, ['Voor Proefnaam: bureaulamp']) && !S.poortVrij(POORT, ['lamp voor De Proefnaam']) && !S.poortVrij(POORT, ['LAMP VOOR PROEFNAAM']) && !S.poortVrij(POORT, ['kast van der Proefnaam']) && !S.poortVrij(POORT, ['bloeddrukmeter voor Van den Bosch']) && !S.poortVrij(POORT, ['lamp voor de Philips']) && ['[Proefnaam]', '{Proefnaam}', '<Proefnaam>', '«Proefnaam»', '/Proefnaam', '*Proefnaam*', "'Proefnaam'", '’Proefnaam’', '-Proefnaam-', 'Proefnaam.', '..Proefnaam', "'t Proefnaam", '’t Proefnaam', 'v.d. Proefnaam', 'von Proefnaam', 'in ’t Proefnaam'].every((v) => !S.poortVrij(POORT, ['bloeddrukmeter voor ' + v])) && ['tbv', 'tbv.', 't.b.v.', 't.b.v', 'T.B.V.', 'TBV'].every((v) => !S.poortVrij(POORT, ['kast ' + v + ' Proefnaam']))
-      && S.poortVrij(POORT, ['kast voor Groenhouten Leusden']) && S.poortVrij(POORT, ['Voor de praktijk: printerpapier']));
+      && S.poortVrij(POORT, ['kast voor Groenhouten Leusden']) && S.poortVrij(POORT, ['Voor de praktijk: printerpapier'])
+      // rooktoets 11-11: afkortingen in hoofdletters zijn geen naam (wel als de hele tekst in hoofdletters staat)
+      && S.poortVrij(POORT, ['Otoscoop met LED-licht', 'met wegwerpspeculums erbij']) && S.poortVrij(POORT, ['kabel met USB-C en HDMI']) && S.poortVrij(POORT, ['papier voor A4-printer'])
+      && !S.poortVrij(POORT, ['kabel voor Proefnaam met USB']));
     toets('11k eenheidStuks: stuk/""/set van 2/2 stuks/4-pack/doos van 10/per meter', S.eenheidStuks('1 stuk') === 1 && S.eenheidStuks('') === 1 && S.eenheidStuks('set van 2') === 2 && S.eenheidStuks('2 stuks') === 2
       && S.eenheidStuks('4-pack') === 4 && S.eenheidStuks('doos van 10') === 10 && S.eenheidStuks('per meter') === null);
     // privacypoort (verzonnen teksten)
