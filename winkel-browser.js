@@ -191,6 +191,22 @@ function maak(o) {
   return { lees, mag, info };
 }
 
+// review MOET 2 (ronde 1 en 2): de hoofdpagina laadt alleen de gevraagde (al door --mag getoetste) productpagina, ook bij het herladen na de
+// controle en ook na een HTTP-doorsturing. Via de CDP-Fetch-laag, want Playwrights route ziet doorgestuurde aanvragen niet (gemeten
+// 11-11-2026: met Fetch kwam een 302 naar een ander pad op dezelfde host niet bij de server aan). Beelden, video en lettertypen niet laden.
+async function bewaak(ctx, page, url) {
+  const zonderHekje = (u) => String(u || '').split('#')[0];
+  const cdp = await ctx.newCDPSession(page);
+  const hoofd = (await cdp.send('Page.getFrameTree')).frameTree.frame.id;
+  cdp.on('Fetch.requestPaused', function (e) {
+    const weg = (e.resourceType === 'Image' || e.resourceType === 'Media' || e.resourceType === 'Font')
+      || (e.resourceType === 'Document' && e.frameId === hoofd && zonderHekje(e.request.url) !== zonderHekje(url));
+    cdp.send(weg ? 'Fetch.failRequest' : 'Fetch.continueRequest', weg ? { requestId: e.requestId, errorReason: 'BlockedByClient' } : { requestId: e.requestId }).catch(() => null);
+  });
+  await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
+  return cdp;
+}
+
 // ── het kind: één pagina openen, controle afwachten, HTML wegschrijven ──
 async function kind(invoerPad, uitPad) {
   const d = JSON.parse(fs.readFileSync(invoerPad, 'utf8'));
@@ -199,7 +215,6 @@ async function kind(invoerPad, uitPad) {
   const tot = Date.now() + d.ms;
   const rest = () => Math.max(1000, tot - Date.now());
   const host = new URL(d.url).hostname;
-  const zonderHekje = (u) => String(u || '').split('#')[0];
   let browser, page;
   const px = maakProxy(basisDomein(host));
   await new Promise((k) => px.srv.listen(0, '127.0.0.1', k));
@@ -209,14 +224,8 @@ async function kind(invoerPad, uitPad) {
     try { browser = await pw.chromium.launch({ executablePath: d.exe, headless: true, chromiumSandbox: true, timeout: rest(), proxy }); }
     catch (e) { browser = await pw.chromium.launch({ executablePath: d.exe, headless: true, chromiumSandbox: false, timeout: rest(), proxy }); }
     const ctx = await browser.newContext({ locale: 'nl-NL', timezoneId: 'Europe/Amsterdam', acceptDownloads: false });
-    await ctx.route('**/*', function (route) {
-      const req = route.request();
-      // review MOET 2: de hoofdpagina mag alleen de gevraagde (al door --mag getoetste) productpagina laden, ook bij het herladen na de controle
-      if (req.isNavigationRequest() && req.frame() === page.mainFrame() && zonderHekje(req.url()) !== zonderHekje(d.url)) return route.abort();
-      if (['image', 'media', 'font'].indexOf(req.resourceType()) >= 0) return route.abort();
-      return route.continue();
-    });
     page = await ctx.newPage();
+    await bewaak(ctx, page, d.url);
     const r = await page.goto(d.url, { waitUntil: 'domcontentloaded', timeout: rest() });
     let status = r ? r.status() : 0;
     let controle = CONTROLE.test(await page.title().catch(() => ''));
@@ -240,4 +249,4 @@ if (require.main === module && process.argv[2] === '--kind') {
   kind(process.argv[3], process.argv[4]).then(() => process.exit(0), () => process.exit(1));
 }
 
-module.exports = { maak, chromiumPad, CONTROLE, maakProxy, hostMag, basisDomein, doodOmgeving };
+module.exports = { maak, chromiumPad, CONTROLE, bewaak, maakProxy, hostMag, basisDomein, doodOmgeving };

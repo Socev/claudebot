@@ -9,6 +9,7 @@
 #  3. winkel-browser.js: kale omgeving in het kind, cache (geen tweede kind), rij-grens (druk), harde tijdsgrens (kind weg), weigering
 #     zonder kind, uitkomst met route browser
 #  4. shopper-winkels.domeinenVoor: lezen: browser telt alleen mee met metBrowser
+#  5. bewaak() met een echte Chromium: hoofdframe alleen de gevraagde url, ook niet na een 302; geen beelden (zonder Chromium overgeslagen)
 # Gebruik: bash test/winkel-browser.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -191,4 +192,43 @@ const toets = (n, ok, x) => { if (ok) goed++; else fout++; console.log((ok ? 'GR
 })();
 JS
 JSUIT=$?
-[ "$PYUIT" = 0 ] && [ "$JSUIT" = 0 ] && echo "winkel-browser: alles groen" || { echo "winkel-browser: ROOD"; exit 1; }
+
+# ── 5. review ronde 2: bewaking met een echte Chromium (alleen als die er is; in CI zonder browser overgeslagen) ──
+node - "$PWD/winkel-browser.js" <<'JS'
+const http = require('http'), path = require('path');
+const WB = require(process.argv[2]);
+const exe = WB.chromiumPad();
+let pw = null;
+try { pw = require('/usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright-core'); } catch (e) { pw = null; }
+if (!exe || !pw) { console.log('OVERGESLAGEN 5 (geen Chromium of Playwright op deze machine)'); process.exit(0); }
+let goed = 0, fout = 0;
+const toets = (n, ok, x) => { if (ok) goed++; else fout++; console.log((ok ? 'GROEN ' : 'ROOD  ') + n + (ok || x === undefined ? '' : '  [' + JSON.stringify(x).slice(0, 300) + ']')); };
+const zag = [];
+const srv = http.createServer((q, r) => { zag.push(q.url);
+  if (q.url === '/a') { r.writeHead(302, { Location: '/verboden' }); return r.end(); }
+  if (q.url === '/p') return r.end('<html><head><title>Proef</title></head><body><img src="/beeld.png"><p>proef</p></body></html>');
+  r.end('x'); });
+(async () => {
+  await new Promise((k) => srv.listen(0, '127.0.0.1', k));
+  const basis = 'http://127.0.0.1:' + srv.address().port;
+  const b = await pw.chromium.launch({ executablePath: exe, headless: true });
+  try {
+    for (const [doel, naam] of [[basis + '/p', 'gevraagde pagina']]) {
+      const ctx = await b.newContext(); const page = await ctx.newPage(); await WB.bewaak(ctx, page, doel);
+      const r = await page.goto(doel).catch((e) => null);
+      toets('5a ' + naam + ' laadt, beeld niet opgehaald', r && r.status() === 200 && zag.indexOf('/beeld.png') < 0, zag);
+      const n = await page.goto(basis + '/ander').then(() => 'geladen', (e) => 'geweigerd');
+      toets('5b andere pagina in het hoofdframe geweigerd', n === 'geweigerd' && zag.indexOf('/ander') < 0, { n, zag });
+      await ctx.close();
+    }
+    const ctx = await b.newContext(); const page = await ctx.newPage(); await WB.bewaak(ctx, page, basis + '/a');
+    const n = await page.goto(basis + '/a').then(() => 'geladen', (e) => 'geweigerd');
+    toets('5c doorsturen (302) naar een ander pad op dezelfde host: niet opgehaald', n === 'geweigerd' && zag.indexOf('/a') >= 0 && zag.indexOf('/verboden') < 0, { n, zag });
+    await ctx.close();
+  } finally { await b.close(); srv.close(); }
+  console.log('BROWSER ' + goed + ' groen, ' + fout + ' rood');
+  process.exit(fout ? 1 : 0);
+})();
+JS
+BRUIT=$?
+[ "$PYUIT" = 0 ] && [ "$JSUIT" = 0 ] && [ "$BRUIT" = 0 ] && echo "winkel-browser: alles groen" || { echo "winkel-browser: ROOD"; exit 1; }
