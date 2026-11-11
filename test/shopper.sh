@@ -2,7 +2,7 @@
 # Toetst OVIS Shopper S3 (wv2264, 2-11-2026; favorieten wv2267 § 6): shopper.js (alleen type: shopper-zoektocht direct in de vaste Shopper-mappen, entiteit uit de map,
 # geen symlink volgen, id = hash van het pad en nooit een pad uit de vraag, koop-link alleen https, totaal/advies uit de opties) en het
 # server.js-blok (routes, audit zonder wens, Niet meer nodig = de enige schrijfactie, gekocht niet via de App, /health alleen aantallen + tijdstip,
-# uitrol-lijst; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase; § 8 de knop Gekocht en Toch niet gekocht, wv2275). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
+# uitrol-lijst; § 12 Snel vergelijken wv2934 met nep-zoekhulp en nep-winkels; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase; § 8 de knop Gekocht en Toch niet gekocht, wv2275). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
 if grep -nE "console\.|eval\(" shopper.js; then echo "ROOD  shopper.js logt naar de console of gebruikt eval"; exit 1; fi
@@ -655,6 +655,133 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('11zb server.js: POST /app/shopper/nieuw met 6/uur en 12/dag, poort = patiëntpoort, staat shopper-nieuw.json, alleen twee labels', /route === 'POST \/app\/shopper\/nieuw'/.test(blok11)
       && /appTeller\('shopper_nieuw', 6, 3600000\)/.test(blok11) && /appTeller\('shopper_nieuw_dag', 12, 86400000\)/.test(blok11) && /intake', 'patientpoort\.js'/.test(blok11) && /poort: poort/.test(blok11)
       && /shopper-nieuw\.json/.test(blok11) && /label === 'socev: Shopper nieuw' \? 'socev: Shopper nieuw' : 'socev: Shopper opnieuw'/.test(blok11));
+  }
+
+  // ── 12. wv2934: Snel vergelijken (shopper-vergelijk.js): nep-zoekhulp en nep-winkels, poort, plafond, alleen gelezen waarden, bewaren, kandidaten ──
+  {
+    const SV = require('./shopper-vergelijk.js');
+    const PP = require('./intake/patientpoort.js'), POORT = (t) => PP.beoordeel({ teksten: t }, { eigen: PP.maakEigen(null, {}) });
+    const SYS = path.join(V, '00_Systeem'); fs.mkdirSync(SYS, { recursive: true });
+    fs.writeFileSync(path.join(SYS, 'Shopper - favoriete winkels.md'), '---\ntype: shopper-favorieten\nwinkels:\n  - {domein: tweakers.net, naam: "Tweakers", aan: true}\n  - {domein: proefwinkel.nl, naam: "Proefwinkel", aan: true}\n  - {domein: uitwinkel.nl, naam: "Uit", aan: false}\n---\n');
+    let klok = new Date('2026-11-11T15:00:00Z');   // woensdag 16:00 NL
+    const zoeken = [], gelezen = [];
+    let zoekAntw = null, lezerAntw = {}, lezerWacht = null, tegelijk = 0, maxTegelijk = 0;
+    const nepZoek = async (z) => { zoeken.push(z); if (typeof zoekAntw === 'function') return zoekAntw(z); return zoekAntw; };
+    const nepLezer = async (url) => {
+      gelezen.push(url); tegelijk++; maxTegelijk = Math.max(maxTegelijk, tegelijk);
+      try { if (lezerWacht) await lezerWacht(url); return lezerAntw[url] === undefined ? { url, winkel: 'bol', product: 'Proefkast metaal', prijs_eur: 30, verzending_eur: 0, levertijd: 'morgen in huis' } : lezerAntw[url]; }
+      finally { tegelijk--; }
+    };
+    const STAAT = path.join(W, 'shopper-vergelijk.json');
+    const mk = () => SV.maak({ vault: V, vv: VV, lezer: nepLezer, zoek: nepZoek, poort: POORT, staatPad: STAAT, nu: () => klok });
+    let v = mk();
+    const wacht = async (id, st) => { for (let i = 0; i < 200; i++) { const r = v.stand(id); if (r.body.vergelijk && (st || ['klaar', 'mislukt']).indexOf(r.body.vergelijk.stand) >= 0) return r.body.vergelijk; await new Promise((x) => setTimeout(x, 5)); } return null; };
+    const K = (n, w) => ({ winkel: w || 'bol.com', product: 'Proefkast metaal 180 cm ' + n, url: 'https://www.bol.com/nl/nl/p/proefkast-' + n + '/9300000000' + n + '/', prijs_tekst: '€ 1,00', opmerking: null, gezien: true });
+    // invoer
+    let r = v.start({ wens: 'Stellingkast', kleur: 'rood' });
+    const r2 = v.start({ wens: '' }), r3 = v.start({ wens: 'Stellingkast', refurbished: 'ja' }), r4 = v.start({ wens: 'x'.repeat(161) });
+    toets('12a invoer: onbekend veld, lege of te lange wens, refurbished geen ja/nee = 400; geen zoekvraag', r.status === 400 && r2.status === 400 && r3.status === 400 && r4.status === 400 && zoeken.length === 0, [r, r2, r3]);
+    r = v.start({ wens: 'Stellingkast', eisen: ['voor mevrouw Proefnaam'] });
+    const r5 = v.start({ wens: 'Bloeddrukmeter voor Jan Proef' });
+    toets('12b privacypoort: naam in eis of wens = 422, niets naar de zoekhulp', r.status === 422 && r.body.poort === true && r5.status === 422 && zoeken.length === 0, [r, r5]);
+    // de hele route
+    zoekAntw = (z) => ({ ok: true, usd: 0.05, kandidaten: /Eisen/.test(z.vraag) ? [K(1), K(2), K(3), K(4)] : [K(2), K(5), K(6), { winkel: 'nep', product: 'x', url: 'http://onveilig.nl/p', prijs_tekst: null }] });
+    lezerAntw = {
+      [K(1).url]: { url: K(1).url, winkel: 'bol', product: 'Proefkast metaal 180 cm 1', prijs_eur: 48.99, verzending_eur: 0, levertijd: 'Uiterlijk 18 november in huis', voorraad: 'op voorraad', verkoper: 'Proefverkoper', btw: 'incl' },
+      [K(2).url]: { url: K(2).url, winkel: 'bol', product: 'Proefkast metaal 180 cm 2 - Set van 2', prijs_eur: 40.99, verzending_eur: 0, levertijd: 'Voor 23:59 besteld, vrijdag in huis' },
+      [K(3).url]: { url: K(3).url, winkel: 'bol', product: 'Proef T-shirt wit 3XL', prijs_eur: 9.99, verzending_eur: 0 },
+      [K(4).url]: { url: K(4).url, winkel: 'bol', blokkade: 'geen productpagina (zoek- of categoriepagina?)' },
+      [K(5).url]: { url: K(5).url, winkel: 'bol', product: 'Proefkast metaal 180 cm 5', prijs_eur: null },
+      [K(6).url]: { url: K(6).url, winkel: 'bol', product: 'Proefkast metaal 180 cm 6', prijs_eur: 20, verzending_eur: null, levertijd: '1-3 werkdagen' },
+    };
+    r = v.start({ wens: 'Stellingkast metaal', aantal: 2, eisen: ['180 cm hoog'] });
+    toets('12c start = 200 met id en stand zoekt; wens in de uitkomst (niet in een log)', r.status === 200 && /^[0-9a-f]{12}$/.test(r.body.vergelijk.id) && r.body.vergelijk.stand === 'zoekt', r);
+    const id = r.body.vergelijk.id;
+    let u = await wacht(id);
+    const zv = zoeken.slice(-2);
+    toets('12d twee zoekvragen tegelijk: wens + eisen, en de kale wens; afnemer shopper-snel; domeinen = favorieten aan zonder vergelijker + bol.com + amazon.nl', zoeken.length === 2
+      && /Eisen van de koper: 180 cm hoog/.test(zv[0].vraag) && !/Eisen/.test(zv[1].vraag) && /Aantal: 2/.test(zv[1].vraag) && zv.every((z) => z.afnemer === 'shopper-snel')
+      && JSON.stringify(zv[0].domeinen) === JSON.stringify(['proefwinkel.nl', 'bol.com', 'amazon.nl']), zv);
+    const op = (n) => u.opties.find((x) => x.url === K(n).url), ng = (n) => u.niet_gelezen.find((x) => x.url === K(n).url);
+    toets('12e alleen gelezen waarden: prijs van de pagina (niet het zoekfragment € 1,00), totaal = aantal × prijs + verzending', u.stand === 'klaar' && op(1).prijs_eur === 48.99 && op(1).totaal_eur === 97.98 && op(1).koop_aantal === 2 && op(1).btw === 'incl', u);
+    toets('12f set van 2 bij aantal 2 = één keer kopen (€ 40,99); goedkoopste bovenaan', op(2).koop_eenheid === 'set van 2' && op(2).koop_aantal === 1 && op(2).totaal_eur === 40.99 && u.opties[0].url === K(2).url, u.opties);
+    toets('12g ander product (T-shirt), blokkade en geen prijs = niet_gelezen met reden; onveilige link nooit gelezen', /ander product/.test(ng(3).reden) && /productpagina/.test(ng(4).reden) && /prijs niet te lezen/.test(ng(5).reden)
+      && !gelezen.some((x) => /onveilig/.test(x)) && !op(3), u.niet_gelezen);
+    toets('12h verzending niet te lezen = totaal null (nooit geschat); in huis uit de levertijd (vrijdag = 13-11, uiterlijk 18 november, 3 werkdagen = 16-11)', op(6).totaal_eur === null && op(6).verzending_eur === null
+      && op(2).in_huis === '2026-11-13' && op(1).in_huis === '2026-11-18' && op(6).in_huis === '2026-11-16', u.opties);
+    toets('12i favoriet en refurbished per optie; kosten opgeteld (2 × $ 0,05)', op(1).favoriet === false && op(1).refurbished === false && u.usd === 0.1, u);
+    // eerste kaart zodra hij er is; hooguit 8 lezen, hooguit 4 tegelijk
+    zoekAntw = { ok: true, usd: 0.01, kandidaten: Array.from({ length: 12 }, (_, i) => K(20 + i)) };
+    lezerAntw = {}; gelezen.length = 0; maxTegelijk = 0;
+    let los = [];
+    lezerWacht = (url) => new Promise((ok) => los.push(ok));
+    r = v.start({ wens: 'Proefrek' });
+    const id2 = r.body.vergelijk.id;
+    for (let i = 0; i < 100 && los.length < 4; i++) await new Promise((x) => setTimeout(x, 5));
+    los.shift()();
+    let tussen = null;
+    for (let i = 0; i < 100; i++) { tussen = v.stand(id2).body.vergelijk; if (tussen.opties.length) break; await new Promise((x) => setTimeout(x, 5)); }
+    toets('12j eerste kaart al zichtbaar terwijl de rest nog leest (stand leest, 1 optie, te_lezen 8)', tussen.stand === 'leest' && tussen.opties.length === 1 && tussen.te_lezen === 8, tussen);
+    lezerWacht = null; while (los.length) los.shift()();
+    for (let i = 0; i < 50; i++) { while (los.length) los.shift()(); await new Promise((x) => setTimeout(x, 5)); }
+    u = await wacht(id2);
+    toets('12k hooguit 8 productpagina\'s, hooguit 4 tegelijk', gelezen.length === 8 && maxTegelijk <= 4 && u.opties.length === 8, { n: gelezen.length, maxTegelijk });
+    // zoekhulp weigert
+    zoekAntw = { ok: false, status: 'grens' };
+    u = await wacht(v.start({ wens: 'Proeflamp' }).body.vergelijk.id);
+    zoekAntw = { ok: false, status: 'poort' };
+    const u2 = await wacht(v.start({ wens: 'Proeflamp' }).body.vergelijk.id);
+    toets('12l zoekhulp weigert: stand mislukt met fout grens of poort, geen lezen', u.stand === 'mislukt' && u.fout === 'grens' && u2.fout === 'poort', [u, u2]);
+    // plafond 20 per dag (de staat telt, ook na een herstart)
+    zoekAntw = { ok: true, usd: 0, kandidaten: [] };
+    v = mk();
+    let n20 = 0; for (let i = 0; i < 30; i++) { if (v.start({ wens: 'Proefding ' + i }).status === 200) n20++; }
+    const plaf = v.start({ wens: 'Nog een' });
+    klok = new Date('2026-11-12T08:00:00Z');
+    const morgen = v.start({ wens: 'Morgen weer' });
+    toets('12m plafond: 20 per Nederlandse dag (inclusief de eerdere), daarna 429; de volgende dag weer', n20 === 20 - 4 && plaf.status === 429 && morgen.status === 200, { n20, plaf, morgen: morgen.status });
+    toets('12n na een herstart (nieuwe module, zelfde staat) is een niet-afgemaakte ronde mislukt, geen eeuwige spinner', (() => { const w = mk(); const s = w.stand(morgen.body.vergelijk.id).body.vergelijk; return s.stand === 'mislukt' || s.stand === 'klaar'; })());
+    // bewaren
+    v = mk();
+    let b = v.bewaar(id, {});
+    const b2 = v.bewaar(id, { entiteit: 'groenhouten', x: 1 }), b3 = v.bewaar('../x', { entiteit: 'groenhouten' });
+    toets('12o bewaar: zonder entiteit, met extra veld of ongeldige id = 400', b.status === 400 && b2.status === 400 && b3.status === 400, [b, b2, b3]);
+    klok = new Date('2026-11-11T16:00:00Z');
+    b = v.bewaar(id, { entiteit: 'groenhouten' });
+    const bp = path.join(GH, 'Shopper - 2026-11-11 - Stellingkast metaal.md');
+    const bt = fs.existsSync(bp) ? fs.readFileSync(bp, 'utf8') : '';
+    const mm = S.maak({ vault: V, vv: VV }), bz = mm.zoektocht(b.body.zoektocht && b.body.zoektocht.id);
+    toets('12p bewaar: nieuwe zoektochtpagina (bron: snel, status open, geen advies, voldoet onbekend), leesbaar voor shopper.js met dezelfde gelezen opties', b.status === 200 && /\nbron: snel\n/.test(bt) && /\nstatus: open\n/.test(bt)
+      && !/\nadvies:/.test(bt) && /voldoet: onbekend/.test(bt) && bz.status === 200 && bz.body.zoektocht.opties.length === 3 && bz.body.zoektocht.opties.some((x) => x.totaal_eur === 40.99 && x.koop_eenheid === 'set van 2')
+      && JSON.stringify(bz.body.zoektocht.eisen) === JSON.stringify(['180 cm hoog']) && /Niet te lezen/.test(bt), { bz: JSON.stringify(bz.body).slice(0, 900), bt: bt.slice(600, 1500) });
+    const b4 = v.bewaar(id, { entiteit: 'groenhouten' });
+    toets('12q twee keer bewaren = dezelfde zoektocht (al), geen tweede pagina', b4.status === 200 && b4.body.al === true && fs.readdirSync(GH).filter((x) => /Stellingkast metaal/.test(x)).length === 1, b4);
+    const b5 = v.bewaar(id2, { entiteit: 'pot' });
+    toets('12r map van de entiteit bestaat niet = 409, niets geschreven', b5.status === 409, b5);
+    // kandidaten voor de grondige agent (Fable b13)
+    let starts = [];
+    const ms = S.maak({ vault: V, vv: VV, poort: POORT, vergelijk: v, nu: () => klok, nieuwPad: path.join(W, 'shopper-nieuw-12.json'),
+      agentStart: async (p, label) => { starts.push({ p, label }); return { ok: true, job_id: '0123456789abcdef' }; }, agentStand: () => 'loopt', grondwet: () => 'GRONDWET-KERN v1 proef' });
+    r = await ms.nieuw({ wens: 'Stellingkast metaal', aantal: 2, eisen: ['180 cm hoog'], vergelijk: id });
+    toets('12s Laat Shopper zoeken met vergelijk-id: de opdracht bevat de kandidaten van de pod (gelezen + rest), als gegeven', r.status === 200 && starts.length === 1 && /KANDIDATEN VAN DE POD/.test(starts[0].p)
+      && starts[0].p.indexOf(K(2).url) > 0 && starts[0].p.indexOf(K(3).url) > 0 && /in plaats van de zoekhulp \(oai\.py\)/.test(starts[0].p), r);
+    zoekAntw = { ok: true, usd: 0.01, kandidaten: [K(40)] }; const voor = zoeken.length;
+    r = await ms.nieuw({ wens: 'Proefbureau', eisen: [] });
+    toets('12t zonder vergelijk-id zoekt de pod de kandidaten eerst zelf (één vraag zonder eisen) en geeft ze mee', r.status === 200 && zoeken.length === voor + 1 && starts[1].p.indexOf(K(40).url) > 0, r);
+    zoekAntw = { ok: false, status: 'grens' };
+    r = await ms.nieuw({ wens: 'Proefkastje' });
+    toets('12u zoekhulp weigert: de agent start toch, zonder kandidatenblok', r.status === 200 && starts.length === 3 && !/KANDIDATEN VAN DE POD/.test(starts[2].p), r);
+    r = await ms.nieuw({ wens: 'Proefkastje 2', vergelijk: '../x' });
+    toets('12v vergelijk-id ongeldig = 400', r.status === 400, r);
+    toets('12w kandidatenBlok: geen https = weg; leeg = geen blok', S.kandidatenBlok({ gelezen: [], rest: [{ url: 'javascript:x' }] }) === '' && S.kandidatenBlok(null) === '');
+    toets('12x verlopen na 24 uur: stand 404', (() => { klok = new Date(klok.getTime() + 25 * 3600000); return v.stand(id).status === 404; })());
+    // server.js en uitrol
+    const src = fs.readFileSync('server.js', 'utf8'), s0 = src.indexOf('const shopper = (function () {'), s1 = src.indexOf('// ── einde OVIS Shopper ──'), bl = src.slice(s0, s1);
+    toets('12y server.js: POST vergelijk 10/uur, GET stand stil in het app-log, bewaar via shopper_status, staat shopper-vergelijk.json, zoek via openaiHulp.zoek; reden zonder wens',
+      /route === 'POST \/app\/shopper\/vergelijk'/.test(bl) && /appTeller\('shopper_vergelijk', 10, 3600000\)/.test(bl) && /soort === 'vergelijk-stand'\) && u\.status === 200\) res\._app\.stil = true/.test(bl)
+      && /shopper-vergelijk\.json/.test(bl) && /openaiHulp\.zoek\(z\)/.test(bl) && /res\._app\.reden = 'shopper ' \+ soort \+ \(m \? ' ' \+ \(\/\^\[0-9a-f\]\{12\}\$\/\.test\(m\[1\]\)/.test(bl)
+      && /RELEASE_OPTIONEEL="[^"]*\bshopper-vergelijk\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
+    toets('12z module logt niets en kent geen sleutel', !/console\.|process\.env|eval\(/.test(fs.readFileSync('shopper-vergelijk.js', 'utf8')));
   }
 
   fs.rmSync(W, { recursive: true, force: true });
