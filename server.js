@@ -21709,6 +21709,10 @@ if (GHAWA_TIKKEN) {
 //   POST /app/shopper/<id>/eisen      wv2561: {wens, eisen: [..]} van een open zoektocht (alleen die regels + aangepast; deelt shopper_status 30/uur)
 //   POST /app/shopper/<id>/opnieuw    wv2561: start een achtergrondagent "socev: Shopper opnieuw" (skill ovis-shopper) op dezelfde pagina; 6/uur,
 //                                     één ronde tegelijk per zoektocht; stand in klokken/shopper-opnieuw.json (job + tijd, geen wens)
+//   POST /app/shopper/vergelijk       wv2934: {wens, aantal?, eisen[]?, refurbished?} = Snel vergelijken (pod-zoekhulp + winkel-lezen.py, ± 20 s,
+//                                     plafond 20/dag in de module en 10/uur); GET …/vergelijk/<id> = de stand (opties zodra gelezen, 24 u bewaard);
+//                                     POST …/vergelijk/<id>/bewaar {entiteit} = zoektochtpagina (bron: snel, status open, geen advies). Nieuw kreeg
+//                                     het veld vergelijk (id): de grondige agent krijgt de kandidaten van de pod mee (Fable b13).
 //   POST /app/shopper/nieuw           wv2850: {wens, aantal?, entiteit?, eisen[]} = Nieuwe zoektocht in de app zelf (geen zin meer in het gesprek):
 //                                     privacypoort (patiëntpoort, fail-closed; ook op eisen en opnieuw) → agent "socev: Shopper nieuw" met een
 //                                     start_id die op de nieuwe pagina komt; 6/uur en 12/dag; stand in klokken/shopper-nieuw.json (2 dagen).
@@ -21778,7 +21782,15 @@ const shopper = (function () {
     if (poortMod === undefined) poortMod = require(path.join(__dirname, 'intake', 'patientpoort.js'));
     return poortMod.beoordeel({ teksten: teksten }, { eigen: poortMod.maakEigen(null, {}) });
   };
-  try { return require(p).maak({ vault: VAULT, vv: VV(), facturenPad: facturenPad, lezer: lezer, todoistTaak: todoistTaak, poort: poort,
+  // wv2934 Snel vergelijken (shopper-vergelijk.js): zoekhulp van de pod (openai-hulp zoek) + winkel-lezen.py, zonder taalmodel dat eisen naleest;
+  // uitkomst 24 u in de klokken-map (shopper-vergelijk.json), nooit de wens in een log. Ontbreekt de module of de zoekhulp: geen route (404).
+  let vergelijk = null;
+  const vp = path.join(__dirname, 'shopper-vergelijk.js');
+  if (lezer && fs.existsSync(vp) && typeof openaiHulp === 'object' && openaiHulp && typeof openaiHulp.zoek === 'function') {
+    try { vergelijk = require(vp).maak({ vault: VAULT, vv: VV(), lezer: lezer, poort: poort, zoek: function (z) { return openaiHulp.zoek(z); },
+      staatPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-vergelijk.json') : null }); } catch (e) { logError('shopper-vergelijk', e); vergelijk = null; }
+  }
+  try { return require(p).maak({ vault: VAULT, vv: VV(), facturenPad: facturenPad, lezer: lezer, todoistTaak: todoistTaak, poort: poort, vergelijk: vergelijk,
     nieuwPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nieuw.json') : null,
     nalezenPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nalezen.json') : null,
     agentStart: agentStart, agentStand: agentStand, grondwet: grondwet,
@@ -21792,6 +21804,7 @@ appStaat.tellers.shopper_taak = [];
 appStaat.tellers.shopper_opnieuw = [];
 appStaat.tellers.shopper_nieuw = [];
 appStaat.tellers.shopper_nieuw_dag = [];
+appStaat.tellers.shopper_vergelijk = [];
 async function appShopper(req, res, a, route, d) {
   if (!shopper) return appWeiger(res, 404, 'Shopper zit niet in deze versie van de pod', 'shopper ontbreekt');
   if (!appTeller('shopper', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens shopper');
@@ -21803,6 +21816,18 @@ async function appShopper(req, res, a, route, d) {
       if (!appTeller('shopper_nieuw', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 6)', 'grens shopper nieuw');
       if (!appTeller('shopper_nieuw_dag', 12, 86400000)) return appWeiger(res, 429, 'vandaag al 12 zoektochten gestart; morgen weer', 'grens shopper nieuw dag');
       u = typeof shopper.nieuw === 'function' ? await shopper.nieuw(d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
+    }
+    else if (route === 'POST /app/shopper/vergelijk') {   // wv2934: Snel vergelijken (zoekhulp + winkelpagina's lezen, ± 20 s); 10/uur, de module 20/dag
+      soort = 'vergelijk';
+      if (!shopper.vergelijk) u = { status: 404, body: { ok: false, fout: 'snel vergelijken zit niet in deze versie van de pod' } };
+      else if (!appTeller('shopper_vergelijk', 10, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 10)', 'grens shopper vergelijk');
+      else u = shopper.vergelijk.start(d);
+    }
+    else if ((m = /^GET \/app\/shopper\/vergelijk\/([^/]*)$/.exec(route))) { soort = 'vergelijk-stand'; u = shopper.vergelijk ? shopper.vergelijk.stand(m[1]) : { status: 404, body: { ok: false, fout: 'onbekend' } }; }
+    else if ((m = /^POST \/app\/shopper\/vergelijk\/([^/]*)\/bewaar$/.exec(route))) {
+      soort = 'vergelijk-bewaar';
+      if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
+      u = shopper.vergelijk ? shopper.vergelijk.bewaar(m[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
     }
     else if ((m = /^GET \/app\/shopper\/([^/]*)$/.exec(route))) { soort = 'zoektocht'; u = shopper.zoektocht(m[1]); }   // shopper.js toetst de id zelf (12 hex, anders 400)
     else if ((m = /^POST \/app\/shopper\/([^/]*)\/status$/.exec(route))) {
@@ -21837,7 +21862,7 @@ async function appShopper(req, res, a, route, d) {
     }
     else u = { status: 404, body: { ok: false, fout: 'onbekend' } };
   } catch (e) { logError('shopper', e); return appWeiger(res, 503, 'Shopper kon de zoektochten nu niet lezen; probeer het zo opnieuw', 'shopper fout'); }
-  if (soort === 'lijst' && u.status === 200) res._app.stil = true;
+  if ((soort === 'lijst' || soort === 'vergelijk-stand') && u.status === 200) res._app.stil = true;
   else res._app.reden = 'shopper ' + soort + (m ? ' ' + (/^[0-9a-f]{12}$/.test(m[1]) ? m[1] : 'ongeldig') : '') + ' ' + u.status;
   return appStuur(res, u.status, u.body);
 }
