@@ -631,6 +631,9 @@ jobs:
       - name: "mailvoorwerk (wv2455, voorwerk bij vragen in Mail)"
         if: ${{ !cancelled() }}
         run: bash test/mailvoorwerk.sh
+      - name: "voorwerk2 (wv2916, voorwerk-2: leesluik, bronbewijs, gevoeligheidspoort, kruisproeven)"
+        if: ${{ !cancelled() }}
+        run: bash test/voorwerk2.sh
       - name: "werkstroom (wv2002, Werkstroom: leesroute over MailMan, Intake en Facturen)"
         if: ${{ !cancelled() }}
         run: bash test/werkstroom.sh

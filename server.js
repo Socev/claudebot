@@ -4631,6 +4631,7 @@ function handleRequest(req, res) {
 
   // ── v2: toezicht — wat loopt er, wat liep er ──────────────────────────────
   // Alleen labels en toestanden, geen inhoud; zelfde openbaarheidsniveau als /health.
+  if (req.method === 'POST' && req.url === '/intern/voorwerk-luik') return voorwerkLuikRoute(req, res);   // wv2916: leesluik voorwerk-2 (alleen 127.0.0.1 + runtoken)
   if (req.url === '/mk/n8n-lees' || req.url.indexOf('/mk/n8n-lees/') === 0 || req.url.indexOf('/mk/n8n-lees?') === 0) return mkN8nLeesRoute(req, res);   // wv2081
 
   if (req.method === 'GET' && req.url === '/agents') {
@@ -18458,6 +18459,154 @@ async function mailVoorwerkLees(id) {
   if (!vol || typeof vol !== 'object' || vol.fout || vol.melding || String(vol.id || '') !== b.gmail_id) throw new Error('lees-luik gaf de mail niet');
   return { van: vol.van, aan: vol.aan, onderwerp: vol.onderwerp, datum: vol.datum_lokaal || vol.datum, tekst: typeof vol.tekst === 'string' ? vol.tekst : '', bijlagen: (b.bijlagen || []).length };
 }
+// ── wv2916: voorwerk-2 — onderzoeksrun met alleen het leesluik voorwerk-lees.js (ontwerp vault "01_Ontwikkeling/Mail-laag stap 4b -
+// voorwerk-2, uitgezocht antwoord (ontwerp 11-11-2026).md", Davids Ja 11-11 11:58). Schakelaar voorwerk.json {"versie": 2}; ontbreekt = 1.
+// De run: claude -p --restricted --strict-mcp-config --mcp-config <alleen voorwerk-lees> --tools "" --allowedTools mcp__voorwerk (gemeten
+// 11-11 met 2.1.322: alleen die tools, verder niets), Sonnet, effort medium, ≤ 30 beurten, 8 min, account 2 (automatisch geen account 1 als
+// vangnet; op Davids tik wel, zoals harvesterClaude), lege 0700-werkmap, kale omgeving, geen sessie. Het MCP-kind kent alleen een kort levend
+// runtoken voor POST /intern/voorwerk-luik op 127.0.0.1; het luik (grenzen, patiëntpoort, run-log, teksten voor het bronbewijs) leeft hier
+// in het geheugen en verdwijnt na de run. Verwerkers: MAILMAN_DIR/voorwerk-verwerkers.json {"verwerkers":[{naam, domein}]}; ontbreekt = leeg
+// (dan gaat geen medewerkergegeven in een concept).
+function mailVoorwerkVersie() {
+  try { const j = JSON.parse(fs.readFileSync(path.join(MAILMAN_DIR, 'voorwerk.json'), 'utf8')); return j && j.versie === 2 ? 2 : 1; } catch (e) { return 1; }
+}
+function mailVoorwerkVerwerkers() {
+  try { const j = JSON.parse(fs.readFileSync(path.join(MAILMAN_DIR, 'voorwerk-verwerkers.json'), 'utf8')); return Array.isArray(j && j.verwerkers) ? j.verwerkers : []; } catch (e) { return []; }
+}
+const voorwerkLuiken = new Map();   // runtoken → { luik, tot }
+const VOORWERK_RUN_MS = 8 * 60000;
+function voorwerkKind(bin, args, invoer, ms) {
+  return new Promise(function (klaar) {
+    let k, uit = [], n = 0;
+    try { k = spawn(bin, args, { stdio: ['pipe', 'pipe', 'ignore'], env: { PATH: process.env.PATH || '/usr/bin:/bin', HOME: '/nonexistent', LANG: 'C.UTF-8' } }); } catch (e) { return klaar(''); }
+    const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, ms);
+    k.stdout.on('data', function (c) { if (n < 2e6) { uit.push(c); n += c.length; } });
+    k.stdin.on('error', function () {});
+    k.on('error', function () {});
+    k.on('close', function () { clearTimeout(tm); klaar(Buffer.concat(uit).toString('utf8')); });
+    try { k.stdin.end(invoer); } catch (e) {}
+  });
+}
+function voorwerkLuikIo() {
+  const pp = require(path.join(__dirname, 'intake', 'patientpoort.js'));
+  return {
+    poort: function (stuk) { return pp.beoordeel(stuk); },
+    vaultZoek: async function (t) {
+      const naam = t.replace(/[*?\[\]]/g, '');
+      const a = await voorwerkKind('find', [VAULT, '-path', '*/.*', '-prune', '-o', '-type', 'f', '-iname', '*' + naam + '*', '-print'], '', 20000);
+      const b = await voorwerkKind('grep', ['-rIl', '-i', '-F', '--include=*.md', '--exclude-dir=.*', '--', t, VAULT], '', 20000);
+      return a.split('\n').concat(b.split('\n')).filter(Boolean).map(function (f) { return path.relative(VAULT, f).split(path.sep).join('/'); }).filter(function (r) { return r && r.indexOf('..') !== 0; });
+    },
+    vaultLees: async function (rel) {
+      const vol = path.join(VAULT, rel);
+      if (/\.(md|txt)$/i.test(rel)) return String(VV().lees(vol, 'utf8', { max: 2000000 }));
+      const buf = VV().lees(vol, null, { max: 15 * 1024 * 1024 });
+      if (/\.pdf$/i.test(rel)) return voorwerkKind('pdftotext', ['-q', '-l', '20', '-layout', '-', '-'], buf, 30000);
+      return voorwerkKind('pandoc', ['-f', 'docx', '-t', 'plain', '--wrap=none'], buf, 30000);
+    },
+    mailZoek: async function (q, max) { const j = await appAgendaApi({ actie: 'mail_zoeken', query: q, max: max }); return j && Array.isArray(j.mails) ? j.mails : []; },
+    mailLees: async function (id) {
+      const v = await appAgendaApi({ actie: 'mail_lezen', id: String(id) });
+      if (!v || typeof v !== 'object' || v.fout || v.melding || String(v.id || '') !== String(id)) return null;
+      return { van: v.van, aan: v.aan, onderwerp: v.onderwerp, datum: v.datum_lokaal || v.datum, tekst: typeof v.tekst === 'string' ? v.tekst : '' };
+    },
+    // Slotje: MailMan zag een patiëntmarker of zorgmail bij dit Gmail-bericht; onbekend bij MailMan = de poort beslist; fout = dicht
+    mailSlot: function (id) {
+      try {
+        const r = mailman._db.prepare('SELECT marker, marker_soorten, reden, jev FROM besluit WHERE gmail_id = ?').all(String(id));
+        // review Fable ZOU 7: ook een mail waarin Jev een opdracht aan een AI zag (zoals kandidaat() in mailvoorwerk.js)
+        const inj = function (x) { try { const j = JSON.parse(x.jev || '{}') || {}; return Number(j.injectie) >= 0.5 || Number(j.aan_ai) >= 0.5; } catch (e) { return false; } };
+        return r.some(function (x) { return !!x.marker || x.marker_soorten === 'zorgmail' || x.reden === 'zorgmail' || x.reden === 'slotje' || inj(x); });
+      } catch (e) { return true; }
+    },
+    agenda: async function (van, tot) {
+      const j = await appAgendaApi({ actie: 'agenda', start: van, end: appYmdPlus(tot, 1) });
+      return (j && Array.isArray(j.events) ? j.events : []).filter(function (e) { return e && e.status !== 'cancelled'; })
+        .map(function (e) { return { titel: e.titel, start: e.start, einde: e.einde, agenda: e.kalender }; });
+    },
+    contact: async function (q) {
+      const j = await crPost(CR_CONTACTEN_WF, 'Webhook zoek', 'crContactenUrl', process.env.SUPABASE_RPC_CONTACTEN, { q: q, limiet: 10 });
+      return (j && Array.isArray(j.treffers) ? j.treffers : []).map(function (c) { return { naam: c.weergavenaam, telefoons: c.telefoons_e164, mail: c.emails || c.email || undefined, organisatie: c.organisatie || undefined }; });
+    },
+    facturen: async function (t) {
+      if (!facturenRoutes || typeof facturenRoutes.lees !== 'function') return null;
+      const r = facturenRoutes.lees(facturenOpen(), { opdracht: 'hoe', tekst: t }, { wie: 'socev' });
+      return r && r.status === 200 ? r.j : null;
+    },
+    nmbrs: async function (naam) { if (!nmbrsData) return null; const r = await nmbrsKind('persoon', { naam: naam }); return r && r.j; }
+  };
+}
+async function voorwerkOnderzoek(o) {
+  let tok = '', account = kiesAccount({ account: 2 });
+  if (account === 2) { try { tok = await account2Token(); } catch (e) { tok = ''; } }
+  if (!tok) {
+    if (o.door !== 'david') return { ok: false, fout: 'geen ruimte op account 2' };
+    const v = await account1Vangnet();
+    if (!v.mag) return { ok: false, fout: 'geen ruimte op account 2 of 1 (' + v.reden + ')' };
+    account = 1; tok = process.env.CLAUDE_CODE_OAUTH_TOKEN || '';
+  }
+  const L = require(path.join(__dirname, 'voorwerk-lees.js'));
+  const luik = L.maakLuik(voorwerkLuikIo(), { afzender: o.afzender });
+  const token = crypto.randomBytes(32).toString('hex');
+  voorwerkLuiken.set(token, { luik: luik, tot: Date.now() + VOORWERK_RUN_MS + 60000 });
+  let map = null;
+  const opruim = function () { voorwerkLuiken.delete(token); if (map) { try { fs.rmSync(map, { recursive: true, force: true }); } catch (e) {} } };
+  try {
+    map = fs.mkdtempSync(path.join(require('os').tmpdir(), 'voorwerk-'));
+    fs.chmodSync(map, 0o700);
+    fs.mkdirSync(path.join(map, 'w'), { mode: 0o700 });
+    const cfg = path.join(map, 'mcp.json');
+    fs.writeFileSync(cfg, JSON.stringify({ mcpServers: { voorwerk: { type: 'stdio', command: process.execPath, args: [path.join(__dirname, 'voorwerk-lees.js')],
+      env: { VOORWERK_LUIK_URL: 'http://127.0.0.1:' + PORT + '/intern/voorwerk-luik', VOORWERK_LUIK_TOKEN: token } } } }), { mode: 0o600 });
+    const env = { DISABLE_AUTOUPDATER: '1' };
+    HARVESTER_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
+    env.CLAUDE_CODE_OAUTH_TOKEN = tok;
+    const args = ['-p', '--output-format', 'json', '--restricted', '--strict-mcp-config', '--mcp-config', cfg, '--tools', '', '--allowedTools', 'mcp__voorwerk',
+      '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', '--no-session-persistence', '--model', HARVESTER_MODEL, '--effort', 'medium',
+      '--max-turns', '30', '--system-prompt', o.systeem, '--json-schema', JSON.stringify(o.schema)];
+    const r = await new Promise(function (klaar) {
+      let k, uit = '';
+      try { k = spawn(HARVESTER_BIN, args, { cwd: path.join(map, 'w'), env: env, stdio: ['pipe', 'pipe', 'ignore'] }); } catch (e) { return klaar({ ok: false, fout: 'claude start niet' }); }
+      k.stdin.on('error', function () {});
+      try { k.stdin.end(o.prompt); } catch (e) {}
+      const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, VOORWERK_RUN_MS);
+      k.stdout.setEncoding('utf8');
+      k.stdout.on('data', function (c) { if (uit.length < 4e6) uit += c; });
+      k.on('error', function () {});
+      k.on('close', function (code) {
+        clearTimeout(tm);
+        let j = null;
+        try { j = JSON.parse(uit.trim().split('\n').pop()); } catch (e) {}
+        if (!j) return klaar({ ok: false, fout: 'claude gaf geen JSON (exit ' + code + ')' });
+        const verbruik = { account: account, beurten: j.num_turns || null, ms: j.duration_ms || null, kosten: typeof j.total_cost_usd === 'number' ? j.total_cost_usd : null };
+        if (j.is_error) return klaar({ ok: false, fout: 'claude: ' + String(j.subtype || 'fout').slice(0, 60), verbruik: verbruik });
+        let st = j.structured_output;
+        if (!st && typeof j.result === 'string') { const m = /\{[\s\S]*\}/.exec(j.result); if (m) { try { st = JSON.parse(m[0]); } catch (e) {} } }
+        if (!st || typeof st !== 'object') return klaar({ ok: false, fout: 'geen vaste vorm', verbruik: verbruik });
+        klaar({ ok: true, data: st, verbruik: verbruik });
+      });
+    });
+    schrijfLog(nu() + ' voorwerk-onderzoek ' + velden({ door: o.door, ok: !!r.ok, account: account, aanroepen: luik.tel.aanroepen, stukken: luik.tel.stukken, tegengehouden: luik.tel.tegengehouden,
+      geweigerd: luik.tel.geweigerd, beurten: r.verbruik && r.verbruik.beurten, usd: r.verbruik && r.verbruik.kosten, fout: r.ok ? undefined : r.fout }));
+    return Object.assign(r, { stukken: luik.stukken, log: luik.log });
+  } catch (e) { logError('voorwerk-onderzoek', e); return { ok: false, fout: 'intern' }; }
+  finally { opruim(); }
+}
+// POST /intern/voorwerk-luik — alleen het MCP-kind van een lopende onderzoeksrun: 127.0.0.1, geen doorgestuurd verzoek, geldig runtoken
+function voorwerkLuikRoute(req, res) {
+  const stuur = function (st, j) { res.writeHead(st, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(j)); };
+  const ip = String((req.socket && req.socket.remoteAddress) || '');
+  if (!/^(127\.0\.0\.1|::ffff:127\.0\.0\.1|::1)$/.test(ip) || req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip']) return stuur(404, { ok: false });
+  const tok = String(req.headers['x-voorwerk-token'] || '');
+  const run = /^[0-9a-f]{64}$/.test(tok) ? voorwerkLuiken.get(tok) : null;
+  if (!run || Date.now() > run.tot) return stuur(401, { fout: true, tekst: 'geen lopende run' });
+  readBody(req, async function (d) {
+    if (!d || typeof d !== 'object') return stuur(400, { fout: true, tekst: 'bad json' });
+    let r;
+    try { r = await run.luik.roep(String(d.tool || ''), d.args); } catch (e) { r = { fout: true, tekst: 'niet gelukt' }; }
+    stuur(200, r);
+  });
+}
 const mailVoorwerk = (function () {
   const p = path.join(__dirname, 'mailvoorwerk.js');
   if (!fs.existsSync(p) || !mailman || typeof mailman.voorwerkBron !== 'function') return null;
@@ -18469,7 +18618,9 @@ const mailVoorwerk = (function () {
       claude: harvesterClaude,
       stem: function () { const s = String(VV().lees(path.join(VAULT, '.claude', 'skills', 'mijn-mailstem', 'SKILL.md'), 'utf8') || ''); const i = s.indexOf('# Mijn mailstem'); return i >= 0 ? s.slice(i) : ''; },
       concept: function (body) { return potVzConcept(body); },
-      register: function (regel) { return potVzRegister(regel); } });
+      register: function (regel) { return potVzRegister(regel); },
+      versie: mailVoorwerkVersie, verwerkers: mailVoorwerkVerwerkers,
+      onderzoek: fs.existsSync(path.join(__dirname, 'voorwerk-lees.js')) ? voorwerkOnderzoek : null });
   } catch (e) { logError('mailvoorwerk', e); return null; }
 })();
 function mailVoorwerkInfo() { if (!mailVoorwerk) return { aan: false, module: false }; try { return mailVoorwerk.health(); } catch (e) { return { fout: true }; } }
@@ -18484,7 +18635,7 @@ async function appMailVoorwerk(req, res, a, d, route) {
   if (soort !== 'toon' && !(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
   d = d && typeof d === 'object' ? d : {};
   let r;
-  try { r = soort === 'toon' ? mailVoorwerk.toon(d.draad) : soort === 'maak' ? mailVoorwerk.opVerzoek(d.draad) : await mailVoorwerk.gmail(d); }
+  try { r = soort === 'toon' ? mailVoorwerk.toon(d.draad) : soort === 'maak' ? mailVoorwerk.opVerzoek(d.draad, d.aanwijzing) : await mailVoorwerk.gmail(d); }
   catch (e) { logError('mail-voorwerk', e); return appWeiger(res, 500, 'fout op de pod', 'voorwerk uitzondering'); }
   res._app.reden = 'mail voorwerk ' + soort + (r.status >= 300 ? ' ' + String(r.j && (r.j.reden || r.j.fout) || '').slice(0, 40) : '');
   return appStuur(res, r.status, r.j);
