@@ -37,6 +37,8 @@ const CAT_IDS = CATEGORIEEN.map((c) => c.id).concat(['alles']);
 const LEZEN = ['script', 'browser', 'niet'];
 const MAX_WINKELS = 80;
 const SCORE_OUD = 30 * 86400000, SCORE_POGING = 6 * 3600000;
+const BRONNEN = ['kieskeurig', 'kiyoh', 'thuiswinkel'];
+const goedeMeting = (x) => !!x && typeof x === 'object' && !x.fout;
 const MIN_ERVARINGEN = 10;   // Kieskeurig toont vaak een cijfer op 1–11 ervaringen (gemeten 11-11): daaronder geen cijfer, wel het aantal
 // Platforms met partnerverkopers: de verkoper moet het platform zelf zijn, anders geen platformscore
 const PLATFORM = { 'bol.com': ['bol', 'bol.com'], 'amazon.nl': ['amazon', 'amazon.nl', 'amazon eu s.a.r.l.', 'amazon eu sarl'],
@@ -87,7 +89,8 @@ function winkelBij(url, winkels) {
 function verzendUitTabel(w, subtotaal) {
   const v = w && w.verzend;
   if (!v || v.eur == null || typeof subtotaal !== 'number' || !(subtotaal > 0)) return null;
-  const boven = v.drempel_eur != null && v.boven_drempel_eur != null && subtotaal >= v.drempel_eur;
+  // review wv2935 MOET 1: in hele centen vergelijken (3 × 19,90 = 59,70 mag niet onder een drempel van 59,70 vallen)
+  const boven = v.drempel_eur != null && v.boven_drempel_eur != null && Math.round(subtotaal * 100) >= Math.round(v.drempel_eur * 100);
   return { eur: boven ? v.boven_drempel_eur : v.eur, gemeten: v.gemeten };
 }
 const norm = (s) => String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -172,13 +175,25 @@ function maak(o) {
     return Promise.resolve().then(() => o.scoreLezer({ winkels: invoer })).then((j) => {
       bezig = false;
       if (!j || typeof j !== 'object' || !j.winkels || typeof j.op !== 'string') return false;
-      return bewaar({ op: j.op, winkels: j.winkels });
+      // review wv2935 ZOU 2: een mislukte bron overschrijft nooit een eerdere goede meting; zijn er fouten, dan na 6 uur een nieuwe poging
+      const oud = scores(), uit = {};
+      let fouten = 0;
+      for (const d of Object.keys(j.winkels)) {
+        const n = j.winkels[d] && typeof j.winkels[d] === 'object' ? j.winkels[d] : {}, v = oud && oud.winkels[d] ? oud.winkels[d] : {};
+        uit[d] = {};
+        for (const b of BRONNEN) {
+          if (n[b] && n[b].fout) fouten++;
+          uit[d][b] = goedeMeting(n[b]) ? n[b] : goedeMeting(v[b]) ? v[b] : (n[b] || null);
+        }
+      }
+      return bewaar({ op: j.op, winkels: uit, fouten });
     }, () => { bezig = false; return false; });
   }
   function moetVerversen(s) {
     if (bezig || nu().getTime() - poging < SCORE_POGING) return false;
     const op = s && Date.parse(s.op);
-    return !op || nu().getTime() - op > SCORE_OUD;
+    if (!op) return true;
+    return nu().getTime() - op > (s.fouten > 0 ? SCORE_POGING : SCORE_OUD);
   }
   // Het overzicht voor de tab Winkels. pagina = tekst van de favorietenpagina (of null); gekocht = [{winkel, url, datum}]
   function overzicht(pagina, gekocht) {
