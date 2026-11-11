@@ -397,7 +397,7 @@ const POORT_TOEGESTAAN = ['medisch', 'medisch_3', 'medisch_4'];
 // voor, van, namens, aan, bij, met, t.b.v., tbv) met daarna een woord dat met een hoofdletter begint ("voor Jan", "Voor Jan", "voor De Vries",
 // "VOOR JAN"). Uitzondering alleen als ELK woord van die reeks op een korte vaste lijst staat (eigen entiteiten, plaatsen, feestdagen,
 // veelgebruikte merken). Liever een keer te streng (David schrijft "Samsung-oplader") dan een naam naar de zoekronde.
-const NAAM_VOORZETSEL = new Set(['voor', 'van', 'namens', 'aan', 'bij', 'met', 'tbv', 't.b.v.', 't.b.v', 'from', 'for']);
+const NAAM_VOORZETSEL = new Set(['voor', 'van', 'namens', 'aan', 'bij', 'met', 'tbv', 'from', 'for']);   // vergeleken zonder punten: t.b.v., tbv., t.b.v = tbv
 const NAAM_TUSSEN = new Set(['van', 'de', 'der', 'den', 'ter', 'ten', 'te', 'het', "'t"]);
 const POORT_NAAM_MAG = new Set(['tolgaarde', 'groenhouten', 'pot', 'holding', 'praktijkhouders', 'privé', 'prive', 'sloel', 'leusden', 'amersfoort', 'nederland', 'kerst', 'kerstmis',
   'sinterklaas', 'pasen', 'koningsdag', 'moederdag', 'vaderdag',
@@ -408,7 +408,7 @@ const POORT_NAAM_MAG = new Set(['tolgaarde', 'groenhouten', 'pot', 'holding', 'p
 function naamIn(x) {
   const w = String(x).split(/[\s,;:()"“”]+/).filter(Boolean);
   for (let i = 0; i < w.length - 1; i++) {
-    if (!NAAM_VOORZETSEL.has(w[i].toLowerCase())) continue;
+    if (!NAAM_VOORZETSEL.has(w[i].toLowerCase().replace(/\./g, ''))) continue;
     let k = i + 1;
     const reeks = [];
     // tussenvoegsels ("van der", "de") horen bij de naam als er verderop een woord met hoofdletter volgt ("voor van der Proefnaam")
