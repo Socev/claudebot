@@ -43,6 +43,14 @@
  *    opties", de nieuwe komen in de frontmatter (ids lopen door). De opdracht bouwt de pod zelf (opnieuwOpdracht: vaste tekst + grondwet van
  *    de release + pad uit paden() + wens/eisen van de pagina, als gegeven gemarkeerd); niets uit de vraag. Eén lopende ronde per zoektocht;
  *    de stand (o.opnieuwPad, 2 dagen bewaard) toont de app tot de pagina een nieuwere gezocht-tijd heeft of de agent klaar is.
+ *  - Prijshistorie bij het advies (wv2946, fase 4; ontwerp vault "01_Ontwikkeling/OVIS Shopper fase 4 - aanwijzen, prijshistorie en bewaken
+ *    (ontwerp wv2935, 11-11-2026).md"): bij het openen van een OPEN zoektocht met advies start prijshistorieBij() hooguit eens per 7 dagen
+ *    (na een leesfout na 6 uur) o.prijsLezer({product}) op de achtergrond (server.js: prijshistorie.py uit de release, alleen GET op
+ *    www.kieskeurig.nl, kale omgeving). Het script beslist zelf of het hetzelfde product is en rekent met vaste regels; hier alleen de
+ *    uitkomst (zin, url, tijd) in o.prijsPad per zoektocht-id met een vingerafdruk van de adviesnaam (ander advies = opnieuw lezen). De app
+ *    krijgt prijshistorie {zin, t, url} of {stand: 'leest'}; geen zin = null. Eén lezing tegelijk over alle zoektochten heen.
+ *  - Aanwijzen (wv2946, stap A): aanwijs() telt per maand hoe vaak David bij een actie op "Zoek met Shopper" tikte (o.aanwijsPad, alleen
+ *    {"JJJJ-MM": n}, geen tekst); info() geeft het aantal van deze maand. Beslisregel stap B: ≥ 3 in een maand.
  * PRIVACY. Deze module logt niets; info() geeft alleen aantallen en het tijdstip van de laatste lijst (geen wens, pad of bedrag). Er gaat niets naar buiten of naar een taalmodel.
  */
 const fs = require('fs');
@@ -69,6 +77,7 @@ const ID_RE = /^[0-9a-f]{12}$/;
 const TODOIST_RE = /^[A-Za-z0-9]{6,40}$/;
 const KANDIDATEN_MS = 30000;   // wv2934: hooguit zo lang wacht Laat Shopper zoeken op de zoekhulp van de pod
 const MAX_GELIJK = 4;   // review wv2454 ZOU 1: hooguit 4 leesprocessen tegelijk over alle zoektochten heen
+const PRIJS_OPNIEUW = 7 * 86400000, PRIJS_FOUT_OPNIEUW = 6 * 3600000, PRIJS_BEWAAR = 14 * 86400000, MAX_PRIJS_STAAT = 200;   // wv2946
 const NALEZEN_OPNIEUW = 10 * 60000, NALEZEN_BEWAAR = 7 * 86400000, MAX_NALEZEN = 8, MAX_NALEZEN_STAAT = 200, TAAK_CACHE = 5 * 60000;
 
 function idVan(rel) { return crypto.createHash('sha256').update(String(rel)).digest('hex').slice(0, 12); }
@@ -550,6 +559,64 @@ function maak(o) {
     const opties = c.opties.filter((n) => n && z._opties.some((x) => x.id === n.id && x.url && x.url === n.url)).map((n) => { const k = Object.assign({}, n); delete k.url; return k; });
     return opties.length ? { t: c.t, opties, samenvatting: samenvatting(opties) } : null;
   }
+  // ── wv2946: prijshistorie bij het advies (Kieskeurig) ──
+  // staat: { <zoektocht-id>: { t, p (vingerafdruk adviesnaam), zin|null, url|null, fout: bool } }; onleesbaar = leeg
+  const prijsBezig = new Set();
+  function jsonStaat(pad) {
+    if (!pad) return {};
+    try { const j = JSON.parse(fs.readFileSync(pad, 'utf8')); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; } catch (e) { return {}; }
+  }
+  function jsonBewaar(pad, uit) {
+    const tmp = pad + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(uit), { mode: 0o600 });
+    fs.renameSync(tmp, pad);
+  }
+  function prijsBewaar(id, rij) {
+    if (!o.prijsPad) return;
+    const st = jsonStaat(o.prijsPad);
+    st[id] = rij;
+    const grens = nu().getTime() - PRIJS_BEWAAR;
+    const ids = Object.keys(st).filter((k) => ID_RE.test(k) && st[k] && Date.parse(st[k].t) > grens).sort((a, b) => (st[a].t < st[b].t ? 1 : -1)).slice(0, MAX_PRIJS_STAAT);
+    const uit = {};
+    for (const k of ids) uit[k] = st[k];
+    jsonBewaar(o.prijsPad, uit);
+  }
+  const PRIJS_URL = /^https:\/\/www\.kieskeurig\.nl\/[a-z0-9-]{1,80}\/product\/\d{1,12}-[a-z0-9-]{1,200}$/;
+  const PRIJS_ZIN = /^Kieskeurig: (laagste prijs in 90 dagen \(€ \d{1,6}(,\d\d)?, gelezen \d{1,2}-\d{1,2}\)|op \d{1,2}-\d{1,2} was het € \d{1,6}(,\d\d)? \(nu € \d{1,6}(,\d\d)?\); laagste in 90 dagen)$/;
+  function prijshistorieBij(z) {
+    if (z.status !== 'open' || !z.advies || typeof o.prijsLezer !== 'function' || !o.prijsPad) return null;
+    const adv = z._opties.find((x) => x.id === z.advies);
+    const product = adv && adv.product ? adv.product : '';
+    if (product.length < 3) return null;
+    const vinger = crypto.createHash('sha256').update(product).digest('hex').slice(0, 16);
+    const c = jsonStaat(o.prijsPad)[z.id];
+    const leeftijd = c && c.p === vinger ? nu().getTime() - Date.parse(c.t) : Infinity;
+    if (leeftijd < (c && c.fout ? PRIJS_FOUT_OPNIEUW : PRIJS_OPNIEUW)) return c.zin ? { zin: c.zin, t: c.t, url: c.url || null } : null;
+    if (prijsBezig.has(z.id)) return { stand: 'leest' };
+    if (prijsBezig.size >= 1) return null;   // één lezing tegelijk; de volgende keer openen probeert het opnieuw
+    prijsBezig.add(z.id);
+    const id = z.id;
+    let vraag;
+    try { vraag = o.prijsLezer({ product }); } catch (e) { vraag = null; }
+    Promise.resolve(vraag).then((j) => j, () => null).then(function (j) {
+      prijsBezig.delete(id);
+      const ok = !!j && typeof j === 'object' && typeof j.reden === 'string';
+      const zin = ok && typeof j.zin === 'string' && PRIJS_ZIN.test(j.zin) ? j.zin : null;
+      const url = zin && typeof j.url === 'string' && PRIJS_URL.test(j.url) ? j.url : null;
+      try { prijsBewaar(id, { t: nu().toISOString(), p: vinger, zin, url, fout: !ok || /^fout:/.test(j.reden) }); } catch (e) { /* niet bewaard: volgende keer opnieuw */ }
+    });
+    return { stand: 'leest' };
+  }
+  // ── wv2946 stap A: hoe vaak David bij een actie op "Zoek met Shopper" tikte (alleen een teller per maand) ──
+  function maandNl() { return nlDag(nu()).slice(0, 7); }
+  function aanwijs() {
+    if (!o.aanwijsPad) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    const st = jsonStaat(o.aanwijsPad), m = maandNl(), uit = {};
+    st[m] = (Number.isInteger(st[m]) ? st[m] : 0) + 1;
+    for (const k of Object.keys(st).filter((k) => /^\d{4}-\d{2}$/.test(k) && Number.isInteger(st[k])).sort().slice(-24)) uit[k] = st[k];
+    try { jsonBewaar(o.aanwijsPad, uit); } catch (e) { return { status: 503, body: { ok: false, fout: 'niet bewaard' } }; }
+    return { status: 200, body: { ok: true } };
+  }
   function paden() {
     const uit = [];
     for (const ent of MAPPEN) {
@@ -630,7 +697,7 @@ function maak(o) {
       facturen: z.status === 'gekocht' ? metFacturen((db) => facturenBij(db, z)) : undefined,
       todoist_url: z.todoist_id ? 'https://app.todoist.com/app/task/' + z.todoist_id : null, nu: nalezingBij(z),
       eerdere: sectie(t, 'Eerdere opties', 12000), aangepast: tekstVeld(fmWaarde(t, 'aangepast'), 60) || null, zoekt: zoektBij(z),
-      advies_controle: adviesControle(z, R.fmLijst(t, 'eisen').map((x) => tekstVeld(x, 200)).filter(Boolean)) }) } };
+      advies_controle: adviesControle(z, R.fmLijst(t, 'eisen').map((x) => tekstVeld(x, 200)).filter(Boolean)), prijshistorie: prijshistorieBij(z) }) } };
   }
   // POST …/nalezen (wv2454): de opties van een open zoektocht opnieuw lezen. Async; o.lezer(url) → Promise<uitkomst | null>.
   async function nalezen(id) {
@@ -972,8 +1039,11 @@ function maak(o) {
     }
     return u;
   } }) : null;
-  function info() { return Object.assign({ aan: true }, laatst || { op: null, zoektochten: null, open: null, onleesbaar: null, favorieten: null }); }
-  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, info, vergelijk, winkels: winkelsMod ? winkels : null };
+  function info() {
+    const a = o.aanwijsPad ? jsonStaat(o.aanwijsPad)[maandNl()] : null;   // wv2946: aantal tikken op Zoek met Shopper deze maand (geen tekst)
+    return Object.assign({ aan: true }, laatst || { op: null, zoektochten: null, open: null, onleesbaar: null, favorieten: null }, { aanwijzen_maand: Number.isInteger(a) ? a : 0 });
+  }
+  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, info, vergelijk, winkels: winkelsMod ? winkels : null, aanwijs };
 }
 
 module.exports = { maak, kandidatenBlok, ontleed, adviesControle, eenheidStuks, poortVrij, nieuwOpdracht, POORT_FOUT, nuVan, btwVeld, zetEisenRegels, opnieuwOpdracht, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
