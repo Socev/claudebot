@@ -7102,7 +7102,7 @@ const APP_HANDELING = [
   // wv2347: een Ja die de grondregels wijzigt (grondwet, bevoegdheden, privacy- of patiëntregels) vraagt altijd een vingerafdruk, ook als de
   // vraag geen woord over versturen/verwijderen/agenda/geld bevat (3-11: Ja op "Grondwet 3 — mag Intake een vermoeden van patiëntgegevens
   // zonder vraag doorlaten?" kwam zonder). Als laatste, zodat de reden van bestaande vragen niet verandert. Tweede slot: herkomst.grondwet.
-  ['grondwet', /grondwet|grondregel|\bbevoegdhe(id|den)\b|patientgegeven|patientdata|persoonsgegeven|privacyregel|privacyfilter|privacycontrole|privacygrens|patientpoort|patientcontrole/],
+  ['grondwet', /grondwet|grondregel|toestemming(?:en|s)register|\bbevoegdhe(id|den)\b|patientgegeven|patientdata|persoonsgegeven|privacyregel|privacyfilter|privacycontrole|privacygrens|patientpoort|patientcontrole/],
 ];
 function appHandeling(tekst) {
   const t = String(tekst || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -7135,7 +7135,7 @@ const APP_GEVOELIG = [
   // wv2347: een Ja die de grondregels wijzigt (grondwet, bevoegdheden, privacy- of patiëntregels) vraagt altijd een vingerafdruk, ook als de
   // vraag geen woord over versturen/verwijderen/agenda/geld bevat (3-11: Ja op "Grondwet 3 — mag Intake een vermoeden van patiëntgegevens
   // zonder vraag doorlaten?" kwam zonder). Als laatste, zodat de reden van bestaande vragen niet verandert. Tweede slot: herkomst.grondwet.
-  ['grondwet', /grondwet|grondregel|\bbevoegdhe(id|den)\b|patientgegeven|patientdata|persoonsgegeven|privacyregel|privacyfilter|privacycontrole|privacygrens|patientpoort|patientcontrole/],
+  ['grondwet', /grondwet|grondregel|toestemming(?:en|s)register|\bbevoegdhe(id|den)\b|patientgegeven|patientdata|persoonsgegeven|privacyregel|privacyfilter|privacycontrole|privacygrens|patientpoort|patientcontrole/],
 ];
 // wv2433: opruimen van eigen machinekamer-werk is geen verwijderen van Davids gegevens. Alleen als er zo'n werkwoord in de vraag staat en
 // niets dat van David is (mail, agenda, bestanden, rijen in zijn apps, back-ups, accounts, BSN, of 'je'/'jou'); bij twijfel blijft het verwijderen. Opzeggen, annuleren,
