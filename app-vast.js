@@ -179,6 +179,80 @@ function meest(t, vandaag) {
   return { klaar: dagen >= MEEST_NA_DAGEN, dagen: dagen, na_dagen: MEEST_NA_DAGEN, score: score };
 }
 
+// ── wv2929 (OVIS als besturingssysteem, fase 4; David Ja 11-11-2026 16:24): eigen werkruimtes (werkruimtes.json naast apps-volgorde.json, één
+// stand voor telefoon en laptop). Een werkruimte = een set tabs met hun indeling naast elkaar. De vijf standaardsets staan in de app
+// (socev-app src/werkruimtes.ts); hier staat alleen wat David zelf bewaarde. Alleen vaste id's: de werkruimte uit WERKRUIMTE_IDS, de tabs als
+// App-id (APP_IDS) of plek (intake, brain); geen namen, geen inhoud, geen apparaat. set null = terug naar de standaard.
+const WERKRUIMTE_IDS = ['geld', 'praktijk', 'post', 'prive', 'brein', 'eigen'];
+const WERKRUIMTE_PLEKKEN = ['intake', 'brain'];
+const WERKRUIMTE_MAX = 8;   // = de grens van levende tabs op de pc
+const isWrToken = function (x) { return isAppId(x) || (typeof x === 'string' && WERKRUIMTE_PLEKKEN.indexOf(x) >= 0); };
+// Eén set: { tabs: [token], naast: [token] | null }. streng = van de app (fout bij elk afwijkend id); anders van schijf (stil opschonen).
+function wrSet(x, streng) {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return streng ? { fout: 'ongeldige werkruimte' } : null;
+  if (!Array.isArray(x.tabs)) return streng ? { fout: 'tabs ontbreken' } : null;
+  if (streng) {
+    if (!x.tabs.length) return { fout: 'een werkruimte zonder tabs' };
+    if (x.tabs.length > WERKRUIMTE_MAX) return { fout: 'te veel tabs (hooguit ' + WERKRUIMTE_MAX + ')' };
+    for (let i = 0; i < x.tabs.length; i++) {
+      if (!isWrToken(x.tabs[i])) return { fout: 'onbekende tab' };
+      if (x.tabs.indexOf(x.tabs[i]) !== i) return { fout: 'een tab staat dubbel' };
+    }
+  }
+  const tabs = [];
+  x.tabs.forEach(function (t) { if (isWrToken(t) && tabs.indexOf(t) < 0 && tabs.length < WERKRUIMTE_MAX) tabs.push(t); });
+  if (!tabs.length) return streng ? { fout: 'een werkruimte zonder tabs' } : null;
+  let naast = null;
+  if (x.naast !== undefined && x.naast !== null) {
+    const ok = Array.isArray(x.naast) && x.naast.length >= 2 && x.naast.length <= 3
+      && x.naast.every(function (t, i) { return tabs.indexOf(t) >= 0 && x.naast.indexOf(t) === i; });
+    if (!ok && streng) return { fout: 'ongeldige indeling naast elkaar' };
+    naast = ok ? x.naast.slice() : null;
+  }
+  return { tabs: tabs, naast: naast };
+}
+// Van schijf; geen bestand = alleen de standaard (versie 0)
+function werkruimtesUitBestand(j) {
+  const sets = {};
+  if (j && j.sets && typeof j.sets === 'object') WERKRUIMTE_IDS.forEach(function (id) { const s = wrSet(j.sets[id], false); if (s) sets[id] = s; });
+  const v = Number(j && j.versie);
+  return { versie: j ? (Number.isSafeInteger(v) && v > 0 ? v : 1) : 0, sets: sets };
+}
+// Eén wijziging: d = { versie, id, set } (set null = standaard terug). Andere versie = 409 (ander apparaat); vaste plek = 403.
+function werkruimtePas(nu, d, vastePlek) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return { ok: false, status: 400, fout: 'ongeldige vraag', reden: 'werkruimte vorm' };
+  if (vastePlek) return { ok: false, status: 403, fout: 'Een werkruimte bewaren doe je op je telefoon of laptop.', reden: 'werkruimte vaste plek' };
+  if (!Number.isSafeInteger(d.versie) || d.versie < 0) return { ok: false, status: 400, fout: 'versie ontbreekt', reden: 'werkruimte versie vorm' };
+  if (d.versie !== nu.versie) return { ok: false, status: 409, fout: 'de werkruimtes zijn intussen op een ander apparaat gewijzigd', reden: 'werkruimte versie oud' };
+  if (WERKRUIMTE_IDS.indexOf(d.id) < 0) return { ok: false, status: 400, fout: 'onbekende werkruimte', reden: 'werkruimte id' };
+  const sets = Object.assign({}, nu.sets);
+  if (d.set === null) {
+    if (!sets[d.id]) return { ok: true, stand: nu, veranderd: false };
+    delete sets[d.id];
+  } else {
+    const s = wrSet(d.set, true);
+    if (s.fout) return { ok: false, status: 400, fout: s.fout, reden: 'werkruimte set' };
+    const oud = sets[d.id];
+    if (oud && oud.tabs.join() === s.tabs.join() && String(oud.naast) === String(s.naast)) return { ok: true, stand: nu, veranderd: false };
+    sets[d.id] = s;
+  }
+  return { ok: true, veranderd: true, stand: { versie: nu.versie + 1, sets: sets } };
+}
+function werkruimtesNaarBestand(stand, nuIso) { return { versie: stand.versie, bijgewerkt: nuIso, sets: stand.sets }; }
+// Wat een apparaat ziet; op een vaste plek zonder privé-App (zoals de Apps-volgorde); een indeling met minder dan twee over vervalt
+function werkruimtesVoorApparaat(stand, vastePlek, prive) {
+  const sets = {};
+  Object.keys(stand.sets).forEach(function (id) {
+    const s = stand.sets[id];
+    const weg = function (l) { return vastePlek ? l.filter(function (x) { return prive.indexOf(x) < 0; }) : l.slice(); };
+    const tabs = weg(s.tabs);
+    const naast = s.naast ? weg(s.naast) : null;
+    sets[id] = { tabs: tabs, naast: naast && naast.length >= 2 ? naast : null };
+  });
+  return { versie: stand.versie, sets: sets, ids: WERKRUIMTE_IDS, max: WERKRUIMTE_MAX };
+}
+
 module.exports = { STANDAARD, MAX, regel, schoon, uitBestand, voorApparaat, pas,
   APP_IDS, VOLGORDE_MAX, SORTERINGEN, beginFavorieten, volgordeUitBestand, volgordePas, naarBestand, volgordeVoorApparaat,
-  tellingUitBestand, telOpen, meest, TEL_DUBBEL_MS, MEEST_NA_DAGEN };
+  tellingUitBestand, telOpen, meest, TEL_DUBBEL_MS, MEEST_NA_DAGEN,
+  WERKRUIMTE_IDS, WERKRUIMTE_PLEKKEN, WERKRUIMTE_MAX, werkruimtesUitBestand, werkruimtePas, werkruimtesNaarBestand, werkruimtesVoorApparaat };   // wv2929

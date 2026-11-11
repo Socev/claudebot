@@ -605,6 +605,9 @@ jobs:
       - name: "apps-volgorde (wv2479, Apps-overzicht: volgorde, favorieten, openingsteller)"
         if: ${{ !cancelled() }}
         run: bash test/apps-volgorde.sh
+      - name: "werkruimtes (wv2929, OVIS als besturingssysteem fase 4: eigen werkruimtes)"
+        if: ${{ !cancelled() }}
+        run: bash test/werkruimtes.sh
       - name: "app-open (wv1712, OVIS M6-pod: Socev stuurt de weergave)"
         if: ${{ !cancelled() }}
         run: bash test/app-open.sh
