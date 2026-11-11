@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS ml_fotospoor (hid TEXT PRIMARY KEY, aantal_bij INTEGE
   met_gps INTEGER NOT NULL, van TEXT, tot TEXT, lat REAL, lon REAL, op TEXT NOT NULL);
 `;
 const SYNC_ELKE_MS = 10 * 60000, RUST_NA_FOUT_MS = 5 * 60000, FOTO_CACHE_MS = 10 * 60000, TOEGANG_VERS_MS = 2 * 60000;
-const MAX_NIEUW_PER_RONDE = 30, MAX_DEEL = 8, MAX_DEEL_BYTES = 300 * 1024, MAX_FOTOS = 300;
+const MAX_NIEUW_PER_RONDE = 30, MAX_DEEL = 8, MAX_DEEL_BYTES = 300 * 1024, MAX_FOTOS = 1000;   // wv2943: 300 → 1000 (de diashow kiest over het hele album; bezoekers blijven op 300, memorylane-publiek.js)
 const VOORVOEGSEL = 'MemoryLane – ';   // oude vorm (wv2120): alleen nog om Socevs eigen oude namen te herkennen
 const MERK = ' (ML)', ZONDER_JAAR = '(zonder jaar)', MAX_NAAM = 200, MAX_HERNOEM_PER_RONDE = 30;
 const CODE_RE = /memorylane:([0-9a-f]{16})/;
@@ -231,7 +231,9 @@ function maak(o) {
     if (!vers && c && nu() - c.op < FOTO_CACHE_MS) return c.fotos;
     const fotos = await im.albumFotos(rij.album_id, MAX_FOTOS);
     cache.set(hid, { op: nu(), fotos });
-    if (fotos.length !== rij.aantal) q.aantal.run(fotos.length, hid);
+    // wv2943: het echte aantal in het album (ook boven de grens), voor de eerlijke teller "album: 312 foto's"
+    const aantal = Number.isInteger(fotos.totaal) && fotos.totaal >= fotos.length ? fotos.totaal : fotos.length;
+    if (aantal !== rij.aantal) q.aantal.run(aantal, hid);
     return fotos;
   }
   function gevelVan(rij, fotos) {

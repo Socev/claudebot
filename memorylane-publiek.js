@@ -37,6 +37,10 @@ const MLD = require('./memorylane-delen.js');
 const KRINGEN = MLD.PKRINGEN;
 const RONDE_MS = 15 * 60000, LOG_MS = 5 * 60000, HOUDBAAR_MS = 24 * 3600000;
 const FOTO_BUDGET_MS = 40000, FOTO_TEGELIJK = 3, BATCH = 40, FOTO_MAX_TIK = 40;
+// wv2943: bezoekers krijgen hooguit de eerste 300 foto's van een album (de pod geeft Davids app er nu 500); de opnamedag komt per ronde
+// bij hooguit DAG_PER_RONDE al geplaatste foto's (± 23.000 bij de invoering: 50 D1-aanroepen per kring per ronde, binnen de Cloudflare-rem)
+const MAX_PUBLIEK_FOTOS = 300, DAG_PER_RONDE = 2000;
+const DAG_RE = /^(19|20)\d{2}-\d{2}-\d{2}$/;
 const VIDEO_BUDGET = 150 * 1000 * 1000;   // wv2938: alle video's buiten samen (R2 van het hele account stond 11-11 op 9,68 van de gratis 10 GB)
 // wv2737: de Cloudflare-API staat 1.200 aanroepen per 5 min toe (header Ratelimit-Policy q=1200;w=300, gemeten 8-11). Een foto kost 3 aanroepen
 // (2x R2 put + D1). Zonder rem haalde de lus de grens in seconden en faalde daarna ±100 uploads per seconde, die elk weer meetelden: geen foto
@@ -57,7 +61,7 @@ const D1_SCHEMA = [
   'CREATE TABLE IF NOT EXISTS publicatie (kring TEXT PRIMARY KEY, versie INTEGER NOT NULL, geldig_tot INTEGER NOT NULL)',
   'CREATE TABLE IF NOT EXISTS huis (kring TEXT NOT NULL, pid TEXT NOT NULL, open INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY (kring, pid))',
   'CREATE TABLE IF NOT EXISTS detail (kring TEXT NOT NULL, pid TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY (kring, pid))',
-  'CREATE TABLE IF NOT EXISTS foto (kring TEXT NOT NULL, fid TEXT NOT NULL, pid TEXT NOT NULL, volg INTEGER NOT NULL, ratio REAL, mime_k TEXT NOT NULL, mime_g TEXT NOT NULL, PRIMARY KEY (kring, fid))',
+  'CREATE TABLE IF NOT EXISTS foto (kring TEXT NOT NULL, fid TEXT NOT NULL, pid TEXT NOT NULL, volg INTEGER NOT NULL, ratio REAL, mime_k TEXT NOT NULL, mime_g TEXT NOT NULL, dag TEXT, PRIMARY KEY (kring, fid))',
   'CREATE INDEX IF NOT EXISTS foto_pid ON foto (kring, pid, volg)',
   'CREATE TABLE IF NOT EXISTS gevel (kring TEXT NOT NULL, pid TEXT NOT NULL, mime TEXT NOT NULL, PRIMARY KEY (kring, pid))',
   'CREATE TABLE IF NOT EXISTS video (kring TEXT NOT NULL, fid TEXT NOT NULL, pid TEXT NOT NULL, mime TEXT NOT NULL, grootte INTEGER NOT NULL, PRIMARY KEY (kring, fid))',   // wv2938
@@ -65,6 +69,9 @@ const D1_SCHEMA = [
   'CREATE TABLE IF NOT EXISTS stand (sleutel TEXT PRIMARY KEY, waarde TEXT NOT NULL)',
   'CREATE TABLE IF NOT EXISTS log (id INTEGER PRIMARY KEY AUTOINCREMENT, pid TEXT NOT NULL, kring TEXT NOT NULL, huis TEXT, op INTEGER NOT NULL)',
 ];
+
+// wv2943: kolommen die er later bij kwamen (bestaande D1); 'duplicate column' = er al
+const D1_KOLOMMEN = ['ALTER TABLE foto ADD COLUMN dag TEXT'];
 
 function sha256(x) { return crypto.createHash('sha256').update(x).digest('hex'); }
 function iso(ms) { return new Date(ms).toISOString(); }
@@ -197,7 +204,12 @@ function maak(o) {
     return uit;
   }
   let schemaKlaar = false;
-  async function zorgSchema() { if (!schemaKlaar) { await d1(D1_SCHEMA.map((sql) => ({ sql, params: [] }))); schemaKlaar = true; } }
+  async function zorgSchema() {
+    if (schemaKlaar) return;
+    await d1(D1_SCHEMA.map((sql) => ({ sql, params: [] })));
+    for (const sql of D1_KOLOMMEN) { try { await d1([{ sql, params: [] }]); } catch (e) { if (!/duplicate column/i.test(String(e && e.message))) throw e; } }
+    schemaKlaar = true;
+  }
 
   // ── bezoekers (elke tik; alleen bij een wijziging naar D1) ──
   function bezoekersWens() {
@@ -239,9 +251,11 @@ function maak(o) {
         if (!f || f.status !== 200) { w.onvolledig = true; continue; }   // Immich even weg: deze ronde niets van dit album weghalen
         let volg = 0;
         // wv2938: een video alleen als de pod video's kan omzetten (ml.videoBestand); anders blijft hij buiten, zoals eerst
-        for (const ft of f.body.fotos || []) {
+        // wv2943: per foto alleen de opnamedag erbij (geen plaats, tijd of favoriet: David beslist later over de plaats voor bezoekers)
+        for (const ft of (f.body.fotos || []).slice(0, MAX_PUBLIEK_FOTOS)) {
           if (!ft || typeof ft.id !== 'string' || (!ft.beeld && !videoKan)) continue;
-          w.fotos.set(fidVan(k, x.hid, ft.id), { hid: x.hid, pid, asset: ft.id, volg: volg++, ratio: typeof ft.ratio === 'number' ? ft.ratio : null, video: !ft.beeld });
+          w.fotos.set(fidVan(k, x.hid, ft.id), { hid: x.hid, pid, asset: ft.id, volg: volg++, ratio: typeof ft.ratio === 'number' ? ft.ratio : null, video: !ft.beeld,
+            dag: typeof ft.dag === 'string' && DAG_RE.test(ft.dag) ? ft.dag : null });
         }
         const gv = f.body.album && f.body.album.gevel;
         w.gevels.set(pid, { hid: x.hid, hash: 'foto:' + (gv || '') });
@@ -303,16 +317,19 @@ function maak(o) {
         naD1.push(() => q.objZet.run(k, 'd:' + pid, hs, d.hid));
       }
     }
-    // volgorde/ratio van al geplaatste foto's bijwerken
+    // volgorde/ratio/dag van al geplaatste foto's bijwerken (wv2943: alleen een andere dag telt mee in DAG_PER_RONDE; volg/ratio altijd)
+    let dagNog = o.dagPerRonde || DAG_PER_RONDE;   // (toets: kleiner)
     for (const [fid, f] of w.fotos) {
       const r = heb.get('f:' + fid);
       if (!r) continue;
       const x = JSON.parse(r.hash);
       if (x.bezig) continue;
-      if (x.volg !== f.volg || x.ratio !== f.ratio) {
-        batch.push({ sql: 'UPDATE foto SET volg = ?, ratio = ? WHERE kring = ? AND fid = ?', params: [f.volg, f.ratio, k, fid] });
-        naD1.push(() => q.objZet.run(k, 'f:' + fid, JSON.stringify(Object.assign({ pid: x.pid, volg: f.volg, ratio: f.ratio, mk: x.mk, mg: x.mg }, x.v ? { v: x.v } : {})), f.hid));
-      }
+      const anders = x.volg !== f.volg || x.ratio !== f.ratio, dagAnders = (x.dag ?? null) !== (f.dag ?? null);
+      let dag = x.dag ?? null;
+      if (dagAnders && (anders || dagNog > 0)) { dag = f.dag ?? null; if (!anders) dagNog--; }
+      if (!anders && dag === (x.dag ?? null)) continue;
+      batch.push({ sql: 'UPDATE foto SET volg = ?, ratio = ?, dag = ? WHERE kring = ? AND fid = ?', params: [f.volg, f.ratio, dag, k, fid] });
+      naD1.push(() => q.objZet.run(k, 'f:' + fid, JSON.stringify(Object.assign({ pid: x.pid, volg: f.volg, ratio: f.ratio, mk: x.mk, mg: x.mg }, dag ? { dag } : {}, x.v ? { v: x.v } : {})), f.hid));
     }
     if (batch.length) await d1(batch);
     for (const f of naD1) f();
@@ -386,9 +403,9 @@ function maak(o) {
     // review wv2938 MOET 1: vlak vóór het zichtbaar maken opnieuw toetsen (huis nog open in deze ronde; een video nog steeds in het album en mag)
     const nogSteeds = wens[x.k].details.has(x.pid) && (!vid || ((await ml.videoBestand(x.asset, { kring: x.k, hid: x.hid })) || {}).stand === 'klaar');
     if (!nogSteeds) { for (const key of keys) await o.r2.del(key).catch(() => {}); return 'overgeslagen'; }
-    await d1([{ sql: 'INSERT INTO foto (kring, fid, pid, volg, ratio, mime_k, mime_g) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (kring, fid) DO NOTHING', params: [x.k, x.fid, x.pid, x.volg, x.ratio, bk.mime, bg.mime] }]
+    await d1([{ sql: 'INSERT INTO foto (kring, fid, pid, volg, ratio, mime_k, mime_g, dag) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (kring, fid) DO NOTHING', params: [x.k, x.fid, x.pid, x.volg, x.ratio, bk.mime, bg.mime, x.dag || null] }]
       .concat(vid ? [{ sql: 'INSERT INTO video (kring, fid, pid, mime, grootte) VALUES (?, ?, ?, ?, ?) ON CONFLICT (kring, fid) DO UPDATE SET grootte = excluded.grootte', params: [x.k, x.fid, x.pid, 'video/mp4', vid.grootte] }] : []));
-    q.objZet.run(x.k, 'f:' + x.fid, JSON.stringify(Object.assign({ pid: x.pid, volg: x.volg, ratio: x.ratio, mk: bk.mime, mg: bg.mime }, vid ? { v: vid.grootte } : {})), x.hid);
+    q.objZet.run(x.k, 'f:' + x.fid, JSON.stringify(Object.assign({ pid: x.pid, volg: x.volg, ratio: x.ratio, mk: bk.mime, mg: bg.mime }, x.dag ? { dag: x.dag } : {}, vid ? { v: vid.grootte } : {})), x.hid);
     if (vid) videoTel.ok++;
     return 'ok';
   }
