@@ -1028,7 +1028,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       x.zin === null && /niet hetzelfde product \(ander of geen modelnummer\)/.test(x.reden) && xb2.zin === null && /kleur/.test(xb2.reden) && xb3.zin === null && /inhoud/.test(xb3.reden)
       && xb4.zin === null && /ander merk/.test(xb4.reden) && xb5.zin === null && xb5.reden === 'geen modelnummer in het advies', [x, xb2, xb3, xb4, xb5]);
     // rekenregels rechtstreeks (punten_van + zin_van) met verzonnen reeksen; n = dagen terug of een eigen datumtekst
-    const reken = (gevallen) => JSON.parse(cp.execFileSync('python3', ['-I', '-c', [
+    const reken = (gevallen) => JSON.parse(cp.execFileSync('python3', ['-I', '-B', '-c', [
       'import importlib.util, json, sys', 'from datetime import date',
       's = importlib.util.spec_from_file_location("ph", "prijshistorie.py"); ph = importlib.util.module_from_spec(s); s.loader.exec_module(ph)',
       'uit = []', 'for g in json.loads(sys.stdin.read()):',
@@ -1055,7 +1055,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     x = draai(geval('f', GOED, vol(110, 110, -1), true), ADVIES);
     const xf2 = draai(geval('f2', GOED, null), ADVIES);
     toets('14f prijshistorie verborgen of productpagina weg = geen zin (en wel de reden)', x.zin === null && x.reden === 'prijshistorie verborgen' && xf2.zin === null && /HTTP 404/.test(xf2.reden), [x, xf2]);
-    const mag = JSON.parse(cp.execFileSync('python3', ['-I', '-c', [
+    const mag = JSON.parse(cp.execFileSync('python3', ['-I', '-B', '-c', [
       'import importlib.util, json', 's = importlib.util.spec_from_file_location("ph", "prijshistorie.py"); ph = importlib.util.module_from_spec(s); s.loader.exec_module(ph)',
       'print(json.dumps([ph.mag(u) for u in ["https://www.kieskeurig.nl/search?q=proef%2Fx+s", "https://www.kieskeurig.nl/airfryer/merk/proef", "http://www.kieskeurig.nl/search?q=x",',
       '  "https://kieskeurig.nl/search?q=x", "https://www.kieskeurig.nl.evil.example/search?q=x", "https://www.kieskeurig.nl:8443/search?q=x", "https://www.kieskeurig.nl/product-clickout/1/2",',
