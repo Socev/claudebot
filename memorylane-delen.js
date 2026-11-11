@@ -301,6 +301,8 @@ function maak(o) {
   // wv2120: Immich-albums per herinnering (alleen met een Immich-client)
   // (ontbreekt memorylane-fotos.js in de release, dan zonder foto's: delen werkt door)
   const F = (function () { if (!o.immich) return null; try { return require('./memorylane-fotos.js').maak({ db, immich: o.immich, nu, fout }); } catch (e) { fout('ml-fotos', e); return null; } })();
+  // wv2938: video's afspelen (memorylane-video.js maakt per video één kleine versie op de pod; o.video = { dir, ffmpeg }). Zonder: geen afspelen.
+  const VID = (function () { if (!F || !o.video || !o.video.dir) return null; try { return require('./memorylane-video.js').maak({ dir: o.video.dir, ffmpeg: o.video.ffmpeg, spawn: o.video.spawn, immich: o.immich, nu, fout }); } catch (e) { fout('ml-video', e); return null; } })();
   let fotoTabel = false;
   // wv2325: gegenereerde plaatjes als gevel (alleen met o.beeld; ontbreekt memorylane-plaatje.js, dan zonder)
   const P = (function () {
@@ -1243,6 +1245,32 @@ function maak(o) {
     if (!F) return { status: 404, body: { ok: false, fout: 'geen Immich' } };
     return F.foto(id, maat, opt && (opt.toon || opt.kring) ? (hid) => magZien(vind(hid), opt) : null);
   }
+  // ── wv2938: video's. Alleen een id dat NU als video in een gekoppeld album staat (toonmodus/kring: van een herinnering die mag) ──
+  const magVan = (opt) => (opt && (opt.toon || opt.kring) ? (hid) => magZien(vind(hid), opt) : null);
+  async function videoMag(id, opt) {
+    if (!F || !VID) return { status: 404, body: { ok: false, fout: 'afspelen kan nog niet op deze pod' } };
+    let ok;
+    try { ok = await F.isVideo(id, magVan(opt)); } catch (e) { return { status: 503, body: { ok: false, fout: 'Immich was niet bereikbaar' } }; }
+    return ok ? null : { status: 404, body: { ok: false, fout: 'onbekend' } };
+  }
+  // stand van de afspeelbare versie (zet hem zo nodig klaar): klaar (grootte, delen) | wacht | bezig | kan-niet (reden)
+  async function video(id, opt) { const n = await videoMag(id, opt); return n || { status: 200, body: Object.assign({ ok: true }, VID.stand(id, true)) }; }
+  async function videoDeel(id, nr, opt) {
+    const n = await videoMag(id, opt); if (n) return n;
+    const d = VID.deel(id, nr);
+    return d ? { status: 200, body: Object.assign({ ok: true }, d) } : { status: 404, body: { ok: false, fout: 'dit stuk is er (nog) niet' } };
+  }
+  // voor memorylane-publiek (altijd met kring en hid): → { stand: 'klaar', data, grootte } | { stand, reden? } | null (geen video-module)
+  // review bouw ronde 2 MOET 1: alleen het album van DEZE herinnering telt, en die moet nu (nog) voor de kring zichtbaar zijn
+  async function videoBestand(id, opt) {
+    if (!F || !VID || !opt || !opt.kring || !opt.hid) return null;
+    const h = metAlbum(opt.hid);
+    if (!h || !magZien(h, opt) || !(await F.isVideo(id, (hid) => hid === opt.hid && magZien(vind(hid), opt)))) return { stand: 'kan-niet', reden: 'onbekend' };
+    const s = VID.stand(id, true);
+    if (s.stand !== 'klaar') return s;
+    const b = VID.bestand(id);
+    return b ? { stand: 'klaar', data: b, grootte: b.length } : { stand: 'kan-niet', reden: 'te groot' };
+  }
   // wv2314 (R6): de gevel van één huis in de straat; in de toonmodus alleen van een toonbare herinnering (anders 404, zoals f/<id>)
   // wv2325: zonder foto-gevel het gegenereerde plaatje (in de toonmodus alleen bij een toonbare); heeft het album foto's, dan wint de foto
   async function gevelBeeld(hid, opt) {
@@ -1792,11 +1820,11 @@ function maak(o) {
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
     const ks = Object.fromEntries(db.prepare('SELECT uitkomst, count(*) n FROM ml_koppel GROUP BY uitkomst').all().map((r) => [r.uitkomst, r.n]));
-    return { herinneringen: q.hAlle.all().length, samengevoegd: q.hAlle.all().filter((h) => h.status === 'samengevoegd').length, koppel: ks, stukken: st, immich: F ? F.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, vertelscript: S ? S.info() : null,
+    return { herinneringen: q.hAlle.all().length, samengevoegd: q.hAlle.all().filter((h) => h.status === 'samengevoegd').length, koppel: ks, stukken: st, immich: F ? F.info() : null, video: VID ? VID.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, vertelscript: S ? S.info() : null,
       vertel_auto: S ? { uit: fs.existsSync(AUTO_UIT), laatst: autoLaatst } : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
-  return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling, fotoReizen,
+  return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, video, videoDeel, videoBestand, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling, fotoReizen,
     plaatjeVoorstel, plaatjeMaken, plaatjeWeg, _P: P, vertellerMaken, vertellerDeel, vertellerWeg, _V: V,
     vertelVerhaalMaken, vertelVerhaalDeel, vertelVerhaalWeg, _S: S, autoVertel,
     fotoSync, koppel, losmaken, hoofdpersonen, kring, kringVoorstelTerug, kringen, publiekLijst, magKring, tekstRaak: (l) => (l.some((t) => geheimRaak(t)) ? 'geheim' : markerRaak(l) ? 'marker' : null), _db: db, _setVoor: setVoor, _F: F,

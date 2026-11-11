@@ -16,6 +16,10 @@
  *  - Ids: per kring een eigen huis-id (h + 16 hex) en foto-id (HMAC-SHA256 met een pod-sleutel): geen hid, Immich-id of koppeling tussen kringen.
  *  - Foto's: Immich-miniatuur en -voorbeeld (± 1440 px), zonder metadata (strip(): EXIF, XMP, IPTC, commentaar eruit; onbekend formaat = niet
  *    publiceren). De D1-rij van een foto komt pas na beide R2-objecten.
+ *  - Video's (wv2938): als een foto (miniatuur en voorbeeld = het eerste beeld uit Immich, metadata eruit) plus R2 f/<kring>/<fid>/v (de kleine
+ *    versie van memorylane-video.js, zonder metadata) en D1-rij video. Pas als die versie klaar is (anders de volgende ronde). Samen hooguit
+ *    VIDEO_BUDGET bytes in R2 (beide kringen; het account zit dicht bij de gratis 10 GB): wat niet past, gaat niet naar buiten. Vlak vóór de
+ *    D1-rij wordt de toestemming opnieuw getoetst (review ontwerp MOET 1); mag het niet meer, dan gaan de net geplaatste objecten weer weg.
  *  - Dicht gaan (kring uit, gevoelig, weg): in één D1-batch eerst een blok-rij (de worker weigert meteen), dan de rijen weg; daarna de
  *    R2-objecten; het blok gaat pas weg als die allemaal weg zijn (anders herhaalt de volgende ronde).
  *  - Houdbaarheid: publicatie.geldig_tot = nu + 24 u na elke geslaagde ronde; duwt de pod een dag niet, dan zet de worker de straat dicht.
@@ -33,6 +37,7 @@ const MLD = require('./memorylane-delen.js');
 const KRINGEN = MLD.PKRINGEN;
 const RONDE_MS = 15 * 60000, LOG_MS = 5 * 60000, HOUDBAAR_MS = 24 * 3600000;
 const FOTO_BUDGET_MS = 40000, FOTO_TEGELIJK = 3, BATCH = 40, FOTO_MAX_TIK = 40;
+const VIDEO_BUDGET = 150 * 1000 * 1000;   // wv2938: alle video's buiten samen (R2 van het hele account stond 11-11 op 9,68 van de gratis 10 GB)
 // wv2737: de Cloudflare-API staat 1.200 aanroepen per 5 min toe (header Ratelimit-Policy q=1200;w=300, gemeten 8-11). Een foto kost 3 aanroepen
 // (2x R2 put + D1). Zonder rem haalde de lus de grens in seconden en faalde daarna ±100 uploads per seconde, die elk weer meetelden: geen foto
 // meer door, api.log elk uur vol, en ook de rondes en de oude deellinks (ml-d1) faalden. Nu hooguit FOTO_MAX_TIK pogingen per tik
@@ -55,6 +60,7 @@ const D1_SCHEMA = [
   'CREATE TABLE IF NOT EXISTS foto (kring TEXT NOT NULL, fid TEXT NOT NULL, pid TEXT NOT NULL, volg INTEGER NOT NULL, ratio REAL, mime_k TEXT NOT NULL, mime_g TEXT NOT NULL, PRIMARY KEY (kring, fid))',
   'CREATE INDEX IF NOT EXISTS foto_pid ON foto (kring, pid, volg)',
   'CREATE TABLE IF NOT EXISTS gevel (kring TEXT NOT NULL, pid TEXT NOT NULL, mime TEXT NOT NULL, PRIMARY KEY (kring, pid))',
+  'CREATE TABLE IF NOT EXISTS video (kring TEXT NOT NULL, fid TEXT NOT NULL, pid TEXT NOT NULL, mime TEXT NOT NULL, grootte INTEGER NOT NULL, PRIMARY KEY (kring, fid))',   // wv2938
   'CREATE TABLE IF NOT EXISTS blok (kring TEXT NOT NULL, pid TEXT NOT NULL, op INTEGER NOT NULL, PRIMARY KEY (kring, pid))',
   'CREATE TABLE IF NOT EXISTS stand (sleutel TEXT PRIMARY KEY, waarde TEXT NOT NULL)',
   'CREATE TABLE IF NOT EXISTS log (id INTEGER PRIMARY KEY AUTOINCREMENT, pid TEXT NOT NULL, kring TEXT NOT NULL, huis TEXT, op INTEGER NOT NULL)',
@@ -215,6 +221,7 @@ function maak(o) {
 
   // ── de straat per kring ──
   let wens = null;   // kring → { huizen: Map(pid → {hid, open, json}), details: Map, gevels: Map(pid → {hid, hash}), fotos: Map(fid → {hid, pid, asset, volg, ratio}) }
+  const videoKan = typeof ml.videoBestand === 'function' && ml.info && (function () { try { const i = ml.info(); return !!(i && i.video && i.video.ffmpeg); } catch (e) { return false; } })();
   async function wensVan(k) {
     const w = { huizen: new Map(), details: new Map(), gevels: new Map(), fotos: new Map(), tegen: 0 };
     for (const x of ml.publiekLijst(k)) {
@@ -231,7 +238,11 @@ function maak(o) {
         try { f = await ml.fotos(x.hid, { kring: k }); } catch (e) { fout('mlp-fotos', e); }
         if (!f || f.status !== 200) { w.onvolledig = true; continue; }   // Immich even weg: deze ronde niets van dit album weghalen
         let volg = 0;
-        for (const ft of f.body.fotos || []) if (ft && ft.beeld && typeof ft.id === 'string') w.fotos.set(fidVan(k, x.hid, ft.id), { hid: x.hid, pid, asset: ft.id, volg: volg++, ratio: typeof ft.ratio === 'number' ? ft.ratio : null });
+        // wv2938: een video alleen als de pod video's kan omzetten (ml.videoBestand); anders blijft hij buiten, zoals eerst
+        for (const ft of f.body.fotos || []) {
+          if (!ft || typeof ft.id !== 'string' || (!ft.beeld && !videoKan)) continue;
+          w.fotos.set(fidVan(k, x.hid, ft.id), { hid: x.hid, pid, asset: ft.id, volg: volg++, ratio: typeof ft.ratio === 'number' ? ft.ratio : null, video: !ft.beeld });
+        }
         const gv = f.body.album && f.body.album.gevel;
         w.gevels.set(pid, { hid: x.hid, hash: 'foto:' + (gv || '') });
       } else if (x.item.plaatje) w.gevels.set(pid, { hid: x.hid, hash: 'plaatje' });
@@ -256,7 +267,7 @@ function maak(o) {
     for (const pid of dichtGaan) {
       batch.push({ sql: 'INSERT INTO blok (kring, pid, op) VALUES (?, ?, ?) ON CONFLICT (kring, pid) DO UPDATE SET op = excluded.op', params: [k, pid, nu()] });
       batch.push({ sql: 'DELETE FROM detail WHERE kring = ? AND pid = ?', params: [k, pid] }, { sql: 'DELETE FROM foto WHERE kring = ? AND pid = ?', params: [k, pid] },
-        { sql: 'DELETE FROM gevel WHERE kring = ? AND pid = ?', params: [k, pid] });
+        { sql: 'DELETE FROM video WHERE kring = ? AND pid = ?', params: [k, pid] }, { sql: 'DELETE FROM gevel WHERE kring = ? AND pid = ?', params: [k, pid] });
       if (!w.huizen.has(pid)) batch.push({ sql: 'DELETE FROM huis WHERE kring = ? AND pid = ?', params: [k, pid] });
       naD1.push(() => { q.objWeg.run(k, 'd:' + pid); if (!w.huizen.has(pid)) q.objWeg.run(k, 'h:' + pid); });
     }
@@ -266,8 +277,8 @@ function maak(o) {
         const fid = r.sleutel.slice(2), x = JSON.parse(r.hash);
         const weg = !w.fotos.has(fid) && (dichtGaan.has(x.pid) || !w.onvolledig);
         if (!weg) continue;
-        if (!dichtGaan.has(x.pid)) batch.push({ sql: 'DELETE FROM foto WHERE kring = ? AND fid = ?', params: [k, fid] });
-        r2weg.push({ sleutel: r.sleutel, keys: [r2f(k, fid, 'k'), r2f(k, fid, 'g')], pid: x.pid });
+        if (!dichtGaan.has(x.pid)) batch.push({ sql: 'DELETE FROM foto WHERE kring = ? AND fid = ?', params: [k, fid] }, { sql: 'DELETE FROM video WHERE kring = ? AND fid = ?', params: [k, fid] });
+        r2weg.push({ sleutel: r.sleutel, keys: [r2f(k, fid, 'k'), r2f(k, fid, 'g')].concat(x.v ? [r2f(k, fid, 'v')] : []), pid: x.pid });
       }
       if (r.sleutel.startsWith('g:')) {
         const pid = r.sleutel.slice(2), g = w.gevels.get(pid);
@@ -300,7 +311,7 @@ function maak(o) {
       if (x.bezig) continue;
       if (x.volg !== f.volg || x.ratio !== f.ratio) {
         batch.push({ sql: 'UPDATE foto SET volg = ?, ratio = ? WHERE kring = ? AND fid = ?', params: [f.volg, f.ratio, k, fid] });
-        naD1.push(() => q.objZet.run(k, 'f:' + fid, JSON.stringify({ pid: x.pid, volg: f.volg, ratio: f.ratio, mk: x.mk, mg: x.mg }), f.hid));
+        naD1.push(() => q.objZet.run(k, 'f:' + fid, JSON.stringify(Object.assign({ pid: x.pid, volg: f.volg, ratio: f.ratio, mk: x.mk, mg: x.mg }, x.v ? { v: x.v } : {})), f.hid));
       }
     }
     if (batch.length) await d1(batch);
@@ -351,17 +362,42 @@ function maak(o) {
       q.objZet.run(x.k, 'g:' + x.pid, JSON.stringify({ bron: x.bron }), x.hid);
       return 'ok';
     }
+    // wv2938: een video eerst klaar en binnen het budget, anders (nog) niet
+    let vid = null;
+    if (x.video) {
+      vid = await ml.videoBestand(x.asset, { kring: x.k, hid: x.hid });
+      if (!vid || vid.stand === 'kan-niet') { videoTel.niet++; return 'geen'; }
+      if (vid.stand !== 'klaar') { videoTel.wacht++; return 'wacht'; }
+      // review bouw MOET 2: synchroon reserveren (geen await tussen toets en reservering), anders gebruiken parallelle uploads hetzelfde budget
+      if (videoBytes() + videoGereserveerd + vid.grootte > budget) { videoTel.budget++; return 'geen'; }
+      videoGereserveerd += vid.grootte;
+    }
+    try { return await uploadFoto(x, vid); } finally { if (vid && !vid.overgedragen) videoGereserveerd -= vid.grootte; }
+  }
+  async function uploadFoto(x, vid) {
     const bk = await beeld(x, 'k'), bg = await beeld(x, 'g');
     if (!bk || !bg) return 'geen';
-    q.objZet.run(x.k, 'f:' + x.fid, JSON.stringify({ pid: x.pid, bezig: true }), x.hid);   // review MOET 3: eerst vastleggen, dan uploaden
-    await o.r2.put(r2f(x.k, x.fid, 'k'), bk.data, bk.mime);
-    await o.r2.put(r2f(x.k, x.fid, 'g'), bg.data, bg.mime);
-    if (!wens[x.k].details.has(x.pid)) { await o.r2.del(r2f(x.k, x.fid, 'k')).catch(() => {}); await o.r2.del(r2f(x.k, x.fid, 'g')).catch(() => {}); return 'overgeslagen'; }
-    await d1([{ sql: 'INSERT INTO foto (kring, fid, pid, volg, ratio, mime_k, mime_g) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (kring, fid) DO NOTHING', params: [x.k, x.fid, x.pid, x.volg, x.ratio, bk.mime, bg.mime] }]);
-    q.objZet.run(x.k, 'f:' + x.fid, JSON.stringify({ pid: x.pid, volg: x.volg, ratio: x.ratio, mk: bk.mime, mg: bg.mime }), x.hid);
+    q.objZet.run(x.k, 'f:' + x.fid, JSON.stringify(Object.assign({ pid: x.pid, bezig: true }, vid ? { v: vid.grootte } : {})), x.hid);   // review MOET 3: eerst vastleggen, dan uploaden
+    if (vid) { videoGereserveerd -= vid.grootte; vid.overgedragen = true; }   // review ronde 3 ZOU 1: telt vanaf hier via de bezig-rij (één keer)
+    const keys = [r2f(x.k, x.fid, 'k'), r2f(x.k, x.fid, 'g')].concat(vid ? [r2f(x.k, x.fid, 'v')] : []);
+    await o.r2.put(keys[0], bk.data, bk.mime);
+    await o.r2.put(keys[1], bg.data, bg.mime);
+    if (vid) await o.r2.put(keys[2], vid.data, 'video/mp4');
+    // review wv2938 MOET 1: vlak vóór het zichtbaar maken opnieuw toetsen (huis nog open in deze ronde; een video nog steeds in het album en mag)
+    const nogSteeds = wens[x.k].details.has(x.pid) && (!vid || ((await ml.videoBestand(x.asset, { kring: x.k, hid: x.hid })) || {}).stand === 'klaar');
+    if (!nogSteeds) { for (const key of keys) await o.r2.del(key).catch(() => {}); return 'overgeslagen'; }
+    await d1([{ sql: 'INSERT INTO foto (kring, fid, pid, volg, ratio, mime_k, mime_g) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (kring, fid) DO NOTHING', params: [x.k, x.fid, x.pid, x.volg, x.ratio, bk.mime, bg.mime] }]
+      .concat(vid ? [{ sql: 'INSERT INTO video (kring, fid, pid, mime, grootte) VALUES (?, ?, ?, ?, ?) ON CONFLICT (kring, fid) DO UPDATE SET grootte = excluded.grootte', params: [x.k, x.fid, x.pid, 'video/mp4', vid.grootte] }] : []));
+    q.objZet.run(x.k, 'f:' + x.fid, JSON.stringify(Object.assign({ pid: x.pid, volg: x.volg, ratio: x.ratio, mk: bk.mime, mg: bg.mime }, vid ? { v: vid.grootte } : {})), x.hid);
+    if (vid) videoTel.ok++;
     return 'ok';
   }
   const fotoTel = { ok: 0, geen: 0, fout: 0 };
+  const videoTel = { ok: 0, wacht: 0, budget: 0, niet: 0 };
+  let videoGereserveerd = 0;
+  const budget = o.videoBudget || VIDEO_BUDGET;   // (toets: kleiner)
+  // wv2938: bytes aan video's die nu buiten staan of onderweg zijn (beide kringen)
+  function videoBytes() { let n = 0; for (const k of KRINGEN) for (const r of q.obj.all(k)) if (r.sleutel.startsWith('f:') && r.hash.indexOf('"v":') >= 0) { const x = JSON.parse(r.hash); if (typeof x.v === 'number') n += x.v; } return n; }
   async function uploads() {
     const tot = nu() + FOTO_BUDGET_MS;
     let pogingen = 0, gestopt = false;
@@ -448,9 +484,10 @@ function maak(o) {
     for (const r of q.logHid.all()) { (uit[r.hid] = uit[r.hid] || []).push({ naam: naam.get(r.pid) || 'onbekend', laatst: r.laatst }); }
     return uit;
   }
-  function health() { return { aan: true, laatste_ronde: stand('laatste_ronde'), wachtrij: wachtrij.length, bezoekers: Number(stand('bezoekers_n') || 0), noodstop: stand('noodstop') === '1', fout: laatst && laatst.fout ? true : false, fotos: fotoTel }; }
+  function health() { return { aan: true, laatste_ronde: stand('laatste_ronde'), wachtrij: wachtrij.length, bezoekers: Number(stand('bezoekers_n') || 0), noodstop: stand('noodstop') === '1', fout: laatst && laatst.fout ? true : false, fotos: fotoTel,
+    video: Object.assign({ kan: videoKan, mb_buiten: Math.round(videoBytes() / 1e6), budget_mb: Math.round(budget / 1e6) }, videoTel) }; }
   function markeerVuil() { wijziging++; }
   return { tik, info, gezien, noodstop, health, markeerVuil, _pidVan: pidVan, _fidVan: fidVan, _persoonVan: persoonVan, _dichtItem: dichtItem, _wens: () => wens };
 }
 
-module.exports = { maak, strip, stripJpeg, stripWebp, lijstItem, detailItem, adresHash, LIJST_VELDEN, DETAIL_VELDEN, D1_SCHEMA, KRINGEN, FOTO_MAX_TIK };
+module.exports = { maak, strip, stripJpeg, stripWebp, lijstItem, detailItem, adresHash, LIJST_VELDEN, DETAIL_VELDEN, D1_SCHEMA, KRINGEN, FOTO_MAX_TIK, VIDEO_BUDGET };

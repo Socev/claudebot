@@ -12,6 +12,8 @@
  *   GET  /api/timeline/bucket?albumId=<uuid>&timeBucket=<datum>   foto-ids van die maand
  *        (&withCoordinates=true, wv2468: ook opnametijd en GPS voor de periode en het kaartpunt van een reis uit je foto's; alleen lezen)
  *   GET  /api/assets/<uuid>/thumbnail?size=thumbnail|preview      miniatuur of voorbeeld (nooit het origineel)
+ *   GET  /api/assets/<uuid>/video/playback             wv2938: een video lezen (alleen lezen, rechtstreeks naar een bestand van ≤ 2 GB;
+ *                                                       memorylane-video.js maakt er een kleine versie van om af te spelen)
  *   POST /api/albums  {albumName, description}         album aanmaken, LEEG (geen assetIds, geen albumUsers)
  *   PATCH /api/albums/<uuid>  {albumName}              ALLEEN de naam van een album (wv2225; memorylane-fotos.js doet dat alleen bij albums
  *                                                       met zijn eigen code en naamvorm). Geen omschrijving, omslag, volgorde of delen.
@@ -102,6 +104,7 @@ function weiger(methode, pad, query, body) {
     if (pad === '/api/timeline/bucket') return alleen(['albumId', 'timeBucket', 'order', 'withCoordinates']) && u(q.albumId) && typeof q.timeBucket === 'string' && BUCKET_RE.test(q.timeBucket)
       && (q.order === undefined || q.order === 'asc' || q.order === 'desc') && (q.withCoordinates === undefined || q.withCoordinates === 'true') ? null : 'query';
     if ((m = /^\/api\/assets\/([0-9a-f-]{36})\/thumbnail$/.exec(pad)) && u(m[1])) return alleen(['size']) && (q.size === 'thumbnail' || q.size === 'preview') ? null : 'query';
+    if ((m = /^\/api\/assets\/([0-9a-f-]{36})\/video\/playback$/.exec(pad)) && u(m[1])) return sleutels.length ? 'query' : null;   // wv2938: video lezen (naar bestand)
     return 'pad';
   }
   if (methode === 'POST' && pad === '/api/assets') {
@@ -351,7 +354,45 @@ function maak(o) {
     const x = Array.isArray(r) ? r.find(function (y) { return y && y.id === eigenId; }) : null;
     return !!(x && (x.success === true || x.error === 'duplicate'));
   }
-  return { albums, album, maakAlbum, hernoemAlbum, albumFotos, albumSpoor, beeld, verzoek, basis, fotoInfo, origineel, albumsVan, uploaden, stapelen, inAlbum, mijnId, magStapelen };
+  // wv2938: een video naar een NIEUW bestand (wx, 0600), gestreamd met een harde grens; → { bytes, mime }. Bij een fout of te groot is het
+  // bestand weer weg. Zelfde witte lijst en sleutel als verzoek(); doorverwijzingen worden niet gevolgd.
+  async function videoNaarBestand(id, pad, max, timeoutMs) {
+    if (!u(id)) throw new Error('immich: ongeldige video');
+    const p = '/api/assets/' + id + '/video/playback';
+    const r = weiger('GET', p, {}, undefined);
+    if (r) { const e = new Error('immich: niet toegestaan (' + r + ')'); e.code = 'WITTE_LIJST'; throw e; }
+    const k = await o.sleutel();
+    if (!k) { const e = new Error('immich: geen sleutel'); e.code = 'GEEN_SLEUTEL'; throw e; }
+    const fs = require('fs');
+    let res;
+    try { res = await doeFetch(basis + p, { method: 'GET', headers: { 'x-api-key': k, Accept: 'video/*', 'User-Agent': 'socev-memorylane/1' }, redirect: 'manual', signal: AbortSignal.timeout(timeoutMs || 600000) }); }
+    catch (e) { const f = new Error('immich: niet bereikbaar'); f.code = 'NET'; throw f; }
+    // review bouw ronde 2 MOET 2: een afgewezen antwoord niet inlezen (geen grens), maar afbreken
+    const breekAf = async function () { try { if (res.body) await res.body.cancel(); } catch (e) { /* weg */ } };
+    if (res.status !== 200) { await breekAf(); const f = new Error('immich: HTTP ' + res.status); f.code = 'HTTP'; f.status = res.status; throw f; }
+    const ct = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!/^video\/[a-z0-9.+-]+$/.test(ct) && ct !== 'application/octet-stream') { await breekAf(); const f = new Error('immich: geen video'); f.code = 'SOORT'; throw f; }
+    if (Number(res.headers.get('content-length') || 0) > max) { await breekAf(); const f = new Error('immich: video te groot'); f.code = 'GROOT'; throw f; }
+    let fd;
+    try { fd = fs.openSync(pad, 'wx', 0o600); } catch (e) { await breekAf(); throw e; }   // review ronde 3 ZOU 2
+    let n = 0, ok = false;
+    const lezer = res.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await lezer.read();
+        if (done) break;
+        n += value.length;
+        if (n > max) { try { await lezer.cancel(); } catch (e) { /* weg */ } const f = new Error('immich: video te groot'); f.code = 'GROOT'; throw f; }
+        let w = 0; while (w < value.length) w += fs.writeSync(fd, value, w, value.length - w);
+      }
+      ok = true;
+    } finally {
+      fs.closeSync(fd);
+      if (!ok) { try { await lezer.cancel(); } catch (e) { /* al dicht */ } try { fs.unlinkSync(pad); } catch (e) { /* weg */ } }
+    }
+    return { bytes: n, mime: ct };
+  }
+  return { albums, album, maakAlbum, hernoemAlbum, albumFotos, albumSpoor, beeld, verzoek, basis, fotoInfo, origineel, albumsVan, uploaden, stapelen, inAlbum, mijnId, magStapelen, videoNaarBestand };
 }
 
 // Zit er nog metadata (Exif/XMP, met mogelijk de plek of het toestel) in een beeld? Dan delen we het niet naar buiten.

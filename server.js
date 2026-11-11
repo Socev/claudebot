@@ -6104,6 +6104,7 @@ async function appTelegram(tekst) {
 // dat deel: de app-data van de toets).
 function mlToonPad() { let d = null; try { d = HERINNERINGEN_DIR; } catch (e) { d = null; } return path.join(d || APP_DATA, 'toonmodus.json'); }
 const ML_TOON_ROUTES = [/^GET \/app\/memorylane\/(lijst|toon)$/, /^POST \/app\/memorylane\/toon$/, /^GET \/app\/memorylane\/h\/h[0-9a-f]{16}(\/fotos|\/audio\/[1-9][0-9]?)?$/,
+  /^GET \/app\/memorylane\/v\/[0-9a-f-]{36}(\/[1-9][0-9]{0,2})?$/,   // wv2938: video (stand, stukken)
   /^GET \/app\/memorylane\/f\/[0-9a-f-]{36}\/(k|g)$/, /^GET \/app\/memorylane\/h\/h[0-9a-f]{16}\/gevel\/k$/, /^POST \/app\/aanwezig$/];   // wv2314: gevel
 let mlToon = null;
 function mlToonLees() {
@@ -21131,6 +21132,8 @@ const memorylaneDelen = (function () {
   if (!fs.existsSync(p) || !intake || !herinneringen || !HERINNERINGEN_MOD) return null;
   try {
     return require(p).maak({ db: intake._db, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, host: DOCS_HOST, kluis: mlKluis, immich: immichMl, verhaal: herinneringenVerhaal,
+      // wv2938: video's afspelen — kleine versie per video in herinneringen/video (cache), statische ffmpeg op het volume (niet in het image)
+      video: { dir: path.join(HERINNERINGEN_DIR, 'video'), ffmpeg: process.env.ML_FFMPEG || '/opt/data/tools/ffmpeg/ffmpeg' },
       // wv2325: Plaatje maken via openai-hulp (alleen de beschrijving gaat naar OpenAI; teller en maandgrens daar)
       beeld: function (x) { return openaiHulp && typeof openaiHulp.beeld === 'function' ? openaiHulp.beeld({ afnemer: 'memorylane-plaatje', prompt: x && x.prompt, kwaliteit: 'medium' }) : Promise.resolve({ ok: false, status: 'uit' }); },
       marker: require(path.join(__dirname, 'intake', 'patientpoort.js')), geheimen: function () { try { return openaiPodGeheimen(); } catch (e) { return []; } },
@@ -21186,7 +21189,7 @@ const memorylanePubliek = (function () {
       r2: {
         put: async function (key, buf, mime) {
           const u = r2Url(key), tok = await mlPubToken();
-          const r = await fetch(u, { method: 'PUT', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': mime }, body: buf, signal: AbortSignal.timeout(60000) });
+          const r = await fetch(u, { method: 'PUT', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': mime }, body: buf, signal: AbortSignal.timeout(Math.max(60000, Math.ceil(buf.length / 100))) });   // wv2938: video tot 80 MB
           await r.text().catch(function () {});
           if (!r.ok) throw new Error('R2 put HTTP ' + r.status);
         },
@@ -21208,6 +21211,7 @@ async function memorylanePubliekTik(dwing) {
 if (memorylanePubliek && SERVER_ECHT) { setTimeout(function () { memorylanePubliekTik(); }, 180000).unref(); setInterval(function () { memorylanePubliekTik(); }, 60000).unref(); }
 appStaat.tellers.memorylane = [];
 appStaat.tellers['memorylane-foto'] = [];
+appStaat.tellers['memorylane-video'] = [];
 async function appMemorylane(req, res, a, s, route, d) {
   if (!memorylaneDelen) return appWeiger(res, 404, 'MemoryLane delen zit niet in deze versie van de pod', 'ml ontbreekt');
   const antw = function (wat, u) { res._app.reden = 'memorylane ' + wat + ' ' + u.status; return appStuur(res, u.status, u.body); };
@@ -21217,6 +21221,13 @@ async function appMemorylane(req, res, a, s, route, d) {
     if (!appTeller('memorylane-foto', 3000, 3600000)) return appWeiger(res, 429, 'te veel foto\'s dit uur', 'grens memorylane-foto');
     try { return antw('foto', await memorylaneDelen.foto(m[1], m[2] === 'g' ? 'groot' : 'klein', { toon: mlToonAan(a.id) })); }
     catch (e) { logError('memorylane-foto', e); return appWeiger(res, 503, 'de foto kon nu niet geladen worden', 'ml foto fout'); }
+  }
+  // wv2938: een video. v/<id> = stand van de afspeelbare versie (zet hem zo nodig klaar); v/<id>/<n> = stuk n (2 MB) als JSON {mime, data}.
+  // Zelfde toets als een foto (id nu als video in een gekoppeld album; toonmodus alleen toonbaar); eigen teller.
+  if ((m = /^GET \/app\/memorylane\/v\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/([1-9][0-9]{0,2}))?$/.exec(route))) {
+    if (!appTeller('memorylane-video', 1500, 3600000)) return appWeiger(res, 429, 'te veel video dit uur', 'grens memorylane-video');
+    try { return antw('video', m[2] ? await memorylaneDelen.videoDeel(m[1], Number(m[2]), { toon: mlToonAan(a.id) }) : await memorylaneDelen.video(m[1], { toon: mlToonAan(a.id) })); }
+    catch (e) { logError('memorylane-video', e); return appWeiger(res, 503, 'de video kon nu niet geladen worden', 'ml video fout'); }
   }
   // wv2314 (R6, de straat): de gevel van één herinnering als miniatuur {mime, data}, zonder de fotolijst; zelfde teller als de foto's
   if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/gevel\/k$/.exec(route))) {

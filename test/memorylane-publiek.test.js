@@ -57,6 +57,8 @@ function nepImmich() {
       return res(200, r0);
     }
     if (m === 'GET' && (r = /^\/api\/assets\/([0-9a-f-]{36})\/thumbnail$/.exec(u.pathname))) { const b = st.beelden.get(r[1]); return b ? res(200, b.buf, b.mime) : res(404, {}); }
+    // wv2938: de video zelf (verzonnen testbeeld)
+    if (m === 'GET' && (r = /^\/api\/assets\/([0-9a-f-]{36})\/video\/playback$/.exec(u.pathname))) { const b = st.videoBuf && st.video.has(r[1]) ? st.videoBuf.get(r[1]) : null; return b ? res(200, b, 'video/mp4') : res(404, {}); }
     return res(404, { message: 'nep: onbekend' });
   };
   st.client = IM.maak({ basis: 'https://immich.proef.invalid', sleutel: async () => st.sleutel, fetch: st.fetch });
@@ -90,7 +92,7 @@ function lijst(status) {
     '| Dubbel Proef | shizzle | ada@voorbeeld.invalid | |\n| Zonder Adres | familie | | |\n| Iemand Anders | vrienden | x@voorbeeld.invalid | |\n';
 }
 
-function omgeving() {
+function omgeving(opt) {
   const basis = fs.mkdtempSync(path.join(os.tmpdir(), 'ml-publiek-toets-'));
   const idir = path.join(basis, 'intake'), vault = path.join(basis, 'vault'), hdir = path.join(basis, 'herinneringen');
   for (const m of [idir, vault, path.join(vault, '20_Prive/Reizen'), path.join(vault, H.NOTITIE_MAP), path.join(vault, M.MAP)]) fs.mkdirSync(m, { recursive: true });
@@ -103,7 +105,7 @@ function omgeving() {
   const fouten = [];
   const ml = M.maak({ db: ing._db, vault, vv: VV, dir: hdir, d1: async () => ({ ok: true, rijen: [] }), kluis: async () => null, marker: P, geheimen: () => ['nepgeheim-0123456789abcdef'],
     categorieen: H.CATEGORIEEN, onderhoudAan: () => false, nachtgrendel: () => false, nu: () => klok.t, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)),
-    reisVandaag: () => '2026-11-08', immich: im.client });
+    reisVandaag: () => '2026-11-08', immich: im.client, video: opt && opt.video ? { dir: path.join(hdir, 'video'), ffmpeg: opt.video } : undefined });
   const d1db = new DatabaseSync(':memory:');
   const st = { d1Uit: false, r2Uit: false, r2: new Map(), batches: 0 };
   const d1 = async (batch) => {
@@ -114,7 +116,7 @@ function omgeving() {
   };
   const r2 = { put: async (k, b, m) => { if (st.r2Uit) throw new Error('R2 put HTTP 500'); st.r2.set(k, { b: Buffer.from(b), m }); },
     del: async (k) => { if (st.r2Uit) throw new Error('R2 del HTTP 500'); st.r2.delete(k); } };
-  const pub = MP.maak({ db: ing._db, ml, vault, vv: VV, dir: hdir, d1, r2, categorieen: H.CATEGORIEEN, nu: () => klok.t, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)) });
+  const pub = MP.maak({ db: ing._db, ml, vault, vv: VV, dir: hdir, d1, r2, categorieen: H.CATEGORIEEN, nu: () => klok.t, videoBudget: opt && opt.budget, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)) });
   const ins = ing._db.prepare("INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES (?, 'los', ?, ?, 0, 'actief', ?, ?)");
   function album(hid, cat, titel, wanneer) {
     const t = '2026-11-01T10:00:00Z';
@@ -365,5 +367,228 @@ test('wv2737: rem op de Cloudflare-API: hooguit FOTO_MAX_TIK uploads per tik; bi
     assert.ok(tikken >= 2, 'de wachtrij was niet in één tik leeg');
     assert.strictEqual(o.ing._db.prepare("SELECT count(*) n FROM mlp_obj WHERE hash LIKE '%bezig%'").get().n, 0, 'ook de foto\'s die 429 kregen kwamen terug');
     assert.strictEqual(o.rijen('foto', 'familie').filter((r) => r.pid === o.pub._pidVan('familie', B)).length, 62, 'alle foto\'s van B staan erin');
+  } finally { o.sluit(); }
+});
+
+// ── wv2938: video's naar buiten (echte ffmpeg; zonder ffmpeg overgeslagen). Verzonnen testbeeld met een verzonnen plaats en titel. ──
+const FF = process.env.ML_FFMPEG || (fs.existsSync('/opt/data/tools/ffmpeg/ffmpeg') ? '/opt/data/tools/ffmpeg/ffmpeg' : (function () { try { return require('child_process').execFileSync('sh', ['-c', 'command -v ffmpeg']).toString().trim(); } catch (e) { return ''; } })());
+const ffOk = !!FF && fs.existsSync(FF);
+const MV = require(path.join(ROOT, 'memorylane-video.js'));
+
+test('wv2938 metaVeilig: alleen ftyp/moov/mdat/free; geen ©xyz, meta met inhoud, uuid of udta met andere velden; kapot = niet veilig', () => {
+  const doos = (t, ...k) => { const lijf = Buffer.concat(k.map((x) => (Buffer.isBuffer(x) ? x : Buffer.from(x, 'latin1')))); const l = Buffer.alloc(4); l.writeUInt32BE(8 + lijf.length); return Buffer.concat([l, Buffer.from(t, 'latin1'), lijf]); };
+  const vol = (t, ...k) => doos(t, Buffer.alloc(4), ...k);   // FullBox (versie + vlaggen)
+  const trak = doos('trak', doos('tkhd', Buffer.alloc(20)), doos('mdia', doos('hdlr', Buffer.alloc(25))));
+  const schoon = (udta) => Buffer.concat([doos('ftyp', 'isom\0\0\x02\0'), doos('moov', doos('mvhd', Buffer.alloc(20)), trak, ...(udta ? [udta] : [])), doos('mdat', Buffer.alloc(16))]);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ml-video-meta-'));
+  const v = (b) => { const p = path.join(dir, 'x.mp4'); fs.writeFileSync(p, b); return MV.metaVeilig(p); };
+  try {
+    assert.strictEqual(v(schoon()), true);
+    assert.strictEqual(v(schoon(doos('udta', doos('\xa9too', 'Lavf'), vol('meta', doos('hdlr', Buffer.alloc(25)), doos('ilst'))))), true, 'lege meta van ffmpeg mag');
+    assert.strictEqual(v(schoon(doos('udta', doos('\xa9xyz', '+52.0000+005.0000/')))), false, 'plaats');
+    assert.strictEqual(v(schoon(doos('udta', vol('meta', doos('hdlr', Buffer.alloc(25)), doos('ilst', doos('\xa9nam', 'Proefcamera')))))), false, 'meta met inhoud');
+    assert.strictEqual(v(Buffer.concat([schoon(), doos('uuid', Buffer.alloc(16))])), false, 'uuid (XMP) op het hoogste niveau');
+    assert.strictEqual(v(Buffer.concat([doos('ftyp', 'isom'), doos('moov', doos('trak', doos('meta', Buffer.alloc(8)))), doos('mdat')])), false, 'meta in een trak');
+    assert.strictEqual(v(schoon().subarray(0, 30)), false, 'afgekapt');
+    const hd = (naam) => vol('hdlr', Buffer.alloc(4), 'vide', Buffer.alloc(12), naam + '\0');
+    const metHdlr = (naam) => Buffer.concat([doos('ftyp', 'isom'), doos('moov', doos('trak', doos('mdia', hd(naam)))), doos('mdat')]);
+    assert.strictEqual(v(metHdlr('VideoHandler')), true);
+    assert.strictEqual(v(metHdlr('Proefcamera van Ada')), false, 'review bouw MOET 1: vrije tekst in handler_name');
+    assert.strictEqual(v(Buffer.from('geen mp4 maar tekst')), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('wv2938 immich: video/playback alleen GET zonder query; videoNaarBestand houdt de grens en laat bij een fout geen bestand achter', async () => {
+  const id = crypto.randomUUID();
+  assert.strictEqual(IM.weiger('GET', '/api/assets/' + id + '/video/playback', {}, undefined), null);
+  assert.strictEqual(IM.weiger('GET', '/api/assets/' + id + '/video/playback', { x: '1' }, undefined), 'query');
+  assert.notStrictEqual(IM.weiger('POST', '/api/assets/' + id + '/video/playback', {}, {}), null);
+  const im = nepImmich(); im.video.add(id); im.videoBuf = new Map([[id, Buffer.alloc(5000, 7)]]);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ml-video-dl-'));
+  try {
+    const p = path.join(dir, 'a.in');
+    assert.deepStrictEqual(await im.client.videoNaarBestand(id, p, 10000), { bytes: 5000, mime: 'video/mp4' });
+    assert.strictEqual((fs.statSync(p).mode & 0o777), 0o600);
+    await assert.rejects(im.client.videoNaarBestand(id, p, 10000), /EEXIST/, 'nooit een bestaand bestand overschrijven');
+    const q = path.join(dir, 'b.in');
+    await assert.rejects(im.client.videoNaarBestand(id, q, 1000), (e) => e.code === 'GROOT');
+    assert.strictEqual(fs.existsSync(q), false, 'te groot = bestand weg');
+    await assert.rejects(im.client.videoNaarBestand(crypto.randomUUID(), q, 10000), (e) => e.code === 'HTTP' && e.status === 404);
+    assert.strictEqual(fs.existsSync(q), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('wv2938 app: video(id) zet klaar en geeft de stand; videoDeel geeft stukken; foto, onbekend id of kring zonder recht = 404', { skip: !ffOk && 'geen ffmpeg' }, async () => {
+  const o = omgeving({ video: FF });
+  try {
+    o.album(A, 'shizzle', 'Shizzle: Proefweekend - 2004', '2004-05'); o.album(B, 'gezin', 'Zomervakantie 2015 - Proefland', '2015-07');
+    o.zetLijst('bevestigd'); await o.ml.fotoSync(true);
+    const alb = (h) => o.im.albums.find((x) => x.id === o.ing._db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(h).album_id);
+    const foto = o.im.foto(alb(A), jpeg(), 'image/jpeg');
+    const vid = o.im.foto(alb(A), jpeg(), 'image/jpeg'); o.im.video.add(vid);
+    const vidB = o.im.foto(alb(B), jpeg(), 'image/jpeg'); o.im.video.add(vidB);
+    o.im.videoBuf = new Map([[vid, proefVideo(o.basis)], [vidB, proefVideo(o.basis)]]);
+    o.klok.t += 11 * 60000; await o.ml.fotoSync(true);
+    await o.ml.fotos(A); await o.ml.fotos(B);
+    assert.strictEqual((await o.ml.video(foto)).status, 404, 'een foto is geen video');
+    assert.strictEqual((await o.ml.video(crypto.randomUUID())).status, 404);
+    assert.strictEqual((await o.ml.video(vidB, { kring: 'shizzle' })).status, 404, 'Shizzle mag het gezinsalbum niet');
+    const s1 = await o.ml.video(vid);
+    assert.strictEqual(s1.status, 200); assert.ok(['wacht', 'bezig'].includes(s1.body.stand), JSON.stringify(s1.body));
+    assert.ok(await wachtOp(async () => (await o.ml.video(vid)).body.stand === 'klaar'));
+    const s2 = (await o.ml.video(vid)).body;
+    assert.ok(s2.grootte > 1000 && s2.delen === 1 && s2.mime === 'video/mp4');
+    const d = await o.ml.videoDeel(vid, 1);
+    assert.strictEqual(d.status, 200);
+    const b = Buffer.from(d.body.data, 'base64');
+    assert.strictEqual(b.length, s2.grootte); assert.strictEqual(b.toString('latin1', 4, 8), 'ftyp');
+    assert.strictEqual((await o.ml.videoDeel(vid, 2)).status, 404, 'buiten bereik');
+    assert.strictEqual((await o.ml.videoDeel(vidB, 1, { kring: 'shizzle' })).status, 404);
+    // kring uit = ook voor de kring geen video meer
+    assert.strictEqual((await o.ml.video(vid, { kring: 'shizzle' })).status, 200);
+    assert.strictEqual(o.ml.kring(A, { kring: 'shizzle', aan: false }).status, 200);
+    assert.strictEqual((await o.ml.video(vid, { kring: 'shizzle' })).status, 404);
+    // Immich kent de video niet meer → kan-niet met reden (geen fout naar de app)
+    const vidC = o.im.foto(alb(A), jpeg(), 'image/jpeg'); o.im.video.add(vidC);
+    o.klok.t += 11 * 60000; await o.ml.fotoSync(true); await o.ml.fotos(A);
+    assert.ok(await wachtOp(async () => (await o.ml.video(vidC)).body.stand === 'kan-niet'));
+    assert.match((await o.ml.video(vidC)).body.reden, /niet meer in Immich/);
+    assert.ok(o.fouten.every((f) => !f.includes(vidC) && !f.includes('Proef')), 'geen id of titel in de fouten');
+    assert.ok(!fs.readdirSync(path.join(o.basis, 'herinneringen', 'video')).some((f) => f.startsWith('.tmp-')), 'geen tijdelijke bestanden over');
+  } finally { o.sluit(); }
+});
+function proefVideo(dir) {
+  const p = path.join(dir, 'proef.mov');
+  require('child_process').execFileSync(FF, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=10', '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '2',
+    '-c:v', 'libx264', '-c:a', 'aac', '-metadata', 'location=+52.0000+005.0000/', '-metadata', 'title=Proefcamera-verzonnen', '-metadata:s:v', 'handler_name=Proefcamera-handler', '-metadata:s:a', 'handler_name=Proefstad-geluid', '-f', 'mov', p]);
+  return fs.readFileSync(p);
+}
+async function wachtOp(f, ms) { const tot = Date.now() + (ms || 30000); while (Date.now() < tot) { if (await f()) return true; await new Promise((r) => setTimeout(r, 100)); } return false; }
+
+test('wv2938: video naar buiten = poster (k/g) + kleine versie zonder metadata (v) + D1-rij video; pas als hij klaar is; uit het album = alles weg', { skip: !ffOk && 'geen ffmpeg' }, async () => {
+  const o = omgeving({ video: FF });
+  try {
+    o.album(A, 'shizzle', 'Shizzle: Proefweekend - 2004', '2004-05');
+    o.zetLijst('bevestigd');
+    await o.ml.fotoSync(true);
+    const a = o.im.albums.find((x) => x.id === o.ing._db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(A).album_id);
+    o.im.foto(a, jpeg(), 'image/jpeg');
+    const vid = o.im.foto(a, jpeg(), 'image/jpeg');   // poster van de video (Immich-miniatuur)
+    o.im.video.add(vid); o.im.videoBuf = new Map([[vid, proefVideo(o.basis)]]);
+    assert.ok(/Proefcamera-verzonnen/.test(o.im.videoBuf.get(vid).toString('latin1')), 'proefvideo heeft metadata (kruisproef)');
+    o.klok.t += 11 * 60000; await o.ml.fotoSync(true);
+    let u = await o.pub.tik(true);
+    assert.ok(!u.fout, u.fout);
+    assert.strictEqual(o.rijen('video').length, 0, 'eerste ronde: video nog niet klaar, dus niet buiten');
+    assert.strictEqual(o.rijen('foto', 'familie').length, 1, 'alleen de foto');
+    // de pod zet hem intussen om (één tegelijk)
+    assert.ok(await wachtOp(() => o.ml.info().video.klaar === 1), 'omgezet: ' + JSON.stringify(o.ml.info().video) + ' ' + o.fouten.join('; '));
+    u = await o.pub.tik(true);
+    assert.ok(!u.fout, u.fout);
+    for (const k of ['familie', 'shizzle']) {
+      const v = o.rijen('video', k);
+      assert.strictEqual(v.length, 1, k);
+      const fid = v[0].fid;
+      assert.ok(o.rijen('foto', k).some((f) => f.fid === fid), 'ook als foto (poster) in de lijst');
+      const obj = o.st.r2.get('f/' + k + '/' + fid + '/v');
+      assert.ok(obj && obj.m === 'video/mp4' && obj.b.length === v[0].grootte, 'v-object in R2');
+      const t = obj.b.toString('latin1');
+      assert.ok(!/Proefcamera|\+52\.0000|\xa9xyz/.test(t), 'geen titel of plaats in de video buiten');
+      assert.ok(!METADATA.test(o.st.r2.get('f/' + k + '/' + fid + '/k').b.toString('latin1')), 'poster zonder metadata');
+      assert.ok(!t.includes(vid) && !JSON.stringify(v).includes(vid), 'geen Immich-id buiten');
+    }
+    assert.strictEqual(o.pub.health().video.ok, 2);
+    assert.ok(o.pub.health().video.mb_buiten >= 0);
+    // video uit het album → poster, v-object en D1-rij weg
+    a.assets = a.assets.filter((x) => x !== vid);
+    o.klok.t += 11 * 60000; await o.ml.fotoSync(true);
+    o.pub.markeerVuil(); u = await o.pub.tik(true);
+    assert.ok(!u.fout, u.fout);
+    assert.strictEqual(o.rijen('video').length, 0);
+    assert.strictEqual([...o.st.r2.keys()].filter((k) => k.endsWith('/v')).length, 0, 'v-objecten weg');
+    assert.strictEqual(o.rijen('foto', 'familie').length, 1);
+  } finally { o.sluit(); }
+});
+
+test('wv2938: zonder ffmpeg blijven video\'s buiten (zoals vóór wv2938); review MOET 1: toestemming weg tijdens de upload = objecten weer weg, geen D1-rij', { skip: !ffOk && 'geen ffmpeg' }, async () => {
+  const z = omgeving({ video: '/bestaat/niet/ffmpeg' });
+  try {
+    z.album(A, 'shizzle', 'Shizzle: Proefweekend - 2004', '2004-05'); z.zetLijst('bevestigd'); await z.ml.fotoSync(true);
+    const a = z.im.albums.find((x) => x.id === z.ing._db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(A).album_id);
+    const vid = z.im.foto(a, jpeg(), 'image/jpeg'); z.im.video.add(vid);
+    z.klok.t += 11 * 60000; await z.ml.fotoSync(true);
+    await z.pub.tik(true);
+    assert.strictEqual(z.rijen('foto').length, 0, 'video zonder ffmpeg niet buiten, ook niet als poster');
+    assert.strictEqual(z.pub.health().video.kan, false);
+  } finally { z.sluit(); }
+  const o = omgeving({ video: FF });
+  try {
+    o.album(A, 'shizzle', 'Shizzle: Proefweekend - 2004', '2004-05'); o.zetLijst('bevestigd'); await o.ml.fotoSync(true);
+    const a = o.im.albums.find((x) => x.id === o.ing._db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(A).album_id);
+    const vid = o.im.foto(a, jpeg(), 'image/jpeg'); o.im.video.add(vid); o.im.videoBuf = new Map([[vid, proefVideo(o.basis)]]);
+    o.klok.t += 11 * 60000; await o.ml.fotoSync(true);
+    await o.pub.tik(true);
+    assert.ok(await wachtOp(() => o.ml.info().video.klaar === 1));
+    // net na de R2-put haalt David de video uit het album (de lijst in Immich is direct anders; de toets vraagt vers)
+    let weg = false;
+    const put0 = o.pub;
+    o.st.hook = null;
+    const r2put = o.st.r2.set.bind(o.st.r2);
+    o.st.r2.set = (k, v) => { r2put(k, v); if (k.endsWith('/v') && !weg) { weg = true; a.assets = a.assets.filter((x) => x !== vid); o.klok.t += 3 * 60000; } return o.st.r2; };
+    await put0.tik(true);
+    assert.ok(weg, 'de video is wel geüpload geweest');
+    assert.strictEqual(o.rijen('video').length, 0, 'geen D1-rij');
+    assert.strictEqual([...o.st.r2.keys()].filter((k) => k.startsWith('f/')).length, 0, 'net geplaatste objecten weer weg');
+  } finally { o.sluit(); }
+});
+
+test('wv2938 review bouw MOET 2: het videobudget houdt ook bij gelijktijdige uploads (synchroon gereserveerd)', { skip: !ffOk && 'geen ffmpeg' }, async () => {
+  const een = (() => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ml-v-')); const b = proefVideo(d); fs.rmSync(d, { recursive: true, force: true }); return b; })();
+  const o = omgeving({ video: FF, budget: 1 });   // eerst meten hoe groot de kleine versie is
+  let grootte;
+  try {
+    o.album(A, 'shizzle', 'Shizzle: Proefweekend - 2004', '2004-05'); o.zetLijst('bevestigd'); await o.ml.fotoSync(true);
+    const a = o.im.albums.find((x) => x.id === o.ing._db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(A).album_id);
+    const v = o.im.foto(a, jpeg(), 'image/jpeg'); o.im.video.add(v); o.im.videoBuf = new Map([[v, een]]);
+    o.klok.t += 11 * 60000; await o.ml.fotoSync(true); await o.ml.fotos(A);
+    await o.ml.video(v); assert.ok(await wachtOp(async () => (await o.ml.video(v)).body.stand === 'klaar'));
+    grootte = (await o.ml.video(v)).body.grootte;
+  } finally { o.sluit(); }
+  const p = omgeving({ video: FF, budget: Math.round(grootte * 1.5) });
+  try {
+    p.album(A, 'shizzle', 'Shizzle: Proefweekend - 2004', '2004-05'); p.zetLijst('bevestigd'); await p.ml.fotoSync(true);
+    const a = p.im.albums.find((x) => x.id === p.ing._db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(A).album_id);
+    const ids = [1, 2, 3].map(() => p.im.foto(a, jpeg(), 'image/jpeg'));
+    p.im.videoBuf = new Map(ids.map((id) => [id, een])); for (const id of ids) p.im.video.add(id);
+    p.klok.t += 11 * 60000; await p.ml.fotoSync(true); await p.ml.fotos(A);
+    for (const id of ids) await p.ml.video(id);
+    assert.ok(await wachtOp(async () => p.ml.info().video.klaar === 3, 60000));
+    await p.pub.tik(true);
+    assert.strictEqual(p.rijen('video').length, 1, 'maar één video past in 1,5 x de grootte');
+    assert.ok(p.pub.health().video.budget >= 1);
+  } finally { p.sluit(); }
+});
+
+test('wv2938 review bouw ronde 2 MOET 1: zelfde video in twee albums; herinnering A wordt tijdens de upload ingetrokken = geen video onder A (B telt niet mee)', { skip: !ffOk && 'geen ffmpeg' }, async () => {
+  const o = omgeving({ video: FF });
+  try {
+    o.album(A, 'shizzle', 'Shizzle: Proefweekend - 2004', '2004-05'); o.album(B, 'gezin', 'Zomervakantie 2015 - Proefland', '2015-07');
+    o.zetLijst('bevestigd'); await o.ml.fotoSync(true);
+    const alb = (h) => o.im.albums.find((x) => x.id === o.ing._db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(h).album_id);
+    const vid = o.im.foto(alb(A), jpeg(), 'image/jpeg'); alb(B).assets.push(vid); o.im.video.add(vid);
+    o.im.videoBuf = new Map([[vid, proefVideo(o.basis)]]);
+    o.klok.t += 11 * 60000; await o.ml.fotoSync(true);
+    await o.pub.tik(true);
+    assert.ok(await wachtOp(() => o.ml.info().video.klaar === 1));
+    const pidA = o.pub._pidVan('familie', A);
+    let ingetrokken = false;
+    const zet = o.st.r2.set.bind(o.st.r2);
+    o.st.r2.set = (k, v) => { zet(k, v); if (!ingetrokken && k.startsWith('f/familie/') && k.endsWith('/v') && o.rijen('foto', 'familie').length === 0 && JSON.stringify([...o.st.r2.keys()]).length) {
+      const fidA = o.pub._fidVan('familie', A, vid);
+      if (k === 'f/familie/' + fidA + '/v') { ingetrokken = true; o.ml.kring(A, { kring: 'familie', aan: false }); } } return o.st.r2; };
+    await o.pub.tik(true);
+    assert.ok(ingetrokken, 'de upload onder A liep');
+    assert.ok(!o.rijen('video', 'familie').some((r) => r.pid === pidA), 'geen video onder de ingetrokken herinnering');
+    assert.ok(!o.st.r2.has('f/familie/' + o.pub._fidVan('familie', A, vid) + '/v'), 'net geplaatst object weer weg');
   } finally { o.sluit(); }
 });
