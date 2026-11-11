@@ -775,6 +775,20 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('12v vergelijk-id ongeldig = 400', r.status === 400, r);
     toets('12w kandidatenBlok: geen https = weg; leeg = geen blok', S.kandidatenBlok({ gelezen: [], rest: [{ url: 'javascript:x' }] }) === '' && S.kandidatenBlok(null) === '');
     toets('12x verlopen na 24 uur: stand 404', (() => { klok = new Date(klok.getTime() + 25 * 3600000); return v.stand(id).status === 404; })());
+    {   // review ronde 1 MOET 1: opruimen zonder nieuwe vraag (geheugen en schijf); ZOU 1: staat niet te schrijven = geen betaalde zoekvraag
+      const w = SV.maak({ vault: V, vv: VV, lezer: nepLezer, zoek: nepZoek, poort: POORT, staatPad: STAAT, nu: () => klok, opruimTik: false });
+      zoekAntw = { ok: true, usd: 0, kandidaten: [] };
+      const id9 = w.start({ wens: 'Opruimproef' }).body.vergelijk.id;
+      for (let i = 0; i < 100 && ['klaar', 'mislukt'].indexOf(w.stand(id9).body.vergelijk.stand) < 0; i++) await new Promise((x) => setTimeout(x, 5));
+      const voor9 = fs.readFileSync(STAAT, 'utf8').includes('Opruimproef');
+      klok = new Date(klok.getTime() + 25 * 3600000);
+      w.opruimen();
+      toets('12xa na 24 uur weg uit staatbestand en geheugen, ook zonder nieuwe vraag', voor9 && !fs.readFileSync(STAAT, 'utf8').includes('Opruimproef') && w.stand(id9).status === 404);
+      const kapot = SV.maak({ vault: V, vv: VV, lezer: nepLezer, zoek: nepZoek, poort: POORT, staatPad: path.join(W, 'bestaat-niet', 'x.json'), nu: () => klok, opruimTik: false });
+      const n0 = zoeken.length, rk = kapot.start({ wens: 'Proefkast' });
+      await new Promise((x) => setTimeout(x, 30));
+      toets('12xb staat niet te schrijven = 503 en geen zoekvraag (de dagteller blijft kloppen)', rk.status === 503 && zoeken.length === n0, rk);
+    }
     // server.js en uitrol
     const src = fs.readFileSync('server.js', 'utf8'), s0 = src.indexOf('const shopper = (function () {'), s1 = src.indexOf('// ── einde OVIS Shopper ──'), bl = src.slice(s0, s1);
     toets('12y server.js: POST vergelijk 10/uur, GET stand stil in het app-log, bewaar via shopper_status, staat shopper-vergelijk.json, zoek via openaiHulp.zoek; reden zonder wens',
