@@ -1279,9 +1279,19 @@ test('wv2932: uitkomst wacht (machinekamer) houdt het paar vast; rij weg → de 
     db.prepare("INSERT INTO ml_koppel (hid, sleutel, uitkomst, kandidaat, titel_gezet, album_gezet, op) VALUES (?, 'x', 'wacht', ?, 0, 0, 'nu')").run(hr, ha);
     assert.deepStrictEqual(o.ml.koppel(false).acties, []);
     assert.strictEqual(stat(o, ha).status, 'actief');
-    db.prepare('DELETE FROM ml_koppel WHERE hid = ?').run(hr);
-    o.verder();
+    // review MOET 1: het vastgehouden album gaat ook niet bij een andere reis of een opname
+    o.reis('2026 - Proefweekend Dal.md', 'reis', '2026-10-15 – 2026-10-19'); o.ml.lijst(); o.verder();
+    assert.ok(!o.ml.koppel(false).acties.some((x) => (x.fotoalbums || []).includes(ha)), 'andere reis: niet');
+    o.opname(RA, 'reizen', false);
+    o.staat.verhalen[RA] = { titel: 'Sneeuw', alineas: ['Het sneeuwde.'], datum_van: '2026-10-17', datum_tot: '2026-10-17', datum_precisie: 'dag' };
+    o.ml.lijst(); o.verder();
+    const op = o.ml.koppel(false).acties.find((x) => x.opname);
+    assert.ok(op && op.uitkomst !== 'samengevoegd'); assert.strictEqual(stat(o, ha).status, 'actief');
+    db.prepare('DELETE FROM ml_koppel').run();
+    fs.rmSync(path.join(o.vault, '20_Prive/Reizen/2026 - Proefweekend Dal.md')); o.ing._db.prepare('UPDATE ramble SET status = ? WHERE ramble_id = ?').run('weg', RA);
+    o.ml.lijst(); o.verder();
     assert.strictEqual(o.ml.koppel(false).samengevoegd, 1);
+    assert.deepStrictEqual({ ...stat(o, ha) }, { status: 'samengevoegd', bij: hr });
   } finally { o.sluit(); }
 });
 
