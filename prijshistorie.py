@@ -13,7 +13,7 @@ BRON (gemeten 11-11-2026, eigen User-Agent, robots.txt "Allow: /" met een paar D
 
 ZELFDE PRODUCT (review MOET 1). Alleen als (a) het merk van Kieskeurig als woord in de productnaam van het advies staat, (b) de typenummers
 in beide namen precies gelijk zijn (woord met letters én cijfers, ≥ 4 tekens zonder streepjes/schuine strepen, geen maat of eenheid zoals
-2750W of 180kg; een los voorvoegsel van 2-4 hoofdletters ervoor hoort erbij: GSR 18V-55 ≠ GSB 18V-55; diff-review wv2946 MOET 1), en (c) de uitvoeringskenmerken (aantal/set, maat in mm/cm/m, inhoud in GB/TB/l/ml/kg/g, kleur) in beide namen gelijk zijn;
+2750W of 180kg; een los voorvoegsel van 2-4 letters ervoor hoort erbij (hoofdletterongevoelig, geen lidwoord of voorzetsel): GSR 18V-55 ≠ gsb 18V-55; diff-review wv2946 MOET 1), en (c) de uitvoeringskenmerken (aantal/set, maat in mm/cm/m, inhoud in GB/TB/l/ml/kg/g, kleur) in beide namen gelijk zijn;
 staat een kenmerk maar aan één kant, dan geen zin. Woordoverlap alleen is nooit genoeg.
 
 REKENREGELS (review MOET 2). Punten = (dag, laagste bedrag) met een geldige datum en een bedrag > 0; per dag de laagste. Venster = de 90 dagen
@@ -65,6 +65,9 @@ def norm(s):
     return re.sub(r"\s+", " ", str(s or "").replace(" ", " ")).strip().lower()
 
 
+GEEN_VOORVOEGSEL = {"de", "het", "een", "van", "voor", "met", "en", "of", "in", "op", "uit", "tot", "bij", "per", "the", "for", "and", "with", "to"}
+
+
 def _modelwoorden(naam):
     """[(woord zoals geschreven, sleutel)] voor elk woord met letters én cijfers, ≥ 4 tekens zonder - / . (geen maat of eenheid)."""
     uit = []
@@ -79,7 +82,7 @@ def _modelwoorden(naam):
 
 
 def modelnummers(naam, merk=None):
-    """Volledige typenummers: het modelwoord met een los typevoorvoegsel ervoor (2-4 hoofdletters, niet het merk), zodat "GSR 18V-55" en
+    """Volledige typenummers: het modelwoord met een los typevoorvoegsel ervoor (2-4 letters, niet het merk of een lidwoord/voorzetsel), zodat "GSR 18V-55" en
     "GSB 18V-55" verschillen (review wv2946 MOET 1). Zonder voorvoegsel alleen het modelwoord."""
     woorden = [w for w in re.split(r"[\s,;:()\[\]+|]+", str(naam or "").replace("\u00a0", " ")) if w]
     merk_k = norm(merk) if merk else ""
@@ -90,7 +93,7 @@ def modelnummers(naam, merk=None):
             continue
         k = mw[0][1]
         v = woorden[i - 1].strip("-/.'\"") if i > 0 else ""
-        if re.match(r"^[A-Z]{2,4}$", v) and v.lower() != merk_k:
+        if re.match(r"^[A-Za-z]{2,4}$", v) and v.lower() != merk_k and v.lower() not in GEEN_VOORVOEGSEL:   # ronde 2: ook gsr/gsb in kleine letters
             k = v.lower() + k
         uit.add(k)
     return uit
