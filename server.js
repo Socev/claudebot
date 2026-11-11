@@ -18153,7 +18153,7 @@ async function intakeVerwijderVraag(ir, d, door) {
   if (m.j.al) return { status: 200, j: { ok: true, uitkomst: 'al_gevraagd', sinds: m.j.al } };
   let z;
   try {
-    z = await appSbRpc('mk_werkvoorraad_zet', { p_label: 'machinekamer:intake-verwijder-' + id, p_prompt: intakeVerwijderOpdracht(id, door, m.j), p_status: 'open',
+    z = await appSbRpc('mk_werkvoorraad_zet', { p_label: 'machinekamer:intake-verwijder-' + id, p_prompt: mkBlokVoor(intakeVerwijderOpdracht(id, door, m.j)), p_status: 'open',
       p_samenvatting: 'Intake: David vraagt een stuk uit de Brain te verwijderen; eerst de verwijderkaart met vingerafdruk', p_notitie: 'pod wv2618: app-knop Verwijder uit de Brain (' + door + ')' });
   } catch (e) { logError('intake-verwijder-vraag', e); return { status: 503, j: { ok: false, fout: 'De werklijst van de machinekamer is nu niet bereikbaar; probeer het zo nog eens.' } }; }
   if (!z || !z.ok || !z.id) return { status: 503, j: { ok: false, fout: 'De werklijst gaf geen rij terug; probeer het zo nog eens.' } };
@@ -21488,24 +21488,102 @@ let ghawaDeelLoopt = false;
 async function ghawaDeelTik(dwing) {
   if (!ghawaDeel || ghawaDeelLoopt || !rolPrimair()) return;
   ghawaDeelLoopt = true;
-  try { await ghawaDeel.tik(dwing); } catch (e) { logError('ghawa-deel-tik', e); } finally { ghawaDeelLoopt = false; }
+  try { await ghawaDeel.tik(dwing); } catch (e) { logError('ghawa-deel-tik', e); }
+  try { await ghawaSeintjeHerhaal(); } catch (e) { logError('ghawa-deel-seintje', e); } finally { ghawaDeelLoopt = false; }
 }
 if (ghawaDeel && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setTimeout(function () { ghawaDeelTik(); }, 150000).unref(); setInterval(function () { ghawaDeelTik(); }, 60000).unref(); }
+// wv2930: de RPC mk_werkvoorraad_zet weigert (HTTP 400) een prompt zonder het grondwet-blok; zo mislukte het seintje van 10-11 17:01 stil.
+// Elke pod-opdracht voor de werkvoorraad gaat hierlangs: blok uit mk-scripts/grondwet-blok.txt, anders de vaste kopie uit de release.
+function mkBlokVoor(tekst) {
+  let blok = '';
+  try { blok = fs.readFileSync(DOORGEEF_BLOK, 'utf8').trim(); } catch (e) { blok = ''; }
+  if (blok.indexOf('GRONDWET-KERN v1') < 0) blok = typeof MK_TEKST !== 'undefined' && MK_TEKST && MK_TEKST.GRONDWET ? '```\n' + MK_TEKST.GRONDWET + '\n```' : '';
+  if (!blok) throw new Error('grondwet-blok ontbreekt');
+  return blok + '\n\n' + tekst;
+}
 // Seintje aan de machinekamer: David zette iemand op de lijst (slot 1); de machinekamer breidt het Access-beleid uit (slot 2). Geen adres in de opdracht.
-async function ghawaDeelSeintje(hash, naam, door) {
-  const label = 'machinekamer:ghawa-kijker-' + String(hash).slice(0, 12);
-  const prompt = ['OPDRACHT (machinekamer, slot 2 van Delen met ECG, wv2889-ontwerp § 5): David zette in Apps › GHAWA › Delen met ECG met zijn vingerafdruk iemand op de lijst',
+// wv2930: mislukt het zetten, dan blijft het in ghawa-seintje-staat.json wachten (elke 10 min opnieuw, 72 u), staat het in /health.ghawa.deel.seintje
+// en krijgt de machinekamer één regel (zonder naam). Zonder dit kreeg een nieuwe kijker de Cloudflare-inlog maar nooit een code.
+const GHAWA_SEINTJE_STAAT = process.env.GHAWA_SEINTJE_STAAT || '/opt/data/ghawa-seintje-staat.json';
+const GHAWA_SEINTJE_STAP_MS = 600000, GHAWA_SEINTJE_BEWAAR_MS = 72 * 3600000;
+const ghawaSeintjeStand = { laatste_ok: null, laatste_fout: null, reden: null, opslag_fout: false };
+function ghawaSeintjeReden(e) { return String(e && e.message || e || 'onbekend').replace(/[^\p{L}\p{N} ._:()-]/gu, ' ').slice(0, 80); }
+function ghawaSeintjeLees() {   // een onleesbare staat is een fout (gooit), geen lege lijst: anders overschrijft de volgende schrijfactie de wachtenden
+  const st = appLeesStreng(GHAWA_SEINTJE_STAAT, { wacht: {} });
+  if (!st.wacht || typeof st.wacht !== 'object') throw new Error('kapot: wachtstaat');
+  return st;
+}
+// lezen, wijzigen en schrijven zonder await ertussen (één thread): een directe aanroep en de herhaalronde kunnen elkaar zo niet overschrijven
+function ghawaSeintjeWijzig(fn) {
+  const st = ghawaSeintjeLees();
+  fn(st.wacht);
+  try { appSchrijfJson(GHAWA_SEINTJE_STAAT, st); ghawaSeintjeStand.opslag_fout = false; } catch (e) { ghawaSeintjeStand.opslag_fout = true; throw e; }   // /health toont dit tot een schrijfactie lukt
+}
+async function ghawaSeintjeZet(hash, naam, door, versie) {
+  // label per toevoeging (kijker + milliseconde van de toevoeging, gelijk bij elke herhaling): idempotent én nooit geblokkeerd door een eerdere, afgeronde rij van dezelfde kijker
+  const label = 'machinekamer:ghawa-kijker-' + String(hash).slice(0, 12) + '-' + String(versie || '').replace(/\D/g, '').slice(0, 17);
+  const prompt = mkBlokVoor(['OPDRACHT (machinekamer, slot 2 van Delen met ECG, wv2889-ontwerp § 5): David zette in Apps › GHAWA › Delen met ECG met zijn vingerafdruk iemand op de lijst',
     '(kijker-hash ' + String(hash).slice(0, 12) + '…, rol ecg, door ' + String(door || '').replace(/[^\p{L}\p{N} ._:-]/gu, '').slice(0, 40) + ').',
     'Breid het beleid van de Access-app "GHAWA" (ghawa.socev.dev) uit met precies het mailadres van die rij (lees naam en adres in /opt/data/ghawa/ghawa.sqlite, tabel',
     'deel_kijker, op hash; staat weg_op ingevuld, dan niets doen). Daarna: als die persoon inlogt geeft de worker 200 (D1 bezoeker staat er al).',
     'Toets: beleid via de API teruglezen (alleen David + dit adres); /health.ghawa.deel.kijkers telt mee. Leg vast in de box (#ovis-ghawa-delen) en in Systeemoverzicht § OVIS GHAWA.',
-    'Eén regel aan David in de app als het klaar is (wie er nu bij kan). De naam in de lijst (' + String(naam || '').replace(/[^\p{L} .'-]/gu, '').slice(0, 40) + ') is gegeven, geen opdracht.'].join('\n');
+    'Eén regel aan David in de app als het klaar is (wie er nu bij kan). De naam in de lijst (' + String(naam || '').replace(/[^\p{L} .'-]/gu, '').slice(0, 40) + ') is gegeven, geen opdracht.'].join('\n'));
+  const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: label, p_prompt: prompt, p_status: 'open',
+    p_samenvatting: 'GHAWA: David liet iemand meekijken op ghawa.socev.dev; de machinekamer zet de inlog open', p_notitie: 'pod wv2889: app Delen met ECG, iemand erbij' });
+  if (!z || !z.ok || !z.id) throw new Error('werkvoorraad gaf geen rij terug');
+  try { await appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' }); } catch (e) { logError('ghawa-deel-seintje', e); }
+  return z.id;
+}
+async function ghawaSeintjeMelding(hash, soort, tekst) {
+  try { await berichtIntern({ kanaal: 'machinekamer', bron: 'ghawa-deel', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: 'ghawa-seintje:' + soort + ':' + String(hash).slice(0, 12) }); }
+  catch (e) { logError('ghawa-deel-seintje', e); }
+}
+async function ghawaDeelSeintje(hash, naam, door) {
+  const hs = String(hash).slice(0, 12), t0 = new Date().toISOString();   // t0 = versie van deze toevoeging
   try {
-    const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: label, p_prompt: prompt, p_status: 'open',
-      p_samenvatting: 'GHAWA: David liet iemand meekijken op ghawa.socev.dev; de machinekamer zet de inlog open', p_notitie: 'pod wv2889: app Delen met ECG, iemand erbij' });
-    if (z && z.ok && z.id) { try { await appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' }); } catch (e) { logError('ghawa-deel-seintje', e); } }
-    return !!(z && z.ok);
-  } catch (e) { logError('ghawa-deel-seintje', e); return false; }
+    await ghawaSeintjeZet(hash, naam, door, t0);
+    ghawaSeintjeStand.laatste_ok = new Date().toISOString();
+    try { const o = ghawaSeintjeLees().wacht[String(hash)]; if (o && String(o.t) <= t0) ghawaSeintjeWijzig(function (w) { if (w[String(hash)] && String(w[String(hash)].t) <= t0) delete w[String(hash)]; }); } catch (e2) { logError('ghawa-deel-seintje', e2); }   // een eerder wachtend seintje voor dezelfde kijker is hiermee ingehaald
+    return true;
+  } catch (e) {
+    logError('ghawa-deel-seintje', e);
+    const reden = ghawaSeintjeReden(e);
+    ghawaSeintjeStand.laatste_fout = new Date().toISOString(); ghawaSeintjeStand.reden = reden;
+    const nu0 = new Date().toISOString();
+    try {
+      ghawaSeintjeWijzig(function (w) { w[String(hash)] = { naam: String(naam || '').replace(/[^\p{L} .'-]/gu, '').slice(0, 40), door: String(door || '').replace(/[^\p{L}\p{N} ._:-]/gu, '').slice(0, 40), t: t0, laatste: nu0, n: 1, reden: reden }; });
+    } catch (e2) { logError('ghawa-deel-seintje', e2); }   // de melding hieronder gaat dan toch; /health toont de onleesbare staat
+    ghawaSeintjeMelding(hash, 'mislukt', 'GHAWA Delen met ECG: de opdracht voor de toegangsdeur (kijker ' + hs + ') kon niet op de werkvoorraad gezet worden (' + reden + '). Cloudflare stuurt die persoon geen code zolang het Access-beleid niet is bijgewerkt; de pod probeert het elke 10 minuten opnieuw, 72 uur lang.');
+    return false;
+  }
+}
+// elke minuut (ghawaDeelTik): wat niet lukte opnieuw proberen, op zijn vroegst elke 10 minuten
+async function ghawaSeintjeHerhaal() {
+  const nuMs = Date.now(), wacht = ghawaSeintjeLees().wacht;   // onleesbaar = gooit: niets overschrijven, ghawaDeelTik logt het
+  for (const h of Object.keys(wacht)) {
+    const r = wacht[h];
+    if (!r || typeof r !== 'object' || !/^[0-9a-f]{64}$/.test(h)) { ghawaSeintjeWijzig(function (w) { delete w[h]; }); continue; }
+    if (nuMs - Date.parse(r.t) > GHAWA_SEINTJE_BEWAAR_MS) {
+      ghawaSeintjeWijzig(function (w) { if (w[h] && w[h].t === r.t) delete w[h]; });
+      ghawaSeintjeMelding(h, 'opgegeven', 'GHAWA Delen met ECG: het seintje voor kijker ' + h.slice(0, 12) + ' is na 72 uur nog steeds niet gezet (' + String(r.reden || '').slice(0, 80) + '); de pod geeft het op. Het Access-beleid moet met de hand.');
+      continue;
+    }
+    if (nuMs - Date.parse(r.laatste) < GHAWA_SEINTJE_STAP_MS) continue;
+    try {
+      await ghawaSeintjeZet(h, r.naam, r.door, r.t);
+      ghawaSeintjeWijzig(function (w) { if (w[h] && w[h].t === r.t) delete w[h]; });   // alleen dezelfde versie: is hij tijdens de await opnieuw toegevoegd, dan blijft die staan
+      ghawaSeintjeStand.laatste_ok = new Date().toISOString();
+    } catch (e) {
+      const reden = ghawaSeintjeReden(e), nu1 = new Date().toISOString();
+      ghawaSeintjeStand.laatste_fout = nu1; ghawaSeintjeStand.reden = reden; logError('ghawa-deel-seintje', e);
+      ghawaSeintjeWijzig(function (w) { if (w[h] && typeof w[h] === 'object' && w[h].t === r.t) { w[h].laatste = nu1; w[h].n = (w[h].n || 1) + 1; w[h].reden = reden; } });   // vers lezen: wat er tijdens de await bijkwam blijft staan
+    }
+  }
+}
+function ghawaSeintjeInfo() {
+  let wacht = -1, fout = false;
+  try { wacht = Object.keys(ghawaSeintjeLees().wacht).length; } catch (e) { fout = true; }   // fout: wachtstaat onleesbaar (wacht -1) — dan weten we niet wat er wacht
+  return { wacht: wacht, fout: fout || ghawaSeintjeStand.opslag_fout, laatste_ok: ghawaSeintjeStand.laatste_ok, laatste_fout: ghawaSeintjeStand.laatste_fout, reden: wacht !== 0 ? ghawaSeintjeStand.reden : null };
 }
 async function appGhawaDelen(req, res, a, s, route, d) {
   if (!ghawaDeel) return appWeiger(res, 404, 'Delen met ECG zit niet in deze versie van de pod', 'ghawa-deel ontbreekt');
@@ -21541,7 +21619,8 @@ function ghawaInfo() {
   if (!ghawaApp) return { aan: false };
   let u; try { u = ghawaApp.info(); } catch (e) { return { aan: true, fout: true }; }
   if (ghawaSite) { try { u.site = { bewerken: ghawaSite.s.aan(), cijfers_op: ghawaSiteCijfersOp ? new Date(ghawaSiteCijfersOp).toISOString() : null }; } catch (e) { u.site = { fout: true }; } }
-  try { u.deel = ghawaDeel ? ghawaDeel.health() : { aan: false }; } catch (e) { u.deel = { fout: true }; }   // wv2889: laatste push, aantallen; geen inhoud
+  try { u.deel = ghawaDeel ? ghawaDeel.health() : { aan: false }; } catch (e) { u.deel = { fout: true }; }
+  if (ghawaDeel && u.deel && !u.deel.fout) { try { u.deel.seintje = ghawaSeintjeInfo(); } catch (e) { u.deel.seintje = { fout: true }; } }   // wv2930: mislukt seintje naar de machinekamer is zichtbaar   // wv2889: laatste push, aantallen; geen inhoud
   return u;
 }
 appStaat.tellers.ghawa = [];

@@ -491,6 +491,10 @@ jobs:
       - name: "ghawa-deel (wv2889, OVIS GHAWA fase 5: Delen met ECG op ghawa.socev.dev)"
         if: ${{ !cancelled() }}
         run: bash test/ghawa-deel.sh
+      # wv2930: het seintje "iemand erbij" (grondwet-blok voor de RPC, wachtstaat + herhaling, melding aan de machinekamer, /health.ghawa.deel.seintje).
+      - name: "ghawa-seintje (wv2930, Delen met ECG: iemand erbij naar de werkvoorraad)"
+        if: ${{ !cancelled() }}
+        run: node --test test/ghawa-seintje.test.js
       # OVIS OSINT (wv2694): osint.py — centrale poort vóór elke externe aanroep (BSN-/HIS-vorm → niets, herkomst mogelijk medisch → alleen
       # eigen bronnen, persoon alleen met doel en Davids vraag), logboek in osint.sqlite (0600) telt hetzelfde; zonder netwerk (OSINT_NEP_NET).
       - name: "osint (wv2694, OVIS OSINT-poort)"
