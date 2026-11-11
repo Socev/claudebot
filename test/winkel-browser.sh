@@ -211,15 +211,20 @@ if (!exe || !pw) { console.log('OVERGESLAGEN 5 (geen Chromium of Playwright op d
 let goed = 0, fout = 0;
 const toets = (n, ok, x) => { if (ok) goed++; else fout++; console.log((ok ? 'GROEN ' : 'ROOD  ') + n + (ok || x === undefined ? '' : '  [' + JSON.stringify(x).slice(0, 300) + ']')); };
 const zag = [];
+const dgram = require('dgram'), stun = dgram.createSocket('udp4'); let stunPakketten = 0, stunPoort = 0;
+stun.on('message', () => { stunPakketten++; });
 const srv = http.createServer((q, r) => { zag.push(q.url);
   if (q.url === '/a') { r.writeHead(302, { Location: '/verboden' }); return r.end(); }
+  if (q.url === '/rtc') return r.end('<html><body><script>window.rtc = "start"; try { const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:127.0.0.1:' + stunPoort + '" }] });'
+    + ' pc.createDataChannel("x"); pc.createOffer().then((o) => pc.setLocalDescription(o)).then(() => { window.rtc = "gestart"; }, () => { window.rtc = "fout"; }); } catch (e) { window.rtc = "geen"; }</script></body></html>');
   if (q.url === '/p') return r.end('<html><head><title>Proef</title></head><body><img src="/beeld.png"><iframe src="/kader"></iframe><p>proef</p>'
     + '<script>try { window.open("/popup1"); } catch (e) {} setTimeout(function () { try { window.open("/popup2"); } catch (e) {} }, 50);</script></body></html>');
   r.end('x'); });
 (async () => {
   await new Promise((k) => srv.listen(0, '127.0.0.1', k));
+  await new Promise((k) => stun.bind(0, '127.0.0.1', k)); stunPoort = stun.address().port;
   const basis = 'http://127.0.0.1:' + srv.address().port;
-  const b = await pw.chromium.launch({ executablePath: exe, headless: true });
+  const b = await pw.chromium.launch({ executablePath: exe, headless: true, args: WB.BROWSER_ARGS });
   try {
     for (const [doel, naam] of [[basis + '/p', 'gevraagde pagina']]) {
       const ctx = await b.newContext(); const page = await ctx.newPage(); await WB.bewaak(ctx, page, doel);
@@ -231,11 +236,18 @@ const srv = http.createServer((q, r) => { zag.push(q.url);
       toets('5b andere pagina in het hoofdframe geweigerd', n === 'geweigerd' && zag.indexOf('/ander') < 0, { n, zag });
       await ctx.close();
     }
+    { // review ronde 4: geen WebRTC; een STUN-luisteraar krijgt niets binnen
+      const c2 = await b.newContext(); const p2 = await c2.newPage(); await WB.bewaak(c2, p2, basis + '/rtc');
+      await p2.goto(basis + '/rtc'); await p2.waitForTimeout(1500);
+      const st = await p2.evaluate(() => window.rtc);
+      toets('5e review ronde 4: geen WebRTC, STUN-luisteraar krijgt niets', st === 'geen' && stunPakketten === 0, { st, stunPakketten });
+      await c2.close();
+    }
     const ctx = await b.newContext(); const page = await ctx.newPage(); await WB.bewaak(ctx, page, basis + '/a');
     const n = await page.goto(basis + '/a').then(() => 'geladen', (e) => 'geweigerd');
     toets('5c doorsturen (302) naar een ander pad op dezelfde host: niet opgehaald', n === 'geweigerd' && zag.indexOf('/a') >= 0 && zag.indexOf('/verboden') < 0, { n, zag });
     await ctx.close();
-  } finally { await b.close(); srv.close(); }
+  } finally { await b.close(); srv.close(); stun.close(); }
   console.log('BROWSER ' + goed + ' groen, ' + fout + ' rood');
   process.exit(fout ? 1 : 0);
 })();
