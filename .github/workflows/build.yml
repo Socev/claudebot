@@ -551,6 +551,9 @@ jobs:
       - name: "contactringen (wv2894, idee 19d: zondagseintje binnenste kring, alleen datum laatste appje)"
         if: ${{ !cancelled() }}
         run: bash test/contactringen.sh
+      - name: "box-archief (wv2902, MrLean ML7/ML8: wekelijkse archiefstap box + Open vragen)"
+        if: ${{ !cancelled() }}
+        run: bash test/box-archief.sh
       # Publicatieservice (wv1869, SB2 fase 3b): bronnotities + register via de outbox (nep-Supabase met de regels van 0012), proef 7 en 8.
       - name: "intake-publicatie (wv1869, publicatieservice)"
         if: ${{ !cancelled() }}

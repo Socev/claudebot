@@ -19639,6 +19639,22 @@ const contactringen = (function () {
   } catch (e) { logError('contactringen', e); return null; }
 })();
 function contactringenInfo() { if (!contactringen) return { aan: false }; try { return contactringen.info(); } catch (e) { return { aan: true, fout: true }; } }
+// ── Box-archief (wv2902, MrLean ML7/ML8, Davids Ja 11-11-2026): wekelijkse archiefstap van de machinekamer-box en Open vragen aan David;
+// waarom en regels in box-archief.js. Nachtketen-stap box-archief (in-process, eigen weekstempel in scripts-staat/box-archief/laatste.json).
+// De open/uitgestelde Voor jou-kaarten komen uit de databank: een registerrij die bij zo'n kaart hoort, blijft staan (plek 5 vergelijkt ze).
+const BOX_ARCHIEF_DIR = '/opt/data/scripts-staat/box-archief';
+const boxArchief = (function () {
+  const p = path.join(__dirname, 'box-archief.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const m = require(p);
+    return { ronde: function (ctx) {
+      return m.ronde({ vault: VAULT, VV: VV(), vandaag: ctx.datum, staatMap: BOX_ARCHIEF_DIR,
+        kaarten: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); if (!j || !Array.isArray(j.punten)) throw new Error('kaartenlijst onleesbaar'); return j.punten; },
+        log: function (o) { schrijfLog(nu() + ' box-archief ' + JSON.stringify(o).slice(0, 600)); } });
+    } };
+  } catch (e) { logError('box-archief', e); return null; }
+})();
 // ── AVG-spiegel (wv2526; bouwplan vault "01_Ontwikkeling/AVG-stukken per praktijk in GitHub (bouwplan 5-11-2026).md") ──
 // Nachtketen-stap: spiegelt 10_Zakelijk/<Praktijk>/Privacy naar de privé-repo Socev/avg-<praktijk> (eenrichting; logica, BSN-elfproef en
 // grenzen in mk-scripts/avg-spiegel/spiegel.py). Kaal kindproces (geen socev-run: die meldt zelf met een bericht; hier meldt alleen de keten
@@ -19825,6 +19841,12 @@ const nachtketen = (function () {
       { naam: 'veeg', start_na: [3, 50], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(scriptsVeeg) },
       // wv2526: AVG-stukken per praktijk naar hun privé-repo; kindproces met eigen harde grens (4 min); een fout meldt alleen de keten (box-rij)
       { naam: 'avg-spiegel', start_na: [4, 0], limiet_min: 5, pogingen: 2, meldtZelf: false, doe: function (ctx) { return avgSpiegelRonde(ctx); } },
+      // wv2902: wekelijkse archiefstap box + Open vragen (box-archief.js); doet binnen 7 dagen na de vorige geslaagde ronde niets (al_gedaan);
+      // vóór de droomronde van 05:30, die alleen nog naloopt. Een fout meldt de keten (meldtZelf false).
+      { naam: 'box-archief', start_na: [4, 20], limiet_min: 5, pogingen: 2, inProces: true, meldtZelf: false, doe: async function (ctx) {
+        if (!boxArchief) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        return boxArchief.ronde(ctx);
+      } },
       { naam: 'sb2-feitenlijst', start_na: [5, 0], na: ['bibliothecaris'], limiet_min: 7, pogingen: 2, meldtZelf: true,
         voorwaarde: nachtN8nVoorwaarde([NACHT_N8N.rawInput, NACHT_N8N.teams, NACHT_N8N.whatsapp], [6, 40], true), doe: nachtDagStap(sb2Feitenlijst) },
       { naam: 'sb2-zoekindex', na: ['sb2-feitenlijst'], limiet_min: 15, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekindex) },
