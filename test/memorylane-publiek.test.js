@@ -51,7 +51,8 @@ function nepImmich() {
       const a = st.albums.find((x) => x.id === u.searchParams.get('albumId'));
       const ids = !a ? [] : u.searchParams.get('timeBucket') === '2020-02-01' ? a.assets.slice(0, 3) : a.assets.slice(3);
       const r0 = { id: ids, isImage: ids.map((x) => !st.video.has(x)), isTrashed: ids.map((x) => st.prullenbak.has(x)), ratio: ids.map(() => 1.5),
-        fileCreatedAt: ids.map((x) => (st.meta.get(x) || {}).t || '2020-02-10T10:00:00.000Z'), localOffsetHours: ids.map((x) => (st.meta.get(x) || {}).off ?? 1) };
+        fileCreatedAt: ids.map((x) => (st.meta.get(x) || {}).t || '2020-02-10T10:00:00.000Z'), localOffsetHours: ids.map((x) => (st.meta.get(x) || {}).off ?? 1),
+        city: ids.map(() => 'Proefplaatsnaam'), isFavorite: ids.map(() => true) };
       // wv2468: plek alleen met withCoordinates=true (zoals Immich 3)
       if (u.searchParams.get('withCoordinates') === 'true') { r0.latitude = ids.map((x) => (st.meta.get(x) || {}).lat ?? null); r0.longitude = ids.map((x) => (st.meta.get(x) || {}).lon ?? null); }
       return res(200, r0);
@@ -116,7 +117,7 @@ function omgeving(opt) {
   };
   const r2 = { put: async (k, b, m) => { if (st.r2Uit) throw new Error('R2 put HTTP 500'); st.r2.set(k, { b: Buffer.from(b), m }); },
     del: async (k) => { if (st.r2Uit) throw new Error('R2 del HTTP 500'); st.r2.delete(k); } };
-  const pub = MP.maak({ db: ing._db, ml, vault, vv: VV, dir: hdir, d1, r2, categorieen: H.CATEGORIEEN, nu: () => klok.t, videoBudget: opt && opt.budget, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)) });
+  const pub = MP.maak({ db: ing._db, ml, vault, vv: VV, dir: hdir, d1, r2, categorieen: H.CATEGORIEEN, nu: () => klok.t, videoBudget: opt && opt.budget, dagPerRonde: opt && opt.dagPerRonde, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)) });
   const ins = ing._db.prepare("INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES (?, 'los', ?, ?, 0, 'actief', ?, ?)");
   function album(hid, cat, titel, wanneer) {
     const t = '2026-11-01T10:00:00Z';
@@ -230,6 +231,57 @@ test('publiceren: vast schema, dicht huis = alleen het jaar, geen pod- of Immich
     assert.ok(bz.some((r) => r.hash === MP.adresHash('ADA.TWEE@voorbeeld.invalid ') && r.kring === 'familie'));
     assert.ok(!JSON.stringify(bz).includes('@') && !JSON.stringify(bz).includes('Ada'));
     assert.strictEqual(o.rijen('publicatie').every((r) => r.geldig_tot === o.klok.t + 24 * 3600000), true);
+    assert.deepStrictEqual(o.fouten, []);
+  } finally { o.sluit(); }
+});
+
+test('wv2943 bezoekers krijgen per foto de opnamedag, nooit de plaats, tijd of favoriet; al geplaatste foto\'s krijgen hun dag geleidelijk (hooguit dagPerRonde per ronde)', async () => {
+  const o = omgeving({ dagPerRonde: 2 });
+  try {
+    o.album(A, 'shizzle', 'Shizzle: Proefweekend - 2004', '2004-05');
+    o.album(B, 'gezin', 'Zomervakantie 2015 - Proefland', '2015-07');
+    o.zetLijst('bevestigd');
+    await o.ml.fotoSync(true);
+    for (const h of [A, B]) {
+      const a = o.im.albums.find((x) => x.id === o.ing._db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(h).album_id);
+      for (let i = 0; i < 2; i++) { const id = o.im.foto(a, jpeg(), 'image/jpeg'); o.im.meta.set(id, { t: '2015-07-1' + (i + 1) + 'T22:30:00.000Z', off: 2 }); }
+    }
+    o.klok.t += 11 * 60000; await o.ml.fotoSync(true);
+    const u = await o.pub.tik(true);
+    assert.ok(!u.fout, u.fout);
+    const fam = o.rijen('foto', 'familie');
+    assert.strictEqual(fam.length, 4);
+    assert.deepStrictEqual(fam.map((r) => r.dag).sort(), ['2015-07-12', '2015-07-12', '2015-07-13', '2015-07-13'], 'plaatselijke dag (over middernacht)');
+    const alles = JSON.stringify(o.rijen('foto').concat(o.rijen('detail'), o.rijen('huis'))) + JSON.stringify(o.ing._db.prepare('SELECT * FROM mlp_obj').all());
+    assert.ok(!alles.includes('Proefplaatsnaam'), 'geen plaats buiten'); assert.ok(!/T2\d:30|fav|tijd/.test(alles), 'geen tijd of favoriet buiten');
+    // al geplaatst zonder dag (zoals vóór wv2943): per ronde hooguit 3 erbij
+    o.d1db.prepare('UPDATE foto SET dag = NULL').run();
+    for (const r of o.ing._db.prepare("SELECT kring, sleutel, hash FROM mlp_obj WHERE sleutel LIKE 'f:%'").all()) { const x = JSON.parse(r.hash); delete x.dag; o.ing._db.prepare('UPDATE mlp_obj SET hash = ? WHERE kring = ? AND sleutel = ?').run(JSON.stringify(x), r.kring, r.sleutel); }
+    const metDag = () => o.rijen('foto').filter((r) => r.dag).length;
+    const n = o.rijen('foto').length;
+    assert.strictEqual(n, 6, 'familie 4 + shizzle 2');
+    o.klok.t += 16 * 60000; await o.pub.tik(true);
+    assert.strictEqual(metDag(), 4, 'twee kringen × 2 (shizzle had er maar 2)');
+    for (let i = 0; i < 3; i++) { o.klok.t += 16 * 60000; await o.pub.tik(true); }
+    assert.strictEqual(metDag(), n, 'uiteindelijk allemaal');
+    assert.deepStrictEqual(o.fouten, []);
+  } finally { o.sluit(); }
+});
+
+test('wv2943 bestaande D1 zonder kolom dag: de pod zet hem erbij (één keer), daarna gewoon publiceren', async () => {
+  const o = omgeving();
+  try {
+    o.d1db.exec('CREATE TABLE foto (kring TEXT NOT NULL, fid TEXT NOT NULL, pid TEXT NOT NULL, volg INTEGER NOT NULL, ratio REAL, mime_k TEXT NOT NULL, mime_g TEXT NOT NULL, PRIMARY KEY (kring, fid))');
+    o.album(B, 'gezin', 'Zomervakantie 2015 - Proefland', '2015-07');
+    o.zetLijst('bevestigd');
+    await o.ml.fotoSync(true);
+    const a = o.im.albums.find((x) => x.id === o.ing._db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(B).album_id);
+    o.im.foto(a, jpeg(), 'image/jpeg');
+    o.klok.t += 11 * 60000; await o.ml.fotoSync(true);
+    const u = await o.pub.tik(true);
+    assert.ok(!u.fout, u.fout);
+    assert.ok(o.d1db.prepare("SELECT name FROM pragma_table_info('foto')").all().some((r) => r.name === 'dag'));
+    assert.strictEqual(o.rijen('foto', 'familie')[0].dag, '2020-02-10');
     assert.deepStrictEqual(o.fouten, []);
   } finally { o.sluit(); }
 });

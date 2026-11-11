@@ -72,7 +72,9 @@ function nepImmich() {
       const a = st.albums.find((x) => x.id === u.searchParams.get('albumId'));
       const ids = !a ? [] : u.searchParams.get('timeBucket') === '2020-02-01' ? a.assets.slice(0, 3) : a.assets.slice(3);
       const r0 = { id: ids, isImage: ids.map((x) => !st.video.has(x)), isTrashed: ids.map((x) => st.prullenbak.has(x)), ratio: ids.map(() => 1.5),
-        fileCreatedAt: ids.map((x) => (st.meta.get(x) || {}).t || '2020-02-10T10:00:00.000Z'), localOffsetHours: ids.map((x) => (st.meta.get(x) || {}).off ?? 1) };
+        fileCreatedAt: ids.map((x) => (st.meta.get(x) || {}).t || '2020-02-10T10:00:00.000Z'), localOffsetHours: ids.map((x) => (st.meta.get(x) || {}).off ?? 1),
+        city: ids.map((x) => (st.meta.get(x) || {}).stad ?? null), duration: ids.map((x) => (st.meta.get(x) || {}).duur ?? (st.video.has(x) ? '0:00:12.500000' : '0:00:00.00000')),
+        isFavorite: ids.map((x) => (st.meta.get(x) || {}).fav === true), country: ids.map(() => 'Proefland') };
       // wv2468: plek alleen met withCoordinates=true (zoals Immich 3)
       if (u.searchParams.get('withCoordinates') === 'true') { r0.latitude = ids.map((x) => (st.meta.get(x) || {}).lat ?? null); r0.longitude = ids.map((x) => (st.meta.get(x) || {}).lon ?? null); }
       return res(200, r0);
@@ -343,6 +345,33 @@ test("foto's: alleen uit een gekoppeld album (andere ids 404), gevel = eerste of
     // Immich weg: 503 met uitleg, geen uitzondering
     o.im.uit = true;
     assert.strictEqual((await o.ml.fotos(hr)).status, 503);
+  } finally { o.sluit(); }
+});
+
+test("wv2943 foto's: dag, tijd (plaatselijk), plaats, duur bij een video en favoriet; geen coördinaten of land; aantal = heel album ook boven de grens", async () => {
+  const o = omgeving();
+  try {
+    o.reis('2020 - Proefrally Noorwegen.md', '2020-02-09 – 2020-02-15');
+    await o.tik();
+    const hr = o.hid('reis', REIS);
+    const al = o.im.albums.find((a) => a.id === o.album(hr).album_id);
+    const f1 = o.im.foto(al, webp(false)), f2 = o.im.foto(al, webp(false)), f3 = o.im.foto(al, webp(false)), f4 = o.im.foto(al, webp(false));
+    o.im.meta.set(f1, { t: '2020-02-10T23:30:15.000Z', off: 2, stad: '  Proefstad  ', fav: true, lat: 60.1, lon: 10.2 });
+    o.im.meta.set(f2, { t: '2020-02-11T08:00:00.000Z', off: 1, stad: 'Stad<script>' });
+    o.im.meta.set(f3, { t: 'gisteren' });
+    o.im.video.add(f4); o.im.meta.set(f4, { t: '2020-03-01T12:00:00.000Z', off: 0, duur: '0:01:05.600000' });
+    const r = await o.ml.fotos(hr);
+    assert.strictEqual(r.status, 200);
+    const [a, b, c, d] = r.body.fotos;
+    assert.deepStrictEqual(a, { id: f1, beeld: true, ratio: 1.5, dag: '2020-02-11', tijd: '2020-02-11T01:30:15', plaats: 'Proefstad', duur: null, fav: true }, 'plaatselijke dag over middernacht');
+    assert.strictEqual(b.plaats, null, 'geen rare tekens als plaats'); assert.strictEqual(b.dag, '2020-02-11'); assert.strictEqual(b.fav, false);
+    assert.strictEqual(c.dag, null); assert.strictEqual(c.tijd, null);
+    assert.strictEqual(d.beeld, false); assert.strictEqual(d.duur, 66, 'video: duur in seconden');
+    for (const x of r.body.fotos) for (const k of ['lat', 'lon', 'latitude', 'longitude', 'country', 'land']) assert.ok(!(k in x), 'geen ' + k);
+    assert.ok(!JSON.stringify(r.body).includes('60.1') && !JSON.stringify(r.body).includes('Proefland'));
+    // totaal: de som van de bakken, ook als de grens eerder stopt
+    const l = await o.im.client.albumFotos(al.id, 2);
+    assert.strictEqual(l.length, 2); assert.strictEqual(l.totaal, 4); assert.ok(!JSON.stringify(l).includes('totaal'));
   } finally { o.sluit(); }
 });
 

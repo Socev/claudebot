@@ -69,6 +69,27 @@ function plaatselijkeDag(utc, offset) {
   const d = new Date(t + o * 3600000).toISOString().slice(0, 10);
   return /^(19|20)\d{2}-\d{2}-\d{2}$/.test(d) ? d : null;
 }
+// wv2943: de plaatselijke opnametijd tot op de seconde ('JJJJ-MM-DDTUU:MM:SS', zonder zone) — de stabiele verwijzing van Vertel erbij
+function plaatselijkeTijd(utc, offset) {
+  const t = typeof utc === 'string' ? Date.parse(utc) : NaN;
+  if (!Number.isFinite(t)) return null;
+  const o = Number.isFinite(offset) && Math.abs(offset) <= 14 ? offset : 0;
+  const d = new Date(t + o * 3600000).toISOString().slice(0, 19);
+  return /^(19|20)\d{2}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(d) ? d : null;
+}
+// wv2943: alleen een gewone plaatsnaam (letters, spaties, koppeltekens, apostrof, punt), hooguit 60 tekens; anders null
+function plaatsNaam(x) {
+  if (typeof x !== 'string') return null;
+  const s = x.normalize('NFC').replace(/\s+/g, ' ').trim();
+  return s && s.length <= 60 && /^[\p{L}\p{M}][\p{L}\p{M} .'’-]*$/u.test(s) ? s : null;
+}
+// wv2943: Immich-duur 'U:MM:SS.ffffff' → seconden (afgerond, 0–86400); anders null
+function duurSec(x) {
+  const m = typeof x === 'string' ? /^(\d{1,3}):([0-5]\d):([0-5]\d)(\.\d+)?$/.exec(x) : null;
+  if (!m) return null;
+  const s = Math.round(Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + Number(m[4] || 0));
+  return s > 0 && s <= 86400 ? s : null;
+}
 function geldigGetal(x, grens) { return typeof x === 'number' && Number.isFinite(x) && Math.abs(x) <= grens ? x : null; }
 
 function u(x) { return typeof x === 'string' && UUID_RE.test(x); }
@@ -248,24 +269,33 @@ function maak(o) {
     if (!a || a.id !== id) throw new Error('immich: onverwacht antwoord');
     return a;
   }
-  // Foto-ids van een album, oudste eerst, hooguit max; zonder prullenbak. → [{ id, beeld (false = video), ratio }]
+  // Foto-ids van een album, oudste eerst, hooguit max; zonder prullenbak. → [{ id, beeld (false = video), ratio, dag, plaats, duur, fav }]
+  // wv2943 (diashow stap 1): per foto ook de plaatselijke opnamedag (JJJJ-MM-DD), de plaatsnaam (city, geen coördinaten), de duur van een
+  // video in seconden en of hij in Immich favoriet is; de lijst draagt .totaal = het aantal in het hele album (som van de bakken, ook boven max).
   async function albumFotos(id, max) {
     if (!u(id)) throw new Error('immich: ongeldig album');
-    const grens = Math.max(1, Math.min(500, max || 200));
+    const grens = Math.max(1, Math.min(1000, max || 200));   // wv2943: 500 → 1000
     const bakken = await verzoek('GET', '/api/timeline/buckets', { albumId: id, order: 'asc' });
     const uit = [];
+    let totaal = 0;
+    for (const b of Array.isArray(bakken) ? bakken : []) if (b && Number.isInteger(b.count) && b.count > 0) totaal += b.count;
     for (const b of Array.isArray(bakken) ? bakken : []) {
       if (uit.length >= grens) break;
       const tb = b && typeof b.timeBucket === 'string' ? b.timeBucket : null;
       if (!tb || !BUCKET_RE.test(tb)) continue;
       const r = await verzoek('GET', '/api/timeline/bucket', { albumId: id, timeBucket: tb, order: 'asc' });
       const ids = r && Array.isArray(r.id) ? r.id : [];
+      const kol = (k) => (r && Array.isArray(r[k]) ? r[k] : []);
+      const fc = kol('fileCreatedAt'), off = kol('localOffsetHours'), stad = kol('city'), duur = kol('duration'), fav = kol('isFavorite');
       for (let i = 0; i < ids.length && uit.length < grens; i++) {
         if (!u(ids[i])) continue;
         if (Array.isArray(r.isTrashed) && r.isTrashed[i] === true) continue;
-        uit.push({ id: ids[i], beeld: !(Array.isArray(r.isImage) && r.isImage[i] === false), ratio: Array.isArray(r.ratio) && Number.isFinite(r.ratio[i]) ? Math.round(r.ratio[i] * 1000) / 1000 : null });
+        const beeld = !(Array.isArray(r.isImage) && r.isImage[i] === false);
+        uit.push({ id: ids[i], beeld, ratio: Array.isArray(r.ratio) && Number.isFinite(r.ratio[i]) ? Math.round(r.ratio[i] * 1000) / 1000 : null,
+          dag: plaatselijkeDag(fc[i], off[i]), tijd: plaatselijkeTijd(fc[i], off[i]), plaats: plaatsNaam(stad[i]), duur: beeld ? null : duurSec(duur[i]), fav: fav[i] === true });
       }
     }
+    Object.defineProperty(uit, 'totaal', { value: Math.max(totaal, uit.length), enumerable: false });
     return uit;
   }
   // wv2468 (Tripper): wanneer en waar de foto's van een album gemaakt zijn, voor de periode en het kaartpunt van een reis uit je foto's.
