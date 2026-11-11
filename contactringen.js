@@ -212,7 +212,7 @@ function maak(o) {
       let d = null;
       x.ids.forEach(function (id) { if (datums[id] && (!d || datums[id] > d)) d = datums[id]; });
       const geldig = !!(d && isDatum(d) && d <= datum);   // review ZOU 1: alleen een echte datum t/m vandaag telt
-      if (geldig) { gezien++; if (!st.laatst_gezien || d > st.laatst_gezien) st.laatst_gezien = d; } else blind++;
+      if (geldig) { gezien++; if (!st.laatst_gezien || d > st.laatst_gezien) { st.laatst_gezien = d; st.gemeld_op = null; } } else blind++;   // nieuw contact = nieuwe periode (review r3 MOET 1)
       if (p.geen_signaal) uitgezet++;
       // stil-signaal: alleen met een datum van vandaag (blind = stil), niet bij geen_signaal, één keer per stilteperiode
       if (geldig && !p.geen_signaal) {
@@ -233,7 +233,8 @@ function maak(o) {
       wacht: (stil.length - keus.stil.length) + (jarig.length - keus.jarig.length) };
     if (droog) { laatst = { op: new Date(nu()).toISOString(), droog: true }; return { ok: true, droog: true, regel: t, detail: detail }; }
     // review r2 MOET 1: na alle aanroepen opnieuw de klok: na 07:00 is de briefing weg → niets schrijven, niemand als gemeld
-    if (t && a.uur * 60 + a.min + (nu() - start) / 60000 >= 7 * 60) return mislukt('te laat voor de briefing van 07:00');
+    // de minuut van de stapklok kan tot 59 s achterlopen: reken het einde van die minuut (review r3 MOET 2)
+    if (t && a.uur * 60 + a.min + 1 + (nu() - start) / 60000 > 7 * 60) return mislukt('te laat voor de briefing van 07:00');
     if (t) {
       try { await o.bufferZet(datum, t); } catch (e) { return mislukt('buffer niet gezet'); }
     }
