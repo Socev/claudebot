@@ -12,7 +12,8 @@
  *
  * REGEL. Laatste 1-op-1-appje > 42 dagen geleden en in deze stilteperiode nog niet gemeld → "laatste 1-op-1-appje met X is N weken
  * geleden" (nooit "lang niets gehoord": het luik ziet geen gesprekken, groepen of bezoek). Plus verjaardagen (ring 1 zonder
- * huishouden) binnen 14 dagen, één keer per verjaardag. Geen datum gevonden = geen signaal (blind = stil).
+ * huishouden en zonder geen_signaal) binnen 14 dagen, één keer per verjaardag. Geen datum gevonden = geen signaal (blind = stil).
+ * Hooguit 5 per soort en 400 tekens; wat niet past wordt niet als gemeld vastgelegd en komt volgende week (review MOET 2).
  *
  * STAAT. staatPad (600): per vaultpad alleen laatst_gezien (datum), gemeld_op (datum) en jarig_jaar (jaartal van de laatst
  * gemelde verjaardag). Geen nummers, geen inhoud, geen namen buiten het vaultpad.
@@ -37,6 +38,7 @@ const GRENS_DAGEN = 42;          // ring 1: langer dan 6 weken (Regels op de rin
 const JARIG_DAGEN = 14;
 const MAX_IDS = 30;              // zoekluik weigert meer
 const REGEL_MAX = 400;
+const MAX_PER_SOORT = 5;         // review MOET 2: niet afkappen; wat niet past blijft voor volgende week (niet als gemeld vastgelegd)
 const DAG = 86400000;
 
 function ams(ms) {
@@ -45,7 +47,7 @@ function ams(ms) {
     .formatToParts(new Date(ms)).forEach(function (x) { p[x.type] = x.value; });
   return { datum: p.year + '-' + p.month + '-' + p.day, uur: Number(p.hour), min: Number(p.minute) };
 }
-function isDatum(d) { return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d); }
+function isDatum(d) { return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && new Date(d + 'T12:00:00Z').toISOString().slice(0, 10) === d; }
 function dagNr(d) { return Math.round(Date.parse(d + 'T12:00:00Z') / DAG); }
 function zondag(d) { return new Date(d + 'T12:00:00Z').getUTCDay() === 0; }
 function norm(x) { return String(x == null ? '' : x).normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim(); }
@@ -101,7 +103,13 @@ function regel(stil, jarig) {
   if (!delen.length) return '';
   let t = 'Binnenste kring: ' + delen.join('; ') + '.';
   if (stil.length) t += ' Zie je iemand vaak? Zeg "zie ik vaak", dan krijgt die persoon geen seintje meer.';
-  return t.length > REGEL_MAX ? t.slice(0, REGEL_MAX - 1) + '…' : t;
+  return t;
+}
+// kies wat in de regel past (≤ MAX_PER_SOORT per soort, ≤ REGEL_MAX tekens); alleen die worden als gemeld vastgelegd
+function kies(stil, jarig) {
+  let s = stil.slice(0, MAX_PER_SOORT), j = jarig.slice(0, MAX_PER_SOORT);
+  while (regel(s, j).length > REGEL_MAX && (s.length || j.length)) { if (s.length >= j.length) s = s.slice(0, -1); else j = j.slice(0, -1); }
+  return { stil: s, jarig: j, tekst: regel(s, j) };
 }
 
 function maak(o) {
@@ -130,7 +138,7 @@ function maak(o) {
     if (!droog && a.uur * 60 + a.min >= 7 * 60) return { ok: true, al_gedaan: true, detail: { te_laat: true } };   // briefing is al weg
 
     const mislukt = function (soort) {
-      soort = String(soort).replace(/\d{6,}/g, '#').slice(0, 100);
+      soort = String(soort).slice(0, 100);   // alleen vaste lokale teksten (review MOET 1)
       laatst = { op: new Date(nu()).toISOString(), fout: soort };
       if (droog) return { ok: true, droog: true, detail: { fout: soort } };
       s.klaar_datum = datum; s.laatste_fout = soort;
@@ -163,7 +171,7 @@ function maak(o) {
       for (const n of namen) {
         let c;
         try { c = await o.contacten(n); } catch (e) { return mislukt('contacten-webhook onbereikbaar'); }
-        if (!c || c.ok !== true || !Array.isArray(c.treffers)) return mislukt('contacten-webhook gaf ' + (c && c.fout ? 'fout ' + String(c.fout).slice(0, 30) : 'een ander antwoord'));
+        if (!c || c.ok !== true || !Array.isArray(c.treffers)) return mislukt(c && c.fout === 'secret' ? 'contacten-webhook weigerde de sleutel' : c && c.fout ? 'contacten-webhook gaf een fout' : 'contacten-webhook gaf een ander antwoord');
         c.treffers.filter(function (t) { return t && norm(t.weergavenaam) === norm(n); }).forEach(function (t) {
           (Array.isArray(t.telefoons_e164) ? t.telefoons_e164 : []).forEach(function (nr) {
             const d = String(nr || '').replace(/\D/g, '');
@@ -197,41 +205,43 @@ function maak(o) {
       const st = s.personen[p.pad] || {};
       let d = null;
       x.ids.forEach(function (id) { if (datums[id] && (!d || datums[id] > d)) d = datums[id]; });
-      if (d && d <= datum) { gezien++; if (!st.laatst_gezien || d > st.laatst_gezien) st.laatst_gezien = d; } else blind++;
+      const geldig = !!(d && isDatum(d) && d <= datum);   // review ZOU 1: alleen een echte datum t/m vandaag telt
+      if (geldig) { gezien++; if (!st.laatst_gezien || d > st.laatst_gezien) st.laatst_gezien = d; } else blind++;
       if (p.geen_signaal) uitgezet++;
       // stil-signaal: alleen met een datum van vandaag (blind = stil), niet bij geen_signaal, één keer per stilteperiode
-      if (d && !p.geen_signaal) {
+      if (geldig && !p.geen_signaal) {
         const dagen = dagNr(datum) - dagNr(st.laatst_gezien);
         const alGemeld = st.gemeld_op && st.gemeld_op >= st.laatst_gezien;
         if (dagen > GRENS_DAGEN && !alGemeld) stil.push({ pad: p.pad, voornaam: p.voornaam, weken: Math.floor(dagen / 7), dagen: dagen });
       }
       const vj = volgendeJarig(x.verjaardag, datum);
-      if (vj && dagNr(vj) - dagNr(datum) <= JARIG_DAGEN && st.jarig_jaar !== Number(vj.slice(0, 4))) {
+      if (vj && !p.geen_signaal && dagNr(vj) - dagNr(datum) <= JARIG_DAGEN && st.jarig_jaar !== Number(vj.slice(0, 4))) {   // review MOET 3: 'zie ik vaak' = geen seintje
         jarig.push({ pad: p.pad, voornaam: p.voornaam, datum: vj });
       }
       if (st.laatst_gezien || st.gemeld_op || st.jarig_jaar) s.personen[p.pad] = { laatst_gezien: st.laatst_gezien || null, gemeld_op: st.gemeld_op || null, jarig_jaar: st.jarig_jaar || null };
     }
     stil.sort(function (a, b) { return b.dagen - a.dagen; });
     jarig.sort(function (a, b) { return a.datum < b.datum ? -1 : 1; });
-    const t = regel(stil, jarig);
-    const detail = { personen: doel.length, met_datum: gezien, blind: blind, geen_signaal: uitgezet, stil: stil.length, jarig: jarig.length };
+    const keus = kies(stil, jarig), t = keus.tekst;
+    const detail = { personen: doel.length, met_datum: gezien, blind: blind, geen_signaal: uitgezet, stil: keus.stil.length, jarig: keus.jarig.length,
+      wacht: (stil.length - keus.stil.length) + (jarig.length - keus.jarig.length) };
     if (droog) { laatst = { op: new Date(nu()).toISOString(), droog: true }; return { ok: true, droog: true, regel: t, detail: detail }; }
     if (t) {
       try { await o.bufferZet(datum, t); } catch (e) { return mislukt('buffer niet gezet'); }
     }
     // pas na een geslaagde bufferrij als gemeld vastleggen (anders zou een mislukte zondag de melding inslikken)
     const pers = function (pad) { if (!s.personen[pad]) s.personen[pad] = { laatst_gezien: null, gemeld_op: null, jarig_jaar: null }; return s.personen[pad]; };
-    stil.forEach(function (x) { pers(x.pad).gemeld_op = datum; });
-    jarig.forEach(function (x) { pers(x.pad).jarig_jaar = Number(x.datum.slice(0, 4)); });
+    keus.stil.forEach(function (x) { pers(x.pad).gemeld_op = datum; });
+    keus.jarig.forEach(function (x) { pers(x.pad).jarig_jaar = Number(x.datum.slice(0, 4)); });
     Object.assign(s, { klaar_datum: datum, laatste_ok: datum, regel_datum: t ? datum : s.regel_datum || null });
     delete s.laatste_fout;
     try { staatZet(s); } catch (e) { /* stil; de regel staat er al */ }
-    laatst = { op: new Date(nu()).toISOString(), stil: stil.length, jarig: jarig.length };
-    if (o.log) o.log({ opdracht: 'contactringen', ok: true, personen: doel.length, met_datum: gezien, blind: blind, stil: stil.length, jarig: jarig.length });
+    laatst = { op: new Date(nu()).toISOString(), stil: keus.stil.length, jarig: keus.jarig.length };
+    if (o.log) o.log({ opdracht: 'contactringen', ok: true, personen: doel.length, met_datum: gezien, blind: blind, stil: keus.stil.length, jarig: keus.jarig.length, wacht: detail.wacht });
     return { ok: true, detail: detail };
   }
   function info() { const s = staatLees(); return { aan: true, laatst: laatst, klaar_datum: s.klaar_datum || null, regel_datum: s.regel_datum || null, laatste_fout: s.laatste_fout || null }; }
   return { doe: doe, info: info };
 }
 
-module.exports = { maak: maak, _intern: { leesRing: leesRing, volgendeJarig: volgendeJarig, regel: regel, naamUitPad: naamUitPad, norm: norm, zondag: zondag } };
+module.exports = { maak: maak, _intern: { kies: kies, isDatum: isDatum, leesRing: leesRing, volgendeJarig: volgendeJarig, regel: regel, naamUitPad: naamUitPad, norm: norm, zondag: zondag } };
