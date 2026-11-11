@@ -414,9 +414,8 @@ function naamIn(x) {
     // tussenvoegsels ("van der", "de") horen bij de naam als er verderop een woord met hoofdletter volgt ("voor van der Proefnaam")
     const tussenNaarNaam = (j) => { while (j < w.length && NAAM_TUSSEN.has(w[j].toLowerCase())) j++; return j < w.length && /^\p{Lu}/u.test(w[j]); };
     while (k < w.length && (/^\p{Lu}/u.test(w[k]) || (NAAM_TUSSEN.has(w[k].toLowerCase()) && tussenNaarNaam(k)))) { reeks.push(w[k]); k++; }
-    const kern = reeks.filter((r) => /^\p{Lu}/u.test(r) && !NAAM_TUSSEN.has(r.toLowerCase()));
-    if (kern.length && !kern.every((r) => POORT_NAAM_MAG.has(r.toLowerCase().replace(/[.!?'’]+$/, '')))) return true;
-    if (!kern.length && reeks.some((r) => /^\p{Lu}/u.test(r))) return true;   // "voor De Van": alleen tussenvoegsels met hoofdletter = toch een naam
+    // review ronde 4: de VOLLEDIGE reeks telt; een tussenvoegsel erin ("Van den Bosch", "de Kerst") = naam, ook als het laatste woord een merk is
+    if (reeks.length && (reeks.some((r) => NAAM_TUSSEN.has(r.toLowerCase())) || !reeks.every((r) => POORT_NAAM_MAG.has(r.toLowerCase().replace(/[.!?'’]+$/, ''))))) return true;
   }
   return false;
 }
