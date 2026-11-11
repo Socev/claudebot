@@ -7160,6 +7160,8 @@ const APP_NAAM_WOORDEN = new Set(('facturen facturen-app intake ovis app socev-a
   'op de het je pc laptop telefoon tablet werk-pc met en voor in zal ik mag een zo twee drie vier').split(' '));
 function appGevoeligZonderNaam(n, t, re) {
   if (/[\r\n]/.test(n.trim()) || APP_NAAM_BLOK.test(t)) return false;
+  // Codex-review ronde 2: alleen a-z, cijfers, spaties en gewone leestekens; elk ander teken (ook niet-Latijnse letters) = gevoelig
+  if (!/^[a-z0-9 ?.,:'"\u2018\u2019\u201c\u201d\u2014\u2013-]+$/.test(t.trim())) return false;
   const woorden = t.split(/[^a-z0-9-]+/).filter((w) => /[a-z0-9]/.test(w));
   if (!woorden.length || !woorden.every((w) => APP_NAAM_WOORDEN.has(w) || /^\d{1,2}$/.test(w))) return false;
   const ui = APP_NAAM_UI_RE.test(t);
