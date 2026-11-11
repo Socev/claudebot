@@ -17,10 +17,13 @@
  *   marketplace-verkoper op Amazon nooit de score van het platform → { soort: 'partner', verkoper }; verkoper onbekend op een platform →
  *   { soort: 'onbekend_verkoper' }; anders de score van de winkel van het domein (of { soort: 'geen' }); geen winkel in de lijst → null.
  * - aankopen(gekocht[], winkels): per winkel hoe vaak en wanneer laatst David er kocht (Gekocht in Shopper), en de rest als "elders".
+ * - facturenPerWinkel(groepen, winkels, k) (wv2947): per winkel het aantal facturen en de laatste factuurdatum uit Facturen, alleen op
+ *   leveranciersnaam; elke leveranciersgroep telt bij hooguit één winkel (naam vóór domein, dan de langste sleutel, dan de eerste in de lijst).
  * - maak(o): overzicht() voor GET /app/shopper/winkels, en de scores (klokken-map, 0600) met een leesronde die alleen start als iemand de
  *   tab opent en de scores ouder zijn dan 30 dagen (hooguit eens per 6 uur een poging): geen vaste ronde, geen taalmodel.
  *
- * PRIVACY. Alleen winkelnamen, domeinen en aantallen; geen wens, bedrag of factuur. Deze module logt niets.
+ * PRIVACY. Alleen winkelnamen, domeinen en aantallen; geen wens, bedrag of factuur. Uit Facturen alleen per winkel een aantal en een datum
+ *   (geen bedrag, geen leveranciersnaam, geen entiteit). Deze module logt niets.
  */
 const fs = require('fs');
 const path = require('path');
@@ -155,6 +158,33 @@ function aankopen(gekocht, winkels) {
   }
   return { per, elders: Object.values(elders).sort((a, b) => b.aantal - a.aantal || (a.naam < b.naam ? -1 : 1)) };
 }
+// wv2947: facturen per winkel. groepen = [{ naam, aantal, laatst }] uit Facturen (naam = leveranciersnaam(en) van één groep, alleen in het
+// geheugen van de pod); k = { sleutelVan, hostKern, woorden } uit shopper.js (dezelfde koppeling als de S5-facturen: heel woord in de
+// leveranciersnaam). Een groep telt bij hooguit één winkel, zodat winkel.nl en winkel.be dezelfde facturen niet twee keer tellen:
+// een treffer op de winkelnaam gaat vóór een treffer op het domein, dan de langste sleutel, dan de eerste winkel in de lijst.
+// → { domein: { aantal, laatst } } (alleen winkels met ≥ 1 factuur)
+function facturenPerWinkel(groepen, winkels, k) {
+  const per = {};
+  if (!Array.isArray(groepen) || !k || typeof k.woorden !== 'function') return per;
+  const sl = (winkels || []).map((w, i) => ({ domein: w.domein, i, s: [[k.sleutelVan(w.naam), 2], [k.hostKern('https://' + w.domein + '/'), 1]].filter((x) => x[0]) }));
+  const beter = (a, b) => !b || a[0] !== b[0] ? !b || a[0] > b[0] : a[1] !== b[1] ? a[1] > b[1] : a[2] < b[2];
+  for (const g of groepen) {
+    if (!g || !Number.isInteger(g.aantal) || g.aantal <= 0) continue;
+    const lev = ' ' + k.woorden(g.naam).join(' ') + ' ';
+    let best = null, doel = null;
+    for (const x of sl) for (const [s, sterk] of x.s) {
+      if (lev.indexOf(' ' + s + ' ') < 0) continue;
+      const r = [sterk, s.length, x.i];
+      if (beter(r, best)) { best = r; doel = x.domein; }
+    }
+    if (!doel) continue;
+    const d = DATUM_RE.test(String(g.laatst || '')) ? g.laatst : null;
+    const p = per[doel] = per[doel] || { aantal: 0, laatst: null };
+    p.aantal += g.aantal;
+    if (d && (!p.laatst || d > p.laatst)) p.laatst = d;
+  }
+  return per;
+}
 // Domeinen voor de zoekhulp bij een categorie: winkels in die categorie die aan staan en die Shopper kan lezen; zonder categorie: alle die aan staan
 function domeinenVoor(winkels, categorie) {
   return (winkels || []).filter((w) => w.aan && w.lezen !== 'niet' && w.lezen !== 'browser'
@@ -203,24 +233,26 @@ function maak(o) {
     if (!op) return true;
     return nu().getTime() - op > (s.fouten > 0 ? SCORE_POGING : SCORE_OUD);
   }
-  // Het overzicht voor de tab Winkels. pagina = tekst van de favorietenpagina (of null); gekocht = [{winkel, url, datum}]
-  function overzicht(pagina, gekocht) {
+  // Het overzicht voor de tab Winkels. pagina = tekst van de favorietenpagina (of null); gekocht = [{winkel, url, datum}];
+  // facturen = groepen uit Facturen (wv2947) of null (Facturen niet te lezen: geen telling, facturen_stand 'geen')
+  function overzicht(pagina, gekocht, facturen) {
     const winkels = pagina == null ? [] : winkelsVan(pagina);
     const s = scores();
     let stand = s ? 'klaar' : 'geen';
     if (winkels.length && moetVerversen(s) && typeof o.scoreLezer === 'function') { ververs(winkels); stand = 'leest'; }
     else if (bezig) stand = 'leest';
     const a = aankopen(gekocht, winkels);
+    const fpw = Array.isArray(facturen) ? facturenPerWinkel(facturen, winkels, o.sleutels) : null;
     const lijst = winkels.map((w) => {
-      const sc = scoreVan(w.domein, s), eigen = a.per[w.domein] || null;
+      const sc = scoreVan(w.domein, s), eigen = a.per[w.domein] || null, fac = fpw ? fpw[w.domein] || null : null;
       return { domein: w.domein, naam: w.naam, aan: w.aan, soort: w.soort, categorie: w.categorie, refurbished: w.refurbished, lezen: w.lezen,
-        verzend: w.verzend, score: sc, gekocht: eigen, onbekend: !eigen && !(sc && (sc.bronnen.some((b) => b.cijfer != null) || sc.thuiswinkel_sinds)) };
+        verzend: w.verzend, score: sc, gekocht: eigen, facturen: fac, onbekend: !eigen && !fac && !(sc && (sc.bronnen.some((b) => b.cijfer != null) || sc.thuiswinkel_sinds)) };
     });
     const oudste = lijst.map((w) => w.score && w.score.op).filter(Boolean).sort()[0] || (s ? s.op : null);   // ronde 2 ZOU 1: de oudste getoonde meting
     return { status: 200, body: { ok: true, categorieen: CATEGORIEEN, winkels: lijst, elders: a.elders, score_op: oudste, score_stand: stand,
-      pagina: pagina == null ? 'onleesbaar' : 'ok' } };
+      pagina: pagina == null ? 'onleesbaar' : 'ok', facturen_stand: fpw ? 'ok' : 'geen' } };
   }
   return { overzicht, scores, ververs, info: () => ({ bezig, poging: poging ? new Date(poging).toISOString() : null }) };
 }
 
-module.exports = { maak, winkelsVan, winkelBij, verzendUitTabel, scoreBij, scoreVan, aankopen, domeinenVoor, CATEGORIEEN, CAT_IDS, MIN_ERVARINGEN };
+module.exports = { maak, winkelsVan, winkelBij, verzendUitTabel, scoreBij, scoreVan, aankopen, facturenPerWinkel, domeinenVoor, CATEGORIEEN, CAT_IDS, MIN_ERVARINGEN };
