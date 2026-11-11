@@ -20,6 +20,15 @@
  * status: open, geen advies: niemand las de eisen na). kandidaten(id) → de kandidaten voor de grondige agent (Fable b13).
  * zoekKandidaten({wens, aantal, eisen}) → alleen de zoekrondes (geen lezen), voor "Laat Shopper zoeken" zonder snelle ronde vooraf.
  *
+ * TWEEDEHANDS (wv2940, 11-11-2026; vervolg van wv2939, David kocht een tweedehands bladderscan op eBay.co.uk, goedkoper en nieuwer dan het
+ * advies). Vraagt de wens of een eis om tweedehands/gebruikt/refurbished (of staat refurbished aan), dan doet de pod één zoekronde extra met
+ * het domeinfilter MARKTPLAATSEN (eBay in het VK, DE, NL en FR, Marktplaats, 2dehands, Kleinanzeigen); gemeten 11-11: $ 0,03 per ronde, de
+ * gewone maandgrens van de zoekhulp geldt. Uit die ronde telt alleen een link die in de bronnen van het antwoord stond (gezien) en, bij eBay
+ * en Marktplaats, alleen een item- of advertentiepagina (geen zoekpagina). eBay weigert het lezen (403, gemeten 11-11: leesscript, curl en
+ * browser): zo'n kandidaat gaat niet naar het leesscript maar meteen naar niet_gelezen als "niet nagelezen", prijs onbekend (hooguit 3;
+ * review Codex: een prijs uit het antwoord van het taalmodel is niet gecontroleerd en gaat nergens heen), en naar de grondige agent met het
+ * veld niet_nagelezen. Niets verdwijnt stil.
+ *
  * PRIVACY. De wens staat alleen in de staat (klokken-map, 24 u) en, na Davids tik op Bewaar, op de pagina; nooit in een log of rij. Deze module
  * logt niets. Koopt nooit: alleen GET op productpagina's via het leesscript (dat zoek-, winkelwagen- en accountpaden weigert).
  */
@@ -32,6 +41,8 @@ const MAX_WENS = 160, MAX_EIS = 200, MAX_EISEN = 20, MAX_LEES = 8, MAX_GELIJK = 
 const ZOEK_MS = 45000, ZOEK_MAX = 5;
 const VERGELIJKERS = ['tweakers.net'];   // geen winkel: zijn productpagina's geven geen koop-link (het leesscript weigert clickout)
 const ALTIJD = ['bol.com', 'amazon.nl'];
+const MARKTPLAATSEN = ['ebay.co.uk', 'ebay.de', 'ebay.nl', 'ebay.fr', 'marktplaats.nl', '2dehands.be', 'kleinanzeigen.de'];
+const MAX_NIET_NAGELEZEN = 3;
 const ID_RE = /^[0-9a-f]{12}$/;
 const tekst = (x, max) => { const v = String(x == null ? '' : x).replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim(); return v && v !== 'null' ? v.slice(0, max) : ''; };
 const getal = (x) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 && x < 1e7 ? Math.round(x * 100) / 100 : null);
@@ -77,7 +88,21 @@ function pakket(naam) {
   if (m) { const n = Number(m[1]); return n >= 1 && n <= 50 ? n : 1; }
   return /\bduo ?pa(k|ck)\b/.test(s) ? 2 : 1;
 }
-const REFURB = /refurbished|tweedehands|renewed|gereviseerd|occasion|\bgebruikt\b/i;
+const REFURB = /refurbished|tweede ?hands|\b2e ?hands|second ?hand|renewed|gereviseerd|occasion|\bgebruikt\b/i;
+// Wil de koper tweedehands? (vinkje refurbished, of het woord in wens of eisen)
+function tweedehands(g) { return !!(g && (g.refurbished === true || REFURB.test([g.wens].concat(g.eisen || []).join(' ')))); }
+// eBay laat zich niet lezen (403, gemeten 11-11-2026): niet naar het leesscript
+function onleesbaar(u) { return /(^|\.)ebay\.[a-z.]+$/.test(hostNaam(u)); }
+// Uit de marktplaatsronde alleen een item- of advertentiepagina (eBay /itm/ of /p/, Marktplaats/2dehands /v/), geen zoek- of winkelpagina
+function marktItem(u) {
+  let x; try { x = new URL(u); } catch (e) { return false; }
+  const h = x.hostname.replace(/^www\./, '');
+  if (/(^|\.)ebay\.[a-z.]+$/.test(h)) return /^\/(itm|p)\/[^/]/.test(x.pathname);
+  if (/^(marktplaats\.nl|2dehands\.be)$/.test(h)) return /^\/v\//.test(x.pathname);
+  return true;
+}
+// review Codex MOET 1: geen prijs uit het antwoord van het taalmodel (niet gecontroleerd); de agent zoekt de indicatie zelf
+function nietNagelezen() { return 'eBay laat de pod niet lezen (403): niet nagelezen, prijs onbekend'; }
 // Levertijd → eerste genoemde dag (JJJJ-MM-DD, Nederlandse tijd) of null. Alleen vaste woorden; onbekend blijft onbekend.
 const MAANDEN = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
 const DAGEN = ['zondag', 'maandag', 'dinsdag', 'woensdag', 'donderdag', 'vrijdag', 'zaterdag'];
@@ -232,8 +257,11 @@ function maak(o) {
   }
   // De zoekrondes (tegelijk). → { kandidaten, usd, fout? }
   async function zoekRondes(g, dom) {
-    const vragen = zoekVragen(g);
-    const uit = await Promise.all(vragen.map((v) => Promise.resolve().then(() => o.zoek({ afnemer: 'shopper-snel', vraag: v, domeinen: dom, max_zoek: ZOEK_MAX, ms: ZOEK_MS })).then((x) => x, () => null)));
+    const rondes = zoekVragen(g).map((v) => ({ vraag: v, domeinen: dom }));
+    // wv2940: bij tweedehands een ronde extra op eBay en de marktplaatsen in de EU en het VK
+    if (tweedehands(g)) rondes.push({ vraag: g.wens + '.' + (g.aantal ? ' Aantal: ' + g.aantal + '.' : '') + ' Tweedehands, gebruikt of refurbished; ook uit het VK.', domeinen: MARKTPLAATSEN, markt: true });
+    const uit = await Promise.all(rondes.map((r) => Promise.resolve().then(() => o.zoek({ afnemer: 'shopper-snel', vraag: r.vraag, domeinen: r.domeinen, max_zoek: ZOEK_MAX, ms: ZOEK_MS }))
+      .then((x) => (x && x.ok && r.markt && Array.isArray(x.kandidaten) ? Object.assign({}, x, { kandidaten: x.kandidaten.filter((k) => k && k.gezien === true && marktItem(k.url)) }) : x), () => null)));
     const ok = uit.filter((x) => x && x.ok);
     const usd = Math.round(ok.reduce((s, x) => s + (Number(x.usd) || 0), 0) * 10000) / 10000;
     if (!ok.length) {
@@ -251,8 +279,11 @@ function maak(o) {
     try { z = await zoekRondes(g, dom.lijst); } catch (e) { z = { kandidaten: [], usd: 0, fout: 'zoeken' }; }
     u.usd = z.usd;
     if (z.fout) { zet(id, Object.assign(u, { stand: 'mislukt', fout: z.fout, ms: nu().getTime() - t0, versie: 2 })); return; }
-    const lees = z.kandidaten.slice(0, MAX_LEES);
-    Object.assign(u, { stand: 'leest', te_lezen: lees.length, kandidaten: z.kandidaten.map((k) => ({ url: k.url, winkel: k.winkel, product: k.product })), opties: [], niet_gelezen: [], versie: 3 });
+    const lees = z.kandidaten.filter((k) => !onleesbaar(k.url)).slice(0, MAX_LEES);
+    // wv2940: eBay niet lezen (403) maar als "niet nagelezen" tonen, met de zoekprijs als indicatie
+    const niet = z.kandidaten.filter((k) => onleesbaar(k.url)).slice(0, MAX_NIET_NAGELEZEN)
+      .map((k) => ({ winkel: k.winkel || hostNaam(k.url), product: k.product, url: k.url, reden: nietNagelezen() }));
+    Object.assign(u, { stand: 'leest', te_lezen: lees.length, kandidaten: z.kandidaten.map((k) => ({ url: k.url, winkel: k.winkel, product: k.product })), opties: [], niet_gelezen: niet, versie: 3 });
     zet(id, u);
     let versie = 3;
     await Promise.all(lees.map((k) => beperkt(async function () {
@@ -304,15 +335,22 @@ function maak(o) {
     const u = haal(id);
     if (!u || u.stand !== 'klaar') return null;
     const gelezen = (u.opties || []).map((x) => ({ winkel: x.winkel, product: x.product, url: x.url, prijs_eur: x.prijs_eur, verzending_eur: x.verzending_eur, levertijd: x.levertijd }));
-    const rest = (u.kandidaten || []).filter((k) => !gelezen.some((x) => x.url === k.url)).map((k) => ({ winkel: k.winkel, product: k.product, url: k.url }));
+    const ng = new Map((u.niet_gelezen || []).map((x) => [x.url, x.reden]));
+    const rest = (u.kandidaten || []).filter((k) => !gelezen.some((x) => x.url === k.url)).map((k) => restVan(k, ng.get(k.url) || (onleesbaar(k.url) ? nietNagelezen() : null)));
     return { t: u.t, wens: u.wens, gelezen, rest };
+  }
+  // Een kandidaat voor de agent; niet_nagelezen = de pod kon of mocht hem niet lezen (wv2940: blijft als rij, valt niet weg)
+  function restVan(k, reden) {
+    const x = { winkel: k.winkel, product: k.product, url: k.url };
+    if (reden) x.niet_nagelezen = reden;
+    return x;
   }
   // Alleen de zoekrondes, voor Laat Shopper zoeken zonder snelle ronde vooraf (de agent leest zelf na). null bij weigering of fout.
   async function zoekKandidaten(g) {
     if (typeof o.zoek !== 'function') return null;
     try {
-      const z = await zoekRondes({ wens: g.wens, aantal: g.aantal || null, eisen: g.eisen || [], refurbished: false }, domeinen().lijst);
-      return z.fout ? null : { t: nu().toISOString(), gelezen: [], rest: z.kandidaten.map((k) => ({ winkel: k.winkel, product: k.product, url: k.url })) };
+      const z = await zoekRondes({ wens: g.wens, aantal: g.aantal || null, eisen: g.eisen || [], refurbished: g.refurbished === true }, domeinen().lijst);
+      return z.fout ? null : { t: nu().toISOString(), gelezen: [], rest: z.kandidaten.map((k) => restVan(k, onleesbaar(k.url) ? nietNagelezen() : null)) };
     } catch (e) { return null; }
   }
   // Bewaar als zoektocht: een nieuwe pagina in de Shopper-map van de entiteit (bron: snel, status: open, geen advies)
@@ -352,4 +390,4 @@ function maak(o) {
   return { start, stand, kandidaten, zoekKandidaten, bewaar, opruimen };
 }
 
-module.exports = { maak, zoekVragen, samenvoegen, zelfdeProduct, pakket, inHuis, optieVan, invoer, bestandsnaam, isoNl, PLAFOND_DAG };
+module.exports = { maak, zoekVragen, samenvoegen, tweedehands, onleesbaar, marktItem, MARKTPLAATSEN, zelfdeProduct, pakket, inHuis, optieVan, invoer, bestandsnaam, isoNl, PLAFOND_DAG };
