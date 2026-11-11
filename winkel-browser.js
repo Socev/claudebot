@@ -26,6 +26,8 @@ const { spawn, execFile } = require('child_process');
 
 const PW_STANDAARD = '/usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright-core';
 const KIND_MS = 45000, HARD_MS = 10000, WACHT_MAX = 4, CACHE_OK_MS = 6 * 3600000, CACHE_FOUT_MS = 30 * 60000, CACHE_MAX = 200;
+// review ronde 4 MOET 1: WebRTC (UDP) gaat buiten de proxy om; alleen via de proxy en zonder eigen UDP
+const BROWSER_ARGS = ['--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--webrtc-ip-handling-policy=disable_non_proxied_udp'];
 const CONTROLE = /Security Checkpoint|Just a moment|Even geduld|Checking your browser|Client Challenge/i;
 
 function chromiumPad(basis) {
@@ -198,7 +200,11 @@ function maak(o) {
 // kind), window.open bestaat niet op de pagina, en een nieuw tabblad gaat meteen dicht.
 async function bewaak(ctx, page, url) {
   const zonderHekje = (u) => String(u || '').split('#')[0];
-  await ctx.addInitScript(function () { try { window.open = function () { return null; }; } catch (e) { /* weg */ } });
+  await ctx.addInitScript(function () {
+    try { window.open = function () { return null; }; } catch (e) { /* weg */ }
+    // review ronde 4: geen WebRTC (UDP buiten de proxy om)
+    for (const n of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel']) { try { Object.defineProperty(window, n, { value: undefined, configurable: false, writable: false }); } catch (e) { /* weg */ } }
+  });
   ctx.on('page', function (p) { if (p !== page) p.close().catch(() => null); });
   const cdp = await ctx.newCDPSession(page);
   const hoofd = (await cdp.send('Page.getFrameTree')).frameTree.frame.id;
@@ -226,7 +232,7 @@ async function kind(invoerPad, uitPad) {
   // <-loopback>: ook 127.0.0.1/localhost gaat door de proxy (Chromium slaat loopback anders standaard over)
   const proxy = { server: 'http://127.0.0.1:' + px.srv.address().port, bypass: '<-loopback>' };
   try {
-    const basisOpt = { executablePath: d.exe, headless: true, timeout: rest(), proxy, ignoreDefaultArgs: ['--disable-popup-blocking'] };
+    const basisOpt = { executablePath: d.exe, headless: true, timeout: rest(), proxy, ignoreDefaultArgs: ['--disable-popup-blocking'], args: BROWSER_ARGS };
     try { browser = await pw.chromium.launch(Object.assign({ chromiumSandbox: true }, basisOpt)); }
     catch (e) { browser = await pw.chromium.launch(Object.assign({}, basisOpt, { chromiumSandbox: false, timeout: rest() })); }
     const ctx = await browser.newContext({ locale: 'nl-NL', timezoneId: 'Europe/Amsterdam', acceptDownloads: false });
@@ -255,4 +261,4 @@ if (require.main === module && process.argv[2] === '--kind') {
   kind(process.argv[3], process.argv[4]).then(() => process.exit(0), () => process.exit(1));
 }
 
-module.exports = { maak, chromiumPad, CONTROLE, bewaak, maakProxy, hostMag, basisDomein, doodOmgeving };
+module.exports = { maak, chromiumPad, CONTROLE, BROWSER_ARGS, bewaak, maakProxy, hostMag, basisDomein, doodOmgeving };
