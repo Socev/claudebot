@@ -185,9 +185,10 @@ function facturenPerWinkel(groepen, winkels, k) {
   }
   return per;
 }
-// Domeinen voor de zoekhulp bij een categorie: winkels in die categorie die aan staan en die Shopper kan lezen; zonder categorie: alle die aan staan
-function domeinenVoor(winkels, categorie) {
-  return (winkels || []).filter((w) => w.aan && w.lezen !== 'niet' && w.lezen !== 'browser'
+// Domeinen voor de zoekhulp bij een categorie: winkels in die categorie die aan staan en die Shopper kan lezen; zonder categorie: alle die aan staan.
+// metBrowser (wv2949): de pod heeft de browserroute, dan tellen winkels met lezen: browser ook mee
+function domeinenVoor(winkels, categorie, metBrowser) {
+  return (winkels || []).filter((w) => w.aan && w.lezen !== 'niet' && (w.lezen !== 'browser' || metBrowser === true)
     && (!categorie || w.categorie.indexOf(categorie) >= 0 || w.categorie.indexOf('alles') >= 0)).map((w) => w.domein);
 }
 

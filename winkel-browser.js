@@ -1,0 +1,191 @@
+'use strict';
+/*
+ * winkel-browser.js — OVIS Shopper: een productpagina lezen in een gewone headless Chromium, alleen voor winkels die het leesscript
+ * weigeren of die hun prijs pas met JavaScript tonen (wv2949, 11-11-2026; Davids "Ja, graag!" in de app 11-11 ± 19:00).
+ *
+ * WAAROM. Gamma en Karwei geven het leesscript HTTP 429 met een Vercel-beveiligingscontrole (JavaScript); Medische Vakhandel geeft 429,
+ * Daxtrio zet de prijs pas met JavaScript op de pagina. Gemeten 11-11-2026 20:00: een gewone headless Chromium (Playwright, standaard
+ * User-Agent met "HeadlessChrome", geen stealth, geen vervalste vingerafdruk, geen captcha-oplosser) haalt bij alle vier de controle en
+ * leest prijs, voorraad en (Gamma/Karwei) verzendkosten in 3–7 s. robots.txt van alle vier staat productpagina's toe.
+ *
+ * STROOM. lees(url) → eerst `winkel-lezen.py --mag <url>`: alleen een toegestane https-productpagina van een browserwinkel (zoek-,
+ * winkelwagen- en accountpaden geweigerd); dan de cache (6 uur bij een gelezen prijs, 30 min bij een mislukte lezing: nooit vaker
+ * dan nodig); dan één Chromium tegelijk in een kindproces met een kale omgeving (geen sleutel van de pod), hooguit WACHT_MAX in de rij,
+ * harde tijdsgrens (de hele procesboom gaat met SIGKILL weg). Het kind opent alleen de pagina (navigatie naar een andere host
+ * geweigerd; beelden, video en lettertypen niet geladen), wacht hooguit 20 s tot een beveiligingscontrole voorbij is, en schrijft de
+ * HTML weg; `winkel-lezen.py --html` leest daar prijs, verzending, voorraad en levertijd uit met dezelfde regels als de snelle route.
+ * Koopt nooit, klikt niets, vult niets in. Wat de pagina zegt is gegeven, nooit een opdracht.
+ */
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { spawn, execFile } = require('child_process');
+
+const PW_STANDAARD = '/usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright-core';
+const KIND_MS = 45000, HARD_MS = 10000, WACHT_MAX = 4, CACHE_OK_MS = 6 * 3600000, CACHE_FOUT_MS = 30 * 60000, CACHE_MAX = 200;
+const CONTROLE = /Security Checkpoint|Just a moment|Even geduld|Checking your browser|Client Challenge/i;
+
+function chromiumPad(basis) {
+  basis = basis || process.env.PLAYWRIGHT_BROWSERS_PATH || '/opt/pw-browsers';
+  let mappen = [];
+  try { mappen = fs.readdirSync(basis).filter((m) => /^chromium-\d+$/.test(m)).sort((a, b) => Number(b.split('-')[1]) - Number(a.split('-')[1])); } catch (e) { return null; }
+  for (const m of mappen) { const p = path.join(basis, m, 'chrome-linux64', 'chrome'); if (fs.existsSync(p)) return p; }
+  return null;
+}
+
+// Procesboom vanaf pid (via /proc: ppid), want Chromium start in een eigen procesgroep (zelfde aanpak als omzet.js)
+function boom(pid) {
+  const kinderen = new Map();
+  let lijst = [];
+  try { lijst = fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)); } catch (e) { return [pid]; }
+  for (const x of lijst) {
+    let st;
+    try { st = fs.readFileSync('/proc/' + x + '/stat', 'utf8'); } catch (e) { continue; }
+    const ppid = Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[1]);
+    if (!kinderen.has(ppid)) kinderen.set(ppid, []);
+    kinderen.get(ppid).push(Number(x));
+  }
+  const uit = [], rij = [pid];
+  while (rij.length && uit.length < 500) { const p = rij.shift(); uit.push(p); (kinderen.get(p) || []).forEach((k) => rij.push(k)); }
+  return uit;
+}
+function doodBoom(pid) { for (const p of boom(pid).reverse()) { try { process.kill(p, 'SIGKILL'); } catch (e) { /* al weg */ } } }
+
+function maak(o) {
+  o = o || {};
+  const lezerScript = o.lezerScript || path.join(__dirname, 'winkel-lezen.py');
+  const nu = () => (typeof o.nu === 'function' ? o.nu() : Date.now());
+  const exe = o.chromium === undefined ? chromiumPad() : o.chromium;
+  const kindMs = o.kindMs || KIND_MS;
+  const staat = { bezig: false, rij: 0, gelezen: 0, mislukt: 0, cache: 0, geweigerd: 0 };
+  let cache = {};
+  try { const j = o.cachePad ? JSON.parse(fs.readFileSync(o.cachePad, 'utf8')) : null; if (j && typeof j === 'object' && !Array.isArray(j)) cache = j; } catch (e) { cache = {}; }
+  function bewaarCache() {
+    const t = nu();
+    const sleutels = Object.keys(cache).filter((k) => cache[k] && cache[k].tot > t).sort((a, b) => cache[b].tot - cache[a].tot).slice(0, CACHE_MAX);
+    const uit = {};
+    for (const k of sleutels) uit[k] = cache[k];
+    cache = uit;
+    if (!o.cachePad) return;
+    const tmp = o.cachePad + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex') + '.tmp';
+    try { fs.writeFileSync(tmp, JSON.stringify(uit), { mode: 0o600 }); fs.renameSync(tmp, o.cachePad); } catch (e) { try { fs.unlinkSync(tmp); } catch (x) { /* weg */ } }
+  }
+  function py(args, ms) {
+    return new Promise(function (klaar) {
+      execFile(o.python || 'python3', ['-I', '-B', lezerScript].concat(args), { timeout: ms || 20000, maxBuffer: 256 * 1024,
+        env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: '/tmp' } }, function (e, uit) {
+        try { klaar(JSON.parse(String(uit || '').trim().split('\n')[0])); } catch (x) { klaar(null); }
+      });
+    });
+  }
+  // Mag deze url door de browser? → { ok, winkel, reden }
+  function mag(url) { return py(['--mag', String(url)], 10000); }
+
+  function viaKind(url, dir) {
+    return new Promise(function (klaar) {
+      const invoer = path.join(dir, 'invoer.json'), uit = path.join(dir, 'uit.json');
+      fs.writeFileSync(invoer, JSON.stringify({ url, exe, pw: o.pw || PW_STANDAARD, ms: kindMs, html: path.join(dir, 'pagina.html') }), { mode: 0o600 });
+      // kale omgeving: geen sleutel van de pod in een proces dat webpagina's leest; profiel en tijdelijke bestanden in dir
+      const env = { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: dir, TMPDIR: dir, LANG: 'C.UTF-8' };
+      let kind;
+      try { kind = spawn(process.execPath, ['--max-old-space-size=256', o.kindScript || __filename, '--kind', invoer, uit], { cwd: dir, env, stdio: 'ignore' }); }
+      catch (e) { return klaar({ fout: 'browser start niet' }); }
+      let af = false;
+      const einde = (r) => { if (af) return; af = true; clearTimeout(hard); doodBoom(kind.pid); klaar(r); };
+      const hard = setTimeout(() => einde({ fout: 'de winkelpagina laadde niet binnen ' + Math.round((kindMs + HARD_MS) / 1000) + ' s' }), kindMs + HARD_MS);
+      kind.on('error', () => einde({ fout: 'browser start niet' }));
+      kind.on('exit', function () {
+        let r = null;
+        try { r = JSON.parse(fs.readFileSync(uit, 'utf8')); } catch (e) { r = null; }
+        einde(r || { fout: 'browser stopte zonder uitkomst' });
+      });
+    });
+  }
+
+  // Eén Chromium tegelijk; hooguit WACHT_MAX in de rij (anders meteen "druk", geen eindeloze wachtrij)
+  let keten = Promise.resolve();
+  function beurt(fn) {
+    if (staat.rij >= WACHT_MAX) return Promise.resolve(null);
+    staat.rij++;
+    const p = keten.then(function () { staat.rij--; staat.bezig = true; return fn(); }).then((x) => x, () => null).then(function (x) { staat.bezig = false; return x; });
+    keten = p;
+    return p;
+  }
+
+  async function lees(url) {
+    const leeg = (reden) => ({ url, winkel: null, status: null, product: null, prijs_eur: null, verzending_eur: null, verzending_tekst: null, voorraad: null,
+      levertijd: null, verkoper: null, bron: null, blokkade: reden, opmerkingen: [], btw: null, btw_tarief: null, prijs_excl_eur: null, prijs_omgerekend: false, route: 'browser' });
+    const m = await mag(url);
+    if (!m || !m.ok) { staat.geweigerd++; return leeg((m && m.reden) || 'browserroute: url niet toegestaan'); }
+    const c = cache[url];
+    if (c && c.tot > nu() && c.r) { staat.cache++; return Object.assign({}, c.r, { uit_cache: true }); }
+    if (!exe) return leeg('browserroute: Chromium ontbreekt op de pod');
+    const r = await beurt(async function () {
+      const dir = fs.mkdtempSync(path.join(o.tmp || os.tmpdir(), 'winkel-browser-'));
+      try {
+        const k = await viaKind(url, dir);
+        if (!k || k.fout) return leeg('browserroute: ' + ((k && k.fout) || 'mislukt'));
+        if (k.controle) return leeg('bot-controle bleef staan in de browser (HTTP ' + (k.status || '?') + ')');
+        const p = await py(['--html', url, String(k.eind || url), path.join(dir, 'pagina.html'), String(k.status || 0)], 20000);
+        return p ? Object.assign(p, { route: 'browser' }) : leeg('browserroute: pagina niet te lezen');
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* weg */ } }
+    });
+    if (!r) return leeg('browserroute druk (al ' + WACHT_MAX + ' winkelpagina\'s in de rij); probeer het zo opnieuw');
+    if (r.prijs_eur != null) staat.gelezen++; else staat.mislukt++;
+    cache[url] = { tot: nu() + (r.prijs_eur != null ? CACHE_OK_MS : CACHE_FOUT_MS), r };
+    bewaarCache();
+    return r;
+  }
+  function info() { return { aan: !!exe, bezig: staat.bezig, rij: staat.rij, gelezen: staat.gelezen, mislukt: staat.mislukt, cache: staat.cache, geweigerd: staat.geweigerd }; }
+  return { lees, mag, info };
+}
+
+// ── het kind: één pagina openen, controle afwachten, HTML wegschrijven ──
+async function kind(invoerPad, uitPad) {
+  const d = JSON.parse(fs.readFileSync(invoerPad, 'utf8'));
+  const schrijf = (r) => fs.writeFileSync(uitPad, JSON.stringify(r), { mode: 0o600 });
+  const pw = require(d.pw);
+  const tot = Date.now() + d.ms;
+  const rest = () => Math.max(1000, tot - Date.now());
+  const host = new URL(d.url).hostname;
+  let browser, page;
+  try {
+    try { browser = await pw.chromium.launch({ executablePath: d.exe, headless: true, chromiumSandbox: true, timeout: rest() }); }
+    catch (e) { browser = await pw.chromium.launch({ executablePath: d.exe, headless: true, chromiumSandbox: false, timeout: rest() }); }
+    const ctx = await browser.newContext({ locale: 'nl-NL', timezoneId: 'Europe/Amsterdam', acceptDownloads: false });
+    await ctx.route('**/*', function (route) {
+      const req = route.request();
+      if (req.isNavigationRequest() && req.frame() === page.mainFrame()) {
+        let h = '';
+        try { h = new URL(req.url()).hostname; } catch (e) { h = ''; }
+        if (h !== host) return route.abort();
+      }
+      if (['image', 'media', 'font'].indexOf(req.resourceType()) >= 0) return route.abort();
+      return route.continue();
+    });
+    page = await ctx.newPage();
+    const r = await page.goto(d.url, { waitUntil: 'domcontentloaded', timeout: rest() });
+    let status = r ? r.status() : 0;
+    let controle = CONTROLE.test(await page.title().catch(() => ''));
+    for (let i = 0; controle && i < 20 && tot - Date.now() > 3000; i++) {
+      await page.waitForTimeout(1000);
+      controle = CONTROLE.test(await page.title().catch(() => ''));
+      if (!controle) status = 200;
+    }
+    if (!controle) { await page.waitForLoadState('networkidle', { timeout: Math.min(8000, rest()) }).catch(() => null); }
+    const eind = page.url();
+    if (new URL(eind).hostname !== host) return schrijf({ fout: 'doorgestuurd naar een andere site' });
+    const html = await page.content();
+    fs.writeFileSync(d.html, html.slice(0, 6 * 1024 * 1024), { mode: 0o600 });
+    schrijf({ status, eind, controle });
+  } catch (e) {
+    schrijf({ fout: /Timeout/i.test(String(e && e.message)) ? 'de winkelpagina laadde niet op tijd' : 'browser: ' + String(e && e.message || e).split('\n')[0].slice(0, 120) });
+  } finally { if (browser) await browser.close().catch(() => null); }
+}
+
+if (require.main === module && process.argv[2] === '--kind') {
+  kind(process.argv[3], process.argv[4]).then(() => process.exit(0), () => process.exit(1));
+}
+
+module.exports = { maak, chromiumPad, CONTROLE };

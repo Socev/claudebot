@@ -267,7 +267,7 @@ function maak(o) {
   function domeinen(categorie) {
     let fav = [], winkels = [];
     try { const t = o.vv.lees(path.join(o.vault, S.FAVORIETEN), 'utf8', { max: 256 * 1024 }); fav = S.favorietenVan(t); winkels = W ? W.winkelsVan(t) : []; } catch (e) { fav = []; winkels = []; }
-    const bron = W && winkels.length ? W.domeinenVoor(winkels, categorie || null) : fav;
+    const bron = W && winkels.length ? W.domeinenVoor(winkels, categorie || null, o.metBrowser === true) : fav;
     const d = ALTIJD.slice();
     for (const x of bron) if (VERGELIJKERS.indexOf(x) < 0 && d.indexOf(x) < 0) d.push(x);
     return { lijst: d.slice(0, 20), fav, winkels };
