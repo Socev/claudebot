@@ -7129,8 +7129,8 @@ const APP_GEVOELIG = [
   // Vervangen, stoppen, uitzetten, afsluiten en ontkoppelen alleen als er iets van David in de vraag staat (APP_DAVID_RE): dan raakt het
   // zijn gegevens (back-ups, mail, Todoist); anders is het een technische handeling.
   ['verwijderen', /vervang|\bstop(?:pen|t)?\b|uitzet|zet\b[^.?!]*\buit\b|afsluit|sluit\b[^.?!]*\baf\b|ontkoppel/, 'david'],
-  ['agenda', /agenda|afspra|inplan|plan\b[^.?!]*\bin\b|verzet|verplaats|reserve|\bboek|verschuif|schuif\b[^.?!]*\bop\b/],
-  ['geld', /betaal|betalen|overmaak|overmaken|maak\b[^.?!]*\bover\b|bestel|\bkoop|kopen|aanschaf|factur|declar|incass|\bgeld\b|€|euro|bedrag|voldoe|abonnement|contract/],
+  ['agenda', /agenda|afspra|inplan|plan\b[^.?!]*\bin\b|verzet|verplaats|reserve|\bboek|verschuif|schuif\b[^.?!]*\bop\b/, 'naam'],
+  ['geld', /betaal|betalen|overmaak|overmaken|maak\b[^.?!]*\bover\b|bestel|\bkoop|kopen|aanschaf|factur|declar|incass|\bgeld\b|€|euro|bedrag|voldoe|abonnement|contract/, 'naam'],
   // wv2347: een Ja die de grondregels wijzigt (grondwet, bevoegdheden, privacy- of patiëntregels) vraagt altijd een vingerafdruk, ook als de
   // vraag geen woord over versturen/verwijderen/agenda/geld bevat (3-11: Ja op "Grondwet 3 — mag Intake een vermoeden van patiëntgegevens
   // zonder vraag doorlaten?" kwam zonder). Als laatste, zodat de reden van bestaande vragen niet verandert. Tweede slot: herkomst.grondwet.
@@ -7142,13 +7142,36 @@ const APP_GEVOELIG = [
 const APP_INTERN_RE = /proefbestand|proefpagina|proefkopie|proefrij|testbestand|wegwerp|werkbestand|werkmap|werkboom|werkbomen|worktree|werkkopie|tussenbestand|logdump|logarchief|sleutelkopie|eigen kopie|\bwv\d{2,5}\b|mk-scripts/;
 const APP_DAVID_RE = /mail|agenda|afspra|todoist|\btaak|\btaken\b|notitie|dossier|vault|second ?brain|\bdrive\b|foto|contact|document|\bscan|back-?up|reservekopie|immich|album|factu|transactie|concept|bericht|\bchat|whatsapp|\bpagina|\brij(?:en)?\b|\bjouw\b|herinnering|patient|genoom|\bdna\b|account|\bbsn|privacy|workflow|annule|opzeg|afzeg|\bzeg\b|intrek|\btrek\b|beeindig/;
 const APP_JIJ_RE = /\b(?:je|jou|jouw|jullie|david)\b/;
+// wv2907 (nazorg ML5, meting wv2904): de App-naam 'Facturen' (geld: factur) en de knopnaam 'Verplaats' (agenda: verplaats) maakten
+// bouw- en ontwerpvragen gevoelig ("Facturen op de pc — werktafel met tabel?", "Intake stap 5 — Geschiedenis met Verplaats bouwen?").
+// Smalle uitzondering, alleen voor agenda en geld: de naam staat op naamplek (App vóór het gedachtestreepje aan het begin; knop met
+// hoofdletter midden in de zin of tussen aanhalingstekens), er staat een bouw- of ontwerpwoord in de vraag en GEEN woord over geld,
+// versturen, verwijderen of agenda (APP_NAAM_BLOK, over de hele tekst incl. voorstel). Dan wordt alleen de naam weggelaten en de regex
+// opnieuw getoetst: elk ander geld- of agendawoord houdt de vraag gevoelig. De geldregex zelf blijft ongewijzigd. Fail-closed.
+const APP_NAAM_APP_RE = /^\s*(?:ovis\s+)?facturen(?:-app)?(?:\s+op\s+(?:de\s+|het\s+|je\s+)?(?:pc|laptop|telefoon|tablet|werk-pc))?\s*[\u2014\u2013-]\s/i;
+const APP_NAAM_KNOP_RE = /(?<=[\p{L}\p{N},:]\s+)['"\u2018\u2019\u201c\u201d]?Verplaats['"\u2018\u2019\u201c\u201d]?(?![\p{L}\p{N}])/gu;
+// Bouwwoord: bij een knopnaam mag 'bouwen'; bij een App-naam alleen een scherm- of vormwoord (een kale 'Facturen-app — bouw ik verder
+// met deze vijf keuzes?' bleek in de stappen een maandelijks afschrift naar een derde te bevatten; titel alleen zegt dan te weinig).
+const APP_NAAM_UI_RE = /\b(?:vormgeving|opmaak|werk(?:tafel|bank)|inklappen|tabel|kolom(?:men)?|scherm|(?:groeps)?knop(?:pen)?|weergave)\b/;
+const APP_NAAM_BOUW_RE = /\b(?:bouw(?:en|t)?|inbouwen|inrichten)\b/;
+const APP_NAAM_BLOK = /€|\beuro|bedrag|betaal|betalen|betaling|\biban\b|rekening|overmaak|overmaken|incass|declar|\bfactuur\b|boekhoud|\bsepa\b|leverancier|stuur|sturen|zend|mail|verwijder|\bwis|\bweg|afspra|agenda|\bboek(?:en|t)?\b|bestel|\bkoop|kopen|abonnement|contract|\bgeld\b|keuze/;
+function appGevoeligZonderNaam(n, t, re) {
+  if (APP_NAAM_BLOK.test(t)) return false;
+  const ui = APP_NAAM_UI_RE.test(t);
+  let n2 = ui ? n.replace(APP_NAAM_APP_RE, 'app \u2014 ') : n;
+  if (ui || APP_NAAM_BOUW_RE.test(t)) n2 = n2.replace(APP_NAAM_KNOP_RE, 'knop');
+  if (n2 === n) return false;
+  return !re.test(n2.toLowerCase());
+}
 function appGevoelig(tekst) {
-  const t = String(tekst || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const n = String(tekst || '').normalize('NFKD').replace(/[̀-ͯ]/g, '');
+  const t = n.toLowerCase();
   if (!t.trim()) return 'onleesbaar';   // fail-closed
   for (const [reden, re, uitz] of APP_GEVOELIG) {
     if (!re.test(t)) continue;
     if (uitz === 'intern' && APP_INTERN_RE.test(t) && !APP_DAVID_RE.test(t) && !APP_JIJ_RE.test(t)) continue;   // review MOET 2: 'je'/'jou' = van David, fail-closed
     if (uitz === 'david' && !APP_DAVID_RE.test(t)) continue;
+    if (uitz === 'naam' && appGevoeligZonderNaam(n, t, re)) continue;   // wv2907
     return reden;
   }
   return null;
