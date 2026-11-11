@@ -152,7 +152,7 @@ const BUITEN_LABELS = ['SENT', 'DRAFT', 'CHAT', 'SPAM', 'TRASH'];
 const VERKOOP_POSTVAK = 'gmail:groenhouten';
 const VERKOOP_DOMEINEN = ['hapleusden.nl', 'hpgroenhouten.nl'];
 const VERKOOP_STROOM = 'verkoop', VERKOOP_LABEL = 'VERKOOP';
-const VERKOOP_STATUS = ['kandidaat', 'herkend', 'niet_herkend', 'aangeboden', 'verstuurd', 'gearchiveerd', 'al_doorgestuurd', 'overgeslagen', 'onzeker', 'geweigerd', 'mislukt'];
+const VERKOOP_STATUS = ['kandidaat', 'herkend', 'niet_herkend', 'aangeboden', 'verstuurd', 'gearchiveerd', 'al_doorgestuurd', 'overgeslagen', 'onzeker', 'geweigerd', 'mislukt', 'weg_david'];   // wv2911: weg_david = David haalde de nota zelf uit het overzicht (terug = vorige status)
 const VERKOOP_HANG_MS = 48 * 3600 * 1000, VERKOOP_TOETS_DEADLINE_MS = 240 * 1000;   // review wv1997 #5/#13
 const VERKOOP_WACHT_MS = 24 * 3600 * 1000, VERKOOP_TOETS_POGINGEN = 3;
 const VERKOOP_RONDE_MAX = 10, VERKOOP_DAG_MAX = 25;                     // doorsturen per ronde / per 24 uur (gemeten piek ± 16 per twee weken)
@@ -886,7 +886,8 @@ function maak(o) {
     ['aanbod', 'thread_id TEXT'], ['aanbod', 'erf TEXT'],   // wv2196 draadlabels
     ['postvak', 'inbox_lijst TEXT'], ['postvak', 'zaken_tijd TEXT'],   // wv2218 zaakregister
     ['besluit', 'terug_tijd TEXT'], ['besluit', 'terug_poging INTEGER NOT NULL DEFAULT 0'],
-    ['zaak', 'zou_weg TEXT'], ['zaak', 'zou_reden TEXT']]) {   // wv2455 proefweek vanzelf weg   // wv2259 terug bij Geen factuur   // wv2218 zaakregister: laatste volledige inboxlijst, laatste berekening
+    ['zaak', 'zou_weg TEXT'], ['zaak', 'zou_reden TEXT'],
+    ['verkoop', 'vorige TEXT']]) {   // wv2911: status vóór 'weg_david';    // wv2455 proefweek vanzelf weg   // wv2259 terug bij Geen factuur   // wv2218 zaakregister: laatste volledige inboxlijst, laatste berekening
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
   // wv2259: Ecobank-meldingen die de pod verwerkte (bron: server.js na de Ecobank-ronde) en wat MailMan ermee deed
@@ -2559,7 +2560,7 @@ function maak(o) {
       return loopt && v.archief && v.archief_kan && Date.parse(r.verstuurd || '') >= n - VERKOOP_ARCHIEF_MS ? { fase: 'wacht_archief', open: true } : { fase: 'verstuurd', open: false };
     }
     if (s === 'onzeker' || s === 'geweigerd' || s === 'mislukt') return { fase: s, open: recent(r.bijgewerkt) };
-    return { fase: s, open: false };
+    return { fase: s, open: false };   // ook weg_david (wv2911): David haalde hem zelf uit het overzicht
   }
   function verkoopTab() {
     const v = verkoopOverzicht();
@@ -2592,6 +2593,34 @@ function maak(o) {
       wijzig('verkoop', p.id, oud, verwijd ? Object.assign({ vingerafdruk: true }, nieuw) : nieuw, door);
     });
     return { status: 200, j: { ok: true } };
+  }
+  /*
+   * wv2911 (David 11-11, Engineer-knop in Facturen › Verkoop): een nota die bij David ligt (fase zelf, blijft, onzeker, geweigerd, mislukt,
+   * archief_mislukt) en waar hij in de app niets mee kan, haalt hij met "Klaar, uit het overzicht" weg. Alleen de status in het eigen journaal
+   * (nieuwe status weg_david, de vorige in kolom vorige); niets in Gmail, niets naar Exact, dus geen vingerafdruk. Terug = POST …/terug.
+   * MailMan pakt een weg_david-rij niet meer op (doorsturen/archiveren kijken alleen naar herkend/aangeboden/verstuurd).
+   */
+  const VERKOOP_WEG_FASEN = ['zelf', 'blijft', 'onzeker', 'geweigerd', 'mislukt', 'archief_mislukt'];
+  function verkoopWegRoute(d, terug, door) {
+    const id = d.id;
+    if (!Number.isSafeInteger(id) || id < 1) return { status: 400, j: { ok: false, fout: 'geen geldig nummer' } };
+    const r = db.prepare('SELECT * FROM verkoop WHERE id = ? AND postvak = ?').get(id, VERKOOP_POSTVAK);
+    if (!r) return { status: 404, j: { ok: false, fout: 'nota onbekend' } };
+    if (terug) {
+      if (r.status !== 'weg_david') return { status: 409, j: { ok: false, fout: 'deze nota is niet door jou uit het overzicht gehaald' } };
+      const vorige = VERKOOP_STATUS.includes(r.vorige) && r.vorige !== 'weg_david' ? r.vorige : 'herkend';
+      db.prepare("UPDATE verkoop SET status = ?, vorige = NULL, bijgewerkt = ? WHERE id = ? AND status = 'weg_david'").run(vorige, iso(), r.id);
+      wijzig('verkoop_weg', r.id, { status: 'weg_david' }, { status: vorige }, door);
+      return { status: 200, j: { ok: true, id: r.id, status: vorige } };
+    }
+    const p = postvak(VERKOOP_POSTVAK), m = verkoopMag(p);
+    const fase = verkoopFase({ status: r.status, kandidaat: r.kandidaat_tijd, ontvangen: r.ontvangen, aangeboden: r.aangeboden_tijd, verstuurd: r.verstuurd_tijd,
+      bijgewerkt: r.bijgewerkt, archief_pogingen: r.archief_pogingen },
+      { kan: m.ok, door: !!(p && p.verkoop_door), door_sinds: p && p.verkoop_sinds || null, archief: !!(p && p.verkoop_archief), archief_kan: !!(m.ok && m.label_id) }, p ? p.stand : 'uit').fase;
+    if (!VERKOOP_WEG_FASEN.includes(fase)) return { status: 409, j: { ok: false, fout: 'deze nota ligt niet bij jou (MailMan is er nog mee bezig of hij is al afgehandeld)' } };
+    db.prepare('UPDATE verkoop SET status = ?, vorige = ?, bijgewerkt = ? WHERE id = ? AND status = ?').run('weg_david', r.status, iso(), r.id, r.status);
+    wijzig('verkoop_weg', r.id, { status: r.status, fase }, { status: 'weg_david' }, door);
+    return { status: 200, j: { ok: true, id: r.id, status: 'weg_david' } };
   }
   function n8n(route, d) {
     if (route === 'POST /mailman/start') return start();
@@ -3144,6 +3173,8 @@ function maak(o) {
     if (route === 'POST /app/mailman/oordeel') return oordeelRoute(d);
     if (route === 'POST /app/mailman/wegzet') return wegzetRoute(d, door);   // wv2455: Nooit vanzelf weg per afzender
     if (route === 'POST /app/mailman/verkoop') return verkoopRoute(d, door, ctx);   // wv1997 B7-V
+    if (route === 'POST /app/mailman/verkoop/weg') return verkoopWegRoute(d, false, door);   // wv2911
+    if (route === 'POST /app/mailman/verkoop/terug') return verkoopWegRoute(d, true, door);   // wv2911
     return { status: 404, j: { ok: false, fout: 'onbekend' } };
   }
   function info() {

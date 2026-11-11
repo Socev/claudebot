@@ -1456,6 +1456,65 @@ test('wv1998 tab Verkoop: naam, nummer en bedrag in het journaal; naam na 14 dag
   assert.equal(JSON.stringify(mm._db.prepare('SELECT * FROM verkoop').all()) + JSON.stringify(mm._db.prepare('SELECT * FROM postvak').all()), voor);
 });
 
+test('wv2911 Verkoop: "Klaar, uit het overzicht" haalt een nota die bij David ligt weg (weg_david), terugzetten werkt, MailMan raakt hem niet aan', async () => {
+  const { mm, dir, fouten } = vkKamer();
+  const [a, b] = await vkHerkend(mm, 2);
+  const T = function () { return mm.app('GET /app/mailman/verkoop', {}, ctxVers(false)).j; };
+  const fase = function (id) { const x = T().verkoop.journaal.find(function (y) { return y.id === vRij(mm, id).id; }); return [x.fase, x.open]; };
+  const weg = function (id, pad) { return mm.app('POST /app/mailman/verkoop/' + (pad || 'weg'), { id }, ctxVers(false)); };
+  assert.deepEqual(fase(a.id), ['zelf', true]); assert.equal(T().open, 2);
+  // geen vingerafdruk nodig (intern, omkeerbaar); alleen een geldig nummer van een bestaande nota
+  assert.equal(weg(null).status, 400); assert.equal(weg('3').status, 400, 'tekst is geen nummer'); assert.equal(weg(-1).status, 400);
+  assert.equal(weg(99999).status, 404);
+  assert.equal(weg(vRij(mm, a.id).id).status, 200);
+  assert.equal(vRij(mm, a.id).status, 'weg_david'); assert.equal(vRij(mm, a.id).vorige, 'herkend');
+  assert.deepEqual(fase(a.id), ['weg_david', false]); assert.equal(T().open, 1, 'de teller volgt');
+  assert.deepEqual(fase(b.id), ['zelf', true], 'andere nota blijft staan');
+  assert.equal(weg(vRij(mm, a.id).id).status, 409, 'dubbel wegdoen: de nota ligt niet meer bij David');
+  // terug naar de vorige status
+  assert.equal(weg(vRij(mm, b.id).id, 'terug').status, 409, 'terugzetten kan alleen op een weggehaalde nota');
+  assert.equal(weg(vRij(mm, a.id).id, 'terug').status, 200);
+  assert.equal(vRij(mm, a.id).status, 'herkend'); assert.equal(vRij(mm, a.id).vorige, null);
+  assert.deepEqual(fase(a.id), ['zelf', true]); assert.equal(T().open, 2);
+  // de fasen waarin de nota bij David ligt: onzeker, geweigerd, mislukt, archief_mislukt (status verstuurd) komen terug op hun eigen status
+  const zet = function (id, sql, ...x) { mm._db.prepare('UPDATE verkoop SET ' + sql + ' WHERE gmail_id = ?').run(...x, id); };
+  for (const [sql, x, f] of [["status = 'geweigerd', bijgewerkt = ?", [new Date(klok).toISOString()], 'geweigerd'], ["status = 'mislukt', bijgewerkt = ?", [new Date(klok).toISOString()], 'mislukt'],
+    ["status = 'onzeker', bijgewerkt = ?", [new Date(klok).toISOString()], 'onzeker'],
+    ["status = 'verstuurd', verstuurd_tijd = ?, archief_pogingen = 5, bijgewerkt = ?", [new Date(klok).toISOString(), new Date(klok).toISOString()], 'archief_mislukt']]) {
+    zet(a.id, sql, ...x);
+    assert.deepEqual(fase(a.id), [f, true]);
+    const st = vRij(mm, a.id).status;
+    assert.equal(weg(vRij(mm, a.id).id).status, 200, f);
+    assert.deepEqual(fase(a.id), ['weg_david', false]); assert.equal(vRij(mm, a.id).vorige, st);
+    assert.equal(weg(vRij(mm, a.id).id, 'terug').status, 200);
+    assert.equal(vRij(mm, a.id).status, st); assert.deepEqual(fase(a.id), [f, true]);
+  }
+  // MailMan is er nog mee bezig of hij is al afgehandeld: niet weg te halen
+  for (const sql of ["status = 'aangeboden', aangeboden_tijd = '" + new Date(klok).toISOString() + "'", "status = 'gearchiveerd'", "status = 'niet_herkend'", "status = 'kandidaat'"]) {
+    zet(a.id, sql);
+    assert.equal(weg(vRij(mm, a.id).id).status, 409, sql); assert.notEqual(vRij(mm, a.id).status, 'weg_david');
+  }
+  // fase 'blijft' (doorsturen aan, nota van vóór het aanzetten buiten de ronde) mag ook weg
+  zet(a.id, "status = 'herkend'");
+  vkToestaan(dir); klok += 60000;
+  assert.equal(mm.app('POST /app/mailman/verkoop', { door: true, archief: true }, ctxVers(true)).status, 200);
+  assert.equal(weg(vRij(mm, a.id).id).status, 200, 'zelf (van vóór het aanzetten)');
+  // een weggehaalde nota wordt nooit aangeboden aan n8n, ook al zou hij herkend zijn
+  klok += 60000;
+  const [c] = await vkHerkend(mm, 1);
+  assert.equal(weg(vRij(mm, c.id).id).status, 409, 'wacht op doorsturen: MailMan is er mee bezig');
+  const act = vkActies(mm, [a.id, c.id]);
+  assert.ok(!(act.a.j.acties || []).some(function (y) { return y.gmail_id === a.id; }), 'weg_david niet aangeboden');
+  assert.equal(vRij(mm, a.id).status, 'weg_david');
+  // wijzigingslog: wie en wat
+  const lg = mm._db.prepare("SELECT * FROM wijziging WHERE wat = 'verkoop_weg' ORDER BY id").all();
+  assert.ok(lg.length >= 2 && lg.every(function (x) { return x.door === 'app:Proef'; }));
+  // zonder terugzet-vorige (met de hand gezet): terug naar herkend
+  zet(b.id, "status = 'weg_david', vorige = NULL");
+  assert.equal(weg(vRij(mm, b.id).id, 'terug').status, 200); assert.equal(vRij(mm, b.id).status, 'herkend');
+  assert.deepEqual(fouten, []);
+});
+
 test('wv2006: regel uit de verzonden mail — herkomst alleen in het overzicht, beslissing als een gewone In-regel, aan/uit/weg via de App', () => {
   const { mm } = nieuweKamer();
   const db = mm._db;
