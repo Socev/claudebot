@@ -96,10 +96,15 @@ function inHuis(levertijd, nu) {
     if (d < vandaag) d = (jaar + 1) + d.slice(4);
     kand.push([m.index, d]);
   }
-  const rel = [[/\bovermorgen\b/, 2], [/\bmorgen\b/, 1], [/\bvandaag\b/, 0]];
-  for (const [re, n] of rel) { const r = re.exec(s); if (r && !(n === 1 && /overmorgen/.test(s.slice(Math.max(0, r.index - 4), r.index + 6)))) kand.push([r.index, dagPlus(vandaag, n)]); }
+  // review ronde 3 ZOU 1: "vandaag besteld/verzonden" is de besteldag, geen bezorgdag (geldt ook voor een weekdag)
+  const besteld = (i, w) => /^\s*(besteld|verzonden|verstuurd|bestellen)/.test(s.slice(i + w.length, i + w.length + 14));
+  const rel = [[/\bovermorgen\b/g, 2], [/\bmorgen\b/g, 1], [/\bvandaag\b/g, 0]];
+  for (const [re, n] of rel) {
+    let r;
+    while ((r = re.exec(s))) { if (!(n === 1 && /overmorgen/.test(s.slice(Math.max(0, r.index - 4), r.index + 6))) && !besteld(r.index, r[0])) { kand.push([r.index, dagPlus(vandaag, n)]); break; } }
+  }
   const vw = new Date(vandaag + 'T12:00:00Z').getUTCDay();
-  DAGEN.forEach((w, i) => { const r = new RegExp('\\b' + w + '\\b').exec(s); if (r) kand.push([r.index, dagPlus(vandaag, ((i - vw + 7) % 7) || 7)]); });
+  DAGEN.forEach((w, i) => { const re = new RegExp('\\b' + w + '\\b', 'g'); let r; while ((r = re.exec(s))) { if (!besteld(r.index, w)) { kand.push([r.index, dagPlus(vandaag, ((i - vw + 7) % 7) || 7)]); break; } } });
   const wd = /(?:(\d{1,2}) ?(?:-|tot|à|a) ?)?(\d{1,2}) ?werkdag(?:en)?/.exec(s);
   if (wd) kand.push([wd.index, werkdagenPlus(vandaag, Number(wd[2]))]);
   const wk = /(\d{1,2}) ?(?:-|tot) ?(\d{1,2}) ?weken|(\d{1,2}) ?(?:week|weken)/.exec(s);
