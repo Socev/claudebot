@@ -21737,6 +21737,7 @@ if (GHAWA_TIKKEN) {
 // eigenaar (rolVoor ingang app), dus Shopper toont niets dat de Facturen-app David niet ook toont.
 // id = 12 hex van sha256(vaultpad); shopper.js zoekt het pad zelf op (nooit een pad uit de vraag). Audit zonder wens of pad. /health.shopper:
 // aantallen en het tijdstip van de laatste lijst (geen wens, pad of bedrag). Ontbreekt shopper.js in de release: 404 en aan=false.
+let shopperBrowserInfo = function () { return { aan: false }; };   // wv2949: gevuld in het Shopper-blok hieronder
 const shopper = (function () {
   const p = path.join(__dirname, 'shopper.js');
   if (!fs.existsSync(p)) return null;
@@ -21749,7 +21750,7 @@ const shopper = (function () {
   // hostnaam (het script weigert ip-adressen, interne namen, andere poorten, zoek-, winkelwagen- en accountpaden). Een kale omgeving: geen
   // sleutel van de pod gaat mee naar een proces dat webpagina's leest. De link komt van de zoektochtpagina, nooit uit de vraag.
   const lezerScript = path.join(__dirname, 'winkel-lezen.py');
-  const lezer = fs.existsSync(lezerScript) ? function (url) {
+  let lezer = fs.existsSync(lezerScript) ? function (url) {
     return new Promise(function (klaar) {
       require('child_process').execFile('python3', ['-I', lezerScript, url], { timeout: 45000, maxBuffer: 256 * 1024,
         env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: '/tmp' } }, function (e, uit) {
@@ -21798,10 +21799,31 @@ const shopper = (function () {
   };
   // wv2934 Snel vergelijken (shopper-vergelijk.js): zoekhulp van de pod (openai-hulp zoek) + winkel-lezen.py, zonder taalmodel dat eisen naleest;
   // uitkomst 24 u in de klokken-map (shopper-vergelijk.json), nooit de wens in een log. Ontbreekt de module of de zoekhulp: geen route (404).
+  // wv2949: browserroute (winkel-browser.js: gewone headless Chromium, één tegelijk, kale omgeving, cache 6 u) alleen voor de winkels die
+  // het leesscript niet kan lezen (Gamma, Karwei, Medische Vakhandel, Daxtrio) en alleen als David ze op de winkelpagina aan heeft staan
+  // (aan: true, lezen: browser). De rest blijft de snelle route; staat de winkel uit, dan zegt het leesscript zelf dat hij alleen in een browser kan.
+  let winkelBrowser = null;
+  try { winkelBrowser = require(path.join(__dirname, 'winkel-browser.js')).maak({ cachePad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-browser.json') : null }); }
+  catch (e) { logError('winkel-browser', e); winkelBrowser = null; }
+  const browserMag = function (url) {
+    try {
+      const W = require(path.join(__dirname, 'shopper-winkels.js'));
+      const w = W.winkelBij(url, W.winkelsVan(VV().lees(path.join(VAULT, '00_Systeem/Shopper - favoriete winkels.md'), 'utf8', { max: 256 * 1024 })));
+      return !!(w && w.aan && w.lezen === 'browser');
+    } catch (e) { return false; }
+  };
+  const lezerScriptAlleen = lezer;
+  if (lezer && winkelBrowser && winkelBrowser.info().aan) lezer = async function (url) {
+    if (!browserMag(url)) return lezerScriptAlleen(url);
+    const r = await winkelBrowser.lees(url);
+    // geen browserwinkel (bv. Tweakers, lezen: browser maar een vergelijker): het leesscript geeft zijn eigen uitleg
+    return r && r.blokkade && /^browserroute alleen voor /.test(r.blokkade) ? lezerScriptAlleen(url) : r;
+  };
+  shopperBrowserInfo = function () { return winkelBrowser ? winkelBrowser.info() : { aan: false }; };
   let vergelijk = null;
   const vp = path.join(__dirname, 'shopper-vergelijk.js');
   if (lezer && fs.existsSync(vp) && typeof openaiHulp === 'object' && openaiHulp && typeof openaiHulp.zoek === 'function') {
-    try { vergelijk = require(vp).maak({ vault: VAULT, vv: VV(), lezer: lezer, poort: poort, zoek: function (z) { return openaiHulp.zoek(z); },
+    try { vergelijk = require(vp).maak({ vault: VAULT, vv: VV(), lezer: lezer, poort: poort, metBrowser: lezer !== lezerScriptAlleen, zoek: function (z) { return openaiHulp.zoek(z); },
       staatPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-vergelijk.json') : null }); } catch (e) { logError('shopper-vergelijk', e); vergelijk = null; }
   }
   // wv2935 fase 3: de winkelscore (winkel-score.py uit de release: alleen GET op Kieskeurig, Kiyoh en Thuiswinkel, kale omgeving, ≤ 3 min);
@@ -21837,7 +21859,10 @@ const shopper = (function () {
     agentStart: agentStart, agentStand: agentStand, grondwet: grondwet,
     opnieuwPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-opnieuw.json') : null }); } catch (e) { logError('shopper', e); return null; }
 })();
-function shopperInfo() { if (!shopper) return { aan: false }; try { return shopper.info(); } catch (e) { return { aan: true, fout: true }; } }
+function shopperInfo() {
+  if (!shopper) return { aan: false };
+  try { return Object.assign({}, shopper.info(), { browser: shopperBrowserInfo() }); } catch (e) { return { aan: true, fout: true }; }
+}
 appStaat.tellers.shopper = [];
 appStaat.tellers.shopper_status = [];
 appStaat.tellers.shopper_nalezen = [];

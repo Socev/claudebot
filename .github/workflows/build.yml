@@ -518,6 +518,11 @@ jobs:
       - name: "winkel-lezen (wv2454, Shopper leesscript)"
         if: ${{ !cancelled() }}
         run: bash test/winkel-lezen.sh
+      # OVIS Shopper wv2949: browserroute (winkel-lezen.py --mag/--html + winkel-browser.js): alleen productpagina's van Gamma, Karwei, Medische
+      # Vakhandel en Daxtrio, kale omgeving, cache, rij-grens en harde tijdsgrens; nep-kind, geen netwerk, geen echte browser.
+      - name: "winkel-browser (wv2949, Shopper browserroute)"
+        if: ${{ !cancelled() }}
+        run: bash test/winkel-browser.sh
       # MemoryLane R2 (wv2118): verhaal uit een opname (Claude zonder tools, nep-API), citaattoets, datum door code, injectie, categorie volgt,
       # voorstellen alleen na Ja, Davids aanpassing wint, plafond/dienstfout/grendel, padpoorten.
       - name: "herinneringen-verhaal (wv2118, MemoryLane R2)"

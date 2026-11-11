@@ -41,6 +41,10 @@ WEIGER = [
     (r"(^|\.)remarkt\.(nl|be|de)$", r"^/catalogsearch/|^/checkout|^/customer"),
     (r"(^|\.)amazon\.(nl|de|com\.be)$", r"^/gp/(cart|buy|sign-in|item-dispatch|aw/c)|^/ap/|^/dp/product-availability/"),
     (r".*", r"/(checkout|cart|winkelwagen|winkelmand|basket|login|inloggen|account|mijn-account)(/|$|\?)"),
+    # wv2949 (robots.txt 11-11-2026): Gamma/Karwei verbieden o.a. /*zoeken*, /n/, /my/; Daxtrio /search, /cart, /checkout, /account
+    (r"(^|\.)(gamma|karwei)\.nl$", r"zoeken|^/n/|^/my/|winkelwagen|/checkout|favorieten|/account"),
+    (r"(^|\.)daxtrio\.nl$", r"^/(search|cart|checkout|account|wishlist|switch-stores)"),
+    (r"(^|\.)medischevakhandel\.nl$", r"^/(cart|checkout|checkouts|account|search)|/cart|/checkouts?/"),
 ]
 # Alleen productpagina's (review wv2267 MOET 2): een zoek- of categoriepagina zou de prijs van het eerste/gesponsorde artikel geven
 PRODUCTPAD = {
@@ -51,7 +55,12 @@ PRODUCTPAD = {
     "123accu": r"-i\d+(-t\d+)?\.html$", "123led": r"-i\d+(-t\d+)?\.html$", "123-3d": r"-i\d+(-t\d+)?\.html$",
     "123schoon": r"-i\d+(-t\d+)?\.html$",
     "azerty": r"^/product/[^/]+/\d+",
+    "gamma": r"^/assortiment/[^/]+/p/[A-Za-z0-9]+/?$", "karwei": r"^/assortiment/[^/]+/p/[A-Za-z0-9]+/?$",
+    "medischevakhandel": r"^(/collections/[^/]+)?/products/[^/]+/?$", "daxtrio": r"^/p/[^/]+/?$",
 }
+# wv2949: winkels die alleen in een gewone headless Chromium te lezen zijn (winkel-browser.js; gemeten 11-11-2026): Gamma en Karwei geven
+# het script HTTP 429 (Vercel-controle met JavaScript), Medische Vakhandel 429, Daxtrio zet de prijs pas met JavaScript op de pagina
+BROWSER = ("gamma", "karwei", "medischevakhandel", "daxtrio")
 MAX_DOORSTUREN = 3
 BLOK_TEKENS = ["Just a moment", "cf-chl", "Performing security verification", "/errors/validateCaptcha",
                "Robot Check", "Pardon our interruption", "px-captcha", "captcha-delivery.com", "<title>Client Challenge</title>"]
@@ -60,7 +69,7 @@ BLOK_TEKENS = ["Just a moment", "cf-chl", "Performing security verification", "/
 def winkel_van(host):
     h = host.lower()
     for sleutel in ("coolblue", "bol", "amazon", "tweakers", "azerty", "remarkt", "123inkt", "123encre", "123ink",
-                    "123accu", "123led", "123-3d", "123schoon", "hornbach", "praxis", "ikea"):
+                    "123accu", "123led", "123-3d", "123schoon", "hornbach", "praxis", "ikea") + BROWSER:
         if re.search(r"(^|\.)" + re.escape(sleutel) + r"\.", h):
             return sleutel
     return "anders"
@@ -282,7 +291,8 @@ def aanbod_uit_jsonld(producten):
 # winkels zetten in hun gestructureerde data vaak de prijs EXCL. btw (gemeten 9-11-2026: Praxisdienst JSON-LD 263,45 bij "263,45 netto
 # 318,77 bruto"; Bloeddrukmeterswebshop microdata 314,01 bij 379,95 en "Alle prijzen zijn inclusief 21% BTW"). Daarom: de prijs uit de
 # gestructureerde data altijd terugzoeken in de paginatekst met zijn btw-label. Alleen 21 en 9 % (NL); nooit gokken.
-CONSUMENT = {"coolblue", "bol", "amazon", "remarkt", "hornbach", "praxis", "ikea", "123inkt", "123accu", "123led", "123-3d", "123schoon"}
+CONSUMENT = {"coolblue", "bol", "amazon", "remarkt", "hornbach", "praxis", "ikea", "123inkt", "123accu", "123led", "123-3d", "123schoon",
+             "gamma", "karwei"}   # wv2949: bouwmarkten voor consumenten (prijs incl. btw)
 _BEDRAG = r"(\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2,6})(?![\d,])"
 _LABEL_BTW = re.compile(r"(?:€\s?)?" + _BEDRAG + r"\s?(?:€\s?)?\(?\s*(incl|excl)(?:\.|usief|\b)\s*(?:(\d{1,2})\s?%\s*)?(?:btw|vat)\b", re.I)
 _LABEL_NB = re.compile(r"(?:€\s?)?" + _BEDRAG + r"\s?(?:€\s?)?\(?\s*(netto|bruto)\b", re.I)
@@ -374,7 +384,8 @@ VOORRAAD_NL = {"InStock": "op voorraad", "OutOfStock": "niet op voorraad", "PreO
                "Discontinued": "uit het assortiment", "InStoreOnly": "alleen in de winkel", "OnlineOnly": "op voorraad (online)"}
 
 
-def lees(url):
+def lees(url, html_tekst=None, eind_url=None, html_status=None):
+    """html_tekst (wv2949): de HTML die winkel-browser.js in de browser las; dan geen eigen GET, wel dezelfde regels."""
     r = {"url": url, "winkel": None, "status": None, "product": None, "prijs_eur": None, "verzending_eur": None,
          "verzending_tekst": None, "voorraad": None, "levertijd": None, "verkoper": None, "bron": None,
          "blokkade": None, "opmerkingen": [], "btw": None, "btw_tarief": None, "prijs_excl_eur": None, "prijs_omgerekend": False}
@@ -389,11 +400,24 @@ def lees(url):
     if r["winkel"] == "tweakers":
         r["blokkade"] = "Tweakers stuurt een gewone fetch naar de DPG-toestemmingspagina; lees in de browser (SKILL.md, Tweakers-blok)"
         return r
-    try:
-        code, eind, t = haal(url)
-    except Exception as e:
-        r["blokkade"] = "niet bereikbaar: %s" % str(e)[:120]
+    if html_tekst is None and r["winkel"] in BROWSER:
+        r["blokkade"] = "deze winkel is alleen in een browser te lezen (bot-controle of prijs via JavaScript): browserroute van de pod of de Playwright-browser"
         return r
+    if html_tekst is not None:
+        if r["winkel"] not in BROWSER:
+            r["blokkade"] = "browserroute alleen voor " + ", ".join(BROWSER)
+            return r
+        code, eind, t = html_status or 200, eind_url or url, html_tekst
+        reden = toegestaan(eind, r["winkel"])
+        if reden:
+            r["blokkade"] = reden
+            return r
+    else:
+        try:
+            code, eind, t = haal(url)
+        except Exception as e:
+            r["blokkade"] = "niet bereikbaar: %s" % str(e)[:120]
+            return r
     r["status"] = code
     if eind != url:
         r["opmerkingen"].append("doorgestuurd naar " + eind[:200])
@@ -583,6 +607,53 @@ def lees(url):
                     r["voorraad"] = "op voorraad" + (" (%d stuks)" % st["stockLevel"] if isinstance(st.get("stockLevel"), int) and not isinstance(st.get("stockLevel"), bool) else "")
                 elif st.get("stockLevelStatus") == "outOfStock":
                     r["voorraad"] = "niet op voorraad"
+    elif w in ("gamma", "karwei"):
+        # wv2949 (gemeten 11-11-2026 in de browser): "Thuisbezorgd voor €4.95 en gratis vanaf €50" of "Dit product wordt niet thuis bezorgd";
+        # levertijd "Vandaag besteld, vrijdag 13 november in huis". Winkelvoorraad hangt aan een gekozen bouwmarkt: niet gelezen.
+        if re.search(r"Dit product wordt niet thuis bezorgd", s):
+            r["verzending_eur"], r["verzending_tekst"] = None, "niet thuis bezorgd: alleen afhalen in de bouwmarkt"
+            r["opmerkingen"].append("wordt niet thuis bezorgd (alleen Click & Collect in de bouwmarkt)")
+        else:
+            m = re.search(r"Thuisbezorgd voor €\s?(\d+[.,]\d{2}) en gratis vanaf €\s?(\d+(?:[.,]\d{2})?)", s)
+            if m and r["prijs_eur"] is not None:
+                kost, drempel = bedrag(m.group(1)), bedrag(m.group(2))
+                if kost is not None and drempel is not None:
+                    r["verzending_eur"] = 0.0 if r["prijs_eur"] >= drempel else kost
+                    r["verzending_tekst"] = "%s: thuisbezorgd € %.2f, gratis vanaf € %.0f (per bestelling)" % (w.capitalize(), kost, drempel)
+            lt = eerste(r"Vandaag besteld, ((?:maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|zondag) \d{1,2} [a-z]+ in huis|morgen in huis|overmorgen in huis)", s, 1)
+            if lt:
+                r["levertijd"] = lt
+        if re.search(r"Online (?:uitverkocht|niet (?:meer )?leverbaar)", s) and not re.search(r"Online bijna uitverkocht", s):
+            r["opmerkingen"].append("de pagina noemt 'online uitverkocht' of 'niet leverbaar' (kan ook een ander artikel op de pagina zijn)")
+        r["opmerkingen"].append("voorraad per bouwmarkt niet gelezen (hangt aan een gekozen bouwmarkt)")
+    elif w == "medischevakhandel":
+        # wv2949: "Beschikbaarheid Wordt voor u besteld" / "Op voorraad"; "Gratis verzending vanaf €100 excl. btw en €121 incl. btw (NL)"
+        b = eerste(r"Beschikbaarheid\s+(Op voorraad|Wordt voor u besteld|Niet op voorraad|Uitverkocht|Tijdelijk niet leverbaar|Levertijd [^.]{2,40}?)(?=\s|$)", s, 1)
+        if b:
+            r["voorraad"] = b
+        m = re.search(r"Gratis verzending vanaf €\s?\d+ excl\. btw en €\s?(\d+(?:[.,]\d{2})?) incl\. btw", s, re.I)
+        if m and r["prijs_eur"] is not None:
+            drempel = bedrag(m.group(1))
+            if drempel is not None and r["prijs_eur"] >= drempel:
+                r["verzending_eur"], r["verzending_tekst"] = 0.0, "Medische Vakhandel: gratis verzending vanaf € %.0f incl. btw" % drempel
+    elif w == "daxtrio":
+        # wv2949 (gemeten 11-11-2026): JSON-LD AggregateOffer met één prijs = EXCL. btw; het koopblok zegt "€ 329,00 excl. btw € 358,61 incl. btw
+        # In winkelwagen". Alleen als precies één paar in een koopblok bij de JSON-LD-prijs past (anders: prijs niet te lezen).
+        excl_ld = set()
+        for p in producten:
+            ofs = p.get("offers")
+            for of in (ofs if isinstance(ofs, list) else [ofs]):
+                if isinstance(of, dict) and of.get("@type") == "AggregateOffer" and bedrag(of.get("lowPrice")) is not None \
+                        and bedrag(of.get("lowPrice")) == bedrag(of.get("highPrice")) and str(of.get("offerCount", 1)) == "1":
+                    excl_ld.add(bedrag(of.get("lowPrice")))
+        paren = [(bedrag(m.group(1)), bedrag(m.group(2))) for m in
+                 re.finditer(r"€\s?(\d{1,3}(?:\.\d{3})*,\d{2}) excl\. btw\s+€\s?(\d{1,3}(?:\.\d{3})*,\d{2}) incl\. btw\s+In winkelwagen", s, re.I)]
+        passend = {pr for pr in paren if pr[0] in excl_ld}
+        if r["prijs_eur"] is None and len(excl_ld) == 1 and len(passend) == 1:
+            ex, inc = passend.pop()
+            r["prijs_eur"], r["bron"] = inc, "jsonld+koopblok"
+        if re.search(r"Niet op voorraad|Uitverkocht|Tijdelijk niet leverbaar", s):
+            r["opmerkingen"].append("de pagina noemt 'niet op voorraad' of 'uitverkocht' (kan ook een ander artikel zijn)")
     btw_lezen(r, s, w)
     if r["prijs_eur"] is None:
         r["opmerkingen"].append("prijs niet te lezen")
@@ -595,5 +666,22 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(__doc__.strip())
         sys.exit(2)
+    if sys.argv[1] == "--mag" and len(sys.argv) == 3:
+        # wv2949: mag winkel-browser.js deze url openen? Alleen een toegestane productpagina van een browserwinkel
+        u = sys.argv[2]
+        try:
+            w = winkel_van(urllib.parse.urlsplit(u).hostname or "")
+        except ValueError:
+            w = None
+        reden = toegestaan(u) or (None if w in BROWSER else "browserroute alleen voor " + ", ".join(BROWSER))
+        print(json.dumps({"ok": reden is None, "winkel": w, "reden": reden}, ensure_ascii=False))
+        sys.exit(0)
+    if sys.argv[1] == "--html" and len(sys.argv) in (5, 6):
+        # wv2949: --html <url> <eind-url> <bestand> [status] = de HTML die de browser las, met dezelfde regels lezen
+        with open(sys.argv[4], "rb") as f:
+            ruw = f.read(MAX_BYTES)
+        st = int(sys.argv[5]) if len(sys.argv) == 6 and sys.argv[5].isdigit() else 200
+        print(json.dumps(lees(sys.argv[2], ruw.decode("utf-8", "replace"), sys.argv[3], st), ensure_ascii=False))
+        sys.exit(0)
     for a in sys.argv[1:13]:
         print(json.dumps(lees(a), ensure_ascii=False))
