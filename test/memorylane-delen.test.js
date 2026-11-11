@@ -1165,3 +1165,151 @@ test('wv2732: met de hand samengevoegd (status samengevoegd + bij, zonder koppel
     assert.strictEqual(o.ml.lijst().body.herinneringen.length, 2);
   } finally { o.sluit(); }
 });
+
+// ── wv2932: een fotoalbum (los, google:…) waarvan de fotodata binnen de dagen van een reis vallen → bij de reis (verzonnen data) ──
+const FM2932 = require(path.join(ROOT, 'memorylane-fotos.js'));
+function albumOmgeving(extra) {
+  const im = { basis: 'https://immich.invalid', albums: async () => im.lijst, albumSpoor: async (id) => im.spoor[id] || [], lijst: [], spoor: {} };
+  const box = [];
+  const o = omgeving(Object.assign({ immich: im, box: (t) => box.push(t) }, extra || {}));
+  o.im = im; o.box = box;
+  o.reis('2026 - Proefweekend Bergdorp.md', 'reis', '2026-10-16 – 2026-10-18');
+  o.ml.lijst();
+  o.verder = () => { o.klok.t += 11 * 60000; };
+  let n = 0;
+  // fotoalbum met n foto's op de gegeven dagen; spoor = rij in ml_fotospoor (zoals de sync hem rekent)
+  o.album = (cat, dagen, opt) => {
+    n++;
+    const hid = 'h' + ('a932' + String(n).padStart(12, '0')), ref = 'google:' + ('b932' + String(n).padStart(12, '0'));
+    const id = '00000000-0000-4000-8000-' + String(932000000000 + n);
+    o.ing._db.prepare("INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES (?, 'los', ?, ?, 0, 'actief', '2026-10-31T00:00:00Z', '2026-10-31T00:00:00Z')")
+      .run(hid, ref, cat);
+    o.ing._db.prepare("INSERT INTO ml_album (hid, sleutel, album_id, status, aantal, gemaakt_op) VALUES (?, ?, ?, 'actief', ?, '2026-10-31T00:00:00Z')").run(hid, FM2932.code('los', ref), id, dagen.length);
+    if (!(opt && opt.zonderSpoor)) {
+      const u = FM2932.spoorUit(dagen.map((d) => ({ dag: d })));
+      o.ing._db.prepare("INSERT INTO ml_fotospoor (hid, aantal_bij, fotos, met_dag, met_gps, van, tot, op) VALUES (?, ?, ?, ?, 0, ?, ?, '2026-10-31T00:00:00Z')").run(hid, dagen.length, u.fotos, u.met_dag, u.van, u.tot);
+    }
+    o.im.lijst.push({ id, naam: 'x', omschrijving: 'code ' + FM2932.code('los', ref), aantal: dagen.length, omslag: null });
+    o.im.spoor[id] = dagen.map((d) => ({ dag: d }));
+    return hid;
+  };
+  o.rel = '20_Prive/Reizen/2026 - Proefweekend Bergdorp.md';
+  return o;
+}
+const WEEKEND = ['2026-10-16', '2026-10-17', '2026-10-17', '2026-10-18', '2026-10-19'];
+
+test('wv2932: fotoalbum met fotodata binnen de reis (± 1 dag) → samengevoegd bij de reis; album verhuist; verborgen; losmaken zet alles terug', () => {
+  const o = albumOmgeving();
+  try {
+    const db = o.ing._db, hr = o.hid('reis', o.rel), ha = o.album('reizen', WEEKEND);
+    const d = o.ml.koppel(true);
+    assert.deepStrictEqual(d.acties, [{ reis: hr, fotoalbums: [ha], uitkomst: 'samengevoegd', reden: '' }]);
+    assert.strictEqual(stat(o, ha).status, 'actief', 'droog schrijft niets');
+    assert.strictEqual(o.ml.koppel(false).samengevoegd, 1);
+    assert.deepStrictEqual({ ...stat(o, ha) }, { status: 'samengevoegd', bij: hr });
+    assert.strictEqual(stat(o, hr).status, 'actief', 'de reis blijft');
+    assert.strictEqual(db.prepare('SELECT hid FROM ml_album WHERE sleutel = ?').get(FM2932.code('los', 'google:b932000000000001')).hid, hr, 'album nu bij de reis');
+    const k = db.prepare('SELECT * FROM ml_koppel WHERE hid = ?').get(hr);
+    assert.strictEqual(k.uitkomst, 'samengevoegd'); assert.strictEqual(k.kandidaat, ha); assert.strictEqual(k.album_gezet, 1); assert.strictEqual(k.titel_gezet, 0);
+    assert.ok(!o.ml.lijst().body.herinneringen.some((h) => h.hid === ha), 'fotoalbum niet meer los te zien');
+    assert.strictEqual(o.ml.reisKoppeling(o.rel).album.aantal, 5, 'Tripper: de reis heeft de foto\'s');
+    for (const kr of M.PKRINGEN) assert.ok(!o.ml.publiekLijst(kr).some((x) => x.hid === ha), 'niet bij de bezoekers (' + kr + ')');
+    assert.ok(o.ml.publiekLijst('familie').some((x) => x.hid === hr && x.open));
+    o.verder(); assert.deepStrictEqual(o.ml.koppel(false).acties, [], 'tweede ronde: niets');
+    const l = o.ml.losmaken(ha);
+    assert.strictEqual(l.status, 200); assert.strictEqual(l.body.album, true); assert.strictEqual(l.body.bij, hr);
+    assert.strictEqual(stat(o, ha).status, 'actief');
+    assert.strictEqual(db.prepare('SELECT hid FROM ml_album WHERE sleutel = ?').get(FM2932.code('los', 'google:b932000000000001')).hid, ha, 'album terug');
+    assert.strictEqual(db.prepare('SELECT uitkomst FROM ml_koppel WHERE hid = ?').get(hr).uitkomst, 'losgemaakt');
+    o.verder(); assert.strictEqual(o.ml.koppel(false).samengevoegd, 0, 'losgemaakt = niet opnieuw');
+  } finally { o.sluit(); }
+});
+
+test('wv2932: reis met een leeg eigen album: dat maakt plaats; fotodata buiten de reis of zonder spoor → niets', () => {
+  const o = albumOmgeving();
+  try {
+    const db = o.ing._db, hr = o.hid('reis', o.rel);
+    db.prepare("INSERT INTO ml_album (hid, sleutel, album_id, status, aantal, gemaakt_op) VALUES (?, ?, ?, 'actief', 0, '2026-10-31T00:00:00Z')").run(hr, FM2932.code('reis', o.rel), '00000000-0000-4000-8000-000000000932');
+    const buiten = o.album('reizen', ['2026-10-16', '2026-10-18', '2026-10-20', '2026-10-20']);   // tot 20-10 = 2 dagen na de reis
+    const zonder = o.album('reizen', WEEKEND, { zonderSpoor: true });
+    assert.deepStrictEqual(o.ml.koppel(false).acties, []);
+    assert.strictEqual(stat(o, buiten).status, 'actief'); assert.strictEqual(stat(o, zonder).status, 'actief');
+    db.prepare('UPDATE ml_fotospoor SET tot = ? WHERE hid = ?').run('2026-10-19', buiten);
+    o.verder();
+    assert.strictEqual(o.ml.koppel(false).samengevoegd, 1, 'nu binnen ± 1 dag');
+    assert.strictEqual(db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(hr).album_id, '00000000-0000-4000-8000-932000000001', 'leeg album van de reis maakt plaats');
+  } finally { o.sluit(); }
+});
+
+test('wv2932: twijfel → niets samengevoegd en één box-rij per reisperiode (twee albums, album bij twee reizen, stukken, zichtbaar, kring, reis met foto\'s)', () => {
+  const o = albumOmgeving();
+  try {
+    const hr = o.hid('reis', o.rel), a1 = o.album('reizen', WEEKEND), a2 = o.album('reizen', WEEKEND);
+    const u = o.ml.koppel(false);
+    assert.strictEqual(u.twijfel, 1); assert.strictEqual(u.acties[0].reden, '2 fotoalbums');
+    assert.strictEqual(stat(o, a1).status, 'actief'); assert.strictEqual(stat(o, a2).status, 'actief');
+    assert.strictEqual(o.box.length, 1); assert.ok(o.box[0].includes(hr) && /wv2932/.test(o.box[0]));
+    assert.ok(!/Proef|Bergdorp/.test(o.box[0]), 'geen titels in de box');
+    o.verder(); o.ml.koppel(false); assert.strictEqual(o.box.length, 1, 'niet elke ronde');
+  } finally { o.sluit(); }
+  const gevallen = [
+    ['fotoalbum past bij meer reizen', (o) => { o.reis('2026 - Proefweekend Dal.md', 'reis', '2026-10-17 – 2026-10-19'); o.ml.lijst(); }],
+    ['fotoalbum heeft eigen stukken', (o, ha) => assert.strictEqual(o.ml.tekst(ha, { tekst: 'Het sneeuwde.' }).status, 200)],
+    ['fotoalbum staat zichtbaar gezet', (o, ha) => assert.strictEqual(o.ml.kring(ha, { kring: 'shizzle', aan: true }).status, 200)],
+    ['reis is zichtbaar waar het fotoalbum dat niet is', (o, ha) => o.ing._db.prepare('UPDATE ml_herinnering SET categorie = NULL WHERE hid = ?').run(ha)],
+    ['reis heeft al foto\'s', (o, ha, hr) => o.ing._db.prepare("INSERT INTO ml_album (hid, sleutel, album_id, status, aantal, gemaakt_op) VALUES (?, ?, ?, 'actief', 7, '2026-10-31T00:00:00Z')").run(hr, FM2932.code('reis', o.rel), '00000000-0000-4000-8000-000000000933')],
+  ];
+  for (const [reden, zet] of gevallen) {
+    const o = albumOmgeving();
+    try {
+      const hr = o.hid('reis', o.rel), ha = o.album('reizen', WEEKEND);
+      zet(o, ha, hr);
+      const u = o.ml.koppel(false);
+      const a = u.acties.find((x) => x.reis === hr);
+      assert.strictEqual(a.uitkomst, 'twijfel', reden); assert.strictEqual(a.reden, reden);
+      assert.strictEqual(stat(o, ha).status, 'actief', reden);
+    } finally { o.sluit(); }
+  }
+});
+
+test('wv2932: uitkomst wacht (machinekamer) houdt het paar vast; rij weg → de volgende ronde voegt samen', () => {
+  const o = albumOmgeving();
+  try {
+    const db = o.ing._db, hr = o.hid('reis', o.rel), ha = o.album('reizen', WEEKEND);
+    db.prepare("INSERT INTO ml_koppel (hid, sleutel, uitkomst, kandidaat, titel_gezet, album_gezet, op) VALUES (?, 'x', 'wacht', ?, 0, 0, 'nu')").run(hr, ha);
+    assert.deepStrictEqual(o.ml.koppel(false).acties, []);
+    assert.strictEqual(stat(o, ha).status, 'actief');
+    db.prepare('DELETE FROM ml_koppel WHERE hid = ?').run(hr);
+    o.verder();
+    assert.strictEqual(o.ml.koppel(false).samengevoegd, 1);
+  } finally { o.sluit(); }
+});
+
+test('wv2932: de sync rekent het fotospoor ook voor een fotoalbum buiten Reizen (niet bij gevoelig); daarna vanzelf bij de reis', async () => {
+  const o = albumOmgeving();
+  try {
+    const hr = o.hid('reis', o.rel), ha = o.album('shizzle', WEEKEND, { zonderSpoor: true }), hg = o.album('shizzle', WEEKEND, { zonderSpoor: true });
+    o.ing._db.prepare('UPDATE ml_herinnering SET gevoelig = 1 WHERE hid = ?').run(hg);
+    assert.strictEqual(o.ml._F.spoor(ha), null);
+    await o.ml.fotoSync(true);
+    assert.strictEqual(o.ml._F.spoor(ha).van, '2026-10-16'); assert.strictEqual(o.ml._F.spoor(ha).tot, '2026-10-19');
+    assert.strictEqual(o.ml._F.spoor(hg), null, 'gevoelig: geen spoor');
+    assert.strictEqual(o.ml.koppel(false).samengevoegd, 1);
+    assert.deepStrictEqual({ ...stat(o, ha) }, { status: 'samengevoegd', bij: hr });
+    assert.strictEqual(o.ml.fotoReizen().length, 0, 'fotoReizen blijft alleen Reizen');
+  } finally { o.sluit(); }
+});
+
+test('wv2932: een reis met een samengevoegd fotoalbum gaat niet vanzelf bij een opname (twijfel)', () => {
+  const o = albumOmgeving();
+  try {
+    const hr = o.hid('reis', o.rel), ha = o.album('reizen', WEEKEND);
+    assert.strictEqual(o.ml.koppel(false).samengevoegd, 1);
+    o.opname(RA, 'reizen', false);
+    o.staat.verhalen[RA] = { titel: 'Sneeuw', alineas: ['Het sneeuwde.'], datum_van: '2026-10-17', datum_tot: '2026-10-17', datum_precisie: 'dag' };
+    o.ml.lijst(); o.verder();
+    const u = o.ml.koppel(false);
+    assert.strictEqual(u.acties[0].uitkomst, 'twijfel'); assert.strictEqual(u.acties[0].reden, 'kandidaat heeft al een samengevoegd fotoalbum');
+    assert.strictEqual(stat(o, hr).status, 'actief'); assert.strictEqual(stat(o, ha).status, 'samengevoegd');
+  } finally { o.sluit(); }
+});

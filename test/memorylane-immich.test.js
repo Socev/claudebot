@@ -743,7 +743,8 @@ test('wv2468 fotoReizen geeft het spoor van een reis uit je foto\'s mee (periode
     for (let i = 0; i < 5; i++) { const id = o.im.foto(ga, webp(false)); o.im.meta.set(id, { lat: 50, lon: 5 }); }
     o.im.log.length = 0;
     await o.tik();
-    assert.ok(!o.im.log.some((l) => /withCoordinates/.test(l) && l.includes(ga.id)), 'gezinsalbum: geen spoor');
+    // wv2932: het spoor wordt nu voor elk fotoalbum zonder gevoelig-vinkje gerekend (koppel() legt het naast de reizen); fotoReizen blijft Reizen
+    assert.ok(o.im.log.some((l) => /withCoordinates/.test(l) && l.includes(ga.id)), 'gezinsalbum: ook spoor (wv2932)');
     const r = o.ml.fotoReizen();
     assert.strictEqual(r.length, 1);
     assert.deepStrictEqual(r[0].spoor, { van: '2018-08-10', tot: '2018-08-14', punt: { lat: 41.4, lon: 2.2 }, fotos: 5, met_gps: 5 });
