@@ -7144,21 +7144,26 @@ const APP_DAVID_RE = /mail|agenda|afspra|todoist|\btaak|\btaken\b|notitie|dossie
 const APP_JIJ_RE = /\b(?:je|jou|jouw|jullie|david)\b/;
 // wv2907 (nazorg ML5, meting wv2904): de App-naam 'Facturen' (geld: factur) en de knopnaam 'Verplaats' (agenda: verplaats) maakten
 // bouw- en ontwerpvragen gevoelig ("Facturen op de pc — werktafel met tabel?", "Intake stap 5 — Geschiedenis met Verplaats bouwen?").
-// Smalle uitzondering, alleen voor agenda en geld: de naam staat op naamplek (App vóór het gedachtestreepje aan het begin; knop met
-// hoofdletter midden in de zin of tussen aanhalingstekens), er staat een bouw- of ontwerpwoord in de vraag en GEEN woord over geld,
-// versturen, verwijderen of agenda (APP_NAAM_BLOK, over de hele tekst incl. voorstel). Dan wordt alleen de naam weggelaten en de regex
-// opnieuw getoetst: elk ander geld- of agendawoord houdt de vraag gevoelig. De geldregex zelf blijft ongewijzigd. Fail-closed.
-const APP_NAAM_APP_RE = /^\s*(?:ovis\s+)?facturen(?:-app)?(?:\s+op\s+(?:de\s+|het\s+|je\s+)?(?:pc|laptop|telefoon|tablet|werk-pc))?\s*[\u2014\u2013-]\s/i;
-const APP_NAAM_KNOP_RE = /(?<=[\p{L}\p{N},:]\s+)['"\u2018\u2019\u201c\u201d]?Verplaats['"\u2018\u2019\u201c\u201d]?(?![\p{L}\p{N}])/gu;
-// Bouwwoord: bij een knopnaam mag 'bouwen'; bij een App-naam alleen een scherm- of vormwoord (een kale 'Facturen-app — bouw ik verder
-// met deze vijf keuzes?' bleek in de stappen een maandelijks afschrift naar een derde te bevatten; titel alleen zegt dan te weinig).
+// Smalle uitzondering, alleen voor agenda en geld, en alleen als ALLES klopt (anders gevoelig, fail-closed):
+// - één regel, geen voorstel erbij (Codex-review MOET 1: een opdracht in 'Voorstel: Verplaats …' is geen knopnaam);
+// - elk woord staat in APP_NAAM_WOORDEN (vaste lijst App-, scherm- en vulwoorden; Codex MOET 2: een onbekend werkwoord als
+//   'kwijtschelden' of 'bijwerken' houdt de vraag gevoelig), met minstens één scherm- of bouwwoord en geen blokwoord;
+// - de naam staat op naamplek: de App aan het begin vóór het gedachtestreepje, de knop met hoofdletter na 'knop'/'met' of tussen
+//   aanhalingstekens. Alleen de naam wordt weggelaten en de oorspronkelijke regex opnieuw getoetst. De geldregex zelf blijft gelijk.
+const APP_NAAM_APP_RE = /^\s*(?:ovis\s+)?facturen(?:-app)?(?:\s+op\s+(?:de\s+|het\s+|je\s+)?(?:pc|laptop|telefoon|tablet|werk-pc))?\s*[—–-]\s/i;
+const APP_NAAM_KNOP_RE = /(?:(?<=\b(?:knop|knoppen|met)\s+)Verplaats|['"‘’“”]Verplaats['"‘’“”])(?![\p{L}\p{N}])/gu;
 const APP_NAAM_UI_RE = /\b(?:vormgeving|opmaak|werk(?:tafel|bank)|inklappen|tabel|kolom(?:men)?|scherm|(?:groeps)?knop(?:pen)?|weergave)\b/;
 const APP_NAAM_BOUW_RE = /\b(?:bouw(?:en|t)?|inbouwen|inrichten)\b/;
 const APP_NAAM_BLOK = /€|\beuro|bedrag|betaal|betalen|betaling|\biban\b|rekening|overmaak|overmaken|incass|declar|\bfactuur\b|boekhoud|\bsepa\b|leverancier|stuur|sturen|zend|mail|verwijder|\bwis|\bweg|afspra|agenda|\bboek(?:en|t)?\b|bestel|\bkoop|kopen|abonnement|contract|\bgeld\b|keuze/;
+const APP_NAAM_WOORDEN = new Set(('facturen facturen-app intake ovis app socev-app geschiedenis stap verplaats ' +
+  'gesprek vanzelf inklappen kolom kolommen werktafel werkbank tabel knop knoppen groepsknoppen scherm weergave vormgeving opmaak bouwen inbouwen inrichten ' +
+  'op de het je pc laptop telefoon tablet werk-pc met en voor in zal ik mag een zo twee drie vier').split(' '));
 function appGevoeligZonderNaam(n, t, re) {
-  if (APP_NAAM_BLOK.test(t)) return false;
+  if (/[\r\n]/.test(n.trim()) || APP_NAAM_BLOK.test(t)) return false;
+  const woorden = t.split(/[^a-z0-9-]+/).filter((w) => /[a-z0-9]/.test(w));
+  if (!woorden.length || !woorden.every((w) => APP_NAAM_WOORDEN.has(w) || /^\d{1,2}$/.test(w))) return false;
   const ui = APP_NAAM_UI_RE.test(t);
-  let n2 = ui ? n.replace(APP_NAAM_APP_RE, 'app \u2014 ') : n;
+  let n2 = ui ? n.replace(APP_NAAM_APP_RE, 'app — ') : n;
   if (ui || APP_NAAM_BOUW_RE.test(t)) n2 = n2.replace(APP_NAAM_KNOP_RE, 'knop');
   if (n2 === n) return false;
   return !re.test(n2.toLowerCase());
