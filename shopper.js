@@ -405,7 +405,11 @@ const POORT_NAAM_MAG = new Set(['tolgaarde', 'groenhouten', 'pot', 'holding', 'p
   'samsung', 'philips', 'apple', 'bosch', 'miele', 'sony', 'dell', 'lenovo', 'ikea', 'google', 'microsoft', 'logitech', 'canon', 'epson', 'brother', 'siemens',
   'makita', 'dyson', 'nespresso', 'sonos', 'garmin', 'omron', 'braun', 'tefal', 'riester', 'heine', 'seca', 'kern', 'littmann', 'hama', 'gazelle', 'lego', 'nintendo',
   'hp', 'lg', 'aeg', 'jbl', 'asus', 'acer']);
+// rooktoets 11-11: "Otoscoop met LED-licht" viel als naam weg. Een naamwoord = hoofdletter + kleine letter ("Jan", "De") of één hoofdletter;
+// een afkorting in hoofdletters (LED, USB, A4, KERN) niet, behalve als de hele tekst geen kleine letter heeft ("LAMP VOOR JAN").
 function naamIn(x) {
+  const roept = !/\p{Ll}/u.test(String(x));
+  const hoofd = (t) => (roept ? /^\p{Lu}/u.test(t) : /^\p{Lu}(\p{Ll}|$)/u.test(t));
   // review ronde 5: alles behalve letters, cijfers, punt, apostrof en koppelteken scheidt woorden ([Naam], {Naam}, <Naam>, «Naam», /Naam)
   // ronde 6: tekens om een woord heen ('Jan', "Jan", -Jan-, Jan.) gaan eraf vóór de hoofdlettercontrole
   const w = String(x).split(/[^\p{L}\p{N}.'’-]+/u).map((t) => t.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')).filter(Boolean);
@@ -413,9 +417,9 @@ function naamIn(x) {
     if (!NAAM_VOORZETSEL.has(w[i].toLowerCase().replace(/\./g, ''))) continue;
     let k = i + 1;
     const reeks = [];
-    // tussenvoegsels ("van der", "de") horen bij de naam als er verderop een woord met hoofdletter volgt ("voor van der Proefnaam")
-    const tussenNaarNaam = (j) => { while (j < w.length && NAAM_TUSSEN.has(w[j].toLowerCase())) j++; return j < w.length && /^\p{Lu}/u.test(w[j]); };
-    while (k < w.length && (/^\p{Lu}/u.test(w[k]) || (NAAM_TUSSEN.has(w[k].toLowerCase()) && tussenNaarNaam(k)))) { reeks.push(w[k]); k++; }
+    // tussenvoegsels ("van der", "de") horen bij de naam als er verderop een naamwoord volgt ("voor van der Proefnaam")
+    const tussenNaarNaam = (j) => { while (j < w.length && NAAM_TUSSEN.has(w[j].toLowerCase())) j++; return j < w.length && hoofd(w[j]); };
+    while (k < w.length && (hoofd(w[k]) || (NAAM_TUSSEN.has(w[k].toLowerCase()) && tussenNaarNaam(k)))) { reeks.push(w[k]); k++; }
     // review ronde 4: de VOLLEDIGE reeks telt; een tussenvoegsel erin ("Van den Bosch", "de Kerst") = naam, ook als het laatste woord een merk is
     if (reeks.length && (reeks.some((r) => NAAM_TUSSEN.has(r.toLowerCase())) || !reeks.every((r) => POORT_NAAM_MAG.has(r.toLowerCase().replace(/[.!?'’]+$/, ''))))) return true;
   }
