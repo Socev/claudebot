@@ -164,7 +164,9 @@ function maak(o) {
     try { tekst = await o.ringTekst(); } catch (e) { return mislukt('ringpagina niet leesbaar'); }
     const ring = leesRing(tekst);
     if (!ring) return mislukt('ringpagina: § Ring 1 niet in de verwachte vorm');
-    const doel = ring.filter(function (p) { return !p.huishouden; });
+    // huishouden en geen_signaal vallen vóór elke opzoekvraag weg: hun nummers gaan nergens heen (review r5 MOET 1)
+    const uitgezet = ring.filter(function (p) { return !p.huishouden && p.geen_signaal; }).length;
+    const doel = ring.filter(function (p) { return !p.huishouden && !p.geen_signaal; });
     const cfg = config(), extra = (cfg && cfg.contactnamen) || {};
 
     // nummers per persoon (alleen in het geheugen)
@@ -206,7 +208,7 @@ function maak(o) {
     }
 
     const stil = [], jarig = [];
-    let gezien = 0, blind = 0, uitgezet = 0;
+    let gezien = 0, blind = 0;
     for (const x of perPersoon) {
       const p = x.p;
       const st = s.personen[p.pad] || {};
@@ -214,23 +216,24 @@ function maak(o) {
       x.ids.forEach(function (id) { if (datums[id] && (!d || datums[id] > d)) d = datums[id]; });
       const geldig = !!(d && isDatum(d) && d <= datum);   // review ZOU 1: alleen een echte datum t/m vandaag telt
       if (geldig) { gezien++; if (!st.laatst_gezien || d > st.laatst_gezien) { st.laatst_gezien = d; st.gemeld_op = null; } } else blind++;   // nieuw contact = nieuwe periode (review r3 MOET 1)
-      if (p.geen_signaal) uitgezet++;
       // stil-signaal: alleen met een datum van vandaag (blind = stil), niet bij geen_signaal, één keer per stilteperiode
-      if (geldig && !p.geen_signaal) {
+      if (geldig) {
         const dagen = dagNr(datum) - dagNr(st.laatst_gezien);
         const alGemeld = st.gemeld_op && st.gemeld_op >= st.laatst_gezien;
         if (dagen > GRENS_DAGEN && !alGemeld) stil.push({ pad: p.pad, voornaam: p.voornaam, weken: Math.floor(dagen / 7), dagen: dagen });
       }
       const vj = volgendeJarig(x.verjaardag, datum);
-      if (vj && !p.geen_signaal && dagNr(vj) - dagNr(datum) <= JARIG_DAGEN && st.jarig_jaar !== Number(vj.slice(0, 4))) {   // review MOET 3: 'zie ik vaak' = geen seintje
+      if (vj && dagNr(vj) - dagNr(datum) <= JARIG_DAGEN && st.jarig_jaar !== Number(vj.slice(0, 4))) {   // review MOET 3: 'zie ik vaak' = geen seintje
         jarig.push({ pad: p.pad, voornaam: p.voornaam, datum: vj });
       }
       if (st.laatst_gezien || st.gemeld_op || st.jarig_jaar) s.personen[p.pad] = { laatst_gezien: st.laatst_gezien || null, gemeld_op: st.gemeld_op || null, jarig_jaar: st.jarig_jaar || null };
     }
     stil.sort(function (a, b) { return b.dagen - a.dagen; });
     jarig.sort(function (a, b) { return a.datum < b.datum ? -1 : 1; });
+    // bewust geaccepteerd (review r5 ZOU 1): valt een verjaardag door de grens van 5 buiten de regel en is hij vóór volgende zondag, dan
+    // vervalt die melding dit jaar; bij 14 personen en een venster van 14 dagen zijn 6 verjaardagen in één week niet reëel.
     const keus = kies(stil, jarig), t = keus.tekst;
-    const detail = { personen: doel.length, met_datum: gezien, blind: blind, geen_signaal: uitgezet, stil: keus.stil.length, jarig: keus.jarig.length,
+    const detail = { personen: doel.length + uitgezet, met_datum: gezien, blind: blind, geen_signaal: uitgezet, stil: keus.stil.length, jarig: keus.jarig.length,
       wacht: (stil.length - keus.stil.length) + (jarig.length - keus.jarig.length) };
     if (droog) { laatst = { op: new Date(nu()).toISOString(), droog: true }; return { ok: true, droog: true, regel: t, detail: detail }; }
     // review r2 MOET 1: na alle aanroepen opnieuw de klok: na 07:00 is de briefing weg → niets schrijven, niemand als gemeld
@@ -249,7 +252,7 @@ function maak(o) {
     delete s.laatste_fout;
     try { staatZet(s); } catch (e) { /* stil; de regel staat er al */ }
     laatst = { op: new Date(nu()).toISOString(), stil: keus.stil.length, jarig: keus.jarig.length };
-    if (o.log) o.log({ opdracht: 'contactringen', ok: true, personen: doel.length, met_datum: gezien, blind: blind, stil: keus.stil.length, jarig: keus.jarig.length, wacht: detail.wacht });
+    if (o.log) o.log({ opdracht: 'contactringen', ok: true, personen: doel.length + uitgezet, met_datum: gezien, blind: blind, stil: keus.stil.length, jarig: keus.jarig.length, wacht: detail.wacht });
     return { ok: true, detail: detail };
   }
   function info() { const s = staatLees(); return { aan: true, laatst: laatst, klaar_datum: s.klaar_datum || null, regel_datum: s.regel_datum || null, laatste_fout: s.laatste_fout || null }; }

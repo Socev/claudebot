@@ -84,7 +84,7 @@ const NR = /\d{8,}/;
   toets('regel: Anna jarig (vr 20-11), niet stil', /binnenkort jarig: Anna \(vr 20-11\)/.test(t) && !/met Anna/.test(t), t);
   toets('regel: huishouden, geen_signaal (Eef) en blind (Fien) niet genoemd', !/Huisgenoot|Eef|Fien/.test(t), t);
   toets('regel: uitweg "zie ik vaak"', /zie ik vaak/.test(t), t);
-  toets('huishouden niet opgezocht', x.vraag.contacten.indexOf('Nep Huisgenoot') === -1, x.vraag.contacten);
+  toets('huishouden en geen_signaal niet opgezocht, hun nummers niet naar het luik', x.vraag.contacten.indexOf('Nep Huisgenoot') === -1 && x.vraag.contacten.indexOf('Eef Nepper') === -1 && !x.vraag.datums.some(l => l.indexOf('31600000106@c.us') >= 0 || l.indexOf('31600000100@c.us') >= 0), x.vraag);
   toets('Bram: alleen het contact met exact zijn naam telt (zakelijk-contact niet)', x.vraag.datums[0].indexOf('31600000999@c.us') === -1, x.vraag.datums);
   toets('detail: tellingen, geen namen of nummers', u.ok && u.detail.personen === 6 && u.detail.stil === 3 && u.detail.jarig === 1 && u.detail.blind === 1 && u.detail.geen_signaal === 1 && !NR.test(JSON.stringify(u)), u);
   const sp = path.join(d, 'cr', 'staat.json');
@@ -217,6 +217,8 @@ const NR = /\d{8,}/;
   toets('server.js: datumvraag alleen met datums_voor en sessie nl', /datums: function \(ids\) \{ return crPost\(CR_WA_WF, null, 'crWaUrl', process\.env\.N8N_WEBHOOK_WHATSAPP, \{ sessie: 'nl', datums_voor: ids \}\); \}/.test(sv));
   toets('server.js: bron contactringen in ochtend_buffer, teruggelezen', /bron: 'contactringen', datum: datum, tekst: tekst/.test(sv) && /rij na het schrijven niet teruggelezen/.test(sv));
 
+  toets('uitrol.sh: contactringen.js optioneel in de release', /RELEASE_OPTIONEEL="[^"]*\bcontactringen\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
+  toets('CI: test/contactringen.sh in build.yml', /run: bash test\/contactringen\.sh/.test(fs.readFileSync('.github/workflows/build.yml', 'utf8')));
   // 12. kruisproef: een nummer in de regel moet de nummertoets rood maken
   toets('kruisproef nummertoets: een nummer wordt gezien', NR.test('met 31600000101 is'));
 
