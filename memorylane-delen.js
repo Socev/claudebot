@@ -1590,6 +1590,8 @@ function maak(o) {
   // (review MOET 2). Hooguit elke KOPPEL_ELKE_MS. droog = alleen zeggen wat er zou gebeuren.
   const KOPPEL_MAX_DAGEN = 31, KOPPEL_ELKE_MS = 5 * 60000;
   const KOPPEL_KLAAR = ['samengevoegd', 'losgemaakt', 'wacht'];   // niet opnieuw beoordelen (wacht = wv2932, de machinekamer houdt het paar vast)
+  // wv2932 (review MOET 1): de kandidaat van een rij 'wacht' blijft ook voor andere reizen en opnames vast
+  function vastgehouden() { return new Set(db.prepare("SELECT kandidaat FROM ml_koppel WHERE uitkomst = 'wacht' AND kandidaat IS NOT NULL").all().map((r) => r.kandidaat)); }
   let koppelVorige = 0;
   function dagNr(d) { return Math.round(Date.parse(String(d) + 'T00:00:00Z') / 86400000); }
   function koppelBox(regels, kop) {
@@ -1627,6 +1629,7 @@ function maak(o) {
         const a = F ? F.kort(c.hid) : null;
         if (q.sVan.all(c.hid).some((x) => x.status !== 'weggegooid')) return 'kandidaat heeft eigen stukken';
         if (c.zicht_familie || c.zicht_vrienden || c.kring_familie === 1 || c.kring_shizzle === 1 || (a && a.foto_delen)) return 'kandidaat staat zichtbaar gezet';
+        if (vastgehouden().has(c.hid)) return 'kandidaat wordt vastgehouden';   // wv2932 (review MOET 1): kandidaat van een rij 'wacht'
         const kk = q.koppel.get(c.hid);   // wv2932: een reis met een samengevoegd fotoalbum (album is van dat fotoalbum; losmaken zou het niet terugvinden)
         if (kk && kk.uitkomst === 'samengevoegd') return 'kandidaat heeft al een samengevoegd fotoalbum';
         return '';
@@ -1681,7 +1684,8 @@ function maak(o) {
       const van = dagIn(w.van), tot = dagIn(w.tot);
       return van !== null && tot !== null && tot >= van && tot - van < KOPPEL_MAX_DAGEN ? { h: c, van, tot, periode: w.van + '/' + w.tot } : null;
     }).filter(Boolean);
-    let albums = q.hAlle.all().filter((c) => c.status === 'actief' && isFotoalbum(c)).map((c) => {
+    const vast = vastgehouden();
+    let albums = q.hAlle.all().filter((c) => c.status === 'actief' && isFotoalbum(c) && !vast.has(c.hid)).map((c) => {
       const a = F.kort(c.hid), sp = F.spoor(c.hid);
       if (!a || a.status !== 'actief' || !(a.aantal > 0) || !sp || !sp.van || !sp.tot) return null;
       const van = dagIn(sp.van), tot = dagIn(sp.tot);
