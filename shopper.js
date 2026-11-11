@@ -210,6 +210,15 @@ const zelfdeGekocht = (a, b) => !!a && !!b && GEKOCHT_VELDEN.every((k) => (a[k] 
 function dagPlus(d, n) { const x = new Date(d + 'T12:00:00Z'); if (isNaN(x)) return null; x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
 function dagAfstand(a, b) { return Math.abs(Math.round((new Date(a + 'T12:00:00Z') - new Date(b + 'T12:00:00Z')) / 86400000)); }
 // Kandidaat-facturen voor één gekochte zoektocht z (met z.gekocht en z._opties), uit een alleen-lezen database db
+// wv2947 tab Winkels: facturen van de praktijken per leveranciersnaam. Telt: factuur (soort factuur, geen dubbel, niet geen_factuur/privé,
+// met een zakelijke entiteit) en het FV2-archief (niet geen_factuur/genegeerd; het archief kent geen privé). Alleen naam, aantal en datum.
+const FAC_WINKEL_SQL = "SELECT naam, count(*) AS aantal, max(d) AS laatst FROM ("
+  + "SELECT coalesce(l.naam, '') || ' ' || coalesce(f.leverancier_naam, '') AS naam, coalesce(f.factuurdatum, substr(f.aangemaakt_op, 1, 10)) AS d "
+  + "FROM factuur f LEFT JOIN leverancier l ON l.id = f.leverancier WHERE f.soort = 'factuur' AND f.status NOT IN ('geen_factuur', 'prive_archief') "
+  + "AND f.dubbel_van IS NULL AND f.entiteit IS NOT NULL AND f.entiteit <> 'prive' "
+  + "UNION ALL SELECT coalesce(a.leverancier_naam, ''), coalesce(a.factuurdatum, substr(a.aangemaakt_op, 1, 10)) FROM factuur_archief a "
+  + "WHERE coalesce(a.status, '') NOT IN ('geen_factuur', 'genegeerd') AND a.entiteit <> 'prive'"
+  + ") WHERE trim(naam) <> '' GROUP BY naam";   // review ZOU 1: geen LIMIT (een afgekapte telling zou als ok gelden); begrensd door het aantal leveranciers
 function facturenBij(db, z) {
   const g = z.gekocht;
   if (!g || !g.datum) return [];
@@ -1010,7 +1019,7 @@ function maak(o) {
     return { status: 409, body: { ok: false, fout: 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
   }
   // ── wv2935 fase 3: tab Winkels en de score bij de echte verkoper ──
-  const winkelsMod = W ? W.maak({ scorePad: o.scorePad || null, scoreLezer: o.scoreLezer || null, nu }) : null;
+  const winkelsMod = W ? W.maak({ scorePad: o.scorePad || null, scoreLezer: o.scoreLezer || null, nu, sleutels: { sleutelVan, hostKern, woorden } }) : null;
   function winkelsEnScores() { const t = lees(FAVORIETEN); return { pagina: t, winkels: t == null ? [] : W.winkelsVan(t), scores: winkelsMod.scores() }; }
   // Per optie de score bij de echte verkoper (W.scoreBij); de opties zelf blijven gelijk
   function metScore(opties, ws) {
@@ -1029,7 +1038,10 @@ function maak(o) {
       const opt = z.gekocht.optie ? z._opties.find((x) => x.id === z.gekocht.optie) : null;
       gekocht.push({ winkel: z.gekocht.winkel || (opt && opt.winkel) || null, url: opt && opt.url ? opt.url : null, verkoper: opt ? opt.verkoper || null : null, datum: z.gekocht.datum });
     }
-    return winkelsMod.overzicht(lees(FAVORIETEN), gekocht);
+    // wv2947: "hier kocht je eerder" ook uit Facturen — per leveranciersnaam een aantal en de laatste datum (alleen-lezen, geen bedrag, geen
+    // entiteit; de namen blijven in de pod). null = Facturen niet te lezen (andere kant, geen bestand, slot): dan geen telling.
+    const fac = metFacturen((db) => db.prepare(FAC_WINKEL_SQL).all().map((r) => ({ naam: String(r.naam || ''), aantal: Number(r.aantal), laatst: r.laatst || null })));
+    return winkelsMod.overzicht(lees(FAVORIETEN), gekocht, fac);
   }
   // Snel vergelijken: de stand met de score per optie (de module zelf kent geen scores)
   const vergelijk = o.vergelijk ? Object.assign({}, o.vergelijk, { stand: function (id) {

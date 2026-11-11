@@ -2,7 +2,7 @@
 # Toetst OVIS Shopper S3 (wv2264, 2-11-2026; favorieten wv2267 § 6): shopper.js (alleen type: shopper-zoektocht direct in de vaste Shopper-mappen, entiteit uit de map,
 # geen symlink volgen, id = hash van het pad en nooit een pad uit de vraag, koop-link alleen https, totaal/advies uit de opties) en het
 # server.js-blok (routes, audit zonder wens, Niet meer nodig = de enige schrijfactie, gekocht niet via de App, /health alleen aantallen + tijdstip,
-# uitrol-lijst; § 12 Snel vergelijken wv2934 met nep-zoekhulp en nep-winkels; § 13 Winkels, categorieën, verzendtabel en winkelscore wv2935; § 14 prijshistorie (Kieskeurig) en aanwijsteller wv2946; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase; § 8 de knop Gekocht en Toch niet gekocht, wv2275). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
+# uitrol-lijst; § 12 Snel vergelijken wv2934 met nep-zoekhulp en nep-winkels; § 13 Winkels, categorieën, verzendtabel en winkelscore wv2935; § 14 prijshistorie (Kieskeurig) en aanwijsteller wv2946; § 15 Winkels: facturen per winkel uit Facturen wv2947; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase; § 8 de knop Gekocht en Toch niet gekocht, wv2275). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
 if grep -nE "console\.|eval\(" shopper.js; then echo "ROOD  shopper.js logt naar de console of gebruikt eval"; exit 1; fi
@@ -1133,6 +1133,86 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       && /execFile\('python3', \['-I', prijsScript\], \{ timeout: 90000[^}]*env: \{ PATH: process\.env\.PATH \|\| '\/usr\/bin:\/bin', LANG: 'C\.UTF-8', HOME: '\/tmp' \}/.test(bl14)
       && /k\.stdin\.end\(JSON\.stringify\(invoer\)\)/.test(bl14.slice(bl14.indexOf('prijsScript'))) && /shopper-prijshistorie\.json/.test(bl14) && /shopper-aanwijzen\.json/.test(bl14)
       && /RELEASE_OPTIONEEL="[^"]*\bprijshistorie\.py\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
+  }
+
+
+  // ── 15. wv2947: tab Winkels — "hier kocht je eerder" ook uit Facturen (verzonnen facturendatabase, alleen lezen) ──
+  {
+    const WM = require('./shopper-winkels.js'), F = require('./facturen-db.js'), FD = path.join(W, 'facturen15'), fdb = F.open(FD), db = fdb.db, nu = '2026-11-02T10:00:00.000Z';
+    for (const e of ['groenhouten', 'tolgaarde', 'prive']) db.prepare('INSERT INTO entiteit (sleutel, naam) VALUES (?, ?)').run(e, 'Proef ' + e);
+    const lev = (id, naam) => db.prepare('INSERT INTO leverancier (id, naam, genormaliseerd, aangemaakt_op) VALUES (?, ?, ?, ?)').run(id, naam, naam.toLowerCase(), nu);
+    lev('b000000000000001', 'Koelblauw B.V.'); lev('b000000000000002', 'Bolwerk Proefhandel'); lev('b000000000000003', 'Vosproef - A. Vos en Zonen B.V.');
+    let nr = 0;
+    const fac = (x) => { nr++; const h = String(nr).padStart(15, '0'); db.prepare('INSERT INTO document (id, sha256, soort, aangemaakt_op) VALUES (?, ?, ?, ?)').run('d' + h, require('crypto').createHash('sha256').update('wv2947-' + nr).digest('hex'), 'pdf', nu);
+      db.prepare('INSERT INTO factuur (id, document, soort, leverancier, leverancier_naam, factuurdatum, incl, incl_eur, valuta, entiteit, status, dubbel_van, aangemaakt_op, bijgewerkt_op) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run('f' + h, 'd' + h, x.soort || 'factuur', x.lev || null, x.naam || null, x.datum === undefined ? '2026-10-03' : x.datum, 1999, 1999, 'EUR', x.ent === undefined ? 'groenhouten' : x.ent, x.st || 'te_beoordelen', x.dubbel || null, x.aan || nu, nu); return 'f' + h; };
+    const arch = (x) => { nr++; db.prepare('INSERT INTO factuur_archief (id, herkomst, extern_id, entiteit, leverancier_naam, factuurdatum, incl, status, alleen_eigenaar, aangemaakt_op) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run('a' + String(nr).padStart(15, '0'), 'fv2', 'x' + nr, x.ent || 'tolgaarde', x.naam, x.datum || '2026-05-01', 999, x.st === undefined ? 'beslist' : x.st, 1, nu); };
+    const f1 = fac({ lev: 'b000000000000001', datum: '2026-08-04' });            // Koelblauw via leverancier.naam
+    fac({ naam: 'Koelblauw B.V.', datum: '2026-06-01', ent: 'tolgaarde' });      // zonder leverancier-id (leverancier_naam), andere praktijk telt mee
+    fac({ lev: 'b000000000000001', datum: '2026-09-09', soort: 'creditnota' });  // creditnota telt niet
+    fac({ lev: 'b000000000000001', datum: '2026-09-10', st: 'geen_factuur' });   // geen factuur telt niet
+    fac({ lev: 'b000000000000001', datum: '2026-09-11', dubbel: f1 });           // dubbel telt niet
+    fac({ lev: 'b000000000000001', datum: '2026-09-12', ent: 'prive' });          // privé telt niet
+    fac({ lev: 'b000000000000001', datum: '2026-09-13', ent: null });            // zonder entiteit telt niet
+    fac({ lev: 'b000000000000002', datum: '2026-09-14' });                       // Bolwerk ≠ bol (heel woord)
+    fac({ naam: 'Proefbol.com B.V.', datum: '2026-09-15' });                     // Proefbol ≠ bol
+    fac({ naam: 'bol.com b.v.', datum: '2026-09-16' });                          // bol: naam én domein
+    fac({ lev: 'b000000000000003', datum: null, aan: '2026-11-04T09:00:00.000Z' });   // Vosproef via naam; geen factuurdatum = aangemaakt_op
+    arch({ naam: 'Koelblauw B.V.', datum: '2026-10-20' });                       // FV2-archief telt mee
+    arch({ naam: 'Vosproef.nl', datum: '2026-07-07' });                          // domein als naam: past op de winkelnaam
+    arch({ naam: 'Koelblauw B.V.', datum: '2026-10-25', st: 'genegeerd' });      // genegeerd telt niet
+    arch({ naam: 'Koelblauw B.V.', datum: '2026-10-26', st: 'geen_factuur' });   // geen factuur telt niet
+    arch({ naam: 'Inktproef.nl', datum: '2026-03-03', st: null });               // status leeg telt mee
+    arch({ naam: 'Nergensproef BV', datum: '2026-04-04' });                      // geen winkel in de lijst: wordt geen winkel
+    F.sluit ? F.sluit(fdb) : db.close();
+    const FP = path.join(FD, 'facturen.sqlite'), hashVan = () => require('crypto').createHash('sha256').update(fs.readFileSync(FP)).digest('hex') + ':' + fs.statSync(FP).mtimeMs;
+    const voorHash = hashVan();
+    const FAV15 = ['---', 'type: shopper-favorieten', 'winkels:',
+      '  - {domein: bol.com, naam: "bol", aan: true, categorie: alles, lezen: script}',
+      '  - {domein: koelblauw.nl, naam: "Koelblauw", aan: true, categorie: elektronica, lezen: script}',
+      '  - {domein: koelblauw.be, naam: "Koelblauw België", aan: false, categorie: elektronica, lezen: script}',
+      '  - {domein: vosproef.nl, naam: "Vosproef", aan: true, categorie: medisch, lezen: script}',
+      '  - {domein: inktproef.be, naam: "Inktproef België", aan: false, categorie: kantoor, lezen: script}',
+      '  - {domein: inktproef.nl, naam: "Inktproef", aan: true, categorie: kantoor, lezen: script}',
+      '  - {domein: leegproef.nl, naam: "Leegproef", aan: true, categorie: huis, lezen: script}',
+      '---', ''].join('\n');
+    const V15 = path.join(W, 'vault15'), VT = path.join(V15, '10_Zakelijk/Tolgaarde/Shopper');
+    fs.mkdirSync(VT, { recursive: true }); fs.mkdirSync(path.join(V15, '00_Systeem'), { recursive: true });
+    fs.writeFileSync(path.join(V15, '00_Systeem/Shopper - favoriete winkels.md'), FAV15);
+    fs.writeFileSync(path.join(VT, 'Shopper - 2026-11-09 - Proefkabel.md'), ['---', 'type: shopper-zoektocht', 'wens: "Proefkabel"', 'status: gekocht',
+      'gekocht: {optie: o1, winkel: "Vosproef", bedrag_eur: 9.9, datum: "2026-11-09", opmerking: null, via: app}', 'gezocht: 2026-11-09T09:00+01:00', 'aantal: 1', 'opties:',
+      '  - {id: o1, winkel: "Vosproef", verkoper: "Vosproef", product: "Kabel", koop_aantal: 1, prijs_eur: 9.9, verzending_eur: 0, totaal_eur: 9.9, url: "https://www.vosproef.nl/p/k"}',
+      'advies: o1', '---', ''].join('\n'));
+    const m15 = S.maak({ vault: V15, vv: VV, facturenPad: () => FP });
+    const r15 = m15.winkels(), wk = (d) => r15.body.winkels.find((w) => w.domein === d);
+    toets('15a facturen per winkel: factuur + FV2-archief, alle praktijken; creditnota/geen factuur/dubbel/privé/zonder entiteit/genegeerd tellen niet',
+      r15.status === 200 && r15.body.facturen_stand === 'ok' && JSON.stringify(wk('koelblauw.nl').facturen) === JSON.stringify({ aantal: 3, laatst: '2026-10-20' }), wk('koelblauw.nl'));
+    toets('15b landvariant telt dezelfde facturen niet twee keer: naam gaat vóór domein (Koelblauw ≠ Koelblauw België), bij gelijke sterkte de eerste in de lijst',
+      wk('koelblauw.be').facturen === null && JSON.stringify(wk('inktproef.nl').facturen) === JSON.stringify({ aantal: 1, laatst: '2026-03-03' }) && wk('inktproef.be').facturen === null,
+      [wk('koelblauw.be'), wk('inktproef.nl'), wk('inktproef.be')]);
+    toets('15c bol: alleen "bol.com b.v." (heel woord), Bolwerk en Proefbol tellen niet', JSON.stringify(wk('bol.com').facturen) === JSON.stringify({ aantal: 1, laatst: '2026-09-16' }), wk('bol.com'));
+    toets('15d Vosproef: leveranciersnaam met toevoeging en zonder factuurdatum (aangemaakt_op) + archief; naast de eigen aankoop uit Gekocht',
+      JSON.stringify(wk('vosproef.nl').facturen) === JSON.stringify({ aantal: 2, laatst: '2026-11-04' }) && wk('vosproef.nl').gekocht.aantal === 1, wk('vosproef.nl'));
+    toets('15e geen nieuwe winkels uit Facturen: alleen de lijst, Nergensproef nergens; winkel zonder facturen = facturen null en blijft onbekend zonder score',
+      r15.body.winkels.length === 7 && !JSON.stringify(r15.body).includes('Nergensproef') && wk('leegproef.nl').facturen === null && wk('leegproef.nl').onbekend === true
+      && wk('koelblauw.nl').onbekend === false && r15.body.elders.length === 0, r15.body.winkels.map((w) => w.domein));
+    const bodyTekst = JSON.stringify(r15.body);
+    toets('15f geen bedrag, geen leveranciersnaam, geen entiteit en geen factuur-id in het antwoord', !/19\.99|1999|9\.99|"999"|B\.V\.|A\. Vos|groenhouten|tolgaarde|prive|"f0000|"a0000|bedrag/i.test(bodyTekst.replace(/"verzend":null/g, '')), bodyTekst.slice(0, 400));
+    toets('15g de facturendatabase is na de vraag byte-gelijk (niets geschreven)', hashVan() === voorHash);
+    const m15b = S.maak({ vault: V15, vv: VV, facturenPad: () => { throw new Error('kapot'); } }), m15c = S.maak({ vault: V15, vv: VV, facturenPad: () => null }), m15d = S.maak({ vault: V15, vv: VV });
+    toets('15h facturenPad gooit / null / ontbreekt: tab gewoon 200, facturen_stand geen, per winkel facturen null',
+      [m15b, m15c, m15d].every((x) => { const r = x.winkels(); return r.status === 200 && r.body.facturen_stand === 'geen' && r.body.winkels.every((w) => w.facturen === null); }));
+    const k = { sleutelVan: S.sleutelVan, hostKern: S.hostKern, woorden: (t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean) };
+    const ws15 = WM.winkelsVan(FAV15);
+    const pw = WM.facturenPerWinkel([{ naam: 'Koelblauw', aantal: 2, laatst: '2026-01-02' }, { naam: 'Koelblauw', aantal: 0, laatst: '2026-12-31' }, { naam: 'koelblauw', aantal: 1.5, laatst: '2026-12-30' },
+      { naam: 'Koelblauw', aantal: 1, laatst: 'gisteren' }, null], ws15, k);
+    toets('15i facturenPerWinkel: aantal 0/geen geheel getal telt niet, rare datum geen laatst; zonder hulpfuncties of groepen = leeg',
+      JSON.stringify(pw) === JSON.stringify({ 'koelblauw.nl': { aantal: 3, laatst: '2026-01-02' } }) && JSON.stringify(WM.facturenPerWinkel(null, ws15, k)) === '{}'
+      && JSON.stringify(WM.facturenPerWinkel([{ naam: 'Koelblauw', aantal: 1 }], ws15, null)) === '{}', pw);
+    const bron15 = fs.readFileSync('shopper.js', 'utf8');
+    toets('15j shopper.js: de telling loopt via metFacturen (readOnly + query_only), alleen SELECT', /const fac = metFacturen\(\(db\) => db\.prepare\(FAC_WINKEL_SQL\)\.all\(\)/.test(bron15)
+      && /^const FAC_WINKEL_SQL = "SELECT /m.test(bron15) && !/\b(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|ATTACH)\b/.test(bron15));
   }
 
   fs.rmSync(W, { recursive: true, force: true });
