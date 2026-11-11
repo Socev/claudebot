@@ -188,7 +188,19 @@ function maak(o) {
     fs.writeFileSync(tmp, JSON.stringify(uit), { mode: 0o600 });
     fs.renameSync(tmp, o.staatPad);
   }
-  function zet(id, u) { lopend.set(id, u); try { const st = staat(); st[id] = u; bewaarStaat(st); } catch (e) { /* alleen in het geheugen */ } }
+  // → true als de staat op schijf staat (of er geen staatbestand is); false = alleen in het geheugen
+  function zet(id, u) { lopend.set(id, u); try { const st = staat(); st[id] = u; bewaarStaat(st); return true; } catch (e) { return !o.staatPad; } }
+  // review ronde 1 MOET 1: na 24 uur weg, ook zonder nieuwe vraag (geheugen en schijf); elk uur en bij elke start/stand
+  function opruimen() {
+    const grens = nu().getTime() - BEWAAR_MS;
+    for (const [k, u] of lopend) if (!u || !(Date.parse(u.t) >= grens)) lopend.delete(k);
+    if (!o.staatPad) return;
+    try {
+      const st = staat();
+      if (Object.keys(st).some((k) => !st[k] || !(Date.parse(st[k].t) >= grens))) bewaarStaat(st);
+    } catch (e) { /* volgende ronde opnieuw */ }
+  }
+  if (o.opruimTik !== false) { const t = setInterval(opruimen, 3600000); if (t && typeof t.unref === 'function') t.unref(); }
   function haal(id) {
     if (!ID_RE.test(String(id || ''))) return null;
     const st = staat()[id] || null, m = lopend.get(id) || null;
@@ -245,12 +257,17 @@ function maak(o) {
     if (v.fout) return { status: 400, body: { ok: false, fout: v.fout } };
     const g = v.g;
     if (!S.poortVrij(o.poort, [g.wens].concat(g.eisen))) return { status: 422, body: { ok: false, fout: S.POORT_FOUT, poort: true } };
+    opruimen();
     const st = staat(), dag = nlDag(nu());
     const vandaag = Object.keys(st).filter((k) => st[k] && st[k].t && nlDag(new Date(st[k].t)) === dag).length
       + Array.from(lopend.keys()).filter((k) => !st[k] && nlDag(new Date(lopend.get(k).t)) === dag).length;
     if (vandaag >= PLAFOND_DAG) return { status: 429, body: { ok: false, fout: 'vandaag al ' + PLAFOND_DAG + ' keer snel vergeleken; morgen weer (of laat Shopper grondig zoeken)' } };
     const id = crypto.randomBytes(6).toString('hex');
-    zet(id, { t: nu().toISOString(), stand: 'zoekt', wens: g.wens, aantal: g.aantal, eisen: g.eisen, refurbished: g.refurbished, opties: [], niet_gelezen: [], versie: 1 });
+    // review ronde 1 ZOU 1: de dagteller staat in de staat; lukt opslaan niet, dan geen betaalde zoekvraag (anders telt hij na een herstart niet mee)
+    if (!zet(id, { t: nu().toISOString(), stand: 'zoekt', wens: g.wens, aantal: g.aantal, eisen: g.eisen, refurbished: g.refurbished, opties: [], niet_gelezen: [], versie: 1 })) {
+      lopend.delete(id);
+      return { status: 503, body: { ok: false, fout: 'Shopper kon dit nu niet bijhouden; probeer het zo opnieuw' } };
+    }
     Promise.resolve().then(() => draai(id, g)).catch(function () { const u = haal(id); if (u) zet(id, Object.assign({}, u, { stand: 'mislukt', fout: 'intern', versie: 99 })); });
     return { status: 200, body: { ok: true, vergelijk: toon(id, haal(id)) } };
   }
@@ -261,6 +278,7 @@ function maak(o) {
   }
   function stand(id) {
     if (!ID_RE.test(String(id || ''))) return { status: 400, body: { ok: false, fout: 'ongeldige id' } };
+    opruimen();
     const u = haal(id);
     if (!u) return { status: 404, body: { ok: false, fout: 'deze vergelijking is er niet meer (na 24 uur weg); zoek opnieuw' } };
     if (u.stand !== 'klaar' && u.stand !== 'mislukt' && !lopend.has(id)) return { status: 200, body: { ok: true, vergelijk: Object.assign(toon(id, u), { stand: 'mislukt', fout: 'herstart' }) } };
@@ -316,7 +334,7 @@ function maak(o) {
     zet(id, Object.assign({}, u, { bewaard: z, versie: (u.versie || 0) + 1 }));
     return { status: 200, body: { ok: true, zoektocht: z } };
   }
-  return { start, stand, kandidaten, zoekKandidaten, bewaar };
+  return { start, stand, kandidaten, zoekKandidaten, bewaar, opruimen };
 }
 
 module.exports = { maak, zoekVragen, samenvoegen, zelfdeProduct, pakket, inHuis, optieVan, invoer, bestandsnaam, isoNl, PLAFOND_DAG };
