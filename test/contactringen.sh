@@ -155,6 +155,23 @@ const NR = /\d{8,}/;
   { fs.writeFileSync(path.join(d, 'config2.json'), JSON.stringify({ contactnamen: { '20_Prive/Familie/Dirk Nepper': ['Pa Nep Mob'] } }));
     x = maak({ configPad: path.join(d, 'config2.json'), staatPad: path.join(d, 'cr6', 'staat.json') }); await x.k.doe({ ams: ZO });
     toets('config vult aan: paginanaam én extra naam opgezocht', x.vraag.contacten.indexOf('Dirk Nepper') >= 0 && x.vraag.contacten.indexOf('Pa Nep Mob') >= 0, x.vraag.contacten); }
+  { let klok = 0; const sp7 = path.join(d, 'cr7', 'staat.json');
+    x = maak({ staatPad: sp7, nu: () => klok, datums: async (ids) => { klok += 11000; const u = {}; ids.forEach(i => { u[i] = DATUMS[i] || null; }); return { datums: u }; } });
+    u = await x.k.doe({ ams: { datum: '2027-06-13', uur: 6, min: 59 } });
+    toets('start 06:59 (+ seconden onbekend), 11 s ophalen: te laat, niets geschreven', x.buf.length === 0 && /te laat/.test(u.detail.fout), u);
+    x = maak({ staatPad: path.join(d, 'cr8', 'staat.json'), nu: () => klok }); u = await x.k.doe({ ams: { datum: '2027-06-13', uur: 6, min: 58 } });
+    toets('start 06:58 zonder vertraging: wel geschreven', x.buf.length === 1, u); }
+  // review r3 MOET 1: appje op de meldzondag zelf → nieuwe periode, 43 d later opnieuw gemeld
+  { const sp9 = path.join(d, 'cr9', 'staat.json'); fs.mkdirSync(path.dirname(sp9), { recursive: true });
+    fs.writeFileSync(sp9, JSON.stringify({ personen: { '20_Prive/Nep/Persoon 0': { laatst_gezien: '2027-01-01', gemeld_op: '2027-03-07', jarig_jaar: null } } }));
+    const een = '## Ring 1\n### Overig ring 1\n- [[20_Prive/Nep/Persoon 0|P0]]\n';
+    CONTACT['persoon 0'] = [{ weergavenaam: 'Persoon 0', telefoons_e164: ['+31610000000'] }];
+    let dd = '2027-03-07';
+    x = maak({ ringTekst: async () => een, staatPad: sp9, datums: async (ids) => ({ datums: { [ids[0]]: dd } }) });
+    await x.k.doe({ ams: { datum: '2027-03-14', uur: 6, min: 40 } });
+    x = maak({ ringTekst: async () => een, staatPad: sp9, datums: async (ids) => ({ datums: { [ids[0]]: dd } }) });
+    u = await x.k.doe({ ams: { datum: '2027-04-25', uur: 6, min: 40 } });
+    toets('appje op de meldzondag: 49 d later opnieuw gemeld', x.buf.length === 1 && /met P0 is 7 weken/.test(x.buf[0][1]), [u, x.buf]); }
   toets('isDatum: 2026-13-01 geeft false (geen uitzondering)', C._intern.isDatum('2026-13-01') === false);
 
   // 9. meer dan 30 ids → porties van ≤ 30
