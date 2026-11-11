@@ -788,6 +788,10 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       const n0 = zoeken.length, rk = kapot.start({ wens: 'Proefkast' });
       await new Promise((x) => setTimeout(x, 30));
       toets('12xb staat niet te schrijven = 503 en geen zoekvraag (de dagteller blijft kloppen)', rk.status === 503 && zoeken.length === n0, rk);
+      fs.writeFileSync(STAAT + '.123.abcdef01.tmp', '{"x":{"wens":"Achtergebleven proefwens"}}');
+      fs.writeFileSync(STAAT + '.niet-van-ons', 'blijft');
+      SV.maak({ vault: V, vv: VV, lezer: nepLezer, zoek: nepZoek, poort: POORT, staatPad: STAAT, nu: () => klok, opruimTik: false });
+      toets('12xc achtergebleven tijdelijk staatbestand (crash) weg bij het opstarten; andere bestanden blijven', !fs.existsSync(STAAT + '.123.abcdef01.tmp') && fs.existsSync(STAAT + '.niet-van-ons'));
     }
     // server.js en uitrol
     const src = fs.readFileSync('server.js', 'utf8'), s0 = src.indexOf('const shopper = (function () {'), s1 = src.indexOf('// ── einde OVIS Shopper ──'), bl = src.slice(s0, s1);

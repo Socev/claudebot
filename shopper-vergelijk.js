@@ -185,13 +185,22 @@ function maak(o) {
     const uit = {};
     for (const k of ids) uit[k] = st[k];
     const tmp = o.staatPad + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex') + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(uit), { mode: 0o600 });
-    fs.renameSync(tmp, o.staatPad);
+    try { fs.writeFileSync(tmp, JSON.stringify(uit), { mode: 0o600 }); fs.renameSync(tmp, o.staatPad); }
+    catch (e) { try { fs.unlinkSync(tmp); } catch (x) { /* weg */ } throw e; }
+  }
+  // review ronde 2 MOET 1: tijdelijke staatbestanden van een afgebroken schrijfactie (crash) weg; schrijven gaat synchroon, dus er loopt er nooit één
+  function tmpWeg() {
+    if (!o.staatPad) return;
+    const map = path.dirname(o.staatPad), voor = path.basename(o.staatPad) + '.';
+    let namen = [];
+    try { namen = fs.readdirSync(map); } catch (e) { return; }
+    for (const n of namen) if (n.startsWith(voor) && /^\d+\.[0-9a-f]{8}\.tmp$/.test(n.slice(voor.length))) { try { fs.unlinkSync(path.join(map, n)); } catch (e) { /* weg */ } }
   }
   // → true als de staat op schijf staat (of er geen staatbestand is); false = alleen in het geheugen
   function zet(id, u) { lopend.set(id, u); try { const st = staat(); st[id] = u; bewaarStaat(st); return true; } catch (e) { return !o.staatPad; } }
   // review ronde 1 MOET 1: na 24 uur weg, ook zonder nieuwe vraag (geheugen en schijf); elk uur en bij elke start/stand
   function opruimen() {
+    tmpWeg();
     const grens = nu().getTime() - BEWAAR_MS;
     for (const [k, u] of lopend) if (!u || !(Date.parse(u.t) >= grens)) lopend.delete(k);
     if (!o.staatPad) return;
@@ -201,6 +210,7 @@ function maak(o) {
     } catch (e) { /* volgende ronde opnieuw */ }
   }
   if (o.opruimTik !== false) { const t = setInterval(opruimen, 3600000); if (t && typeof t.unref === 'function') t.unref(); }
+  opruimen();   // bij het opstarten van de pod
   function haal(id) {
     if (!ID_RE.test(String(id || ''))) return null;
     const st = staat()[id] || null, m = lopend.get(id) || null;
