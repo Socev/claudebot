@@ -36,6 +36,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const S = require('./shopper.js');
+// wv2935 fase 3: categorieën (domeinfilter per categorie) en de gemeten verzendtabel per winkel; ontbreekt de module, dan zoals fase 2
+let W = null;
+try { W = require('./shopper-winkels.js'); } catch (e) { W = null; }
 
 const MAX_WENS = 160, MAX_EIS = 200, MAX_EISEN = 20, MAX_LEES = 8, MAX_GELIJK = 4, PLAFOND_DAG = 20, BEWAAR_MS = 86400000, MAX_STAAT = 60;
 const ZOEK_MS = 45000, ZOEK_MAX = 5;
@@ -139,7 +142,7 @@ function inHuis(levertijd, nu) {
   return kand[0][1];
 }
 // Eén uitkomst van winkel-lezen.py + de kandidaat → een optie (alleen gelezen waarden) of een regel voor niet_gelezen
-function optieVan(k, r, g, fav, nu) {
+function optieVan(k, r, g, fav, nu, winkels) {
   const niet = (reden) => ({ niet: { winkel: k.winkel || hostNaam(k.url), product: k.product, url: k.url, reden } });
   if (!r || typeof r !== 'object' || r.url !== k.url) return niet('niet te lezen (geen antwoord van het leesscript)');
   if (r.blokkade) return niet(tekst(r.blokkade, 160));
@@ -147,9 +150,15 @@ function optieVan(k, r, g, fav, nu) {
   if (prijs == null || prijs === 0) return niet('prijs niet te lezen op de pagina');
   const product = tekst(r.product, 200) || k.product;
   if (r.product && k.product && !zelfdeProduct(k.product, r.product)) return niet('de link wijst naar een ander product');
-  const verz = getal(r.verzending_eur), per = pakket(product), stuks = g.aantal || 1, koop = Math.ceil(stuks / per);
+  const per = pakket(product), stuks = g.aantal || 1, koop = Math.ceil(stuks / per);
+  let verz = getal(r.verzending_eur), vtekst = verz == null ? null : tekst(r.verzending_tekst, 120) || null, vbron = verz == null ? null : 'pagina', vgem = null;
+  // wv2935 (Fable b2a): las het script geen verzending, dan de gemeten verzendtabel van deze winkel (met meetdatum); nooit bij een platform
+  if (verz == null && W && winkels) {
+    const w = W.winkelBij(k.url, winkels), t = w && !/^(bol\.com|amazon\.)/.test(w.domein) ? W.verzendUitTabel(w, koop * prijs) : null;
+    if (t) { verz = getal(t.eur); vbron = 'tabel'; vgem = t.gemeten; vtekst = 'volgens de verzendtabel van ' + w.naam + (t.gemeten ? ' (gemeten ' + t.gemeten + ')' : ''); }
+  }
   return { optie: { winkel: tekst(r.winkel !== 'anders' && r.winkel ? r.winkel : '', 40) || k.winkel || hostNaam(k.url), verkoper: tekst(r.verkoper, 80) || null,
-    product, url: k.url, prijs_eur: prijs, verzending_eur: verz, verzending_tekst: verz == null ? null : tekst(r.verzending_tekst, 120) || null,
+    product, url: k.url, prijs_eur: prijs, verzending_eur: verz, verzending_tekst: verz == null ? null : vtekst, verzending_bron: vbron, verzending_gemeten: vgem,
     koop_eenheid: per > 1 ? 'set van ' + per : '1 stuk', koop_aantal: koop, totaal_eur: verz == null ? null : Math.round((koop * prijs + verz) * 100) / 100,
     btw: r.btw === 'incl' ? 'incl' : r.prijs_omgerekend && /^(21|9)$/.test(String(r.btw_tarief)) ? 'omgerekend ' + r.btw_tarief + '%' : null,
     levertijd: tekst(r.levertijd, 160) || null, in_huis: inHuis(r.levertijd, nu), voorraad: tekst(r.voorraad, 120) || null,
@@ -158,7 +167,7 @@ function optieVan(k, r, g, fav, nu) {
 function hostNaam(u) { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; } }
 // Invoer van de app toetsen (zelfde grenzen als Nieuwe zoektocht)
 function invoer(d, extra) {
-  const mag = ['wens', 'aantal', 'eisen', 'refurbished'].concat(extra || []);
+  const mag = ['wens', 'aantal', 'eisen', 'refurbished', 'categorie'].concat(extra || []);
   if (!d || typeof d !== 'object' || Array.isArray(d) || Object.keys(d).some((k) => mag.indexOf(k) < 0)) return { fout: 'alleen ' + mag.join(', ') };
   const wens = typeof d.wens === 'string' ? tekst(d.wens, MAX_WENS + 1) : '';
   if (!wens || wens.length > MAX_WENS) return { fout: 'wens: tekst van 1 tot ' + MAX_WENS + ' tekens' };
@@ -170,7 +179,12 @@ function invoer(d, extra) {
   for (const x of ruw) { const e = tekst(x, MAX_EIS + 1); if (e.length > MAX_EIS) return { fout: 'een eis: hooguit ' + MAX_EIS + ' tekens' }; if (e) eisen.push(e); }
   if (eisen.length > MAX_EISEN) return { fout: 'hooguit ' + MAX_EISEN + ' eisen' };
   if (d.refurbished != null && typeof d.refurbished !== 'boolean') return { fout: 'refurbished: ja of nee' };
-  return { g: { wens, aantal: n, eisen, refurbished: d.refurbished === true } };
+  let categorie = null;   // wv2935: één categorie (domeinfilter); leeg of "alle" = alle winkels die aan staan
+  if (d.categorie != null && d.categorie !== '' && d.categorie !== 'alle') {
+    if (!W || typeof d.categorie !== 'string' || W.CATEGORIEEN.every((c) => c.id !== d.categorie)) return { fout: 'categorie: ' + (W ? W.CATEGORIEEN.map((c) => c.id).join(', ') : 'niet in deze versie') };
+    categorie = d.categorie;
+  }
+  return { g: { wens, aantal: n, eisen, refurbished: d.refurbished === true, categorie } };
 }
 // Bestandsnaam van een bewaarde zoektocht: "Shopper - JJJJ-MM-DD - <wens>.md" zonder tekens die een pad of link breken
 function bestandsnaam(dag, wens, n) {
@@ -248,12 +262,15 @@ function maak(o) {
     if (!u || nu().getTime() - Date.parse(u.t) > BEWAAR_MS) return null;
     return u;
   }
-  function domeinen() {
-    let fav = [];
-    try { const t = o.vv.lees(path.join(o.vault, S.FAVORIETEN), 'utf8', { max: 256 * 1024 }); fav = S.favorietenVan(t); } catch (e) { fav = []; }
-    const d = fav.filter((x) => VERGELIJKERS.indexOf(x) < 0);
-    for (const x of ALTIJD) if (d.indexOf(x) < 0) d.push(x);
-    return { lijst: d.slice(0, 20), fav };
+  // wv2935: bol en Amazon altijd eerst (de zoekhulp neemt hooguit 20 domeinen); met categorie alleen de winkels van die categorie die aan staan
+  // en die Shopper kan lezen
+  function domeinen(categorie) {
+    let fav = [], winkels = [];
+    try { const t = o.vv.lees(path.join(o.vault, S.FAVORIETEN), 'utf8', { max: 256 * 1024 }); fav = S.favorietenVan(t); winkels = W ? W.winkelsVan(t) : []; } catch (e) { fav = []; winkels = []; }
+    const bron = W && winkels.length ? W.domeinenVoor(winkels, categorie || null) : fav;
+    const d = ALTIJD.slice();
+    for (const x of bron) if (VERGELIJKERS.indexOf(x) < 0 && d.indexOf(x) < 0) d.push(x);
+    return { lijst: d.slice(0, 20), fav, winkels };
   }
   // De zoekrondes (tegelijk). → { kandidaten, usd, fout? }
   async function zoekRondes(g, dom) {
@@ -274,7 +291,7 @@ function maak(o) {
   async function draai(id, g) {
     const t0 = nu().getTime();
     const u = Object.assign({}, haal(id));
-    const dom = domeinen();
+    const dom = domeinen(g.categorie);
     let z;
     try { z = await zoekRondes(g, dom.lijst); } catch (e) { z = { kandidaten: [], usd: 0, fout: 'zoeken' }; }
     u.usd = z.usd;
@@ -289,7 +306,7 @@ function maak(o) {
     await Promise.all(lees.map((k) => beperkt(async function () {
       let r = null;
       try { r = await o.lezer(k.url); } catch (e) { r = null; }
-      const x = optieVan(k, r, g, dom.fav, nu());
+      const x = optieVan(k, r, g, dom.fav, nu(), dom.winkels);
       if (x.optie) u.opties.push(Object.assign({ n: u.opties.length + 1 }, x.optie)); else u.niet_gelezen.push(x.niet);
       u.versie = ++versie;
       zet(id, u);
@@ -310,7 +327,7 @@ function maak(o) {
     if (vandaag >= PLAFOND_DAG) return { status: 429, body: { ok: false, fout: 'vandaag al ' + PLAFOND_DAG + ' keer snel vergeleken; morgen weer (of laat Shopper grondig zoeken)' } };
     const id = crypto.randomBytes(6).toString('hex');
     // review ronde 1 ZOU 1: de dagteller staat in de staat; lukt opslaan niet, dan geen betaalde zoekvraag (anders telt hij na een herstart niet mee)
-    if (!zet(id, { t: nu().toISOString(), stand: 'zoekt', wens: g.wens, aantal: g.aantal, eisen: g.eisen, refurbished: g.refurbished, opties: [], niet_gelezen: [], versie: 1 })) {
+    if (!zet(id, { t: nu().toISOString(), stand: 'zoekt', wens: g.wens, aantal: g.aantal, eisen: g.eisen, refurbished: g.refurbished, categorie: g.categorie || null, opties: [], niet_gelezen: [], versie: 1 })) {
       lopend.delete(id);
       return { status: 503, body: { ok: false, fout: 'Shopper kon dit nu niet bijhouden; probeer het zo opnieuw' } };
     }
@@ -318,7 +335,7 @@ function maak(o) {
     return { status: 200, body: { ok: true, vergelijk: toon(id, haal(id)) } };
   }
   function toon(id, u) {
-    return { id, t: u.t, stand: u.stand, fout: u.fout || null, wens: u.wens, aantal: u.aantal, eisen: u.eisen, refurbished: !!u.refurbished,
+    return { id, t: u.t, stand: u.stand, fout: u.fout || null, wens: u.wens, aantal: u.aantal, eisen: u.eisen, refurbished: !!u.refurbished, categorie: u.categorie || null,
       opties: u.opties || [], niet_gelezen: u.niet_gelezen || [], te_lezen: u.te_lezen || null, usd: u.usd == null ? null : u.usd, ms: u.ms || null,
       bewaard: u.bewaard || null };
   }

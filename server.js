@@ -21801,7 +21801,20 @@ const shopper = (function () {
     try { vergelijk = require(vp).maak({ vault: VAULT, vv: VV(), lezer: lezer, poort: poort, zoek: function (z) { return openaiHulp.zoek(z); },
       staatPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-vergelijk.json') : null }); } catch (e) { logError('shopper-vergelijk', e); vergelijk = null; }
   }
+  // wv2935 fase 3: de winkelscore (winkel-score.py uit de release: alleen GET op Kieskeurig, Kiyoh en Thuiswinkel, kale omgeving, ≤ 3 min);
+  // shopper-winkels.js start hem alleen als iemand de tab Winkels opent en de scores ouder zijn dan 30 dagen. Uitkomst in KLOKKEN_DIR (0600).
+  const scoreScript = path.join(__dirname, 'winkel-score.py');
+  const scoreLezer = fs.existsSync(scoreScript) ? function (invoer) {
+    return new Promise(function (klaar) {
+      const k = require('child_process').execFile('python3', ['-I', scoreScript], { timeout: 180000, maxBuffer: 512 * 1024,
+        env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: '/tmp' } }, function (e, uit) {
+        try { klaar(JSON.parse(String(uit || '').trim().split('\n')[0])); } catch (x) { klaar(null); }
+      });
+      try { k.stdin.end(JSON.stringify(invoer)); } catch (e) { klaar(null); }
+    });
+  } : null;
   try { return require(p).maak({ vault: VAULT, vv: VV(), facturenPad: facturenPad, lezer: lezer, todoistTaak: todoistTaak, poort: poort, vergelijk: vergelijk,
+    scoreLezer: scoreLezer, scorePad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-winkelscore.json') : null,
     nieuwPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nieuw.json') : null,
     nalezenPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nalezen.json') : null,
     agentStart: agentStart, agentStand: agentStand, grondwet: grondwet,
@@ -21840,6 +21853,7 @@ async function appShopper(req, res, a, route, d) {
       if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
       u = shopper.vergelijk ? shopper.vergelijk.bewaar(m[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
     }
+    else if (route === 'GET /app/shopper/winkels') { soort = 'winkels'; u = shopper.winkels ? shopper.winkels() : { status: 404, body: { ok: false, fout: 'Winkels zit niet in deze versie van de pod' } }; }   // wv2935: tab Winkels (de 600/uur van shopper geldt)
     else if ((m = /^GET \/app\/shopper\/([^/]*)$/.exec(route))) { soort = 'zoektocht'; u = shopper.zoektocht(m[1]); }   // shopper.js toetst de id zelf (12 hex, anders 400)
     else if ((m = /^POST \/app\/shopper\/([^/]*)\/status$/.exec(route))) {
       soort = 'status';
@@ -21873,7 +21887,7 @@ async function appShopper(req, res, a, route, d) {
     }
     else u = { status: 404, body: { ok: false, fout: 'onbekend' } };
   } catch (e) { logError('shopper', e); return appWeiger(res, 503, 'Shopper kon de zoektochten nu niet lezen; probeer het zo opnieuw', 'shopper fout'); }
-  if ((soort === 'lijst' || soort === 'vergelijk-stand') && u.status === 200) res._app.stil = true;
+  if ((soort === 'lijst' || soort === 'vergelijk-stand' || soort === 'winkels') && u.status === 200) res._app.stil = true;
   else res._app.reden = 'shopper ' + soort + (m ? ' ' + (/^[0-9a-f]{12}$/.test(m[1]) ? m[1] : 'ongeldig') : '') + ' ' + u.status;
   return appStuur(res, u.status, u.body);
 }

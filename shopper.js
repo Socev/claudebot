@@ -49,6 +49,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const R = require('./reizen.js');   // dezelfde frontmatter-lezing (flow-maps, lijsten) als Tripper
+// wv2935 fase 3: winkels, categorieën, verzendtabel en winkelscore (ontbreekt de module in de release: geen tab Winkels, geen score)
+let W = null;
+try { W = require('./shopper-winkels.js'); } catch (e) { W = null; }
 
 const MAPPEN = [
   ['groenhouten', 'Groenhouten', '10_Zakelijk/Groenhouten/Shopper'],
@@ -618,7 +621,9 @@ function maak(o) {
     const v = vind(id);
     if (v.fout) return v.fout;
     const { p, t, z } = v;
-    return { status: 200, body: { ok: true, zoektocht: Object.assign(kaal(z), { opties: z._opties, pad: p.rel, bestand: path.basename(p.rel),
+    let opties = z._opties;
+    try { opties = metScore(z._opties); } catch (e) { opties = z._opties; }   // wv2935: score bij de echte verkoper
+    return { status: 200, body: { ok: true, zoektocht: Object.assign(kaal(z), { opties, pad: p.rel, bestand: path.basename(p.rel),
       eisen: R.fmLijst(t, 'eisen').map((x) => tekstVeld(x, 200)).filter(Boolean).slice(0, 20),
       aannames: R.fmLijst(t, 'aannames').map((x) => tekstVeld(x, 300)).filter(Boolean).slice(0, 20),
       inleiding: inleiding(t), waarom: sectie(t, 'Waarom dit advies'), niet_te_lezen: sectie(t, 'Niet te lezen'),
@@ -937,8 +942,38 @@ function maak(o) {
     if (reden === 'gekocht' && bestaand && nieuw === null && zelfdeGekocht(bestaand, maakNieuw(v.z))) return { status: 200, body: { ok: true, status: 'gekocht', al: true, gekocht: bestaand } };
     return { status: 409, body: { ok: false, fout: 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
   }
+  // ── wv2935 fase 3: tab Winkels en de score bij de echte verkoper ──
+  const winkelsMod = W ? W.maak({ scorePad: o.scorePad || null, scoreLezer: o.scoreLezer || null, nu }) : null;
+  function winkelsEnScores() { const t = lees(FAVORIETEN); return { pagina: t, winkels: t == null ? [] : W.winkelsVan(t), scores: winkelsMod.scores() }; }
+  // Per optie de score bij de echte verkoper (W.scoreBij); de opties zelf blijven gelijk
+  function metScore(opties, ws) {
+    if (!winkelsMod || !Array.isArray(opties)) return opties;
+    const x = ws || winkelsEnScores();
+    return opties.map((op) => Object.assign({}, op, { winkelscore: op && op.url ? W.scoreBij(op.url, op.verkoper, x.winkels, x.scores) : null }));
+  }
+  // GET /app/shopper/winkels: de winkels per categorie met eigen aankopen (Gekocht in Shopper), score, verzendtabel en wat Shopper kan lezen
+  function winkels() {
+    if (!winkelsMod) return { status: 404, body: { ok: false, fout: 'Winkels zit niet in deze versie van de pod' } };
+    const gekocht = [];
+    for (const p of paden()) {
+      const t = lees(p.rel);
+      const z = t == null ? null : ontleed(t, p.rel, p.ent, []);
+      if (!z || z.status !== 'gekocht' || !z.gekocht) continue;
+      const opt = z.gekocht.optie ? z._opties.find((x) => x.id === z.gekocht.optie) : null;
+      gekocht.push({ winkel: z.gekocht.winkel || (opt && opt.winkel) || null, url: opt && opt.url ? opt.url : null, datum: z.gekocht.datum });
+    }
+    return winkelsMod.overzicht(lees(FAVORIETEN), gekocht);
+  }
+  // Snel vergelijken: de stand met de score per optie (de module zelf kent geen scores)
+  const vergelijk = o.vergelijk ? Object.assign({}, o.vergelijk, { stand: function (id) {
+    const u = o.vergelijk.stand(id);
+    if (u && u.status === 200 && u.body && u.body.vergelijk && Array.isArray(u.body.vergelijk.opties) && winkelsMod) {
+      try { u.body.vergelijk = Object.assign({}, u.body.vergelijk, { opties: metScore(u.body.vergelijk.opties) }); } catch (e) { /* zonder score */ }
+    }
+    return u;
+  } }) : null;
   function info() { return Object.assign({ aan: true }, laatst || { op: null, zoektochten: null, open: null, onleesbaar: null, favorieten: null }); }
-  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, info, vergelijk: o.vergelijk || null };
+  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, info, vergelijk, winkels: winkelsMod ? winkels : null };
 }
 
 module.exports = { maak, kandidatenBlok, ontleed, adviesControle, eenheidStuks, poortVrij, nieuwOpdracht, POORT_FOUT, nuVan, btwVeld, zetEisenRegels, opnieuwOpdracht, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
