@@ -93,6 +93,13 @@ toets("2m Daxtrio: twee koopblokken bij dezelfde prijs = geen prijs", r.get("pri
 d3 = html("d3", open(d1, encoding="utf-8").read().replace('"highPrice": 200', '"highPrice": 260'))
 r = py("--html", DX, DX, d3)
 toets("2n Daxtrio: AggregateOffer met prijsrange = geen prijs", r.get("prijs_eur") is None, r)
+d4 = html("d4", open(d1, encoding="utf-8").read().replace("<h1>", ld({"@type": "Product", "name": "Aanbevolen proefartikel", "offers": {"@type": "AggregateOffer",
+     "offerCount": 1, "highPrice": 50, "lowPrice": 50}}) + "<h1>"))
+r = py("--html", DX, DX, d4)
+toets("2n2 Daxtrio: twee producten in de JSON-LD = geen prijs (review ronde 3)", r.get("prijs_eur") is None, r)
+d5 = html("d5", open(d1, encoding="utf-8").read().replace("<div>€ 200,00", "<div>€ 50,00 excl. btw € 54,50 incl. btw In winkelwagen</div><div>€ 200,00"))
+r = py("--html", DX, DX, d5)
+toets("2n3 Daxtrio: eerste koopblok hoort niet bij het hoofdproduct = geen prijs", r.get("prijs_eur") is None, r)
 r = py("--html", "https://www.bol.com/nl/nl/p/proef/9200000000001/", "https://www.bol.com/nl/nl/p/proef/9200000000001/", k1)
 toets("2o --html op een andere winkel geweigerd", r.get("prijs_eur") is None and "browserroute alleen" in (r.get("blokkade") or ""), r)
 r = py("--html", KAR, "https://www.gamma.nl/assortiment/x/p/B1", k1)
@@ -206,7 +213,8 @@ const toets = (n, ok, x) => { if (ok) goed++; else fout++; console.log((ok ? 'GR
 const zag = [];
 const srv = http.createServer((q, r) => { zag.push(q.url);
   if (q.url === '/a') { r.writeHead(302, { Location: '/verboden' }); return r.end(); }
-  if (q.url === '/p') return r.end('<html><head><title>Proef</title></head><body><img src="/beeld.png"><p>proef</p></body></html>');
+  if (q.url === '/p') return r.end('<html><head><title>Proef</title></head><body><img src="/beeld.png"><iframe src="/kader"></iframe><p>proef</p>'
+    + '<script>try { window.open("/popup1"); } catch (e) {} setTimeout(function () { try { window.open("/popup2"); } catch (e) {} }, 50);</script></body></html>');
   r.end('x'); });
 (async () => {
   await new Promise((k) => srv.listen(0, '127.0.0.1', k));
@@ -216,7 +224,9 @@ const srv = http.createServer((q, r) => { zag.push(q.url);
     for (const [doel, naam] of [[basis + '/p', 'gevraagde pagina']]) {
       const ctx = await b.newContext(); const page = await ctx.newPage(); await WB.bewaak(ctx, page, doel);
       const r = await page.goto(doel).catch((e) => null);
+      await page.waitForTimeout(800);
       toets('5a ' + naam + ' laadt, beeld niet opgehaald', r && r.status() === 200 && zag.indexOf('/beeld.png') < 0, zag);
+      toets('5d review ronde 3: geen iframe en geen pop-up opgehaald', ['/kader', '/popup1', '/popup2'].every((u) => zag.indexOf(u) < 0), zag);
       const n = await page.goto(basis + '/ander').then(() => 'geladen', (e) => 'geweigerd');
       toets('5b andere pagina in het hoofdframe geweigerd', n === 'geweigerd' && zag.indexOf('/ander') < 0, { n, zag });
       await ctx.close();

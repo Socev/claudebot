@@ -639,8 +639,10 @@ def lees(url, html_tekst=None, eind_url=None, html_status=None):
     elif w == "daxtrio":
         # wv2949 (gemeten 11-11-2026): JSON-LD AggregateOffer met één prijs = EXCL. btw; het koopblok zegt "€ 329,00 excl. btw € 358,61 incl. btw
         # In winkelwagen". Alleen als precies één paar in een koopblok bij de JSON-LD-prijs past (anders: prijs niet te lezen).
+        # review ronde 3 MOET 2: alleen met precies één product in de JSON-LD (het hoofdproduct), en het EERSTE koopblok op de pagina moet bij
+        # die prijs horen (aanbevolen artikelen staan erna); anders geen prijs
         excl_ld = set()
-        for p in producten:
+        for p in (producten if len(producten) == 1 else []):
             ofs = p.get("offers")
             for of in (ofs if isinstance(ofs, list) else [ofs]):
                 if isinstance(of, dict) and of.get("@type") == "AggregateOffer" and bedrag(of.get("lowPrice")) is not None \
@@ -649,7 +651,7 @@ def lees(url, html_tekst=None, eind_url=None, html_status=None):
         paren = [(bedrag(m.group(1)), bedrag(m.group(2))) for m in
                  re.finditer(r"€\s?(\d{1,3}(?:\.\d{3})*,\d{2}) excl\. btw\s+€\s?(\d{1,3}(?:\.\d{3})*,\d{2}) incl\. btw\s+In winkelwagen", s, re.I)]
         passend = {pr for pr in paren if pr[0] in excl_ld}
-        if r["prijs_eur"] is None and len(excl_ld) == 1 and len(passend) == 1:
+        if r["prijs_eur"] is None and len(excl_ld) == 1 and len(passend) == 1 and paren and paren[0] in passend:
             ex, inc = passend.pop()
             r["prijs_eur"], r["bron"] = inc, "jsonld+koopblok"
         if re.search(r"Niet op voorraad|Uitverkocht|Tijdelijk niet leverbaar", s):

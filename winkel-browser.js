@@ -194,13 +194,18 @@ function maak(o) {
 // review MOET 2 (ronde 1 en 2): de hoofdpagina laadt alleen de gevraagde (al door --mag getoetste) productpagina, ook bij het herladen na de
 // controle en ook na een HTTP-doorsturing. Via de CDP-Fetch-laag, want Playwrights route ziet doorgestuurde aanvragen niet (gemeten
 // 11-11-2026: met Fetch kwam een 302 naar een ander pad op dezelfde host niet bij de server aan). Beelden, video en lettertypen niet laden.
+// review ronde 3 MOET 1: geen pop-ups. Chromiums eigen pop-upblokkade staat aan (Playwright zet die standaard uit: ignoreDefaultArgs in het
+// kind), window.open bestaat niet op de pagina, en een nieuw tabblad gaat meteen dicht.
 async function bewaak(ctx, page, url) {
   const zonderHekje = (u) => String(u || '').split('#')[0];
+  await ctx.addInitScript(function () { try { window.open = function () { return null; }; } catch (e) { /* weg */ } });
+  ctx.on('page', function (p) { if (p !== page) p.close().catch(() => null); });
   const cdp = await ctx.newCDPSession(page);
   const hoofd = (await cdp.send('Page.getFrameTree')).frameTree.frame.id;
   cdp.on('Fetch.requestPaused', function (e) {
+    // review ronde 3 MOET 1: ook geen iframes (elk document buiten het hoofdframe)
     const weg = (e.resourceType === 'Image' || e.resourceType === 'Media' || e.resourceType === 'Font')
-      || (e.resourceType === 'Document' && e.frameId === hoofd && zonderHekje(e.request.url) !== zonderHekje(url));
+      || (e.resourceType === 'Document' && (e.frameId !== hoofd || zonderHekje(e.request.url) !== zonderHekje(url)));
     cdp.send(weg ? 'Fetch.failRequest' : 'Fetch.continueRequest', weg ? { requestId: e.requestId, errorReason: 'BlockedByClient' } : { requestId: e.requestId }).catch(() => null);
   });
   await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
@@ -221,8 +226,9 @@ async function kind(invoerPad, uitPad) {
   // <-loopback>: ook 127.0.0.1/localhost gaat door de proxy (Chromium slaat loopback anders standaard over)
   const proxy = { server: 'http://127.0.0.1:' + px.srv.address().port, bypass: '<-loopback>' };
   try {
-    try { browser = await pw.chromium.launch({ executablePath: d.exe, headless: true, chromiumSandbox: true, timeout: rest(), proxy }); }
-    catch (e) { browser = await pw.chromium.launch({ executablePath: d.exe, headless: true, chromiumSandbox: false, timeout: rest(), proxy }); }
+    const basisOpt = { executablePath: d.exe, headless: true, timeout: rest(), proxy, ignoreDefaultArgs: ['--disable-popup-blocking'] };
+    try { browser = await pw.chromium.launch(Object.assign({ chromiumSandbox: true }, basisOpt)); }
+    catch (e) { browser = await pw.chromium.launch(Object.assign({}, basisOpt, { chromiumSandbox: false, timeout: rest() })); }
     const ctx = await browser.newContext({ locale: 'nl-NL', timezoneId: 'Europe/Amsterdam', acceptDownloads: false });
     page = await ctx.newPage();
     await bewaak(ctx, page, d.url);
