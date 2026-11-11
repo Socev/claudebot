@@ -1008,12 +1008,13 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     const VD = '2026-11-11';
     const reeksVan = (r) => [1, r.map(([n, a]) => [0, { ean: [0, '8700000000001'], amount: [0, a], date: [0, dag(VD, n) + 'T00:00:00Z'], id: [0, '0'] }])];
     const esc = (t) => t.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-    const prodPagina = (r, verborgen) => '<html><astro-island uid="x" props="' + esc(JSON.stringify({ product: [0, { naam: [0, 'x'] }], hidePriceHistory: [0, !!verborgen], priceHistory: reeksVan(r) })) + '" ssr></astro-island></html>';
+    const PNAAM = 'Proefmerk 5000 series PR552/00 Airfryer - Dubbel - 9L - 2750W - Zwart';
+    const prodPagina = (r, verborgen, naam) => '<html><script type="application/ld+json">' + JSON.stringify({ '@graph': [{ '@type': 'Product', name: naam || PNAAM, brand: { '@type': 'Brand', name: 'Proefmerk' } }] }) + '</script><astro-island uid="x" props="' + esc(JSON.stringify({ product: [0, { naam: [0, 'x'] }], hidePriceHistory: [0, !!verborgen], priceHistory: reeksVan(r) })) + '" ssr></astro-island></html>';
     const item = (naam, merk, nr) => ({ '@type': 'ListItem', url: 'https://www.kieskeurig.nl/airfryer/product/' + nr + '-proef', item: { '@type': 'Product', name: naam, brand: { '@type': 'Brand', name: merk }, url: 'https://www.kieskeurig.nl/airfryer/product/' + nr + '-proef' } });
     const zoekPagina = (items) => '<html><script type="application/ld+json">' + JSON.stringify({ '@context': 'https://schema.org', '@graph': [{ '@type': 'ItemList', itemListElement: items }] }) + '</script></html>';
     const vol = (nu, min, minDag) => { const r = []; for (let n = 88; n >= 4; n -= 4) r.push([n, n === minDag ? min : 120]); r.push([0, nu]); return r; };
     const draai = (map, product) => JSON.parse(cp.execFileSync('python3', ['-I', 'prijshistorie.py', '--toets', map], { input: JSON.stringify({ product, vandaag: VD }), encoding: 'utf8', timeout: 20000 }));
-    const geval = (naam, items, reeks, verborgen) => { const m = path.join(F, naam); fs.mkdirSync(m); fs.writeFileSync(path.join(m, 'zoek.html'), zoekPagina(items)); if (reeks) fs.writeFileSync(path.join(m, '777.html'), prodPagina(reeks, verborgen)); return m; };
+    const geval = (naam, items, reeks, verborgen, pnaam) => { const m = path.join(F, naam); fs.mkdirSync(m); fs.writeFileSync(path.join(m, 'zoek.html'), zoekPagina(items)); if (reeks) fs.writeFileSync(path.join(m, '777.html'), prodPagina(reeks, verborgen, pnaam)); return m; };
     const GOED = [item('Proefmerk 5000 series PR552/00 Airfryer - Dubbel - 9L - 2750W - Zwart', 'Proefmerk', 777)];
     const ADVIES = 'Proefmerk PR552/00 Airfryer Dual Basket 9L zwart';
     let x = draai(geval('a', [item('Proefmerk 5000 series PR555/00 Airfryer - 9L - Zwart', 'Proefmerk', 778)].concat(GOED), vol(110, 110, -1)), ADVIES);
@@ -1055,6 +1056,23 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     x = draai(geval('f', GOED, vol(110, 110, -1), true), ADVIES);
     const xf2 = draai(geval('f2', GOED, null), ADVIES);
     toets('14f prijshistorie verborgen of productpagina weg = geen zin (en wel de reden)', x.zin === null && x.reden === 'prijshistorie verborgen' && xf2.zin === null && /HTTP 404/.test(xf2.reden), [x, xf2]);
+    // diff-review wv2946: MOET 1 (typevoorvoegsel, alle typenummers gelijk), MOET 2 (doorsturen / ander product op de pagina), MOET 3 (begrensd uitpakken)
+    const xg1 = draai(geval('m1', [item('Proefmerk Professional GSB 18V-55 Klopboormachine', 'Proefmerk', 777)], vol(110, 110, -1)), 'Proefmerk Professional GSR 18V-55 accuboormachine');
+    const xg2 = draai(geval('m1b', [item('Proefmerk PR552/00 PR553/00 Airfryer - 9L - Zwart', 'Proefmerk', 777)], vol(110, 110, -1)), ADVIES);
+    const mDoor = geval('m2', GOED, vol(110, 110, -1)); fs.writeFileSync(path.join(mDoor, '777.html.doorsturen'), 'https://www.kieskeurig.nl/airfryer/product/888-ander');
+    const xg3 = draai(mDoor, ADVIES);
+    const xg4 = draai(geval('m2b', GOED, vol(110, 110, -1), false, 'Proefmerk 5000 series PR555/00 Airfryer - 9L - Zwart'), ADVIES);
+    toets('14f2 (review MOET 1+2) GSR ≠ GSB bij hetzelfde 18V-55; een extra typenummer aan één kant = geen zin; productpagina doorgestuurd of met een ander product in de JSON-LD = geen zin',
+      xg1.zin === null && /ander of geen modelnummer/.test(xg1.reden) && xg2.zin === null && xg3.zin === null && /doorgestuurd/.test(xg3.reden) && xg4.zin === null && /ander product/.test(xg4.reden), [xg1, xg2, xg3, xg4]);
+    const bom = JSON.parse(cp.execFileSync('python3', ['-I', '-B', '-c', [
+      'import importlib.util, json, zlib', 'uit = []',
+      'for f in ("prijshistorie.py", "winkel-score.py"):',
+      '    s = importlib.util.spec_from_file_location("m", f); m = importlib.util.module_from_spec(s); s.loader.exec_module(m)',
+      '    c = zlib.compressobj(9, zlib.DEFLATED, 31); g = c.compress(b"0" * (5 * 1024 * 1024)) + c.flush()',
+      '    try:', '        m.uitpakken(g); uit.append("door")', '    except ValueError as e:', '        uit.append(str(e))',
+      '    c = zlib.compressobj(9, zlib.DEFLATED, 31); uit.append(len(m.uitpakken(c.compress(b"klein") + c.flush())))',
+      'print(json.dumps(uit))'].join('\n')], { encoding: 'utf8' }));
+    toets('14f3 (review MOET 3) beide leesscripts pakken gzip begrensd uit: 5 MB uitgepakt = "pagina te groot", klein gaat door', JSON.stringify(bom) === JSON.stringify(['pagina te groot', 5, 'pagina te groot', 5]), bom);
     const mag = JSON.parse(cp.execFileSync('python3', ['-I', '-B', '-c', [
       'import importlib.util, json', 's = importlib.util.spec_from_file_location("ph", "prijshistorie.py"); ph = importlib.util.module_from_spec(s); s.loader.exec_module(ph)',
       'print(json.dumps([ph.mag(u) for u in ["https://www.kieskeurig.nl/search?q=proef%2Fx+s", "https://www.kieskeurig.nl/airfryer/merk/proef", "http://www.kieskeurig.nl/search?q=x",',

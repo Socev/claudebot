@@ -20,7 +20,6 @@ GEBRUIK
 GRENZEN. Alleen GET op deze drie vaste hosts via https, doorsturen alleen binnen dezelfde host, ≤ 4 MB per pagina, 20 s per vraag, 1 s pauze
 tussen vragen, hooguit 80 winkels, na 140 s geen nieuwe vraag meer (de rest = "tijd op"; de pod stopt het proces na 180 s). Geen cookies, geen sleutel, geen gegevens van David.
 """
-import gzip
 import html
 import json
 import re
@@ -29,6 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from datetime import datetime, timezone
 
 UA = "Socev-Shopper/1.0 (persoonlijke prijscheck, alleen lezen)"
@@ -141,6 +141,18 @@ class _ZelfdeHost(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, doel)
 
 
+def uitpakken(body):
+    """gzip uitpakken met dezelfde 4 MB-grens als het lezen (diff-review wv2946 MOET 3, zelfde fout als in prijshistorie.py)."""
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        uit = d.decompress(body, MAX_BYTES + 1)
+    except zlib.error:
+        raise ValueError("pagina niet uit te pakken")
+    if len(uit) > MAX_BYTES or d.unconsumed_tail:
+        raise ValueError("pagina te groot")
+    return uit
+
+
 def haal(url):
     u = urllib.parse.urlsplit(url)
     if u.scheme != "https" or u.hostname not in HOSTS.values() or u.port not in (None, 443):
@@ -150,16 +162,15 @@ def haal(url):
     opener = urllib.request.build_opener(_ZelfdeHost())
     try:
         r = opener.open(req, timeout=20)
-        code, body, hdr = r.status, r.read(MAX_BYTES), r.headers
+        code, body, hdr = r.status, r.read(MAX_BYTES + 1), r.headers
     except urllib.error.HTTPError as e:
         if e.code == 399:
             raise ValueError(e.msg)
         return e.code, ""
+    if len(body) > MAX_BYTES:
+        raise ValueError("pagina te groot")
     if (hdr.get("Content-Encoding") or "").lower() == "gzip":
-        try:
-            body = gzip.decompress(body)
-        except OSError:
-            pass
+        body = uitpakken(body)
     return code, body.decode("utf-8", "replace")
 
 
