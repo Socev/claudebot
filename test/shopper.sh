@@ -542,15 +542,15 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     c = AC([O('o1', { koop_aantal: 2, prijs_eur: 446.49, verzending_eur: 0, totaal_eur: 892.98, voldoet: 'ja' }), O('o2', { koop_aantal: 2, prijs_eur: 49.95, verzending_eur: 0, totaal_eur: 99.9, voldoet: 'nee', eis: 'geijkt klasse III', afwijking: 'niet geijkt' })], 'o1', ['digitaal of analoog'], 2);
     toets('11b weegschaal: goedkopere viel af om iets wat geen eis van David is (geijkt) = klopt niet (geen_eis)', c.uitkomst === 'klopt_niet' && c.goedkoper[0].soort === 'geen_eis' && c.goedkoopst_id === 'o1', c);
     // bloeddrukmeter: oude pagina zonder voldoet-velden, met eisen; een optie € 13,31 goedkoper dan het advies
-    const bd = (x8) => [O('o6', { prijs_eur: 105.02, verzending_eur: 5.93, totaal_eur: 110.95 }), O('o7', { prijs_eur: 115.75, verzending_eur: 5.93, totaal_eur: 121.68 }), O('o8', Object.assign({ prijs_eur: 91.71, verzending_eur: 5.93, totaal_eur: 97.64 }, x8))];
+    const bd = (x8, x6) => [O('o6', Object.assign({ prijs_eur: 105.02, verzending_eur: 5.93, totaal_eur: 110.95 }, x6 || {})), O('o7', { prijs_eur: 115.75, verzending_eur: 5.93, totaal_eur: 121.68 }), O('o8', Object.assign({ prijs_eur: 91.71, verzending_eur: 5.93, totaal_eur: 97.64 }, x8))];
     const eisBd = ['handmatig, niet elektronisch', 'tafelmodel met grote schaal'];
     c = AC(bd({}), 'o6', eisBd, 1);
     toets('11c bloeddrukmeter zonder vastlegging: niet na te rekenen (geen vals alarm), de goedkopere staat erbij met € 13,31', c.uitkomst === 'niet_na_te_rekenen' && c.ok === null && c.goedkoper.length === 1
       && c.goedkoper[0].id === 'o8' && c.goedkoper[0].verschil_eur === 13.31 && c.goedkoper[0].soort === 'onbekend' && c.vastgelegd === false, c);
-    c = AC(bd({ voldoet: 'nee', eis: 'Tafelmodel met  grote schaal', afwijking: 'schaal 120 mm' }), 'o6', eisBd, 1);
+    c = AC(bd({ voldoet: 'nee', eis: 'Tafelmodel met  grote schaal', afwijking: 'schaal 120 mm' }, { voldoet: 'ja' }), 'o6', eisBd, 1);
     toets('11d bloeddrukmeter met vastlegging: goedkopere valt af op Davids eis (hoofdletters/spaties maken niet uit) = klopt, met reden zichtbaar', c.uitkomst === 'klopt' && c.ok === true && c.goedkoper[0].soort === 'valt_af'
       && c.goedkoper[0].afwijking === 'schaal 120 mm' && c.goedkoopst_id === 'o6', c);
-    c = AC(bd({ voldoet: 'nee' }), 'o6', eisBd, 1);
+    c = AC(bd({ voldoet: 'nee' }, { voldoet: 'ja' }), 'o6', eisBd, 1);
     toets('11e goedkopere "voldoet niet" zonder eis en zonder afwijking = klopt niet (geen_reden)', c.uitkomst === 'klopt_niet' && c.goedkoper[0].soort === 'geen_reden', c);
     c = AC([O('o1', { prijs_eur: 40, verzending_eur: 5, totaal_eur: 50 }), O('o2', { prijs_eur: 48, verzending_eur: 0, totaal_eur: 48 })], 'o1', [], 1);
     toets('11f rekenfout: totaal € 50 bij 40 + 5 = klopt niet; Shopper rekent met € 45 (en o2 € 48 is dan niet goedkoper)', c.uitkomst === 'klopt_niet' && c.per_optie.o1.rekenfout === true && c.per_optie.o1.totaal_eur === 45 && c.goedkoper.length === 0, c);
@@ -559,13 +559,25 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     const c3 = AC([O('o1', { koop_eenheid: 'per meter', koop_aantal: 1, prijs_eur: 30, verzending_eur: 0, totaal_eur: 30 })], 'o1', [], 2);
     toets('11g aantal: 2 gevraagd, 1 stuk gekocht = klopt niet; set van 2 = klopt; onleesbare eenheid = niet getoetst', c.uitkomst === 'klopt_niet' && c.per_optie.o1.aantal_ok === false && c2.uitkomst === 'klopt' && c3.per_optie.o1.aantal_ok === null, [c, c2, c3]);
     c = AC([O('o1', { prijs_eur: 60, verzending_eur: 0, totaal_eur: 60 }), O('o2', { prijs_eur: 50, verzending_eur: null, totaal_eur: null })], 'o1', [], 1);
-    toets('11h verzending onbekend: "vanaf € 50" onder het advies = mogelijk goedkoper (waarschuwing), uitkomst blijft klopt', c.uitkomst === 'klopt' && c.mogelijk_goedkoper.length === 1 && c.mogelijk_goedkoper[0].vanaf_eur === 50
+    toets('11h verzending onbekend: "vanaf € 50" onder het advies = mogelijk goedkoper, uitkomst niet na te rekenen (review MOET 5)', c.uitkomst === 'niet_na_te_rekenen' && c.mogelijk_goedkoper.length === 1 && c.mogelijk_goedkoper[0].vanaf_eur === 50
       && c.per_optie.o2.vanaf_eur === 50 && /verzendkosten onbekend/.test(c.redenen.join(' ')), c);
     c = AC([O('o1', { prijs_eur: 60, verzending_eur: 0, totaal_eur: 60 }), O('o2', { prijs_eur: 50, verzending_eur: 0, totaal_eur: 50 })], 'o1', [], 1);
     toets('11i zonder eisen past alles: advies niet de goedkoopste = klopt niet', c.uitkomst === 'klopt_niet' && c.goedkoopst_id === 'o2' && c.verschil_eur === 10, c);
     c = AC([O('o1', { prijs_eur: 60, verzending_eur: null })], 'o1', [], 1);
     const c4 = AC([O('o1', { prijs_eur: 60, verzending_eur: 0, totaal_eur: 60 })], null, [], 1), c5 = AC([O('o1', { prijs_eur: 60, verzending_eur: 0, totaal_eur: 60, voldoet: 'nee', eis: 'x' })], 'o1', ['x'], 1);
     toets('11j advies zonder totaal = niet na te rekenen; geen advies = geen_advies; advies voldoet zelf niet = klopt niet', c.uitkomst === 'niet_na_te_rekenen' && c4.uitkomst === 'geen_advies' && c5.uitkomst === 'klopt_niet', [c, c4, c5]);
+    // review wv2850 (Codex NO-GO, MOET 1–5)
+    c = AC([O('o1', { prijs_eur: null, verzending_eur: null, totaal_eur: 20, voldoet: 'ja' }), O('o2', { prijs_eur: 30, verzending_eur: 0, totaal_eur: 30, voldoet: 'ja' })], 'o1', ['x'], 1);
+    toets('11ka MOET 1: totaal zonder gelezen prijs telt niet (advies niet na te rekenen; goedkoopste die past = o2 met nagerekend totaal)', c.uitkomst === 'niet_na_te_rekenen' && c.per_optie.o1.totaal_eur === null && c.goedkoopst_id === 'o2', c);
+    c = AC([O('o1', { prijs_eur: 60, verzending_eur: 0, totaal_eur: 60 }), O('o2', { prijs_eur: 20, verzending_eur: 0, totaal_eur: 20, voldoet: 'nee', eis: 'geijkt', afwijking: 'niet geijkt' })], 'o1', [], 1);
+    toets('11kb MOET 3: zonder eisen is elke afwijzing ongeldig (geen_eis = klopt niet)', c.uitkomst === 'klopt_niet' && c.goedkoper[0].soort === 'geen_eis' && c.per_optie.o2.passend === null, c);
+    c = AC([O('o1', { koop_aantal: null, prijs_eur: 5, verzending_eur: 0, totaal_eur: 5, voldoet: 'ja' })], 'o1', ['x'], 10);
+    toets('11kc MOET 4: 10 gevraagd zonder koopaantal = geen totaal, niet passend vast te stellen, niet na te rekenen', c.uitkomst === 'niet_na_te_rekenen' && c.per_optie.o1.totaal_eur === null && c.per_optie.o1.passend === null && c.goedkoopst_id === null, c);
+    c = AC([O('o1', { prijs_eur: 60, verzending_eur: 0, totaal_eur: 60 })], 'o1', ['x'], 1);
+    toets('11kd MOET 5: advies zonder vastlegging bij eisen = niet na te rekenen, geen "goedkoopste die past"', c.uitkomst === 'niet_na_te_rekenen' && c.goedkoopst_id === null && /niet vastgelegd/.test(c.reden), c);
+    toets('11ke MOET 2: losse naam na voorzetsel = dicht; entiteit, feestdag, merk en "de spreekkamer" = vrij', !S.poortVrij(POORT, ['bloeddrukmeter voor Proef Achternaam']) && !S.poortVrij(POORT, ['lamp', 'cadeau voor Pietje'])
+      && !S.poortVrij(POORT, ['kast t.b.v. Achternaam']) && S.poortVrij(POORT, ['kast voor Groenhouten']) && S.poortVrij(POORT, ['cadeau voor Kerst']) && S.poortVrij(POORT, ['lamp van Philips'])
+      && S.poortVrij(POORT, ['weegschaal voor de spreekkamer']) && S.poortVrij(POORT, ['meter van KERN']) && S.poortVrij(POORT, ['hoesje voor iPhone 15']));
     toets('11k eenheidStuks: stuk/""/set van 2/2 stuks/4-pack/doos van 10/per meter', S.eenheidStuks('1 stuk') === 1 && S.eenheidStuks('') === 1 && S.eenheidStuks('set van 2') === 2 && S.eenheidStuks('2 stuks') === 2
       && S.eenheidStuks('4-pack') === 4 && S.eenheidStuks('doos van 10') === 10 && S.eenheidStuks('per meter') === null);
     // privacypoort (verzonnen teksten)

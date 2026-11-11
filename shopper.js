@@ -318,21 +318,25 @@ const normEis = (x) => String(x == null ? '' : x).toLowerCase().replace(/\s+/g, 
 //  niet) | onbekend (niet vastgelegd); mogelijk_goedkoper = opties zonder totaal waarvan prijs × aantal al onder het advies ligt.
 function adviesControle(z, eisen) {
   const lijst = (z && z._opties) || [], ei = (eisen || []).map(normEis).filter(Boolean), geenEisen = ei.length === 0;
+  const meer = !!(z && z.aantal && z.aantal > 1);
   const per = {};
   for (const o of lijst) {
-    const k = o.koop_aantal || 1;
-    const reken = o.prijs_eur != null && o.verzending_eur != null ? r2(k * o.prijs_eur + o.verzending_eur) : null;
+    // review wv2850 MOET 1 en 4: een totaal telt alleen als het na te rekenen is uit gelezen prijs, verzending en een koopaantal (bij meer
+    // dan één gevraagd stuk moet koop_aantal er staan); een totaal van de pagina zonder die opbouw telt niet
+    const k = o.koop_aantal || (meer ? null : 1);
+    const reken = o.prijs_eur != null && o.verzending_eur != null && k != null ? r2(k * o.prijs_eur + o.verzending_eur) : null;
     const rekenfout = reken != null && o.totaal_eur != null && Math.abs(o.totaal_eur - reken) > 0.01;
-    const totaal = reken != null ? reken : (o.prijs_eur == null ? o.totaal_eur : null);
     const n = eenheidStuks(o.koop_eenheid);
-    const aantalOk = z.aantal && o.koop_aantal && n ? (k * n >= z.aantal && (k - 1) * n < z.aantal) : null;
+    const aantalOk = !z.aantal ? true : o.koop_aantal && n ? (o.koop_aantal * n >= z.aantal && (o.koop_aantal - 1) * n < z.aantal) : null;
+    const eisVanDavid = o.voldoet === 'nee' ? (o.eis != null && ei.indexOf(normEis(o.eis)) >= 0) : null;
+    // review MOET 5: passend alleen als vastgelegd (voldoet ja, of geen eisen en geen nee) én het aantal klopt; een "nee" om iets wat geen eis
+    // van David is (MOET 3, ook bij nul eisen) maakt de optie onbekend, niet afgevallen
     let passend;
-    if (o.voldoet === 'nee') passend = false;
-    else if (o.voldoet === 'ja' || geenEisen) passend = true;
-    else passend = o.id === z.advies ? true : null;   // het advies geldt als passend volgens de agent; een andere optie zonder vastlegging = onbekend
     if (aantalOk === false) passend = false;
-    per[o.id] = { totaal_eur: totaal, rekenfout, vanaf_eur: totaal == null && o.prijs_eur != null ? r2(k * o.prijs_eur) : null, aantal_ok: aantalOk, passend,
-      eis_van_david: o.voldoet === 'nee' ? (o.eis != null && ei.indexOf(normEis(o.eis)) >= 0) : null };
+    else if (o.voldoet === 'nee') passend = eisVanDavid ? false : null;
+    else if (o.voldoet === 'ja' || (geenEisen && o.voldoet == null)) passend = aantalOk === true ? true : null;
+    else passend = null;
+    per[o.id] = { totaal_eur: reken, rekenfout, vanaf_eur: reken == null && o.prijs_eur != null && k != null ? r2(k * o.prijs_eur) : null, aantal_ok: aantalOk, passend, eis_van_david: eisVanDavid };
   }
   const passendMetTotaal = lijst.filter((o) => per[o.id].passend === true && per[o.id].totaal_eur != null).sort((a, b) => per[a.id].totaal_eur - per[b.id].totaal_eur);
   const goedkoopst = passendMetTotaal[0] || null;
@@ -348,10 +352,11 @@ function adviesControle(z, eisen) {
   if (!lijst.length) { uit.uitkomst = 'geen_advies'; uit.ok = null; uit.reden = 'Geen opties.'; return uit; }
   if (!adv) { uit.uitkomst = 'geen_advies'; uit.ok = null; uit.reden = 'Deze zoektocht heeft geen advies.'; return uit; }
   const pa = per[adv.id], at = pa.totaal_eur;
-  if (adv.voldoet === 'nee') zet('klopt_niet', 'Het advies voldoet zelf niet aan je eisen' + (adv.eis ? ' (' + adv.eis + ')' : '') + '.');
+  if (adv.voldoet === 'nee' && pa.eis_van_david) zet('klopt_niet', 'Het advies voldoet zelf niet aan je eisen (' + adv.eis + ').');
   if (pa.rekenfout) zet('klopt_niet', 'Het totaal van het advies klopt niet met prijs × aantal + verzending (nagerekend: ' + eur(at) + ').');
   if (pa.aantal_ok === false) zet('klopt_niet', 'Het aantal van het advies klopt niet met het gevraagde aantal (' + z.aantal + ').');
-  if (at == null) zet('onbekend', 'Het advies heeft geen volledig totaal (verzending niet gelezen).');
+  if (at == null) zet('onbekend', 'Het advies heeft geen na te rekenen totaal (prijs, verzending of aantal niet gelezen).');
+  if (pa.passend === null) zet('onbekend', pa.aantal_ok === null ? 'Bij het advies is niet na te gaan of het aantal stuks klopt.' : 'Van het advies is niet vastgelegd of het aan je eisen voldoet.');
   for (const o of lijst) {
     if (o.id === adv.id) continue;
     const p = per[o.id];
@@ -359,9 +364,9 @@ function adviesControle(z, eisen) {
       const v = r2(at - p.totaal_eur);
       let soort;
       if (p.passend === true) soort = 'past';
-      else if (p.passend === false && p.aantal_ok === false) soort = 'aantal';
+      else if (p.aantal_ok === false) soort = 'aantal';
       else if (o.voldoet === 'nee' && !o.eis && !o.afwijking) soort = 'geen_reden';
-      else if (o.voldoet === 'nee' && !geenEisen && p.eis_van_david === false) soort = 'geen_eis';
+      else if (o.voldoet === 'nee' && !p.eis_van_david) soort = 'geen_eis';
       else if (o.voldoet === 'nee') soort = 'valt_af';
       else soort = 'onbekend';
       uit.goedkoper.push({ id: o.id, totaal_eur: p.totaal_eur, verschil_eur: v, soort, eis: o.eis || null, afwijking: o.afwijking || null });
@@ -375,9 +380,10 @@ function adviesControle(z, eisen) {
   if (past.length) { uit.verschil_eur = past[0].verschil_eur; zet('klopt_niet', 'Niet de goedkoopste die past: ' + eur(past[0].verschil_eur) + ' duurder dan een optie die ook aan je eisen voldoet.'); }
   if (uit.goedkoper.some((g) => g.soort === 'geen_eis')) zet('klopt_niet', 'Een goedkopere optie viel af om iets wat geen eis van je is.');
   if (uit.goedkoper.some((g) => g.soort === 'geen_reden')) zet('klopt_niet', 'Een goedkopere optie viel af zonder reden.');
-  if (uit.goedkoper.some((g) => g.soort === 'onbekend')) zet('onbekend', 'Van ' + (uit.goedkoper.filter((g) => g.soort === 'onbekend').length === 1 ? 'een goedkopere optie' : 'goedkopere opties')
-    + ' is niet vastgelegd of hij aan je eisen voldoet; niet na te rekenen.');
-  if (uit.mogelijk_goedkoper.length) uit.redenen.push('Bij ' + uit.mogelijk_goedkoper.length + (uit.mogelijk_goedkoper.length === 1 ? ' optie' : ' opties') + ' zijn de verzendkosten onbekend; die kan goedkoper uitvallen.');
+  const onb = uit.goedkoper.filter((g) => g.soort === 'onbekend').length;
+  if (onb) zet('onbekend', 'Van ' + (onb === 1 ? 'een goedkopere optie' : 'goedkopere opties') + ' is niet vastgelegd of hij aan je eisen voldoet; niet na te rekenen.');
+  // review MOET 5: een optie zonder bekende verzending die al onder het advies begint, maakt "goedkoopste die past" onzeker
+  if (uit.mogelijk_goedkoper.length) zet('onbekend', 'Bij ' + uit.mogelijk_goedkoper.length + (uit.mogelijk_goedkoper.length === 1 ? ' goedkoper beginnende optie' : ' goedkoper beginnende opties') + ' zijn de verzendkosten onbekend; niet na te rekenen.');
   if (uit.goedkoopst_id && uit.goedkoopst_id !== adv.id && uit.verschil_eur == null && at != null && uit.goedkoopst_eur < at - 0.005) uit.verschil_eur = r2(at - uit.goedkoopst_eur);
   uit.reden = uit.redenen[0] || null;
   return uit;
@@ -387,16 +393,31 @@ function adviesControle(z, eisen) {
 // telt ook (de poort ziet een naam zonder datum niet). Medische productwoorden mogen (bloeddrukmeter). Geen poort of een fout = dicht.
 const POORT_PERSOON = /(^|[^\p{L}])(mw|mevr|mevrouw|dhr|de heer|meneer|patiënt(e|en)?|patient(e|en)?|cliënt(e|en)?|client(e|en)?|pt|bsn|geb\.?|geboren)([^\p{L}]|$)/iu;
 const POORT_TOEGESTAAN = ['medisch', 'medisch_3', 'medisch_4'];
+// review wv2850 MOET 2: een losse naam ziet de patiëntpoort niet. Daarom ook dicht bij een voorzetsel met een woord met hoofdletter erna
+// ("voor Jan", "van Jansen", "t.b.v. Pietersen"), behalve de eigen entiteiten, feestdagen en woorden in hoofdletters (merken als KERN).
+// Liever een keer te streng (David haalt het woord weg of schrijft "Samsung-oplader") dan een naam naar de zoekronde.
+const POORT_NAAM = /(?:^|[\s(,;:])(?:voor|van|namens|aan|bij|met|t\.?b\.?v\.?|tbv|from|for)\s+((?:\p{Lu}[\p{Ll}'’-]+)(?:\s+(?:van|de|der|den|ter|ten|\p{Lu}[\p{Ll}'’-]+))*)/gu;
+const POORT_NAAM_MAG = new Set(['tolgaarde', 'groenhouten', 'pot', 'holding', 'praktijkhouders', 'privé', 'prive', 'sloel', 'leusden', 'amersfoort', 'nederland', 'kerst', 'kerstmis',
+  'sinterklaas', 'pasen', 'koningsdag', 'moederdag', 'vaderdag', 'oud', 'nieuw', 'de', 'het', 'een',
+  // veelgebruikte merken (een merk na "van"/"voor" is geen naam): liever een korte vaste lijst dan een naamherkenner
+  'samsung', 'philips', 'apple', 'bosch', 'miele', 'sony', 'dell', 'lenovo', 'ikea', 'google', 'microsoft', 'logitech', 'canon', 'epson', 'brother', 'siemens',
+  'makita', 'dyson', 'nespresso', 'sonos', 'garmin', 'omron', 'braun', 'tefal', 'riester', 'heine', 'seca', 'kern', 'littmann', 'hama', 'gazelle', 'lego', 'nintendo']);
+function naamIn(x) {
+  POORT_NAAM.lastIndex = 0;
+  let m;
+  while ((m = POORT_NAAM.exec(String(x)))) { const w = m[1].split(/\s+/)[0].toLowerCase(); if (!POORT_NAAM_MAG.has(w)) return true; }
+  return false;
+}
 function poortVrij(poort, teksten) {
   const t = (teksten || []).filter((x) => typeof x === 'string' && x.trim());
   if (!t.length) return true;
   if (typeof poort !== 'function') return false;
-  if (t.some((x) => POORT_PERSOON.test(x))) return false;
+  if (t.some((x) => POORT_PERSOON.test(x) || naamIn(x))) return false;
   let b = null;
   try { b = poort(t); } catch (e) { return false; }
   return !!b && b.tegenhouden === false && Array.isArray(b.soorten) && b.soorten.every((s) => POORT_TOEGESTAAN.indexOf(s) >= 0);
 }
-const POORT_FOUT = 'Haal de persoonsgegevens eruit; Shopper zoekt alleen op het product.';
+const POORT_FOUT = 'Haal de persoonsgegevens eruit (ook een naam na "voor" of "van"); Shopper zoekt alleen op het product.';
 // De opdracht voor de agent van Nieuwe zoektocht (zelfde bouw als opnieuwOpdracht; alles behalve de vaste tekst is gegeven)
 function nieuwOpdracht(g) {
   if (typeof g.grondwet !== 'string' || g.grondwet.indexOf('GRONDWET-KERN v1') < 0 || !ID_RE.test(String(g.start_id || ''))) return null;
