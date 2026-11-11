@@ -161,6 +161,13 @@ const NR = /\d{8,}/;
     toets('start 06:59 (+ seconden onbekend), 11 s ophalen: te laat, niets geschreven', x.buf.length === 0 && /te laat/.test(u.detail.fout), u);
     x = maak({ staatPad: path.join(d, 'cr8', 'staat.json'), nu: () => klok }); u = await x.k.doe({ ams: { datum: '2027-06-13', uur: 6, min: 58 } });
     toets('start 06:58 zonder vertraging: wel geschreven', x.buf.length === 1, u); }
+  { let klok = 0; const sp10 = path.join(d, 'cr10', 'staat.json');
+    x = maak({ staatPad: sp10, nu: () => klok, bufferZet: async () => { klok += 25 * 60000; } });
+    u = await x.k.doe({ ams: { datum: '2027-06-20', uur: 6, min: 40 } });
+    const s10 = JSON.parse(fs.readFileSync(sp10, 'utf8'));
+    toets('schrijven duurt tot na 07:00: niemand als gemeld, box-rij', /na 07:00 geschreven/.test(u.detail.fout) && Object.values(s10.personen).every(p => !p.gemeld_op && !p.jarig_jaar) && x.box.length === 1, [u, s10]); }
+  { x = maak({ staatPad: path.join(d, 'cr11', 'staat.json'), datums: async (ids) => ({ datums: {} }) }); u = await x.k.doe({ ams: ZO });
+    toets('luik laat een gevraagd nummer weg: fail-closed', /liet een gevraagd nummer weg/.test(u.detail.fout) && x.buf.length === 0, u); }
   // review r3 MOET 1: appje op de meldzondag zelf → nieuwe periode, 43 d later opnieuw gemeld
   { const sp9 = path.join(d, 'cr9', 'staat.json'); fs.mkdirSync(path.dirname(sp9), { recursive: true });
     fs.writeFileSync(sp9, JSON.stringify({ personen: { '20_Prive/Nep/Persoon 0': { laatst_gezien: '2027-01-01', gemeld_op: '2027-03-07', jarig_jaar: null } } }));

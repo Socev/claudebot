@@ -198,6 +198,7 @@ function maak(o) {
       try { r = await o.datums(deel); } catch (e) { return mislukt('zoekluik onbereikbaar'); }
       if (!r || typeof r !== 'object' || !r.datums || typeof r.datums !== 'object' || Object.keys(r).some(function (k) { return k !== 'datums'; })) return mislukt('zoekluik gaf een ander antwoord');
       for (const id of deel) {
+        if (!Object.prototype.hasOwnProperty.call(r.datums, id)) return mislukt('zoekluik liet een gevraagd nummer weg');   // review r4 ZOU 1
         const v = r.datums[id];
         if (v !== null && v !== undefined && !isDatum(v)) return mislukt('zoekluik gaf iets anders dan een datum');
         datums[id] = v || null;
@@ -234,9 +235,11 @@ function maak(o) {
     if (droog) { laatst = { op: new Date(nu()).toISOString(), droog: true }; return { ok: true, droog: true, regel: t, detail: detail }; }
     // review r2 MOET 1: na alle aanroepen opnieuw de klok: na 07:00 is de briefing weg → niets schrijven, niemand als gemeld
     // de minuut van de stapklok kan tot 59 s achterlopen: reken het einde van die minuut (review r3 MOET 2)
-    if (t && a.uur * 60 + a.min + 1 + (nu() - start) / 60000 > 7 * 60) return mislukt('te laat voor de briefing van 07:00');
+    const telaat = function () { return a.uur * 60 + a.min + 1 + (nu() - start) / 60000 > 7 * 60; };
+    if (t && telaat()) return mislukt('te laat voor de briefing van 07:00');
     if (t) {
       try { await o.bufferZet(datum, t); } catch (e) { return mislukt('buffer niet gezet'); }
+      if (telaat()) return mislukt('rij pas na 07:00 geschreven; niemand als gemeld vastgelegd');   // review r4 MOET 1
     }
     // pas na een geslaagde bufferrij als gemeld vastleggen (anders zou een mislukte zondag de melding inslikken)
     const pers = function (pad) { if (!s.personen[pad]) s.personen[pad] = { laatst_gezien: null, gemeld_op: null, jarig_jaar: null }; return s.personen[pad]; };
