@@ -966,6 +966,24 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       && /shopper-winkelscore\.json/.test(bl13) && /'winkel-score\.py'/.test(bl13) && /timeout: 180000/.test(bl13) && /env: \{ PATH: process\.env\.PATH \|\| '\/usr\/bin:\/bin', LANG: 'C\.UTF-8', HOME: '\/tmp' \}/.test(bl13)
       && /RELEASE_OPTIONEEL="[^"]*\bshopper-winkels\.js winkel-score\.py\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
     toets('13w shopper-winkels.js logt niets en kent geen sleutel', !/console\.|process\.env|eval\(/.test(fs.readFileSync('shopper-winkels.js', 'utf8')));
+    // review wv2935 ronde 1
+    const dr = { verzend: { eur: 4.95, drempel_eur: 59.7, boven_drempel_eur: 0, tekst: null, gemeten: null } };
+    toets('13x (MOET 1) drempel in hele centen: 3 × 19,90 = 59,70 haalt een drempel van 59,70 (gratis)', WM.verzendUitTabel(dr, 3 * 19.9).eur === 0 && WM.verzendUitTabel(dr, 59.69).eur === 4.95, 3 * 19.9);
+    {
+      const SPm = path.join(F, 'samen.json');
+      fs.writeFileSync(SPm, JSON.stringify({ op: '2026-10-01T00:00:00Z', winkels: { 'vosproef.nl': { kiyoh: { cijfer: 8.8, aantal: 107 } } } }));
+      let klokM = new Date('2026-11-11T16:00:00Z'), rondes = 0;
+      const wmM = WM.maak({ scorePad: SPm, nu: () => klokM, scoreLezer: async () => { rondes++; return { op: klokM.toISOString(), winkels: { 'vosproef.nl': { kiyoh: { fout: 'niet te lezen (HTTP 503)' }, kieskeurig: null, thuiswinkel: null } } }; } });
+      wmM.overzicht(FAV, []); await new Promise((r) => setTimeout(r, 20));
+      const naM = JSON.parse(fs.readFileSync(SPm, 'utf8'));
+      klokM = new Date(klokM.getTime() + 2 * 3600000); wmM.overzicht(FAV, []); await new Promise((r) => setTimeout(r, 20));
+      const r1 = rondes;
+      klokM = new Date(klokM.getTime() + 5 * 3600000); wmM.overzicht(FAV, []); await new Promise((r) => setTimeout(r, 20));
+      toets('13y (ZOU 2) mislukte bron overschrijft de eerdere goede meting niet; met fouten na 6 uur (niet na 30 dagen) een nieuwe poging',
+        naM.winkels['vosproef.nl'].kiyoh.cijfer === 8.8 && naM.fouten === 1 && r1 === 1 && rondes === 2, [naM, r1, rondes]);
+    }
+    toets('13z (ZOU 1) scoreleesscript: na 140 s geen nieuwe vraag meer (rest "tijd op"), ruim binnen de 180 s van de pod',
+      /DEADLINE_S = 140/.test(pyB) && /time\.monotonic\(\) - t0 > DEADLINE_S/.test(pyB) && /niet gelezen \(tijd op\)/.test(pyB));
   }
 
   fs.rmSync(W, { recursive: true, force: true });
