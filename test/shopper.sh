@@ -454,7 +454,8 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     fs.writeFileSync(P10, bron10);
     let klok = new Date('2026-11-06T09:00:00Z'), starts = [], startAntwoord = { ok: true, job_id: 'abcdef0123456789' }, stand = 'loopt';
     const GW = 'GRONDWET-KERN v1 — proefblok';
-    const m10 = S.maak({ vault: V10, vv: VV, nu: () => klok, opnieuwPad: path.join(W, 'opnieuw.json'), grondwet: () => GW,
+    const PP = require('./intake/patientpoort.js'), POORT = (t) => PP.beoordeel({ teksten: t }, { eigen: PP.maakEigen(null, {}) });   // wv2850: de echte patiëntpoort
+    const m10 = S.maak({ vault: V10, vv: VV, nu: () => klok, opnieuwPad: path.join(W, 'opnieuw.json'), grondwet: () => GW, poort: POORT,
       agentStart: async (pr) => { starts.push(pr); if (startAntwoord instanceof Error) throw startAntwoord; return startAntwoord; }, agentStand: () => stand });
     const id10 = m10.lijst().body.zoektochten[0].id;
     let r = m10.eisen(id10, { wens: 'Duette-gordijnen keuken en slaapkamer', eisen: ['Duette (honingraat)', '', 'keuken lichtdoorlatend', 'slaapkamer "verduisterend"'] });
@@ -516,7 +517,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     // server.js-blok
     const blok = src.slice(hb, he);
     toets('10s server.js: routes eisen (teller shopper_status 30) en opnieuw (6/uur), label socev: Shopper opnieuw, grondwet uit de release', /\/eisen\$\/\.exec\(route\)/.test(blok) && /appTeller\('shopper_opnieuw', 6, 3600000\)/.test(blok)
-      && /label: 'socev: Shopper opnieuw'/.test(blok) && /autoGrondwet\(\)/.test(blok) && /shopper-opnieuw\.json/.test(blok));
+      && /label: label === 'socev: Shopper nieuw' \? 'socev: Shopper nieuw' : 'socev: Shopper opnieuw'/.test(blok) && /autoGrondwet\(\)/.test(blok) && /shopper-opnieuw\.json/.test(blok));
     fs.writeFileSync(P10, na);
     const ctx10 = vm.createContext({ require, __dirname: process.cwd(), path, fs, VAULT: V10, VV: () => VV, appStaat: { tellers: {} }, logError: () => {}, appTeller: () => true,
       appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Object, JSON, String, Promise, Buffer });
@@ -526,6 +527,116 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('10t route eisen: 200 en de pagina heeft de nieuwe wens; reden zonder wens', rr.s === 200 && /wens: "Nieuwe wens"/.test(fs.readFileSync(P10, 'utf8')) && rr.app.reden === 'shopper eisen ' + id10 + ' 200', rr);
     rr = await vr('POST /app/shopper/' + id10 + '/opnieuw');
     toets('10u route opnieuw zonder http/PORT in de context = 404 (geen agent)', rr.s === 404 && rr.app.reden === 'shopper opnieuw ' + id10 + ' 404', rr);
+  }
+
+  // ── 11. wv2850: advies-controle (vaste toets: verzonnen weegschaal- en bloeddrukmeterpagina naar het voorbeeld van 9-11), privacypoort, Nieuwe zoektocht ──
+  {
+    const PP = require('./intake/patientpoort.js'), POORT = (t) => PP.beoordeel({ teksten: t }, { eigen: PP.maakEigen(null, {}) });
+    const O = (id, x) => Object.assign({ id, winkel: 'Proefwinkel', verkoper: '', product: 'Proefding', koop_eenheid: '1 stuk', koop_aantal: 1, prijs_eur: null, verzending_eur: null, totaal_eur: null,
+      btw: 'incl', levertijd: '', voorraad: '', url: 'https://proef.nl/p/' + id, url_geweigerd: false, favoriet: false, gelezen: '', voldoet: null, eis: null, afwijking: null }, x);
+    const AC = (opties, advies, eisen, aantal) => S.adviesControle({ _opties: opties, advies, aantal: aantal || null }, eisen);
+    // weegschaal: 2 stuks, eis "digitaal of analoog"; advies € 892,98 terwijl een passende optie € 99,90 kost
+    let c = AC([O('o1', { koop_aantal: 2, prijs_eur: 446.49, verzending_eur: 0, totaal_eur: 892.98, voldoet: 'ja' }), O('o2', { koop_aantal: 2, prijs_eur: 49.95, verzending_eur: 0, totaal_eur: 99.9, voldoet: 'ja' })], 'o1', ['digitaal of analoog'], 2);
+    toets('11a weegschaal: advies € 892,98 naast een passende € 99,90 = klopt niet, goedkoopste die past o2, verschil € 793,08', c.uitkomst === 'klopt_niet' && c.ok === false && c.goedkoopst_id === 'o2'
+      && c.verschil_eur === 793.08 && c.goedkoper[0].soort === 'past' && /goedkoopste die past/.test(c.reden), c);
+    c = AC([O('o1', { koop_aantal: 2, prijs_eur: 446.49, verzending_eur: 0, totaal_eur: 892.98, voldoet: 'ja' }), O('o2', { koop_aantal: 2, prijs_eur: 49.95, verzending_eur: 0, totaal_eur: 99.9, voldoet: 'nee', eis: 'geijkt klasse III', afwijking: 'niet geijkt' })], 'o1', ['digitaal of analoog'], 2);
+    toets('11b weegschaal: goedkopere viel af om iets wat geen eis van David is (geijkt) = klopt niet (geen_eis)', c.uitkomst === 'klopt_niet' && c.goedkoper[0].soort === 'geen_eis' && c.goedkoopst_id === 'o1', c);
+    // bloeddrukmeter: oude pagina zonder voldoet-velden, met eisen; een optie € 13,31 goedkoper dan het advies
+    const bd = (x8) => [O('o6', { prijs_eur: 105.02, verzending_eur: 5.93, totaal_eur: 110.95 }), O('o7', { prijs_eur: 115.75, verzending_eur: 5.93, totaal_eur: 121.68 }), O('o8', Object.assign({ prijs_eur: 91.71, verzending_eur: 5.93, totaal_eur: 97.64 }, x8))];
+    const eisBd = ['handmatig, niet elektronisch', 'tafelmodel met grote schaal'];
+    c = AC(bd({}), 'o6', eisBd, 1);
+    toets('11c bloeddrukmeter zonder vastlegging: niet na te rekenen (geen vals alarm), de goedkopere staat erbij met € 13,31', c.uitkomst === 'niet_na_te_rekenen' && c.ok === null && c.goedkoper.length === 1
+      && c.goedkoper[0].id === 'o8' && c.goedkoper[0].verschil_eur === 13.31 && c.goedkoper[0].soort === 'onbekend' && c.vastgelegd === false, c);
+    c = AC(bd({ voldoet: 'nee', eis: 'Tafelmodel met  grote schaal', afwijking: 'schaal 120 mm' }), 'o6', eisBd, 1);
+    toets('11d bloeddrukmeter met vastlegging: goedkopere valt af op Davids eis (hoofdletters/spaties maken niet uit) = klopt, met reden zichtbaar', c.uitkomst === 'klopt' && c.ok === true && c.goedkoper[0].soort === 'valt_af'
+      && c.goedkoper[0].afwijking === 'schaal 120 mm' && c.goedkoopst_id === 'o6', c);
+    c = AC(bd({ voldoet: 'nee' }), 'o6', eisBd, 1);
+    toets('11e goedkopere "voldoet niet" zonder eis en zonder afwijking = klopt niet (geen_reden)', c.uitkomst === 'klopt_niet' && c.goedkoper[0].soort === 'geen_reden', c);
+    c = AC([O('o1', { prijs_eur: 40, verzending_eur: 5, totaal_eur: 50 }), O('o2', { prijs_eur: 48, verzending_eur: 0, totaal_eur: 48 })], 'o1', [], 1);
+    toets('11f rekenfout: totaal € 50 bij 40 + 5 = klopt niet; Shopper rekent met € 45 (en o2 € 48 is dan niet goedkoper)', c.uitkomst === 'klopt_niet' && c.per_optie.o1.rekenfout === true && c.per_optie.o1.totaal_eur === 45 && c.goedkoper.length === 0, c);
+    c = AC([O('o1', { koop_aantal: 1, prijs_eur: 30, verzending_eur: 0, totaal_eur: 30 })], 'o1', [], 2);
+    const c2 = AC([O('o1', { koop_eenheid: 'set van 2', koop_aantal: 1, prijs_eur: 30, verzending_eur: 0, totaal_eur: 30 })], 'o1', [], 2);
+    const c3 = AC([O('o1', { koop_eenheid: 'per meter', koop_aantal: 1, prijs_eur: 30, verzending_eur: 0, totaal_eur: 30 })], 'o1', [], 2);
+    toets('11g aantal: 2 gevraagd, 1 stuk gekocht = klopt niet; set van 2 = klopt; onleesbare eenheid = niet getoetst', c.uitkomst === 'klopt_niet' && c.per_optie.o1.aantal_ok === false && c2.uitkomst === 'klopt' && c3.per_optie.o1.aantal_ok === null, [c, c2, c3]);
+    c = AC([O('o1', { prijs_eur: 60, verzending_eur: 0, totaal_eur: 60 }), O('o2', { prijs_eur: 50, verzending_eur: null, totaal_eur: null })], 'o1', [], 1);
+    toets('11h verzending onbekend: "vanaf € 50" onder het advies = mogelijk goedkoper (waarschuwing), uitkomst blijft klopt', c.uitkomst === 'klopt' && c.mogelijk_goedkoper.length === 1 && c.mogelijk_goedkoper[0].vanaf_eur === 50
+      && c.per_optie.o2.vanaf_eur === 50 && /verzendkosten onbekend/.test(c.redenen.join(' ')), c);
+    c = AC([O('o1', { prijs_eur: 60, verzending_eur: 0, totaal_eur: 60 }), O('o2', { prijs_eur: 50, verzending_eur: 0, totaal_eur: 50 })], 'o1', [], 1);
+    toets('11i zonder eisen past alles: advies niet de goedkoopste = klopt niet', c.uitkomst === 'klopt_niet' && c.goedkoopst_id === 'o2' && c.verschil_eur === 10, c);
+    c = AC([O('o1', { prijs_eur: 60, verzending_eur: null })], 'o1', [], 1);
+    const c4 = AC([O('o1', { prijs_eur: 60, verzending_eur: 0, totaal_eur: 60 })], null, [], 1), c5 = AC([O('o1', { prijs_eur: 60, verzending_eur: 0, totaal_eur: 60, voldoet: 'nee', eis: 'x' })], 'o1', ['x'], 1);
+    toets('11j advies zonder totaal = niet na te rekenen; geen advies = geen_advies; advies voldoet zelf niet = klopt niet', c.uitkomst === 'niet_na_te_rekenen' && c4.uitkomst === 'geen_advies' && c5.uitkomst === 'klopt_niet', [c, c4, c5]);
+    toets('11k eenheidStuks: stuk/""/set van 2/2 stuks/4-pack/doos van 10/per meter', S.eenheidStuks('1 stuk') === 1 && S.eenheidStuks('') === 1 && S.eenheidStuks('set van 2') === 2 && S.eenheidStuks('2 stuks') === 2
+      && S.eenheidStuks('4-pack') === 4 && S.eenheidStuks('doos van 10') === 10 && S.eenheidStuks('per meter') === null);
+    // privacypoort (verzonnen teksten)
+    toets('11l poort vrij: productwoorden, ook medische (bloeddrukmeter, stethoscoop, manchet)', S.poortVrij(POORT, ['Tafelmodel bloeddrukmeter spreekkamer', 'grote schaal', 'met stethoscoop en manchet'])
+      && S.poortVrij(POORT, ['Weegschaal 2 stuks', 'digitaal of analoog']) && S.poortVrij(POORT, ['Duette rolgordijn 80 cm']));
+    toets('11m poort dicht: aanspreekvorm, patiëntwoord, geboortedatum, BSN-vorm, geen poort, poort gooit, poort zonder uitslag',
+      !S.poortVrij(POORT, ['rolstoel voor mevrouw Proef']) && !S.poortVrij(POORT, ['bloeddrukmeter', 'voor patiënt met hypertensie']) && !S.poortVrij(POORT, ['krukken voor iemand geb. 12-03-1950'])
+      && !S.poortVrij(POORT, ['label met 111222333']) && !S.poortVrij(null, ['lamp']) && !S.poortVrij(() => { throw new Error('x'); }, ['lamp']) && !S.poortVrij(() => null, ['lamp']));
+    // Nieuwe zoektocht
+    const V11 = path.join(W, 'vault11'), TG11 = path.join(V11, '10_Zakelijk/Tolgaarde/Shopper');
+    fs.mkdirSync(TG11, { recursive: true });
+    let klok = new Date('2026-11-11T15:00:00Z'), starts = [], antwoord = { ok: true, job_id: '0123456789abcdef' }, stand = 'loopt';
+    const NP = path.join(W, 'nieuw.json');
+    const m11 = S.maak({ vault: V11, vv: VV, nu: () => klok, nieuwPad: NP, opnieuwPad: path.join(W, 'opnieuw11.json'), grondwet: () => 'GRONDWET-KERN v1 — proefblok', poort: POORT,
+      agentStart: async (pr, label) => { starts.push({ pr, label }); return antwoord; }, agentStand: () => stand });
+    let r = await m11.nieuw({ wens: 'Tafelmodel bloeddrukmeter', aantal: 1, entiteit: 'tolgaarde', eisen: ['handmatig', '', 'grote schaal'] });
+    const sid = r.body && r.body.lopend && r.body.lopend.start_id;
+    toets('11n nieuw: 200, één agent "socev: Shopper nieuw", opdracht met grondwet, start_id, map en eisen als JSON-gegeven (lege eis weg)', r.status === 200 && starts.length === 1 && starts[0].label === 'socev: Shopper nieuw'
+      && /^[0-9a-f]{12}$/.test(sid) && starts[0].pr.indexOf('GRONDWET-KERN v1') === 0 && starts[0].pr.includes('start_id: "' + sid + '"') && starts[0].pr.includes('10_Zakelijk/Tolgaarde/Shopper/')
+      && starts[0].pr.includes('{"wens":"Tafelmodel bloeddrukmeter","aantal":1,"eisen":["handmatig","grote schaal"]}') && !/vraagSocev|gesprek met Socev\)/.test(''), r);
+    toets('11o staat 0600; lijst geeft lopend (loopt) met wens en entiteit', (fs.statSync(NP).mode & 0o777) === 0o600 && m11.lijst().body.lopend.length === 1 && m11.lijst().body.lopend[0].stand === 'loopt'
+      && m11.lijst().body.lopend[0].wens === 'Tafelmodel bloeddrukmeter' && m11.lijst().body.lopend[0].entiteit === 'tolgaarde', m11.lijst().body.lopend);
+    r = await m11.nieuw({ wens: 'Tafelmodel bloeddrukmeter', eisen: [] });
+    toets('11p dezelfde wens binnen 5 minuten = 409, geen tweede agent', r.status === 409 && starts.length === 1, r);
+    const nee = await Promise.all([m11.nieuw({ wens: 'x', pad: '../a' }), m11.nieuw({ wens: '' }), m11.nieuw({ wens: 'x', entiteit: 'geheim' }), m11.nieuw({ wens: 'x', aantal: 0 }),
+      m11.nieuw({ wens: 'x', eisen: ['y'.repeat(201)] }), m11.nieuw({ wens: 'x', eisen: Array(21).fill('a') }), m11.nieuw({ wens: 'x', eisen: 'a' }), m11.nieuw(null)]);
+    toets('11q nieuw weigert: onbekend veld, lege wens, onbekende entiteit, aantal 0, te lange eis, > 20 eisen, geen lijst, geen gegevens', nee.every((x) => x.status === 400) && starts.length === 1, nee.map((x) => x.status));
+    const dicht = await Promise.all([m11.nieuw({ wens: 'Rolstoel voor mevrouw Proef' }), m11.nieuw({ wens: 'Krukken', eisen: ['voor patiënt geb. 12-03-1950'] })]);
+    toets('11r privacypoort op wens én eisen: 422 met de vaste melding, geen agent', dicht.every((x) => x.status === 422 && x.body.fout === S.POORT_FOUT) && starts.length === 1, dicht);
+    const zonderPoort = S.maak({ vault: V11, vv: VV, nieuwPad: path.join(W, 'n2.json'), grondwet: () => 'GRONDWET-KERN v1', agentStart: async () => antwoord });
+    toets('11s zonder poort in de pod = dicht (422), geen agent', (await zonderPoort.nieuw({ wens: 'Lamp' })).status === 422);
+    antwoord = { ok: false, status: 429 };
+    r = await m11.nieuw({ wens: 'Bureaulamp' });
+    toets('11t geen plek voor een agent = 503 met uitleg, niets bewaard', r.status === 503 && /te veel achtergrondklussen/.test(r.body.fout) && m11.lijst().body.lopend.length === 1, r);
+    antwoord = { ok: true, job_id: 'fedcba9876543210' };
+    // de agent schrijft de pagina met start_id: lopend verdwijnt, de zoektocht staat er met controle
+    fs.writeFileSync(path.join(TG11, 'Shopper - 2026-11-11 - Bloeddrukmeter.md'), pagina(['type: shopper-zoektocht', 'start_id: "' + sid + '"', 'bron: app', 'wens: "Tafelmodel bloeddrukmeter"', 'status: open',
+      'gezocht: 2026-11-11T16:20+01:00', 'aantal: 1', 'eisen: ["handmatig", "grote schaal"]', 'opties:',
+      '  - {id: o1, winkel: "Proefwinkel", product: "Meter A", koop_eenheid: "1 stuk", koop_aantal: 1, prijs_eur: 105.02, verzending_eur: 5.93, totaal_eur: 110.95, voldoet: ja, url: "https://proef.nl/a"}',
+      '  - {id: o2, winkel: "Proefwinkel", product: "Meter B", koop_eenheid: "1 stuk", koop_aantal: 1, prijs_eur: 91.71, verzending_eur: 5.93, totaal_eur: 97.64, voldoet: nee, eis: "grote schaal", afwijking: "schaal 120 mm", url: "https://proef.nl/b"}',
+      'advies: o1']));
+    const L11 = m11.lijst().body, z11 = L11.zoektochten[0];
+    toets('11u pagina met start_id: lopend leeg; lijst geeft controle klopt en goedkoopste die past', L11.lopend.length === 0 && z11.controle === 'klopt' && z11.goedkoopst_passend_eur === 110.95 && z11.start_id === sid, [L11.lopend, z11]);
+    const d11 = m11.zoektocht(z11.id).body.zoektocht;
+    toets('11v detail: advies_controle en per optie voldoet/eis/afwijking', d11.advies_controle.uitkomst === 'klopt' && d11.advies_controle.goedkoper[0].soort === 'valt_af'
+      && d11.opties[1].voldoet === 'nee' && d11.opties[1].eis === 'grote schaal' && d11.opties[1].afwijking === 'schaal 120 mm' && d11.opties[0].voldoet === 'ja', d11.advies_controle);
+    // mislukt: 1 dag zichtbaar, daarna niet meer
+    starts = [];
+    r = await m11.nieuw({ wens: 'Bureaulamp' });
+    stand = 'mislukt';
+    const mis = m11.lijst().body.lopend.find((x) => x.wens === 'Bureaulamp');
+    klok = new Date(klok.getTime() + 25 * 3600000);
+    toets('11w mislukte start: zichtbaar als mislukt, na een dag weg', r.status === 200 && mis && mis.stand === 'mislukt' && !m11.lijst().body.lopend.some((x) => x.wens === 'Bureaulamp'), mis);
+    // eisen en opnieuw gaan ook langs de poort
+    const P11 = path.join(TG11, 'Shopper - 2026-11-11 - Bloeddrukmeter.md'), voor11 = fs.readFileSync(P11, 'utf8');
+    r = m11.eisen(z11.id, { wens: 'Tafelmodel bloeddrukmeter', eisen: ['voor dhr. Proef'] });
+    toets('11x eisen met persoonsgegevens = 422, pagina ongewijzigd', r.status === 422 && fs.readFileSync(P11, 'utf8') === voor11, r);
+    fs.writeFileSync(P11, voor11.replace('eisen: ["handmatig", "grote schaal"]', 'eisen: ["handmatig", "voor mevrouw Proef"]'));
+    starts = [];
+    r = await m11.opnieuw(z11.id);
+    toets('11y opnieuw met persoonsgegevens op de pagina = 422, geen agent', r.status === 422 && starts.length === 0, r);
+    fs.writeFileSync(P11, voor11);
+    r = await m11.opnieuw(z11.id);
+    toets('11z opnieuw met schone pagina: label socev: Shopper opnieuw', r.status === 200 && starts.length === 1 && starts[0].label === 'socev: Shopper opnieuw', r);
+    toets('11za opdracht: zonder grondwetblok of zonder geldige start_id geen opdracht', S.nieuwOpdracht({ grondwet: 'x', start_id: 'abcdefabcdef' }) === null && S.nieuwOpdracht({ grondwet: 'GRONDWET-KERN v1', start_id: '../x' }) === null);
+    // server.js: route nieuw met tellers, poort en label
+    const src11 = fs.readFileSync('server.js', 'utf8'), b0 = src11.indexOf('const shopper = (function () {'), b1 = src11.indexOf('// ── einde OVIS Shopper ──');
+    const blok11 = src11.slice(b0, b1);
+    toets('11zb server.js: POST /app/shopper/nieuw met 6/uur en 12/dag, poort = patiëntpoort, staat shopper-nieuw.json, alleen twee labels', /route === 'POST \/app\/shopper\/nieuw'/.test(blok11)
+      && /appTeller\('shopper_nieuw', 6, 3600000\)/.test(blok11) && /appTeller\('shopper_nieuw_dag', 12, 86400000\)/.test(blok11) && /intake', 'patientpoort\.js'/.test(blok11) && /poort: poort/.test(blok11)
+      && /shopper-nieuw\.json/.test(blok11) && /label === 'socev: Shopper nieuw' \? 'socev: Shopper nieuw' : 'socev: Shopper opnieuw'/.test(blok11));
   }
 
   fs.rmSync(W, { recursive: true, force: true });

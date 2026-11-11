@@ -21680,6 +21680,11 @@ if (GHAWA_TIKKEN) {
 //   POST /app/shopper/<id>/eisen      wv2561: {wens, eisen: [..]} van een open zoektocht (alleen die regels + aangepast; deelt shopper_status 30/uur)
 //   POST /app/shopper/<id>/opnieuw    wv2561: start een achtergrondagent "socev: Shopper opnieuw" (skill ovis-shopper) op dezelfde pagina; 6/uur,
 //                                     één ronde tegelijk per zoektocht; stand in klokken/shopper-opnieuw.json (job + tijd, geen wens)
+//   POST /app/shopper/nieuw           wv2850: {wens, aantal?, entiteit?, eisen[]} = Nieuwe zoektocht in de app zelf (geen zin meer in het gesprek):
+//                                     privacypoort (patiëntpoort, fail-closed; ook op eisen en opnieuw) → agent "socev: Shopper nieuw" met een
+//                                     start_id die op de nieuwe pagina komt; 6/uur en 12/dag; stand in klokken/shopper-nieuw.json (2 dagen).
+//                                     GET /app/shopper geeft daarbij lopend[] en per zoektocht de uitkomst van de advies-controle; GET …/<id>
+//                                     geeft advies_controle (totalen nagerekend, per optie voldoet/eis/afwijking, niets goedkopers stil weg).
 // wv2276 S5: bij een gekochte zoektocht geeft GET /app/shopper/<id> ook facturen (hooguit 3 passende facturen uit de Facturen-app: id,
 // leverancier, datum, bedrag, zekerheid; berekend, niets geschreven) en de lijst factuur_gevonden (aantal). De app-sessie is in Facturen de
 // eigenaar (rolVoor ingang app), dus Shopper toont niets dat de Facturen-app David niet ook toont.
@@ -21715,9 +21720,10 @@ const shopper = (function () {
   };
   // wv2561 Opnieuw zoeken: een achtergrondagent (route socev, zoals Shopper vanzelf) via POST /agent op deze pod; de opdracht maakt shopper.js
   // (vaste tekst + het grondwet-blok uit de release + pad en eisen van de pagina). agentStand leest alleen het register (loopt / klaar / mislukt).
-  const agentStart = (typeof http !== 'undefined' && typeof PORT !== 'undefined') ? function (prompt) {
+  // wv2850: ook Nieuwe zoektocht (label 'socev: Shopper nieuw'); alleen deze twee vaste labels
+  const agentStart = (typeof http !== 'undefined' && typeof PORT !== 'undefined') ? function (prompt, label) {
     return new Promise(function (klaar) {
-      const body = JSON.stringify({ secret: SECRET, prompt: prompt, label: 'socev: Shopper opnieuw', chat_id: '40687', max_minuten: 40 });
+      const body = JSON.stringify({ secret: SECRET, prompt: prompt, label: label === 'socev: Shopper nieuw' ? 'socev: Shopper nieuw' : 'socev: Shopper opnieuw', chat_id: '40687', max_minuten: 40 });
       const r = http.request({ host: '127.0.0.1', port: PORT, method: 'POST', path: '/agent', timeout: 15000,
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, function (res) {
         let t = '';
@@ -21736,7 +21742,15 @@ const shopper = (function () {
     return a.ok === true ? 'klaar' : a.ok === false ? 'mislukt' : (a.ended ? 'klaar' : 'loopt');
   };
   const grondwet = function () { return typeof autoGrondwet === 'function' ? autoGrondwet() : null; };
-  try { return require(p).maak({ vault: VAULT, vv: VV(), facturenPad: facturenPad, lezer: lezer, todoistTaak: todoistTaak,
+  // wv2850 (plan § 3, review MOET 2): de privacypoort voor wens en eisen = de patiëntpoort van Intake (zelfde aanroep als de OpenAI-hulp);
+  // shopper.js beslist (fail-closed: alleen vrij bij tegenhouden false en geen persoonskenmerk)
+  let poortMod;
+  const poort = function (teksten) {
+    if (poortMod === undefined) poortMod = require(path.join(__dirname, 'intake', 'patientpoort.js'));
+    return poortMod.beoordeel({ teksten: teksten }, { eigen: poortMod.maakEigen(null, {}) });
+  };
+  try { return require(p).maak({ vault: VAULT, vv: VV(), facturenPad: facturenPad, lezer: lezer, todoistTaak: todoistTaak, poort: poort,
+    nieuwPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nieuw.json') : null,
     nalezenPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nalezen.json') : null,
     agentStart: agentStart, agentStand: agentStand, grondwet: grondwet,
     opnieuwPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-opnieuw.json') : null }); } catch (e) { logError('shopper', e); return null; }
@@ -21747,12 +21761,20 @@ appStaat.tellers.shopper_status = [];
 appStaat.tellers.shopper_nalezen = [];
 appStaat.tellers.shopper_taak = [];
 appStaat.tellers.shopper_opnieuw = [];
+appStaat.tellers.shopper_nieuw = [];
+appStaat.tellers.shopper_nieuw_dag = [];
 async function appShopper(req, res, a, route, d) {
   if (!shopper) return appWeiger(res, 404, 'Shopper zit niet in deze versie van de pod', 'shopper ontbreekt');
   if (!appTeller('shopper', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens shopper');
   let u, m = null, soort = 'onbekend';
   try {
     if (route === 'GET /app/shopper') { soort = 'lijst'; u = shopper.lijst(); }
+    else if (route === 'POST /app/shopper/nieuw') {   // wv2850: Nieuwe zoektocht vanuit de app (agent, geen gesprek met Socev); 6/uur en 12/dag
+      soort = 'nieuw';
+      if (!appTeller('shopper_nieuw', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 6)', 'grens shopper nieuw');
+      if (!appTeller('shopper_nieuw_dag', 12, 86400000)) return appWeiger(res, 429, 'vandaag al 12 zoektochten gestart; morgen weer', 'grens shopper nieuw dag');
+      u = typeof shopper.nieuw === 'function' ? await shopper.nieuw(d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
+    }
     else if ((m = /^GET \/app\/shopper\/([^/]*)$/.exec(route))) { soort = 'zoektocht'; u = shopper.zoektocht(m[1]); }   // shopper.js toetst de id zelf (12 hex, anders 400)
     else if ((m = /^POST \/app\/shopper\/([^/]*)\/status$/.exec(route))) {
       soort = 'status';
