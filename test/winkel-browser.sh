@@ -110,7 +110,13 @@ const [, , , invoer, uit] = process.argv;
 const d = JSON.parse(fs.readFileSync(invoer, 'utf8'));
 fs.appendFileSync(process.env.HOME + '/../teller', 'x');
 const sleutels = Object.keys(process.env).filter((k) => !/^(PATH|HOME|TMPDIR|LANG)$/.test(k));
+// review ZOU 1: een extra omgevingsvariabele (zoals een sleutel van de pod) = expliciet falen
+if (sleutels.length) { fs.writeFileSync(uit, JSON.stringify({ fout: 'omgeving lekt: ' + sleutels.join(',') })); return; }
 if (/traag/.test(d.url)) { setTimeout(() => {}, 60000); return; }
+if (/wees/.test(d.url)) {   // een "Chromium" die het kind overleeft (naar init verhuisd) en dan stopt het kind zonder uitkomst
+  require('child_process').spawn('sleep', ['297.13'], { detached: true, stdio: 'ignore', env: process.env }).unref();
+  return;
+}
 fs.writeFileSync(d.html, '<html><body><script type="application/ld+json">{"@type":"Product","name":"Proefpomp Blauw","offers":{"@type":"Offer","availability":"https://schema.org/InStock","price":"12.34"}}</script>'
   + '<p>Thuisbezorgd voor €4.95 en gratis vanaf €50</p><p>ENV:' + sleutels.join(',') + '</p></body></html>');
 setTimeout(() => fs.writeFileSync(uit, JSON.stringify({ status: 200, eind: d.url, controle: false })), /rij/.test(d.url) ? 400 : 10);
@@ -127,7 +133,7 @@ const toets = (n, ok, x) => { if (ok) goed++; else fout++; console.log((ok ? 'GR
   const K = 'https://www.karwei.nl/assortiment/proefpomp/p/B999';
   let r = await B.lees(K);
   toets('3a browserroute leest prijs en verzending', r && r.prijs_eur === 12.34 && r.verzending_eur === 4.95 && r.route === 'browser', r);
-  toets('3b kind krijgt een kale omgeving (geen geheim van de pod)', r && !(r.opmerkingen || []).join(' ').includes('GEHEIM') && teller() === 1, r);
+  toets('3b kind krijgt een kale omgeving (geen geheim van de pod; nep-kind faalt anders)', r && r.prijs_eur === 12.34 && !/lekt/.test(r.blokkade || '') && teller() === 1, r);
   const html = fs.readdirSync(tmp).filter((x) => x.startsWith('winkel-browser-'));
   toets('3c tijdelijke map weer weg', html.length === 0, html);
   r = await B.lees(K);
@@ -145,12 +151,35 @@ const toets = (n, ok, x) => { if (ok) goed++; else fout++; console.log((ok ? 'GR
   const rij = await Promise.all([1, 2, 3, 4, 5, 6].map((i) => B.lees('https://www.gamma.nl/assortiment/rij-' + i + '/p/B' + i)));
   const druk = rij.filter((x) => /druk/.test(x.blokkade || '')).length, gel = rij.filter((x) => x.prijs_eur === 12.34).length;
   toets('3i één tegelijk, hooguit 4 wachtend: de rest "druk", niets kwijt', druk >= 1 && gel >= 4 && druk + gel === 6, rij.map((x) => x.blokkade || x.prijs_eur));
+  r = await B.lees('https://www.gamma.nl/assortiment/wees/p/B7');
+  await new Promise((k) => setTimeout(k, 300));
+  const wees = require('child_process').execSync('ps -eo args').toString().split('\n').filter((l) => /^sleep 297\.13$/.test(l.trim()));
+  toets('3l review MOET 3: een verhuisde browser van deze lezing gaat ook weg (omgeving), uitkomst eerlijk', wees.length === 0 && /zonder uitkomst/.test(r.blokkade || ''), { r, wees });
+  // review MOET 1: de proxy laat alleen https naar het eigen domein op een openbaar IPv4-adres door
+  const WB = require(mod);
+  toets('3m hostMag: eigen domein en subdomein ja; ander domein, lijkt-op en ip nee',
+    WB.hostMag('www.karwei.nl', 'karwei.nl') && WB.hostMag('static.karwei.nl', 'karwei.nl') && !WB.hostMag('karwei.nl.boos.nl', 'karwei.nl')
+    && !WB.hostMag('nepkarwei.nl', 'karwei.nl') && !WB.hostMag('127.0.0.1', '0.1') && WB.basisDomein('www.karwei.nl') === 'karwei.nl');
+  const nepDns = { 'www.karwei.nl': '93.184.216.34', 'intern.karwei.nl': '10.1.2.3', 'lus.karwei.nl': '127.0.0.1', 'meta.karwei.nl': '169.254.169.254', 'cgnat.karwei.nl': '100.64.0.9' };
+  const px = WB.maakProxy('karwei.nl', (h, k) => (nepDns[h] ? k(null, [{ address: nepDns[h], family: 4 }]) : k(new Error('weg'))));
+  await new Promise((k) => px.srv.listen(0, '127.0.0.1', k));
+  const poort = px.srv.address().port, net = require('net');
+  const connect = (doel) => new Promise((k) => { const c = net.connect(poort, '127.0.0.1', () => c.write('CONNECT ' + doel + ' HTTP/1.1\r\nHost: ' + doel + '\r\n\r\n'));
+    let t = ''; c.on('data', (x) => { t += x; if (/\r\n\r\n/.test(t)) { c.destroy(); k(t.split('\r\n')[0]); } }); c.on('error', () => k('fout')); setTimeout(() => { c.destroy(); k(t.split('\r\n')[0] || 'stil'); }, 3000); });
+  const uit = {};
+  for (const d of ['intern.karwei.nl:443', 'lus.karwei.nl:443', 'meta.karwei.nl:443', 'cgnat.karwei.nl:443', 'www.karwei.nl:80', 'www.gamma.nl:443', '127.0.0.1:443', 'onbekend.karwei.nl:443']) uit[d] = await connect(d);
+  toets('3n proxy weigert intern, loopback, metadata, CGNAT, andere poort, ander domein, ip en onopzoekbaar', Object.values(uit).every((x) => /403/.test(x)), uit);
+  const gewoon = await new Promise((k) => require('http').get({ host: '127.0.0.1', port: poort, path: 'http://www.karwei.nl/' }, (res) => { res.resume(); k(res.statusCode); }).on('error', () => k(0)));
+  toets('3o proxy weigert gewone http', gewoon === 403, gewoon);
+  px.srv.close();
   const zonder = require(mod).maak({ chromium: null, tmp });
   r = await zonder.lees(K);
   toets('3j zonder Chromium: eerlijke blokkade', r && /Chromium ontbreekt/.test(r.blokkade || ''), r);
   const inf = B.info();
   toets('3k info alleen tellers (geen url of tekst)', JSON.stringify(Object.keys(inf)) === '["aan","bezig","rij","gelezen","mislukt","cache","geweigerd"]'
     && inf.rij === 0 && inf.bezig === false && inf.cache === 1 && inf.geweigerd === 2 && !/http/.test(JSON.stringify(inf)), inf);
+  const kaal = require('child_process').execSync('ps -eo args').toString().split('\n').filter((l) => /^\S*node .*nepkind\.js --kind/.test(l));
+  toets('3p geen nep-kind meer over', kaal.length === 0, kaal);
   // 4. domeinfilter
   const W = require(wmod);
   const ws = [{ domein: 'karwei.nl', aan: true, lezen: 'browser', categorie: ['bouw'] }, { domein: 'gamma.nl', aan: false, lezen: 'browser', categorie: ['bouw'] },

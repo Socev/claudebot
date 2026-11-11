@@ -20,6 +20,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const net = require('net');
+const dns = require('dns');
 const { spawn, execFile } = require('child_process');
 
 const PW_STANDAARD = '/usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright-core';
@@ -51,6 +53,54 @@ function boom(pid) {
   return uit;
 }
 function doodBoom(pid) { for (const p of boom(pid).reverse()) { try { process.kill(p, 'SIGKILL'); } catch (e) { /* al weg */ } } }
+// review MOET 3: Chromium-processen die na een onverwachte exit van het kind al naar init zijn verhuisd, vinden we aan hun omgeving
+// (TMPDIR = de eigen tijdelijke map van deze lezing; alle nakomelingen erven die)
+function doodOmgeving(dir) {
+  const merk = Buffer.from('\0TMPDIR=' + dir + '\0');
+  let lijst = [];
+  try { lijst = fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x) && Number(x) !== process.pid); } catch (e) { return 0; }
+  let n = 0;
+  for (const x of lijst) {
+    let env;
+    try { env = Buffer.concat([Buffer.from('\0'), fs.readFileSync('/proc/' + x + '/environ')]); } catch (e) { continue; }
+    if (env.indexOf(merk) >= 0) { try { process.kill(Number(x), 'SIGKILL'); n++; } catch (e) { /* al weg */ } }
+  }
+  return n;
+}
+
+// ── review MOET 1: al het browserverkeer via een proxy in het kind. Alleen CONNECT op poort 443 naar het eigen domein van de winkel (of een
+// subdomein), opgezocht als IPv4 en alleen naar een openbaar adres (geen loopback, privé, link-local, CGNAT, multicast, gereserveerd); de
+// verbinding gaat naar dát adres (geen tweede DNS-vraag). Gewone http en elk ander verzoek: 403. Dit geldt ook voor doorsturen (302), dat
+// Playwrights route niet ziet (gemeten 11-11-2026: een 302 naar 127.0.0.1 kwam aan).
+const NIET_OPENBAAR = new net.BlockList();
+for (const [a, n] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24],
+  ['192.0.2.0', 24], ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4]]) NIET_OPENBAAR.addSubnet(a, n, 'ipv4');
+function basisDomein(host) { return String(host || '').toLowerCase().replace(/\.$/, '').split('.').slice(-2).join('.'); }
+function hostMag(host, basis) { const h = String(host || '').toLowerCase().replace(/\.$/, ''); return !!basis && (h === basis || h.endsWith('.' + basis)) && !net.isIP(h); }
+function maakProxy(basis, opzoek) {
+  opzoek = opzoek || ((h, k) => dns.lookup(h, { family: 4, all: true }, k));
+  const telling = { door: 0, geweigerd: 0 };
+  const srv = require('http').createServer(function (req, res) { telling.geweigerd++; res.writeHead(403); res.end(); });
+  srv.on('connect', function (req, sock, kop) {
+    const weiger = () => { telling.geweigerd++; try { sock.end('HTTP/1.1 403 Forbidden\r\n\r\n'); } catch (e) { /* weg */ } };
+    sock.on('error', () => null);
+    const m = /^([a-z0-9.-]+):(\d+)$/i.exec(String(req.url || ''));
+    if (!m || m[2] !== '443' || !hostMag(m[1], basis)) return weiger();
+    opzoek(m[1], function (e, adressen) {
+      const ips = (adressen || []).map((a) => a && a.address).filter((ip) => net.isIPv4(ip));
+      if (e || !ips.length || ips.some((ip) => NIET_OPENBAAR.check(ip, 'ipv4'))) return weiger();
+      const doel = net.connect(443, ips[0], function () {
+        telling.door++;
+        sock.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (kop && kop.length) doel.write(kop);
+        doel.pipe(sock); sock.pipe(doel);
+      });
+      doel.on('error', () => { try { sock.destroy(); } catch (x) { /* weg */ } });
+      sock.on('close', () => { try { doel.destroy(); } catch (x) { /* weg */ } });
+    });
+  });
+  return { srv, telling };
+}
 
 function maak(o) {
   o = o || {};
@@ -92,7 +142,7 @@ function maak(o) {
       try { kind = spawn(process.execPath, ['--max-old-space-size=256', o.kindScript || __filename, '--kind', invoer, uit], { cwd: dir, env, stdio: 'ignore' }); }
       catch (e) { return klaar({ fout: 'browser start niet' }); }
       let af = false;
-      const einde = (r) => { if (af) return; af = true; clearTimeout(hard); doodBoom(kind.pid); klaar(r); };
+      const einde = (r) => { if (af) return; af = true; clearTimeout(hard); doodBoom(kind.pid); doodOmgeving(dir); klaar(r); };
       const hard = setTimeout(() => einde({ fout: 'de winkelpagina laadde niet binnen ' + Math.round((kindMs + HARD_MS) / 1000) + ' s' }), kindMs + HARD_MS);
       kind.on('error', () => einde({ fout: 'browser start niet' }));
       kind.on('exit', function () {
@@ -149,18 +199,20 @@ async function kind(invoerPad, uitPad) {
   const tot = Date.now() + d.ms;
   const rest = () => Math.max(1000, tot - Date.now());
   const host = new URL(d.url).hostname;
+  const zonderHekje = (u) => String(u || '').split('#')[0];
   let browser, page;
+  const px = maakProxy(basisDomein(host));
+  await new Promise((k) => px.srv.listen(0, '127.0.0.1', k));
+  // <-loopback>: ook 127.0.0.1/localhost gaat door de proxy (Chromium slaat loopback anders standaard over)
+  const proxy = { server: 'http://127.0.0.1:' + px.srv.address().port, bypass: '<-loopback>' };
   try {
-    try { browser = await pw.chromium.launch({ executablePath: d.exe, headless: true, chromiumSandbox: true, timeout: rest() }); }
-    catch (e) { browser = await pw.chromium.launch({ executablePath: d.exe, headless: true, chromiumSandbox: false, timeout: rest() }); }
+    try { browser = await pw.chromium.launch({ executablePath: d.exe, headless: true, chromiumSandbox: true, timeout: rest(), proxy }); }
+    catch (e) { browser = await pw.chromium.launch({ executablePath: d.exe, headless: true, chromiumSandbox: false, timeout: rest(), proxy }); }
     const ctx = await browser.newContext({ locale: 'nl-NL', timezoneId: 'Europe/Amsterdam', acceptDownloads: false });
     await ctx.route('**/*', function (route) {
       const req = route.request();
-      if (req.isNavigationRequest() && req.frame() === page.mainFrame()) {
-        let h = '';
-        try { h = new URL(req.url()).hostname; } catch (e) { h = ''; }
-        if (h !== host) return route.abort();
-      }
+      // review MOET 2: de hoofdpagina mag alleen de gevraagde (al door --mag getoetste) productpagina laden, ook bij het herladen na de controle
+      if (req.isNavigationRequest() && req.frame() === page.mainFrame() && zonderHekje(req.url()) !== zonderHekje(d.url)) return route.abort();
       if (['image', 'media', 'font'].indexOf(req.resourceType()) >= 0) return route.abort();
       return route.continue();
     });
@@ -181,11 +233,11 @@ async function kind(invoerPad, uitPad) {
     schrijf({ status, eind, controle });
   } catch (e) {
     schrijf({ fout: /Timeout/i.test(String(e && e.message)) ? 'de winkelpagina laadde niet op tijd' : 'browser: ' + String(e && e.message || e).split('\n')[0].slice(0, 120) });
-  } finally { if (browser) await browser.close().catch(() => null); }
+  } finally { if (browser) await browser.close().catch(() => null); px.srv.close(); }
 }
 
 if (require.main === module && process.argv[2] === '--kind') {
   kind(process.argv[3], process.argv[4]).then(() => process.exit(0), () => process.exit(1));
 }
 
-module.exports = { maak, chromiumPad, CONTROLE };
+module.exports = { maak, chromiumPad, CONTROLE, maakProxy, hostMag, basisDomein, doodOmgeving };
