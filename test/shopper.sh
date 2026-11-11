@@ -2,7 +2,7 @@
 # Toetst OVIS Shopper S3 (wv2264, 2-11-2026; favorieten wv2267 § 6): shopper.js (alleen type: shopper-zoektocht direct in de vaste Shopper-mappen, entiteit uit de map,
 # geen symlink volgen, id = hash van het pad en nooit een pad uit de vraag, koop-link alleen https, totaal/advies uit de opties) en het
 # server.js-blok (routes, audit zonder wens, Niet meer nodig = de enige schrijfactie, gekocht niet via de App, /health alleen aantallen + tijdstip,
-# uitrol-lijst; § 12 Snel vergelijken wv2934 met nep-zoekhulp en nep-winkels; § 13 Winkels, categorieën, verzendtabel en winkelscore wv2935; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase; § 8 de knop Gekocht en Toch niet gekocht, wv2275). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
+# uitrol-lijst; § 12 Snel vergelijken wv2934 met nep-zoekhulp en nep-winkels; § 13 Winkels, categorieën, verzendtabel en winkelscore wv2935; § 14 prijshistorie (Kieskeurig) en aanwijsteller wv2946; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase; § 8 de knop Gekocht en Toch niet gekocht, wv2275). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
 if grep -nE "console\.|eval\(" shopper.js; then echo "ROOD  shopper.js logt naar de console of gebruikt eval"; exit 1; fi
@@ -91,7 +91,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('3f pagina zonder statusregel krijgt er een', (function () { const id = S.idVan('20_Prive/Shopper/Shopper - 2026-11-02 - Prive lamp.md'); fs.writeFileSync(path.join(PR, 'Shopper - 2026-11-02 - Prive lamp.md'), pagina(['type: shopper-zoektocht', 'wens: "Proeflamp"']));
     return m.status(id, { status: 'vervallen' }).status === 200 && /\nstatus: vervallen\n---/.test(fs.readFileSync(path.join(PR, 'Shopper - 2026-11-02 - Prive lamp.md'), 'utf8')); })());
   const i = m.info();
-  toets('4 info: alleen aantallen en tijdstip (geen wens of pad)', i.aan === true && i.zoektochten === 4 && Object.keys(i).sort().join() === 'aan,favorieten,onleesbaar,op,open,zoektochten' && i.favorieten === 0, i);
+  toets('4 info: alleen aantallen en tijdstip (geen wens of pad)', i.aan === true && i.zoektochten === 4 && Object.keys(i).sort().join() === 'aan,aanwijzen_maand,favorieten,onleesbaar,op,open,zoektochten' && i.favorieten === 0 && i.aanwijzen_maand === 0, i);
 
   // ── 6. favorieten (wv2267) ──
   const FV = path.join(V, '00_Systeem'); fs.mkdirSync(FV, { recursive: true });
@@ -998,6 +998,121 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     }
     toets('13z (ZOU 1) scoreleesscript: na 140 s geen nieuwe vraag meer (rest "tijd op"), ruim binnen de 180 s van de pod',
       /DEADLINE_S = 140/.test(pyB) && /time\.monotonic\(\) - t0 > DEADLINE_S/.test(pyB) && /niet gelezen \(tijd op\)/.test(pyB));
+  }
+
+  // ── 14. wv2946 fase 4: prijshistorie bij het advies (prijshistorie.py, verzonnen Kieskeurig-pagina's) en de aanwijsteller ──
+  {
+    const cp = require('child_process'), F = path.join(W, 'w14'); fs.mkdirSync(F, { recursive: true });
+    const dag = (vandaag, n) => { const d = new Date(vandaag + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
+    // reeks: [[dagen terug, bedrag], …] → priceHistory zoals Kieskeurig hem in de astro-props zet ([0, waarde] / [1, lijst])
+    const VD = '2026-11-11';
+    const reeksVan = (r) => [1, r.map(([n, a]) => [0, { ean: [0, '8700000000001'], amount: [0, a], date: [0, dag(VD, n) + 'T00:00:00Z'], id: [0, '0'] }])];
+    const esc = (t) => t.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    const prodPagina = (r, verborgen) => '<html><astro-island uid="x" props="' + esc(JSON.stringify({ product: [0, { naam: [0, 'x'] }], hidePriceHistory: [0, !!verborgen], priceHistory: reeksVan(r) })) + '" ssr></astro-island></html>';
+    const item = (naam, merk, nr) => ({ '@type': 'ListItem', url: 'https://www.kieskeurig.nl/airfryer/product/' + nr + '-proef', item: { '@type': 'Product', name: naam, brand: { '@type': 'Brand', name: merk }, url: 'https://www.kieskeurig.nl/airfryer/product/' + nr + '-proef' } });
+    const zoekPagina = (items) => '<html><script type="application/ld+json">' + JSON.stringify({ '@context': 'https://schema.org', '@graph': [{ '@type': 'ItemList', itemListElement: items }] }) + '</script></html>';
+    const vol = (nu, min, minDag) => { const r = []; for (let n = 88; n >= 4; n -= 4) r.push([n, n === minDag ? min : 120]); r.push([0, nu]); return r; };
+    const draai = (map, product) => JSON.parse(cp.execFileSync('python3', ['-I', 'prijshistorie.py', '--toets', map], { input: JSON.stringify({ product, vandaag: VD }), encoding: 'utf8', timeout: 20000 }));
+    const geval = (naam, items, reeks, verborgen) => { const m = path.join(F, naam); fs.mkdirSync(m); fs.writeFileSync(path.join(m, 'zoek.html'), zoekPagina(items)); if (reeks) fs.writeFileSync(path.join(m, '777.html'), prodPagina(reeks, verborgen)); return m; };
+    const GOED = [item('Proefmerk 5000 series PR552/00 Airfryer - Dubbel - 9L - 2750W - Zwart', 'Proefmerk', 777)];
+    const ADVIES = 'Proefmerk PR552/00 Airfryer Dual Basket 9L zwart';
+    let x = draai(geval('a', [item('Proefmerk 5000 series PR555/00 Airfryer - 9L - Zwart', 'Proefmerk', 778)].concat(GOED), vol(110, 110, -1)), ADVIES);
+    toets('14a match (exact modelnummer, zelfde merk, 9L en zwart aan beide kanten; de eerste kandidaat met een ander model valt af): laagste in 90 dagen',
+      x.zin === 'Kieskeurig: laagste prijs in 90 dagen (€ 110, gelezen 11-11)' && x.url === 'https://www.kieskeurig.nl/airfryer/product/777-proef', x);
+    x = draai(geval('b', [item('Proefmerk 5000 series PR555/00 Airfryer - 9L - Zwart', 'Proefmerk', 777)], vol(110, 110, -1)), ADVIES);
+    const xb2 = draai(geval('b2', [item('Proefmerk 5000 series PR552/00 Airfryer - Dubbel - 9L - 2750W', 'Proefmerk', 777)], vol(110, 110, -1)), ADVIES);
+    const xb3 = draai(geval('b3', [item('Proefmerk 5000 series PR552/00 Airfryer - 7L - Zwart', 'Proefmerk', 777)], vol(110, 110, -1)), ADVIES);
+    const xb4 = draai(geval('b4', [item('Anders PR552/00 Airfryer - 9L - Zwart', 'Anders', 777)], vol(110, 110, -1)), ADVIES);
+    const xb5 = draai(geval('b5', GOED, vol(110, 110, -1)), 'Proefmerk Airfryer Dual Basket 9L zwart');
+    toets('14b geen match: ander model (woordoverlap is niet genoeg), kleur maar aan één kant, andere inhoud, ander merk, advies zonder modelnummer = geen zin',
+      x.zin === null && /niet hetzelfde product \(ander of geen modelnummer\)/.test(x.reden) && xb2.zin === null && /kleur/.test(xb2.reden) && xb3.zin === null && /inhoud/.test(xb3.reden)
+      && xb4.zin === null && /ander merk/.test(xb4.reden) && xb5.zin === null && xb5.reden === 'geen modelnummer in het advies', [x, xb2, xb3, xb4, xb5]);
+    // rekenregels rechtstreeks (punten_van + zin_van) met verzonnen reeksen; n = dagen terug of een eigen datumtekst
+    const reken = (gevallen) => JSON.parse(cp.execFileSync('python3', ['-I', '-c', [
+      'import importlib.util, json, sys', 'from datetime import date',
+      's = importlib.util.spec_from_file_location("ph", "prijshistorie.py"); ph = importlib.util.module_from_spec(s); s.loader.exec_module(ph)',
+      'uit = []', 'for g in json.loads(sys.stdin.read()):',
+      '    uit.append(list(ph.zin_van(ph.punten_van(g), date.fromisoformat("' + VD + '"))))', 'print(json.dumps(uit, ensure_ascii=False))'].join('\n')],
+      { input: JSON.stringify(gevallen.map((r) => r.map(([n, a]) => ({ amount: a, date: typeof n === 'string' ? n : dag(VD, n) + 'T00:00:00Z' })))), encoding: 'utf8' }));
+    const elke = (van, stap, nu) => { const r = []; for (let n = van; n > 0; n -= stap) r.push([n, 120]); r.push([0, nu]); return r; };
+    let R14 = reken([elke(85, 5, 100), elke(84, 4, 100), [[89, 120], [74, 120], [60, 120], [45, 120], [30, 120], [15, 120], [0, 100]],
+      [[89, 120], [75, 120], [61, 120], [47, 120], [33, 120], [19, 120], [5, 120], [3, 100]], elke(88, 4, 120).map(([n, a]) => [n + 4, a])]);
+    toets('14c dekking: oudste punt 85 dagen terug = zin, 84 = geen zin; gat van 15 dagen = geen zin, 14 = zin; nieuwste punt 4 dagen oud = geen zin',
+      R14[0][0] === 'Kieskeurig: laagste prijs in 90 dagen (€ 100, gelezen 11-11)' && R14[1][0] === null && /te korte reeks \(oudste punt 84/.test(R14[1][1])
+      && R14[2][0] === null && /gat van 15 dagen/.test(R14[2][1]) && R14[3][0] === 'Kieskeurig: laagste prijs in 90 dagen (€ 100, gelezen 8-11)'
+      && R14[4][0] === null && /nieuwste punt te oud \(4 dagen\)/.test(R14[4][1]), R14);
+    const met = (nu, punten) => { const r = elke(88, 4, nu).map(([n, x]) => [n, n === 0 ? x : nu + 50]); for (const [n, a] of punten) { const i = r.findIndex((y) => y[0] === n); if (i >= 0) r[i][1] = a; else r.push([n, a]); } return r; };
+    R14 = reken([met(95, [[40, 95]]), met(100, [[40, 95], [20, 95]]), met(100, [[40, 95.01]]), met(200, [[60, 190]]), met(200, [[60, 190.01]]), met(99.5, [[8, 87.25]])]);
+    toets('14d gelijkspel en drempel: nu = minimum = "laagste"; minimum op twee dagen = de laatste dag; € 5 en 5 % precies op de grens wel, een cent erboven niet',
+      R14[0][0] === 'Kieskeurig: laagste prijs in 90 dagen (€ 95, gelezen 11-11)' && R14[1][0] === 'Kieskeurig: op 22-10 was het € 95 (nu € 100); laagste in 90 dagen'
+      && R14[2][0] === null && R14[2][1] === 'geen duidelijk verschil' && R14[3][0] === 'Kieskeurig: op 12-9 was het € 190 (nu € 200); laagste in 90 dagen' && R14[4][0] === null
+      && R14[5][0] === 'Kieskeurig: op 3-11 was het € 87,25 (nu € 99,50); laagste in 90 dagen', R14);
+    R14 = reken([elke(88, 4, 120).concat([[84, 0], [80, -3], [76, 'x'], [72, true], ['2026-02-30T00:00:00Z', 1], ['kapot', 1], [44, 130]]),
+      elke(88, 4, 120).concat([[0, 150], [-2, 10]]), elke(150, 4, 120).concat([[120, 1]])]);
+    toets('14e alleen geldige punten (bedrag > 0, echte datum), per dag de laagste, niets uit de toekomst of van vóór het venster',
+      R14[0][0] === 'Kieskeurig: laagste prijs in 90 dagen (€ 120, gelezen 11-11)' && R14[1][0] === 'Kieskeurig: laagste prijs in 90 dagen (€ 120, gelezen 11-11)'
+      && R14[2][0] === 'Kieskeurig: laagste prijs in 90 dagen (€ 120, gelezen 11-11)', R14);
+    x = draai(geval('f', GOED, vol(110, 110, -1), true), ADVIES);
+    const xf2 = draai(geval('f2', GOED, null), ADVIES);
+    toets('14f prijshistorie verborgen of productpagina weg = geen zin (en wel de reden)', x.zin === null && x.reden === 'prijshistorie verborgen' && xf2.zin === null && /HTTP 404/.test(xf2.reden), [x, xf2]);
+    const mag = JSON.parse(cp.execFileSync('python3', ['-I', '-c', [
+      'import importlib.util, json', 's = importlib.util.spec_from_file_location("ph", "prijshistorie.py"); ph = importlib.util.module_from_spec(s); s.loader.exec_module(ph)',
+      'print(json.dumps([ph.mag(u) for u in ["https://www.kieskeurig.nl/search?q=proef%2Fx+s", "https://www.kieskeurig.nl/airfryer/merk/proef", "http://www.kieskeurig.nl/search?q=x",',
+      '  "https://kieskeurig.nl/search?q=x", "https://www.kieskeurig.nl.evil.example/search?q=x", "https://www.kieskeurig.nl:8443/search?q=x", "https://www.kieskeurig.nl/product-clickout/1/2",',
+      '  "https://www.kieskeurig.nl/airfryer?merken=proef", "https://www.kieskeurig.nl/airfryer?prijs=1-2", "https://www.kieskeurig.nl/api/x", "https://www.kieskeurig.nl/x/ajax/y"]]))'].join('\n')], { encoding: 'utf8' }));
+    toets('14g alleen https op www.kieskeurig.nl (poort 443) en geen pad of query die robots.txt verbiedt', JSON.stringify(mag) === JSON.stringify([true, true, false, false, false, false, false, false, false, false, false]), mag);
+    const py = fs.readFileSync('prijshistorie.py', 'utf8'), pyCode = py.slice(py.indexOf('import gzip'));
+    toets('14h leesscript: alleen GET (geen data/POST), doorsturen gaat langs mag(), eigen User-Agent, geen omgevingsvariabelen, schrijft niets weg',
+      /redirect_request[\s\S]{0,200}if not mag\(doel\)/.test(py) && /Socev-Shopper\/1\.0/.test(py) && !/os\.environ|getenv|open\([^)]*['"]w|method=|data=/.test(pyCode) && /HOST = "www\.kieskeurig\.nl"/.test(py));
+
+    // shopper.js: prijshistorieBij (één lezing per 7 dagen, na een fout na 6 uur; alleen open + advies; vaste zinvorm en Kieskeurig-link)
+    const V14 = path.join(W, 'v14'), M14 = path.join(V14, '20_Prive/Shopper'); fs.mkdirSync(M14, { recursive: true });
+    const pag14 = (naam, status, product) => fs.writeFileSync(path.join(M14, naam + '.md'), pagina(['type: shopper-zoektocht', 'wens: "Proefairfryer"', 'status: ' + status, 'gezocht: 2026-11-10T09:00+01:00', 'aantal: 1', 'opties:',
+      '  - {id: o1, winkel: "Proefwinkel", product: "' + product + '", prijs_eur: 110, verzending_eur: 0, totaal_eur: 110, url: "https://www.proefwinkel.nl/p/1"}', 'advies: o1']));
+    pag14('Shopper - 2026-11-10 - A', 'open', ADVIES); pag14('Shopper - 2026-11-10 - B', 'open', 'Proefmerk PR999/00 Airfryer'); pag14('Shopper - 2026-11-10 - C', 'gekocht', ADVIES);
+    let klok = new Date('2026-11-11T12:00:00Z'), vragen = [], antwoord = { zin: 'Kieskeurig: laagste prijs in 90 dagen (€ 110, gelezen 11-11)', reden: 'laagste', url: 'https://www.kieskeurig.nl/airfryer/product/777-proef' }, los = null;
+    const PP14 = path.join(W, 'prijs14.json'), AP14 = path.join(W, 'aanwijs14.json');
+    const m14 = S.maak({ vault: V14, vv: VV, nu: () => klok, prijsPad: PP14, aanwijsPad: AP14, prijsLezer: (inv) => { vragen.push(inv); return new Promise((r) => { los = () => r(antwoord); }); } });
+    const idA = S.idVan('20_Prive/Shopper/Shopper - 2026-11-10 - A.md'), idB = S.idVan('20_Prive/Shopper/Shopper - 2026-11-10 - B.md'), idC = S.idVan('20_Prive/Shopper/Shopper - 2026-11-10 - C.md');
+    const ph = (id) => m14.zoektocht(id).body.zoektocht.prijshistorie;
+    const p1 = ph(idA), pB = ph(idB), pC = ph(idC);
+    await new Promise((r) => setTimeout(r, 5));
+    toets('14i eerste keer openen: stand leest, één vraag met alleen de productnaam van het advies; tweede zoektocht wacht (één tegelijk); gekocht = niets',
+      p1 && p1.stand === 'leest' && vragen.length === 1 && JSON.stringify(vragen[0]) === JSON.stringify({ product: ADVIES }) && pB === null && pC === null, [p1, pB, pC, vragen]);
+    toets('14j zolang de lezing loopt: nog steeds leest, geen tweede vraag', ph(idA).stand === 'leest' && vragen.length === 1);
+    los(); await new Promise((r) => setTimeout(r, 20));
+    const p2 = ph(idA), st14 = JSON.parse(fs.readFileSync(PP14, 'utf8'));
+    toets('14k daarna de zin met leesdatum en Kieskeurig-link; staatbestand 0600 met alleen tijd, vingerafdruk, zin, url, fout (geen productnaam)',
+      p2 && p2.zin === antwoord.zin && p2.url === antwoord.url && p2.t === klok.toISOString() && (fs.statSync(PP14).mode & 0o777) === 0o600
+      && JSON.stringify(Object.keys(st14[idA]).sort()) === JSON.stringify(['fout', 'p', 't', 'url', 'zin']) && !/Proefmerk|PR552/.test(fs.readFileSync(PP14, 'utf8')), [p2, st14]);
+    klok = new Date(klok.getTime() + 6 * 86400000); const p3 = ph(idA);
+    klok = new Date(klok.getTime() + 2 * 86400000); const p4 = ph(idA);
+    toets('14l na 6 dagen geen nieuwe lezing (zin blijft), na 8 dagen wel', p3 && p3.zin === antwoord.zin && p4 && p4.stand === 'leest' && vragen.length === 2, [p3, p4, vragen.length]);
+    antwoord = { zin: null, reden: 'fout: zoeken gaf HTTP 503', url: null }; los(); await new Promise((r) => setTimeout(r, 20));
+    const p5 = ph(idA); klok = new Date(klok.getTime() + 5 * 3600000); const p6 = ph(idA); klok = new Date(klok.getTime() + 2 * 3600000); const p7 = ph(idA);
+    toets('14m leesfout: geen zin; na 5 uur niet opnieuw, na 7 uur wel', p5 === null && p6 === null && p7 && p7.stand === 'leest' && vragen.length === 3, [p5, p6, p7, vragen.length]);
+    antwoord = { zin: 'Kieskeurig: koop nu, wacht niet!', reden: 'laagste', url: 'https://evil.example/x' }; los(); await new Promise((r) => setTimeout(r, 20));
+    const p8 = ph(idA);
+    pag14('Shopper - 2026-11-10 - A', 'open', 'Proefmerk PR552/00 Airfryer 9L zwart refurbished');
+    const p9 = ph(idA);
+    toets('14n een zin buiten de vaste vorm (koopadvies) telt niet; een ander advies-product = opnieuw lezen ondanks de verse uitkomst', p8 === null && p9 && p9.stand === 'leest' && vragen.length === 4 && vragen[3].product !== ADVIES, [p8, p9, vragen.length]);
+    antwoord = { zin: 'Kieskeurig: op 3-11 was het € 87,25 (nu € 99,50); laagste in 90 dagen', reden: 'was_lager', url: 'https://www.kieskeurig.nl/../x' }; los(); await new Promise((r) => setTimeout(r, 20));
+    const p10 = ph(idA);
+    toets('14o tweede zinvorm komt door; een Kieskeurig-link die niet op een productpagina wijst wordt null', p10 && p10.zin === antwoord.zin && p10.url === null, p10);
+    const m14z = S.maak({ vault: V14, vv: VV, nu: () => klok });
+    toets('14p zonder lezer of pad (oude pod): prijshistorie null, geen fout', m14z.zoektocht(idA).body.zoektocht.prijshistorie === null);
+    // aanwijsteller (stap A)
+    klok = new Date('2026-11-30T22:30:00Z');   // 23:30 in Nederland, nog november
+    const a1 = m14.aanwijs(); m14.aanwijs(); klok = new Date('2026-11-30T23:30:00Z'); m14.aanwijs();   // 00:30 NL = december
+    const ast = JSON.parse(fs.readFileSync(AP14, 'utf8'));
+    toets('14q aanwijsteller: alleen {maand: aantal} in Nederlandse tijd, 0600; info() geeft het aantal van deze maand', a1.status === 200 && JSON.stringify(ast) === JSON.stringify({ '2026-11': 2, '2026-12': 1 })
+      && (fs.statSync(AP14).mode & 0o777) === 0o600 && m14.info().aanwijzen_maand === 1 && m14z.aanwijs().status === 404, [ast, m14.info()]);
+    const src14 = fs.readFileSync('server.js', 'utf8'), bl14 = src14.slice(src14.indexOf('const shopper = (function () {'), src14.indexOf('// ── einde OVIS Shopper ──'));
+    toets('14r server.js: POST /app/shopper/aanwijs met eigen teller (60/uur); prijshistorie.py kaal (alleen PATH/LANG/HOME), productnaam via stdin, 90 s; klokken-paden; uitrol-lijst',
+      /route === 'POST \/app\/shopper\/aanwijs'/.test(bl14) && /appTeller\('shopper_aanwijs', 60, 3600000\)/.test(bl14) && /'prijshistorie\.py'/.test(bl14)
+      && /execFile\('python3', \['-I', prijsScript\], \{ timeout: 90000[^}]*env: \{ PATH: process\.env\.PATH \|\| '\/usr\/bin:\/bin', LANG: 'C\.UTF-8', HOME: '\/tmp' \}/.test(bl14)
+      && /k\.stdin\.end\(JSON\.stringify\(invoer\)\)/.test(bl14.slice(bl14.indexOf('prijsScript'))) && /shopper-prijshistorie\.json/.test(bl14) && /shopper-aanwijzen\.json/.test(bl14)
+      && /RELEASE_OPTIONEEL="[^"]*\bprijshistorie\.py\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
   }
 
   fs.rmSync(W, { recursive: true, force: true });

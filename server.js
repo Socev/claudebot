@@ -21724,6 +21724,9 @@ if (GHAWA_TIKKEN) {
 //                                     plafond 20/dag in de module en 10/uur); GET …/vergelijk/<id> = de stand (opties zodra gelezen, 24 u bewaard);
 //                                     POST …/vergelijk/<id>/bewaar {entiteit} = zoektochtpagina (bron: snel, status open, geen advies). Nieuw kreeg
 //                                     het veld vergelijk (id): de grondige agent krijgt de kandidaten van de pod mee (Fable b13).
+//   POST /app/shopper/aanwijs         wv2946 stap A: één tik op "Zoek met Shopper" bij een actie; alleen een teller per maand in klokken/
+//                                     shopper-aanwijzen.json (geen tekst), /health.shopper.aanwijzen_maand; 60/uur. GET …/<id> geeft sinds wv2946 ook
+//                                     prijshistorie (één zin van Kieskeurig bij het advies, of {stand:'leest'}; zie shopper.js)
 //   POST /app/shopper/nieuw           wv2850: {wens, aantal?, entiteit?, eisen[]} = Nieuwe zoektocht in de app zelf (geen zin meer in het gesprek):
 //                                     privacypoort (patiëntpoort, fail-closed; ook op eisen en opnieuw) → agent "socev: Shopper nieuw" met een
 //                                     start_id die op de nieuwe pagina komt; 6/uur en 12/dag; stand in klokken/shopper-nieuw.json (2 dagen).
@@ -21813,7 +21816,21 @@ const shopper = (function () {
       try { k.stdin.end(JSON.stringify(invoer)); } catch (e) { klaar(null); }
     });
   } : null;
+  // wv2946 fase 4: de prijshistorie bij het advies (prijshistorie.py uit de release: alleen GET op www.kieskeurig.nl, doorsturen alleen binnen
+  // die host, kale omgeving, ≤ 90 s). De productnaam gaat via stdin (niet in argv of een log); uitkomst in KLOKKEN_DIR (0600).
+  const prijsScript = path.join(__dirname, 'prijshistorie.py');
+  const prijsLezer = fs.existsSync(prijsScript) ? function (invoer) {
+    return new Promise(function (klaar) {
+      const k = require('child_process').execFile('python3', ['-I', prijsScript], { timeout: 90000, maxBuffer: 64 * 1024,
+        env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: '/tmp' } }, function (e, uit) {
+        try { klaar(JSON.parse(String(uit || '').trim().split('\n')[0])); } catch (x) { klaar(null); }
+      });
+      try { k.stdin.end(JSON.stringify(invoer)); } catch (e) { klaar(null); }
+    });
+  } : null;
   try { return require(p).maak({ vault: VAULT, vv: VV(), facturenPad: facturenPad, lezer: lezer, todoistTaak: todoistTaak, poort: poort, vergelijk: vergelijk,
+    prijsLezer: prijsLezer, prijsPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-prijshistorie.json') : null,
+    aanwijsPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-aanwijzen.json') : null,
     scoreLezer: scoreLezer, scorePad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-winkelscore.json') : null,
     nieuwPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nieuw.json') : null,
     nalezenPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nalezen.json') : null,
@@ -21829,6 +21846,7 @@ appStaat.tellers.shopper_opnieuw = [];
 appStaat.tellers.shopper_nieuw = [];
 appStaat.tellers.shopper_nieuw_dag = [];
 appStaat.tellers.shopper_vergelijk = [];
+appStaat.tellers.shopper_aanwijs = [];
 async function appShopper(req, res, a, route, d) {
   if (!shopper) return appWeiger(res, 404, 'Shopper zit niet in deze versie van de pod', 'shopper ontbreekt');
   if (!appTeller('shopper', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens shopper');
@@ -21852,6 +21870,11 @@ async function appShopper(req, res, a, route, d) {
       soort = 'vergelijk-bewaar';
       if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
       u = shopper.vergelijk ? shopper.vergelijk.bewaar(m[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
+    }
+    else if (route === 'POST /app/shopper/aanwijs') {   // wv2946 stap A: één tik op "Zoek met Shopper" bij een actie (alleen een teller per maand, geen tekst)
+      soort = 'aanwijs';
+      if (!appTeller('shopper_aanwijs', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens shopper aanwijs');
+      u = typeof shopper.aanwijs === 'function' ? shopper.aanwijs() : { status: 404, body: { ok: false, fout: 'onbekend' } };
     }
     else if (route === 'GET /app/shopper/winkels') { soort = 'winkels'; u = shopper.winkels ? shopper.winkels() : { status: 404, body: { ok: false, fout: 'Winkels zit niet in deze versie van de pod' } }; }   // wv2935: tab Winkels (de 600/uur van shopper geldt)
     else if ((m = /^GET \/app\/shopper\/([^/]*)$/.exec(route))) { soort = 'zoektocht'; u = shopper.zoektocht(m[1]); }   // shopper.js toetst de id zelf (12 hex, anders 400)
