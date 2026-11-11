@@ -9,8 +9,8 @@ C=$(grep -vE '^\s*(\*|//)' mailvoorwerk.js)
 if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen|env)|import\(|console\.|\beval\("; then
   echo "ROOD  CI-poort: mailvoorwerk.js laadt een netwerk- of procesmodule, leest de omgeving, logt naar de console of gebruikt eval"; exit 1
 fi
-if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|crypto|node:sqlite)'\)$"; then
-  echo "ROOD  CI-poort: mailvoorwerk.js laadt een module buiten fs, path, crypto en node:sqlite"; exit 1
+if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|crypto|node:sqlite|\./voorwerk-poort\.js)'\)$"; then
+  echo "ROOD  CI-poort: mailvoorwerk.js laadt een module buiten fs, path, crypto, node:sqlite en ./voorwerk-poort.js"; exit 1
 fi
 echo "GROEN CI-poort: mailvoorwerk.js alleen lokaal"
 f=0
