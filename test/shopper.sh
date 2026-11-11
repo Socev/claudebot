@@ -1059,12 +1059,13 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     // diff-review wv2946: MOET 1 (typevoorvoegsel, alle typenummers gelijk), MOET 2 (doorsturen / ander product op de pagina), MOET 3 (begrensd uitpakken)
     const xg1 = draai(geval('m1', [item('Proefmerk Professional GSB 18V-55 Klopboormachine', 'Proefmerk', 777)], vol(110, 110, -1)), 'Proefmerk Professional GSR 18V-55 accuboormachine');
     const xg1b = draai(geval('m1c', [item('Proefmerk gsb 18V-55 Klopboormachine', 'Proefmerk', 777)], vol(110, 110, -1)), 'Proefmerk gsr 18V-55 accuboormachine');
+    const xg5 = draai(geval('m3', [item('Proefmerk Stekkerdoos 3-voudig zwart 60x130 - 5 meter', 'Proefmerk', 777)], vol(110, 110, -1)), 'Proefmerk stekkerdoos 3-voudig zwart 60x130, 5 meter');
     const xg2 = draai(geval('m1b', [item('Proefmerk PR552/00 PR553/00 Airfryer - 9L - Zwart', 'Proefmerk', 777)], vol(110, 110, -1)), ADVIES);
     const mDoor = geval('m2', GOED, vol(110, 110, -1)); fs.writeFileSync(path.join(mDoor, '777.html.doorsturen'), 'https://www.kieskeurig.nl/airfryer/product/888-ander');
     const xg3 = draai(mDoor, ADVIES);
     const xg4 = draai(geval('m2b', GOED, vol(110, 110, -1), false, 'Proefmerk 5000 series PR555/00 Airfryer - 9L - Zwart'), ADVIES);
-    toets('14f2 (review MOET 1+2, ronde 2) GSR ≠ GSB bij hetzelfde 18V-55, ook in kleine letters; een extra typenummer aan één kant = geen zin; productpagina doorgestuurd of met een ander product in de JSON-LD = geen zin',
-      xg1.zin === null && /ander of geen modelnummer/.test(xg1.reden) && xg1b.zin === null && /ander of geen modelnummer/.test(xg1b.reden) && xg2.zin === null && xg3.zin === null && /doorgestuurd/.test(xg3.reden) && xg4.zin === null && /ander product/.test(xg4.reden), [xg1, xg2, xg3, xg4]);
+    toets('14f2 (review MOET 1+2, ronde 2) GSR ≠ GSB bij hetzelfde 18V-55, ook in kleine letters; 3-voudig en 60x130 zijn geen typenummer; een extra typenummer aan één kant = geen zin; productpagina doorgestuurd of met een ander product in de JSON-LD = geen zin',
+      xg1.zin === null && /ander of geen modelnummer/.test(xg1.reden) && xg1b.zin === null && /ander of geen modelnummer/.test(xg1b.reden) && xg5.zin === null && xg5.reden === 'geen modelnummer in het advies' && xg2.zin === null && xg3.zin === null && /doorgestuurd/.test(xg3.reden) && xg4.zin === null && /ander product/.test(xg4.reden), [xg1, xg2, xg3, xg4]);
     const bom = JSON.parse(cp.execFileSync('python3', ['-I', '-B', '-c', [
       'import importlib.util, json, zlib', 'uit = []',
       'for f in ("prijshistorie.py", "winkel-score.py"):',

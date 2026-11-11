@@ -16,7 +16,7 @@ in beide namen precies gelijk zijn (woord met letters én cijfers, ≥ 4 tekens 
 2750W of 180kg; een los voorvoegsel van 2-4 letters ervoor hoort erbij (hoofdletterongevoelig, geen lidwoord of voorzetsel): GSR 18V-55 ≠ gsb 18V-55; diff-review wv2946 MOET 1), en (c) de uitvoeringskenmerken (aantal/set, maat in mm/cm/m, inhoud in GB/TB/l/ml/kg/g, kleur) in beide namen gelijk zijn;
 staat een kenmerk maar aan één kant, dan geen zin. Woordoverlap alleen is nooit genoeg.
 
-REKENREGELS (review MOET 2). Punten = (dag, laagste bedrag) met een geldige datum en een bedrag > 0; per dag de laagste. Venster = de 90 dagen
+REKENREGELS (review MOET 2; gemeten 11-11: Kieskeurig mist bij alle producten 12-10 t/m 29-10-2026, een gat van 17 dagen, dus tot ± 10-1-2027 geen zin). Punten = (dag, laagste bedrag) met een geldige datum en een bedrag > 0; per dag de laagste. Venster = de 90 dagen
 tot en met vandaag (Europe/Amsterdam). Dekking: oudste punt ≥ 85 dagen terug, nieuwste ≤ 3 dagen terug, geen gat > 14 dagen tussen twee
 punten. Nu = het bedrag van het nieuwste punt. Zinnen:
   nu ≤ minimum             → "Kieskeurig: laagste prijs in 90 dagen (€ nu, gelezen d-m)"            (d-m = dag van het nieuwste punt)
@@ -65,6 +65,8 @@ def norm(s):
     return re.sub(r"\s+", " ", str(s or "").replace(" ", " ")).strip().lower()
 
 
+# geen typenummer (eigen meting wv2946 op echte adviezen): maten (60x130, 180x90x40cm) en getal + woord (3-voudig, 2-persoons, 5delig)
+GEEN_MODEL = re.compile(r"^(\d+([.,]\d+)?(x\d+([.,]\d+)?)+(mm|cm|m)?|\d+-?[a-z]{4,})$")
 GEEN_VOORVOEGSEL = {"de", "het", "een", "van", "voor", "met", "en", "of", "in", "op", "uit", "tot", "bij", "per", "the", "for", "and", "with", "to"}
 
 
@@ -74,7 +76,7 @@ def _modelwoorden(naam):
     for w in re.split(r"[\s,;:()\[\]+|]+", str(naam or "").replace("\u00a0", " ")):
         w = w.strip("-/.'\"")
         k = re.sub(r"[-/.]", "", w.lower())
-        if not w or EENHEID_MODEL.match(w.lower()):
+        if not w or EENHEID_MODEL.match(w.lower()) or GEEN_MODEL.match(w.lower()):
             continue
         if len(k) >= 4 and re.search(r"\d", k) and re.search(r"[a-z]", k) and re.match(r"^[a-z0-9]+$", k):
             uit.append((w, k))
