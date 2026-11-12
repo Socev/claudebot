@@ -490,6 +490,12 @@ jobs:
       - name: "beleggen (wv2982, OVIS Beleggen fase 1)"
         if: ${{ !cancelled() }}
         run: bash test/beleggen.sh
+      # wv2984: OVIS Imagine fase 1 — bibliotheek + incognito (zoektocht op merk na wissen, na 60 min en na een herstart; drie kruisproeven rood).
+      - name: "imagine (wv2984, OVIS Imagine fase 1, incognito)"
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -c "import PIL" 2>/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil)
+          bash test/imagine-incognito.sh
       # OVIS GHAWA (wv2877): ghawa.js (invoer, rekenkern op de cent, routes zonder donateurs of GHAWA-bankvelden) en het server.js-blok.
       # wv2880: + ghawa-bij.js (fase 2: GHAWA-bank uit Facturen, Ecobank-afschriften, fondsen, maandronde) in test/ghawa-bij.test.js.
       # wv2883: + ghawa-site.js (fase 3: website via git op een lokale bare repo; foto-toets alleen met sharp, anders overgeslagen).

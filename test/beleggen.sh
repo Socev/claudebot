@@ -17,7 +17,7 @@ grep -qF "['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volg
 grep -qF "p === '/app/beleggen/bestand' ? APP_BELEGGEN_MAX_BODY_VROEG" server.js || { echo "ROOD  server.js: bodygrens voor het bestand ontbreekt"; f=1; }
 grep -qE "^\s+beleggen: typeof beleggenInfo === 'function'" server.js || { echo "ROOD  server.js: /health.beleggen ontbreekt"; f=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* beleggen\.js" uitrol.sh || { echo "ROOD  uitrol.sh: beleggen.js niet in RELEASE_OPTIONEEL"; f=1; }
-grep -qE "'ghawa', 'beleggen'\]" app-vast.js || { echo "ROOD  app-vast.js: beleggen niet in APP_IDS"; f=1; }
+grep -qE "'ghawa', 'beleggen'(, '[a-z-]+')*\]" app-vast.js || { echo "ROOD  app-vast.js: beleggen niet in APP_IDS"; f=1; }
 # de route mag geen inhoud loggen: in het server.js-blok alleen vaste teksten in logError
 B=$(awk '/── OVIS Beleggen \(wv2982/,/── einde OVIS Beleggen ──/' server.js)
 if echo "$B" | grep -nE "logError\([^)]*(e\.message|String\(e|d\.|u\.body)"; then echo "ROOD  server.js: Beleggen logt inhoud"; f=1; fi

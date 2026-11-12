@@ -78,7 +78,7 @@ function pas(lijst, d, vastePlek) {
 // niet kent, toont de app gewoon onderaan; ordenen en favoriet maken kan pas als hij hier staat.
 const APP_IDS = ['praktijken', 'projecten', 'bandjes', 'financien', 'gezondheid', 'facturen', 'docplan', 'bestanden', 'pot',
   'pot-afschriften', 'studio', 'broedstoof', 'memorylane', 'tripper', 'kalender', 'shopper', 'pakjes', 'osint', 'mediatheek', 'harvester', 'ideeen',
-  'flock', 'verbruik', 'tokencounter', 'sleutelbos', 'mail', 'mailman', 'cijfer-meester', 'ghawa', 'beleggen'];   // sleutelbos: wv2481; ghawa: wv2877; beleggen: wv2982
+  'flock', 'verbruik', 'tokencounter', 'sleutelbos', 'mail', 'mailman', 'cijfer-meester', 'ghawa', 'beleggen', 'imagine'];   // sleutelbos: wv2481; ghawa: wv2877; beleggen: wv2982; imagine: wv2984
 const VOLGORDE_MAX = 60;
 const SORTERINGEN = ['eigen', 'az', 'meest'];
 const TEL_DAGEN = 120;            // zo lang blijven dagtellingen staan
