@@ -112,37 +112,46 @@ function onbetaald(fdb) {
   return fdb.db.prepare("SELECT f.id, coalesce(l.naam, f.leverancier_naam) AS naam, f.nummer, f.incl, f.entiteit, coalesce(e.naam_kort, e.naam) AS ent_naam, " +
     "f.vervaldatum, f.factuurdatum, f.betaalspoor, f.uitvoer_op, " +
     "(SELECT min(m) FROM (SELECT max(t.boekdatum) AS m FROM bank_transactie t JOIN rekening r ON r.id = t.rekening WHERE r.entiteit = f.entiteit AND r.controle = 1 " +
-    "AND t.verwijderd_op IS NULL GROUP BY t.rekening)) AS bank_tot " +
+    "AND t.verwijderd_op IS NULL GROUP BY t.rekening)) AS bank_tot, " +
+    // wv2959: leverancier die via de creditcard betaald wordt (komt voor in kaart_regel) → ook de kaartstand: de oudste van de ingelezen-tot
+    // per kaart waarop hij voorkomt (laatste periode_tot van een overzicht, anders de laatste transactiedatum). NULL = geen kaartleverancier.
+    "(SELECT min(coalesce((SELECT max(b.periode_tot) FROM kaart_bestand b WHERE b.kaart = k.id), (SELECT max(r2.transactiedatum) FROM kaart_regel r2 WHERE r2.kaart = k.id))) " +
+    "FROM kaart k WHERE f.leverancier IS NOT NULL AND EXISTS (SELECT 1 FROM kaart_regel kr WHERE kr.kaart = k.id AND kr.leverancier = f.leverancier)) AS kaart_tot " +
     "FROM factuur f LEFT JOIN leverancier l ON l.id = f.leverancier LEFT JOIN entiteit e ON e.sleutel = f.entiteit " +
     "WHERE f.status IN ('in_wachtrij','wordt_verstuurd','concept_klaar','verstuurd','verzending_mislukt') AND f.entiteit IS NOT NULL AND f.entiteit <> 'prive' " +
     "AND f.soort = 'factuur' AND f.incl > 0 AND f.betaalspoor IN ('te_betalen','ingevoerd','incasso_verwacht','betaald_vooraf') " +
     "AND (SELECT count(*) FROM koppeling k WHERE k.factuur = f.id AND coalesce(k.methode, '') <> 'sepa_terug') <= " +
     "(SELECT count(*) FROM koppeling k WHERE k.factuur = f.id AND k.methode = 'sepa_terug') " +
-    "AND NOT EXISTS (SELECT 1 FROM voorstel v WHERE v.status = 'open' AND EXISTS (SELECT 1 FROM json_each(v.facturen) j WHERE j.value = f.id))").all();
+    "AND NOT EXISTS (SELECT 1 FROM voorstel v WHERE v.status = 'open' AND EXISTS (SELECT 1 FROM json_each(v.facturen) j WHERE j.value = f.id)) " +
+    // wv2959: aan een creditcardregel gekoppeld = betaald (via de kaart)
+    "AND NOT EXISTS (SELECT 1 FROM kaart_regel kr WHERE kr.factuur = f.id)").all();
 }
 function onbetaaldKaart(r, grens, nuKort) {
   const naam = String(r.naam || 'onbekende leverancier').slice(0, 50);
+  const cc = !!r.kaart_tot;   // wv2959: leverancier betaalt (ook) via de creditcard: beide bronnen genoemd, de oudste stand telt
+  const tot = cc && r.kaart_tot < r.bank_tot ? r.kaart_tot : r.bank_tot;
   const wat = r.betaalspoor === 'betaald_vooraf' ? 'staat als al betaald, maar ' : r.betaalspoor === 'incasso_verwacht' ? 'zou geïncasseerd worden, maar ' :
     r.betaalspoor === 'ingevoerd' ? 'staat als ingevoerd in de bank, maar ' : '';
   return { sleutel: 'facturen-onbetaald-' + r.id, soort: 'doen', waar: 'overal', prive: false, duur_min: 5, volgorde: 30,
     titel: ('Factuur ' + naam + ' — betaling nakijken').slice(0, 90),
     waarom: ('De factuur van ' + naam + (r.nummer ? ' (nr. ' + String(r.nummer).slice(0, 30) + ')' : '') + ' voor ' + (r.ent_naam || r.entiteit) + ', ' + euroTekst(r.incl) +
-      ', verviel op ' + nlDatum(r.vervaldatum || isoPlus(r.factuurdatum, 14)) + '. Hij ' + wat + 'ik zie tot en met ' + nlDatum(r.bank_tot) +
-      ' geen betaling in de bank. Zo blijft er geen rekening onbetaald liggen.').slice(0, 400),
+      ', verviel op ' + nlDatum(r.vervaldatum || isoPlus(r.factuurdatum, 14)) + '. Hij ' + wat + 'ik zie tot en met ' + nlDatum(tot) +
+      (cc ? ' geen betaling op de bank of de creditcard.' : ' geen betaling in de bank.') + ' Zo blijft er geen rekening onbetaald liggen.').slice(0, 400),
     stappen: ['Kijk of je hem betaald hebt (bank, creditcard of iDEAL).',
       'Niet betaald: betaal hem alsnog; staat hij op de betaallijst, dan via Apps › Facturen › Betalen.',
       'Wel betaald: koppel de betaling in Apps › Facturen › Bankcontrole, of zet deze kaart op gedaan.'],
-    meting: (nuKort + ': niet gekoppeld aan een bankregel; bank ingelezen t/m ' + nlDatum(r.bank_tot) + ', grens ' + nlDatum(grens) + '.').slice(0, 300),
+    meting: (nuKort + (cc ? ': niet gekoppeld aan een bank- of creditcardregel; bank ingelezen t/m ' + nlDatum(r.bank_tot) + ', creditcard t/m ' + nlDatum(r.kaart_tot)
+      : ': niet gekoppeld aan een bankregel; bank ingelezen t/m ' + nlDatum(r.bank_tot)) + ', grens ' + nlDatum(grens) + '.').slice(0, 300),
     herkomst: { module: MODULE, handmatig: 'facturen', doel: { scherm: 'facturen', focus: 'factuur:' + r.id } } };
 }
 /*
- * onbetaaldPlan({ rijen, punten, vandaag, nuKort }) → { zet: [kaart], dicht: [{ sleutel, van, bewijs }], wacht_op_bank: n }
+ * onbetaaldPlan({ rijen, punten, vandaag, nuKort }) → { zet: [kaart], dicht: [{ sleutel, van, bewijs }], wacht_op_bank: n, wacht_op_kaart: n }
  *   rijen: onbetaald(fdb); punten: mk_voor_jou_lijst (alle, ook gesloten): [{ sleutel, status }].
  */
 function onbetaaldPlan(x) {
   const punten = (x.punten || []).filter(function (p) { return p && ONBETAALD.test(String(p.sleutel)); });
   const bekend = new Map(punten.map(function (p) { return [p.sleutel, p.status]; }));
-  const uit = { zet: [], dicht: [], wacht_op_bank: 0 };
+  const uit = { zet: [], dicht: [], wacht_op_bank: 0, wacht_op_kaart: 0 };
   const nog = new Set();
   for (const r of x.rijen || []) {
     if (!OPEN_SPOREN.includes(r.betaalspoor)) continue;
@@ -154,6 +163,9 @@ function onbetaaldPlan(x) {
     const sleutel = 'facturen-onbetaald-' + r.id;
     nog.add(sleutel);
     if (!r.bank_tot || r.bank_tot < grens) { uit.wacht_op_bank++; continue; }   // bank nog niet ingelezen tot de grens: niet vast te stellen
+    // wv2959 (David 12-11-2026: "Betalingen die van de CC gaan moet je dus veel langer de tijd geven ... tot je CC-overzicht tot minstens die
+    // datum is aangevuld"): een kaartleverancier pas als ook de creditcard tot de grens is ingelezen (soms bank, soms kaart: beide moeten voorbij)
+    if (r.kaart_tot && r.kaart_tot < grens) { uit.wacht_op_kaart++; continue; }
     if (bekend.has(sleutel) || uit.zet.length >= MAX_ONBETAALD) continue;
     uit.zet.push(onbetaaldKaart(r, grens, x.nuKort || ''));
   }

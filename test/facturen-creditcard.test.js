@@ -484,3 +484,52 @@ test('ontdubbeling kijkt naar de omschrijving (review MOET 1): andere winkel zel
   const t3tekst = icsTekst({ vorig: '0,00', credit: '0,00', debet: '20,00', nieuw: '20,00', regels: [pdfRegel('15 mrt', '16 mrt', 'WOLKDIENST', '', '', '', '20,00', 'debet')] });
   assert.throws(() => C.inlezen(t3.fdb, '0000', icsPdf(t3tekst), { wie: 'toets', nu: NU, pdfTekst: t3tekst }), (e) => e instanceof C.KaartFout && e.code === 'twijfel');
 });
+
+// ───────────────────────────── wv2959: vangnet "betaling nakijken" kijkt ook naar de creditcard ─────────────────────────────
+test('wv2959 onbetaald: kaartleverancier krijgt de creditcardstand; kaart_regel.factuur = betaald; bankleverancier zonder kaartstand', () => {
+  const t = opzet();
+  const KA = require(path.join(ROOT, 'facturen-kaart.js'));
+  C.kaartZet(t.fdb, { klantnummer: KLANT, laatste4: '0000', rekening: TG.slice(-4), wie: 'toets', nu: NU });
+  C.inlezen(t.fdb, '0000', csv(BASIS), { wie: 'toets', nu: NU, naam: 'ics.csv' });   // periode t/m 2026-04-20; Wolkdienst staat erin
+  // bank van Tolgaarde loopt verder dan de kaart
+  t.fdb.db.prepare("INSERT INTO bank_transactie (id, bestand, rekening, entiteit, eigen_iban, boekdatum, bedrag_centen, tegenpartij_naam, omschrijving, is_incasso, entry_ref, formaat, aangemaakt_op) VALUES ('e9999999999999a1', ?, ?, 'tolgaarde', ?, '2026-06-30', -100, 'Proef', 'proef', 0, 'refx', 'abn_tab', '2026-07-01T00:00:00Z')").run(t.ids.bestand, t.ids.rek, TG);
+  let n = 0;
+  const factuur = (lev, levNaam, datum, incl) => {
+    const fid = D.nieuwId(), did = D.nieuwId(); n++;
+    const s = D.stukSchrijf(t.fdb, Buffer.from('%PDF-1.4 proef wv2959 ' + n));
+    D.voegToe(t.fdb, 'document', { id: did, sha256: s.sha256, naam: 'f' + n + '.pdf', mime: 'application/pdf', bytes: s.bytes, soort: 'pdf', tekstlaag: 1, geupload_door: 'toets', aangemaakt_op: '2026-05-01T00:00:00Z' });
+    D.voegToe(t.fdb, 'factuur', { id: fid, document: did, soort: 'factuur', leverancier: lev, leverancier_naam: levNaam, nummer: 'P' + n, factuurdatum: datum, vervaldatum: datum,
+      excl: incl, btw: 0, incl, valuta: 'EUR', incl_eur: incl, betaalwijze: 'zelf', entiteit: 'tolgaarde', intern: 0, status: 'verstuurd', betaalspoor: 'betaald_vooraf',
+      bevestigd_door: 'toets', bevestigd_op: '2026-05-01T00:00:00Z', aangemaakt_op: '2026-05-01T00:00:00Z', bijgewerkt_op: '2026-05-01T00:00:00Z' });
+    return fid;
+  };
+  const wolk = factuur(t.ids.wolk, 'Wolkdienst', '2026-05-04', 850);   // grens 11-5: bank t/m 30-6 voorbij, kaart t/m 20-4 nog niet
+  const bankLev = D.nieuwId();
+  D.voegToe(t.fdb, 'leverancier', { id: bankLev, naam: 'Bankbetaald Proef B.V.', genormaliseerd: 'bankbetaald proef b v', aangemaakt_op: '2026-01-01T00:00:00Z' });
+  const bank = factuur(bankLev, 'Bankbetaald Proef B.V.', '2026-05-04', 1210);
+  const rij = (id) => KA.onbetaald(t.fdb).find((r) => r.id === id);
+  assert.equal(rij(wolk).kaart_tot, '2026-04-20', 'kaartstand = periode_tot van het overzicht');
+  assert.equal(rij(wolk).bank_tot, '2026-06-30');
+  assert.equal(rij(bank).kaart_tot, null, 'bankleverancier: geen kaartstand');
+  const plan = () => KA.onbetaaldPlan({ rijen: KA.onbetaald(t.fdb), punten: [], vandaag: '2026-06-01', nuKort: '1-6 08:00' });
+  let p = plan();
+  assert.deepEqual(p.zet.map((k) => k.sleutel), ['facturen-onbetaald-' + bank], 'Wolkdienst wacht op de kaart, de bankleverancier niet');
+  assert.equal(p.wacht_op_kaart, 1);
+  assert.match(p.zet[0].waarom, /geen betaling in de bank\./);
+  // kaart ingelezen tot voorbij de grens, niets gekoppeld → wel een kaart, met beide bronnen in de tekst
+  C.inlezen(t.fdb, '0000', csv([['20-05-2026', '21-05-2026', 'WINKELTJE PARIS FRA', '****0000', 'D', '1,00', 'EUR', '1,00', 'Transaction', '202606']]), { wie: 'toets', nu: NU, naam: 'ics2.csv' });
+  assert.equal(rij(wolk).kaart_tot, '2026-05-20');
+  p = plan();
+  const kw = p.zet.find((k) => k.sleutel === 'facturen-onbetaald-' + wolk);
+  assert.ok(kw, 'nu wel een kaart voor Wolkdienst');
+  assert.match(kw.waarom, /tot en met 20-5-2026 geen betaling op de bank of de creditcard/);
+  assert.match(kw.meting, /creditcard t\/m 20-5-2026/);
+  assert.ok(kw.titel.length <= 90 && kw.waarom.length <= 400 && kw.meting.length <= 300);
+  // creditcardregel aan de factuur gekoppeld → betaald: niet meer kandidaat, een open kaart gaat dicht
+  const kr = t.fdb.db.prepare("SELECT id FROM kaart_regel WHERE leverancier = ? AND soort = 'transactie' AND factuur IS NULL AND factuur_archief IS NULL LIMIT 1").get(t.ids.wolk).id;
+  t.fdb.db.prepare('UPDATE kaart_regel SET factuur = ? WHERE id = ?').run(wolk, kr);
+  assert.equal(rij(wolk), undefined, 'gekoppeld aan de creditcard = betaald');
+  p = KA.onbetaaldPlan({ rijen: KA.onbetaald(t.fdb), punten: [{ sleutel: 'facturen-onbetaald-' + wolk, status: 'open' }], vandaag: '2026-06-01', nuKort: '1-6 08:00' });
+  assert.deepEqual(p.dicht.map((d) => d.sleutel), ['facturen-onbetaald-' + wolk]);
+  D.sluit(t.fdb);
+});
