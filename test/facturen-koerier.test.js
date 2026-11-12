@@ -939,8 +939,10 @@ test('wv2969 route exact zonder PDF (alleen UBL): Bevestigen weigert vooraf met 
   const ubl = t.fdb.db.prepare('SELECT ubl_document FROM factuur WHERE id = ?').get(f.id).ubl_document;
   t.fdb.db.prepare('UPDATE factuur SET ubl_document = NULL WHERE id = ?').run(f.id);
   t.fdb.db.prepare('UPDATE factuur SET document = ? WHERE id = ?').run(ubl, f.id);
-  const detail = t.call('GET', 'factuur', { id: f.id });
-  if (detail.status === 200) assert.ok(detail.j.bevestigen.redenen.some((x) => /niet naar Exact: alleen een UBL-bestand/.test(x)), JSON.stringify(detail.j.bevestigen));
+  const detail = t.call('GET', 'factuur/' + f.id);
+  assert.equal(detail.status, 200);
+  assert.equal(detail.j.bevestigen.ok, false);
+  assert.ok(detail.j.bevestigen.redenen.some((x) => /niet naar Exact: alleen een UBL-bestand/.test(x)), JSON.stringify(detail.j.bevestigen));
   const a = zelfBevestig(t, f);
   assert.equal(a.r.status, 409);
   assert.equal(a.r.j.code, 'exact');
@@ -988,8 +990,13 @@ test('wv2969 te groot voor Exact (> 15 MB): Bevestigen weigert vooraf; een opdra
   assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE soort = 'verzending_mislukt' AND EXISTS (SELECT 1 FROM json_each(facturen) j WHERE j.value = ?)", [f2.id]), 1);
   // Opnieuw proberen maakt geen nieuwe opdracht zolang het stuk te groot is
   t.fdb.db.prepare('UPDATE document SET bytes = ? WHERE sha256 = ?').run(15 * 1024 * 1024 + 500, JSON.parse(b.op.bijlagen)[0].sha256);
-  const o = t.call('POST', 'opnieuw_proberen', { id: f2.id });
-  if (o.status !== 404) { assert.equal(o.status, 409, JSON.stringify(o.j)); assert.match(JSON.stringify(o.j), /te groot voor Exact/); }
+  const n0 = t.n('SELECT count(*) AS n FROM opdracht WHERE factuur = ?', [f2.id]);
+  const o = t.call('POST', 'opnieuw', { id: f2.id });
+  assert.equal(o.status, 409, JSON.stringify(o.j));
+  assert.equal(o.j.code, 'exact');
+  assert.match(JSON.stringify(o.j), /te groot voor Exact/);
+  assert.equal(t.n('SELECT count(*) AS n FROM opdracht WHERE factuur = ?', [f2.id]), n0, 'geen nieuwe opdracht');
+  assert.equal(t.fac(f2.id).status, 'verzending_mislukt');
 });
 
 test('wv2969 meer dan 150 pagina\'s: geweigerd met het paginatal (echte pdftotext); 150 pagina\'s gaat gewoon', async () => {
