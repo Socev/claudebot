@@ -2631,6 +2631,7 @@ async function bewijs(o) {
       const beurtKlaar = async (tekst, voor) => {
         H.appStaat.tellers.beurt = [];
         const rr = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst }, { pot: P.jar });
+        for (let i = 0; i < 40 && rr.j.job_id && !afmaken[rr.j.job_id]; i++) await slaap(50);   // wv2965: chat_log bij de start; het antwoord komt vóór de start
         if (!afmaken[rr.j.job_id]) return 'beurt mislukt: ' + JSON.stringify(rr);
         await slaap(30); pushes.length = 0;
         afmaken[rr.j.job_id]('ok ' + tekst);
@@ -3110,7 +3111,9 @@ async function bewijs(o) {
       toets('14 wv405 vragen.json: druk hoort bij zijn job, nog niet gestart', vjR.antwoord && vjR.antwoord.job === jRij && vjR.antwoord.gestart === false, JSON.stringify(vjR));
       losB(); await slaap(60);
       toets('14 wv405 eerst de getypte beurt die al wachtte', gestart.length === nGR + 1 && gestart[gestart.length - 1].jobId === rb.j.job_id, gestart.slice(nGR).map((x) => x.jobId).join());
-      afmaken[rb.j.job_id]('ok'); await slaap(120);
+      afmaken[rb.j.job_id]('ok');
+      for (let i = 0; i < 40 && !(gestart.length >= nGR + 2 && chatlogStaat.rijen.slice(nCL).some((x) => x.bevestiging === 'knop-ja-vers')); i++) await slaap(50);   // wv2965: trage pod
+      await slaap(60);
       const gR = gestart[gestart.length - 1];
       const clR = chatlogStaat.rijen.slice(nCL);
       toets('14 wv405 daarna de eerste knopbeurt, met "met verse vingerafdruk bevestigd"; chat_log knop-ja-vers pas nu, na het antwoord van de vorige beurt', gestart.length === nGR + 2 && gR.jobId === jRij && /, met verse vingerafdruk bevestigd, vraag-id /.test(gR.prompt) && /kanaal "app-knop", en handel af\.\)$/.test(gR.prompt) && clR.length >= 3 && clR[clR.length - 1].bevestiging === 'knop-ja-vers' && clR[clR.length - 2].rol === 'socev' && /Piet/.test(clR[clR.length - 2].tekst), gR.prompt.slice(-160) + ' ' + JSON.stringify(clR.map((x) => [x.rol, x.bevestiging])));
@@ -3282,8 +3285,8 @@ async function bewijs(o) {
           afmaken[h1.j.job_id]('De tandarts2965 is vrijdag 10:00.\n\nVRAAG AAN DAVID: Zal ik de tandarts2965 naar 11:00 verzetten?');
           await wachtStart(h2.j.job_id);
           const pS = chatlogStaat.rijen.find((r) => r.rol === 'socev' && /tandarts2965 naar 11:00/.test(r.tekst));
-          const dJa = chatlogStaat.rijen.find((r) => r.rol === 'david' && r.tekst === 'ja' && r.ts === jobs[h2.j.job_id].created);
-          toets('14b wv2965 bij de start van het "ja" uit de rij: Davids rij in chat_log met zijn typtijd (vóór Socevs voorstel)', !!pS && !!dJa && dJa.bevestiging === 'getypt' && dJa.kanaal === 'app' && dJa.ts < pS.ts && gestart.length === nG + 2, JSON.stringify([pS, dJa, chatlogStaat.rijen.slice(nCL)]));
+          const dJa = chatlogStaat.rijen.find((r) => r.rol === 'david' && r.tekst === 'ja' && r.ts <= jobs[h2.j.job_id].created && r.ts > jobs[h2.j.job_id].created - 1000);   // ontvangsttijd (Codex MOET 1)
+          toets('14b wv2965 bij de start van het "ja" uit de rij: Davids rij in chat_log met zijn ontvangsttijd (vóór Socevs voorstel)', !!pS && !!dJa && dJa.bevestiging === 'getypt' && dJa.kanaal === 'app' && dJa.ts < pS.ts && gestart.length === nG + 2, JSON.stringify([pS, dJa, chatlogStaat.rijen.slice(nCL)]));
           { const p = poortwachterPaar(chatlogStaat.rijen.filter((r) => String(r.chat_id) === '40687'));
             toets('14b wv2965 Poortwachter: het getypte "ja" uit de rij is nooit een bevestiging van het voorstel dat Socev pas daarna deed', p && p.david === dJa && p.socev && !/tandarts2965 naar 11:00/.test(p.socev.tekst), JSON.stringify(p)); }
           const p2 = promptVan(h2.j.job_id);
@@ -3293,9 +3296,25 @@ async function bewijs(o) {
           const h6 = await tikH('ja, die bedoel ik', { antwoord_op: hD });
           afmaken[h2.j.job_id]('Welk voorstel bedoel je?'); await wachtStart(h3.j.job_id);
           afmaken[h3.j.job_id]('ok 3'); await wachtStart(h6.j.job_id);
-          const t6 = jobs[h6.j.job_id].created, c6 = chatlogStaat.rijen.filter((r) => (r.rol === 'socev' && /tandarts2965 naar 11:00/.test(r.tekst) && r.ts === t6 - 1) || (r.rol === 'david' && r.tekst === 'ja, die bedoel ik' && r.ts === t6));
+          const t6 = jobs[h6.j.job_id].created, d6 = chatlogStaat.rijen.find((r) => r.rol === 'david' && r.tekst === 'ja, die bedoel ik' && r.ts <= t6 && r.ts > t6 - 1000);
+          const c6 = d6 ? chatlogStaat.rijen.filter((r) => r === d6 || (r.rol === 'socev' && /tandarts2965 naar 11:00/.test(r.tekst) && r.ts === d6.ts - 1)) : [];
           toets('14b wv2965 Antwoord hierop uit de rij: geciteerd bericht (socev, typtijd - 1) en Davids rij (typtijd)', h6.status === 200 && h6.j.in_rij === true && c6.length === 2, JSON.stringify([h6.status, h6.j, chatlogStaat.rijen.slice(-4)]));
           afmaken[h6.j.job_id]('ok 6'); await slaap(80);
+          // Codex-review MOET 1: wacht een getypt bericht nog op een ander dat zijn chat_log schrijft (startend), en verschijnt in die
+          // wachttijd een voorstel, dan blijft Davids rij op het moment van ontvangst staan (vóór dat voorstel), ook als het kanaal dan vrij is
+          { H.appStaat.startend = H.appStaat.startend || {}; H.appStaat.startend.hoofd = (H.appStaat.startend.hoofd || 0) + 1;
+            const tVoor = Date.now();
+            const pW = tikH('ja, wacht2965');
+            await slaap(250);
+            const tVoorstel = Date.now();
+            chatlogStaat.rijen.push({ chat_id: '40687', rol: 'socev', kanaal: 'app', ts: tVoorstel, tekst: 'Zal ik de wacht2965-afspraak verzetten?', bevestiging: '' });
+            H.appStaat.startend.hoofd--;
+            const rW = await pW;
+            await wachtStart(rW.j.job_id);
+            const dW = chatlogStaat.rijen.find((r) => r.rol === 'david' && r.tekst === 'ja, wacht2965');
+            const p = poortwachterPaar(chatlogStaat.rijen.filter((r) => String(r.chat_id) === '40687'));
+            toets('14b wv2965 (Codex MOET 1) bericht wachtte op een ander chat_log-schrijven: rij op ontvangsttijd, vóór het voorstel uit die wachttijd; Poortwachter koppelt het er niet aan', rW.status === 200 && dW && dW.ts >= tVoor && dW.ts < tVoorstel && p && p.david === dW && !/wacht2965-afspraak/.test((p.socev || {}).tekst || ''), JSON.stringify([rW.status, dW, tVoor, tVoorstel, p && p.socev]));
+            afmaken[rW.j.job_id]('ok W'); await slaap(80); }
           // sortering op typtijd ook in het hoofdkanaal
           const g2 = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar });
           const i1 = g2.j.items.findIndex((x) => x.job_id === h1.j.job_id), i2 = g2.j.items.findIndex((x) => x.job_id === h2.j.job_id), i6 = g2.j.items.findIndex((x) => x.job_id === h6.j.job_id);
@@ -3323,9 +3342,10 @@ async function bewijs(o) {
           const rt = await typ('na telegram');
           await slaap(30);
           jobs[tg].status = 'done'; jobs[tg].done_at = Date.now(); jobs[tg].result = { ok: true, output: 'tg' };
-          los(); await slaap(60);
+          los(); const tLos = Date.now();
+          for (let i = 0; i < 60 && !promptVan(rt.j.job_id); i++) await slaap(50);   // wv2965: trage pod (2 CPU's); was vast 60 ms
           const pt = promptVan(rt.j.job_id);
-          toets('14b getypt terwijl een Telegram-beurt loopt -> 200 in_rij; rijregel na de Telegram-beurt', rt.status === 200 && rt.j.in_rij === true && /\n\(Dit bericht typte David om \d\d:\d\d terwijl je nog bezig was; je antwoord van \d\d:\d\d had hij toen nog niet gezien\.\)$/.test(pt), rt.status + JSON.stringify(pt.slice(-160)));
+          toets('14b getypt terwijl een Telegram-beurt loopt -> 200 in_rij; rijregel na de Telegram-beurt (start na ' + (Date.now() - tLos) + ' ms)', rt.status === 200 && rt.j.in_rij === true && /\n\(Dit bericht typte David om \d\d:\d\d terwijl je nog bezig was; je antwoord van \d\d:\d\d had hij toen nog niet gezien\.\)$/.test(pt), rt.status + JSON.stringify(pt.slice(-160)));
           afmaken[rt.j.job_id]('ok'); await slaap(60); delete jobs[tg]; }
         // 8. tussendoor-regel: 0, 1 en 6 berichten (hooguit 5)
         { const r0 = await typ('zonder tussendoor'); await slaap(40);
