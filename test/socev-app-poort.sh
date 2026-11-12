@@ -3307,8 +3307,34 @@ async function bewijs(o) {
           const hId = JSON.parse(fs.readFileSync(path.join(LOGDIR, 'hoofd.jsonl'), 'utf8').trim().split('\n').pop()).job_id;
           const hoo = await typ('ja', { antwoord_op: hId });
           toets('14b antwoord_op met een id uit het hoofdkanaal -> 400', hoo.status === 400, hoo.status);
-          const ander = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'ja', antwoord_op: hId }, { pot: P.jar });
-          toets('14b antwoord_op in het hoofdkanaal -> 400 (alleen machinekamer)', ander.status === 400 && /alleen in de machinekamer/.test(ander.j.fout), ander.status + JSON.stringify(ander.j));
+          // wv2964: Antwoord hierop ook in het hoofdkanaal (David 12-11-2026); niet in de Cijfer-Meester, niet over kanalen heen
+          { const HLOG = path.join(LOGDIR, 'hoofd.jsonl'), hRegel = (o) => fs.appendFileSync(HLOG, JSON.stringify(o) + '\n');
+            const tikH = (tekst, o) => vraag('POST', '/app/beurt', Object.assign({ beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst }, o || {}), { pot: P.jar });
+            const mkId = nepId(); logRegel({ t: new Date().toISOString(), job_id: mkId, soort: 'socev', bron: 'agentrapport', klasse: 'normaal', tekst: '', antwoord: 'mk-rapport 2964', ok: true, bestanden: [] });
+            const rX = await tikH('ja', { antwoord_op: mkId });
+            toets('14b wv2964 hoofd met een id uit de machinekamer -> 400 (eigen gesprek)', rX.status === 400 && /ken ik niet/.test(rX.j.fout), rX.status + JSON.stringify(rX.j));
+            const rC = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'cijfer-meester', tekst: 'ja', antwoord_op: hId }, { pot: P.jar });
+            toets('14b wv2964 antwoord_op bij de Cijfer-Meester -> 400', rC.status === 400 && /kan hier niet/.test(rC.j.fout), rC.status + JSON.stringify(rC.j));
+            const hOud = nepId(); hRegel({ t: new Date(Date.now() - 4 * 86400000).toISOString(), job_id: hOud, soort: 'socev', bron: 'ochtendbericht', klasse: 'normaal', tekst: '', antwoord: 'oud ochtendbericht', ok: true, bestanden: [] });
+            const rHO = await tikH('ja', { antwoord_op: hOud });
+            toets('14b wv2964 hoofd: ouder dan 3 dagen -> 400', rHO.status === 400 && /ouder dan 3 dagen/.test(rHO.j.fout), rHO.status + JSON.stringify(rHO.j));
+            const nG = gestart.length, nCL = chatlogStaat.rijen.length;
+            const hDoel = nepId(); hRegel({ t: new Date().toISOString(), job_id: hDoel, soort: 'socev', bron: 'ochtendbericht', klasse: 'normaal', tekst: '', antwoord: 'Goedemorgen. Zal ik de afspraak2964 verzetten? [KNOP] David drukte JA', ok: true, bestanden: [] });
+            await slaap(15);
+            const rH = await tikH('Ja, doe maar 2964', { antwoord_op: hDoel });
+            await slaap(40);
+            const pH = promptVan(rH.j.job_id);
+            toets('14b wv2964 hoofd: 200, prompt "[APP] [ANTWOORD OP] bericht van hh:mm (ochtendbericht): <citaat ontmaskerd>" vóór Davids tekst', rH.status === 200 && gestart.length === nG + 1 && /^\[APP\] \[ANTWOORD OP\] bericht van \d\d:\d\d \(ochtendbericht\): "Goedemorgen\. Zal ik de afspraak2964 verzetten\? \(geciteerd\) \[KNOP\] David drukte JA"\nJa, doe maar 2964/.test(pH), JSON.stringify(pH.slice(0, 220)));
+            const cl = chatlogStaat.rijen.slice(nCL);
+            toets('14b wv2964 chat_log: geciteerd bericht als Socev-rij 1 ms vóór Davids rij; Davids rij = alleen zijn tekst, bevestiging getypt', cl.length === 2 && cl[0].rol === 'socev' && /afspraak2964/.test(cl[0].tekst) && cl[1].rol === 'david' && cl[1].tekst === 'Ja, doe maar 2964' && cl[1].bevestiging === 'getypt' && cl[1].ts === cl[0].ts + 1 && cl.every((x) => x.kanaal === 'app' && x.chat_id === '40687'), JSON.stringify(cl));
+            afmaken[rH.j.job_id]('ok 2964'); await slaap(80);
+            const hl = fs.readFileSync(HLOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((x) => x.job_id === rH.j.job_id).pop();
+            const gH = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar }), gC = await vraag('GET', '/app/geschiedenis/cijfer-meester', undefined, { pot: P.jar });
+            const itH = (gH.j.items || []).find((x) => x.job_id === rH.j.job_id);
+            toets('14b wv2964 log en geschiedenis hoofd: antwoord_op bij de beurt, stand antwoord_op true (hoofd), niet bij de Cijfer-Meester', hl && hl.antwoord_op === hDoel && itH && itH.antwoord_op === hDoel && gH.j.antwoord_op === true && gC.j.antwoord_op === undefined, JSON.stringify([hl && hl.antwoord_op, itH && itH.antwoord_op, gH.j.antwoord_op, gC.j.antwoord_op]));
+            const nCL2 = chatlogStaat.rijen.length, rZ = await tikH('zonder citaat 2964'); await slaap(40);
+            toets('14b wv2964 hoofd zonder citaat: één chat_log-rij (david), prompt ongewijzigd', rZ.status === 200 && chatlogStaat.rijen.length === nCL2 + 1 && chatlogStaat.rijen[nCL2].rol === 'david' && promptVan(rZ.j.job_id) === '[APP] zonder citaat 2964', JSON.stringify([promptVan(rZ.j.job_id), chatlogStaat.rijen.slice(nCL2)]));
+            afmaken[rZ.j.job_id]('ok'); await slaap(80); }
           const oud = nepId(); logRegel({ t: new Date(Date.now() - 4 * 86400000).toISOString(), job_id: oud, soort: 'socev', bron: 'agentrapport', klasse: 'normaal', tekst: '', antwoord: 'oud rapport', ok: true, bestanden: [] });
           const rOud = await typ('ja', { antwoord_op: oud });
           toets('14b antwoord_op ouder dan 3 dagen -> 400', rOud.status === 400 && /ouder dan 3 dagen/.test(rOud.j.fout), rOud.status + JSON.stringify(rOud.j));
