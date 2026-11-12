@@ -434,6 +434,8 @@ function inlezen(fdb, kaartWie, bytes, opties) {
   // de ene mag een afgekapte vorm van de andere zijn, ≥ 6 tekens). Meer dan één zo'n afgekapte kandidaat: twijfel, het hele bestand geweigerd
   // (review Codex wv2958 MOET 1: een andere winkel met hetzelfde bedrag op dezelfde dag mag nooit claimen). Autorisaties nooit.
   const ander = fdb.db.prepare("SELECT r.id, r.omschrijving FROM kaart_regel r JOIN kaart_bestand b ON b.id = r.bestand WHERE r.kaart = ? AND b.formaat <> ? AND r.soort = ? AND r.transactiedatum = ? AND coalesce(r.boekdatum, '') = ? AND r.bedrag_centen = ? AND r.overzicht IS ? ORDER BY r.id");
+  // review Codex ronde 3: bepalen wat nieuw is gebeurt bij schrijven binnen dezelfde vergrendelde transactie (BEGIN IMMEDIATE) als het invoegen
+  const bepaal = () => {
   const geclaimd = new Set();
   // een CSV na de PDF (review Codex ronde 2 MOET 1): het PDF-overzicht is het hele overzicht; regels van een overzicht waar al een PDF van is
   // ingelezen, slaat een CSV over (ze zijn er al, en zo kan een anders gespelde regel nooit dubbel binnenkomen)
@@ -454,14 +456,22 @@ function inlezen(fdb, kaartWie, bytes, opties) {
     geclaimd.add(tegen.id);
     return false;
   });
-  const uit = { droog: !!o.droog, formaat, periode: g.periode, aantallen: g.aantallen, regels: regels.length, nieuw: nieuw.length, al_bekend_regels: regels.length - nieuw.length };
+  return nieuw;
+  };
+  const uit = { droog: !!o.droog, formaat, periode: g.periode, aantallen: g.aantallen, regels: regels.length };
   if (pdf) Object.assign(uit, { overzicht: g.overzicht, totalen: g.totalen });
-  const best = fdb.db.prepare('SELECT id FROM kaart_bestand WHERE sha256 = ?').get(sha);
-  if (best) return Object.assign(uit, { al_bekend: true, bestand: best.id, nieuw: 0, al_bekend_regels: regels.length });
-  if (o.droog) return Object.assign(uit, { al_bekend: false });
+  const bestaand = () => fdb.db.prepare('SELECT id FROM kaart_bestand WHERE sha256 = ?').get(sha);
+  const alBekend = (best) => Object.assign(uit, { al_bekend: true, bestand: best.id, nieuw: 0, al_bekend_regels: regels.length });
+  let best = bestaand();
+  if (best) return alBekend(best);
+  if (o.droog) { const n = bepaal(); return Object.assign(uit, { al_bekend: false, nieuw: n.length, al_bekend_regels: regels.length - n.length }); }
   const bron = D.bronSchrijf(fdb, bytes);
   const wanneer = nuIso(nu), id = D.nieuwId();
+  let nieuw = null;
   D.transactie(fdb, () => {
+    best = bestaand();
+    if (best) return;
+    nieuw = bepaal();
     D.voegToe(fdb, 'kaart_bestand', { id, kaart: kaart.id, sha256: sha, formaat, overzicht: pdf ? g.overzicht : null, naam: o.naam ? String(o.naam).slice(0, 255) : null,
       periode_van: g.periode.van, periode_tot: g.periode.tot, aantal: regels.length, nieuw: nieuw.length, bron_bewaard: bron && bron.sha256 === sha ? 1 : 0,
       herkomst: o.herkomst ? String(o.herkomst).slice(0, 300) : null, geupload_door: o.wie, geupload_op: wanneer });
@@ -481,6 +491,8 @@ function inlezen(fdb, kaartWie, bytes, opties) {
     D.audit(fdb, { wie: o.wie, wat: 'kaart_inlezen', object_soort: 'kaart_bestand', object_id: id, entiteit: kaart.entiteit,
       na: { regels: regels.length, nieuw: nieuw.length, periode: g.periode, aantallen: g.aantallen, bron_bewaard: !!(bron && bron.sha256 === sha) }, wanneer });
   });
+  if (best) return alBekend(best);   // tussendoor door een ander proces ingelezen
+  Object.assign(uit, { nieuw: nieuw.length, al_bekend_regels: regels.length - nieuw.length });
   const koppeling = koppel(fdb, kaart.id, { nu, wie: o.wie });
   return Object.assign(uit, { al_bekend: false, bestand: id, koppeling });
 }
