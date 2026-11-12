@@ -253,4 +253,6 @@ const srv = http.createServer((q, r) => { zag.push(q.url);
 })();
 JS
 BRUIT=$?
-[ "$PYUIT" = 0 ] && [ "$JSUIT" = 0 ] && [ "$BRUIT" = 0 ] && echo "winkel-browser: alles groen" || { echo "winkel-browser: ROOD"; exit 1; }
+# wv2961: zonder deze regel komt winkel-browser.js niet in de release en staat de browserroute uit (11-11: shopper.browser.aan = false)
+if grep -qE 'RELEASE_OPTIONEEL="[^"]*[[:space:]"]winkel-browser\.js[[:space:]"]' uitrol.sh; then echo "GROEN uitrol: winkel-browser.js staat in RELEASE_OPTIONEEL"; LIJSTUIT=0; else echo "ROOD  uitrol: winkel-browser.js ontbreekt in RELEASE_OPTIONEEL"; LIJSTUIT=1; fi
+[ "$LIJSTUIT" = 0 ] && [ "$PYUIT" = 0 ] && [ "$JSUIT" = 0 ] && [ "$BRUIT" = 0 ] && echo "winkel-browser: alles groen" || { echo "winkel-browser: ROOD"; exit 1; }
