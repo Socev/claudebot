@@ -42,6 +42,17 @@
 // versie, tekst_hash, stem }), alleen vanuit de server (derde argument van maak, nooit uit de invoer van de app); (4) het label in
 // Bestanden komt dan uit die bron ("tolgaarde · tg-buiten · v3"); (5) deps.naKlaar(taak) na afloop, los en met eigen catch, zodat een
 // fout daarin nooit de afronding raakt die de wachtrij vrijgeeft.
+//
+// GEHEUGEN-TAKEN (wv2984, OVIS Imagine fase 1; ontwerp mk-scripts/ovis-imagine/ontwerp-incognito.md). maakGeheugen() neemt een foto als
+// Buffer (van imagine.js, nooit uit de app rechtstreeks) en levert het resultaat als Buffer terug aan een callback: geen werkmap, geen
+// Bestanden, nooit in taken.json (st.geheugen i.p.v. st.taken), wel dezelfde rij en hetzelfde slot (één taak tegelijk met de Studio).
+// Alleen fotoflows met websocket-uitvoer (zonder SaveImageWebsocket in ComfyUI: geweigerd, nooit de Preview-weg). Pillow via een pijp
+// (studio-beeld.py pijp-*: stdin → fd 3), dus ook geen tijdelijk bestand. Een GEHEIME taak (incognito) daarbovenop:
+//   - audit en log alleen { soort: 'incognito', uitkomst, duur_s }; geen flow, taak-id, maten, reden of meting; fout() alleen vaste teksten;
+//   - de pod kiest zelf de ComfyUI-prompt-id en zet hem VÓÓR het indienen in het merkbestand (deps.merk, 0600: alleen prompt-id's en of
+//     /free nog moet). Lukt dat schrijven niet, dan niets indienen. Een id gaat pas uit het merk als zijn geschiedenisregel aantoonbaar weg
+//     is; /free (ook de uitvoercache van ComfyUI) alleen bij een lege rij. geheimNaloop() doet dat elke minuut, bij Alles wissen en na
+//     een herstart (merk gelezen bij het laden); tot het merk leeg is en de invoer 1×1 is: nog_te_wissen.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -308,7 +319,9 @@ function maak(deps) {
   const log = deps.log || function () {};
   const fout = deps.fout || function () {};
   const st = { taken: [], rij: [], bezig: null, lokaal: { sleutel: null, flows: {} }, router: { op: 0, modellen: null, fout: null },
-    fs: {}, info: { op: 0, d: null }, comfyLaatst: 0, comfyFreeGedaan: true, timer: null, histWis: [] };
+    fs: {}, info: { op: 0, d: null }, comfyLaatst: 0, comfyFreeGedaan: true, timer: null, histWis: [],
+    geheugen: [], gTel: { dag: '', n: 0 }, merk: { pids: [], free: false }, herstartMerk: false, naloopBezig: null, blok: false, freeVraag: false };   // wv2984
+  const MERK = deps.merk || null;   // wv2984: pad van het incognito-merkbestand (null = geen geheime taken)
 
   // ── opslag ──
   function mkdir(p) { fs.mkdirSync(p, { recursive: true, mode: 0o700 }); }
@@ -621,13 +634,13 @@ function maak(deps) {
   }
 
   // ── stand ──
-  function vandaagN() { const d = dagNL(klok()); return st.taken.filter(function (t) { return dagNL(Date.parse(t.gemaakt)) === d; }).length; }
+  function vandaagN() { const d = dagNL(klok()); return st.taken.filter(function (t) { return dagNL(Date.parse(t.gemaakt)) === d; }).length + (st.gTel.dag === d ? st.gTel.n : 0); }
   function stand() {
     const maand = dagNL(klok()).slice(0, 7);
     // alleen de tijd tussen indienen en klaar (niet het wachten op een bezette ComfyUI; Fable wv707 #12)
     const gpuS = st.taken.filter(function (t) { return t.gpu_s > 0 && dagNL(Date.parse(t.gemaakt)).slice(0, 7) === maand; })
       .reduce(function (s, t) { return s + t.gpu_s; }, 0);
-    return { vandaag: vandaagN(), per_dag: GRENS.per_dag, in_rij: st.rij.length, rij_max: GRENS.rij, bezig: st.bezig ? st.bezig.id : null,
+    return { vandaag: vandaagN(), per_dag: GRENS.per_dag, in_rij: st.rij.length, rij_max: GRENS.rij, bezig: st.bezig ? (st.bezig.geheim ? 'incognito' : st.bezig.naloop ? 'opruimen' : st.bezig.id) : null,
       gpu_minuten_maand: Math.round(gpuS / 6) / 10, elevenlabs: bundelUit() };
   }
   function taakUit(t) {
@@ -716,6 +729,33 @@ function maak(deps) {
         if (code !== 0 || j.ok !== true) return eind({ ok: false, reden: schoon(j.reden || 'foto geweigerd', 120) });
         eind(j);
       });
+    });
+  }
+  // wv2984: zelfde controle zonder bestand. Bytes op stdin, nieuw beeld (als dat er is) van fd 3, JSON van stdout.
+  // → { ok:true, ...json, bytes: Buffer|null } of { ok:false, reden }. Nooit een pad, nooit beeldinhoud in een melding.
+  function beeldPijp(args, buf) {
+    return new Promise(function (klaar) {
+      let k, uit = '', af = false;
+      const fd3 = []; let n3 = 0;
+      const eind = function (r) { if (af) return; af = true; clearTimeout(tm); fd3.length = 0; klaar(r); };
+      try { k = spawn(PY.bin, ['-I', PY.script].concat(args), { env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' }, stdio: ['pipe', 'pipe', 'ignore', 'pipe'] }); }
+      catch (e) { return klaar({ ok: false, reden: 'de beeldcontrole start niet' }); }
+      const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} eind({ ok: false, reden: 'de beeldcontrole duurde te lang' }); }, BEELD.py_ms);
+      k.stdout.on('data', function (b) { if (uit.length < 4000) uit += b; });
+      k.stdio[3].on('data', function (b) { n3 += b.length; if (n3 <= BEELD.uit_lees_max) fd3.push(b); });
+      k.stdio[3].on('error', function () {});
+      k.stdin.on('error', function () {});
+      k.on('error', function () { eind({ ok: false, reden: 'de beeldcontrole start niet' }); });
+      k.on('close', function (code) {
+        let j = null;
+        try { j = JSON.parse(uit.trim().split('\n').pop()); } catch (e) { j = null; }
+        if (!j || typeof j !== 'object') return eind({ ok: false, reden: 'de beeldcontrole gaf geen antwoord (code ' + code + ')' });
+        if (code !== 0 || j.ok !== true) return eind({ ok: false, reden: schoon(j.reden || 'beeld geweigerd', 120) });
+        if (n3 > BEELD.uit_lees_max) return eind({ ok: false, reden: 'het beeld werd te groot' });
+        j.bytes = n3 ? Buffer.concat(fd3) : null;
+        eind(j);
+      });
+      k.stdin.end(buf);
     });
   }
   // Grens voor deze taak: max_mp van het veld, of lager via max_mp_per ("schaal=4": 1).
@@ -978,16 +1018,113 @@ function maak(deps) {
     return { status: 200, taak: taakUit(t) };
   }
 
+  // ── wv2984: geheugen-taak (OVIS Imagine; zie de kop) ──
+  // o: { flow, velden (zonder het fotoveld), beeld: Buffer, beurt_id, geheim: bool, apparaat, klaar(uitkomst) }
+  // uitkomst: { status: 'klaar'|'mislukt'|'gestopt', reden, beelden: [{ bytes, breed, hoog, ext }], duur_s, model, flow }
+  // ctx als bij maak (versOk/versVerbruik): een flow op proef vraagt ook hier elke keer een verse vingerafdruk.
+  async function maakGeheugen(o, ctx) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    if (!o || !Buffer.isBuffer(o.beeld) || typeof o.klaar !== 'function') return { status: 400, fout: 'geen beeld' };
+    const geheim = o.geheim === true;
+    if (geheim && !MERK) return { status: 409, fout: 'incognito kan hier niet' };
+    if (geheim && st.blok) return { status: 409, fout: NOG_TE_WISSEN };
+    const beurt = String(o.beurt_id || '');
+    if (!/^[A-Za-z0-9-]{8,64}$/.test(beurt)) return { status: 400, fout: 'beurt_id ontbreekt' };
+    const al = st.geheugen.find(function (t) { return t.beurt_id === beurt; });
+    if (al) return { status: 200, taak: geheugenUit(al), al: true };
+    const flowId = String(o.flow || '');
+    const c = await catalogus(false);
+    const f = c.flows.find(function (x) { return x.id === flowId; });
+    if (!f || f.motor !== 'comfyui') return { status: 404, fout: 'deze bewerking bestaat niet (meer)' };
+    if (f.fout || f.reden || f.status === 'uit') return { status: 409, fout: 'deze bewerking kan nu niet: ' + (f.fout || f.reden || 'staat uit') };
+    const v = f.velden.find(function (x) { return x.soort === 'beeld'; });
+    if (!v) return { status: 409, fout: 'deze bewerking neemt geen foto' };
+    const invoer = Object.assign({}, o.velden && typeof o.velden === 'object' ? o.velden : {});
+    invoer[v.naam] = { n: 1 };
+    const w = waardenVan(f, invoer);
+    if (w.fout) return { status: 400, fout: w.fout };
+    if (f.status === 'proef' && !ctx.versOk()) return { status: 403, fout: 'deze bewerking is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
+    if (o.beeld.length > BEELD.max_bytes) return { status: 413, fout: 'beeld groter dan 20 MB' };
+    const soort = beeldSoort(o.beeld);
+    if (!soort) return { status: 415, fout: 'alleen jpg, png of webp' };
+    const grens = beeldGrens(v, w.waarden);
+    const r = await beeldPijp(['pijp-neem', String(grens)], o.beeld);
+    if (!r.ok) return { status: 400, fout: 'beeld geweigerd: ' + r.reden };
+    if ({ JPEG: 'jpg', PNG: 'png', WEBP: 'webp' }[r.formaat] !== soort) return { status: 415, fout: 'beeld geweigerd: de inhoud past niet bij het bestandstype' };
+    // vanaf hier synchroon tot de taak in de rij staat
+    const al2 = st.geheugen.find(function (t) { return t.beurt_id === beurt; });
+    if (al2) return { status: 200, taak: geheugenUit(al2), al: true };
+    if (geheim && st.blok) return { status: 409, fout: NOG_TE_WISSEN };
+    if (vandaagN() >= GRENS.per_dag) return { status: 429, fout: 'vandaag al ' + GRENS.per_dag + ' bewerkingen gemaakt; morgen weer' };
+    if (st.rij.length >= GRENS.rij) return { status: 429, fout: 'er staan al ' + GRENS.rij + ' taken in de rij; wacht tot er een klaar is' };
+    const bytes = r.verkleind ? r.bytes : o.beeld;
+    if (!bytes) return { status: 500, fout: 'verkleinen van het beeld lukte niet' };
+    if (f.status === 'proef') {
+      if (!ctx.versOk()) return { status: 403, fout: 'deze bewerking is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
+      ctx.versVerbruik();
+    }
+    const dag = dagNL(klok());
+    if (st.gTel.dag !== dag) st.gTel = { dag: dag, n: 0 };
+    st.gTel.n++;
+    const t = { id: hex16(), beurt_id: beurt, geheugen: true, geheim: geheim, flow: f.id, titel: f.titel, motor: f.motor, uitvoer: f.uitvoer,
+      status: 'wacht', fase: 'in de rij', procent: null, gemaakt: new Date(klok()).toISOString(), velden: w.waarden, bestanden: [],
+      proef: f.status === 'proef', apparaat: String(o.apparaat || ''), model: f.ai_model || null,
+      beeld: { veld: v.naam, breed: r.verkleind ? r.nieuw_breed : r.breed, hoog: r.verkleind ? r.nieuw_hoog : r.hoog, ext: r.verkleind ? r.ext : soort,
+        verkleind: !!r.verkleind, grens_mp: grens },
+      _in: bytes, _uit: [], _klaar: o.klaar };
+    t.velden[v.naam] = '(foto)';
+    st.geheugen.push(t);
+    st.rij.push(t.id);
+    setImmediate(volgende);
+    return { status: 200, taak: geheugenUit(t) };
+  }
+  function geheugenUit(t) {
+    return { id: t.id, status: t.status, fase: t.fase || null, procent: t.procent == null ? null : t.procent, gemaakt: t.gemaakt, start: t.start || null,
+      plek_in_rij: t.status === 'wacht' ? st.rij.indexOf(t.id) + 1 : null, flow: t.flow, titel: t.titel, reden: t.reden || null };
+  }
+  function vindTaak(id) { return st.taken.find(function (x) { return x.id === id; }) || st.geheugen.find(function (x) { return x.id === id; }); }
+  // Stop van een geheugen-taak (Imagine): uit de rij of de lopende onderbreken. apparaat (als gegeven) = alleen eigen geheime taken.
+  function stopGeheugen(id, apparaat) {
+    const t = st.geheugen.find(function (x) { return x.id === id; });
+    if (!t || (t.geheim && apparaat !== undefined && t.apparaat !== String(apparaat))) return { status: 404, fout: 'deze taak bestaat niet (meer)' };
+    if (t.status === 'wacht') {
+      st.rij = st.rij.filter(function (x) { return x !== id; });
+      t.status = 'gestopt'; t.reden = 'uit de rij gehaald'; t.eind = new Date(klok()).toISOString(); t.fase = null;
+      const u = geheugenUit(t);
+      geheugenAf(t);
+      return { status: 200, taak: u };
+    }
+    if (t.status === 'bezig' && st.bezig && st.bezig.id === id) {
+      const c = st.bezig.ctl;
+      c.gestopt = true; t.fase = 'stoppen';
+      try { if (c.stop) c.stop(); } catch (e) {}
+      try { if (c.wek) c.wek(); } catch (e) {}
+      return { status: 200, taak: geheugenUit(t) };
+    }
+    return { status: 409, fout: 'deze taak loopt niet meer' };
+  }
+  // Afronding van een geheugen-taak: callback (eigen catch), daarna alle verwijzingen naar de bytes los en uit st.geheugen.
+  function geheugenAf(t) {
+    const u = { status: t.status, reden: t.reden || null, duur_s: t.duur_s || 0, model: t.model, flow: t.flow,
+      beelden: t.status === 'klaar' ? t._uit.slice() : [] };
+    const k = t._klaar;
+    t._in = null; t._uit = []; t._klaar = null;
+    if (t.geheim) t.velden = null;
+    st.geheugen = st.geheugen.filter(function (x) { return x !== t; });
+    try { if (k) Promise.resolve(k(u)).catch(function () { fout(t.geheim ? 'imagine-incognito' : 'imagine-klaar', new Error('afronden mislukt')); }); }
+    catch (e) { fout(t.geheim ? 'imagine-incognito' : 'imagine-klaar', new Error('afronden mislukt')); }
+  }
+
   // ── wachtrij: één tegelijk ──
   function volgende() {
     if (st.bezig || !st.rij.length) return;
     const id = st.rij.shift();
-    const t = st.taken.find(function (x) { return x.id === id; });
+    const t = vindTaak(id);
     if (!t || t.status !== 'wacht') return setImmediate(volgende);
     const ctl = { gestopt: false, stop: null };
-    st.bezig = { id: id, ctl: ctl };
+    st.bezig = { id: id, ctl: ctl, geheim: t.geheim === true, apparaat: t.apparaat };
     t.status = 'bezig'; t.start = new Date(klok()).toISOString(); t.fase = 'start';
-    bewaarTaken();
+    if (!t.geheugen) bewaarTaken();
     // Eindafhandeling in try/finally: wat er ook gooit (schijf vol, log), st.bezig komt altijd vrij en het proces krijgt nooit een
     // onafgehandelde afwijzing (Fable wv707 #5).
     voer(t, ctl).then(function (r) { return r; }, function (e) { return { fout: foutTekst(e && e.message || e) }; }).then(function (r) { try {
@@ -998,6 +1135,17 @@ function maak(deps) {
       else if (r && r.ok) { t.status = 'klaar'; t.procent = 100; }
       else { t.status = 'mislukt'; t.reden = (r && r.fout) || 'onbekende fout'; }
       t.fase = null;
+      if (t.geheugen) {
+        // wv2984: geen werkmap, geen verbruik, geen Bestanden. Geheim: alleen de telregel (geen flow, id, reden of maten).
+        if (t.geheim) { audit({ soort: 'incognito', uitkomst: t.status, duur_s: t.duur_s }); log('studio incognitotaak uitkomst=' + t.status + ' duur_s=' + t.duur_s); }
+        else {
+          audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: t.status, duur_s: t.duur_s, bestanden: t._uit.length, bron: 'imagine', proef: !!t.proef,
+            reden: t.status === 'klaar' ? null : String(t.reden || '').slice(0, 160) });
+          log('studio taak=' + t.id + ' flow=' + t.flow + ' bron=imagine uitkomst=' + t.status + ' duur_s=' + t.duur_s);
+        }
+        geheugenAf(t);
+        return;
+      }
       try { fs.rmSync(path.join(WERK, t.id), { recursive: true, force: true }); } catch (e) {}
       // wv782: reservering verrekenen. Geleverd = de schatting vooraf (met credits erbij); aanroep gedaan maar uitkomst onbekend =
       // 'geschat' (telt mee); nooit aangeroepen of door de aanbieder geweigerd (HTTP-fout, ElevenLabs rekent die niet) = vrijgegeven.
@@ -1014,16 +1162,17 @@ function maak(deps) {
       if (t.bron && deps.naKlaar) {
         try { Promise.resolve(deps.naKlaar(taakUit(t))).catch(function (e) { fout('studio-naklaar', e); }); } catch (e) { fout('studio-naklaar', e); }
       }
-    } catch (e) { fout('studio-afronden', e); } finally {
+    } catch (e) { fout('studio-afronden', t.geheim ? new Error('afronden mislukt') : e); } finally {
       st.bezig = null;
-      try { bewaarTaken(); } catch (e) {}
+      try { if (!t.geheugen) bewaarTaken(); } catch (e) {}
       setImmediate(volgende);
-    } }).catch(function (e) { fout('studio-volgende', e); st.bezig = null; });
+    } }).catch(function (e) { fout('studio-volgende', t.geheim ? new Error('volgende mislukt') : e); st.bezig = null; });
   }
   async function voer(t, ctl) {
     const c = await catalogus(false);
     const f = c.flows.find(function (x) { return x.id === t.flow; });
     if (!f) return { fout: 'de flow is intussen weg' };
+    if (t.geheugen) return f.motor === 'comfyui' ? motorComfy(t, f, null, ctl) : { fout: 'onbekende motor' };   // wv2984: alles in het geheugen
     const out = path.join(WERK, t.id, 'out');
     mkdir(out);
     let r;
@@ -1437,6 +1586,8 @@ function maak(deps) {
     let info;
     try { info = await objectInfo(); } catch (e) { return { fout: foutTekst(e.message) }; }
     // wv2983: een fotoflow stuurt zijn resultaat over de websocket als ComfyUI SaveImageWebsocket kent (niets in de tijdelijke map)
+    // wv2984: een geheugen-taak (Imagine) alleen zo; zonder die knoop geen terugval op de Preview-weg
+    if (t.geheugen && !wsKan(info)) return { fout: 'ComfyUI kent SaveImageWebsocket niet (meer); zonder kan Imagine niets maken. Er is niets ingediend.' };
     const toets = flowToets(v.api, info, { ws: !!t.beeld && wsKan(info) });
     if (toets.fout) return { fout: 'knopentoets: ' + toets.fout };
     // wv2482 (diffreview MOET 2): een LoadImage alleen in een taak met een eigen foto (anders leest hij wat er toevallig staat)
@@ -1477,11 +1628,23 @@ function maak(deps) {
   async function motorComfyIn(t, f, out, ctl, toets, clientId, voorbewerking) {
     if (!t.beeld) return comfyDraai(t, f, out, ctl, toets, clientId);
     // wv2482: de foto pas nu naar ComfyUI (de rij is leeg), en daarna ALTIJD terug naar 1×1 — ook bij fout, stop of een uitzondering
-    const invoer = path.join(WERK, t.id, 'in', 'invoer.' + t.beeld.ext);
-    let buf;
-    try { buf = fs.readFileSync(invoer); } catch (e) { return { fout: 'de foto van deze taak is weg (herstart?)' }; }
-    try { fs.copyFileSync(invoer, path.join(out, 'voor.' + t.beeld.ext)); } catch (e) { return { fout: 'de foto kon niet klaargezet worden' }; }
-    if (voorbewerking) {
+    let buf, invoer = null;
+    if (t.geheugen) {
+      // wv2984: invoer uit het geheugen; voorbewerking via de pijp (geen bestand)
+      buf = t._in;
+      if (!Buffer.isBuffer(buf)) return { fout: 'het beeld van deze taak is weg' };
+      if (voorbewerking) {
+        const r = await beeldPijp(['pijp-voor', voorbewerking], buf);
+        if (!r.ok || !r.bytes) return { fout: 'het beeld kon niet voorbewerkt worden' + (r.reden ? ': ' + r.reden : '') };
+        buf = r.bytes;
+        t.meting.voorbewerking = voorbewerking;
+      }
+    } else {
+      invoer = path.join(WERK, t.id, 'in', 'invoer.' + t.beeld.ext);
+      try { buf = fs.readFileSync(invoer); } catch (e) { return { fout: 'de foto van deze taak is weg (herstart?)' }; }
+      try { fs.copyFileSync(invoer, path.join(out, 'voor.' + t.beeld.ext)); } catch (e) { return { fout: 'de foto kon niet klaargezet worden' }; }
+    }
+    if (voorbewerking && !t.geheugen) {
       // wv2679: alleen wat ComfyUI krijgt verandert; voor.<ext> in Bestanden blijft het origineel
       const vb = path.join(WERK, t.id, 'in', 'voorbewerkt.png');
       const r = await beeldPy(['voor', invoer, vb, voorbewerking]);
@@ -1490,6 +1653,8 @@ function maak(deps) {
       t.meting.voorbewerking = voorbewerking;
     }
     t.fase = 'foto naar ComfyUI';
+    // wv2984 (review ontwerp MOET 1): een geheime taak zet het merk (free = na een herstart opruimen) vóór de upload; lukt dat niet: niets
+    if (t.geheim && !merkStart()) return { fout: 'incognito kon niet veilig starten (merk niet te schrijven); er is niets naar de beeldserver gegaan' };
     zetVuil(true);
     try {
       const u = await comfyUpload(buf);
@@ -1499,6 +1664,7 @@ function maak(deps) {
       const l = await comfyLeeg();
       if (l) zetVuil(false);
       else fout('studio-beeld-leeg', new Error('1x1 overschrijven lukte niet; vrijRonde probeert het opnieuw'));
+      buf = null;
     }
   }
   async function comfyDraai(t, f, out, ctl, toets, clientId) {
@@ -1553,9 +1719,19 @@ function maak(deps) {
         const host = vrijGeheugenMib();
         if (host == null || host < f.ram_mib_schatting + GEHEUGEN.host_marge_mib) return { fout: 'Te weinig geheugen vrij op Olares voor deze bewerking (vlak voor het starten gemeten). Er is niets gestart. Probeer het later opnieuw.' };
       }
-      const p = await comfyPost('/prompt', { prompt: toets.prompt, client_id: clientId });
-      if (!p.ok || !p.j || !p.j.prompt_id) return { fout: 'ComfyUI weigerde de flow: ' + foutTekst(p.j && p.j.error ? (p.j.error.message || p.j.error.type) : 'HTTP ' + p.status) };
+      // wv2984: een geheime taak kiest zijn prompt-id zelf en zet hem eerst in het merk (lukt dat niet: niets indienen)
+      let eigenPid = null;
+      if (t.geheim) {
+        eigenPid = crypto.randomUUID();
+        if (!merkErbij(eigenPid)) return { fout: 'incognito kon niet veilig starten (merk niet te schrijven); er is niets ingediend' };
+      }
+      const p = await comfyPost('/prompt', eigenPid ? { prompt: toets.prompt, client_id: clientId, prompt_id: eigenPid } : { prompt: toets.prompt, client_id: clientId });
+      if (!p.ok || !p.j || !p.j.prompt_id) {
+        if (eigenPid) pid = eigenPid;   // staat hij toch in ComfyUI, dan ruimt de naloop hem op (het merk houdt hem vast)
+        return { fout: 'ComfyUI weigerde de flow: ' + foutTekst(p.j && p.j.error ? (p.j.error.message || p.j.error.type) : 'HTTP ' + p.status) };
+      }
       pid = String(p.j.prompt_id);
+      if (eigenPid && pid !== eigenPid && !merkErbij(pid)) { await comfyEigenStop(pid); return { fout: 'incognito kon niet veilig verder (merk niet te schrijven); de taak is gestopt' }; }
       t.meting.prompt_id = pid;
       const ev0 = eind(pid);
       t.gpu_start = klok();
@@ -1617,6 +1793,17 @@ function maak(deps) {
             if (!buf) continue;
             ext = ((/\.([a-z0-9]{2,5})$/i.exec(b.filename) || [])[1] || 'png').toLowerCase();
           }
+          if (t.beeld && !o.audio && t.geheugen) {
+            // wv2984: zelfde toets via de pijp, resultaat alleen in het geheugen
+            const soort = beeldSoort(buf);
+            if (!soort) { uitFout = 'ComfyUI gaf iets terug dat geen jpg, png of webp is'; continue; }
+            const r = await beeldPijp(['pijp-uit', String(BEELD.max_mp_uit), String(BEELD.jpg_boven)], buf);
+            if (!r.ok) { uitFout = 'resultaat geweigerd: ' + r.reden; continue; }
+            i++;
+            t._uit.push({ bytes: r.omgezet && r.bytes ? r.bytes : buf, breed: r.breed, hoog: r.hoog, ext: r.omgezet && r.bytes ? 'jpg' : soort });
+            t.meting.uit_breed = r.breed; t.meting.uit_hoog = r.hoog;
+            continue;
+          }
           if (t.beeld && !o.audio) {
             // wv2482: resultaat toetsen (≤ 16 MP, leesbaar) en boven 10 MB als JPEG 92; naam na-<n> naast voor.<ext>
             const soort = beeldSoort(buf);
@@ -1660,6 +1847,7 @@ function maak(deps) {
   }
   async function histWis(pid) {
     const weg = await histWisNu(pid);
+    if (weg && st.merk.pids.indexOf(pid) >= 0) merkWeg(pid);   // wv2984
     if (!weg && !st.histWis.some(function (x) { return x.pid === pid; })) st.histWis.push({ pid: pid, sinds: klok() });
     if (st.histWis.length > 50) st.histWis.splice(0, st.histWis.length - 50);
     return weg;
@@ -1685,11 +1873,123 @@ function maak(deps) {
       else if (q.wacht.some(function (x) { return Array.isArray(x) && String(x[1]) === pid; })) await comfyPost('/queue', { delete: [pid] });
     } catch (e) { fout('studio-comfy-stop', e); }
   }
+  // ── wv2984: incognito-merk en naloop op ComfyUI (zie de kop) ──
+  // Merk = { pids: [prompt-id's van geheime taken waarvan de geschiedenisregel nog niet aantoonbaar weg is], free: /free nog nodig }.
+  // Alleen in het bestand als er iets in staat; leeg = bestand weg. Schrijven atomair (0600); een schrijffout = false (dan niets indienen).
+  function merkSchrijf() {
+    if (!MERK) return false;
+    try {
+      if (!st.merk.pids.length && !st.merk.free) { fs.rmSync(MERK, { force: true }); return true; }
+      mkdir(path.dirname(MERK));
+      const tmp = MERK + '.nieuw.' + process.pid;
+      fs.writeFileSync(tmp, JSON.stringify({ pids: st.merk.pids, free: st.merk.free }) + '\n', { mode: 0o600 });
+      fs.renameSync(tmp, MERK);
+      return true;
+    } catch (e) { fout('imagine-incognito', new Error('merk schrijven mislukt')); return false; }
+  }
+  function merkErbij(pid) {
+    if (st.merk.pids.indexOf(pid) < 0) st.merk.pids.push(pid);
+    const vorigFree = st.merk.free;
+    st.merk.free = true;
+    if (merkSchrijf()) return true;
+    st.merk.pids = st.merk.pids.filter(function (x) { return x !== pid; }); st.merk.free = vorigFree;
+    return false;
+  }
+  function merkStart() {
+    if (st.merk.free) return merkSchrijf() || fs.existsSync(MERK);
+    st.merk.free = true;
+    if (merkSchrijf()) return true;
+    st.merk.free = false;
+    return false;
+  }
+  function merkWeg(pid) { st.merk.pids = st.merk.pids.filter(function (x) { return x !== pid; }); merkSchrijf(); }
+  (function merkLaad() {
+    if (!MERK) return;
+    try {
+      const j = JSON.parse(fs.readFileSync(MERK, 'utf8'));
+      const pids = Array.isArray(j.pids) ? j.pids.filter(function (x) { return typeof x === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(x); }).slice(0, 200) : [];
+      st.merk = { pids: pids, free: true };
+      st.herstartMerk = true;   // er liep een incognitosessie toen de pod stopte
+    } catch (e) { if (e && e.code !== 'ENOENT') { st.merk = { pids: [], free: true }; st.herstartMerk = true; } }
+    if (st.herstartMerk) { st.blok = true; st.freeVraag = true; }
+  })();
+  const NOG_TE_WISSEN = 'incognito wacht nog tot een vorige sessie op de beeldserver gewist is; probeer het zo opnieuw';
+  // prompt-id van de geheime taak die NU loopt (die mag in het merk staan zonder dat er iets 'nog te wissen' is)
+  function lopendPid() { const t = st.bezig && st.bezig.geheim ? vindTaak(st.bezig.id) : null; return t && t.meting ? t.meting.prompt_id || null : null; }
+  // nog te wissen = een geheime regel die niet bij de lopende taak hoort, of een gevraagde /free die nog niet lukte, of de blokkade
+  // na een herstart of een mislukt wissen. Blokkeren van nieuwe incognitotaken alleen op st.blok (anders blokkeert elke taak de volgende).
+  function nogTeWissen() {
+    if (!MERK) return false;
+    const lp = lopendPid();
+    return st.blok || st.merk.pids.some(function (p) { return p !== lp; }) || (st.freeVraag && st.merk.free);
+  }
+  // Naloop: invoer 1×1, per prompt-id uit het merk de geschiedenisregel weg (staat hij nog in de rij: eerst stoppen, later opnieuw),
+  // /free alleen als ComfyUI niets te doen heeft en de pod niets laat lopen. Geeft het gemeten lijstje terug.
+  async function geheimNaloop(vraagFree) {
+    if (vraagFree && st.merk.free) st.freeVraag = true;
+    if (st.naloopBezig) return st.naloopBezig;
+    st.naloopBezig = (async function () {
+      const stappen = [];
+      // review ontwerp MOET 4: invoer en /free alleen met het slot van de motor (st.bezig): geen taak kan intussen uploaden of indienen
+      const slot = !st.bezig;
+      if (slot) st.bezig = { id: '_naloop', ctl: { gestopt: false }, naloop: true };
+      try {
+      // 1. invoer op de beeldserver
+      if (slot && fs.existsSync(VUIL)) { if (await comfyLeeg()) zetVuil(false); }
+      stappen.push({ stap: 'invoer', ok: !fs.existsSync(VUIL) });
+      // 2. geschiedenis
+      let q = null;
+      try { q = await comfyRij(); } catch (e) { q = null; }
+      let weg = 0;
+      const lp = lopendPid();
+      for (const pid of st.merk.pids.slice()) {
+        if (!q) break;
+        if (pid === lp) continue;   // de lopende taak ruimt zijn eigen regel op
+        const inRij = q.lopend.concat(q.wacht).some(function (x) { return Array.isArray(x) && String(x[1]) === pid; });
+        if (inRij) { if (!(st.bezig && st.bezig.geheim)) await comfyEigenStop(pid); continue; }
+        if (await histWisNu(pid)) { merkWeg(pid); weg++; }
+      }
+      stappen.push({ stap: 'geschiedenis', ok: !!q && !st.merk.pids.some(function (p) { return p !== lp; }), n: weg });
+      // 3. werkgeheugen van ComfyUI (gewichten én de uitvoercache), alleen op verzoek (wissen, verlopen, herstart)
+      if (slot && st.freeVraag && st.merk.free && !st.merk.pids.length) {
+        try {
+          const q2 = await comfyRij();
+          if (!q2.lopend.length && !q2.wacht.length) {
+            const fr = await comfyPost('/free', { unload_models: true, free_memory: true });
+            if (fr.ok) { st.merk.free = false; st.freeVraag = false; st.comfyFreeGedaan = true; merkSchrijf(); }
+          }
+        } catch (e) { /* volgende ronde */ }
+      }
+      stappen.push({ stap: 'geheugen', ok: !(st.freeVraag && st.merk.free) });
+      } finally { if (slot) { st.bezig = null; setImmediate(volgende); } }
+      const schoon = stappen.every(function (x) { return x.ok; });
+      if (schoon) st.blok = false;
+      return { stappen: stappen, schoon: schoon };
+    })();
+    try { return await st.naloopBezig; } finally { st.naloopBezig = null; }
+  }
+  // Alles wissen (Imagine, één apparaat): eigen wachtende geheime taken uit de rij, de lopende stoppen en hooguit 30 s wachten, dan de naloop.
+  async function geheimWis(apparaat) {
+    const eigen = function (t) { return t.geheim && t.apparaat === String(apparaat); };
+    let gestopt = 0;
+    st.geheugen.filter(function (t) { return eigen(t) && t.status === 'wacht'; }).forEach(function (t) { stopGeheugen(t.id); gestopt++; });
+    const loopt = st.geheugen.find(function (t) { return eigen(t) && t.status === 'bezig'; });
+    if (loopt) { stopGeheugen(loopt.id); gestopt++; }
+    const tot = klok() + 30000;
+    while (st.geheugen.some(eigen) && klok() < tot) await wacht(100);
+    const r = await geheimNaloop(true);
+    r.stappen.unshift({ stap: 'taken', ok: !st.geheugen.some(eigen), n: gestopt });
+    r.schoon = r.stappen.every(function (x) { return x.ok; });
+    if (!r.schoon) st.blok = true;   // tot de minuutronde het alsnog schoon krijgt: geen nieuwe incognitotaken
+    return r;
+  }
+
   // GPU teruggeven (§ 5.3 stap 8): 10 min na de laatste Studio-taak in ComfyUI, alleen bij een lege rij, één keer.
   async function vrijRonde() {
     // wv2482: staat er nog een foto in ComfyUI (1×1 mislukt of pod herstart midden in een taak), dan eerst die leegmaken
     if (!st.bezig && fs.existsSync(VUIL)) { if (await comfyLeeg()) { zetVuil(false); log('studio comfy-invoer alsnog leeggemaakt'); } }
     await histRonde().catch(function () {});   // wv2983
+    if (nogTeWissen()) await geheimNaloop().catch(function () {});   // wv2984
     if (st.comfyFreeGedaan || st.bezig || klok() - st.comfyLaatst < COMFY_FREE_NA_MS) return;
     try {
       const q = await comfyRij();
@@ -1754,6 +2054,8 @@ function maak(deps) {
 
   st.timer = setInterval(function () { vrijRonde().catch(function () {}); }, 60 * 1000);
   if (st.timer.unref) st.timer.unref();
+  // wv2984: na een herstart met een merk niet een minuut wachten
+  if (nogTeWissen()) { const tv = setTimeout(function () { geheimNaloop().catch(function () {}); }, T.naloopStart == null ? 5000 : T.naloopStart); if (tv.unref) tv.unref(); }
 
   return {
     // GET /app/studio/flows
@@ -1775,6 +2077,11 @@ function maak(deps) {
     health: function () { return { taken_vandaag: vandaagN(), bezig: !!st.bezig, in_rij: st.rij.length }; },
     toetsFlow: toetsFlow,
     _vrijRonde: vrijRonde,   // wv2482: alleen de toets (anders elke minuut via de timer)
+    // wv2984: OVIS Imagine (geheugen-taken; incognito)
+    maakGeheugen: maakGeheugen, geheugenTaak: function (id) { const t = st.geheugen.find(function (x) { return x.id === id; }); return t ? geheugenUit(t) : null; },
+    stopGeheugen: stopGeheugen, geheimWis: geheimWis, geheimNaloop: geheimNaloop,
+    incognito: function () { return { nog_te_wissen: nogTeWissen(), blok: st.blok, herstart: st.herstartMerk }; },
+    beeldPijp: beeldPijp, immichHaal: immichHaal, flowVan: async function (id) { const c = await catalogus(false); const f = c.flows.find(function (x) { return x.id === id; }); return f ? flowUit(f) : null; },
     stopTimers: function () { clearInterval(st.timer); },
     _st: st,
   };

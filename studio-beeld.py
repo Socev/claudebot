@@ -10,6 +10,10 @@
 #                                         groter dan max_mp: rechtop zetten (EXIF) en verkleinen tot max_mp (PNG, of JPEG 95 bij
 #                                         een JPEG-bron) naar <uit>.<ext>; anders niets schrijven (het origineel blijft zoals het kwam)
 #   uit <in> <uit.jpg> <max_mp> <max_bytes>  uitvoer van ComfyUI: decoderen, hooguit max_mp; groter dan max_bytes: JPEG 92 naar <uit.jpg>
+#   pijp-neem <max_mp> | pijp-uit <max_mp> <max_bytes> | pijp-voor <soort> | pijp-toon <px>   (wv2984, OVIS Imagine)
+#                                         zelfde standen zonder bestand: de bytes komen op stdin, het (nieuwe) beeld gaat naar fd 3,
+#                                         JSON op stdout. Niets op schijf (incognito). pijp-toon = weergaveversie: rechtop, ≤ px, JPEG 85.
+#                                         Schrijft pijp-neem/-uit niets naar fd 3, dan blijft het beeld zoals het kwam.
 #   voor <in> <uit.png> <soort>           voorbewerking vóór ComfyUI (wv2679), soort uit een vaste lijst:
 #                                         grijs-niveaus = rechtop (EXIF), grijs, niveaus 1 %–99 % gemeten in het binnenste zonder egale
 #                                         scanrand en toegepast op het hele beeld (de rand wordt wit; de maten blijven gelijk)
@@ -97,8 +101,70 @@ def grijs_niveaus(im):
 VOORBEWERKING = {"grijs-niveaus": grijs_niveaus}
 
 
+PIJP_MAX = 30 * 1024 * 1024
+
+
+def pijp(a):
+    # wv2984: alles in het geheugen. Invoer = stdin (hooguit PIJP_MAX), uitvoer = fd 3; nooit een pad of bestand.
+    import io
+    from PIL import Image, ImageOps
+    data = sys.stdin.buffer.read(PIJP_MAX + 1)
+    if len(data) > PIJP_MAX:
+        klaar(2, ok=False, reden="beeld te groot")
+    uit = io.BytesIO()
+
+    def lever(**kw):
+        if uit.tell():
+            with os.fdopen(3, "wb", closefd=True) as f:
+                f.write(uit.getvalue())
+        klaar(0, ok=True, **kw)
+    im, formaat = open_beeld(io.BytesIO(data))
+    b, h = im.size
+    if a[0] == "pijp-neem" and len(a) == 2:
+        max_mp = float(a[1])
+        if b * h / 1e6 <= max_mp:
+            lever(formaat=formaat, breed=b, hoog=h, verkleind=False)
+        im = ImageOps.exif_transpose(im)
+        f = (max_mp * 1e6 / (im.size[0] * im.size[1])) ** 0.5
+        nb, nh = max(1, int(im.size[0] * f)), max(1, int(im.size[1] * f))
+        while nb * nh > max_mp * 1e6:
+            nb, nh = max(1, nb - 1), max(1, nh - 1)
+        im = im.convert("RGBA" if im.mode in ("RGBA", "LA", "P") and formaat != "JPEG" else "RGB").resize((nb, nh), Image.LANCZOS)
+        if formaat == "JPEG":
+            im.save(uit, "JPEG", quality=95)
+            lever(formaat=formaat, breed=b, hoog=h, verkleind=True, nieuw_breed=nb, nieuw_hoog=nh, ext="jpg")
+        im.save(uit, "PNG")
+        lever(formaat=formaat, breed=b, hoog=h, verkleind=True, nieuw_breed=nb, nieuw_hoog=nh, ext="png")
+    if a[0] == "pijp-uit" and len(a) == 3:
+        if b * h > float(a[1]) * 1e6:
+            klaar(2, ok=False, reden="resultaat groter dan %s megapixel" % a[1], breed=b, hoog=h)
+        if len(data) <= int(a[2]):
+            lever(formaat=formaat, breed=b, hoog=h, omgezet=False)
+        im.convert("RGB").save(uit, "JPEG", quality=92)
+        lever(formaat=formaat, breed=b, hoog=h, omgezet=True)
+    if a[0] == "pijp-voor" and len(a) == 2:
+        if a[1] not in VOORBEWERKING:
+            klaar(2, ok=False, reden="onbekende voorbewerking")
+        r, lo, hi = VOORBEWERKING[a[1]](im)
+        r.save(uit, "PNG")
+        lever(breed=r.size[0], hoog=r.size[1], niveau_laag=lo, niveau_hoog=hi)
+    if a[0] == "pijp-toon" and len(a) == 2:
+        px = max(64, min(4096, int(a[1])))
+        im = ImageOps.exif_transpose(im)
+        im.thumbnail((px, px), Image.LANCZOS)
+        if im.mode in ("RGBA", "LA", "P"):
+            achter = Image.new("RGB", im.size, (255, 255, 255))
+            achter.paste(im.convert("RGBA"), mask=im.convert("RGBA").split()[3])
+            im = achter
+        im.convert("RGB").save(uit, "JPEG", quality=85)
+        lever(formaat=formaat, breed=b, hoog=h, toon_breed=im.size[0], toon_hoog=im.size[1])
+    klaar(2, ok=False, reden="onbekende aanroep")
+
+
 def main(a):
     grenzen()
+    if a and a[0].startswith("pijp-"):
+        pijp(a)
     if len(a) == 4 and a[0] == "neem":
         from PIL import Image, ImageOps
         im, formaat = open_beeld(a[1])
