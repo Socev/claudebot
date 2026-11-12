@@ -233,3 +233,53 @@ test('niets met bedragen in reden of info', () => {
   for (const r of redenen) assert.ok(!/\d+[,.]\d{2}/.test(r), r);
   assert.ok(!/cent|810|304/.test(JSON.stringify(m.info())));
 });
+
+// ── review achteraf (Codex 12-11, NO-GO 7 MOET + 1 ZOU): elk punt een toets ──
+test('review MOET 1: tekens — erbij met positieve lokale waarde, positieve kosten, negatief aantal in de portefeuille = weigeren', () => {
+  weigert(TX_NL.replace('"-800,00",EUR,"-800,00",EUR,,"-1,00",EUR,"-801,00"', '"800,00",EUR,"800,00",EUR,,"-1,00",EUR,"799,00"'), /teken van de lokale waarde/);
+  weigert(TX_NL.replace('"-2,00",EUR,"-278,50"', '"2,00",EUR,"-274,50"'), /kosten horen negatief/);
+  weigert(PORT.replace('XX0000000022,10,"81,00",EUR,"810,00","810,00"', 'XX0000000022,-10,"81,00",EUR,"-810,00","-810,00"'), /aantal moet groter dan nul/);
+  weigert(TX_NL.replace('3,"100,00",USD', '3,"0,00",USD'), /koers moet groter dan nul/);
+});
+test('review MOET 2: een kostenkolom met valuta moet in euro staan', () => {
+  weigert(TX_NL.replace('"-2,00",EUR,"-278,50"', '"-2,00",USD,"-278,50"'), /kosten moet in EUR staan, niet in USD/);
+});
+test('review MOET 3: alleen een CASH-regel mag zonder aantal en ISIN', () => {
+  weigert(PORT.replace('VOORBEELD WERELD ETF,XX0000000022,10,"81,00",EUR,"810,00","810,00"', 'VOORBEELD WERELD ETF,,,,EUR,"810,00","810,00"'), /zonder aantal of ISIN/);
+  assert.strictEqual(B.leesBestand(PORT).rijen.filter((r) => r.regelsoort === 'cash').length, 1);
+});
+test('review MOET 4: rekeningregel met mutatie maar zonder saldo = weigeren; zonder beide mag', () => {
+  weigert(REK.replace('EUR,"917,00",aaaa', ',,aaaa'), /mutatie zonder saldo/);
+  const info = REK + '\n05-11-2026,15:31,05-11-2026,VOORBEELD CHIPS INC,XX0000000011,Valuta Creditering,"1,0850",,,,,';
+  assert.strictEqual(B.leesBestand(info).rijen.length, 4);
+});
+test('review MOET 5: 3 en 3,0 of 100,00 en 100,0 geven dezelfde dubbelsleutel', () => {
+  const a = B.leesBestand(TX_NL).rijen[0].sleutel;
+  const b = B.leesBestand(TX_NL.replace('XNAS,3,"100,00",USD', 'XNAS,"3,0","100,0",USD')).rijen[0].sleutel;
+  assert.strictEqual(a, b);
+});
+test('review MOET 6: een beantwoorde vraag overslaan haalt haar regels weg', () => {
+  const { post, get } = nieuw();
+  post('plan', { vraag: 8, waarden: { max_aandeel: '10', max_thema: '40' } });
+  assert.strictEqual(get().body.regels.max_aandeel, 10);
+  post('plan', { vraag: 8, overslaan: true });
+  const o = get().body;
+  assert.strictEqual(o.regels.max_aandeel, undefined); assert.strictEqual(o.regels.max_thema, undefined);
+  assert.strictEqual(o.stand.lampjes.find((l) => l.sleutel === 'max_aandeel').grens, 'nog niet gezet');
+});
+test('review MOET 7: maximum per aandeel/thema grijs zolang een positie geen soort heeft, oranje bij een overschrijding', () => {
+  const L = (r, s) => Object.fromEntries(B.bereken(data(r, s), '2026-11-12').lampjes.map((l) => [l.sleutel, l.lamp]));
+  assert.deepStrictEqual([L(REGELS, {}).max_aandeel, L(REGELS, {}).max_thema], ['grijs', 'grijs']);
+  const half = { 'isin:XX0000000011': 'tech' };
+  assert.strictEqual(L(Object.assign({}, REGELS, { max_aandeel: 10 }), half).max_aandeel, 'oranje');
+  assert.strictEqual(L(REGELS, half).max_aandeel, 'grijs');
+});
+test('review ZOU 1: grenzen op onafgeronde percentages (10,04 % boven 10 %)', () => {
+  const d = { antwoorden: {}, regels: { max_aandeel: 10, kern_max: 89.97 }, soorten: { 'isin:XX0000000011': 'tech', 'isin:XX0000000022': 'kern' }, transacties: [], dagboek: [], volglijst: [], keuzes: {}, stand_datum: '2026-11-12',
+    posities: [{ sleutel: 'isin:XX0000000011', regelsoort: 'effect', naam: 'A', waarde_eur_cent: 1004 }, { sleutel: 'isin:XX0000000022', regelsoort: 'effect', naam: 'B', waarde_eur_cent: 8996 }] };
+  const k = B.bereken(d, '2026-11-12');
+  assert.strictEqual(k.posities[1].aandeel, 10);
+  assert.ok(k.signalen.some((x) => x.sleutel.startsWith('max-aandeel:isin:XX0000000011')));
+  assert.strictEqual(k.verdeling.kern, 90, 'weergave afgerond');
+  assert.strictEqual(k.lampjes.find((l) => l.sleutel === 'kern').lamp, 'groen', 'kern 89,96 % ligt onder het maximum 89,97 % (afgerond 90,0 zou ten onrechte oranje geven)');
+});

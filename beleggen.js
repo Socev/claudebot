@@ -205,8 +205,15 @@ function leesBedrag(rij, k, dec, regel, naam, leegMag, vasteValuta) {
   let valuta, getal;
   if (RE_VALUTA.test(a) && !RE_VALUTA.test(b)) { valuta = a; getal = b; } else if (RE_VALUTA.test(b) && !RE_VALUTA.test(a)) { valuta = b; getal = a; }
   else throw new LeesFout('bedrag zonder herkenbare valuta', regel, naam);
+  if (vasteValuta && valuta !== vasteValuta) throw new LeesFout(naam + ' moet in ' + vasteValuta + ' staan, niet in ' + valuta, regel, naam);   // review achteraf MOET 2
   const g = leesGetal(getal, dec, regel, naam, false);
   return { g, cent: naarCent(g), valuta };
+}
+// review achteraf MOET 5: getaltekst zonder overbodige nullen voor de dubbelsleutel ('1.0' = '1', '0100.50' = '100.5')
+function canon(t) {
+  let x = String(t).replace(/^\+/, ''); const neg = x.startsWith('-'); if (neg) x = x.slice(1);
+  let [h, f = ''] = x.split('.'); h = h.replace(/^0+(?=\d)/, ''); f = f.replace(/0+$/, '');
+  const u = f ? h + '.' + f : h; return neg && u !== '0' ? '-' + u : u;
 }
 const veld = (rij, k) => (k ? String(rij[k.i] || '').trim() : '');
 const RE_ISIN = /^[A-Z]{2}[A-Z0-9]{9}\d$/;
@@ -256,9 +263,13 @@ function leesBestand(tekst) {
       if (koers.valuta && lokaal.valuta && koers.valuta !== lokaal.valuta) throw new LeesFout('koers en lokale waarde in verschillende valuta', regel, 'koers');
       const valuta = lokaal.valuta || koers.valuta;
       if (!valuta) throw new LeesFout('valuta ontbreekt', regel, 'lokale waarde');
-      // optellen
+      // optellen; tekens (review achteraf MOET 1): koers > 0, erbij (aantal > 0) = geld eruit (lokale waarde en waarde < 0), eraf = geld erin
+      if (!(koers.g.n > 0)) throw new LeesFout('koers moet groter dan nul zijn', regel, 'koers');
       if (Math.abs(Math.abs(aantal.n * koers.g.n) - Math.abs(lokaal.g.n)) > tol(lokaal.g.n)) throw new LeesFout('aantal × koers is niet de lokale waarde', regel, 'lokale waarde');
-      if (lokaal.g.n !== 0 && waarde.g.n !== 0 && Math.sign(lokaal.g.n) !== Math.sign(waarde.g.n)) throw new LeesFout('lokale waarde en waarde hebben een ander teken', regel, 'waarde');
+      if (lokaal.g.n === 0 || Math.sign(lokaal.g.n) !== -Math.sign(aantal.n)) throw new LeesFout('teken van de lokale waarde past niet bij het aantal (erbij = negatief, eraf = positief)', regel, 'lokale waarde');
+      if (waarde.g.n === 0 || Math.sign(waarde.g.n) !== Math.sign(lokaal.g.n)) throw new LeesFout('lokale waarde en waarde hebben een ander teken', regel, 'waarde');
+      if (kosten && kosten.g.n > 0) throw new LeesFout('kosten horen negatief te zijn', regel, 'kosten');
+      if (autofx && autofx.g.n > 0) throw new LeesFout('AutoFX-kosten horen negatief te zijn', regel, 'autofx');
       if (valuta === 'EUR') { if (Math.abs(lokaal.g.n - waarde.g.n) > tol(waarde.g.n)) throw new LeesFout('waarde in euro wijkt af van de lokale waarde', regel, 'waarde'); }
       else {
         if (!wk || !(wk.n > 0)) throw new LeesFout('wisselkoers ontbreekt bij een bedrag in ' + valuta, regel, 'wisselkoers');
@@ -270,7 +281,7 @@ function leesBestand(tekst) {
       let order = veld(rij, kaart.order);
       if (!order && kaart.order && kaart.order.partner != null) order = String(rij[kaart.order.partner] || '').trim();
       if (!order && kaart.order) { const laatste = String(rij[kop.length] || rij[kop.length - 1] || '').trim(); if (/^[0-9a-f-]{8,}$/i.test(laatste)) order = laatste; }
-      const basis = [datum, tijd, isin, aantal.tekst, koers.g.tekst, lokaal.cent, order].join('|');
+      const basis = [datum, tijd, isin, canon(aantal.tekst), canon(koers.g.tekst), lokaal.cent, order].join('|');
       telling[basis] = (telling[basis] || 0) + 1;
       uit.push({ sleutel: 'tx:' + sha(basis + '#' + telling[basis]).slice(0, 32), datum, tijd, naam, isin, beurs: veld(rij, kaart.beurs) || null,
         aantal: aantal.tekst, koers: koers.g.tekst, valuta, lokaal_cent: lokaal.cent, waarde_eur_cent: waarde.cent, wisselkoers: wk ? wk.tekst : null,
@@ -284,8 +295,8 @@ function leesBestand(tekst) {
       const aantalT = veld(rij, kaart.aantal);
       const waarde = leesBedrag(rij, kaart.waarde, dec, regel, 'waarde in EUR', false, 'EUR');
       const lokaal = leesBedrag(rij, kaart.lokaal, dec, regel, 'lokale waarde', false);
-      if (!aantalT && !isin) {   // contant geld (bv. CASH & CASH FUND & FTX CASH (EUR)): telt niet mee in de verdeling
-        if (veld(rij, kaart.koers)) throw new LeesFout('regel zonder aantal en ISIN maar met koers', regel, 'koers');
+      if (!aantalT && !isin && !veld(rij, kaart.koers) && /\bCASH\b/i.test(naam)) {   // contant geld (CASH & CASH FUND & FTX CASH (EUR)): telt niet mee; review achteraf MOET 3: alleen een regel met CASH in de naam
+        if (lokaal.g.n < 0 || waarde.g.n < 0) throw new LeesFout('negatief contant geld', regel, 'waarde in EUR');
         if (lokaal.valuta === 'EUR' && Math.abs(lokaal.g.n - waarde.g.n) > tol(waarde.g.n)) throw new LeesFout('waarde in euro wijkt af van de lokale waarde', regel, 'waarde in EUR');
         const sl = 'cash:' + (lokaal.valuta || 'EUR');
         if (gezien.has(sl)) throw new LeesFout('twee regels contant geld in dezelfde valuta', regel, 'product');
@@ -293,9 +304,13 @@ function leesBestand(tekst) {
         uit.push({ sleutel: sl, regelsoort: 'cash', naam, isin: null, aantal: null, koers: null, valuta: lokaal.valuta, lokaal_cent: lokaal.cent, waarde_eur_cent: waarde.cent, regel });
         continue;
       }
+      if (!aantalT || !isin) throw new LeesFout('regel zonder aantal of ISIN (alleen contant geld mag dat)', regel, !aantalT ? 'aantal' : 'isin');
       if (!RE_ISIN.test(isin)) throw new LeesFout('geen geldige ISIN', regel, 'isin');
       const aantal = leesGetal(aantalT, dec, regel, 'aantal');
       const koers = leesBedrag(rij, kaart.koers, dec, regel, 'slotkoers', false);
+      if (!(aantal.n > 0)) throw new LeesFout('aantal moet groter dan nul zijn', regel, 'aantal');
+      if (koers.g.n < 0 || lokaal.g.n < 0 || waarde.g.n < 0) throw new LeesFout('negatieve koers of waarde in de portefeuille', regel, 'lokale waarde');
+      if (koers.valuta && lokaal.valuta && koers.valuta !== lokaal.valuta) throw new LeesFout('slotkoers en lokale waarde in verschillende valuta', regel, 'slotkoers');
       if (Math.abs(Math.abs(aantal.n * koers.g.n) - Math.abs(lokaal.g.n)) > tol(lokaal.g.n)) throw new LeesFout('aantal × slotkoers is niet de lokale waarde', regel, 'lokale waarde');
       if (lokaal.valuta === 'EUR' && Math.abs(lokaal.g.n - waarde.g.n) > tol(waarde.g.n)) throw new LeesFout('waarde in euro wijkt af van de lokale waarde', regel, 'waarde in EUR');
       const sl = 'isin:' + isin;
@@ -315,6 +330,7 @@ function leesBestand(tekst) {
       if (kaart.fx) leesGetal(veld(rij, kaart.fx), dec, regel, 'fx', true);
       const mutatie = leesBedrag(rij, kaart.mutatie, dec, regel, 'mutatie', true);
       const saldo = leesBedrag(rij, kaart.saldo, dec, regel, 'saldo', true);
+      if (!!mutatie !== !!saldo) throw new LeesFout(mutatie ? 'mutatie zonder saldo' : 'saldo zonder mutatie', regel, mutatie ? 'saldo' : 'mutatie');   // review achteraf MOET 4
       if (mutatie && saldo && mutatie.valuta !== saldo.valuta) throw new LeesFout('mutatie en saldo in verschillende valuta', regel, 'saldo');
       let order = veld(rij, kaart.order);
       if (!order && kaart.order && kaart.order.partner != null) order = String(rij[kaart.order.partner] || '').trim();
@@ -358,9 +374,10 @@ function bereken(data, vandaag) {
   const posities = effecten.map((p) => {
     const soort = data.soorten[p.sleutel] || null;
     groep[soort || 'zonder'] += p.waarde_eur_cent;
-    return Object.assign({}, p, { soort, aandeel: rond(pct(p.waarde_eur_cent, belegd)) });
+    return Object.assign({}, p, { soort, aandeel: rond(pct(p.waarde_eur_cent, belegd)), _ruw: pct(p.waarde_eur_cent, belegd) });
   }).sort((a, b) => b.waarde_eur_cent - a.waarde_eur_cent);
   const g = (k) => pct(groep[k], belegd);
+  const ruw = { kern: g('kern'), tech: g('tech'), health: g('health'), eigen: pct(groep.tech + groep.health, belegd), leuk: g('leuk') };   // review achteraf ZOU 1
   const verdeling = { belegd_cent: belegd, cash_cent: cash.reduce((s, p) => s + p.waarde_eur_cent, 0), kern: rond(g('kern')), tech: rond(g('tech')), health: rond(g('health')),
     eigen: rond(pct(groep.tech + groep.health, belegd)), leuk: rond(g('leuk')), zonder: rond(g('zonder')), zonder_aantal: posities.filter((p) => !p.soort).length };
   const heeftStand = belegd > 0;
@@ -372,7 +389,8 @@ function bereken(data, vandaag) {
     if (min == null && max == null) return lamp(sleutel, naam, 'nog niet gezet', pctTekst(waarde), null, 'Vraag 7 in je plan.');
     const grens = (min != null ? pctTekst(min) : '0 %') + ' – ' + (max != null ? pctTekst(max) : '100 %');
     if (!volledig) return lamp(sleutel, naam, grens, pctTekst(waarde), null, heeftStand ? 'Eerst bij elke positie de soort kiezen.' : 'Nog geen stand.');
-    const b = (min == null || waarde >= min - 1e-9) && (max == null || waarde <= max + 1e-9);
+    const r = ruw[sleutel];
+    const b = (min == null || r >= min - 1e-9) && (max == null || r <= max + 1e-9);
     lamp(sleutel, naam, grens, pctTekst(waarde), b, b ? 'Binnen je bandbreedte.' : 'Buiten je bandbreedte.');
     return b;
   };
@@ -386,9 +404,9 @@ function bereken(data, vandaag) {
   const grootste = posities.filter((p) => p.soort && p.soort !== 'kern');
   if (R.max_aandeel == null) lamp('max_aandeel', 'Eén aandeel hoogstens', 'nog niet gezet', null, null, 'Vraag 8 in je plan.');
   else {
-    const boven = heeftStand ? grootste.filter((p) => p.aandeel > R.max_aandeel + 1e-9) : [];
-    lamp('max_aandeel', 'Eén aandeel hoogstens', pctTekst(R.max_aandeel), grootste.length ? pctTekst(grootste[0] && Math.max(...grootste.map((p) => p.aandeel))) : '–',
-      heeftStand ? boven.length === 0 : null, boven.length ? boven.length + ' boven je maximum' : heeftStand ? 'Geen aandeel boven je maximum (kern telt niet mee).' : 'Nog geen stand.');
+    const boven = heeftStand ? grootste.filter((p) => p._ruw > R.max_aandeel + 1e-9) : [];
+    lamp('max_aandeel', 'Eén aandeel hoogstens', pctTekst(R.max_aandeel), grootste.length ? pctTekst(Math.max(...grootste.map((p) => p.aandeel))) : '–',
+      boven.length ? false : volledig ? true : null, boven.length ? boven.length + ' boven je maximum' : volledig ? 'Geen aandeel boven je maximum (kern telt niet mee).' : heeftStand ? 'Eerst bij elke positie de soort kiezen.' : 'Nog geen stand.');
     for (const p of boven) sig({ sleutel: 'max-aandeel:' + p.sleutel + ':' + standDatum + ':' + R.max_aandeel, soort: 'boven_maximum', titel: p.naam + ' zit boven je maximum per aandeel',
       wat: 'Volgens je stand van ' + standDatum + ' is ' + p.naam + ' ' + pctTekst(p.aandeel) + ' van je beleggingen.', raakt: p.naam + ' (' + SOORT_NAAM[p.soort] + ', ' + pctTekst(p.aandeel) + ' van het geheel)',
       positie: p.sleutel, plan: 'Je maximum voor één aandeel is ' + pctTekst(R.max_aandeel) + '.' });
@@ -396,9 +414,9 @@ function bereken(data, vandaag) {
   if (R.max_thema == null) lamp('max_thema', 'Eén thema hoogstens', 'nog niet gezet', null, null, 'Vraag 8 in je plan.');
   else {
     const b = [];
-    for (const t of ['tech', 'health']) if (heeftStand && verdeling[t] > R.max_thema + 1e-9) b.push(t);
-    lamp('max_thema', 'Eén thema hoogstens', pctTekst(R.max_thema), 'tech ' + pctTekst(verdeling.tech) + ' · health ' + pctTekst(verdeling.health), heeftStand ? !b.length : null,
-      b.length ? b.map((t) => SOORT_NAAM[t]).join(' en ') + ' boven je maximum' : heeftStand ? 'Beide thema\'s binnen je maximum.' : 'Nog geen stand.');
+    for (const t of ['tech', 'health']) if (heeftStand && ruw[t] > R.max_thema + 1e-9) b.push(t);
+    lamp('max_thema', 'Eén thema hoogstens', pctTekst(R.max_thema), 'tech ' + pctTekst(verdeling.tech) + ' · health ' + pctTekst(verdeling.health), b.length ? false : volledig ? true : null,
+      b.length ? b.map((t) => SOORT_NAAM[t]).join(' en ') + ' boven je maximum' : volledig ? 'Beide thema\'s binnen je maximum.' : heeftStand ? 'Eerst bij elke positie de soort kiezen.' : 'Nog geen stand.');
     for (const t of b) sig({ sleutel: 'max-thema:' + t + ':' + standDatum + ':' + R.max_thema, soort: 'boven_maximum', titel: SOORT_NAAM[t] + ' zit boven je maximum per thema',
       wat: 'Volgens je stand van ' + standDatum + ' is ' + SOORT_NAAM[t] + ' samen ' + pctTekst(verdeling[t]) + ' van je beleggingen.', raakt: 'thema ' + SOORT_NAAM[t], plan: 'Je maximum per thema is ' + pctTekst(R.max_thema) + '.' });
   }
@@ -560,6 +578,7 @@ function maak(o) {
       const k = bereken(d, vandaag);
       const volg = d.volglijst.map((v) => Object.assign({}, v, { vroegst: d.regels.afkoel_dagen != null ? plusDagen(v.op.slice(0, 10), d.regels.afkoel_dagen) : null }));
       const dagboek = d.dagboek.map((x) => Object.assign({}, x, { terugblik6_op: plusMaanden(x.datum, 6), terugblik12_op: plusMaanden(x.datum, 12) }));
+      for (const p of k.posities) delete p._ruw;
       return { ok: true, vandaag, vragen: VRAGEN, antwoorden: d.antwoorden, regels: d.regels, versies: d.versies, stand: { datum: d.stand_datum, bron: d.stand_bron,
         verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig }, transacties: d.transacties, dagboek, volglijst: volg,
         signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, rekening_rijen: d.rekening_rijen,
@@ -627,6 +646,7 @@ function maak(o) {
       const op = nuIso();
       db.prepare('INSERT INTO plan_antwoord (vraag, tekst, waarden, status, op) VALUES (?, ?, ?, ?, ?) ON CONFLICT(vraag) DO UPDATE SET tekst = excluded.tekst, waarden = excluded.waarden, status = excluded.status, op = excluded.op')
         .run(vraag, tekst, regels ? JSON.stringify(regels) : null, overslaan ? 'overgeslagen' : 'beantwoord', op);
+      if (overslaan) for (const f of VRAGEN.find((x) => x.nr === vraag).velden || []) db.prepare('DELETE FROM regel WHERE sleutel = ?').run(f.sleutel);   // review achteraf MOET 6
       if (regels) for (const [k, w] of Object.entries(regels)) {
         if (w === null) db.prepare('DELETE FROM regel WHERE sleutel = ?').run(k);
         else db.prepare('INSERT INTO regel (sleutel, waarde, op) VALUES (?, ?, ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde, op = excluded.op').run(k, JSON.stringify(w), op);
