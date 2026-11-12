@@ -131,7 +131,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-2.8';   // wv2548: Doktersmaten gelijk met privé achter config.json gedeeld_gelijk (tekst, Jev, labelset 2, live; nooit uitgangen/afgedaan/zaken/overstap); wv2455: proefweek 'vanzelf weg' (schaduw: zaak.zou_weg, tabel wegzet_afzender, Nooit per afzender), teller jij_open, voorwerkbron voor mailvoorwerk.js; wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
+const VERSIE = 'mailman-2.9';   // wv2469: proefweek vanzelf weg aangescherpt (betaal-/termijnwoorden, bank/overheid/loon/kluis-afzenders, persoonlijke adressen nooit) en opnieuw gestart (zou_versie 2); wv2548: Doktersmaten gelijk met privé achter config.json gedeeld_gelijk (tekst, Jev, labelset 2, live; nooit uitgangen/afgedaan/zaken/overstap); wv2455: proefweek 'vanzelf weg' (schaduw: zaak.zou_weg, tabel wegzet_afzender, Nooit per afzender), teller jij_open, voorwerkbron voor mailvoorwerk.js; wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -754,12 +754,19 @@ function laagDraad(lijst) {
 // nooit bij een afzender die David op Nooit zette, nooit bij een draad waarin David antwoordde. TODO/ACTIE_DS, slotje, Intake en factuur
 // vallen er al uit door de laag (dat is jij of socev, nooit weg). → reden (vaste code) of null.
 const VANZELF_REDENEN = ['nieuwsbrief', 'systeemmelding', 'geen_actie'];
-const VANZELF_NIET_RE = /wachtwoord|password|wacht ?woord|inlog|log ?in\b|sign.?in|aanmeld.?poging|beveilig|security|verifi|bevestig.{0,20}(account|e-?mail|adres)|\bcode\b|2fa|tweestaps|two.?(factor|step)|fraude|fraud|phishing|verdacht|suspicious|waarschuwing|warning|alert|account|toegang|access|factuur|invoice|nota\b|betaal|payment|incasso|aanmaning|herinnering|reminder|achterstand|deadline|vervalt|verloopt|expire|opzeg|contract|storing|outage|datalek|breach/i;
+const VANZELF_NIET_RE = /wachtwoord|password|wacht ?woord|inlog|log ?in\b|sign.?in|aanmeld.?poging|beveilig|security|verifi|bevestig.{0,20}(account|e-?mail|adres)|\bcode\b|2fa|tweestaps|two.?(factor|step)|fraude|fraud|phishing|verdacht|suspicious|waarschuwing|warning|alert|account|toegang|access|factuur|invoice|nota\b|betaal|payment|incasso|aanmaning|herinnering|reminder|achterstand|deadline|vervalt|verloopt|expire|opzeg|contract|storing|outage|datalek|breach|betaling|afschrijving|afgeschreven|renew|verleng|subscription|abonnement|\bplan\b|upgrade|spend|limiet|limit\b|credit|tegoed|verval|verloop|verlopen|loopt af|geldig|meterstand|doorgeven|geef .{0,30}\bdoor\b|action required|actie (vereist|nodig|gevraagd)|niet vergeten|afspraak|appointment|controle|failed|mislukt|\bfout|error|privacy|persoonsgegevens|personal (data|information)|개인정보|pensioen|salaris|loonstrook|belasting|toeslag|aangifte|verzekering|polis|over tijd|overdue|te laat/i;
+// wv2469 (proefweek 5–12-11: afschrijving, verlenging, meterstand doorgeven, vervaldata, betaling ontvangen, spend cap en een doorgestuurde
+// mail van een familielid zaten bij 'zou weg'): ook nooit bij bank, betalen, loon, overheid of wachtwoordkluis (afzenderdomein), en nooit bij
+// een persoonlijk adres (gratis maildienst: dat schrijft een mens). VANZELF_VERSIE telt de proefweek opnieuw (oude zou_weg telt niet mee).
+const VANZELF_VERSIE = 2;
+const VANZELF_NIET_AFZENDER_RE = /@([a-z0-9-]+\.)*(abnamro|ing|rabobank|bunq|triodos|asnbank|snsbank|knab|regiobank|paypal|ecobank|belastingdienst|overheid|mijnoverheid|rijksoverheid|digid|svb|uwv|duo|nmbrs|loket|1password|bitwarden|lastpass)\.[a-z]{2,}$/i;
+const VANZELF_VRIJ_RE = /@(gmail|googlemail|hotmail|outlook|live|msn|icloud|me|mac|yahoo|ziggo|kpnmail|kpnplanet|planet|xs4all|hetnet|home|casema|upcmail|chello|telfort|tele2|proton|protonmail)\.[a-z.]{2,}$/i;
 function zouWeg(x) {
   if (!isObj(x) || x.laag !== 'weg' || !VANZELF_REDENEN.includes(x.reden)) return null;
   if (x.nooit || x.beantwoord || x.afgehandeld_door === 'david_app') return null;
   if (!x.afzender || !/^[^@\s]+@[^@\s]+$/.test(String(x.afzender))) return null;
   if (VANZELF_NIET_RE.test(String(x.onderwerp || ''))) return null;
+  if (VANZELF_NIET_AFZENDER_RE.test(String(x.afzender)) || VANZELF_VRIJ_RE.test(String(x.afzender))) return null;   // wv2469
   return x.reden;
 }
 
@@ -767,7 +774,7 @@ const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwa
   jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
   labelset2Lees, toetsRegelLabels, labelPlan2, alleenBetalen, ecobankMelding, DRAAD_LABELS, ERF_LABELS, DRAAD_SOORTEN, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
   authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL,
-  laagBericht, laagDraad, LAAG_VERSIE, LAGEN, LAAG_REDENEN, FACTUUR_FASEN, zouWeg, VANZELF_REDENEN, VANZELF_NIET_RE };
+  laagBericht, laagDraad, LAAG_VERSIE, LAGEN, LAAG_REDENEN, FACTUUR_FASEN, zouWeg, VANZELF_REDENEN, VANZELF_NIET_RE, VANZELF_VERSIE, VANZELF_NIET_AFZENDER_RE, VANZELF_VRIJ_RE };
 
 // ─────────────────────────── startset (O.5) ───────────────────────────
 
@@ -886,7 +893,7 @@ function maak(o) {
     ['aanbod', 'thread_id TEXT'], ['aanbod', 'erf TEXT'],   // wv2196 draadlabels
     ['postvak', 'inbox_lijst TEXT'], ['postvak', 'zaken_tijd TEXT'],   // wv2218 zaakregister
     ['besluit', 'terug_tijd TEXT'], ['besluit', 'terug_poging INTEGER NOT NULL DEFAULT 0'],
-    ['zaak', 'zou_weg TEXT'], ['zaak', 'zou_reden TEXT'],
+    ['zaak', 'zou_weg TEXT'], ['zaak', 'zou_reden TEXT'], ['zaak', 'zou_versie INTEGER'],   // wv2469
     ['verkoop', 'vorige TEXT']]) {   // wv2911: status vóór 'weg_david';    // wv2455 proefweek vanzelf weg   // wv2259 terug bij Geen factuur   // wv2218 zaakregister: laatste volledige inboxlijst, laatste berekening
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
@@ -1324,8 +1331,8 @@ function maak(o) {
     const tel = { draden: 0, jij: 0, socev: 0, weg: 0, afgedaan: 0, afgehandeld: 0, heropend: 0, nooit: 0, inbox: inbox ? 'volledig' : 'onbekend' };
     const get = db.prepare('SELECT * FROM zaak WHERE postvak = ? AND thread_id = ?');
     const zet = db.prepare(`INSERT OR REPLACE INTO zaak (postvak, thread_id, bron, eerste, laatste, laatste_besluit, berichten, laag, laag_reden, laag_detail, laag_sinds,
-      laag_versie, laag_besluit, inbox, inbox_tijd, inbox_gezien, eigen_archief, afgehandeld, afgehandeld_door, heropend, beantwoord, ooit_weggezet, bijgewerkt, zou_weg, zou_reden)
-      VALUES (?, ?, 'gmail', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      laag_versie, laag_besluit, inbox, inbox_tijd, inbox_gezien, eigen_archief, afgehandeld, afgehandeld_door, heropend, beantwoord, ooit_weggezet, bijgewerkt, zou_weg, zou_reden, zou_versie)
+      VALUES (?, ?, 'gmail', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const nooit = nooitSet(pv);   // wv2455
     const tijd = function (b) { return b.ontvangen || b.aangemaakt; };
     tx(function () {
@@ -1364,11 +1371,12 @@ function maak(o) {
         const ooit = oud && oud.ooit_weggezet ? oud.ooit_weggezet : (l.laag === 'weg' ? t : null);
         // wv2455: proefweek vanzelf weg — eerste keer dat de zaak "vanzelf weg" zou gaan blijft staan (meting: had David hem toch nodig?)
         const nw = binnen[binnen.length - 1], adres = String(nw.afzender || '').toLowerCase();
-        const zou = af && !(oud && oud.zou_weg) ? null : zouWeg({ laag: l.laag, reden: l.reden, onderwerp: nw.onderwerp, afzender: adres, nooit: nooit.has(adres),
+        const oudZou = oud && oud.zou_weg && oud.zou_versie === VANZELF_VERSIE;   // wv2469: een zou_weg van een oudere regel telt niet meer
+        const zou = af && !oudZou ? null : zouWeg({ laag: l.laag, reden: l.reden, onderwerp: nw.onderwerp, afzender: adres, nooit: nooit.has(adres),
           beantwoord: beantwoord && beantwoord >= laatste });
-        const zouT = oud && oud.zou_weg ? oud.zou_weg : (zou ? t : null), zouR = oud && oud.zou_reden ? oud.zou_reden : zou;
+        const zouT = oudZou ? oud.zou_weg : (zou ? t : null), zouR = oudZou ? oud.zou_reden : zou;
         zet.run(pv, th, tijd(binnen[0]), laatste, binnen[binnen.length - 1].id, binnen.length, l.laag, l.reden, l.detail, sinds, LAAG_VERSIE, binnen[l.index].id,
-          inb, inbT, gezien, eigen, af, afDoor, her, beantwoord, ooit, t, zouT, zouR);
+          inb, inbT, gezien, eigen, af, afDoor, her, beantwoord, ooit, t, zouT, zouR, zouT ? VANZELF_VERSIE : null);
         tel.draden++;
         if (af) tel.afgedaan++; else tel[l.laag]++;
       }
@@ -1405,8 +1413,8 @@ function maak(o) {
   // Proefweek vanzelf weg: tellingen voor Mail (laatste 14 dagen) — zou = Socev zou het vanzelf wegzetten; zelf = David haalde het daarna zelf
   // uit zijn inbox (dat werk had Socev kunnen doen); gemist = het bleek toch iets voor David (nu jij/socev, beantwoord, of afzender op Nooit)
   function vanzelfStand(p, grens) {
-    const sinds = db.prepare('SELECT min(zou_weg) t FROM zaak WHERE postvak = ? AND zou_weg IS NOT NULL').get(p.id).t || null;
-    const rijen = db.prepare('SELECT z.laag, z.afgehandeld_door, z.beantwoord, z.zou_weg, b.afzender FROM zaak z LEFT JOIN besluit b ON b.id = z.laatste_besluit WHERE z.postvak = ? AND z.laatste >= ? AND z.zou_weg IS NOT NULL').all(p.id, grens);
+    const sinds = db.prepare('SELECT min(zou_weg) t FROM zaak WHERE postvak = ? AND zou_weg IS NOT NULL AND zou_versie = ?').get(p.id, VANZELF_VERSIE).t || null;   // wv2469
+    const rijen = db.prepare('SELECT z.laag, z.afgehandeld_door, z.beantwoord, z.zou_weg, b.afzender FROM zaak z LEFT JOIN besluit b ON b.id = z.laatste_besluit WHERE z.postvak = ? AND z.laatste >= ? AND z.zou_weg IS NOT NULL AND z.zou_versie = ?').all(p.id, grens, VANZELF_VERSIE);
     const nooit = nooitSet(p.id);
     let zelf = 0, gemist = 0;
     for (const r of rijen) {
