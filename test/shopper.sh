@@ -964,7 +964,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('13v server.js: GET /app/shopper/winkels vóór de id-route, stil in het app-log, scorePad shopper-winkelscore.json, script kaal en begrensd; uitrol-lijst',
       bl13.indexOf("route === 'GET /app/shopper/winkels'") > 0 && bl13.indexOf("route === 'GET /app/shopper/winkels'") < bl13.indexOf("soort = 'zoektocht'") && /soort === 'winkels'\) && u\.status === 200\) res\._app\.stil = true/.test(bl13)
       && /shopper-winkelscore\.json/.test(bl13) && /'winkel-score\.py'/.test(bl13) && /timeout: 180000/.test(bl13) && /env: \{ PATH: process\.env\.PATH \|\| '\/usr\/bin:\/bin', LANG: 'C\.UTF-8', HOME: '\/tmp' \}/.test(bl13)
-      && /RELEASE_OPTIONEEL="[^"]*\bshopper-winkels\.js winkel-score\.py\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
+      && /RELEASE_OPTIONEEL="[^"]*\bshopper-winkels\.js (winkel-browser\.js )?winkel-score\.py\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
     toets('13w shopper-winkels.js logt niets en kent geen sleutel', !/console\.|process\.env|eval\(/.test(fs.readFileSync('shopper-winkels.js', 'utf8')));
     // review wv2935 ronde 1
     const dr = { verzend: { eur: 4.95, drempel_eur: 59.7, boven_drempel_eur: 0, tekst: null, gemeten: null } };
