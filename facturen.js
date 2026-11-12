@@ -3369,16 +3369,32 @@ function isIcsCsv(bytes) {
   return eerste.replace(/"/g, '').split(';').slice(0, 3).join(';') === CC.ICS_KOPPEN.slice(0, 3).join(';');
 }
 // Inlezen voor de kaart (facturen-creditcard.js: hele bestand of niets, idempotent op regel, kaartnummer geweigerd); alleen de eigenaar.
-function verwerkIcs(fdb, r, bytes, naam, nu) {
+// wv2958: pdfTekst gezet = het ICS-rekeningoverzicht als PDF (de tekst van pdftotext); dan sluit het op de cent op de totalen of het wordt geweigerd.
+function verwerkIcs(fdb, r, bytes, naam, nu, pdfTekst) {
   eisEigenaar(r);
   let x, l4 = null;
+  const pdf = pdfTekst != null;
   try {
     // de kaart uit het bestand zelf (laatste 4 van de eerste regel met een kaart; review wv2060 KAN 5: bij een tweede kaart niet weigeren)
-    l4 = (CC.leesIcsCsv(bytes).regels.find((g) => g.laatste4) || {}).laatste4 || null;
-    x = CC.inlezen(fdb, l4, bytes, { wie: r.wie, herkomst: 'app-upload: ' + kort(naam || 'ics.csv', 200), naam: naam || null, nu });
+    l4 = ((pdf ? CC.leesIcsPdfTekst(pdfTekst) : CC.leesIcsCsv(bytes)).regels.find((g) => g.laatste4) || {}).laatste4 || null;
+    x = CC.inlezen(fdb, l4, bytes, { wie: r.wie, herkomst: 'app-upload: ' + kort(naam || (pdf ? 'ics.pdf' : 'ics.csv'), 200), naam: naam || null, nu, pdfTekst: pdf ? pdfTekst : undefined });
   } catch (e) { if (e instanceof CC.KaartFout) weiger(e.code === 'kaartnummer' ? 422 : 415, 'ICS-overzicht geweigerd: ' + kort(e.uitleg, 160), { code: 'creditcard_' + e.code }); throw e; }
   const k = l4 ? { laatste4: l4 } : fdb.db.prepare('SELECT laatste4 FROM kaart LIMIT 1').get();
-  return { soort: 'creditcard', al_bekend: !!x.al_bekend, kaart: k ? '…' + k.laatste4 : null, periode: x.periode, regels: x.regels, nieuw: x.nieuw, al_bekend_regels: x.al_bekend_regels };
+  return { soort: 'creditcard', formaat: pdf ? 'pdf' : 'csv', al_bekend: !!x.al_bekend, kaart: k ? '…' + k.laatste4 : null, periode: x.periode, overzicht: x.overzicht || undefined,
+    regels: x.regels, nieuw: x.nieuw, al_bekend_regels: x.al_bekend_regels };
+}
+/*
+ * wv2958: is deze upload het ICS-rekeningoverzicht als PDF? Alleen voor de eigenaar en alleen als de beller een pdftotext geeft (o.pdfTekst,
+ * server.js). Eerst een goedkope voorselectie op de bytes ("International Card Services" in de documentinformatie, of een ICS-bestandsnaam
+ * als _202611.pdf), dan de tekst en alle kenmerken (CC.isIcsPdfTekst). Niet zeker → null: de oude weg (de stukken, de koerier).
+ */
+function icsPdfTekst(r, bytes, naam, o) {
+  if (!CC || !isEig(r) || typeof o.pdfTekst !== 'function') return null;
+  if (bytes.subarray(0, 5).toString('latin1') !== '%PDF-') return null;
+  if (bytes.indexOf('International Card Services', 0, 'latin1') < 0 && !/^_?\d{6}\.pdf$/i.test(String(naam || ''))) return null;
+  let t;
+  try { t = o.pdfTekst(bytes); } catch (e) { t = null; }
+  return t && t.ok && CC.isIcsPdfTekst(t.tekst) ? String(t.tekst) : null;
 }
 function upload(fdb, r, d, nu, o) {
   const beurt = String(d.beurt || ''), n = Number(d.n), soort = d.soort === undefined ? 'auto' : d.soort;
@@ -3394,6 +3410,10 @@ function upload(fdb, r, d, nu, o) {
     if (CC && isIcsCsv(bytes)) {   // wv2060: het ICS-overzicht van de creditcard (CSV) hoort bij de kaart, niet bij de bank of de stukken
       if (soort === 'factuur') weiger(415, 'geen PDF, UBL of afbeelding');
       return verwerkIcs(fdb, r, bytes, st.naam, nu);
+    }
+    if (soort !== 'bank') {   // wv2958: het ICS-overzicht als PDF hoort ook bij de kaart, niet bij de stukken
+      const icsTekst = icsPdfTekst(r, bytes, st.naam, o);
+      if (icsTekst != null) return verwerkIcs(fdb, r, bytes, st.naam, nu, icsTekst);
     }
     const herkend = soortVan(bytes, st.naam || '');
     if (soort === 'bank' && herkend !== 'bank') weiger(415, 'dit is geen bankexport (MT940, TAB of CSV)');
@@ -3862,7 +3882,8 @@ function maak(opties) {
       // schrijven alleen op de primaire kant (bouwplan § 8: netheid, de borging is dat de VPS geen database heeft)
       if (v.primair !== true) weiger(409, 'Facturen draait alleen op de primaire kant');
       const vo = { versOk: typeof v.versOk === 'function' ? v.versOk : () => false, versVerbruik: typeof v.versVerbruik === 'function' ? v.versVerbruik : () => {}, uploadNeem: v.uploadNeem,
-        sepaDoor: v.sepaDoor };   // wv2465: 'auto' | 'concept' | anders niets (server.js FACTUREN_SEPA_DOOR)
+        sepaDoor: v.sepaDoor,   // wv2465: 'auto' | 'concept' | anders niets (server.js FACTUREN_SEPA_DOOR)
+        pdfTekst: typeof v.pdfTekst === 'function' ? v.pdfTekst : undefined };   // wv2958: ICS-overzicht als PDF herkennen (server.js facturenPdfTekst)
       switch (rest) {
         case 'bevestig': return ok(bevestig(fdb, r, d, nu), 'bevestig ' + kort(d.id, 16));
         case 'bevestig-groep': { const j = bevestigGroep(fdb, r, d, nu, vo); return ok(j, 'bevestig-groep ' + j.bevestigd.length + '/' + (j.bevestigd.length + j.geweigerd.length)); }   // wv2661

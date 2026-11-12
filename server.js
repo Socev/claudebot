@@ -17118,6 +17118,17 @@ function facturenKoerierInfo(fdb) {
     direct: direct, verzending: k && k.verzending ? { direct: k.verzending.direct || 0, direct_terug: k.verzending.direct_terug || 0, direct_onzeker: k.verzending.direct_onzeker || 0 } : null };
 }
 // Het klaarstaande bestand van dít apparaat en deze beurt (zelfde map als appUpload): bytes + naam, en weg() ruimt het op.
+// wv2958: de tekst van een PDF voor de herkenning van het ICS-rekeningoverzicht in Uploads (facturen.js upload → icsPdfTekst). Vast pad, geen
+// shell, PDF op stdin, lege omgeving, 15 s, uitvoer ≤ 4 MB, stderr niet gelezen (daar kan een stukje van het document in staan). Synchroon:
+// facturen.js roept hem alleen aan voor een PDF met "International Card Services" erin of een ICS-bestandsnaam (één blad: tientallen ms).
+function facturenPdfTekst(bytes) {
+  try {
+    const x = require('child_process').spawnSync('/usr/bin/pdftotext', ['-q', '-layout', '-enc', 'UTF-8', '-', '-'],
+      { input: bytes, timeout: 15000, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8', env: {}, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    if (x.error || x.status !== 0) return { ok: false };
+    return { ok: true, tekst: String(x.stdout || '') };
+  } catch (e) { return { ok: false }; }
+}
 function facturenUploadNeem(a, beurt, n) {
   const dir = appUploadMap(a, beurt);
   const x = appUploadLijst(dir).find(function (b) { return b.n === n; });
@@ -17181,7 +17192,7 @@ async function appFacturen(req, res, a, s, d, route) {
   }
   const r = facturenRoutes.app(fdb, { methode: req.method, pad: pad, d: d || {}, rol: rol, primair: rolPrimair(),
     versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; },
-    uploadNeem: function (b, n) { return facturenUploadNeem(a, b, n); }, bankluisPad: FACTUREN_BANKLUIS,
+    uploadNeem: function (b, n) { return facturenUploadNeem(a, b, n); }, bankluisPad: FACTUREN_BANKLUIS, pdfTekst: facturenPdfTekst,   // wv2958
     sepaDoor: typeof sdModus === 'function' ? sdModus() : null });   // wv2465
   if (req.method === 'GET' && pad.indexOf('/app/facturen/document/') !== 0 && r.status === 200) res._app.stil = true;
   if (req.method !== 'GET' && r.status === 200) facturenKaartPlan(3000);   // wv1705: verzamelkaart bijwerken (bevestigen, terugdraaien, upload)

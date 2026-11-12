@@ -1205,6 +1205,18 @@ BEGIN SELECT RAISE(ABORT, 'sepa_verzending: de rij hoort bij een batch van dezel
 `;
 function M23(db, vervang) { M5(db, vervang || M23_VERVANG, 'migratie_23'); db.exec(M23_TRIGGER); }
 
+/*
+ * wv2958 (David 12-11-2026, Ja op "Zal ik Facturen het ICS-overzicht ook als PDF laten inlezen"): het maandelijkse rekeningoverzicht van ICS
+ * als PDF naast de CSV-export. Alleen de CHECK op kaart_bestand.formaat verruimen naar ('ics_csv','ics_pdf'); zelfde weg als M5
+ * (writable_schema, één vervanging, al verruimd = overslaan; een CHECK verruimen verandert niets aan de opgeslagen rijen). LET OP terugrol: een
+ * release van vóór wv2958 opent deze database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 24`
+ * (de oude code leest kaart_bestand.formaat niet; een PDF-bestand en zijn regels hinderen haar niet). Herhaalbaar.
+ */
+const M24_VERVANG = [
+  ['kaart_bestand', "formaat TEXT NOT NULL CHECK (formaat IN ('ics_csv'))", "formaat TEXT NOT NULL CHECK (formaat IN ('ics_csv','ics_pdf'))"],
+];
+function M24(db, vervang) { return M5(db, vervang || M24_VERVANG, 'migratie_24'); }
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -1228,6 +1240,7 @@ const MIGRATIES = [
   { versie: 21, naam: 'SEPA-batch van Tolgaarde zelf naar nogbetalen@: sepa_verzending (wv2465)', sql: M21 },
   { versie: 22, naam: 'per leverancier concept of direct: leverancier.verzendwijze(+versie), snapshot op opdracht (wv2480)', fn: (db) => M22(db) },
   { versie: 23, naam: 'SEPA-batch: ook de POT (invoer per betaling met de extensie POT-invoer); Privé blijft uitgesloten (wv2842)', fn: (db) => M23(db) },
+  { versie: 24, naam: "creditcard: kaart_bestand.formaat ook 'ics_pdf' (rekeningoverzicht als PDF, wv2958)", fn: (db) => M24(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -1885,7 +1898,7 @@ function health(fdb) {
 }
 
 module.exports = {
-  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M17_VERVANG, _M17: M17, M18_VERVANG, _M18: M18, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
+  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M17_VERVANG, _M17: M17, M18_VERVANG, _M18: M18, M24_VERVANG, _M24: M24, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
   terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, reserveerKies, directBesluit, factuurTwijfel, DIRECT_TWIJFEL, directVandaag, DIRECT_PER_DAG, terugNaarConcept, verzendNotitie, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,
