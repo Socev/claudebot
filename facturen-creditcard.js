@@ -435,9 +435,13 @@ function inlezen(fdb, kaartWie, bytes, opties) {
   // (review Codex wv2958 MOET 1: een andere winkel met hetzelfde bedrag op dezelfde dag mag nooit claimen). Autorisaties nooit.
   const ander = fdb.db.prepare("SELECT r.id, r.omschrijving FROM kaart_regel r JOIN kaart_bestand b ON b.id = r.bestand WHERE r.kaart = ? AND b.formaat <> ? AND r.soort = ? AND r.transactiedatum = ? AND coalesce(r.boekdatum, '') = ? AND r.bedrag_centen = ? AND r.overzicht IS ? ORDER BY r.id");
   const geclaimd = new Set();
+  // een CSV na de PDF (review Codex ronde 2 MOET 1): het PDF-overzicht is het hele overzicht; regels van een overzicht waar al een PDF van is
+  // ingelezen, slaat een CSV over (ze zijn er al, en zo kan een anders gespelde regel nooit dubbel binnenkomen)
+  const metPdf = new Set(pdf ? [] : fdb.db.prepare("SELECT overzicht FROM kaart_bestand WHERE kaart = ? AND formaat = 'ics_pdf' AND overzicht IS NOT NULL").all(kaart.id).map((x) => x.overzicht));
   const nieuw = regels.filter((r) => {
     if (bekend.get(r.sleutel)) return false;
     if (r.soort === 'autorisatie') return true;
+    if (r.overzicht && metPdf.has(r.overzicht)) return false;
     const vrij = ander.all(kaart.id, formaat, r.soort, r.transactiedatum, r.boekdatum || '', r.bedrag_centen, r.overzicht).filter((x) => !geclaimd.has(x.id));
     const n = omsNorm(r.omschrijving);
     let tegen = vrij.find((x) => omsNorm(x.omschrijving) === n);
@@ -458,7 +462,7 @@ function inlezen(fdb, kaartWie, bytes, opties) {
   const bron = D.bronSchrijf(fdb, bytes);
   const wanneer = nuIso(nu), id = D.nieuwId();
   D.transactie(fdb, () => {
-    D.voegToe(fdb, 'kaart_bestand', { id, kaart: kaart.id, sha256: sha, formaat, naam: o.naam ? String(o.naam).slice(0, 255) : null,
+    D.voegToe(fdb, 'kaart_bestand', { id, kaart: kaart.id, sha256: sha, formaat, overzicht: pdf ? g.overzicht : null, naam: o.naam ? String(o.naam).slice(0, 255) : null,
       periode_van: g.periode.van, periode_tot: g.periode.tot, aantal: regels.length, nieuw: nieuw.length, bron_bewaard: bron && bron.sha256 === sha ? 1 : 0,
       herkomst: o.herkomst ? String(o.herkomst).slice(0, 300) : null, geupload_door: o.wie, geupload_op: wanneer });
     for (const r of nieuw) {

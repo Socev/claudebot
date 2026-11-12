@@ -463,6 +463,17 @@ test('ontdubbeling kijkt naar de omschrijving (review MOET 1): andere winkel zel
   C.inlezen(t2.fdb, '0000', csv([['10-03-2026', '11-03-2026', 'WINKEL CEE AMSTERDAM NLD', '****0000', 'D', '5,00', 'EUR', '5,00', 'Transaction', '202604']]), { wie: 'toets', nu: NU });
   const voor = t2.fdb.db.prepare('SELECT count(*) AS n FROM kaart_regel').get().n;
   assert.throws(() => C.inlezen(t2.fdb, '0000', icsPdf(tekst), { wie: 'toets', nu: NU, pdfTekst: tekst }), (e) => e instanceof C.KaartFout && e.code === 'dubbel');
+  // andersom (review ronde 2): eerst de PDF, dan een CSV met een extra of anders gespelde regel op dat overzicht → overgeslagen, niets dubbel
+  const t4 = opzet();
+  C.kaartZet(t4.fdb, { klantnummer: KLANT, laatste4: '0000', rekening: TG.slice(-4), wie: 'toets', nu: NU });
+  C.inlezen(t4.fdb, '0000', icsPdf(tekst), { wie: 'toets', nu: NU, pdfTekst: tekst });
+  assert.equal(t4.fdb.db.prepare("SELECT overzicht FROM kaart_bestand WHERE formaat = 'ics_pdf'").get().overzicht, '2026-04');
+  const c4 = C.inlezen(t4.fdb, '0000', csv([['10-03-2026', '11-03-2026', 'WINKEL CEE AMSTERDAM NLD', '****0000', 'D', '5,00', 'EUR', '5,00', 'Transaction', '202604'],
+    ['15-03-2026', '16-03-2026', 'WINKEL  BEE  AMSTERDAM', '****0000', 'D', '20,00', 'EUR', '20,00', 'Transaction', '202604'],
+    ['20-04-2026', '21-04-2026', 'WOLKDIENST SAN FRANCISCO USA', '****0000', 'D', '7,00', 'USD', '7,70', 'Transaction', '202605']]), { wie: 'toets', nu: NU });
+  assert.equal(c4.nieuw, 1, 'alleen de regel van overzicht 2026-05'); assert.equal(c4.al_bekend_regels, 2);
+  const s4 = t4.fdb.db.prepare("SELECT count(*) AS n, sum(bedrag_centen) AS s FROM kaart_regel WHERE overzicht = '2026-04'").get();
+  assert.deepEqual([s4.n, s4.s], [2, 4000], 'overzicht 2026-04 blijft precies de PDF');
   assert.equal(t2.fdb.db.prepare('SELECT count(*) AS n FROM kaart_regel').get().n, voor);
   assert.equal(t2.fdb.db.prepare("SELECT count(*) AS n FROM kaart_bestand WHERE formaat = 'ics_pdf'").get().n, 0);
   // twee afgekapte kandidaten: twijfel, geweigerd

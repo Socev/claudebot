@@ -1207,15 +1207,22 @@ function M23(db, vervang) { M5(db, vervang || M23_VERVANG, 'migratie_23'); db.ex
 
 /*
  * wv2958 (David 12-11-2026, Ja op "Zal ik Facturen het ICS-overzicht ook als PDF laten inlezen"): het maandelijkse rekeningoverzicht van ICS
- * als PDF naast de CSV-export. Alleen de CHECK op kaart_bestand.formaat verruimen naar ('ics_csv','ics_pdf'); zelfde weg als M5
- * (writable_schema, één vervanging, al verruimd = overslaan; een CHECK verruimen verandert niets aan de opgeslagen rijen). LET OP terugrol: een
+ * als PDF naast de CSV-export. De CHECK op kaart_bestand.formaat verruimen naar ('ics_csv','ics_pdf') (zelfde weg als M5: writable_schema,
+ * één vervanging, al verruimd = overslaan; een CHECK verruimen verandert niets aan de opgeslagen rijen) en de kolom kaart_bestand.overzicht
+ * erbij (alleen bij een PDF gevuld; review Codex wv2958 ronde 2; ALTER TABLE ADD COLUMN, overgeslagen als hij er al is). LET OP terugrol: een
  * release van vóór wv2958 opent deze database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 24`
- * (de oude code leest kaart_bestand.formaat niet; een PDF-bestand en zijn regels hinderen haar niet). Herhaalbaar.
+ * (de oude code leest kaart_bestand.formaat en .overzicht niet; een PDF-bestand en zijn regels hinderen haar niet). Herhaalbaar.
  */
 const M24_VERVANG = [
   ['kaart_bestand', "formaat TEXT NOT NULL CHECK (formaat IN ('ics_csv'))", "formaat TEXT NOT NULL CHECK (formaat IN ('ics_csv','ics_pdf'))"],
 ];
-function M24(db, vervang) { return M5(db, vervang || M24_VERVANG, 'migratie_24'); }
+function M24(db, vervang) {
+  M5(db, vervang || M24_VERVANG, 'migratie_24');
+  // het overzicht (JJJJ-MM) waar een PDF-bestand het hele rekeningoverzicht van is; een latere CSV slaat regels van dat overzicht over
+  if (!db.prepare('PRAGMA table_info(kaart_bestand)').all().some((k) => k.name === 'overzicht')) {
+    db.exec("ALTER TABLE kaart_bestand ADD COLUMN overzicht TEXT CHECK (overzicht IS NULL OR overzicht GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]')");
+  }
+}
 
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
