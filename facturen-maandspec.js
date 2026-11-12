@@ -266,7 +266,7 @@ function kaartIcs(x) {
     waarom: 'Begin ' + MAANDEN[Number(MS_VOLGENDE(x.maand).slice(5, 7)) - 1] + ' krijgt je vader de specificatie van ' + n + ': PayPal én de creditcard. De ICS-incasso van ' + n +
       ' staat op de bank (' + dagKort(x.incasso_eerste) + '); welke betalingen erin zitten, ziet Socev pas als jij het overzicht uploadt. Zonder upload gaat de specificatie zonder creditcard.',
     stappen: ['Log in bij ICS (icscards.nl of de ICS-app) en open de zakelijke Mastercard die eindigt op ' + x.laatste4 + '.',
-      'Download de transacties als CSV-bestand, vanaf de 1e van vorige maand tot vandaag (overlap mag: dubbele regels slaat Socev over).',
+      'Download de transacties als CSV-bestand (vanaf de 1e van vorige maand tot vandaag) of het rekeningoverzicht van ' + n + ' als PDF; overlap mag: dubbele regels slaat Socev over.',
       'Open in de Socev-app Apps › Facturen › Uploads en sleep het bestand erin (of tik op Kies bestanden).',
       'Klaar: deze kaart gaat vanzelf dicht zodra het overzicht van ' + n + ' binnen is.'],
     meting: (x.nuKort ? x.nuKort + ': ' : '') + 'de ICS-incasso van ' + n + ' staat op de bank, het overzicht met de transacties nog niet in Facturen.',
