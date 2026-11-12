@@ -198,3 +198,34 @@ test('wv1917 diffreview: in een batch met latere uitvoerdatum telt de grens vana
   assert.strictEqual(K.onbetaaldPlan({ rijen: [r], punten: [], vandaag: '2026-11-26' }).zet.length, 0);
   assert.strictEqual(K.onbetaaldPlan({ rijen: [r], punten: [], vandaag: '2026-11-28' }).zet.length, 1);
 });
+
+test('wv2959 onbetaald: creditcardleverancier pas een kaart als bank én creditcard tot de grens zijn ingelezen; tekst noemt beide', () => {
+  // grens 18-11 (verval 11-11 + 7); bank t/m 20-11
+  const achter = K.onbetaaldPlan({ rijen: [rij({ kaart_tot: '2026-10-30' })], punten: [], vandaag: '2026-11-25', nuKort: NK });
+  assert.deepStrictEqual([achter.zet.length, achter.wacht_op_bank, achter.wacht_op_kaart], [0, 0, 1], 'kaart loopt achter: niets');
+  assert.strictEqual(K.onbetaaldPlan({ rijen: [rij({ kaart_tot: '2026-11-17' })], punten: [], vandaag: '2026-11-25' }).zet.length, 0, 'net vóór de grens');
+  const bankAchter = K.onbetaaldPlan({ rijen: [rij({ kaart_tot: '2026-11-30', bank_tot: '2026-11-10' })], punten: [], vandaag: '2026-11-25' });
+  assert.deepStrictEqual([bankAchter.zet.length, bankAchter.wacht_op_bank], [0, 1], 'kaart voorbij, bank niet: ook niets');
+  const p = K.onbetaaldPlan({ rijen: [rij({ kaart_tot: '2026-11-19' })], punten: [], vandaag: '2026-11-25', nuKort: NK });
+  assert.strictEqual(p.zet.length, 1);
+  const k = p.zet[0];
+  assert.match(k.waarom, /ik zie tot en met 19-11-2026 geen betaling op de bank of de creditcard\./, 'oudste stand van de twee');
+  assert.match(k.meting, /bank- of creditcardregel; bank ingelezen t\/m 20-11-2026, creditcard t\/m 19-11-2026, grens 18-11-2026/);
+  assert.match(k.stappen[0], /creditcard/);
+  assert.ok(k.titel.length <= 90 && k.waarom.length <= 400 && k.meting.length <= 300);
+  // lange namen en nummers: nog steeds binnen de grenzen
+  const lang = K.onbetaaldKaart(rij({ kaart_tot: '2026-11-19', naam: 'X'.repeat(200), nummer: '9'.repeat(200), ent_naam: 'Y'.repeat(200), betaalspoor: 'betaald_vooraf' }), '2026-11-18', NK);
+  assert.ok(lang.titel.length <= 90 && lang.waarom.length <= 400 && lang.meting.length <= 300);
+  // een open kaart van een creditcardfactuur waarvan de kaart achterloopt, blijft open (niet bewezen betaald)
+  const blijf = K.onbetaaldPlan({ rijen: [rij({ kaart_tot: '2026-10-30' })], punten: [{ sleutel: 'facturen-onbetaald-' + 'a'.repeat(16), status: 'open' }], vandaag: '2026-11-25' });
+  assert.strictEqual(blijf.dicht.length, 0);
+  // bankleverancier (geen kaart_tot): tekst ongewijzigd
+  const b = K.onbetaaldPlan({ rijen: [rij()], punten: [], vandaag: '2026-11-25', nuKort: NK }).zet[0];
+  assert.match(b.waarom, /ik zie tot en met 20-11-2026 geen betaling in de bank\./);
+  assert.match(b.meting, /: niet gekoppeld aan een bankregel; bank ingelezen t\/m 20-11-2026, grens 18-11-2026\./);
+});
+
+test('wv2959 onbetaald: server.js telt wacht_op_kaart mee in de logregel', () => {
+  const server = fs.readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /wacht_op_kaart: plan\.wacht_op_kaart \|\| 0/);
+});
