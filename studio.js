@@ -25,7 +25,9 @@
 //   voorwaarde: genoeg MemAvailable garandeert niet dat de motor start, te weinig betekent wel (vrijwel) zeker dat hij niet start.
 // - piper: Piper op de pod (/opt/data/piper, stem nl_NL-ronnie-medium, CPU), tekst → WAV. Proefstem, geen GPU.
 // - comfyui: rechtstreeks ComfyUI (https://d9ce03380.<olares>), alleen als terugval. Elke flow gaat vóór elk indienen door de
-//   knopentoets (KNOPEN hieronder: vaste lijst in de pod, niet in de flow) en /object_info; Save → Preview; de taak wacht als ComfyUI
+//   knopentoets (KNOPEN hieronder: vaste lijst in de pod, niet in de flow) en /object_info; Save → Preview (fotoflows sinds wv2983:
+//   Save/Preview → SaveImageWebsocket, resultaat over de websocket, niets in ComfyUI's tijdelijke map; eigen /history-regel na elke
+//   taak gewist); de taak wacht als ComfyUI
 //   iets anders doet (gedeeld met Davids browser) en onderbreekt alleen zijn eigen prompt_id; /free alleen bij een lege rij.
 //
 // GRENZEN. 1 taak tegelijk, hooguit 5 in de rij, 30 per dag (Europe/Amsterdam), max_seconden per flow. Een flow op "proef" draait
@@ -169,7 +171,17 @@ const KNOPEN = {
   },
   // LoadImage leest een bestand uit ComfyUI's invoermap: alleen de vaste Studio-naam, nooit een ander (wv2482)
   laad_beeld: ['LoadImage'],
+  // wv2983 (OVIS Imagine fase 0): fotoflows sturen hun resultaat over de websocket in plaats van naar ComfyUI's tijdelijke map.
+  // SaveImageWebsocket (meegeleverd met ComfyUI, gemeten 0.43.0) stuurt elk beeld als PNG-bericht (4 bytes soort 1, 4 bytes formaat
+  // 2 = PNG) naar de client van de taak en schrijft niets op schijf; zijn /history-regel heeft outputs {}. Gemeten 12-11-2026 door de
+  // Olares-poort: 1, 4 en 16 MP (tot 48 MB) heel en pixel-gelijk. Alleen deze klasse uit precies deze module; Save/Preview in een
+  // fotoflow wordt deze knoop als hij er is (anders blijft het Preview, zoals voorheen; t.meting.uitvoer zegt welke).
+  ws_beeld: { klasse: 'SaveImageWebsocket', module: 'custom_nodes.websocket_image_save' },
 };
+function wsKan(info) {
+  const k = info && Object.hasOwn(info, KNOPEN.ws_beeld.klasse) && info[KNOPEN.ws_beeld.klasse];
+  return !!(k && k.python_module === KNOPEN.ws_beeld.module && k.output_node === true);
+}
 function knoopToets(klasse, info) {
   if (typeof klasse !== 'string' || !/^[A-Za-z0-9_+.\- ]{1,120}$/.test(klasse)) return 'ongeldige knoopnaam';
   if (KNOPEN.weiger_naam.indexOf(klasse) >= 0) return 'knoop ' + klasse + ' staat op de weigerlijst';
@@ -209,7 +221,11 @@ function veldToets(klasse, naam, w, info) {
   return naam + ' (' + String(t).slice(0, 30) + ') kan alleen via een koppeling';
 }
 // Volledige toets van een API-JSON; herschrijft Save → Preview in de kopie. Geeft { fout } of { prompt }.
-function flowToets(api, info) {
+// wv2983: opties.ws → SaveImage én PreviewImage worden SaveImageWebsocket (alleen als wsKan(info)); ws_knopen = hun ids.
+function flowToets(api, info, opties) {
+  const ws = !!(opties && opties.ws);
+  if (ws && !wsKan(info)) return { fout: 'SaveImageWebsocket ontbreekt in deze ComfyUI' };
+  const wsKnopen = [];
   if (!api || typeof api !== 'object' || Array.isArray(api)) return { fout: 'flow.json is geen ComfyUI-API-export' };
   const uit = {};
   const ids = Object.keys(api);
@@ -217,7 +233,16 @@ function flowToets(api, info) {
   for (const id of ids) {
     const n = api[id];
     if (!n || typeof n.class_type !== 'string' || !n.inputs || typeof n.inputs !== 'object') return { fout: 'knoop ' + id + ' is onvolledig' };
-    const klasse = KNOPEN.save_naar_preview[n.class_type] || n.class_type;
+    let klasse = KNOPEN.save_naar_preview[n.class_type] || n.class_type;
+    if (ws && (klasse === 'PreviewImage' || klasse === KNOPEN.ws_beeld.klasse)) {
+      // wv2983: alleen het beeld gaat mee; geen bestandsnaam, geen andere velden
+      if (!Array.isArray(n.inputs.images) || n.inputs.images.length !== 2 || typeof n.inputs.images[0] !== 'string' || !Number.isInteger(n.inputs.images[1]))
+        return { fout: 'knoop ' + id + ': de uitvoerknoop heeft geen beeld als invoer' };
+      if (!api[n.inputs.images[0]]) return { fout: 'knoop ' + id + ' verwijst naar een knoop die er niet is' };
+      wsKnopen.push(String(id));
+      uit[id] = { class_type: KNOPEN.ws_beeld.klasse, inputs: { images: n.inputs.images } };
+      continue;
+    }
     const f = knoopToets(klasse, info);
     if (f) return { fout: f };
     const inputs = {};
@@ -239,7 +264,8 @@ function flowToets(api, info) {
     }
     uit[id] = { class_type: klasse, inputs: inputs };
   }
-  return { prompt: uit };
+  if (ws && !wsKnopen.length) return { fout: 'de flow heeft geen beelduitvoer' };
+  return ws ? { prompt: uit, ws_knopen: wsKnopen } : { prompt: uit };
 }
 
 function hex16() { return crypto.randomBytes(8).toString('hex'); }
@@ -282,7 +308,7 @@ function maak(deps) {
   const log = deps.log || function () {};
   const fout = deps.fout || function () {};
   const st = { taken: [], rij: [], bezig: null, lokaal: { sleutel: null, flows: {} }, router: { op: 0, modellen: null, fout: null },
-    fs: {}, info: { op: 0, d: null }, comfyLaatst: 0, comfyFreeGedaan: true, timer: null };
+    fs: {}, info: { op: 0, d: null }, comfyLaatst: 0, comfyFreeGedaan: true, timer: null, histWis: [] };
 
   // ── opslag ──
   function mkdir(p) { fs.mkdirSync(p, { recursive: true, mode: 0o700 }); }
@@ -1410,7 +1436,8 @@ function maak(deps) {
     if (v.fout) return { fout: v.fout };
     let info;
     try { info = await objectInfo(); } catch (e) { return { fout: foutTekst(e.message) }; }
-    const toets = flowToets(v.api, info);
+    // wv2983: een fotoflow stuurt zijn resultaat over de websocket als ComfyUI SaveImageWebsocket kent (niets in de tijdelijke map)
+    const toets = flowToets(v.api, info, { ws: !!t.beeld && wsKan(info) });
     if (toets.fout) return { fout: 'knopentoets: ' + toets.fout };
     // wv2482 (diffreview MOET 2): een LoadImage alleen in een taak met een eigen foto (anders leest hij wat er toevallig staat)
     if (!t.beeld && Object.keys(toets.prompt).some(function (k) { return KNOPEN.laad_beeld.indexOf(toets.prompt[k].class_type) >= 0; }))
@@ -1440,7 +1467,7 @@ function maak(deps) {
       await wacht(T.wachtStap, ctl);
     }
     const clientId = 'socev-studio-' + t.id;
-    t.meting = { vram_vrij_voor_mib: voor.vram_vrij_mib, ram_vrij_voor_mib: voor.ram_vrij_mib };
+    t.meting = { vram_vrij_voor_mib: voor.vram_vrij_mib, ram_vrij_voor_mib: voor.ram_vrij_mib, uitvoer: toets.ws_knopen ? 'websocket' : 'preview' };
     if (voor.host_vrij_mib != null) t.meting.host_vrij_voor_mib = voor.host_vrij_mib;
     if (!f.vrij_na) return motorComfyIn(t, f, out, ctl, toets, clientId, v.voorbewerking);
     // wv2679: na een zware flow altijd de gewichten uit het geheugen (ook bij fout of stop)
@@ -1477,22 +1504,50 @@ function maak(deps) {
   async function comfyDraai(t, f, out, ctl, toets, clientId) {
     t.fase = 'indienen bij ComfyUI';
     let pid = null, klaarWs = false, wsFout = null, ws = null;
+    // wv2983: websocket-uitvoer. De socket hoort alleen bij onze clientId: ComfyUI stuurt 'executing' en de beeldberichten alleen
+    // naar de client van de taak. Een beeld telt alleen als het binnenkomt terwijl een van onze uitvoerknopen draait, als PNG
+    // (latente voorproefjes zijn JPEG); hooguit 8 beelden, elk ≤ uit_lees_max, samen ≤ 2 × uit_lees_max. Berichten die vóór het
+    // prompt_id binnenkomen (taak al klaar voor het antwoord op /prompt) worden per prompt_id onthouden.
+    const wsModus = Array.isArray(toets.ws_knopen) && toets.ws_knopen.length > 0;
+    const wsBeelden = [], perPid = {};
+    let wsKnoop = null, wsBytes = 0, wsDicht = false;
+    const eind = function (p) { return perPid[p] || (perPid[p] = { klaar: false, fout: null }); };
     try {
       ws = new WebSocket(COMFY.replace(/^http/, 'ws') + '/ws?clientId=' + clientId);
+      ws.binaryType = 'arraybuffer';
       ws.onmessage = function (ev) {
+        if (typeof ev.data !== 'string') {
+          if (!wsModus) return;
+          const b = Buffer.from(ev.data);
+          if (b.length < 9 || b.readUInt32BE(0) !== 1 || b.readUInt32BE(4) !== 2 || toets.ws_knopen.indexOf(String(wsKnoop)) < 0) return;
+          if (wsBeelden.length >= 8 || b.length - 8 > BEELD.uit_lees_max || wsBytes + b.length > 2 * BEELD.uit_lees_max) { wsFout = wsFout || 'ComfyUI stuurde te veel of te grote beelden'; return; }
+          wsBytes += b.length;
+          wsBeelden.push(b.subarray(8));
+          return;
+        }
         let m; try { m = JSON.parse(String(ev.data)); } catch (e) { return; }
         const d = m && m.data || {};
-        if (!pid || d.prompt_id !== pid) return;
+        if (m.type === 'executing') wsKnoop = d.node == null ? null : String(d.node);
+        if (d.prompt_id == null) return;
+        const e = eind(String(d.prompt_id));
+        if (m.type === 'executing' && d.node === null) e.klaar = true;
+        else if (m.type === 'execution_success') e.klaar = true;
+        else if (m.type === 'execution_error') e.fout = foutTekst(d.exception_message || 'fout in ComfyUI');
+        else if (m.type === 'execution_interrupted') e.fout = 'onderbroken in ComfyUI';
+        if (!pid || String(d.prompt_id) !== pid) return;
         if (m.type === 'progress' && d.max > 0) { t.procent = Math.max(0, Math.min(99, Math.round(100 * d.value / d.max))); t.fase = 'bezig in ComfyUI'; }
-        else if (m.type === 'executing' && d.node === null) klaarWs = true;
-        else if (m.type === 'execution_success') klaarWs = true;
-        else if (m.type === 'execution_error') wsFout = foutTekst(d.exception_message || 'fout in ComfyUI');
-        else if (m.type === 'execution_interrupted') wsFout = 'onderbroken in ComfyUI';
       };
       ws.onerror = function () {};
-    } catch (e) { ws = null; }   // zonder websocket: alleen /history pollen
+      ws.onclose = function () { wsDicht = true; };
+    } catch (e) { ws = null; }   // zonder websocket: alleen /history pollen (niet bij websocket-uitvoer, zie hieronder)
     const sluit = function () { try { if (ws) ws.close(); } catch (e) {} };
     try {
+      if (wsModus) {
+        // zonder open socket komt het resultaat nergens aan: dan niets indienen
+        const tot = klok() + 15000;
+        while (ws && ws.readyState === 0 && !wsDicht && klok() < tot && !ctl.gestopt) await wacht(25, ctl);
+        if (!ws || ws.readyState !== 1) return { fout: ctl.gestopt ? 'gestopt' : 'geen websocket-verbinding met ComfyUI; niets ingediend' };
+      }
       if (f.ram_mib_schatting > 0) {
         // wv2679 (Fable KAN 1): tussen meting en hier zitten voorbewerking en upload; de machine nog één keer meten (lokaal, gratis)
         const host = vrijGeheugenMib();
@@ -1502,6 +1557,7 @@ function maak(deps) {
       if (!p.ok || !p.j || !p.j.prompt_id) return { fout: 'ComfyUI weigerde de flow: ' + foutTekst(p.j && p.j.error ? (p.j.error.message || p.j.error.type) : 'HTTP ' + p.status) };
       pid = String(p.j.prompt_id);
       t.meting.prompt_id = pid;
+      const ev0 = eind(pid);
       t.gpu_start = klok();
       st.comfyLaatst = klok(); st.comfyFreeGedaan = false;   // vanaf hier ruimt de 10-min-ronde ook op als alles hieronder misgaat
       if (f.ram_mib_schatting > 0) {
@@ -1523,31 +1579,44 @@ function maak(deps) {
       let hist = null, snel = 0;
       for (;;) {
         // na "klaar" van de websocket hooguit 20 snelle peilingen, daarna weer het gewone tempo (Fable wv707 #7)
-        await wacht(klaarWs && snel++ < 20 ? 50 : T.poll, ctl);
+        await wacht((klaarWs || ev0.klaar) && snel++ < 20 ? 50 : T.poll, ctl);
         st.comfyLaatst = klok();
         if (ctl.gestopt || klok() > grens) {
           await comfyEigenStop(pid);
           return ctl.gestopt ? { fout: 'gestopt' } : { fout: 'ComfyUI deed er langer over dan ' + f.max_seconden + ' s; eigen taak gestopt' };
         }
-        if (wsFout) return { fout: wsFout };
+        klaarWs = ev0.klaar;
+        if (ev0.fout) wsFout = ev0.fout;
+        // wv2983 (Codex MOET 2): bij een fout van onze kant de eigen taak in ComfyUI stoppen (comfyEigenStop doet niets als hij al klaar is)
+        if (wsFout) { await comfyEigenStop(pid); return { fout: wsFout }; }
+        if (wsModus) {
+          // de beeldberichten komen op de socket vóór execution_success; /history alleen voor een foutmelding
+          if (klaarWs) break;
+          if (wsDicht) { await comfyEigenStop(pid); return { fout: 'de verbinding met ComfyUI viel weg; het resultaat kwam niet aan' }; }
+        }
         try { const h = await (await comfyGet('/history/' + encodeURIComponent(pid))).json(); hist = h && h[pid]; } catch (e) { if (e.uit) return { fout: e.message }; hist = null; }
-        if (hist && hist.status && hist.status.status_str === 'error') return { fout: 'ComfyUI meldt een fout in de flow' };
-        if (hist && hist.outputs && (hist.status ? hist.status.completed !== false : true) && Object.keys(hist.outputs).length) break;
+        if (hist && hist.status && hist.status.status_str === 'error') { return { fout: 'ComfyUI meldt een fout in de flow' }; }
+        if (wsModus) continue;
+        if (hist && hist.outputs && (hist.status ? hist.status.completed !== false : true) && Object.keys(hist.outputs).length) { break; }
       }
       t.gpu_s = Math.round((klok() - t.gpu_start) / 1000);
-      // uitvoer via /view (type temp: Preview); niets blijft in ComfyUI's uitvoermap
+      // uitvoer via /view (type temp: Preview); niets blijft in ComfyUI's uitvoermap. wv2983: bij websocket-uitvoer de ontvangen beelden
       let i = 0, uitFout = null;
-      for (const nid of Object.keys(hist.outputs)) {
-        const o = hist.outputs[nid];
-        const lijst = [].concat(o.images || [], o.audio || []);
+      const bronnen = wsModus ? [{ ws: true }] : Object.keys(hist.outputs).map(function (nid) { return hist.outputs[nid]; });
+      for (const o of bronnen) {
+        const lijst = o.ws ? wsBeelden : [].concat(o.images || [], o.audio || []);
         for (const b of lijst) {
           if (i >= 8) break;
-          if (!b || typeof b.filename !== 'string' || !/^[A-Za-z0-9_.\- ()]{1,200}$/.test(b.filename)) continue;
-          const q = 'filename=' + encodeURIComponent(b.filename) + '&subfolder=' + encodeURIComponent(String(b.subfolder || '')) + '&type=' + encodeURIComponent(String(b.type || 'temp'));
-          const rr = await comfyGet('/view?' + q, 60000);
-          const buf = await leesMax(rr, t.beeld ? BEELD.uit_lees_max : GRENS.bestand_max);
-          if (!buf) continue;
-          const ext = ((/\.([a-z0-9]{2,5})$/i.exec(b.filename) || [])[1] || 'png').toLowerCase();
+          let buf, ext;
+          if (o.ws) { buf = b; ext = 'png'; }
+          else {
+            if (!b || typeof b.filename !== 'string' || !/^[A-Za-z0-9_.\- ()]{1,200}$/.test(b.filename)) continue;
+            const q = 'filename=' + encodeURIComponent(b.filename) + '&subfolder=' + encodeURIComponent(String(b.subfolder || '')) + '&type=' + encodeURIComponent(String(b.type || 'temp'));
+            const rr = await comfyGet('/view?' + q, 60000);
+            buf = await leesMax(rr, t.beeld ? BEELD.uit_lees_max : GRENS.bestand_max);
+            if (!buf) continue;
+            ext = ((/\.([a-z0-9]{2,5})$/i.exec(b.filename) || [])[1] || 'png').toLowerCase();
+          }
           if (t.beeld && !o.audio) {
             // wv2482: resultaat toetsen (≤ 16 MP, leesbaar) en boven 10 MB als JPEG 92; naam na-<n> naast voor.<ext>
             const soort = beeldSoort(buf);
@@ -1569,7 +1638,43 @@ function maak(deps) {
       if (!i) return { fout: uitFout || 'ComfyUI gaf geen beeld of geluid terug' };
       try { const na = await comfyStats(); t.meting.vram_vrij_na_mib = na.vram_vrij_mib; t.meting.ram_vrij_na_mib = na.ram_vrij_mib; } catch (e) {}
       return { ok: true };
-    } finally { sluit(); }
+    } finally {
+      sluit();
+      wsBeelden.length = 0;
+      // wv2983: onze regel uit ComfyUI's geschiedenis (daar staat de opdrachttekst en bij Preview de verwijzing naar het resultaat).
+      // Nu wissen en natellen; staat hij er nog (stop of time-out: de regel komt pas ná afloop), dan wist vrijRonde hem later.
+      if (pid) await histWis(pid);
+    }
+  }
+  // Eerst de rij: zolang onze prompt daar staat, is zijn regel er nog niet (ComfyUI schrijft hem bij het afronden, onder dezelfde slot
+  // als het uit de rij halen). Pas als hij niet meer in de rij staat, wissen en natellen.
+  async function histWisNu(pid) {
+    try {
+      const q = await comfyRij();
+      if (q.lopend.concat(q.wacht).some(function (x) { return Array.isArray(x) && String(x[1]) === pid; })) return false;
+      const r = await comfyPost('/history', { delete: [pid] });
+      if (!r.ok) return false;
+      const h = await (await comfyGet('/history/' + encodeURIComponent(pid))).json();
+      return !h || !Object.hasOwn(h, pid);
+    } catch (e) { return false; }
+  }
+  async function histWis(pid) {
+    const weg = await histWisNu(pid);
+    if (!weg && !st.histWis.some(function (x) { return x.pid === pid; })) st.histWis.push({ pid: pid, sinds: klok() });
+    if (st.histWis.length > 50) st.histWis.splice(0, st.histWis.length - 50);
+    return weg;
+  }
+  // vrijRonde: regels die bij het afronden nog niet weg konden. Alleen wissen als de taak niet meer in de rij staat (een lopende taak
+  // komt pas ná afloop in de geschiedenis); na 2 uur opgeven met een logregel.
+  async function histRonde() {
+    if (!st.histWis.length || st.bezig) return;
+    for (const x of st.histWis.slice()) {
+      const weg = await histWisNu(x.pid);
+      if (weg || klok() - x.sinds > 2 * 3600 * 1000) {
+        st.histWis = st.histWis.filter(function (y) { return y !== x; });
+        if (!weg) log('studio comfy-geschiedenis: een regel bleef 2 uur staan; opgegeven');
+      }
+    }
   }
   // Onderbreken alleen als ComFyUI NU onze eigen prompt draait; staat hij nog in de rij, dan alleen die uit de rij halen (Fable M3).
   async function comfyEigenStop(pid) {
@@ -1584,6 +1689,7 @@ function maak(deps) {
   async function vrijRonde() {
     // wv2482: staat er nog een foto in ComfyUI (1×1 mislukt of pod herstart midden in een taak), dan eerst die leegmaken
     if (!st.bezig && fs.existsSync(VUIL)) { if (await comfyLeeg()) { zetVuil(false); log('studio comfy-invoer alsnog leeggemaakt'); } }
+    await histRonde().catch(function () {});   // wv2983
     if (st.comfyFreeGedaan || st.bezig || klok() - st.comfyLaatst < COMFY_FREE_NA_MS) return;
     try {
       const q = await comfyRij();

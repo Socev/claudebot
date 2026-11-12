@@ -389,6 +389,12 @@ jobs:
         run: |
           python3 -c "import PIL" 2>/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil)
           bash test/studio-beeld.sh
+      # wv2983: Studio-fotoflows via SaveImageWebsocket (niets in ComfyUI's tijdelijke map, eigen /history-regel gewist, ook na stop)
+      - name: "studio-ws (wv2983, OVIS Imagine fase 0)"
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -c "import PIL" 2>/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil)
+          bash test/studio-ws.sh
       # wv2614: Studio × Immich (foto uit Immich als bron, Zet in Immich: nieuwe foto + stapel + albums, origineel onveranderd)
       - name: "studio-immich (wv2614, fotoherstel fase 2)"
         if: ${{ !cancelled() }}
