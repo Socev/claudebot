@@ -143,6 +143,104 @@ function leesIcsCsv(bytes) {
 }
 
 /*
+ * wv2958 (David 12-11-2026): het maandelijkse ICS-rekeningoverzicht als PDF. De tekst komt van de beller (pdftotext -layout, via io in
+ * server.js of het machinekamer-gereedschap); deze functie is puur. Opbouw (gemeten op een echt overzicht, Mastercard Business, 1 blad):
+ * kop "rekeningoverzicht" + "International Card Services", een regel "Datum / ICS-klantnummer / Volgnummer / Bladnummer" met eronder
+ * "03 november 2026   770.1580.0012   11   1 van 1", een regel "Vorig openstaand saldo / Totaal credit / Totaal debet / Nieuw openstaand
+ * saldo" met eronder vier eurobedragen (saldi met debet/credit), dan per kaart "Card-nummer: ************1234" en de regels
+ * "05 okt   06 okt   NAAM   PLAATS   LND   9,00 USD   8,26 debet" (vreemde valuta optioneel, eronder "Wisselkoers USD 1.08959").
+ * Het overzicht is de maand van de overzichtsdatum (zoals "Maand/jaar rekeningoverzicht" in de CSV); het jaar van een regel volgt uit die
+ * datum (een maand na de overzichtsmaand hoort bij het jaar ervoor). Betalingen (incasso, her-incasso, geweigerde incasso, overboeking)
+ * zijn soort 'betaling' zonder kaart, al het andere 'transactie'; autorisaties staan niet op een overzicht.
+ * Controle, op de cent: som debetregels = Totaal debet, som creditregels = Totaal credit, en vorig + debet − credit = nieuw saldo. Klopt één
+ * daarvan niet, of staat er een onleesbare of ongemaskeerde kaartregel, dan weigert het het hele overzicht (KaartFout): niets half.
+ * → zelfde vorm als leesIcsCsv, plus { formaat: 'ics_pdf', overzicht, klantnummer, totalen }.
+ */
+const MAAND_VOL = { januari: 1, februari: 2, maart: 3, april: 4, mei: 5, juni: 6, juli: 7, augustus: 8, september: 9, oktober: 10, november: 11, december: 12 };
+const PDF_BEDRAG = '\\d{1,3}(?:\\.\\d{3})*,\\d{2}';
+const PDF_REGEL = new RegExp('^\\s*(\\d{1,2}) ([a-z]{3})\\s+(\\d{1,2}) ([a-z]{3})\\s+(\\S.*?)\\s+(' + PDF_BEDRAG + ') (debet|credit)\\s*$', 'i');
+const PDF_VREEMD = new RegExp('^(.*?)\\s{2,}(' + PDF_BEDRAG + ') ([A-Z]{3})$');
+const BETAAL_RE = /INCASSO|VORIG SALDO|^(?:UW )?BETALING|ONTVANGEN BETALING|OVERBOEKING/;
+// Kenmerken van een ICS-rekeningoverzicht (alle vijf): wie het niet zeker is, gaat de oude weg (de stukken).
+function isIcsPdfTekst(tekst) {
+  const t = String(tekst || '');
+  return /International Card Services/.test(t) && /^\s*rekeningoverzicht\s*$/m.test(t) && /ICS-klantnummer/.test(t) &&
+    /Nieuw openstaand saldo/.test(t) && /^\s*Card-nummer:\s*\*+\d{4}\s*$/m.test(t);
+}
+function leesIcsPdfTekst(tekst) {
+  const t = String(tekst || '').replace(/\r/g, '');
+  if (!isIcsPdfTekst(t)) throw new KaartFout('formaat', 'geen ICS-rekeningoverzicht (kenmerken ontbreken)');
+  const lijnen = t.split('\n');
+  const na = (re) => { const i = lijnen.findIndex((l) => re.test(l)); return i >= 0 ? (lijnen.slice(i + 1).find((l) => l.trim() !== '') || '') : null; };
+  // overzichtsdatum en klantnummer
+  const kop = na(/^\s*Datum\s+ICS-klantnummer\s+Volgnummer\s+Bladnummer\s*$/);
+  const mk = kop && /^\s*(\d{1,2}) ([a-z]+) (\d{4})\s+(\d{3}\.\d{4}\.\d{4})\s+\d+\s+\d+ van \d+\s*$/.exec(kop);
+  if (!mk || !MAAND_VOL[mk[2]]) throw new KaartFout('formaat', 'overzichtsdatum of klantnummer onleesbaar');
+  const datum = mk[3] + '-' + String(MAAND_VOL[mk[2]]).padStart(2, '0') + '-' + String(mk[1]).padStart(2, '0');
+  if (!K.isIsoDatum(datum)) throw new KaartFout('formaat', 'overzichtsdatum onleesbaar');
+  const klantnummer = mk[4].replace(/\./g, '');
+  // totalen: vorig saldo, totaal credit, totaal debet, nieuw saldo (saldo debet = te betalen, +)
+  const tot = na(/^\s*Vorig openstaand saldo\s+Totaal credit\s+Totaal debet\s+Nieuw openstaand saldo\s*$/);
+  const bedragen = [];
+  if (tot) { const re = new RegExp('€\\s*(' + PDF_BEDRAG + ')(?:\\s+(debet|credit)\\b)?', 'g'); let m; while ((m = re.exec(tot))) bedragen.push(m); }
+  if (bedragen.length !== 4 || !bedragen[0][2] || !bedragen[3][2] || bedragen[1][2] || bedragen[2][2]) throw new KaartFout('formaat', 'de totalen van het overzicht zijn onleesbaar');
+  const c = (m, teken) => { const v = bedragNl(m[1]); return teken && m[2] === 'credit' ? -v : v; };
+  const totalen = { vorig_saldo_centen: c(bedragen[0], true), credit_centen: c(bedragen[1]), debet_centen: c(bedragen[2]), nieuw_saldo_centen: c(bedragen[3], true) };
+  const jaar = Number(datum.slice(0, 4)), maand = Number(datum.slice(5, 7)), overzicht = datum.slice(0, 7);
+  const dagIso = (d, mnd, nr) => {
+    const m = MAANDEN[String(mnd).toLowerCase()];
+    if (!m) throw new KaartFout('regel', 'regel ' + nr + ': maand onleesbaar', { regel: nr });
+    const iso = (m > maand ? jaar - 1 : jaar) + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    if (!K.isIsoDatum(iso) || iso > datum || K.dagenTussen(iso, datum) > 100) throw new KaartFout('regel', 'regel ' + nr + ': datum onleesbaar of buiten het overzicht', { regel: nr });
+    return iso;
+  };
+  const uit = [];
+  let kaart = null, vorigeVreemd = false;
+  for (let i = 0; i < lijnen.length; i++) {
+    const l = lijnen[i], nr = i + 1;
+    const ck = /^\s*Card-nummer:\s*(.*?)\s*$/.exec(l);
+    if (ck) {
+      if (!/^\*{4,15}\d{4}$/.test(ck[1])) throw new KaartFout('kaartnummer', 'regel ' + nr + ': kaartnummer niet gemaskeerd', { regel: nr });
+      kaart = ck[1].slice(-4); continue;
+    }
+    if (/^\s*Wisselkoers [A-Z]{3}\s+\d+[.,]\d+\s*$/.test(l)) {
+      if (!vorigeVreemd) throw new KaartFout('regel', 'regel ' + nr + ': wisselkoers zonder regel in vreemde valuta', { regel: nr });
+      vorigeVreemd = false; continue;
+    }
+    const m = PDF_REGEL.exec(l);
+    if (!m) { if (/^\s*\d{1,2} [a-z]{3}\s+\d{1,2} [a-z]{3}\s/i.test(l)) throw new KaartFout('regel', 'regel ' + nr + ': onleesbaar', { regel: nr }); continue; }
+    if (!kaart) throw new KaartFout('regel', 'regel ' + nr + ': regel vóór het kaartnummer', { regel: nr });
+    let midden = m[5].trim(), valuta = 'EUR', orig = null;
+    const v = PDF_VREEMD.exec(midden);
+    if (v) { midden = v[1].trim(); valuta = v[3]; orig = bedragNl(v[2]); }
+    const delen = midden.split(/\s{2,}/).map((x) => x.trim()).filter(Boolean);
+    if (delen.some(bevatKaartnummer) || bevatKaartnummer(l)) throw new KaartFout('kaartnummer', 'regel ' + nr + ': een kaartnummer (13–19 cijfers, Luhn): overzicht geweigerd', { regel: nr });
+    const land = delen.length >= 3 && /^[A-Z]{3}$/.test(delen[delen.length - 1]) ? delen[delen.length - 1] : null;
+    const oms = K.schoon(delen.join(' ')).replace(/\s+/g, ' ').trim().slice(0, 200);
+    if (!oms) throw new KaartFout('regel', 'regel ' + nr + ': omschrijving leeg', { regel: nr });
+    const bedrag = bedragNl(m[6]) * (m[7].toLowerCase() === 'credit' ? -1 : 1);
+    if (valuta === 'EUR') orig = bedrag;
+    else if (m[7].toLowerCase() === 'credit') orig = -orig;
+    const soort = BETAAL_RE.test(oms) ? 'betaling' : 'transactie';
+    const td = dagIso(m[1], m[2], nr), bd = dagIso(m[3], m[4], nr);
+    uit.push({ soort, transactiedatum: td, boekdatum: bd, omschrijving: oms, bedrag_centen: bedrag, valuta_orig: valuta, bedrag_orig_centen: orig,
+      merchant_categorie: null, mcc: null, land, overzicht, laatste4: soort === 'betaling' ? null : kaart, ruw: oms });
+    vorigeVreemd = valuta !== 'EUR';
+  }
+  if (!uit.length) throw new KaartFout('leeg', 'geen regels op het overzicht');
+  const debet = uit.filter((r) => r.bedrag_centen > 0).reduce((s, r) => s + r.bedrag_centen, 0);
+  const credit = -uit.filter((r) => r.bedrag_centen < 0).reduce((s, r) => s + r.bedrag_centen, 0);
+  if (debet !== totalen.debet_centen || credit !== totalen.credit_centen || totalen.vorig_saldo_centen + debet - credit !== totalen.nieuw_saldo_centen) {
+    throw new KaartFout('totaal', 'de regels sluiten niet op de totalen van het overzicht (debet ' + (debet / 100).toFixed(2) + ' tegen ' + (totalen.debet_centen / 100).toFixed(2) +
+      ', credit ' + (credit / 100).toFixed(2) + ' tegen ' + (totalen.credit_centen / 100).toFixed(2) + ')', { totalen });
+  }
+  const datums = uit.map((r) => r.transactiedatum).sort();
+  const aantallen = { transactie: 0, betaling: 0, autorisatie: 0 };
+  for (const r of uit) aantallen[r.soort]++;
+  return { formaat: 'ics_pdf', regels: uit, periode: { van: datums[0], tot: datums[datums.length - 1] }, aantallen, overzicht, overzicht_datum: datum, klantnummer, totalen };
+}
+
+/*
  * Sleutel per regel: sha256 van de kaart, alle bewaarde velden en het volgnummer onder precies gelijke regels in dit bestand (twee keer
  * € 5 bij dezelfde winkel op dezelfde dag zijn twee regels). Een later overzicht dat dezelfde dagen bevat, geeft dezelfde sleutels zolang
  * het alle regels van die dag bevat (ICS exporteert per hele dag).
@@ -320,21 +418,37 @@ function inlezen(fdb, kaartWie, bytes, opties) {
   const o = opties || {};
   const nu = Number.isFinite(o.nu) ? o.nu : Date.now();
   const kaart = kaartVan(fdb, kaartWie);
-  const g = leesIcsCsv(bytes);
+  const pdf = o.pdfTekst != null;
+  const g = pdf ? leesIcsPdfTekst(o.pdfTekst) : leesIcsCsv(bytes);
+  const formaat = pdf ? 'ics_pdf' : 'ics_csv';
+  if (pdf && g.klantnummer !== String(kaart.klantnummer)) throw new KaartFout('andere_kaart', 'het overzicht hoort bij een ander ICS-klantnummer dan de kaart …' + kaart.laatste4 + ': geweigerd');
   const anders = g.regels.filter((r) => r.laatste4 && r.laatste4 !== kaart.laatste4).length;
   if (anders) throw new KaartFout('andere_kaart', anders + ' regel(s) van een andere kaart dan …' + kaart.laatste4 + ': bestand geweigerd');
   const sha = D.sha256(bytes);
   const regels = sleutels(kaart.id, g.regels, sha);
   const bekend = fdb.db.prepare('SELECT 1 FROM kaart_regel WHERE sleutel = ?');
-  const nieuw = regels.filter((r) => !bekend.get(r.sleutel));
-  const uit = { droog: !!o.droog, periode: g.periode, aantallen: g.aantallen, regels: regels.length, nieuw: nieuw.length, al_bekend_regels: regels.length - nieuw.length };
+  // wv2958: CSV en PDF van dezelfde periode tellen niet dubbel. De sleutels verschillen (de PDF kent geen categorie, en de omschrijving kan
+  // anders gespatieerd zijn); een regel zonder bekende sleutel geldt daarom ook als binnen als er één op één een regel uit een bestand van
+  // het andere formaat bestaat met dezelfde soort, transactiedatum, boekdatum, bedrag en overzicht (autorisaties nooit).
+  const ander = fdb.db.prepare("SELECT r.id FROM kaart_regel r JOIN kaart_bestand b ON b.id = r.bestand WHERE r.kaart = ? AND b.formaat <> ? AND r.soort = ? AND r.transactiedatum = ? AND coalesce(r.boekdatum, '') = ? AND r.bedrag_centen = ? AND r.overzicht IS ? ORDER BY r.id");
+  const geclaimd = new Set();
+  const nieuw = regels.filter((r) => {
+    if (bekend.get(r.sleutel)) return false;
+    if (r.soort === 'autorisatie') return true;
+    const tegen = ander.all(kaart.id, formaat, r.soort, r.transactiedatum, r.boekdatum || '', r.bedrag_centen, r.overzicht).find((x) => !geclaimd.has(x.id));
+    if (!tegen) return true;
+    geclaimd.add(tegen.id);
+    return false;
+  });
+  const uit = { droog: !!o.droog, formaat, periode: g.periode, aantallen: g.aantallen, regels: regels.length, nieuw: nieuw.length, al_bekend_regels: regels.length - nieuw.length };
+  if (pdf) Object.assign(uit, { overzicht: g.overzicht, totalen: g.totalen });
   const best = fdb.db.prepare('SELECT id FROM kaart_bestand WHERE sha256 = ?').get(sha);
   if (best) return Object.assign(uit, { al_bekend: true, bestand: best.id, nieuw: 0, al_bekend_regels: regels.length });
   if (o.droog) return Object.assign(uit, { al_bekend: false });
   const bron = D.bronSchrijf(fdb, bytes);
   const wanneer = nuIso(nu), id = D.nieuwId();
   D.transactie(fdb, () => {
-    D.voegToe(fdb, 'kaart_bestand', { id, kaart: kaart.id, sha256: sha, formaat: 'ics_csv', naam: o.naam ? String(o.naam).slice(0, 255) : null,
+    D.voegToe(fdb, 'kaart_bestand', { id, kaart: kaart.id, sha256: sha, formaat, naam: o.naam ? String(o.naam).slice(0, 255) : null,
       periode_van: g.periode.van, periode_tot: g.periode.tot, aantal: regels.length, nieuw: nieuw.length, bron_bewaard: bron && bron.sha256 === sha ? 1 : 0,
       herkomst: o.herkomst ? String(o.herkomst).slice(0, 300) : null, geupload_door: o.wie, geupload_op: wanneer });
     for (const r of nieuw) {
@@ -348,6 +462,36 @@ function inlezen(fdb, kaartWie, bytes, opties) {
   });
   const koppeling = koppel(fdb, kaart.id, { nu, wie: o.wie });
   return Object.assign(uit, { al_bekend: false, bestand: id, koppeling });
+}
+
+/*
+ * wv2958: een PDF die al als stuk binnenkwam (document, bv. een upload van vóór de herkenning) alsnog als ICS-rekeningoverzicht inlezen,
+ * met dezelfde inleescode als de upload (inlezen met pdfTekst). Daarna: stond het document nog te_lezen zonder factuur, dan te_lezen 0 met
+ * een auditrij (de koerier leest het dan niet meer als factuur). Is er al een factuur van gemaakt, dan blijft die staan (David wijst hem af in
+ * Beoordelen); dat staat in het antwoord. tekst = pdftotext -layout van het stuk (van de beller). → inlezen-antwoord + { document }.
+ */
+function documentNaarKaart(fdb, docId, tekst, opties) {
+  const o = opties || {};
+  const nu = Number.isFinite(o.nu) ? o.nu : Date.now();
+  const doc = fdb.db.prepare('SELECT id, sha256, naam, soort, te_lezen FROM document WHERE id = ?').get(String(docId || ''));
+  if (!doc) throw new KaartFout('document', 'document niet gevonden');
+  if (doc.soort !== 'pdf') throw new KaartFout('document', 'document is geen PDF');
+  const bytes = D.stukLees(fdb, doc.sha256);
+  const g = leesIcsPdfTekst(tekst);
+  const l4 = (g.regels.find((r) => r.laatste4) || {}).laatste4 || null;
+  const facturen = fdb.db.prepare('SELECT count(*) AS n FROM factuur WHERE document = ? OR ubl_document = ?').get(doc.id, doc.id).n;
+  const u = inlezen(fdb, l4, bytes, { droog: o.droog, wie: o.wie, herkomst: 'document ' + doc.id + (doc.naam ? ' (' + String(doc.naam).slice(0, 200) + ')' : ''), naam: doc.naam, nu, pdfTekst: tekst });
+  let uitStapel = false;
+  if (!o.droog && doc.te_lezen && !facturen) {
+    D.transactie(fdb, () => {
+      if (fdb.db.prepare('UPDATE document SET te_lezen = 0 WHERE id = ? AND te_lezen = 1').run(doc.id).changes === 1) {
+        D.audit(fdb, { wie: o.wie, wat: 'document_creditcard', object_soort: 'document', object_id: doc.id, voor: { te_lezen: true },
+          na: { te_lezen: false, kaart_bestand: u.bestand || null, overzicht: g.overzicht }, wanneer: nuIso(nu) });
+        uitStapel = true;
+      }
+    });
+  }
+  return Object.assign(u, { document: { id: doc.id, te_lezen_was: !!doc.te_lezen, uit_stapel: uitStapel, facturen } });
 }
 
 /*
@@ -509,6 +653,6 @@ function lees(fdb, d) {
 }
 
 module.exports = {
-  KaartFout, ICS_KOPPEN, leesIcsCsv, sleutels, handelaar, zoekLeverancier, zoekFactuur, incassoOverzicht, isKaartBankregel, aansluiting, volgendeMaand, vorigeMaand,
-  kaartVan, kaartZet, inlezen, koppel, aansluitingDb, betaalwijze, lees,
+  KaartFout, ICS_KOPPEN, leesIcsCsv, isIcsPdfTekst, leesIcsPdfTekst, sleutels, handelaar, zoekLeverancier, zoekFactuur, incassoOverzicht, isKaartBankregel, aansluiting, volgendeMaand, vorigeMaand,
+  kaartVan, kaartZet, inlezen, documentNaarKaart, koppel, aansluitingDb, betaalwijze, lees,
 };

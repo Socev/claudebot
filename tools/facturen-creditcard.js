@@ -4,15 +4,16 @@
  * migratie 13). Draait op de pod (Olares, primaire kant) als 'claude', tegen /opt/data/facturen (of FACTUREN_DIR), vanuit de machinekamer.
  *
  *   node tools/facturen-creditcard.js kaart-zet --klantnummer <cijfers> --laatste4 <4 cijfers> --rekening <laatste 4 van het IBAN> [--naam …]
- *   node tools/facturen-creditcard.js inlezen [--droog] [--kaart <laatste 4>] [--herkomst "<tekst>"] <ics.csv>
+ *   node tools/facturen-creditcard.js inlezen [--droog] [--kaart <laatste 4>] [--herkomst "<tekst>"] <ics.csv | rekeningoverzicht.pdf>
+ *   node tools/facturen-creditcard.js document [--droog] <document-id>   een al geüploade PDF alsnog als ICS-rekeningoverzicht (wv2958)
  *   node tools/facturen-creditcard.js koppel [--kaart …]          bankincasso's, leveranciers en facturen (opnieuw) koppelen
  *   node tools/facturen-creditcard.js stand [--kaart …]           aansluiting per rekeningoverzicht (transacties ↔ incasso op de bank)
  *   node tools/facturen-creditcard.js betaalwijze [--zet [--leverancier <id>[,<id>…]]] [--kaart …]   per leverancier: creditcard (standaard
  *                'betaald'), wisselend, eenmalig of onzeker; --zet legt 'betaald' vast (met --leverancier alleen die, ook eenmalig)
  *   node tools/facturen-creditcard.js regels [--maand JJJJ-MM] [--tekst …] [--kaart …]
  *
- * Een PDF-overzicht van ICS: eerst overzetten naar dezelfde CSV-kolommen (de lezer weigert alles wat afwijkt), dan inlezen; regels die al
- * binnen zijn (zelfde sleutel) worden overgeslagen. Weigert als de database een ander schema heeft dan deze code (eerst uitrollen).
+ * Een PDF-rekeningoverzicht van ICS (wv2958) gaat via pdftotext -layout door dezelfde inleescode als in Uploads: het sluit op de cent op de
+ * totalen of het wordt geweigerd; regels die al binnen zijn (zelfde sleutel, of dezelfde regel uit het andere formaat) worden overgeslagen. Weigert als de database een ander schema heeft dan deze code (eerst uitrollen).
  */
 'use strict';
 const fs = require('fs');
@@ -34,6 +35,13 @@ function openGoed(schrijven) {
   }
   return D.open(DIR);
 }
+// pdftotext -layout (vast pad, PDF op stdin, lege omgeving); de tekst blijft in het geheugen
+function pdfNaarTekst(bytes) {
+  const x = require('child_process').spawnSync(process.env.PDFTOTEXT || '/usr/bin/pdftotext', ['-q', '-layout', '-enc', 'UTF-8', '-', '-'],
+    { input: bytes, timeout: 30000, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8', env: {}, stdio: ['pipe', 'pipe', 'ignore'] });
+  if (x.error || x.status !== 0) throw new Error('pdftotext kon de PDF niet lezen');
+  return String(x.stdout || '');
+}
 const euro = (c) => c == null ? '—' : (c < 0 ? '-' : '') + '€ ' + (Math.abs(c) / 100).toFixed(2).replace('.', ',');
 
 function hoofd(argv) {
@@ -47,14 +55,25 @@ function hoofd(argv) {
     const fdb = openGoed(true);
     try { return C.kaartZet(fdb, o); } finally { D.sluit(fdb); }
   }
+  if (cmd === 'document') {
+    const droog = vlag('--droog');
+    if (argv.length !== 1) throw new Error('document: precies één document-id');
+    const fdb = openGoed(!droog);
+    try {
+      const doc = fdb.db.prepare("SELECT sha256 FROM document WHERE id = ? AND soort = 'pdf'").get(argv[0]);
+      if (!doc) throw new Error('document: geen PDF-document met dit id');
+      return C.documentNaarKaart(fdb, argv[0], pdfNaarTekst(D.stukLees(fdb, doc.sha256)), { droog, wie: WIE, nu: Date.now() });
+    } finally { D.sluit(fdb); }
+  }
   if (cmd === 'inlezen') {
     const droog = vlag('--droog'), herkomst = waarde('--herkomst');
     if (argv.length !== 1) throw new Error('inlezen: precies één bestand');
     const p = argv[0];
     const bytes = fs.readFileSync(p);
+    const pdfTekst = bytes.subarray(0, 5).toString('latin1') === '%PDF-' ? pdfNaarTekst(bytes) : undefined;
     const fdb = openGoed(!droog);
     try {
-      const u = C.inlezen(fdb, kaartArg, bytes, { droog, wie: WIE, herkomst: herkomst || ('machinekamer: ' + path.basename(p)), naam: path.basename(p), nu: Date.now() });
+      const u = C.inlezen(fdb, kaartArg, bytes, { droog, wie: WIE, herkomst: herkomst || ('machinekamer: ' + path.basename(p)), naam: path.basename(p), nu: Date.now(), pdfTekst });
       return Object.assign({ bestand_naam: path.basename(p) }, u);
     } finally { D.sluit(fdb); }
   }

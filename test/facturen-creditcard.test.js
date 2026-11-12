@@ -281,3 +281,168 @@ test('CLI: stand en inlezen op een map; weigert een database met een ouder schem
   const o = cli(['koppel']);
   assert.notEqual(o.status, 0); assert.match(o.stderr, /oudere release/);
 });
+
+// ───────────────────────────── wv2958: het rekeningoverzicht als PDF ─────────────────────────────
+// Verzonnen overzicht met dezelfde opbouw als een echt ICS-rekeningoverzicht (pdftotext -layout): klantnummer 999.9000.0001, kaart …0000,
+// overzicht van 03-04-2026 (overzicht 2026-04) met de regels van BASIS die op overzicht 202604 staan plus één nieuwe na de CSV.
+const sp = (n) => ' '.repeat(n);
+const pdfRegel = (td, bd, naam, plaats, land, vreemd, eur, dc) => td + sp(3) + bd + sp(9) + naam.padEnd(37) + (plaats || '').padEnd(25) + (land || '').padEnd(16) +
+  (vreemd ? vreemd.padStart(9) : sp(9)) + sp(10) + eur.padStart(10) + ' ' + dc;
+function icsTekst(o) {
+  o = o || {};
+  const regels = o.regels || [
+    pdfRegel('08 mrt', '08 mrt', 'GEINCASSEERD VORIG SALDO', '', '', '', '73,00', 'credit'),
+    pdfRegel('08 mrt', '08 mrt', 'GEWEIGERDE INCASSO', '', '', '', '73,00', 'debet'),
+    pdfRegel('14 mrt', '14 mrt', 'HER-INCASSO', '', '', '', '73,00', 'credit'),
+    pdfRegel('15 mrt', '16 mrt', 'WOLKDIENST', 'SAN FRANCISCO', 'USA', '22,00 USD', '20,00', 'debet'),
+    sp(24) + 'Wisselkoers USD' + sp(22) + '1.10000',
+    pdfRegel('01 apr', '02 apr', 'PROEFBUREAU* ABONNEMENT', 'DUBLIN 4', 'IRL', '', '1.210,00', 'debet'),
+  ];
+  return [
+    sp(140) + 'rekeningoverzicht', sp(96) + 'International Card Services BV', 'Proefpraktijk B.V.' + sp(78) + 'Postbus 1', '',
+    'Mastercard Business', '',
+    'Datum' + sp(28) + 'ICS-klantnummer' + sp(19) + 'Volgnummer' + sp(22) + 'Bladnummer',
+    (o.datum || '03 april 2026') + sp(17) + (o.klant || '999.9000.0001') + sp(19) + '4' + sp(30) + '1 van 1',
+    'Vorig openstaand saldo' + sp(11) + 'Totaal credit' + sp(19) + 'Totaal debet' + sp(20) + 'Nieuw openstaand saldo',
+    '€ ' + (o.vorig || '73,00') + sp(13) + 'debet' + sp(7) + '€ ' + (o.credit || '146,00') + sp(24) + '€ ' + (o.debet || '1.303,00') + sp(22) + '€ ' + (o.nieuw || '1.230,00') + sp(12) + 'debet',
+    '', '', 'Datum      Datum         Omschrijving' + sp(59) + 'Bedrag in             Bedrag in', 'transactie boeking' + sp(78) + 'vreemde valuta        Euro', '', '',
+    'Card-nummer: ' + (o.kaart || '************0000'), 'Card-houder: P. PROEF',
+  ].concat(regels, ['', '', 'Het te betalen bedrag van € 1.230,00 wordt omstreeks 9 april 2026 van uw bankrekening geïncasseerd.']).join('\n') + '\n';
+}
+// Een echte (minimale) PDF met die tekst: Courier, één regel per Tj, WinAnsi (€ = 0x80); /Author zoals bij ICS.
+function icsPdf(tekst) {
+  const lijnen = tekst.split('\n');
+  const esc = (s) => s.replace(/[\\()]/g, (c) => '\\' + c).replace(/€/g, '\\200').replace(/ï/g, '\\357');
+  const stroom = lijnen.map((l, i) => 'BT /F1 5 Tf 10 ' + (820 - i * 7) + ' Td (' + esc(l) + ') Tj ET').join('\n');
+  const obj = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+    '<< /Length ' + Buffer.byteLength(stroom, 'latin1') + ' >>\nstream\n' + stroom + '\nendstream',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>',
+    '<< /Author (International Card Services) /Title (W03042026proef) >>'];
+  let uit = '%PDF-1.4\n'; const pos = [];
+  obj.forEach((o, i) => { pos.push(Buffer.byteLength(uit, 'latin1')); uit += (i + 1) + ' 0 obj\n' + o + '\nendobj\n'; });
+  const x = Buffer.byteLength(uit, 'latin1');
+  uit += 'xref\n0 ' + (obj.length + 1) + '\n0000000000 65535 f \n' + pos.map((p) => String(p).padStart(10, '0') + ' 00000 n \n').join('') +
+    'trailer\n<< /Size ' + (obj.length + 1) + ' /Root 1 0 R /Info 6 0 R >>\nstartxref\n' + x + '\n%%EOF\n';
+  return Buffer.from(uit, 'latin1');
+}
+function pdfNaarTekst(bytes) {
+  const r = require('child_process').spawnSync('/usr/bin/pdftotext', ['-q', '-layout', '-enc', 'UTF-8', '-', '-'], { input: bytes, encoding: 'utf8' });
+  assert.equal(r.status, 0, 'pdftotext'); return r.stdout;
+}
+
+test('PDF-lezer: opbouw, jaar uit de overzichtsdatum, betalingen zonder kaart, op de cent op de totalen', () => {
+  const g = C.leesIcsPdfTekst(icsTekst());
+  assert.equal(g.formaat, 'ics_pdf'); assert.equal(g.overzicht, '2026-04'); assert.equal(g.klantnummer, KLANT);
+  assert.deepEqual(g.aantallen, { transactie: 2, betaling: 3, autorisatie: 0 });
+  assert.deepEqual(g.totalen, { vorig_saldo_centen: 7300, credit_centen: 14600, debet_centen: 130300, nieuw_saldo_centen: 123000 });
+  const w = g.regels.find((r) => r.omschrijving === 'WOLKDIENST SAN FRANCISCO USA');
+  assert.deepEqual([w.transactiedatum, w.boekdatum, w.bedrag_centen, w.valuta_orig, w.bedrag_orig_centen, w.land, w.laatste4], ['2026-03-15', '2026-03-16', 2000, 'USD', 2200, 'USA', '0000']);
+  const h = g.regels.find((r) => r.omschrijving === 'HER-INCASSO');
+  assert.deepEqual([h.soort, h.bedrag_centen, h.laatste4, h.valuta_orig], ['betaling', -7300, null, 'EUR']);
+  assert.equal(g.regels.find((r) => r.omschrijving.startsWith('PROEFBUREAU')).bedrag_centen, 121000);
+  // januari-overzicht met een regel uit december: het jaar ervoor
+  const jan = C.leesIcsPdfTekst(icsTekst({ datum: '03 januari 2027', vorig: '0,00', credit: '0,00', debet: '10,00', nieuw: '10,00', regels: [pdfRegel('28 dec', '29 dec', 'WOLKDIENST', 'SAN FRANCISCO', 'USA', '', '10,00', 'debet')] }));
+  assert.equal(jan.regels[0].transactiedatum, '2026-12-28'); assert.equal(jan.overzicht, '2027-01');
+  assert.equal(C.isIcsPdfTekst('Factuur 12\nProefbureau\nTotaal € 10,00'), false, 'een gewone factuur is het niet');
+});
+
+test('PDF-lezer weigert het hele overzicht: totaal, kaartnummer, onleesbare regel, kenmerken', () => {
+  const fout = (tekst, code) => assert.throws(() => C.leesIcsPdfTekst(tekst), (e) => e instanceof C.KaartFout && e.code === code);
+  fout(icsTekst({ debet: '1.303,01' }), 'totaal');
+  fout(icsTekst({ nieuw: '1.230,01' }), 'totaal');
+  fout(icsTekst({ regels: [pdfRegel('15 mrt', '16 mrt', 'WOLKDIENST', 'SAN FRANCISCO', 'USA', '', '20,00', 'debet')] }), 'totaal');
+  fout(icsTekst({ kaart: '4111111111111111' }), 'formaat');   // het kenmerk "Card-nummer: ****1234" ontbreekt dan al
+  fout(icsTekst().replace('Card-houder', 'Card-nummer: 4111 1111 1111 1111\nCard-houder'), 'kaartnummer');
+  fout(icsTekst({ vorig: '0,00', credit: '0,00', debet: '20,00', nieuw: '20,00', regels: [pdfRegel('15 mrt', '16 mrt', 'WEBWINKEL 4111-1111-1111-1111', 'AMSTERDAM', 'NLD', '', '20,00', 'debet')] }), 'kaartnummer');
+  fout(icsTekst({ regels: [pdfRegel('15 xyz', '16 mrt', 'WOLKDIENST', 'SAN FRANCISCO', 'USA', '', '20,00', 'debet')] }), 'regel');
+  fout(icsTekst().replace('International Card Services BV', 'Andere Kaart BV'), 'formaat');
+});
+
+test('PDF en CSV van dezelfde periode tellen niet dubbel (beide volgordes); ander klantnummer geweigerd', () => {
+  for (const volgorde of ['csv-eerst', 'pdf-eerst']) {
+    const t = opzet();
+    C.kaartZet(t.fdb, { klantnummer: KLANT, laatste4: '0000', rekening: TG.slice(-4), wie: 'toets', nu: NU });
+    const pdf = icsPdf(icsTekst()), tekst = pdfNaarTekst(pdf);
+    const telTr = () => t.fdb.db.prepare("SELECT count(*) AS n FROM kaart_regel WHERE soort <> 'autorisatie'").get().n;
+    if (volgorde === 'csv-eerst') {
+      C.inlezen(t.fdb, '0000', csv(BASIS), { wie: 'toets', nu: NU });
+      const u = C.inlezen(t.fdb, '0000', pdf, { wie: 'toets', nu: NU, pdfTekst: tekst, naam: 'ics.pdf' });
+      assert.equal(u.formaat, 'ics_pdf'); assert.equal(u.regels, 5); assert.equal(u.nieuw, 1, 'alleen PROEFBUREAU van 1 april is nieuw'); assert.equal(u.al_bekend_regels, 4);
+      assert.equal(telTr(), BASIS.length - 1 + 1);
+    } else {
+      const u = C.inlezen(t.fdb, '0000', pdf, { wie: 'toets', nu: NU, pdfTekst: tekst });
+      assert.equal(u.nieuw, 5);
+      const c = C.inlezen(t.fdb, '0000', csv(BASIS), { wie: 'toets', nu: NU });
+      assert.equal(c.al_bekend_regels, 4, 'de vier regels van overzicht 2026-04 uit de PDF tellen als binnen'); assert.equal(c.nieuw, BASIS.length - 4);
+      assert.equal(telTr(), BASIS.length - 1 + 1);
+    }
+    assert.equal(t.fdb.db.prepare("SELECT formaat FROM kaart_bestand WHERE formaat = 'ics_pdf'").get().formaat, 'ics_pdf');
+    assert.ok(D.bronBestaat(t.fdb, D.sha256(pdf)), 'de PDF in bankbron/');
+    const nog = C.inlezen(t.fdb, '0000', pdf, { wie: 'toets', nu: NU, pdfTekst: tekst });
+    assert.equal(nog.al_bekend, true);
+    assert.throws(() => C.inlezen(t.fdb, '0000', icsPdf(icsTekst({ klant: '999.9000.0002' })), { wie: 'toets', nu: NU, pdfTekst: icsTekst({ klant: '999.9000.0002' }) }),
+      (e) => e instanceof C.KaartFout && e.code === 'andere_kaart');
+  }
+});
+
+test('upload in de app: ICS-PDF naar de kaart, niet naar de stukken; niet zeker of niet sluitend = oude weg of geweigerd', () => {
+  const t = opzet();
+  C.kaartZet(t.fdb, { klantnummer: KLANT, laatste4: '0000', rekening: TG.slice(-4), wie: 'toets', nu: NU });
+  const R = F.maak({ fout: () => {} });
+  const david = F.rolVoor(t.fdb, { ingang: 'app', wie: 'toets' });
+  let n = 0;
+  const up = (bytes, naam, extra) => R.app(t.fdb, Object.assign({ methode: 'POST', pad: '/app/facturen/upload', d: { beurt: 'fac-proef-' + String(++n).padStart(4, '0'), n: 1 }, rol: david, primair: true, nu: NU + n,
+    uploadNeem: () => ({ naam, bytes, weg: () => {} }), pdfTekst: (b) => ({ ok: true, tekst: pdfNaarTekst(b) }) }, extra || {}));
+  const docs = () => t.fdb.db.prepare('SELECT count(*) AS n FROM document').get().n;
+  // niet sluitend: geweigerd, niets ingelezen en niet bij de stukken
+  const mis = up(icsPdf(icsTekst({ debet: '1.303,01' })), '_202604.pdf');
+  assert.equal(mis.status, 415); assert.match(mis.j.fout || JSON.stringify(mis.j), /sluiten niet/);
+  assert.equal(t.fdb.db.prepare('SELECT count(*) AS n FROM kaart_regel').get().n, 0); assert.equal(docs(), 0);
+  // goed: naar de kaart
+  const pdf = icsPdf(icsTekst());
+  const ok = up(pdf, '_202604.pdf');
+  assert.equal(ok.status, 200, JSON.stringify(ok.j)); assert.equal(ok.j.soort, 'creditcard'); assert.equal(ok.j.formaat, 'pdf'); assert.equal(ok.j.kaart, '…0000');
+  assert.equal(ok.j.overzicht, '2026-04'); assert.equal(ok.j.nieuw, 5); assert.equal(docs(), 0, 'geen document voor de koerier');
+  assert.equal(up(pdf, '_202604.pdf').j.al_bekend, true);
+  // zonder pdftotext (oude pod-kant) of als de tekst het niet zeker is: de oude weg (stukken, te_lezen)
+  const ander = icsPdf(icsTekst({ datum: '03 mei 2026', vorig: '0,00', credit: '0,00', debet: '10,00', nieuw: '10,00', regels: [pdfRegel('20 apr', '21 apr', 'WOLKDIENST', 'SAN FRANCISCO', 'USA', '', '10,00', 'debet')] }));
+  const zonder = up(ander, '_202605.pdf', { pdfTekst: undefined });
+  assert.equal(zonder.status, 200); assert.equal(zonder.j.te_lezen, true); assert.equal(docs(), 1);
+  const factuur = up(icsPdf('Factuur 12\nProefbureau\nTotaal 10,00'), 'factuur.pdf');
+  assert.equal(factuur.j.te_lezen, true); assert.equal(docs(), 2);
+  // niet de eigenaar (praktijkmanager via de ingang): de oude weg, de kaart is van de eigenaar
+  const pm = up(icsPdf(icsTekst({ datum: '03 juni 2026', vorig: '0,00', credit: '0,00', debet: '10,00', nieuw: '10,00', regels: [pdfRegel('20 mei', '21 mei', 'WOLKDIENST', 'SAN FRANCISCO', 'USA', '', '10,00', 'debet')] })), '_202606.pdf',
+    { rol: { soort: 'praktijkmanager', wie: 'pm', entiteiten: ['tolgaarde'], ingang: 'fac' } });
+  assert.notEqual(pm.j && pm.j.soort, 'creditcard');
+});
+
+test('CLI: een PDF inlezen en een al geüpload document alsnog naar de kaart (te_lezen 0 met audit; een factuur blijft staan)', () => {
+  const t = opzet();
+  C.kaartZet(t.fdb, { klantnummer: KLANT, laatste4: '0000', rekening: TG.slice(-4), wie: 'toets', nu: NU });
+  const pdf = icsPdf(icsTekst());
+  const st = D.stukSchrijf(t.fdb, pdf), id = D.nieuwId();
+  D.voegToe(t.fdb, 'document', { id, sha256: st.sha256, naam: '_202604.pdf', mime: 'application/pdf', bytes: st.bytes, soort: 'pdf', te_lezen: 1, geupload_door: 'toets', aangemaakt_op: '2026-04-05T00:00:00Z' });
+  D.sluit(t.fdb);
+  const cp = require('child_process');
+  const env = Object.assign({}, process.env, { FACTUREN_DIR: path.join(t.dir, 'db'), SOCEV_KANT: 'olares' });
+  const cli = (args) => cp.spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'tools', 'facturen-creditcard.js')].concat(args), { env, encoding: 'utf8' });
+  const droog = cli(['document', '--droog', id]);
+  assert.equal(droog.status, 0, droog.stderr); assert.equal(JSON.parse(droog.stdout).document.uit_stapel, false);
+  const d = cli(['document', id]);
+  assert.equal(d.status, 0, d.stderr);
+  const j = JSON.parse(d.stdout);
+  assert.equal(j.formaat, 'ics_pdf'); assert.equal(j.nieuw, 5); assert.deepEqual(j.document, { id, te_lezen_was: true, uit_stapel: true, facturen: 0 });
+  const fdb = D.open(path.join(t.dir, 'db'));
+  assert.equal(fdb.db.prepare('SELECT te_lezen FROM document WHERE id = ?').get(id).te_lezen, 0);
+  assert.equal(fdb.db.prepare("SELECT count(*) AS n FROM audit WHERE wat = 'document_creditcard' AND object_id = ?").get(id).n, 1);
+  D.sluit(fdb);
+  assert.equal(JSON.parse(cli(['document', id]).stdout).al_bekend, true, 'nog eens: al bekend');
+  // inlezen van een PDF-bestand (pdftotext in het gereedschap)
+  const f = path.join(t.dir, 'mei.pdf');
+  fs.writeFileSync(f, icsPdf(icsTekst({ datum: '03 mei 2026', vorig: '1.230,00', credit: '1.230,00', debet: '10,00', nieuw: '10,00',
+    regels: [pdfRegel('09 apr', '09 apr', 'GEINCASSEERD VORIG SALDO', '', '', '', '1.230,00', 'credit'), pdfRegel('20 apr', '21 apr', 'WOLKDIENST', 'SAN FRANCISCO', 'USA', '11,00 USD', '10,00', 'debet'), sp(24) + 'Wisselkoers USD' + sp(22) + '1.10000'] })));
+  const i = cli(['inlezen', f]);
+  assert.equal(i.status, 0, i.stderr); assert.equal(JSON.parse(i.stdout).nieuw, 2); assert.equal(JSON.parse(i.stdout).overzicht, '2026-05');
+  assert.notEqual(cli(['document', 'ffffffffffffffff']).status, 0);
+});
