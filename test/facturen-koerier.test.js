@@ -845,3 +845,204 @@ test('Intake-hartslag: lijst zonder stukken → bron groen; lijstfout → rood; 
   assert.equal(u4.intake.fout, 'lijst');
   assert.deepEqual(kleur(nu4 + MIN), { 'intake:gmail:david': 'rood', 'intake:gmail:groenhouten': 'rood' });
 });
+
+// ───────────────────────────── wv2969: eisen van de Exact-Scanservice (verzonnen data) ─────────────────────────────
+
+// PDF met n pagina's (synthetisch), voor de paginagrens; opvulling als PDF-commentaar voor de groottegrens
+function pdfPaginas(n, opvul) {
+  const obj = ['<< /Type /Catalog /Pages 2 0 R >>', null, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'];
+  const kids = [];
+  for (let i = 0; i < n; i++) {
+    const tekst = 'BT /F1 11 Tf 56 780 Td (Factuur PROEF-PAG pagina ' + (i + 1) + ') Tj ET';
+    obj.push('<< /Length ' + tekst.length + ' >>\nstream\n' + tekst + '\nendstream');
+    obj.push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ' + obj.length + ' 0 R >>');
+    kids.push(obj.length + ' 0 R');
+  }
+  obj[1] = '<< /Type /Pages /Kids [' + kids.join(' ') + '] /Count ' + n + ' >>';
+  let uit = '%PDF-1.4\n' + (opvul ? '%' + 'x'.repeat(opvul) + '\n' : '');
+  const plek = [];
+  obj.forEach((o, i) => { plek.push(Buffer.byteLength(uit, 'latin1')); uit += (i + 1) + ' 0 obj\n' + o + '\nendobj\n'; });
+  const xref = Buffer.byteLength(uit, 'latin1');
+  uit += 'xref\n0 ' + (obj.length + 1) + '\n0000000000 65535 f \n' + plek.map((p) => String(p).padStart(10, '0') + ' 00000 n \n').join('');
+  uit += 'trailer\n<< /Size ' + (obj.length + 1) + ' /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF\n';
+  return Buffer.from(uit, 'latin1');
+}
+// een te beoordelen factuur van een Exact-entiteit, zonder twijfel te bevestigen; met ubl = met een UBL-bestand ernaast
+function exactFactuur(t, ubl) {
+  return t.fdb.db.prepare("SELECT * FROM factuur WHERE status = 'te_beoordelen' AND entiteit IN ('tolgaarde','groenhouten','holding','kostenmaatschap') AND betaalwijze <> 'onbekend' " +
+    "AND iban_nieuw = 0 AND patientkenmerk = 0 AND valuta = 'EUR' AND incl > 0 AND ubl_document IS " + (ubl ? 'NOT NULL' : 'NULL') + ' ORDER BY aangemaakt_op, id LIMIT 1').get();
+}
+// het stuk van een factuur vervangen door andere bytes (vóór Bevestigen; naam optioneel; bytes-kolom optioneel anders dan de echte grootte)
+function vervangStuk(t, f, bytes, o) {
+  o = o || {};
+  const s = D.stukSchrijf(t.fdb, bytes), id = D.nieuwId();
+  D.voegToe(t.fdb, 'document', { id, sha256: s.sha256, naam: o.naam || 'factuur-proef.pdf', mime: 'application/pdf', bytes: o.bytes != null ? o.bytes : s.bytes, soort: 'pdf', tekstlaag: 1,
+    patientkenmerk: 0, te_lezen: 0, aangemaakt_op: new Date(NU).toISOString() });
+  t.fdb.db.prepare('UPDATE factuur SET document = ? WHERE id = ?').run(id, f.id);
+  return s.sha256;
+}
+function zelfBevestig(t, f, d) {
+  const r = t.call('POST', 'bevestig', Object.assign({ id: f.id }, d || {}));
+  return { r, op: r.j && r.j.opdracht ? t.op(r.j.opdracht.id) : null, tok: 'FV' + f.id };
+}
+
+test('wv2969 bestandsnaam naar Exact: ≤ 99 tekens incl. extensie, leesbaar, uniek binnen de mail; zonder grens zoals vroeger', () => {
+  const pdfB = Z.pdf(['x']);
+  const lang = 'Factuur ' + 'Leverancier Met Een Heel Lange Naam B.V. '.repeat(4) + '\u0007nummer 2026-0001.pdf';
+  const n = KO.naamMetExtensie(lang, 'application/pdf', pdfB, 'boekhouder_factuur', 99);
+  assert.ok(n.length <= 99, n.length + ' tekens');
+  assert.match(n, /^Factuur Leverancier .*\.pdf$/);
+  assert.ok(!/[\u0000-\u001f]|\s{2}|\s\.pdf$/.test(n), 'geen stuurtekens, dubbele spaties of spatie vóór de extensie');
+  assert.equal(KO.naamMetExtensie(lang, 'application/pdf', pdfB, 'boekhouder_factuur').length, 114, 'zonder grens (route mail) ongewijzigd: 110 + .pdf');
+  assert.equal(KO.naamMetExtensie('kort.pdf', 'application/pdf', pdfB, 'boekhouder_factuur', 99), 'kort.pdf');
+  const u = KO.uniekeNamen([{ naam: 'a'.repeat(95) + '.pdf' }, { naam: 'A'.repeat(95) + '.pdf' }, { naam: 'b.pdf' }], 99).map((b) => b.naam);
+  assert.equal(new Set(u.map((x) => x.toLowerCase())).size, 3);
+  assert.ok(u.every((x) => x.length <= 99 && /\.pdf$/.test(x)), JSON.stringify(u));
+  assert.match(u[1], / \(2\)\.pdf$/);
+});
+
+test('wv2969 route exact: alleen de PDF gaat mee (geen UBL-XML), naam ≤ 99; de vingerafdruk van het akkoord (met UBL) blijft gelden', async () => {
+  const t = opzet(), g = nepGmail();
+  const f = exactFactuur(t, true);
+  assert.ok(f, 'zaad heeft een Exact-factuur met UBL');
+  t.fdb.db.prepare('UPDATE document SET naam = ? WHERE id = ?').run('Inkoopfactuur ' + 'zeer lange omschrijving '.repeat(8) + '.pdf', f.document);
+  const { r, op, tok } = zelfBevestig(t, f);
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(JSON.parse(op.bijlagen).length, 2, 'het akkoord dekt PDF en UBL (zoals opdrachten die al wachten)');
+  await t.ronde(g, VERSTUUR + 5 * MIN);
+  const mijn = g.verzonden.filter((v) => v.token === tok);
+  assert.equal(mijn.length, 1);
+  assert.equal(mijn[0].namen.length, 1);
+  assert.match(mijn[0].namen[0], /\.pdf$/);
+  assert.ok(mijn[0].namen[0].length <= 99, mijn[0].namen[0].length + ' tekens');
+  assert.deepEqual(mijn[0].shas, [JSON.parse(op.bijlagen)[0].sha256], 'alleen de PDF uit het akkoord');
+  assert.equal(t.op(op.id).status, 'gelukt');
+  assert.equal(t.op(op.id).vingerafdruk_koerier, op.vingerafdruk);
+});
+
+test('wv2969 route mail (Acta) en POT-afschriften ongewijzigd: PDF én UBL gaan mee', async () => {
+  const t = opzet(), g = nepGmail();
+  const f = exactFactuur(t, true);
+  const { r, op, tok } = zelfBevestig(t, f, { entiteit: 'sloel' });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  await t.ronde(g, VERSTUUR + 5 * MIN);
+  const mijn = g.verzonden.filter((v) => v.token === tok);
+  assert.equal(mijn.length, 1);
+  assert.deepEqual(mijn[0].namen.map((n) => n.slice(-4)).sort(), ['.pdf', '.xml']);
+  assert.equal(t.op(op.id).status, 'gelukt');
+});
+
+test('wv2969 route exact zonder PDF (alleen UBL): Bevestigen weigert vooraf met uitleg; een oude opdracht wordt geweigerd met signaal', async () => {
+  const t = opzet(), g = nepGmail();
+  const f = exactFactuur(t, true);
+  // zo'n factuur nabootsen: het hoofdstuk is de UBL (vóór Bevestigen); het oude PDF-stuk hangt er niet meer aan
+  const ubl = t.fdb.db.prepare('SELECT ubl_document FROM factuur WHERE id = ?').get(f.id).ubl_document;
+  t.fdb.db.prepare('UPDATE factuur SET ubl_document = NULL WHERE id = ?').run(f.id);
+  t.fdb.db.prepare('UPDATE factuur SET document = ? WHERE id = ?').run(ubl, f.id);
+  const detail = t.call('GET', 'factuur', { id: f.id });
+  if (detail.status === 200) assert.ok(detail.j.bevestigen.redenen.some((x) => /niet naar Exact: alleen een UBL-bestand/.test(x)), JSON.stringify(detail.j.bevestigen));
+  const a = zelfBevestig(t, f);
+  assert.equal(a.r.status, 409);
+  assert.equal(a.r.j.code, 'exact');
+  assert.match(a.r.j.fout || a.r.j.error || JSON.stringify(a.r.j), /alleen een UBL-bestand \(XML\), geen PDF/);
+  assert.equal(t.fac(f.id).status, 'te_beoordelen', 'blijft in Beoordelen');
+  // naar de route mail mag het wel (die neemt UBL)
+  assert.equal(zelfBevestig(t, f, { entiteit: 'sloel' }).r.status, 200);
+  // een opdracht van vóór deze wijziging (Exact, alleen UBL; toen weigerde Bevestigen dat niet): zo'n opdracht maken zoals de oude code deed
+  t.fdb.db.prepare("UPDATE opdracht SET status = 'teruggedraaid' WHERE factuur = ? AND status = 'wacht'").run(f.id);
+  t.fdb.db.prepare("UPDATE factuur SET entiteit = 'tolgaarde' WHERE id = ?").run(f.id);
+  const fk = D.factuurVoorKern(t.fdb, f.id);
+  const ent = t.fdb.db.prepare("SELECT * FROM entiteit WHERE sleutel = 'tolgaarde'").get();
+  const opk = { id: D.nieuwId(), soort: 'boekhouder_factuur', entiteit: 'tolgaarde', doeladres: ent.boekhoud_doel, bijlagen: F.bijlagenVan(t.fdb, fk), verstuur_na: new Date(VERSTUUR).toISOString() };
+  opk.idempotentiesleutel = f.id + ':' + opk.id;
+  opk.vingerafdruk = K.vingerafdruk({ id: opk.id, soort: opk.soort, doeladres: opk.doeladres, regel: { factuur_id: f.id, entiteit: 'tolgaarde', bedrag_centen: fk.incl, doeladres: opk.doeladres }, bijlagen: opk.bijlagen });
+  D.voegToe(t.fdb, 'opdracht', { id: opk.id, soort: opk.soort, factuur: f.id, entiteit: opk.entiteit, doeladres: opk.doeladres, bijlagen: opk.bijlagen, vingerafdruk: opk.vingerafdruk,
+    verstuur_na: opk.verstuur_na, idempotentiesleutel: opk.idempotentiesleutel, status: 'wacht', poging: 0, aangemaakt_door: 'proef', aangemaakt_op: new Date(NU).toISOString(), bijgewerkt_op: new Date(NU).toISOString() });
+  const b = { tok: 'FV' + f.id }, op = t.op(opk.id), f2 = f;
+  for (let i = 0; i <= 3 && t.op(op.id).status === 'wacht'; i++) await t.ronde(g, VERSTUUR + 5 * MIN + i * UUR);
+  assert.equal(g.verzonden.filter((v) => v.token === b.tok).length, 0);
+  assert.equal(t.op(op.id).status, 'geweigerd');
+  assert.match(t.op(op.id).fout, /geen PDF: Exact neemt alleen een PDF aan/);
+  assert.equal(t.fac(f2.id).status, 'verzending_mislukt');
+  assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE soort = 'verzending_mislukt' AND status = 'open' AND EXISTS (SELECT 1 FROM json_each(facturen) j WHERE j.value = ?)", [f2.id]), 1);
+});
+
+test('wv2969 te groot voor Exact (> 15 MB): Bevestigen weigert vooraf; een opdracht met zo\'n stuk wordt geweigerd, zichtbaar, niets verstuurd', async () => {
+  const t = opzet(), g = nepGmail();
+  const f = exactFactuur(t, false);
+  vervangStuk(t, f, Z.pdf(['Leverancier A B.V.', 'Factuur GROOT-1']), { bytes: 16 * 1024 * 1024 });
+  const a = zelfBevestig(t, f);
+  assert.equal(a.r.status, 409);
+  assert.equal(a.r.j.code, 'exact');
+  assert.match(JSON.stringify(a.r.j), /te groot voor Exact \(16 MB, Exact neemt tot 15 MB\)/);
+  // echte grootte boven 15 MB, terwijl de bytes-kolom klein is (zoals een opdracht die al wachtte): de koerier vangt het
+  const f2 = exactFactuur(t, false);
+  vervangStuk(t, f2, pdfPaginas(1, 15 * 1024 * 1024 + 10), { bytes: 1000 });
+  const b = zelfBevestig(t, f2);
+  assert.equal(b.r.status, 200, JSON.stringify(b.r.j));
+  await t.ronde(g, VERSTUUR + 5 * MIN);
+  assert.equal(g.verzonden.filter((v) => v.token === b.tok).length, 0);
+  assert.equal(t.op(b.op.id).status, 'geweigerd');
+  assert.match(t.op(b.op.id).fout, /^te groot voor Exact \(15 MB, Exact neemt tot 15 MB\)/);
+  assert.equal(t.fac(f2.id).status, 'verzending_mislukt');
+  assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE soort = 'verzending_mislukt' AND EXISTS (SELECT 1 FROM json_each(facturen) j WHERE j.value = ?)", [f2.id]), 1);
+  // Opnieuw proberen maakt geen nieuwe opdracht zolang het stuk te groot is
+  t.fdb.db.prepare('UPDATE document SET bytes = ? WHERE sha256 = ?').run(15 * 1024 * 1024 + 500, JSON.parse(b.op.bijlagen)[0].sha256);
+  const o = t.call('POST', 'opnieuw_proberen', { id: f2.id });
+  if (o.status !== 404) { assert.equal(o.status, 409, JSON.stringify(o.j)); assert.match(JSON.stringify(o.j), /te groot voor Exact/); }
+});
+
+test('wv2969 meer dan 150 pagina\'s: geweigerd met het paginatal (echte pdftotext); 150 pagina\'s gaat gewoon', async () => {
+  const t = opzet(), g = nepGmail();
+  const f = exactFactuur(t, false);
+  vervangStuk(t, f, pdfPaginas(151));
+  const a = zelfBevestig(t, f);
+  assert.equal(a.r.status, 200, JSON.stringify(a.r.j));
+  const f2 = exactFactuur(t, false);
+  vervangStuk(t, f2, pdfPaginas(150));
+  const b = zelfBevestig(t, f2);
+  assert.equal(b.r.status, 200, JSON.stringify(b.r.j));
+  for (let i = 0; i <= 3 && [a, b].some((x) => t.op(x.op.id).status === 'wacht'); i++) await t.ronde(g, VERSTUUR + 5 * MIN + i * UUR);   // het zaad heeft al opdrachten in de rij (8 per ronde)
+  assert.equal(g.verzonden.filter((v) => v.token === a.tok).length, 0);
+  assert.equal(t.op(a.op.id).status, 'geweigerd');
+  assert.match(t.op(a.op.id).fout, /^te veel pagina's voor Exact \(151, Exact neemt tot 150\)/);
+  assert.equal(t.fac(f.id).status, 'verzending_mislukt');
+  assert.equal(g.verzonden.filter((v) => v.token === b.tok).length, 1, '150 pagina\'s mag');
+  assert.equal(t.op(b.op.id).status, 'gelukt');
+  // pdftotext faalt of de tekst is te lang: niet versturen (fail-closed), met reden
+  assert.match(await KO.exactPaginas([{ naam: 'a.pdf', bytes: Buffer.from('x') }], async () => ({ ok: false, fout: 'pdftotext' })), /niet vast te stellen/);
+  assert.match(await KO.exactPaginas([{ naam: 'a.pdf', bytes: Buffer.from('x') }], async () => ({ ok: false, fout: 'te_lang' })), /meer dan 150/);
+  assert.equal(await KO.exactPaginas([{ naam: 'a.pdf', bytes: Buffer.from('x') }], async () => ({ ok: true, tekst: 'a\fb\f' })), null);
+});
+
+test('wv2969 herinnering, aanmaning, offerte: de lezer herkent de titel, zet de reden bovenaan in Beoordelen; Bevestigen naar Exact weigert, naar Acta niet', () => {
+  const S = (tekst, ond, naam) => K.stapSoortStuk(tekst, ond ? { onderwerp: ond } : null, naam || 'stuk.pdf').soort;
+  assert.equal(S('Leverancier Proef B.V.        BETALINGSHERINNERING\nFactuurnummer P-1\nTotaal 12,00'), 'herinnering');
+  assert.equal(S('AANMANING\nFactuur P-2'), 'aanmaning');
+  assert.equal(S('2e herinnering\nFactuur P-2'), 'herinnering');
+  assert.equal(S('OFFERTE\nProef B.V.'), 'offerte');
+  assert.equal(S('Leverancier\nFactuur P-3', null, 'Aanmaning_2026-17.pdf'), 'aanmaning');
+  assert.equal(S('Leverancier\nFactuur P-3', 'Tweede herinnering factuur P-3'), 'herinnering');
+  // geen herinnering: verwijzingen, voetteksten en meldingsmails
+  assert.equal(S('Leverancier\nFactuur P-4\nOfferte: Q-12\nOffertenummer 77\nBij niet tijdig betalen volgt een aanmaning'), null);
+  assert.equal(S('Leverancier\nFactuur P-5', 'Herinnering: uw factuur staat klaar'), null);
+  assert.equal(S('Leverancier\nFactuur P-6', 'Dit is geen aanmaning'), null);
+  assert.equal(S('Factuur P-7\n' + 'regel\n'.repeat(20) + 'HERINNERING'), null, 'alleen de kop van het stuk');
+  // het besliskader: reden bovenaan, besluit soort_stuk, status blijft te beoordelen
+  const tekst = 'Proef Leverancier B.V.\nBETALINGSHERINNERING\nFactuur\nFactuurnummer: HER-1\nFactuurdatum: 01-10-2026\nTotaal incl. btw: 121,00\nIBAN NL91ABNA0417164300';
+  const u = K.beslisBericht({ bericht: { message_id: 'm1', afzender: 'x@proef.invalid', onderwerp: 'Factuur HER-1' }, documenten: [{ sha256: 'a'.repeat(64), naam: 'HER-1.pdf', mime: 'application/pdf', tekst, tekstlaag: true }] }, { vandaag: '2026-10-22' });
+  assert.equal(u.facturen.length, 1);
+  assert.equal(u.facturen[0].status, 'te_beoordelen');
+  assert.match(u.facturen[0].redenen[0], /^Lijkt een betalingsherinnering .*Exact keurt die af/);
+  assert.ok(u.facturen[0].besluiten.some((b) => b.stap === 'soort_stuk' && b.waarde === 'herinnering'));
+  // routes: Exact weigert met uitleg, Acta (mail) mag
+  const t = opzet();
+  const f = exactFactuur(t, false);
+  t.fdb.db.prepare("INSERT INTO besluit (factuur, stap, veld, waarde, bron, toelichting, wanneer) VALUES (?, 'soort_stuk', 'soort_stuk', 'aanmaning', 'regel', 'proef', ?)").run(f.id, new Date(NU).toISOString());
+  const a = zelfBevestig(t, f);
+  assert.equal(a.r.status, 409);
+  assert.equal(a.r.j.code, 'exact');
+  assert.match(JSON.stringify(a.r.j), /lijkt een aanmaning: Exact keurt die af/);
+  assert.equal(t.fac(f.id).status, 'te_beoordelen');
+  assert.equal(zelfBevestig(t, f, { entiteit: 'sloel' }).r.status, 200);
+});

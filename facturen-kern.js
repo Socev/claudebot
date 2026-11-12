@@ -540,6 +540,34 @@ function stapGeenFactuur(tekst, bericht, ctx) {
   return { geen: false, besluiten: [besluit('geen_factuur', 'is_factuur', 1, 'regel', heeftWoord ? 'factuurwoord aanwezig' : 'geen kenmerk van een andere soort stuk')] };
 }
 
+// ───────────────────────────── stap 6b: herinnering, aanmaning, offerte (wv2969) ─────────────────────────────
+
+// David 12-11-2026 (eisen van de Exact-Scanservice): Exact keurt herinneringen, aanmaningen en offertes af. Herkend als TITEL: een cel (kolom
+// in de pdftotext-opmaak) in de eerste 15 regels van het stuk, of de bestandsnaam, die met zo'n woord begint en geen verwijzing is
+// ("Offerte: Q-12", "offertenummer", "herinnering 2" tellen niet); in het onderwerp van de mail alleen de sterke woorden. Een zin als "anders
+// volgt een aanmaning" telt niet. Niets wordt automatisch afgewezen: de factuur blijft in Beoordelen met de reden bovenaan, en Bevestigen naar
+// een entiteit met route Exact weigert met uitleg (facturen.js exactBezwaar).
+const STUK_TITEL = /^(?:(?:\d+e|eerste|tweede|derde|laatste)\s+)?(betalingsherinnering|herinnering|aanmaning|sommatie|ingebrekestelling|payment\s+reminder|reminder|overdue\s+notice|offerte|prijsopgave|quotation)\b(?!\s*(?:[:#]|n[or]\.?\b|nummer|number|\d))/i;
+// in de bestandsnaam ("Aanmaning_2026-17.pdf", "Offerte 88.pdf") mag er een nummer achter staan
+const STUK_NAAM = new RegExp(STUK_TITEL.source.replace('|\\d))', '))'), 'i');
+const STUK_ONDERWERP = /\b(betalingsherinnering|aanmaning|sommatie|ingebrekestelling|payment\s+reminder|overdue\s+notice|(?:\d+e|eerste|tweede|derde|laatste)\s+herinnering)\b/i;
+const STUK_NIET = /\b(?:geen|volgt\s+(?:een|de)|ontvangt\s+u\s+(?:een|de)|sturen\s+(?:wij|we)\s+(?:u\s+)?een|zonder)\s+(?:betalings)?(?:herinnering|aanmaning|sommatie)\b/gi;
+function stukSoortVan(woord) { return /offerte|prijsopgave|quotation/i.test(woord) ? 'offerte' : /aanmaning|sommatie|ingebreke/i.test(woord) ? 'aanmaning' : 'herinnering'; }
+function stapSoortStuk(tekst, bericht, naam) {
+  const cellen = String(tekst || '').replace(/\r\n?/g, '\n').split(/[\n\f]/).filter((r) => /\S/.test(r)).slice(0, 15)
+    .flatMap((r) => r.split(/\s{3,}|\t/)).map((c) => c.replace(/\s+/g, ' ').trim()).filter((c) => c && c.length <= 60);
+  const nm = String(naam || '').replace(/\.[a-z0-9]{2,4}$/i, '').replace(/[_.\-]+/g, ' ').trim();
+  let w = null, waar = null;
+  for (const c of cellen) { const m = STUK_TITEL.exec(c); if (m) { w = m[1]; waar = 'titel op het stuk'; break; } }
+  if (!w) { const m = STUK_NAAM.exec(nm); if (m) { w = m[1]; waar = 'bestandsnaam'; } }
+  if (!w) { const m = STUK_ONDERWERP.exec(String((bericht && bericht.onderwerp) || '').replace(STUK_NIET, ' ')); if (m) { w = m[1]; waar = 'onderwerp van de mail'; } }
+  if (!w) return { soort: null, besluiten: [] };
+  const soort = stukSoortVan(w);
+  return { soort, besluiten: [besluit('soort_stuk', 'soort_stuk', soort, 'regel', '"' + w.toLowerCase().replace(/\s+/g, ' ') + '" in ' + waar)],
+    reden: (soort === 'offerte' ? 'Lijkt een offerte' : soort === 'aanmaning' ? 'Lijkt een aanmaning' : 'Lijkt een betalingsherinnering') +
+      ' ("' + w.toLowerCase().replace(/\s+/g, ' ') + '" in ' + waar + '): Exact keurt die af. Staat de factuur zelf er al in, kies dan Geen factuur' };
+}
+
 // ───────────────────────────── leverancier ─────────────────────────────
 
 function domeinVan(afzender) {
@@ -1239,6 +1267,13 @@ function beslisBericht(invoer, ctx) {
       besluiten.push(...gf.besluiten);
       if (gf.geen) { status = 'geen_factuur'; redenen.unshift('Geen factuur: ' + gf.besluiten[0].toelichting); }
     }
+    // wv2969: herinnering/aanmaning/offerte zichtbaar in Beoordelen (de factuur blijft daar; Bevestigen naar Exact weigert met deze reden)
+    if (status === 'te_beoordelen' && g.pdf) {
+      const ss = stapSoortStuk([g.pdf.tekst, g.pdf.ocr_tekst].filter(Boolean).join('\n'), bericht, g.pdf.naam);
+      besluiten.push(...ss.besluiten);
+      if (ss.soort) redenen.unshift(ss.reden);
+    }
+    if (!g.pdf) redenen.push('Alleen een UBL-bestand (XML), geen PDF: Exact neemt alleen een PDF aan; vraag de leverancier om de PDF');
     const sb = stapBetaalwijze(scan ? '' : tekst, v, ctx, { leverancier: lev, regel: rgLev ? rg : null });
     besluiten.push(...sb.besluiten);
     // wv2143: model_zonder_steun vóór valideer (een bedrag dat alleen Claude las maakt de € 2.500-waarschuwing nooit stil)
@@ -1487,7 +1522,7 @@ module.exports = {
   leesXml, leesUbl, leesPdfTekst,
   // besliskader per stap (§ 4.5)
   stapDubbelBestand, stapDubbelInhoud, factuurSleutel, stapSoort, groepeerBericht, stapPatientkenmerk, stapVelden, herkenLeverancier, compactNaam, naamVerwant, ibanNaamPast, VERZAMEL_RE,
-  stapEntiteit, stapGeenFactuur, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, gebruikelijkBedrag, GEBRUIKELIJK_MIN_EERDER, ibanPoort, naamZelfde, ibanHistorieBekend, eerderBetaaldOnbekend, eerderTekst, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
+  stapEntiteit, stapGeenFactuur, stapSoortStuk, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, gebruikelijkBedrag, GEBRUIKELIJK_MIN_EERDER, ibanPoort, naamZelfde, ibanHistorieBekend, eerderBetaaldOnbekend, eerderTekst, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
   // leren
   leerUitBevestiging,
   // overgangen (§ 4.4)
