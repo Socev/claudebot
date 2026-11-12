@@ -3092,6 +3092,23 @@ test('wv2455 zouWeg: alleen weg (nieuwsbrief, systeemmelding, geen actie); nooit
   assert.equal(K.zouWeg(Object.assign({}, b, { laag: 'socev' })), null);
   assert.equal(K.zouWeg(null), null);
 });
+test('wv2469 zouWeg aangescherpt: betaal- en termijnwoorden, bank/overheid/loon/kluis-afzender en persoonlijk adres nooit vanzelf weg', () => {
+  const b = { laag: 'weg', reden: 'nieuwsbrief', onderwerp: 'Nieuws van november', afzender: 'nieuws@vereniging.invalid' };
+  assert.equal(K.VANZELF_VERSIE, 2);
+  ['je maandelijkse afschrijving komt eraan', 'Your plan will renew', 'We hebben de betaling van uw bestelling ontvangen!', 'Geef uw watermeterstand door',
+    'Nieuwe passen één jaar geldig: controleer de vervaldata', 'A spend cap has been configured', 'AI Credits Auto Upgrade Completed',
+    'Action Required: Update your models', 'Niet vergeten: uw afspraak bij de garage', 'Your subscription to the Starter tier', 'Pensioenexport voor de werkgevers',
+    '[repo] Run failed: ci - main', 'Taken voor vandaag → 1 over tijd', 'Your 5-hour limit has been removed', 'Zorgverzekering 2027: je besparing']
+    .forEach(function (o) { assert.equal(K.zouWeg(Object.assign({}, b, { onderwerp: o })), null, o); });
+  ['nieuws@nl.abnamro.com', 'info@mail.ing.nl', 'service@paypal.com', 'no-reply@nmbrs.nl', 'info@email.1password.com', 'noreply@belastingdienst.nl',
+    'iemand.verzonnen@gmail.com', 'iemand@hotmail.com', 'iemand@ziggo.nl', 'iemand@icloud.com']
+    .forEach(function (a) { assert.equal(K.zouWeg(Object.assign({}, b, { afzender: a })), null, a); });
+  // gewone nieuwsbrieven en bezorgmeldingen blijven kandidaat (geen overmatige grens)
+  [['Je pakket is bezorgd', 'noreply@bezorger.invalid'], ['Nieuwsbrief ledencommissie', 'info@email.vereniging.invalid'], ['Weekblad: wonen en werken', 'nieuwsbrief@blad.invalid'],
+    ['Bestelling 123 is verzonden', 'info@winkel.invalid'], ['I want to connect', 'invitations@netwerk.invalid'], ['Bericht van de school', 'info@thing.invalid']]
+    .forEach(function (x) { assert.equal(K.zouWeg(Object.assign({}, b, { onderwerp: x[0], afzender: x[1] })), 'nieuwsbrief', x[0]); });
+  assert.equal(K.zouWeg(Object.assign({}, b, { afzender: 'nieuws@thing.invalid' })), 'nieuwsbrief');   // 'ing' alleen als eigen domeindeel
+});
 test('wv2455 zaakregister: zou_weg in de schaduw, Nooit per afzender, gemist en zelf, jij_open, voorwerkBron zonder tekst; Gmail onveranderd', () => {
   const { mm, dir, gm, fouten } = b8Kamer();
   const nb = mail({ van: 'Nieuws <Nieuws@vereniging.invalid>', onderwerp: 'Nieuwsbrief november', afmeld: true });
@@ -3137,6 +3154,13 @@ test('wv2455 zaakregister: zou_weg in de schaduw, Nooit per afzender, gemist en 
   gm.plek(nb2.id, 'archief');
   const met = l2Ronde(mm, gm, ids, { vlag: true, inbox: true }).l.j.acties;
   a = zakenApp(mm); assert.equal(a.j.vanzelf.zelf, 1); assert.equal(a.j.vanzelf.zou, 2);
+  assert.equal(zaak(mm, nb.threadId).zou_versie, K.VANZELF_VERSIE);
+  // wv2469: een zou_weg van een oudere regel (zou_versie leeg) telt niet mee en wordt bij de volgende ronde opnieuw bepaald
+  mm._db.prepare('UPDATE zaak SET zou_versie = NULL, zou_weg = ? WHERE thread_id = ?').run('2020-01-01T00:00:00.000Z', nb.threadId);
+  a = zakenApp(mm); assert.equal(a.j.vanzelf.zou, 1, 'oude regel telt niet'); assert.notEqual(a.j.vanzelf.sinds, '2020-01-01T00:00:00.000Z');
+  l2Ronde(mm, gm, ids, { vlag: true, inbox: true });
+  assert.equal(zaak(mm, nb.threadId).zou_versie, K.VANZELF_VERSIE); assert.notEqual(zaak(mm, nb.threadId).zou_weg, '2020-01-01T00:00:00.000Z');
+  a = zakenApp(mm); assert.equal(a.j.vanzelf.zou, 2);
   assert.ok(zonder.concat(met).every(function (x) { return !(x.eraf || []).includes('INBOX') && !(x.eraf || []).includes('UNREAD'); }), 'de proefweek haalt niets uit de inbox en markeert niets gelezen');
   // voorwerkBron: open jij-zaken met afzender, onderwerp en Jev (geen mailtekst); één draad
   const vb = mm.voorwerkBron({ sinds: new Date(klok - 3 * 86400000).toISOString() });
