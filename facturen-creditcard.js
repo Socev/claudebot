@@ -156,6 +156,7 @@ function leesIcsCsv(bytes) {
  * daarvan niet, of staat er een onleesbare of ongemaskeerde kaartregel, dan weigert het het hele overzicht (KaartFout): niets half.
  * → zelfde vorm als leesIcsCsv, plus { formaat: 'ics_pdf', overzicht, klantnummer, totalen }.
  */
+function omsNorm(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
 const MAAND_VOL = { januari: 1, februari: 2, maart: 3, april: 4, mei: 5, juni: 6, juli: 7, augustus: 8, september: 9, oktober: 10, november: 11, december: 12 };
 const PDF_BEDRAG = '\\d{1,3}(?:\\.\\d{3})*,\\d{2}';
 const PDF_REGEL = new RegExp('^\\s*(\\d{1,2}) ([a-z]{3})\\s+(\\d{1,2}) ([a-z]{3})\\s+(\\S.*?)\\s+(' + PDF_BEDRAG + ') (debet|credit)\\s*$', 'i');
@@ -429,13 +430,22 @@ function inlezen(fdb, kaartWie, bytes, opties) {
   const bekend = fdb.db.prepare('SELECT 1 FROM kaart_regel WHERE sleutel = ?');
   // wv2958: CSV en PDF van dezelfde periode tellen niet dubbel. De sleutels verschillen (de PDF kent geen categorie, en de omschrijving kan
   // anders gespatieerd zijn); een regel zonder bekende sleutel geldt daarom ook als binnen als er één op één een regel uit een bestand van
-  // het andere formaat bestaat met dezelfde soort, transactiedatum, boekdatum, bedrag en overzicht (autorisaties nooit).
-  const ander = fdb.db.prepare("SELECT r.id FROM kaart_regel r JOIN kaart_bestand b ON b.id = r.bestand WHERE r.kaart = ? AND b.formaat <> ? AND r.soort = ? AND r.transactiedatum = ? AND coalesce(r.boekdatum, '') = ? AND r.bedrag_centen = ? AND r.overzicht IS ? ORDER BY r.id");
+  // het andere formaat bestaat met dezelfde soort, transactiedatum, boekdatum, bedrag, overzicht én omschrijving (alleen letters en cijfers;
+  // de ene mag een afgekapte vorm van de andere zijn, ≥ 6 tekens). Meer dan één zo'n afgekapte kandidaat: twijfel, het hele bestand geweigerd
+  // (review Codex wv2958 MOET 1: een andere winkel met hetzelfde bedrag op dezelfde dag mag nooit claimen). Autorisaties nooit.
+  const ander = fdb.db.prepare("SELECT r.id, r.omschrijving FROM kaart_regel r JOIN kaart_bestand b ON b.id = r.bestand WHERE r.kaart = ? AND b.formaat <> ? AND r.soort = ? AND r.transactiedatum = ? AND coalesce(r.boekdatum, '') = ? AND r.bedrag_centen = ? AND r.overzicht IS ? ORDER BY r.id");
   const geclaimd = new Set();
   const nieuw = regels.filter((r) => {
     if (bekend.get(r.sleutel)) return false;
     if (r.soort === 'autorisatie') return true;
-    const tegen = ander.all(kaart.id, formaat, r.soort, r.transactiedatum, r.boekdatum || '', r.bedrag_centen, r.overzicht).find((x) => !geclaimd.has(x.id));
+    const vrij = ander.all(kaart.id, formaat, r.soort, r.transactiedatum, r.boekdatum || '', r.bedrag_centen, r.overzicht).filter((x) => !geclaimd.has(x.id));
+    const n = omsNorm(r.omschrijving);
+    let tegen = vrij.find((x) => omsNorm(x.omschrijving) === n);
+    if (!tegen) {
+      const kort = vrij.filter((x) => { const m = omsNorm(x.omschrijving); return Math.min(m.length, n.length) >= 6 && (m.startsWith(n) || n.startsWith(m)); });
+      if (kort.length > 1) throw new KaartFout('twijfel', 'regel van ' + r.transactiedatum + ' past op meer dan één regel uit het andere formaat: bestand geweigerd');
+      tegen = kort[0];
+    }
     if (!tegen) return true;
     geclaimd.add(tegen.id);
     return false;
@@ -456,6 +466,13 @@ function inlezen(fdb, kaartWie, bytes, opties) {
         boekdatum: r.boekdatum, omschrijving: r.omschrijving, bedrag_centen: r.bedrag_centen, valuta_orig: r.valuta_orig, bedrag_orig_centen: r.bedrag_orig_centen,
         merchant_categorie: r.merchant_categorie, mcc: r.mcc, land: r.land, overzicht: r.overzicht, laatste4: r.laatste4, handelaar: handelaar(r.omschrijving, r.soort),
         aangemaakt_op: wanneer });
+    }
+    // wv2958 (review Codex MOET 1): het PDF-overzicht is het hele overzicht. Na het inlezen moet de databank voor dit overzicht precies
+    // dezelfde geboekte regels hebben (aantal en som op de cent); anders is er iets dubbel of verkeerd geclaimd → alles terug (ROLLBACK).
+    if (pdf) {
+      const st = fdb.db.prepare("SELECT count(*) AS n, coalesce(sum(bedrag_centen), 0) AS s FROM kaart_regel WHERE kaart = ? AND overzicht = ? AND soort <> 'autorisatie'").get(kaart.id, g.overzicht);
+      const som = g.regels.reduce((t, r) => t + r.bedrag_centen, 0);
+      if (st.n !== g.regels.length || st.s !== som) throw new KaartFout('dubbel', 'na het inlezen sluit overzicht ' + g.overzicht + ' niet op de PDF (' + st.n + ' regels in Facturen, ' + g.regels.length + ' op het overzicht): niets ingelezen');
     }
     D.audit(fdb, { wie: o.wie, wat: 'kaart_inlezen', object_soort: 'kaart_bestand', object_id: id, entiteit: kaart.entiteit,
       na: { regels: regels.length, nieuw: nieuw.length, periode: g.periode, aantallen: g.aantallen, bron_bewaard: !!(bron && bron.sha256 === sha) }, wanneer });

@@ -446,3 +446,30 @@ test('CLI: een PDF inlezen en een al geüpload document alsnog naar de kaart (te
   assert.equal(i.status, 0, i.stderr); assert.equal(JSON.parse(i.stdout).nieuw, 2); assert.equal(JSON.parse(i.stdout).overzicht, '2026-05');
   assert.notEqual(cli(['document', 'ffffffffffffffff']).status, 0);
 });
+
+test('ontdubbeling kijkt naar de omschrijving (review MOET 1): andere winkel zelfde bedrag/dag claimt niet; niet sluitend na inlezen = niets', () => {
+  const t = opzet();
+  C.kaartZet(t.fdb, { klantnummer: KLANT, laatste4: '0000', rekening: TG.slice(-4), wie: 'toets', nu: NU });
+  // gedeeltelijke CSV: alleen winkel B (zelfde datums en bedrag als A)
+  C.inlezen(t.fdb, '0000', csv([['15-03-2026', '16-03-2026', 'WINKEL BEE AMSTERDAM NLD', '****0000', 'D', '20,00', 'EUR', '20,00', 'Transaction', '202604']]), { wie: 'toets', nu: NU });
+  const tekst = icsTekst({ vorig: '0,00', credit: '0,00', debet: '40,00', nieuw: '40,00', regels: [
+    pdfRegel('15 mrt', '16 mrt', 'WINKEL AA', 'AMSTERDAM', 'NLD', '', '20,00', 'debet'), pdfRegel('15 mrt', '16 mrt', 'WINKEL BEE', 'AMSTERDAM', 'NLD', '', '20,00', 'debet')] });
+  const u = C.inlezen(t.fdb, '0000', icsPdf(tekst), { wie: 'toets', nu: NU, pdfTekst: tekst });
+  assert.equal(u.nieuw, 1); assert.equal(u.al_bekend_regels, 1);
+  assert.deepEqual(t.fdb.db.prepare("SELECT omschrijving FROM kaart_regel WHERE overzicht = '2026-04' ORDER BY omschrijving").all().map((x) => x.omschrijving), ['WINKEL AA AMSTERDAM NLD', 'WINKEL BEE AMSTERDAM NLD']);
+  // een CSV-regel op dit overzicht die niet op de PDF staat: na inlezen sluit het niet → niets ingelezen (ROLLBACK)
+  const t2 = opzet();
+  C.kaartZet(t2.fdb, { klantnummer: KLANT, laatste4: '0000', rekening: TG.slice(-4), wie: 'toets', nu: NU });
+  C.inlezen(t2.fdb, '0000', csv([['10-03-2026', '11-03-2026', 'WINKEL CEE AMSTERDAM NLD', '****0000', 'D', '5,00', 'EUR', '5,00', 'Transaction', '202604']]), { wie: 'toets', nu: NU });
+  const voor = t2.fdb.db.prepare('SELECT count(*) AS n FROM kaart_regel').get().n;
+  assert.throws(() => C.inlezen(t2.fdb, '0000', icsPdf(tekst), { wie: 'toets', nu: NU, pdfTekst: tekst }), (e) => e instanceof C.KaartFout && e.code === 'dubbel');
+  assert.equal(t2.fdb.db.prepare('SELECT count(*) AS n FROM kaart_regel').get().n, voor);
+  assert.equal(t2.fdb.db.prepare("SELECT count(*) AS n FROM kaart_bestand WHERE formaat = 'ics_pdf'").get().n, 0);
+  // twee afgekapte kandidaten: twijfel, geweigerd
+  const t3 = opzet();
+  C.kaartZet(t3.fdb, { klantnummer: KLANT, laatste4: '0000', rekening: TG.slice(-4), wie: 'toets', nu: NU });
+  C.inlezen(t3.fdb, '0000', csv([['15-03-2026', '16-03-2026', 'WOLKDIENST EEN AMSTERDAM NLD', '****0000', 'D', '20,00', 'EUR', '20,00', 'Transaction', '202604'],
+    ['15-03-2026', '16-03-2026', 'WOLKDIENST TWEE AMSTERDAM NLD', '****0000', 'D', '20,00', 'EUR', '20,00', 'Transaction', '202604']]), { wie: 'toets', nu: NU });
+  const t3tekst = icsTekst({ vorig: '0,00', credit: '0,00', debet: '20,00', nieuw: '20,00', regels: [pdfRegel('15 mrt', '16 mrt', 'WOLKDIENST', '', '', '', '20,00', 'debet')] });
+  assert.throws(() => C.inlezen(t3.fdb, '0000', icsPdf(t3tekst), { wie: 'toets', nu: NU, pdfTekst: t3tekst }), (e) => e instanceof C.KaartFout && e.code === 'twijfel');
+});
