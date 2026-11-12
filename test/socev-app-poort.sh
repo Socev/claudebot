@@ -3065,6 +3065,7 @@ async function bewijs(o) {
       // twee gevoelige vragen (hoofd + machinekamer) en één gewone
       const metVraag = async (kanaal, zin) => {
         const rr = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal, tekst: 'iets' }, { pot: P.jar });
+        for (let i = 0; i < 40 && rr.j.job_id && !afmaken[rr.j.job_id]; i++) await slaap(50);   // wv2965: hoofd schrijft chat_log bij de start
         await slaap(30); afmaken[rr.j.job_id]('Klaar.\n\nVRAAG AAN DAVID: ' + zin); await slaap(80);
         const u = await vraag('POST', '/app/uitslag', { job_id: rr.j.job_id }, { pot: P.jar });
         return { job: rr.j.job_id, hash: u.j.vraag && u.j.vraag.hash, gevoelig: u.j.vraag && u.j.vraag.gevoelig };
@@ -3116,7 +3117,7 @@ async function bewijs(o) {
       await slaap(60);
       const gR = gestart[gestart.length - 1];
       const clR = chatlogStaat.rijen.slice(nCL);
-      toets('14 wv405 daarna de eerste knopbeurt, met "met verse vingerafdruk bevestigd"; chat_log knop-ja-vers pas nu, na het antwoord van de vorige beurt', gestart.length === nGR + 2 && gR.jobId === jRij && /, met verse vingerafdruk bevestigd, vraag-id /.test(gR.prompt) && /kanaal "app-knop", en handel af\.\)$/.test(gR.prompt) && clR.length >= 3 && clR[clR.length - 1].bevestiging === 'knop-ja-vers' && clR[clR.length - 2].rol === 'socev' && /Piet/.test(clR[clR.length - 2].tekst), gR.prompt.slice(-160) + ' ' + JSON.stringify(clR.map((x) => [x.rol, x.bevestiging])));
+      toets('14 wv405 daarna de eerste knopbeurt, met "met verse vingerafdruk bevestigd"; chat_log knop-ja-vers pas nu, na het antwoord van de vorige beurt', gestart.length === nGR + 2 && gR.jobId === jRij && /, met verse vingerafdruk bevestigd, vraag-id /.test(gR.prompt) && /kanaal "app-knop", en handel af\.\)$/.test(gR.prompt) && clR.length >= 3 && clR[clR.length - 1].bevestiging === 'knop-ja-vers' && clR[clR.length - 2].rol === 'socev' && /Piet/.test(clR[clR.length - 2].tekst), JSON.stringify([gestart.length - nGR, gR.jobId === jRij, clR.map((x) => [x.rol, x.bevestiging, x.ts])]) + ' ' + gR.prompt.slice(-160));
       toets('14 wv405 vragen.json: gestart na de start', JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[vRij.job + ':' + vRij.hash].antwoord.gestart === true);
       afmaken[jRij]('gedaan'); await slaap(120);
       const gR2 = gestart[gestart.length - 1];
