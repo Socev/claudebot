@@ -113,7 +113,9 @@ function omgeving(opt) {
     if (st.d1Uit) throw new Error('D1 gaf HTTP 500');
     st.batches++;
     if (st.hook) st.hook(batch);
-    return batch.map((q) => { const s = d1db.prepare(q.sql); return /^\s*SELECT/i.test(q.sql) ? { results: s.all(...q.params) } : (s.run(...q.params), { results: [] }); });
+    // wv2961: net als de echte d1() in server.js: een sql-fout komt terug als 'D1 gaf HTTP 400', zonder de sqlite-melding
+    try { return batch.map((q) => { const s = d1db.prepare(q.sql); return /^\s*SELECT/i.test(q.sql) ? { results: s.all(...q.params) } : (s.run(...q.params), { results: [] }); }); }
+    catch (e) { st.sqlFouten = (st.sqlFouten || 0) + 1; throw new Error('D1 gaf HTTP 400'); }
   };
   const r2 = { put: async (k, b, m) => { if (st.r2Uit) throw new Error('R2 put HTTP 500'); st.r2.set(k, { b: Buffer.from(b), m }); },
     del: async (k) => { if (st.r2Uit) throw new Error('R2 del HTTP 500'); st.r2.delete(k); } };
@@ -124,7 +126,7 @@ function omgeving(opt) {
     ins.run(hid, 'google:' + hid.slice(1), cat, t, t);
     fs.writeFileSync(path.join(vault, M.MAP, hid + '.md'), '---\ntype: herinnering-stukken\nherinnering_id: ' + hid + '\nsoort: los\ntitel: "' + titel + '"\ntitel_bron: naamgeving\nwanneer: "' + wanneer + '"\n---\nFoto\'s: verzonnen.\n');
   }
-  return { basis, vault, ing, ml, pub, im, st, d1db, klok, fouten, album,
+  return { basis, vault, hdir, d1, r2, ing, ml, pub, im, st, d1db, klok, fouten, album,
     rijen: (t, k) => d1db.prepare('SELECT * FROM ' + t + (k ? ' WHERE kring = ?' : '')).all(...(k ? [k] : [])).map((r) => ({ ...r })),
     zetLijst: (s) => fs.writeFileSync(path.join(vault, M.BEZOEKERS_PAGINA), lijst(s)),
     sluit: () => { ing.sluit(); fs.rmSync(basis, { recursive: true, force: true }); } };
@@ -282,6 +284,24 @@ test('wv2943 bestaande D1 zonder kolom dag: de pod zet hem erbij (één keer), d
     assert.ok(!u.fout, u.fout);
     assert.ok(o.d1db.prepare("SELECT name FROM pragma_table_info('foto')").all().some((r) => r.name === 'dag'));
     assert.strictEqual(o.rijen('foto', 'familie')[0].dag, '2020-02-10');
+    assert.deepStrictEqual(o.fouten, []);
+  } finally { o.sluit(); }
+});
+
+test('wv2961 D1 heeft kolom dag al: een verse pod (herstart, nieuwe uitrol) publiceert gewoon, geen ALTER die met HTTP 400 faalt', async () => {
+  const o = await opgezet();
+  try {
+    let u = await o.pub.tik(true);
+    assert.ok(!u.fout, u.fout);
+    const pub2 = MP.maak({ db: o.ing._db, ml: o.ml, vault: o.vault, vv: VV, dir: o.hdir, d1: o.d1, r2: o.r2, categorieen: H.CATEGORIEEN,
+      nu: () => o.klok.t, fout: (l, e) => o.fouten.push(l + ': ' + (e && e.message)) });
+    const alters = [];
+    o.st.hook = (batch) => { for (const q of batch) if (/^\s*ALTER/i.test(q.sql)) alters.push(q.sql); };
+    o.klok.t += 16 * 60000;
+    u = await pub2.tik(true);
+    assert.ok(!u.fout, u.fout);
+    assert.deepStrictEqual(alters, [], 'geen ALTER als de kolom er al is');
+    assert.strictEqual(o.st.sqlFouten || 0, 0, 'geen enkele sql-fout naar D1');
     assert.deepStrictEqual(o.fouten, []);
   } finally { o.sluit(); }
 });

@@ -70,8 +70,9 @@ const D1_SCHEMA = [
   'CREATE TABLE IF NOT EXISTS log (id INTEGER PRIMARY KEY AUTOINCREMENT, pid TEXT NOT NULL, kring TEXT NOT NULL, huis TEXT, op INTEGER NOT NULL)',
 ];
 
-// wv2943: kolommen die er later bij kwamen (bestaande D1); 'duplicate column' = er al
-const D1_KOLOMMEN = ['ALTER TABLE foto ADD COLUMN dag TEXT'];
+// wv2943: kolommen die er later bij kwamen (bestaande D1). wv2961: eerst kijken of de kolom er al is (pragma_table_info);
+// de echte d1() gooit bij een ALTER-fout alleen 'D1 gaf HTTP 400' (nooit de sql-melding), dus 'duplicate column' herkennen kan niet.
+const D1_KOLOMMEN = [{ tabel: 'foto', kolom: 'dag', sql: 'ALTER TABLE foto ADD COLUMN dag TEXT' }];
 
 function sha256(x) { return crypto.createHash('sha256').update(x).digest('hex'); }
 function iso(ms) { return new Date(ms).toISOString(); }
@@ -207,7 +208,12 @@ function maak(o) {
   async function zorgSchema() {
     if (schemaKlaar) return;
     await d1(D1_SCHEMA.map((sql) => ({ sql, params: [] })));
-    for (const sql of D1_KOLOMMEN) { try { await d1([{ sql, params: [] }]); } catch (e) { if (!/duplicate column/i.test(String(e && e.message))) throw e; } }
+    const heeft = async (k) => { const [r] = await d1([{ sql: 'SELECT name FROM pragma_table_info(?)', params: [k.tabel] }]);
+      return ((r && r.results) || []).some((x) => x && x.name === k.kolom); };
+    for (const k of D1_KOLOMMEN) {
+      if (await heeft(k)) continue;
+      try { await d1([{ sql: k.sql, params: [] }]); } catch (e) { if (!(await heeft(k))) throw e; }   // tegelijk toegevoegd = goed
+    }
     schemaKlaar = true;
   }
 
