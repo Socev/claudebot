@@ -376,7 +376,7 @@ function detail(fdb, r, id, nu) {
       ingevoerd_op: f.ingevoerd_op, betaald_gezien_op: f.betaald_gezien_op, nagebeld_door: f.nagebeld_door, nagebeld_op: f.nagebeld_op,
       nagebeld_ibans: f.nagebeld_ibans, dubbel_van: f.dubbel_van, aangemaakt_op: f.aangemaakt_op }),
     iban_poort: { iban_nieuw: ip.iban_nieuw, reden: ip.reden, eerder_betaald: ip.eerder ? ip.eerder.totaal : 0 },   // wv2610: > 0 = geen "nieuw IBAN" in de kop
-    bevestigen: K.magBevestigen(f, poort),
+    bevestigen: metExact(fdb, f, K.magBevestigen(f, poort)),
     leverancier: lev ? { id: lev.id, naam: lev.naam, standaard_entiteit: lev.standaard_entiteit, standaard_betaalwijze: lev.standaard_betaalwijze,
       ibans: lev.ibans, alleen_portaal: !!lev.alleen_portaal, mediaan: lev.mediaan, verzendwijze: lev.verzendwijze || 'concept' } : null,
     verzending: verzendingVoorbeeld(fdb, f, nu),   // wv2480: wordt om HH:00 direct verstuurd / wordt een concept (reden)
@@ -835,6 +835,8 @@ function bevestig(fdb, r, d, nu, o) {
     const ov = K.statusOvergang('te_beoordelen', 'bevestigen', Object.assign({}, nieuw, { poort }));
     if (!ov.ok) weiger(409, 'bevestigen kan niet: ' + ov.reden, { redenen: K.magBevestigen(nieuw, poort).redenen });
     if (ov.naar === 'in_wachtrij' && !Number.isSafeInteger(nieuw.incl)) weiger(409, 'vul eerst het totaalbedrag in');
+    const xb = ov.naar === 'in_wachtrij' ? exactBezwaar(fdb, f, e.sleutel) : null;   // wv2969
+    if (xb) weiger(409, 'niet naar Exact: ' + xb, { code: 'exact', redenen: ['niet naar Exact: ' + xb] });
     const wanneer = nuIso(nu);
     // wv2590: een factuur zonder gekoppelde leverancier krijgt er bij Bevestigen een op naam (zoals Velden verbeteren), zodat het leren hieronder
     // iets heeft om te onthouden; alleen de eigenaar (leverancierOpNaam). Pas NA de controles hierboven: die rekenden zonder leverancier, dus
@@ -905,6 +907,8 @@ function zekerReden(fdb, f, ctx) {
   if (rij.valuta !== 'EUR') return 'andere valuta dan euro';
   if (K.isCreditnota(rij)) return 'creditnota beoordeel je los';
   if (!Number.isSafeInteger(rij.incl) || rij.incl <= 0) return 'geen totaalbedrag';
+  const xb = exactBezwaar(fdb, rij, rij.entiteit);   // wv2969
+  if (xb) return 'niet naar Exact: ' + xb;
   const tw = D.factuurTwijfel(fdb, rij, null);
   if (tw) return tw;
   const poort = poortVoor(fdb, f, ctx);
@@ -994,6 +998,30 @@ function zussenKoppelen(fdb, f, lev, wie, wanneer) {
     n++;
   }
   return n;
+}
+/*
+ * wv2969 (David 12-11-2026, eisen van de Exact-Scanservice): mag deze factuur naar een entiteit met route exact? null = ja (of geen route exact),
+ * anders de reden in gewone taal. Vooraf bij Bevestigen en Opnieuw proberen (en zichtbaar in het detail), zodat David het ziet vóór er een
+ * opdracht is: alleen een UBL-bestand zonder PDF, een stuk boven 15 MB, of een stuk dat de lezer als herinnering, aanmaning of offerte
+ * herkende (besluit soort_stuk, facturen-kern stapSoortStuk). Het paginatal (≤ 150) en de bestandsnaam regelt de koerier bij verzenden.
+ */
+const EXACT_BYTES = 15 * 1024 * 1024;
+function exactBezwaar(fdb, f, entiteit) {
+  const e = fdb.db.prepare('SELECT boekhoud_route FROM entiteit WHERE sleutel = ?').get(String(entiteit || ''));
+  if (!e || e.boekhoud_route !== 'exact') return null;
+  const d = fdb.db.prepare('SELECT d.soort, d.mime, d.bytes FROM factuur f JOIN document d ON d.id = f.document WHERE f.id = ?').get(f.id);
+  if (!d) return 'het stuk ontbreekt';
+  if (d.soort === 'ubl' || /xml/i.test(String(d.mime || ''))) return 'alleen een UBL-bestand (XML), geen PDF: Exact neemt alleen een PDF aan. Vraag de leverancier om de factuur als PDF';
+  if (Number(d.bytes) > EXACT_BYTES) return 'te groot voor Exact (' + (Math.round(Number(d.bytes) / 104857.6) / 10).toLocaleString('nl-NL') + ' MB, Exact neemt tot 15 MB): verklein of splits de PDF, of boek hem zelf in';
+  const h = fdb.db.prepare("SELECT waarde FROM besluit WHERE factuur = ? AND stap = 'soort_stuk' ORDER BY id DESC LIMIT 1").get(f.id);
+  if (h && ['herinnering', 'aanmaning', 'offerte'].includes(h.waarde)) return 'lijkt een ' + (h.waarde === 'herinnering' ? 'betalingsherinnering' : h.waarde) +
+    ': Exact keurt die af. Staat de factuur zelf er al in, kies dan Geen factuur; anders vraag je de leverancier om de factuur';
+  return null;
+}
+// detail en lijst: de Exact-reden erbij, zodat de knop Bevestigen zegt waarom het niet kan
+function metExact(fdb, f, mb) {
+  const x = f && f.status === 'te_beoordelen' && f.entiteit ? exactBezwaar(fdb, f, f.entiteit) : null;
+  return x ? { ok: false, redenen: mb.redenen.concat(['niet naar Exact: ' + x]) } : mb;
 }
 function bijlagenVan(fdb, f) {
   const docs = [f.document_id, f.ubl_document_id].filter(Boolean).map((id) => fdb.db.prepare('SELECT naam, mime, sha256 FROM document WHERE id = ?').get(id));
@@ -1275,6 +1303,8 @@ function factuurGebeurtenis(fdb, r, f, gebeurtenis, nu) {
     const ov = K.statusOvergang(f.status, 'opnieuw_proberen', { entiteit: f.entiteit });
     if (!ov.ok) weiger(409, 'opnieuw proberen kan niet: ' + ov.reden);
     const e = fdb.db.prepare('SELECT * FROM entiteit WHERE sleutel = ?').get(f.entiteit);
+    const xb = exactBezwaar(fdb, f, f.entiteit);   // wv2969
+    if (xb) weiger(409, 'niet naar Exact: ' + xb, { code: 'exact' });
     const op = K.maakOpdracht(f, e, { id: D.nieuwId(), bijlagen: bijlagenVan(fdb, f), verstuur_na: K.verstuurNa(nu, verstuurInstelling(fdb)), poort });
     const u = fdb.db.prepare("UPDATE factuur SET status = 'in_wachtrij', bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = 'verzending_mislukt'").run(wanneer, f.id);
     if (u.changes !== 1) weiger(409, 'de factuur is intussen gewijzigd');
@@ -4010,4 +4040,4 @@ function mailStappen(fdb, max) {
     .map((x) => ({ gmail_id: String(x.gmail_id), stap: Number(x.rang) >= 2 ? 'is_betaald' : 'in_sepa' }));
 }
 
-module.exports = { naadVenster, eerdereBetalingen, ibanHistorie, ibanHerbereken, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, betaalMeldingJob, betaalMeldingKlaar, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek, ZONDER_FACTUUR };
+module.exports = { naadVenster, eerdereBetalingen, ibanHistorie, ibanHerbereken, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, betaalMeldingJob, betaalMeldingKlaar, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, exactBezwaar, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek, ZONDER_FACTUUR };

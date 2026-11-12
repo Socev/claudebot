@@ -51,6 +51,11 @@ const GRENS = {
   tekst: 200000,
   intake: 10,               // OVIS Intake-stukken per ronde (wv1919)
 };
+// wv2969 (David 12-11-2026, eisen van de Exact-Scanservice; vault 10_Zakelijk/_Gedeeld/Relaties/Exact.md): naar een entiteit met route exact
+// gaat alleen de PDF (geen UBL-XML: geen bewijs dat de scanmail XML verwerkt, 0 mails van Exact sinds 9-2026), ≤ 15 MB, ≤ 150 pagina's,
+// bestandsnaam ≤ 99 tekens incl. extensie en uniek binnen de mail. Wat niet past wordt geweigerd met een reden die David in Facturen ziet
+// (signaal verzending mislukt); er gaat niets half naar Exact. Route mail (Acta) en de POT-afschriften blijven zoals ze waren.
+const EXACT = { bytes: 15 * 1024 * 1024, paginas: 150, naam: 99 };
 const OPGEHAALD_MS = K.OPGEHAALD_TIMEOUT_MS;
 const TOKEN_RE = /\[ref (F[VA][0-9a-f]{16})\]/;
 
@@ -77,8 +82,9 @@ function pdfNaarTekst(bytes, o) {
         { timeout: o.timeoutMs || 20000, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8', env: {}, windowsHide: true },
         function (err, stdout) {
           if (err) return klaar({ ok: false, fout: err.killed ? 'tijd' : err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'te_lang' : 'pdftotext' });
-          const tekst = String(stdout || '').slice(0, GRENS.tekst);
-          klaar({ ok: true, tekst, tekstlaag: /\S/.test(tekst) });
+          const vol = String(stdout || ''), tekst = vol.slice(0, GRENS.tekst);
+          // wv2969: pdftotext sluit elke pagina af met een form feed; geteld op de volle uitvoer (gemeten 12-11: 55 van 55 echte PDF's = pdfinfo)
+          klaar({ ok: true, tekst, tekstlaag: /\S/.test(tekst), paginas: (vol.match(/\f/g) || []).length });
         });
     } catch (e) { return klaar({ ok: false, fout: 'pdftotext' }); }
     kind.stdin.on('error', function () {});
@@ -121,14 +127,28 @@ function plusDagen(ymd, n) { return K.plusDagen(ymd, n); }
 // MT940 begint met ':20:', of (ABN-export, ook wat pot-afschrift.js maakt) met de kop BIC / 940 / BIC en dan ':20:' (wv2852: zonder
 // die kop werd elk ABN-afschrift geweigerd). Streng: alleen die drie regels mogen vóór ':20:' staan.
 const MT940_KOP = /^\s*(?:[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\r?\n940\r?\n[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\r?\n)?:20:/;
-function naamMetExtensie(naam, mime, bytes, soort) {
-  const stam = String(naam || 'stuk').replace(/[\\/]/g, '_').replace(/\.(pdf|xml|940|sta|mt940)$/i, '').slice(0, 110) || 'stuk';
+// max (wv2969, route exact): hele naam incl. extensie ≤ max tekens, stuurtekens en dubbele spaties eruit; zonder max zoals vóór wv2969 (110 + extensie).
+function naamMetExtensie(naam, mime, bytes, soort, max) {
+  let stam = String(naam || 'stuk').replace(/[\\/]/g, '_').replace(/\.(pdf|xml|940|sta|mt940)$/i, '');
+  stam = max ? stam.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max - 4).trim() || 'stuk' : stam.slice(0, 110) || 'stuk';
   const b = bytes || Buffer.alloc(0);
   if (b.subarray(0, 5).toString('latin1') === '%PDF-') return stam + '.pdf';
   if (/^\s*(?:\ufeff)?<(?:\?xml|(?:\w+:)?(?:Invoice|CreditNote)\b)/.test(b.subarray(0, 300).toString('utf8'))) return stam + '.xml';
   if (soort === 'boekhouder_afschrift' && MT940_KOP.test(b.subarray(0, 80).toString('latin1'))) return stam + '.940';
   return null;
 }
+// wv2969: namen uniek binnen één mail (hoofdletterongevoelig): de tweede wordt "stam (2).pdf", ingekort zodat hij binnen max blijft.
+function uniekeNamen(bijlagen, max) {
+  const gezien = new Set();
+  return bijlagen.map(function (b) {
+    let naam = b.naam;
+    const m = /^(.*)(\.[a-z0-9]{3})$/i.exec(naam) || [naam, naam, ''];
+    for (let i = 2; gezien.has(naam.toLowerCase()); i++) { const x = ' (' + i + ')'; naam = m[1].slice(0, max - m[2].length - x.length).trim() + x + m[2]; }
+    gezien.add(naam.toLowerCase());
+    return Object.assign({}, b, { naam });
+  });
+}
+function mb(n) { return (Math.round(n / 104857.6) / 10).toLocaleString('nl-NL'); }
 // Onderwerp en tekst van de mail aan de boekhouder: kort, zonder factuurtekst, met het token.
 function mailVoor(fdb, op, modus) {
   const e = fdb.db.prepare('SELECT naam, naam_kort FROM entiteit WHERE sleutel = ?').get(op.entiteit) || {};
@@ -156,7 +176,7 @@ function mailVoor(fdb, op, modus) {
  */
 function controleer(fdb, op) {
   if (op.entiteit === 'prive') return { ok: false, reden: 'opdracht voor privé' };
-  const e = fdb.db.prepare('SELECT sleutel, boekhoud_doel, afschrift_doel FROM entiteit WHERE sleutel = ?').get(op.entiteit);
+  const e = fdb.db.prepare('SELECT sleutel, boekhoud_doel, afschrift_doel, boekhoud_route FROM entiteit WHERE sleutel = ?').get(op.entiteit);
   if (!e || e.sleutel === 'prive') return { ok: false, reden: 'entiteit onbekend of privé' };
   const doel = op.soort === 'boekhouder_factuur' ? e.boekhoud_doel : e.afschrift_doel;
   if (!doel || doel !== op.doeladres) return { ok: false, reden: 'doeladres wijkt af van de entiteitentabel' };
@@ -183,16 +203,26 @@ function controleer(fdb, op) {
   try { vingerafdruk = K.vingerafdruk({ id: op.id, soort: op.soort, doeladres: doel, regel, bijlagen: verse }); }
   catch (e2) { return { ok: false, reden: 'vingerafdruk niet op te bouwen (' + foutSoort(e2) + ')' }; }
   if (vingerafdruk !== op.vingerafdruk) return { ok: false, reden: 'vingerafdruk wijkt af van het akkoord' };
-  const bijlagen = [];
+  // wv2969: de vingerafdruk dekt alle stukken van het akkoord (ook de UBL), zodat opdrachten van vóór deze wijziging niet vastlopen; naar
+  // Exact gaat daarvan alleen de PDF (een deelverzameling van wat David akkoord gaf, nooit iets erbij).
+  const exact = op.soort === 'boekhouder_factuur' && e.boekhoud_route === 'exact';
+  let bijlagen = [];
   for (const b of verse) {
     let bytes;
     try { bytes = D.stukLees(fdb, b.sha256); } catch (e3) { return { ok: false, reden: 'stuk ontbreekt of is beschadigd' }; }
     if (sha256(bytes) !== b.sha256) return { ok: false, reden: 'stuk komt niet overeen met zijn sha256' };
-    const naam = naamMetExtensie(b.naam, b.mime, bytes, op.soort);
+    const naam = naamMetExtensie(b.naam, b.mime, bytes, op.soort, exact ? EXACT.naam : null);
     if (!naam) return { ok: false, reden: 'bijlagetype niet verzendbaar (alleen PDF, UBL of MT940)' };
     bijlagen.push({ naam, mime: b.mime || 'application/octet-stream', bytes });
   }
-  return { ok: true, bijlagen, vingerafdruk };
+  if (exact) {
+    bijlagen = bijlagen.filter((b) => /\.pdf$/.test(b.naam));
+    if (!bijlagen.length) return { ok: false, reden: 'geen PDF: Exact neemt alleen een PDF aan, geen UBL-bestand (XML). Vraag de leverancier om de factuur als PDF' };
+    const groot = bijlagen.reduce((n, b) => n + b.bytes.length, 0);
+    if (groot > EXACT.bytes) return { ok: false, reden: 'te groot voor Exact (' + mb(groot) + ' MB, Exact neemt tot 15 MB): verklein of splits de PDF, of boek hem zelf in' };
+    bijlagen = uniekeNamen(bijlagen, EXACT.naam);
+  }
+  return { ok: true, bijlagen, vingerafdruk, exact };
 }
 
 // ───────────────────────────── lees-luik: zoeken op het token ─────────────────────────────
@@ -353,6 +383,18 @@ async function ronde(fdb, io, o) {
   return uit;
 }
 
+// wv2969: null = elke PDF ≤ 150 pagina's; anders de reden (zonder inhoud). Een te lange tekst (> 4 MB uit pdftotext) is ruim meer dan 150 pagina's.
+async function exactPaginas(bijlagen, pdf) {
+  for (const b of bijlagen) {
+    let t;
+    try { t = await pdf(b.bytes); } catch (e) { t = { ok: false, fout: 'pdftotext' }; }
+    if (t && !t.ok && t.fout === 'te_lang') return 'te veel pagina\'s voor Exact (meer dan 150): splits de PDF of boek hem zelf in';
+    const n = t && t.ok ? (Number.isSafeInteger(t.paginas) ? t.paginas : (String(t.tekst || '').match(/\f/g) || []).length) : null;
+    if (n == null) return 'paginatal van de PDF niet vast te stellen (Exact neemt tot 150 pagina\'s): open de PDF en stuur hem zo nodig zelf';
+    if (n > EXACT.paginas) return 'te veel pagina\'s voor Exact (' + n + ', Exact neemt tot 150): splits de PDF of boek hem zelf in';
+  }
+  return null;
+}
 // Eén opdracht: controleren, zo nodig eerst zoeken, reserveren, verzenden, uitkomst vastleggen.
 /*
  * wv2480: de bijlagen vers lezen vlak vóór een directe verzending (review MOET 4: positief bewijs). Elke PDF met tekstlaag (≥ 40 tekens), een
@@ -402,6 +444,11 @@ async function verstuurEen(fdb, io, op, o, uit) {
       uit.verzending.overgenomen++;
       return;
     }
+  }
+  // wv2969: Exact neemt hooguit 150 pagina's; geteld met pdftotext (de enige PDF-lezer hier). Niet te tellen = niet versturen (zichtbaar).
+  if (c.exact) {
+    const p = await exactPaginas(c.bijlagen, o.pdf || pdfNaarTekst);
+    if (p) { D.opdrachtResultaat(fdb, op.id, { status: 'geweigerd', fout: p }, { nu: klok(), wie }); uit.verzending.geweigerd++; return; }
   }
   // wv2480: concept of direct. Eerst (alleen als de opdracht direct kan) de bijlagen vers lezen; dan in één transactie kiezen, het dagplafond
   // tellen en reserveren (D.reserveerKies = ook de hercontrole op de verse rijen). Tussen die transactie en de aanroep zit geen await.
@@ -790,4 +837,4 @@ async function knoopVul(fdb, io, factuurIds, domein, o) {
   return n;
 }
 
-module.exports = { ronde, leesIntake, eigenVerzondenAanAnderen, knoopVul, controleer, pdfNaarTekst, oorspronkelijkeAfzender, isDoorgestuurd, tokenVan, mailVoor, zoekToken, naamMetExtensie, LuikFout, GRENS, PDFTOTEXT, TOKEN_RE };
+module.exports = { ronde, leesIntake, eigenVerzondenAanAnderen, knoopVul, controleer, pdfNaarTekst, oorspronkelijkeAfzender, isDoorgestuurd, tokenVan, mailVoor, zoekToken, naamMetExtensie, uniekeNamen, exactPaginas, LuikFout, GRENS, EXACT, PDFTOTEXT, TOKEN_RE };
