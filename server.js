@@ -7781,6 +7781,11 @@ async function appBeurt(req, res, reg, a, s, d) {
   // wv2965: chat_log pas bij de start (hoofd met rij). Schrijft een ander bericht (oude pad, [AUTO]) nog zijn rij, dan eerst dat
   // bericht in de wachtrij en dit erachter (zoals appKnop, Fable-diffreview wv405 #2).
   const chatlogBijStart = kanaal === 'hoofd' && rijAan;
+  // Codex-review wv2965 MOET 1: ontvangsttijd en "bezig" vastleggen vóór het wachten (de job ontstaat pas daarna; een voorstel dat in die
+  // wachttijd verschijnt, mag niet vóór dit bericht komen te staan)
+  const ontvangen = Date.now();
+  const bezigBijOntvangst = chatlogBijStart && ((appStaat.startend && appStaat.startend[kanaal] > 0) ||
+    Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === APP_KANALEN[kanaal] && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); }));
   if (chatlogBijStart) for (let i = 0; i < 40 && appStaat.startend && appStaat.startend[kanaal] > 0; i++) await new Promise(function (r) { setTimeout(r, 100); });
   const ids = appBeurtIds();
   if (ids[bh]) { res._app.reden = 'herhaling ' + ids[bh].job; return appStuur(res, 200, { ok: true, job_id: ids[bh].job, al: true, in_rij: appWachtInRij(ids[bh].job) }); }   // tweede kwam tijdens de rolcheck
@@ -7817,7 +7822,7 @@ async function appBeurt(req, res, reg, a, s, d) {
         antwoord_op: antwOp ? antwOp.x.job_id : undefined,
         // wv628 (§ 4.2 1a/1b): rijregel en tussendoor-regel pas bij de start (wat er dan afrondde of binnenkwam)
         bijStart: kanaal === 'machinekamer' ? function () { return appRijStaart(jidRef, kanaal, !!antwOp); }
-          : chatlogBijStart ? function () { return appHoofdStart(jidRef, inRij, chatRijen); }   // wv2965
+          : chatlogBijStart ? function () { return appHoofdStart(jidRef, inRij || bezigBijOntvangst, chatRijen, ontvangen); }   // wv2965
           : kanaal === 'hoofd' ? function () { return typeof zoekSnelStaart === 'function' ? zoekSnelStaart() : ''; } : undefined });   // wv1252: wat David intussen via Zoek snel vroeg
       jidRef = st.job_id || null;
     }
@@ -7905,14 +7910,15 @@ async function appRijStaart(jobId, kanaal, metCitaat, zonderTussendoor) {
   return uit;
 }
 // wv2965: bij de start van een getypte hoofdbeurt (rij aan). (1) Davids rij in chat_log (en bij "Antwoord hierop" het geciteerde
-// bericht 1 ms eerder). Stond het bericht in de rij (er liep een beurt toen het binnenkwam), dan krijgt de rij zijn typtijd als ts:
+// bericht 1 ms eerder). Stond het bericht in de rij (er liep een beurt toen het binnenkwam of toen het de wachtrij in ging), dan krijgt
+// de rij zijn ontvangsttijd als ts:
 // de Poortwachter koppelt Davids laatste rij aan Socevs laatste rij dáárvóór, dus nooit aan een voorstel dat pas na het typen kwam;
 // en tijdens de beurt die liep stond de rij er nog niet, dus telde hij daar ook niet. Anders, zoals de knopdruk, ná de laatst
 // geschreven rij. Lukt het schrijven niet op tijd, dan de systeemregel (geen agenda-actie). (2) De rijregel van de machinekamer (had
 // David het antwoord dat intussen afrondde al gezien?), zonder tussendoor-regel. (3) Zoek snel (wv1252), zoals vóór wv2965.
-function appHoofdStart(jobId, wachtte, chatRijen) {
+function appHoofdStart(jobId, wachtte, chatRijen, ontvangen) {
   const j = jobId && jobs[jobId];
-  const getypt = j ? j.created : Date.now();
+  const getypt = Math.min(Number(ontvangen) || Infinity, j ? j.created : Date.now());   // ontvangst (vóór elk wachten), anders aanmaak
   const tsD = wachtte ? getypt : Math.max(Date.now(), (appStaat.chatlogLaatsteTs || 0) + 2);
   const log = appChatLogVoor('hoofd', chatRijen(tsD)).then(function (g) { return g ? '' : APP_CHATLOG_NIET; }, function (e) { logError('app-chatlog', e); return APP_CHATLOG_NIET; });
   const rij = appRijStaart(jobId, 'hoofd', false, true).catch(function (e) { logError('app-bij-start', e); return ''; });
