@@ -7764,11 +7764,11 @@ async function appBeurt(req, res, reg, a, s, d) {
     const gehad = new Set();
     upload = { dir: dir, lijst: gekozen.map(function (k) { return { n: k.n, doel: appUniekeNaam(k.naam, gehad), grootte: k.grootte }; }) };
   }
-  // wv628 (§ 4.2 1c): "Antwoord hierop" = het id van een bericht in het machinekamergesprek; de pod zoekt het zelf op (de app stuurt
-  // geen tekst mee). Alleen de machinekamer; onbekend of ouder dan 3 dagen = 400.
+  // wv628 (§ 4.2 1c): "Antwoord hierop" = het id van een bericht in hetzelfde gesprek; de pod zoekt het zelf op (de app stuurt
+  // geen tekst mee). Machinekamer en (wv2964) hoofdkanaal, niet de Cijfer-Meester; onbekend of ouder dan 3 dagen = 400.
   let antwOp = null;
   if (d.antwoord_op !== undefined && d.antwoord_op !== null && d.antwoord_op !== '') {
-    if (kanaal !== 'machinekamer') return appWeiger(res, 400, '"Antwoord hierop" kan alleen in de machinekamer', 'antwoord_op kanaal');
+    if (!APP_ANTWOORD_OP_KANALEN[kanaal]) return appWeiger(res, 400, '"Antwoord hierop" kan hier niet', 'antwoord_op kanaal');
     if (!APP_JOB_RE.test(String(d.antwoord_op))) return appWeiger(res, 400, 'dit bericht ken ik niet (meer); stuur je antwoord zonder citaat', 'antwoord_op vorm');
     antwOp = await appAntwoordOpZoek(kanaal, String(d.antwoord_op));
     if (antwOp.fout) return appWeiger(res, antwOp.status, antwOp.fout, antwOp.reden);
@@ -7784,7 +7784,12 @@ async function appBeurt(req, res, reg, a, s, d) {
   appStaat.beurtStartend[bh] = new Promise(function (r) { klaarJob = r; });
   let st, inRij = false;
   try {
-    const gelogd = await appChatLogStart(kanaal, [{ rol: 'david', ts: Date.now(), bevestiging: 'getypt', tekst: tekst ? appOntmasker(tekst) : '[' + upload.lijst.length + ' bestand(en)]' }]);
+    // wv2964: met "Antwoord hierop" in het hoofdkanaal eerst het geciteerde bericht als Socev-rij (1 ms eerder, zoals een knopdruk in de
+    // app), zodat de Poortwachter Davids getypte rij aan dát bericht koppelt en niet aan het laatste. Davids rij blijft alleen zijn eigen
+    // tekst met bevestiging 'getypt' (een getypt antwoord, ook met citaat, is nooit een knopdruk).
+    const tsD = antwOp && kanaal === 'hoofd' ? Math.max(Date.now(), (appStaat.chatlogLaatsteTs || 0) + 2) : Date.now();
+    const gelogd = await appChatLogStart(kanaal, (antwOp && kanaal === 'hoofd' ? [{ rol: 'socev', ts: tsD - 1, tekst: String(antwOp.x.antwoord || '') }] : [])
+      .concat([{ rol: 'david', ts: tsD, bevestiging: 'getypt', tekst: tekst ? appOntmasker(tekst) : '[' + upload.lijst.length + ' bestand(en)]' }]));
     // wv628: [ANTWOORD OP] vóór Davids tekst; is het geciteerde bericht een open gevoelige vraag, dan een regel dat getypt niet telt
     const kop = antwOp ? appAntwoordOpRegel(antwOp.x) + '\n' : '';
     const staartOp = antwOp && antwOp.gevoeligOpen ? '\n' + APP_ANTWOORD_OP_GEVOELIG : '';
@@ -7815,6 +7820,7 @@ async function appBeurt(req, res, reg, a, s, d) {
 
 // ── wv628: rij, tussendoor-regel en "Antwoord hierop" (ontwerp parallelle draden § 4.2) ──
 const APP_ANTWOORD_OP_MS = 72 * 3600 * 1000;
+const APP_ANTWOORD_OP_KANALEN = { machinekamer: true, hoofd: true };   // wv2964: ook het gesprek met Socev (David 12-11-2026)
 const APP_ANTWOORD_OP_CITAAT = 600;
 const APP_ANTWOORD_OP_GEVOELIG = '(Getypt antwoord op een open vraag over versturen, verwijderen, agenda of geld: voor deze handeling telt alleen de knop met vingerafdruk, niet dit getypte antwoord. De vraag houdt zijn knoppen.)';
 const APP_TUSSENDOOR_MAX = 5;
@@ -8215,7 +8221,7 @@ async function appGeschiedenis(req, res, reg, a, pad) {
   const uit = { ok: true, kanaal: kanaal, items: items, lopend: lopend, fout: fout, reacties: !!reacties };
   // wv628: wat deze pod kent (de app zet de Stuur-knop alleen open en toont Antwoord hierop als het er staat; oude pod = oud gedrag)
   if (appRijAan(kanaal)) { uit.rij_getypt = true; uit.rij_max = APP_RIJ_GETYPT_MAX; }
-  if (kanaal === 'machinekamer') uit.antwoord_op = true;
+  if (APP_ANTWOORD_OP_KANALEN[kanaal]) uit.antwoord_op = true;   // wv2964: ook hoofd
   if (anker) { uit.anker = anker; uit.meer_nieuw = meerNieuw; }
   appStuur(res, 200, uit);
 }
