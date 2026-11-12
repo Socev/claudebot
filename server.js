@@ -4133,6 +4133,7 @@ function handleRequest(req, res) {
       pot_maand: typeof potMaandInfo === 'function' ? potMaandInfo() : { aan: false },   // wv2762: OVIS POT maandronde (schakelaar, bundel, laatste tik; geen inhoud)   // wv911: POT-app nota's als Gmail-concept (schakelaar, laatste tik, aantallen; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
+      beleggen: typeof beleggenInfo === 'function' ? beleggenInfo() : { aan: false },   // wv2982: OVIS Beleggen (aantallen rijen, vault_ok; geen bedragen)
       ghawa: typeof ghawaInfo === 'function' ? ghawaInfo() : { aan: false },   // wv2877: OVIS GHAWA (databank aanwezig?, laatste scherm en of het sluit; geen inhoud)
       gezondheid: typeof gezondheidInfo === 'function' ? gezondheidInfo() : { aan: false },   // wv937: App Gezondheid (gezondheid-app.js in deze release? tellers, geen inhoud)
       doorgeefluik: typeof doorgeefInfo === 'function' ? doorgeefInfo() : { aan: false },   // wv1267: schakelaar en laatste uitkomst (geen inhoud)
@@ -5453,7 +5454,8 @@ const APP_MAX_BODY = 64 * 1024;
 const APP_OMZET_MAX_BODY = 5 * 1024 * 1024;   // wv1854: tekst ≤ 2 MB (omzet.js telt de bytes en geeft 413) + JSON-ontsnapping (\n, \", \uXXXX)
 const APP_BRAIN_WEB_MAX_BODY = 6 * 1024 * 1024;   // wv2660: Naar Second Brain, html ≤ 2 M tekens + JSON-ontsnapping (brain-web.js telt zelf)
 const APP_OSINT_BESTAND_MAX_BODY = 15 * 1024 * 1024;   // wv2698: OSINT › Bestand duiden, ≤ 10 MB als base64 (13,4 MB) + JSON
-const APP_OSINT_ZOEK_MAX_BODY = 256 * 1024;   // wv2698: OSINT › Mail duiden, kop ≤ 60.000 tekens + JSON-ontsnapping (review-ZOU 7)
+const APP_OSINT_ZOEK_MAX_BODY = 256 * 1024;
+const APP_BELEGGEN_MAX_BODY_VROEG = 3 * 1024 * 1024;   // wv2982: OVIS Beleggen › bestand (CSV ≤ 2 MB als JSON-tekst)   // wv2698: OSINT › Mail duiden, kop ≤ 60.000 tekens + JSON-ontsnapping (review-ZOU 7)
 const APP_CODE_MS = 10 * 60 * 1000;
 const APP_CODE_POGINGEN = 5;
 const APP_CODE_INTERVAL_MS = 60 * 1000;
@@ -5478,7 +5480,8 @@ APP_GLIJD_ROUTES.add('POST /app/financien/doel');   // wv2621: doel erbij of weg
 APP_GLIJD_ROUTES.add('POST /app/financien/potje');   // wv2706: potje zetten of weg = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij een reis tikken = David die werkt
 ['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2717: zelf corrigeren = David die werkt
-APP_GLIJD_ROUTES.add('POST /app/zoek-snel');   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
+APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
+['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
 // geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
@@ -13600,8 +13603,9 @@ function handleApp(req, res) {
     const rambleStuk = req.method === 'POST' && APP_RAMBLE_STUK_RE.test(p);   // wv1969: MemoryLane, één WAV-stuk van 60 s
     const ruw = upload || rambleStuk || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
     if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
-    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && (p === '/app/osint/bestand' || p === '/app/ghawa/afschrift' || p === '/app/ghawa/website/concept') ? APP_OSINT_BESTAND_MAX_BODY : (req.method === 'POST' && p === '/app/osint/zoek' ? APP_OSINT_ZOEK_MAX_BODY : APP_MAX_BODY)))); })(function (fout, d, lichaam) {
+    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && (p === '/app/osint/bestand' || p === '/app/ghawa/afschrift' || p === '/app/ghawa/website/concept') ? APP_OSINT_BESTAND_MAX_BODY : (req.method === 'POST' && p === '/app/osint/zoek' ? APP_OSINT_ZOEK_MAX_BODY : (req.method === 'POST' && p === '/app/beleggen/bestand' ? APP_BELEGGEN_MAX_BODY_VROEG : APP_MAX_BODY))))); })(function (fout, d, lichaam) {
       if (fout === 'groot' && p === '/app/omzet') return appWeiger(res, 413, 'de tekst is te groot om om te zetten (hooguit 2 MB)', 'body groot');   // wv1854
+      if (fout === 'groot' && p === '/app/beleggen/bestand') return appWeiger(res, 413, 'dit bestand is te groot (hooguit 2 MB)', 'body groot');   // wv2982
       if (fout === 'groot' && p === '/app/brain/webpagina') return appWeiger(res, 413, 'deze pagina is te groot (hooguit 2 MB html)', 'body groot');   // wv2660
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
       let reg;
@@ -13712,6 +13716,7 @@ function handleApp(req, res) {
           || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank)$/.test(route)
           || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)
           || /^(GET \/app\/ghawa\/delen|POST \/app\/ghawa\/delen\/(onderdeel|noodstop|kijker|kijker-weg|tekst|overleg))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
+        if (route === 'GET /app/beleggen' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
@@ -21754,6 +21759,38 @@ if (GHAWA_TIKKEN) {
   }, 60 * 60000).unref();
 }
 // ── einde OVIS GHAWA ──
+// ── OVIS Beleggen (wv2982, 12-11-2026; plan vault "01_Ontwikkeling/OVIS Beleggen - plan (Fable 5.2, 12-11-2026)" fase 1) ──
+// Eigen scherm /beleggen in de Socev-app: Davids plan (veertien vragen → regels), stand uit zijn eigen DEGIRO-export of met de hand, dagboek,
+// volglijst en signalen die alleen rekenen. Eigen databank /opt/data/beleggen/beleggen.sqlite (700/600); beleggen.js doet geen uitgaand verzoek
+// en kent geen DEGIRO-inlog. Routes achter de app-sessie (zelfde poort als Financiën: sessie + handtekening, op een vaste plek het invoerslot
+// voor elke POST; geen verse vingerafdruk per handeling):
+//   GET  /app/beleggen                       alles in één antwoord
+//   POST /app/beleggen/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal)
+// Bestand: JSON {naam, tekst, datum?, bewaar} tot 3 MB (doorgeefluik én pod); bewaar:false = proef zonder schrijven. Audit: alleen route + aantallen.
+// Vaultpagina's 20_Prive/Financien/Beleggen/Beleggingsplan.md en Dagboek.md via vault-veilig (de databank is de bron).
+const BELEGGEN_DB = process.env.BELEGGEN_DB || '/opt/data/beleggen/beleggen.sqlite';
+const beleggenApp = (function () {
+  const p = path.join(__dirname, 'beleggen.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ dbPad: BELEGGEN_DB, vaultSchrijf: function (rel, tekst) { VV().schrijf(path.join(VAULT, rel), tekst); } }); }
+  catch (e) { logError('beleggen', new Error('laden faalde')); return null; }
+})();
+async function appBeleggen(req, res, a, route, d) {
+  if (!beleggenApp) return appWeiger(res, 404, 'Beleggen zit niet in deze versie van de pod', 'beleggen ontbreekt');
+  if (!appTeller('beleggen', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens beleggen');
+  const post = route.indexOf('POST ') === 0;
+  if (post && !appTeller('beleggen-schrijf', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens beleggen-schrijf');
+  let u;
+  try { u = beleggenApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
+  catch (e) { logError('beleggen', new Error('route faalde')); return appWeiger(res, 503, 'Beleggen is nu niet te lezen; probeer het zo opnieuw', 'beleggen fout'); }   // geen inhoud in de log
+  if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'beleggen').slice(0, 80);
+  return appStuur(res, u.status, u.body);
+}
+function beleggenInfo() {
+  if (!beleggenApp) return { aan: false };
+  try { return beleggenApp.info(); } catch (e) { return { aan: true, fout: true }; }
+}
+// ── einde OVIS Beleggen ──
 // ── OVIS Shopper (wv2264, 2-11-2026; idee 23 S3, ontwerp vault "01_Ontwikkeling/OVIS Shopper - wat er al bestaat en ontwerp (2-11-2026).md"
 // § 3.3–3.4) ──
 // Apps › Shopper in de Socev-app: de zoektochten van de skill ovis-shopper. Geen eigen opslag: shopper.js leest bij elke vraag de pagina's

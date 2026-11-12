@@ -480,6 +480,10 @@ jobs:
       - name: "pakjes (wv2593, pakjes in de app)"
         if: ${{ !cancelled() }}
         run: bash test/pakjes.sh
+      # wv2982: OVIS Beleggen fase 1 — bestandslezer (DEGIRO-export, strikt), rekenwerk, routes en vaultpagina's op verzonnen gegevens.
+      - name: "beleggen (wv2982, OVIS Beleggen fase 1)"
+        if: ${{ !cancelled() }}
+        run: bash test/beleggen.sh
       # OVIS GHAWA (wv2877): ghawa.js (invoer, rekenkern op de cent, routes zonder donateurs of GHAWA-bankvelden) en het server.js-blok.
       # wv2880: + ghawa-bij.js (fase 2: GHAWA-bank uit Facturen, Ecobank-afschriften, fondsen, maandronde) in test/ghawa-bij.test.js.
       # wv2883: + ghawa-site.js (fase 3: website via git op een lokale bare repo; foto-toets alleen met sharp, anders overgeslagen).
