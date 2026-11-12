@@ -1333,8 +1333,11 @@ async function bewijs(o) {
       H.appKnopBevestiging('ja', false, { soort: 'reist' }) === 'knop-ja' && H.appKnopBevestiging('nee', true, { soort: 'reist' }) === 'knop-nee' &&
       H.appKnopBevestiging('anders', true, { soort: 'reist' }) === 'knop-anders' && H.appKnopBevestiging('ja', true, null) === 'knop-ja-vers');
     toets('9 wv374: aanwezig is geen invoer (slot vrij) en staat in APP_GLIJD_ROUTES', H.appInvoerRoute('POST /app/aanwezig', false, {}, { soort: 'vast' }) === false && vm.runInContext("APP_GLIJD_ROUTES.has('POST /app/aanwezig')", ctx) === true);   // wv2563: op de echte set, niet op de regelvorm (wv2245 zette er een route achter)
+    // wv2965: sinds de rij in het hoofdkanaal komt een tweede getypt bericht in de rij (§ 14b); de 409 blijft het gedrag met de uitknop
+    fs.writeFileSync(path.join(DATA, 'rij-getypt-uit'), '');
     r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'nog iets' }, { pot: P.jar });
-    toets('9 tweede beurt in hetzelfde kanaal terwijl Socev bezig is -> 409', r.status === 409 && /bezig/.test(r.j.fout), JSON.stringify(r.j));
+    fs.unlinkSync(path.join(DATA, 'rij-getypt-uit'));
+    toets('9 tweede beurt in hetzelfde kanaal terwijl Socev bezig is (uitknop rij-getypt-uit) -> 409', r.status === 409 && /bezig/.test(r.j.fout), JSON.stringify(r.j));
     tot0 = sP.tot = Date.now() + 60000;
     const auditRegels = () => fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter((l) => /app\/uitslag/.test(l)).length;
     const nAudit = auditRegels();
@@ -3095,8 +3098,10 @@ async function bewijs(o) {
       await vers(P);
       const rDubK = await vraag('POST', '/app/knop', { job_id: vRij.job, vraag_hash: vRij.hash, keuze: 'ja' }, { pot: P.jar });
       toets('14 wv405 nog een druk op dezelfde vraag in de rij -> 409 al beantwoord, geen extra beurt, vingerafdruk niet verbruikt', rDubK.status === 409 && rDubK.j.beantwoord && rDubK.j.beantwoord.keuze === 'ja' && /^al beantwoord: Ja /.test(rDubK.j.fout) && sessieVan(P).vers_tot > 0 && Object.keys(jobs).filter((id) => jobs[id].app && jobs[id].app.soort === 'knop' && jobs[id].status === 'pending').length === 2, rDubK.status + ' ' + JSON.stringify(rDubK.j));
+      fs.writeFileSync(path.join(DATA, 'rij-getypt-uit'), '');   // wv2965: met de rij komt hij erachter (§ 14b); hier het gedrag met de uitknop
       const rTyp = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'nog iets' }, { pot: P.jar });
-      toets('14 wv405 getypt bericht terwijl knopdrukken in de rij staan -> nog steeds 409 kanaal bezig', rTyp.status === 409 && /bezig/.test(rTyp.j.fout), rTyp.status);
+      fs.unlinkSync(path.join(DATA, 'rij-getypt-uit'));
+      toets('14 wv405 getypt bericht terwijl knopdrukken in de rij staan (uitknop rij-getypt-uit) -> 409 kanaal bezig', rTyp.status === 409 && /bezig/.test(rTyp.j.fout), rTyp.status);
       { const g = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar });
         const lo = (g.j.lopend || []).filter((x) => x.job_id === jRij || x.job_id === jRij2);
         const it = (g.j.items || []).find((x) => x.job_id === vRij.job);
@@ -3162,6 +3167,8 @@ async function bewijs(o) {
         await slaap(300);
         const rS = await vraag('POST', '/app/knop', { job_id: vS.job, vraag_hash: vS.hash, keuze: 'nee' }, { pot: P.jar });
         const rTS = await pTyp;
+        // wv2965: het getypte bericht staat meteen in de wachtrij en schrijft chat_log bij zijn start (hier 1,5 s); wacht tot hij start
+        for (let i = 0; i < 40 && !gestart.slice(nS).some((x) => x.jobId === rTS.j.job_id); i++) await slaap(100);
         chatlogStaat.vertraging = 0;
         await slaap(80);
         toets('14 wv405 knopdruk tijdens het startvenster van een getypt bericht: komt erachter (in_rij), getypt bericht start eerst', rS.status === 200 && rS.j.in_rij === true && rTS.status === 200 && gestart.length === nS + 1 && gestart[gestart.length - 1].jobId === rTS.j.job_id, JSON.stringify([rS.status, rS.j.in_rij, rTS.status, gestart.slice(nS).map((x) => x.jobId), rTS.j.job_id]));
@@ -3238,19 +3245,78 @@ async function bewijs(o) {
         afmaken[rFok.j.job_id]('ok'); await slaap(80);
         { const ruw = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
           toets('14b teruggehaald bericht staat niet in de geschiedenis en niet in het log', !(ruw.j.items || []).some((x) => x.job_id === rD.j.job_id) && !leesLog().some((x) => x.job_id === rD.j.job_id)); }
-        // 6. hoofdkanaal blijft 409; uitknop rij-getypt-uit -> machinekamer weer 409
-        { const h1 = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'hoofd 1' }, { pot: P.jar });
+        // 6. wv2965 (David 12-11-2026): ook het hoofdkanaal typbaar terwijl Socev bezig is; Davids rij in chat_log pas bij de start, en
+        // stond het bericht in de rij dan op zijn typtijd: de Poortwachter koppelt het nooit aan een voorstel dat Socev pas daarna deed.
+        // poortwachterPaar = de koppeling uit n8n "AI - Poortwachter (Jev)", knoop "Context en state": Davids laatste rij (ts), en
+        // Socevs laatste rij uit hetzelfde kanaal met ts < die van David.
+        { const poortwachterPaar = (rijen) => {
+            const kan = (r) => r.kanaal === 'app' ? 'app' : 'telegram';
+            const d = rijen.filter((r) => r.rol === 'david').sort((a, b) => b.ts - a.ts)[0];
+            if (!d) return null;
+            const s = rijen.filter((r) => r.rol === 'socev' && r.ts < d.ts && kan(r) === kan(d)).sort((a, b) => b.ts - a.ts)[0];
+            return { david: d, socev: s || null };
+          };
+          const tikH = (tekst, o) => vraag('POST', '/app/beurt', Object.assign({ beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst }, o || {}), { pot: P.jar });
+          const wachtStart = async (id) => { for (let i = 0; i < 50 && !gestart.some((x) => x.jobId === id); i++) await slaap(50); await slaap(20); };   // trage pod (2 CPU's)
+          const nG = gestart.length, nCL = chatlogStaat.rijen.length;
+          chatlogStaat.rijen.push({ chat_id: '40687', rol: 'socev', kanaal: 'app', ts: Date.now() - 5000, tekst: 'Zal ik de kapper2965 maandag 9:00 in je agenda zetten?', bevestiging: '' });
+          await slaap(5);
+          const h1 = await tikH('hoofd 1: hoe laat is de tandarts2965?');
+          await wachtStart(h1.j.job_id);
+          toets('14b wv2965 hoofd stil kanaal: 200, start meteen, Davids rij in chat_log (bij de start, ná de laatste rij)', h1.status === 200 && h1.j.in_rij === false && gestart.length === nG + 1 && chatlogStaat.rijen.length === nCL + 2 && chatlogStaat.rijen[nCL + 1].rol === 'david' && chatlogStaat.rijen[nCL + 1].tekst === 'hoofd 1: hoe laat is de tandarts2965?' && promptVan(h1.j.job_id) === '[APP] hoofd 1: hoe laat is de tandarts2965?', JSON.stringify([h1.j, chatlogStaat.rijen.slice(nCL), promptVan(h1.j.job_id)]));
+          const h2 = await tikH('ja');
           await slaap(30);
-          const h2 = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'hoofd 2' }, { pot: P.jar });
-          toets('14b hoofdkanaal: getypt bij een lopende beurt -> nog steeds 409 (fase 1 alleen machinekamer)', h1.status === 200 && h2.status === 409 && /bezig/.test(h2.j.fout), [h1.status, h2.status].join());
-          afmaken[h1.j.job_id]('ok'); await slaap(60); }
+          const h2Rij = chatlogStaat.rijen.slice(nCL + 2);
+          toets('14b wv2965 hoofd: getypt terwijl Socev bezig is -> 200 + in_rij (was 409); nog niet gestart en nog NIET in chat_log', h2.status === 200 && h2.j.in_rij === true && gestart.length === nG + 1 && h2Rij.length === 0, h2.status + JSON.stringify([h2.j, h2Rij]));
+          { const p = poortwachterPaar(chatlogStaat.rijen.filter((r) => String(r.chat_id) === '40687'));
+            toets('14b wv2965 Poortwachter tijdens de lopende beurt: Davids laatste rij is nog "hoofd 1", niet het "ja" uit de rij', p && p.david.tekst === 'hoofd 1: hoe laat is de tandarts2965?', JSON.stringify(p)); }
+          const h3 = await tikH('hoofd 3'), h4 = await tikH('hoofd 4'), h5 = await tikH('hoofd 5');
+          toets('14b wv2965 hoofd: drie in de rij -> 200; het vierde -> 429 "er staan al 3 berichten in de rij"', h3.status === 200 && h4.status === 200 && h5.status === 429 && /al 3 berichten in de rij/.test(h5.j.fout), [h3.status, h4.status, h5.status].join());
+          { const g = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar });
+            const lo = (g.j.lopend || []).filter((x) => [h2.j.job_id, h3.j.job_id, h4.j.job_id].includes(x.job_id));
+            toets('14b wv2965 geschiedenis hoofd: rij_getypt + rij_max 3; lopend in_rij en Haal terug (eigen apparaat)', g.j.rij_getypt === true && g.j.rij_max === 3 && lo.length === 3 && lo.every((x) => x.in_rij === true && x.terug === true), JSON.stringify([g.j.rij_getypt, g.j.lopend])); }
+          const rT = await vraag('POST', '/app/rij/terug', { job_id: h4.j.job_id }, { pot: P.jar });
+          toets('14b wv2965 hoofd: Haal terug vóór de start -> 200 met de tekst', rT.status === 200 && rT.j.tekst === 'hoofd 4' && jobs[h4.j.job_id].app.teruggehaald === true, rT.status + JSON.stringify(rT.j));
+          // Socev doet in de lopende beurt een voorstel; daarna start het "ja" uit de rij
+          await slaap(15);
+          afmaken[h1.j.job_id]('De tandarts2965 is vrijdag 10:00.\n\nVRAAG AAN DAVID: Zal ik de tandarts2965 naar 11:00 verzetten?');
+          await wachtStart(h2.j.job_id);
+          const pS = chatlogStaat.rijen.find((r) => r.rol === 'socev' && /tandarts2965 naar 11:00/.test(r.tekst));
+          const dJa = chatlogStaat.rijen.find((r) => r.rol === 'david' && r.tekst === 'ja' && r.ts === jobs[h2.j.job_id].created);
+          toets('14b wv2965 bij de start van het "ja" uit de rij: Davids rij in chat_log met zijn typtijd (vóór Socevs voorstel)', !!pS && !!dJa && dJa.bevestiging === 'getypt' && dJa.kanaal === 'app' && dJa.ts < pS.ts && gestart.length === nG + 2, JSON.stringify([pS, dJa, chatlogStaat.rijen.slice(nCL)]));
+          { const p = poortwachterPaar(chatlogStaat.rijen.filter((r) => String(r.chat_id) === '40687'));
+            toets('14b wv2965 Poortwachter: het getypte "ja" uit de rij is nooit een bevestiging van het voorstel dat Socev pas daarna deed', p && p.david === dJa && p.socev && !/tandarts2965 naar 11:00/.test(p.socev.tekst), JSON.stringify(p)); }
+          const p2 = promptVan(h2.j.job_id);
+          toets('14b wv2965 prompt van het bericht uit de rij: rijregel (antwoord van hh:mm had hij nog niet gezien), geen tussendoor-regel', p2.indexOf('[APP] ja\n(Dit bericht typte David om ') === 0 && /terwijl je nog bezig was; je antwoord van \d\d:\d\d had hij toen nog niet gezien\.\)$/.test(p2) && !/\[Systeem: tussen/.test(p2), JSON.stringify(p2));
+          // wv2964 + wv2965: Antwoord hierop in de rij -> geciteerd bericht 1 ms vóór de typtijd
+          const hD = (JSON.parse(fs.readFileSync(path.join(LOGDIR, 'hoofd.jsonl'), 'utf8').trim().split('\n').pop()) || {}).job_id;
+          const h6 = await tikH('ja, die bedoel ik', { antwoord_op: hD });
+          afmaken[h2.j.job_id]('Welk voorstel bedoel je?'); await wachtStart(h3.j.job_id);
+          afmaken[h3.j.job_id]('ok 3'); await wachtStart(h6.j.job_id);
+          const t6 = jobs[h6.j.job_id].created, c6 = chatlogStaat.rijen.filter((r) => (r.rol === 'socev' && /tandarts2965 naar 11:00/.test(r.tekst) && r.ts === t6 - 1) || (r.rol === 'david' && r.tekst === 'ja, die bedoel ik' && r.ts === t6));
+          toets('14b wv2965 Antwoord hierop uit de rij: geciteerd bericht (socev, typtijd - 1) en Davids rij (typtijd)', h6.status === 200 && h6.j.in_rij === true && c6.length === 2, JSON.stringify([h6.status, h6.j, chatlogStaat.rijen.slice(-4)]));
+          afmaken[h6.j.job_id]('ok 6'); await slaap(80);
+          // sortering op typtijd ook in het hoofdkanaal
+          const g2 = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar });
+          const i1 = g2.j.items.findIndex((x) => x.job_id === h1.j.job_id), i2 = g2.j.items.findIndex((x) => x.job_id === h2.j.job_id), i6 = g2.j.items.findIndex((x) => x.job_id === h6.j.job_id);
+          toets('14b wv2965 geschiedenis hoofd op typtijd: h1, dan het "ja" uit de rij, dan h6', i1 >= 0 && i2 > i1 && i6 > i2, JSON.stringify([i1, i2, i6])); }
+        // 6b. uitknop rij-getypt-uit -> machinekamer én hoofd weer 409; hoofd dan chat_log bij binnenkomst (oude pad)
         { const m1 = await typ('uitknop 1'); await slaap(30);
           fs.writeFileSync(path.join(DATA, 'rij-getypt-uit'), '');
           const m2 = await typ('uitknop 2');
           const gU = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+          const nCL = chatlogStaat.rijen.length;
+          const hU1 = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'hoofd uitknop 1' }, { pot: P.jar });
+          const clU = chatlogStaat.rijen.slice(nCL);
+          await slaap(30);
+          const hU2 = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'hoofd uitknop 2' }, { pot: P.jar });
+          const gUH = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar });
           fs.unlinkSync(path.join(DATA, 'rij-getypt-uit'));
           toets('14b uitknop rij-getypt-uit: getypt bij bezig kanaal -> 409 zoals vroeger; geschiedenis zonder rij_getypt', m1.status === 200 && m2.status === 409 && /bezig/.test(m2.j.fout) && gU.j.rij_getypt === undefined && gU.j.antwoord_op === true, [m1.status, m2.status, gU.j.rij_getypt].join());
-          afmaken[m1.j.job_id]('ok'); await slaap(60); }
+          toets('14b wv2965 uitknop ook voor hoofd: 409 bij bezig, geen rij_getypt, chat_log al vóór het antwoord op het verzoek (oude pad)', hU1.status === 200 && hU2.status === 409 && /bezig/.test(hU2.j.fout) && gUH.j.rij_getypt === undefined && clU.length === 1 && clU[0].tekst === 'hoofd uitknop 1', JSON.stringify([hU1.status, hU2.status, gUH.j.rij_getypt, clU]));
+          afmaken[m1.j.job_id]('ok'); afmaken[hU1.j.job_id]('ok'); await slaap(60);
+          for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];   // wv2965: de beurten hierboven tellen mee voor de uurgrens
+        }
         // 7. lopende Telegram-beurt (geen app-job) -> in_rij; rondt hij af vóór de start, dan de rijregel (ook < 30 s)
         { const tg = nepId(); jobs[tg] = { status: 'running', created: Date.now(), started: Date.now(), chat_id: MK, workspace: 'vault', bron: 'telegram' };
           const los = houdVast();
@@ -3464,6 +3530,7 @@ async function bewijs(o) {
       chatlogStaat.kapot = true; chatlogStaat.mislukt = 0;
       const lang = 'A'.repeat(400) + 'midden' + 'Z'.repeat(400);
       r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: lang }, { pot: P.jar });
+      for (let i = 0; i < 60 && !(r.j.job_id && gestart.some((x) => x.jobId === r.j.job_id)); i++) await slaap(100);   // wv2965: chat_log bij de start
       toets('14 wv171: chat_log kapot -> beurt toch 200, met de regel "geen agenda-actie" in de prompt', r.status === 200 && !!r.j.job_id && gestart[gestart.length - 1].jobId === r.j.job_id && gestart[gestart.length - 1].prompt.endsWith('doe in deze beurt geen agenda-actie, de Poortwachter ziet het niet. Vraag David het zo nodig opnieuw.)'), JSON.stringify(r.j) + (gestart[gestart.length - 1] || {}).prompt);
       await slaap(2300);
       toets('14 wv171: ... twee pogingen, daarna stil (fail-open)', chatlogStaat.mislukt === 2, chatlogStaat.mislukt);
@@ -3481,12 +3548,15 @@ async function bewijs(o) {
       await slaap(500);
       const [rDub, rAnder] = await Promise.all([vraag('POST', '/app/beurt', { beurt_id: bTraag, kanaal: 'hoofd', tekst: 'traag logboek' }, { pot: P.jar }),
         vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'ander bericht' }, { pot: P.jar })]);
-      toets('14 wv171: tijdens het wachten: ander bericht in hetzelfde kanaal -> 409 bezig', rAnder.status === 409 && /nog bezig/.test(rAnder.j.fout), JSON.stringify(rAnder.j));
+      // wv2965: chat_log gaat bij de start (bijStart); het verzoek zelf wacht niet meer, de beurt start pas na het schrijven (≤ 3 s)
+      toets('14 wv171/wv2965: tijdens het wachten: ander bericht in hetzelfde kanaal -> 200 in de rij (achter het trage)', rAnder.status === 200 && rAnder.j.in_rij === true, JSON.stringify(rAnder.j));
       const rT = await pTraag;
-      toets('14 wv171: traag logboek: na ~3 s gestart, met de regel in de prompt', rT.status === 200 && Date.now() - t0 >= 2900 && Date.now() - t0 < 4500 && gestart.length === nTr + 1 && /geen agenda-actie/.test(gestart[gestart.length - 1].prompt), (Date.now() - t0) + ' ' + JSON.stringify(rT.j));
+      for (let i = 0; i < 50 && gestart.length < nTr + 1; i++) await slaap(100);
+      toets('14 wv171: traag logboek: na ~3 s gestart, met de regel in de prompt', rT.status === 200 && Date.now() - t0 >= 2900 && Date.now() - t0 < 4500 && gestart.length === nTr + 1 && gestart[nTr].jobId === rT.j.job_id && /geen agenda-actie/.test(gestart[nTr].prompt), (Date.now() - t0) + ' ' + JSON.stringify(rT.j));
       toets('14 wv171: ... dezelfde beurt_id tijdens het wachten -> dezelfde job (al), geen tweede beurt', rDub.status === 200 && rDub.j.al === true && rDub.j.job_id === rT.j.job_id, JSON.stringify(rDub.j));
       chatlogStaat.vertraging = 0;
-      afmaken[rT.j.job_id]('ok'); await slaap(60);
+      afmaken[rT.j.job_id]('ok'); await slaap(120);
+      if (rAnder.j.job_id && afmaken[rAnder.j.job_id]) { afmaken[rAnder.j.job_id]('ok'); await slaap(60); }
 
       // ── herstelcode op verzoek ──
       r = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar });
@@ -3618,7 +3688,7 @@ async function bewijs(o) {
       const hoofdN = fs.readFileSync(path.join(LOGDIR, 'hoofd.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((x) => Date.parse(x.t) > Date.now() - 3600000).length;
       const gz = JSON.parse(fs.readFileSync(GZ, 'utf8')); gz[pid].hoofd = new Date(Date.now() - 3600000).toISOString(); gz[pid].broedstoof_nr -= 2; fs.writeFileSync(GZ, JSON.stringify(gz));
       r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
-      const hoofdMem = Object.keys(jobs).filter((id) => jobs[id].app && jobs[id].app.kanaal === 'hoofd' && jobs[id].status === 'done' && jobs[id].app.gelogd !== true).length;
+      const hoofdMem = Object.keys(jobs).filter((id) => jobs[id].app && jobs[id].app.kanaal === 'hoofd' && jobs[id].status === 'done' && jobs[id].app.gelogd !== true && !jobs[id].app.teruggehaald && !jobs[id].app.rijVerloren).length;   // wv2965: teruggehaald (Haal terug, ook in hoofd) staat nergens
       toets('15 hoofdkanaal: antwoorden na "gezien" tellen (' + hoofdN + ' in het log + ' + hoofdMem + ' alleen in het geheugen), met tijd van de jongste', hoofdN > 0 && r.j.tabs.hoofd === hoofdN + hoofdMem && !!r.j.laatst.hoofd, JSON.stringify(r.j));
       toets('15 broedstoof: twee ideeën boven het gezien-nummer = 2 nieuw', r.j.tabs.broedstoof === 2, r.j.tabs.broedstoof);
       const nuP = r.j.nu;
