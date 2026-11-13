@@ -354,14 +354,17 @@ test('fase 1 info: alleen tellingen, geen namen', async () => {
 });
 
 // ── wv3015 fase 2: volle naam achter de nieuwe registertekst, infoschermen alleen met Davids Ja op precies die kaart ──
-const NIEUW = ['i. ... artsen van vandaag (voor- en achternaam, ook waarnemers, en dagdeel) ... Vrije tekst (weekbericht, mededeling, infoschermen) alleen na Davids knop ...'];
+const NIEUW = ['i. ... artsen van vandaag (voor- en achternaam, ook waarnemers, en dagdeel) ... Vrije tekst (weekbericht, mededeling, infoschermen) alleen na Davids knop per bericht of per set ...'];
 const SET = { set: '2026-11-13', sleutel: 'wv9001', kaart: { titel: 'Personeelsscherm — deze infoschermen tonen?', waarom: 'Proef.', waar: 'overal', deadline: '2026-11-20', na: ['Ja = op het scherm.'] },
   schermen: [
-    { kop: 'Proefinfo een', intro: 'Inleiding.', punten: [{ titel: 'Punt A', tekst: 'Tekst A.' }, { titel: 'Punt B', tekst: 'Tekst B.' }], bron: 'Verzonnen bron 1', tot: '2026-12-31' },
+    { kop: 'Proefinfo een', intro: 'Inleiding.', punten: [{ titel: 'Punt A', tekst: 'Tekst A.' }, { titel: 'Punt B', tekst: 'Tekst B.' }], bron: 'Verzonnen bron 1', tot: '2026-12-11' },
     { kop: 'Proefinfo twee', intro: '', punten: [{ titel: 'Punt C', tekst: 'Tekst C.' }], bron: 'Verzonnen bron 2', tot: '2026-11-17' },
   ] };
 SET.vraag_id = PS._t.fnv('voorjou:' + SET.sleutel + ':kaart');
-const jaVoor = (set, extra) => ({ ['job1:' + set.vraag_id]: { antwoord: Object.assign({ keuze: 'ja', t: '2026-11-13T12:00:00Z', kaart_hash: PS._t.kaartHash(PS._t.setKaart(set).kaart) }, extra || {}) } });
+// Ja op de kaart zoals de module hem opbouwt; voor een ongeldige set de kaart met de hand (David zag die tekst), zodat alleen de vormtoets weigert
+const kaartVan = (set) => (PS._t.setKaart(set) || { kaart: { titel: set.kaart.titel, waarom: set.kaart.waarom, waar: set.kaart.waar, deadline: set.kaart.deadline,
+  stappen: set.schermen.map((x) => PS._t.stapTekst(x, set.set)).concat(set.kaart.na) } }).kaart;
+const jaVoor = (set, extra) => ({ ['job1:' + set.vraag_id]: { antwoord: Object.assign({ keuze: 'ja', t: '2026-11-13T12:00:00Z', kaart_hash: PS._t.kaartHash(kaartVan(set)) }, extra || {}) } });
 function fase2(o = {}) {
   const f = fase1(Object.assign({ aan: true, tekst: NIEUW }, o));
   if (o.set !== null) fs.writeFileSync(path.join(f.dir, 'infoschermen.json'), JSON.stringify({ sets: [o.set || SET] }));
@@ -419,6 +422,9 @@ test('fase 2 infoschermen: zonder Ja niets; met Ja op precies deze kaart wel; ei
     ['tekst gewijzigd', fase2({ vragen: jaVoor(SET), set: Object.assign({}, SET, { schermen: [Object.assign({}, SET.schermen[0], { intro: 'Andere inleiding.' }), SET.schermen[1]] }) })],
     ['andere sleutel', fase2({ vragen: jaVoor(SET), set: Object.assign({}, SET, { sleutel: 'wv9002' }) })],
     ['rij zonder infoschermen', fase2({ vragen: jaVoor(SET), tekst: ['i. artsen van vandaag (voor- en achternaam, ook waarnemers)'] })],
+    ['rij noemt infoschermen in een ontkenning', fase2({ vragen: jaVoor(SET), tekst: ['i. artsen van vandaag (voor- en achternaam). Nooit infoschermen.'] })],
+    ['einddatum > 28 dagen', fase2({ vragen: jaVoor(Object.assign({}, SET, { schermen: [Object.assign({}, SET.schermen[0], { tot: '2026-12-12' })] })), set: Object.assign({}, SET, { schermen: [Object.assign({}, SET.schermen[0], { tot: '2026-12-12' })] }) })],
+    ['onbestaande datum', fase2({ vragen: jaVoor(Object.assign({}, SET, { schermen: [Object.assign({}, SET.schermen[0], { tot: '2026-11-31' })] })), set: Object.assign({}, SET, { schermen: [Object.assign({}, SET.schermen[0], { tot: '2026-11-31' })] }) })],
     ['rij uit', fase2({ vragen: jaVoor(SET), aan: 'uit' })],
   ];
   for (const [w, g] of kruis) { assert.deepStrictEqual((await g.m.verzamel(t)).info, [], w); await g.m.publiceer(); assert.doesNotMatch(html(g.D), /Proefinfo/, w); }
@@ -438,8 +444,18 @@ test('fase 2 tik: vrijgave of Ja verschijnt bij de volgende tik (niet pas na 30 
   let t = Date.parse('2026-11-17T09:00:00Z'); f.zet(t);
   await f.m.tik();
   assert.doesNotMatch(html(f.D), /Proefinfo/);
+  fs.writeFileSync(path.join(f.dir, 'infoschermen.json'), JSON.stringify({ sets: [SET] }));   // echte volgorde: set vóór de kaart
+  t += 5 * 60000; f.zet(t); await f.m.tik();
+  assert.doesNotMatch(html(f.D), /Proefinfo/, 'set zonder Ja');
+  fs.writeFileSync(f.vragenPad, JSON.stringify(jaVoor(SET)));                                // Davids Ja: alleen vragen.json verandert
+  t += 5 * 60000; f.zet(t); await f.m.tik();
+  assert.match(html(f.D), /Proefinfo twee/, 'Ja werkt bij de volgende tik');
+  fs.writeFileSync(f.vragenPad, '{}');                                                        // Ja weg (bv. na 30 dagen opgeruimd)
+  await f.m.publiceer();
+  assert.doesNotMatch(html(f.D), /Proefinfo/, 'publiceer controleert de Ja opnieuw');
+  t += 5 * 60000; f.zet(t); await f.m.tik();
+  assert.doesNotMatch(html(f.D), /Proefinfo/);
   fs.writeFileSync(f.vragenPad, JSON.stringify(jaVoor(SET)));
-  fs.writeFileSync(path.join(f.dir, 'infoschermen.json'), JSON.stringify({ sets: [SET] }));
   t += 5 * 60000; f.zet(t); await f.m.tik();
   assert.match(html(f.D), /Proefinfo twee/);
   t = Date.parse('2026-11-17T23:30:00Z'); f.zet(t); await f.m.tik();   // 18-11 00:30 in Amsterdam

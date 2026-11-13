@@ -176,8 +176,9 @@ const WEER_OUD_MS = 12 * UUR;          // ouder weer valt weg
 const TITEL_WEG = /priv[eé]|vertrouwelijk|persoonlijk|patiënt|patient|ziek|verlof|vakantie|uitvaart|begrafenis|overl|condoleance|@|\d{6,}/i;
 // fase 2 (wv3015)
 const VOLLE_NAAM_ZIN = 'artsen van vandaag (voor- en achternaam';   // staat deze zin in de registertekst, dan volle naam
-const INFO_ZIN = 'infoschermen';                                      // staat dit woord in de registertekst, dan infoschermen (met Ja per set)
-const INFO_MAX = 6, INFO_SET_MAX = 4, INFO_DAGEN_MAX = 120;
+const INFO_ZIN = 'infoschermen) alleen na Davids knop';             // staat deze zin in de registertekst, dan infoschermen (met Ja per set; Fable ZOU 3)
+// hooguit 28 dagen na de set: de app bewaart antwoorden 30 dagen (server.js appVragenSchrijf, APP_LOG_MS) en de Ja is het enige bewijs (Fable ZOU 2)
+const INFO_MAX = 6, INFO_SET_MAX = 4, INFO_DAGEN_MAX = 28;
 const INFO_HOOFD_S = 30, INFO_S = 20;
 const INFO_WEG = /@|\d{6,}|\bBSN\b|geboortedatum|https?:|<|>/i;     // geen adressen, nummers of opmaak op een half openbaar scherm
 function ymd(ms) { return amsDelen(ms).datum; }
@@ -287,6 +288,8 @@ function agendaPunten(rijen, vandaag, eigen) {
 }
 // ── infoschermen (fase 2, wv3015) ──
 const schoon = (x) => String(x == null ? '' : x).replace(/\s+/g, ' ').trim();
+// echte kalenderdatum JJJJ-MM-DD (geen 2026-13-45 of 2026-02-30; Fable ZOU 1)
+function echteDatum(d) { if (!/^\d{4}-\d{2}-\d{2}$/.test(String(d || ''))) return false; const x = new Date(d + 'T12:00:00Z'); return !isNaN(x) && x.toISOString().slice(0, 10) === d; }
 function datumNl(d) { const [j, m, dd] = String(d).split('-'); return Number(dd) + '-' + Number(m) + '-' + j; }
 // één scherm uit de set, gecontroleerd op vorm (zonder datumtoets); null = ongeldig (dan is de hele set ongeldig: de kaart toonde hem)
 function infoNorm(sc) {
@@ -295,13 +298,13 @@ function infoNorm(sc) {
   const punten = Array.isArray(sc.punten) ? sc.punten.map((x) => ({ titel: schoon(x && x.titel), tekst: schoon(x && x.tekst) })) : [];
   if (!kop || kop.length > 40 || intro.length > 160 || !bron || bron.length > 130) return null;
   if (!punten.length || punten.length > 4 || punten.some((x) => !x.titel || x.titel.length > 50 || x.tekst.length > 130)) return null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(tot)) return null;
+  if (!echteDatum(tot)) return null;
   if (INFO_WEG.test([kop, intro, bron].concat(...punten.map((x) => [x.titel, x.tekst])).join(' '))) return null;
   return { kop, intro, punten, bron, tot };
 }
 // de stap op Davids kaart: de volledige schermtekst, letterlijk
-function stapTekst(sc) {
-  return 'Infoscherm «' + sc.kop + '» tot en met ' + datumNl(sc.tot) + ': ' + (sc.intro ? sc.intro + ' ' : '') +
+function stapTekst(sc, van) {
+  return 'Infoscherm «' + sc.kop + '» van ' + datumNl(van) + ' tot en met ' + datumNl(sc.tot) + ': ' + (sc.intro ? sc.intro + ' ' : '') +
     sc.punten.map((x) => x.titel + (x.tekst ? ': ' + x.tekst : '')).join(' | ') + ' (bron: ' + sc.bron + ')';
 }
 // zelfde vingerafdruk als server.js appVjInhoudHash (wv3010) en toestemming.py inhoud_hash
@@ -313,14 +316,15 @@ function kaartHash(k) {
 function fnv(t) { let h = 0x811c9dc5; for (const c of String(t)) { h = (h ^ c.codePointAt(0)) >>> 0; h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); }
 function setKaart(set) {
   const k = (set && set.kaart) || {};
-  const sch = Array.isArray(set && set.schermen) ? set.schermen.map(infoNorm) : [];
-  if (!sch.length || sch.length > INFO_SET_MAX || sch.some((x) => !x)) return null;
-  return { schermen: sch, kaart: { titel: k.titel, waarom: k.waarom, stappen: sch.map(stapTekst).concat(Array.isArray(k.na) ? k.na.map(String) : []), waar: k.waar, deadline: k.deadline } };
+  if (!set || !echteDatum(set.set)) return null;
+  const sch = Array.isArray(set.schermen) ? set.schermen.map(infoNorm) : [];
+  if (!sch.length || sch.length > INFO_SET_MAX || sch.some((x) => !x || x.tot < set.set || x.tot > plusDag(set.set, INFO_DAGEN_MAX))) return null;
+  return { schermen: sch, kaart: { titel: k.titel, waarom: k.waarom, stappen: sch.map((x) => stapTekst(x, set.set)).concat(Array.isArray(k.na) ? k.na.map(String) : []), waar: k.waar, deadline: k.deadline } };
 }
 // set geldig = vorm klopt, kaarttitel noemt infoschermen, vraag-id hoort bij de kaartsleutel en in vragen.json staat op dat id een Ja
 // met de hash van precies deze kaartinhoud. Geeft de schermen (met setdatum) of null.
 function setGeldig(set, vragen) {
-  if (!set || typeof set !== 'object' || !/^wv\d{1,7}$/.test(String(set.sleutel || '')) || !/^\d{4}-\d{2}-\d{2}$/.test(String(set.set || ''))) return null;
+  if (!set || typeof set !== 'object' || !/^wv\d{1,7}$/.test(String(set.sleutel || '')) || !echteDatum(set.set)) return null;
   if (fnv('voorjou:' + set.sleutel + ':kaart') !== String(set.vraag_id || '')) return null;
   const sk = setKaart(set); if (!sk || !/infoscherm/i.test(String(sk.kaart.titel || ''))) return null;
   const h = kaartHash(sk.kaart);
@@ -329,7 +333,7 @@ function setGeldig(set, vragen) {
     return !!a && a.keuze === 'ja' && a.kaart_hash === h;
   });
   if (!ja) return null;
-  return sk.schermen.filter((x) => x.tot <= plusDag(set.set, INFO_DAGEN_MAX)).map((x) => Object.assign({ set: set.set }, x));
+  return sk.schermen.map((x) => Object.assign({ set: set.set }, x));
 }
 function weerBeeld(j, vandaag) {
   if (!j || typeof j !== 'object' || !j.current || !Array.isArray(j.daily)) return null;
@@ -403,7 +407,8 @@ function maak(o) {
   const vragenPad = o.vragenPad || '/opt/data/socev-app-data/vragen.json';
   const infoPad = path.join(dir, 'infoschermen.json');
   function infoBestand() { try { return fs.readFileSync(infoPad, 'utf8'); } catch (e) { return ''; } }
-  const infoBestandSha = () => crypto.createHash('sha256').update(infoBestand() + '|' + String(infoMag())).digest('hex');
+  // Fable ZOU 4: de uitkomst telt (set + rij + Ja in vragen.json), niet alleen het bestand: een Ja of een weggevallen Ja werkt bij de volgende tik
+  const infoBestandSha = (vandaag) => crypto.createHash('sha256').update(JSON.stringify(infoSchermen(vandaag))).digest('hex');
   // vrijgegeven infoschermen van vandaag (zie setGeldig); alles onleesbaar = geen infoschermen
   function infoSchermen(vandaag) {
     if (!infoMag()) return [];
@@ -411,7 +416,8 @@ function maak(o) {
     try { j = JSON.parse(infoBestand() || '{}'); vr = JSON.parse(fs.readFileSync(vragenPad, 'utf8')); } catch (e) { return []; }
     const uit = [];
     for (const set of Array.isArray(j && j.sets) ? j.sets : []) {
-      const g = setGeldig(set, vr); if (!g) continue;
+      let g = null; try { g = setGeldig(set, vr); } catch (e) { g = null; }
+      if (!g) continue;
       for (const x of g) if (x.set <= vandaag && x.tot >= vandaag) uit.push(x);
     }
     return uit.slice(-INFO_MAX);
@@ -446,7 +452,7 @@ function maak(o) {
       bronnen: { agenda: !!rijen, weer: !!weer, medewerkers: aan ? meds.length : null },
     };
     inhoud.bronnen.info = inhoud.info.length;
-    const ish = infoBestandSha();
+    const ish = crypto.createHash('sha256').update(JSON.stringify(inhoud.info)).digest('hex');
     wijzig((x) => { x.inhoud = inhoud; x.inhoud_op = t; x.weer = s.weer || null; x.weer_op = s.weer_op || null; x.info_sha = ish; });
     return inhoud;
   }
@@ -458,7 +464,8 @@ function maak(o) {
     const aan = toestemming();
     // wv3015: volle namen nooit zonder de zin in de rij (ook niet uit een oude stand); infoschermen alleen met de rij en vóór hun einddatum
     const artsen = aan && i.artsen && !!i.volle_naam && !volleNaamMag() ? [] : i.artsen;
-    const info = aan && infoMag() && Array.isArray(i.info) ? i.info.filter((x) => x && x.tot >= a.datum && x.set <= a.datum) : [];
+    // Fable ZOU 4: bij elke publicatie (ook noodknop uit) opnieuw tegen de Ja, niet uit de stand
+    const info = aan ? infoSchermen(a.datum) : [];
     return Object.assign({}, i, { artsen: aan ? artsen : null, jarig: aan ? i.jarig : null, info,
       wd_tekst: d.wdl, dag_tekst: d.dg + ' ' + d.mnl, klok_tekst: String(a.uur).padStart(2, '0') + ':' + String(a.min).padStart(2, '0') });
   }
@@ -679,7 +686,7 @@ function maak(o) {
     if (s.intrek_open) { try { await intrekIntern(config()); } catch (e) { fout('personeelsscherm-intrek', new Error('opnieuw intrekken faalde')); } }
     let nieuw = false;
     if (!s.inhoud_op || t - s.inhoud_op >= INHOUD_MS || ymd(s.inhoud_op) !== ymd(t) || (s.inhoud && s.inhoud.persoonsvakken) !== toestemming()
-      || !!(s.inhoud && s.inhoud.volle_naam) !== (toestemming() && volleNaamMag()) || s.info_sha !== infoBestandSha()) {   // wv3015: rij of vrijgave gewijzigd = meteen
+      || !!(s.inhoud && s.inhoud.volle_naam) !== (toestemming() && volleNaamMag()) || s.info_sha !== infoBestandSha(ymd(t))) {   // wv3015: rij of vrijgave gewijzigd = meteen
       try { const i = await verzamel(t); nieuw = inhoudSha(i) !== s.inhoud_sha; } catch (e) { fout('personeelsscherm-inhoud', new Error(String(e && e.message).slice(0, 80))); }
       s = leesStand();
     }
