@@ -15,6 +15,11 @@
 // van studio.js. Alles wissen: sessie dicht voor nieuwe handelingen (review MOET 3), generatie omhoog (late resultaten vallen weg), Map
 // leeg, eigen taken stoppen, naloop op de beeldserver (studio.geheimWis) en een gemeten lijstje terug. Exporteer naar Brain = alleen dat
 // beeld de bibliotheek in (Immich en opdrachttekst alleen op Davids keuze). Socev kan hier niet bij: alleen routes achter de app-sessie.
+//
+// NIEUW BEELD UIT TEKST (wv2990, 13-11-2026). Studio-flow beeld-tekst-flux (FLUX.2 klein 4B, verborgen in de Studio) via maakGeheugen
+// zonder foto: gewoon = nieuwe bron met het resultaat als versie 1 (herkomst 'tekst', stand 'tekst', opdracht bij de versie); incognito =
+// nieuw beeld in de Map van het apparaat (voorganger null), zelfde uur, wissen en naloop als een bewerking. Taakrij gewoon: bron en
+// voorganger leeg tot het resultaat er is.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -29,6 +34,8 @@ const STANDEN = [
   { id: 'opdracht-qwen', flow: 'beeld-opdracht-qwen', naam: 'Vrije opdracht · Qwen', karakter: 'tekent opnieuw; gezichten blijven trouw', opdracht: true },
   { id: 'opdracht-flux', flow: 'beeld-opdracht-flux', naam: 'Vrije opdracht · FLUX.2 klein', karakter: 'tekent opnieuw; snel, maakt gezichten jonger', opdracht: true },
 ];
+// wv2990: nieuw beeld uit tekst (geen bewerking: niet in STANDEN, dus niet via /bewerk)
+const TEKST = { id: 'tekst', flow: 'beeld-tekst-flux', naam: 'Nieuw beeld uit tekst · FLUX.2 klein', karakter: 'tekent een nieuw beeld', opdracht: true };
 const HEX16 = /^[a-f0-9]{16}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
@@ -103,9 +110,9 @@ function maak(deps) {
     return Buffer.from(s, 'base64');
   }
   function stand(id) { return STANDEN.find(function (x) { return x.id === id; }) || null; }
-  async function standen() {
+  async function standen(lijst) {
     const uit = [];
-    for (const s of STANDEN) {
+    for (const s of lijst || STANDEN) {
       let f = null;
       try { f = await S.flowVan(s.flow); } catch (e) { f = null; }
       uit.push({ id: s.id, naam: s.naam, karakter: s.karakter, opdracht: s.opdracht === true, klaar: !!(f && f.klaar), reden: f ? f.reden : 'deze stand staat niet in de Studio',
@@ -154,8 +161,8 @@ function maak(deps) {
     d.exec('BEGIN');
     try {
       d.prepare('INSERT INTO bron (id, titel, herkomst, immich, gemaakt) VALUES (?, ?, ?, ?, ?)').run(b, x.titel, x.herkomst, x.immich || null, iso());
-      d.prepare('INSERT INTO versie (id, bron, voorganger, nr, stand, model, opdracht, gemaakt, breed, hoog, bytes, toon_bytes, ext) VALUES (?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(v, b, x.stand || null, x.model || null, x.opdracht || null, iso(), x.breed, x.hoog, x.bytes.length, x.toon.length, x.soort);
+      d.prepare('INSERT INTO versie (id, bron, voorganger, nr, stand, model, opdracht, gemaakt, breed, hoog, bytes, toon_bytes, ext, duur_s) VALUES (?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(v, b, x.stand || null, x.model || null, x.opdracht || null, iso(), x.breed, x.hoog, x.bytes.length, x.toon.length, x.soort, x.duur_s || null);
       d.exec('COMMIT');
     } catch (e) { d.exec('ROLLBACK'); try { fs.rmSync(path.join(BEELDEN, b), { recursive: true, force: true }); fs.rmSync(toonPad(v), { force: true }); } catch (e2) {} throw e; }
     return { bron: b, versie: v };
@@ -232,6 +239,48 @@ function maak(deps) {
     }
     zet('klaar', null, laatste);
     log('imagine klaar taak=' + taakId + ' versies=' + u.beelden.length);
+  }
+  // ── wv2990: nieuw beeld uit tekst (gewone stand) ──
+  function titelUit(opdracht) { return opdracht.length > 60 ? opdracht.slice(0, 59).trim() + '…' : opdracht; }
+  async function nieuw(d, ctx, apparaat) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    if (schijf().vol) return { status: 507, fout: 'de bibliotheek van Imagine is vol (5 GB); gooi eerst iets weg' };
+    const velden = Object.assign({}, d && d.velden && typeof d.velden === 'object' ? d.velden : {});
+    const opdracht = schoon(velden.opdracht, GRENS.opdracht_max);
+    if (!opdracht) return { status: 400, fout: 'beschrijf eerst wat je wilt zien' };
+    velden.opdracht = opdracht;
+    const id = hex16();
+    // zoals bewerk: de taak eerst vastleggen; bron en voorganger zijn er pas als het resultaat er is
+    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt) VALUES (?, NULL, ?, ?, ?, ?, ?)').run(id, '', '', TEKST.id, 'wacht', iso());
+    let r;
+    try {
+      r = await S.maakGeheugen({ flow: TEKST.flow, velden: velden, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
+        klaar: function (u) { return nieuwKlaar(id, opdracht, u); } }, ctx);
+    } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
+    if (r.status !== 200 || r.al) open().prepare('DELETE FROM taak WHERE id = ?').run(id);
+    if (r.status !== 200) return r;
+    if (r.al) { const t = open().prepare('SELECT * FROM taak WHERE studio = ?').get(r.taak.id); return { status: 200, taak: t ? taakUit(t) : null, al: true }; }
+    open().prepare('UPDATE taak SET studio = ? WHERE id = ?').run(r.taak.id, id);
+    log('imagine nieuw taak=' + id);
+    return { status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(id)) };
+  }
+  // Resultaat: het eerste beeld wordt een nieuwe bron (versie 1 = het gemaakte beeld)
+  async function nieuwKlaar(taakId, opdracht, u) {
+    const d = open();
+    const zet = function (status, reden, bron, versieId) { d.prepare('UPDATE taak SET status = ?, reden = ?, eind = ?, bron = ?, voorganger = ?, versie = ? WHERE id = ?').run(status, reden || null, iso(), bron || '', versieId || '', versieId || null, taakId); };
+    const beelden = u.beelden || [];
+    if (u.status !== 'klaar' || !beelden.length) return zet(u.status === 'klaar' ? 'mislukt' : u.status, u.reden || 'geen resultaat');
+    const b = beelden[0];
+    beelden.slice(1).forEach(function (x) { x.bytes = null; });
+    const x = await toets(b.bytes);
+    if (x.fout) return zet('mislukt', 'resultaat: ' + x.fout);
+    if (schijf().bytes + b.bytes.length + x.toon.length > GRENS.schijf) return zet('mislukt', 'de bibliotheek is vol (5 GB); niets bewaard');
+    let r;
+    try { r = nieuweBron({ bytes: b.bytes, soort: x.soort, toon: x.toon, breed: x.breed, hoog: x.hoog, titel: titelUit(opdracht), herkomst: 'tekst', stand: TEKST.id,
+      model: u.model || null, opdracht: opdracht, duur_s: u.duur_s || null }); }
+    catch (e) { fout('imagine', new Error('resultaat bewaren mislukt')); return zet('mislukt', 'het resultaat kon niet bewaard worden'); }
+    zet('klaar', null, r.bron, r.versie);
+    log('imagine nieuw klaar taak=' + taakId + ' bron=' + r.bron);
   }
   function weg(soort, id) {
     const d = open();
@@ -313,7 +362,7 @@ function maak(deps) {
         }
         if (album) { const a = await c.album(album); if (!a) return { status: 404, fout: 'dit album bestaat niet (meer)' }; albums = [a]; }
       } catch (e) { fout('imagine-immich', new Error('immich niet bereikbaar')); return { status: 503, fout: 'Immich is nu niet bereikbaar' }; }
-      const generatief = v.stand && ['krassen', 'opdracht-qwen', 'opdracht-flux'].indexOf(v.stand) >= 0;
+      const generatief = v.stand && ['krassen', 'opdracht-qwen', 'opdracht-flux', TEKST.id].indexOf(v.stand) >= 0;   // wv2990: ook tekst naar beeld
       const beschrijving = v.model ? (generatief ? 'Gemaakt met AI (' + v.model + ')' : 'Hersteld met AI (' + v.model + ')') : null;
       let up;
       try { up = await c.uploaden({ data: data, taak: v.id, opname: opname, beschrijving: beschrijving }); }
@@ -351,6 +400,13 @@ function maak(deps) {
     if (!x) return;
     s.beelden.delete(id); incLos(x);
     if (s.comfy) { s.comfy = s.beelden.size > 0 || [...s.taken.values()].some(function (t) { return !!t.studio; }); S.geheimNaloop(true).catch(function () {}); }
+  }
+  // wv2990 (Fable ZOU 1/2): een tekst-naar-beeldtaak die zonder beeld in de Map eindigt (gestopt, mislukt, paste niet) heeft geen bron die later
+  // verloopt; dan nu het werkgeheugen van ComfyUI laten vrijgeven (opdracht in de cache), net als bij een beeld dat de Map verlaat
+  function incVrij(s) {
+    if (!s.comfy) return;
+    s.comfy = s.beelden.size > 0 || [...s.taken.values()].some(function (t) { return !!t.studio; });
+    S.geheimNaloop(true).catch(function () {});
   }
   // een verlopen beeld: weg uit de Map (ook bij een aanvraag), nooit meer uitgeleverd
   function incGeldig(s, id) {
@@ -417,20 +473,46 @@ function maak(deps) {
     if (s.gen !== gen || s.wissen) { S.stopGeheugen(r.taak.id, a); }   // intussen gewist: meteen weer stoppen
     return { status: 200, taak: id };
   }
+  // wv2990: nieuw beeld uit tekst in incognito — zelfde weg als incBewerk, zonder bronbeeld; het resultaat krijgt zijn eigen uur
+  async function incNieuw(a, d, ctx) {
+    const s = incOpen(a);
+    if (!s) return { status: 409, fout: 'er wordt net gewist' };
+    if (incTotaal().n >= GRENS.inc_n) return { status: 409, fout: 'incognito houdt hooguit ' + GRENS.inc_n + ' beelden tegelijk; wis eerst iets' };
+    const velden = Object.assign({}, d && d.velden && typeof d.velden === 'object' ? d.velden : {});
+    const opdracht = schoon(velden.opdracht, GRENS.opdracht_max);
+    if (!opdracht) return { status: 400, fout: 'beschrijf eerst wat je wilt zien' };
+    velden.opdracht = opdracht;
+    const id = hex16(), gen = s.gen;
+    const taak = { studio: null, beeld: null, stand: TEKST.id, gen: gen, status: 'wacht', gemaakt: klok() };
+    s.taken.set(id, taak);
+    let r;
+    try {
+      r = await S.maakGeheugen({ flow: TEKST.flow, velden: velden, beurt_id: String(d.beurt_id || ''), geheim: true, apparaat: a,
+        klaar: function (u) { return incKlaar(a, id, gen, null, TEKST, opdracht, u); } }, ctx);
+    } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
+    if (r.status !== 200) { s.taken.delete(id); return r; }
+    if (r.al) { s.taken.delete(id); return { status: 200, al: true }; }
+    taak.studio = r.taak.id;
+    s.comfy = true;
+    s.herstart = false;
+    if (s.gen !== gen || s.wissen) { S.stopGeheugen(r.taak.id, a); }   // intussen gewist: meteen weer stoppen
+    return { status: 200, taak: id };
+  }
   async function incKlaar(a, taakId, gen, bronId, st, opdracht, u) {
     const s = inc.get(a);
     const beelden = u.beelden || [];
     // review MOET 3: een resultaat van vóór het wissen (andere generatie) of van een verlopen bron valt weg
     if (!s || s.gen !== gen || s.wissen || !s.taken.has(taakId)) { beelden.forEach(function (b) { b.bytes = null; }); return; }
     const t = s.taken.get(taakId);
-    if (!incGeldig(s, bronId)) { beelden.forEach(function (b) { b.bytes = null; }); s.taken.delete(taakId); return; }
-    if (u.status !== 'klaar' || !beelden.length) { t.status = u.status === 'klaar' ? 'mislukt' : u.status; t.reden = u.reden || 'geen resultaat'; t.studio = null; t.eind = klok(); return; }
+    // wv2990: bronId null = nieuw beeld uit tekst (geen bron die kan verlopen)
+    if (bronId && !incGeldig(s, bronId)) { beelden.forEach(function (b) { b.bytes = null; }); s.taken.delete(taakId); return; }
+    if (u.status !== 'klaar' || !beelden.length) { t.status = u.status === 'klaar' ? 'mislukt' : u.status; t.reden = u.reden || 'geen resultaat'; t.studio = null; t.eind = klok(); if (!bronId) incVrij(s); return; }
     let n = 0;
     for (const b of beelden) {
       const x = await toets(b.bytes);
       if (!inc.get(a) || s.gen !== gen || s.wissen) { b.bytes = null; return; }
       // review diff MOET 2: de bron moet nog bestaan en geldig zijn (verlopen of gewist = het resultaat valt weg)
-      if (!incGeldig(s, bronId)) { b.bytes = null; continue; }
+      if (bronId && !incGeldig(s, bronId)) { b.bytes = null; continue; }
       if (x.fout || incTotaal().b + b.bytes.length + x.toon.length > GRENS.inc_bytes) { b.bytes = null; continue; }
       s.beelden.set(hex16(), { bytes: b.bytes, toon: x.toon, soort: x.soort, breed: x.breed, hoog: x.hoog, gemaakt: klok(), voorganger: bronId, stand: st.id,
         opdracht: opdracht, model: u.model || null });
@@ -438,6 +520,7 @@ function maak(deps) {
     }
     s.taken.delete(taakId);
     if (!n) s.taken.set(taakId, { studio: null, beeld: bronId, stand: st.id, gen: gen, status: 'mislukt', reden: 'het resultaat paste niet meer (150 MB) of was onleesbaar', eind: klok() });
+    if (!n && !bronId) incVrij(s);
   }
   function incBeeld(a, id, wat, n) {
     const s = sessie(a);
@@ -495,7 +578,8 @@ function maak(deps) {
     inc.forEach(function (s, a) {
       s.beelden.forEach(function (x, id) { if (nu >= incVerloopt(x)) incUit(s, id); });
       s.taken.forEach(function (t, id) {
-        if (t.studio && !s.beelden.has(t.beeld)) { try { S.stopGeheugen(t.studio, a); } catch (e) {} }
+        if (t.studio && t.beeld && !s.beelden.has(t.beeld)) { try { S.stopGeheugen(t.studio, a); } catch (e) {} }   // wv2990: tekst naar beeld heeft geen bron
+        if (t.studio && !t.beeld && t.gemaakt && nu - t.gemaakt > GRENS.inc_ms) { try { S.stopGeheugen(t.studio, a); } catch (e) {} }   // wv2990 (Fable KAN 1): ook de opdracht niet langer dan het uur
         if (!t.studio && t.eind && nu - t.eind > GRENS.inc_ms) s.taken.delete(id);
       });
     });
@@ -511,13 +595,14 @@ function maak(deps) {
     let m;
     if (!post && p === '/app/imagine') {
       const l = lijst();
-      return { status: 200, reden: 'imagine', body: { ok: true, bronnen: l.bronnen, taken: l.taken, standen: await standen(), schijf: schijf(), immich: !!im(),
+      return { status: 200, reden: 'imagine', body: { ok: true, bronnen: l.bronnen, taken: l.taken, standen: await standen(), tekst: (await standen([TEKST]))[0], schijf: schijf(), immich: !!im(),
         incognito: { nog_te_wissen: S.incognito().nog_te_wissen } } };
     }
     if (!post && (m = /^\/app\/imagine\/bron\/([a-f0-9]{16})$/.exec(p))) { const b = bronMet(m[1]); return b ? { status: 200, body: Object.assign({ ok: true }, b) } : { status: 404, body: { ok: false, fout: 'dit beeld bestaat niet (meer)' } }; }
     if (!post && (m = /^\/app\/imagine\/v\/([a-f0-9]{16})\/(toon|deel\/(\d{1,4}))$/.exec(p))) return uit(beeldGewoon(m[1], m[2] === 'toon' ? 'toon' : 'deel', Number(m[3])));
     if (post && p === '/app/imagine/laad') return uit(await laad(d), 'imagine laad');
     if (post && p === '/app/imagine/bewerk') return uit(await bewerk(d, ctx, a), 'imagine bewerk');
+    if (post && p === '/app/imagine/nieuw') return uit(await nieuw(d, ctx, a), 'imagine nieuw');   // wv2990
     if (post && (m = /^\/app\/imagine\/stop\/([a-f0-9]{16})$/.exec(p))) {
       const t = open().prepare('SELECT * FROM taak WHERE id = ?').get(m[1]);
       if (!t || !t.studio) return uit({ status: 404, fout: 'deze bewerking loopt niet meer' });
@@ -532,6 +617,7 @@ function maak(deps) {
     if (!post && (m = /^\/app\/imagine\/incognito\/b\/([a-f0-9]{16})\/(toon|deel\/(\d{1,4}))$/.exec(p))) return uit(incBeeld(a, m[1], m[2] === 'toon' ? 'toon' : 'deel', Number(m[3])), 'imagine incognito beeld');
     if (post && p === '/app/imagine/incognito/laad') return uit(await incLaad(a, d), 'imagine incognito laad');
     if (post && p === '/app/imagine/incognito/bewerk') return uit(await incBewerk(a, d, ctx), 'imagine incognito bewerk');
+    if (post && p === '/app/imagine/incognito/nieuw') return uit(await incNieuw(a, d, ctx), 'imagine incognito nieuw');   // wv2990
     if (post && p === '/app/imagine/incognito/wis') return uit(await incWis(a), 'imagine incognito wis');
     if (post && (m = /^\/app\/imagine\/incognito\/stop\/([a-f0-9]{16})$/.exec(p))) {
       const s = sessie(a), t = s.taken.get(m[1]);
@@ -553,7 +639,7 @@ function maak(deps) {
         schijf_bytes: schijf().bytes, incognito_nog_te_wissen: S.incognito().nog_te_wissen };
     } catch (e) { return { aan: true, fout: true }; }
   }
-  return { app: app, info: info, STANDEN: STANDEN, GRENS: GRENS, stopTimers: function () { clearInterval(timer); }, _inc: inc, _ronde: incRonde, _db: function () { return open(); } };
+  return { app: app, info: info, STANDEN: STANDEN, TEKST: TEKST, GRENS: GRENS, stopTimers: function () { clearInterval(timer); }, _inc: inc, _ronde: incRonde, _db: function () { return open(); } };
 }
 
-module.exports = { maak: maak, STANDEN: STANDEN, GRENS: GRENS };
+module.exports = { maak: maak, STANDEN: STANDEN, TEKST: TEKST, GRENS: GRENS };

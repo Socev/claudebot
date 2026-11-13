@@ -5483,7 +5483,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/potje');   // wv2706: potje zetten of 
 APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij een reis tikken = David die werkt
 ['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2717: zelf corrigeren = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
-['laad', 'bewerk', 'incognito/laad', 'incognito/bewerk', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
+['laad', 'bewerk', 'nieuw', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -16699,9 +16699,9 @@ async function appStudio(req, res, a, s, d, route) {
 // Eigen scherm /imagine in de Socev-app. Alle logica in imagine.js bovenop de motor van studio.js (maakGeheugen). Routes achter de app-sessie
 // (zelfde poort als de Studio: sessie + handtekening; een stand op proef vraagt per keer een verse vingerafdruk):
 //   GET  /app/imagine, /app/imagine/bron/<id>, /app/imagine/v/<id>/(toon|deel/<n>)
-//   POST /app/imagine/(laad|bewerk), /stop/<taak>, /bron/<id>/(fav|titel|weg), /v/<id>/(weg|immich)
+//   POST /app/imagine/(laad|bewerk|nieuw), /stop/<taak>, /bron/<id>/(fav|titel|weg), /v/<id>/(weg|immich)
 //   GET  /app/imagine/incognito, /app/imagine/incognito/b/<id>/(toon|deel/<n>)
-//   POST /app/imagine/incognito/(laad|bewerk|wis), /incognito/stop/<taak>, /incognito/b/<id>/(weg|export)
+//   POST /app/imagine/incognito/(laad|bewerk|nieuw|wis), /incognito/stop/<taak>, /incognito/b/<id>/(weg|export)
 // Incognito: alleen geheugen van dit proces, per apparaat (a.id); in api.log alleen de vaste redentekst, nooit inhoud; geen logError met tekst.
 const imagineApp = (function () {
   const p = path.join(__dirname, 'imagine.js');
