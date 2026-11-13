@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const SCHEMA_VERSIE = 1;
+const SCHEMA_VERSIE = 2;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT);
 CREATE TABLE IF NOT EXISTS plan_antwoord (vraag INTEGER PRIMARY KEY CHECK (vraag BETWEEN 1 AND 14), tekst TEXT, waarden TEXT,
@@ -42,6 +42,23 @@ CREATE TABLE IF NOT EXISTS dagboek (id INTEGER PRIMARY KEY AUTOINCREMENT, transa
 CREATE TABLE IF NOT EXISTS volglijst (id INTEGER PRIMARY KEY AUTOINCREMENT, naam TEXT NOT NULL, code TEXT, thema TEXT, waarom TEXT, wanneer TEXT,
   op TEXT NOT NULL, weg INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS signaal_keuze (sleutel TEXT PRIMARY KEY, keuze TEXT NOT NULL CHECK (keuze IN ('niets','herinner')), tot TEXT, op TEXT NOT NULL);
+`;
+// Schemaversie 2 (wv2993, fase 2 weekbericht; ontwerp mk-scripts/ovis-beleggen/fase2/ontwerp-fase2.md § 2.2). Alleen nieuwe tabellen (CREATE IF NOT
+// EXISTS = de migratie); fase-1-tabellen blijven gelijk. bedrijf = het kaartje per positie ('isin:…'/'naam:…') of volglijstregel ('volg:<id>');
+// nieuws = alleen kop, link, datum en bron (geen artikeltekst), 120 dagen; week = één rij per ISO-week; week_keuze = Davids keuze per kaart.
+const SCHEMA_2 = `
+CREATE TABLE IF NOT EXISTS bedrijf (sleutel TEXT PRIMARY KEY, naam TEXT NOT NULL, namen TEXT NOT NULL, code TEXT, cik TEXT, sponsor TEXT,
+  producten TEXT NOT NULL DEFAULT '[]', belang INTEGER NOT NULL DEFAULT 0 CHECK (belang IN (0,1)), op TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS nieuws (sleutel TEXT PRIMARY KEY, bedrijf TEXT NOT NULL, bron TEXT NOT NULL, bronsleutel TEXT NOT NULL, hard INTEGER NOT NULL CHECK (hard IN (0,1)),
+  koppeling TEXT NOT NULL CHECK (koppeling IN ('cik','sponsor','product','naam')), soort TEXT, achtergrond INTEGER NOT NULL DEFAULT 0, datum TEXT NOT NULL,
+  titel TEXT NOT NULL, link TEXT, eerst_gezien TEXT NOT NULL, week_getoond TEXT);
+CREATE INDEX IF NOT EXISTS nieuws_bedrijf ON nieuws (bedrijf, datum);
+CREATE TABLE IF NOT EXISTS nieuws_bron (bron TEXT PRIMARY KEY, laatst_ok TEXT, fouten_op_rij INTEGER NOT NULL DEFAULT 0, laatste_fout TEXT, ruis_teller INTEGER NOT NULL DEFAULT 0,
+  gezakt INTEGER NOT NULL DEFAULT 0, gemeld_week TEXT);
+CREATE TABLE IF NOT EXISTS week (iso_week TEXT PRIMARY KEY, van TEXT NOT NULL, tot TEXT NOT NULL, gemaakt_op TEXT NOT NULL, invoer_hash TEXT, kaarten TEXT NOT NULL,
+  verder TEXT NOT NULL, belang TEXT NOT NULL, model TEXT NOT NULL, gemeld_op TEXT, bericht_id TEXT);
+CREATE TABLE IF NOT EXISTS week_keuze (iso_week TEXT NOT NULL, bedrijf TEXT NOT NULL, keuze TEXT NOT NULL CHECK (keuze IN ('niets','dagboek','herinner','ruis','nuttig')),
+  tot TEXT, op TEXT NOT NULL, PRIMARY KEY (iso_week, bedrijf));
 `;
 
 // ── de veertien vragen (plan § 1.7); velden = wat de app narekent ──
@@ -481,7 +498,7 @@ function bereken(data, vandaag) {
   for (const t of data.transacties) if (!metRegel.has(t.sleutel)) open.push({ soort: 'dagboek', transactie: t.sleutel, tekst: t.naam + ' (' + t.datum + '): nog geen dagboekregel' });
   const anthropic = posities.some((p) => ANTHROPIC_RE.test(p.naam)) || data.volglijst.some((v) => ANTHROPIC_RE.test(v.naam + ' ' + (v.code || '')));
   return { verdeling, posities, cash, lampjes, signalen: zichtbaar, signalen_verborgen: signalen.length - zichtbaar.length, open_punten: open,
-    belang: anthropic ? ANTHROPIC_ZIN : null, volledig };
+    belang: anthropic ? ANTHROPIC_ZIN : null, volledig, woorden };
 }
 
 // ── plan: waarden controleren en regels afleiden ──
@@ -527,19 +544,22 @@ function maak(o) {
   const dbPad = o.dbPad;
   const vaultSchrijf = typeof o.vaultSchrijf === 'function' ? o.vaultSchrijf : null;
   const vandaagF = o.vandaag || vandaagNl;
-  let vaultOk = null, laatsteVault = null;
+  let vaultOk = null, laatsteVault = null, gemigreerd = false;
   function open(alleenLezen) {
     const { DatabaseSync } = require('node:sqlite');
     const map = path.dirname(dbPad);
     if (!fs.existsSync(map)) fs.mkdirSync(map, { recursive: true, mode: 0o700 });
     const nieuw = !fs.existsSync(dbPad);
     if (alleenLezen && nieuw) return null;
+    if (alleenLezen && !gemigreerd) open(false).close();   // wv2993: een databank van fase 1 krijgt de tabellen van versie 2 vóór de eerste lezing
     const db = new DatabaseSync(dbPad, alleenLezen ? { readOnly: true } : {});
     if (!alleenLezen) {
       if (nieuw) { try { fs.chmodSync(dbPad, 0o600); } catch (e) { /* bestaat al */ } }
       db.exec('PRAGMA foreign_keys = ON;');
       db.exec(SCHEMA);
-      db.prepare('INSERT OR IGNORE INTO meta (sleutel, waarde) VALUES (?, ?)').run('schema', String(SCHEMA_VERSIE));
+      db.exec(SCHEMA_2);
+      db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde WHERE CAST(meta.waarde AS INTEGER) < CAST(excluded.waarde AS INTEGER)").run(String(SCHEMA_VERSIE));
+      gemigreerd = true;
     }
     return db;
   }
@@ -578,11 +598,12 @@ function maak(o) {
       const k = bereken(d, vandaag);
       const volg = d.volglijst.map((v) => Object.assign({}, v, { vroegst: d.regels.afkoel_dagen != null ? plusDagen(v.op.slice(0, 10), d.regels.afkoel_dagen) : null }));
       const dagboek = d.dagboek.map((x) => Object.assign({}, x, { terugblik6_op: plusMaanden(x.datum, 6), terugblik12_op: plusMaanden(x.datum, 12) }));
+      const bedrijven = bedrijvenUit(db, d, k).map((b) => ({ sleutel: b.sleutel, naam: b.naam, bron: b.bron, kaartje: b.kaartje, voorstel: b.voorstel }));
       for (const p of k.posities) delete p._ruw;
       return { ok: true, vandaag, vragen: VRAGEN, antwoorden: d.antwoorden, regels: d.regels, versies: d.versies, stand: { datum: d.stand_datum, bron: d.stand_bron,
         verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig }, transacties: d.transacties, dagboek, volglijst: volg,
         signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, rekening_rijen: d.rekening_rijen,
-        soort_namen: SOORT_NAAM, vault: { ok: vaultOk, op: laatsteVault } };
+        soort_namen: SOORT_NAAM, vault: { ok: vaultOk, op: laatsteVault }, bedrijven };
     }, false);
   }
   function snapshot(db) {
@@ -832,11 +853,134 @@ function maak(o) {
     return { reden: 'beleggen signaal ' + b.keuze };
   }
 
+  // ── fase 2 (wv2993): kaartje "Nieuws over dit bedrijf", weekbericht lezen, keuze per kaart ──
+  // Het ophalen en de weekronde staan in beleggen-nieuws.js (die doet de verzoeken); hier alleen de databank en Davids invoer.
+  const BELANG_RE = /\b(anthropic|claude)\b/i;
+  // voorstel voor de schrijfwijze: de naam uit het bestand zonder rechtsvorm of aandelenklasse ("VOORBEELD CHIPS INC" → "VOORBEELD CHIPS")
+  const kaleNaam = (n) => String(n || '').replace(/[,.]/g, ' ').replace(/\b(INC|INCORPORATED|CORP|CORPORATION|CO|COMPANY|NV|N V|SA|SE|AG|PLC|LTD|LIMITED|HOLDINGS?|GROUP|A\/S|AS|ASA|AB|SPA|BV|CLASS [A-C]|CL [A-C]|ADR|ORD|REG|SHS)\b/gi, ' ')
+    .replace(/\s+/g, ' ').trim() || String(n || '').trim();
+  function leesBedrijven(db) {
+    const uit = {};
+    for (const r of db.prepare('SELECT * FROM bedrijf').all()) uit[r.sleutel] = { sleutel: r.sleutel, naam: r.naam, namen: JSON.parse(r.namen), code: r.code, cik: r.cik,
+      sponsor: r.sponsor, producten: JSON.parse(r.producten || '[]'), belang: !!r.belang, op: r.op };
+    return uit;
+  }
+  // Alle bedrijven die nieuws kunnen krijgen: posities (geen kern/indexfonds, geen contant) + volglijst. Met Davids reden (dagboek of volglijst).
+  function bedrijvenUit(db, d, k) {
+    const kaartjes = db ? leesBedrijven(db) : {};
+    const R = d.regels || {};
+    const lijst = [];
+    for (const p of k.posities) {
+      if (p.soort === 'kern') continue;
+      lijst.push({ sleutel: p.sleutel, naam: p.naam, bron: 'positie', soort: p.soort || null, aandeel: p.aandeel, boven_max: R.max_aandeel != null && p._ruw != null && p._ruw > R.max_aandeel + 1e-9,
+        reden: k.woorden[p.sleutel] || null, kaartje: kaartjes[p.sleutel] || null, voorstel: { namen: [kaleNaam(p.naam)], code: null } });
+    }
+    for (const v of d.volglijst) lijst.push({ sleutel: 'volg:' + v.id, naam: v.naam, bron: 'volglijst', soort: v.thema || null, aandeel: null, boven_max: false,
+      reden: v.waarom || null, kaartje: kaartjes['volg:' + v.id] || null, voorstel: { namen: [kaleNaam(v.naam)], code: v.code || null } });
+    return lijst;
+  }
+  // Voor beleggen-nieuws.js: wat er nodig is om op te halen en te wegen (geen bedragen; aandeel in % alleen voor de kaart in de app).
+  function nieuwsData() {
+    return metDb((db) => {
+      const d = leesAlles(db);
+      const vandaag = vandaagF();
+      const k = bereken(d, vandaag);
+      const bedrijven = bedrijvenUit(db, d, k).map((b) => { const x = Object.assign({}, b); delete x.voorstel; return x; });
+      return { vandaag, regels: { max_aandeel: d.regels.max_aandeel == null ? null : d.regels.max_aandeel, afkoel_dagen: d.regels.afkoel_dagen == null ? null : d.regels.afkoel_dagen }, bedrijven };
+    }, false);
+  }
+  const lijstVan = (x) => (Array.isArray(x) ? x : String(x == null ? '' : x).split('\n')).map((s) => String(s).trim()).filter(Boolean);
+  function zetBedrijf(b) {
+    const sl = T(b.sleutel, 200);
+    if (!sl || !/^(isin|naam):|^volg:\d+$/.test(sl)) throw new Fout(400, 'onbekend bedrijf');
+    return metDb((db) => {
+      let naam = null;
+      if (sl.startsWith('volg:')) { const r = db.prepare('SELECT naam FROM volglijst WHERE id = ? AND weg = 0').get(Number(sl.slice(5))); naam = r && r.naam; }
+      else { const r = db.prepare("SELECT naam FROM positie WHERE sleutel = ? AND regelsoort = 'effect'").get(sl); naam = r && r.naam; }
+      if (!naam) throw new Fout(404, 'bedrijf niet gevonden in je stand of volglijst');
+      if (b.actie === 'weg') { db.prepare('DELETE FROM bedrijf WHERE sleutel = ?').run(sl); return { reden: 'beleggen bedrijf weg' }; }
+      if (b.actie !== 'zet') throw new Fout(400, 'actie: zet of weg');
+      const namen = [...new Set(lijstVan(b.namen))];
+      if (!namen.length) throw new Fout(400, 'minstens één schrijfwijze van de naam');
+      if (namen.length > 8 || namen.some((n) => n.length < 2 || n.length > 60)) throw new Fout(400, 'schrijfwijzen: hooguit 8, elk 2 tot 60 tekens');
+      const producten = [...new Set(lijstVan(b.producten))];
+      if (producten.length > 10 || producten.some((n) => n.length < 2 || n.length > 60)) throw new Fout(400, 'productnamen: hooguit 10, elk 2 tot 60 tekens');
+      const code = b.code == null || String(b.code).trim() === '' ? null : String(b.code).trim().toUpperCase();
+      if (code && !/^[A-Z0-9][A-Z0-9.-]{0,11}$/.test(code)) throw new Fout(400, 'beurscode: letters en cijfers, hooguit 12');
+      const cikRuw = b.cik == null ? '' : String(b.cik).trim().replace(/^0+/, '');
+      if (cikRuw && !/^\d{1,10}$/.test(cikRuw)) throw new Fout(400, 'SEC-nummer (CIK): alleen cijfers, hooguit 10');
+      const cik = cikRuw ? cikRuw.padStart(10, '0') : null;
+      const sponsor = T(b.sponsor, 120);
+      const belang = b.belang === true || BELANG_RE.test(namen.join(' ') + ' ' + naam) ? 1 : 0;
+      db.prepare('INSERT INTO bedrijf (sleutel, naam, namen, code, cik, sponsor, producten, belang, op) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(sleutel) DO UPDATE SET ' +
+        'naam = excluded.naam, namen = excluded.namen, code = excluded.code, cik = excluded.cik, sponsor = excluded.sponsor, producten = excluded.producten, belang = excluded.belang, op = excluded.op')
+        .run(sl, naam, JSON.stringify(namen), code, cik, sponsor, JSON.stringify(producten), belang, nuIso());
+      return { reden: 'beleggen bedrijf' };
+    }, true);
+  }
+  const WEEK_KEUZES = ['niets', 'dagboek', 'herinner', 'ruis', 'nuttig'];
+  function leesWeek() {
+    return metDb((db) => {
+      const vandaag = vandaagF();
+      const leeg = { ok: true, vandaag, weken: [], keuzes: {}, herinneringen: [], gezakt: [], ingesteld: 0, afkoel_dagen: null };
+      if (!db) return leeg;
+      const r = db.prepare("SELECT waarde FROM regel WHERE sleutel = 'afkoel_dagen'").get();
+      leeg.afkoel_dagen = r ? JSON.parse(r.waarde) : null;
+      leeg.ingesteld = db.prepare('SELECT COUNT(*) AS n FROM bedrijf').get().n;
+      leeg.weken = db.prepare('SELECT iso_week, van, tot, gemaakt_op, kaarten, verder, belang, model, gemeld_op FROM week ORDER BY iso_week DESC LIMIT 12').all().map((w) => {
+        const m = JSON.parse(w.model || '{}');
+        return { iso_week: w.iso_week, van: w.van, tot: w.tot, gemaakt_op: w.gemaakt_op, kaarten: JSON.parse(w.kaarten), verder: JSON.parse(w.verder), belang: JSON.parse(w.belang),
+          gewogen: m.ok === true, gemeld: !!w.gemeld_op };
+      });
+      for (const k of db.prepare('SELECT iso_week, bedrijf, keuze, tot FROM week_keuze').all()) (leeg.keuzes[k.iso_week] = leeg.keuzes[k.iso_week] || {})[k.bedrijf] = { keuze: k.keuze, tot: k.tot };
+      // herinnering: een kaart uit een eerdere week waarvan de afkoeltijd om is, staat bovenaan tot David een andere keuze maakt
+      for (const w of leeg.weken.slice(1)) for (const kaart of w.kaarten) {
+        const k = (leeg.keuzes[w.iso_week] || {})[kaart.bedrijf];
+        if (k && k.keuze === 'herinner' && k.tot && k.tot <= vandaag) leeg.herinneringen.push({ iso_week: w.iso_week, kaart });
+      }
+      leeg.gezakt = db.prepare('SELECT bron FROM nieuws_bron WHERE gezakt = 1 ORDER BY bron').all().map((x) => x.bron);
+      return leeg;
+    }, false);
+  }
+  function zetWeekKeuze(b) {
+    if (b.actie === 'terug') {
+      const bron = T(b.bron, 120); if (!bron) throw new Fout(400, 'bron ontbreekt');
+      metDb((db) => { const r = db.prepare('UPDATE nieuws_bron SET gezakt = 0, ruis_teller = 0 WHERE bron = ? AND gezakt = 1').run(bron); if (!r.changes) throw new Fout(404, 'bron niet gevonden'); }, true);
+      return { reden: 'beleggen bron terug' };
+    }
+    const week = T(b.week, 10), bedrijf = T(b.bedrijf, 200);
+    if (!week || !/^\d{4}-W\d{2}$/.test(week) || !bedrijf) throw new Fout(400, 'week en bedrijf nodig');
+    if (!WEEK_KEUZES.includes(b.keuze)) throw new Fout(400, 'keuze: niets, dagboek, herinner, ruis of nuttig');
+    let tot = null;
+    metDb((db) => {
+      const w = db.prepare('SELECT kaarten FROM week WHERE iso_week = ?').get(week);
+      const kaart = w && JSON.parse(w.kaarten).find((k) => k.bedrijf === bedrijf);
+      if (!kaart) throw new Fout(404, 'kaart niet gevonden');
+      const oud = db.prepare('SELECT keuze FROM week_keuze WHERE iso_week = ? AND bedrijf = ?').get(week, bedrijf);
+      if (b.keuze === 'herinner') {
+        const r = db.prepare("SELECT waarde FROM regel WHERE sleutel = 'afkoel_dagen'").get();
+        tot = plusDagen(vandaagF(), r ? JSON.parse(r.waarde) : 7);
+      }
+      db.prepare('INSERT INTO week_keuze (iso_week, bedrijf, keuze, tot, op) VALUES (?, ?, ?, ?, ?) ON CONFLICT(iso_week, bedrijf) DO UPDATE SET keuze = excluded.keuze, tot = excluded.tot, op = excluded.op')
+        .run(week, bedrijf, b.keuze, tot, nuIso());
+      // Ruis telt één keer per kaart op bij elke bron op die kaart; na drie keer zakt de bron naar Verder gezien (terug te zetten)
+      const telt = (b.keuze === 'ruis') - (!!oud && oud.keuze === 'ruis');
+      if (telt) for (const bron of [...new Set((kaart.gebeurd || []).map((g) => g.bronsleutel).filter(Boolean))]) {
+        db.prepare('INSERT INTO nieuws_bron (bron) VALUES (?) ON CONFLICT(bron) DO NOTHING').run(bron);
+        db.prepare('UPDATE nieuws_bron SET ruis_teller = MAX(0, ruis_teller + ?) WHERE bron = ?').run(telt, bron);
+        db.prepare('UPDATE nieuws_bron SET gezakt = CASE WHEN ruis_teller >= 3 THEN 1 ELSE gezakt END WHERE bron = ?').run(bron);
+      }
+    }, true);
+    return { reden: 'beleggen week ' + b.keuze };
+  }
+
   const SCHRIJF = { '/app/beleggen/plan': zetPlan, '/app/beleggen/soort': zetSoort, '/app/beleggen/positie': zetPositie, '/app/beleggen/transactie': zetTransactie,
-    '/app/beleggen/bestand': zetBestand, '/app/beleggen/dagboek': zetDagboek, '/app/beleggen/volglijst': zetVolglijst, '/app/beleggen/signaal': zetSignaal };
+    '/app/beleggen/bestand': zetBestand, '/app/beleggen/dagboek': zetDagboek, '/app/beleggen/volglijst': zetVolglijst, '/app/beleggen/signaal': zetSignaal,
+    '/app/beleggen/bedrijf': zetBedrijf, '/app/beleggen/week/keuze': zetWeekKeuze };
   function app(v) {
     try {
       if (v.methode === 'GET' && v.pad === '/app/beleggen') return { status: 200, body: overzicht(), reden: 'beleggen' };
+      if (v.methode === 'GET' && v.pad === '/app/beleggen/week') return { status: 200, body: leesWeek(), reden: 'beleggen week' };
       const f = v.methode === 'POST' ? SCHRIJF[v.pad] : null;
       if (!f) return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'beleggen onbekend' };
       const u = f(v.body && typeof v.body === 'object' ? v.body : {});
@@ -852,10 +996,11 @@ function maak(o) {
       if (!db) return { aan: true, databank: false };
       const n = (t) => db.prepare('SELECT COUNT(*) AS n FROM ' + t).get().n;
       return { aan: true, databank: true, posities: n('positie'), transacties: n('transactie'), rekening: n('rekening'), dagboek: n('dagboek'), volglijst: n('volglijst'),
-        planversies: n('planversie'), vault_ok: vaultOk };
+        planversies: n('planversie'), vault_ok: vaultOk, schema: Number((db.prepare("SELECT waarde FROM meta WHERE sleutel = 'schema'").get() || {}).waarde) || null,
+        nieuws: { bedrijven: n('bedrijf'), regels: n('nieuws'), weken: n('week'), bronnen_gezakt: db.prepare('SELECT COUNT(*) AS n FROM nieuws_bron WHERE gezakt = 1').get().n } };
     }, false);
   }
-  return { app, info, _overzicht: overzicht };
+  return { app, info, _overzicht: overzicht, nieuwsData, metDb, vandaag: vandaagF };
 }
 
 module.exports = { maak, leesBestand, bereken, regelsUit, VRAGEN, LeesFout, ANTHROPIC_ZIN, plusMaanden };

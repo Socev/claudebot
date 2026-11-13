@@ -490,6 +490,10 @@ jobs:
       - name: "beleggen (wv2982, OVIS Beleggen fase 1)"
         if: ${{ !cancelled() }}
         run: bash test/beleggen.sh
+      # wv2993: OVIS Beleggen fase 2 — weekbericht: ophalen, ruisregels, weegronde en kaarten op opgenomen antwoorden (geen netwerk, geen model) + kruisproef per regel.
+      - name: "beleggen-nieuws (wv2993, OVIS Beleggen weekbericht)"
+        if: ${{ !cancelled() }}
+        run: bash test/beleggen-nieuws.sh
       # wv2991: OVIS Personeelsscherm fase 0 — proefscherm tekenen, koppelen met IP-eis, intrekken, tik en meldingen (nep-D1, nep-Cloudflare).
       - name: "personeelsscherm (wv2991, OVIS Personeelsscherm fase 0)"
         if: ${{ !cancelled() }}

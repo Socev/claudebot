@@ -220,7 +220,7 @@ function haalEen(u, adres, deps, accept) {
     const host = u.hostname.replace(/^\[|\]$/g, '');
     const lookup = function (h, o, cb) { if (typeof o === 'function') cb = o; if (o && o.all) cb(null, [{ address: adres.address, family: adres.family }]); else cb(null, adres.address, adres.family); };
     const opts = { method: 'GET', host: host, port: 443, path: u.pathname + u.search, lookup: lookup, servername: net.isIP(host) ? undefined : host,
-      headers: { 'user-agent': UA, accept: accept, 'accept-encoding': 'gzip, deflate, br' }, timeout: OPHAAL_MS };
+      headers: { 'user-agent': (deps && typeof deps.ua === 'string' && /^[\x20-\x7e]{1,120}$/.test(deps.ua)) ? deps.ua : UA, accept: accept, 'accept-encoding': 'gzip, deflate, br' }, timeout: OPHAAL_MS };   // wv2993: eigen user-agent per afnemer (Beleggen)
     if (deps && deps.agent) opts.agent = deps.agent;
     if (deps && deps.ca) opts.ca = deps.ca;
     const req = (deps && deps.request ? deps.request : https.request)(opts, function (res) {
