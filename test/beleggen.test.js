@@ -296,3 +296,19 @@ test('wv3006: historie — één punt per standdatum (laatste bestand van die da
   assert.deepStrictEqual(h, [{ datum: '2026-10-01', belegd_cent: 81000 + 30415 + 10138, cash_cent: 15000 }, { datum: '2026-11-12', belegd_cent: 82000 + 30415 + 10138, cash_cent: 15000 }]);
   assert.strictEqual(get().body.stand.historie.length, 2, 'tweede lezing (cache) geeft hetzelfde');
 });
+test('wv3008 startfase: contant met de hand telt als contant, niet als belegd; een ingelezen portefeuille vervangt het; daarna niet meer met de hand', () => {
+  const { post, get } = nieuw();
+  assert.strictEqual(post('positie', { actie: 'contant', waarde_eur: '-1' }).status, 400);
+  assert.strictEqual(post('positie', { actie: 'contant', waarde_eur: 'veel' }).status, 400);
+  const u = post('positie', { actie: 'contant', waarde_eur: '250,50' });
+  assert.strictEqual(u.status, 200); assert.ok(!/\d/.test(u.reden), 'geen bedrag in de reden');
+  let o = get().body;
+  assert.deepStrictEqual([o.stand.verdeling.cash_cent, o.stand.verdeling.belegd_cent, o.stand.posities.length, o.stand.cash.length, o.stand.bron, o.stand.datum], [25050, 0, 0, 1, 'hand', '2026-11-12']);
+  assert.strictEqual(post('positie', { actie: 'contant', waarde_eur: '300' }).status, 200);
+  assert.strictEqual(get().body.stand.verdeling.cash_cent, 30000, 'bijwerken, niet optellen');
+  assert.strictEqual(post('bestand', { naam: 'Portfolio.csv', tekst: PORT, datum: '2026-11-12', bewaar: true }).status, 200);
+  o = get().body;
+  assert.ok(!o.stand.cash.some((c) => c.sleutel === 'cash:hand'), 'bestand vervangt de handregel');
+  assert.strictEqual(post('positie', { actie: 'contant', waarde_eur: '1' }).status, 409);
+  assert.strictEqual(post('positie', { actie: 'raar' }).status, 400);
+});
