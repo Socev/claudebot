@@ -11,9 +11,9 @@ if echo "$C" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new 
 if echo "$C" | grep -niE "koersdoel|koopadvies|'kopen'|'verkopen'|\"kopen\"|\"verkopen\"|degiro\.(nl|com)|trader\.degiro"; then echo "ROOD  beleggen.js: handelsknop, koersdoel of DEGIRO-adres"; f=1; fi
 [ $f = 0 ] && echo "GROEN CI-poort: beleggen.js zonder netwerk, proces, log, handelsknop of DEGIRO-adres"
 grep -q "const beleggenApp = (function () {" server.js || { echo "ROOD  server.js: beleggenApp ontbreekt"; f=1; }
-P=$(grep -oE "POST \\\\/app\\\\/beleggen\\\\/\([a-z|]+\)" server.js)
-[ "$P" = 'POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal)' ] || { echo "ROOD  server.js: POST-routes van Beleggen zijn niet precies de acht ($P)"; f=1; }
-grep -qF "['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });" server.js || { echo "ROOD  server.js: Beleggen-routes verlengen de sessie niet"; f=1; }
+P=$(grep -oE "POST \\\\/app\\\\/beleggen\\\\/\([a-z|\\\\/]+\)" server.js)
+[ "$P" = 'POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)' ] || { echo "ROOD  server.js: POST-routes van Beleggen zijn niet precies de tien ($P)"; f=1; }   # wv2993: +bedrijf, week/keuze
+grep -qF "['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });" server.js || { echo "ROOD  server.js: Beleggen-routes verlengen de sessie niet"; f=1; }
 grep -qF "p === '/app/beleggen/bestand' ? APP_BELEGGEN_MAX_BODY_VROEG" server.js || { echo "ROOD  server.js: bodygrens voor het bestand ontbreekt"; f=1; }
 grep -qE "^\s+beleggen: typeof beleggenInfo === 'function'" server.js || { echo "ROOD  server.js: /health.beleggen ontbreekt"; f=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* beleggen\.js" uitrol.sh || { echo "ROOD  uitrol.sh: beleggen.js niet in RELEASE_OPTIONEEL"; f=1; }

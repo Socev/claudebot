@@ -5485,7 +5485,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij 
 ['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2717: zelf corrigeren = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
 ['laad', 'bewerk', 'nieuw', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
-['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
+['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });   // wv2991: Personeelsscherm = David die werkt
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -13725,7 +13725,7 @@ function handleApp(req, res) {
           || /^(GET \/app\/ghawa\/delen|POST \/app\/ghawa\/delen\/(onderdeel|noodstop|kijker|kijker-weg|tekst|overleg))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
         if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
-        if (route === 'GET /app/beleggen' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
+        if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
@@ -14725,11 +14725,12 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'facturen-boekstuk',    // wv2316: boekstuk Google Home naar André (verstuurd = archief; concept of vraag = dag)
   'weer-avond',           // wv2605: avondseintje bij vroeg vertrek (gladheid/storm/onweer/KNMI 05:00–08:00 morgen); hoofdkanaal, soort dag
   'nieuwsbrief',          // wv2190: wekelijkse bloemlezing uit de nieuwsbrieven (za 09:15, AI - Nieuwsbrief-bloemlezing); hoofdkanaal, soort dag
+  'beleggen-week',        // wv2993: OVIS Beleggen weekbericht (zondag 09:00; alleen aantallen, geen namen of bedragen); hoofdkanaal, soort dag
   'dagsamenvatting']);    // wv589: dagsamenvatting "Gebeurd" 07:15 (idee 13 § 4.6): machinekamer, geen MELD_SOORT-regel = archief, geen seintje
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
 const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag' };
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag' };
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
@@ -21810,6 +21811,8 @@ if (GHAWA_TIKKEN) {
 // voor elke POST; geen verse vingerafdruk per handeling):
 //   GET  /app/beleggen                       alles in één antwoord
 //   POST /app/beleggen/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal)
+//   GET  /app/beleggen/week                  wv2993: weekberichten (laatste 12), keuzes, herinneringen, gezakte bronnen
+//   POST /app/beleggen/(bedrijf|week/keuze)  wv2993: kaartje "Nieuws over dit bedrijf"; keuze per weekkaart (niets/dagboek/herinner/ruis/nuttig)
 // Bestand: JSON {naam, tekst, datum?, bewaar} tot 3 MB (doorgeefluik én pod); bewaar:false = proef zonder schrijven. Audit: alleen route + aantallen.
 // Vaultpagina's 20_Prive/Financien/Beleggen/Beleggingsplan.md en Dagboek.md via vault-veilig (de databank is de bron).
 const BELEGGEN_DB = process.env.BELEGGEN_DB || '/opt/data/beleggen/beleggen.sqlite';
@@ -21832,8 +21835,44 @@ async function appBeleggen(req, res, a, route, d) {
 }
 function beleggenInfo() {
   if (!beleggenApp) return { aan: false };
-  try { return beleggenApp.info(); } catch (e) { return { aan: true, fout: true }; }
+  let i;
+  try { i = beleggenApp.info(); } catch (e) { return { aan: true, fout: true }; }
+  if (beleggenNieuws) { try { i.weekbericht = beleggenNieuws.info(); } catch (e) { i.weekbericht = { aan: true, fout: true }; } }
+  return i;
 }
+// ── wv2993: OVIS Beleggen fase 2 — weekbericht met nieuws (ontwerp mk-scripts/ovis-beleggen/fase2/ontwerp-fase2.md; David Ja 13-11 08:36:
+// zondag 09:00, SEC-stukken zonder contactadres). Logica in beleggen-nieuws.js; hier de koppeling: ophalen via harvester.veiligHaal (alleen https/443,
+// openbare adressen, ≤ 3 MB, tijdgrenzen) met een eigen user-agent ZONDER contactadres, weging via harvesterClaude (Sonnet, geen gereedschap),
+// seintje via berichtIntern (bron beleggen-week, soort dag, sleutel per ISO-week), box-rij bij een bron die drie dagen faalt, hartslag
+// 'beleggen-ophaal'. Eigen klok zoals weerAvondTik: elke 5 min, alleen echte pod met rol primair; werk alleen 06:40 (ophalen, eens per dag) en
+// zondag 09:00 (weekronde); seintje alleen 07:00–22:00. Log: alleen aantallen (geen bedrijfsnamen, koppen of bedragen).
+const BELEGGEN_UA = 'OVIS-Beleggen/1 (+https://socev.dev)';
+const beleggenNieuws = (function () {
+  const p = path.join(__dirname, 'beleggen-nieuws.js');
+  if (!beleggenApp || !fs.existsSync(p)) return null;
+  try {
+    const H = require(path.join(__dirname, 'harvester.js'));
+    return require(p).maak({ beleggen: beleggenApp, leesFeed: H.leesFeed,
+      haal: async function (url, accept) { const r = await H.veiligHaal(url, { ua: BELEGGEN_UA }, accept); return r.body; },
+      claude: harvesterClaude, klok: ovisAms,
+      bericht: async function (tekst, sleutel) {
+        const r = await berichtIntern({ kanaal: 'hoofd', bron: 'beleggen-week', klasse: 'normaal', soort: 'dag', tekst: tekst, sleutel: sleutel });
+        return { ok: !!(r && r.status === 200 && r.j && r.j.ok), id: r && r.j && r.j.id };
+      },
+      boxRij: function (t) { return ovisBoxRij(t); },
+      hartslag: function (n, b) { return appSbRpc('mk_hartslag_stempel', { p_component: 'beleggen-ophaal', p_gemeten_rijen: n, p_bevindingen: b }); },
+      log: function (o) { schrijfLog(nu() + ' beleggen-nieuws ' + velden(o)); } });
+  } catch (e) { logError('beleggen-nieuws', new Error('laden faalde')); return null; }
+})();
+let beleggenNieuwsBezig = false;
+async function beleggenNieuwsTik() {
+  if (!beleggenNieuws || !SERVER_ECHT || !rolPrimair() || beleggenNieuwsBezig) return;
+  beleggenNieuwsBezig = true;
+  try { await beleggenNieuws.tik(); }
+  catch (e) { logError('beleggen-nieuws', new Error('tik faalde')); }   // geen inhoud in de log
+  finally { beleggenNieuwsBezig = false; }
+}
+if (beleggenNieuws && SERVER_ECHT) { setInterval(function () { beleggenNieuwsTik(); }, 5 * 60000).unref(); }
 // ── einde OVIS Beleggen ──
 // ── OVIS Personeelsscherm (wv2991, 13-11-2026; plan vault "01_Ontwikkeling/OVIS Personeelsscherm - plan (Fable 5.2, 13-11-2026)", ontwerp fase 0
 // met Codex-review in mk-scripts/personeelsscherm/ontwerp-fase0.md) ──
