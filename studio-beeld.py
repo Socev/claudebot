@@ -297,7 +297,8 @@ def naad(data, deel, uit, lever):
         klaar(2, ok=False, reden="het resultaat heeft andere maten dan het beeld", breed=res.size[0], hoog=res.size[1])
     vast = hoofd.getchannel("A").point(lambda v: 255 if v == 255 else 0)   # buiten het (gegroeide) masker
     orig = hoofd.convert("RGB")
-    verschil = ImageChops.difference(res, orig).convert("L").point(lambda v: 255 if v else 0)
+    r_, g_, b_ = ImageChops.difference(res, orig).split()   # review Codex ZOU 1: per kanaal, niet via grijs (dat rondt kleine verschillen weg)
+    verschil = ImageChops.lighter(ImageChops.lighter(r_, g_), b_).point(lambda v: 255 if v else 0)
     verschil_px = sum(ImageChops.multiply(verschil, vast).histogram()[255:])
     buiten_px = sum(vast.histogram()[255:])
     Image.composite(orig, res, vast).save(uit, "PNG")

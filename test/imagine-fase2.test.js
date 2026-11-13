@@ -3,7 +3,7 @@
 // Nagebouwde ComfyUI (test/imagine-nep-comfy.js): een prompt met ImageCompositeMasked geeft het beeld OMGEKEERD terug zonder masker, dus
 // de naad klopt alleen als de pod (studio-beeld.py pijp-naad) buiten het gegroeide masker het verstuurde beeld terugzet.
 // Kruisproeven (moeten ROOD): IMAGINE_KRUIS=naad (geen naadherstel in de pod), =pod (de app kan de knipmaten pod_* zetten),
-// =vinger (vergelijk vraagt de vingerafdruk per taak i.p.v. één keer). Verzonnen beelden (ruis). Vraagt python3 met Pillow.
+// =vinger (vergelijk vraagt de vingerafdruk per taak i.p.v. één keer), =refs (incognito toetst de voorbeelden niet opnieuw). Verzonnen beelden (ruis). Vraagt python3 met Pillow.
 const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto'), zlib = require('zlib');
 const { execFileSync } = require('child_process');
 const ROOT = path.join(__dirname, '..');
@@ -23,6 +23,8 @@ function wijzig(f, oud, nieuw) { const p = path.join(MOD, f); const s = fs.readF
 if (KRUIS === 'naad') wijzig('imagine.js', 'if (!naad) return { bytes: b.bytes, verschil_px: null };', 'return { bytes: b.bytes, verschil_px: null };');
 if (KRUIS === 'pod') wijzig('imagine.js', 'Object.assign(zonderPod(d.velden), vb.velden)', 'Object.assign({}, vb.velden, d.velden)');
 if (KRUIS === 'vinger') wijzig('imagine.js', 'ctx2, apparaat, groep);', 'ctx, apparaat, groep);');
+// review Fable MOET 1: zonder de voorbeeldtoets in incognito (taak, afronding en ronde) moet F6 "voorbeeld gewist/verlopen" ROOD
+if (KRUIS === 'refs') { wijzig('imagine.js', 'function refsGeldig(s, refs) { return (refs || []).every(', 'function refsGeldig(s, refs) { return true || (refs || []).every('); wijzig('imagine.js', '|| (t.refs || []).some(', '|| false && (t.refs || []).some('); }
 const studioMod = require(path.join(MOD, 'studio.js'));
 const imagineMod = require(path.join(MOD, 'imagine.js'));
 
@@ -49,7 +51,7 @@ x, y, b, h = [int(v) for v in sys.argv[1:5]]
 up = Image.open(io.BytesIO(f[0])); a = up.getchannel('A').crop((x, y, x + b, y + h))
 o = Image.open(io.BytesIO(f[1])).convert('RGB'); r = Image.open(io.BytesIO(f[2])).convert('RGB')
 vast = a.point(lambda v: 255 if v == 255 else 0); vrij = a.point(lambda v: 255 if v == 0 else 0)
-dif = ImageChops.difference(r, o).convert('L').point(lambda v: 255 if v else 0)
+rr, gg, bb = ImageChops.difference(r, o).split(); dif = ImageChops.lighter(ImageChops.lighter(rr, gg), bb).point(lambda v: 255 if v else 0)
 t = lambda m: sum(m.histogram()[255:])
 print(json.dumps([t(ImageChops.multiply(dif, vrij)), t(vrij), t(ImageChops.multiply(dif, vast)), t(vast)]))`, deel.map(String), Buffer.concat([n(upload), n(origineel), n(resultaat)])).toString());
 }
@@ -81,7 +83,7 @@ function zoek(wortels, nn) {
 (async function () {
   const nep = await require('./imagine-nep-comfy.js').start(COMFY, { zonderWs: false });
   const C = nep.C;
-  const nu = Date.parse('2026-11-13T10:00:00Z');
+  let nu = Date.parse('2026-11-13T10:00:00Z');
   const klok = () => nu;
   const STUDIO = path.join(POD, 'studio'), IMAGINE = path.join(POD, 'imagine'), LOG = path.join(POD, 'api.log');
   const zetFlow = (naam, y, api) => { fs.mkdirSync(path.join(STUDIO, 'flows', naam), { recursive: true }); fs.writeFileSync(path.join(STUDIO, 'flows', naam, 'flow.yaml'), JSON.stringify(y)); fs.writeFileSync(path.join(STUDIO, 'flows', naam, 'flow.json'), JSON.stringify(api)); };
@@ -119,6 +121,7 @@ function zoek(wortels, nn) {
   let r = await roep('/app/imagine');
   const sq = r.body.standen.find((s) => s.id === 'opdracht-qwen'), sf = r.body.standen.find((s) => s.id === 'opdracht-flux'), so = r.body.standen.find((s) => s.id === 'opknappen');
   toets('F1 Qwen: masker en 1 voorbeeld; FLUX: masker, 0 voorbeelden; Opknappen: geen masker', sq && sq.masker === true && sq.refs_max === 1 && sf && sf.masker === true && sf.refs_max === 0 && so && so.masker === false, r.body.standen);
+  toets('F1 de pod meldt fase 2 (de app toont Vergelijk en Bijsnijden pas dan)', r.body.fase === 2, r.body.fase);
   toets('F1 geen pod_-velden in wat de app ziet', !r.body.standen.some((s) => s.velden.some((v) => /^pod_/.test(v.naam))));
   const fl = await S.flows();
   toets('F1 plus-flows niet in de Studio-lijst (verborgen)', !fl.flows.some((f) => /^beeld-plus-/.test(f.id)) && fl.flows.some((f) => f.id === 'beeld-opdracht-qwen'), fl.flows.map((f) => f.id));
@@ -208,6 +211,13 @@ print(ImageChops.difference(a, b).getbbox() is None)`, [], Buffer.concat([lengte
     r = await roep('/app/imagine/vergelijk/' + groep + '/kies', { houd: [] });
     toets('F4 nog eens kiezen: 404', r.status === 404, r);
   }
+  // review Codex MOET 1: twee gelijktijdige vergelijkingen met één verse vingerafdruk → één gaat door, de andere 403
+  gebruikt = false; verbruik = 0;
+  const [g1, g2] = await Promise.all([roep('/app/imagine/vergelijk', { versie: v1, velden: { opdracht: 'een' }, beurt_id: nb() }, 'apparaat-a', ctxEen),
+    roep('/app/imagine/vergelijk', { versie: v1, velden: { opdracht: 'twee' }, beurt_id: nb() }, 'apparaat-a', ctxEen)]);
+  toets('F4 twee vergelijkingen tegelijk met één vingerafdruk: één 200, één 403', [g1.status, g2.status].sort().join() === '200,403' && verbruik === 1, { a: g1.status, b: g2.status, verbruik });
+  await klaarOp(bron, tVoor + 4);
+  for (const g of [g1, g2]) if (g.status === 200) await roep('/app/imagine/vergelijk/' + g.body.groep + '/kies', { houd: [] });
   // rij bijna vol: vergelijk weigert vooraf en zet niets in de rij
   C.scenario = 'hang';
   const taken5 = [];
@@ -219,6 +229,16 @@ print(ImageChops.difference(a, b).getbbox() is None)`, [], Buffer.concat([lengte
   for (const t of taken5.reverse()) await roep('/app/imagine/stop/' + t, {});
   C.scenario = 'goed';
   await totDat(async () => (await roep('/app/imagine')).body.taken.every((t) => t.status !== 'wacht' && t.status !== 'bezig'), 10000);
+
+  // review Codex ZOU 1: pijp-naad telt een verschil van één niveau in één kanaal, en zet het terug
+  const pk = py(`b = Image.frombytes('RGB', (40, 30), os.urandom(40 * 30 * 3)).convert('RGBA'); a = Image.new('L', (40, 30), 255); ImageDraw.Draw(a).rectangle((0, 0, 9, 9), fill=0); b.putalpha(a)
+u = io.BytesIO(); b.save(u, 'PNG'); sys.stdout.buffer.write(u.getvalue())`);
+  const res1 = py(`d = sys.stdin.buffer.read(); im = Image.open(io.BytesIO(d)).convert('RGB'); px = im.load(); r, g, b = px[30, 20]; px[30, 20] = (r, g, (b + 1) % 256)
+u = io.BytesIO(); im.save(u, 'PNG'); sys.stdout.buffer.write(u.getvalue())`, [], pk);
+  const nd = await S.beeldPijp(['pijp-naad', '0', '0', '40', '30'], Buffer.concat([lengte(pk), pk, lengte(res1), res1]));
+  const terug = nd.bytes ? py(`d = sys.stdin.buffer.read(); n = int.from_bytes(d[:4], 'big'); a = Image.open(io.BytesIO(d[4:4+n])).convert('RGB'); b = Image.open(io.BytesIO(d[4+n:])).convert('RGB')
+print(ImageChops.difference(a, b).getbbox() is None)`, [], Buffer.concat([lengte(pk), pk, nd.bytes])).toString().trim() : 'geen';
+  toets('F4n naad: één niveau blauw buiten het masker telt (verschil_px 1) en wordt teruggezet', nd.ok && nd.verschil_px === 1 && terug === 'True', { ok: nd.ok, v: nd.verschil_px, terug });
 
   // ── F5. bijsnijden en draaien ──
   r = await roep('/app/imagine/v/' + v1 + '/snij', { x: 0, y: 0, b: 1, h: 1, draai: 0 });
@@ -256,7 +276,35 @@ print(e.size == s.size and ImageChops.difference(e, s).getbbox() is None)`, [], 
   const resI = ri ? Buffer.from((await roep('/app/imagine/incognito/b/' + ri.id + '/deel/1')).body.data, 'base64') : Buffer.alloc(0);
   const nI = resI.length && upI ? naadMeting(upI, i1, resI, [0, 0, 200, 150]) : [0, 1, 1, 1];
   toets('F6 incognito: één upload met beeld + voorbeeld, naad exact', mI && mI[0] === 320 && nI[2] === 0 && nI[0] > 0, { mI, nI });
-  const NN = naalden([M, WOORD], [i1, i2, resI]);
+  // review Fable MOET 1 / ZOU 1: een voorbeeld dat tijdens de taak gewist wordt of verloopt, stopt de taak; geen resultaat in de sessie
+  C.scenario = 'hang';
+  const i3 = maakBeeld(M + 'w'), a3 = (await roep('/app/imagine/incognito/laad', { data: i3.toString('base64') })).body.beeld;
+  const int0 = C.interrupts.length, nB = (await roep('/app/imagine/incognito')).body.beelden.length;
+  r = await roep('/app/imagine/incognito/bewerk', { beeld: a1, stand: 'opdracht-qwen', velden: { opdracht: 'wis ' + WOORD }, refs: [a3], beurt_id: nb() });
+  await totDat(() => !!C.hangt, 5000);
+  await roep('/app/imagine/incognito/b/' + a3 + '/weg', {});
+  I._ronde();
+  await totDat(async () => (await roep('/app/imagine/incognito')).body.taken.every((t) => t.status !== 'wacht' && t.status !== 'bezig'), 8000);
+  let li = (await roep('/app/imagine/incognito')).body;
+  toets('F6 voorbeeld gewist tijdens de taak: taak gestopt op de beeldserver, geen nieuw beeld', r.status === 200 && C.interrupts.length > int0 && li.beelden.length === nB - 1, { s: r.status, i: C.interrupts.length - int0, n: li.beelden.length, nB });
+  // verlopen: voorbeeld 59 min ouder dan de bron; na 2 min is het voorbeeld weg, de bron niet
+  const i4 = maakBeeld(M + 'v'), a4 = (await roep('/app/imagine/incognito/laad', { data: i4.toString('base64') })).body.beeld;
+  nu += 59 * 60000;
+  const i5 = maakBeeld(M + 'b'), a5 = (await roep('/app/imagine/incognito/laad', { data: i5.toString('base64') })).body.beeld;
+  const int1 = C.interrupts.length;
+  r = await roep('/app/imagine/incognito/bewerk', { beeld: a5, stand: 'opdracht-qwen', velden: { opdracht: 'uur ' + WOORD }, refs: [a4], beurt_id: nb() });
+  await totDat(() => !!C.hangt, 5000);
+  nu += 2 * 60000;
+  I._ronde();
+  await totDat(async () => (await roep('/app/imagine/incognito')).body.taken.every((t) => t.status !== 'wacht' && t.status !== 'bezig'), 8000);
+  li = (await roep('/app/imagine/incognito')).body;
+  toets('F6 voorbeeld verlopen tijdens de taak: taak gestopt, bron blijft, geen resultaat', r.status === 200 && C.interrupts.length > int1 && li.beelden.some((x) => x.id === a5) && !li.beelden.some((x) => x.voorganger === a5), { s: r.status, i: C.interrupts.length - int1, b: li.beelden });
+  C.scenario = 'goed';
+  r = await roep('/app/imagine/incognito/bewerk', { beeld: a5, stand: 'opdracht-qwen', velden: { opdracht: 'x' }, refs: [a5], beurt_id: nb() });
+  toets('F6 de bron zelf als voorbeeld: 410', r.status === 410, r);
+  const NN = naalden([M, WOORD], [i1, i2, resI, i3, i4, i5]);
+  // na de gestopte taken eerst de naloop laten afronden (zoals de minuutronde van de pod), dan wissen
+  toets('F6 naloop na de gestopte taken: niets meer te wissen', await totDat(async () => { await S.geheimNaloop(); return !S.incognito().nog_te_wissen; }, 8000), S.incognito());
   r = await roep('/app/imagine/incognito/wis', {});
   toets('F6 wissen schoon', r.status === 200 && r.body.schoon === true, r.body);
   const tz = zoek([POD, COMFY], NN);
@@ -267,7 +315,7 @@ print(e.size == s.size and ImageChops.difference(e, s).getbbox() is None)`, [], 
   toets('F7 api.log zonder opdrachttekst, zonder FOUT, met de nieuwe regels', !/maak dit stuk rood|jas van het voorbeeld|zomerdag/.test(logT) && !/FOUT/.test(logT) && /imagine bewerk .*masker=1/.test(logT) && /imagine vergelijk groep=/.test(logT) && /imagine snij versie=/.test(logT),
     logT.split('\n').filter((x) => /imagine|FOUT/.test(x)).slice(-12));
   const audit = fs.readFileSync(path.join(STUDIO, 'audit.jsonl'), 'utf8').trim().split('\n').map((x) => JSON.parse(x)).filter((x) => x.soort === 'incognito');
-  toets('F7 audit incognito alleen de telregel', audit.length === 1 && Object.keys(audit[0]).sort().join() === 'duur_s,soort,t,uitkomst', audit);
+  toets('F7 audit incognito alleen de telregel', audit.length === 3 && Object.keys(audit[0]).sort().join() === 'duur_s,soort,t,uitkomst', audit);
 
   S.stopTimers(); I.stopTimers(); nep.sluit();
   fs.rmSync(W, { recursive: true, force: true });
