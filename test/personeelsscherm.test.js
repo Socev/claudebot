@@ -143,6 +143,36 @@ test('koppelen: verlopen code geweigerd; sleutel van 2048 bits geweigerd; misluk
   assert.strictEqual((await b.m.appStand()).stand.gekoppeld, false);
 });
 
+test('wv3012: nieuw token nog niet bekend (400/12130) = beleid opnieuw; mislukt koppelen geeft de code vrij met de stap in de melding', async () => {
+  // Cloudflare kent een vers service token niet meteen: twee keer 12130, daarna goed → gekoppeld
+  let n = 0;
+  const a = opzet();
+  const cfEcht = a.C.cf;
+  a.C.calls.length = 0;
+  const m = PS.maak({ dir: a.dir, d1: a.D.d1, nu: a.nu, melding: async () => {}, fout: () => {},
+    cf: async (meth, pad, body) => { if (meth === 'PUT' && body && body.policies && body.policies.length === 2 && n++ < 2) return { status: 400, j: { success: false, errors: [{ code: 12130 }] } }; return cfEcht(meth, pad, body); } });
+  koppelRij(a.D, '20000001', a.nu());
+  const ok = await m.koppel('20000001');
+  assert.strictEqual(ok.status, 200, JSON.stringify(ok.body));
+  assert.strictEqual(n, 3, 'twee keer 12130, derde keer goed');
+  // token maken faalt: code weer vrij (gebruikt 0), melding met stap, en dezelfde code werkt daarna
+  const b = opzet({ faal: (meth, pad) => meth === 'POST' && /service_tokens$/.test(pad) });
+  koppelRij(b.D, '20000002', b.nu());
+  const r = await b.m.koppel('20000002');
+  assert.strictEqual(r.status, 503);
+  assert.match(r.body.fout, /stap token maken: Cloudflare gaf HTTP 500/);
+  assert.strictEqual(b.D.sq.prepare('SELECT gebruikt FROM koppel').get().gebruikt, 0, 'code vrijgegeven');
+  assert.doesNotMatch(r.body.fout, /b{20}/, 'geen geheim in de melding');
+  // ander beleidfout (geen 12130) = niet herhalen, code vrij
+  const c = opzet({ faal: (meth) => meth === 'PUT' });
+  koppelRij(c.D, '20000003', c.nu());
+  const r2 = await c.m.koppel('20000003');
+  assert.strictEqual(r2.status, 503); assert.match(r2.body.fout, /stap beleid/);
+  assert.strictEqual(c.C.calls.filter((x) => x.methode === 'PUT').length, 2, 'één poging met token + één keer terugzetten');
+  assert.strictEqual(c.D.sq.prepare('SELECT gebruikt FROM koppel').get().gebruikt, 0);
+  assert.strictEqual((await c.m.koppel('20000003')).status, 503, 'zelfde code opnieuw te proberen (niet 404)');
+});
+
 test('intrekken: eerst D1 dicht, dan beleid alleen eigenaar, dan token weg; faalt Cloudflare, dan maakt de tik het af', async () => {
   const { m, D, C, nu } = opzet();
   koppelRij(D, '12345678', nu());

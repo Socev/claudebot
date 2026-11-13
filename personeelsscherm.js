@@ -49,6 +49,8 @@ const FOUT_MAX = 5, FOUT_VENSTER = 30 * 60000;
 const STIL_MS = 30 * 60000;
 const TOKEN_NAAM = 'personeelsscherm-pi';
 const TOKEN_DUUR = '8760h';
+const BELEID_POGINGEN = 8, BELEID_WACHT_MS = 1000;   // wv3012
+const slaap = (ms) => new Promise((r) => setTimeout(r, ms));
 const HOST = 'personeel.socev.dev';
 
 function iso(ms) { return new Date(ms).toISOString(); }
@@ -392,7 +394,15 @@ function maak(o) {
       include: [{ service_token: { token_id: token.id } }], require: [{ ip: { ip: token.ip + '/32' } }] });
     return Object.assign({}, c.access_app, { policies: pol });
   }
-  async function zetBeleid(c, token) { await cf('PUT', '/accounts/' + c.account + '/access/apps/' + c.access_app_id, appBody(c, token)); }
+  // wv3012: een net gemaakt service token is bij Cloudflare niet meteen bekend; PUT geeft dan 400/12130 'service token not found'.
+  // Daarom met token tot 8 keer opnieuw (oplopend, samen ± 30 s); zonder token (terugzetten) één keer.
+  async function zetBeleid(c, token) {
+    const pad = '/accounts/' + c.account + '/access/apps/' + c.access_app_id;
+    for (let i = 0; ; i++) {
+      try { await cf('PUT', pad, appBody(c, token)); return; }
+      catch (e) { if (!token || i >= BELEID_POGINGEN - 1 || !(e.status === 400 && String(e.cfCode) === '12130')) throw e; await slaap(BELEID_WACHT_MS * (i + 1)); }
+    }
+  }
   async function tokenWeg(c, id) {
     try { await cf('DELETE', '/accounts/' + c.account + '/access/service_tokens/' + id); }
     catch (e) { if (e.status !== 404 && e.cfCode !== 12135) throw e; }   // al weg = goed
@@ -434,12 +444,26 @@ function maak(o) {
       catch (e) { return { status: 409, body: { ok: false, fout: 'De sleutel van het kastje klopt niet; zet het kastje uit en aan voor een nieuwe code.' } }; }
       // een vorig kastje gaat eerst helemaal dicht
       if (s0.token || s0.intrek_open) await intrekIntern(c);
-      const tk = await cf('POST', '/accounts/' + c.account + '/access/service_tokens', { name: TOKEN_NAAM, duration: TOKEN_DUUR });
+      let stap = 'token maken';
+      const vrijgeven = async (e) => {   // wv3012: melding bewaren (logError logt alleen name/code; code = melding, zonder geheimen) en code vrijgeven
+        const mld = ('stap ' + stap + ': ' + String(e && e.message)).replace(/[^\w .:()'\/-]/g, '').slice(0, 120);
+        const fe = new Error('koppelen faalde'); fe.code = mld; fout('personeelsscherm-koppel', fe);
+        wijzig((x) => { x.laatste_koppelfout = { op: t0, melding: mld }; });
+        try { await d1([{ sql: 'UPDATE koppel SET gebruikt = 0, verloopt = ? WHERE code_hash = ? AND gebruikt = 1 AND cipher IS NULL', params: [nu() + NA_INTIKKEN_MS, ch] }]); }
+        catch (e2) { fout('personeelsscherm-koppel', new Error('code vrijgeven faalde')); }
+        return { status: 503, body: { ok: false, fout: 'Koppelen lukte niet (' + mld + '). Er is niets blijven staan; tik dezelfde code nog eens in.' } };
+      };
+      let tk;
+      try { tk = await cf('POST', '/accounts/' + c.account + '/access/service_tokens', { name: TOKEN_NAAM, duration: TOKEN_DUUR }); }
+      catch (e) { return await vrijgeven(e); }
       const token = { id: tk.id, client_id: tk.client_id, ip: String(rij.ip), aangemaakt: t0, verloopt: tk.expires_at ? Date.parse(tk.expires_at) : t0 + 365 * 24 * UUR };
       let geheim = tk.client_secret; tk.client_secret = undefined;
       try {
-        if (!token.id || !/^[a-z0-9]{20,64}\.access$/.test(String(token.client_id || '')) || !/^[a-f0-9]{32,128}$/.test(String(geheim || ''))) throw new Error('onverwacht token');
+        stap = 'token controleren';
+        if (!token.id || !/^[a-z0-9]{20,64}\.access$/.test(String(token.client_id || '')) || !/^[A-Za-z0-9._-]{32,200}$/.test(String(geheim || ''))) throw new Error('onverwacht token');
+        stap = 'beleid';
         await zetBeleid(c, token);
+        stap = 'opslaan';
         const cipher = crypto.publicEncrypt({ key: pub, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
           Buffer.from(JSON.stringify({ client_id: token.client_id, client_secret: geheim }), 'utf8')).toString('base64');
         geheim = null;
@@ -453,8 +477,7 @@ function maak(o) {
         geheim = null;
         try { await zetBeleid(c, null); } catch (e2) { fout('personeelsscherm-koppel', new Error('beleid terugzetten faalde')); }
         try { await tokenWeg(c, token.id); } catch (e2) { wijzig((x) => { x.intrek_open = { id: token.id }; }); }
-        fout('personeelsscherm-koppel', new Error('koppelen faalde: ' + String(e && e.message).slice(0, 80)));
-        return { status: 503, body: { ok: false, fout: 'Koppelen lukte niet; er is niets blijven staan. Probeer het zo opnieuw.' } };
+        return await vrijgeven(e);
       }
       wijzig((x) => { x.token = { id: token.id, client_id: token.client_id, ip_eis: true, aangemaakt: token.aangemaakt, verloopt: token.verloopt };   // het adres zelf staat alleen in D1 en het Access-beleid
         x.koppel_open_tot = null; x.vreemd = null; x.foutcodes = []; x.gekoppeld_op = t0; x.stil_gemeld = null; });
