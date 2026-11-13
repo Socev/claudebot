@@ -91,7 +91,9 @@ function icoon(soort, groot) {
   if (soort === 'sneeuw') return `<svg class="${c}" viewBox="0 0 52 52" aria-hidden="true"><circle cx="19" cy="24" r="10" fill="#C9CACD"/><circle cx="31" cy="20" r="13" fill="#C9CACD"/><rect x="12" y="24" width="32" height="11" rx="5.5" fill="#C9CACD"/><circle cx="18" cy="44" r="3" fill="#88898C"/><circle cx="28" cy="44" r="3" fill="#88898C"/><circle cx="38" cy="44" r="3" fill="#88898C"/></svg>`;
   return `<svg class="${c}" viewBox="0 0 52 52" aria-hidden="true"><circle cx="19" cy="28" r="10" fill="#C9CACD"/><circle cx="31" cy="24" r="13" fill="#C9CACD"/><rect x="12" y="28" width="32" height="11" rx="5.5" fill="#C9CACD"/></svg>`;
 }
-function bouwHtml({ gemaakt, houdbaar_tot, leeg, logoSvg, inhoud }) {
+// wv3020: toon = welk paneel zonder script zichtbaar is (0 = Komende weken, k = infoscherm k; voor het voorbeeld per scherm in de app);
+// een infoscherm met lab (alleen voorbeeld) toont die tekst in plaats van "Info k/n".
+function bouwHtml({ gemaakt, houdbaar_tot, leeg, logoSvg, inhoud, toon }) {
   const csp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; connect-src 'none'";
   const klokScript = `(function(){var T=${Number(houdbaar_tot)};var D=['zondag','maandag','dinsdag','woensdag','donderdag','vrijdag','zaterdag'],M=['januari','februari','maart','april','mei','juni','juli','augustus','september','oktober','november','december'];
 function z(n){return(n<10?'0':'')+n}function s(){var e=document.getElementById('doek');if(e){var f=Math.min(innerWidth/1920,innerHeight/1080);e.style.transform='scale('+f+')';}}s();addEventListener('resize',s);
@@ -115,7 +117,8 @@ var q=Math.floor(n.getTime()/1000)%S;for(i=0;i<L.length;i++){L[i][0].classList.t
     : '<div class="niets">Geen afspraken in de komende weken.</div>';
   // wv3015: infoschermen (alleen wat verzamel() na Davids Ja doorliet); einde van de dag 'tot' op de wandklok (CET; in de zomer hooguit een uur later)
   const info = Array.isArray(i.info) ? i.info.slice(0, INFO_MAX) : [];
-  const infoHtml = info.map((sc, k) => `<section class="paneel info" data-s="${INFO_S}" data-tot="${Date.parse(plusDag(sc.tot, 1) + 'T00:00:00+01:00')}"><div class="ph"><h1>${esc(sc.kop)}</h1><div class="lab">Info ${k + 1}/${info.length}</div></div>`
+  const zicht = Number.isInteger(toon) && toon >= 0 && toon <= info.length ? toon : 0;
+  const infoHtml = info.map((sc, k) => `<section class="paneel info${zicht === k + 1 ? ' aan' : ''}" data-s="${INFO_S}" data-tot="${Date.parse(plusDag(sc.tot, 1) + 'T00:00:00+01:00')}"><div class="ph"><h1>${esc(sc.kop)}</h1><div class="lab">${sc.lab ? esc(sc.lab) : `Info ${k + 1}/${info.length}`}</div></div>`
     + (sc.intro ? `<p class="intro">${esc(sc.intro)}</p>` : '')
     + `<div class="punten">${sc.punten.map((x) => `<div class="punt"><div class="pt">${esc(x.titel)}</div>${x.tekst ? `<div class="px">${esc(x.tekst)}</div>` : ''}</div>`).join('')}</div>`
     + `<div class="voet">Bron: ${esc(sc.bron)}</div></section>`).join('');
@@ -153,7 +156,7 @@ html,body{margin:0;height:100%;background:#fff;color:#5B5C60;font-family:'Libera
 <body data-soort="scherm" data-gemaakt="${Number(gemaakt)}" data-houdbaar="${Number(houdbaar_tot)}">
 <div id="doek"><div class="rail">${logo}<div><div id="wd">${esc(i.wd_tekst || '')}</div><div id="dag">${esc(i.dag_tekst || '')}</div><div id="klok">${esc(i.klok_tekst || '')}</div></div>
 ${weerHtml}${persBlok('Artsen vandaag', i.artsen, 'Geen rooster bekend', 5)}${persBlok('Jarig deze week', i.jarig, 'Niemand jarig deze week', Math.max(2, 6 - Math.min(5, (i.artsen || []).length)))}</div>
-<div class="podium"><section class="paneel aan" data-s="${INFO_HOOFD_S}"><div class="ph"><h1>Komende weken</h1><div class="lab">Agenda</div></div>${agHtml}
+<div class="podium"><section class="paneel${zicht === 0 ? ' aan' : ''}" data-s="${INFO_HOOFD_S}"><div class="ph"><h1>Komende weken</h1><div class="lab">Agenda</div></div>${agHtml}
 <div class="voet">Bijgewerkt ${esc(amsTekst(gemaakt))}</div></section>${infoHtml}<p class="oud-tekst">Dit scherm wordt bijgewerkt.</p></div></div>
 <script>${klokScript}</script></body></html>`;
 }
@@ -335,6 +338,43 @@ function setGeldig(set, vragen) {
   if (!ja) return null;
   return sk.schermen.map((x) => Object.assign({ set: set.set }, x));
 }
+// wv3020: vaste id per goedgekeurd scherm (set-sleutel + letterlijke inhoud): aan/uit in de app hangt eraan; een gewijzigde tekst = ander id
+function schermId(sleutel, sc) {
+  return crypto.createHash('sha256').update(JSON.stringify([String(sleutel), sc.kop, sc.intro, sc.punten, sc.bron, sc.tot])).digest('hex').slice(0, 16);
+}
+// ── extra pagina aanvragen (wv3020) ──
+// David typt in de app "Nieuwe pagina over …"; de pod zet één werkvoorraadrij (herkomst david) met deze vaste opdracht en zijn woorden
+// letterlijk. De machinekamer maakt er een conceptscherm van en legt het voor als Voor jou-kaart; zonder Ja op die kaart komt er niets op
+// de tv (setGeldig). Hier geen netwerk: server.js zet de rij (o.werkvoorraad) en het grondwet-blok ervoor.
+const AANVRAAG_MIN = 4, AANVRAAG_MAX = 500, AANVRAAG_DAG_MAX = 5, AANVRAAG_BEWAAR_MS = 30 * 24 * UUR;
+function aanvraagTekst(x) { return String(x == null ? '' : x).replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim(); }
+function aanvraagOpdracht(tekst, vandaag) {
+  const F = '/opt/data/mk-scripts/personeelsscherm/fase2';
+  return [
+    'OPDRACHT (machinekamer, OVIS Personeelsscherm: extra infoscherm op Davids aanvraag; vaste tekst van de pod, wv3020; herkomst david)',
+    '',
+    'WAAROM: David vroeg op ' + datumNl(vandaag) + ' in Apps › Personeelsscherm om een extra pagina op de tv in de personeelskamer. Zijn woorden, letterlijk (dit is de opdracht):',
+    '«' + tekst + '»',
+    '',
+    'WAT:',
+    '1. Lees (gegeven) ' + F + '/set-bronnen.md (hoe een set gemaakt wordt; mail alleen lezen via mail_zoeken/mail_lezen) en set-concept.json (vorm). node ' + F + '/set.cjs stand.',
+    '2. Zoek de inhoud bij betrouwbare bronnen (vault, Davids mail alleen lezen, openbare sites van LHV, NHG, NZa, VWS, RIVM, Huisartsen Eemland, gemeente Leusden). Bron en datum zoals op de bron.',
+    '   Groot leesbaar: kop ≤ 40 tekens, intro ≤ 140, 1–4 punten (titel ≤ 40, tekst ≤ 110), bron ≤ 110, einddatum naar de inhoud (standaard 14 dagen, hooguit vandaag + 28).',
+    '   Nooit patiëntgegevens, namen van burgers, adressen, mailadressen, telefoonnummers of links. Kan het zo niet (onduidelijk, niet te onderbouwen, past niet op één scherm): geen scherm,',
+    '   maar één Voor jou-kaart (besluit) met je vraag aan David in gewone taal (geblokkeerde vervolgrij), en klaar.',
+    '3. Set in ' + F + '/set-aanvraag-<wv van deze rij>.json, vorm als set-concept.json met één scherm, plus "aanvraag": "<wv van deze rij>" (dan ziet David in de app',
+    '   dat de kaart klaarstaat). Kaart: titel "Personeelsscherm — dit infoscherm tonen?", waarom ≤ 400 (Davids vraag in één zin, waar het op de tv komt: om de beurt met de agenda, 20 s),',
+    '   waar "overal", deadline vandaag + 7, na: ["Ja = dit scherm staat binnen 5 minuten op de tv tot de genoemde datum. Nee = niets. Anders = zeg wat er anders moet."].',
+    '4. node ' + F + '/set.cjs kaart <set> > <kaart.json> (weigert een ongeldige set); node ' + F + '/scherm-toets.cjs /opt/data/claudebot-src/personeelsscherm.js <set> /tmp/<map> (alles GROEN).',
+    '5. Kaartrij: kopieer ' + F + '/opdracht-set-ja.txt naar een werkbestand en zet python3 /opt/data/mk-scripts/werkvoorraad.py zet --ouder-job "$SOCEV_AGENT_RUN"',
+    '   --label "machinekamer:personeelsscherm-aanvraag-ja-<wv van deze rij>" --herkomst david --prompt-bestand <werkbestand> --status geblokkeerd',
+    '   --geblokkeerd-door "David: Ja op het nieuwe infoscherm" --voor-jou <kaart.json> --samenvatting "Personeelsscherm: nieuw infoscherm op jouw aanvraag ter goedkeuring."',
+    '   Dan node ' + F + '/set.cjs toevoegen <set> wv<nieuw> en python3 ' + F + '/controleer.py wv<nieuw> → GELIJK (ONGELIJK = uitzoeken, niet negeren).',
+    '   Zet de vraag in 00_Systeem/Open vragen aan David.md.',
+    '6. Vastleggen: één regel in § Log van 01_Ontwikkeling/OVIS Personeelsscherm - plan (Fable 5.2, 13-11-2026).md en een box-rij #personeelsscherm.',
+    'Rapport aan David: geen apart bericht; de kaart is het bericht. Vervolg: de kaartrij uit stap 5.',
+  ].join('\n');
+}
 function weerBeeld(j, vandaag) {
   if (!j || typeof j !== 'object' || !j.current || !Array.isArray(j.daily)) return null;
   const c = j.current, w0 = Array.isArray(c.weather) && c.weather[0] ? c.weather[0] : {};
@@ -409,8 +449,9 @@ function maak(o) {
   function infoBestand() { try { return fs.readFileSync(infoPad, 'utf8'); } catch (e) { return ''; } }
   // Fable ZOU 4: de uitkomst telt (set + rij + Ja in vragen.json), niet alleen het bestand: een Ja of een weggevallen Ja werkt bij de volgende tik
   const infoBestandSha = (vandaag) => crypto.createHash('sha256').update(JSON.stringify(infoSchermen(vandaag))).digest('hex');
-  // vrijgegeven infoschermen van vandaag (zie setGeldig); alles onleesbaar = geen infoschermen
-  function infoSchermen(vandaag) {
+  // goedgekeurde infoschermen van vandaag (zie setGeldig), ook die David in de app uitzette; alles onleesbaar = geen.
+  // wv3020: elk met id (schermId) en de set-sleutel; aanvraag = het wv-nummer van Davids aanvraag als de set daaruit kwam
+  function infoKandidaten(vandaag) {
     if (!infoMag()) return [];
     let j, vr;
     try { j = JSON.parse(infoBestand() || '{}'); vr = JSON.parse(fs.readFileSync(vragenPad, 'utf8')); } catch (e) { return []; }
@@ -418,9 +459,16 @@ function maak(o) {
     for (const set of Array.isArray(j && j.sets) ? j.sets : []) {
       let g = null; try { g = setGeldig(set, vr); } catch (e) { g = null; }
       if (!g) continue;
-      for (const x of g) if (x.set <= vandaag && x.tot >= vandaag) uit.push(x);
+      for (const x of g) if (x.set <= vandaag && x.tot >= vandaag) uit.push(Object.assign({ id: schermId(set.sleutel, x), sleutel: set.sleutel }, x));
     }
-    return uit.slice(-INFO_MAX);
+    return uit;
+  }
+  // wv3020: wat David in de app uitzette (stand.info_uit, op id) blijft van de tv tot hij het weer aanzet of het scherm verloopt
+  const uitLijst = () => { const u = leesStand().info_uit; return u && typeof u === 'object' ? u : {}; };
+  // vrijgegeven infoschermen van vandaag die op de tv horen: goedgekeurd, binnen de looptijd, niet uitgezet; hooguit INFO_MAX (de nieuwste)
+  function infoSchermen(vandaag) {
+    const u = uitLijst();
+    return infoKandidaten(vandaag).filter((x) => !u[x.id]).slice(-INFO_MAX);
   }
   function eigenPunten() { try { const j = JSON.parse(fs.readFileSync(path.join(dir, 'punten.json'), 'utf8')); return Array.isArray(j) ? j : []; } catch (e) { return []; } }
   async function weerVers(s, t) {
@@ -491,7 +539,8 @@ function maak(o) {
     const sig = crypto.sign(null, bytes, k);
     await d1([{ sql: 'INSERT INTO envelop (id, volgnr, bytes, sig, op) VALUES (1, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET volgnr = excluded.volgnr, bytes = excluded.bytes, sig = excluded.sig, op = excluded.op WHERE excluded.volgnr > envelop.volgnr',
       params: [doc.volgnr, bytes.toString('base64'), sig.toString('base64'), t] }]);
-    wijzig((x) => { x.volgnr = doc.volgnr; x.gemaakt = t; x.houdbaar_tot = doc.houdbaar_tot; x.leeg = aan; x.html = doc.html; x.fout = null; x.inhoud_sha = inhoudSha(s.inhoud); });
+    // wv3020: een knop in de app en de tik kunnen tegelijk publiceren; D1 houdt het hoogste volgnr, de stand ook
+    wijzig((x) => { if (Number(x.volgnr || 0) > doc.volgnr) return; x.volgnr = doc.volgnr; x.gemaakt = t; x.houdbaar_tot = doc.houdbaar_tot; x.leeg = aan; x.html = doc.html; x.fout = null; x.inhoud_sha = inhoudSha(s.inhoud); });
     return doc;
   }
 
@@ -523,6 +572,75 @@ function maak(o) {
     await d1([{ sql: "INSERT INTO stand (sleutel, waarde) VALUES ('koppel_open_tot', ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde", params: [String(tot)] }]);
     wijzig((x) => { x.koppel_open_tot = tot; });
     return { status: 200, body: { ok: true, koppel_open_tot: tot } };
+  }
+
+  // wv3020: infoscherm uit (meteen van de tv: nieuwe getekende envelop, zonder vingerafdruk, zoals de noodknop) of weer aan (server.js eist
+  // een verse vingerafdruk; hier: alleen een scherm dat nu goedgekeurd is en binnen zijn looptijd valt, dus nooit nieuwe tekst)
+  async function infoZet(idRuw, aan) {
+    const id = String(idRuw == null ? '' : idRuw);
+    if (!/^[0-9a-f]{16}$/.test(id)) return { status: 400, body: { ok: false, fout: 'Onbekend scherm.' } };
+    const vandaag = ymd(nu());
+    const x = infoKandidaten(vandaag).find((y) => y.id === id);
+    if (aan && !x) return { status: 409, body: { ok: false, fout: 'Dit scherm kan niet meer aan: het is niet (meer) door jou goedgekeurd of de looptijd is voorbij.' } };
+    if (!aan && !x && !uitLijst()[id]) return { status: 404, body: { ok: false, fout: 'Dit scherm staat niet (meer) op de tv.' } };
+    wijzig((s) => {
+      const u = s.info_uit && typeof s.info_uit === 'object' ? s.info_uit : {};
+      for (const k of Object.keys(u)) if (!u[k] || !(String(u[k].tot) >= vandaag)) delete u[k];   // verlopen = weg
+      if (aan) delete u[id]; else u[id] = { op: nu(), tot: x ? x.tot : vandaag };
+      s.info_uit = u;
+    });
+    try { await publiceer(); }
+    catch (e) {
+      fout('personeelsscherm-publiceer', new Error(String(e && e.message).slice(0, 80)));
+      return { status: 503, body: { ok: false, fout: (aan ? 'Aangezet' : 'Uitgezet') + ', maar de tv is nog niet bijgewerkt; dat probeer ik binnen 5 minuten opnieuw.' } };
+    }
+    return { status: 200, body: { ok: true, id, aan: !!aan } };
+  }
+  let aanvraagBezig = false;
+  async function aanvraag(ruw) {
+    const tekst = aanvraagTekst(ruw);
+    if (tekst.length < AANVRAAG_MIN) return { status: 400, body: { ok: false, fout: 'Schrijf waar de nieuwe pagina over moet gaan.' } };
+    if (tekst.length > AANVRAAG_MAX) return { status: 400, body: { ok: false, fout: 'Houd het korter (hooguit ' + AANVRAAG_MAX + ' tekens).' } };
+    if (typeof o.werkvoorraad !== 'function') return { status: 503, body: { ok: false, fout: 'Aanvragen kan in deze versie nog niet.' } };
+    const t = nu(), dag = ymd(t);
+    const lijst = (leesStand().aanvragen || []).filter((a) => a && t - a.op < AANVRAAG_BEWAAR_MS);
+    const al = lijst.find((a) => ymd(a.op) === dag && String(a.tekst).toLowerCase() === tekst.toLowerCase());
+    if (al) return { status: 200, body: { ok: true, al: true } };
+    if (lijst.filter((a) => ymd(a.op) === dag).length >= AANVRAAG_DAG_MAX) return { status: 429, body: { ok: false, fout: 'Vandaag heb je al ' + AANVRAAG_DAG_MAX + ' pagina\'s aangevraagd; morgen kan het weer.' } };
+    if (aanvraagBezig) return { status: 409, body: { ok: false, fout: 'Er gaat net een aanvraag weg; probeer het zo opnieuw.' } };
+    aanvraagBezig = true;
+    try {
+      const label = 'machinekamer:personeelsscherm-aanvraag-' + dag.replace(/-/g, '') + '-' + crypto.createHash('sha256').update(tekst.toLowerCase()).digest('hex').slice(0, 8);
+      let z;
+      try { z = await o.werkvoorraad({ label, prompt: aanvraagOpdracht(tekst, dag), samenvatting: ('Personeelsscherm: David vraagt een extra pagina — ' + tekst).slice(0, 200), notitie: 'pod wv3020: Apps › Personeelsscherm, Nieuwe pagina' }); }
+      catch (e) { fout('personeelsscherm-aanvraag', new Error('werkvoorraad: ' + String(e && e.message).slice(0, 60))); z = null; }
+      if (!z || !/^\d{1,7}$/.test(String(z.id))) return { status: 503, body: { ok: false, fout: 'De aanvraag kon niet worden doorgegeven; probeer het zo opnieuw.' } };
+      wijzig((s) => { s.aanvragen = (s.aanvragen || []).filter((a) => a && t - a.op < AANVRAAG_BEWAAR_MS).concat([{ op: t, tekst, wv: Number(z.id) }]).slice(-20); });
+      return { status: 200, body: { ok: true, al: !!z.bestond } };
+    } finally { aanvraagBezig = false; }
+  }
+  // wv3020: elk scherm apart voor de app (bladeren): Komende weken = de envelop zelf (voorbeeld_html); elk goedgekeurd infoscherm met zijn
+  // eigen voorbeeld (zelfde doek, dat paneel zichtbaar), looptijd en of het op de tv staat. Aanvragen met hun stand: wacht (nog geen
+  // concept), kaart (concept ligt in Voor jou), aan (goedgekeurd).
+  function appSchermen(s, t) {
+    const vandaag = ymd(t), kand = infoKandidaten(vandaag), u = uitLijst();
+    const opTv = infoSchermen(vandaag).map((x) => x.id);
+    const inh = schermInhoud(s, t);
+    const lijst = [{ id: 'hoofd', soort: 'hoofd', titel: 'Komende weken', looptijd_s: opTv.length ? INFO_HOOFD_S : null, aan: true, uit: false }];
+    for (const x of kand) {
+      const k = opTv.indexOf(x.id);
+      const sc = Object.assign({}, x, { lab: k >= 0 ? 'Info ' + (k + 1) + '/' + opTv.length : (u[x.id] ? 'Staat uit' : 'Wacht op een plek') });
+      lijst.push({ id: x.id, soort: 'info', titel: x.kop, looptijd_s: INFO_S, van: x.set, tot: x.tot, aan: k >= 0, uit: !!u[x.id],
+        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [sc] }), toon: 1 }) });
+    }
+    let sets = [], vr = {};
+    try { const j = JSON.parse(infoBestand() || '{}'); sets = Array.isArray(j.sets) ? j.sets : []; vr = JSON.parse(fs.readFileSync(vragenPad, 'utf8')); } catch (e) { /* stand blijft wacht */ }
+    const aanvragen = (s.aanvragen || []).filter((a) => a && t - a.op < AANVRAAG_BEWAAR_MS).slice(-10).reverse().map((a) => {
+      const bij = sets.filter((x) => x && String(x.aanvraag || '') === 'wv' + a.wv);
+      let geldig = false; try { geldig = bij.some((x) => !!setGeldig(x, vr)); } catch (e) { geldig = false; }
+      return { op: a.op, tekst: a.tekst, stand: geldig ? 'aan' : bij.length ? 'kaart' : 'wacht' };
+    });
+    return { schermen: lijst, aanvragen };
   }
 
   let bezig = false;   // één koppeling of intrekking tegelijk
@@ -666,6 +784,7 @@ function maak(o) {
         fout: ffout || s.fout || (s.intrek_open ? 'Intrekken is nog niet helemaal klaar; ik probeer het opnieuw.' : null),
       },
       voorbeeld_html: s.html || '',
+      ...appSchermen(s, nu()),   // wv3020
     };
   }
 
@@ -675,6 +794,8 @@ function maak(o) {
     if (methode === 'POST' && pad === '/app/personeelsscherm/koppel') return koppel(body && body.code);
     if (methode === 'POST' && pad === '/app/personeelsscherm/intrek') return intrek();
     if (methode === 'POST' && pad === '/app/personeelsscherm/leeg') return leeg(!!(body && body.aan === true));
+    if (methode === 'POST' && pad === '/app/personeelsscherm/info') return infoZet(body && body.id, !!(body && body.aan === true));   // wv3020
+    if (methode === 'POST' && pad === '/app/personeelsscherm/aanvraag') return aanvraag(body && body.tekst);   // wv3020
     return { status: 404, body: { ok: false, fout: 'onbekend' } };
   }
 
@@ -722,12 +843,13 @@ function maak(o) {
       inhoud_op: s.inhoud_op ? iso(s.inhoud_op) : null, persoonsvakken: !!(s.inhoud && s.inhoud.persoonsvakken),
       vakken: s.inhoud ? { agenda: (s.inhoud.agenda || []).length, artsen: s.inhoud.artsen ? s.inhoud.artsen.length : null, jarig: s.inhoud.jarig ? s.inhoud.jarig.length : null, weer: !!s.inhoud.weer,
         info: Array.isArray(s.inhoud.info) ? s.inhoud.info.length : 0, volle_naam: !!s.inhoud.volle_naam } : null,
+      info_uit: s.info_uit ? Object.keys(s.info_uit).length : 0, aanvragen: (s.aanvragen || []).filter((a) => a && nu() - a.op < AANVRAAG_BEWAAR_MS).length,   // wv3020
       bronnen: s.inhoud ? s.inhoud.bronnen || null : null };   // alleen tellingen, nooit namen
   }
 
-  return { app, tik, info, publiceer, open, koppel, intrek, leeg, leesD1, appStand, verzamel, toestemming, infoSchermen };
+  return { app, tik, info, publiceer, open, koppel, intrek, leeg, leesD1, appStand, verzamel, toestemming, infoSchermen, infoKandidaten, infoZet, aanvraag };
 }
 
 module.exports = { maak, bouwHtml, D1_SCHEMA, inWerktijd, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
   VOLLE_NAAM_ZIN, INFO_ZIN,
-  _t: { agendaPunten, artsenVandaag, jarigen, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig } };
+  _t: { agendaPunten, artsenVandaag, jarigen, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };

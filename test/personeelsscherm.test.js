@@ -492,3 +492,127 @@ test('fase 2 rotatie: het script wisselt op de wandklok (30 s hoofdscherm, 20 s 
   for (let k = 0; k < 50; k += 5) assert.strictEqual(zichtbaar(c + k * 1000)[2], false);
   assert.deepStrictEqual(zichtbaar(c + 35000), [false, true, false]);
 });
+
+// ── wv3020: in de app bladeren, infoschermen aan/uit, extra pagina aanvragen ──
+test('wv3020 uit: meteen een nieuwe envelop zonder dat scherm (hoger volgnr), blijft weg bij de tik; aan = weer erop', async () => {
+  const f = fase2({ vragen: jaVoor(SET) });
+  let t = Date.parse('2026-11-16T09:00:00Z'); f.zet(t);
+  await f.m.tik();
+  assert.match(html(f.D), /Proefinfo een/);
+  const st = await f.m.appStand();
+  const [een, twee] = st.schermen.filter((x) => x.soort === 'info');
+  assert.strictEqual(een.titel, 'Proefinfo een'); assert.strictEqual(een.aan, true); assert.strictEqual(twee.aan, true);
+  const v0 = f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr;
+  t += 1000; f.zet(t);
+  const r = await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: een.id, aan: false } });
+  assert.strictEqual(r.status, 200);
+  assert.ok(f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr > v0, 'nieuwe envelop');
+  let h = html(f.D);
+  assert.doesNotMatch(h, /Proefinfo een/); assert.match(h, /Proefinfo twee/); assert.match(h, /Info 1\/1/);
+  t += 5 * 60000; f.zet(t); await f.m.tik();
+  assert.doesNotMatch(html(f.D), /Proefinfo een/, 'blijft uit na de tik');
+  t += 31 * 60000; f.zet(t); await f.m.tik();
+  assert.doesNotMatch(html(f.D), /Proefinfo een/, 'blijft uit na opnieuw verzamelen');
+  const st2 = await f.m.appStand();
+  const e2 = st2.schermen.find((x) => x.id === een.id);
+  assert.strictEqual(e2.aan, false); assert.strictEqual(e2.uit, true); assert.match(e2.html, /Staat uit/); assert.match(e2.html, /Proefinfo een/);
+  assert.strictEqual(f.m.info().info_uit, 1);
+  // weer aan
+  const r2 = await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: een.id, aan: true } });
+  assert.strictEqual(r2.status, 200);
+  h = html(f.D); assert.match(h, /Proefinfo een/); assert.match(h, /Info 2\/2/);
+  // alles uit = alleen Komende weken (geen wissel meer)
+  await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: een.id, aan: false } });
+  await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: twee.id, aan: false } });
+  assert.strictEqual((html(f.D).match(/class="paneel info/g) || []).length, 0);
+  assert.strictEqual((await f.m.appStand()).schermen[0].looptijd_s, null);
+});
+
+test('wv3020 aan alleen met Ja en binnen de looptijd: andere/onbekende id, Ja weg, tekst gewijzigd of verlopen = geweigerd (kruisproeven)', async () => {
+  const t = Date.parse('2026-11-16T09:00:00Z');
+  const mk = async () => { const f = fase2({ vragen: jaVoor(SET) }); f.zet(t); await f.m.tik(); const st = await f.m.appStand(); return { f, ids: st.schermen.filter((x) => x.soort === 'info').map((x) => x.id) }; };
+  let { f, ids } = await mk();
+  const aan = (id) => f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id, aan: true } });
+  assert.strictEqual((await aan('nietgoed')).status, 400);
+  assert.strictEqual((await aan('0123456789abcdef')).status, 409, 'onbekend scherm');
+  // Ja weg na het uitzetten
+  await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: ids[0], aan: false } });
+  fs.writeFileSync(f.vragenPad, '{}');
+  assert.strictEqual((await aan(ids[0])).status, 409, 'Ja weg');
+  assert.doesNotMatch(html(f.D), /Proefinfo een/);
+  f.zet(t + 5 * 60000); await f.m.tik(); assert.doesNotMatch(html(f.D), /Proefinfo/, 'tik haalt de rest weg');
+  // tekst na de Ja gewijzigd: oude id bestaat niet meer, nieuwe set heeft geen Ja
+  ({ f, ids } = await mk());
+  await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: ids[0], aan: false } });
+  fs.writeFileSync(path.join(f.dir, 'infoschermen.json'), JSON.stringify({ sets: [Object.assign({}, SET, { schermen: [Object.assign({}, SET.schermen[0], { intro: 'Nieuwe tekst.' }), SET.schermen[1]] })] }));
+  assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: ids[0], aan: true } })).status, 409, 'tekst gewijzigd');
+  // verlopen: scherm twee loopt tot 17-11; op 18-11 niet meer aan te zetten
+  ({ f, ids } = await mk());
+  await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: ids[1], aan: false } });
+  f.zet(Date.parse('2026-11-18T09:00:00Z'));
+  assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: ids[1], aan: true } })).status, 409, 'verlopen');
+  assert.doesNotMatch(html(f.D), /Proefinfo twee/);
+  // registerrij zonder infoschermen: niets aan te zetten
+  ({ f, ids } = await mk());
+  await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: ids[0], aan: false } });
+  f.zetReg(true, ['i. artsen van vandaag (voor- en achternaam)']);
+  assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: ids[0], aan: true } })).status, 409, 'rij zonder infoschermen');
+});
+
+test('wv3020 voorbeeld per scherm: eigen doek met dat paneel zichtbaar, titel, looptijd, van/tot; hoofdscherm = de envelop', async () => {
+  const f = fase2({ vragen: jaVoor(SET) });
+  f.zet(Date.parse('2026-11-16T09:00:00Z')); await f.m.tik();
+  const st = await f.m.appStand();
+  assert.strictEqual(st.schermen.length, 3);
+  assert.deepStrictEqual(st.schermen.map((x) => [x.soort, x.titel, x.looptijd_s]), [['hoofd', 'Komende weken', 30], ['info', 'Proefinfo een', 20], ['info', 'Proefinfo twee', 20]]);
+  assert.strictEqual(st.schermen[0].html, undefined); assert.strictEqual(st.voorbeeld_html, html(f.D));
+  const h = st.schermen[2].html;
+  assert.match(h, /<section class="paneel info aan" data-s="20"/); assert.match(h, /<section class="paneel" data-s="30">/); assert.match(h, /Info 2\/2/);
+  assert.doesNotMatch(h, /Proefinfo een/); assert.doesNotMatch(h, /data:image\/svg/, 'zonder logo (klein)');
+  assert.strictEqual(st.schermen[1].van, '2026-11-13'); assert.strictEqual(st.schermen[1].tot, '2026-12-11');
+  // bouwHtml zonder toon = hoofdscherm zichtbaar (zoals de tv zonder script)
+  const d = PS.bouwHtml({ gemaakt: 0, houdbaar_tot: 1, leeg: false, inhoud: { agenda: [], info: [Object.assign({}, SET.schermen[0], { set: SET.set })] } });
+  assert.match(d, /<section class="paneel aan" data-s="30">/); assert.match(d, /<section class="paneel info" data-s="20"/);
+});
+
+test('wv3020 aanvraag: precies één rij met Davids woorden letterlijk; zelfde tekst dezelfde dag = geen tweede; grenzen; mislukt = niets bewaard', async () => {
+  const f = fase2({ set: null });
+  f.zet(Date.parse('2026-11-16T09:00:00Z'));
+  const rijen = []; let faal = false;
+  const m = PS.maak({ dir: f.dir, vault: f.vault, registerPad: path.join(f.vault, 'register.json'), vragenPad: f.vragenPad, d1: f.D.d1, cf: f.C.cf, nu: f.nu, melding: async () => {}, fout: () => {},
+    werkvoorraad: async (o) => { if (faal) throw new Error('weg'); rijen.push(o); return { id: 4000 + rijen.length }; } });
+  const vraag = (tekst) => m.app({ pad: '/app/personeelsscherm/aanvraag', methode: 'POST', body: { tekst } });
+  const tekst = 'De griepvaccinatie-campagne: data en wie wat doet';
+  let r = await vraag(tekst);
+  assert.strictEqual(r.status, 200); assert.strictEqual(rijen.length, 1);
+  assert.ok(rijen[0].prompt.includes('«' + tekst + '»'), 'letterlijk');
+  assert.match(rijen[0].label, /^machinekamer:personeelsscherm-aanvraag-20261116-[0-9a-f]{8}$/);
+  assert.match(rijen[0].prompt, /Personeelsscherm — dit infoscherm tonen\?/); assert.match(rijen[0].prompt, /"aanvraag"/);
+  r = await vraag('  de GRIEPVACCINATIE-campagne:   data en wie wat doet ');
+  assert.strictEqual(r.status, 200); assert.strictEqual(r.body.al, true); assert.strictEqual(rijen.length, 1, 'geen tweede rij');
+  assert.strictEqual((await vraag('')).status, 400); assert.strictEqual((await vraag('x'.repeat(501))).status, 400); assert.strictEqual(rijen.length, 1);
+  // regeleinden en stuurtekens worden spaties (één regel in de opdracht)
+  await vraag('Regel een\nregel twee drie'); assert.ok(rijen[1].prompt.includes('«Regel een regel twee drie»'));
+  faal = true; r = await vraag('Iets dat mislukt'); assert.strictEqual(r.status, 503); faal = false;
+  assert.strictEqual((await m.appStand()).aanvragen.length, 2, 'mislukte aanvraag niet bewaard');
+  await vraag('Drie'); await vraag('Vier vier'); await vraag('Vijf vijf');
+  r = await vraag('Zes zes'); assert.strictEqual(r.status, 429); assert.strictEqual(rijen.length, 5);
+  f.zet(Date.parse('2026-11-17T09:00:00Z')); assert.strictEqual((await vraag('Zes zes')).status, 200, 'volgende dag weer');
+  // zonder werkvoorraad-koppeling: nette weigering
+  assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/aanvraag', methode: 'POST', body: { tekst } })).status, 503);
+});
+
+test('wv3020 aanvraag-stand: wacht → kaart (set met aanvraag, nog geen Ja) → aan (Ja); nooit het wv-nummer', async () => {
+  const f = fase2({ set: null });
+  f.zet(Date.parse('2026-11-16T09:00:00Z'));
+  const m = PS.maak({ dir: f.dir, vault: f.vault, registerPad: path.join(f.vault, 'register.json'), vragenPad: f.vragenPad, d1: f.D.d1, cf: f.C.cf, nu: f.nu, fout: () => {},
+    werkvoorraad: async () => ({ id: 4321 }) });
+  await m.app({ pad: '/app/personeelsscherm/aanvraag', methode: 'POST', body: { tekst: 'Proefonderwerp' } });
+  let a = (await m.appStand()).aanvragen;
+  assert.deepStrictEqual(a.map((x) => [x.tekst, x.stand]), [['Proefonderwerp', 'wacht']]); assert.strictEqual(JSON.stringify(a).includes('4321'), false);
+  const set = Object.assign({}, SET, { aanvraag: 'wv4321' });
+  fs.writeFileSync(path.join(f.dir, 'infoschermen.json'), JSON.stringify({ sets: [set] }));
+  assert.strictEqual((await m.appStand()).aanvragen[0].stand, 'kaart');
+  fs.writeFileSync(f.vragenPad, JSON.stringify(jaVoor(SET)));
+  assert.strictEqual((await m.appStand()).aanvragen[0].stand, 'aan');
+});

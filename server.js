@@ -5486,7 +5486,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij 
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
 ['laad', 'bewerk', 'nieuw', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
-['open', 'koppel', 'intrek', 'leeg'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });   // wv2991: Personeelsscherm = David die werkt
+['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
 // geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
@@ -13733,7 +13733,7 @@ function handleApp(req, res) {
           || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)
           || /^(GET \/app\/ghawa\/delen|POST \/app\/ghawa\/delen\/(onderdeel|noodstop|kijker|kijker-weg|tekst|overleg))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
-        if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
+        if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
@@ -21892,6 +21892,9 @@ if (beleggenNieuws && SERVER_ECHT) { setInterval(function () { beleggenNieuwsTik
 //   POST /app/personeelsscherm/koppel {code}  verse vingerafdruk (verbruikt vóór de eerste await), telefoon/meereizend (APP_BEHEER_ROUTES)
 //   POST /app/personeelsscherm/intrek         idem
 //   POST /app/personeelsscherm/leeg {aan}     noodknop (geen vingerafdruk: maakt alleen leeg of weer gewoon)
+//   POST /app/personeelsscherm/info {id, aan} wv3020: infoscherm uit (geen vingerafdruk: haalt alleen weg) of weer aan (verse vingerafdruk;
+//                                             de module laat alleen een goedgekeurd scherm binnen zijn looptijd weer toe)
+//   POST /app/personeelsscherm/aanvraag {tekst} wv3020: "Nieuwe pagina over …" → één werkvoorraadrij (herkomst david), grondwet-blok ervoor
 // Nooit de code, het token, een IP of html in een log, audit of fout.
 const PERSONEELSSCHERM_DIR = process.env.PERSONEELSSCHERM_DIR || '/opt/data/personeelsscherm';
 const PERSONEELSSCHERM_D1 = process.env.PERSONEELSSCHERM_D1_ID || '35687849-4860-47e3-b94c-2a8b37619e3a';
@@ -21925,6 +21928,13 @@ const personeelsscherm = (function () {
         let j = null; try { j = await r.json(); } catch (e) {}
         return { status: r.status, j: j };
       },
+      // wv3020: Davids aanvraag voor een extra pagina = één werkvoorraadrij (zoals GHAWA/DocPlan), herkomst david
+      werkvoorraad: async function (o) {
+        const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: o.label, p_prompt: mkBlokVoor(o.prompt), p_status: 'open', p_samenvatting: o.samenvatting, p_notitie: o.notitie }, 20000);
+        if (!z || !z.ok || !z.id) throw new Error('werkvoorraad gaf geen rij terug');
+        try { await appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' }, 20000); } catch (e) { logError('personeelsscherm-aanvraag', new Error('herkomst niet gezet')); }
+        return { id: z.id, bestond: !!z.bestond };
+      },
       melding: async function (sleutel, tekst) {
         const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'personeelsscherm', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: sleutel });
         if (!r || r.status !== 200) throw new Error('melding gaf HTTP ' + (r ? r.status : '?'));
@@ -21949,6 +21959,12 @@ async function appPersoneelsscherm(req, res, a, route, d, s) {
     if (!appVersOk(a, s)) { res._app.reden = 'personeelsscherm ' + wat + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
     s.vers_tot = 0;   // verbruikt vóór de eerste await (zoals Sleutelbos)
   }
+  if (wat === 'info' && d && d.aan === true) {   // wv3020: weer aan = opnieuw tonen wat David goedkeurde, met verse vingerafdruk
+    if (!appTeller('personeelsscherm-sleutel', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens personeelsscherm-sleutel');
+    if (!appVersOk(a, s)) { res._app.reden = 'personeelsscherm ' + wat + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
+    s.vers_tot = 0;
+  }
+  if (wat === 'aanvraag' && !appTeller('personeelsscherm-aanvraag', 10, 86400000)) return appWeiger(res, 429, 'te vaak vandaag', 'grens personeelsscherm-aanvraag');
   let u;
   try { u = await personeelsscherm.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
   catch (e) { logError('personeelsscherm', new Error('route ' + wat + ' faalde')); return appWeiger(res, 503, 'Het personeelsscherm is nu niet te bereiken; probeer het zo opnieuw', 'personeelsscherm fout'); }
