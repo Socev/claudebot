@@ -252,8 +252,10 @@ function fase1(o = {}) {
   pag('Ver Weg', { type: 'medewerker', naam: 'Ver Weg', status: 'in dienst (onbepaald)', geboortedatum: '1970-12-25' });
   pag('Overzicht', { type: 'overzicht', naam: 'Personeelsoverzicht' });
   const reg = path.join(vault, 'register.json');
-  const zetReg = (aan) => fs.writeFileSync(reg, JSON.stringify({ rijen: [{ id: 'ander', status: 'aan' }].concat(aan ? [{ id: 'personeelsscherm-vast', status: aan === true ? 'aan' : aan }] : []) }));
-  zetReg(o.aan);
+  const zetReg = (aan, tekst) => fs.writeFileSync(reg, JSON.stringify({ rijen: [{ id: 'ander', status: 'aan', tekst: [PS.VOLLE_NAAM_ZIN + ' ' + PS.INFO_ZIN] }].concat(aan ? [{ id: 'personeelsscherm-vast', status: aan === true ? 'aan' : aan, tekst: tekst || ['i. artsen van vandaag (voornaam en dagdeel)'] }] : []) }));
+  zetReg(o.aan, o.tekst);
+  const vragenPad = path.join(vault, 'vragen.json');
+  fs.writeFileSync(vragenPad, JSON.stringify(o.vragen || {}));
   const ent = (naam) => [{ rol: 'betreft', naam, object_id: 'o-' + naam }, { rol: 'context', naam: 'Huisartsenpraktijk Tolgaarde B.V.' }];
   const rijen = [
     { feed: 'rooster-tg-artsen', soort: 'dienst', titel: 'WK', status: 'actief', event_id: 1, hele_dag: true, begin_datum: '2026-11-16', eind_datum: '2026-11-16', entiteiten: ent('Wietske Kwakkel') },
@@ -276,9 +278,9 @@ function fase1(o = {}) {
   const weer = { current: { temp: 6.4, weather: [{ id: 801, description: 'licht bewolkt' }] }, daily: [{ dt: 1763290800, temp: { max: 8.5, min: 3.4 } }, { dt: 1763377200, temp: { max: 7 }, weather: [{ id: 800 }] }] };
   const z = opzet(o);
   const tel = { tijdlijn: 0, weer: 0 };
-  const m = PS.maak({ dir: z.dir, vault, registerPad: reg, d1: z.D.d1, cf: z.C.cf, nu: z.nu, melding: async () => {}, fout: () => {},
+  const m = PS.maak({ dir: z.dir, vault, registerPad: reg, vragenPad, d1: z.D.d1, cf: z.C.cf, nu: z.nu, melding: async () => {}, fout: () => {},
     tijdlijn: async () => { tel.tijdlijn++; if (o.tijdlijnFaalt) throw new Error('weg'); return rijen; }, weer: async () => { tel.weer++; return weer; } });
-  return Object.assign(z, { m, zetReg, tel, vault });
+  return Object.assign(z, { m, zetReg, tel, vault, vragenPad });
 }
 const html = (D) => { const r = D.sq.prepare('SELECT bytes FROM envelop WHERE id = 1').get(); return JSON.parse(Buffer.from(r.bytes, 'base64')).html; };
 
@@ -348,5 +350,129 @@ test('fase 1 info: alleen tellingen, geen namen', async () => {
   await f.m.verzamel(f.nu());
   const j = JSON.stringify(f.m.info());
   assert.doesNotMatch(j, /Wietske|Fenna|Jorrit|HAGRO-vergadering/);
-  assert.match(j, /"vakken":\{"agenda":2,"artsen":6,"jarig":2,"weer":true\}/);
+  assert.match(j, /"vakken":\{"agenda":2,"artsen":6,"jarig":2,"weer":true,"info":0,"volle_naam":false\}/);
+});
+
+// ── wv3015 fase 2: volle naam achter de nieuwe registertekst, infoschermen alleen met Davids Ja op precies die kaart ──
+const NIEUW = ['i. ... artsen van vandaag (voor- en achternaam, ook waarnemers, en dagdeel) ... Vrije tekst (weekbericht, mededeling, infoschermen) alleen na Davids knop ...'];
+const SET = { set: '2026-11-13', sleutel: 'wv9001', kaart: { titel: 'Personeelsscherm — deze infoschermen tonen?', waarom: 'Proef.', waar: 'overal', deadline: '2026-11-20', na: ['Ja = op het scherm.'] },
+  schermen: [
+    { kop: 'Proefinfo een', intro: 'Inleiding.', punten: [{ titel: 'Punt A', tekst: 'Tekst A.' }, { titel: 'Punt B', tekst: 'Tekst B.' }], bron: 'Verzonnen bron 1', tot: '2026-12-31' },
+    { kop: 'Proefinfo twee', intro: '', punten: [{ titel: 'Punt C', tekst: 'Tekst C.' }], bron: 'Verzonnen bron 2', tot: '2026-11-17' },
+  ] };
+SET.vraag_id = PS._t.fnv('voorjou:' + SET.sleutel + ':kaart');
+const jaVoor = (set, extra) => ({ ['job1:' + set.vraag_id]: { antwoord: Object.assign({ keuze: 'ja', t: '2026-11-13T12:00:00Z', kaart_hash: PS._t.kaartHash(PS._t.setKaart(set).kaart) }, extra || {}) } });
+function fase2(o = {}) {
+  const f = fase1(Object.assign({ aan: true, tekst: NIEUW }, o));
+  if (o.set !== null) fs.writeFileSync(path.join(f.dir, 'infoschermen.json'), JSON.stringify({ sets: [o.set || SET] }));
+  return f;
+}
+
+test('fase 2 volle naam: alleen met de zin in de registertekst; vaste artsen en waarnemers; andere praktijk en roostertitel nooit', async () => {
+  const { m, D } = fase2({ set: null });
+  const i = await m.verzamel(Date.parse('2026-11-16T09:00:00Z'));
+  assert.strictEqual(i.volle_naam, true);
+  assert.deepStrictEqual(i.artsen.map((a) => a.naam), ['Ed Kort', 'Hidde Invaller', 'Hugo Kortnaam', 'Jorrit Bakkerus', 'Sanne van Hoorn', 'Wietske Kwakkel']);
+  await m.publiceer();
+  const h = html(D);
+  assert.match(h, /Ed Kort/); assert.match(h, /Hidde Invaller/); assert.match(h, /Sanne van Hoorn/); assert.doesNotMatch(h, /Waarnemer|Andere Praktijk|Morgen Dokter|JB 8-12|Testerink|1990/);
+  // kruisproef: oude tekst (de zin staat alleen in een ándere rij) = voornaam en Waarnemer
+  const g = fase2({ set: null, tekst: ['i. artsen van vandaag (voornaam en dagdeel)'] });
+  const j = await g.m.verzamel(Date.parse('2026-11-16T09:00:00Z'));
+  assert.strictEqual(j.volle_naam, false); assert.ok(j.artsen.some((a) => a.naam === 'Waarnemer')); assert.ok(!j.artsen.some((a) => / /.test(a.naam)));
+  // kruisproef: rij uit met de nieuwe tekst = geen artsen
+  const u = fase2({ set: null, aan: 'uit' });
+  assert.strictEqual((await u.m.verzamel(Date.parse('2026-11-16T09:00:00Z'))).artsen, null);
+});
+
+test('fase 2 volle naam: rij terug naar de oude tekst → publiceer zonder achternamen, ook vóór het volgende verzamelen; tik verzamelt meteen', async () => {
+  const f = fase2({ set: null });
+  f.zet(Date.parse('2026-11-16T09:00:00Z'));
+  await f.m.tik();
+  assert.match(html(f.D), /Hidde Invaller/);
+  f.zetReg(true, ['i. artsen van vandaag (voornaam en dagdeel)']);
+  await f.m.publiceer();
+  assert.doesNotMatch(html(f.D), /Kwakkel|Invaller/);
+  f.zet(f.nu() + 5 * 60000); await f.m.tik();
+  const h = html(f.D);
+  assert.match(h, /Wietske/); assert.match(h, /Waarnemer/); assert.doesNotMatch(h, /Kwakkel|Invaller/);
+});
+
+test('fase 2 infoschermen: zonder Ja niets; met Ja op precies deze kaart wel; einddatum telt; kruisproeven', async () => {
+  const t = Date.parse('2026-11-16T09:00:00Z');
+  // geen Ja
+  let f = fase2();
+  assert.deepStrictEqual((await f.m.verzamel(t)).info, []);
+  await f.m.publiceer(); assert.doesNotMatch(html(f.D), /Proefinfo/);
+  // Ja op de goede kaart
+  f = fase2({ vragen: jaVoor(SET) });
+  let i = await f.m.verzamel(t);
+  assert.deepStrictEqual(i.info.map((x) => x.kop), ['Proefinfo een', 'Proefinfo twee']);
+  await f.m.publiceer();
+  let h = html(f.D);
+  assert.match(h, /<section class="paneel aan" data-s="30">/); assert.strictEqual((h.match(/class="paneel info"/g) || []).length, 2);
+  assert.match(h, /Proefinfo een/); assert.match(h, /Bron: Verzonnen bron 1/); assert.match(h, /Info 1\/2/);
+  // kruisproeven: Nee, andere hash, tekst na de Ja gewijzigd, vraag-id van een andere kaart, rij zonder het woord infoschermen
+  const kruis = [
+    ['Nee', fase2({ vragen: jaVoor(SET, { keuze: 'nee' }) })],
+    ['andere hash', fase2({ vragen: jaVoor(SET, { kaart_hash: 'f'.repeat(64) }) })],
+    ['tekst gewijzigd', fase2({ vragen: jaVoor(SET), set: Object.assign({}, SET, { schermen: [Object.assign({}, SET.schermen[0], { intro: 'Andere inleiding.' }), SET.schermen[1]] }) })],
+    ['andere sleutel', fase2({ vragen: jaVoor(SET), set: Object.assign({}, SET, { sleutel: 'wv9002' }) })],
+    ['rij zonder infoschermen', fase2({ vragen: jaVoor(SET), tekst: ['i. artsen van vandaag (voor- en achternaam, ook waarnemers)'] })],
+    ['rij uit', fase2({ vragen: jaVoor(SET), aan: 'uit' })],
+  ];
+  for (const [w, g] of kruis) { assert.deepStrictEqual((await g.m.verzamel(t)).info, [], w); await g.m.publiceer(); assert.doesNotMatch(html(g.D), /Proefinfo/, w); }
+  // einddatum: op 18-11 is scherm twee (tot 17-11) weg
+  f = fase2({ vragen: jaVoor(SET) });
+  i = await f.m.verzamel(Date.parse('2026-11-18T09:00:00Z'));
+  assert.deepStrictEqual(i.info.map((x) => x.kop), ['Proefinfo een']);
+  // ongeldig scherm in de set (adres) = hele set weg
+  const slecht = Object.assign({}, SET, { schermen: [Object.assign({}, SET.schermen[0], { punten: [{ titel: 'Mail', tekst: 'iemand@voorbeeld.nl' }] })] });
+  const s2 = fase2({ vragen: jaVoor(Object.assign({}, slecht, { schermen: [SET.schermen[0]] })), set: slecht });
+  assert.deepStrictEqual((await s2.m.verzamel(t)).info, []);
+  assert.strictEqual(PS._t.infoNorm(slecht.schermen[0]), null);
+});
+
+test('fase 2 tik: vrijgave of Ja verschijnt bij de volgende tik (niet pas na 30 min); verlopen scherm verdwijnt bij de dagwissel', async () => {
+  const f = fase2({ set: null });
+  let t = Date.parse('2026-11-17T09:00:00Z'); f.zet(t);
+  await f.m.tik();
+  assert.doesNotMatch(html(f.D), /Proefinfo/);
+  fs.writeFileSync(f.vragenPad, JSON.stringify(jaVoor(SET)));
+  fs.writeFileSync(path.join(f.dir, 'infoschermen.json'), JSON.stringify({ sets: [SET] }));
+  t += 5 * 60000; f.zet(t); await f.m.tik();
+  assert.match(html(f.D), /Proefinfo twee/);
+  t = Date.parse('2026-11-17T23:30:00Z'); f.zet(t); await f.m.tik();   // 18-11 00:30 in Amsterdam
+  const h = html(f.D);
+  assert.match(h, /Proefinfo een/); assert.doesNotMatch(h, /Proefinfo twee/);
+  assert.strictEqual(f.m.info().vakken.info, 1);
+});
+
+test('fase 2 rotatie: het script wisselt op de wandklok (30 s hoofdscherm, 20 s per infoscherm) en slaat verlopen panelen over', () => {
+  const vm = require('vm');
+  const tot = (d) => Date.parse(d + 'T00:00:00+01:00');
+  const doc = PS.bouwHtml({ gemaakt: 0, houdbaar_tot: Date.parse('2027-01-01T00:00:00Z'), leeg: false, inhoud: { agenda: [], artsen: null, jarig: null,
+    info: [Object.assign({ set: '2026-11-13' }, SET.schermen[0]), Object.assign({ set: '2026-11-13' }, SET.schermen[1])] } });
+  const scr = /<script>([\s\S]*?)<\/script>/.exec(doc)[1];
+  const panelen = [...doc.matchAll(/<section class="paneel( info)?( aan)?" data-s="(\d+)"(?: data-tot="(\d+)")?/g)].map((m) => {
+    const cls = new Set(['paneel'].concat(m[2] ? ['aan'] : []));
+    return { s: m[3], tot: m[4] || null, cls, getAttribute: (k) => (k === 'data-s' ? m[3] : k === 'data-tot' ? m[4] || null : null),
+      classList: { remove: (c) => cls.delete(c), toggle: (c, on) => (on ? cls.add(c) : cls.delete(c)) } };
+  });
+  assert.deepStrictEqual(panelen.map((p) => p.s), ['30', '20', '20']);
+  assert.strictEqual(Number(panelen[2].tot), tot('2026-11-18'));
+  const zichtbaar = (ms) => {
+    const ctx = { document: { getElementById: () => null, querySelectorAll: () => panelen, body: {} }, innerWidth: 1920, innerHeight: 1080, addEventListener() {}, setInterval() {},
+      Date: class extends Date { constructor(...a) { super(...(a.length ? a : [ms])); } } };
+    vm.runInNewContext(scr, ctx);
+    return panelen.map((p) => p.cls.has('aan'));
+  };
+  const b = Math.floor(Date.parse('2026-11-16T09:00:00Z') / 70000) * 70000;   // begin van een ronde van 70 s
+  assert.deepStrictEqual(zichtbaar(b + 5000), [true, false, false]);
+  assert.deepStrictEqual(zichtbaar(b + 35000), [false, true, false]);
+  assert.deepStrictEqual(zichtbaar(b + 55000), [false, false, true]);
+  // na 18-11 00:00 is paneel 3 verlopen: ronde 50 s, paneel 3 nooit meer
+  const c = Math.ceil(tot('2026-11-18') / 50000) * 50000;
+  for (let k = 0; k < 50; k += 5) assert.strictEqual(zichtbaar(c + k * 1000)[2], false);
+  assert.deepStrictEqual(zichtbaar(c + 35000), [false, true, false]);
 });

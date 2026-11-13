@@ -21912,6 +21912,7 @@ const personeelsscherm = (function () {
         return r.json();
       },
       registerPad: '/opt/data/mk-scripts/toestemmingen.json',
+      vragenPad: APP_VRAGEN,   // wv3015: infoschermen alleen met Davids Ja (kaart_hash) in de app-antwoorden; alleen lezen
       d1: async function (batch) {
         const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/d1/database/' + PERSONEELSSCHERM_D1 + '/query', { batch: batch });
         const ok = r.status === 200 && r.j && r.j.success === true && Array.isArray(r.j.result) && r.j.result.length === batch.length && r.j.result.every(function (x) { return x && x.success !== false; });
