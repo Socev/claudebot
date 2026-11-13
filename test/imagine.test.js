@@ -27,6 +27,11 @@ if (KRUIS === 'preview') {
 }
 if (KRUIS === 'geschiedenis') wijzig('studio.js', "async function histWisNu(pid) {", "async function histWisNu(pid) { return true;");
 if (KRUIS === 'schijf') wijzig('imagine.js', "    const id = hex16();\n    s.beelden.set(id,", "    const id = hex16();\n    fs.writeFileSync(path.join(DIR, 'werk-' + id), bytes);\n    s.beelden.set(id,");
+// kruisproeven van de diffreview (handmatig): k7a zonder prompt-id vooraf, k7b zonder brontoets in incKlaar, k7c zonder taak vooraf
+if (KRUIS === 'kf1') wijzig('imagine.js', "S.geheimNaloop(true).catch(function () {}); }\n  }", "}\n  }");   // Fable MOET 1: vrijgeven bij uit de Map weg
+if (KRUIS === 'k7a') wijzig('studio.js', 't.meting.prompt_id = eigenPid;   //', '//');
+if (KRUIS === 'k7b') { wijzig('imagine.js', "      if (!incGeldig(s, bronId)) { b.bytes = null; continue; }\n", ''); wijzig('imagine.js', "    if (!incGeldig(s, bronId)) { beelden.forEach(function (b) { b.bytes = null; }); s.taken.delete(taakId); return; }\n", ''); }
+if (KRUIS === 'k7c') wijzig('imagine.js', "open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt) VALUES (?, NULL, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, s.id, 'wacht', iso());", '');
 const studioMod = require(path.join(MOD, 'studio.js'));
 const imagineMod = require(path.join(MOD, 'imagine.js'));
 
@@ -184,18 +189,35 @@ function zoek(wortels, nn) {
   nu += 61 * 1000;
   r = await roep('/app/imagine/incognito/b/' + ib2 + '/toon');
   toets('4 na 60 minuten: 410 bij de aanvraag zelf', r.status === 410, r.status);
+  const free4 = C.free;
+  r = await roep('/app/imagine/incognito');   // zoals de open app: de lijst haalt het verlopen resultaat weg, niet de ronde (review Fable MOET 1)
   I._ronde();
-  await slaap(50);
-  await S.geheimNaloop(true);
+  const vrij4 = await totDat(() => C.free > free4 && !fs.existsSync(path.join(IMAGINE, 'incognito-merk.json')), 5000);
   r = await roep('/app/imagine/incognito');
-  toets('4 de ronde ruimt ook het resultaat op; niets meer te wissen', r.body.beelden.length === 0 && r.body.nog_te_wissen === false, r.body);
+  toets('4 verlopen (via de lijst of de ronde): beelden weg, ComfyUI vrijgegeven (/free), merk weg, niets meer te wissen', r.body.beelden.length === 0 && r.body.nog_te_wissen === false && vrij4, { b: r.body, free: C.free - free4 });
   const t4 = zoek([POD, COMFY], naalden([M2, W2], [inc2]));
   toets('4 nul treffers na verlopen', t4.length === 0, t4);
+
+  // 4b (review Fable MOET 1): Wis per beeld na een bewerking geeft ook /free en een leeg merk
+  r = await roep('/app/imagine/incognito/laad', { data: maakBeeld('r4b').toString('base64') });
+  const b4b = r.body.beeld;
+  await roep('/app/imagine/incognito/bewerk', { beeld: b4b, stand: 'opdracht-qwen', velden: { opdracht: 'vier b' }, beurt_id: nb() });
+  await totDat(async () => (await roep('/app/imagine/incognito')).body.beelden.length === 2, 15000);
+  const free4b = C.free;
+  for (const x of (await roep('/app/imagine/incognito')).body.beelden) await roep('/app/imagine/incognito/b/' + x.id + '/weg', {});
+  toets('4b Wis per beeld: /free en merk weg', await totDat(() => C.free > free4b && !fs.existsSync(path.join(IMAGINE, 'incognito-merk.json')), 5000), { free: C.free - free4b });
+  // 4c (review Fable ZOU 3): mislukte taken tellen niet mee voor de grens van 12
+  const sa = I._inc.get('apparaat-a');
+  for (let i = 0; i < 12; i++) sa.taken.set('mislukt' + i, { studio: null, beeld: 'x', stand: 'opdracht-qwen', gen: sa.gen, status: 'mislukt', reden: 'proef', eind: nu });
+  r = await roep('/app/imagine/incognito/laad', { data: maakBeeld('r4c').toString('base64') });
+  toets('4c twaalf mislukte taakregels blokkeren laden niet', r.status === 200, r);
+  for (let i = 0; i < 12; i++) sa.taken.delete('mislukt' + i);
+  await roep('/app/imagine/incognito/wis', {});
 
   // ── 5. logboeken: alleen de telregel ──
   const audit = fs.readFileSync(path.join(STUDIO, 'audit.jsonl'), 'utf8').trim().split('\n').map((x) => JSON.parse(x));
   const incAudit = audit.filter((x) => x.soort === 'incognito');
-  toets('5 audit: per incognitotaak alleen { t, soort, uitkomst, duur_s }', incAudit.length === 2 && incAudit.every((x) => Object.keys(x).sort().join() === 'duur_s,soort,t,uitkomst'), incAudit);
+  toets('5 audit: per incognitotaak alleen { t, soort, uitkomst, duur_s }', incAudit.length === 3 && incAudit.every((x) => Object.keys(x).sort().join() === 'duur_s,soort,t,uitkomst'), incAudit);
   const logT = fs.readFileSync(LOG, 'utf8');
   toets('5 api.log: incognitoregels zonder flow of taak-id, geen FOUT-regels', /studio incognitotaak uitkomst=klaar duur_s=\d+/.test(logT) && !/FOUT/.test(logT), logT.split('\n').filter((x) => /incognito|FOUT/.test(x)));
   // ingepakt logboek (zoals de rotatie): de zoektocht leest .gz uitgepakt (kruis: een merk in de .gz wordt gevonden)
@@ -203,6 +225,43 @@ function zoek(wortels, nn) {
   const proefGz = path.join(W, 'gzproef'); fs.mkdirSync(proefGz); fs.writeFileSync(path.join(proefGz, 'x.gz'), zlib.gzipSync(Buffer.from('aa ' + M + ' bb')));
   toets('5 zoektocht vindt een merk in een ingepakt logboek (de scan zelf werkt)', zoek([proefGz], naalden([M], [])).length === 1);
   fs.rmSync(proefGz, { recursive: true });
+
+  // ── 7. randgevallen uit de diffreview (Codex wv2984) ──
+  // 7a (MOET 1): tussen indienen en het antwoord van ComfyUI draait de naloop; de gekozen prompt-id moet in het merk blijven
+  C.promptWacht = 400;
+  r = await roep('/app/imagine/incognito/laad', { data: maakBeeld('r7a').toString('base64') });
+  const b7 = r.body.beeld;
+  const p0 = C.prompts.length;
+  await roep('/app/imagine/incognito/bewerk', { beeld: b7, stand: 'opdracht-qwen', velden: { opdracht: 'zeven a' }, beurt_id: nb() });
+  await totDat(() => C.prompts.length > p0, 5000);
+  await S.geheimNaloop();
+  const m7 = fs.existsSync(path.join(IMAGINE, 'incognito-merk.json')) ? JSON.parse(fs.readFileSync(path.join(IMAGINE, 'incognito-merk.json'), 'utf8')) : { pids: [] };
+  toets('7a naloop tijdens het indienen laat de prompt-id in het merk staan', m7.pids.indexOf(C.prompts[p0].prompt_id) >= 0, { merk: m7, pid: C.prompts[p0] && C.prompts[p0].prompt_id });
+  C.promptWacht = 0;
+  await totDat(async () => (await roep('/app/imagine/incognito')).body.taken.length === 0, 10000);
+  await roep('/app/imagine/incognito/wis', {});
+  // 7b (MOET 2): de bron verdwijnt (gewist; verlopen gaat via dezelfde incGeldig) terwijl de bewerking loopt; het resultaat mag niet alsnog
+  // met een vers uur verschijnen. (Een klokprong tijdens de taak laat de motor zelf op tijd-uit lopen; daarom de bron wissen.)
+  r = await roep('/app/imagine/incognito/laad', { data: maakBeeld('r7b').toString('base64') });
+  const b7b = r.body.beeld;
+  C.draaiWacht = 500;
+  await roep('/app/imagine/incognito/bewerk', { beeld: b7b, stand: 'opdracht-qwen', velden: { opdracht: 'zeven b' }, beurt_id: nb() });
+  await totDat(() => C.rij.queue_running.length > 0, 5000);
+  await roep('/app/imagine/incognito/b/' + b7b + '/weg', {});
+  await totDat(() => C.rij.queue_running.length === 0, 5000);
+  await totDat(async () => (await roep('/app/imagine/incognito')).body.taken.length === 0, 5000);
+  r = await roep('/app/imagine/incognito');
+  toets('7b resultaat van een verdwenen bron valt weg', r.body.beelden.length === 0, r.body.beelden);
+  C.draaiWacht = 0;
+  await roep('/app/imagine/incognito/wis', {});
+  // 7c (MOET 3): weggooien van de bron terwijl de bewerking nog start, wordt geweigerd
+  r = await roep('/app/imagine/laad', { data: maakBeeld('r7c').toString('base64') });
+  const bron7 = r.body.bron, v7 = r.body.versie;
+  const start7 = roep('/app/imagine/bewerk', { versie: v7, stand: 'opdracht-qwen', velden: { opdracht: 'zeven c' }, beurt_id: nb() });
+  const weg7 = await roep('/app/imagine/bron/' + bron7 + '/weg', {});
+  await start7;
+  toets('7c weggooien tijdens het starten van een bewerking: geweigerd (409)', weg7.status === 409, weg7);
+  await totDat(async () => (await roep('/app/imagine/bron/' + bron7)).body.taken.every((t) => t.status !== 'wacht' && t.status !== 'bezig'), 10000);
 
   // ── 6. herstartproef: proces gedood midden in een incognitotaak ──
   S.stopTimers(); I.stopTimers();

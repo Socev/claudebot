@@ -1723,7 +1723,8 @@ function maak(deps) {
       let eigenPid = null;
       if (t.geheim) {
         eigenPid = crypto.randomUUID();
-        if (!merkErbij(eigenPid)) return { fout: 'incognito kon niet veilig starten (merk niet te schrijven); er is niets ingediend' };
+        t.meting.prompt_id = eigenPid;   // review diff MOET 1: vóór de POST als lopend bekend, zodat de naloop hem niet als 'weg' uit het merk haalt
+        if (!merkErbij(eigenPid)) { t.meting.prompt_id = null; return { fout: 'incognito kon niet veilig starten (merk niet te schrijven); er is niets ingediend' }; }
       }
       const p = await comfyPost('/prompt', eigenPid ? { prompt: toets.prompt, client_id: clientId, prompt_id: eigenPid } : { prompt: toets.prompt, client_id: clientId });
       if (!p.ok || !p.j || !p.j.prompt_id) {
@@ -1936,7 +1937,7 @@ function maak(deps) {
       try {
       // 1. invoer op de beeldserver
       if (slot && fs.existsSync(VUIL)) { if (await comfyLeeg()) zetVuil(false); }
-      stappen.push({ stap: 'invoer', ok: !fs.existsSync(VUIL) });
+      stappen.push(Object.assign({ stap: 'invoer', ok: !fs.existsSync(VUIL) }, !slot && fs.existsSync(VUIL) ? { wacht: true } : {}));
       // 2. geschiedenis
       let q = null;
       try { q = await comfyRij(); } catch (e) { q = null; }
@@ -1960,7 +1961,7 @@ function maak(deps) {
           }
         } catch (e) { /* volgende ronde */ }
       }
-      stappen.push({ stap: 'geheugen', ok: !(st.freeVraag && st.merk.free) });
+      stappen.push(Object.assign({ stap: 'geheugen', ok: !(st.freeVraag && st.merk.free) }, !slot && st.freeVraag && st.merk.free ? { wacht: true } : {}));   // review Fable ZOU 1
       } finally { if (slot) { st.bezig = null; setImmediate(volgende); } }
       const schoon = stappen.every(function (x) { return x.ok; });
       if (schoon) st.blok = false;
@@ -1994,7 +1995,8 @@ function maak(deps) {
     try {
       const q = await comfyRij();
       if (q.lopend.length || q.wacht.length) return;
-      await comfyPost('/free', { unload_models: true, free_memory: true });
+      const fr = await comfyPost('/free', { unload_models: true, free_memory: true });
+      if (!fr.ok) return;   // wv2984 (review Fable ZOU 2): een mislukte /free telt niet als gedaan
       st.comfyFreeGedaan = true;
       log('studio comfy /free na ' + Math.round((klok() - st.comfyLaatst) / 60000) + ' min rust');
     } catch (e) { if (!(e && e.uit)) fout('studio-free', e); else st.comfyFreeGedaan = true; }

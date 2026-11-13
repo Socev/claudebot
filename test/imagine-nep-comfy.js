@@ -68,9 +68,10 @@ function start(dir, o) {
         const j = JSON.parse(body.toString());
         C.prompts.push(j);
         const pid = typeof j.prompt_id === 'string' && j.prompt_id ? j.prompt_id : 'pid-' + C.prompts.length;
-        C.rij = { queue_running: [[1, pid, j.prompt, {}, []]], queue_pending: [] };
-        setTimeout(() => draai(pid, j.prompt, j.client_id), 30);
-        return stuur(200, { prompt_id: pid, number: C.prompts.length });
+        // promptWacht: het antwoord (en de rij) komt pas na zoveel ms — het venster tussen indienen en bevestigen
+        const nu = () => { C.rij = { queue_running: [[1, pid, j.prompt, {}, []]], queue_pending: [] }; setTimeout(() => draai(pid, j.prompt, j.client_id), C.draaiWacht || 30); stuur(200, { prompt_id: pid, number: C.prompts.length }); };
+        if (C.promptWacht) return void setTimeout(nu, C.promptWacht);
+        return nu();
       }
       if (req.url === '/history' && req.method === 'POST') {
         const j = JSON.parse(body.toString() || '{}');
