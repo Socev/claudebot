@@ -283,3 +283,16 @@ test('review ZOU 1: grenzen op onafgeronde percentages (10,04 % boven 10 %)', ()
   assert.strictEqual(k.verdeling.kern, 90, 'weergave afgerond');
   assert.strictEqual(k.lampjes.find((l) => l.sleutel === 'kern').lamp, 'groen', 'kern 89,96 % ligt onder het maximum 89,97 % (afgerond 90,0 zou ten onrechte oranje geven)');
 });
+test('wv3006: historie — één punt per standdatum (laatste bestand van die dag), belegd en contant apart, oplopend, leeg zonder bestand', () => {
+  const { post, get } = nieuw();
+  assert.deepStrictEqual(get().body.stand.historie, []);
+  const p2 = PORT.replace('"810,00","810,00"', '"820,00","820,00"').replace('10,"81,00"', '10,"82,00"');
+  const p3 = PORT.replace('"150,00","150,00"', '"250,00","250,00"');
+  assert.strictEqual(post('bestand', { naam: 'a.csv', tekst: PORT, datum: '2026-10-01', bewaar: true }).body.bewaard, true);
+  assert.strictEqual(post('bestand', { naam: 'b.csv', tekst: p3, datum: '2026-11-12', bewaar: true }).body.bewaard, true);
+  assert.strictEqual(post('bestand', { naam: 'c.csv', tekst: p2, datum: '2026-11-12', bewaar: true }).body.bewaard, true);   // zelfde dag: dit telt
+  assert.strictEqual(post('bestand', { naam: 't.csv', tekst: TX_NL, bewaar: true }).body.bewaard, true);   // transacties tellen niet
+  const h = get().body.stand.historie;
+  assert.deepStrictEqual(h, [{ datum: '2026-10-01', belegd_cent: 81000 + 30415 + 10138, cash_cent: 15000 }, { datum: '2026-11-12', belegd_cent: 82000 + 30415 + 10138, cash_cent: 15000 }]);
+  assert.strictEqual(get().body.stand.historie.length, 2, 'tweede lezing (cache) geeft hetzelfde');
+});

@@ -376,6 +376,7 @@ function leesBestand(tekst) {
 // ── rekenwerk ──
 const pct = (a, b) => (b > 0 ? (a / b) * 100 : null);
 const rond = (x) => (x == null ? null : Math.round(x * 10) / 10);
+const HISTORIE_MAX = 60;   // wv3006: hooguit zoveel standen op het dashboard
 function plusDagen(iso, n) { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
 function plusMaanden(iso, n) { const d = new Date(iso + 'T12:00:00Z'); const dag = d.getUTCDate(); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() + n); const max = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate(); d.setUTCDate(Math.min(dag, max)); return d.toISOString().slice(0, 10); }
 const pctTekst = (x) => (x == null ? '–' : String(rond(x)).replace('.', ',') + ' %');
@@ -591,6 +592,31 @@ function maak(o) {
     d.rekening_rijen = db.prepare('SELECT COUNT(*) AS n FROM rekening').get().n;
     return d;
   }
+  // wv3006 (dashboard): de waarde per ingelezen portefeuille, één punt per standdatum (het laatst ingelezen bestand van die dag telt), voor
+  // "verschil met je vorige stand" en de lijn op het dashboard. Geen dagkoersen: alleen Davids eigen standen, opnieuw gelezen uit de bewaarde
+  // bestanden (een bestand dat de lezer nu weigert, telt niet mee). Cache op de sha256 van de inhoud: een bewaard bestand verandert niet.
+  const historieCache = new Map();
+  function historieUit(db) {
+    if (!db) return [];
+    const per = new Map();
+    for (const r of db.prepare("SELECT id, datum_bestand, sha256 FROM bestand WHERE soort = 'portefeuille' AND datum_bestand IS NOT NULL ORDER BY datum_bestand, id").all()) per.set(r.datum_bestand, r);
+    const uit = [];
+    for (const [datum, r] of Array.from(per).slice(-HISTORIE_MAX)) {
+      let w = historieCache.get(r.sha256);
+      if (!w) {
+        try {
+          const l = leesBestand(db.prepare('SELECT inhoud FROM bestand WHERE id = ?').get(r.id).inhoud);
+          if (l.soort !== 'portefeuille') continue;
+          w = { belegd_cent: 0, cash_cent: 0 };
+          for (const x of l.rijen) w[x.regelsoort === 'cash' ? 'cash_cent' : 'belegd_cent'] += x.waarde_eur_cent;
+        } catch (e) { continue; }
+        if (historieCache.size >= 4 * HISTORIE_MAX) historieCache.clear();
+        historieCache.set(r.sha256, w);
+      }
+      uit.push({ datum, belegd_cent: w.belegd_cent, cash_cent: w.cash_cent });
+    }
+    return uit;
+  }
   function overzicht() {
     return metDb((db) => {
       const d = leesAlles(db);
@@ -601,7 +627,7 @@ function maak(o) {
       const bedrijven = bedrijvenUit(db, d, k).map((b) => ({ sleutel: b.sleutel, naam: b.naam, bron: b.bron, kaartje: b.kaartje, voorstel: b.voorstel }));
       for (const p of k.posities) delete p._ruw;
       return { ok: true, vandaag, vragen: VRAGEN, antwoorden: d.antwoorden, regels: d.regels, versies: d.versies, stand: { datum: d.stand_datum, bron: d.stand_bron,
-        verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig }, transacties: d.transacties, dagboek, volglijst: volg,
+        verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig, historie: historieUit(db) }, transacties: d.transacties, dagboek, volglijst: volg,
         signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, rekening_rijen: d.rekening_rijen,
         soort_namen: SOORT_NAAM, vault: { ok: vaultOk, op: laatsteVault }, bedrijven };
     }, false);
