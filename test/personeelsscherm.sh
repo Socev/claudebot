@@ -21,6 +21,7 @@ grep -qF "['open', 'koppel', 'intrek', 'leeg'].forEach(function (r) { APP_GLIJD_
 grep -qE "^\s+personeelsscherm: typeof personeelsschermInfo === 'function'" server.js || { echo "ROOD  server.js: /health.personeelsscherm ontbreekt"; f=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* personeelsscherm\.js" uitrol.sh || { echo "ROOD  uitrol.sh: personeelsscherm.js niet in RELEASE_OPTIONEEL"; f=1; }
 grep -qE "'personeelsscherm'(, '[a-z-]+')*\]" app-vast.js || { echo "ROOD  app-vast.js: personeelsscherm niet in APP_IDS"; f=1; }
+echo "$B" | grep -qE "^\s+vragenPad: APP_VRAGEN," || { echo "ROOD  server.js: infoschermen lezen de app-antwoorden niet (vragenPad)"; f=1; }   # wv3015
 [ $f = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS"
 node --test test/personeelsscherm.test.js 2>&1 | tail -n 12 | grep -E "^# (pass|fail)"; node --test test/personeelsscherm.test.js >/dev/null 2>&1 || { echo "ROOD  test/personeelsscherm.test.js"; f=1; }
 exit $f
