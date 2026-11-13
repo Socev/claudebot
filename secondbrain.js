@@ -219,6 +219,13 @@ function maak(opt) {
   // oplossen (los) gebeurt elke bouw opnieuw over de hele lijst, want een nieuw of verdwenen bestand kan elk linkdoel veranderen.
   // Geen afscherming hier: de kaart is één ongefilterde lijst en kaartVoor/mag filtert per verzoek op {vast} (zoals voorheen).
   let linkCache = new Map();
+  // wv3003: de linkcache staat ook op schijf (linkcache.json naast kaart.json, 0600), zodat de eerste opening na een uitrol/podherstart niet
+  // alle ± 8.500 pagina's opnieuw leest (gemeten 1,3 s; onder schijfdruk 15 s). Alleen pad + mtime + ctime + grootte + linkdoelen, geen
+  // paginatekst. Even streng als in het geheugen: een hit eist dezelfde mtime, ctime en grootte (een kopie/verplaatsing van de vault geeft
+  // een nieuwe ctime = opnieuw lezen), en het bestand geldt alleen voor dezelfde vault en dezelfde linksIn-code (een nieuwe parser = weg).
+  const LINKCACHE_VERSIE = 1;
+  const PARSER = crypto.createHash('sha256').update(linksIn.toString()).digest('hex').slice(0, 16);
+  let linkCacheSchijf = null;   // sha256 van wat er op schijf staat (niet opnieuw schrijven als er niets veranderde)
 
   function mkdir() {
     try { fs.mkdirSync(DIR, { recursive: true, mode: 0o700 }); fs.chmodSync(DIR, 0o700); } catch (e) { fout('secondbrain-dir', e); }
@@ -316,7 +323,9 @@ function maak(opt) {
         let t;
         try { t = fs.readFileSync(path.join(VAULT, b.p), 'utf8'); } catch (e) { continue; }
         gelezen++;
-        doelen = linksIn(t).filter(function (l) { return l.doel; }).map(function (l) { return { doel: l.doel, md: l.md }; });
+        const dubbel = new Set();   // wv3003: elk doel één keer (de eerste telt; dezelfde doel+md lost toch naar hetzelfde bestand op), halveert de cache
+        doelen = linksIn(t).filter(function (l) { const x = (l.md ? '1' : '0') + l.doel; if (!l.doel || dubbel.has(x)) return false; dubbel.add(x); return true; })
+          .map(function (l) { return { doel: l.doel, md: l.md }; });
       }
       nieuwCache.set(b.p, { m: b.m, c: ctimes[i], g: b.g, doelen: doelen });
       const gezien = new Set();
@@ -326,6 +335,7 @@ function maak(opt) {
       }
     }
     linkCache = nieuwCache;
+    bewaarLinks(sig);
     k.sig = sig; k.gelezen = gelezen;
     k.op = nu(); k.duur = Date.now() - t0;
     kaart = k;
@@ -345,6 +355,41 @@ function maak(opt) {
       fs.renameSync(tmp, doel);
       laatsteHash = h;
     } catch (e) { fout('secondbrain-bewaar', e); }
+  }
+
+  // wv3003: linkcache naar schijf, atomisch; sig = de bestandenlijst waarvoor hij geldt (alleen om dubbel schrijven te sparen).
+  function bewaarLinks(sig) {
+    try {
+      if (linkCacheSchijf === sig) return;
+      const items = [];
+      linkCache.forEach(function (c, p) { items.push([p, c.m, c.c, c.g, c.doelen.map(function (l) { return l.md ? [l.doel, 1] : [l.doel]; })]); });
+      const inhoud = JSON.stringify({ versie: LINKCACHE_VERSIE, parser: PARSER, vault: VAULT, items: items });
+      mkdir();
+      const doel = path.join(DIR, 'linkcache.json'), tmp = doel + '.tmp' + process.pid;
+      fs.writeFileSync(tmp, inhoud, { mode: 0o600 });
+      fs.renameSync(tmp, doel);
+      linkCacheSchijf = sig;
+    } catch (e) { fout('secondbrain-linkcache', e); }
+  }
+  // Bij de start: alleen overnemen als versie, parser en vault kloppen en elk item de juiste vorm heeft; anders leeg (= de oude koude bouw).
+  function laadLinks() {
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(DIR, 'linkcache.json'), 'utf8'));
+      if (!j || j.versie !== LINKCACHE_VERSIE || j.parser !== PARSER || j.vault !== VAULT || !Array.isArray(j.items)) return 0;
+      const m = new Map();
+      const getal = function (x) { return typeof x === 'number' && isFinite(x); };
+      for (const it of j.items) {
+        if (!Array.isArray(it) || it.length !== 5 || typeof it[0] !== 'string' || !getal(it[1]) || !getal(it[2]) || !getal(it[3]) || !Array.isArray(it[4])) return 0;
+        const doelen = [];
+        for (const l of it[4]) {
+          if (!Array.isArray(l) || typeof l[0] !== 'string' || !l[0]) return 0;
+          doelen.push({ doel: l[0], md: l[1] === 1 });
+        }
+        m.set(it[0], { m: it[1], c: it[2], g: it[3], doelen: doelen });
+      }
+      if (!linkCache.size) linkCache = m;
+      return m.size;
+    } catch (e) { return 0; }   // geen of onleesbaar bestand: de eerste bouw leest alles (zoals voor wv3003)
   }
 
   // Eén bouw tegelijk (Fable K9); vers genoeg = de bestaande. Synchroon onder de motorkap (wv2607: ± 150 ms met de linkcache, ± 1,1 s zonder).
@@ -834,6 +879,7 @@ function maak(opt) {
 
   // Bij een podstart: de laatste kaart als vertrekpunt (de eerste vraag bouwt hem vers).
   function laadBewaard() {
+    laadLinks();   // wv3003
     try {
       const j = JSON.parse(fs.readFileSync(path.join(DIR, 'kaart.json'), 'utf8'));
       if (!j || !Array.isArray(j.bestanden)) return;

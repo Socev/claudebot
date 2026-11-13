@@ -7,12 +7,12 @@
 # wv1940 zoekfilter soorten: codes, soort én plek, afgekapt per soort, teller, vault eerst; wv2077 relevantie: entiteitpagina bovenaan,
 # groepen entiteiten · paginas · tekst, paginanaam/alias/vaker genoemd, map-wirwar achteraan, register weg = zonder groep),
 # kaart.json 0600 buiten de vault, koppeltabel Financiën, en server.js (dispatch, grenzen, glijdroutes, invoerslot, audit zonder pad, /health,
-# verrijking Financiën, uitrol-lijst, Dockerfile). Raakt de echte vault niet. Gebruik: bash test/secondbrain.sh
+# verrijking Financiën, uitrol-lijst, Dockerfile); wv3003 linkcache.json over een herstart heen (8c). Raakt de echte vault niet. Gebruik: bash test/secondbrain.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node --no-warnings - <<'JS'
 const fs = require('fs'), path = require('path'), os = require('os');
-const S = require('./secondbrain.js');
+const S = require(process.env.SB_MODULE || './secondbrain.js');   // wv3003: SB_MODULE alleen voor de kruisproef
 let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (!ok && extra !== undefined ? '  [' + JSON.stringify(extra).slice(0, 600) + ']' : '')); }
 
@@ -385,6 +385,64 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     const kj = JSON.parse(fs.readFileSync(path.join(W, 'staat10', 'kaart.json'), 'utf8'));
     toets('8b ctime en linkcache niet in kaart.json, de kaart (vers) of het antwoord', kj.bestanden.every((b) => !('c' in b) && !('doelen' in b)) && s10.vers(false).bestanden.every((b) => !('c' in b) && !('doelen' in b))
       && [o1, o2, v1, v2].every((r) => r.j.knopen.every((k) => k.length === 5) && Object.keys(r.j).sort().join() === 'alles,bijgewerkt,domeinen,knopen,lijnen,ok,vaste_plek,verborgen_n'), kj.bestanden[0]);
+  }
+
+  // ── 8c. wv3003: linkcache op schijf, zodat de eerste bouw na een herstart niet alles opnieuw leest; even streng als in het geheugen ──
+  {
+    const V = path.join(W, 'vault11'), DA = path.join(W, 'staat11'), DB = path.join(W, 'staat11-leeg');
+    const zet11 = (p, t) => { fs.mkdirSync(path.dirname(path.join(V, p)), { recursive: true }); fs.writeFileSync(path.join(V, p), t); };
+    zet11('a.md', '# A\n[[b]] en [[b]] en [[nog niet]] en [md](c.md)\n');
+    zet11('b.md', '# B\n[[a]]\n');
+    fs.utimesSync(path.join(V, 'b.md'), 1700000000, 1700000000);
+    zet11('c.md', '# C\n[[b]]\n');
+    zet11('map/d.md', '# D\n[[a]] [[c]]\n');
+    const klok = () => 1e12;
+    const start = (dir) => { const s = S.maak({ vault: V, dir: dir, nu: klok }); s.laadBewaard(); s.vers(false); return s; };
+    const kaartVan = (dir) => fs.readFileSync(path.join(dir, 'kaart.json'));
+    const leeg = (naam) => { const d = path.join(W, naam); fs.rmSync(d, { recursive: true, force: true }); return d; };
+    const s1 = start(DA);
+    const lc = path.join(DA, 'linkcache.json');
+    const st = fs.statSync(lc);
+    toets('8c eerste bouw: alles gelezen, linkcache.json 0600 naast kaart.json', s1.health().gelezen === 4 && (st.mode & 0o777) === 0o600, [s1.health(), (st.mode & 0o777).toString(8)]);
+    const lj = JSON.parse(fs.readFileSync(lc, 'utf8'));
+    toets('8c linkcache: alleen paden, mtime/ctime/grootte en linkdoelen (geen paginatekst), dubbel doel één keer',
+      lj.items.length === 4 && lj.items.every((it) => it.length === 5) && fs.readFileSync(lc, 'utf8').indexOf('# A') < 0
+      && JSON.stringify(lj.items.find((it) => it[0] === 'a.md')[4]) === JSON.stringify([['b'], ['nog niet'], ['c.md', 1]]), lj.items);
+    const s2 = start(DA);
+    toets('8c herstart met cache: niets opnieuw gelezen', s2.health().gelezen === 0, s2.health());
+    start(leeg('staat11-zonder'));
+    toets('8c herstart met cache: kaart byte-gelijk aan een koude bouw zonder cache', Buffer.compare(kaartVan(DA), kaartVan(path.join(W, 'staat11-zonder'))) === 0);
+    // gewijzigd tussen twee starts: zelfde grootte, mtime teruggezet (alleen ctime verraadt het)
+    fs.writeFileSync(path.join(V, 'b.md'), '# B\n[[c]]\n');
+    fs.utimesSync(path.join(V, 'b.md'), 1700000000, 1700000000);
+    const s3 = start(DA);
+    const b3 = s3.vers(false).bestanden.find((b) => b.p === 'b.md');
+    const ic = s3.vers(false).bestanden.findIndex((b) => b.p === 'c.md');
+    toets('8c na herstart: pagina met nieuwe ctime (mtime/grootte gelijk) wél opnieuw gelezen', s3.health().gelezen === 1 && JSON.stringify(b3.l) === JSON.stringify([ic]), [s3.health(), b3.l]);
+    // kruisproef-gevallen: het cachebestand liegt over één veld; de echte stat moet winnen
+    const lieg = (pad, veld, waarde) => { const j = JSON.parse(fs.readFileSync(lc, 'utf8')); const it = j.items.find((x) => x[0] === pad); it[veld] = waarde; it[4] = [['map/d']]; fs.writeFileSync(lc, JSON.stringify(j)); };
+    const dLinkVan = (s, pad) => { const k = s.vers(false); const id = k.bestanden.findIndex((b) => b.p === 'map/d.md'); return k.bestanden.find((b) => b.p === pad).l.indexOf(id) >= 0; };
+    lieg('c.md', 1, 1);   // mtime anders, ctime + grootte kloppen
+    const s4 = start(DA);
+    toets('8c cache met andere mtime: opnieuw gelezen, oude linkdoelen niet gebruikt', s4.health().gelezen === 1 && !dLinkVan(s4, 'c.md'), s4.health());
+    lieg('c.md', 2, 1);   // ctime anders
+    const s5 = start(DA);
+    toets('8c cache met andere ctime (kopie/verplaatsing van de vault): opnieuw gelezen', s5.health().gelezen === 1 && !dLinkVan(s5, 'c.md'), s5.health());
+    lieg('c.md', 3, 999);   // grootte anders
+    const s6 = start(DA);
+    toets('8c cache met andere grootte: opnieuw gelezen', s6.health().gelezen === 1 && !dLinkVan(s6, 'c.md'), s6.health());
+    const kopje = (wijzig) => { const j = JSON.parse(fs.readFileSync(lc, 'utf8')); wijzig(j); fs.writeFileSync(lc, JSON.stringify(j)); };
+    kopje((j) => { j.vault = '/ergens/anders'; });
+    toets('8c cache van een andere vault: genegeerd (alles gelezen)', start(DA).health().gelezen === 4);
+    kopje((j) => { j.parser = 'oud'; });
+    toets('8c cache van een andere linksIn-code: genegeerd (alles gelezen)', start(DA).health().gelezen === 4);
+    fs.writeFileSync(lc, '{"versie":1,"items":[["a.md",1,');
+    let s9; try { s9 = start(DA); } catch (e) { s9 = null; }
+    toets('8c onleesbare cache: geen crash, alles gelezen, daarna weer bruikbaar', s9 && s9.health().gelezen === 4 && start(DA).health().gelezen === 0, s9 && s9.health());
+    kopje((j) => { j.items[0][4] = [[42]]; });
+    toets('8c cache met verkeerde vorm: genegeerd', start(DA).health().gelezen === 4);
+    start(leeg('staat11-zonder'));
+    toets('8c eindstand: kaart met cache byte-gelijk aan koude bouw', Buffer.compare(kaartVan(DA), kaartVan(path.join(W, 'staat11-zonder'))) === 0);
   }
 
   // ── 9. server.js ──
