@@ -194,11 +194,17 @@ function maak(deps) {
     const velden = Object.assign({}, d.velden && typeof d.velden === 'object' ? d.velden : {});
     const opdracht = s.opdracht ? schoon(velden.opdracht, GRENS.opdracht_max) : null;
     const id = hex16();
-    const r = await S.maakGeheugen({ flow: s.flow, velden: velden, beeld: bytes, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
-      klaar: function (u) { return naKlaar(id, v, s, opdracht, u); } }, ctx);
+    // review diff MOET 3: de taak eerst vastleggen (wacht), zodat weggooien van de bron of versie intussen geweigerd wordt
+    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt) VALUES (?, NULL, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, s.id, 'wacht', iso());
+    let r;
+    try {
+      r = await S.maakGeheugen({ flow: s.flow, velden: velden, beeld: bytes, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
+        klaar: function (u) { return naKlaar(id, v, s, opdracht, u); } }, ctx);
+    } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
+    if (r.status !== 200 || r.al) open().prepare('DELETE FROM taak WHERE id = ?').run(id);
     if (r.status !== 200) return r;
     if (r.al) { const t = open().prepare('SELECT * FROM taak WHERE studio = ?').get(r.taak.id); return { status: 200, taak: t ? taakUit(t) : null, al: true }; }
-    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, r.taak.id, v.bron, v.id, s.id, 'wacht', iso());
+    open().prepare('UPDATE taak SET studio = ? WHERE id = ?').run(r.taak.id, id);
     log('imagine bewerk taak=' + id + ' stand=' + s.id);
     return { status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(id)) };
   }
@@ -211,6 +217,9 @@ function maak(deps) {
     for (const b of u.beelden) {
       const x = await toets(b.bytes);
       if (x.fout) { zet('mislukt', 'resultaat: ' + x.fout); return; }
+      // review diff MOET 3 / ZOU 1: na elke await opnieuw: bestaat de bron nog, en past het nog binnen 5 GB?
+      if (!d.prepare('SELECT 1 FROM bron WHERE id = ?').get(v.bron)) { zet('mislukt', 'het beeld is intussen weggegooid'); return; }
+      if (schijf().bytes + b.bytes.length + x.toon.length > GRENS.schijf) { zet('mislukt', 'de bibliotheek is vol (5 GB); niets bewaard'); return; }
       const nr = (d.prepare('SELECT MAX(nr) AS n FROM versie WHERE bron = ?').get(v.bron).n || 0) + 1;
       const id = hex16();
       try {
@@ -331,21 +340,30 @@ function maak(deps) {
     if (!s) { s = { gen: 1, wissen: false, comfy: false, beelden: new Map(), taken: new Map(), herstart: incHerstart }; inc.set(a, s); }
     return s;
   }
-  function incTotaal() { let n = 0, b = 0; inc.forEach(function (s) { s.beelden.forEach(function (x) { n++; b += x.bytes.length + x.toon.length; }); s.taken.forEach(function () { n++; }); }); return { n: n, b: b }; }
+  function incTotaal() { let n = 0, b = 0; inc.forEach(function (s) { s.beelden.forEach(function (x) { n++; b += x.bytes.length + x.toon.length; }); s.taken.forEach(function (t) { if (t.studio || t.status === 'wacht') n++; }); }); return { n: n, b: b }; }
   function incVerloopt(x) { return x.gemaakt + GRENS.inc_ms; }
   function incLos(x) { x.bytes = null; x.toon = null; x.opdracht = null; }
+  // review Fable MOET 1: verlaat een beeld de Map (verlopen bij een aanvraag, de ronde, Wis per beeld) terwijl deze sessie iets op ComfyUI deed,
+  // dan het werkgeheugen van ComfyUI laten vrijgeven (ook de uitvoercache). Lukt dat nu niet (slot bezet), dan blijft het als 'nog te wissen'
+  // staan en doet de minuutronde van studio.js het.
+  function incUit(s, id) {
+    const x = s.beelden.get(id);
+    if (!x) return;
+    s.beelden.delete(id); incLos(x);
+    if (s.comfy) { s.comfy = s.beelden.size > 0 || [...s.taken.values()].some(function (t) { return !!t.studio; }); S.geheimNaloop(true).catch(function () {}); }
+  }
   // een verlopen beeld: weg uit de Map (ook bij een aanvraag), nooit meer uitgeleverd
   function incGeldig(s, id) {
     const x = s.beelden.get(id);
     if (!x) return null;
-    if (klok() >= incVerloopt(x)) { s.beelden.delete(id); incLos(x); return null; }
+    if (klok() >= incVerloopt(x)) { incUit(s, id); return null; }
     return x;
   }
   function incLijst(a) {
     const s = sessie(a), nu = klok();
     const beelden = [];
     s.beelden.forEach(function (x, id) {
-      if (nu >= incVerloopt(x)) { s.beelden.delete(id); incLos(x); return; }
+      if (nu >= incVerloopt(x)) { incUit(s, id); return; }
       beelden.push({ id: id, voorganger: x.voorganger, stand: x.stand, breed: x.breed, hoog: x.hoog, gemaakt: iso(x.gemaakt),
         rest_s: Math.max(0, Math.ceil((incVerloopt(x) - nu) / 1000)), opdracht: !!x.opdracht, model: x.model || null });
     });
@@ -367,6 +385,7 @@ function maak(deps) {
     const x = await toets(bytes);
     if (x.fout) return { status: x.status, fout: x.fout };
     if (s.gen !== gen || s.wissen) return { status: 409, fout: 'er is intussen gewist' };
+    if (incTotaal().n >= GRENS.inc_n) return { status: 409, fout: 'incognito houdt hooguit ' + GRENS.inc_n + ' beelden tegelijk; wis eerst iets' };
     if (incTotaal().b + bytes.length + x.toon.length > GRENS.inc_bytes) return { status: 409, fout: 'incognito zit vol (150 MB); wis eerst iets' };
     const id = hex16();
     s.beelden.set(id, { bytes: bytes, toon: x.toon, soort: x.soort, breed: x.breed, hoog: x.hoog, gemaakt: klok(), voorganger: null, stand: null, opdracht: null, model: null });
@@ -404,11 +423,14 @@ function maak(deps) {
     // review MOET 3: een resultaat van vóór het wissen (andere generatie) of van een verlopen bron valt weg
     if (!s || s.gen !== gen || s.wissen || !s.taken.has(taakId)) { beelden.forEach(function (b) { b.bytes = null; }); return; }
     const t = s.taken.get(taakId);
+    if (!incGeldig(s, bronId)) { beelden.forEach(function (b) { b.bytes = null; }); s.taken.delete(taakId); return; }
     if (u.status !== 'klaar' || !beelden.length) { t.status = u.status === 'klaar' ? 'mislukt' : u.status; t.reden = u.reden || 'geen resultaat'; t.studio = null; t.eind = klok(); return; }
     let n = 0;
     for (const b of beelden) {
       const x = await toets(b.bytes);
       if (!inc.get(a) || s.gen !== gen || s.wissen) { b.bytes = null; return; }
+      // review diff MOET 2: de bron moet nog bestaan en geldig zijn (verlopen of gewist = het resultaat valt weg)
+      if (!incGeldig(s, bronId)) { b.bytes = null; continue; }
       if (x.fout || incTotaal().b + b.bytes.length + x.toon.length > GRENS.inc_bytes) { b.bytes = null; continue; }
       s.beelden.set(hex16(), { bytes: b.bytes, toon: x.toon, soort: x.soort, breed: x.breed, hoog: x.hoog, gemaakt: klok(), voorganger: bronId, stand: st.id,
         opdracht: opdracht, model: u.model || null });
@@ -427,9 +449,8 @@ function maak(deps) {
   function incWegEen(a, id) {
     const s = incOpen(a);
     if (!s) return { status: 409, fout: 'er wordt net gewist' };
-    const x = s.beelden.get(id);
-    if (!x) return { status: 404, fout: 'dit beeld is er niet meer' };
-    s.beelden.delete(id); incLos(x);
+    if (!s.beelden.has(id)) return { status: 404, fout: 'dit beeld is er niet meer' };
+    incUit(s, id);
     return { status: 200 };
   }
   async function incWis(a) {
@@ -472,13 +493,11 @@ function maak(deps) {
   function incRonde() {
     const nu = klok();
     inc.forEach(function (s, a) {
-      let verlopen = 0;
-      s.beelden.forEach(function (x, id) { if (nu >= incVerloopt(x)) { s.beelden.delete(id); incLos(x); verlopen++; } });
+      s.beelden.forEach(function (x, id) { if (nu >= incVerloopt(x)) incUit(s, id); });
       s.taken.forEach(function (t, id) {
         if (t.studio && !s.beelden.has(t.beeld)) { try { S.stopGeheugen(t.studio, a); } catch (e) {} }
         if (!t.studio && t.eind && nu - t.eind > GRENS.inc_ms) s.taken.delete(id);
       });
-      if (verlopen && s.comfy) { s.comfy = s.beelden.size > 0 || s.taken.size > 0; S.geheimNaloop(true).catch(function () {}); }
     });
   }
   const timer = setInterval(incRonde, T.ronde);
