@@ -36,7 +36,7 @@ done
 node --no-warnings test/imagine-fase2.test.js > /tmp/imagine-toets.$$ 2>&1; r=$?
 tail -n 1 /tmp/imagine-toets.$$; grep -E "^ROOD" /tmp/imagine-toets.$$
 [ $r = 0 ] || { echo "ROOD  test/imagine-fase2.test.js"; f=1; }
-for k in naad:"F2 NAAD" pod:"F3 knipmaten" vinger:"F4 vergelijk met één vingerafdruk"; do
+for k in naad:"F2 NAAD" pod:"F3 knipmaten" vinger:"F4 vergelijk met één vingerafdruk" refs:"F6 voorbeeld gewist tijdens de taak"; do
   IMAGINE_KRUIS=${k%%:*} node --no-warnings test/imagine-fase2.test.js > /tmp/imagine-toets.$$ 2>&1
   if [ $? = 0 ]; then echo "ROOD  kruisproef ${k%%:*} bleef groen"; f=1
   elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"

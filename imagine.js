@@ -346,7 +346,10 @@ function maak(deps) {
     const h = S.health();
     if (h.in_rij + 2 > GRENS.rij) return { status: 429, fout: 'vergelijken zet twee taken in de rij en daar is nu geen plek voor (hooguit ' + GRENS.rij + '); wacht tot er een klaar is' };
     if (h.taken_vandaag + 2 > GRENS.dag) return { status: 429, fout: 'vergelijken telt als twee bewerkingen en dan kom je over de ' + GRENS.dag + ' van vandaag' };
+    // review Codex MOET 1: de vingerafdruk meteen (vóór elke await) verbruiken; beide taken krijgen die ene uitkomst. Een tweede gelijktijdig
+    // verzoek ziet hem dan al verbruikt. Mislukt het starten daarna, dan is hij toch op (veilige kant).
     const vers = !!ctx.versOk();
+    if (vers) ctx.versVerbruik();
     const ctx2 = Object.assign({}, ctx, { versOk: function () { return vers; }, versVerbruik: function () {} });
     const groep = hex16();
     const basis = Object.assign({}, d);
@@ -358,7 +361,6 @@ function maak(deps) {
       if (!r1.al) { const t = open().prepare('SELECT * FROM taak WHERE id = ?').get(r1.taak.id); if (t && t.studio) { try { S.stopGeheugen(t.studio); } catch (e) {} } }
       return { status: r2.status, fout: 'vergelijken kon niet: ' + (r2.fout || 'onbekend'), vers_nodig: r2.vers_nodig };
     }
-    if (vers) ctx.versVerbruik();
     if (r1.al && r2.al) return { status: 200, al: true, groep: r1.taak ? r1.taak.vergelijk : null, taken: [r1.taak, r2.taak] };
     log('imagine vergelijk groep=' + groep);
     return { status: 200, groep: groep, taken: [r1.taak, r2.taak] };
@@ -372,11 +374,17 @@ function maak(deps) {
     if (!vs.length) return { status: 404, fout: 'deze vergelijking bestaat niet (meer)' };
     const houd = d && Array.isArray(d.houd) ? d.houd.map(String) : null;
     if (!houd || houd.some(function (x) { return !vs.some(function (v) { return v.id === x; }); })) return { status: 400, fout: 'kies links, rechts of beide' };
+    // review Codex MOET 2: eerst nagaan dat alles wat weg moet ook weg mag; pas dan iets veranderen
+    const weg_ids = vs.filter(function (v) { return houd.indexOf(v.id) < 0; }).map(function (v) { return v.id; });
+    for (const id of weg_ids) if (db.prepare("SELECT 1 FROM taak WHERE voorganger = ? AND status IN ('wacht','bezig')").get(id)) return { status: 409, fout: 'er loopt nog een bewerking op een van deze uitkomsten' };
     let weg_n = 0;
-    for (const v of vs) {
-      if (houd.indexOf(v.id) >= 0) db.prepare('UPDATE versie SET vergelijk = NULL WHERE id = ?').run(v.id);
-      else { const r = weg('versie', v.id); if (r.status !== 200) return r; weg_n++; }
-    }
+    db.exec('BEGIN');
+    try { for (const v of vs) if (houd.indexOf(v.id) >= 0) db.prepare('UPDATE versie SET vergelijk = NULL WHERE id = ?').run(v.id); db.exec('COMMIT'); }
+    catch (e) { db.exec('ROLLBACK'); return { status: 500, fout: 'bewaren lukte niet' }; }
+    // kies loopt zonder await (geen wedloop met een nieuwe taak na de controle hierboven); 404 = al weg en telt als gelukt
+    let mis = 0;
+    for (const id of weg_ids) { const r = weg('versie', id); if (r.status === 200) weg_n++; else if (r.status !== 404) mis++; }
+    if (mis) { fout('imagine', new Error('vergelijk: weggooien deels mislukt')); return { status: 500, fout: 'niet alles kon weg; probeer het nog eens' }; }   // Codex hertoets MOET 1
     db.prepare('UPDATE taak SET vergelijk = NULL WHERE vergelijk = ?').run(groep);
     log('imagine vergelijk gekozen groep=' + groep + ' bewaard=' + houd.length + ' weg=' + weg_n);
     return { status: 200, bewaard: houd.length };
@@ -637,7 +645,7 @@ function maak(deps) {
     if (!Array.isArray(refIds) || refIds.length > REFS_MAX) return { status: 400, fout: 'hooguit ' + REFS_MAX + ' voorbeelden' };
     const refBufs = [];
     for (const rid of refIds) {
-      const rx = HEX16.test(String(rid)) && rid !== bronId && refIds.indexOf(rid) === refIds.lastIndexOf(rid) ? incGeldig(s, String(rid)) : null;
+      const rx = HEX16.test(String(rid)) && String(rid) !== bronId && refIds.indexOf(rid) === refIds.lastIndexOf(rid) ? incGeldig(s, String(rid)) : null;   // Fable KAN 2
       if (!rx) return { status: 410, fout: 'een voorbeeld is er niet meer (verlopen of gewist)' };
       refBufs.push(rx.toon);
     }
@@ -645,15 +653,18 @@ function maak(deps) {
     if (vb.status) return vb;
     if (s.gen !== gen || s.wissen) return { status: 409, fout: 'er is intussen gewist' };
     if (!incGeldig(s, bronId)) return { status: 410, fout: 'dit beeld is er niet meer (verlopen of gewist)' };
+    // review Fable MOET 1: ook de voorbeelden opnieuw (een voorbeeld dat intussen weg is, mag niet alsnog naar de beeldserver)
+    const refs = refIds.map(String);
+    if (!refsGeldig(s, refs)) return { status: 410, fout: 'een voorbeeld is er niet meer (verlopen of gewist)' };
     const velden = Object.assign(zonderPod(d.velden), vb.velden);
     const opdracht = st.opdracht ? schoon(velden.opdracht, GRENS.opdracht_max) : null;
     const id = hex16();
-    const taak = { studio: null, beeld: bronId, stand: st.id, gen: gen, status: 'wacht' };
+    const taak = { studio: null, beeld: bronId, refs: refs, stand: st.id, gen: gen, status: 'wacht' };
     s.taken.set(id, taak);
     let r;
     try {
       r = await S.maakGeheugen({ flow: vb.flow, velden: velden, beeld: vb.beeld, beurt_id: String(d.beurt_id || ''), geheim: true, apparaat: a,
-        klaar: function (u) { return incKlaar(a, id, gen, bronId, st, opdracht, u, vb.naad); } }, ctx);
+        klaar: function (u) { return incKlaar(a, id, gen, bronId, st, opdracht, u, vb.naad, refs); } }, ctx);
     } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
     if (r.status !== 200) { s.taken.delete(id); return r; }
     if (r.al) { s.taken.delete(id); return { status: 200, al: true }; }
@@ -687,14 +698,15 @@ function maak(deps) {
     if (s.gen !== gen || s.wissen) { S.stopGeheugen(r.taak.id, a); }   // intussen gewist: meteen weer stoppen
     return { status: 200, taak: id };
   }
-  async function incKlaar(a, taakId, gen, bronId, st, opdracht, u, naad) {
+  function refsGeldig(s, refs) { return (refs || []).every(function (r) { return !!incGeldig(s, r); }); }
+  async function incKlaar(a, taakId, gen, bronId, st, opdracht, u, naad, refs) {
     const s = inc.get(a);
     const beelden = u.beelden || [];
     // review MOET 3: een resultaat van vóór het wissen (andere generatie) of van een verlopen bron valt weg
     if (!s || s.gen !== gen || s.wissen || !s.taken.has(taakId)) { beelden.forEach(function (b) { b.bytes = null; }); return; }
     const t = s.taken.get(taakId);
     // wv2990: bronId null = nieuw beeld uit tekst (geen bron die kan verlopen)
-    if (bronId && !incGeldig(s, bronId)) { beelden.forEach(function (b) { b.bytes = null; }); s.taken.delete(taakId); return; }
+    if ((bronId && !incGeldig(s, bronId)) || !refsGeldig(s, refs)) { beelden.forEach(function (b) { b.bytes = null; }); s.taken.delete(taakId); return; }   // + voorbeelden (Fable MOET 1)
     if (u.status !== 'klaar' || !beelden.length) { t.status = u.status === 'klaar' ? 'mislukt' : u.status; t.reden = u.reden || 'geen resultaat'; t.studio = null; t.eind = klok(); if (!bronId) incVrij(s); return; }
     let n = 0;
     for (const b of beelden) {
@@ -704,7 +716,7 @@ function maak(deps) {
       const x = await toets(b.bytes);
       if (!inc.get(a) || s.gen !== gen || s.wissen) { b.bytes = null; return; }
       // review diff MOET 2: de bron moet nog bestaan en geldig zijn (verlopen of gewist = het resultaat valt weg)
-      if (bronId && !incGeldig(s, bronId)) { b.bytes = null; continue; }
+      if ((bronId && !incGeldig(s, bronId)) || !refsGeldig(s, refs)) { b.bytes = null; continue; }
       if (x.fout || incTotaal().b + b.bytes.length + x.toon.length > GRENS.inc_bytes) { b.bytes = null; continue; }
       s.beelden.set(hex16(), { bytes: b.bytes, toon: x.toon, soort: x.soort, breed: x.breed, hoog: x.hoog, gemaakt: klok(), voorganger: bronId, stand: st.id,
         opdracht: opdracht, model: u.model || null });
@@ -770,7 +782,7 @@ function maak(deps) {
     inc.forEach(function (s, a) {
       s.beelden.forEach(function (x, id) { if (nu >= incVerloopt(x)) incUit(s, id); });
       s.taken.forEach(function (t, id) {
-        if (t.studio && t.beeld && !s.beelden.has(t.beeld)) { try { S.stopGeheugen(t.studio, a); } catch (e) {} }   // wv2990: tekst naar beeld heeft geen bron
+        if (t.studio && t.beeld && (!s.beelden.has(t.beeld) || (t.refs || []).some(function (r) { return !s.beelden.has(r); }))) { try { S.stopGeheugen(t.studio, a); } catch (e) {} }   // wv2990: tekst naar beeld heeft geen bron; wv3021: ook een weg voorbeeld
         if (t.studio && !t.beeld && t.gemaakt && nu - t.gemaakt > GRENS.inc_ms) { try { S.stopGeheugen(t.studio, a); } catch (e) {} }   // wv2990 (Fable KAN 1): ook de opdracht niet langer dan het uur
         if (!t.studio && t.eind && nu - t.eind > GRENS.inc_ms) s.taken.delete(id);
       });
@@ -787,7 +799,7 @@ function maak(deps) {
     let m;
     if (!post && p === '/app/imagine') {
       const l = lijst();
-      return { status: 200, reden: 'imagine', body: { ok: true, bronnen: l.bronnen, taken: l.taken, standen: await standen(), tekst: (await standen([TEKST]))[0], schijf: schijf(), immich: !!im(),
+      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, standen: await standen(), tekst: (await standen([TEKST]))[0], schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
         incognito: { nog_te_wissen: S.incognito().nog_te_wissen } } };
     }
     if (!post && (m = /^\/app\/imagine\/bron\/([a-f0-9]{16})$/.exec(p))) { const b = bronMet(m[1]); return b ? { status: 200, body: Object.assign({ ok: true }, b) } : { status: 404, body: { ok: false, fout: 'dit beeld bestaat niet (meer)' } }; }
