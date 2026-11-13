@@ -8122,7 +8122,8 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   // wv405: loopt er al een beurt in dit gesprek (app of Telegram), dan komt deze erachter; de app toont dan "staat in de rij"
   const inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
   const drukT = Date.now();
-  const antwoord = { keuze: keuze, t: new Date(drukT).toISOString(), apparaat: a.id, vingerafdruk: gevoeligJa || undefined };
+  const antwoord = { keuze: keuze, t: new Date(drukT).toISOString(), apparaat: a.id, vingerafdruk: gevoeligJa || undefined,
+    kaart_hash: kaart && /^[a-f0-9]{64}$/.test(String(kaart.inhoudHash || '')) ? kaart.inhoudHash : undefined };   // wv3010
   const jobId2 = crypto.randomBytes(8).toString('hex');   // vooraf, zodat de druk in één schrijfactie aan zijn beurt vastzit
   v[sleutel].antwoord = Object.assign({ job: jobId2, gestart: false }, antwoord);
   try { appVragenSchrijf(v); } catch (e) { logError('app-vragen', e); terug(); return appWeiger(res, 500, 'opslag', 'vragen niet schrijfbaar'); }
@@ -11024,6 +11025,13 @@ function appVjStatusTijd(st) {
 }
 // FNV-1a zoals appVraagUit (vraag_id in Telegram)
 function appVjFnv(t) { let h = 0x811c9dc5; for (const ch of String(t)) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); }
+// wv3010: vingerafdruk van de kaartinhoud (titel, waarom, stappen, waar, deadline) zoals de databank hem gaf bij de druk. Gaat mee in het
+// antwoord in vragen.json (kaart_hash); mk-scripts/toestemming.py rekent hem na (zelfde JSON, sha256) in plaats van een tijdvenster rond
+// het sluiten van de kaart: die sluit pas bij de start van de beurt, en dat kan minuten later zijn als de machinekamer bezig is.
+function appVjInhoudHash(p) {
+  const s = function (x) { return x == null ? '' : String(x); };
+  return crypto.createHash('sha256').update(JSON.stringify([s(p.titel), s(p.waarom), (Array.isArray(p.stappen) ? p.stappen : []).map(s), s(p.waar), s(p.deadline)]), 'utf8').digest('hex');
+}
 // Eigen vraag-id van een kaart: stabiel per kaart + registerrij (niet op de tekst: een kleine tekstwijziging in het register mag geen
 // tweede Ja mogelijk maken). De job-helft is geen echte job; appKnop krijgt de tekst dan via de kaartcontext.
 function appVjKaartSleutel(p) {
@@ -11379,6 +11387,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
     } catch (e) { logError('app-vragen', e); return appWeiger(res, 503, 'vragenregister onleesbaar; vraag de machinekamer', 'vragen kapot'); }
   }
   const tijd = appKlok();
+  const inhoudHash = appVjInhoudHash(p);   // wv3010: de kaart zoals hij nu (vers gelezen) in de databank staat
   const h = p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
   const wv = (Array.isArray(h.wv) ? h.wv : []).filter(function (x) { return Number.isInteger(Number(x)); }).slice(0, 6).map(function (x) { return 'wv' + Number(x); });
   const titel = appOntmasker(appVjOpmaakWeg(p.titel), 'kaart'), tekst = appOntmasker(k.tekst, 'kaart'), voorstel = k.voorstel ? appOntmasker(k.voorstel, 'kaart') : null;
@@ -11437,7 +11446,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   if (hr) {
     const hrStart = bijStart;
     const knopHr = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
-      { tekst: tekst, bericht: bericht, context: context + hr.context, gevoelig: k.gevoelig,
+      { tekst: tekst, bericht: bericht, inhoudHash: inhoudHash, context: context + hr.context, gevoelig: k.gevoelig,
         bijStart: function (kz, g) { try { hr.bijStart(); } catch (e) { logError('ramble-knop', e); } return hrStart(kz, g); },
         bijVerval: function () { try { hr.bijVerval(); } catch (e) { logError('ramble-knop', e); } } });
     await knopHr;
@@ -11447,7 +11456,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   if (ss) {
     const ssCtx = context + ss.context, ssStart = bijStart;
     const knopSs = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
-      { tekst: tekst, bericht: bericht, context: ssCtx, gevoelig: k.gevoelig, upload: ss.upload || undefined,
+      { tekst: tekst, bericht: bericht, inhoudHash: inhoudHash, context: ssCtx, gevoelig: k.gevoelig, upload: ss.upload || undefined,
         bijStart: function (kz, g) { try { ss.bijStart(); } catch (e) { logError('scansnap-knop', e); } return ssStart(kz, g); },
         bijVerval: function () { try { ss.bijVerval(); } catch (e) { logError('scansnap-knop', e); } } });
     await knopSs;
@@ -11456,7 +11465,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   }
   // wv921, wv861 en wv1253 sluiten elkaar uit (pot-vrijgave-N, de sleutel in bundel.json, intake-…); de haak van de een of de ander
   const knopRes = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
-    { tekst: tekst, bericht: bericht, context: pot || bs ? ctx : ov ? context + ov.context : ctxIb, gevoelig: k.gevoelig || (!pot && !!ib) || !!bs,
+    { tekst: tekst, bericht: bericht, inhoudHash: inhoudHash, context: pot || bs ? ctx : ov ? context + ov.context : ctxIb, gevoelig: k.gevoelig || (!pot && !!ib) || !!bs,
       bijStart: ov ? function (kz, g) { bijStart(kz, g); return ov.staart(a); } : bijStart,
       naStart: ov ? ov.naStart : pot && !pot.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { potVzVrijgeven(pot.v, kz, gevoeligJa, ap, bevestiging, vraagId); }
         : bs && !bs.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { bsVrijgeven(bs.v, kz, gevoeligJa, ap, bevestiging, vraagId); }

@@ -7396,6 +7396,31 @@ async function bewijs(o) {
       r = await KN({ id: 21, keuze: 'nee' });
       toets('27b tweede druk -> 409 al beantwoord (Ja), geen tweede beurt', r.status === 409 && r.j.beantwoord && r.j.beantwoord.keuze === 'ja' && /^al beantwoord: Ja /.test(r.j.fout) && gestart.length === n0 + 1, r.status + JSON.stringify(r.j));
       afmaken[g1.jobId]('ok'); await slaap(40);
+      // wv3010: Ja op een besluitkaart terwijl de machinekamer bezig is (eerst een andere kaartdruk die loopt): de druk staat in de rij, de kaart sluit pas bij de
+      // start, maar het antwoord in vragen.json draagt meteen de sha256 van de kaartinhoud (toestemming.py rekent die na, geen tijdvenster)
+      sbStaat.vj.push(pk(47, 'kaart-bezet', { titel: 'Mag de bezetproef doorgaan?' }));
+      sbStaat.vj.push(pk(46, 'kaart-hash', { titel: 'Proef — toestemmingenregister: mag de proef «x»?', waarom: 'Omdat “het” moet.\nRegel 2', stappen: ['Lees.', 'Registerrij proef: «De proef mag x.»'], deadline: '2026-11-20' }));
+      H.appStaat.vjCache = null;
+      const rB_3010 = await KN({ id: 47, keuze: 'ja' });
+      await wachtTot(() => gestart.length && gestart[gestart.length - 1].jobId === (rB_3010.j && rB_3010.j.job_id));
+      const gB_3010 = gestart[gestart.length - 1];
+      const nH_3010 = gestart.length;
+      await vers(P);   // een toestemmingskaart is in het echt gevoelig: Ja met vingerafdruk
+      const rH_3010 = await KN({ id: 46, keuze: 'ja' });
+      await slaap(40);
+      const k46_3010 = sbStaat.vj.find((x) => x.id === 46);
+      const verwH_3010 = require('crypto').createHash('sha256').update(JSON.stringify([k46_3010.titel, k46_3010.waarom, k46_3010.stappen, k46_3010.waar, k46_3010.deadline]), 'utf8').digest('hex');
+      const aH_3010 = Object.values(vrLees()).map((x) => x.antwoord).find((x) => x && rH_3010.j && x.job === rH_3010.j.job_id);
+      toets('27b wv3010 Ja bij bezette machinekamer: in de rij, kaart nog open, antwoord met kaart_hash = sha256 van de kaartinhoud', rH_3010.status === 200 && rH_3010.j.in_rij === true && gestart.length === nH_3010
+        && k46_3010.status === 'open' && aH_3010 && aH_3010.keuze === 'ja' && aH_3010.vingerafdruk === true && aH_3010.kaart_hash === verwH_3010, rH_3010.status + ' ' + JSON.stringify([rH_3010.j, aH_3010, k46_3010.status, verwH_3010]));
+      afmaken[gB_3010.jobId]('ok');
+      await wachtTot(() => sbStaat.vj.find((x) => x.id === 46).status === 'gedaan', 3000);
+      const gH_3010 = gestart[gestart.length - 1];
+      toets('27b wv3010 na de vorige beurt: knopbeurt start, kaart dicht door david met het vraag-id; kaart_hash blijft staan', gestart.length === nH_3010 + 1 && sbStaat.vj.find((x) => x.id === 46).status === 'gedaan'
+        && /David drukte Ja op de kaart \(vraag-id [a-f0-9]{8}\), met verse vingerafdruk$/.test(sbStaat.vj.find((x) => x.id === 46).bewijs) && Object.values(vrLees()).some((x) => x.antwoord && x.antwoord.kaart_hash === verwH_3010 && x.antwoord.gestart === true),
+        JSON.stringify([gestart.length - nH_3010, sbStaat.vj.find((x) => x.id === 46).status, sbStaat.vj.find((x) => x.id === 46).bewijs, Object.values(vrLees()).map((x) => x.antwoord).filter((x) => x && x.kaart_hash)]));
+      if (gH_3010 && gH_3010.jobId !== gB_3010.jobId) { afmaken[gH_3010.jobId]('ok'); await slaap(40); }
+      sbStaat.vj = sbStaat.vj.filter((x) => x.id !== 46 && x.id !== 47); H.appStaat.vjCache = null;
       H.appStaat.vjCache = null;
       r = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
       const l21 = (r.j.punten || []).find((x) => x.id === 21);
