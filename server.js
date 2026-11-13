@@ -21891,6 +21891,18 @@ const personeelsscherm = (function () {
   if (!fs.existsSync(p)) return null;
   try {
     return require(p).maak({ dir: PERSONEELSSCHERM_DIR, vault: VAULT, fout: logError,
+      // wv3005 fase 1: agenda/rooster uit de tijdlijn (service_role, zoals de kalender-app), weer voor Leusden (OpenWeatherMap, sleutel uit
+      // de kluis zoals weer-ochtend; de module haalt hooguit elke 2 uur), register = toestemmingenregister (alleen lezen)
+      tijdlijn: function (van, tot) { return appSbRpc('sb_kalender_tijdlijn', { p_van: van, p_tot: tot }, 20000); },
+      weer: async function () {
+        const sl = await weerSleutel();
+        if (!sl) throw new Error('geen weersleutel');
+        const r = await fetch('https://api.openweathermap.org/data/3.0/onecall?lat=52.1&lon=5.4&units=metric&lang=nl&exclude=minutely,hourly,alerts&appid=' + encodeURIComponent(sl),
+          { headers: { 'User-Agent': 'socev-personeelsscherm/1', accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+        if (r.status !== 200) throw new Error('weer gaf HTTP ' + r.status);   // nooit de URL (sleutel) in een fout
+        return r.json();
+      },
+      registerPad: '/opt/data/mk-scripts/toestemmingen.json',
       d1: async function (batch) {
         const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/d1/database/' + PERSONEELSSCHERM_D1 + '/query', { batch: batch });
         const ok = r.status === 200 && r.j && r.j.success === true && Array.isArray(r.j.result) && r.j.result.length === batch.length && r.j.result.every(function (x) { return x && x.success !== false; });

@@ -209,3 +209,114 @@ test('werktijd: ma–vr 07:30–18:00 Amsterdam', () => {
   assert.strictEqual(PS.inWerktijd(Date.parse('2026-11-16T17:00:00Z')), false);
   assert.strictEqual(PS.inWerktijd(Date.parse('2026-11-14T10:00:00Z')), false);  // zaterdag
 });
+
+// ── wv3005 fase 1: inhoud, registerrij als poort (verzonnen namen en data) ──
+function fase1(o = {}) {
+  const vault = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-vault-'));
+  const map = path.join(vault, '10_Zakelijk/Tolgaarde/Medewerkers');
+  fs.mkdirSync(map, { recursive: true });
+  const pag = (f, fm) => fs.writeFileSync(path.join(map, f + '.md'), '---\n' + Object.entries(fm).map(([k, v]) => k + ': ' + v).join('\n') + '\n---\n\ntekst\n');
+  pag('Fenna Testerink', { type: 'medewerker', naam: 'Fenna Testerink', status: 'in dienst (onbepaald)', geboortedatum: '1990-11-16' });
+  pag('Tygo Proefman', { type: 'medewerker', naam: 'Tygo Proefman', status: 'in dienst (onbepaald)', geboortedatum: '1985-11-19' });
+  pag('Oud Collega', { type: 'medewerker', naam: 'Oud Collega', status: 'uit dienst per 2025-01-31', geboortedatum: '1970-11-17' });
+  pag('Ver Weg', { type: 'medewerker', naam: 'Ver Weg', status: 'in dienst (onbepaald)', geboortedatum: '1970-12-25' });
+  pag('Overzicht', { type: 'overzicht', naam: 'Personeelsoverzicht' });
+  const reg = path.join(vault, 'register.json');
+  const zetReg = (aan) => fs.writeFileSync(reg, JSON.stringify({ rijen: [{ id: 'ander', status: 'aan' }].concat(aan ? [{ id: 'personeelsscherm-vast', status: aan === true ? 'aan' : aan }] : []) }));
+  zetReg(o.aan);
+  const ent = (naam) => [{ rol: 'betreft', naam, object_id: 'o-' + naam }, { rol: 'context', naam: 'Huisartsenpraktijk Tolgaarde B.V.' }];
+  const rijen = [
+    { feed: 'rooster-tg-artsen', soort: 'dienst', titel: 'WK', status: 'actief', event_id: 1, hele_dag: true, begin_datum: '2026-11-16', eind_datum: '2026-11-16', entiteiten: ent('Wietske Kwakkel') },
+    { feed: 'rooster-tg-artsen', soort: 'dienst', titel: 'JB 8-12 uur', status: 'actief', event_id: 2, hele_dag: true, begin_datum: '2026-11-16', eind_datum: '2026-11-16', entiteiten: ent('Jorrit Bakkerus') },
+    { feed: 'rooster-tg-artsen', soort: 'dienst', titel: 'Hidde Invaller', status: 'actief', event_id: 3, hele_dag: true, begin_datum: '2026-11-16', eind_datum: '2026-11-16', entiteiten: ent('Hidde Invaller') },
+    { feed: 'rooster-tg-artsen', soort: 'dienst', titel: 'Hugo Kortnaam', status: 'actief', event_id: 6, hele_dag: true, begin_datum: '2026-11-16', eind_datum: '2026-11-16', entiteiten: ent('Hugo Kortnaam') },
+    { feed: 'rooster-tg-artsen', soort: 'dienst', titel: 'Ed', status: 'actief', event_id: 7, hele_dag: true, begin_datum: '2026-11-16', eind_datum: '2026-11-16', entiteiten: ent('Ed Kort') },
+    { feed: 'rooster-tg-artsen', soort: 'dienst', titel: 'SvH 13-17', status: 'actief', event_id: 8, hele_dag: true, begin_datum: '2026-11-16', eind_datum: '2026-11-16', entiteiten: ent('Sanne van Hoorn') },
+    { feed: 'rooster-tg-artsen', soort: 'dienst', titel: 'SvH 8-12', status: 'actief', event_id: 9, hele_dag: true, begin_datum: '2026-11-16', eind_datum: '2026-11-16', entiteiten: ent('Sanne van Hoorn') },
+    { feed: 'rooster-tg-artsen', soort: 'dienst', titel: 'MD', status: 'actief', event_id: 4, hele_dag: true, begin_datum: '2026-11-17', eind_datum: '2026-11-17', entiteiten: ent('Morgen Dokter') },
+    { feed: 'rooster-gh-artsen', soort: 'dienst', titel: 'GH', status: 'actief', event_id: 5, hele_dag: true, begin_datum: '2026-11-16', eind_datum: '2026-11-16', entiteiten: ent('Andere Praktijk') },
+    { feed: 'google-hagro', sync_agenda: 'hagro', soort: 'afspraak', titel: 'HAGRO-vergadering', status: 'actief', event_id: 10, hele_dag: false, begin_datum: '2026-11-19', begin_tijd: '2026-11-19T15:00:00+00:00', eind_tijd: '2026-11-19T17:00:00+00:00', entiteiten: [] },
+    { feed: 'google-hagro', sync_agenda: 'hagro', soort: 'afspraak', titel: 'Privé: gesprek', status: 'actief', event_id: 11, hele_dag: false, begin_datum: '2026-11-20', begin_tijd: '2026-11-20T10:00:00+00:00', entiteiten: [] },
+    { feed: 'google-hagro', sync_agenda: 'hagro', soort: 'afspraak', titel: 'Overleg', status: 'actief', event_id: 12, hele_dag: false, begin_datum: '2026-11-21', begin_tijd: '2026-11-21T10:00:00+00:00', entiteiten: ent('Iemand Anders') },
+    { feed: 'google-hagro', sync_agenda: 'hagro', soort: 'afspraak', titel: 'Bel 0612345678', status: 'actief', event_id: 13, hele_dag: true, begin_datum: '2026-11-22', entiteiten: [] },
+    { feed: 'google-hagro', sync_agenda: 'hagro', soort: 'afspraak', titel: 'Geannuleerd overleg', status: 'geannuleerd', event_id: 14, hele_dag: true, begin_datum: '2026-11-23', entiteiten: [] },
+    { feed: 'google-werk', soort: 'afspraak', titel: 'Werkafspraak geheim', status: 'actief', event_id: 15, hele_dag: true, begin_datum: '2026-11-18', entiteiten: [] },
+    { feed: 'google-hagro', sync_agenda: 'hagro', soort: 'afspraak', titel: 'Nieuwjaarsborrel', status: 'actief', event_id: 16, hele_dag: true, begin_datum: '2026-12-18', entiteiten: [] },
+  ];
+  const weer = { current: { temp: 6.4, weather: [{ id: 801, description: 'licht bewolkt' }] }, daily: [{ dt: 1763290800, temp: { max: 8.5, min: 3.4 } }, { dt: 1763377200, temp: { max: 7 }, weather: [{ id: 800 }] }] };
+  const z = opzet(o);
+  const tel = { tijdlijn: 0, weer: 0 };
+  const m = PS.maak({ dir: z.dir, vault, registerPad: reg, d1: z.D.d1, cf: z.C.cf, nu: z.nu, melding: async () => {}, fout: () => {},
+    tijdlijn: async () => { tel.tijdlijn++; if (o.tijdlijnFaalt) throw new Error('weg'); return rijen; }, weer: async () => { tel.weer++; return weer; } });
+  return Object.assign(z, { m, zetReg, tel, vault });
+}
+const html = (D) => { const r = D.sq.prepare('SELECT bytes FROM envelop WHERE id = 1').get(); return JSON.parse(Buffer.from(r.bytes, 'base64')).html; };
+
+test('fase 1 kruisproef: zonder registerrij geen artsen of jarigen (ook niet als de rij uit staat), wel dag, weer en agenda', async () => {
+  for (const aan of [false, 'uit']) {
+    const { m, D } = fase1({ aan });
+    const i = await m.verzamel(Date.parse('2026-11-16T09:00:00Z'));
+    assert.strictEqual(i.artsen, null); assert.strictEqual(i.jarig, null); assert.strictEqual(i.persoonsvakken, false);
+    await m.publiceer();
+    const h = html(D);
+    assert.doesNotMatch(h, /Artsen vandaag|Jarig deze week|Wietske|Jorrit|Fenna|Tygo|Waarnemer/);
+    assert.match(h, /HAGRO-vergadering/); assert.match(h, /Licht bewolkt/); assert.match(h, /Komende weken/);
+    assert.doesNotMatch(h, /Proefscherm|wordt ingericht/);
+  }
+});
+
+test('fase 1 met registerrij: voornaam + dagdeel, waarnemer zonder naam, jarigen met dag en maand; nooit achternaam, jaar of roostertitel', async () => {
+  const { m, D } = fase1({ aan: true });
+  const i = await m.verzamel(Date.parse('2026-11-16T09:00:00Z'));
+  assert.deepStrictEqual(i.artsen, [{ naam: 'Jorrit', wanneer: 'ochtend' }, { naam: 'Sanne', wanneer: 'hele dag' }, { naam: 'Wietske', wanneer: 'hele dag' }, { naam: 'Waarnemer', wanneer: 'hele dag' }, { naam: 'Waarnemer', wanneer: 'hele dag' }, { naam: 'Waarnemer', wanneer: 'hele dag' }]);
+  assert.deepStrictEqual(i.jarig, [{ naam: 'Fenna', wanneer: 'vandaag', nu: true }, { naam: 'Tygo', wanneer: 'do 19 nov', nu: false }]);   // uit dienst en buiten de week weg
+  await m.publiceer();
+  const h = html(D);
+  assert.match(h, /Wietske/); assert.match(h, /Fenna/);
+  assert.doesNotMatch(h, /Kwakkel|Bakkerus|Invaller|Testerink|Proefman|Oud|Ver Weg|1990|1985|JB 8-12|Andere|Morgen|Hugo|Kortnaam|Ed Kort|van Hoorn|SvH/);
+});
+
+test('fase 1 agenda: alleen HAGRO, actief, zonder privé/persoon/nummer, gesorteerd; tijd in Amsterdam', async () => {
+  const { m } = fase1({ aan: true });
+  const i = await m.verzamel(Date.parse('2026-11-16T09:00:00Z'));
+  assert.deepStrictEqual(i.agenda.map((a) => a.titel), ['HAGRO-vergadering', 'Nieuwjaarsborrel']);
+  assert.strictEqual(i.agenda[0].tijd, '16:00–18:00'); assert.strictEqual(i.agenda[0].wd, 'do'); assert.strictEqual(i.agenda[1].tijd, 'hele dag');
+});
+
+test('fase 1 tik: inhoud elke 30 min, publiceert bij verandering; registerrij weg = volgende tik zonder namen; weer hooguit elke 2 uur', async () => {
+  const f = fase1({ aan: true });
+  let t = Date.parse('2026-11-16T09:00:00Z'); f.zet(t);
+  await f.m.tik();
+  assert.match(html(f.D), /Wietske/);
+  const v1 = f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr;
+  t += 5 * 60000; f.zet(t); await f.m.tik();
+  assert.strictEqual(f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr, v1, 'niets veranderd = niet opnieuw');
+  f.zetReg(false);
+  t += 5 * 60000; f.zet(t); await f.m.tik();
+  assert.doesNotMatch(html(f.D), /Wietske|Fenna|Artsen vandaag/, 'zonder rij meteen weg, niet pas na 30 min');
+  assert.strictEqual(f.m.info().persoonsvakken, false);
+  assert.ok(f.tel.weer <= 1, 'weer niet elke tik');
+  t += 3 * 3600000; f.zet(t); await f.m.tik();
+  assert.strictEqual(f.tel.weer, 2);
+});
+
+test('fase 1: oude stand met namen en registerrij weg → publiceer laat ze weg; agenda faalt → vak blijft zoals het was', async () => {
+  const f = fase1({ aan: true });
+  await f.m.verzamel(f.nu());
+  f.zetReg(false);
+  await f.m.publiceer();
+  assert.doesNotMatch(html(f.D), /Wietske|Fenna/);
+  const g = fase1({ aan: false, tijdlijnFaalt: true });
+  const s = path.join(g.dir, 'stand.json');
+  fs.writeFileSync(s, JSON.stringify({ inhoud: { datum: '2026-11-16', agenda: [{ wd: 'do', dg: '19', mn: 'nov', titel: 'Eerder gelezen', tijd: '16:00', label: 'HAGRO' }] } }));
+  const i = await g.m.verzamel(g.nu());
+  assert.deepStrictEqual(i.agenda.map((a) => a.titel), ['Eerder gelezen']); assert.strictEqual(i.bronnen.agenda, false);
+});
+
+test('fase 1 info: alleen tellingen, geen namen', async () => {
+  const f = fase1({ aan: true });
+  await f.m.verzamel(f.nu());
+  const j = JSON.stringify(f.m.info());
+  assert.doesNotMatch(j, /Wietske|Fenna|Jorrit|HAGRO-vergadering/);
+  assert.match(j, /"vakken":\{"agenda":2,"artsen":6,"jarig":2,"weer":true\}/);
+});
