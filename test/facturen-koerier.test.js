@@ -467,6 +467,111 @@ test('POT-afschrift: klaarzetten → opdracht naar het afschriftadres met MT940 
   assert.equal(t.n('SELECT count(*) AS n FROM document'), voor, 'geen losse stukken');
 });
 
+test('wv2992 afschriftsignaal: eigen knoppen, geen dubbele opdracht via de knop, gelukte latere verzending sluit het signaal (vervallen)', async () => {
+  const t = opzet(), g = nepGmail();
+  const rek = t.fdb.db.prepare("SELECT id FROM rekening WHERE entiteit = 'pot'").get();
+  const pdf = { naam: 'POT-2026-10.pdf', bytes: Z.pdf(['Afschrift POT 2026-10', 'synthetisch']) };
+  const goed = { naam: 'POT-2026-10.sta', bytes: Buffer.from('ABNANL2A\r\n940\r\nABNANL2A\r\n:20:PROEF\r\n:25:NL00TEST0000000001\r\n-') };
+  const fout = { naam: 'POT-2026-10.sta', bytes: Buffer.from('tekst\n:20:PROEF') };   // geen verzendbaar bijlagetype → geweigerd (zoals 9-11)
+  const sig = (afs) => t.fdb.db.prepare("SELECT * FROM signaal WHERE soort = 'verzending_mislukt' AND json_extract(details, '$.afschrift') = ? ORDER BY aangemaakt_op, rowid").all(afs);
+  const inLijst = (id) => t.call('GET', 'bank').j.signalen.find((x) => x.id === id);
+  const opdrachten = (afs) => t.n('SELECT count(*) AS n FROM opdracht WHERE afschrift = ?', [afs]);
+
+  // (A) zoals 9/10-11: geweigerd → signaal; David zet het afschrift opnieuw klaar (POT-app) → gelukt → het oude signaal vervalt vanzelf
+  const r1 = F.afschriftKlaarzetten(t.fdb, t.eig, { rekening: rek.id, periode: '2026-10', mt940: fout, pdf }, { nu: NU });
+  await t.ronde(g, VERSTUUR + 5 * MIN);
+  assert.equal(t.op(r1.opdracht.id).status, 'geweigerd');
+  const [s1] = sig(r1.afschrift);
+  assert.ok(s1 && s1.status === 'open', 'signaal na weigering');
+  assert.deepEqual(JSON.parse(s1.facturen), []);
+  assert.equal(JSON.parse(s1.details).periode, '2026-10');
+  assert.deepEqual(inLijst(s1.id).knoppen.map((k) => k.knop), ['opnieuw_proberen', 'al_geregeld'], 'afschrift: geen Terug naar Beoordelen');
+  assert.equal(inLijst(s1.id).knoppen[1].label, 'Weg, al geregeld');
+  assert.equal(t.call('POST', 'signaal', { id: s1.id, knop: 'terug_naar_beoordelen' }).status, 400);
+  const r2 = F.afschriftKlaarzetten(t.fdb, t.eig, { rekening: rek.id, periode: '2026-10', mt940: goed, pdf }, { nu: NU + 2 * UUR });
+  // er loopt nu een opdracht: Opnieuw proberen staat niet in de lijst en de route weigert (geen tweede opdracht naar de boekhouder)
+  assert.deepEqual(inLijst(s1.id).knoppen.map((k) => k.knop), ['al_geregeld']);
+  const n0 = opdrachten(r1.afschrift);
+  const x = t.call('POST', 'signaal', { id: s1.id, knop: 'opnieuw_proberen' });
+  assert.equal(x.status, 409, JSON.stringify(x.j));
+  assert.match(JSON.stringify(x.j), /loopt al een verzending/);
+  assert.equal(opdrachten(r1.afschrift), n0, 'geen extra opdracht');
+  assert.equal(t.fdb.db.prepare('SELECT status FROM signaal WHERE id = ?').get(s1.id).status, 'open', 'weigering laat het signaal open');
+  await t.ronde(g, NU + 2 * UUR + 35 * MIN);
+  assert.equal(t.op(r2.opdracht.id).status, 'gelukt');
+  const d1 = t.fdb.db.prepare('SELECT * FROM signaal WHERE id = ?').get(s1.id);
+  assert.equal(d1.status, 'afgehandeld');
+  assert.equal(d1.afhandeling, 'vervallen');
+  assert.equal(d1.wie, 'pod');
+  assert.ok(d1.les.includes(r2.opdracht.id), 'les noemt de gelukte opdracht');
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'signaal_vervallen' AND object_id = ? AND wie = 'pod'", [s1.id]), 1);
+  assert.equal(inLijst(s1.id), undefined, 'niet meer bij de open signalen');
+  // na de gelukte verzending: ook met de route geen nieuwe opdracht voor dit afschrift
+  assert.match(JSON.stringify(t.call('POST', 'signaal', { id: s1.id, knop: 'opnieuw_proberen' }).j), /niet_open|al afgehandeld/);
+  // een tweede open signaal over dit afschrift (bv. een oude weigering) kan na de gelukte verzending niet meer opnieuw
+  t.fdb.db.prepare("UPDATE signaal SET status = 'open', afhandeling = NULL, les = NULL, wie = NULL, wanneer = NULL WHERE id = ?").run(s1.id);
+  assert.deepEqual(inLijst(s1.id).knoppen.map((k) => k.knop), ['al_geregeld']);
+  const y = t.call('POST', 'signaal', { id: s1.id, knop: 'opnieuw_proberen' });
+  assert.equal(y.status, 409);
+  assert.match(JSON.stringify(y.j), /al gelukt/);
+  assert.equal(opdrachten(r1.afschrift), n0);
+
+  // (B) Opnieuw proberen met de knop: dezelfde bestanden opnieuw in de wachtrij, één nieuwe opdracht; twee keer drukken = nog steeds één
+  const r3 = F.afschriftKlaarzetten(t.fdb, t.eig, { rekening: rek.id, periode: '2026-09', mt940: goed, pdf }, { nu: NU + 3 * UUR });
+  assert.ok(D.claimOpdrachten(t.fdb, NU + 4 * UUR).opdrachten.some((o) => o.id === r3.opdracht.id));
+  assert.equal(D.opdrachtResultaat(t.fdb, r3.opdracht.id, { status: 'geweigerd', fout: 'proef' }, { nu: NU + 4 * UUR }).ok, true);
+  const [s3] = sig(r3.afschrift);
+  assert.equal(t.fdb.db.prepare('SELECT status FROM pot_afschrift WHERE id = ?').get(r3.afschrift).status, 'klaar');
+  const k = t.call('POST', 'signaal', { id: s3.id, knop: 'opnieuw_proberen' }, { nu: NU + 5 * UUR });
+  assert.equal(k.status, 200, JSON.stringify(k.j));
+  assert.match(k.j.les, /bankafschrift van september 2026 opnieuw gestart/);
+  const nieuw = t.fdb.db.prepare("SELECT * FROM opdracht WHERE afschrift = ? AND status = 'wacht'").all(r3.afschrift);
+  assert.equal(nieuw.length, 1);
+  assert.deepEqual(JSON.parse(nieuw[0].bijlagen).map((b) => b.sha256), JSON.parse(t.op(r3.opdracht.id).bijlagen).map((b) => b.sha256), 'dezelfde bestanden');
+  assert.equal(nieuw[0].doeladres, t.op(r3.opdracht.id).doeladres);
+  assert.equal(t.fdb.db.prepare('SELECT status FROM pot_afschrift WHERE id = ?').get(r3.afschrift).status, 'in_wachtrij');
+  assert.equal(t.call('POST', 'signaal', { id: s3.id, knop: 'opnieuw_proberen' }, { nu: NU + 5 * UUR }).status, 409, 'al afgehandeld');
+  assert.equal(opdrachten(r3.afschrift), 2);
+  t.fdb.db.prepare("UPDATE gebruiker SET actief = 1 WHERE rol = 'praktijkmanager'").run();
+  const rolPm = F.rolVoor(t.fdb, { ingang: 'fac', email: 'praktijkmanager@voorbeeld.invalid' });
+  assert.ok(rolPm, 'praktijkmanager uit het zaad');
+
+  // (C) Weg, al geregeld: sluit zonder gevolg, met les
+  const r4 = F.afschriftKlaarzetten(t.fdb, t.eig, { rekening: rek.id, periode: '2025-08', mt940: goed, pdf }, { nu: NU + 6 * UUR });
+  D.claimOpdrachten(t.fdb, NU + 7 * UUR);
+  D.opdrachtResultaat(t.fdb, r4.opdracht.id, { status: 'geweigerd', fout: 'proef' }, { nu: NU + 7 * UUR });
+  const [s4] = sig(r4.afschrift);
+  assert.equal(s4.alleen_eigenaar, 1);
+  assert.equal(t.call('POST', 'signaal', { id: s4.id, knop: 'al_geregeld' }, { rol: rolPm, nu: NU + 8 * UUR }).status, 404, 'POT-signaal: alleen de eigenaar');
+  const w = t.call('POST', 'signaal', { id: s4.id, knop: 'al_geregeld' }, { nu: NU + 8 * UUR });
+  assert.equal(w.status, 200, JSON.stringify(w.j));
+  const d4 = t.fdb.db.prepare('SELECT * FROM signaal WHERE id = ?').get(s4.id);
+  assert.equal(d4.afhandeling, 'al_geregeld');
+  assert.match(d4.les, /augustus 2025 was al geregeld/);
+  assert.equal(opdrachten(r4.afschrift), 1, 'geen nieuwe opdracht');
+  assert.equal(t.fdb.db.prepare('SELECT status FROM pot_afschrift WHERE id = ?').get(r4.afschrift).status, 'klaar');
+});
+
+test('wv2992 factuursignaal: knoppen ongewijzigd; een gelukte latere opdracht voor dezelfde factuur sluit het open signaal, een ander signaal blijft', async () => {
+  const t = opzet(), g = nepGmail();
+  const { f, op } = t.bevestig();
+  const ander = t.fdb.db.prepare("SELECT id FROM factuur WHERE id <> ? LIMIT 1").get(f.id).id;
+  const B = require(path.join(ROOT, 'facturen-bank.js'));
+  const zet = (fid, opId) => { const s = B.maakSignaal('verzending_mislukt', { facturen: [fid], entiteit: f.entiteit, details: { opdracht: opId, status: 'geweigerd' }, sleutel_extra: 'op=' + opId });
+    t.fdb.db.prepare('INSERT INTO signaal (id, sleutel, soort, titel, entiteit, facturen, details, aangemaakt_op) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(D.nieuwId(), s.sleutel, s.soort, s.titel, s.entiteit, JSON.stringify(s.facturen), JSON.stringify(s.details), new Date(NU).toISOString());
+    return t.fdb.db.prepare('SELECT * FROM signaal WHERE sleutel = ?').get(s.sleutel); };
+  const oud = zet(f.id, 'eerdereopdracht'), los = zet(ander, 'anderopdracht');
+  assert.deepEqual(t.call('GET', 'bank').j.signalen.find((x) => x.id === oud.id).knoppen.map((k) => k.knop), ['opnieuw_proberen', 'terug_naar_beoordelen']);
+  await t.ronde(g, VERSTUUR + 5 * MIN);
+  assert.equal(t.op(op.id).status, 'gelukt');
+  const d = t.fdb.db.prepare('SELECT * FROM signaal WHERE id = ?').get(oud.id);
+  assert.equal(d.status, 'afgehandeld');
+  assert.equal(d.afhandeling, 'vervallen');
+  assert.ok(d.les.includes(op.id));
+  assert.equal(t.fdb.db.prepare('SELECT status FROM signaal WHERE id = ?').get(los.id).status, 'open', 'signaal over een andere factuur blijft');
+});
+
 // ───────────────────────────── binnenkomend: uploads en verzamelpostvak ─────────────────────────────
 
 test('te_lezen-upload: de koerier leest de PDF (pdftotext) en maakt de factuur; de tekst komt nergens in de database', async () => {

@@ -1100,6 +1100,11 @@ function terugGevolgen(s) {
   return [{ actie: 'terug_koppelen', transactie: (s.transacties || [])[0], factuur: s.facturen[0] },
     { actie: 'betaalspoor', factuur: s.facturen[0], gebeurtenis: 'teruggeboekt', batch: d.batch || null, uitvoerdatum: d.uitvoerdatum || null }];
 }
+// wv2992: signaal over een POT-afschrift (verzending_mislukt van een boekhouder_afschrift-opdracht): wel details.afschrift, geen factuur.
+function isAfschriftSignaal(s) { return !!(s && s.details && s.details.afschrift) && !((s.facturen || []).filter(Boolean).length); }
+function afschriftTekst(s) { const p = s.details && s.details.periode; return 'het bankafschrift' + (/^\d{4}-\d{2}$/.test(String(p || '')) ? ' van ' + maandNL(p) : ''); }
+// Knoppen die bij dit signaal horen (een knop met geldt(s) = false bestaat voor dit signaal niet).
+function knoppenVan(s) { return Object.keys(SIGNALEN[s.soort].knoppen).filter((k) => { const g = SIGNALEN[s.soort].knoppen[k].geldt; return !g || g(s); }); }
 const SIGNALEN = {
   geen_factuur: {
     titel: 'Afschrijving zonder factuur',
@@ -1135,13 +1140,22 @@ const SIGNALEN = {
         les: (s) => 'Twee facturen van ' + naamVan(s) + ' met zelfde nummer en bedrag waren toch twee facturen.' },
     },
   },
+  // wv2992 (David 13-11-2026: "Er blijven 2 signalen staan van de mislukte verzending van de POT"): een signaal over een POT-afschrift
+  // (details.afschrift, geen factuur) heeft eigen knoppen. Opnieuw proberen zet hetzelfde afschrift opnieuw klaar (de app toetst eerst dat er
+  // geen gelukte of lopende opdracht is: anders dubbel naar de boekhouder); "Weg, al geregeld" sluit zonder gevolg. Terug naar Beoordelen
+  // bestaat alleen voor een factuur. Een gelukte latere verzending sluit het signaal zelf (facturen-db.js, afhandeling vervallen).
   verzending_mislukt: {
     titel: 'Verzending mislukt',
     knoppen: {
-      opnieuw_proberen: { label: 'Opnieuw proberen', vereist: [], gevolgen: (s) => [{ actie: 'factuur_status', factuur: s.facturen[0], gebeurtenis: 'opnieuw_proberen' }],
-        les: (s) => 'Verzending van een factuur van ' + naamVan(s) + ' opnieuw gestart.' },
-      terug_naar_beoordelen: { label: 'Terug naar Beoordelen', vereist: [], gevolgen: (s) => [{ actie: 'factuur_status', factuur: s.facturen[0], gebeurtenis: 'terug_naar_beoordelen' }],
+      opnieuw_proberen: { label: 'Opnieuw proberen', vereist: [],
+        gevolgen: (s) => (isAfschriftSignaal(s) ? [{ actie: 'afschrift_opnieuw', afschrift: s.details.afschrift }]
+          : [{ actie: 'factuur_status', factuur: s.facturen[0], gebeurtenis: 'opnieuw_proberen' }]),
+        les: (s) => (isAfschriftSignaal(s) ? 'Verzending van ' + afschriftTekst(s) + ' opnieuw gestart.' : 'Verzending van een factuur van ' + naamVan(s) + ' opnieuw gestart.') },
+      terug_naar_beoordelen: { label: 'Terug naar Beoordelen', vereist: [], geldt: (s) => !isAfschriftSignaal(s),
+        gevolgen: (s) => [{ actie: 'factuur_status', factuur: s.facturen[0], gebeurtenis: 'terug_naar_beoordelen' }],
         les: (s) => 'Factuur van ' + naamVan(s) + ' terug naar Beoordelen na een mislukte verzending.' },
+      al_geregeld: { label: 'Weg, al geregeld', vereist: [], geldt: (s) => isAfschriftSignaal(s), gevolgen: () => [],
+        les: (s) => 'Mislukte verzending van ' + afschriftTekst(s) + ' was al geregeld; signaal weggezet.' },
     },
   },
   incasso_niet_gezien: {
@@ -1249,7 +1263,7 @@ function maakSignaal(soort, o) {
   // wv1326: sleutel_vast = een eigen sleutel los van de bankregels (afwijkend_bedrag: één signaal per tegenpartij per maand)
   s.sleutel = s.sleutel_vast ? soort + ':' + s.sleutel_vast : signaalSleutel(soort, s.transacties, s.facturen, s.sleutel_extra);
   delete s.sleutel_extra; delete s.sleutel_vast;
-  s.knoppen = Object.keys(SIGNALEN[soort].knoppen);
+  s.knoppen = knoppenVan(s);
   s.alleen_eigenaar = !!s.alleen_eigenaar;
   return s;
 }
@@ -1277,6 +1291,7 @@ function afhandelSignaal(signaal, knop, opties) {
   for (const v of k.vereist) if (opties[v] === undefined || opties[v] === null || opties[v] === '') return { ok: false, fout: 'vereist', reden: v };
   if (k.vereist.includes('categorie') && !CATEGORIEEN.includes(opties.categorie)) return { ok: false, fout: 'onbekende_categorie', reden: CATEGORIEEN.join(', ') };
   if (k.vereist.includes('toelichting') && String(opties.toelichting).trim().length < 5) return { ok: false, fout: 'vereist', reden: 'toelichting' };
+  if (k.geldt && !k.geldt(signaal)) return { ok: false, fout: 'voorwaarde', reden: 'deze knop hoort niet bij dit signaal' };
   const vw = k.voorwaarde ? k.voorwaarde(signaal) : null;
   if (vw) return { ok: false, fout: 'voorwaarde', reden: vw };
   const af = Object.assign({}, signaal, { status: 'afgehandeld', afhandeling: knop, les: k.les(signaal, opties).slice(0, LES_MAX), wie: opties.wie, wanneer: opties.nu });
@@ -2012,7 +2027,7 @@ function feitUitleg(k) {
 }
 
 module.exports = {
-  BankWeigering, FORMATEN, HISTORIE_FORMATEN, ABN_HISTORIE_KOP, leesAbnHistorie, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, DOCPLAN_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
+  BankWeigering, isAfschriftSignaal, knoppenVan, FORMATEN, HISTORIE_FORMATEN, ABN_HISTORIE_KOP, leesAbnHistorie, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, DOCPLAN_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
   // parsers
   pyStr, mkRef, kenEntryRefsToe, refBasis, saldoControle, normBedrag, herkenFormaat, csvRijen, leesIng, leesTriodos, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
   formaatPast, mt940Dag, ingTaalKop, ingTaalTekst, FORMAAT_FAMILIE, FORMAAT_NAAM,

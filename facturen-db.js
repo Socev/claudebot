@@ -1524,7 +1524,7 @@ function weigerOpdracht(fdb, op, reden, tijd, wie) {
 // intussen elders staat (bv. een oude opdracht na terugdraaien), blijft staan.
 function verzendingMislukt(fdb, op, reden, tijd, wie, gebeurtenis) {
   const B = require('./facturen-bank.js');
-  let f = null, eigenaar = false;
+  let f = null, eigenaar = false, periode = null;
   if (op.factuur) {
     f = fdb.db.prepare('SELECT id, status, entiteit, leverancier, incl, alleen_eigenaar, patientkenmerk FROM factuur WHERE id = ?').get(op.factuur);
     if (f && ['in_wachtrij', 'wordt_verstuurd'].includes(f.status)) {
@@ -1538,10 +1538,12 @@ function verzendingMislukt(fdb, op, reden, tijd, wie, gebeurtenis) {
     eigenaar = !!(f && (f.alleen_eigenaar || f.patientkenmerk || f.entiteit === 'prive'));
   } else {
     fdb.db.prepare("UPDATE pot_afschrift SET status = 'klaar', bijgewerkt_op = ? WHERE id = ? AND status = 'in_wachtrij'").run(tijd, op.afschrift);
+    const pa = fdb.db.prepare('SELECT periode FROM pot_afschrift WHERE id = ?').get(op.afschrift);
+    periode = pa ? pa.periode : null;   // wv2992: voor de les op de knop ("het bankafschrift van oktober 2026")
     eigenaar = true;   // POT-afschriften en alles wat ervan afgeleid is: alleen de eigenaar (App-bouwplan § 4.2; diffreview #6)
   }
   const s = B.maakSignaal('verzending_mislukt', { entiteit: op.entiteit, leverancier: f ? f.leverancier : null, facturen: f ? [f.id] : [],
-    bedrag_centen: f ? f.incl : null, details: { opdracht: op.id, status: gebeurtenis === 'geweigerd' ? 'geweigerd' : 'mislukt', afschrift: op.afschrift || undefined, reden: String(reden || '').slice(0, 200) },
+    bedrag_centen: f ? f.incl : null, details: { opdracht: op.id, status: gebeurtenis === 'geweigerd' ? 'geweigerd' : 'mislukt', afschrift: op.afschrift || undefined, periode: periode || undefined, reden: String(reden || '').slice(0, 200) },
     sleutel_extra: 'op=' + op.id, alleen_eigenaar: eigenaar });
   fdb.db.prepare('INSERT INTO signaal (id, sleutel, soort, titel, entiteit, leverancier, transacties, facturen, bedrag_centen, details, alleen_eigenaar, aangemaakt_op) ' +
     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (sleutel) DO NOTHING')
@@ -1728,7 +1730,8 @@ function opdrachtResultaat(fdb, opId, r, o) {
       }
       audit(fdb, { wie, wat: 'opdracht_gelukt', object_soort: 'opdracht', object_id: op.id, entiteit: op.entiteit,
         na: { modus: r.modus, factuur_status: naar, overgenomen: !!r.overgenomen }, wanneer: tijd });
-      return { ok: true, gewijzigd: true, factuur_status: naar };
+      const vervallen = mislukteSignalenVervallen(fdb, op, tijd);
+      return { ok: true, gewijzigd: true, factuur_status: naar, signalen_vervallen: vervallen };
     }
     if (r.status === 'mislukt') {
       const ov = K.opdrachtOvergang(op, 'mislukt');
@@ -1746,6 +1749,28 @@ function opdrachtResultaat(fdb, opId, r, o) {
     }
     throw new DbFout('status', 'onbekende uitkomst');
   });
+}
+/*
+ * wv2992 (David 13-11-2026: "Er blijven 2 signalen staan van de mislukte verzending van de POT"): lukt een opdracht, dan gaan de open
+ * signalen "verzending mislukt" over dezelfde factuur of hetzelfde afschrift (eerdere, geweigerde of definitief mislukte opdrachten) dicht:
+ * afhandeling 'vervallen', les met het opdracht-id, audit-rij (wie pod). Alleen open signalen; een afgehandeld signaal blijft zoals het is.
+ * In dezelfde transactie als de uitkomst. → aantal gesloten signalen.
+ */
+function mislukteSignalenVervallen(fdb, op, tijd) {
+  const open = op.factuur
+    ? fdb.db.prepare("SELECT id, entiteit FROM signaal WHERE status = 'open' AND soort = 'verzending_mislukt' AND EXISTS (SELECT 1 FROM json_each(signaal.facturen) j WHERE j.value = ?)").all(op.factuur)
+    : fdb.db.prepare("SELECT id, entiteit FROM signaal WHERE status = 'open' AND soort = 'verzending_mislukt' AND json_extract(details, '$.afschrift') = ?").all(op.afschrift);
+  const les = 'Een latere verzending (opdracht ' + op.id + ') is gelukt; dit signaal verviel vanzelf.';
+  let n = 0;
+  for (const x of open) {
+    const u = fdb.db.prepare("UPDATE signaal SET status = 'afgehandeld', afhandeling = 'vervallen', les = ?, wie = 'pod', wanneer = ?, sluimer_tot = NULL WHERE id = ? AND status = 'open'")
+      .run(les, tijd, x.id);
+    if (u.changes !== 1) continue;
+    n++;
+    audit(fdb, { wie: 'pod', wat: 'signaal_vervallen', object_soort: 'signaal', object_id: x.id, entiteit: x.entiteit, voor: { status: 'open' },
+      na: { status: 'afgehandeld', afhandeling: 'vervallen', opdracht: op.id }, wanneer: tijd });
+  }
+  return n;
 }
 /*
  * Verzend-detectie (modus concept): de mail met het token staat in Verzonden → factuur concept_klaar → verstuurd (kern verzonden_gezien),
@@ -1907,7 +1932,7 @@ function health(fdb) {
 module.exports = {
   DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M17_VERVANG, _M17: M17, M18_VERVANG, _M18: M18, M24_VERVANG, _M24: M24, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
-  terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, reserveerKies, directBesluit, factuurTwijfel, DIRECT_TWIJFEL, directVandaag, DIRECT_PER_DAG, terugNaarConcept, verzendNotitie, opdrachtResultaat, verzondenGezien,
+  terugdraaien, LEVEND, mislukteSignalenVervallen, claimOpdrachten, weigerOpdracht, reserveer, reserveerKies, directBesluit, factuurTwijfel, DIRECT_TWIJFEL, directVandaag, DIRECT_PER_DAG, terugNaarConcept, verzendNotitie, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,
   backup, herstel, tellingen, health,
 };
