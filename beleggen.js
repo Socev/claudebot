@@ -730,7 +730,19 @@ function maak(o) {
       metDb((db) => { const r = db.prepare('DELETE FROM positie WHERE sleutel = ? AND bron = ?').run(sl, 'hand'); if (!r.changes) throw new Fout(404, 'alleen een positie die je met de hand invoerde kan weg'); }, true);
       return { reden: 'beleggen positie weg' };
     }
-    if (b.actie !== 'zet') throw new Fout(400, 'actie: zet of weg');
+    if (b.actie === 'contant') {   // wv3008 (startfase): een storting met de hand = één contantregel (cash telt niet mee in de verdeling); een ingelezen portefeuille vervangt hem
+      const w = handGetal(b.waarde_eur, 'bedrag in euro');
+      if (w.n < 0) throw new Fout(400, 'bedrag in euro kan niet negatief zijn');
+      metDb((db) => {
+        const oud = db.prepare('SELECT bron FROM positie WHERE regelsoort = ? AND bron = ? LIMIT 1').get('cash', 'bestand');
+        if (oud) throw new Fout(409, 'je contant geld komt uit je bestand; zet een nieuw bestand in de app om het te wijzigen');
+        db.prepare("INSERT INTO positie (sleutel, regelsoort, naam, isin, aantal, koers, valuta, lokaal_cent, waarde_eur_cent, bron, bestand_id, op) VALUES ('cash:hand', 'cash', 'Contant (met de hand)', NULL, NULL, NULL, 'EUR', NULL, ?, 'hand', NULL, ?) " +
+          'ON CONFLICT(sleutel) DO UPDATE SET waarde_eur_cent = excluded.waarde_eur_cent, op = excluded.op').run(naarCent(w), nuIso());
+        zetStand(db, vandaagF(), 'hand');
+      }, true);
+      return { reden: 'beleggen contant hand' };
+    }
+    if (b.actie !== 'zet') throw new Fout(400, 'actie: zet, contant of weg');
     const naam = T(b.naam, 120); if (!naam) throw new Fout(400, 'naam ontbreekt');
     const isin = handIsin(b.isin), aantal = handGetal(b.aantal, 'aantal'), koers = handGetal(b.koers, 'koers', true), valuta = handValuta(b.valuta);
     const waarde = handGetal(b.waarde_eur, 'waarde in euro');
