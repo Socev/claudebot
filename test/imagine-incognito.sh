@@ -17,7 +17,7 @@ if echo "$B" | grep -nE "(^|[^a-zA-Z])log\("; then echo "ROOD  imagine.js: het i
 if echo "$B" | grep -nE "fout\([^)]*(e\.message|String\(e|\+)" ; then echo "ROOD  imagine.js: het incognitodeel logt een fouttekst met inhoud"; f=1; fi
 grep -q "audit({ soort: 'incognito', uitkomst: t.status, duur_s: t.duur_s })" studio.js || { echo "ROOD  studio.js: telregel incognito niet zoals ontworpen"; f=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* imagine\.js" uitrol.sh || { echo "ROOD  uitrol.sh: imagine.js niet in RELEASE_OPTIONEEL"; f=1; }
-grep -qE "'beleggen', 'imagine'\]" app-vast.js || { echo "ROOD  app-vast.js: imagine niet in APP_IDS"; f=1; }
+grep -qE "'beleggen', 'imagine'(, '[a-z-]+')*\]" app-vast.js || { echo "ROOD  app-vast.js: imagine niet in APP_IDS"; f=1; }
 grep -qF "p === '/app/imagine/incognito/laad') ? APP_IMAGINE_MAX_BODY" server.js || { echo "ROOD  server.js: bodygrens voor laden ontbreekt"; f=1; }
 grep -qF "merk: path.join(IMAGINE_DIR, 'incognito-merk.json')" server.js || { echo "ROOD  server.js: studio kent het incognito-merk niet"; f=1; }
 S=$(awk '/── OVIS Imagine \(wv2984/,/── einde OVIS Imagine ──/' server.js)
