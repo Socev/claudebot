@@ -5614,7 +5614,7 @@ function appBeheerVanafVast(route, a, d) {
 // voor het doorgeefluik (intern, doorgeefSchoon) en de vaste-plekschakelaar van Second Brain/Docs/Zoek snel (wv1901).
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], docs: [], managers: [], 'zoek-snel': [], mediatheek: [], 'mediatheek-bestand': [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], docs: [], managers: [], 'zoek-snel': [], mediatheek: [], 'mediatheek-bestand': [], ghawa: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -21764,7 +21764,6 @@ function ghawaInfo() {
   if (ghawaDeel && u.deel && !u.deel.fout) { try { u.deel.seintje = ghawaSeintjeInfo(); } catch (e) { u.deel.seintje = { fout: true }; } }   // wv2930: mislukt seintje naar de machinekamer is zichtbaar   // wv2889: laatste push, aantallen; geen inhoud
   return u;
 }
-appStaat.tellers.ghawa = [];
 async function appGhawa(req, res, a, route, d, s) {
   if (!ghawaApp) return appWeiger(res, 404, 'GHAWA zit niet in deze versie van de pod', 'ghawa ontbreekt');
   if (!appTeller('ghawa', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa');
