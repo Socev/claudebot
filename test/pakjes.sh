@@ -48,6 +48,64 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
   toets('1 mailtekst is gegeven: geen < > in de winkel, velden begrensd, lange tekst geen probleem', h && !/[<>]/.test(h.winkel || '') && (h.winkel || '').length <= 80 && h.code === 'PRF00011122233', h);
   toets('1 kandidaatfilter: vervoerderdomein of pakketwoord in het onderwerp', P.isKandidaat({ afzender_domein: 'edm.postnl.nl', onderwerp: 'x' }) && P.isKandidaat({ afzender_domein: 'proef.nl', onderwerp: 'Je pakket komt eraan' })
     && !P.isKandidaat({ afzender_domein: 'proef.nl', onderwerp: 'Notulen vergadering' }));
+  // ── 1b. wv3011 (weekmeting 13-11): FedEx, GOFO, GLS Nederland, verzendmail met "Vervoerder:", bestelbevestiging, Intrapost, maaltijden ──
+  h = P.herken(mail('"FedEx Express" <noreply@fedex.com>', 'Uw zending is onderweg 700011122233', 'Uw zending van Proefwinkel.com is onderweg.\nGeplande leverdatum\ndinsdag, 17/11/2026\nkopieer deze link: https://fedex.com/fedextrack?t=700011122233&l=nl_NL&et=xyz\nTracking-id\n700011122233', '2026-11-16T10:00:00Z'));
+  toets('1b FedEx: code, winkel uit "zending van", onderweg, dag uit "dinsdag, 17/11/2026", link naar fedex.com', h && h.vervoerder === 'fedex' && h.code === '700011122233' && h.winkel === 'Proefwinkel.com'
+    && h.stand === 'onderweg' && h.verwacht_dag === '2026-11-17' && /^https:\/\/www\.fedex\.com\//.test(P.volgLink(h, [])), h);
+  h = P.herken(mail('"FedEx Delivery Manager" <Trackingupdates@fedex.com>', 'Uw zending is afgeleverd 700011122233', 'Uw zending van Proefwinkel.com is afgeleverd.'));
+  toets('1b FedEx afgeleverd = bezorgd, zelfde sleutel', h && h.stand === 'bezorgd' && h.sleutel === 'fedex:700011122233', h);
+  h = P.herken(mail('"GOFO Netherlands" <cs@nlconnect.gofo.com>', 'Jouw pakket wordt binnenkort bezorgd — Kies een bezorgvoorkeur', 'Jouw pakket GFNL00011122233344 is aangekomen in ons sorteercentrum en wordt\nbinnenkort bezorgd.\n[https://x.example/L0/https:%2F%2Fwww.gofoexpress.nl%2Ftracking-results%2F%3Fid=GFNL00011122233344/1/abc]'));
+  toets('1b GOFO: code GFNL…, sorteercentrum = onderweg, link naar gofoexpress.nl', h && h.vervoerder === 'gofo' && h.code === 'GFNL00011122233344' && h.stand === 'onderweg'
+    && P.volgLink(h, []) === 'https://www.gofoexpress.nl/tracking-results/?id=GFNL00011122233344', h);
+  h = P.herken(mail('"GLS Netherlands" <noreply@gls-netherlands.com>', 'Informatie over je zending via GLS', 'Je pakket is bezorgd!\nWe hebben vandaag jouw pakket van Proefleverancier Zorg bezorgd.\n[https://www.gls-info.nl/tracking/ttlink?parcelNo=11122233344455&zipCode=' + PC + '&lang=NL]'));
+  toets('1b GLS NL: 14 cijfers uit parcelNo, bezorgd uit de tekst, winkel uit "pakket van … bezorgd", geen postcode', h && h.vervoerder === 'gls' && h.code === '11122233344455' && h.stand === 'bezorgd'
+    && h.winkel === 'Proefleverancier Zorg' && !JSON.stringify(h).includes(PC), h);
+  toets('1b GLS NL: 14 cijfers = geen volgvraag (rstt029 kent ze niet), link naar gls-info.nl', P.volgAdressen({ vervoerder: 'gls', code: '11122233344455' }, [PC]).length === 0
+    && P.volgAdressen({ vervoerder: 'gls', code: '111222333444' }, [PC]).length === 1 && /^https:\/\/www\.gls-info\.nl\//.test(P.volgLink({ vervoerder: 'gls', code: '11122233344455' }, [])));
+  h = P.herken(mail('"GLS Netherlands" <noreply@gls-netherlands.com>', 'Niet thuis? Plan de bezorging van je pakket zelf', 'Goed nieuws! Op woensdag 18 november 2026 ontvang je jouw pakket van een\nGLS-bezorger. Volg: [https://www.gls-info.nl/tracking/ttlink?parcelNo=11122233344455&lang=NL]', '2026-11-17T08:00:00Z'));
+  toets('1b GLS NL aankondiging: niet bezorgd, dag uit "Op woensdag 18 november"', h && h.stand !== 'bezorgd' && h.verwacht_dag === '2026-11-18' && !h.winkel, h);
+  h = P.herken(mail('info@proefdienst.de', 'Uw bestelling bij Proefdienst is verzonden [1234-5678]', 'Uw bestelling is gereedgemaakt voor verzending.\n- Vervoerder: DPD\n- Verzendnummer: 09990001112223\n- Leveradres: Proefstraat 1, ' + PC + ' Proefstad'));
+  toets('1b verzendmail met "Vervoerder: DPD" en "Verzendnummer": dpd, code, winkel uit het onderwerp, onderweg, geen adres', h && h.vervoerder === 'dpd' && h.code === '09990001112223' && h.winkel === 'Proefdienst'
+    && h.stand === 'onderweg' && !JSON.stringify(h).includes(PC), h);
+  const vos1 = P.herken(mail('"Proefmedisch.nl - Proef en Zonen B.V." <info@proefmedisch.nl>', 'Uw  orderbevestiging PRF12345 van Proefmedisch.nl', 'Hartelijk dank voor uw bestelling!\nUw ordernummer is:\nPRF12345\nTRACK EN TRACE\nZodra uw bestelling is aangekomen in het sorteercentrum ontvangt u een track & trace code.'));
+  const vos2 = P.herken(mail('"Proefmedisch.nl - Proef en Zonen B.V." <info@proefmedisch.nl>', 'Bevestiging van uw bestelling PRF12345', 'Hartelijk dank voor uw bestelling PRF12345. Zodra uw bestelling wordt verzonden, ontvangt u een e-mail met een track &amp; trace-code.'));
+  toets('1b bestelbevestiging zonder bezorgwoord maar met track & trace: Besteld, één rij voor beide mails, winkel uit het domein', vos1 && vos2 && vos1.vervoerder === 'winkel' && vos1.stand === 'besteld'
+    && vos1.sleutel === vos2.sleutel && vos1.bestelnr === 'PRF12345' && vos1.winkel === 'Proefmedisch', [vos1, vos2]);
+  h = P.herken(mail('"Team Intrapost" <noreply@intrapost-mailer.nl>', 'Track & Trace 2026/12345 ' + PC + ' PROEFSTAD (Proefleverancier Zorg B.V..)', 'Hierbij ontvangt u de Track & Trace link voor het volgen van uw zending 2026/12345 naar het volgende adres:\nProefpraktijk\n' + PC + ' PROEFSTAD\nhttps://vindmijnzending.nl/zoeken/AbCdEf123'));
+  toets('1b Intrapost: winkelrij onderweg, afzender uit het onderwerp, geen postcode of plaats', h && h.vervoerder === 'winkel' && h.stand === 'onderweg' && h.winkel === 'Proefleverancier Zorg'
+    && h.bestelnr === '2026-12345' && !JSON.stringify(h).includes(PC) && !/PROEFSTAD/i.test(JSON.stringify(h)), h);
+  const lijf = 'Je bestelling is binnen!\nOrder Nr 2026-11112222\nBezorgtijdstip 18:00 - 18:15\nBezorgkosten € 1,49';
+  toets('1b maaltijdbezorger nooit een pakje: op afzendernaam, op domein, ook met bezorgkosten en ordernummer', P.herken(mail('"Proef Pizza Team" <confirm@proefbezorg.nl>', 'Bedankt voor je order, tot zo!', lijf)) === null
+    && P.herken(mail('Bestellingen <confirm@newyorkpizza.nl>', 'Bedankt voor je bestelling', lijf)) === null && P.herken(mail('Proef <noreply@hellofresh.nl>', 'Je bestelling is verzonden', lijf + '\nTrack & trace: PRF00011122233')) === null
+    && P.herken(mail('Proef <noreply@thuisbezorgd.nl>', 'Bedankt voor je bestelling', lijf)) === null);
+  toets('1b gewone webwinkel met dezelfde bestelmail blijft Besteld (kruis: alleen maaltijd valt weg)', (P.herken(mail('Proefwinkel <orders@proefwinkel.nl>', 'Bedankt voor je bestelling', lijf)) || {}).stand === 'besteld');
+  toets('1b dagUit: "dinsdag, 17/11/2026" en een weekdag die niet klopt valt terug op de weekdag', P.dagUit('dinsdag, 17/11/2026', '2026-11-16') === '2026-11-17' && P.dagUit('maandag, 17/11/2026', '2026-11-16') === '2026-11-16');
+  {
+    const W1 = fs.mkdtempSync(path.join(os.tmpdir(), 'pakjes-1b-'));
+    const M1 = P.maak({ dir: W1, nu: () => Date.parse('2026-11-17T12:00:00Z') });
+    M1.verwerkMail({ gmail_id: 'a1', van: 'Proefwinkel <orders@proefwinkel.nl>', onderwerp: 'Je pakket is verzonden', tekst: 'Track & trace: 700011122233', datum: '2026-11-16T09:00:00Z' });
+    M1.verwerkMail({ gmail_id: 'a2', van: 'FedEx <noreply@fedex.com>', onderwerp: 'Uw zending is afgeleverd 700011122233', tekst: 'Uw zending van Proefwinkel is afgeleverd.', datum: '2026-11-17T09:00:00Z' });
+    const l1 = M1.lijst([]).body.lopend;
+    toets('1b code eerst uit de winkelmail (Anders), daarna van FedEx: één pakje, FedEx, bezorgd', l1.length === 1 && l1[0].vervoerder === 'FedEx' && l1[0].stand === 'bezorgd', l1);
+    M1.sluit(); fs.rmSync(W1, { recursive: true, force: true });
+  }
+  {
+    // wv3011: na een nieuwe herkenningsversie worden mails die eerder "geen pakje" waren één keer opnieuw gelezen; herkende blijven staan
+    const W2 = fs.mkdtempSync(path.join(os.tmpdir(), 'pakjes-hv-'));
+    const { DatabaseSync } = require('node:sqlite');
+    const d2 = new DatabaseSync(path.join(W2, 'pakjes.sqlite'));
+    d2.exec("CREATE TABLE mail (gmail_id TEXT PRIMARY KEY, zending_id TEXT, tijd TEXT, gezien TEXT NOT NULL); INSERT INTO mail VALUES ('geen', NULL, NULL, '2026-11-10'), ('wel', 'abc', NULL, '2026-11-10');");
+    d2.close();
+    let M2 = P.maak({ dir: W2 });
+    const ken = () => { const r = []; for (const id of ['geen', 'wel']) { const s = new DatabaseSync(path.join(W2, 'pakjes.sqlite')); if (s.prepare('SELECT 1 FROM mail WHERE gmail_id = ?').get(id)) r.push(id); s.close(); } return r.join(','); };
+    M2.info();
+    const na1 = ken();
+    M2.verwerkMail({ gmail_id: 'nieuw', van: 'x <x@proef.nl>', onderwerp: 'Notulen', tekst: 'niets', datum: '2026-11-11T09:00:00Z' });
+    M2.sluit(); M2 = P.maak({ dir: W2 }); M2.info();
+    const s2 = new DatabaseSync(path.join(W2, 'pakjes.sqlite')); const blijft = !!s2.prepare("SELECT 1 FROM mail WHERE gmail_id = 'nieuw'").get(); s2.close();
+    toets('1b nieuwe herkenningsversie: "geen pakje"-mails vergeten (opnieuw lezen), herkende blijven; daarna niet bij elke opening', na1 === 'wel' && blijft, { na1, blijft });
+    M2.sluit(); fs.rmSync(W2, { recursive: true, force: true });
+  }
   // ── 2. antwoorden van de vervoerders (verzonnen, met adresvelden die er niet uit mogen komen) ──
   const dhlJ = (fases, extra) => [Object.assign({ barcode: 'JJD1', view: { interval: '2026-11-07T10:00:00+01:00/2026-11-07T18:00:00+01:00', phases: fases.map(([ph, k, t]) => ({ phase: ph, events: [{ key: k, timestamp: t }] })),
     phaseDisplay: ['DATA_RECEIVED', 'UNDERWAY', 'IN_DELIVERY', 'DELIVERED'].map((ph) => ({ phase: ph, completed: fases.some((f) => f[0] === ph) })) }, receiver: { name: 'Proef Persoon', address: { postalCode: PC2 } } }, extra || {})];
