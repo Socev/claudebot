@@ -4134,6 +4134,7 @@ function handleRequest(req, res) {
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
       beleggen: typeof beleggenInfo === 'function' ? beleggenInfo() : { aan: false },
+      personeelsscherm: typeof personeelsschermInfo === 'function' ? personeelsschermInfo() : { aan: false },   // wv2991: OVIS Personeelsscherm (gekoppeld, laatst gezien, volgnr; nooit token, code of IP)
       imagine: typeof imagineInfo === 'function' ? imagineInfo() : { aan: false },   // wv2984: OVIS Imagine (aantallen, schijf, nog te wissen; geen titels of beelden)   // wv2982: OVIS Beleggen (aantallen rijen, vault_ok; geen bedragen)
       ghawa: typeof ghawaInfo === 'function' ? ghawaInfo() : { aan: false },   // wv2877: OVIS GHAWA (databank aanwezig?, laatste scherm en of het sluit; geen inhoud)
       gezondheid: typeof gezondheidInfo === 'function' ? gezondheidInfo() : { aan: false },   // wv937: App Gezondheid (gezondheid-app.js in deze release? tellers, geen inhoud)
@@ -5485,6 +5486,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij 
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
 ['laad', 'bewerk', 'nieuw', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
+['open', 'koppel', 'intrek', 'leeg'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });   // wv2991: Personeelsscherm = David die werkt
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
 // geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
@@ -5590,6 +5592,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/sleutels/weg',        // wv1786: weggooien idem
   'POST /app/sleutels/nieuw',      // wv2481: een nieuwe kluissleutel toevoegen (Sleutelbos) idem
   'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
+  'POST /app/personeelsscherm/koppel', 'POST /app/personeelsscherm/intrek',   // wv2991: sleutel van het kastje aan de tv maken of intrekken
   'POST /app/agenda',      // wv315 (zie hieronder)
   'POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus', 'POST /app/facturen/leverancier/verzendwijze',   // wv2480: per leverancier direct verzenden
   'POST /app/docs/delen',
@@ -13721,6 +13724,7 @@ function handleApp(req, res) {
           || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)
           || /^(GET \/app\/ghawa\/delen|POST \/app\/ghawa\/delen\/(onderdeel|noodstop|kijker|kijker-weg|tekst|overleg))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
+        if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
         if (route === 'GET /app/beleggen' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
@@ -21831,6 +21835,71 @@ function beleggenInfo() {
   try { return beleggenApp.info(); } catch (e) { return { aan: true, fout: true }; }
 }
 // ── einde OVIS Beleggen ──
+// ── OVIS Personeelsscherm (wv2991, 13-11-2026; plan vault "01_Ontwikkeling/OVIS Personeelsscherm - plan (Fable 5.2, 13-11-2026)", ontwerp fase 0
+// met Codex-review in mk-scripts/personeelsscherm/ontwerp-fase0.md) ──
+// Een Raspberry Pi aan de tv in de personeelskamer haalt elke 2 minuten een door de pod getekend scherm op van personeel.socev.dev (Worker
+// socev-personeel, D1 `personeel`, Access: David + het ene kastje-token met IP-eis). Logica en waarom in personeelsscherm.js; hier alleen
+// D1 en de Cloudflare-API met het pod-token, de tik (elke 5 min, alleen primair), de routes en berichten aan de machinekamer.
+//   GET  /app/personeelsscherm                stand + voorbeeld
+//   POST /app/personeelsscherm/open           koppelvenster 15 min (geen vingerafdruk: het geeft niets prijs)
+//   POST /app/personeelsscherm/koppel {code}  verse vingerafdruk (verbruikt vóór de eerste await), telefoon/meereizend (APP_BEHEER_ROUTES)
+//   POST /app/personeelsscherm/intrek         idem
+//   POST /app/personeelsscherm/leeg {aan}     noodknop (geen vingerafdruk: maakt alleen leeg of weer gewoon)
+// Nooit de code, het token, een IP of html in een log, audit of fout.
+const PERSONEELSSCHERM_DIR = process.env.PERSONEELSSCHERM_DIR || '/opt/data/personeelsscherm';
+const PERSONEELSSCHERM_D1 = process.env.PERSONEELSSCHERM_D1_ID || '35687849-4860-47e3-b94c-2a8b37619e3a';
+const personeelsscherm = (function () {
+  const p = path.join(__dirname, 'personeelsscherm.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ dir: PERSONEELSSCHERM_DIR, vault: VAULT, fout: logError,
+      d1: async function (batch) {
+        const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/d1/database/' + PERSONEELSSCHERM_D1 + '/query', { batch: batch });
+        const ok = r.status === 200 && r.j && r.j.success === true && Array.isArray(r.j.result) && r.j.result.length === batch.length && r.j.result.every(function (x) { return x && x.success !== false; });
+        if (!ok) throw new Error('D1 gaf HTTP ' + r.status);   // nooit sql of waarden in de fout
+        return r.j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [], meta: x.meta || {} }; });
+      },
+      cf: async function (methode, pad, body) {
+        const r = await fetch(SMAL_CF_BASIS + '/client/v4' + pad, { method: methode, headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': 'application/json' },
+          body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30000) });
+        let j = null; try { j = await r.json(); } catch (e) {}
+        return { status: r.status, j: j };
+      },
+      melding: async function (sleutel, tekst) {
+        const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'personeelsscherm', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: sleutel });
+        if (!r || r.status !== 200) throw new Error('melding gaf HTTP ' + (r ? r.status : '?'));
+      } });
+  } catch (e) { logError('personeelsscherm', new Error('laden faalde')); return null; }
+})();
+let personeelsschermLoopt = false;
+async function personeelsschermTik() {
+  if (!personeelsscherm || personeelsschermLoopt || !rolPrimair()) return;
+  personeelsschermLoopt = true;
+  try { await personeelsscherm.tik(); } catch (e) { logError('personeelsscherm-tik', new Error(String(e && e.message).slice(0, 80))); } finally { personeelsschermLoopt = false; }
+}
+if (personeelsscherm && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setTimeout(function () { personeelsschermTik(); }, 170000).unref(); setInterval(function () { personeelsschermTik(); }, 5 * 60000).unref(); }
+async function appPersoneelsscherm(req, res, a, route, d, s) {
+  if (!personeelsscherm) return appWeiger(res, 404, 'Het personeelsscherm zit niet in deze versie van de pod', 'personeelsscherm ontbreekt');
+  if (!appTeller('personeelsscherm', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens personeelsscherm');
+  const post = route.indexOf('POST ') === 0;
+  const wat = route.replace(/^(GET|POST) \/app\/personeelsscherm\/?/, '') || 'stand';
+  if (post && !rolPrimair()) return appWeiger(res, 409, 'deze kant van Socev is nu passief; probeer het zo opnieuw', 'niet primair');
+  if (wat === 'koppel' || wat === 'intrek') {
+    if (!appTeller('personeelsscherm-sleutel', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens personeelsscherm-sleutel');
+    if (!appVersOk(a, s)) { res._app.reden = 'personeelsscherm ' + wat + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
+    s.vers_tot = 0;   // verbruikt vóór de eerste await (zoals Sleutelbos)
+  }
+  let u;
+  try { u = await personeelsscherm.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
+  catch (e) { logError('personeelsscherm', new Error('route ' + wat + ' faalde')); return appWeiger(res, 503, 'Het personeelsscherm is nu niet te bereiken; probeer het zo opnieuw', 'personeelsscherm fout'); }
+  if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = ('personeelsscherm ' + wat + ' (' + u.status + ')').slice(0, 80);   // nooit de code
+  return appStuur(res, u.status, u.body);
+}
+function personeelsschermInfo() {
+  if (!personeelsscherm) return { aan: false };
+  try { return personeelsscherm.info(); } catch (e) { return { aan: true, fout: true }; }
+}
+// ── einde OVIS Personeelsscherm ──
 // ── OVIS Shopper (wv2264, 2-11-2026; idee 23 S3, ontwerp vault "01_Ontwikkeling/OVIS Shopper - wat er al bestaat en ontwerp (2-11-2026).md"
 // § 3.3–3.4) ──
 // Apps › Shopper in de Socev-app: de zoektochten van de skill ovis-shopper. Geen eigen opslag: shopper.js leest bij elke vraag de pagina's

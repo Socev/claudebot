@@ -490,6 +490,10 @@ jobs:
       - name: "beleggen (wv2982, OVIS Beleggen fase 1)"
         if: ${{ !cancelled() }}
         run: bash test/beleggen.sh
+      # wv2991: OVIS Personeelsscherm fase 0 — proefscherm tekenen, koppelen met IP-eis, intrekken, tik en meldingen (nep-D1, nep-Cloudflare).
+      - name: "personeelsscherm (wv2991, OVIS Personeelsscherm fase 0)"
+        if: ${{ !cancelled() }}
+        run: bash test/personeelsscherm.sh
       # wv2984: OVIS Imagine fase 1 — bibliotheek + incognito (zoektocht op merk na wissen, na 60 min en na een herstart; drie kruisproeven rood).
       - name: "imagine (wv2984, OVIS Imagine fase 1, incognito)"
         if: ${{ !cancelled() }}
