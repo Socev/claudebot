@@ -152,7 +152,7 @@ const goedModel = { prompts: [], antwoord: function () { return { ok: true, data
   // ── 8. server.js-koppeling ──
   const s = fs.readFileSync('server.js', 'utf8');
   toets('server.js: nieuwsbrief-luik met eigen time-out 60 s', /luik: function \(b\) \{ return appAgendaApi\(b, \{ timeoutMs: 60000 \}\); \}/.test(s) && /AbortSignal\.timeout\(ms\)/.test(s));
-  toets('server.js: bron nieuwsbrief bekend, soort dag', /'nieuwsbrief',\s+\/\/ wv2190/.test(s) && /nieuwsbrief: 'dag' \}/.test(s));
+  toets('server.js: bron nieuwsbrief bekend, soort dag', /'nieuwsbrief',\s+\/\/ wv2190/.test(s) && /nieuwsbrief: 'dag'[,\s}]/.test(s));
   toets('server.js: route met body-secret achter rolPoort', /req\.url === '\/nieuwsbrief-ronde' \|\| req\.url === '\/nieuwsbrief-ronde\/uitkomst'\)\) \{\n    return rolPoort/.test(s) && /nieuwsbrief\.rondeStart\(\{ proef: d\.proef === true \}\)/.test(s));
   toets('server.js: model via harvesterClaude (zonder tools), bericht via berichtIntern', /claude: harvesterClaude,\n      leesVault/.test(s) && /berichtIntern\(\{ kanaal: b\.kanaal, bron: 'nieuwsbrief'/.test(s));
   toets('uitrol.sh: nieuwsbrief.js in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bnieuwsbrief\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
