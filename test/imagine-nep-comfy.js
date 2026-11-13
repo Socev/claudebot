@@ -4,7 +4,19 @@
 // nep" doorzoekt. SaveImageWebsocket stuurt de invoer terug (dus het merk zit in het resultaat); PreviewImage schrijft het in temp/.
 // Neemt prompt_id uit POST /prompt over (zoals ComfyUI). Scenario 'hang': de taak blijft lopen tot /interrupt.
 // wv2990: een prompt zonder LoadImage (tekst naar beeld) geeft C.t2iBeeld terug (de toets zet daar een beeld met het opdrachtwoord in).
+// wv3021: een prompt met ImageCompositeMasked (masker/voorbeelden) knipt het beeld uit de invoer (ImageCrop van 'destination', of de hele
+// invoer) en geeft het OMGEKEERD terug, zonder masker: alsof de flow buiten het masker níét terugzette. Dan moet de pod (pijp-naad) het doen.
+// C.laatsteUpload = kopie van de laatste upload (alleen in het geheugen van de nep, voor de toets).
 const fs = require('fs'), path = require('path'), http = require('http'), crypto = require('crypto');
+const { execFileSync } = require('child_process');
+function omgekeerd(buf, deel) {
+  return execFileSync('python3', ['-I', '-c', `import sys, io
+from PIL import Image, ImageChops
+im = Image.open(io.BytesIO(sys.stdin.buffer.read())).convert('RGB')
+x, y, b, h = [int(v) for v in sys.argv[1:5]]
+if b > 0: im = im.crop((x, y, x + b, y + h))
+u = io.BytesIO(); ImageChops.invert(im).save(u, 'PNG'); sys.stdout.buffer.write(u.getvalue())`].concat(deel.map(String)), { input: buf, maxBuffer: 64 * 1024 * 1024 });
+}
 function start(dir, o) {
   o = o || {};
   for (const d of ['input/studio', 'temp', 'output']) fs.mkdirSync(path.join(dir, d), { recursive: true });
@@ -16,9 +28,13 @@ function start(dir, o) {
     PreviewImage: { python_module: 'nodes', output_node: true, input: { required: { images: ['IMAGE', {}] } } },
     SaveImage: { python_module: 'nodes', output_node: true, input: { required: { images: ['IMAGE', {}], filename_prefix: ['STRING', {}] } } },
     SaveImageWebsocket: { python_module: 'custom_nodes.websocket_image_save', output_node: true, input: { required: { images: ['IMAGE'] } } },
+    // wv3021
+    ImageCrop: { python_module: 'comfy_extras.nodes_images', input: { required: { image: ['IMAGE', {}], width: ['INT', {}], height: ['INT', {}], x: ['INT', {}], y: ['INT', {}] } } },
+    CropMask: { python_module: 'comfy_extras.nodes_mask', input: { required: { mask: ['MASK', {}], x: ['INT', {}], y: ['INT', {}], width: ['INT', {}], height: ['INT', {}] } } },
+    ImageCompositeMasked: { python_module: 'comfy_extras.nodes_mask', input: { required: { destination: ['IMAGE', {}], source: ['IMAGE', {}], x: ['INT', {}], y: ['INT', {}], resize_source: ['BOOLEAN', {}] }, optional: { mask: ['MASK', {}] } } },
   };
   if (o.zonderWs) delete OI.SaveImageWebsocket;
-  const C = { prompts: [], hist: {}, histDelete: [], interrupts: [], free: 0, rij: { queue_running: [], queue_pending: [] }, ws: {}, scenario: 'goed', n: 0, hangt: null, t2iBeeld: null, uploads: 0 };
+  const C = { prompts: [], hist: {}, histDelete: [], interrupts: [], free: 0, rij: { queue_running: [], queue_pending: [] }, ws: {}, scenario: 'goed', n: 0, hangt: null, t2iBeeld: null, uploads: 0, laatsteUpload: null };
   const histPad = path.join(dir, 'history.json');
   const histBewaar = () => fs.writeFileSync(histPad, JSON.stringify(C.hist));
   histBewaar();
@@ -41,7 +57,12 @@ function start(dir, o) {
     if (C.scenario === 'hang') { C.hangt = { pid, cid, prompt }; return; }
     const outputs = {};
     const metFoto = Object.keys(prompt).some((id) => prompt[id].class_type === 'LoadImage');
-    const invoer = !metFoto && C.t2iBeeld ? C.t2iBeeld : fs.existsSync(invoerPad) ? fs.readFileSync(invoerPad) : Buffer.alloc(0);   // wv2990
+    let invoer = !metFoto && C.t2iBeeld ? C.t2iBeeld : fs.existsSync(invoerPad) ? fs.readFileSync(invoerPad) : Buffer.alloc(0);   // wv2990
+    const samen = Object.keys(prompt).find((id) => prompt[id].class_type === 'ImageCompositeMasked');   // wv3021
+    if (samen && invoer.length) {
+      const dst = prompt[samen].inputs.destination, k = prompt[dst[0]];
+      invoer = omgekeerd(invoer, k && k.class_type === 'ImageCrop' ? [k.inputs.x, k.inputs.y, k.inputs.width, k.inputs.height] : [0, 0, 0, 0]);
+    }
     for (const id of Object.keys(prompt)) {
       const k = prompt[id].class_type;
       zendTekst(cid, { type: 'executing', data: { node: id, prompt_id: pid } });
@@ -61,7 +82,9 @@ function start(dir, o) {
         const fd = await new Response(body, { headers: { 'content-type': req.headers['content-type'] } }).formData();
         const f = fd.get('image');
         C.uploads++;
-        fs.writeFileSync(path.join(dir, 'input', fd.get('subfolder'), f.name), Buffer.from(await f.arrayBuffer()));
+        const ub = Buffer.from(await f.arrayBuffer());
+        if (ub.length > 200) C.laatsteUpload = ub;   // wv3021 (niet de 1×1)
+        fs.writeFileSync(path.join(dir, 'input', fd.get('subfolder'), f.name), ub);
         return stuur(200, { name: f.name, subfolder: fd.get('subfolder'), type: 'input' });
       }
       if (req.url === '/object_info') return stuur(200, OI);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Toetst OVIS Imagine fase 1 (wv2984; plan § 3.4): test/imagine.test.js (gewone stand + incognito tegen een nagebouwde ComfyUI met mappen op
+# Toetst OVIS Imagine fase 1 (wv2984) en fase 2 (wv3021, test/imagine-fase2.test.js; plan § 3.4): test/imagine.test.js (gewone stand + incognito tegen een nagebouwde ComfyUI met mappen op
 # schijf, schuifbare klok, zoektocht op merk/woord/beeld in alles wat de pod schrijft, ook uitgepakte .gz, en herstartproef) moet GROEN;
 # dezelfde toets met elk van de drie kruisproeven (uitvoer via PreviewImage, geen opruiming van de geschiedenis, incognito-invoer naar schijf)
 # moet ROOD. Plus de CI-poort: imagine.js laadt alleen fs/path/crypto/node:sqlite, doet zelf geen netwerk of proces, en het incognitodeel
@@ -31,6 +31,16 @@ for k in preview geschiedenis schijf; do
   if [ $? = 0 ]; then echo "ROOD  kruisproef $k bleef groen (de toets ziet het lek niet)"; f=1
   elif grep -qE "^ROOD  [346] nul treffers" /tmp/imagine-toets.$$; then echo "GROEN kruisproef $k: zoektocht rood ($(grep -cE '^ROOD' /tmp/imagine-toets.$$) rode regels)"
   else echo "ROOD  kruisproef $k werd rood, maar niet op de zoektocht"; grep -E "^ROOD" /tmp/imagine-toets.$$ | head -3; f=1; fi
+done
+# wv3021 (fase 2): masker/naad, voorbeelden, vergelijk, bijsnijden/draaien, masker+voorbeeld in incognito; drie kruisproeven moeten ROOD
+node --no-warnings test/imagine-fase2.test.js > /tmp/imagine-toets.$$ 2>&1; r=$?
+tail -n 1 /tmp/imagine-toets.$$; grep -E "^ROOD" /tmp/imagine-toets.$$
+[ $r = 0 ] || { echo "ROOD  test/imagine-fase2.test.js"; f=1; }
+for k in naad:"F2 NAAD" pod:"F3 knipmaten" vinger:"F4 vergelijk met één vingerafdruk"; do
+  IMAGINE_KRUIS=${k%%:*} node --no-warnings test/imagine-fase2.test.js > /tmp/imagine-toets.$$ 2>&1
+  if [ $? = 0 ]; then echo "ROOD  kruisproef ${k%%:*} bleef groen"; f=1
+  elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"
+  else echo "ROOD  kruisproef ${k%%:*} werd rood, maar niet op ${k#*:}"; grep -E "^ROOD" /tmp/imagine-toets.$$ | head -3; f=1; fi
 done
 rm -f /tmp/imagine-toets.$$
 exit $f

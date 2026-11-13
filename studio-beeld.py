@@ -14,6 +14,16 @@
 #                                         zelfde standen zonder bestand: de bytes komen op stdin, het (nieuwe) beeld gaat naar fd 3,
 #                                         JSON op stdout. Niets op schijf (incognito). pijp-toon = weergaveversie: rechtop, ≤ px, JPEG 85.
 #                                         Schrijft pijp-neem/-uit niets naar fd 3, dan blijft het beeld zoals het kwam.
+#   pijp-pakket <max_mp> <ref_mp> | pijp-naad <x> <y> <b> <h> | pijp-snij <x> <y> <b> <h> <draai>   (wv3021, OVIS Imagine fase 2)
+#                                         pakket: stdin = rijtje [4 bytes lengte][bytes]: beeld, masker (lengte 0 = geen), 0-2 voorbeelden.
+#                                         Eén RGBA-PNG (alles naast elkaar, samen <= max_mp; voorbeelden <= ref_mp): het beeld links met in
+#                                         alfa 255 - masker (masker = het getekende stuk, gegroeid en zacht gemaakt; 255 = alles blijft, zonder
+#                                         masker 0 = alles mag veranderen), de voorbeelden rechts ervan. Eén upload onder de vaste naam: geen
+#                                         nieuw schrijfpunt in ComfyUI (ook incognito). JSON: maten per deel.
+#                                         naad: stdin = [pakket][resultaat]; buiten het masker (alfa 255) zet hij het beeld uit het pakket pixel
+#                                         voor pixel terug en telt hoeveel pixels het resultaat daar anders had (PNG naar fd 3).
+#                                         snij: bijsnijden (breuken 0-1 van het rechtop gezette beeld) en draaien (0/90/180/270 met de klok mee),
+#                                         exact: PNG (boven 20 MB: JPEG 95, 'omgezet').
 #   voor <in> <uit.png> <soort>           voorbewerking vóór ComfyUI (wv2679), soort uit een vaste lijst:
 #                                         grijs-niveaus = rechtop (EXIF), grijs, niveaus 1 %–99 % gemeten in het binnenste zonder egale
 #                                         scanrand en toegepast op het hele beeld (de rand wordt wit; de maten blijven gelijk)
@@ -101,7 +111,7 @@ def grijs_niveaus(im):
 VOORBEWERKING = {"grijs-niveaus": grijs_niveaus}
 
 
-PIJP_MAX = 30 * 1024 * 1024
+PIJP_MAX = 64 * 1024 * 1024   # wv3021: pakket en naad dragen twee beelden
 
 
 def pijp(a):
@@ -118,8 +128,12 @@ def pijp(a):
             with os.fdopen(3, "wb", closefd=True) as f:
                 f.write(uit.getvalue())
         klaar(0, ok=True, **kw)
-    im, formaat = open_beeld(io.BytesIO(data))
-    b, h = im.size
+    if a[0] in ("pijp-pakket", "pijp-naad"):
+        im = formaat = None
+        b = h = 0
+    else:
+        im, formaat = open_beeld(io.BytesIO(data))
+        b, h = im.size
     if a[0] == "pijp-neem" and len(a) == 2:
         max_mp = float(a[1])
         if b * h / 1e6 <= max_mp:
@@ -148,6 +162,12 @@ def pijp(a):
         r, lo, hi = VOORBEWERKING[a[1]](im)
         r.save(uit, "PNG")
         lever(breed=r.size[0], hoog=r.size[1], niveau_laag=lo, niveau_hoog=hi)
+    if a[0] == "pijp-pakket" and len(a) == 3:
+        pakket(data, float(a[1]), float(a[2]), uit, lever)
+    if a[0] == "pijp-naad" and len(a) == 5:
+        naad(data, [int(x) for x in a[1:5]], uit, lever)
+    if a[0] == "pijp-snij" and len(a) == 6:
+        snij(im, formaat, [float(x) for x in a[1:5]], int(a[5]), uit, lever)
     if a[0] == "pijp-toon" and len(a) == 2:
         px = max(64, min(4096, int(a[1])))
         im = ImageOps.exif_transpose(im)
@@ -159,6 +179,156 @@ def pijp(a):
         im.convert("RGB").save(uit, "JPEG", quality=85)
         lever(formaat=formaat, breed=b, hoog=h, toon_breed=im.size[0], toon_hoog=im.size[1])
     klaar(2, ok=False, reden="onbekende aanroep")
+
+
+def frames(data, n_min, n_max):
+    # [4 bytes lengte, big-endian][bytes] achter elkaar; precies tot het eind
+    uit, i = [], 0
+    while i < len(data):
+        if i + 4 > len(data) or len(uit) >= n_max:
+            klaar(2, ok=False, reden="pakket onleesbaar")
+        n = int.from_bytes(data[i:i + 4], "big")
+        if i + 4 + n > len(data):
+            klaar(2, ok=False, reden="pakket onleesbaar")
+        uit.append(data[i + 4:i + 4 + n])
+        i += 4 + n
+    if len(uit) < n_min:
+        klaar(2, ok=False, reden="pakket onvolledig")
+    return uit
+
+
+def rechtop_rgb(buf):
+    import io
+    from PIL import ImageOps
+    im, formaat = open_beeld(io.BytesIO(buf))
+    return ImageOps.exif_transpose(im).convert("RGB"), formaat
+
+
+def binnen(im, max_px):
+    # verkleinen (LANCZOS) tot hooguit max_px pixels; kleiner blijft zoals het is
+    from PIL import Image
+    b, h = im.size
+    if b * h <= max_px:
+        return im
+    f = (max_px / (b * h)) ** 0.5
+    nb, nh = max(1, int(b * f)), max(1, int(h * f))
+    while nb * nh > max_px:
+        nb, nh = max(1, nb - 1), max(1, nh - 1)
+    return im.resize((nb, nh), Image.LANCZOS)
+
+
+def masker_zacht(m_bin, groei):
+    # gegroeid (vervagen + drempel: ± groei px naar buiten) en zacht aan de binnenkant van de groeirand; buiten de groei precies 0
+    from PIL import ImageChops, ImageFilter
+    g = m_bin.filter(ImageFilter.GaussianBlur(groei / 2.0)).point(lambda v: 255 if v >= 8 else 0)
+    z = ImageChops.multiply(g.filter(ImageFilter.GaussianBlur(groei / 2.0)), g)
+    return ImageChops.lighter(z, m_bin), g
+
+
+def pakket(data, max_mp, ref_mp, uit, lever):
+    import io
+    from PIL import Image, ImageChops
+    f = frames(data, 2, 4)
+    if not f[0]:
+        klaar(2, ok=False, reden="geen beeld")
+    hoofd, formaat = rechtop_rgb(f[0])
+    refs = []
+    for r in f[2:]:
+        if not r:
+            klaar(2, ok=False, reden="voorbeeld leeg")
+        refs.append(binnen(rechtop_rgb(r)[0], ref_mp * 1e6))
+    m = None
+    if f[1]:
+        mi, mf = open_beeld(io.BytesIO(f[1]))
+        if mf != "PNG" or mi.size[0] > 4096 or mi.size[1] > 4096:
+            klaar(2, ok=False, reden="masker onleesbaar")
+        m = mi.convert("L")
+    elif not refs:
+        klaar(2, ok=False, reden="geen masker en geen voorbeeld")
+    # alles naast elkaar en samen hooguit max_mp: eerst het beeld binnen wat de voorbeelden overlaten, dan samen krimpen tot het past
+    rest = max(0.5, max_mp - sum(r.size[0] * r.size[1] for r in refs) / 1e6)
+    hoofd = binnen(hoofd, rest * 1e6)
+    for _ in range(60):
+        B = hoofd.size[0] + sum(r.size[0] for r in refs)
+        H = max([hoofd.size[1]] + [r.size[1] for r in refs])
+        if B * H <= max_mp * 1e6:
+            break
+        hoofd = binnen(hoofd, int(hoofd.size[0] * hoofd.size[1] * 0.92))
+        refs = [binnen(r, int(r.size[0] * r.size[1] * 0.92)) for r in refs]
+    else:
+        klaar(2, ok=False, reden="pakket past niet")
+    b0, h0 = hoofd.size
+    groei = max(4, int(round(0.008 * max(b0, h0))))
+    if m is not None:
+        m_bin = m.resize((b0, h0), Image.BILINEAR).point(lambda v: 255 if v >= 128 else 0)
+        if not m_bin.getbbox():
+            klaar(2, ok=False, reden="het masker is leeg: teken eerst over het stuk dat moet veranderen")
+        zacht, gegroeid = masker_zacht(m_bin, groei)
+        alfa = ImageChops.invert(zacht)
+        gegroeid_px = sum(gegroeid.histogram()[255:])
+    else:
+        alfa = Image.new("L", (b0, h0), 0)
+        gegroeid_px = b0 * h0
+    doek = Image.new("RGBA", (B, H), (0, 0, 0, 255))
+    hr = hoofd.convert("RGBA")
+    hr.putalpha(alfa)
+    doek.paste(hr, (0, 0))
+    delen, x = [[0, 0, b0, h0]], b0
+    for r in refs:
+        doek.paste(r.convert("RGBA"), (x, 0))
+        delen.append([x, 0, r.size[0], r.size[1]])
+        x += r.size[0]
+    doek.save(uit, "PNG")
+    lever(breed=B, hoog=H, delen=delen, groei=groei, masker=m is not None, masker_px=gegroeid_px)
+
+
+def naad(data, deel, uit, lever):
+    import io
+    from PIL import Image, ImageChops
+    f = frames(data, 2, 2)
+    pk, pf = open_beeld(io.BytesIO(f[0]))
+    if pf != "PNG" or pk.mode != "RGBA":
+        klaar(2, ok=False, reden="pakket onleesbaar")
+    x, y, b, h = deel
+    hoofd = pk.crop((x, y, x + b, y + h))
+    res, _ = open_beeld(io.BytesIO(f[1]))
+    res = res.convert("RGB")
+    if res.size != (b, h):
+        klaar(2, ok=False, reden="het resultaat heeft andere maten dan het beeld", breed=res.size[0], hoog=res.size[1])
+    vast = hoofd.getchannel("A").point(lambda v: 255 if v == 255 else 0)   # buiten het (gegroeide) masker
+    orig = hoofd.convert("RGB")
+    verschil = ImageChops.difference(res, orig).convert("L").point(lambda v: 255 if v else 0)
+    verschil_px = sum(ImageChops.multiply(verschil, vast).histogram()[255:])
+    buiten_px = sum(vast.histogram()[255:])
+    Image.composite(orig, res, vast).save(uit, "PNG")
+    lever(breed=b, hoog=h, verschil_px=verschil_px, buiten_px=buiten_px)
+
+
+def snij(im, formaat, br, draai, uit, lever):
+    from PIL import Image, ImageOps
+    if draai not in (0, 90, 180, 270) or any(v != v for v in br):
+        klaar(2, ok=False, reden="onbekende draaiing")
+    x, y, w, h = br
+    if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 and 0 < h <= 1 and x + w <= 1.000001 and y + h <= 1.000001):
+        klaar(2, ok=False, reden="uitsnede valt buiten het beeld")
+    im = ImageOps.exif_transpose(im)
+    B, H = im.size
+    l, t = int(round(x * B)), int(round(y * H))
+    r, o = min(B, int(round((x + w) * B))), min(H, int(round((y + h) * H)))
+    if r - l < 16 or o - t < 16:
+        klaar(2, ok=False, reden="uitsnede kleiner dan 16 pixels")
+    if im.mode not in ("RGB", "RGBA", "L", "LA"):
+        im = im.convert("RGBA" if "A" in im.getbands() or im.mode == "P" else "RGB")
+    im = im.crop((l, t, r, o))
+    if draai:
+        im = im.transpose({90: Image.ROTATE_270, 180: Image.ROTATE_180, 270: Image.ROTATE_90}[draai])
+    im.save(uit, "PNG")
+    if uit.tell() > 20 * 1024 * 1024:
+        uit.seek(0)
+        uit.truncate()
+        im.convert("RGB").save(uit, "JPEG", quality=95)
+        lever(breed=im.size[0], hoog=im.size[1], ext="jpg", omgezet=True)
+    lever(breed=im.size[0], hoog=im.size[1], ext="png", omgezet=False)
 
 
 def main(a):

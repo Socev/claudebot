@@ -5458,6 +5458,7 @@ const APP_BRAIN_WEB_MAX_BODY = 6 * 1024 * 1024;   // wv2660: Naar Second Brain, 
 const APP_OSINT_BESTAND_MAX_BODY = 15 * 1024 * 1024;   // wv2698: OSINT › Bestand duiden, ≤ 10 MB als base64 (13,4 MB) + JSON
 const APP_OSINT_ZOEK_MAX_BODY = 256 * 1024;
 const APP_IMAGINE_MAX_BODY = 28 * 1024 * 1024;   // wv2984: OVIS Imagine › laden (beeld ≤ 20 MB als base64 in JSON, alleen in het geheugen; ook incognito)
+const APP_IMAGINE_MASKER_MAX_BODY = 6 * 1024 * 1024;   // wv3021: bewerken/vergelijken met een getekend masker (PNG ≤ 4 MB als base64; imagine.js toetst zelf)
 const APP_BELEGGEN_MAX_BODY_VROEG = 3 * 1024 * 1024;   // wv2982: OVIS Beleggen › bestand (CSV ≤ 2 MB als JSON-tekst)   // wv2698: OSINT › Mail duiden, kop ≤ 60.000 tekens + JSON-ontsnapping (review-ZOU 7)
 const APP_CODE_MS = 10 * 60 * 1000;
 const APP_CODE_POGINGEN = 5;
@@ -5484,7 +5485,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/potje');   // wv2706: potje zetten of 
 APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij een reis tikken = David die werkt
 ['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2717: zelf corrigeren = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
-['laad', 'bewerk', 'nieuw', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
+['laad', 'bewerk', 'nieuw', 'vergelijk', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
@@ -13618,10 +13619,11 @@ function handleApp(req, res) {
     const rambleStuk = req.method === 'POST' && APP_RAMBLE_STUK_RE.test(p);   // wv1969: MemoryLane, één WAV-stuk van 60 s
     const ruw = upload || rambleStuk || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
     if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
-    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && (p === '/app/osint/bestand' || p === '/app/ghawa/afschrift' || p === '/app/ghawa/website/concept') ? APP_OSINT_BESTAND_MAX_BODY : (req.method === 'POST' && p === '/app/osint/zoek' ? APP_OSINT_ZOEK_MAX_BODY : (req.method === 'POST' && p === '/app/beleggen/bestand' ? APP_BELEGGEN_MAX_BODY_VROEG : (req.method === 'POST' && (p === '/app/imagine/laad' || p === '/app/imagine/incognito/laad') ? APP_IMAGINE_MAX_BODY : APP_MAX_BODY)))))); })(function (fout, d, lichaam) {
+    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && (p === '/app/osint/bestand' || p === '/app/ghawa/afschrift' || p === '/app/ghawa/website/concept') ? APP_OSINT_BESTAND_MAX_BODY : (req.method === 'POST' && p === '/app/osint/zoek' ? APP_OSINT_ZOEK_MAX_BODY : (req.method === 'POST' && p === '/app/beleggen/bestand' ? APP_BELEGGEN_MAX_BODY_VROEG : (req.method === 'POST' && (p === '/app/imagine/laad' || p === '/app/imagine/incognito/laad') ? APP_IMAGINE_MAX_BODY : (req.method === 'POST' && (p === '/app/imagine/bewerk' || p === '/app/imagine/vergelijk' || p === '/app/imagine/incognito/bewerk') ? APP_IMAGINE_MASKER_MAX_BODY : APP_MAX_BODY))))))); })(function (fout, d, lichaam) {
       if (fout === 'groot' && p === '/app/omzet') return appWeiger(res, 413, 'de tekst is te groot om om te zetten (hooguit 2 MB)', 'body groot');   // wv1854
       if (fout === 'groot' && p === '/app/beleggen/bestand') return appWeiger(res, 413, 'dit bestand is te groot (hooguit 2 MB)', 'body groot');   // wv2982
       if (fout === 'groot' && (p === '/app/imagine/laad' || p === '/app/imagine/incognito/laad')) return appWeiger(res, 413, 'dit beeld is te groot (hooguit 20 MB)', 'body groot');   // wv2984
+      if (fout === 'groot' && (p === '/app/imagine/bewerk' || p === '/app/imagine/vergelijk' || p === '/app/imagine/incognito/bewerk')) return appWeiger(res, 413, 'het getekende stuk is te groot; teken het opnieuw', 'body groot');   // wv3021
       if (fout === 'groot' && p === '/app/brain/webpagina') return appWeiger(res, 413, 'deze pagina is te groot (hooguit 2 MB html)', 'body groot');   // wv2660
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
       let reg;
@@ -16713,7 +16715,7 @@ async function appStudio(req, res, a, s, d, route) {
 // Eigen scherm /imagine in de Socev-app. Alle logica in imagine.js bovenop de motor van studio.js (maakGeheugen). Routes achter de app-sessie
 // (zelfde poort als de Studio: sessie + handtekening; een stand op proef vraagt per keer een verse vingerafdruk):
 //   GET  /app/imagine, /app/imagine/bron/<id>, /app/imagine/v/<id>/(toon|deel/<n>)
-//   POST /app/imagine/(laad|bewerk|nieuw), /stop/<taak>, /bron/<id>/(fav|titel|weg), /v/<id>/(weg|immich)
+//   POST /app/imagine/(laad|bewerk|nieuw|vergelijk), /stop/<taak>, /bron/<id>/(fav|titel|weg), /v/<id>/(weg|immich|snij), /vergelijk/<groep>/kies (wv3021)
 //   GET  /app/imagine/incognito, /app/imagine/incognito/b/<id>/(toon|deel/<n>)
 //   POST /app/imagine/incognito/(laad|bewerk|nieuw|wis), /incognito/stop/<taak>, /incognito/b/<id>/(weg|export)
 // Incognito: alleen geheugen van dit proces, per apparaat (a.id); in api.log alleen de vaste redentekst, nooit inhoud; geen logError met tekst.
