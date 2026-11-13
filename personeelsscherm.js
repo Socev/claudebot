@@ -16,7 +16,10 @@
  * 30 s, elk infoscherm 20 s, op de wandklok zodat de meta-refresh de wissel niet terugzet). Een infoscherm komt alleen op het scherm als
  * de registerrij INFO_ZIN noemt, de set in <dir>/infoschermen.json staat EN in vragen.json van de app een Ja staat op het vraag-id van
  * precies die kaart met kaart_hash == sha256 van de kaartinhoud zoals deze module hem uit de set opbouwt (stapTekst): David keurde dus
- * deze letterlijke tekst goed. Elk scherm heeft een einddatum (tot); daarna valt het weg (pod bij de dagwissel, kastje op de wandklok). Deze module:
+ * deze letterlijke tekst goed. Elk scherm heeft een einddatum (tot); daarna valt het weg (pod bij de dagwissel, kastje op de wandklok).
+ * Nieuws (wv3023, 13-11-2026, Davids Ja op de kaart van wv3022): paneel met de vijf nieuwste NOS-koppen (kop + tijd + "Bron: NOS"), alleen als
+ * de registertekst NIEUWS_ZIN bevat; de pod haalt de feed hooguit elk kwartier (server.js o.nieuws), weg bij storing, kapotte feed of > 6 uur
+ * oud; in de app aan/uit als infoscherm met vaste id NIEUWS_ID. Codex-review 3 rondes (lineaire, structuurbewuste parser). Deze module:
  *  - bouwt het scherm (één HTML-bestand, alles inline) en zet het als ondertekende envelop (Ed25519 over de exacte bytes) in D1 `personeel`;
  *    de Worker (socev-app personeel/worker.ts) geeft hem door, het kastje controleert de handtekening en het volgnr (geen terugrol);
  *    elke 6 uur opnieuw getekend, houdbaar 36 uur; de noodknop tekent meteen een zwarte envelop met een hoger volgnr;
@@ -117,8 +120,18 @@ var q=Math.floor(n.getTime()/1000)%S;for(i=0;i<L.length;i++){L[i][0].classList.t
     : '<div class="niets">Geen afspraken in de komende weken.</div>';
   // wv3015: infoschermen (alleen wat verzamel() na Davids Ja doorliet); einde van de dag 'tot' op de wandklok (CET; in de zomer hooguit een uur later)
   const info = Array.isArray(i.info) ? i.info.slice(0, INFO_MAX) : [];
-  const zicht = Number.isInteger(toon) && toon >= 0 && toon <= info.length ? toon : 0;
-  const infoHtml = info.map((sc, k) => `<section class="paneel info${zicht === k + 1 ? ' aan' : ''}" data-s="${INFO_S}" data-tot="${Date.parse(plusDag(sc.tot, 1) + 'T00:00:00+01:00')}"><div class="ph"><h1>${esc(sc.kop)}</h1><div class="lab">${sc.lab ? esc(sc.lab) : `Info ${k + 1}/${info.length}`}</div></div>`
+  // wv3023: nieuws (NOS) als eerste paneel na Komende weken; alleen wat schermInhoud doorliet (registerzin, niet uit, ≤ 6 uur oud).
+  // data-tot = nieuwste + 6 uur: ook als de pod niet meer publiceert valt het op de wandklok weg. Leeg (alleen app-voorbeeld) = uitlegregel.
+  const nw = i.nieuws && typeof i.nieuws === 'object' && Array.isArray(i.nieuws.items) ? i.nieuws : null;
+  const nwDag = amsDelen(Number(gemaakt) || 0).datum;
+  const nPan = info.length + (nw ? 1 : 0);
+  const zicht = Number.isInteger(toon) && toon >= 0 && toon <= nPan ? toon : 0;
+  const nwTijd = (ms) => { const a = amsDelen(ms); return a.datum === nwDag ? String(a.uur).padStart(2, '0') + ':' + String(a.min).padStart(2, '0') : 'gisteren'; };
+  const nieuwsHtml = nw ? `<section class="paneel nieuws${zicht === 1 ? ' aan' : ''}" data-s="${INFO_S}"${nw.items.length ? ` data-tot="${Number(nw.nieuwste) + NIEUWS_OUD_MS}"` : ''}><div class="ph"><h1>Nieuws</h1><div class="lab">NOS</div></div>`
+    + (nw.items.length ? nw.items.slice(0, NIEUWS_N).map((x) => `<div class="nws"><span class="nt">${esc(nwTijd(x.ms))}</span><span class="nk">${esc(x.kop)}</span></div>`).join('')
+      : '<div class="niets">Nu geen recent nieuws: de NOS is niet bereikbaar of het nieuwste bericht is ouder dan 6 uur. Dan staat dit scherm niet op de tv.</div>')
+    + '<div class="voet">Bron: NOS</div></section>' : '';
+  const infoHtml = nieuwsHtml + info.map((sc, k) => `<section class="paneel info${zicht === k + 1 + (nw ? 1 : 0) ? ' aan' : ''}" data-s="${INFO_S}" data-tot="${Date.parse(plusDag(sc.tot, 1) + 'T00:00:00+01:00')}"><div class="ph"><h1>${esc(sc.kop)}</h1><div class="lab">${sc.lab ? esc(sc.lab) : `Info ${k + 1}/${info.length}`}</div></div>`
     + (sc.intro ? `<p class="intro">${esc(sc.intro)}</p>` : '')
     + `<div class="punten">${sc.punten.map((x) => `<div class="punt"><div class="pt">${esc(x.titel)}</div>${x.tekst ? `<div class="px">${esc(x.tekst)}</div>` : ''}</div>`).join('')}</div>`
     + `<div class="voet">Bron: ${esc(sc.bron)}</div></section>`).join('');
@@ -151,6 +164,8 @@ html,body{margin:0;height:100%;background:#fff;color:#5B5C60;font-family:'Libera
 .intro{font-size:38px;line-height:1.3;color:#3E3F42;margin:4px 0 26px}
 .punten{display:grid;grid-template-columns:1fr 1fr;gap:30px 44px}.punt{border-left:8px solid #ED1C24;padding:4px 0 4px 24px;min-width:0}
 .pt{font-size:40px;font-weight:bold;color:#3E3F42;line-height:1.15}.px{font-size:32px;line-height:1.3;margin-top:8px}
+.nws{display:flex;align-items:baseline;gap:24px;padding:16px 0;border-bottom:2px solid #D9DADC}.nt{flex:none;width:100px;font-size:30px;font-weight:bold;color:#88898C;white-space:nowrap}
+.nk{flex:1;min-width:0;font-size:39px;font-weight:bold;color:#3E3F42;line-height:1.2;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .oud-tekst{display:none;font-size:44px;color:#3E3F42}body.oud .podium>*,body.oud .weer-blok,body.oud .blok{display:none}body.oud .podium .oud-tekst{display:block}
 </style></head>
 <body data-soort="scherm" data-gemaakt="${Number(gemaakt)}" data-houdbaar="${Number(houdbaar_tot)}">
@@ -184,6 +199,85 @@ const INFO_ZIN = 'infoschermen) alleen na Davids knop';             // staat dez
 const INFO_MAX = 6, INFO_SET_MAX = 4, INFO_DAGEN_MAX = 28;
 const INFO_HOOFD_S = 30, INFO_S = 20;
 const INFO_WEG = /@|\d{6,}|\bBSN\b|geboortedatum|https?:|<|>/i;     // geen adressen, nummers of opmaak op een half openbaar scherm
+// ── nieuws (wv3023, David Ja 13-11-2026 op de kaart van wv3022: "het laatste nieuws, bijvoorbeeld van nu.nl of nos.nl") ──
+// De POD haalt de NOS-feed (server.js o.nieuws, nooit het kastje), hooguit elk kwartier; alleen <title> en <pubDate> van de vijf nieuwste
+// items, geen link, beeld of beschrijving. Weg als het ophalen faalt, de feed kapot is of het nieuwste bericht ouder is dan 6 uur; alleen
+// als de registertekst NIEUWS_ZIN bevat en David het in de app niet uitzette. Tekst van derden zonder knop per kop: daarom streng schoon.
+const NIEUWS_ZIN = 'Nieuws: de vijf nieuwste koppen van de NOS (alleen kop en tijd';   // staat deze zin in de registertekst, dan het nieuwsscherm
+const NIEUWS_N = 5, NIEUWS_KOP_MAX = 110, NIEUWS_MS = 15 * 60000, NIEUWS_OUD_MS = 6 * 3600000, NIEUWS_ITEM_OUD_MS = 24 * 3600000;
+const NIEUWS_BYTES_MAX = 2 * 1024 * 1024, NIEUWS_TIMEOUT_MS = 20000, NIEUWS_ITEMS_MAX = 200;
+const NIEUWS_ID = crypto.createHash('sha256').update('nieuws:nos').digest('hex').slice(0, 16);   // vaste id voor aan/uit in de app (zelfde vorm als schermId)
+const NIEUWS_WEG = /https?:|www\.|@/i;   // een kop met een adres of link komt er niet op
+function nieuwsEntiteit(m, x) {
+  const vast = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+  if (x[0] === '#') { const n = x[1] === 'x' || x[1] === 'X' ? parseInt(x.slice(2), 16) : parseInt(x.slice(1), 10); return Number.isInteger(n) && n > 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : ' '; }
+  return Object.prototype.hasOwnProperty.call(vast, x) ? vast[x] : ' ';
+}
+// één kop schoon: CDATA uitpakken, entiteiten één keer omzetten, tags en losse < > weg, stuur-, opmaak- en richtingstekens weg, ≤ 110 tekens
+function nieuwsKop(ruw) {
+  let s = String(ruw == null ? '' : ruw).replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
+  s = s.replace(/&(#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z]{2,8});/g, nieuwsEntiteit);
+  s = s.replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, ' ').replace(/<[^>]*>/g, ' ').replace(/[<>]/g, ' ');   // ook de inhoud van script/style weg
+  s = s.replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s || NIEUWS_WEG.test(s)) return '';
+  if ([...s].length > NIEUWS_KOP_MAX) { const t = [...s].slice(0, NIEUWS_KOP_MAX - 1).join(''); const k = t.lastIndexOf(' '); s = (k > 60 ? t.slice(0, k) : t).replace(/[\s,.;:–-]+$/, '') + '…'; }
+  return s;
+}
+// Lineair en structuurbewust (Codex MOET ronde 1 en 2, review wv3023): één doorgang met indexOf; CDATA, commentaar en <?…?> worden
+// overgeslagen (dus geen "items" uit een beschrijving of commentaar); alleen de directe kinderen title en pubDate van rss>channel>item
+// tellen. Elke afwijking (onafgesloten tag/CDATA/commentaar, DOCTYPE, rare tagnaam, sluittag past niet) = hele feed kapot = null.
+function rssItems(xml) {
+  const stapel = [], items = [];
+  let i = 0, cur = null, vang = null, vangVan = 0;
+  for (;;) {
+    const lt = xml.indexOf('<', i); if (lt < 0) break;
+    if (xml.startsWith('<![CDATA[', lt)) { const e = xml.indexOf(']]>', lt + 9); if (e < 0) return null; i = e + 3; continue; }
+    if (xml.startsWith('<!--', lt)) { const e = xml.indexOf('-->', lt + 4); if (e < 0) return null; i = e + 3; continue; }
+    if (xml[lt + 1] === '?') { const e = xml.indexOf('?>', lt + 2); if (e < 0) return null; i = e + 2; continue; }
+    if (xml[lt + 1] === '!') return null;   // DOCTYPE/ENTITY: niet in een NOS-feed, en eigen entiteiten willen we niet
+    const gt = xml.indexOf('>', lt + 1); if (gt < 0) return null;
+    const raw = xml.slice(lt + 1, gt);
+    i = gt + 1;
+    if (raw[0] === '/') {
+      const naam = raw.slice(1).trim();
+      if (stapel.pop() !== naam) return null;
+      if (vang && naam === vang && stapel.length === 3) { cur[vang] = xml.slice(vangVan, lt); vang = null; }
+      if (naam === 'item' && cur && stapel.length === 2) { items.push(cur); cur = null; if (items.length >= NIEUWS_ITEMS_MAX) return items; }
+      continue;
+    }
+    const zelf = raw.endsWith('/');
+    const naam = (zelf ? raw.slice(0, -1) : raw).split(/[ \t\r\n]/, 1)[0];
+    if (!/^[A-Za-z_][\w:.-]{0,40}$/.test(naam)) return null;
+    if (zelf) continue;
+    stapel.push(naam);
+    if (stapel.length === 3 && naam === 'item' && stapel[0] === 'rss' && stapel[1] === 'channel') cur = {};
+    else if (cur && !vang && stapel.length === 4 && (naam === 'title' || naam === 'pubDate') && !(naam in cur)) { vang = naam; vangVan = gt + 1; }
+  }
+  return stapel.length === 0 ? items : null;
+}
+// RSS → { items: [{kop, ms}] (nieuwste eerst, ≤ 5), nieuwste } of null (geen/kapotte feed, niets bruikbaars, nieuwste > 6 uur oud)
+function nieuwsKoppen(xml, t) {
+  if (typeof xml !== 'string' || !xml || xml.length > NIEUWS_BYTES_MAX) return null;
+  const ruw = rssItems(xml);
+  if (!ruw) return null;
+  const items = [];
+  for (const it of ruw) {
+    if (typeof it.title !== 'string' || typeof it.pubDate !== 'string' || it.title.length > 2000 || it.pubDate.length > 200) continue;
+    const ms = Date.parse(nieuwsKop(it.pubDate).slice(0, 40));
+    if (!Number.isFinite(ms) || ms > t + 15 * 60000 || t - ms > NIEUWS_ITEM_OUD_MS) continue;   // toekomst of > 1 dag oud: niet
+    const kop = nieuwsKop(it.title);
+    if (kop && !items.some((x) => x.kop === kop)) items.push({ kop, ms });
+  }
+  items.sort((a, b) => b.ms - a.ms);
+  const top = items.slice(0, NIEUWS_N);
+  if (!top.length || t - top[0].ms > NIEUWS_OUD_MS) return null;
+  return { items: top, nieuwste: top[0].ms };
+}
+// mag dit nieuws nu op het scherm (vorm + leeftijd)?
+function nieuwsGeldig(n, t) {
+  return !!n && Array.isArray(n.items) && n.items.length > 0 && n.items.length <= NIEUWS_N && Number.isFinite(n.nieuwste) && t - n.nieuwste <= NIEUWS_OUD_MS
+    && n.items.every((x) => x && typeof x.kop === 'string' && x.kop && [...x.kop].length <= NIEUWS_KOP_MAX && Number.isFinite(x.ms));
+}
 function ymd(ms) { return amsDelen(ms).datum; }
 function plusDag(datum, n) { const d = new Date(datum + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
 function datumDelen(datum) { const d = new Date(datum + 'T12:00:00Z'); return { wd: WD_KORT[d.getUTCDay()], wdl: WD_LANG[d.getUTCDay()], dg: String(d.getUTCDate()), mn: MND_KORT[d.getUTCMonth()], mnl: MND_LANG[d.getUTCMonth()] }; }
@@ -470,6 +564,27 @@ function maak(o) {
     const u = uitLijst();
     return infoKandidaten(vandaag).filter((x) => !u[x.id]).slice(-INFO_MAX);
   }
+  // ── nieuws (wv3023) ──
+  const nieuwsMag = () => rijMag(NIEUWS_ZIN);
+  const nieuwsActief = () => nieuwsMag() && !uitLijst()[NIEUWS_ID];
+  const nieuwsTimeout = Number(o.nieuwsTimeoutMs) > 0 ? Number(o.nieuwsTimeoutMs) : NIEUWS_TIMEOUT_MS;
+  const nieuwsBinnenKwartier = (s, t) => !!s.nieuws_poging && t >= s.nieuws_poging && t - s.nieuws_poging < NIEUWS_MS;
+  // hooguit elk kwartier één poging (ook een mislukte telt); mislukt of oud = null (scherm weg), geen terugval op een oudere kop.
+  // Zet s.nieuws/s.nieuws_poging (verzamel schrijft ze weg). Niet actief (geen zin, of uit in de app) = niets ophalen.
+  async function nieuwsVers(s, t) {
+    if (!nieuwsActief()) return null;
+    if (nieuwsBinnenKwartier(s, t)) return nieuwsGeldig(s.nieuws, t) ? s.nieuws : null;
+    s.nieuws_poging = t; s.nieuws = null;
+    if (typeof o.nieuws !== 'function') return null;
+    let klok = null;
+    try {
+      const xml = await Promise.race([Promise.resolve().then(() => o.nieuws()), new Promise((_, nee) => { klok = setTimeout(() => nee(new Error('timeout')), nieuwsTimeout); })]);
+      const n = nieuwsKoppen(xml, t);
+      if (n) s.nieuws = n;   // zonder ophaaltijd: dezelfde koppen = dezelfde inhoud = geen nieuwe envelop
+    } catch (e) { fout('personeelsscherm-nieuws', new Error('nieuws ophalen faalde')); }   // nooit de inhoud of het adres in de fout
+    finally { if (klok) clearTimeout(klok); }
+    return s.nieuws;
+  }
   function eigenPunten() { try { const j = JSON.parse(fs.readFileSync(path.join(dir, 'punten.json'), 'utf8')); return Array.isArray(j) ? j : []; } catch (e) { return []; } }
   async function weerVers(s, t) {
     if (s.weer && s.weer_op && t - s.weer_op < WEER_MS) return s.weer;
@@ -488,6 +603,7 @@ function maak(o) {
     }
     const meds = aan ? leesMedewerkers(o.vault, vandaag) : [];
     const weer = await weerVers(s, t);
+    const nieuws = aan ? await nieuwsVers(s, t) : null;   // wv3023
     const inhoud = {
       datum: vandaag,
       weer: weer || null,
@@ -497,11 +613,14 @@ function maak(o) {
       persoonsvakken: aan,
       volle_naam: vol,
       info: aan ? infoSchermen(vandaag) : [],
+      nieuws: nieuws || null,
       bronnen: { agenda: !!rijen, weer: !!weer, medewerkers: aan ? meds.length : null },
     };
     inhoud.bronnen.info = inhoud.info.length;
+    inhoud.bronnen.nieuws = nieuws ? nieuws.items.length : 0;
     const ish = crypto.createHash('sha256').update(JSON.stringify(inhoud.info)).digest('hex');
-    wijzig((x) => { x.inhoud = inhoud; x.inhoud_op = t; x.weer = s.weer || null; x.weer_op = s.weer_op || null; x.info_sha = ish; });
+    wijzig((x) => { x.inhoud = inhoud; x.inhoud_op = t; x.weer = s.weer || null; x.weer_op = s.weer_op || null; x.info_sha = ish;
+      if (s.nieuws_poging) { x.nieuws = s.nieuws || null; x.nieuws_poging = s.nieuws_poging; } });
     return inhoud;
   }
   // vaste delen van het moment (voorbeeld zonder script): dag en klok in Amsterdamse tijd
@@ -514,7 +633,9 @@ function maak(o) {
     const artsen = aan && i.artsen && !!i.volle_naam && !volleNaamMag() ? [] : i.artsen;
     // Fable ZOU 4: bij elke publicatie (ook noodknop uit) opnieuw tegen de Ja, niet uit de stand
     const info = aan ? infoSchermen(a.datum) : [];
-    return Object.assign({}, i, { artsen: aan ? artsen : null, jarig: aan ? i.jarig : null, info,
+    // wv3023: nieuws bij elke publicatie opnieuw tegen registerzin, uit-knop en leeftijd (nooit uit een oude stand doorgeschoven)
+    const nieuws = aan && nieuwsActief() && nieuwsGeldig(i.nieuws, t) ? i.nieuws : null;
+    return Object.assign({}, i, { artsen: aan ? artsen : null, jarig: aan ? i.jarig : null, info, nieuws,
       wd_tekst: d.wdl, dag_tekst: d.dg + ' ' + d.mnl, klok_tekst: String(a.uur).padStart(2, '0') + ':' + String(a.min).padStart(2, '0') });
   }
   function inhoudSha(i) { const c = Object.assign({}, i || {}); delete c.bronnen; return crypto.createHash('sha256').update(JSON.stringify(c)).digest('hex'); }
@@ -580,7 +701,8 @@ function maak(o) {
     const id = String(idRuw == null ? '' : idRuw);
     if (!/^[0-9a-f]{16}$/.test(id)) return { status: 400, body: { ok: false, fout: 'Onbekend scherm.' } };
     const vandaag = ymd(nu());
-    const x = infoKandidaten(vandaag).find((y) => y.id === id);
+    // wv3023: het nieuwsscherm heeft een vaste id; kandidaat zolang de registerzin er staat (uit blijft uit tot David het weer aanzet)
+    const x = id === NIEUWS_ID ? (toestemming() && nieuwsMag() ? { tot: '9999-12-31' } : null) : infoKandidaten(vandaag).find((y) => y.id === id);
     if (aan && !x) return { status: 409, body: { ok: false, fout: 'Dit scherm kan niet meer aan: het is niet (meer) door jou goedgekeurd of de looptijd is voorbij.' } };
     if (!aan && !x && !uitLijst()[id]) return { status: 404, body: { ok: false, fout: 'Dit scherm staat niet (meer) op de tv.' } };
     wijzig((s) => {
@@ -588,6 +710,7 @@ function maak(o) {
       for (const k of Object.keys(u)) if (!u[k] || !(String(u[k].tot) >= vandaag)) delete u[k];   // verlopen = weg
       if (aan) delete u[id]; else u[id] = { op: nu(), tot: x ? x.tot : vandaag };
       s.info_uit = u;
+      if (id === NIEUWS_ID) { s.nieuws_poging = null; if (!aan) s.nieuws = null; }   // wv3023: aan = de volgende tik haalt meteen vers; uit = niets bewaren
     });
     try { await publiceer(); }
     catch (e) {
@@ -626,12 +749,17 @@ function maak(o) {
     const vandaag = ymd(t), kand = infoKandidaten(vandaag), u = uitLijst();
     const opTv = infoSchermen(vandaag).map((x) => x.id);
     const inh = schermInhoud(s, t);
-    const lijst = [{ id: 'hoofd', soort: 'hoofd', titel: 'Komende weken', looptijd_s: opTv.length ? INFO_HOOFD_S : null, aan: true, uit: false }];
+    const lijst = [{ id: 'hoofd', soort: 'hoofd', titel: 'Komende weken', looptijd_s: opTv.length || inh.nieuws ? INFO_HOOFD_S : null, aan: true, uit: false }];
+    // wv3023: nieuwsscherm (alleen met de registerzin); voorbeeld met de koppen die nu op de tv staan, of de uitlegregel als er geen vers nieuws is
+    if (toestemming() && nieuwsMag()) {
+      lijst.push({ id: NIEUWS_ID, soort: 'info', titel: 'Nieuws (NOS)', looptijd_s: INFO_S, van: null, tot: null, aan: !!inh.nieuws, uit: !!u[NIEUWS_ID],
+        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [], nieuws: inh.nieuws || { items: [] } }), toon: 1 }) });
+    }
     for (const x of kand) {
       const k = opTv.indexOf(x.id);
       const sc = Object.assign({}, x, { lab: k >= 0 ? 'Info ' + (k + 1) + '/' + opTv.length : (u[x.id] ? 'Staat uit' : 'Wacht op een plek') });
       lijst.push({ id: x.id, soort: 'info', titel: x.kop, looptijd_s: INFO_S, van: x.set, tot: x.tot, aan: k >= 0, uit: !!u[x.id],
-        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [sc] }), toon: 1 }) });
+        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [sc], nieuws: null }), toon: 1 }) });
     }
     let sets = [], vr = {};
     try { const j = JSON.parse(infoBestand() || '{}'); sets = Array.isArray(j.sets) ? j.sets : []; vr = JSON.parse(fs.readFileSync(vragenPad, 'utf8')); } catch (e) { /* stand blijft wacht */ }
@@ -807,7 +935,8 @@ function maak(o) {
     if (s.intrek_open) { try { await intrekIntern(config()); } catch (e) { fout('personeelsscherm-intrek', new Error('opnieuw intrekken faalde')); } }
     let nieuw = false;
     if (!s.inhoud_op || t - s.inhoud_op >= INHOUD_MS || ymd(s.inhoud_op) !== ymd(t) || (s.inhoud && s.inhoud.persoonsvakken) !== toestemming()
-      || !!(s.inhoud && s.inhoud.volle_naam) !== (toestemming() && volleNaamMag()) || s.info_sha !== infoBestandSha(ymd(t))) {   // wv3015: rij of vrijgave gewijzigd = meteen
+      || !!(s.inhoud && s.inhoud.volle_naam) !== (toestemming() && volleNaamMag()) || s.info_sha !== infoBestandSha(ymd(t))   // wv3015: rij of vrijgave gewijzigd = meteen
+      || (toestemming() && nieuwsActief() && !nieuwsBinnenKwartier(s, t)) || (!!(s.inhoud && s.inhoud.nieuws) && !(toestemming() && nieuwsActief()))) {   // wv3023: nieuws elk kwartier; zin weg of uit = meteen
       try { const i = await verzamel(t); nieuw = inhoudSha(i) !== s.inhoud_sha; } catch (e) { fout('personeelsscherm-inhoud', new Error(String(e && e.message).slice(0, 80))); }
       s = leesStand();
     }
@@ -842,7 +971,9 @@ function maak(o) {
       vreemd: s.vreemd ? iso(s.vreemd.op) : null, intrek_open: !!s.intrek_open, laatste_tik: s.laatste_tik ? iso(s.laatste_tik) : null, fout: s.fout || null,
       inhoud_op: s.inhoud_op ? iso(s.inhoud_op) : null, persoonsvakken: !!(s.inhoud && s.inhoud.persoonsvakken),
       vakken: s.inhoud ? { agenda: (s.inhoud.agenda || []).length, artsen: s.inhoud.artsen ? s.inhoud.artsen.length : null, jarig: s.inhoud.jarig ? s.inhoud.jarig.length : null, weer: !!s.inhoud.weer,
-        info: Array.isArray(s.inhoud.info) ? s.inhoud.info.length : 0, volle_naam: !!s.inhoud.volle_naam } : null,
+        info: Array.isArray(s.inhoud.info) ? s.inhoud.info.length : 0, volle_naam: !!s.inhoud.volle_naam,
+        nieuws: s.inhoud.nieuws && Array.isArray(s.inhoud.nieuws.items) ? s.inhoud.nieuws.items.length : 0 } : null,   // wv3023: alleen het aantal koppen
+      nieuws_mag: nieuwsMag(), nieuws_uit: !!uitLijst()[NIEUWS_ID], nieuws_poging: s.nieuws_poging ? iso(s.nieuws_poging) : null,
       info_uit: s.info_uit ? Object.keys(s.info_uit).length : 0, aanvragen: (s.aanvragen || []).filter((a) => a && nu() - a.op < AANVRAAG_BEWAAR_MS).length,   // wv3020
       bronnen: s.inhoud ? s.inhoud.bronnen || null : null };   // alleen tellingen, nooit namen
   }
@@ -851,5 +982,5 @@ function maak(o) {
 }
 
 module.exports = { maak, bouwHtml, D1_SCHEMA, inWerktijd, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
-  VOLLE_NAAM_ZIN, INFO_ZIN,
-  _t: { agendaPunten, artsenVandaag, jarigen, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };
+  VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID,
+  _t: { nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, artsenVandaag, jarigen, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };

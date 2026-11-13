@@ -21914,6 +21914,16 @@ const personeelsscherm = (function () {
         if (r.status !== 200) throw new Error('weer gaf HTTP ' + r.status);   // nooit de URL (sleutel) in een fout
         return r.json();
       },
+      // wv3023: NOS-feed (openbaar, zonder sleutel); de module vraagt hooguit elk kwartier en alleen met de registerzin, neemt alleen kop + tijd.
+      // Geen doorsturing, hooguit 2 MB, 15 s; een fout noemt alleen de status.
+      nieuws: async function () {
+        const r = await fetch('https://feeds.nos.nl/nosnieuwsalgemeen', { redirect: 'error', headers: { 'User-Agent': 'socev-personeelsscherm/1', accept: 'application/rss+xml, application/xml, text/xml' }, signal: AbortSignal.timeout(15000) });
+        if (r.status !== 200) throw new Error('nieuws gaf HTTP ' + r.status);
+        if (Number(r.headers.get('content-length') || 0) > 2 * 1024 * 1024) throw new Error('nieuws te groot');
+        const delen = []; let n = 0;
+        for await (const d of r.body) { n += d.length; if (n > 2 * 1024 * 1024) throw new Error('nieuws te groot'); delen.push(Buffer.from(d)); }
+        return Buffer.concat(delen).toString('utf8');
+      },
       registerPad: '/opt/data/mk-scripts/toestemmingen.json',
       vragenPad: APP_VRAGEN,   // wv3015: infoschermen alleen met Davids Ja (kaart_hash) in de app-antwoorden; alleen lezen
       d1: async function (batch) {

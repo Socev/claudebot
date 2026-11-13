@@ -252,7 +252,7 @@ function fase1(o = {}) {
   pag('Ver Weg', { type: 'medewerker', naam: 'Ver Weg', status: 'in dienst (onbepaald)', geboortedatum: '1970-12-25' });
   pag('Overzicht', { type: 'overzicht', naam: 'Personeelsoverzicht' });
   const reg = path.join(vault, 'register.json');
-  const zetReg = (aan, tekst) => fs.writeFileSync(reg, JSON.stringify({ rijen: [{ id: 'ander', status: 'aan', tekst: [PS.VOLLE_NAAM_ZIN + ' ' + PS.INFO_ZIN] }].concat(aan ? [{ id: 'personeelsscherm-vast', status: aan === true ? 'aan' : aan, tekst: tekst || ['i. artsen van vandaag (voornaam en dagdeel)'] }] : []) }));
+  const zetReg = (aan, tekst) => fs.writeFileSync(reg, JSON.stringify({ rijen: [{ id: 'ander', status: 'aan', tekst: [PS.VOLLE_NAAM_ZIN + ' ' + PS.INFO_ZIN + ' ' + PS.NIEUWS_ZIN] }].concat(aan ? [{ id: 'personeelsscherm-vast', status: aan === true ? 'aan' : aan, tekst: tekst || ['i. artsen van vandaag (voornaam en dagdeel)'] }] : []) }));
   zetReg(o.aan, o.tekst);
   const vragenPad = path.join(vault, 'vragen.json');
   fs.writeFileSync(vragenPad, JSON.stringify(o.vragen || {}));
@@ -277,9 +277,10 @@ function fase1(o = {}) {
   ];
   const weer = { current: { temp: 6.4, weather: [{ id: 801, description: 'licht bewolkt' }] }, daily: [{ dt: 1763290800, temp: { max: 8.5, min: 3.4 } }, { dt: 1763377200, temp: { max: 7 }, weather: [{ id: 800 }] }] };
   const z = opzet(o);
-  const tel = { tijdlijn: 0, weer: 0 };
+  const tel = { tijdlijn: 0, weer: 0, nieuws: 0 };
   const m = PS.maak({ dir: z.dir, vault, registerPad: reg, vragenPad, d1: z.D.d1, cf: z.C.cf, nu: z.nu, melding: async () => {}, fout: () => {},
-    tijdlijn: async () => { tel.tijdlijn++; if (o.tijdlijnFaalt) throw new Error('weg'); return rijen; }, weer: async () => { tel.weer++; return weer; } });
+    tijdlijn: async () => { tel.tijdlijn++; if (o.tijdlijnFaalt) throw new Error('weg'); return rijen; }, weer: async () => { tel.weer++; return weer; },
+    nieuws: o.nieuws ? async () => { tel.nieuws++; return o.nieuws(); } : undefined, nieuwsTimeoutMs: o.nieuwsTimeoutMs });   // wv3023
   return Object.assign(z, { m, zetReg, tel, vault, vragenPad });
 }
 const html = (D) => { const r = D.sq.prepare('SELECT bytes FROM envelop WHERE id = 1').get(); return JSON.parse(Buffer.from(r.bytes, 'base64')).html; };
@@ -350,7 +351,7 @@ test('fase 1 info: alleen tellingen, geen namen', async () => {
   await f.m.verzamel(f.nu());
   const j = JSON.stringify(f.m.info());
   assert.doesNotMatch(j, /Wietske|Fenna|Jorrit|HAGRO-vergadering/);
-  assert.match(j, /"vakken":\{"agenda":2,"artsen":6,"jarig":2,"weer":true,"info":0,"volle_naam":false\}/);
+  assert.match(j, /"vakken":\{"agenda":2,"artsen":6,"jarig":2,"weer":true,"info":0,"volle_naam":false,"nieuws":0\}/);
 });
 
 // ── wv3015 fase 2: volle naam achter de nieuwe registertekst, infoschermen alleen met Davids Ja op precies die kaart ──
@@ -615,4 +616,205 @@ test('wv3020 aanvraag-stand: wacht → kaart (set met aanvraag, nog geen Ja) →
   assert.strictEqual((await m.appStand()).aanvragen[0].stand, 'kaart');
   fs.writeFileSync(f.vragenPad, JSON.stringify(jaVoor(SET)));
   assert.strictEqual((await m.appStand()).aanvragen[0].stand, 'aan');
+});
+
+// ── wv3023: nieuwsscherm (NOS-koppen) — alleen met de registerzin, pod haalt hooguit elk kwartier, alleen kop + tijd, weg bij storing of oud ──
+const T0 = Date.parse('2026-11-16T09:00:00Z');   // ma 10:00 Amsterdam
+const rfc = (ms) => new Date(ms).toUTCString().replace('GMT', '+0000');
+function rss(items, o = {}) {
+  const x = '<?xml version="1.0" encoding="UTF-8"?>\r\n<rss version="2.0">\r\n  <channel>\r\n    <title><![CDATA[NOS Nieuws]]></title>\r\n    <pubDate>' + rfc(T0) + '</pubDate>\r\n'
+    + items.map((it) => '    <item>\r\n' + (it.voor || '') + '      <title>' + it.titel + '</title>\r\n      <link>https://voorbeeld.invalid/l/1</link>\r\n'
+      + '      <description><![CDATA[<p>Beschrijving die nooit op het scherm mag.</p><title>Valse kop uit de beschrijving</title>]]></description>\r\n'
+      + '      <pubDate>' + (it.pd || rfc(it.ms)) + '</pubDate>\r\n      <enclosure url="https://voorbeeld.invalid/b.jpg" type="image/jpeg"/>\r\n    </item>\r\n').join('')
+    + '  </channel>\r\n</rss>\r\n';
+  return o.afgekapt ? x.slice(0, Math.floor(x.length * 0.7)) : x;
+}
+const KOPPEN = ['Eerste proefkop over het weer', 'Tweede proefkop over de trein', 'Derde proefkop over de markt', 'Vierde proefkop over sport', 'Vijfde proefkop over kunst', 'Zesde proefkop die niet meer past'];
+const vers = (n = 6, oud = 0) => KOPPEN.slice(0, n).map((k, i) => ({ titel: '<![CDATA[' + k + ']]>', ms: T0 - oud - (i + 1) * 7 * 60000 }));
+const MET_NIEUWS = [NIEUW[0] + ' Nieuws: de vijf nieuwste koppen van de NOS (alleen kop en tijd, bron genoemd), automatisch ververst, zonder knop per kop.'];
+function nieuwsOpzet(o = {}) {
+  let feed = o.feed !== undefined ? o.feed : () => rss(vers());
+  const f = fase1(Object.assign({ aan: true, tekst: MET_NIEUWS, nieuws: () => feed() }, o));
+  f.zet(T0);
+  return Object.assign(f, { zetFeed: (g) => { feed = g; } });
+}
+const nieuwsPaneel = (h) => { const m = /<section class="paneel nieuws[^"]*"[^>]*>[\s\S]*?<\/section>/.exec(h); return m ? m[0] : null; };
+
+test('wv3023 nieuwsKoppen: CDATA, HTML, entiteiten, stuur- en richtingstekens, te lange kop, link, beschrijving en volgorde', () => {
+  const lang = 'Een heel lange proefkop die maar doorgaat en doorgaat over van alles en nog wat zodat hij zeker langer wordt dan honderdtien tekens samen';
+  const xml = rss([
+    { titel: '<![CDATA[<b>Vet</b> en <script>alert(1)</script>schoon]]>', ms: T0 - 60000 },
+    { titel: 'Kop met &lt;i&gt;opmaak&lt;/i&gt; &amp; entiteit &#8220;citaat&#8221;', ms: T0 - 2 * 60000 },
+    { titel: '<![CDATA[' + lang + ']]>', ms: T0 - 3 * 60000 },
+    { titel: 'Stuur\u0007teken‮omgekeerd​weg', ms: T0 - 4 * 60000 },
+    { titel: '<![CDATA[Lees meer op https://voorbeeld.invalid]]>', ms: T0 - 5 * 60000 },
+    { titel: '<![CDATA[Mail ons@voorbeeld.invalid]]>', ms: T0 - 6 * 60000 },
+    { titel: '<![CDATA[Uit de toekomst]]>', ms: T0 + 3600000 },
+    { titel: '<![CDATA[Van eergisteren]]>', ms: T0 - 30 * 3600000 },
+    { titel: '<![CDATA[Zonder datum]]>', pd: 'geen datum' },
+    { titel: '<![CDATA[Vet en schoon]]>', ms: T0 - 7 * 60000 },   // dubbel na schoonmaken
+    { titel: '<![CDATA[Ouder maar wel binnen een dag]]>', ms: T0 - 10 * 3600000 },
+    { titel: '<![CDATA[Nog ouder]]>', ms: T0 - 11 * 3600000 },
+  ]);
+  const n = PS._t.nieuwsKoppen(xml, T0);
+  assert.ok(n);
+  const k = n.items.map((x) => x.kop);
+  assert.strictEqual(k.length, 5);
+  assert.strictEqual(k[0], 'Vet en schoon');
+  assert.strictEqual(k[1], 'Kop met opmaak & entiteit “citaat”');
+  assert.ok([...k[2]].length <= 110 && k[2].endsWith('…') && lang.startsWith(k[2].slice(0, -1)), 'ingekort op een woordgrens');
+  assert.strictEqual(k[3], 'Stuur teken omgekeerd weg');
+  assert.strictEqual(k[4], 'Ouder maar wel binnen een dag', 'link, adres, toekomst, > 1 dag, zonder datum en dubbel vallen weg');
+  assert.strictEqual(n.nieuwste, T0 - 60000);
+  const alles = JSON.stringify(n);
+  assert.doesNotMatch(alles, /script|alert|<|>|https?:|@|Beschrijving|Valse kop|\.jpg|‮|\u0007|​/);
+});
+
+test('wv3023 nieuwsKoppen: kapotte xml, afgekapt, geen RSS, te groot, oud nieuws of niets bruikbaars = null', () => {
+  assert.ok(PS._t.nieuwsKoppen(rss(vers()), T0));
+  assert.strictEqual(PS._t.nieuwsKoppen(rss(vers(), { afgekapt: true }), T0), null, 'afgekapt');
+  assert.strictEqual(PS._t.nieuwsKoppen('<html><body>Fout 502</body></html>', T0), null, 'geen RSS');
+  assert.strictEqual(PS._t.nieuwsKoppen('<rss><channel><item><title>x', T0), null, 'kapot');
+  assert.strictEqual(PS._t.nieuwsKoppen('', T0), null); assert.strictEqual(PS._t.nieuwsKoppen(null, T0), null); assert.strictEqual(PS._t.nieuwsKoppen({ a: 1 }, T0), null);
+  assert.strictEqual(PS._t.nieuwsKoppen(rss(vers()).replace('</channel>', ' '.repeat(2 * 1024 * 1024) + '</channel>'), T0), null, 'te groot');
+  assert.strictEqual(PS._t.nieuwsKoppen(rss(vers(5, 6 * 3600000)), T0), null, 'nieuwste ouder dan 6 uur');
+  assert.ok(PS._t.nieuwsKoppen(rss(vers(5, 6 * 3600000 - 8 * 60000)), T0), 'net binnen 6 uur');
+  assert.strictEqual(PS._t.nieuwsKoppen(rss([{ titel: '<![CDATA[https://alleen.link]]>', ms: T0 - 60000 }]), T0), null, 'niets bruikbaars');
+});
+
+test('wv3023 zonder registerzin geen nieuws en geen ophalen (ook niet als de zin in een andere rij staat of de rij uit staat)', async () => {
+  for (const [w, o] of [['oude tekst', { tekst: NIEUW }], ['rij uit', { aan: 'uit' }], ['geen rij', { aan: false }]]) {
+    const f = nieuwsOpzet(o);
+    await f.m.tik();
+    assert.strictEqual(f.tel.nieuws, 0, w + ': niet opgehaald');
+    assert.doesNotMatch(html(f.D), /paneel nieuws|Nieuws|NOS|proefkop/, w);
+    assert.ok(!(await f.m.appStand()).schermen.some((x) => /Nieuws/.test(x.titel)), w + ': niet in de app');
+    assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.NIEUWS_ID, aan: true } })).status, 409, w + ': niet aan te zetten');
+  }
+});
+
+test('wv3023 met registerzin: vijf koppen met tijd, Bron: NOS, geen link/beeld/beschrijving; wisselt mee (20 s) en valt op de wandklok weg na 6 uur', async () => {
+  const f = nieuwsOpzet();
+  await f.m.tik();
+  assert.strictEqual(f.tel.nieuws, 1);
+  const h = html(f.D), p = nieuwsPaneel(h);
+  assert.ok(p, 'nieuwspaneel');
+  assert.strictEqual((p.match(/class="nws"/g) || []).length, 5);
+  assert.match(p, /<span class="nt">09:53<\/span><span class="nk">Eerste proefkop over het weer<\/span>/);
+  assert.doesNotMatch(h, /Zesde proefkop|Beschrijving|Valse kop|voorbeeld\.invalid|\.jpg/);
+  assert.match(p, /Bron: NOS/); assert.match(p, /data-s="20"/);
+  assert.match(p, new RegExp('data-tot="' + (T0 - 7 * 60000 + 6 * 3600000) + '"'));
+  assert.match(h, /<section class="paneel aan" data-s="30">/, 'Komende weken blijft eerst');
+  assert.strictEqual(f.m.info().vakken.nieuws, 5); assert.strictEqual(f.m.info().nieuws_mag, true);
+  assert.doesNotMatch(JSON.stringify(f.m.info()), /proefkop/, '/health: alleen het aantal');
+  // app: eigen scherm Nieuws (NOS), aan, met voorbeeld; hoofdscherm wisselt
+  const st = await f.m.appStand();
+  const n = st.schermen.find((x) => x.id === PS.NIEUWS_ID);
+  assert.deepStrictEqual([n.soort, n.titel, n.looptijd_s, n.aan, n.uit], ['info', 'Nieuws (NOS)', 20, true, false]);
+  assert.match(n.html, /<section class="paneel nieuws aan"/); assert.match(n.html, /Eerste proefkop/);
+  assert.strictEqual(st.schermen[0].looptijd_s, 30);
+});
+
+test('wv3023 ophalen hooguit elk kwartier; mislukt, kapot, oud of timeout = scherm weg (geen oude koppen)', async () => {
+  const f = nieuwsOpzet();
+  await f.m.tik(); assert.strictEqual(f.tel.nieuws, 1);
+  f.zet(T0 + 5 * 60000); await f.m.tik(); f.zet(T0 + 10 * 60000); await f.m.tik();
+  assert.strictEqual(f.tel.nieuws, 1, 'niet vaker dan elk kwartier');
+  f.zetFeed(() => { throw new Error('weg'); });
+  f.zet(T0 + 15 * 60000); await f.m.tik();
+  assert.strictEqual(f.tel.nieuws, 2); assert.strictEqual(nieuwsPaneel(html(f.D)), null, 'ophalen faalt = weg');
+  f.zet(T0 + 20 * 60000); await f.m.tik(); assert.strictEqual(f.tel.nieuws, 2, 'ook na een fout hooguit elk kwartier');
+  f.zetFeed(() => rss(vers())); f.zet(T0 + 30 * 60000); await f.m.tik();
+  assert.ok(nieuwsPaneel(html(f.D)), 'terug');
+  f.zetFeed(() => rss(vers(), { afgekapt: true })); f.zet(T0 + 45 * 60000); await f.m.tik();
+  assert.strictEqual(nieuwsPaneel(html(f.D)), null, 'kapotte xml = weg');
+  f.zetFeed(() => rss(vers())); f.zet(T0 + 60 * 60000); await f.m.tik(); assert.ok(nieuwsPaneel(html(f.D)));
+  f.zet(T0 + 7 * 3600000); await f.m.tik();   // feed blijft de koppen van 10:00 geven: nu > 6 uur oud
+  assert.strictEqual(nieuwsPaneel(html(f.D)), null, 'oud nieuws = weg');
+  // timeout: de tik wacht niet eindeloos en het scherm valt weg
+  const g = nieuwsOpzet({ nieuwsTimeoutMs: 50 });
+  await g.m.tik(); assert.ok(nieuwsPaneel(html(g.D)));
+  g.zetFeed(() => new Promise(() => {}));
+  g.zet(T0 + 15 * 60000);
+  const t0 = Date.now(); await g.m.tik();
+  assert.ok(Date.now() - t0 < 2000, 'tik hangt niet'); assert.strictEqual(nieuwsPaneel(html(g.D)), null, 'timeout = weg');
+  // geen ophaalfunctie (oude server.js): niets
+  const h = nieuwsOpzet(); const m = PS.maak({ dir: h.dir, vault: h.vault, registerPad: path.join(h.vault, 'register.json'), vragenPad: h.vragenPad, d1: h.D.d1, cf: h.C.cf, nu: h.nu, fout: () => {} });
+  await m.tik(); assert.strictEqual(nieuwsPaneel(html(h.D)), null);
+});
+
+test('wv3023 publiceer zonder vers ophalen: oud (> 6 uur) of zin weg = niet op het scherm, ook niet uit de stand; tik haalt het meteen weg', async () => {
+  const f = nieuwsOpzet();
+  await f.m.tik(); assert.ok(nieuwsPaneel(html(f.D)));
+  f.zet(T0 + 6 * 3600000); await f.m.publiceer();
+  assert.strictEqual(nieuwsPaneel(html(f.D)), null, 'publiceer controleert de leeftijd');
+  const g = nieuwsOpzet();
+  await g.m.tik(); assert.ok(nieuwsPaneel(html(g.D)));
+  g.zetReg(true, NIEUW);
+  await g.m.publiceer(); assert.strictEqual(nieuwsPaneel(html(g.D)), null, 'zin weg = meteen weg bij publiceren');
+  g.zet(T0 + 5 * 60000); await g.m.tik();
+  assert.strictEqual(nieuwsPaneel(html(g.D)), null); assert.strictEqual((await g.m.verzamel(g.nu())).nieuws, null);
+  assert.strictEqual(g.tel.nieuws, 1, 'zonder zin niet meer opgehaald');
+});
+
+test('wv3023 uit in de app: meteen een envelop zonder nieuws, niet meer ophalen; weer aan = volgende tik vers', async () => {
+  const f = nieuwsOpzet();
+  await f.m.tik();
+  const v0 = f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr;
+  f.zet(T0 + 1000);
+  const r = await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.NIEUWS_ID, aan: false } });
+  assert.strictEqual(r.status, 200);
+  assert.ok(f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr > v0);
+  assert.strictEqual(nieuwsPaneel(html(f.D)), null);
+  f.zet(T0 + 20 * 60000); await f.m.tik(); f.zet(T0 + 40 * 60000); await f.m.tik();
+  assert.strictEqual(f.tel.nieuws, 1, 'uit = niet ophalen'); assert.strictEqual(nieuwsPaneel(html(f.D)), null, 'blijft uit');
+  f.zet(Date.parse('2026-11-20T09:00:00Z')); await f.m.tik(); assert.strictEqual(nieuwsPaneel(html(f.D)), null, 'blijft uit, ook dagen later');
+  const st = await f.m.appStand(); const n = st.schermen.find((x) => x.id === PS.NIEUWS_ID);
+  assert.deepStrictEqual([n.aan, n.uit], [false, true]); assert.strictEqual(st.schermen[0].looptijd_s, null);
+  assert.strictEqual(f.m.info().nieuws_uit, true);
+  // weer aan; de feed geeft nu koppen van vrijdag
+  const T1 = Date.parse('2026-11-20T09:00:00Z');
+  f.zetFeed(() => rss(KOPPEN.slice(0, 5).map((k, i) => ({ titel: k, ms: T1 - (i + 1) * 60000 }))));
+  assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.NIEUWS_ID, aan: true } })).status, 200);
+  f.zet(T1 + 60000); await f.m.tik();
+  assert.ok(nieuwsPaneel(html(f.D)), 'volgende tik haalt vers'); assert.strictEqual(f.tel.nieuws, 2);
+});
+
+test('wv3023 bouwHtml: nieuws na Komende weken, vóór de infoschermen; app-voorbeeld zonder vers nieuws = uitlegregel; kop altijd ge-escaped', () => {
+  const nieuws = { items: [{ kop: 'Kop met <b> & "aanhalingstekens"', ms: T0 - 60000 }, { kop: 'Kop van gisteren', ms: T0 - 12 * 3600000 }], nieuwste: T0 - 60000 };
+  const h = PS.bouwHtml({ gemaakt: T0, houdbaar_tot: T0 + 1, leeg: false, inhoud: { agenda: [], nieuws, info: [Object.assign({}, SET.schermen[0], { set: SET.set })] } });
+  assert.ok(h.indexOf('paneel nieuws') < h.indexOf('paneel info'));
+  assert.match(h, /Kop met &lt;b&gt; &amp; &quot;aanhalingstekens&quot;/); assert.match(h, /<span class="nt">gisteren<\/span>/);
+  const t = PS.bouwHtml({ gemaakt: T0, houdbaar_tot: T0 + 1, leeg: false, inhoud: { agenda: [], nieuws, info: [Object.assign({}, SET.schermen[0], { set: SET.set })] }, toon: 2 });
+  assert.match(t, /<section class="paneel info aan"/); assert.match(t, /<section class="paneel nieuws" /);
+  const leeg = PS.bouwHtml({ gemaakt: T0, houdbaar_tot: T0 + 1, leeg: false, inhoud: { agenda: [], nieuws: { items: [] }, info: [] }, toon: 1 });
+  assert.match(leeg, /Nu geen recent nieuws/); assert.doesNotMatch(nieuwsPaneel(leeg), /data-tot/);
+});
+
+test('wv3023 nieuwsKoppen lineair (Codex MOET): kwaadaardige feeds van bijna 2 MB zijn snel klaar en geven niets of alleen goede koppen', () => {
+  const kop = '<item><title>Goede proefkop</title><pubDate>' + rfc(T0 - 60000) + '</pubDate></item>';
+  const vul = (stuk) => { const n = Math.floor((2 * 1024 * 1024 - 200) / stuk.length); return '<rss><channel>' + kop + stuk.repeat(n) + '</channel></rss>'; };
+  for (const [w, stuk] of [['item zonder sluiting', '<item>'], ['item+title open', '<item><title>'], ['description open', '<item><description>'],
+    ['CDATA open', '<item><title><![CDATA['], ['rss open', '<rss'], ['tag zonder >', '<item'], ['entiteiten', '&amp;&#x41;'], ['lege items', '<item></item>']]) {
+    const x = vul(stuk); assert.ok(x.length <= 2 * 1024 * 1024, w);
+    const t0 = Date.now(); const n = PS._t.nieuwsKoppen(x, T0); const ms = Date.now() - t0;
+    assert.ok(ms < 1500, w + ': ' + ms + ' ms');
+    assert.ok(n === null || n.items.every((y) => y.kop === 'Goede proefkop'), w);
+  }
+  // onafgesloten beschrijving (nesting klopt niet) = hele feed kapot
+  const vals = '<rss><channel><item><description><title>Valse kop</title><pubDate>' + rfc(T0 - 60000) + '</pubDate></item>' + kop + '</channel></rss>';
+  assert.strictEqual(PS._t.nieuwsKoppen(vals, T0), null);
+  // Codex MOET ronde 2: item-opmaak in CDATA of commentaar (kanaal- of itembeschrijving) is geen item; titel in een kleinkind telt niet
+  const pd = '<pubDate>' + rfc(T0 - 30000) + '</pubDate>';
+  const listig = '<?xml version="1.0"?><rss version="2.0"><channel><title>NOS</title>'
+    + '<description><![CDATA[<item><title>Kop uit CDATA</title>' + pd + '</item>]]></description>'
+    + '<!-- <item><title>Kop uit commentaar</title>' + pd + '</item> -->'
+    + '<item><description><item><title>Kop uit genest item</title>' + pd + '</item></description><title>Goede proefkop</title><pubDate>' + rfc(T0 - 60000) + '</pubDate></item>'
+    + '<item><media:group><title>Kop uit kleinkind</title>' + pd + '</media:group></item>'
+    + '<item><title><![CDATA[Tweede goede kop met </item> erin]]></title>' + pd + '</item>'
+    + '</channel></rss>';
+  assert.deepStrictEqual(PS._t.nieuwsKoppen(listig, T0).items.map((y) => y.kop), ['Tweede goede kop met erin', 'Goede proefkop']);
+  assert.strictEqual(PS._t.nieuwsKoppen('<!DOCTYPE rss [<!ENTITY x "Kop">]><rss><channel>' + kop + '</channel></rss>', T0), null, 'DOCTYPE = weg');
+  // kop of datum veel te lang = item weg
+  assert.strictEqual(PS._t.nieuwsKoppen('<rss><channel><item><title>' + 'a '.repeat(1500) + '</title><pubDate>' + rfc(T0) + '</pubDate></item></channel></rss>', T0), null);
 });
