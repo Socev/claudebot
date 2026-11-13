@@ -3,6 +3,7 @@
 // geschiedenis die ook als bestand bewaard wordt (history.json), zodat de zoektocht naar het merk ook "de geschiedenis en de mappen van de
 // nep" doorzoekt. SaveImageWebsocket stuurt de invoer terug (dus het merk zit in het resultaat); PreviewImage schrijft het in temp/.
 // Neemt prompt_id uit POST /prompt over (zoals ComfyUI). Scenario 'hang': de taak blijft lopen tot /interrupt.
+// wv2990: een prompt zonder LoadImage (tekst naar beeld) geeft C.t2iBeeld terug (de toets zet daar een beeld met het opdrachtwoord in).
 const fs = require('fs'), path = require('path'), http = require('http'), crypto = require('crypto');
 function start(dir, o) {
   o = o || {};
@@ -10,13 +11,14 @@ function start(dir, o) {
   const OI = {
     LoadImage: { python_module: 'nodes', input: { required: { image: [['voorbeeld.png'], { image_upload: true }] } } },
     ImageScaleBy: { python_module: 'nodes', input: { required: { image: ['IMAGE', {}], upscale_method: [['lanczos'], {}], scale_by: ['FLOAT', {}] } } },
+    EmptyImage: { python_module: 'nodes', input: { required: { width: ['INT', {}], height: ['INT', {}], batch_size: ['INT', {}], color: ['INT', {}] } } },   // wv2990
     PrimitiveStringMultiline: { python_module: 'comfy_extras.nodes_primitive', input: { required: { value: ['STRING', {}] } } },
     PreviewImage: { python_module: 'nodes', output_node: true, input: { required: { images: ['IMAGE', {}] } } },
     SaveImage: { python_module: 'nodes', output_node: true, input: { required: { images: ['IMAGE', {}], filename_prefix: ['STRING', {}] } } },
     SaveImageWebsocket: { python_module: 'custom_nodes.websocket_image_save', output_node: true, input: { required: { images: ['IMAGE'] } } },
   };
   if (o.zonderWs) delete OI.SaveImageWebsocket;
-  const C = { prompts: [], hist: {}, histDelete: [], interrupts: [], free: 0, rij: { queue_running: [], queue_pending: [] }, ws: {}, scenario: 'goed', n: 0, hangt: null };
+  const C = { prompts: [], hist: {}, histDelete: [], interrupts: [], free: 0, rij: { queue_running: [], queue_pending: [] }, ws: {}, scenario: 'goed', n: 0, hangt: null, t2iBeeld: null, uploads: 0 };
   const histPad = path.join(dir, 'history.json');
   const histBewaar = () => fs.writeFileSync(histPad, JSON.stringify(C.hist));
   histBewaar();
@@ -38,7 +40,8 @@ function start(dir, o) {
   function draai(pid, prompt, cid) {
     if (C.scenario === 'hang') { C.hangt = { pid, cid, prompt }; return; }
     const outputs = {};
-    const invoer = fs.existsSync(invoerPad) ? fs.readFileSync(invoerPad) : Buffer.alloc(0);
+    const metFoto = Object.keys(prompt).some((id) => prompt[id].class_type === 'LoadImage');
+    const invoer = !metFoto && C.t2iBeeld ? C.t2iBeeld : fs.existsSync(invoerPad) ? fs.readFileSync(invoerPad) : Buffer.alloc(0);   // wv2990
     for (const id of Object.keys(prompt)) {
       const k = prompt[id].class_type;
       zendTekst(cid, { type: 'executing', data: { node: id, prompt_id: pid } });
@@ -57,6 +60,7 @@ function start(dir, o) {
       if (req.url === '/upload/image' && req.method === 'POST') {
         const fd = await new Response(body, { headers: { 'content-type': req.headers['content-type'] } }).formData();
         const f = fd.get('image');
+        C.uploads++;
         fs.writeFileSync(path.join(dir, 'input', fd.get('subfolder'), f.name), Buffer.from(await f.arrayBuffer()));
         return stuur(200, { name: f.name, subfolder: fd.get('subfolder'), type: 'input' });
       }

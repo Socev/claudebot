@@ -1020,11 +1020,13 @@ function maak(deps) {
 
   // ── wv2984: geheugen-taak (OVIS Imagine; zie de kop) ──
   // o: { flow, velden (zonder het fotoveld), beeld: Buffer, beurt_id, geheim: bool, apparaat, klaar(uitkomst) }
+  // wv2990: zonder beeld voor een flow zonder fotoveld (tekst naar beeld, Imagine "Nieuw beeld uit tekst"): geen upload, wel websocket-uitvoer
   // uitkomst: { status: 'klaar'|'mislukt'|'gestopt', reden, beelden: [{ bytes, breed, hoog, ext }], duur_s, model, flow }
   // ctx als bij maak (versOk/versVerbruik): een flow op proef vraagt ook hier elke keer een verse vingerafdruk.
   async function maakGeheugen(o, ctx) {
     if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
-    if (!o || !Buffer.isBuffer(o.beeld) || typeof o.klaar !== 'function') return { status: 400, fout: 'geen beeld' };
+    if (!o || typeof o.klaar !== 'function' || (o.beeld != null && !Buffer.isBuffer(o.beeld))) return { status: 400, fout: 'geen beeld' };
+    const metBeeld = Buffer.isBuffer(o.beeld);   // wv2990
     const geheim = o.geheim === true;
     if (geheim && !MERK) return { status: 409, fout: 'incognito kan hier niet' };
     if (geheim && st.blok) return { status: 409, fout: NOG_TE_WISSEN };
@@ -1038,27 +1040,31 @@ function maak(deps) {
     if (!f || f.motor !== 'comfyui') return { status: 404, fout: 'deze bewerking bestaat niet (meer)' };
     if (f.fout || f.reden || f.status === 'uit') return { status: 409, fout: 'deze bewerking kan nu niet: ' + (f.fout || f.reden || 'staat uit') };
     const v = f.velden.find(function (x) { return x.soort === 'beeld'; });
-    if (!v) return { status: 409, fout: 'deze bewerking neemt geen foto' };
+    if (metBeeld && !v) return { status: 409, fout: 'deze bewerking neemt geen foto' };
+    if (!metBeeld && (v || f.uitvoer !== 'beeld')) return { status: 400, fout: 'geen beeld' };   // wv2990: alleen tekst naar beeld zonder foto
     const invoer = Object.assign({}, o.velden && typeof o.velden === 'object' ? o.velden : {});
-    invoer[v.naam] = { n: 1 };
+    if (v) invoer[v.naam] = { n: 1 };
     const w = waardenVan(f, invoer);
     if (w.fout) return { status: 400, fout: w.fout };
     if (f.status === 'proef' && !ctx.versOk()) return { status: 403, fout: 'deze bewerking is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
-    if (o.beeld.length > BEELD.max_bytes) return { status: 413, fout: 'beeld groter dan 20 MB' };
-    const soort = beeldSoort(o.beeld);
-    if (!soort) return { status: 415, fout: 'alleen jpg, png of webp' };
-    const grens = beeldGrens(v, w.waarden);
-    const r = await beeldPijp(['pijp-neem', String(grens)], o.beeld);
-    if (!r.ok) return { status: 400, fout: 'beeld geweigerd: ' + r.reden };
-    if ({ JPEG: 'jpg', PNG: 'png', WEBP: 'webp' }[r.formaat] !== soort) return { status: 415, fout: 'beeld geweigerd: de inhoud past niet bij het bestandstype' };
+    let soort = null, grens = null, r = null;
+    if (metBeeld) {
+      if (o.beeld.length > BEELD.max_bytes) return { status: 413, fout: 'beeld groter dan 20 MB' };
+      soort = beeldSoort(o.beeld);
+      if (!soort) return { status: 415, fout: 'alleen jpg, png of webp' };
+      grens = beeldGrens(v, w.waarden);
+      r = await beeldPijp(['pijp-neem', String(grens)], o.beeld);
+      if (!r.ok) return { status: 400, fout: 'beeld geweigerd: ' + r.reden };
+      if ({ JPEG: 'jpg', PNG: 'png', WEBP: 'webp' }[r.formaat] !== soort) return { status: 415, fout: 'beeld geweigerd: de inhoud past niet bij het bestandstype' };
+    }
     // vanaf hier synchroon tot de taak in de rij staat
     const al2 = st.geheugen.find(function (t) { return t.beurt_id === beurt; });
     if (al2) return { status: 200, taak: geheugenUit(al2), al: true };
     if (geheim && st.blok) return { status: 409, fout: NOG_TE_WISSEN };
     if (vandaagN() >= GRENS.per_dag) return { status: 429, fout: 'vandaag al ' + GRENS.per_dag + ' bewerkingen gemaakt; morgen weer' };
     if (st.rij.length >= GRENS.rij) return { status: 429, fout: 'er staan al ' + GRENS.rij + ' taken in de rij; wacht tot er een klaar is' };
-    const bytes = r.verkleind ? r.bytes : o.beeld;
-    if (!bytes) return { status: 500, fout: 'verkleinen van het beeld lukte niet' };
+    const bytes = metBeeld ? (r.verkleind ? r.bytes : o.beeld) : null;
+    if (metBeeld && !bytes) return { status: 500, fout: 'verkleinen van het beeld lukte niet' };
     if (f.status === 'proef') {
       if (!ctx.versOk()) return { status: 403, fout: 'deze bewerking is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
       ctx.versVerbruik();
@@ -1069,10 +1075,10 @@ function maak(deps) {
     const t = { id: hex16(), beurt_id: beurt, geheugen: true, geheim: geheim, flow: f.id, titel: f.titel, motor: f.motor, uitvoer: f.uitvoer,
       status: 'wacht', fase: 'in de rij', procent: null, gemaakt: new Date(klok()).toISOString(), velden: w.waarden, bestanden: [],
       proef: f.status === 'proef', apparaat: String(o.apparaat || ''), model: f.ai_model || null,
-      beeld: { veld: v.naam, breed: r.verkleind ? r.nieuw_breed : r.breed, hoog: r.verkleind ? r.nieuw_hoog : r.hoog, ext: r.verkleind ? r.ext : soort,
-        verkleind: !!r.verkleind, grens_mp: grens },
+      beeld: metBeeld ? { veld: v.naam, breed: r.verkleind ? r.nieuw_breed : r.breed, hoog: r.verkleind ? r.nieuw_hoog : r.hoog, ext: r.verkleind ? r.ext : soort,
+        verkleind: !!r.verkleind, grens_mp: grens } : null,
       _in: bytes, _uit: [], _klaar: o.klaar };
-    t.velden[v.naam] = '(foto)';
+    if (v) t.velden[v.naam] = '(foto)';
     st.geheugen.push(t);
     st.rij.push(t.id);
     setImmediate(volgende);
@@ -1588,8 +1594,9 @@ function maak(deps) {
     // wv2983: een fotoflow stuurt zijn resultaat over de websocket als ComfyUI SaveImageWebsocket kent (niets in de tijdelijke map)
     // wv2984: een geheugen-taak (Imagine) alleen zo; zonder die knoop geen terugval op de Preview-weg
     if (t.geheugen && !wsKan(info)) return { fout: 'ComfyUI kent SaveImageWebsocket niet (meer); zonder kan Imagine niets maken. Er is niets ingediend.' };
-    const toets = flowToets(v.api, info, { ws: !!t.beeld && wsKan(info) });
+    const toets = flowToets(v.api, info, { ws: (!!t.beeld || !!t.geheugen) && wsKan(info) });   // wv2990: een geheugen-taak altijd via de websocket
     if (toets.fout) return { fout: 'knopentoets: ' + toets.fout };
+    if (t.geheugen && !(toets.ws_knopen && toets.ws_knopen.length)) return { fout: 'knopentoets: zonder websocket-uitvoer kan Imagine niets maken; niets ingediend' };   // wv2990 (Fable KAN 3)
     // wv2482 (diffreview MOET 2): een LoadImage alleen in een taak met een eigen foto (anders leest hij wat er toevallig staat)
     if (!t.beeld && Object.keys(toets.prompt).some(function (k) { return KNOPEN.laad_beeld.indexOf(toets.prompt[k].class_type) >= 0; }))
       return { fout: 'knopentoets: een LoadImage kan alleen in een flow met een fotoveld' };
@@ -1626,7 +1633,12 @@ function maak(deps) {
     finally { await vrijNa(t); }
   }
   async function motorComfyIn(t, f, out, ctl, toets, clientId, voorbewerking) {
-    if (!t.beeld) return comfyDraai(t, f, out, ctl, toets, clientId);
+    if (!t.beeld) {
+      // wv2990: tekst naar beeld (geheugen-taak zonder foto): geen upload. Een geheime taak zet eerst het merk, zoals de fotoweg (merkErbij in comfyDraai
+      // doet het daarna nog eens per prompt-id, ook vóór de POST)
+      if (t.geheim && !merkStart()) return { fout: 'incognito kon niet veilig starten (merk niet te schrijven); er is niets naar de beeldserver gegaan' };
+      return comfyDraai(t, f, out, ctl, toets, clientId);
+    }
     // wv2482: de foto pas nu naar ComfyUI (de rij is leeg), en daarna ALTIJD terug naar 1×1 — ook bij fout, stop of een uitzondering
     let buf, invoer = null;
     if (t.geheugen) {
@@ -1794,7 +1806,7 @@ function maak(deps) {
             if (!buf) continue;
             ext = ((/\.([a-z0-9]{2,5})$/i.exec(b.filename) || [])[1] || 'png').toLowerCase();
           }
-          if (t.beeld && !o.audio && t.geheugen) {
+          if (!o.audio && t.geheugen) {   // wv2990: ook tekst naar beeld (geen t.beeld)
             // wv2984: zelfde toets via de pijp, resultaat alleen in het geheugen
             const soort = beeldSoort(buf);
             if (!soort) { uitFout = 'ComfyUI gaf iets terug dat geen jpg, png of webp is'; continue; }

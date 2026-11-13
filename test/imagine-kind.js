@@ -10,7 +10,9 @@ const I = require(path.join(process.env.IK_MOD, 'imagine.js')).maak({ dir: path.
 (async function () {
   const ctx = { versOk: () => true, versVerbruik: () => {} };
   const r = await I.app({ pad: '/app/imagine/incognito/laad', methode: 'POST', body: { data: fs.readFileSync(process.env.IK_BEELD).toString('base64') }, apparaat: 'apparaat-a', ctx });
-  const b = await I.app({ pad: '/app/imagine/incognito/bewerk', methode: 'POST', body: { beeld: r.body.beeld, stand: 'opdracht-qwen', velden: { opdracht: process.env.IK_WOORD }, beurt_id: 'beurt-kind-1' }, apparaat: 'apparaat-a', ctx });
+  // wv2990: IK_T2I = een tekst-naar-beeldtaak in plaats van een bewerking
+  const b = process.env.IK_T2I ? await I.app({ pad: '/app/imagine/incognito/nieuw', methode: 'POST', body: { velden: { opdracht: process.env.IK_WOORD }, beurt_id: 'beurt-kind-t2i' }, apparaat: 'apparaat-a', ctx })
+    : await I.app({ pad: '/app/imagine/incognito/bewerk', methode: 'POST', body: { beeld: r.body.beeld, stand: 'opdracht-qwen', velden: { opdracht: process.env.IK_WOORD }, beurt_id: 'beurt-kind-1' }, apparaat: 'apparaat-a', ctx });
   process.stdout.write('kind: ' + r.status + ' ' + b.status + '\n');
   setInterval(() => {}, 1000);
 })();

@@ -23,15 +23,20 @@ for (const f of ['studio.js', 'studio-beeld.py', 'elevenlabs-credits.js', 'imagi
 function wijzig(f, oud, nieuw) { const p = path.join(MOD, f); const s = fs.readFileSync(p, 'utf8'); if (s.indexOf(oud) < 0) throw new Error('kruisproef: tekst niet gevonden in ' + f); fs.writeFileSync(p, s.split(oud).join(nieuw)); }
 if (KRUIS === 'preview') {
   wijzig('studio.js', "if (t.geheugen && !wsKan(info)) return", "if (false) return");
-  wijzig('studio.js', "flowToets(v.api, info, { ws: !!t.beeld && wsKan(info) })", "flowToets(v.api, info, { ws: false })");
+  wijzig('studio.js', "flowToets(v.api, info, { ws: (!!t.beeld || !!t.geheugen) && wsKan(info) })", "flowToets(v.api, info, { ws: false })");
+  wijzig('studio.js', "if (t.geheugen && !(toets.ws_knopen && toets.ws_knopen.length)) return", "if (false) return");
 }
 if (KRUIS === 'geschiedenis') wijzig('studio.js', "async function histWisNu(pid) {", "async function histWisNu(pid) { return true;");
 if (KRUIS === 'schijf') wijzig('imagine.js', "    const id = hex16();\n    s.beelden.set(id,", "    const id = hex16();\n    fs.writeFileSync(path.join(DIR, 'werk-' + id), bytes);\n    s.beelden.set(id,");
 // kruisproeven van de diffreview (handmatig): k7a zonder prompt-id vooraf, k7b zonder brontoets in incKlaar, k7c zonder taak vooraf
 if (KRUIS === 'kf1') wijzig('imagine.js', "S.geheimNaloop(true).catch(function () {}); }\n  }", "}\n  }");   // Fable MOET 1: vrijgeven bij uit de Map weg
 if (KRUIS === 'k7a') wijzig('studio.js', 't.meting.prompt_id = eigenPid;   //', '//');
-if (KRUIS === 'k7b') { wijzig('imagine.js', "      if (!incGeldig(s, bronId)) { b.bytes = null; continue; }\n", ''); wijzig('imagine.js', "    if (!incGeldig(s, bronId)) { beelden.forEach(function (b) { b.bytes = null; }); s.taken.delete(taakId); return; }\n", ''); }
+if (KRUIS === 'k7b') { wijzig('imagine.js', "      if (bronId && !incGeldig(s, bronId)) { b.bytes = null; continue; }\n", ''); wijzig('imagine.js', "    if (bronId && !incGeldig(s, bronId)) { beelden.forEach(function (b) { b.bytes = null; }); s.taken.delete(taakId); return; }\n", ''); }
 if (KRUIS === 'k7c') wijzig('imagine.js', "open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt) VALUES (?, NULL, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, s.id, 'wacht', iso());", '');
+// wv2990 (handmatig): kt2i = de ronde stopt een tekst-naar-beeldtaak omdat hij geen bron heeft (4t moet rood)
+if (KRUIS === 'kt2i') wijzig('imagine.js', "if (t.studio && t.beeld && !s.beelden.has(t.beeld))", "if (t.studio && !s.beelden.has(t.beeld))");
+// kt2v = geen vrijgave na een tekst-naar-beeldtaak zonder resultaat (Fable ZOU 1; 4s moet rood)
+if (KRUIS === 'kt2v') wijzig('imagine.js', "S.geheimNaloop(true).catch(function () {});\n  }\n  // een verlopen beeld", "}\n  // een verlopen beeld");
 const studioMod = require(path.join(MOD, 'studio.js'));
 const imagineMod = require(path.join(MOD, 'imagine.js'));
 
@@ -87,6 +92,13 @@ function zoek(wortels, nn) {
     velden: [{ naam: 'foto', label: 'Foto', soort: 'beeld', pad: '1.inputs.image' }, { naam: 'opdracht', label: 'Opdracht', soort: 'tekstvak', verplicht: true, pad: '2.inputs.value' }] }, api);
   zetFlow('foto-opknappen', { titel: 'Opknappen (toets)', motor: 'comfyui', status: 'proef', uitvoer: 'beeld', max_seconden: 5, ai_model: 'SeedVR2',
     velden: [{ naam: 'foto', label: 'Foto', soort: 'beeld', pad: '1.inputs.image' }] }, { 1: api[1], 9: api[9] });
+  // wv2990: tekst naar beeld (verborgen in de Studio, op proef; formaat zet breedte en hoogte)
+  zetFlow('beeld-tekst-flux', { titel: 'Beeld uit tekst (toets)', motor: 'comfyui', status: 'proef', verborgen: true, uitvoer: 'beeld', max_seconden: 5, ai_model: 'FLUX.2 klein 4B',
+    velden: [{ naam: 'opdracht', label: 'Wat wil je zien?', soort: 'tekstvak', verplicht: true, max: 2000, pad: '2.inputs.value' },
+      { naam: 'formaat', label: 'Formaat', soort: 'keuze', standaard: 'vierkant', opties: [{ label: 'vierkant', waarde: 'vierkant', zet: { '1.inputs.width': 64, '1.inputs.height': 64 } },
+        { label: 'breed', waarde: 'breed', zet: { '1.inputs.width': 96, '1.inputs.height': 48 } }] },
+      { naam: 'seed', label: 'Seed', soort: 'seed', meer: true }] },
+    { 1: { class_type: 'EmptyImage', inputs: { width: 32, height: 32, batch_size: 1, color: 0 } }, 2: { class_type: 'PrimitiveStringMultiline', inputs: { value: '' } }, 13: { class_type: 'PreviewImage', inputs: { images: ['1', 0] } } });
   const schrijfLog = (r) => fs.appendFileSync(LOG, r + '\n');
   const maakPod = (extra) => {
     const S = studioMod.maak(Object.assign({ dir: STUDIO, bewaar: () => { throw new Error('Bestanden mag niet'); }, primair: () => true, sleutel: async () => null,
@@ -129,6 +141,47 @@ function zoek(wortels, nn) {
   toets('1 een versie weggooien: bestand en weergave weg', r.status === 200 && !fs.existsSync(path.join(IMAGINE, 'toon', v2.id + '.jpg')), r);
   toets('1 geschiedenis van ComfyUI leeg en invoer 1×1 na de gewone taak', Object.keys(C.hist).length === 0 && invoerLeeg(), Object.keys(C.hist));
 
+  // ── 1t. nieuw beeld uit tekst, gewone stand (wv2990) ──
+  r = await roep('/app/imagine');
+  toets('1t Imagine kent "Nieuw beeld uit tekst" (klaar, velden opdracht en formaat), niet als bewerking', r.body.tekst && r.body.tekst.id === 'tekst' && r.body.tekst.klaar && r.body.tekst.velden.map((v) => v.naam).join() === 'opdracht,formaat'
+    && !r.body.standen.some((s) => s.id === 'tekst'), r.body.tekst);
+  const fl = await S.flows();
+  toets('1t de flow staat niet in de Studio-lijst (verborgen)', fl.flows.some((f) => f.id === 'beeld-opdracht-qwen') && !fl.flows.some((f) => f.id === 'beeld-tekst-flux'), fl.flows.map((f) => f.id));
+  r = await roep('/app/imagine/bewerk', { versie: v1, stand: 'tekst', velden: { opdracht: 'x' }, beurt_id: nb() });
+  toets('1t tekst-naar-beeld kan niet via /bewerk', r.status === 400, r);
+  r = await roep('/app/imagine/nieuw', { velden: { opdracht: '   ' }, beurt_id: nb() });
+  toets('1t zonder opdracht: 400', r.status === 400, r);
+  r = await roep('/app/imagine/nieuw', { velden: { opdracht: 'x'.repeat(2001) }, beurt_id: nb() });
+  toets('1t opdracht langer dan 2000 tekens: 400', r.status === 400, r);
+  r = await roep('/app/imagine/nieuw', { velden: { opdracht: 'een vuurtoren' }, beurt_id: nb() }, 'apparaat-a', ctxNee);
+  toets('1t op proef zonder verse vingerafdruk: 403 vers_nodig, niets in de rij', r.status === 403 && r.body.vers_nodig === true && !(await roep('/app/imagine')).body.taken.some((t) => t.stand === 'tekst'), r);
+  const TG = 'tekstGEWOON' + crypto.randomBytes(6).toString('hex');
+  C.t2iBeeld = maakBeeld(TG, 96, 48);
+  const up1 = C.uploads, pr1 = C.prompts.length;
+  r = await roep('/app/imagine/nieuw', { velden: { opdracht: 'een vuurtoren bij nacht ' + TG, formaat: 'breed' }, beurt_id: nb() });
+  toets('1t gestart: taak in de rij zonder bron', r.status === 200 && r.body.taak && r.body.taak.stand === 'tekst' && r.body.taak.bron === '', r);
+  const tk = r.body.taak && r.body.taak.id;
+  await totDat(async () => (await roep('/app/imagine')).body.taken.some((t) => t.id === tk && t.status === 'klaar'), 15000);
+  r = await roep('/app/imagine');
+  const tkK = r.body.taken.find((t) => t.id === tk) || {};
+  const bt = r.body.bronnen.find((b) => b.id === tkK.bron);
+  toets('1t klaar: nieuwe bron "tekst" in de bibliotheek, taak verwijst naar bron en versie', tkK.status === 'klaar' && !!bt && bt.herkomst === 'tekst' && bt.versies === 1 && bt.nieuwste === tkK.versie && /vuurtoren/.test(bt.titel), { tkK, bt });
+  r = await roep('/app/imagine/bron/' + tkK.bron);
+  const vt = r.body.versies && r.body.versies[0];
+  toets('1t versie 1 = het gemaakte beeld: stand tekst, model, opdracht bewaard, geen voorganger', vt && vt.nr === 1 && vt.stand === 'tekst' && vt.voorganger === null && vt.model === 'FLUX.2 klein 4B' && vt.opdracht === 'een vuurtoren bij nacht ' + TG && vt.breed === 96, vt);
+  r = await roep('/app/imagine/v/' + tkK.versie + '/deel/1');
+  toets('1t origineel = wat ComfyUI over de websocket stuurde', r.status === 200 && Buffer.from(r.body.data, 'base64').equals(C.t2iBeeld), r.status);
+  const prT = C.prompts[pr1] || {};
+  toets('1t geen upload, formaat gezet (96 × 48), uitvoer via SaveImageWebsocket, geen LoadImage', C.uploads === up1 && prT.prompt && prT.prompt['1'].inputs.width === 96 && prT.prompt['1'].inputs.height === 48
+    && prT.prompt['13'].class_type === 'SaveImageWebsocket' && !Object.values(prT.prompt).some((n) => n.class_type === 'LoadImage') || KRUIS === 'preview', prT.prompt);
+  toets('1t geschiedenis van ComfyUI leeg', Object.keys(C.hist).length === 0, Object.keys(C.hist));
+  r = await roep('/app/imagine/nieuw', { velden: { opdracht: 'een vuurtoren', formaat: 'rond' }, beurt_id: nb() });
+  toets('1t onbekend formaat: 400', r.status === 400, r);
+  r = await roep('/app/imagine/bewerk', { versie: tkK.versie, stand: 'opdracht-qwen', velden: { opdracht: 'maak het dag' }, beurt_id: nb() });
+  await totDat(async () => (await roep('/app/imagine/bron/' + tkK.bron)).body.versies.length === 2, 15000);
+  toets('1t het gemaakte beeld is daarna gewoon te bewerken (versie 2)', (await roep('/app/imagine/bron/' + tkK.bron)).body.versies.length === 2);
+  C.t2iBeeld = null;
+
   // ── 2. incognito: laden, bewerken, sessie per apparaat ──
   const M = 'merkINC' + crypto.randomBytes(8).toString('hex'), WOORD = 'woordINC' + crypto.randomBytes(8).toString('hex');
   const inc = maakBeeld(M);
@@ -154,6 +207,30 @@ function zoek(wortels, nn) {
   const uitInc = r.status === 200 ? Buffer.from(r.body.data, 'base64') : Buffer.alloc(0);
   toets('2 resultaat op te halen (weergave en origineel)', toonInc.length > 100 && uitInc.equals(inc), { t: toonInc.length, u: uitInc.length });
   toets('2 Studio-lijst toont de incognitotaak niet', !S.taken().taken.some((t) => t.flow === 'beeld-opdracht-qwen'));
+  // 2t (wv2990): nieuw beeld uit tekst in incognito; het beeld van de nep draagt het opdrachtwoord (het zoeken vindt dus ook het resultaat)
+  const T2 = 'woordT2I' + crypto.randomBytes(8).toString('hex');
+  const t2b = maakBeeld(T2, 64, 64);
+  C.t2iBeeld = t2b;
+  const nInc = (await roep('/app/imagine/incognito')).body.beelden.length, upI = C.uploads, prI = C.prompts.length;
+  r = await roep('/app/imagine/incognito/nieuw', { velden: { opdracht: '   ' }, beurt_id: nb() });
+  toets('2t incognito zonder opdracht: 400', r.status === 400, r);
+  r = await roep('/app/imagine/incognito/nieuw', { velden: { opdracht: 'teken ' + T2 }, beurt_id: nb() }, 'apparaat-a', ctxNee);
+  toets('2t incognito op proef zonder verse vingerafdruk: 403, geen taak', r.status === 403 && (await roep('/app/imagine/incognito')).body.taken.length === 0, r);
+  r = await roep('/app/imagine/incognito/nieuw', { velden: { opdracht: 'teken ' + T2 }, beurt_id: nb() });
+  toets('2t incognito nieuw beeld gestart', r.status === 200 && /^[a-f0-9]{16}$/.test(r.body.taak), r);
+  await totDat(async () => (await roep('/app/imagine/incognito')).body.beelden.length === nInc + 1, 15000);
+  r = await roep('/app/imagine/incognito');
+  const rt = r.body.beelden.find((x) => x.stand === 'tekst');
+  toets('2t resultaat als nieuw incognitobeeld (geen voorganger, stand tekst, opdracht in het geheugen, eigen uur)', !!rt && rt.voorganger === null && rt.opdracht === true && rt.rest_s === 3600 && r.body.taken.length === 0, r.body);
+  const prT2 = C.prompts[prI] || {};
+  toets('2t eigen prompt-id, geen upload, uitvoer via SaveImageWebsocket', /^[0-9a-f-]{36}$/.test(String(prT2.prompt_id)) && C.uploads === upI && (prT2.prompt && prT2.prompt['13'].class_type === 'SaveImageWebsocket' || KRUIS === 'preview'), prT2.prompt);
+  r = await roep('/app/imagine/incognito/b/' + (rt && rt.id) + '/toon');
+  const toonT2 = r.status === 200 ? Buffer.from(r.body.data, 'base64') : Buffer.alloc(0);
+  r = await roep('/app/imagine/incognito/b/' + (rt && rt.id) + '/deel/1');
+  toets('2t resultaat op te halen', toonT2.length > 100 && r.status === 200 && Buffer.from(r.body.data, 'base64').equals(t2b), { t: toonT2.length, s: r.status });
+  r = await roep('/app/imagine/incognito', undefined, 'apparaat-b');
+  toets('2t een ander apparaat ziet het niet', r.body.beelden.length === 0);
+  C.t2iBeeld = null;
   // export van een ANDER beeld (bewust naar de bibliotheek; dat merk mag dus wel op schijf staan)
   const E = 'merkEXP' + crypto.randomBytes(6).toString('hex');
   r = await roep('/app/imagine/incognito/laad', { data: maakBeeld(E).toString('base64') });
@@ -165,7 +242,7 @@ function zoek(wortels, nn) {
   toets('2 exporteren naar Immich zonder album: geweigerd', r.status === 400, r);
 
   // ── 3. Alles wissen ──
-  const NN = naalden([M, WOORD], [inc, uitInc, toonInc]);
+  const NN = naalden([M, WOORD, T2], [inc, uitInc, toonInc, t2b, toonT2]);
   r = await roep('/app/imagine/incognito/wis', {});
   toets('3 wissen: gemeten lijstje, alles ok', r.status === 200 && r.body.schoon === true && r.body.stappen.length >= 5 && r.body.stappen.every((x) => x.ok), r.body);
   toets('3 /free gedaan (ook de uitvoercache van ComfyUI)', C.free >= 1, C.free);
@@ -213,11 +290,49 @@ function zoek(wortels, nn) {
   toets('4c twaalf mislukte taakregels blokkeren laden niet', r.status === 200, r);
   for (let i = 0; i < 12; i++) sa.taken.delete('mislukt' + i);
   await roep('/app/imagine/incognito/wis', {});
+  // 4t (wv2990): de ronde stopt een lopende tekst-naar-beeldtaak NIET (hij heeft geen bron); het resultaat verloopt na 60 minuten
+  const W4 = 'woordT2U' + crypto.randomBytes(8).toString('hex');
+  const t4b = maakBeeld(W4, 64, 64);
+  C.t2iBeeld = t4b; C.draaiWacht = 500;
+  const int4 = C.interrupts.length;
+  r = await roep('/app/imagine/incognito/nieuw', { velden: { opdracht: W4 }, beurt_id: nb() });
+  await totDat(() => C.rij.queue_running.length > 0, 5000);
+  I._ronde();
+  await totDat(async () => (await roep('/app/imagine/incognito')).body.taken.length === 0, 10000);
+  r = await roep('/app/imagine/incognito');
+  toets('4t de ronde laat een lopende tekst-naar-beeldtaak met rust; resultaat komt', r.body.beelden.length === 1 && r.body.beelden[0].stand === 'tekst' && C.interrupts.length === int4, { b: r.body.beelden, t: r.body.taken, i: C.interrupts.length - int4 });
+  C.draaiWacht = 0; C.t2iBeeld = null;
+  const t4id = r.body.beelden[0] && r.body.beelden[0].id;
+  nu += 60 * 60000 + 1000;
+  const free4t = C.free;
+  r = await roep('/app/imagine/incognito/b/' + t4id + '/toon');
+  const r4t = await roep('/app/imagine/incognito');
+  toets('4t na 60 minuten weg (410), ComfyUI vrijgegeven, merk weg', r.status === 410 && r4t.body.beelden.length === 0
+    && await totDat(() => C.free > free4t && !fs.existsSync(path.join(IMAGINE, 'incognito-merk.json')), 5000), { s: r.status, n: r4t.body.beelden.length, free: C.free - free4t });
+  const tz4 = zoek([POD, COMFY], naalden([W4], [t4b]));
+  toets('4t nul treffers na verlopen (tekst naar beeld)', tz4.length === 0, tz4);
+  // 4s (Fable ZOU 1/2): een tekst-naar-beeldtaak gestopt na het indienen (geen beeld in de Map) → toch /free en merk weg
+  const W4s = 'woordT2S' + crypto.randomBytes(8).toString('hex');
+  C.scenario = 'hang';
+  r = await roep('/app/imagine/incognito/nieuw', { velden: { opdracht: W4s }, beurt_id: nb() });
+  const tk4s = r.body.taak;
+  await totDat(() => !!C.hangt, 5000);
+  const free4s = C.free;
+  r = await roep('/app/imagine/incognito/stop/' + tk4s, {});
+  await totDat(async () => (await roep('/app/imagine/incognito')).body.taken.every((t) => t.status !== 'wacht' && t.status !== 'bezig'), 10000);
+  C.scenario = 'goed';
+  const vrij4s = await totDat(async () => { await S.geheimNaloop(); return C.free > free4s && !fs.existsSync(path.join(IMAGINE, 'incognito-merk.json')); }, 5000);
+  r = await roep('/app/imagine/incognito');
+  toets('4s gestopte tekst-naar-beeldtaak: ComfyUI vrijgegeven (/free), merk weg, niets te wissen', vrij4s && r.body.nog_te_wissen === false && r.body.beelden.length === 0, { free: C.free - free4s, b: r.body });
+  const tz4s = zoek([POD, COMFY], naalden([W4s], []));
+  toets('4s nul treffers op de opdracht', tz4s.length === 0, tz4s);
+  await roep('/app/imagine/incognito/wis', {});
 
   // ── 5. logboeken: alleen de telregel ──
+  // 6 incognitotaken: 2, 2t, 4, 4b, 4t, 4s (wv2990)
   const audit = fs.readFileSync(path.join(STUDIO, 'audit.jsonl'), 'utf8').trim().split('\n').map((x) => JSON.parse(x));
   const incAudit = audit.filter((x) => x.soort === 'incognito');
-  toets('5 audit: per incognitotaak alleen { t, soort, uitkomst, duur_s }', incAudit.length === 3 && incAudit.every((x) => Object.keys(x).sort().join() === 'duur_s,soort,t,uitkomst'), incAudit);
+  toets('5 audit: per incognitotaak alleen { t, soort, uitkomst, duur_s }', incAudit.length === 6 && incAudit.every((x) => Object.keys(x).sort().join() === 'duur_s,soort,t,uitkomst'), incAudit);
   const logT = fs.readFileSync(LOG, 'utf8');
   toets('5 api.log: incognitoregels zonder flow of taak-id, geen FOUT-regels', /studio incognitotaak uitkomst=klaar duur_s=\d+/.test(logT) && !/FOUT/.test(logT), logT.split('\n').filter((x) => /incognito|FOUT/.test(x)));
   // ingepakt logboek (zoals de rotatie): de zoektocht leest .gz uitgepakt (kruis: een merk in de .gz wordt gevonden)
@@ -263,32 +378,40 @@ function zoek(wortels, nn) {
   toets('7c weggooien tijdens het starten van een bewerking: geweigerd (409)', weg7.status === 409, weg7);
   await totDat(async () => (await roep('/app/imagine/bron/' + bron7)).body.taken.every((t) => t.status !== 'wacht' && t.status !== 'bezig'), 10000);
 
-  // ── 6. herstartproef: proces gedood midden in een incognitotaak ──
+  // ── 6. herstartproef: proces gedood midden in een incognitotaak (6 = bewerking, 6t = tekst naar beeld, wv2990) ──
+  const herstart = async (L, t2i) => {
   S.stopTimers(); I.stopTimers();
   const M3 = 'merkHER' + crypto.randomBytes(8).toString('hex'), W3 = 'woordHER' + crypto.randomBytes(8).toString('hex');
   const inc3 = maakBeeld(M3);
   fs.writeFileSync(path.join(W, 'in3.png'), inc3);
   C.scenario = 'hang';
-  const kind = spawn(process.execPath, [path.join(__dirname, 'imagine-kind.js')], { env: Object.assign({}, process.env, { IK_MOD: MOD, IK_POD: POD, IK_COMFY: nep.url, IK_BEELD: path.join(W, 'in3.png'), IK_WOORD: W3 }), stdio: ['ignore', 'pipe', 'inherit'] });
+  if (t2i) C.t2iBeeld = maakBeeld(W3, 64, 64);
+  const kind = spawn(process.execPath, [path.join(__dirname, 'imagine-kind.js')], { env: Object.assign({}, process.env, { IK_MOD: MOD, IK_POD: POD, IK_COMFY: nep.url, IK_BEELD: path.join(W, 'in3.png'), IK_WOORD: W3, IK_T2I: t2i ? '1' : '' }), stdio: ['ignore', 'pipe', 'inherit'] });
   let kUit = ''; kind.stdout.on('data', (b) => { kUit += b; });
   const hangt = await totDat(() => !!C.hangt, 20000);
   fs.rmSync(path.join(W, 'in3.png'));
-  toets('6 kind: incognitotaak loopt in de nep-ComfyUI', hangt, kUit);
+  toets(L + ' kind: incognitotaak loopt in de nep-ComfyUI', hangt, kUit);
   const merkVoor = fs.existsSync(path.join(IMAGINE, 'incognito-merk.json')) ? JSON.parse(fs.readFileSync(path.join(IMAGINE, 'incognito-merk.json'), 'utf8')) : null;
-  toets('6 merk staat vóór het indienen op schijf, alleen prompt-id en free', !!merkVoor && merkVoor.pids.length === 1 && Object.keys(merkVoor).sort().join() === 'free,pids' && merkVoor.pids[0] === (C.hangt && C.hangt.pid), merkVoor);
+  toets(L + ' merk staat vóór het indienen op schijf, alleen prompt-id en free', !!merkVoor && merkVoor.pids.length === 1 && Object.keys(merkVoor).sort().join() === 'free,pids' && merkVoor.pids[0] === (C.hangt && C.hangt.pid), merkVoor);
   kind.kill('SIGKILL');
   await new Promise((r2) => kind.on('exit', r2));
   C.scenario = 'goed';
   ({ S, I } = maakPod());
   r = await roep('/app/imagine/incognito');
-  toets('6 na de herstart: nog te wissen en de melding "sessie beëindigd door een herstart"', r.body.herstart === true, r.body);
+  toets(L + ' na de herstart: nog te wissen en de melding "sessie beëindigd door een herstart"', r.body.herstart === true, r.body);
   const schoon = await totDat(async () => { await S.geheimNaloop(); return !S.incognito().nog_te_wissen; }, 10000);
-  toets('6 naloop: eigen taak onderbroken, geschiedenis weg, invoer 1×1, /free, merk weg', schoon && C.interrupts.some((x) => merkVoor && x.prompt_id === merkVoor.pids[0]) && Object.keys(C.hist).length === 0 && invoerLeeg() && !fs.existsSync(path.join(IMAGINE, 'incognito-merk.json')),
+  toets(L + ' naloop: eigen taak onderbroken, geschiedenis weg, invoer 1×1, /free, merk weg', schoon && C.interrupts.some((x) => merkVoor && x.prompt_id === merkVoor.pids[0]) && Object.keys(C.hist).length === 0 && invoerLeeg() && !fs.existsSync(path.join(IMAGINE, 'incognito-merk.json')),
     { schoon, i: C.interrupts, h: Object.keys(C.hist), merk: fs.existsSync(path.join(IMAGINE, 'incognito-merk.json')) });
   const t6 = zoek([POD, COMFY], naalden([M3, W3], [inc3]));
-  toets('6 nul treffers na de herstart', t6.length === 0, t6);
+  toets(L + ' nul treffers na de herstart', t6.length === 0, t6);
   r = await roep('/app/imagine/incognito/laad', { data: maakBeeld('x').toString('base64') });
-  toets('6 daarna weer incognito te gebruiken', r.status === 200, r);
+  toets(L + ' daarna weer incognito te gebruiken', r.status === 200, r);
+  const tw = await roep('/app/imagine/incognito/wis', {});
+  toets(L + ' en weer schoon te wissen', tw.status === 200 && tw.body.schoon === true, tw.body);
+  C.t2iBeeld = null;
+  };
+  await herstart('6', false);
+  await herstart('6t', true);
 
   S.stopTimers(); I.stopTimers(); nep.sluit();
   fs.rmSync(W, { recursive: true, force: true });
