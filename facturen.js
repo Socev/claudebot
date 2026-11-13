@@ -268,9 +268,13 @@ function txKort(t) {
     omschrijving: t.omschrijving, kenmerk: t.kenmerk, entiteit: t.entiteit, rekening: eind4(t.eigen_iban), is_incasso: !!t.is_incasso, categorie: t.categorie,
     formaat: t.formaat };
 }
-function signaalKort(s) {
+// wv2992: alleen de knoppen die bij dit signaal horen (afschrift of factuur); Opnieuw proberen bij een afschrift alleen als er voor dat
+// afschrift geen gelukte of lopende opdracht is (anders dubbel naar de boekhouder).
+function signaalKort(s, fdb) {
   const d = json(s.details, {}) || {};
-  const knoppen = B.SIGNALEN[s.soort] ? Object.entries(B.SIGNALEN[s.soort].knoppen).map(([k, v]) => ({ knop: k, label: v.label, vereist: v.vereist })) : [];
+  const vorm = { soort: s.soort, facturen: json(s.facturen, []) || [], details: d };
+  const knoppen = B.SIGNALEN[s.soort] ? B.knoppenVan(vorm).filter((k) => !(fdb && s.status === 'open' && k === 'opnieuw_proberen' && B.isAfschriftSignaal(vorm) && afschriftBezet(fdb, d.afschrift)))
+    .map((k) => { const v = B.SIGNALEN[s.soort].knoppen[k]; return { knop: k, label: v.label, vereist: v.vereist }; }) : [];
   return { id: s.id, soort: s.soort, titel: s.titel, entiteit: s.entiteit, leverancier: s.leverancier, naam: d.naam || null, transacties: json(s.transacties, []),
     facturen: json(s.facturen, []), bedrag_centen: s.bedrag_centen, status: s.status, afhandeling: s.afhandeling, les: s.les, wie: s.wie, wanneer: s.wanneer,
     sluimer_tot: s.sluimer_tot, aangemaakt_op: s.aangemaakt_op, knoppen,
@@ -536,7 +540,7 @@ function bank(fdb, r, nu) {
   const feitGroep = fdb.db.prepare("SELECT status, count(*) AS n FROM feit WHERE substr(wanneer, 1, 7) = ? GROUP BY status").all(maand);
   if (isEig(r)) for (const g of feitGroep) geleerd_regels.push({ tekst: g.status === 'bevestigd' ? g.n + (g.n === 1 ? ' rekening' : ' rekeningen') + ' vastgelegd als rekening van een leverancier (uit de bankhistorie).'
     : g.n + (g.n === 1 ? ' rekeningkaart' : ' rekeningkaarten') + ' afgewezen; nabellen blijft nodig en de kaart komt niet terug.', aantal: g.n, soort: 'feit_' + g.status, entiteit: null });
-  return { signalen: open.map(signaalKort), geleerd: geleerd.slice(0, 50).map(signaalKort), geleerd_regels, voorstellen, feiten: feitKaarten(fdb, r, nu),
+  return { signalen: open.map((x) => signaalKort(x, fdb)), geleerd: geleerd.slice(0, 50).map((x) => signaalKort(x)), geleerd_regels, voorstellen, feiten: feitKaarten(fdb, r, nu),
     weken: Object.values(weken).sort((a, b) => (a.week < b.week ? -1 : 1)), zonder_factuur: ZONDER_FACTUUR.aan };
 }
 function t2(a, b) { return JSON.stringify([a || null, b]); }
@@ -2131,6 +2135,14 @@ function voerGevolgUit(fdb, r, s, g, nu, uit) {
         .run(ov.naar, ov.naar, dagAmsterdam(nu), wanneer, f.id, f.betaalspoor);
       D.audit(fdb, { wie: r.wie, wat: 'betaalspoor_' + g.gebeurtenis, object_soort: 'factuur', object_id: f.id, entiteit: f.entiteit, voor: { betaalspoor: f.betaalspoor }, na: { betaalspoor: ov.naar }, wanneer });
       return { actie: g.actie, factuur: f.id, betaalspoor: ov.naar };
+    }
+    case 'afschrift_opnieuw': {
+      // wv2992: hetzelfde POT-afschrift (de laatst gemaakte bestanden) opnieuw in de wachtrij, alleen de eigenaar
+      eisEigenaar(r);
+      const bezet = afschriftBezet(fdb, g.afschrift);
+      if (bezet) weiger(409, 'opnieuw proberen kan niet: ' + bezet);
+      uit.afschrift = afschriftOpnieuw(fdb, r, g.afschrift, nu);
+      return { actie: g.actie, afschrift: g.afschrift, opdracht: uit.afschrift.opdracht.id };
     }
     case 'betaallijst': return { actie: g.actie, factuur: g.factuur };
     case 'koppelen': return Object.assign({ actie: g.actie }, koppelIntern(fdb, r, String(g.transactie || ''), g.factuur, true, nu));
@@ -3826,18 +3838,48 @@ function afschriftKlaarzetten(fdb, r, invoer, o) {
     if (a && ['in_wachtrij', 'verstuurd'].includes(a.status)) weiger(409, 'dit afschrift staat al in de wachtrij of is verstuurd');
     if (!a) { a = { id: D.nieuwId() }; D.voegToe(fdb, 'pot_afschrift', { id: a.id, rekening: rek.id, periode: invoer.periode, mt940_document: ids[0].id, pdf_document: ids[1].id, status: 'in_wachtrij', aangemaakt_op: wanneer, bijgewerkt_op: wanneer }); }
     else fdb.db.prepare("UPDATE pot_afschrift SET mt940_document = ?, pdf_document = ?, status = 'in_wachtrij', bijgewerkt_op = ? WHERE id = ?").run(ids[0].id, ids[1].id, wanneer, a.id);
-    const opId = D.nieuwId();
-    // naam en mime uit de documentrij (bij een hergebruikt stuk de oude naam), zoals de consistentiecontrole ze opnieuw opbouwt (diffreview wv855 #5)
-    const bijlagen = ids.map((x) => { const d = fdb.db.prepare('SELECT naam, mime, sha256 FROM document WHERE id = ?').get(x.id); return { naam: d.naam, mime: d.mime, sha256: d.sha256 }; });
-    const op = { id: opId, soort: 'boekhouder_afschrift', doeladres: e.afschrift_doel,
-      regel: { afschrift_id: a.id, entiteit: e.sleutel, periode: invoer.periode, doeladres: e.afschrift_doel }, bijlagen };
-    const vingerafdruk = K.vingerafdruk(op);
-    const verstuurNa = K.verstuurNa(nu, verstuurInstelling(fdb));
-    D.voegToe(fdb, 'opdracht', { id: opId, soort: op.soort, afschrift: a.id, entiteit: e.sleutel, doeladres: e.afschrift_doel, bijlagen, vingerafdruk,
-      verstuur_na: verstuurNa, idempotentiesleutel: 'afschrift:' + a.id + ':' + opId, status: 'wacht', poging: 0, aangemaakt_door: r.wie, aangemaakt_op: wanneer, bijgewerkt_op: wanneer });
-    D.audit(fdb, { wie: r.wie, wat: 'afschrift_klaarzetten', object_soort: 'pot_afschrift', object_id: a.id, entiteit: e.sleutel, na: { periode: invoer.periode, opdracht: opId }, wanneer });
-    return { afschrift: a.id, opdracht: { id: opId, verstuur_na: verstuurNa } };
+    return afschriftOpdracht(fdb, r, a.id, e, ids.map((x) => x.id), invoer.periode, nu, 'afschrift_klaarzetten');
   });
+}
+// De opdracht boekhouder_afschrift bij een afschrift dat net op in_wachtrij ging (gedeeld door klaarzetten en Opnieuw proberen, wv2992).
+function afschriftOpdracht(fdb, r, afschriftId, e, docIds, periode, nu, wat) {
+  const wanneer = nuIso(nu);
+  const opId = D.nieuwId();
+  // naam en mime uit de documentrij (bij een hergebruikt stuk de oude naam), zoals de consistentiecontrole ze opnieuw opbouwt (diffreview wv855 #5)
+  const bijlagen = docIds.map((id) => { const d = fdb.db.prepare('SELECT naam, mime, sha256 FROM document WHERE id = ?').get(id); return { naam: d.naam, mime: d.mime, sha256: d.sha256 }; });
+  const op = { id: opId, soort: 'boekhouder_afschrift', doeladres: e.afschrift_doel,
+    regel: { afschrift_id: afschriftId, entiteit: e.sleutel, periode, doeladres: e.afschrift_doel }, bijlagen };
+  const vingerafdruk = K.vingerafdruk(op);
+  const verstuurNa = K.verstuurNa(nu, verstuurInstelling(fdb));
+  D.voegToe(fdb, 'opdracht', { id: opId, soort: op.soort, afschrift: afschriftId, entiteit: e.sleutel, doeladres: e.afschrift_doel, bijlagen, vingerafdruk,
+    verstuur_na: verstuurNa, idempotentiesleutel: 'afschrift:' + afschriftId + ':' + opId, status: 'wacht', poging: 0, aangemaakt_door: r.wie, aangemaakt_op: wanneer, bijgewerkt_op: wanneer });
+  D.audit(fdb, { wie: r.wie, wat, object_soort: 'pot_afschrift', object_id: afschriftId, entiteit: e.sleutel, na: { periode, opdracht: opId }, wanneer });
+  return { afschrift: afschriftId, opdracht: { id: opId, verstuur_na: verstuurNa } };
+}
+/*
+ * wv2992: waarom een afschrift nu geen nieuwe opdracht mag krijgen (null = mag wel): het staat al in de wachtrij of is verstuurd, of er is een
+ * levende opdracht (wacht, opgehaald, gelukt, of mislukt met nog een poging; dezelfde regel als de unieke index opdracht_levend_afschrift).
+ */
+function afschriftBezet(fdb, afschriftId) {
+  const a = fdb.db.prepare('SELECT status FROM pot_afschrift WHERE id = ?').get(String(afschriftId || ''));
+  if (!a) return 'afschrift niet gevonden';
+  const o = fdb.db.prepare('SELECT status FROM opdracht WHERE afschrift = ? AND ' + D.LEVEND + ' ORDER BY aangemaakt_op DESC LIMIT 1').get(afschriftId);
+  if (o) return o.status === 'gelukt' ? 'een latere verzending van dit afschrift is al gelukt' : 'er loopt al een verzending van dit afschrift';
+  if (a.status === 'verstuurd') return 'dit afschrift is al verstuurd';
+  if (a.status !== 'klaar') return 'dit afschrift staat al in de wachtrij';
+  return null;
+}
+// Opnieuw proberen bij een afschriftsignaal: dezelfde (laatst gemaakte) bestanden opnieuw naar het afschriftadres. Binnen de transactie van
+// het signaal; afschriftBezet is dan al getoetst.
+function afschriftOpnieuw(fdb, r, afschriftId, nu) {
+  const a = fdb.db.prepare('SELECT a.*, k.entiteit FROM pot_afschrift a JOIN rekening k ON k.id = a.rekening WHERE a.id = ?').get(afschriftId);
+  if (!a) weiger(404, 'afschrift niet gevonden');
+  if (!a.mt940_document || !a.pdf_document) weiger(409, 'bij dit afschrift ontbreken de bestanden; maak het opnieuw in de POT-app');
+  const e = fdb.db.prepare('SELECT * FROM entiteit WHERE sleutel = ?').get(a.entiteit);
+  if (!e || !e.afschrift_doel) weiger(409, 'deze entiteit heeft geen afschriftadres (eerst instellen)');
+  const u = fdb.db.prepare("UPDATE pot_afschrift SET status = 'in_wachtrij', bijgewerkt_op = ? WHERE id = ? AND status = 'klaar'").run(nuIso(nu), a.id);
+  if (u.changes !== 1) weiger(409, 'het afschrift is intussen gewijzigd');
+  return afschriftOpdracht(fdb, r, a.id, e, [a.mt940_document, a.pdf_document], a.periode, nu, 'afschrift_opnieuw');
 }
 // POST /facturen-ronde: de back-up (VACUUM INTO, 14 dagen); de koerier (facturen-koerier.js) roept dit aan als backupNodig.
 // Na een wijziging in de koppelregels (facturen-bank.js) beoordeelt de eerstvolgende back-upronde (de eerste tik na 02:00) de stand één
