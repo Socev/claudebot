@@ -92,7 +92,7 @@ function t(){var n=new Date();var k=document.getElementById('klok'),w=document.g
 if(n.getTime()>T){document.body.className='oud';}}t();setInterval(t,1000);})();`;
   if (leeg) {
     return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta http-equiv="refresh" content="60"><title>Personeelsscherm</title>
-<style>html,body{margin:0;height:100%;background:#000;color:#444;font-family:'Liberation Sans',Arial,Helvetica,sans-serif;overflow:hidden}#doek{position:relative;width:1920px;height:1080px;transform-origin:0 0;background:#000}#klok{position:absolute;right:38px;bottom:38px;font-size:46px}#dag,#wd{display:none}</style></head>
+<style>*{cursor:none!important}html,body{margin:0;height:100%;background:#000;color:#444;font-family:'Liberation Sans',Arial,Helvetica,sans-serif;overflow:hidden}#doek{position:relative;width:1920px;height:1080px;transform-origin:0 0;background:#000}#klok{position:absolute;right:38px;bottom:38px;font-size:46px}#dag,#wd{display:none}</style></head>
 <body data-soort="leeg" data-gemaakt="${Number(gemaakt)}"><div id="doek"><div id="klok"></div><div id="wd"></div><div id="dag"></div></div><script>${klokScript}</script></body></html>`;
   }
   const i = inhoud || {};
@@ -106,7 +106,7 @@ if(n.getTime()>T){document.body.className='oud';}}t();setInterval(t,1000);})();`
     : '<div class="niets">Geen afspraken in de komende weken.</div>';
   return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta http-equiv="refresh" content="60"><title>Personeelsscherm</title>
 <style>
-*{box-sizing:border-box}
+*{box-sizing:border-box;cursor:none!important}
 html,body{margin:0;height:100%;background:#fff;color:#5B5C60;font-family:'Liberation Sans',Arial,Helvetica,sans-serif;overflow:hidden}
 #doek{position:relative;width:1920px;height:1080px;transform-origin:0 0;background:#fff;overflow:hidden;display:flex}
 .rail{width:620px;flex:none;background:#F4F4F5;padding:44px 52px;display:flex;flex-direction:column;gap:30px;border-right:8px solid #ED1C24;overflow:hidden}
