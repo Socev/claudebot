@@ -7,7 +7,8 @@
 // Wat erin komt (gemeten 26-10 → 2-11, bouwplan § 4.8):
 //   klus     — agentrapport in de machinekamer van een wortelrij (diepte 0, rij = wortel: de klus die rechtstreeks uit Davids opdracht of
 //              knop kwam), herkomst david, soort gewoon; in het hoofdkanaal elk agentrapport-david. Vervolgstappen niet (58/dag).
-//   antwoord — Davids eigen beurt (getypt of knop) met een antwoord, zolang hij dat gesprek ná het antwoord niet zag.
+//   antwoord — Davids eigen getypte beurt met een antwoord, zolang hij dat gesprek ná het antwoord niet zag; een knopdruk alleen bij een
+//              fout of een bestand (wv3093, knopTelt).
 //   bewaard  — wat David in het gesprek bewaarde (14 dagen na het bewaren).
 // Nooit: een bericht met een vraag (die staat in Moet iets of als kaart), Telegram-beurten, zoekvragen; op een vaste plek geen hoofdkanaal.
 
@@ -34,6 +35,13 @@ function kort(t, n) {
 function klusTelt(k) {
   return !!k && typeof k === 'object' && k.herkomst === 'david' && (k.soort || 'gewoon') === 'gewoon' && Number(k.diepte || 0) === 0 &&
     k.rij != null && String(k.wortel) === String(k.rij);
+}
+// wv3093 (David 14-11-2026 22:35: "te vaak berichten wegklikken ... vooral de berichten die komen doordat ik op 'ja' of nee heb geklikt"):
+// het antwoord op een knopdruk (Ja/Nee/Anders; app-log soort knop) is meestal een bevestiging en blijft alleen in het gesprek. Wél te
+// lezen: een mislukte beurt (ok false) of een antwoord met een bestand. Een antwoord met een nieuwe vraag staat in Moet iets (vraag()).
+// Gemeten 7-14 nov: 159 knopantwoorden, 15 met een vraag, 5 met een bestand, 0 mislukt.
+function knopTelt(x) {
+  return x.ok === false || (Array.isArray(x.bestanden) && x.bestanden.length > 0);
 }
 function tijd(x) { const t = Date.parse(x); return isFinite(t) ? t : NaN; }
 
@@ -107,7 +115,7 @@ function uit(o) {
             soort = 'klus';
             titel = kort(o.klussen[x.agent_job].titel || '', 200) || null;
           }
-        } else if (x.soort === 'bericht' || x.soort === 'knop') {
+        } else if (x.soort === 'bericht' || (x.soort === 'knop' && knopTelt(x))) {
           if (!(tijd(tabs[kanaal]) >= t)) soort = 'antwoord';   // David zag het gesprek ná het antwoord: dan niet (meer)
         }
       }
@@ -141,5 +149,5 @@ function klusJobs(per, nu) {
   return Array.from(s).sort();
 }
 
-module.exports = { uit: uit, zet: zet, staatNorm: staatNorm, klusTelt: klusTelt, klusJobs: klusJobs,
+module.exports = { uit: uit, zet: zet, staatNorm: staatNorm, klusTelt: klusTelt, knopTelt: knopTelt, klusJobs: klusJobs,
   AUTO_MS: AUTO_MS, BEWAAR_OUD_MS: BEWAAR_OUD_MS, BEWAAR_MS: BEWAAR_MS, LOG_MS: LOG_MS, MAX: MAX, JOB_RE: JOB_RE };
