@@ -1457,7 +1457,9 @@ const FIN_LABEL = { omzet_totaal: 'Omzet', resultaat: 'Resultaat', personeel: 'P
 const FIN_KERN = {
   TG: { kern: ['omzet_totaal', 'resultaat', 'personeel', 'uitbesteed', 'k_huisv', 'liquide', 'ev_totaal'],
     noten: ['Personeelskosten: t/m 2021 staat alleen het totaal in de jaarrekening; vanaf 2022 opgeteld uit lonen, sociale lasten, pensioen en overige personeelskosten.', 'De jaarrekening 2021 is met OCR ingelezen.'] },
-  GH: { kern: ['omzet_totaal', 'resultaat', 'personeel', 'uitbesteed', 'k_huisv', 'liquide', 'ev_totaal'], noten: ['Resultaat = winst van de maatschap, vóór verdeling over de maten.'] },
+  // wv3041: de hub heeft ook de voorganger HAP Leusden (2017-2020, andere eigenaren); die jaren horen niet in deze reeks
+  GH: { kern: ['omzet_totaal', 'resultaat', 'personeel', 'uitbesteed', 'k_huisv', 'liquide', 'ev_totaal'], van: 2024,
+    noten: ['Resultaat = winst van de maatschap, vóór verdeling over de maten.', 'Vanaf 2024 (maatschap Groenhouten). De jaren 2017–2020 van de voorganger Huisartsenpraktijk Leusden (andere eigenaren en een andere kostenindeling) staan wel in de datahub, maar niet in deze reeks; vraag Socev.'] },
   POT: { kern: ['k_som_bruto', 'bijdrage_maten', 'personeel', 'liquide'], omkeren: ['bijdrage_maten'],
     noten: ['Kosten vóór bijdrage = wat de POH-GGZ-constructie werkelijk kost; de deelnemende praktijken dragen dat via hun bijdrage.', '2016 boekte de bijdrage als omzet (2017 herrubriceerde dat).'] },
   KM: { kern: ['k_som_bruto', 'bijdrage_maten', 'k_huisv', 'liquide'], omkeren: ['bijdrage_maten'], van: 2017,

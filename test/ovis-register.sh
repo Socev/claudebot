@@ -1299,6 +1299,9 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const blok = R.finKernBlokTekst('TG', M());
     toets('12 kerncijferblok: jaren als kolommen, hele euro\'s, personeel opgeteld, – waar niets is, geen datum', /\| bedragen in hele euro's \| 2024 \| 2025 \|/.test(blok) && /\| Omzet \| 1\.000\.000 \| 1\.100\.000 \|/.test(blok)
       && /\| Personeelskosten \| – \| 350\.000 \|/.test(blok) && /\| Resultaat \| – \| −1\.235 \|/.test(blok) && /Bron: 2 jaarrekeningen/.test(blok) && blok.indexOf('id="fin:TG"') > 0, blok);
+    const mG = M(); mG.reeks.push({ entiteit: 'GH', rubriek: 'omzet_totaal', jaar: 2018, bedrag: 931234, bron_id: 60 }, { entiteit: 'GH', rubriek: 'omzet_totaal', jaar: 2024, bedrag: 1197097, bron_id: 15 });
+    const blokG = R.finKernBlokTekst('GH', mG);
+    toets('12 wv3041 kerncijferblok GH: jaren van de voorganger (vóór 2024) niet in de tabel, wel de noot', /\| bedragen in hele euro's \| 2024 \|\n/.test(blokG) && !/2018 \|/.test(blokG) && !/931\.234/.test(blokG) && /voorganger Huisartsenpraktijk Leusden/.test(blokG), blokG);
     const mR = M(); mR.reeks.push({ entiteit: 'POT', rubriek: 'k_som_bruto', jaar: 2025, bedrag: 5, bron_id: 3 });
     toets('12 entiteit met cijfers zonder kerncijferpagina: BB2 kern', /BB2-fin-kern-POT-geen-pagina/.test(ids(C(FIN({ meting: mR })))));
     toets('12 kerncijferpagina voor een entiteit zonder cijfers: BB1', /BB1-fin-kern-POT-onbekend/.test(ids(C(FIN({ kern: [R.leesKern(KP, KERNT('TG')), R.leesKern('10_Zakelijk/POT_POH_GGZ/Financieel/Kerncijfers - POT.md', KERNT('POT'))] })))));
