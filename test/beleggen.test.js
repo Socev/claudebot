@@ -380,3 +380,75 @@ test('wv2985 echte vorm: elke afwijking = weigeren', () => {
   // rekening: regels met dezelfde minuut mogen, maar een oudere regel boven een nieuwere niet (ook als het saldo toevallig klopt)
   weigert(ECHT_REK.replace('08-11-2026,19:30,08-11-2026', '11-11-2026,19:30,11-11-2026'), /nieuw naar oud/);
 });
+
+// ── wv3030: Davids vorm (14-11-2026; hier VERZONNEN): alle 14 vragen beantwoord, 7/10/13 alleen in woorden, transacties ingelezen, geen portefeuille ──
+function davidVorm() {
+  const r = nieuw();
+  for (let v = 1; v <= 14; v++) {
+    const waarden = v === 8 ? { max_aandeel: '10', max_thema: '40' } : v === 14 ? { herbalans_wijze: 'afwijking' } : {};
+    assert.strictEqual(r.post('plan', { vraag: v, tekst: 'verzonnen antwoord ' + v, waarden }).status, 200);
+  }
+  assert.strictEqual(r.post('bestand', { naam: 'Transactions.csv', tekst: ECHT_TX, bewaar: true }).status, 200);
+  return r;
+}
+test('wv3030 regels: beantwoorde vraag zonder getal = "geen getal" (niet "nog niet gezet"); open vraag blijft "nog niet gezet"', () => {
+  const { get } = davidVorm();
+  const o = get().body;
+  assert.strictEqual(o.open_punten.filter((p) => p.soort === 'vraag').length, 0);
+  const L = Object.fromEntries(o.stand.lampjes.map((l) => [l.sleutel, l]));
+  for (const k of ['kern', 'eigen', 'leuk', 'afkoel', 'koop_niet']) { assert.strictEqual(L[k].grens, 'geen getal', k); assert.match(L[k].uitleg, /de app rekent dit niet na/); assert.strictEqual(L[k].lamp, 'grijs'); }
+  assert.deepStrictEqual([L.kern.vraag, L.koop_niet.vraag, L.afkoel.vraag, L.max_aandeel.vraag], [7, 10, 13, 8]);
+  assert.ok(!o.stand.lampjes.some((l) => l.grens === 'nog niet gezet'));
+  assert.strictEqual(L.max_aandeel.grens, '10 %');
+  const k = B.bereken({ antwoorden: {}, regels: {}, posities: [], soorten: {}, transacties: [], dagboek: [], volglijst: [], keuzes: {} }, '2026-11-12');
+  assert.ok(k.lampjes.every((l) => l.grens === 'nog niet gezet'), 'zonder antwoorden blijft het "nog niet gezet"');
+});
+test('wv3030 stand uit transacties: aantal + aankoopwaarde incl. kosten, bron aankoop; portefeuille of handpositie gaat voor', () => {
+  const { get, post } = davidVorm();
+  let o = get().body;
+  assert.strictEqual(o.stand.bron, 'aankoop'); assert.strictEqual(o.stand.datum, '2026-11-10');
+  const P = Object.fromEntries(o.stand.posities.map((p) => [p.sleutel, p]));
+  assert.deepStrictEqual([P['isin:XX0000000044'].aantal, P['isin:XX0000000044'].waarde_eur_cent, P['isin:XX0000000044'].bron], ['4', 18191, 'aankoop']);
+  assert.deepStrictEqual([P['isin:XX0000000055'].aantal, P['isin:XX0000000055'].waarde_eur_cent], ['6', 12100]);
+  assert.strictEqual(o.stand.verdeling.belegd_cent, 18191 + 12100);
+  assert.strictEqual(o.stand.verdeling.cash_cent, 0);
+  // soort en nieuwskaartje mogen op een positie uit transacties (en blijven straks bij de portefeuille: zelfde sleutel)
+  assert.strictEqual(post('soort', { sleutel: 'isin:XX0000000044', soort: 'tech' }).status, 200);
+  assert.strictEqual(post('soort', { sleutel: 'isin:XX0000000099', soort: 'tech' }).status, 404);
+  assert.strictEqual(post('bedrijf', { sleutel: 'isin:XX0000000044', actie: 'zet', namen: ['Voorbeeld Robot'] }).status, 200);
+  o = get().body;
+  assert.strictEqual(o.stand.posities.find((p) => p.sleutel === 'isin:XX0000000044').soort, 'tech');
+  // verkoop haalt naar rato aankoopwaarde weg; meer verkopen dan er was = onvolledig, positie weg
+  const a = B.aankoopStand([{ datum: '2026-11-01', tijd: '10:00', naam: 'A', isin: 'XX0000000066', aantal: '4', totaal_eur_cent: -40000 },
+    { datum: '2026-11-02', tijd: '10:00', naam: 'A', isin: 'XX0000000066', aantal: '-1', totaal_eur_cent: 12000 },
+    { datum: '2026-11-02', tijd: '11:00', naam: 'B', isin: null, aantal: '-2', totaal_eur_cent: 5000 }]);
+  assert.deepStrictEqual(a.map((p) => [p.sleutel, p.aantal, p.waarde_eur_cent, p.onvolledig]), [['isin:XX0000000066', '3', 30000, false]]);
+  // handpositie gaat voor
+  assert.strictEqual(post('positie', { actie: 'zet', naam: 'Voorbeeld Hand', aantal: '1', waarde_eur: '50' }).status, 200);
+  o = get().body;
+  assert.deepStrictEqual([o.stand.bron, o.stand.posities.length], ['hand', 1]);
+  // ingelezen portefeuille gaat voor
+  const r2 = davidVorm();
+  assert.strictEqual(r2.post('bestand', { naam: 'Portfolio.csv', tekst: PORT, datum: '2026-11-13', bewaar: true }).status, 200);
+  o = r2.get().body;
+  assert.deepStrictEqual([o.stand.bron, o.stand.posities.every((p) => p.bron === 'bestand')], ['bestand', true]);
+});
+test('wv3030 signaal op aankoopwaarde zegt dat; storting in het rekeningoverzicht telt', () => {
+  const { get, post } = davidVorm();
+  post('soort', { sleutel: 'isin:XX0000000044', soort: 'tech' }); post('soort', { sleutel: 'isin:XX0000000055', soort: 'health' });
+  const s = get().body.signalen.find((x) => x.sleutel.startsWith('max-aandeel:'));
+  assert.ok(s && /^Op aankoopwaarde \(je transacties tot en met 2026-11-10\)/.test(s.wat), s && s.wat);
+  assert.strictEqual(get().body.stortingen, 0);
+  assert.strictEqual(post('bestand', { naam: 'Account.csv', tekst: ECHT_REK, bewaar: true }).status, 200);
+  assert.strictEqual(get().body.stortingen, 1, 'Reservation iDEAL = storting');
+});
+test('wv3030 dagboek: Niets doen haalt het signaal én het open punt weg', () => {
+  const { get, post } = davidVorm();
+  let o = get().body;
+  const tx = o.open_punten.filter((p) => p.soort === 'dagboek');
+  assert.strictEqual(tx.length, 2);
+  for (const p of tx) assert.strictEqual(post('signaal', { sleutel: 'dagboek:' + p.transactie, keuze: 'niets' }).status, 200);
+  o = get().body;
+  assert.strictEqual(o.open_punten.filter((p) => p.soort === 'dagboek').length, 0);
+  assert.ok(!o.signalen.some((x) => x.soort === 'dagboek'));
+});
