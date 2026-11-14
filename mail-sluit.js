@@ -169,17 +169,19 @@ function maak(io) {
     let mm = {};
     try { mm = io.mailman.mailSluitBron(h.berichten.map(function (b) { return b.id; })) || {}; } catch (e) { fout('mail-sluit-mailman', e); return null; }
     const adres = function (v) { const x = /<([^<>\s]+@[^<>\s]+)>/.exec(v) || /([^\s<>"]+@[^\s<>"]+)/.exec(v); return x ? x[1].toLowerCase().slice(0, 200) : ''; };
-    const bekendVan = {};
+    const bekendVan = {}, onzeker = new Set();   // review r4: een mislukte of overgeslagen contactencontrole is geen "onbekend"
     let gevraagd = 0;
     for (const b of h.berichten) {
       if (!b.labels.includes('SPAM')) continue;
       const a = adres(b.van);
       if (!a || Object.prototype.hasOwnProperty.call(bekendVan, a)) continue;
-      if (gevraagd++ >= MAX_BEKEND) { bekendVan[a] = false; h.compleet = false; continue; }
-      try { bekendVan[a] = (await io.bekend(a)) === true; } catch (e) { fout('mail-sluit-bekend', e); bekendVan[a] = false; h.compleet = false; }
+      if (gevraagd++ >= MAX_BEKEND) { bekendVan[a] = false; onzeker.add(a); h.compleet = false; continue; }
+      try { bekendVan[a] = (await io.bekend(a)) === true; } catch (e) { fout('mail-sluit-bekend', e); bekendVan[a] = false; onzeker.add(a); h.compleet = false; }
     }
     const perDraad = new Map();
+    const twijfel = new Set();   // gesprekken waarvan de plek door zo'n onzekere controle niet vaststaat: tellen als "niet gezien" bij samenvoegen
     for (const b of h.berichten) {
+      if (b.labels.includes('SPAM') && onzeker.has(adres(b.van))) twijfel.add(b.draad);
       const d = Object.assign(deel(b, mm[b.id], h.filters, !!bekendVan[adres(b.van)]), { b });
       if (!perDraad.has(b.draad)) perDraad.set(b.draad, []);
       perDraad.get(b.draad).push(d);
@@ -204,7 +206,7 @@ function maak(io) {
         datum: b.datum, slot, spam: d.reden === 'spam_bekend', ongelezen: b.labels.includes('UNREAD') });
     }
     lijst.sort(function (x, y) { return String(y.datum || '').localeCompare(String(x.datum || '')); });
-    return { dag, op: new Date(nu()).toISOString(), compleet: h.compleet, berichten: h.berichten.length, tel, uit, mist, lijst, draden: Array.from(perDraad.keys()) };
+    return { dag, op: new Date(nu()).toISOString(), compleet: h.compleet, berichten: h.berichten.length, tel, uit, mist, lijst, draden: Array.from(perDraad.keys()).filter(function (d) { return !twijfel.has(d); }) };
   }
   // De nachtronde: gisteren en de twee dagen ervoor opnieuw. Geeft { ok, dagen: [...], nieuw: [draden], ochtend: tekst|null, mist }.
   // ok = elke dag kwam terug EN was compleet (review wv3091 MOET 1: een onvolledige dag is geen geslaagde controle; de tik probeert opnieuw
