@@ -543,12 +543,23 @@ start_api(){
 # Het bestand wordt met de hand gevuld uit het Vault-secret github_pat_ghawa_site.
 GHAWA_CRED="${GHAWA_CRED:-/opt/data/.git-credentials-ghawa}"
 
-setup_git(){
-  git config --global user.name  "${GIT_USER_NAME:-GHAWA Website Bot}"
-  git config --global user.email "${GIT_USER_EMAIL:-bot@ghawa.org}"
+# Globale git-identiteit van de pod: elke commit van Socev en de machinekamer (claudebot-src,
+# socev-app, mk-scripts …) krijgt deze naam. Draait bij ELKE podstart, ook zonder GHAWA.
+# GIT_USER_NAME/GIT_USER_EMAIL uit de chart zijn de GHAWA-identiteit: die horen alleen in de
+# GHAWA-clone ($REPO_DIR, zie setup_git), niet globaal. Tot wv3039 (14-11-2026) zette setup_git
+# ze globaal, waardoor 940 commits op claudebot-src als "GHAWA Website Bot" te boek staan.
+# Overschrijfbaar met POD_GIT_NAAM/POD_GIT_MAIL.
+setup_git_pod(){
+  git config --global user.name  "${POD_GIT_NAAM:-Socev machinekamer}"
+  git config --global user.email "${POD_GIT_MAIL:-machinekamer@socev.dev}"
   git config --global init.defaultBranch main
   git config --global pull.rebase false
-  git config --global --add safe.directory "$REPO_DIR"
+}
+
+setup_git(){
+  # Eén regel per map: --add stapelde bij elke podstart een kopie (60 op 14-11-2026).
+  # --replace-all met --fixed-value vervangt alle gelijke regels door één, of voegt hem toe.
+  git config --global --fixed-value --replace-all safe.directory "$REPO_DIR" "$REPO_DIR"
 
   # GEEN globale credential.helper meer, en GEEN $HOME/.git-credentials.
   #
@@ -585,6 +596,8 @@ setup_git(){
   fi
 
   if [ -d "$REPO_DIR/.git" ]; then
+    git -C "$REPO_DIR" config --local user.name  "${GIT_USER_NAME:-GHAWA Website Bot}"
+    git -C "$REPO_DIR" config --local user.email "${GIT_USER_EMAIL:-bot@ghawa.org}"
     git -C "$REPO_DIR" config --local --unset-all credential.helper 2>/dev/null || true
     git -C "$REPO_DIR" config --local --add credential.helper ''
     git -C "$REPO_DIR" config --local --add credential.helper "store --file=$GHAWA_CRED"
@@ -657,6 +670,7 @@ rclone listremotes 2>/dev/null | grep -q "^${SYNC_REMOTE}:" || log "LET OP: rclo
 [ -f "${CODEX_HOME:-/opt/data/.codex}/auth.json" ] || log "LET OP: Codex nog niet ingelogd — draai 'codex login --device-auth' als gebruiker claude (tweede brein blijft tot dan onbruikbaar; Claude draait gewoon)."
 
 rol_reset_podstart
+setup_git_pod
 start_sync
 if [ -n "$REPO_URL" ]; then
   mkdir -p "$REPO_DIR"
