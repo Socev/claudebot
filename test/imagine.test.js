@@ -22,9 +22,9 @@ const MOD = path.join(W, 'mod'); fs.mkdirSync(MOD);
 for (const f of ['studio.js', 'studio-beeld.py', 'elevenlabs-credits.js', 'imagine.js']) fs.copyFileSync(path.join(ROOT, f), path.join(MOD, f));
 function wijzig(f, oud, nieuw) { const p = path.join(MOD, f); const s = fs.readFileSync(p, 'utf8'); if (s.indexOf(oud) < 0) throw new Error('kruisproef: tekst niet gevonden in ' + f); fs.writeFileSync(p, s.split(oud).join(nieuw)); }
 if (KRUIS === 'preview') {
-  wijzig('studio.js', "if (t.geheugen && !wsKan(info)) return", "if (false) return");
-  wijzig('studio.js', "flowToets(v.api, info, { ws: (!!t.beeld || !!t.geheugen) && wsKan(info), geheugen: !!t.geheugen })", "flowToets(v.api, info, { ws: false })");
-  wijzig('studio.js', "if (t.geheugen && !(toets.ws_knopen && toets.ws_knopen.length)) return", "if (false) return");
+  wijzig('studio.js', "if (t.geheugen && !tekstTaak && !wsKan(info)) return", "if (false) return");   // wv3044: tekstTaak erbij
+  wijzig('studio.js', "flowToets(v.api, info, { ws: !tekstTaak && (!!t.beeld || !!t.geheugen) && wsKan(info), geheugen: !!t.geheugen, tekst: tekstTaak })", "flowToets(v.api, info, { ws: false })");
+  wijzig('studio.js', "if (t.geheugen && !tekstTaak && !(toets.ws_knopen && toets.ws_knopen.length)) return", "if (false) return");
 }
 if (KRUIS === 'geschiedenis') wijzig('studio.js', "async function histWisNu(pid) {", "async function histWisNu(pid) { return true;");
 if (KRUIS === 'schijf') wijzig('imagine.js', "    const id = hex16();\n    s.beelden.set(id,", "    const id = hex16();\n    fs.writeFileSync(path.join(DIR, 'werk-' + id), bytes);\n    s.beelden.set(id,");
