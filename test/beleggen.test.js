@@ -422,7 +422,8 @@ test('wv3030 stand uit transacties: aantal + aankoopwaarde incl. kosten, bron aa
   const a = B.aankoopStand([{ datum: '2026-11-01', tijd: '10:00', naam: 'A', isin: 'XX0000000066', aantal: '4', totaal_eur_cent: -40000 },
     { datum: '2026-11-02', tijd: '10:00', naam: 'A', isin: 'XX0000000066', aantal: '-1', totaal_eur_cent: 12000 },
     { datum: '2026-11-02', tijd: '11:00', naam: 'B', isin: null, aantal: '-2', totaal_eur_cent: 5000 }]);
-  assert.deepStrictEqual(a.map((p) => [p.sleutel, p.aantal, p.waarde_eur_cent, p.onvolledig]), [['isin:XX0000000066', '3', 30000, false]]);
+  assert.deepStrictEqual(a.posities.map((p) => [p.sleutel, p.aantal, p.waarde_eur_cent, p.onvolledig]), [['isin:XX0000000066', '3', 30000, false]]);
+  assert.strictEqual(a.onvolledig, true, 'verkoop zonder bekende aankoop = stand onvolledig');
   // handpositie gaat voor
   assert.strictEqual(post('positie', { actie: 'zet', naam: 'Voorbeeld Hand', aantal: '1', waarde_eur: '50' }).status, 200);
   o = get().body;
@@ -451,4 +452,24 @@ test('wv3030 dagboek: Niets doen haalt het signaal én het open punt weg', () =>
   o = get().body;
   assert.strictEqual(o.open_punten.filter((p) => p.soort === 'dagboek').length, 0);
   assert.ok(!o.signalen.some((x) => x.soort === 'dagboek'));
+});
+test('wv3030 review: portefeuille met alleen contant gaat voor; onvolledige transacties = niets beoordelen, geen signaal', () => {
+  const r = davidVorm();
+  r.post('soort', { sleutel: 'isin:XX0000000044', soort: 'tech' }); r.post('soort', { sleutel: 'isin:XX0000000055', soort: 'health' });
+  const alleenCash = 'Product,Symbool/ISIN,Aantal,Slotkoers,Lokale waarde,,Waarde in EUR\nCASH & CASH FUND & FTX CASH (EUR),,,,EUR,"150,00","150,00"\n';
+  assert.strictEqual(r.post('bestand', { naam: 'Portfolio.csv', tekst: alleenCash, datum: '2026-11-13', bewaar: true }).status, 200);
+  let o = r.get().body;
+  assert.deepStrictEqual([o.stand.bron, o.stand.posities.length, o.stand.datum], ['bestand', 0, '2026-11-13']);
+  // verkoop zonder eerdere aankoop naast een geldige positie
+  const tx = [{ sleutel: 't1', datum: '2026-11-01', tijd: '10:00', naam: 'A', isin: 'XX0000000066', aantal: '1', totaal_eur_cent: -10000 },
+    { sleutel: 't2', datum: '2026-11-02', tijd: '10:00', naam: 'B', isin: 'XX0000000077', aantal: '-5', totaal_eur_cent: 5000 }];
+  const a = B.aankoopStand(tx);
+  const d = { antwoorden: {}, regels: { max_aandeel: 10 }, posities: a.posities, soorten: { 'isin:XX0000000066': 'tech' }, transacties: tx, dagboek: [{ id: 1, transactie_sleutel: 't1', datum: '2026-11-01', naam: 'A', waarom: 'x' }, { id: 2, transactie_sleutel: 't2', datum: '2026-11-02', naam: 'B', waarom: 'x' }],
+    volglijst: [], keuzes: {}, stand_datum: '2026-11-02', stand_bron: 'aankoop', aankoop_onvolledig: a.onvolledig };
+  const k = B.bereken(d, '2026-11-14');
+  assert.strictEqual(k.volledig, false);
+  assert.ok(!k.signalen.some((s) => s.soort === 'boven_maximum'), 'geen signaal op een onvolledige stand');
+  assert.match(k.lampjes.find((l) => l.sleutel === 'max_aandeel').uitleg, /niet compleet/);
+  const k2 = B.bereken(Object.assign({}, d, { aankoop_onvolledig: false }), '2026-11-14');
+  assert.ok(k2.signalen.some((s) => s.soort === 'boven_maximum'), 'kruis: compleet → wel signaal');
 });

@@ -427,7 +427,10 @@ function bereken(data, vandaag) {
   const verdeling = { belegd_cent: belegd, cash_cent: cash.reduce((s, p) => s + p.waarde_eur_cent, 0), kern: rond(g('kern')), tech: rond(g('tech')), health: rond(g('health')),
     eigen: rond(pct(groep.tech + groep.health, belegd)), leuk: rond(g('leuk')), zonder: rond(g('zonder')), zonder_aantal: posities.filter((p) => !p.soort).length };
   const heeftStand = belegd > 0;
-  const volledig = heeftStand && verdeling.zonder_aantal === 0;
+  const onvolledig = !!data.aankoop_onvolledig;   // wv3030: stand uit transacties die niet compleet zijn → niets beoordelen, geen signalen op de verdeling
+  const volledig = heeftStand && verdeling.zonder_aantal === 0 && !onvolledig;
+  const beoordeel = heeftStand && !onvolledig;
+  const waarom = !heeftStand ? 'Nog geen stand.' : onvolledig ? 'Je transacties zijn niet compleet; lees je portefeuille in.' : 'Eerst bij elke positie de soort kiezen.';
   const lampjes = [];
   const VRAAG_VAN = { kern: 7, eigen: 7, leuk: 7, max_aandeel: 8, max_thema: 8, herbalans: 14, afkoel: 13, koop_niet: 10 };
   const lamp = (sleutel, naam, grens, stand, binnen, uitleg) => lampjes.push({ sleutel, naam, grens, stand,
@@ -440,7 +443,7 @@ function bereken(data, vandaag) {
   const band = (sleutel, naam, min, max, waarde) => {
     if (min == null && max == null) return zonderGetal(sleutel, naam, pctTekst(waarde));
     const grens = (min != null ? pctTekst(min) : '0 %') + ' – ' + (max != null ? pctTekst(max) : '100 %');
-    if (!volledig) return lamp(sleutel, naam, grens, pctTekst(waarde), null, heeftStand ? 'Eerst bij elke positie de soort kiezen.' : 'Nog geen stand.');
+    if (!volledig) return lamp(sleutel, naam, grens, pctTekst(waarde), null, waarom);
     const r = ruw[sleutel];
     const b = (min == null || r >= min - 1e-9) && (max == null || r <= max + 1e-9);
     lamp(sleutel, naam, grens, pctTekst(waarde), b, b ? 'Binnen je bandbreedte.' : 'Buiten je bandbreedte.');
@@ -458,9 +461,9 @@ function bereken(data, vandaag) {
   const grootste = posities.filter((p) => p.soort && p.soort !== 'kern');
   if (R.max_aandeel == null) zonderGetal('max_aandeel', 'Eén aandeel hoogstens', null);
   else {
-    const boven = heeftStand ? grootste.filter((p) => p._ruw > R.max_aandeel + 1e-9) : [];
+    const boven = beoordeel ? grootste.filter((p) => p._ruw > R.max_aandeel + 1e-9) : [];
     lamp('max_aandeel', 'Eén aandeel hoogstens', pctTekst(R.max_aandeel), grootste.length ? pctTekst(Math.max(...grootste.map((p) => p.aandeel))) : '–',
-      boven.length ? false : volledig ? true : null, boven.length ? boven.length + ' boven je maximum' : volledig ? 'Geen aandeel boven je maximum (kern telt niet mee).' : heeftStand ? 'Eerst bij elke positie de soort kiezen.' : 'Nog geen stand.');
+      boven.length ? false : volledig ? true : null, boven.length ? boven.length + ' boven je maximum' : volledig ? 'Geen aandeel boven je maximum (kern telt niet mee).' : waarom);
     for (const p of boven) sig({ sleutel: 'max-aandeel:' + p.sleutel + ':' + standDatum + ':' + R.max_aandeel, soort: 'boven_maximum', titel: p.naam + ' zit boven je maximum per aandeel',
       wat: volgens + ' is ' + p.naam + ' ' + pctTekst(p.aandeel) + ' van je beleggingen.', raakt: p.naam + ' (' + SOORT_NAAM[p.soort] + ', ' + pctTekst(p.aandeel) + ' van het geheel)',
       positie: p.sleutel, plan: 'Je maximum voor één aandeel is ' + pctTekst(R.max_aandeel) + '.' });
@@ -468,9 +471,9 @@ function bereken(data, vandaag) {
   if (R.max_thema == null) zonderGetal('max_thema', 'Eén thema hoogstens', null);
   else {
     const b = [];
-    for (const t of ['tech', 'health']) if (heeftStand && ruw[t] > R.max_thema + 1e-9) b.push(t);
+    for (const t of ['tech', 'health']) if (beoordeel && ruw[t] > R.max_thema + 1e-9) b.push(t);
     lamp('max_thema', 'Eén thema hoogstens', pctTekst(R.max_thema), 'tech ' + pctTekst(verdeling.tech) + ' · health ' + pctTekst(verdeling.health), b.length ? false : volledig ? true : null,
-      b.length ? b.map((t) => SOORT_NAAM[t]).join(' en ') + ' boven je maximum' : volledig ? 'Beide thema\'s binnen je maximum.' : heeftStand ? 'Eerst bij elke positie de soort kiezen.' : 'Nog geen stand.');
+      b.length ? b.map((t) => SOORT_NAAM[t]).join(' en ') + ' boven je maximum' : volledig ? 'Beide thema\'s binnen je maximum.' : waarom);
     for (const t of b) sig({ sleutel: 'max-thema:' + t + ':' + standDatum + ':' + R.max_thema, soort: 'boven_maximum', titel: SOORT_NAAM[t] + ' zit boven je maximum per thema',
       wat: volgens + ' is ' + SOORT_NAAM[t] + ' samen ' + pctTekst(verdeling[t]) + ' van je beleggingen.', raakt: 'thema ' + SOORT_NAAM[t], plan: 'Je maximum per thema is ' + pctTekst(R.max_thema) + '.' });
   }
@@ -560,14 +563,18 @@ function aankoopStand(transacties) {
     if (Math.abs(p.aantal) < 1e-9) { p.aantal = 0; p.kost = 0; }
     per.set(sl, p);
   }
-  return Array.from(per.values()).filter((p) => p.aantal > 0).map((p) => ({ sleutel: p.sleutel, regelsoort: 'effect', naam: p.naam, isin: p.isin, aantal: String(Number(p.aantal.toFixed(6))),
-    koers: null, valuta: p.valuta, lokaal_cent: null, waarde_eur_cent: p.kost, bron: 'aankoop', transacties: p.transacties, onvolledig: p.onvolledig }));
+  // review wv3030 MOET 2: onvolledig ook op standniveau (een verkoop zonder bekende aankoop laat de positie weg, maar de stand is dan niet compleet)
+  const alle = Array.from(per.values());
+  return { onvolledig: alle.some((p) => p.onvolledig), posities: alle.filter((p) => p.aantal > 0).map((p) => ({ sleutel: p.sleutel, regelsoort: 'effect', naam: p.naam, isin: p.isin,
+    aantal: String(Number(p.aantal.toFixed(6))), koers: null, valuta: p.valuta, lokaal_cent: null, waarde_eur_cent: p.kost, bron: 'aankoop', transacties: p.transacties, onvolledig: p.onvolledig })) };
 }
 function metAankoop(d) {
-  if (d.posities.some((p) => p.regelsoort === 'effect') || !d.transacties.length) return d;
-  const eff = aankoopStand(d.transacties);
-  if (!eff.length) return d;
-  return Object.assign({}, d, { posities: d.posities.concat(eff), stand_datum: d.transacties.reduce((m, t) => (t.datum > m ? t.datum : m), ''), stand_bron: 'aankoop' });
+  // review wv3030 MOET 1: een ingelezen portefeuille gaat altijd voor, ook als die alleen contant bevat (alles verkocht)
+  if (d.stand_bron === 'bestand' || d.posities.some((p) => p.regelsoort === 'effect') || !d.transacties.length) return d;
+  const a = aankoopStand(d.transacties);
+  if (!a.posities.length && !a.onvolledig) return d;
+  return Object.assign({}, d, { posities: d.posities.concat(a.posities), stand_datum: d.transacties.reduce((m, t) => (t.datum > m ? t.datum : m), ''), stand_bron: 'aankoop',
+    aankoop_onvolledig: a.onvolledig });
 }
 
 // ── plan: waarden controleren en regels afleiden ──
@@ -697,7 +704,7 @@ function maak(o) {
       const bedrijven = bedrijvenUit(db, d, k).map((b) => ({ sleutel: b.sleutel, naam: b.naam, bron: b.bron, kaartje: b.kaartje, voorstel: b.voorstel }));
       for (const p of k.posities) delete p._ruw;
       return { ok: true, vandaag, vragen: VRAGEN, antwoorden: d.antwoorden, regels: d.regels, versies: d.versies, stand: { datum: d.stand_datum, bron: d.stand_bron,
-        verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig, historie: historieUit(db) }, transacties: d.transacties, dagboek, volglijst: volg,
+        verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig, historie: historieUit(db), onvolledig: !!d.aankoop_onvolledig }, transacties: d.transacties, dagboek, volglijst: volg,
         signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, rekening_rijen: d.rekening_rijen, stortingen: d.stortingen,
         soort_namen: SOORT_NAAM, vault: { ok: vaultOk, op: laatsteVault }, bedrijven };
     }, false);
