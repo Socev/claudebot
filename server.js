@@ -2650,6 +2650,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     if (!lezen && typeof appOpenNaRun === 'function') appOpenNaRun(jobId, j, r);   // wv1712 (OVIS M6-pod): [OPEN …] uit de uitvoer, veld alleen bij een eigen app-beurt
     r.workspace = ws;
     if (keuze.model && !r.fallback_van) r.model = keuze.model;
+    if (j.noodknop && !r.ok) { r.error = 'gestopt-noodknop'; r.output = mkNoodTekst(j); }   // wv3083: zeggen wie stopte (anders "inactiviteit")
     if (sKey && r.session_id && !((sessieResetOp[key] || 0) > sessieGelezen)) { chatSessions[sKey] = r.session_id; saveSessions(); }   // wv895: een reset tijdens de beurt wint
     j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
     jobEindLog(jobId, j, ws);
@@ -20594,6 +20595,99 @@ async function appManagers(req, res, a, d, route) {
 }
 // ── einde managers ──
 
+// ── Noodknop machinekamer (wv3083, 14-11-2026; bouwplan vault 01_Ontwikkeling/Noodknop machinekamer (bouwplan 14-11-2026).md) ──
+// WAAROM. 14-11 liep een machinekamerbeurt twee keer tot de bovengrens van 30 min (wachtlussen in de beurt); Davids berichten stonden in
+// de rij, de wachtende uitrol telde de beurt mee en David moest de pod herstarten (drie agents afgebroken). Socev zag het, maar kon alleen
+// meten. David 21:37: "Jij bent de allesoverzienende chief of staff. Jij moet bij nood de rechten en mogelijkheden hebben in te grijpen."
+// WAT. mkNoodknop stopt alleen de LOPENDE beurt van de machinekamersessie (telegram-debug: app én debug-bot) via dezelfde stopingang als
+// de smalle poort (progress.stoppen: procesgroep SIGTERM, daarna SIGKILL). Wat erachter in de rij staat, loopt daarna gewoon door
+// (enqueue); achtergrondagents, het hoofdkanaal, de uitrol en de werkvoorraad raakt hij niet. Het antwoord van de gestopte beurt zegt wie
+// hem stopte en na hoeveel minuten (processJob); elke stop geeft een regel in het podlog en een box-rij.
+// WIE. POST /smal/mk-noodknop {secret, vraag_id?}: Socev (SOCEV_AGENT_SLEUTEL) alleen met Davids verse Ja (app-knop, ≤ 15 min, één Ja =
+// één stop) op precies MK_NOOD_VRAAG en alleen als de beurt al MK_NOOD_MIN_MS loopt; de machinekamer (API_SECRET) direct. {opdracht: 'stand'}
+// leest alleen (looptijd, rij). SMAL_GRENS 12/uur voor stand en stop samen; stoppen begrenst de Ja (één Ja = één stop).
+// DEKT NIET: dezelfde uid (zie managersKnopJa). Ergste geval bij misbruik: een machinekamerbeurt wordt afgebroken (geen gegevens, niets naar buiten).
+const MK_NOOD_VRAAG = 'Zal ik de vastgelopen machinekamer stoppen?';
+const MK_NOOD_KNOP_MS = 15 * 60 * 1000;
+const MK_NOOD_MIN_MS = 5 * 60 * 1000;
+const MK_NOOD_PAD = serverPad('mk-noodknop', process.env.MK_NOODKNOP_PAD, '/opt/data/mk-noodknop.json', serverProefDeel('mk-noodknop.json'));
+let mkNoodBezig = false;
+function mkNoodJobs(status) {
+  const sessie = APP_KANALEN.machinekamer;
+  return Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j && !j.agent && j.workspace === DEFAULT_WS && j.chat_id === sessie && j.status === status; });
+}
+function mkNoodGebruikt() {
+  try { const x = JSON.parse(fs.readFileSync(MK_NOOD_PAD, 'utf8')); return Array.isArray(x.gebruikt) ? x.gebruikt.map(String) : []; }
+  catch (e) { if (e && e.code === 'ENOENT') return []; throw e; }   // onleesbaar = weigeren (anders telt een gebruikte Ja opnieuw)
+}
+function mkNoodTekst(j) {
+  const n = j.noodknop || {};
+  const min = Math.max(0, Math.round((n.t - (j.started || j.created || n.t)) / 60000));
+  return 'Deze beurt is gestopt met de noodknop' + (n.door === 'socev' ? ' (door Socev, op jouw Ja)' : ' (door de machinekamer)') + ' na ' + min +
+    ' minuten. Wat erna in de rij stond, komt nu aan de beurt.';
+}
+async function mkNoodknop(d, door) {
+  if (door !== 'socev' && door !== 'machinekamer') return { status: 400, j: { ok: false, fout: 'onbekende aanroeper' } };
+  if (d && d.opdracht === 'stand') {   // alleen lezen: loopt er een machinekamerbeurt, hoe lang al, en hoeveel staat erachter
+    const nu = Date.now();
+    return { status: 200, j: { ok: true, lopend: mkNoodJobs('running').map(function (id) { const j = jobs[id]; return { liep_min: Math.round((nu - (j.started || j.created || nu)) / 60000), via: j.app ? 'app' : 'telegram' }; }),
+      wachtend: mkNoodJobs('pending').length, stoppen_mag_socev_na_min: Math.round(MK_NOOD_MIN_MS / 60000), vraag: 'VRAAG AAN DAVID: ' + MK_NOOD_VRAAG } };
+  }
+  if (mkNoodBezig) return { status: 409, j: { ok: false, fout: 'de noodknop is al bezig' } };
+  mkNoodBezig = true;
+  try {
+    const wachtend = function () { return mkNoodJobs('pending').length; };
+    const doelen = function () {
+      const nu = Date.now();
+      return mkNoodJobs('running').filter(function (id) { return door !== 'socev' || nu - (jobs[id].started || jobs[id].created || nu) >= MK_NOOD_MIN_MS; });
+    };
+    if (!mkNoodJobs('running').length) return { status: 409, j: { ok: false, fout: 'er loopt nu geen beurt in de machinekamer; niets gestopt', wachtend: wachtend() } };
+    if (!doelen().length) return { status: 409, j: { ok: false, fout: 'de machinekamerbeurt loopt nog geen ' + Math.round(MK_NOOD_MIN_MS / 60000) + ' minuten; de noodknop werkt pas daarna', wachtend: wachtend() } };
+    let ja = null, gebruikt = [];
+    if (door === 'socev') {
+      const h = String(d && d.vraag_id || '').trim().toLowerCase();
+      if (!/^[0-9a-f]{8}$/.test(h)) return { status: 400, j: { ok: false, fout: 'vraag_id ontbreekt: de 8 tekens uit Davids Ja-knop op "' + MK_NOOD_VRAAG + '"' } };
+      try { gebruikt = mkNoodGebruikt(); } catch (e) { logError('mk-noodknop', e); return { status: 503, j: { ok: false, fout: 'het register van de noodknop is onleesbaar; niets gestopt' } }; }
+      let b;
+      try { b = await managersKnopJa(h, gebruikt); } catch (e) { b = { ok: false, fout: 'vragenregister onleesbaar' }; }
+      if (!b || !b.ok) return { status: 403, j: { ok: false, fout: String((b && b.fout) || 'geen Ja van David gevonden').replace('voor een ronde', 'voor de noodknop') } };
+      if (!(Date.now() - b.t <= MK_NOOD_KNOP_MS)) return { status: 403, j: { ok: false, fout: 'Davids Ja is ouder dan 15 minuten; vraag het opnieuw' } };
+      if (String(b.tekst || '').trim().toLowerCase() !== MK_NOOD_VRAAG.toLowerCase()) return { status: 403, j: { ok: false, fout: 'Davids Ja hoort bij een andere vraag; de vraag moet precies zijn: VRAAG AAN DAVID: ' + MK_NOOD_VRAAG } };
+      ja = b;
+    }
+    // na de await opnieuw kijken: de beurt kan intussen klaar zijn
+    const ids = doelen().filter(function (id) { const j = jobs[id]; return j.progress && typeof j.progress.stoppen === 'function'; });
+    if (!ids.length) return { status: 409, j: { ok: false, fout: 'er loopt nu geen machinekamerbeurt die te stoppen is (net klaar, of nog aan het opstarten); niets gestopt', wachtend: wachtend() } };
+    if (ja) {
+      // eerst de Ja als gebruikt vastleggen, dan pas stoppen: één Ja = één stop, ook na een herstart
+      try {
+        const tmp = MK_NOOD_PAD + '.nieuw.' + process.pid;
+        fs.writeFileSync(tmp, JSON.stringify({ gebruikt: gebruikt.concat([ja.sleutel]).slice(-100) }), { mode: 0o600 });
+        fs.renameSync(tmp, MK_NOOD_PAD);
+      } catch (e) { logError('mk-noodknop', e); return { status: 503, j: { ok: false, fout: 'de Ja kon niet worden vastgelegd; niets gestopt' } }; }
+    }
+    const t = Date.now();
+    const gestopt = [];
+    ids.forEach(function (id) {
+      const j = jobs[id];
+      j.noodknop = { door: door, t: t };
+      // Codex-review wv3083 ZOU 1: een stopfout niet als gelukt melden (de beurt zou doorlopen terwijl box en antwoord "gestopt" zeggen)
+      try { j.progress.stoppen(); } catch (e) { logError('mk-noodknop', e); delete j.noodknop; return; }
+      gestopt.push({ job_id: id, liep_min: Math.round((t - (j.started || j.created || t)) / 60000), via: j.app ? 'app' : 'telegram' });
+    });
+    if (!gestopt.length) return { status: 500, j: { ok: false, fout: 'stoppen mislukte op de pod; de beurt loopt nog' + (ja ? ' (Davids Ja is verbruikt: vraag opnieuw)' : '') } };
+    const n = wachtend();
+    schrijfLog(JSON.stringify({ t: new Date(t).toISOString(), soort: 'mk-noodknop', door: door, gestopt: gestopt.map(function (g) { return g.job_id; }), wachtend: n }));
+    const k = ovisAms().klok;
+    ovisBoxRij('\n## [direct] ' + k + ' — Noodknop: machinekamerbeurt gestopt door ' + (door === 'socev' ? 'Socev (op Davids Ja)' : 'de machinekamer') + ' (automatisch, wv3083) #mk-noodknop\n' +
+      '- status: open\n- van: pod (noodknop)\n' +
+      gestopt.map(function (g) { return '- gestopt: job ' + g.job_id + ' (' + g.via + ') na ' + g.liep_min + ' min\n'; }).join('') +
+      '- daarna in de rij: ' + n + '\n- te doen: nagaan waarom de beurt vastliep (podlog en transcript van de job); niets opnieuw starten wat David niet vroeg\n');
+    return { status: 200, j: { ok: true, gestopt: gestopt, wachtend: n } };
+  } finally { mkNoodBezig = false; }
+}
+// ── einde noodknop machinekamer ──
+
 // ── Ringkaart (wv888, 23-10-2026; bouwplan "01_Ontwikkeling/Ringkaart van Socev - tandwielweergave (bouwplan 23-10-2026).md") ──
 // GET /app/ringkaart: wachters (hartslagtabel via RPC mk_hartslag_stand, service_role, 60 s buffer), skills en kanalen (ringkaart.js,
 // uit de vault). Alleen lezen. Op een vaste plek geen beschrijvingen (Fable wv888 #4). Stil in het auditlog bij 200 (de app ververst
@@ -24239,6 +24333,7 @@ function socevSmalOpts(runOpts, chatId) {
 //   POST /smal/fin-sql      {sql, params} -> D1 fin, alleen één SELECT/WITH zonder schrijfwoorden (laden blijft machinekamer)
 //   POST /smal/telegram     {opdracht: dialogen|lees, chat, dagen, aantal} -> telegram-reader.js (zelf alleen-lezen)
 //   POST /smal/health-opgaven  {} -> health-import.py --alleen-opgaven als claude (wv887; zie healthOpgaven)
+//   POST /smal/mk-noodknop     {vraag_id? | opdracht: 'stand'} -> stopt de lopende machinekamerbeurt (wv3083; zie mkNoodknop): Socev alleen met Davids verse Ja.
 //   POST /smal/manager-ronde   {naam, reden?, vraag_id?} -> ronde op afroep van een manager (wv895; zie managers.js): Socev alleen met
 //                              het vraag-id van Davids verse Ja-knop; API_SECRET (machinekamer) direct. Rapport in de machinekamer.
 // Fable wv424b: géén script uit de vault met de volle omgeving (de vault is schrijfbaar voor elke smalle sessie: drie regels
@@ -24247,7 +24342,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata']);   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -24481,6 +24576,8 @@ async function smalActie(actie, d, wie) {
     } catch (e) { logError('app-open', e); }
     return r;
   }
+  // wv3083: noodknop machinekamer (zie mkNoodknop). Socev-sleutel = door socev (alleen met vraag_id van Davids verse Ja); API_SECRET = machinekamer.
+  if (actie === 'mk-noodknop') return mkNoodknop(d, socevAgentSleutelOk(d.secret) ? 'socev' : 'machinekamer');
   // wv895: een manager-ronde op afroep. Socev-sleutel = door socev (alleen met vraag_id van Davids verse Ja); API_SECRET = machinekamer.
   if (actie === 'manager-ronde') {
     if (!managers) return { status: 404, j: { ok: false, fout: 'Managers zit niet in deze versie van de pod' } };
