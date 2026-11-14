@@ -153,6 +153,7 @@ function winkelBestelling(ond, tekst, dom, naam, tms, mailDag) {
   return {
     sleutel: 'winkel:' + dom + ':' + (bestelnr || mailDag), vervoerder: 'winkel', code: null, bestelnr, winkel, omschrijving: null, stand,
     verwacht_dag: null, verwacht_van: null, verwacht_tot: null, pc: null, tijd: isFinite(tms) ? new Date(tms).toISOString() : null,
+    adres: adresUit(tekst), detail: detailUit(ond, tekst),   // wv3062
   };
 }
 
@@ -188,9 +189,69 @@ function standUit(t) {
   return null;
 }
 
+// wv3062 (David 14-11: "specifiekere status-meldingen per pakje"): een tussenstand in gewone taal, alleen als de mail het zelf zegt. Het onderwerp
+// telt altijd; uit de lijf-tekst alleen de zinnen die gemeten zijn (14-11: GOFO sorteercentrum, Amazon brievenbus, winkel "door onze bezorgdienst
+// opgehaald"); de rest van de lijf-tekst is standaardtekst ("Niet thuis? … bij de buren") en zegt niets over dit pakje.
+const DETAIL_ONDERWERP = [
+  [/(retour (naar|aan) (de )?afzender|teruggestuurd naar (de )?afzender|return(ed)? to sender|zur[üu]ck an (den )?absender)/i, 'Gaat terug naar de afzender'],
+  [/(ingeklaard|customs cleared|verzollt)/i, 'Ingeklaard bij de douane'],
+  [/(\bdouane\b|\bcustoms\b|\bzoll\b)/i, 'Bij de douane'],
+  [/(bezorgpoging|niet (thuis )?(aan)?getroffen|konden (je|jouw|uw) (pakket|zending) niet (af)?leveren|delivery attempt|zustellversuch)/i, 'Bezorgpoging mislukt'],
+  [/(vertraagd|vertraging|delayed|versp[äa]tet|verz[öo]gert)/i, 'Vertraagd'],
+  [/(sorteercentrum|sorting cent(er|re)|sortierzentrum|verteilzentrum|distributiecentrum)/i, 'Bij het sorteercentrum'],
+  [/(hebben (je|jouw|uw) (pakket|zending) ontvangen|opgehaald door (de )?(bezorger|vervoerder))/i, 'Bij de bezorger'],
+  [/(klaar voor verzending|ready to ship)/i, 'Klaar voor verzending'],
+  [/(bij (de |je |jouw )?buren|neighbou?rs?\b|nachbar)/i, 'Bij de buren'],
+  [/(brievenbus|letterbox|briefkasten)/i, 'In de brievenbus'],
+];
+const DETAIL_TEKST = [
+  [/aangekomen in ons sorteercentrum/i, 'Bij het sorteercentrum'],
+  [/pakket is achtergelaten in (de |je |jouw )?brievenbus/i, 'In de brievenbus'],
+  [/door onze bezorgdienst opgehaald/i, 'Bij de bezorger'],
+];
+const DETAIL_BEZORGD = ['Bij de buren', 'In de brievenbus'];   // hoort bij Bezorgd; de andere alleen zolang het pakje niet bezorgd is
+function detailUit(ond, tekst) {
+  for (const [re, w] of DETAIL_ONDERWERP) if (re.test(ond)) return w;
+  for (const [re, w] of DETAIL_TEKST) if (re.test(tekst)) return w;
+  return null;
+}
+// wv3062 (David 14-11: "afleveradres: waar gaat hij heen"): straat + huisnummer en plaats na een adreskop in de mail (gemeten 14-11 bij DPD, GLS,
+// UPS, FedEx, Sendcloud, Intrapost en webwinkels). Geen naam en geen postcode: de postcode gaat nooit naar de app (zie pc). Alleen op het scherm.
+const ADRES_KOP = /(bezorgadres|afleveradres|leveradres|leveringsadres|verzendadres|lieferadresse|versandadresse|shipping address|delivery address|ship to|afgeleverd aan|verzonden naar|naar het volgende adres)\s*:?/gi;
+const STRAAT = /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ.'’ -]{1,50}?)\s+(\d{1,5}(?:\s?[a-zA-Z]{1,2}\b|[- ]\d{1,4})?)$/;
+const PLAATS = /^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’ -]{1,29}$/;
+function adresUit(tekst) {
+  const t = String(tekst || '').slice(0, MAX_TEKST).replace(/\r/g, '').replace(/&nbsp;|\u00a0/g, ' ').replace(/[*_]/g, '');
+  const re = new RegExp(ADRES_KOP.source, 'gi');
+  let m, beste = null;
+  while ((m = re.exec(t)) && !beste) {
+    const delen = t.slice(re.lastIndex, re.lastIndex + 240).split(/\n|\s{3,}|,\s*|\s+-\s+/).map((x) => x.trim()).filter(Boolean).slice(0, 6);
+    let straat = null, plaats = null, pcGezien = false;
+    for (let i = 0; i < delen.length && !plaats; i++) {
+      const d = delen[i];
+      if (/^https?:|@|\[|^\(?https?/i.test(d)) break;
+      const p = /\b[1-9]\d{3}\s?[A-Z]{2}\b/.exec(d);
+      if (p) {
+        pcGezien = true;
+        const voor = d.slice(0, p.index).trim(), na = d.slice(p.index + p[0].length).replace(/^[\s(]+|[\s)]+$/g, '').trim();
+        if (!straat && STRAAT.test(voor)) straat = voor;
+        if (PLAATS.test(na)) plaats = na;
+        else if (i > 0 && delen[i - 1] !== straat && PLAATS.test(delen[i - 1]) && straat) plaats = delen[i - 1];
+        else if (delen[i + 1] && /^[A-ZÀ-Ý][A-ZÀ-Ý' -]{1,29}$/.test(delen[i + 1])) plaats = delen[i + 1];
+        break;
+      }
+      const q = /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’ -]{1,29})\s+[1-9]\d{3}$/.exec(d);   // FedEx: "Plaats 1234"
+      if (q && straat) { plaats = q[1]; break; }
+      if (!straat && STRAAT.test(d)) straat = d;
+    }
+    if (straat || (plaats && pcGezien)) beste = [straat ? netjes(straat) : null, plaats ? netjes(plaats) : null].filter(Boolean).join(', ');
+  }
+  return beste ? schoon(beste, 120) : null;
+}
+
 /*
  * herken({van, onderwerp, tekst, datum}) → null (geen pakje) of
- *   { sleutel, vervoerder, code, bestelnr, winkel, omschrijving, stand, verwacht_dag, verwacht_van, verwacht_tot, pc }
+ *   { sleutel, vervoerder, code, bestelnr, winkel, omschrijving, stand, verwacht_dag, verwacht_van, verwacht_tot, pc, adres, detail }
  * pc (postcode) alleen uit een PostNL-link in de mail; het veld gaat nooit naar de app of een log.
  */
 function herken(m) {
@@ -282,6 +343,7 @@ function herken(m) {
     return {
       sleutel: 'winkel:' + dom + ':' + n[1] + '-' + n[2], vervoerder: 'winkel', code: null, bestelnr: n[1] + '-' + n[2], winkel: netjes(afz) || 'Intrapost', omschrijving: null,
       stand: 'onderweg', verwacht_dag: null, verwacht_van: null, verwacht_tot: null, pc: null, tijd: isFinite(tms) ? new Date(tms).toISOString() : null,
+      adres: adresUit(tekst), detail: detailUit(ond, tekst),   // wv3062
     };
   } else if (op(dom, 'amazon.nl', 'amazon.com', 'amazon.de', 'amazon.fr', 'amazon.co.uk')) {
     // Amazon-eigen bezorging: geen openbare volgcode; het bestelnummer houdt de mails van één bestelling bij elkaar
@@ -341,6 +403,7 @@ function herken(m) {
     vervoerder, code, bestelnr, winkel: netjes(winkel), omschrijving: schoon(omschrijving, 120), stand,
     verwacht_dag, verwacht_van: verwacht_dag && tv ? tv[0] : null, verwacht_tot: verwacht_dag && tv ? tv[1] : null, pc,
     tijd: isFinite(tms) ? new Date(tms).toISOString() : null,
+    adres: adresUit(tekst), detail: detailUit(ond, tekst),   // wv3062
   };
 }
 
@@ -449,7 +512,25 @@ CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT NOT NULL)
 `;
 // wv3011: verandert de herkenning, verhoog dan dit getal. Bij de eerste opening daarna vergeet de module welke mails "geen pakje" waren,
 // zodat de ronden ze (binnen de 21 dagen van de kandidaten, 20 per ronde) één keer opnieuw lezen; herkende mails blijven staan.
-const HERKEN_VERSIE = '2';
+const HERKEN_VERSIE = '3';   // wv3062: adres en tussenstand uit de mail
+// wv3062: kolommen die er later bij kwamen (bestaande banken krijgen ze bij open() via ALTER TABLE). adres = straat + plaats uit de mail (alleen
+// voor het scherm), stand_detail = tussenstand uit de jongste mail, geleverd_hand = David tikte "Is geleverd" (tijd; NULL = teruggedraaid),
+// aanvul = versie waarmee de open pakjes van vóór deze kolommen één keer hun jongste mails opnieuw lieten lezen.
+const EXTRA_KOLOMMEN = ['adres TEXT', 'stand_detail TEXT', 'geleverd_hand TEXT', 'aanvul TEXT'];
+const AANVUL_VERSIE = '1';
+const VERVOERDER_DOMEINEN = ['postnl.nl', 'dhl.com', 'dhl.nl', 'dhl.de', 'dhlecommerce.nl', 'dhlparcel.nl', 'dpd.nl', 'dpd.com', 'dpd.de', 'dpdgroup.com', 'gls-info.nl',
+  'gls-group.eu', 'gls-group.com', 'gls.nl', 'gls-netherlands.com', 'ups.com', 'dragonflyinternational.com', 'dragonflyshipping.nl', 'fedex.com', 'gofo.com', 'gofoexpress.nl'];
+// wv3062: het mailonderwerp voor op de kaart (platte tekst): Fwd:/RE: eraf, witruimte samen, hooguit 120 tekens
+function onderwerpSchoon(x) {
+  let v = schoon(x, 2000);
+  if (!v) return null;
+  let oud;
+  do { oud = v; v = v.replace(/^\s*(?:fwd?|fw|re|aw|wg|sv|antw|doorgestuurd)\s*:\s*/i, ''); } while (v !== oud);
+  v = v.replace(/\s+/g, ' ').trim();
+  if (!v) return null;
+  if (v.length > 120) { const k = v.slice(0, 119), i = k.lastIndexOf(' '); v = (i > 80 ? k.slice(0, i) : k) + '…'; }
+  return v;
+}
 const RANG = { besteld: 0, aangemeld: 1, onderweg: 2, vandaag: 3, afhaalpunt: 4, bezorgd: 5 };
 
 function maak(o) {
@@ -465,6 +546,8 @@ function maak(o) {
     db = new DatabaseSync(f);
     db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;');
     db.exec(SCHEMA);
+    const kol = new Set(db.prepare('PRAGMA table_info(zending)').all().map((k) => k.name));
+    EXTRA_KOLOMMEN.forEach((k) => { if (!kol.has(k.split(' ')[0])) db.exec('ALTER TABLE zending ADD COLUMN ' + k); });
     const hv = db.prepare("SELECT waarde FROM meta WHERE sleutel = 'herken_versie'").get();
     if (!hv || hv.waarde !== HERKEN_VERSIE) {
       db.exec('DELETE FROM mail WHERE zending_id IS NULL');
@@ -500,9 +583,9 @@ function maak(o) {
     const tijd = h.tijd || nu;
     if (!z) {
       const id = idVan(h.sleutel);
-      d.prepare(`INSERT INTO zending (id, sleutel, vervoerder, code, bestelnr, winkel, omschrijving, pc, stand_mail, mail_tijd, verwacht_dag, verwacht_van, verwacht_tot, eerste, bijgewerkt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, h.sleutel, h.vervoerder, h.code, h.bestelnr, h.winkel, h.omschrijving, h.pc, h.stand, tijd,
-        h.verwacht_dag, h.verwacht_van, h.verwacht_tot, tijd, nu);
+      d.prepare(`INSERT INTO zending (id, sleutel, vervoerder, code, bestelnr, winkel, omschrijving, pc, stand_mail, mail_tijd, verwacht_dag, verwacht_van, verwacht_tot, eerste, bijgewerkt,
+        adres, stand_detail, aanvul) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, h.sleutel, h.vervoerder, h.code, h.bestelnr, h.winkel, h.omschrijving, h.pc, h.stand, tijd,
+        h.verwacht_dag, h.verwacht_van, h.verwacht_tot, tijd, nu, h.adres || null, h.detail || null, AANVUL_VERSIE);
       z = { id };
     } else {
       const nieuwer = !z.mail_tijd || tijd >= z.mail_tijd;
@@ -512,10 +595,10 @@ function maak(o) {
       // bezorgd blijft bezorgd: een oudere mail die later binnenkomt zet de stand niet terug
       const stand = nieuwer && !(z.stand_mail === 'bezorgd' && RANG[h.stand] < RANG.bezorgd) ? h.stand : z.stand_mail;
       d.prepare(`UPDATE zending SET sleutel = ?, vervoerder = ?, winkel = COALESCE(winkel, ?), omschrijving = COALESCE(omschrijving, ?), pc = COALESCE(pc, ?),
-        stand_mail = ?, mail_tijd = ?, verwacht_dag = ?, verwacht_van = ?, verwacht_tot = ?, eerste = MIN(eerste, ?), bijgewerkt = ? WHERE id = ?`).run(
+        stand_mail = ?, mail_tijd = ?, verwacht_dag = ?, verwacht_van = ?, verwacht_tot = ?, eerste = MIN(eerste, ?), bijgewerkt = ?, adres = ?, stand_detail = ? WHERE id = ?`).run(
         sleutel, vervoerder, h.winkel, h.omschrijving, h.pc, stand, nieuwer ? tijd : z.mail_tijd,
         nieuwer && h.verwacht_dag ? h.verwacht_dag : z.verwacht_dag, nieuwer && h.verwacht_dag ? h.verwacht_van : z.verwacht_van, nieuwer && h.verwacht_dag ? h.verwacht_tot : z.verwacht_tot,
-        tijd, nu, z.id);
+        tijd, nu, (nieuwer ? h.adres || z.adres : z.adres || h.adres) || null, (nieuwer ? h.detail : z.stand_detail) || null, z.id);
     }
     d.prepare('INSERT OR REPLACE INTO mail (gmail_id, zending_id, tijd, gezien) VALUES (?, ?, ?, ?)').run(String(m.gmail_id), z.id, iso(m.datum), nu);
     return z.id;
@@ -524,7 +607,7 @@ function maak(o) {
   function teVolgen(dwing) {
     const d = open(), nu = klok();
     return d.prepare("SELECT * FROM zending WHERE code IS NOT NULL AND vervoerder IN ('postnl','dhl','gls','onbekend') AND verborgen IS NULL").all().filter((z) => {
-      if (z.stand_volg === 'bezorgd' || z.bezorgd_op) return false;
+      if (z.stand_volg === 'bezorgd' || z.bezorgd_op || z.geleverd_hand) return false;
       if (z.vervoerder === 'gls' && !/^\d{11,12}$/.test(String(z.code))) return false;   // wv3011: geen openbare volgvraag (zie volgAdressen)
       if (Date.parse(z.eerste) < nu - STIL_NA) return false;
       if (z.stand_mail === 'bezorgd' && z.ververst) return false;
@@ -583,6 +666,28 @@ function maak(o) {
         uit.gelezen++;
         if (verwerkMail({ gmail_id: x.gmail_id, van: m.van, onderwerp: m.onderwerp || x.onderwerp, tekst: m.tekst, datum: m.datum || x.ontvangen })) uit.herkend++;
       }
+      // wv3062: open pakjes van vóór de kolommen adres/stand_detail lezen hun jongste mails één keer opnieuw (hooguit 5 pakjes en 3 mails per pakje
+      // per ronde); alleen adres en tussenstand worden bijgezet, de rest van de rij blijft zoals hij was
+      // review Codex MOET 1: alleen af als er iets gelezen is (of er geen mail meer is); mislukt het lezen, dan een volgende ronde opnieuw, hooguit 3 keer
+      const aanvul = d.prepare(`SELECT id, aanvul FROM zending WHERE (aanvul IS NULL OR aanvul <> ?) AND verborgen IS NULL AND geleverd_hand IS NULL AND bezorgd_op IS NULL
+        AND COALESCE(stand_volg, stand_mail) <> 'bezorgd' AND eerste >= ? ORDER BY eerste DESC LIMIT 5`).all(AANVUL_VERSIE, new Date(nuMs - STIL_NA).toISOString());
+      for (const z of aanvul) {
+        const ms = d.prepare('SELECT gmail_id FROM mail WHERE zending_id = ? ORDER BY tijd DESC LIMIT 3').all(z.id);
+        let adres = null, detail = null, eerst = true, gelezen = 0;
+        for (const x of ms) {
+          let m = null;
+          try { m = await r.lees(x.gmail_id); } catch (e) { m = null; }
+          const h = m && typeof m.tekst === 'string' ? herken({ van: m.van, onderwerp: m.onderwerp, tekst: m.tekst, datum: m.datum }) : null;
+          if (h && eerst) detail = h.detail || null;
+          if (m && typeof m.tekst === 'string') { eerst = false; gelezen++; }
+          if (h && h.adres && !adres) adres = h.adres;
+          if (adres && !eerst) break;
+        }
+        const poging = (/^poging:(\d+)$/.exec(String(z.aanvul || '')) || [0, 0])[1] * 1 + 1;
+        const klaar = gelezen > 0 || !ms.length || poging >= 3;
+        d.prepare('UPDATE zending SET adres = COALESCE(adres, ?), stand_detail = COALESCE(stand_detail, ?), aanvul = ? WHERE id = ?').run(adres, detail, klaar ? AANVUL_VERSIE : 'poging:' + poging, z.id);
+        uit.aangevuld = (uit.aangevuld || 0) + 1;
+      }
       if (r.haal) {
         for (const z of teVolgen(r.dwing).slice(0, 25)) {
           const v = await volg(z, r.haal);
@@ -601,7 +706,7 @@ function maak(o) {
   }
   function opruimen() {
     const d = open(), nu = klok();
-    d.prepare('DELETE FROM zending WHERE bijgewerkt < ? AND (bezorgd_op IS NOT NULL OR stand_mail = ? OR verborgen IS NOT NULL OR eerste < ?)').run(
+    d.prepare('DELETE FROM zending WHERE bijgewerkt < ? AND (bezorgd_op IS NOT NULL OR geleverd_hand IS NOT NULL OR stand_mail = ? OR verborgen IS NOT NULL OR eerste < ?)').run(
       new Date(nu - WEG_NA).toISOString(), 'bezorgd', new Date(nu - WEG_NA).toISOString());
     d.prepare('DELETE FROM mail WHERE gezien < ?').run(new Date(nu - MAIL_WEG_NA).toISOString());
     d.prepare('DELETE FROM lees_fout WHERE laatst < ?').run(new Date(nu - MAIL_WEG_NA).toISOString());
@@ -621,7 +726,12 @@ function maak(o) {
       const ref = Date.parse((volgt ? z.ververst : z.mail_tijd) || '');
       if (!isFinite(ref) || nlDag(ref) < vandaag) stand = 'onderweg';
     }
-    const bezorgd = stand === 'bezorgd' ? (z.bezorgd_op || z.mail_tijd || z.bijgewerkt) : null;
+    // wv3062: David tikte "Is geleverd": dan is het bezorgd op dat moment, wat de mail of de vervoerder ook zegt (terug te draaien)
+    const hand = !!z.geleverd_hand && stand !== 'bezorgd';
+    if (hand) { stand = 'bezorgd'; dag = null; van = null; tot = null; }
+    const bezorgd = stand === 'bezorgd' ? (hand ? z.geleverd_hand : (z.bezorgd_op || z.mail_tijd || z.bijgewerkt)) : null;
+    // tussenstand uit de mail: niet als de vervoerder zelf een standtekst gaf; Bij de buren / In de brievenbus alleen bij Bezorgd, de rest alleen ervoor
+    const det = z.stand_detail && !(volgt && z.volg_tekst) && !hand && (stand === 'bezorgd') === DETAIL_BEZORGD.includes(z.stand_detail) ? z.stand_detail : null;
     const laatstT = [z.mail_tijd, z.ververst && !z.ververs_fout ? z.ververst : null, z.bezorgd_op].filter(Boolean).sort().pop() || z.eerste;
     return {
       id: z.id, winkel: z.winkel || null, omschrijving: z.omschrijving || null,
@@ -630,6 +740,7 @@ function maak(o) {
       verwacht_dag: dag || null, verwacht_van: van || null, verwacht_tot: tot || null, bezorgd_op: bezorgd,
       bron: volgt ? 'vervoerder' : 'mail', ververst: z.ververst && !z.ververs_fout ? z.ververst : null,
       laatst: laatstT, eerste: z.eerste, link: volgLink(z, pcs), verborgen: !!z.verborgen,
+      adres: z.adres || null, stand_detail: det, handmatig: !!z.geleverd_hand, onderwerp: null,   // wv3062
     };
   }
   function sorteer(a, b) {
@@ -668,9 +779,13 @@ function maak(o) {
       const o = kand[0];
       o._samen = true; weg.add(w.id);
       o.vervoerder = 'Amazon via ' + w.vervoerder; o.code = w.code; o.samen_id = w.id;
-      if (w.bron === 'vervoerder' || RANG[w.stand] > RANG[o.stand]) {
+      o._groep = (o._groep || [o.id]).concat(w._groep || [w.id]);   // wv3062: voor het mailonderwerp van de hele groep
+      o.adres = o.adres || w.adres;
+      if (o.handmatig && o.stand === 'bezorgd') { /* wv3062: David tikte Is geleverd op de Amazon-rij: die wint */ }
+      else if (w.handmatig && w.stand === 'bezorgd') { o.stand = 'bezorgd'; o.handmatig = true; o.bezorgd_op = w.bezorgd_op; o.stand_detail = null; o.verwacht_dag = null; o.verwacht_van = null; o.verwacht_tot = null; }
+      else if (w.bron === 'vervoerder' || RANG[w.stand] > RANG[o.stand]) {
         o.stand = w.stand; o.stand_tekst = w.stand_tekst; o.bron = w.bron; o.ververst = w.ververst; o.link = w.link || o.link;
-        o.bezorgd_op = w.bezorgd_op || o.bezorgd_op;
+        o.bezorgd_op = w.bezorgd_op || o.bezorgd_op; o.stand_detail = w.stand_detail;
         if (w.verwacht_dag) { o.verwacht_dag = w.verwacht_dag; o.verwacht_van = w.verwacht_van; o.verwacht_tot = w.verwacht_tot; }
       } else if (!o.verwacht_van && w.verwacht_dag === o.verwacht_dag) { o.verwacht_van = w.verwacht_van; o.verwacht_tot = w.verwacht_tot; }
       if (String(w.laatst) > String(o.laatst)) o.laatst = w.laatst;
@@ -694,15 +809,43 @@ function maak(o) {
       const o = kand[0];
       weg.add(w.id); bezet.add(o.id);
       if (!o.samen_id) o.samen_id = w.id;
+      o._groep = (o._groep || [o.id]).concat(w._groep || [w.id]);   // wv3062
+      o.adres = o.adres || w.adres;
       if (!o.bestelnr) o.bestelnr = w.bestelnr;
     });
     return ws.filter((w) => !weg.has(w.id));
   }
-  function lijst(gekocht) {
+  /*
+   * wv3062 (David 14-11, advies Pakjes 1): een pakje zonder omschrijving krijgt het onderwerp van een van zijn mails (ook die van een samengevoegde
+   * rij). onderwerpen(gmail_ids) → Map gmail_id → {onderwerp, domein} (server.js leest mailman.sqlite alleen lezend; er wordt niets bewaard).
+   * Keuze: de jongste mail van de winkel (die noemt bestelling of product), anders de jongste van de vervoerder. Fout of geen bron = geen onderwerp.
+   */
+  function vulOnderwerp(d, ws, onderwerpen) {
+    const zonder = ws.filter((w) => !w.omschrijving);
+    if (typeof onderwerpen === 'function' && zonder.length) {
+      const q = d.prepare('SELECT gmail_id, tijd FROM mail WHERE zending_id = ?'), per = new Map(), alle = [];
+      zonder.forEach((w) => {
+        const ms = [];
+        (w._groep || [w.id]).forEach((id) => q.all(id).forEach((r) => { ms.push(r); alle.push(String(r.gmail_id)); }));
+        per.set(w, ms);
+      });
+      let kop = null;
+      try { kop = alle.length ? onderwerpen(alle) : null; } catch (e) { kop = null; }
+      if (kop && typeof kop.get === 'function') zonder.forEach((w) => {   // geen instanceof: een Map uit een ander vm-domein (UI-toets) telt ook
+        const ms = per.get(w).map((r) => ({ tijd: String(r.tijd || ''), k: kop.get(String(r.gmail_id)) })).filter((x) => x.k && onderwerpSchoon(x.k.onderwerp))
+          .sort((a, b) => (a.tijd < b.tijd ? 1 : a.tijd > b.tijd ? -1 : 0));
+        const kies = ms.find((x) => !VERVOERDER_DOMEINEN.some((v) => op(String(x.k.domein || '').toLowerCase(), v))) || ms[0];
+        w.onderwerp = kies ? onderwerpSchoon(kies.k.onderwerp) : null;
+      });
+    }
+    ws.forEach((w) => { delete w._groep; });
+    return ws;
+  }
+  function lijst(gekocht, onderwerpen) {
     const d = open(), nu = klok(), vandaag = nlDag(nu), pcs = postcodes();
     const lopend = [], eerder = [];
     const rijen = d.prepare('SELECT * FROM zending').all(), wn = new Set(rijen.filter((z) => z.vervoerder === 'winkel').map((z) => z.id));
-    for (const w of samenWinkel(samenAmazon(rijen.map((z) => weergave(z, vandaag, pcs))), wn)) {
+    for (const w of vulOnderwerp(d, samenWinkel(samenAmazon(rijen.map((z) => weergave(z, vandaag, pcs))), wn), onderwerpen)) {
       // bezorgd: 7 dagen in de lijst; niet bezorgd en 30 dagen stil (bij een vervoerder die we volgen) of 10 dagen stil (alleen mail): naar Eerder
       const volgbaar = ['PostNL', 'DHL', 'GLS', 'PostNL of DHL'].includes(w.vervoerder) || w.bron === 'vervoerder';
       const oud = w.stand === 'bezorgd' ? Date.parse(w.bezorgd_op) < nu - EERDER_NA : Date.parse(w.laatst) < nu - (volgbaar ? STIL_NA : STIL_MAIL_NA);
@@ -724,17 +867,28 @@ function maak(o) {
     if (typeof dat.samen === 'string' && /^[0-9a-f]{12}$/.test(dat.samen)) d.prepare('UPDATE zending SET verborgen = ?, bijgewerkt = ? WHERE id = ?').run(dat.verborgen ? nu : null, nu, dat.samen);
     return { status: 200, body: { ok: true, id, verborgen: dat.verborgen } };
   }
+  // wv3062 (David 14-11: "een knop om 'Is geleverd' te klikken"): handmatig afsluiten en terugdraaien; samen = de samengevoegde rij gaat mee
+  function geleverd(id, dat) {
+    if (!/^[0-9a-f]{12}$/.test(String(id))) return { status: 400, body: { ok: false, fout: 'ongeldig pakje' } };
+    if (!dat || typeof dat.geleverd !== 'boolean') return { status: 400, body: { ok: false, fout: 'geleverd moet true of false zijn' } };
+    const d = open(), nu = nuIso();
+    if (!d.prepare('SELECT id FROM zending WHERE id = ?').get(id)) return { status: 404, body: { ok: false, fout: 'pakje niet gevonden' } };
+    const zet = d.prepare('UPDATE zending SET geleverd_hand = ?, bijgewerkt = ? WHERE id = ?');
+    zet.run(dat.geleverd ? nu : null, nu, id);
+    if (typeof dat.samen === 'string' && /^[0-9a-f]{12}$/.test(dat.samen) && dat.samen !== id) zet.run(dat.geleverd ? nu : null, nu, dat.samen);
+    return { status: 200, body: { ok: true, id, geleverd: dat.geleverd } };
+  }
   function info() {
     try {
       const d = open(), n = (q, ...a) => d.prepare(q).get(...a).n;
       const r = d.prepare('SELECT start, eind, mails, herkend, gevolgd, volg_fout, fout FROM ronde ORDER BY id DESC LIMIT 1').get();
-      return { aan: true, pakjes: n('SELECT COUNT(*) AS n FROM zending'), niet_bezorgd: n("SELECT COUNT(*) AS n FROM zending WHERE bezorgd_op IS NULL AND COALESCE(stand_volg, stand_mail) <> 'bezorgd' AND verborgen IS NULL"),
+      return { aan: true, pakjes: n('SELECT COUNT(*) AS n FROM zending'), niet_bezorgd: n("SELECT COUNT(*) AS n FROM zending WHERE bezorgd_op IS NULL AND geleverd_hand IS NULL AND COALESCE(stand_volg, stand_mail) <> 'bezorgd' AND verborgen IS NULL"),
         mails: n('SELECT COUNT(*) AS n FROM mail'), postcodes: postcodes().length,
         laatste_ronde: r ? { op: r.eind || r.start, mails: r.mails, herkend: r.herkend, gevolgd: r.gevolgd, volg_fout: r.volg_fout, fout: !!r.fout } : null };
     } catch (e) { return { aan: true, fout: true }; }
   }
   function sluit() { if (db) { try { db.close(); } catch (e) { /* niets */ } db = null; } }
-  return { herken, isKandidaat, ronde, lijst, verberg, info, sluit, verwerkMail, teVolgen, volg, _laatst: () => laatst };
+  return { herken, isKandidaat, ronde, lijst, verberg, geleverd, info, sluit, verwerkMail, teVolgen, volg, _laatst: () => laatst };
 }
 
-module.exports = { maak, herken, isKandidaat, leesDhl, leesPostnl, leesGls, volgAdressen, volgLink, dagUit, tijdvakUit, standUit, STANDEN };
+module.exports = { maak, herken, adresUit, detailUit, onderwerpSchoon, isKandidaat, leesDhl, leesPostnl, leesGls, volgAdressen, volgLink, dagUit, tijdvakUit, standUit, STANDEN };

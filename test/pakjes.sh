@@ -72,8 +72,9 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
   toets('1b bestelbevestiging zonder bezorgwoord maar met track & trace: Besteld, één rij voor beide mails, winkel uit het domein', vos1 && vos2 && vos1.vervoerder === 'winkel' && vos1.stand === 'besteld'
     && vos1.sleutel === vos2.sleutel && vos1.bestelnr === 'PRF12345' && vos1.winkel === 'Proefmedisch', [vos1, vos2]);
   h = P.herken(mail('"Team Intrapost" <noreply@intrapost-mailer.nl>', 'Track & Trace 2026/12345 ' + PC + ' PROEFSTAD (Proefleverancier Zorg B.V..)', 'Hierbij ontvangt u de Track & Trace link voor het volgen van uw zending 2026/12345 naar het volgende adres:\nProefpraktijk\n' + PC + ' PROEFSTAD\nhttps://vindmijnzending.nl/zoeken/AbCdEf123'));
-  toets('1b Intrapost: winkelrij onderweg, afzender uit het onderwerp, geen postcode of plaats', h && h.vervoerder === 'winkel' && h.stand === 'onderweg' && h.winkel === 'Proefleverancier Zorg'
-    && h.bestelnr === '2026-12345' && !JSON.stringify(h).includes(PC) && !/PROEFSTAD/i.test(JSON.stringify(h)), h);
+  // wv3062: David 14-11 wil zien waar een pakje heen gaat: de plaats staat nu in adres (alleen voor het scherm); de postcode nog steeds nergens
+  toets('1b Intrapost: winkelrij onderweg, afzender uit het onderwerp, geen postcode; plaats alleen in adres', h && h.vervoerder === 'winkel' && h.stand === 'onderweg' && h.winkel === 'Proefleverancier Zorg'
+    && h.bestelnr === '2026-12345' && !JSON.stringify(h).includes(PC) && h.adres === 'Proefstad' && !/PROEFSTAD/i.test(JSON.stringify(Object.assign({}, h, { adres: null }))), h);
   const lijf = 'Je bestelling is binnen!\nOrder Nr 2026-11112222\nBezorgtijdstip 18:00 - 18:15\nBezorgkosten € 1,49';
   toets('1b maaltijdbezorger nooit een pakje: op afzendernaam, op domein, ook met bezorgkosten en ordernummer', P.herken(mail('"Proef Pizza Team" <confirm@proefbezorg.nl>', 'Bedankt voor je order, tot zo!', lijf)) === null
     && P.herken(mail('Bestellingen <confirm@newyorkpizza.nl>', 'Bedankt voor je bestelling', lijf)) === null && P.herken(mail('Proef <noreply@hellofresh.nl>', 'Je bestelling is verzonden', lijf + '\nTrack & trace: PRF00011122233')) === null
@@ -268,6 +269,102 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
       && dz.some((p) => p.stand === 'besteld' && p.bestelnr === 'DZ1002'), dz);
     M5.sluit(); fs.rmSync(W5, { recursive: true, force: true });
   }
+  // ── 6. wv3062 (David 14-11): mailonderwerp op de kaart, Is geleverd, afleveradres en tussenstand uit de mail ──
+  {
+    const A = P.adresUit;
+    toets('6 adres: DPD-vorm (kop, naam, straat, postcode) = alleen de straat, geen naam of postcode', A('Bezorgen 14 november 2026 Bezorgadres\nProef Persoon\nProefstraat 12\n' + PC + '\nWijzigen?') === 'Proefstraat 12', A('Bezorgadres\nProef Persoon\nProefstraat 12\n' + PC));
+    toets('6 adres: GLS-vorm op één regel + plaats in hoofdletters eronder', A('Afleveradres:   Proef Persoon     Proefstraat 3     ' + PC + '\nPROEFSTAD\nMet vriendelijke groet') === 'Proefstraat 3, Proefstad', A('Afleveradres:   Proef Persoon     Proefstraat 3     ' + PC + '\nPROEFSTAD'));
+    toets('6 adres: UPS-vorm in hoofdletters met (PLAATS)', A('LEVERINGSADRES:\nPROEF PERSOON\nPROEFSTRAAT 3 , 1234 AB (PROEFSTAD)\nZENDINGSINFO:') === 'Proefstraat 3, Proefstad', A('LEVERINGSADRES:\nPROEF PERSOON\nPROEFSTRAAT 3 , 1234 AB (PROEFSTAD)'));
+    toets('6 adres: FedEx-vorm "Plaats 1234" en straat met tussenvoegsels', A('Afgeleverd aan\nProefhof van der Laan 12,\nProefstad 1234\nOntvangen door') === 'Proefhof van der Laan 12, Proefstad', A('Afgeleverd aan\nProefhof van der Laan 12,\nProefstad 1234'));
+    toets('6 adres: winkelvorm "Straat 1, 1234AB Plaats" op één regel', A('- Leveradres: Proefstraat 1, ' + PC + ' Proefstad') === 'Proefstraat 1, Proefstad');
+    toets('6 adres: alleen een factuuradres, een link of geen kop = geen adres', A('Factuuradres\nProefstraat 1\n' + PC + ' Proefstad') === null && A('Bezorgadres\nhttps://proef.nl/x\nProefstraat 1') === null && A('Proefstraat 1 ' + PC) === null);
+    toets('6 adres: nooit langer dan 120 tekens, geen < >', (A('Bezorgadres\n<b>Proefstraat</b> 1\n' + PC + ' Proefstad') || '').indexOf('<') < 0);
+    const D = P.detailUit;
+    toets('6 tussenstand uit het onderwerp: sorteercentrum, bij de bezorger, klaar voor verzending, douane, ingeklaard, vertraagd, buren, brievenbus',
+      D('Je pakket is in ons sorteercentrum', '') === 'Bij het sorteercentrum' && D('We hebben je pakket ontvangen!', '') === 'Bij de bezorger' && D('Jouw order PR1 is klaar voor verzending', '') === 'Klaar voor verzending'
+      && D('Je zending is bij de douane', '') === 'Bij de douane' && D('Je zending is ingeklaard', '') === 'Ingeklaard bij de douane' && D('Je pakket is vertraagd', '') === 'Vertraagd'
+      && D('Je pakket is bezorgd bij de buren', '') === 'Bij de buren' && D('Je pakket is bezorgd in de brievenbus (JJD1)', '') === 'In de brievenbus');
+    toets('6 tussenstand: standaardtekst in de mail ("Niet thuis? … bij de buren", brievenbus-uitleg) telt niet; "Niet thuis? Plan …" in het onderwerp ook niet',
+      D('Informatie over je zending via GLS', 'Ben je niet thuis en kan het niet bij de buren afgeleverd worden? Geen probleem, ligt het in jouw brievenbus') === null
+      && D('Niet thuis? Plan de bezorging van je pakket zelf', 'bij de buren') === null && D('Vandaag ontvang je jouw pakket van GLS!', 'Anders doen we morgen een nieuwe bezorgpoging.') === null);
+    toets('6 tussenstand uit de tekst: alleen de gemeten zinnen (GOFO sorteercentrum, Amazon brievenbus, winkel opgehaald)', D('Jouw pakket wordt binnenkort bezorgd', 'Jouw pakket GFNL1 is aangekomen in ons sorteercentrum en wordt') === 'Bij het sorteercentrum'
+      && D('Bezorgd: ‘Proef...‘', 'Pakket is achtergelaten in brievenbus') === 'In de brievenbus' && D('Je pakket is onderweg', 'Je pakket is zojuist door onze bezorgdienst opgehaald') === 'Bij de bezorger');
+    const O = P.onderwerpSchoon;
+    toets('6 onderwerp: Fwd:/RE: eraf, dubbele spaties weg, geen < >, leeg = null, lang = hooguit 120 tekens met …', O('Fwd: RE:  Bestelling   PR123  bij Proefwinkel') === 'Bestelling PR123 bij Proefwinkel'
+      && O('Fwd:') === null && O('') === null && O(null) === null && O('<b>Proef</b>') === 'bProef/b' && O('woord '.repeat(60)).length <= 120 && /…$/.test(O('woord '.repeat(60))));
+    // lijst met onderwerpen
+    const W6 = fs.mkdtempSync(path.join(os.tmpdir(), 'pakjes6-'));
+    let n6 = Date.parse('2026-11-14T09:00:00Z');
+    const M6 = P.maak({ dir: W6, nu: () => n6 });
+    M6.verwerkMail({ gmail_id: 'o1', van: 'Proefzaak <x@proefzaak.nl>', onderwerp: 'Bedankt voor je bestelling', tekst: 'Bestelnummer PZ1001\nBezorgadres\nProef Persoon\nProefstraat 5\n' + PC + ' Proefstad', datum: '2026-11-12T08:00:00Z' });
+    M6.verwerkMail({ gmail_id: 'o2', van: 'PostNL <n@edm.postnl.nl>', onderwerp: 'Nieuw pakket van Proefzaak', tekst: 'Track & trace-code\n3SPZAK111222333', datum: '2026-11-13T08:00:00Z' });
+    M6.verwerkMail({ gmail_id: 'o3', van: 'DHL eCommerce <noreply@dhlecommerce.nl>', onderwerp: 'We hebben je pakket ontvangen (JJD000011112222999988887)', tekst: 'pakket JJD000011112222999988887 van ANDERWINKEL op de stoep', datum: '2026-11-13T09:00:00Z' });
+    M6.verwerkMail({ gmail_id: 'o4', van: 'Amazon.nl <u@amazon.nl>', onderwerp: 'Verzonden: ‘Proefstoel...’', tekst: 'Bestelnummer 111-9998887-7776665', datum: '2026-11-13T10:00:00Z' });
+    const kop = new Map([['o1', { onderwerp: 'Fwd: Bedankt voor je bestelling PZ1001 bij Proefzaak', domein: 'proefzaak.nl' }], ['o2', { onderwerp: 'Nieuw pakket van Proefzaak', domein: 'edm.postnl.nl' }],
+      ['o3', { onderwerp: 'We hebben je pakket ontvangen (JJD000011112222999988887)', domein: 'dhlecommerce.nl' }], ['o4', { onderwerp: 'Verzonden: ‘Proefstoel...’', domein: 'amazon.nl' }]]);
+    let gevraagdIds = null;
+    let l6 = M6.lijst([], (ids) => { gevraagdIds = ids.slice(); return kop; }).body;
+    const pz = l6.lopend.find((p) => /3SPZAK/.test(String(p.code))), an = l6.lopend.find((p) => /JJD0000111122229999/.test(String(p.code))), am = l6.lopend.find((p) => p.bestelnr === '111-9998887-7776665');
+    toets('6 lijst: samengevoegd pakje (winkel + PostNL) krijgt het onderwerp van de winkelmail, zonder Fwd:', pz && pz.onderwerp === 'Bedankt voor je bestelling PZ1001 bij Proefzaak', pz);
+    toets('6 lijst: alleen een vervoerdermail = dat onderwerp', an && an.onderwerp === 'We hebben je pakket ontvangen (JJD000011112222999988887)', an);
+    toets('6 lijst: omschrijving wint (Amazon), geen onderwerp en zijn mail niet eens gevraagd', am && am.omschrijving === 'Proefstoel' && am.onderwerp === null && gevraagdIds && !gevraagdIds.includes('o4'), [am, gevraagdIds]);
+    toets('6 lijst: afleveradres van de winkelmail op het samengevoegde pakje, zonder postcode of naam; tussenstand Bij de bezorger', pz && pz.adres === 'Proefstraat 5, Proefstad' && an && an.stand_detail === 'Bij de bezorger'
+      && !JSON.stringify(l6).includes(PC) && !/Proef Persoon/.test(JSON.stringify(l6)), [pz, an]);
+    toets('6 lijst: onderwerpen gooit een fout = lijst werkt, geen onderwerp', (() => { const r = M6.lijst([], () => { throw new Error('op slot'); }); return r.status === 200 && r.body.lopend.length === 3 && r.body.lopend.every((p) => p.onderwerp === null); })());
+    toets('6 lijst: geen bron of onbekende mail = geen onderwerp', M6.lijst([]).body.lopend.every((p) => p.onderwerp === null) && M6.lijst([], () => new Map()).body.lopend.every((p) => p.onderwerp === null)
+      && M6.lijst([], () => new Map([['o3', { onderwerp: '   ', domein: 'dhlecommerce.nl' }]])).body.lopend.every((p) => p.onderwerp === null));
+    // Is geleverd
+    toets('6 geleverd: ongeldig id 400, geen boolean 400, onbekend 404', M6.geleverd('x', { geleverd: true }).status === 400 && M6.geleverd(an.id, { geleverd: 'ja' }).status === 400 && M6.geleverd('abcdefabcdef', { geleverd: true }).status === 404);
+    toets('6 geleverd: Is geleverd = Bezorgd (handmatig), geen tussenstand, niet meer volgen', M6.geleverd(an.id, { geleverd: true }).status === 200 && (() => {
+      const p = M6.lijst([]).body.lopend.find((x) => x.id === an.id); return p && p.stand === 'bezorgd' && p.handmatig === true && p.bezorgd_op === new Date(n6).toISOString() && p.stand_detail === null && !p.verwacht_dag;
+    })() && !M6.teVolgen(true).some((z) => z.id === an.id) && /"niet_bezorgd":3/.test(JSON.stringify(M6.info())));   // 4 rijen (winkel + PostNL samen, DHL, Amazon), DHL is nu geleverd
+    toets('6 geleverd: na 7 dagen naar Eerder (zoals bezorgd), terugdraaien = weer de stand uit de mail en weer volgen', (n6 += 8 * 86400000, M6.lijst([]).body.eerder.some((x) => x.id === an.id))
+      && (n6 -= 8 * 86400000, M6.geleverd(an.id, { geleverd: false }).status === 200) && (() => { const p = M6.lijst([]).body.lopend.find((x) => x.id === an.id); return p && p.stand !== 'bezorgd' && p.handmatig === false && p.stand_detail === 'Bij de bezorger'; })()
+      && M6.teVolgen(true).some((z) => z.id === an.id));
+    toets('6 geleverd: samen neemt de samengevoegde rij mee (en terug)', M6.geleverd(pz.id, { geleverd: true, samen: pz.samen_id }).status === 200
+      && M6.lijst([]).body.lopend.filter((p) => p.handmatig).length === 1 && M6.lijst([]).body.lopend.find((p) => p.id === pz.id).stand === 'bezorgd'
+      && M6.geleverd(pz.id, { geleverd: false, samen: pz.samen_id }).status === 200 && M6.lijst([]).body.lopend.every((p) => !p.handmatig));
+    // tussenstand Bij de buren alleen bij bezorgd
+    M6.verwerkMail({ gmail_id: 'o5', van: 'DHL eCommerce <noreply@dhlecommerce.nl>', onderwerp: 'Je pakket is bezorgd bij de buren (JJD000011112222999988887)', tekst: 'Bezorgd.', datum: '2026-11-14T08:00:00Z' });
+    toets('6 tussenstand van een nieuwere mail vervangt de oude; Bij de buren hoort bij Bezorgd', (() => { const p = M6.lijst([]).body.lopend.find((x) => x.id === an.id); return p && p.stand === 'bezorgd' && p.stand_detail === 'Bij de buren'; })());
+    M6.sluit();
+    // aanvullen: een bank van vóór wv3062 (zonder de nieuwe kolommen) krijgt ze, en de open pakjes lezen één keer hun jongste mail opnieuw
+    const W7 = fs.mkdtempSync(path.join(os.tmpdir(), 'pakjes7-'));
+    { const { DatabaseSync } = require('node:sqlite'); const o = new DatabaseSync(path.join(W7, 'pakjes.sqlite'));
+      o.exec(`CREATE TABLE zending (id TEXT PRIMARY KEY, sleutel TEXT NOT NULL UNIQUE, vervoerder TEXT NOT NULL, code TEXT, bestelnr TEXT, winkel TEXT, omschrijving TEXT,
+        pc TEXT, stand_mail TEXT, mail_tijd TEXT, verwacht_dag TEXT, verwacht_van TEXT, verwacht_tot TEXT, stand_volg TEXT, volg_tekst TEXT, volg_dag TEXT, volg_van TEXT, volg_tot TEXT, gevolgd TEXT, bezorgd_op TEXT,
+        ververst TEXT, ververs_fout TEXT, ververs_pogingen INTEGER NOT NULL DEFAULT 0, verborgen TEXT, eerste TEXT NOT NULL, bijgewerkt TEXT NOT NULL);
+        CREATE TABLE mail (gmail_id TEXT PRIMARY KEY, zending_id TEXT, tijd TEXT, gezien TEXT NOT NULL);
+        INSERT INTO zending (id, sleutel, vervoerder, code, winkel, stand_mail, mail_tijd, eerste, bijgewerkt) VALUES ('aaaaaaaaaaa1', 'dpd:09990001112223', 'dpd', '09990001112223', 'Proefdienst', 'onderweg', '2026-11-13T08:00:00.000Z', '2026-11-13T08:00:00.000Z', '2026-11-13T08:00:00.000Z');
+        INSERT INTO zending (id, sleutel, vervoerder, code, winkel, stand_mail, mail_tijd, eerste, bijgewerkt, bezorgd_op) VALUES ('aaaaaaaaaaa2', 'dpd:09990001112224', 'dpd', '09990001112224', 'Proefdienst', 'bezorgd', '2026-11-13T08:00:00.000Z', '2026-11-13T08:00:00.000Z', '2026-11-13T08:00:00.000Z', '2026-11-13T08:00:00.000Z');
+        INSERT INTO mail VALUES ('v1', 'aaaaaaaaaaa1', '2026-11-13T08:00:00.000Z', '2026-11-13T08:00:00.000Z');
+        INSERT INTO mail VALUES ('v2', 'aaaaaaaaaaa2', '2026-11-13T08:00:00.000Z', '2026-11-13T08:00:00.000Z');`); o.close(); }
+    const M7 = P.maak({ dir: W7, nu: () => Date.parse('2026-11-14T09:00:00Z') });
+    const gel7 = [];
+    const lees7 = async (id) => { gel7.push(id); return mail('DPD <n@dpd.nl>', 'Je pakket is in ons sorteercentrum', 'Pakketnummer 09990001112223\nBezorgadres\nProef Persoon\nProefstraat 9\n' + PC, '2026-11-13T08:00:00Z'); };
+    const r7 = await M7.ronde({ kandidaten: [], lees: lees7 });
+    const p7 = M7.lijst([]).body.lopend.find((p) => p.id === 'aaaaaaaaaaa1');
+    toets('6 aanvullen: oude bank krijgt de kolommen; open pakje leest zijn mail één keer opnieuw (adres + tussenstand), bezorgd pakje niet', r7.ok && r7.aangevuld === 1 && gel7.join() === 'v1' && p7 && p7.adres === 'Proefstraat 9' && p7.stand_detail === 'Bij het sorteercentrum', [r7, gel7, p7]);
+    await M7.ronde({ kandidaten: [], lees: lees7 });
+    toets('6 aanvullen: de volgende ronde leest niets opnieuw', gel7.length === 1, gel7);
+    // review Codex MOET 1: lukt het lezen niet, dan een volgende ronde opnieuw (hooguit 3 rondes), niet voorgoed overgeslagen
+    { const { DatabaseSync } = require('node:sqlite'); const o = new DatabaseSync(path.join(W7, 'pakjes.sqlite'));
+      o.exec("UPDATE zending SET aanvul = NULL, adres = NULL, stand_detail = NULL WHERE id = 'aaaaaaaaaaa1'"); o.close(); }
+    const fout7 = [];
+    const leesFout7 = async (id) => { fout7.push(id); return null; };
+    await M7.ronde({ kandidaten: [], lees: leesFout7 });
+    await M7.ronde({ kandidaten: [], lees: leesFout7 });
+    const na2 = M7.lijst([]).body.lopend.find((p) => p.id === 'aaaaaaaaaaa1');
+    await M7.ronde({ kandidaten: [], lees: lees7 });
+    const na3 = M7.lijst([]).body.lopend.find((p) => p.id === 'aaaaaaaaaaa1');
+    toets('6 aanvullen: leesfout = volgende ronde opnieuw; daarna gelukt', fout7.length === 2 && na2 && na2.adres === null && na3 && na3.adres === 'Proefstraat 9', [fout7, na2 && na2.adres, na3 && na3.adres]);
+    { const { DatabaseSync } = require('node:sqlite'); const o = new DatabaseSync(path.join(W7, 'pakjes.sqlite'));
+      o.exec("UPDATE zending SET aanvul = NULL, adres = NULL WHERE id = 'aaaaaaaaaaa1'"); o.close(); }
+    fout7.length = 0;
+    for (let i = 0; i < 5; i++) await M7.ronde({ kandidaten: [], lees: leesFout7 });
+    toets('6 aanvullen: blijft het lezen mislukken, dan na 3 rondes klaar (geen eindeloos lezen)', fout7.length === 3, fout7);
+    M7.sluit(); fs.rmSync(W6, { recursive: true, force: true }); fs.rmSync(W7, { recursive: true, force: true });
+  }
   // ── 4. server.js-blok en uitrol ──
   const src = fs.readFileSync('server.js', 'utf8');
   const b = src.slice(src.indexOf('// ── OVIS Pakjes (wv2593'), src.indexOf('// ── einde OVIS Pakjes ──'));
@@ -277,6 +374,31 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
   toets('4 server.js: log alleen aantallen (geen code, winkel, postcode, onderwerp)', log && !/code|winkel|pc|postcode|onderwerp|van:/.test(log.replace(/volg_|kandidaten/g, '')), log);
   toets('4 server.js: mailman.sqlite alleen lezen', /new DatabaseSync\(f, \{ readOnly: true \}\)/.test(b) && !/INSERT|UPDATE|DELETE/.test(b.slice(b.indexOf('function pakjesKandidaten'), b.indexOf('async function pakjesLees'))));
   toets('4 server.js: ronde alleen op de primaire kant en overdag', /!SERVER_ECHT \|\| !rolPrimair\(\)/.test(b) && /'06:30'/.test(b));
+  // wv3062: onderwerpen uit mailman.sqlite: alleen lezen, stil leeg bij geen bank, kapotte bank of slot; route geleverd
+  {
+    const st = b.indexOf('function pakjesOnderwerpen'), en = b.indexOf('async function pakjesLees');
+    const fsrc = b.slice(st, en);
+    toets('4 server.js: pakjesOnderwerpen leest alleen (readOnly, geen INSERT/UPDATE/DELETE), lijst krijgt hem mee, route geleverd', st > 0 && /new DatabaseSync\(f, \{ readOnly: true \}\)/.test(fsrc) && !/INSERT|UPDATE|DELETE|schrijfLog/.test(fsrc)
+      && (b.match(/pakjes\.lijst\(pakjesGekocht\(\), pakjesOnderwerpen\)/g) || []).length === 2 && /\\\/geleverd\$/.test(b) && /appTeller\('pakjes_geleverd', 60/.test(b));
+    const MD = fs.mkdtempSync(path.join(os.tmpdir(), 'pakjes-mm-'));
+    const fout = [];
+    const maakF = new Function('MAILMAN_DIR', 'fs', 'path', 'require', 'logError', fsrc + '\nreturn pakjesOnderwerpen;');
+    const po = maakF(MD, fs, path, require, (k) => fout.push(k));
+    toets('4 onderwerpen: geen mailman.sqlite = lege Map, geen fout', po(['a']) instanceof Map && po(['a']).size === 0 && fout.length === 0);
+    const { DatabaseSync } = require('node:sqlite');
+    const mm = new DatabaseSync(path.join(MD, 'mailman.sqlite'));
+    mm.exec("CREATE TABLE besluit (gmail_id TEXT, postvak TEXT, afzender_domein TEXT, onderwerp TEXT); INSERT INTO besluit VALUES ('a', 'gmail:david', 'proef.nl', 'Proefonderwerp'), ('b', 'gmail:david', 'proef.nl', NULL), ('c', 'gmail:praktijk', 'proef.nl', 'Ander postvak');");
+    const r1 = po(['a', 'b', 'c', 'd']);
+    toets('4 onderwerpen: alleen gmail:david met een onderwerp', r1.size === 1 && r1.get('a').onderwerp === 'Proefonderwerp' && r1.get('a').domein === 'proef.nl', [...r1]);
+    toets('4 onderwerpen: meer dan 400 ids in delen', po(Array.from({ length: 900 }, (x, i) => i === 850 ? 'a' : 'x' + i)).size === 1);
+    mm.exec('BEGIN EXCLUSIVE');
+    const t0 = Date.now(), r2 = po(['a']);
+    toets('4 onderwerpen: bank op slot = lege Map binnen een seconde, fout gelogd zonder inhoud', r2.size === 0 && Date.now() - t0 < 1500 && fout.length === 1, [r2.size, Date.now() - t0, fout]);
+    mm.exec('ROLLBACK'); mm.close();
+    fs.writeFileSync(path.join(MD, 'mailman.sqlite'), 'geen sqlite '.repeat(100));
+    toets('4 onderwerpen: kapotte bank = lege Map', (() => { try { return po(['a']).size === 0; } catch (e) { return false; } })());
+    fs.rmSync(MD, { recursive: true, force: true });
+  }
   toets('4 uitrol.sh: pakjes.js in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bpakjes\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

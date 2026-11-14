@@ -22374,6 +22374,8 @@ async function appShopper(req, res, a, route, d) {
 // mails en 25 volgvragen per ronde. Log en /health alleen aantallen: nooit een code, winkel, postcode of adres.
 // Routes achter de app-sessie: GET /app/pakjes (lopend, eerder, verwacht uit Shopper), POST /app/pakjes/ververs (nu een ronde, 6/uur),
 // POST /app/pakjes/<id>/verberg {verborgen, samen?} (naar Eerder of terug; 60/uur). Ontbreekt pakjes.js in de release: 404 en aan=false.
+// wv3062 (14-11): POST /app/pakjes/<id>/geleverd {geleverd, samen?} (David zet het zelf op bezorgd of draait dat terug; 60/uur); de lijst geeft
+// per pakje zonder omschrijving het mailonderwerp (pakjesOnderwerpen, alleen lezen uit mailman.sqlite), het afleveradres en de tussenstand uit de mail.
 const PAKJES_DIR = serverPad('pakjes', process.env.PAKJES_DIR, '/opt/data/pakjes', serverProefDeel('pakjes'));
 const pakjes = (function () {
   const p = path.join(__dirname, 'pakjes.js');
@@ -22392,6 +22394,26 @@ function pakjesKandidaten() {
     return db.prepare("SELECT gmail_id, ontvangen, afzender_domein, onderwerp FROM besluit WHERE postvak = 'gmail:david' AND ontvangen >= ? ORDER BY ontvangen LIMIT 2000")
       .all(new Date(Date.now() - 21 * 86400000).toISOString());
   } finally { db.close(); }
+}
+// wv3062: onderwerp en afzenderdomein van de mails van de pakjes zonder omschrijving, voor op de kaart (alleen lezen, niets bewaard; de lijst gaat
+// stil door zonder onderwerp als mailman.sqlite weg, op slot of kapot is). Nooit in een log.
+function pakjesOnderwerpen(ids) {
+  const uit = new Map();
+  const f = path.join(MAILMAN_DIR, 'mailman.' + 'sqlite');
+  if (!ids || !ids.length || !fs.existsSync(f)) return uit;
+  const { DatabaseSync } = require('node:sqlite');
+  let db = null;
+  try {
+    db = new DatabaseSync(f, { readOnly: true });
+    db.exec('PRAGMA busy_timeout = 500;');
+    for (let i = 0; i < ids.length; i += 400) {
+      const deel = ids.slice(i, i + 400).map(String);
+      db.prepare("SELECT gmail_id, afzender_domein, onderwerp FROM besluit WHERE postvak = 'gmail:david' AND gmail_id IN (" + deel.map(function () { return '?'; }).join(',') + ')')
+        .all(...deel).forEach(function (r) { if (r.onderwerp) uit.set(String(r.gmail_id), { onderwerp: r.onderwerp, domein: r.afzender_domein }); });
+    }
+  } catch (e) { logError('pakjes-onderwerp', new Error('mailman.sqlite niet te lezen')); return new Map(); }
+  finally { if (db) { try { db.close(); } catch (e) { /* niets */ } } }
+  return uit;
 }
 async function pakjesLees(id) {
   const j = await appAgendaApi({ actie: 'mail_lezen', id: String(id) });
@@ -22444,23 +22466,29 @@ function pakjesGekocht() {
 appStaat.tellers.pakjes = [];
 appStaat.tellers.pakjes_ververs = [];
 appStaat.tellers.pakjes_verberg = [];
+appStaat.tellers.pakjes_geleverd = [];
 async function appPakjes(req, res, a, route, d) {
   if (!pakjes) return appWeiger(res, 404, 'Pakjes zit niet in deze versie van de pod', 'pakjes ontbreekt');
   if (!appTeller('pakjes', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens pakjes');
   let u, m = null, soort = 'onbekend';
   try {
-    if (route === 'GET /app/pakjes') { soort = 'lijst'; u = pakjes.lijst(pakjesGekocht()); }
+    if (route === 'GET /app/pakjes') { soort = 'lijst'; u = pakjes.lijst(pakjesGekocht(), pakjesOnderwerpen); }
     else if (route === 'POST /app/pakjes/ververs') {
       soort = 'ververs';
       if (!appTeller('pakjes_ververs', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 6)', 'grens pakjes ververs');
       const r = await Promise.race([pakjesRonde({ dwing: true, bron: 'app' }), new Promise(function (ok) { setTimeout(function () { ok({ ok: true, loopt: true }); }, 25000).unref(); })]);
-      u = pakjes.lijst(pakjesGekocht());
+      u = pakjes.lijst(pakjesGekocht(), pakjesOnderwerpen);
       u.body.ververs = { ok: !!r.ok, loopt: !!r.loopt, gelezen: r.gelezen || 0, gevolgd: r.gevolgd || 0, volg_fout: r.volg_fout || 0 };
     }
     else if ((m = /^POST \/app\/pakjes\/([^/]*)\/verberg$/.exec(route))) {
       soort = 'verberg';
       if (!appTeller('pakjes_verberg', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens pakjes verberg');
       u = pakjes.verberg(m[1], d);
+    }
+    else if ((m = /^POST \/app\/pakjes\/([^/]*)\/geleverd$/.exec(route))) {   // wv3062: "Is geleverd" (en terug)
+      soort = 'geleverd';
+      if (!appTeller('pakjes_geleverd', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens pakjes geleverd');
+      u = typeof pakjes.geleverd === 'function' ? pakjes.geleverd(m[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
     }
     else u = { status: 404, body: { ok: false, fout: 'onbekend' } };
   } catch (e) { logError('pakjes', e); return appWeiger(res, 503, 'Pakjes kon de lijst nu niet lezen; probeer het zo opnieuw', 'pakjes fout'); }
