@@ -5487,7 +5487,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/potje');   // wv2706: potje zetten of 
 APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij een reis tikken = David die werkt
 ['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2717: zelf corrigeren = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
-['laad', 'bewerk', 'nieuw', 'vergelijk', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
+['laad', 'bewerk', 'nieuw', 'vergelijk', 'uitbreiden', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/uitbreiden', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
 ['controleer', 'inlees', 'intrek', 'code'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
@@ -16724,6 +16724,8 @@ async function appStudio(req, res, a, s, d, route) {
 //   POST /app/imagine/(laad|bewerk|nieuw|vergelijk), /stop/<taak>, /bron/<id>/(fav|titel|weg), /v/<id>/(weg|immich|snij), /vergelijk/<groep>/kies (wv3021)
 //   GET  /app/imagine/incognito, /app/imagine/incognito/b/<id>/(toon|deel/<n>)
 //   POST /app/imagine/incognito/(laad|bewerk|nieuw|wis), /incognito/stop/<taak>, /incognito/b/<id>/(weg|export)
+//   wv3044: GET /app/imagine/(incognito/)uitbreiden/<id>, POST /app/imagine/(incognito/)uitbreiden en …/uitbreiden/<id>/weg (opdracht uitbreiden;
+//   de tekst alleen in het procesgeheugen van imagine.js, nooit in de log)
 // Incognito: alleen geheugen van dit proces, per apparaat (a.id); in api.log alleen de vaste redentekst, nooit inhoud; geen logError met tekst.
 const imagineApp = (function () {
   const p = path.join(__dirname, 'imagine.js');
