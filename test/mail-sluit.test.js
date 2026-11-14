@@ -206,7 +206,7 @@ test('mail-app wijzig terug meldt de terugzetting aan de sluitcontrole; archiver
   assert.deepEqual(klaar, ['cccccccccccc0001']);
 });
 
-test('review MOET 1 (r1) en MOET 3 (r2): een onvolledige dag = ok false en laat een eerdere volledige uitkomst ongemoeid (tellingen en lijst kloppen samen)', async () => {
+test('review r1 MOET 1, r3 MOET 1: een onvolledige hercontrole = ok false, bewaard als niet compleet; nieuwe vondsten blijven, eerdere lijstgesprekken die hij niet zag ook', async () => {
   const a = ber({ labels: ['UNREAD'], onderwerp: 'Eerste' }), b = ber({ labels: ['UNREAD'], onderwerp: 'Later erbij' });
   let alle = [a];
   const k = kamer(function () { return alle; });
@@ -217,9 +217,10 @@ test('review MOET 1 (r1) en MOET 3 (r2): een onvolledige dag = ok false en laat 
   r = await k2.m.ronde();
   assert.equal(r.ok, false, 'onvolledig is geen geslaagde controle');
   const s = k2.opslag();
-  assert.equal(s.dagen[DAG].compleet, true, 'de volledige uitkomst blijft');
-  assert.deepEqual(s.dagen[DAG].lijst.map(function (x) { return x.onderwerp; }), ['Eerste'], 'de volledige dag blijft zoals hij was (de dag komt nog twee nachten langs)');
-  assert.equal(s.dagen[DAG].tel.lijst, 1);
+  assert.equal(s.dagen[DAG].compleet, false, 'zichtbaar niet compleet');
+  assert.deepEqual(s.dagen[DAG].lijst.map(function (x) { return x.onderwerp; }), ['Later erbij', 'Eerste'], 'nieuwe vondst + het eerdere gesprek dat deze poging niet zag');
+  assert.equal(s.dagen[DAG].tel.lijst, 1, 'de som is van deze poging');
+  assert.equal(s.dagen[DAG].aangevuld, 1);
   assert.equal(s.laatste.ok, false);
 });
 
@@ -300,4 +301,22 @@ test('review ronde 2 MOET 2: vindt een herkansing er later nog bij, dan telt de 
   k.m.ochtendGezet();
   await k.m.ronde();
   assert.equal(k.m.ochtendOpen(), null, 'niets nieuws = geen nieuwe regel');
+});
+
+test('review r3 ZOU 1: aangevuld telt per uitkomst (niet opgeteld); een gesprek dat de poging nu in de inbox ziet, komt niet terug op de lijst', async () => {
+  const a = ber({ labels: ['UNREAD'], onderwerp: 'Steeds gemist' }), b = ber({ labels: ['UNREAD'], onderwerp: 'Wel gezien' });
+  let alle = [a, b];
+  const k = kamer(function () { return alle; });
+  await k.m.ronde();
+  const k2 = kamer(function () { return alle; }, { opslag: JSON.stringify(k.opslag()), melding: true });
+  alle = [b];
+  for (let i = 0; i < 3; i++) await k2.m.ronde();
+  let d = k2.opslag().dagen[DAG];
+  assert.equal(d.aangevuld, 1, 'na drie onvolledige pogingen nog steeds 1');
+  assert.equal(d.lijst.length, 2);
+  alle = [Object.assign({}, b, { labels: ['INBOX'] })];   // b staat nu in de inbox, a nog steeds niet gezien
+  await k2.m.ronde();
+  d = k2.opslag().dagen[DAG];
+  assert.deepEqual(d.lijst.map(function (x) { return x.onderwerp; }), ['Steeds gemist'], 'b kreeg zijn nieuwe plek (inbox), a blijft');
+  assert.equal(d.tel.inbox, 1);
 });
