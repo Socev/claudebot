@@ -22505,12 +22505,16 @@ async function pakjesLees(id) {
   return { van: j.van, onderwerp: j.onderwerp, tekst: j.tekst, datum: j.datum };
 }
 // alleen de vaste https-adressen die pakjes.js bouwt; geen redirect volgen, hooguit 1 MB, alleen json
-const PAKJES_HOSTS = ['my.dhlecommerce.nl', 'jouw.postnl.nl', 'gls-group.com'];
-async function pakjesHaal(url) {
+// wv3078: GOFO (www.gofo.com, POST met de code als json-body) en Dragonfly (dragonflyshipping.nl), gemeten 14-11-2026; POST alleen naar PAKJES_POST
+const PAKJES_HOSTS = ['my.dhlecommerce.nl', 'jouw.postnl.nl', 'gls-group.com', 'www.gofo.com', 'dragonflyshipping.nl'];
+const PAKJES_POST = ['www.gofo.com'];
+async function pakjesHaal(url, body) {
   const u = new URL(url);
   if (u.protocol !== 'https:' || PAKJES_HOSTS.indexOf(u.hostname) < 0) throw new Error('host niet toegestaan');
-  const r = await fetch(u, { headers: { 'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36', accept: 'application/json, text/plain, */*' },
-    redirect: 'manual', signal: AbortSignal.timeout(15000) });
+  if (body !== undefined && PAKJES_POST.indexOf(u.hostname) < 0) throw new Error('post niet toegestaan');
+  const kop = { 'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36', accept: 'application/json, text/plain, */*' };
+  if (body !== undefined) kop['content-type'] = 'application/json';
+  const r = await fetch(u, Object.assign({ headers: kop, redirect: 'manual', signal: AbortSignal.timeout(15000) }, body !== undefined ? { method: 'POST', body: JSON.stringify(body) } : {}));
   const t = await r.text();
   let j = null;
   if (t.length <= 1024 * 1024) { try { j = JSON.parse(t); } catch (e) { j = null; } }

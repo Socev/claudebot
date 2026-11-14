@@ -407,7 +407,8 @@ function herken(m) {
   };
 }
 
-// ── volgen bij de vervoerder (alleen openbare pagina's, gemeten 6-11-2026) ──
+// ── volgen bij de vervoerder (alleen openbare pagina's, gemeten 6-11-2026; GOFO en Dragonfly 14-11-2026, wv3078) ──
+const GOFO_CODE = /^GF[A-Z]{2}\d{10,20}$/, DRAGONFLY_CODE = /^AMZNL\d{9,15}$/;
 function volgAdressen(z, postcodes) {
   const c = encodeURIComponent(z.code || '');
   if (!z.code) return [];
@@ -419,6 +420,10 @@ function volgAdressen(z, postcodes) {
   if (z.vervoerder === 'postnl') return /NL$/.test(z.code) ? pnl(pcs) : pnl(pcs);
   if (z.vervoerder === 'gls' && !/^\d{11,12}$/.test(z.code)) return [];   // wv3011: GLS NL (14 cijfers) kent rstt029 niet (404, gemeten 13-11)
   if (z.vervoerder === 'gls') return [{ soort: 'gls', url: 'https://gls-group.com/app/service/open/rest/NL/nl/rstt029?match=' + c }];
+  // wv3078 (gemeten 14-11-2026 met echte codes): GOFO en Dragonfly hebben een openbare json-volgvraag zonder login of sleutel. GOFO wil een POST met
+  // de code in de body (de enige POST; server.js pakjesHaal stuurt body als json). DPD (geen verbinding vanaf de pod), UPS en FedEx (403) niet.
+  if (z.vervoerder === 'gofo') return GOFO_CODE.test(z.code) ? [{ soort: 'gofo', url: 'https://www.gofo.com/nl/open-api/official/track/queryTrackV2', body: { numberList: [z.code] } }] : [];
+  if (z.vervoerder === 'dragonfly') return DRAGONFLY_CODE.test(z.code) ? [{ soort: 'dragonfly', url: 'https://dragonflyshipping.nl/cfworker/v3/tracking/' + c + '/' }] : [];
   if (z.vervoerder === 'onbekend') return [dhl].concat(pnl(pcs));
   return [];
 }
@@ -447,21 +452,26 @@ function vakUit(start, eind, heleDag) {
 }
 const DHL_FASE = { DATA_RECEIVED: 'aangemeld', UNDERWAY: 'onderweg', IN_DELIVERY: 'vandaag', DELIVERED: 'bezorgd' };
 const DHL_TEKST = { DATA_RECEIVED: 'Aangemeld bij DHL', UNDERWAY: 'Onderweg', IN_DELIVERY: 'Bezorger is onderweg', DELIVERED: 'Bezorgd' };
+// wv3078: de jongste gebeurtenis geeft een preciezere tussenstand (sleutels gemeten 14-11 in echte antwoorden; andere sleutels = de fasetekst)
+const DHL_STAP = { PARCEL_SORTED_AT_HUB: 'Bij het sorteercentrum', PARCEL_ARRIVED_AT_LOCAL_DEPOT: 'Bij het bezorgdepot', OUT_FOR_DELIVERY: 'Bezorger is onderweg' };
 function leesDhl(j) {
   const r = Array.isArray(j) ? j[0] : null, v = r && r.view;
   if (!v || typeof v !== 'object') return { gevonden: false };
   let fase = null;
   (Array.isArray(v.phaseDisplay) ? v.phaseDisplay : []).forEach((p) => { if (p && p.completed && DHL_FASE[p.phase]) fase = p.phase; });
   const sleutels = [];
-  let bezorgdOp = null;
+  let bezorgdOp = null, jongste = null, jongsteT = -Infinity;
   (Array.isArray(v.phases) ? v.phases : []).forEach((p) => (Array.isArray(p && p.events) ? p.events : []).forEach((e) => {
     if (e && typeof e.key === 'string') sleutels.push(e.key);
+    const t = e ? Date.parse(e.timestamp) : NaN;
+    if (e && typeof e.key === 'string' && isFinite(t) && t > jongsteT) { jongsteT = t; jongste = e.key; }
     if (p.phase === 'DELIVERED' && e && e.timestamp && !bezorgdOp) bezorgdOp = iso(e.timestamp);
   }));
   let stand = fase ? DHL_FASE[fase] : null, tekst = fase ? DHL_TEKST[fase] : null;
   const ps = sleutels.concat([String(v.message || '')]).join(' ');
   if (stand !== 'bezorgd' && /(PARCELSHOP|SERVICEPOINT|SERVICE_POINT|LOCKER|PARCEL_STATION|PICKUP_POINT)/.test(ps) && !/PICKED_UP|COLLECTED/.test(ps)) { stand = 'afhaalpunt'; tekst = 'Ligt klaar bij een DHL-punt'; }
   if (stand === 'bezorgd' && /MAILBOX/.test(ps)) tekst = 'Bezorgd in de brievenbus';
+  if ((stand === 'onderweg' || stand === 'vandaag') && jongste && DHL_STAP[jongste]) tekst = DHL_STAP[jongste];   // wv3078
   if (!stand) return { gevonden: false };
   let vak = {};
   if (typeof v.interval === 'string' && v.interval.indexOf('/') > 0 && stand !== 'bezorgd') { const d = v.interval.split('/'); vak = vakUit(d[0], d[1], false); }
@@ -472,9 +482,11 @@ function leesPostnl(j, code) {
   const x = colli ? (colli[code] || colli[Object.keys(colli)[0]]) : null;
   if (!x || typeof x !== 'object') return { gevonden: false };
   const idx = x.statusPhase && Number(x.statusPhase.index);
-  let stand = x.isDelivered || x.isPickedUpAtRetailLocation ? 'bezorgd' : x.isAtRetailLocation ? 'afhaalpunt'
+  const stand = x.isDelivered || x.isPickedUpAtRetailLocation ? 'bezorgd' : x.isAtRetailLocation ? 'afhaalpunt'
     : idx >= 4 ? 'bezorgd' : idx === 3 ? 'vandaag' : idx === 2 ? 'onderweg' : 'aangemeld';
-  const tekst = schoon(x.statusPhase && x.statusPhase.message, 120);
+  // wv3078: zolang het pakje niet bezorgd is, zegt de jongste waarneming meer ("Zending is gesorteerd") dan de fasetekst (observations: jongste eerst, gemeten 14-11)
+  const obs = Array.isArray(x.observations) && x.observations[0] && typeof x.observations[0].description === 'string' ? schoon(x.observations[0].description, 120) : null;
+  const tekst = (stand !== 'bezorgd' && stand !== 'afhaalpunt' && obs) || schoon(x.statusPhase && x.statusPhase.message, 120);
   let vak = {};
   if (stand !== 'bezorgd' && x.eta && x.eta.start) vak = vakUit(x.eta.start, x.eta.end, x.eta.type === 'WholeDay');
   const winkel = x.sender && x.sender.names ? netjes(x.sender.names.companyName || x.sender.names.personName) : null;
@@ -490,11 +502,56 @@ function leesGls(j) {
   const op = h && /^\d{4}-\d{2}-\d{2}$/.test(String(h.date || '')) ? iso(h.date + 'T' + (/^\d{2}:\d{2}/.test(String(h.time || '')) ? String(h.time).slice(0, 5) : '12:00') + ':00+01:00') : null;
   return { gevonden: true, stand: GLS_STAND[si], tekst: GLS_STAND[si] === 'bezorgd' ? 'Bezorgd' : null, bezorgd_op: GLS_STAND[si] === 'bezorgd' ? op : null };
 }
+// wv3078 GOFO queryTrackV2: {code, data: [{trackingNumber, status, trackStatus?, lastTrackEvent: {processCode, processDate, trackStatus}, trackEventList}]}.
+// processCode-waarden gemeten 14-11-2026 in een echt antwoord (eventnamen tussen haakjes); trackStatus 2 = onderweg, 6 = bezorgd. Andere codes:
+// alleen de grove stand uit trackStatus, zonder tekst; is ook die onbekend, dan niets (de mail blijft dan de bron).
+const GOFO_STAP = {
+  100: ['aangemeld', 'Aangemeld bij GOFO'],                    // Shipment not yet received or processed
+  202: ['onderweg', 'Bij het sorteercentrum'],                 // Arrived at the sorting center
+  200: ['onderweg', 'Vertrokken uit het sorteercentrum'],      // Departed from the sorting center
+  201: ['onderweg', 'Aangekomen in de regio'],                 // Arrived in your region
+  203: ['onderweg', 'Wordt klaargemaakt voor bezorging'],      // Preparing for delivery
+  208: ['vandaag', 'Bezorger is onderweg'],                    // Out for delivery with the courier
+  205: ['bezorgd', 'Bezorgd'],                                 // Delivered at the delivery address
+};
+const GOFO_GROF = { 2: 'onderweg', 6: 'bezorgd' };
+function leesGofo(j, code) {
+  const l = j && Array.isArray(j.data) ? j.data : [];
+  const x = l.find((d) => d && (d.trackingNumber === code || d.waybillNo === code || d.number === code));   // review Codex MOET 1: alleen exact dit pakje
+  if (!x || typeof x !== 'object') return { gevonden: false };
+  const e = x.lastTrackEvent && typeof x.lastTrackEvent === 'object' ? x.lastTrackEvent : Array.isArray(x.trackEventList) ? x.trackEventList[0] : null;
+  if (!e || typeof e !== 'object') return { gevonden: false };
+  const stap = GOFO_STAP[Number(e.processCode)];
+  const stand = stap ? stap[0] : GOFO_GROF[Number(e.trackStatus)];
+  if (!stand) return { gevonden: false };
+  return { gevonden: true, stand, tekst: stap ? stap[1] : null, bezorgd_op: stand === 'bezorgd' ? iso(e.processDate) : null };
+}
+// wv3078 Dragonfly (Amazon-bezorger) cfworker/v3/tracking: {success, data: {code: 'found'|'not_found', result: {last_status: {status, step, isDelivered,
+// timestamp (ms), etaType}, public_eta: {from, to}}}}. Statuscodes gemeten 14-11-2026: 0 Data received, 105 Received, 300 Loaded, 601 Delivered;
+// een andere code telt alleen via step 1–2 (aangemeld/onderweg) of isDelivered, zonder tekst.
+const DRAGONFLY_STAP = { 0: ['aangemeld', 'Aangemeld bij Dragonfly'], 105: ['onderweg', 'Ontvangen door Dragonfly'], 300: ['vandaag', 'Bezorger is onderweg'], 601: ['bezorgd', 'Bezorgd'] };
+function leesDragonfly(j, code) {
+  const d0 = j && j.success === true && j.data && j.data.code === 'found' ? j.data.result : null;
+  const d = d0 && (code === undefined || String(d0.tracking_id || '').toUpperCase() === String(code).toUpperCase()) ? d0 : null;   // alleen exact dit pakje
+  const s = d && d.last_status && typeof d.last_status === 'object' ? d.last_status : null;
+  if (!s) return { gevonden: false };
+  const stap = DRAGONFLY_STAP[Number(s.status)];
+  let stand = s.isDelivered === true ? 'bezorgd' : stap ? stap[0] : s.step === 1 ? 'aangemeld' : s.step === 2 ? 'onderweg' : null;
+  if (!stand) return { gevonden: false };
+  const tekst = stand === 'bezorgd' ? 'Bezorgd' : stap && stap[0] === stand ? stap[1] : null;
+  let vak = {};
+  const pe = d.public_eta;
+  if (stand !== 'bezorgd' && s.etaType && s.etaType !== 'none' && pe && typeof pe.from === 'string' && typeof pe.to === 'string') vak = vakUit(pe.from, pe.to, false);
+  const ts = Number(s.timestamp);
+  return Object.assign({ gevonden: true, stand, tekst, bezorgd_op: stand === 'bezorgd' && isFinite(ts) && ts > 1e12 ? new Date(ts).toISOString() : null }, vak);
+}
 function leesAntwoord(soort, j, code) {
   try {
     if (soort === 'dhl') return leesDhl(j);
     if (soort === 'postnl') return leesPostnl(j, code);
     if (soort === 'gls') return leesGls(j);
+    if (soort === 'gofo') return leesGofo(j, code);
+    if (soort === 'dragonfly') return leesDragonfly(j, code);
   } catch (e) { /* vorm onbekend: niets */ }
   return { gevonden: false };
 }
@@ -606,9 +663,10 @@ function maak(o) {
   // welke pakjes nu bij de vervoerder te verversen zijn (niet bezorgd, niet verborgen, ≤ 30 dagen, wachttijd voorbij)
   function teVolgen(dwing) {
     const d = open(), nu = klok();
-    return d.prepare("SELECT * FROM zending WHERE code IS NOT NULL AND vervoerder IN ('postnl','dhl','gls','onbekend') AND verborgen IS NULL").all().filter((z) => {
+    return d.prepare("SELECT * FROM zending WHERE code IS NOT NULL AND vervoerder IN ('postnl','dhl','gls','gofo','dragonfly','onbekend') AND verborgen IS NULL").all().filter((z) => {
       if (z.stand_volg === 'bezorgd' || z.bezorgd_op || z.geleverd_hand) return false;
       if (z.vervoerder === 'gls' && !/^\d{11,12}$/.test(String(z.code))) return false;   // wv3011: geen openbare volgvraag (zie volgAdressen)
+      if ((z.vervoerder === 'gofo' && !GOFO_CODE.test(String(z.code))) || (z.vervoerder === 'dragonfly' && !DRAGONFLY_CODE.test(String(z.code)))) return false;   // wv3078
       if (Date.parse(z.eerste) < nu - STIL_NA) return false;
       if (z.stand_mail === 'bezorgd' && z.ververst) return false;
       if (dwing) return !z.ververst || Date.parse(z.ververst) < nu - 5 * 60000;
@@ -617,13 +675,13 @@ function maak(o) {
       return !z.ververst || Date.parse(z.ververst) < nu - wacht - extra;
     });
   }
-  // één pakje bij de vervoerder nalezen; haal(url) → {status, json} (server.js). Geeft 'ok' | 'onbekend' | 'fout'.
+  // één pakje bij de vervoerder nalezen; haal(url[, body]) → {status, json} (server.js; body = json voor een POST, alleen GOFO). Geeft 'ok' | 'onbekend' | 'fout'.
   async function volg(z, haal) {
     const d = open(), nu = nuIso();
     let uit = 'onbekend', r = null, soort = null, pcGebruikt = null;
     for (const a of volgAdressen(z, postcodes())) {
       let antw = null;
-      try { antw = await haal(a.url); } catch (e) { antw = null; }
+      try { antw = await (a.body ? haal(a.url, a.body) : haal(a.url)); } catch (e) { antw = null; }
       if (!antw || (antw.status >= 500 && a.soort !== 'postnl') || antw.status === 429 || antw.status === 403) { uit = 'fout'; continue; }
       const l = leesAntwoord(a.soort, antw.json, z.code);
       if (l.gevonden) { r = l; soort = a.soort; pcGebruikt = a.pc || null; uit = 'ok'; break; }
@@ -891,4 +949,4 @@ function maak(o) {
   return { herken, isKandidaat, ronde, lijst, verberg, geleverd, info, sluit, verwerkMail, teVolgen, volg, _laatst: () => laatst };
 }
 
-module.exports = { maak, herken, adresUit, detailUit, onderwerpSchoon, isKandidaat, leesDhl, leesPostnl, leesGls, volgAdressen, volgLink, dagUit, tijdvakUit, standUit, STANDEN };
+module.exports = { maak, herken, adresUit, detailUit, onderwerpSchoon, isKandidaat, leesDhl, leesPostnl, leesGls, leesGofo, leesDragonfly, volgAdressen, volgLink, dagUit, tijdvakUit, standUit, STANDEN };
