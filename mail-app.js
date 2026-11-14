@@ -314,6 +314,7 @@ function maak(io) {
       if (isObj(r) && r.ok === true && String(r.draad || '') === t) {
         gedaan.push(t);
         if (wat === 'archiveer' || wat === 'terug') { try { io.mailman.mailTik(t, wat); } catch (e) { fout('mail-app-wijzig-zaak', e); } }
+        if (wat === 'terug' && typeof io.sluitKlaar === 'function') io.sluitKlaar(t);   // wv3091: weg van de lijst Niet in je inbox gekomen
       } else mislukt.push(t);
     }
     // Ongedaan maken: de App bepaalt per gesprek wat er echt veranderde (review wv3090 MOET 1) en stuurt alleen dat terug; tegen = de handeling ervoor

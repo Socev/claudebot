@@ -4181,6 +4181,7 @@ function handleRequest(req, res) {
       intake: intakeInfo(),
       mailman: typeof mailmanInfo === 'function' ? mailmanInfo() : { aan: false },
       mail_app: { aan: typeof mailApp !== 'undefined' && !!mailApp, auto_voorwerk: typeof mailVoorwerkAuto === 'function' ? mailVoorwerkAuto() : null },   // wv3077: OVIS Mail fase 1
+      mail_sluit: typeof mailSluitInfo === 'function' ? mailSluitInfo() : { aan: false },   // wv3091: OVIS Mail fase 2 (sluitcontrole; alleen tellingen)
       mail_voorwerk: typeof mailVoorwerkInfo === 'function' ? mailVoorwerkInfo() : { aan: false },   // wv2455: voorwerk bij vragen in Mail (tellingen, geen inhoud)   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
@@ -13959,7 +13960,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/tokens/openai' || route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/mailman' || route === 'GET /app/mailman/verkoop' || route.indexOf('POST /app/mailman/') === 0) return typeof appMailman === 'function' ? appMailman(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'mailman');   // wv1856: OVIS MailMan
-        if (route === 'POST /app/mail/lijst' || route === 'POST /app/mail/gesprek' || route === 'POST /app/mail/bijlage' || route === 'POST /app/mail/todo' || route === 'POST /app/mail/todo/voorstel' || route === 'POST /app/mail/naar' || route === 'POST /app/mail/wijzig') return typeof appMailApp === 'function' ? appMailApp(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'mail-app');   // wv3077: OVIS Mail fase 1 (Davids Gmail-inbox met de laag van Socev)
+        if (route === 'POST /app/mail/lijst' || route === 'POST /app/mail/gesprek' || route === 'POST /app/mail/bijlage' || route === 'POST /app/mail/todo' || route === 'POST /app/mail/todo/voorstel' || route === 'POST /app/mail/naar' || route === 'POST /app/mail/wijzig' || route === 'POST /app/mail/buiten' || route === 'POST /app/mail/buiten/klaar') return typeof appMailApp === 'function' ? appMailApp(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'mail-app');   // wv3077: OVIS Mail fase 1 (Davids Gmail-inbox met de laag van Socev)
         if (route === 'POST /app/mail/voorwerk' || route === 'POST /app/mail/voorwerk/maak' || route === 'POST /app/mail/voorwerk/gmail') return typeof appMailVoorwerk === 'function' ? appMailVoorwerk(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'mail voorwerk');   // wv2455: voorwerk bij vragen in Mail
         if (route === 'GET /app/mail/zaken' || /^GET \/app\/mail\/zaken\/(jij|socev|weg|afgedaan|zien)\/[1-9]\d?$/.test(route)) return typeof appMailZaken === 'function' ? appMailZaken(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mail');   // wv2218: Apps › Mail (zaakregister, alleen lezen); wv2291: groep zien
         if (route === 'GET /app/werkstroom' || route.indexOf('GET /app/werkstroom/') === 0) return typeof appWerkstroom === 'function' ? appWerkstroom(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'werkstroom');   // wv2002: Werkstroom (alleen lezen)
@@ -19021,7 +19022,9 @@ const mailApp = (function () {
       todoist: function (b) { return mailAppTodoist(b); },
       labelIds: function () { return typeof mailman.mailLabelIds === 'function' ? mailman.mailLabelIds() : null; },   // wv3090 fase 1b
       toestemming: function () { return mailAppToestemming(); },
-      pas: function (x) { return mailAppPasMaak(x); } });
+      pas: function (x) { return mailAppPasMaak(x); },
+      // wv3091: een gelukte terugzetting in de inbox haalt het gesprek van de lijst "Niet in je inbox gekomen" (typeof/try: de UI-toets laadt dit blok los)
+      sluitKlaar: function (t) { try { if (typeof mailSluit !== 'undefined' && mailSluit) mailSluit.klaar({ draad: t, hoe: 'terug' }); } catch (e) { logError('mail-sluit-klaar', e); } } });
   } catch (e) { logError('mail-app', e); return null; }
 })();
 // ── wv3090: OVIS Mail fase 1b — Gmail-handeling op Davids tik (archiveren, terugzetten, gelezen/ongelezen, ster, label uit MailMans vaste
@@ -19065,7 +19068,7 @@ async function mailAppTodoist(body) {
   try { j = await r.json(); } catch (e) { j = null; }
   return { status: r.status, j: j && typeof j === 'object' ? { id: j.id } : null };
 }
-const MAIL_APP_UUR = { lijst: 900, gesprek: 600, bijlage: 120, 'todo/voorstel': 60, todo: 30, naar: 60, wijzig: 300 };
+const MAIL_APP_UUR = { lijst: 900, gesprek: 600, bijlage: 120, 'todo/voorstel': 60, todo: 30, naar: 60, wijzig: 300, buiten: 300, 'buiten/klaar': 120 };
 async function appMailApp(req, res, a, d, route) {
   if (!mailApp) return appWeiger(res, 404, 'De Mail-App zit niet in deze versie van de pod', 'mail-app ontbreekt');
   if (appAfscherm(a)) return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'mail-app afgeschermd');
@@ -19073,7 +19076,7 @@ async function appMailApp(req, res, a, d, route) {
   const tel = 'mail-app-' + soort;
   appStaat.tellers[tel] = appStaat.tellers[tel] || [];
   if (!appTeller(tel, MAIL_APP_UUR[soort] || 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens mail-app ' + soort);
-  if ((soort === 'todo' || soort === 'naar' || soort === 'wijzig') && !(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
+  if ((soort === 'todo' || soort === 'naar' || soort === 'wijzig' || soort === 'buiten/klaar') && !(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
   d = d && typeof d === 'object' ? d : {};
   let r;
   try {
@@ -19083,15 +19086,84 @@ async function appMailApp(req, res, a, d, route) {
     else if (soort === 'todo/voorstel') r = await mailApp.todoVoorstel(d);
     else if (soort === 'todo') r = await mailApp.todo(d);
     else if (soort === 'wijzig') r = await mailApp.wijzig(d);
+    else if (soort === 'buiten') r = typeof mailSluit !== 'undefined' && mailSluit ? mailSluit.lijst() : { status: 200, j: { ok: true, uit: true, items: [], gisteren: null, laatste: null } };   // wv3091 fase 2
+    else if (soort === 'buiten/klaar') r = typeof mailSluit !== 'undefined' && mailSluit ? mailSluit.klaar(d) : { status: 404, j: { ok: false, fout: 'De sluitcontrole zit niet in deze versie van de pod' } };
     else r = mailman.mailNaar(d);
   } catch (e) { logError('mail-app', e); return appWeiger(res, 500, 'fout op de pod', 'mail-app uitzondering'); }
   // alleen de route, de map en de uitkomst; nooit de zoekvraag, een onderwerp of tekst (grondwet 2/3)
   res._app.reden = 'mail ' + soort + (soort === 'lijst' ? ' ' + String(d.map || 'inbox').replace(/[^a-z]/g, '').slice(0, 12) + (d.q ? ' zoek' : '') : '') + (soort === 'naar' ? ' ' + String(d.naar || '').replace(/[^a-z]/g, '').slice(0, 10) : '')
-    + (soort === 'wijzig' ? ' ' + String(d.wat || '').replace(/[^a-z_]/g, '').slice(0, 12) + ' ' + (r.j && Array.isArray(r.j.gedaan) ? r.j.gedaan.length : 0) : '') + (r.status >= 300 ? ' ' + r.status : '');
+    + (soort === 'buiten/klaar' ? ' ' + String(d.hoe || '').replace(/[^a-z]/g, '').slice(0, 8) : '') + (soort === 'wijzig' ? ' ' + String(d.wat || '').replace(/[^a-z_]/g, '').slice(0, 12) + ' ' + (r.j && Array.isArray(r.j.gedaan) ? r.j.gedaan.length : 0) : '') + (r.status >= 300 ? ' ' + r.status : '');
   if (soort !== 'lijst' || d.eerste !== true || d.q || d.pagina) res._app.stil = true;   // alleen het openen van de inbox is een auditregel
   return appStuur(res, r.status, r.j);
 }
 // ── einde wv3077 OVIS Mail fase 1 ──
+// ── wv3091: OVIS Mail fase 2 — de nachtelijke sluitcontrole en de lijst "Niet in je inbox gekomen" (mail-sluit.js; plan § 3.2–3.3). Eén keer
+// per nacht (00:30–06:30, primaire kant, hooguit 3 pogingen) sluit de pod gisteren en herziet de twee dagen ervoor: elk binnengekomen gesprek
+// is door David afgehandeld, door Socev weggezet, in de inbox, of staat op de lijst (met waarom). Alleen lezen via het leesluik (mail_dag).
+// Staat in MAILMAN_DIR/sluit.json (600; 14 dagen; afzender en onderwerp alleen van lijstgesprekken, na de patiëntpoort). Eén regel in het
+// ochtendbericht (ochtend_buffer, bron 'mail') alleen voor gesprekken die nieuw op de lijst kwamen; een storing (MailMan zag mail niet, of
+// de controle lukte niet) = één box-rij. Log alleen tellingen.
+const MAIL_SLUIT_PAD = path.join(MAILMAN_DIR, 'sluit.json');
+async function mailSluitBekend(adres) {
+  try { if (mailman.mailVerzondenAan(adres)) return true; } catch (e) { logError('mail-sluit-verzonden', e); }
+  const j = await crPost(CR_CONTACTEN_WF, 'Webhook zoek', 'crContactenUrl', process.env.SUPABASE_RPC_CONTACTEN, { q: adres, limiet: 5 });
+  if (!j || j.ok === false || !Array.isArray(j.treffers)) throw new Error('contacten gaven geen antwoord');
+  return j.treffers.some(function (t) {
+    const alle = (JSON.stringify([t && t.emails_plat, t && t.email_primair]).toLowerCase().match(/[^\s"',;<>\[\]{}]+@[^\s"',;<>\[\]{}]+/g) || []);
+    return alle.indexOf(String(adres).toLowerCase()) >= 0;
+  });
+}
+const mailSluit = (function () {
+  const p = path.join(__dirname, 'mail-sluit.js');
+  if (!fs.existsSync(p) || !mailman || typeof mailman.mailSluitBron !== 'function') return null;
+  try {
+    return require(p).maak({ fout: logError,
+      luik: function (body) { return appAgendaApi(body, { timeoutMs: 120000 }); },
+      mailman: mailman,
+      poort: function (stuk) { return require(path.join(__dirname, 'intake', 'patientpoort.js')).beoordeel(stuk); },
+      bekend: mailSluitBekend,
+      lees: function () { try { return JSON.parse(fs.readFileSync(MAIL_SLUIT_PAD, 'utf8')); } catch (e) { return null; } },
+      schrijf: function (st) { const t = MAIL_SLUIT_PAD + '.tmp'; fs.writeFileSync(t, JSON.stringify(st), { mode: 0o600 }); fs.renameSync(t, MAIL_SLUIT_PAD); } });
+  } catch (e) { logError('mail-sluit', e); return null; }
+})();
+function mailSluitInfo() { if (!mailSluit) return { aan: false }; try { return mailSluit.info(); } catch (e) { return { aan: true, fout: true }; } }
+const MAIL_SLUIT_FILTER = { type: 'and', filters: [{ columnName: 'bron', condition: 'eq', value: 'mail' }] };
+async function mailSluitOchtend(datum, tekst) {
+  const body = { filter: MAIL_SLUIT_FILTER, data: { bron: 'mail', datum: datum, tekst: tekst }, returnData: true };
+  const poging = function () { return appN8nZend('POST', '/data-tables/' + APP_MELD_TABEL + '/rows/upsert', body); };
+  await poging().catch(function () { return new Promise(function (ok) { setTimeout(ok, 2000); }).then(poging); });
+  const j = await appN8nZend('GET', '/data-tables/' + APP_MELD_TABEL + '/rows?limit=5&filter=' + encodeURIComponent(JSON.stringify(MAIL_SLUIT_FILTER)));
+  const l = (Array.isArray(j && j.data) ? j.data : []).filter(function (r) { return r && r.bron === 'mail' && r.datum === datum && r.tekst === tekst; });
+  if (!l.length) throw new Error('rij na het schrijven niet teruggelezen');
+}
+const mailSluitStand = { dag: '', pogingen: 0, bezig: false };
+async function mailSluitTik() {
+  if (!mailSluit || mailSluitStand.bezig || !rolPrimair()) return;
+  const t = ovisAms(), m = t.uur * 60 + t.min;
+  if (m < 30 || m > 390) return;   // 00:30–06:30: na middernacht, vóór het ochtendbericht
+  if (mailSluitStand.dag !== t.datum) { mailSluitStand.dag = t.datum; mailSluitStand.pogingen = 0; }
+  const l = mailSluitInfo().laatste;
+  if (mailSluitStand.pogingen >= 3 || (l && l.ok && l.op && mailSluitDag(Date.parse(l.op)) === t.datum)) return;   // vannacht al gedaan (ook na een herstart)
+  mailSluitStand.bezig = true; mailSluitStand.pogingen++;
+  let r = null;
+  try { r = await mailSluit.ronde(); } catch (e) { logError('mail-sluit-ronde', e); r = null; } finally { mailSluitStand.bezig = false; }
+  const tel = r ? r.dagen.map(function (d) { return d.dag + ':' + d.tel.binnen + '/' + d.tel.lijst; }).join(',') : '-';
+  schrijfLog(nu() + ' mail-sluit poging=' + mailSluitStand.pogingen + ' ok=' + !!(r && r.ok) + ' dagen=' + tel + ' nieuw=' + (r ? r.nieuw.length : 0) + ' mist=' + (r ? r.mist : 0));
+  if (r && r.ochtend) {
+    try { await mailSluitOchtend(t.datum, r.ochtend); mailSluit.gemeld(r.nieuw); } catch (e) { logError('mail-sluit-ochtend', e); }
+  }
+  if (r && r.mist > 0 && mailSluit.boxNieuw('mist-' + t.datum)) {
+    ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Mail sluitcontrole: MailMan zag ' + r.mist + ' gesprek(ken) niet #ovis-mail-sluit\n- status: open\n- van: pod:mail-sluit — bevinding_id mail-sluit-mist-' + t.datum +
+      '\n- wat ik zag: in de laatste drie dagen ' + r.mist + ' gesprek(ken) buiten de inbox, niet in spam of prullenbak, zonder besluit van MailMan (alleen tellingen; de gesprekken staan in Mail › Niet in je inbox gekomen)\n- voorstel: rondes van AI - MailMan nalopen (tabel ronde in mailman.sqlite, volledig/afgekapt) en /health mail_sluit\n');
+  }
+  if ((!r || !r.ok) && mailSluitStand.pogingen >= 3 && mailSluit.boxNieuw('fout-' + t.datum)) {
+    ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Mail sluitcontrole lukte vannacht niet #ovis-mail-sluit\n- status: open\n- van: pod:mail-sluit — bevinding_id mail-sluit-fout-' + t.datum +
+      '\n- wat ik zag: 3 pogingen zonder volledige uitkomst (leesluik mail_dag, MailMan of de contacten); de lijst in Mail is van de vorige geslaagde nacht\n- voorstel: api.log (mail-sluit) en errors.log nalopen; n8n AI - Agenda-Wachter API actie mail_dag\n');
+  }
+}
+function mailSluitDag(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
+if (mailSluit && SERVER_ECHT) { setInterval(function () { mailSluitTik().catch(function (e) { logError('mail-sluit-tik', e); }); }, 10 * 60000).unref(); }
+// ── einde wv3091 ──
 let mailmanDag = '';
 // Dezelfde zorg komt niet elke dag terug in de box (grondwet 10): alleen bij een andere set postvakken met zorgen, of na 7 dagen
 function mailmanZorgNieuw(z) {

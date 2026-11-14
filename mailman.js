@@ -3259,6 +3259,41 @@ function maak(o) {
     }
     return r;
   }
+  // wv3091 (OVIS Mail fase 2, sluitcontrole): per Gmail-bericht wat MailMan ervan weet, alleen vlaggen en MailMans reden (geen tekst):
+  //  gezien      MailMan las hem (een besluit, ook inhaal)
+  //  eerst_inbox bij MailMans eerste lezing stond hij in de inbox (David had hem dus voor zich)
+  //  socev       MailMan haalde hem zelf uit de inbox (archief van een verwerkte factuur, een aanbod met INBOX eraf dat niet mislukte)
+  //  jij         het zaakregister zegt: door David afgehandeld (david_gmail of david_app)
+  //  slot        patiëntmarker of zorgmail in die draad
+  //  reden       MailMans laagreden van de draad (voor "door Socev weggezet, met reden")
+  function mailSluitBron(ids) {
+    const uit = {};
+    const p = postvak('gmail:david');
+    if (!p || !Array.isArray(ids)) return uit;
+    const qb = db.prepare('SELECT gmail_id, thread_id, labels, archief_tijd, terug_tijd, marker, marker_soorten, reden FROM besluit WHERE postvak = ? AND gmail_id = ? ORDER BY inhaal, id LIMIT 1');
+    const qa = db.prepare("SELECT 1 FROM aanbod WHERE postvak = ? AND gmail_id = ? AND eraf LIKE '%\"INBOX\"%' AND (uitkomst IS NULL OR uitkomst = 'ok') LIMIT 1");
+    const qz = db.prepare('SELECT laag_reden, eigen_archief, afgehandeld, afgehandeld_door FROM zaak WHERE postvak = ? AND thread_id = ?');
+    const qs = db.prepare("SELECT max(CASE WHEN marker IS NOT NULL AND marker <> 0 OR marker_soorten = 'zorgmail' OR reden = 'zorgmail' THEN 1 ELSE 0 END) slot FROM besluit WHERE postvak = ? AND thread_id = ?");
+    for (const x of ids.slice(0, 2000)) {
+      const id = String(x || '');
+      if (!ID_RE.test(id) || uit[id]) continue;
+      const b = qb.get(p.id, id);
+      if (!b) { uit[id] = { gezien: false }; continue; }
+      const z = qz.get(p.id, b.thread_id), s = qs.get(p.id, b.thread_id);
+      let lab = [];
+      try { lab = JSON.parse(b.labels || '[]'); } catch (e) { lab = []; }
+      const socev = (!!b.archief_tijd && !b.terug_tijd) || !!qa.get(p.id, id) || !!(z && z.eigen_archief);
+      uit[id] = { gezien: true, eerst_inbox: Array.isArray(lab) && lab.includes('INBOX'), socev, jij: !!(z && z.afgehandeld && String(z.afgehandeld_door || '').indexOf('david') === 0),
+        slot: !!(s && s.slot), reden: z ? String(z.laag_reden || '').slice(0, 40) || null : null };
+    }
+    return uit;
+  }
+  // wv3091: mailde David eerder naar dit adres? (eigen verzonden mail die MailMan zag; bewaartermijn van het besluit)
+  function mailVerzondenAan(adres) {
+    const p = postvak('gmail:david'), a = String(adres || '').toLowerCase();
+    if (!p || !/^[^\s@<>",]+@[^\s@<>",]+$/.test(a)) return false;
+    return !!db.prepare("SELECT 1 FROM besluit WHERE postvak = ? AND labels LIKE '%\"SENT\"%' AND instr(lower(aan), ?) > 0 LIMIT 1").get(p.id, a);
+  }
   function app(route, d, ctx) {
     d = isObj(d) ? d : {};
     const door = ctx && ctx.apparaat ? 'app:' + String(ctx.apparaat).slice(0, 40) : 'app';
@@ -3357,7 +3392,7 @@ function maak(o) {
     }
     return uit;
   }
-  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, ecobankBekend, inboxUit: function (pv) { return inboxUit(postvakken().find(function (p) { return p.id === pv; })); }, werkstroomTel, werkstroomLijst, mailBron, zakenLijst, voorwerkBron, mailNaar, mailLaag, mailRegel, mailLabelIds, mailTik, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
+  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, ecobankBekend, inboxUit: function (pv) { return inboxUit(postvakken().find(function (p) { return p.id === pv; })); }, werkstroomTel, werkstroomLijst, mailBron, zakenLijst, voorwerkBron, mailNaar, mailLaag, mailRegel, mailLabelIds, mailTik, mailSluitBron, mailVerzondenAan, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
 }
 
 function isPad(p) { return p === '/mailman' || String(p).indexOf('/mailman/') === 0; }

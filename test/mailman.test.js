@@ -3383,3 +3383,27 @@ test('wv3090 mailTik: archiveren op Davids tik telt meteen als jij (david_app), 
   assert.ok(zaak(mm, b.threadId).heropend); assert.equal(zaak(mm, b.threadId).afgehandeld, null);
   assert.equal(mm.mailTik('kapot!', 'archiveer'), false); assert.equal(mm.mailTik(a.threadId, 'verwijder'), false);
 });
+
+test('wv3091 mailSluitBron: per bericht gezien, eerst in de inbox, door David afgehandeld, slot; mailVerzondenAan op eigen verzonden mail', () => {
+  const { mm, dir, gm } = b8Kamer();
+  const a = mail({ onderwerp: 'Verzonnen sluit a' }), b = mail({ onderwerp: 'Verzonnen sluit b', labels: ['CATEGORY_UPDATES'] });
+  const uit = mail({ labels: ['SENT'], van: 'Ik <ik@eigen.invalid>', aan: 'Vriend <vriend@voorbeeld.invalid>', onderwerp: 'Verzonnen verzonden' });
+  const ms = [a, b, uit];
+  draai(mm, 'gmail:david', ms, { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir); zakenToestaan(dir);
+  ms.forEach(function (m) { gm.voeg(m); });
+  l2Ronde(mm, gm, ms.map(function (m) { return m.id; }), { inbox: true });
+  const onbekend = 'abcdefabcdef0001';
+  let s = mm.mailSluitBron([a.id, b.id, onbekend, 'kapot!']);
+  assert.deepEqual(Object.keys(s).sort(), [a.id, b.id, onbekend].sort());
+  assert.equal(s[a.id].gezien, true); assert.equal(s[a.id].eerst_inbox, true); assert.equal(s[a.id].jij, false); assert.equal(s[a.id].socev, false);
+  assert.equal(s[b.id].eerst_inbox, false, 'b kwam zonder INBOX binnen');
+  assert.deepEqual(s[onbekend], { gezien: false });
+  mm.mailTik(a.threadId, 'archiveer');
+  s = mm.mailSluitBron([a.id]);
+  assert.equal(s[a.id].jij, true);
+  assert.equal(mm.mailVerzondenAan('vriend@voorbeeld.invalid'), true);
+  assert.equal(mm.mailVerzondenAan('VRIEND@voorbeeld.invalid'), true);
+  assert.equal(mm.mailVerzondenAan('ander@voorbeeld.invalid'), false);
+  assert.equal(mm.mailVerzondenAan('kapot'), false);
+});
