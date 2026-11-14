@@ -46,6 +46,7 @@ toets('cijfer-meester -> beide', c.lessenDomein('cijfer-meester', '') === 'beide
 toets('cijfermeester (gedeeld) -> geen', c.lessenDomein('cijfermeester', '') === 'geen');
 toets('40687 blijft pa', c.lessenDomein('40687', '') === 'pa');
 toets('telegram-debug blijft machine', c.lessenDomein('telegram-debug', '') === 'machine');
+toets('ovis-nza: geen lessen (wv3087, vertrouwelijk dossier)', c.lessenDomein('ovis-nza', '') === 'geen');
 toets('machinekamer:-label wint', c.lessenDomein('cijfer-meester', 'machinekamer:x') === 'machine');
 toets('onbekend -> null (alle domeinen)', c.lessenDomein('iets-anders', '') === null);
 
@@ -64,23 +65,23 @@ Object.assign(c.chatSessions, sess);
 // 10-10-2026 zomertijd: 01:59Z = 03:59 Amsterdam, 02:10Z = 04:10, 03:00Z = 05:00
 toets('03:59 Amsterdam: niets', c.nachtresetTik(Date.parse('2026-10-10T01:59:00Z')).length === 0 && c.rij.length === 0);
 const g = c.nachtresetTik(Date.parse('2026-10-10T02:10:00Z'));
-toets('04:10 Amsterdam: drie sessies in de wachtrij (sinds 12-10 ook telegram-debug)', JSON.stringify(g) === '["cijfer-meester","cijfermeester","telegram-debug"]' && c.rij.length === 3, g);
+toets('04:10 Amsterdam: vijf sessies in de wachtrij (sinds 12-10 telegram-debug, wv424 mcp-check, wv3087 ovis-nza)', JSON.stringify(g) === '["cijfer-meester","ovis-nza","cijfermeester","telegram-debug","mcp-check"]' && c.rij.length === 5, g);
 toets('nog niets gewist vóór de wachtrij draait', c.chatSessions['cijfer-meester'] === 'a');
 c.rij.forEach(function (x) { x.fn(); });
 toets('cijfer-meester: alle breinen gewist', !c.chatSessions['cijfer-meester'] && !c.chatSessions['codex:cijfer-meester'] && !c.chatSessions['gemini:cijfer-meester']);
 toets('cijfermeester: alle breinen gewist', !c.chatSessions['cijfermeester'] && !c.chatSessions['codex:cijfermeester']);
 toets('andere sessies ongemoeid', c.chatSessions['40687'] === 'e' && c.chatSessions['ghawa:cijfer-meester'] === 'f', c.chatSessions);
-toets('opgeslagen en gelogd', c.bewaard === 2 && c.log.length === 3 && /nachtreset sessie=cijfer-meester gewist=ja/.test(c.log[0]), c.log);
+toets('opgeslagen en gelogd', c.bewaard === 2 && c.log.length === 5 && /nachtreset sessie=cijfer-meester gewist=ja/.test(c.log[0]), c.log);
 c.rij = [];
 toets('04:50 dezelfde dag: niet nog eens', c.nachtresetTik(Date.parse('2026-10-10T02:50:00Z')).length === 0 && c.rij.length === 0);
 toets('05:00: niets', c.nachtresetTik(Date.parse('2026-10-10T03:00:00Z')).length === 0);
 c.nachtresetTik(Date.parse('2026-10-11T02:05:00Z'));
 c.rij.forEach(function (x) { x.fn(); });
-toets('volgende nacht opnieuw, lege sessie = geen opslag', c.rij.length === 3 && c.bewaard === 2 && /gewist=leeg/.test(c.log[3]), c.log);
+toets('volgende nacht opnieuw, lege sessie = geen opslag', c.rij.length === 5 && c.bewaard === 2 && /gewist=leeg/.test(c.log[5]), c.log);
 // Wintertijd (na 25-10-2026): 03:10Z = 04:10 Amsterdam, 02:10Z = 03:10
 c.rij = [];
 toets('wintertijd 03:10 Amsterdam: niets', c.nachtresetTik(Date.parse('2026-11-02T02:10:00Z')).length === 0);
-toets('wintertijd 04:10 Amsterdam: reset', c.nachtresetTik(Date.parse('2026-11-02T03:10:00Z')).length === 3);
+toets('wintertijd 04:10 Amsterdam: reset', c.nachtresetTik(Date.parse('2026-11-02T03:10:00Z')).length === 5);
 // Beurt die ná de reset in dezelfde wachtrij komt, ziet een lege sessie; de volgorde regelt enqueue (FIFO per sleutel).
 const uit = maak({ NACHTRESET: '0' });
 toets('NACHTRESET=0: uit', uit.nachtresetTik(Date.parse('2026-10-10T02:10:00Z')).length === 0 && uit.rij.length === 0);
