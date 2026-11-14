@@ -599,6 +599,158 @@ function maak(deps) {
     }
     return { status: 200, basis: basis, vaultBasis: vaultMap + '/' + basis };
   }
+  // ── geluid van de werkversie (wv3064, David 14-11-2026 via het advies van Fable) ──
+  // Het geluid van een gemaakt bandje staat in Bestanden (30 dagen). Staat de werkversie dan nog niet in de centrale, dan was het weg
+  // (opnieuw maken = credits). Daarom een eigen kopie per bandje in DIR/werkversies/<praktijk>/<id>/ (meta.json + b/<n>, 0700/0600):
+  // één versie per bandje (een nieuwere Maak vervangt hem), weg zodra die versie (of een latere) in de centrale staat. De 30-dagenregel
+  // van Bestanden blijft zoals hij is. Bij twijfel (register dicht, onleesbaar) raakt de ronde niets aan.
+  const WERK = path.join(DIR, 'werkversies');
+  const WERK_NAMEN = new Set(ARCHIEF_BESTANDEN.map(function (x) { return x[0]; }));
+  const WERK_RESTEN_MS = 3600 * 1000;
+  function werkMap(pr, id) { return Object.hasOwn(PRAKTIJKEN, pr) && ID_RE.test(String(id)) ? path.join(WERK, pr, String(id)) : null; }
+  // { job, versie, tekst_hash, bewaard_op, bestanden: [{ n, naam, grootte, pad }] } of null (geen map, geen leesbare meta, geen geluid)
+  function werkversie(pr, id) {
+    const d = werkMap(pr, id);
+    if (!d) return null;
+    let m;
+    try {
+      if (!fs.lstatSync(d).isDirectory() || !fs.lstatSync(path.join(d, 'meta.json')).isFile()) return null;
+      m = JSON.parse(fs.readFileSync(path.join(d, 'meta.json'), 'utf8'));
+    } catch (e) { return null; }
+    if (!m || !/^[a-f0-9]{16}$/.test(String(m.job)) || !Array.isArray(m.bestanden)) return null;
+    const best = [];
+    m.bestanden.forEach(function (x) {
+      if (!x || !Number.isInteger(x.n) || x.n < 1 || x.n > 999 || !WERK_NAMEN.has(String(x.naam))) return;
+      const p = path.join(d, 'b', String(x.n));
+      try { const st = fs.lstatSync(p); if (st.isFile()) best.push({ n: x.n, naam: String(x.naam), grootte: st.size, pad: p }); } catch (e) {}
+    });
+    if (!best.length) return null;
+    return { job: String(m.job), versie: Number.isInteger(m.versie) ? m.versie : 0, tekst_hash: /^[a-f0-9]{16}$/.test(String(m.tekst_hash)) ? String(m.tekst_hash) : null,
+      bewaard_op: typeof m.bewaard_op === 'string' ? m.bewaard_op : null, bestanden: best };
+  }
+  // o: { job, versie, tekst_hash, bestanden: [{ n, naam, pad }] }. Eerst volledig in een nieuwe map, dan pas de oude vervangen.
+  function bewaarWerkversie(pr, id, o) {
+    const d = werkMap(pr, id);
+    if (!d || !/^[a-f0-9]{16}$/.test(String(o && o.job))) return { status: 400, fout: 'onbekend bandje of job' };
+    const lijst = (o.bestanden || []).filter(function (x) { return x && Number.isInteger(x.n) && x.n >= 1 && x.n <= 999 && WERK_NAMEN.has(String(x.naam)) && x.pad; });
+    if (!lijst.length) return { status: 409, fout: 'geen geluid om te bewaren' };
+    const stempel = process.pid + '-' + klok();
+    const tmp = d + '.nieuw-' + stempel, oud = d + '.oud-' + stempel;
+    try {
+      mkdir(WERK); mkdir(path.join(WERK, pr));
+      fs.mkdirSync(path.join(tmp, 'b'), { recursive: true, mode: 0o700 });
+      const best = lijst.map(function (x) {
+        if (!fs.lstatSync(x.pad).isFile()) throw new Error('bron is geen gewoon bestand');
+        const doel = path.join(tmp, 'b', String(x.n));
+        fs.copyFileSync(x.pad, doel, fs.constants.COPYFILE_EXCL);
+        fs.chmodSync(doel, 0o600);
+        return { n: x.n, naam: String(x.naam), grootte: fs.statSync(doel).size };
+      });
+      fs.writeFileSync(path.join(tmp, 'meta.json'), JSON.stringify({ praktijk: pr, bandje: id, job: String(o.job), versie: Number(o.versie) || 0,
+        tekst_hash: o.tekst_hash || null, bewaard_op: new Date(klok()).toISOString(), bestanden: best }), { mode: 0o600, flag: 'wx' });
+      let had = false;
+      try { fs.renameSync(d, oud); had = true; } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+      try { fs.renameSync(tmp, d); } catch (e) { if (had) { try { fs.renameSync(oud, d); } catch (x) {} } throw e; }
+      if (had) fs.rmSync(oud, { recursive: true, force: true });
+      return { status: 200, bestanden: best.length };
+    } catch (e) {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (x) {}
+      fout('bandjes-werkversie', e);
+      return { status: 500, fout: 'het geluid kon niet bewaard worden' };
+    }
+  }
+  function ruimWerkversie(pr, id) {
+    const d = werkMap(pr, id);
+    if (!d) return false;
+    const weg = d + '.weg-' + process.pid + '-' + klok();
+    try { fs.renameSync(d, weg); } catch (e) { if (e && e.code !== 'ENOENT') fout('bandjes-werkversie-weg', e); return false; }
+    try { fs.rmSync(weg, { recursive: true, force: true }); } catch (e) { fout('bandjes-werkversie-weg', e); }
+    return true;
+  }
+  // Het bestand n van job (voor GET /app/bestand als Bestanden het na 30 dagen niet meer heeft): { naam, pad } of null.
+  function werkBestand(job, n) {
+    if (!/^[a-f0-9]{16}$/.test(String(job)) || !Number.isInteger(n)) return null;
+    for (const pr of Object.keys(PRAKTIJKEN)) {
+      let ids = [];
+      try { ids = fs.readdirSync(path.join(WERK, pr)).filter(function (x) { return ID_RE.test(x); }); } catch (e) { continue; }
+      for (const id of ids) {
+        const w = werkversie(pr, id);
+        if (!w || w.job !== job) continue;
+        const b = w.bestanden.find(function (x) { return x.n === n; });
+        return b ? { naam: b.naam, pad: b.pad } : null;
+      }
+    }
+    return null;
+  }
+  // Brak een vervanging af tussen de twee renames (proces gestopt), dan ontbreekt de map zelf maar staat er een …nieuw- (volledig: meta.json
+  // wordt als laatste geschreven) of een …oud-. Zet de jongste volledige …nieuw- terug, anders de jongste …oud-. Brak hij af vóór de eerste
+  // rename (map = vorige job, …nieuw- = de job uit het register), dan wisselt de …nieuw- alsnog in (Codex ronde 2).
+  function herstelWerk(pr, uit, laatsteJob) {
+    let namen = [];
+    try { namen = fs.readdirSync(path.join(WERK, pr)); } catch (e) { return; }
+    const rest = {};
+    namen.forEach(function (x) {
+      const m = /^(.+)\.(nieuw|oud)-\d+-(\d+)$/.exec(x);
+      if (m && ID_RE.test(m[1])) (rest[m[1]] = rest[m[1]] || []).push({ naam: x, soort: m[2], t: Number(m[3]) });
+    });
+    Object.keys(rest).forEach(function (id) {
+      const d = werkMap(pr, id);
+      const jobVan = function (naam) { try { const p = path.join(WERK, pr, naam); return fs.lstatSync(path.join(p, 'meta.json')).isFile() ? String(JSON.parse(fs.readFileSync(path.join(p, 'meta.json'), 'utf8')).job || '') : ''; } catch (e) { return ''; } };
+      const heel = function (x) { return !!jobVan(x.naam); };
+      let bestaat = true;
+      try { fs.lstatSync(d); } catch (e) { if (!e || e.code !== 'ENOENT') return; bestaat = false; }
+      if (bestaat) {
+        const doel = laatsteJob && laatsteJob[id], nu = werkversie(pr, id);
+        const nieuw = doel && (!nu || nu.job !== doel) ? rest[id].filter(function (x) { return x.soort === 'nieuw' && jobVan(x.naam) === doel; }).sort(function (a, b) { return b.t - a.t; })[0] : null;
+        if (!nieuw) return;
+        try {
+          fs.renameSync(d, d + '.oud-' + process.pid + '-' + klok());
+          fs.renameSync(path.join(WERK, pr, nieuw.naam), d);
+          if (uit) uit.hersteld = (uit.hersteld || 0) + 1;
+        } catch (e) { fout('bandjes-werkversie-herstel', e); }
+        return;
+      }
+      const kies = rest[id].filter(heel).sort(function (a, b) { return (a.soort === b.soort ? b.t - a.t : a.soort === 'nieuw' ? -1 : 1); })[0];
+      if (!kies) return;
+      try { fs.renameSync(path.join(WERK, pr, kies.naam), d); if (uit) uit.hersteld = (uit.hersteld || 0) + 1; } catch (e) { fout('bandjes-werkversie-herstel', e); }
+    });
+  }
+  // Per bandje: staat de bewaarde versie (of een latere) in de centrale → weg; is er een nieuwere gemaakte werkversie waarvan Bestanden
+  // het geluid (met telefoonversie) nog heeft → die bewaren (vervangt de vorige). bestandVan(job) = [{ n, naam, pad }] of null.
+  function werkRonde(bestandVan) {
+    const uit = { bewaard: 0, opgeruimd: 0, fouten: 0, overgeslagen: 0, hersteld: 0 };
+    Object.keys(PRAKTIJKEN).forEach(function (pr) {
+      let l;
+      try { l = lees(pr); } catch (e) { uit.fouten++; return; }
+      if (l.status !== 200 || l.dicht || l.ontbreekt) { uit.overgeslagen++; return; }
+      const laatsteJob = {};
+      l.bandjes.forEach(function (b) { const lb = laatsteVan(b.laatste_bestand); if (lb && lb.versie > b.centrale_versie) laatsteJob[b.id] = lb.job; });
+      herstelWerk(pr, uit, laatsteJob);   // Codex MOET 1: eerst een onderbroken vervanging terugzetten, pas daarna resten opruimen
+      l.bandjes.forEach(function (b) {
+        let w = werkversie(pr, b.id);
+        // Codex MOET 2: na het opruimen doorgaan; er kan al een nieuwere gemaakte werkversie zijn die bewaard moet worden
+        if (w && w.versie <= b.centrale_versie) { if (ruimWerkversie(pr, b.id)) uit.opgeruimd++; w = null; }
+        const lb = laatsteVan(b.laatste_bestand);
+        if (!lb || lb.versie <= b.centrale_versie || (w && w.job === lb.job)) return;
+        let bs = null;
+        try { bs = bestandVan ? bestandVan(lb.job) : null; } catch (e) { bs = null; }
+        if (!bs || !bs.some(function (x) { return x && /^bandje-telefoon-(ulaw|pcm)\.wav$/.test(x.naam); })) return;
+        const r = bewaarWerkversie(pr, b.id, { job: lb.job, versie: lb.versie, tekst_hash: lb.hash, bestanden: bs });
+        if (r.status === 200) uit.bewaard++; else uit.fouten++;
+      });
+      // resten (…nieuw-/…oud-/…weg-) na een uur weg, maar alleen als het bandje zelf een leesbare kopie heeft (of het een …weg- is)
+      try {
+        fs.readdirSync(path.join(WERK, pr)).forEach(function (x) {
+          const m = /^(.+)\.(nieuw|oud|weg)-\d+-\d+$/.exec(x);
+          if (!m) return;
+          if (m[2] !== 'weg' && !werkversie(pr, m[1])) return;
+          const p = path.join(WERK, pr, x);
+          try { if (klok() - fs.lstatSync(p).mtimeMs > WERK_RESTEN_MS) fs.rmSync(p, { recursive: true, force: true }); } catch (e) {}
+        });
+      } catch (e) {}
+    });
+    return uit;
+  }
   function inCentrale(pr, id, a) {
     const l = lees(pr);
     if (l.status !== 200) return l;
@@ -628,6 +780,8 @@ function maak(deps) {
     zetGemaakt: function (pr, id, o) { return muteer(pr, 'gemaakt', function (md, vv) { return zetGemaakt(md, vv, id, o, klok); }); },
     inCentrale: inCentrale,
     schrijfArchief: schrijfArchief,   // ook voor de eenmalige migratie (wv830)
+    werkversie: werkversie, bewaarWerkversie: bewaarWerkversie, ruimWerkversie: ruimWerkversie, werkBestand: werkBestand, werkRonde: werkRonde,   // wv3064
+    werkPad: WERK,
     pad: pad,
     archiefMap: function (pr) { return PRAKTIJKEN[pr] ? path.join(path.dirname(pad(pr)), 'Archief') : null; },
     nieuw: function (pr, o) { return muteer(pr, 'nieuw', function (md, vv) { return nieuwBandje(md, vv, o, klok); }); },
@@ -769,9 +923,26 @@ function routes(deps) {
   function praktijkUit(l) {
     return { id: l.praktijk, naam: l.naam || (PRAKTIJKEN[l.praktijk] && PRAKTIJKEN[l.praktijk].naam), instellingen: l.instellingen || {},
       praktijkstem: praktijkstem(l.instellingen),
-      bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { spreektekst: spreekVan(b, l.instellingen) }); }),   // wv803
+      bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { spreektekst: spreekVan(b, l.instellingen), bewaard: bewaardUit(l.praktijk, b.id) }); }),   // wv803; wv3064 bewaard
       dicht: l.dicht || null, fouten: l.fouten || [], conflicten: l.conflicten || [], teruggezet: l.teruggezet || [], ontbreekt: l.ontbreekt === true };
   }
+  // wv3064: het bewaarde geluid van de werkversie (zonder paden) of null
+  function bewaardUit(pr, id) {
+    let w = null;
+    try { w = S.werkversie ? S.werkversie(pr, id) : null; } catch (e) { w = null; }
+    return w ? { job: w.job, versie: w.versie, tekst_hash: w.tekst_hash, bewaard_op: w.bewaard_op,
+      bestanden: w.bestanden.map(function (x) { return { n: x.n, naam: x.naam, grootte: x.grootte }; }) } : null;
+  }
+  // wv3064: eerst Bestanden (30 dagen), dan de eigen bewaarplek van die job
+  function bestandenVan(pr, id, job) {
+    let bs = null;
+    try { bs = deps.bestandVan ? deps.bestandVan(job) : null; } catch (e) { fout('bandjes-bestand', e); bs = null; }
+    if (bs && bs.length) return bs;
+    let w = null;
+    try { w = S.werkversie ? S.werkversie(pr, id) : null; } catch (e) { w = null; }
+    return w && w.job === job ? w.bestanden.map(function (x) { return { n: x.n, naam: x.naam, pad: x.pad }; }) : bs;
+  }
+  function ronde() { return S.werkRonde ? S.werkRonde(deps.bestandVan) : null; }
   // wv782: de ElevenLabs-stemmen komen uit de registers (praktijkstem eerst, dan `stemmen`); een praktijkstem zonder naam in `stemmen`
   // heet "ElevenLabs-stem"
   function registerStemmen() {
@@ -886,8 +1057,7 @@ function routes(deps) {
       try { lopend = deps.studio && deps.studio.lopend ? deps.studio.lopend().taken || [] : []; } catch (e) { lopend = []; }
       if (lopend.some(function (x) { return x && x.bron && x.bron.soort === 'bandje' && x.bron.praktijk === pr && x.bron.bandje === id && !x.bron.proef; }))
         return { status: 409, j: { ok: false, fout: 'er wordt nog een bandje gemaakt; wacht tot dat klaar is' } };
-      let bestanden = null;
-      try { bestanden = deps.bestandVan ? deps.bestandVan(lb.job) : null; } catch (e) { fout('bandjes-bestand', e); bestanden = null; }
+      const bestanden = bestandenVan(pr, id, lb.job);   // wv3064: ook na 30 dagen, uit de eigen bewaarplek
       // zonder telefoonversie geen archief van wat in de centrale gaat (Fable wv830 #10)
       if (bestanden && bestanden.length && !bestanden.some(function (x) { return /^bandje-telefoon-(ulaw|pcm)\.wav$/.test(x.naam); }))
         return { status: 409, j: { ok: false, fout: 'bij dit bandje ontbreken de telefoonversies; maak het opnieuw' } };
@@ -895,6 +1065,7 @@ function routes(deps) {
       const r = S.inCentrale(pr, id, { versie: v, tekst_hash: String(d.tekst_hash), bestanden: bestanden, job: lb.job,
         stem: tb ? tb.stem : b.stem, model: tb && tb.model ? tb.model : null, spreektekst: taak && taak.velden && typeof taak.velden.tekst === 'string' ? taak.velden.tekst : spreekVan(b, l.instellingen).tekst });
       if (r.status === 200) log('bandjes in centrale ' + pr + '/' + id + ' v' + v + ' archief=' + r.archief);
+      if (r.status === 200 && S.ruimWerkversie) { try { S.ruimWerkversie(pr, id); } catch (e) { fout('bandjes-werkversie-weg', e); } }   // wv3064: staat nu in het archief
       return r.status === 200 ? (function () { const g = goed(r); g.j.archief = r.archief; return g; })() : fouts(r);
     }
     // maak (en proef, wv803): de tekst komt UIT HET REGISTER, nooit uit de invoer; versie + hash moeten kloppen met wat de app las.
@@ -999,16 +1170,23 @@ function routes(deps) {
     const heeftBasis = Number.isInteger(b.basis);
     const r = S.zetGemaakt(b.praktijk, b.bandje, { basis: heeftBasis ? b.basis : b.versie, versie: heeftBasis ? b.versie : null, tekst_hash: b.tekst_hash, waarde: waarde });
     if (r.status !== 200) { log('bandjes naklaar taak=' + taak.id + ' register niet bijgewerkt: ' + String(r.fout || '').slice(0, 120)); boxMeld(S.lees(b.praktijk)); }
-    else log('bandjes naklaar taak=' + taak.id + ' ' + b.praktijk + '/' + b.bandje + ' v' + b.versie + ' gemaakt');
+    else {
+      log('bandjes naklaar taak=' + taak.id + ' ' + b.praktijk + '/' + b.bandje + ' v' + b.versie + ' gemaakt');
+      try { const u = ronde(); if (u && (u.bewaard || u.opgeruimd || u.fouten)) log('bandjes werkversies ' + JSON.stringify(u)); } catch (e) { fout('bandjes-werkronde', e); }   // wv3064
+    }
   }
 
   // /health: zonder inhoud
   function health() {
     const uit = { aan: true };
     Object.keys(PRAKTIJKEN).forEach(function (pr) { try { uit['dicht_' + pr] = !!S.lees(pr).dicht; } catch (e) { uit['dicht_' + pr] = null; } });
+    // wv3064: hoeveel bandjes hun werkversie-geluid op de eigen bewaarplek hebben (alleen een telling)
+    try { uit.werkversies_bewaard = Object.keys(PRAKTIJKEN).reduce(function (n, pr) { let ids = []; try { ids = fs.readdirSync(path.join(S.werkPad, pr)).filter(function (x) { return ID_RE.test(x); }); } catch (e) {} return n + ids.filter(function (id) { return !!S.werkversie(pr, id); }).length; }, 0); } catch (e) { uit.werkversies_bewaard = null; }
     return uit;
   }
-  return { app: app, smal: smal, naKlaar: naKlaar, health: health, stemmen: stemmen };
+  // wv3064: GET /app/bestand/<job>/<n> als Bestanden de job niet meer heeft
+  function bewaardBestand(job, n) { try { return S.werkBestand ? S.werkBestand(job, n) : null; } catch (e) { return null; } }
+  return { app: app, smal: smal, naKlaar: naKlaar, health: health, stemmen: stemmen, ronde: ronde, bewaardBestand: bewaardBestand };
 }
 
 module.exports = { PRAKTIJKEN, GRENS, STEM_STANDAARD, normTekst, tekstHash, parse, bandjeUit, zetTekst, zetVoorstel, haalVoorstelWeg, zetVelden, nieuwBandje,

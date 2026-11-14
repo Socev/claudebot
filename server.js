@@ -9220,9 +9220,12 @@ async function appBestand(req, res, rest) {
   const jobId = m0[1], n = Number(m0[2]);
   if (!appTeller('bestand', APP_BESTAND_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel downloads dit uur (max ' + APP_BESTAND_PER_UUR + ')', 'grens bestand');
   const m = appBewaardVan(jobId);
-  const b = m && (m.bestanden || []).find(function (x) { return x.n === n; });
+  let b = m && (m.bestanden || []).find(function (x) { return x.n === n; });
+  // wv3064: het geluid van een bandje dat nog niet in de centrale staat, bewaart Bandjes zelf langer dan 30 dagen
+  const bw = !b && bandjes && bandjes.bewaardBestand ? bandjes.bewaardBestand(jobId, n) : null;
+  if (bw) b = { n: n, naam: bw.naam };
   if (!b) return appWeiger(res, 404, 'dit bestand is er niet (meer); de pod bewaart bestanden 30 dagen', 'bestand ' + jobId + '/' + n + ' weg');
-  const bpad = appBestandPad(m, b);   // wv2663: een verwijzing leest het bestand van de agent
+  const bpad = bw ? bw.pad : appBestandPad(m, b);   // wv2663: een verwijzing leest het bestand van de agent
   if (!bpad) return appWeiger(res, 404, 'dit bestand is er niet (meer); de pod bewaart bestanden 30 dagen', 'bestand ' + jobId + '/' + n + ' verwijzing weg');
   let inhoud;
   try { inhoud = await appLeesEcht(bpad); }
@@ -17740,7 +17743,7 @@ function bandjesBestandVan(jobId) {
   const uit = [];
   m.bestanden.forEach(function (x) {
     const p = appBestandPad(m, x);   // wv2663: ook een verwijzing
-    try { if (p && fs.lstatSync(p).isFile()) uit.push({ naam: String(x.naam), pad: p }); } catch (e) {}
+    try { if (p && fs.lstatSync(p).isFile()) uit.push({ n: x.n, naam: String(x.naam), pad: p }); } catch (e) {}   // wv3064: n voor de bewaarplek
   });
   return uit;
 }
@@ -17758,6 +17761,18 @@ async function appBandjes(req, res, a, s, d, route) {
   return appStuur(res, r.status, r.j);
 }
 // ── einde bandjes ──
+// wv3064: de timers buiten het blok (test/bandjes.sh laadt het blok in een vm zonder timers)
+// wv3064: elk uur (en 2 min na de start) het geluid van gemaakte werkversies veiligstellen en dat van wat in de centrale staat opruimen
+function bandjesWerkRonde() {
+  if (!bandjes || !bandjes.ronde || !rolPrimair()) return null;
+  try {
+    const u = bandjes.ronde();
+    if (u && (u.bewaard || u.opgeruimd || u.fouten)) schrijfLog(nu() + ' bandjes werkversies ' + JSON.stringify(u));
+    return u;
+  } catch (e) { logError('bandjes-werkronde', e); return null; }
+}
+setTimeout(bandjesWerkRonde, 2 * 60 * 1000).unref();
+setInterval(bandjesWerkRonde, 60 * 60 * 1000).unref();
 
 // ── Facturen-app, smalle ingang voor de praktijkmanager (wv856, F6, 23-10-2026; bouwplan § 4.3 en § 7) ──
 // /fac/* = de eigen pod-ingang van facturen.socev.dev (eigen Access-app met Google-login, eigen doorgeef-Function, eigen servicetoken en
