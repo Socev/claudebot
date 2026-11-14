@@ -117,6 +117,22 @@ toets('25 geopend: geteld, tweede binnen een minuut (ander apparaat) niet, onbek
 toets('25b in het bestand geen apparaat of inhoud', Object.keys(tel).sort().join() === 'dagen,sinds,versie' && Object.keys(tel.dagen[dag]).join() === 'facturen', tel);
 
 toets('25c review MOET 1: afgeschermde vaste plek krijgt geen privé-id in bekend of meest', /bekend: vp \? L\.APP_IDS\.filter/.test(src) && /if \(vp\) APP_PRIVE_MODULES\.forEach\(function \(id\) \{ delete m\.score\[id\]; \}\)/.test(src));
+// ── wv3069: App Projecten weg; een bewaarde of meegestuurde 'projecten' valt stil weg ──
+toets('29 wv3069 projecten niet meer in APP_IDS, wel in APP_VERVALLEN', L.APP_IDS.indexOf('projecten') < 0 && L.APP_VERVALLEN.indexOf('projecten') >= 0);
+const vb29 = L.volgordeUitBestand({ versie: 4, volgorde: ['praktijken', 'projecten', 'mail'], favorieten: ['projecten', 'pot'], sortering: 'eigen' }, []);
+toets('29b van schijf: projecten overgeslagen, rest in volgorde', vb29.volgorde.join() === 'praktijken,mail' && vb29.favorieten.join() === 'pot' && vb29.versie === 4, vb29);
+const r29 = L.volgordePas(vb29, { versie: 4, volgorde: ['projecten', 'mail', 'praktijken'], favorieten: ['projecten'], sortering: 'az' }, false);
+toets('29c van een oude app: projecten stil weg, geen 400', r29.ok === true && r29.stand.volgorde.join() === 'mail,praktijken' && r29.stand.favorieten.join() === '', r29);
+const r29d = L.volgordePas(vb29, { versie: 4, volgorde: ['onbekend'], favorieten: [], sortering: 'az' }, false);
+toets('29d een écht onbekende id blijft 400', r29d.ok === false && r29d.status === 400, r29d);
+const w29 = L.werkruimtesUitBestand({ versie: 2, sets: { praktijk: { tabs: ['docplan', 'praktijken', 'projecten', 'bandjes'], naast: ['praktijken', 'projecten'] } } });
+toets('29e werkruimte van schijf: projecten weg, naast met één tab vervalt', w29.sets.praktijk.tabs.join() === 'docplan,praktijken,bandjes' && w29.sets.praktijk.naast === null, w29);
+const w29f = L.werkruimtePas(w29, { versie: 2, id: 'praktijk', set: { tabs: ['projecten', 'docplan', 'bandjes', 'praktijken'], naast: ['docplan', 'projecten', 'bandjes'] } }, false);
+toets('29f werkruimte van een oude app: projecten weg, naast blijft met de twee overige', w29f.ok === true && w29f.stand.sets.praktijk.tabs.join() === 'docplan,bandjes,praktijken' && w29f.stand.sets.praktijk.naast.join() === 'docplan,bandjes', w29f);
+const w29g = L.werkruimtePas(w29, { versie: 2, id: 'praktijk', set: { tabs: ['projecten'] } }, false);
+toets('29g werkruimte met alleen projecten (oude app) = terug naar de standaard, geen 400', w29g.ok === true && w29g.veranderd === true && !w29g.stand.sets.praktijk && w29g.stand.versie === 3, w29g);
+const w29h = L.werkruimtePas(w29, { versie: 2, id: 'praktijk', set: { tabs: [] } }, false);
+toets('29h werkruimte zonder tabs blijft 400', w29h.ok === false && w29h.status === 400, w29h);
 // ── bedrading ──
 toets('26 routes in de routetabel', /route === 'GET \/app\/apps-volgorde' \|\| route === 'POST \/app\/apps-volgorde'\) return appAppsVolgordeRoute\(req, res, a, d\)/.test(src) && /route === 'POST \/app\/apps-geopend'\) return appAppsGeopendRoute\(req, res, a, d\)/.test(src));
 toets('27 tellen valt niet onder het invoerslot, rangschikken wel', /const APP_SLOT_VRIJ = new Set\(\[[^\]]*'POST \/app\/apps-geopend'/.test(src) && !/const APP_SLOT_VRIJ = new Set\(\[[^\]]*'POST \/app\/apps-volgorde'/.test(src));

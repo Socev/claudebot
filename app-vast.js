@@ -76,9 +76,13 @@ function pas(lijst, d, vastePlek) {
 // alleen aantallen). De weergave raster/lijst is per toestel en staat niet hier. Alleen App-id's uit APP_IDS (= de Apps in de
 // catalogus src/modules.ts, plek "apps"; de toets test/apps-volgorde.test.ts in socev-app houdt ze gelijk). Een App die de pod nog
 // niet kent, toont de app gewoon onderaan; ordenen en favoriet maken kan pas als hij hier staat.
-const APP_IDS = ['praktijken', 'projecten', 'bandjes', 'financien', 'gezondheid', 'facturen', 'docplan', 'bestanden', 'pot',
+const APP_IDS = ['praktijken', 'bandjes', 'financien', 'gezondheid', 'facturen', 'docplan', 'bestanden', 'pot',
   'pot-afschriften', 'studio', 'broedstoof', 'memorylane', 'tripper', 'kalender', 'shopper', 'pakjes', 'osint', 'mediatheek', 'harvester', 'ideeen',
   'flock', 'verbruik', 'tokencounter', 'sleutelbos', 'mail', 'mailman', 'cijfer-meester', 'ghawa', 'beleggen', 'imagine', 'personeelsscherm', 'pma'];   // sleutelbos: wv2481; ghawa: wv2877; beleggen: wv2982; imagine: wv2984; personeelsscherm: wv2991; pma: wv3037
+// wv3069 (David 14-11-2026 18:53, "Projecten kan weg"): Apps die weg zijn. Staat zo'n id nog in een bewaarde volgorde, favorieten of
+// werkruimte, of stuurt een oude app hem nog mee, dan valt hij stil weg (geen 400): de rest van de stand blijft gewoon gelden.
+const APP_VERVALLEN = ['projecten'];
+const zonderVervallen = function (l) { return Array.isArray(l) ? l.filter(function (x) { return APP_VERVALLEN.indexOf(x) < 0; }) : l; };
 const VOLGORDE_MAX = 60;
 const SORTERINGEN = ['eigen', 'az', 'meest'];
 const TEL_DAGEN = 120;            // zo lang blijven dagtellingen staan
@@ -104,6 +108,7 @@ function volgordeUitBestand(j, vastLijst) {
     sortering: SORTERINGEN.indexOf(j.sortering) >= 0 ? j.sortering : 'eigen', standaard: false };
 }
 function strengeLijst(l, wat) {   // van de app: elk id moet bekend zijn, geen dubbele, hooguit VOLGORDE_MAX
+  l = zonderVervallen(l);   // wv3069
   if (!Array.isArray(l)) return { fout: wat + ' ontbreekt', reden: 'volgorde ' + wat + ' vorm' };
   if (l.length > VOLGORDE_MAX) return { fout: 'te veel Apps in ' + wat, reden: 'volgorde ' + wat + ' te lang' };
   for (let i = 0; i < l.length; i++) {
@@ -191,6 +196,10 @@ const isWrToken = function (x) { return isAppId(x) || (typeof x === 'string' && 
 function wrSet(x, streng) {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return streng ? { fout: 'ongeldige werkruimte' } : null;
   if (!Array.isArray(x.tabs)) return streng ? { fout: 'tabs ontbreken' } : null;
+  if (streng) {   // wv3069: een App die weg is valt stil weg (tabs en naast); naast met nog maar één tab = niet meer naast elkaar
+    const naast0 = Array.isArray(x.naast) ? zonderVervallen(x.naast) : x.naast;
+    x = { tabs: zonderVervallen(x.tabs), naast: Array.isArray(naast0) && naast0.length < 2 && naast0.length !== x.naast.length ? null : naast0 };
+  }
   if (streng) {
     if (!x.tabs.length) return { fout: 'een werkruimte zonder tabs' };
     if (x.tabs.length > WERKRUIMTE_MAX) return { fout: 'te veel tabs (hooguit ' + WERKRUIMTE_MAX + ')' };
@@ -226,7 +235,9 @@ function werkruimtePas(nu, d, vastePlek) {
   if (d.versie !== nu.versie) return { ok: false, status: 409, fout: 'de werkruimtes zijn intussen op een ander apparaat gewijzigd', reden: 'werkruimte versie oud' };
   if (WERKRUIMTE_IDS.indexOf(d.id) < 0) return { ok: false, status: 400, fout: 'onbekende werkruimte', reden: 'werkruimte id' };
   const sets = Object.assign({}, nu.sets);
-  if (d.set === null) {
+  // wv3069 (review MOET 1): een set van een oude app met alleen Apps die weg zijn = terug naar de standaard, geen 400
+  const alleenVervallen = d.set && Array.isArray(d.set.tabs) && d.set.tabs.length > 0 && zonderVervallen(d.set.tabs).length === 0;
+  if (d.set === null || alleenVervallen) {
     if (!sets[d.id]) return { ok: true, stand: nu, veranderd: false };
     delete sets[d.id];
   } else {
@@ -253,6 +264,6 @@ function werkruimtesVoorApparaat(stand, vastePlek, prive) {
 }
 
 module.exports = { STANDAARD, MAX, regel, schoon, uitBestand, voorApparaat, pas,
-  APP_IDS, VOLGORDE_MAX, SORTERINGEN, beginFavorieten, volgordeUitBestand, volgordePas, naarBestand, volgordeVoorApparaat,
+  APP_IDS, APP_VERVALLEN, VOLGORDE_MAX, SORTERINGEN, beginFavorieten, volgordeUitBestand, volgordePas, naarBestand, volgordeVoorApparaat,
   tellingUitBestand, telOpen, meest, TEL_DUBBEL_MS, MEEST_NA_DAGEN,
   WERKRUIMTE_IDS, WERKRUIMTE_PLEKKEN, WERKRUIMTE_MAX, werkruimtesUitBestand, werkruimtePas, werkruimtesNaarBestand, werkruimtesVoorApparaat };   // wv2929
