@@ -21,6 +21,12 @@
 //   en O_NONBLOCK, /proc/self/fd = het verwachte echte pad (geen tussenmap die intussen een koppeling werd), fstat = zelfde inode,
 //   nlink 1 (geen hardlink naar buiten); hooguit 20 MB (base64 in JSON). De beschrijving en de kaft ook: zelfde leesweg, ≤ 64 kB / 1 MB.
 // Eén fout = één stuk: een beschrijving die niet klopt komt in `te_herstellen` (bestandsnaam + reden in gewone taal), de rest staat er.
+// wv3063 (14-11-2026; advies Fable 14-11, David 18:03 "loop plannen na, werk ze uit"): een stuk dat bewust elders staat (een
+// Windows-installer bij een release op GitHub; de vault houdt geen programma's) heeft geen mediabestand ernaast maar `extern: "<adres>"`
+// in de frontmatter. Alleen als er GEEN mediabestand met dezelfde naam naast staat (staat dat er wel, dan wint het bestand en telt extern
+// niet), alleen https, alleen een host uit EXTERN_HOSTS, ≤ 300 tekens, geen gebruikersdeel, poort of rare tekens, en dan zonder
+// `bestanden:`. Zo'n stuk telt als stuk (geen bestand, niet om af te spelen); de App toont "Open bij <host>". De padcontrole voor
+// echte bestanden (M1–M4) blijft ongewijzigd: een extern stuk heeft geen bestand-id.
 // Alles alleen lezen; de module schrijft niets. Privé-module: op een vaste plek open, een bestand ophalen onder het invoerslot (server.js, wv1901); dicht alleen als APP_VAST_AFSCHERMEN aan staat.
 
 const fs = require('fs');
@@ -34,6 +40,25 @@ const AUDIO = { mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'aud
 // alleen downloaden (beeld en video krijgen later een eigen weergave; geparkeerd als beeldbank, Ideeënbus § 22)
 const ANDERS = { pdf: 'application/pdf', flp: 'application/octet-stream', mid: 'audio/midi', midi: 'audio/midi',
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime' };
+
+// wv3063: vaste hostlijst voor extern (host → naam op de knop). Iets erbij = codewijziging met toets, niet via een beschrijving.
+const EXTERN_HOSTS = { 'github.com': 'GitHub' };
+const MAX_EXTERN = 300;
+const ZONDER_ZUS = 'er staat geen mediabestand met dezelfde naam naast deze beschrijving';
+// Adres → { url, naam } of null. Eerst de tekens (geen spatie, @, :-poort, aanhalingsteken, <>, backslash, stuurteken), dan de URL-lezer.
+function externAdres(s) {
+  if (typeof s !== 'string') return null;
+  const t = s.trim();
+  if (!t || t.length > MAX_EXTERN) return null;
+  if (!/^https:\/\/[A-Za-z0-9.-]+(\/[A-Za-z0-9\-._~\/%?=&#+]*)?$/.test(t)) return null;
+  let u;
+  try { u = new URL(t); } catch (e) { return null; }
+  if (u.protocol !== 'https:' || u.username || u.password || u.port) return null;
+  const host = u.hostname.toLowerCase();
+  if (!Object.prototype.hasOwnProperty.call(EXTERN_HOSTS, host)) return null;
+  if (u.href.length > MAX_EXTERN) return null;
+  return { url: u.href, naam: EXTERN_HOSTS[host] };
+}
 
 const extVan = (p) => { const m = /\.([a-z0-9]{1,5})$/i.exec(p); return m ? m[1].toLowerCase() : ''; };
 const idVan = (p) => crypto.createHash('sha256').update(p, 'utf8').digest('hex').slice(0, 16);
@@ -220,7 +245,9 @@ const geldigeDatum = (iso) => { const d = new Date(iso + 'T12:00:00Z'); return !
 
 // Eén beschrijving (tekst + map waarin hij staat, NFC) → { niet } (geen mediatheekbeschrijving) | { reden } | { stuk }.
 // Alleen de inhoud; of de bestanden echt bestaan toetst maak().
-function leesBeschrijving(tekst, map) {
+// wv3063: opt.extern = er staat geen mediabestand naast; dan moet extern een toegestaan adres zijn en blijft bestanden leeg.
+function leesBeschrijving(tekst, map, opt) {
+  const metExtern = !!(opt && opt.extern);
   const lees = fmLezer();
   if (!lees) return { reden: 'de lezer voor beschrijvingen ontbreekt in deze versie van de pod' };
   const fm = lees(tekst);
@@ -231,6 +258,7 @@ function leesBeschrijving(tekst, map) {
   const v = fm.velden;
   const een = (k) => { const x = v[k]; if (x === undefined || x === '') return null; return typeof x === 'string' ? x.trim() : undefined; };
   if (een('bron_soort') !== 'mediatheek') return { niet: true };
+  if (metExtern && (v.extern === undefined || v.extern === '')) return { reden: ZONDER_ZUS };   // wv3063: geen extern = de oude reden
   for (const k of ['categorie', 'titel', 'wie', 'datum', 'datum_tekst', 'favoriet']) if (een(k) === undefined) return { reden: k + ' moet één waarde zijn, geen lijst' };
   const categorie = een('categorie');
   if (!categorie) return { reden: 'categorie ontbreekt' };
@@ -244,7 +272,15 @@ function leesBeschrijving(tekst, map) {
   if (fav) { if (/^(true|ja|yes)$/i.test(fav)) favoriet = true; else if (!/^(false|nee|no)$/i.test(fav)) return { reden: 'favoriet moet true of false zijn' }; }
   let bs = v.bestanden;
   if (typeof bs === 'string') bs = bs ? [bs] : [];
-  if (!Array.isArray(bs) || !bs.length) return { reden: 'bestanden ontbreekt (de link naar het mediabestand)' };
+  let extern = null;
+  if (metExtern) {
+    const ex = v.extern;
+    if (typeof ex !== 'string') return { reden: 'extern moet één adres zijn, geen lijst' };
+    extern = externAdres(ex);
+    if (!extern) return { reden: 'het adres bij extern is niet toegestaan (alleen https bij ' + Object.values(EXTERN_HOSTS).join(', ') + ', hooguit ' + MAX_EXTERN + ' tekens)' };
+    if (bs !== undefined && (!Array.isArray(bs) || bs.length)) return { reden: ZONDER_ZUS + '; staat het stuk alleen elders, haal dan bestanden weg' };
+    bs = [];
+  } else if (!Array.isArray(bs) || !bs.length) return { reden: 'bestanden ontbreekt (de link naar het mediabestand)' };
   const bestanden = [];
   for (let ruw of bs) {
     if (/^\[[^[\]]+\]$/.test(String(ruw).trim())) ruw = '[' + String(ruw).trim() + ']';   // bestanden: [[x]] zonder aanhalingstekens leest de lezer als lijst "[x]"
@@ -267,7 +303,7 @@ function leesBeschrijving(tekst, map) {
   while (i < romp.length && romp[i].trim() && !/^#{1,6}\s/.test(romp[i])) alinea.push(romp[i++].trim());
   const omschrijving = plat(alinea.join(' ')).slice(0, 1200) || null;
   return { stuk: { categorie: categorie, titel: een('titel') ? plat(een('titel')) : null, wie: een('wie') ? plat(een('wie')) : null, datum: datum,
-    datum_tekst: datum ? null : een('datum_tekst'), favoriet: favoriet, omschrijving: omschrijving, bestanden: bestanden } };
+    datum_tekst: datum ? null : een('datum_tekst'), favoriet: favoriet, omschrijving: omschrijving, bestanden: bestanden, extern: extern } };
 }
 
 const MAX_BESCHRIJVING = 64 * 1024;
@@ -334,15 +370,17 @@ function maak(opt) {
   }
 
   // Eén beschrijving beoordelen (ook bij elk bestand-verzoek opnieuw): mapRaw = vaultpad van de map zoals op schijf.
-  function beoordeel(mapRaw, mdNaam) {
+  // wv3063: extern = er staat geen mediabestand naast (zoek: zus false); dan geen bestanden en een toegestaan extern-adres.
+  function beoordeel(mapRaw, mdNaam, extern) {
     const e = echt();
     let dirReal;
     try { dirReal = fs.realpathSync(path.join(VAULT, mapRaw)); } catch (x) { return { reden: 'de map is niet te lezen' }; }
     if (dirReal !== path.join(e.vault, mapRaw) || dirReal.indexOf(e.top + path.sep) !== 0) return { reden: 'de map is een koppeling' };
     const t = leesKlein(path.join(dirReal, mdNaam), MAX_BESCHRIJVING, false);
     if (t.fout) return { reden: t.fout };
-    const r = leesBeschrijving(t.tekst, mapRaw.normalize('NFC'));
+    const r = leesBeschrijving(t.tekst, mapRaw.normalize('NFC'), { extern: !!extern });
     if (r.niet || r.reden) return r;
+    if (extern) return { stuk: r.stuk, rijen: [], mtimeMs: t.mtimeMs };
     const basis = mdNaam.slice(0, -3).normalize('NFC');
     if (!r.stuk.bestanden.some((b) => b.naam.slice(0, -b.ext.length - 1) === basis))
       return { reden: 'het mediabestand met dezelfde naam als de beschrijving staat niet bij bestanden' };
@@ -412,12 +450,13 @@ function maak(opt) {
     if (!kt.fout) { kaft = leesKaft(kt.tekst); kaftM = kt.mtimeMs; }
     const z = zoek();
     const perId = new Map(), perCat = new Map(), teHerstellen = [], geclaimd = new Set(), mtMappen = new Set();
-    let nb = 0, nweg = 0, laatst = kaftM;
+    let nb = 0, nweg = 0, next = 0, laatst = kaftM;
     for (const g of z.gevonden) {
       mtMappen.add(g.map);
       const md = g.naam.normalize('NFC');
-      if (!g.zus) { teHerstellen.push({ naam: md, reden: 'er staat geen mediabestand met dezelfde naam naast deze beschrijving' }); continue; }
-      const r = beoordeel(g.map, g.naam);
+      // wv3063: zonder mediabestand ernaast alleen nog een stuk met een toegestaan extern-adres; elke andere fout blijft de oude reden
+      const r = beoordeel(g.map, g.naam, !g.zus);
+      if (!g.zus && !r.stuk) { teHerstellen.push({ naam: md, reden: r.reden || ZONDER_ZUS }); continue; }
       if (r.niet) continue;
       if (r.reden) { teHerstellen.push({ naam: md, reden: r.reden }); nweg += r.ontbreekt || 0; continue; }
       laatst = Math.max(laatst, r.mtimeMs);
@@ -429,10 +468,13 @@ function maak(opt) {
         perId.set(id, { map: g.map, md: g.naam });
         bs.push({ id: id, naam: b.naam, ext: b.ext, soort: AUDIO[b.ext] ? 'audio' : 'bestand', label: b.ext, grootte: f.grootte, ontbreekt: false, te_groot: f.grootte > MAX_BESTAND });
       }
+      if (s.extern) next++;
       const sl = catSleutel(s.categorie);
       if (!perCat.has(sl)) perCat.set(sl, { naam: plat(s.categorie), items: [] });
-      perCat.get(sl).items.push({ titel: s.titel || bs[0].naam.replace(/\.[^.]+$/, ''), wie: s.wie, datum: s.datum, datum_tekst: s.datum_tekst,
-        omschrijving: s.omschrijving, noot: null, favoriet: s.favoriet, bestanden: bs, paginas: [], geweigerd: 0 });
+      const item = { titel: s.titel || (bs[0] ? bs[0].naam.replace(/\.[^.]+$/, '') : md.slice(0, -3)), wie: s.wie, datum: s.datum, datum_tekst: s.datum_tekst,
+        omschrijving: s.omschrijving, noot: null, favoriet: s.favoriet, bestanden: bs, paginas: [], geweigerd: 0 };
+      if (s.extern) item.extern = { url: s.extern.url, naam: s.extern.naam };   // wv3063: alleen bij een stuk dat elders staat
+      perCat.get(sl).items.push(item);
     }
     // zonder beschrijving: geluid in een map met beschrijvingen dat geen stuk is en geen (kapotte) beschrijving ernaast heeft
     const metBesch = new Set(z.gevonden.map((g) => (g.map + '/' + g.naam.slice(0, -3)).normalize('NFC')));
@@ -454,7 +496,7 @@ function maak(opt) {
     teHerstellen.sort((a, b) => nl(a.naam, b.naam));
     const n = onderwerpen.reduce((t, o) => t + o.items.length, 0);
     return { ok: true, pagina: PAD, kaft: !!kaft, bijgewerkt: new Date(laatst || Date.now()).toISOString(), onderwerpen: onderwerpen, te_herstellen: teHerstellen,
-      tel: { items: n, bestanden: nb, ontbreekt: nweg, te_herstellen: teHerstellen.length, zonder_beschrijving: zonder, afgekapt: z.afgekapt }, _perId: perId };
+      tel: { items: n, bestanden: nb, ontbreekt: nweg, te_herstellen: teHerstellen.length, zonder_beschrijving: zonder, afgekapt: z.afgekapt, extern: next }, _perId: perId };
   }
 
   // De lijst hooguit CACHE_MS oud (20_Prive heeft ± 1.600 pagina's; alleen gewijzigde .md worden opnieuw gelezen)
@@ -515,4 +557,4 @@ function maak(opt) {
   return { stand: stand, bestand: bestand, health: health, lijst: lijst };
 }
 
-module.exports = { maak: maak, leesKaft: leesKaft, leesBeschrijving: leesBeschrijving, catSleutel: catSleutel, leesPagina: leesPagina, leesItem: leesItem, schoonDoel: schoonDoel, plat: plat, idVan: idVan, AUDIO: AUDIO, ANDERS: ANDERS, MAX_BESTAND: MAX_BESTAND };
+module.exports = { externAdres: externAdres, EXTERN_HOSTS: EXTERN_HOSTS, maak: maak, leesKaft: leesKaft, leesBeschrijving: leesBeschrijving, catSleutel: catSleutel, leesPagina: leesPagina, leesItem: leesItem, schoonDoel: schoonDoel, plat: plat, idVan: idVan, AUDIO: AUDIO, ANDERS: ANDERS, MAX_BESTAND: MAX_BESTAND };
