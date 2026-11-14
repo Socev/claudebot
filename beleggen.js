@@ -649,7 +649,7 @@ function maak(o) {
     } finally { db.close(); }
   }
   function leesAlles(db) {
-    const leeg = { antwoorden: {}, regels: {}, versies: [], posities: [], soorten: {}, transacties: [], dagboek: [], volglijst: [], keuzes: {}, bestanden: [], stand_datum: null, stand_bron: null, rekening_rijen: 0, stortingen: 0 };
+    const leeg = { antwoorden: {}, regels: {}, versies: [], posities: [], soorten: {}, transacties: [], dagboek: [], volglijst: [], keuzes: {}, bestanden: [], exports: { portefeuille: null, transacties: null, rekening: null }, stand_datum: null, stand_bron: null, rekening_rijen: 0, stortingen: 0 };
     if (!db) return leeg;
     const d = leeg;
     for (const r of db.prepare('SELECT * FROM plan_antwoord').all()) d.antwoorden[r.vraag] = { tekst: r.tekst, waarden: r.waarden ? JSON.parse(r.waarden) : null, status: r.status, op: r.op };
@@ -662,6 +662,11 @@ function maak(o) {
     d.volglijst = db.prepare('SELECT id, naam, code, thema, waarom, wanneer, op FROM volglijst WHERE weg = 0 ORDER BY id').all().map((r) => Object.assign({}, r));
     for (const r of db.prepare('SELECT sleutel, keuze, tot FROM signaal_keuze').all()) d.keuzes[r.sleutel] = { keuze: r.keuze, tot: r.tot };
     d.bestanden = db.prepare('SELECT id, soort, naam, datum_bestand, op, rijen, nieuw FROM bestand ORDER BY id DESC LIMIT 10').all().map((r) => Object.assign({}, r));
+    // wv3031: per DEGIRO-export (portefeuille, transacties, rekening) het laatst ingelezen bestand, los van de 10 hierboven (geen bedragen)
+    d.exports = { portefeuille: null, transacties: null, rekening: null };
+    for (const r of db.prepare('SELECT soort, MAX(op) AS op, COUNT(*) AS n FROM bestand GROUP BY soort').all()) {
+      if (r.soort in d.exports) d.exports[r.soort] = { op: r.op, aantal: r.n, datum_bestand: (db.prepare('SELECT datum_bestand FROM bestand WHERE soort = ? ORDER BY op DESC, id DESC LIMIT 1').get(r.soort) || {}).datum_bestand || null };
+    }
     const m = Object.fromEntries(db.prepare("SELECT sleutel, waarde FROM meta WHERE sleutel IN ('stand_datum', 'stand_bron')").all().map((r) => [r.sleutel, r.waarde]));
     d.stand_datum = m.stand_datum || null; d.stand_bron = m.stand_bron || null;
     d.rekening_rijen = db.prepare('SELECT COUNT(*) AS n FROM rekening').get().n;
@@ -705,7 +710,7 @@ function maak(o) {
       for (const p of k.posities) delete p._ruw;
       return { ok: true, vandaag, vragen: VRAGEN, antwoorden: d.antwoorden, regels: d.regels, versies: d.versies, stand: { datum: d.stand_datum, bron: d.stand_bron,
         verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig, historie: historieUit(db), onvolledig: !!d.aankoop_onvolledig }, transacties: d.transacties, dagboek, volglijst: volg,
-        signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, rekening_rijen: d.rekening_rijen, stortingen: d.stortingen,
+        signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, exports: d.exports, rekening_rijen: d.rekening_rijen, stortingen: d.stortingen,
         soort_namen: SOORT_NAAM, vault: { ok: vaultOk, op: laatsteVault }, bedrijven };
     }, false);
   }

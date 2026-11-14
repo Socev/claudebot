@@ -473,3 +473,21 @@ test('wv3030 review: portefeuille met alleen contant gaat voor; onvolledige tran
   const k2 = B.bereken(Object.assign({}, d, { aankoop_onvolledig: false }), '2026-11-14');
   assert.ok(k2.signalen.some((s) => s.soort === 'boven_maximum'), 'kruis: compleet → wel signaal');
 });
+test('wv3031 exports: per DEGIRO-export het laatst ingelezen bestand (ook na meer dan 10 bestanden), nog niet = null, geen bedragen', () => {
+  const { post, get } = nieuw();
+  assert.deepStrictEqual(get().body.exports, { portefeuille: null, transacties: null, rekening: null });
+  assert.strictEqual(post('bestand', { naam: 'Transactions.csv', tekst: ECHT_TX, bewaar: false }).status, 200);
+  assert.deepStrictEqual(get().body.exports.transacties, null, 'proef telt niet');
+  assert.strictEqual(post('bestand', { naam: 'Transactions.csv', tekst: ECHT_TX, bewaar: true }).status, 200);
+  let x = get().body.exports;
+  assert.deepStrictEqual([x.portefeuille, x.rekening, x.transacties && x.transacties.aantal], [null, null, 1]);
+  assert.match(x.transacties.op, /^\d{4}-\d\d-\d\dT/);
+  for (let i = 0; i < 11; i++) assert.strictEqual(post('bestand', { naam: 'p.csv', tekst: i % 2 ? PORT.replace('"150,00","150,00"', '"160,00","160,00"') : PORT, datum: `2026-11-${String(i + 1).padStart(2, '0')}`, bewaar: true }).status, 200);
+  const o = get().body;
+  assert.ok(!o.bestanden.some((b) => b.soort === 'transacties'), 'de lijst van 10 ziet de transacties niet meer');
+  assert.strictEqual(o.exports.transacties.aantal, 1, 'het overzicht wel');
+  assert.deepStrictEqual([o.exports.portefeuille.aantal, o.exports.portefeuille.datum_bestand, o.exports.rekening], [11, '2026-11-11', null]);
+  assert.strictEqual(post('bestand', { naam: 'Account.csv', tekst: ECHT_REK, bewaar: true }).status, 200);
+  assert.strictEqual(get().body.exports.rekening.aantal, 1);
+  assert.deepStrictEqual(Object.keys(get().body.exports.rekening).sort(), ['aantal', 'datum_bestand', 'op']);
+});
