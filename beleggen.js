@@ -211,8 +211,10 @@ function leesTijd(s, regel, kolom) {
   return t;
 }
 const RE_VALUTA = /^[A-Z]{3}$/;
-// Bedrag met valuta in twee kolommen: precies één van de twee is een valutacode, de ander het getal (de volgorde verschilt per export).
-function leesBedrag(rij, k, dec, regel, naam, leegMag, vasteValuta) {
+// Bedrag met valuta in twee kolommen: precies één van de twee is een valutacode, de ander het getal. wv2985 (Davids echte NL-export 13-11):
+// transacties = getal, valuta ("Koers,," → 162,83 | USD); rekeningoverzicht = valuta, getal ("Mutatie,," → USD | 488,49). volgorde 'gv' of 'vg'
+// eist die vorm; null (portefeuille, nog niet op een echt bestand gezien) accepteert beide.
+function leesBedrag(rij, k, dec, regel, naam, leegMag, vasteValuta, volgorde) {
   const a = (rij[k.i] || '').trim(), b = k.partner == null ? '' : (rij[k.partner] || '').trim();
   if (k.partner == null) {
     const g = leesGetal(a, dec, regel, naam, leegMag);
@@ -222,6 +224,7 @@ function leesBedrag(rij, k, dec, regel, naam, leegMag, vasteValuta) {
   let valuta, getal;
   if (RE_VALUTA.test(a) && !RE_VALUTA.test(b)) { valuta = a; getal = b; } else if (RE_VALUTA.test(b) && !RE_VALUTA.test(a)) { valuta = b; getal = a; }
   else throw new LeesFout('bedrag zonder herkenbare valuta', regel, naam);
+  if (volgorde && (volgorde === 'gv') !== (valuta === b)) throw new LeesFout(naam + ': ' + (volgorde === 'gv' ? 'eerst het getal, dan de valuta' : 'eerst de valuta, dan het getal') + ' (zoals in de DEGIRO-export)', regel, naam);
   if (vasteValuta && valuta !== vasteValuta) throw new LeesFout(naam + ' moet in ' + vasteValuta + ' staan, niet in ' + valuta, regel, naam);   // review achteraf MOET 2
   const g = leesGetal(getal, dec, regel, naam, false);
   return { g, cent: naarCent(g), valuta };
@@ -234,6 +237,9 @@ function canon(t) {
 }
 const veld = (rij, k) => (k ? String(rij[k.i] || '').trim() : '');
 const RE_ISIN = /^[A-Z]{2}[A-Z0-9]{9}\d$/;
+const RE_ORDER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;   // wv2985: DEGIRO-order-id (uuid, kleine letters; review ronde 4), in transacties en rekeningoverzicht
+// review wv2985 ronde 4: marge van een omrekening = afronding van de koers (half van de laatste decimaal) + een halve cent aan beide kanten
+function wisselTol(euro, koers) { const d = (koers.tekst.split('.')[1] || '').length; return euro * (0.5 * Math.pow(10, -d)) / koers.n + 0.005 / koers.n + 0.005 + 0.002; }
 const tol = (x) => 0.011 + Math.abs(x) * 0.0005;   // 1 cent + afronding van koers/wisselkoers
 
 function sha(t) { return crypto.createHash('sha256').update(t).digest('hex'); }
@@ -268,13 +274,13 @@ function leesBestand(tekst) {
       if (!RE_ISIN.test(isin)) throw new LeesFout('geen geldige ISIN', regel, 'isin');
       const aantal = leesGetal(veld(rij, kaart.aantal), dec, regel, 'aantal');
       if (aantal.n === 0) throw new LeesFout('aantal is nul', regel, 'aantal');
-      const koers = leesBedrag(rij, kaart.koers, dec, regel, 'koers', false);
-      const lokaal = leesBedrag(rij, kaart.lokaal, dec, regel, 'lokale waarde', false);
-      const waarde = leesBedrag(rij, kaart.waarde, dec, regel, 'waarde', false, 'EUR');
+      const koers = leesBedrag(rij, kaart.koers, dec, regel, 'koers', false, null, 'gv');
+      const lokaal = leesBedrag(rij, kaart.lokaal, dec, regel, 'lokale waarde', false, null, 'gv');
+      const waarde = leesBedrag(rij, kaart.waarde, dec, regel, 'waarde', false, 'EUR', 'gv');
       const wk = kaart.wisselkoers ? leesGetal(veld(rij, kaart.wisselkoers), dec, regel, 'wisselkoers', true) : null;
-      const kosten = kaart.kosten ? leesBedrag(rij, kaart.kosten, dec, regel, 'kosten', true, 'EUR') : null;
-      const autofx = kaart.autofx ? leesBedrag(rij, kaart.autofx, dec, regel, 'autofx', true, 'EUR') : null;
-      const totaal = leesBedrag(rij, kaart.totaal, dec, regel, 'totaal', false, 'EUR');
+      const kosten = kaart.kosten ? leesBedrag(rij, kaart.kosten, dec, regel, 'kosten', true, 'EUR', 'gv') : null;
+      const autofx = kaart.autofx ? leesBedrag(rij, kaart.autofx, dec, regel, 'autofx', true, 'EUR', 'gv') : null;
+      const totaal = leesBedrag(rij, kaart.totaal, dec, regel, 'totaal', false, 'EUR', 'gv');
       if (waarde.valuta && waarde.valuta !== 'EUR') throw new LeesFout('waarde niet in euro', regel, 'waarde');
       if (totaal.valuta && totaal.valuta !== 'EUR') throw new LeesFout('totaal niet in euro', regel, 'totaal');
       if (koers.valuta && lokaal.valuta && koers.valuta !== lokaal.valuta) throw new LeesFout('koers en lokale waarde in verschillende valuta', regel, 'koers');
@@ -287,17 +293,21 @@ function leesBestand(tekst) {
       if (waarde.g.n === 0 || Math.sign(waarde.g.n) !== Math.sign(lokaal.g.n)) throw new LeesFout('lokale waarde en waarde hebben een ander teken', regel, 'waarde');
       if (kosten && kosten.g.n > 0) throw new LeesFout('kosten horen negatief te zijn', regel, 'kosten');
       if (autofx && autofx.g.n > 0) throw new LeesFout('AutoFX-kosten horen negatief te zijn', regel, 'autofx');
-      if (valuta === 'EUR') { if (Math.abs(lokaal.g.n - waarde.g.n) > tol(waarde.g.n)) throw new LeesFout('waarde in euro wijkt af van de lokale waarde', regel, 'waarde'); }
-      else {
+      if (valuta === 'EUR') {
+        if (Math.abs(lokaal.g.n - waarde.g.n) > tol(waarde.g.n)) throw new LeesFout('waarde in euro wijkt af van de lokale waarde', regel, 'waarde');
+        if (wk && wk.n !== 1) throw new LeesFout('wisselkoers bij een bedrag in euro', regel, 'wisselkoers');   // wv2985: leeg of 1
+      } else {
         if (!wk || !(wk.n > 0)) throw new LeesFout('wisselkoers ontbreekt bij een bedrag in ' + valuta, regel, 'wisselkoers');
-        const a = Math.abs(lokaal.g.n) / wk.n, b = Math.abs(lokaal.g.n) * wk.n, w = Math.abs(waarde.g.n);
-        if (Math.abs(a - w) > tol(w) * 2 && Math.abs(b - w) > tol(w) * 2) throw new LeesFout('lokale waarde en wisselkoers geven niet de waarde in euro', regel, 'wisselkoers');
+        // wv2985 (gemeten op Davids export): de wisselkoers is vreemde valuta per euro, dus waarde in euro = lokale waarde / wisselkoers
+        const a = Math.abs(lokaal.g.n) / wk.n, w = Math.abs(waarde.g.n);
+        if (Math.abs(a - w) > wisselTol(w, wk)) throw new LeesFout('lokale waarde / wisselkoers geeft niet de waarde in euro (DEGIRO: ' + valuta + ' per euro)', regel, 'wisselkoers');
       }
       const som = waarde.g.n + (kosten ? kosten.g.n : 0) + (autofx ? autofx.g.n : 0);
       if (Math.abs(som - totaal.g.n) > 0.011) throw new LeesFout('totaal is niet waarde + kosten', regel, 'totaal');
       let order = veld(rij, kaart.order);
       if (!order && kaart.order && kaart.order.partner != null) order = String(rij[kaart.order.partner] || '').trim();
       if (!order && kaart.order) { const laatste = String(rij[kop.length] || rij[kop.length - 1] || '').trim(); if (/^[0-9a-f-]{8,}$/i.test(laatste)) order = laatste; }
+      if (order && !RE_ORDER.test(order)) throw new LeesFout('order-id heeft niet de vorm van DEGIRO', regel, 'order id');
       const basis = [datum, tijd, isin, canon(aantal.tekst), canon(koers.g.tekst), lokaal.cent, order].join('|');
       telling[basis] = (telling[basis] || 0) + 1;
       uit.push({ sleutel: 'tx:' + sha(basis + '#' + telling[basis]).slice(0, 32), datum, tijd, naam, isin, beurs: veld(rij, kaart.beurs) || null,
@@ -344,30 +354,48 @@ function leesBestand(tekst) {
       if (isin && !RE_ISIN.test(isin)) throw new LeesFout('geen geldige ISIN', regel, 'isin');
       const omschrijving = veld(rij, kaart.omschrijving);
       if (!omschrijving) throw new LeesFout('omschrijving ontbreekt', regel, 'omschrijving');
-      if (kaart.fx) leesGetal(veld(rij, kaart.fx), dec, regel, 'fx', true);
-      const mutatie = leesBedrag(rij, kaart.mutatie, dec, regel, 'mutatie', true);
-      const saldo = leesBedrag(rij, kaart.saldo, dec, regel, 'saldo', true);
+      const fx = kaart.fx ? leesGetal(veld(rij, kaart.fx), dec, regel, 'fx', true) : null;
+      const mutatie = leesBedrag(rij, kaart.mutatie, dec, regel, 'mutatie', true, null, 'vg');
+      const saldo = leesBedrag(rij, kaart.saldo, dec, regel, 'saldo', true, null, 'vg');
       if (!!mutatie !== !!saldo) throw new LeesFout(mutatie ? 'mutatie zonder saldo' : 'saldo zonder mutatie', regel, mutatie ? 'saldo' : 'mutatie');   // review achteraf MOET 4
       if (mutatie && saldo && mutatie.valuta !== saldo.valuta) throw new LeesFout('mutatie en saldo in verschillende valuta', regel, 'saldo');
       let order = veld(rij, kaart.order);
       if (!order && kaart.order && kaart.order.partner != null) order = String(rij[kaart.order.partner] || '').trim();
+      if (order && !RE_ORDER.test(order)) throw new LeesFout('order-id heeft niet de vorm van DEGIRO', regel, 'order id');
+      if (!order && /^valuta (creditering|debitering)$/i.test(omschrijving)) throw new LeesFout('valutawissel zonder order-id', regel, 'order id');   // review wv2985 ronde 2
+      if (!mutatie && /^valuta (creditering|debitering)$/i.test(omschrijving)) throw new LeesFout('valutawissel zonder mutatie', regel, 'mutatie');   // review wv2985 ronde 5
+      // wv2985: FX staat alleen bij de valutawissel aan de kant van de vreemde valuta (Valuta Creditering/Debitering in USD), vreemde valuta per euro
+      if (fx) {
+        if (!(fx.n > 0)) throw new LeesFout('FX moet groter dan nul zijn', regel, 'fx');
+        if (!mutatie || mutatie.valuta === 'EUR' || !/^valuta (creditering|debitering)$/i.test(omschrijving)) throw new LeesFout('FX hoort alleen bij een valutawissel in vreemde valuta', regel, 'fx');
+      } else if (mutatie && mutatie.valuta !== 'EUR' && /^valuta (creditering|debitering)$/i.test(omschrijving)) throw new LeesFout('FX ontbreekt bij een valutawissel in ' + mutatie.valuta, regel, 'fx');   // review wv2985 MOET 1
       const basis = [datum, tijd, isin, omschrijving, mutatie ? mutatie.valuta + mutatie.cent : '', saldo ? saldo.valuta + saldo.cent : '', order].join('|');
       telling[basis] = (telling[basis] || 0) + 1;
       const r = { sleutel: 'rk:' + sha(basis + '#' + telling[basis]).slice(0, 32), datum, tijd, valutadatum, naam: veld(rij, kaart.product) || null, isin: isin || null,
         omschrijving, mutatie_cent: mutatie ? mutatie.cent : null, mutatie_valuta: mutatie ? mutatie.valuta : null, saldo_cent: saldo ? saldo.cent : null,
         saldo_valuta: saldo ? saldo.valuta : null, order_id: order || null, regel };
+      if (fx) Object.defineProperty(r, '_fx', { value: fx, enumerable: false });
       uit.push(r);
       if (mutatie && saldo) (perValuta[saldo.valuta] = perValuta[saldo.valuta] || []).push(r);
     }
-    // MOET 1 (review vooraf): per valuta moet het saldo doorlopen, in één volgorde over het hele bestand (DEGIRO: nieuw → oud).
+    // MOET 1 (review vooraf): per valuta moet het saldo doorlopen. wv2985 (Davids export): altijd nieuw → oud, ook binnen één minuut; oud → nieuw = weigeren.
     for (const [val, rs] of Object.entries(perValuta)) {
-      if (rs.length < 2) continue;
-      let nieuwOud = true, oudNieuw = true, eerstFout = null;
       for (let i = 0; i + 1 < rs.length; i++) {
-        if (rs[i + 1].saldo_cent + rs[i].mutatie_cent !== rs[i].saldo_cent) { if (nieuwOud && !eerstFout) eerstFout = rs[i]; nieuwOud = false; }
-        if (rs[i].saldo_cent + rs[i + 1].mutatie_cent !== rs[i + 1].saldo_cent) oudNieuw = false;
+        if (rs[i + 1].saldo_cent + rs[i].mutatie_cent !== rs[i].saldo_cent) throw new LeesFout('het saldo in ' + val + ' loopt niet door van onder naar boven (DEGIRO zet de nieuwste regel bovenaan)', rs[i].regel, 'saldo');
       }
-      if (!nieuwOud && !oudNieuw) throw new LeesFout('het saldo in ' + val + ' loopt niet door (saldo + mutatie klopt niet met de volgende regel)', (eerstFout || rs[0]).regel, 'saldo');
+    }
+    // datum en tijd lopen van nieuw (boven) naar oud (onder)
+    for (let i = 0; i + 1 < uit.length; i++) if (uit[i].datum + uit[i].tijd < uit[i + 1].datum + uit[i + 1].tijd) throw new LeesFout('regels staan niet van nieuw naar oud', uit[i + 1].regel, 'datum');
+    // wv2985: bij een valutawissel met FX moet de euroregel van dezelfde order het bedrag / FX zijn (tegengesteld teken); staat die er niet in, dan niet te toetsen
+    const vreemd = {};   // review wv2985 ronde 3: één wissel in vreemde valuta per order (gemeten), anders telt de euroregel dubbel
+    for (const r of uit) if (r._fx != null) { if (vreemd[r.order_id]) throw new LeesFout('twee valutawissels in vreemde valuta bij één order', r.regel, 'mutatie'); vreemd[r.order_id] = true; }
+    for (const r of uit) {
+      if (r._fx == null || !r.order_id) continue;
+      const eur = uit.filter((x) => x.order_id === r.order_id && x.mutatie_valuta === 'EUR' && /^valuta (creditering|debitering)$/i.test(x.omschrijving));
+      if (eur.length > 1) throw new LeesFout('twee eurowissels bij één order', eur[1].regel, 'mutatie');
+      if (!eur.length) continue;
+      const e = eur[0], v = Math.abs(r.mutatie_cent) / 100 / r._fx.n, w = Math.abs(e.mutatie_cent) / 100;
+      if (Math.sign(e.mutatie_cent) === Math.sign(r.mutatie_cent) || Math.abs(v - w) > wisselTol(w, r._fx)) throw new LeesFout('valutawissel klopt niet: bedrag / FX is niet de euroregel van dezelfde order', r.regel, 'fx');
     }
   }
   return { soort, rijen: uit, decimaal: dec, scheiding: sep };
