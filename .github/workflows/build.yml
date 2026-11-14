@@ -494,6 +494,10 @@ jobs:
       - name: "beleggen (wv2982, OVIS Beleggen fase 1)"
         if: ${{ !cancelled() }}
         run: bash test/beleggen.sh
+      # wv3037: OVIS PMA fase 1 — ZIP-lezer (Promedico PMA, strikt), overlap per dag, pseudoniem nooit in een antwoord, routes; CI-poort geen netwerk.
+      - name: "pma (wv3037, OVIS PMA fase 1)"
+        if: ${{ !cancelled() }}
+        run: bash test/pma.sh
       # wv2993: OVIS Beleggen fase 2 — weekbericht: ophalen, ruisregels, weegronde en kaarten op opgenomen antwoorden (geen netwerk, geen model) + kruisproef per regel.
       - name: "beleggen-nieuws (wv2993, OVIS Beleggen weekbericht)"
         if: ${{ !cancelled() }}

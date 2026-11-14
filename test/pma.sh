@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Toetst OVIS PMA fase 1 (wv3037): CI-poort (pma.js laadt alleen fs, path, crypto, zlib en node:sqlite; geen netwerk, proces of log),
+# koppeling in server.js (één GET en precies vier POST-routes achter de app-poort, glijden, bodygrens van controleer, /health.pma, geen inhoud
+# in de log), uitrol.sh en APP_IDS, en de lezer + overlap + pseudoniem + routes in test/pma.test.js (verzonnen exports, test/pma-maak.js).
+set -u
+cd "$(dirname "$0")/.." || exit 1
+f=0
+C=$(grep -vE '^\s*(\*|//)' pma.js)
+if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|crypto|zlib|node:sqlite)'\)$"; then echo "ROOD  CI-poort: pma.js laadt een andere module"; f=1; fi
+if echo "$C" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new Function|child_process|https?:|\bnet\b|XMLHttpRequest|WebSocket"; then echo "ROOD  CI-poort: pma.js raakt netwerk, proces of log"; f=1; fi
+[ $f = 0 ] && echo "GROEN CI-poort: pma.js heeft geen netwerk, proces of log"
+grep -q "const pmaApp = (function () {" server.js || { echo "ROOD  server.js: pmaApp ontbreekt"; f=1; }
+P=$(grep -oE "POST \\\\/app\\\\/pma\\\\/\([a-z|]+\)" server.js)
+[ "$P" = 'POST \/app\/pma\/(controleer|inlees|intrek|code)' ] || { echo "ROOD  server.js: POST-routes van PMA zijn niet precies de vier ($P)"; f=1; }
+grep -qF "['controleer', 'inlees', 'intrek', 'code'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });" server.js || { echo "ROOD  server.js: PMA-routes verlengen de sessie niet"; f=1; }
+grep -qF "p === '/app/pma/controleer' ? APP_PMA_MAX_BODY" server.js || { echo "ROOD  server.js: bodygrens voor controleer ontbreekt"; f=1; }
+grep -qE "^\s+pma: typeof pmaInfo === 'function'" server.js || { echo "ROOD  server.js: /health.pma ontbreekt"; f=1; }
+grep -qE "^RELEASE_OPTIONEEL=\".* pma\.js" uitrol.sh || { echo "ROOD  uitrol.sh: pma.js niet in RELEASE_OPTIONEEL"; f=1; }
+grep -qE "'pma'(, '[a-z-]+')*\]" app-vast.js || { echo "ROOD  app-vast.js: pma niet in APP_IDS"; f=1; }
+B=$(awk '/── OVIS PMA \(wv3037/,/── einde OVIS PMA ──/' server.js)
+[ -n "$B" ] || { echo "ROOD  server.js: blok OVIS PMA niet gevonden"; f=1; }
+if echo "$B" | grep -nE "logError\([^)]*(e\.message|String\(e|d\.|u\.body)|schrijfLog"; then echo "ROOD  server.js: PMA logt inhoud"; f=1; fi
+if echo "$B" | grep -nE "finD1\(" | grep -viE "SELECT"; then echo "ROOD  server.js: PMA doet iets anders dan lezen op fin-datahub"; f=1; fi
+[ $f = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS"
+node --test test/pma.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma.test.js"; f=1; }
+exit $f
