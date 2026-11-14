@@ -16,6 +16,7 @@ Opslag: osint.sqlite (0600, map 0700): cache 30 dagen, logboek (zoekvraag + aanr
 naar buiten) 1 jaar. Niets wordt gepubliceerd; naar buiten gaat alleen de zoekterm (of een kaartvak/BAG-id) naar de gekozen bron.
 
 Gebruik: echo '<json>' | osint.py zoek      → JSON met kaartjes + logboek van deze vraag
+         echo '<json>' | osint.py vastgoed  → wv3085: feiten + kaartbeelden per eigen object (OVIS Vastgoed; schrijft niets in osint.sqlite)
          osint.py logboek [n]                → de laatste n zoekvragen met hun aanroepen
          osint.py info                       → aantallen (voor /health), zonder zoektermen
 Omgeving: OSINT_DB, PORT, API_SECRET (Facturen via /smal/facturen), SUPABASE_RPC_CONTACTEN, N8N_WEBHOOK_AGENDA_API (mail_zoeken),
@@ -1647,6 +1648,455 @@ def adres_deel3(ctx, ls, beelden):
     return uit
 
 
+# ---------------------------------------------------------------- vastgoed (wv3085): gedeelde lagen voor OVIS Vastgoed (en OSINT, wv3086)
+# Advies: vault "01_Ontwikkeling/Overheids-API's - wat kunnen we ermee (Fable 5.2, 14-11-2026)" § 3a/§ 4. Gemeten 14-11-2026 vanaf de pod op
+# het openbare voorbeeldadres (Kadaster, Apeldoorn; kantoorfunctie):
+#   Locatieserver op nummer   free?q=*:*&fq=type:adres&fq=adresseerbaarobject_id:<16 cijfers> → 1 doc (centroide, buurt, gekoppeld_perceel)
+#   3D-BAG                    api.3dbag.nl/collections/pand/items/NL.IMBAG.Pand.<id> → feature.CityObjects[..].attributes b3_* (hoogtes m NAP,
+#                             volume, dakvlakken; b3_pw_datum = jaar van de hoogtemeting). Licentie CC BY 4.0 (docs.3dbag.nl/en/copyright).
+#   Plangebied                PDOK ruimtelijke-plannen WMS, GetFeatureInfo laag bestemmingsplangebied (naam, typeplan, planstatus, datum,
+#                             identificatie, verwijzingnaartekst); enkelbestemming/bouwvlak/maatvoering gaven op het proefpunt niets. CC0.
+#   Funderingskaart (RVO)     PDOK rvo/indicatieve-aandachtsgebieden-funderingsproblematiek, laag indgebfunderingsproblematiek (legenda, fgr,
+#                             percvoor1970, nBag; per postcodegebied). CC0.
+#   BRO                       publiek.broservices.nl sr/cpt/v1 en gm/gmw/v1 …/characteristics/searches (POST, cirkel in km) → XML. Open data.
+#   CBS-prijsindex            opendata.cbs.nl 85773NED (bestaande koopwoningen, 2020=100, alleen heel Nederland; jaar = …JJ00).
+#   BRK op nummer             api.pdok.nl/kadaster/brk-kadastrale-kaart/ogc/v1 perceel?kadastrale_gemeente_waarde&sectie&perceelnummer (+ geometrie)
+#   BAG in een vak            api.pdok.nl/kadaster/bag/ogc/v2 verblijfsobject?bbox=lon,lat,lon,lat (WGS84)
+# Grens (opdracht wv3085): naar buiten gaan alleen nummers (BAG-id, pand-id, kadastrale aanduiding) en een kaartvak (bbox of een tot ± 100 m
+# afgeronde cirkel, postcodegebied voor de bekendmakingen); nooit straat + huisnummer. Deze laag bewaart niets (geen osint.sqlite):
+# de aanroeper (vastgoed.js) schrijft feiten, beelden en aanroepen in zijn eigen databank.
+VG_LS = 'https://api.pdok.nl/bzk/locatieserver/search/v3_1/free?'
+VG_RP_WMS = 'https://service.pdok.nl/kadaster/ruimtelijke-plannen/wms/v1_0'
+VG_FUND_WMS = 'https://service.pdok.nl/rvo/indicatieve-aandachtsgebieden-funderingsproblematiek/wms/v1_0'
+VG_BRO = {'cpt': 'https://publiek.broservices.nl/sr/cpt/v1/characteristics/searches', 'gmw': 'https://publiek.broservices.nl/gm/gmw/v1/characteristics/searches'}
+VG_LICENTIE = {'BAG': 'BAG (Kadaster): publiek domein', 'BRK': 'Kadastrale kaart © Kadaster, CC BY 4.0', '3DBAG': '3DBAG door 3D geoinformation (TU Delft) en 3DGI, CC BY 4.0',
+               'PDOK': 'PDOK, CC0', 'luchtfoto': 'Luchtfoto Beeldmateriaal Nederland via PDOK', 'AHN': 'AHN via PDOK, CC0', 'RP': 'Ruimtelijke plannen via PDOK, CC0',
+               'FUND': 'Funderingskaart RVO/KCAF via PDOK, CC0', 'BRO': 'Basisregistratie Ondergrond (TNO/BRO), open data', 'CBS': 'CBS open data, CC BY 4.0',
+               'LBM': 'Leefbaarometer (BZK), open data', 'BODEM': 'Bodemloket, open data', 'EP': 'EP-online (RVO)', 'SRU': 'Officiële bekendmakingen (overheid.nl)'}
+VG_ID = re.compile(r'^\d{16}$')
+VG_SLOT = __import__('threading').Lock()
+
+
+def wgs84_naar_rd(lon, lat):
+    """Benadering RD New (Schreutelkamp & Strang van Hees), nauwkeurig tot ± 1 m in Nederland; genoeg voor een kaartvak."""
+    dp, dl = 0.36 * (lat - 52.15517440), 0.36 * (lon - 5.38720621)
+    x = 155000 + 190094.945 * dl - 11832.228 * dp * dl - 114.221 * dp * dp * dl - 32.391 * dl ** 3 - 0.705 * dp - 2.340 * dp ** 3 * dl \
+        - 0.608 * dp * dl ** 3 - 0.008 * dl * dl + 0.148 * dp * dp * dl ** 3
+    y = 463000 + 309056.544 * dp + 3638.893 * dl * dl + 73.077 * dp * dp - 157.984 * dp * dl * dl + 59.788 * dp ** 3 + 0.433 * dl \
+        - 6.439 * dp * dp * dl * dl - 0.032 * dp * dl + 0.092 * dl ** 4 - 0.054 * dp * dl ** 4
+    return x, y
+
+
+def vg_feit(rubriek, veld, waarde, bron, licentie=None, peildatum=None, url=None, soort=None):
+    if waarde in (None, '', []):
+        return None
+    return {'rubriek': rubriek, 'veld': str(veld)[:120], 'waarde': str(waarde)[:400], 'bron': str(bron)[:120], 'licentie': licentie,
+            'peildatum': peildatum, 'url': url if isinstance(url, str) and re.match(r'^https://[\w.-]+(/[^\s"<>]*)?$', url) else None, 'soort': soort}
+
+
+def vg_uit_kaartje(k, rubriek, licentie, peildatum=None):
+    """Een OSINT-kaartje (velden of items) als feiten; dezelfde bronfunctie voor OSINT en Vastgoed, geen tweede kopie."""
+    if not isinstance(k, dict):
+        return []
+    uit = [vg_feit(rubriek, a, b, k.get('bron') or '', licentie, peildatum) for a, b in k.get('velden') or []]
+    uit += [vg_feit(rubriek, i.get('tekst'), i.get('sub') or '–', k.get('bron') or '', licentie, peildatum, i.get('url'), 'lijst')
+            for i in k.get('items') or [] if isinstance(i, dict)]
+    if not uit and k.get('klein'):
+        uit.append(vg_feit(rubriek, k.get('titel') or 'Bron', k['klein'], k.get('bron') or '', licentie, peildatum, soort='leeg'))
+    return [f for f in uit if f]
+
+
+def ls_op_nummer(ctx, vbo_id):
+    """Locatieserver op BAG-nummer (geen adres naar buiten): punt, buurt, gemeente, gekoppeld perceel."""
+    q = [('q', '*:*'), ('fq', 'type:adres'), ('fq', 'adresseerbaarobject_id:' + vbo_id), ('rows', 1),
+         ('fl', 'weergavenaam,postcode,centroide_rd,centroide_ll,buurtcode,buurtnaam,wijknaam,gemeentecode,gemeentenaam,waterschapsnaam,gekoppeld_perceel')]
+    r = jhaal(ctx, 'PDOK Locatieserver', VG_LS + up.urlencode(q), 'BAG-id ' + vbo_id, timeout=15)
+    docs = ((r or {}).get('response') or {}).get('docs') or [] if isinstance(r, dict) else []
+    return docs[0] if docs and isinstance(docs[0], dict) else None
+
+
+def drie_d_bag(ctx, pand_id):
+    r = jhaal(ctx, '3D-BAG', 'https://api.3dbag.nl/collections/pand/items/NL.IMBAG.Pand.' + pand_id, 'pand-id ' + pand_id, timeout=30)
+    co = ((r or {}).get('feature') or {}).get('CityObjects') or {} if isinstance(r, dict) else {}
+    a = (co.get('NL.IMBAG.Pand.' + pand_id) or {}).get('attributes') if isinstance(co, dict) else None
+    return a if isinstance(a, dict) else None
+
+
+def drie_d_feiten(a):
+    if not a:
+        return []
+    g = lambda k: a.get(k) if isinstance(a.get(k), (int, float)) and not isinstance(a.get(k), bool) else None
+    mv = g('b3_h_maaiveld')
+    bo = lambda k: ('%s m' % getal_nl(g(k) - mv, 1)) if g(k) is not None and mv is not None else None
+    dak = {'slanted': 'schuin', 'horizontal': 'plat', 'multiple horizontal': 'meerdere platte delen', 'only horizontal': 'plat'}.get(str(a.get('b3_dak_type') or ''), a.get('b3_dak_type'))
+    jaar = str(a.get('b3_pw_datum')) if a.get('b3_pw_datum') else None
+    m2 = lambda k: ('%s m²' % getal_nl(g(k), 0)) if g(k) is not None else None
+    v = [('Hoogste punt dak boven maaiveld', bo('b3_h_dak_max')), ('Nokhoogte boven maaiveld', bo('b3_h_nok')),
+         ('Laagste dakrand boven maaiveld', bo('b3_h_dak_min')), ('Dakhoogte (70 %) boven maaiveld', bo('b3_h_dak_70p')),
+         ('Maaiveld (3D-BAG)', ('%s m NAP' % getal_nl(mv, 2)) if mv is not None else None), ('Bouwlagen', g('b3_bouwlagen')), ('Daktype', dak),
+         ('Plat dak', m2('b3_opp_dak_plat')), ('Schuin dak', m2('b3_opp_dak_schuin')), ('Buitenmuur', m2('b3_opp_buitenmuur')),
+         ('Scheidingsmuur met de buren', m2('b3_opp_scheidingsmuur')), ('Grondvlak', m2('b3_opp_grond')),
+         ('Inhoud (model)', ('%s m³' % getal_nl(g('b3_volume_lod22'), 0)) if g('b3_volume_lod22') is not None else None),
+         ('Oorspronkelijk bouwjaar (3D-BAG)', a.get('oorspronkelijkbouwjaar'))]
+    return [f for f in (vg_feit('bouw', x, y, '3D-BAG (rekenmodel op BAG en AHN)', VG_LICENTIE['3DBAG'], jaar) for x, y in v) if f]
+
+
+def vg_info(ctx, url, laag, x, y, bron, r=5, n=20):
+    q = {'service': 'WMS', 'version': '1.3.0', 'request': 'GetFeatureInfo', 'layers': laag, 'query_layers': laag, 'styles': '', 'crs': 'EPSG:28992',
+         'bbox': '%.0f,%.0f,%.0f,%.0f' % (x - r, y - r, x + r, y + r), 'width': 11, 'height': 11, 'i': 5, 'j': 5, 'info_format': 'application/json',
+         'feature_count': n}
+    d = jhaal(ctx, bron, url + '?' + up.urlencode(q), 'kaartvak %d x %d m' % (2 * r, 2 * r), timeout=25)
+    return [f.get('properties') for f in (d or {}).get('features') or [] if isinstance(f, dict) and isinstance(f.get('properties'), dict)] if isinstance(d, dict) else []
+
+
+def plannen(ctx, x, y):
+    """Welke ruimtelijke plannen op dit punt gelden (zonder sleutel). Regels per perceel pas met de gratis sleutels (fase 3)."""
+    uit, gezien = [], set()
+    for p in sorted(vg_info(ctx, VG_RP_WMS, 'bestemmingsplangebied', x, y, 'Ruimtelijke plannen (PDOK)'), key=lambda p: str(p.get('datum') or ''), reverse=True):
+        if str(p.get('historisch') or '0') != '0' or p.get('identificatie') in gezien:
+            continue
+        gezien.add(p.get('identificatie'))
+        url = next((u for u in str(p.get('verwijzingnaartekst') or '').split(',') if '/r_' in u), None) or (str(p.get('verwijzingnaartekst') or '').split(',') or [None])[0]
+        sub = ' · '.join(z for z in (str(p.get('typeplan') or ''), str(p.get('planstatus') or ''), datum_nl(p.get('datum')) or '', str(p.get('naamoverheid') or '')) if z)
+        uit.append(vg_feit('regels', p.get('naam') or p.get('identificatie'), sub, 'Ruimtelijke plannen (PDOK)', VG_LICENTIE['RP'], str(p.get('datum') or '')[:10] or None,
+                           url.strip() if url else None, 'plan'))
+    for laag, label in (('enkelbestemming', 'Bestemming'), ('bouwvlak', 'Bouwvlak'), ('maatvoering', 'Maatvoering')):
+        for p in vg_info(ctx, VG_RP_WMS, laag, x, y, 'Ruimtelijke plannen (PDOK)', 2, 5):
+            w = ' · '.join(str(p.get(k)) for k in ('naam', 'bestemmingshoofdgroep', 'omschrijving', 'waarde', 'waardetype') if p.get(k))
+            uit.append(vg_feit('regels', label, w or 'ja', 'Ruimtelijke plannen (PDOK)', VG_LICENTIE['RP']))
+    return [f for f in uit if f]
+
+
+def fundering(ctx, x, y):
+    p = (vg_info(ctx, VG_FUND_WMS, 'indgebfunderingsproblematiek', x, y, 'Funderingskaart (RVO via PDOK)', 2, 3) or [None])[0]
+    if not p:
+        return [vg_feit('grond', 'Funderingskaart', 'Geen aandachtsgebied op dit punt.', 'Funderingskaart (RVO via PDOK)', VG_LICENTIE['FUND'], soort='leeg')]
+    v = [('Funderingskaart', p.get('legenda')), ('Bodem in het postcodegebied', p.get('fgr')),
+         ('Panden van vóór 1970 in het postcodegebied', ('%s %%' % p.get('percvoor1970')) if p.get('percvoor1970') not in (None, '') else None)]
+    return [f for f in (vg_feit('grond', a, b, 'Funderingskaart (RVO/KCAF via PDOK)', VG_LICENTIE['FUND'], url='https://www.kcaf.nl/') for a, b in v) if f]
+
+
+def _xml(t, tag):
+    m = re.search(r'<(?:\w+:)?%s\b[^>]*>([^<]*)<' % tag, t)
+    return m.group(1).strip() if m else None
+
+
+def bro_rond(ctx, lon, lat):
+    """Sonderingen (≤ 500 m) en grondwaterputten (≤ 1 km) uit de BRO; het middelpunt gaat afgerond op 3 decimalen (± 100 m) naar buiten."""
+    c = {'lat': round(lat, 3), 'lon': round(lon, 3)}
+    uit = []
+    for soort, km, naam in (('cpt', 0.5, 'Sondering'), ('gmw', 1.0, 'Grondwaterput')):
+        body = {'registrationPeriod': {'beginDate': '1990-01-01', 'endDate': datetime.date.today().isoformat()}, 'area': {'enclosingCircle': {'center': c, 'radius': km}}}
+        try:
+            t = haal(ctx, 'BRO ' + ('sonderingen' if soort == 'cpt' else 'grondwaterputten'), VG_BRO[soort], 'kaartvak: cirkel %s km rond een punt afgerond op ± 100 m' % getal_nl(km, 1),
+                     data=body, timeout=30, maxb=3_000_000)
+        except PoortDicht:
+            raise
+        except Exception:
+            uit.append(vg_feit('grond', {'Sondering': 'Sonderingen', 'Grondwaterput': 'Grondwaterputten'}[naam], 'De BRO gaf geen antwoord.', 'BRO', VG_LICENTIE['BRO'], soort='leeg'))
+            continue
+        docs = []
+        for d in re.findall(r'<dispatchDocument>(.*?)</dispatchDocument>', t or '', re.S):
+            pos = re.search(r'standardizedLocation[^>]*>\s*<gml:pos>([\d.]+) ([\d.]+)<', d)
+            if not pos:
+                continue
+            afst = afstand_m(lon, lat, float(pos.group(2)), float(pos.group(1)))
+            docs.append((afst, _xml(d, 'broId'), d))
+        docs.sort(key=lambda z: z[0])
+        uit.append(vg_feit('grond', {'Sondering': 'Sonderingen', 'Grondwaterput': 'Grondwaterputten'}[naam] + ' binnen %s' % ('500 m' if soort == 'cpt' else '1 km'), len(docs), 'BRO (publiek.broservices.nl)', VG_LICENTIE['BRO']))
+        for afst, bid, d in docs[:5]:
+            if soort == 'cpt':
+                dm = re.search(r'researchReportDate>\s*<(?:\w+:)?date>([^<]+)<', d)
+                w = ' · '.join(z for z in ('%d m verderop' % afst, ('diepte %s m' % getal_nl(float(_xml(d, 'finalDepth')), 1)) if _xml(d, 'finalDepth') else '',
+                                           ('onderzoek %s' % datum_nl(dm.group(1))) if dm else '') if z)
+            else:
+                mv, top, bodem_ = _xml(d, 'groundLevelPosition'), _xml(d, 'shallowestScreenTopPosition'), _xml(d, 'deepestScreenBottomPosition')
+                w = ' · '.join(z for z in ('%d m verderop' % afst, ('maaiveld %s m NAP' % getal_nl(float(mv), 2)) if mv else '',
+                                           ('filter %s tot %s m NAP' % (getal_nl(float(top), 1), getal_nl(float(bodem_), 1))) if top and bodem_ else '',
+                                           ('geplaatst %s' % datum_nl(_xml(d, 'date'))) if _xml(d, 'date') else '') if z)
+            uit.append(vg_feit('grond', '%s %s' % (naam, bid), w, 'BRO (publiek.broservices.nl)', VG_LICENTIE['BRO'],
+                               url='https://www.broloket.nl/ondergrondgegevens?bro-id=' + bid if bid and re.fullmatch(r'[A-Z]{3}\d{12}', bid) else None, soort='lijst'))
+    return [f for f in uit if f]
+
+
+def cbs_prijsindex(ctx):
+    """Prijsindex bestaande koopwoningen (heel Nederland, 2020=100): {'jaren': {'2024': 117.3, …}, 'laatste': ['2026-09', 130.1]}."""
+    r = jhaal(ctx, 'CBS prijsindex koopwoningen', 'https://opendata.cbs.nl/ODataApi/odata/85773NED/TypedDataSet?' + up.urlencode(
+        {'$select': 'Perioden,PrijsindexVerkoopprijzen_1'}), 'niets (hele tabel, landelijk)', timeout=25)
+    jaren, maand = {}, []
+    for x in ((r or {}).get('value') or []) if isinstance(r, dict) else []:
+        p, v = str((x or {}).get('Perioden') or ''), (x or {}).get('PrijsindexVerkoopprijzen_1')
+        if not isinstance(v, (int, float)):
+            continue
+        if re.fullmatch(r'\d{4}JJ00', p):
+            jaren[p[:4]] = float(v)
+        elif re.fullmatch(r'\d{4}MM\d{2}', p):
+            maand.append(('%s-%s' % (p[:4], p[6:]), float(v)))
+    maand.sort()
+    return {'jaren': jaren, 'maanden': dict(maand[-36:]), 'laatste': list(maand[-1]) if maand else None} if jaren else None
+
+
+def perceel_op_nummer(ctx, gemeente, sectie, nummer):
+    memo = ctx.__dict__.setdefault('vg_perceel', {})
+    k = (gemeente, sectie, nummer)
+    if k not in memo:
+        memo[k] = _perceel_op_nummer(ctx, gemeente, sectie, nummer)
+    return memo[k]
+
+
+def _perceel_op_nummer(ctx, gemeente, sectie, nummer):
+    q = {'f': 'json', 'limit': 2, 'kadastrale_gemeente_waarde': gemeente, 'sectie': sectie, 'perceelnummer': nummer}
+    r = jhaal(ctx, 'Kadastrale kaart (PDOK BRK)', 'https://api.pdok.nl/kadaster/brk-kadastrale-kaart/ogc/v1/collections/perceel/items?' + up.urlencode(q),
+              'kadastrale aanduiding %s %s %s' % (gemeente, sectie, nummer), timeout=20)
+    f = ((r or {}).get('features') or [None])[0] if isinstance(r, dict) else None
+    if not isinstance(f, dict):
+        return None
+    g = f.get('geometry') or {}
+    pts = []
+
+    def plat(c):
+        if isinstance(c, list) and len(c) == 2 and all(isinstance(z, (int, float)) for z in c):
+            pts.append(c)
+        elif isinstance(c, list):
+            for z in c:
+                plat(z)
+    plat(g.get('coordinates'))
+    p = dict(f.get('properties') or {})
+    if pts:
+        p['_bbox'] = [min(z[0] for z in pts), min(z[1] for z in pts), max(z[0] for z in pts), max(z[1] for z in pts)]
+    return p
+
+
+def bag_in_vak(ctx, bbox, max_n=1000):
+    """Verblijfsobjecten in een vak (WGS84 lon,lat,lon,lat); naar buiten gaat alleen het vak. → lijst, of None als een pagina mislukte, een
+    volgende pagina naar een andere host wijst of het vak meer dan max_n objecten heeft: dan is "geen treffer" niet te zeggen (review MOET 2)."""
+    uit, url = [], 'https://api.pdok.nl/kadaster/bag/ogc/v2/collections/verblijfsobject/items?' + up.urlencode({'f': 'json', 'limit': 500, 'bbox': '%.6f,%.6f,%.6f,%.6f' % tuple(bbox)})
+    for _ in range(max_n // 500 + 1):
+        code, t = haal(ctx, 'BAG (PDOK OGC)', url, 'kaartvak (perceel van het complex)', timeout=25, metcode=True)
+        try:
+            r = json.loads(t or 'null')
+        except ValueError:
+            return None
+        if code != '200' or not isinstance(r, dict) or not isinstance(r.get('features'), list):
+            return None
+        uit += [f.get('properties') or {} for f in r['features'] if isinstance(f, dict)]
+        nxt = next((l.get('href') for l in r.get('links') or [] if isinstance(l, dict) and l.get('rel') == 'next'), None)
+        if not nxt:
+            return uit
+        if len(uit) >= max_n or not str(nxt).startswith('https://api.pdok.nl/kadaster/bag/ogc/v2/'):
+            return None
+        url = nxt
+    return None
+
+
+def vg_beelden(ctx, x, y, plan=True, half=(60, 40)):
+    """Kaartbeelden rond een RD-punt: luchtfoto + perceel + pand, tijdmachine per jaar, hoogtekaart, plangebied. Alleen een kaartvak naar buiten."""
+    if not ctx.beelden:
+        return []
+    bbox = '%d,%d,%d,%d' % (x - half[0], y - half[1], x + half[0], y + half[1])
+    taken = {'foto': ('foto', None, None), 'perceel': ('perceel', None, None), 'pand': ('pand', None, None), 'ahn': ('ahn', None, None), 'kaart': ('top10nl', None, None)}
+    taken.update({'j' + j: ('foto', l, 'PDOK luchtfoto ' + j) for j, l in JAREN})
+    with cf.ThreadPoolExecutor(5) as ex:
+        fut = {k: ex.submit(wms, ctx, v[0], bbox, v[1], v[2]) for k, v in taken.items()}
+        img = {}
+        for k, f in fut.items():
+            try:
+                img[k] = f.result()
+            except PoortDicht:
+                img[k] = None
+    if plan:
+        try:
+            img['plan'] = vg_wms(ctx, VG_RP_WMS, 'bestemmingsplangebied,enkelbestemming,bouwvlak', bbox, 'Ruimtelijke plannen kaartbeeld (PDOK)')
+        except PoortDicht:
+            img['plan'] = None
+    b = []
+    if img.get('foto'):
+        b.append({'soort': 'luchtfoto', 'titel': 'Luchtfoto met perceelgrens en pand', 'src': img['foto'], 'over': [z for z in (img.get('perceel'), img.get('pand')) if z],
+                  'bron': VG_LICENTIE['luchtfoto'] + '; ' + VG_LICENTIE['BRK'] + '; ' + VG_LICENTIE['BAG']})
+    if img.get('kaart'):
+        b.append({'soort': 'kaart', 'titel': 'Kaart met perceelgrens', 'src': img['kaart'], 'over': [z for z in (img.get('perceel'),) if z], 'bron': 'TOP10NL (Kadaster), CC0; ' + VG_LICENTIE['BRK']})
+    for j, _ in JAREN:
+        if img.get('j' + j):
+            b.append({'soort': 'tijd', 'titel': j, 'jaar': j, 'src': img['j' + j], 'over': [], 'bron': VG_LICENTIE['luchtfoto']})
+    if img.get('ahn'):
+        b.append({'soort': 'hoogte', 'titel': 'Hoogtekaart (AHN): hoe warmer, hoe hoger', 'src': img['ahn'], 'over': [], 'bron': VG_LICENTIE['AHN']})
+    if img.get('plan') and img.get('foto'):
+        b.append({'soort': 'plan', 'titel': 'Plangebied en bestemming op de luchtfoto', 'src': img['foto'], 'over': [img['plan']], 'bron': VG_LICENTIE['RP']})
+    return b
+
+
+def vg_wms(ctx, url, lagen, bbox, bron):
+    q = {'service': 'WMS', 'version': '1.3.0', 'request': 'GetMap', 'layers': lagen, 'styles': '', 'crs': 'EPSG:28992', 'bbox': bbox,
+         'width': 480, 'height': 320, 'format': 'image/png', 'transparent': 'true'}
+    try:
+        x = haal(ctx, bron, url + '?' + up.urlencode(q), 'kaartvak rond het object', binair=True, timeout=30)
+    except PoortDicht:
+        raise
+    except Exception:
+        return None
+    if not x or x[:8] != b'\x89PNG\r\n\x1a\n':
+        return None
+    return 'data:image/png;base64,' + base64.b64encode(x).decode()
+
+
+VG_OK = {'ep': ('200', '404')}   # EP-online: 404 = geen label geregistreerd (een antwoord, geen fout)
+
+
+def vg_groep(ctx, groep, f):
+    """Eén bron als eigen groep (review MOET 3): eigen logboek, daarna bij het hoofdlogboek. → (feiten met 'groep', gelukt).
+    Gelukt = geen uitzondering en elke aanroep gaf een goed antwoord (200/204; EP-online ook 404), en er was een aanroep of een uitkomst."""
+    sub = Ctx(ctx.niveau, ctx.beelden, ctx.wie)
+    sub.vg_perceel = ctx.__dict__.setdefault('vg_perceel', {})   # perceel-geheugen delen (box-zoektocht en perceelfeiten)
+    try:
+        uit, fout = [x for x in (f(sub) or []) if x], False
+    except Exception:
+        uit, fout = [], True
+    with VG_SLOT:
+        ctx.log.extend(sub.log)
+    goed = VG_OK.get(groep, ('200', '204')) + (('nep',) if NEP else ())   # toets (OSINT_NEP_NET): het nepantwoord telt als 200
+    gelukt = not fout and all(l['status'] in goed for l in sub.log) and (bool(sub.log) or bool(uit))
+    for x in uit:
+        x['groep'] = groep
+    return uit, gelukt
+
+
+def vastgoed_object(ctx, o, beelden):
+    """Eén object van David: {id, vbo: [16 cijfers], pand: [16 cijfers]?, percelen: [{gemeente, sectie, nummer}], zoek: {huisnummer, toevoeging}?}.
+    → {id, feiten (elk met groep), groepen {groep: gelukt}, beelden, punt, gevonden}. Elke bron los: een fout kost alleen die bron, en de aanroeper
+    vervangt alleen de feiten van een gelukte groep (de rest blijft staan)."""
+    feiten, gevonden, groepen = [], {}, {}
+    vbos = [v for v in (o.get('vbo') or []) if isinstance(v, str) and VG_ID.match(v)][:3]
+    percelen = [p for p in (o.get('percelen') or []) if isinstance(p, dict) and re.fullmatch(r'[A-Za-z][\w -]{1,40}', str(p.get('gemeente') or ''))
+                and re.fullmatch(r'[A-Z]{1,2}', str(p.get('sectie') or '')) and re.fullmatch(r'\d{1,5}', str(p.get('nummer') or ''))][:4]
+
+    def veilig(f, *a):
+        try:
+            return f(*a)
+        except Exception:
+            return None
+
+    def groep(naam, f):
+        uit, ok = vg_groep(ctx, naam, f)
+        groepen[naam] = ok
+        feiten.extend(uit)
+        return ok
+    # BAG-nummer van een box zoeken in het vak van het perceel (alleen het vak naar buiten; huisnummer + toevoeging vergelijken we hier)
+    zoek = o.get('zoek') if isinstance(o.get('zoek'), dict) else None
+    if not vbos and percelen and zoek:
+        p0 = veilig(perceel_op_nummer, ctx, percelen[0]['gemeente'], percelen[0]['sectie'], percelen[0]['nummer'])
+        alle = veilig(bag_in_vak, ctx, p0['_bbox']) if p0 and p0.get('_bbox') else None
+        if alle is None:
+            gevonden = {'fout': True}   # niet te zeggen of de box een eigen nummer heeft (bron mislukt of vak te groot)
+        else:
+            hn, tv = str(zoek.get('huisnummer') or ''), str(zoek.get('toevoeging') or '').strip().upper()
+            raak = [v for v in alle if str(v.get('huisnummer') or '') == hn and str(v.get('toevoeging') or v.get('huisletter') or '').strip().upper() == tv]
+            gevonden = {'in_vak': len(alle), 'zelfde_huisnummer': sum(1 for v in alle if str(v.get('huisnummer') or '') == hn), 'raak': len(raak)}
+            if len(raak) == 1 and VG_ID.match(str(raak[0].get('identificatie') or '')):
+                vbos = [str(raak[0]['identificatie'])]
+                gevonden['vbo'] = vbos[0]
+    st = {'ls': None, 'vbo': {}}
+
+    def g_ls(c):
+        st['ls'] = ls_op_nummer(c, vbos[0])
+        ls = st['ls'] or {}
+        return [vg_feit('regels', a, b, 'PDOK Locatieserver', VG_LICENTIE['PDOK']) for a, b in (
+            ('Buurt', ls.get('buurtnaam')), ('Wijk', ls.get('wijknaam')), ('Gemeente', ls.get('gemeentenaam')), ('Waterschap', ls.get('waterschapsnaam')))]
+
+    def g_bag(c):
+        vbo = {}
+        for v in vbos:
+            r = bag(c, 'bag:verblijfsobject', 'identificatie', v) or []
+            if r:
+                vbo = vbo or r[0]
+                gevonden.setdefault('vbo_bag', []).append(v)
+        st['vbo'] = vbo
+        if not vbo:
+            return []
+        uit = [vg_feit('bouw', a, b, 'BAG via PDOK', VG_LICENTIE['BAG']) for a, b in (
+            ('Bouwjaar', vbo.get('bouwjaar')), ('Gebruiksoppervlakte (BAG)', ('%s m²' % vbo['oppervlakte']) if vbo.get('oppervlakte') else None),
+            ('Gebruiksdoel', vbo.get('gebruiksdoel')), ('Status', vbo.get('status')), ('Status pand', vbo.get('pandstatus')),
+            ('BAG-nummer verblijfsobject', vbo.get('identificatie')), ('BAG-nummer pand', vbo.get('pandidentificatie')))]
+        pand = bag(c, 'bag:verblijfsobject', 'pandidentificatie', vbo['pandidentificatie']) if vbo.get('pandidentificatie') else None
+        if pand:
+            uit.append(vg_feit('bouw', 'Adressen in het pand', len(pand), 'BAG via PDOK', VG_LICENTIE['BAG']))
+        return uit
+    if vbos:
+        groep('ls', g_ls)
+        groep('bag', g_bag)
+    ls, vbo = st['ls'], st['vbo']
+    pand_ids = [p for p in (o.get('pand') or []) if isinstance(p, str) and VG_ID.match(p)] or ([vbo['pandidentificatie']] if VG_ID.match(str(vbo.get('pandidentificatie') or '')) else [])
+    if pand_ids:
+        groep('3dbag', lambda c: drie_d_feiten(drie_d_bag(c, pand_ids[0])))
+    rd = [float(z) for z in re.findall(r'[\d.]+', (ls or {}).get('centroide_rd') or '')]
+    ll = [float(z) for z in re.findall(r'-?[\d.]+', (ls or {}).get('centroide_ll') or '')]
+    if len(rd) != 2 and percelen:   # geen BAG-nummer (box zonder eigen nummer): het midden van het perceel
+        p0 = veilig(perceel_op_nummer, ctx, percelen[0]['gemeente'], percelen[0]['sectie'], percelen[0]['nummer'])
+        if p0 and p0.get('_bbox'):
+            b = p0['_bbox']
+            ll = [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]
+            rd = list(wgs84_naar_rd(*ll))
+
+    def g_perceel(c):
+        uit = []
+        for p in percelen:
+            r = perceel_op_nummer(c, p['gemeente'], p['sectie'], p['nummer'])
+            if not r:
+                raise ValueError('perceel')
+            aand = '%s %s %s' % (p['gemeente'], p['sectie'], p['nummer'])
+            uit += [vg_feit('grond', a, b, 'Kadastrale kaart (PDOK BRK)', VG_LICENTIE['BRK'], datum_nl(r.get('begin_geldigheid'))) for a, b in (
+                ('Perceel ' + aand + ': grootte', ('%s m²' % r.get('kadastrale_grootte_waarde')) if r.get('kadastrale_grootte_waarde') else None),
+                ('Perceel ' + aand + ': soort grootte', r.get('soort_grootte_waarde')))]
+        return uit
+    if percelen:
+        groep('perceel', g_perceel)
+    taken = []
+    if len(rd) == 2:
+        x, y = rd
+        taken += [('ahn', lambda c: vg_uit_kaartje(ahn(c, x, y), 'grond', VG_LICENTIE['AHN'])), ('bodem', lambda c: vg_uit_kaartje(bodem(c, x, y), 'grond', VG_LICENTIE['BODEM'])),
+                  ('fundering', lambda c: fundering(c, x, y)), ('plannen', lambda c: plannen(c, x, y))]
+    if len(ll) == 2:
+        taken.append(('bro', lambda c: bro_rond(c, ll[0], ll[1])))
+    bu = str((ls or {}).get('buurtcode') or '').strip().upper()
+    gm = ('GM' + str(ls.get('gemeentecode'))) if ls and re.fullmatch(r'\d{4}', str(ls.get('gemeentecode') or '')) else None
+    if re.fullmatch(r'BU\d{8}', bu):
+        taken += [('cbs', lambda c: vg_uit_kaartje(cbs(c, bu, gm), 'regels', VG_LICENTIE['CBS'])),
+                  ('lbm', lambda c: vg_uit_kaartje(leefbaarometer(c, bu), 'regels', VG_LICENTIE['LBM']))]
+    pc = re.sub(r'\s', '', str((ls or {}).get('postcode') or '')).upper()
+    if re.fullmatch(r'\d{4}[A-Z]{2}', pc):
+        taken.append(('sru', lambda c: vg_uit_kaartje(bekendmakingen(c, pc, 'Bekendmakingen in het postcodegebied', 'postcodegebied (kaartvak, geen huisnummer)'), 'regels', VG_LICENTIE['SRU'])))
+    if vbos and sleutel_er('ep_online'):
+        taken.append(('ep', lambda c: vg_uit_kaartje(ep_online(c, vbos[0]), 'bouw', VG_LICENTIE['EP'])))
+    with cf.ThreadPoolExecutor(5) as ex:
+        fut = [(naam, ex.submit(vg_groep, ctx, naam, f)) for naam, f in taken]
+        for naam, f in fut:
+            uit, ok = f.result()
+            groepen[naam] = ok
+            feiten.extend(uit)
+    b = veilig(vg_beelden, ctx, rd[0], rd[1]) if len(rd) == 2 and beelden else []
+    return {'id': o.get('id'), 'feiten': [f for f in feiten if f], 'groepen': groepen, 'beelden': b or [], 'gevonden': gevonden,
+            'punt': {'rd': [round(z, 1) for z in rd], 'll': [round(z, 6) for z in ll]} if len(rd) == 2 else None}
+
+
+def vastgoed(v):
+    """OVIS Vastgoed (wv3085): Davids eigen objecten, alleen op nummers; geen opslag hier, de aanroeper bewaart. wie = david (App)."""
+    SLEUTELS.clear()
+    sl = v.pop('sleutels', None)
+    if isinstance(sl, dict):
+        SLEUTELS.update({k: sl[k] for k in SLEUTEL_ENV if isinstance(sl.get(k), str)})
+    ctx = Ctx('alles', v.get('beelden') is not False, 'david')
+    objecten = [o for o in (v.get('objecten') or []) if isinstance(o, dict)][:5]
+    uit = [vastgoed_object(ctx, o, v.get('beelden') is not False) for o in objecten]
+    index = None
+    if v.get('index') is not False:
+        try:
+            index = cbs_prijsindex(ctx)
+        except PoortDicht:
+            index = None
+        except Exception:
+            index = None
+    return {'ok': True, 'versie': VERSIE, 'objecten': uit, 'prijsindex': index, 'licentie_index': VG_LICENTIE['CBS'], 'aanroepen': ctx.log}
+
+
 # ---------------------------------------------------------------- kenteken (wv2698; RDW open data, geen eigenaar)
 KENTEKEN_RE = re.compile(r'^(?=(?:[A-Z0-9]-?){6}$)(?=.*[A-Z])(?=.*\d)[A-Z0-9]{1,3}-?[A-Z0-9]{1,4}-?[A-Z0-9]{1,3}$')
 RDW = 'https://opendata.rdw.nl/resource/'
@@ -2861,8 +3311,8 @@ def info():
 
 
 def main(a):
-    if not a or a[0] not in ('zoek', 'logboek', 'info', 'instelling', 'grafiek', 'lijkend'):
-        sys.exit('gebruik: osint.py zoek (json op stdin) | logboek [n] | info | instelling (json op stdin: {} = lezen, {zet: {...}}) | grafiek [n] | lijkend')
+    if not a or a[0] not in ('zoek', 'logboek', 'info', 'instelling', 'grafiek', 'lijkend', 'vastgoed'):
+        sys.exit('gebruik: osint.py zoek (json op stdin) | logboek [n] | info | instelling (json op stdin: {} = lezen, {zet: {...}}) | grafiek [n] | lijkend | vastgoed (json op stdin)')
     if a[0] == 'zoek':
         try:
             v = json.loads(sys.stdin.read() or '{}')
@@ -2877,6 +3327,12 @@ def main(a):
         except ValueError:
             v = {}
         r = zet_instellingen(v['zet']) if isinstance(v, dict) and isinstance(v.get('zet'), dict) else {'ok': True, 'instellingen': instellingen()}
+    elif a[0] == 'vastgoed':   # wv3085: OVIS Vastgoed (Davids eigen objecten, alleen nummers en een kaartvak naar buiten; niets in osint.sqlite)
+        try:
+            v = json.loads(sys.stdin.read() or '{}')
+        except ValueError:
+            v = None
+        r = vastgoed(v) if isinstance(v, dict) else {'ok': False, 'fout': 'geen json'}
     elif a[0] == 'grafiek':
         r = grafiek(a[1] if len(a) > 1 and a[1].isdigit() else 40)
     elif a[0] == 'lijkend':

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# wv3085: OVIS Vastgoed fase 1 — CI-poort (vastgoed.js laadt alleen fs, path en node:sqlite; geen netwerk, proces of log), koppeling in
+# server.js (één GET en precies vier POST-routes achter de app-poort, glijden, /health.vastgoed, ververs alleen primair, geen inhoud in de log),
+# uitrol.sh en APP_IDS, de module (test/vastgoed.test.js, verzonnen dossier uit test/vastgoed-maak.js) en de gedeelde bronnenlaag
+# (test/vastgoed-laag.py: osint.py vastgoed zonder netwerk, lek- en afrondeisen).
+# Kruisproef: KRUIS=1 bash test/vastgoed.sh — elf kopieën met één fout erin (in de werkboom, zie mk-geheugen osint-kruisproef-in-werkboom);
+# elke kopie moet rood geven.
+set -u
+cd "$(dirname "$0")/.." || exit 1
+f=0
+VJS="${VASTGOED_JS:-$PWD/vastgoed.js}"; OPY="${OSINT_PY:-$PWD/osint.py}"
+C=$(grep -vE '^\s*(\*|//)' "$VJS")
+if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|node:sqlite)'\)$"; then echo "ROOD  CI-poort: vastgoed.js laadt een andere module"; f=1; fi
+if echo "$C" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new Function|child_process|https?://[a-z]|\bnet\b|XMLHttpRequest|WebSocket"; then echo "ROOD  CI-poort: vastgoed.js raakt netwerk, proces of log"; f=1; fi
+[ $f = 0 ] && echo "GROEN CI-poort: vastgoed.js heeft geen netwerk, proces of log"
+g=0
+grep -q "const vastgoedApp = (function () {" server.js || { echo "ROOD  server.js: vastgoedApp ontbreekt"; g=1; }
+P=$(grep -oE "POST \\\\/app\\\\/vastgoed\\\\/\([a-z|]+\)" server.js)
+[ "$P" = 'POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen)' ] || { echo "ROOD  server.js: POST-routes van Vastgoed zijn niet precies de vier ($P)"; g=1; }
+grep -qF "['dossier', 'ververs', 'beelden', 'aanroepen'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });" server.js || { echo "ROOD  server.js: Vastgoed-routes verlengen de sessie niet"; g=1; }
+grep -qE "^\s+vastgoed: typeof vastgoedInfo === 'function'" server.js || { echo "ROOD  server.js: /health.vastgoed ontbreekt"; g=1; }
+grep -qE "^RELEASE_OPTIONEEL=\".* vastgoed\.js" uitrol.sh || { echo "ROOD  uitrol.sh: vastgoed.js niet in RELEASE_OPTIONEEL"; g=1; }
+grep -qE "'vastgoed'(, '[a-z-]+')*\]" app-vast.js || { echo "ROOD  app-vast.js: vastgoed niet in APP_IDS"; g=1; }
+B=$(awk '/── OVIS Vastgoed \(wv3085/,/── einde OVIS Vastgoed ──/' server.js)
+[ -n "$B" ] || { echo "ROOD  server.js: blok OVIS Vastgoed niet gevonden"; g=1; }
+echo "$B" | grep -qF "if (!rolPrimair()) return appWeiger(res, 409" || { echo "ROOD  server.js: ververs niet beperkt tot de hoofdpod"; g=1; }
+echo "$B" | grep -qF "return osintRun(['vastgoed'], invoer);" || { echo "ROOD  server.js: Vastgoed gebruikt niet de gedeelde bronnenlaag (osint.py vastgoed)"; g=1; }
+if echo "$B" | grep -nE "logError\([^)]*(e\.message|String\(e|d\.|u\.body|invoer)|schrijfLog|fetch\("; then echo "ROOD  server.js: Vastgoed logt inhoud of gaat zelf naar buiten"; g=1; fi
+grep -qE "a\[0\] == 'vastgoed'" "$OPY" || { echo "ROOD  osint.py: opdracht vastgoed ontbreekt"; g=1; }
+[ $g = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS, osint.py"
+[ $g = 0 ] || f=1
+VASTGOED_JS="$VJS" node --test test/vastgoed.test.js 2>&1 | grep -E "^# (pass|fail)"; VASTGOED_JS="$VJS" node --test test/vastgoed.test.js >/dev/null 2>&1 || { echo "ROOD  test/vastgoed.test.js"; f=1; }
+T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+python3 -I test/vastgoed-laag.py "$OPY" "$T" | tail -1; python3 -I test/vastgoed-laag.py "$OPY" "$T" >/dev/null 2>&1 || { echo "ROOD  test/vastgoed-laag.py"; f=1; }
+
+if [ "${KRUIS:-0}" = 1 ]; then
+  echo "— kruisproef (elke kopie moet ROOD zijn)"
+  k=0
+  kruis() {   # $1 = bestand, $2 = python-vervanging (oud, nieuw), $3 = wat
+    local kopie="$PWD/vastgoed-kruis-tmp.${1##*.}"
+    python3 -c "import sys; s=open(sys.argv[1]).read(); a,b=sys.argv[2],sys.argv[3]; assert a in s, 'niet gevonden: '+a; open(sys.argv[4],'w').write(s.replace(a,b,1))" "$1" "$2" "$3" "$kopie" || { echo "FOUT  kruisproef: vervanging niet gevonden ($4)"; k=1; return; }
+    if [ "${1##*.}" = js ]; then VASTGOED_JS="$kopie" node --test test/vastgoed.test.js >/dev/null 2>&1 && { echo "FOUT  kruisproef groen: $4"; k=1; } || echo "rood  $4"
+    else python3 -I test/vastgoed-laag.py "$kopie" "$T" >/dev/null 2>&1 && { echo "FOUT  kruisproef groen: $4"; k=1; } || echo "rood  $4"; fi
+    rm -f "$kopie"
+  }
+  kruis vastgoed.js "const invoer = { id: obj.id, vbo, pand: JSON.parse(obj.pand || '[]'), percelen };" "const invoer = { id: obj.id, vbo, pand: JSON.parse(obj.pand || '[]'), percelen, adres: obj.adres };" "adres mee naar de bronnenlaag"
+  kruis vastgoed.js "gt > vandaag && gt.slice(0, 4) > String(jaar + 1)" "gt" "verlopen energielabel telt als geldig"
+  kruis vastgoed.js "return { status: 200, body: u, reden: 'vastgoed overzicht' };" "return { status: 200, body: u, reden: 'vastgoed overzicht ' + ((u.objecten || [])[0] || {}).adres };" "adres in de reden (api.log)"
+  kruis osint.py "c = {'lat': round(lat, 3), 'lon': round(lon, 3)}" "c = {'lat': lat, 'lon': lon}" "BRO-middelpunt niet afgerond"
+  kruis osint.py "lambda c: vg_uit_kaartje(bekendmakingen(c, pc," "lambda c: vg_uit_kaartje(bekendmakingen(c, ls.get('weergavenaam') or pc," "bekendmakingen op het adres"
+  kruis osint.py "if len(uit) >= max_n or not str(nxt).startswith('https://api.pdok.nl/kadaster/bag/ogc/v2/'):" "if len(uit) >= max_n:" "volgende-link naar een andere host gevolgd"
+  kruis osint.py "alle = veilig(bag_in_vak, ctx, p0['_bbox']) if p0 and p0.get('_bbox') else None" "alle = (veilig(bag_in_vak, ctx, p0['_bbox']) if p0 and p0.get('_bbox') else None) or []" "mislukte BAG-zoektocht telt als 'geen nummer' (review MOET 2)"
+  kruis osint.py "gelukt = not fout and all(l['status'] in goed for l in sub.log)" "gelukt = not fout" "uitgevallen bron telt als gelukt (review MOET 3)"
+  kruis vastgoed.js "const tax = reeksen.filter((r) => r.reeks === 'taxatie')" "const tax = reeksen.filter((r) => r.reeks === 'taxatie' || r.reeks === 'taxatie-na')" "indicatie op de waarde na verbouwing (review MOET 1)"
+  kruis vastgoed.js "const gelukt = GROEPEN.filter((g) => groepen[g] === true);" "const gelukt = GROEPEN.filter((g) => groepen[g] !== undefined);" "feiten van een mislukte bron weggegooid (review MOET 3)"
+  kruis vastgoed.js "if (bezig.has(id)) throw new Fout(429, 'wordt al bijgewerkt');" "" "twee verversingen tegelijk (review ZOU 1)"
+  [ $k = 0 ] && echo "GROEN kruisproef: alle elf rood" || f=1
+fi
+exit $f
