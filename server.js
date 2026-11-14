@@ -11842,12 +11842,12 @@ const APP_FIN_LABEL = {
 // Per entiteit wat er getoond wordt; `van` laat jaren weg die niet vergelijkbaar zijn (skill fin-datahub § 3, bekende eigenaardigheden).
 const APP_NOOT_GROEI = 'De groei van de personeelskosten bevat ook meer of minder personeel; de NZa-indexatie is alleen de prijs (loon). Een groter verschil zegt dus niet vanzelf dat personeel duurder werd.';   // Fable-review wv174 M3
 const APP_PRAKTIJKEN = [
-  { code: 'TG', naam: 'Tolgaarde', voluit: 'Huisartsenpraktijk Tolgaarde B.V.', praktijk: true,
+  { code: 'TG', naam: 'Tolgaarde', voluit: 'Huisartsenpraktijk Tolgaarde B.V.', praktijk: true, gemeente: 'GM0327',
     kern: ['omzet_totaal', 'resultaat', 'personeel', 'uitbesteed', 'k_huisv', 'liquide', 'ev_totaal'],
     lijnen: [{ titel: 'Omzet en resultaat', r: ['omzet_totaal', 'resultaat'] }, { titel: 'Personeel en waarneming', r: ['personeel', 'uitbesteed'] }],
     noten: ['Personeelskosten: t/m 2021 staat alleen het totaal in de jaarrekening; vanaf 2022 opgeteld uit lonen, sociale lasten, pensioen en overige personeelskosten.',
       'De jaarrekening 2021 is met OCR ingelezen.', APP_NOOT_GROEI] },
-  { code: 'GH', naam: 'Groenhouten', voluit: 'Huisartsenpraktijk Groenhouten (maatschap)', praktijk: true,
+  { code: 'GH', naam: 'Groenhouten', voluit: 'Huisartsenpraktijk Groenhouten (maatschap)', praktijk: true, gemeente: 'GM0327',
     kern: ['omzet_totaal', 'resultaat', 'personeel', 'uitbesteed', 'k_huisv', 'liquide', 'ev_totaal'],
     lijnen: [{ titel: 'Omzet en resultaat', r: ['omzet_totaal', 'resultaat'] }, { titel: 'Personeel en waarneming', r: ['personeel', 'uitbesteed'] }],
     van: 2024,   // wv3041: de hub heeft ook de voorganger HAP Leusden (2017-2020, andere eigenaren); niet in deze reeks
@@ -12028,8 +12028,75 @@ function appPohggzSector(reeksen, zd, bronnen) {
     bron: appKort('index berekend uit ' + appBronReeks(ids, bronnen) + '; ' + appZdBron(cellen), 200) }] };
 }
 
+// ── dichtbij (wv3081): de gemeente van de praktijk naast haar regio en Nederland ──
+// David 14-11-2026 22:16: "CijferMeester moet niet Leusden-specifiek zijn, maar dat soort detailniveau voor elke gemeente kunnen leveren.
+// Wel kan dergelijk Leusden-specifieke toesplitsing handig zijn bij OVIS PMA, waar CijferMeester dan misschien weer de data kan
+// aanleveren." De Cijfer-Meester levert per willekeurige gemeente via RPC zd_gemeente (zorgdata: gemeentesleutel CBS + Vektis,
+// regio = CBS-indeling, BEREKEND uit de gemeenten, niet opgeslagen); hier alleen de vaste vraag voor de gemeente van de praktijk
+// (`gemeente` in APP_PRAKTIJKEN). Geen taalmodel, geen invoer van de app, openbare sectorcijfers. Lukt het niet: geen blok, één regel.
+const APP_DICHTBIJ_INDELING = 'jeugdregio';   // CBS: voor Leusden 'Eemland' (Amersfoort, Baarn, Bunschoten, Eemnes, Leusden, Soest, Woudenberg)
+const APP_DICHTBIJ_TEGELS = ['kosten_hz_pv', 'aandeel_65plus', 'aandeel_80plus', 'afstand_huisarts_km', 'afstand_hap_km'];
+const APP_DICHTBIJ_STAND = ['bron heeft nieuwer', 'niet recent gekeken', 'bron gestopt', 'niet te meten', 'bij'];   // slechtste eerst
+function appDichtbijRond(v, d) { return typeof v === 'number' && isFinite(v) ? Math.round(v * Math.pow(10, d)) / Math.pow(10, d) : null; }
+// Eén tegel per reeks: het laatste jaar met een gemeentecijfer, met regio en Nederland uit hetzelfde jaar.
+function appDichtbijTegel(r, regioNaam, nLeden) {
+  const jaren = (Array.isArray(r.jaren) ? r.jaren : []).filter(function (j) { return j && typeof j.gemeente === 'number' && isFinite(j.gemeente); });
+  if (!jaren.length) return null;
+  const j = jaren[jaren.length - 1], d = Number(r.decimalen) || 0;
+  const vers = Array.isArray(r.versheid) ? r.versheid : [];
+  const stand = APP_DICHTBIJ_STAND.find(function (s) { return vers.some(function (v) { return v && v.stand === s; }); }) || 'niet te meten';
+  const ververst = vers.map(function (v) { return v && String(v.ververst_op || '').slice(0, 10); }).filter(function (x) { return /^\d{4}-\d{2}-\d{2}$/.test(x); }).sort().pop() || null;
+  const bronnen = (Array.isArray(r.bronnen) ? r.bronnen : []).map(function (b) { return appKort(b, 120); });
+  const vektis = bronnen.some(function (b) { return /vektis/i.test(b); });
+  return { code: r.code, label: appKort(r.naam, 80), eenheid: appKort(r.eenheid, 40), decimalen: d, jaar: j.jaar, voorlopig: !!j.voorlopig,
+    gemeente: appDichtbijRond(j.gemeente, d), regio: appDichtbijRond(j.regio, d), nl: appDichtbijRond(j.nl, d),
+    regio_n: typeof j.regio_n === 'number' ? j.regio_n : null, regio_leden: nLeden,
+    bron: (vektis ? 'bron: Vektis — ' : '') + (bronnen.join('; ') || 'Cijfer-Meester') + (typeof j.regio === 'number' ? '; ' + regioNaam + ' berekend uit de ' + nLeden + ' gemeenten' : ''),
+    ververst: ververst, stand: stand, kanttekening: r.kanttekening ? appKort(r.kanttekening, 400) : null };
+}
+// Lijn over de jaren voor de kosten per verzekerde (gemeente, regio, Nederland), vanaf 2015.
+function appDichtbijLijn(r, gem, regioNaam) {
+  const jaren = (Array.isArray(r && r.jaren) ? r.jaren : []).filter(function (j) { return j && j.jaar >= 2015 && typeof j.gemeente === 'number'; });
+  if (jaren.length < 2 || jaren.length > 60) return null;
+  const rond = function (v) { return appDichtbijRond(v, Number(r.decimalen) || 0); };
+  return { soort: 'lijn', titel: appKort(r.naam, 80) + ' — ' + gem + ', ' + regioNaam + ' en Nederland', eenheid: '€', x: jaren.map(function (j) { return String(j.jaar); }),
+    reeksen: [{ naam: gem, waarden: jaren.map(function (j) { return rond(j.gemeente); }) }, { naam: regioNaam, waarden: jaren.map(function (j) { return rond(j.regio); }) },
+      { naam: 'Nederland', waarden: jaren.map(function (j) { return rond(j.nl); }) }],
+    bron: 'Vektis — ' + ((r.bronnen || []).map(function (b) { return appKort(b, 120); }).join('; ') || 'Vektis open data') + '; ' + regioNaam + ' berekend (gewogen naar verzekerdejaren)' };
+}
+function appDichtbijBlok(p, praktijken) {
+  if (!p || p.ok !== true || !p.gemeente || !p.regio || !Array.isArray(p.reeksen)) return null;
+  const gem = appKort(p.gemeente.naam, 60), regioNaam = appKort(p.regio.naam, 60);
+  const leden = Array.isArray(p.regio.gemeenten) ? p.regio.gemeenten.map(function (g) { return appKort(g, 60); }) : [];
+  const per = {};
+  p.reeksen.forEach(function (r) { if (r && r.code) per[r.code] = r; });
+  const tegels = APP_DICHTBIJ_TEGELS.map(function (c) { return per[c] ? appDichtbijTegel(per[c], regioNaam, leden.length) : null; }).filter(Boolean);
+  if (!tegels.length) return null;
+  const inw = per.inwoners ? appDichtbijTegel(per.inwoners, regioNaam, leden.length) : null;
+  const lijn = appDichtbijLijn(per.kosten_hz_pv, gem, regioNaam);
+  return { gemeente: { code: appKort(p.gemeente.code, 10), naam: gem, inwoners: inw ? inw.gemeente : null },
+    regio: { naam: regioNaam, indeling: 'CBS-regio-indeling ' + appKort(p.regio.indeling, 30) + ', ' + leden.length + ' gemeenten', gemeenten: leden, inwoners: inw ? inw.regio : null },
+    nl: { inwoners: inw ? inw.nl : null }, peiljaar_inwoners: inw ? inw.jaar : null, praktijken: praktijken, tegels: tegels, grafieken: lijn ? [lijn] : [],
+    vraag: 'Vergelijk de huisartsenzorgkosten in ' + gem + ' met ' + regioNaam + ' en Nederland sinds 2015' };
+}
+async function appDichtbij() {
+  const per = {};
+  APP_PRAKTIJKEN.forEach(function (d) { if (d.gemeente) (per[d.gemeente] = per[d.gemeente] || []).push(d.code); });
+  const uit = [];
+  let fout = false;
+  await Promise.all(Object.keys(per).map(function (gm) {
+    return appSbRpc('zd_gemeente', { p_gemeente: gm, p_indeling: APP_DICHTBIJ_INDELING, p_van: 2015 }, 10000).then(function (p) {
+      const b = appDichtbijBlok(p, per[gm]);
+      if (b) uit.push(b); else fout = true;
+    }, function (e) { logError('app-praktijken', e); fout = true; });
+  }));
+  return { blokken: uit, fout: fout };
+}
+// ── einde dichtbij ──
+
 async function appPraktijkenVerzamel() {
   let zdFout = false;
+  const dichtbijBezig = appDichtbij();   // vangt zelf zijn fouten (wordt nooit afgewezen); loopt naast de datahub
   const codes = APP_PRAKTIJKEN.map(function (d) { return "'" + d.code + "'"; }).join(',');
   const rubr = APP_FIN_RUBRIEKEN.map(function (k) { return "'" + k + "'"; }).join(',');
   const f = {};
@@ -12053,7 +12120,9 @@ async function appPraktijkenVerzamel() {
     return appSbRpc('zd_reeks', { p_code: c, p_norm: 'abs', p_van: 2015, p_tot: 2035 }).then(function (r) { zd[c] = appZdMap(r); },
       function (e) { logError('app-praktijken', e); zd[c] = null; zdFout = true; });
   }));
+  const dichtbij = await dichtbijBezig;
   const fouten = zdFout ? ['de sectorcijfers van de Cijfer-Meester zijn nu niet te lezen; alleen de eigen cijfers'] : [];
+  if (dichtbij.fout) fouten.push('de vergelijking met gemeente, regio en Nederland is nu niet te lezen');
   const entiteiten = APP_PRAKTIJKEN.map(function (def) {
     const reeksen = appFinReeksen(f.reeks, def);
     const kern = def.kern.map(function (k) { return appKernCijfer(APP_FIN_LABEL[k], reeksen[k], f.bronnen); }).filter(Boolean);
@@ -12070,7 +12139,7 @@ async function appPraktijkenVerzamel() {
     return { code: def.code, naam: def.naam, voluit: def.voluit, jaren: jaren.length ? [Math.min.apply(null, jaren), Math.max.apply(null, jaren)] : null,
       kern: kern, grafieken: grafieken, sector: sector, noten: def.noten || [] };
   });
-  return { entiteiten: entiteiten, fouten: fouten, op: Date.now() };
+  return { entiteiten: entiteiten, dichtbij: dichtbij.blokken, fouten: fouten, op: Date.now() };
 }
 // 30 min bewaard; met een fout (zorgdata weg) hooguit 2 min, zodat Ververs echt opnieuw leest. Mislukt een vernieuwing terwijl er
 // oudere cijfers zijn, dan die cijfers met een regel erbij in plaats van een 503 (Fable-review wv174 M4).
@@ -12093,7 +12162,7 @@ async function appPraktijkenRoute(req, res, a) {
   // David 8-10-2026 (app): "De tab Praktijken mag op alle apparaten zichtbaar en gevuld zijn" — ook op een vaste plek.
   let d;
   try { d = await appPraktijken(); } catch (e) { logError('app-praktijken', e); return appWeiger(res, 503, 'de cijfers zijn nu niet te lezen', 'praktijken fout'); }
-  appStuur(res, 200, { ok: true, vaste_plek: false, entiteiten: d.entiteiten, fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
+  appStuur(res, 200, { ok: true, vaste_plek: false, entiteiten: d.entiteiten, dichtbij: d.dichtbij || [], fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
 }
 
 // ── App Financiën (wv771; bouwplan idee 16 § 11): privégeld, alleen lezen ──
