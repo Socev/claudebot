@@ -498,6 +498,10 @@ jobs:
       - name: "pma (wv3037, OVIS PMA fase 1)"
         if: ${{ !cancelled() }}
         run: bash test/pma.sh
+      # wv3085: OVIS Vastgoed fase 1 — dossierlezer, dossierstand, waarde-indicatie en routes op een verzonnen dossier; gedeelde bronnenlaag (osint.py vastgoed) zonder netwerk met lek- en afrondeisen; CI-poort geen netwerk.
+      - name: "vastgoed (wv3085, OVIS Vastgoed fase 1)"
+        if: ${{ !cancelled() }}
+        run: bash test/vastgoed.sh
       # wv2993: OVIS Beleggen fase 2 — weekbericht: ophalen, ruisregels, weegronde en kaarten op opgenomen antwoorden (geen netwerk, geen model) + kruisproef per regel.
       - name: "beleggen-nieuws (wv2993, OVIS Beleggen weekbericht)"
         if: ${{ !cancelled() }}

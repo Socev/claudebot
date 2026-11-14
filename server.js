@@ -4138,6 +4138,7 @@ function handleRequest(req, res) {
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
       pma: typeof pmaInfo === 'function' ? pmaInfo() : { aan: false },   // wv3037: OVIS PMA (alleen aantallen: exports, regels, dagen, kwartalen)
+      vastgoed: typeof vastgoedInfo === 'function' ? vastgoedInfo() : { aan: false },   // wv3085: OVIS Vastgoed (alleen aantallen: objecten, feiten, stukken, aanroepen)
       beleggen: typeof beleggenInfo === 'function' ? beleggenInfo() : { aan: false },
       personeelsscherm: typeof personeelsschermInfo === 'function' ? personeelsschermInfo() : { aan: false },   // wv2991: OVIS Personeelsscherm (gekoppeld, laatst gezien, volgnr; nooit token, code of IP)
       imagine: typeof imagineInfo === 'function' ? imagineInfo() : { aan: false },   // wv2984: OVIS Imagine (aantallen, schijf, nog te wissen; geen titels of beelden)   // wv2982: OVIS Beleggen (aantallen rijen, vault_ok; geen bedragen)
@@ -5496,6 +5497,7 @@ APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
 ['controleer', 'inlees', 'intrek', 'code', 'koppel', 'rol', 'rooster', 'persoon'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt (wv3047: koppel, rol, rooster, persoon)   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
+['dossier', 'ververs', 'beelden', 'aanroepen'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
 // geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
@@ -13835,6 +13837,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
         if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
         if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
+        if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
@@ -22258,6 +22261,51 @@ function pmaInfo() {
   try { const i = pmaApp.info(); i.fin_controle = pmaFin.waarden ? 'ja' : 'nog niet gelezen'; return i; } catch (e) { return { aan: true, fout: true }; }
 }
 // ── einde OVIS PMA ──
+// ── OVIS Vastgoed (wv3085, 14-11-2026; advies vault "01_Ontwikkeling/Overheids-API's - wat kunnen we ermee (Fable 5.2, 14-11-2026)" § 4) ──
+// Eén privé-scherm met alles over Davids woning en zijn twee garageboxen. Logica in vastgoed.js (alleen fs, path, node:sqlite; geen netwerk);
+// opslag /opt/data/vastgoed (700): vastgoed.sqlite (600). Het dossier komt uit de vault (20_Prive/Huis, bestandsnamen 20_Prive/Bronnen/Huis;
+// alleen lezen). Openbare gegevens via de gedeelde bronnenlaag van OSINT (osint.py vastgoed: BAG, 3D-BAG, kadastrale kaart, AHN, luchtfoto
+// per jaar, plangebied, funderingskaart, BRO, Bodemloket, CBS, Leefbaarometer, bekendmakingen, EP-online met de kluissleutel): naar buiten
+// gaan alleen nummers en een kaartvak, elke aanroep staat in de tabel aanroep van vastgoed.sqlite (niet in osint.sqlite, niet in api.log).
+// Routes achter de app-sessie (alleen David; Socev heeft hier geen ingang):
+//   GET  /app/vastgoed                       alle objecten met feiten, reeksen, stukken, tijdlijn, dossierstand en waarde-indicatie (zonder beelden)
+//   POST /app/vastgoed/dossier               het dossier opnieuw uit de vault lezen
+//   POST /app/vastgoed/ververs {id}          openbare gegevens voor één object ophalen (≤ 1× per 10 min per object; alleen de hoofdpod)
+//   POST /app/vastgoed/beelden {id}          de kaartbeelden van één object (luchtfoto + perceel, tijdmachine, hoogte, plangebied)
+//   POST /app/vastgoed/aanroepen             de laatste 200 aanroepen naar buiten (wat ging waarheen)
+// Audit/log: alleen route + reden; nooit een adres, nummer of bedrag.
+const VASTGOED_DIR = serverPad('vastgoed', process.env.VASTGOED_DIR, '/opt/data/vastgoed', serverProefDeel('vastgoed'));
+const vastgoedApp = (function () {
+  const p = path.join(__dirname, 'vastgoed.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ map: VASTGOED_DIR, vault: VAULT,
+      bronnen: async function (invoer) {
+        if (typeof osintRun !== 'function' || !fs.existsSync(OSINT_SCRIPT)) return { ok: false };
+        invoer.sleutels = await osintSleutels();   // EP-online uit de kluis, via stdin (nooit in env, log of uitkomst)
+        return osintRun(['vastgoed'], invoer);
+      } });
+  } catch (e) { logError('vastgoed', new Error('laden faalde')); return null; }
+})();
+async function appVastgoed(req, res, a, route, d) {
+  if (!vastgoedApp) return appWeiger(res, 404, 'Vastgoed zit niet in deze versie van de pod', 'vastgoed ontbreekt');
+  if (!appTeller('vastgoed', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed');
+  const post = route.indexOf('POST ') === 0;
+  if (route === 'POST /app/vastgoed/ververs') {
+    if (!rolPrimair()) return appWeiger(res, 409, 'openbare gegevens ophalen kan alleen op de hoofdpod', 'vastgoed niet primair');
+    if (!appTeller('vastgoed-ververs', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed-ververs');
+  }
+  let u;
+  try { u = await vastgoedApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
+  catch (e) { logError('vastgoed', new Error('route faalde')); return appWeiger(res, 503, 'Vastgoed is nu niet te lezen; probeer het zo opnieuw', 'vastgoed fout'); }   // geen inhoud in de log
+  if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'vastgoed').slice(0, 80);
+  return appStuur(res, u.status, u.body);
+}
+function vastgoedInfo() {
+  if (!vastgoedApp) return { aan: false };
+  try { return vastgoedApp.info(); } catch (e) { return { aan: true, fout: true }; }
+}
+// ── einde OVIS Vastgoed ──
 // ── OVIS Personeelsscherm (wv2991, 13-11-2026; plan vault "01_Ontwikkeling/OVIS Personeelsscherm - plan (Fable 5.2, 13-11-2026)", ontwerp fase 0
 // met Codex-review in mk-scripts/personeelsscherm/ontwerp-fase0.md) ──
 // Een Raspberry Pi aan de tv in de personeelskamer haalt elke 2 minuten een door de pod getekend scherm op van personeel.socev.dev (Worker
