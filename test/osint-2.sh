@@ -16,7 +16,7 @@ ET="${OSINT_EXIFTOOL:-/opt/data/venvs/osint/tools/exiftool/exiftool}"
 PY="${OSINT_PY:-$PWD/osint.py}"
 PYBIN="${OSINT_PYTHON:-python3}"   # wv2712: de venv (Pillow + numpy) toetst ook de fotoforensiek
 "$PYBIN" -I - "$PY" "$T" <<'EOF'
-import base64, json, os, sqlite3, subprocess, sys
+import base64, json, os, sqlite3, subprocess, sys, time
 import urllib.parse as up
 py, T = sys.argv[1], sys.argv[2]
 fout = []
@@ -452,5 +452,147 @@ g = run(['grafiek'])
 ids = {x['id'] for x in g.get('knopen', [])}
 eis({'btw:nl123456782b01', 'kenteken:zz999q', 'ip:203.0.113.7', 'domein:proefpraktijk.examp1e'} <= ids and all(r['van'] in ids and r['naar'] in ids for r in g['randen']), 'grafiek: knopen uit alle zoekvragen, randen kloppen')
 eis(all(x.get('soort') not in ('persoon',) for x in g['knopen']) and not any('Verzonnen Maker' in x['label'] for x in g['knopen']), 'grafiek: geen personen of bestandsmakers')
+# --- wv3086: overheidsbronnen zonder sleutel (verzonnen antwoorden; geen echte personen of bedrijven)
+# Adres: 3D-maten, geldend plan, funderingskaart, grondwater/sonderingen, CBS per postcode (pc6), bekendmakingen op postcode (terugval op straat).
+# Bedrijf: TenderNed. Mail en bedrijf: register van overheidsorganisaties (lokaal, wekelijks verversen, geen medewerkers bewaard).
+def cpt3086(lat, lon, bid):
+    return ('<dispatchDocument><CPT_C><brocom:broId>%s</brocom:broId><brocom:standardizedLocation srsName="x"><gml:pos>%s %s</gml:pos></brocom:standardizedLocation>'
+            '<finalDepth uom="m">20.000</finalDepth><researchReportDate><brocom:date>2020-01-01</brocom:date></researchReportDate></CPT_C></dispatchDocument>') % (bid, lat, lon)
+OO_XML = ('<?xml version="1.0" encoding="UTF-8"?><p:overheidsorganisaties p:timestamp="2026-11-14T23:00:13+01:00" xmlns:p="https://organisaties.overheid.nl/static/schema/oo/export/2.6.13">'
+          '<p:organisaties><p:organisatie p:systeemId="1"><p:naam>Gemeente Nergensdorp</p:naam><p:afkorting>Nergensdorp</p:afkorting><p:types><p:type>Gemeente</p:type></p:types>'
+          '<p:contact><p:internetadressen><p:internetadres><p:label>algemeen</p:label><p:url>https://www.nergensdorp.example/</p:url></p:internetadres></p:internetadressen>'
+          '<p:emailadressen><p:emailadres><p:label>algemeen</p:label><p:email>info@nergensdorp.example</p:email></p:emailadres>'
+          '<p:emailadres><p:email>loket.nergensdorp@gmail.com</p:email></p:emailadres></p:emailadressen>'
+          '<p:telefoonnummers><p:telefoonnummer><p:nummer>0000-000000</p:nummer></p:telefoonnummer></p:telefoonnummers></p:contact>'
+          '<p:medewerkers><p:medewerker><p:naam>Proefambtenaar Qzv</p:naam><p:contact><p:emailadressen><p:emailadres><p:email>qzv@prive-proef.example</p:email></p:emailadres></p:emailadressen></p:contact></p:medewerker></p:medewerkers>'
+          '<p:organisaties><p:organisatie p:systeemId="2"><p:naam>Afdeling Belastingen</p:naam><p:types><p:type>Organisatieonderdeel</p:type></p:types>'
+          '<p:contact><p:internetadressen><p:internetadres><p:url>https://belastingen.nergensdorp.example</p:url></p:internetadres></p:internetadressen></p:contact></p:organisatie></p:organisaties>'
+          '</p:organisatie>'
+          '<p:organisatie p:systeemId="3"><p:naam>Proefinstituut Volksverzekeringen</p:naam><p:afkorting>PVV-QZ</p:afkorting><p:types><p:type>Zelfstandig bestuursorgaan</p:type></p:types>'
+          '<p:contact><p:internetadressen><p:internetadres><p:url>https://pivqz.example</p:url></p:internetadres></p:internetadressen></p:contact></p:organisatie>'
+          '<p:organisatie p:systeemId="4"><p:naam>Waterschap Oude Proef</p:naam><p:types><p:type>Waterschap</p:type></p:types><p:eindDatum>2020-01-01</p:eindDatum>'
+          '<p:contact><p:internetadressen><p:internetadres><p:url>https://oudeproef.example</p:url></p:internetadres></p:internetadressen></p:contact></p:organisatie>'
+          '</p:organisaties></p:overheidsorganisaties>')
+nep3086 = dict(nep)
+nep3086.update({
+ 'api.pdok.nl/bzk/locatieserver/search/v3_1/free': {'response': {'docs': [dict(nep['api.pdok.nl/bzk/locatieserver/search/v3_1/free']['response']['docs'][0], postcode='9999ZZ')]}},
+ 'service.pdok.nl/lv/bag/wfs/v2_0': {'features': [{'properties': {'identificatie': '9999010000000001', 'oppervlakte': 120, 'gebruiksdoel': 'kantoorfunctie', 'bouwjaar': 1985,
+     'pandidentificatie': '9999100000000001', 'pandstatus': 'Pand in gebruik', 'status': 'Verblijfsobject in gebruik'}}]},
+ 'api.3dbag.nl/collections/pand/items/NL.IMBAG.Pand.9999100000000001': {'feature': {'CityObjects': {'NL.IMBAG.Pand.9999100000000001': {'attributes': {
+     'b3_h_maaiveld': 2.0, 'b3_h_dak_max': 14.5, 'b3_h_dak_min': 8.0, 'b3_dak_type': 'slanted', 'b3_opp_grond': 80.0, 'b3_volume_lod22': 812.4, 'b3_bouwlagen': 3, 'b3_pw_datum': 2022}}}}},
+ 'service.pdok.nl/kadaster/ruimtelijke-plannen/wms/v1_0?layers=bestemmingsplangebied': {'features': [
+     {'properties': {'naam': 'Proefplan Nergensdorp', 'identificatie': 'NL.IMRO.9999.proef-vas1', 'datum': '2025-09-25', 'typeplan': 'bestemmingsplan', 'planstatus': 'vastgesteld',
+                     'historisch': '0', 'verwijzingnaartekst': 'https://ruimtelijkeplannen.nl/documents/x/r_x.html'}}]},
+ 'service.pdok.nl/kadaster/ruimtelijke-plannen/wms/v1_0?layers=enkelbestemming': {'features': [{'properties': {'naam': 'Kantoor', 'bestemmingshoofdgroep': 'kantoor'}},
+     {'properties': {'naam': 'Kantoor', 'bestemmingshoofdgroep': 'kantoor'}}]},
+ 'service.pdok.nl/rvo/indicatieve-aandachtsgebieden-funderingsproblematiek/wms/v1_0': {'features': [{'properties': {'legenda': 'Proefgebied - 60-80 %',
+     'fgr': 'Proefgrond', 'percvoor1970': '66.66666666666666'}}]},
+ 'publiek.broservices.nl/sr/cpt/v1/characteristics/searches': '<x>' + cpt3086('52.1005', '5.1004', 'CPT000000000013') + '</x>',
+ 'publiek.broservices.nl/gm/gmw/v1/characteristics/searches': '<x></x>',
+ 'api.pdok.nl/cbs/postcode6/ogc/v1/collections/postcode6/items': {'features': [
+     {'properties': {'postcode6': '9999ZZ', 'jaarcode': 2024, 'aantal_inwoners': 130, 'gemiddelde_woz_waarde_woning': -99995, 'aantal_woningen': -99997,
+                     'aantal_inwoners_0_tot_15_jaar': 13, 'aantal_inwoners_15_tot_25_jaar': 13, 'aantal_inwoners_25_tot_45_jaar': 26, 'aantal_inwoners_45_tot_65_jaar': 39,
+                     'aantal_inwoners_65_jaar_en_ouder': 39, 'mediaan_inkomen_huishouden': 'onclassificeerbaar', 'percentage_koopwoningen': -99997}},
+     {'properties': {'postcode6': '9999ZZ', 'jaarcode': 2023, 'aantal_inwoners': 120, 'gemiddelde_woz_waarde_woning': 413, 'aantal_woningen': 55, 'percentage_koopwoningen': 70,
+                     'dichtstbijzijnde_huisartsenpraktijk_afstand_in_km': 0.7, 'mediaan_inkomen_huishouden': 'hoog_gemiddeld'}},
+     {'properties': {'postcode6': '1111AA', 'jaarcode': 2025, 'aantal_inwoners': 999999}}]},
+ 'www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties': {'totalElements': 3, 'content': [
+     {'publicatieId': '13', 'publicatieDatum': '2026-10-01', 'typePublicatie': {'code': 'AAO', 'omschrijving': 'Aankondiging opdracht'}, 'aanbestedingNaam': 'Proefschoonmaak 2027',
+      'opdrachtgeverNaam': 'Voorbeeld Leverancier B.V.', 'link': {'href': 'https://www.tenderned.nl/aankondigingen/overzicht/13'}},
+     {'publicatieId': '14', 'publicatieDatum': '2025-05-05', 'typePublicatie': {'code': 'AGO', 'omschrijving': 'Aankondiging gegunde opdracht'}, 'aanbestedingNaam': 'Proefwerk gegund',
+      'opdrachtgeverNaam': 'Gemeente Nergensdorp', 'link': {'href': 'javascript:alert(1)'}},
+     {'publicatieId': 'x', 'publicatieDatum': '2024-01-01', 'typePublicatie': {'code': 'MAC', 'omschrijving': 'Marktconsultatie'}, 'aanbestedingNaam': 'Oud', 'opdrachtgeverNaam': 'Iemand'}]},
+ 'organisaties.overheid.nl/archive/exportOO.xml': OO_XML,
+})
+json.dump(nep3086, open(os.path.join(T, 'nep.json'), 'w'))
+r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True)
+eis(all(kaart(r, t).get('juridisch') and kaart(r, t).get('opgehaald') and kaart(r, t).get('bron') for t in (
+    'Het pand in 3D', 'Geldend plan op dit punt', 'Funderingskaart', 'Grondwater en sonderingen', 'Cijfers voor postcode 9999ZZ', 'Bekendmakingen in dit postcodegebied')),
+    'wv3086 adres: zes nieuwe kaartjes, elk met bron, datum en de regel juridisch')
+k = kaart(r, 'Het pand in 3D'); eis(veld(k, 'Hoogste punt dak boven maaiveld') == '12,5 m' and veld(k, 'Bouwlagen') == '3' and 'hoogtemeting 2022' in (k.get('klein') or ''), 'wv3086 3D-BAG: hoogte boven maaiveld, bouwlagen, jaar van de meting')
+k = kaart(r, 'Geldend plan'); eis((k.get('items') or [{}])[0].get('tekst') == 'Proefplan Nergensdorp' and [a for a, b in k['velden']].count('Bestemming') == 1, 'wv3086 plan: plan als item, dubbele bestemming één keer')
+k = kaart(r, 'Funderingskaart'); eis(veld(k, 'Panden van vóór 1970 in het postcodegebied') == '67 %' and veld(k, 'Funderingskaart') == 'Proefgebied - 60-80 %', 'wv3086 fundering: legenda, percentage afgerond')
+k = kaart(r, 'Grondwater en sonderingen'); eis(veld(k, 'Sonderingen binnen 500 m') == '1' and 'broloket.nl' in ((k.get('items') or [{}])[0].get('url') or ''), 'wv3086 BRO: telling en sondering met link')
+k = kaart(r, 'Cijfers voor postcode 9999ZZ')
+eis(veld(k, 'Inwoners (2024)') == '130' and veld(k, 'Gemiddelde WOZ-waarde woning (2023)') == '€ 413.000' and veld(k, 'Woningen (2023)') == '55'
+    and veld(k, 'Koopwoningen (2023)') == '70 %' and veld(k, 'Mediaan inkomen huishouden (2023)') == 'hoog gemiddeld' and veld(k, 'Leeftijd (2024)') == '0-15: 10 % · 15-25: 10 % · 25-45: 20 % · 45-65: 30 % · 65+: 30 %'
+    and '999999' not in json.dumps(k), 'wv3086 pc6: per veld het nieuwste openbare jaar; afgeschermd (-99997/-99995/onclassificeerbaar) valt terug; andere postcode genegeerd')
+sru = [l for l in r['logboek'] if l['host'] == 'repository.overheid.nl']
+eis(len(sru) == 1 and sru[0]['naar_buiten'] == 'postcode 9999ZZ (geen huisnummer)' and 'Gezocht op postcode 9999ZZ' in (kaart(r, 'Bekendmakingen in dit postcodegebied').get('klein') or ''),
+    'wv3086 bekendmakingen: op postcode, geen straat of huisnummer naar buiten')
+pc6 = [l for l in r['logboek'] if l['host'] == 'api.pdok.nl' and 'postcode6' in str(l.get('bron'))]
+eis(len(pc6) == 1 and pc6[0]['naar_buiten'] == 'postcode 9999ZZ', 'wv3086 pc6: alleen de postcode naar buiten')
+nep_leeg = dict(nep3086)
+nep_leeg['repository.overheid.nl/sru?query=cql.textAndIndexes="9999ZZ" AND c.product-area==officielepublicaties'] = {'searchRetrieveResponse': {'numberOfRecords': 0}}
+json.dump(nep_leeg, open(os.path.join(T, 'nep.json'), 'w'))
+r = zoek(ingang='adres', term='Proefstraat 1, 9999 ZZ Nergensdorp', wie='david', vers=True)
+k = kaart(r, 'Bekendmakingen over dit adres')
+eis(bool(k.get('items')) and 'Op postcode 9999ZZ niets gevonden' in (k.get('klein') or '') and [l['naar_buiten'] for l in r['logboek'] if l['host'] == 'repository.overheid.nl']
+    == ['postcode 9999ZZ (geen huisnummer)', 'straat + huisnummer + plaats'], 'wv3086 bekendmakingen: niets op postcode → terugval op straat + plaats, met uitleg')
+json.dump(nep3086, open(os.path.join(T, 'nep.json'), 'w'))
+# bedrijf: TenderNed
+r = zoek(ingang='bedrijf', term='Voorbeeld Leverancier', wie='david', vers=True)
+k = kaart(r, 'Aanbestedingen (TenderNed)')
+tn = [l for l in r['logboek'] if l['host'] == 'www.tenderned.nl']
+eis(str(veld(k, 'Publicaties waarin de naam voorkomt')) == '3' and str(veld(k, 'Als opdrachtgever (van de nieuwste 3)')) == '1' and str(veld(k, 'Gunningsberichten die de naam noemen (van de nieuwste 3)')) == '1'
+    and k['items'][0]['tekst'] == 'Proefschoonmaak 2027' and k.get('juridisch') and len(tn) == 1 and tn[0]['naar_buiten'] == 'naam: Voorbeeld Leverancier', 'wv3086 TenderNed: tellingen, nieuwste eerst, alleen de naam naar buiten')
+eis([i.get('url') for i in k['items']] == ['https://www.tenderned.nl/aankondigingen/overzicht/13', 'https://www.tenderned.nl/aankondigingen/overzicht/14', None], 'wv3086 TenderNed: alleen https-links naar tenderned.nl (javascript-link vervangen, onleesbaar id zonder link)')
+eis(not kaart(r, 'Register van overheidsorganisaties'), 'wv3086 register: geen kaartje bij een gewoon bedrijf')
+r = zoek(ingang='bedrijf', term='Voorbeeld Leverancier', wie='socev', herkomst='facturen', vers=True)
+eis('www.tenderned.nl' not in hosts_van(r), 'wv3086 TenderNed: Socev met een vrije naam stuurt die niet naar TenderNed (review-MOET 1 wv2698)')
+# register van overheidsorganisaties (lokaal)
+OO = os.path.join(os.path.dirname(os.environ['OSINT_DB']), 'overheidsorganisaties.json')
+for x in (OO,):
+    if os.path.exists(x): os.remove(x)
+def mailkop(van): return 'From: %s\nTo: ik@voorbeeld.example\nSubject: Proef\nMessage-ID: <1@proef.example>\n' % van
+r = zoek(ingang='mail', kop=mailkop('Gemeente Nergensdorp <betalen@nergensdorp-betalen.example>'), wie='david', vers=True)
+k = kaart(r, 'Register van overheidsorganisaties')
+eis('noemt zich Gemeente Nergensdorp' in (k.get('let') or '') and 'nergensdorp-betalen.example' in k['let'] and 'nergensdorp.example' in (veld(k, 'Domeinen van die organisatie volgens het register') or '')
+    and k.get('juridisch'), 'wv3086 register: afzender noemt zich een gemeente uit het register met een ander domein → let op, met de domeinen uit het register')
+oo = open(OO).read() if os.path.exists(OO) else ''
+eis(oo and 'Proefambtenaar' not in oo and 'prive-proef' not in oo and '0000-000000' not in oo and 'gmail.com' not in oo and oct(os.stat(OO).st_mode & 0o777) == '0o600',
+    'wv3086 register: lokaal bestand 0600 zonder medewerkers, telefoon of gratis maildomeinen')
+eis(len([l for l in r['logboek'] if l['host'] == 'organisaties.overheid.nl']) == 1 and all(l['naar_buiten'] == 'niets (het hele exportbestand)' for l in r['logboek'] if l['host'] == 'organisaties.overheid.nl'),
+    'wv3086 register: eerste keer één keer het hele bestand opgehaald, niets naar buiten')
+r = zoek(ingang='mail', kop=mailkop('Gemeente Nergensdorp <info@nergensdorp.example>'), wie='david', vers=True)
+k = kaart(r, 'Register van overheidsorganisaties')
+eis(not k.get('let') and 'Gemeente Nergensdorp' in (veld(k, 'Domein in het register') or '') and not [l for l in r['logboek'] if l['host'] == 'organisaties.overheid.nl'],
+    'wv3086 register: juiste domein → geen let op; register vers = geen nieuwe aanroep')
+r = zoek(ingang='mail', kop=mailkop('Belastingen <noreply@belastingen.nergensdorp.example>'), wie='david', vers=True)
+eis('Gemeente Nergensdorp' in (veld(kaart(r, 'Register van overheidsorganisaties'), 'Domein in het register') or ''), 'wv3086 register: subdomein telt bij de organisatie')
+r = zoek(ingang='mail', kop=mailkop('Gemeente Nergensdorp <loket@gmail.com>'), wie='david', vers=True)
+eis('noemt zich Gemeente Nergensdorp' in (kaart(r, 'Register van overheidsorganisaties').get('let') or ''), 'wv3086 register: gratis maildomein uit het register telt niet als eigen domein')
+r = zoek(ingang='mail', kop=mailkop('"Belastingdienst" <noreply@belasting-proef.example>'), wie='david', vers=True)
+eis('belasting-proef.example staat niet in het register' in (kaart(r, 'Register van overheidsorganisaties').get('let') or ''), 'wv3086 register: klinkt als overheid, domein niet in het register → let op')
+r = zoek(ingang='mail', kop=mailkop('PVV-QZ <post@pivqz.example>'), wie='david', vers=True)
+eis(not kaart(r, 'Register van overheidsorganisaties').get('let') and 'Proefinstituut' in (veld(kaart(r, 'Register van overheidsorganisaties'), 'Naam in het register') or ''), 'wv3086 register: afkorting + eigen domein → in orde')
+r = zoek(ingang='mail', kop=mailkop('Waterschap Oude Proef <info@oudeproef.example>'), wie='david', vers=True)
+eis('opgeheven' in (kaart(r, 'Register van overheidsorganisaties').get('let') or ''), 'wv3086 register: domein van een opgeheven organisatie → let op')
+r = zoek(ingang='mail', kop=mailkop('Proefwinkel <info@proefwinkel.example>'), wie='david', vers=True)
+eis(not kaart(r, 'Register van overheidsorganisaties'), 'wv3086 register: gewone afzender → geen kaartje (stilte)')
+r = zoek(ingang='bedrijf', term='nergensdorp.example', wie='david', vers=True)
+eis('Gemeente Nergensdorp' in (veld(kaart(r, 'Register van overheidsorganisaties'), 'Domein in het register') or ''), 'wv3086 register: bedrijf op domein vindt de gemeente')
+# wekelijks verversen: ouder dan 7 dagen → opnieuw ophalen; mislukt dat, dan de vorige versie met uitleg
+t0 = int(time.time()) - 8 * 86400; os.utime(OO, (t0, t0))
+r = zoek(ingang='mail', kop=mailkop('Gemeente Nergensdorp <info@nergensdorp.example>'), wie='david', vers=True)
+eis(len([l for l in r['logboek'] if l['host'] == 'organisaties.overheid.nl']) == 1 and os.path.getmtime(OO) > t0 + 86400, 'wv3086 register: ouder dan 7 dagen → bij gebruik opnieuw opgehaald')
+os.utime(OO, (t0, t0))
+nep_kapot = dict(nep3086); nep_kapot['organisaties.overheid.nl/archive/exportOO.xml'] = '<kapot'
+json.dump(nep_kapot, open(os.path.join(T, 'nep.json'), 'w'))
+r = zoek(ingang='mail', kop=mailkop('Gemeente Nergensdorp <info@nergensdorp.example>'), wie='david', vers=True)
+k = kaart(r, 'Register van overheidsorganisaties')
+eis('Gemeente Nergensdorp' in (veld(k, 'Domein in het register') or '') and 'vorige versie' in (k.get('klein') or '') and 'Proefambtenaar' not in open(OO).read(), 'wv3086 register: ophalen mislukt → vorige versie, met uitleg')
+json.dump(nep3086, open(os.path.join(T, 'nep.json'), 'w'))
+# poort (kruisproef): BSN-vorm of patiëntkenmerk → niets naar de nieuwe bronnen; het register wordt dan ook niet opgehaald
+NIEUW3086 = {'api.3dbag.nl', 'publiek.broservices.nl', 'www.tenderned.nl', 'organisaties.overheid.nl', 'service.pdok.nl', 'api.pdok.nl', 'repository.overheid.nl'}
+os.utime(OO, (t0, t0))
+for v, wat in ((dict(ingang='adres', term='Proefstraat 1 Nergensdorp 111222333', wie='david'), 'adres met BSN-vorm'),
+               (dict(ingang='adres', term='Proefstraat 1 Nergensdorp', wie='socev', herkomst='mogelijk-medisch'), 'adres met herkomst mogelijk medisch'),
+               (dict(ingang='bedrijf', term='Voorbeeld Leverancier patiëntnummer 4711', wie='david'), 'bedrijf met patiëntkenmerk'),
+               (dict(ingang='mail', kop=mailkop('Gemeente Nergensdorp <x@nergensdorp-betalen.example>') + 'X-Proef: BSN 111222333\n', wie='david'), 'mail met BSN')):
+    r = zoek(vers=True, **v)
+    eis(r['poort']['niveau'] != 'alles' and ext(r) == 0 and not hosts_van(r) & NIEUW3086, 'wv3086 poort: %s → niets naar 3D-BAG/BRO/TenderNed/register/pc6/SRU' % wat)
+eis(os.path.getmtime(OO) == t0, 'wv3086 poort: register niet opgehaald bij een dichte poort')
+json.dump(nep, open(os.path.join(T, 'nep.json'), 'w'))
 print('osint-2: %d fout' % len(fout)); sys.exit(1 if fout else 0)
 EOF
