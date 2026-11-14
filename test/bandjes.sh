@@ -385,7 +385,7 @@ const OP = B.maak({ vault: V2, dir: D2, klok: () => Date.now(), fout: (w, e) => 
 OP.mkdir();
 toets('B mkdir: map 0700, tmp 0700', (fs.statSync(D2).mode & 0o777) === 0o700 && (fs.statSync(path.join(D2, 'tmp')).mode & 0o777) === 0o700);
 let bestandWeg = false;   // wv830: Bestanden na 30 dagen leeg
-const bestandVan = (job) => (bestandWeg || !bewaard[job] ? null : bewaard[job].bestanden.map((x) => ({ naam: x.naam, pad: path.join(BEWAAR, job, 'b', String(x.n)) })));
+const bestandVan = (job) => (bestandWeg || !bewaard[job] ? null : bewaard[job].bestanden.map((x) => ({ n: x.n, naam: x.naam, pad: path.join(BEWAAR, job, 'b', String(x.n)) })));   // wv3064: met n, zoals server.js
 R2 = B.routes({ opslag: OP, studio: ST, primair: () => prim, dir: D2, boxPad: BOX, bestandVan, log: (r) => logs.push(r), fout: (w, e) => fouts.push(w + ': ' + (e && e.message)) });
 let vers = false, verbruikt = 0;
 const ctx = { versOk: () => vers, versVerbruik: () => { vers = false; verbruikt++; }, apparaat: 'toets' };
@@ -580,9 +580,29 @@ toets('B status met andere hash (David wijzigde in Obsidian): 409', r.status ===
 toets('wv830 voor het markeren: v3 gemaakt, in centrale v2', bu.versie === 3 && bu.kan_centrale === true && /^v2,/.test(bu.in_centrale), bu);
 r = await app('POST /app/bandjes/status', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: bu.versie, tekst_hash: bu.tekst_hash, job: 'ffffffffffffffff' });
 toets('wv830 status met een ander job dan het laatst gemaakte: 409', r.status === 409, r);
+// wv3064: na Maak staat het geluid ook op de eigen bewaarplek van Bandjes
+const WV = path.join(D2, 'werkversies', 'tolgaarde', 'tg-buiten');
+const lbNu = B.laatsteVan(bu.laatste_bestand);
+{ const w = OP.werkversie('tolgaarde', 'tg-buiten');
+  const zelfde = w && w.bestanden.every((x) => fs.readFileSync(x.pad).equals(fs.readFileSync(path.join(BEWAAR, w.job, 'b', String(x.n)))));
+  toets('wv3064 na Maak: werkversie bewaard (job van laatste bestand, drie bestanden met telefoonversies, byte-gelijk)', !!w && w.job === lbNu.job && w.versie === 3 && w.bestanden.length === 3 &&
+    w.bestanden.some((x) => x.naam === 'bandje-telefoon-ulaw.wav') && zelfde, w);
+  toets('wv3064 bewaarplek: mappen 0700, bestanden 0600', [path.join(D2, 'werkversies'), path.join(D2, 'werkversies', 'tolgaarde'), WV, path.join(WV, 'b')].every((d) => (fs.statSync(d).mode & 0o777) === 0o700) &&
+    [path.join(WV, 'meta.json')].concat(w.bestanden.map((x) => x.pad)).every((f) => (fs.statSync(f).mode & 0o777) === 0o600));
+  const gw = await app('GET /app/bandjes', {});
+  const gb = gw.j.praktijken[0].bandjes.find((x) => x.id === 'tg-buiten');
+  toets('wv3064 GET: bandje draagt bewaard (job, n, naam, grootte; geen pad)', gb.bewaard && gb.bewaard.job === lbNu.job && gb.bewaard.bestanden.length === 3 && !JSON.stringify(gb.bewaard).includes(D2) &&
+    gw.j.praktijken[0].bandjes.filter((x) => x.id !== 'tg-buiten').every((x) => x.bewaard === null), gb.bewaard); }
 bestandWeg = true;
+{ const u = R2.ronde();
+  const bb = R2.bewaardBestand(lbNu.job, 1);
+  toets('wv3064 Bestanden leeg (30 dagen voorbij): ronde laat de werkversie staan, bestand nog af te spelen', u.opgeruimd === 0 && u.fouten === 0 && !!OP.werkversie('tolgaarde', 'tg-buiten') && bb && bb.naam === bewaard[lbNu.job].bestanden[0].naam &&
+    fs.readFileSync(bb.pad).equals(fs.readFileSync(path.join(BEWAAR, lbNu.job, 'b', '1'))), { u, bb });
+  toets('wv3064 bewaardBestand: onbekende job of n = null', R2.bewaardBestand('ffffffffffffffff', 1) === null && R2.bewaardBestand(lbNu.job, 9) === null && R2.bewaardBestand('../x', 1) === null); }
+fs.renameSync(WV, WV + '-even-weg');   // zonder bewaarplek: het oude gedrag (409)
 r = await app('POST /app/bandjes/status', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: bu.versie, tekst_hash: bu.tekst_hash });
-toets('wv830 status als de bestanden niet meer in Bestanden staan: 409, niets gemarkeerd, geen archief', r.status === 409 && /Bestanden/.test(r.j.fout) && (await herlees()).status === bu.status && !fs.existsSync(ARCH), r);
+toets('wv830 status als de bestanden niet meer in Bestanden staan (en niet bewaard): 409, niets gemarkeerd, geen archief', r.status === 409 && /Bestanden/.test(r.j.fout) && (await herlees()).status === bu.status && !fs.existsSync(ARCH), r);
+fs.renameSync(WV + '-even-weg', WV);
 bestandWeg = false;
 // terwijl er nog een Maak loopt: 409 (anders valt die generatie na het markeren weg; Fable wv830 #4)
 fs.writeFileSync(MODUS, 'traag');
@@ -596,7 +616,12 @@ await totDat(async () => (await herlees()).laatste_bestand.indexOf(mTraag.j.taak
 bu = await herlees();
 toets('wv830 ... die generatie bleef v3 (werkversie overschreven)', bu.versie === 3 && bu.kan_centrale === true && B.laatsteVan(bu.laatste_bestand).job === mTraag.j.taak.id, bu);
 const lb3 = B.laatsteVan(bu.laatste_bestand);
+toets('wv3064 tweede Maak van dezelfde versie vervangt de bewaarde (één map, geen resten, oude job weg)', OP.werkversie('tolgaarde', 'tg-buiten').job === lb3.job && R2.bewaardBestand(lbNu.job, 1) === null &&
+  fs.readdirSync(path.join(D2, 'werkversies', 'tolgaarde')).join(',') === 'tg-buiten', fs.readdirSync(path.join(D2, 'werkversies', 'tolgaarde')));
+bestandWeg = true;   // wv3064: markeren na 30 dagen = uit de eigen bewaarplek
 r = await app('POST /app/bandjes/status', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: bu.versie, tekst_hash: bu.tekst_hash, job: lb3.job });
+bestandWeg = false;
+toets('wv3064 na markeren: bewaarde werkversie opgeruimd (staat nu in het archief)', r.status === 200 && OP.werkversie('tolgaarde', 'tg-buiten') === null && !fs.existsSync(WV) && R2.bewaardBestand(lb3.job, 1) === null, r);
 bu = await herlees();
 const iso = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
 const basis3 = 'tg-buiten-v3-' + iso;
@@ -677,13 +702,56 @@ toets('B box: modus van het origineel behouden, geen tijdelijk bestand in de vau
 toets('B box: rij in het vaste formaat (status open, gevolg, voorstel)', /## \[direct\] \d{4}-\d{2}-\d{2} \d{2}:\d{2} — Bandjes Tolgaarde: [^\n]+\n- status: open\n- van: pod bandjes\.js[^\n]*\n- gemeten: [^\n]+\n- gevolg als er niets gebeurt: [^\n]+\n- voorstel: [^\n]+journaal\.jsonl/.test(boxNa), boxNa.slice(0, 1200));
 r = await app('POST /app/bandjes/maak', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: 2, tekst_hash: B.tekstHash('Versie vijf.'), beurt_id: beurt() });
 toets('B teruggezet: maak 409 dicht', r.status === 409 && r.j.dicht === true, r);
-toets('B health: dicht per praktijk, zonder inhoud', JSON.stringify(R2.health()) === JSON.stringify({ aan: true, dicht_tolgaarde: true, dicht_groenhouten: true }), R2.health());
+toets('B health: dicht per praktijk, zonder inhoud', JSON.stringify(R2.health()) === JSON.stringify({ aan: true, dicht_tolgaarde: true, dicht_groenhouten: true, werkversies_bewaard: 0 }), R2.health());
+// wv3064: een bewaarde werkversie van een bandje dat al in de centrale staat (gh-buiten v2) — bij een dicht register raakt de ronde niets aan
+{ const nep = path.join(W2, 'nep-ulaw.wav'); fs.writeFileSync(nep, Buffer.alloc(500, 1));
+  const zet = OP.bewaarWerkversie('groenhouten', 'gh-buiten', { job: 'abcdefabcdef0123', versie: 2, tekst_hash: null, bestanden: [{ n: 2, naam: 'bandje-telefoon-ulaw.wav', pad: nep }] });
+  const u = R2.ronde();
+  toets('wv3064 ronde bij een dicht register: niets opgeruimd', zet.status === 200 && u.opgeruimd === 0 && u.overgeslagen === 2 && !!OP.werkversie('groenhouten', 'gh-buiten'), { zet, u }); }
 // zelfde dag, na een "herstart" (nieuwe routes-laag): geen tweede rij
 const R3 = B.routes({ opslag: B.maak({ vault: V2, dir: D2 }), studio: ST, primair: () => true, dir: D2, boxPad: BOX });
 await R3.app('GET /app/bandjes', {}, ctx);
 toets('B box: na een herstart dezelfde dag geen tweede rij', (fs.readFileSync(BOX, 'utf8').match(/— Bandjes (Tolgaarde|Groenhouten):/g) || []).length === 2);
 fs.writeFileSync(TG2, nuTg); fs.unlinkSync(GH2 + '.conflict1');
-toets('B opgelost: weer open', JSON.stringify(R2.health()) === JSON.stringify({ aan: true, dicht_tolgaarde: false, dicht_groenhouten: false }), R2.health());
+toets('B opgelost: weer open', JSON.stringify(R2.health()) === JSON.stringify({ aan: true, dicht_tolgaarde: false, dicht_groenhouten: false, werkversies_bewaard: 1 }), R2.health());
+{ const u = R2.ronde();
+  toets('wv3064 ronde: werkversie van wat al in de centrale staat (v2 ≤ v2) opgeruimd', u.opgeruimd === 1 && OP.werkversie('groenhouten', 'gh-buiten') === null && R2.health().werkversies_bewaard === 0, u); }
+// Codex MOET 1: vervanging afgebroken tussen de twee renames → de ronde zet de volledige nieuwe kopie terug en ruimt pas daarna op
+{ const nep = path.join(W2, 'nep-ulaw.wav');
+  const G = path.join(D2, 'werkversies', 'groenhouten');
+  OP.bewaarWerkversie('groenhouten', 'gh-hoofdmenu', { job: 'abcdefabcdef0001', versie: 9, bestanden: [{ n: 2, naam: 'bandje-telefoon-ulaw.wav', pad: nep }] });
+  fs.renameSync(path.join(G, 'gh-hoofdmenu'), path.join(G, 'gh-hoofdmenu.oud-1-1000'));
+  OP.bewaarWerkversie('groenhouten', 'gh-hoofdmenu', { job: 'abcdefabcdef0002', versie: 9, bestanden: [{ n: 2, naam: 'bandje-telefoon-ulaw.wav', pad: nep }] });
+  fs.renameSync(path.join(G, 'gh-hoofdmenu'), path.join(G, 'gh-hoofdmenu.nieuw-1-2000'));
+  for (const x of fs.readdirSync(G)) fs.utimesSync(path.join(G, x), new Date(Date.now() - 2 * 3600e3), new Date(Date.now() - 2 * 3600e3));   // ouder dan een uur
+  const u = R2.ronde();
+  const w = OP.werkversie('groenhouten', 'gh-hoofdmenu');
+  toets('wv3064 herstel na een afgebroken vervanging: nieuwe kopie terug, oude rest daarna opgeruimd', u.hersteld === 1 && w && w.job === 'abcdefabcdef0002' && fs.readdirSync(G).join(',') === 'gh-hoofdmenu', { u, n: fs.readdirSync(G) });
+  OP.ruimWerkversie('groenhouten', 'gh-hoofdmenu'); }
+// Codex MOET 2: kopie van een versie die al in de centrale staat én een nieuwere gemaakte werkversie → oude weg, nieuwe bewaard in dezelfde ronde
+{ const nep = path.join(W2, 'nep-ulaw.wav');
+  const gb = (await app('GET /app/bandjes', {})).j.praktijken[0].bandjes.find((x) => x.id === 'tg-buiten');
+  OP.bewaarWerkversie('tolgaarde', 'tg-buiten', { job: 'abcdefabcdef0003', versie: gb.centrale_versie, bestanden: [{ n: 2, naam: 'bandje-telefoon-ulaw.wav', pad: nep }] });
+  const mk2 = await maakEnWacht(gb);
+  const job2 = mk2.m && mk2.m.j && mk2.m.j.taak && mk2.m.j.taak.id;
+  OP.bewaarWerkversie('tolgaarde', 'tg-buiten', { job: 'abcdefabcdef0003', versie: gb.centrale_versie, bestanden: [{ n: 2, naam: 'bandje-telefoon-ulaw.wav', pad: nep }] });   // zoals vóór de ronde
+  const u = R2.ronde();
+  const w = OP.werkversie('tolgaarde', 'tg-buiten');
+  toets('wv3064 ronde: verouderde kopie opgeruimd én nieuwere werkversie meteen bewaard', u.opgeruimd === 1 && u.bewaard === 1 && w && w.job === job2 && w.versie === gb.centrale_versie + 1, { u, w: w && w.job, job2 }); }
+// Codex ronde 2: afgebroken vóór de eerste rename (map = vorige job, …nieuw- = de job uit het register), Bestanden ook al leeg → nieuw wisselt in
+{ const nep = path.join(W2, 'nep-ulaw.wav');
+  const T = path.join(D2, 'werkversies', 'tolgaarde');
+  const gb = (await app('GET /app/bandjes', {})).j.praktijken[0].bandjes.find((x) => x.id === 'tg-buiten');
+  const lbj = B.laatsteVan(gb.laatste_bestand).job;
+  const echt = OP.werkversie('tolgaarde', 'tg-buiten');
+  fs.renameSync(path.join(T, 'tg-buiten'), path.join(T, 'tg-buiten.nieuw-1-3000'));   // de volledige nieuwe kopie bleef als rest staan
+  OP.bewaarWerkversie('tolgaarde', 'tg-buiten', { job: 'abcdefabcdef0004', versie: gb.versie, bestanden: [{ n: 2, naam: 'bandje-telefoon-ulaw.wav', pad: nep }] });   // de vorige
+  for (const x of fs.readdirSync(T)) fs.utimesSync(path.join(T, x), new Date(Date.now() - 2 * 3600e3), new Date(Date.now() - 2 * 3600e3));
+  bestandWeg = true;
+  const u = R2.ronde();
+  bestandWeg = false;
+  const w = OP.werkversie('tolgaarde', 'tg-buiten');
+  toets('wv3064 herstel: afgebroken vóór de eerste rename en Bestanden leeg → de nieuwe kopie (job uit het register) wisselt in', echt && echt.job === lbj && u.hersteld === 1 && w && w.job === lbj && !fs.readdirSync(T).some((x) => /nieuw/.test(x)), { u, w: w && w.job, n: fs.readdirSync(T) }); }
 
 // ── 11. server.js-koppeling: het blok Bandjes in een vm, met de echte ctx-functie van server.js ──
 {
@@ -713,7 +781,7 @@ toets('B opgelost: weer open', JSON.stringify(R2.health()) === JSON.stringify({ 
   await c.appBandjes({}, rs, apparaat, sessie, {}, 'GET /app/bandjes');
   const lees = stuurde.pop();
   const tb = lees.j.praktijken[0].bandjes.find((x) => x.id === 'tg-buiten');
-  toets('S GET via server.js: 200, stil', lees.st === 200 && rs._app.stil === true && tb && tb.versie === 5, lees.st);
+  toets('S GET via server.js: 200, stil', lees.st === 200 && rs._app.stil === true && tb && tb.versie === 6, lees.st);   // wv3064: § 10 maakte werkversie v6
   await c.appBandjes({}, res(), apparaat, sessie, { praktijk: 'tolgaarde', bandje: 'tg-buiten', stem: 'piper:proef-stem', versie: tb.versie, tekst_hash: tb.tekst_hash, beurt_id: beurt() }, 'POST /app/bandjes/maak');
   let o = stuurde.pop();
   toets('S maak op een flow op proef zonder verse vingerafdruk (echte ctx uit de sessie): 403 vers_nodig', o.st === 403 && o.j.vers_nodig === true, o);
@@ -726,7 +794,10 @@ toets('B opgelost: weer open', JSON.stringify(R2.health()) === JSON.stringify({ 
   await c.appBandjes({}, rs, apparaat, sessie, { praktijk: 'tolgaarde', bandje: 'tg-buiten', tekst: 'Bel 123456782 niet.', versie: tb.versie, tekst_hash: tb.tekst_hash }, 'POST /app/bandjes/tekst');
   o = stuurde.pop();
   toets('S BSN-achtig getal op een vaste plek: ongewijzigd bewaard, geen masker (wv1931; de app waarschuwt)', o.st === 200 && o.j.bandje.tekst === 'Bel 123456782 niet.' && rs._app.bsnWeg === undefined, o);
-  toets('S health via server.js', JSON.stringify(c.bandjesInfo()) === JSON.stringify({ aan: true, dicht_tolgaarde: false, dicht_groenhouten: false }), c.bandjesInfo());
+  toets('S health via server.js', JSON.stringify(c.bandjesInfo()) === JSON.stringify({ aan: true, dicht_tolgaarde: false, dicht_groenhouten: false, werkversies_bewaard: 0 }), c.bandjesInfo());
+  toets('wv3064 server.js: GET /app/bestand valt terug op de bewaarplek, uurronde alleen primair met timers buiten het blok', /const bw = !b && bandjes && bandjes\.bewaardBestand \? bandjes\.bewaardBestand\(jobId, n\) : null;/.test(src) &&
+    /const bpad = bw \? bw\.pad : appBestandPad\(m, b\);/.test(src) && /function bandjesWerkRonde\(\) \{\n  if \(!bandjes \|\| !bandjes\.ronde \|\| !rolPrimair\(\)\) return null;/.test(src) &&
+    /setInterval\(bandjesWerkRonde, 60 \* 60 \* 1000\)\.unref\(\);/.test(src) && src.indexOf('setInterval(bandjesWerkRonde') > e && /uit\.push\(\{ n: x\.n, naam: String\(x\.naam\), pad: p \}\)/.test(src));
 }
 toets('B geen onverwachte fouten', fouts.filter((f) => !/naKlaar gooit|studio-telefoonversie|studio-normaliseer|studio-sleutel/.test(f)).length === 0, fouts);
 ST.stopTimers();
