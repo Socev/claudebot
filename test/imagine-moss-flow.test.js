@@ -21,8 +21,10 @@ r = S.flowToets(oud, oi, { ws: true, geheugen: true });
 toets('M2 moss-comfyui (SaveImage + PreviewAny) in een geheugen-taak: geweigerd op PreviewAny', !!r.fout && /PreviewAny/.test(r.fout), r);
 r = S.flowToets(oud, oi);
 toets('M3 moss-comfyui buiten Imagine (Studio-kaart) komt nog door de toets (Save → Preview)', !r.fout && r.prompt && r.prompt['9'].class_type === 'PreviewImage', r.fout);
-const metPrev = Object.assign({}, moss, { 99: { class_type: 'PreviewAny', inputs: { source: ['7', 0] } } });
+const metPrev = Object.assign({}, moss, { 99: { class_type: 'PreviewAny', inputs: { source: ['4', 0] } } });
 r = S.flowToets(metPrev, oi, { ws: true, geheugen: true });
 toets('M4 beeld-tekst-moss met een PreviewAny erbij: geweigerd', !!r.fout && /PreviewAny/.test(r.fout), r);
+// wv3044: MOSS breidt zelf niet meer stil uit (uitbreiden = aparte, zichtbare stap); de opdracht gaat letterlijk naar CLIPTextEncode
+toets('M5 beeld-tekst-moss zonder TextGenerate of ComfySwitchNode; CLIPTextEncode leest de opdracht zelf', !Object.values(moss).some((n) => /^(TextGenerate|TextGenerateV2|ComfySwitchNode)$/.test(n.class_type)) && JSON.stringify(moss['8'].inputs.text) === '["4",0]');
 console.log(rood + ' ROOD, ' + groen + ' GROEN');
 process.exit(rood ? 1 : 0);

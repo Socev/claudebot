@@ -6,6 +6,8 @@
 // wv2990: een prompt zonder LoadImage (tekst naar beeld) geeft C.t2iBeeld terug (de toets zet daar een beeld met het opdrachtwoord in).
 // wv3021: een prompt met ImageCompositeMasked (masker/voorbeelden) knipt het beeld uit de invoer (ImageCrop van 'destination', of de hele
 // invoer) en geeft het OMGEKEERD terug, zonder masker: alsof de flow buiten het masker níét terugzette. Dan moet de pod (pijp-naad) het doen.
+// wv3044: TextGenerateV2 → PreviewAny (opdracht uitbreiden): stuurt 'executed' met { text: [C.uitTekst + opdracht] } naar de client en zet die
+// tekst in de geschiedenis (zoals ComfyUI 0.44 de ui-uitvoer van PreviewAny bewaart), zodat de toets kan zien dat de pod hem weghaalt.
 // C.laatsteUpload = kopie van de laatste upload (alleen in het geheugen van de nep, voor de toets).
 const fs = require('fs'), path = require('path'), http = require('http'), crypto = require('crypto');
 const { execFileSync } = require('child_process');
@@ -32,10 +34,15 @@ function start(dir, o) {
     // wv3021
     ImageCrop: { python_module: 'comfy_extras.nodes_images', input: { required: { image: ['IMAGE', {}], width: ['INT', {}], height: ['INT', {}], x: ['INT', {}], y: ['INT', {}] } } },
     CropMask: { python_module: 'comfy_extras.nodes_mask', input: { required: { mask: ['MASK', {}], x: ['INT', {}], y: ['INT', {}], width: ['INT', {}], height: ['INT', {}] } } },
+    // wv3044 (vorm zoals ComfyUI 0.44)
+    CLIPLoader: { python_module: 'nodes', input: { required: { clip_name: [['qwen3.5_9b_w4a8_gptq.safetensors'], {}], type: [['stable_diffusion', 'moss_image'], {}] }, optional: { device: [['default', 'cpu'], {}] } } },
+    LoadLoraTextEncoder: { python_module: 'comfy_extras.nodes_lora_stack', input: { required: { clip: ['CLIP', {}], loras: ['COMFY_DYNAMICGROUP_V3', { template: { required: { lora_name: ['COMBO', { options: ['qwen35-9b-hauhaucs_uncensored_lora_rank4_fp32.safetensors'] }], strength: ['FLOAT', {}], enabled: ['BOOLEAN', {}] } }, min: 1, max: 20 }] } } },
+    TextGenerateV2: { python_module: 'comfy_extras.nodes_textgen', input: { required: { clip: ['CLIP', {}], prompt: ['STRING', {}], max_length: ['INT', {}], sampling_mode: ['COMFY_DYNAMICCOMBO_V3', { options: [{ key: 'on' }, { key: 'off' }] }] },
+      optional: { thinking: ['BOOLEAN', {}], use_default_template: ['BOOLEAN', {}], mtp: ['COMBO', { options: ['auto', 'off'] }], system_prompt: ['STRING', {}] } } },
     ImageCompositeMasked: { python_module: 'comfy_extras.nodes_mask', input: { required: { destination: ['IMAGE', {}], source: ['IMAGE', {}], x: ['INT', {}], y: ['INT', {}], resize_source: ['BOOLEAN', {}] }, optional: { mask: ['MASK', {}] } } },
   };
   if (o.zonderWs) delete OI.SaveImageWebsocket;
-  const C = { prompts: [], hist: {}, histDelete: [], interrupts: [], free: 0, rij: { queue_running: [], queue_pending: [] }, ws: {}, scenario: 'goed', n: 0, hangt: null, t2iBeeld: null, uploads: 0, laatsteUpload: null };
+  const C = { prompts: [], hist: {}, histDelete: [], interrupts: [], free: 0, rij: { queue_running: [], queue_pending: [] }, ws: {}, scenario: 'goed', n: 0, hangt: null, t2iBeeld: null, uploads: 0, laatsteUpload: null, uitTekst: 'UITGEBREID ', tekstWacht: 0 };
   const histPad = path.join(dir, 'history.json');
   const histBewaar = () => fs.writeFileSync(histPad, JSON.stringify(C.hist));
   histBewaar();
@@ -68,7 +75,20 @@ function start(dir, o) {
       const k = prompt[id].class_type;
       zendTekst(cid, { type: 'executing', data: { node: id, prompt_id: pid } });
       if (k === 'SaveImageWebsocket') zendBeeld(cid, invoer);
+      if (k === 'PreviewAny') {   // wv3044
+        const src = prompt[id].inputs.source, g = src && prompt[src[0]];
+        const pl = g && g.inputs.prompt && prompt[g.inputs.prompt[0]];
+        const tekst = C.uitTekst + (pl ? pl.inputs.value : '');
+        outputs[id] = { text: [tekst] };
+        zendTekst(cid, { type: 'executed', data: { node: id, display_node: id, output: { text: [tekst] }, prompt_id: pid } });
+      }
       if (k === 'PreviewImage') { const fn = 'ComfyUI_temp_' + (++C.n) + '_.png'; fs.writeFileSync(path.join(dir, 'temp', fn), invoer); outputs[id] = { images: [{ filename: fn, subfolder: '', type: 'temp' }] }; }
+    }
+    // wv3044: C.naRij = ms dat de prompt na execution_success nog in de rij staat (zoals de echte ComfyUI 0.44); de geschiedenis komt pas daarna
+    if (C.naRij) {
+      zendTekst(cid, { type: 'execution_success', data: { prompt_id: pid } });
+      zendTekst(cid, { type: 'executing', data: { node: null, prompt_id: pid } });
+      return void setTimeout(() => afronden(pid, prompt, cid, outputs, { status_str: 'success', completed: true, messages: [] }), C.naRij);
     }
     afronden(pid, prompt, cid, outputs, { status_str: 'success', completed: true, messages: [] });
     zendTekst(cid, { type: 'execution_success', data: { prompt_id: pid } });
