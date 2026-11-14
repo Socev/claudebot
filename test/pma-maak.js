@@ -30,6 +30,7 @@ function zip(bestanden) {   // [{ naam, data: Buffer }] → Buffer (deflate, vla
 }
 
 const KOP = 'id;patientnummer;Verrichting;Omschrijving;Type;Registreerder AGB;Registreerder;Soort;Tarief;Boekingsdatum;Factuurdatum';
+const KOP_ZONDER = KOP.replace(';patientnummer', '');   // wv3045: Davids normale vorm sinds 14-11-2026 (e.zonderPnr)
 const q = (v) => '"' + String(v).replace(/"/g, '""') + '"';
 const nl = (iso) => iso.slice(8, 10) + '-' + iso.slice(5, 7) + '-' + iso.slice(0, 4);
 const EIGEN_AGB = '01999999';   // verzonnen
@@ -39,8 +40,8 @@ function maakExport(e) {
   const info = 'AGB;Export datum;Begin periode;Eind periode;Naam populatie;Naam gegevensset;Type\r\n' +
     [e.agb || '009870', nl(e.exportdatum), nl(e.begin), nl(e.eind), 'ExportEigenpatienten_' + nl(e.exportdatum).replace(/-/g, ''), e.set || 'PMA', 'Praktijk'].join(';');
   let id = 700000;
-  const rijen = [e.kop || KOP].concat(e.regels.map((r) => [String(++id), r.pnr, r.code || '', r.oms, r.type, r.agb === undefined ? EIGEN_AGB : r.agb, r.reg, r.soort || (r.type === 'I' ? 'INSCHRIJFGELD' : 'NORMAAL'),
-    r.tarief, nl(r.dag), r.factuur === undefined ? (r.type === 'I' ? nl(r.dag) : '') : (r.factuur ? nl(r.factuur) : '')].map(q).join(';')));
+  const rijen = [e.kop || (e.zonderPnr ? KOP_ZONDER : KOP)].concat(e.regels.map((r) => [String(++id)].concat(e.zonderPnr ? [] : [r.pnr], [r.code || '', r.oms, r.type, r.agb === undefined ? EIGEN_AGB : r.agb, r.reg, r.soort || (r.type === 'I' ? 'INSCHRIJFGELD' : 'NORMAAL'),
+    r.tarief, nl(r.dag), r.factuur === undefined ? (r.type === 'I' ? nl(r.dag) : '') : (r.factuur ? nl(r.factuur) : '')]).map(q).join(';')));
   const naam = 'export_ExportEigenpatienten_' + nl(e.exportdatum).replace(/-/g, '') + '_PMA_VERRICHTING.csv';
   return zip((e.extra || []).concat([{ naam: 'export_info.csv', data: Buffer.from(info, 'utf8') }, { naam, data: Buffer.from(rijen.join('\r\n') + '\r\n', 'utf8') }]));
 }
@@ -110,4 +111,4 @@ function exportB() {
   return { agb: '009870', exportdatum: '2026-04-08', begin: '2026-01-20', eind: '2026-04-01', regels };
 }
 
-module.exports = { zip, maakExport, exportA, exportB, inschrijving, verrichtingen, patienten, KOP, MODULES, BASIS, C, REG, nl };
+module.exports = { zip, maakExport, KOP_ZONDER, exportA, exportB, inschrijving, verrichtingen, patienten, KOP, MODULES, BASIS, C, REG, nl };
