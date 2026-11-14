@@ -47,11 +47,11 @@ toets('2a hoofdkanaal: agentrapport-david wel, briefing niet', u2.punten.length 
 const u2v = T.uit({ per: { hoofd: [h1], machinekamer: [r1] }, klussen, staat: {}, tabs: {}, vraag, vast: true, nu: NU });
 toets('2b vaste plek: niets uit het hoofdkanaal, machinekamer wel', u2v.punten.length === 1 && u2v.punten[0].kanaal === 'machinekamer');
 // ── 3. antwoorden op Davids eigen beurt ──
-const b1 = beurt('knop', NU - 2 * U), b2 = beurt('bericht', NU - 3 * U), b3 = beurt('bericht', NU - U, { vraag_hash: 'abcd1234', antwoord: 'Klaar.\n\nVRAAG AAN DAVID: Zal ik het aanzetten?' });
+const b1 = beurt('knop', NU - 2 * U, { bestanden: ['Proefplan.md'] }), b2 = beurt('bericht', NU - 3 * U), b3 = beurt('bericht', NU - U, { vraag_hash: 'abcd1234', antwoord: 'Klaar.\n\nVRAAG AAN DAVID: Zal ik het aanzetten?' });
 const b4 = beurt('telegram', NU - U), b5 = beurt('zoek', NU - U), b6 = beurt('bericht', NU - U, { antwoord: '' });
 const per3 = { hoofd: [b2], machinekamer: [b1, b3, b4, b5, b6] };
 const u3 = T.uit({ per: per3, klussen, staat: {}, tabs: { machinekamer: iso(NU - 3 * U), hoofd: iso(NU - 4 * U) }, vraag, nu: NU });
-toets('3a antwoord op knop en getypt bericht dat David nog niet zag: erin, met zijn eigen tekst (van)', u3.punten.length === 2 && u3.punten.every((p) => p.soort === 'antwoord') && u3.punten.find((p) => p.job_id === b1.job_id).knop === true && /proefknop/.test(u3.punten.find((p) => p.job_id === b1.job_id).van), u3.punten);
+toets('3a antwoord op knop (met bestand) en getypt bericht dat David nog niet zag: erin, met zijn eigen tekst (van)', u3.punten.length === 2 && u3.punten.every((p) => p.soort === 'antwoord') && u3.punten.find((p) => p.job_id === b1.job_id).knop === true && /proefknop/.test(u3.punten.find((p) => p.job_id === b1.job_id).van), u3.punten);
 toets('3b met een vraag, Telegram, zoekvraag of leeg antwoord: niet', !u3.punten.some((p) => [b3, b4, b5, b6].some((b) => b.job_id === p.job_id)));
 const u3z = T.uit({ per: per3, klussen, staat: {}, tabs: { machinekamer: iso(NU - U), hoofd: iso(NU - 2 * U) }, vraag, nu: NU });
 toets('3c David zag het gesprek ná het antwoord: vanzelf weg (niet afgevinkt)', u3z.punten.length === 0 && u3z.afgevinkt.length === 0);
@@ -113,6 +113,22 @@ const st11 = Object.assign({}, s11, { bewaard: { [b11.job_id]: { kanaal: 'machin
 const u11 = T.uit({ per: { machinekamer: [r11a, r11b, b11] }, klussen, staat: st11, tabs: {}, vraag, nu: NU });
 toets('11a eerste keer: vanzelf alleen de laatste 24 uur (geen week achterstand); bewaard van daarvoor wel', u11.punten.length === 2 && u11.punten.some((p) => p.job_id === r11b.job_id) && u11.punten.some((p) => p.job_id === b11.job_id && p.soort === 'bewaard'));
 toets('11b sinds blijft staan (niet elke keer 24 uur terug)', T.staatNorm(s11, NU + 5 * D).sinds === s11.sinds);
+// ── 12. wv3093: antwoord op een knopdruk (David 14-11: "die hoef ik niet te zien in de 'Voor jou' lijst") ──
+const k1 = beurt('knop', NU - U), k2 = beurt('knop', NU - U, { tekst: '✗ Nee — op de vraag: Mag ik de proefknop bouwen?' });
+const k3 = beurt('knop', NU - U, { tekst: '✎ Anders: liever morgen — bij de kaart "Proefknop"' });
+const k4 = beurt('knop', NU - U, { ok: false, fout: 'proeffout', antwoord: 'Er ging iets mis met de proef.' });
+const k5 = beurt('knop', NU - U, { bestanden: ['Proefplan.md'] }), k6 = beurt('knop', NU - U, { bestanden: [] });
+const k7 = beurt('knop', NU - U, { vraag_hash: 'beefbeef', antwoord: 'Begrepen.\n\nVRAAG AAN DAVID: Zal ik ook de tweede proef doen?' });
+const g12 = beurt('bericht', NU - U);
+const u12 = T.uit({ per: { hoofd: [k1, k5], machinekamer: [k2, k3, k4, k6, k7, g12] }, klussen, staat: {}, tabs: {}, vraag, nu: NU });
+const in12 = (b) => u12.punten.some((p) => p.job_id === b.job_id);
+toets('12a knopantwoord Ja/Nee/Anders (ook lege bestandenlijst): niet in Te lezen, in beide gesprekken', !in12(k1) && !in12(k2) && !in12(k3) && !in12(k6), u12.punten.map((p) => p.job_id));
+toets('12b knopantwoord dat mislukte of een bestand meegeeft: wel', in12(k4) && in12(k5) && u12.punten.find((p) => p.job_id === k4.job_id).ok === false);
+toets('12c knopantwoord met een nieuwe vraag: niet in Te lezen (staat in Moet iets), getypt bericht blijft', !in12(k7) && in12(g12) && vraag(k7));
+toets('12d het getal telt de knopantwoorden niet mee', u12.ongezien === 3 && u12.nieuw === 3, { ongezien: u12.ongezien, nieuw: u12.nieuw });
+const st12 = { sinds: iso(NU - D), gezien: {}, bewaard: { [k1.job_id]: { kanaal: 'hoofd', op: iso(NU - 1000) } } };
+toets('12e een knopantwoord dat David zelf bewaarde: wel (als bewaard)', T.uit({ per: { hoofd: [k1] }, klussen, staat: st12, tabs: {}, vraag, nu: NU }).punten.some((p) => p.job_id === k1.job_id && p.soort === 'bewaard'));
+toets('12f knopTelt alleen op velden: ok false of een niet-lege bestandenlijst', T.knopTelt({ ok: false }) && T.knopTelt({ bestanden: ['a'] }) && !T.knopTelt({ ok: true, bestanden: [] }) && !T.knopTelt({ antwoord: 'storing: VRAAG' }));
 // ── 10. koppeling in server.js en de release ──
 const S = fs.readFileSync('server.js', 'utf8'), UR = fs.readFileSync('uitrol.sh', 'utf8');
 toets('10a route POST /app/te-lezen bestaat en glijdt (David die leest), niet in APP_SLOT_VRIJ', /route === 'POST \/app\/te-lezen'\) return appTeLezenZet/.test(S) && /'POST \/app\/aanwezig', 'POST \/app\/te-lezen'\]\)/.test(S) && !/APP_SLOT_VRIJ = new Set\(\[[^\]]*te-lezen/.test(S));
