@@ -92,7 +92,12 @@ const spNep = { kluis: [], schrijf: [], log: [], creds: [], patch: [], test: [],
 const pushStaat = { status: 201 };
 // wv174 (tab Praktijken): D1 `fin` (Cloudflare-API) en zorgdata (RPC zd_reeks) nagebootst, vorm als de echte (gemeten 8-10)
 const finStaat = { sql: [], auth: [], kapot: false, urls: [] };
-const zdStaat = { kapot: false, aanroepen: [] };
+const zdStaat = { kapot: false, aanroepen: [], gemeente: [], gemeenteKapot: false };
+// wv3081: RPC zd_gemeente (profiel van één gemeente naast regio en Nederland); verzonnen gemeente Proefdorp in regio Proefland
+const ZD_GEMEENTE = { ok: true, gemeente: { code: 'GM0327', naam: 'Proefdorp' }, regio: { indeling: 'jeugdregio', code: 'JZ99', naam: 'Proefland', gemeenten: ['Proefdorp', 'Proefstad'] },
+  reeksen: [{ code: 'inwoners', naam: 'Inwoners (1 januari)', eenheid: 'personen', decimalen: 0, jaren: [{ jaar: 2026, gemeente: 1000, regio: 3000, regio_n: 2, nl: 20000 }], bronnen: ['CBS proef'], versheid: [{ code: 'bevolking_nl', stand: 'bij', ververst_op: '2026-11-14T10:00:00Z' }] },
+    { code: 'kosten_hz_pv', naam: 'Kosten huisartsenzorg per verzekerde', eenheid: '€ per verzekerdejaar', decimalen: 0, kanttekening: 'Kosten per verzekerde zijn geen doelmatigheidsmaat (proef).',
+      jaren: [{ jaar: 2023, gemeente: 270.2, regio: 263.4, regio_n: 2, nl: 268 }, { jaar: 2024, gemeente: 298.7, regio: 291.8, regio_n: 2, nl: 296.1 }], bronnen: ['Vektis proefbestand'], versheid: [{ code: 'vektis_hz_totaal_pv', stand: 'bij', ververst_op: '2026-08-01T00:00:00Z' }] }] };
 const finR = (e, r, rij, bron0) => Object.entries(rij).map(([j, b]) => ({ entiteit: e, rubriek: r, jaar: Number(j), bedrag: b, bron_id: typeof bron0 === 'function' ? bron0(Number(j)) : bron0 }));
 const finTG = (j) => (j <= 2020 ? 7 : j === 2021 ? 8 : j === 2022 ? 9 : j === 2023 ? 11 : j === 2024 ? 14 : 18);
 const FIN_REEKS = [].concat(
@@ -268,6 +273,11 @@ async function nepFetch(url, opt) {
     if (!/\/d1\/database\/ffcb09ad-fc50-4c83-aa7b-ad6409b44e03\/query$/.test(url)) return antw(404, { success: false });
     const res = / FROM reeks /.test(q) ? FIN_REEKS : / FROM patienten /.test(q) ? FIN_PAT : / FROM declaratie /.test(q) ? FIN_DECL : / FROM bron /.test(q) ? FIN_BRON : null;
     return res ? antw(200, { success: true, result: [{ results: res, success: true }] }) : antw(400, { success: false, errors: [{ message: 'onbekende query' }] });
+  }
+  if (url === SB + '/rest/v1/rpc/zd_gemeente') {   // wv3081: zorgdata per gemeente
+    zdStaat.gemeente.push(JSON.parse(opt.body || '{}'));
+    if (zdStaat.kapot || zdStaat.gemeenteKapot) return antw(500, { message: 'kapot' });
+    return antw(200, ZD_GEMEENTE);
   }
   if (url === SB + '/rest/v1/rpc/zd_reeks') {   // wv174: zorgdata
     const b = JSON.parse(opt.body || '{}'); zdStaat.aanroepen.push(b);
@@ -4218,6 +4228,11 @@ async function bewijs(o) {
       const qR = finStaat.sql.find((x) => / FROM reeks /.test(x.q)).q;
       toets("20 reeks: alleen versie='jaarrekening', maat IS NULL (geen modeluitkomst, geen winstdeel per maat), alleen de vijf entiteiten", /versie='jaarrekening' AND maat IS NULL/.test(qR) && /entiteit IN \('TG','GH','POT','KM','HOLD'\)/.test(qR) && !/PHBV|SLOEL/.test(qR), qR);
       toets('20 patiënten: alleen totalen (leeftijdsgroep IS NULL), declaraties: verzekeraar totaal', finStaat.sql.some((x) => / FROM patienten /.test(x.q) && /leeftijdsgroep IS NULL/.test(x.q)) && finStaat.sql.some((x) => / FROM declaratie /.test(x.q) && /verzekeraar='totaal'/.test(x.q)));
+      toets('20 wv3081: één vaste vraag zd_gemeente voor de gemeente van TG en GH (GM0327, jeugdregio, vanaf 2015)', JSON.stringify(zdStaat.gemeente) === JSON.stringify([{ p_gemeente: 'GM0327', p_indeling: 'jeugdregio', p_van: 2015 }]), JSON.stringify(zdStaat.gemeente));
+      { const d = (j.dichtbij || [])[0] || {}; const kt = (d.tegels || []).find((t) => t.code === 'kosten_hz_pv') || {};
+        toets('20 wv3081: blok Proefdorp · Proefland · Nederland met tegel kosten (laatste jaar), bron Vektis, kanttekening en vraag', (j.dichtbij || []).length === 1 && d.praktijken.join() === 'TG,GH'
+          && kt.jaar === 2024 && kt.gemeente === 299 && kt.regio === 292 && kt.nl === 296 && /^bron: Vektis/.test(kt.bron) && /doelmatigheidsmaat/.test(kt.kanttekening) && kt.ververst === '2026-08-01' && kt.stand === 'bij'
+          && d.vraag === 'Vergelijk de huisartsenzorgkosten in Proefdorp met Proefland en Nederland sinds 2015' && d.gemeente.inwoners === 1000, JSON.stringify(j.dichtbij).slice(0, 400)); }
       toets('20 zorgdata: drie reeksen via zd_reeks', zdStaat.aanroepen.map((x) => x.p_code).sort().join() === 'idx_personeel,normpraktijk_ptn,nza_pohggz_uitgaven' && zdStaat.aanroepen.every((x) => x.p_norm === 'abs'), JSON.stringify(zdStaat.aanroepen));
       const kern = (e, label) => (E[e] && E[e].kern || []).find((k) => k.label === label);
       const graf = (e, re) => (E[e] && E[e].grafieken || []).find((g) => re.test(g.titel));
@@ -4269,7 +4284,11 @@ async function bewijs(o) {
       H.appStaat.praktijken = null; zdStaat.kapot = true;
       r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
       toets('20 zorgdata stuk: 200, eigen cijfers wel, sector weg, fout in gewone taal', r.status === 200 && r.j.entiteiten.length === 5 && r.j.entiteiten.every((e) => e.sector === null) && /Cijfer-Meester/.test(r.j.fouten.join()) && r.j.entiteiten[0].kern.length >= 5, JSON.stringify(r.j.fouten));
-      zdStaat.kapot = false; H.appStaat.praktijken = null; finStaat.kapot = true;
+      toets('20 wv3081 zorgdata stuk: blok gemeente · regio · Nederland weg met één regel', Array.isArray(r.j.dichtbij) && r.j.dichtbij.length === 0 && r.j.fouten.filter((f) => /gemeente, regio en Nederland/.test(f)).length === 1, JSON.stringify(r.j.fouten));
+      zdStaat.kapot = false; H.appStaat.praktijken = null; zdStaat.gemeenteKapot = true;
+      r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
+      toets('20 wv3081 alleen zd_gemeente stuk: blok weg met één regel, de sector en de rest blijven', r.status === 200 && r.j.dichtbij.length === 0 && r.j.fouten.length === 1 && /gemeente, regio en Nederland/.test(r.j.fouten[0]) && !!r.j.entiteiten[0].sector && r.j.entiteiten[0].kern.length >= 5, JSON.stringify(r.j.fouten));
+      zdStaat.gemeenteKapot = false; H.appStaat.praktijken = null; finStaat.kapot = true;
       r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
       toets('20 datahub stuk: 503 met nette tekst', r.status === 503 && /niet te lezen/.test(r.j.fout), JSON.stringify(r.j));
       finStaat.kapot = false; H.appStaat.praktijken = null;
