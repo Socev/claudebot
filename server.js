@@ -13881,7 +13881,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/tokens/openai' || route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/mailman' || route === 'GET /app/mailman/verkoop' || route.indexOf('POST /app/mailman/') === 0) return typeof appMailman === 'function' ? appMailman(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'mailman');   // wv1856: OVIS MailMan
-        if (route === 'POST /app/mail/lijst' || route === 'POST /app/mail/gesprek' || route === 'POST /app/mail/bijlage' || route === 'POST /app/mail/todo' || route === 'POST /app/mail/todo/voorstel' || route === 'POST /app/mail/naar') return typeof appMailApp === 'function' ? appMailApp(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'mail-app');   // wv3077: OVIS Mail fase 1 (Davids Gmail-inbox met de laag van Socev)
+        if (route === 'POST /app/mail/lijst' || route === 'POST /app/mail/gesprek' || route === 'POST /app/mail/bijlage' || route === 'POST /app/mail/todo' || route === 'POST /app/mail/todo/voorstel' || route === 'POST /app/mail/naar' || route === 'POST /app/mail/wijzig') return typeof appMailApp === 'function' ? appMailApp(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'mail-app');   // wv3077: OVIS Mail fase 1 (Davids Gmail-inbox met de laag van Socev)
         if (route === 'POST /app/mail/voorwerk' || route === 'POST /app/mail/voorwerk/maak' || route === 'POST /app/mail/voorwerk/gmail') return typeof appMailVoorwerk === 'function' ? appMailVoorwerk(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'mail voorwerk');   // wv2455: voorwerk bij vragen in Mail
         if (route === 'GET /app/mail/zaken' || /^GET \/app\/mail\/zaken\/(jij|socev|weg|afgedaan|zien)\/[1-9]\d?$/.test(route)) return typeof appMailZaken === 'function' ? appMailZaken(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mail');   // wv2218: Apps › Mail (zaakregister, alleen lezen); wv2291: groep zien
         if (route === 'GET /app/werkstroom' || route.indexOf('GET /app/werkstroom/') === 0) return typeof appWerkstroom === 'function' ? appWerkstroom(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'werkstroom');   // wv2002: Werkstroom (alleen lezen)
@@ -18627,6 +18627,13 @@ function mailmanRoute(req, res) {
     if (!d || typeof d !== 'object') return mailmanStuur(res, 400, { ok: false, fout: 'geen json' });
     if (!bearer && !berichtGeheimOk(d)) return mailmanStuur(res, 401, { ok: false, fout: 'sleutel' });
     delete d.secret;
+    // wv3090: de pas van een tik in de Mail-App terugtoetsen; alleen met het pod-geheim (n8n), nooit met een MailMan-sleutel
+    if (reqPath(req) === '/mailman/mail-wijzig-pas') {
+      if (bearer || typeof mailAppPasToets !== 'function') return mailmanStuur(res, 401, { ok: false, fout: 'sleutel' });
+      const pr = mailAppPasToets(d);
+      res._log = Object.assign(res._log || {}, { mailman: 'mail-wijzig-pas ' + (pr.j.ok ? 'ja' : 'nee') });
+      return mailmanStuur(res, pr.status, pr.j);
+    }
     let r;
     try { r = toets ? await mailman.verkoopToets(d) : mailman.n8n('POST ' + reqPath(req), d); } catch (e) { logError('mailman', e); return mailmanStuur(res, 500, { ok: false, fout: 'intern' }); }
     res._log = Object.assign(res._log || {}, { mailman: reqPath(req).slice(9) });
@@ -18933,9 +18940,29 @@ const mailApp = (function () {
       intakeStuk: function (draad) { return typeof mailIntakeStukken === 'function' ? mailIntakeStukken(mailmanIntakeOpen(), [draad]).get(draad) || null : null; },
       poort: function (stuk) { return require(path.join(__dirname, 'intake', 'patientpoort.js')).beoordeel(stuk); },
       datums: async function (d) { if (typeof datums === 'undefined' || !datums) return []; const r = await datums.verwerk({ tekst: d.tekst, anker: d.anker }); return r.status === 200 && r.j && Array.isArray(r.j.treffers) ? r.j.treffers : []; },
-      todoist: function (b) { return mailAppTodoist(b); } });
+      todoist: function (b) { return mailAppTodoist(b); },
+      labelIds: function () { return typeof mailman.mailLabelIds === 'function' ? mailman.mailLabelIds() : null; },   // wv3090 fase 1b
+      toestemming: function () { return mailAppToestemming(); },
+      pas: function (x) { return mailAppPasMaak(x); } });
   } catch (e) { logError('mail-app', e); return null; }
 })();
+// ── wv3090: OVIS Mail fase 1b — Gmail-handeling op Davids tik (archiveren, terugzetten, gelezen/ongelezen, ster, label uit MailMans vaste
+// lijst). Toestemming = registerrij mail-app-prive-op-tik met status aan in het toestemmingenregister (alleen die bron telt; onleesbaar = uit).
+// Elke luik-aanroep mail_wijzig draagt een eenmalige pas (16 willekeurige bytes, 60 s, alleen in het geheugen van deze pod) die n8n vóór de
+// Gmail-handeling terugtoetst via POST /mailman/mail-wijzig-pas met het pod-geheim (n8n-credential "Claudebot pod API (body-secret)"). Het
+// luikgeheim kennen ook Socevs skills; zonder pas van een tik in de App doet het luik niets in Gmail. Pas en handeling moeten precies gelijk zijn.
+const MAIL_APP_REGISTER = process.env.MAIL_APP_REGISTER || '/opt/data/mk-scripts/toestemmingen.json';
+const MAIL_APP_RIJ = 'mail-app-prive-op-tik';
+function mailAppToestemming() {
+  try { const r = JSON.parse(fs.readFileSync(MAIL_APP_REGISTER, 'utf8')); return !!(r && Array.isArray(r.rijen) && r.rijen.some(function (x) { return x && x.id === MAIL_APP_RIJ && x.status === 'aan'; })); }
+  catch (e) { return false; }
+}
+const mailAppPassenReg = (function () {
+  try { return mailApp ? require(path.join(__dirname, 'mail-app.js')).passen({ nu: Date.now, toeval: function () { return crypto.randomBytes(16).toString('hex'); } }) : null; }
+  catch (e) { logError('mail-app-passen', e); return null; }
+})();
+function mailAppPasMaak(x) { if (!mailAppPassenReg) throw new Error('geen passen'); return mailAppPassenReg.maak(x); }
+function mailAppPasToets(d) { return mailAppPassenReg ? mailAppPassenReg.toets(d) : { status: 200, j: { ok: false } }; }
 async function mailAppLuikBytes(body) {
   const geheim = process.env.N8N_WEBHOOK_AGENDA_API;
   if (!geheim) throw new Error('lees-luik niet ingericht');
@@ -18960,7 +18987,7 @@ async function mailAppTodoist(body) {
   try { j = await r.json(); } catch (e) { j = null; }
   return { status: r.status, j: j && typeof j === 'object' ? { id: j.id } : null };
 }
-const MAIL_APP_UUR = { lijst: 900, gesprek: 600, bijlage: 120, 'todo/voorstel': 60, todo: 30, naar: 60 };
+const MAIL_APP_UUR = { lijst: 900, gesprek: 600, bijlage: 120, 'todo/voorstel': 60, todo: 30, naar: 60, wijzig: 300 };
 async function appMailApp(req, res, a, d, route) {
   if (!mailApp) return appWeiger(res, 404, 'De Mail-App zit niet in deze versie van de pod', 'mail-app ontbreekt');
   if (appAfscherm(a)) return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'mail-app afgeschermd');
@@ -18968,7 +18995,7 @@ async function appMailApp(req, res, a, d, route) {
   const tel = 'mail-app-' + soort;
   appStaat.tellers[tel] = appStaat.tellers[tel] || [];
   if (!appTeller(tel, MAIL_APP_UUR[soort] || 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens mail-app ' + soort);
-  if ((soort === 'todo' || soort === 'naar') && !(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
+  if ((soort === 'todo' || soort === 'naar' || soort === 'wijzig') && !(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
   d = d && typeof d === 'object' ? d : {};
   let r;
   try {
@@ -18977,10 +19004,12 @@ async function appMailApp(req, res, a, d, route) {
     else if (soort === 'bijlage') r = await mailApp.bijlage(d);
     else if (soort === 'todo/voorstel') r = await mailApp.todoVoorstel(d);
     else if (soort === 'todo') r = await mailApp.todo(d);
+    else if (soort === 'wijzig') r = await mailApp.wijzig(d);
     else r = mailman.mailNaar(d);
   } catch (e) { logError('mail-app', e); return appWeiger(res, 500, 'fout op de pod', 'mail-app uitzondering'); }
   // alleen de route, de map en de uitkomst; nooit de zoekvraag, een onderwerp of tekst (grondwet 2/3)
-  res._app.reden = 'mail ' + soort + (soort === 'lijst' ? ' ' + String(d.map || 'inbox').replace(/[^a-z]/g, '').slice(0, 12) + (d.q ? ' zoek' : '') : '') + (soort === 'naar' ? ' ' + String(d.naar || '').replace(/[^a-z]/g, '').slice(0, 10) : '') + (r.status >= 300 ? ' ' + r.status : '');
+  res._app.reden = 'mail ' + soort + (soort === 'lijst' ? ' ' + String(d.map || 'inbox').replace(/[^a-z]/g, '').slice(0, 12) + (d.q ? ' zoek' : '') : '') + (soort === 'naar' ? ' ' + String(d.naar || '').replace(/[^a-z]/g, '').slice(0, 10) : '')
+    + (soort === 'wijzig' ? ' ' + String(d.wat || '').replace(/[^a-z_]/g, '').slice(0, 12) + ' ' + (r.j && Array.isArray(r.j.gedaan) ? r.j.gedaan.length : 0) : '') + (r.status >= 300 ? ' ' + r.status : '');
   if (soort !== 'lijst' || d.eerste !== true || d.q || d.pagina) res._app.stil = true;   // alleen het openen van de inbox is een auditregel
   return appStuur(res, r.status, r.j);
 }
