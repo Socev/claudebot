@@ -151,7 +151,7 @@ function bladen(o) {
   }
   t.push([]);
   t.push(['Bedrag', 'Som van de afschrijvingen van de praktijkrekening in het kalenderjaar (op boekdatum) aan de rekeningen die bij de waarnemer horen, inclusief vergoedingen. Terugbetalingen zijn niet afgetrokken; ze staan in de opmerking.']);
-  t.push(['NAW', 'Uit de waarnemerslijst van 2025 (vindplaats per regel). Een adres kan sindsdien veranderd zijn. Ontbreekt iets, dan staat er "NAW onvolledig".']);
+  t.push(['NAW', 'Uit de waarnemerslijst van 2025, aangevuld uit facturen en het BIG-register (vindplaats per regel). Een adres kan sindsdien veranderd zijn. Ontbreekt iets, dan staat er "NAW onvolledig".']);
   t.push(['Geboortedatum en BSN', 'Bewust leeg: DocPlan slaat ze niet op. Vul ze aan zoals vorig jaar.']);
   t.push(['Wie telt', 'Alleen waarnemers (niet in loondienst) met een betaling in het jaar. Bij een waarnemer die via een eigen BV factureert, vervalt de opgaaf meestal: graag nakijken.']);
   uit.push({ naam: 'Toelichting', rijen: t });

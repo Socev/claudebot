@@ -405,3 +405,171 @@ test('wv2486 review MOET 2: antwoord van plaatsen verloren (stand fout) → ontv
     assert.strictEqual(roep.filter((b) => b.pr === 'GH').length, 1, 'GH zonder schrijfrecht: alleen de ene plaatspoging, geen weghalen');
   } finally { t.weg(); }
 });
+
+// ── wv3066: een vinkje telt meteen (eigen gezet item dat de feed nog niet zag = +1, weggehaald na de feed = −1); kaarttekst volgt de stand ──
+const tg = (x, maandag, i) => x.j.praktijken[0].weken.find((w) => w.maandag === maandag).dagen[i || 0];
+const routeV = (pad, bez, antwoord) => routeG(pad, bez, antwoord || ((b) => (b.actie === 'plaatsen' ? (b.pr === 'GH' ? { ok: false, fout: 'geen_schrijfrecht' } : { ok: true, event_id: 'eigen' + b.datum.replace(/-/g, '') }) : { ok: true, weg: 1 })));
+const gaten = { TG: { '2027-01-11': { artsen: 2 } }, GH: { '2027-01-12': { artsen: 0 } } };   // TG ma tekort 1 (min 3); GH di tekort 2 (min 2, GH zonder weekregel)
+const allesOk = (b) => (b.actie === 'plaatsen' ? { ok: true, event_id: 'eigen' + b.pr.toLowerCase() + b.datum.replace(/-/g, '') } : { ok: true, weg: 1 });
+
+test('wv3066 vinkje bij tekort 1: meteen oranje, niet meer in "zonder verzoek", reden verzoek_vers; tekort 2: rood met de rest', async () => {
+  const t = tmpDb();
+  try {
+    const { r } = routeV(t.pad, rooster(gaten), allesOk);
+    let x = await r.app(req());
+    assert.deepStrictEqual(x.j.praktijken.map((p) => p.zonder_verzoek), [1, 1]);
+    await postG(r, { handeling: 'vink', pr: 'TG', datum: '2027-01-11' });
+    await postG(r, { handeling: 'vink', pr: 'GH', datum: '2027-01-12' });
+    x = await r.app(req());
+    const ma = tg(x, '2027-01-11', 0), di = x.j.praktijken[1].weken.find((w) => w.maandag === '2027-01-11').dagen[1];
+    assert.deepStrictEqual([ma.kleur, ma.gezocht, ma.verzoek_vers, ma.voorstel], ['oranje', 1, 'gezet', null]);
+    assert.strictEqual(ma.redenen[0].gedekt, true);
+    assert.deepStrictEqual([di.kleur, di.gezocht, di.verzoek_vers], ['rood', 1, 'gezet']);
+    assert.deepStrictEqual(di.voorstel, { aantal: 1, soort: 'hard' }, 'één vinkje = één verzoek: de rest blijft');
+    assert.deepStrictEqual(x.j.praktijken.map((p) => p.zonder_verzoek), [0, 1], 'alleen de dag met het resterende tekort telt nog');
+  } finally { t.weg(); }
+});
+
+test('wv3066 vinkje weg = meteen weer rood; ook als de feed het item al zag (weggehaald na de feed = −1)', async () => {
+  const t = tmpDb();
+  try {
+    const { r } = routeV(t.pad, rooster(gaten));
+    await postG(r, { handeling: 'vink', pr: 'TG', datum: '2027-01-11' });
+    assert.strictEqual(tg(await r.app(req()), '2027-01-11').kleur, 'oranje');
+    await postG(r, { handeling: 'ontvink', pr: 'TG', datum: '2027-01-11' });
+    let x = await r.app(req());
+    assert.deepStrictEqual([tg(x, '2027-01-11').kleur, tg(x, '2027-01-11').gezocht, tg(x, '2027-01-11').verzoek_vers], ['rood', 0, null], 'zelfde dag: feed zag niets, niets te corrigeren');
+    // volgende ochtend: opnieuw aangevinkt de avond ervoor, feed van 07:00 bevat het item (gezocht 1) → gewoon gedekt, geen correctie
+    const avond = NU + 12 * 3600e3, morgen = NU + 864e5;
+    const bezM = Object.assign(rooster({ TG: { '2027-01-11': { artsen: 2, gezocht: 1 }, '2027-01-12': { artsen: 0 } } }, FEEDS(1, false, morgen)));
+    const { r: r2 } = routeV(t.pad, bezM);
+    await r2.app(req({ methode: 'POST', nu: avond, d: { handeling: 'vink', pr: 'TG', datum: '2027-01-11' } }));
+    x = await r2.app(req({ nu: morgen }));
+    assert.deepStrictEqual([tg(x, '2027-01-11').kleur, tg(x, '2027-01-11').gezocht, tg(x, '2027-01-11').verzoek_vers], ['oranje', 1, null], 'feed telt het item: niet dubbel');
+    // nu weghalen: de feed telt het nog tot morgen, het scherm meteen niet meer
+    await r2.app(req({ methode: 'POST', nu: morgen + 3600e3, d: { handeling: 'ontvink', pr: 'TG', datum: '2027-01-11' } }));
+    x = await r2.app(req({ nu: morgen + 3600e3 }));
+    assert.deepStrictEqual([tg(x, '2027-01-11').kleur, tg(x, '2027-01-11').gezocht, tg(x, '2027-01-11').verzoek_vers], ['rood', 0, 'weg']);
+    // feed van de ochtend erna ziet het item niet meer: geen correctie meer (rood uit de feed zelf)
+    const bezO = rooster(gaten, FEEDS(1, false, morgen + 864e5));
+    const { r: r3 } = routeV(t.pad, bezO);
+    x = await r3.app(req({ nu: morgen + 864e5 }));
+    assert.deepStrictEqual([tg(x, '2027-01-11').kleur, tg(x, '2027-01-11').verzoek_vers], ['rood', null]);
+  } finally { t.weg(); }
+});
+
+test('wv3066 ochtendronde: een dag met een eigen gezet verzoek dat de feed nog niet zag levert geen kaart; een gemelde dag gaat dicht als geregeld', async () => {
+  const t = tmpDb();
+  try {
+    const bez = rooster({ TG: { '2026-12-07': { artsen: 2 }, '2026-12-14': { artsen: 2 } } });
+    const { r } = routeV(t.pad, bez);
+    const db = new DatabaseSync(t.pad); const v = vj();
+    const bewijs = [];
+    const st0 = v.io.status; v.io.status = async (s, van, naar, x) => { bewijs.push(x && x.bewijs); return st0(s, van, naar); };
+    try {
+      await ronde(db, rooster({ TG: { '2026-12-14': { artsen: 2 } } }), v);   // eerst alleen week 51 gemeld
+      assert.deepStrictEqual([...v.kaarten.keys()], ['docplan-bezetting:TG:2026-12-14:1']);
+      // David vinkt beide dagen aan; de ronde van morgen draait op een feed die nog van vóór het vinkje is
+      await r.app(req({ methode: 'POST', nu: NU + 3600e3, d: { handeling: 'vink', pr: 'TG', datum: '2026-12-07' } }));
+      await r.app(req({ methode: 'POST', nu: NU + 3600e3, d: { handeling: 'vink', pr: 'TG', datum: '2026-12-14' } }));
+      const oud = Object.assign({}, bez, { feeds: FEEDS(2, false, NU) });   // feed 2 uur vóór NU, ouder dan het vinkje
+      const x = await B.ronde({ rpc: async () => oud, db, io: v.io, nu: NU + 2 * 3600e3, normTekst: null, nuKort: 'k', forceer: true, zelfSchrijven: true });
+      assert.strictEqual(x.nieuw, 0, 'geen kaart voor een dag met een eigen gezet verzoek');
+      assert.strictEqual(x.gesloten, 1);
+      assert.match(bewijs[0], /geregeld/);
+    } finally { db.close(); }
+  } finally { t.weg(); }
+});
+
+test('wv3066 kaart: de stap volgt de stand per praktijk (zelf / link / onbekend); sluittekst "voorbij" als de dag voorbij is', async () => {
+  assert.strictEqual(B.schrijfWijze(true, null), 'onbekend');
+  assert.strictEqual(B.schrijfWijze(true, 'zelf'), 'zelf');
+  assert.strictEqual(B.schrijfWijze(true, 'link'), 'link');
+  assert.strictEqual(B.schrijfWijze(false, 'zelf'), 'link', 'pod zonder schrijfroute = link');
+  const t = tmpDb();
+  try {
+    const { r } = routeV(t.pad, rooster({}));
+    let x = await r.app(req());
+    assert.deepStrictEqual(x.j.praktijken.map((p) => p.schrijven), ['onbekend', 'onbekend']);
+    await postG(r, { handeling: 'vink', pr: 'TG', datum: '2027-01-11' });
+    await postG(r, { handeling: 'vink', pr: 'GH', datum: '2027-01-11' });
+    x = await r.app(req());
+    assert.deepStrictEqual(x.j.praktijken.map((p) => p.schrijven), ['zelf', 'link']);
+    // n8n even weg: verandert niets aan wat de praktijk kan
+    const { r: rWeg } = routeG(t.pad, rooster({}), () => { throw new Error('weg'); });
+    await postG(rWeg, { handeling: 'vink', pr: 'TG', datum: '2027-01-13' });
+    assert.strictEqual((await r.app(req())).j.praktijken[0].schrijven, 'zelf');
+    // de ochtendronde zet de kaart met dezelfde stand
+    const db = new DatabaseSync(t.pad); const v = vj();
+    try {
+      await B.ronde({ rpc: async () => Object.assign(rooster({ TG: { '2026-12-08': { artsen: 0 } }, GH: { '2026-12-08': { artsen: 0 } } }), { feeds: FEEDS(2, false, NU) }), db, io: v.io, nu: NU, normTekst: null, nuKort: 'k', forceer: true, zelfSchrijven: true });
+      const kTG = v.kaarten.get('docplan-bezetting:TG:2026-12-07:1').kaart, kGH = v.kaarten.get('docplan-bezetting:GH:2026-12-07:1').kaart;
+      assert.match(kTG.stappen[1], /Socev zet het verzoek dan zelf op de waarneemsite\. Vinkje weg/);
+      assert.ok(!/GEZOCHT-agenda/.test(kTG.stappen[1]), 'TG: geen oude werkwijze');
+      assert.match(kGH.stappen[1], /Zet in GEZOCHT-agenda.*Groenhouten niet zelf zetten/);
+      assert.match(kTG.stappen[2], /geregeld of voorbij/);
+    } finally { db.close(); }
+    assert.match(B.kaartStap('onbekend', 'Tolgaarde'), /Lukt dat niet, dan verschijnt de knop/);
+    // sluitsoort
+    assert.strictEqual(B.sluitSoort([{ stand: 'voorbij' }]), 'voorbij');
+    assert.strictEqual(B.sluitSoort([{ stand: 'voorbij' }, { stand: 'opgelost' }]), 'gemengd');
+    assert.strictEqual(B.sluitSoort([{ stand: 'goed_zo' }, { stand: 'opgelost' }]), 'geregeld');
+  } finally { t.weg(); }
+});
+
+test('wv3066 ronde: een gemelde dag die voorbij gaat zonder oplossing sluit met "De dag is voorbij", niet met "geregeld"', async () => {
+  const t = tmpDb(); const db = new DatabaseSync(t.pad); const v = vj();
+  const bewijs = []; const st0 = v.io.status; v.io.status = async (s, van, naar, x) => { bewijs.push(x && x.bewijs); return st0(s, van, naar); };
+  try {
+    const gat = { TG: { '2026-11-09': { artsen: 2 } } };   // ma 9-11, gemeld op do 5-11
+    await ronde(db, rooster(gat), v);
+    assert.strictEqual(v.kaarten.size, 1);
+    const x = await ronde(db, rooster(gat), v, Date.parse('2026-11-10T06:10:00Z'));   // di 10-11: de dag is voorbij, nog steeds 2 artsen
+    assert.strictEqual(x.gesloten, 1);
+    assert.match(bewijs[0], /De dag is voorbij/); assert.ok(!/geregeld/.test(bewijs[0]));
+  } finally { db.close(); t.weg(); }
+});
+
+test('wv3066 schema: gezet_op, bezetting_weg en bezetting_schrijf herhaalbaar; oude gezette rij zonder gezet_op valt terug op bijgewerkt', () => {
+  const t = tmpDb();
+  try {
+    const db = new DatabaseSync(t.pad);
+    db.exec("CREATE TABLE bezetting_keuze (pr TEXT NOT NULL CHECK (pr IN ('TG','GH')), datum TEXT NOT NULL, op TEXT NOT NULL, door TEXT NOT NULL, event_id TEXT, stand TEXT, fout TEXT, bijgewerkt TEXT, PRIMARY KEY (pr, datum))");
+    db.prepare("INSERT INTO bezetting_keuze VALUES ('TG','2027-01-11','2026-11-01T00:00:00Z','david','abcde1','gezet',NULL,'2026-11-05T05:30:00Z')").run();
+    B.schema(db); B.schema(db);
+    const st = B.staat(db);
+    assert.strictEqual(st.eigen.TG.get('2027-01-11'), '2026-11-05T05:30:00Z');
+    assert.deepStrictEqual(st.schrijf, { TG: null, GH: null });
+    // feed van 06:00 na bijgewerkt 05:30 → zit erin, geen correctie; feed van 05:00 → +1
+    assert.strictEqual(B.correctie(FEEDS(1e-6, false, Date.parse('2026-11-05T06:00:00Z')), 'TG', st.eigen.TG, st.weg.TG).size, 0);
+    assert.strictEqual(B.correctie(FEEDS(1e-6, false, Date.parse('2026-11-05T05:00:00Z')), 'TG', st.eigen.TG, st.weg.TG).get('2027-01-11'), 1);
+    const zonder = B.correctie([], 'TG', st.eigen.TG, new Map([['2027-01-12', [{ gezet_op: '2026-11-01T00:00:00Z', weg_op: '2026-11-06T00:00:00Z' }]]]));
+    assert.deepStrictEqual([zonder.get('2027-01-11'), zonder.has('2027-01-12')], [1, false], 'zonder feedtijd: gezet telt, weg niet');
+    db.close();
+  } finally { t.weg(); }
+});
+
+test('wv3066 review MOET 1: meerdere vinkcycli over een feedverversing — een oude verwijdering die de feed al zag telt niet mee voor een latere', async () => {
+  const t = tmpDb();
+  try {
+    const dag = '2027-01-11', u = 3600e3;
+    // dag 1 22:00 vink A; feed dag 2 06:00 ziet A (gezocht 1); dag 2 09:00 ontvink A; feed dag 3 06:00 ziet A niet meer (gezocht 0)
+    const f2 = NU + 864e5, f3 = NU + 2 * 864e5;
+    const bez = (gz, feedNu) => rooster({ TG: { [dag]: { artsen: 2, gezocht: gz } } }, FEEDS(1e-6, false, feedNu));
+    const stap = async (bz, nu, d) => { const { r } = routeV(t.pad, bz); if (d) await r.app(req({ methode: 'POST', nu, d })); return tg(await r.app(req({ nu })), dag); };
+    let d = await stap(bez(0, NU), NU + 16 * u, { handeling: 'vink', pr: 'TG', datum: dag });
+    assert.deepStrictEqual([d.kleur, d.gezocht], ['oranje', 1]);
+    d = await stap(bez(1, f2), f2 + 3 * u, { handeling: 'ontvink', pr: 'TG', datum: dag });
+    assert.deepStrictEqual([d.kleur, d.gezocht, d.verzoek_vers], ['rood', 0, 'weg']);
+    // dag 3: feed zag de verwijdering; vink B en meteen weer weg (vóór de volgende feed), dan vink C
+    d = await stap(bez(0, f3), f3 + 3 * u, { handeling: 'vink', pr: 'TG', datum: dag });
+    assert.deepStrictEqual([d.kleur, d.gezocht], ['oranje', 1], 'B telt');
+    d = await stap(bez(0, f3), f3 + 4 * u, { handeling: 'ontvink', pr: 'TG', datum: dag });
+    assert.deepStrictEqual([d.kleur, d.gezocht, d.verzoek_vers], ['rood', 0, null], 'B weg vóór de feed: niets te corrigeren, geen −1 van A');
+    d = await stap(bez(0, f3), f3 + 5 * u, { handeling: 'vink', pr: 'TG', datum: dag });
+    assert.deepStrictEqual([d.kleur, d.gezocht, d.verzoek_vers], ['oranje', 1, 'gezet'], 'C staat: oranje, niet rood');
+    // en met een verzoek van een ander in de feed (gezocht 1 + eigen C): 2, niet 1
+    d = await stap(bez(1, f3), f3 + 5 * u);
+    assert.strictEqual(d.gezocht, 2);
+  } finally { t.weg(); }
+});
