@@ -314,6 +314,46 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   await ctx.__mt.appMediatheek({}, Object.assign(new EE(), { _app: {} }), { soort: 'meereizend' }, 'GET /app/mediatheek/bestand/' + idA);
   toets('5m na close (één keer geteld) weer plek', gestuurd[n0 + 1].s === 200, gestuurd[n0 + 1] && gestuurd[n0 + 1].s);
 
+  // ── 6. wv3063: een stuk dat elders staat (extern: in plaats van een mediabestand ernaast) ──
+  const V3 = path.join(W, 'vault3'), ES = '20_Prive/Bronnen/Eigen software';
+  const zet3 = (p, t) => { fs.mkdirSync(path.dirname(path.join(V3, p)), { recursive: true }); fs.writeFileSync(path.join(V3, p), t); };
+  const REL = 'https://github.com/Voorbeeld/proef-app/releases/tag/installer-2026-01-02';
+  zet3('20_Prive/Mediatheek.md', '---\ntype: index\n---\n\n## Eigen software\n\nProgramma\'s die David zelf maakte.\n');
+  zet3(ES + '/Goed.md', besch(['categorie: "Eigen software"', 'titel: "Proef-app — installer"', 'wie: David', 'datum: 2026-01-02', 'extern: "' + REL + '"'], 'Installer van de proef-app.'));
+  zet3(ES + '/Zonder omschrijving.md', '---\nbron_soort: mediatheek\ncategorie: Eigen software\nextern: ' + REL + '\n---\n\n## Alleen een kop\n');
+  zet3(ES + '/Http.md', besch(['categorie: Eigen software', 'extern: "http://github.com/Voorbeeld/proef-app/releases"']));
+  zet3(ES + '/Andere host.md', besch(['categorie: Eigen software', 'extern: "https://github.com.voorbeeld.nl/x"']));
+  zet3(ES + '/Subdomein.md', besch(['categorie: Eigen software', 'extern: "https://gist.github.com/x"']));
+  zet3(ES + '/Te lang.md', besch(['categorie: Eigen software', 'extern: "https://github.com/' + 'a'.repeat(290) + '"']));
+  zet3(ES + '/Gebruiker.md', besch(['categorie: Eigen software', 'extern: "https://iemand@github.com/x"']));
+  zet3(ES + '/Lijst.md', besch(['categorie: Eigen software', 'extern:', '  - "' + REL + '"']));
+  zet3(ES + '/Ook bestanden.md', besch(['categorie: Eigen software', 'extern: "' + REL + '"'].concat(bl(ES + '/Ook bestanden.msi'))));
+  zet3(ES + '/Wint.mp3', MP3);   // bestand ernaast wint: extern (ook een fout adres) telt dan niet
+  zet3(ES + '/Wint.md', besch(['categorie: Eigen software', 'titel: Wint', 'extern: "http://elders.voorbeeld/x"'].concat(bl(ES + '/Wint.mp3'))));
+  zet3(ES + '/Geen extern.md', besch(['categorie: Eigen software']));
+  const m3 = M.maak({ vault: V3, cacheMs: 0 }), s3 = m3.stand().j;
+  const es = (s3.onderwerpen.find((o) => o.naam === 'Eigen software') || { items: [] }).items;
+  const TH3 = Object.fromEntries(s3.te_herstellen.map((t) => [t.naam, t.reden]));
+  const goedS = es.find((i) => i.titel === 'Proef-app — installer');
+  toets('6a extern goed: stuk met titel, wie, datum, omschrijving, extern { url, naam GitHub }, geen bestanden', !!goedS && goedS.wie === 'David' && goedS.datum === '2026-01-02' && goedS.omschrijving === 'Installer van de proef-app.' && goedS.bestanden.length === 0 && goedS.extern && goedS.extern.url === REL && goedS.extern.naam === 'GitHub', goedS);
+  const zo = es.find((i) => i.titel === 'Zonder omschrijving');
+  toets('6b extern zonder omschrijving en zonder titel (onaangehaald adres): geldig stuk, titel = naam van de beschrijving, omschrijving leeg', !!zo && zo.omschrijving === null && zo.extern && zo.extern.url === REL, es.map((i) => i.titel));
+  const verw3 = { 'Http.md': /adres bij extern is niet toegestaan/, 'Andere host.md': /niet toegestaan/, 'Subdomein.md': /niet toegestaan/, 'Te lang.md': /niet toegestaan.*300/,
+    'Gebruiker.md': /niet toegestaan/, 'Lijst.md': /geen lijst/, 'Ook bestanden.md': /haal dan bestanden weg/, 'Geen extern.md': /^er staat geen mediabestand met dezelfde naam naast deze beschrijving$/ };
+  const mis3 = Object.keys(verw3).filter((k) => !verw3[k].test(TH3[k] || ''));
+  toets('6c te herstellen met reden: http, andere host, subdomein, te lang, gebruikersdeel, lijst, extern én bestanden, zonder extern = oude reden', !mis3.length && Object.keys(TH3).length === Object.keys(verw3).length, mis3.map((k) => k + ': ' + TH3[k]).concat(Object.keys(TH3)));
+  const wint = es.find((i) => i.titel === 'Wint');
+  toets('6d extern én bestand ernaast: het bestand wint (afspeelbaar, geen extern, fout adres telt niet)', !!wint && wint.bestanden.length === 1 && !('extern' in wint) && m3.bestand(wint.bestanden[0].id).status === 200 && !TH3['Wint.md'], wint);
+  toets('6e tellers: 3 stukken (2 elders), 1 bestand, 8 te herstellen; /health zonder adres', s3.tel.items === 3 && s3.tel.extern === 2 && s3.tel.bestanden === 1 && s3.tel.te_herstellen === 8 && m3.health().items === 3 && !JSON.stringify(m3.health()).includes('github'), s3.tel);
+  toets('6f een stuk dat elders staat heeft geen bestand-id; de kaft-categorie telt het', es.length === 3 && s3.onderwerpen[0].naam === 'Eigen software' && goedS && goedS.bestanden.length === 0 && m3.bestand(M.idVan(ES + '/Goed.md')).status === 404);
+  const EA = M.externAdres;
+  toets('6g externAdres: alleen https, github.com, geen poort/gebruiker/spatie/aanhalingsteken/backslash/schema-truc; hoofdletters in de host mogen',
+    !!EA(REL) && EA('https://GitHub.com/x').url === 'https://github.com/x' && EA('https://github.com').url === 'https://github.com/' &&
+    ['http://github.com/x', 'https://github.com:444/x', 'https://a:b@github.com/x', 'https://github.com/a b', 'https://github.com/"x', 'https://github.com\\@evil.nl/',
+     'javascript:alert(1)//https://github.com/', 'https://evil.nl/https://github.com/', 'https://github.com.', ' https://evil.nl', 'https://github.com/' + 'x'.repeat(300), '', null, ['https://github.com/x']]
+      .every((x) => EA(x) === null), ['https://github.com.', 'https://github.com:444/x'].map((x) => EA(x)));
+  toets('6h hostlijst is vast in de code (alleen github.com)', JSON.stringify(M.EXTERN_HOSTS) === '{"github.com":"GitHub"}');
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
