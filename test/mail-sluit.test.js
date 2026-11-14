@@ -337,3 +337,20 @@ test('review r4 MOET 1: een mislukte contactencontrole laat een eerder vermeld s
   assert.equal(k2.lijst().j.items.length, 1, 'het spamgesprek van oom blijft op de lijst');
   assert.equal(JSON.parse(opslag).dagen[DAG].compleet, false);
 });
+
+test('review r5 ZOU 1: staat een gesprek al op de nieuwe lijst, dan komt de oude vermelding er niet dubbel bij', async () => {
+  const sp = ber({ labels: ['SPAM', 'UNREAD'], van: 'Oom <oom@familie.invalid>' });
+  const ander = ber({ draad: sp.draad, labels: ['UNREAD'], onderwerp: 'Gewoon ander bericht' });
+  const k = kamer([sp], { bekend: ['oom@familie.invalid'] });
+  await k.m.ronde();
+  const MSx = require('../mail-sluit.js');
+  let opslag = JSON.stringify(k.opslag());
+  const k2 = MSx.maak({ nu: function () { return KLOK; }, luik: async function () { return { berichten: [sp, ander], filters: [], labels: [] }; },
+    mailman: { mailSluitBron: function (ids) { const u = {}; ids.forEach(function (i) { u[i] = { gezien: true }; }); return u; } },
+    poort: function (stuk) { return poort.beoordeel(stuk); }, bekend: async function () { throw new Error('weg'); },
+    lees: function () { return JSON.parse(opslag); }, schrijf: function (x) { opslag = JSON.stringify(x); } });
+  for (let i = 0; i < 3; i++) await k2.ronde();
+  const d = JSON.parse(opslag).dagen[DAG];
+  assert.equal(d.lijst.filter(function (x) { return x.draad === sp.draad; }).length, 1);
+  assert.equal(d.aangevuld, 0);
+});
