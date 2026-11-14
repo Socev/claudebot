@@ -25,7 +25,7 @@ OSINT_NEP_NET=1 (toets: elke netwerkaanroep geeft een nepantwoord en telt alleen
 import base64, concurrent.futures as cf, datetime, hashlib, html, json, os, re, sqlite3, subprocess, sys, time, unicodedata
 import urllib.parse as up, urllib.request, urllib.error
 
-VERSIE = 'osint-4'
+VERSIE = 'osint-5'   # wv3086: nieuwe kaartjes (3D-BAG, plan, fundering, BRO, pc6, TenderNed, overheidsregister); oude cache telt niet meer
 HIER = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ.get('OSINT_DB') or '/opt/data/osint/osint.sqlite'
 VAULT = os.environ.get('VAULT_DIR') or '/opt/data/AI_SecondBrain'
@@ -478,8 +478,9 @@ def zoek_adres(ctx, term):
     extra = []
     with cf.ThreadPoolExecutor(2) as ex:
         straat = ' '.join(str(x) for x in (ls.get('straatnaam'), ls.get('huis_nlt') or ls.get('huisnummer')) if x)
-        f1 = ex.submit(bekendmakingen, ctx, straat, 'Bekendmakingen over dit adres (vergunningen e.d.)', 'straat + huisnummer + plaats',
-                       [straat, ls.get('woonplaatsnaam')]) if straat else None
+        pc = re.sub(r'\s', '', str(ls.get('postcode') or '')).upper()
+        pc = pc if re.fullmatch(r'\d{4}[A-Z]{2}', pc) else None
+        f1 = ex.submit(bekendmakingen_adres, ctx, pc, straat, ls.get('woonplaatsnaam')) if pc or straat else None   # wv3086: eerst op postcode
         f2 = ex.submit(ep_online, ctx, vbo_id)
         for f in (f1, f2):
             try:
@@ -491,7 +492,7 @@ def zoek_adres(ctx, term):
             except Exception:
                 pass
     kaarten += extra
-    kaarten += adres_deel3(ctx, ls, img)   # wv2712: buurt, hoogte, bodem, straatbeeld
+    kaarten += adres_deel3(ctx, ls, img, vbo.get('pandidentificatie'))   # wv2712: buurt, hoogte, bodem, straatbeeld; wv3086: + Vastgoed-lagen en pc6
     kaarten.append(adres_links(ls))
     kaarten.append(melding('Bedrijven op dit adres', 'Welke bedrijven hier gevestigd zijn, kan pas met een KvK-sleutel (betaalde keuze, niet aangezet).'))
     return kaarten, {'adres': ls.get('weergavenaam'), 'bouwjaar': vbo.get('bouwjaar'), 'adressen_in_pand': len(pand), 'perceel': perceel}
@@ -691,6 +692,13 @@ def zoek_bedrijf(ctx, term):
         kaarten += bedrijf_breed(ctx, naam, kvk)
     elif ctx.niveau == 'alles':
         kaarten.append(insolventie_link())
+    # wv3086: register van overheidsorganisaties (lokaal; alleen een kaartje bij een treffer of een naam die naar de overheid klinkt)
+    try:
+        k = oo_kaartje(ctx, [dom] if dom else [], kern.get('naam') or vies_naam or (t if not (kvk or dom or iban or btw) else None), 'organisatie')
+        if k:
+            kaarten.append(k)
+    except Exception:
+        kaarten.append(melding('Register van overheidsorganisaties', 'Het register kon niet worden doorzocht.'))
     return kaarten, kern
 
 
@@ -911,6 +919,14 @@ JUR = {
     'delpher': 'Historische kranten (Delpher, KB, 1618–1995): licht. Een gelijke naam is niet dezelfde persoon.',
     'harvester': 'Organisatiedomein: licht. Gevonden mailadressen van medewerkers zijn persoonsgegevens: alleen gebruiken voor het doel van deze zoekvraag.',
     'hulplinks': 'Openbare registers met een wettelijk doel. Zoek zelf en alleen met een concreet belang (bijv. wie mag tekenen); vanuit OVIS gaat er niets heen.',
+    # wv3086 (overheidsbronnen zonder sleutel)
+    '3dbag': '3D-BAG (TU Delft/3DGI, CC BY 4.0): rekenmodel van het pand op BAG en hoogtebestand, zonder persoonsgegevens; geen bezwaar.',
+    'plannen': 'Ruimtelijke plannen (PDOK, CC0): openbaar en geldend voor iedereen; geen bezwaar. Wat er precies mag, staat in de regels van het plan zelf.',
+    'fundering': 'Funderingskaart (RVO/KCAF, CC0): een indicatie per postcodegebied, geen oordeel over één pand; geen bezwaar.',
+    'bro': 'Basisregistratie Ondergrond (open data): metingen in de grond, geen persoonsgegevens. Naar buiten gaat alleen een tot ± 100 m afgerond punt.',
+    'pc6': 'CBS-cijfers per postcode (CC BY 4.0): het CBS rondt af en schermt cijfers af bij weinig inwoners of woningen; gemiddelden over de postcode, niet over één huishouden.',
+    'tenderned': 'Aanbestedingen zijn openbaar met een wettelijk doel; over organisaties, licht. Een gelijke naam is niet dezelfde partij.',
+    'oo': 'Register van overheidsorganisaties (open data), lokaal doorzocht: naar buiten gaat niets, alleen het hele bestand wordt eens per week opgehaald. Namen van medewerkers worden niet bewaard.',
 }
 DOMEINEN_STANDAARD = ['tolgaarde.nl', 'huisartsentolgaarde.nl', 'hpgroenhouten.nl', 'hapleusden.nl', 'socev.dev']
 TOOLS = os.environ.get('OSINT_TOOLS') or '/opt/data/venvs/osint/tools'
@@ -1110,17 +1126,20 @@ def bedrijf_breed(ctx, naam, kvk):
         taken.append(('kvkopen', lambda: kvk_open(ctx, kvk)))
     if naam:
         taken += [('icij', lambda: icij(ctx, naam)), ('sru', lambda: bekendmakingen(ctx, naam)), ('rs', lambda: rechtspraak(ctx, naam))]
+        taken.append(('tn', lambda: tenderned(ctx, naam)))   # wv3086
     uit = []
-    with cf.ThreadPoolExecutor(7) as ex:
+    with cf.ThreadPoolExecutor(8) as ex:
         fut = [(k, ex.submit(f)) for k, f in taken]
         for k, f in fut:
             try:
-                uit.append(f.result())
+                x = f.result()
+                if x:
+                    uit.append(x)
             except PoortDicht:
                 pass
             except Exception:
                 uit.append(melding({'gleif': 'LEI-register', 'icij': 'Offshore Leaks', 'sru': 'Officiële bekendmakingen', 'rs': 'Rechtspraak', 'lrza': 'Zorgaanbieder (LRZa)',
-                                    'wd': 'Wikidata', 'kvkopen': 'KvK open data'}[k], 'Deze bron gaf geen antwoord.'))
+                                    'wd': 'Wikidata', 'kvkopen': 'KvK open data', 'tn': 'Aanbestedingen (TenderNed)'}[k], 'Deze bron gaf geen antwoord.'))
     uit.append(insolventie_link())
     return uit
 
@@ -1619,8 +1638,9 @@ def zonder_intern(kaarten):
     return [{a: b for a, b in k.items() if a != '_gsv'} if isinstance(k, dict) else k for k in kaarten]
 
 
-def adres_deel3(ctx, ls, beelden):
-    """Buurt (CBS + Leefbaarometer), hoogte (AHN), bodem (Bodemloket) en straatbeeld bij een gevonden adres; elk kaartje los, een fout kost alleen dat kaartje."""
+def adres_deel3(ctx, ls, beelden, pand=None):
+    """Buurt (CBS + Leefbaarometer), hoogte (AHN), bodem (Bodemloket) en straatbeeld bij een gevonden adres; elk kaartje los, een fout kost alleen dat kaartje.
+    wv3086: + 3D-maten van het pand, geldend plan, funderingskaart, grondwater en sonderingen (gedeelde laag van Vastgoed) en CBS per postcode."""
     bu = str(ls.get('buurtcode') or '').strip().upper()
     gm = ('GM' + str(ls.get('gemeentecode'))) if re.fullmatch(r'\d{4}', str(ls.get('gemeentecode') or '')) else None
     rd = [float(v) for v in re.findall(r'[\d.]+', ls.get('centroide_rd') or '')]
@@ -1630,12 +1650,22 @@ def adres_deel3(ctx, ls, beelden):
         taken += [lambda: cbs(ctx, bu, gm), lambda: leefbaarometer(ctx, bu)]
     if len(rd) == 2:
         taken += [lambda: ahn(ctx, rd[0], rd[1], (beelden or {}).get('ahn')), lambda: bodem(ctx, rd[0], rd[1])]
+    pc = re.sub(r'\s', '', str(ls.get('postcode') or '')).upper()
+    if pand and VG_ID.match(str(pand)):
+        taken.append(lambda: kaart_veilig('Het pand in 3D (maten)', lambda: adres_3d(ctx, str(pand))))
+    if len(rd) == 2:
+        taken += [lambda: kaart_veilig('Geldend plan op dit punt', lambda: adres_plannen(ctx, rd[0], rd[1])),
+                  lambda: kaart_veilig('Funderingskaart (indicatie)', lambda: adres_fundering(ctx, rd[0], rd[1]))]
+    if len(ll) == 2:
+        taken.append(lambda: kaart_veilig('Grondwater en sonderingen in de buurt', lambda: adres_bro(ctx, ll[0], ll[1])))
+    if re.fullmatch(r'\d{4}[A-Z]{2}', pc):
+        taken.append(lambda: kaart_veilig('Cijfers voor postcode %s (CBS)' % pc, lambda: cbs_pc6(ctx, pc)))
     if len(ll) == 2 and ctx.beelden:
         taken.append(lambda: straatbeeld(ctx, ll[0], ll[1]))
         if sleutel_er('google_streetview'):
             taken.append(lambda: straatbeeld_google(ctx, ll[0], ll[1]))
     uit = []
-    with cf.ThreadPoolExecutor(5) as ex:
+    with cf.ThreadPoolExecutor(8) as ex:
         for f in [ex.submit(t) for t in taken]:
             try:
                 k = f.result()
@@ -1767,12 +1797,22 @@ def plannen(ctx, x, y):
     return [f for f in uit if f]
 
 
+def pct_rond(v):
+    """'66.66666666666666' → '67 %' (wv3086: de RVO-laag geeft een ruwe breuk); onleesbaar = zoals het is."""
+    if v in (None, ''):
+        return None
+    try:
+        return '%s %%' % getal_nl(round(float(v)))
+    except (TypeError, ValueError):
+        return '%s %%' % v
+
+
 def fundering(ctx, x, y):
     p = (vg_info(ctx, VG_FUND_WMS, 'indgebfunderingsproblematiek', x, y, 'Funderingskaart (RVO via PDOK)', 2, 3) or [None])[0]
     if not p:
         return [vg_feit('grond', 'Funderingskaart', 'Geen aandachtsgebied op dit punt.', 'Funderingskaart (RVO via PDOK)', VG_LICENTIE['FUND'], soort='leeg')]
     v = [('Funderingskaart', p.get('legenda')), ('Bodem in het postcodegebied', p.get('fgr')),
-         ('Panden van vóór 1970 in het postcodegebied', ('%s %%' % p.get('percvoor1970')) if p.get('percvoor1970') not in (None, '') else None)]
+         ('Panden van vóór 1970 in het postcodegebied', pct_rond(p.get('percvoor1970')))]
     return [f for f in (vg_feit('grond', a, b, 'Funderingskaart (RVO/KCAF via PDOK)', VG_LICENTIE['FUND'], url='https://www.kcaf.nl/') for a, b in v) if f]
 
 
@@ -2097,6 +2137,371 @@ def vastgoed(v):
     return {'ok': True, 'versie': VERSIE, 'objecten': uit, 'prijsindex': index, 'licentie_index': VG_LICENTIE['CBS'], 'aanroepen': ctx.log}
 
 
+# ---------------------------------------------------------------- overheidsbronnen zonder sleutel (wv3086)
+# Advies vault "01_Ontwikkeling/Overheids-API's - wat kunnen we ermee (Fable 5.2, 14-11-2026)" § 5. Gemeten 15-11-2026 vanaf de pod:
+#   Adres: de lagen van Vastgoed (3D-BAG, plangebied, funderingskaart, BRO) als kaartjes; CBS per postcode van zes posities via PDOK
+#   (api.pdok.nl/cbs/postcode6/ogc/v1, items?postcode6=…: één rij per jaar 2015–2024, -99997 = afgeschermd, -99995 = nog niet beschikbaar).
+#   Bekendmakingen op postcode i.p.v. straat + huisnummer + plaats (drie openbare adressen: 5.783 → 386, 37 → 7 en 89 → 36 treffers; bij het
+#   kantoor in Apeldoorn waren 29 van de 37 publicaties van de bewoner zelf, op postcode 7 van 7 over het adres). Niets op de postcode → de oude zoekvraag.
+#   Bedrijf: TenderNed papi …/v2/publicaties?search="<naam>" (volledige tekst, ook gunningsberichten; wie won staat alleen in de publicatie zelf).
+#   Mail en bedrijf: register van overheidsorganisaties (organisaties.overheid.nl/archive/exportOO.xml, ± 38 MB, 4.549 organisaties), lokaal
+#   doorzocht; alleen naam, afkorting, soort, opgeheven, websites en maildomeinen worden bewaard (geen medewerkers, telefoon of adressen).
+PC6_URL = 'https://api.pdok.nl/cbs/postcode6/ogc/v1/collections/postcode6/items?'
+PC6_VELD = [('aantal_inwoners', 'Inwoners', 'n'), ('aantal_part_huishoudens', 'Huishoudens', 'n'), ('gemiddelde_huishoudensgrootte', 'Gemiddelde huishoudensgrootte', 'd1'),
+            ('aantal_woningen', 'Woningen', 'n'), ('percentage_koopwoningen', 'Koopwoningen', 'pct'), ('percentage_huurwoningen', 'Huurwoningen', 'pct'),
+            ('gemiddelde_woz_waarde_woning', 'Gemiddelde WOZ-waarde woning', 'woz'), ('mediaan_inkomen_huishouden', 'Mediaan inkomen huishouden', 'tekst'),
+            ('gemiddeld_gasverbruik_woning', 'Gemiddeld gasverbruik woning', 'm3'), ('gemiddeld_elektriciteitsverbruik_woning', 'Gemiddeld stroomverbruik woning', 'kwh'),
+            ('dichtstbijzijnde_huisartsenpraktijk_afstand_in_km', 'Afstand tot huisartsenpraktijk', 'km'),
+            ('dichtstbijzijnde_grote_supermarkt_afstand_in_km', 'Afstand tot grote supermarkt', 'km'), ('dichtstbijzijnde_treinstation_afstand_in_km', 'Afstand tot treinstation', 'km')]
+PC6_LEEFTIJD = [('aantal_inwoners_0_tot_15_jaar', '0-15'), ('aantal_inwoners_15_tot_25_jaar', '15-25'), ('aantal_inwoners_25_tot_45_jaar', '25-45'),
+                ('aantal_inwoners_45_tot_65_jaar', '45-65'), ('aantal_inwoners_65_jaar_en_ouder', '65+')]
+TN_URL = 'https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties?'
+OO_URL = 'https://organisaties.overheid.nl/archive/exportOO.xml'
+OO_DAGEN = 7
+OO_GENERIEK = {'gmail.com', 'googlemail.com', 'hotmail.com', 'hotmail.nl', 'outlook.com', 'outlook.nl', 'live.nl', 'live.com', 'msn.com', 'yahoo.com', 'yahoo.nl',
+               'icloud.com', 'me.com', 'ziggo.nl', 'kpnmail.nl', 'kpnplanet.nl', 'planet.nl', 'home.nl', 'hetnet.nl', 'xs4all.nl', 'zonnet.nl', 'casema.nl',
+               'upcmail.nl', 'chello.nl', 'telfort.nl', 'online.nl', 'tele2.nl', 'quicknet.nl', 'protonmail.com', 'proton.me', 'gmx.net', 'gmx.com', 'gmx.de',
+               'facebook.com', 'linkedin.com', 'twitter.com', 'x.com', 'instagram.com', 'youtube.com', 'google.com', 'wordpress.com', 'blogspot.com', 'wixsite.com'}
+OVERHEID_RE = re.compile(r'(?<![a-z])(gemeente|ministerie|provincie|waterschap|hoogheemraadschap|belastingdienst|toeslagen|rijksoverheid|rijksdienst|'
+                         r'overheid|politie|rechtbank|rechtspraak|cjib|duo|uwv|svb|kadaster|rdw|douane|inspectie)(?![a-z])', re.I)
+
+
+def oo_bestand():
+    return os.environ.get('OSINT_OO') or os.path.join(os.path.dirname(DB), 'overheidsorganisaties.json')
+
+
+def kaart_veilig(titel, f):
+    """Een bronkaartje dat niet stilletjes verdwijnt: een fout wordt een melding; een dichte poort blijft een dichte poort (geen kaartje)."""
+    try:
+        return f()
+    except PoortDicht:
+        raise
+    except Exception:
+        return melding(titel, 'Deze bron gaf geen antwoord.')
+
+
+def feiten_kaartje(titel, bron, feiten, jur, klein=None):
+    """Feiten uit de gedeelde laag van Vastgoed (vg_feit) als OSINT-kaartje: velden, en lijsten (plannen, sonderingen) als items."""
+    feiten = [f for f in feiten or [] if f]
+    leeg = [f['waarde'] for f in feiten if f.get('soort') == 'leeg']
+    velden = []
+    for f in feiten:
+        if f.get('soort') not in ('lijst', 'plan', 'leeg') and (f['veld'], f['waarde']) not in velden:   # plannen geven dezelfde bestemming per laag vaak twee keer
+            velden.append((f['veld'], f['waarde']))
+    items = [item(f['veld'], f['waarde'] if f['waarde'] != '–' else None, f.get('url')) for f in feiten if f.get('soort') in ('lijst', 'plan')]
+    k = ' '.join(x for x in leeg + [klein] if x) or None
+    return kaartje(titel, bron, velden, items=items, klein=k, juridisch=jur)
+
+
+def adres_3d(ctx, pand_id):
+    a = drie_d_bag(ctx, pand_id)
+    if not a:
+        return kaartje('Het pand in 3D (maten)', '3D-BAG (TU Delft/3DGI)', klein='3D-BAG heeft geen model van dit pand.', juridisch=JUR['3dbag'])
+    f = drie_d_feiten(a)
+    jaar = next((x.get('peildatum') for x in f if x.get('peildatum')), None)
+    return feiten_kaartje('Het pand in 3D (maten)', '3D-BAG (TU Delft/3DGI, rekenmodel op BAG en AHN)', f, JUR['3dbag'],
+                          'Hoogtes boven het maaiveld%s. Een rekenmodel uit de hoogtemeting, geen bouwtekening.' % ((', hoogtemeting ' + str(jaar)) if jaar else ''))
+
+
+def adres_plannen(ctx, x, y):
+    f = plannen(ctx, x, y)
+    k = feiten_kaartje('Geldend plan op dit punt', 'Ruimtelijke plannen (PDOK)', f, JUR['plannen'],
+                       None if any(z.get('soort') == 'plan' for z in f) else 'De kaart van ruimtelijke plannen geeft hier geen plan.')
+    k['klein'] = ((k.get('klein') or '') + ' Nieuwe regels (na 1-1-2024) staan in het omgevingsplan: zie Regels op de kaart.').strip()
+    return k
+
+
+def adres_fundering(ctx, x, y):
+    return feiten_kaartje('Funderingskaart (indicatie)', 'Funderingskaart (RVO/KCAF via PDOK)', fundering(ctx, x, y), JUR['fundering'],
+                          'Een indicatie voor het postcodegebied, geen oordeel over dit pand.')
+
+
+def adres_bro(ctx, lon, lat):
+    return feiten_kaartje('Grondwater en sonderingen in de buurt', 'Basisregistratie Ondergrond (BRO)', bro_rond(ctx, lon, lat), JUR['bro'],
+                          'Gezocht rond een tot ± 100 m afgerond punt; afstanden tot het adres.')
+
+
+def pc6_waarde(v):
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return v if v > -99990 else None   # -99997 afgeschermd, -99995 nog niet beschikbaar
+    v = str(v).strip()
+    return None if not v or re.match(r'^-9999\d$', v) or v.lower() in ('onclassificeerbaar', 'geheim', 'onbekend', 'nvt') else v
+
+
+def pc6_fmt(v, soort):
+    if soort == 'tekst':
+        return str(v).replace('_', ' ')
+    if not isinstance(v, (int, float)):
+        return None
+    if soort == 'pct':
+        return '%s %%' % getal_nl(v)
+    if soort == 'woz':
+        return '€ %s' % getal_nl(v * 1000)
+    if soort == 'km':
+        return '%s km' % getal_nl(v, 1)
+    if soort == 'm3':
+        return '%s m³' % getal_nl(v)
+    if soort == 'kwh':
+        return '%s kWh' % getal_nl(v)
+    if soort == 'd1':
+        return getal_nl(v, 1)
+    return getal_nl(v)
+
+
+def cbs_pc6(ctx, pc):
+    """CBS-cijfers per postcode van zes posities (PDOK, CC BY 4.0): per veld het nieuwste jaar met een openbare waarde. Naar buiten: alleen de postcode."""
+    r = jhaal(ctx, 'CBS postcode6 (PDOK)', PC6_URL + up.urlencode({'f': 'json', 'postcode6': pc, 'limit': 20}), 'postcode ' + pc, timeout=25)
+    if not isinstance(r, dict) or not isinstance(r.get('features'), list):
+        return melding('Cijfers voor postcode %s (CBS)' % pc, 'Het CBS (via PDOK) gaf geen antwoord.', 'CBS postcode6 (PDOK)')
+    jaren = {}
+    for f in r['features']:
+        p = (f or {}).get('properties') if isinstance(f, dict) else None
+        if isinstance(p, dict) and re.sub(r'\s', '', str(p.get('postcode6') or '')).upper() == pc and re.fullmatch(r'\d{4}', str(p.get('jaarcode') or '')):
+            jaren[str(p['jaarcode'])] = p
+    volg = sorted(jaren, reverse=True)
+    velden = []
+    for veld, label, soort in PC6_VELD:
+        j = next((j for j in volg if pc6_waarde(jaren[j].get(veld)) is not None), None)
+        w = pc6_fmt(pc6_waarde(jaren[j].get(veld)), soort) if j else None
+        if w:
+            velden.append(('%s (%s)' % (label, j), w))
+    for j in volg:   # leeftijd: het nieuwste jaar waarin inwoners en alle vijf groepen openbaar zijn
+        p = jaren[j]
+        n = pc6_waarde(p.get('aantal_inwoners'))
+        g = [pc6_waarde(p.get(v)) for v, _ in PC6_LEEFTIJD]
+        if isinstance(n, (int, float)) and n > 0 and all(isinstance(x, (int, float)) for x in g):
+            velden.insert(1, ('Leeftijd (%s)' % j, ' · '.join('%s: %d %%' % (lab, round(100.0 * x / n)) for x, (_, lab) in zip(g, PC6_LEEFTIJD))))
+            break
+    bron = 'CBS kerncijfers per postcode (PDOK, CC BY 4.0)'
+    if not jaren:
+        return kaartje('Cijfers voor postcode %s (CBS)' % pc, bron, klein='Het CBS heeft geen cijfers voor deze postcode.', juridisch=JUR['pc6'])
+    if not velden:
+        return kaartje('Cijfers voor postcode %s (CBS)' % pc, bron, klein='Het CBS schermt de cijfers voor deze postcode af (te weinig inwoners of woningen), of heeft ze nog niet.',
+                       juridisch=JUR['pc6'])
+    return kaartje('Cijfers voor postcode %s (CBS)' % pc, bron, velden, juridisch=JUR['pc6'],
+                   klein='Postcode van zes posities (fijner dan de buurt); tussen haakjes het jaar. Het CBS rondt af en laat cijfers weg bij weinig inwoners of '
+                         'woningen. Gemiddelden over de postcode, niet over dit adres.')
+
+
+def bekendmakingen_adres(ctx, pc, straat, plaats):
+    """wv3086: eerst op postcode (minder ruis, gemeten), alleen als daar niets staat op straat + huisnummer + plaats zoals vroeger."""
+    if pc:
+        k = bekendmakingen(ctx, pc, 'Bekendmakingen in dit postcodegebied (vergunningen e.d.)', 'postcode %s (geen huisnummer)' % pc)
+        if k.get('items') or not straat:
+            k['klein'] = ((k.get('klein') or '') + ' Gezocht op postcode %s: ook de buren in dit postcodegebied.' % pc).strip()
+            return k
+    k = bekendmakingen(ctx, straat, 'Bekendmakingen over dit adres (vergunningen e.d.)', 'straat + huisnummer + plaats', [straat, plaats])
+    if pc:
+        k['klein'] = ('Op postcode %s niets gevonden; hier op straat, huisnummer en plaats. ' % pc + (k.get('klein') or '')).strip()
+    return k
+
+
+def tenderned(ctx, naam):
+    """Aanbestedingen waarin een organisatienaam voorkomt (TenderNed, zonder sleutel): als opdrachtgever, en gunningsberichten die de naam noemen."""
+    n = re.sub(r'["“”]', '', norm(naam))[:120].strip()
+    if len(n) < 3:
+        return None
+    titel, bron = 'Aanbestedingen (TenderNed)', 'TenderNed (aanbestedingen van de overheid)'
+    r = jhaal(ctx, 'TenderNed (aanbestedingen)', TN_URL + up.urlencode({'page': 0, 'size': 50, 'search': '"%s"' % n}), 'naam: ' + n,
+              hdr={'Accept': 'application/json'}, timeout=25)
+    if not isinstance(r, dict) or not isinstance(r.get('content'), list):
+        return melding(titel, 'TenderNed gaf geen antwoord.', bron)
+    c = [x for x in r['content'] if isinstance(x, dict)]
+    links = [item('Zelf zoeken op TenderNed', None, 'https://www.tenderned.nl/aankondigingen/overzicht')]
+    if not c:
+        return kaartje(titel, bron, klein='Geen aanbesteding gevonden waarin deze naam voorkomt.', links=links, juridisch=JUR['tenderned'])
+    kn = n.lower()
+    og = lambda x: str(x.get('opdrachtgeverNaam') or '')
+    soort = lambda x: str(((x.get('typePublicatie') or {}).get('omschrijving')) or '') if isinstance(x.get('typePublicatie'), dict) else ''
+    code = lambda x: str(((x.get('typePublicatie') or {}).get('code')) or '') if isinstance(x.get('typePublicatie'), dict) else ''
+    als_og = [x for x in c if kn in og(x).lower()]
+    gunning = [x for x in c if x not in als_og and code(x) == 'AGO']
+
+    def url(x):
+        h = ((x.get('link') or {}).get('href')) if isinstance(x.get('link'), dict) else None
+        if isinstance(h, str) and re.match(r'^https://www\.tenderned\.nl/[\w/.-]*$', h):
+            return h
+        return 'https://www.tenderned.nl/aankondigingen/overzicht/%s' % x['publicatieId'] if re.fullmatch(r'\d{1,10}', str(x.get('publicatieId') or '')) else None
+    c.sort(key=lambda x: str(x.get('publicatieDatum') or ''), reverse=True)
+    tot = r.get('totalElements') if isinstance(r.get('totalElements'), int) else len(c)
+    return kaartje(titel, bron, [('Publicaties waarin de naam voorkomt', tot), ('Als opdrachtgever (van de nieuwste %d)' % len(c), len(als_og)),
+                                 ('Gunningsberichten die de naam noemen (van de nieuwste %d)' % len(c), len(gunning))],
+                   items=[item(str(x.get('aanbestedingNaam') or '(zonder naam)')[:200], ' · '.join(y for y in (datum_nl(x.get('publicatieDatum')), soort(x),
+                          ('opdrachtgever ' + og(x)) if og(x) else '') if y), url(x)) for x in c[:10]],
+                   klein='Gezocht op de naam tussen aanhalingstekens, in de hele tekst van de publicaties. Bij een gunningsbericht staat wie de opdracht kreeg '
+                         'in de publicatie zelf (open de link). Een gelijke naam is niet dezelfde partij.', links=links, juridisch=JUR['tenderned'])
+
+
+def _ln(tag):
+    return tag.rsplit('}', 1)[-1]
+
+
+def oo_lees(xml):
+    """Exportbestand → {'tijd', 'orgs': [{naam, afk, soort, ouder, weg, web, mail}]}. Medewerkers, telefoon en adressen worden overgeslagen."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml)
+    tijd = next((v for k, v in root.attrib.items() if _ln(k) == 'timestamp'), None)
+    orgs = []
+
+    def kind(e, naam):
+        return next((c for c in e if _ln(c.tag) == naam), None)
+
+    def tekst(e, naam):
+        c = kind(e, naam)
+        return norm(c.text)[:200] if c is not None and c.text else None
+
+    def host(u):
+        try:
+            h = (up.urlsplit(str(u or '').strip()).hostname or '').lower()
+        except ValueError:
+            return None
+        h = h[4:] if h.startswith('www.') else h
+        return h if DOMEIN_RE.match(h) and h not in OO_GENERIEK else None
+
+    def maak(o, ouder):
+        ct = kind(o, 'contact')
+        web, mail = [], []
+        if ct is not None:
+            for ia in (kind(ct, 'internetadressen') or []):
+                h = host(tekst(ia, 'url'))
+                if h and h not in web:
+                    web.append(h)
+            for ea in (kind(ct, 'emailadressen') or []):
+                m = re.search(r'@([\w.-]+\.[a-z]{2,})\s*$', tekst(ea, 'email') or '', re.I)
+                d = m.group(1).lower() if m else None
+                if d and d not in OO_GENERIEK and d not in mail:
+                    mail.append(d)
+        ts = kind(o, 'types')
+        return {'naam': tekst(o, 'naam'), 'afk': tekst(o, 'afkorting'), 'soort': tekst(ts, 'type') if ts is not None else None, 'ouder': ouder,
+                'weg': bool(tekst(o, 'eindDatum')), 'web': web[:8], 'mail': mail[:8]}
+
+    def loop(e, ouder):
+        for c in e:
+            n = _ln(c.tag)
+            if n in ('medewerkers', 'contact', 'adressen', 'bestuursorganen', 'raad'):
+                continue
+            if n == 'organisatie':
+                o = maak(c, ouder)
+                if o['naam']:
+                    orgs.append(o)
+                loop(c, o['naam'] or ouder)
+            else:
+                loop(c, ouder)
+    loop(root, None)
+    return {'tijd': tijd, 'orgs': orgs}
+
+
+def oo_register(ctx):
+    """Het register lokaal (≤ 7 dagen oud); anders één keer het hele exportbestand ophalen (door de poort, naar buiten gaat niets).
+    → (register of None, oud: True als een verouderd bestand gebruikt wordt omdat ophalen niet lukte)."""
+    pad = oo_bestand()
+    oud = None
+    try:
+        oud = json.load(open(pad))
+        vers = time.time() - os.path.getmtime(pad) < OO_DAGEN * 86400
+    except (OSError, ValueError):
+        oud, vers = None, False
+    if oud and vers and isinstance(oud.get('orgs'), list):
+        return oud, False
+    try:
+        x = haal(ctx, 'Register van overheidsorganisaties', OO_URL, 'niets (het hele exportbestand)', binair=True, maxb=80_000_000, timeout=90)
+        reg = oo_lees(x)
+        if len(reg['orgs']) < (1 if NEP else 500):
+            raise ValueError('register te klein')
+        reg['opgehaald'] = nu_iso()
+        os.umask(0o077)
+        os.makedirs(os.path.dirname(pad), mode=0o700, exist_ok=True)
+        tmp = '%s.%d.tmp' % (pad, os.getpid())
+        with open(tmp, 'w') as f:
+            json.dump(reg, f, ensure_ascii=False)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, pad)
+        return reg, False
+    except PoortDicht:
+        pass
+    except Exception:
+        pass
+    return (oud, True) if oud and isinstance(oud.get('orgs'), list) else (None, False)
+
+
+def naam_sleutel(t):
+    t = unicodedata.normalize('NFKD', str(t or ''))
+    t = ''.join(ch for ch in t if not unicodedata.combining(ch)).lower()
+    return re.sub(r'[^a-z0-9]+', ' ', t).strip()
+
+
+def oo_zoek(reg, domeinen, naam):
+    """→ (organisaties op domein, organisaties op naam). Heuristiek (bewust eenvoudig): domein = gelijk of subdomein van een website- of
+    maildomein uit het register; naam = de volledige registernaam (≥ 6 tekens, geen organisatieonderdeel) als hele woorden in de naam,
+    of de afkorting (≥ 3 hoofdletters) als los woord; een organisatieonderdeel alleen als de naam er precies gelijk aan is. Restrisico: een
+    bedrijf met een overheidsafkorting in zijn naam geeft een treffer; een korte naam ("Kadaster") vindt de registernaam niet (dan beslist het domein)."""
+    doms = [d.lower().strip('.') for d in domeinen or [] if d]
+    op_dom, op_naam = [], []
+    nn = ' %s ' % naam_sleutel(naam) if naam else None
+    for o in reg.get('orgs') or []:
+        if not isinstance(o, dict):
+            continue
+        eigen = set((o.get('web') or []) + (o.get('mail') or []))
+        if doms and any(d == e or d.endswith('.' + e) for d in doms for e in eigen):
+            op_dom.append(o)
+        if nn:
+            on = naam_sleutel(o.get('naam'))
+            afk = str(o.get('afk') or '')
+            if (nn.strip() == on and len(on) >= 3) or (o.get('soort') != 'Organisatieonderdeel' and (
+                    (len(on) >= 6 and ' %s ' % on in nn) or (len(afk) >= 3 and afk.isupper() and re.search(r'(?<![A-Za-z0-9])%s(?![A-Za-z0-9])' % re.escape(afk), naam)))):
+                op_naam.append(o)
+    lang = lambda o: -len(str(o.get('naam') or ''))
+    return sorted(op_dom, key=lang)[:5], sorted(op_naam, key=lang)[:5]
+
+
+def oo_kaartje(ctx, domeinen, naam, wat='afzender'):
+    """Staat de organisatie die zich als overheid voordoet in het register, met hetzelfde domein? Geen treffer en niet overheidsachtig = geen kaartje."""
+    domeinen = [d for d in domeinen or [] if d]
+    lijkt = bool(OVERHEID_RE.search(naam or '') or any(OVERHEID_RE.search(re.sub(r'[.-]', ' ', d)) for d in domeinen))
+    titel, bron = 'Register van overheidsorganisaties', 'Register van overheidsorganisaties (organisaties.overheid.nl, lokaal)'
+    reg, verouderd = oo_register(ctx)
+    if not reg:
+        return melding(titel, 'Het register kon niet worden opgehaald: niet te zeggen of deze %s erin staat.' % wat, bron) if lijkt else None
+    op_dom, op_naam = oo_zoek(reg, domeinen, naam)
+    if not op_dom and not op_naam and not lijkt:
+        return None
+    oms = lambda o: '%s (%s%s)' % (o.get('naam'), o.get('soort') or 'overheid', ', opgeheven' if o.get('weg') else '')
+    eigen = lambda o: (o.get('web') or []) + [m for m in o.get('mail') or [] if m not in (o.get('web') or [])]
+    velden = [('Naam in het register', '; '.join(map(oms, op_naam)) if op_naam else ('niet precies zo gevonden' if naam else None)),
+              ('Domein in het register', '; '.join(map(oms, op_dom)) if op_dom else ('nee' if domeinen else None))]
+    if op_naam:
+        velden.append(('Domeinen van die organisatie volgens het register', '; '.join(', '.join(eigen(o)) or 'geen genoemd' for o in op_naam[:3])))
+    nn = naam_sleutel(naam)
+    deels = [] if op_naam or op_dom or len(nn) < 6 else sorted(
+        [o for o in reg.get('orgs') or [] if isinstance(o, dict) and ' %s ' % nn in ' %s ' % naam_sleutel(o.get('naam'))],
+        key=lambda o: (o.get('soort') == 'Organisatieonderdeel', len(str(o.get('naam') or ''))))[:3]
+    if deels:   # "Kadaster" → "Dienst voor het kadaster en de openbare registers": alleen als suggestie, het domein beslist
+        velden.append(('Lijkt op (in het register)', '; '.join('%s: %s' % (oms(o), ', '.join(eigen(o)) or 'geen domein genoemd') for o in deels)))
+    let = None
+    if op_naam and domeinen and not any(o in op_dom for o in op_naam):
+        let = ('De %s noemt zich %s, maar %s staat in het register niet bij die organisatie. Dat kan nep zijn, of een verzenddienst die de organisatie '
+               'inhuurt: controleer via de website uit het register.') % (wat, op_naam[0].get('naam'), ', '.join(domeinen))
+    elif not op_dom and domeinen and lijkt:
+        let = 'Klinkt als een overheidsorganisatie, maar het domein %s staat niet in het register.' % ', '.join(domeinen)
+    elif not op_naam and not op_dom and not deels:
+        let = 'Klinkt als een overheidsorganisatie, maar de naam staat niet zo in het register.'
+    elif op_dom and any(o.get('weg') for o in op_dom) and not any(not o.get('weg') for o in op_dom):
+        let = 'Het domein hoort bij een organisatie die volgens het register is opgeheven.'
+    sites = []
+    for o in (op_naam or op_dom or deels)[:3]:
+        for h in (o.get('web') or [])[:1]:
+            if ('https://' + h) not in [s['url'] for s in sites]:
+                sites.append(item('%s: %s' % (o.get('naam'), h), None, 'https://' + h))
+    datum = datum_nl(reg.get('tijd') or reg.get('opgehaald'))
+    klein = 'Register van %s, lokaal doorzocht op naam en domein; wordt bij gebruik eens per week ververst.%s' % (
+        datum or 'onbekende datum', ' Verversen lukte nu niet: dit is de vorige versie.' if verouderd else '')
+    if op_dom and not let:
+        klein = 'Het domein hoort bij een organisatie in het register. ' + klein
+    return kaartje(titel, bron, velden, let=let, links=sites, klein=klein, juridisch=JUR['oo'])
+
+
 # ---------------------------------------------------------------- kenteken (wv2698; RDW open data, geen eigenaar)
 KENTEKEN_RE = re.compile(r'^(?=(?:[A-Z0-9]-?){6}$)(?=.*[A-Z])(?=.*\d)[A-Z0-9]{1,3}-?[A-Z0-9]{1,4}-?[A-Z0-9]{1,3}$')
 RDW = 'https://opendata.rdw.nl/resource/'
@@ -2264,6 +2669,20 @@ def zoek_mail(ctx, kop):
         ('SPF', zoekw('spf')), ('DKIM', ('%s (%s)' % (zoekw('dkim'), ', '.join(dkim_d))) if zoekw('dkim') else (', '.join(dkim_d) or None)), ('DMARC', zoekw('dmarc')),
         ('Servers onderweg', len(rec)), ('Oorspronkelijke server (IP)', oorsprong)],
         let=('Let op: ' + '; '.join(let) + '.') if let else None, juridisch=JUR['mail'])]
+    # wv3086: zegt de afzender een overheidsorganisatie te zijn, dan: staat die in het register, met dit domein? (lokaal; ook bij een dichte poort)
+    try:
+        from email.utils import parseaddr
+        from email.header import decode_header, make_header
+        dn = parseaddr(str(van or ''))[0]
+        try:
+            dn = str(make_header(decode_header(dn)))
+        except Exception:
+            pass
+        k = oo_kaartje(ctx, [dv] if dv else [], norm(dn)[:200] or None, 'afzender')
+        if k:
+            kaarten.append(k)
+    except Exception:
+        kaarten.append(melding('Register van overheidsorganisaties', 'Het register kon niet worden doorzocht.'))
     if hops:
         kaarten.append(kaartje('De route (nieuwste bovenaan)', 'Received-regels (lokaal)', items=hops[:15], juridisch=JUR['mail']))
     kern = {'spf': zoekw('spf'), 'dkim': zoekw('dkim'), 'dmarc': zoekw('dmarc'), 'afzenderdomein': dv, 'oorsprong': oorsprong, 'signalen': len(let)}
@@ -3152,7 +3571,7 @@ ZONDER_TERM = ('voetafdruk', 'lijkend')   # werken alleen op de eigen lijsten ui
 JUR_BRON = [('PDOK', 'pdok'), ('BAG', 'pdok'), ('OpenCorporates', 'kvk'), ('Liza', 'kvk'), ('RDAP', 'domein'), ('BIG', 'big'), ('Facturen', 'eigen'),
             ('Contacts', 'eigen'), ('mail', 'eigen'), ('Second Brain', 'eigen'), ('libphonenumber', 'telefoon'),
             ('Zorgaanbieders', 'lrza'), ('KvK open', 'kvkopen'), ('Wikidata', 'wikidata'), ('Tuchtrecht', 'tuchtrecht'), ('Delpher', 'delpher'),
-            ('Open Archieven', 'openarch'), ('HackerTarget', 'harvester')]   # wv2848: ook de meldingen 'gaf geen antwoord' van deel 2
+            ('Open Archieven', 'openarch'), ('HackerTarget', 'harvester'), ('TenderNed', 'tenderned'), ('overheidsorganisaties', 'oo')]   # wv2848: ook de meldingen 'gaf geen antwoord' van deel 2
 
 
 def met_juridisch(kaarten):
