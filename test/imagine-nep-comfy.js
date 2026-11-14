@@ -25,6 +25,7 @@ function start(dir, o) {
     ImageScaleBy: { python_module: 'nodes', input: { required: { image: ['IMAGE', {}], upscale_method: [['lanczos'], {}], scale_by: ['FLOAT', {}] } } },
     EmptyImage: { python_module: 'nodes', input: { required: { width: ['INT', {}], height: ['INT', {}], batch_size: ['INT', {}], color: ['INT', {}] } } },   // wv2990
     PrimitiveStringMultiline: { python_module: 'comfy_extras.nodes_primitive', input: { required: { value: ['STRING', {}] } } },
+    PreviewAny: { python_module: 'comfy_extras.nodes_preview_any', output_node: true, input: { required: { source: ['*', {}] } } },   // wv3038
     PreviewImage: { python_module: 'nodes', output_node: true, input: { required: { images: ['IMAGE', {}] } } },
     SaveImage: { python_module: 'nodes', output_node: true, input: { required: { images: ['IMAGE', {}], filename_prefix: ['STRING', {}] } } },
     SaveImageWebsocket: { python_module: 'custom_nodes.websocket_image_save', output_node: true, input: { required: { images: ['IMAGE'] } } },

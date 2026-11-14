@@ -20,6 +20,8 @@
 // zonder foto: gewoon = nieuwe bron met het resultaat als versie 1 (herkomst 'tekst', stand 'tekst', opdracht bij de versie); incognito =
 // nieuw beeld in de Map van het apparaat (voorganger null), zelfde uur, wissen en naloop als een bewerking. Taakrij gewoon: bron en
 // voorganger leeg tot het resultaat er is.
+// wv3038 (14-11-2026, David): standaard MOSS-Image (flow beeld-tekst-moss), FLUX.2 klein als keuze (body.model 'moss' | 'flux'; zonder
+// model = MOSS). Beide flows met dezelfde velden; het model staat bij de versie (versie.model = ai_model van de flow) en in Immich.
 //
 // FASE 2 (wv3021, 13-11-2026; plan § 2.3, § 4 fase 2). Alleen bij de vrije opdracht (Qwen, FLUX.2 klein):
 //   - MASKER ("alleen een stuk"): de app stuurt het getekende stuk als zwart-wit-PNG. studio-beeld.py pijp-pakket maakt er één RGBA-PNG van:
@@ -50,7 +52,13 @@ const STANDEN = [
   { id: 'opdracht-flux', flow: 'beeld-opdracht-flux', naam: 'Vrije opdracht · FLUX.2 klein', karakter: 'tekent opnieuw; snel, maakt gezichten jonger', opdracht: true },
 ];
 // wv2990: nieuw beeld uit tekst (geen bewerking: niet in STANDEN, dus niet via /bewerk)
-const TEKST = { id: 'tekst', flow: 'beeld-tekst-flux', naam: 'Nieuw beeld uit tekst · FLUX.2 klein', karakter: 'tekent een nieuw beeld', opdracht: true };
+// wv3038: twee modellen onder dezelfde stand 'tekst'; TEKST = de standaard (MOSS-Image)
+const TEKSTEN = [
+  { id: 'tekst', model: 'moss', flow: 'beeld-tekst-moss', naam: 'Nieuw beeld uit tekst · MOSS-Image', kort: 'MOSS-Image', karakter: 'tekent een nieuw beeld; schrijft je beschrijving eerst zelf uit', opdracht: true },
+  { id: 'tekst', model: 'flux', flow: 'beeld-tekst-flux', naam: 'Nieuw beeld uit tekst · FLUX.2 klein', kort: 'FLUX.2 klein', karakter: 'tekent een nieuw beeld; volgt je woorden letterlijk', opdracht: true },
+];
+const TEKST = TEKSTEN[0];
+function tekstModel(m) { if (m === undefined || m === null || m === '') return TEKST; return TEKSTEN.find(function (x) { return x.model === m; }) || null; }
 // wv3021: flows voor masker en voorbeelden (generator mk-scripts/ovis-imagine/fase2/maak-plus-flows.py): <basis>-<aantal voorbeelden>
 const PLUS = { 'opdracht-qwen': 'beeld-plus-qwen', 'opdracht-flux': 'beeld-plus-flux' };
 const REFS_MAX = 2, MASKER_B64_MAX = 4 * 1024 * 1024;
@@ -151,7 +159,7 @@ function maak(deps) {
           if (n === 0) masker = true; else refs = n;
         }
       }
-      uit.push({ id: s.id, naam: s.naam, karakter: s.karakter, opdracht: s.opdracht === true, klaar: !!(f && f.klaar), reden: f ? f.reden : 'deze stand staat niet in de Studio',
+      uit.push({ id: s.id, naam: s.naam, karakter: s.karakter, opdracht: s.opdracht === true, ...(s.model ? { model: s.model, kort: s.kort } : {}), klaar: !!(f && f.klaar), reden: f ? f.reden : 'deze stand staat niet in de Studio',
         tijd: f ? f.tijd : '', vers_per_keer: !!(f && f.vers_per_keer), masker: masker, refs_max: masker ? refs : 0,
         velden: f ? f.velden.filter(function (v) { return v.soort !== 'beeld' && v.soort !== 'seed' && !/^pod_/.test(v.naam); }) : [] });
     }
@@ -432,19 +440,21 @@ function maak(deps) {
     const opdracht = schoon(velden.opdracht, GRENS.opdracht_max);
     if (!opdracht) return { status: 400, fout: 'beschrijf eerst wat je wilt zien' };
     velden.opdracht = opdracht;
+    const tm = tekstModel(d && d.model);   // wv3038
+    if (!tm) return { status: 400, fout: 'onbekend model; kies MOSS-Image of FLUX.2 klein' };
     const id = hex16();
     // zoals bewerk: de taak eerst vastleggen; bron en voorganger zijn er pas als het resultaat er is
     open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt) VALUES (?, NULL, ?, ?, ?, ?, ?)').run(id, '', '', TEKST.id, 'wacht', iso());
     let r;
     try {
-      r = await S.maakGeheugen({ flow: TEKST.flow, velden: velden, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
+      r = await S.maakGeheugen({ flow: tm.flow, velden: velden, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
         klaar: function (u) { return nieuwKlaar(id, opdracht, u); } }, ctx);
     } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
     if (r.status !== 200 || r.al) open().prepare('DELETE FROM taak WHERE id = ?').run(id);
     if (r.status !== 200) return r;
     if (r.al) { const t = open().prepare('SELECT * FROM taak WHERE studio = ?').get(r.taak.id); return { status: 200, taak: t ? taakUit(t) : null, al: true }; }
     open().prepare('UPDATE taak SET studio = ? WHERE id = ?').run(r.taak.id, id);
-    log('imagine nieuw taak=' + id);
+    log('imagine nieuw taak=' + id + ' model=' + tm.model);
     return { status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(id)) };
   }
   // Resultaat: het eerste beeld wordt een nieuwe bron (versie 1 = het gemaakte beeld)
@@ -682,13 +692,15 @@ function maak(deps) {
     const opdracht = schoon(velden.opdracht, GRENS.opdracht_max);
     if (!opdracht) return { status: 400, fout: 'beschrijf eerst wat je wilt zien' };
     velden.opdracht = opdracht;
+    const tm = tekstModel(d && d.model);   // wv3038
+    if (!tm) return { status: 400, fout: 'onbekend model; kies MOSS-Image of FLUX.2 klein' };
     const id = hex16(), gen = s.gen;
     const taak = { studio: null, beeld: null, stand: TEKST.id, gen: gen, status: 'wacht', gemaakt: klok() };
     s.taken.set(id, taak);
     let r;
     try {
-      r = await S.maakGeheugen({ flow: TEKST.flow, velden: velden, beurt_id: String(d.beurt_id || ''), geheim: true, apparaat: a,
-        klaar: function (u) { return incKlaar(a, id, gen, null, TEKST, opdracht, u); } }, ctx);
+      r = await S.maakGeheugen({ flow: tm.flow, velden: velden, beurt_id: String(d.beurt_id || ''), geheim: true, apparaat: a,
+        klaar: function (u) { return incKlaar(a, id, gen, null, tm, opdracht, u); } }, ctx);
     } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
     if (r.status !== 200) { s.taken.delete(id); return r; }
     if (r.al) { s.taken.delete(id); return { status: 200, al: true }; }
@@ -799,7 +811,7 @@ function maak(deps) {
     let m;
     if (!post && p === '/app/imagine') {
       const l = lijst();
-      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, standen: await standen(), tekst: (await standen([TEKST]))[0], schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
+      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, standen: await standen(), tekst: (await standen([TEKST]))[0], teksten: await standen(TEKSTEN), tekst_standaard: TEKST.model, schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
         incognito: { nog_te_wissen: S.incognito().nog_te_wissen } } };
     }
     if (!post && (m = /^\/app\/imagine\/bron\/([a-f0-9]{16})$/.exec(p))) { const b = bronMet(m[1]); return b ? { status: 200, body: Object.assign({ ok: true }, b) } : { status: 404, body: { ok: false, fout: 'dit beeld bestaat niet (meer)' } }; }
@@ -846,7 +858,7 @@ function maak(deps) {
         schijf_bytes: schijf().bytes, incognito_nog_te_wissen: S.incognito().nog_te_wissen };
     } catch (e) { return { aan: true, fout: true }; }
   }
-  return { app: app, info: info, STANDEN: STANDEN, TEKST: TEKST, GRENS: GRENS, PLUS: PLUS, stopTimers: function () { clearInterval(timer); }, _inc: inc, _ronde: incRonde, _db: function () { return open(); } };
+  return { app: app, info: info, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, stopTimers: function () { clearInterval(timer); }, _inc: inc, _ronde: incRonde, _db: function () { return open(); } };
 }
 
-module.exports = { maak: maak, STANDEN: STANDEN, TEKST: TEKST, GRENS: GRENS, PLUS: PLUS };
+module.exports = { maak: maak, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS };
