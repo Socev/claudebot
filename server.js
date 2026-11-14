@@ -5529,6 +5529,12 @@ const APP_APPARAAT_COOKIE_S = 400 * 24 * 3600;
 const APP_KOPPEL_PER_UUR = 30;                 // koppel/* (streng)
 const APP_OPENEN_PER_UUR = 120;                // passkey/opties (elke start en elke terugkeer na 2 min; review wv55 #5)
 const APP_VERZOEKEN_PER_UUR = 1200;            // alles onder /app/
+// wv3084 (David 14-11 21:19: hele app dicht met "te veel verzoeken"): wat de app vanzelf en steeds weer vraagt telt apart, met een
+// ruimere grens. Gemeten 14-11 20:44–21:09: de laptop volgde twee machinekamerbeurten (één liep 30 min vast, één wachtte in de rij),
+// elk elke 3 s = 40 per minuut; zo was 'alles' (1200/uur) in 25 minuten op en weigerde de pod ook het openen (status). Zo kan langdurig
+// volgen de rest van de app niet meer dichtzetten en omgekeerd; beide blijven begrensd (misbruik: samen hooguit 1200 + 6000 per uur).
+const APP_LICHT_PER_UUR = 6000;
+const APP_LICHTE_ROUTES = new Set(['POST /app/uitslag', 'GET /app/status', 'GET /app/draden', 'GET /app/nieuw', 'GET /app/vast', 'GET /app/apparaat/aanvraag', 'POST /app/aanwezig']);
 const APP_AUDIT_MAX = 5 * 1024 * 1024;
 const APP_ROUTE_RE = /^\/app\/[a-z0-9/-]{1,64}$/;
 // wv200 (bouwplan § 4.9c): kanaal cijfer-meester -> eigen sessie 'cijfer-meester', NIET de gedeelde 'cijfermeester' van
@@ -5703,6 +5709,24 @@ function appTeller(soort, max, venster) {
   const l = appStaat.tellers[soort] = (appStaat.tellers[soort] || []).filter(function (t) { return nu - t < venster; });
   if (l.length >= max) return false;
   l.push(nu); return true;
+}
+// wv3084: in welke algemene teller een app-verzoek telt (null = geen: concept en seintje-stand hebben een eigen grens; wv159, wv804)
+function appGrensSoort(m, p) {
+  const r = m + ' ' + p;
+  if (r === 'POST /app/concept' || r === 'GET /app/seintje-stand') return null;
+  return APP_LICHTE_ROUTES.has(r) ? 'licht' : 'alles';
+}
+// wv3084: hoeveel seconden tot er in deze teller weer plek is (het oudste verzoek valt uit het venster); minstens 1
+function appTellerWacht(soort, venster) {
+  const l = appStaat.tellers[soort] || [];
+  return l.length ? Math.max(1, Math.ceil((l[0] + venster - Date.now()) / 1000)) : 1;
+}
+// wv3084: 429 van de algemene grens, met de wachttijd (Retry-After en wacht_s) zodat de app weet wanneer Opnieuw weer kan
+function appWeigerGrens(res, soort) {
+  const w = appTellerWacht(soort, 3600000);
+  if (res._app) res._app.reden = 'grens ' + soort;
+  res.setHeader('Retry-After', String(w));
+  appStuur(res, 429, { ok: false, fout: 'te veel verzoeken van de app dit uur', grens: true, wacht_s: w });
 }
 
 function appCookieKop(cookies) { return cookies ? { 'X-App-Cookies': JSON.stringify(cookies) } : {}; }
@@ -7564,7 +7588,7 @@ async function appMagBeurt(res, kanaal, rij) {
   if (!rij && appLopend(kanaal)) { appWeiger(res, 409, 'Socev is in dit kanaal nog bezig; wacht op het antwoord', 'kanaal bezig'); return false; }
   if (rij === 'getypt' && appGetyptInRij(kanaal) >= APP_RIJ_GETYPT_MAX) { appWeiger(res, 429, 'er staan al ' + APP_RIJ_GETYPT_MAX + ' berichten in de rij; wacht tot Socev er een heeft opgepakt', 'getypt rij vol'); return false; }   // wv628
   if (rij === true && appKnopInRij(kanaal) >= APP_KNOP_RIJ_MAX) { appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol'); return false; }
-  if (!appTeller('beurt', APP_BEURTEN_PER_UUR, 3600000)) { appWeiger(res, 429, 'te veel berichten dit uur (max ' + APP_BEURTEN_PER_UUR + '); gebruik Telegram', 'grens beurt'); return false; }
+  if (!appTeller('beurt', APP_BEURTEN_PER_UUR, 3600000)) { appWeiger(res, 429, 'te veel berichten dit uur (max ' + APP_BEURTEN_PER_UUR + '); probeer het over ' + Math.ceil(appTellerWacht('beurt', 3600000) / 60) + ' min opnieuw', 'grens beurt'); return false; }
   return true;
 }
 
@@ -13652,7 +13676,9 @@ function handleApp(req, res) {
     res._app.voorAuth = false;
     // wv159 (Fable K9): concept bewaren heeft een eigen grens (APP_CONCEPT_PER_UUR) en telt niet mee in 'alles'
     // wv804: seintje-stand heeft een eigen teller per apparaat en telt evenmin mee
-    if (!(req.method === 'POST' && p === '/app/concept') && !(req.method === 'GET' && p === '/app/seintje-stand') && !appTeller('alles', APP_VERZOEKEN_PER_UUR, 3600000)) { req.resume(); return appWeiger(res, 429, 'te veel verzoeken', 'grens alles'); }
+    // wv3084: volgen en verversen (APP_LICHTE_ROUTES) tellen in 'licht', de rest in 'alles'
+    const grensSoort = appGrensSoort(req.method, p);
+    if (grensSoort && !appTeller(grensSoort, grensSoort === 'licht' ? APP_LICHT_PER_UUR : APP_VERZOEKEN_PER_UUR, 3600000)) { req.resume(); return appWeigerGrens(res, grensSoort); }
     // Upload (wv99): ruwe bytes, geen JSON; de route leest de stroom zelf. Wordt hij eerder geweigerd (geen sessie e.d.), dan
     // de rest van de stroom weggooien zodat de verbinding netjes afloopt.
     const upload = req.method === 'POST' && p.indexOf('/app/upload/') === 0;

@@ -476,7 +476,7 @@ function vraag(m, pad, body, o) {
         const ck = res.headers['x-app-cookies'] ? JSON.parse(res.headers['x-app-cookies']) : null;
         if (ck) laatsteCookies = res.headers['x-app-cookies'];
         if (ck && p) for (const n of Object.keys(ck)) p[n] = ck[n] ? ck[n].w : '';
-        ok({ status: res.statusCode, j, ck });
+        ok({ status: res.statusCode, j, ck, h: res.headers });   // wv3084: koppen (Retry-After)
       });
     });
     r.on('error', (e) => ok({ status: 0, j: { fout: e.code } }));
@@ -1088,6 +1088,35 @@ async function bewijs(o) {
     // gesynchroniseerde passkey in een vreemde browser zonder apparaatcookie = nieuw apparaat
     r = await vraag('GET', '/app/status', undefined, { pot: pot() });
     toets('8 browser zonder apparaatcookie: geen apparaat, alleen een aanvraag mogelijk', r.j.apparaat === null && r.j.aanvraag_mogelijk === true && r.j.koppelen_open === false, JSON.stringify(r.j));
+
+    // ── 8b. wv3084: volgen en verversen tellen apart van 'alles'; een 429 zegt hoe lang wachten (David 14-11 21:19) ──
+    {
+      const grensUit = (n) => { const m = new RegExp('const ' + n + ' = (\\d+);').exec(src); return m ? Number(m[1]) : NaN; };
+      const MAX_ALLES = grensUit('APP_VERZOEKEN_PER_UUR'), MAX_LICHT = grensUit('APP_LICHT_PER_UUR');
+      const T = H.appStaat.tellers;
+      const bewaar = { alles: (T.alles || []).slice(), licht: (T.licht || []).slice() };
+      // 'alles' vol, oudste verzoek 100 s voor het einde van zijn uur
+      const oud = Date.now() - 3600000 + 100000;
+      T.alles = Array.from({ length: MAX_ALLES }, (_, i) => oud + i); T.licht = [];
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar });
+      toets('8b alles vol: gewone route 429 met wacht_s ±100, Retry-After gelijk, geen Telegram', r.status === 429 && r.j.grens === true && r.j.wacht_s >= 90 && r.j.wacht_s <= 101 && r.h['retry-after'] === String(r.j.wacht_s) && !/telegram/i.test(r.j.fout || ''), r.status + ' ' + JSON.stringify(r.j) + ' ' + r.h['retry-after']);
+      r = await vraag('GET', '/app/status', undefined, { pot: P.jar });
+      toets('8b alles vol: status (openen) gaat door en telt in licht', r.status === 200 && T.licht.length === 1 && T.alles.length === MAX_ALLES, r.status + ' licht=' + T.licht.length);
+      const r1 = await vraag('POST', '/app/uitslag', { job_id: 'bestaat-niet' }, { pot: P.jar });
+      // draden/nieuw zonder sessie: de grens telt ze, de route zelf draait niet (die vult anders de meldingencache vóór § 12; 401 = langs de grens)
+      const zonder = { pot: { apparaat: P.jar.apparaat } };
+      const r2 = await vraag('GET', '/app/draden', undefined, zonder);
+      const r3 = await vraag('GET', '/app/nieuw', undefined, zonder);
+      const r4 = await vraag('POST', '/app/aanwezig', {}, { pot: P.jar });
+      toets('8b alles vol: uitslag/draden/nieuw/aanwezig niet geweigerd door de grens', [r1, r2, r3, r4].every((x) => x.status !== 429) && T.licht.length === 5, [r1, r2, r3, r4].map((x) => x.status).join('/') + ' licht=' + T.licht.length);
+      // 'licht' vol: volgen wacht, de rest gaat door
+      T.alles = []; T.licht = Array.from({ length: MAX_LICHT }, (_, i) => Date.now() - 1000 + i % 1000);
+      r = await vraag('POST', '/app/uitslag', { job_id: 'bestaat-niet' }, { pot: P.jar });
+      const rA = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar });
+      toets('8b licht vol: uitslag 429 (grens licht, wacht ~1 uur), gewone route niet', r.status === 429 && r.j.wacht_s > 3500 && rA.status !== 429 && T.alles.length === 1, r.status + ' ' + JSON.stringify(r.j) + ' / ' + rA.status);
+      toets('8b grens ruim genoeg: licht ≥ 5× alles', MAX_LICHT >= 5 * MAX_ALLES, MAX_LICHT + ' / ' + MAX_ALLES);
+      T.alles = bewaar.alles; T.licht = bewaar.licht;
+    }
 
     // ── 30. wv2554: noodroute als de telefoon kwijt is (ontwerp Noodroute telefoon kwijt § Toetsen; toetsdata verzonnen) ──
     // Eigen proefwereld (telefoon, pc met vaste plek, laptop); register, staat, Tasker en sessies worden na afloop teruggezet voor § 10.
