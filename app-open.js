@@ -18,7 +18,7 @@
 // instellingen en het slot. Een nieuwe module wordt pas stuurbaar als hij hier bijkomt (en in de catalogus).
 const STUURBAAR = ['overzicht', 'intake', 'apps', 'brain',
   'bandjes', 'financien', 'gezondheid', 'facturen', 'bestanden', 'pot-afschriften', 'studio',
-  'broedstoof', 'mediatheek', 'harvester', 'ideeen', 'flock', 'verbruik', 'secondbrain', 'pot'];   // wv1894: OVIS POT; wv2077: docs eruit (opgegaan in Brain); wv3069: projecten weg (David 14-11); wv3070: praktijken opgegaan in PMA (eigen venster, niet stuurbaar)
+  'broedstoof', 'mediatheek', 'harvester', 'flock', 'verbruik', 'secondbrain', 'pot'];   // wv1894: OVIS POT; wv2077: docs eruit (opgegaan in Brain); wv3069: projecten weg (David 14-11); wv3070: praktijken opgegaan in PMA (eigen venster, niet stuurbaar); wv3072: ideeen (AIX) is een tab van de Harvester
 // Strikt (de enige vorm die telt): precies zo, op één regel, vooraan de regel, zonder opmaak eromheen.
 const STRIKT_RE = /^\[OPEN scherm=([a-z][a-z0-9-]{1,39})(?: focus=([^\s\]]{1,100}))?\]$/;
 // Ruim (wat er altijd uit gaat): ook met opmaak eromheen, andere hoofdletters of extra spaties. Wordt getoetst op de genormaliseerde
