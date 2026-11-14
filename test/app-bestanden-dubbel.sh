@@ -32,10 +32,10 @@ const DIR = path.join(W, 'app-bestanden');
 const code = [
   "const APP_BESTANDEN_DIR = " + JSON.stringify(DIR) + ";",
   ...['APP_BESTANDEN_MS', 'APP_BESTANDEN_JOB_MAX', 'APP_BESTANDEN_JOB_BYTES', 'APP_BESTANDEN_TOTAAL_BYTES', 'APP_BESTAND_MAX', 'APP_RAPPORT_MAX',
-    'APP_BESTAND_PER_UUR', 'APP_JOB_RE', 'APP_DAG_RE', 'APP_DUBBEL_MS', 'APP_DUBBEL_VOOR_MS'].map(cst),
+    'APP_BESTAND_PER_UUR', 'APP_JOB_RE', 'APP_DAG_RE', 'APP_DUBBEL_MS', 'APP_DUBBEL_VOOR_MS', 'APP_BEURT_LABEL_MAX'].map(cst),
   (/^const APP_MIME = \{[\s\S]*?\};/m.exec(src) || [''])[0],
   ...['appLabelGewoon', 'appVeiligeNaam', 'appBewaarKandidaten', 'appBewaar', 'appBestandenIndex', 'appLeesEcht', 'appBewaardVan', 'appBestandPad',
-    'appZelfdeBijAgent', 'appBestandenZichtbaar', 'appBestandenOpruim', 'appBestanden', 'appBestand', 'berichtBestand'].map(fn),
+    'appZelfdeBijAgent', 'appBestandenZichtbaar', 'appBestandenOpruim', 'appBestanden', 'appBestand', 'berichtBestand', 'appBestandBron'].map(fn),   // wv3061: appBestandBron
   "function appSha(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }",
   "function appLeesJson(f, standaard) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return standaard; } }",
 ].join('\n');
