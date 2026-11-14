@@ -320,3 +320,20 @@ test('review r3 ZOU 1: aangevuld telt per uitkomst (niet opgeteld); een gesprek 
   assert.deepEqual(d.lijst.map(function (x) { return x.onderwerp; }), ['Steeds gemist'], 'b kreeg zijn nieuwe plek (inbox), a blijft');
   assert.equal(d.tel.inbox, 1);
 });
+
+test('review r4 MOET 1: een mislukte contactencontrole laat een eerder vermeld spamgesprek van een bekende niet stil van de lijst vallen', async () => {
+  const sp = ber({ labels: ['SPAM', 'UNREAD'], van: 'Oom <oom@familie.invalid>', onderwerp: 'Spam van oom' });
+  const k = kamer([sp], { bekend: ['oom@familie.invalid'] });
+  await k.m.ronde();
+  assert.equal(k.m.lijst().j.items.length, 1);
+  const MSx = require('../mail-sluit.js');
+  let opslag = JSON.stringify(k.opslag());
+  const k2 = MSx.maak({ nu: function () { return KLOK; }, luik: async function () { return { berichten: [sp], filters: [], labels: [] }; },
+    mailman: { mailSluitBron: function (ids) { const u = {}; ids.forEach(function (i) { u[i] = { gezien: true }; }); return u; } },
+    poort: function (stuk) { return poort.beoordeel(stuk); }, bekend: async function () { throw new Error('contacten even weg'); },
+    lees: function () { return JSON.parse(opslag); }, schrijf: function (x) { opslag = JSON.stringify(x); } });
+  const r = await k2.ronde();
+  assert.equal(r.ok, false);
+  assert.equal(k2.lijst().j.items.length, 1, 'het spamgesprek van oom blijft op de lijst');
+  assert.equal(JSON.parse(opslag).dagen[DAG].compleet, false);
+});
