@@ -131,6 +131,80 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
   const adr = P.volgAdressen({ vervoerder: 'onbekend', code: '3SPROE123456789', pc: null }, [PC, PC2, 'onzin']);
   toets('2 volgadressen: 3S-code zonder vervoerder = DHL en PostNL met elke geldige postcode; alleen de drie vaste hosts', adr.length === 3 && adr.every((a) => ['my.dhlecommerce.nl', 'jouw.postnl.nl', 'gls-group.com'].includes(new URL(a.url).hostname)), adr.map((a) => a.soort));
   toets('2 geen volgadres voor Amazon, DPD of UPS (geen openbare pagina zonder login)', ['amazon', 'dpd', 'ups', 'anders'].every((v) => P.volgAdressen({ vervoerder: v, code: 'X12345678' }, [PC]).length === 0));
+  // ── 2b. wv3078: GOFO en Dragonfly volgen; DHL/PostNL tussenstand (verzonnen antwoorden in de gemeten vorm van 14-11-2026) ──
+  {
+    const GF = 'GFNL1112223334445556', AM = 'AMZNL111222333444';
+    const gofo = (ev, x) => ({ code: 200, msg: 'ok', data: [Object.assign({ trackingNumber: GF, waybillNo: GF, status: 'X', consigneeName: 'Proef Persoon', lastTrackEvent: ev,
+      trackEventList: ev ? [ev] : [] }, x || {})] });
+    const ev = (c, t, d) => ({ processCode: c, trackStatus: t, processDate: d || '2026-11-12T10:00:00.000+0100', processLocation: 'Proefstad', mainContent: 'x' });
+    const G = (j) => P.leesGofo(j, GF);
+    toets('2b GOFO: 202 = onderweg "Bij het sorteercentrum"; 208 = vandaag "Bezorger is onderweg"; 100 = aangemeld', G(gofo(ev(202, 2))).stand === 'onderweg' && G(gofo(ev(202, 2))).tekst === 'Bij het sorteercentrum'
+      && G(gofo(ev(208, 2))).stand === 'vandaag' && G(gofo(ev(208, 2))).tekst === 'Bezorger is onderweg' && G(gofo(ev(100, 2))).stand === 'aangemeld', [G(gofo(ev(202, 2))), G(gofo(ev(208, 2)))]);
+    r = G(gofo(ev(205, 6, '2026-11-12T14:30:00.000+0100')));
+    toets('2b GOFO: 205 = bezorgd met het moment uit processDate', r.stand === 'bezorgd' && r.bezorgd_op === '2026-11-12T13:30:00.000Z' && r.tekst === 'Bezorgd', r);
+    toets('2b GOFO: onbekende code met trackStatus 2 = onderweg zonder tekst; 6 = bezorgd; onbekend beide = niet gevonden', G(gofo(ev(999, 2))).stand === 'onderweg' && G(gofo(ev(999, 2))).tekst === null
+      && G(gofo(ev(999, 6))).stand === 'bezorgd' && !G(gofo(ev(999, 9))).gevonden);
+    toets('2b GOFO: niet gevonden (lege data), kapot, rommel = niet gevonden; geen naam of plaats in de uitkomst', !G({ code: 200, data: [] }).gevonden && !G(null).gevonden && !G({ data: 'x' }).gevonden
+      && !G(gofo(null, { trackEventList: [] })).gevonden && !/Proef|Proefstad/.test(JSON.stringify(G(gofo(ev(202, 2))))));
+    toets('2b GOFO: zonder lastTrackEvent telt de eerste uit trackEventList', G(gofo(null, { trackEventList: [ev(201, 2), ev(202, 2)] })).tekst === 'Aangekomen in de regio');
+    const drag = (st, x, r2) => ({ success: true, data: { code: 'found', result: Object.assign({ tracking_id: AM, driver_name: 'Proef Bezorger', public_eta: { from: '2026-11-12T13:00:00.000Z', to: '2026-11-12T15:00:00.000Z', min: 13, max: 22 },
+      last_status: Object.assign({ status: st, statusCode: st, step: { 0: 1, 105: 2, 300: 3, 601: 4 }[st] || 3, isDelivered: st === 601, timestamp: 1794000000000, etaType: st === 300 ? 'time' : 'none', package_location: { lat: 1 } }, x || {}) }, r2 || {}) } });
+    const D2 = P.leesDragonfly;
+    toets('2b Dragonfly: 0 aangemeld, 105 "Ontvangen door Dragonfly", 300 vandaag met tijdvak 14:00–16:00', D2(drag(0)).stand === 'aangemeld' && D2(drag(105)).stand === 'onderweg' && D2(drag(105)).tekst === 'Ontvangen door Dragonfly'
+      && D2(drag(300)).stand === 'vandaag' && D2(drag(300)).verwacht_van === '14:00' && D2(drag(300)).verwacht_tot === '16:00' && D2(drag(300)).verwacht_dag === '2026-11-12', D2(drag(300)));
+    r = D2(drag(601));
+    toets('2b Dragonfly: 601 = bezorgd met moment, geen tijdvak; geen bezorgernaam in de uitkomst', r.stand === 'bezorgd' && r.bezorgd_op === new Date(1794000000000).toISOString() && !r.verwacht_dag && !/Proef/.test(JSON.stringify(r)), r);
+    toets('2b Dragonfly: onbekende code: isDelivered = bezorgd, step 2 = onderweg zonder tekst, step 3 = niet gevonden', D2(drag(777, { isDelivered: true, step: 4 })).stand === 'bezorgd'
+      && D2(drag(777, { step: 2 })).stand === 'onderweg' && D2(drag(777, { step: 2 })).tekst === null && !D2(drag(777, { step: 3 })).gevonden);
+    toets('2b Dragonfly: not_found, success false, kapot = niet gevonden', !D2({ success: false, data: { status: 404, code: 'not_found', result: null } }).gevonden && !D2(null).gevonden && !D2({ success: true, data: { code: 'found', result: {} } }).gevonden);
+    toets('2b GOFO/Dragonfly: antwoord over een ander pakje (ander nummer) = niet gevonden (review Codex MOET 1)', !G(gofo(ev(205, 6), { trackingNumber: 'GFNL9', waybillNo: 'GFNL9' })).gevonden
+      && !P.leesDragonfly(drag(601, {}, { tracking_id: 'AMZNL999' }), AM).gevonden && P.leesDragonfly(drag(601), AM).gevonden);
+    const va = P.volgAdressen({ vervoerder: 'gofo', code: GF }, [PC]), vd = P.volgAdressen({ vervoerder: 'dragonfly', code: AM }, [PC]);
+    toets('2b volgadressen: GOFO = POST naar www.gofo.com met de code in de body; Dragonfly = GET op dragonflyshipping.nl; rare code = geen volgvraag',
+      va.length === 1 && new URL(va[0].url).hostname === 'www.gofo.com' && va[0].body.numberList[0] === GF && !va[0].url.includes(GF)
+      && vd.length === 1 && new URL(vd[0].url).hostname === 'dragonflyshipping.nl' && !vd[0].body && vd[0].url.includes(AM)
+      && P.volgAdressen({ vervoerder: 'gofo', code: 'GF1/../x' }, []).length === 0 && P.volgAdressen({ vervoerder: 'dragonfly', code: 'AMZNL1?x=1' }, []).length === 0, [va, vd]);
+    // DHL: jongste gebeurtenis geeft de tussenstand
+    r = P.leesDhl(dhlJ([['UNDERWAY', 'PARCEL_SORTED_AT_HUB', '2026-11-06T18:00:00Z']]));
+    const r2 = P.leesDhl([{ view: { phases: [{ phase: 'UNDERWAY', events: [{ key: 'PARCEL_ARRIVED_AT_LOCAL_DEPOT', timestamp: '2026-11-07T05:00:00Z' }, { key: 'PARCEL_SORTED_AT_HUB', timestamp: '2026-11-06T18:00:00Z' }] }],
+      phaseDisplay: [{ phase: 'DATA_RECEIVED', completed: true }, { phase: 'UNDERWAY', completed: true }] } }]);
+    const r3 = P.leesDhl(dhlJ([['UNDERWAY', 'IETS_ANDERS', '2026-11-06T18:00:00Z']]));
+    toets('2b DHL: PARCEL_SORTED_AT_HUB = "Bij het sorteercentrum", daarna LOCAL_DEPOT = "Bij het bezorgdepot", onbekende sleutel = "Onderweg"', r.tekst === 'Bij het sorteercentrum' && r2.tekst === 'Bij het bezorgdepot' && r3.tekst === 'Onderweg', [r.tekst, r2.tekst, r3.tekst]);
+    r = P.leesDhl(dhlJ([['DELIVERED', 'DELIVERED', '2026-11-07T12:00:00Z'], ['IN_DELIVERY', 'OUT_FOR_DELIVERY', '2026-11-07T08:00:00Z'], ['UNDERWAY', 'PARCEL_SORTED_AT_HUB', '2026-11-06T18:00:00Z']]));
+    toets('2b DHL: bezorgd blijft "Bezorgd" (geen tussenstand)', r.stand === 'bezorgd' && r.tekst === 'Bezorgd', r);
+    // PostNL: jongste waarneming
+    const obs = [{ observationCode: 'J01', description: 'Zending is gesorteerd', observationDate: '2026-11-05T06:00:00+01:00' }, { observationCode: 'B01', description: 'Pakket is ontvangen door PostNL' }];
+    toets('2b PostNL: niet bezorgd = jongste waarneming als tekst; bezorgd = fasetekst', P.leesPostnl(pnl({ statusPhase: { index: 2, message: 'Fase' }, observations: obs }), '3SPROE123456789').tekst === 'Zending is gesorteerd'
+      && P.leesPostnl(pnl({ isDelivered: true, statusPhase: { index: 4, message: 'Pakket is bezorgd' }, observations: obs }), '3SPROE123456789').tekst === 'Pakket is bezorgd'
+      && P.leesPostnl(pnl({ observations: 'rommel' }), '3SPROE123456789').tekst === 'Pakket is gesorteerd');
+    // volg(): GOFO via POST, 404/429/kapot
+    const W8 = fs.mkdtempSync(path.join(os.tmpdir(), 'pakjes-'));
+    let nu8 = Date.parse('2026-11-12T09:00:00Z');
+    const M8 = P.maak({ dir: W8, nu: () => nu8 });
+    M8.verwerkMail({ gmail_id: 'g1', van: 'GOFO <noreply@gofo.com>', onderwerp: 'Jouw pakket wordt binnenkort bezorgd', tekst: 'Trackingnummer ' + GF + ' van Proefwinkel', datum: '2026-11-12T08:00:00Z' });
+    M8.verwerkMail({ gmail_id: 'd1', van: 'Dragonfly <noreply@dragonflyshipping.nl>', onderwerp: 'Je pakket is onderweg', tekst: 'Volg je pakket ' + AM, datum: '2026-11-12T08:00:00Z' });
+    const tv = M8.teVolgen(false).map((z) => z.vervoerder).sort().join(',');
+    toets('2b teVolgen: GOFO en Dragonfly doen mee', tv === 'dragonfly,gofo', tv);
+    const vraag = [];
+    let antw = { status: 429, json: null };
+    const haal8 = async (url, body) => { vraag.push([new URL(url).hostname, body ? JSON.stringify(body) : null]); return typeof antw === 'function' ? antw(url) : antw; };
+    const z0 = M8.teVolgen(false).find((z) => z.vervoerder === 'gofo');
+    toets('2b volg GOFO: 429 = fout (later opnieuw), body met de code naar www.gofo.com', await M8.volg(z0, haal8) === 'fout' && vraag[0][0] === 'www.gofo.com' && vraag[0][1].includes(GF), vraag);
+    antw = { status: 404, json: null };
+    toets('2b volg GOFO: 404 zonder json = onbekend', await M8.volg(z0, haal8) === 'onbekend');
+    antw = { status: 200, json: { code: 200, data: [] } };
+    toets('2b volg GOFO: niet gevonden = onbekend', await M8.volg(z0, haal8) === 'onbekend');
+    antw = { status: 200, json: gofo(ev(202, 2)) };
+    const uit8 = await M8.volg(z0, haal8);
+    const kaart = M8.lijst([]).body.lopend.find((p) => p.vervoerder === 'GOFO');
+    toets('2b volg GOFO: gevonden = ok, kaart toont "Bij het sorteercentrum" van de vervoerder', uit8 === 'ok' && kaart && kaart.bron === 'vervoerder' && kaart.stand_tekst === 'Bij het sorteercentrum' && kaart.stand === 'onderweg', kaart);
+    const zd = M8.teVolgen(true).find((z) => z.vervoerder === 'dragonfly');
+    antw = (url) => ({ status: 200, json: /dragonflyshipping\.nl\/cfworker\/v3\/tracking\//.test(url) ? drag(105) : null });
+    const uitD = await M8.volg(zd, haal8);
+    const kaartD = M8.lijst([]).body.lopend.find((p) => p.vervoerder === 'Dragonfly');
+    toets('2b volg Dragonfly: GET zonder body, kaart toont "Ontvangen door Dragonfly"', uitD === 'ok' && vraag[vraag.length - 1][1] === null && kaartD && kaartD.stand_tekst === 'Ontvangen door Dragonfly', kaartD);
+    M8.sluit(); fs.rmSync(W8, { recursive: true, force: true });
+  }
   // ── 3. opslag, ronde en lijst ──
   const W = fs.mkdtempSync(path.join(os.tmpdir(), 'pakjes-'));
   fs.writeFileSync(path.join(W, 'config.json'), JSON.stringify({ postcodes: [PC] }));
@@ -369,7 +443,22 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
   const src = fs.readFileSync('server.js', 'utf8');
   const b = src.slice(src.indexOf('// ── OVIS Pakjes (wv2593'), src.indexOf('// ── einde OVIS Pakjes ──'));
   toets('4 server.js: blok aanwezig met de drie routes en /health.pakjes', b.length > 1000 && /'GET \/app\/pakjes'/.test(b) && /POST \/app\/pakjes\/ververs/.test(b) && /\\\/verberg\$/.test(b) && /pakjes: typeof pakjesInfo === 'function'/.test(src));
-  toets('4 server.js: hosts vast (DHL, PostNL, GLS), geen redirect volgen', /PAKJES_HOSTS = \['my\.dhlecommerce\.nl', 'jouw\.postnl\.nl', 'gls-group\.com'\]/.test(b) && /redirect: 'manual'/.test(b));
+  toets('4 server.js: hosts vast (DHL, PostNL, GLS, GOFO, Dragonfly), geen redirect volgen', /PAKJES_HOSTS = \['my\.dhlecommerce\.nl', 'jouw\.postnl\.nl', 'gls-group\.com', 'www\.gofo\.com', 'dragonflyshipping\.nl'\]/.test(b)
+    && /PAKJES_POST = \['www\.gofo\.com'\]/.test(b) && /redirect: 'manual'/.test(b));
+  // wv3078: pakjesHaal echt draaien met een nep-fetch: alleen vaste hosts, POST alleen naar GOFO, body als json, geen redirect
+  {
+    const st = b.indexOf('const PAKJES_HOSTS'), en = b.indexOf('let pakjesBezig');
+    const gezien = [];
+    const nepFetch = async (u, o) => { gezien.push({ host: u.hostname, method: o.method || 'GET', body: o.body || null, ct: o.headers['content-type'] || null, redirect: o.redirect }); return { status: 200, text: async () => '{"a":1}' }; };
+    const haalS = new Function('fetch', 'AbortSignal', b.slice(st, en) + '; return pakjesHaal;')(nepFetch, AbortSignal);
+    const fout = async (f) => { try { await f(); return false; } catch (e) { return true; } };
+    const g1 = await haalS('https://www.gofo.com/nl/open-api/official/track/queryTrackV2', { numberList: ['GFNL1'] });
+    const g2 = await haalS('https://dragonflyshipping.nl/cfworker/v3/tracking/AMZNL1/');
+    toets('4 pakjesHaal: GOFO = POST met json-body; Dragonfly = GET; vreemde host, http of POST naar een andere host = geweigerd',
+      g1.json.a === 1 && gezien[0].method === 'POST' && gezien[0].body === '{"numberList":["GFNL1"]}' && gezien[0].ct === 'application/json' && gezien[0].redirect === 'manual'
+      && gezien[1].method === 'GET' && gezien[1].body === null && g2.status === 200
+      && await fout(() => haalS('https://evil.example/x')) && await fout(() => haalS('http://www.gofo.com/x', {})) && await fout(() => haalS('https://dragonflyshipping.nl/x', { a: 1 })) && gezien.length === 2, gezien);
+  }
   const log = (/schrijfLog\(nu\(\) \+ ' pakjes ' \+ velden\(\{([^}]*)\}/.exec(b) || [])[1] || '';
   toets('4 server.js: log alleen aantallen (geen code, winkel, postcode, onderwerp)', log && !/code|winkel|pc|postcode|onderwerp|van:/.test(log.replace(/volg_|kandidaten/g, '')), log);
   toets('4 server.js: mailman.sqlite alleen lezen', /new DatabaseSync\(f, \{ readOnly: true \}\)/.test(b) && !/INSERT|UPDATE|DELETE/.test(b.slice(b.indexOf('function pakjesKandidaten'), b.indexOf('async function pakjesLees'))));
