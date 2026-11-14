@@ -19,6 +19,10 @@
 // Twee stappen: Controleer (ZIP in wacht/, alleen tellen) en Inlezen (opnieuw tellen; anders dan bij Controleer = weigeren; daarna schrijven,
 // nacontrole in dezelfde transactie, ZIP naar bron/). Intrekken = stand 'ingetrokken' en de praktijk opnieuw opbouwen uit de overige ZIP's.
 //
+// wv3045 (14-11-2026): ook de export zonder kolom patientnummer (Davids normale vorm sinds 14-11). Patient = '' in de databank; patiënten per
+// kwartaal = aantal basisregels, dubbel en in-/uitstroom = "niet in deze export". Een latere export in de andere vorm vervangt de dagen gewoon
+// (vergelijking op inhoud zonder patiënt, alleen voor de tellingen bij Controleer).
+//
 // Gebruik vanuit server.js: require('./pma.js').maak({ map, finPatienten() }) → { app({ pad, methode, body }), info(), herbouw(praktijk) }.
 
 const fs = require('fs');
@@ -26,14 +30,14 @@ const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
 
-const SCHEMA_VERSIE = 1;
+const SCHEMA_VERSIE = 2;   // 2 = wv3045: export.met_patient (export zonder kolom patientnummer)
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT);
 CREATE TABLE IF NOT EXISTS praktijk (code TEXT PRIMARY KEY, naam TEXT NOT NULL, agb TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS export (id INTEGER PRIMARY KEY AUTOINCREMENT, praktijk TEXT NOT NULL REFERENCES praktijk(code), sha256 TEXT NOT NULL UNIQUE,
   naam TEXT, exportdatum TEXT NOT NULL, begin TEXT NOT NULL, eind TEXT NOT NULL, gegevensset TEXT NOT NULL, op TEXT NOT NULL,
   n_inschrijf INTEGER NOT NULL, n_regel INTEGER NOT NULL, n_voorlopig INTEGER NOT NULL, n_gelijk INTEGER NOT NULL,
-  stand TEXT NOT NULL CHECK (stand IN ('actief','ingetrokken')), samenvatting TEXT NOT NULL);
+  stand TEXT NOT NULL CHECK (stand IN ('actief','ingetrokken')), samenvatting TEXT NOT NULL, met_patient INTEGER NOT NULL DEFAULT 1 CHECK (met_patient IN (0,1)));
 CREATE TABLE IF NOT EXISTS inschrijf (praktijk TEXT NOT NULL, peildatum TEXT NOT NULL, patient TEXT NOT NULL, code TEXT NOT NULL, tarief_cent INTEGER NOT NULL,
   registreerder TEXT NOT NULL, volgnr INTEGER NOT NULL, export_id INTEGER NOT NULL REFERENCES export(id),
   UNIQUE (praktijk, peildatum, patient, code, volgnr));
@@ -96,6 +100,11 @@ const CODES_START = [
 
 const KOP_INFO = ['AGB', 'Export datum', 'Begin periode', 'Eind periode', 'Naam populatie', 'Naam gegevensset', 'Type'];
 const KOP_DATA = ['id', 'patientnummer', 'Verrichting', 'Omschrijving', 'Type', 'Registreerder AGB', 'Registreerder', 'Soort', 'Tarief', 'Boekingsdatum', 'Factuurdatum'];
+// wv3045 (David 14-11-2026, bewust): de export zonder de kolom patientnummer is de normale vorm. Dan staat patient = '' in de databank
+// (ZONDER); alles wat niet van het nummer afhangt werkt gewoon, unieke patiënten, dubbele basisregels en in-/uitstroom worden NIET.
+const KOP_ZONDER = KOP_DATA.filter((k) => k !== 'patientnummer');
+const ZONDER = '';
+const NIET = 'niet in deze export';
 const ZIP_MAX = 8 * 1024 * 1024;            // één ZIP (een jaar Tolgaarde ± 1,2 MB)
 const UITGEPAKT_MAX = 200 * 1024 * 1024;    // samen uitgepakt (een jaar ± 27 MB); daarboven weigeren (ZIP-bom)
 const WACHT_MS = 24 * 3600 * 1000;          // een gecontroleerde ZIP blijft een dag in wacht/
@@ -210,15 +219,18 @@ function leesExport(zipBuf, pseudo) {
   if (begin > eind) throw new LeesFout('export_info: begin ligt na het eind');
   if (eind > exportdatum) throw new LeesFout('export_info: de periode loopt door na de exportdatum');
   const rijen = splitsCsv(utf8(data[0].data, 'het verrichtingenbestand'));
-  if (!rijen.length || rijen[0].join(';') !== KOP_DATA.join(';')) throw new LeesFout('het verrichtingenbestand heeft niet de bekende kolommen');
+  const kop = rijen.length ? rijen[0].join(';') : '';
+  const metPatient = kop === KOP_DATA.join(';');
+  if (!metPatient && kop !== KOP_ZONDER.join(';')) throw new LeesFout('het verrichtingenbestand heeft niet de bekende kolommen');
+  const nKol = metPatient ? KOP_DATA.length : KOP_ZONDER.length;
   const inschrijf = [], regels = [];
   const volgI = new Map(), volgR = new Map();
   let voorlopig = 0, gelijk = 0;
   for (let r = 1; r < rijen.length; r++) {
     const v = rijen[r], wat = 'regel ' + (r + 1);
-    if (v.length !== KOP_DATA.length) throw new LeesFout(wat + ': ' + v.length + ' velden in plaats van ' + KOP_DATA.length);
-    const [, pnr, code, oms, type, ragb, reg, soort, tar, bd, fd] = v;
-    if (!/^\d{1,20}$/.test(pnr)) throw new LeesFout(wat + ': patiëntnummer niet in de bekende vorm');
+    if (v.length !== nKol) throw new LeesFout(wat + ': ' + v.length + ' velden in plaats van ' + nKol);
+    const [pnr, code, oms, type, ragb, reg, soort, tar, bd, fd] = metPatient ? v.slice(1) : [null].concat(v.slice(1));
+    if (metPatient && !/^\d{1,20}$/.test(pnr)) throw new LeesFout(wat + ': patiëntnummer niet in de bekende vorm');
     if (!['I', 'V', 'O'].includes(type)) throw new LeesFout(wat + ': onbekend type "' + type.slice(0, 10) + '"');
     if (!['INSCHRIJFGELD', 'NORMAAL'].includes(soort)) throw new LeesFout(wat + ': onbekende soort "' + soort.slice(0, 20) + '"');
     if ((type === 'I') !== (soort === 'INSCHRIJFGELD')) throw new LeesFout(wat + ': type ' + type + ' hoort niet bij soort ' + soort);
@@ -229,7 +241,7 @@ function leesExport(zipBuf, pseudo) {
     const fdag = fd === '' ? null : datum(fd, wat + ' factuurdatum');
     const tc = cent(tar, wat);
     if (dag < begin || dag > eind) throw new LeesFout(wat + ': boekingsdatum ' + bd + ' ligt buiten de periode van de export');
-    const patient = pseudo(pr.code, pnr);
+    const patient = metPatient ? pseudo(pr.code, pnr) : ZONDER;
     if (type === 'I') {
       if (!isKwartaalStart(dag)) throw new LeesFout(wat + ': inschrijfgeld op ' + bd + ', niet op de eerste dag van een kwartaal');
       const k = dag + '|' + patient + '|' + code;
@@ -245,7 +257,7 @@ function leesExport(zipBuf, pseudo) {
         registreerder: reg, tarief_cent: tc, factuurdatum: fdag, volgnr: n, voorlopig: vl });
     }
   }
-  return { praktijk: pr.code, praktijk_naam: pr.naam, agb, exportdatum, begin, eind, gegevensset: set, inschrijf, regels, voorlopig, gelijk };
+  return { praktijk: pr.code, praktijk_naam: pr.naam, agb, exportdatum, begin, eind, gegevensset: set, inschrijf, regels, voorlopig, gelijk, met_patient: metPatient };
 }
 
 function nuIso() { return new Date().toISOString(); }
@@ -279,17 +291,23 @@ function maak(o) {
   }
   function pseudo(praktijk, nummer) { return crypto.createHmac('sha256', hmac()).update(praktijk + ':' + nummer).digest('hex').slice(0, 16); }
 
+  let bijgewerkt = false;   // wv3045: een databank van schema 1 eerst bijwerken, ook als de eerste opening alleen leest (GET na de uitrol)
   function open(alleenLezen) {
     const { DatabaseSync } = require('node:sqlite');
     mappen();
     const nieuw = !fs.existsSync(dbPad);
     if (alleenLezen && nieuw) return null;
+    if (alleenLezen && !bijgewerkt) open(false).close();
     const db = new DatabaseSync(dbPad, alleenLezen ? { readOnly: true } : {});
     if (!alleenLezen) {
       if (nieuw) { try { fs.chmodSync(dbPad, 0o600); } catch (e) { /* bestaat al */ } }
       db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE;');
       db.exec(SCHEMA);
-      db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?) ON CONFLICT(sleutel) DO NOTHING").run(String(SCHEMA_VERSIE));
+      if (!db.prepare('PRAGMA table_info(export)').all().some((k) => k.name === 'met_patient')) {
+        db.exec('ALTER TABLE export ADD COLUMN met_patient INTEGER NOT NULL DEFAULT 1 CHECK (met_patient IN (0,1))');   // alle exports van schema 1 hadden het nummer
+      }
+      db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde WHERE CAST(waarde AS INTEGER) < CAST(excluded.waarde AS INTEGER)").run(String(SCHEMA_VERSIE));
+      bijgewerkt = true;
       const p = db.prepare('INSERT INTO praktijk (code, naam, agb) VALUES (?, ?, ?) ON CONFLICT(code) DO NOTHING');
       for (const [agb, x] of Object.entries(PRAKTIJKEN)) p.run(x.code, x.naam, agb);
       const c = db.prepare("INSERT INTO code (code, van_jaar, tot_jaar, naam, groep, subgroep, ritme, telt_patient, telt_werkdag, bron) VALUES (?, 2000, NULL, ?, ?, ?, ?, ?, ?, 'start') ON CONFLICT(code, van_jaar) DO NOTHING");
@@ -318,31 +336,42 @@ function maak(o) {
   // ── plan: wat zou deze export doen (zonder schrijven); ook de basis van Inlezen ──
   function plan(db, ex, nieuwId) {
     const codes = codeKaart(db);
-    const eigen = db ? db.prepare('SELECT id, exportdatum FROM export WHERE stand = ?').all('actief') : [];
+    const eigen = db ? db.prepare('SELECT id, exportdatum, met_patient FROM export WHERE stand = ?').all('actief') : [];
     const datumVan = new Map(eigen.map((e) => [e.id, e.exportdatum]));
+    const vormVan = new Map(eigen.map((e) => [e.id, !!e.met_patient]));
     const wint = (eid) => { const d = datumVan.get(eid); return d === undefined || d <= ex.exportdatum || eid === nieuwId; };   // gelijke datum: de laatst ingelezen wint
     // verrichtingen per dag
     const nieuwPerDag = new Map();
     for (const r of ex.regels) { if (!nieuwPerDag.has(r.dag)) nieuwPerDag.set(r.dag, []); nieuwPerDag.get(r.dag).push(r); }
     const oudPerDag = new Map(), bronDag = new Map();
     if (db) {
-      for (const r of db.prepare('SELECT dag, sleutel, factuurdatum FROM regel WHERE praktijk = ? AND dag BETWEEN ? AND ?').iterate(ex.praktijk, ex.begin, ex.eind)) {
-        if (!oudPerDag.has(r.dag)) oudPerDag.set(r.dag, new Map()); oudPerDag.get(r.dag).set(r.sleutel, r.factuurdatum);
+      for (const r of db.prepare('SELECT dag, sleutel, factuurdatum, patient, code, omschrijving, type, reg_agb, registreerder, tarief_cent FROM regel WHERE praktijk = ? AND dag BETWEEN ? AND ?').iterate(ex.praktijk, ex.begin, ex.eind)) {
+        if (!oudPerDag.has(r.dag)) oudPerDag.set(r.dag, new Map()); oudPerDag.get(r.dag).set(r.sleutel, r);
       }
       for (const r of db.prepare('SELECT dag, export_id FROM dagbron WHERE praktijk = ? AND dag BETWEEN ? AND ?').iterate(ex.praktijk, ex.begin, ex.eind)) bronDag.set(r.dag, r.export_id);
     }
-    const d = { nieuw: 0, gelijk: 0, wijzigt: 0, ouder: 0 }, rg = { erbij: 0, eraf: 0, factuur: 0 };
+    const d = { nieuw: 0, gelijk: 0, wijzigt: 0, ouder: 0, andere_vorm: 0 }, rg = { erbij: 0, eraf: 0, factuur: 0 };
     const winDagen = [], wijzigDagen = [];
+    // wv3045: inhoud zonder patiënt (voor dagen waar de opgeslagen export de andere vorm had: met ↔ zonder patiëntnummer)
+    const inh = (r) => [r.code || '', r.omschrijving, r.type, r.reg_agb || '', r.registreerder, r.tarief_cent].join('\u0001');
+    const telOp = (m, k) => m.set(k, (m.get(k) || 0) + 1);
+    const overschot = (a, b) => { let n = 0; for (const [k, x] of a) n += Math.max(0, x - (b.get(k) || 0)); return n; };
     for (const dag of dagenTussen(ex.begin, ex.eind)) {
       const eid = bronDag.get(dag);
       const nu = nieuwPerDag.get(dag) || [], oud = oudPerDag.get(dag) || new Map();
       if (eid === undefined) { d.nieuw++; winDagen.push(dag); rg.erbij += nu.length; if (oud.size) { rg.eraf += oud.size; } continue; }
       if (!wint(eid)) { d.ouder++; continue; }
       winDagen.push(dag);
-      let erbij = 0, factuur = 0;
-      const gezien = new Set();
-      for (const r of nu) { gezien.add(r.sleutel); if (!oud.has(r.sleutel)) erbij++; else if ((oud.get(r.sleutel) || null) !== r.factuurdatum) factuur++; }
-      let eraf = 0; for (const k of oud.keys()) if (!gezien.has(k)) eraf++;
+      let erbij = 0, factuur = 0, eraf = 0;
+      // review Codex MOET 1: altijd als multiset (een volgnummer hangt bij gelijke inhoud af van de volgorde, de factuurdatum niet); in dezelfde vorm
+      // telt de patiënt mee, bij de andere vorm (met ↔ zonder nummer) niet: daar verschillen de sleutels altijd
+      const zelfde = vormVan.get(eid) === ex.met_patient;
+      if (!zelfde) d.andere_vorm++;
+      const k = (r) => (zelfde ? r.patient + '\u0001' : '') + inh(r);
+      const a = new Map(), b = new Map(), af = new Map(), bf = new Map();
+      for (const r of nu) { telOp(a, k(r)); telOp(af, k(r) + '\u0001' + (r.factuurdatum || '')); }
+      for (const r of oud.values()) { telOp(b, k(r)); telOp(bf, k(r) + '\u0001' + (r.factuurdatum || '')); }
+      erbij = overschot(a, b); eraf = overschot(b, a); factuur = overschot(af, bf) - erbij;
       if (erbij || eraf || factuur) { d.wijzigt++; wijzigDagen.push(dag); rg.erbij += erbij; rg.eraf += eraf; rg.factuur += factuur; } else d.gelijk++;
     }
     // inschrijfgeld per kwartaaldatum
@@ -352,8 +381,11 @@ function maak(o) {
     const fin = finPatienten() || {};
     for (const q of dagenTussen(ex.begin, ex.eind).filter(isKwartaalStart)) {
       const nu = nieuwPerQ.get(q) || [];
-      const pat = new Set(nu.filter((r) => (codes.get(r.code) || {}).telt_patient).map((r) => r.patient)).size;
+      const basisR = nu.filter((r) => (codes.get(r.code) || {}).telt_patient);
+      // wv3045: zonder patiëntnummer = het aantal basisregels (in de echte exports ± 0,03 % meer dan unieke patiënten)
+      const pat = ex.met_patient ? new Set(basisR.map((r) => r.patient)).size : basisR.length;
       const k = { peildatum: q, regels: nu.length, patienten: klein(pat), stand: 'leeg' };
+      if (!ex.met_patient) k.zonder_patientnummer = true;
       const finJaar = fin[ex.praktijk] && fin[ex.praktijk][q.slice(0, 4)];
       if (finJaar && pat) { k.fin = Math.round(finJaar * 100) / 100; k.fin_afwijking_pct = pct1(pat, finJaar); k.fin_melding = Math.abs(pat / finJaar - 1) > 0.01; }
       const eid = db ? (db.prepare('SELECT export_id FROM kwartaalbron WHERE praktijk = ? AND peildatum = ?').get(ex.praktijk, q) || {}).export_id : undefined;
@@ -364,10 +396,11 @@ function maak(o) {
       }
       else if (eid === undefined) { k.stand = 'nieuw'; winQ.push(q); }
       else {
-        const oud = new Set(db.prepare('SELECT patient, code, volgnr, tarief_cent, registreerder FROM inschrijf WHERE praktijk = ? AND peildatum = ?').all(ex.praktijk, q)
-          .map((r) => [r.patient, r.code, r.volgnr, r.tarief_cent, r.registreerder].join('|')));
-        const nieuwS = nu.map((r) => [r.patient, r.code, r.volgnr, r.tarief_cent, r.registreerder].join('|'));
-        const gelijk = oud.size === nieuwS.length && nieuwS.every((x) => oud.has(x));
+        // wv3045: als multiset zonder volgnummer (zonder patiëntnummer hangt het volgnummer af van de volgorde in het bestand)
+        const sleutelI = (r) => [r.patient, r.code, r.tarief_cent, r.registreerder].join('|');
+        const oudS = db.prepare('SELECT patient, code, tarief_cent, registreerder FROM inschrijf WHERE praktijk = ? AND peildatum = ?').all(ex.praktijk, q).map(sleutelI).sort();
+        const nieuwS = nu.map(sleutelI).sort();
+        const gelijk = oudS.length === nieuwS.length && nieuwS.every((x, i) => x === oudS[i]);
         k.stand = gelijk ? 'gelijk' : 'vervangen'; winQ.push(q);
       }
       kwartalen.push(k);
@@ -377,7 +410,7 @@ function maak(o) {
     for (const r of ex.regels) if (r.type === 'V' && !codes.has(r.code)) onbekend.set(r.code, (onbekend.get(r.code) || 0) + 1);
     for (const r of ex.inschrijf) if (!codes.has(r.code)) onbekend.set(r.code, (onbekend.get(r.code) || 0) + 1);
     const samenvatting = {
-      praktijk: ex.praktijk, praktijk_naam: ex.praktijk_naam, exportdatum: ex.exportdatum, begin: ex.begin, eind: ex.eind,
+      praktijk: ex.praktijk, praktijk_naam: ex.praktijk_naam, exportdatum: ex.exportdatum, begin: ex.begin, eind: ex.eind, met_patientnummer: ex.met_patient,
       regels: { inschrijf: ex.inschrijf.length, verrichting: ex.regels.filter((r) => r.type === 'V').length, overig: ex.regels.filter((r) => r.type === 'O').length,
         voorlopig: ex.voorlopig, gelijke_regels: ex.gelijk },
       dagen: d, regelverschil: rg, kwartalen,
@@ -481,8 +514,8 @@ function maak(o) {
           herbouwIn(db, ex.praktijk);
           return { id: al.id, terug: true };
         }
-      const r = db.prepare("INSERT INTO export (praktijk, sha256, naam, exportdatum, begin, eind, gegevensset, op, n_inschrijf, n_regel, n_voorlopig, n_gelijk, stand, samenvatting) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'actief',?)")
-        .run(ex.praktijk, s, w.naam, ex.exportdatum, ex.begin, ex.eind, ex.gegevensset, nuIso(), ex.inschrijf.length, ex.regels.length, ex.voorlopig, ex.gelijk, JSON.stringify(p.samenvatting));
+      const r = db.prepare("INSERT INTO export (praktijk, sha256, naam, exportdatum, begin, eind, gegevensset, op, n_inschrijf, n_regel, n_voorlopig, n_gelijk, stand, samenvatting, met_patient) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'actief',?,?)")
+        .run(ex.praktijk, s, w.naam, ex.exportdatum, ex.begin, ex.eind, ex.gegevensset, nuIso(), ex.inschrijf.length, ex.regels.length, ex.voorlopig, ex.gelijk, JSON.stringify(p.samenvatting), ex.met_patient ? 1 : 0);
         const id = Number(r.lastInsertRowid);
         schrijfExport(db, ex, id, plan(db, ex, id));
         return { id };
@@ -546,7 +579,8 @@ function maak(o) {
       const fin = finPatienten() || {};
       const uit = Object.assign(leeg, {
         praktijken: db.prepare('SELECT code, naam FROM praktijk ORDER BY code DESC').all().map((p) => Object.assign({}, p)),
-        exports: db.prepare('SELECT id, praktijk, naam, exportdatum, begin, eind, op, n_inschrijf, n_regel, n_voorlopig, n_gelijk, stand FROM export ORDER BY exportdatum DESC, id DESC').all().map((r) => Object.assign({}, r)),
+        exports: db.prepare('SELECT id, praktijk, naam, exportdatum, begin, eind, op, n_inschrijf, n_regel, n_voorlopig, n_gelijk, stand, met_patient FROM export ORDER BY exportdatum DESC, id DESC').all()
+          .map((r) => Object.assign({}, r, { met_patient: !!r.met_patient })),
         nog_in_te_delen: db.prepare("SELECT c.code, c.naam, (SELECT COUNT(*) FROM regel r WHERE r.code = c.code) + (SELECT COUNT(*) FROM inschrijf i WHERE i.code = c.code) AS n FROM code c WHERE c.groep = 'nog-in-te-delen' ORDER BY c.code").all().map((r) => Object.assign({}, r)),
       });
       for (const p of uit.praktijken) {
@@ -556,20 +590,36 @@ function maak(o) {
         const klasseVan = (code) => basis.indexOf(code);
         let vorige = null, vorigeQ = null;
         p.kwartalen = [];
+        const inBasis = 'code IN (' + basis.map(() => '?').join(',') + ')';
         for (const q of qs) {
-          const perPat = new Map();
-          for (const r of db.prepare('SELECT patient, code FROM inschrijf WHERE praktijk = ? AND peildatum = ? AND code IN (' + basis.map(() => '?').join(',') + ')').iterate(p.code, q, ...basis)) {
-            const k = klasseVan(r.code); const o = perPat.get(r.patient);
-            perPat.set(r.patient, o === undefined ? k : Math.max(o, k));
+          // wv3045: een kwartaaldatum komt als geheel uit één export; zonder patiëntnummer (patient = '') tellen we basisregels per klasse
+          const zonder = !!db.prepare('SELECT 1 AS x FROM inschrijf WHERE praktijk = ? AND peildatum = ? AND patient = ? LIMIT 1').get(p.code, q, ZONDER);
+          const klassen = basis.map(() => 0);
+          let perPat = null, nPat;
+          const k = { peildatum: q };
+          if (zonder) {
+            for (const r of db.prepare('SELECT code, COUNT(*) AS n FROM inschrijf WHERE praktijk = ? AND peildatum = ? AND ' + inBasis + ' GROUP BY code').iterate(p.code, q, ...basis)) klassen[klasseVan(r.code)] += r.n;
+            nPat = klassen.reduce((a, n) => a + n, 0);
+            Object.assign(k, { patienten: klein(nPat), klassen: klassen.map(klein), dubbel: NIET, zonder_patientnummer: true });
+          } else {
+            perPat = new Map();
+            for (const r of db.prepare('SELECT patient, code FROM inschrijf WHERE praktijk = ? AND peildatum = ? AND ' + inBasis).iterate(p.code, q, ...basis)) {
+              const kl = klasseVan(r.code); const o = perPat.get(r.patient);
+              perPat.set(r.patient, o === undefined ? kl : Math.max(o, kl));
+            }
+            const dubbel = db.prepare('SELECT COUNT(*) AS n FROM (SELECT patient FROM inschrijf WHERE praktijk = ? AND peildatum = ? AND ' + inBasis + ' GROUP BY patient HAVING COUNT(*) > 1)').get(p.code, q, ...basis).n;
+            for (const kl of perPat.values()) klassen[kl]++;
+            nPat = perPat.size;
+            Object.assign(k, { patienten: klein(nPat), klassen: klassen.map(klein), dubbel: klein(dubbel) });   // review MOET 3: ook het totaal
           }
-          const dubbel = db.prepare('SELECT COUNT(*) AS n FROM (SELECT patient FROM inschrijf WHERE praktijk = ? AND peildatum = ? AND code IN (' + basis.map(() => '?').join(',') + ') GROUP BY patient HAVING COUNT(*) > 1)').get(p.code, q, ...basis).n;
-          const klassen = basis.map(() => 0); for (const k of perPat.values()) klassen[k]++;
-          const k = { peildatum: q, patienten: klein(perPat.size), klassen: klassen.map(klein), dubbel: klein(dubbel) };   // review MOET 3: ook het totaal
-          if (vorige && volgendKwartaal(vorigeQ) === q) {
-            let inn = 0, uitS = 0, door = 0;
-            for (const [pt, kl] of perPat) { if (!vorige.has(pt)) inn++; else if (kl > vorige.get(pt)) door++; }
-            for (const pt of vorige.keys()) if (!perPat.has(pt)) uitS++;
-            k.instroom = klein(inn); k.uitstroom = klein(uitS); k.doorschuif = klein(door);
+          if (vorigeQ && volgendKwartaal(vorigeQ) === q) {
+            if (!perPat || !vorige) { k.instroom = NIET; k.uitstroom = NIET; k.doorschuif = NIET; }
+            else {
+              let inn = 0, uitS = 0, door = 0;
+              for (const [pt, kl] of perPat) { if (!vorige.has(pt)) inn++; else if (kl > vorige.get(pt)) door++; }
+              for (const pt of vorige.keys()) if (!perPat.has(pt)) uitS++;
+              k.instroom = klein(inn); k.uitstroom = klein(uitS); k.doorschuif = klein(door);
+            }
           }
           const mods = db.prepare('SELECT code, COUNT(*) AS n, SUM(tarief_cent) AS c FROM inschrijf WHERE praktijk = ? AND peildatum = ? GROUP BY code ORDER BY code').all(p.code, q);
           k.inschrijfgeld = { basis: 0, opslag: 0, modules: 0, jaarmodule: 0 };
@@ -580,10 +630,10 @@ function maak(o) {
             else if (c.groep === 'inschrijving') k.inschrijfgeld.opslag += m.c;
             else if (c.groep === 'module' && c.ritme === 'jaar') k.inschrijfgeld.jaarmodule += m.c;
             else k.inschrijfgeld.modules += m.c;
-            if (c.groep === 'module' || c.groep === 'nog-in-te-delen') k.modules.push({ code: m.code, naam: c.naam, ritme: c.ritme || null, n: m.n, cent: m.c, dekking_pct: perPat.size ? Math.round(m.n / perPat.size * 1000) / 10 : null });
+            if (c.groep === 'module' || c.groep === 'nog-in-te-delen') k.modules.push({ code: m.code, naam: c.naam, ritme: c.ritme || null, n: m.n, cent: m.c, dekking_pct: nPat ? Math.round(m.n / nPat * 1000) / 10 : null });
           }
           const fj = fin[p.code] && fin[p.code][q.slice(0, 4)];
-          if (fj) { k.fin = Math.round(fj * 100) / 100; k.fin_afwijking_pct = pct1(perPat.size, fj); k.fin_melding = Math.abs(perPat.size / fj - 1) > 0.01; }
+          if (fj) { k.fin = Math.round(fj * 100) / 100; k.fin_afwijking_pct = pct1(nPat, fj); k.fin_melding = Math.abs(nPat / fj - 1) > 0.01; }
           p.kwartalen.push(k);
           vorige = perPat; vorigeQ = q;
         }
@@ -650,7 +700,7 @@ function maak(o) {
       if (!db) return { aan: true, databank: false };
       const n = (t, w) => db.prepare('SELECT COUNT(*) AS n FROM ' + t + (w || '')).get().n;
       let bron = 0; try { bron = fs.readdirSync(bronMap).filter((f) => f.endsWith('.zip')).length; } catch (e) { /* geen map */ }
-      return { aan: true, databank: true, exports: n('export', " WHERE stand = 'actief'"), ingetrokken: n('export', " WHERE stand = 'ingetrokken'"), regels: n('regel'),
+      return { aan: true, databank: true, exports: n('export', " WHERE stand = 'actief'"), zonder_patientnummer: n('export', " WHERE stand = 'actief' AND met_patient = 0"), ingetrokken: n('export', " WHERE stand = 'ingetrokken'"), regels: n('regel'),
         inschrijf: n('inschrijf'), dagen: n('dagbron'), kwartalen: n('kwartaalbron'), nog_in_te_delen: n('code', " WHERE groep = 'nog-in-te-delen'"), bron_zips: bron,
         schema: Number((db.prepare("SELECT waarde FROM meta WHERE sleutel = 'schema'").get() || {}).waarde) || null };
     }, false);

@@ -40,7 +40,7 @@ const tel = (map, t, w, ...p) => db(map, 'SELECT COUNT(*) AS n FROM ' + t + (w ?
 // Alle patiëntnummers (ruw) uit de verzonnen exports en alle pseudoniemen uit de databank: geen enkele mag in een antwoord staan.
 function geheimen(map, ...exports) {
   const ruw = new Set(); for (const e of exports) for (const r of e.regels) ruw.add(r.pnr);
-  const ps = db(map, 'SELECT DISTINCT patient FROM regel UNION SELECT DISTINCT patient FROM inschrijf').map((r) => r.patient);
+  const ps = db(map, 'SELECT DISTINCT patient FROM regel UNION SELECT DISTINCT patient FROM inschrijf').map((r) => r.patient).filter((p) => p !== '');   // wv3045: '' = zonder nummer
   return { ruw: [...ruw], ps };
 }
 function lekt(obj, g) {
@@ -95,7 +95,7 @@ test('overlap: alleen gewijzigde dagen vervangen, gelijke regels blijven, voorlo
   const { c } = inlees(m, B);
   const s = c.body.samenvatting;
   // 20–31 jan: 20-1 één regel erbij, 26–30 jan factuurdatum ingevuld (5 werkdagen) → 6 dagen wijzigen; de andere 6 gelijk; 60 nieuwe dagen
-  assert.deepStrictEqual(s.dagen, { nieuw: 60, gelijk: 6, wijzigt: 6, ouder: 0 });   // 1 feb t/m 1 apr = 28 + 31 + 1
+  assert.deepStrictEqual(s.dagen, { nieuw: 60, gelijk: 6, wijzigt: 6, ouder: 0, andere_vorm: 0 });   // 1 feb t/m 1 apr = 28 + 31 + 1
   assert.strictEqual(s.regelverschil.erbij > 1, true);
   assert.strictEqual(s.regelverschil.eraf, 0);
   assert.ok(s.regelverschil.factuur >= 20);
@@ -299,4 +299,117 @@ test('review MOET 4: terugzetten van een ingetrokken export gaat ook langs de ve
   const i = post(m, 'inlees', { sha: cB.body.sha });
   assert.strictEqual(i.status, 409);
   assert.strictEqual(m.info().exports, 0);
+});
+
+// ── wv3045: export ZONDER kolom patientnummer (Davids normale vorm sinds 14-11-2026), ook gemengd met de oude vorm ──
+const zonder = (e) => Object.assign(e, { zonderPnr: true });
+const NIET = 'niet in deze export';
+test('wv3045 zonder patiëntnummer: inlezen, basisregels als patiëntaantal, unieke tellingen "niet in deze export", geen sleutel nodig', () => {
+  const { m, map } = nieuw();
+  const A = zonder(M.exportA()), B = zonder(M.exportB());
+  const { c } = inlees(m, A);
+  const s = c.body.samenvatting;
+  assert.strictEqual(s.met_patientnummer, false);
+  assert.strictEqual(s.kwartalen[0].patienten, 40); assert.strictEqual(s.kwartalen[0].zonder_patientnummer, true);
+  assert.strictEqual(tel(map, 'regel'), A.regels.filter((r) => r.type !== 'I').length);
+  assert.strictEqual(tel(map, 'inschrijf'), 363);
+  assert.strictEqual(tel(map, 'regel', "patient <> ''") + tel(map, 'inschrijf', "patient <> ''"), 0);
+  assert.strictEqual(fs.existsSync(path.join(map, 'sleutel')), false, 'zonder nummer wordt de pseudoniemsleutel niet eens aangemaakt');
+  const { c: cB } = inlees(m, B);
+  assert.deepStrictEqual(cB.body.samenvatting.dagen, { nieuw: 60, gelijk: 6, wijzigt: 6, ouder: 0, andere_vorm: 0 });
+  assert.strictEqual(cB.body.samenvatting.regelverschil.eraf, 0);
+  const o = m.app({ methode: 'GET', pad: '/app/pma' }).body;
+  const tg = o.praktijken.find((p) => p.code === 'TG');
+  const [k1, k2] = tg.kwartalen;
+  assert.strictEqual(k1.patienten, 40); assert.strictEqual(k2.patienten, 41);
+  assert.strictEqual(k1.dubbel, NIET); assert.strictEqual(k2.instroom, NIET); assert.strictEqual(k2.uitstroom, NIET); assert.strictEqual(k2.doorschuif, NIET);
+  assert.strictEqual(k1.zonder_patientnummer, true);
+  assert.deepStrictEqual(k1.klassen, [24, 8, '< 5', '< 5']);   // 40 verzonnen patiënten: 6/2/1/1 van elke 10
+  assert.ok(k1.modules.find((x) => x.code === '31080').dekking_pct === 100);
+  assert.strictEqual(o.exports.every((e) => e.met_patient === false), true);
+  assert.strictEqual(m.info().zonder_patientnummer, 2);
+  // zelfde inhoud als met nummer: maanden, registreerders, modules en inschrijfgeld gelijk
+  const { m: m2 } = nieuw(); inlees(m2, M.exportA()); inlees(m2, M.exportB());
+  const t2 = m2.app({ methode: 'GET', pad: '/app/pma' }).body.praktijken.find((p) => p.code === 'TG');
+  assert.deepStrictEqual(tg.maanden, t2.maanden); assert.deepStrictEqual(tg.registreerders, t2.registreerders);
+  assert.deepStrictEqual(tg.kwartalen.map((k) => [k.patienten, k.inschrijfgeld, k.modules]), t2.kwartalen.map((k) => [k.patienten, k.inschrijfgeld, k.modules]));
+  assert.notStrictEqual(t2.kwartalen[1].instroom, NIET);
+});
+
+test('wv3045 gemengd: nieuwere export zonder nummer over dagen mét nummer, daarna weer mét nummer = dagen vervangen, tellingen op inhoud', () => {
+  const { m, map } = nieuw();
+  const A = M.exportA(), B = zonder(M.exportB());
+  inlees(m, A);
+  const { c } = inlees(m, B);
+  const s = c.body.samenvatting;
+  // 20–31 jan (12 dagen) stonden er mét nummer: andere vorm; op inhoud 6 gelijk en 6 gewijzigd, net als in dezelfde vorm
+  assert.deepStrictEqual(s.dagen, { nieuw: 60, gelijk: 6, wijzigt: 6, ouder: 0, andere_vorm: 12 });
+  const { m: mv } = nieuw(); inlees(mv, M.exportA());   // zelfde stap in dezelfde vorm als maatstaf
+  assert.deepStrictEqual(s.regelverschil, lees(mv, M.exportB()).body.samenvatting.regelverschil);
+  assert.strictEqual(s.regelverschil.eraf, 0); assert.ok(s.regelverschil.factuur >= 20);
+  assert.strictEqual(tel(map, 'regel', "dag >= '2026-01-20' AND patient <> ''"), 0);
+  assert.ok(tel(map, 'regel', "dag < '2026-01-20' AND patient <> ''") > 0);
+  let tg = m.app({ methode: 'GET', pad: '/app/pma' }).body.praktijken.find((p) => p.code === 'TG');
+  assert.strictEqual(tg.kwartalen[0].zonder_patientnummer, undefined); assert.strictEqual(typeof tg.kwartalen[0].dubbel, 'number');
+  assert.strictEqual(tg.kwartalen[1].instroom, NIET);
+  // een latere export mét nummer over dezelfde dagen vervangt ze gewoon (inhoud gelijk: alle dagen 'gelijk', andere vorm)
+  const B2 = Object.assign(M.exportB(), { exportdatum: '2026-04-09' });
+  const { c: c2 } = inlees(m, B2);
+  assert.deepStrictEqual(c2.body.samenvatting.dagen, { nieuw: 0, gelijk: 72, wijzigt: 0, ouder: 0, andere_vorm: 72 });
+  assert.strictEqual(c2.body.samenvatting.kwartalen[0].stand, 'vervangen');
+  assert.strictEqual(tel(map, 'regel', "patient = ''") + tel(map, 'inschrijf', "patient = ''"), 0);
+  tg = m.app({ methode: 'GET', pad: '/app/pma' }).body.praktijken.find((p) => p.code === 'TG');
+  assert.strictEqual(tg.kwartalen[1].instroom, '< 5');
+  // intrekken van de laatste: terug naar A + B zonder nummer
+  assert.strictEqual(post(m, 'intrek', { id: 3 }).status, 200);
+  assert.strictEqual(tel(map, 'regel', "dag >= '2026-01-20' AND patient <> ''"), 0);
+  // een OUDERE export zonder nummer verandert niets aan nieuwere dagen mét nummer
+  const { m: m3, map: map3 } = nieuw(); inlees(m3, M.exportB());
+  const voor = db(map3, 'SELECT sleutel FROM regel ORDER BY sleutel');
+  const { c: c3 } = inlees(m3, zonder(Object.assign(M.exportA(), { exportdatum: '2026-02-01' })));
+  assert.strictEqual(c3.body.samenvatting.dagen.ouder, 12);
+  assert.deepStrictEqual(db(map3, "SELECT sleutel FROM regel WHERE dag >= '2026-01-20' ORDER BY sleutel"), voor);
+  const g = geheimen(map, A, B);
+  assert.strictEqual(lekt(c.body, g) || lekt(c2.body, g) || lekt(tg, g), false);
+});
+
+test('wv3045 zonder nummer blijft strikt: andere kolommen of een veld te veel = weigeren', () => {
+  const { m } = nieuw();
+  const weiger = (e, re) => { const c = post(m, 'controleer', { zip: zip64(e) }); assert.strictEqual(c.status, 400, JSON.stringify(c.body)); assert.match(c.body.fout, re); };
+  weiger(Object.assign(zonder(M.exportA()), { kop: M.KOP_ZONDER.replace('Tarief', 'Bedrag') }), /bekende kolommen/);
+  weiger(Object.assign(zonder(M.exportA()), { kop: M.KOP_ZONDER.replace('id;', '') }), /bekende kolommen/);
+  weiger(Object.assign(M.exportA(), { kop: M.KOP_ZONDER }), /11 velden in plaats van 10/);   // kop zonder, regels met nummer
+});
+
+test('wv3045 databank van schema 1 (zonder kolom met_patient) wordt bijgewerkt, ook als eerst alleen gelezen wordt', () => {
+  const { m, map } = nieuw();
+  inlees(m, M.exportA());
+  const { DatabaseSync } = require('node:sqlite');
+  const d = new DatabaseSync(path.join(map, 'pma.sqlite'));
+  d.exec("ALTER TABLE export DROP COLUMN met_patient; UPDATE meta SET waarde = '1' WHERE sleutel = 'schema'"); d.close();
+  const m2 = P.maak({ map, finPatienten: () => FIN });
+  const o = m2.app({ methode: 'GET', pad: '/app/pma' });
+  assert.strictEqual(o.status, 200, JSON.stringify(o.body));
+  assert.strictEqual(o.body.exports[0].met_patient, true);
+  assert.strictEqual(m2.info().schema, 2);
+  const { c } = inlees(m2, zonder(M.exportB()));
+  assert.strictEqual(c.body.samenvatting.dagen.andere_vorm, 12);
+});
+
+test('wv3045 zelfde inhoud in een andere volgorde (zonder nummer) = kwartaal en dagen "gelijk"; ook mét nummer', () => {
+  const { m } = nieuw();
+  const anders = (e) => { for (const r of e.regels) if (r.type === 'I' && r.pnr === '900001') r.reg = 'Y. Proefanders'; return e; };   // regels binnen één code verschillen
+  // review Codex MOET 1: twee verder gelijke verrichtingen, de een gefactureerd en de ander nog niet; omgekeerde volgorde = geen wijziging
+  const tweeling = (e) => { const r = { pnr: '900009', code: M.C.kort[0], oms: M.C.kort[1], type: 'V', reg: 'A. Proefsen', tarief: M.C.kort[2], dag: '2026-01-22' };
+    e.regels.push(Object.assign({}, r, { factuur: '2026-01-31' }), Object.assign({}, r, { factuur: null })); return e; };
+  inlees(m, tweeling(anders(zonder(M.exportA()))));
+  const A2 = tweeling(anders(zonder(Object.assign(M.exportA(), { exportdatum: '2026-02-04' })))); A2.regels.reverse();
+  const s = lees(m, A2).body.samenvatting;
+  assert.strictEqual(s.kwartalen[0].stand, 'gelijk');
+  assert.deepStrictEqual(s.dagen, { nieuw: 0, gelijk: 31, wijzigt: 0, ouder: 0, andere_vorm: 0 });
+  assert.deepStrictEqual(s.regelverschil, { erbij: 0, eraf: 0, factuur: 0 });
+  const { m: mm } = nieuw();
+  inlees(mm, tweeling(M.exportA()));
+  const A3 = tweeling(Object.assign(M.exportA(), { exportdatum: '2026-02-04' })); A3.regels.reverse();
+  assert.deepStrictEqual(lees(mm, A3).body.samenvatting.dagen, { nieuw: 0, gelijk: 31, wijzigt: 0, ouder: 0, andere_vorm: 0 });
 });
