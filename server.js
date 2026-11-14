@@ -11754,7 +11754,8 @@ const APP_PRAKTIJKEN = [
   { code: 'GH', naam: 'Groenhouten', voluit: 'Huisartsenpraktijk Groenhouten (maatschap)', praktijk: true,
     kern: ['omzet_totaal', 'resultaat', 'personeel', 'uitbesteed', 'k_huisv', 'liquide', 'ev_totaal'],
     lijnen: [{ titel: 'Omzet en resultaat', r: ['omzet_totaal', 'resultaat'] }, { titel: 'Personeel en waarneming', r: ['personeel', 'uitbesteed'] }],
-    noten: ['Resultaat = winst van de maatschap, vóór verdeling over de maten.', APP_NOOT_GROEI] },
+    van: 2024,   // wv3041: de hub heeft ook de voorganger HAP Leusden (2017-2020, andere eigenaren); niet in deze reeks
+    noten: ['Resultaat = winst van de maatschap, vóór verdeling over de maten.', 'Vanaf 2024 (maatschap Groenhouten). De jaren 2017–2020 van de voorganger Huisartsenpraktijk Leusden (andere eigenaren en een andere kostenindeling) staan wel in de datahub, maar niet in deze reeks; vraag Socev.', APP_NOOT_GROEI] },
   { code: 'POT', naam: 'POT', voluit: 'POT POH-GGZ (Maatschap samenwerkende werkgevers)', pohggz: true,
     kern: ['k_som_bruto', 'bijdrage_maten', 'personeel', 'liquide'], omkeren: ['bijdrage_maten'],
     lijnen: [{ titel: 'Wat de POH-GGZ kost', r: ['k_som_bruto', 'personeel'] }],
