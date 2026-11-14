@@ -3283,3 +3283,73 @@ test('wv2548 review MOET 1: ook in een inhaalronde gaat een verkoopkandidaat noo
   assert.deepEqual(u.s1.j.jev.map(function (a) { return a.gmail_id; }), [gewoon.id]);
   assert.deepEqual(fouten, []);
 });
+
+// ── wv3077 (OVIS Mail fase 1): Naar Facturen / Naar Brain uit de Mail-App op elke mail, vlakjes (mailLaag) en de regel bovenaan (mailRegel) ──
+test('wv3077 mailNaar: elke binnengekomen mail kan naar Facturen of Brain (label via de keuze-tak), één keer; nooit bij een slotje, onbekend of bezig', () => {
+  const { mm, dir, gm, fouten } = b8Kamer();
+  const info = mail({ onderwerp: 'Rekening als tekst' });
+  const mens = mail({ van: 'Iemand <iemand@voorbeeld.invalid>', onderwerp: 'Verslag van de vergadering' });
+  const pat = mail({ onderwerp: 'Betreft: mw. Proef', tekst: 'Geachte collega, bovengenoemde patiënt zagen wij op de polikliniek. Geboortedatum: 01-02-1950. Diagnose en behandelplan volgen.' });
+  const ms = [info, mens, pat];
+  const jev = { [info.id]: JEV_INFO, [mens.id]: JEV_INFO, [pat.id]: JEV_INFO };
+  draai(mm, 'gmail:david', ms, { jev: function (a) { return jevAntwoord(jev[a.gmail_id]); } });
+  const vooraf = mm.mailNaar({ draad: info.threadId, naar: 'facturen' });
+  assert.equal(vooraf.status, 409, 'nog niet live met labelset 2');
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir); zakenToestaan(dir);
+  ms.forEach(function (m) { gm.voeg(m); });
+  const ids = ms.map(function (m) { return m.id; });
+  l2Ronde(mm, gm, ids, { inbox: true });
+  assert.equal(rij(mm, info.id).stroom, 'info');
+  assert.equal(mm.mailNaar({ draad: info.threadId, naar: 'elders' }).status, 400);
+  assert.equal(mm.mailNaar({ draad: 'zz', naar: 'facturen' }).status, 400);
+  const onb = mm.mailNaar({ draad: 'abcdefabcdef1234', naar: 'facturen' });
+  assert.equal(onb.status, 409); assert.equal(onb.j.onbekend, true);
+  const slot = mm.mailNaar({ draad: pat.threadId, naar: 'brain' });
+  assert.equal(slot.status, 409); assert.equal(slot.j.slot, true);
+  const f = mm.mailNaar({ draad: info.threadId, naar: 'facturen' });
+  assert.deepEqual(f.j, { ok: true, wacht: true, label: 'FACTUUR' });
+  const b = mm.mailNaar({ draad: mens.threadId, naar: 'brain' });
+  assert.equal(b.j.label, 'INTAKE');
+  assert.equal(rij(mm, info.id).juist_door, 'mail-app');
+  let laag = mm.mailLaag([info.threadId, mens.threadId, pat.threadId, 'abcdefabcdef1234']);
+  assert.equal(laag[info.threadId].app_wacht, 'facturen'); assert.equal(laag[mens.threadId].app_wacht, 'brain');
+  assert.equal(laag[pat.threadId].slot, true); assert.equal(laag['abcdefabcdef1234'], undefined);
+  const a = l2Ronde(mm, gm, ids, { inbox: true });
+  const per = perId(a.l.j.acties);
+  assert.equal(per[info.id].soort, 'keuze'); assert.deepEqual(per[info.id].erbij, ['FACTUUR']);
+  assert.equal(per[mens.id].soort, 'keuze'); assert.deepEqual(per[mens.id].erbij, ['INTAKE', 'AI/MailMan']);
+  assert.equal(per[pat.id], undefined);
+  assert.ok(gm.heeft(info.id, 'FACTUUR') && gm.heeft(mens.id, 'INTAKE'));
+  assert.equal(lsRij(mm, info.id, 'FACTUUR').bron, 'keuze');
+  assert.deepEqual(l2Ronde(mm, gm, ids, { inbox: true }).l.j.acties, [], 'één keer');
+  assert.deepEqual(mm.mailNaar({ draad: info.threadId, naar: 'facturen' }).j, { ok: true, al: true, label: 'FACTUUR' });
+  laag = mm.mailLaag([info.threadId]);
+  assert.equal(laag[info.threadId].app_wacht, null);
+  assert.equal(laag[info.threadId].laag, 'socev'); assert.equal(laag[info.threadId].reden, 'facturen');
+  // de Werkstroom (steekproef) wint van een eerdere app-keuze
+  assert.equal(mm.app('POST /app/mailman/oordeel', { id: rij(mm, mens.id).id, juist: null }).status, 200);
+  assert.equal(rij(mm, mens.id).juist_door, null);
+  assert.deepEqual(fouten, []);
+});
+
+test('wv3077 mailRegel: vandaag binnen = door jou + door Socev weggezet + in je inbox + buiten je inbox + onbekend; alleen tellingen, alleen privé', () => {
+  const { mm, dir, gm } = b8Kamer();
+  const blijft = mail({ onderwerp: 'Staat nog in de inbox' }), weg = mail({ onderwerp: 'David archiveert' }), filter = mail({ onderwerp: 'Via een filter' });
+  const oud = mail({ onderwerp: 'Van eergisteren', datum: klok - 3 * 86400000 });
+  const ms = [blijft, weg, filter, oud];
+  draai(mm, 'gmail:david', ms, { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir); zakenToestaan(dir);
+  ms.forEach(function (m) { gm.voeg(m); });
+  gm.plek(filter.id, 'archief');
+  const ids = ms.map(function (m) { return m.id; });
+  l2Ronde(mm, gm, ids, { inbox: true });
+  gm.plek(weg.id, 'archief');
+  l2Ronde(mm, gm, ids, { inbox: true });
+  const r = mm.mailRegel();
+  assert.equal(r.aan, true);
+  assert.equal(r.binnen, 3, 'oud telt niet');
+  assert.deepEqual([r.jij, r.socev, r.inbox, r.buiten, r.onbekend], [1, 0, 1, 1, 0]);
+  assert.equal(r.jij + r.socev + r.inbox + r.buiten + r.onbekend, r.binnen);
+  assert.ok(r.laatste_geslaagd);
+  assert.ok(!JSON.stringify(r).includes('Staat nog'), 'geen onderwerpen');
+});
