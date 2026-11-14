@@ -54,11 +54,11 @@ test('lezer: transacties oud NL (19 kolommen) en nieuw EN (18 kolommen, punt, BO
   assert.strictEqual(b.soort, 'transacties'); assert.strictEqual(b.decimaal, '.');
   assert.deepStrictEqual([b.rijen[0].kosten_eur_cent, b.rijen[0].totaal_eur_cent, b.rijen[0].order_id], [-223, -9440, 'aaaa0000-0000-0000-0000-000000000003']);
 });
-test('lezer: rekeningoverzicht, saldo loopt door (nieuw → oud én oud → nieuw)', () => {
+test('lezer: rekeningoverzicht, saldo loopt door van nieuw → oud; oud → nieuw = weigeren (wv2985)', () => {
   const l = B.leesBestand(REK);
   assert.strictEqual(l.soort, 'rekening'); assert.strictEqual(l.rijen.length, 3);
   const kop = REK.split('\n')[0], rs = REK.split('\n').slice(1).reverse();
-  assert.strictEqual(B.leesBestand([kop, ...rs].join('\n')).rijen.length, 3);
+  weigert([kop, ...rs].join('\n'), /loopt niet door van onder naar boven/);
   weigert(REK.replace('"917,00"', '"916,00"'), /saldo in EUR loopt niet door/);
 });
 test('lezer: verkeerde of onbekende kolommen = weigeren met de namen', () => {
@@ -76,7 +76,7 @@ test('lezer: verkeerde decimalen = weigeren', () => {
 test('lezer: rij die niet optelt = weigeren met regelnummer', () => {
   try { B.leesBestand(PORT.replace('"810,00","810,00"', '"820,00","820,00"')); assert.fail('niet geweigerd'); }
   catch (e) { assert.ok(e instanceof B.LeesFout); assert.match(e.message, /aantal × slotkoers/); assert.strictEqual(e.regel, 3); }
-  weigert(TX_NL.replace('"-276,50"', '"-300,00"'), /wisselkoers geven niet de waarde/);
+  weigert(TX_NL.replace('"-276,50"', '"-300,00"'), /wisselkoers geeft niet de waarde/);
   weigert(TX_NL.replace('"-278,50"', '"-280,50"'), /totaal is niet waarde \+ kosten/);
   weigert(TX_NL.replace('05-11-2026', '31-11-2026'), /datum bestaat niet/);
   weigert(TX_NL.replace('05-11-2026', '2026-11-05'), /dd-mm-jjjj/);
@@ -250,7 +250,7 @@ test('review MOET 3: alleen een CASH-regel mag zonder aantal en ISIN', () => {
 });
 test('review MOET 4: rekeningregel met mutatie maar zonder saldo = weigeren; zonder beide mag', () => {
   weigert(REK.replace('EUR,"917,00",aaaa', ',,aaaa'), /mutatie zonder saldo/);
-  const info = REK + '\n05-11-2026,15:31,05-11-2026,VOORBEELD CHIPS INC,XX0000000011,Valuta Creditering,"1,0850",,,,,';
+  const info = REK + '\n01-11-2026,09:00,01-11-2026,VOORBEELD GELDFONDS,XX0000000099,Geldmarktfonds prijswijziging,,,,,,';   // wv2985: FX zonder mutatie = weigeren (zie echte vorm)
   assert.strictEqual(B.leesBestand(info).rijen.length, 4);
 });
 test('review MOET 5: 3 en 3,0 of 100,00 en 100,0 geven dezelfde dubbelsleutel', () => {
@@ -311,4 +311,72 @@ test('wv3008 startfase: contant met de hand telt als contant, niet als belegd; e
   assert.ok(!o.stand.cash.some((c) => c.sleutel === 'cash:hand'), 'bestand vervangt de handregel');
   assert.strictEqual(post('positie', { actie: 'contant', waarde_eur: '1' }).status, 409);
   assert.strictEqual(post('positie', { actie: 'raar' }).status, 400);
+});
+
+// ── wv2985: Davids ECHTE DEGIRO-vorm (NL-export, gemeten 14-11-2026 op zijn eigen bestanden; hier VERZONNEN namen, ISIN's, getallen en order-id's) ──
+// Transacties: 17 kolommen met AutoFX, paren getal → valuta, Waarde/Totaal EUR enkel, wisselkoers = USD per euro, koop = negatieve lokale waarde.
+// Rekeningoverzicht: paren valuta → getal, nieuw → oud (ook binnen één minuut), saldo per valuta loopt door, FX alleen op de Valuta Creditering
+// in vreemde valuta; de bijbehorende Valuta Debitering in euro = bedrag / FX (incl. AutoFX); USD-saldo terug op nul.
+const ECHT_TX = [
+  'Datum,Tijd,Product,ISIN,Beurs,Uitvoeringsplaats,Aantal,Koers,,Lokale waarde,,Waarde EUR,Wisselkoers,AutoFX Kosten,Transactiekosten en/of kosten van derden EUR,Totaal EUR,Order ID',
+  '10-11-2026,15:45,VOORBEELD ROBOT CORP,XX0000000044,NDQ,XNAS,4,"50,2500",USD,"-201,00",USD,"-179,46","1,1200","-0,45","-2,00","-181,91",bbbb0000-0000-4000-8000-000000000001',
+  '09-11-2026,10:12,VOORBEELD ZORGFONDS,XX0000000055,EAM,XAMS,6,"20,0000",EUR,"-120,00",EUR,"-120,00",,,"-1,00","-121,00",bbbb0000-0000-4000-8000-000000000002',
+].join('\n') + '\n';
+const ECHT_REK = [
+  'Datum,Tijd,Valutadatum,Product,ISIN,Omschrijving,FX,Mutatie,,Saldo,,Order Id',
+  '10-11-2026,15:45,10-11-2026,VOORBEELD ROBOT CORP,XX0000000044,Valuta Creditering,"1,1172",USD,"201,00",USD,"0,00",bbbb0000-0000-4000-8000-000000000001',
+  '10-11-2026,15:45,10-11-2026,VOORBEELD ROBOT CORP,XX0000000044,Valuta Debitering,,EUR,"-179,91",EUR,"197,09",bbbb0000-0000-4000-8000-000000000001',
+  '10-11-2026,15:45,10-11-2026,VOORBEELD ROBOT CORP,XX0000000044,DEGIRO Transactiekosten en/of kosten van derden,,EUR,"-2,00",EUR,"377,00",bbbb0000-0000-4000-8000-000000000001',
+  '10-11-2026,15:45,10-11-2026,VOORBEELD ROBOT CORP,XX0000000044,"Koop 4 @ 50,25 USD",,USD,"-201,00",USD,"-201,00",bbbb0000-0000-4000-8000-000000000001',
+  '09-11-2026,10:12,09-11-2026,VOORBEELD ZORGFONDS,XX0000000055,DEGIRO Transactiekosten en/of kosten van derden,,EUR,"-1,00",EUR,"379,00",bbbb0000-0000-4000-8000-000000000002',
+  '09-11-2026,10:12,09-11-2026,VOORBEELD ZORGFONDS,XX0000000055,"Koop 6 @ 20 EUR",,EUR,"-120,00",EUR,"380,00",bbbb0000-0000-4000-8000-000000000002',
+  '08-11-2026,19:30,08-11-2026,,,Reservation iDEAL,,EUR,"500,00",EUR,"500,00",',
+].join('\n') + '\n';
+test('wv2985 echte vorm: transacties (AutoFX, USD per euro) en rekeningoverzicht (valuta → getal, nieuw → oud) worden gelezen', () => {
+  const t = B.leesBestand(ECHT_TX);
+  assert.deepStrictEqual([t.soort, t.rijen.length, t.decimaal, t.scheiding], ['transacties', 2, ',', ',']);
+  const r = t.rijen[0];
+  assert.deepStrictEqual([r.valuta, r.lokaal_cent, r.waarde_eur_cent, r.kosten_eur_cent, r.totaal_eur_cent, r.wisselkoers, r.order_id, r.aantal],
+    ['USD', -20100, -17946, -245, -18191, '1.1200', 'bbbb0000-0000-4000-8000-000000000001', '4']);
+  assert.deepStrictEqual([t.rijen[1].valuta, t.rijen[1].wisselkoers, t.rijen[1].kosten_eur_cent], ['EUR', null, -100]);
+  const k = B.leesBestand(ECHT_REK);
+  assert.deepStrictEqual([k.soort, k.rijen.length], ['rekening', 7]);
+  assert.deepStrictEqual(k.rijen.map((x) => x.mutatie_valuta + ':' + x.mutatie_cent).slice(0, 2), ['USD:20100', 'EUR:-17991']);
+  assert.strictEqual(k.rijen[6].order_id, null);
+  assert.ok(!('_fx' in JSON.parse(JSON.stringify(k.rijen[0]))), 'FX-hulpveld lekt niet naar de opslag');
+});
+test('wv2985 echte vorm: elke afwijking = weigeren', () => {
+  // paren in de andere volgorde
+  weigert(ECHT_TX.replace('"-201,00",USD,"-179,46"', 'USD,"-201,00","-179,46"'), /eerst het getal, dan de valuta/);
+  weigert(ECHT_REK.replace('Koop 4 @ 50,25 USD",,USD,"-201,00"', 'Koop 4 @ 50,25 USD",,"-201,00",USD'), /eerst de valuta, dan het getal/);
+  // wisselkoers andersom (euro per USD) of bij een eurotransactie
+  weigert(ECHT_TX.replace('"1,1200"', '"0,8929"'), /USD per euro/);
+  weigert(ECHT_TX.replace('"-120,00",,,"-1,00"', '"-120,00","1,1200",,"-1,00"'), /wisselkoers bij een bedrag in euro/);
+  // rekeningoverzicht oud → nieuw, of twee regels van plaats gewisseld
+  const [kop, ...rs] = ECHT_REK.trim().split('\n');
+  weigert([kop, ...rs.slice().reverse()].join('\n'), /loopt niet door van onder naar boven/);
+  weigert([kop, rs[0], rs[1], rs[2], rs[3], rs[6], rs[4], rs[5]].join('\n'), /loopt niet door|nieuw naar oud/);
+  // FX: verkeerd, op een euroregel, of op een regel die geen valutawissel is
+  weigert(ECHT_REK.replace('"1,1172"', '"1,0172"'), /valutawissel klopt niet/);
+  weigert(ECHT_REK.replace('Valuta Debitering,,EUR', 'Valuta Debitering,"1,1172",EUR'), /FX hoort alleen bij een valutawissel in vreemde valuta/);
+  weigert(ECHT_REK.replace('"Koop 4 @ 50,25 USD",,USD', '"Koop 4 @ 50,25 USD","1,1172",USD'), /FX hoort alleen/);
+  weigert(ECHT_REK.replace('Valuta Debitering,,EUR,"-179,91"', 'Valuta Debitering,,EUR,"179,91"').replace('"197,09"', '"556,91"'), /valutawissel klopt niet/);
+  // review wv2985 MOET 1: FX gewist (en euroregel + saldo aangepast) = weigeren, niet stil zonder kruiscontrole
+  weigert(ECHT_REK.replace('Valuta Creditering,"1,1172",USD', 'Valuta Creditering,,USD').replace('"-179,91",EUR,"197,09"', '"-279,91",EUR,"97,09"'), /FX ontbreekt bij een valutawissel in USD/);
+  // review wv2985 ronde 2: order-id gewist op een valutawissel (dan geen kruiscontrole) = weigeren, aan beide kanten
+  weigert(ECHT_REK.replace('"0,00",bbbb0000-0000-4000-8000-000000000001', '"0,00",').replace('"-179,91",EUR,"197,09"', '"-279,91",EUR,"97,09"'), /valutawissel zonder order-id/);
+  weigert(ECHT_REK.replace('"197,09",bbbb0000-0000-4000-8000-000000000001', '"197,09",'), /valutawissel zonder order-id/);
+  // review wv2985 ronde 3: twee USD-wissels tegenover één euroregel = weigeren
+  { const [k0, ...r0] = ECHT_REK.trim().split('\n'); weigert([k0, r0[0].replace('"0,00"', '"201,00"'), r0[0], ...r0.slice(1)].join('\n'), /twee valutawissels/); }
+  // review wv2985 ronde 4: order-id met hoofdletters (kruiscontrole zou hem missen) en een omrekening die ± 19 cent afwijkt = weigeren
+  weigert(ECHT_REK.replace('"197,09",bbbb0000-0000-4000-8000-000000000001', '"197,09",BBBB0000-0000-4000-8000-000000000001'), /order-id/);
+  weigert(ECHT_REK.replace('"-179,91",EUR,"197,09"', '"-180,10",EUR,"196,90"'), /valutawissel klopt niet/);
+  weigert(ECHT_TX.replace('"-179,46","1,1200","-0,45","-2,00","-181,91"', '"-179,26","1,1200","-0,45","-2,00","-181,71"'), /wisselkoers geeft niet de waarde/);
+  // review wv2985 ronde 5: euroregel van de wissel zonder bedragen (dan geen kruiscontrole en past het saldo nog) = weigeren
+  weigert(ECHT_REK.replace('Valuta Debitering,,EUR,"-179,91",EUR,"197,09"', 'Valuta Debitering,,,,,'), /valutawissel zonder mutatie/);
+  // order-id in een andere vorm
+  weigert(ECHT_TX.replace('bbbb0000-0000-4000-8000-000000000002', '12345'), /order-id/);
+  weigert(ECHT_REK.replace('"380,00",bbbb0000-0000-4000-8000-000000000002', '"380,00",ORDER-2'), /order-id/);
+  // rekening: regels met dezelfde minuut mogen, maar een oudere regel boven een nieuwere niet (ook als het saldo toevallig klopt)
+  weigert(ECHT_REK.replace('08-11-2026,19:30,08-11-2026', '11-11-2026,19:30,11-11-2026'), /nieuw naar oud/);
 });
