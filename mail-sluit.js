@@ -204,13 +204,14 @@ function maak(io) {
         datum: b.datum, slot, spam: d.reden === 'spam_bekend', ongelezen: b.labels.includes('UNREAD') });
     }
     lijst.sort(function (x, y) { return String(y.datum || '').localeCompare(String(x.datum || '')); });
-    return { dag, op: new Date(nu()).toISOString(), compleet: h.compleet, berichten: h.berichten.length, tel, uit, mist, lijst };
+    return { dag, op: new Date(nu()).toISOString(), compleet: h.compleet, berichten: h.berichten.length, tel, uit, mist, lijst, draden: Array.from(perDraad.keys()) };
   }
   // De nachtronde: gisteren en de twee dagen ervoor opnieuw. Geeft { ok, dagen: [...], nieuw: [draden], ochtend: tekst|null, mist }.
   // ok = elke dag kwam terug EN was compleet (review wv3091 MOET 1: een onvolledige dag is geen geslaagde controle; de tik probeert opnieuw
-  // en meldt na 3 pogingen). Per dag (ronde 2, MOET 1 en 3): een complete uitkomst vervangt; een onvolledige laat een eerdere complete staan
-  // (die dag komt de volgende nachten nog twee keer langs), en vervangt anders een eerdere onvolledige mét alle lijstgesprekken van beide
-  // (nooit een gesprek stil weg); zo'n dag blijft als niet compleet gemarkeerd, met het aantal aangevulde gesprekken. Eerst al het Gmail-werk
+  // en meldt na 3 pogingen). Per dag (review ronde 2 en 3): een complete uitkomst vervangt. Een onvolledige wordt bewaard als niet compleet,
+  // mét de eerdere lijstgesprekken die deze poging helemaal niet zag (een gesprek dat hij nu wél zag, bijvoorbeeld terug in de inbox, krijgt
+  // zijn nieuwe plek); aangevuld = hoeveel dat er bij deze uitkomst zijn (niet opgeteld). Zo verdwijnt geen gesprek stil, blijven nieuwe vondsten
+  // staan, en zegt de App dat de som van die dag niet compleet is. Eerst al het Gmail-werk
   // (awaits), dan pas de staat lezen, samenvoegen en schrijven zonder await ertussen (MOET 3 ronde 1: een tik van David blijft staan).
   async function ronde() {
     const vandaag = amsDag(nu());
@@ -226,16 +227,13 @@ function maak(io) {
     let ok = true;
     for (const u of uitkomsten) {
       if (!u.r) { ok = false; continue; }
-      const oud = s.dagen[u.dag];
+      const oud = s.dagen[u.dag], zagNu = new Set(u.r.draden || []);
+      delete u.r.draden;
       if (!u.r.compleet) {
         ok = false;
-        if (oud && oud.compleet) { dagen.push(oud); continue; }
-        if (oud && Array.isArray(oud.lijst)) {
-          const gezien = new Set(u.r.lijst.map(function (x) { return x.draad; }));
-          const erbij = oud.lijst.filter(function (x) { return !gezien.has(x.draad); });
-          u.r.lijst = u.r.lijst.concat(erbij);
-          u.r.aangevuld = (oud.aangevuld || 0) + erbij.length;
-        }
+        const erbij = oud && Array.isArray(oud.lijst) ? oud.lijst.filter(function (x) { return !zagNu.has(x.draad); }) : [];
+        u.r.lijst = u.r.lijst.concat(erbij);
+        u.r.aangevuld = erbij.length;
       }
       s.dagen[u.dag] = u.r; dagen.push(u.r);
     }
