@@ -119,20 +119,32 @@ toets('25b in het bestand geen apparaat of inhoud', Object.keys(tel).sort().join
 toets('25c review MOET 1: afgeschermde vaste plek krijgt geen privé-id in bekend of meest', /bekend: vp \? L\.APP_IDS\.filter/.test(src) && /if \(vp\) APP_PRIVE_MODULES\.forEach\(function \(id\) \{ delete m\.score\[id\]; \}\)/.test(src));
 // ── wv3069: App Projecten weg; een bewaarde of meegestuurde 'projecten' valt stil weg ──
 toets('29 wv3069 projecten niet meer in APP_IDS, wel in APP_VERVALLEN', L.APP_IDS.indexOf('projecten') < 0 && L.APP_VERVALLEN.indexOf('projecten') >= 0);
-const vb29 = L.volgordeUitBestand({ versie: 4, volgorde: ['praktijken', 'projecten', 'mail'], favorieten: ['projecten', 'pot'], sortering: 'eigen' }, []);
-toets('29b van schijf: projecten overgeslagen, rest in volgorde', vb29.volgorde.join() === 'praktijken,mail' && vb29.favorieten.join() === 'pot' && vb29.versie === 4, vb29);
-const r29 = L.volgordePas(vb29, { versie: 4, volgorde: ['projecten', 'mail', 'praktijken'], favorieten: ['projecten'], sortering: 'az' }, false);
-toets('29c van een oude app: projecten stil weg, geen 400', r29.ok === true && r29.stand.volgorde.join() === 'mail,praktijken' && r29.stand.favorieten.join() === '', r29);
+const vb29 = L.volgordeUitBestand({ versie: 4, volgorde: ['pma', 'projecten', 'mail'], favorieten: ['projecten', 'pot'], sortering: 'eigen' }, []);
+toets('29b van schijf: projecten overgeslagen, rest in volgorde', vb29.volgorde.join() === 'pma,mail' && vb29.favorieten.join() === 'pot' && vb29.versie === 4, vb29);
+const r29 = L.volgordePas(vb29, { versie: 4, volgorde: ['projecten', 'mail', 'pma'], favorieten: ['projecten'], sortering: 'az' }, false);
+toets('29c van een oude app: projecten stil weg, geen 400', r29.ok === true && r29.stand.volgorde.join() === 'mail,pma' && r29.stand.favorieten.join() === '', r29);
 const r29d = L.volgordePas(vb29, { versie: 4, volgorde: ['onbekend'], favorieten: [], sortering: 'az' }, false);
 toets('29d een écht onbekende id blijft 400', r29d.ok === false && r29d.status === 400, r29d);
-const w29 = L.werkruimtesUitBestand({ versie: 2, sets: { praktijk: { tabs: ['docplan', 'praktijken', 'projecten', 'bandjes'], naast: ['praktijken', 'projecten'] } } });
-toets('29e werkruimte van schijf: projecten weg, naast met één tab vervalt', w29.sets.praktijk.tabs.join() === 'docplan,praktijken,bandjes' && w29.sets.praktijk.naast === null, w29);
-const w29f = L.werkruimtePas(w29, { versie: 2, id: 'praktijk', set: { tabs: ['projecten', 'docplan', 'bandjes', 'praktijken'], naast: ['docplan', 'projecten', 'bandjes'] } }, false);
-toets('29f werkruimte van een oude app: projecten weg, naast blijft met de twee overige', w29f.ok === true && w29f.stand.sets.praktijk.tabs.join() === 'docplan,bandjes,praktijken' && w29f.stand.sets.praktijk.naast.join() === 'docplan,bandjes', w29f);
+const w29 = L.werkruimtesUitBestand({ versie: 2, sets: { praktijk: { tabs: ['docplan', 'pma', 'projecten', 'bandjes'], naast: ['pma', 'projecten'] } } });
+toets('29e werkruimte van schijf: projecten weg, naast met één tab vervalt', w29.sets.praktijk.tabs.join() === 'docplan,pma,bandjes' && w29.sets.praktijk.naast === null, w29);
+const w29f = L.werkruimtePas(w29, { versie: 2, id: 'praktijk', set: { tabs: ['projecten', 'docplan', 'bandjes', 'pma'], naast: ['docplan', 'projecten', 'bandjes'] } }, false);
+toets('29f werkruimte van een oude app: projecten weg, naast blijft met de twee overige', w29f.ok === true && w29f.stand.sets.praktijk.tabs.join() === 'docplan,bandjes,pma' && w29f.stand.sets.praktijk.naast.join() === 'docplan,bandjes', w29f);
 const w29g = L.werkruimtePas(w29, { versie: 2, id: 'praktijk', set: { tabs: ['projecten'] } }, false);
 toets('29g werkruimte met alleen projecten (oude app) = terug naar de standaard, geen 400', w29g.ok === true && w29g.veranderd === true && !w29g.stand.sets.praktijk && w29g.stand.versie === 3, w29g);
 const w29h = L.werkruimtePas(w29, { versie: 2, id: 'praktijk', set: { tabs: [] } }, false);
 toets('29h werkruimte zonder tabs blijft 400', w29h.ok === false && w29h.status === 400, w29h);
+// ── wv3070: App Praktijken ging op in PMA (scherm Jaarcijfers); een bewaarde of meegestuurde 'praktijken' valt stil weg ──
+toets('30 wv3070 praktijken niet meer in APP_IDS, wel in APP_VERVALLEN; pma blijft', L.APP_IDS.indexOf('praktijken') < 0 && L.APP_VERVALLEN.indexOf('praktijken') >= 0 && L.APP_IDS.indexOf('pma') >= 0);
+const vb30 = L.volgordeUitBestand({ versie: 7, volgorde: ['praktijken', 'pma', 'mail'], favorieten: ['praktijken', 'pot'], sortering: 'eigen' }, []);
+toets('30b van schijf: praktijken overgeslagen, rest in volgorde', vb30.volgorde.join() === 'pma,mail' && vb30.favorieten.join() === 'pot' && vb30.versie === 7, vb30);
+const r30 = L.volgordePas(vb30, { versie: 7, volgorde: ['praktijken', 'mail', 'pma'], favorieten: ['praktijken', 'pma'], sortering: 'az' }, false);
+toets('30c van een oude app: praktijken stil weg, geen 400', r30.ok === true && r30.stand.volgorde.join() === 'mail,pma' && r30.stand.favorieten.join() === 'pma', r30);
+const w30 = L.werkruimtesUitBestand({ versie: 4, sets: { praktijk: { tabs: ['docplan', 'praktijken', 'bandjes'], naast: ['docplan', 'praktijken'] } } });
+toets('30d werkruimte van schijf (standaard van vóór wv3070): praktijken weg, naast met één tab vervalt', w30.sets.praktijk.tabs.join() === 'docplan,bandjes' && w30.sets.praktijk.naast === null, w30);
+const w30e = L.werkruimtePas(w30, { versie: 4, id: 'praktijk', set: { tabs: ['praktijken', 'projecten'] } }, false);
+toets('30e werkruimte met alleen vervallen Apps (praktijken + projecten) = terug naar de standaard, geen 400', w30e.ok === true && w30e.veranderd === true && !w30e.stand.sets.praktijk, w30e);
+const w30f = L.werkruimtePas(w30, { versie: 4, id: 'praktijk', set: { tabs: ['docplan', 'pma', 'bandjes'], naast: null } }, false);
+toets('30f de nieuwe standaard (docplan, pma, bandjes) is geldig', w30f.ok === true && w30f.stand.sets.praktijk.tabs.join() === 'docplan,pma,bandjes', w30f);
 // ── bedrading ──
 toets('26 routes in de routetabel', /route === 'GET \/app\/apps-volgorde' \|\| route === 'POST \/app\/apps-volgorde'\) return appAppsVolgordeRoute\(req, res, a, d\)/.test(src) && /route === 'POST \/app\/apps-geopend'\) return appAppsGeopendRoute\(req, res, a, d\)/.test(src));
 toets('27 tellen valt niet onder het invoerslot, rangschikken wel', /const APP_SLOT_VRIJ = new Set\(\[[^\]]*'POST \/app\/apps-geopend'/.test(src) && !/const APP_SLOT_VRIJ = new Set\(\[[^\]]*'POST \/app\/apps-volgorde'/.test(src));

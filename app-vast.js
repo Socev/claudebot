@@ -76,12 +76,12 @@ function pas(lijst, d, vastePlek) {
 // alleen aantallen). De weergave raster/lijst is per toestel en staat niet hier. Alleen App-id's uit APP_IDS (= de Apps in de
 // catalogus src/modules.ts, plek "apps"; de toets test/apps-volgorde.test.ts in socev-app houdt ze gelijk). Een App die de pod nog
 // niet kent, toont de app gewoon onderaan; ordenen en favoriet maken kan pas als hij hier staat.
-const APP_IDS = ['praktijken', 'bandjes', 'financien', 'gezondheid', 'facturen', 'docplan', 'bestanden', 'pot',
+const APP_IDS = ['bandjes', 'financien', 'gezondheid', 'facturen', 'docplan', 'bestanden', 'pot',
   'pot-afschriften', 'studio', 'broedstoof', 'memorylane', 'tripper', 'kalender', 'shopper', 'pakjes', 'osint', 'mediatheek', 'harvester', 'ideeen',
   'flock', 'verbruik', 'tokencounter', 'sleutelbos', 'mail', 'mailman', 'cijfer-meester', 'ghawa', 'beleggen', 'imagine', 'personeelsscherm', 'pma'];   // sleutelbos: wv2481; ghawa: wv2877; beleggen: wv2982; imagine: wv2984; personeelsscherm: wv2991; pma: wv3037
 // wv3069 (David 14-11-2026 18:53, "Projecten kan weg"): Apps die weg zijn. Staat zo'n id nog in een bewaarde volgorde, favorieten of
 // werkruimte, of stuurt een oude app hem nog mee, dan valt hij stil weg (geen 400): de rest van de stand blijft gewoon gelden.
-const APP_VERVALLEN = ['projecten'];
+const APP_VERVALLEN = ['projecten', 'praktijken'];   // wv3070 (David 14-11-2026 18:53): Praktijken ging op in PMA (scherm Jaarcijfers)
 const zonderVervallen = function (l) { return Array.isArray(l) ? l.filter(function (x) { return APP_VERVALLEN.indexOf(x) < 0; }) : l; };
 const VOLGORDE_MAX = 60;
 const SORTERINGEN = ['eigen', 'az', 'meest'];
