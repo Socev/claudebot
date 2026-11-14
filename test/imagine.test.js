@@ -23,7 +23,7 @@ for (const f of ['studio.js', 'studio-beeld.py', 'elevenlabs-credits.js', 'imagi
 function wijzig(f, oud, nieuw) { const p = path.join(MOD, f); const s = fs.readFileSync(p, 'utf8'); if (s.indexOf(oud) < 0) throw new Error('kruisproef: tekst niet gevonden in ' + f); fs.writeFileSync(p, s.split(oud).join(nieuw)); }
 if (KRUIS === 'preview') {
   wijzig('studio.js', "if (t.geheugen && !wsKan(info)) return", "if (false) return");
-  wijzig('studio.js', "flowToets(v.api, info, { ws: (!!t.beeld || !!t.geheugen) && wsKan(info) })", "flowToets(v.api, info, { ws: false })");
+  wijzig('studio.js', "flowToets(v.api, info, { ws: (!!t.beeld || !!t.geheugen) && wsKan(info), geheugen: !!t.geheugen })", "flowToets(v.api, info, { ws: false })");
   wijzig('studio.js', "if (t.geheugen && !(toets.ws_knopen && toets.ws_knopen.length)) return", "if (false) return");
 }
 if (KRUIS === 'geschiedenis') wijzig('studio.js', "async function histWisNu(pid) {", "async function histWisNu(pid) { return true;");
@@ -36,6 +36,8 @@ if (KRUIS === 'k7c') wijzig('imagine.js', "open().prepare('INSERT INTO taak (id,
 // wv2990 (handmatig): kt2i = de ronde stopt een tekst-naar-beeldtaak omdat hij geen bron heeft (4t moet rood)
 if (KRUIS === 'kt2i') wijzig('imagine.js', "if (t.studio && t.beeld && !s.beelden.has(t.beeld))", "if (t.studio && !s.beelden.has(t.beeld))");
 // kt2v = geen vrijgave na een tekst-naar-beeldtaak zonder resultaat (Fable ZOU 1; 4s moet rood)
+// wv3038: kmoss = de geheugenpoort laat een andere uitvoerknoop (PreviewAny) door (1m moet rood)
+if (KRUIS === 'kmoss') wijzig('studio.js', "if (opties && opties.geheugen && info && Object.hasOwn(info, klasse)", "if (false && opties && opties.geheugen && info && Object.hasOwn(info, klasse)");
 if (KRUIS === 'kt2v') wijzig('imagine.js', "S.geheimNaloop(true).catch(function () {});\n  }\n  // een verlopen beeld", "}\n  // een verlopen beeld");
 const studioMod = require(path.join(MOD, 'studio.js'));
 const imagineMod = require(path.join(MOD, 'imagine.js'));
@@ -99,6 +101,14 @@ function zoek(wortels, nn) {
         { label: 'breed', waarde: 'breed', zet: { '1.inputs.width': 96, '1.inputs.height': 48 } }] },
       { naam: 'seed', label: 'Seed', soort: 'seed', meer: true }] },
     { 1: { class_type: 'EmptyImage', inputs: { width: 32, height: 32, batch_size: 1, color: 0 } }, 2: { class_type: 'PrimitiveStringMultiline', inputs: { value: '' } }, 13: { class_type: 'PreviewImage', inputs: { images: ['1', 0] } } });
+  // wv3038: MOSS-Image = standaard; zelfde velden, uitvoerknoop 14 (zo is te zien welke flow ComfyUI kreeg)
+  const mossYaml = { titel: 'Beeld uit tekst MOSS (toets)', motor: 'comfyui', status: 'proef', verborgen: true, uitvoer: 'beeld', max_seconden: 5, ai_model: 'MOSS-Image',
+    velden: [{ naam: 'opdracht', label: 'Wat wil je zien?', soort: 'tekstvak', verplicht: true, max: 2000, pad: '4.inputs.value' },
+      { naam: 'formaat', label: 'Formaat', soort: 'keuze', standaard: 'vierkant', opties: [{ label: 'vierkant', waarde: 'vierkant', zet: { '1.inputs.width': 64, '1.inputs.height': 64 } },
+        { label: 'breed', waarde: 'breed', zet: { '1.inputs.width': 96, '1.inputs.height': 48 } }] },
+      { naam: 'seed', label: 'Seed', soort: 'seed', meer: true }] };
+  const mossApi = { 1: { class_type: 'EmptyImage', inputs: { width: 32, height: 32, batch_size: 1, color: 0 } }, 4: { class_type: 'PrimitiveStringMultiline', inputs: { value: '' } }, 14: { class_type: 'PreviewImage', inputs: { images: ['1', 0] } } };
+  zetFlow('beeld-tekst-moss', mossYaml, mossApi);
   const schrijfLog = (r) => fs.appendFileSync(LOG, r + '\n');
   const maakPod = (extra) => {
     const S = studioMod.maak(Object.assign({ dir: STUDIO, bewaar: () => { throw new Error('Bestanden mag niet'); }, primair: () => true, sleutel: async () => null,
@@ -146,7 +156,14 @@ function zoek(wortels, nn) {
   toets('1t Imagine kent "Nieuw beeld uit tekst" (klaar, velden opdracht en formaat), niet als bewerking', r.body.tekst && r.body.tekst.id === 'tekst' && r.body.tekst.klaar && r.body.tekst.velden.map((v) => v.naam).join() === 'opdracht,formaat'
     && !r.body.standen.some((s) => s.id === 'tekst'), r.body.tekst);
   const fl = await S.flows();
-  toets('1t de flow staat niet in de Studio-lijst (verborgen)', fl.flows.some((f) => f.id === 'beeld-opdracht-qwen') && !fl.flows.some((f) => f.id === 'beeld-tekst-flux'), fl.flows.map((f) => f.id));
+  toets('1t de flow staat niet in de Studio-lijst (verborgen)', fl.flows.some((f) => f.id === 'beeld-opdracht-qwen') && !fl.flows.some((f) => f.id === 'beeld-tekst-flux' || f.id === 'beeld-tekst-moss'), fl.flows.map((f) => f.id));
+  // wv3038: twee modellen, standaard MOSS-Image
+  r = await roep('/app/imagine');
+  toets('1m standaard MOSS-Image, keuze FLUX.2 klein (beide klaar, zelfde velden)', r.body.tekst_standaard === 'moss' && r.body.tekst.model === 'moss' && Array.isArray(r.body.teksten)
+    && r.body.teksten.map((x) => x.model).join() === 'moss,flux' && r.body.teksten.every((x) => x.id === 'tekst' && x.klaar && x.velden.map((v) => v.naam).join() === 'opdracht,formaat') && r.body.teksten[0].kort === 'MOSS-Image', r.body.teksten);
+  const nT = r.body.taken.length, nP = C.prompts.length;
+  r = await roep('/app/imagine/nieuw', { velden: { opdracht: 'een vuurtoren' }, model: 'minimax', beurt_id: nb() });
+  toets('1m onbekend model: 400, geen taak, niets ingediend', r.status === 400 && (await roep('/app/imagine')).body.taken.length === nT && C.prompts.length === nP, r);
   r = await roep('/app/imagine/bewerk', { versie: v1, stand: 'tekst', velden: { opdracht: 'x' }, beurt_id: nb() });
   toets('1t tekst-naar-beeld kan niet via /bewerk', r.status === 400, r);
   r = await roep('/app/imagine/nieuw', { velden: { opdracht: '   ' }, beurt_id: nb() });
@@ -168,18 +185,40 @@ function zoek(wortels, nn) {
   toets('1t klaar: nieuwe bron "tekst" in de bibliotheek, taak verwijst naar bron en versie', tkK.status === 'klaar' && !!bt && bt.herkomst === 'tekst' && bt.versies === 1 && bt.nieuwste === tkK.versie && /vuurtoren/.test(bt.titel), { tkK, bt });
   r = await roep('/app/imagine/bron/' + tkK.bron);
   const vt = r.body.versies && r.body.versies[0];
-  toets('1t versie 1 = het gemaakte beeld: stand tekst, model, opdracht bewaard, geen voorganger', vt && vt.nr === 1 && vt.stand === 'tekst' && vt.voorganger === null && vt.model === 'FLUX.2 klein 4B' && vt.opdracht === 'een vuurtoren bij nacht ' + TG && vt.breed === 96, vt);
+  toets('1t versie 1 = het gemaakte beeld: stand tekst, model (standaard MOSS-Image), opdracht bewaard, geen voorganger', vt && vt.nr === 1 && vt.stand === 'tekst' && vt.voorganger === null && vt.model === 'MOSS-Image' && vt.opdracht === 'een vuurtoren bij nacht ' + TG && vt.breed === 96, vt);
   r = await roep('/app/imagine/v/' + tkK.versie + '/deel/1');
   toets('1t origineel = wat ComfyUI over de websocket stuurde', r.status === 200 && Buffer.from(r.body.data, 'base64').equals(C.t2iBeeld), r.status);
   const prT = C.prompts[pr1] || {};
-  toets('1t geen upload, formaat gezet (96 × 48), uitvoer via SaveImageWebsocket, geen LoadImage', C.uploads === up1 && prT.prompt && prT.prompt['1'].inputs.width === 96 && prT.prompt['1'].inputs.height === 48
-    && prT.prompt['13'].class_type === 'SaveImageWebsocket' && !Object.values(prT.prompt).some((n) => n.class_type === 'LoadImage') || KRUIS === 'preview', prT.prompt);
+  toets('1t geen upload, formaat gezet (96 × 48), MOSS-flow, uitvoer via SaveImageWebsocket, geen LoadImage', C.uploads === up1 && prT.prompt && prT.prompt['1'].inputs.width === 96 && prT.prompt['1'].inputs.height === 48
+    && prT.prompt['14'].class_type === 'SaveImageWebsocket' && !prT.prompt['13'] && !Object.values(prT.prompt).some((n) => n.class_type === 'LoadImage') || KRUIS === 'preview', prT.prompt);
   toets('1t geschiedenis van ComfyUI leeg', Object.keys(C.hist).length === 0, Object.keys(C.hist));
   r = await roep('/app/imagine/nieuw', { velden: { opdracht: 'een vuurtoren', formaat: 'rond' }, beurt_id: nb() });
   toets('1t onbekend formaat: 400', r.status === 400, r);
   r = await roep('/app/imagine/bewerk', { versie: tkK.versie, stand: 'opdracht-qwen', velden: { opdracht: 'maak het dag' }, beurt_id: nb() });
   await totDat(async () => (await roep('/app/imagine/bron/' + tkK.bron)).body.versies.length === 2, 15000);
   toets('1t het gemaakte beeld is daarna gewoon te bewerken (versie 2)', (await roep('/app/imagine/bron/' + tkK.bron)).body.versies.length === 2);
+  // wv3038: keuze FLUX.2 klein → de FLUX-flow (knoop 13) en model FLUX bij de versie
+  const prF = C.prompts.length;
+  r = await roep('/app/imagine/nieuw', { velden: { opdracht: 'een molen ' + TG }, model: 'flux', beurt_id: nb() });
+  const tkF = r.body.taak && r.body.taak.id;
+  await totDat(async () => (await roep('/app/imagine')).body.taken.some((t) => t.id === tkF && t.status === 'klaar'), 15000);
+  const tkFK = (await roep('/app/imagine')).body.taken.find((t) => t.id === tkF) || {};
+  r = await roep('/app/imagine/bron/' + tkFK.bron);
+  const vF = r.body.versies && r.body.versies[0], prFl = C.prompts[prF] || {};
+  toets('1m keuze FLUX.2 klein: FLUX-flow ingediend, versie met model FLUX.2 klein 4B', tkFK.status === 'klaar' && vF && vF.model === 'FLUX.2 klein 4B' && prFl.prompt && !!prFl.prompt['13'] && !prFl.prompt['14'], { tkFK, vF, p: prFl.prompt });
+  // wv3038: geheugenpoort — een MOSS-flow met een tweede uitvoerknoop (PreviewAny met de uitgeschreven beschrijving, zoals de Studio-flow
+  // moss-comfyui) wordt geweigerd; niets ingediend. Daarna de goede flow terug.
+  zetFlow('beeld-tekst-moss', mossYaml, Object.assign({}, mossApi, { 13: { class_type: 'PreviewAny', inputs: { source: ['4', 0] } }, 9: { class_type: 'SaveImage', inputs: { images: ['1', 0], filename_prefix: 'moss_image_t2i' } } }));
+  const raak = (naam, t) => ['flow.yaml', 'flow.json'].forEach((f) => fs.utimesSync(path.join(STUDIO, 'flows', naam, f), t, t));   // mtime = cachesleutel van lokaleFlows
+  raak('beeld-tekst-moss', 1700000000);
+  const prX = C.prompts.length;
+  r = await roep('/app/imagine/nieuw', { velden: { opdracht: 'een brug ' + TG }, beurt_id: nb() });
+  const tkX = r.body.taak && r.body.taak.id;
+  await totDat(async () => (await roep('/app/imagine')).body.taken.some((t) => t.id === tkX && ['klaar', 'mislukt'].includes(t.status)), 15000);
+  const tkXK = (await roep('/app/imagine')).body.taken.find((t) => t.id === tkX) || {};
+  toets('1m MOSS-flow met PreviewAny/SaveImage: geweigerd door de geheugenpoort, niets bij ComfyUI ingediend', tkXK.status === 'mislukt' && /PreviewAny/.test(String(tkXK.reden)) && C.prompts.length === prX, { tkXK, n: C.prompts.length - prX });
+  zetFlow('beeld-tekst-moss', mossYaml, mossApi);
+  raak('beeld-tekst-moss', 1700000100);
   C.t2iBeeld = null;
 
   // ── 2. incognito: laden, bewerken, sessie per apparaat ──
@@ -223,7 +262,7 @@ function zoek(wortels, nn) {
   const rt = r.body.beelden.find((x) => x.stand === 'tekst');
   toets('2t resultaat als nieuw incognitobeeld (geen voorganger, stand tekst, opdracht in het geheugen, eigen uur)', !!rt && rt.voorganger === null && rt.opdracht === true && rt.rest_s === 3600 && r.body.taken.length === 0, r.body);
   const prT2 = C.prompts[prI] || {};
-  toets('2t eigen prompt-id, geen upload, uitvoer via SaveImageWebsocket', /^[0-9a-f-]{36}$/.test(String(prT2.prompt_id)) && C.uploads === upI && (prT2.prompt && prT2.prompt['13'].class_type === 'SaveImageWebsocket' || KRUIS === 'preview'), prT2.prompt);
+  toets('2t eigen prompt-id, geen upload, MOSS-flow (standaard), uitvoer via SaveImageWebsocket', /^[0-9a-f-]{36}$/.test(String(prT2.prompt_id)) && C.uploads === upI && rt && rt.model === 'MOSS-Image' && (prT2.prompt && prT2.prompt['14'].class_type === 'SaveImageWebsocket' || KRUIS === 'preview'), { p: prT2.prompt, m: rt && rt.model });
   r = await roep('/app/imagine/incognito/b/' + (rt && rt.id) + '/toon');
   const toonT2 = r.status === 200 ? Buffer.from(r.body.data, 'base64') : Buffer.alloc(0);
   r = await roep('/app/imagine/incognito/b/' + (rt && rt.id) + '/deel/1');

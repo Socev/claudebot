@@ -23,9 +23,21 @@ grep -qF "merk: path.join(IMAGINE_DIR, 'incognito-merk.json')" server.js || { ec
 S=$(awk '/── OVIS Imagine \(wv2984/,/── einde OVIS Imagine ──/' server.js)
 if echo "$S" | grep -nE "logError\([^)]*(e\.message|String\(e|, e\))"; then echo "ROOD  server.js: Imagine logt een fout met inhoud"; f=1; fi
 [ $f = 0 ] && echo "GROEN CI-poort en koppeling (imagine.js, server.js, uitrol.sh, APP_IDS)"
+# wv3038: Imagine-antwoorden (ook incognito-beelden) via appStuur met Cache-Control: no-store; kruisproef zonder no-store moet ROOD
+awk '/^async function appImagine\(/,/^}/' server.js | grep -qF "return appStuur(res, u.status" || { echo "ROOD  server.js: appImagine antwoordt niet via appStuur"; f=1; }
+node test/imagine-nostore.js || f=1
+if IMAGINE_KRUIS=nostore node test/imagine-nostore.js > /dev/null; then echo "ROOD  kruisproef nostore bleef groen"; f=1; else echo "GROEN kruisproef nostore: rood zonder no-store"; fi
+# wv3038: de echte MOSS-flow (fixture) door de geheugenpoort; moss-comfyui (PreviewAny) geweigerd
+node test/imagine-moss-flow.test.js > /tmp/imagine-moss.$$ 2>&1 || { cat /tmp/imagine-moss.$$; echo "ROOD  test/imagine-moss-flow.test.js"; f=1; }
+tail -n 1 /tmp/imagine-moss.$$; rm -f /tmp/imagine-moss.$$
 node --no-warnings test/imagine.test.js > /tmp/imagine-toets.$$ 2>&1; r=$?
 tail -n 1 /tmp/imagine-toets.$$; grep -E "^ROOD" /tmp/imagine-toets.$$
 [ $r = 0 ] || { echo "ROOD  test/imagine.test.js"; f=1; }
+# wv3038: zonder de geheugenpoort voor andere uitvoerknopen moet 1m rood worden
+IMAGINE_KRUIS=kmoss node --no-warnings test/imagine.test.js > /tmp/imagine-toets.$$ 2>&1
+if [ $? = 0 ]; then echo "ROOD  kruisproef kmoss bleef groen"; f=1
+elif grep -qF "ROOD  1m MOSS-flow met PreviewAny" /tmp/imagine-toets.$$; then echo "GROEN kruisproef kmoss: rood op 1m (PreviewAny)"
+else echo "ROOD  kruisproef kmoss werd rood, maar niet op 1m"; grep -E "^ROOD" /tmp/imagine-toets.$$ | head -3; f=1; fi
 for k in preview geschiedenis schijf; do
   IMAGINE_KRUIS=$k node --no-warnings test/imagine.test.js > /tmp/imagine-toets.$$ 2>&1
   if [ $? = 0 ]; then echo "ROOD  kruisproef $k bleef groen (de toets ziet het lek niet)"; f=1

@@ -254,6 +254,10 @@ function flowToets(api, info, opties) {
       uit[id] = { class_type: KNOPEN.ws_beeld.klasse, inputs: { images: n.inputs.images } };
       continue;
     }
+    // wv3038: in een geheugen-taak (Imagine) alleen beelduitvoer via de websocket; elke andere uitvoerknoop (PreviewAny met de uitgeschreven
+    // beschrijving, PreviewAudio …) zet inhoud in ComfyUI's geschiedenis of tijdelijke map en wordt geweigerd
+    if (opties && opties.geheugen && info && Object.hasOwn(info, klasse) && info[klasse] && info[klasse].output_node === true)
+      return { fout: 'knoop ' + id + ' (' + klasse + ') zet uitvoer bij ComfyUI; in Imagine mag alleen het beeld via de websocket' };
     const f = knoopToets(klasse, info);
     if (f) return { fout: f };
     const inputs = {};
@@ -1594,7 +1598,7 @@ function maak(deps) {
     // wv2983: een fotoflow stuurt zijn resultaat over de websocket als ComfyUI SaveImageWebsocket kent (niets in de tijdelijke map)
     // wv2984: een geheugen-taak (Imagine) alleen zo; zonder die knoop geen terugval op de Preview-weg
     if (t.geheugen && !wsKan(info)) return { fout: 'ComfyUI kent SaveImageWebsocket niet (meer); zonder kan Imagine niets maken. Er is niets ingediend.' };
-    const toets = flowToets(v.api, info, { ws: (!!t.beeld || !!t.geheugen) && wsKan(info) });   // wv2990: een geheugen-taak altijd via de websocket
+    const toets = flowToets(v.api, info, { ws: (!!t.beeld || !!t.geheugen) && wsKan(info), geheugen: !!t.geheugen });   // wv2990: een geheugen-taak altijd via de websocket; wv3038: en niets anders
     if (toets.fout) return { fout: 'knopentoets: ' + toets.fout };
     if (t.geheugen && !(toets.ws_knopen && toets.ws_knopen.length)) return { fout: 'knopentoets: zonder websocket-uitvoer kan Imagine niets maken; niets ingediend' };   // wv2990 (Fable KAN 3)
     // wv2482 (diffreview MOET 2): een LoadImage alleen in een taak met een eigen foto (anders leest hij wat er toevallig staat)
