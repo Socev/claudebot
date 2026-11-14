@@ -36,6 +36,15 @@
 //     links, rechts of beide bewaart (de rest gaat weg).
 //   - BIJSNIJDEN EN DRAAIEN (alleen gewone stand): pijp-snij, zonder videokaart, exact (PNG); nieuwe versie, het origineel blijft.
 //   Incognito: masker en voorbeelden (uit de eigen sessie) via dezelfde pijp en dezelfde upload; niets erbij in merk, wissen of log.
+//
+// OPDRACHT UITBREIDEN (wv3044, 14-11-2026, David: "keuze voor wel-of-niet prompt upsampling", upsampler = Qwen3.5-9B met de LoRA
+// nynxz/Qwen3.5-9B qwen35-9b-hauhaucs_uncensored_lora_rank4_fp32). Eigen verborgen Studio-flow opdracht-uitbreiden (CLIPLoader
+// qwen3.5_9b_w4a8_gptq → Load LoRA (Text Encoder) → Generate Text → PreviewAny) via maakGeheugen met uitvoer 'tekst': de tekst komt over
+// de websocket, de /history-regel wist studio.js meteen. De uitgebreide tekst staat ALLEEN in dit proces (Map uitb, hooguit 15 min, alleen
+// voor hetzelfde apparaat en dezelfde stand), nooit in imagine.sqlite, log of audit. De app toont hem vóór het genereren; David kiest die
+// tekst (de app stuurt hem als opdracht naar /nieuw: gewone stand = bij de versie bewaard zoals elke opdracht, titel uit zijn eigen tekst)
+// of zijn eigen. De beeldflows breiden zelf niet meer uit (MOSS: TextGenerate eruit; wv3044), dus schakelaar uit = de eigen tekst letterlijk.
+// Incognito: zelfde weg met geheim (merk, telregel), weg bij Alles wissen, bij verlopen en zodra de opdracht gebruikt is.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -54,13 +63,15 @@ const STANDEN = [
 // wv2990: nieuw beeld uit tekst (geen bewerking: niet in STANDEN, dus niet via /bewerk)
 // wv3038: twee modellen onder dezelfde stand 'tekst'; TEKST = de standaard (MOSS-Image)
 const TEKSTEN = [
-  { id: 'tekst', model: 'moss', flow: 'beeld-tekst-moss', naam: 'Nieuw beeld uit tekst · MOSS-Image', kort: 'MOSS-Image', karakter: 'tekent een nieuw beeld; schrijft je beschrijving eerst zelf uit', opdracht: true },
+  { id: 'tekst', model: 'moss', flow: 'beeld-tekst-moss', naam: 'Nieuw beeld uit tekst · MOSS-Image', kort: 'MOSS-Image', karakter: 'tekent een nieuw beeld; werkt het best met een uitgebreide beschrijving', opdracht: true },
   { id: 'tekst', model: 'flux', flow: 'beeld-tekst-flux', naam: 'Nieuw beeld uit tekst · FLUX.2 klein', kort: 'FLUX.2 klein', karakter: 'tekent een nieuw beeld; volgt je woorden letterlijk', opdracht: true },
 ];
 const TEKST = TEKSTEN[0];
 function tekstModel(m) { if (m === undefined || m === null || m === '') return TEKST; return TEKSTEN.find(function (x) { return x.model === m; }) || null; }
 // wv3021: flows voor masker en voorbeelden (generator mk-scripts/ovis-imagine/fase2/maak-plus-flows.py): <basis>-<aantal voorbeelden>
 const PLUS = { 'opdracht-qwen': 'beeld-plus-qwen', 'opdracht-flux': 'beeld-plus-flux' };
+// wv3044: opdracht uitbreiden (zie de kop). per_apparaat = tegelijk lopend; dag = per apparaat per dag (telt niet voor de 30 beelden)
+const UITB = { flow: 'opdracht-uitbreiden', ms: 15 * 60 * 1000, per_apparaat: 2, dag: 100, tekst_max: 2000 };
 const REFS_MAX = 2, MASKER_B64_MAX = 4 * 1024 * 1024;
 const VERGELIJK = ['opdracht-qwen', 'opdracht-flux'];   // links, rechts
 const SNIJ = { id: 'snijden', naam: 'Bijsnijden en draaien' };
@@ -442,23 +453,25 @@ function maak(deps) {
     velden.opdracht = opdracht;
     const tm = tekstModel(d && d.model);   // wv3038
     if (!tm) return { status: 400, fout: 'onbekend model; kies MOSS-Image of FLUX.2 klein' };
+    const eigen = uitbKijk(apparaat, d && d.uitbreiding, false);   // wv3044: titel uit Davids eigen tekst; de uitgebreide tekst is de opdracht
     const id = hex16();
     // zoals bewerk: de taak eerst vastleggen; bron en voorganger zijn er pas als het resultaat er is
     open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt) VALUES (?, NULL, ?, ?, ?, ?, ?)').run(id, '', '', TEKST.id, 'wacht', iso());
     let r;
     try {
       r = await S.maakGeheugen({ flow: tm.flow, velden: velden, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
-        klaar: function (u) { return nieuwKlaar(id, opdracht, u); } }, ctx);
+        klaar: function (u) { return nieuwKlaar(id, opdracht, u, eigen); } }, ctx);
     } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
     if (r.status !== 200 || r.al) open().prepare('DELETE FROM taak WHERE id = ?').run(id);
     if (r.status !== 200) return r;
     if (r.al) { const t = open().prepare('SELECT * FROM taak WHERE studio = ?').get(r.taak.id); return { status: 200, taak: t ? taakUit(t) : null, al: true }; }
     open().prepare('UPDATE taak SET studio = ? WHERE id = ?').run(r.taak.id, id);
+    uitbGebruikt(apparaat, d && d.uitbreiding, false);   // wv3044: gestart → de uitgebreide tekst uit het geheugen
     log('imagine nieuw taak=' + id + ' model=' + tm.model);
     return { status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(id)) };
   }
   // Resultaat: het eerste beeld wordt een nieuwe bron (versie 1 = het gemaakte beeld)
-  async function nieuwKlaar(taakId, opdracht, u) {
+  async function nieuwKlaar(taakId, opdracht, u, eigen) {
     const d = open();
     const zet = function (status, reden, bron, versieId) { d.prepare('UPDATE taak SET status = ?, reden = ?, eind = ?, bron = ?, voorganger = ?, versie = ? WHERE id = ?').run(status, reden || null, iso(), bron || '', versieId || '', versieId || null, taakId); };
     const beelden = u.beelden || [];
@@ -469,7 +482,7 @@ function maak(deps) {
     if (x.fout) return zet('mislukt', 'resultaat: ' + x.fout);
     if (schijf().bytes + b.bytes.length + x.toon.length > GRENS.schijf) return zet('mislukt', 'de bibliotheek is vol (5 GB); niets bewaard');
     let r;
-    try { r = nieuweBron({ bytes: b.bytes, soort: x.soort, toon: x.toon, breed: x.breed, hoog: x.hoog, titel: titelUit(opdracht), herkomst: 'tekst', stand: TEKST.id,
+    try { r = nieuweBron({ bytes: b.bytes, soort: x.soort, toon: x.toon, breed: x.breed, hoog: x.hoog, titel: titelUit(eigen || opdracht), herkomst: 'tekst', stand: TEKST.id,
       model: u.model || null, opdracht: opdracht, duur_s: u.duur_s || null }); }
     catch (e) { fout('imagine', new Error('resultaat bewaren mislukt')); return zet('mislukt', 'het resultaat kon niet bewaard worden'); }
     zet('klaar', null, r.bron, r.versie);
@@ -574,6 +587,116 @@ function maak(deps) {
     } finally { immichBezig.delete(id); }
   }
 
+  // ── wv3044: opdracht uitbreiden (zie de kop) ──
+  const uitb = new Map();   // id → { apparaat, geheim, sessie (incognito), gen, studio, status, tekst, eigen, reden, gemaakt, eind, duur_s }
+  const uTel = new Map();   // apparaat → { dag, n }
+  function uitbLoopt(s) { for (const x of uitb.values()) { if (x.sessie === s && x.studio) return true; } return false; }
+  function uitbWeg(id, x) {
+    if (uitb.get(id) !== x) return;
+    uitb.delete(id);
+    if (x.studio) { try { S.stopGeheugen(x.studio, x.geheim ? x.apparaat : undefined); } catch (e) {} }
+    x.tekst = null; x.eigen = null; x.studio = null;
+    if (x.geheim && x.sessie) incVrij(x.sessie);   // een geheime opdracht zat in ComfyUI: daar laten vrijgeven (zoals een beeld dat weggaat)
+  }
+  function uitbWegVan(s, a) { [...uitb.entries()].forEach(function (e) { if (e[1].geheim && (e[1].sessie === s || e[1].apparaat === a)) { const x = e[1]; uitb.delete(e[0]); if (x.studio) { try { S.stopGeheugen(x.studio, a); } catch (er) {} } x.tekst = null; x.eigen = null; x.studio = null; } }); }
+  function uitbRonde() { const nu = klok(); [...uitb.entries()].forEach(function (e) { if (nu - e[1].gemaakt > UITB.ms) uitbWeg(e[0], e[1]); }); }
+  // Nette tekst: zonder aanhalingstekens eromheen, hooguit tekst_max (afgekapt op een zinseinde als dat kan)
+  function uitbNetjes(t) {
+    let x = String(t || '').replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+    if (/^["“'].*["”']$/s.test(x)) x = x.slice(1, -1).trim();
+    if (x.length > UITB.tekst_max) { const k = x.slice(0, UITB.tekst_max); const z = Math.max(k.lastIndexOf('. '), k.lastIndexOf('.\n')); x = (z > UITB.tekst_max / 2 ? k.slice(0, z + 1) : k).trim(); }
+    return x;
+  }
+  async function uitbreid(a, d, ctx, geheim) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    const s = geheim ? incOpen(a) : null;
+    if (geheim && !s) return { status: 409, fout: 'er wordt net gewist' };
+    const opdracht = schoon(d && d.opdracht, GRENS.opdracht_max).trim();
+    if (!opdracht) return { status: 400, fout: 'beschrijf eerst wat je wilt zien' };
+    uitbRonde();
+    let n = 0;
+    uitb.forEach(function (x) { if (x.apparaat === a && (x.studio || x.status === 'wacht')) n++; });   // review ZOU 1: ook wat nog start (vóór de await)
+    if (n >= UITB.per_apparaat) return { status: 429, fout: 'er lopen al ' + UITB.per_apparaat + ' uitbreidingen; wacht tot er een klaar is' };
+    const dag = new Date(klok()).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    const tel = uTel.get(a);
+    if (tel && tel.dag === dag && tel.n >= UITB.dag) return { status: 429, fout: 'vandaag al ' + UITB.dag + ' keer uitgebreid; morgen weer' };
+    uTel.set(a, tel && tel.dag === dag ? { dag: dag, n: tel.n + 1 } : { dag: dag, n: 1 });   // review ZOU 1: vooraf gereserveerd, terug bij geen start
+    const terug = function () { const ut = uTel.get(a); if (ut && ut.dag === dag && ut.n > 0) ut.n--; };
+    const id = hex16();
+    const x = { apparaat: a, geheim: geheim, sessie: s, gen: s ? s.gen : 0, studio: null, status: 'wacht', tekst: null, eigen: geheim ? null : opdracht, reden: null, gemaakt: klok(), eind: null, duur_s: null };
+    uitb.set(id, x);
+    let r;
+    try {
+      r = await S.maakGeheugen({ flow: UITB.flow, velden: { opdracht: opdracht }, beurt_id: String(d.beurt_id || ''), geheim: geheim, apparaat: a,
+        klaar: function (u) { return uitbKlaar(id, x, u); } }, ctx);
+    } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
+    if (r.status !== 200) { if (uitb.get(id) === x) uitb.delete(id); terug(); return r; }
+    if (r.al) {
+      if (uitb.get(id) === x) uitb.delete(id);
+      terug();
+      for (const e of uitb.entries()) { if (e[1].studio === r.taak.id && e[1].apparaat === a && e[1].geheim === geheim) return { status: 200, uitbreiding: e[0], al: true }; }
+      return { status: 200, al: true };
+    }
+    if (uitb.get(id) !== x) {
+      // review MOET 1: tijdens het starten gewist (Alles wissen) of verlopen: de net gestarte taak ook stoppen, anders gaat de opdracht alsnog naar ComfyUI
+      try { S.stopGeheugen(r.taak.id, geheim ? a : undefined); } catch (e) {}
+      x.tekst = null; x.eigen = null; x.studio = null;
+      if (geheim && s) { s.comfy = true; incVrij(s); }
+      return { status: 409, fout: 'er is intussen gewist' };
+    }
+    if (x.status === 'wacht') x.studio = r.taak.id;
+    if (geheim) {
+      s.comfy = true;
+      if (s.gen !== x.gen || s.wissen) { uitbWeg(id, x); return { status: 409, fout: 'er is intussen gewist' }; }   // intussen gewist: meteen weer stoppen
+    } else log('imagine uitbreiden taak=' + id);
+    return { status: 200, uitbreiding: id };
+  }
+  function uitbKlaar(id, x, u) {
+    if (uitb.get(id) !== x) return;
+    if (x.geheim) { const s = inc.get(x.apparaat); if (!s || s !== x.sessie || s.gen !== x.gen || s.wissen) { uitb.delete(id); x.tekst = null; return; } }
+    x.studio = null; x.eind = klok(); x.duur_s = u.duur_s || null;
+    const t = u.status === 'klaar' ? uitbNetjes(u.tekst) : '';
+    if (t) { x.status = 'klaar'; x.tekst = t; }
+    else { x.status = u.status === 'klaar' ? 'mislukt' : u.status; x.reden = u.status === 'klaar' ? 'het model gaf geen tekst terug' : (u.reden || 'mislukt'); }
+    if (x.geheim && x.status !== 'klaar' && x.sessie) incVrij(x.sessie);
+    if (!x.geheim) log('imagine uitbreiden klaar taak=' + id + ' uitkomst=' + x.status + ' duur_s=' + (x.duur_s || 0));
+  }
+  function uitbVan(a, id, geheim) {
+    uitbRonde();
+    const x = HEX16.test(String(id)) ? uitb.get(String(id)) : null;
+    return x && x.apparaat === a && x.geheim === geheim ? x : null;
+  }
+  function uitbLees(a, id, geheim) {
+    const x = uitbVan(a, id, geheim);
+    if (!x) return { status: 404, fout: 'deze uitbreiding is er niet meer (verlopen of gewist)' };
+    const lo = x.studio ? S.geheugenTaak(x.studio) : null;
+    const u = { id: id, status: lo ? lo.status : x.status, fase: lo ? lo.fase : null, plek_in_rij: lo ? lo.plek_in_rij : null, reden: x.reden || null, duur_s: x.duur_s,
+      rest_s: Math.max(0, Math.ceil((x.gemaakt + UITB.ms - klok()) / 1000)) };
+    if (x.status === 'klaar') u.tekst = x.tekst;
+    return { status: 200, body: { uitbreiding: u } };
+  }
+  function uitbStop(a, id, geheim) {
+    const x = uitbVan(a, id, geheim);
+    if (!x) return { status: 404, fout: 'deze uitbreiding is er niet meer' };
+    uitbWeg(String(id), x);
+    return { status: 200 };
+  }
+  // bij /nieuw: eerst kijken (eigen tekst voor de titel), pas na een geslaagde start weg (een geweigerde start laat hem staan voor opnieuw)
+  function uitbKijk(a, id, geheim) {
+    if (id === undefined || id === null || id === '') return null;
+    const x = uitbVan(a, id, geheim);
+    return x ? x.eigen || null : null;
+  }
+  function uitbGebruikt(a, id, geheim) {
+    if (id === undefined || id === null || id === '') return null;
+    const x = uitbVan(a, id, geheim);
+    if (!x) return null;
+    const eigen = x.eigen;
+    uitb.delete(String(id)); x.tekst = null; x.eigen = null;
+    if (x.studio) { try { S.stopGeheugen(x.studio, geheim ? a : undefined); } catch (e) {} x.studio = null; }
+    return eigen || null;
+  }
+
   // ── incognito (alleen dit proces) ──
   const inc = new Map();   // apparaat-id → { gen, wissen, comfy, beelden: Map(id → beeld), taken: Map(id → { studio, beeld, gen }) }
   let incHerstart = false;
@@ -592,13 +715,13 @@ function maak(deps) {
     const x = s.beelden.get(id);
     if (!x) return;
     s.beelden.delete(id); incLos(x);
-    if (s.comfy) { s.comfy = s.beelden.size > 0 || [...s.taken.values()].some(function (t) { return !!t.studio; }); S.geheimNaloop(true).catch(function () {}); }
+    if (s.comfy) { s.comfy = s.beelden.size > 0 || [...s.taken.values()].some(function (t) { return !!t.studio; }) || uitbLoopt(s); S.geheimNaloop(true).catch(function () {}); }
   }
   // wv2990 (Fable ZOU 1/2): een tekst-naar-beeldtaak die zonder beeld in de Map eindigt (gestopt, mislukt, paste niet) heeft geen bron die later
   // verloopt; dan nu het werkgeheugen van ComfyUI laten vrijgeven (opdracht in de cache), net als bij een beeld dat de Map verlaat
   function incVrij(s) {
     if (!s.comfy) return;
-    s.comfy = s.beelden.size > 0 || [...s.taken.values()].some(function (t) { return !!t.studio; });
+    s.comfy = s.beelden.size > 0 || [...s.taken.values()].some(function (t) { return !!t.studio; }) || uitbLoopt(s);   // wv3044
     S.geheimNaloop(true).catch(function () {});
   }
   // een verlopen beeld: weg uit de Map (ook bij een aanvraag), nooit meer uitgeleverd
@@ -707,8 +830,15 @@ function maak(deps) {
     taak.studio = r.taak.id;
     s.comfy = true;
     s.herstart = false;
+    uitbGebruikt(a, d && d.uitbreiding, true);   // wv3044: gestart → de gebruikte uitbreiding uit het geheugen
     if (s.gen !== gen || s.wissen) { S.stopGeheugen(r.taak.id, a); }   // intussen gewist: meteen weer stoppen
     return { status: 200, taak: id };
+  }
+  // wv3044: kan uitbreiden nu? (flow er en klaar) + de tijd uit de flow; standaard uit (David 14-11: keuze; opdracht: standaard UIT)
+  async function uitbStand() {
+    let f = null;
+    try { f = await S.flowVan(UITB.flow); } catch (e) { f = null; }
+    return { klaar: !!(f && f.klaar), reden: f ? f.reden : 'de uitbreidstap staat niet in de Studio', tijd: f ? f.tijd : '', standaard: false, model: f && f.ai_model ? f.ai_model : null };
   }
   function refsGeldig(s, refs) { return (refs || []).every(function (r) { return !!incGeldig(s, r); }); }
   async function incKlaar(a, taakId, gen, bronId, st, opdracht, u, naad, refs) {
@@ -760,9 +890,10 @@ function maak(deps) {
       const n = s.beelden.size;
       s.beelden.forEach(incLos); s.beelden.clear();
       s.taken.forEach(function (t) { if (t.studio) { try { S.stopGeheugen(t.studio, a); } catch (e) {} } });
+      uitbWegVan(s, a);   // wv3044: ook de uitgebreide opdrachten (en hun lopende taken)
       const r = await S.geheimWis(a);
       // na de afronding opnieuw leeg (een resultaat dat net binnenkwam, viel al weg op de generatie; voor de zekerheid)
-      s.beelden.forEach(incLos); s.beelden.clear(); s.taken.clear();
+      s.beelden.forEach(incLos); s.beelden.clear(); s.taken.clear(); uitbWegVan(s, a);
       s.comfy = false; s.herstart = false;
       const stappen = [{ stap: 'beelden', ok: s.beelden.size === 0, n: n }].concat(r.stappen);
       return { status: 200, stappen: stappen, schoon: stappen.every(function (x) { return x.ok; }) };
@@ -800,7 +931,8 @@ function maak(deps) {
       });
     });
   }
-  const timer = setInterval(incRonde, T.ronde);
+
+  const timer = setInterval(function () { incRonde(); uitbRonde(); }, T.ronde);
   if (timer.unref) timer.unref();
   // na een herstart: de vorige sessie is weg; de app krijgt één keer de melding
   try { incHerstart = !!S.incognito().herstart; } catch (e) { incHerstart = false; }
@@ -811,7 +943,7 @@ function maak(deps) {
     let m;
     if (!post && p === '/app/imagine') {
       const l = lijst();
-      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, standen: await standen(), tekst: (await standen([TEKST]))[0], teksten: await standen(TEKSTEN), tekst_standaard: TEKST.model, schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
+      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, standen: await standen(), tekst: (await standen([TEKST]))[0], teksten: await standen(TEKSTEN), tekst_standaard: TEKST.model, uitbreiden: await uitbStand(), schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
         incognito: { nog_te_wissen: S.incognito().nog_te_wissen } } };
     }
     if (!post && (m = /^\/app\/imagine\/bron\/([a-f0-9]{16})$/.exec(p))) { const b = bronMet(m[1]); return b ? { status: 200, body: Object.assign({ ok: true }, b) } : { status: 404, body: { ok: false, fout: 'dit beeld bestaat niet (meer)' } }; }
@@ -819,6 +951,9 @@ function maak(deps) {
     if (post && p === '/app/imagine/laad') return uit(await laad(d), 'imagine laad');
     if (post && p === '/app/imagine/bewerk') return uit(await bewerk(d, ctx, a), 'imagine bewerk');
     if (post && p === '/app/imagine/nieuw') return uit(await nieuw(d, ctx, a), 'imagine nieuw');   // wv2990
+    if (post && p === '/app/imagine/uitbreiden') return uit(await uitbreid(a, d, ctx, false), 'imagine uitbreiden');   // wv3044
+    if (!post && (m = /^\/app\/imagine\/uitbreiden\/([a-f0-9]{16})$/.exec(p))) return uit(uitbLees(a, m[1], false), 'imagine uitbreiden lees');
+    if (post && (m = /^\/app\/imagine\/uitbreiden\/([a-f0-9]{16})\/weg$/.exec(p))) return uit(uitbStop(a, m[1], false), 'imagine uitbreiden weg');
     if (post && p === '/app/imagine/vergelijk') return uit(await vergelijk(d, ctx, a), 'imagine vergelijk');   // wv3021
     if (post && (m = /^\/app\/imagine\/vergelijk\/([a-f0-9]{16})\/kies$/.exec(p))) return uit(kies(m[1], d), 'imagine vergelijk kies');
     if (post && (m = /^\/app\/imagine\/v\/([a-f0-9]{16})\/snij$/.exec(p))) return uit(await snij(m[1], d), 'imagine snij');
@@ -837,6 +972,9 @@ function maak(deps) {
     if (post && p === '/app/imagine/incognito/laad') return uit(await incLaad(a, d), 'imagine incognito laad');
     if (post && p === '/app/imagine/incognito/bewerk') return uit(await incBewerk(a, d, ctx), 'imagine incognito bewerk');
     if (post && p === '/app/imagine/incognito/nieuw') return uit(await incNieuw(a, d, ctx), 'imagine incognito nieuw');   // wv2990
+    if (post && p === '/app/imagine/incognito/uitbreiden') return uit(await uitbreid(a, d, ctx, true), 'imagine incognito uitbreiden');   // wv3044
+    if (!post && (m = /^\/app\/imagine\/incognito\/uitbreiden\/([a-f0-9]{16})$/.exec(p))) return uit(uitbLees(a, m[1], true), 'imagine incognito uitbreiden lees');
+    if (post && (m = /^\/app\/imagine\/incognito\/uitbreiden\/([a-f0-9]{16})\/weg$/.exec(p))) return uit(uitbStop(a, m[1], true), 'imagine incognito uitbreiden weg');
     if (post && p === '/app/imagine/incognito/wis') return uit(await incWis(a), 'imagine incognito wis');
     if (post && (m = /^\/app\/imagine\/incognito\/stop\/([a-f0-9]{16})$/.exec(p))) {
       const s = sessie(a), t = s.taken.get(m[1]);
@@ -858,7 +996,7 @@ function maak(deps) {
         schijf_bytes: schijf().bytes, incognito_nog_te_wissen: S.incognito().nog_te_wissen };
     } catch (e) { return { aan: true, fout: true }; }
   }
-  return { app: app, info: info, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, stopTimers: function () { clearInterval(timer); }, _inc: inc, _ronde: incRonde, _db: function () { return open(); } };
+  return { app: app, info: info, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB, stopTimers: function () { clearInterval(timer); }, _inc: inc, _ronde: incRonde, _uitb: uitb, _uitbRonde: uitbRonde, _db: function () { return open(); } };
 }
 
-module.exports = { maak: maak, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS };
+module.exports = { maak: maak, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB };

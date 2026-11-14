@@ -1,0 +1,39 @@
+{
+ "ai_model": "Qwen3.5-9B",
+ "titel": "Opdracht uitbreiden (Qwen3.5-9B)",
+ "uitleg": "Schrijft je korte beschrijving uit tot een uitgebreide Engelse opdracht voor MOSS-Image of FLUX.2 klein (Qwen3.5-9B met de LoRA van nynxz, Apache-2.0), op de eigen videokaart. Alleen via OVIS Imagine (Nieuw beeld uit tekst, schakelaar Opdracht uitbreiden).",
+ "motor": "comfyui",
+ "status": "actief",
+ "verborgen": true,
+ "uitvoer": "tekst",
+ "bron": "Machinekamer 14-11-2026 (wv3044) op Davids keuze; kernknopen ComfyUI 0.44 (LoadLoraTextEncoder, TextGenerateV2, PreviewAny); systeemopdracht uit Comfy-Org-sjabloon image_moss_image_t2i; LoRA nynxz/Qwen3.5-9B (README/kaart apache-2.0), basis Qwen/Qwen3.5-9B (LICENSE Apache-2.0), afgeleid van HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive (apache-2.0)",
+ "tijd": "± 20 s",
+ "max_seconden": 180,
+ "gpu_mib_schatting": 8000,
+ "ram_mib_schatting": 9000,
+ "zonder_taalmodel": true,
+ "vrij_na": false,
+ "max_per_dag": 30,
+ "prijs": {
+  "eenheid": "tekst",
+  "bedrag": 0,
+  "bron": "lokaal op Olares"
+ },
+ "velden": [
+  {
+   "naam": "opdracht",
+   "label": "Wat wil je zien?",
+   "soort": "tekstvak",
+   "verplicht": true,
+   "max": 2000,
+   "pad": "3.inputs.value"
+  },
+  {
+   "naam": "seed",
+   "label": "Seed",
+   "soort": "seed",
+   "meer": true,
+   "pad": "5.inputs.sampling_mode.seed"
+  }
+ ]
+}
