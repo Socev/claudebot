@@ -9,7 +9,7 @@
  *     De kluis (Management-API) zit in server.js en komt binnen als deps.kluisLees / deps.kluisZet.
  *  2. Kindproces (node nmbrs-data.js <opdracht>): de enige plek die Nmbrs aanroept. Omgeving alleen PATH/HOME/TZ/LANG en NMBRS_DIR;
  *     geheimen via stdin. Netwerk: wissel (code → tokens), ververs (refresh → tokens), intrek (revocation), ronde, peil.
- *     Lokaal (geen netwerk): stand, signalen, gemeld, persoon, koppel, instel.
+ *     Lokaal (geen netwerk): stand, signalen, gemeld, persoon, koppel, instel, pot, pma (wv3047).
  *
  * NETWERK. Eén fetch, in roep(), altijd eerst door verzoekToets: POST alleen op identityservice /connect/token en /connect/revocation,
  * GET alleen op de witte lijst paden van api.nmbrsapp.com (PADEN_GET) met per pad de toegestane queryparameters; /api/documents/{taskId}
@@ -391,7 +391,11 @@ function historieRijen(lijst, veld, velden, sub) {
     const mw = idVan(e && e.employeeId); if (!mw) return;
     (Array.isArray(e[veld]) ? e[veld] : []).slice(0, 200).forEach(function (x, i) {
       const data = kies(x, velden);
-      if (veld === 'schedules') { const w1 = kies(x && x.week1, V.week), w2 = kies(x && x.week2, V.week); data.weekuren = weekUren(w1, w2); }
+      if (veld === 'schedules') {
+        const w1 = kies(x && x.week1, V.week), w2 = kies(x && x.week2, V.week); data.weekuren = weekUren(w1, w2);
+        // wv3047 (OVIS PMA fase 2): ook de uren per weekdag bewaren (ma..zo, twee weekpatronen), zodat PMA de werkdagen kan nemen
+        data.dagen1 = dagUren(w1); data.dagen2 = dagUren(w2);
+      }
       if (veld === 'salaries' && x && x.salaryTable) {
         data.tabel = kies(x.salaryTable, V.salaristabel);
         data.schaal = kies(x.salaryTable.scale, V.schaal); data.trede = kies(x.salaryTable.step, V.trede);
@@ -400,6 +404,11 @@ function historieRijen(lijst, veld, velden, sub) {
     });
   });
   return uit;
+}
+function dagUren(w) {   // wv3047: { hoursMonday … hoursSunday } → [ma, di, wo, do, vr, za, zo] (uren, 0–24); null alleen als de week ontbreekt
+  // review wv3047 MOET 3: een ingevulde week met alleen nullen blijft een week (om-de-week), anders lijkt week 1 een vast rooster
+  if (!w || !V.week.some(function (k) { return Object.hasOwn(w, k); })) return null;
+  return V.week.map(function (k) { const n = Number(w[k]); return w[k] != null && isFinite(n) && n >= 0 && n <= 24 ? Math.round(n * 100) / 100 : 0; });
 }
 function weekUren(w1, w2) {
   const som = function (w) { return Object.keys(w).reduce(function (a, k) { return a + (Number(w[k]) || 0); }, 0); };
@@ -905,6 +914,34 @@ function kindPot(dir) {
     return { ok: true, stand: { peil: peil || new Date().toISOString().slice(0, 10), medewerkers: medewerkers } };
   } finally { d.close(); }
 }
+// wv3047: personeel voor OVIS PMA fase 2 (koppelen van Promedico-registreerders aan medewerkers, werkdagen en uren). Alleen de bedrijven die
+// in de koppeltabel aan TG, GH of POT hangen; per medewerker naam (ook in delen, voor het voorstel), dossierpad uit koppeling.json, functies,
+// dienstverbanden, contracturen en roosters (uren per week, dagen per week, uren per weekdag sinds wv3047). NOOIT een bedrag, BSN of verzuim.
+function kindPma(dir) {
+  if (!fs.existsSync(path.join(dir, 'nmbrs.' + 'sqlite'))) return { ok: true, peil: null, medewerkers: [] };
+  const d = db(dir);
+  try {
+    const L = laad(d), kop = koppelingLees(dir);
+    const d10 = function (v) { return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : null; };
+    const getal = function (v) { const n = Number(v); return v == null || !isFinite(n) ? null : n; };
+    const dagen = function (a) { return Array.isArray(a) && a.length === 7 && a.every(function (n) { return typeof n === 'number' && n >= 0 && n <= 24; }) ? a : null; };
+    const medewerkers = Object.keys(L.mw).map(function (k) { return L.mw[k]; }).filter(function (m) { const e = (L.bedrijven[m.bedrijf] || {}).entiteit; return e === 'TG' || e === 'GH' || e === 'POT'; }).map(function (m) {
+      const h = function (s) { return m.h[s] || []; }, info = m.info || {};
+      return {
+        id: m.id, naam: naamVan(info), voornaam: info.firstName ? String(info.firstName).slice(0, 60) : null, tussen: info.prefix ? String(info.prefix).slice(0, 20) : null,
+        achternaam: info.lastName ? String(info.lastName).slice(0, 80) : null, entiteit: L.bedrijven[m.bedrijf].entiteit, dossier: kop.medewerkers[m.id] || null,
+        functies: h('functie').map(function (x) { return { omschrijving: x.description ? String(x.description).slice(0, 80) : null, begin: d10(x.startDate), aangemaakt: x.createdAt || null }; }),
+        dienst: h('dienstverband').map(function (x) { return { begin: d10(x.startDate), eind: d10(x.endDate) }; }).filter(function (x) { return x.begin; }),
+        contract: h('contract').map(function (x) { return { begin: d10(x.startDate), eind: d10(x.endDate), uren: getal(x.hoursPerWeek) }; }).filter(function (x) { return x.begin; }),
+        rooster: h('rooster').map(function (x) {
+          return { begin: d10(x.startDate), uren: x.weekuren != null ? getal(x.weekuren) : getal(x.hoursPerWeek), dagen_per_week: getal(x.daysPerWeek), dagen1: dagen(x.dagen1), dagen2: dagen(x.dagen2), aangemaakt: x.createdAt || null };
+        }).filter(function (x) { return x.begin; }),
+      };
+    });
+    const r = d.prepare('select eind from ronde where ok = 1 order by volg desc limit 1').get();
+    return { ok: true, peil: r && r.eind ? String(r.eind).slice(0, 10) : null, medewerkers: medewerkers };
+  } finally { d.close(); }
+}
 const ENTITEITEN = /^(TG|GH|HOLD|PH|POT|KM|SLOEL|[A-Z]{2,6})$/;
 function kindKoppel(invoer, dir) {
   const bedrijf = idVan(invoer.bedrijf), ent = String(invoer.entiteit || '');
@@ -1131,6 +1168,7 @@ function kindVault(invoer, dir) {
 async function kind(opdracht, invoer, dir) {
   if (opdracht === 'stand') return kindStand(dir);
   if (opdracht === 'pot') return kindPot(dir);
+  if (opdracht === 'pma') return kindPma(dir);   // wv3047
   if (opdracht === 'signalen') return kindSignalen(invoer, dir);
   if (opdracht === 'gemeld') return kindGemeld(invoer, dir);
   if (opdracht === 'persoon') return kindPersoon(invoer, dir);
@@ -1174,4 +1212,4 @@ if (require.main === module) {
 }
 
 module.exports = { SCOPES, REDIRECT, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodSchrijf, noodWis, doodLees, doodZet, verzoekToets, kies, scopesExact,
-  sha, xmlBoom, journaalRegels, signalenBereken, caoBlokken, periodeStart, NmbrsFout, vaultBereken, blokZet, vaultPadGoed, BLOK_BEGIN, BLOK_EIND };
+  sha, xmlBoom, journaalRegels, signalenBereken, caoBlokken, periodeStart, NmbrsFout, vaultBereken, blokZet, vaultPadGoed, BLOK_BEGIN, BLOK_EIND, dagUren };

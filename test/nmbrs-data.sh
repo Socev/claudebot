@@ -309,6 +309,13 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('pot: stand met dienst, rooster en schaal/trede per datum', !!potM && potM.salaris.length === 1 && potM.salaris[0].schaal === 'A' && potM.salaris[0].trede === 3 && potM.salaris[0].begin === '2025-01-01' && /^\d{4}-\d{2}-\d{2}$/.test(pot.j.stand.peil), pot.j);
     toets('pot: geen bedrag, BSN, IBAN, geboortedatum of mail', !/:(4000|1500|25)[,}]/.test(potT) && potT.indexOf(BSN) < 0 && potT.indexOf(IBAN) < 0 && potT.indexOf(GEB) < 0 && potT.indexOf(MAIL) < 0 && !/"value"/.test(potT), potT.slice(0, 300));
     await kindEcht('koppel', { bedrijf: C1, entiteit: 'TG' }, DIR);
+    // wv3047: personeel voor OVIS PMA — daguren per weekdag bewaard (twee weekpatronen), functies, dienst, contracturen; nooit een bedrag of BSN
+    const pma = await kindEcht('pma', {}, DIR);
+    const pmaT = JSON.stringify(pma.j || {});
+    const pmaM = pma.j && pma.j.ok && pma.j.medewerkers.find((x) => x.id === E1);
+    toets('pma: daguren per weekdag (ma–zo) bewaard naast de weeksom', !!pmaM && pmaM.entiteit === 'TG' && JSON.stringify(pmaM.rooster[0].dagen1) === '[8,8,8,6.4,0,0,0]' && JSON.stringify(pmaM.rooster[0].dagen2) === '[8,8,8,6.4,0,0,0]' && pmaM.rooster[0].uren === 30.4 && pmaM.functies.length >= 1, pma.j);
+    toets('pma: review MOET 3 — een ingevulde nulweek blijft een week, een ontbrekende week is null', JSON.stringify(TM.dagUren({ hoursMonday: 0, hoursTuesday: 0 })) === '[0,0,0,0,0,0,0]' && TM.dagUren({}) === null && TM.dagUren(null) === null);
+    toets('pma: geen bedrag, BSN, IBAN, geboortedatum of mail', !/:(4000|1500|25)[,}]/.test(pmaT) && pmaT.indexOf(BSN) < 0 && pmaT.indexOf(IBAN) < 0 && pmaT.indexOf(GEB) < 0 && pmaT.indexOf(MAIL) < 0 && !/"value"|salar/i.test(pmaT), pmaT.slice(0, 300));
     sg = await kindEcht('signalen', { vault: [{ entiteit: 'TG', naam: 'Anna Proef', namen: ['Anna Proef'], actief: true }, { entiteit: 'TG', naam: 'Dirk Weg', namen: ['Dirk Weg'], actief: true }, { entiteit: 'GH', naam: 'Elders', namen: ['Elders'], actief: true }] }, DIR);
     toets('S6: Bert en Cor zonder pagina, pagina Dirk zonder Nmbrs; niet-gekoppelde entiteit telt niet', per('S6') === 'Bert Voorbeeld,Cor Toets,Dirk Weg', sg.j.signalen.filter((s) => s.soort === 'S6'));
     const g1 = await kindEcht('gemeld', { sleutels: sg.j.nieuw.map((x) => x.sleutel) }, DIR);

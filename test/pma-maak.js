@@ -111,4 +111,32 @@ function exportB() {
   return { agb: '009870', exportdatum: '2026-04-08', begin: '2026-01-20', eind: '2026-04-01', regels };
 }
 
-module.exports = { zip, maakExport, KOP_ZONDER, exportA, exportB, inschrijving, verrichtingen, patienten, KOP, MODULES, BASIS, C, REG, nl };
+// wv3047 (fase 2): personeel — een export sep–okt 2026 met vaste werkdagen en verzonnen Nmbrs/dossiers (test/pma-werkdag.test.js, socev-app test/pma-ui.cjs)
+function reeks(van, tot) { const u = []; for (let d = van; d <= tot;) { u.push(d); const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + 1); d = x.toISOString().slice(0, 10); } return u; }
+const wd = (d) => (new Date(d + 'T12:00:00Z').getUTCDay() + 6) % 7;
+function exportPersoneel() {
+  // september–oktober 2026: "A. Proefsen" (assistente, ma/di/do), "B. Verzonnen" (POH-GGZ via POT), "Waarnemer2 Proefpraktijk"
+  // en "Q. Artsma" met AGB (arts). Plus inschrijfgeld op 1-10 op naam van de praktijkhouder (telt nooit als werkdag).
+  const regels = inschrijving('2026-10-01', patienten(12, 900001), false);
+  for (const d of reeks('2026-09-01', '2026-10-31')) {
+    const w = wd(d);
+    if ([0, 1, 3].includes(w)) for (let i = 0; i < 9; i++) regels.push({ pnr: String(900001 + i), code: C.middel[0], oms: C.middel[1], type: 'V', reg: 'A. Proefsen', agb: '', tarief: C.middel[2], dag: d, factuur: '2026-11-05' });
+    if (w === 2) for (let i = 0; i < 6; i++) regels.push({ pnr: String(900001 + i), code: C.ggz[0], oms: C.ggz[1], type: 'V', reg: 'B. Verzonnen', agb: '', tarief: C.ggz[2], dag: d, factuur: '2026-11-05' });
+    if (w < 5) for (let i = 0; i < 4; i++) regels.push({ pnr: String(900001 + i), code: C.lang[0], oms: C.lang[1], type: 'V', reg: 'Q. Artsma', agb: '01990001', tarief: C.lang[2], dag: d, factuur: '2026-11-05' });
+    if (w === 4) regels.push({ pnr: '900009', code: C.kort[0], oms: C.kort[1], type: 'V', reg: 'Waarnemer2 Proefpraktijk', agb: '', tarief: C.kort[2], dag: d, factuur: '2026-11-05' });
+  }
+  return maakExport({ agb: '009870', exportdatum: '2026-11-02', begin: '2026-09-01', eind: '2026-10-31', regels, zonderPnr: true });
+}
+const NEP_PERSONEEL = {   // wv3047: verzonnen Nmbrs en dossiers
+  peil: '2026-11-14',
+  medewerkers: [
+    { id: '11111111-1111-1111-1111-111111111111', naam: 'Anke Proefsen', voornaam: 'Anke', tussen: null, achternaam: 'Proefsen', entiteit: 'TG', dossier: '10_Zakelijk/Tolgaarde/Medewerkers/Anke Proefsen - doktersassistente.md',
+      functies: [{ omschrijving: 'Doktersassistente', begin: '2024-03-01' }], dienst: [{ begin: '2024-03-01', eind: null }], contract: [{ begin: '2024-03-01', eind: null, uren: 24 }],
+      rooster: [{ begin: '2024-03-01', uren: 24, dagen_per_week: 3, dagen1: null, dagen2: null }] },
+    { id: '22222222-2222-2222-2222-222222222222', naam: 'Bram Verzonnen', voornaam: 'Bram', tussen: null, achternaam: 'Verzonnen', entiteit: 'POT', dossier: null,
+      functies: [{ omschrijving: 'PO GGZ', begin: '2025-01-01' }], dienst: [{ begin: '2025-01-01', eind: null }], contract: [], rooster: [{ begin: '2025-01-01', uren: 8, dagen_per_week: 1 }] },
+  ],
+  dossiers: [{ pad: '10_Zakelijk/Tolgaarde/Medewerkers/Anke Proefsen - doktersassistente.md', naam: 'Anke Proefsen', rol: 'doktersassistente' },
+    { pad: '10_Zakelijk/Tolgaarde/Medewerkers/Quinten Artsma - huisarts (praktijkhouder).md', naam: 'Quinten Artsma', rol: 'huisarts (praktijkhouder)' }],
+};
+module.exports = { exportPersoneel, NEP_PERSONEEL, zip, maakExport, KOP_ZONDER, exportA, exportB, inschrijving, verrichtingen, patienten, KOP, MODULES, BASIS, C, REG, nl };
