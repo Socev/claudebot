@@ -429,10 +429,16 @@ function bereken(data, vandaag) {
   const heeftStand = belegd > 0;
   const volledig = heeftStand && verdeling.zonder_aantal === 0;
   const lampjes = [];
+  const VRAAG_VAN = { kern: 7, eigen: 7, leuk: 7, max_aandeel: 8, max_thema: 8, herbalans: 14, afkoel: 13, koop_niet: 10 };
   const lamp = (sleutel, naam, grens, stand, binnen, uitleg) => lampjes.push({ sleutel, naam, grens, stand,
-    lamp: binnen === null ? 'grijs' : binnen ? 'groen' : 'oranje', uitleg });
+    lamp: binnen === null ? 'grijs' : binnen ? 'groen' : 'oranje', uitleg, vraag: VRAAG_VAN[sleutel] || null });
+  // wv3030: een regel zonder getal heet alleen "nog niet gezet" zolang zijn vraag open is; is de vraag beantwoord (in woorden), dan "geen getal"
+  const beantwoord = (nr) => !!(data.antwoorden && data.antwoorden[nr] && data.antwoorden[nr].status === 'beantwoord');
+  const zonderGetal = (sleutel, naam, stand) => { const nr = VRAAG_VAN[sleutel];
+    return beantwoord(nr) ? lamp(sleutel, naam, 'geen getal', stand, null, 'Vraag ' + nr + ' beantwoord zonder getal: de app rekent dit niet na.')
+      : lamp(sleutel, naam, 'nog niet gezet', stand, null, 'Vraag ' + nr + ' in je plan.'); };
   const band = (sleutel, naam, min, max, waarde) => {
-    if (min == null && max == null) return lamp(sleutel, naam, 'nog niet gezet', pctTekst(waarde), null, 'Vraag 7 in je plan.');
+    if (min == null && max == null) return zonderGetal(sleutel, naam, pctTekst(waarde));
     const grens = (min != null ? pctTekst(min) : '0 %') + ' – ' + (max != null ? pctTekst(max) : '100 %');
     if (!volledig) return lamp(sleutel, naam, grens, pctTekst(waarde), null, heeftStand ? 'Eerst bij elke positie de soort kiezen.' : 'Nog geen stand.');
     const r = ruw[sleutel];
@@ -442,39 +448,41 @@ function bereken(data, vandaag) {
   };
   const kernOk = band('kern', 'Kern (indexfondsen)', R.kern_min, R.kern_max, verdeling.kern);
   const eigenOk = band('eigen', 'Eigen keuzes (tech + health)', R.eigen_min, R.eigen_max, verdeling.eigen);
-  const leukOk = R.leuk_max == null ? lamp('leuk', 'Voor de leuk', 'nog niet gezet', pctTekst(verdeling.leuk), null, 'Vraag 7 in je plan.')
+  const leukOk = R.leuk_max == null ? zonderGetal('leuk', 'Voor de leuk', pctTekst(verdeling.leuk))
     : band('leuk', 'Voor de leuk', null, R.leuk_max, verdeling.leuk);
   const signalen = [];
   const sig = (s) => signalen.push(Object.assign({ keuzes: ['niets', 'dagboek', 'herinner'] }, s));
   const standDatum = data.stand_datum || 'geen';
+  // wv3030: stand uit transacties = aankoopwaarde (geen koersen); dat staat dan ook in de signaaltekst
+  const volgens = data.stand_bron === 'aankoop' ? 'Op aankoopwaarde (je transacties tot en met ' + standDatum + ')' : 'Volgens je stand van ' + standDatum;
   const grootste = posities.filter((p) => p.soort && p.soort !== 'kern');
-  if (R.max_aandeel == null) lamp('max_aandeel', 'Eén aandeel hoogstens', 'nog niet gezet', null, null, 'Vraag 8 in je plan.');
+  if (R.max_aandeel == null) zonderGetal('max_aandeel', 'Eén aandeel hoogstens', null);
   else {
     const boven = heeftStand ? grootste.filter((p) => p._ruw > R.max_aandeel + 1e-9) : [];
     lamp('max_aandeel', 'Eén aandeel hoogstens', pctTekst(R.max_aandeel), grootste.length ? pctTekst(Math.max(...grootste.map((p) => p.aandeel))) : '–',
       boven.length ? false : volledig ? true : null, boven.length ? boven.length + ' boven je maximum' : volledig ? 'Geen aandeel boven je maximum (kern telt niet mee).' : heeftStand ? 'Eerst bij elke positie de soort kiezen.' : 'Nog geen stand.');
     for (const p of boven) sig({ sleutel: 'max-aandeel:' + p.sleutel + ':' + standDatum + ':' + R.max_aandeel, soort: 'boven_maximum', titel: p.naam + ' zit boven je maximum per aandeel',
-      wat: 'Volgens je stand van ' + standDatum + ' is ' + p.naam + ' ' + pctTekst(p.aandeel) + ' van je beleggingen.', raakt: p.naam + ' (' + SOORT_NAAM[p.soort] + ', ' + pctTekst(p.aandeel) + ' van het geheel)',
+      wat: volgens + ' is ' + p.naam + ' ' + pctTekst(p.aandeel) + ' van je beleggingen.', raakt: p.naam + ' (' + SOORT_NAAM[p.soort] + ', ' + pctTekst(p.aandeel) + ' van het geheel)',
       positie: p.sleutel, plan: 'Je maximum voor één aandeel is ' + pctTekst(R.max_aandeel) + '.' });
   }
-  if (R.max_thema == null) lamp('max_thema', 'Eén thema hoogstens', 'nog niet gezet', null, null, 'Vraag 8 in je plan.');
+  if (R.max_thema == null) zonderGetal('max_thema', 'Eén thema hoogstens', null);
   else {
     const b = [];
     for (const t of ['tech', 'health']) if (heeftStand && ruw[t] > R.max_thema + 1e-9) b.push(t);
     lamp('max_thema', 'Eén thema hoogstens', pctTekst(R.max_thema), 'tech ' + pctTekst(verdeling.tech) + ' · health ' + pctTekst(verdeling.health), b.length ? false : volledig ? true : null,
       b.length ? b.map((t) => SOORT_NAAM[t]).join(' en ') + ' boven je maximum' : volledig ? 'Beide thema\'s binnen je maximum.' : heeftStand ? 'Eerst bij elke positie de soort kiezen.' : 'Nog geen stand.');
     for (const t of b) sig({ sleutel: 'max-thema:' + t + ':' + standDatum + ':' + R.max_thema, soort: 'boven_maximum', titel: SOORT_NAAM[t] + ' zit boven je maximum per thema',
-      wat: 'Volgens je stand van ' + standDatum + ' is ' + SOORT_NAAM[t] + ' samen ' + pctTekst(verdeling[t]) + ' van je beleggingen.', raakt: 'thema ' + SOORT_NAAM[t], plan: 'Je maximum per thema is ' + pctTekst(R.max_thema) + '.' });
+      wat: volgens + ' is ' + SOORT_NAAM[t] + ' samen ' + pctTekst(verdeling[t]) + ' van je beleggingen.', raakt: 'thema ' + SOORT_NAAM[t], plan: 'Je maximum per thema is ' + pctTekst(R.max_thema) + '.' });
   }
   if (R.leuk_max != null && leukOk === false) sig({ sleutel: 'leuk:' + standDatum + ':' + R.leuk_max, soort: 'potje', titel: 'Voor de leuk zit boven je plafond',
-    wat: 'Volgens je stand van ' + standDatum + ' is "voor de leuk" ' + pctTekst(verdeling.leuk) + ' van je beleggingen.', raakt: 'potje voor de leuk', plan: 'Je plafond is ' + pctTekst(R.leuk_max) + '.' });
+    wat: volgens + ' is "voor de leuk" ' + pctTekst(verdeling.leuk) + ' van je beleggingen.', raakt: 'potje voor de leuk', plan: 'Je plafond is ' + pctTekst(R.leuk_max) + '.' });
   // herbalanceren
   const maand = Number(vandaag.slice(5, 7));
-  if (!R.herbalans_wijze) lamp('herbalans', 'Herbalanceren', 'nog niet gezet', null, null, 'Vraag 14 in je plan.');
+  if (!R.herbalans_wijze) zonderGetal('herbalans', 'Herbalanceren', null);
   else if (R.herbalans_wijze === 'momenten') {
     const ms = Array.isArray(R.herbalans_maanden) ? R.herbalans_maanden : [];
     const nu = ms.includes(maand);
-    lamp('herbalans', 'Herbalanceren', ms.length ? 'in maand ' + ms.join(', ') : 'maanden nog niet gezet', nu ? 'deze maand' : '–', ms.length ? !nu : null, nu ? 'Het is een herbalansmaand.' : 'Geen herbalansmaand.');
+    lamp('herbalans', 'Herbalanceren', ms.length ? 'in maand ' + ms.join(', ') : 'geen maanden ingevuld', nu ? 'deze maand' : '–', ms.length ? !nu : null, nu ? 'Het is een herbalansmaand.' : 'Geen herbalansmaand.');
     if (nu) sig({ sleutel: 'herbalans:' + vandaag.slice(0, 7), soort: 'herbalans', titel: 'Herbalansmoment', wat: 'Deze maand staat in je plan als herbalansmoment.',
       raakt: 'de verdeling (kern ' + pctTekst(verdeling.kern) + ', eigen keuzes ' + pctTekst(verdeling.eigen) + ', voor de leuk ' + pctTekst(verdeling.leuk) + ')',
       plan: 'Je herbalanceert in maand ' + ms.join(', ') + '; bij voorkeur met nieuwe inleg.' });
@@ -484,7 +492,7 @@ function bereken(data, vandaag) {
     if (af) sig({ sleutel: 'herbalans:afwijking:' + standDatum, soort: 'herbalans', titel: 'Tijd om te herbalanceren', wat: 'Een deel van je verdeling staat buiten zijn bandbreedte.',
       raakt: 'kern ' + pctTekst(verdeling.kern) + ', eigen keuzes ' + pctTekst(verdeling.eigen), plan: 'Je herbalanceert als een deel buiten zijn bandbreedte komt.' });
   }
-  if (R.afkoel_dagen == null) lamp('afkoel', 'Afkoeltijd', 'nog niet gezet', null, null, 'Vraag 13 in je plan.');
+  if (R.afkoel_dagen == null) zonderGetal('afkoel', 'Afkoeltijd', null);
   else lamp('afkoel', 'Afkoeltijd', R.afkoel_dagen + ' dagen', null, true, 'Een herinnering na een signaal komt na zoveel dagen terug.');
   // koop ik niet
   const koopNiet = Array.isArray(R.koop_niet) ? R.koop_niet.filter(Boolean) : [];
@@ -492,7 +500,7 @@ function bereken(data, vandaag) {
   const treffers = [];
   for (const p of posities) { const k = raakNiet(p.naam); if (k) treffers.push({ wat: p.naam, k, s: 'positie:' + p.sleutel }); }
   for (const v of data.volglijst) { const k = raakNiet(v.naam); if (k) treffers.push({ wat: v.naam, k, s: 'volg:' + v.id }); }
-  if (!koopNiet.length) lamp('koop_niet', 'Koop ik niet', 'nog niet gezet', null, null, 'Vraag 10 in je plan.');
+  if (!koopNiet.length) zonderGetal('koop_niet', 'Koop ik niet', null);
   else lamp('koop_niet', 'Koop ik niet', koopNiet.length + (koopNiet.length === 1 ? ' bedrijf' : ' bedrijven'), treffers.length ? treffers.length + ' treffer' : 'geen treffer', !treffers.length,
     treffers.length ? 'Iets in je stand of volglijst staat op je lijst.' : 'Niets in je stand of volglijst staat op je lijst.');
   for (const t of treffers) sig({ sleutel: 'koop-niet:' + t.s, soort: 'koop_niet', titel: t.wat + ' staat op je lijst "koop ik niet"', wat: t.wat + ' lijkt op "' + t.k + '" uit je lijst.',
@@ -524,10 +532,42 @@ function bereken(data, vandaag) {
   const open = [];
   for (const v of VRAGEN) { const a = data.antwoorden[v.nr]; if (!a || a.status === 'overgeslagen') open.push({ soort: 'vraag', vraag: v.nr, tekst: 'Vraag ' + v.nr + (a ? ' overgeslagen' : ' nog niet beantwoord') }); }
   for (const p of posities) if (!p.soort) open.push({ soort: 'positie', sleutel: p.sleutel, tekst: p.naam + ': kies kern, tech, health of voor de leuk' });
-  for (const t of data.transacties) if (!metRegel.has(t.sleutel)) open.push({ soort: 'dagboek', transactie: t.sleutel, tekst: t.naam + ' (' + t.datum + '): nog geen dagboekregel' });
+  const bewustZonder = (t) => { const k = data.keuzes['dagboek:' + t.sleutel]; return !!(k && k.keuze === 'niets'); };   // wv3030: Niets doen = geen open punt meer
+  for (const t of data.transacties) if (!metRegel.has(t.sleutel) && !bewustZonder(t)) open.push({ soort: 'dagboek', transactie: t.sleutel, tekst: t.naam + ' (' + t.datum + '): nog geen dagboekregel' });
   const anthropic = posities.some((p) => ANTHROPIC_RE.test(p.naam)) || data.volglijst.some((v) => ANTHROPIC_RE.test(v.naam + ' ' + (v.code || '')));
   return { verdeling, posities, cash, lampjes, signalen: zichtbaar, signalen_verborgen: signalen.length - zichtbaar.length, open_punten: open,
     belang: anthropic ? ANTHROPIC_ZIN : null, volledig, woorden };
+}
+
+// wv3030: stand uit transacties zolang er geen portefeuille en geen handpositie is (een ingelezen portefeuille of handpositie gaat altijd voor).
+// Per ISIN (anders naam): aantal en aankoopwaarde incl. kosten; een verkoop haalt naar rato aankoopwaarde weg (gemiddelde kostprijs). Geen koersen:
+// dit is de waarde bij aankoop, niet de huidige waarde. Ontbreekt een totaal of verkoopt een rij meer dan er was, dan 'onvolledig' (niet raden).
+function aankoopStand(transacties) {
+  const per = new Map();
+  const tijd = (t) => t.datum + ' ' + (t.tijd || '');
+  for (const t of transacties.slice().sort((a, b) => (tijd(a) < tijd(b) ? -1 : tijd(a) > tijd(b) ? 1 : 0))) {
+    const n = Number(t.aantal);
+    if (!Number.isFinite(n) || n === 0) continue;
+    const sl = t.isin ? 'isin:' + t.isin : 'naam:' + String(t.naam).toLowerCase();
+    const p = per.get(sl) || { sleutel: sl, naam: t.naam, isin: t.isin || null, valuta: t.valuta || null, aantal: 0, kost: 0, transacties: 0, onvolledig: false };
+    p.transacties++; p.naam = t.naam;
+    if (n > 0) {
+      const tot = t.totaal_eur_cent != null ? t.totaal_eur_cent : t.waarde_eur_cent != null ? t.waarde_eur_cent + (t.kosten_eur_cent || 0) : null;
+      if (tot == null || tot > 0) p.onvolledig = true; else p.kost += -tot;
+      p.aantal += n;
+    } else if (-n > p.aantal + 1e-9) { p.onvolledig = true; p.aantal = 0; p.kost = 0; }
+    else { p.kost = Math.round(p.kost * (1 + n / p.aantal)); p.aantal += n; }
+    if (Math.abs(p.aantal) < 1e-9) { p.aantal = 0; p.kost = 0; }
+    per.set(sl, p);
+  }
+  return Array.from(per.values()).filter((p) => p.aantal > 0).map((p) => ({ sleutel: p.sleutel, regelsoort: 'effect', naam: p.naam, isin: p.isin, aantal: String(Number(p.aantal.toFixed(6))),
+    koers: null, valuta: p.valuta, lokaal_cent: null, waarde_eur_cent: p.kost, bron: 'aankoop', transacties: p.transacties, onvolledig: p.onvolledig }));
+}
+function metAankoop(d) {
+  if (d.posities.some((p) => p.regelsoort === 'effect') || !d.transacties.length) return d;
+  const eff = aankoopStand(d.transacties);
+  if (!eff.length) return d;
+  return Object.assign({}, d, { posities: d.posities.concat(eff), stand_datum: d.transacties.reduce((m, t) => (t.datum > m ? t.datum : m), ''), stand_bron: 'aankoop' });
 }
 
 // ── plan: waarden controleren en regels afleiden ──
@@ -602,7 +642,7 @@ function maak(o) {
     } finally { db.close(); }
   }
   function leesAlles(db) {
-    const leeg = { antwoorden: {}, regels: {}, versies: [], posities: [], soorten: {}, transacties: [], dagboek: [], volglijst: [], keuzes: {}, bestanden: [], stand_datum: null, stand_bron: null, rekening_rijen: 0 };
+    const leeg = { antwoorden: {}, regels: {}, versies: [], posities: [], soorten: {}, transacties: [], dagboek: [], volglijst: [], keuzes: {}, bestanden: [], stand_datum: null, stand_bron: null, rekening_rijen: 0, stortingen: 0 };
     if (!db) return leeg;
     const d = leeg;
     for (const r of db.prepare('SELECT * FROM plan_antwoord').all()) d.antwoorden[r.vraag] = { tekst: r.tekst, waarden: r.waarden ? JSON.parse(r.waarden) : null, status: r.status, op: r.op };
@@ -610,7 +650,7 @@ function maak(o) {
     d.versies = db.prepare('SELECT versie, op, wat FROM planversie ORDER BY versie DESC LIMIT 20').all().map((r) => Object.assign({}, r));
     d.posities = db.prepare('SELECT sleutel, regelsoort, naam, isin, aantal, koers, valuta, lokaal_cent, waarde_eur_cent, bron FROM positie').all().map((r) => Object.assign({}, r));
     for (const r of db.prepare('SELECT sleutel, soort FROM positie_soort').all()) d.soorten[r.sleutel] = r.soort;
-    d.transacties = db.prepare('SELECT sleutel, datum, tijd, naam, isin, aantal, koers, valuta, waarde_eur_cent, kosten_eur_cent, bron FROM transactie ORDER BY datum DESC, tijd DESC').all().map((r) => Object.assign({}, r));
+    d.transacties = db.prepare('SELECT sleutel, datum, tijd, naam, isin, aantal, koers, valuta, waarde_eur_cent, kosten_eur_cent, totaal_eur_cent, bron FROM transactie ORDER BY datum DESC, tijd DESC').all().map((r) => Object.assign({}, r));
     d.dagboek = db.prepare('SELECT * FROM dagboek ORDER BY datum DESC, id DESC').all().map((r) => Object.assign({}, r));
     d.volglijst = db.prepare('SELECT id, naam, code, thema, waarom, wanneer, op FROM volglijst WHERE weg = 0 ORDER BY id').all().map((r) => Object.assign({}, r));
     for (const r of db.prepare('SELECT sleutel, keuze, tot FROM signaal_keuze').all()) d.keuzes[r.sleutel] = { keuze: r.keuze, tot: r.tot };
@@ -618,6 +658,8 @@ function maak(o) {
     const m = Object.fromEntries(db.prepare("SELECT sleutel, waarde FROM meta WHERE sleutel IN ('stand_datum', 'stand_bron')").all().map((r) => [r.sleutel, r.waarde]));
     d.stand_datum = m.stand_datum || null; d.stand_bron = m.stand_bron || null;
     d.rekening_rijen = db.prepare('SELECT COUNT(*) AS n FROM rekening').get().n;
+    // wv3030: een storting in het rekeningoverzicht (DEGIRO: "Reservation iDEAL", "iDEAL storting", "flatex Storting", "Deposit") = stap storten gedaan
+    d.stortingen = db.prepare("SELECT COUNT(*) AS n FROM rekening WHERE mutatie_cent > 0 AND (lower(omschrijving) LIKE '%storting%' OR lower(omschrijving) LIKE '%deposit%' OR lower(omschrijving) LIKE '%ideal%')").get().n;
     return d;
   }
   // wv3006 (dashboard): de waarde per ingelezen portefeuille, één punt per standdatum (het laatst ingelezen bestand van die dag telt), voor
@@ -647,7 +689,7 @@ function maak(o) {
   }
   function overzicht() {
     return metDb((db) => {
-      const d = leesAlles(db);
+      const d = metAankoop(leesAlles(db));
       const vandaag = vandaagF();
       const k = bereken(d, vandaag);
       const volg = d.volglijst.map((v) => Object.assign({}, v, { vroegst: d.regels.afkoel_dagen != null ? plusDagen(v.op.slice(0, 10), d.regels.afkoel_dagen) : null }));
@@ -656,7 +698,7 @@ function maak(o) {
       for (const p of k.posities) delete p._ruw;
       return { ok: true, vandaag, vragen: VRAGEN, antwoorden: d.antwoorden, regels: d.regels, versies: d.versies, stand: { datum: d.stand_datum, bron: d.stand_bron,
         verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig, historie: historieUit(db) }, transacties: d.transacties, dagboek, volglijst: volg,
-        signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, rekening_rijen: d.rekening_rijen,
+        signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, rekening_rijen: d.rekening_rijen, stortingen: d.stortingen,
         soort_namen: SOORT_NAAM, vault: { ok: vaultOk, op: laatsteVault }, bedrijven };
     }, false);
   }
@@ -731,12 +773,20 @@ function maak(o) {
     schrijfVault({ plan: true });
     return { reden: 'beleggen plan vraag ' + vraag };
   }
+  // wv3030: naam van een belegde positie, ook als die (nog) alleen uit transacties komt; null = onbekend
+  function naamVan(db, sl) {
+    const r = db.prepare("SELECT naam FROM positie WHERE sleutel = ? AND regelsoort = 'effect'").get(sl);
+    if (r) return r.naam;
+    const t = sl.startsWith('isin:') ? db.prepare('SELECT naam FROM transactie WHERE isin = ? ORDER BY datum DESC LIMIT 1').get(sl.slice(5))
+      : db.prepare('SELECT naam FROM transactie WHERE isin IS NULL AND lower(naam) = ? ORDER BY datum DESC LIMIT 1').get(sl.slice(5));
+    return t ? t.naam : null;
+  }
   function zetSoort(b) {
     const sl = T(b.sleutel, 200);
     if (!sl || !/^(isin|naam):/.test(sl)) throw new Fout(400, 'onbekende positie');
     if (b.soort !== null && !SOORTEN.includes(b.soort)) throw new Fout(400, 'soort: kern, tech, health of leuk');
     metDb((db) => {
-      if (!db.prepare('SELECT 1 FROM positie WHERE sleutel = ?').get(sl)) throw new Fout(404, 'positie niet gevonden');
+      if (!naamVan(db, sl)) throw new Fout(404, 'positie niet gevonden');
       if (b.soort === null) db.prepare('DELETE FROM positie_soort WHERE sleutel = ?').run(sl);
       else db.prepare('INSERT INTO positie_soort (sleutel, soort, op) VALUES (?, ?, ?) ON CONFLICT(sleutel) DO UPDATE SET soort = excluded.soort, op = excluded.op').run(sl, b.soort, nuIso());
     }, true);
@@ -948,7 +998,7 @@ function maak(o) {
   // Voor beleggen-nieuws.js: wat er nodig is om op te halen en te wegen (geen bedragen; aandeel in % alleen voor de kaart in de app).
   function nieuwsData() {
     return metDb((db) => {
-      const d = leesAlles(db);
+      const d = metAankoop(leesAlles(db));
       const vandaag = vandaagF();
       const k = bereken(d, vandaag);
       const bedrijven = bedrijvenUit(db, d, k).map((b) => { const x = Object.assign({}, b); delete x.voorstel; return x; });
@@ -962,7 +1012,7 @@ function maak(o) {
     return metDb((db) => {
       let naam = null;
       if (sl.startsWith('volg:')) { const r = db.prepare('SELECT naam FROM volglijst WHERE id = ? AND weg = 0').get(Number(sl.slice(5))); naam = r && r.naam; }
-      else { const r = db.prepare("SELECT naam FROM positie WHERE sleutel = ? AND regelsoort = 'effect'").get(sl); naam = r && r.naam; }
+      else naam = naamVan(db, sl);
       if (!naam) throw new Fout(404, 'bedrijf niet gevonden in je stand of volglijst');
       if (b.actie === 'weg') { db.prepare('DELETE FROM bedrijf WHERE sleutel = ?').run(sl); return { reden: 'beleggen bedrijf weg' }; }
       if (b.actie !== 'zet') throw new Fout(400, 'actie: zet of weg');
@@ -1069,4 +1119,4 @@ function maak(o) {
   return { app, info, _overzicht: overzicht, nieuwsData, metDb, vandaag: vandaagF };
 }
 
-module.exports = { maak, leesBestand, bereken, regelsUit, VRAGEN, LeesFout, ANTHROPIC_ZIN, plusMaanden };
+module.exports = { maak, leesBestand, bereken, aankoopStand, regelsUit, VRAGEN, LeesFout, ANTHROPIC_ZIN, plusMaanden };
