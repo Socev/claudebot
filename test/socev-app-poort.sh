@@ -6847,6 +6847,9 @@ async function bewijs(o) {
         pnt(9, 'bonsai', { soort: 'besluit', prive: true }),
         pnt(10, 'gesloten', { status: 'gedaan', gesloten_door: 'beheer', gesloten_op: new Date().toISOString() }),
         pnt(11, 'reg-pat', { soort: 'besluit', status: 'later', later_tot: plus(V, 20), herkomst: { register: ['2026-10-06 08:00'], wv: [999] } }),
+        // wv3100: vandaag door David afgehandeld (wel in afgehandeld), gisteren door David en vandaag door de ronde (niet)
+        pnt(3112, 'david-vandaag', { status: 'vervallen', gesloten_door: 'david', gesloten_op: new Date().toISOString(), titel: 'Afgehandeld3100' }),
+        pnt(3113, 'david-gisteren', { status: 'gedaan', gesloten_door: 'david', gesloten_op: new Date(Date.now() - 30 * 3600000).toISOString() }),
       ];
       sbStaat.wvItems = [{ id: 62, label: 'machinekamer:olares-backup-status', samenvatting: 'Back-up van Olares controleren', status: 'geblokkeerd', geblokkeerd_door: 'David: NAS-backup instellen', opdracht: 'GEHEIME-OPDRACHT' },
         { id: 325, label: 'machinekamer:wv315 agenda-knop', samenvatting: null, status: 'geblokkeerd', geblokkeerd_door: 'David: ja', opdracht: 'X' }];
@@ -6879,6 +6882,7 @@ async function bewijs(o) {
         toets('27 wv1004: mk_voor_jou_vraag_jobs kapot -> 200, moet_iets een lijst, kaarten gelijk, logError app-voor-jou', rJ.status === 200 && Array.isArray(rJ.j.moet_iets) && rJ.j.moet_fout === null && JSON.stringify(rJ.j.punten) === JSON.stringify(rK.j.punten) && nieuwL.some((l) => /^app-voor-jou: /.test(l)), JSON.stringify([rJ.status, rJ.j.moet_fout, nieuwL]));
         logs.splice(nL, logs.length - nL);
       }
+      toets('27 wv3100: afgehandeld = vandaag door David gesloten (id, titel, status, t), niet de ronde, niet gisteren, niet wat in de lijst staat; zonder bewijs of sleutel', Array.isArray(r.j.afgehandeld) && r.j.afgehandeld.length === 1 && r.j.afgehandeld[0].id === 3112 && r.j.afgehandeld[0].titel === 'Afgehandeld3100' && r.j.afgehandeld[0].status === 'vervallen' && !!r.j.afgehandeld[0].t && r.j.afgehandeld[0].beantwoord === null && !/BEWIJS-|sleutel/.test(JSON.stringify(r.j.afgehandeld)), JSON.stringify(r.j.afgehandeld));
       toets('27 later-toekomst apart met datum', (r.j.later || []).length === 2 && r.j.later[0].id === 7 && r.j.later[0].later_tot === plus(V, 3), JSON.stringify(r.j.later));
       const L = Object.fromEntries((r.j.punten || []).map((x) => [x.id, x]));
       toets('27 regel 2: wanneer · waar · duur', L[1].regel2 === 'uiterlijk ' + dm(plus(V, 9)) + ' · op de praktijk · ± 15 min' && L[2].regel2 === 'vandaag · op je telefoon · ± 1,5 u' && L[3].regel2 === 'uiterlijk morgen · op de pc · ± 5 min'

@@ -10748,9 +10748,18 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   try { vr = appVragen(); } catch (e) { vr = {}; }
   const af = await appVjAfgeleid(punten, nu);   // wv1018: vóór de lijst (beantwoord leest de afgeleide koppeling ook)
   const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), appVjDoel(p, a), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map) }); });   // wv1706: module + doel
+  // wv3100 (David 14-11 23:28, "inbox zero"): wat David vandaag zelf afhandelde (Gedaan, Niet meer nodig, Ja / Nee / Anders op de kaart) en
+  // niet meer in de lijst staat, voor de ingeklapte regel "Afgehandeld vandaag" onderaan Voor jou. De app haalt beantwoorde en net gekozen
+  // punten zelf uit de lijst; dit is alleen de terugvindplek. Geen lijst van de ronde of een agent (gesloten_door david), hooguit 30.
+  const inLijst = new Set(lijst.map(function (p) { return p.id; }));
+  const afgehandeld = eigen.filter(function (p) {
+    const g = Date.parse(p.gesloten_op || '');
+    return (p.status === 'gedaan' || p.status === 'vervallen') && p.gesloten_door === 'david' && Number.isFinite(g) && appYmd(g) === vandaag && !inLijst.has(p.id);
+  }).sort(function (x, y) { return String(y.gesloten_op).localeCompare(String(x.gesloten_op)); }).slice(0, 30)
+    .map(function (p) { return { id: p.id, titel: appKort(p.titel, 120), status: p.status, t: p.gesloten_op, beantwoord: appVjBeantwoordKort(p, vr, af.map) }; });
   // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten).
   // wv926 (Fable-diffreview #1): alleen op GET /app/voor-jou/kanaal (sinds wv946 de enige weg van de app); /app/voor-jou blijft zoals main.
-  const basisAntwoord = { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: appAfscherm(a),
+  const basisAntwoord = { ok: true, punten: lijst, later: later, afgehandeld: afgehandeld, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: appAfscherm(a),
     bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null };
   if (!kanaal) return appStuur(res, 200, basisAntwoord);
   let moet = null, moetFout = null;
