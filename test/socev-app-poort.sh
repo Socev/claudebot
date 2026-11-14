@@ -2361,7 +2361,7 @@ async function bewijs(o) {
       logs.splice(0, logs.length, ...logs.filter((l) => !/^app-agents/.test(l)));
       // haakjes in de pod: processJob alleen hoofdkanaal/machinekamer en nooit 'lezen'; processAgent rapport alleen machinekamer/david
       const volSrc = fs.readFileSync('server.js', 'utf8');
-      toets('11 processJob bewaart alleen 40687/telegram-debug/cijfer-meester (wv200), nooit lezen', /if \(gereedschap !== 'lezen' && APP_KANAAL_VAN_CHAT\[chatId\]\) appBewaar\(/.test(volSrc) && /APP_KANAAL_VAN_CHAT = \{ '40687': 'hoofd', 'telegram-debug': 'machinekamer', 'cijfer-meester': 'cijfer-meester' \}/.test(volSrc) && !/'cijfermeester': 'cijfermeester'/.test(volSrc));
+      toets('11 processJob bewaart alleen 40687/telegram-debug/cijfer-meester (wv200) en ovis-nza (wv3087), nooit lezen', /if \(gereedschap !== 'lezen' && APP_KANAAL_VAN_CHAT\[chatId\]\) appBewaar\(/.test(volSrc) && /APP_KANAAL_VAN_CHAT = \{ '40687': 'hoofd', 'telegram-debug': 'machinekamer', 'cijfer-meester': 'cijfer-meester', 'ovis-nza': 'ovis-nza' \}/.test(volSrc) && !/'cijfermeester': 'cijfermeester'/.test(volSrc));
       // wv364: één gedeelde ingang appBewaarAgent (finally, wees, tussenstand na herstart, gesneuvelde agents)
       toets('11 processAgent: rapport alleen bij route machinekamer of david', /rapport: \(route === 'machinekamer' \|\| route === 'david'\) \? rapport : null/.test(volSrc) &&
         /appBewaarAgent\(jobId, entry, outdir, appRapport, /.test(volSrc) && (volSrc.match(/appBewaar\(/g) || []).length === 4);
@@ -5398,7 +5398,7 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/gezien', { tab: 'cijfer-meester' }, { pot: P.jar });
       toets('22 /app/gezien cijfer-meester -> 200', r.status === 200, JSON.stringify(r.j));
       const vs = fs.readFileSync('server.js', 'utf8');
-      toets('22 seintje -> tab cijfer-meester; werklessen app beide, gedeelde bot geen (wv363)', /\^antwoord \(hoofd\|machinekamer\|cijfer-meester\)\$/.test(vs) && /'cijfermeester': 'geen', 'cijfer-meester': 'beide'/.test(vs));
+      toets('22 seintje -> tab cijfer-meester; werklessen app beide, gedeelde bot geen (wv363)', /\^antwoord \(hoofd\|machinekamer\|cijfer-meester\|ovis-nza\)\$/.test(vs) && /'cijfermeester': 'geen', 'cijfer-meester': 'beide', 'ovis-nza': 'geen'/.test(vs));
       // Telegram-regressie: hoofd en machinekamer ongemoeid (kop alleen in cijfer-meester)
       const nH = gestart.length;
       r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'regressie hoofd' }, { pot: P.jar });
