@@ -386,12 +386,13 @@ test('wv3045 databank van schema 1 (zonder kolom met_patient) wordt bijgewerkt, 
   inlees(m, M.exportA());
   const { DatabaseSync } = require('node:sqlite');
   const d = new DatabaseSync(path.join(map, 'pma.sqlite'));
-  d.exec("ALTER TABLE export DROP COLUMN met_patient; UPDATE meta SET waarde = '1' WHERE sleutel = 'schema'"); d.close();
+  d.exec("ALTER TABLE export DROP COLUMN met_patient; ALTER TABLE registreerder DROP COLUMN bevestigd; DROP TABLE persoon; UPDATE meta SET waarde = '1' WHERE sleutel = 'schema'"); d.close();
   const m2 = P.maak({ map, finPatienten: () => FIN });
   const o = m2.app({ methode: 'GET', pad: '/app/pma' });
   assert.strictEqual(o.status, 200, JSON.stringify(o.body));
   assert.strictEqual(o.body.exports[0].met_patient, true);
-  assert.strictEqual(m2.info().schema, 2);
+  assert.strictEqual(m2.info().schema, 3);   // wv3047: schema 3 (persoon, rol_periode, rooster_hand, registreerder.bevestigd)
+  assert.strictEqual(m2.app({ methode: 'GET', pad: '/app/pma/personeel' }).status, 200);   // wv3047: ook na bijwerken
   const { c } = inlees(m2, zonder(M.exportB()));
   assert.strictEqual(c.body.samenvatting.dagen.andere_vorm, 12);
 });

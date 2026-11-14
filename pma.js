@@ -30,7 +30,7 @@ const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
 
-const SCHEMA_VERSIE = 2;   // 2 = wv3045: export.met_patient (export zonder kolom patientnummer)
+const SCHEMA_VERSIE = 3;   // 2 = wv3045: export.met_patient (export zonder kolom patientnummer); 3 = wv3047: persoon, rol_periode, rooster_hand, registreerder.bevestigd
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT);
 CREATE TABLE IF NOT EXISTS praktijk (code TEXT PRIMARY KEY, naam TEXT NOT NULL, agb TEXT NOT NULL UNIQUE);
@@ -53,6 +53,12 @@ CREATE TABLE IF NOT EXISTS code (code TEXT NOT NULL, van_jaar INTEGER NOT NULL, 
 CREATE TABLE IF NOT EXISTS registreerder (praktijk TEXT NOT NULL, naam TEXT NOT NULL, persoon INTEGER, soort TEXT NOT NULL CHECK (soort IN ('persoon','verzamel')),
   eerst TEXT NOT NULL, PRIMARY KEY (praktijk, naam));
 CREATE TABLE IF NOT EXISTS instelling (praktijk TEXT NOT NULL, sleutel TEXT NOT NULL, waarde TEXT NOT NULL, PRIMARY KEY (praktijk, sleutel));
+CREATE TABLE IF NOT EXISTS persoon (id INTEGER PRIMARY KEY AUTOINCREMENT, naam TEXT NOT NULL, dossier TEXT, nmbrs TEXT,
+  dienst TEXT NOT NULL DEFAULT 'onbekend' CHECK (dienst IN ('loondienst','pot','zzp','praktijkhouder','onbekend')), groep INTEGER NOT NULL DEFAULT 0 CHECK (groep IN (0,1)), op TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS rol_periode (id INTEGER PRIMARY KEY AUTOINCREMENT, persoon INTEGER NOT NULL REFERENCES persoon(id), praktijk TEXT NOT NULL REFERENCES praktijk(code),
+  rol TEXT NOT NULL, van TEXT NOT NULL, tot TEXT, op TEXT NOT NULL, CHECK (tot IS NULL OR tot >= van));
+CREATE TABLE IF NOT EXISTS rooster_hand (persoon INTEGER NOT NULL REFERENCES persoon(id), praktijk TEXT NOT NULL REFERENCES praktijk(code), ingang TEXT NOT NULL,
+  uren TEXT NOT NULL, op TEXT NOT NULL, PRIMARY KEY (persoon, praktijk, ingang));
 `;
 
 // Praktijken op het AGB zoals het in export_info staat (zonder de voorloop "01"); onbekend = weigeren met de vraag.
@@ -260,6 +266,146 @@ function leesExport(zipBuf, pseudo) {
   return { praktijk: pr.code, praktijk_naam: pr.naam, agb, exportdatum, begin, eind, gegevensset: set, inschrijf, regels, voorlopig, gelijk, met_patient: metPatient };
 }
 
+
+// ── fase 2 (wv3047): registreerder → persoon → rol, roosters en werkdagen (plan § 2 "Registreerder → medewerker → rol", § 3) ──
+// Rollen in de tijd per praktijk; de eerste zes vergelijkt het scherm Medewerkers, de laatste vier het scherm Artsen. Alleen binnen een rol.
+const ROLLEN = ['assistente', 'poh-s', 'poh-ggz', 'paio', 'stagiair', 'overig', 'huisarts-praktijkhouder', 'huisarts-loondienst', 'waarnemer', 'aios'];
+const ROL_NAAM = { assistente: 'Assistente', 'poh-s': 'POH-S', 'poh-ggz': 'POH-GGZ', paio: 'PA(io)', stagiair: 'Stagiair', overig: 'Overig',
+  'huisarts-praktijkhouder': 'Huisarts (praktijkhouder)', 'huisarts-loondienst': 'Huisarts in loondienst', waarnemer: 'Waarnemer', aios: 'Aios' };
+const ARTS_ROLLEN = ['huisarts-praktijkhouder', 'huisarts-loondienst', 'waarnemer', 'aios'];
+const DIENSTEN = ['loondienst', 'pot', 'zzp', 'praktijkhouder', 'onbekend'];
+const TUSSEN = new Set(['van', 'de', 'der', 'den', 'het', 'ter', 'ten', 'te', 't', 'in', 'op', 'la', 'le', 'du', 'da', 'dos', 'el', 'al', 'v', 'vd', 'v d']);
+// Verzamelnaam: "Waarnemer Tolgaarde", sinds de export van 14-11-2026 ook "Waarnemer2 Tolgaarde"; een naam die op de praktijknaam eindigt
+const VERZAMEL_RE = /^waarnemer|\b(tolgaarde|groenhouten)$/i;
+const isoGoed = (x) => typeof x === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(x) && new Date(x + 'T12:00:00Z').toISOString().slice(0, 10) === x;
+function kaal(x) { return String(x || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z\s-]/g, ' ').replace(/\s+/g, ' ').trim(); }
+// "A. de Vries", "A.B. van Dijk-Jansen", "Anke Proef", "ABC Proef" → { initiaal, voornaam (alleen als uitgeschreven), achter (zonder tussenvoegsel), delen }
+function ontleed(voor, rest) {
+  const v = String(voor || '').trim(), vk = kaal(v);
+  if (!vk) return null;
+  const letters = /^(\p{Lu}\.?\s?)+$/u.test(v) || /^\p{Lu}{1,4}$/u.test(v) || /\./.test(v);
+  const delen = kaal(rest).split(/[\s-]+/).filter((x) => x && !TUSSEN.has(x) && x.length > 1);
+  if (!delen.length) return null;
+  return { initiaal: vk[0], voornaam: letters ? null : vk.split(' ')[0], achter: delen.join(''), delen };
+}
+function ontleedNaam(ruw) { const t = String(ruw || '').trim().split(/\s+/); return t.length < 2 ? null : ontleed(t[0], t.slice(1).join(' ')); }
+// 0 = past niet, 1 = één deel van de achternaam gelijk (dubbele naam), 2 = achternaam gelijk; voorletter moet altijd kloppen
+function lijkt(a, b) {
+  if (!a || !b || a.initiaal !== b.initiaal) return 0;
+  if (a.voornaam && b.voornaam && !(a.voornaam.startsWith(b.voornaam) || b.voornaam.startsWith(a.voornaam))) return 0;
+  if (a.achter === b.achter) return 2;
+  return a.delen.some((x) => b.delen.includes(x)) ? 1 : 0;
+}
+// Functie (Nmbrs) of dossiernaam → rol (voorstel; David bevestigt)
+function rolUit(t) {
+  const x = kaal(t);
+  if (!x) return null;
+  if (/\bggz\b|pohggz/.test(x)) return 'poh-ggz';
+  if (/\bpoh ?-?s\b|somati/.test(x)) return 'poh-s';
+  if (/stagi/.test(x)) return 'stagiair';
+  if (/physician|\bpa\b|\bpaio\b|\bpa ?-?io\b/.test(x)) return 'paio';
+  if (/\baios\b|huisarts in opleiding/.test(x)) return 'aios';
+  if (/waarne/.test(x)) return 'waarnemer';
+  if (/praktijkhouder/.test(x)) return 'huisarts-praktijkhouder';
+  if (/huisarts/.test(x)) return 'huisarts-loondienst';
+  if (/assist|doktersass|\bda\b/.test(x)) return 'assistente';
+  return 'overig';
+}
+const WEEKDAG = (iso) => (new Date(iso + 'T12:00:00Z').getUTCDay() + 6) % 7;   // 0 = maandag … 6 = zondag
+const maandagVan = (iso) => plusDag(iso, -WEEKDAG(iso));
+// Feestdagen van de CAO Huisartsenzorg (Nieuwjaar, 2e Paas- en Pinksterdag, Koningsdag, Hemelvaart, Kerst; Bevrijdingsdag eens per vijf jaar)
+function feestdagen(jaar) {
+  const a = jaar % 19, b = Math.floor(jaar / 100), c = jaar % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const maand = Math.floor((h + l - 7 * m + 114) / 31), dag = ((h + l - 7 * m + 114) % 31) + 1;
+  const pasen = jaar + '-' + String(maand).padStart(2, '0') + '-' + String(dag).padStart(2, '0');
+  const koning = new Date(Date.UTC(jaar, 3, 27, 12)).getUTCDay() === 0 ? jaar + '-04-26' : jaar + '-04-27';
+  const u = [jaar + '-01-01', plusDag(pasen, 1), koning, plusDag(pasen, 39), plusDag(pasen, 50), jaar + '-12-25', jaar + '-12-26'];
+  if (jaar % 5 === 0) u.push(jaar + '-05-05');
+  return u;
+}
+// Is een Nmbrs-rooster per weekdag een echt patroon? Niet als het leeg is, als week 1 en week 2 verschillen (welke week is welke weten we
+// niet) of als de uren gewoon gelijk over ma–vr verdeeld zijn terwijl iemand minder dan vijf dagen werkt.
+function nmbrsDagenEcht(r) {
+  if (!r || !Array.isArray(r.dagen1)) return null;
+  const a = r.dagen1, b = Array.isArray(r.dagen2) ? r.dagen2 : null;
+  if (!a.some((n) => n > 0)) return null;
+  if (b && b.some((n, i) => n !== a[i])) return null;   // review MOET 3: ook een ingevulde nulweek 2 = om de week
+  const werk = a.slice(0, 5);
+  if (werk.every((n) => n > 0 && n === werk[0]) && r.dagen_per_week != null && r.dagen_per_week < 4.5) return null;
+  return a;
+}
+const laatsteOp = (rijen, veld, d) => { let u = null; for (const r of rijen) if (r[veld] && r[veld] <= d && (!u || r[veld] >= u[veld])) u = r; return u; };
+// De werkdagen van één persoon bij één praktijk (pure functie; de 30 gevallen in test/pma-werkdag.test.js).
+// i.dagen: Map dag → { n, kort, middel, lang, vk, vl, mi, poh, cent } (alleen declaraties die voor de werkdag tellen; nooit inschrijfgeld)
+// i.gedekt: Set van dagen die door een export gedekt zijn; i.rollen [{ rol, van, tot }]; i.hand [{ ingang, uren[7] }];
+// i.nmbrs { dienst [{ begin, eind }], rooster [{ begin, uren, dagen_per_week, dagen1, dagen2 }], contract [{ begin, eind, uren }] } of null;
+// i.drempel (invaldag), i.feest Set. Uit: [{ dag, soort, uren, rol, bron, t }] met soort gewerkt | afwezig | invaldag | los | weekend | feestdag.
+function werkdagenVan(i) {
+  const dagen = i.dagen, rollen = i.rollen || [], hand = i.hand || [], nm = i.nmbrs || null, drempel = i.drempel || 5, feest = i.feest || new Set();
+  const alle = [...dagen.keys()].sort();
+  const gedekt = [...i.gedekt].sort();
+  if (!gedekt.length || (!alle.length && !rollen.length)) return [];
+  let van = alle[0] || gedekt[0], tot = alle[alle.length - 1] || gedekt[gedekt.length - 1];
+  if (rollen.length) {
+    van = rollen.reduce((a, r) => (r.van < a ? r.van : a), rollen[0].van);
+    tot = rollen.some((r) => !r.tot) ? gedekt[gedekt.length - 1] : rollen.reduce((a, r) => (r.tot > a ? r.tot : a), rollen[0].tot);
+    if (alle.length && alle[0] < van) van = alle[0];
+    if (alle.length && alle[alle.length - 1] > tot) tot = alle[alle.length - 1];
+  }
+  // patroon uit de declaraties: per week (maandag) de weekdagen met minstens één declaratie
+  const weken = new Map();
+  for (const [d, t] of dagen) { const wd = WEEKDAG(d); if (wd > 4 || !t.n) continue; const w = maandagVan(d); if (!weken.has(w)) weken.set(w, new Set()); weken.get(w).add(wd); }
+  const patroonCache = new Map();
+  const patroon = (w) => {   // weekdagen die in minstens de helft van de actieve weken in het venster (4 weken ervoor t/m 3 erna) een declaratie hadden
+    if (patroonCache.has(w)) return patroonCache.get(w);
+    const actief = [];
+    for (let k = -4; k <= 3; k++) { const x = weken.get(plusDag(w, 7 * k)); if (x) actief.push(x); }
+    let u = null;
+    if (actief.length >= 2) { u = new Set(); for (let wd = 0; wd < 5; wd++) if (actief.filter((x) => x.has(wd)).length * 2 >= actief.length) u.add(wd); }
+    patroonCache.set(w, u);
+    return u;
+  };
+  const rolOp = (d) => { let u = null; for (const r of rollen) if (r.van <= d && (!r.tot || r.tot >= d) && (!u || r.van >= u.van)) u = r; return u ? u.rol : null; };
+  const inDienst = (d) => !nm || !nm.dienst || !nm.dienst.length || nm.dienst.some((x) => x.begin <= d && (!x.eind || x.eind >= d));
+  const gem = (u) => { const w = u.slice(0, 5).filter((n) => n > 0); return w.length ? Math.round(w.reduce((a, n) => a + n, 0) / w.length * 100) / 100 : null; };
+  const uit = [];
+  for (const d of gedekt) {
+    if (d < van || d > tot) continue;
+    const t = dagen.get(d) || null, n = t ? t.n : 0;
+    const rol = rolOp(d), binnen = (!rollen.length || rol) && inDienst(d);
+    if (!binnen && !n) continue;
+    const wd = WEEKDAG(d), w = maandagVan(d);
+    // rooster van die dag: handrooster (David) > Nmbrs per weekdag (als echt) > Nmbrs uren per week met het declaratiepatroon > alleen het patroon
+    let bron, uren = null, weekUren = null;
+    const h = laatsteOp(hand, 'ingang', d);
+    const nr = nm && nm.rooster ? laatsteOp(nm.rooster, 'begin', d) : null;
+    const nd = nmbrsDagenEcht(nr);
+    if (h) { bron = 'hand'; uren = h.uren; }
+    else if (nd) { bron = 'nmbrs-dag'; uren = nd; }
+    else {
+      const nc = nm && nm.contract ? laatsteOp(nm.contract.filter((c) => !c.eind || c.eind >= d), 'begin', d) : null;
+      weekUren = nr && nr.uren > 0 ? nr.uren : nc && nc.uren > 0 ? nc.uren : null;
+      bron = weekUren != null ? 'nmbrs-week' : 'patroon';
+    }
+    let werk, daguren = null, invaluren = null;
+    if (uren) { werk = uren[wd] > 0; daguren = werk ? uren[wd] : null; invaluren = gem(uren); }
+    else {
+      const p = patroon(w);
+      werk = p ? p.has(wd) : null;
+      if (weekUren != null && p && p.size) { invaluren = Math.round(weekUren / p.size * 100) / 100; if (werk) daguren = invaluren; }
+    }
+    let soort;
+    if (wd > 4) { if (!n) continue; soort = 'weekend'; daguren = null; }
+    else if (werk === true) soort = n ? 'gewerkt' : feest.has(d) ? 'feestdag' : binnen ? 'afwezig' : null;
+    else if (werk === false) { if (!n) continue; soort = n >= drempel ? 'invaldag' : 'los'; daguren = soort === 'invaldag' ? invaluren : null; }
+    else { if (!n) continue; soort = 'gewerkt'; bron = bron === 'nmbrs-week' ? 'nmbrs-week-zonder-patroon' : 'zonder-patroon'; }
+    if (!soort) continue;
+    uit.push({ dag: d, soort, uren: soort === 'gewerkt' || soort === 'invaldag' ? daguren : null, rol, bron, t });
+  }
+  return uit;
+}
+
 function nuIso() { return new Date().toISOString(); }
 const groepVan = (codes, code, type) => (type === 'O' ? 'niet-gedeclareerd' : (codes.get(code) || {}).groep || 'nog-in-te-delen');
 const klein = (n) => (n > 0 && n < KLEIN ? '< 5' : n);
@@ -271,6 +417,9 @@ function maak(o) {
   const map = o.map;
   const dbPad = path.join(map, 'pma.sqlite'), bronMap = path.join(map, 'bron'), wachtMap = path.join(map, 'wacht'), sleutelPad = path.join(map, 'sleutel');
   const finPatienten = typeof o.finPatienten === 'function' ? o.finPatienten : () => null;
+  // wv3047: personeel uit Nmbrs (nmbrs-data.js 'pma': namen, functies, dienstverband, roosters; geen bedragen) en de dossiernamen uit de vault,
+  // van server.js als gegeven: { peil, medewerkers: [...], dossiers: [{ pad, naam, entiteit }] } of null (dan alleen koppelen op naam)
+  const personeelVan = typeof o.personeel === 'function' ? o.personeel : () => null;
   let sleutel = null;
   function mappen() {
     for (const m of [map, bronMap, wachtMap]) { if (!fs.existsSync(m)) fs.mkdirSync(m, { recursive: true, mode: 0o700 }); try { fs.chmodSync(m, 0o700); } catch (e) { /* niet van ons */ } }
@@ -306,6 +455,9 @@ function maak(o) {
       if (!db.prepare('PRAGMA table_info(export)').all().some((k) => k.name === 'met_patient')) {
         db.exec('ALTER TABLE export ADD COLUMN met_patient INTEGER NOT NULL DEFAULT 1 CHECK (met_patient IN (0,1))');   // alle exports van schema 1 hadden het nummer
       }
+      if (!db.prepare('PRAGMA table_info(registreerder)').all().some((k) => k.name === 'bevestigd')) {
+        db.exec('ALTER TABLE registreerder ADD COLUMN bevestigd TEXT');   // wv3047: wanneer David de koppeling naam → persoon bevestigde (leeg = nog te koppelen)
+      }
       db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde WHERE CAST(waarde AS INTEGER) < CAST(excluded.waarde AS INTEGER)").run(String(SCHEMA_VERSIE));
       bijgewerkt = true;
       const p = db.prepare('INSERT INTO praktijk (code, naam, agb) VALUES (?, ?, ?) ON CONFLICT(code) DO NOTHING');
@@ -313,7 +465,7 @@ function maak(o) {
       const c = db.prepare("INSERT INTO code (code, van_jaar, tot_jaar, naam, groep, subgroep, ritme, telt_patient, telt_werkdag, bron) VALUES (?, 2000, NULL, ?, ?, ?, ?, ?, ?, 'start') ON CONFLICT(code, van_jaar) DO NOTHING");
       for (const [code, naam, groep, sub, ritme, tp] of CODES_START) c.run(code, naam, groep, sub, ritme, tp, groep === 'inschrijving' || groep === 'module' ? 0 : 1);
       const s = db.prepare("INSERT INTO instelling (praktijk, sleutel, waarde) VALUES ('*', ?, ?) ON CONFLICT DO NOTHING");
-      s.run('klein_aantal', '30'); s.run('fin_afwijking_pct', '1');
+      s.run('klein_aantal', '30'); s.run('fin_afwijking_pct', '1'); s.run('invaldag_min', '5');   // wv3047: zoveel declaraties op een niet-roosterdag = invaldag
     }
     return db;
   }
@@ -446,7 +598,7 @@ function maak(o) {
     }
     for (const r of ex.regels) if (r.type === 'V') nieuwCode.run(r.code, String(r.omschrijving).slice(0, 120));
     for (const r of ex.inschrijf) nieuwCode.run(r.code, String(r.naam).slice(0, 120));
-    for (const n of namen) reg.run(ex.praktijk, n, /^waarnemer\b/i.test(n) ? 'verzamel' : 'persoon', ex.exportdatum);
+    for (const n of namen) reg.run(ex.praktijk, n, VERZAMEL_RE.test(n) ? 'verzamel' : 'persoon', ex.exportdatum);
     // nacontrole in dezelfde transactie: telt de databank op tot wat de export zei?
     const nR = db.prepare('SELECT COUNT(*) AS n FROM regel WHERE export_id = ?').get(exportId).n;
     const nI = db.prepare('SELECT COUNT(*) AS n FROM inschrijf WHERE export_id = ?').get(exportId).n;
@@ -682,10 +834,251 @@ function maak(o) {
     }, false);
   }
 
-  const SCHRIJF = { '/app/pma/controleer': controleer, '/app/pma/inlees': inlees, '/app/pma/intrek': intrek, '/app/pma/code': zetCode };
+
+  // ── fase 2 (wv3047): personeel ──
+  function bron() {
+    const b = personeelVan() || {};
+    return { peil: b.peil || null, medewerkers: Array.isArray(b.medewerkers) ? b.medewerkers : [], dossiers: Array.isArray(b.dossiers) ? b.dossiers : [] };
+  }
+  const ENT_VAN = { TG: ['TG', 'POT'], GH: ['GH', 'POT'] };
+  const DOSSIER_ENT = { Tolgaarde: 'TG', Groenhouten: 'GH', POT_POH_GGZ: 'POT' };
+  const dossierEnt = (pad) => DOSSIER_ENT[String(pad).split('/')[1]] || null;
+  const functieNu = (m) => (m.functies || []).slice().sort((a, b) => String(a.begin || '').localeCompare(String(b.begin || '')) || String(a.aangemaakt || '').localeCompare(String(b.aangemaakt || ''))).pop() || null;
+  // Per ruwe naam: aantallen, AGB aanwezig, aandeel POH-GGZ (alleen voor het voorstel)
+  function namenStand(db) {
+    const codes = codeKaart(db), st = new Map();
+    for (const r of db.prepare('SELECT praktijk, registreerder AS naam, code, type, COUNT(*) AS n, MIN(dag) AS eerste, MAX(dag) AS laatste, MAX(reg_agb) AS agb FROM regel GROUP BY praktijk, registreerder, code, type').iterate()) {
+      const k = r.praktijk + '\u0001' + r.naam;
+      const x = st.get(k) || { n: 0, poh: 0, eerste: r.eerste, laatste: r.laatste, agb: null };
+      x.n += r.n; if (groepVan(codes, r.code, r.type) === 'poh-ggz') x.poh += r.n;
+      if (r.eerste < x.eerste) x.eerste = r.eerste; if (r.laatste > x.laatste) x.laatste = r.laatste; if (r.agb) x.agb = r.agb;
+      st.set(k, x);
+    }
+    return st;
+  }
+  function voorstel(db, reg, st, alle, personen, b) {
+    const x = st.get(reg.praktijk + '\u0001' + reg.naam) || { n: 0, poh: 0, eerste: null, laatste: null, agb: null };
+    const ik = ontleedNaam(reg.naam);
+    // 1. zelfde AGB of bijna dezelfde naam als een naam die al bevestigd is (Promedico schreef iemand anders: één keer bevestigen)
+    for (const a of alle) {
+      if (!a.persoon || !a.bevestigd || a.naam === reg.naam) continue;
+      const y = st.get(a.praktijk + '\u0001' + a.naam);
+      if (x.agb && y && y.agb === x.agb) return { persoon: a.persoon, reden: 'zelfde AGB als "' + a.naam + '"' };
+      if (lijkt(ik, ontleedNaam(a.naam)) === 2) return { persoon: a.persoon, reden: 'lijkt op "' + a.naam + '" (andere schrijfwijze?)' };
+    }
+    for (const p of personen) if (!p.groep && lijkt(ik, ontleedNaam(p.naam)) === 2) return { persoon: p.id, reden: 'lijkt op ' + p.naam };
+    if (reg.soort === 'verzamel' || VERZAMEL_RE.test(reg.naam)) return { nieuw: { naam: reg.naam, groep: true, dienst: 'zzp' }, rollen: [{ rol: 'waarnemer', van: x.eerste || reg.eerst, tot: null }], reden: 'verzamelnaam: één groep (waarnemer), telt mee in de praktijk- en rolcijfers, niet in een vergelijking tussen personen' };
+    // 2. Nmbrs (dezelfde praktijk of POT) en een dossier in de vault
+    const kies = (lijst, ontl) => { let best = 0, u = []; for (const m of lijst) { const sc = lijkt(ik, ontl(m)); if (sc > best) { best = sc; u = [m]; } else if (sc && sc === best) u.push(m); } return u; };
+    const nm = kies(b.medewerkers.filter((m) => (ENT_VAN[reg.praktijk] || []).includes(m.entiteit)), (m) => ontleed(m.voornaam, [m.tussen, m.achternaam].filter(Boolean).join(' ')));
+    const ds = kies(b.dossiers.filter((d) => (ENT_VAN[reg.praktijk] || []).includes(dossierEnt(d.pad))), (d) => ontleedNaam(d.naam));
+    const m = nm.length === 1 ? nm[0] : null;
+    const dossier = m && m.dossier ? m.dossier : ds.length === 1 ? ds[0].pad : null;
+    const dNaam = dossier ? (b.dossiers.find((d) => d.pad === dossier) || {}) : {};
+    const redenen = [];
+    if (m) redenen.push('Nmbrs: ' + m.naam + (functieNu(m) && functieNu(m).omschrijving ? ' (' + functieNu(m).omschrijving + ')' : ''));
+    else if (nm.length > 1) redenen.push(nm.length + ' medewerkers in Nmbrs passen; kies er één');
+    if (dossier) redenen.push('dossier ' + (dNaam.naam || 'in de vault'));
+    else if (ds.length > 1) redenen.push(ds.length + ' dossiers passen');
+    // rollen: uit de Nmbrs-functies (met hun begindatum), anders uit de dossiernaam, anders uit de codes
+    let rollen = [];
+    if (m) {
+      const f = (m.functies || []).filter((y) => y.omschrijving).slice().sort((a, c) => String(a.begin || '').localeCompare(String(c.begin || '')));
+      for (const y of f) { const r = rolUit(y.omschrijving), v = y.begin && isoGoed(y.begin) ? y.begin : null; if (!r) continue; if (rollen.length && rollen[rollen.length - 1].rol === r) continue; rollen.push({ rol: r, van: v, tot: null }); }
+      for (let k = 0; k < rollen.length; k++) { if (!rollen[k].van) rollen[k].van = k === 0 ? (x.eerste || reg.eerst) : rollen[k - 1].van; if (k > 0) rollen[k - 1].tot = rollen[k].van > rollen[k - 1].van ? plusDag(rollen[k].van, -1) : rollen[k - 1].van; }
+      if (rollen.length) rollen[0].van = (m.dienst || []).map((y) => y.begin).filter(isoGoed).sort()[0] || rollen[0].van;
+      rollen = rollen.filter((y) => !y.tot || y.tot >= y.van);
+    }
+    if (!rollen.length) {
+      let r = dNaam.naam ? rolUit(dNaam.rol || '') : null;
+      if ((!r || r === 'overig') && x.n && x.poh / x.n >= 0.8) r = 'poh-ggz';
+      if (r) rollen = [{ rol: r, van: x.eerste || reg.eerst, tot: null }];
+      else if (x.agb) redenen.push('heeft een AGB: waarschijnlijk een arts; kies de rol');
+    }
+    if (!m && !dossier && !rollen.length) return { reden: redenen.join('; ') || 'geen dossier of Nmbrs-medewerker gevonden' };
+    return { nieuw: { naam: m ? m.naam : dNaam.naam || reg.naam, dossier, nmbrs: m ? m.id : null, dienst: m ? (m.entiteit === 'POT' ? 'pot' : 'loondienst') : 'onbekend' }, rollen, reden: redenen.join('; ') };
+  }
+  function personenLees(db) {
+    const ps = db.prepare('SELECT id, naam, dossier, nmbrs, dienst, groep FROM persoon ORDER BY naam').all().map((p) => Object.assign({}, p, { groep: !!p.groep, rollen: [], rooster: [] }));
+    const by = new Map(ps.map((p) => [p.id, p]));
+    for (const r of db.prepare('SELECT id, persoon, praktijk, rol, van, tot FROM rol_periode ORDER BY van').all()) { const p = by.get(r.persoon); if (p) p.rollen.push(Object.assign({}, r)); }
+    for (const r of db.prepare('SELECT persoon, praktijk, ingang, uren FROM rooster_hand ORDER BY ingang').all()) { const p = by.get(r.persoon); if (p) p.rooster.push({ praktijk: r.praktijk, ingang: r.ingang, uren: JSON.parse(r.uren) }); }
+    return ps;
+  }
+  function personeel() {
+    return metDb((db) => {
+      const b = bron();
+      const leeg = { ok: true, rollen: ROLLEN.map((r) => ({ id: r, naam: ROL_NAAM[r], arts: ARTS_ROLLEN.includes(r) })), diensten: DIENSTEN, praktijken: [], personen: [], registreerders: [], werkdagen: {},
+        nmbrs_peil: b.peil, nmbrs: [], dossiers: [], klein_aantal: 30, invaldag_min: 5 };
+      if (!db) return leeg;
+      const inst = (k, d) => Number((db.prepare("SELECT waarde FROM instelling WHERE praktijk = '*' AND sleutel = ?").get(k) || {}).waarde) || d;
+      leeg.klein_aantal = inst('klein_aantal', 30); leeg.invaldag_min = inst('invaldag_min', 5);
+      const st = namenStand(db), personen = personenLees(db);
+      const alle = db.prepare('SELECT praktijk, naam, persoon, soort, eerst, bevestigd FROM registreerder ORDER BY praktijk, naam').all().map((r) => Object.assign({}, r));
+      leeg.praktijken = db.prepare('SELECT code, naam FROM praktijk WHERE code IN (SELECT DISTINCT praktijk FROM dagbron) ORDER BY code DESC').all().map((r) => Object.assign({}, r));
+      leeg.personen = personen;
+      leeg.registreerders = alle.map((r) => {
+        const x = st.get(r.praktijk + '\u0001' + r.naam) || { n: 0, eerste: null, laatste: null, agb: null };
+        const u = { praktijk: r.praktijk, naam: r.naam, soort: r.soort === 'verzamel' || VERZAMEL_RE.test(r.naam) ? 'verzamel' : 'persoon', n: x.n, eerste: x.eerste, laatste: x.laatste, met_agb: !!x.agb, persoon: r.bevestigd ? r.persoon : null, bevestigd: r.bevestigd || null };
+        if (!r.bevestigd && x.n) u.voorstel = voorstel(db, r, st, alle, personen, b);
+        return u;
+      });
+      leeg.nmbrs = b.medewerkers.map((m) => ({ id: m.id, naam: m.naam, entiteit: m.entiteit, functie: (functieNu(m) || {}).omschrijving || null, dossier: m.dossier || null }));
+      leeg.dossiers = b.dossiers.map((d) => ({ pad: d.pad, naam: d.naam, entiteit: dossierEnt(d.pad) }));
+      // werkdagen per praktijk per persoon (compact: [dag, soort, uren, rol, bron, n, d, kort, middel, lang, vk, vl, mi, poh, cent])
+      const codes = codeKaart(db), drempel = leeg.invaldag_min;
+      const nmVan = new Map(b.medewerkers.map((m) => [m.id, m]));
+      for (const pr of leeg.praktijken) {
+        const gedekt = new Set(db.prepare('SELECT dag FROM dagbron WHERE praktijk = ?').all(pr.code).map((r) => r.dag));
+        const jaren = new Set([...gedekt].map((d) => Number(d.slice(0, 4)))), feest = new Set();
+        for (const j of jaren) for (const f of feestdagen(j)) feest.add(f);
+        const naarPersoon = new Map(alle.filter((r) => r.praktijk === pr.code && r.bevestigd && r.persoon).map((r) => [r.naam, r.persoon]));
+        const perP = new Map();
+        for (const r of db.prepare('SELECT registreerder AS naam, dag, code, type, COUNT(*) AS n, SUM(tarief_cent) AS c FROM regel WHERE praktijk = ? GROUP BY registreerder, dag, code, type').iterate(pr.code)) {
+          const pid = naarPersoon.get(r.naam); if (!pid) continue;
+          const c = r.type === 'O' ? null : codes.get(r.code);
+          if (c && !(c.telt_werkdag === undefined ? 1 : c.telt_werkdag)) continue;
+          if (!perP.has(pid)) perP.set(pid, new Map());
+          const m = perP.get(pid); if (!m.has(r.dag)) m.set(r.dag, { n: 0, d: 0, kort: 0, middel: 0, lang: 0, vk: 0, vl: 0, mi: 0, poh: 0, cent: 0 });
+          const t = m.get(r.dag), g = groepVan(codes, r.code, r.type), sub = c ? c.subgroep : null;
+          t.n += r.n;
+          if (r.type === 'V') { t.d += r.n; t.cent += r.c; }
+          if (g === 'consult' && (sub === 'kort' || sub === 'middel' || sub === 'lang')) t[sub] += r.n;
+          else if (g === 'visite' && sub === 'kort') t.vk += r.n; else if (g === 'visite' && sub === 'lang') t.vl += r.n;
+          else if (g === 'mi') t.mi += r.n; else if (g === 'poh-ggz') t.poh += r.n;
+        }
+        const uitP = {};
+        for (const p of personen) {
+          const dagen = perP.get(p.id) || new Map();
+          const rollen = p.rollen.filter((r) => r.praktijk === pr.code);
+          if (!dagen.size && !rollen.length) continue;
+          const m = p.nmbrs ? nmVan.get(p.nmbrs) : null;
+          // review wv3047 MOET 1: rooster en contracturen uit Nmbrs gelden alleen bij de praktijk van dat bedrijf (TG bij TG, GH bij GH). Bij POT
+          // (POH-GGZ, werkt bij meer praktijken) en bij de andere praktijk: geen Nmbrs-uren, alleen het patroon of een handrooster; het
+          // dienstverband geldt overal (uit dienst = nergens).
+          const eigen = m && m.entiteit === pr.code;
+          const w = werkdagenVan({ dagen, gedekt, rollen, hand: p.rooster.filter((r) => r.praktijk === pr.code), nmbrs: m ? { dienst: m.dienst, rooster: eigen ? m.rooster : [], contract: eigen ? m.contract : [] } : null, drempel, feest });
+          uitP[p.id] = w.map((x) => { const t = x.t || { n: 0, d: 0, kort: 0, middel: 0, lang: 0, vk: 0, vl: 0, mi: 0, poh: 0, cent: 0 }; return [x.dag, x.soort, x.uren, x.rol, x.bron, t.n, t.d, t.kort, t.middel, t.lang, t.vk, t.vl, t.mi, t.poh, t.cent]; });
+        }
+        leeg.werkdagen[pr.code] = uitP;
+        // Nmbrs-rooster per persoon (voor het scherm: welke uren gelden, en of de daguren een echt patroon zijn)
+      }
+      for (const p of personen) {
+        const m = p.nmbrs ? nmVan.get(p.nmbrs) : null;
+        p.nmbrs_rooster = m ? (m.rooster || []).map((r) => ({ begin: r.begin, uren: r.uren, dagen_per_week: r.dagen_per_week, dagen: nmbrsDagenEcht(r), dagen_ingevuld: Array.isArray(r.dagen1) })) : null;
+        p.nmbrs_naam = m ? m.naam : null;
+        p.nmbrs_entiteit = m ? m.entiteit : null;   // review MOET 1: Nmbrs-uren gelden alleen bij deze praktijk
+      }
+      return leeg;
+    }, false);
+  }
+  // ── fase 2: schrijven (alleen David, op het koppelscherm) ──
+  const tekstVeld = (x, max) => String(x == null ? '' : x).replace(/[\u0000-\u001f<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+  function rollenGoed(rollen) {
+    if (!Array.isArray(rollen) || rollen.length > 10) throw new Fout(400, 'rollen als lijst');
+    return rollen.map((r) => {
+      if (!ROLLEN.includes(r && r.rol)) throw new Fout(400, 'kies een rol');
+      if (!isoGoed(r.van)) throw new Fout(400, 'begindatum van de rol als jjjj-mm-dd');
+      if (r.tot != null && r.tot !== '' && (!isoGoed(r.tot) || r.tot < r.van)) throw new Fout(400, 'einddatum van de rol leeg of na het begin');
+      return { rol: r.rol, van: r.van, tot: r.tot || null };
+    });
+  }
+  function nieuwPersoon(db, n, b) {
+    const naam = tekstVeld(n.naam, 120);
+    if (naam.length < 2) throw new Fout(400, 'naam van de medewerker');
+    const dossier = n.dossier ? String(n.dossier) : null, nmbrs = n.nmbrs ? String(n.nmbrs) : null;
+    if (dossier && !b.dossiers.some((d) => d.pad === dossier)) throw new Fout(400, 'onbekend dossier');
+    if (nmbrs && !b.medewerkers.some((m) => m.id === nmbrs)) throw new Fout(400, 'onbekende Nmbrs-medewerker');
+    const dienst = DIENSTEN.includes(n.dienst) ? n.dienst : 'onbekend';
+    // dezelfde Nmbrs-medewerker of hetzelfde dossier = dezelfde persoon (nooit twee personen voor één medewerker)
+    const al = nmbrs ? db.prepare('SELECT id FROM persoon WHERE nmbrs = ?').get(nmbrs) : dossier ? db.prepare('SELECT id FROM persoon WHERE dossier = ?').get(dossier) : null;
+    if (al) return al.id;
+    return Number(db.prepare('INSERT INTO persoon (naam, dossier, nmbrs, dienst, groep, op) VALUES (?, ?, ?, ?, ?, ?)').run(naam, dossier, nmbrs, dienst, n.groep ? 1 : 0, nuIso()).lastInsertRowid);
+  }
+  function koppel(body) {
+    const praktijk = String(body.praktijk || ''), naam = String(body.naam || '');
+    const b = bron();
+    return metDb((db) => {
+      const reg = db.prepare('SELECT praktijk, naam FROM registreerder WHERE praktijk = ? AND naam = ?').get(praktijk, naam);
+      if (!reg) throw new Fout(404, 'deze naam staat niet in de exports');
+      if (body.los === true) { db.prepare('UPDATE registreerder SET persoon = NULL, bevestigd = NULL WHERE praktijk = ? AND naam = ?').run(praktijk, naam); return { body: { ok: true }, reden: 'pma koppel los' }; }
+      let pid;
+      if (body.persoon != null) {
+        pid = Number(body.persoon);
+        if (!Number.isInteger(pid) || !db.prepare('SELECT 1 AS x FROM persoon WHERE id = ?').get(pid)) throw new Fout(404, 'deze medewerker bestaat niet');
+      } else if (body.nieuw && typeof body.nieuw === 'object') pid = nieuwPersoon(db, body.nieuw, b);
+      else throw new Fout(400, 'kies een medewerker');
+      const rollen = body.rollen == null ? [] : rollenGoed(body.rollen);
+      if (rollen.length && !db.prepare('SELECT 1 AS x FROM rol_periode WHERE persoon = ? AND praktijk = ?').get(pid, praktijk)) {
+        const ins = db.prepare('INSERT INTO rol_periode (persoon, praktijk, rol, van, tot, op) VALUES (?, ?, ?, ?, ?, ?)');
+        for (const r of rollen) ins.run(pid, praktijk, r.rol, r.van, r.tot, nuIso());
+      }
+      db.prepare('UPDATE registreerder SET persoon = ?, bevestigd = ? WHERE praktijk = ? AND naam = ?').run(pid, nuIso(), praktijk, naam);
+      return { body: { ok: true, persoon: pid }, reden: 'pma koppel' };
+    }, true);
+  }
+  function rolZet(body) {
+    return metDb((db) => {
+      if (body.weg === true) {
+        const id = Number(body.id); if (!Number.isInteger(id)) throw new Fout(400, 'welke rol?');
+        if (!db.prepare('DELETE FROM rol_periode WHERE id = ?').run(id).changes) throw new Fout(404, 'deze rol bestaat niet');
+        return { body: { ok: true }, reden: 'pma rol weg' };
+      }
+      const pid = Number(body.persoon), praktijk = String(body.praktijk || '');
+      if (!Number.isInteger(pid) || !db.prepare('SELECT 1 AS x FROM persoon WHERE id = ?').get(pid)) throw new Fout(404, 'deze medewerker bestaat niet');
+      if (!db.prepare('SELECT 1 AS x FROM praktijk WHERE code = ?').get(praktijk)) throw new Fout(400, 'kies een praktijk');
+      const [r] = rollenGoed([body]);
+      if (body.id != null) {
+        const id = Number(body.id);
+        if (!db.prepare('UPDATE rol_periode SET rol = ?, van = ?, tot = ?, praktijk = ?, op = ? WHERE id = ? AND persoon = ?').run(r.rol, r.van, r.tot, praktijk, nuIso(), id, pid).changes) throw new Fout(404, 'deze rol bestaat niet');
+        return { body: { ok: true, id }, reden: 'pma rol' };
+      }
+      const id = Number(db.prepare('INSERT INTO rol_periode (persoon, praktijk, rol, van, tot, op) VALUES (?, ?, ?, ?, ?, ?)').run(pid, praktijk, r.rol, r.van, r.tot, nuIso()).lastInsertRowid);
+      return { body: { ok: true, id }, reden: 'pma rol' };
+    }, true);
+  }
+  function roosterZet(body) {
+    const pid = Number(body.persoon), praktijk = String(body.praktijk || ''), ingang = String(body.ingang || '');
+    if (!isoGoed(ingang)) throw new Fout(400, 'ingangsdatum als jjjj-mm-dd');
+    return metDb((db) => {
+      if (!Number.isInteger(pid) || !db.prepare('SELECT 1 AS x FROM persoon WHERE id = ?').get(pid)) throw new Fout(404, 'deze medewerker bestaat niet');
+      if (!db.prepare('SELECT 1 AS x FROM praktijk WHERE code = ?').get(praktijk)) throw new Fout(400, 'kies een praktijk');
+      if (body.weg === true) { db.prepare('DELETE FROM rooster_hand WHERE persoon = ? AND praktijk = ? AND ingang = ?').run(pid, praktijk, ingang); return { body: { ok: true }, reden: 'pma rooster weg' }; }
+      const u = body.uren;
+      if (!Array.isArray(u) || u.length !== 7 || !u.every((n) => typeof n === 'number' && n >= 0 && n <= 14)) throw new Fout(400, 'uren per dag (ma t/m zo) tussen 0 en 14');
+      const uren = u.map((n) => Math.round(n * 4) / 4);
+      db.prepare('INSERT INTO rooster_hand (persoon, praktijk, ingang, uren, op) VALUES (?, ?, ?, ?, ?) ON CONFLICT(persoon, praktijk, ingang) DO UPDATE SET uren = excluded.uren, op = excluded.op').run(pid, praktijk, ingang, JSON.stringify(uren), nuIso());
+      return { body: { ok: true }, reden: 'pma rooster' };
+    }, true);
+  }
+  function persoonZet(body) {
+    const pid = Number(body.id), b = bron();
+    return metDb((db) => {
+      const p = Number.isInteger(pid) ? db.prepare('SELECT id FROM persoon WHERE id = ?').get(pid) : null;
+      if (!p) throw new Fout(404, 'deze medewerker bestaat niet');
+      if (body.naam !== undefined) { const n = tekstVeld(body.naam, 120); if (n.length < 2) throw new Fout(400, 'naam van de medewerker'); db.prepare('UPDATE persoon SET naam = ? WHERE id = ?').run(n, pid); }
+      if (body.dienst !== undefined) { if (!DIENSTEN.includes(body.dienst)) throw new Fout(400, 'kies een soort dienstverband'); db.prepare('UPDATE persoon SET dienst = ? WHERE id = ?').run(body.dienst, pid); }
+      if (body.dossier !== undefined) {
+        const d = body.dossier ? String(body.dossier) : null;
+        if (d && !b.dossiers.some((x) => x.pad === d)) throw new Fout(400, 'onbekend dossier');
+        db.prepare('UPDATE persoon SET dossier = ? WHERE id = ?').run(d, pid);
+      }
+      if (body.nmbrs !== undefined) {
+        const m = body.nmbrs ? String(body.nmbrs) : null;
+        if (m && !b.medewerkers.some((x) => x.id === m)) throw new Fout(400, 'onbekende Nmbrs-medewerker');
+        if (m && db.prepare('SELECT 1 AS x FROM persoon WHERE nmbrs = ? AND id <> ?').get(m, pid)) throw new Fout(409, 'deze Nmbrs-medewerker hoort al bij iemand anders');
+        db.prepare('UPDATE persoon SET nmbrs = ? WHERE id = ?').run(m, pid);
+      }
+      if (body.groep !== undefined) db.prepare('UPDATE persoon SET groep = ? WHERE id = ?').run(body.groep ? 1 : 0, pid);
+      return { body: { ok: true }, reden: 'pma persoon' };
+    }, true);
+  }
+  const SCHRIJF = { '/app/pma/controleer': controleer, '/app/pma/inlees': inlees, '/app/pma/intrek': intrek, '/app/pma/code': zetCode,
+    '/app/pma/koppel': koppel, '/app/pma/rol': rolZet, '/app/pma/rooster': roosterZet, '/app/pma/persoon': persoonZet };   // wv3047: fase 2
   function app(v) {
     try {
       if (v.methode === 'GET' && v.pad === '/app/pma') return { status: 200, body: overzicht(), reden: 'pma' };
+      if (v.methode === 'GET' && v.pad === '/app/pma/personeel') return { status: 200, body: personeel(), reden: 'pma personeel' };   // wv3047
       const f = v.methode === 'POST' ? SCHRIJF[v.pad] : null;
       if (!f) return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'pma onbekend' };
       const u = f(v.body && typeof v.body === 'object' ? v.body : {});
@@ -702,6 +1095,7 @@ function maak(o) {
       let bron = 0; try { bron = fs.readdirSync(bronMap).filter((f) => f.endsWith('.zip')).length; } catch (e) { /* geen map */ }
       return { aan: true, databank: true, exports: n('export', " WHERE stand = 'actief'"), zonder_patientnummer: n('export', " WHERE stand = 'actief' AND met_patient = 0"), ingetrokken: n('export', " WHERE stand = 'ingetrokken'"), regels: n('regel'),
         inschrijf: n('inschrijf'), dagen: n('dagbron'), kwartalen: n('kwartaalbron'), nog_in_te_delen: n('code', " WHERE groep = 'nog-in-te-delen'"), bron_zips: bron,
+        personen: n('persoon'), namen_gekoppeld: n('registreerder', ' WHERE bevestigd IS NOT NULL'), namen_open: n('registreerder', ' WHERE bevestigd IS NULL'),   // wv3047
         schema: Number((db.prepare("SELECT waarde FROM meta WHERE sleutel = 'schema'").get() || {}).waarde) || null };
     }, false);
   }
@@ -715,4 +1109,4 @@ function maak(o) {
   return { app, info, herbouw, _plan: plan, _pseudo: pseudo };
 }
 
-module.exports = { maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN };
+module.exports = { maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht };

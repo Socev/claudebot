@@ -5490,7 +5490,7 @@ APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
 ['laad', 'bewerk', 'nieuw', 'vergelijk', 'uitbreiden', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/uitbreiden', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
-['controleer', 'inlees', 'intrek', 'code'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
+['controleer', 'inlees', 'intrek', 'code', 'koppel', 'rol', 'rooster', 'persoon'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt (wv3047: koppel, rol, rooster, persoon)   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
 // geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
@@ -13741,7 +13741,7 @@ function handleApp(req, res) {
           || /^(GET \/app\/ghawa\/delen|POST \/app\/ghawa\/delen\/(onderdeel|noodstop|kijker|kijker-weg|tekst|overleg))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
         if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
-        if (route === 'GET /app/pma' || /^POST \/app\/pma\/(controleer|inlees|intrek|code)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1
+        if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
@@ -21901,14 +21901,23 @@ if (beleggenNieuws && SERVER_ECHT) { setInterval(function () { beleggenNieuwsTik
 //   POST /app/pma/inlees {sha}                       opnieuw tellen, schrijven, nacontrole, ZIP naar bron/
 //   POST /app/pma/intrek {id}                        export intrekken; de praktijk opnieuw opbouwen uit bron/
 //   POST /app/pma/code {code, groep, subgroep?}      een code indelen
+// wv3047 (fase 2: medewerkers, rollen en uren; alleen op Davids scherm, nooit namen met cijfers in log of audit):
+//   GET  /app/pma/personeel                          namen → voorstel/koppeling, personen, rollen, handroosters, werkdagen per persoon
+//   POST /app/pma/koppel {praktijk, naam, persoon | nieuw, rollen?, los?}   naam bevestigen (David), eventueel met rollen
+//   POST /app/pma/rol {persoon, praktijk, rol, van, tot? | id, weg}        rol in de tijd
+//   POST /app/pma/rooster {persoon, praktijk, ingang, uren[7] | weg}        handrooster (voor wie niet in Nmbrs staat)
+//   POST /app/pma/persoon {id, naam?, dienst?, dossier?, nmbrs?, groep?}   medewerker bijwerken
+// Het personeel komt als gegeven uit Nmbrs (nmbrs-data.js 'pma': namen, functies, dienstverband, roosters; geen bedragen) en uit de namen van
+// de dossierbestanden in de vault (alleen de bestandsnaam, niet de inhoud); hooguit eens per 10 minuten ververst, mislukt = zonder.
 // De controle tegen fin-datahub (patiënten per jaar, kwartaalgemiddelde) leest server.js hier met één SELECT op D1 `fin` (hooguit eens per
 // 6 uur; mislukt = geen controle) en geeft hem als getallen aan pma.js. Er gaat niets van PMA naar buiten. Audit/log: alleen route + reden.
 const PMA_DIR = serverPad('pma', process.env.PMA_DIR, '/opt/data/pma', serverProefDeel('pma'));
 const pmaFin = { waarden: null, op: 0, bezig: null };
+const pmaPersoneel = { waarden: null, op: 0, bezig: null };   // wv3047
 const pmaApp = (function () {
   const p = path.join(__dirname, 'pma.js');
   if (!fs.existsSync(p)) return null;
-  try { return require(p).maak({ map: PMA_DIR, finPatienten: function () { return pmaFin.waarden; } }); }
+  try { return require(p).maak({ map: PMA_DIR, finPatienten: function () { return pmaFin.waarden; }, personeel: function () { return pmaPersoneel.waarden; } }); }
   catch (e) { logError('pma', new Error('laden faalde')); return null; }
 })();
 function pmaFinVers() {
@@ -21925,12 +21934,38 @@ function pmaFinVers() {
     .then(function () { pmaFin.bezig = null; });
   return pmaFin.bezig;
 }
+// wv3047: dossiernamen (bestandsnamen "Voornaam Achternaam - rol.md") en het personeel uit Nmbrs
+function pmaDossiers() {
+  const uit = [];
+  ['Tolgaarde', 'Groenhouten', 'POT_POH_GGZ'].forEach(function (m) {
+    const rel = '10_Zakelijk/' + m + '/Medewerkers';
+    let namen = [];
+    try { namen = fs.readdirSync(path.join(VAULT, rel)).filter(function (f) { return /\.md$/.test(f) && !/^[.]/.test(f); }).slice(0, 300); } catch (e) { return; }
+    namen.forEach(function (f) {
+      const b = f.slice(0, -3), i = b.indexOf(' - ');
+      uit.push({ pad: rel + '/' + f, naam: (i > 0 ? b.slice(0, i) : b).trim().slice(0, 120), rol: i > 0 ? b.slice(i + 3).trim().slice(0, 120) : '' });
+    });
+  });
+  return uit;
+}
+function pmaPersoneelVers(nu) {
+  if (pmaPersoneel.bezig) return pmaPersoneel.bezig;
+  if (!nu && Date.now() - pmaPersoneel.op < 10 * 60000) return Promise.resolve();
+  pmaPersoneel.bezig = (typeof nmbrsKind === 'function' && nmbrsData ? nmbrsKind('pma', {}) : Promise.resolve(null))
+    .then(function (r) { const j = r && r.j && r.j.ok ? r.j : null; return { peil: j ? j.peil : null, medewerkers: j && Array.isArray(j.medewerkers) ? j.medewerkers : [] }; },
+      function () { logError('pma', new Error('nmbrs niet te lezen')); return { peil: null, medewerkers: [] }; })
+    .then(function (n) { n.dossiers = pmaDossiers(); pmaPersoneel.waarden = n; pmaPersoneel.op = Date.now(); })
+    .catch(function () { pmaPersoneel.op = Date.now(); logError('pma', new Error('personeel niet te lezen')); })
+    .then(function () { pmaPersoneel.bezig = null; });
+  return pmaPersoneel.bezig;
+}
 async function appPma(req, res, a, route, d) {
   if (!pmaApp) return appWeiger(res, 404, 'PMA zit niet in deze versie van de pod', 'pma ontbreekt');
   if (!appTeller('pma', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens pma');
   const post = route.indexOf('POST ') === 0;
   if (post && !appTeller('pma-schrijf', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens pma-schrijf');
   if (route === 'GET /app/pma' || route === 'POST /app/pma/controleer') await pmaFinVers();
+  if (route === 'GET /app/pma/personeel' || route === 'POST /app/pma/koppel' || route === 'POST /app/pma/persoon') await pmaPersoneelVers(false);   // wv3047
   let u;
   try { u = pmaApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
   catch (e) { logError('pma', new Error('route faalde')); return appWeiger(res, 503, 'PMA is nu niet te lezen; probeer het zo opnieuw', 'pma fout'); }   // geen inhoud in de log
