@@ -233,7 +233,8 @@ function maak(io) {
       delete u.r.draden;
       if (!u.r.compleet) {
         ok = false;
-        const erbij = oud && Array.isArray(oud.lijst) ? oud.lijst.filter(function (x) { return !zagNu.has(x.draad); }) : [];
+        const opNieuw = new Set(u.r.lijst.map(function (x) { return x.draad; }));   // review r5 ZOU 1: nooit dubbel
+        const erbij = oud && Array.isArray(oud.lijst) ? oud.lijst.filter(function (x) { return !zagNu.has(x.draad) && !opNieuw.has(x.draad); }) : [];
         u.r.lijst = u.r.lijst.concat(erbij);
         u.r.aangevuld = erbij.length;
       }
