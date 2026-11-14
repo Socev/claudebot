@@ -206,7 +206,7 @@ test('mail-app wijzig terug meldt de terugzetting aan de sluitcontrole; archiver
   assert.deepEqual(klaar, ['cccccccccccc0001']);
 });
 
-test('review MOET 1: een onvolledige dag = ok false en vervangt geen eerdere volledige uitkomst; wat hij erbij zet komt wel op de lijst', async () => {
+test('review MOET 1 (r1) en MOET 3 (r2): een onvolledige dag = ok false en laat een eerdere volledige uitkomst ongemoeid (tellingen en lijst kloppen samen)', async () => {
   const a = ber({ labels: ['UNREAD'], onderwerp: 'Eerste' }), b = ber({ labels: ['UNREAD'], onderwerp: 'Later erbij' });
   let alle = [a];
   const k = kamer(function () { return alle; });
@@ -218,7 +218,8 @@ test('review MOET 1: een onvolledige dag = ok false en vervangt geen eerdere vol
   assert.equal(r.ok, false, 'onvolledig is geen geslaagde controle');
   const s = k2.opslag();
   assert.equal(s.dagen[DAG].compleet, true, 'de volledige uitkomst blijft');
-  assert.deepEqual(s.dagen[DAG].lijst.map(function (x) { return x.onderwerp; }).sort(), ['Eerste', 'Later erbij']);
+  assert.deepEqual(s.dagen[DAG].lijst.map(function (x) { return x.onderwerp; }), ['Eerste'], 'de volledige dag blijft zoals hij was (de dag komt nog twee nachten langs)');
+  assert.equal(s.dagen[DAG].tel.lijst, 1);
   assert.equal(s.laatste.ok, false);
 });
 
@@ -264,4 +265,39 @@ test('review MOET 4: de ochtendregel blijft open tot hij gezet is, alleen voor v
   assert.equal(k.m.ochtendOpen().dag, '2026-11-15');
   k.zetKlok(Date.parse('2026-11-16T00:30:00Z'));
   assert.equal(k.m.ochtendOpen(), null, 'een regel van gisteren wordt niet meer bezorgd');
+});
+
+test('review ronde 2 MOET 1: twee onvolledige pogingen na elkaar — beide lijstgesprekken blijven, gemarkeerd als aangevuld en niet compleet', async () => {
+  const a = ber({ labels: ['UNREAD'], onderwerp: 'Poging een' }), b = ber({ labels: ['UNREAD'], onderwerp: 'Poging twee' });
+  let alle = [a];
+  const k = kamer(function () { return alle; }, { melding: true });
+  let r = await k.m.ronde();
+  assert.equal(r.ok, false);
+  alle = [b];
+  r = await k.m.ronde();
+  const d = k.opslag().dagen[DAG];
+  assert.equal(d.compleet, false);
+  assert.deepEqual(d.lijst.map(function (x) { return x.onderwerp; }).sort(), ['Poging een', 'Poging twee']);
+  assert.equal(d.aangevuld, 1);
+  assert.equal(k.m.lijst().j.gisteren.aangevuld, 1);
+  assert.equal(k.m.lijst().j.items.length, 2);
+});
+
+test('review ronde 2 MOET 2: vindt een herkansing er later nog bij, dan telt de ochtendregel het totaal van de nacht en gaat hij opnieuw de buffer in', async () => {
+  const a = ber({ labels: ['UNREAD'] }), b = ber({ labels: ['UNREAD'] });
+  let alle = [a];
+  const k = kamer(function () { return alle; }, { melding: true });
+  await k.m.ronde();
+  assert.match(k.m.ochtendOpen().tekst, /^1 mail /);
+  k.m.ochtendGezet();
+  assert.equal(k.m.ochtendOpen(), null);
+  alle = [a, b];
+  await k.m.ronde();
+  const o = k.m.ochtendOpen();
+  assert.ok(o, 'opnieuw open na een extra vondst');
+  assert.match(o.tekst, /^2 mails /, 'het totaal van de nacht, niet alleen de nieuwe');
+  assert.equal(o.draden.length, 2);
+  k.m.ochtendGezet();
+  await k.m.ronde();
+  assert.equal(k.m.ochtendOpen(), null, 'niets nieuws = geen nieuwe regel');
 });

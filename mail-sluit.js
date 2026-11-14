@@ -208,9 +208,10 @@ function maak(io) {
   }
   // De nachtronde: gisteren en de twee dagen ervoor opnieuw. Geeft { ok, dagen: [...], nieuw: [draden], ochtend: tekst|null, mist }.
   // ok = elke dag kwam terug EN was compleet (review wv3091 MOET 1: een onvolledige dag is geen geslaagde controle; de tik probeert opnieuw
-  // en meldt na 3 pogingen). Een onvolledige uitkomst vervangt nooit een eerdere complete van dezelfde dag; wel komt wat hij op de lijst zet
-  // erbij (liever een gesprek te veel op de lijst dan een stil weg). Eerst al het Gmail-werk (awaits), dan pas de staat lezen, samenvoegen en
-  // schrijven zonder await ertussen (MOET 3: een tik van David tijdens de ronde blijft staan).
+  // en meldt na 3 pogingen). Per dag (ronde 2, MOET 1 en 3): een complete uitkomst vervangt; een onvolledige laat een eerdere complete staan
+  // (die dag komt de volgende nachten nog twee keer langs), en vervangt anders een eerdere onvolledige mét alle lijstgesprekken van beide
+  // (nooit een gesprek stil weg); zo'n dag blijft als niet compleet gemarkeerd, met het aantal aangevulde gesprekken. Eerst al het Gmail-werk
+  // (awaits), dan pas de staat lezen, samenvoegen en schrijven zonder await ertussen (MOET 3 ronde 1: een tik van David blijft staan).
   async function ronde() {
     const vandaag = amsDag(nu());
     const uitkomsten = [];
@@ -225,14 +226,15 @@ function maak(io) {
     let ok = true;
     for (const u of uitkomsten) {
       if (!u.r) { ok = false; continue; }
+      const oud = s.dagen[u.dag];
       if (!u.r.compleet) {
         ok = false;
-        const oud = s.dagen[u.dag];
-        if (oud && oud.compleet) {
-          const gezien = new Set((oud.lijst || []).map(function (x) { return x.draad; }));
-          oud.lijst = (oud.lijst || []).concat(u.r.lijst.filter(function (x) { return !gezien.has(x.draad); }));
-          dagen.push(oud);
-          continue;
+        if (oud && oud.compleet) { dagen.push(oud); continue; }
+        if (oud && Array.isArray(oud.lijst)) {
+          const gezien = new Set(u.r.lijst.map(function (x) { return x.draad; }));
+          const erbij = oud.lijst.filter(function (x) { return !gezien.has(x.draad); });
+          u.r.lijst = u.r.lijst.concat(erbij);
+          u.r.aangevuld = (oud.aangevuld || 0) + erbij.length;
         }
       }
       s.dagen[u.dag] = u.r; dagen.push(u.r);
@@ -241,10 +243,15 @@ function maak(io) {
     for (const r of dagen) for (const x of r.lijst) if (!s.klaar[x.draad] && !s.gemeld[x.draad] && nieuw.indexOf(x.draad) < 0) nieuw.push(x.draad);
     const gisteren = s.dagen[dagErbij(vandaag, -1)];
     let ochtend = null;
+    // MOET 4 (ronde 1) en MOET 2 (ronde 2): de regel van vannacht telt ALLE nieuwe gesprekken van deze nacht, ook als een herkansing er later
+    // nog bij vindt; hij blijft open tot hij (opnieuw, met het totaal) in de buffer staat. Een regel van een vorige dag vervalt.
     if (nieuw.length && gisteren) {
-      ochtend = (nieuw.length === 1 ? '1 mail van de afgelopen dagen kwam' : nieuw.length + ' mails van de afgelopen dagen kwamen')
+      const o = isObj(s.ochtend) && s.ochtend.dag === vandaag ? s.ochtend : { dag: vandaag, draden: [] };
+      const alle = o.draden.slice();
+      for (const d of nieuw) if (alle.indexOf(d) < 0) alle.push(d);
+      ochtend = (alle.length === 1 ? '1 mail van de afgelopen dagen kwam' : alle.length + ' mails van de afgelopen dagen kwamen')
         + ' niet in je inbox; in de App onder Mail › Niet in je inbox gekomen zie je welke en waarom.';
-      s.ochtend = { dag: vandaag, tekst: ochtend, draden: nieuw };   // MOET 4: blijft staan tot de regel echt in de buffer staat
+      s.ochtend = { dag: vandaag, tekst: ochtend, draden: alle, gezet: false };
     }
     s.laatste = { op: new Date(nu()).toISOString(), ok, dagen: dagen.map(function (r) { return r.dag; }), compleet: ok };
     bewaar(s);
@@ -253,12 +260,11 @@ function maak(io) {
   // De ochtendregel die nog bezorgd moet worden (alleen die van vandaag), en na een gelukte bezorging: weg, en deze gesprekken nooit nog eens
   function ochtendOpen() {
     const s = staat();
-    return isObj(s.ochtend) && s.ochtend.dag === amsDag(nu()) && typeof s.ochtend.tekst === 'string' ? { dag: s.ochtend.dag, tekst: s.ochtend.tekst, draden: (s.ochtend.draden || []).slice() } : null;
+    return isObj(s.ochtend) && s.ochtend.dag === amsDag(nu()) && !s.ochtend.gezet && typeof s.ochtend.tekst === 'string' ? { dag: s.ochtend.dag, tekst: s.ochtend.tekst, draden: (s.ochtend.draden || []).slice() } : null;
   }
   function ochtendGezet() {
     const s = staat(), t = new Date(nu()).toISOString();
-    if (isObj(s.ochtend)) for (const d of Array.isArray(s.ochtend.draden) ? s.ochtend.draden : []) if (ID_RE.test(String(d))) s.gemeld[d] = t;
-    delete s.ochtend;
+    if (isObj(s.ochtend)) { for (const d of Array.isArray(s.ochtend.draden) ? s.ochtend.draden : []) if (ID_RE.test(String(d))) s.gemeld[d] = t; s.ochtend.gezet = true; }
     bewaar(s);
   }
   // box-rij hooguit één keer per sleutel per 14 dagen
@@ -281,7 +287,7 @@ function maak(io) {
       }
     }
     const g = s.dagen[dagErbij(amsDag(nu()), -1)] || null;
-    return { status: 200, j: { ok: true, items, gisteren: g ? { dag: g.dag, tel: g.tel, compleet: g.compleet, uit: g.uit } : null, laatste: s.laatste } };
+    return { status: 200, j: { ok: true, items, gisteren: g ? { dag: g.dag, tel: g.tel, compleet: g.compleet, aangevuld: g.aangevuld || 0, uit: g.uit } : null, laatste: s.laatste } };
   }
   // Davids tik: 'gezien' (laat zo) of 'terug' (na een gelukte terugzetting in de inbox via mail-app.js wijzig)
   function klaar(d) {
