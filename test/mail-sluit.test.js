@@ -156,8 +156,10 @@ test('nachtronde: drie dagen, ochtendregel alleen voor nieuwe gesprekken, nooit 
   assert.match(r.ochtend, /^3 mails van de afgelopen dagen kwamen niet in je inbox; in de App onder Mail › Niet in je inbox gekomen/);
   let l = k.m.lijst().j;
   assert.equal(l.items.length, 3); assert.equal(l.gisteren.dag, '2026-11-14'); assert.equal(l.gisteren.tel.lijst, 2);
-  // na een gelukte ochtendregel: dezelfde gesprekken nooit opnieuw
-  k.m.gemeld(r.nieuw);
+  // na een gelukte ochtendregel: dezelfde gesprekken nooit opnieuw (review MOET 4: tot dan blijft hij open)
+  assert.deepEqual(k.m.ochtendOpen().draden, r.nieuw);
+  k.m.ochtendGezet();
+  assert.equal(k.m.ochtendOpen(), null);
   r = await k.m.ronde();
   assert.equal(r.nieuw.length, 0); assert.equal(r.ochtend, null);
   // Laat zo en terug
@@ -202,4 +204,64 @@ test('mail-app wijzig terug meldt de terugzetting aan de sluitcontrole; archiver
   await m.wijzig({ draad: 'cccccccccccc0001', wat: 'terug' });
   await m.wijzig({ draad: 'cccccccccccc0002', wat: 'archiveer' });
   assert.deepEqual(klaar, ['cccccccccccc0001']);
+});
+
+test('review MOET 1: een onvolledige dag = ok false en vervangt geen eerdere volledige uitkomst; wat hij erbij zet komt wel op de lijst', async () => {
+  const a = ber({ labels: ['UNREAD'], onderwerp: 'Eerste' }), b = ber({ labels: ['UNREAD'], onderwerp: 'Later erbij' });
+  let alle = [a];
+  const k = kamer(function () { return alle; });
+  let r = await k.m.ronde();
+  assert.equal(r.ok, true);
+  const k2 = kamer(function () { return alle; }, { opslag: JSON.stringify(k.opslag()), melding: true });
+  alle = [b];
+  r = await k2.m.ronde();
+  assert.equal(r.ok, false, 'onvolledig is geen geslaagde controle');
+  const s = k2.opslag();
+  assert.equal(s.dagen[DAG].compleet, true, 'de volledige uitkomst blijft');
+  assert.deepEqual(s.dagen[DAG].lijst.map(function (x) { return x.onderwerp; }).sort(), ['Eerste', 'Later erbij']);
+  assert.equal(s.laatste.ok, false);
+});
+
+test('review MOET 2: filtertekst met een patiëntkenmerk gaat niet mee; bij een slot alleen een algemene reden', async () => {
+  const F = [{ id: 'fp', criteria: { subject: 'BSN 111222333 geboortedatum 01-02-1950' }, action: { removeLabelIds: ['INBOX'] } }];
+  const m = ber({ labels: ['UNREAD'], onderwerp: 'BSN 111222333 geboortedatum 01-02-1950 gewoon' });
+  // eigen kamer met deze filter
+  const MSx = require('../mail-sluit.js');
+  let opslag = null;
+  const k = MSx.maak({ nu: function () { return KLOK; }, luik: async function () { return { berichten: [m], filters: F, labels: [] }; },
+    mailman: { mailSluitBron: function (ids) { const u = {}; ids.forEach(function (i) { u[i] = { gezien: true }; }); return u; } },
+    poort: function (stuk) { return poort.beoordeel(stuk); }, bekend: async function () { return false; },
+    lees: function () { return opslag ? JSON.parse(opslag) : null; }, schrijf: function (x) { opslag = JSON.stringify(x); } });
+  const r = await k.sluitDag(DAG);
+  assert.equal(r.lijst.length, 1);
+  assert.equal(r.lijst[0].slot, true);
+  assert.equal(r.lijst[0].waarom, 'Een Gmail-filter hield hem buiten je inbox');
+  assert.doesNotMatch(JSON.stringify(r), /111222333/);
+});
+
+test('review MOET 3: een tik van David tijdens de ronde (Laat zo) blijft staan', async () => {
+  const a = ber({ labels: ['UNREAD'] });
+  let opslag = null, tijdensRonde = null;
+  const MSx = require('../mail-sluit.js');
+  const k = MSx.maak({ nu: function () { return KLOK; },
+    luik: async function () { if (tijdensRonde) { const f = tijdensRonde; tijdensRonde = null; f(); } return { berichten: [a], filters: [], labels: [] }; },
+    mailman: { mailSluitBron: function (ids) { const u = {}; ids.forEach(function (i) { u[i] = { gezien: true }; }); return u; } },
+    poort: function (stuk) { return poort.beoordeel(stuk); }, bekend: async function () { return false; },
+    lees: function () { return opslag ? JSON.parse(opslag) : null; }, schrijf: function (x) { opslag = JSON.stringify(x); } });
+  await k.ronde();
+  assert.equal(k.lijst().j.items.length, 1);
+  tijdensRonde = function () { assert.equal(k.klaar({ draad: a.draad, hoe: 'gezien' }).status, 200); };
+  await k.ronde();
+  assert.equal(k.lijst().j.items.length, 0, 'Laat zo van tijdens de ronde is niet overschreven');
+  assert.ok(JSON.parse(opslag).klaar[a.draad]);
+});
+
+test('review MOET 4: de ochtendregel blijft open tot hij gezet is, alleen voor vandaag', async () => {
+  const k = kamer([ber({ labels: ['UNREAD'] })]);
+  const r = await k.m.ronde();
+  assert.ok(r.ochtend);
+  assert.equal(k.m.ochtendOpen().tekst, r.ochtend);
+  assert.equal(k.m.ochtendOpen().dag, '2026-11-15');
+  k.zetKlok(Date.parse('2026-11-16T00:30:00Z'));
+  assert.equal(k.m.ochtendOpen(), null, 'een regel van gisteren wordt niet meer bezorgd');
 });

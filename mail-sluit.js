@@ -106,6 +106,8 @@ function draadUit(delen) {
   for (const d of delen) if (!best || VOLGORDE.indexOf(d.soort) < VOLGORDE.indexOf(best.soort)) best = d;
   return best;
 }
+const WAAROM_ALGEMEEN = { filter: 'Een Gmail-filter hield hem buiten je inbox', spam_bekend: 'Gmail zette hem bij spam, maar de afzender ken je',
+  mailman_mist: 'Buiten je inbox en Socev zag hem niet langskomen', onbekend: 'Buiten je inbox, ongelezen; oorzaak niet te zien' };
 function waaromTekst(d, namen) {
   if (d.reden === 'filter') return filterTekst(d.filter, namen);
   if (d.reden === 'spam_bekend') return 'Gmail zette hem bij spam, maar de afzender ken je (contacten of eerder gemaild)';
@@ -129,6 +131,7 @@ function maak(io) {
     const grensMs = nu() - BEWAAR_DAGEN * 86400000;
     for (const k of ['klaar', 'gemeld']) for (const t of Object.keys(s[k])) if (!(Date.parse(s[k][t]) >= grensMs) && !(isObj(s[k][t]) && Date.parse(s[k][t].op) >= grensMs)) delete s[k][t];
     for (const t of Object.keys(s.box)) if (!(Date.parse(s.box[t]) >= grensMs)) delete s.box[t];
+    if (isObj(s.ochtend) && s.ochtend.dag !== amsDag(nu())) delete s.ochtend;
     io.schrijf(s);
   }
   // alle mail van één Amsterdamse dag uit het leesluik (alle pagina's); compleet = geen fout of melding onderweg
@@ -190,29 +193,49 @@ function maak(io) {
       if (d.reden === 'mailman_mist') mist++;
       if (d.soort !== 'lijst') continue;
       const b = d.b;
+      // review wv3091 MOET 2: ook de waaromtekst (filtercriteria, labelnamen) gaat door de poort; bij een slot alleen een algemene reden
+      const waarom = waaromTekst(d, h.namen);
       let slot = !!(mm[b.id] && mm[b.id].slot);
       if (!slot) {
-        try { const p = io.poort({ teksten: [b.onderwerp, b.van].filter(Boolean), bijlagenamen: [], onderwerp: b.onderwerp, leesbaar: true }); slot = !p || p.tegenhouden !== false; }
+        try { const p = io.poort({ teksten: [b.onderwerp, b.van, waarom].filter(Boolean), bijlagenamen: [], onderwerp: b.onderwerp, leesbaar: true }); slot = !p || p.tegenhouden !== false; }
         catch (e) { slot = true; }
       }
-      lijst.push({ draad, id: b.id, dag, reden: d.reden, waarom: waaromTekst(d, h.namen), van: slot ? '' : b.van.slice(0, 200), onderwerp: slot ? '' : b.onderwerp.slice(0, 200),
+      lijst.push({ draad, id: b.id, dag, reden: d.reden, waarom: slot ? WAAROM_ALGEMEEN[d.reden] : waarom, van: slot ? '' : b.van.slice(0, 200), onderwerp: slot ? '' : b.onderwerp.slice(0, 200),
         datum: b.datum, slot, spam: d.reden === 'spam_bekend', ongelezen: b.labels.includes('UNREAD') });
     }
     lijst.sort(function (x, y) { return String(y.datum || '').localeCompare(String(x.datum || '')); });
     return { dag, op: new Date(nu()).toISOString(), compleet: h.compleet, berichten: h.berichten.length, tel, uit, mist, lijst };
   }
-  // De nachtronde: gisteren en de twee dagen ervoor opnieuw. Geeft { ok, dagen: [...], nieuw: [draden], ochtend: tekst|null }.
+  // De nachtronde: gisteren en de twee dagen ervoor opnieuw. Geeft { ok, dagen: [...], nieuw: [draden], ochtend: tekst|null, mist }.
+  // ok = elke dag kwam terug EN was compleet (review wv3091 MOET 1: een onvolledige dag is geen geslaagde controle; de tik probeert opnieuw
+  // en meldt na 3 pogingen). Een onvolledige uitkomst vervangt nooit een eerdere complete van dezelfde dag; wel komt wat hij op de lijst zet
+  // erbij (liever een gesprek te veel op de lijst dan een stil weg). Eerst al het Gmail-werk (awaits), dan pas de staat lezen, samenvoegen en
+  // schrijven zonder await ertussen (MOET 3: een tik van David tijdens de ronde blijft staan).
   async function ronde() {
     const vandaag = amsDag(nu());
-    const s = staat();
-    const dagen = [];
-    let ok = true;
+    const uitkomsten = [];
     for (let i = TERUG_DAGEN; i >= 1; i--) {
       const dag = dagErbij(vandaag, -i);
       let r = null;
       try { r = await sluitDag(dag); } catch (e) { fout('mail-sluit-dag', e); r = null; }
-      if (!r) { ok = false; continue; }
-      s.dagen[dag] = r; dagen.push(r);
+      uitkomsten.push({ dag, r });
+    }
+    const s = staat();
+    const dagen = [];
+    let ok = true;
+    for (const u of uitkomsten) {
+      if (!u.r) { ok = false; continue; }
+      if (!u.r.compleet) {
+        ok = false;
+        const oud = s.dagen[u.dag];
+        if (oud && oud.compleet) {
+          const gezien = new Set((oud.lijst || []).map(function (x) { return x.draad; }));
+          oud.lijst = (oud.lijst || []).concat(u.r.lijst.filter(function (x) { return !gezien.has(x.draad); }));
+          dagen.push(oud);
+          continue;
+        }
+      }
+      s.dagen[u.dag] = u.r; dagen.push(u.r);
     }
     const nieuw = [];
     for (const r of dagen) for (const x of r.lijst) if (!s.klaar[x.draad] && !s.gemeld[x.draad] && nieuw.indexOf(x.draad) < 0) nieuw.push(x.draad);
@@ -221,15 +244,21 @@ function maak(io) {
     if (nieuw.length && gisteren) {
       ochtend = (nieuw.length === 1 ? '1 mail van de afgelopen dagen kwam' : nieuw.length + ' mails van de afgelopen dagen kwamen')
         + ' niet in je inbox; in de App onder Mail › Niet in je inbox gekomen zie je welke en waarom.';
+      s.ochtend = { dag: vandaag, tekst: ochtend, draden: nieuw };   // MOET 4: blijft staan tot de regel echt in de buffer staat
     }
-    s.laatste = { op: new Date(nu()).toISOString(), ok, dagen: dagen.map(function (r) { return r.dag; }), compleet: dagen.every(function (r) { return r.compleet; }) };
+    s.laatste = { op: new Date(nu()).toISOString(), ok, dagen: dagen.map(function (r) { return r.dag; }), compleet: ok };
     bewaar(s);
     return { ok, dagen, nieuw, ochtend, mist: dagen.reduce(function (a, r) { return a + (r.mist || 0); }, 0) };
   }
-  // na een gelukte ochtendregel: deze gesprekken nooit nog eens melden
-  function gemeld(draden) {
+  // De ochtendregel die nog bezorgd moet worden (alleen die van vandaag), en na een gelukte bezorging: weg, en deze gesprekken nooit nog eens
+  function ochtendOpen() {
+    const s = staat();
+    return isObj(s.ochtend) && s.ochtend.dag === amsDag(nu()) && typeof s.ochtend.tekst === 'string' ? { dag: s.ochtend.dag, tekst: s.ochtend.tekst, draden: (s.ochtend.draden || []).slice() } : null;
+  }
+  function ochtendGezet() {
     const s = staat(), t = new Date(nu()).toISOString();
-    for (const d of Array.isArray(draden) ? draden : []) if (ID_RE.test(String(d))) s.gemeld[d] = t;
+    if (isObj(s.ochtend)) for (const d of Array.isArray(s.ochtend.draden) ? s.ochtend.draden : []) if (ID_RE.test(String(d))) s.gemeld[d] = t;
+    delete s.ochtend;
     bewaar(s);
   }
   // box-rij hooguit één keer per sleutel per 14 dagen
@@ -271,7 +300,7 @@ function maak(io) {
     const open = lijst().j.items.length;
     return { aan: true, laatste: s.laatste, dagen: Object.keys(s.dagen).length, open };
   }
-  return { ronde, sluitDag, lijst, klaar, gemeld, boxNieuw, info };
+  return { ronde, sluitDag, lijst, klaar, ochtendOpen, ochtendGezet, boxNieuw, info };
 }
 
 module.exports = { maak, deel, draadUit, filterPast, filterTekst, middernacht, amsDag, dagErbij, VOLGORDE, LIJST_REDENEN };

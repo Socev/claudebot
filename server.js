@@ -19024,7 +19024,7 @@ const mailApp = (function () {
       toestemming: function () { return mailAppToestemming(); },
       pas: function (x) { return mailAppPasMaak(x); },
       // wv3091: een gelukte terugzetting in de inbox haalt het gesprek van de lijst "Niet in je inbox gekomen" (typeof/try: de UI-toets laadt dit blok los)
-      sluitKlaar: function (t) { try { if (typeof mailSluit !== 'undefined' && mailSluit) mailSluit.klaar({ draad: t, hoe: 'terug' }); } catch (e) { logError('mail-sluit-klaar', e); } } });
+      sluitKlaar: function (t) { try { const ms = typeof mailSluitMod === 'function' ? mailSluitMod() : null; if (ms) ms.klaar({ draad: t, hoe: 'terug' }); } catch (e) { logError('mail-sluit-klaar', e); } } });
   } catch (e) { logError('mail-app', e); return null; }
 })();
 // ── wv3090: OVIS Mail fase 1b — Gmail-handeling op Davids tik (archiveren, terugzetten, gelezen/ongelezen, ster, label uit MailMans vaste
@@ -19086,8 +19086,8 @@ async function appMailApp(req, res, a, d, route) {
     else if (soort === 'todo/voorstel') r = await mailApp.todoVoorstel(d);
     else if (soort === 'todo') r = await mailApp.todo(d);
     else if (soort === 'wijzig') r = await mailApp.wijzig(d);
-    else if (soort === 'buiten') r = typeof mailSluit !== 'undefined' && mailSluit ? mailSluit.lijst() : { status: 200, j: { ok: true, uit: true, items: [], gisteren: null, laatste: null } };   // wv3091 fase 2
-    else if (soort === 'buiten/klaar') r = typeof mailSluit !== 'undefined' && mailSluit ? mailSluit.klaar(d) : { status: 404, j: { ok: false, fout: 'De sluitcontrole zit niet in deze versie van de pod' } };
+    else if (soort === 'buiten') r = mailSluitMod() ? mailSluitMod().lijst() : { status: 200, j: { ok: true, uit: true, items: [], gisteren: null, laatste: null } };   // wv3091 fase 2
+    else if (soort === 'buiten/klaar') r = mailSluitMod() ? mailSluitMod().klaar(d) : { status: 404, j: { ok: false, fout: 'De sluitcontrole zit niet in deze versie van de pod' } };
     else r = mailman.mailNaar(d);
   } catch (e) { logError('mail-app', e); return appWeiger(res, 500, 'fout op de pod', 'mail-app uitzondering'); }
   // alleen de route, de map en de uitkomst; nooit de zoekvraag, een onderwerp of tekst (grondwet 2/3)
@@ -19126,6 +19126,9 @@ const mailSluit = (function () {
       schrijf: function (st) { const t = MAIL_SLUIT_PAD + '.tmp'; fs.writeFileSync(t, JSON.stringify(st), { mode: 0o600 }); fs.renameSync(t, MAIL_SLUIT_PAD); } });
   } catch (e) { logError('mail-sluit', e); return null; }
 })();
+// via een functie (niet typeof op de const): de UI-toets laadt dit blok later in dezelfde vm, en een al geoptimaliseerde aanroeper ziet een
+// later gedeclareerde const dan niet (gemeten 15-11); in de pod zelf is het gewoon de module
+function mailSluitMod() { try { return mailSluit; } catch (e) { return null; } }
 function mailSluitInfo() { if (!mailSluit) return { aan: false }; try { return mailSluit.info(); } catch (e) { return { aan: true, fout: true }; } }
 const MAIL_SLUIT_FILTER = { type: 'and', filters: [{ columnName: 'bron', condition: 'eq', value: 'mail' }] };
 async function mailSluitOchtend(datum, tekst) {
@@ -19136,30 +19139,46 @@ async function mailSluitOchtend(datum, tekst) {
   const l = (Array.isArray(j && j.data) ? j.data : []).filter(function (r) { return r && r.bron === 'mail' && r.datum === datum && r.tekst === tekst; });
   if (!l.length) throw new Error('rij na het schrijven niet teruggelezen');
 }
-const mailSluitStand = { dag: '', pogingen: 0, bezig: false };
+const mailSluitStand = { dag: '', pogingen: 0, ochtendPogingen: 0, bezig: false };
 async function mailSluitTik() {
   if (!mailSluit || mailSluitStand.bezig || !rolPrimair()) return;
   const t = ovisAms(), m = t.uur * 60 + t.min;
-  if (m < 30 || m > 390) return;   // 00:30–06:30: na middernacht, vóór het ochtendbericht
-  if (mailSluitStand.dag !== t.datum) { mailSluitStand.dag = t.datum; mailSluitStand.pogingen = 0; }
-  const l = mailSluitInfo().laatste;
-  if (mailSluitStand.pogingen >= 3 || (l && l.ok && l.op && mailSluitDag(Date.parse(l.op)) === t.datum)) return;   // vannacht al gedaan (ook na een herstart)
-  mailSluitStand.bezig = true; mailSluitStand.pogingen++;
-  let r = null;
-  try { r = await mailSluit.ronde(); } catch (e) { logError('mail-sluit-ronde', e); r = null; } finally { mailSluitStand.bezig = false; }
-  const tel = r ? r.dagen.map(function (d) { return d.dag + ':' + d.tel.binnen + '/' + d.tel.lijst; }).join(',') : '-';
-  schrijfLog(nu() + ' mail-sluit poging=' + mailSluitStand.pogingen + ' ok=' + !!(r && r.ok) + ' dagen=' + tel + ' nieuw=' + (r ? r.nieuw.length : 0) + ' mist=' + (r ? r.mist : 0));
-  if (r && r.ochtend) {
-    try { await mailSluitOchtend(t.datum, r.ochtend); mailSluit.gemeld(r.nieuw); } catch (e) { logError('mail-sluit-ochtend', e); }
-  }
-  if (r && r.mist > 0 && mailSluit.boxNieuw('mist-' + t.datum)) {
-    ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Mail sluitcontrole: MailMan zag ' + r.mist + ' gesprek(ken) niet #ovis-mail-sluit\n- status: open\n- van: pod:mail-sluit — bevinding_id mail-sluit-mist-' + t.datum +
-      '\n- wat ik zag: in de laatste drie dagen ' + r.mist + ' gesprek(ken) buiten de inbox, niet in spam of prullenbak, zonder besluit van MailMan (alleen tellingen; de gesprekken staan in Mail › Niet in je inbox gekomen)\n- voorstel: rondes van AI - MailMan nalopen (tabel ronde in mailman.sqlite, volledig/afgekapt) en /health mail_sluit\n');
-  }
-  if ((!r || !r.ok) && mailSluitStand.pogingen >= 3 && mailSluit.boxNieuw('fout-' + t.datum)) {
-    ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Mail sluitcontrole lukte vannacht niet #ovis-mail-sluit\n- status: open\n- van: pod:mail-sluit — bevinding_id mail-sluit-fout-' + t.datum +
-      '\n- wat ik zag: 3 pogingen zonder volledige uitkomst (leesluik mail_dag, MailMan of de contacten); de lijst in Mail is van de vorige geslaagde nacht\n- voorstel: api.log (mail-sluit) en errors.log nalopen; n8n AI - Agenda-Wachter API actie mail_dag\n');
-  }
+  if (m < 30 || m > 390) return;   // 00:30–06:30: na middernacht, vóór het ochtendbericht (07:00)
+  if (mailSluitStand.dag !== t.datum) { mailSluitStand.dag = t.datum; mailSluitStand.pogingen = 0; mailSluitStand.ochtendPogingen = 0; }
+  mailSluitStand.bezig = true;
+  try {
+    const l = mailSluitInfo().laatste;
+    const gedaan = !!(l && l.ok && l.op && mailSluitDag(Date.parse(l.op)) === t.datum);   // vannacht al geslaagd (ook na een herstart)
+    if (!gedaan && mailSluitStand.pogingen < 3) {
+      mailSluitStand.pogingen++;
+      let r = null;
+      try { r = await mailSluit.ronde(); } catch (e) { logError('mail-sluit-ronde', e); r = null; }
+      const tel = r ? r.dagen.map(function (d) { return d.dag + ':' + d.tel.binnen + '/' + d.tel.lijst + (d.compleet ? '' : '?'); }).join(',') : '-';
+      schrijfLog(nu() + ' mail-sluit poging=' + mailSluitStand.pogingen + ' ok=' + !!(r && r.ok) + ' dagen=' + tel + ' nieuw=' + (r ? r.nieuw.length : 0) + ' mist=' + (r ? r.mist : 0));
+      if (r && r.mist > 0 && mailSluit.boxNieuw('mist-' + t.datum)) {
+        ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Mail sluitcontrole: MailMan zag ' + r.mist + ' gesprek(ken) niet #ovis-mail-sluit\n- status: open\n- van: pod:mail-sluit — bevinding_id mail-sluit-mist-' + t.datum +
+          '\n- wat ik zag: in de laatste drie dagen ' + r.mist + ' gesprek(ken) buiten de inbox, niet in spam of prullenbak, zonder besluit van MailMan (alleen tellingen; de gesprekken staan in Mail › Niet in je inbox gekomen)\n- voorstel: rondes van AI - MailMan nalopen (tabel ronde in mailman.sqlite, volledig/afgekapt) en /health mail_sluit\n');
+      }
+      // review wv3091 MOET 1: ook een onvolledige uitkomst (ok false) telt als mislukt; na 3 pogingen één box-rij
+      if ((!r || !r.ok) && mailSluitStand.pogingen >= 3 && mailSluit.boxNieuw('fout-' + t.datum)) {
+        ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Mail sluitcontrole lukte vannacht niet (volledig) #ovis-mail-sluit\n- status: open\n- van: pod:mail-sluit — bevinding_id mail-sluit-fout-' + t.datum +
+          '\n- wat ik zag: 3 pogingen zonder volledige uitkomst (leesluik mail_dag, MailMan of de contacten); wat wel lukte staat op de lijst, een eerdere volledige uitkomst van een dag blijft staan\n- voorstel: api.log (mail-sluit) en errors.log nalopen; n8n AI - Agenda-Wachter API actie mail_dag\n');
+      }
+    }
+    // review wv3091 MOET 4: de ochtendregel los van de ronde bezorgen, opnieuw tot hij in de buffer staat (hooguit 6 keer per nacht)
+    const o = mailSluit.ochtendOpen();
+    if (o && mailSluitStand.ochtendPogingen < 6) {
+      mailSluitStand.ochtendPogingen++;
+      try { await mailSluitOchtend(t.datum, o.tekst); mailSluit.ochtendGezet(); schrijfLog(nu() + ' mail-sluit ochtendregel gezet n=' + o.draden.length); }
+      catch (e) {
+        logError('mail-sluit-ochtend', e);
+        if (mailSluitStand.ochtendPogingen >= 6 && mailSluit.boxNieuw('ochtend-' + t.datum)) {
+          ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Mail: ochtendregel niet in de buffer gekomen #ovis-mail-sluit\n- status: open\n- van: pod:mail-sluit — bevinding_id mail-sluit-ochtend-' + t.datum +
+            '\n- wat ik zag: 6 pogingen om de regel (' + o.draden.length + ' gesprek(ken) niet in de inbox) in ochtend_buffer te zetten mislukten; de lijst in Mail is er wel\n- voorstel: n8n Data Table ochtend_buffer en errors.log (mail-sluit-ochtend)\n');
+        }
+      }
+    }
+  } finally { mailSluitStand.bezig = false; }
 }
 function mailSluitDag(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
 if (mailSluit && SERVER_ECHT) { setInterval(function () { mailSluitTik().catch(function (e) { logError('mail-sluit-tik', e); }); }, 10 * 60000).unref(); }
