@@ -2660,7 +2660,9 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     jobEindLog(jobId, j, ws);
   } finally {
     // Socev-app (wv98): wat Socev in out/ zette, 30 dagen voor de tab Bestanden; alleen hoofdkanaal en machinekamer, nooit 'lezen'.
-    if (gereedschap !== 'lezen' && APP_KANAAL_VAN_CHAT[chatId]) appBewaar(jobId, outdir, { soort: 'beurt', kanaal: APP_KANAAL_VAN_CHAT[chatId], app: !!(j && j.app) });
+    // wv3061: label = het begin van Davids eigen bericht (alleen een getypt app-bericht of de telefoon), alleen in meta.json
+    if (gereedschap !== 'lezen' && APP_KANAAL_VAN_CHAT[chatId]) appBewaar(jobId, outdir, { soort: 'beurt', kanaal: APP_KANAAL_VAN_CHAT[chatId], app: !!(j && j.app),
+      label: j && j.app && (j.app.soort === 'bericht' || j.app.soort === 'tel') ? appBeurtLabel(j.app.tekst) : null });
     try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) {}
     // Transcript van een 'lezen'-beurt bevat inhoud van derden en hoort bij geen enkel gesprek: weg.
     if (gereedschap === 'lezen') {
@@ -8666,6 +8668,34 @@ function appBewaarKandidaten(outdir) {
   }
   return uit;
 }
+// wv3061 (Werkbestanden, "Van wie"): herkomst van een bewaarde klus. machinekamer = agent met label machinekamer… of kanaal machinekamer
+// (beurt of bericht van de machinekamer); studio = soort studio; de rest (hoofdkanaal, Cijfer-Meester, david:-agents) socev.
+function appBestandBron(m) {
+  if (!m) return 'socev';
+  if (m.soort === 'studio') return 'studio';
+  if (m.kanaal === 'machinekamer') return 'machinekamer';
+  if (m.soort === 'agent' && /^\s*machinekamer/i.test(String(m.label || ''))) return 'machinekamer';
+  return 'socev';
+}
+// wv3061: titel van een beurt in Werkbestanden = het begin van Davids eigen bericht: eerste regel met tekst, zonder markeringen van het
+// systeem ([AUTO], [APP], [Systeem: …] e.d.) en zonder opmaaktekens, hooguit 80 tekens platte tekst; niets bruikbaars = null.
+const APP_BEURT_LABEL_MAX = 80;
+function appBeurtLabel(t) {
+  if (typeof t !== 'string' || !t.trim()) return null;
+  const merk = /^\s*\((?:getypt|knop)\)\s*|^\s*\[(?:KNOP|APP|AUTO|REPLY OP VRAAG|ANTWOORD\s*OP|FILES-PORTAAL|MACHINEKAMER|Systeem|WERKVOORRAAD|HEARTBEAT|OPEN)\b[^\]\n]*\]?\s*/i;
+  const regels = String(t).replace(/\p{Cf}/gu, '').normalize('NFKC').split(/\r?\n/);
+  for (let r of regels) {
+    for (let i = 0; i < 5 && merk.test(r); i++) r = r.replace(merk, '');
+    r = r.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/<[^>]*>/g, ' ').replace(/[*_`#>~|]+/g, ' ').replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+    if (!r || /^[-–—=.…\s]+$/.test(r)) continue;
+    const tekens = Array.from(r);
+    if (tekens.length <= APP_BEURT_LABEL_MAX) return r;
+    const kort = tekens.slice(0, APP_BEURT_LABEL_MAX - 1).join(''), heel = kort.replace(/\s+\S*$/, '');   // liefst op een woordgrens
+    return (Array.from(heel).length >= 40 ? heel : kort).trim() + '…';
+  }
+  return null;
+}
 // Aangeroepen in de finally van processJob/processAgent, vóór io/<job> wordt gewist. Synchroon (rename is direct).
 function appBewaar(jobId, outdir, meta) {
   try {
@@ -9203,7 +9233,9 @@ async function appBestanden(req, res) {
     const w = perJob[m.job_id];
     return { job_id: m.job_id, soort: m.soort, kanaal: m.kanaal, app: m.app, op: m.op,
       label: m.soort === 'agent' ? ((w && w.samenvatting) ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(m.label)) : m.soort === 'socev' ? 'bericht · ' + String(m.label || '').slice(0, 40)
-        : m.soort === 'studio' ? 'Studio · ' + String(m.label || '').slice(0, 80) : null,   // wv707
+        : m.soort === 'studio' ? 'Studio · ' + String(m.label || '').slice(0, 80)
+        : (m.soort === 'beurt' && m.label) ? Array.from(String(m.label)).slice(0, APP_BEURT_LABEL_MAX).join('') : null,   // wv707; wv3061: beurt = begin van Davids vraag
+      bron: appBestandBron(m),   // wv3061: Van wie (socev | machinekamer | studio)
       bestanden: m.bestanden.map(function (b) { return { n: b.n, naam: appVeiligeNaam(b.naam, new Set()), grootte: b.grootte }; }),
       overgeslagen: m.overgeslagen || 0, vol: m.vol === true, na_herstart: m.na_herstart === true };
   });
