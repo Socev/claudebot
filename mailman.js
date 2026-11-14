@@ -1421,7 +1421,7 @@ function maak(o) {
     let zelf = 0, gemist = 0;
     for (const r of rijen) {
       if (r.laag !== 'weg' || (r.beantwoord && r.beantwoord > r.zou_weg) || nooit.has(String(r.afzender || '').toLowerCase())) gemist++;
-      else if (r.afgehandeld_door === 'david_gmail') zelf++;
+      else if (r.afgehandeld_door === 'david_gmail' || r.afgehandeld_door === 'david_app') zelf++;   // wv3090: ook gearchiveerd met zijn tik in de Mail-App
     }
     const lijst = db.prepare("SELECT adres, tijd FROM wegzet_afzender WHERE postvak = ? AND stand = 'nooit' ORDER BY tijd DESC LIMIT 100").all(p.id);
     return { sinds, zou: rijen.length, zelf, gemist, nooit: lijst.map(function (r) { return { adres: r.adres, tijd: r.tijd }; }), schaduw: true };
@@ -3217,6 +3217,31 @@ function maak(o) {
     }
     return uit;
   }
+  // wv3090 (OVIS Mail fase 1b): de label-ID's van de vaste lijst in Davids privé-Gmail (labelset2), voor de Mail-App. null = geen geldige set.
+  function mailLabelIds() {
+    const p = postvak('gmail:david'), s = p ? l2(p) : null;
+    return s ? Object.assign({}, s.ids) : null;
+  }
+  // wv3090: David archiveerde (of zette terug) met zijn eigen tik in de Mail-App en Gmail nam het aan → het zaakregister meteen bijwerken,
+  // zodat de regel bovenaan klopt zonder op de volgende ronde te wachten. Archiveren = afgehandeld door David (david_app; telt als jij, net als
+  // david_gmail); terugzetten = weer in de inbox: een eigen archiveer-tik van zonet wordt ongedaan gemaakt, een eerder afgehandelde zaak is
+  // heropend (zoals de ronde dat ook zou doen). Een zaak die MailMan niet kent blijft onbekend (de volgende ronde neemt hem op).
+  function mailTik(draad, wat) {
+    const p = postvak('gmail:david'), th = String(draad || '');
+    if (!p || !zakenAan(p) || !ID_RE.test(th)) return false;
+    const t = iso();
+    if (wat === 'archiveer') {
+      return db.prepare("UPDATE zaak SET inbox = 'nee', inbox_tijd = ?, inbox_gezien = COALESCE(inbox_gezien, ?), afgehandeld = COALESCE(afgehandeld, ?),"
+        + " afgehandeld_door = CASE WHEN afgehandeld IS NULL THEN 'david_app' ELSE afgehandeld_door END, bijgewerkt = ? WHERE postvak = ? AND thread_id = ? AND eigen_archief = 0")
+        .run(t, t, t, t, p.id, th).changes > 0;
+    }
+    if (wat === 'terug') {
+      return db.prepare("UPDATE zaak SET inbox = 'ja', inbox_tijd = ?, inbox_gezien = ?, eigen_archief = 0,"
+        + " heropend = CASE WHEN afgehandeld IS NOT NULL AND COALESCE(afgehandeld_door, '') <> 'david_app' THEN ? ELSE heropend END,"
+        + " afgehandeld = NULL, afgehandeld_door = NULL, bijgewerkt = ? WHERE postvak = ? AND thread_id = ?").run(t, t, t, t, p.id, th).changes > 0;
+    }
+    return false;
+  }
   function mailRegel() {
     const p = postvak('gmail:david');
     if (!p || !zakenAan(p)) return { aan: false };
@@ -3332,7 +3357,7 @@ function maak(o) {
     }
     return uit;
   }
-  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, ecobankBekend, inboxUit: function (pv) { return inboxUit(postvakken().find(function (p) { return p.id === pv; })); }, werkstroomTel, werkstroomLijst, mailBron, zakenLijst, voorwerkBron, mailNaar, mailLaag, mailRegel, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
+  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, ecobankBekend, inboxUit: function (pv) { return inboxUit(postvakken().find(function (p) { return p.id === pv; })); }, werkstroomTel, werkstroomLijst, mailBron, zakenLijst, voorwerkBron, mailNaar, mailLaag, mailRegel, mailLabelIds, mailTik, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
 }
 
 function isPad(p) { return p === '/mailman' || String(p).indexOf('/mailman/') === 0; }

@@ -3353,3 +3353,33 @@ test('wv3077 mailRegel: vandaag binnen = door jou + door Socev weggezet + in je 
   assert.ok(r.laatste_geslaagd);
   assert.ok(!JSON.stringify(r).includes('Staat nog'), 'geen onderwerpen');
 });
+
+test('wv3090 mailTik: archiveren op Davids tik telt meteen als jij (david_app), terugzetten maakt het ongedaan, de ronde erna houdt het; labelIds = vaste lijst', () => {
+  const { mm, dir, gm } = b8Kamer();
+  const a = mail({ onderwerp: 'Verzonnen archiveer' }), b = mail({ onderwerp: 'Verzonnen blijft' });
+  const ms = [a, b];
+  draai(mm, 'gmail:david', ms, { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir); zakenToestaan(dir);
+  ms.forEach(function (m) { gm.voeg(m); });
+  const ids = ms.map(function (m) { return m.id; });
+  l2Ronde(mm, gm, ids, { inbox: true });
+  assert.deepEqual([mm.mailRegel().jij, mm.mailRegel().inbox], [0, 2]);
+  const li = mm.mailLabelIds();
+  assert.ok(li && /^Label_\d+$/.test(li.TODO) && /^Label_\d+$/.test(li.ACTIE_DS), 'ID\'s uit labelset2');
+  assert.equal(mm.mailTik(a.threadId, 'archiveer'), true);
+  assert.equal(zaak(mm, a.threadId).inbox, 'nee'); assert.equal(zaak(mm, a.threadId).afgehandeld_door, 'david_app');
+  assert.deepEqual([mm.mailRegel().jij, mm.mailRegel().inbox], [1, 1], 'regel bovenaan meteen bij');
+  // ongedaan maken: terug in de inbox, niet als heropend
+  assert.equal(mm.mailTik(a.threadId, 'terug'), true);
+  assert.equal(zaak(mm, a.threadId).inbox, 'ja'); assert.equal(zaak(mm, a.threadId).afgehandeld, null); assert.equal(zaak(mm, a.threadId).heropend, null);
+  // opnieuw archiveren en Gmail volgt: de ronde houdt david_app (geen dubbele afhandeling)
+  mm.mailTik(a.threadId, 'archiveer'); gm.plek(a.id, 'archief');
+  klok += 15 * 60000; l2Ronde(mm, gm, ids, { inbox: true });
+  assert.equal(zaak(mm, a.threadId).afgehandeld_door, 'david_app'); assert.equal(zaak(mm, a.threadId).inbox, 'nee');
+  // een eerder in Gmail afgehandelde zaak die David terugzet = heropend
+  gm.plek(b.id, 'archief'); klok += 15 * 60000; l2Ronde(mm, gm, ids, { inbox: true });
+  assert.equal(zaak(mm, b.threadId).afgehandeld_door, 'david_gmail');
+  assert.equal(mm.mailTik(b.threadId, 'terug'), true);
+  assert.ok(zaak(mm, b.threadId).heropend); assert.equal(zaak(mm, b.threadId).afgehandeld, null);
+  assert.equal(mm.mailTik('kapot!', 'archiveer'), false); assert.equal(mm.mailTik(a.threadId, 'verwijder'), false);
+});

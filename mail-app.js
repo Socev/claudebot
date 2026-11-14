@@ -11,8 +11,9 @@
  * Een heel gesprek gaat door de patiëntpoort voordat er één letter naar het scherm gaat; een gesprek met slotje (patiëntmarker of
  * zorgmail bij MailMan, of de poort slaat nu aan) blijft "Open in Gmail".
  * GRENZEN. Alleen privé-Gmail (gmail:david). Mailtekst alleen door het geheugen: deze module schrijft niets naar schijf en logt geen
- * inhoud (server.js logt alleen route en aantallen). Geen Gmail-handeling hier: Naar Facturen / Naar Brain gaan via MailMans keuze-tak
- * (label uit de vaste lijst, bij de volgende ronde); archiveren, gelezen en ster zijn fase 1b (registerkaart). Maak todo = één
+ * inhoud (server.js logt alleen route en aantallen). Naar Facturen / Naar Brain gaan via MailMans keuze-tak (label uit de vaste lijst,
+ * bij de volgende ronde). Fase 1b (wv3090): archiveren, terugzetten, gelezen/ongelezen, ster en een label uit MailMans vaste lijst op Davids
+ * eigen tik (wijzig, zie onder), alleen als de registerrij mail-app-prive-op-tik aan staat. Maak todo = één
  * Todoist-taak op Davids tik (titel aan te passen, datum uit de datumdetector, link naar het gesprek), nooit bij een slotje, en de titel
  * gaat eerst door de patiëntpoort.
  * PUUR waar het kan: vertaalLabels, vlakVan, schoonLijst, kiesDatum zijn los te toetsen. Alles naar buiten komt van server.js (io).
@@ -39,6 +40,20 @@ const TEKENS = {
 };
 const ENTITEITEN = { 'AI/Tolgaarde': 'Tolgaarde', 'AI/Groenhouten': 'Groenhouten', 'AI/HAGRO': 'HAGRO', 'AI/POT': 'POT', 'AI/Holding': 'Holding',
   'AI/Praktijkhouders_BV': 'Praktijkhouders', 'AI/SEL': 'SEL', 'AI/DBH': 'DBH', 'AI/Prive': 'Privé' };
+
+// ── wv3090 fase 1b: Gmail-handeling op Davids tik. Vaste lijst (toestemmingenregister rij mail-app-prive-op-tik, Davids Ja 14-11 22:29):
+// INBOX, UNREAD, STARRED en de acht labels van MailMan (namen; de label-ID's komen uit MailMans config labelset2 gmail:david). Nooit
+// TRASH, SPAM, verwijderen of versturen; AI/MailMan (de wachtrij van MailMan) hoort er niet bij. Elke handeling heeft een tegenhanger
+// (Ongedaan maken in de App = de tegenhanger op dezelfde gesprekken).
+const WIJZIG_LABELS = ['INTAKE', 'FACTUUR', 'NIEUWSBRIEF', 'SOCIAAL', 'OVERIG', 'TWIJFEL', 'TODO', 'ACTIE_DS'];
+const WIJZIG = {
+  archiveer: { eraf: ['INBOX'], terug: 'terug' }, terug: { erbij: ['INBOX'], terug: 'archiveer' },
+  gelezen: { eraf: ['UNREAD'], terug: 'ongelezen' }, ongelezen: { erbij: ['UNREAD'], terug: 'gelezen' },
+  ster: { erbij: ['STARRED'], terug: 'geen_ster' }, geen_ster: { eraf: ['STARRED'], terug: 'ster' },
+  label_erbij: { label: 'erbij', terug: 'label_eraf' }, label_eraf: { label: 'eraf', terug: 'label_erbij' },
+};
+const WIJZIG_MAX = 20;
+const LABEL_ID_RE = /^Label_\d{1,12}$/;
 
 function isObj(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
 function str(x, n) { return typeof x === 'string' ? x.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').slice(0, n) : ''; }
@@ -100,7 +115,8 @@ function schoonLijst(j) {
     regels.push({ draad: g.draad, berichten: Number(g.berichten) || 1, ids: (Array.isArray(g.ids) ? g.ids : []).map(String).filter(function (x) { return DRAAD_RE.test(x); }).slice(-50),
       van: str(g.van, 300), namen: (Array.isArray(g.namen) ? g.namen : []).map(function (x) { return str(x, 80); }).slice(-4), onderwerp: str(g.onderwerp, 300),
       snippet: str(g.snippet, 250), datum: str(g.datum, 40), ongelezen: g.ongelezen === true, bijlage: g.bijlage === true, ster: v.ster,
-      inbox: lab.includes('INBOX'), concept: lab.includes('DRAFT'), tekens: v.tekens, eigen: v.eigen });
+      inbox: lab.includes('INBOX'), concept: lab.includes('DRAFT'), tekens: v.tekens, eigen: v.eigen,
+      vast: WIJZIG_LABELS.filter(function (n) { return lab.some(function (id) { return (kaart.has(id) ? kaart.get(id) : id) === n; }); }) });   // wv3090: stand van het labelmenu
   }
   const eigenLabels = Array.from(kaart.entries()).filter(function (e) { return vertaalLabels([e[0]], kaart).eigen.length; }).map(function (e) { return e[1].slice(0, 80); }).sort();
   return { regels, eigenLabels };
@@ -250,7 +266,86 @@ function maak(io) {
     if (r.status < 200 || r.status >= 300 || !isObj(r.j) || !r.j.id) return { status: 502, j: { ok: false, fout: 'De taak kwam niet in Todoist (' + r.status + ')' } };
     return { status: 200, j: { ok: true, id: String(r.j.id).slice(0, 40), titel, datum } };
   }
-  return { lijst, gesprek, bijlage, todoVoorstel, todo };
+  // wv3090: POST /app/mail/wijzig { draden: [..] (of draad), wat, label? } — alleen op Davids tik (server.js: app-sessie, niet afgeschermd,
+  // primair, uurgrens). Per gesprek één luik-aanroep mail_wijzig met een eenmalige pas die n8n bij de pod terugtoetst (io.pas): het luikgeheim
+  // alleen (dat ook Socevs skills kennen) is niet genoeg om iets in Gmail te veranderen. Een label van MailMan nooit bij een slotje of als de
+  // patiëntpoort nu aanslaat (archiveren, gelezen en ster mogen wel: dat raakt de inhoud niet en leest niets). Na een gelukt archiveren/terugzetten werkt MailMans zaakregister
+  // meteen bij (de regel bovenaan klopt zonder op de volgende ronde te wachten); al het andere volgt de volgende ronde.
+  async function wijzig(d) {
+    d = isObj(d) ? d : {};
+    const wat = String(d.wat || '');
+    const w = Object.prototype.hasOwnProperty.call(WIJZIG, wat) ? WIJZIG[wat] : null;
+    if (!w) return { status: 400, j: { ok: false, fout: 'onbekende handeling' } };
+    const ruw = Array.isArray(d.draden) ? d.draden : (d.draad != null ? [d.draad] : []);
+    const draden = [];
+    for (const x of ruw) { const t = String(x || ''); if (!DRAAD_RE.test(t)) return { status: 400, j: { ok: false, fout: 'geen gesprek' } }; if (!draden.includes(t)) draden.push(t); }
+    if (!draden.length || draden.length > WIJZIG_MAX) return { status: 400, j: { ok: false, fout: 'kies 1 tot ' + WIJZIG_MAX + ' gesprekken' } };
+    let erbij = (w.erbij || []).slice(), eraf = (w.eraf || []).slice(), labelNaam = null;
+    if (w.label) {
+      labelNaam = String(d.label || '');
+      if (!WIJZIG_LABELS.includes(labelNaam)) return { status: 400, j: { ok: false, fout: 'dit label staat niet in de vaste lijst' } };
+      let ids = null;
+      try { ids = io.labelIds(); } catch (e) { fout('mail-app-wijzig-labels', e); ids = null; }
+      const id = isObj(ids) ? String(ids[labelNaam] || '') : '';
+      if (!LABEL_ID_RE.test(id)) return { status: 409, j: { ok: false, fout: 'MailMan kent dit label in je Gmail nog niet' } };
+      if (w.label === 'erbij') erbij = [id]; else eraf = [id];
+    }
+    // De registerrij is de toestemming (grondwet regel 7, toestemmingenregister): zonder rij met status aan doet de App niets in Gmail.
+    let mag = false;
+    try { mag = io.toestemming() === true; } catch (e) { fout('mail-app-wijzig-register', e); mag = false; }
+    if (!mag) return { status: 409, j: { ok: false, register: false, link: gmailLink(draden[0]), fout: 'Dit kan in de App pas na je Ja in Voor jou; Gmail opent dit gesprek' } };
+    if (labelNaam) {
+      // review wv3090 MOET 2: een label (het stuurt Intake/Facturen) alleen na dezelfde controle als bij het lezen: slot bij MailMan óf de
+      // patiëntpoort slaat nu aan op het hele gesprek (gesprek() hieronder). Slot of onzekere uitkomst (Gmail gaf het gesprek niet) = niets.
+      for (const t of draden) {
+        let g;
+        try { g = await gesprek({ draad: t }); } catch (e) { fout('mail-app-wijzig-poort', e); g = null; }
+        if (g && g.status === 403) return { status: 409, j: { ok: false, slot: true, fout: 'Bij een gesprek met mogelijk patiëntgegevens zet Socev geen label; doe het in Gmail' } };
+        if (!g || g.status !== 200) return { status: 502, j: { ok: false, fout: 'Gmail gaf een gesprek nu niet; er is niets veranderd. Probeer het zo opnieuw' } };
+      }
+    }
+    const gedaan = [], mislukt = [];
+    for (const t of draden) {
+      let r = null;
+      try {
+        const pas = io.pas({ draad: t, erbij, eraf });
+        r = await io.luik({ actie: 'mail_wijzig', draad: t, erbij, eraf, pas });
+      } catch (e) { fout('mail-app-wijzig', e); r = null; }
+      if (isObj(r) && r.ok === true && String(r.draad || '') === t) {
+        gedaan.push(t);
+        if (wat === 'archiveer' || wat === 'terug') { try { io.mailman.mailTik(t, wat); } catch (e) { fout('mail-app-wijzig-zaak', e); } }
+      } else mislukt.push(t);
+    }
+    // Ongedaan maken: de App bepaalt per gesprek wat er echt veranderde (review wv3090 MOET 1) en stuurt alleen dat terug; tegen = de handeling ervoor
+    if (!gedaan.length) return { status: 502, j: { ok: false, gedaan, mislukt, fout: 'Gmail nam het nu niet aan; probeer het zo opnieuw' } };
+    return { status: 200, j: { ok: true, wat, label: labelNaam, gedaan, mislukt, tegen: w.terug } };
+  }
+  return { lijst, gesprek, bijlage, todoVoorstel, todo, wijzig };
 }
 
-module.exports = { maak, vertaalLabels, vlakVan, schoonLijst, valideerLijst, kiesDatum, gmailLink, MAPPEN, VERBORGEN, TEKENS, ENTITEITEN };
+// wv3090: eenmalige passen voor mail_wijzig. maak(handeling) → pas (32 hex, 60 s geldig, hooguit 200 open); toets(d) → { ok } alleen als
+// de pas bestaat, niet verlopen is en draad + erbij + eraf precies gelijk zijn (volgorde telt niet). Een getoetste pas is op, ook bij nee.
+function passen(o) {
+  const nu = o.nu, toeval = o.toeval, m = new Map(), DUUR = 60000, MAX = 200;
+  const sleutel = function (x) { const l = function (a) { return (Array.isArray(a) ? a : []).map(String).slice().sort().join(','); }; return String((x && x.draad) || '') + '|' + l(x && x.erbij) + '|' + l(x && x.eraf); };
+  function maak(x) {
+    const n = nu();
+    for (const [k, v] of m) if (n - v.t > DUUR) m.delete(k);
+    if (m.size >= MAX) throw new Error('te veel open passen');
+    const pas = String(toeval());
+    if (!/^[0-9a-f]{32}$/.test(pas)) throw new Error('pas niet goed');
+    m.set(pas, { s: sleutel(x), t: n });
+    return pas;
+  }
+  function toets(d) {
+    d = isObj(d) ? d : {};
+    const pas = typeof d.pas === 'string' && /^[0-9a-f]{32}$/.test(d.pas) ? d.pas : '';
+    const v = pas ? m.get(pas) : null;
+    if (pas) m.delete(pas);
+    const ok = !!v && nu() - v.t <= DUUR && v.s === sleutel(d);
+    return { status: 200, j: ok ? { ok: true, pas } : { ok: false } };
+  }
+  return { maak, toets, open: function () { return m.size; } };
+}
+
+module.exports = { passen, maak, vertaalLabels, vlakVan, schoonLijst, valideerLijst, kiesDatum, gmailLink, MAPPEN, VERBORGEN, TEKENS, ENTITEITEN, WIJZIG, WIJZIG_LABELS };
