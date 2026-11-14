@@ -376,6 +376,7 @@ function maak(io) {
   async function tik(o) {
     o = isObj(o) ? o : {};
     if (bezig || !io.aan()) return { gedaan: 0, reden: bezig ? 'bezig' : 'uit' };
+    if (typeof io.auto === 'function' && !io.auto()) return { gedaan: 0, reden: 'auto_uit' };   // wv3077: automatisch voorwerk apart uit (OVIS Mail fase 1, plan § 2.4); op Davids tik blijft het werken
     const uur = amsUur(nu());
     if (!o.altijd && (uur < UUR_VAN || uur >= UUR_TOT)) return { gedaan: 0, reden: 'buiten_uren' };
     bezig = true;
