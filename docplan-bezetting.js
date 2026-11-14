@@ -28,6 +28,12 @@
  * Lukt het niet (geen schrijfrecht, zoals nu bij Groenhouten; n8n onbereikbaar), dan blijft de vooringevulde Google-link (David tikt Opslaan).
  * Nooit een bericht aan een waarnemer.
  *
+ * wv3066 (14-11-2026, advies Fable "dat het vinkje meteen telt"): de feeds verversen één keer per dag (± 06:35), dus een verzoek dat de pod na de
+ * laatste feed zette, zit nog niet in gezocht. Een eigen gezet item (bezetting_keuze stand gezet, gezet_op later dan de laatste rooster_open-feed
+ * van die praktijk) telt daarom meteen als één verzoek (verzoek_vers 'gezet'); een eigen item dat de pod weghaalde nadat de feed het zag
+ * (bezetting_weg) telt meteen niet meer (verzoek_vers 'weg'). Zodra de feed na het moment ververst is, telt alleen de feed weer (de waarheid).
+ * Eén vinkje = één verzoek: mist een dag twee artsen, dan blijft hij rood met het resterende tekort. Zelfde berekening voor scherm en ochtendronde.
+ *
  * Puur: deze module laadt niets en raakt geen bestanden of netwerk; server.js geeft rpc, de docplan-databank (node:sqlite) en de Voor jou-io mee.
  * Namen gaan alleen in het antwoord aan Davids app (tik = wie), nooit in een kaart of log.
  */
@@ -154,7 +160,10 @@ function week(pr, maandag, dagen, normP, x) {
   const ds = WD.map((w, i) => {
     const datum = isoPlus(maandag, i), r = dagen.get(datum) || {};
     const fd = feestdag(datum);
-    return { datum, wd: w, feestdag: fd, artsen: Number(r.artsen) || 0, gezocht: Number(r.gezocht) || 0,
+    // wv3066: eigen verzoek dat de feed nog niet zag (+1) of dat de pod weghaalde nadat de feed het zag (−1)
+    const corr = (x.correctie && x.correctie.get(datum)) || 0, feedG = Number(r.gezocht) || 0;
+    const gezocht = Math.max(0, feedG + corr);
+    return { datum, wd: w, feestdag: fd, artsen: Number(r.artsen) || 0, gezocht, verzoek_vers: gezocht > feedG ? 'gezet' : gezocht < feedG ? 'weg' : null,
       namen: Array.isArray(r.namen) ? r.namen.map((n) => ({ naam: String(n.naam || '?'), half: n.half === true })) : [],
       niet_geteld: Number(r.niet_geteld) || 0, verleden: !!(x.vandaag && datum <= x.vandaag), extra: 0,
       kleur: fd ? 'grijs' : 'groen', redenen: [], voorstel: null, punten: [] };
@@ -226,7 +235,28 @@ function week(pr, maandag, dagen, normP, x) {
   return { pr, maandag, weeknr: isoWeek(maandag), kleur, regels, dagen: ds.map((d) => { const o = Object.assign({}, d); delete o.extra; return o; }), punten, meldbaar };
 }
 
-/* beoordeel({ bez, norm, vandaag, van, weken, goedZo: {pr: Set}, keuze: {pr: Set} }) → per praktijk de weken; punten = meldbare punten. */
+/*
+ * wv3066: correctie(feeds, pr, eigen: Map datum → gezet_op, weg: Map datum → [{ gezet_op, weg_op }] (één per weggehaald item)) → Map datum → som.
+ * feedTijd = de oudste laatste_gelukt van de actieve rooster_open-feeds van die praktijk (geen = de feed zag nog niets). Ontbreekt een tijd,
+ * dan telt een gezet item als nog niet in de feed (+1) en een weggehaald item niet (geen −1): liever oranje dat morgen klopt dan een stil gat.
+ */
+function feedTijd(feeds, pr) {
+  const t = (Array.isArray(feeds) ? feeds : []).filter((f) => f && f.pr === pr && f.leesregel === 'rooster_open' && f.actief !== false).map((f) => Date.parse(f.laatste_gelukt || ''));
+  if (!t.length || t.some((x) => !Number.isFinite(x))) return -Infinity;
+  return Math.min.apply(null, t);
+}
+function correctie(feeds, pr, eigen, weg) {
+  const ft = feedTijd(feeds, pr), uit = new Map();
+  const tijd = (s) => { const t = Date.parse(s || ''); return Number.isFinite(t) ? t : null; };
+  for (const [datum, op] of eigen || []) { const t = tijd(op); if (t === null || t > ft) uit.set(datum, (uit.get(datum) || 0) + 1); }
+  for (const [datum, rijen] of weg || []) for (const w of Array.isArray(rijen) ? rijen : [rijen]) {
+    const g = tijd(w && w.gezet_op), z = tijd(w && w.weg_op);
+    if (g !== null && z !== null && g <= ft && z > ft) uit.set(datum, (uit.get(datum) || 0) - 1);   // dit item zag de feed, zijn verwijdering nog niet
+  }
+  return uit;
+}
+
+/* beoordeel({ bez, norm, vandaag, van, weken, goedZo: {pr: Set}, keuze: {pr: Set}, eigen?: {pr: Map}, weg?: {pr: Map} }) → per praktijk de weken; punten = meldbare punten. */
 function beoordeel(o) {
   const per = { TG: new Map(), GH: new Map() };
   for (const r of Array.isArray(o.bez && o.bez.dagen) ? o.bez.dagen : []) if (per[r.pr] && geldigIso(r.datum)) per[r.pr].set(r.datum, r);
@@ -235,9 +265,10 @@ function beoordeel(o) {
   const punten = [];
   for (const code of Object.keys(PRAKTIJK)) {
     const np = o.norm.praktijken[code];
+    const corr = correctie(o.bez && o.bez.feeds, code, (o.eigen || {})[code], (o.weg || {})[code]);
     const weken = [];
     for (let i = 0; i < o.weken; i++) {
-      const w = week(code, isoPlus(o.van, 7 * i), per[code], np, { vandaag: o.vandaag, tot, goedZo: (o.goedZo || {})[code], keuze: (o.keuze || {})[code] });
+      const w = week(code, isoPlus(o.van, 7 * i), per[code], np, { vandaag: o.vandaag, tot, goedZo: (o.goedZo || {})[code], keuze: (o.keuze || {})[code], correctie: corr });
       weken.push(w);
       for (const p of w.meldbaar) punten.push(Object.assign({ pr: code, maandag: w.maandag, weeknr: w.weeknr }, p));
     }
@@ -278,14 +309,28 @@ function schema(db) {
     CREATE TABLE IF NOT EXISTS bezetting_fout (dag TEXT PRIMARY KEY, reden TEXT NOT NULL, gemeld INTEGER NOT NULL DEFAULT 0);`);
   // wv2486: per vinkje het item dat de pod zelf in de GEZOCHT-agenda zette (herhaalbaar: kolom alleen toevoegen als hij er nog niet is)
   const kol = new Set(db.prepare("SELECT name FROM pragma_table_info('bezetting_keuze')").all().map((r) => r.name));
-  for (const [k, t] of [['event_id', 'TEXT'], ['stand', 'TEXT'], ['fout', 'TEXT'], ['bijgewerkt', 'TEXT']]) if (!kol.has(k)) db.exec('ALTER TABLE bezetting_keuze ADD COLUMN ' + k + ' ' + t);
+  for (const [k, t] of [['event_id', 'TEXT'], ['stand', 'TEXT'], ['fout', 'TEXT'], ['bijgewerkt', 'TEXT'], ['gezet_op', 'TEXT']]) if (!kol.has(k)) db.exec('ALTER TABLE bezetting_keuze ADD COLUMN ' + k + ' ' + t);
+  // wv3066: eigen items die de pod weghaalde (tot de feed het ziet) en per praktijk de laatste uitkomst van zelf schrijven (zelf | link)
+  // review MOET 1: één rij per weggehaald item (niet per dag), zodat een oude verwijdering die de feed al zag een latere niet beïnvloedt
+  db.exec(`CREATE TABLE IF NOT EXISTS bezetting_weg (id INTEGER PRIMARY KEY, pr TEXT NOT NULL CHECK (pr IN ('TG','GH')), datum TEXT NOT NULL, gezet_op TEXT NOT NULL,
+      weg_op TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS bezetting_schrijf (pr TEXT PRIMARY KEY CHECK (pr IN ('TG','GH')), stand TEXT NOT NULL CHECK (stand IN ('zelf','link')), op TEXT NOT NULL);`);
 }
 function staat(db) {
   const goedZo = { TG: new Set(), GH: new Set() }, keuze = { TG: new Set(), GH: new Set() }, keuzeRij = { TG: new Map(), GH: new Map() };
+  const eigen = { TG: new Map(), GH: new Map() }, weg = { TG: new Map(), GH: new Map() }, schrijf = { TG: null, GH: null };
   const punten = db.prepare('SELECT pr, sleutel, stand, kaart FROM bezetting_punt').all();
   for (const p of punten) if (p.stand === 'goed_zo' && goedZo[p.pr]) goedZo[p.pr].add(p.sleutel);
-  for (const k of db.prepare('SELECT pr, datum, event_id, stand, fout FROM bezetting_keuze').all()) if (keuze[k.pr]) { keuze[k.pr].add(k.datum); keuzeRij[k.pr].set(k.datum, k); }
-  return { goedZo, keuze, keuzeRij, punten, kaarten: db.prepare('SELECT sleutel, pr, maandag, volgnr, punten, stand FROM bezetting_kaart').all() };
+  for (const k of db.prepare('SELECT pr, datum, op, event_id, stand, fout, bijgewerkt, gezet_op FROM bezetting_keuze').all()) if (keuze[k.pr]) {
+    keuze[k.pr].add(k.datum); keuzeRij[k.pr].set(k.datum, k);
+    if (k.event_id && k.stand === 'gezet') eigen[k.pr].set(k.datum, k.gezet_op || k.bijgewerkt || k.op);   // wv3066 (rij van vóór wv3066: bijgewerkt)
+  }
+  for (const w of db.prepare('SELECT pr, datum, gezet_op, weg_op FROM bezetting_weg ORDER BY id').all()) if (weg[w.pr]) {
+    if (!weg[w.pr].has(w.datum)) weg[w.pr].set(w.datum, []);
+    weg[w.pr].get(w.datum).push(w);
+  }
+  for (const r of db.prepare('SELECT pr, stand FROM bezetting_schrijf').all()) if (r.pr in schrijf) schrijf[r.pr] = r.stand;
+  return { goedZo, keuze, keuzeRij, eigen, weg, schrijf, punten, kaarten: db.prepare('SELECT sleutel, pr, maandag, volgnr, punten, stand FROM bezetting_kaart').all() };
 }
 
 /*
@@ -320,19 +365,42 @@ function plan(o) {
   // sluiten: een open kaart waarvan elk punt (na af en na nieuwe meldingen) niet meer 'gemeld op deze kaart' is
   const naAf = new Map((o.punten || []).map((p) => [p.pr + '|' + p.sleutel, Object.assign({}, p)]));
   for (const a of af) naAf.get(a.pr + '|' + a.sleutel).stand = a.stand;
-  const sluit = [];
+  const sluit = [], sluitReden = {};
   for (const k of o.kaarten || []) {
     if (k.stand !== 'open') continue;
     let ps = [];
     try { ps = JSON.parse(k.punten); } catch (e) { ps = []; }
     const nogOpen = ps.some((s) => { const r = naAf.get(k.pr + '|' + s); return r && r.stand === 'gemeld' && r.kaart === k.sleutel; });
-    if (!nogOpen) sluit.push(k.sleutel);
+    if (!nogOpen) { sluit.push(k.sleutel); sluitReden[k.sleutel] = sluitSoort(ps.map((s) => naAf.get(k.pr + '|' + s))); }
   }
-  return { melden: uit, af, sluit };
+  return { melden: uit, af, sluit, sluitReden };
 }
+/* wv3066 (review 9-11 bevinding 6/7): waarom een kaart dichtgaat. Alle punten voorbij = 'voorbij' (niet "geregeld"); geen voorbij = 'geregeld'. */
+function sluitSoort(rijen) {
+  const st = rijen.map((r) => (r && r.stand) || '');
+  if (st.length && st.every((x) => x === 'voorbij')) return 'voorbij';
+  return st.some((x) => x === 'voorbij') ? 'gemengd' : 'geregeld';
+}
+const SLUIT_TEKST = {
+  geregeld: 'Alle dagen van deze kaart zijn geregeld (rooster aangevuld, waarneemverzoek staat, of door jou goed bevonden).',
+  voorbij: 'De dag is voorbij; er is niets meer te regelen.',
+  gemengd: 'Een deel van de dagen is geregeld; de rest is voorbij.',
+};
 
-/* De Voor jou-kaart (geen namen, alleen aantallen; geen pad of wv-nummer). */
-function kaart(m, nuKort) {
+/*
+ * wv3066: de stap "zo zet je het verzoek uit" volgt wat het scherm voor die praktijk echt biedt (dezelfde stand als GET: bezetting_schrijf):
+ *   zelf     het vinkje zet het verzoek zelf op de waarneemsite (laatste poging gelukt)
+ *   link     Socev mag er niet schrijven (laatste poging: geen schrijfrecht) of de pod kan niet zelf schrijven: de knop "Zet in GEZOCHT-agenda"
+ *   onbekend nog nooit geprobeerd: eerst het vinkje, en als dat niet lukt de knop
+ */
+function schrijfWijze(zelfKan, laatste) { return !zelfKan || laatste === 'link' ? 'link' : laatste === 'zelf' ? 'zelf' : 'onbekend'; }
+function kaartStap(wijze, naam) {
+  if (wijze === 'zelf') return 'Vink de dag(en) aan die je wilt uitzetten ("Uitzetten naar waarneming"): Socev zet het verzoek dan zelf op de waarneemsite. Vinkje weg = verzoek weg.';
+  if (wijze === 'link') return 'Vink de dag(en) aan en tik bij elke dag op "Zet in GEZOCHT-agenda": Google Agenda opent met het verzoek ingevuld, jij tikt Opslaan. (Socev kan het verzoek voor ' + naam + ' niet zelf zetten.)';
+  return 'Vink de dag(en) aan die je wilt uitzetten: Socev zet het verzoek dan zelf op de waarneemsite. Lukt dat niet, dan verschijnt de knop "Zet in GEZOCHT-agenda"; tik die en daarna Opslaan in Google Agenda.';
+}
+/* De Voor jou-kaart (geen namen, alleen aantallen; geen pad of wv-nummer). wijze: zie schrijfWijze (standaard 'onbekend'). */
+function kaart(m, nuKort, wijze) {
   const naam = PRAKTIJK[m.pr];
   const dagPunten = m.punten.filter((p) => p.sleutel.startsWith('dag:'));
   const weekPunt = m.punten.find((p) => p.sleutel.startsWith('week:'));
@@ -345,8 +413,8 @@ function kaart(m, nuKort) {
   return { sleutel: m.sleutel, soort: 'doen', waar: 'overal', prive: false, duur_min: 2, volgorde: 40,
     titel, waarom,
     stappen: ['Open in de Socev-app Apps › DocPlan › Bezetting; de week staat al open.',
-      'Vink de dag(en) aan die je wilt uitzetten en tik bij elke dag op "Zet in GEZOCHT-agenda": Google Agenda opent met het verzoek ingevuld, jij tikt Opslaan.',
-      'Mag het zo blijven? Tik "Is goed zo". Deze kaart gaat vanzelf dicht als alle dagen geregeld zijn.'],
+      kaartStap(wijze || 'onbekend', naam),
+      'Mag het zo blijven? Tik "Is goed zo". Deze kaart gaat vanzelf dicht als alle dagen geregeld of voorbij zijn.'],
     meting: (nuKort ? nuKort + ': ' : '') + 'rooster en GEZOCHT-agenda van vanochtend naast de norm gelegd.',
     herkomst: { module: 'docplan', handmatig: 'docplan-bezetting', doel: { scherm: 'docplan', focus: 'bezetting:' + m.pr + '-' + m.maandag } } };
 }
@@ -381,7 +449,7 @@ async function ronde(o) {
   if (!fo.ok) return mislukt(fo.reden);
   o.db.prepare('DELETE FROM bezetting_fout').run();
   const st = staat(o.db);
-  const b = beoordeel({ bez, norm: nl.norm, vandaag, van, weken, goedZo: st.goedZo, keuze: st.keuze });
+  const b = beoordeel({ bez, norm: nl.norm, vandaag, van, weken, goedZo: st.goedZo, keuze: st.keuze, eigen: st.eigen, weg: st.weg });
   const p = plan({ open: b.punten, punten: st.punten, kaarten: st.kaarten, vandaag });
   const uit = { ok: true, gedaan: true, nieuw: 0, opgelost: 0, gesloten: 0, open: 0, fouten: [], norm_fout: nl.fout || undefined };
   const t = new Date(nu).toISOString();
@@ -392,7 +460,7 @@ async function ronde(o) {
   const zetKaart = o.db.prepare(`INSERT INTO bezetting_kaart (sleutel, pr, maandag, volgnr, punten, stand, gezet) VALUES (?, ?, ?, ?, ?, 'open', ?)`);
   for (const m of p.melden.slice(0, MAX_KAARTEN)) {
     try {
-      await o.io.zet(kaart(m, o.nuKort || ''));
+      await o.io.zet(kaart(m, o.nuKort || '', schrijfWijze(o.zelfSchrijven === true, st.schrijf[m.pr])));
     } catch (e) { uit.fouten.push(m.sleutel + ': kaart niet gezet'); continue; }
     o.db.exec('BEGIN');
     try {
@@ -404,14 +472,14 @@ async function ronde(o) {
   }
   if (p.melden.length > MAX_KAARTEN) uit.fouten.push((p.melden.length - MAX_KAARTEN) + ' kaarten overgeslagen (hooguit ' + MAX_KAARTEN + ' per ronde)');
   // sluiten (ook de kaarten die door Davids "Is goed zo" af zijn)
-  uit.gesloten = (await sluitAf(o.db, o.io, o.nuKort, t, p.sluit, uit.fouten)).length;
+  uit.gesloten = (await sluitAf(o.db, o.io, o.nuKort, t, p.sluit, uit.fouten, p.sluitReden)).length;
   uit.open = o.db.prepare("SELECT count(*) n FROM bezetting_kaart WHERE stand = 'open'").get().n;
   o.db.prepare('INSERT OR REPLACE INTO bezetting_ronde (dag, op, uitkomst) VALUES (?, ?, ?)').run(vandaag, t,
     JSON.stringify({ nieuw: uit.nieuw, opgelost: uit.opgelost, gesloten: uit.gesloten, open: uit.open, fouten: uit.fouten.length }));
   return uit;
 }
 /* Sluit de gegeven kaarten in Voor jou (door agent, met bewijs) en in de administratie; Davids eigen afhandeling blijft staan. */
-async function sluitAf(db, io, nuKort, t, sleutels, fouten) {
+async function sluitAf(db, io, nuKort, t, sleutels, fouten, reden) {
   if (!sleutels.length) return [];
   let lijst = [];
   try { lijst = (await io.lijst()) || []; } catch (e) { fouten.push('Voor jou-lijst niet te lezen'); return []; }
@@ -421,7 +489,8 @@ async function sluitAf(db, io, nuKort, t, sleutels, fouten) {
     const v = lijst.find((p) => p && p.sleutel === s);
     if (v && (v.status === 'open' || v.status === 'later')) {
       let r;
-      try { r = await io.status(s, v.status, 'gedaan', { bewijs: (nuKort ? nuKort + ': ' : '') + 'Alle dagen van deze kaart zijn geregeld (rooster aangevuld, waarneemverzoek staat, of door jou goed bevonden).', reden: 'docplan-bezetting: alle punten af' }); }
+      const soort = (reden && reden[s]) || 'geregeld';
+      try { r = await io.status(s, v.status, 'gedaan', { bewijs: (nuKort ? nuKort + ': ' : '') + SLUIT_TEKST[soort], reden: 'docplan-bezetting: alle punten af (' + soort + ')' }); }
       catch (e) { r = null; }
       if (!r || r.ok !== true) { fouten.push(s + ': niet gesloten'); continue; }
     }
@@ -470,12 +539,13 @@ function maak(o) {
       return { status: 503, j: { ok: false, fout: 'het rooster is nu niet te lezen' }, reden: 'bezetting fout' };
     }
     if (!bez || !Array.isArray(bez.dagen)) return { status: 503, j: { ok: false, fout: 'onverwacht antwoord van de databank' }, reden: 'bezetting fout' };
-    const st = metDb(staat) || { goedZo: {}, keuze: {}, keuzeRij: {}, punten: [], kaarten: [] };
-    const b = beoordeel({ bez, norm: nl.norm, vandaag, van, weken, goedZo: st.goedZo, keuze: st.keuze });
+    const st = metDb(staat) || { goedZo: {}, keuze: {}, keuzeRij: {}, eigen: {}, weg: {}, schrijf: {}, punten: [], kaarten: [] };
+    const b = beoordeel({ bez, norm: nl.norm, vandaag, van, weken, goedZo: st.goedZo, keuze: st.keuze, eigen: st.eigen, weg: st.weg });
     const fo = feedsOk(bez.feeds, nu, nl.norm.feed_max_uur);
     const gemeld = new Map(st.punten.filter((p) => p.stand === 'gemeld').map((p) => [p.pr + '|' + p.sleutel, p.kaart]));
     for (const p of b.praktijken) {
       p.zonder_verzoek = 0;
+      p.schrijven = schrijfWijze(typeof o.gezocht === 'function', (st.schrijf || {})[p.code]);   // wv3066: zelfde stand als de kaart
       for (const w of p.weken) {
         for (const d of w.dagen) {
           const kr = ((st.keuzeRij || {})[p.code] || new Map()).get(d.datum);
@@ -523,7 +593,7 @@ function maak(o) {
     }
     return { status: 400, j: { ok: false, fout: 'onbekende handeling' }, reden: 'bezetting ongeldig' };
   }
-  function keuzeRij(pr, datum) { return metDb((db) => db.prepare('SELECT pr, datum, event_id, stand FROM bezetting_keuze WHERE pr = ? AND datum = ?').get(pr, datum) || null); }
+  function keuzeRij(pr, datum) { return metDb((db) => db.prepare('SELECT pr, datum, op, event_id, stand, bijgewerkt, gezet_op FROM bezetting_keuze WHERE pr = ? AND datum = ?').get(pr, datum) || null); }
   async function schrijf(body) {
     if (typeof o.gezocht !== 'function') return { ok: false, fout: 'niet_ingericht' };
     try { const r = await o.gezocht(body); return r && typeof r === 'object' ? r : { ok: false, fout: 'leeg antwoord' }; }
@@ -537,8 +607,14 @@ function maak(o) {
     const r = await schrijf({ actie: 'plaatsen', pr: d.pr, datum: d.datum });
     const idOk = r.ok === true && typeof r.event_id === 'string' && /^[a-z0-9_]{5,200}$/.test(r.event_id);
     const stand = idOk ? 'gezet' : r.fout === 'geen_schrijfrecht' ? 'geen_recht' : r.fout === 'niet_ingericht' ? 'link' : 'fout';
-    const bewaard = metDb((db) => db.prepare('UPDATE bezetting_keuze SET event_id = ?, stand = ?, fout = ?, bijgewerkt = ? WHERE pr = ? AND datum = ?')
-      .run(idOk ? r.event_id : null, stand, idOk ? null : String(r.fout || '?').slice(0, 200), t, d.pr, d.datum).changes === 1);
+    const bewaard = metDb((db) => {
+      const n = db.prepare('UPDATE bezetting_keuze SET event_id = ?, stand = ?, fout = ?, bijgewerkt = ?, gezet_op = ? WHERE pr = ? AND datum = ?')
+        .run(idOk ? r.event_id : null, stand, idOk ? null : String(r.fout || '?').slice(0, 200), t, idOk ? t : null, d.pr, d.datum).changes === 1;
+      // wv3066: per praktijk de laatste uitkomst (kaarttekst en scherm); een losse fout (n8n weg) verandert niets aan wat de praktijk kan
+      if (stand === 'gezet' || stand === 'geen_recht') db.prepare('INSERT INTO bezetting_schrijf (pr, stand, op) VALUES (?, ?, ?) ON CONFLICT (pr) DO UPDATE SET stand = excluded.stand, op = excluded.op')
+        .run(d.pr, stand === 'gezet' ? 'zelf' : 'link', t);
+      return n;
+    });
     // review MOET 2: item gezet maar id niet bewaard → ontvinken zoekt het later op datum (stand blijft leeg = mogelijk gezet)
     if (!bewaard) return { status: 503, j: { ok: false, fout: 'het verzoek staat mogelijk op de waarneemsite, maar is niet goed opgeslagen; vink opnieuw aan' }, reden: 'bezetting vink niet bewaard' };
     return { status: 200, j: { ok: true, handeling: 'vink', pr: d.pr, datum: d.datum, op_site: idOk, schrijf_fout: idOk ? null : schrijfFoutTekst(stand, d.pr) },
@@ -553,6 +629,14 @@ function maak(o) {
       if (!(r.ok === true || r.fout === 'niet_eigen')) {
         metDb((db) => db.prepare("UPDATE bezetting_keuze SET fout = ?, bijgewerkt = ? WHERE pr = ? AND datum = ?").run(String(r.fout || '?').slice(0, 200), t, d.pr, d.datum));
         return { status: 502, j: { ok: false, fout: 'niet weggehaald van de waarneemsite; probeer het zo opnieuw' }, reden: 'bezetting ontvink fout' };
+      }
+      // wv3066: weggehaald → onthouden tot de feed het ziet (telt dan meteen niet meer); alleen als er echt een eigen item weg is
+      if (r.ok === true && (rij.event_id || Number(r.weg) > 0)) {
+        metDb((db) => {
+          // opruimen: dag lang voorbij, of weggehaald > 7 dagen geleden (de dagelijkse feed heeft het dan zeker gezien)
+          db.prepare('DELETE FROM bezetting_weg WHERE datum < ? OR weg_op < ?').run(isoPlus(t.slice(0, 10), -7), new Date(Date.parse(t) - 7 * 864e5).toISOString());
+          db.prepare('INSERT INTO bezetting_weg (pr, datum, gezet_op, weg_op) VALUES (?, ?, ?, ?)').run(d.pr, d.datum, rij.gezet_op || rij.bijgewerkt || rij.op || t, t);
+        });
       }
       // niet_eigen: het item draagt de markering van de pod niet (meer); dan raakt de pod het niet en vergeet alleen het vinkje
       if (r.fout === 'niet_eigen') {
@@ -573,18 +657,20 @@ function maak(o) {
       const st = staat(db);
       // alleen open kaarten waarop geen punt meer 'gemeld' staat; de rest wacht op de ochtendronde
       const nogGemeld = new Set(st.punten.filter((x) => x.stand === 'gemeld').map((x) => x.kaart));
-      const sluit = st.kaarten.filter((k) => k.stand === 'open' && !nogGemeld.has(k.sleutel)).map((k) => k.sleutel);
-      return await sluitAf(db, o.io, o.nuKort ? o.nuKort() : '', new Date().toISOString(), sluit, []);
+      const open = st.kaarten.filter((k) => k.stand === 'open' && !nogGemeld.has(k.sleutel));
+      const rij = new Map(st.punten.map((x) => [x.pr + '|' + x.sleutel, x])), reden = {};
+      for (const k of open) { let ps = []; try { ps = JSON.parse(k.punten); } catch (e) { ps = []; } reden[k.sleutel] = sluitSoort(ps.map((x) => rij.get(k.pr + '|' + x))); }
+      return await sluitAf(db, o.io, o.nuKort ? o.nuKort() : '', new Date().toISOString(), open.map((k) => k.sleutel), [], reden);
     } finally { try { db.close(); } catch (e) { /* al dicht */ } }
   }
   async function ochtend(x) {
     const db = o.openDb ? o.openDb() : null;
     if (!db) return null;
-    try { return await ronde(Object.assign({ rpc: o.rpc, db, io: o.io, normTekst: o.normTekst ? o.normTekst() : null, nuKort: o.nuKort ? o.nuKort() : '' }, x || {})); }
+    try { return await ronde(Object.assign({ rpc: o.rpc, db, io: o.io, normTekst: o.normTekst ? o.normTekst() : null, nuKort: o.nuKort ? o.nuKort() : '', zelfSchrijven: typeof o.gezocht === 'function' }, x || {})); }
     finally { try { db.close(); } catch (e) { /* al dicht */ } }
   }
   return { app, naGoedZo, ochtend };
 }
 
-module.exports = { maak, ronde, plan, beoordeel, week, kaart, feedsOk, normLees, normTekst, feestdagen, feestdag, pasen, googleLink, schema, staat, schrijfFoutTekst,
+module.exports = { maak, ronde, plan, beoordeel, week, kaart, kaartStap, schrijfWijze, sluitSoort, SLUIT_TEKST, correctie, feedTijd, feedsOk, normLees, normTekst, feestdagen, feestdag, pasen, googleLink, schema, staat, schrijfFoutTekst,
   maandagVan, isoWeek, NORM_STANDAARD, PAD_RE, KAART_RE };
