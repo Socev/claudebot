@@ -1,0 +1,18 @@
+{
+  "versie": 1,
+  "uitleg": "Woordenlijst van promedico-betekenis.js (wv3143, regel 2 en 5 van het Kalender-plan). Elk patroon is een JavaScript-regex zonder vlaggen; er wordt hoofdletterongevoelig gezocht in de (al geschoonde) omschrijving van een blok ZONDER patiënt. Volgorde telt: de eerste groep die past wint. dekt = de tijd is voor David bekend geblokkeerd (een eigen afspraak eronder is 'afgedekt'); open = telt als open spreekuur. Uitbreiden mag zonder nieuwe bouw; een patroon dat niet compileert wordt overgeslagen en geteld in /health.",
+  "dagmarkering": {
+    "uitleg": "Alleen voor dagbrede blokken (>= 10 uur). Een dagbreed blok dat hier niet past blijft 'dagbreed, onbekend' (review MOET 3: die dag geen open uren, elke overlap = controleer). Bewust leeg tot David zegt wat zijn dagbrede blokken betekenen.",
+    "patronen": []
+  },
+  "groepen": [
+    { "betekenis": "open_op_de_dag", "label": "open op de dag", "dekt": false, "open": true,
+      "patronen": ["\\bop de dag\\b"] },
+    { "betekenis": "vergadering", "label": "vergadering", "dekt": true, "open": false,
+      "patronen": ["vergader", "\\boverleg", "\\bmdo\\b", "\\bhagro\\b", "\\bmeeting\\b", "\\bbespreking\\b", "\\bintervisie\\b", "\\bscholing\\b", "\\bcursus\\b", "\\bonti?e\\b"] },
+    { "betekenis": "eigen_blokkade", "label": "eigen blokkade", "dekt": true, "open": false,
+      "patronen": ["\\bvrije?\\b", "\\bfysio", "\\btandarts", "\\bpriv[eé](?![a-z])", "\\bvakantie\\b", "\\bverlof\\b", "\\bafwezig", "\\bkapper\\b", "\\bpsycholoog\\b", "\\bziekenhuis\\b", "\\bdokter\\b"] },
+    { "betekenis": "praktijktaak", "label": "praktijktaak", "dekt": false, "open": false,
+      "patronen": ["\\bregie", "\\bmeebellen\\b", "\\buitloop\\b"] }
+  ]
+}
