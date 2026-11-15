@@ -145,6 +145,14 @@ const w30e = L.werkruimtePas(w30, { versie: 4, id: 'praktijk', set: { tabs: ['pr
 toets('30e werkruimte met alleen vervallen Apps (praktijken + projecten) = terug naar de standaard, geen 400', w30e.ok === true && w30e.veranderd === true && !w30e.stand.sets.praktijk, w30e);
 const w30f = L.werkruimtePas(w30, { versie: 4, id: 'praktijk', set: { tabs: ['docplan', 'pma', 'bandjes'], naast: null } }, false);
 toets('30f de nieuwe standaard (docplan, pma, bandjes) is geldig', w30f.ok === true && w30f.stand.sets.praktijk.tabs.join() === 'docplan,pma,bandjes', w30f);
+// ── wv3110: MailMan is geen App meer (instellingen onder het tandwiel in Mail); een bewaarde of meegestuurde 'mailman' valt stil weg ──
+toets('31 wv3110 mailman niet meer in APP_IDS, wel in APP_VERVALLEN; mail blijft', L.APP_IDS.indexOf('mailman') < 0 && L.APP_VERVALLEN.indexOf('mailman') >= 0 && L.APP_IDS.indexOf('mail') >= 0);
+const vb31 = L.volgordeUitBestand({ versie: 3, volgorde: ['facturen', 'mailman', 'bestanden'], favorieten: ['mailman', 'pot'], sortering: 'eigen' }, []);
+toets('31b van schijf (zoals de echte volgorde van 7-11): mailman overgeslagen, rest in volgorde', vb31.volgorde.join() === 'facturen,bestanden' && vb31.favorieten.join() === 'pot', vb31);
+const w31 = L.werkruimtesUitBestand({ versie: 2, sets: { post: { tabs: ['intake', 'mailman', 'bestanden'], naast: ['mailman', 'bestanden'] } } });
+toets('31c werkruimte Post van vóór wv3110: mailman weg, naast met één tab vervalt', w31.sets.post.tabs.join() === 'intake,bestanden' && w31.sets.post.naast === null, w31);
+const w31d = L.werkruimtePas(w31, { versie: 2, id: 'post', set: { tabs: ['intake', 'bestanden'], naast: ['intake', 'bestanden'] } }, false);
+toets('31d de nieuwe standaard van Post (intake, bestanden; Mail is een eigen venster) is geldig', w31d.ok === true && w31d.stand.sets.post.tabs.join() === 'intake,bestanden' && w31d.stand.sets.post.naast.join() === 'intake,bestanden', w31d);
 // ── bedrading ──
 toets('26 routes in de routetabel', /route === 'GET \/app\/apps-volgorde' \|\| route === 'POST \/app\/apps-volgorde'\) return appAppsVolgordeRoute\(req, res, a, d\)/.test(src) && /route === 'POST \/app\/apps-geopend'\) return appAppsGeopendRoute\(req, res, a, d\)/.test(src));
 toets('27 tellen valt niet onder het invoerslot, rangschikken wel', /const APP_SLOT_VRIJ = new Set\(\[[^\]]*'POST \/app\/apps-geopend'/.test(src) && !/const APP_SLOT_VRIJ = new Set\(\[[^\]]*'POST \/app\/apps-volgorde'/.test(src));
