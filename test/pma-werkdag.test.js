@@ -166,8 +166,29 @@ geval('30 feestdagen: Pasen 2026 en Koningsdag op zaterdag 26-4-2025, Bevrijding
   assert.deepStrictEqual(P.feestdagen(2026), ['2026-01-01', '2026-04-06', '2026-04-27', '2026-05-14', '2026-05-25', '2026-12-25', '2026-12-26']);
   assert.ok(P.feestdagen(2025).includes('2025-04-26') && P.feestdagen(2025).includes('2025-05-05'));
 });
+// wv3054 (gemeten op de echte koppeling van 14-11-2026): het patroonvenster liep 4 weken voor de eerste en na de laatste declaratie door
+// (vertrokken stagiair/leerling kreeg weken afwezig), en een verzamelnaam (groep waarnemers) kreeg afwezige dagen.
+geval('31 zonder rooster: na de laatste declaratie (vertrokken) geen afwezig', () => {
+  const zonder = {}; for (const d of reeks('2026-10-05', '2026-10-25')) zonder[d] = null;
+  const u = R({ dagen: vaste([0, 1, 3], zonder), rollen: [{ rol: 'stagiair', van: '2026-08-31', tot: null }] });
+  assert.deepStrictEqual([op(u, '2026-10-05'), op(u, '2026-10-12'), op(u, '2026-10-01').soort], [undefined, undefined, 'gewerkt']);
+});
+geval('32 zonder rooster: vóór de eerste declaratie (later begonnen) geen afwezig; ertussen wel', () => {
+  const zonder = { '2026-09-29': null }; for (const d of reeks('2026-08-31', '2026-09-20')) zonder[d] = null;
+  const u = R({ dagen: vaste([0, 1, 3], zonder), rollen: [{ rol: 'poh-ggz', van: '2026-01-01', tot: null }] });   // rol al eerder (andere praktijk)
+  assert.deepStrictEqual([op(u, '2026-09-14'), op(u, '2026-09-29').soort], [undefined, 'afwezig']);
+});
+geval('33 met handrooster blijft een lege roosterdag na de laatste declaratie afwezig (binnen de rol)', () => {
+  const u = R({ dagen: vaste([0, 1, 3], { '2026-10-19': null, '2026-10-20': null, '2026-10-22': null }), hand: [{ ingang: '2026-01-01', uren: VAST }],
+    rollen: [{ rol: 'assistente', van: '2026-01-01', tot: null }] });
+  assert.strictEqual(op(u, '2026-10-19').soort, 'afwezig');
+});
+geval('34 groep (verzamelnaam): nooit afwezig, declaratiedagen blijven gewerkt', () => {
+  const u = R({ groep: true, dagen: vaste([0, 1, 3], { '2026-09-08': null }) });
+  assert.deepStrictEqual([op(u, '2026-09-08'), op(u, '2026-09-07').soort, u.some((x) => x.soort === 'afwezig')], [undefined, 'gewerkt', false]);
+});
 for (const [naam, f] of GEVALLEN) test('werkdag ' + naam, f);
-test('de toetslijst heeft 30 gevallen', () => assert.strictEqual(GEVALLEN.length, 30));
+test('de toetslijst heeft 34 gevallen', () => assert.strictEqual(GEVALLEN.length, 34));
 
 // ── namen en rollen ──
 test('naam ontleden en vergelijken (voorletter + achternaam, tussenvoegsel, dubbele naam)', () => {
