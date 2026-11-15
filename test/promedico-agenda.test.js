@@ -91,7 +91,8 @@ const logRegels = function (c, w) { const p = pagina(c, w); return p.slice(p.ind
     assert.strictEqual((await c.ont.verwerk(o2)).status, 400);
   });
   const vormfouten = {
-    'onbekend topveld': function (s) { s.herkend = true; },
+    'onbekend topveld': function (s) { s.nieuwveld = true; },
+    'herkend als tekst': function (s) { s.herkend = 'ja'; },
     'onbekend veld met naam als sleutel': function (s) { s.dagen[0].blokken[0]['ZWAARMERKWOORD'] = 1; },
     'onbekend dagveld': function (s) { s.dagen[0].x = 1; },
     '__proto__-sleutel': function (s) { return JSON.stringify(s).replace('"schema"', '"__proto__":{"a":1},"schema"'); },
@@ -126,6 +127,56 @@ const logRegels = function (c, w) { const p = pagina(c, w); return p.slice(p.ind
       assert(!JSON.stringify(r).includes('ZWAARMERKWOORD'));
     });
   }
+  await t('wv3138: onbekend veld noemt de NAAM (geen waarde); onleesbare naam blijft anoniem; ook in de logcategorie', async function () {
+    const c = maak(); const s = stand(); s.extensie_kleur = 'GEHEIMEWAARDE';
+    const r = await c.ont.verwerk(omhul(s));
+    assert.strictEqual(r.status, 400); assert(r.j.fout.includes('extensie_kleur'), r.j.fout); assert(r.log.includes('extensie_kleur'), r.log);
+    assert(!JSON.stringify(r).includes('GEHEIMEWAARDE'));
+    assert(c.ont.health().laatste_weigering.reden.includes('extensie_kleur'));
+    const s2 = stand(); s2.dagen[0].blokken[0]['Jansen, J.'] = 'x';
+    const r2 = await c.ont.verwerk(omhul(s2)); assert(r2.j.fout.includes('onleesbare naam') && !r2.j.fout.includes('Jansen'), r2.j.fout);
+    const s3 = stand(); s3.dagen[0]['a'.repeat(31)] = 1;
+    assert((await c.ont.verwerk(omhul(s3))).j.fout.includes('onleesbare naam'));
+  });
+  await t('wv3138: herkend=true verwerkt gewoon; herkend ontbreekt idem', async function () {
+    const c = maak(); const r = await c.ont.verwerk(omhul(stand({ herkend: true })));
+    assert.strictEqual(r.status, 200); assert.strictEqual(r.j.uitkomst, 'verwerkt'); assert(pagina(c).includes('14:00–14:45 consult, 3 patiënten'));
+    assert(!/niet herkend/i.test(pagina(c)));
+  });
+  await t('wv3138: herkend=false op lege week: melding op de pagina, logregel, geen dagen, staat telt; zelfde blik opnieuw = dubbel', async function () {
+    const c = maak(); const s = stand({ herkend: false, dagen: [], sinds_vorige_blik: null });
+    const r = await c.ont.verwerk(omhul(s)); assert.strictEqual(r.status, 200, JSON.stringify(r.j)); assert.strictEqual(r.j.uitkomst, 'niet_herkend');
+    const p = pagina(c); assert(p.includes('Laatste blik niet herkend (Promedico-scherm anders)')); assert(p.includes('nog geen goede stand')); assert.strictEqual(logRegels(c), 1);
+    assert(!p.includes('## maandag')); assert(/blik niet herkend/.test(p.slice(p.indexOf('## Log'))));
+    const h = c.ont.health(); assert(h.laatste_niet_herkend && !h.laatste_verwerkt); assert.strictEqual(h.vandaag.niet_herkend, 1);
+    const r2 = await c.ont.verwerk(omhul(s)); assert.strictEqual(r2.j.uitkomst, 'dubbel'); assert.strictEqual(logRegels(c), 1);
+    c.zetNu(Date.parse('2026-11-15T14:00:00+01:00'));
+    const r3 = await c.ont.verwerk(omhul(stand({ herkend: false, dagen: [], sinds_vorige_blik: null, gezien_op: '2026-11-15T13:55:00+01:00' })));
+    assert.strictEqual(r3.j.uitkomst, 'niet_herkend'); assert.strictEqual(logRegels(c), 2, 'snoei laat log + melding van een week zonder dagen staan');
+    assert(pagina(c).includes('13:55'));
+  });
+  await t('wv3138: herkend=false met dagen erin: die worden NIET verwerkt', async function () {
+    const c = maak(); const r = await c.ont.verwerk(omhul(stand({ herkend: false })));
+    assert.strictEqual(r.j.uitkomst, 'niet_herkend'); assert(!pagina(c).includes('buikpijn') && !pagina(c).includes('## maandag'));
+  });
+  await t('wv3138: herkend=false na een goede stand: goede stand blijft, melding erbij; daarna weer goed = melding weg', async function () {
+    const c = maak(); await c.ont.verwerk(omhul(stand()));
+    c.zetNu(Date.parse('2026-11-15T14:10:00+01:00'));
+    const r = await c.ont.verwerk(omhul(stand({ herkend: false, dagen: [], gezien_op: '2026-11-15T14:05:00+01:00' })));
+    assert.strictEqual(r.j.uitkomst, 'niet_herkend');
+    let p = pagina(c); assert(p.includes('Laatste blik niet herkend')); assert(p.includes('eerdere goede stand')); assert(p.includes('14:00–14:45 consult, 3 patiënten')); assert.strictEqual(logRegels(c), 2);
+    c.zetNu(Date.parse('2026-11-15T14:20:00+01:00'));
+    await c.ont.verwerk(omhul(stand({ gezien_op: '2026-11-15T14:15:00+01:00' })));
+    p = pagina(c); assert(!p.includes('Laatste blik niet herkend')); assert.strictEqual(logRegels(c), 3);
+  });
+  await t('wv3138: oudere niet-herkende blik na een nieuwere goede verandert niets; periode over twee weken meldt beide', async function () {
+    const c = maak();
+    const r0 = await c.ont.verwerk(omhul(stand({ herkend: false, dagen: [], periode_van: '2026-11-22', periode_tot: '2026-11-23', gezien_op: '2026-11-15T13:44:00+01:00' })));
+    assert.deepStrictEqual(r0.j.weken, ['2026-W47', '2026-W48']);
+    assert(pagina(c, '2026-W47').includes('Laatste blik niet herkend') && pagina(c, '2026-W48').includes('Laatste blik niet herkend'));
+    const r1 = await c.ont.verwerk(omhul(stand({ herkend: false, dagen: [], periode_van: '2026-11-22', periode_tot: '2026-11-23', gezien_op: '2026-11-15T13:40:00+01:00' })));
+    assert.strictEqual(r1.j.uitkomst, 'ouder');
+  });
   await t('grenzen precies: 7 dagen, 300 blokken, 60 sjabloon, 81 tekens, kleur null, 24:00 als tot', async function () {
     const s = stand({ periode_van: '2026-11-16', periode_tot: '2026-11-22' });
     s.dagen[1].blokken = []; for (let i = 0; i < 300; i++) s.dagen[1].blokken.push({ van: '08:00', tot: '24:00', soort: 'consult', kleur: null, patient: true });

@@ -15,6 +15,8 @@
  *   niet eens gedecodeerd; 3. content-type → 415; 4. grootte ≤ 300 kB → 413; 5. strikte vorm → 400 (hele stand weg, reden = pad
  *   zonder waarden); 6. tekstvelden schoon + patiëntcontrole (harde treffer = alleen dat veld weg); 7. per datum: alleen een strikt
  *   latere gezien_op vervangt; dubbel/ouder = 200 zonder logregel; 8. pagina's opnieuw opbouwen uit de staat (vault-veilig).
+ * wv3138: onbekend veld = 400 met de NAAM erin (alleen /^[a-z_]{1,30}$/, anders 'onleesbare naam'); 'herkend' (boolean) toegestaan, false = geen dagen
+ *   verwerken, melding + logregel op de weekpagina, eerdere stand blijft.
  * Nooit in een log: lijf, kop, geheim of tekst. Alleen status en een redencategorie.
  */
 const fs = require('fs');
@@ -37,7 +39,7 @@ const KLUISNAAM = 'promedico_agenda_geheim';
 const KOP = 'Promedico-agenda';
 
 const TOP_VERPLICHT = ['schema', 'extensie', 'gezien_op', 'weergave', 'periode_van', 'periode_tot', 'dagen'];
-const TOP_OPTIONEEL = ['sinds_vorige_blik'];
+const TOP_OPTIONEEL = ['sinds_vorige_blik', 'herkend'];   // wv3138: herkend = bouwplan § 2 (false = Promedico-opbouw niet herkend)
 const DAG_VERPLICHT = ['datum', 'sjabloon', 'blokken'];
 const DAG_OPTIONEEL = ['dagnotitie'];
 const SJ_VERPLICHT = ['van', 'tot', 'soort', 'kleur'];
@@ -75,8 +77,13 @@ function isoMs(s) {
 }
 function tijdMin(s) { if (s === '24:00') return 1440; const m = RE_TIJD.exec(s); return m ? (+m[1]) * 60 + (+m[2]) : NaN; }
 
+// wv3138: bij een onbekend veld de NAAM noemen (nooit een waarde), maar alleen als hij eruitziet als een veldnaam.
+const RE_VELDNAAM = /^[a-z_]{1,30}$/;
 function sleutels(o, verplicht, optioneel, waar) {
-  for (const k of Object.keys(o)) if (verplicht.indexOf(k) < 0 && optioneel.indexOf(k) < 0) throw vormFout('onbekend veld in ' + waar);
+  for (const k of Object.keys(o)) if (verplicht.indexOf(k) < 0 && optioneel.indexOf(k) < 0) {
+    const naam = RE_VELDNAAM.test(k) ? k : 'onleesbare naam';
+    const e = vormFout('onbekend veld ' + naam + ' in ' + waar); e.cat = 'vorm onbekend veld ' + naam; throw e;
+  }
   for (const k of verplicht) if (!eigen(o, k)) throw vormFout('veld ontbreekt in ' + waar);
 }
 function tijdOk(x, waar) { if (typeof x !== 'string' || !RE_TIJD.test(x)) throw vormFout('tijd niet UU:MM in ' + waar); }
@@ -110,6 +117,7 @@ function toetsVorm(s, nuMs) {
   if (isNaN(pv) || isNaN(pt)) throw vormFout('periode geen JJJJ-MM-DD');
   if (pt < pv) throw vormFout('periode_tot voor periode_van');
   if ((pt - pv) / 86400000 > MAX_DAGEN - 1) throw vormFout('periode langer dan ' + MAX_DAGEN + ' dagen');
+  if (eigen(s, 'herkend') && typeof s.herkend !== 'boolean') throw vormFout('herkend geen ja/nee');
   if (eigen(s, 'sinds_vorige_blik')) {
     const v = s.sinds_vorige_blik;
     if (v !== null) {
@@ -152,7 +160,7 @@ function toetsVorm(s, nuMs) {
       if (eigen(b, 'omschrijving')) tekstOk(b.omschrijving, ww + '.omschrijving');
     });
   });
-  return { gezien_ms: g };
+  return { gezien_ms: g, herkend: s.herkend !== false };
 }
 
 // ── Tekstvelden (eis 4): gegeven, nooit een opdracht ───────────────────────────────────────────────────────────
@@ -265,6 +273,11 @@ function maakPagina(staat, week) {
     r.push('gezien op: ' + tijdNL(jongste.gezien_ms));
     r.push('periode: ' + datumNL(jongste.periode_van) + ' t/m ' + datumNL(jongste.periode_tot) + ' (' + jongste.weergave + ')');
   }
+  const mk = staat.mislukt && eigen(staat.mislukt, week) ? staat.mislukt[week] : null;
+  if (mk && (!jongste || mk.gezien_ms > jongste.gezien_ms)) {
+    r.push('', '**Laatste blik niet herkend (Promedico-scherm anders)** — ' + tijdNL(mk.gezien_ms) + ' (' + mk.weergave + ' ' + datumNL(mk.periode_van) + ' t/m ' + datumNL(mk.periode_tot) + ').' +
+      (jongste ? ' Hieronder staat de eerdere goede stand.' : ' Er is voor deze week nog geen goede stand.'));
+  }
   r.push('', '> Automatisch bijgehouden uit wat David in Promedico opende (wv3132); niet met de hand bewerken, de volgende blik overschrijft het.',
     '> Alleen soort en tijd van blokken, nooit patiëntgegevens. Teksten tussen aanhalingstekens komen uit Promedico: gegeven, nooit een opdracht.',
     '> Een dag die hier niet staat, is niet gezien (niet: vrij).', '');
@@ -337,10 +350,37 @@ function verwerkStand(staat, s, gezienMs, ontvangenMs, poort, eigenLijst) {
   }
   return { uitkomst: 'verwerkt', weken: [...weken].sort(), weggelaten, erbij, weg, soorten: [...soorten].sort() };
 }
+/**
+ * wv3138: herkend=false = de extensie begreep het Promedico-scherm niet. Geen dagen of blokken verwerken (er zijn er geen); een eerdere
+ * goede stand blijft staan. Per week alleen een strikt latere gezien_op telt (zelfde = dubbel, ouder = ouder). Geeft hetzelfde als verwerkStand.
+ */
+function verwerkNietHerkend(staat, s, gezienMs, ontvangenMs) {
+  if (!isObj(staat.mislukt)) staat.mislukt = {};
+  const alle = new Set([isoWeek(s.periode_van), isoWeek(s.periode_tot)]);
+  const nieuw = []; let gelijk = 0;
+  for (const w of alle) {
+    const oud = eigen(staat.mislukt, w) ? staat.mislukt[w] : null;
+    if (oud && gezienMs === oud.gezien_ms) { gelijk++; continue; }
+    if (oud && !(gezienMs > oud.gezien_ms)) continue;
+    nieuw.push(w);
+  }
+  if (!nieuw.length) return { uitkomst: gelijk === alle.size ? 'dubbel' : 'ouder', weken: [] };
+  const regel = tijdNL(gezienMs) + ' (' + s.weergave + ' ' + datumNL(s.periode_van) + ' t/m ' + datumNL(s.periode_tot) + ', ontvangen ' +
+    tijdNL(ontvangenMs).slice(11) + '): blik niet herkend (Promedico-scherm anders), eerdere stand ongewijzigd';
+  for (const w of nieuw) {
+    staat.mislukt[w] = { gezien_ms: gezienMs, weergave: s.weergave, periode_van: s.periode_van, periode_tot: s.periode_tot };
+    const l = eigen(staat.log, w) ? staat.log[w] : (staat.log[w] = []);
+    l.push(regel);
+    if (l.length > LOG_MAX) l.splice(0, l.length - LOG_MAX);
+  }
+  return { uitkomst: 'niet_herkend', weken: nieuw.sort() };
+}
 // Staat klein houden: datums ouder dan ± 8 weken eruit (hun pagina blijft in de vault), log alleen voor weken met datums.
 function snoei(staat, nuMs) {
   for (const d of Object.keys(staat.datums)) if (datumMs(d) < nuMs - DATUM_BEWAAR_MS) delete staat.datums[d];
+  if (isObj(staat.mislukt)) for (const w of Object.keys(staat.mislukt)) if (staat.mislukt[w].gezien_ms < nuMs - DATUM_BEWAAR_MS) delete staat.mislukt[w];
   const levend = new Set(Object.keys(staat.datums).map(isoWeek));
+  if (isObj(staat.mislukt)) for (const w of Object.keys(staat.mislukt)) levend.add(w);
   for (const w of Object.keys(staat.log)) if (!levend.has(w)) delete staat.log[w];
 }
 
@@ -355,7 +395,7 @@ function maakOntvanger(o) {
   const nuF = o.nu || Date.now;
   const map = o.map || path.join('10_Zakelijk', 'Tolgaarde', KOP);
   let geheim = { waarde: '', gehaald: 0, tot: 0 }, bezig = null;
-  const stand = { laatste_verwerkt: null, laatste_weigering: null, vandaag: null };
+  const stand = { laatste_verwerkt: null, laatste_niet_herkend: null, laatste_weigering: null, vandaag: null };
   let rij = Promise.resolve();
 
   function tel(soort) {
@@ -441,31 +481,36 @@ function maakOntvanger(o) {
     try { s = JSON.parse(tekst); } catch (e) { return weiger(400, 'lijf geen json'); }
     const t = nuF();
     let vorm;
-    try { vorm = toetsVorm(s, t); } catch (e) { if (e.vorm) return weiger(400, e.message, e.klok ? 'klok' : 'vorm'); throw e; }
+    try { vorm = toetsVorm(s, t); } catch (e) { if (e.vorm) return weiger(400, e.message, e.klok ? 'klok' : (e.cat || 'vorm')); throw e; }
     // Een verwerking tegelijk (staat lezen, aanpassen, schrijven).
-    const stap = function () { return verwerkIn(s, vorm.gezien_ms); };
+    const stap = function () { return verwerkIn(s, vorm.gezien_ms, vorm.herkend); };
     const uit = rij.then(stap, stap);
     rij = uit.catch(function () {});
     return uit;
   }
-  function verwerkIn(s, gezienMs) {
+  function verwerkIn(s, gezienMs, herkend) {
     const t = nuF();
     let staat;
     try { staat = leesStaat(); } catch (e) { return weiger(503, 'staat onleesbaar'); }
-    const r = verwerkStand(staat, s, gezienMs, t, o.poort, null);
-    if (r.uitkomst !== 'verwerkt') { tel(r.uitkomst); return { status: 200, j: { ok: true, uitkomst: r.uitkomst }, log: r.uitkomst }; }
+    const r = herkend ? verwerkStand(staat, s, gezienMs, t, o.poort, null) : verwerkNietHerkend(staat, s, gezienMs, t);
+    if (r.uitkomst !== 'verwerkt' && r.uitkomst !== 'niet_herkend') { tel(r.uitkomst); return { status: 200, j: { ok: true, uitkomst: r.uitkomst }, log: r.uitkomst }; }
     snoei(staat, t);
     // Eerst de pagina's, dan pas de staat: mislukt een pagina, dan non-2xx en zonder staatwijziging, dus de herhaling van de
     // extensie (5 min) verwerkt de stand opnieuw (Fable wv3132 #3).
     try { for (const w of r.weken) schrijfPagina(staat, w); } catch (e) { return weiger(500, 'pagina niet geschreven'); }
     try { schrijfStaat(staat); } catch (e) { return weiger(500, 'staat niet geschreven'); }
+    if (!herkend) {
+      tel('niet_herkend');
+      stand.laatste_niet_herkend = { tijd: new Date(t).toISOString(), gezien_op: new Date(gezienMs).toISOString(), weken: r.weken };
+      return { status: 200, j: { ok: true, uitkomst: 'niet_herkend', weken: r.weken }, log: 'niet herkend ' + r.weken.join(',') };
+    }
     tel('verwerkt');
     stand.laatste_verwerkt = { tijd: new Date(t).toISOString(), gezien_op: new Date(gezienMs).toISOString(), weken: r.weken, weggelaten: r.weggelaten };
     return { status: 200, j: { ok: true, uitkomst: 'verwerkt', weken: r.weken, weggelaten: r.weggelaten },
       log: 'verwerkt ' + r.weken.join(',') + (r.weggelaten ? ' weggelaten ' + r.weggelaten + ' (' + r.soorten.join(',') + ')' : '') };
   }
-  function health() { return { aan: !fs.existsSync(uitPad), geheim_geladen: !!geheim.waarde, laatste_verwerkt: stand.laatste_verwerkt, laatste_weigering: stand.laatste_weigering, vandaag: stand.vandaag }; }
+  function health() { return { aan: !fs.existsSync(uitPad), geheim_geladen: !!geheim.waarde, laatste_verwerkt: stand.laatste_verwerkt, laatste_niet_herkend: stand.laatste_niet_herkend, laatste_weigering: stand.laatste_weigering, vandaag: stand.vandaag }; }
   return { verwerk, health };
 }
 
-module.exports = { maakOntvanger, toetsVorm, keurTekst, schoonTekst, mdVeilig, maakPagina, verwerkStand, legeStaat, isoWeek, blokRegels, verschil, OMHULSEL_MAX, LIJF_MAX, KLUISNAAM, SCHEMA };
+module.exports = { maakOntvanger, toetsVorm, keurTekst, schoonTekst, mdVeilig, maakPagina, verwerkStand, verwerkNietHerkend, legeStaat, isoWeek, blokRegels, verschil, OMHULSEL_MAX, LIJF_MAX, KLUISNAAM, SCHEMA };

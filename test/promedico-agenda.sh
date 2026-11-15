@@ -18,11 +18,17 @@ PY
 }
 kruis geheim "if (!goed) return weiger(401, 'geheim');" ""
 kruis zeef "for (const [naam, re] of AGENDA_HARD) if (re.test(t)) soorten.push(naam);" ""
-kruis volgorde "if (oud && !(gezienMs > oud.gezien_ms)) continue;" ""
+kruis volgorde "if (oud && !(gezienMs > oud.gezien_ms)) continue;
+    if (oud) eerste = false;" "if (oud) eerste = false;"
 kruis patientblok "if (!b.patient) {" "if (true) {"
-kruis vorm "for (const k of Object.keys(o)) if (verplicht.indexOf(k) < 0 && optioneel.indexOf(k) < 0) throw vormFout('onbekend veld in ' + waar);" ""
+kruis vorm "for (const k of Object.keys(o)) if (verplicht.indexOf(k) < 0 && optioneel.indexOf(k) < 0) {" "for (const k of Object.keys(o)) if (false) {"
 kruis pagina-eerst "try { for (const w of r.weken) schrijfPagina(staat, w); } catch (e) { return weiger(500, 'pagina niet geschreven'); }
     try { schrijfStaat(staat); }" "try { schrijfStaat(staat); } catch (e) {}
     try { for (const w of r.weken) schrijfPagina(staat, w); } catch (e) { return weiger(500, 'pagina niet geschreven'); }
     try { }"
-echo "promedico-agenda: toets + 6 kruisproeven goed"
+kruis herkend-toegestaan "const TOP_OPTIONEEL = ['sinds_vorige_blik', 'herkend'];" "const TOP_OPTIONEEL = ['sinds_vorige_blik'];"
+kruis herkend-negeren "const r = herkend ? verwerkStand(staat, s, gezienMs, t, o.poort, null) : verwerkNietHerkend(staat, s, gezienMs, t);" "const r = verwerkStand(staat, s, gezienMs, t, o.poort, null);"
+kruis veldnaam "const naam = RE_VELDNAAM.test(k) ? k : 'onleesbare naam';" "const naam = '';"
+kruis naam-niet-anoniem "const naam = RE_VELDNAAM.test(k) ? k : 'onleesbare naam';" "const naam = k;"
+kruis snoei-mislukt "for (const w of Object.keys(staat.mislukt)) levend.add(w);" ""
+echo "promedico-agenda: toets + 11 kruisproeven goed"
