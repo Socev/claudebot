@@ -2,7 +2,7 @@
 // wv3047: OVIS PMA fase 2 — de werkdagregels (plan § 3) als toetslijst. De gevallen komen uit het oude Ovis-PMA-implementatieplan (§ 5.3 en
 // § 8: roosterdag met klein consult, roosterdag zonder declaraties, invaldag boven/onder de drempel, weekend, om-de-week, vakantieweek,
 // inschrijfgeld, roosterresolutie grens-exact), uitgebreid met de lagen van het nieuwe plan (handrooster > Nmbrs per weekdag > Nmbrs per week
-// met declaratiepatroon > alleen patroon), feestdagen, dienstverband en rolperiodes: samen 30 gevallen (wv3054: 34; wv3053: 37, patroon wint van afwijkende Nmbrs-dagen; wv3111: 42, praktijkmanager en weekuren per dag). Alles verzonnen.
+// met declaratiepatroon > alleen patroon), feestdagen, dienstverband en rolperiodes: samen 30 gevallen (wv3054: 34; wv3053: 37, patroon wint van afwijkende Nmbrs-dagen; wv3111: 42, praktijkmanager en weekuren per dag; wv3136: 45, POH-GGZ zonder afwezig). Alles verzonnen.
 // Daarna de routes van fase 2 op een verzonnen export (koppelen, voorstel uit verzonnen Nmbrs en dossiers, rollen, handrooster, kengetallen).
 const test = require('node:test');
 const assert = require('node:assert');
@@ -175,7 +175,7 @@ geval('31 zonder rooster: na de laatste declaratie (vertrokken) geen afwezig', (
 });
 geval('32 zonder rooster: vóór de eerste declaratie (later begonnen) geen afwezig; ertussen wel', () => {
   const zonder = { '2026-09-29': null }; for (const d of reeks('2026-08-31', '2026-09-20')) zonder[d] = null;
-  const u = R({ dagen: vaste([0, 1, 3], zonder), rollen: [{ rol: 'poh-ggz', van: '2026-01-01', tot: null }] });   // rol al eerder (andere praktijk)
+  const u = R({ dagen: vaste([0, 1, 3], zonder), rollen: [{ rol: 'assistente', van: '2026-01-01', tot: null }] });   // rol al eerder (andere praktijk); wv3136: assistente, want bij de POH-GGZ telt nooit afwezig
   assert.deepStrictEqual([op(u, '2026-09-14'), op(u, '2026-09-29').soort], [undefined, 'afwezig']);
 });
 geval('33 met handrooster blijft een lege roosterdag na de laatste declaratie afwezig (binnen de rol)', () => {
@@ -227,8 +227,23 @@ geval('42 Nmbrs-uren per week over minder declaratiedagen dan Nmbrs-dagen: per d
   const u = R({ dagen: vaste([0, 1, 3]), nmbrs: { rooster: [{ begin: '2025-01-01', uren: 38, dagen_per_week: 5 }] } });
   assert.deepStrictEqual([op(u, '2026-09-07').uren, op(u, '2026-09-07').bron], [7.6, 'nmbrs-week']);
 });
+// wv3136: bij de POH-GGZ geen afwezige dagen (David 15-11-2026: Ja op de kaart); gewerkt, uren en invaldagen blijven
+const NM_GGZ = { rooster: [{ begin: '2025-01-01', uren: 24, dagen_per_week: 3, dagen1: [8, 8, 0, 8, 0, 0, 0], dagen2: null }] };
+geval('43 POH-GGZ met Nmbrs-rooster: een lege roosterdag geeft geen rij; gewerkt (met uren) en een invaldag blijven (wv3136)', () => {
+  const u = R({ dagen: vaste([0, 1, 3], { '2026-09-08': null, '2026-09-09': tel(6) }), nmbrs: NM_GGZ, rollen: [{ rol: 'poh-ggz', van: '2026-01-01', tot: null }] });
+  assert.deepStrictEqual([op(u, '2026-09-08'), op(u, '2026-09-07').soort, op(u, '2026-09-07').uren, op(u, '2026-09-09').soort, u.some((x) => x.soort === 'afwezig')],
+    [undefined, 'gewerkt', 8, 'invaldag', false]);
+});
+geval('44 assistente met hetzelfde Nmbrs-rooster: de lege roosterdag blijft afwezig (wv3136)', () => {
+  const u = R({ dagen: vaste([0, 1, 3], { '2026-09-08': null }), nmbrs: NM_GGZ, rollen: [{ rol: 'assistente', van: '2026-01-01', tot: null }] });
+  assert.strictEqual(op(u, '2026-09-08').soort, 'afwezig');
+});
+geval('45 POH-GGZ met alleen weekuren (POT) en declaratiepatroon: een lege patroondag geeft geen rij, de uren per gewerkte dag blijven (wv3136)', () => {
+  const u = R({ dagen: vaste([0, 1, 3], { '2026-09-17': null }), nmbrs: { rooster: [{ begin: '2025-01-01', uren: 24, dagen_per_week: 3 }] }, rollen: [{ rol: 'poh-ggz', van: '2026-01-01', tot: null }] });
+  assert.deepStrictEqual([op(u, '2026-09-17'), op(u, '2026-09-14').soort, op(u, '2026-09-14').uren], [undefined, 'gewerkt', 8]);
+});
 for (const [naam, f] of GEVALLEN) test('werkdag ' + naam, f);
-test('de toetslijst heeft 42 gevallen', () => assert.strictEqual(GEVALLEN.length, 42));
+test('de toetslijst heeft 45 gevallen', () => assert.strictEqual(GEVALLEN.length, 45));
 
 // ── namen en rollen ──
 test('naam ontleden en vergelijken (voorletter + achternaam, tussenvoegsel, dubbele naam)', () => {

@@ -277,6 +277,9 @@ const ARTS_ROLLEN = ['huisarts-praktijkhouder', 'huisarts-loondienst', 'waarneme
 // wv3111: rollen waarvan het werk zelden een declaratie geeft (David 15-11-2026 over de praktijkmanager: vaste dagen, incidenteel andere).
 // Met een rooster telt een roosterdag dan als gewerkt, ook zonder declaratie (nooit afwezig); een andere doordeweekse dag met activiteit is een extra dag.
 const ROOSTER_IS_WERK = new Set(['praktijkmanager']);
+// wv3136: rollen zonder afwezige dagen (David 15-11-2026, Ja op de kaart): een POH-GGZ declareert op Tolgaarde gemiddeld maar ± 1,7 keer
+// per gewerkte dag, dus een roosterdag zonder declaratie zegt niets. Gewerkt, invaldag, los en uren blijven; een lege roosterdag geeft geen rij.
+const GEEN_AFWEZIG_ROLLEN = new Set(['poh-ggz']);
 const DIENSTEN = ['loondienst', 'pot', 'zzp', 'praktijkhouder', 'onbekend'];
 const TUSSEN = new Set(['van', 'de', 'der', 'den', 'het', 'ter', 'ten', 'te', 't', 'in', 'op', 'la', 'le', 'du', 'da', 'dos', 'el', 'al', 'v', 'vd', 'v d']);
 // Verzamelnaam: "Waarnemer Tolgaarde", sinds de export van 14-11-2026 ook "Waarnemer2 Tolgaarde"; een naam die op de praktijknaam eindigt
@@ -421,6 +424,7 @@ function werkdagenVan(i) {
     if (wd > 4) { if (!n) continue; soort = 'weekend'; daguren = null; }
     else if (werk === true) {
       if (!n && (i.groep || (!uren && (!declVan || d < declVan || d > declTot)))) continue;   // wv3054: groep of buiten de declaratiespanne
+      if (!n && GEEN_AFWEZIG_ROLLEN.has(rol)) continue;   // wv3136: bij de POH-GGZ nooit afwezig
       soort = n ? 'gewerkt' : feest.has(d) ? 'feestdag' : binnen ? (uren && ROOSTER_IS_WERK.has(rol) ? 'gewerkt' : 'afwezig') : null;   // wv3111
     }
     else if (werk === false) { if (!n) continue; soort = n >= drempel || (uren && ROOSTER_IS_WERK.has(rol)) ? 'invaldag' : 'los'; daguren = soort === 'invaldag' ? invaluren : null; }
