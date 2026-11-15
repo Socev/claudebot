@@ -15,6 +15,7 @@ fs.writeFileSync(NEP, [
   'import json, sys, os',
   'a = sys.argv[1:]',
   'open(os.environ["NZA_DB"] + ".argv", "a").write(json.dumps(a) + "\\n")',
+  'open(os.environ["NZA_DB"] + ".env", "w").write(os.environ.get("NZA_WACHT", ""))',
   'if a[:2] == ["scherm", "overzicht"]: print(json.dumps({"ok": True, "gebouwd": "x", "telling": {"stukken": 2}, "stukken": []}))',
   'elif a[1:3] == ["stuk", "kapot"]: print("geen json")',
   'elif a[1:3] == ["stuk", "weg"]: print(json.dumps({"ok": False, "fout": "stuk weg niet in het dossier"})); sys.exit(1)',
@@ -38,7 +39,24 @@ test('overzicht en cache op de stand van de index', async () => {
   await m.app({ pad: '/app/nza', methode: 'GET' });
   const n = fs.readFileSync(NEPDB + '.argv', 'utf8').trim().split('\n').filter((r) => r.includes('overzicht')).length;
   assert.strictEqual(n, 1, 'tweede keer uit de cache');
-  assert.deepStrictEqual(m.info(), { aan: true, gebouwd: 'x', stukken: 2 });
+  assert.deepStrictEqual(m.info(), { aan: true, gebouwd: 'x', stukken: 2, bronnen_gekeken: null });
+});
+
+test('wv3113: nieuwe scherm.json van de wachter ververst de cache; NZA_WACHT gaat mee naar het script', async () => {
+  const W = fs.mkdtempSync(path.join(T, 'wacht-'));
+  const DB2 = path.join(T, 'nep2.db');
+  fs.writeFileSync(DB2, 'x');
+  const m = maak({ script: NEP, db: DB2, wacht: W, vandaag: '2026-11-15' });
+  const tel = () => fs.readFileSync(DB2 + '.argv', 'utf8').trim().split('\n').filter((r) => r.includes('overzicht')).length;
+  await m.app({ pad: '/app/nza', methode: 'GET' });
+  await m.app({ pad: '/app/nza', methode: 'GET' });
+  assert.strictEqual(tel(), 1, 'zonder scherm.json: uit de cache');
+  fs.writeFileSync(path.join(W, 'scherm.json'), '{"laatst_gekeken": "2026-11-16T08:00+01:00"}');
+  await m.app({ pad: '/app/nza', methode: 'GET' });
+  assert.strictEqual(tel(), 2, 'nieuwe scherm.json: opnieuw gelezen');
+  await m.app({ pad: '/app/nza', methode: 'GET' });
+  assert.strictEqual(tel(), 2, 'daarna weer uit de cache');
+  assert.strictEqual(fs.readFileSync(DB2 + '.env', 'utf8').trim(), W);
 });
 
 test('stuk: invoer wordt gecontroleerd vóór het script draait', async () => {

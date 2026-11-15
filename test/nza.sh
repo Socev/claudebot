@@ -24,5 +24,16 @@ B=$(awk '/── OVIS NZa scherm \(wv3099/,/── einde OVIS NZa scherm ──/
 if echo "$B" | grep -nE "logError\([^)]*(e\.message|String\(e|d\.|u\.body)|schrijfLog|fetch\("; then echo "ROOD  server.js: NZa logt inhoud of gaat zelf naar buiten"; g=1; fi
 echo "$B" | grep -qF "(!SERVER_ECHT && process.env.NZA_SCRIPT)" || { echo "ROOD  server.js: NZA_SCRIPT mag alleen buiten de echte pod"; g=1; }
 [ $g = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS"
+# wv3113: de wachter (fase 2) — dagklok via socev-run met hartslag, venster 07:50-09:50, niet tijdens onderhoud/OVIS-ronde, scherm.json in de cache
+h=0
+W=$(awk '/── OVIS NZa fase 2: de wachter \(wv3113/,/── einde OVIS NZa wachter ──/' server.js)
+echo "$W" | grep -qF "naam: 'ovis-nza-wachter', hartslag: 'ovis-nza-wachter'" || { echo "ROOD  wachter: geen dagronde met hartslag ovis-nza-wachter"; h=1; }
+echo "$W" | grep -qF "venster: { van: [7, 50], tot: [9, 50] }" || { echo "ROOD  wachter: venster niet 07:50-09:50 (buiten de stille uren)"; h=1; }
+echo "$W" | grep -qF "!onderhoud.stand().aan" || { echo "ROOD  wachter: draait ook in de onderhoudsstand"; h=1; }
+echo "$W" | grep -qF "if (!nzaWachter || !SERVER_ECHT || !rolPrimair()) return;" || { echo "ROOD  wachter: tikt ook buiten de echte, primaire pod"; h=1; }
+echo "$W" | grep -qF "argv: ['python3', '-I', script, 'ronde']" || { echo "ROOD  wachter: ander commando"; h=1; }
+grep -qF "wacht: serverPad('nza-wacht'" server.js || { echo "ROOD  scherm: wachtmap niet doorgegeven"; h=1; }
+[ $h = 0 ] && echo "GROEN wachter: dagklok, venster, onderhoud, alleen echte pod, scherm.json"
+[ $h = 0 ] || g=1
 node --test test/nza-scherm.test.js 2>&1 | tail -12; t=${PIPESTATUS[0]}
 [ $f = 0 ] && [ $g = 0 ] && [ "$t" = 0 ]

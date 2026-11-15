@@ -4,6 +4,8 @@
 // agent: nza.py scherm overzicht | scherm stuk <id> [--plek] [--citaat]. Zo zijn de tellingen en de stand per stuk (geldt nu, komt eraan,
 // vervangen, vernietigd) gelijk aan die van fase 1a, en komt het vinkje "citaat gecontroleerd" uit de citaatcontrole van 1a (nooit uit de
 // tekst van de agent). Alleen lezen: geen schrijfroute, geen netwerk; de index /opt/data/ovis-nza/nza.db wordt read-only geopend.
+// Fase 2 (wv3113): de wachter (mk-scripts/ovis-nza/wachter.py) schrijft <wacht>/scherm.json (titel + link-stukken, laatst gekeken per bron);
+// nza.py zet die in het overzicht (nieuw_links, bronnen). De cache kijkt daarom ook naar dat bestand.
 // Alleen child_process (execFile zonder shell, python3 -I) en fs.
 const { execFile } = require('child_process');
 const fs = require('fs');
@@ -15,6 +17,7 @@ const CITAAT_MAX = 1500;
 function maak(opts) {
   const script = opts.script;
   const db = opts.db;
+  const wacht = opts.wacht || '';   // map met scherm.json van de wachter (wv3113)
   const vandaag = opts.vandaag || '';   // alleen voor de toets met het proefdossier (NZA_VANDAAG)
   const timeoutMs = opts.timeoutMs || 20000;
   let cache = null;   // overzicht per stand van de index (mtime + grootte)
@@ -27,6 +30,7 @@ function maak(opts) {
       if (bezig >= 3) return klaar({ status: 429, body: { ok: false, fout: 'even te druk; probeer het zo opnieuw' }, reden: 'nza druk' });
       bezig++;
       const env = { PATH: process.env.PATH || '/usr/bin:/bin', NZA_DB: db, LANG: 'C.UTF-8' };
+      if (wacht) env.NZA_WACHT = wacht;
       if (vandaag) env.NZA_VANDAAG = vandaag;
       execFile('python3', ['-I', script, 'scherm'].concat(argv), { env: env, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024 },
         function (e, out) {
@@ -43,7 +47,9 @@ function maak(opts) {
   async function overzicht() {
     let st;
     try { st = fs.statSync(db); } catch (e) { return { status: 503, body: { ok: false, fout: 'de dossierindex ontbreekt' }, reden: 'nza geen index' }; }
-    const sleutel = st.mtimeMs + ':' + st.size + ':' + vandaagNu();
+    let w = '-';
+    if (wacht) { try { const ws = fs.statSync(wacht + '/scherm.json'); w = ws.mtimeMs + ':' + ws.size; } catch (e) { w = '-'; } }
+    const sleutel = st.mtimeMs + ':' + st.size + ':' + w + ':' + vandaagNu();
     if (cache && cache.sleutel === sleutel) return { status: 200, body: cache.body };
     const u = await draai(['overzicht']);
     if (u.status === 200) cache = { sleutel: sleutel, body: u.body };
@@ -83,7 +89,8 @@ function maak(opts) {
   function info() {
     if (!aan()) return { aan: false };
     const t = cache && cache.body && cache.body.telling;
-    return { aan: true, gebouwd: cache ? cache.body.gebouwd : null, stukken: t ? t.stukken : null };
+    const b = cache && cache.body && cache.body.bronnen;
+    return { aan: true, gebouwd: cache ? cache.body.gebouwd : null, stukken: t ? t.stukken : null, bronnen_gekeken: b ? (b.laatst_gekeken || null) : null };
   }
 
   return { app: app, info: info, aan: aan };
