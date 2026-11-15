@@ -206,3 +206,20 @@ test('opruimen na 14 dagen; bestand 0600; health zonder inhoud', async () => {
   assert.equal(k.vw.toon('aa11bb22cc33dd44').j.voorwerk, null);
   klok -= 15 * DAG;
 });
+
+test('wv3092 conceptKlaar: alleen concepten die in hun eigen Gmail-draad kwamen, met het besluit; geen tekst', async () => {
+  const k = kamer();
+  await k.vw.tik();
+  assert.deepEqual(k.vw.conceptKlaar(), [], 'nog niets in Gmail');
+  const tekst = 'Hoi,\n\nPrima, ik teken het en stuur het vrijdag terug.\n\nGroet,\nDavid';
+  assert.equal((await k.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst })).status, 200);
+  const c = k.vw.conceptKlaar();
+  assert.equal(c.length, 1);
+  assert.deepEqual(Object.keys(c[0]).sort(), ['besluit', 'draad', 'tijd']);
+  assert.equal(c[0].besluit, 101); assert.equal(c[0].draad, 'aa11bb22cc33dd44'); assert.ok(Date.parse(c[0].tijd));
+  const los = kamer({ conceptAntw: { status: 200, j: { ok: true, concept_id: 'r-9', thread_id: '0000000000000000' } } }); await los.vw.tik();
+  assert.equal((await los.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst })).status, 200);
+  assert.deepEqual(los.vw.conceptKlaar(), [], 'los concept (andere draad): geen label');
+  klok += 15 * 86400000;
+  try { assert.deepEqual(k.vw.conceptKlaar(), [], 'na 14 dagen niet meer'); } finally { klok -= 15 * 86400000; }
+});

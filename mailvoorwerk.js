@@ -11,7 +11,7 @@
  * (harvesterClaude): wat wordt er gevraagd, wat stelt Socev voor, en zo nodig een concept-antwoord in Davids stem met "[nog in te vullen: …]"
  * waar hij iets moet aanvullen of beslissen. Het resultaat staat alleen in voorwerk.sqlite (0600, na 14 dagen weg) en in Mail. Pas als David op
  * "Zet als concept in Gmail" tikt — en er geen "[nog in te vullen" meer in de tekst staat — maakt de pod via het bestaande mailconcept-luik
- * (n8n, alleen concepten) een concept in die Gmail-draad. Versturen doet David zelf (grondwet 1). Geen Gmail-label (CONCEPT_KLAAR is stap 4b).
+ * (n8n, alleen concepten) een concept in die Gmail-draad. Versturen doet David zelf (grondwet 1). Het label CONCEPT_KLAAR zet MailMan (wv3092; conceptKlaar()).
  * GRENZEN. Slotje (patiëntmarker/zorgmail) en een mail waarin Jev een opdracht aan een AI zag: nooit naar het model. Automatisch hooguit 2 per tik
  * (elke 5 min), 15 per dag, 07–22 uur; op Davids tik hooguit 10 per uur. Mailtekst komt nooit in een log of in de vault; het register krijgt
  * alleen een hash (zoals de skill mailconcept-aanmaken).
@@ -502,6 +502,12 @@ function maak(io) {
       return { status: 200, j: { ok: true, in_draad: td === draad, aan } };
     } finally { gmailBezig.delete(draad); }
   }
+  // wv3092: voor MailMan (CONCEPT_KLAAR): de concepten die via gmail() in hun eigen Gmail-draad kwamen, met het besluit waarop ze antwoorden.
+  // Alleen id's en tijd, geen tekst; de nieuwste 500 (MailMan houdt eerdere al bij; review wv3092 ZOU 2). → [{ besluit, draad, tijd }]
+  function conceptKlaar() {
+    return open().prepare('SELECT besluit, draad, gmail_tijd FROM voorwerk WHERE postvak = ? AND gmail_tijd IS NOT NULL AND gmail_draad = draad AND gmail_tijd >= ? ORDER BY gmail_tijd DESC LIMIT 500')
+      .all(PV, new Date(nu() - BEWAAR_MS).toISOString()).map(function (r) { return { besluit: r.besluit, draad: r.draad, tijd: r.gmail_tijd }; });
+  }
   function opruim() {
     try {
       telTabel();
@@ -518,7 +524,7 @@ function maak(io) {
       return { aan: io.aan(), versie: versie() === 2 ? VERSIE2 : VERSIE, u24: t, gmail_24u: g, vandaag_auto: vandaagAuto(), onderzoek_auto_vandaag: pl.runs, usd_auto_vandaag: pl.usd, plafond_ok: pl.ok };
     } catch (e) { return { aan: io.aan(), fout: true }; }
   }
-  return { tik, toon, lijst, opVerzoek, gmail, opruim, health, _db: open };
+  return { tik, toon, lijst, opVerzoek, gmail, conceptKlaar, opruim, health, _db: open };
 }
 
 module.exports = { maak, kandidaat, schoon, schoonStap1, schoonStap3, conceptOnderwerp, gevoeligTekst, SCHEMA, SCHEMA_STAP1, SCHEMA_STAP3, SYSTEEM, SYSTEEM_STAP1, SYSTEEM_STAP2, VERSIE, VERSIE2, OPEN_RE,

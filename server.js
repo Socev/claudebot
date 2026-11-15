@@ -18838,6 +18838,8 @@ const mailman = (function () {
     return require(p).maak({ dir: MAILMAN_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
       intakeDraden: mailmanIntakeDraden, intakeBerichten: mailmanIntakeBerichten, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt, factuurStap: mailmanFactuurStap, factuurGeen: mailmanFactuurGeen,
+      // wv3092: concepten van Socev in Gmail (mailvoorwerk.js) voor CONCEPT_KLAAR; pas bij een ronde aangeroepen (mailVoorwerk staat verderop)
+      conceptKlaar: function (pv) { return pv === 'gmail:david' && mailVoorwerk && typeof mailVoorwerk.conceptKlaar === 'function' ? mailVoorwerk.conceptKlaar() : []; },
       proces: intakeProces, verkoopTmp: '/dev/shm' });
   } catch (e) { logError('mailman', e); return null; }
 })();

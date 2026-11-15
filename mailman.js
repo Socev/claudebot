@@ -131,7 +131,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-2.9';   // wv2469: proefweek vanzelf weg aangescherpt (betaal-/termijnwoorden, bank/overheid/loon/kluis-afzenders, persoonlijke adressen nooit) en opnieuw gestart (zou_versie 2); wv2548: Doktersmaten gelijk met privé achter config.json gedeeld_gelijk (tekst, Jev, labelset 2, live; nooit uitgangen/afgedaan/zaken/overstap); wv2455: proefweek 'vanzelf weg' (schaduw: zaak.zou_weg, tabel wegzet_afzender, Nooit per afzender), teller jij_open, voorwerkbron voor mailvoorwerk.js; wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
+const VERSIE = 'mailman-2.10';   // wv3092: CONCEPT_KLAAR (concept van Socev in de draad; eraf als het concept weg is), achter labelset2.ids.CONCEPT_KLAAR; wv2469: proefweek vanzelf weg aangescherpt (betaal-/termijnwoorden, bank/overheid/loon/kluis-afzenders, persoonlijke adressen nooit) en opnieuw gestart (zou_versie 2); wv2548: Doktersmaten gelijk met privé achter config.json gedeeld_gelijk (tekst, Jev, labelset 2, live; nooit uitgangen/afgedaan/zaken/overstap); wv2455: proefweek 'vanzelf weg' (schaduw: zaak.zou_weg, tabel wegzet_afzender, Nooit per afzender), teller jij_open, voorwerkbron voor mailvoorwerk.js; wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -235,6 +235,17 @@ const DRAAD_LABELS = ['INTAKE', 'NIEUWSBRIEF', 'SOCIAAL', 'OVERIG', 'TWIJFEL', '
 const ERF_LABELS = DRAAD_LABELS.filter(function (l) { return l !== 'TWIJFEL'; });
 const DRAAD_SOORTEN = ['besluit', 'keuze', 'vangnet', 'opruim', 'afgedaan'];
 const DRAAD_MAX = 20;                               // andere berichten per draad die n8n meeneemt
+// wv3092 (toestemmingenregister rij concept-klaar, Davids Ja 1-11-2026 vraag-id 20ed85e2; rij mailman-prive-weghalen: eraf als het concept weg
+// is): CONCEPT_KLAAR op het binnengekomen bericht waarop Socev op Davids tik een concept-antwoord in de Gmail-draad zette (mailvoorwerk.js
+// gmail(); o.conceptKlaar levert { besluit, draad, tijd }). Alleen privé (gmail:david, nooit een gedeeld postvak), alleen met een eigen geldig
+// label-ID in config.json labelset2["gmail:david"].ids.CONCEPT_KLAAR (uit = die regel weg). Per bericht, nooit op de draad en nooit geërfd;
+// niet in de vaste lijst van de Mail-App (geen tik). De n8n-grens leest de draad na: erbij alleen als er nu een concept (DRAFT) in de draad
+// staat, eraf alleen als er geen concept meer in staat (David verstuurde of verwijderde het). Wat David zelf weghaalt komt nooit terug
+// (één keer gezet; opnieuw alleen bij een nieuwer concept). Gaat het zetten CONCEPT_POGINGEN keer niet door, dan niet meer (/health).
+const CONCEPT_LABEL = 'CONCEPT_KLAAR';
+const CONCEPT_MAX = 10, CONCEPT_CHECK_MAX = 10, CONCEPT_POGINGEN = 5;
+const CONCEPT_CHECK_MS = 30 * 60000, CONCEPT_CHECK_LAAT_MS = 6 * 3600000, CONCEPT_WEEK_MS = 7 * 86400000;   // eerste week elk half uur, daarna elke 6 uur
+const CONCEPT_BRON_MS = 30 * 86400000, CONCEPT_CHECK_TOT_MS = 60 * 86400000;   // concepten van ≤ 30 dagen; na 60 dagen niet meer nalopen
 // wv2036 statuslabels: de factuurstappen na FACTUUR/verwerkt, hun rang (alleen vooruit) en wat er per stap af mag (eerdere stappen uit de reeks)
 const STAP_LABEL = { in_sepa: 'FACTUUR/In_SEPA', is_betaald: 'FACTUUR/Is_betaald' };
 const STAP_RANG = { in_sepa: 1, is_betaald: 2 };
@@ -636,6 +647,15 @@ function labelset2Lees(t) {
   }
   return { ok: true, ids, namen: Object.keys(ids), reden: 'Ja ' + t.ja.slice(0, 16) };
 }
+// wv3092: het label-ID van CONCEPT_KLAAR uit labelset2 (t = config.labelset2[postvak]), alleen als de rest van de set geldig is en het ID
+// eigen is (niet een van de vaste of optionele labels). → 'Label_…' of null (= uit)
+function conceptLabelId(t) {
+  const r = labelset2Lees(t);
+  if (!r.ok) return null;
+  const id = t.ids[CONCEPT_LABEL];
+  if (typeof id !== 'string' || !/^Label_\d{1,12}$/.test(id) || Object.values(r.ids).includes(id)) return null;
+  return id;
+}
 // Regelveld labels (B8): alleen namen uit L2_REGEL, uniek; leeg = geen. → { ok, l | reden }
 function toetsRegelLabels(x) {
   if (x == null) return { ok: true, l: [] };
@@ -773,7 +793,7 @@ function zouWeg(x) {
 
 const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, eersteRegel, regelStroom, jevVragen,
   jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
-  labelset2Lees, toetsRegelLabels, labelPlan2, alleenBetalen, ecobankMelding, DRAAD_LABELS, ERF_LABELS, DRAAD_SOORTEN, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
+  labelset2Lees, conceptLabelId, CONCEPT_LABEL, CONCEPT_POGINGEN, toetsRegelLabels, labelPlan2, alleenBetalen, ecobankMelding, DRAAD_LABELS, ERF_LABELS, DRAAD_SOORTEN, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
   authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL,
   laagBericht, laagDraad, LAAG_VERSIE, LAGEN, LAAG_REDENEN, FACTUUR_FASEN, zouWeg, VANZELF_REDENEN, VANZELF_NIET_RE, VANZELF_VERSIE, VANZELF_NIET_AFZENDER_RE, VANZELF_VRIJ_RE };
 
@@ -857,6 +877,8 @@ CREATE TABLE IF NOT EXISTS zaak (postvak TEXT NOT NULL, thread_id TEXT NOT NULL,
   afgehandeld TEXT, afgehandeld_door TEXT, heropend TEXT, beantwoord TEXT, ooit_weggezet TEXT, bijgewerkt TEXT NOT NULL, PRIMARY KEY (postvak, thread_id));
 CREATE INDEX IF NOT EXISTS zaak_laag ON zaak (postvak, laag, laatste);
 CREATE TABLE IF NOT EXISTS wegzet_afzender (postvak TEXT NOT NULL, adres TEXT NOT NULL, stand TEXT NOT NULL, tijd TEXT NOT NULL, door TEXT, PRIMARY KEY (postvak, adres));
+CREATE TABLE IF NOT EXISTS concept_klaar (postvak TEXT NOT NULL, gmail_id TEXT NOT NULL, thread_id TEXT NOT NULL, bron_tijd TEXT NOT NULL, gezet TEXT, weg TEXT,
+  weg_door TEXT, pogingen INTEGER NOT NULL DEFAULT 0, check_tijd TEXT, vorig_gezet TEXT, PRIMARY KEY (postvak, gmail_id));
 `;
 
 // ─────────────────────────── opslag en routes ───────────────────────────
@@ -1510,6 +1532,34 @@ function maak(o) {
     return r.ok ? r : null;
   }
   function draadAan(p) { const c = config(); return !(isObj(c.draad_uit) && c.draad_uit[p.id]); }   // wv2196
+  // wv3092: CONCEPT_KLAAR alleen privé, nooit een gedeeld postvak, alleen met een eigen label-ID in labelset2 → het ID of null
+  function conceptAan(p) {
+    if (!p || p.id !== 'gmail:david' || p.gedeeld || !l2(p)) return null;
+    const c = config();
+    return conceptLabelId(isObj(c.labelset2) ? c.labelset2[p.id] : null);
+  }
+  // wv3092: de concepten die Socev in Gmail zette (o.conceptKlaar: [{ besluit, draad, tijd }]) bijschrijven. Alleen als het besluit van dit
+  // postvak is, in die draad zit en geen verzonden mail of concept is. Een nieuwer concept begint opnieuw (label opnieuw aanbieden: David kan
+  // het oude label zelf weggehaald hebben; review wv3092 ZOU 1). Stond het oude label nog, dan onthoudt vorig_gezet dat: lukt het opnieuw
+  // zetten niet (concept al weer weg), dan wordt het oude label toch nagelopen en weggehaald.
+  function conceptBij(pv) {
+    let bron = [];
+    try { const x = o.conceptKlaar(pv); bron = Array.isArray(x) ? x : []; } catch (e) { fout('mailman-concept', e); return; }
+    const grens = new Date(nu() - CONCEPT_BRON_MS).toISOString();
+    tx(function () {
+      for (const c of bron.slice(0, 500)) {
+        if (!isObj(c) || !Number.isSafeInteger(c.besluit) || !ID_RE.test(String(c.draad || '')) || typeof c.tijd !== 'string' || !Number.isFinite(Date.parse(c.tijd)) || c.tijd < grens) continue;
+        const b = db.prepare('SELECT * FROM besluit WHERE id = ? AND postvak = ? AND inhaal = 0').get(c.besluit, pv);
+        if (!b || !ID_RE.test(String(b.gmail_id || '')) || b.thread_id !== String(c.draad) || buitenRij(b)) continue;
+        const r = db.prepare('SELECT * FROM concept_klaar WHERE postvak = ? AND gmail_id = ?').get(pv, b.gmail_id);
+        if (!r) db.prepare('INSERT INTO concept_klaar (postvak, gmail_id, thread_id, bron_tijd) VALUES (?, ?, ?, ?)').run(pv, b.gmail_id, b.thread_id, c.tijd);
+        else if (c.tijd > r.bron_tijd) {
+          db.prepare(`UPDATE concept_klaar SET bron_tijd = ?, vorig_gezet = CASE WHEN weg IS NOT NULL THEN NULL ELSE COALESCE(gezet, vorig_gezet) END,
+            gezet = NULL, weg = NULL, weg_door = NULL, pogingen = 0, check_tijd = NULL WHERE postvak = ? AND gmail_id = ?`).run(c.tijd, pv, b.gmail_id);
+        }
+      }
+    });
+  }
   function l2Live(p) { const s = l2(p); return s && p.stand === 'live' && liveMag(p).ok ? s : null; }
   function l2Start(p) {
     if (!p.labelset2_sinds) { const t = iso(); db.prepare('UPDATE postvak SET labelset2_sinds = ? WHERE id = ? AND labelset2_sinds IS NULL').run(t, p.id); p.labelset2_sinds = t; }
@@ -1803,7 +1853,7 @@ function maak(o) {
       - db.prepare("SELECT count(*) n FROM aanbod WHERE postvak = ? AND uitkomst IS NULL AND tijd >= ? AND instr(erbij, ?) > 0").get(pv, new Date(nu() - AANBOD_EIGEN_MS).toISOString(), '"' + WACHTRIJ + '"').n;
     const acties = new Map(), aanbod = [], gelezenAangeboden = [], archiefPogingen = [], af = [];
     let wacht = 0;
-    const tel = { besluit: 0, keuze: 0, vangnet: 0, route: 0, intrek: 0, opruim: 0, overstap: 0, archief: 0, factuurstap: 0, afgedaan: 0, afgedaan_schaduw: 0, terug: 0, ecobank: 0 };
+    const tel = { besluit: 0, keuze: 0, vangnet: 0, route: 0, intrek: 0, opruim: 0, overstap: 0, archief: 0, factuurstap: 0, afgedaan: 0, afgedaan_schaduw: 0, terug: 0, ecobank: 0, concept: 0, concept_weg: 0 };
     const iu = inboxUit(p);   // wv2259
     const vlagPlan = function (eff, plan, b) { return plan.labels.includes('TODO') || plan.labels.includes('ACTIE_DS') || eff === 'twijfel' || vlagRij(b); };
     const vol = function () { return acties.size >= LABEL_ACTIES_MAX; };
@@ -2035,8 +2085,31 @@ function maak(o) {
         if (voeg(id, 'afgedaan', [], eraf)) { afgPogingen.push({ id, eraf }); n++; }
       }
     }
+    // concept (wv3092): CONCEPT_KLAAR erbij op het bericht waar Socev een concept in de draad zette; concept_weg: nalopen of het er nog staat
+    const conPogingen = [], conChecks = [];
+    if (conceptAan(p) && typeof o.conceptKlaar === 'function') {
+      conceptBij(pv);
+      for (const x of db.prepare('SELECT gmail_id, thread_id FROM concept_klaar WHERE postvak = ? AND gezet IS NULL AND weg IS NULL AND pogingen < ? ORDER BY bron_tijd, gmail_id LIMIT 100').all(pv, CONCEPT_POGINGEN)) {
+        if (vol() || conPogingen.length >= CONCEPT_MAX) break;
+        if (acties.has(x.gmail_id)) continue;
+        if (voeg(x.gmail_id, 'concept', [CONCEPT_LABEL], [])) { acties.get(x.gmail_id).thread_id = x.thread_id; conPogingen.push(x.gmail_id); }
+      }
+      const tn = nu();
+      // nalopen: het label staat (gezet), of het stond nog van een vorig concept en het opnieuw zetten is opgegeven (vorig_gezet)
+      for (const x of db.prepare(`SELECT gmail_id, thread_id, COALESCE(gezet, vorig_gezet) basis, check_tijd FROM concept_klaar WHERE postvak = ? AND weg IS NULL
+          AND (gezet IS NOT NULL OR (vorig_gezet IS NOT NULL AND pogingen >= ?)) AND COALESCE(gezet, vorig_gezet) >= ? ORDER BY COALESCE(check_tijd, gezet, vorig_gezet), gmail_id LIMIT 200`)
+        .all(pv, CONCEPT_POGINGEN, new Date(tn - CONCEPT_CHECK_TOT_MS).toISOString())) {
+        if (vol() || conChecks.length >= CONCEPT_CHECK_MAX) break;
+        const tus = tn - Date.parse(x.basis) < CONCEPT_WEEK_MS ? CONCEPT_CHECK_MS : CONCEPT_CHECK_LAAT_MS;
+        if (tn - Date.parse(x.check_tijd || x.basis) < tus) continue;   // vanaf het zetten of de vorige controle
+        if (acties.has(x.gmail_id)) continue;
+        if (voeg(x.gmail_id, 'concept_weg', [], [CONCEPT_LABEL])) { acties.get(x.gmail_id).thread_id = x.thread_id; conChecks.push(x.gmail_id); }
+      }
+    }
     tx(function () {
       const t = iso();
+      for (const id of conPogingen) db.prepare('UPDATE concept_klaar SET pogingen = pogingen + 1 WHERE postvak = ? AND gmail_id = ?').run(pv, id);
+      for (const id of conChecks) db.prepare('UPDATE concept_klaar SET check_tijd = ? WHERE postvak = ? AND gmail_id = ?').run(t, pv, id);
       for (const x of afgPogingen) for (const l of x.eraf) db.prepare('UPDATE vlag_plek SET pogingen = pogingen + 1 WHERE postvak = ? AND gmail_id = ? AND label = ? AND afgedaan IS NULL').run(pv, x.id, l);   // review KAN 1: alleen de aangeboden vlaggen
       for (const a of aanbod) db.prepare('INSERT INTO aanbod (postvak, ronde, gmail_id, soort, erbij, eraf, tijd, thread_id, erf) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(pv, r.id, a.id, a.soort, JSON.stringify(a.erbij), JSON.stringify(a.eraf), t, a.th || null, a.erf && a.erf.length ? JSON.stringify(a.erf) : null);
       for (const id of gelezenAangeboden) db.prepare('UPDATE besluit SET gelezen_aangeboden = ? WHERE id = ?').run(t, id);
@@ -2104,6 +2177,9 @@ function maak(o) {
             if (a.soort === 'factuurstap') { if (x.overgeslagen === true) telStap.overgeslagen++; else { telStap.fout++; tel.fout++; } continue; }
             if (a.soort === 'terug' || a.soort === 'ecobank') { if (x.overgeslagen !== true) tel.fout++; continue; }   // wv2259: grens sloeg over (prullenbak, geen factuurmail, afzender) = geen labelfout; telt als poging
             if (a.soort === 'afgedaan') { if (x.overgeslagen !== true) tel.fout++; continue; }   // wv2189: overgeslagen (terug in de inbox, nieuwsbrief) is geen labelfout
+            // wv3092: concept overgeslagen = geen concept (meer) in de draad, of de grens liet het niet door: telt als poging (bij het aanbieden);
+            // concept_weg overgeslagen = het concept staat er nog (of de draad was niet te lezen): later opnieuw nalopen
+            if (a.soort === 'concept' || a.soort === 'concept_weg') { if (x.overgeslagen !== true) tel.fout++; continue; }
             // wv2196: opruim die de grens overslaat (het label staat er al niet meer, of de mail is verzonden/weg) is geen fout: niet eindeloos opnieuw;
             // staat het label toch nog in Gmail, dan zet de volgende labelstaat het terug (bron blijft MailMan) en komt de opruim terug
             if (a.soort === 'opruim' && x.overgeslagen === true) { for (const l of aw) if (l === 'TWIJFEL' || l === 'OVERIG') lsWeg(pv, id, l, 'elders'); continue; }
@@ -2136,6 +2212,15 @@ function maak(o) {
           }
           if (a.soort === 'archief') {
             if (b && !b.archief_tijd && erbij.includes(VERWERKT_LABEL)) { db.prepare('UPDATE besluit SET archief_tijd = ? WHERE id = ?').run(iso(), b.id); tel.archief++; }
+            continue;
+          }
+          if (a.soort === 'concept') {   // wv3092: pas gezet als Gmail CONCEPT_KLAAR terugmeldt
+            if (erbij.includes(CONCEPT_LABEL)) { db.prepare('UPDATE concept_klaar SET gezet = ?, vorig_gezet = NULL WHERE postvak = ? AND gmail_id = ? AND gezet IS NULL').run(iso(), pv, id); tel.concept = (tel.concept || 0) + 1; }
+            continue;
+          }
+          if (a.soort === 'concept_weg') {   // wv3092: het concept is weg; eraf leeg = het label stond er al niet meer (David haalde het weg)
+            db.prepare('UPDATE concept_klaar SET weg = ?, weg_door = ? WHERE postvak = ? AND gmail_id = ? AND weg IS NULL').run(iso(), eraf.includes(CONCEPT_LABEL) ? 'mailman' : 'elders', pv, id);
+            tel.concept_weg = (tel.concept_weg || 0) + 1;
             continue;
           }
           if (a.soort === 'afgedaan') {
@@ -3330,6 +3415,7 @@ function maak(o) {
         labelset: !!l2Live(p),   // wv2033 B8
         factuurstap: p.gedeeld ? undefined : stapStand(p, dag),   // wv2036 statuslabels: alleen tellingen
         afgedaan: p.gedeeld ? undefined : afgedaanStand(p, dag),   // wv2189: alleen tellingen
+        concept_klaar: p.id === 'gmail:david' && !p.gedeeld ? conceptStand(p, dag) : undefined,   // wv3092: alleen tellingen
         zaken: p.gedeeld ? undefined : zakenStand(p),   // wv2218: alleen tellingen
         routes_24u: db.prepare('SELECT count(*) n FROM route WHERE postvak = ? AND aangemaakt >= ?').get(p.id, dag).n,
         correcties_24u: db.prepare('SELECT count(*) n FROM correctie WHERE postvak = ? AND tijd >= ?').get(p.id, dag).n,
@@ -3344,6 +3430,14 @@ function maak(o) {
       .get(dag, STAP_POGINGEN, STAP_POGINGEN, p.id);
     const u = db.prepare("SELECT COALESCE(sum(uitkomst = 'fout'), 0) f, COALESCE(sum(uitkomst = 'overgeslagen'), 0) o FROM aanbod WHERE postvak = ? AND soort = 'factuurstap' AND tijd >= ?").get(p.id, dag);
     return { aan: stapMag(p).ok, in_sepa: s.in_sepa, is_betaald: s.is_betaald, gezet_24u: s.gezet_24u, open: s.open, opgegeven: s.opgegeven, fout_24u: u.f, overgeslagen_24u: u.o };
+  }
+  // wv3092: stand van CONCEPT_KLAAR. staat = label in Gmail en concept nog niet weg; wacht = nog te zetten; opgegeven = na CONCEPT_POGINGEN niet gezet
+  function conceptStand(p, dag) {
+    const s = db.prepare(`SELECT COALESCE(sum(gezet IS NOT NULL AND weg IS NULL), 0) staat, COALESCE(sum(gezet IS NULL AND weg IS NULL AND pogingen < ?), 0) wacht,
+      COALESCE(sum(gezet IS NULL AND weg IS NULL AND pogingen >= ?), 0) opgegeven, COALESCE(sum(gezet >= ?), 0) gezet_24u, COALESCE(sum(weg >= ?), 0) weg_24u
+      FROM concept_klaar WHERE postvak = ?`).get(CONCEPT_POGINGEN, CONCEPT_POGINGEN, dag, dag, p.id);
+    const u = db.prepare("SELECT COALESCE(sum(uitkomst = 'fout'), 0) f FROM aanbod WHERE postvak = ? AND soort IN ('concept', 'concept_weg') AND tijd >= ?").get(p.id, dag);
+    return Object.assign({ aan: !!conceptAan(p) }, s, { fout_24u: u.f });
   }
   // wv2189: stand van afgedaan (aantal mails). gevolgd = mail met een vlag die MailMan in de inbox zag; wacht = buiten de inbox gezien, nog niet af (zonder
   // schakelaar: wat MailMan zou weghalen); eigen = MailMans eigen archief (nooit)

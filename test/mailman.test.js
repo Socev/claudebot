@@ -3407,3 +3407,169 @@ test('wv3091 mailSluitBron: per bericht gezien, eerst in de inbox, door David af
   assert.equal(mm.mailVerzondenAan('ander@voorbeeld.invalid'), false);
   assert.equal(mm.mailVerzondenAan('kapot'), false);
 });
+
+// ── wv3092 CONCEPT_KLAAR: concept van Socev in de draad (register concept-klaar); eraf als het concept weg is (mailman-prive-weghalen) ──
+const CK_ID = 'Label_99';
+// zoals de n8n-grens: erbij alleen met een concept (DRAFT) in de draad, eraf alleen zonder; de draad moet die van de pod zijn
+function conceptPas(gm, drafts) {
+  return function (acties) {
+    const ck = function (a) { return a.soort === 'concept' || a.soort === 'concept_weg'; };
+    const uit = gm.pas(acties.filter(function (a) { return !ck(a); }));
+    for (const a of acties.filter(ck)) {
+      const x = gm.ber.get(a.gmail_id);
+      if (gm.fout) { uit.push({ gmail_id: a.gmail_id, ok: false, fout: 'HTTP 500' }); continue; }
+      if (!x || x.sent || x.thread !== a.thread_id) { uit.push({ gmail_id: a.gmail_id, ok: false, overgeslagen: true }); continue; }
+      const er = drafts.has(x.thread);
+      if (a.soort === 'concept') {
+        assert.deepEqual([a.erbij, a.eraf, !!a.draad], [['CONCEPT_KLAAR'], [], false]);
+        if (!er) { uit.push({ gmail_id: a.gmail_id, ok: false, overgeslagen: true }); continue; }
+        x.labels.add('CONCEPT_KLAAR'); uit.push({ gmail_id: a.gmail_id, erbij: ['CONCEPT_KLAAR'], eraf: [], ok: true });
+      } else {
+        assert.deepEqual([a.erbij, a.eraf, !!a.draad], [[], ['CONCEPT_KLAAR'], false]);
+        if (er) { uit.push({ gmail_id: a.gmail_id, ok: false, overgeslagen: true }); continue; }
+        const had = x.labels.delete('CONCEPT_KLAAR');
+        uit.push({ gmail_id: a.gmail_id, erbij: [], eraf: had ? ['CONCEPT_KLAAR'] : [], ok: true });
+      }
+    }
+    return uit;
+  };
+}
+function ckRonde(mm, gm, ids, pas) {
+  const r = ronde(mm, 'gmail:david');
+  mm.n8n('POST /mailman/nieuw', { ronde: r.ronde, postvak: 'gmail:david', ids, volledig: true });
+  const s = mm.n8n('POST /mailman/labelstaat', { ronde: r.ronde, postvak: 'gmail:david', labels: gm.lijsten() });
+  const l = mm.n8n('POST /mailman/labels', { ronde: r.ronde, postvak: 'gmail:david', ids });
+  const g = mm.n8n('POST /mailman/gezet', { ronde: r.ronde, postvak: 'gmail:david', resultaten: pas(l.j.acties || []) });
+  return { r, s, l, g, ck: (l.j.acties || []).filter(function (a) { return a.soort === 'concept' || a.soort === 'concept_weg'; }) };
+}
+function ckKamer() {
+  const bron = [], gevraagd = [];
+  const k = nieuweKamer({ conceptKlaar: function (pv) { gevraagd.push(pv); return bron.slice(); } });
+  return Object.assign(k, { bron, gevraagd, gm: nepGmail(), drafts: new Set() });
+}
+function ckStand(mm) { return mm.info().postvakken.find(function (p) { return p.id === 'gmail:david'; }).concept_klaar; }
+
+test('wv3092 conceptLabelId: alleen een eigen geldig ID naast een geldige labelset2', () => {
+  assert.equal(K.conceptLabelId({ ja: 'x', ids: Object.assign({}, IDS2, { CONCEPT_KLAAR: CK_ID }) }), CK_ID);
+  assert.equal(K.conceptLabelId({ ja: 'x', ids: IDS2 }), null, 'niet genoemd = uit');
+  assert.equal(K.conceptLabelId({ ja: 'x', ids: Object.assign({}, IDS2, { CONCEPT_KLAAR: IDS2.TWIJFEL }) }), null, 'ID van een ander label');
+  assert.equal(K.conceptLabelId({ ja: 'x', ids: Object.assign({}, IDS2, { CONCEPT_KLAAR: 'DRAFT' }) }), null, 'systeemlabel');
+  assert.equal(K.conceptLabelId({ ids: Object.assign({}, IDS2, { CONCEPT_KLAAR: CK_ID }) }), null, 'labelset2 zonder Ja');
+  assert.equal(K.conceptLabelId(null), null);
+  assert.equal(K.labelset2Lees({ ja: 'x', ids: Object.assign({}, IDS2, { CONCEPT_KLAAR: CK_ID }) }).namen.includes('CONCEPT_KLAAR'), false, 'niet in de vaste lijst (geen tik in de Mail-App)');
+});
+
+test('wv3092 CONCEPT_KLAAR: erbij na een concept van Socev (met concept in de draad), één keer; eraf pas als het concept weg is; nalopen begrensd', () => {
+  const { mm, dir, gm, bron, gevraagd, drafts } = ckKamer();
+  const m = mail(), n = mail(), vreemd = mail();
+  const ms = [m, n, vreemd];
+  draai(mm, 'gmail:david', ms, { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  ms.forEach(function (x) { gm.voeg(x); });
+  const ids = ms.map(function (x) { return x.id; }), pas = conceptPas(gm, drafts);
+  ckRonde(mm, gm, ids, pas);
+  bron.push({ besluit: rij(mm, m.id).id, draad: m.threadId, tijd: new Date(klok).toISOString() });
+  bron.push({ besluit: rij(mm, vreemd.id).id, draad: n.threadId, tijd: new Date(klok).toISOString() });   // draad hoort niet bij het besluit
+  bron.push({ besluit: 999999, draad: m.threadId, tijd: new Date(klok).toISOString() }, { besluit: 'x', draad: 'kapot!', tijd: 'nooit' });
+  drafts.add(m.threadId);
+  assert.deepEqual(ckRonde(mm, gm, ids, pas).ck, [], 'zonder label-ID in labelset2: niets');
+  assert.equal(gevraagd.length, 0, 'en de bron wordt niet eens gevraagd');
+  assert.equal(ckStand(mm).aan, false);
+  l2Toestaan(dir, { CONCEPT_KLAAR: CK_ID });
+  let x = ckRonde(mm, gm, ids, pas);
+  assert.deepEqual(x.ck.map(function (a) { return [a.soort, a.gmail_id, a.thread_id]; }), [['concept', m.id, m.threadId]], 'alleen het bericht met het concept, in zijn eigen draad');
+  assert.ok(gm.heeft(m.id, 'CONCEPT_KLAAR') && !gm.heeft(n.id, 'CONCEPT_KLAAR') && !gm.heeft(vreemd.id, 'CONCEPT_KLAAR'));
+  assert.equal(x.g.j.telling.concept, 1);
+  assert.ok(gevraagd.every(function (pv) { return pv === 'gmail:david'; }));
+  assert.equal(lsRij(mm, m.id, 'CONCEPT_KLAAR'), undefined, 'niet in label_staat (geen vaste lijst, geen draadlabel)');
+  // volgende ronden: niet opnieuw; nalopen pas na een half uur; concept staat er nog → label blijft
+  assert.deepEqual(ckRonde(mm, gm, ids, pas).ck, []);
+  klok += 31 * 60000;
+  x = ckRonde(mm, gm, ids, pas);
+  assert.deepEqual(x.ck.map(function (a) { return a.soort; }), ['concept_weg']);
+  assert.ok(gm.heeft(m.id, 'CONCEPT_KLAAR'), 'concept staat er nog: label blijft');
+  assert.equal(x.g.j.telling.fout, 0, 'overgeslagen is geen fout');
+  assert.deepEqual(ckRonde(mm, gm, ids, pas).ck, [], 'net nagelopen');
+  // David verstuurt het concept → bij de volgende controle eraf, daarna niets meer
+  drafts.delete(m.threadId);
+  klok += 31 * 60000;
+  x = ckRonde(mm, gm, ids, pas);
+  assert.deepEqual(x.ck.map(function (a) { return a.soort; }), ['concept_weg']);
+  assert.ok(!gm.heeft(m.id, 'CONCEPT_KLAAR'));
+  assert.equal(mm._db.prepare('SELECT weg_door FROM concept_klaar WHERE gmail_id = ?').get(m.id).weg_door, 'mailman');
+  klok += 7 * 3600000;
+  assert.deepEqual(ckRonde(mm, gm, ids, pas).ck, [], 'weg is weg');
+  assert.deepEqual(Object.assign({}, ckStand(mm)), { aan: true, staat: 0, wacht: 0, opgegeven: 0, gezet_24u: 1, weg_24u: 1, fout_24u: 0 });
+  assert.equal(mm.info().postvakken.find(function (p) { return p.id === 'gmail:groenhouten'; }).concept_klaar, undefined, 'doktersmaten nooit');
+  assert.equal(Object.keys(mm.mailLabelIds()).includes('CONCEPT_KLAAR'), false, 'Mail-App: geen tik op CONCEPT_KLAAR');
+});
+
+test('wv3092 CONCEPT_KLAAR: concept al weg vóór de ronde → na 5 pogingen opgegeven; nieuwer concept begint opnieuw; David haalt het label weg → nooit terug', () => {
+  const { mm, dir, gm, bron, drafts } = ckKamer();
+  const m = mail(), d = mail();
+  draai(mm, 'gmail:david', [m, d], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir, { CONCEPT_KLAAR: CK_ID });
+  gm.voeg(m); gm.voeg(d);
+  const ids = [m.id, d.id], pas = conceptPas(gm, drafts);
+  ckRonde(mm, gm, ids, pas);   // eerst de gewone labels (één actie per bericht per ronde)
+  bron.push({ besluit: rij(mm, m.id).id, draad: m.threadId, tijd: new Date(klok).toISOString() });
+  for (let i = 0; i < 5; i++) { const x = ckRonde(mm, gm, ids, pas); assert.deepEqual(x.ck.map(function (a) { return a.soort; }), ['concept'], 'poging ' + (i + 1)); klok += 15 * 60000; }
+  assert.deepEqual(ckRonde(mm, gm, ids, pas).ck, [], 'na 5 keer niet meer');
+  assert.ok(!gm.heeft(m.id, 'CONCEPT_KLAAR'));
+  assert.equal(ckStand(mm).opgegeven, 1);
+  // David laat Socev een nieuw concept zetten (Nog een concept) → opnieuw
+  bron[0] = { besluit: rij(mm, m.id).id, draad: m.threadId, tijd: new Date(klok).toISOString() };
+  drafts.add(m.threadId);
+  assert.deepEqual(ckRonde(mm, gm, ids, pas).ck.map(function (a) { return a.soort; }), ['concept']);
+  assert.ok(gm.heeft(m.id, 'CONCEPT_KLAAR'));
+  // David haalt CONCEPT_KLAAR zelf weg; het concept staat er nog → MailMan zet het niet terug
+  gm.weg(m.id, 'CONCEPT_KLAAR');
+  for (let i = 0; i < 3; i++) { klok += 31 * 60000; const x = ckRonde(mm, gm, ids, pas); assert.ok(x.ck.every(function (a) { return a.soort === 'concept_weg'; })); }
+  assert.ok(!gm.heeft(m.id, 'CONCEPT_KLAAR'), 'nooit terug');
+  drafts.delete(m.threadId); klok += 31 * 60000;
+  ckRonde(mm, gm, ids, pas);
+  assert.equal(mm._db.prepare('SELECT weg_door FROM concept_klaar WHERE gmail_id = ?').get(m.id).weg_door, 'elders', 'label stond er al niet meer');
+  // Gmail-fout bij zetten: telt als fout en als poging; daarna lukt het
+  bron.push({ besluit: rij(mm, d.id).id, draad: d.threadId, tijd: new Date(klok).toISOString() }); drafts.add(d.threadId);
+  gm.fout = true; const f = ckRonde(mm, gm, ids, pas); gm.fout = false;
+  assert.equal(f.g.j.telling.fout, 1);
+  klok += 15 * 60000;
+  ckRonde(mm, gm, ids, pas);
+  assert.ok(gm.heeft(d.id, 'CONCEPT_KLAAR'));
+  assert.equal(ckStand(mm).fout_24u, 1);
+  // na een week: nalopen elke 6 uur
+  klok += 8 * 86400000;
+  assert.deepEqual(ckRonde(mm, gm, ids, pas).ck.map(function (a) { return a.soort; }), ['concept_weg']);
+  klok += 3 * 3600000;
+  assert.deepEqual(ckRonde(mm, gm, ids, pas).ck, [], 'binnen 6 uur niet opnieuw');
+  klok += 3 * 3600000 + 60000;
+  assert.deepEqual(ckRonde(mm, gm, ids, pas).ck.map(function (a) { return a.soort; }), ['concept_weg']);
+});
+
+test('wv3092 review ZOU 1: nieuwer concept → label opnieuw (ook als David het oude weghaalde); lukt dat niet meer, dan gaat het oude label toch eraf', () => {
+  const { mm, dir, gm, bron, drafts } = ckKamer();
+  const m = mail(), q = mail();
+  draai(mm, 'gmail:david', [m, q], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir, { CONCEPT_KLAAR: CK_ID });
+  gm.voeg(m); gm.voeg(q);
+  const ids = [m.id, q.id], pas = conceptPas(gm, drafts);
+  ckRonde(mm, gm, ids, pas);
+  // (a) label gezet, David haalt het weg, verstuurt het concept en laat meteen een nieuw concept zetten (vóór de volgende controle)
+  bron.push({ besluit: rij(mm, m.id).id, draad: m.threadId, tijd: new Date(klok).toISOString() }); drafts.add(m.threadId);
+  ckRonde(mm, gm, ids, pas); assert.ok(gm.heeft(m.id, 'CONCEPT_KLAAR'));
+  gm.weg(m.id, 'CONCEPT_KLAAR'); klok += 5 * 60000;
+  bron[0] = { besluit: rij(mm, m.id).id, draad: m.threadId, tijd: new Date(klok).toISOString() };
+  assert.deepEqual(ckRonde(mm, gm, ids, pas).ck.map(function (a) { return a.soort; }), ['concept']);
+  assert.ok(gm.heeft(m.id, 'CONCEPT_KLAAR'), 'nieuw concept: label weer zichtbaar');
+  // (b) het label staat nog; een nieuw concept dat al weg is vóór MailMan het ziet → na 5 pogingen wordt het oude label toch nagelopen en weggehaald
+  bron.push({ besluit: rij(mm, q.id).id, draad: q.threadId, tijd: new Date(klok).toISOString() }); drafts.add(q.threadId);
+  ckRonde(mm, gm, ids, pas); assert.ok(gm.heeft(q.id, 'CONCEPT_KLAAR'));
+  klok += 5 * 60000; drafts.delete(q.threadId);
+  bron[1] = { besluit: rij(mm, q.id).id, draad: q.threadId, tijd: new Date(klok).toISOString() };
+  for (let i = 0; i < 5; i++) { klok += 15 * 60000; assert.ok(ckRonde(mm, gm, ids, pas).ck.some(function (a) { return a.gmail_id === q.id && a.soort === 'concept'; })); }
+  assert.ok(gm.heeft(q.id, 'CONCEPT_KLAAR'), 'nog het oude label');
+  klok += 31 * 60000;
+  const x = ckRonde(mm, gm, ids, pas);
+  assert.ok(x.ck.some(function (a) { return a.gmail_id === q.id && a.soort === 'concept_weg'; }));
+  assert.ok(!gm.heeft(q.id, 'CONCEPT_KLAAR'), 'oud label weg: er staat geen concept meer');
+});
