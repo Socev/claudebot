@@ -4270,7 +4270,7 @@ function handleRequest(req, res) {
       bewaker: bewakerInfo(),
       // wv3124: schijfdrukmeting per minuut (schijfdruk.js): laatste minuut, piek 24 u met tijdstip; ring onder scripts-staat/schijfdruk
       schijfdruk: schijfdrukStand,
-      promedico_agenda: promedicoAgenda ? promedicoAgenda.health() : null,   // wv3132
+      promedico_agenda: promedicoAgenda ? Object.assign({}, promedicoAgenda.health(), { app: typeof promedicoAppInfo === 'function' ? promedicoAppInfo() : { aan: false } }) : null,   // wv3132; wv3143: .app = Calendar-laag (laatste {op, dagen, ms}, geen tekst)
       // wv698: argv-detector (sleutelwaarden in /proc/*/cmdline); treffers_24u > 0 = er lekt iets, zie de box
       detector: argvDetInfo(),
       // wv715: de socev-loper (smalle gesprekken als uid 1002): stand, bereikbaar (ping elke minuut), lopend, fouten
@@ -14137,6 +14137,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
+        if (route.indexOf('GET /app/promedico/') === 0) return typeof appPromedico === 'function' ? appPromedico(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'promedico');   // wv3143: Promedico-laag in Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
         if (route === 'GET /app/osint' || route === 'POST /app/osint/zoek' || route === 'POST /app/osint/bestand' || route === 'GET /app/osint/instelling' || route === 'POST /app/osint/instelling' || route === 'GET /app/osint/grafiek') return typeof appOsint === 'function' ? appOsint(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'osint');   // wv2698: + bestand, instelling, grafiek   // wv2694: OVIS OSINT (logboek, zoeken)
@@ -22331,6 +22332,33 @@ async function appKalender(req, res, a, route) {
   return appStuur(res, u.status, u.body);
 }
 // ── einde OVIS Calendar ──
+// ── Promedico-laag in Calendar (wv3143) ──
+// wv3143 (15-11-2026): Promedico-agenda als eigen laag in Apps › Calendar (fase A, bouwplan "Promedico-agenda meelezen" § Kalender-laag).
+//   GET /app/promedico/<van>/<tot>     YYYY-MM-DD, hooguit 62 dagen
+// promedico-betekenis.js leest de staat van de ontvanger (PROMEDICO_AGENDA_DIR/staat.json) ALLEEN-LEZEND en de Google-regels uit dezelfde
+// tijdlijn als de Calendar, en geeft per dag blokken met betekenis/zekerheid/reden, open uren en botsingen. Omschrijvingen, dagnotitie en
+// Google-titels gaan alleen in het antwoord; de audit-reden en /health.promedico_agenda.app noemen alleen venster, aantal dagen en ms.
+const promedicoApp = (function () {
+  const p = path.join(__dirname, 'promedico-betekenis.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const staatPad = path.join(process.env.PROMEDICO_AGENDA_DIR || '/opt/data/promedico-agenda', 'staat.json');
+    return require(p).maakApp({ rpc: function (fn, body) { return appSbRpc(fn, body, 20000); },
+      leesStaat: function () { try { return fs.readFileSync(staatPad, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } } });
+  } catch (e) { logError('promedico-app', e); return null; }
+})();
+function promedicoAppInfo() { if (!promedicoApp) return { aan: false }; try { return promedicoApp.info(); } catch (e) { return { aan: true, fout: true }; } }
+appStaat.tellers.promedico = [];
+async function appPromedico(req, res, a, route) {
+  if (!promedicoApp) return appWeiger(res, 404, 'De Promedico-laag zit niet in deze versie van de pod', 'promedico ontbreekt');
+  if (!appTeller('promedico', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens promedico');
+  let u;
+  try { u = await promedicoApp.app({ methode: req.method, pad: route.replace(/^[A-Z]+ /, ''), nu: Date.now() }); }
+  catch (e) { logError('promedico-app', new Error(String(e && e.message || 'fout').slice(0, 80))); return appWeiger(res, 503, 'De Promedico-stand is nu niet te lezen; probeer het zo opnieuw', 'promedico fout'); }
+  res._app.reden = String(u.reden || 'promedico').slice(0, 80);
+  return appStuur(res, u.status, u.body);
+}
+// ── einde Promedico-laag ──
 // ── OVIS GHAWA (wv2877, 10-11-2026; plan vault "01_Ontwikkeling/OVIS GHAWA - plan naar een 8 (Fable 5.2, 10-11-2026)" § 8 fase 1) ──
 // Apps › GHAWA: de cijfers van de bouw in Sukuta (ECG) en van Stichting GHAWA, uit de eigen databank /opt/data/ghawa/ghawa.sqlite (één keer
 // gevuld uit het overdrachtsbestand, datastand 6-10-2026). ghawa.js rekent bij elke vraag na (dalasi leidend, nog open per regel, verrekening

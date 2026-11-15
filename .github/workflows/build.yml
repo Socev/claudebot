@@ -429,6 +429,10 @@ jobs:
       - name: "promedico-agenda (wv3132, ontvanger Chrome-extensie)"
         if: ${{ !cancelled() }}
         run: bash test/promedico-agenda.sh
+      # Promedico-laag in Calendar (wv3143): regels 1-6, open uren, botsing a-d, oud/niet gezien, route en server-blok, kruisproef per review-MOET.
+      - name: "promedico-betekenis (wv3143, Promedico-laag in Calendar)"
+        if: ${{ !cancelled() }}
+        run: bash test/promedico-betekenis.sh
       # OVIS Intake, aanleverweg (wv1282): CI-poort (alleen fs/path/crypto/node:sqlite, Authorization alleen naar de hash, register alleen in de
       # module), sleutels, envelop per veldtype, naampoort (elke WINCODE-soort), bytes, dubbel/afwijkend, herzienbaar, padpoging, onvolledig,
       # onderhoud, vrije velden, leesluik, de 23 markergevallen + bewaarregel, en per profiel voorbeeld, weigering en rondreis.

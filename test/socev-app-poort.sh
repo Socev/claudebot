@@ -1353,6 +1353,13 @@ async function bewijs(o) {
     }
     r = await vraag('GET', '/app/kalender', undefined, { pot: P.jar });
     toets('9 wv2333: met sessie voorbij de poort (404 zonder appKalender in dit blok)', r.status === 404, r.status);
+    // wv3143 (Promedico-laag in Calendar): de stand (HIS-omschrijvingen, Google-titels) zonder sessie niet te lezen, ook niet met een geldig venster
+    for (const pad of ['/app/promedico/2026-11-16/2026-11-20', '/app/promedico/2026-01-01/2026-06-01']) {
+      r = await vraag('GET', pad, undefined, {});
+      toets('9 wv3143: ' + pad + ' zonder sessie -> 401', r.status === 401, r.status);
+    }
+    r = await vraag('GET', '/app/promedico/2026-11-16/2026-11-20', undefined, { pot: P.jar });
+    toets('9 wv3143: met sessie voorbij de poort (404 zonder appPromedico in dit blok)', r.status === 404, r.status);
     // wv2264 (OVIS Shopper): zoektochten zonder sessie niet te lezen of op vervallen te zetten
     for (const [mt, pad] of [['GET', '/app/shopper'], ['GET', '/app/shopper/0123456789ab'], ['POST', '/app/shopper/0123456789ab/status'], ['POST', '/app/shopper/0123456789ab/nalezen'], ['GET', '/app/shopper/0123456789ab/taak']]) {
       r = await vraag(mt, pad, mt === 'POST' ? { status: 'vervallen' } : undefined, {});
