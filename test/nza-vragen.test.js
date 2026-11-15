@@ -164,3 +164,22 @@ test('markdown: vraag, antwoord, doorvraag, aanhangsel, absolute links alleen me
   assert.ok(kaal.includes('](/nza#stuk=proef-tb-2026&plek=3)'), 'onveilige basis = relatieve links');
   assert.strictEqual((await m.lijst())[0].aanhangsels, 1);
 });
+
+test('wv3157 zetCheck: bezig/fout bij één wisseling, weg met null; aanhangsel ernaast; onbekend = false', async () => {
+  const m = maak({ map: nieuwMap(), leesAppLog: async () => [] });
+  const id = await m.naAntwoord({ job_id: J(40), tekst: 'Proefvraag check', t: '2026-11-15T12:00:00Z', antwoord: 'Antwoord met [p. 1](/nza#stuk=proef-1&plek=1)', ok: true });
+  assert.strictEqual(await m.zetCheck(id, J(40), { status: 'bezig', start: '2026-11-15T12:01:00Z', model: 'Fable 5.2', job: J(41), fout: 'x' }), true);
+  let w = m.wisseling(id, J(40));
+  assert.deepStrictEqual(w.dubbelcheck, { status: 'bezig', start: '2026-11-15T12:01:00Z', model: 'Fable 5.2', job: J(41), fout: 'x' });
+  assert.strictEqual(await m.zetAanhangsel(id, J(40), { soort: 'dubbelcheck', titel: 'Dubbelcheck', model: 'Fable 5.2', md: '**1 bewering nagelopen**' }), true);
+  assert.strictEqual(await m.zetCheck(id, J(40), null), true);
+  w = m.wisseling(id, J(40));
+  assert.strictEqual(w.dubbelcheck, undefined);
+  assert.strictEqual(w.aanhangsels.length, 1);
+  assert.match(m.markdown((await m.draad(id)).draad), /### Dubbelcheck · .* · Fable 5\.2\n\n\*\*1 bewering nagelopen\*\*/);
+  assert.strictEqual(await m.zetCheck(id, J(99), { status: 'bezig' }), false);
+  assert.strictEqual(await m.zetCheck('d-kapot', J(40), { status: 'bezig' }), false);
+  assert.strictEqual(m.wisseling(id, J(99)), null);
+  await m.zetCheck(id, J(40), { status: 'raar', fout: 'mislukt' });
+  assert.strictEqual(m.wisseling(id, J(40)).dubbelcheck.status, 'fout');
+});

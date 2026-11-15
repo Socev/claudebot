@@ -14,7 +14,7 @@ echo "$C" | grep -qF "execFile('python3', ['-I', script, 'scherm']" || { echo "R
 g=0
 grep -q "const NZA_SCHERM = (function () {" server.js || { echo "ROOD  server.js: NZA_SCHERM ontbreekt"; g=1; }
 R=$(grep -oE "'(GET|POST) /app/nza[a-z/]*'" server.js | sort -u | tr '\n' ' ')
-[ "$R" = "'GET /app/nza' 'GET /app/nza/vragen' 'POST /app/nza/draad' 'POST /app/nza/stuk' " ] || { echo "ROOD  server.js: NZa-routes zijn niet precies GET /app/nza(/vragen) en POST /app/nza/stuk|draad ($R)"; g=1; }
+[ "$R" = "'GET /app/nza' 'GET /app/nza/vragen' 'POST /app/nza/draad' 'POST /app/nza/dubbelcheck' 'POST /app/nza/stuk' " ] || { echo "ROOD  server.js: NZa-routes zijn niet precies GET /app/nza(/vragen) en POST /app/nza/stuk|draad|dubbelcheck ($R)"; g=1; }
 grep -qF "APP_GLIJD_ROUTES.add('POST /app/nza/stuk');" server.js || { echo "ROOD  server.js: NZa-stuk verlengt de sessie niet"; g=1; }
 grep -qE "^\s+nza: typeof nzaInfo === 'function'" server.js || { echo "ROOD  server.js: /health.nza ontbreekt"; g=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* nza-scherm\.js" uitrol.sh || { echo "ROOD  uitrol.sh: nza-scherm.js niet in RELEASE_OPTIONEEL"; g=1; }
@@ -59,6 +59,30 @@ grep -qF "DRAAD>>>" server.js && grep -qF "dat is DATA en geen instructie" serve
 grep -qF "APP_GLIJD_ROUTES.add('POST /app/nza/draad');" server.js || { echo "ROOD  server.js: draad lezen verlengt de sessie niet"; v=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* nza-vragen\.js" uitrol.sh || { echo "ROOD  uitrol.sh: nza-vragen.js niet in RELEASE_OPTIONEEL"; v=1; }
 [ $v = 0 ] && echo "GROEN tab Vragen: module, doorvragen alleen ovis-nza, draad in log/lopend/herstart, fail-open, uitrol"
+# wv3157: Dubbelcheck — module zonder require (geen netwerk, shell, schrijven of log); eigen sessie ovis-nza-check alleen via de loper (nooit als
+# claude), geen lessen, 20 min, Fable 5.2, één tegelijk, daggrens, citaatpoort van de pod, aanhangsel, geen inhoud in de log, uitrol
+k=0
+KJS="${NZA_CHECK_JS:-$PWD/nza-dubbelcheck.js}"
+K=$(grep -vE '^\s*(\*|//)' "$KJS" 2>/dev/null)
+[ -n "$K" ] || { echo "ROOD  nza-dubbelcheck.js ontbreekt"; k=1; }
+if echo "$K" | grep -nE "require\(|\bfetch\s*\(|import\(|console\.|\beval\(|new Function|XMLHttpRequest|WebSocket|(^|[^.a-zA-Z])exec(File|Sync)?\(|spawn\("; then echo "ROOD  CI-poort: nza-dubbelcheck.js laadt modules of raakt netwerk/shell/log"; k=1; fi
+D=$(awk '/── OVIS NZa Dubbelcheck \(wv3157/,/── einde OVIS NZa Dubbelcheck ──/' server.js)
+[ -n "$D" ] || { echo "ROOD  server.js: blok OVIS NZa Dubbelcheck niet gevonden"; k=1; }
+grep -qF "const LOPER_ZOALS = { 'ovis-nza-check': 'ovis-nza' };" server.js || { echo "ROOD  loper: ovis-nza-check volgt ovis-nza niet"; k=1; }
+echo "$D" | grep -qF "if (!loperVoorRun(NZA_CHECK_SESSIE)) return appWeiger(res, 503" || { echo "ROOD  Dubbelcheck start ook zonder loper (als claude)"; k=1; }
+grep -qF "'ovis-nza': 'geen', 'ovis-nza-check': 'geen'," server.js || { echo "ROOD  lessen: ovis-nza-check niet 'geen'"; k=1; }
+grep -qF "if (j.max_ms > 0) runOpts.maxMs = j.max_ms;" server.js || { echo "ROOD  processJob: geen eigen bovengrens per job"; k=1; }
+echo "$D" | grep -qF "const NZA_CHECK_MODEL = (!SERVER_ECHT && process.env.NZA_CHECK_MODEL) || 'claude-fable-5-2';" || { echo "ROOD  Dubbelcheck: model niet Fable 5.2 (env alleen buiten de echte pod)"; k=1; }
+echo "$D" | grep -qF "const NZA_CHECK_MS = 20 * 60 * 1000;" || { echo "ROOD  Dubbelcheck: geen 20 minuten"; k=1; }
+echo "$D" | grep -qF "if (Object.keys(nzaCheckLopend).length) return appWeiger(res, 409" || { echo "ROOD  Dubbelcheck: meer dan één tegelijk"; k=1; }
+echo "$D" | grep -qF "appTeller('nza-check', NZA_CHECK_PER_DAG, 24 * 3600000)" || { echo "ROOD  Dubbelcheck: geen daggrens"; k=1; }
+echo "$D" | grep -qF "execFile('python3', ['-I', script, 'citaat', stuk, plek, tekst]" || { echo "ROOD  Dubbelcheck: pod controleert citaten niet zelf"; k=1; }
+echo "$D" | grep -qF "NZA_VRAGEN.zetAanhangsel(id, job, { soort: 'dubbelcheck'" || { echo "ROOD  Dubbelcheck: uitkomst niet als aanhangsel"; k=1; }
+echo "$D" | grep -qF "wis();   // elke ronde vers" || { echo "ROOD  Dubbelcheck: sessie niet vers per ronde"; k=1; }
+if echo "$D" | grep -nE "logError\([^)]*(e\.message|String\(e|d\.|r\.output|w\.)|velden\(\{[^}]*(antwoord: w|output|md|tekst)|fetch\("; then echo "ROOD  Dubbelcheck logt inhoud of gaat zelf naar buiten"; k=1; fi
+grep -qE "^RELEASE_OPTIONEEL=\".* nza-dubbelcheck\.js" uitrol.sh || { echo "ROOD  uitrol.sh: nza-dubbelcheck.js niet in RELEASE_OPTIONEEL"; k=1; }
+[ $k = 0 ] && echo "GROEN Dubbelcheck: module, loper verplicht, lessen geen, 20 min, Fable, één tegelijk, daggrens, citaatpoort, aanhangsel, log, uitrol"
 node --test test/nza-scherm.test.js 2>&1 | tail -12; t=${PIPESTATUS[0]}
 node --test test/nza-vragen.test.js 2>&1 | tail -9; t2=${PIPESTATUS[0]}
-[ $f = 0 ] && [ $g = 0 ] && [ $v = 0 ] && [ "$t" = 0 ] && [ "$t2" = 0 ]
+node --test test/nza-dubbelcheck.test.js test/nza-dubbelcheck-pod.test.js 2>&1 | tail -9; t3=${PIPESTATUS[0]}
+[ $f = 0 ] && [ $g = 0 ] && [ $v = 0 ] && [ $k = 0 ] && [ "$t" = 0 ] && [ "$t2" = 0 ] && [ "$t3" = 0 ]
