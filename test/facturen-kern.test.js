@@ -563,8 +563,8 @@ test('statusovergangen: precies de tabel uit § 4.4, elke andere combinatie gewe
       } else { assert.equal(r.ok, false, (van || '—') + ' ' + g + ' hoort geweigerd'); assert.equal(r.fout, 'ongeldige_overgang'); geweigerd++; }
     }
   }
-  assert.equal(toegestaan, 16);
-  assert.equal(geweigerd, (K.STATUSSEN.length + 1) * K.GEBEURTENISSEN.length - 16);
+  assert.equal(toegestaan, 18);   // wv3074: concept_klaar → concept_verdwenen, concept_verwijderd → verzonden_gezien
+  assert.equal(geweigerd, (K.STATUSSEN.length + 1) * K.GEBEURTENISSEN.length - 18);
   assert.equal(K.statusOvergang('bestaat_niet', 'bevestigen').fout, 'onbekende_status');
   assert.equal(K.statusOvergang('te_beoordelen', 'betalen').fout, 'onbekende_gebeurtenis');
 });
@@ -584,6 +584,11 @@ test('statusovergangen: voorwaarden (privé, terugdraaien na claimen, modus)', (
   assert.deepEqual(K.statusOvergang('wordt_verstuurd', 'gelukt', { modus: 'versturen' }), { ok: true, naar: 'verstuurd' });
   assert.equal(K.statusOvergang('wordt_verstuurd', 'gelukt', {}).ok, false);
   assert.equal(K.statusOvergang('verzending_mislukt', 'opnieuw_proberen', { entiteit: 'prive' }).ok, false);
+  // wv3074: weggegooid concept → concept_verwijderd; alleen Verzonden haalt hem daar weer uit (nooit terug de wachtrij in)
+  assert.deepEqual(K.statusOvergang('concept_klaar', 'concept_verdwenen', {}), { ok: true, naar: 'concept_verwijderd' });
+  assert.deepEqual(K.statusOvergang('concept_verwijderd', 'verzonden_gezien', {}), { ok: true, naar: 'verstuurd' });
+  for (const g of K.GEBEURTENISSEN) if (g !== 'verzonden_gezien') assert.equal(K.statusOvergang('concept_verwijderd', g, { entiteit: 'tolgaarde', betaalwijze: 'zelf', iban: IBAN.A, modus: 'concept' }).ok, false, g);
+  for (const van of K.STATUSSEN) if (van !== 'concept_klaar') assert.equal(K.statusOvergang(van, 'concept_verdwenen', {}).ok, false, van);
   // privé komt langs geen enkele weg in de wachtrij
   for (const van of [null].concat(K.STATUSSEN)) for (const g of K.GEBEURTENISSEN) {
     const r = K.statusOvergang(van, g, { entiteit: 'prive', betaalwijze: 'zelf', iban: IBAN.A, opdracht_status: 'wacht', modus: 'versturen' });

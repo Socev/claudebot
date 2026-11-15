@@ -118,7 +118,7 @@ function onbetaald(fdb) {
     "(SELECT min(coalesce((SELECT max(b.periode_tot) FROM kaart_bestand b WHERE b.kaart = k.id), (SELECT max(r2.transactiedatum) FROM kaart_regel r2 WHERE r2.kaart = k.id))) " +
     "FROM kaart k WHERE f.leverancier IS NOT NULL AND EXISTS (SELECT 1 FROM kaart_regel kr WHERE kr.kaart = k.id AND kr.leverancier = f.leverancier)) AS kaart_tot " +
     "FROM factuur f LEFT JOIN leverancier l ON l.id = f.leverancier LEFT JOIN entiteit e ON e.sleutel = f.entiteit " +
-    "WHERE f.status IN ('in_wachtrij','wordt_verstuurd','concept_klaar','verstuurd','verzending_mislukt') AND f.entiteit IS NOT NULL AND f.entiteit <> 'prive' " +
+    "WHERE f.status IN ('in_wachtrij','wordt_verstuurd','concept_klaar','verstuurd','verzending_mislukt','concept_verwijderd') AND f.entiteit IS NOT NULL AND f.entiteit <> 'prive' " +
     "AND f.soort = 'factuur' AND f.incl > 0 AND f.betaalspoor IN ('te_betalen','ingevoerd','incasso_verwacht','betaald_vooraf') " +
     "AND (SELECT count(*) FROM koppeling k WHERE k.factuur = f.id AND coalesce(k.methode, '') <> 'sepa_terug') <= " +
     "(SELECT count(*) FROM koppeling k WHERE k.factuur = f.id AND k.methode = 'sepa_terug') " +

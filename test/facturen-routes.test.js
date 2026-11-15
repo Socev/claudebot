@@ -1784,7 +1784,7 @@ test('wv1917: onbetaald(fdb) leest alleen bevestigde, zakelijke, niet-gekoppelde
   assert.ok(rijen.length > 0, 'zaad heeft open facturen');
   for (const r of rijen) {
     const f = t.f('id = ?', [r.id]);
-    assert.ok(['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'].includes(f.status));
+    assert.ok(['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt', 'concept_verwijderd'].includes(f.status));
     assert.ok(f.entiteit !== 'prive' && f.soort === 'factuur' && f.incl > 0);
     assert.ok(['te_betalen', 'ingevoerd', 'incasso_verwacht', 'betaald_vooraf'].includes(f.betaalspoor));
     assert.equal(t.n('SELECT count(*) n FROM koppeling WHERE factuur = ?', [r.id]), 0);

@@ -1324,8 +1324,8 @@ function leerUitBevestiging(voorstel, bevestigd, leverancier) {
 
 // ───────────────────────────── status, betaalspoor, opdracht ─────────────────────────────
 
-const STATUSSEN = ['te_beoordelen', 'geen_factuur', 'dubbel', 'in_wachtrij', 'prive_archief', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'];
-const GEBEURTENISSEN = ['aangeboden_factuur', 'aangeboden_geen_factuur', 'aangeboden_dubbel', 'bevestigen', 'geen_factuur', 'terugdraaien', 'koerier_haalt_op', 'gelukt', 'verzonden_gezien', 'mislukt_definitief', 'geweigerd', 'opnieuw_proberen', 'terug_naar_beoordelen', 'toch_factuur'];
+const STATUSSEN = ['te_beoordelen', 'geen_factuur', 'dubbel', 'in_wachtrij', 'prive_archief', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt', 'concept_verwijderd'];
+const GEBEURTENISSEN = ['aangeboden_factuur', 'aangeboden_geen_factuur', 'aangeboden_dubbel', 'bevestigen', 'geen_factuur', 'terugdraaien', 'koerier_haalt_op', 'gelukt', 'verzonden_gezien', 'mislukt_definitief', 'geweigerd', 'opnieuw_proberen', 'terug_naar_beoordelen', 'toch_factuur', 'concept_verdwenen'];
 // [van, gebeurtenis, naar, voorwaarde(ctx) → null of reden van weigering]. van null = nieuw document.
 const STATUS_OVERGANGEN = [
   [null, 'aangeboden_factuur', 'te_beoordelen'],
@@ -1340,6 +1340,11 @@ const STATUS_OVERGANGEN = [
   ['wordt_verstuurd', 'gelukt', 'verstuurd', (c) => (c.modus === 'versturen' ? null : 'modus is niet versturen')],
   ['wordt_verstuurd', 'gelukt', 'concept_klaar', (c) => (c.modus === 'concept' ? null : 'modus is niet concept')],
   ['concept_klaar', 'verzonden_gezien', 'verstuurd'],
+  // wv3074 (David 14-11-2026 19:37: "Soms komt er iets foutief terecht. Bijvoorbeeld een dubbele factuur, of iets wat ik zelf al eens had
+  // doorgestuurd. Dan delete ik het concept bewust"): het Gmail-concept staat niet meer in Concepten en niet in Verzonden → concept_verwijderd
+  // (stil, geen signaal; de factuur blijft in de databank). Duikt het token later toch in Verzonden op: alsnog verstuurd.
+  ['concept_klaar', 'concept_verdwenen', 'concept_verwijderd'],
+  ['concept_verwijderd', 'verzonden_gezien', 'verstuurd'],
   ['wordt_verstuurd', 'mislukt_definitief', 'verzending_mislukt'],
   ['wordt_verstuurd', 'geweigerd', 'verzending_mislukt'],
   ['verzending_mislukt', 'opnieuw_proberen', 'in_wachtrij', (c) => (c.entiteit === 'prive' ? 'privé gaat nooit naar de boekhouder' : null)],

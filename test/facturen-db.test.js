@@ -174,7 +174,7 @@ test('migratie 5 (wv1299): schema 4 → 5 verruimt bank/formaat met TRIODOS/trio
   const dir = map('m5');
   dbOpSchema4(dir).close();
   const f = D.open(dir);
-  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
+  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
   assert.equal(f.schema, D.SCHEMA_VERSIE);
   assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
@@ -232,7 +232,7 @@ test('migratie 5 (wv1299): een fout ná het bijwerken van sqlite_master rolt vol
   assert.deepEqual(tabelSql(db), voor);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   db.close();
-  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
+  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
 });
 
 test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets', () => {
@@ -1085,7 +1085,7 @@ test("migratie 11 (wv1326): signaal krijgt soort 'afwijkend_bedrag'; vanaf schem
   const dir2 = path.dirname(d2.pad);
   D.sluit(d2);
   const e2 = D.open(dir2);
-  assert.deepEqual(e2.toegepast, [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
+  assert.deepEqual(e2.toegepast, [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
   assert.equal(sigSql(e2.db), vers);
   D.sluit(e2);
 });
@@ -1256,4 +1256,62 @@ test('migratie 23 (wv2842): vanaf schema 22 mag de POT een batch, Privé nooit; 
   assert.equal(f.db.prepare('SELECT count(*) AS n FROM sepa_batch').get().n, 2);
   D.sluit(f);
   fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(leeg, { recursive: true, force: true });
+});
+
+// ───────────────────────────── wv3074: concept_verwijderd ─────────────────────────────
+
+const factuurSql = (db) => db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'factuur'").get().sql;
+
+test('migratie 25 (wv3074): schema 4 → nu verruimt factuur.status met concept_verwijderd; nieuw = gemigreerd; onzin blijft geweigerd; herhaalbaar', () => {
+  const dir = map('m25');
+  dbOpSchema4(dir).close();
+  const f = D.open(dir);
+  assert.ok(f.toegepast.includes(25));
+  const sql = factuurSql(f.db);
+  assert.equal(sql.split("'concept_verwijderd'").length - 1, 1, 'precies één keer in de status-CHECK');
+  const nieuw = D.open(map('m25-nieuw'));
+  assert.equal(factuurSql(nieuw.db), sql, 'een nieuwe database krijgt hetzelfde schema als een gemigreerde');
+  D.sluit(nieuw);
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  D.sluit(f);
+  // lichte terugrol (rij weg) → opnieuw openen past 25 opnieuw toe zonder iets te veranderen
+  const g = D.open(dir); g.db.prepare('DELETE FROM schema_migratie WHERE versie = 25').run(); D.sluit(g);
+  const h = D.open(dir); assert.deepEqual(h.toegepast, [25]); assert.equal(factuurSql(h.db), sql); D.sluit(h);
+});
+
+test('migratie 25 (wv3074): de CHECK laat concept_verwijderd toe en weigert onzin (zaad)', () => {
+  const f = D.open(map('m25-check'));
+  Z.zaai(f, { vandaag: '2026-10-22' });
+  const id = f.db.prepare("SELECT id FROM factuur WHERE status = 'concept_klaar' LIMIT 1").get().id;
+  f.db.prepare("UPDATE factuur SET status = 'concept_verwijderd' WHERE id = ?").run(id);
+  gooit(() => f.db.prepare("UPDATE factuur SET status = 'concept_weg' WHERE id = ?").run(id), /CHECK/);
+  D.sluit(f);
+});
+
+test('conceptVerdwenen (wv3074): concept_klaar → concept_verwijderd met audit (reden, vraag-id) en besluitrij; één keer; Verzonden haalt hem terug naar verstuurd', () => {
+  const f = D.open(map('m25-weg'));
+  Z.zaai(f, { vandaag: '2026-10-22' });
+  const op = f.db.prepare("SELECT o.* FROM opdracht o JOIN factuur x ON x.id = o.factuur WHERE x.status = 'concept_klaar' AND o.status = 'gelukt' AND o.modus = 'concept' LIMIT 1").get();
+  assert.ok(op, 'zaad heeft een gelukte conceptopdracht');
+  const voorBetaal = f.db.prepare('SELECT betaalspoor FROM factuur WHERE id = ?').get(op.factuur).betaalspoor;
+  const r = D.conceptVerdwenen(f, op.id, { nu: NU, wie: 'david (vraag f9d9e1cd)', reden: 'concept in Gmail verwijderd door David', vraag_id: 'f9d9e1cd' });
+  assert.deepEqual(r, { ok: true, gewijzigd: true });
+  const x = f.db.prepare('SELECT * FROM factuur WHERE id = ?').get(op.factuur);
+  assert.equal(x.status, 'concept_verwijderd');
+  assert.equal(x.betaalspoor, voorBetaal, 'betaalspoor loopt door');
+  const a = D.leesJson(f.db.prepare("SELECT * FROM audit WHERE wat = 'concept_verdwenen' AND object_id = ? ORDER BY id DESC LIMIT 1").get(op.factuur));
+  assert.equal(a.na.vraag_id, 'f9d9e1cd'); assert.equal(a.na.opdracht, op.id); assert.match(a.na.reden, /verwijderd door David/); assert.equal(a.voor.status, 'concept_klaar');
+  const b = f.db.prepare("SELECT * FROM besluit WHERE factuur = ? AND stap = 'verzending'").all(op.factuur);
+  assert.equal(b.length, 1); assert.equal(b[0].bron, 'mens'); assert.match(b[0].toelichting, /f9d9e1cd/);
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM signaal WHERE status = 'open' AND EXISTS (SELECT 1 FROM json_each(facturen) j WHERE j.value = ?)").get(op.factuur).n, 0, 'geen signaal');
+  // tweede keer: niets
+  assert.deepEqual(D.conceptVerdwenen(f, op.id, { nu: NU + 1000, vraag_id: 'f9d9e1cd' }), { ok: true, gewijzigd: false });
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM besluit WHERE factuur = ? AND stap = 'verzending'").get(op.factuur).n, 1);
+  // geen conceptopdracht (verstuurd in modus versturen / wacht) → weigeren
+  const ander = f.db.prepare("SELECT id FROM opdracht WHERE status = 'wacht' LIMIT 1").get();
+  assert.equal(D.conceptVerdwenen(f, ander.id, { nu: NU }).ok, false);
+  // toch in Verzonden: alsnog verstuurd
+  assert.deepEqual(D.verzondenGezien(f, op.id, { nu: NU + 2000, message_id: 'm1' }), { ok: true, gewijzigd: true });
+  assert.equal(f.db.prepare('SELECT status FROM factuur WHERE id = ?').get(op.factuur).status, 'verstuurd');
+  D.sluit(f);
 });

@@ -34,8 +34,9 @@ function nepGmail(o) {
       let lijst;
       const tok = tokens(q);
       if (tok.length) {
-        const alleenSent = /^in:sent /.test(q);
-        lijst = g.mails.filter((m) => tok.some((t) => m.onderwerp.indexOf('[ref ' + t + ']') >= 0) && (alleenSent ? m.labels.includes('SENT') : (m.labels.includes('SENT') || m.labels.includes('DRAFT'))));
+        const alleenSent = /^in:sent /.test(q), alleenDraft = /^in:draft /.test(q);   // wv3074: in:draft = alleen concepten
+        lijst = g.mails.filter((m) => tok.some((t) => m.onderwerp.indexOf('[ref ' + t + ']') >= 0) &&
+          (alleenSent ? m.labels.includes('SENT') : alleenDraft ? m.labels.includes('DRAFT') : (m.labels.includes('SENT') || m.labels.includes('DRAFT'))));
       } else {
         const na = /after:(\d{4})\/(\d{2})\/(\d{2})/.exec(q), voor = /before:(\d{4})\/(\d{2})\/(\d{2})/.exec(q);
         const van = na ? na.slice(1).join('-') : '0000', tot = voor ? voor.slice(1).join('-') : '9999';
@@ -86,7 +87,16 @@ function opzet() {
   const t = { dir, fdb, routes, eig, klok: NU };
   t.call = (methode, rest, d, x) => routes.app(fdb, { methode, pad: '/app/facturen' + (rest ? '/' + rest : ''), d: d || {}, rol: (x && x.rol) || eig, primair: true, nu: (x && x.nu) || NU,
     versOk: () => true, versVerbruik: () => {} });
-  t.ronde = (g, nu, extra) => { t.klok = nu; return KO.ronde(fdb, Object.assign(g.io(), extra || {}), { nu, klok: () => t.klok }); };
+  // wv3074: de concepten van het zaad staan in nep-Gmail (anders ziet de koerier ze als "door David weggegooid")
+  t.zaadConcepten = (g) => {
+    if (g.zaadGezet) return; g.zaadGezet = true;
+    for (const op of fdb.db.prepare("SELECT o.* FROM opdracht o JOIN factuur f ON f.id = o.factuur WHERE o.status = 'gelukt' AND o.modus = 'concept' AND f.status = 'concept_klaar'").all()) {
+      const tok = 'FV' + op.factuur, id = 'z' + op.id.slice(0, 15);
+      g.mails.push({ id, thread_id: id, aan: op.doeladres, onderwerp: 'Factuur (zaad) [ref ' + tok + ']', snippet: 'Kenmerk ' + tok + ', opdracht ' + op.id, labels: ['DRAFT'],
+        datum: new Date(NU).toISOString(), dag_lokaal: '2026-10-22' });
+    }
+  };
+  t.ronde = (g, nu, extra) => { t.zaadConcepten(g); t.klok = nu; return KO.ronde(fdb, Object.assign(g.io(), extra || {}), { nu, klok: () => t.klok }); };
   t.op = (id) => fdb.db.prepare('SELECT * FROM opdracht WHERE id = ?').get(id);
   t.fac = (id) => fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(id);
   t.n = (sql, p) => Number(fdb.db.prepare(sql).get(...(p || [])).n);
@@ -1157,4 +1167,102 @@ test('wv2969 herinnering, aanmaning, offerte: de lezer herkent de titel, zet de 
   assert.match(JSON.stringify(a.r.j), /lijkt een aanmaning: Exact keurt die af/);
   assert.equal(t.fac(f.id).status, 'te_beoordelen');
   assert.equal(zelfBevestig(t, f, { entiteit: 'sloel' }).r.status, 200);
+});
+
+
+// ───────────────────────────── wv3074: concept door David weggegooid ─────────────────────────────
+
+const weggooien = (g, tok) => { const i = g.mails.findIndex((m) => m.labels.includes('DRAFT') && m.onderwerp.indexOf('[ref ' + tok + ']') >= 0); assert.ok(i >= 0); return g.mails.splice(i, 1)[0]; };
+
+test('wv3074 concept weggegooid: na twee missers ≥ 45 min uit elkaar stil naar concept_verwijderd (audit, geen signaal, geen nieuw concept); zaadconcepten blijven', async () => {
+  const t = opzet(), g = nepGmail();
+  const { f, op, tok } = t.bevestig();
+  await t.ronde(g, VERSTUUR + 5 * MIN);
+  assert.equal(t.fac(f.id).status, 'concept_klaar');
+  const verwijderdVoor = t.n("SELECT count(*) AS n FROM factuur WHERE status = 'concept_verwijderd'");
+  const signalen = t.n("SELECT count(*) AS n FROM signaal");
+  weggooien(g, tok);
+  // te jong (< 2 uur na concept_klaar): nog geen misser
+  let u = await t.ronde(g, VERSTUUR + 65 * MIN);
+  assert.equal(u.detectie.concept_mist, 0, JSON.stringify(u.detectie));
+  u = await t.ronde(g, VERSTUUR + 130 * MIN);
+  assert.equal(u.ok, true, JSON.stringify(u.fouten));
+  assert.equal(u.detectie.concept_mist, 1);
+  assert.equal(t.fac(f.id).status, 'concept_klaar', 'één misser is niet genoeg');
+  assert.ok(g.zoek.some((q) => /^in:draft subject:\(/.test(q) && q.indexOf(tok) >= 0));
+  u = await t.ronde(g, VERSTUUR + 160 * MIN);
+  assert.equal(t.fac(f.id).status, 'concept_klaar', '< 45 min na de eerste misser');
+  u = await t.ronde(g, VERSTUUR + 180 * MIN);
+  assert.equal(u.ok, true, JSON.stringify(u.fouten));
+  assert.equal(u.detectie.concept_weg, 1);
+  assert.equal(t.fac(f.id).status, 'concept_verwijderd');
+  const a = D.leesJson(t.fdb.db.prepare("SELECT * FROM audit WHERE wat = 'concept_verdwenen' AND object_id = ?").get(f.id));
+  assert.equal(a.wie, 'koerier'); assert.equal(a.na.opdracht, op.id); assert.match(a.na.reden, /verwijderd door David/);
+  assert.equal(t.n("SELECT count(*) AS n FROM signaal"), signalen, 'geen signaal');
+  assert.equal(t.n("SELECT count(*) AS n FROM meta WHERE sleutel LIKE 'concept_mist:%'"), 0, 'markering opgeruimd');
+  assert.equal(g.concepten(tok), 0, 'geen nieuw concept');
+  assert.equal(t.n("SELECT count(*) AS n FROM factuur WHERE status = 'concept_verwijderd'"), verwijderdVoor + 1, 'alleen deze; concepten die nog in Gmail staan blijven');
+  // niet meer in concept_oud; wel in de lijst Verstuurd
+  const o = t.call('GET', '', {}, { nu: VERSTUUR + 5 * 86400000 }).j;
+  assert.equal(o.tellers.concept_oud, t.n("SELECT count(*) AS n FROM factuur WHERE status = 'concept_klaar'"));
+  const l = t.call('GET', 'lijst/verstuurd', {}, { nu: VERSTUUR + 4 * UUR });
+  assert.ok(JSON.stringify(l.j).indexOf(f.id) >= 0, 'zichtbaar onder Verstuurd');
+  // toch in Verzonden opgedoken (binnen 30 dagen): alsnog verstuurd
+  g.mails.push({ id: 's-laat', thread_id: 's-laat', aan: op.doeladres, onderwerp: 'Factuur [ref ' + tok + ']', snippet: '', labels: ['SENT'], datum: new Date(NU).toISOString(), dag_lokaal: '2026-10-22' });
+  u = await t.ronde(g, VERSTUUR + 6 * UUR);
+  assert.equal(t.fac(f.id).status, 'verstuurd', JSON.stringify(u.detectie));
+});
+
+test('wv3074 concept even weg en weer terug: markering vervalt; daarna opnieuw twee missers nodig', async () => {
+  const t = opzet(), g = nepGmail();
+  const { f, tok } = t.bevestig();
+  await t.ronde(g, VERSTUUR + 5 * MIN);
+  const m = weggooien(g, tok);
+  await t.ronde(g, VERSTUUR + 130 * MIN);
+  g.mails.push(m);                                   // weer gevonden (bv. een haperende zoekindex)
+  let u = await t.ronde(g, VERSTUUR + 190 * MIN);
+  assert.equal(t.fac(f.id).status, 'concept_klaar');
+  assert.equal(t.n("SELECT count(*) AS n FROM meta WHERE sleutel LIKE 'concept_mist:%'"), 0);
+  weggooien(g, tok);
+  u = await t.ronde(g, VERSTUUR + 250 * MIN);
+  assert.equal(u.detectie.concept_mist, 1);
+  assert.equal(t.fac(f.id).status, 'concept_klaar');
+  u = await t.ronde(g, VERSTUUR + 300 * MIN);
+  assert.equal(t.fac(f.id).status, 'concept_verwijderd');
+});
+
+test('wv3074 token in Verzonden naar een ander adres: niet "weg" (blijft concept_klaar); lees-luik-fout bij Concepten: niets', async () => {
+  const t = opzet(), g = nepGmail();
+  const { f, op, tok } = t.bevestig();
+  await t.ronde(g, VERSTUUR + 5 * MIN);
+  const m = weggooien(g, tok);
+  g.mails.push(Object.assign({}, m, { id: 's-ander', aan: 'iemand-anders@voorbeeld.invalid', labels: ['SENT'] }));
+  await t.ronde(g, VERSTUUR + 130 * MIN);
+  await t.ronde(g, VERSTUUR + 190 * MIN);
+  assert.equal(t.fac(f.id).status, 'concept_klaar');
+  assert.equal(t.n("SELECT count(*) AS n FROM meta WHERE sleutel = ?", ['concept_mist:' + op.id]), 0);
+  // Gmail-fout alleen bij de Concepten-zoekvraag → lees-luik-fout, geen overgang
+  g.mails = g.mails.filter((x) => x.id !== 's-ander');
+  const echt = g.luik;
+  g.luik = async (b) => (b.actie === 'mail_zoeken' && /^in:draft /.test(String(b.query)) ? { query: b.query, aantal: 0, mails: [], melding: 'fout bij zoeken: proef' } : echt(b));
+  for (const nu of [VERSTUUR + 250 * MIN, VERSTUUR + 310 * MIN]) {
+    const u = await t.ronde(g, nu);
+    assert.ok(u.fouten.some((x) => x.wat === 'lees-luik'), JSON.stringify(u.fouten));
+  }
+  assert.equal(t.fac(f.id).status, 'concept_klaar');
+});
+
+test('wv3074 rem: meer dan 3 concepten tegelijk "weg" → niets veranderen, fout concept_weg:rem in de hartslag', async () => {
+  const t = opzet(), g = nepGmail();
+  const b = [];
+  for (let i = 0; i < 4; i++) b.push(t.bevestig(b.length ? 'id NOT IN (' + b.map((x) => "'" + x.f.id + "'").join(',') + ')' : ''));
+  for (let i = 1; i <= 3 && b.some((x) => t.fac(x.f.id).status !== 'concept_klaar'); i++) await t.ronde(g, VERSTUUR + i * 5 * MIN);   // zaad: 8 claims per ronde
+  for (const x of b) assert.equal(t.fac(x.f.id).status, 'concept_klaar');
+  for (const x of b) weggooien(g, x.tok);
+  await t.ronde(g, VERSTUUR + 140 * MIN);
+  const u = await t.ronde(g, VERSTUUR + 200 * MIN);
+  assert.equal(u.ok, false);
+  assert.ok(u.fouten.some((x) => x.wat === 'concept_weg' && x.soort === 'rem'), JSON.stringify(u.fouten));
+  for (const x of b) assert.equal(t.fac(x.f.id).status, 'concept_klaar');
+  assert.match(JSON.parse(D.metaLees(t.fdb, 'koerier_ronde')).fout, /concept_weg:rem/);
 });

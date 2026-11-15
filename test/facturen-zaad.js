@@ -377,6 +377,13 @@ function zaai(fdb, o) {
     if (teBetalen) signaal(B.maakSignaal('te_betalen_niet_betaald', { entiteit: teBetalen.entiteit, leverancier: teBetalen.l.id, facturen: [teBetalen.id], bedrag_centen: teBetalen.incl }), tijd(0, 6));
     if (ingevoerd) signaal(B.maakSignaal('ingevoerd_niet_gezien', { entiteit: ingevoerd.entiteit, leverancier: ingevoerd.l.id, facturen: [ingevoerd.id], bedrag_centen: ingevoerd.incl }), tijd(-10, 6),
       { afhandeling: 'opnieuw_kijken', les: 'Betaling aan ' + ingevoerd.l.naam + ' nog niet op de bank; over drie dagen opnieuw kijken.', sluimer_tot: dag(-7), wanneer: tijd(-10, 9) });
+    // wv3074: één concept dat David in Gmail weggooide (na de hoofdlus, zodat de rest van het zaad gelijk blijft)
+    const weg = fdb.db.prepare("SELECT f.id, f.entiteit, o.id AS oid FROM factuur f JOIN opdracht o ON o.factuur = f.id AND o.status = 'gelukt' WHERE f.status = 'concept_klaar' ORDER BY f.id LIMIT 1").get();
+    if (weg) {
+      fdb.db.prepare("UPDATE factuur SET status = 'concept_verwijderd' WHERE id = ?").run(weg.id);
+      D.audit(fdb, { wie: 'koerier', wat: 'concept_verdwenen', object_soort: 'factuur', object_id: weg.id, entiteit: weg.entiteit, voor: { status: 'concept_klaar' },
+        na: { status: 'concept_verwijderd', opdracht: weg.oid, reden: 'zaad' }, wanneer: tijd(-1, 9) });
+    }
     D.metaZet(fdb, 'zaad', JSON.stringify({ vandaag, zaad: Number.isInteger(o.zaad) ? o.zaad : 824, door: 'test/facturen-zaad.js' }));
     return { facturen: facturen.length, stukken: tel.stukken, transacties: txs.length, tellingen: D.tellingen(fdb), ids: { eigenaar, praktijkmanager: pm, rekening: rek, afschriften: potAf } };
   });

@@ -33,7 +33,7 @@ const ARCHIEF_IN = ['beslist'];
 const ARCHIEF_UIT = ['genegeerd', 'geen_factuur'];
 // Facturen-app: vanaf verstuurd/ingevoerd, niet concept_klaar (§ 3.5)
 const APP_SPOREN = ['ingevoerd', 'incasso_verwacht', 'betaald_vooraf', 'betaald_gezien'];
-const APP_NIET = ['concept_klaar', 'te_beoordelen', 'geen_factuur', 'dubbel', 'prive_archief'];
+const APP_NIET = ['concept_klaar', 'te_beoordelen', 'geen_factuur', 'dubbel', 'prive_archief', 'concept_verwijderd'];   // wv3074
 
 class FinFout extends Error { constructor(code, uitleg) { super(code + ': ' + uitleg); this.code = code; this.uitleg = uitleg; } }
 
@@ -559,7 +559,7 @@ function besluit(dir, b, nu) {
  * (Supabase: blob + source_record 'bank' + source_revision met de periode). Statussen uit het FV2-archief zijn vrije tekst: alleen bekende
  * codes gaan mee, de rest als archief_overig.
  */
-const APP_STATUSSEN = ['te_beoordelen', 'geen_factuur', 'dubbel', 'in_wachtrij', 'prive_archief', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'];
+const APP_STATUSSEN = ['te_beoordelen', 'geen_factuur', 'dubbel', 'in_wachtrij', 'prive_archief', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt', 'concept_verwijderd'];
 const REGISTREER_POGINGEN = 5;
 function uitgeslotenCode(s) {
   if (s === 'genegeerd' || s === 'geen_factuur' || s === 'archief_leeg') return s;
