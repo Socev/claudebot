@@ -14,7 +14,9 @@ const crypto = require('crypto');
 
 const DRAAD_RE = /^d-[a-f0-9]{16}$/;
 const JOB_RE = /^[a-f0-9]{16}$/;
-const MAX_WISSELINGEN = 30;            // per draad; daarna een nieuwe vraag beginnen
+const MAX_WISSELINGEN = 30;            // per draad: daarna weigert appBeurt een doorvraag (context().vol); opslaan gooit nooit iets weg
+const MAX_OPSLAG = 2 * MAX_WISSELINGEN; // vangnet: een draad groeit niet eindeloos; erboven = eigen draad (niets weg; Codex wv3156 MOET 1)
+const CONTEXT_VRAAG_MAX = 2000;        // een vraag in de context hooguit zo lang (Codex ZOU 1)
 const MAX_ANTWOORD = 60000;            // zelfde grens als het app-log
 const MAX_VRAAG = 8000;
 const CONTEXT_MAX = 40000;             // tekens draadcontext in de prompt van een doorvraag
@@ -135,7 +137,7 @@ function maak(opts) {
         }
         d = { id: id, versie: 1, gemaakt: r.getypt || r.t || new Date(nu()).toISOString(), wisselingen: [] };
       }
-      if (d.wisselingen.length >= MAX_WISSELINGEN) return id;
+      if (d.wisselingen.length >= MAX_OPSLAG) return naAntwoord(Object.assign({}, r, { draad: undefined }));   // nooit stil weg
       d.wisselingen.push(wisselingVan(r));
       d.wisselingen.sort(function (a, b) { return Date.parse(a.getypt || a.t) - Date.parse(b.getypt || b.t); });
       d.bijgewerkt = new Date(nu()).toISOString();
@@ -220,17 +222,27 @@ function maak(opts) {
     const ws = d.wisselingen.filter(function (w) { return w.ok; });
     if (!ws.length) return null;
     if (d.wisselingen.length >= MAX_WISSELINGEN) return { vol: true };
-    const delen = ws.map(function (w, i) { return { kop: (i === 0 ? 'Vraag' : 'Doorvraag ' + i) + ' (' + tijdNl(w.getypt || w.t) + '): ' + w.vraag, a: w.antwoord }; });
-    let ruimte = CONTEXT_MAX - delen.reduce(function (s, x) { return s + x.kop.length + 40; }, 0);
-    // van jong naar oud volledig, oudere antwoorden ingekort als het niet past
+    // Het hele blok (vragen + antwoorden) binnen CONTEXT_MAX: van jong naar oud; past een ouder antwoord niet meer heel, dan ingekort; past
+    // ook de vraag niet meer, dan stopt het daar (oudere wisselingen weggelaten, met een regel). De jongste vraag+antwoord gaan altijd mee.
+    const delen = ws.map(function (w, i) {
+      const v = String(w.vraag || '');
+      return { kop: (i === 0 ? 'Vraag' : 'Doorvraag ' + i) + ' (' + tijdNl(w.getypt || w.t) + '): ' + (v.length > CONTEXT_VRAAG_MAX ? v.slice(0, CONTEXT_VRAAG_MAX) + ' […]' : v), a: w.antwoord };
+    });
+    let ruimte = CONTEXT_MAX;
+    const mee = [];
     for (let i = delen.length - 1; i >= 0; i--) {
       const x = delen[i];
-      if (x.a.length <= ruimte) { ruimte -= x.a.length; continue; }
-      const k = Math.max(0, ruimte);
-      x.a = k > 400 ? x.a.slice(0, k) + '\n[… rest van dit eerdere antwoord weggelaten]' : '[eerder antwoord weggelaten wegens lengte]';
+      const vast = x.kop.length + 40;
+      if (mee.length && vast + 200 > ruimte) { mee.unshift({ kop: '[' + (i + 1) + ' eerdere vraag/vragen weggelaten wegens lengte]', a: '' }); break; }
+      ruimte -= vast;
+      if (x.a.length > ruimte) {
+        const k = Math.max(0, ruimte - 60);
+        x.a = mee.length && k <= 400 ? '[eerder antwoord weggelaten wegens lengte]' : x.a.slice(0, Math.max(k, mee.length ? 0 : 1000)) + '\n[… rest van dit antwoord weggelaten]';
+      }
       ruimte -= x.a.length;
+      mee.unshift(x);
     }
-    const tekst = delen.map(function (x) { return x.kop + '\nJouw antwoord toen:\n' + x.a; }).join('\n\n---\n\n');
+    const tekst = mee.map(function (x) { return x.a ? x.kop + '\nJouw antwoord toen:\n' + x.a : x.kop; }).join('\n\n---\n\n');
     return { tekst: tekst, wisselingen: d.wisselingen.length };
   }
 

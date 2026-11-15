@@ -104,11 +104,31 @@ test('context: lange antwoorden ingekort tot de grens, jongste het volledigst; v
   const c = m.context(id);
   assert.ok(c.tekst.length <= 41000, 'lengte ' + c.tekst.length);
   assert.ok(c.tekst.includes('J'.repeat(30000)), 'jongste antwoord heel');
-  assert.ok(c.tekst.includes('[… rest van dit eerdere antwoord weggelaten]'));
+  assert.ok(c.tekst.includes('[… rest van dit antwoord weggelaten]') && c.tekst.includes('O'.repeat(5000)), 'ouder antwoord ingekort, begin blijft');
   for (let i = 2; i < 30; i++) await m.naAntwoord({ job_id: J(40 + i), tekst: 'v' + i, antwoord: 'a', ok: true, draad: id, t: new Date(Date.parse('2026-11-15T10:01:00Z') + i * 60000).toISOString() });
   assert.deepStrictEqual(m.context(id), { vol: true });
-  assert.strictEqual(await m.naAntwoord({ job_id: J(80), tekst: 'te veel', antwoord: 'a', ok: true, draad: id }), id);
-  assert.strictEqual((await m.draad(id)).draad.wisselingen.length, 30);
+  // Codex MOET 1: een al geaccepteerde doorvraag boven de 30 gaat niet verloren
+  assert.strictEqual(await m.naAntwoord({ job_id: J(80), tekst: 'nog één', antwoord: 'a', ok: true, draad: id }), id);
+  assert.strictEqual((await m.draad(id)).draad.wisselingen.length, 31);
+  for (let i = 31; i < 60; i++) await m.naAntwoord({ job_id: J(100 + i), tekst: 'v' + i, antwoord: 'a', ok: true, draad: id });
+  assert.strictEqual((await m.draad(id)).draad.wisselingen.length, 60);
+  assert.strictEqual(await m.naAntwoord({ job_id: J(200), tekst: 'boven het vangnet', antwoord: 'a', ok: true, draad: id }), 'd-' + J(200), 'eigen draad, niet weg');
+});
+
+test('context: lange vragen tellen mee in de grens (Codex ZOU 1); jongste wisseling altijd mee', async () => {
+  const m = maak({ map: nieuwMap(), leesAppLog: async () => [] });
+  const id = await m.naAntwoord({ job_id: J(300), tekst: 'Q'.repeat(8000), antwoord: 'EERSTE', ok: true, t: '2026-11-15T10:00:00Z' });
+  for (let i = 1; i < 12; i++) await m.naAntwoord({ job_id: J(300 + i), tekst: 'Q'.repeat(8000), antwoord: 'A' + i + 'x'.repeat(3000), ok: true, draad: id, t: new Date(Date.parse('2026-11-15T10:00:00Z') + i * 60000).toISOString() });
+  const c = m.context(id);
+  assert.ok(c.tekst.length <= 40500, 'lengte ' + c.tekst.length);
+  assert.ok(c.tekst.includes('A11' + 'x'.repeat(3000)), 'jongste antwoord heel');
+  assert.ok(!c.tekst.includes('Q'.repeat(2001)), 'vraag ingekort');
+  assert.ok(/eerdere vraag\/vragen weggelaten/.test(c.tekst), 'oudste weggelaten met een regel');
+  // één reusachtig antwoord: toch begrensd, begin blijft
+  const m2 = maak({ map: nieuwMap(), leesAppLog: async () => [] });
+  const id2 = await m2.naAntwoord({ job_id: J(400), tekst: 'v', antwoord: 'B'.repeat(59000), ok: true });
+  const c2 = m2.context(id2);
+  assert.ok(c2.tekst.length <= 40500 && c2.tekst.includes('B'.repeat(1000)), 'lengte ' + c2.tekst.length);
 });
 
 test('log van de agent: precies één regel in het tijdvak = bronnen en niet_in_dossier erbij (UTC of Nederlandse tijd)', async () => {
