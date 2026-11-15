@@ -18,7 +18,7 @@ const nu0 = L.werkruimtesUitBestand(null);
 let r = L.werkruimtePas(nu0, { versie: 0, id: 'geld', set: { tabs: ['facturen', 'financien', 'pot'], naast: ['facturen', 'financien'] } }, false);
 toets('3 eerste set: versie 1, veranderd', r.ok && r.veranderd && r.stand.versie === 1 && r.stand.sets.geld.tabs.join() === 'facturen,financien,pot', r);
 const nu1 = r.stand;
-r = L.werkruimtePas(nu1, { versie: 0, id: 'post', set: { tabs: ['mailman'] } }, false);
+r = L.werkruimtePas(nu1, { versie: 0, id: 'post', set: { tabs: ['mail'] } }, false);
 toets('4 oude versie → 409', !r.ok && r.status === 409, r);
 r = L.werkruimtePas(nu1, { versie: 1, id: 'geld', set: { tabs: ['facturen', 'financien', 'pot'], naast: ['facturen', 'financien'] } }, false);
 toets('4b zelfde = niets veranderd', r.ok && !r.veranderd, r);
@@ -28,7 +28,7 @@ const fout = [
   ['tab-id met app:-voorvoegsel', { versie: 1, id: 'post', set: { tabs: ['app:pot'] } }],
   ['dubbel', { versie: 1, id: 'post', set: { tabs: ['pot', 'pot'] } }],
   ['leeg', { versie: 1, id: 'post', set: { tabs: [] } }],
-  ['meer dan 8', { versie: 1, id: 'post', set: { tabs: ['pot', 'facturen', 'financien', 'mail', 'mailman', 'osint', 'pakjes', 'shopper', 'tripper'] } }],
+  ['meer dan 8', { versie: 1, id: 'post', set: { tabs: ['pot', 'facturen', 'financien', 'mail', 'bestanden', 'osint', 'pakjes', 'shopper', 'tripper'] } }],
   ['naast buiten de set', { versie: 1, id: 'post', set: { tabs: ['pot', 'facturen'], naast: ['pot', 'osint'] } }],
   ['naast van 1', { versie: 1, id: 'post', set: { tabs: ['pot', 'facturen'], naast: ['pot'] } }],
   ['naast van 4', { versie: 1, id: 'post', set: { tabs: ['pot', 'facturen', 'osint', 'mail'], naast: ['pot', 'facturen', 'osint', 'mail'] } }],
