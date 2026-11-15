@@ -22,6 +22,11 @@
  *             op /health.schijfdruk; bewaker.js zet bij een ingreep de laatste 15 minuten in zijn momentopname.
  *   melden    stilte is de default: geen bericht aan David. Wel één box-rij als full avg60 langer dan 10 min boven 50 % blijft
  *             (hooguit 1x per 24 u, alarm.json), met tijdvak en zwaarste apparaat.
+ *   NVMe      (wv3126) elke 10 s sysfs: controllerstatus en /sys/block/nvmeNn1/stat; per minuut veld nv in het record (latentie ms per
+ *             opdracht, MB, % bezet, inflight, stilstand, temperatuur). Bij een drukperiode komt het oordeel 'schijf hapert' of
+ *             'drukte van elders' met de getallen in de box-rij. Status ≠ live of een vastzittende I/O (inflight > 0 en ≥ 30 s geen
+ *             afgeronde opdracht: lezen, schrijven, discard of flush) = altijd een box-rij [direct] en hooguit 1x per dag één regel aan David via bericht.py (niet 23:00-07:00).
+ *             Geen noodstop. Leesstuk: 00_Systeem/Schijf van Olares.md.
  * Uitzetten: touch /opt/data/schijfdruk-uit (gelezen bij de start van het proces) of SCHIJFDRUK=0 in de omgeving van server.js.
  * Toets: test/schijfdruk.sh (nep-/proc, eigen paden; raakt de pod niet).
  */
@@ -67,8 +72,19 @@ const C = {
   alarmPct: getal('SCHIJFDRUK_ALARM_PCT', 50),
   alarmMs: getal('SCHIJFDRUK_ALARM_MS', 10 * 60000),
   alarmPauze: getal('SCHIJFDRUK_ALARM_PAUZE_MS', 24 * 3600000),
-  vensterMs: getal('SCHIJFDRUK_VENSTER_MS', 24 * 3600000)
+  vensterMs: getal('SCHIJFDRUK_VENSTER_MS', 24 * 3600000),
+  // wv3126: NVMe-meting
+  nvTik: getal('SCHIJFDRUK_NV_MS', 10000),          // elke 10 s sysfs lezen (stat + state), per minuut één record
+  nvStilS: getal('SCHIJFDRUK_NV_STIL_S', 30),       // inflight > 0 en zo lang geen afgeronde opdracht = vastzittende I/O (io_timeout van de kernel)
+  nvLatMs: getal('SCHIJFDRUK_NV_LAT_MS', 500),      // gemiddelde ms per opdracht boven dit = traag
+  nvWeinigMb: getal('SCHIJFDRUK_NV_WEINIG_MB', 600), // MB per minuut (lezen + schrijven) onder dit = "weinig verkeer"
+  haperBoxPauze: getal('SCHIJFDRUK_HAPER_BOX_PAUZE_MS', 30 * 60000),   // tussen twee box-rijen van twee verschillende incidenten
+  haperBerichtPauze: getal('SCHIJFDRUK_HAPER_BERICHT_PAUZE_MS', 24 * 3600000),   // hooguit 1 bericht per dag aan David
+  haperHerstelMs: getal('SCHIJFDRUK_HAPER_HERSTEL_MS', 3 * 60000)   // zo lang gezond = incident voorbij
 };
+const SYS = process.env.SCHIJFDRUK_SYS || '/sys';
+const HAPER_BESTAND = path.join(DIR, 'haper.json');
+const BERICHT = process.env.SCHIJFDRUK_BERICHT || '/opt/data/mk-scripts/bericht.py';
 
 const mono = () => Number(process.hrtime.bigint() / 1000000n);
 const wacht = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -175,9 +191,217 @@ async function monster() {
     }
     vorige = { ms: m, schijven: s };
   }
+  const nvr = await nvVoorRecord();   // wv3126: NVMe-latentie en -status van de afgelopen minuut
+  if (nvr) r.nv = nvr;
   if (fouten.length) r.fout = fouten.join(',');
   r.ms = wand;
   return r;
+}
+
+// ── wv3126: NVMe-latentie en -status ────────────────────────────────────────────────────────────────────────────────
+// Doel: "de schijf hapert" scheiden van "een andere app schrijft veel". Elke C.nvTik (10 s) uit sysfs: controllerstatus
+// (/sys/class/nvme/nvmeN/state) en /sys/block/nvmeNn1/stat (afgeronde opdrachten, sectoren, ms per opdracht, io_ticks, inflight).
+// De tellers worden per minuut opgeteld tot één veld nv in het record: s status (de slechtste van de minuut), r/w aantal opdrachten,
+// mr/mw MB, lr/lw gemiddelde ms per opdracht, lm het slechtste gemiddelde van één venster van 10 s (een opdracht van 40 s verschijnt
+// pas als hij klaar is, dus in het venster waarin hij eindigt), bz % bezet, i inflight, st langste stilstand in s (inflight > 0 en
+// geen enkele opdracht afgerond), t temperatuur, n aantal vensters. Alleen sysfs: geen dmesg, journal of SMART nodig (niet leesbaar
+// vanuit de pod). Een temperatuurlezing stuurt een commando naar de controller en gaat daarom alleen per minuut en alleen als hij live is.
+const NVNAAM = /^nvme\d+$/, NVBLOK = /^nvme\d+n\d+$/;
+let nvDev = [];            // [{ ctrl, blok, temp }]  temp = pad naar temp1_input of null
+let nvOntdekt = 0;
+const nvAcc = {};          // per blok: { vorig: {st, ms}, acc, niet: Set, stilSinds }
+let nvBezig = false;
+let incident = null;       // { sinds, reden, details, gezondSinds, boxKlaar, msgKlaar, boxLaatst, boxPog, msgLaatst, msgPog }
+let haperBezig = false;
+let haperStaat = { box: 0, bericht: 0 };   // ms van de laatste box-rij en het laatste bericht (ook na een herstart: haper.json)
+const nul = () => ({ n: 0, dr: 0, dw: 0, drs: 0, dws: 0, drt: 0, dwt: 0, dtk: 0, dms: 0, lm: 0, stil: 0, infl: 0 });
+
+async function nvOntdek() {
+  const cs = await metGrens(fsp.readdir(SYS + '/class/nvme'), C.proc, null);
+  if (!cs) { nvOntdekt = Date.now(); return; }   // geen NVMe of niet te lezen: houd de lijst van de vorige keer
+  const uit = [];
+  for (const c of cs.filter((n) => NVNAAM.test(n)).sort()) {
+    const inh = (await metGrens(fsp.readdir(SYS + '/class/nvme/' + c), C.proc, null)) || [];
+    const hw = inh.find((n) => /^hwmon\d+$/.test(n));
+    for (const b of inh.filter((n) => NVBLOK.test(n)).sort()) uit.push({ ctrl: c, blok: b, temp: hw ? SYS + '/class/nvme/' + c + '/' + hw + '/temp1_input' : null });
+  }
+  nvDev = uit; nvOntdekt = Date.now();
+}
+function leesStat(t) {
+  const g = String(t || '').trim().split(/\s+/).map(Number);   // 0 reads, 2 sectoren gelezen, 3 ms lezen, 4 writes, 6 sectoren geschreven, 7 ms schrijven, 8 inflight, 9 io_ticks
+  if (g.length < 10 || g.some((x) => !Number.isFinite(x))) return null;
+  // voortgang = ook discard (11, kernel >= 5.5) en flush (15, kernel >= 5.5): inflight telt die mee, dus een langdurige trim of flush is geen stilstand
+  return { r: g[0], rs: g[2], rt: g[3], w: g[4], ws: g[6], wt: g[7], infl: g[8], tick: g[9], x: (g[11] || 0) + (g[15] || 0) };
+}
+async function nvTik() {
+  if (nvBezig || fsOpen > MAXOPEN) return;   // vorige ronde nog bezig, of lezingen die vastzitten bezetten de pool
+  nvBezig = true;
+  try {
+    if (!nvDev.length ? Date.now() - nvOntdekt > 60000 : Date.now() - nvOntdekt > 5 * 60000) await nvOntdek();
+    let probleem = null;
+    for (const d of nvDev) {
+      if (fsOpen > MAXOPEN) break;
+      const staatT = await lees(SYS + '/class/nvme/' + d.ctrl + '/state', C.proc);
+      const st = leesStat(await lees(SYS + '/block/' + d.blok + '/stat', C.proc));
+      const m = mono();
+      const a = nvAcc[d.blok] || (nvAcc[d.blok] = { vorig: null, acc: nul(), niet: new Set(), stilSinds: null });
+      const staat = staatT === null ? null : staatT.trim();
+      if (staat && staat !== 'live') a.niet.add(staat);
+      let stil = 0;
+      if (st) {
+        const v = a.vorig;
+        if (v) {
+          const dx = st.x - v.st.x, dr = st.r - v.st.r, dw = st.w - v.st.w, drt = st.rt - v.st.rt, dwt = st.wt - v.st.wt, drs = st.rs - v.st.rs, dws = st.ws - v.st.ws, dtk = st.tick - v.st.tick;
+          if (dx < 0 || dr < 0 || dw < 0 || drt < 0 || dwt < 0 || drs < 0 || dws < 0 || dtk < 0) a.stilSinds = null;   // teller teruggezet: geen delta
+          else {
+            if (st.infl > 0 && dr + dw + dx === 0) { if (a.stilSinds === null) a.stilSinds = m; } else a.stilSinds = null;
+            stil = a.stilSinds === null ? 0 : Math.round((m - a.stilSinds) / 1000);
+            const x = a.acc;
+            x.n++; x.dr += dr; x.dw += dw; x.drs += drs; x.dws += dws; x.drt += drt; x.dwt += dwt; x.dtk += dtk; x.dms += m - v.ms;
+            x.lm = Math.max(x.lm, dr ? drt / dr : 0, dw ? dwt / dw : 0); x.stil = Math.max(x.stil, stil); x.infl = st.infl;
+          }
+        }
+        a.vorig = { st: st, ms: m };
+      }
+      if (staat && staat !== 'live') probleem = probleem || { reden: 'status "' + staat + '" in plaats van live', blok: d.blok, staat: staat, stil: stil, infl: st ? st.infl : null };
+      else if (stil >= C.nvStilS) probleem = probleem || { reden: 'vastzittende I/O: ' + st.infl + ' opdrachten wachten en al ' + stil + ' s is er geen enkele afgerond', blok: d.blok, staat: staat, stil: stil, infl: st.infl };
+    }
+    incidentBijwerken(probleem);
+  } catch (e) {} finally { nvBezig = false; }
+}
+async function nvVoorRecord() {
+  const uit = {}; let n = 0;
+  for (const d of nvDev) {
+    const a = nvAcc[d.blok]; if (!a || !a.acc.n) continue;
+    const x = a.acc, s = a.niet.size ? Array.from(a.niet).join('/') : 'live';
+    let t = null;
+    if (d.temp && s === 'live' && fsOpen <= MAXOPEN) { const tt = parseInt(await lees(d.temp, C.proc), 10); if (Number.isFinite(tt)) t = rond(tt / 1000, 10); }
+    uit[d.blok] = { s: s, r: x.dr, w: x.dw, mr: rond(x.drs * 512 / 1048576, 10), mw: rond(x.dws * 512 / 1048576, 10), lr: x.dr ? rond(x.drt / x.dr, 10) : null, lw: x.dw ? rond(x.dwt / x.dw, 10) : null,
+      lm: rond(x.lm, 10), bz: x.dms ? rond(x.dtk / x.dms * 100, 10) : null, i: x.infl, st: x.stil, t: t, n: x.n };
+    a.acc = nul(); a.niet = new Set(); n++;
+  }
+  return n ? uit : null;
+}
+
+// Het oordeel bij een drukperiode: hapert de schijf, of komt de drukte van elders? Hapering = status ≠ live, een vastzittende I/O of
+// trage opdrachten (> C.nvLatMs ms in een venster van 10 s) bij weinig verkeer (< C.nvWeinigMb MB in die minuut); drukte = veel MB bij
+// normale latentie. Veel MB bij trage opdrachten is een verzadigde schijf: dat is drukte, geen defect, en staat met de getallen erbij.
+function nvOordeel(venster) {
+  const staten = new Set(), apparaten = new Set();
+  let n = 0, ops = 0, somR = 0, opsR = 0, somW = 0, opsW = 0, mb = 0, mbPiek = 0, lm = 0, lmT = null, lmMb = 0, stil = 0, tr = false;
+  for (const r of venster) {
+    if (!r.nv) continue;
+    for (const k of Object.keys(r.nv)) {
+      const v = r.nv[k]; n++; apparaten.add(k);
+      const m = (v.mr || 0) + (v.mw || 0);
+      mb += m; mbPiek = Math.max(mbPiek, m);
+      if (v.lr !== null && v.lr !== undefined) { somR += v.lr * (v.r || 0); opsR += v.r || 0; }
+      if (v.lw !== null && v.lw !== undefined) { somW += v.lw * (v.w || 0); opsW += v.w || 0; }
+      if (v.s && v.s !== 'live') for (const x of String(v.s).split('/')) staten.add(x);
+      if ((v.st || 0) > stil) stil = v.st;
+      if ((v.lm || 0) > lm) { lm = v.lm; lmT = r.t; lmMb = m; }
+      if ((v.lm || 0) > C.nvLatMs && m < C.nvWeinigMb) tr = true;
+    }
+  }
+  ops = opsR + opsW;
+  if (!n) return { label: 'niet vast te stellen', tekst: 'geen NVMe-meting in dit tijdvak (sysfs niet leesbaar of de meter startte net)' };
+  const hapert = staten.size > 0 || stil >= C.nvStilS || tr;
+  const redenen = [];
+  if (staten.size) redenen.push('status ' + Array.from(staten).join('/') + ' gezien');
+  if (stil >= C.nvStilS) redenen.push('langste stilstand ' + stil + ' s met opdrachten in de wacht');
+  if (tr) redenen.push('opdrachten > ' + C.nvLatMs + ' ms bij minder dan ' + C.nvWeinigMb + ' MB per minuut');
+  const getallen = Array.from(apparaten).join('+') + ': ' + (staten.size ? 'status ' + Array.from(staten).join('/') : 'status steeds live') +
+    '; gemiddeld ' + (opsW ? rond(somW / opsW, 10) : '-') + ' ms per schrijfopdracht en ' + (opsR ? rond(somR / opsR, 10) : '-') + ' ms per leesopdracht (' + ops + ' opdrachten)' +
+    '; slechtste venster van 10 s ' + rond(lm, 10) + ' ms' + (lmT ? ' om ' + hhmm(Date.parse(lmT)) + ' bij ' + rond(lmMb, 10) + ' MB in die minuut' : '') +
+    '; verkeer gemiddeld ' + rond(mb / Math.max(1, n), 10) + ' MB per minuut (piek ' + rond(mbPiek, 10) + ')' + '; langste stilstand ' + stil + ' s';
+  const verzadigd = !hapert && lm > C.nvLatMs;
+  return { label: hapert ? 'schijf hapert' : 'drukte van elders', hapert: hapert, tekst: (hapert ? 'de schijf zelf hapert (' + redenen.join('; ') + ') — ' : 'de schijf zelf antwoordt normaal' + (verzadigd ? ' behalve door veel verkeer (verzadigd, geen defect)' : '') + '; de drukte komt van een proces op de host — ') + getallen };
+}
+function nvSamenvatting() {
+  const grens = Date.now() - C.vensterMs, apparaten = {};
+  for (const r of buf) {
+    if (!r.nv || r.ms < grens) continue;
+    for (const k of Object.keys(r.nv)) {
+      const v = r.nv[k], u = apparaten[k] || (apparaten[k] = { laatste: null, piek_venster_ms: null, laatst_niet_live: null, langste_stil_s: null });
+      u.laatste = { tijd: r.t, status: v.s, lees_ms: v.lr, schrijf_ms: v.lw, mb_min: rond((v.mr || 0) + (v.mw || 0), 10), bezet_pct: v.bz, inflight: v.i, stil_s: v.st, temp_c: v.t, leeftijd_s: Math.round((Date.now() - r.ms) / 1000) };
+      if (!u.piek_venster_ms || v.lm > u.piek_venster_ms.waarde) u.piek_venster_ms = { waarde: v.lm, tijd: r.t };
+      if (v.s && v.s !== 'live') u.laatst_niet_live = { tijd: r.t, status: v.s };
+      if (!u.langste_stil_s || v.st > u.langste_stil_s.waarde) u.langste_stil_s = { waarde: v.st, tijd: r.t };
+    }
+  }
+  return { apparaten: apparaten, vensters_per_minuut_verwacht: Math.round(60000 / C.nvTik),
+    incident: incident ? { sinds_iso: new Date(incident.sinds).toISOString(), reden: incident.reden, box_rij: incident.boxKlaar, bericht_david: incident.msgKlaar, pogingen_box: incident.boxPog, pogingen_bericht: incident.msgPog } : null,
+    laatste_box_iso: haperStaat.box ? new Date(haperStaat.box).toISOString() : null, laatste_bericht_iso: haperStaat.bericht ? new Date(haperStaat.bericht).toISOString() : null };
+}
+
+// ── het hapering-incident: status ≠ live of een vastzittende I/O is altijd een box-rij (direct) en één regel aan David (1x/dag) ────────
+function stilleUren() {
+  const uur = process.env.SCHIJFDRUK_UUR !== undefined ? parseInt(process.env.SCHIJFDRUK_UUR, 10) : parseInt(amsterdam().slice(11, 13), 10);
+  return uur >= 23 || uur < 7;
+}
+function incidentBijwerken(p) {
+  const nu = Date.now();
+  if (p) {
+    if (!incident) incident = { sinds: nu, reden: p.reden, details: p, gezondSinds: null, boxKlaar: false, msgKlaar: false, boxLaatst: 0, boxPog: 0, msgLaatst: 0, msgPog: 0 };
+    incident.gezondSinds = null; incident.details = p;
+  } else if (incident) {
+    if (incident.gezondSinds === null) incident.gezondSinds = nu;
+    if (nu - incident.gezondSinds >= C.haperHerstelMs) incident = null;   // drie minuten gezond: voorbij; een volgende is een nieuw incident
+  }
+  if (incident) haperVerwerk().catch(() => {});
+}
+function stuurBericht(tekst) {
+  if (!fs.existsSync(BERICHT)) return Promise.resolve(false);
+  return new Promise(function (resolve) {
+    let p, klaar = false;
+    const einde = (v) => { if (!klaar) { klaar = true; clearTimeout(t); resolve(v); } };
+    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch (e) {} einde(false); }, 120000);
+    try { p = spawn('python3', [BERICHT, '--klasse', 'normaal', '--sleutel', 'schijf-hapert', tekst], { stdio: 'ignore', cwd: '/', env: process.env }); }
+    catch (e) { einde(false); return; }
+    p.on('error', () => einde(false));
+    p.on('exit', (code) => einde(code === 0));
+  });
+}
+function haperRij(i, nu) {
+  const d = i.details || {};
+  const lijst = buf.filter((r) => r.ms >= nu - 15 * 60000 && r.nv);
+  const o = nvOordeel(lijst);
+  const velden = [
+    ['status', 'open — de NVMe-schijf van Olares zelf meldt een probleem (niet een andere app); kijk of de server er last van heeft (/health.schijfdruk.nvme) en vergelijk met de incidenten van 5/6-10 en 9-10 in 00_Systeem/Schijf van Olares.md'],
+    ['van', 'schijfdruk.js (wv3126, release ' + SHA + ')'],
+    ['gemeten', d.blok + ': ' + i.reden + '; sinds ' + hhmm(i.sinds) + ' (nu ' + hhmm(nu) + '); laatste 15 min: ' + o.tekst],
+    ['verloop', 'ring ' + DIR + '/ring-*.jsonl (veld nv per minuut: status, MB, ms per opdracht, inflight, stilstand, temperatuur); bij een ingreep van de bewaker staan de laatste 15 min in bin/bewaker-bewijs-*.json'],
+    ['David', 'krijgt hooguit 1x per dag één regel in de app (niet 23:00-07:00); geen noodstop en geen ingreep door de meter'],
+    ['voorstel', 'dmesg, journal en SMART zijn vanuit de pod niet leesbaar: laat de Olares-zijde (host) de NVMe-log nalopen als dit terugkeert; schijf, firmware en energiebeheer zijn daar te beoordelen']];
+  return '\n## [direct] ' + amsterdam().slice(0, 16) + ' — Schijf van Olares hapert: ' + i.reden.slice(0, 80) + ' #schijf-hapert\n' +
+    velden.map((v) => '- ' + v[0] + ': ' + String(v[1]).replace(/[\r\n]+/g, ' ').slice(0, 1500)).join('\n') + '\n';
+}
+// Pogingen per kanaal: de eerste 10 elke minuut, daarna elke 30 minuten zolang het incident duurt (een schrijfstoring in de stille uren
+// mag het bericht van de ochtend niet blokkeren, en een mislukt bericht niet de box-rij).
+const haperWacht = (pog) => (pog < 10 ? 60000 : 30 * 60000);
+async function haperVerwerk() {
+  const i = incident, nu = Date.now();
+  if (haperBezig || !i || (i.boxKlaar && i.msgKlaar)) return;
+  haperBezig = true;
+  try {
+    if (!i.boxKlaar && nu - i.boxLaatst >= haperWacht(i.boxPog)) {
+      if (nu - haperStaat.box < C.haperBoxPauze) i.boxKlaar = true;   // net een rij gezet voor een vorig incident: geen tweede
+      else {
+        i.boxPog++; i.boxLaatst = nu;
+        if (await boxRijVeilig(haperRij(i, nu))) { i.boxKlaar = true; haperStaat.box = nu; await haperBewaar(); }
+      }
+    }
+    if (!i.msgKlaar && nu - i.msgLaatst >= haperWacht(i.msgPog)) {
+      if (nu - haperStaat.bericht < C.haperBerichtPauze) i.msgKlaar = true;   // hooguit 1x per dag
+      else if (!stilleUren()) {
+        i.msgPog++; i.msgLaatst = nu;
+        if (await stuurBericht('De schijf van Olares hapert weer, zoals in oktober. De app kan daardoor even traag zijn of een foutmelding geven. Het staat vastgelegd voor de machinekamer; je hoeft niets te doen.')) { i.msgKlaar = true; haperStaat.bericht = nu; await haperBewaar(); }
+      }
+    }
+  } catch (e) {} finally { haperBezig = false; }
+}
+function haperBewaar() {
+  return schrijfAtomair(HAPER_BESTAND, JSON.stringify({ box_iso: haperStaat.box ? new Date(haperStaat.box).toISOString() : null, bericht_iso: haperStaat.bericht ? new Date(haperStaat.bericht).toISOString() : null }) + '\n');
 }
 
 // ── geheugen, bestanden ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -262,7 +486,7 @@ function samenvatting() {
     piek_24u: { full_avg60: p60 ? { waarde: p60.io[3], tijd: p60.t } : null, full_avg10: p10 ? { waarde: p10.io[2], tijd: p10.t } : null },
     schrijven: { uitstaand: uitstaand.length + (inVlucht ? inVlucht.n : 0), hangt_s: inVlucht ? Math.round((mono() - inVlucht.sinds) / 1000) : 0,
       laatste_ok_iso: laatsteSchrijfOk ? new Date(laatsteSchrijfOk).toISOString() : null, fout: schrijfFout },
-    geschiedenis_fout: geschiedenisFout, ring_map: DIR
+    nvme: nvSamenvatting(), geschiedenis_fout: geschiedenisFout, ring_map: DIR
   };
 }
 let geschiedenisFout = null;
@@ -319,14 +543,16 @@ async function alarmRij(vanaf) {
   for (const n of Object.keys(som)) { const b = som[n].ms ? som[n].tick / som[n].ms * 100 : 0; if (!top || b > top.b) top = { n: n, b: b, mb_r: som[n].rs * 512 / 1048576, mb_w: som[n].ws * 512 / 1048576 }; }
   const piek = venster.reduce((m, r) => (r.io && r.io[3] > m ? r.io[3] : m), 0);
   const l = buf[buf.length - 1];
+  const o = nvOordeel(venster);   // wv3126: hapert de schijf, of komt de drukte van elders?
   const velden = [
-    ['status', 'open — alleen vastgelegd; geen actie nodig tenzij het terugkomt of de server er last van heeft'],
+    ['status', o.hapert ? 'open — de schijf zelf hapert (zie oordeel); kijk of de server er last van heeft' : 'open — alleen vastgelegd; geen actie nodig tenzij het terugkomt of de server er last van heeft'],
+    ['oordeel', o.label + ' — ' + o.tekst],
     ['van', 'schijfdruk.js (wv3124, release ' + SHA + ')'],
     ['gemeten', 'full avg60 van /proc/pressure/io boven ' + C.alarmPct + ' % sinds ' + hhmm(vanaf) + ' (nu ' + hhmm(nu) + ', ' + Math.round((nu - vanaf) / 60000) + ' min, piek ' + piek + ' %, laatste minuut full avg10 ' + (l && l.io ? l.io[2] : '?') + ' %)' +
       (top ? '; zwaarste apparaat in dit tijdvak ' + top.n + ' (' + rond(top.b, 10) + ' % bezet, ' + rond(top.mb_r, 10) + ' MB gelezen, ' + rond(top.mb_w, 10) + ' MB geschreven)' : '; geen apparaat met IO-delta (druk komt van buiten de pod of de diskstats ontbreken)')],
     ['verloop', 'ring ' + DIR + '/ring-*.jsonl (per minuut, 42-48 u) en /health.schijfdruk; bij een ingreep van de bewaker staan de laatste 15 min in bin/bewaker-bewijs-*.json'],
-    ['voorstel', 'vergelijk het tijdvak met Immich/Takeout-import, back-ups en de nachtketen; bij een herhaling op hetzelfde uur de bron op de Olares-host zoeken']];
-  const rij = '\n## [direct] ' + amsterdam().slice(0, 16) + ' — Schijfdruk hoog: full avg60 > ' + C.alarmPct + ' % al ' + Math.round((nu - vanaf) / 60000) + ' min' + (top ? ' (' + top.n + ')' : '') + ' #schijfdruk-hoog\n' +
+    ['voorstel', o.hapert ? 'de schijf zelf hapert: zie 00_Systeem/Schijf van Olares.md; de Olares-zijde (host-log) moet de NVMe nalopen' : 'vergelijk het tijdvak met Immich/Takeout-import, back-ups en de nachtketen; bij een herhaling op hetzelfde uur de bron op de Olares-host zoeken']];
+  const rij = '\n## [direct] ' + amsterdam().slice(0, 16) + ' — Schijfdruk hoog: full avg60 > ' + C.alarmPct + ' % al ' + Math.round((nu - vanaf) / 60000) + ' min' + (top ? ' (' + top.n + ')' : '') + ' — ' + o.label + ' #schijfdruk-hoog\n' +
     velden.map((v) => '- ' + v[0] + ': ' + String(v[1]).replace(/[\r\n]+/g, ' ').slice(0, 1500)).join('\n') + '\n';
   return boxRijVeilig(rij);
 }
@@ -376,10 +602,14 @@ process.on('unhandledRejection', function () {});
   if (!(await neemSlot())) process.exit(0);
   await wacht(600);   // een gelijktijdige starter kan het slot nog overschrijven (Codex MOET 3): pas luisteren als het na 600 ms nog van mij is
   if (await slotIsVan_mij() !== true) process.exit(0);
+  const hp = await lees(HAPER_BESTAND, 3000);
+  try { const j = JSON.parse(hp); haperStaat = { box: Date.parse(j.box_iso) || 0, bericht: Date.parse(j.bericht_iso) || 0 }; } catch (e) {}
   const al = await lees(ALARM_BESTAND, 3000);
   try { laatsteAlarm = Date.parse(JSON.parse(al).laatste_iso) || 0; } catch (e) {}
   geschiedenisFout = await geschiedenis();
   luister();
+  await nvTik();
+  setInterval(function () { nvTik(); }, C.nvTik);
   await tik();
   setInterval(function () { tik(); }, C.tik);
 })();
