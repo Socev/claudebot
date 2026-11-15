@@ -335,7 +335,13 @@ function nmbrsDagenEcht(r) {
   if (werk.every((n) => n > 0 && n === werk[0]) && r.dagen_per_week != null && r.dagen_per_week < 4.5) return null;
   return a;
 }
-const laatsteOp = (rijen, veld, d) => { let u = null; for (const r of rijen) if (r[veld] && r[veld] <= d && (!u || r[veld] >= u[veld])) u = r; return u; };
+// wv3053: twee Nmbrs-roosters met dezelfde begindatum (17 keer gemeten, steeds met andere uren of dagen): het laatst aangemaakte geldt,
+// niet de volgorde in de lijst. Zonder `aangemaakt` (handrooster) blijft de laatste in de lijst winnen.
+const laatsteOp = (rijen, veld, d) => {
+  let u = null;
+  for (const r of rijen) if (r[veld] && r[veld] <= d && (!u || r[veld] > u[veld] || (r[veld] === u[veld] && String(r.aangemaakt || '') >= String(u.aangemaakt || '')))) u = r;
+  return u;
+};
 // De werkdagen van één persoon bij één praktijk (pure functie; de 30 gevallen in test/pma-werkdag.test.js).
 // i.dagen: Map dag → { n, kort, middel, lang, vk, vl, mi, poh, cent } (alleen declaraties die voor de werkdag tellen; nooit inschrijfgeld)
 // i.gedekt: Set van dagen die door een export gedekt zijn; i.rollen [{ rol, van, tot }]; i.hand [{ ingang, uren[7] }];
@@ -379,13 +385,18 @@ function werkdagenVan(i) {
     const rol = rolOp(d), binnen = (!rollen.length || rol) && inDienst(d);
     if (!binnen && !n) continue;
     const wd = WEEKDAG(d), w = maandagVan(d);
-    // rooster van die dag: handrooster (David) > Nmbrs per weekdag (als echt) > Nmbrs uren per week met het declaratiepatroon > alleen het patroon
+    // rooster van die dag: handrooster (David) > Nmbrs per weekdag (als echt en gelijk aan het patroon) > Nmbrs uren per week met het declaratiepatroon > alleen het patroon
     let bron, uren = null, weekUren = null;
     const h = laatsteOp(hand, 'ingang', d);
     const nr = nm && nm.rooster ? laatsteOp(nm.rooster, 'begin', d) : null;
     const nd = nmbrsDagenEcht(nr);
+    // wv3053: Nmbrs zet de uren vaak op andere weekdagen dan waarop iemand werkt (gemeten 15-11-2026: 5 van 11 medewerkers, 141 van 338
+    // weken; 128 onterechte afwezige dagen). Heeft die week een declaratiepatroon met andere dagen, dan wint het patroon en gelden alleen
+    // de Nmbrs-uren per week. Zonder (of met leeg) patroon blijven de Nmbrs-dagen gelden.
+    const pw = nd && !h ? patroon(w) : null;
+    const ndPast = nd && (!pw || !pw.size || [0, 1, 2, 3, 4].every((x) => (nd[x] > 0) === pw.has(x)));
     if (h) { bron = 'hand'; uren = h.uren; }
-    else if (nd) { bron = 'nmbrs-dag'; uren = nd; }
+    else if (ndPast) { bron = 'nmbrs-dag'; uren = nd; }
     else {
       const nc = nm && nm.contract ? laatsteOp(nm.contract.filter((c) => !c.eind || c.eind >= d), 'begin', d) : null;
       weekUren = nr && nr.uren > 0 ? nr.uren : nc && nc.uren > 0 ? nc.uren : null;

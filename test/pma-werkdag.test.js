@@ -2,7 +2,7 @@
 // wv3047: OVIS PMA fase 2 — de werkdagregels (plan § 3) als toetslijst. De gevallen komen uit het oude Ovis-PMA-implementatieplan (§ 5.3 en
 // § 8: roosterdag met klein consult, roosterdag zonder declaraties, invaldag boven/onder de drempel, weekend, om-de-week, vakantieweek,
 // inschrijfgeld, roosterresolutie grens-exact), uitgebreid met de lagen van het nieuwe plan (handrooster > Nmbrs per weekdag > Nmbrs per week
-// met declaratiepatroon > alleen patroon), feestdagen, dienstverband en rolperiodes: samen 30 gevallen. Alles verzonnen.
+// met declaratiepatroon > alleen patroon), feestdagen, dienstverband en rolperiodes: samen 30 gevallen (wv3054: 34; wv3053: 37, patroon wint van afwijkende Nmbrs-dagen). Alles verzonnen.
 // Daarna de routes van fase 2 op een verzonnen export (koppelen, voorstel uit verzonnen Nmbrs en dossiers, rollen, handrooster, kengetallen).
 const test = require('node:test');
 const assert = require('node:assert');
@@ -183,12 +183,29 @@ geval('33 met handrooster blijft een lege roosterdag na de laatste declaratie af
     rollen: [{ rol: 'assistente', van: '2026-01-01', tot: null }] });
   assert.strictEqual(op(u, '2026-10-19').soort, 'afwezig');
 });
+geval('35 Nmbrs per weekdag op andere dagen dan het declaratiepatroon: het patroon wint, uren per week uit Nmbrs (wv3053)', () => {
+  // Nmbrs: ma, di, do; declaraties ma, wo, do. Dinsdag is dan geen afwezig, woensdag geen invaldag.
+  const u = R({ dagen: vaste([0, 2, 3], { '2026-09-17': null }), nmbrs: { rooster: [{ begin: '2025-01-01', uren: 24, dagen_per_week: 3, dagen1: [8, 8, 0, 8, 0, 0, 0], dagen2: [8, 8, 0, 8, 0, 0, 0] }] } });
+  assert.deepStrictEqual([op(u, '2026-09-08'), op(u, '2026-09-09').soort, op(u, '2026-09-09').uren, op(u, '2026-09-09').bron, op(u, '2026-09-17').soort],
+    [undefined, 'gewerkt', 8, 'nmbrs-week', 'afwezig']);
+});
+geval('36 Nmbrs per weekdag zonder patroon in het venster (lange stilte): de Nmbrs-dagen blijven gelden (afwezig)', () => {
+  const zonder = {}; for (const d of reeks('2026-09-14', '2026-10-25')) zonder[d] = null;
+  const u = R({ dagen: vaste([0, 2, 3], zonder), rollen: [{ rol: 'assistente', van: '2026-01-01', tot: null }],
+    nmbrs: { rooster: [{ begin: '2025-01-01', uren: 24, dagen_per_week: 3, dagen1: [8, 8, 0, 8, 0, 0, 0], dagen2: [8, 8, 0, 8, 0, 0, 0] }] } });
+  assert.deepStrictEqual([op(u, '2026-10-20').soort, op(u, '2026-10-20').bron, op(u, '2026-10-21')], ['afwezig', 'nmbrs-dag', undefined]);
+});
+geval('37 twee Nmbrs-roosters met dezelfde begindatum: het laatst aangemaakte geldt, ook als het eerder in de lijst staat (wv3053)', () => {
+  const r = (uren, aangemaakt) => ({ begin: '2025-01-01', uren, dagen_per_week: 3, aangemaakt });
+  const u = R({ dagen: vaste([0, 1, 3]), nmbrs: { rooster: [r(27, '2025-02-01T10:00:00Z'), r(18, '2025-01-05T10:00:00Z')] } });
+  assert.strictEqual(op(u, '2026-09-07').uren, 9);
+});
 geval('34 groep (verzamelnaam): nooit afwezig, declaratiedagen blijven gewerkt', () => {
   const u = R({ groep: true, dagen: vaste([0, 1, 3], { '2026-09-08': null }) });
   assert.deepStrictEqual([op(u, '2026-09-08'), op(u, '2026-09-07').soort, u.some((x) => x.soort === 'afwezig')], [undefined, 'gewerkt', false]);
 });
 for (const [naam, f] of GEVALLEN) test('werkdag ' + naam, f);
-test('de toetslijst heeft 34 gevallen', () => assert.strictEqual(GEVALLEN.length, 34));
+test('de toetslijst heeft 37 gevallen', () => assert.strictEqual(GEVALLEN.length, 37));
 
 // ── namen en rollen ──
 test('naam ontleden en vergelijken (voorletter + achternaam, tussenvoegsel, dubbele naam)', () => {
