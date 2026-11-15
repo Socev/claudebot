@@ -151,6 +151,31 @@ const M = require(path.resolve('pot-maand.js'));
     toets('concept weggegooid: maandkaart dicht met "1 van de 2 verzonden; 1 concept weggegooid"', /1 van de 2 mails .* verzonden; 1 concept weggegooid/.test(String(bewijs)), bewijs);
     toets('concept weggegooid: op de probleemkaart', kaartenL.slice(k0).some((k) => /probleem/.test(k.sleutel) && /weggegooid/.test(k.p.waarom)), kaartenL.slice(k0).map((k) => k.sleutel));
   }
+  // ── creditnota (wv3079): verstuurde SLOEL-nota van P91 crediteren → nieuwe praktijkmail met de creditnota; de Exact-regel van het origineel
+  //    (nog geen_adres) blijft en gaat later gewoon, met het origineel (gecrediteerd) erin ──
+  {
+    const orig = db.prepare("select id, nummer, bedrag from nota where entiteit='SLOEL' and praktijk_id='P91' and soort='maand'").get();
+    const k = await B.api.behandel(A, 'GET', 'credit', new URLSearchParams({ nota: String(orig.id) }), null, 'proef');
+    toets('credit: kijken kan (verstuurd)', k.status === 200 && k.body.kan === true && k.body.hint === null, k.body);
+    const c = await B.api.behandel(A, 'POST', 'creditnota', Z, { nota_id: orig.id, reden: 'proef crediteren', stempel: k.body.stempel }, 'proef');
+    toets('credit: gemaakt', c.status === 200, c.body);
+    const cn = db.prepare(`select * from nota where credit_van=${orig.id}`).get();
+    const g0 = gmail.length;
+    u = await M.ronde(io, {});
+    const pm = mc().filter((x) => x.soort === 'praktijk' && JSON.parse(x.nota_ids).includes(cn.id));
+    toets('credit: praktijkmail P91 met alleen de creditnota → concept', pm.length === 1 && pm[0].status === 'concept' && pm[0].aan === 'een@proef.example' && gmail.length > g0, [pm, gmail.length - g0]);
+    const gm = gmail.find((g) => g.bijlagen.some((x) => x.includes(cn.nummer)) && g.aan === 'een@proef.example');
+    const pt = gm ? execFileSync('/usr/bin/pdftotext', ['-q', '-', '-'], { input: gm.pdfs[0], encoding: 'utf8' }) : '';
+    toets('credit: pdf CREDITNOTA met verwijzing naar het origineel, geen factuur', /CREDITNOTA/.test(pt) && pt.includes(orig.nummer) && !/factu/i.test(pt), pt.slice(0, 300));
+    toets('credit: mailtekst zegt creditnota, niets overmaken, woordtoets schoon', !!gm && /creditnota/.test(gm.bericht) && /niets overgemaakt/.test(gm.bericht) && B.K.controleerStukTekst(gm.onderwerp + gm.bericht).length === 0, gm && gm.bericht);
+    const exO = mc().filter((x) => x.soort === 'exact' && JSON.parse(x.nota_ids).includes(orig.id));
+    toets('credit: Exact-regel van het origineel blijft geen_adres (geen fout)', exO.length === 1 && exO[0].status === 'geen_adres', exO);
+    await B.api.behandel(A, 'POST', 'verkoopadres', Z, { entiteit: 'SLOEL', email: 'verkoop-sloel@proef.example' }, 'proef');
+    u = await M.ronde(io, {});
+    const exS = mc().filter((x) => x.soort === 'exact' && x.entiteit === 'SLOEL');
+    toets('credit: verkoopadres SLOEL → Exact-concepten met origineel (gecrediteerd) én creditnota, geen fout', exS.length >= 2 && exS.every((x) => x.status === 'concept')
+      && exS.some((x) => JSON.parse(x.nota_ids).includes(orig.id)) && exS.some((x) => JSON.parse(x.nota_ids).includes(cn.id)), exS);
+  }
   // ── overname (R10): stuk voor de vorige houder = eigen mail aan het adres op de nota; nieuwe houder apart (Codex r1 M1) ──
   {
     const oud = db.prepare("select id from praktijk_versie where praktijk_id='P91'").get().id;

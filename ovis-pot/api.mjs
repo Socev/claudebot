@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot 4fd0303cb2b6440872d6405e9ab9b7858e0cc2b7 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot eee9baf1006419f12993704ac72bc7b1d4c643bf (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
@@ -107,7 +107,7 @@ export async function geld(db          , j         ) {
   const gevraagd = await rijen(db,
     "select entiteit, praktijk_id, round(sum(case when bron='ovis-pot' then (select coalesce(sum(json_extract(r.value,'$.bedrag')),0) from json_each(nota.regels) r " +
     "where json_extract(r.value,'$.soort')='bijdrage') else bedrag - coalesce(buffer,0) end),2) as bedrag, count(*) as n " +
-    "from nota where jaar=? and status='definitief' and soort not in ('buffer','afrekening') group by 1,2", J);
+    "from nota where jaar=? and status='definitief' and soort not in ('buffer','afrekening','credit') group by 1,2", J);
   return { jaar: J, betaald, gevraagd, extra };
 }
 
@@ -124,7 +124,7 @@ export async function monitor(db          , j         ) {
   // naar de browser) en de koppelingen die David met de hand legde.
   const vanaf = Number((await overnameVanaf(db)).slice(0, 4));
   if (J < vanaf) return { jaar: J, verwachting, betalingen, bank, notas: [], koppelingen: [], verzoeken: [], mail: [] };
-  const notas = await rijen                         (db, "select id, entiteit, praktijk_id, nummer, datum, vervaldag, soort, periode, bedrag, status from nota where bron='ovis-pot' and (jaar=? or substr(datum,1,4)=?) order by entiteit, nummer", J, String(J));
+  const notas = await rijen                         (db, "select id, entiteit, praktijk_id, nummer, datum, vervaldag, soort, periode, bedrag, status, gecrediteerd from nota where bron='ovis-pot' and (jaar=? or substr(datum,1,4)=?) order by entiteit, nummer", J, String(J));
   const ruw = await rijen                         (db,
     "select t.id, m.id as bankmutatie_id, m.entiteit, t.praktijk_id, m.boekdatum as datum, t.bedrag, t.soort, m.omschrijving from bank_toewijzing t join bankmutatie m on m.id=t.bankmutatie_id " +
     "where m.boekdatum<? and t.praktijk_id is not null and ((m.entiteit in ('POT','KM') and t.soort in ('voorschot','afrekening')) or (m.entiteit='SLOEL' and t.soort in ('huur','afrekening'))) and m.boekdatum>=? order by m.boekdatum",
@@ -152,7 +152,7 @@ export async function maandStand(db          ) {
 
 /** Alles in één keer (Excel-export, ook om over te stappen naar iets anders): elke tabel van de app als rijen. */
 const EXPORT_TABELLEN = ["entiteit", "praktijk", "praktijk_versie", "praktijk_naam", "praktijk_patienten", "deelname", "deelname_uitzondering", "kostencomponent", "kostenmutatie",
-  "subsidie", "subsidie_totaal", "inschrijftarief", "jaarlast", "medewerker", "contract", "contractmutatie", "afwezigheid", "inhuur", "cao_tabel", "loonparameter", "loonsom", "buffer",
+  "subsidie", "subsidie_totaal", "inschrijftarief", "zk_contract", "jaarlast", "medewerker", "contract", "contractmutatie", "afwezigheid", "inhuur", "cao_tabel", "loonparameter", "loonsom", "buffer",
   "jaarplan", "jaarplan_regel", "nota", "correctie", "afrekening", "verwachting", "bankrekening", "bankmutatie", "bank_toewijzing", "koppeling", "mail_concept", "pod_verzoek",
   "overname", "ronde_stap", "instelling", "logboek"]         ;
 export async function exportAlles(db          ) {
@@ -177,6 +177,9 @@ export async function schrijf(db          , route        , b        , wie       
   switch (route) {
     case "corrigeer": return corrigeer(db, b, wie);   // wv2788: een versie verbeteren (vergissing), logboek oud → nieuw
     case "verwijder": return verwijder(db, b, wie);   // wv2788: een per vergissing aangemaakte versie weghalen, niet als er stukken op leunen
+    case "nota-vervallen": return terugDoe(db, b, wie, "nota");   // wv3071: een definitieve nota laten vervallen zolang er niets verzonden is
+    case "afrekening-terug": return terugDoe(db, b, wie, "afrekening");
+    case "creditnota": return creditDoe(db, b, wie);   // wv3079: creditnota voor een maandnota die de deur uit is   // wv3071: een vastgestelde afrekening terugzetten (nota's vervallen mee)
     case "praktijk-versie": {
       const p = tekst(b.praktijk_id, "praktijk", { verplicht: true, max: 3 }) ;
       await bestaatPraktijk(db, p);
@@ -319,7 +322,10 @@ export async function behandel(db          , methode        , pad        , zoek 
       if (pad === "naspeel") return { status: 200, body: await naspeel(db) };
       if (pad === "bewaking") return { status: 200, body: await bewaking(db, zoek.get("jaar")) };
       if (pad === "verwachting") return { status: 200, body: await verwachting(db, zoek.get("jaar")) };
+      if (pad === "zk") return { status: 200, body: await zk(db, zoek.get("jaar")) };
       if (pad === "leunt") return { status: 200, body: await leunt(db, zoek) };
+      if (pad === "terug") return { status: 200, body: await terugKijk(db, zoek) };
+      if (pad === "credit") return { status: 200, body: await creditKijk(db, zoek) };
       throw new Fout(404, "onbekende route");
     }
     if (methode === "POST") {
@@ -342,6 +348,8 @@ export async function behandel(db          , methode        , pad        , zoek 
 // zelf opnieuw uit de database (het voorbeeld in de browser is alleen een voorbeeld). Niets verstuurt mail of beweegt geld.
 // =====================================================================================================================
 const json = (x         ) => JSON.stringify(x);
+/** Telt als gemaakte maandnota (niet opnieuw maken, R9 'gemaakt'): niet vervallen en niet gecrediteerd (wv3071/wv3079). */
+const TELT_ALS_GEMAAKT = (n                         ) => n.status !== "vervallen" && n.status !== "gecrediteerd";
 const plusDag = (d        , n        ) => K.plusDagen(d, n);
 
 /** Alles wat fase 2 voor jaar J nodig heeft (personeel, buffer, jaarplannen, nota's, correcties, ronde). */
@@ -490,6 +498,42 @@ export async function bewaking(db          , j         ) {
  * Verwacht jaarresultaat POT (wv2800): wat de kosten van jaar J worden (loonstroken tot nu + rekenkern op het personeel uit Nmbrs, overige
  * kosten, uitkering verzuimverzekering) en wat dat per praktijk betekent bij de afrekening. Alleen informatie: maakt geen nota's.
  */
+/**
+ * Contracteringsadvies POH-GGZ (Zilveren Kruis) en de prognose door het jaar (wv2815). Uren voor ZK = gemiddelde contracturen POT per
+ * kwartaal min de gemeente-uren; per praktijk naar rato van het nieuwste patiëntenaantal (peildatum ≤ vandaag). Alleen informatie.
+ */
+export async function zk(db          , j         ) {
+  const vandaag = (await rijen               (db, "select date('now') as d"))[0].d;
+  const J = j == null || j === "" ? Number(vandaag.slice(0, 4)) : jaar(j);
+  const [contracten, mutaties, standen, deelnames, tarieven, inst, regels, praktijken] = await Promise.all([
+    rijen                         (db, "select c.id, c.soort, c.van, c.tot, c.uren, m.naam from contract c left join medewerker m on m.id=c.medewerker_id"),
+    rijen                         (db, "select contract_id, geldig_van, uren from contractmutatie where uren is not null"),
+    rijen                                                            (db, "select praktijk_id, peildatum, aantal from praktijk_patienten where aantal is not null and peildatum <= ? order by peildatum", vandaag),
+    rijen(db, "select entiteit, praktijk_id, geldig_van, geldig_tot, geldt_voor from deelname where entiteit='POT'"),
+    // wv2818: het ZK-tarief bij 16 uur per 2.350 patiënten (grondslag van de ZK-regel), NIET het inschrijftarief (= wat de praktijken werkelijk krijgen)
+    rijen                                                               (db, "select sleutel, waarde, opmerking from instelling where sleutel=?", `zk_tarief_max_${J}`),
+    rijen                                     (db, "select sleutel, waarde from instelling where sleutel in ('zk_gemeente_uren', 'zk_drempel_pct', ?)", `zk_gemeente_uren_${J}`),
+    rijen                         (db, "select id, geldig_van, uren, per_normpraktijk, bron, opmerking from zk_contract order by geldig_van"),
+    rijen                              (db, "select id, naam from praktijk"),
+  ]);
+  const iv = (k        ) => inst.find((x) => x.sleutel === k)?.waarde;
+  const gemeenteUren = Number(iv(`zk_gemeente_uren_${J}`) ?? iv("zk_gemeente_uren") ?? K.ZK_GEMEENTE_UREN);
+  const drempelPct = Number(iv("zk_drempel_pct") ?? K.ZK_DREMPEL_PCT);
+  const prognose = K.zkPrognose({ jaar: J, contracten: contracten           , mutaties: mutaties           , gemeenteUren, vandaag, gecontracteerd: regels           , drempelPct });
+  // patiënten: de deelnemers van de POT in J met hun nieuwste stand (zo vult elke praktijk het ZK-portaal ook in: het aantal van nu)
+  const ids = K.deelnemers(deelnames           , "POT", J).map((d                         ) => d.praktijk_id);
+  const laatst = new Map                                               ();
+  for (const s of standen) if (ids.includes(s.praktijk_id)) laatst.set(s.praktijk_id, { aantal: Number(s.aantal), peildatum: s.peildatum });
+  const ontbreekt = ids.filter((id        ) => !laatst.has(id));
+  const lijst = ids.filter((id        ) => laatst.has(id)).map((id        ) => ({ id, patienten: laatst.get(id) .aantal, peildatum: laatst.get(id) .peildatum }));
+  const tariefMax = tarieven[0] && Number(tarieven[0].waarde) > 0 ? Number(tarieven[0].waarde) : null;
+  const advies = K.zkAdvies({ urenZk: prognose.gemiddeld ?? 0, praktijken: lijst, tariefMax, decimalen: 1 });
+  return {
+    jaar: J, vandaag, gemeenteUren, drempelPct, tariefMax, tariefBron: tariefMax == null ? null : tarieven[0]?.opmerking ?? null, prognose, advies, ontbreekt, praktijken: lijst,
+    namen: Object.fromEntries(praktijken.map((p) => [p.id, p.naam])), contract: regels,
+  };
+}
+
 export async function verwachting(db          , j         ) {
   const vandaag = (await rijen               (db, "select date('now') as d"))[0].d;
   const J = j == null || j === "" ? Number(vandaag.slice(0, 4)) : jaar(j);
@@ -632,7 +676,7 @@ export async function nmbrsSync(db          , ruweStand         , wie = K.NMBRS_
 export async function jaarGegevens(db          , j         ) {
   const J = jaar(j);
   const [contracten, contractmutaties, afwezigheid, inhuur, cao, loonparameters, loonsom, buffers, bufferGevraagd, spreiding,
-    jaarplannen, regels, notas, correcties, ronde] = await Promise.all([
+    jaarplannen, regels, notas, correcties, ronde, afgerekend] = await Promise.all([
     rijen(db, "select c.*, m.naam from contract c left join medewerker m on m.id=c.medewerker_id order by c.soort, m.naam, c.van"),
     rijen(db, "select * from contractmutatie order by contract_id, geldig_van"),
     rijen(db, "select * from afwezigheid order by van"),
@@ -649,13 +693,15 @@ export async function jaarGegevens(db          , j         ) {
     rijen(db, "select * from jaarplan where jaar=? order by entiteit, versie", J),
     rijen(db, "select r.* from jaarplan_regel r join jaarplan p on p.id=r.jaarplan_id where p.jaar=? order by r.jaarplan_id, r.praktijk_id", J),
     // nota's van J−1 en J, plus alle tegoeden (afrekening 'u krijgt terug') en nota's met een verrekening, voor het tegoed per 31-12 (Codex r3)
-    rijen(db, "select * from nota where jaar in (?, ?) or substr(datum,1,4)=? or (soort='afrekening' and bedrag<0) or regels like '%\"verrekening\"%' order by entiteit, nummer", J - 1, J, String(J)),
+    rijen(db, "select * from nota where jaar in (?, ?) or substr(datum,1,4)=? or (soort='afrekening' and bedrag<0) or soort='credit' or id in (select credit_van from nota where soort='credit') or regels like '%\"verrekening\"%' order by entiteit, nummer", J - 1, J, String(J)),
     rijen(db, "select * from correctie where nota_id is null or jaar>=? order by entiteit, praktijk_id, id", J - 1),
     rijen(db, "select * from ronde_stap where jaar=?", J),
+    // welke afrekeningen in de app vastgesteld zijn (wv3071: ook terug te draaien, dan verdwijnt de regel)
+    rijen(db, "select entiteit, jaar, count(*) as n from afrekening where versie='ovis-pot' and jaar between ? and ? group by 1,2", J - 1, J),
   ]);
   let nmbrs          = null;
   try { nmbrs = JSON.parse((await rijen                    (db, "select waarde from instelling where sleutel='nmbrs_sync'"))[0]?.waarde || "null"); } catch { nmbrs = null; }
-  return { jaar: J, contracten, contractmutaties, afwezigheid, inhuur, cao, loonparameters, loonsom, buffers, bufferGevraagd, spreiding, jaarplannen, regels, notas, correcties, ronde, nmbrs };
+  return { jaar: J, contracten, contractmutaties, afwezigheid, inhuur, cao, loonparameters, loonsom, buffers, bufferGevraagd, spreiding, jaarplannen, regels, notas, correcties, ronde, afgerekend, nmbrs };
 }
 
 async function planInvoer(db          , J        ) {
@@ -786,6 +832,39 @@ export async function schrijfJaarronde(db          , route        , b        , w
         .bind(e, van, doel, mnd, opbouwIn, status, tekst(b.opmerking, "opmerking", { max: 300 })), log(db, wie, "buffer", `${e}@${van}`, oud ? "gewijzigd" : "nieuw", oud, { doel, opbouw_maanden: mnd, opbouw_in: opbouwIn, status })]);
       return { ok: true };
     }
+    case "zk-contract": {   // wv2815: het bij Zilveren Kruis gecontracteerde aantal uur POH-GGZ (alle praktijken samen), vanaf een kwartaal
+      const van = datum(b.geldig_van, "geldig vanaf") ;
+      if (!/^\d{4}-(01|04|07|10)-01$/.test(van)) throw new Fout(400, "geldig vanaf = de 1e van een kwartaal (1 januari, 1 april, 1 juli of 1 oktober)");
+      const uren = getal(b.uren, "uren", { min: 0.1, max: 2000 }) ;
+      const pn = getal(b.per_normpraktijk, "uren per normpraktijk", { min: 0.1, max: 36, leeg: true });
+      const bron = tekst(b.bron, "bron", { max: 300 });
+      const oud = await rijen(db, "select uren, per_normpraktijk, bron from zk_contract where geldig_van=?", van);
+      await db.batch([db.prepare("insert into zk_contract (geldig_van, uren, per_normpraktijk, bron, opmerking) values (?,?,?,?,?) on conflict(geldig_van) do update set uren=excluded.uren, per_normpraktijk=excluded.per_normpraktijk, bron=excluded.bron, opmerking=excluded.opmerking")
+        .bind(van, uren, pn, bron, tekst(b.opmerking, "opmerking", { max: 300 })),
+        log(db, wie, "zk_contract", van, oud.length ? "gewijzigd" : "nieuw", oud[0] ?? null, { uren, per_normpraktijk: pn, bron })]);
+      return { ok: true };
+    }
+    case "zk-instelling": {   // wv2815: gemeente-uren (eerst in mindering) en de drempel voor de tip 'contracten laten openzetten'
+      const zet                             = [];
+      const gu = getal(b.gemeente_uren, "gemeente-uren", { min: 0, max: 500, leeg: true });
+      if (gu != null) zet.push(["zk_gemeente_uren", String(gu), "uren POH-GGZ per week die de gemeente betaalt; gaan eerst af van de contracturen POT (wv2815)"]);
+      const dp = getal(b.drempel_pct, "drempel", { min: 1, max: 50, leeg: true });
+      if (dp != null) zet.push(["zk_drempel_pct", String(dp), "prognose zoveel procent boven het gecontracteerde: tip om de ZK-contracten te laten openzetten (wv2815)"]);
+      const tm = getal(b.tarief_max, "ZK-tarief", { min: 0.01, max: 50, leeg: true });   // wv2818: per jaar, los van het inschrijftarief
+      if (tm != null) {
+        const J = jaar(b.jaar);
+        zet.push([`zk_tarief_max_${J}`, String(tm), `ZK-tarievenlijst ${J}, POH-GGZ bij 16 uur per 2.350 patiënten (maximaal)`]);
+      }
+      if (!zet.length) throw new Fout(400, "niets om te bewaren");
+      const st = [];
+      for (const [k, w, o] of zet) {
+        const oud = await rijen                    (db, "select waarde from instelling where sleutel=?", k);
+        st.push(db.prepare("insert into instelling (sleutel, waarde, opmerking) values (?,?,?) on conflict(sleutel) do update set waarde=excluded.waarde").bind(k, w, o),
+          log(db, wie, "instelling", k, oud.length ? "gewijzigd" : "nieuw", oud[0]?.waarde ?? null, w));
+      }
+      await db.batch(st);
+      return { ok: true };
+    }
     case "jan-feb": {   // POT: januari + f × jaarbegroting, februari evenveel minder (wv2787); invoer in procenten, 0 = uit
       const f = Math.round(getal(b.procent, "procent", { min: 0, max: K.JAN_FEB.max * 100 })  * 100) / 10000;
       const oud = await rijen                    (db, "select waarde from instelling where sleutel='pot_jan_feb'");
@@ -870,7 +949,7 @@ export async function schrijfJaarronde(db          , route        , b        , w
       if (vast) {
         const keuzeR9 = keuze(b.keuze, "keuze (verdelen of laten)", ["verdelen", "laten"]         );
         const oudR = (d.regels                             ).filter((x) => x.jaarplan_id === vast.id).map((x) => ({ praktijk_id: String(x.praktijk_id), maanden: JSON.parse(String(x.maanden))            , buffer: JSON.parse(String(x.buffer))            , aandeel: Number(x.aandeel), stand: Number(x.stand) }));
-        const gemaakt = [...new Set((d.notas                             ).filter((n) => n.entiteit === e && n.jaar === J && n.soort === "maand" && n.bron === "ovis-pot").map((n) => Number(String(n.periode).slice(5, 7))))];
+        const gemaakt = [...new Set((d.notas                             ).filter((n) => n.entiteit === e && n.jaar === J && n.soort === "maand" && n.bron === "ovis-pot" && TELT_ALS_GEMAAKT(n)).map((n) => Number(String(n.periode).slice(5, 7))))];
         const h = K.herzien({ oud: oudR, nieuw: praktijken, gemaakt, keuze: keuzeR9 });
         herz = { keuze: keuzeR9, gemaakt, open_maanden: h.open_maanden, naar_afrekening: h.praktijken.map((p) => ({ praktijk_id: p.praktijk_id, bedrag: p.naar_afrekening })) };
         praktijken = h.praktijken.map((p) => {
@@ -941,8 +1020,9 @@ export async function schrijfJaarronde(db          , route        , b        , w
         datumVan[e] = dat; vervalVan[e] = verval;
       }
       const d = await planInvoer(db, J);
-      // alle onverrekende tegoeden (afrekeningsnota's 'u krijgt terug'), ongeacht het jaar (Codex M2)
-      const tegoeden = await rijen(db, "select id, entiteit, praktijk_id, nummer, bedrag, verrekend, datum from nota where soort='afrekening' and status='definitief' and bedrag<0 and -bedrag-verrekend>0.004");
+      // alle onverrekende tegoeden (afrekeningsnota's 'u krijgt terug', en wat op een gecrediteerde nota al betaald was: creditnota wv3079), ongeacht het jaar (Codex M2)
+      const tegoeden = await rijen(db, "select id, entiteit, praktijk_id, nummer, soort, bedrag, tegoed, verrekend, datum from nota where status='definitief' and " +
+        "((soort='afrekening' and bedrag<0 and -bedrag-verrekend>0.004) or (soort='credit' and tegoed-verrekend>0.004))");
       const st         = [];
       const gemaakt           = [];
       const token = `aanvraag:${crypto.randomUUID()}`;   // koppelt invoegen, neveneffecten en controle aan deze aanvraag (Codex r3 M1)
@@ -954,11 +1034,11 @@ export async function schrijfJaarronde(db          , route        , b        , w
         const nummers = (await rijen                    (db, "select nummer from nota where entiteit=?", e)).map((x) => x.nummer);
         for (const r of (d.regels                             ).filter((x) => x.jaarplan_id === plan.id)) {
           const pid = String(r.praktijk_id), periode = `${J}-${String(m).padStart(2, "0")}`;
-          if ((d.notas                             ).some((n) => n.entiteit === e && n.praktijk_id === pid && n.soort === "maand" && n.periode === periode && n.status !== "vervallen")) continue;
+          if ((d.notas                             ).some((n) => n.entiteit === e && n.praktijk_id === pid && n.soort === "maand" && n.periode === periode && TELT_ALS_GEMAAKT(n))) continue;
           const bijdrage = Number(JSON.parse(String(r.maanden))[m - 1]), buf = Number(JSON.parse(String(r.buffer))[m - 1]);
           const corr = (d.correcties                             ).filter((c) => c.entiteit === e && c.praktijk_id === pid && c.nota_id == null);
           const teg = tegoeden.filter((n) => n.entiteit === e && n.praktijk_id === pid)
-            .map((n) => ({ id: Number(n.id), nummer: String(n.nummer), bedrag: Number(n.bedrag), verrekend: Number(n.verrekend || 0), datum: String(n.datum) }));
+            .map((n) => ({ id: Number(n.id), nummer: String(n.nummer), soort: String(n.soort), bedrag: Number(n.bedrag), tegoed: Number(n.tegoed || 0), verrekend: Number(n.verrekend || 0), datum: String(n.datum) }));
           const voor = bijdrage + buf + corr.reduce((s, c) => s + Number(c.bedrag), 0);
           const verr = K.verrekenTegoeden(teg, voor);
           if (Math.abs(voor) < 0.005 && !verr.length) continue;
@@ -1008,7 +1088,7 @@ export async function schrijfJaarronde(db          , route        , b        , w
           return Number(q[0].s);
         }
         const q = await rijen               (db, "select coalesce(sum(case when bron='ovis-pot' then (select coalesce(sum(json_extract(x.value,'$.bedrag')),0) from json_each(nota.regels) x where json_extract(x.value,'$.soort')='bijdrage') else bedrag - coalesce(buffer,0) end),0) as s " +
-          "from nota where entiteit=? and praktijk_id=? and jaar=? and status='definitief' and soort not in ('buffer','afrekening') and datum<?", e, pid, J, grens);
+          "from nota where entiteit=? and praktijk_id=? and jaar=? and status='definitief' and soort not in ('buffer','afrekening','credit') and datum<?", e, pid, J, grens);
         return Number(q[0].s);
       };
       // plus extra bijdragen vóór de grens (wv2773: er zijn geen leningen; vanaf K.EXTRA_BIJDRAGE_VANAF)
@@ -1728,4 +1808,317 @@ async function verwijder(db          , b        , wie        ) {
   await db.batch(st);
   if (await s.lees(db, s.sleutel(r))) throw new Fout(409, "Niet verwijderd: er is intussen iets veranderd (bijvoorbeeld een nota gemaakt of de versie aangepast). Kijk opnieuw.");
   return { ok: true };
+}
+
+// ---------- terugdraaien (wv3071, David 14-11-2026: "Zolang ik de concepten niet verzonden heb is er niets aan de hand") ----------
+// Een definitieve nota laten vervallen, of een vastgestelde afrekening terugzetten zodat hij opnieuw vast te stellen is, zolang er niets de
+// deur uit is. De nota blijft staan met status 'vervallen': het nummer blijft bezet en wordt nooit opnieuw uitgegeven (volgendNummer telt alle
+// nummers), dus de nummering blijft sluitend. Is een stuk verstuurd (aan de praktijk of naar Exact) of is er een betaling aan gekoppeld, dan
+// weigert de app: dat kan alleen nog met een creditnota (ontwerp, nog niet gebouwd). Wat het scherm liet zien is de vingerafdruk (stempel):
+// de batch gaat alleen door als de stand daarvan nog precies zo is.
+                                           
+/** mails die (nog) niet in Gmail staan: die regel vervalt mee; de andere stukken eruit zet de pod bij zijn volgende ronde opnieuw klaar */
+const MAIL_NIET_IN_GMAIL = ["wacht", "geen_adres", "wacht_op_adres", "fout", "concept_weg"];
+const VERZEND_UIT = ["geannuleerd", "vervangen", "fout", "concept_weg"];
+const VERZEND_WEG = ["verzonden", "auto_verstuurd", "onzeker_verzonden", "verstuurd_door_david"];
+const MAIL_AAN                         = { praktijk: "aan de praktijk", exact: "naar de boekhouding (Exact)", herinnering: "als herinnering" };
+const ENT_NAAM                         = { POT: "POT", KM: "Kostenmaatschap", SLOEL: "SLOEL" };
+export const CREDIT_UITLEG = "Dit stuk is de deur uit; terugdraaien kan dan alleen nog met een creditnota (knop \"creditnota\" bij de nota).";
+
+export const CREDIT_AFREKENING = "Een afrekeningsnota die de deur uit is crediteren zit er nog niet in (de eerste afrekening in de app is begin 2028); een verschil gaat tot dan als correctie mee.";
+                                                                                                        
+                      
+                                                                                           
+                                                                                                                                  
+ 
+
+function terugWat(b                          )           {
+  const g = (k        ) => (b instanceof URLSearchParams ? b.get(k) : (b          )[k]);
+  if (g("nota") != null || g("nota_id") != null) return { soort: "nota", id: geldigId(g("nota") ?? g("nota_id"), "nota") };
+  return { soort: "afrekening", entiteit: keuze(g("entiteit"), "entiteit", ENT), jaar: jaar(g("jaar")) };
+}
+
+/** Wat er bij terugdraaien meegaat, of waarom het niet kan; plus de vingerafdruk van precies die stand. */
+async function terugStand(db          , wat          )                      {
+  let idsSql       , corrSql       , afSql       ;
+  if (wat.soort === "nota") {
+    const n = (await rijen(db, "select id, entiteit, jaar, nummer, soort, status, bron from nota where id=?", wat.id))[0];
+    if (!n) throw new Fout(404, "nota niet gevonden");
+    if (n.bron !== "ovis-pot") throw new Fout(409, "Alleen nota's die deze app maakte zijn terug te draaien; de oude nota's (tot en met 2026) niet.");
+    if (n.status === "vervallen") throw new Fout(409, `Nota ${n.entiteit} ${n.nummer} is al vervallen.`);
+    if (n.status === "gecrediteerd") throw new Fout(409, `Nota ${n.entiteit} ${n.nummer} is al gecrediteerd; terugdraaien hoeft niet meer.`);
+    if (n.status !== "definitief") throw new Fout(409, `Nota ${n.entiteit} ${n.nummer} staat op '${n.status}'.`);
+    if (n.soort === "credit") throw new Fout(409, "Een creditnota draai je niet terug. Moet de gecrediteerde nota toch blijven, maak hem dan opnieuw (Nota's › Nota's van een maand maken).");
+    if (n.soort === "afrekening") throw new Fout(409, "Een afrekeningsnota draai je terug met de hele afrekening (Januari-ronde, stap B6): dan kun je de afrekening daarna opnieuw vaststellen.");
+    idsSql = { sql: "select ?", w: [wat.id] };
+    corrSql = { sql: "nota_id = ?", w: [wat.id] };
+    // de afrekening van dat jaar rekende met deze nota (gevraagd); is die al vastgesteld, dan eerst die terug (Codex r1)
+    afSql = { sql: "entiteit=? and jaar=? and versie='ovis-pot'", w: [n.entiteit, n.jaar] };
+  } else {
+    const { entiteit: e, jaar: J } = wat;
+    if (!(await rijen(db, "select 1 x from afrekening where entiteit=? and jaar=? and versie='ovis-pot'", e, J)).length)
+      throw new Fout(409, `De afrekening ${ENT_NAAM[e]} ${J} is niet in deze app vastgesteld; er is niets terug te draaien.`);
+    idsSql = { sql: "select id from nota where entiteit=? and jaar=? and soort='afrekening' and bron='ovis-pot' and status<>'vervallen'", w: [e, J] };
+    corrSql = { sql: "entiteit=? and jaar=? and (omschrijving like ? or omschrijving like ?)", w: [e, J, `Afrekening doorbelaste huur ${J}%`, `Correctie afrekening ${J}:%`] };
+    afSql = { sql: "entiteit=? and jaar=? and versie='ovis-pot'", w: [e, J] };
+  }
+  const I = () => ({ sql: `(${idsSql.sql})`, w: idsSql.w });
+  const fp        = {
+    sql: "select json_array(" +
+      `(select group_concat(json_array(id, status, bedrag, verrekend, regels), '|') from (select id, status, bedrag, verrekend, regels from nota where id in ${I().sql} order by id)), ` +
+      `(select group_concat(json_array(id, status), '|') from (select distinct c.id, c.status from mail_concept c, json_each(c.nota_ids) j where j.value in ${I().sql} order by c.id)), ` +
+      `(select count(*) from koppeling where nota_id in ${I().sql}), ` +
+      `(select group_concat(json_array(id, status), '|') from (select id, status from pod_verzoek where nota_id in ${I().sql} order by id)), ` +
+      `(select group_concat(json_array(id, status), '|') from (select id, status from nota_verzending where nota_id in ${I().sql} order by id)), ` +
+      `(select group_concat(json_array(id, nota_id, bedrag), '|') from (select id, nota_id, bedrag from correctie where ${corrSql.sql} order by id)), ` +
+      `(select group_concat(json_array(id, saldo, jaarlast_totaal, status), '|') from (select id, saldo, jaarlast_totaal, status from afrekening where ${afSql.sql} order by id)))`,
+    w: [...I().w, ...I().w, ...I().w, ...I().w, ...I().w, ...corrSql.w, ...afSql.w],
+  };
+  const leesFp = async () => (await rijen                (db, `select (${fp.sql}) as f`, ...fp.w))[0]?.f ?? null;
+  const fp1 = await leesFp();
+  const ids = (await rijen                (db, idsSql.sql.replace(/^select \?$/, "select ? as id"), ...idsSql.w)).map((x) => Number(x.id));
+  const lijst = ids.map(() => "?").join(",") || "null";
+  const [notas, mails, kop, verzoeken, verz, correcties, afrekening] = await Promise.all([
+    rijen(db, `select * from nota where id in (${lijst}) order by nummer`, ...ids),
+    rijen(db, `select distinct c.id, c.soort, c.status, c.nummers, c.onderwerp, c.verzonden_op, c.nota_ids, j.value as nota_id from mail_concept c, json_each(c.nota_ids) j where j.value in (${lijst}) order by c.id`, ...ids),
+    rijen                                (db, `select nota_id, count(*) as n from koppeling where nota_id in (${lijst}) group by nota_id`, ...ids),
+    rijen(db, `select id, nota_id, status from pod_verzoek where nota_id in (${lijst})`, ...ids),
+    rijen(db, `select id, nota_id, status, verzonden_op from nota_verzending where nota_id in (${lijst})`, ...ids),
+    rijen(db, `select * from correctie where ${corrSql.sql} order by id`, ...corrSql.w),
+    rijen(db, `select * from afrekening where ${afSql.sql} order by praktijk_id`, ...afSql.w),
+  ]);
+  if (fp1 !== (await leesFp())) throw new Fout(409, "Er veranderde net iets (de pod was bezig). Kijk over een minuut opnieuw.");
+  const waarom           = [];
+  if (wat.soort === "nota" && afrekening.length)
+    waarom.push(`De afrekening ${ENT_NAAM[String(notas[0].entiteit)]} ${notas[0].jaar} is al vastgesteld en rekende met deze nota; draai eerst die afrekening terug (Januari-ronde, stap B6), daarna kan deze nota vervallen.`);
+  let creditnota = false;
+  const naam = (n     ) => `${n.entiteit} ${n.nummer}`;
+  for (const n of notas) {
+    const id = Number(n.id);
+    if (kop.some((k) => Number(k.nota_id) === id)) { creditnota = true; waarom.push(`${naam(n)}: er is al een betaling aan gekoppeld (Betalingen).`); }
+    for (const v of verz.filter((x) => Number(x.nota_id) === id && !VERZEND_UIT.includes(String(x.status)))) {
+      if (VERZEND_WEG.includes(String(v.status))) { creditnota = true; waarom.push(`${naam(n)}: verstuurd via de oude verzendrij${v.verzonden_op ? ` op ${String(v.verzonden_op).slice(0, 10)}` : ""}.`); }
+      else waarom.push(`${naam(n)}: staat nog in de oude verzendrij (${v.status}).`);
+    }
+    for (const m of mails.filter((x) => Number(x.nota_id) === id)) {
+      const aan = MAIL_AAN[String(m.soort)] || "";
+      if (m.status === "verzonden") { creditnota = true; waarom.push(`${naam(n)}: verstuurd ${aan}${m.verzonden_op ? ` op ${String(m.verzonden_op).slice(0, 10)}` : ""}.`); }
+      else if (m.status === "bezig" || m.status === "onzeker") waarom.push(`${naam(n)}: de pod is net bezig met de mail ${aan} (of weet nog niet zeker of die in Gmail staat). Probeer het over tien minuten opnieuw.`);
+      else if (m.status === "concept") waarom.push(`${naam(n)}: staat als concept in je Gmail (${aan}${m.onderwerp ? `, onderwerp "${m.onderwerp}"` : ""}). Gooi dat concept weg zonder te versturen; binnen ongeveer een uur ziet OVIS POT dat en kun je hem laten vervallen.`);
+    }
+    if (n.soort === "afrekening" && Number(n.verrekend || 0) > 0.004) {
+      const op = await rijen                    (db, "select distinct n.entiteit || ' ' || n.nummer as nummer from nota n, json_each(n.regels) x where n.status='definitief' and json_extract(x.value,'$.soort')='verrekening' and json_extract(x.value,'$.nota_id')=?", id);
+      waarom.push(`${naam(n)}: het tegoed is al verrekend op ${op.map((x) => x.nummer).join(", ") || "een volgende nota"}; laat die eerst vervallen.`);
+    }
+  }
+  // bij de afrekening: een correctieregel die al op een (niet vervallen) nota staat, moet eerst met die nota terug
+  for (const c of wat.soort === "afrekening" ? correcties.filter((x) => x.nota_id != null) : []) {
+    const op = (await rijen                                    (db, "select entiteit || ' ' || nummer as nummer, status from nota where id=?", c.nota_id))[0];
+    waarom.push(`De correctie "${c.omschrijving}" staat al op nota ${op?.nummer || c.nota_id}; laat die eerst vervallen.`);
+  }
+  if (creditnota) waarom.push(wat.soort === "nota" ? CREDIT_UITLEG : CREDIT_AFREKENING);
+  // wat er gebeurt (alleen zinvol als het kan)
+  const gevolgen           = [];
+  if (wat.soort === "nota") {
+    const n = notas[0];
+    gevolgen.push(`Nota ${naam(n)} (${K.euro(Number(n.bedrag))}) vervalt. Het nummer blijft in de lijst staan als vervallen en wordt niet opnieuw gebruikt; een nieuwe nota krijgt het volgende nummer.`);
+    if (correcties.length) gevolgen.push(`${correcties.length === 1 ? "De correctie" : `De ${correcties.length} correcties`} op deze nota (${correcties.map((c) => c.omschrijving).join("; ")}) ${correcties.length === 1 ? "komt" : "komen"} op de volgende nota.`);
+    const verr = (JSON.parse(String(n.regels || "[]"))                                                               ).filter((r) => r.soort === "verrekening");
+    if (verr.length) gevolgen.push(`Het tegoed dat hier verrekend werd (${verr.map((r) => K.euro(-r.bedrag)).join(" + ")}) staat weer open en gaat mee op de volgende nota.`);
+    if (n.soort === "maand") gevolgen.push(`Opnieuw maken: Nota's › Nota's van een maand maken (${n.periode}); die maakt alleen wat ontbreekt.`);
+  } else {
+    gevolgen.push(`De afrekening ${ENT_NAAM[wat.entiteit]} ${wat.jaar} gaat terug naar niet vastgesteld (${afrekening.length} praktijk${afrekening.length === 1 ? "" : "en"}); je kunt hem daarna opnieuw vaststellen met de kosten zoals ze dan staan.`);
+    if (notas.length) gevolgen.push(`${notas.length === 1 ? "De afrekeningsnota" : `De ${notas.length} afrekeningsnota's`} (${notas.map(naam).join(", ")}) ${notas.length === 1 ? "vervalt" : "vervallen"}; de nummers blijven als vervallen staan en worden niet opnieuw gebruikt.`);
+    if (correcties.length) gevolgen.push(`${correcties.length === 1 ? "De correctieregel" : `De ${correcties.length} correctieregels`} die nog op een nota moesten (${[...new Set(correcties.map((c) => String(c.omschrijving)))].join("; ")}) ${correcties.length === 1 ? "vervalt" : "vervallen"}.`);
+  }
+  const weg = mails.filter((m) => MAIL_NIET_IN_GMAIL.includes(String(m.status)));
+  if (weg.length) {
+    const ander = [...new Set(weg.flatMap((m) => (JSON.parse(String(m.nummers || "[]"))            )))].filter((x) => !notas.some((n) => naam(n) === x));
+    gevolgen.push(`${new Set(weg.map((m) => m.id)).size === 1 ? "De mail" : "De mails"} die de pod hiervoor nog moest klaarzetten (of die je al weggooide) ${new Set(weg.map((m) => m.id)).size === 1 ? "vervalt" : "vervallen"}${ander.length ? `; voor de andere stukken eruit (${ander.join(", ")}) zet de pod binnen tien minuten een nieuw concept klaar` : ""}.`);
+  }
+  if (verzoeken.some((v) => v.status === "wacht")) gevolgen.push("De gevraagde herinnering vervalt.");
+  return { kan: !waarom.length, creditnota, waarom, gevolgen, stempel: K.versieVan([fp1]), fp, fpWaarde: fp1, ids, notas, mails, correcties, afrekening, verzoeken };
+}
+
+export async function terugKijk(db          , zoek                 ) {
+  const s = await terugStand(db, terugWat(zoek));
+  return { kan: s.kan, creditnota: s.creditnota, waarom: s.waarom, gevolgen: s.gevolgen, stempel: s.stempel, nummers: s.notas.map((n) => `${n.entiteit} ${n.nummer}`) };
+}
+
+async function terugDoe(db          , b        , wie        , soort                       ) {
+  const wat = terugWat(b);
+  if (wat.soort !== soort) throw new Fout(400, soort === "nota" ? "nota_id ontbreekt" : "entiteit en jaar ontbreken");
+  const reden = tekst(b.reden, "reden", { verplicht: true, max: 300 }) ;
+  if (reden.length < 4) throw new Fout(400, "reden: schrijf in een paar woorden waarom");
+  const s = await terugStand(db, wat);
+  if (!s.kan) throw new Fout(409, s.waarom.join(" "));
+  if (typeof b.stempel !== "string" || b.stempel !== s.stempel)
+    throw new Fout(409, "Er is intussen iets veranderd (bijvoorbeeld een mail klaargezet of een betaling gekoppeld). Kijk opnieuw.");
+  const verzoek = crypto.randomUUID();
+  const tabel = soort === "nota" ? "nota" : "afrekening";
+  const sleutel = soort === "nota" ? `${s.notas[0].entiteit} ${s.notas[0].nummer}` : `${(wat                        ).entiteit}/${(wat                    ).jaar}`;
+  const oud = { notas: s.notas, mails: s.mails, correcties: s.correcties, afrekening: s.afrekening, verzoeken: s.verzoeken };
+  // het logboek eerst, onder de vingerafdruk; al het andere hangt aan déze logboekregel (zelfde aanpak als verwijderen, Codex r9 wv2788)
+  const st         = [db.prepare(`insert into logboek (wie, tabel, sleutel, actie, oud, nieuw) select ?, ?, ?, ?, ?, json_object('verzoek', ?, 'reden', ?, 'stempel', ?, 'nummers', json(?)) where (${s.fp.sql}) is ?`)
+    .bind(wie, tabel, sleutel, soort === "nota" ? "vervallen" : "teruggedraaid", JSON.stringify(oud), verzoek, reden, s.stempel, JSON.stringify(s.notas.map((n) => `${n.entiteit} ${n.nummer}`)), ...s.fp.w, s.fpWaarde)];
+  const gelogd = "exists (select 1 from logboek where tabel = ? and json_extract(nieuw, '$.verzoek') = ?)";
+  const G = [tabel, verzoek];
+  const lijst = s.ids.map(() => "?").join(",");
+  if (s.ids.length) {
+    st.push(db.prepare(`update nota set status='vervallen', vervallen=json_object('op', strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'door', ?, 'reden', ?) where id in (${lijst}) and status='definitief' and ${gelogd}`).bind(wie, reden, ...s.ids, ...G));
+    // correcties op deze nota's gaan terug naar 'nog op een nota' (bij de afrekening vervallen ze hieronder)
+    st.push(db.prepare(`update correctie set nota_id=null where nota_id in (${lijst}) and ${gelogd}`).bind(...s.ids, ...G));
+    // een verrekend tegoed komt weer open
+    for (const n of s.notas) for (const r of (JSON.parse(String(n.regels || "[]"))                                                                 ).filter((x) => x.soort === "verrekening" && x.nota_id != null))
+      st.push(db.prepare(`update nota set verrekend=max(0, round(verrekend - ?, 2)) where id=? and ${gelogd}`).bind(K.rond2(-r.bedrag), r.nota_id, ...G));
+    const weg = [...new Set(s.mails.filter((m) => MAIL_NIET_IN_GMAIL.includes(String(m.status))).map((m) => Number(m.id)))];
+    if (weg.length) st.push(db.prepare(`delete from mail_concept where id in (${weg.map(() => "?").join(",")}) and status in (${MAIL_NIET_IN_GMAIL.map(() => "?").join(",")}) and ${gelogd}`).bind(...weg, ...MAIL_NIET_IN_GMAIL, ...G));
+    st.push(db.prepare(`update pod_verzoek set status='geannuleerd', uitkomst='nota vervallen', bijgewerkt_op=strftime('%Y-%m-%dT%H:%M:%SZ','now') where nota_id in (${lijst}) and status='wacht' and ${gelogd}`).bind(...s.ids, ...G));
+  }
+  if (soort === "afrekening") {
+    const { entiteit: e, jaar: J } = wat                                      ;
+    const cids = s.correcties.map((c) => Number(c.id));
+    if (cids.length) st.push(db.prepare(`delete from correctie where id in (${cids.map(() => "?").join(",")}) and nota_id is null and ${gelogd}`).bind(...cids, ...G));
+    st.push(db.prepare(`delete from afrekening where entiteit=? and jaar=? and versie='ovis-pot' and ${gelogd}`).bind(e, J, ...G));
+  }
+  await db.batch(st);
+  if (!(await rijen(db, "select 1 x from logboek where tabel = ? and json_extract(nieuw, '$.verzoek') = ?", ...G)).length)
+    throw new Fout(409, "Niet teruggedraaid: er veranderde net iets (bijvoorbeeld een mail of een betaling). Kijk opnieuw.");
+  return { ok: true, nummers: s.notas.map((n) => `${n.entiteit} ${n.nummer}`) };
+}
+
+// ---------- creditnota (wv3079, David 14-11-2026 22:28: Ja op "creditnota bouwen voor een al verstuurde nota?"; ontwerp R12) ----------
+// Een maandnota die de deur uit is (verstuurd, of betaald) gaat niet meer terug maar wordt gecrediteerd: een nieuwe nota (soort 'credit',
+// volgend nummer in dezelfde reeks, R11) met − het bedrag en de regel "Creditering van … X van <datum>". Het origineel krijgt status
+// 'gecrediteerd' (blijft staan, telt niet meer in gevraagd, afrekening of termijnen; de creditnota ook niet). Wat er volgens de
+// betaalmonitor al op betaald was, wordt een tegoed op de creditnota dat bij de volgende nota verrekend wordt (zoals een afrekeningstegoed).
+// Correcties en verrekende tegoeden op het origineel komen weer open. De pod zet de creditnota als concept klaar aan de praktijk en naar
+// Exact (de bestaande mailrij); de mail van het origineel naar Exact blijft staan (de boekhouding krijgt beide). Een ander bedrag = daarna
+// de nota opnieuw maken via de gewone route. Niet voor een afrekeningsnota (eerst nodig begin 2028) en niet als de afrekening van dat jaar
+// al vastgesteld is (die telde de nota al mee: eerst de afrekening terug). Zelfde vangrails als terugdraaien: reden, vingerafdruk, logboek eerst.
+const MAIL_POD_BEZIG = ["bezig", "onzeker"];
+                       
+                                                                                                                         
+                                                                                                               
+ 
+
+async function creditStand(db          , id        , datumIn         )                       {
+  const n = (await rijen(db, "select * from nota where id=?", id))[0];
+  if (!n) throw new Fout(404, "nota niet gevonden");
+  const naam = `${n.entiteit} ${n.nummer}`;
+  if (n.bron !== "ovis-pot") throw new Fout(409, "Alleen nota's die deze app maakte zijn te crediteren; de oude nota's (tot en met 2026) niet.");
+  if (n.status === "gecrediteerd") {
+    let c = ""; try { c = String(JSON.parse(String(n.gecrediteerd || "{}")).credit_nummer || ""); } catch { c = ""; }
+    throw new Fout(409, `Nota ${naam} is al gecrediteerd${c ? ` (creditnota ${n.entiteit} ${c})` : ""}.`);
+  }
+  if (n.status === "vervallen") throw new Fout(409, `Nota ${naam} is vervallen; er is niets te crediteren.`);
+  if (n.status !== "definitief") throw new Fout(409, `Nota ${naam} staat op '${n.status}'.`);
+  if (n.soort === "credit") throw new Fout(409, "Een creditnota crediteer je niet. Moet de gecrediteerde nota toch blijven, maak hem dan opnieuw (Nota's › Nota's van een maand maken).");
+  if (n.soort === "afrekening") throw new Fout(409, CREDIT_AFREKENING);
+  if (n.soort !== "maand") throw new Fout(409, `Een nota van soort '${n.soort}' is hier niet te crediteren.`);
+  if (!(Number(n.bedrag) > 0.004)) throw new Fout(409, `Nota ${naam} heeft geen te betalen bedrag; daar hoort geen creditnota bij.`);
+  const vandaag = (await rijen               (db, "select date('now') as d"))[0].d;
+  const dat = datumIn == null || datumIn === "" ? vandaag : datum(datumIn, "datum creditnota") ;
+  if (dat < String(n.datum)) throw new Fout(400, "De creditnota kan niet vóór de nota zelf gedateerd zijn.");
+  const vanaf = await overnameVanaf(db);
+  if (dat < vanaf) throw new Fout(409, `nota's maakt de app pas vanaf ${vanaf}`);
+  const e = String(n.entiteit), J = Number(n.jaar), pid = String(n.praktijk_id);
+  const fp        = {
+    sql: "select json_array(" +
+      "(select json_array(id, status, bedrag, verrekend, regels, gecrediteerd) from nota where id=?), " +
+      "(select group_concat(json_array(id, status), '|') from (select distinct c.id, c.status from mail_concept c, json_each(c.nota_ids) j where j.value=? order by c.id)), " +
+      "(select group_concat(json_array(id, status), '|') from (select id, status from pod_verzoek where nota_id=? order by id)), " +
+      "(select group_concat(json_array(id, status), '|') from (select id, status from nota_verzending where nota_id=? order by id)), " +
+      "(select group_concat(json_array(id, nota_id, bedrag), '|') from (select id, nota_id, bedrag from correctie where nota_id=? order by id)), " +
+      "(select count(*) from afrekening where entiteit=? and jaar=? and versie='ovis-pot'), " +
+      // wat de betaalmonitor ziet (posten, toewijzingen, koppelingen van deze praktijk) en het nummer dat de creditnota krijgt
+      "(select count(*) || ':' || coalesce(max(id),0) from bankmutatie where entiteit=?), " +
+      "(select count(*) || ':' || coalesce(round(sum(t.bedrag),2),0) from bank_toewijzing t join bankmutatie m on m.id=t.bankmutatie_id where m.entiteit=? and t.praktijk_id=?), " +
+      "(select count(*) || ':' || coalesce(round(sum(k.bedrag),2),0) from koppeling k join nota x on x.id=k.nota_id where x.entiteit=? and x.praktijk_id=?), " +
+      "(select group_concat(json_array(id, status), '|') from (select id, status from nota where entiteit=? and praktijk_id=? and bron='ovis-pot' order by id)), " +
+      "(select count(*) || ':' || coalesce(max(nummer),'') from nota where entiteit=?))",
+    w: [id, id, id, id, id, e, J, e, e, pid, e, pid, e, pid, e],
+  };
+  const leesFp = async () => (await rijen                (db, `select (${fp.sql}) as f`, ...fp.w))[0]?.f ?? null;
+  const fp1 = await leesFp();
+  const [mails, verz, correcties, verzoeken, afr, nummers, m, bank] = await Promise.all([
+    rijen(db, "select distinct c.id, c.soort, c.status, c.nummers, c.onderwerp, c.verzonden_op from mail_concept c, json_each(c.nota_ids) j where j.value=? order by c.id", id),
+    rijen(db, "select id, status, verzonden_op from nota_verzending where nota_id=?", id),
+    rijen(db, "select * from correctie where nota_id=? order by id", id),
+    rijen(db, "select id, status from pod_verzoek where nota_id=?", id),
+    rijen(db, "select 1 x from afrekening where entiteit=? and jaar=? and versie='ovis-pot' limit 1", e, J),
+    rijen                    (db, "select nummer from nota where entiteit=?", e),
+    monitor(db, J),
+    rijen                     (db, "select max(boekdatum) as laatste from bankmutatie where entiteit=?", e),
+  ]);
+  if (fp1 !== (await leesFp())) throw new Fout(409, "Er veranderde net iets (de pod was bezig). Kijk over een minuut opnieuw.");
+  const peil = [bank[0]?.laatste || vandaag, vandaag].sort()[0];
+  const betaald = K.rond2(Math.min(Number(n.bedrag), K.betaaldOpNota(m         , n         , peil)));
+  const nummer = K.volgendNummer(nummers.map((x) => x.nummer), Number(dat.slice(0, 4)));
+  const waarom           = [];
+  if (afr.length) waarom.push(`De afrekening ${ENT_NAAM[e]} ${J} is al vastgesteld en telde deze nota al mee; een fout bedrag is daarin al rechtgezet. Crediteren zou dubbel tellen. Moet het toch: draai eerst de afrekening terug (Januari-ronde, stap B6; kan zolang de afrekeningsnota's niet verstuurd zijn) en stel hem daarna opnieuw vast.`);
+  for (const x of mails) {
+    const aan = MAIL_AAN[String(x.soort)] || "";
+    if (MAIL_POD_BEZIG.includes(String(x.status))) waarom.push(`De pod is net bezig met de mail ${aan} (of weet nog niet zeker of die in Gmail staat). Probeer het over tien minuten opnieuw.`);
+    else if (x.status === "concept" && x.soort !== "exact")
+      waarom.push(`Nota ${naam} staat nog als concept in je Gmail (${aan}${x.onderwerp ? `, onderwerp "${x.onderwerp}"` : ""}). Verstuur dat eerst, of gooi het weg en laat de nota dan vervallen (terugdraaien): dan is er geen creditnota nodig.`);
+  }
+  for (const v of verz.filter((x) => !VERZEND_UIT.includes(String(x.status)) && !VERZEND_WEG.includes(String(x.status))))
+    waarom.push(`Nota ${naam} staat nog in de oude verzendrij (${v.status}); wacht tot die klaar is.`);
+  const uit = mails.some((x) => x.status === "verzonden") || verz.some((x) => VERZEND_WEG.includes(String(x.status))) || betaald > 0.004;
+  const hint = uit ? null : `Volgens de app is nota ${naam} nog niet verstuurd en niet betaald. Klopt dat, laat hem dan liever vervallen (terugdraaien): dan is er geen creditnota nodig. Heb je hem zelf (buiten de pod om) verstuurd, ga dan hier door.`;
+  const gevolgen           = [];
+  gevolgen.push(`Creditnota ${e} ${nummer} van ${K.euro(Number(n.bedrag))}, gedateerd ${dat}: "Creditering van ${K.stukNaam(e)} ${n.nummer}". Nota ${naam} krijgt de stand gecrediteerd; beide blijven in de lijst staan en tellen niet meer mee in wat er gevraagd is.`);
+  gevolgen.push(betaald > 0.004
+    ? `Op nota ${naam} is volgens Betalingen al ${K.euro(betaald)} betaald${betaald + 0.004 < Number(n.bedrag) ? ` (van ${K.euro(Number(n.bedrag))})` : ""}; dat wordt een tegoed dat van de volgende nota van ${ENT_NAAM[e]} afgaat.`
+    : `Op nota ${naam} is volgens Betalingen nog niets betaald; de praktijk hoeft hem niet meer te betalen. Betaalt ze hem toch nog, dan zie je dat in Betalingen als te veel betaald.`);
+  if (correcties.length) gevolgen.push(`${correcties.length === 1 ? "De correctie" : `De ${correcties.length} correcties`} op deze nota (${correcties.map((c) => c.omschrijving).join("; ")}) ${correcties.length === 1 ? "komt" : "komen"} op de volgende nota.`);
+  const verr = (JSON.parse(String(n.regels || "[]"))                                        ).filter((r) => r.soort === "verrekening");
+  if (verr.length) gevolgen.push(`Het tegoed dat op deze nota verrekend werd (${verr.map((r) => K.euro(-r.bedrag)).join(" + ")}) staat weer open en gaat mee op de volgende nota.`);
+  const exact = String((await rijen                    (db, "select waarde from instelling where sleutel=?", `verkoopadres_exact_${e}`))[0]?.waarde || "").trim();
+  gevolgen.push(`De pod zet de creditnota${dat > vandaag ? ` op ${dat}` : " binnen tien minuten"} als concept klaar aan de praktijk${exact ? " en naar Exact" : " (naar Exact zodra het verkoopadres er is)"}; jij verstuurt. Een mail van nota ${naam} naar Exact die nog moet, gaat gewoon: de boekhouding krijgt beide.`);
+  const weg = mails.filter((x) => x.soort !== "exact" && MAIL_NIET_IN_GMAIL.includes(String(x.status)));
+  if (weg.length) gevolgen.push(`De mail aan de praktijk die de pod voor nota ${naam} nog moest klaarzetten vervalt; de andere stukken eruit zet hij opnieuw klaar.`);
+  if (verzoeken.some((v) => v.status === "wacht")) gevolgen.push("De gevraagde herinnering vervalt.");
+  gevolgen.push(`Moet er een ander bedrag gevraagd worden? Pas zo nodig het jaarplan aan en maak daarna de nota van ${n.periode} opnieuw (Nota's van een maand maken); die krijgt weer een eigen nummer.`);
+  return { kan: !waarom.length, waarom, gevolgen, hint, stempel: K.versieVan([fp1, betaald, nummer, dat]), fp, fpWaarde: fp1, nota: n, betaald, nummer, datum: dat, mails, correcties, verzoeken };
+}
+
+export async function creditKijk(db          , zoek                 ) {
+  const s = await creditStand(db, geldigId(zoek.get("nota"), "nota"), zoek.get("datum"));
+  return { kan: s.kan, waarom: s.waarom, gevolgen: s.gevolgen, hint: s.hint, stempel: s.stempel, nummer: `${s.nota.entiteit} ${s.nummer}`, origineel: `${s.nota.entiteit} ${s.nota.nummer}`, betaald: s.betaald, datum: s.datum };
+}
+
+async function creditDoe(db          , b        , wie        ) {
+  const id = geldigId(b.nota_id, "nota");
+  const reden = tekst(b.reden, "reden", { verplicht: true, max: 300 }) ;
+  if (reden.length < 4) throw new Fout(400, "reden: schrijf in een paar woorden waarom");
+  const s = await creditStand(db, id, b.datum);
+  if (!s.kan) throw new Fout(409, s.waarom.join(" "));
+  if (typeof b.stempel !== "string" || b.stempel !== s.stempel)
+    throw new Fout(409, "Er is intussen iets veranderd (bijvoorbeeld een betaling, een mail of een andere nota). Kijk opnieuw.");
+  const n = s.nota, e = String(n.entiteit);
+  const c = K.maakCreditNota({ origineel: n         , nummer: s.nummer, datum: s.datum, betaald: s.betaald });
+  const verzoek = crypto.randomUUID();
+  const st         = [db.prepare(`insert into logboek (wie, tabel, sleutel, actie, oud, nieuw) select ?, 'nota', ?, 'gecrediteerd', ?, json_object('verzoek', ?, 'reden', ?, 'stempel', ?, 'creditnota', ?, 'betaald', ?) where (${s.fp.sql}) is ?`)
+    .bind(wie, `${e} ${n.nummer}`, JSON.stringify({ nota: n, mails: s.mails, correcties: s.correcties, verzoeken: s.verzoeken }), verzoek, reden, s.stempel, `${e} ${s.nummer}`, s.betaald, ...s.fp.w, s.fpWaarde)];
+  const gelogd = "exists (select 1 from logboek where tabel = 'nota' and json_extract(nieuw, '$.verzoek') = ?)";
+  st.push(db.prepare("insert into nota (entiteit, jaar, nummer, praktijk_id, datum, vervaldag, soort, periode, titel, regels, bedrag, buffer, status, bron, debiteur, toelichting, tegoed, credit_van, aangemaakt_op) " +
+    `select ?,?,?,?,?,?, 'credit', ?,?,?,?, 0, 'definitief', 'ovis-pot', ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now') where ${gelogd}`)
+    .bind(e, c.jaar, c.nummer, c.praktijk_id, c.datum, c.vervaldag, c.periode, c.titel, json(c.regels), c.bedrag, typeof n.debiteur === "string" ? n.debiteur : json(n.debiteur), c.toelichting, c.tegoed, id, verzoek));
+  st.push(db.prepare(`update nota set status='gecrediteerd', gecrediteerd=json_object('op', strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'door', ?, 'reden', ?, 'credit_id', (select id from nota where credit_van=?), 'credit_nummer', ?, 'betaald', ?) where id=? and status='definitief' and ${gelogd}`)
+    .bind(wie, reden, id, s.nummer, s.betaald, id, verzoek));
+  // correcties op het origineel gaan terug naar 'nog op een nota'; een tegoed dat erop verrekend werd komt weer open
+  st.push(db.prepare(`update correctie set nota_id=null where nota_id=? and ${gelogd}`).bind(id, verzoek));
+  for (const r of (JSON.parse(String(n.regels || "[]"))                                                                 ).filter((x) => x.soort === "verrekening" && x.nota_id != null))
+    st.push(db.prepare(`update nota set verrekend=max(0, round(verrekend - ?, 2)) where id=? and ${gelogd}`).bind(K.rond2(-r.bedrag), r.nota_id, verzoek));
+  // een mail aan de praktijk (of herinnering) die nog niet in Gmail staat vervalt; die naar Exact blijft (de boekhouding krijgt het origineel én de creditnota)
+  const weg = [...new Set(s.mails.filter((x) => x.soort !== "exact" && MAIL_NIET_IN_GMAIL.includes(String(x.status))).map((x) => Number(x.id)))];
+  if (weg.length) st.push(db.prepare(`delete from mail_concept where id in (${weg.map(() => "?").join(",")}) and soort<>'exact' and status in (${MAIL_NIET_IN_GMAIL.map(() => "?").join(",")}) and ${gelogd}`).bind(...weg, ...MAIL_NIET_IN_GMAIL, verzoek));
+  st.push(db.prepare(`update pod_verzoek set status='geannuleerd', uitkomst='nota gecrediteerd', bijgewerkt_op=strftime('%Y-%m-%dT%H:%M:%SZ','now') where nota_id=? and status='wacht' and ${gelogd}`).bind(id, verzoek));
+  try { await db.batch(st); }
+  catch (x) { if (/UNIQUE constraint/i.test(String((x         )?.message || x))) throw new Fout(409, "Er is net een andere nota of creditnota gemaakt. Kijk opnieuw."); throw x; }
+  const na = await rijen(db, "select c.id, c.nummer, o.status from nota c join nota o on o.id=c.credit_van where c.credit_van=? and exists (select 1 from logboek where tabel='nota' and json_extract(nieuw, '$.verzoek')=?)", id, verzoek);
+  if (!na.length || na[0].status !== "gecrediteerd") throw new Fout(409, "Niet gecrediteerd: er veranderde net iets (bijvoorbeeld een betaling of een mail). Kijk opnieuw.");
+  return { ok: true, nummer: `${e} ${na[0].nummer}`, origineel: `${e} ${n.nummer}`, tegoed: c.tegoed };
 }

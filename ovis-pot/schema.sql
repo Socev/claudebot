@@ -1,4 +1,4 @@
--- GEGENEREERD uit Socev/ovis-pot 4fd0303cb2b6440872d6405e9ab9b7858e0cc2b7: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql, migrations/0007_jan_feb.sql, migrations/0008_historie_blind.sql, migrations/0009_subsidie_totaal.sql, migrations/0010_notadag_25.sql, migrations/0011_nmbrs_koppeling.sql
+-- GEGENEREERD uit Socev/ovis-pot eee9baf1006419f12993704ac72bc7b1d4c643bf: migrations/0001_pot_tabellen_uit_fin.sql, migrations/0002_nieuw_model.sql, migrations/0003_begroting_jaarronde.sql, migrations/0004_maand_bank.sql, migrations/0005_geen_leningen.sql, migrations/0006_historie.sql, migrations/0007_jan_feb.sql, migrations/0008_historie_blind.sql, migrations/0009_subsidie_totaal.sql, migrations/0010_notadag_25.sql, migrations/0011_nmbrs_koppeling.sql, migrations/0012_zk_contract.sql, migrations/0013_zk_tarief_max.sql, migrations/0014_nota_vervallen.sql, migrations/0015_creditnota.sql
 -- OVIS POT — migratie 0001: de POT-tabellen zoals ze in D1 `fin` stonden (kolommen en ids gelijk), zodat de pod-modules
 -- (pot-datahub.js, pot-verzend.js) bij het overstapmoment alleen een andere database krijgen. Gegenereerd uit fin.sqlite_master op 8-11-2026.
 -- Geen gegevens in deze repo; de inhoud komt met scripts/kopieer-uit-fin.py.
@@ -591,3 +591,41 @@ ALTER TABLE contract ADD COLUMN einde_bron TEXT;
 -- Een wijziging per datum is van de koppeling als nmbrs_stand gevuld is (wat de koppeling schreef: uren, schaal, trede); dezelfde drie-weg.
 ALTER TABLE contractmutatie ADD COLUMN nmbrs_stand TEXT;
 CREATE UNIQUE INDEX ux_contract_nmbrs ON contract(nmbrs_dienst) WHERE nmbrs_dienst IS NOT NULL;
+
+-- wv2815: contracteringsadvies POH-GGZ (Zilveren Kruis) en de prognose door het jaar.
+-- zk_contract = het aantal uur POH-GGZ per week dat alle praktijken samen bij Zilveren Kruis gecontracteerd hebben, vanaf een kwartaal
+-- (een nieuwe regel bij elke ophoging, bv. per 1 juli na het openzetten van de contracten). De verdeling per praktijk volgt uit het advies.
+CREATE TABLE IF NOT EXISTS zk_contract (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  geldig_van TEXT NOT NULL UNIQUE CHECK (geldig_van GLOB '[0-9][0-9][0-9][0-9]-[01][0-9]-01' AND substr(geldig_van,6,2) IN ('01','04','07','10')),
+  uren REAL NOT NULL CHECK (uren > 0 AND uren <= 2000),
+  per_normpraktijk REAL CHECK (per_normpraktijk IS NULL OR (per_normpraktijk > 0 AND per_normpraktijk <= 36)),
+  bron TEXT,
+  opmerking TEXT,
+  ingevoerd_op TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+-- gemeente-uren (jeugd, subsidie) die eerst in mindering gaan, en de drempel voor de tip 'contracten laten openzetten' (procent)
+INSERT INTO instelling (sleutel, waarde, opmerking) VALUES ('zk_gemeente_uren', '60', 'uren POH-GGZ per week die de gemeente betaalt; gaan eerst af van de contracturen POT (wv2815)') ON CONFLICT(sleutel) DO NOTHING;
+INSERT INTO instelling (sleutel, waarde, opmerking) VALUES ('zk_drempel_pct', '5', 'prognose zoveel procent boven het gecontracteerde: tip om de ZK-contracten te laten openzetten (wv2815)') ON CONFLICT(sleutel) DO NOTHING;
+
+-- wv2818: het ZK-tarief bij 16 uur POH-GGZ per 2.350 patiënten (tarievenlijst Zilveren Kruis, "Maximaal") staat apart van het inschrijftarief.
+-- inschrijftarief = wat de praktijken werkelijk per patiënt per kwartaal krijgen (inschrijfgeld in Subsidie en inschrijfgeld en de Jaarafronding);
+-- zk_tarief_max_<J> = de grondslag van de ZK-rekenregel in het contracteringsadvies: (uren × 2350 ÷ patiënten) ÷ 16 × dit tarief.
+INSERT INTO instelling (sleutel, waarde, opmerking) VALUES ('zk_tarief_max_2026', '5.41', 'ZK-tarievenlijst 2026, POH-GGZ bij 16 uur per 2.350 patiënten (maximaal)') ON CONFLICT(sleutel) DO NOTHING;
+INSERT INTO instelling (sleutel, waarde, opmerking) VALUES ('zk_tarief_max_2027', '5.57', 'ZK-tarievenlijst 2027, POH-GGZ bij 16 uur per 2.350 patiënten (maximaal)') ON CONFLICT(sleutel) DO NOTHING;
+
+-- OVIS POT — migratie 0014 (wv3071, 14-11-2026): terugdraaien zolang er niets verzonden is (David 14-11: "Als definitieve nota's niet terug te
+-- draaien zijn, moeten we dus een terugdraaifunctie maken. Zolang ik de concepten niet verzonden heb is er niets aan de hand").
+-- Een nota die vervalt blijft staan met status 'vervallen' (het nummer blijft bezet en wordt nooit opnieuw uitgegeven: de nummering blijft
+-- sluitend); hier staat wanneer, door wie en waarom. De volledige oude stand staat in het logboek.
+ALTER TABLE nota ADD COLUMN vervallen TEXT;   -- JSON {op, door, reden} zodra status = 'vervallen'
+
+-- OVIS POT — migratie 0015 (wv3079, 15-11-2026): creditnota voor een nota die de deur uit is (David 14-11-2026 22:28, Ja op de kaart
+-- "creditnota bouwen voor een al verstuurde nota?"). Ontwerp R12. Een creditnota is een gewone nota met soort 'credit' (eigen nummer in
+-- dezelfde reeks, bedrag = − het origineel); het origineel krijgt status 'gecrediteerd' en telt dan, net als de creditnota zelf, niet
+-- meer mee in gevraagd, afrekening of termijnen. Wat op het origineel al betaald was, wordt een tegoed dat op de volgende nota verrekend wordt.
+ALTER TABLE nota ADD COLUMN credit_van INTEGER REFERENCES nota(id);   -- creditnota: het origineel
+ALTER TABLE nota ADD COLUMN tegoed REAL NOT NULL DEFAULT 0;           -- creditnota: wat op het origineel al betaald was (te verrekenen)
+ALTER TABLE nota ADD COLUMN gecrediteerd TEXT;                        -- origineel: JSON {op, door, reden, credit_id, credit_nummer, betaald}
+-- één creditnota per origineel (ook als twee verzoeken tegelijk komen)
+CREATE UNIQUE INDEX ux_nota_credit_van ON nota(credit_van) WHERE credit_van IS NOT NULL;
