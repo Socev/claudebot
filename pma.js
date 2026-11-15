@@ -340,11 +340,14 @@ const laatsteOp = (rijen, veld, d) => { let u = null; for (const r of rijen) if 
 // i.dagen: Map dag → { n, kort, middel, lang, vk, vl, mi, poh, cent } (alleen declaraties die voor de werkdag tellen; nooit inschrijfgeld)
 // i.gedekt: Set van dagen die door een export gedekt zijn; i.rollen [{ rol, van, tot }]; i.hand [{ ingang, uren[7] }];
 // i.nmbrs { dienst [{ begin, eind }], rooster [{ begin, uren, dagen_per_week, dagen1, dagen2 }], contract [{ begin, eind, uren }] } of null;
-// i.drempel (invaldag), i.feest Set. Uit: [{ dag, soort, uren, rol, bron, t }] met soort gewerkt | afwezig | invaldag | los | weekend | feestdag.
+// i.drempel (invaldag), i.feest Set, i.groep (verzamelnaam: geen rooster, dus nooit afwezig; wv3054). Uit: [{ dag, soort, uren, rol, bron, t }] met soort gewerkt | afwezig | invaldag | los | weekend | feestdag.
 function werkdagenVan(i) {
   const dagen = i.dagen, rollen = i.rollen || [], hand = i.hand || [], nm = i.nmbrs || null, drempel = i.drempel || 5, feest = i.feest || new Set();
   const alle = [...dagen.keys()].sort();
   const gedekt = [...i.gedekt].sort();
+  // wv3054: het declaratiepatroon zegt alleen iets tussen de eerste en de laatste dag met declaraties; daarbuiten (nog niet begonnen,
+  // vertrokken, of het venster van 4 weken loopt door) is een lege patroondag geen afwezigheid. Een rooster (hand of Nmbrs per dag) blijft gelden.
+  const metDecl = alle.filter((d) => dagen.get(d) && dagen.get(d).n > 0), declVan = metDecl[0] || null, declTot = metDecl[metDecl.length - 1] || null;
   if (!gedekt.length || (!alle.length && !rollen.length)) return [];
   let van = alle[0] || gedekt[0], tot = alle[alle.length - 1] || gedekt[gedekt.length - 1];
   if (rollen.length) {
@@ -397,7 +400,10 @@ function werkdagenVan(i) {
     }
     let soort;
     if (wd > 4) { if (!n) continue; soort = 'weekend'; daguren = null; }
-    else if (werk === true) soort = n ? 'gewerkt' : feest.has(d) ? 'feestdag' : binnen ? 'afwezig' : null;
+    else if (werk === true) {
+      if (!n && (i.groep || (!uren && (!declVan || d < declVan || d > declTot)))) continue;   // wv3054: groep of buiten de declaratiespanne
+      soort = n ? 'gewerkt' : feest.has(d) ? 'feestdag' : binnen ? 'afwezig' : null;
+    }
     else if (werk === false) { if (!n) continue; soort = n >= drempel ? 'invaldag' : 'los'; daguren = soort === 'invaldag' ? invaluren : null; }
     else { if (!n) continue; soort = 'gewerkt'; bron = bron === 'nmbrs-week' ? 'nmbrs-week-zonder-patroon' : 'zonder-patroon'; }
     if (!soort) continue;
@@ -957,7 +963,7 @@ function maak(o) {
           // (POH-GGZ, werkt bij meer praktijken) en bij de andere praktijk: geen Nmbrs-uren, alleen het patroon of een handrooster; het
           // dienstverband geldt overal (uit dienst = nergens).
           const eigen = m && m.entiteit === pr.code;
-          const w = werkdagenVan({ dagen, gedekt, rollen, hand: p.rooster.filter((r) => r.praktijk === pr.code), nmbrs: m ? { dienst: m.dienst, rooster: eigen ? m.rooster : [], contract: eigen ? m.contract : [] } : null, drempel, feest });
+          const w = werkdagenVan({ groep: p.groep, dagen, gedekt, rollen, hand: p.rooster.filter((r) => r.praktijk === pr.code), nmbrs: m ? { dienst: m.dienst, rooster: eigen ? m.rooster : [], contract: eigen ? m.contract : [] } : null, drempel, feest });
           uitP[p.id] = w.map((x) => { const t = x.t || { n: 0, d: 0, kort: 0, middel: 0, lang: 0, vk: 0, vl: 0, mi: 0, poh: 0, cent: 0 }; return [x.dag, x.soort, x.uren, x.rol, x.bron, t.n, t.d, t.kort, t.middel, t.lang, t.vk, t.vl, t.mi, t.poh, t.cent]; });
         }
         leeg.werkdagen[pr.code] = uitP;
