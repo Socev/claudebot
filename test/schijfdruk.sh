@@ -12,6 +12,11 @@
 #                aaneengesloten periode binnen de pauze: geen tweede rij; boven de pauze wel.
 #   F ring       oude ringbestanden boven het maximum worden opgeruimd.
 #   H lezing     een /proc-bestand dat nooit antwoordt (FIFO): na MAXOPEN open lezingen start er niets nieuws meer, de meter blijft antwoorden.
+#   I nvme       nep-sysfs (wv3126): ms per opdracht, MB, aantallen en status per minuut kloppen met een onafhankelijke berekening (python).
+#   J oordeel    drukperiode: 'drukte van elders' bij veel MB en normale latentie, 'schijf hapert' bij trage opdrachten bij weinig MB,
+#                'niet vast te stellen' zonder NVMe; geen incident en geen bericht bij alleen een traag venster.
+#   K incident   vastzittende I/O of status ≠ live: precies één box-rij #schijf-hapert en één bericht (nep-bericht.py), geen tweede na
+#                een herstart (haper.json), in de stille uren wel de rij en geen bericht, een gezonde schijf geen rij.
 #   G kosten     echte /proc: CPU-tijd en geheugen van de meter per sample, en wat dat per minuut betekent.
 # Kruisproef: SCHIJFDRUK_KRUIS=1 laat de toets een bewust foute kopie draaien (delta zonder aftrekken): A moet dan rood zijn.
 set -u
@@ -24,7 +29,8 @@ rood(){ echo "ROOD: $1"; FOUT=1; }
 groen(){ echo "GROEN: $1"; }
 JS="$HIER/schijfdruk.js"
 if [ "${SCHIJFDRUK_KRUIS:-0}" = "1" ]; then
-  mkdir -p "$TOP/fout"; sed 's/const dr = s\[n\].rs - v.rs, dw = s\[n\].ws - v.ws, dtk = s\[n\].tick - v.tick;/const dr = s[n].rs, dw = s[n].ws, dtk = s[n].tick;/' "$JS" > "$TOP/fout/schijfdruk.js"
+  mkdir -p "$TOP/fout"; sed -e 's/const dr = s\[n\].rs - v.rs, dw = s\[n\].ws - v.ws, dtk = s\[n\].tick - v.tick;/const dr = s[n].rs, dw = s[n].ws, dtk = s[n].tick;/' \
+    -e 's/const dr = st.r - v.st.r, dw = st.w - v.st.w,/const dr = st.r, dw = st.w,/' "$JS" > "$TOP/fout/schijfdruk.js"
   JS="$TOP/fout/schijfdruk.js"
 fi
 
@@ -47,11 +53,19 @@ json(){ python3 -c "import sys,json; j=json.load(sys.stdin); print(eval(sys.argv
 opzet(){
   W="$TOP/$1"; S="$W/map"; P="$W/proc"; mkdir -p "$S"
   printf '# box\n\n**Formaat** (proef)\n\n## [week] 2026-10-01 10:00 — bestaande rij\n- status: open\n' > "$W/box.md"
+  printf 'import sys\nopen(sys.argv[0][:-3] + ".log", "a").write(" ".join(sys.argv[1:]) + "\\n")\n' > "$W/bericht.py"   # nep: nooit een echt bericht
+}
+nepsys(){  # nepsys <staat> <r> <rsec> <rms> <w> <wsec> <wms> <infl> <ticks> [temp_millic] [discards] — schrijft een nep-/sys (atomair)
+  local D="$W/sys"; mkdir -p "$D/class/nvme/nvme0/nvme0n1" "$D/class/nvme/nvme0/hwmon3" "$D/block/nvme0n1"
+  echo "$1" > "$D/.s"; mv "$D/.s" "$D/class/nvme/nvme0/state"
+  echo "${10:-43000}" > "$D/.t"; mv "$D/.t" "$D/class/nvme/nvme0/hwmon3/temp1_input"
+  echo "$2 0 $3 $4 $5 0 $6 $7 $8 $9 $9 ${11:-0} 0 0 0 0 0" > "$D/.b"; mv "$D/.b" "$D/block/nvme0n1/stat"
 }
 start(){  # start <sha> [extra env…]
   local sha="$1"; shift
   env SCHIJFDRUK_DIR="$S" SCHIJFDRUK_PROC="$P" SCHIJFDRUK_BOX="$W/box.md" SCHIJFDRUK_SHA="$sha" SCHIJFDRUK_TIK_MS=250 \
-    SCHIJFDRUK_FS_MS=1500 SCHIJFDRUK_UIT="$W/uit" "$@" setsid node "$JS" >/dev/null 2>&1 &
+    SCHIJFDRUK_FS_MS=1500 SCHIJFDRUK_UIT="$W/uit" SCHIJFDRUK_SYS="$W/sys" SCHIJFDRUK_BERICHT="$W/bericht.py" SCHIJFDRUK_UUR=12 \
+    SCHIJFDRUK_NV_MS=100 SCHIJFDRUK_NV_STIL_S=1 "$@" setsid node "$JS" >/dev/null 2>&1 &
   echo $!
 }
 
@@ -157,9 +171,93 @@ echo "$RH" | json 'any("lezingen hangen" in r.get("fout","") for r in j["records
 TH=$(ls /proc/$MH/task | wc -l); [ "$(echo "$SH" | json 'j["laatste"]["leeftijd_s"] < 3')" = "True" ] && groen "H: socket antwoordt, laatste record vers ($TH threads)" || rood "H: socket traag/stil"
 kill -9 "$MH" 2>/dev/null
 
+# ── I nvme (nep-sysfs) ────────────────────────────────────────────────────────────────────────────────────────────
+opzet i; nep "$P" 0.00 1000 2000 300; nepsys live 100 0 100 200 0 400 0 1000
+MI=$(start shaI)
+wachtOp '[ "$(vraag /samenvatting | json "j[\"records_geheugen\"]")" -ge 2 ] 2>/dev/null' 10 || rood "I: meter start niet"
+sleep 0.6; nepsys live 300 20480 500 250 40960 25400 0 1300 44000   # +200 lezen (10 MB, 400 ms), +50 schrijven (20 MB, 25000 ms), +300 ms bezet
+sleep 1.2
+RI=$(vraag "/recent?min=5")
+echo "$RI" | python3 -c "
+import sys, json
+j = json.load(sys.stdin)
+hits = [r['nv']['nvme0n1'] for r in j['records'] if 'nv' in r and r['nv']['nvme0n1']['r'] == 200]
+assert len(hits) == 1, 'records met de delta: %d' % len(hits)
+v = hits[0]
+# onafhankelijke verwachting uit de nep-getallen
+assert v['w'] == 50 and v['mr'] == 10.0 and v['mw'] == 20.0, v
+assert abs(v['lr'] - 400/200) < 0.11 and abs(v['lw'] - 25000/50) < 0.11 and abs(v['lm'] - 500) < 0.11, v
+assert v['s'] == 'live' and v['t'] == 44.0 and v['i'] == 0, v
+print('delta ok', v)
+" && groen "I: nv per minuut klopt (200 lees 2,0 ms, 50 schrijf 500 ms, 10/20 MB, temperatuur 44, status live)" || rood "I: nv-delta klopt niet: $(echo "$RI" | head -c 600)"
+[ "$(vraag /samenvatting | json 'j["nvme"]["apparaten"]["nvme0n1"]["piek_venster_ms"]["waarde"]')" = "500" ] && groen "I: samenvatting toont de piek (500 ms) voor /health" || rood "I: samenvatting.nvme: $(vraag /samenvatting | json 'j["nvme"]')"
+kill "$MI" 2>/dev/null
+
+# ── J oordeel ─────────────────────────────────────────────────────────────────────────────────────────────────────
+# J1 veel MB bij normale latentie → drukte van elders
+opzet j1; nep "$P" 80.00 1000 2000 300; nepsys live 0 0 0 0 0 0 0 0
+MJ=$(start shaJ1 SCHIJFDRUK_ALARM_MS=1500 SCHIJFDRUK_ALARM_PAUZE_MS=600000)
+for i in 1 2 3 4 5 6 7 8 9 10; do nepsys live 0 0 0 $((i*3000)) $((i*1310720)) $((i*3000)) 0 $((i*100)); nep "$P" 80.00 $((1000+i*400)) $((2000+i*100)) $((300+i*200)); sleep 0.5; done
+grep -q "oordeel: drukte van elders" "$W/box.md" && groen "J1: veel MB bij normale latentie = 'drukte van elders'" || rood "J1: $(grep -n 'oordeel' "$W/box.md" | head -c 600)"
+grep -q "#schijf-hapert" "$W/box.md" && rood "J1: valse hapering-rij" || groen "J1: geen hapering-rij"
+kill "$MJ" 2>/dev/null
+# J2 trage opdrachten bij weinig MB → schijf hapert (zonder dat status of stilstand afwijkt: geen incident, geen bericht)
+opzet j2; nep "$P" 80.00 1000 2000 300; nepsys live 0 0 0 0 0 0 0 0
+MJ=$(start shaJ2 SCHIJFDRUK_ALARM_MS=1500 SCHIJFDRUK_ALARM_PAUZE_MS=600000)
+for i in 1 2 3 4 5 6 7 8 9 10; do nepsys live 0 0 0 $((i*10)) $((i*80)) $((i*8000)) 0 $((i*100)); nep "$P" 80.00 $((1000+i*400)) $((2000+i*100)) $((300+i*200)); sleep 0.5; done
+grep -q "oordeel: schijf hapert" "$W/box.md" && groen "J2: 800 ms per opdracht bij weinig MB = 'schijf hapert'" || rood "J2: $(grep -n 'oordeel' "$W/box.md" | head -c 600)"
+grep -q "Schijfdruk hoog.*schijf hapert" "$W/box.md" && groen "J2: oordeel staat ook in de titel" || rood "J2: titel mist oordeel"
+{ grep -q "#schijf-hapert" "$W/box.md" || [ -s "$W/bericht.log" ]; } && rood "J2: incident/bericht zonder statusafwijking of stilstand" || groen "J2: geen incident en geen bericht (alleen traag)"
+kill "$MJ" 2>/dev/null
+# J3 zonder NVMe-meting → niet vast te stellen
+opzet j3; nep "$P" 80.00 1000 2000 300
+MJ=$(start shaJ3 SCHIJFDRUK_ALARM_MS=1500)
+for i in 1 2 3 4 5 6 7 8; do nep "$P" 80.00 $((1000+i*400)) $((2000+i*100)) $((300+i*200)); sleep 0.5; done
+grep -q "oordeel: niet vast te stellen" "$W/box.md" && groen "J3: zonder sysfs 'niet vast te stellen'" || rood "J3: $(grep -n 'oordeel' "$W/box.md" | head -c 400)"
+kill "$MJ" 2>/dev/null
+
+# ── K incident ────────────────────────────────────────────────────────────────────────────────────────────────────
+# K1 vastzittende I/O: inflight 3 en geen enkele opdracht afgerond
+opzet k1; nep "$P" 0.00 1000 2000 300; nepsys live 100 0 100 200 0 400 3 1000
+MK=$(start shaK1)
+wachtOp '[ "$(grep -c "#schijf-hapert" "$W/box.md")" -ge 1 ]' 12
+sleep 3
+[ "$(grep -c "#schijf-hapert" "$W/box.md")" = "1" ] && groen "K1: vastzittende I/O geeft precies één box-rij (ook na 3 s extra)" || rood "K1: $(grep -c '#schijf-hapert' "$W/box.md") rijen"
+grep -q "^## \[direct\] .*Schijf van Olares hapert: vastzittende I/O" "$W/box.md" && groen "K1: rij is [direct] en noemt de reden" || rood "K1: rij: $(grep -n 'hapert' "$W/box.md" | head -c 300)"
+[ "$(grep -c . "$W/bericht.log" 2>/dev/null)" = "1" ] && grep -q "zoals in oktober" "$W/bericht.log" && groen "K1: één bericht aan David in gewone taal" || rood "K1: bericht.log: $(cat "$W/bericht.log" 2>/dev/null)"
+[ "$(vraag /samenvatting | json 'j["nvme"]["incident"]["bericht_david"]')" = "True" ] && groen "K1: /health.schijfdruk.nvme.incident toont het incident" || rood "K1: samenvatting: $(vraag /samenvatting | json 'j["nvme"]["incident"]')"
+head -c 400 "$W/box.md" | grep -q "Formaat" && grep -q "bestaande rij" "$W/box.md" && groen "K1: bestaande box-rijen bleven staan" || rood "K1: box beschadigd"
+# herstart terwijl het nog duurt: haper.json houdt een tweede rij en een tweede bericht tegen
+kill "$MK" 2>/dev/null; wachtOp '! kill -0 "$MK" 2>/dev/null' 5
+MK=$(start shaK1b); sleep 4
+[ "$(grep -c "#schijf-hapert" "$W/box.md")" = "1" ] && [ "$(grep -c . "$W/bericht.log")" = "1" ] && groen "K1: na een herstart geen tweede rij en geen tweede bericht (haper.json)" || rood "K1: rijen $(grep -c '#schijf-hapert' "$W/box.md"), berichten $(grep -c . "$W/bericht.log")"
+kill "$MK" 2>/dev/null
+# K2 status ≠ live
+opzet k2; nep "$P" 0.00 1000 2000 300; nepsys resetting 100 0 100 200 0 400 0 1000
+MK=$(start shaK2); wachtOp '[ "$(grep -c "#schijf-hapert" "$W/box.md")" -ge 1 ]' 12; sleep 1
+grep -q 'status "resetting" in plaats van live' "$W/box.md" && [ "$(grep -c "#schijf-hapert" "$W/box.md")" = "1" ] && groen "K2: status resetting = één box-rij" || rood "K2: $(grep -n 'hapert' "$W/box.md" | head -c 300)"
+kill "$MK" 2>/dev/null
+# K3 stille uren: wel de rij, geen bericht
+opzet k3; nep "$P" 0.00 1000 2000 300; nepsys resetting 100 0 100 200 0 400 0 1000
+MK=$(start shaK3 SCHIJFDRUK_UUR=2); wachtOp '[ "$(grep -c "#schijf-hapert" "$W/box.md")" -ge 1 ]' 12; sleep 2
+[ "$(grep -c "#schijf-hapert" "$W/box.md")" = "1" ] && [ ! -s "$W/bericht.log" ] && groen "K3: om 02:00 wel de rij, geen bericht" || rood "K3: rijen $(grep -c '#schijf-hapert' "$W/box.md"), bericht: $(cat "$W/bericht.log" 2>/dev/null)"
+kill "$MK" 2>/dev/null
+# K5 een lange trim: lezen/schrijven staan stil maar discards lopen door (inflight telt die mee) = geen stilstand
+opzet k5; nep "$P" 0.00 1000 2000 300; nepsys live 100 0 100 200 0 400 2 1000 43000 0
+MK=$(start shaK5)
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do nepsys live 100 0 100 200 0 400 2 1000 43000 $i; sleep 0.3; done
+{ grep -q "#schijf-hapert" "$W/box.md" || [ -s "$W/bericht.log" ]; } && rood "K5: trim (discards lopen door) telt als stilstand" || groen "K5: voortgang in discards is geen stilstand"
+kill "$MK" 2>/dev/null
+# K4 gezonde schijf die druk bezig is: niets
+opzet k4; nep "$P" 0.00 1000 2000 300; nepsys live 0 0 0 0 0 0 0 0
+MK=$(start shaK4)
+for i in 1 2 3 4 5 6 7 8 9 10; do nepsys live $((i*50)) $((i*400)) $((i*50)) $((i*50)) $((i*400)) $((i*50)) $((i%2)) $((i*20)); sleep 0.3; done
+{ grep -q "#schijf-hapert" "$W/box.md" || [ -s "$W/bericht.log" ]; } && rood "K4: melding bij een gezonde schijf" || groen "K4: gezonde, bezige schijf geeft geen melding"
+kill "$MK" 2>/dev/null
+
 # ── G kosten (echte /proc, 100 ms-tik) ────────────────────────────────────────────────────────────────────────────
 opzet g
-MG=$(env SCHIJFDRUK_DIR="$S" SCHIJFDRUK_BOX="$W/box.md" SCHIJFDRUK_SHA=shaG SCHIJFDRUK_TIK_MS=100 SCHIJFDRUK_UIT="$W/uit" setsid node "$JS" >/dev/null 2>&1 & echo $!)
+MG=$(env SCHIJFDRUK_DIR="$S" SCHIJFDRUK_BERICHT="$W/bericht.py" SCHIJFDRUK_BOX="$W/box.md" SCHIJFDRUK_NV_MS=100 SCHIJFDRUK_SHA=shaG SCHIJFDRUK_TIK_MS=100 SCHIJFDRUK_UIT="$W/uit" setsid node "$JS" >/dev/null 2>&1 & echo $!)
 sleep 1; T1=$(awk '{print $14+$15}' /proc/$MG/stat); N1=$(vraag /samenvatting | json 'j["records_geheugen"]'); IO1=$(awk '/^(rchar|wchar):/{s+=$2} END{print s}' /proc/$MG/io)
 sleep 15
 T2=$(awk '{print $14+$15}' /proc/$MG/stat); N2=$(vraag /samenvatting | json 'j["records_geheugen"]'); IO2=$(awk '/^(rchar|wchar):/{s+=$2} END{print s}' /proc/$MG/io)
