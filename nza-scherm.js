@@ -22,6 +22,27 @@ function maak(opts) {
   const timeoutMs = opts.timeoutMs || 20000;
   let cache = null;   // overzicht per stand van de index (mtime + grootte)
   let bezig = 0;
+  // wv3153: kan de agent (gebruiker socev) bij index en vragenlog? 15-11 viel dat weg (rechtenronde 05:00 zette de map dicht).
+  // mk-scripts/ovis-nza/toegang.py toets rekent het na uit de ACL's (de pod kan zich niet als socev voordoen). /health leest de laatste
+  // uitkomst; een verouderde (> 10 min) wordt op de achtergrond ververst, zodat /health nooit wacht. null = (nog) niet vast te stellen.
+  const toegangScript = opts.toegang || '';
+  const toegangMs = opts.toegangMs || 600000;
+  let toegang = { t: 0, waarde: null, bezig: false };
+  function toegangVers() {
+    if (!toegangScript || toegang.bezig || Date.now() - toegang.t < toegangMs) return;
+    if (!fs.existsSync(toegangScript)) { toegang = { t: Date.now(), waarde: null, bezig: false }; return; }
+    toegang.bezig = true;
+    const env = { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' };
+    if (opts.toegangEnv) Object.assign(env, opts.toegangEnv);
+    execFile('python3', ['-I', toegangScript, 'toets', '--json'], { env: env, timeout: 10000, killSignal: 'SIGKILL', maxBuffer: 65536 },
+      function (e, out) {
+        let d = null;
+        try { d = JSON.parse(String(out || '')); } catch (x) { d = null; }
+        const w = d && typeof d.index_leesbaar_agent === 'boolean' ? d.index_leesbaar_agent : null;
+        const l = d && typeof d.log_schrijfbaar_agent === 'boolean' ? d.log_schrijfbaar_agent : null;
+        toegang = { t: Date.now(), waarde: w, log: l, bezig: false };
+      });
+  }
 
   function aan() { return !!(script && fs.existsSync(script) && db && fs.existsSync(db)); }
 
@@ -90,9 +111,16 @@ function maak(opts) {
     if (!aan()) return { aan: false };
     const t = cache && cache.body && cache.body.telling;
     const b = cache && cache.body && cache.body.bronnen;
-    return { aan: true, gebouwd: cache ? cache.body.gebouwd : null, stukken: t ? t.stukken : null, bronnen_gekeken: b ? (b.laatst_gekeken || null) : null };
+    const i = { aan: true, gebouwd: cache ? cache.body.gebouwd : null, stukken: t ? t.stukken : null, bronnen_gekeken: b ? (b.laatst_gekeken || null) : null };
+    if (toegangScript) {
+      toegangVers();
+      i.index_leesbaar_agent = toegang.waarde;
+      i.vragenlog_schrijfbaar_agent = toegang.log === undefined ? null : toegang.log;
+    }
+    return i;
   }
 
+  if (toegangScript) toegangVers();
   return { app: app, info: info, aan: aan };
 }
 
