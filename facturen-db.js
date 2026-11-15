@@ -58,8 +58,11 @@ const SIGNAAL_V18 = SIGNAAL_V17.concat(['factuur_dagen_afwijkend']);
 const CATEGORIE_V1 = ['loon', 'loonheffing', 'btw', 'belasting', 'declaraties', 'rekening_courant', 'eigen_overboeking', 'bankkosten', 'creditcard',
   'prive_opname', 'abonnement_zonder_factuur', 'subsidie', 'rente', 'overig'];
 const CATEGORIE_V16 = CATEGORIE_V1.concat(['winstvoorschot']);
+// factuur.status: M1 maakte de tabel met STATUS_V1; migratie 25 (wv3074) verruimt die CHECK met concept_verwijderd. L.status is de huidige lijst.
+const STATUS_V1 = ['te_beoordelen', 'geen_factuur', 'dubbel', 'in_wachtrij', 'prive_archief', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'];
+const STATUS_V25 = STATUS_V1.concat(['concept_verwijderd']);
 const L = {
-  status: ['te_beoordelen', 'geen_factuur', 'dubbel', 'in_wachtrij', 'prive_archief', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'],
+  status: STATUS_V25,
   onderweg: ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'],
   betaalspoor: ['te_betalen', 'ingevoerd', 'incasso_verwacht', 'betaald_vooraf', 'betaald_gezien'],
   betaalwijze: ['zelf', 'incasso', 'betaald', 'onbekend'],
@@ -228,7 +231,7 @@ CREATE TABLE factuur (
   betaalwijze TEXT NOT NULL DEFAULT 'onbekend' CHECK (betaalwijze IN ${IN(L.betaalwijze)}),
   entiteit TEXT REFERENCES entiteit(sleutel),
   intern INTEGER NOT NULL DEFAULT 0 ${BOOL('intern')},
-  status TEXT NOT NULL CHECK (status IN ${IN(L.status)}),
+  status TEXT NOT NULL CHECK (status IN ${IN(STATUS_V1)}),
   redenen TEXT NOT NULL DEFAULT '[]' ${JSONL('redenen')},
   controles TEXT NOT NULL DEFAULT '[]' ${JSONL('controles')},
   patientkenmerk INTEGER NOT NULL DEFAULT 0 ${BOOL('patientkenmerk')},
@@ -1216,6 +1219,20 @@ function M23(db, vervang) { M5(db, vervang || M23_VERVANG, 'migratie_23'); db.ex
 const M24_VERVANG = [
   ['kaart_bestand', "formaat TEXT NOT NULL CHECK (formaat IN ('ics_csv'))", "formaat TEXT NOT NULL CHECK (formaat IN ('ics_csv','ics_pdf'))"],
 ];
+/*
+ * wv3074 (David 14-11-2026 19:37, Anders op "Twee facturen voor de boekhouder — opnieuw als concept klaarzetten?": "Soms komt er iets foutief
+ * terecht. Bijvoorbeeld een dubbele factuur, of iets wat ik zelf al eens had doorgestuurd. Dan delete ik het concept bewust"): factuurstatus
+ * 'concept_verwijderd' — het Gmail-concept staat niet meer in Concepten en niet in Verzonden. Zelfde weg als M5 (writable_schema, één
+ * vervanging, al verruimd = overslaan; een CHECK verruimen verandert niets aan de opgeslagen rijen). LET OP terugrol: een release van vóór
+ * wv3074 opent deze database niet meer (schema_nieuwer); lichtste terugrol is eerst de rijen terug op concept_klaar
+ * (`UPDATE factuur SET status = 'concept_klaar' WHERE status = 'concept_verwijderd'`) en dan `DELETE FROM schema_migratie WHERE versie = 25`
+ * (de verruimde CHECK hindert de oude code niet). Herhaalbaar.
+ */
+const M25_VERVANG = [
+  ['factuur', 'status TEXT NOT NULL CHECK (status IN ' + IN(STATUS_V1) + ')', 'status TEXT NOT NULL CHECK (status IN ' + IN(STATUS_V25) + ')'],
+];
+function M25(db, vervang) { return M5(db, vervang || M25_VERVANG, 'migratie_25'); }
+
 function M24(db, vervang) {
   M5(db, vervang || M24_VERVANG, 'migratie_24');
   // het overzicht (JJJJ-MM) waar een PDF-bestand het hele rekeningoverzicht van is; een latere CSV slaat regels van dat overzicht over
@@ -1248,6 +1265,7 @@ const MIGRATIES = [
   { versie: 22, naam: 'per leverancier concept of direct: leverancier.verzendwijze(+versie), snapshot op opdracht (wv2480)', fn: (db) => M22(db) },
   { versie: 23, naam: 'SEPA-batch: ook de POT (invoer per betaling met de extensie POT-invoer); Privé blijft uitgesloten (wv2842)', fn: (db) => M23(db) },
   { versie: 24, naam: "creditcard: kaart_bestand.formaat ook 'ics_pdf' (rekeningoverzicht als PDF, wv2958)", fn: (db) => M24(db) },
+  { versie: 25, naam: "factuur: status 'concept_verwijderd' (Gmail-concept door David weggegooid, wv3074)", fn: (db) => M25(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -1784,13 +1802,45 @@ function verzondenGezien(fdb, opId, o) {
     if (op.status !== 'gelukt' || op.modus !== 'concept') return { ok: false, fout: 'geen gelukte conceptopdracht' };
     let gewijzigd = 0;
     if (op.factuur) {
-      const ov = K.statusOvergang('concept_klaar', 'verzonden_gezien', {});
-      if (!ov.ok) throw new DbFout(ov.fout, ov.reden);
-      gewijzigd = fdb.db.prepare("UPDATE factuur SET status = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = 'concept_klaar'").run(ov.naar, tijd, op.factuur).changes;
+      // wv3074: ook vanuit concept_verwijderd (het concept leek weg, maar staat toch in Verzonden)
+      const f = fdb.db.prepare('SELECT status FROM factuur WHERE id = ?').get(op.factuur);
+      const van = f && (f.status === 'concept_klaar' || f.status === 'concept_verwijderd') ? f.status : null;
+      if (van) {
+        const ov = K.statusOvergang(van, 'verzonden_gezien', {});
+        if (!ov.ok) throw new DbFout(ov.fout, ov.reden);
+        gewijzigd = fdb.db.prepare('UPDATE factuur SET status = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = ?').run(ov.naar, tijd, op.factuur, van).changes;
+      }
     } else gewijzigd = fdb.db.prepare("UPDATE pot_afschrift SET status = 'verstuurd', bijgewerkt_op = ? WHERE id = ? AND status = 'in_wachtrij'").run(tijd, op.afschrift).changes;
     if (gewijzigd) audit(fdb, { wie, wat: 'verzonden_gezien', object_soort: 'opdracht', object_id: op.id, entiteit: op.entiteit,
       na: { message_id: o.message_id ? String(o.message_id).slice(0, 100) : null }, wanneer: tijd });
     return { ok: true, gewijzigd: gewijzigd === 1 };
+  });
+}
+
+/*
+ * wv3074: het Gmail-concept van een gelukte conceptopdracht staat niet meer in Concepten en niet in Verzonden (David gooide het bewust weg) →
+ * factuur concept_klaar → concept_verwijderd (kern concept_verdwenen). Stil: geen signaal, geen vraag; de factuur blijft in de databank en het
+ * betaalspoor loopt gewoon door. Auditrij op de factuur met de reden; met o.vraag_id (Davids knop) ook een besluitrij (bron mens).
+ * o = { nu, wie, reden, vraag_id? } → { ok, gewijzigd }
+ */
+function conceptVerdwenen(fdb, opId, o) {
+  o = o || {};
+  const tijd = nuIso(o.nu), wie = o.wie || 'koerier';
+  const reden = String(o.reden || 'concept niet meer in Gmail (niet in Concepten, niet in Verzonden)').slice(0, 300);
+  const vraag = o.vraag_id ? String(o.vraag_id).slice(0, 40) : null;
+  return transactie(fdb, function () {
+    const op = opdrachtOf(fdb, opId);
+    if (op.status !== 'gelukt' || op.modus !== 'concept' || !op.factuur) return { ok: false, fout: 'geen gelukte conceptopdracht van een factuur' };
+    const ov = K.statusOvergang('concept_klaar', 'concept_verdwenen', {});
+    if (!ov.ok) throw new DbFout(ov.fout, ov.reden);
+    const n = fdb.db.prepare("UPDATE factuur SET status = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = 'concept_klaar'").run(ov.naar, tijd, op.factuur).changes;
+    if (n) {
+      audit(fdb, { wie, wat: 'concept_verdwenen', object_soort: 'factuur', object_id: op.factuur, entiteit: op.entiteit, voor: { status: 'concept_klaar' },
+        na: { status: ov.naar, opdracht: op.id, extern_id: op.extern_id ? String(op.extern_id).slice(0, 100) : null, reden, vraag_id: vraag }, wanneer: tijd });
+      if (vraag) voegToe(fdb, 'besluit', { factuur: op.factuur, stap: 'verzending', veld: 'status', waarde: ov.naar, bron: 'mens',
+        toelichting: (reden + ' (vraag ' + vraag + ')').slice(0, 500), wie, wanneer: tijd });
+    }
+    return { ok: true, gewijzigd: n === 1 };
   });
 }
 
@@ -1930,9 +1980,9 @@ function health(fdb) {
 }
 
 module.exports = {
-  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M17_VERVANG, _M17: M17, M18_VERVANG, _M18: M18, M24_VERVANG, _M24: M24, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
+  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M15_VERVANG, _M15: M15, M16_VERVANG, _M16: M16, M17_VERVANG, _M17: M17, M18_VERVANG, _M18: M18, M24_VERVANG, _M24: M24, M25_VERVANG, _M25: M25, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
-  terugdraaien, LEVEND, mislukteSignalenVervallen, claimOpdrachten, weigerOpdracht, reserveer, reserveerKies, directBesluit, factuurTwijfel, DIRECT_TWIJFEL, directVandaag, DIRECT_PER_DAG, terugNaarConcept, verzendNotitie, opdrachtResultaat, verzondenGezien,
+  terugdraaien, LEVEND, mislukteSignalenVervallen, claimOpdrachten, weigerOpdracht, reserveer, reserveerKies, directBesluit, factuurTwijfel, DIRECT_TWIJFEL, directVandaag, DIRECT_PER_DAG, terugNaarConcept, verzendNotitie, opdrachtResultaat, verzondenGezien, conceptVerdwenen,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,
   backup, herstel, tellingen, health,
 };

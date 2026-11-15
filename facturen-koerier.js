@@ -44,6 +44,12 @@ const GRENS = {
   perUur: 30,               // pod-plafond (naast het plafond in de verzender): reserveringen in het laatste uur
   detectie: 40,             // tokens per ronde in de verzend-detectie (10 per zoekopdracht)
   tokensPerZoek: 10,
+  // wv3074: concept verdwenen (David gooide het bewust weg) — pas na twee missers ≥ 45 min uit elkaar, alleen voor een concept dat al
+  // ≥ 2 uur in Gmail hoort te staan, en nooit meer dan 3 per ronde (meer = eerder een kapot lees-luik dan Davids hand: rem, niets doen)
+  conceptMinMs: 2 * 3600000,
+  conceptMistMs: 45 * 60000,
+  conceptWegPerRonde: 3,
+  verwijderdDagen: 30,      // zo lang kijkt de detectie nog of een "weg" concept toch in Verzonden opduikt
   teLezen: 20,              // handmatige uploads per ronde
   berichten: 60,            // nieuwe mails per ronde (de rest de volgende ronde)
   bronDagen: 14,            // het postvak kijkt zo ver terug (eerste ronde) en altijd 2 dagen vóór de laatste geslaagde ronde
@@ -229,9 +235,10 @@ function controleer(fdb, op) {
 
 class LuikFout extends Error { constructor(soort) { super('lees-luik: ' + soort); this.code = 'luik_' + soort; } }
 // mail_zoeken; geen lijst terug = fout (nooit "niets gevonden").
+const ZOEK_MAX = 25;
 async function zoek(io, query) {
   let j;
-  try { j = await io.luik({ actie: 'mail_zoeken', query, max: 25 }); } catch (e) { throw new LuikFout(foutSoort(e)); }
+  try { j = await io.luik({ actie: 'mail_zoeken', query, max: ZOEK_MAX }); } catch (e) { throw new LuikFout(foutSoort(e)); }
   if (!j || !Array.isArray(j.mails)) throw new LuikFout('geen_lijst');
   // het echte lees-luik meldt een Gmail-fout als 200 met { mails: [], melding: 'fout bij zoeken: …' } of 'deels mislukt: …' (diffreview
   // wv855 #1, gemeten in AI - Agenda-Wachter API › Formatteer mails): dat is nooit "niets gevonden"
@@ -279,7 +286,7 @@ async function ronde(fdb, io, o) {
   const klok = typeof o.klok === 'function' ? o.klok : () => Date.now();
   const wie = o.wie || 'koerier';
   const pdf = typeof io.pdftotext === 'function' ? io.pdftotext : pdfNaarTekst;
-  const uit = { ok: true, fouten: [], voorronde: { gezocht: 0, overgenomen: 0 }, detectie: { gezocht: 0, verstuurd: 0 },
+  const uit = { ok: true, fouten: [], voorronde: { gezocht: 0, overgenomen: 0 }, detectie: { gezocht: 0, verstuurd: 0, concept_mist: 0, concept_weg: 0 },
     verzending: { geclaimd: 0, gelukt: 0, overgenomen: 0, mislukt: 0, geweigerd: 0, geen_resultaat: 0, definitief: 0 } };
   let luikOk = true;
   const fout = (wat, e) => { uit.ok = false; uit.fouten.push({ wat, soort: foutSoort(e) }); };
@@ -311,24 +318,58 @@ async function ronde(fdb, io, o) {
   }
 
   // 2. verzend-detectie (modus concept): oudste eerst (bijgewerkt_op draait mee), 10 tokens per zoekopdracht
+  //    wv3074: staat het token van een factuurconcept niet in Verzonden, dan ook in Concepten kijken; nergens = David gooide het weg →
+  //    na de tweede misser concept_verwijderd (stil). Een factuur op concept_verwijderd blijft nog 30 dagen meekijken in Verzonden.
   if (luikOk) {
-    const wacht = fdb.db.prepare("SELECT o.* FROM opdracht o LEFT JOIN factuur f ON f.id = o.factuur LEFT JOIN pot_afschrift a ON a.id = o.afschrift " +
-      "WHERE o.status = 'gelukt' AND o.modus = 'concept' AND (f.status = 'concept_klaar' OR a.status = 'in_wachtrij') ORDER BY o.bijgewerkt_op, o.id LIMIT ?").all(GRENS.detectie);
+    fdb.db.prepare("DELETE FROM meta WHERE sleutel LIKE 'concept_mist:%' AND substr(sleutel, 14) NOT IN " +
+      "(SELECT o.id FROM opdracht o JOIN factuur f ON f.id = o.factuur WHERE f.status = 'concept_klaar' AND o.status = 'gelukt')").run();
+    const wacht = fdb.db.prepare("SELECT o.*, f.status AS f_status, f.bijgewerkt_op AS f_bijgewerkt FROM opdracht o LEFT JOIN factuur f ON f.id = o.factuur LEFT JOIN pot_afschrift a ON a.id = o.afschrift " +
+      "WHERE o.status = 'gelukt' AND o.modus = 'concept' AND (f.status = 'concept_klaar' OR (f.status = 'concept_verwijderd' AND f.bijgewerkt_op >= ?) OR a.status = 'in_wachtrij') " +
+      'ORDER BY o.bijgewerkt_op, o.id LIMIT ?').all(nuIso(start - GRENS.verwijderdDagen * 86400000), GRENS.detectie);
+    const weg = [];
     for (let i = 0; i < wacht.length; i += GRENS.tokensPerZoek) {
       const deel = wacht.slice(i, i + GRENS.tokensPerZoek);
       const perTok = new Map(deel.map((op) => [tokenVan(op), op]));
       let mails;
       try { mails = await zoek(io, 'in:sent subject:(' + [...perTok.keys()].join(' OR ') + ')'); uit.detectie.gezocht += deel.length; }
       catch (e) { luikOk = false; fout('lees-luik', e); break; }
+      const inSent = new Set();
       for (const m of mails) {
         const t = TOKEN_RE.exec(String(m.onderwerp || ''));
+        if (t) inSent.add(t[1]);   // wv3074: elke treffer in Verzonden (ook naar een ander adres) = het concept is niet "weg"
         const op = t && perTok.get(t[1]);
         if (!op || !(m.labels || []).includes('SENT') || (m.labels || []).includes('DRAFT') || !adresIn(m.aan, op.doeladres)) continue;
         try { if (D.verzondenGezien(fdb, op.id, { nu: klok(), wie, message_id: m.id }).gewijzigd) uit.detectie.verstuurd++; } catch (e) { fout('detectie', e); }
         perTok.delete(t[1]);
       }
+      // wv3074: concept verdwenen? Alleen als het Verzonden-antwoord niet vol zat (een vol antwoord kan treffers missen).
+      const kand = mails.length >= ZOEK_MAX ? [] : deel.filter((op) => op.f_status === 'concept_klaar' && !inSent.has(tokenVan(op)) &&
+        String(op.f_bijgewerkt || '') <= nuIso(start - GRENS.conceptMinMs));
+      if (kand.length) {
+        let concepten;
+        try { concepten = await zoek(io, 'in:draft subject:(' + kand.map(tokenVan).join(' OR ') + ')'); }
+        catch (e) { luikOk = false; fout('lees-luik', e); break; }
+        if (concepten.length < ZOEK_MAX) {
+          const inDraft = new Set();
+          for (const m of concepten) { const t = TOKEN_RE.exec(String(m.onderwerp || '')); if (t) inDraft.add(t[1]); }
+          for (const op of kand) {
+            const k = 'concept_mist:' + op.id;
+            const eerst = D.metaLees(fdb, k);
+            if (inDraft.has(tokenVan(op))) { if (eerst) fdb.db.prepare('DELETE FROM meta WHERE sleutel = ?').run(k); continue; }
+            if (!eerst || !Number.isFinite(Date.parse(eerst))) { D.metaZet(fdb, k, nuIso(klok())); uit.detectie.concept_mist++; continue; }
+            if (Date.parse(eerst) <= klok() - GRENS.conceptMistMs) weg.push(op);
+          }
+        }
+      }
       const tijd = nuIso(klok());
       for (const op of perTok.values()) fdb.db.prepare('UPDATE opdracht SET bijgewerkt_op = ? WHERE id = ? AND status = \'gelukt\'').run(tijd, op.id);   // rotatie
+    }
+    if (weg.length > GRENS.conceptWegPerRonde) fout('concept_weg', { code: 'rem' });   // te veel tegelijk: niets doen, wel zichtbaar in /health
+    else for (const op of weg) {
+      try {
+        if (D.conceptVerdwenen(fdb, op.id, { nu: klok(), wie, reden: 'concept in Gmail verwijderd door David (niet in Concepten, niet in Verzonden; koerier, twee keer gezocht)' }).gewijzigd) uit.detectie.concept_weg++;
+        fdb.db.prepare('DELETE FROM meta WHERE sleutel = ?').run('concept_mist:' + op.id);
+      } catch (e) { fout('concept_weg', e); }
     }
   }
 

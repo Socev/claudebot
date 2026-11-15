@@ -17555,7 +17555,11 @@ function facturenKoerierInfo(fdb) {
   let direct = null;
   try { direct = { vrijgegeven: facturenMod.metaLees(fdb, 'versturen_vrijgegeven') === '1', vandaag: typeof facturenMod.directVandaag === 'function' ? facturenMod.directVandaag(fdb, Date.now()) : null,
     leveranciers: Number(fdb.db.prepare("SELECT count(*) AS n FROM leverancier WHERE verzendwijze = 'direct'").get().n) }; } catch (e) { direct = null; }   // wv2480
+  // wv3074: facturen waarvan David het Gmail-concept weggooide (stil, alleen deze teller)
+  let conceptVerwijderd = null;
+  try { conceptVerwijderd = Number(fdb.db.prepare("SELECT count(*) AS n FROM factuur WHERE status = 'concept_verwijderd'").get().n); } catch (e) { conceptVerwijderd = null; }
   return { aan: true, laatste_ronde: k ? k.op : null, ok: k ? !!k.ok : null, fout: k && k.fout ? String(k.fout).slice(0, 120) : null, verzendmodus: facturenMod.metaLees(fdb, 'verzendmodus'),
+    concept_verwijderd: conceptVerwijderd,
     direct: direct, verzending: k && k.verzending ? { direct: k.verzending.direct || 0, direct_terug: k.verzending.direct_terug || 0, direct_onzeker: k.verzending.direct_onzeker || 0 } : null };
 }
 // Het klaarstaande bestand van dít apparaat en deze beurt (zelfde map als appUpload): bytes + naam, en weg() ruimt het op.
@@ -18782,7 +18786,7 @@ function mailIntakeStukken(idb, draden) {
 // verstuurd, prive_archief; CHECK in facturen-db.js: bevestigd_op + bevestigd_door, door David of wie in de Facturen-app mag bevestigen).
 // te_beoordelen, geen_factuur, dubbel en verzending_mislukt houden de mail in de inbox. Geeft Map gmail_id → aantal documenten van het
 // bericht (mailman.js vergelijkt dat met de pdf/xml-bijlagen). Alleen lezen; zonder Facturen-databank een lege Map (dan archiveert MailMan niets).
-const MAILMAN_VERWERKT = ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'prive_archief'];
+const MAILMAN_VERWERKT = ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'prive_archief', 'concept_verwijderd'];   // wv3074: bevestigd, concept bewust weggegooid
 // wv2259 (opt.inFacturen, MailMan inbox_uit.facturen): al zodra de mail in de Facturen-app staat — geen stuk meer te lezen (document.te_lezen)
 // en minstens één factuur die niet op Geen factuur staat — in plaats van pas als elke factuur verwerkt is. Zelfde telling documenten.
 const MAILMAN_BRON = "(r.soort = 'verzamelpostvak' OR (r.soort = 'intake' AND r.naam = 'intake:gmail:david'))";

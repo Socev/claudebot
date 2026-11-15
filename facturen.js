@@ -50,10 +50,11 @@ const BANK_DAGEN = 400;             // bankcontrole en bankluis kijken zo ver te
 const ZONDER_FACTUUR = { aan: false };
 const ZONDER_FACTUUR_LES = 'Uitgezet op verzoek van David (2-11-2026): afschrijvingen zonder factuur controleert de boekhouder; de app meldt ze niet meer.';
 const zfFilter = (a) => (ZONDER_FACTUUR.aan ? '' : ' AND ' + a + ".soort <> 'geen_factuur'");
-const ONDERWEG = ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'];
+// wv3074: concept_verwijderd (Gmail-concept door David weggegooid) telt voor betalen en SEPA mee zoals concept_klaar; alleen het versturen stopt
+const ONDERWEG = ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt', 'concept_verwijderd'];
 const BETAAL_STATUS = ONDERWEG.concat(['prive_archief']);
 const STAPPEN = { beoordelen: ['te_beoordelen'], wachtrij: ['in_wachtrij', 'wordt_verstuurd'], prive: ['prive_archief'], geen: ['geen_factuur'],
-  dubbel: ['dubbel'], mislukt: ['verzending_mislukt'], verstuurd: ['concept_klaar', 'verstuurd'] };
+  dubbel: ['dubbel'], mislukt: ['verzending_mislukt'], verstuurd: ['concept_klaar', 'verstuurd', 'concept_verwijderd'] };
 // Alle routes (de toets controleert ze tegen APP_ROUTE_RE van server.js en de doorgeef-Function: [a-z0-9/-]{1,64}).
 const ROUTES = {
   GET: ['', 'lijst/<stap>', 'factuur/<id>', 'document/<id>', 'kandidaten/<id>', 'betalen', 'bank', 'bank/oranje/<week>', 'uploads', 'leveranciers', 'instellingen', 'validatie', 'regels',
@@ -1035,7 +1036,7 @@ function terugdraaien(fdb, r, d, nu) {
   const id = vraagId(d, 'id');
   const f = factuurOf404(fdb, r, id);
   if (f.status === 'prive_archief') eisEigenaar(r);
-  if (['wordt_verstuurd', 'concept_klaar', 'verstuurd'].includes(f.status)) weiger(409, 'de koerier heeft de opdracht al opgehaald; terugdraaien kan niet meer', { code: 'al_opgehaald' });
+  if (['wordt_verstuurd', 'concept_klaar', 'verstuurd', 'concept_verwijderd'].includes(f.status)) weiger(409, 'de koerier heeft de opdracht al opgehaald; terugdraaien kan niet meer', { code: 'al_opgehaald' });
   const u = D.terugdraaien(fdb, id, { wie: r.wie, wanneer: nuIso(nu) });
   if (!u.ok) weiger(409, u.fout === 'al_opgehaald' ? u.reden : 'terugdraaien kan niet: ' + (u.reden || u.fout), { code: u.fout });
   return { status: 'te_beoordelen', opdracht: u.opdracht };
@@ -4068,7 +4069,7 @@ function alsFout(e, log) {
  * (review ZOU 4: geen gecorreleerde subquery per factuur). Alleen lezen. wv1919: een bericht dat de koerier uit OVIS Intake las (bron
  * intake:gmail:david, message_id = de Gmail-id) telt net zo. → [{ gmail_id, stap }]
  */
-const STAP_STATUS = "('in_wachtrij','wordt_verstuurd','concept_klaar','verstuurd','prive_archief')";
+const STAP_STATUS = "('in_wachtrij','wordt_verstuurd','concept_klaar','verstuurd','prive_archief','concept_verwijderd')";   // wv3074: ook concept_verwijderd (bevestigd)
 function mailStappen(fdb, max) {
   const RANG = `CASE WHEN f.status NOT IN ${STAP_STATUS} THEN 0 WHEN f.betaalspoor = 'betaald_gezien' THEN 2 WHEN f.betaalspoor IN ('ingevoerd','betaald_vooraf') THEN 1 ELSE 0 END`;
   const ECHT = "f.status NOT IN ('geen_factuur','dubbel') AND f.soort = 'factuur' AND COALESCE(f.incl, 0) >= 0";
