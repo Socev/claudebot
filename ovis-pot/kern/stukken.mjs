@@ -2,7 +2,7 @@
 // Dezelfde code in de browser (downloaden), de Functions en de pod (concepten op de notadag, fase 3): één opmaak per entiteit.
 // Woorden (David 8-11-2026): POT/KM = BIJDRAGENOTA, SLOEL = NOTA DOORBELASTE HUUR; nooit "factuur", geen btw-regel; bedragen
 // zonder min-teken ("af € x", "u krijgt € x terug").
-import { euro, entiteitNaam, notaTitel, controleerStukTekst, uitkomstInWoorden, rond2 } from "./pot-kern.mjs";
+import { euro, entiteitNaam, notaTitel, controleerStukTekst, uitkomstInWoorden, rond2, creditVan } from "./pot-kern.mjs";
 
 // ---------- pdf ----------
 // Helvetica-breedtes (1/1000 em) voor tekens 32–126; overige tekens (€, ë, é, …) rekenen als 556.
@@ -96,9 +96,12 @@ export function notaPdf({ nota, afzender }) {
   y = 700;
   for (const r of [deb.naam, deb.houder && deb.houder !== deb.naam ? deb.houder : null, deb.tav ? (/^t\.?a\.?v\.?\s/i.test(deb.tav) ? deb.tav : `t.a.v. ${deb.tav}`) : null, deb.adres, deb.postcode_plaats].filter(Boolean)) { d.tekst(L, y, r, { maat: 10 }); y -= 13; }
   y = 610;
-  d.tekst(L, y, nota.titel || notaTitel(nota.entiteit), { maat: 16, vet: true });
+  const credit = nota.soort === "credit";   // wv3079: creditnota bij een nota die de deur uit is
+  d.tekst(L, y, nota.titel || notaTitel(nota.entiteit, nota.soort), { maat: 16, vet: true });
   y -= 24;
-  const kv = [["Nummer (betalingskenmerk)", String(nota.nummer)], ["Datum", datumNl(nota.datum)], [rond2(nota.bedrag) < 0 ? "Vervaldag" : "Uiterlijk bijgeschreven", datumNl(nota.vervaldag)], ["Periode", nota.periode || ""]];
+  const kv = credit
+    ? [["Nummer", String(nota.nummer)], ["Datum", datumNl(nota.datum)], ["Crediteert nota", creditVan(nota) || ""], ["Periode", nota.periode || ""]]
+    : [["Nummer (betalingskenmerk)", String(nota.nummer)], ["Datum", datumNl(nota.datum)], [rond2(nota.bedrag) < 0 ? "Vervaldag" : "Uiterlijk bijgeschreven", datumNl(nota.vervaldag)], ["Periode", nota.periode || ""]];
   for (const [k, v] of kv) { if (!v) continue; d.tekst(L, y, k, { maat: 9 }); d.tekst(L + 150, y, v, { maat: 9, vet: true }); y -= 13; }
   y -= 12;
   d.vlak(L - 4, y - 4, R - L + 8, 16);
@@ -116,12 +119,14 @@ export function notaPdf({ nota, afzender }) {
   d.lijn(L, y + 6, R, y + 6);
   y -= 10;
   const totaal = rond2(nota.bedrag);
-  d.tekst(L, y, totaal < 0 ? "U krijgt terug" : "Te betalen", { maat: 11, vet: true });
+  d.tekst(L, y, credit ? "Totaal gecrediteerd" : totaal < 0 ? "U krijgt terug" : "Te betalen", { maat: 11, vet: true });
   d.tekst(R, y, euro(totaal), { maat: 11, vet: true, rechts: true });
   y -= 22;
   if (nota.toelichting) y = d.alinea(L, y, nota.toelichting, R - L, { maat: 9 });
   y -= 6;
-  const betaal = totaal < 0
+  const betaal = credit
+    ? (rond2(nota.tegoed || 0) > 0.004 ? "Hiervoor hoeft u niets over te maken; het al betaalde bedrag gaat af van uw volgende nota." : "Hiervoor hoeft u niets over te maken.")
+    : totaal < 0
     ? "Dit bedrag wordt verrekend met uw volgende nota."
     : `Graag na binnenkomst meteen inboeken en overmaken naar ${afzender.iban || "(IBAN)"} t.n.v. ${afzender.naam_document || afzender.naam}, onder vermelding van ${nota.nummer}, zodat het bedrag uiterlijk ${datumNl(nota.vervaldag)} bijgeschreven is.`;
   y = d.alinea(L, y, betaal, R - L, { maat: 9 });
@@ -129,8 +134,8 @@ export function notaPdf({ nota, afzender }) {
     y -= 4;
     d.alinea(L, y, "Dit is uw bijdrage in de gezamenlijke kosten van de samenwerking (kostendeling), geen vergoeding voor een dienst.", R - L, { maat: 8 });
   }
-  d.tekst(L, 40, `${entiteitNaam(nota.entiteit)} · ${nota.titel || notaTitel(nota.entiteit)} ${nota.nummer}`, { maat: 7 });
-  const tekst = [nota.titel, ...regels.map((r) => r.omschrijving), nota.toelichting || "", betaal].join(" ");
+  d.tekst(L, 40, `${entiteitNaam(nota.entiteit)} · ${nota.titel || notaTitel(nota.entiteit, nota.soort)} ${nota.nummer}`, { maat: 7 });
+  const tekst = [nota.titel, ...regels.map((r) => `${r.omschrijving} ${credit ? r.toelichting || "" : ""}`), nota.toelichting || "", betaal].join(" ");
   const fouten = controleerStukTekst(tekst);
   if (fouten.length) throw new Error(`stuk ${nota.nummer} geweigerd: ${fouten.join(", ")}`);
   return d.bytes();

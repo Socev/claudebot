@@ -154,7 +154,8 @@ async function bundel(io, B, nu, inst, uit) {
   const vanaf = inst.overname_vragen || '2027-01-01';
   const [nieuwP, nieuwE, verz] = (await io.d1([
     { sql: "select n.id, n.entiteit, n.nummer, n.praktijk_id, n.datum, n.debiteur from nota n where n.bron='ovis-pot' and n.status='definitief' and n.datum>=? and n.datum<=? and not exists (select 1 from mail_concept c, json_each(c.nota_ids) j where c.soort='praktijk' and j.value=n.id) order by n.praktijk_id, n.datum, n.entiteit, n.nummer", params: [vanaf, nu.ymd] },
-    { sql: "select n.id, n.entiteit, n.nummer, n.praktijk_id, n.datum from nota n where n.bron='ovis-pot' and n.status='definitief' and n.datum>=? and n.datum<=? and not exists (select 1 from mail_concept c, json_each(c.nota_ids) j where c.soort='exact' and j.value=n.id) order by n.entiteit, n.datum, n.nummer", params: [vanaf, nu.ymd] },
+    // naar Exact ook een gecrediteerde nota (wv3079): de boekhouding krijgt het origineel én de creditnota
+    { sql: "select n.id, n.entiteit, n.nummer, n.praktijk_id, n.datum from nota n where n.bron='ovis-pot' and n.status in ('definitief','gecrediteerd') and n.datum>=? and n.datum<=? and not exists (select 1 from mail_concept c, json_each(c.nota_ids) j where c.soort='exact' and j.value=n.id) order by n.entiteit, n.datum, n.nummer", params: [vanaf, nu.ymd] },
     { sql: "select v.id, v.nota_id, n.entiteit, n.nummer, n.praktijk_id from pod_verzoek v join nota n on n.id=v.nota_id where v.status='wacht' and v.soort='herinnering' order by v.id limit 20", params: [] },
   ])).map((x) => x.results);
   const st = [];
@@ -222,7 +223,9 @@ async function klaarzetten(io, B, nu, inst, uit, zet) {
     const terug = async (reden) => { await zet(r.id, { status: 'wacht', geclaimd_op: null, reden: reden || null }, 'bezig'); };
     const fout = async (reden) => { await zet(r.id, { status: 'fout', reden: kap(reden, 300) }, 'bezig'); uit.fout++; uit.gewijzigd = true; };
     const ns = JSON.parse(r.nota_ids || '[]').map((id) => notaM.get(id));
-    if (!ns.length || ns.some((n) => !n || n.status !== 'definitief' || n.bron !== 'ovis-pot')) { await fout('een stuk in deze mail is niet (meer) vastgesteld in OVIS POT'); continue; }
+    // een gecrediteerde nota (wv3079) gaat alleen nog naar Exact (de boekhouding krijgt beide); niet meer aan de praktijk of als herinnering
+    const telt = (n) => n.status === 'definitief' || (r.soort === 'exact' && n.status === 'gecrediteerd');
+    if (!ns.length || ns.some((n) => !n || !telt(n) || n.bron !== 'ovis-pot')) { await fout('een stuk in deze mail is niet (meer) vastgesteld in OVIS POT'); continue; }
     // ontvanger
     let aan;
     if (r.soort === 'exact') {

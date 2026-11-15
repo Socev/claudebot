@@ -877,7 +877,8 @@ export function herzien({ oud, nieuw, gemaakt, keuze }) {
 
 // ---------- nota's ----------
 /** Titel van het stuk (vaste opmaak per entiteit): POT/KM = BIJDRAGENOTA, SLOEL = NOTA DOORBELASTE HUUR. Nooit "factuur", geen btw. */
-export function notaTitel(entiteit) {
+export function notaTitel(entiteit, soort = null) {
+  if (soort === "credit") return "CREDITNOTA";
   return entiteit === "SLOEL" ? "NOTA DOORBELASTE HUUR" : "BIJDRAGENOTA";
 }
 /** Woorden-toets voor elk stuk dat de deur uitgaat: geen 'factuur', geen 'btw', geen bedrag met een min-teken. */
@@ -918,24 +919,187 @@ export function maakAfrekenNota({ entiteit, jaar, rij, nummer, datum, vervaldag,
     toelichting: `${uitkomstInWoorden(rij.uitkomst)}. Totale kosten ${jaar}: ${euro(kosten)}.`,
   };
 }
-/** Verrekening van tegoeden (afrekeningsnota's met 'u krijgt terug') op een nieuwe nota, oudste eerst, hooguit tot het notabedrag. */
+/**
+ * Wat er van een tegoed nog open staat: een afrekeningsnota 'u krijgt terug' (−bedrag) of een creditnota (wat op het origineel al
+ * betaald was, `tegoed`; wv3079), min wat al verrekend is.
+ */
+export function tegoedOpen(t) {
+  const totaal = t.soort === "credit" ? Number(t.tegoed || 0) : -Number(t.bedrag);
+  return rond2(totaal - Number(t.verrekend || 0));
+}
+/** Verrekening van tegoeden (afrekening 'u krijgt terug', of het al betaalde deel van een gecrediteerde nota) op een nieuwe nota, oudste eerst, hooguit tot het notabedrag. */
 export function verrekenTegoeden(tegoeden, notaBedrag) {
   let ruimte = Math.max(0, rond2(notaBedrag));
   const uit = [];
   for (const t of tegoeden.slice().sort((a, b) => (a.datum < b.datum ? -1 : 1))) {
-    const open = rond2(-Number(t.bedrag) - Number(t.verrekend || 0));
+    const open = tegoedOpen(t);
     if (open <= 0 || ruimte <= 0) continue;
     const deel = Math.min(open, ruimte);
     ruimte = rond2(ruimte - deel);
-    uit.push({ nota_id: t.id, bedrag: -deel, omschrijving: `Verrekening tegoed afrekening (nota ${t.nummer})` });
+    uit.push({ nota_id: t.id, bedrag: -deel, omschrijving: t.soort === "credit" ? `Verrekening tegoed creditnota ${t.nummer}` : `Verrekening tegoed afrekening (nota ${t.nummer})` });
   }
   return uit;
+}
+/**
+ * Creditnota (wv3079, R12) voor een nota die de deur uit is: eigen nummer in dezelfde reeks (R11), bedrag = − het origineel, één regel
+ * "Creditering van <stuk> X van <datum>" met wat erop stond. Het al betaalde deel (`betaald`, hooguit het notabedrag) wordt een tegoed
+ * dat op de volgende nota verrekend wordt; de rest hoeft de praktijk niet meer te betalen. De debiteur is die van het origineel (R10).
+ * Alleen voor een origineel met een positief bedrag.
+ */
+export function maakCreditNota({ origineel: o, nummer, datum, betaald = 0 }) {
+  if (!isDatum(datum)) throw new Error("datum moet JJJJ-MM-DD zijn");
+  const bedrag = rond2(o.bedrag);
+  if (!(bedrag > 0)) throw new Error("alleen een nota met een te betalen bedrag is te crediteren");
+  const regels0 = typeof o.regels === "string" ? JSON.parse(o.regels) : o.regels || [];
+  const stuk = stukNaam(o.entiteit);
+  const tegoed = rond2(Math.min(bedrag, Math.max(0, Number(betaald) || 0)));
+  const rest = rond2(bedrag - tegoed);
+  const wat = regels0.filter((r) => !r.tekst).map((r) => `${r.omschrijving} ${rond2(r.bedrag) < 0 ? `af ${euro(r.bedrag)}` : euro(r.bedrag)}`).join("; ");
+  const toelichting = tegoed < 0.005
+    ? `Nota ${o.nummer} vervalt hiermee; u hoeft die niet te betalen.`
+    : rest < 0.005
+      ? `Nota ${o.nummer} vervalt hiermee. U betaalde die al (${euro(tegoed)}); dat bedrag gaat af van uw volgende nota.`
+      : `Nota ${o.nummer} vervalt hiermee. U betaalde daarvan al ${euro(tegoed)}; dat gaat af van uw volgende nota. De rest (${euro(rest)}) hoeft u niet meer te betalen.`;
+  return {
+    entiteit: o.entiteit, jaar: o.jaar, nummer, praktijk_id: o.praktijk_id, datum, vervaldag: datum, soort: "credit", periode: o.periode || String(o.jaar),
+    titel: notaTitel(o.entiteit, "credit"),
+    regels: [{ soort: "credit", omschrijving: `Creditering van ${stuk} ${o.nummer} van ${datumWoorden(o.datum)}`, bedrag: -bedrag, toelichting: wat ? `Op nota ${o.nummer} stond: ${wat}.` : "",
+      nota_id: o.id ?? null, nummer: String(o.nummer) }],
+    bedrag: -bedrag, buffer: 0, tegoed, credit_van: o.id ?? null, debiteur: o.debiteur, status: "definitief", bron: "ovis-pot", toelichting,
+  };
+}
+/** Het nummer van het origineel uit de regel van een creditnota (voor mailregels en schermen). */
+export function creditVan(n) {
+  if (!n || n.soort !== "credit") return null;
+  try { const r = (typeof n.regels === "string" ? JSON.parse(n.regels) : n.regels || []).find((x) => x.soort === "credit"); return r?.nummer ? String(r.nummer) : null; } catch { return null; }
 }
 
 // ---------- § 7 overzichten ----------
 /** Inschrijfgeld POH-GGZ globaal: gemiddeld aantal patiënten × tarief per kwartaal × 4. */
 export function inschrijfgeld(gemiddeld, tarief) {
   return gemiddeld == null || tarief == null ? null : rond2(Number(gemiddeld) * Number(tarief) * 4);
+}
+
+// ---------- § ZK: contracteringsadvies POH-GGZ en prognose door het jaar (wv2815) ----------
+/**
+ * David 9-11-2026: "ik geef elk jaar begin december een contracteringsadvies naar iedereen ... de gemeente betaalt al 60 uur POH-GGZ, die moeten
+ * dus eerst in mindering ... Als Q1 260 was, Q2 260, Q3 230, Q4 230 uur, dan maakt dat minus de 60 uur 200+200+170+170 -> delen door 4 = 185 uur
+ * gemiddeld. En dan wil ik bij die prognose zien of het onder of boven wat we gecontracteerd hebben zit."
+ * Zilveren Kruis (gemeten op de contracten 2026 van twee praktijken, vier punten): kwartaaltarief per ingeschreven patiënt =
+ * (uren POH-GGZ × 2350 ÷ patiënten) ÷ 16 × het ZK-tarief van module 11201 bij 16 uur per 2350 patiënten (2026 € 5,41, 2027 € 5,57).
+ * Het bedrag per patiënt is dus voor elke praktijk gelijk zolang de uren naar rato van het patiëntenaantal verdeeld zijn.
+ */
+export const ZK_NORM = { patienten: 2350, uren: 16, max_uren: 36 };
+export const ZK_GEMEENTE_UREN = 60;
+export const ZK_DREMPEL_PCT = 5;
+
+/** De vier kwartalen van een jaar. */
+export function kwartalen(jaar) {
+  const J = Number(jaar);
+  return [1, 2, 3, 4].map((q) => ({ q, van: `${J}-${p2(q * 3 - 2)}-01`, tot: laatsteDag(J, q * 3) }));
+}
+
+/** Contracturen per week van één contract op een dag (0 als het contract die dag niet loopt); mutaties met uren gaan voor. */
+export function urenOp(c, mutaties, datum) {
+  if ((c.van && c.van > datum) || (c.tot && c.tot < datum)) return 0;
+  let u = Number(c.uren);
+  for (const m of mutaties.filter((x) => x.contract_id === c.id && x.uren != null && x.geldig_van <= datum).sort((a, b) => (a.geldig_van < b.geldig_van ? -1 : 1))) u = Number(m.uren);
+  return Number.isFinite(u) ? u : 0;
+}
+
+/**
+ * Gemiddelde contracturen per week over [van, tot], per dag gewogen, alle contracten samen. Een vacature telt pas vanaf `vacatureVanaf`
+ * (vandaag): een vacature in het verleden is niet ingevuld geweest (wie begon, staat er als dienstverband uit Nmbrs).
+ */
+export function gemiddeldeUren({ contracten, mutaties = [], van, tot, vacatureVanaf = null }) {
+  const n = dagnr(tot) - dagnr(van) + 1;
+  if (!(n > 0)) return { uren: 0, dagen: 0, per: [] };
+  const per = new Map();
+  let som = 0, dagen = 0;
+  for (let i = 0; i < n; i++) {
+    const d = plusDagen(van, i);
+    dagen++;
+    for (const c of contracten) {
+      if (c.soort === "vacature" && (!vacatureVanaf || d < vacatureVanaf)) continue;
+      const u = urenOp(c, mutaties, d);
+      if (!u) continue;
+      som += u;
+      per.set(c.id, (per.get(c.id) || 0) + u);
+    }
+  }
+  return {
+    uren: rond2(som / dagen), dagen,
+    per: [...per.entries()].map(([id, s]) => { const c = contracten.find((x) => x.id === id); return { id, naam: c?.naam ?? null, soort: c?.soort ?? "dienst", uren: rond2(s / dagen) }; }),
+  };
+}
+
+/** Het gecontracteerde aantal uur (alle praktijken samen) dat op een datum geldt: de nieuwste regel met geldig_van ≤ datum. */
+export function zkGecontracteerdOp(regels, datum) {
+  return (regels || []).filter((r) => String(r.geldig_van) <= datum).sort((x, y) => (String(x.geldig_van) < String(y.geldig_van) ? -1 : 1)).at(-1) || null;
+}
+
+/**
+ * Prognose voor jaar J: per kwartaal de gemiddelde contracturen POT, min de gemeente-uren = uren voor ZK; jaargemiddelde = gemiddelde van de
+ * vier kwartalen (afgelopen kwartalen uit Nmbrs, de rest uit de contracten en vacatures). Naast het gecontracteerde per kwartaal.
+ */
+export function zkPrognose({ jaar, contracten, mutaties = [], gemeenteUren = ZK_GEMEENTE_UREN, vandaag, gecontracteerd = [], drempelPct = ZK_DREMPEL_PCT }) {
+  const qs = kwartalen(jaar).map((k) => {
+    const status = k.tot < vandaag ? "gerealiseerd" : k.van <= vandaag ? "lopend" : "prognose";
+    const g = gemiddeldeUren({ contracten, mutaties, van: k.van, tot: k.tot, vacatureVanaf: vandaag });
+    const gc = zkGecontracteerdOp(gecontracteerd, k.van);
+    return { ...k, status, uren: g.uren, gemeente: Number(gemeenteUren), zk: rond2(g.uren - Number(gemeenteUren)), gecontracteerd: gc ? Number(gc.uren) : null, per: g.per };
+  });
+  const gem = (xs) => (xs.length ? rond2(xs.reduce((s, x) => s + x, 0) / xs.length) : null);
+  const gemiddeld = gem(qs.map((q) => q.zk));
+  // vergelijken over de kwartalen waarvan het gecontracteerde bekend is (anders appels met peren)
+  const bekend = qs.filter((q) => q.gecontracteerd != null);
+  const vergelijk = bekend.length
+    ? { kwartalen: bekend.map((q) => q.q), prognose: gem(bekend.map((q) => q.zk)), gecontracteerd: gem(bekend.map((q) => q.gecontracteerd)) }
+    : null;
+  const signaal = vergelijk ? zkSignaal({ prognose: vergelijk.prognose, gecontracteerd: vergelijk.gecontracteerd, drempelPct }) : null;
+  return { jaar: Number(jaar), vandaag, gemeenteUren: Number(gemeenteUren), kwartalen: qs, gemiddeld, vergelijk, signaal, drempelPct: Number(drempelPct) };
+}
+
+/** Boven of onder het gecontracteerde; sterk = minstens de drempel (procent). Omhoog en sterk: de tip om de contracten te laten openzetten. */
+export function zkSignaal({ prognose, gecontracteerd, drempelPct = ZK_DREMPEL_PCT }) {
+  if (prognose == null || gecontracteerd == null || !(Number(gecontracteerd) > 0)) return null;
+  const verschil = rond2(Number(prognose) - Number(gecontracteerd));
+  const pct = verschil / Number(gecontracteerd);
+  const richting = Math.abs(verschil) < 0.5 ? "gelijk" : verschil > 0 ? "boven" : "onder";
+  const sterk = richting !== "gelijk" && Math.abs(pct) * 100 >= Number(drempelPct) - 1e-9;
+  return { verschil, pct, richting, sterk, tip: richting === "boven" && sterk ? "Het loont om de contracten te laten openzetten en de uren op te hogen." : null };
+}
+
+/**
+ * Contracteringsadvies: de uren voor ZK naar rato van het patiëntenaantal per praktijk (afgerond op `decimalen`), met het kwartaaltarief
+ * dat ZK daar volgens zijn eigen rekenregel bij geeft en het jaarbedrag. Toets: het tarief per patiënt is voor iedereen gelijk.
+ */
+export function zkAdvies({ urenZk, praktijken, tariefMax = null, decimalen = 2 }) {
+  const lijst = (praktijken || []).filter((p) => Number(p.patienten) > 0);
+  const som = lijst.reduce((s, p) => s + Number(p.patienten), 0);
+  const U = Number(urenZk);
+  if (!(som > 0) || !(U > 0)) return { ok: false, reden: !(som > 0) ? "geen patiëntenaantallen" : "geen uren voor ZK", rijen: [] };
+  const f = 10 ** decimalen;
+  const perNorm = (U * ZK_NORM.patienten) / som;
+  const tariefVan = (normI) => (tariefMax == null ? null : rond2((normI / ZK_NORM.uren) * Number(tariefMax)));
+  const rijen = lijst.map((p) => {
+    const n = Number(p.patienten);
+    const uren = Math.round(((U * n) / som) * f + Number.EPSILON) / f;
+    const normI = (uren * ZK_NORM.patienten) / n;
+    const tarief = tariefVan(normI);
+    return { id: p.id, patienten: n, peildatum: p.peildatum ?? null, uren, per_normpraktijk: Math.round(normI * 100) / 100, tarief, jaarbedrag: tarief == null ? null : rond2(tarief * 4 * n) };
+  });
+  const tarieven = [...new Set(rijen.map((r) => r.tarief))];
+  const waarschuwingen = [];
+  if (perNorm > ZK_NORM.max_uren) waarschuwingen.push(`${rond2(perNorm)} uur per ${ZK_NORM.patienten} patiënten is meer dan het NZa-maximum van ${ZK_NORM.max_uren}`);
+  else if (perNorm > ZK_NORM.uren) waarschuwingen.push(`${rond2(perNorm)} uur per ${ZK_NORM.patienten} patiënten is meer dan ${ZK_NORM.uren}: Zilveren Kruis vraagt dan een onderbouwing (wachtlijst of achterstandswijk)`);
+  if (tariefMax != null && tarieven.length > 1) waarschuwingen.push(`door afronden geeft niet elke praktijk hetzelfde tarief (${tarieven.map((t) => String(t).replace(".", ",")).join(" / ")})`);
+  return {
+    ok: true, urenZk: U, patienten: som, perNorm: Math.round(perNorm * 100) / 100, tariefMax: tariefMax == null ? null : Number(tariefMax),
+    tarief: tariefVan(perNorm), gelijk: tariefMax == null ? null : tarieven.length === 1, rijen,
+    somUren: Math.round(rijen.reduce((s, r) => s + r.uren, 0) * f + Number.EPSILON) / f,
+    jaarTotaal: tariefMax == null ? null : rond2(rijen.reduce((s, r) => s + r.jaarbedrag, 0)), waarschuwingen,
+  };
 }
 
 // ---------- samengesteld: het jaarplan en de afrekening uit de gegevens van de database ----------
@@ -1041,8 +1205,30 @@ export function kenmerkenUit(omschrijving, bekend) {
  * termijn (sleutel = nummer, ook het kenmerk). Een nota met 'u krijgt terug' is geen termijn (die wordt verrekend).
  */
 export function termijnenUitNotas(notas, entiteit, praktijk_id) {
-  return (notas || []).filter((n) => n.entiteit === entiteit && n.praktijk_id === praktijk_id && n.status === "definitief" && Number(n.bedrag) > 0.004)
-    .map((n) => ({ sleutel: String(n.nummer), nummer: String(n.nummer), vervaldag: n.vervaldag || n.datum, bedrag: rond2(n.bedrag), bron: "nota", soort: n.soort }));
+  const uit = [];
+  for (const n of notas || []) {
+    if (n.entiteit !== entiteit || n.praktijk_id !== praktijk_id) continue;
+    // een gecrediteerde nota (wv3079) is alleen nog een termijn voor wat er al op betaald was (dat werd een tegoed); de rest vervalt
+    const bedrag = n.status === "definitief" ? rond2(n.bedrag) : n.status === "gecrediteerd" ? rond2(gecrediteerdBetaald(n)) : 0;
+    if (bedrag > 0.004) uit.push({ sleutel: String(n.nummer), nummer: String(n.nummer), vervaldag: n.vervaldag || n.datum, bedrag, bron: "nota", soort: n.soort });
+  }
+  return uit;
+}
+/** Wat er op een gecrediteerde nota al betaald was toen de creditnota gemaakt werd (wv3079). */
+export function gecrediteerdBetaald(n) {
+  try { return Number((typeof n.gecrediteerd === "string" ? JSON.parse(n.gecrediteerd) : n.gecrediteerd || {}).betaald || 0); } catch { return 0; }
+}
+/**
+ * Hoeveel er op één nota betaald is volgens de betaalmonitor (zelfde toewijzing als het scherm Betalingen: hand-koppeling, kenmerk,
+ * venster, inhalen), uit de gegevens van GET /api/monitor. Voor de creditnota (wv3079): dat deel wordt een tegoed.
+ */
+export function betaaldOpNota(m, nota, peildatum) {
+  const termijnen = termijnenUitNotas(m.notas || [], nota.entiteit, nota.praktijk_id);
+  const bet = (m.betalingen || []).filter((b) => b.entiteit === nota.entiteit && b.praktijk_id === nota.praktijk_id)
+    .map((b) => ({ datum: b.datum, bedrag: b.bedrag, id: b.id, kenmerken: b.kenmerken, koppel: b.koppel }));
+  if (!termijnen.length || !bet.length) return 0;
+  const u = betaalstatus({ termijnen, betalingen: bet, peildatum });
+  return rond2(u.termijnen.find((t) => t.sleutel === String(nota.nummer))?.voldaan || 0);
 }
 
 /**
@@ -1076,7 +1262,13 @@ export function verdeelAfrekening({ jaar, kosten, alVoldaanOud = 0, alVoldaanNie
 
 const MND_LANG = ["januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"];
 const datumWoorden = (d) => { const [j, m, dd] = String(d).slice(0, 10).split("-").map(Number); return `${dd} ${MND_LANG[m - 1]} ${j}`; };
-const stukRegel = (n) => `- ${entiteitNaam(n.entiteit)}: ${stukNaam(n.entiteit)} ${n.nummer}, ${Number(n.bedrag) < 0 ? `u krijgt ${euro(n.bedrag)} terug` : euro(n.bedrag)}${Number(n.bedrag) > 0 ? ` (uiterlijk ${datumWoorden(n.vervaldag || n.datum)} bijgeschreven)` : ""}`;
+const stukRegel = (n) => n.soort === "credit" ? creditRegel(n) : `- ${entiteitNaam(n.entiteit)}: ${stukNaam(n.entiteit)} ${n.nummer}, ${Number(n.bedrag) < 0 ? `u krijgt ${euro(n.bedrag)} terug` : euro(n.bedrag)}${Number(n.bedrag) > 0 ? ` (uiterlijk ${datumWoorden(n.vervaldag || n.datum)} bijgeschreven)` : ""}`;
+/** Mailregel van een creditnota (wv3079): welk stuk vervalt en wat er met een al betaald bedrag gebeurt; nooit een min-teken. */
+function creditRegel(n) {
+  const orig = creditVan(n), t = rond2(n.tegoed || 0);
+  return `- ${entiteitNaam(n.entiteit)}: creditnota ${n.nummer} van ${euro(n.bedrag)}${orig ? `, ${stukNaam(n.entiteit)} ${orig} vervalt daarmee` : ""}` +
+    (t > 0.004 ? `; wat al betaald was (${euro(t)}) gaat af van de volgende nota` : "; die hoeft u niet te betalen");
+}
 /**
  * De mail aan een praktijk met de stukken van één notadatum (één mail per praktijk, de nota's als pdf-bijlagen). Concept: David
  * verstuurt. Zelfde woordtoets als de stukken (geen 'factuur', geen btw, geen min-teken).
@@ -1089,8 +1281,11 @@ export function praktijkMail({ praktijk, datum, notas, ondertekening = "David Sc
   const onderwerp = alleenMaand ? `POH-GGZ ${maand}: bijdragen en doorbelaste huur — ${praktijk}` : `POH-GGZ: stukken van ${datumWoorden(datum)} — ${praktijk}`;
   const bedragen = notas.map(stukRegel).join("\n");
   const bericht = `Beste collega's,\n\nIn de bijlage de stukken van ${alleenMaand ? maand : datumWoorden(datum)} voor de POH-GGZ:\n\n${bedragen}\n\n` +
-    `Het nummer van elk stuk is ook het betalingskenmerk; graag per stuk overmaken naar de rekening die erop staat. ` +
-    `Willen jullie de stukken na binnenkomst meteen inboeken, zodat elk bedrag uiterlijk op de genoemde datum bijgeschreven is? Zelf bedragen overnemen uit een lijst is niet meer nodig. ` +
+    (notas.some((n) => Number(n.bedrag) > 0.004)
+      ? `Het nummer van elk stuk is ook het betalingskenmerk; graag per stuk overmaken naar de rekening die erop staat. ` +
+        `Willen jullie de stukken na binnenkomst meteen inboeken, zodat elk bedrag uiterlijk op de genoemde datum bijgeschreven is? Zelf bedragen overnemen uit een lijst is niet meer nodig. `
+      : `Willen jullie de stukken na binnenkomst inboeken? Er hoeft niets overgemaakt te worden. `) +
+    (notas.some((n) => n.soort === "credit") ? `Een creditnota laat het genoemde stuk vervallen; boek beide in, dan staat het weer goed. ` : "") +
     `Het gaat om bijdragen in de gezamenlijke kosten (POT en Kostenmaatschap) en om doorbelaste huur (SLOEL).\n\nMet vriendelijke groet,\n${ondertekening}`;
   const fouten = controleerStukTekst(onderwerp + "\n" + bericht);
   if (fouten.length) throw new Error(`mailtekst geweigerd: ${fouten.join(", ")}`);
