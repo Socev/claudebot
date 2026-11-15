@@ -1099,6 +1099,53 @@ function maak(o) {
         schema: Number((db.prepare("SELECT waarde FROM meta WHERE sleutel = 'schema'").get() || {}).waarde) || null };
     }, false);
   }
+  // wv3098 (PMA › Jaarcijfers, heden): bedragen van het lopende jaar per praktijk — alleen bedragen per maand en sommen, nooit een
+  // patiënt of registreerder. Alleen de aaneengesloten gedekte dagen vanaf 1 januari tellen (een gat = daar houdt "tot nu" op); inschrijfgeld
+  // (inschrijving + modules, tabel inschrijf) alleen van kwartalen waarvan de peildatum binnen die dekking valt én die een kwartaalbron hebben.
+  // `knip` = { TG: 'jjjj-mm-dd' }: dezelfde sommen t/m die dag (de pod geeft de einddatum van de VIP-export mee, geen invoer van de app).
+  function jaarBedragen(jaar, knip) {
+    jaar = Number(jaar);
+    if (!Number.isInteger(jaar) || jaar < 2000 || jaar > 2100) throw new Fout(400, 'jaar');
+    const k = knip && typeof knip === 'object' ? knip : {};
+    return metDb((db) => {
+      const uit = [];
+      for (const x of Object.values(PRAKTIJKEN)) {
+        const p = x.code, j1 = jaar + '-01-01';
+        const r = { code: p, naam: x.naam, jaar, stand: 'geen-export', van: null, tot: null, inschrijf_cent: 0, verricht_cent: 0, maanden: [], kwartalen: [], knip: null };
+        uit.push(r);
+        if (!db) continue;
+        const dagen = db.prepare('SELECT dag FROM dagbron WHERE praktijk = ? AND dag >= ? AND dag <= ? ORDER BY dag').all(p, j1, jaar + '-12-31').map((d) => d.dag);
+        if (!dagen.length) continue;
+        if (dagen[0] !== j1) { r.stand = 'begint-later'; r.van = dagen[0]; continue; }   // zonder 1 januari geen "dit jaar tot nu"
+        let tot = j1;
+        for (let i = 1; i < dagen.length && dagen[i] === plusDag(tot, 1); i++) tot = dagen[i];
+        const kw = new Set(db.prepare('SELECT peildatum FROM kwartaalbron WHERE praktijk = ? AND peildatum >= ? AND peildatum <= ?').all(p, j1, tot).map((q) => q.peildatum));
+        const kwartalen = [];
+        for (let q = j1; q <= tot && q.slice(0, 4) === String(jaar); q = volgendKwartaal(q)) kwartalen.push(q);
+        // een kwartaal zonder bron, of met een bron maar zonder één euro inschrijfgeld (de export had het niet), telt als ontbrekend (review MOET 1)
+        const somQ = (q) => db.prepare('SELECT COALESCE(SUM(tarief_cent), 0) AS c FROM inschrijf WHERE praktijk = ? AND peildatum = ?').get(p, q).c;
+        const missen = kwartalen.filter((q) => !kw.has(q) || !(somQ(q) > 0));
+        Object.assign(r, { stand: missen.length ? 'kwartaal-mist' : 'ok', van: j1, tot, kwartalen: kwartalen.filter((q) => kw.has(q)) });
+        const maanden = new Map();
+        const mnd = (m) => { if (!maanden.has(m)) maanden.set(m, { maand: m, inschrijf_cent: 0, verricht_cent: 0 }); return maanden.get(m); };
+        for (const q of r.kwartalen) {
+          const c = db.prepare('SELECT COALESCE(SUM(tarief_cent), 0) AS c FROM inschrijf WHERE praktijk = ? AND peildatum = ?').get(p, q).c;
+          mnd(q.slice(0, 7)).inschrijf_cent += c; r.inschrijf_cent += c;
+        }
+        for (const m of db.prepare("SELECT substr(dag, 1, 7) AS m, COALESCE(SUM(tarief_cent), 0) AS c FROM regel WHERE praktijk = ? AND type = 'V' AND dag >= ? AND dag <= ? GROUP BY m").all(p, j1, tot)) {
+          mnd(m.m).verricht_cent += m.c; r.verricht_cent += m.c;
+        }
+        r.maanden = [...maanden.values()].sort((a, b) => (a.maand < b.maand ? -1 : 1));
+        const kd = typeof k[p] === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(k[p]) ? k[p] : null;
+        if (kd && kd >= j1 && kd <= tot && !missen.some((q) => q <= kd)) {   // alleen binnen de dekking en met elk kwartaal inschrijfgeld t/m die dag (review MOET 1): anders is de vergelijking niet eerlijk
+          const ins = r.kwartalen.filter((q) => q <= kd).reduce((s, q) => s + (r.maanden.find((m) => m.maand === q.slice(0, 7)) || { inschrijf_cent: 0 }).inschrijf_cent, 0);
+          const ver = db.prepare("SELECT COALESCE(SUM(tarief_cent), 0) AS c FROM regel WHERE praktijk = ? AND type = 'V' AND dag >= ? AND dag <= ?").get(p, j1, kd).c;
+          r.knip = { tot: kd, inschrijf_cent: ins, verricht_cent: ver };
+        }
+      }
+      return uit;
+    }, false);
+  }
   function herbouw(praktijk) {
     return metDb((db) => {
       const ps = praktijk ? [praktijk] : db.prepare("SELECT DISTINCT praktijk FROM export WHERE stand = 'actief'").all().map((r) => r.praktijk);
@@ -1106,7 +1153,7 @@ function maak(o) {
       return n;
     }, true);
   }
-  return { app, info, herbouw, _plan: plan, _pseudo: pseudo };
+  return { app, info, herbouw, jaarBedragen, _plan: plan, _pseudo: pseudo };
 }
 
 module.exports = { maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht };
