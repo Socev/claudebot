@@ -384,6 +384,15 @@ function snoei(staat, nuMs) {
   for (const w of Object.keys(staat.log)) if (!levend.has(w)) delete staat.log[w];
 }
 
+// wv3145 padcontrole: de ontvanger schrijft alleen de weekpagina "Promedico-agenda <jjjj>-W<ww>.md"; de botsingenpagina
+// ("… - botsingen.md") heeft één schrijver, de nachtstap promedico-botsingen.js (bouwplan § F2.1).
+function weekPaginaNaam(week) {
+  if (typeof week !== 'string' || !/^\d{4}-W\d{2}$/.test(week)) throw new Error('padcontrole: geen weeknaam');
+  const n = KOP + ' ' + week + '.md';
+  if (!/^Promedico-agenda \d{4}-W\d{2}\.md$/.test(n)) throw new Error('padcontrole: naam');
+  return n;
+}
+
 // ── De ontvanger (HTTP-laag) ──────────────────────────────────────────────────────────────────────────────────
 /**
  * o = { dir (/opt/data/promedico-agenda), vault, vv (vault-veilig), poort (intake/patientpoort.js),
@@ -447,7 +456,7 @@ function maakOntvanger(o) {
   function schrijfPagina(staat, week) {
     const mapAbs = path.join(o.vault, map);
     try { fs.mkdirSync(mapAbs, { mode: 0o775 }); } catch (e) { if (e.code !== 'EEXIST') throw e; }
-    o.vv.schrijf(path.join(mapAbs, KOP + ' ' + week + '.md'), maakPagina(staat, week));   // vault-veilig: geen symlink in het pad
+    o.vv.schrijf(path.join(mapAbs, weekPaginaNaam(week)), maakPagina(staat, week));   // vault-veilig: geen symlink in het pad
   }
 
   // d = { secret, geheim, type, lijf_b64 } (uit de JSON van n8n); geeft { status, j, log }.
@@ -513,4 +522,4 @@ function maakOntvanger(o) {
   return { verwerk, health };
 }
 
-module.exports = { maakOntvanger, toetsVorm, keurTekst, schoonTekst, mdVeilig, maakPagina, verwerkStand, verwerkNietHerkend, legeStaat, isoWeek, blokRegels, verschil, OMHULSEL_MAX, LIJF_MAX, KLUISNAAM, SCHEMA };
+module.exports = { maakOntvanger, weekPaginaNaam, toetsVorm, keurTekst, schoonTekst, mdVeilig, maakPagina, verwerkStand, verwerkNietHerkend, legeStaat, isoWeek, blokRegels, verschil, OMHULSEL_MAX, LIJF_MAX, KLUISNAAM, SCHEMA };

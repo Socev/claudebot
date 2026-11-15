@@ -433,6 +433,9 @@ jobs:
       - name: "promedico-betekenis (wv3143, Promedico-laag in Calendar)"
         if: ${{ !cancelled() }}
         run: bash test/promedico-betekenis.sh
+      - name: Promedico-botsingen (wv3145, nachtstap fase 2)
+        if: ${{ !cancelled() }}
+        run: bash test/promedico-botsingen.sh
       # OVIS Intake, aanleverweg (wv1282): CI-poort (alleen fs/path/crypto/node:sqlite, Authorization alleen naar de hash, register alleen in de
       # module), sleutels, envelop per veldtype, naampoort (elke WINCODE-soort), bytes, dubbel/afwijkend, herzienbaar, padpoging, onvolledig,
       # onderhoud, vrije velden, leesluik, de 23 markergevallen + bewaarregel, en per profiel voorbeeld, weigering en rondreis.

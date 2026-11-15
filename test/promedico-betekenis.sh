@@ -151,7 +151,7 @@ const A = M.maakApp({ leesStaat: () => staatUit, rpc: async (fn, b) => { rpcAanr
   const src = fs.readFileSync('server.js', 'utf8');
   toets('4a dispatch GET /app/promedico/ direct na de Calendar (achter de app-sessie)', src.indexOf("if (route.indexOf('GET /app/promedico/') === 0) return typeof appPromedico === 'function'") > src.indexOf("if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0)")
     && src.indexOf("if (route.indexOf('GET /app/promedico/') === 0)") - src.indexOf("if (route === 'GET /app/kalender'") < 400);
-  toets('4b /health.promedico_agenda.app', /promedico_agenda: promedicoAgenda \? Object\.assign\(\{\}, promedicoAgenda\.health\(\), \{ app: typeof promedicoAppInfo === 'function' \? promedicoAppInfo\(\) : \{ aan: false \} \}\) : null/.test(src));
+  toets('4b /health.promedico_agenda.app (wv3145: + .botsingen)', /promedico_agenda: promedicoAgenda \? Object\.assign\(\{\}, promedicoAgenda\.health\(\), \{ app: typeof promedicoAppInfo === 'function' \? promedicoAppInfo\(\) : \{ aan: false \}(, botsingen: [^\n]*)? \}\) : null/.test(src));
   const us = fs.readFileSync('uitrol.sh', 'utf8');
   toets('4c uitrol-lijst: module en woordenlijst optioneel; json wordt geparst', /RELEASE_OPTIONEEL="[^"]*\bpromedico-betekenis\.js\b/.test(us) && /RELEASE_OPTIONEEL="[^"]*\bpromedico-woorden\.json\b/.test(us) && /\(\*\.json\) node -e 'JSON\.parse/.test(us));
   toets('4d woordenlijst: elk patroon compileert', M.standaardWoorden().kapot === 0 && M.standaardWoorden().groepen.length >= 4);
