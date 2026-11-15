@@ -502,6 +502,10 @@ jobs:
       - name: "vastgoed (wv3085, OVIS Vastgoed fase 1)"
         if: ${{ !cancelled() }}
         run: bash test/vastgoed.sh
+      # wv3099: OVIS NZa scherm — CI-poort (alleen nza.py scherm, geen netwerk/shell/log), precies twee leesroutes, invoercontrole met een nep-nza.py.
+      - name: "nza (wv3099, OVIS NZa scherm)"
+        if: ${{ !cancelled() }}
+        run: bash test/nza.sh
       # wv2993: OVIS Beleggen fase 2 — weekbericht: ophalen, ruisregels, weegronde en kaarten op opgenomen antwoorden (geen netwerk, geen model) + kruisproef per regel.
       - name: "beleggen-nieuws (wv2993, OVIS Beleggen weekbericht)"
         if: ${{ !cancelled() }}
