@@ -5498,7 +5498,7 @@ APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
 ['controleer', 'inlees', 'intrek', 'code', 'koppel', 'rol', 'rooster', 'persoon'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt (wv3047: koppel, rol, rooster, persoon)   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
-['dossier', 'ververs', 'beelden', 'aanroepen'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt
+['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt; wv3102: + WOZ-beschikking
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
 // geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
@@ -13953,7 +13953,7 @@ function handleApp(req, res) {
     const rambleStuk = req.method === 'POST' && APP_RAMBLE_STUK_RE.test(p);   // wv1969: MemoryLane, één WAV-stuk van 60 s
     const ruw = upload || rambleStuk || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
     if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
-    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && (p === '/app/osint/bestand' || p === '/app/ghawa/afschrift' || p === '/app/ghawa/website/concept') ? APP_OSINT_BESTAND_MAX_BODY : (req.method === 'POST' && p === '/app/osint/zoek' ? APP_OSINT_ZOEK_MAX_BODY : (req.method === 'POST' && p === '/app/beleggen/bestand' ? APP_BELEGGEN_MAX_BODY_VROEG : (req.method === 'POST' && (p === '/app/imagine/laad' || p === '/app/imagine/incognito/laad') ? APP_IMAGINE_MAX_BODY : (req.method === 'POST' && (p === '/app/imagine/bewerk' || p === '/app/imagine/vergelijk' || p === '/app/imagine/incognito/bewerk') ? APP_IMAGINE_MASKER_MAX_BODY : (req.method === 'POST' && p === '/app/pma/controleer' ? APP_PMA_MAX_BODY : APP_MAX_BODY)))))))); })(function (fout, d, lichaam) {
+    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : (req.method === 'POST' && p === '/app/brain/webpagina' ? APP_BRAIN_WEB_MAX_BODY : (req.method === 'POST' && (p === '/app/osint/bestand' || p === '/app/ghawa/afschrift' || p === '/app/ghawa/website/concept' || p === '/app/vastgoed/woz-lees') ? APP_OSINT_BESTAND_MAX_BODY : (req.method === 'POST' && p === '/app/osint/zoek' ? APP_OSINT_ZOEK_MAX_BODY : (req.method === 'POST' && p === '/app/beleggen/bestand' ? APP_BELEGGEN_MAX_BODY_VROEG : (req.method === 'POST' && (p === '/app/imagine/laad' || p === '/app/imagine/incognito/laad') ? APP_IMAGINE_MAX_BODY : (req.method === 'POST' && (p === '/app/imagine/bewerk' || p === '/app/imagine/vergelijk' || p === '/app/imagine/incognito/bewerk') ? APP_IMAGINE_MASKER_MAX_BODY : (req.method === 'POST' && p === '/app/pma/controleer' ? APP_PMA_MAX_BODY : APP_MAX_BODY)))))))); })(function (fout, d, lichaam) {
       if (fout === 'groot' && p === '/app/omzet') return appWeiger(res, 413, 'de tekst is te groot om om te zetten (hooguit 2 MB)', 'body groot');   // wv1854
       if (fout === 'groot' && p === '/app/pma/controleer') return appWeiger(res, 413, 'de ZIP is te groot (hooguit 8 MB); exporteer per kalenderjaar', 'body groot');   // wv3037
       if (fout === 'groot' && p === '/app/beleggen/bestand') return appWeiger(res, 413, 'dit bestand is te groot (hooguit 2 MB)', 'body groot');   // wv2982
@@ -14072,7 +14072,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
         if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
         if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
-        if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1
+        if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
@@ -22683,13 +22683,23 @@ function pmaInfo() {
 //   POST /app/vastgoed/ververs {id}          openbare gegevens voor één object ophalen (≤ 1× per 10 min per object; alleen de hoofdpod)
 //   POST /app/vastgoed/beelden {id}          de kaartbeelden van één object (luchtfoto + perceel, tijdmachine, hoogte, plangebied)
 //   POST /app/vastgoed/aanroepen             de laatste 200 aanroepen naar buiten (wat ging waarheen)
+// Fase 2 (wv3102, 15-11-2026): hypotheek, verbouwkosten, servicekosten (privébank, alleen lezen) en stroom (Tibber, alleen lezen) komen mee in
+// GET /app/vastgoed; vastgoed.js leest ze bij "dossier opnieuw lezen" en vanzelf als de laatste lezing ouder is dan een dag. Plus de WOZ-knop:
+//   POST /app/vastgoed/woz-lees {id, naam, bestand}   pdf/jpg/png (≤ 10 MB, base64) → tekst via pdftotext of tesseract (lokaal, niets naar buiten)
+//                                                      → voorstel {jaar, waarde, peildatum} + token (15 min, alleen dit apparaat, in het geheugen)
+//   POST /app/vastgoed/woz-bewaar {token, id, jaar, waarde, peildatum}   wat David bevestigde: het stuk via vault-veilig in 20_Prive/Bronnen/Huis
+//                                                      ("Prive - <jaar> - WOZ-beschikking <jaar> <object>.<ext>", nooit overschrijven), dan
+//                                                      woz_eigen in vastgoed.sqlite en het dossier opnieuw lezen. Een proefserver schrijft nooit
+//                                                      in de echte vault. WOZ automatisch opvragen is niet gebouwd (voorwaarden niet vastgesteld).
 // Audit/log: alleen route + reden; nooit een adres, nummer of bedrag.
 const VASTGOED_DIR = serverPad('vastgoed', process.env.VASTGOED_DIR, '/opt/data/vastgoed', serverProefDeel('vastgoed'));
+const VASTGOED_BANK = serverPad('vastgoed_bank', process.env.BANK_DIR ? path.join(process.env.BANK_DIR, 'transacties.sqlite') : '', '/opt/data/bank/transacties.sqlite', serverProefDeel('bank/transacties.sqlite'));   // wv3102: alleen lezen
+const VASTGOED_TIBBER = serverPad('vastgoed_tibber', process.env.TIBBER_DIR ? path.join(process.env.TIBBER_DIR, 'tibber.sqlite') : '', '/opt/data/tibber/tibber.sqlite', serverProefDeel('tibber/tibber.sqlite'));   // wv3102: alleen lezen
 const vastgoedApp = (function () {
   const p = path.join(__dirname, 'vastgoed.js');
   if (!fs.existsSync(p)) return null;
   try {
-    return require(p).maak({ map: VASTGOED_DIR, vault: VAULT,
+    return require(p).maak({ map: VASTGOED_DIR, vault: VAULT, bank: VASTGOED_BANK, tibber: VASTGOED_TIBBER,
       bronnen: async function (invoer) {
         if (typeof osintRun !== 'function' || !fs.existsSync(OSINT_SCRIPT)) return { ok: false };
         invoer.sleutels = await osintSleutels();   // EP-online uit de kluis, via stdin (nooit in env, log of uitkomst)
@@ -22697,9 +22707,77 @@ const vastgoedApp = (function () {
       } });
   } catch (e) { logError('vastgoed', new Error('laden faalde')); return null; }
 })();
+// wv3102: WOZ-beschikking. Klaarstaande bestanden alleen in het geheugen (token → bestand), 15 min, hooguit 4, per apparaat.
+const VASTGOED_WOZ = new Map();
+const VASTGOED_WOZ_MS = 15 * 60 * 1000;
+function vastgoedWozSoort(buf) {
+  if (buf.length > 5 && buf.slice(0, 5).toString('latin1') === '%PDF-') return 'pdf';
+  if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf.length > 8 && buf.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
+  return null;
+}
+// Tekst uit het stuk, lokaal: pdftotext (eerste 4 pagina's) of tesseract (nld). Faalt het: lege tekst (David vult dan zelf in). Geen log van inhoud.
+function vastgoedWozTekst(buf, soort) {
+  return new Promise(function (klaar) {
+    const pr = soort === 'pdf' ? spawn('/usr/bin/pdftotext', ['-q', '-l', '4', '-enc', 'UTF-8', '-', '-'], { stdio: ['pipe', 'pipe', 'ignore'] })
+      : spawn('tesseract', ['stdin', 'stdout', '-l', 'nld', '--psm', '3'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const delen = []; let n = 0, af = false;
+    const eind = function (t) { if (af) return; af = true; clearTimeout(tm); klaar(t); };
+    const tm = setTimeout(function () { try { pr.kill('SIGKILL'); } catch (e) {} eind(''); }, 60000);
+    pr.stdout.on('data', function (c) { n += c.length; if (n <= 2 * 1024 * 1024) delen.push(c); });
+    pr.on('error', function () { eind(''); });
+    pr.on('close', function (code) { eind(code === 0 ? Buffer.concat(delen).toString('utf8') : ''); });
+    pr.stdin.on('error', function () {});
+    pr.stdin.end(buf);
+  });
+}
+async function appVastgoedWoz(res, a, route, d) {
+  d = d || {};
+  for (const [k, v] of VASTGOED_WOZ) if (v.tot < Date.now()) VASTGOED_WOZ.delete(k);
+  if (route === 'POST /app/vastgoed/woz-lees') {
+    if (!appTeller('vastgoed-woz', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed-woz');
+    const id = Number(d.id);
+    if (!Number.isInteger(id) || id < 1) return appWeiger(res, 400, 'id ontbreekt', 'vastgoed woz id');
+    if (typeof d.bestand !== 'string' || !d.bestand || d.bestand.length > 14 * 1024 * 1024) return appWeiger(res, 413, 'bestand ontbreekt of is te groot (hooguit 10 MB)', 'vastgoed woz groot');
+    const buf = Buffer.from(d.bestand, 'base64');
+    const soort = vastgoedWozSoort(buf);
+    if (!soort) return appWeiger(res, 415, 'alleen een pdf of een foto (jpg of png)', 'vastgoed woz soort');
+    const tekst = await vastgoedWozTekst(buf, soort);
+    const voorstel = vastgoedApp.wozHerken(tekst);
+    const token = crypto.randomBytes(16).toString('hex');
+    while (VASTGOED_WOZ.size >= 4) VASTGOED_WOZ.delete(VASTGOED_WOZ.keys().next().value);
+    VASTGOED_WOZ.set(token, { buf: buf, soort: soort, id: id, apparaat: a && a.id, tot: Date.now() + VASTGOED_WOZ_MS });
+    res._app.reden = 'vastgoed woz gelezen' + (tekst ? '' : ' zonder tekst');
+    return appStuur(res, 200, { ok: true, token: token, soort: soort, tekst: !!tekst.trim(), voorstel: voorstel });
+  }
+  // woz-bewaar: alleen met het token van dit apparaat en voor hetzelfde object
+  const k = VASTGOED_WOZ.get(String(d.token || ''));
+  if (!k || k.apparaat !== (a && a.id) || k.id !== Number(d.id)) return appWeiger(res, 410, 'het bestand staat niet meer klaar; voeg het opnieuw toe', 'vastgoed woz verlopen');
+  let c;
+  try { c = vastgoedApp.wozControle(d); } catch (e) { return appWeiger(res, e && e.status || 400, e && e.status ? e.message : 'ongeldig', 'vastgoed woz ' + (e && e.status || 400)); }
+  if (!SERVER_ECHT && serverZelfdePlek(VAULT, '/opt/data/AI_SecondBrain')) return appWeiger(res, 409, 'proefserver: niet in de echte vault', 'vastgoed woz proef');
+  const map = '20_Prive/Bronnen/Huis';
+  let rel = null;
+  try {
+    for (let i = 1; i <= 9 && !rel; i++) {
+      const naam = 'Prive - ' + c.jaar + ' - ' + c.stam + (i > 1 ? ' (' + i + ')' : '') + '.' + k.soort;
+      if (VV().schrijf(path.join(VAULT, map, naam), k.buf, { modus: 0o660, alsGelijk: function (st) { return !st; } })) rel = map + '/' + naam;
+    }
+  } catch (e) { logError('vastgoed-woz', new Error('stuk bewaren faalde')); return appWeiger(res, 503, 'het stuk kon niet in het dossier; probeer het zo opnieuw', 'vastgoed woz schrijven'); }
+  if (!rel) return appWeiger(res, 409, 'er staan al te veel stukken met deze naam', 'vastgoed woz naam');
+  VASTGOED_WOZ.delete(String(d.token));
+  try { vastgoedApp.wozVastleggen(d, { pad: rel, sha: crypto.createHash('sha256').update(k.buf).digest('hex') }); }
+  catch (e) { logError('vastgoed-woz', new Error('vastleggen faalde')); return appWeiger(res, 503, 'het stuk staat in het dossier, maar de waarde kon niet worden bewaard; voeg het opnieuw toe', 'vastgoed woz vastleggen'); }
+  res._app.reden = 'vastgoed woz bewaard';
+  return appStuur(res, 200, { ok: true, pad: rel });
+}
 async function appVastgoed(req, res, a, route, d) {
   if (!vastgoedApp) return appWeiger(res, 404, 'Vastgoed zit niet in deze versie van de pod', 'vastgoed ontbreekt');
   if (!appTeller('vastgoed', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed');
+  if (route === 'POST /app/vastgoed/woz-lees' || route === 'POST /app/vastgoed/woz-bewaar') {
+    try { return await appVastgoedWoz(res, a, route, d); }
+    catch (e) { logError('vastgoed-woz', new Error('route faalde')); return appWeiger(res, 503, 'Vastgoed is nu niet te lezen; probeer het zo opnieuw', 'vastgoed woz fout'); }
+  }
   const post = route.indexOf('POST ') === 0;
   if (route === 'POST /app/vastgoed/ververs') {
     if (!rolPrimair()) return appWeiger(res, 409, 'openbare gegevens ophalen kan alleen op de hoofdpod', 'vastgoed niet primair');
