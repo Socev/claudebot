@@ -426,6 +426,23 @@ async function pipeLezers() {
 function deel(naam, f, ms) {
   return metGrens(Promise.resolve().then(f), ms, { fout: naam + ' niet binnen ' + Math.round(ms / 1000) + ' s' });
 }
+// wv3124: de laatste 15 minuten schijfdruk uit het geheugen van schijfdruk.js (unix-socket, geen schijf nodig).
+const SCHIJFDRUK_SOCK = process.env.SCHIJFDRUK_SOCK || path.join(process.env.SCHIJFDRUK_DIR || '/opt/data/scripts-staat/schijfdruk', 'meter.sock');
+function schijfdrukRecent() {
+  return new Promise(function (resolve) {
+    let klaar = false;
+    const einde = (v) => { if (!klaar) { klaar = true; resolve(v); } };
+    const req = http.get({ socketPath: SCHIJFDRUK_SOCK, path: '/recent?min=15', agent: false, timeout: 3000 }, function (res) {
+      let s = '';
+      res.setEncoding('utf8');
+      res.on('data', (d) => { if (s.length < 400000) s += d; });
+      res.on('end', () => { try { const j = JSON.parse(s); einde({ records: j.records, samenvatting: j.samenvatting }); } catch (e) { einde({ fout: 'schijfdruk: antwoord onleesbaar' }); } });
+      res.on('error', () => einde({ fout: 'schijfdruk: antwoord afgebroken' }));
+    });
+    req.on('timeout', () => { req.destroy(); einde({ fout: 'schijfdruk: geen antwoord binnen 3 s' }); });
+    req.on('error', (e) => einde({ fout: 'schijfdruk: meter niet bereikbaar (' + (e.code || e.message) + ')' }));
+  });
+}
 async function momentopname(stilS, b) {
   Object.assign(b, { tijd_iso: new Date().toISOString(), server_pid: SERVER, release: SHA, stil_s: stilS, missers: missers,
     laatste_gezond: laatsteContext });
@@ -456,6 +473,7 @@ async function momentopname(stilS, b) {
         cpu_pressure: await cg('cpu.pressure', 200), io_pressure: await cg('io.pressure', 200) };
     }, 4000).then((x) => { b.cgroup = x; }),
     deel('kinderen', () => kinderenVan(SERVER), 6000).then((x) => { b.kinderen = x; }),
+    deel('schijfdruk', schijfdrukRecent, 4000).then((x) => { b.schijfdruk = x; }),   // wv3124: laatste 15 min uit het geheugen van schijfdruk.js
     deel('api_log', () => staartVan(API_LOG, 50), 4000).then((x) => { b.api_log = x; }),
     deel('agents', async function () {
       const ag = await leesJson(AGENTS);

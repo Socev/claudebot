@@ -2280,6 +2280,36 @@ function agentInfo() {
 const UITROL_MARKER = serverPad('uitrol_marker', process.env.UITROL_MARKER, '/opt/data/uitrol-wacht', serverProefDeel('uitrol-wacht'));
 const UITROL_MARKER_MAX_MS = 5 * 60 * 1000;
 let bewakerPid = null;   // wv701: pid van bewaker.js (zie bewakerStart onderaan)
+// wv3124: schijfdrukmeting (schijfdruk.js) als los proces; /health.schijfdruk komt uit zijn unix-socket (geheugen van de meter, geen schijf),
+// ververst elke minuut asynchroon met een korte time-out en nooit tijdens een /health-aanroep.
+const SCHIJFDRUK_DIR = serverPad('schijfdruk', process.env.SCHIJFDRUK_DIR, '/opt/data/scripts-staat/schijfdruk', serverProefDeel('schijfdruk'));
+let schijfdrukPid = null, schijfdrukStand = { aan: false }, schijfdrukBezig = false;
+function schijfdrukVraag() {
+  if (schijfdrukBezig) return;
+  schijfdrukBezig = true;
+  let klaar = false;
+  const einde = function (v) { if (klaar) return; klaar = true; schijfdrukBezig = false; schijfdrukStand = v; };
+  try {
+    const req = http.get({ socketPath: path.join(SCHIJFDRUK_DIR, 'meter.sock'), path: '/samenvatting', agent: false, timeout: 3000 }, function (res) {
+      let t = '';
+      res.setEncoding('utf8');
+      res.on('data', function (d) { if (t.length < 100000) t += d; });
+      res.on('end', function () { try { const j = JSON.parse(t); einde(Object.assign({ aan: true }, j)); } catch (e) { einde({ aan: true, fout: 'antwoord onleesbaar' }); } });
+      res.on('error', function () { einde({ aan: true, fout: 'meter antwoordt niet' }); });
+    });
+    req.on('timeout', function () { req.destroy(); einde({ aan: true, fout: 'meter antwoordt niet binnen 3 s' }); });
+    req.on('error', function (e) { einde({ aan: schijfdrukPid !== null, fout: 'meter niet bereikbaar (' + (e.code || e.message) + ')' }); });
+  } catch (e) { einde({ aan: false, fout: String(e.message || e).slice(0, 80) }); }
+}
+function schijfdrukStart() {
+  if (SERVER_ECHT !== true || process.env.SCHIJFDRUK === '0') return;
+  const p = path.join(__dirname, 'schijfdruk.js');
+  if (!fs.existsSync(p)) return;   // release zonder meter (oude uitrol.sh of terugrol)
+  try { schijfdrukPid = require(p).start({ sha: path.basename(__dirname) }); }
+  catch (e) { logError('schijfdruk', e); return; }
+  setTimeout(schijfdrukVraag, 5000).unref();
+  setInterval(schijfdrukVraag, 60 * 1000).unref();
+}
 // wv716 (ontwerp wv703 D, Fable: bouwen): geheugen en lusvertraging van dit proces op /health.proces (niet op /health/publiek).
 // monitorEventLoopDelay is één libuv-timer (20 ms) met een histogram; elke volle minuut uitlezen en leegmaken, en de waarden van
 // die minuut tonen. Meet een sluipende JS-lus of GC-druk (de minuut vóór een syscall-hang blijft leeg); de bewaker neemt het
@@ -4237,6 +4267,8 @@ function handleRequest(req, res) {
       onderhoud: onderhoud.stand(),
       // wv701: levensbewaking (bewaker.js); leeft false = de bewaker stopte (zie supervisor.log, regels 'bewaker[')
       bewaker: bewakerInfo(),
+      // wv3124: schijfdrukmeting per minuut (schijfdruk.js): laatste minuut, piek 24 u met tijdstip; ring onder scripts-staat/schijfdruk
+      schijfdruk: schijfdrukStand,
       // wv698: argv-detector (sleutelwaarden in /proc/*/cmdline); treffers_24u > 0 = er lekt iets, zie de box
       detector: argvDetInfo(),
       // wv715: de socev-loper (smalle gesprekken als uid 1002): stand, bereikbaar (ping elke minuut), lopend, fouten
@@ -29102,6 +29134,7 @@ server.listen(PORT, '0.0.0.0', function () {
   console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents, breinen claude|codex|gemini) luistert op :' + PORT +
     ' (vault=' + VAULT + ', repo=' + REPO + ')');
   bewakerStart();
+  schijfdrukStart();
   argvDetectorStart();
 });
 
