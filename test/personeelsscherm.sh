@@ -11,13 +11,13 @@ if echo "$C" | grep -nE "\bfetch\s*\(|process\.env|import\(|console\.|\beval\(|n
 [ $f = 0 ] && echo "GROEN CI-poort: personeelsscherm.js zonder netwerk, omgeving of log"
 grep -q "const personeelsscherm = (function () {" server.js || { echo "ROOD  server.js: personeelsscherm ontbreekt"; f=1; }
 P=$(grep -oE "POST \\\\/app\\\\/personeelsscherm\\\\/\([a-z|]+\)" server.js)
-[ "$P" = 'POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag)' ] || { echo "ROOD  server.js: POST-routes zijn niet precies de zes ($P)"; f=1; }
+[ "$P" = 'POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag|medisch)' ] || { echo "ROOD  server.js: POST-routes zijn niet precies de zeven ($P)"; f=1; }   # wv3154: medisch (vasthouden/loslaten)
 grep -qF "'POST /app/personeelsscherm/koppel', 'POST /app/personeelsscherm/intrek'," server.js || { echo "ROOD  server.js: koppelen/intrekken niet in APP_BEHEER_ROUTES"; f=1; }
 B=$(awk '/── OVIS Personeelsscherm \(wv2991/,/── einde OVIS Personeelsscherm ──/' server.js)
 echo "$B" | grep -qF "if (wat === 'koppel' || wat === 'intrek') {" && echo "$B" | grep -qF "if (!appVersOk(a, s)) { res._app.reden = 'personeelsscherm ' + wat + ', niet vers'" \
   || { echo "ROOD  server.js: koppelen/intrekken zonder verse vingerafdruk"; f=1; }
 if echo "$B" | grep -nE "logError\([^)]*(d\.|u\.body|body\.code)" ; then echo "ROOD  server.js: Personeelsscherm logt inhoud"; f=1; fi
-grep -qF "['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });" server.js || { echo "ROOD  server.js: routes verlengen de sessie niet"; f=1; }
+grep -qF "['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag', 'medisch'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });" server.js || { echo "ROOD  server.js: routes verlengen de sessie niet"; f=1; }
 grep -qE "^\s+personeelsscherm: typeof personeelsschermInfo === 'function'" server.js || { echo "ROOD  server.js: /health.personeelsscherm ontbreekt"; f=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* personeelsscherm\.js" uitrol.sh || { echo "ROOD  uitrol.sh: personeelsscherm.js niet in RELEASE_OPTIONEEL"; f=1; }
 grep -qE "'personeelsscherm'(, '[a-z-]+')*\]" app-vast.js || { echo "ROOD  app-vast.js: personeelsscherm niet in APP_IDS"; f=1; }
@@ -27,6 +27,11 @@ echo "$B" | grep -qF "if (wat === 'info' && d && d.aan === true) {" && echo "$B"
   || { echo "ROOD  server.js: infoscherm aan zonder verse vingerafdruk"; f=1; }
 echo "$B" | grep -qF "p_prompt: mkBlokVoor(o.prompt)" && echo "$B" | grep -qF "appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' }" \
   || { echo "ROOD  server.js: aanvraag zonder grondwet-blok of herkomst david"; f=1; }
+# wv3154: medisch nieuws alleen van de drie vaste openbare feeds, zonder doorsturing en met groottegrens
+M=$(echo "$B" | awk '/medisch: async function \(bron\) \{/,/^      \},$/')
+echo "$M" | grep -qF "{ nhg: 'https://www.nhg.org/feed/?post_type=news', lhv: 'https://www.lhv.nl/feed/?post_type=news', rivm: 'https://www.rivm.nl/nieuws/rss.xml' }[bron]" \
+  && echo "$M" | grep -qF "redirect: 'error'" && echo "$M" | grep -qF "if (n > 2 * 1024 * 1024) throw new Error('medisch te groot')" \
+  || { echo "ROOD  server.js: medisch nieuws niet alleen van de vaste feeds, of met doorsturing / zonder groottegrens"; f=1; }
 [ $f = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS"
 node --test test/personeelsscherm.test.js 2>&1 | tail -n 12 | grep -E "^# (pass|fail)"; node --test test/personeelsscherm.test.js >/dev/null 2>&1 || { echo "ROOD  test/personeelsscherm.test.js"; f=1; }
 exit $f

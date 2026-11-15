@@ -277,10 +277,11 @@ function fase1(o = {}) {
   ];
   const weer = { current: { temp: 6.4, weather: [{ id: 801, description: 'licht bewolkt' }] }, daily: [{ dt: 1763290800, temp: { max: 8.5, min: 3.4 } }, { dt: 1763377200, temp: { max: 7 }, weather: [{ id: 800 }] }] };
   const z = opzet(o);
-  const tel = { tijdlijn: 0, weer: 0, nieuws: 0 };
+  const tel = { tijdlijn: 0, weer: 0, nieuws: 0, medisch: 0, medisch_bron: [] };
   const m = PS.maak({ dir: z.dir, vault, registerPad: reg, vragenPad, d1: z.D.d1, cf: z.C.cf, nu: z.nu, melding: async () => {}, fout: () => {},
     tijdlijn: async () => { tel.tijdlijn++; if (o.tijdlijnFaalt) throw new Error('weg'); return rijen; }, weer: async () => { tel.weer++; return weer; },
-    nieuws: o.nieuws ? async () => { tel.nieuws++; return o.nieuws(); } : undefined, nieuwsTimeoutMs: o.nieuwsTimeoutMs });   // wv3023
+    nieuws: o.nieuws ? async () => { tel.nieuws++; return o.nieuws(); } : undefined, nieuwsTimeoutMs: o.nieuwsTimeoutMs,   // wv3023
+    medisch: o.medisch ? async (b) => { tel.medisch++; tel.medisch_bron.push(b); return o.medisch(b); } : undefined });   // wv3154
   return Object.assign(z, { m, zetReg, tel, vault, vragenPad });
 }
 const html = (D) => { const r = D.sq.prepare('SELECT bytes FROM envelop WHERE id = 1').get(); return JSON.parse(Buffer.from(r.bytes, 'base64')).html; };
@@ -474,7 +475,7 @@ test('fase 2 rotatie: het script wisselt op de wandklok (30 s hoofdscherm, 20 s 
   const panelen = [...doc.matchAll(/<section class="paneel( info)?( aan)?" data-s="(\d+)"(?: data-tot="(\d+)")?/g)].map((m) => {
     const cls = new Set(['paneel'].concat(m[2] ? ['aan'] : []));
     return { s: m[3], tot: m[4] || null, cls, getAttribute: (k) => (k === 'data-s' ? m[3] : k === 'data-tot' ? m[4] || null : null),
-      classList: { remove: (c) => cls.delete(c), toggle: (c, on) => (on ? cls.add(c) : cls.delete(c)) } };
+      classList: { remove: (c) => cls.delete(c), toggle: (c, on) => (on ? cls.add(c) : cls.delete(c)) }, querySelectorAll: () => [] };   // wv3154: geen bladen
   });
   assert.deepStrictEqual(panelen.map((p) => p.s), ['30', '20', '20']);
   assert.strictEqual(Number(panelen[2].tot), tot('2026-11-18'));
@@ -817,4 +818,232 @@ test('wv3023 nieuwsKoppen lineair (Codex MOET): kwaadaardige feeds van bijna 2 M
   assert.strictEqual(PS._t.nieuwsKoppen('<!DOCTYPE rss [<!ENTITY x "Kop">]><rss><channel>' + kop + '</channel></rss>', T0), null, 'DOCTYPE = weg');
   // kop of datum veel te lang = item weg
   assert.strictEqual(PS._t.nieuwsKoppen('<rss><channel><item><title>' + 'a '.repeat(1500) + '</title><pubDate>' + rfc(T0) + '</pubDate></item></channel></rss>', T0), null);
+});
+
+// ── wv3154: medisch nieuws (NHG, LHV, RIVM) dat zichzelf ververst + pagina Belangrijk (LHV/NHG langer vast); verzonnen feeds ──
+const MT0 = Date.parse('2026-11-16T09:00:00Z');
+const DAG = 24 * 3600000;
+function mrss(items, o = {}) {
+  const x = '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom">\n<channel>\n<title>Proefbron</title><description></description>'
+    + '<atom:link href="https://voorbeeld.invalid/feed/" rel="self" type="application/rss+xml" />\n'
+    + items.map((it) => '<item>\n<title>' + it.titel + '</title>\n<link>https://voorbeeld.invalid/' + encodeURIComponent(it.titel.slice(0, 20)) + '</link>\n'
+      + '<pubDate>' + (it.pd || rfc(it.ms)) + '</pubDate>\n<guid isPermaLink="false">' + (it.guid || 'https://voorbeeld.invalid/?p=' + encodeURIComponent(it.titel)) + '</guid>\n'
+      + '<description>' + (it.tekst === undefined ? '<![CDATA[Eerste proefzin over het bericht. Tweede proefzin met meer uitleg. Derde zin die niet meer past.]]>' : it.tekst) + '</description>\n'
+      + '<content:encoded><![CDATA[<p>Volledige tekst die nooit op het scherm mag.</p>]]></content:encoded>\n</item>\n').join('')
+    + '</channel>\n</rss>\n';
+  return o.afgekapt ? x.slice(0, Math.floor(x.length * 0.6)) : x;
+}
+const MED_NHG = () => [
+  { titel: 'Proefbericht NHG over duurzaam werken', ms: MT0 - 2 * 3600000 },
+  { titel: 'Herziene NHG-Standaard Proefklacht verschenen', ms: MT0 - 1 * DAG },
+  { titel: 'Altijd toegang tot de NHG-Richtlijnen in de proefapp', ms: MT0 - 2 * DAG },
+  { titel: 'NHG-proefbericht van lang geleden', ms: MT0 - 40 * DAG },
+];
+const MED_LHV = () => [
+  { titel: 'Proefsubsidie voor opleiden van medewerkers', ms: MT0 - 3 * 3600000 },
+  { titel: 'LHV-proefbericht over regeldruk', ms: MT0 - 1 * DAG - 3600000 },
+  { titel: 'Nieuwe proefpassen: controleer de vervaldata', ms: MT0 - 12 * DAG },
+  { titel: 'LHV-proefbericht over het blad', ms: MT0 - 5 * DAG },
+];
+const MED_RIVM = () => [
+  { titel: 'Proefonderzoek naar griepprik bij ouderen', ms: MT0 - 4 * 3600000, tekst: 'Het RIVM onderzocht de griepprik.\n\n&lt;img loading="lazy" src="https://voorbeeld.invalid/a.jpg" alt&gt;\n' },
+  { titel: 'Proefverkenning thuisbatterijen', ms: MT0 - 5 * 3600000, tekst: 'Steeds meer huishoudens plaatsen een batterij.' },
+  { titel: 'Oproep aan praktijken: proefvaccinatie registreren', ms: MT0 - 6 * 3600000 },   // past de regel, maar RIVM komt niet op Belangrijk
+  { titel: 'Proefbericht uit de toekomst over vaccinatie', ms: MT0 + 3 * 3600000 },
+];
+const MET_MEDISCH = [NIEUW[0] + ' Medisch nieuws: berichten van NHG, LHV en RIVM uit hun openbare nieuwsfeeds (alleen kop, één à twee zinnen samenvatting, bron en datum).'];
+function medOpzet(o = {}) {
+  const feeds = { nhg: () => mrss(MED_NHG()), lhv: () => mrss(MED_LHV()), rivm: () => mrss(MED_RIVM()) };
+  const f = fase1(Object.assign({ aan: true, tekst: MET_MEDISCH, medisch: (b) => feeds[b]() }, o));
+  f.zet(MT0);
+  return Object.assign(f, { feeds });
+}
+const medPaneel = (h, kop) => { const m = new RegExp('<section class="paneel med[^"]*"[^>]*><div class="ph"><h1>' + kop + '</h1>[\\s\\S]*?</section>').exec(h); return m ? m[0] : null; };
+const koppen = (p) => [...(p || '').matchAll(/<div class="mk">([^<]*)<\/div>/g)].map((m) => m[1]);
+
+test('wv3154 medischTekst: hele zinnen uit de bron (≤ 2, ≤ 220 tekens), Lees meer en afgebroken staart eraf, link = geen tekst, beeld weg', () => {
+  const T = PS._t.medischTekst;
+  assert.strictEqual(T('<![CDATA[<p>Eerste zin hier. Tweede zin daar. Derde zin niet.</p>]]>'), 'Eerste zin hier. Tweede zin daar.');
+  assert.strictEqual(T('Wil je meedoen? Meld je aan via de praktijk. Lees het artikel.'), 'Wil je meedoen? Meld je aan via de praktijk.');
+  assert.strictEqual(T('Een zin die af is. En een staart die halverwege ophoudt [&#8230;]'), 'Een zin die af is.');
+  assert.strictEqual(T('Het RIVM onderzocht iets.\n\n&lt;img loading="lazy" src="https://voorbeeld.invalid/a.jpg" alt&gt;'), 'Het RIVM onderzocht iets.');
+  assert.strictEqual(T('Kijk op https://voorbeeld.invalid voor meer.'), '');
+  assert.strictEqual(T('Mail naar iemand@voorbeeld.invalid. Of bel.'), '');
+  assert.strictEqual(T('Stuur\u0007teken weg. Klaar.'), 'Stuur teken weg. Klaar.');
+  const lang = 'Een eerste zin die maar doorgaat ' + 'en nog verder '.repeat(20) + 'tot het einde.';
+  const u = T(lang); assert.ok([...u].length <= 220 && u.endsWith('…'), 'te lange eerste zin afgekapt: ' + u);
+  assert.strictEqual(T('Korte zin. ' + 'Lange tweede zin '.repeat(20) + 'eind.'), 'Korte zin.');
+  assert.strictEqual(T(''), ''); assert.strictEqual(T(null), '');
+});
+
+test('wv3154 medischItems: alleen kop, samenvatting, datum; ≤ 30 dagen, niet uit de toekomst; RIVM alleen over zorg; kapot = null', () => {
+  const B = (id) => PS.MEDISCH_BRONNEN.find((b) => b.id === id);
+  const n = PS._t.medischItems(mrss(MED_NHG()), B('nhg'), MT0);
+  assert.deepStrictEqual(n.map((x) => x.kop), ['Proefbericht NHG over duurzaam werken', 'Herziene NHG-Standaard Proefklacht verschenen', 'Altijd toegang tot de NHG-Richtlijnen in de proefapp']);
+  assert.strictEqual(n[0].tekst, 'Eerste proefzin over het bericht. Tweede proefzin met meer uitleg.');
+  assert.ok(n.every((x) => /^[0-9a-f]{16}$/.test(x.id) && x.bron === 'nhg'));
+  assert.doesNotMatch(JSON.stringify(n), /Volledige tekst|voorbeeld\.invalid|Derde zin/);
+  const r = PS._t.medischItems(mrss(MED_RIVM()), B('rivm'), MT0);
+  assert.deepStrictEqual(r.map((x) => x.kop), ['Proefonderzoek naar griepprik bij ouderen', 'Oproep aan praktijken: proefvaccinatie registreren'], 'RIVM: batterijen en toekomst vallen weg');
+  assert.strictEqual(r[0].tekst, 'Het RIVM onderzocht de griepprik.');
+  assert.strictEqual(PS._t.medischItems(mrss(MED_NHG(), { afgekapt: true }), B('nhg'), MT0), null);
+  assert.strictEqual(PS._t.medischItems('<html>Fout 502</html>', B('nhg'), MT0), null);
+  assert.deepStrictEqual(PS._t.medischItems('<rss><channel><title>Leeg</title></channel></rss>', B('lhv'), MT0), []);
+  // zelfde guid twee keer = één bericht; zelfde id over rondes heen
+  const dubbel = PS._t.medischItems(mrss([{ titel: 'Een', ms: MT0 - 1000, guid: 'g1' }, { titel: 'Twee', ms: MT0 - 2000, guid: 'g1' }]), B('lhv'), MT0);
+  assert.strictEqual(dubbel.length, 1);
+  assert.strictEqual(PS._t.medischItems(mrss([{ titel: 'Een', ms: MT0 - 1000, guid: 'g1' }]), B('lhv'), MT0 + DAG)[0].id, dubbel[0].id);
+});
+
+test('wv3154 zonder registerzin: wel opgehalen voor Davids proef in de app, niet op de tv en niet aan te zetten (kruisproef)', async () => {
+  for (const [w, o] of [['oude tekst', { tekst: NIEUW }], ['NOS-tekst', { tekst: MET_NIEUWS }]]) {
+    const f = medOpzet(o);
+    await f.m.tik();
+    assert.strictEqual(f.tel.medisch, 3, w + ': drie bronnen opgehaald');
+    assert.doesNotMatch(html(f.D), /paneel med|Medisch nieuws|Belangrijk|Proefbericht|Proefsubsidie/, w + ': niet op de tv');
+    const st = await f.m.appStand();
+    const md = st.schermen.find((x) => x.id === PS.MEDISCH_ID), bl = st.schermen.find((x) => x.id === PS.BELANGRIJK_ID);
+    assert.deepStrictEqual([md.proef, md.aan, bl.proef, bl.aan], [true, false, true, false], w);
+    assert.match(md.html, /Proefbericht NHG over duurzaam werken/); assert.match(bl.html, /Proefsubsidie voor opleiden/);
+    assert.ok(md.berichten.length > 0 && bl.berichten.length > 0);
+    assert.strictEqual(st.schermen[0].looptijd_s, null, 'hoofdscherm staat er de hele tijd');
+    assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.MEDISCH_ID, aan: true } })).status, 409, w);
+    assert.strictEqual(f.m.info().medisch.mag, false);
+  }
+  // zonder basisrij: niets ophalen, niets in de app
+  const g = medOpzet({ aan: false }); await g.m.tik();
+  assert.strictEqual(g.tel.medisch, 0); assert.ok(!(await g.m.appStand()).schermen.some((x) => x.id === PS.MEDISCH_ID));
+});
+
+test('wv3154 met registerzin: Medisch nieuws (3 per blad, nieuwste eerst) en Belangrijk (LHV/NHG volgens de regel) op de tv; alleen kop, zinnen, bron, datum', async () => {
+  const f = medOpzet();
+  await f.m.tik();
+  const h = html(f.D), mn = medPaneel(h, 'Medisch nieuws'), bl = medPaneel(h, 'Belangrijk');
+  assert.ok(mn && bl);
+  assert.deepStrictEqual(koppen(mn), ['Proefbericht NHG over duurzaam werken', 'Proefonderzoek naar griepprik bij ouderen', 'Oproep aan praktijken: proefvaccinatie registreren', 'LHV-proefbericht over regeldruk',
+    'Altijd toegang tot de NHG-Richtlijnen in de proefapp', 'LHV-proefbericht over het blad']);
+  assert.strictEqual((mn.match(/class="blad/g) || []).length, 2); assert.match(mn, /<div class="blad aan">/); assert.match(mn, /2 pagina's/);
+  assert.deepStrictEqual(koppen(bl), ['Proefsubsidie voor opleiden van medewerkers', 'Herziene NHG-Standaard Proefklacht verschenen', 'Nieuwe proefpassen: controleer de vervaldata']);
+  assert.match(bl, /blijft staan tot 7 dec/, 'subsidie: 21 dagen na 16-11');
+  assert.match(mn, /<span class="chip a">NHG<\/span><span>16 nov<\/span>/); assert.match(mn, /data-s="25"/);
+  assert.match(mn, /Eerste proefzin over het bericht\. Tweede proefzin met meer uitleg\./);
+  assert.doesNotMatch(h, /Volledige tekst|voorbeeld\.invalid|Derde zin|thuisbatterijen|lang geleden|toekomst|<img/);
+  assert.ok(h.indexOf('Medisch nieuws') < h.indexOf('<h1>Belangrijk'));
+  const i = f.m.info().medisch;
+  assert.deepStrictEqual([i.mag, i.op_tv, i.bronnen.nhg.n, i.bronnen.rivm.n], [true, { nieuws: 6, belangrijk: 3 }, 3, 2]);
+  assert.doesNotMatch(JSON.stringify(f.m.info()), /Proef/, '/health: alleen aantallen');
+  const st = await f.m.appStand();
+  assert.strictEqual(st.schermen.find((x) => x.id === PS.MEDISCH_ID).aan, true); assert.strictEqual(st.schermen[0].looptijd_s, 30);
+});
+
+test('wv3154 ophalen hooguit elk uur; een bron die faalt houdt zijn berichten; nieuwe berichten = nieuwe envelop', async () => {
+  const f = medOpzet();
+  await f.m.tik(); assert.strictEqual(f.tel.medisch, 3);
+  for (const k of [5, 30, 55]) { f.zet(MT0 + k * 60000); await f.m.tik(); }
+  assert.strictEqual(f.tel.medisch, 3, 'niet vaker dan elk uur');
+  f.feeds.lhv = () => { throw new Error('weg'); };
+  f.feeds.nhg = () => mrss([{ titel: 'Vers proefbericht NHG van vanmiddag', ms: MT0 + 50 * 60000 }].concat(MED_NHG()));
+  const v0 = f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr;
+  f.zet(MT0 + 60 * 60000); await f.m.tik();
+  assert.strictEqual(f.tel.medisch, 6);
+  const h = html(f.D);
+  assert.strictEqual(koppen(medPaneel(h, 'Medisch nieuws'))[0], 'Vers proefbericht NHG van vanmiddag');
+  assert.match(h, /LHV-proefbericht over regeldruk/, 'LHV faalde: bewaarde berichten blijven');
+  assert.ok(f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr > v0);
+  const b = f.m.info().medisch.bronnen;
+  assert.deepStrictEqual([b.lhv.ok, b.lhv.fout, b.nhg.ok, b.nhg.fout], [new Date(MT0).toISOString(), new Date(MT0 + 3600000).toISOString(), new Date(MT0 + 3600000).toISOString(), null]);
+  // timeout: hangt niet
+  const g = medOpzet({ nieuwsTimeoutMs: 50 }); g.feeds.rivm = () => new Promise(() => {});
+  const t0 = Date.now(); await g.m.tik(); assert.ok(Date.now() - t0 < 2000); assert.ok(medPaneel(html(g.D), 'Medisch nieuws'));
+});
+
+test('wv3154 vasthouden: Belangrijk vervalt 21 dagen na het bericht; berichten > 30 dagen weg; zin weg = volgende tik zonder medisch nieuws', async () => {
+  const f = medOpzet();
+  await f.m.tik();
+  f.zet(MT0 + 10 * DAG); await f.m.tik();
+  assert.ok(!koppen(medPaneel(html(f.D), 'Belangrijk')).includes('Nieuwe proefpassen: controleer de vervaldata'), 'na 21 dagen (bericht van 4-11) van Belangrijk');
+  assert.ok(koppen(medPaneel(html(f.D), 'Medisch nieuws')).includes('Nieuwe proefpassen: controleer de vervaldata'), 'daarna gewoon bericht tot 30 dagen');
+  f.zet(MT0 + 19 * DAG); await f.m.tik();
+  assert.ok(!/Nieuwe proefpassen/.test(html(f.D)), 'ouder dan 30 dagen = weg');
+  // zin weg: meteen bij de volgende tik
+  f.zetReg(true, NIEUW); f.zet(MT0 + 19 * DAG + 5 * 60000); await f.m.tik();
+  assert.doesNotMatch(html(f.D), /paneel med/);
+  // publiceer zonder verzamelen controleert zelf
+  const g = medOpzet(); await g.m.tik(); g.zetReg(true, NIEUW); await g.m.publiceer(); assert.doesNotMatch(html(g.D), /paneel med/);
+});
+
+test('wv3154 David houdt vast of laat los (zonder nieuwe tekst); los blijft los na het volgende ophalen; uit-knop per pagina', async () => {
+  const f = medOpzet();
+  await f.m.tik();
+  const st = await f.m.appStand();
+  const md = st.schermen.find((x) => x.id === PS.MEDISCH_ID), bl = st.schermen.find((x) => x.id === PS.BELANGRIJK_ID);
+  const blad = md.berichten.find((x) => x.kop === 'LHV-proefbericht over het blad'), sub = bl.berichten.find((x) => /Proefsubsidie/.test(x.kop));
+  assert.deepStrictEqual([blad.vast, sub.vast, sub.door, sub.bron], [false, true, 'regel', 'LHV']);
+  const zet = (id, vast) => f.m.app({ pad: '/app/personeelsscherm/medisch', methode: 'POST', body: { id, vast } });
+  const v0 = f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr;
+  f.zet(MT0 + 1000);
+  assert.strictEqual((await zet(blad.id, true)).status, 200);
+  assert.ok(f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr > v0, 'meteen een nieuwe envelop');
+  let h = html(f.D);
+  assert.strictEqual(koppen(medPaneel(h, 'Belangrijk'))[0], 'LHV-proefbericht over het blad', 'door David vastgezet = bovenaan');
+  assert.match(medPaneel(h, 'Belangrijk'), /blijft staan tot 14 dec/);
+  assert.ok(!koppen(medPaneel(h, 'Medisch nieuws')).includes('LHV-proefbericht over het blad'), 'niet dubbel');
+  assert.strictEqual((await zet(sub.id, false)).status, 200);
+  h = html(f.D); assert.ok(!koppen(medPaneel(h, 'Belangrijk')).some((k) => /Proefsubsidie/.test(k)));
+  f.zet(MT0 + 2 * 3600000); await f.m.tik();
+  assert.ok(!koppen(medPaneel(html(f.D), 'Belangrijk')).some((k) => /Proefsubsidie/.test(k)), 'los blijft los, ook al past de regel');
+  assert.ok(koppen(medPaneel(html(f.D), 'Medisch nieuws')).some((k) => /Proefsubsidie/.test(k)));
+  // grenzen
+  assert.strictEqual((await zet('xyz', true)).status, 400); assert.strictEqual((await zet('0123456789abcdef', true)).status, 404);
+  // uit-knop: alleen die pagina weg
+  assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.MEDISCH_ID, aan: false } })).status, 200);
+  h = html(f.D); assert.strictEqual(medPaneel(h, 'Medisch nieuws'), null); assert.ok(medPaneel(h, 'Belangrijk'));
+  f.zet(MT0 + 4 * 3600000); await f.m.tik(); assert.strictEqual(medPaneel(html(f.D), 'Medisch nieuws'), null, 'blijft uit');
+  assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.MEDISCH_ID, aan: true } })).status, 200);
+  assert.ok(medPaneel(html(f.D), 'Medisch nieuws'), 'weer aan');
+  // vóór de Ja mag vasthouden ook (alleen proef), maar er komt niets op de tv
+  const g = medOpzet({ tekst: NIEUW }); await g.m.tik();
+  const id = (await g.m.appStand()).schermen.find((x) => x.id === PS.MEDISCH_ID).berichten[0].id;
+  assert.strictEqual((await g.m.app({ pad: '/app/personeelsscherm/medisch', methode: 'POST', body: { id, vast: true } })).status, 200);
+  assert.doesNotMatch(html(g.D), /paneel med/);
+});
+
+test('wv3154 rotatie: elke keer dat Medisch nieuws langskomt het volgende blad (op de wandklok); hoofdscherm, NOS en info schuiven goed op', () => {
+  const vm = require('vm');
+  const it = (n, pre) => Array.from({ length: n }, (_, k) => ({ bron: 'nhg', kop: pre + ' ' + (k + 1), tekst: '', ms: MT0 - k * 60000 }));
+  const doc = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + DAG, leeg: false, inhoud: { agenda: [], medisch: { nieuws: it(7, 'Bericht'), belangrijk: it(1, 'Vast') },
+    info: [Object.assign({ set: '2026-11-13' }, SET.schermen[0])] } });
+  const scr = /<script>([\s\S]*?)<\/script>/.exec(doc)[1];
+  const secties = [...doc.matchAll(/<section class="paneel([^"]*)" data-s="(\d+)"[^>]*>([\s\S]*?)<\/section>/g)];
+  assert.deepStrictEqual(secties.map((m) => m[2]), ['30', '25', '25', '20']);
+  const mk = (cls0) => { const cls = new Set(cls0.split(' ').filter(Boolean)); return { cls, classList: { remove: (c) => cls.delete(c), toggle: (c, on) => (on ? cls.add(c) : cls.delete(c)) } }; };
+  const panelen = secties.map((m) => {
+    const p = mk('paneel' + m[1]);
+    p.bladen = [...m[3].matchAll(/<div class="blad( aan)?">/g)].map((b) => mk('blad' + (b[1] || '')));
+    return Object.assign(p, { getAttribute: (k) => (k === 'data-s' ? m[2] : null), querySelectorAll: () => p.bladen });
+  });
+  assert.strictEqual(panelen[1].bladen.length, 3);
+  const op = (ms) => {
+    const ctx = { document: { getElementById: () => null, querySelectorAll: () => panelen, body: {} }, innerWidth: 1920, innerHeight: 1080, addEventListener() {}, setInterval() {},
+      Date: class extends Date { constructor(...a) { super(...(a.length ? a : [ms])); } } };
+    vm.runInNewContext(scr, ctx);
+    return { zicht: panelen.map((p) => p.cls.has('aan')), blad: panelen[1].bladen.findIndex((b) => b.cls.has('aan')) };
+  };
+  const S = 100000, b = Math.floor(MT0 / S) * S, c = Math.floor(MT0 / S);
+  assert.deepStrictEqual(op(b + 5000).zicht, [true, false, false, false]);
+  assert.deepStrictEqual(op(b + 40000).zicht, [false, true, false, false]);
+  assert.deepStrictEqual(op(b + 60000).zicht, [false, false, true, false]);
+  assert.deepStrictEqual(op(b + 85000).zicht, [false, false, false, true]);
+  const bladen = [0, 1, 2, 3].map((k) => op(b + k * S + 40000).blad);
+  assert.deepStrictEqual(bladen, [0, 1, 2, 0].map((k) => (k + c) % 3), 'elke ronde het volgende blad');
+  // toon: index in de app; info staat na de twee medische panelen
+  const t3 = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + DAG, leeg: false, inhoud: { agenda: [], medisch: { nieuws: it(2, 'B'), belangrijk: [] }, info: [Object.assign({ set: '2026-11-13' }, SET.schermen[0])] }, toon: 2 });
+  assert.match(t3, /<section class="paneel info aan"/); assert.doesNotMatch(t3, /Belangrijk/, 'lege Belangrijk niet op de tv');
+});
+
+test('wv3154 kop en samenvatting altijd ge-escaped; app-voorbeeld zonder berichten = uitlegregel', () => {
+  const h = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 1, leeg: false, inhoud: { agenda: [], medisch: { nieuws: [{ bron: 'lhv', kop: 'Kop <b>&"', tekst: '<script>x</script>', ms: MT0 }], belangrijk: [] } } });
+  assert.match(h, /Kop &lt;b&gt;&amp;&quot;/); assert.match(h, /&lt;script&gt;x&lt;\/script&gt;/);
+  const l = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 1, leeg: false, inhoud: { agenda: [], medisch: { nieuws: [], belangrijk: null, leeg_tonen: true } }, toon: 1 });
+  assert.match(l, /Nog geen berichten/);
 });
