@@ -4273,7 +4273,7 @@ function handleRequest(req, res) {
       bewaker: bewakerInfo(),
       // wv3124: schijfdrukmeting per minuut (schijfdruk.js): laatste minuut, piek 24 u met tijdstip; ring onder scripts-staat/schijfdruk
       schijfdruk: schijfdrukStand,
-      promedico_agenda: promedicoAgenda ? Object.assign({}, promedicoAgenda.health(), { app: typeof promedicoAppInfo === 'function' ? promedicoAppInfo() : { aan: false } }) : null,   // wv3132; wv3143: .app = Calendar-laag (laatste {op, dagen, ms}, geen tekst)
+      promedico_agenda: promedicoAgenda ? Object.assign({}, promedicoAgenda.health(), { app: typeof promedicoAppInfo === 'function' ? promedicoAppInfo() : { aan: false }, botsingen: typeof promedicoBotsingenInfo === 'function' ? promedicoBotsingenInfo() : { aan: false } }) : null,   // wv3132; wv3143: .app = Calendar-laag (laatste {op, dagen, ms}, geen tekst)
       // wv698: argv-detector (sleutelwaarden in /proc/*/cmdline); treffers_24u > 0 = er lekt iets, zie de box
       detector: argvDetInfo(),
       // wv715: de socev-loper (smalle gesprekken als uid 1002): stand, bereikbaar (ping elke minuut), lopend, fouten
@@ -20796,6 +20796,12 @@ const nachtketen = (function () {
         return uitwijkCred.ronde(ctx);
       } },
       { naam: 'ovis-agenda', start_na: [3, 30], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisAgenda) },
+      // wv3145 (Promedico-agenda fase 2): ná de Google-spiegel (ook na een fout daarvan: dan niet-beoordeelbaar-pagina's en geen rij) de
+      // botsingenpagina's + hooguit één ochtend_buffer-rij bron promedico; een fout meldt de keten (meldtZelf false)
+      { naam: 'promedico-botsingen', start_na: [3, 35], na: ['ovis-agenda'], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: async function (ctx) {
+        if (!promedicoBotsingen) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        return promedicoBotsingen.doe({ ams: ctx.ams });
+      } },
       { naam: 'ovis-deadlines', start_na: [3, 45], na: ['ovis-agenda'], limiet_min: 5, pogingen: 2, meldtZelf: true,
         voorwaarde: nachtN8nVoorwaarde([NACHT_N8N.nachtconsolidatie], [3, 55], false), doe: nachtDagStap(ovisDeadlines) },
       { naam: 'secondbrain-kaart', start_na: [3, 50], limiet_min: 5, pogingen: 2, inProces: true, doe: async function (ctx) {
@@ -22362,6 +22368,41 @@ async function appPromedico(req, res, a, route) {
   return appStuur(res, u.status, u.body);
 }
 // ── einde Promedico-laag ──
+// ── Promedico-botsingen (wv3145) ──
+// wv3145 (15-11-2026, fase 2 "Agenda-Wachter", bouwplan "Promedico-agenda meelezen" § F2.1): nachtketenstap promedico-botsingen. Rekent
+// met promedico-betekenis.js de Promedico-stand (staat.json, alleen-lezend) tegen de Google-spiegel van vannacht (David + Gezin, vandaag
+// t/m + 13), schrijft drie pagina's "<week> - botsingen" (alleen labels, tijden, zekerheid; nooit HIS- of Google-tekst) en zet zekere
+// botsingen (a patiënt geboekt / b spreekuur open) zelf in één rij ochtend_buffer bron promedico (briefing 07:00: "Overige bron").
+// Register nooit-twee-keer: PROMEDICO_AGENDA_DIR/gemeld.json (eerst buffer, dan register). /health.promedico_agenda.botsingen = aantallen.
+const PB_FILTER = { type: 'and', filters: [{ columnName: 'bron', condition: 'eq', value: 'promedico' }] };
+async function promedicoRijZet(datum, tekst) {
+  const body = { filter: PB_FILTER, data: { bron: 'promedico', datum: datum, tekst: tekst }, returnData: true };
+  const poging = function () { return appN8nZend('POST', '/data-tables/' + APP_MELD_TABEL + '/rows/upsert', body); };
+  await poging().catch(function () { return new Promise(function (ok) { setTimeout(ok, 2000); }).then(poging); });
+  const j = await appN8nZend('GET', '/data-tables/' + APP_MELD_TABEL + '/rows?limit=5&filter=' + encodeURIComponent(JSON.stringify(PB_FILTER)));
+  const l = (Array.isArray(j && j.data) ? j.data : []).filter(function (r) { return r && r.bron === 'promedico' && r.datum === datum && r.tekst === tekst; });
+  if (!l.length) throw new Error('rij na het schrijven niet teruggelezen');
+}
+const promedicoBotsingen = (function () {
+  const p = path.join(__dirname, 'promedico-botsingen.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const dir = process.env.PROMEDICO_AGENDA_DIR || '/opt/data/promedico-agenda';
+    return require(p).maak({ vault: VAULT, registerPad: path.join(dir, 'gemeld.json'),
+      leesStaat: function () { try { return fs.readFileSync(path.join(dir, 'staat.json'), 'utf8'); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } },
+      tijdlijn: function (van, tot) { return appSbRpc('sb_kalender_tijdlijn', { p_van: van, p_tot: tot }, 20000); },
+      spiegelStempel: function (datum) {
+        try { const s = JSON.parse(fs.readFileSync(path.join(NACHTKETEN_DIR, datum + '.json'), 'utf8')); return s && s.stappen && s.stappen['ovis-agenda'] || null; } catch (e) { return null; }
+      },
+      bufferZet: promedicoRijZet,
+      vv: { lees: function (q) { return VV().lees(q, 'utf8', { max: 400000 }); }, schrijf: function (q, inhoud) { return VV().schrijf(q, inhoud); },
+        wegAlsGelijk: function (q, sha) { return VV().wegAlsGelijk(q, sha); } },
+      lijst: function (m) { return fs.readdirSync(m); },
+      log: function (x) { schrijfLog(nu() + ' promedico-botsingen ' + velden(x)); } });
+  } catch (e) { logError('promedico-botsingen', e); return null; }
+})();
+function promedicoBotsingenInfo() { if (!promedicoBotsingen) return { aan: false }; try { return promedicoBotsingen.info(); } catch (e) { return { aan: true, fout: true }; } }
+// ── einde Promedico-botsingen ──
 // ── OVIS GHAWA (wv2877, 10-11-2026; plan vault "01_Ontwikkeling/OVIS GHAWA - plan naar een 8 (Fable 5.2, 10-11-2026)" § 8 fase 1) ──
 // Apps › GHAWA: de cijfers van de bouw in Sukuta (ECG) en van Stichting GHAWA, uit de eigen databank /opt/data/ghawa/ghawa.sqlite (één keer
 // gevuld uit het overdrachtsbestand, datastand 6-10-2026). ghawa.js rekent bij elke vraag na (dalasi leidend, nog open per regel, verrekening
