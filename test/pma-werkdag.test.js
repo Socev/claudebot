@@ -2,7 +2,7 @@
 // wv3047: OVIS PMA fase 2 — de werkdagregels (plan § 3) als toetslijst. De gevallen komen uit het oude Ovis-PMA-implementatieplan (§ 5.3 en
 // § 8: roosterdag met klein consult, roosterdag zonder declaraties, invaldag boven/onder de drempel, weekend, om-de-week, vakantieweek,
 // inschrijfgeld, roosterresolutie grens-exact), uitgebreid met de lagen van het nieuwe plan (handrooster > Nmbrs per weekdag > Nmbrs per week
-// met declaratiepatroon > alleen patroon), feestdagen, dienstverband en rolperiodes: samen 30 gevallen (wv3054: 34; wv3053: 37, patroon wint van afwijkende Nmbrs-dagen). Alles verzonnen.
+// met declaratiepatroon > alleen patroon), feestdagen, dienstverband en rolperiodes: samen 30 gevallen (wv3054: 34; wv3053: 37, patroon wint van afwijkende Nmbrs-dagen; wv3111: 42, praktijkmanager en weekuren per dag). Alles verzonnen.
 // Daarna de routes van fase 2 op een verzonnen export (koppelen, voorstel uit verzonnen Nmbrs en dossiers, rollen, handrooster, kengetallen).
 const test = require('node:test');
 const assert = require('node:assert');
@@ -204,8 +204,31 @@ geval('34 groep (verzamelnaam): nooit afwezig, declaratiedagen blijven gewerkt',
   const u = R({ groep: true, dagen: vaste([0, 1, 3], { '2026-09-08': null }) });
   assert.deepStrictEqual([op(u, '2026-09-08'), op(u, '2026-09-07').soort, u.some((x) => x.soort === 'afwezig')], [undefined, 'gewerkt', false]);
 });
+// wv3111: praktijkmanager (David 15-11-2026: vaste dagen ma 9-17 en do 8-17, incidenteel andere dagen; declareert zelden)
+const PM = { hand: [{ ingang: '2026-01-01', uren: [8, 0, 0, 9, 0, 0, 0] }], rollen: [{ rol: 'praktijkmanager', van: '2026-01-01', tot: null }] };
+geval('38 praktijkmanager: een roosterdag zonder declaratie telt als gewerkt (met de roosteruren), nooit afwezig', () => {
+  const u = R(Object.assign({ dagen: vaste([], { '2026-09-10': tel(1) }) }, PM));
+  assert.deepStrictEqual([op(u, '2026-09-07').soort, op(u, '2026-09-07').uren, op(u, '2026-09-10').uren, u.some((x) => x.soort === 'afwezig')], ['gewerkt', 8, 9, false]);
+});
+geval('39 praktijkmanager: een andere doordeweekse dag met één declaratie = extra dag (invaldag), zonder activiteit geen rij', () => {
+  const u = R(Object.assign({ dagen: vaste([], { '2026-09-09': tel(1) }) }, PM));
+  assert.deepStrictEqual([op(u, '2026-09-09').soort, op(u, '2026-09-08'), op(u, '2026-09-11')], ['invaldag', undefined, undefined]);
+});
+geval('40 praktijkmanager zonder rooster: gewone regels (de uitzondering geldt alleen met een rooster)', () => {
+  const u = R({ dagen: vaste([0, 3], { '2026-09-17': null }), rollen: PM.rollen });
+  assert.strictEqual(op(u, '2026-09-17').soort, 'afwezig');
+});
+geval('41 andere rol met hetzelfde rooster: een lege roosterdag blijft afwezig', () => {
+  const u = R({ dagen: vaste([], { '2026-09-10': tel(1) }), hand: PM.hand, rollen: [{ rol: 'assistente', van: '2026-01-01', tot: null }] });
+  assert.strictEqual(op(u, '2026-09-07').soort, 'afwezig');
+});
+geval('42 Nmbrs-uren per week over minder declaratiedagen dan Nmbrs-dagen: per dag hooguit weekuren / dagen per week (wv3111)', () => {
+  // 38 uur, 5 dagen in Nmbrs; declaraties alleen ma, di, do → 7,6 uur per gewerkte dag (niet 12,67)
+  const u = R({ dagen: vaste([0, 1, 3]), nmbrs: { rooster: [{ begin: '2025-01-01', uren: 38, dagen_per_week: 5 }] } });
+  assert.deepStrictEqual([op(u, '2026-09-07').uren, op(u, '2026-09-07').bron], [7.6, 'nmbrs-week']);
+});
 for (const [naam, f] of GEVALLEN) test('werkdag ' + naam, f);
-test('de toetslijst heeft 37 gevallen', () => assert.strictEqual(GEVALLEN.length, 37));
+test('de toetslijst heeft 42 gevallen', () => assert.strictEqual(GEVALLEN.length, 42));
 
 // ── namen en rollen ──
 test('naam ontleden en vergelijken (voorletter + achternaam, tussenvoegsel, dubbele naam)', () => {
@@ -214,7 +237,8 @@ test('naam ontleden en vergelijken (voorletter + achternaam, tussenvoegsel, dubb
   assert.strictEqual(P.lijkt(P.ontleedNaam('B. de Proef'), P.ontleedNaam('Anke de Proef')), 0);
   assert.strictEqual(P.lijkt(P.ontleedNaam('Anke Proef'), P.ontleedNaam('Bea Proef')), 0);
   assert.deepStrictEqual(['Doktersassistente', 'POH-S', 'PO GGZ', 'Huisarts in opleiding', 'Praktijkmanager', 'Waarnemend huisarts'].map(P.rolUit),
-    ['assistente', 'poh-s', 'poh-ggz', 'aios', 'overig', 'waarnemer']);
+    ['assistente', 'poh-s', 'poh-ggz', 'aios', 'praktijkmanager', 'waarnemer']);
+  assert.deepStrictEqual(['Praktijkbegeleidster', 'Medewerker'].map(P.rolUit), ['praktijkmanager', 'overig']);   // wv3111
 });
 
 // ── routes op een verzonnen export ──
@@ -252,10 +276,15 @@ test('koppelen, rollen, handrooster → werkdagen; inschrijfgeld telt nooit; sch
   assert.strictEqual(kq.status, 200);
   // zelfde Nmbrs-medewerker nog eens = dezelfde persoon
   assert.strictEqual(post('koppel', { praktijk: 'TG', naam: 'B. Verzonnen', nieuw: { naam: 'x y', nmbrs: NEP.medewerkers[0].id } }).body.persoon, 1);
-  // review MOET 1: B werkt via POT; zijn Nmbrs-rooster (8 uur, 1 dag) geldt niet bij TG → alleen het patroon, uren onbekend
+  // wv3111 (David: POT-uren uit Nmbrs wél overnemen): B werkt via POT en heeft alleen bij TG een rol → zijn Nmbrs-uren (8 per week) gelden bij TG
   const kb = post('koppel', { praktijk: 'TG', naam: 'B. Verzonnen', nieuw: { naam: 'Bram Verzonnen', nmbrs: NEP.medewerkers[1].id, dienst: 'pot' }, rollen: [{ rol: 'poh-ggz', van: '2025-01-01' }] });
   const wb = g().werkdagen.TG[String(kb.body.persoon)];
-  assert.deepStrictEqual(wb.find((x) => x[0] === '2026-09-09').slice(1, 5), ['gewerkt', null, 'poh-ggz', 'patroon']);
+  assert.deepStrictEqual(wb.find((x) => x[0] === '2026-09-09').slice(1, 5), ['gewerkt', 8, 'poh-ggz', 'nmbrs-week']);
+  // review MOET 1 blijft voor wie bij twee praktijken een rol heeft: dan geen POT-uren (anders telt hetzelfde rooster dubbel), alleen het patroon
+  const rgh = post('rol', { persoon: kb.body.persoon, praktijk: 'GH', rol: 'poh-ggz', van: '2025-01-01' });
+  assert.strictEqual(rgh.status, 200);
+  assert.deepStrictEqual(g().werkdagen.TG[String(kb.body.persoon)].find((x) => x[0] === '2026-09-09').slice(1, 5), ['gewerkt', null, 'poh-ggz', 'patroon']);
+  assert.strictEqual(post('rol', { id: rgh.body.id, weg: true }).status, 200);
   assert.strictEqual(post('koppel', { praktijk: 'TG', naam: 'B. Verzonnen', los: true }).status, 200);
   // onzin
   assert.strictEqual(post('koppel', { praktijk: 'TG', naam: 'Bestaat Niet', persoon: 1 }).status, 404);
@@ -311,4 +340,23 @@ test('zonder Nmbrs of dossiers (personeel = null) werkt het scherm gewoon', () =
   const u = m.app({ methode: 'GET', pad: '/app/pma/personeel' });
   assert.strictEqual(u.status, 200);
   assert.ok(u.body.registreerders.some((x) => x.voorstel));
+});
+
+test('wv3111: een naam negeren — geen voorstel, niet in de werkdagen, terug te halen met los', () => {
+  const m = P.maak({ map: tmp(), personeel: () => NEP });
+  lees(m, exportPersoneel());
+  const post = (wat, body) => m.app({ methode: 'POST', pad: '/app/pma/' + wat, body });
+  const g = () => m.app({ methode: 'GET', pad: '/app/pma/personeel' }).body;
+  const naam = 'A. Proefsen';
+  const k = post('koppel', { praktijk: 'TG', naam, nieuw: { naam: 'Anke Proefsen', nmbrs: NEP.medewerkers[0].id, dienst: 'loondienst' }, rollen: [{ rol: 'assistente', van: '2024-03-01' }] });
+  assert.ok(g().werkdagen.TG[String(k.body.persoon)].some((x) => x[5] > 0));
+  assert.strictEqual(post('koppel', { praktijk: 'TG', naam, negeer: true }).status, 200);
+  let b = g(), r = b.registreerders.find((x) => x.naam === naam);
+  assert.deepStrictEqual([r.persoon, r.bevestigd, !!r.negeer, r.voorstel], [null, null, true, undefined]);
+  assert.ok(!(b.werkdagen.TG[String(k.body.persoon)] || []).some((x) => x[5] > 0), 'de declaraties van een genegeerde naam tellen niet bij de persoon');
+  assert.strictEqual(post('koppel', { praktijk: 'TG', naam, los: true }).status, 200);
+  r = g().registreerders.find((x) => x.naam === naam);
+  assert.deepStrictEqual([r.negeer, !!r.voorstel], [null, true]);
+  // de lijst rollen kent de praktijkmanager (geen arts)
+  assert.deepStrictEqual(g().rollen.find((x) => x.id === 'praktijkmanager'), { id: 'praktijkmanager', naam: 'Praktijkmanager', arts: false });
 });

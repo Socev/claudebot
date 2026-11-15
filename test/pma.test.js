@@ -391,7 +391,7 @@ test('wv3045 databank van schema 1 (zonder kolom met_patient) wordt bijgewerkt, 
   const o = m2.app({ methode: 'GET', pad: '/app/pma' });
   assert.strictEqual(o.status, 200, JSON.stringify(o.body));
   assert.strictEqual(o.body.exports[0].met_patient, true);
-  assert.strictEqual(m2.info().schema, 3);   // wv3047: schema 3 (persoon, rol_periode, rooster_hand, registreerder.bevestigd)
+  assert.strictEqual(m2.info().schema, 4);   // wv3111: schema 4 (registreerder.negeer)
   assert.strictEqual(m2.app({ methode: 'GET', pad: '/app/pma/personeel' }).status, 200);   // wv3047: ook na bijwerken
   const { c } = inlees(m2, zonder(M.exportB()));
   assert.strictEqual(c.body.samenvatting.dagen.andere_vorm, 12);
