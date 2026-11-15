@@ -123,14 +123,14 @@ test('een verzonnen dag: elk gesprek precies één plek, de som klopt, de lijst 
   assert.doesNotMatch(r2.lijst[0].waarom, /ik\+ai@gmail\.com/, 'Davids adres alleen als +achtervoegsel');
 });
 
-test('patiëntpoort: slaat hij aan op onderwerp of afzender, dan geen onderwerp of afzender bewaard (slot); MailMans slotje idem', async () => {
+test('wv3134: slaat de patiëntpoort aan op onderwerp of afzender (of MailMan zag een slotje), dan slot als teken; onderwerp en afzender blijven', async () => {
   const a = ber({ labels: ['UNREAD'], onderwerp: 'Uitslag lab BSN 111222333 geboortedatum 01-02-1950' });
   const b = ber({ labels: ['UNREAD'], onderwerp: 'Gewoon onderwerp' });
   const mm = {}; mm[b.id] = { gezien: true, slot: true };
   const r = await kamer([a, b], { mm }).m.sluitDag(DAG);
   assert.equal(r.lijst.length, 2);
-  for (const x of r.lijst) { assert.equal(x.slot, true); assert.equal(x.onderwerp, ''); assert.equal(x.van, ''); }
-  assert.doesNotMatch(JSON.stringify(r), /111222333|Gewoon onderwerp/);
+  for (const x of r.lijst) { assert.equal(x.slot, true); assert.ok(x.van, 'afzender blijft'); }
+  assert.deepEqual(r.lijst.map(function (x) { return x.onderwerp; }).sort(), ['Gewoon onderwerp', 'Uitslag lab BSN 111222333 geboortedatum 01-02-1950']);
 });
 
 test('onvolledig: luikfout = geen uitkomst; zonder filters = geen uitkomst; melding of te veel pagina\'s = compleet false; pagina\'s worden gevolgd', async () => {
@@ -224,7 +224,7 @@ test('review r1 MOET 1, r3 MOET 1: een onvolledige hercontrole = ok false, bewaa
   assert.equal(s.laatste.ok, false);
 });
 
-test('review MOET 2: filtertekst met een patiëntkenmerk gaat niet mee; bij een slot alleen een algemene reden', async () => {
+test('wv3134 (was review MOET 2): filtertekst met een patiëntkenmerk = slot als teken; het echte waarom blijft staan', async () => {
   const F = [{ id: 'fp', criteria: { subject: 'BSN 111222333 geboortedatum 01-02-1950' }, action: { removeLabelIds: ['INBOX'] } }];
   const m = ber({ labels: ['UNREAD'], onderwerp: 'BSN 111222333 geboortedatum 01-02-1950 gewoon' });
   // eigen kamer met deze filter
@@ -237,8 +237,8 @@ test('review MOET 2: filtertekst met een patiëntkenmerk gaat niet mee; bij een 
   const r = await k.sluitDag(DAG);
   assert.equal(r.lijst.length, 1);
   assert.equal(r.lijst[0].slot, true);
-  assert.equal(r.lijst[0].waarom, 'Een Gmail-filter hield hem buiten je inbox');
-  assert.doesNotMatch(JSON.stringify(r), /111222333/);
+  assert.match(r.lijst[0].waarom, /111222333/, 'het waarom wordt niet meer vervangen door een algemene reden');
+  assert.equal(r.lijst[0].onderwerp, 'BSN 111222333 geboortedatum 01-02-1950 gewoon');
 });
 
 test('review MOET 3: een tik van David tijdens de ronde (Laat zo) blijft staan', async () => {

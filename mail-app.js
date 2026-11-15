@@ -8,8 +8,11 @@
  * WAT. De lijst ís de Gmail-inbox (of een andere map, of een zoekvraag in de zoektaal van Gmail): het leesluik (n8n AI - Agenda-Wachter
  * API, acties mail_lijst en mail_gesprek, alleen lezen) levert de koppen; deze module legt er per gesprek hooguit één vlakje over uit wat
  * MailMan, Intake, Facturen en het voorwerk al weten, vertaalt de Gmail-labels naar eigen tekens, en zet de regel bovenaan klaar.
- * Een heel gesprek gaat door de patiëntpoort voordat er één letter naar het scherm gaat; een gesprek met slotje (patiëntmarker of
- * zorgmail bij MailMan, of de poort slaat nu aan) blijft "Open in Gmail".
+ * wv3134 (15-11-2026, David: "Niet filteren in Gmail! … NOOIT filteren"): alles wat alleen David op zijn eigen scherm ziet, toont de App
+ * volledig — gesprek, begin van de tekst, onderwerp, bijlagen — ook bij een gesprek dat mogelijk medisch is (patiëntmarker of zorgmail bij
+ * MailMan, of de patiëntpoort slaat nu aan op het hele gesprek). Zo'n gesprek krijgt alleen het neutrale vlakje "mogelijk medisch" en
+ * slot: true; dat zet uit wat inhoud verder stuurt: Maak todo (Todoist), een label van MailMan (stuurt Intake/Facturen), Naar Facturen/Brain
+ * (mailman.js) en het voorwerk door een model (mailvoorwerk.js heeft zijn eigen poort).
  * GRENZEN. Alleen privé-Gmail (gmail:david). Mailtekst alleen door het geheugen: deze module schrijft niets naar schijf en logt geen
  * inhoud (server.js logt alleen route en aantallen). Naar Facturen / Naar Brain gaan via MailMans keuze-tak (label uit de vaste lijst,
  * bij de volgende ronde). Fase 1b (wv3090): archiveren, terugzetten, gelezen/ongelezen, ster en een label uit MailMans vaste lijst op Davids
@@ -23,7 +26,8 @@ const MAPPEN = ['inbox', 'ster', 'concepten', 'verzonden', 'alle'];
 const DRAAD_RE = /^[0-9a-f]{10,24}$/;
 const PAGINA_RE = /^[0-9A-Za-z_-]{1,200}$/;
 const Q_MAX = 500, TITEL_MAX = 300;
-const RONDE_OUD_MS = 45 * 60000;   // § 3.4: drie rondes van een kwartier gemist = oranje
+const RONDE_OUD_MS = 45 * 60000;
+const TODO_MEDISCH = 'Bij een mail die mogelijk medisch is maakt Socev geen todo (die gaat naar Todoist); maak hem zelf';   // § 3.4: drie rondes van een kwartier gemist = oranje
 
 // ── Vertaaltabel Gmail-label → weergave in OVIS Mail (David 14-11 19:40: "labels als communicatie tussen de Gmail-laag en de OVIS
 // Mail-laag … misschien alle AI/-labels als communicatielabels"). verborgen = nooit als label (de vlakjes en tekens dragen de betekenis);
@@ -77,7 +81,7 @@ function vertaalLabels(ids, kaart) {
 // Hooguit één vlakje per regel (plan § 2.2). l = mailLaag[draad] of undefined; vw = voorwerk.lijst[draad]; kan = Socev ziet een vraag
 // (kandidaat voor voorwerk, zonder het te maken); storing = MailMan las de laatste 45 min niet.
 function vlakVan(l, vw, kan, storing) {
-  if (l && l.slot) return { id: 'slot', tekst: 'niet door AI gelezen', kleur: 'rood' };
+  if (l && l.slot) return { id: 'medisch', tekst: 'mogelijk medisch', kleur: 'grijs' };   // wv3134: neutraal; de inhoud blijft zichtbaar
   if (l && l.app_wacht) return { id: 'onderweg', tekst: l.app_wacht === 'facturen' ? 'Naar Facturen…' : 'Naar Brain…', kleur: 'blauw' };
   if (vw && vw.concept && !vw.in_gmail) return { id: 'antwoord-klaar', tekst: 'Antwoord klaar', kleur: 'blauw' };
   if (vw && vw.in_gmail) return { id: 'concept-gmail', tekst: 'Concept in Gmail', kleur: 'grijs' };
@@ -165,8 +169,7 @@ function maak(io) {
       if (r.fout) continue;
       const l = laag[r.draad];
       r.vlak = vlakVan(l, vw[r.draad], !!kan[r.draad], storing.mailman);
-      r.slot = !!(l && l.slot);
-      if (r.slot) r.snippet = '';
+      r.slot = !!(l && l.slot);   // wv3134: alleen een teken (Socevs knoppen uit); het begin van de tekst blijft staan
       r.socev = l ? { laag: l.laag, reden: l.reden, inbox: l.inbox, zou_weg: !!l.zou_weg } : null;
     }
     const eerste = v.map === 'inbox' && !v.q && !v.pagina;
@@ -181,8 +184,6 @@ function maak(io) {
     if (!DRAAD_RE.test(draad)) return { status: 400, j: { ok: false, fout: 'geen gesprek' } };
     let l = null;
     try { l = (io.mailman.mailLaag([draad]) || {})[draad] || null; } catch (e) { fout('mail-app-laag', e); return { status: 500, j: { ok: false, fout: 'fout op de pod' } }; }
-    const dicht = { status: 403, j: { ok: false, slot: true, link: gmailLink(draad), fout: 'In dit gesprek zag Socev mogelijk patiëntgegevens. Open het in Gmail.' } };
-    if (l && l.slot) return dicht;
     let j;
     try { j = await io.luik({ actie: 'mail_gesprek', draad }); } catch (e) { fout('mail-app-gesprek', e); j = null; }
     if (!isObj(j) || j.fout || !Array.isArray(j.berichten) || String(j.draad || '') !== draad) return { status: 502, j: { ok: false, luik: false, fout: 'Gmail gaf dit gesprek nu niet; probeer het zo opnieuw' } };
@@ -193,18 +194,20 @@ function maak(io) {
         html: typeof b.html === 'string' ? b.html.slice(0, 200000) : '', html_te_groot: b.html_te_groot === true, tekst_elders: b.tekst_elders === true,
         bijlagen: (Array.isArray(b.bijlagen) ? b.bijlagen : []).filter(isObj).map(function (x) { return { naam: str(x.naam, 1000), mime: str(x.mime, 100), grootte: Number(x.grootte) || 0, inline: x.inline === true }; }).filter(function (x) { return x.naam; }) };
     });
-    // Patiëntpoort vóór het scherm: dezelfde poort als MailMan en Intake, op ALLES wat de App toont (review wv3077 MOET 1): per bericht de
-    // platte tekst én de html (zonder opmaak), het begin, elk onderwerp, van/aan/cc, en alle bijlagenamen
-    let p;
-    try {
+    // Patiëntpoort op ALLES wat de App toont (review wv3077 MOET 1): per bericht de platte tekst én de html (zonder opmaak), het begin, elk
+    // onderwerp, van/aan/cc, en alle bijlagenamen. Sinds wv3134 beslist hij niet meer over tonen (David ziet alles), alleen of Socevs
+    // handelingen die inhoud verder sturen (todo, label) mogen: slaat hij aan of faalt hij, dan slot = true.
+    let medisch = !!(l && l.slot);
+    if (!medisch) try {
+      let p;
       const teksten = [];
       for (const b of berichten) {
         for (const t of [b.tekst, zonderHtml(b.html), b.snippet, b.onderwerp, b.van, b.aan, b.cc]) if (t && String(t).trim()) teksten.push(String(t));
       }
       p = io.poort({ teksten, bijlagenamen: [].concat.apply([], berichten.map(function (b) { return b.bijlagen.map(function (x) { return x.naam; }); })),
         onderwerp: berichten.map(function (b) { return b.onderwerp; }).filter(Boolean).join(' | ').slice(0, 2000), leesbaar: true });
-    } catch (e) { fout('mail-app-poort', e); return dicht; }
-    if (!p || p.tegenhouden !== false) return dicht;
+      medisch = !p || p.tegenhouden !== false;
+    } catch (e) { fout('mail-app-poort', e); medisch = true; }
     let vw = null;
     try { vw = io.voorwerkLijst ? (io.voorwerkLijst([draad]) || {})[draad] || null : null; } catch (e) { fout('mail-app-voorwerk', e); }
     let kan = false;
@@ -213,15 +216,15 @@ function maak(io) {
     try { stuk = io.intakeStuk ? io.intakeStuk(draad) : null; } catch (e) { stuk = null; }
     return { status: 200, j: { ok: true, draad, aantal: Number(j.aantal) || berichten.length, berichten, link: gmailLink(draad),
       socev: l ? { laag: l.laag, reden: l.reden, detail: l.detail, inbox: l.inbox, app_wacht: l.app_wacht, zou_weg: !!l.zou_weg, weggezet: !!l.weggezet, bezig: !!l.bezig } : null,
-      vlak: vlakVan(l, vw, kan, false), voorwerk: vw, kent_mailman: !!l, intake_stuk: stuk } };
+      vlak: vlakVan(medisch ? Object.assign({}, l || {}, { slot: true }) : l, vw, kan, false), voorwerk: vw, kent_mailman: !!l, intake_stuk: stuk, slot: medisch } };
   }
   async function bijlage(d) {
     d = isObj(d) ? d : {};
     const draad = String(d.draad || ''), bericht = String(d.bericht || ''), naam = typeof d.naam === 'string' ? d.naam : '';
     if (!DRAAD_RE.test(draad) || !DRAAD_RE.test(bericht) || !naam || naam.length > 1000) return { status: 400, j: { ok: false, fout: 'onbekende bijlage' } };
-    // review wv3077 MOET 2: een bijlage alleen uit een gesprek dat nu door de poort komt, en alleen als bericht én naam bij die draad horen
+    // review wv3077 MOET 2: een bijlage alleen als bericht én naam bij die draad horen (het gesprek wordt daarvoor opnieuw gelezen). Sinds
+    // wv3134 ook bij een gesprek dat mogelijk medisch is: de bijlage gaat alleen naar Davids eigen scherm.
     const g = await gesprek({ draad });
-    if (g.status === 403) return { status: 403, j: { ok: false, slot: true, fout: 'Open deze bijlage in Gmail' } };
     if (g.status !== 200) return g;
     const ber = g.j.berichten.find(function (x) { return x.id === bericht; });
     if (!ber || !ber.bijlagen.some(function (x) { return x.naam === naam; })) return { status: 404, j: { ok: false, fout: 'Deze bijlage hoort niet bij dit gesprek' } };
@@ -235,6 +238,7 @@ function maak(io) {
   async function todoVoorstel(d) {
     const g = await gesprek(d);
     if (g.status !== 200) return g;
+    if (g.j.slot) return { status: 409, j: { ok: false, slot: true, fout: TODO_MEDISCH } };   // wv3134: een todo gaat naar Todoist (buiten de pod)
     const b = g.j.berichten.filter(function (x) { return !x.concept; }).slice(-1)[0] || g.j.berichten.slice(-1)[0] || {};
     let datum = null;
     try {
@@ -251,10 +255,11 @@ function maak(io) {
     if (!titel || titel.length > TITEL_MAX) return { status: 400, j: { ok: false, fout: 'de titel is leeg of te lang (hooguit ' + TITEL_MAX + ' tekens)' } };
     const datum = d.datum == null || d.datum === '' ? null : String(d.datum);
     if (datum && !/^\d{4}-\d{2}-\d{2}$/.test(datum)) return { status: 400, j: { ok: false, fout: 'onbekende datum' } };
-    // review wv3077 MOET 3: dezelfde actuele gesprekscontrole als bij openen (slot bij MailMan of de poort slaat nu aan = geen taak)
+    // review wv3077 MOET 3: dezelfde actuele gesprekscontrole als bij openen (slot bij MailMan of de poort slaat nu aan = geen taak: de titel
+    // gaat naar Todoist, buiten de pod)
     const g = await gesprek({ draad });
-    if (g.status === 403) return { status: 409, j: { ok: false, slot: true, fout: 'Bij deze mail maakt Socev geen todo (mogelijk patiëntgegevens); maak hem zelf' } };
     if (g.status !== 200) return { status: 502, j: { ok: false, fout: 'Gmail gaf dit gesprek nu niet; probeer het zo opnieuw' } };
+    if (g.j.slot) return { status: 409, j: { ok: false, slot: true, fout: TODO_MEDISCH } };
     let p;
     try { p = io.poort({ teksten: [titel], bijlagenamen: [], onderwerp: '', leesbaar: true }); } catch (e) { p = null; }
     if (!p || p.tegenhouden !== false) return { status: 409, j: { ok: false, slot: true, fout: 'In de titel staat mogelijk een patiëntgegeven; pas hem aan' } };
@@ -300,8 +305,8 @@ function maak(io) {
       for (const t of draden) {
         let g;
         try { g = await gesprek({ draad: t }); } catch (e) { fout('mail-app-wijzig-poort', e); g = null; }
-        if (g && g.status === 403) return { status: 409, j: { ok: false, slot: true, fout: 'Bij een gesprek met mogelijk patiëntgegevens zet Socev geen label; doe het in Gmail' } };
         if (!g || g.status !== 200) return { status: 502, j: { ok: false, fout: 'Gmail gaf een gesprek nu niet; er is niets veranderd. Probeer het zo opnieuw' } };
+        if (g.j.slot) return { status: 409, j: { ok: false, slot: true, fout: 'Bij een mail die mogelijk medisch is zet Socev geen label (het stuurt Intake of Facturen); doe het in Gmail' } };
       }
     }
     const gedaan = [], mislukt = [];

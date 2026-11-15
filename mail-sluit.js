@@ -22,7 +22,9 @@
  * twee keer dezelfde). MailMan zag een mail niet die ook niet in spam of prullenbak ligt = storing van de pod: één box-rij per dag.
  * GRENZEN. Niets versturen, niets verwijderen, niets in Gmail veranderen (alleen lezen; terugzetten is Davids tik via mail-app.js).
  * Bewaard (io.lees/io.schrijf, MAILMAN_DIR/sluit.json, 600): per dag tellingen en de lijst met afzender en onderwerp (zoals MailMans
- * besluit, 14 dagen), na de patiëntpoort: slaat die aan, dan geen onderwerp en "Open in Gmail". Geen mailtekst. In logs alleen tellingen.
+ * besluit, 14 dagen). Slaat de patiëntpoort aan (of MailMan zag een marker), dan alleen slot: true als teken "mogelijk medisch"; afzender,
+ * onderwerp en waarom blijven staan (wv3134, David 15-11: "NOOIT filteren"; de lijst gaat alleen naar zijn eigen scherm, de ochtendregel
+ * telt alleen). Geen mailtekst. In logs alleen tellingen.
  * PUUR waar het kan: filterPast, deel, draadUit, middernacht zijn los te toetsen. Alles naar buiten komt van server.js (io).
  */
 
@@ -106,8 +108,6 @@ function draadUit(delen) {
   for (const d of delen) if (!best || VOLGORDE.indexOf(d.soort) < VOLGORDE.indexOf(best.soort)) best = d;
   return best;
 }
-const WAAROM_ALGEMEEN = { filter: 'Een Gmail-filter hield hem buiten je inbox', spam_bekend: 'Gmail zette hem bij spam, maar de afzender ken je',
-  mailman_mist: 'Buiten je inbox en Socev zag hem niet langskomen', onbekend: 'Buiten je inbox, ongelezen; oorzaak niet te zien' };
 function waaromTekst(d, namen) {
   if (d.reden === 'filter') return filterTekst(d.filter, namen);
   if (d.reden === 'spam_bekend') return 'Gmail zette hem bij spam, maar de afzender ken je (contacten of eerder gemaild)';
@@ -195,14 +195,14 @@ function maak(io) {
       if (d.reden === 'mailman_mist') mist++;
       if (d.soort !== 'lijst') continue;
       const b = d.b;
-      // review wv3091 MOET 2: ook de waaromtekst (filtercriteria, labelnamen) gaat door de poort; bij een slot alleen een algemene reden
+      // review wv3091 MOET 2: ook de waaromtekst gaat door de poort; sinds wv3134 alleen als teken (slot), niets weggelaten
       const waarom = waaromTekst(d, h.namen);
       let slot = !!(mm[b.id] && mm[b.id].slot);
       if (!slot) {
         try { const p = io.poort({ teksten: [b.onderwerp, b.van, waarom].filter(Boolean), bijlagenamen: [], onderwerp: b.onderwerp, leesbaar: true }); slot = !p || p.tegenhouden !== false; }
         catch (e) { slot = true; }
       }
-      lijst.push({ draad, id: b.id, dag, reden: d.reden, waarom: slot ? WAAROM_ALGEMEEN[d.reden] : waarom, van: slot ? '' : b.van.slice(0, 200), onderwerp: slot ? '' : b.onderwerp.slice(0, 200),
+      lijst.push({ draad, id: b.id, dag, reden: d.reden, waarom, van: b.van.slice(0, 200), onderwerp: b.onderwerp.slice(0, 200),
         datum: b.datum, slot, spam: d.reden === 'spam_bekend', ongelezen: b.labels.includes('UNREAD') });
     }
     lijst.sort(function (x, y) { return String(y.datum || '').localeCompare(String(x.datum || '')); });
