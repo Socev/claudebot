@@ -312,9 +312,11 @@ function nieuwsGeldig(n, t) {
 // Pagina "Medisch nieuws": hooguit 12 berichten ≤ 30 dagen, nieuwste eerst, 3 per blad; elke keer dat de pagina langskomt het volgende
 // blad (klokscript). Pagina "Belangrijk": berichten van NHG en LHV die aan BELANGRIJK_REGEL voldoen blijven tot 21 dagen na hun datum;
 // David kan in de app een bericht vasthouden (28 dagen vanaf zijn tik) of loslaten. RIVM alleen als het over zorg/gezondheid gaat
-// (ZORG_REGEL; RIVM schrijft ook over stikstof en batterijen). Op de tv alleen als de registertekst MEDISCH_ZIN bevat; daarvoor
-// alleen als proef in de app (Davids eigen voorbeeld).
+// (ZORG_REGEL; RIVM schrijft ook over stikstof en batterijen). Op de tv alleen als registerrij MEDISCH_RIJ (status aan, naast
+// personeelsscherm-vast) MEDISCH_ZIN bevat; daarvoor alleen als proef in de app (Davids eigen voorbeeld).
 const MEDISCH_ZIN = 'Medisch nieuws: berichten van NHG, LHV en RIVM uit hun openbare nieuwsfeeds (alleen kop';
+// eigen registerrij (kort genoeg om op Davids kaart helemaal te passen: de app toont per stap 400 tekens); alleen geldig naast personeelsscherm-vast
+const MEDISCH_RIJ = 'personeelsscherm-medisch';
 const MEDISCH_BRONNEN = [{ id: 'nhg', naam: 'NHG', vast: true }, { id: 'lhv', naam: 'LHV', vast: true }, { id: 'rivm', naam: 'RIVM', vast: false, alleenZorg: true }];
 const MEDISCH_MS = UUR, MEDISCH_OUD_MS = 30 * 24 * UUR, MEDISCH_N = 12, MEDISCH_PER_BLAD = 3, MEDISCH_S = 25, MEDISCH_TEKST_MAX = 220, MEDISCH_BEWAAR = 80;
 const BELANGRIJK_MS = 21 * 24 * UUR, BELANGRIJK_DAVID_MS = 28 * 24 * UUR, BELANGRIJK_N = 6;
@@ -642,13 +644,13 @@ function maak(o) {
   // ── inhoud (fase 1) ──
   const registerPad = o.registerPad || '/opt/data/mk-scripts/toestemmingen.json';
   // registerrij aan? Alleen die bron telt (grondwet, alinea TOESTEMMINGEN); onleesbaar = uit
-  function registerRij() {
-    try { const r = JSON.parse(fs.readFileSync(registerPad, 'utf8')); return (r && Array.isArray(r.rijen) && r.rijen.find((x) => x && x.id === REGISTER_RIJ && x.status === 'aan')) || null; }
+  function registerRij(id = REGISTER_RIJ) {
+    try { const r = JSON.parse(fs.readFileSync(registerPad, 'utf8')); return (r && Array.isArray(r.rijen) && r.rijen.find((x) => x && x.id === id && x.status === 'aan')) || null; }
     catch (e) { return null; }
   }
   function toestemming() { return !!registerRij(); }
   // wv3015: wat de tekst van de rij toestaat (bij verschil geldt de tekst, registerkop)
-  function rijMag(zin) { const r = registerRij(); return !!r && Array.isArray(r.tekst) && r.tekst.map(String).join(' ').replace(/\s+/g, ' ').includes(zin); }
+  function rijMag(zin, id) { const r = registerRij(id); return !!r && Array.isArray(r.tekst) && r.tekst.map(String).join(' ').replace(/\s+/g, ' ').includes(zin); }
   const volleNaamMag = () => rijMag(VOLLE_NAAM_ZIN);
   const infoMag = () => rijMag(INFO_ZIN);
   const vragenPad = o.vragenPad || '/opt/data/socev-app-data/vragen.json';
@@ -700,7 +702,7 @@ function maak(o) {
   }
   // ── medisch nieuws (wv3154) ──
   // ophalen zodra de basisrij aan staat (ook vóór de Ja: dan alleen als proef in de app); op de tv alleen met MEDISCH_ZIN en niet uit
-  const medischMag = () => rijMag(MEDISCH_ZIN);
+  const medischMag = () => toestemming() && rijMag(MEDISCH_ZIN, MEDISCH_RIJ);   // eigen rij, en alleen naast de basisrij
   const medischBinnenUur = (s, t) => !!s.medisch_poging && t >= s.medisch_poging && t - s.medisch_poging < MEDISCH_MS;
   // hooguit elk uur één ronde langs de bronnen (ook een mislukte telt); een bron die faalt houdt zijn bewaarde berichten (gedateerd, ≤ 30 dagen)
   async function medischVers(t) {
@@ -1182,5 +1184,5 @@ function maak(o) {
 }
 
 module.exports = { maak, bouwHtml, D1_SCHEMA, inWerktijd, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
-  VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, MEDISCH_ZIN, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN,
+  VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, MEDISCH_ZIN, MEDISCH_RIJ, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN,
   _t: { medischTekst, medischItems, medischBijwerken, medischBeeld, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, artsenVandaag, jarigen, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };

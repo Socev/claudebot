@@ -851,12 +851,18 @@ const MED_RIVM = () => [
   { titel: 'Oproep aan praktijken: proefvaccinatie registreren', ms: MT0 - 6 * 3600000 },   // past de regel, maar RIVM komt niet op Belangrijk
   { titel: 'Proefbericht uit de toekomst over vaccinatie', ms: MT0 + 3 * 3600000 },
 ];
-const MET_MEDISCH = [NIEUW[0] + ' Medisch nieuws: berichten van NHG, LHV en RIVM uit hun openbare nieuwsfeeds (alleen kop, één à twee zinnen samenvatting, bron en datum).'];
+const MED_TEKST = ['Medisch nieuws: berichten van NHG, LHV en RIVM uit hun openbare nieuwsfeeds (alleen kop, één à twee zinnen van de bron, bron en datum).'];
+// register met basisrij (tekst NIEUW) en de eigen rij personeelsscherm-medisch; med = status van die rij (false = geen rij), medTekst = tekst
 function medOpzet(o = {}) {
   const feeds = { nhg: () => mrss(MED_NHG()), lhv: () => mrss(MED_LHV()), rivm: () => mrss(MED_RIVM()) };
-  const f = fase1(Object.assign({ aan: true, tekst: MET_MEDISCH, medisch: (b) => feeds[b]() }, o));
+  const f = fase1(Object.assign({ aan: true, tekst: NIEUW, medisch: (b) => feeds[b]() }, o));
+  const reg = path.join(f.vault, 'register.json');
+  const zetMed = (med = 'aan', medTekst = MED_TEKST, basis = o.aan === undefined ? true : o.aan, basisTekst = o.tekst || NIEUW) => fs.writeFileSync(reg, JSON.stringify({ rijen: [{ id: 'ander', status: 'aan', tekst: MED_TEKST }]
+    .concat(basis ? [{ id: 'personeelsscherm-vast', status: basis === true ? 'aan' : basis, tekst: basisTekst }] : [])
+    .concat(med ? [{ id: PS.MEDISCH_RIJ, status: med, tekst: medTekst }] : []) }));
+  zetMed(o.med === undefined ? 'aan' : o.med, o.medTekst);
   f.zet(MT0);
-  return Object.assign(f, { feeds });
+  return Object.assign(f, { feeds, zetMed });
 }
 const medPaneel = (h, kop) => { const m = new RegExp('<section class="paneel med[^"]*"[^>]*><div class="ph"><h1>' + kop + '</h1>[\\s\\S]*?</section>').exec(h); return m ? m[0] : null; };
 const koppen = (p) => [...(p || '').matchAll(/<div class="mk">([^<]*)<\/div>/g)].map((m) => m[1]);
@@ -895,8 +901,9 @@ test('wv3154 medischItems: alleen kop, samenvatting, datum; ≤ 30 dagen, niet u
   assert.strictEqual(PS._t.medischItems(mrss([{ titel: 'Een', ms: MT0 - 1000, guid: 'g1' }]), B('lhv'), MT0 + DAG)[0].id, dubbel[0].id);
 });
 
-test('wv3154 zonder registerzin: wel opgehalen voor Davids proef in de app, niet op de tv en niet aan te zetten (kruisproef)', async () => {
-  for (const [w, o] of [['oude tekst', { tekst: NIEUW }], ['NOS-tekst', { tekst: MET_NIEUWS }]]) {
+test('wv3154 zonder eigen registerrij: wel opgehaald voor Davids proef in de app, niet op de tv en niet aan te zetten (kruisproef)', async () => {
+  for (const [w, o] of [['geen medische rij', { med: false }], ['medische rij uit', { med: 'uit' }], ['rij zonder de zin', { medTekst: ['Medisch nieuws: alleen koppen.'] }],
+    ['zin alleen in de basisrij', { med: false, tekst: [NIEUW[0] + ' ' + MED_TEKST[0]] }], ['NOS-tekst', { med: false, tekst: MET_NIEUWS }]]) {
     const f = medOpzet(o);
     await f.m.tik();
     assert.strictEqual(f.tel.medisch, 3, w + ': drie bronnen opgehaald');
@@ -910,9 +917,12 @@ test('wv3154 zonder registerzin: wel opgehalen voor Davids proef in de app, niet
     assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.MEDISCH_ID, aan: true } })).status, 409, w);
     assert.strictEqual(f.m.info().medisch.mag, false);
   }
-  // zonder basisrij: niets ophalen, niets in de app
-  const g = medOpzet({ aan: false }); await g.m.tik();
-  assert.strictEqual(g.tel.medisch, 0); assert.ok(!(await g.m.appStand()).schermen.some((x) => x.id === PS.MEDISCH_ID));
+  // zonder basisrij (ook al staat de medische rij aan): niets ophalen, niets in de app, niets op de tv
+  for (const basis of [false, 'uit']) {
+    const g = medOpzet({ aan: basis }); await g.m.tik();
+    assert.strictEqual(g.tel.medisch, 0); assert.ok(!(await g.m.appStand()).schermen.some((x) => x.id === PS.MEDISCH_ID));
+    assert.strictEqual(g.m.info().medisch.mag, false); await g.m.publiceer(); assert.doesNotMatch(html(g.D), /paneel med/);
+  }
 });
 
 test('wv3154 met registerzin: Medisch nieuws (3 per blad, nieuwste eerst) en Belangrijk (LHV/NHG volgens de regel) op de tv; alleen kop, zinnen, bron, datum', async () => {
@@ -965,11 +975,13 @@ test('wv3154 vasthouden: Belangrijk vervalt 21 dagen na het bericht; berichten >
   assert.ok(koppen(medPaneel(html(f.D), 'Medisch nieuws')).includes('Nieuwe proefpassen: controleer de vervaldata'), 'daarna gewoon bericht tot 30 dagen');
   f.zet(MT0 + 19 * DAG); await f.m.tik();
   assert.ok(!/Nieuwe proefpassen/.test(html(f.D)), 'ouder dan 30 dagen = weg');
-  // zin weg: meteen bij de volgende tik
-  f.zetReg(true, NIEUW); f.zet(MT0 + 19 * DAG + 5 * 60000); await f.m.tik();
+  // rij uit: meteen bij de volgende tik
+  f.zet(MT0 + 15 * DAG); await f.m.tik(); assert.match(html(f.D), /paneel med/);
+  f.zetMed('uit'); f.zet(MT0 + 15 * DAG + 5 * 60000); await f.m.tik();
   assert.doesNotMatch(html(f.D), /paneel med/);
-  // publiceer zonder verzamelen controleert zelf
-  const g = medOpzet(); await g.m.tik(); g.zetReg(true, NIEUW); await g.m.publiceer(); assert.doesNotMatch(html(g.D), /paneel med/);
+  // publiceer zonder verzamelen controleert zelf (rij weg, of basisrij weg)
+  const g = medOpzet(); await g.m.tik(); g.zetMed(false); await g.m.publiceer(); assert.doesNotMatch(html(g.D), /paneel med/);
+  const k = medOpzet(); await k.m.tik(); k.zetMed('aan', MED_TEKST, false); await k.m.publiceer(); assert.doesNotMatch(html(k.D), /paneel med/);
 });
 
 test('wv3154 David houdt vast of laat los (zonder nieuwe tekst); los blijft los na het volgende ophalen; uit-knop per pagina', async () => {
@@ -1002,7 +1014,7 @@ test('wv3154 David houdt vast of laat los (zonder nieuwe tekst); los blijft los 
   assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.MEDISCH_ID, aan: true } })).status, 200);
   assert.ok(medPaneel(html(f.D), 'Medisch nieuws'), 'weer aan');
   // vóór de Ja mag vasthouden ook (alleen proef), maar er komt niets op de tv
-  const g = medOpzet({ tekst: NIEUW }); await g.m.tik();
+  const g = medOpzet({ med: false }); await g.m.tik();
   const id = (await g.m.appStand()).schermen.find((x) => x.id === PS.MEDISCH_ID).berichten[0].id;
   assert.strictEqual((await g.m.app({ pad: '/app/personeelsscherm/medisch', methode: 'POST', body: { id, vast: true } })).status, 200);
   assert.doesNotMatch(html(g.D), /paneel med/);
