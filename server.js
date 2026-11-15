@@ -1063,10 +1063,12 @@ function loperStand() {
 function loperNooit(chatId) { return Object.prototype.hasOwnProperty.call(SOCEV_ENV_EXTRA, String(chatId || '')); }
 // /run: alleen smal (de aanroeper toetst dat). Ook buiten de vault-werkruimte: de loper weigert dan de cwd (dicht), nooit stil
 // als 1001 (Fable wv715 #7).
+const LOPER_ZOALS = { 'ovis-nza-check': 'ovis-nza' };   // wv3157: Dubbelcheck van OVIS NZa draait precies zo afgeschermd als OVIS NZa zelf
 function loperVoorRun(chatId) {
   if (loperNooit(chatId)) return false;
   const s = loperStand();
-  return s.alles || s.sessies.indexOf(String(chatId || '')) >= 0;
+  const c = Object.prototype.hasOwnProperty.call(LOPER_ZOALS, String(chatId || '')) ? LOPER_ZOALS[String(chatId)] : String(chatId || '');
+  return s.alles || s.sessies.indexOf(c) >= 0;
 }
 // Fable wv715 #2: een agent die een Socev-sessie startte (agent-sleutel, j.smal) gaat via de loper zodra de stand íets aanzet;
 // anders was één /agent-aanroep vanuit een 1002-sessie genoeg om als 1001 te draaien.
@@ -2478,7 +2480,7 @@ const LESSEN_EMBED_MODEL = '@cf/baai/bge-m3';   // 1024 dims, meertalig; de less
 const LESSEN_DOMEIN = {
   '40687': 'pa', 'agenda-wachter': 'pa', 'correspondentie-wachter': 'pa',
   'actie-bewaker': 'pa', 'personeels-wachter': 'pa', 'nachtconsolidatie': 'pa',
-  'dagplan': 'pa', 'parro': 'pa', 'signal': 'pa', 'cijfermeester': 'geen', 'cijfer-meester': 'beide', 'ovis-nza': 'geen',   // wv3087: vertrouwelijk procesdossier, geen lessen die andere zaken noemen
+  'dagplan': 'pa', 'parro': 'pa', 'signal': 'pa', 'cijfermeester': 'geen', 'cijfer-meester': 'beide', 'ovis-nza': 'geen', 'ovis-nza-check': 'geen',   // wv3087: vertrouwelijk procesdossier, geen lessen die andere zaken noemen
  
   'telegram-debug': 'machine', 'structuur-wachter': 'machine', 'werkkamer': 'machine',
   'vault-concierge': 'machine', 'site-verversing': 'machine', 'kaizen-review': 'machine',
@@ -2644,6 +2646,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     const fullPrompt = lesblok + prompt + misRegel + '\n\n' + (lezen ? WORKSPACES.vault : space).hint(indir, outdir);
     j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
     const runOpts = { progress: j.progress, lastFile: path.join(base, 'codex-last.md') };
+    if (j.max_ms > 0) runOpts.maxMs = j.max_ms;   // wv3157: Dubbelcheck OVIS NZa hooguit 20 min
     if (lezen) runOpts.gereedschap = 'lezen';
     // wv275: een [AUTO]-beurt van de telefoon draagt zijn id in de omgeving; POST /agent leest hem daar terug (telMerkAgent).
     if (j.app && j.app.soort === 'tel') runOpts.env = { SOCEV_TEL_BEURT: jobId };
@@ -14134,7 +14137,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
         if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking
         if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen)
-        if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen
+        if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route.indexOf('GET /app/promedico/') === 0) return typeof appPromedico === 'function' ? appPromedico(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'promedico');   // wv3143: Promedico-laag in Calendar (alleen lezen)
@@ -15522,7 +15525,7 @@ function berichtBronJob(zin, nu, lijst) {
   Object.keys(alle).forEach(function (id) {
     const j = alle[id];
     if (!j || j.agent || j.app || j.status !== 'done' || (j.result && j.result.ok === false) || !APP_JOB_RE.test(id)) return;   // alleen geslaagd afgerond (Fable #6)
-    if (j.chat_id === APP_KANALEN.hoofd || j.chat_id === APP_KANALEN['cijfer-meester'] || j.chat_id === APP_KANALEN['ovis-nza']) return;
+    if (j.chat_id === APP_KANALEN.hoofd || j.chat_id === APP_KANALEN['cijfer-meester'] || j.chat_id === APP_KANALEN['ovis-nza'] || j.chat_id === 'ovis-nza-check') return;   // wv3157
     if (!(nu - (j.done_at || 0) < BERICHT_BRONJOB_MS)) return;
     let out = '';
     try { out = appUitvoer(j); } catch (e) { out = ''; }
@@ -22997,8 +23000,10 @@ async function appNzaVragen(req, res, a, route, d) {
     if (route === 'GET /app/nza/vragen') { const l = await NZA_VRAGEN.lijst(); res._app.stil = true; return appStuur(res, 200, { ok: true, draden: l }); }
     const id = String((d && d.id) || '');
     if (!NZA_VRAGEN_DRAAD_RE.test(id)) return appWeiger(res, 400, 'onbekende vraag', 'nza-draad id');
+    if (route === 'POST /app/nza/dubbelcheck') return await nzaCheckRoute(res, id, d);
     const u = await NZA_VRAGEN.draad(id);
     if (!u) return appWeiger(res, 404, 'deze vraag staat er niet (meer)', 'nza-draad weg');
+    nzaCheckStand(u.draad);
     const basis = d && typeof d.basis === 'string' && /^https:\/\/[a-z0-9.-]+(:\d+)?$/.test(d.basis) ? d.basis : '';
     res._app.stil = true;
     return appStuur(res, 200, { ok: true, draad: u.draad, samenvatting: u.samenvatting, md: NZA_VRAGEN.markdown(u.draad, basis) });
@@ -23019,10 +23024,128 @@ function nzaInfo() {
   let i;
   try { i = NZA_SCHERM.info(); } catch (e) { i = { aan: true, fout: true }; }
   try { if (NZA_VRAGEN) i.vragen = NZA_VRAGEN.info(); } catch (e) { i.vragen = { fout: true }; }   // wv3156
+  try { i.dubbelcheck = nzaCheckInfo(); } catch (e) { i.dubbelcheck = { fout: true }; }   // wv3157 (try: ook TDZ)
   try { if (nzaWachter) i.wachter = nzaWachter.info(); } catch (e) { i.wachter = { fout: true }; }   // wv3113: datum, exit, duur (try: ook TDZ)
   return i;
 }
 // ── einde OVIS NZa scherm ──
+// ── OVIS NZa Dubbelcheck (wv3157, fase 3b, David 15-11-2026 17:45 "heel kritisch" nalopen; Ja 21:07): Dubbelcheck bij een antwoord in de tab Vragen ──
+// POST /app/nza/dubbelcheck {id: draad, job_id: antwoord} start één kritische tweede ronde (nza-dubbelcheck.js: andere instructie, model
+// Fable 5.2) in de eigen sessie 'ovis-nza-check', via de loper als socev zoals OVIS NZa zelf (LOPER_ZOALS; staat de loper niet aan, dan
+// start er niets: nooit als claude), geen lessen, sessie vóór elke ronde gewist. Eén ronde tegelijk, hooguit NZA_CHECK_PER_DAG per dag,
+// 20 minuten. Stand in de draad (wisseling.dubbelcheck: bezig/fout); de uitkomst wordt een aanhangsel (soort dubbelcheck) en gaat zo mee
+// in de download. De pod controleert elk citaat zelf met nza.py citaat (vinkje-poort). Geen tekst uit dossier of antwoord in de log.
+const NZA_CHECK = (function () {
+  const p = path.join(__dirname, 'nza-dubbelcheck.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p); } catch (e) { logError('nza-check', new Error('laden faalde')); return null; }
+})();
+const NZA_CHECK_SESSIE = 'ovis-nza-check';
+const NZA_CHECK_MODEL = (!SERVER_ECHT && process.env.NZA_CHECK_MODEL) || 'claude-fable-5-2';
+const NZA_CHECK_MS = 20 * 60 * 1000;
+const NZA_CHECK_PER_DAG = 20;
+const nzaCheckLopend = {};   // draad|job -> {job, start}
+const nzaCheckTel = { gestart: 0, klaar: 0, mislukt: 0, laatste: null };
+function nzaCheckInfo() {
+  let loper = null;
+  try { loper = loperVoorRun(NZA_CHECK_SESSIE); } catch (e) { loper = null; }
+  return { aan: !!NZA_CHECK, model: NZA_CHECK_MODEL, loper: loper, lopend: Object.keys(nzaCheckLopend).length, gestart: nzaCheckTel.gestart,
+    klaar: nzaCheckTel.klaar, mislukt: nzaCheckTel.mislukt, laatste: nzaCheckTel.laatste };
+}
+function nzaCheckModelNaam(m) { return /fable-5-2/.test(String(m || '')) ? 'Fable 5.2 (' + m + ')' : String(m || 'onbekend model'); }
+// nza.py citaat als claude (zelfde script en index als het NZa-scherm); exit 0 = woordelijk op die plek
+function nzaCitaatToets(stuk, plek, tekst) {
+  return new Promise(function (resolve) {
+    const script = (!SERVER_ECHT && process.env.NZA_SCRIPT) || path.join(VAULT, '.claude/skills/ovis-nza/nza.py');
+    const db = serverPad('nza-db', process.env.NZA_DB, '/opt/data/ovis-nza/nza.db', serverProefDeel('nza/nza.db'));
+    require('child_process').execFile('python3', ['-I', script, 'citaat', stuk, plek, tekst], { timeout: 30000, maxBuffer: 1024 * 1024,
+      env: { PATH: process.env.PATH || '/usr/bin:/bin', NZA_DB: db, HOME: process.env.HOME || '/tmp', LANG: 'C.UTF-8' } },
+      function (err, stdout) {
+        let o = null;
+        try { o = JSON.parse(String(stdout || '')); } catch (e) { o = null; }
+        resolve({ ok: !err && !!(o && o.ok === true), reden: o && o.reden ? String(o.reden).slice(0, 120) : undefined });
+      });
+  });
+}
+// nza.py lees als claude (Codex wv3157 MOET 1: een "klopt" zonder citaat vraagt een plek die de pod kan openen; bedragen moeten erop staan)
+function nzaLeesPlek(stuk, plek) {
+  return new Promise(function (resolve) {
+    const script = (!SERVER_ECHT && process.env.NZA_SCRIPT) || path.join(VAULT, '.claude/skills/ovis-nza/nza.py');
+    const db = serverPad('nza-db', process.env.NZA_DB, '/opt/data/ovis-nza/nza.db', serverProefDeel('nza/nza.db'));
+    require('child_process').execFile('python3', ['-I', script, 'lees', stuk, plek], { timeout: 30000, maxBuffer: 4 * 1024 * 1024,
+      env: { PATH: process.env.PATH || '/usr/bin:/bin', NZA_DB: db, HOME: process.env.HOME || '/tmp', LANG: 'C.UTF-8' } },
+      function (err, stdout) { resolve({ ok: !err, tekst: err ? '' : String(stdout || '') }); });
+  });
+}
+// Na een herstart is een "bezig" zonder lopende ronde afgebroken (alleen in het antwoord, niet op schijf)
+function nzaCheckStand(draad) {
+  (draad.wisselingen || []).forEach(function (w) {
+    const c = w.dubbelcheck;
+    if (c && c.status === 'bezig' && !nzaCheckLopend[draad.id + '|' + w.job_id]) w.dubbelcheck = { status: 'fout', start: c.start, model: c.model, fout: 'afgebroken (de pod startte opnieuw); probeer het opnieuw' };
+  });
+}
+async function nzaCheckRoute(res, id, d) {
+  if (!NZA_CHECK) return appWeiger(res, 404, 'de Dubbelcheck zit niet in deze versie van de pod', 'nza-check ontbreekt');
+  const job = String((d && d.job_id) || '');
+  if (!/^[a-f0-9]{16}$/.test(job)) return appWeiger(res, 400, 'onbekend antwoord', 'nza-check job');
+  const w = NZA_VRAGEN.wisseling(id, job);
+  if (!w) return appWeiger(res, 404, 'dit antwoord staat er niet (meer)', 'nza-check weg');
+  if (!w.ok || !w.antwoord) return appWeiger(res, 409, 'bij deze vraag staat geen antwoord om na te lopen', 'nza-check leeg');
+  const sleutel = id + '|' + job;
+  if (nzaCheckLopend[sleutel]) { res._app.stil = true; return appStuur(res, 200, { ok: true, al: true, dubbelcheck: w.dubbelcheck || null }); }
+  if (Object.keys(nzaCheckLopend).length) return appWeiger(res, 409, 'er loopt al een Dubbelcheck bij een ander antwoord; probeer het als die klaar is', 'nza-check bezet');
+  if (fs.existsSync(APP_UIT)) return appWeiger(res, 503, 'de app staat op de noodstop', 'nza-check noodstop');
+  if (!loperVoorRun(NZA_CHECK_SESSIE)) return appWeiger(res, 503, 'de Dubbelcheck kan nu niet afgeschermd draaien; de machinekamer kijkt ernaar', 'nza-check geen loper');   // nooit als claude
+  if (!appTeller('nza-check', NZA_CHECK_PER_DAG, 24 * 3600000)) return appWeiger(res, 429, 'vandaag al ' + NZA_CHECK_PER_DAG + ' keer een Dubbelcheck; morgen weer', 'grens nza-check');
+  const keuze = resolveKeuze({ model: NZA_CHECK_MODEL });
+  if (keuze.fout) return appWeiger(res, 503, 'het controlemodel is nu niet beschikbaar', 'nza-check model');
+  const start = new Date().toISOString();
+  const runJob = crypto.randomBytes(8).toString('hex');
+  nzaCheckLopend[sleutel] = { job: runJob, start: start };
+  try { await NZA_VRAGEN.zetCheck(id, job, { status: 'bezig', start: start, model: nzaCheckModelNaam(keuze.model), job: runJob }); }
+  catch (e) { delete nzaCheckLopend[sleutel]; throw e; }
+  nzaCheckTel.gestart++;
+  nzaCheckRun(id, job, w, runJob, keuze, start);
+  res._app.reden = 'nza-check ' + runJob;
+  return appStuur(res, 200, { ok: true, dubbelcheck: { status: 'bezig', start: start, model: nzaCheckModelNaam(keuze.model) } });
+}
+function nzaCheckRun(id, job, w, runJob, keuze, start) {
+  const ws = DEFAULT_WS, key = sessionKey(ws, NZA_CHECK_SESSIE), sleutel = id + '|' + job;
+  const wis = function () { if (key) { RUNTIMES_LIJST.forEach(function (rt) { delete chatSessions[sessieSleutel(key, rt)]; }); saveSessions(); sessieResetOp[key] = Date.now(); } };
+  jobs[runJob] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: NZA_CHECK_SESSIE, runtime: keuze.runtime, max_ms: NZA_CHECK_MS, nza_check: true };
+  schrijfLog(nu() + ' nza-dubbelcheck ' + velden({ job: runJob, draad: id, antwoord: job, model: keuze.model || '(default)' }));
+  enqueue(key, function () {
+    wis();   // elke ronde vers: nooit verder in een eerdere controle
+    const t0 = Date.now();
+    return processJob(runJob, NZA_CHECK.prompt(w), undefined, undefined, NZA_CHECK_SESSIE, ws, keuze, undefined).then(async function () {
+      const j = jobs[runJob];
+      if (j) j.opgehaald = Date.now();   // niemand haalt hem via /result op; anders wacht een uitrol er 10 min op
+      const r = Object.assign({}, (j && j.result) || {});
+      if (r.output_file) { try { r.output = fs.readFileSync(r.output_file, 'utf8'); } catch (e) { r.output = ''; } }
+      const model = r.model || keuze.model;
+      const o = r.ok !== false ? NZA_CHECK.leesUitvoer(r.output) : null;
+      const u = o ? await NZA_CHECK.verwerk(o, nzaCitaatToets, { antwoord: w.antwoord, leesPlek: nzaLeesPlek }) : null;
+      if (!u) {
+        nzaCheckTel.mislukt++; nzaCheckTel.laatste = { t: new Date().toISOString(), ok: false };
+        const fout = r.ok === false ? (/bovengrens/.test(String(r.error || '')) ? 'gestopt na 20 minuten' : 'de controle liep niet af') : 'de controle gaf geen bruikbare uitkomst';
+        schrijfLog(nu() + ' nza-dubbelcheck-mislukt ' + velden({ job: runJob, reden: fout }));
+        await NZA_VRAGEN.zetCheck(id, job, { status: 'fout', start: start, model: nzaCheckModelNaam(model), fout: fout + '; probeer het opnieuw' });
+        return;
+      }
+      const md = NZA_CHECK.markdown(u, { model: nzaCheckModelNaam(model), duur_s: (Date.now() - t0) / 1000, afgekapt: String(w.antwoord || '').length > NZA_CHECK.MAX_ANTWOORD });
+      const gezet = await NZA_VRAGEN.zetAanhangsel(id, job, { soort: 'dubbelcheck', titel: 'Dubbelcheck', model: nzaCheckModelNaam(model), md: md });
+      await NZA_VRAGEN.zetCheck(id, job, null);
+      const n = NZA_CHECK.telling(u.rijen);
+      nzaCheckTel.klaar++; nzaCheckTel.laatste = { t: new Date().toISOString(), ok: !!gezet, beweringen: u.rijen.length, klopt: n.klopt, deels: n['klopt deels'], niet: n['niet te vinden'], onjuist: n.onjuist };
+      schrijfLog(nu() + ' nza-dubbelcheck-klaar ' + velden({ job: runJob, beweringen: u.rijen.length, onjuist: n.onjuist, niet: n['niet te vinden'], gezet: !!gezet }));
+    }).catch(function (e) {
+      nzaCheckTel.mislukt++; nzaCheckTel.laatste = { t: new Date().toISOString(), ok: false };
+      logError('nza-check', new Error('ronde faalde'));
+      return NZA_VRAGEN.zetCheck(id, job, { status: 'fout', start: start, fout: 'de controle liep niet af; probeer het opnieuw' }).catch(function () {});
+    }).finally(function () { delete nzaCheckLopend[sleutel]; });
+  });
+}
+// ── einde OVIS NZa Dubbelcheck ──
 // ── OVIS NZa fase 2: de wachter (wv3113, 15-11-2026; plan § 2 "Versheid" en § 4 fase 2; Davids Ja 15-11 09:44) ──
 // Eén ronde per dag zonder taalmodel: mk-scripts/ovis-nza/wachter.py ronde (PUC-sectorlijst huisartsenzorg, CBb-uitspraken, nza.nl-nieuws,
 // VPH/InEen, Tweede Kamer). Nieuwe openbare stukken van NZa en CBb komen in de bibliotheek en de index; nieuws en Kamerstukken alleen als

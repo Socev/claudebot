@@ -262,6 +262,28 @@ function maak(opts) {
     });
   }
 
+  // wv3157 (Dubbelcheck): stand van de lopende ronde bij een wisseling, zichtbaar in de app ("bezig" / "mislukt"); null = weg.
+  // st = {status: 'bezig'|'fout', start, model?, job?, fout?}
+  async function zetCheck(id, jobId, st) {
+    if (!DRAAD_RE.test(String(id)) || !JOB_RE.test(String(jobId))) return false;
+    return opBeurt(id, async function () {
+      const d = lees(id);
+      const w = d && d.wisselingen.find(function (x) { return x.job_id === jobId; });
+      if (!w) return false;
+      if (!st) delete w.dubbelcheck;
+      else w.dubbelcheck = { status: st.status === 'bezig' ? 'bezig' : 'fout', start: String(st.start || new Date(nu()).toISOString()).slice(0, 40),
+        model: st.model ? String(st.model).slice(0, 80) : undefined, job: st.job && JOB_RE.test(String(st.job)) ? String(st.job) : undefined,
+        fout: st.fout ? String(st.fout).slice(0, 200) : undefined };
+      d.bijgewerkt = new Date(nu()).toISOString();
+      schrijf(d);
+      return true;
+    });
+  }
+  function wisseling(id, jobId) {
+    const d = lees(id);
+    return d ? d.wisselingen.find(function (x) { return x.job_id === jobId; }) || null : null;
+  }
+
   function info() {
     let n = 0;
     try { n = fs.readdirSync(map).filter(function (x) { return /^d-[a-f0-9]{16}\.json$/.test(x); }).length; } catch (e) { n = 0; }
@@ -269,7 +291,7 @@ function maak(opts) {
   }
 
   return { naAntwoord: naAntwoord, inhalen: inhalen, lijst: lijst, draad: draad, markdown: markdown, context: context,
-    zetAanhangsel: zetAanhangsel, info: info, bestaat: function (id) { return !!lees(id); } };
+    zetAanhangsel: zetAanhangsel, zetCheck: zetCheck, wisseling: wisseling, info: info, bestaat: function (id) { return !!lees(id); } };
 }
 
 module.exports = { maak: maak, DRAAD_RE: DRAAD_RE, bronnenUit: bronnenUit, eersteRegel: eersteRegel, draadIdVan: draadIdVan };
