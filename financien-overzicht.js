@@ -42,6 +42,14 @@ const crypto = require('crypto'), fs = require('fs'), path = require('path');
 const STROMEN = ['leven', 'inkomen', 'verschuiven', 'intern'];
 const SUBSOORT = { leven: [], inkomen: ['buiten_zicht'], verschuiven: ['verplicht', 'vrijwillig', 'geoormerkt'], intern: [] };
 const EENMALIG_GRENS = 1000;
+// wv3137 (David 15-11-2026: "bijna alle maanden geef ik duizenden euro's meer uit dan er binnenkomt: dat kan niet"): een jaarpost aan INKOMEN
+// (het dividend van de Holding, of een andere grote eenmalige inkomst) komt één keer per jaar binnen maar betaalt het hele jaar. In de
+// maandtrend telt hij daarom als gelijke delen mee (inkomen_gelijk / vrij_gelijk); de echte boekingen, het maandblok en de lijsten blijven
+// ongewijzigd. Dividend = subcategorie of omschrijving "dividend"; andere = inkomen ≥ JAARPOST_GROOT, geen loon/pensioen/uitkering/toeslag,
+// en geen boeking van dezelfde partij in de maand ervoor of erna (geen reeks).
+const JAARPOST_GROOT = 5000;
+const GEEN_JAARPOST = /salaris|loon|pensioen|uitkering|toeslag|alimentatie/i;
+const MAANDNAAM = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
 const GEEN_EENMALIG = ['verzekeringen', 'belastingen', 'creditcard (niet uitgesplitst)'];
 // Davids eigen entiteiten (bedrijfsnamen, geen personen): geld van/naar hier is geen leven of inkomen tenzij de categorie dat zegt
 const ENTITEIT = /primum non nocere|tolgaarde|groenhouten|praktijkhouders|kostenmaatschap/i;
@@ -207,7 +215,21 @@ function boekingen(a, van, tot, aflossing) {
       return;
     }
     const eenmalig = d.stroom === 'leven' && t.bedrag <= -EENMALIG_GRENS && !t.abonnement_id && GEEN_EENMALIG.indexOf(d.cat) < 0 && !/hypotheek/i.test(String(t.subcategorie || ''));
-    uit.push(Object.assign(basis, { stroom: d.stroom, sub: d.sub, deel: t.bedrag, eenmalig: eenmalig }));
+    // wv3137: kandidaat-jaarpost aan inkomen (alleen echt inkomen, niet buiten zicht); 'groot' wordt hieronder bevestigd (geen reeks)
+    let jaar = null;
+    if (d.stroom === 'inkomen' && !d.sub && t.bedrag > 0) {
+      if (/dividend/i.test(String(t.subcategorie || '')) || /dividend/i.test(String(t.omschrijving || ''))) jaar = 'dividend';
+      else if (t.bedrag >= JAARPOST_GROOT && !GEEN_JAARPOST.test(String(t.subcategorie || '') + ' ' + String(t.categorie || ''))) jaar = 'kandidaat';
+    }
+    uit.push(Object.assign(basis, { stroom: d.stroom, sub: d.sub, deel: t.bedrag, eenmalig: eenmalig, jaar: jaar }));
+  });
+  // wv3137: een 'kandidaat' is pas een jaarpost als dezelfde partij niet ook in de maand ervoor of erna iets bracht (dan is het een reeks)
+  const perId = new Map();
+  uit.forEach(function (x) { if (x.stroom !== 'inkomen') return; if (!perId.has(x.id)) perId.set(x.id, new Set()); perId.get(x.id).add(x.maand); });
+  uit.forEach(function (x) {
+    if (x.jaar !== 'kandidaat') return;
+    const ms = perId.get(x.id);
+    x.jaar = ms.has(maandPlus(x.maand, -1)) || ms.has(maandPlus(x.maand, 1)) ? null : 'groot';
   });
   return { delen: uit, posten: rijen.length - anderValuta, ander_valuta: anderValuta };
 }
@@ -217,7 +239,7 @@ function perMaand(delen) {
   const m = new Map();
   delen.forEach(function (x) {
     if (!m.has(x.maand)) m.set(x.maand, { maand: x.maand, boekingen: 0, leven: 0, leven_eenmalig: 0, belasting: 0, inkomen: 0, inkomen_buiten_zicht: 0,
-      verschuiven: 0, verplicht: 0, vrijwillig: 0, geoormerkt: 0, intern: 0, overig: 0, uitgaven: 0 });
+      verschuiven: 0, verplicht: 0, vrijwillig: 0, geoormerkt: 0, intern: 0, overig: 0, uitgaven: 0, jaarpost: 0 });
     const s = m.get(x.maand);
     s[x.stroom] += x.deel;
     if (x.stroom === 'leven') {
@@ -226,6 +248,7 @@ function perMaand(delen) {
       if (x.deel < 0) { s.uitgaven += x.deel; if (!x.zeker && (!x.cat || x.cat === 'overig')) s.overig += x.deel; }
     }
     if (x.stroom === 'inkomen' && x.sub === 'buiten_zicht') s.inkomen_buiten_zicht += x.deel;
+    if (x.stroom === 'inkomen' && x.jaar) s.jaarpost += x.deel;
     if (x.stroom === 'verschuiven' && x.sub) s[x.sub] += x.deel;
   });
   return m;
@@ -456,10 +479,43 @@ function overzicht(A, a, o) {
   // vermogen: privé en Holding apart (wv2716: in vermogenPunt, ook het laatste punt van het vermogensverloop)
   uit.vermogen = vermogenPunt({ v: v, sal: sal, liq: liq, vault: o.vault, FV: FV, nu: nu, blok: blok });
   // trend: 24 maanden vrij per maand (alleen volledige maanden; woning en Holding niet als maandtrend, review ZOU 1)
-  uit.trend = vol.slice().reverse().map(function (m) {
-    const s = pm.get(m) || {};
-    return { maand: m, inkomen: r2(s.inkomen || 0), leven: r2(-(s.leven || 0)), verplicht: r2(-(s.verplicht || 0)), vrij: r2((s.inkomen || 0) + (s.leven || 0) + (s.verplicht || 0)), eenmalig: r2(-(s.leven_eenmalig || 0)) };
+  // wv3137: jaarposten aan inkomen (dividend) gelijk verdeeld over de maanden van hun blok van 12 volledige maanden (de laatste 12 = het venster
+  // van de kerngetallen, daarvóór de 12 ervoor); de som per blok blijft gelijk aan wat er echt binnenkwam. inkomen en vrij blijven de echte
+  // maandcijfers (zoals het blok Per maand ze toont); inkomen_gelijk en vrij_gelijk zijn de gelijkgetrokken voor de grafiek.
+  const blokken = [vol.slice(0, 12), vol.slice(12, 24)].filter(function (bl) { return bl.length; });
+  const gelijk = new Map();   // maand → jaarpost-deel dat er in de gelijkgetrokken cijfers bij hoort
+  blokken.forEach(function (bl) {
+    const tot = bl.reduce(function (z, m) { return z + ((pm.get(m) || {}).jaarpost || 0); }, 0);
+    bl.forEach(function (m) { gelijk.set(m, tot / bl.length); });
   });
+  uit.trend = vol.slice().reverse().map(function (m) {
+    const s = pm.get(m) || {}, jp = s.jaarpost || 0, gl = gelijk.get(m) || 0;
+    const ink = s.inkomen || 0, vrij = ink + (s.leven || 0) + (s.verplicht || 0);
+    const x = { maand: m, inkomen: r2(ink), leven: r2(-(s.leven || 0)), verplicht: r2(-(s.verplicht || 0)), vrij: r2(vrij), eenmalig: r2(-(s.leven_eenmalig || 0)) };
+    if (jp || gl) { x.inkomen_gelijk = r2(ink - jp + gl); x.vrij_gelijk = r2(vrij - jp + gl); if (jp) x.jaarpost = r2(jp); }
+    return x;
+  });
+  // de jaarposten zelf (per boeking) en één regel uitleg per post; het totaal in het venster voor de regel onder Vrij per maand
+  const jaarposten = b.delen.filter(function (x) { return x.jaar && x.stroom === 'inkomen' && gelijk.has(x.maand); })
+    .map(function (x) { const bl = blokken.filter(function (q) { return q.indexOf(x.maand) >= 0; })[0];
+      return { maand: x.maand, soort: x.jaar, naam: veilig(x.naam || x.tegenpartij || x.omschrijving || 'inkomen', 40), bedrag: r2(x.deel), over: bl.length, in_venster: twaalf.indexOf(x.maand) >= 0 }; })
+    .sort(function (p, q) { return q.in_venster - p.in_venster || q.maand.localeCompare(p.maand); });
+  const eur = function (n) { return '€ ' + String(Math.round(Math.abs(n))).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); };
+  const jpTekst = function (j) {
+    const mnd = MAANDNAAM[Number(j.maand.slice(5, 7)) - 1] + (j.in_venster ? '' : ' ' + j.maand.slice(0, 4));   // in het venster is de maandnaam genoeg
+    return (j.soort === 'dividend' ? 'dividend ' : 'eenmalig inkomen (' + j.naam + ') ') + mnd + ' ' + eur(j.bedrag) + ', hier verdeeld over ' + j.over + ' maanden';
+  };
+  uit.jaarposten = jaarposten.slice(0, 6).map(function (j) { return Object.assign({}, j, { tekst: jpTekst(j) }); });
+  const jpVenster = jaarposten.filter(function (j) { return j.in_venster; }), jpSom = jpVenster.reduce(function (z, j) { return z + j.bedrag; }, 0);
+  uit.jaar_uitleg = uit.jaarposten.length ? 'Niet elke maand komt er evenveel binnen: ' + uit.jaarposten.map(function (j) { return j.tekst; }).join('; ') + '. Zo zie je per maand wat er gemiddeld te besteden is; de echte boekingen blijven staan zoals ze zijn.' : null;
+  if (uit.vrij && jpSom) {
+    uit.vrij.regels.splice(1, 0, { tekst: 'waarvan jaarposten (dividend e.d.), hier gelijk verdeeld', bedrag: per(jpSom), sub: true });
+    uit.vrij.uitleg += ' ' + uit.jaar_uitleg;
+  } else if (uit.vrij && uit.jaar_uitleg) uit.vrij.uitleg += ' ' + uit.jaar_uitleg;
+  // wv3137: de jaarregel bovenaan Overzicht: de laatste 12 volledige maanden in één blik (in en uit, het verschil, en wat sparen en de BV's bijdroegen)
+  const vrijwillig = t12('vrijwillig') + t12('geoormerkt');
+  uit.jaarregel = n12 ? { van: van12, tot: tot12, maanden: n12, erin: r2(inkomen), erin_jaarposten: r2(jpSom), eruit: r2(leven + verplicht), leven: r2(leven), aflossing: r2(verplicht),
+    verschil: r2(inkomen - leven - verplicht), verschoven: r2(vrijwillig), eenmalig_uit: r2(eenmalig) } : null;
   // stap 3: uitgaven per categorie en eigenaar, uitschieters, nieuwe terugkerende posten (een fout maakt alleen dit blok leeg)
   uit.uitgaven = blok('uitgaven', function () { return uitgaven(b.delen, { mNu: mNu, twaalf: twaalf, vanaf: o.vanaf }); });
   // wv2700 (David 8-11-2026): "Zelf bij te sturen" — boodschappen, uit eten, stroom, streaming en abonnementen (financien-bijsturen.js); alleen dit blok leeg bij een fout
