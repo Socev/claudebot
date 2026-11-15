@@ -4269,6 +4269,7 @@ function handleRequest(req, res) {
       bewaker: bewakerInfo(),
       // wv3124: schijfdrukmeting per minuut (schijfdruk.js): laatste minuut, piek 24 u met tijdstip; ring onder scripts-staat/schijfdruk
       schijfdruk: schijfdrukStand,
+      promedico_agenda: promedicoAgenda ? promedicoAgenda.health() : null,   // wv3132
       // wv698: argv-detector (sleutelwaarden in /proc/*/cmdline); treffers_24u > 0 = er lekt iets, zie de box
       detector: argvDetInfo(),
       // wv715: de socev-loper (smalle gesprekken als uid 1002): stand, bereikbaar (ping elke minuut), lopend, fouten
@@ -18916,6 +18917,53 @@ function mailmanRoute(req, res) {
     mailmanStuur(res, r.status, r.j);
   });
 }
+// ── wv3132: ontvanger Promedico-agenda-extensie (15-11-2026) ─────────────────────────────────────────────────
+// n8n "AI - Promedico-agenda ontvanger" geeft kop + ruwe bytes door: POST /promedico-agenda/stand { secret (pod), geheim, type, lijf_b64 }.
+// De module (promedico-agenda.js) toetst het extensiegeheim tegen de kluisrij promedico_agenda_geheim (niet op de witte lijst: alleen
+// deze route leest hem, via de Management-API zoals account2Token) en schrijft de weekpagina in 10_Zakelijk/Tolgaarde/Promedico-agenda.
+// In api.log alleen status + categorie; nooit lijf, kop of tekst. Noodschakelaar: /opt/data/promedico-agenda/uit (503).
+const PROMEDICO_AGENDA_DIR = process.env.PROMEDICO_AGENDA_DIR || '/opt/data/promedico-agenda';
+async function promedicoKluisLees(naam) {
+  if (!/^[a-z0-9_]+$/.test(naam)) throw new Error('naam');
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(process.env.SUPABASE_URL || '');
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  if (!m || !pat) throw new Error('geen kluistoegang');
+  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', {
+    method: 'POST', headers: { authorization: 'Bearer ' + pat, 'content-type': 'application/json', 'user-agent': 'socev-pod-promedico-agenda/1' },
+    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + naam + "'" }),
+    signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new Error('kluis http ' + r.status);
+  const rijen = await r.json();
+  if (!Array.isArray(rijen)) throw new Error('kluis vorm');
+  return rijen.length === 1 && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w : '';
+}
+const promedicoAgenda = (function () {
+  try {
+    return require(path.join(__dirname, 'promedico-agenda.js')).maakOntvanger({
+      dir: PROMEDICO_AGENDA_DIR, vault: VAULT,
+      vv: { schrijf: function (p, inhoud) { return VV().schrijf(p, inhoud); } },
+      poort: require(path.join(__dirname, 'intake', 'patientpoort.js')),
+      podGeheimOk: berichtGeheimOk, kluisLees: promedicoKluisLees });
+  } catch (e) { logError('promedico-agenda', e); return null; }
+})();
+function promedicoAgendaIsPad(req) { const p = reqPath(req); return p === '/promedico-agenda' || p.indexOf('/promedico-agenda/') === 0; }
+function promedicoAgendaRoute(req, res) {
+  const stuur = function (status, obj) { try { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(obj)); } catch (e) { /* verbinding weg */ } };
+  if (!promedicoAgenda || req.method !== 'POST' || reqPath(req) !== '/promedico-agenda/stand') { req.resume(); return stuur(404, { ok: false, fout: 'onbekend' }); }
+  if (!rolPrimair()) { req.resume(); return stuur(503, { ok: false, fout: 'niet de actieve kant' }); }
+  const max = 450 * 1024, delen = [];
+  let n = 0, te = false;
+  req.on('data', function (c) { if (te) return; n += c.length; if (n > max) { te = true; delen.length = 0; return; } delen.push(c); });
+  req.on('error', function () {});
+  req.on('end', async function () {
+    if (te) { reqLogExtra(res, { promedico: 'geweigerd 413 omhulsel' }); return stuur(413, { ok: false, fout: 'te groot' }); }
+    let d = null;
+    try { d = JSON.parse(Buffer.concat(delen).toString('utf8') || '{}'); } catch (e) { d = null; }   // nooit e.message loggen
+    const r = await promedicoAgenda.verwerk(d);
+    reqLogExtra(res, { promedico: r.log });
+    stuur(r.status, r.j);
+  });
+}
 async function appMailman(req, res, a, s, d, route) {
   if (!mailman) return appWeiger(res, 404, 'MailMan zit niet in deze versie van de pod', 'mailman ontbreekt');
   if (route === 'POST /app/mailman/mail') return appMailmanMail(res, a, d || {});   // wv2029: voorbeeld rechts in de Werkstroom
@@ -24315,7 +24363,8 @@ const server = http.createServer(function (req, res) {
       if (intake) return intake.verwerk(req, res);
       req.resume(); res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); return res.end('{"ok":false,"uitkomst":"geweigerd","reden":"onbekend"}');
     }
-    if (mailmanIsPad(req)) return mailmanRoute(req, res);   // wv1856: OVIS MailMan (n8n; eigen sleutel of pod-geheim), nooit door naar handleRequest
+    if (mailmanIsPad(req)) return mailmanRoute(req, res);
+    if (promedicoAgendaIsPad(req)) return promedicoAgendaRoute(req, res);   // wv3132: ontvanger Promedico-agenda-extensie (n8n; pod-geheim + kluisgeheim), nooit door naar handleRequest   // wv1856: OVIS MailMan (n8n; eigen sleutel of pod-geheim), nooit door naar handleRequest
     if (telIsPad(req)) return handleTel(req, res);   // wv264: spraak via de telefoon (Tasker)
     if (openaiIsPad(req)) return openaiRoute(req, res);   // wv2055: OpenAI-hulp (intern, API_SECRET)
     if (berichtIsPad(req)) return berichtRoute(req, res);   // wv263: bericht aan David (intern, API_SECRET)
