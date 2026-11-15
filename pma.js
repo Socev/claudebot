@@ -30,7 +30,7 @@ const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
 
-const SCHEMA_VERSIE = 3;   // 2 = wv3045: export.met_patient (export zonder kolom patientnummer); 3 = wv3047: persoon, rol_periode, rooster_hand, registreerder.bevestigd
+const SCHEMA_VERSIE = 4;   // 2 = wv3045: export.met_patient (export zonder kolom patientnummer); 3 = wv3047: persoon, rol_periode, rooster_hand, registreerder.bevestigd; 4 = wv3111: registreerder.negeer
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT);
 CREATE TABLE IF NOT EXISTS praktijk (code TEXT PRIMARY KEY, naam TEXT NOT NULL, agb TEXT NOT NULL UNIQUE);
@@ -269,10 +269,14 @@ function leesExport(zipBuf, pseudo) {
 
 // ── fase 2 (wv3047): registreerder → persoon → rol, roosters en werkdagen (plan § 2 "Registreerder → medewerker → rol", § 3) ──
 // Rollen in de tijd per praktijk; de eerste zes vergelijkt het scherm Medewerkers, de laatste vier het scherm Artsen. Alleen binnen een rol.
-const ROLLEN = ['assistente', 'poh-s', 'poh-ggz', 'paio', 'stagiair', 'overig', 'huisarts-praktijkhouder', 'huisarts-loondienst', 'waarnemer', 'aios'];
-const ROL_NAAM = { assistente: 'Assistente', 'poh-s': 'POH-S', 'poh-ggz': 'POH-GGZ', paio: 'PA(io)', stagiair: 'Stagiair', overig: 'Overig',
+// wv3111: praktijkmanager erbij (David 15-11-2026; Nmbrs noemt de functie "Praktijkbegeleidster"). Artsen vergelijkt het scherm Artsen als één groep.
+const ROLLEN = ['assistente', 'poh-s', 'poh-ggz', 'praktijkmanager', 'paio', 'stagiair', 'overig', 'huisarts-praktijkhouder', 'huisarts-loondienst', 'waarnemer', 'aios'];
+const ROL_NAAM = { assistente: 'Assistente', 'poh-s': 'POH-S', 'poh-ggz': 'POH-GGZ', praktijkmanager: 'Praktijkmanager', paio: 'PA(io)', stagiair: 'Stagiair', overig: 'Overig',
   'huisarts-praktijkhouder': 'Huisarts (praktijkhouder)', 'huisarts-loondienst': 'Huisarts in loondienst', waarnemer: 'Waarnemer', aios: 'Aios' };
 const ARTS_ROLLEN = ['huisarts-praktijkhouder', 'huisarts-loondienst', 'waarnemer', 'aios'];
+// wv3111: rollen waarvan het werk zelden een declaratie geeft (David 15-11-2026 over de praktijkmanager: vaste dagen, incidenteel andere).
+// Met een rooster telt een roosterdag dan als gewerkt, ook zonder declaratie (nooit afwezig); een andere doordeweekse dag met activiteit is een extra dag.
+const ROOSTER_IS_WERK = new Set(['praktijkmanager']);
 const DIENSTEN = ['loondienst', 'pot', 'zzp', 'praktijkhouder', 'onbekend'];
 const TUSSEN = new Set(['van', 'de', 'der', 'den', 'het', 'ter', 'ten', 'te', 't', 'in', 'op', 'la', 'le', 'du', 'da', 'dos', 'el', 'al', 'v', 'vd', 'v d']);
 // Verzamelnaam: "Waarnemer Tolgaarde", sinds de export van 14-11-2026 ook "Waarnemer2 Tolgaarde"; een naam die op de praktijknaam eindigt
@@ -302,6 +306,7 @@ function rolUit(t) {
   if (!x) return null;
   if (/\bggz\b|pohggz/.test(x)) return 'poh-ggz';
   if (/\bpoh ?-?s\b|somati/.test(x)) return 'poh-s';
+  if (/praktijkbegeleid|praktijkmanag/.test(x)) return 'praktijkmanager';
   if (/stagi/.test(x)) return 'stagiair';
   if (/physician|\bpa\b|\bpaio\b|\bpa ?-?io\b/.test(x)) return 'paio';
   if (/\baios\b|huisarts in opleiding/.test(x)) return 'aios';
@@ -407,15 +412,18 @@ function werkdagenVan(i) {
     else {
       const p = patroon(w);
       werk = p ? p.has(wd) : null;
-      if (weekUren != null && p && p.size) { invaluren = Math.round(weekUren / p.size * 100) / 100; if (werk) daguren = invaluren; }
+      // wv3111: de weekuren over minstens het aantal dagen per week uit Nmbrs (gemeten 15-11-2026: over alleen de declaratiedagen gaf 38 uur
+      // over 3 dagen 12,7 uur per dag, en bij de POH-GGZ, wier POT-uren ook andere praktijken dekken, tot 36 uur per dag)
+      const dpw = nr && nr.dagen_per_week > 0 ? nr.dagen_per_week : 0;
+      if (weekUren != null && p && p.size) { invaluren = Math.round(weekUren / Math.max(p.size, dpw) * 100) / 100; if (werk) daguren = invaluren; }
     }
     let soort;
     if (wd > 4) { if (!n) continue; soort = 'weekend'; daguren = null; }
     else if (werk === true) {
       if (!n && (i.groep || (!uren && (!declVan || d < declVan || d > declTot)))) continue;   // wv3054: groep of buiten de declaratiespanne
-      soort = n ? 'gewerkt' : feest.has(d) ? 'feestdag' : binnen ? 'afwezig' : null;
+      soort = n ? 'gewerkt' : feest.has(d) ? 'feestdag' : binnen ? (uren && ROOSTER_IS_WERK.has(rol) ? 'gewerkt' : 'afwezig') : null;   // wv3111
     }
-    else if (werk === false) { if (!n) continue; soort = n >= drempel ? 'invaldag' : 'los'; daguren = soort === 'invaldag' ? invaluren : null; }
+    else if (werk === false) { if (!n) continue; soort = n >= drempel || (uren && ROOSTER_IS_WERK.has(rol)) ? 'invaldag' : 'los'; daguren = soort === 'invaldag' ? invaluren : null; }
     else { if (!n) continue; soort = 'gewerkt'; bron = bron === 'nmbrs-week' ? 'nmbrs-week-zonder-patroon' : 'zonder-patroon'; }
     if (!soort) continue;
     uit.push({ dag: d, soort, uren: soort === 'gewerkt' || soort === 'invaldag' ? daguren : null, rol, bron, t });
@@ -474,6 +482,9 @@ function maak(o) {
       }
       if (!db.prepare('PRAGMA table_info(registreerder)').all().some((k) => k.name === 'bevestigd')) {
         db.exec('ALTER TABLE registreerder ADD COLUMN bevestigd TEXT');   // wv3047: wanneer David de koppeling naam → persoon bevestigde (leeg = nog te koppelen)
+      }
+      if (!db.prepare('PRAGMA table_info(registreerder)').all().some((k) => k.name === 'negeer')) {
+        db.exec('ALTER TABLE registreerder ADD COLUMN negeer TEXT');   // wv3111: wanneer David zei "deze naam negeren" (niet koppelen, niet meetellen bij personen, niet meer tonen bij te koppelen)
       }
       db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde WHERE CAST(waarde AS INTEGER) < CAST(excluded.waarde AS INTEGER)").run(String(SCHEMA_VERSIE));
       bijgewerkt = true;
@@ -931,13 +942,13 @@ function maak(o) {
       const inst = (k, d) => Number((db.prepare("SELECT waarde FROM instelling WHERE praktijk = '*' AND sleutel = ?").get(k) || {}).waarde) || d;
       leeg.klein_aantal = inst('klein_aantal', 30); leeg.invaldag_min = inst('invaldag_min', 5);
       const st = namenStand(db), personen = personenLees(db);
-      const alle = db.prepare('SELECT praktijk, naam, persoon, soort, eerst, bevestigd FROM registreerder ORDER BY praktijk, naam').all().map((r) => Object.assign({}, r));
+      const alle = db.prepare('SELECT praktijk, naam, persoon, soort, eerst, bevestigd, negeer FROM registreerder ORDER BY praktijk, naam').all().map((r) => Object.assign({}, r));
       leeg.praktijken = db.prepare('SELECT code, naam FROM praktijk WHERE code IN (SELECT DISTINCT praktijk FROM dagbron) ORDER BY code DESC').all().map((r) => Object.assign({}, r));
       leeg.personen = personen;
       leeg.registreerders = alle.map((r) => {
         const x = st.get(r.praktijk + '\u0001' + r.naam) || { n: 0, eerste: null, laatste: null, agb: null };
-        const u = { praktijk: r.praktijk, naam: r.naam, soort: r.soort === 'verzamel' || VERZAMEL_RE.test(r.naam) ? 'verzamel' : 'persoon', n: x.n, eerste: x.eerste, laatste: x.laatste, met_agb: !!x.agb, persoon: r.bevestigd ? r.persoon : null, bevestigd: r.bevestigd || null };
-        if (!r.bevestigd && x.n) u.voorstel = voorstel(db, r, st, alle, personen, b);
+        const u = { praktijk: r.praktijk, naam: r.naam, soort: r.soort === 'verzamel' || VERZAMEL_RE.test(r.naam) ? 'verzamel' : 'persoon', n: x.n, eerste: x.eerste, laatste: x.laatste, met_agb: !!x.agb, persoon: r.bevestigd ? r.persoon : null, bevestigd: r.bevestigd || null, negeer: r.negeer || null };
+        if (!r.bevestigd && !r.negeer && x.n) u.voorstel = voorstel(db, r, st, alle, personen, b);
         return u;
       });
       leeg.nmbrs = b.medewerkers.map((m) => ({ id: m.id, naam: m.naam, entiteit: m.entiteit, functie: (functieNu(m) || {}).omschrijving || null, dossier: m.dossier || null }));
@@ -949,7 +960,7 @@ function maak(o) {
         const gedekt = new Set(db.prepare('SELECT dag FROM dagbron WHERE praktijk = ?').all(pr.code).map((r) => r.dag));
         const jaren = new Set([...gedekt].map((d) => Number(d.slice(0, 4)))), feest = new Set();
         for (const j of jaren) for (const f of feestdagen(j)) feest.add(f);
-        const naarPersoon = new Map(alle.filter((r) => r.praktijk === pr.code && r.bevestigd && r.persoon).map((r) => [r.naam, r.persoon]));
+        const naarPersoon = new Map(alle.filter((r) => r.praktijk === pr.code && r.bevestigd && r.persoon && !r.negeer).map((r) => [r.naam, r.persoon]));
         const perP = new Map();
         for (const r of db.prepare('SELECT registreerder AS naam, dag, code, type, COUNT(*) AS n, SUM(tarief_cent) AS c FROM regel WHERE praktijk = ? GROUP BY registreerder, dag, code, type').iterate(pr.code)) {
           const pid = naarPersoon.get(r.naam); if (!pid) continue;
@@ -973,7 +984,11 @@ function maak(o) {
           // review wv3047 MOET 1: rooster en contracturen uit Nmbrs gelden alleen bij de praktijk van dat bedrijf (TG bij TG, GH bij GH). Bij POT
           // (POH-GGZ, werkt bij meer praktijken) en bij de andere praktijk: geen Nmbrs-uren, alleen het patroon of een handrooster; het
           // dienstverband geldt overal (uit dienst = nergens).
-          const eigen = m && m.entiteit === pr.code;
+          // wv3111 (David 15-11-2026: "Wat jij ziet is de hele salarisadministratie van de POT. Zeker wel de uren uit Nmbrs overnemen!"): het
+          // POT-rooster geldt bij de praktijk waar de POH-GGZ een rol heeft, zolang die persoon geen rol bij een andere praktijk heeft (anders
+          // zou hetzelfde rooster bij twee praktijken tellen; dan blijft het patroon).
+          const elders = p.rollen.some((r) => r.praktijk !== pr.code);
+          const eigen = m && (m.entiteit === pr.code || (m.entiteit === 'POT' && !elders));
           const w = werkdagenVan({ groep: p.groep, dagen, gedekt, rollen, hand: p.rooster.filter((r) => r.praktijk === pr.code), nmbrs: m ? { dienst: m.dienst, rooster: eigen ? m.rooster : [], contract: eigen ? m.contract : [] } : null, drempel, feest });
           uitP[p.id] = w.map((x) => { const t = x.t || { n: 0, d: 0, kort: 0, middel: 0, lang: 0, vk: 0, vl: 0, mi: 0, poh: 0, cent: 0 }; return [x.dag, x.soort, x.uren, x.rol, x.bron, t.n, t.d, t.kort, t.middel, t.lang, t.vk, t.vl, t.mi, t.poh, t.cent]; });
         }
@@ -1018,7 +1033,9 @@ function maak(o) {
     return metDb((db) => {
       const reg = db.prepare('SELECT praktijk, naam FROM registreerder WHERE praktijk = ? AND naam = ?').get(praktijk, naam);
       if (!reg) throw new Fout(404, 'deze naam staat niet in de exports');
-      if (body.los === true) { db.prepare('UPDATE registreerder SET persoon = NULL, bevestigd = NULL WHERE praktijk = ? AND naam = ?').run(praktijk, naam); return { body: { ok: true }, reden: 'pma koppel los' }; }
+      if (body.los === true) { db.prepare('UPDATE registreerder SET persoon = NULL, bevestigd = NULL, negeer = NULL WHERE praktijk = ? AND naam = ?').run(praktijk, naam); return { body: { ok: true }, reden: 'pma koppel los' }; }
+      // wv3111: een naam negeren (David 15-11-2026: een regel van iemand van een andere praktijk) = los van elke persoon en niet meer te koppelen
+      if (body.negeer === true) { db.prepare('UPDATE registreerder SET persoon = NULL, bevestigd = NULL, negeer = ? WHERE praktijk = ? AND naam = ?').run(nuIso(), praktijk, naam); return { body: { ok: true }, reden: 'pma koppel negeer' }; }
       let pid;
       if (body.persoon != null) {
         pid = Number(body.persoon);
@@ -1030,7 +1047,7 @@ function maak(o) {
         const ins = db.prepare('INSERT INTO rol_periode (persoon, praktijk, rol, van, tot, op) VALUES (?, ?, ?, ?, ?, ?)');
         for (const r of rollen) ins.run(pid, praktijk, r.rol, r.van, r.tot, nuIso());
       }
-      db.prepare('UPDATE registreerder SET persoon = ?, bevestigd = ? WHERE praktijk = ? AND naam = ?').run(pid, nuIso(), praktijk, naam);
+      db.prepare('UPDATE registreerder SET persoon = ?, bevestigd = ?, negeer = NULL WHERE praktijk = ? AND naam = ?').run(pid, nuIso(), praktijk, naam);
       return { body: { ok: true, persoon: pid }, reden: 'pma koppel' };
     }, true);
   }
