@@ -406,6 +406,49 @@ if (O) {
     let rl = null; try { O.overzicht(A, nepA, { nu: vandaag, vanaf: mOud, saldi: null, vault: VAULT, fv: FVnep }); rl = 'ok'; } catch (e) { rl = e.message; }
     toets('wv2696: lukt de omzetting niet (alleen-lezen), dan telt de oude keuze niet en werkt het overzicht', rl === 'ok' && (() => { try { return a3.db.prepare("SELECT sleutel_v FROM stroom_regels WHERE richting = 'bij' AND sleutel = 't:proefmans'").get().sleutel_v === null; } catch (e) { return false; } })(), rl);
   }
+  // ── wv3137: jaarposten aan inkomen (dividend) gelijk verdeeld in de maandtrend + de jaarregel (David 15-11-2026: "bijna alle maanden … duizenden meer uit dan er binnenkomt") ──
+  toets('wv3137: zonder jaarpost geen extra velden, geen uitleg; wel een jaarregel met erin = inkomen uit de boekingen', !o.trend.some((t) => t.inkomen_gelijk !== undefined || t.vrij_gelijk !== undefined || t.jaarpost !== undefined) && o.jaarposten.length === 0 && o.jaar_uitleg === null &&
+    !!o.jaarregel && o.jaarregel.maanden === 12 && Math.abs(o.jaarregel.erin - lijst({ van: o.venster.van, tot: o.venster.tot, stroom: 'inkomen' }).som) < 0.02 && Math.abs(o.jaarregel.eruit - (o.jaarregel.leven + o.jaarregel.aflossing)) < 0.02 &&
+    Math.abs(o.jaarregel.verschil - (o.jaarregel.erin - o.jaarregel.eruit)) < 0.02 && o.jaarregel.erin_jaarposten === 0, [o.jaarregel, o.jaarposten]);
+  {
+    const BD3 = path.join(W, 'bank3'), a4 = A.open(BD3);
+    A.rekeningenSync(a4, { ho: { bron: 'bunq', uid: 'bunq-31', bunq_id: 31, naam: 'Hoofd', soort: 'lopend', iban: 'NL31BUNQ0000000031', status: 'ACTIVE' } });
+    const HO = [], mDiv = mnd[5], mErf = mnd[8], mOudDiv = mnd[0];
+    mnd.forEach((ym) => { HO.push(p(dg(ym, 10), 8000, 'PRIMUM NON NOCERE HOLDING BV', 'Salaris ' + ym)); HO.push(p(dg(ym, 12), -1000, 'Albert Heijn 1234', 'boodschappen')); });
+    HO.push(p(dg(mDiv, 20), 36000, 'PRIMUM NON NOCERE HOLDING BV', 'Dividenduitkering'));           // jaarpost in het venster
+    HO.push(p(dg(mOudDiv, 21), 12000, 'PRIMUM NON NOCERE HOLDING BV', 'Dividenduitkering'));         // jaarpost in het oudere blok (2 maanden archief)
+    HO.push(p(dg(mErf, 14), 7000, 'Notaris Proef', 'uitkering nalatenschap'));                      // andere eenmalige grote inkomst
+    HO.push(p(dg(mnd[0], 15), 6000, 'Klant Proef', 'factuur 1')); HO.push(p(dg(mnd[1], 15), 6000, 'Klant Proef', 'factuur 2'));   // reeks (twee maanden achter elkaar): geen jaarpost
+    HO.push(p(dg(mnd[9], 15), 2000, 'PRIMUM NON NOCERE HOLDING BV', 'Privéopname'));                // verschuiven/vrijwillig
+    A.bij(a4, 'ho', HO, {});
+    A.verrijk(a4);
+    const zet4 = (where, cat, sub) => a4.db.prepare("UPDATE verrijking SET categorie = ?, subcategorie = ?, herkomst = 'david', david_velden = 'categorie,subcategorie' WHERE nr IN (SELECT nr FROM transacties WHERE " + where + ')').run(cat, sub || null);
+    zet4("omschrijving LIKE 'Salaris%'", 'inkomen', 'salaris'); zet4("omschrijving = 'Dividenduitkering'", 'inkomen', 'dividend'); zet4("tegenpartij = 'Notaris Proef'", 'overig inkomen', null);
+    zet4("tegenpartij = 'Klant Proef'", 'overig inkomen', null); zet4("omschrijving = 'Privéopname'", 'overig inkomen', 'privéopname'); zet4("tegenpartij LIKE 'Albert Heijn%'", 'boodschappen', 'supermarkt');
+    const o4 = O.overzicht(A, a4, { nu: vandaag, vanaf: mOud, saldi: null, vault: VAULT, fv: FVnep });
+    const l4 = (f) => O.boekingenLijst(A, a4, { filter: f, vault: VAULT, fv: FVnep });
+    const T = new Map(o4.trend.map((t) => [t.maand, t])), ven = o4.trend.slice(-12), oud = o4.trend.slice(0, 2);
+    toets('wv3137: venster — inkomen_gelijk is voor elke maand gelijk (8000 salaris + (36000 + 7000) / 12) en de som blijft gelijk aan wat er binnenkwam', o4.trend.length === 14 && ven.length === 12 &&
+      ven.every((t) => Math.abs(t.inkomen_gelijk - (8000 + 43000 / 12)) < 0.02) &&
+      Math.abs(ven.reduce((z, t) => z + t.inkomen_gelijk, 0) - ven.reduce((z, t) => z + t.inkomen, 0)) < 0.05, ven.map((t) => [t.maand, t.inkomen, t.inkomen_gelijk]));
+    toets('wv3137: de echte maandcijfers blijven: het dividend staat in zijn eigen maand (inkomen 44000), andere maanden 8000; jaarpost-veld alleen daar', T.get(mDiv).inkomen === 44000 && T.get(mDiv).jaarpost === 36000 && T.get(mnd[6]).inkomen === 8000 && T.get(mnd[6]).jaarpost === undefined &&
+      T.get(mErf).inkomen === 15000 && T.get(mErf).jaarpost === 7000, [T.get(mDiv), T.get(mErf)]);
+    toets('wv3137: vrij_gelijk = inkomen_gelijk − leven − aflossing; vrij blijft het echte maandcijfer', o4.trend.every((t) => Math.abs(t.vrij_gelijk - (t.inkomen_gelijk - t.leven - t.verplicht)) < 0.02 && Math.abs(t.vrij - (t.inkomen - t.leven - t.verplicht)) < 0.02), o4.trend.slice(-2));
+    toets('wv3137: ouder blok van 2 maanden: 12000 dividend over 2 maanden (6000 elk), de reeks van Klant Proef geen jaarpost', oud.every((t) => Math.abs(t.inkomen_gelijk - (8000 + 6000 + 6000)) < 0.02) && !o4.jaarposten.some((j) => /Klant/.test(j.naam)) &&
+      o4.jaarposten.filter((j) => j.over === 2).length === 1 && o4.jaarposten.filter((j) => j.over === 12).length === 2, [oud, o4.jaarposten]);
+    toets('wv3137: jaarposten benoemd, venster eerst: dividend over 12 maanden, andere eenmalige inkomst, en de uitleg heeft de regel in gewone taal', o4.jaarposten.length === 3 && o4.jaarposten[0].in_venster && o4.jaarposten.some((j) => j.soort === 'dividend' && j.bedrag === 36000 && j.over === 12 && j.maand === mDiv) &&
+      o4.jaarposten.some((j) => j.soort === 'groot' && j.bedrag === 7000 && /Notaris/.test(j.naam)) &&
+      new RegExp('dividend ' + ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'][Number(mDiv.slice(5, 7)) - 1] + ' € 36\\.000, hier verdeeld over 12 maanden').test(o4.jaar_uitleg) && o4.vrij.uitleg.indexOf(o4.jaar_uitleg) >= 0, [o4.jaarposten, o4.jaar_uitleg]);
+    const rs = o4.vrij.regels.find((r) => /jaarposten/.test(r.tekst));
+    toets('wv3137: vrij per maand ongewijzigd door de verdeling (de som van de echte boekingen / 12), met een regel die de jaarposten per maand toont', !!rs && Math.abs(rs.bedrag - 43000 / 12) < 0.02 && rs.sub === true &&
+      Math.abs(o4.vrij.per_maand - ven.reduce((z, t) => z + t.vrij, 0) / 12) < 0.02 && Math.abs(o4.vrij.per_maand - ven.reduce((z, t) => z + t.vrij_gelijk, 0) / 12) < 0.02 && o4.vrij.regels.filter((r) => r.filter).every((r) => Math.abs(l4(r.filter).som / 12 - r.bedrag) < 0.01), o4.vrij.regels);
+    const jr = o4.jaarregel;
+    toets('wv3137: jaarregel = laatste 12 maanden: erin (met dividend), eruit (leven + aflossing), verschil en wat er via verschuiven bij kwam', jr.maanden === 12 && jr.van === mnd[2] && jr.tot === m0 && Math.abs(jr.erin - (12 * 8000 + 36000 + 7000)) < 0.02 && jr.erin_jaarposten === 43000 &&
+      Math.abs(jr.eruit - 12000) < 0.02 && jr.aflossing === 0 && Math.abs(jr.verschil - (jr.erin - jr.eruit)) < 0.02 && jr.verschoven === 2000 && Math.abs(jr.erin - l4({ van: jr.van, tot: jr.tot, stroom: 'inkomen' }).som) < 0.02, jr);
+    toets('wv3137: de boekingen zelf blijven ongewijzigd (het dividend is één boeking van 36000 in zijn maand; de somtoets klopt)', l4({ van: mDiv, tot: mDiv, stroom: 'inkomen' }).boekingen.some((b) => b.bedrag === 36000) && o4.controle.som_klopt === true, o4.controle);
+    // geen jaarpost bij een reeks, ook niet boven de grens: één salaris van 8000 in een maand zonder buren geldt wel als kandidaat → hier alleen toetsen dat salaris (subcategorie) nooit meetelt
+    toets('wv3137: salaris telt nooit als jaarpost, ook niet als het alleen staat', !o4.jaarposten.some((j) => /PRIMUM/i.test(j.naam) && j.soort === 'groot'), o4.jaarposten);
+  }
   const src = fs.readFileSync('financien-overzicht.js', 'utf8').replace(/^\s*(\*|\/\/).*$/gm, '');
   toets('financien-overzicht.js laadt geen netwerk- of procesmodule; schrijven alleen in stroomZet en de eenmalige sleutelomzetting (na stroomZet)', !/require\(['"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads)['"]\)/.test(src) && !/\bfetch\s*\(/.test(src) &&
     !/INSERT|UPDATE|DELETE|CREATE TABLE|db\.exec/.test(src.slice(0, src.indexOf('function stroomZet'))) && !/writeFile|appendFile|unlink/.test(src), null);
