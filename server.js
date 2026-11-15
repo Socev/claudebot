@@ -22818,6 +22818,7 @@ const NZA_SCHERM = (function () {
     return require(p).maak({
       script: (!SERVER_ECHT && process.env.NZA_SCRIPT) || path.join(VAULT, '.claude/skills/ovis-nza/nza.py'),
       db: serverPad('nza-db', process.env.NZA_DB, '/opt/data/ovis-nza/nza.db', serverProefDeel('nza/nza.db')),
+      wacht: serverPad('nza-wacht', process.env.NZA_WACHT, '/opt/data/ovis-nza/wacht', serverProefDeel('nza/wacht')),   // wv3113: scherm.json van de wachter
       vandaag: (!SERVER_ECHT && process.env.NZA_VANDAAG) || '' });
   } catch (e) { logError('nza', new Error('laden faalde')); return null; }
 })();
@@ -22833,9 +22834,41 @@ async function appNza(req, res, a, route, d) {
 }
 function nzaInfo() {
   if (!NZA_SCHERM) return { aan: false };
-  try { return NZA_SCHERM.info(); } catch (e) { return { aan: true, fout: true }; }
+  let i;
+  try { i = NZA_SCHERM.info(); } catch (e) { i = { aan: true, fout: true }; }
+  try { if (nzaWachter) i.wachter = nzaWachter.info(); } catch (e) { i.wachter = { fout: true }; }   // wv3113: datum, exit, duur (try: ook TDZ)
+  return i;
 }
 // ── einde OVIS NZa scherm ──
+// ── OVIS NZa fase 2: de wachter (wv3113, 15-11-2026; plan § 2 "Versheid" en § 4 fase 2; Davids Ja 15-11 09:44) ──
+// Eén ronde per dag zonder taalmodel: mk-scripts/ovis-nza/wachter.py ronde (PUC-sectorlijst huisartsenzorg, CBb-uitspraken, nza.nl-nieuws,
+// VPH/InEen, Tweede Kamer). Nieuwe openbare stukken van NZa en CBb komen in de bibliotheek en de index; nieuws en Kamerstukken alleen als
+// titel + link (wacht/scherm.json → Nieuw op het scherm). Melding aan David alleen bij een nieuwe tariefbeschikking/beleidsregel
+// huisartsenzorg, een beslissing op bezwaar of een uitspraak van het CBb (één bericht per dag, nooit twee keer; dat doet het script).
+// Klok: elke 5 min (echte pod, rol primair); werk alleen 07:50–09:49 en eenmaal per datum (2 pogingen bij exit ≠ 0); niet tijdens de
+// onderhoudsstand of een OVIS-ronde (het script schrijft in de vault). Via socev-run met hartslag ovis-nza-wachter (drempel 36 u): een
+// mislukte ronde geeft box-rij + bericht van het vangnet; een falende bron (exit 3) meldt het script zelf één keer in de box.
+const nzaWachter = (function () {
+  const p = path.join(__dirname, 'sb2-nacht.js');
+  const script = '/opt/data/mk-scripts/ovis-nza/wachter.py';
+  if (!fs.existsSync(p) || !fs.existsSync(script)) return null;
+  try {
+    const m = require(p);
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'ovis-nza-wachter', hartslag: 'ovis-nza-wachter',
+      staatBestand: path.join(KLOKKEN_DIR, 'ovis-nza-wachter.json'), maxMin: 25, pogingen: 2,
+      venster: { van: [7, 50], tot: [9, 50] }, socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env,
+      argv: ['python3', '-I', script, 'ronde'] }) : null;
+  } catch (e) { logError('nza-wachter', new Error('laden faalde')); return null; }
+})();
+async function nzaWachterTik() {
+  if (!nzaWachter || !SERVER_ECHT || !rolPrimair()) return;
+  try {
+    const u = await nzaWachter.tik({ ams: ovisAms(), mag: function () { return !onderhoud.stand().aan && !(typeof ovisLoopt !== 'undefined' && ovisLoopt.nu); } });
+    if (u) schrijfLog(nu() + ' nza-wachter ' + velden({ exit: u.exit, ms: u.ms }));
+  } catch (e) { logError('nza-wachter-tik', new Error('tik faalde')); }
+}
+if (nzaWachter && SERVER_ECHT) { setInterval(function () { nzaWachterTik(); }, 5 * 60000).unref(); }
+// ── einde OVIS NZa wachter ──
 // ── OVIS Personeelsscherm (wv2991, 13-11-2026; plan vault "01_Ontwikkeling/OVIS Personeelsscherm - plan (Fable 5.2, 13-11-2026)", ontwerp fase 0
 // met Codex-review in mk-scripts/personeelsscherm/ontwerp-fase0.md) ──
 // Een Raspberry Pi aan de tv in de personeelskamer haalt elke 2 minuten een door de pod getekend scherm op van personeel.socev.dev (Worker
