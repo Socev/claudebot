@@ -237,3 +237,178 @@ test('geen huisdossier = nette fout zonder pad', async () => {
     assert.strictEqual(r.status, 503); assert.ok(!/\//.test(r.body.fout));
   } finally { fs.rmSync(t, { recursive: true, force: true }); }
 });
+
+// ── wv3102 fase 2: hypotheek, verbouwkosten, servicekosten (nep-bank), stroom (nep-Tibber), WOZ-beschikking ──
+function omgeving2(opties) {
+  const o = opties || {};
+  const t = fs.mkdtempSync(path.join(os.tmpdir(), 'vastgoed2-'));
+  const vault = M.maakVault(path.join(t, 'vault'));
+  const bank = o.geenBank ? path.join(t, 'weg', 'transacties.sqlite') : M.maakBank(path.join(t, 'bank', 'transacties.sqlite'));
+  const tibber = M.maakTibber(path.join(t, 'tibber', 'tibber.sqlite'), o);
+  const m = V.maak({ map: path.join(t, 'data'), vault, bronnen: M.nepBronnen(), bank, tibber, nu: () => new Date('2026-11-14T12:00:00Z') });
+  return { t, vault, bank, tibber, m, weg: () => fs.rmSync(t, { recursive: true, force: true }) };
+}
+const reeks = (o, n) => o.reeksen.filter((r) => r.reeks === n).map((r) => [r.peildatum, r.waarde]);
+
+test('fase 2 hypotheek: leningdelen per object (Garagebox-deel naar de box), lening- en restschuldreeks, bank gaat voor model', async () => {
+  const h = V.leesHypotheek(M.HYPOTHEEK);
+  assert.deepStrictEqual(h.delen.map((d) => [d.naam, d.doel, d.hoofdsom, d.start]), [['Hypo1 Huis', 'Huis', 200000, '2013-04-01'], ['Hypo2 Verbouwing', 'Verbouwing', 40000, '2018-12-01'],
+    ['Hypo3 Garagebox', 'Garagebox', 25000, '2018-12-01'], ['Hypo4 Zolder', 'Zolder', 30000, '2023-07-01']]);
+  assert.strictEqual(h.delen[1].rente_bank, '1,90%');
+  assert.deepStrictEqual(h.delen[3].restschulden.map((r) => r.bron), ['model', 'bank']);   // "—" in 2021 = geen stand
+  const o = omgeving2();
+  try {
+    const [w, b7, b12] = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten;
+    assert.deepStrictEqual(w.leningdelen.map((d) => d.naam), ['Hypo1 Huis', 'Hypo2 Verbouwing', 'Hypo4 Zolder']);
+    assert.deepStrictEqual(b7.leningdelen.map((d) => [d.naam, d.restschuld, d.restschuld_op, d.restschuld_bron]), [['Hypo3 Garagebox', 17950, '2026-10-26', 'bank']]);
+    assert.deepStrictEqual(b12.leningdelen, []);
+    assert.deepStrictEqual(reeks(w, 'lening'), [['2013-04-01', 200000], ['2018-12-01', 240000], ['2023-07-01', 270000]]);
+    // 1-5-2021 bank (Hypo1 + Hypo2), okt 2026 model valt weg (bank 26-10 binnen 45 dagen)
+    assert.deepStrictEqual(reeks(w, 'restschuld'), [['2021-05-01', 186000], ['2026-10-26', 177350.5]]);
+    assert.ok(!JSON.stringify(w.reeksen).includes('999999'));   // losse tekst telt niet
+  } finally { o.weg(); }
+});
+
+test('fase 2 verbouwkosten: alleen de totalen uit de vaste vorm, bij de woning, met kop en datum', async () => {
+  assert.deepStrictEqual(V.leesKosten('# Iets 2019\n\n## Offerte X (3-2-2019)\n\n| a | b |\n|---|---|\n| **Totaal incl. btw** | **€ 1.210,50** |\n\nLos **€ 5.000 incl. btw**.\n'),
+    [{ peildatum: '2019-02-03', waarde: 1210.5, kop: 'Offerte X (3-2-2019)', offerte: true }]);
+  const o = omgeving2();
+  try {
+    const w = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten[0];
+    assert.deepStrictEqual(w.reeksen.filter((r) => r.reeks === 'verbouwing').map((r) => [r.peildatum, r.waarde, /offerte/.test(r.toelichting)]),
+      [['2016-01-01', 1089, false], ['2018-11-05', 36300, true]]);
+  } finally { o.weg(); }
+});
+
+test('fase 2 servicekosten: privébox per jaar uit de nep-bank; BV-box, POT, externe rekening, andere VvE, niet geboekt en vervangen tellen niet', async () => {
+  const o = omgeving2();
+  try {
+    const [, b7, b12] = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten;
+    assert.deepStrictEqual(reeks(b7, 'servicekosten'), [['2025-12-31', 130.5], ['2026-12-31', 105]]);
+    assert.match(b7.reeksen.find((r) => r.reeks === 'servicekosten' && r.peildatum === '2026-12-31').toelichting, /^3 afschrijvingen, lopend jaar t\/m 15-4-2026$/);
+    assert.deepStrictEqual(b7.vve, { stand: 'ok', jaren: 2, onverdeeld: 0 });
+    assert.deepStrictEqual(reeks(b12, 'servicekosten'), []);
+    assert.strictEqual(b12.vve.stand, 'bv');
+  } finally { o.weg(); }
+  // twee privéboxen in dezelfde VvE: alleen posten met "<huisnummer>-<toevoeging>" worden toegewezen, de rest is onverdeeld
+  const u = V.vveUitBank([{ datum: '2026-01-02', bedrag: -10, tegen: 'VvE Proefpark', tekst: 'incasso' }, { datum: '2026-02-02', bedrag: -20, tegen: 'VvE Proefpark', tekst: '110-12' }],
+    [{ sleutel: 'a', vve: 'VvE Proefpark', eigenaar: 'A en B', zoek: { huisnummer: '110', toevoeging: '7' } }, { sleutel: 'b', vve: 'VvE Proefpark', eigenaar: 'A', zoek: { huisnummer: '110', toevoeging: '12' } }]);
+  assert.deepStrictEqual([u.a.jaren, u.a.onverdeeld, u.b.jaren['2026'].uit, u.b.onverdeeld], [{}, 1, 20, 1]);
+});
+
+test('fase 2 stroom: maanden uit de nep-Tibber bij de woning, deelmaand gemarkeerd; twee Tibber-woningen = niet koppelen', async () => {
+  const o = omgeving2();
+  try {
+    const [w, b7] = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten;
+    assert.deepStrictEqual(w.reeksen.filter((r) => r.reeks === 'stroom').map((r) => [r.peildatum, r.waarde, r.eenheid, r.toelichting]),
+      [['2026-09-01', 360, 'kWh', 'hele maand'], ['2026-10-01', 240, 'kWh', 'deels: 240 van 744 uur']]);
+    assert.deepStrictEqual(reeks(w, 'stroomkosten'), [['2026-09-01', 90], ['2026-10-01', 60]]);
+    assert.deepStrictEqual(reeks(b7, 'stroom'), []);
+  } finally { o.weg(); }
+  const t = omgeving2({ tweeWoningen: true });
+  try {
+    const r = (await t.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body;
+    assert.deepStrictEqual(reeks(r.objecten[0], 'stroom'), []);
+    assert.deepStrictEqual([r.geld.tibber.ok, r.geld.tibber.reden], [false, 'meer dan één Tibber-woning']);
+  } finally { t.weg(); }
+});
+
+test('fase 2: een onleesbare bank laat de vorige servicekosten staan; bank en Tibber worden nooit beschreven', async () => {
+  const o = omgeving2();
+  try {
+    const sha = (p) => require('crypto').createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+    const voor = [sha(o.bank), sha(o.tibber)];
+    await o.m.app({ pad: '/app/vastgoed', methode: 'GET' });
+    assert.deepStrictEqual([sha(o.bank), sha(o.tibber)], voor);
+    fs.writeFileSync(o.bank, 'geen databank');
+    await o.m.app({ pad: '/app/vastgoed/dossier', methode: 'POST', body: {} });
+    const r = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body;
+    assert.strictEqual(r.geld.bank.ok, false); assert.strictEqual(r.geld.bank.reden, 'niet te lezen');
+    assert.deepStrictEqual(reeks(r.objecten[1], 'servicekosten').length, 2);
+  } finally { o.weg(); }
+  const g = omgeving2({ geenBank: true });
+  try {
+    const r = (await g.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body;
+    assert.deepStrictEqual([r.geld.bank.ok, r.geld.bank.reden, r.geld.hypotheek.ok, r.geld.tibber.ok], [false, 'databank niet gevonden', true, true]);
+  } finally { g.weg(); }
+});
+
+test('fase 2 WOZ: tekst geeft alleen een voorstel; pas na bevestiging telt de WOZ (dossierstand), nooit zonder controle', async () => {
+  const tekst = 'Gemeente Proef  Beschikking WOZ  Belastingjaar 2026\nWaardepeildatum: 1 januari 2025\nVastgestelde waarde   € 432.000\nAanslag ozb € 321,00';
+  assert.deepStrictEqual(V.wozUitTekst(tekst, new Date('2026-11-14T12:00:00Z')), { jaar: 2026, waarde: 432000, peildatum: '2025-01-01' });
+  assert.deepStrictEqual(V.wozUitTekst('WOZ-waarde: € 98.000 waardepeildatum 01-01-2024', new Date('2026-11-14T12:00:00Z')), { jaar: 2025, waarde: 98000, peildatum: '2024-01-01' });
+  assert.deepStrictEqual(V.wozUitTekst('', new Date()), { jaar: null, waarde: null, peildatum: null });
+  const o = omgeving2();
+  try {
+    const [, , b12] = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten;
+    assert.ok(b12.stand.ontbreekt.some((x) => /^WOZ-beschikking 2026/.test(x)));
+    assert.deepStrictEqual(o.m.wozHerken(tekst), { jaar: 2026, waarde: 432000, peildatum: '2025-01-01' });   // herkennen bewaart niets
+    let r = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten[2];
+    assert.ok(r.stand.ontbreekt.some((x) => /^WOZ-beschikking 2026/.test(x)));
+    for (const fout of [{ id: b12.id, jaar: 1999, waarde: 50000 }, { id: b12.id, jaar: 2026, waarde: 12.5 }, { id: b12.id, jaar: 2026, waarde: 50000, peildatum: '2027-01-01' }, { id: 99, jaar: 2026, waarde: 50000 }]) {
+      assert.throws(() => o.m.wozControle(fout), (e) => e instanceof V.Fout && (e.status === 400 || e.status === 404) && !/\d{4,}/.test(e.message));
+    }
+    const c = o.m.wozControle({ id: b12.id, jaar: 2026, waarde: 41000 });
+    assert.deepStrictEqual([c.peildatum, c.stam], ['2025-01-01', 'WOZ-beschikking 2026 Garagebox 12']);
+    // het stuk zelf schrijft server.js; hier alleen de verwijzing (een pad buiten Bronnen/Huis wordt geweigerd)
+    const naam = 'Prive - 2026 - WOZ-beschikking 2026 Garagebox 12.pdf';
+    fs.writeFileSync(path.join(o.vault, '20_Prive', 'Bronnen', 'Huis', naam), '%PDF-proef');
+    o.m.wozVastleggen({ id: b12.id, jaar: 2026, waarde: 41000 }, { pad: '20_Prive/Bronnen/Huis/' + naam, sha: 'a'.repeat(64) });
+    r = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten[2];
+    assert.ok(!r.stand.ontbreekt.some((x) => /^WOZ-beschikking/.test(x)), r.stand.ontbreekt.join(' | '));
+    assert.deepStrictEqual(reeks(r, 'woz'), [['2025-01-01', 41000]]);
+    assert.match(r.reeksen.find((x) => x.reeks === 'woz').toelichting, /^WOZ 2026 \(beschikking, door jou bevestigd\)$/);
+    assert.ok(r.stukken.some((s) => s.soort === 'woz' && /WOZ-beschikking 2026/.test(s.naam)));   // dossier opnieuw gelezen
+    o.m.wozVastleggen({ id: b12.id, jaar: 2026, waarde: 42000 }, { pad: '../../etc/x', sha: 'nee' });   // zelfde jaar: vervangen, pad geweigerd
+    r = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten[2];
+    assert.deepStrictEqual(reeks(r, 'woz'), [['2025-01-01', 42000]]);
+    assert.strictEqual(r.reeksen.find((x) => x.reeks === 'woz').bron, 'David');
+    // de woning: een bevestigde WOZ van een jaar dat het dossier ook noemt, gaat voor (één punt per peildatum)
+    const w = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten[0];
+    o.m.wozVastleggen({ id: w.id, jaar: 2025, waarde: 415000 }, null);
+    const w2 = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten[0];
+    assert.deepStrictEqual(reeks(w2, 'woz').filter((x) => x[0] === '2024-01-01'), [['2024-01-01', 415000]]);
+    const i = o.m.info();
+    assert.deepStrictEqual([i.woz_eigen, i.leningdelen, i.geld.bank, i.geld.tibber], [2, 4, true, true]);
+    assert.ok(!/41000|42000|415000|17950|Hofstraat|€/.test(JSON.stringify(i)));
+  } finally { o.weg(); }
+});
+
+test('fase 2: redenen zonder bedrag; dossier-route meldt alleen of de bronnen lukten; na een dag vanzelf opnieuw lezen', async () => {
+  const t = fs.mkdtempSync(path.join(os.tmpdir(), 'vastgoed2-'));
+  try {
+    const vault = M.maakVault(path.join(t, 'vault'));
+    const bank = M.maakBank(path.join(t, 'bank', 'transacties.sqlite'));
+    let klok = new Date('2026-11-14T12:00:00Z');
+    const m = V.maak({ map: path.join(t, 'data'), vault, bronnen: null, bank, tibber: null, nu: () => klok });
+    const r = await m.app({ pad: '/app/vastgoed/dossier', methode: 'POST', body: {} });
+    assert.deepStrictEqual([r.body.gelezen.hypotheek, r.body.gelezen.bank, r.body.gelezen.tibber, r.body.gelezen.verbouwkosten], [true, true, false, 2]);
+    assert.ok(!/\d{3,}|€/.test(r.reden));
+    const g = (await m.app({ pad: '/app/vastgoed', methode: 'GET' })).body;
+    assert.deepStrictEqual([g.geld.tibber.ok, g.geld.tibber.reden], [false, 'niet gekoppeld op deze pod']);
+    // de VvE betaalt intussen opnieuw; binnen een dag niets, na een dag leest GET zelf opnieuw
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(bank); db.prepare("INSERT INTO transacties (rek, status, datum, bedrag, valuta, tegenpartij, omschrijving) VALUES ('r1','booked','2026-10-01',-55,'EUR','VVE GARAGEPARK PROEF','kwartaal 4')").run(); db.close();
+    const begin = klok.getTime();
+    klok = new Date(begin + 2 * 3600 * 1000);
+    let b7 = (await m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten[1];
+    assert.deepStrictEqual(reeks(b7, 'servicekosten').find((x) => x[0] === '2026-12-31'), ['2026-12-31', 105]);
+    klok = new Date(begin + 25 * 3600 * 1000);
+    b7 = (await m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten[1];
+    assert.deepStrictEqual(reeks(b7, 'servicekosten').find((x) => x[0] === '2026-12-31'), ['2026-12-31', 160]);
+  } finally { fs.rmSync(t, { recursive: true, force: true }); }
+});
+
+test('review wv3102: restschuld € 0 telt (MOET 1); tabel en grafiek dezelfde voorrang bank/model (MOET 2); onvolledige kosten = geen bedrag (ZOU 1)', () => {
+  const md = M.HYPOTHEEK.replace('| 13 | Hypo3 | Garagebox | 1,50% | 1,50% | € 17.950,00 |', '| 13 | Hypo3 | Garagebox | 1,50% | 1,50% | € 0,00 |');
+  const h = V.leesHypotheek(md);
+  const d3 = h.delen.find((d) => d.naam === 'Hypo3 Garagebox');
+  assert.deepStrictEqual(d3.restschulden.filter((r) => r.bron === 'bank').pop(), { peildatum: '2026-10-26', waarde: 0, bron: 'bank' });
+  assert.deepStrictEqual(V.hypotheekReeksen([d3]).filter((r) => r.reeks === 'restschuld').map((r) => [r.peildatum, r.waarde]), [['2021-05-01', 22000], ['2026-10-26', 0]]);
+  // een modelstand die iets NIEUWER is dan de bankstand: de tabel neemt toch de bank (zoals de grafiek)
+  const d = { naam: 'Hypo9 X', restschulden: [{ peildatum: '2026-10-26', waarde: 100, bron: 'bank' }, { peildatum: '2026-11-01', waarde: 90, bron: 'model' }, { peildatum: '2021-05-01', waarde: 500, bron: 'bank' }] };
+  assert.deepStrictEqual(V.laatsteStand(d, [d]), { peildatum: '2026-10-26', waarde: 100, bron: 'bank' });
+  assert.deepStrictEqual(V.hypotheekReeksen([d]).map((r) => r.peildatum), ['2021-05-01', '2026-10-26']);
+  const s = V.stroomMaanden([{ home_id: 'h', maand: '2026-09', kwh: 360, kosten: 50, uren: 720, kosten_uren: 700 }, { home_id: 'h', maand: '2026-08', kwh: 1, kosten: 2, uren: 744, kosten_uren: 744 }]);
+  assert.deepStrictEqual(s.maanden.map((m) => [m.maand, m.kosten, m.volledig]), [['2026-09', null, true], ['2026-08', 2, true]]);
+});

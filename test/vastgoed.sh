@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# wv3085: OVIS Vastgoed fase 1 — CI-poort (vastgoed.js laadt alleen fs, path en node:sqlite; geen netwerk, proces of log), koppeling in
+# wv3085: OVIS Vastgoed fase 1 (+ fase 2 wv3102: hypotheek, verbouwkosten, nep-bank, nep-Tibber, WOZ-knop) — CI-poort (vastgoed.js laadt alleen fs, path en node:sqlite; geen netwerk, proces of log), koppeling in
 # server.js (één GET en precies vier POST-routes achter de app-poort, glijden, /health.vastgoed, ververs alleen primair, geen inhoud in de log),
 # uitrol.sh en APP_IDS, de module (test/vastgoed.test.js, verzonnen dossier uit test/vastgoed-maak.js) en de gedeelde bronnenlaag
 # (test/vastgoed-laag.py: osint.py vastgoed zonder netwerk, lek- en afrondeisen).
-# Kruisproef: KRUIS=1 bash test/vastgoed.sh — elf kopieën met één fout erin (in de werkboom, zie mk-geheugen osint-kruisproef-in-werkboom);
+# Kruisproef: KRUIS=1 bash test/vastgoed.sh — tweeëntwintig kopieën (elf fase 1, elf fase 2 wv3102) met één fout erin (in de werkboom, zie mk-geheugen osint-kruisproef-in-werkboom);
 # elke kopie moet rood geven.
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -15,9 +15,10 @@ if echo "$C" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new 
 [ $f = 0 ] && echo "GROEN CI-poort: vastgoed.js heeft geen netwerk, proces of log"
 g=0
 grep -q "const vastgoedApp = (function () {" server.js || { echo "ROOD  server.js: vastgoedApp ontbreekt"; g=1; }
-P=$(grep -oE "POST \\\\/app\\\\/vastgoed\\\\/\([a-z|]+\)" server.js)
-[ "$P" = 'POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen)' ] || { echo "ROOD  server.js: POST-routes van Vastgoed zijn niet precies de vier ($P)"; g=1; }
-grep -qF "['dossier', 'ververs', 'beelden', 'aanroepen'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });" server.js || { echo "ROOD  server.js: Vastgoed-routes verlengen de sessie niet"; g=1; }
+P=$(grep -oE "POST \\\\/app\\\\/vastgoed\\\\/\([a-z|-]+\)" server.js)
+[ "$P" = 'POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar)' ] || { echo "ROOD  server.js: POST-routes van Vastgoed zijn niet precies de zes ($P)"; g=1; }
+grep -qF "['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });" server.js || { echo "ROOD  server.js: Vastgoed-routes verlengen de sessie niet"; g=1; }
+grep -qF "p === '/app/ghawa/website/concept' || p === '/app/vastgoed/woz-lees') ? APP_OSINT_BESTAND_MAX_BODY" server.js || { echo "ROOD  server.js: woz-lees heeft niet de bestandsgrens (10 MB)"; g=1; }
 grep -qE "^\s+vastgoed: typeof vastgoedInfo === 'function'" server.js || { echo "ROOD  server.js: /health.vastgoed ontbreekt"; g=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* vastgoed\.js" uitrol.sh || { echo "ROOD  uitrol.sh: vastgoed.js niet in RELEASE_OPTIONEEL"; g=1; }
 grep -qE "'vastgoed'(, '[a-z-]+')*\]" app-vast.js || { echo "ROOD  app-vast.js: vastgoed niet in APP_IDS"; g=1; }
@@ -25,7 +26,18 @@ B=$(awk '/── OVIS Vastgoed \(wv3085/,/── einde OVIS Vastgoed ──/' se
 [ -n "$B" ] || { echo "ROOD  server.js: blok OVIS Vastgoed niet gevonden"; g=1; }
 echo "$B" | grep -qF "if (!rolPrimair()) return appWeiger(res, 409" || { echo "ROOD  server.js: ververs niet beperkt tot de hoofdpod"; g=1; }
 echo "$B" | grep -qF "return osintRun(['vastgoed'], invoer);" || { echo "ROOD  server.js: Vastgoed gebruikt niet de gedeelde bronnenlaag (osint.py vastgoed)"; g=1; }
-if echo "$B" | grep -nE "logError\([^)]*(e\.message|String\(e|d\.|u\.body|invoer)|schrijfLog|fetch\("; then echo "ROOD  server.js: Vastgoed logt inhoud of gaat zelf naar buiten"; g=1; fi
+if echo "$B" | grep -nE "logError\([^)]*(e\.message|String\(e|d\.|u\.body|invoer|tekst|voorstel)|schrijfLog|fetch\("; then echo "ROOD  server.js: Vastgoed logt inhoud of gaat zelf naar buiten"; g=1; fi
+# wv3102 (fase 2): bank en Tibber alleen via serverPad (proef = wegwerpmap), WOZ-stuk via vault-veilig zonder overschrijven, proef nooit in de echte vault,
+# token per apparaat en object, tekst lokaal (pdftotext/tesseract), geen netwerk
+echo "$B" | grep -qF "maak({ map: VASTGOED_DIR, vault: VAULT, bank: VASTGOED_BANK, tibber: VASTGOED_TIBBER," || { echo "ROOD  server.js: bank/Tibber niet aan vastgoed.js gegeven"; g=1; }
+echo "$B" | grep -qE "^const VASTGOED_BANK = serverPad\('vastgoed_bank'" || { echo "ROOD  server.js: bankpad van Vastgoed niet via serverPad"; g=1; }
+echo "$B" | grep -qE "^const VASTGOED_TIBBER = serverPad\('vastgoed_tibber'" || { echo "ROOD  server.js: Tibber-pad van Vastgoed niet via serverPad"; g=1; }
+echo "$B" | grep -qF "VV().schrijf(path.join(VAULT, map, naam), k.buf, { modus: 0o660, alsGelijk: function (st) { return !st; } })" || { echo "ROOD  server.js: WOZ-stuk niet via vault-veilig of overschrijft"; g=1; }
+echo "$B" | grep -qF "if (!SERVER_ECHT && serverZelfdePlek(VAULT, '/opt/data/AI_SecondBrain')) return appWeiger(res, 409" || { echo "ROOD  server.js: proefserver kan in de echte vault schrijven"; g=1; }
+echo "$B" | grep -qF "if (!k || k.apparaat !== (a && a.id) || k.id !== Number(d.id)) return appWeiger(res, 410" || { echo "ROOD  server.js: WOZ-token niet gebonden aan apparaat en object"; g=1; }
+echo "$B" | grep -qF "try { c = vastgoedApp.wozControle(d); }" || { echo "ROOD  server.js: WOZ zonder controle van wat David bevestigde"; g=1; }
+[ "$(echo "$B" | grep -cE "spawn\('(/usr/bin/pdftotext|tesseract)'")" = 2 ] || { echo "ROOD  server.js: WOZ-tekst niet lokaal via pdftotext/tesseract"; g=1; }
+if echo "$B" | grep -nE "https?://|osintRun\(\['woz|wozloket|waardeloket"; then echo "ROOD  server.js: WOZ gaat naar buiten (niet gebouwd, opdracht § 5)"; g=1; fi
 grep -qE "a\[0\] == 'vastgoed'" "$OPY" || { echo "ROOD  osint.py: opdracht vastgoed ontbreekt"; g=1; }
 [ $g = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS, osint.py"
 [ $g = 0 ] || f=1
@@ -54,6 +66,20 @@ if [ "${KRUIS:-0}" = 1 ]; then
   kruis vastgoed.js "const tax = reeksen.filter((r) => r.reeks === 'taxatie')" "const tax = reeksen.filter((r) => r.reeks === 'taxatie' || r.reeks === 'taxatie-na')" "indicatie op de waarde na verbouwing (review MOET 1)"
   kruis vastgoed.js "const gelukt = GROEPEN.filter((g) => groepen[g] === true);" "const gelukt = GROEPEN.filter((g) => groepen[g] !== undefined);" "feiten van een mislukte bron weggegooid (review MOET 3)"
   kruis vastgoed.js "if (bezig.has(id)) throw new Fout(429, 'wordt al bijgewerkt');" "" "twee verversingen tegelijk (review ZOU 1)"
-  [ $k = 0 ] && echo "GROEN kruisproef: alle elf rood" || f=1
+  # wv3102 (fase 2)
+  kruis vastgoed.js "AND coalesce(r.eigenaar, '') NOT IN ('POT', 'extern')" "AND 1 = 1" "POT- en externe rekening tellen mee als servicekosten"
+  kruis vastgoed.js "for (const b of boxen.filter((x) => x.vve && !opBv(x.eigenaar)))" "for (const b of boxen.filter((x) => x.vve))" "box op naam van een BV krijgt privéposten"
+  kruis vastgoed.js "if (!/\bv\.?v\.?e\b|vereniging van eigenaars/.test(tp)" "if (!/\bv\.?v\.?e\b|vereniging van eigenaars/.test(t)" "VvE in de omschrijving telt als VvE-post"
+  kruis vastgoed.js "return (r) => r.bron !== 'model' ||" "return (r) => true ||" "modelstand naast een bankstand blijft staan"
+  kruis vastgoed.js "if (w !== null) d.restschulden.push({ peildatum: datumUit(kb[1])" "if (w) d.restschulden.push({ peildatum: datumUit(kb[1])" "afgelost leningdeel (€ 0) telt niet (review MOET 1)"
+  kruis vastgoed.js "return d.restschulden.filter(ok).sort(" "return d.restschulden.sort(" "tabel kiest een andere stand dan de grafiek (review MOET 2)"
+  kruis vastgoed.js "(r.kosten_uren === undefined || r.kosten_uren >= r.uren)" "true" "onvolledige stroomkosten als maandbedrag (review ZOU 1)"
+  kruis vastgoed.js "volledig: r.uren >= verwacht - 1" "volledig: true" "deelmaand Tibber als hele maand"
+  kruis vastgoed.js "if (reeksen[i].reeks === 'woz' && reeksen[i].peildatum === w.peildatum) reeksen.splice(i, 1);" "" "bevestigde WOZ en dossier-WOZ dubbel"
+  kruis vastgoed.js "stuk.pad.startsWith(BRONNEN + '/') && !stuk.pad.includes('..')" "true" "WOZ-stuk buiten 20_Prive/Bronnen/Huis"
+  kruis vastgoed.js "      if (bank.ok) {
+        db.prepare(\`DELETE FROM reeks WHERE herkomst = 'bank'\`).run();" "      db.prepare(\`DELETE FROM reeks WHERE herkomst = 'bank'\`).run();
+      if (bank.ok) {" "onleesbare bank wist de vorige servicekosten"
+  [ $k = 0 ] && echo "GROEN kruisproef: alle tweeëntwintig rood" || f=1
 fi
 exit $f

@@ -98,6 +98,12 @@ const BOX1 = `# Garagebox Proefpark (box 7) — Hofstraat 110-7
 - **Levering**: akte van levering **1-6-2018** (10:00 uur).
 - **Lopende lasten (huishoudbudget):** VvE-bijdrage ca. € 10–15 per maand.
 - **Vloerbelasting type 1.A (deze box): max. 500 kg/m²** (andere types 250 kg/m²).
+- **Financiering:** meegefinancierd via leningdeel *Garagebox* in de hypotheek op de woning.
+- Zie het [[20_Prive/Bronnen/Huis/Prive - 2018 - Huishoudelijk reglement VvE GaragePark Proef.pdf|reglement]].
+
+## VvE
+
+- Lid van de **[[10_Zakelijk/_Gedeeld/Relaties/VvE GaragePark Proef|VvE GaragePark Proef]]**; servicekosten per kwartaal.
 `;
 
 const BOX2 = `# Aankoop garagebox — Hofstraat 110-12, Apeldoorn
@@ -116,13 +122,30 @@ const BOX2 = `# Aankoop garagebox — Hofstraat 110-12, Apeldoorn
 | Ingeschreven | **3 augustus 2026**, register onroerende zaken **HYP 4, deel 1, nummer 2** |
 | Kadastrale aanduiding | **Apeldoorn U 9900 A 12** — Hofstraat 110 12 Apeldoorn |
 | Rechthebbende | Proef Holding B.V. |
+
+Beheerder van de [[10_Zakelijk/_Gedeeld/Relaties/VvE GaragePark Proef|VvE GaragePark Proef]] is Proefbeheer B.V.
 `;
 
 const ANDERE = {
   'Index.md': '# Huis\n',
   'Eigen woning.md': '# Eigen woning\n',
-  'Terras in het talud 2016.md': '# Terras in het talud 2016\n',
-  'Verbouwing 2018-2019 (uitbouw).md': '# Verbouwing 2018-2019 (uitbouw)\n',
+  'Terras in het talud 2016.md': '# Terras in het talud 2016\n\n## Kerngegevens\n\n| Item | Waarde |\n|---|---|\n| Prijs | € 1.000 − € 100 = **€ 900 excl. btw**; **€ 1.089,00 incl. btw** |\n',
+  'Verbouwing 2018-2019 (uitbouw).md': `# Verbouwing 2018-2019 (uitbouw)
+
+- Financiering: leningdeel *Verbouwing* € 40.000 (losse tekst telt niet mee).
+
+## Offerte Proefbouw (nr. 1-2, gemaild 5-11-2018)
+
+| Onderdeel | Bedrag |
+|---|--:|
+| Ruwbouw | € 20.000,00 |
+| **Totaal excl. btw** | **€ 30.000,00** |
+| **Totaal incl. btw** | **€ 36.300,00** |
+
+## Keukenkast (april 2019)
+
+- € 1.000 = **€ 1.210 incl. btw** (losse tekst telt niet mee).
+`,
   'Kelder - verbouwplan (Proefbureau).md': '# Kelder — verbouwplan met Proefbureau\n',
 };
 const STUKKEN = [
@@ -139,9 +162,82 @@ const STUKKEN = [
   'Prive - 2018 - Huishoudelijk reglement VvE GaragePark Proef.pdf',
 ];
 
+// wv3102 (fase 2): verzonnen hypotheekpagina in de vorm van de echte (20_Prive/Financien/Hypotheek*.md)
+const HYPOTHEEK = `# Hypotheek en overlijdensrisicoverzekeringen
+
+## Kerngegevens
+
+- **Stand (model):** restschuld **€ 999.999** (losse tekst telt niet mee).
+
+## Leningdelen
+
+| Deel (model) | Nr. (vóór 2021) | Hoofdsom | Start | Rente nu | Rentevast t/m | Einde looptijd | Restschuld 1-5-2021 (bank) | Restschuld okt 2026 (model) |
+|---|---|--:|---|--:|---|---|--:|--:|
+| Hypo1 Huis | /1 | € 200.000 | apr 2013 | 1,50% | 1-5-2031 | 1-4-2043 | € 150.000 | € 120.000 |
+| Hypo2 Verbouwing | /2 | € 40.000 | dec 2018 | 2,00% (incl. opslag) | 1-5-2031 | 1-1-2049 | € 36.000 | € 30.000 |
+| Hypo3 Garagebox | /3 | € 25.000 | dec 2018 | 1,50% | 1-5-2031 | 1-1-2049 | € 22.000 | € 18.000 |
+| Hypo4 Zolder | onbekend | € 30.000 | jul 2023 | 4,00% | onbekend | ca. medio 2053 (model) | — | € 28.000 |
+| **Totaal** | | | | | | | | **€ 196.000** |
+
+## Bankstand 26-10-2026 (bankapp)
+
+| Deel bank | Deel model | Doel | Rente bank | Rente model | Restschuld bank |
+|---|---|---|--:|--:|--:|
+| 11 | Hypo1 | Huis | 1,50% | 1,50% | € 119.500,50 |
+| 12 | Hypo2 | Verbouwing | **1,90%** | 2,00% | € 29.900,00 |
+| 13 | Hypo3 | Garagebox | 1,50% | 1,50% | € 17.950,00 |
+| 14 | Hypo4 | Zolder | 4,00% | 4,00% | € 27.950,00 |
+| **Totaal** | | | | | **€ 195.300,50** |
+`;
+
+// wv3102: nep-bank (de vorm van bank-archief transacties.sqlite, alleen de kolommen die vastgoed.js leest) en nep-Tibber (tibber.sqlite verbruik).
+// Verzonnen posten: box 7 (privé) betaalt de VvE per kwartaal; box 12 staat op naam van een BV; ruis: andere VvE, POT-rekening, externe rekening.
+function maakBank(pad) {
+  const { DatabaseSync } = require('node:sqlite');
+  fs.mkdirSync(path.dirname(pad), { recursive: true });
+  const db = new DatabaseSync(pad);
+  db.exec(`CREATE TABLE rekeningen (rek TEXT PRIMARY KEY, eigenaar TEXT);
+    CREATE TABLE transacties (nr INTEGER PRIMARY KEY, rek TEXT NOT NULL, status TEXT NOT NULL, datum TEXT, bedrag REAL, valuta TEXT, tegenpartij TEXT, omschrijving TEXT, vervangen_door INTEGER);`);
+  db.exec(`INSERT INTO rekeningen VALUES ('r1', 'samen'), ('r2', 'David'), ('pot', 'POT'), ('ext', 'extern');`);
+  const t = db.prepare('INSERT INTO transacties (rek, status, datum, bedrag, valuta, tegenpartij, omschrijving, vervangen_door) VALUES (?,?,?,?,?,?,?,?)');
+  for (const [rek, st, dag, b, tp, om, vv] of [
+    ['r1', 'booked', '2025-01-02', -50, 'VVE GARAGEPARK PROEF', 'SEPA Incasso VvE-bijdrage', null],
+    ['r1', 'booked', '2025-04-01', -50, 'VVE GARAGEPARK PROEF', 'SEPA Incasso VvE-bijdrage', null],
+    ['r1', 'booked', '2025-04-01', -10.5, 'VVE GARAGEPARK PROEF', 'Verrekening', null],
+    ['r2', 'booked', '2025-06-27', -20, 'VvE GaragePark Proef', 'Hofstraat 110-7', null],
+    ['r1', 'booked', '2026-01-02', -55, 'Vereniging van Eigenaars GaragePark Proef', 'kwartaal 1', null],
+    ['r1', 'booked', '2026-04-01', -55, 'VVE GARAGEPARK PROEF', 'SEPA Incasso VvE-bijdrage', null],
+    ['r1', 'booked', '2026-04-15', 5, 'VVE GARAGEPARK PROEF', 'Uitbetaling voorstand', null],
+    ['r1', 'pending', '2026-07-01', -999, 'VVE GARAGEPARK PROEF', 'nog niet geboekt', null],
+    ['r1', 'booked', '2026-07-01', -888, 'VVE GARAGEPARK PROEF', 'vervangen post', 1],
+    ['pot', 'booked', '2026-02-01', -777, 'VVE GARAGEPARK PROEF', 'POT-rekening telt niet', null],
+    ['ext', 'booked', '2026-02-01', -666, 'VVE GARAGEPARK PROEF', 'externe rekening telt niet', null],
+    ['r1', 'booked', '2026-03-01', -444, 'VvE Appartementen Elders', 'andere VvE', null],
+    ['r1', 'booked', '2026-03-02', -333, 'Garagepark Proef BV', 'huur, geen VvE', null],
+  ]) t.run(rek, st, dag, b, 'EUR', tp, om, vv);
+  db.close();
+  return pad;
+}
+function maakTibber(pad, o) {
+  const { DatabaseSync } = require('node:sqlite');
+  fs.mkdirSync(path.dirname(pad), { recursive: true });
+  const db = new DatabaseSync(pad);
+  db.exec('CREATE TABLE verbruik (home_id text, van text, tot text, kwh real, kosten real, eenheidsprijs real, eenheidsprijs_btw real, valuta text, primary key (home_id, van))');
+  const t = db.prepare('INSERT INTO verbruik (home_id, van, kwh, kosten) VALUES (?,?,?,?)');
+  // september 2026 volledig (720 uur × 0,5 kWh), oktober deels (10 dagen), één uur zonder meting (null)
+  for (let d = 1; d <= 30; d++) for (let u = 0; u < 24; u++) t.run('h1', `2026-09-${String(d).padStart(2, '0')}T${String(u).padStart(2, '0')}:00:00.000+02:00`, 0.5, 0.125);
+  for (let d = 1; d <= 10; d++) for (let u = 0; u < 24; u++) t.run('h1', `2026-10-${String(d).padStart(2, '0')}T${String(u).padStart(2, '0')}:00:00.000+02:00`, 1, 0.25);
+  t.run('h1', '2026-10-11T00:00:00.000+02:00', null, null);
+  if (o && o.tweeWoningen) t.run('h2', '2026-09-01T00:00:00.000+02:00', 1, 1);
+  db.close();
+  return pad;
+}
+
 function maakVault(dir) {
   const huis = path.join(dir, '20_Prive', 'Huis'), bron = path.join(dir, '20_Prive', 'Bronnen', 'Huis');
   fs.mkdirSync(huis, { recursive: true }); fs.mkdirSync(bron, { recursive: true });
+  fs.mkdirSync(path.join(dir, '20_Prive', 'Financien'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '20_Prive', 'Financien', 'Hypotheek en overlijdensrisicoverzekeringen.md'), HYPOTHEEK);
   fs.writeFileSync(path.join(huis, 'Woning Hofstraat 110.md'), WONING);
   fs.writeFileSync(path.join(huis, 'Garagebox Proefpark (box 7).md'), BOX1);
   fs.writeFileSync(path.join(huis, 'Garagebox-Hofstraat-110-12.md'), BOX2);
@@ -183,4 +279,4 @@ function nepBronnen(opties) {
   return f;
 }
 
-module.exports = { maakVault, nepBronnen, WONING, BOX1, BOX2, STUKKEN };
+module.exports = { maakVault, nepBronnen, maakBank, maakTibber, WONING, BOX1, BOX2, STUKKEN, HYPOTHEEK };
