@@ -3,7 +3,7 @@
 # server.js (één GET en precies vier POST-routes achter de app-poort, glijden, /health.vastgoed, ververs alleen primair, geen inhoud in de log),
 # uitrol.sh en APP_IDS, de module (test/vastgoed.test.js, verzonnen dossier uit test/vastgoed-maak.js) en de gedeelde bronnenlaag
 # (test/vastgoed-laag.py: osint.py vastgoed zonder netwerk, lek- en afrondeisen).
-# Kruisproef: KRUIS=1 bash test/vastgoed.sh — tweeëntwintig kopieën (elf fase 1, elf fase 2 wv3102) met één fout erin (in de werkboom, zie mk-geheugen osint-kruisproef-in-werkboom);
+# Kruisproef: KRUIS=1 bash test/vastgoed.sh — zesentwintig kopieën (elf fase 1, elf fase 2 wv3102, vier wv3131) met één fout erin (in de werkboom, zie mk-geheugen osint-kruisproef-in-werkboom);
 # elke kopie moet rood geven.
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -66,6 +66,12 @@ if [ "${KRUIS:-0}" = 1 ]; then
   kruis vastgoed.js "const tax = reeksen.filter((r) => r.reeks === 'taxatie')" "const tax = reeksen.filter((r) => r.reeks === 'taxatie' || r.reeks === 'taxatie-na')" "indicatie op de waarde na verbouwing (review MOET 1)"
   kruis vastgoed.js "const gelukt = GROEPEN.filter((g) => groepen[g] === true);" "const gelukt = GROEPEN.filter((g) => groepen[g] !== undefined);" "feiten van een mislukte bron weggegooid (review MOET 3)"
   kruis vastgoed.js "if (bezig.has(id)) throw new Fout(429, 'wordt al bijgewerkt');" "" "twee verversingen tegelijk (review ZOU 1)"
+  # wv3131 (WOZ-tabel)
+  kruis vastgoed.js "  wozTabellen(md, u.reeks);   // wv3131: de box las WOZ nog nergens" "" "box leest de WOZ-tabel niet"
+  kruis vastgoed.js "kolom = bj >= 0 && pd >= 0 && w >= 0 ? { bj, pd, w } : null;" "kolom = { bj: 0, pd: 1, w: 2 };" "vaste kolomvolgorde in de WOZ-tabel"
+  kruis vastgoed.js "if (reeks.some((r) => r.reeks === 'woz' && r.peildatum === dag)) continue;" "" "dubbele WOZ-peildatum (tabel en aangifte)"
+  kruis vastgoed.js "    if (!niveau) continue;
+    if (!/^\\s*\\|/.test(l))" "    if (!/^\\s*\\|/.test(l))" "tabel buiten een WOZ-kop wordt gelezen"
   # wv3102 (fase 2)
   kruis vastgoed.js "AND coalesce(r.eigenaar, '') NOT IN ('POT', 'extern')" "AND 1 = 1" "POT- en externe rekening tellen mee als servicekosten"
   kruis vastgoed.js "for (const b of boxen.filter((x) => x.vve && !opBv(x.eigenaar)))" "for (const b of boxen.filter((x) => x.vve))" "box op naam van een BV krijgt privéposten"
