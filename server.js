@@ -22899,7 +22899,8 @@ const NZA_SCHERM = (function () {
       script: (!SERVER_ECHT && process.env.NZA_SCRIPT) || path.join(VAULT, '.claude/skills/ovis-nza/nza.py'),
       db: serverPad('nza-db', process.env.NZA_DB, '/opt/data/ovis-nza/nza.db', serverProefDeel('nza/nza.db')),
       wacht: serverPad('nza-wacht', process.env.NZA_WACHT, '/opt/data/ovis-nza/wacht', serverProefDeel('nza/wacht')),   // wv3113: scherm.json van de wachter
-      vandaag: (!SERVER_ECHT && process.env.NZA_VANDAAG) || '' });
+      vandaag: (!SERVER_ECHT && process.env.NZA_VANDAAG) || '',
+      toegang: SERVER_ECHT ? '/opt/data/mk-scripts/ovis-nza/toegang.py' : (process.env.NZA_TOEGANG || '') });   // wv3153: /health.nza.index_leesbaar_agent
   } catch (e) { logError('nza', new Error('laden faalde')); return null; }
 })();
 async function appNza(req, res, a, route, d) {

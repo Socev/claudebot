@@ -117,3 +117,23 @@ test('proefdossier door het echte nza.py', { skip: echtAan ? false : 'nza.py met
   const ov = (await vroeg.app({ pad: '/app/nza', methode: 'GET' })).body;
   assert.strictEqual(ov.stukken.find((x) => x.id === 'bob-proef-2025').stand, '');
 });
+
+test('wv3153: index_leesbaar_agent in info() uit toegang.py (achtergrond, nooit wachten; fout = null)', async () => {
+  const nepT = (naam, inhoud) => { const p = path.join(T, naam); fs.writeFileSync(p, inhoud); return p; };
+  const goed = nepT('toegang-goed.py', 'import json; print(json.dumps({"index_leesbaar_agent": True, "log_schrijfbaar_agent": False, "fouten": ["x"]}))');
+  const dicht = nepT('toegang-dicht.py', 'import json, sys; print(json.dumps({"index_leesbaar_agent": False, "log_schrijfbaar_agent": False})); sys.exit(1)');
+  const kapot = nepT('toegang-kapot.py', 'print("geen json")');
+  const wacht = (m, sleutel) => new Promise((klaar, mis) => { let n = 0; const iv = setInterval(() => { const i = m.info(); if (i[sleutel] !== null || ++n > 100) { clearInterval(iv); n > 100 ? mis(new Error('geen uitkomst')) : klaar(i); } }, 20); });
+  const m1 = maak({ script: NEP, db: NEPDB, toegang: goed });
+  const i1 = await wacht(m1, 'index_leesbaar_agent');
+  assert.strictEqual(i1.index_leesbaar_agent, true);
+  assert.strictEqual(i1.vragenlog_schrijfbaar_agent, false);
+  const m2 = maak({ script: NEP, db: NEPDB, toegang: dicht });
+  assert.strictEqual((await wacht(m2, 'index_leesbaar_agent')).index_leesbaar_agent, false);
+  const m3 = maak({ script: NEP, db: NEPDB, toegang: kapot });
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.strictEqual(m3.info().index_leesbaar_agent, null, 'geen json = niet vast te stellen');
+  const m4 = maak({ script: NEP, db: NEPDB, toegang: path.join(T, 'bestaat-niet.py') });
+  assert.strictEqual(m4.info().index_leesbaar_agent, null);
+  assert.ok(!('index_leesbaar_agent' in maak({ script: NEP, db: NEPDB }).info()), 'zonder toegang-script geen veld');
+});
