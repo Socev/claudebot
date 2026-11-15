@@ -49,15 +49,17 @@ test('vertaalLabels: systeem- en MailMan-labels verborgen, communicatielabels al
   assert.deepEqual(MA.vertaalLabels(['Label_93', 'Label_82'], kaart).tekens.map(function (t) { return t.id; }), ['volgt', 'sepa']);
 });
 
-test('lijst: volgorde van Gmail, vlakjes uit de laag (één per regel), slotje zonder tekst, regel en storing, kapotte regel eruit', async () => {
+test('lijst: volgorde van Gmail, vlakjes uit de laag (één per regel), mogelijk medisch mét begin van de tekst (wv3134), regel en storing, kapotte regel eruit', async () => {
   const { m, roepen } = kamer();
   const r = await m.lijst({ map: 'inbox' });
   assert.equal(r.status, 200);
   assert.deepEqual(roepen[0], { actie: 'mail_lijst', map: 'inbox', q: '', max: 50, pagina: undefined });
   const j = r.j;
   assert.deepEqual(j.gesprekken.map(function (x) { return x.draad; }), [D1, D2, D3, D4, D5]);
-  assert.deepEqual(j.gesprekken.map(function (x) { return x.vlak && x.vlak.id; }), ['antwoord', 'facturen', 'slot', 'kan-weg', 'antwoord-klaar']);
-  assert.equal(j.gesprekken[2].snippet, '', 'slotje: geen begin van de tekst');
+  assert.deepEqual(j.gesprekken.map(function (x) { return x.vlak && x.vlak.id; }), ['antwoord', 'facturen', 'medisch', 'kan-weg', 'antwoord-klaar']);
+  assert.equal(j.gesprekken[2].snippet, 'iets geheims', 'wv3134: het begin van de tekst blijft staan');
+  assert.equal(j.gesprekken[2].slot, true, 'wel het teken: Socevs knoppen uit');
+  assert.equal(j.gesprekken[2].vlak.tekst, 'mogelijk medisch');
   assert.equal(j.gesprekken[0].ongelezen, true); assert.equal(j.gesprekken[0].ster, true);
   assert.deepEqual(j.gesprekken[1].tekens.map(function (t) { return t.tekst; }), ['In SEPA']);
   assert.deepEqual(j.eigen_labels, ['Vakantie']);
@@ -89,7 +91,7 @@ test('lijst: oranje bij een gemiste ronde (geel vlakje voor wat MailMan niet ken
   assert.equal((await weg.m.lijst({ pagina: '../x' })).status, 400);
 });
 
-test('gesprek: alle berichten, patiëntpoort vóór het scherm, slotje = Open in Gmail zonder tekst', async () => {
+test('gesprek: alle berichten; wv3134: ook mogelijk medisch (MailMan of de poort) volledig, met slot als teken', async () => {
   const { m, roepen } = kamer();
   const r = await m.gesprek({ draad: D1 });
   assert.equal(r.status, 200);
@@ -97,22 +99,28 @@ test('gesprek: alle berichten, patiëntpoort vóór het scherm, slotje = Open in
   assert.equal(r.j.berichten[1].ongelezen, true);
   assert.equal(r.j.berichten[1].bijlagen[0].naam, 'agenda.pdf');
   assert.equal(r.j.link, 'https://mail.google.com/mail/u/0/#all/' + D1);
+  assert.equal(r.j.slot, false);
   const s = await m.gesprek({ draad: D3 });
-  assert.equal(s.status, 403); assert.equal(s.j.slot, true);
-  assert.equal(roepen.filter(function (b) { return b.actie === 'mail_gesprek' && b.draad === D3; }).length, 0, 'slotje: het luik wordt niet eens gevraagd');
+  assert.equal(s.status, 200); assert.equal(s.j.slot, true); assert.equal(s.j.vlak.id, 'medisch');
+  assert.equal(s.j.berichten[1].tekst, 'Kun je donderdag 19 november?', 'MailMans slotje: de tekst komt gewoon op Davids scherm');
+  assert.equal(roepen.filter(function (b) { return b.actie === 'mail_gesprek' && b.draad === D3; }).length, 1);
   const pat = kamer({ gesprek: function (d) { return { draad: d, aantal: 1, berichten: [{ id: d, van: 'x', onderwerp: 'Betreft: mw. Proef', labels: [], tekst: 'Geachte collega, bovengenoemde patiënt zagen wij op de polikliniek. Geboortedatum: 01-02-1950. Diagnose en behandelplan volgen.', bijlagen: [] }] }; } });
   const p = await pat.m.gesprek({ draad: D1 });
-  assert.equal(p.status, 403); assert.ok(!JSON.stringify(p.j).includes('polikliniek'));
+  assert.equal(p.status, 200); assert.equal(p.j.slot, true); assert.ok(JSON.stringify(p.j).includes('polikliniek'), 'poort slaat aan: toch volledig');
+  const kapot = MA.maak({ nu: Date.now, fout: function () {}, luik: async function (b) { return { draad: b.draad, aantal: 1, berichten: [{ id: b.draad, van: 'x', onderwerp: 'y', labels: [], tekst: 'z', bijlagen: [] }] }; },
+    mailman: { mailLaag: function () { return {}; } }, poort: function () { throw new Error('poort stuk'); } });
+  const k = await kapot.gesprek({ draad: D1 });
+  assert.equal(k.status, 200); assert.equal(k.j.slot, true, 'poort faalt: tonen wel, handelingen uit');
   const ander = kamer({ gesprek: function () { return { draad: D2, berichten: [] }; } });
   assert.equal((await ander.m.gesprek({ draad: D1 })).status, 502, 'ander gesprek terug = geen gesprek');
   assert.equal((await m.gesprek({ draad: 'xyz' })).status, 400);
 });
 
-test('bijlage: base64 naar de App, niet bij een slotje, te groot = Open in Gmail', async () => {
+test('bijlage: base64 naar de App, ook bij mogelijk medisch (wv3134), te groot = Open in Gmail', async () => {
   const { m } = kamer();
   const r = await m.bijlage({ draad: D1, bericht: 'bbbbbbbbbbbb0002', naam: 'agenda.pdf' });
   assert.equal(r.status, 200); assert.equal(Buffer.from(r.j.inhoud, 'base64').toString(), '%PDF-1.4 proef'); assert.equal(r.j.type, 'application/pdf');
-  assert.equal((await m.bijlage({ draad: D3, bericht: 'bbbbbbbbbbbb0002', naam: 'x.pdf' })).status, 403);
+  assert.equal((await m.bijlage({ draad: D3, bericht: 'bbbbbbbbbbbb0002', naam: 'agenda.pdf' })).status, 200, 'MailMans slotje: bijlage gewoon naar Davids scherm');
   assert.equal((await m.bijlage({ draad: D1, bericht: 'zz', naam: 'x.pdf' })).status, 400);
   const groot = kamer({ bijlageAntw: { bytes: Buffer.alloc(16 * 1024 * 1024), type: 'application/pdf' } });
   assert.equal((await groot.m.bijlage({ draad: D1, bericht: 'bbbbbbbbbbbb0002', naam: 'agenda.pdf' })).status, 413);
@@ -129,26 +137,28 @@ function patKamer(waar) {
     { id: 'bbbbbbbbbbbb0002', van: 'x <x@voorbeeld.invalid>', onderwerp: waar === 'onderwerp' ? 'Betreft patiënt, geboortedatum 01-02-1950, diagnose' : 'Re: Overleg', labels: [], tekst: 'Schone platte tekst.',
       html: waar === 'html' ? '<p>' + PAT + '</p>' : '', bijlagen: [{ naam: 'verslag.pdf', mime: 'application/pdf', grootte: 10 }] }] }; } });
 }
-test('review MOET 1: de poort ziet ook de html naast schone platte tekst, en latere onderwerpen', async () => {
+test('review MOET 1: de poort ziet ook de html naast schone platte tekst, en latere onderwerpen (sinds wv3134: slot als teken, inhoud blijft)', async () => {
   for (const waar of ['html', 'onderwerp']) {
     const r = await patKamer(waar).m.gesprek({ draad: D1 });
-    assert.equal(r.status, 403, waar); assert.ok(!JSON.stringify(r.j).includes('polikliniek'), waar);
+    assert.equal(r.status, 200, waar); assert.equal(r.j.slot, true, waar);
   }
-  assert.equal((await patKamer('geen').m.gesprek({ draad: D1 })).status, 200, 'kruiscontrole: zonder patiënttekst gewoon open');
+  assert.equal((await patKamer('geen').m.gesprek({ draad: D1 })).j.slot, false, 'kruiscontrole: zonder patiënttekst geen teken');
 });
-test('review MOET 2: bijlage alleen als bericht en naam bij de draad horen en het gesprek nu door de poort komt', async () => {
+test('review MOET 2: bijlage alleen als bericht en naam bij de draad horen; wv3134: ook als de poort aanslaat', async () => {
   const { m } = kamer();
   assert.equal((await m.bijlage({ draad: D1, bericht: 'cccccccccccc0003', naam: 'agenda.pdf' })).status, 404, 'bericht uit een ander gesprek');
   assert.equal((await m.bijlage({ draad: D1, bericht: 'bbbbbbbbbbbb0002', naam: 'ander.pdf' })).status, 404, 'naam hoort niet bij het bericht');
   const p = patKamer('html');
   const r = await p.m.bijlage({ draad: D1, bericht: 'bbbbbbbbbbbb0002', naam: 'verslag.pdf' });
-  assert.equal(r.status, 403); assert.equal(r.j.slot, true);
-  assert.equal(p.bijlagen.length, 0, 'geen bytes opgehaald zonder geslaagde poort');
+  assert.equal(r.status, 200);
+  assert.equal(p.bijlagen.length, 1);
 });
 test('review MOET 3: geen todo voor een gesprek waar de poort nu aanslaat (ook zonder slot bij MailMan)', async () => {
   const p = patKamer('html');
   const r = await p.m.todo({ draad: D1, titel: 'Overleg voorbereiden' });
   assert.equal(r.status, 409); assert.equal(r.j.slot, true); assert.equal(p.todos.length, 0);
+  const v = await p.m.todoVoorstel({ draad: D1 });
+  assert.equal(v.status, 409, 'wv3134: ook geen voorstel (de todo gaat naar Todoist)');
   const weg = kamer({ luikFout: true });
   assert.equal((await weg.m.todo({ draad: D1, titel: 'x' })).status, 502); assert.equal(weg.todos.length, 0);
 });
