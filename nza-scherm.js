@@ -6,6 +6,7 @@
 // tekst van de agent). Alleen lezen: geen schrijfroute, geen netwerk; de index /opt/data/ovis-nza/nza.db wordt read-only geopend.
 // Fase 2 (wv3113): de wachter (mk-scripts/ovis-nza/wachter.py) schrijft <wacht>/scherm.json (titel + link-stukken, laatst gekeken per bron);
 // nza.py zet die in het overzicht (nieuw_links, bronnen). De cache kijkt daarom ook naar dat bestand.
+// wv3158: lijst Ontbreekt (overzicht.ontbreekt) = stand van de wachter + zoekrijen uit <log>/ontbreekt.jsonl; de cache kijkt ook daarnaar.
 // Alleen child_process (execFile zonder shell, python3 -I) en fs.
 const { execFile } = require('child_process');
 const fs = require('fs');
@@ -18,6 +19,7 @@ function maak(opts) {
   const script = opts.script;
   const db = opts.db;
   const wacht = opts.wacht || '';   // map met scherm.json van de wachter (wv3113)
+  const logmap = opts.log || '';   // wv3158: map met ontbreekt.jsonl (zoekrijen van de agent; lijst Ontbreekt)
   const vandaag = opts.vandaag || '';   // alleen voor de toets met het proefdossier (NZA_VANDAAG)
   const timeoutMs = opts.timeoutMs || 20000;
   let cache = null;   // overzicht per stand van de index (mtime + grootte)
@@ -52,6 +54,7 @@ function maak(opts) {
       bezig++;
       const env = { PATH: process.env.PATH || '/usr/bin:/bin', NZA_DB: db, LANG: 'C.UTF-8' };
       if (wacht) env.NZA_WACHT = wacht;
+      if (logmap) env.NZA_LOG = logmap;
       if (vandaag) env.NZA_VANDAAG = vandaag;
       execFile('python3', ['-I', script, 'scherm'].concat(argv), { env: env, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024 },
         function (e, out) {
@@ -70,7 +73,9 @@ function maak(opts) {
     try { st = fs.statSync(db); } catch (e) { return { status: 503, body: { ok: false, fout: 'de dossierindex ontbreekt' }, reden: 'nza geen index' }; }
     let w = '-';
     if (wacht) { try { const ws = fs.statSync(wacht + '/scherm.json'); w = ws.mtimeMs + ':' + ws.size; } catch (e) { w = '-'; } }
-    const sleutel = st.mtimeMs + ':' + st.size + ':' + w + ':' + vandaagNu();
+    let o = '-';   // wv3158: een nieuwe zoekrij van de agent moet meteen op de lijst Ontbreekt staan
+    if (logmap) { try { const os_ = fs.statSync(logmap + '/ontbreekt.jsonl'); o = os_.mtimeMs + ':' + os_.size; } catch (e) { o = '-'; } }
+    const sleutel = st.mtimeMs + ':' + st.size + ':' + w + ':' + o + ':' + vandaagNu();
     if (cache && cache.sleutel === sleutel) return { status: 200, body: cache.body };
     const u = await draai(['overzicht']);
     if (u.status === 200) cache = { sleutel: sleutel, body: u.body };
