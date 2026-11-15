@@ -5530,7 +5530,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij 
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
 ['laad', 'bewerk', 'nieuw', 'vergelijk', 'uitbreiden', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/uitbreiden', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
-['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
+['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag', 'medisch'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
 ['controleer', 'inlees', 'intrek', 'code', 'koppel', 'rol', 'rooster', 'persoon'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt (wv3047: koppel, rol, rooster, persoon)   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
 ['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt; wv3102: + WOZ-beschikking
 APP_GLIJD_ROUTES.add('POST /app/nza/stuk');   // wv3099: een stuk lezen in het NZa-scherm = David die werkt
@@ -14105,7 +14105,7 @@ function handleApp(req, res) {
           || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)
           || /^(GET \/app\/ghawa\/delen|POST \/app\/ghawa\/delen\/(onderdeel|noodstop|kijker|kijker-weg|tekst|overleg))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
-        if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
+        if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag|medisch)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
         if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
         if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking
         if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen)
@@ -22963,6 +22963,7 @@ if (nzaWachter && SERVER_ECHT) { setInterval(function () { nzaWachterTik(); }, 5
 //   POST /app/personeelsscherm/info {id, aan} wv3020: infoscherm uit (geen vingerafdruk: haalt alleen weg) of weer aan (verse vingerafdruk;
 //                                             de module laat alleen een goedgekeurd scherm binnen zijn looptijd weer toe)
 //   POST /app/personeelsscherm/aanvraag {tekst} wv3020: "Nieuwe pagina over …" → één werkvoorraadrij (herkomst david), grondwet-blok ervoor
+//   POST /app/personeelsscherm/medisch {id, vast} wv3154: bericht op Belangrijk vasthouden/loslaten (geen vingerafdruk: geen nieuwe tekst)
 // Nooit de code, het token, een IP of html in een log, audit of fout.
 const PERSONEELSSCHERM_DIR = process.env.PERSONEELSSCHERM_DIR || '/opt/data/personeelsscherm';
 const PERSONEELSSCHERM_D1 = process.env.PERSONEELSSCHERM_D1_ID || '35687849-4860-47e3-b94c-2a8b37619e3a';
@@ -22990,6 +22991,18 @@ const personeelsscherm = (function () {
         if (Number(r.headers.get('content-length') || 0) > 2 * 1024 * 1024) throw new Error('nieuws te groot');
         const delen = []; let n = 0;
         for await (const d of r.body) { n += d.length; if (n > 2 * 1024 * 1024) throw new Error('nieuws te groot'); delen.push(Buffer.from(d)); }
+        return Buffer.concat(delen).toString('utf8');
+      },
+      // wv3154: medisch nieuws (openbare RSS van NHG, LHV en RIVM, zonder sleutel); vaste adressen hier, de module vraagt hooguit elk uur
+      // en neemt alleen kop, één à twee zinnen samenvatting en datum. Geen doorsturing, hooguit 2 MB, 15 s; een fout noemt alleen de status.
+      medisch: async function (bron) {
+        const url = { nhg: 'https://www.nhg.org/feed/?post_type=news', lhv: 'https://www.lhv.nl/feed/?post_type=news', rivm: 'https://www.rivm.nl/nieuws/rss.xml' }[bron];
+        if (!url) throw new Error('onbekende bron');
+        const r = await fetch(url, { redirect: 'error', headers: { 'User-Agent': 'socev-personeelsscherm/1', accept: 'application/rss+xml, application/xml, text/xml' }, signal: AbortSignal.timeout(15000) });
+        if (r.status !== 200) throw new Error('medisch gaf HTTP ' + r.status);
+        if (Number(r.headers.get('content-length') || 0) > 2 * 1024 * 1024) throw new Error('medisch te groot');
+        const delen = []; let n = 0;
+        for await (const d of r.body) { n += d.length; if (n > 2 * 1024 * 1024) throw new Error('medisch te groot'); delen.push(Buffer.from(d)); }
         return Buffer.concat(delen).toString('utf8');
       },
       registerPad: '/opt/data/mk-scripts/toestemmingen.json',
