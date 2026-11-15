@@ -42,6 +42,46 @@ test('dossierlezer: woning (nummers, percelen, kerncijfers, aankoop, taxaties, W
   assert.deepStrictEqual(w.gebeurtenissen.map((g) => g.datum), ['2013-04-03', '2014-12-18', '2016-02-16']);
 });
 
+test('wv3131 WOZ-tabel: woning en box, kolomvolgorde uit de kopregel, tabel gaat voor de aangifte, geen tabel buiten een WOZ-kop', () => {
+  const tab = (kop, t) => `# Proef\n\n## ${kop}\n\n${t}\n\n## Volgende kop\n\n| Belastingjaar | Waardepeildatum | Vastgestelde WOZ-waarde |\n|---|---|--:|\n| 2030 | 1-1-2029 | **€ 999.999** |\n`;
+  const rw = (o) => o.reeks.filter((x) => x.reeks === 'woz').map((x) => [x.peildatum, x.waarde, x.toelichting]);
+  const t1 = '| Belastingjaar | Waardepeildatum | Vastgestelde WOZ-waarde | Woning | Grond | Verslag |\n|---|---|--:|--:|--:|---|\n'
+    + '| 2025 | 1-1-2024 | **€ 1.060.000** | 143 m² · € 580.580 | 385 m² · € 401.170 | [[20_Prive/Bronnen/Huis/x.pdf\\|verslag]] |\n'
+    + '| 2026 | 1-1-2025 | **€ 1.117.000** | 151 m² · € 635.861 | 385 m² · € 403.480 | [[20_Prive/Bronnen/Huis/y.pdf\\|verslag]] |';
+  const w = V.leesWoning(M.WONING + '\n' + tab('WOZ 2024 en 2025 (taxatieverslagen)', t1));
+  assert.deepStrictEqual(rw(w).filter((x) => x[2] === 'WOZ 2025' || x[2] === 'WOZ 2026'), [['2024-01-01', 1060000, 'WOZ 2025'], ['2025-01-01', 1117000, 'WOZ 2026']]);
+  assert.ok(!rw(w).some((x) => x[1] === 999999), 'tabel onder een andere kop telt niet');
+  // kolomvolgorde komt uit de kopregel; toelichting tussen haakjes in de cel; box
+  const t2 = '| Verslag | Vastgestelde WOZ-waarde | Waardepeildatum | Belastingjaar |\n|---|--:|---|---|\n| [[a.pdf\\|verslag]] | **€ 27.000** (huurwaarde € 130/m² × 16 m² = € 2.080) | 1-1-2024 | 2025 |\n| [[b.pdf\\|verslag]] | **€ 27.000** (ongewijzigd, 0,00%) | 1-1-2025 | 2026 |';
+  const b = V.leesBox(M.BOX1 + '\n' + tab('WOZ (taxatieverslagen)', t2));
+  assert.deepStrictEqual(rw(b), [['2024-01-01', 27000, 'WOZ 2025'], ['2025-01-01', 27000, 'WOZ 2026']]);
+  // dezelfde peildatum uit de belastingaangifte (losse zin) en uit de tabel: één punt, de tabel
+  const t3 = '| Belastingjaar | Waardepeildatum | Vastgestelde WOZ-waarde |\n|---|---|--:|\n| 2025 | 1-1-2024 | € 411.000 |';
+  const d = rw(V.leesWoning(M.WONING + '\n' + tab('WOZ 2025 (taxatieverslag)', t3))).filter((x) => x[0] === '2024-01-01');
+  assert.deepStrictEqual(d, [['2024-01-01', 411000, 'WOZ 2025']]);
+  // een tabel zonder de drie kolommen, rijen zonder datum of bedrag, en dezelfde peildatum twee keer: overgeslagen
+  const t4 = '| Jaar | Waarde |\n|---|--:|\n| 2025 | € 1 |';
+  assert.deepStrictEqual(rw(V.leesBox(M.BOX1 + '\n' + tab('WOZ', t4))), []);
+  const t5 = '| Belastingjaar | Waardepeildatum | Vastgestelde WOZ-waarde |\n|---|---|--:|\n| 2025 | onbekend | € 5.000 |\n| 2026 | 1-1-2025 | n.v.t. |\n| 2027 | 1-1-2026 | € 7.000 |\n| 2028 | 1-1-2026 | € 8.000 |';
+  assert.deepStrictEqual(rw(V.leesBox(M.BOX1 + '\n' + tab('WOZ', t5))), [['2026-01-01', 7000, 'WOZ 2027']]);
+  // een ### onder de WOZ-kop hoort er nog bij; een gelijke kop niet
+  assert.deepStrictEqual(rw(V.leesBox(M.BOX1 + '\n' + tab('WOZ', '### Verslagen\n\n' + t3))), [['2024-01-01', 411000, 'WOZ 2025']]);
+});
+
+test('wv3131 WOZ-tabel: de dossierstand van een box (verzonnen WOZ 2025 en 2026) meldt geen ontbrekende WOZ meer', async () => {
+  const o = omgeving2();
+  try {
+    const f = path.join(o.vault, '20_Prive', 'Huis', 'Garagebox-Hofstraat-110-12.md');
+    const vooraf = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten[2];
+    assert.ok(vooraf.stand.ontbreekt.some((x) => /^WOZ-beschikking 2026/.test(x)));
+    fs.appendFileSync(f, '\n## WOZ (taxatieverslagen)\n\n| Belastingjaar | Waardepeildatum | Vastgestelde WOZ-waarde | Verslag |\n|---|---|--:|---|\n| 2025 | 1-1-2024 | **€ 40.000** | [[a.pdf\\|verslag]] |\n| 2026 | 1-1-2025 | **€ 41.000** (ongewijzigd) | [[b.pdf\\|verslag]] |\n');
+    o.m.leesDossier();
+    const na = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten[2];
+    assert.ok(!na.stand.ontbreekt.some((x) => /^WOZ-beschikking/.test(x)), na.stand.ontbreekt.join(' | '));
+    assert.deepStrictEqual(na.reeksen.filter((x) => x.reeks === 'woz').map((x) => [x.peildatum, x.waarde, x.toelichting]), [['2024-01-01', 40000, 'WOZ 2025'], ['2025-01-01', 41000, 'WOZ 2026']]);
+  } finally { o.weg(); }
+});
+
 test('dossierlezer: boxen (zoeksleutel, appartementsrecht, grondperceel van de andere box, koopsom, levering)', () => {
   const d = V.leesDossierMap(M.maakVault(fs.mkdtempSync(path.join(os.tmpdir(), 'vg-'))));
   assert.deepStrictEqual(d.objecten.map((o) => o.sleutel), ['woning', 'box-7', 'box-12']);

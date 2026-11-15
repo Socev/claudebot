@@ -172,6 +172,7 @@ function leesWoning(md) {
       u.reeks.push({ reeks: 'woz', peildatum: `${vj}-01-01`, waarde: euroUit(vorig[1]), eenheid: 'euro', toelichting: `WOZ ${Number(m[1]) - 1} (de vorige, uit het verslag ${m[1]})` });
     }
   }
+  wozTabellen(md, u.reeks);   // wv3131: tabel per belastingjaar, vóór de losse zin (tabel gaat voor de aangifte)
   const losse = /de WOZ-waarde voor\s*(\d{4}) is (€\s*[\d.]+)/gi;
   while ((m = losse.exec(md))) {
     const j = Number(m[1]); const w = euroUit(m[2]);
@@ -185,6 +186,37 @@ function leesWoning(md) {
   const bp = sectie(md, 'Bestemmingsplan').match(/\*\*Bestemmingsplan "([^"]+)"\*\*/); if (bp) f('regels', 'Bestemmingsplan (dossier)', bp[1]);
   const zp = md.match(/^###\s+Zonnepanelen (\d{4}) \(([^)]+)\)/m); if (zp) f('bouw', 'Zonnepanelen', `${zp[2]} (${zp[1]})`);
   return u;
+}
+
+// wv3131: WOZ-tabellen (taxatieverslagen per belastingjaar). Onder een kop met "WOZ" (## tot ####) een markdowntabel met kolommen
+// Belastingjaar, Waardepeildatum en Vastgestelde WOZ-waarde (volgorde uit de kopregel); per rij één punt in de reeks woz. Eén punt per peildatum:
+// wat al in de reeks staat (andere vorm, of een eerdere rij) blijft; de tabel wordt gelezen vóór de losse zin uit de belastingaangifte en gaat daarvoor.
+function celSplits(l) { return String(l).trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((x) => x.trim()); }
+const SCHEIDING = /^\s*\|[\s:|-]*-[\s:|-]*$/;
+function wozTabellen(md, reeks) {
+  const regels = String(md).split('\n');
+  let niveau = 0; let kolom = null;
+  for (let i = 0; i < regels.length; i++) {
+    const l = regels[i];
+    const kop = l.match(/^(#{1,6})\s+(.*)$/);
+    if (kop) { kolom = null; if (!niveau || kop[1].length <= niveau) niveau = /WOZ/i.test(kop[2]) ? kop[1].length : 0; continue; }
+    if (!niveau) continue;
+    if (!/^\s*\|/.test(l)) { kolom = null; continue; }
+    if (i + 1 < regels.length && SCHEIDING.test(regels[i + 1]) && !SCHEIDING.test(l)) {   // kopregel van een tabel
+      const k = celSplits(l).map((x) => kaal(x));
+      const bj = k.findIndex((x) => /^belastingjaar$/i.test(x)); const pd = k.findIndex((x) => /peildatum/i.test(x)); const w = k.findIndex((x) => /vastgestelde.*waarde|^WOZ-waarde/i.test(x));
+      kolom = bj >= 0 && pd >= 0 && w >= 0 ? { bj, pd, w } : null;
+      i++;
+      continue;
+    }
+    if (!kolom || SCHEIDING.test(l)) continue;
+    const c = celSplits(l);
+    const jaar = Number((kaal(c[kolom.bj]).match(/^(20\d{2})\b/) || [])[1]);
+    const dag = datumUit(kaal(c[kolom.pd])); const bedrag = euroUit(kaal(c[kolom.w]));
+    if (!jaar || !dag || !bedrag) continue;
+    if (reeks.some((r) => r.reeks === 'woz' && r.peildatum === dag)) continue;
+    reeks.push({ reeks: 'woz', peildatum: dag, waarde: bedrag, eenheid: 'euro', toelichting: `WOZ ${jaar}` });
+  }
 }
 
 function leesBox(md) {
@@ -224,6 +256,7 @@ function leesBox(md) {
   // fase 2: de VvE (wikilink naar de relatiepagina, "[[…/VvE Naam|VvE Naam]]") voor de servicekosten uit de bank; geen naam in de code
   const vveLink = md.match(/\[\[(?:[^\]|]*\/)?(VvE [^\]|/]+?)(?:\|([^\]]+))?\]\]/);   // laatste deel van het pad begint met "VvE " (niet een stuk over de VvE)
   u.vve = vveLink ? kaal(vveLink[2] || vveLink[1]) : null;
+  wozTabellen(md, u.reeks);   // wv3131: de box las WOZ nog nergens
   return u;
 }
 
