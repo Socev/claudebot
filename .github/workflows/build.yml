@@ -982,6 +982,11 @@ jobs:
       - name: Rooktest - eigen databank
         run: bash test/db-rook.sh ghcr.io/socev/claudebot:${{ github.run_number }}
 
+      # wv3241: terug-modus van db-wacht.sh + db-terug.js (databank terug van de R230 na een uitwijk) met wegwerp-clusters, als claude
+      # in het gebouwde image (daar staat PostgreSQL 17); kruisproeven: afwijkende LSN, kopie met standby.signal, beschadigde kopie.
+      - name: Rooktest - databank terug (db-wacht terug-modus)
+        run: docker run --rm -u claude -v "$PWD:/src:ro" --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} /src/test/db-terug.sh
+
       # WAAROM DEZE STAP BESTAAT (23-9-2026). De Claude Code-CLI is bewust niet vastgepind:
       # elk nieuw image pakt de nieuwste. Dat is goed (nieuwe modellen, zoals Opus 5.5 dat
       # CLI >= 2.1.280 eist), maar een nieuwe CLI kan ook een vlag schrappen of hernoemen

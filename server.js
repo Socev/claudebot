@@ -2392,6 +2392,7 @@ function dbVraag() {
   // wv3187: tunnel naar de R230 (stand van supervisor.js) en de reserve (pg_stat_replication + slot r230, via /app/sb-sql)
   basis.tunnel = dbTunnelStand();
   basis.reserve = dbReserve;
+  basis.terug = dbTerug.laatste_iso ? { laatste: dbTerug.laatste_iso, uitkomst: dbTerug.uitkomst, id: dbTerug.id, fout: dbTerug.fout, bezig: dbTerug.bezig } : null;
   if (socket) dbReserveVraag();
   let klaar = false;
   const einde = function (luik) { if (klaar) return; klaar = true; dbStand = Object.assign(basis, { luik: luik }); };
@@ -25132,6 +25133,7 @@ async function rolRonde() {
     rolBezig = false;
     rolSchrijfBestand();
     try { uitwijk3bRonde(); } catch (e) { logError('uitwijk3b', e); }
+    try { dbTerugRonde(); } catch (e) { logError('dbterug', e); }
     if (!rol.eerste) { rol.eerste = Date.now(); rolEersteKlaar(); }
     clearTimeout(rolTimer);
     rolTimer = setTimeout(rolRonde, rol.fout ? ROL_INTERVAL_FOUT_MS : ROL_INTERVAL_MS);
@@ -25213,6 +25215,33 @@ function uitwijk3bRonde() {
     if (err || ['gestopt', 'mislukt', 'opgegeven', 'box_gezet'].indexOf(j.uitkomst) >= 0) {
       schrijfLog(nu() + ' uitwijk3b ' + velden({ wat: args[0], uitkomst: u3b.laatste_uitkomst, fout: err ? String(err.message || err).slice(0, 120) : null }));
     }
+  });
+}
+
+// ── Databank terug na een uitwijk (wv3241; ontwerp databank § 5a) ──
+// `uitwijk naar-olares` op de R230 zet een koude kopie van de uitwijkdatabank klaar en wacht. De R230 kan deze pod niet bereiken;
+// de pod de R230 wel (ssh). Daarom kijkt de pod zelf: is deze kant olares en zegt een verse lezing 'vps', dan eens per ronde
+// /app/db/db-terug.js (haalt de kopie, laat db-wacht.sh hem inzetten, meldt de uitkomst op de R230). Alleen met een eigen databank
+// (socket). Zonder aanvraag op de R230 is het één ssh-aanroep per minuut, alleen tijdens een uitwijk.
+const DB_TERUG_BIN = serverPad('dbterug', process.env.DB_TERUG_BIN, '/app/db/db-terug.js', serverProefDeel('db-terug-bestaat-niet.js'));
+const dbTerug = { bezig: false, laatste_iso: null, uitkomst: null, id: null, fout: null, aanroepen: 0 };
+function dbTerugRonde() {
+  if (ROL_KANT !== 'olares' || dbTerug.bezig) return;
+  if (!(rol.actieve_kant === 'vps' && rol.gelezen && Date.now() - rol.gelezen < 30000)) return;
+  if (!fs.existsSync(DB_TERUG_BIN)) return;
+  try { if (!fs.statSync('/run/pg/.s.PGSQL.5432').isSocket()) return; } catch (e) { return; }
+  dbTerug.bezig = true; dbTerug.aanroepen++;
+  require('child_process').execFile(process.execPath, [DB_TERUG_BIN, 'ronde'], { timeout: 20 * 60 * 1000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024,
+    env: { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME || '/opt/data', TZ: 'UTC' } }, function (err, stdout) {
+    dbTerug.bezig = false;
+    let j = {};
+    try { j = JSON.parse(String(stdout || '').trim().split('\n').pop() || '{}'); } catch (e) { j = {}; }
+    const vorig = dbTerug.uitkomst;
+    dbTerug.laatste_iso = new Date().toISOString();
+    dbTerug.uitkomst = j.uitkomst || (err ? 'fout' : '?');
+    dbTerug.id = j.id || null;
+    dbTerug.fout = j.fout ? String(j.fout).slice(0, 160) : (err ? String(err.message || err).slice(0, 120) : null);
+    if (dbTerug.uitkomst !== 'geen' || vorig !== 'geen') schrijfLog(nu() + ' dbterug ' + velden({ uitkomst: dbTerug.uitkomst, id: dbTerug.id, fout: dbTerug.fout }));
   });
 }
 

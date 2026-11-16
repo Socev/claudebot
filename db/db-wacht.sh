@@ -4,6 +4,10 @@
 #     mappen en rechten, kluissleutel naar /opt/data/pg/kluis.key (0400 pg), oom_score_adj -500, dan `gosu pg` naar de lus.
 #   Als pg: initdb (superuser pgbaas) als de datamap leeg is, postgres starten, init-SQL toepassen (idempotent), wachten;
 #     sterft postgres, dan herstart met oplopende wachttijd. /run/pgstop/stop (gezet door run.sh bij SIGTERM) = netjes stoppen.
+#   wv3241 terug-modus: /run/pgstop/terug (alleen claude kan het zetten; db-terug.js na `uitwijk naar-olares` op de R230) = de koude
+#     kopie van de uitwijkdatabank in /opt/data/pg/terug/<id>/data.tar inzetten: uitpakken en toetsen terwijl postgres nog draait,
+#     dan netjes stoppen, de huidige datamap opzij (17/data.oud-<tijd>, nooit gewist), de kopie op zijn plek, postgres weer starten.
+#     Uitkomst in /opt/data/pg/terug-<id>.json (0640 pg:pgsock). Faalt een toets vóór het stoppen, dan blijft alles zoals het was.
 # Noodschakelaar: /opt/data/pg-uit bestaat → niets starten. Faalt hier iets, dan start de pod gewoon door (de databank is dan weg).
 set -u
 PGBIN="${PG_BIN:-/usr/lib/postgresql/17/bin}"
@@ -31,7 +35,9 @@ if [ "$(id -u)" = "0" ]; then
   # PostgREST-socket (wv3180, Codex MOET 1): alleen claude
   mkdir -p /run/pgrst; chown claude:claude /run/pgrst; chmod 0700 /run/pgrst
   # stopverzoek: alleen claude (run.sh) kan het zetten, pg kan het zien (0711, vaste naam)
-  chown claude:claude "$STOPMAP"; chmod 0711 "$STOPMAP"; rm -f "$STOPMAP/stop"
+  chown claude:claude "$STOPMAP"; chmod 0711 "$STOPMAP"; rm -f "$STOPMAP/stop" "$STOPMAP/terug"
+  # wv3241: ontvangstmap voor de terug-kopie: claude schrijft, pg leest (groep pgsock, setgid), socev komt niet in /opt/data/pg
+  mkdir -p "$BASIS/terug"; chown claude:pgsock "$BASIS/terug"; chmod 2750 "$BASIS/terug"
   touch "$LOG"; chown pg:pgsock "$LOG"; chmod 0640 "$LOG"
   if [ -f /opt/data/.pg/kluis.key ]; then
     install -o pg -g pg -m 0400 /opt/data/.pg/kluis.key "$BASIS/kluis.key" || log "kluissleutel kopiëren faalde"
@@ -77,6 +83,61 @@ init_sql(){
     fi
   fi
 }
+# ── terug-modus (wv3241) ──────────────────────────────────────────────────────────────────────────────────────
+# Het verzoek (regels sleutel=waarde, door claude) noemt id, sha256 van de tar en wat pg_controldata van de kopie moet zeggen
+# (checkpoint_lsn, tijdlijn, systeem_id; gemeten op de R230 ná de nette stop). Paden komen nooit uit het verzoek: alleen het id.
+TERUG_HERSTART=0
+terug_waarde(){ sed -n "s/^$1=//p" "$STOPMAP/terug" 2>/dev/null | head -1 | tr -cd "$2"; }
+terug_id(){ local id; id="$(terug_waarde id 'A-Za-z0-9-')"; [[ "$id" =~ ^[A-Za-z0-9-]{8,48}$ ]] && printf '%s' "$id"; }
+terug_open(){ local id; [ -s "$STOPMAP/terug" ] && id="$(terug_id)" && [ ! -e "$BASIS/terug-$id.json" ]; }
+controle(){ LC_ALL=C "$PGBIN/pg_controldata" "$1" 2>/dev/null | sed -n "s/^$2: *//p" | head -1; }
+terug_uitkomst(){  # <id> <uitkomst> <reden> [extra json-velden]
+  local f="$BASIS/terug-$1.json"
+  printf '{"id":"%s","uitkomst":"%s","reden":"%s","tijd":"%s"%s}\n' "$1" "$2" "$3" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${4:-}" > "$f.tmp" \
+    && chmod 0640 "$f.tmp" && mv -f "$f.tmp" "$f"
+  log "terug $1: $2 ${3}"
+}
+terug_uitvoeren(){
+  local id sha lsn tli sid tar nieuw oud k_staat k_lsn k_tli k_sid h_tli rc
+  id="$(terug_id)" || return 0
+  sha="$(terug_waarde sha256 '0-9a-f')"; lsn="$(terug_waarde checkpoint_lsn '0-9A-F/')"
+  tli="$(terug_waarde tijdlijn '0-9')"; sid="$(terug_waarde systeem_id '0-9')"
+  tar="$BASIS/terug/$id/data.tar"; nieuw="$BASIS/17/terug-$id"
+  log "terugverzoek $id: kopie uitpakken en toetsen (postgres draait nog)"
+  [ ${#sha} = 64 ] && [ -n "$lsn" ] && [ -n "$tli" ] && [ -n "$sid" ] || { terug_uitkomst "$id" fout "verzoek onvolledig"; return 0; }
+  [ -f "$tar" ] || { terug_uitkomst "$id" fout "kopie ontbreekt"; return 0; }
+  [ "$(sha256sum < "$tar" | cut -c1-64)" = "$sha" ] || { terug_uitkomst "$id" fout "sha256 van de kopie wijkt af"; return 0; }
+  rm -rf "$nieuw"; mkdir -p "$nieuw" || { terug_uitkomst "$id" fout "uitpakmap niet te maken"; return 0; }
+  if ! tar -C "$nieuw" --no-same-owner -xf "$tar" 2>>"$LOG"; then rm -rf "$nieuw"; terug_uitkomst "$id" fout "uitpakken faalde (schijf vol?)"; return 0; fi
+  local d="$nieuw/data"
+  if [ ! -s "$d/PG_VERSION" ] || [ "$(cat "$d/PG_VERSION")" != "$(cat "$DATA/PG_VERSION")" ]; then rm -rf "$nieuw"; terug_uitkomst "$id" fout "geen databank van dezelfde hoofdversie"; return 0; fi
+  if [ -e "$d/standby.signal" ] || [ -e "$d/recovery.signal" ] || [ -e "$d/postmaster.pid" ]; then
+    rm -rf "$nieuw"; terug_uitkomst "$id" fout "kopie is een reserve of niet netjes gestopt (signal/pid)"; return 0
+  fi
+  k_staat="$(controle "$d" 'Database cluster state')"; k_lsn="$(controle "$d" 'Latest checkpoint location')"
+  k_tli="$(controle "$d" "Latest checkpoint's TimeLineID")"; k_sid="$(controle "$d" 'Database system identifier')"
+  h_tli="$(controle "$DATA" "Latest checkpoint's TimeLineID")"
+  if [ "$k_staat" != "shut down" ]; then rm -rf "$nieuw"; terug_uitkomst "$id" fout "kopie niet netjes gestopt ($k_staat)"; return 0; fi
+  if [ "$k_lsn" != "$lsn" ] || [ "$k_tli" != "$tli" ] || [ "$k_sid" != "$sid" ]; then
+    rm -rf "$nieuw"; terug_uitkomst "$id" fout "kopie wijkt af van de R230 (lsn $k_lsn/$lsn, tijdlijn $k_tli/$tli, systeem gelijk: $([ "$k_sid" = "$sid" ] && echo ja || echo nee))"; return 0
+  fi
+  # alleen een afstammeling van deze databank (zelfde systeem-id: de reserve was een kopie van Olares) en niet van een oudere tijdlijn
+  if [ "$k_sid" != "$(controle "$DATA" 'Database system identifier')" ]; then rm -rf "$nieuw"; terug_uitkomst "$id" fout "kopie hoort bij een andere databank (systeem-id)"; return 0; fi
+  if [ -n "$h_tli" ] && [ "$k_tli" -lt "$h_tli" ]; then rm -rf "$nieuw"; terug_uitkomst "$id" fout "kopie is ouder dan de huidige databank (tijdlijn $k_tli < $h_tli)"; return 0; fi
+  log "terugverzoek $id: kopie klopt (lsn $k_lsn, tijdlijn $k_tli); postgres netjes stoppen"
+  kill -INT "$PID" 2>/dev/null
+  for _ in $(seq 1 120); do kill -0 "$PID" 2>/dev/null || break; sleep 0.5; done
+  if kill -0 "$PID" 2>/dev/null; then rm -rf "$nieuw"; terug_uitkomst "$id" fout "postgres stopte niet binnen 60 s; huidige databank blijft"; TERUG_HERSTART=1; return 0; fi
+  oud="data.oud-$(date -u +%Y%m%d-%H%M%S)"
+  if ! mv "$DATA" "$BASIS/17/$oud"; then rm -rf "$nieuw"; terug_uitkomst "$id" fout "huidige datamap niet opzij te zetten; blijft"; TERUG_HERSTART=1; return 0; fi
+  if ! mv "$d" "$DATA"; then
+    mv "$BASIS/17/$oud" "$DATA"; rm -rf "$nieuw"; terug_uitkomst "$id" fout "kopie niet op zijn plek te zetten; oude datamap terug"; TERUG_HERSTART=1; return 0
+  fi
+  chmod 0700 "$DATA"; rmdir "$nieuw" 2>/dev/null || true
+  terug_uitkomst "$id" gewisseld "kopie ingezet, oude datamap opzij" ",\"oud\":\"$oud\",\"checkpoint_lsn\":\"$k_lsn\",\"tijdlijn\":$k_tli,\"systeem_id\":\"$k_sid\""
+  TERUG_HERSTART=1
+}
+
 WACHT=(2 5 10 20 30 60)
 n=0
 while ! stop_gevraagd; do
@@ -92,9 +153,11 @@ while ! stop_gevraagd; do
       for _ in $(seq 1 30); do kill -0 "$PID" 2>/dev/null || break; sleep 0.5; done
       log "postgres gestopt"; exit 0
     fi
+    if terug_open; then terug_uitvoeren; [ "$TERUG_HERSTART" = 1 ] && break; fi
     sleep 1
   done
   wait "$PID" 2>/dev/null; rc=$?
+  if [ "$TERUG_HERSTART" = 1 ]; then TERUG_HERSTART=0; n=0; log "terug-modus: postgres opnieuw starten (rc $rc)"; continue; fi
   [ $(( $(date +%s) - gestart )) -gt 300 ] && n=0
   w=${WACHT[$n]}; [ $n -lt $(( ${#WACHT[@]} - 1 )) ] && n=$((n+1))
   log "postgres stopte (rc $rc) — herstart over ${w}s"
