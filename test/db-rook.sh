@@ -30,6 +30,8 @@ docker exec -e PGPASSWORD=fout $C /usr/lib/postgresql/17/bin/psql -X -At "host=1
 docker exec $C sh -c "cat /opt/data/pg/db-wacht.log /opt/data/pg/log/* 2>/dev/null" | grep -qF "$RW"; [ $? != 0 ]; ok $? "wachtwoord niet in db-wacht.log of de postgres-log"
 P=$(docker exec $C stat -c '%U:%G %a' /run/pg /opt/data/pg/17/data | tr '\n' ' ')
 [ "$P" = "pg:pgsock 750 pg:pg 700 " ]; ok $? "rechten socketmap en datamap ($P)"
+P=$(docker exec $C stat -c '%U:%G %a' /opt/data/pg/terug /run/pgstop | tr '\n' ' ')
+[ "$P" = "claude:pgsock 2750 claude:claude 711 " ]; ok $? "wv3241: ontvangstmap terug (claude schrijft, pg leest) en verzoekmap ($P)"
 docker exec -u claude $C sh -c 'umask 077; mkdir -p /opt/data/.pg && head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n" > /opt/data/.pg/jwt.key && K=sb_secret_rooktest_$(head -c 8 /dev/urandom | od -An -tx1 | tr -d " \n") && printf "%s" "$K" > /tmp/k && H=$(printf "%s" "$K" | sha256sum | cut -c1-64) && printf "{\"sleutels\":[{\"naam\":\"rook\",\"rol\":\"service_role\",\"sha256\":\"%s\"}]}" "$H" > /opt/data/.pg/luik-sleutels.json && (nohup /usr/local/bin/postgrest /app/db/postgrest.conf > /tmp/pgrst.log 2>&1 &) && (nohup node /app/db/db-luik.js > /tmp/luik.log 2>&1 &)'
 for i in $(seq 1 30); do docker exec $C curl -fsS -m 2 http://127.0.0.1:8091/health >/dev/null 2>&1 && break; sleep 1; done
 docker exec $C curl -fsS -m 3 http://127.0.0.1:8091/health; echo
