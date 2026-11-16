@@ -20,7 +20,10 @@ let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (extra && !ok ? '  [' + String(extra).slice(0, 300) + ']' : '')); }
 for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_CODE_INTERVAL_MS = 1000;'],
                       ['const APP_VERS_MS = 2 * 60 * 1000;', 'const APP_VERS_MS = 4000;'],
-                      ['const APP_UPLOAD_TOTAAL_MAX = 300 * 1024 * 1024;', 'const APP_UPLOAD_TOTAAL_MAX = 45 * 1024 * 1024;'],
+                      ['const APP_UPLOAD_TOTAAL_MAX = 600 * 1024 * 1024;', 'const APP_UPLOAD_TOTAAL_MAX = 45 * 1024 * 1024;'],
+                      // wv3224: de oude grenstoetsen (50 MB per bericht) blijven zo geldig; § 9c-groot toetst de stukken met echte 8 MiB
+                      ['const APP_UPLOAD_BEURT_MAX = 250 * 1024 * 1024;', 'const APP_UPLOAD_BEURT_MAX = 50 * 1024 * 1024;'],
+                      ['vrij - extra >= APP_UPLOAD_SCHIJF_RESERVE', 'vrij - extra >= (globalThis.RESERVE_TOETS || APP_UPLOAD_SCHIJF_RESERVE)'],
                       ['const APP_PUSH_WACHT_MS = 20 * 1000;', 'const APP_PUSH_WACHT_MS = 300;'],
                       // wv2967: § 12 rekt de push-wacht op via globalThis.PUSH_WACHT_TOETS (onder last duurde ophalen/geschiedenis soms > 300 ms);
                       // overal 1200 liet seintjes van eerdere beurten in latere secties vallen (§ 12 [3], § 23 verstuurd 0)
@@ -1681,6 +1684,90 @@ async function bewijs(o) {
       r = await upl('/app/upload/' + bid() + '/1', inhoud('x'), 'x.txt', { pot: M.jar });
       toets('9c 61e bestand in een uur -> 429', r.status === 429, r.status);
       H.appStaat.tellers.upload = [];
+      // ── 9c-groot (wv3224): groot bestand in stukken van 8 MiB, hervatten, grenzen ──
+      {
+        const DEEL = 8 * MB, sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+        const gb = bid(), groot = crypto.randomBytes(36617519), K = Math.ceil(groot.length / DEEL);   // zoals de PDF van 16-11 (36,6 MB)
+        const stuk = (i) => groot.subarray((i - 1) * DEEL, Math.min(i * DEEL, groot.length));
+        const zend = (b, n, i, k, buf, naam) => upl('/app/upload/' + b + '/' + n + '/' + i + '/' + k, buf, naam || 'WOO-besluit NZa.pdf', { pot: M.jar });
+        const s3 = await zend(gb, 1, 3, K, stuk(3));
+        const s1 = await zend(gb, 1, 1, K, stuk(1));
+        const s5 = await zend(gb, 1, 5, K, stuk(5));
+        const s2 = await zend(gb, 1, 2, K, stuk(2));
+        const s2b = await zend(gb, 1, 2, K, stuk(2));   // herhaling na een time-out: onschuldig
+        toets('9c-groot stukken in willekeurige volgorde: elk 200 met wat nog ontbreekt; herhaling onschuldig', K === 5 && [s3, s1, s5, s2, s2b].every((x) => x.status === 200 && x.j.compleet === false) && JSON.stringify(s2b.j.ontbreekt) === '[4]' && JSON.stringify(s3.j.ontbreekt) === '[1,2,4,5]', JSON.stringify([s3.j, s2b.j]));
+        const gbMap = path.join(UPDIR, fs.readdirSync(UPDIR)[0], crypto.createHash('sha256').update(gb).digest('hex').slice(0, 32));
+        // half stuk 4 én een afgebroken herhaling van het al ontvangen stuk 2 (met andere bytes): telt niet en beschadigt niets (Codex MOET 1)
+        const half = (i, buf) => new Promise((ok) => {
+          const kop = { 'content-type': 'application/octet-stream', 'x-app-poort': POORT, 'cf-access-jwt-assertion': jwt(), 'x-app-naam': encodeURIComponent('WOO-besluit NZa.pdf'), 'content-length': String(DEEL), 'x-app-apparaat': M.jar.apparaat, 'x-app-sessie': M.jar.sessie };
+          const rq = http.request({ host: '127.0.0.1', port: srv.address().port, path: '/app/upload/' + gb + '/1/' + i + '/' + K, method: 'POST', headers: kop }, () => ok());
+          rq.on('error', () => ok());
+          rq.write(buf);
+          setTimeout(() => { rq.destroy(); setTimeout(ok, 150); }, 150);
+        });
+        await half(4, stuk(4).subarray(0, 3 * MB));
+        await half(2, Buffer.alloc(3 * MB, 0xee));
+        const halfStand = JSON.parse(fs.readFileSync(path.join(gbMap, '1.delen.json'), 'utf8'));
+        const rv = await vraag('POST', '/app/beurt', { beurt_id: gb, kanaal: 'hoofd', tekst: 'Voor het NZa-dossier', bestanden: [1] }, { pot: M.jar });
+        toets('9c-groot half stuk telt niet; beurt vóór het laatste stuk -> 409 ontbreekt [1], geen beurt', JSON.stringify(halfStand.ontvangen.sort()) === '[1,2,3,5]' && !fs.existsSync(path.join(gbMap, '1')) && rv.status === 409 && JSON.stringify(rv.j.ontbreekt) === '[1]', JSON.stringify(halfStand) + ' ' + rv.status + JSON.stringify(rv.j));
+        const s4 = await zend(gb, 1, 4, K, stuk(4));
+        const samen = fs.existsSync(path.join(gbMap, '1')) ? fs.readFileSync(path.join(gbMap, '1')) : Buffer.alloc(0);
+        toets('9c-groot laatste ontbrekende stuk -> compleet, grootte en inhoud byte voor byte gelijk, hulpbestanden weg', s4.status === 200 && s4.j.compleet === true && s4.j.grootte === groot.length && sha(samen) === sha(groot) &&
+          fs.readdirSync(gbMap).filter((f) => /^1\.(d|delen|samen)/.test(f)).length === 0 && JSON.parse(fs.readFileSync(path.join(gbMap, '1.json'), 'utf8')).naam === 'WOO-besluit NZa.pdf', JSON.stringify(s4.j));
+        const s5b = await zend(gb, 1, 5, K, stuk(5));
+        toets('9c-groot herhaling van het laatste stuk na compleet (antwoord kwijt) -> meteen compleet, bestand ongewijzigd', s5b.status === 200 && s5b.j.compleet === true && s5b.j.al === true && s5b.j.grootte === groot.length && sha(fs.readFileSync(path.join(gbMap, '1'))) === sha(groot), JSON.stringify(s5b.j));
+        r = await vraag('POST', '/app/beurt', { beurt_id: gb, kanaal: 'hoofd', tekst: 'Voor het NZa-dossier', bestanden: [1] }, { pot: M.jar });
+        const gbJob = r.j.job_id, gbIn = path.join(IOD, String(gbJob), 'in', 'WOO-besluit NZa.pdf');
+        const gbPrompt = (gestart[gestart.length - 1] || {}).prompt || '';
+        toets('9c-groot beurt met het grote bestand: in de invoermap byte voor byte, prompt noemt het als groot (in delen lezen)', r.status === 200 && fs.existsSync(gbIn) && sha(fs.readFileSync(gbIn)) === sha(groot) && /Groot: WOO-besluit NZa\.pdf \(35 MB\); lees dat in delen/.test(gbPrompt), r.status + ' ' + gbPrompt.slice(0, 300));
+        const na = await zend(gb, 2, 1, 2, stuk(1));
+        toets('9c-groot stuk na het versturen -> 409 al verstuurd', na.status === 409 && /al verstuurd/.test(na.j.fout), na.status);
+        if (afmaken[gbJob]) afmaken[gbJob]('ok');
+        await slaap(60);
+        // ongeldige stukken
+        const gx = bid();
+        const x1 = await zend(gx, 1, 1, 3, Buffer.alloc(DEEL - 1, 1));
+        const x2 = await zend(gx, 1, 1, 26, Buffer.alloc(DEEL, 1));
+        const x3 = await zend(gx, 1, 1, 1, Buffer.alloc(10, 1));
+        const x4 = await zend(gx, 1, 4, 3, Buffer.alloc(10, 1));
+        const x5 = await upl('/app/upload/' + gx + '/1/3/3', Buffer.alloc(10, 1), 'a.bin', { pot: M.jar, chunked: true });
+        toets('9c-groot ongeldig: niet-laatste stuk ≠ 8 MiB 400, > 25 stukken 413 "200 MB", k=1 of i>k 400, zonder lengte 400', x1.status === 400 && x2.status === 413 && /200 MB/.test(x2.j.fout) && x3.status === 400 && x4.status === 400 && x5.status === 400, [x1.status, x2.status, x2.j.fout, x3.status, x4.status, x5.status].join(','));
+        // grenzen: alles klaarstaand (toets: 45 MB) en per bericht (toets: 50 MB), schijfruimte
+        H.appUploadOpruim(true);
+        const gv = bid();
+        const v7 = await zend(gv, 1, 1, 7, Buffer.alloc(DEEL, 7));
+        toets('9c-groot bestand groter dan wat er klaar mag staan -> 507', v7.status === 507, v7.status + JSON.stringify(v7.j));
+        const gs = bid();
+        const gs1 = await upl('/app/upload/' + gs + '/1', Buffer.alloc(20 * MB, 1), 'a.bin', { pot: M.jar });
+        const gs2 = await zend(gs, 2, 1, 5, Buffer.alloc(DEEL, 2));
+        toets('9c-groot samen met een ander bestand boven de berichtgrens -> 413 "samen"', gs1.status === 200 && gs2.status === 413 && /samen/.test(gs2.j.fout), gs1.status + '/' + gs2.status + ' ' + gs2.j.fout);
+        H.appUploadOpruim(true);
+        // Codex MOET 2: twee lopende grote bestanden in één bericht tellen met hun volle maat (k × 8 MiB), niet pas als ze compleet zijn
+        const gr = bid();
+        const gr1 = await zend(gr, 1, 1, 4, Buffer.alloc(DEEL, 1));
+        const gr2 = await zend(gr, 2, 1, 4, Buffer.alloc(DEEL, 2));
+        toets('9c-groot twee lopende grote bestanden samen boven de berichtgrens -> tweede 413 al bij zijn eerste stuk', gr1.status === 200 && gr2.status === 413 && /samen/.test(gr2.j.fout), gr1.status + '/' + gr2.status + ' ' + gr2.j.fout);
+        H.appUploadOpruim(true);
+        // Codex MOET 3: wat een lopende upload nog mag worden, telt mee in de pod-grens van alles wat klaarstaat
+        const ga = bid(), gz = bid();
+        const ga1 = await zend(ga, 1, 1, 5, Buffer.alloc(DEEL, 1));
+        const gz1 = await zend(gz, 1, 1, 2, Buffer.alloc(DEEL, 2));
+        toets('9c-groot lopende upload gereserveerd: een tweede bericht dat samen boven wat er klaar mag staan komt -> 507', ga1.status === 200 && gz1.status === 507, ga1.status + '/' + gz1.status);
+        H.appUploadOpruim(true);
+        ctx.RESERVE_TOETS = 1e18;
+        const gd = bid();
+        const d1 = await zend(gd, 1, 1, 3, Buffer.alloc(DEEL, 3));
+        const d2 = await upl('/app/upload/' + gd + '/2', inhoud('klein'), 'k.txt', { pot: M.jar });
+        delete ctx.RESERVE_TOETS;
+        toets('9c-groot te weinig schijfruimte -> 507 met uitleg (stukken én gewone upload), logregel voor de machinekamer', d1.status === 507 && d2.status === 507 && /schijfruimte/.test(d1.j.fout) && logs.some((l) => /^app-upload-schijf/.test(l)), d1.status + '/' + d2.status + ' ' + d1.j.fout);
+        // per uur telt een groot bestand één keer
+        H.appStaat.tellers.upload = [];
+        const gu = bid();
+        for (let i = 1; i <= 3; i++) await zend(gu, 1, i, 3, i < 3 ? Buffer.alloc(DEEL, i) : Buffer.alloc(100, i));
+        toets('9c-groot drie stukken = één upload in de uurteller', (H.appStaat.tellers.upload || []).length === 1, (H.appStaat.tellers.upload || []).length);
+        H.appStaat.tellers.upload = [];
+        H.appUploadOpruim(true);
+      }
       // namen
       const N = H.appSchoneNaam;
       toets('9c naam: pad weg, geen verborgen bestand, geen stuur-/richtingstekens, max 120 tekens met extensie',

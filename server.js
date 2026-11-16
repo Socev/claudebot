@@ -5757,9 +5757,16 @@ const APP_TEKST_MAX = 20000;
 const APP_UPLOAD_DIR = process.env.APP_UPLOAD_DIR || path.join(APP_DATA, 'upload');  // klaarstaand, per apparaat + beurt, 1 u
 const APP_IO = typeof IO === 'string' ? IO : (process.env.IO_DIR || '/opt/data/io');   // = IO van processJob (io/<job>/in); wv349: ook in een proef
 const APP_UPLOAD_MAX_N = 10;                             // bestanden per beurt
-const APP_UPLOAD_BESTAND_MAX = 20 * 1024 * 1024;         // per bestand (gelijk aan MAX_FILE)
-const APP_UPLOAD_BEURT_MAX = 50 * 1024 * 1024;           // per beurt samen
-const APP_UPLOAD_TOTAAL_MAX = 300 * 1024 * 1024;         // alles wat klaarstaat, alle beurten samen
+const APP_UPLOAD_BESTAND_MAX = 20 * 1024 * 1024;         // per bestand in één verzoek (gelijk aan MAX_FILE)
+// wv3224 (David 16-11-2026: een PDF van 36,6 MB kwam niet aan): groter dan 20 MB gaat in stukken van 8 MiB op
+// POST /app/upload/<beurt_id>/<n>/<i>/<k> (ruwe bytes per stuk, eigen inhoudshash per stuk). Elk stuk blijft zo ver onder de
+// verzoekgrens van Cloudflare (gratis plan: 100 MB, gemeten 16-11) en een weggevallen stuk kan los opnieuw (hervatten).
+const APP_UPLOAD_DEEL = 8 * 1024 * 1024;                 // vaste stukgrootte; alleen het laatste stuk mag kleiner
+const APP_UPLOAD_GROOT_MAX = 200 * 1024 * 1024;          // per bestand in stukken (= 25 stukken)
+const APP_UPLOAD_DELEN_MAX = APP_UPLOAD_GROOT_MAX / APP_UPLOAD_DEEL;
+const APP_UPLOAD_BEURT_MAX = 250 * 1024 * 1024;          // per beurt samen (was 50 MB tot wv3224)
+const APP_UPLOAD_TOTAAL_MAX = 600 * 1024 * 1024;         // alles wat klaarstaat, alle beurten samen (was 300 MB)
+const APP_UPLOAD_SCHIJF_RESERVE = 5 * 1024 * 1024 * 1024;   // wv3224: na dit stuk moet er nog 5 GB vrij zijn op de datschijf
 const APP_UPLOAD_PER_UUR = 60;
 const APP_UPLOAD_MS = 60 * 60 * 1000;                    // klaarstaand maar nooit verstuurd: na een uur weg
 const APP_LOG_MS = 30 * 24 * 3600 * 1000;
@@ -7864,9 +7871,11 @@ function appUniekeNaam(naam, gehad) {
 const APP_BEELD_RE = /\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?)$/i;
 // Standaardopdrachten van Telegram, letterlijk (CLAUDE.md § Socev-app; bouwplan § 8 #21).
 const APP_FOTO_OPDRACHT = 'Analyseer de bijgevoegde foto (lees alle zichtbare tekst en begrijp de inhoud) en verwerk de relevante informatie direct in mijn Second Brain volgens de vault-conventies (zie CLAUDE.md, AGENTS.md en de index.md): werk de juiste pagina(s) bij of maak ze aan, met bronvermelding. Geef daarna een korte samenvatting van wat je hebt vastgelegd en op welke pagina(s).';
-function appBestandenPrompt(tekst, namen) {
+function appBestandenPrompt(tekst, namen, groot) {
+  // wv3224: een groot bestand (> 20 MB, tot 200 MB) niet in één keer inlezen
+  const grootRegel = groot && groot.length ? ' Groot: ' + groot.join(', ') + '; lees dat in delen (bijvoorbeeld pdftotext of per paginabereik), niet in één keer.' : '';
   const kop = 'David stuurde via de app ' + (namen.length === 1 ? '1 bestand' : namen.length + ' bestanden') + ' in één bericht: ' +
-    namen.join(', ') + '. ' + (namen.length === 1 ? 'Het staat' : 'Ze staan') + ' in je invoermap.';
+    namen.join(', ') + '. ' + (namen.length === 1 ? 'Het staat' : 'Ze staan') + ' in je invoermap.' + grootRegel;
   const bundel = namen.length > 1 ? 'Dit is één bundel, geen losse berichten (zoals het bestandenportaal): doe het met alle bestanden samen en antwoord één keer.' : '';
   if (tekst) return kop + '\n\nZijn tekst:\n' + tekst + (bundel ? '\n\n' + bundel : '');
   const fotos = namen.filter(function (n) { return APP_BEELD_RE.test(n); }), docs = namen.filter(function (n) { return !APP_BEELD_RE.test(n); });
@@ -7876,12 +7885,27 @@ function appBestandenPrompt(tekst, namen) {
   return kop + '\n\nGeen tekst erbij; de standaardopdracht van Telegram geldt:\n' + delen.join('\n') + (bundel ? '\n\n' + bundel : '');
 }
 
+// wv3224: vrije ruimte op de schijf van de uploadmap (null = niet te meten; dan geen weigering op schijfruimte)
+function appUploadVrij() {
+  try { const st = fs.statfsSync(fs.existsSync(APP_UPLOAD_DIR) ? APP_UPLOAD_DIR : APP_DATA); return st.bavail * st.bsize; } catch (e) { return null; }
+}
+const APP_UPLOAD_SCHIJF_VOL = 'de pod heeft nu te weinig schijfruimte voor dit bestand; zet het in de vault of stuur een link (de machinekamer is gewaarschuwd)';
+function appUploadSchijfVol(extra) {
+  const vrij = appUploadVrij();
+  if (vrij === null || vrij - extra >= APP_UPLOAD_SCHIJF_RESERVE) return false;
+  logError('app-upload-schijf', new Error('te weinig vrij voor upload: ' + Math.round(vrij / 1048576) + ' MB vrij, ' + Math.round(extra / 1048576) + ' MB gevraagd'));
+  return true;
+}
+const appUploadMb = function (b) { return Math.round(b / 1048576) + ' MB'; };
+
 // POST /app/upload/<beurt_id>/<n>: één bestand, ruwe bytes (application/octet-stream), naam in X-App-Naam (URI-gecodeerd).
 // Hetzelfde n nog eens = vervangen (herhaling na een time-out). Fouten komen terug; een half bestand blijft nooit staan.
+// wv3224: POST /app/upload/<beurt_id>/<n>/<i>/<k> = stuk i van k van een groot bestand (appUploadDeel).
 function appUpload(req, res, reg, a, rest) {
   const weg = function (st, f, r) { req.resume(); return appWeiger(res, st, f, r); };
-  const m = /^([a-z0-9-]{8,64})\/([1-9][0-9]?)$/.exec(rest);
+  const m = /^([a-z0-9-]{8,64})\/([1-9][0-9]?)(?:\/([1-9][0-9]?)\/([1-9][0-9]?))?$/.exec(rest);
   if (!m || Number(m[2]) > APP_UPLOAD_MAX_N) return weg(400, 'ongeldig uploadadres', 'upload pad');
+  if (m[3] !== undefined) return appUploadDeel(req, res, a, m[1], Number(m[2]), Number(m[3]), Number(m[4]), weg);
   const bid = m[1], n = Number(m[2]);
   const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   if (ct !== 'application/octet-stream') return weg(415, 'alleen ruwe bestandsinhoud', 'upload soort');
@@ -7899,6 +7923,7 @@ function appUpload(req, res, reg, a, rest) {
   const anderen = klaar.filter(function (x) { return x.n !== n; });
   if (anderen.length >= APP_UPLOAD_MAX_N) return weg(413, 'te veel bestanden in één bericht (max ' + APP_UPLOAD_MAX_N + ')', 'upload aantal');
   if (appUploadOpruim(false) > APP_UPLOAD_TOTAAL_MAX) return weg(507, 'de pod heeft nu geen ruimte voor meer bestanden; probeer het over een uur', 'upload vol');
+  if (appUploadSchijfVol(lengte || APP_UPLOAD_BESTAND_MAX)) return weg(507, APP_UPLOAD_SCHIJF_VOL, 'upload schijf vol');   // wv3224
   const max = Math.min(APP_UPLOAD_BESTAND_MAX, APP_UPLOAD_BEURT_MAX - anderen.reduce(function (t, x) { return t + x.grootte; }, 0));
   const teGroot = 'bestanden samen te groot (max ' + (APP_UPLOAD_BEURT_MAX >> 20) + ' MB per bericht)';
   if (max <= 0 || (lengte !== null && lengte > max)) return weg(413, teGroot, 'upload samen te groot');
@@ -7943,6 +7968,7 @@ function appUpload(req, res, reg, a, rest) {
         fs.writeFileSync(tmp, JSON.stringify({ naam: naam, t: new Date().toISOString() }), { mode: 0o600 });
         fs.renameSync(deel, path.join(dir, String(n)));
         fs.renameSync(tmp, path.join(dir, n + '.json'));
+        appUploadDelenWeg(dir, n);   // wv3224: een eerder half groot bestand onder hetzelfde nummer is nu vervangen
       } catch (e) {
         if (e && e.noodstop) return mis(503, 'de app staat uit (noodstop)', 'app-uit (tijdens upload)');
         if (e && e.al) return mis(409, 'dit bericht is al verstuurd', 'upload na beurt');
@@ -7953,6 +7979,217 @@ function appUpload(req, res, reg, a, rest) {
       appStuur(res, 200, { ok: true, n: n, naam: naam, grootte: bytes });
     });
   });
+}
+
+// wv3224: stuk i van k van één groot bestand. Elk stuk komt in <n>.d<i> (eerst tijdelijk, pas na volledige ontvangst en een kloppende
+// getekende inhoudshash op zijn plek); welke stukken binnen zijn staat in <n>.delen.json {naam, k, ontvangen, laatste, bezig}. Zijn alle k
+// er, dan voegt één verzoek ze samen tot <n> + <n>.json, precies zoals een gewone upload; daarvoor ziet appUploadLijst/appBeurt het niet.
+// Een stuk dat halverwege afbreekt telt niet mee en raakt een eerder goed stuk niet (Codex-review MOET 1). Het antwoord noemt wat nog ontbreekt
+// (ontbreekt), zodat de app na een onderbreking alleen die stukken opnieuw stuurt. Opruimen: de map gaat na een uur zonder
+// beweging weg (appUploadOpruim, zoals elke klaarstaande upload), bij versturen van de beurt (appUploadWeg) of de noodstop.
+function appUploadDelenWeg(dir, n) {
+  let namen = [];
+  try { namen = fs.readdirSync(dir); } catch (e) { return; }
+  const re = new RegExp('^' + n + '\\.(d[1-9][0-9]?(\\..*)?|delen\\.json(\\..*)?|samen\\..*)$');
+  namen.forEach(function (f) { if (re.test(f)) { try { fs.rmSync(path.join(dir, f), { force: true }); } catch (e) { logError('app-upload-deel', e); } } });
+}
+// Codex-review wv3224 MOET 2/3: wat lopende grote bestanden nog mogen worden, telt al mee (reservering = k × 8 MiB per bestand, min wat er al ligt).
+// Geeft { totaal: nog te komen over alle mappen, map: { <n>: k × 8 MiB } voor de gevraagde map }.
+function appUploadReservering(eigenDir) {
+  const uit = { totaal: 0, map: {} };
+  let apparaten = [];
+  try { apparaten = fs.readdirSync(APP_UPLOAD_DIR); } catch (e) { return uit; }
+  apparaten.forEach(function (ap) {
+    let mappen = [];
+    try { mappen = fs.readdirSync(path.join(APP_UPLOAD_DIR, ap)); } catch (e) { return; }
+    mappen.forEach(function (m) {
+      const md = path.join(APP_UPLOAD_DIR, ap, m);
+      let namen = [];
+      try { namen = fs.readdirSync(md); } catch (e) { return; }
+      namen.forEach(function (f) {
+        const x = /^([1-9][0-9]?)\.delen\.json$/.exec(f);
+        if (!x) return;
+        const st = appLeesJson(path.join(md, f), null);
+        if (!st || !Number.isInteger(st.k) || !Array.isArray(st.ontvangen)) return;
+        uit.totaal += Math.max(0, st.k - st.ontvangen.length) * APP_UPLOAD_DEEL;
+        if (md === eigenDir) uit.map[x[1]] = st.k * APP_UPLOAD_DEEL;
+      });
+    });
+  });
+  return uit;
+}
+const APP_UPLOAD_SAMEN_STIL_MS = 2 * 60 * 1000;   // een samenvoeging die zo lang 'bezig' staat, is afgebroken (herstart)
+function appUploadDeel(req, res, a, bid, n, i, k, weg) {
+  if (String(a.id).indexOf('fac-') === 0) return weg(400, 'ongeldig uploadadres', 'upload deel fac');   // alleen Davids eigen app
+  if (k < 2 || i > k) return weg(400, 'ongeldig uploadadres', 'upload deel pad');
+  if (k > APP_UPLOAD_DELEN_MAX) return weg(413, 'bestand te groot (max ' + appUploadMb(APP_UPLOAD_GROOT_MAX) + ' per bestand)', 'upload deel aantal');
+  const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (ct !== 'application/octet-stream') return weg(415, 'alleen ruwe bestandsinhoud', 'upload soort');
+  let naam = '';
+  const kop = String(req.headers['x-app-naam'] || '');
+  if (kop.length <= 1000) { try { naam = appSchoneNaam(decodeURIComponent(kop)); } catch (e) { naam = ''; } }
+  if (!naam) return weg(400, 'bestandsnaam ontbreekt', 'upload naam');
+  const lengte = req.headers['content-length'] !== undefined ? Number(req.headers['content-length']) : NaN;
+  if (!Number.isInteger(lengte) || lengte < 1 || lengte > APP_UPLOAD_DEEL || (i < k && lengte !== APP_UPLOAD_DEEL)) return weg(400, 'ongeldig stuk', 'upload deel lengte');
+  if (appBeurtIds()[appSha(bid)]) return weg(409, 'dit bericht is al verstuurd', 'upload na beurt');
+  // per uur telt één groot bestand als één upload (het eerste stuk), niet als 25
+  if (i === 1 && !appTeller('upload', APP_UPLOAD_PER_UUR, 3600000)) return weg(429, 'te veel bestanden dit uur (max ' + APP_UPLOAD_PER_UUR + ')', 'grens upload');
+  const dir = appUploadMap(a, bid);
+  let klaar;
+  try { klaar = appUploadLijst(dir); } catch (e) { logError('app-upload', e); return weg(503, 'opslag op de pod onleesbaar', 'upload lijst'); }
+  const anderen = klaar.filter(function (x) { return x.n !== n; });
+  if (anderen.length >= APP_UPLOAD_MAX_N) return weg(413, 'te veel bestanden in één bericht (max ' + APP_UPLOAD_MAX_N + ')', 'upload aantal');
+  const statPad = path.join(dir, n + '.delen.json');
+  let stand = appLeesJson(statPad, null);
+  const nieuw = !stand || stand.k !== k || stand.naam !== naam || !Array.isArray(stand.ontvangen);
+  const teGroot = 'bestanden samen te groot (max ' + appUploadMb(APP_UPLOAD_BEURT_MAX) + ' per bericht)';
+  // herhaling van een stuk nadat dit bestand al compleet is (het antwoord ging verloren): meteen compleet, niets opnieuw
+  const alKlaar = !stand && klaar.find(function (x) { return x.n === n && x.naam === naam && x.grootte > (k - 1) * APP_UPLOAD_DEEL && x.grootte <= k * APP_UPLOAD_DEEL; });
+  if (alKlaar) { req.resume(); res._app.reden = 'upload ' + n + ' deel ' + i + '/' + k + ' al compleet'; return appStuur(res, 200, { ok: true, n: n, deel: i, k: k, compleet: true, naam: naam, grootte: alKlaar.grootte, al: true }); }
+  if (nieuw) {
+    // grenzen met reservering (Codex MOET 2/3): complete andere bestanden + lopende andere (k × 8 MiB) + dit bestand (k × 8 MiB) per bericht;
+    // alles wat klaarstaat + wat lopende uploads nog mogen worden + dit bestand over alle mappen
+    const res2 = appUploadReservering(dir);
+    const lopend = Object.keys(res2.map).reduce(function (t, x) { return Number(x) === n ? t : t + res2.map[x]; }, 0);
+    if (anderen.reduce(function (t, x) { return t + x.grootte; }, 0) + lopend + (k - 1) * APP_UPLOAD_DEEL + (i === k ? lengte : 1) > APP_UPLOAD_BEURT_MAX) return weg(413, teGroot, 'upload samen te groot');
+    if (appUploadOpruim(false) + res2.totaal + k * APP_UPLOAD_DEEL > APP_UPLOAD_TOTAAL_MAX) return weg(507, 'de pod heeft nu geen ruimte voor meer bestanden; probeer het over een uur', 'upload vol');
+  }
+  if (appUploadSchijfVol(nieuw ? 2 * k * APP_UPLOAD_DEEL : 2 * APP_UPLOAD_DEEL)) return weg(507, APP_UPLOAD_SCHIJF_VOL, 'upload schijf vol');   // ×2: stukken + samengevoegd
+  // Codex MOET 1: elk stuk eerst in een eigen tijdelijk bestand; pas na volledige ontvangst + geldige inhoudshash wordt het <n>.d<i>.
+  // Een afgebroken of afgekeurde herhaling raakt zo nooit een stuk dat al goed binnen was.
+  const tmpPad = path.join(dir, n + '.d' + i + '.' + crypto.randomBytes(4).toString('hex'));
+  let ws;
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (nieuw) {   // ander bestand onder hetzelfde nummer (of het eerste stuk): opnieuw beginnen
+      appUploadDelenWeg(dir, n);
+      stand = { naam: naam, k: k, ontvangen: [], laatste: null, t: new Date().toISOString() };
+      const tmp = statPad + '.' + crypto.randomBytes(4).toString('hex');
+      fs.writeFileSync(tmp, JSON.stringify(stand), { mode: 0o600 });
+      fs.renameSync(tmp, statPad);
+    }
+    ws = fs.createWriteStream(tmpPad, { flags: 'wx', mode: 0o600 });
+  } catch (e) { logError('app-upload-deel', e); return weg(500, 'opslag op de pod mislukt', 'upload deel map'); }
+  let bytes = 0, af = false;
+  const hash = res._app.inhoud ? crypto.createHash('sha256') : null;
+  const mis = function (st, f, r) {
+    if (af) return; af = true;
+    req.resume();
+    const klaar2 = function () { fs.rm(tmpPad, { force: true }, function () {
+      if (res.headersSent) return;
+      if (st === 401) { res._app.reden = r; return appStuur(res, 401, { ok: false, fout: f, binding: 'inhoud' }); }
+      appWeiger(res, st, f, r);
+    }); };
+    if (ws.closed) klaar2(); else { ws.once('close', klaar2); ws.destroy(); }
+  };
+  ws.on('error', function (e) { logError('app-upload-deel', e); mis(500, 'opslag op de pod mislukt', 'upload deel schrijven'); });
+  req.on('aborted', function () { mis(400, 'upload afgebroken', 'upload afgebroken'); });
+  req.on('error', function () { mis(400, 'upload afgebroken', 'upload afgebroken'); });
+  req.on('data', function (c) {
+    if (af) return;
+    bytes += c.length;
+    if (bytes > lengte) return mis(400, 'upload onvolledig', 'upload deel te lang');
+    if (hash) hash.update(c);
+    if (!ws.write(c)) { req.pause(); ws.once('drain', function () { if (!af) req.resume(); }); }
+  });
+  req.on('end', function () {
+    if (af) return;
+    if (bytes !== lengte) return mis(400, 'upload onvolledig', 'upload deel lengte');
+    if (hash && !appInhoudKlopt(res, hash)) return mis(401, 'open opnieuw met je vingerafdruk', 'binding fout:inhoud');
+    ws.end(function () {
+      if (af) return;
+      // synchroon (één tik): stand lezen, stuk plaatsen, stand bijwerken en zo nodig het samenvoegen claimen — gelijktijdige stukken
+      // kunnen elkaar zo niet overschrijven en er voegt er hooguit één samen
+      let st2, ontbreekt;
+      try {
+        if (fs.existsSync(APP_UIT)) throw Object.assign(new Error('noodstop'), { noodstop: true });
+        if (appBeurtIds()[appSha(bid)]) throw Object.assign(new Error('al verstuurd'), { al: true });
+        st2 = appLeesJson(statPad, null);
+        if (!st2 || st2.k !== k || st2.naam !== naam || !Array.isArray(st2.ontvangen)) throw Object.assign(new Error('vervangen'), { vervangen: true });
+        fs.renameSync(tmpPad, path.join(dir, n + '.d' + i));
+        if (st2.ontvangen.indexOf(i) < 0) st2.ontvangen.push(i);
+        if (i === k) st2.laatste = bytes;
+        ontbreekt = [];
+        for (let x = 1; x <= k; x++) if (st2.ontvangen.indexOf(x) < 0) ontbreekt.push(x);
+        const bezig = st2.bezig && Date.now() - Date.parse(st2.bezig) < APP_UPLOAD_SAMEN_STIL_MS;
+        if (!ontbreekt.length && !bezig) st2.bezig = new Date().toISOString();
+        else if (!ontbreekt.length) ontbreekt = null;   // een ander verzoek voegt al samen
+        const tmp = statPad + '.' + crypto.randomBytes(4).toString('hex');
+        fs.writeFileSync(tmp, JSON.stringify(st2), { mode: 0o600 });
+        fs.renameSync(tmp, statPad);
+      } catch (e) {
+        if (e && e.noodstop) return mis(503, 'de app staat uit (noodstop)', 'app-uit (tijdens upload)');
+        if (e && e.al) return mis(409, 'dit bericht is al verstuurd', 'upload na beurt');
+        if (e && e.vervangen) return mis(409, 'dit bestand werd intussen opnieuw begonnen; probeer het opnieuw', 'upload deel vervangen');
+        logError('app-upload-deel', e); return mis(500, 'opslag op de pod mislukt', 'upload deel afronden');
+      }
+      af = true;
+      const reden = 'upload ' + n + ' deel ' + i + '/' + k + ' (' + bytes + ' B)';
+      if (ontbreekt === null) { res._app.reden = reden + ' samenvoegen loopt al'; return appStuur(res, 200, { ok: true, n: n, deel: i, k: k, compleet: false, ontbreekt: [], bezig: true }); }
+      if (ontbreekt.length) { res._app.reden = reden; return appStuur(res, 200, { ok: true, n: n, deel: i, k: k, compleet: false, ontbreekt: ontbreekt }); }
+      appUploadSamenvoegen(dir, n, st2, bid, function (fout, grootte) {
+        if (fout) {
+          res._app.reden = reden + ' samenvoegen: ' + fout.reden;
+          return appWeiger(res, fout.status, fout.tekst, fout.reden);
+        }
+        res._app.reden = reden + ' compleet ' + grootte + ' B';
+        appStuur(res, 200, { ok: true, n: n, deel: i, k: k, compleet: true, naam: naam, grootte: grootte });
+      });
+    });
+  });
+}
+// Alle k stukken achter elkaar in <n>.samen.<rand> (asynchroon: 200 MB kopiëren mag de pod niet stilzetten), dan synchroon de
+// laatste controles (noodstop, beurt al verstuurd, grootte, berichtgrens met de echte maten) en pas dan <n> + <n>.json.
+function appUploadSamenvoegen(dir, n, st, bid, klaar) {
+  const doel = path.join(dir, n + '.samen.' + crypto.randomBytes(4).toString('hex'));
+  const grootte = (st.k - 1) * APP_UPLOAD_DEEL + st.laatste;
+  const ws = fs.createWriteStream(doel, { flags: 'wx', mode: 0o600 });
+  let i = 1, gedaan = false;
+  const fout = function (status, tekst, reden, e) {
+    if (gedaan) return; gedaan = true;
+    if (e) logError('app-upload-samen', e);
+    ws.destroy();
+    fs.rm(doel, { force: true }, function () {
+      // de claim loslaten, zodat een volgende poging opnieuw kan samenvoegen (de stukken blijven staan)
+      try { const s2 = appLeesJson(path.join(dir, n + '.delen.json'), null); if (s2 && s2.bezig) { delete s2.bezig; fs.writeFileSync(path.join(dir, n + '.delen.json'), JSON.stringify(s2), { mode: 0o600 }); } } catch (e2) {}
+      klaar({ status: status, tekst: tekst, reden: reden });
+    });
+  };
+  ws.on('error', function (e) { fout(500, 'opslag op de pod mislukt', 'upload samen schrijven', e); });
+  const volgende = function () {
+    if (gedaan) return;
+    if (i > st.k) return ws.end(af);
+    const p = path.join(dir, n + '.d' + i);
+    let verwacht = i < st.k ? APP_UPLOAD_DEEL : st.laatste;
+    let lst;
+    try { lst = fs.statSync(p); } catch (e) { return fout(409, 'een stuk van het bestand ontbreekt; probeer het opnieuw', 'upload samen stuk weg', e); }
+    if (lst.size !== verwacht) return fout(500, 'opslag op de pod mislukt', 'upload samen stukgrootte');
+    const rs = fs.createReadStream(p);
+    rs.on('error', function (e) { fout(500, 'opslag op de pod mislukt', 'upload samen lezen', e); });
+    rs.on('end', function () { i++; volgende(); });
+    rs.pipe(ws, { end: false });
+  };
+  const af = function () {
+    if (gedaan) return;
+    try {
+      if (fs.existsSync(APP_UIT)) return fout(503, 'de app staat uit (noodstop)', 'app-uit (tijdens upload)');
+      if (appBeurtIds()[appSha(bid)]) return fout(409, 'dit bericht is al verstuurd', 'upload na beurt');
+      if (fs.statSync(doel).size !== grootte) return fout(500, 'opslag op de pod mislukt', 'upload samen grootte');
+      const anderen = appUploadLijst(dir).filter(function (x) { return x.n !== n; });
+      if (anderen.reduce(function (t, x) { return t + x.grootte; }, 0) + grootte > APP_UPLOAD_BEURT_MAX) {
+        gedaan = true; fs.rmSync(doel, { force: true }); appUploadDelenWeg(dir, n);
+        return klaar({ status: 413, tekst: 'bestanden samen te groot (max ' + appUploadMb(APP_UPLOAD_BEURT_MAX) + ' per bericht)', reden: 'upload samen te groot (afronden)' });
+      }
+      const tmp = path.join(dir, n + '.samen.' + crypto.randomBytes(4).toString('hex') + '.json');
+      fs.writeFileSync(tmp, JSON.stringify({ naam: st.naam, t: new Date().toISOString(), delen: st.k }), { mode: 0o600 });
+      fs.renameSync(doel, path.join(dir, String(n)));
+      fs.renameSync(tmp, path.join(dir, n + '.json'));
+      gedaan = true;
+      appUploadDelenWeg(dir, n);
+    } catch (e) { return fout(500, 'opslag op de pod mislukt', 'upload samen afronden', e); }
+    klaar(null, grootte);
+  };
+  ws.once('open', volgende);
 }
 
 async function appBeurt(req, res, reg, a, s, d) {
@@ -8051,7 +8288,7 @@ async function appBeurt(req, res, reg, a, s, d) {
     const kop = antwOp ? appAntwoordOpRegel(antwOp.x) + '\n' : '';
     const staartOp = antwOp && antwOp.gevoeligOpen ? '\n' + APP_ANTWOORD_OP_GEVOELIG : '';
     // review #14: met bijlagen blijft de beurt beginnen met de bundelregel (CLAUDE.md); het citaat komt er dan achter
-    let promptTekst = (upload ? appBestandenPrompt(appOntmasker(tekst), namen) + (kop ? '\n' + kop.replace(/\n$/, '') : '') : kop + appOntmasker(tekst)) + staartOp + (gelogd ? '' : APP_CHATLOG_NIET);
+    let promptTekst = (upload ? appBestandenPrompt(appOntmasker(tekst), namen, upload.lijst.filter(function (x) { return x.grootte > APP_UPLOAD_BESTAND_MAX; }).map(function (x) { return x.doel + ' (' + appUploadMb(x.grootte) + ')'; })) + (kop ? '\n' + kop.replace(/\n$/, '') : '') : kop + appOntmasker(tekst)) + staartOp + (gelogd ? '' : APP_CHATLOG_NIET);
     let draadFout = null;
     if (draad) { const dp = nzaDoorvraagPrompt(draad, promptTekst); if (dp.fout) draadFout = dp.fout; else promptTekst = dp.tekst; }   // wv3156
     // wv628 (review #7): na de laatste await opnieuw tellen, anders komen twee gelijktijdige verzoeken er allebei door
