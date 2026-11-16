@@ -210,7 +210,7 @@ function nep(M) {
         { payrollRunId: RUNOPEN, number: 13, description: 'Open', year: 2026, periodStart: 11, periodEnd: 11, createdAt: recent, type: 'normal', locked: false }]));
     }
     if (u.pathname === '/api/companies/' + C1 + '/runs/' + RUN + '/sepa') { if (u.searchParams.get('year') !== '2026') return stuur(400, {}); return stuur(200, { taskId: TAAK }); }
-    if (u.pathname === '/api/documents/' + TAAK) { if (M.doc202-- > 0) return stuur(202, '"Document is being processed"'); res.writeHead(200, { 'Content-Type': M.ct || 'application/octet-stream' }); return res.end(M.pain); }
+    if (u.pathname === '/api/documents/' + TAAK) { if (M.doc202-- > 0) return stuur(202, '"Document is being processed"'); if (M.leeg != null && M.leeg-- > 0) { res.writeHead(200, { 'Content-Type': 'application/octet-stream' }); return res.end(); } res.writeHead(200, { 'Content-Type': M.ct || 'application/octet-stream' }); return res.end(M.pain); }
     if (u.pathname === '/api/companies/' + C1 + '/runs/' + RUN + '/employees') return stuur(200, pagina([1, 2, 3].map((i) => ({ employeeId: 'e0000000-0000-4000-8000-00000000000' + i, employeeNumber: 100 + i }))));
     if (/journalsemployee$/.test(u.pathname)) return stuur(403, { title: 'Forbidden' });
     if (/\/api\/companies\/[^/]+\/(employees|salarytables)/.test(u.pathname)) return stuur(200, pagina([]));
@@ -372,6 +372,37 @@ test('wv3228 ronde: zip-document → klaar; JSON zonder inhoud → afgekeurd met
       assert.ok(st.locked_sinds && st.zichtbaar_sinds && !st.documenten_sinds, JSON.stringify(st));
       assert.ok(open && !open.locked_sinds && !open.zichtbaar_sinds, JSON.stringify(open));
       assert.equal(data.visibleEmployeeLogin, true); assert.equal(data.control, true);
+    } finally { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('wv3229 ronde: document eerst leeg (200, 0 bytes) → doorvragen → klaar; altijd leeg → opnieuw (geen afkeuring), daarna klaar', async () => {
+  for (const geval of ['eerst', 'altijd']) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nb-kind-'));
+    const M = { log: [], doc202: 0, leeg: geval === 'eerst' ? 2 : 1000, pain: nmbrsPain() };
+    const srv = nep(M); await new Promise((k) => srv.listen(0, '127.0.0.1', k));
+    const env = { NMBRS_API_BASIS: 'http://127.0.0.1:' + srv.address().port };
+    try {
+      await kind(dir, 'betaalgemeld', { runs: [] }, env);
+      const { DatabaseSync } = require('node:sqlite');
+      let d = new DatabaseSync(path.join(dir, 'nmbrs.sqlite'));
+      d.prepare("insert into bedrijf_entiteit (bedrijf, entiteit, door, sinds) values (?, 'POT', 'toets', '2026-11-16')").run(C1); d.close();
+      const inv = { access: 'at-' + 'a'.repeat(30), sub: 'sub-proef-0000000000001', doc: true, pot_iban: POT };
+      let r = await kind(dir, 'ronde', inv, env);
+      assert.equal(r.ok, true, JSON.stringify(r));
+      d = new DatabaseSync(path.join(dir, 'nmbrs.sqlite'));
+      let b = d.prepare('select status, formaat, pogingen, controle from betaallijst where run = ?').get(RUN); d.close();
+      const docs = M.log.filter((x) => x.startsWith('/api/documents/')).length;
+      if (geval === 'eerst') {
+        assert.equal(b.status, 'klaar', b.controle); assert.equal(b.formaat, 'pain.001.001.03');
+        const c = JSON.parse(b.controle); assert.equal(c.vorm.leeg, 2); assert.equal(c.vorm.vragen, 3); assert.equal(docs, 3);
+      } else {
+        assert.equal(b.status, 'opnieuw', b.controle); assert.equal(b.pogingen, 1); assert.equal(JSON.parse(b.controle).ophalen, 'document:leeg:8'); assert.equal(docs, 8);
+        assert.equal(r.betaal.opnieuw, 1); assert.equal(r.betaal.afgekeurd, 0);
+        M.leeg = 0; r = await kind(dir, 'ronde', inv, env);   // volgende ronde: nu wel inhoud
+        d = new DatabaseSync(path.join(dir, 'nmbrs.sqlite')); b = d.prepare('select status, pogingen from betaallijst where run = ?').get(RUN); d.close();
+        assert.equal(b.status, 'klaar'); assert.equal(b.pogingen, 2);
+      }
     } finally { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
   }
 });
