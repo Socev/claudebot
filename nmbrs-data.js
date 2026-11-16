@@ -505,16 +505,20 @@ async function journaal(L, bedrijf, run, jaar) {
 async function taakDocument(L, r, B) {
   if (r.status !== 200 || !r.j || !idVan(r.j.taskId)) return { status: 'taak:' + r.status };
   TAKEN.add(r.j.taskId);
+  let leeg = 0;
   for (let i = 0; i < 8; i++) {
     await slaap(PAUZE_MS * 5 * (i + 1));
     const d = await L.haal('/api/documents/' + r.j.taskId, true);
     if (d.status === 202) continue;
+    // wv3229: Nmbrs gaf voor R11 een 200 met 0 bytes (application/octet-stream). Vermoedelijk nog niet klaar: blijven vragen; blijft het
+    // leeg, dan 'document:leeg:<n>' → status opnieuw (volgende ronde, hooguit 5 pogingen), geen afkeuring als onleesbaar
+    if (d.status === 200 && d.buf && d.buf.length === 0) { leeg++; continue; }
     if (d.status !== 200 || d.tekst == null) return { status: 'document:' + d.status + (d.groot ? ':groot' : '') };
     // wv3228: uitpakken (utf-16, base64, JSON-omhulsel, zip) en de vorm beschrijven zonder inhoud (nmbrs-betaal.js ontpak)
     const o = B.ontpak(d.buf || Buffer.from(d.tekst, 'utf8'), d.ct);
-    return { status: 'ok', tekst: o.tekst, vorm: o.vorm, ruw_sha: sha(d.buf || d.tekst) };
+    return { status: 'ok', tekst: o.tekst, vorm: Object.assign({}, o.vorm, { vragen: i + 1, leeg: leeg }), ruw_sha: sha(d.buf || d.tekst) };
   }
-  return { status: 'document:wacht' };
+  return { status: leeg ? 'document:leeg:' + leeg : 'document:wacht' };
 }
 // wv3208: betaallijsten van nieuwe, vergrendelde loonruns van de POT (bedrijf_entiteit = POT), alleen met documentrecht. Per run: het
 // SEPA-bestand van Nmbrs (zonder betaaldatum; die kiest David in de app), het aantal medewerkers in de run, controles (nmbrs-betaal.js).
