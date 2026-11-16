@@ -689,6 +689,62 @@ test('wv2336 stand door: zacht gaat door met het label mogelijk medisch, hard st
   E.r.sluit();
 });
 
+// wv3176: VECOZO ION-melding (verzonnen; het RelatieID is veertien nullen) — via gmail:groenhouten in de vault op 12-11-2026
+const ION_TEKST = 'Geachte heer/mevrouw, onderstaande patiëntrelatie is beëindigd. RelatieID: 00000000000000. Met vriendelijke groet, VECOZO (verzonnen)';
+test('wv3176 ionMelding: dezelfde regel als isIonMelding (wv1056); andere VECOZO-post en ION-nieuws van een ander blijven door', () => {
+  const I = R.ionMelding;
+  const t = (van, onderwerp, tekst, extra) => I(Object.assign({ van, onderwerp, teksten: [tekst || 'x'] }, extra || {}));
+  assert.equal(t('noreply@vecozo.nl', ' - ION Patiëntrelaties beëindigd', ION_TEKST), true);
+  assert.equal(t('noreply@vecozo.nl', ' - ION Pat\ufffdntrelaties be\ufffdindigd'), true);           // mojibake
+  assert.equal(t('noreply@vecozo.nl', ' - ION Patintrelaties beindigd'), true);
+  assert.equal(t('collega@voorbeeld.example', 'FW: - ION Patiëntrelaties beëindigd', 'zie onder'), true);   // doorgestuurd
+  assert.equal(t('noreply@vecozo.nl', 'Kennisgeving', 'Relatie-ID: 00000000000000'), true);           // VECOZO + RelatieID, ander onderwerp
+  assert.equal(t('noreply@enquete.vecozo.nl', 'ION-melding patiëntrelatie gewijzigd'), true);
+  assert.equal(t('VECOZO <noreply@vecozo.nl>', 'ION Patiëntrelaties'), true);
+  assert.equal(t('collega@voorbeeld.example', 'FW: overleg', 'zie bijlage', { bijlagenamen: ['FW: ION Patiëntrelaties beëindigd.msg'] }), true);
+  assert.equal(t('x@voorbeeld.example', 'Doorgestuurd', 'RelatieID 00000000000000', { van_naam: 'VECOZO' }), true);
+  // blijven door
+  assert.equal(t('noreply@vecozo.nl', 'Nieuwe opt-in aanmeldingen LSP bij VECOZO', 'Er zijn nieuwe aanmeldingen.'), false);
+  assert.equal(t('Support@vecozo.nl', 'VECOZO [Ticket 1] - Serviceverzoek Diensten', 'Uw verzoek'), false);
+  assert.equal(t('noreply@vecozo.nl', 'Herinnering: Verleng uw persoonlijk certificaat', 'Uw certificaat verloopt.'), false);
+  assert.equal(t('info@lhv.example', 'Nieuwsbrief: patiëntrelatie en inschrijving', 'ION is een afkorting'), false);
+  assert.equal(t('x@nepvecozo.nl', 'Relatie', 'RelatieID'), false);
+  assert.equal(t('info@stichting.example', 'Uitnodiging ION-congres', 'Programma'), false);
+  assert.equal(t('anne@voorbeeld.example', 'Re: Overleg roosters', 'Bel 00000000000000'), false);   // 14 cijfers zonder VECOZO
+});
+
+test('wv3176 ION-melding via de Gmail-intake: hard (ion_melding), stil buiten de Brain, geteld; schaduw = vastgehouden; andere VECOZO-mail door', async () => {
+  const E = omgeving({ markerStand: () => 'door', live: () => ({ 'gmail:david': true, 'gmail:groenhouten': true }) });
+  const ion = E.zet({ bron: 'gmail:groenhouten', marker: 'geen', soorten: ['patient_woord'], meta: { van: 'noreply@vecozo.nl', onderwerp: ' - ION Patiëntrelaties beëindigd', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('noreply@vecozo.nl', ' - ION Patiëntrelaties beëindigd', ION_TEKST) }] });
+  const lsp = E.zet({ bron: 'gmail:groenhouten', meta: { van: 'noreply@vecozo.nl', onderwerp: 'Nieuwe opt-in aanmeldingen LSP bij VECOZO', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('noreply@vecozo.nl', 'Nieuwe opt-in aanmeldingen LSP bij VECOZO', 'Er zijn nieuwe opt-in aanmeldingen voor het LSP binnengekomen (verzonnen).') }] });
+  await E.r.ronde();
+  const lh = E.db.prepare('SELECT * FROM live_stuk WHERE stuk_id = ?').get(ion);
+  assert.equal(lh.staat, 'bewaard'); assert.equal(lh.keuze, 'hard'); assert.equal(lh.keuze_door, 'router');
+  const m = E.db.prepare("SELECT uitkomst, bewijs FROM besluit WHERE stuk_id = ? AND stap = 'marker'").get(ion);
+  assert.equal(m.uitkomst, 'gemarkeerd'); assert.ok(JSON.parse(m.bewijs).soorten.includes('ion_melding'));
+  const w = E.db.prepare("SELECT uitkomst, bewijs FROM besluit WHERE stuk_id = ? AND stap = 'marker_weging'").get(ion);
+  assert.equal(w.uitkomst, 'hard'); assert.ok(JSON.parse(w.bewijs).waarom.includes('ion_melding'));
+  assert.ok(!E.bestanden().some((p) => /ION/.test(p)), E.bestanden().join(','));
+  assert.ok(!E.tel.jev.some((x) => /RelatieID/.test(x)) && !E.tel.indeling.some((x) => /RelatieID/.test(x)));
+  assert.equal(E.tel.kaarten.length, 0);
+  assert.ok(!/00000000000000/.test(JSON.stringify(E.db.prepare('SELECT * FROM besluit').all())));
+  assert.equal(E.db.prepare('SELECT staat FROM live_stuk WHERE stuk_id = ?').get(lsp).staat, 'klaar');
+  assert.ok(E.bestanden().some((p) => /LSP/.test(p)));
+  const tl = E.r.telling('2000-01-01T00:00:00Z', '2100-01-01T00:00:00Z');
+  assert.equal(tl.marker_hard, 1); assert.equal(tl.buiten_brain, 1);
+  E.r.sluit();
+  // stand schaduw: vastgehouden (ook buiten de Brain), zoals elk gemarkeerd stuk
+  const S = omgeving({ live: () => ({ 'gmail:groenhouten': true }) });
+  const ion2 = S.zet({ bron: 'gmail:groenhouten', marker: 'geen', soorten: ['patient_woord'], meta: { van: 'noreply@vecozo.nl', onderwerp: ' - ION Patiëntrelaties beëindigd', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('noreply@vecozo.nl', ' - ION Patiëntrelaties beëindigd', ION_TEKST) }] });
+  await S.r.ronde();
+  assert.equal(S.db.prepare('SELECT staat FROM live_stuk WHERE stuk_id = ?').get(ion2).staat, 'vastgehouden');
+  assert.deepEqual(S.bestanden(), []);
+  S.r.sluit();
+});
+
 test('wv2336 binnenbak: voorstel, kandidaten en reden zonder modelaanroep; keuze alleen op de actuele versie en herhaalveilig', async () => {
   const E = omgeving();
   const id = E.zet({ meta: { van: 'x@voorbeeld-energie.example', onderwerp: 'Brief', aan: ['david@voorbeeld.example'] },
