@@ -464,6 +464,9 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   TOETSUUR: () => toetsUur,
   TOETSBUUR: () => toetsBUur, SECRET: 'g'.repeat(40),
   agentsReg,
+  // wv3227: OVIS Code — register en werkbestanden (staan in server.js buiten het app-blok)
+  CODE_APPS: require('./code-apps.js'), CODE_IDS: require('./code-apps.js').APPS.map((x) => x.id), OVIS_CODE_DIR: path.join(W, 'ovis-code'),
+  CODE_WERK: require('./ovis-code.js').maak({ basis: path.join(W, 'ovis-code'), geheugenToets: require('./mk-tekst.js').geheugenToets }),
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
@@ -5471,6 +5474,68 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/naast', undefined, {});
       toets('21 zonder sessie -> 401', r.status === 401, r.status);
       n8nStaat.executies = exVoor;
+    }
+
+    // ── 22c. OVIS Code (wv3227): kanaal code-<id> door de echte app-route — kop, sessie, werkbestanden, logboek, route, grens van 2 ──
+    {
+      const boxRijen = [];
+      ctx.schrijfLog = () => {}; ctx.nu = () => ''; ctx.velden = () => ''; ctx.ovisBoxRij = (t) => { boxRijen.push(t); return true; };
+      const n0 = gestart.length;
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'code-onzin', tekst: 'x' }, { pot: P.jar });
+      const rH = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'code-Texere', tekst: 'x' }, { pot: P.jar });
+      toets('22c verzonnen id en id met hoofdletter -> 400, niets gestart', r.status === 400 && rH.status === 400 && gestart.length === n0, JSON.stringify([r.j, rH.j]));
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'code-texere', tekst: 'geef in drie regels de stand' }, { pot: P.jar });
+      const jt = r.j.job_id;
+      await slaap(60);
+      const gt = gestart[gestart.length - 1] || {};
+      toets('22c beurt -> sessie ovis-code-texere met de vaste kop uit de release en Davids tekst erachter', r.status === 200 && gt.jobId === jt && gt.chatId === 'ovis-code-texere' &&
+        /^\[OVIS CODE · OVIS Texere \(texere\)\]/.test(gt.prompt) && gt.prompt.indexOf('De vraag van David:\n[APP] geef in drie regels de stand') > 0 && gt.prompt.indexOf(OMLIJST.slice(0, 40)) < 0, JSON.stringify(gt).slice(0, 300));
+      toets('22c job is een app-beurt op kanaal code-texere (voorwaarde voor de machinekamer-klasse)', jobs[jt] && jobs[jt].app && jobs[jt].app.kanaal === 'code-texere' && jobs[jt].chat_id === 'ovis-code-texere' && !jobs[jt].agent);
+      const om = path.join(W, 'ovis-code', 'texere');
+      const md = (p) => fs.lstatSync(p).mode & 0o777;
+      toets('22c eerste gesprek: INSTRUCTIE en STAND aangemaakt (map 0700, bestanden 0600)', fs.existsSync(path.join(om, 'STAND.md')) && md(om) === 0o700 && md(path.join(om, 'INSTRUCTIE.md')) === 0o600 && md(path.join(om, 'STAND.md')) === 0o600);
+      afmaken[jt]('Stand: server 3.4 live.\nVolgende stap: zinnenbeheer.\nValkuil: hookcontrole.\n\nVRAAG AAN DAVID: Zal ik de server bijwerken?');
+      await slaap(80);
+      r = await vraag('POST', '/app/uitslag', { job_id: jt }, { pot: P.jar });
+      toets('22c uitslag: antwoord met knoppen (zoals de machinekamer)', r.status === 200 && r.j.klaar === true && r.j.kanaal === 'code-texere' && r.j.vraag && /server bijwerken/.test(r.j.vraag.tekst), JSON.stringify(r.j).slice(0, 300));
+      const lp = path.join(LOGDIR, 'code-texere.jsonl');
+      const lc = fs.existsSync(lp) ? fs.readFileSync(lp, 'utf8') : '';
+      toets('22c antwoord in het logboek van het kanaal (0600), niet in de machinekamer', /server 3\.4 live/.test(lc) && (fs.statSync(lp).mode & 0o077) === 0 && !/server 3\.4 live/.test(fs.readFileSync(path.join(LOGDIR, 'machinekamer.jsonl'), 'utf8')), lc.slice(0, 200));
+      r = await vraag('GET', '/app/code/apps', undefined, { pot: P.jar });
+      const tx = r.j && r.j.apps && r.j.apps.find((x) => x.id === 'texere');
+      const js = JSON.stringify(r.j || {});
+      toets('22c GET /app/code/apps: 70 apps in groepen, texere met gesprek, chip wacht_op_jou (open vraag), geen podpad/label/voorvoegsel', r.status === 200 && r.j.apps.length >= 70 && r.j.groepen.length === 4 && tx && tx.gesprek.laatste && tx.chip === 'wacht_op_jou' &&
+        js.indexOf('/opt/data') < 0 && js.indexOf('voorvoegsels') < 0 && js.indexOf('machinekamer:') < 0 && r.j.tegelijk.max === 2, js.slice(0, 300));
+      ctx.RUNTIMES_LIJST = ['claude', 'codex']; ctx.chatSessions = { 'ovis-code-texere': 'sessie-1', 'codex:ovis-code-texere': 'sessie-2', 'ovis-code-pot': 'blijft' };
+      ctx.sessieSleutel = (k, rt) => (rt && rt !== 'claude' ? rt + ':' + k : k); let bewaard = 0; ctx.saveSessions = () => { bewaard++; }; ctx.sessieResetOp = {};
+      r = await vraag('POST', '/app/code/nieuw', { id: 'texere' }, { pot: P.jar });
+      toets('22c Nieuw gesprek wist alleen de sessie van deze app (alle breinen), bewaart en zet de resettijd', !ctx.chatSessions['ovis-code-texere'] && !ctx.chatSessions['codex:ovis-code-texere'] && ctx.chatSessions['ovis-code-pot'] === 'blijft' && bewaard === 1 && ctx.sessieResetOp['ovis-code-texere'] > 0, JSON.stringify(ctx.chatSessions));
+      const rN = await vraag('POST', '/app/code/nieuw', { id: 'onzin' }, { pot: P.jar });
+      toets('22c Nieuw gesprek: 200; onbekende app 400', r.status === 200 && rN.status === 400, JSON.stringify([r.j, rN.j]));
+      // gesymlinkte STAND: de beurt start niet, 409 met werkbestanden, één box-rij
+      fs.renameSync(path.join(om, 'STAND.md'), path.join(W, 'stand-x.md'));
+      fs.writeFileSync(path.join(W, 'vreemd.md'), 'vreemd\n', { mode: 0o600 });
+      fs.symlinkSync(path.join(W, 'vreemd.md'), path.join(om, 'STAND.md'));
+      const n1 = gestart.length;
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'code-texere', tekst: 'nog iets' }, { pot: P.jar });
+      toets('22c gesymlinkte STAND: 409 "werkbestanden niet in orde", niets gestart, één box-rij', r.status === 409 && r.j.werkbestanden === true && /machinekamer herstelt/.test(r.j.fout) && gestart.length === n1 && boxRijen.length === 1 && /OVIS Code › texere/.test(boxRijen[0]), JSON.stringify(r.j));
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'code-texere', tekst: 'nog eens' }, { pot: P.jar });
+      toets('22c tweede afkeuring dezelfde dag: geen tweede box-rij', r.status === 409 && boxRijen.length === 1, boxRijen.length);
+      fs.unlinkSync(path.join(om, 'STAND.md')); fs.renameSync(path.join(W, 'stand-x.md'), path.join(om, 'STAND.md'));
+      // grens van 2 tegelijk over alle apps
+      const ids = [];
+      for (const k of ['code-pot', 'code-spoed', 'code-crisis']) { r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: k, tekst: 'proef ' + k }, { pot: P.jar }); ids.push(r.j.job_id); }
+      await slaap(300);
+      const lopen = ids.filter((id) => isGestart(id)).length;
+      r = await vraag('GET', '/app/geschiedenis/code-crisis', undefined, { pot: P.jar });
+      const wacht = r.j && r.j.lopend && r.j.lopend.find((x) => x.job_id === ids[2]);
+      toets('22c drie apps tegelijk: twee lopen, de derde wacht zichtbaar (in_rij + wacht_op_plek)', lopen === 2 && !isGestart(ids[2]) && wacht && wacht.in_rij === true && wacht.wacht_op_plek === true, JSON.stringify({ lopen, wacht }));
+      afmaken[ids[0]]('klaar pot');
+      for (let i = 0; i < 40 && !isGestart(ids[2]); i++) await slaap(100);
+      toets('22c na het eerste antwoord start de derde', isGestart(ids[2]));
+      afmaken[ids[1]]('klaar spoed'); afmaken[ids[2]]('klaar crisis');
+      await slaap(80);
+      delete ctx.schrijfLog; delete ctx.nu; delete ctx.velden; delete ctx.ovisBoxRij; ['RUNTIMES_LIJST', 'chatSessions', 'sessieSleutel', 'saveSessions', 'sessieResetOp'].forEach((k) => { delete ctx[k]; });
     }
 
     // ── 22. Cijfer-Meester (wv200, bouwplan § 4.9c): kanaal cijfer-meester -> eigen sessie, kop, geen knoppen/bijlagen/chat_log ──
