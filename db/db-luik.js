@@ -21,9 +21,11 @@ const fs = require('fs');
 const env = process.env;
 const POORT = parseInt(env.DB_LUIK_POORT || '8091', 10);
 const HOST = env.DB_LUIK_HOST || '0.0.0.0';
+// PostgREST luistert alleen op een unix-socket in een map van claude (Codex MOET 1); POSTGREST_POORT alleen voor de toets (nep op TCP)
+const DOEL_SOCKET = env.POSTGREST_SOCKET || '/run/pgrst/pgrst.sock';
+const DOEL_POORT = env.POSTGREST_POORT ? parseInt(env.POSTGREST_POORT, 10) : null;
 const DOEL_HOST = '127.0.0.1';
-const DOEL_POORT = parseInt(env.POSTGREST_POORT || '3001', 10);
-const ADMIN_POORT = parseInt(env.POSTGREST_ADMIN_POORT || '3002', 10);
+function doelOpties(o) { return Object.assign(DOEL_POORT ? { host: DOEL_HOST, port: DOEL_POORT } : { socketPath: DOEL_SOCKET }, o); }
 const SLEUTELS = env.DB_LUIK_SLEUTELS || '/opt/data/.pg/luik-sleutels.json';
 const JWT_PAD = env.DB_LUIK_JWT || '/opt/data/.pg/jwt.key';
 const LOG = env.DB_LUIK_LOG || '/opt/data/bin/db-luik.log';
@@ -101,9 +103,10 @@ function antwoord(res, status, obj) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(t) });
   res.end(t);
 }
-function adminGet(pad) {
+// gereedheid: GET / als anon (OpenAPI-overzicht); 200 = verbonden met Postgres en schemacache geladen
+function doelGet(pad) {
   return new Promise(function (resolve) {
-    const r = http.get({ host: DOEL_HOST, port: ADMIN_POORT, path: pad, timeout: 2000 }, function (x) { x.resume(); resolve(x.statusCode); });
+    const r = http.get(doelOpties({ path: pad, timeout: 3000, headers: { accept: 'application/openapi+json' } }), function (x) { x.resume(); resolve(x.statusCode); });
     r.on('error', function () { resolve(0); });
     r.on('timeout', function () { r.destroy(); resolve(0); });
   });
@@ -113,15 +116,21 @@ async function gezondheid(res) {
   laadSleutels();
   let socket = false;
   try { socket = fs.statSync(SOCKET).isSocket(); } catch (e) { socket = false; }
-  const live = await adminGet('/live');
-  const ready = await adminGet('/ready');
-  const ok = socket && live === 200 && ready === 200 && !lijst.fout;
-  antwoord(res, ok ? 200 : 503, { ok: ok, postgres_socket: socket, postgrest_live: live === 200, postgrest_ready: ready === 200,
+  const st = await doelGet('/');
+  const ok = socket && st === 200 && !lijst.fout;
+  antwoord(res, ok ? 200 : 503, { ok: ok, postgres_socket: socket, postgrest_live: st > 0, postgrest_ready: st === 200,
     sleutels: lijst.sleutels.length, sleutel_fout: lijst.fout, sinds_s: Math.round((Date.now() - start) / 1000) });
 }
 
+// Codex MOET 2: alleen een filter op de HOOFDtabel telt. Ingebedde parameters (child.order, child.id=eq.1) beperken de te wijzigen
+// rijen niet. Kolomfilter = sleutel zonder punt met een operatorwaarde (eq., in., is., …); logisch = or/and/not.or/not.and met (…).
 function heeftFilter(zoek) {
-  for (const k of new URLSearchParams(zoek).keys()) if (!GEEN_FILTER.has(k)) return true;
+  for (const [k, v] of new URLSearchParams(zoek)) {
+    if (GEEN_FILTER.has(k)) continue;
+    if (/^(not\.)?(or|and)$/.test(k)) { if (/^\(.+\)$/.test(v)) return true; continue; }
+    if (k.indexOf('.') >= 0) continue;
+    if (/^(not\.)?[a-z]+(\([a-z0-9_,]+\))?\..+/i.test(v)) return true;
+  }
   return false;
 }
 
@@ -154,8 +163,8 @@ const server = http.createServer(function (req, res) {
   let token;
   try { token = jwtVoor(s.rol); } catch (e) { req.resume(); antwoord(res, 503, { message: 'luik niet ingericht' }); return; }
   kop.authorization = 'Bearer ' + token;
-  kop.host = DOEL_HOST + ':' + DOEL_POORT;
-  const naar = http.request({ host: DOEL_HOST, port: DOEL_POORT, method: req.method, path: doelPad + (zoek ? '?' + zoek : ''), headers: kop });
+  kop.host = 'postgrest';
+  const naar = http.request(doelOpties({ method: req.method, path: doelPad + (zoek ? '?' + zoek : ''), headers: kop }));
   const klok = setTimeout(function () {
     naar.destroy(new Error('tijd'));
     antwoord(res, 504, { message: 'databank antwoordt niet binnen ' + Math.round(TIJDSLIMIET_MS / 1000) + ' s' });

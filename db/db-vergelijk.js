@@ -3,7 +3,7 @@
  * db-vergelijk.js (wv3180) — vergelijkt twee databanken na een dump/herstel (ontwerp § 4). Elk verschil = stop.
  *
  *   node db-vergelijk.js manifest <uit.json> [verbinding] [--snapshot-export <bestand>]
- *   node db-vergelijk.js vergelijk <bron.json> <doel.json>
+ *   node db-vergelijk.js vergelijk <bron.json> <doel.json> [--toegestaan ext:vector] [--doel-socket <map> --doel-port <p> --doel-db <naam> --doel-rol <rol>]
  *
  * Verbinding: --socket <map> --db <naam> --rol <rol> (lokaal, peer), of --host/--port/--user/--db met PGPASSWORD uit de omgeving
  * en --ssl (zoals sslmode=require). --snapshot-export: opent een REPEATABLE READ-transactie, schrijft pg_export_snapshot() naar het
@@ -70,8 +70,10 @@ async function manifest(argv) {
       const pol = await q("select string_agg(polname || ':' || polcmd::text || ':' || polpermissive::text || ':' || coalesce(array_to_string(array(select case when r = 0 then 'PUBLIC' else pg_get_userbyid(r) end from unnest(polroles) r order by 1), ','), '') || ':' || coalesce(pg_get_expr(polqual, polrelid), '') || ':' || coalesce(pg_get_expr(polwithcheck, polrelid), ''), '|' order by polname) as p from pg_policy where polrelid = $1", [t.oid]);
       const idx = await q("select string_agg(pg_get_indexdef(indexrelid), '|' order by pg_get_indexdef(indexrelid)) as i from pg_index where indrelid = $1", [t.oid]);
       const trg = await q("select string_agg(pg_get_triggerdef(oid), '|' order by pg_get_triggerdef(oid)) as t from pg_trigger where tgrelid = $1 and not tgisinternal", [t.oid]);
-      const con = await q("select string_agg(conname || ' ' || case when contype = 'c' then regexp_replace(pg_get_constraintdef(oid), '[()[:space:]]', '', 'g') else pg_get_constraintdef(oid) end, '|' order by conname) as c from pg_constraint where conrelid = $1", [t.oid]);
-      Object.assign(basis, { rijen: String(r.n), rijhash: r.h, rls: t.rls, force_rls: t.frls, policies: pol[0].p || '', indexen: idx[0].i || '', triggers: trg[0].t || '', constraints: con[0].c || '' });
+      // letterlijk (Codex MOET 5: haakjes weghalen kan (a OR b) AND c gelijk laten lijken aan a OR (b AND c)); een herstel plat geneste
+      // AND's af, dat lost `vergelijk --doel-…` op door de brontekst in de doeldatabank opnieuw te laten ontleden
+      const con = await q("select coalesce(array_agg(conname || ' ' || pg_get_constraintdef(oid) order by conname), '{}') as c from pg_constraint where conrelid = $1", [t.oid]);
+      Object.assign(basis, { rijen: String(r.n), rijhash: r.h, rls: t.rls, force_rls: t.frls, policies: pol[0].p || '', indexen: idx[0].i || '', triggers: trg[0].t || '', constraints: con[0].c });
       m.tabellen[t.naam] = basis;
     } else if (t.relkind === 'v' || t.relkind === 'm') {
       const v = await q('select pg_get_viewdef($1::oid) as d', [t.oid]);
@@ -98,11 +100,12 @@ async function manifest(argv) {
     sequences: Object.keys(m.sequences).length, rijen: Object.values(m.tabellen).reduce(function (a, t) { return a + (t.rijen ? Number(t.rijen) : 0); }, 0) }));
 }
 
-function vergelijk(argv) {
+async function vergelijk(argv) {
   const a = JSON.parse(fs.readFileSync(argv[1], 'utf8'));
   const b = JSON.parse(fs.readFileSync(argv[2], 'utf8'));
   const toegestaan = String(arg(argv, '--toegestaan', '') || '').split(',').filter(Boolean);   // bv. ext:vector
   const uit = { verschillen: 0, per_soort: {}, voorbeelden: [], toegestane_verschillen: [] };
+  const teHerparsen = [];
   const telVerschil = function (soort, naam, veld) {
     uit.verschillen++; uit.per_soort[soort] = (uit.per_soort[soort] || 0) + 1;
     if (uit.voorbeelden.length < 40) uit.voorbeelden.push(soort + ' ' + naam + (veld ? ' [' + veld + ']' : ''));
@@ -116,10 +119,45 @@ function vergelijk(argv) {
       if (typeof vx !== 'object' || vx === null) { if (JSON.stringify(vx) !== JSON.stringify(vy)) telVerschil(soort, k); return; }
       Object.keys(Object.assign({}, vx, vy)).forEach(function (veld) {
         if (soort === 'sequences' && veld === 'last_value') { if (BigInt(vy.last_value) < BigInt(vx.last_value)) telVerschil(soort, k, 'last_value lager'); return; }
+        if (soort === 'tabellen' && veld === 'constraints' && JSON.stringify(vx[veld]) !== JSON.stringify(vy[veld])) { teHerparsen.push({ tabel: k, bron: vx[veld] || [], doel: vy[veld] || [] }); return; }
         if (JSON.stringify(vx[veld]) !== JSON.stringify(vy[veld])) telVerschil(soort, k, veld);
       });
     });
   });
+  // CHECK-constraints die alleen in tekst verschillen: brontekst in de doeldatabank opnieuw ontleden (tijdelijke tabel LIKE de echte,
+  // transactie wordt teruggedraaid). Gelijk na ontleden = genormaliseerd (geteld, geen verschil); anders, of zonder doelverbinding = verschil.
+  uit.genormaliseerd = 0;
+  let dc = null;
+  if (teHerparsen.length && arg(argv, '--doel-socket')) {
+    dc = new pg.Client({ host: arg(argv, '--doel-socket'), port: parseInt(arg(argv, '--doel-port', '5432'), 10), database: arg(argv, '--doel-db'), user: arg(argv, '--doel-rol'), options: '-c TimeZone=UTC' });
+    await dc.connect();
+  }
+  for (const t of teHerparsen) {
+    const doelSet = new Set(t.doel);
+    const bronAlleen = t.bron.filter(function (x) { return !doelSet.has(x); });
+    const bronSet = new Set(t.bron);
+    const doelAlleen = t.doel.filter(function (x) { return !bronSet.has(x); });
+    const naam = function (x) { return x.split(' ')[0]; };
+    if (!dc || bronAlleen.length !== doelAlleen.length) { telVerschil('tabellen', t.tabel, 'constraints'); continue; }
+    let gelijk = true;
+    for (const b of bronAlleen) {
+      const d = doelAlleen.find(function (x) { return naam(x) === naam(b); });
+      const def = b.slice(naam(b).length + 1);
+      if (!d || !/^CHECK \(/.test(def)) { gelijk = false; break; }
+      try {
+        await dc.query('begin');
+        const qn = t.tabel.split('.').map(function (x) { return '"' + x.replace(/"/g, '""') + '"'; }).join('.');
+        await dc.query('create temp table wv3180_herparse (like ' + qn + ')');
+        await dc.query('alter table wv3180_herparse add constraint wv3180_c ' + def + ' not valid');
+        const r = await dc.query("select pg_get_constraintdef(oid) as d from pg_constraint where conname = 'wv3180_c' and conrelid = 'wv3180_herparse'::regclass");
+        await dc.query('rollback');
+        if ((naam(b) + ' ' + r.rows[0].d.replace(/ NOT VALID$/, '')) !== d) gelijk = false;
+      } catch (e) { try { await dc.query('rollback'); } catch (x) {} gelijk = false; }
+      if (!gelijk) break;
+    }
+    if (gelijk) uit.genormaliseerd += bronAlleen.length; else telVerschil('tabellen', t.tabel, 'constraints');
+  }
+  if (dc) await dc.end();
   Object.keys(Object.assign({}, a.extensies, b.extensies)).forEach(function (e) {
     const x = (a.extensies || {})[e], y = (b.extensies || {})[e];
     if (!x || !y || x.schema !== y.schema) return telVerschil('extensies', e, 'ontbreekt of ander schema');
@@ -139,7 +177,7 @@ function vergelijk(argv) {
   const argv = process.argv.slice(2);
   try {
     if (argv[0] === 'manifest' && argv[1]) await manifest(argv);
-    else if (argv[0] === 'vergelijk' && argv[2]) vergelijk(argv);
+    else if (argv[0] === 'vergelijk' && argv[2]) await vergelijk(argv);
     else { console.error('gebruik: manifest <uit.json> [--socket … --db … --rol …] | vergelijk <bron.json> <doel.json> [--toegestaan ext:vector]'); process.exit(2); }
   } catch (e) { console.error(JSON.stringify({ fout: String(e && e.message || e).slice(0, 500) })); process.exit(1); }
 })();

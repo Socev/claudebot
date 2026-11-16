@@ -1,5 +1,5 @@
 // test/db-luik.test.js (wv3180) — toetst db/db-luik.js tegen een nep-PostgREST (altijd) en, met DB_LUIK_ECHT=1, tegen een echte
-// PostgREST + Postgres (DB_LUIK_ECHT_POORT, DB_LUIK_ECHT_ADMIN, DB_LUIK_ECHT_SOCKET, DB_LUIK_ECHT_JWT, DB_LUIK_ECHT_SLEUTELS,
+// PostgREST + Postgres (DB_LUIK_ECHT_PGRST_SOCKET = unix-socket van PostgREST, DB_LUIK_ECHT_SOCKET = Postgres-socket, DB_LUIK_ECHT_JWT, DB_LUIK_ECHT_SLEUTELS,
 // DB_LUIK_ECHT_SERVICE / _ANON = sleutelwaarden uit de omgeving, nooit in de uitvoer).
 // Het te toetsen bestand: DB_LUIK_JS (standaard db/db-luik.js) — zo kan een kruisproef een kapotte kopie aanwijzen.
 'use strict';
@@ -66,7 +66,7 @@ async function nep() {
   const sock = path.join(map, 'nep.sock');
   const sockSrv = require('net').createServer().listen(sock);
   const log = path.join(map, 'luik.log');
-  const luik = await startLuik({ DB_LUIK_POORT: String(pLuik), DB_LUIK_HOST: '127.0.0.1', POSTGREST_POORT: String(pNep), POSTGREST_ADMIN_POORT: String(pAdmin),
+  const luik = await startLuik({ DB_LUIK_POORT: String(pLuik), DB_LUIK_HOST: '127.0.0.1', POSTGREST_POORT: String(pNep),
     DB_LUIK_SLEUTELS: path.join(map, 'sleutels.json'), DB_LUIK_JWT: path.join(map, 'jwt.key'), DB_LUIK_LOG: log, DB_LUIK_PG_SOCKET: sock, DB_LUIK_MAX_BODY: '2000' });
   try {
     let n0 = gezien.length;
@@ -98,6 +98,15 @@ async function nep() {
     r = await vraag(pLuik, 'PATCH', '/rest/v1/t', { apikey: SVC, 'content-type': 'application/json' }, '{"a":1}');
     r2 = await vraag(pLuik, 'DELETE', '/rest/v1/t?select=a', { apikey: SVC });
     ok(r.st === 400 && JSON.parse(r.lijf).code === '21000' && r2.st === 400 && gezien.length === n0, 'PATCH/DELETE zonder filter: 400 (safeupdate)');
+    // Codex MOET 2: ingebedde parameters of een kale waarde zijn geen filter op de hoofdtabel
+    const n1 = gezien.length;
+    r = await vraag(pLuik, 'PATCH', '/rest/v1/t?select=*,kind(*)&kind.order=id', { apikey: SVC, 'content-type': 'application/json' }, '{"a":1}');
+    r2 = await vraag(pLuik, 'DELETE', '/rest/v1/t?kind.id=eq.1', { apikey: SVC });
+    r3 = await vraag(pLuik, 'DELETE', '/rest/v1/t?kind.or=(a.eq.1)&naam=x', { apikey: SVC });
+    ok(r.st === 400 && r2.st === 400 && r3.st === 400 && gezien.length === n1, 'ingebed filter (kind.id, kind.order, kind.or) of waarde zonder operator telt niet: 400');
+    r = await vraag(pLuik, 'DELETE', '/rest/v1/t?or=(a.eq.1,b.eq.2)', { apikey: SVC });
+    r2 = await vraag(pLuik, 'PATCH', '/rest/v1/t?id=not.is.null', { apikey: SVC, 'content-type': 'application/json' }, '{"a":1}');
+    ok(r.st === 200 && r2.st === 200, 'or=(…) en not.is.null op de hoofdtabel tellen als filter');
     r = await vraag(pLuik, 'PATCH', '/rest/v1/t?id=eq.1', { apikey: SVC, 'content-type': 'application/json' }, '{"a":1}');
     r2 = await vraag(pLuik, 'DELETE', '/rest/v1/rpc/x', { apikey: SVC });
     ok(r.st === 200 && r2.st === 200, 'PATCH met filter en rpc gaan door');
@@ -127,8 +136,7 @@ async function echt() {
   console.log('deel B: echte PostgREST + Postgres');
   const pLuik = await vrijePoort();
   const map = fs.mkdtempSync(path.join(os.tmpdir(), 'dbluik-echt-'));
-  const luik = await startLuik({ DB_LUIK_POORT: String(pLuik), DB_LUIK_HOST: '127.0.0.1', POSTGREST_POORT: process.env.DB_LUIK_ECHT_POORT,
-    POSTGREST_ADMIN_POORT: process.env.DB_LUIK_ECHT_ADMIN, DB_LUIK_SLEUTELS: process.env.DB_LUIK_ECHT_SLEUTELS, DB_LUIK_JWT: process.env.DB_LUIK_ECHT_JWT,
+  const luik = await startLuik({ DB_LUIK_POORT: String(pLuik), DB_LUIK_HOST: '127.0.0.1', POSTGREST_SOCKET: process.env.DB_LUIK_ECHT_PGRST_SOCKET, DB_LUIK_SLEUTELS: process.env.DB_LUIK_ECHT_SLEUTELS, DB_LUIK_JWT: process.env.DB_LUIK_ECHT_JWT,
     DB_LUIK_LOG: path.join(map, 'luik.log'), DB_LUIK_PG_SOCKET: process.env.DB_LUIK_ECHT_SOCKET });
   const SVC = process.env.DB_LUIK_ECHT_SERVICE, ANON = process.env.DB_LUIK_ECHT_ANON;
   try {

@@ -28,6 +28,8 @@ if [ "$(id -u)" = "0" ]; then
   # ander proces is, en dan weigert postgres te starten
   rm -f "$DATA/postmaster.pid"
   chown pg:pgsock "$SOCK"; chmod 0750 "$SOCK"
+  # PostgREST-socket (wv3180, Codex MOET 1): alleen claude
+  mkdir -p /run/pgrst; chown claude:claude /run/pgrst; chmod 0700 /run/pgrst
   # stopverzoek: alleen claude (run.sh) kan het zetten, pg kan het zien (0711, vaste naam)
   chown claude:claude "$STOPMAP"; chmod 0711 "$STOPMAP"; rm -f "$STOPMAP/stop"
   touch "$LOG"; chown pg:pgsock "$LOG"; chmod 0640 "$LOG"
