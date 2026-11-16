@@ -52,6 +52,9 @@ SYNCLOG="$BIN/bisync.log"
 # Vast in het image (root), niet via de omgeving te verleggen (Fable wv813 #12).
 SYNC_FILTER=/app/bisync-filter.txt
 SYNC_FILTER_TOETS=/app/bisync-filter-toets.sh
+# Het bericht bij SYNC STOP (wv3184): vaste waarde, niet uit de omgeving; alleen een toets die dit blok knipt zet hem
+# daarna op een nep (test/rolwachter.sh deel B stuurde anders bij elke run een echt bericht naar David, 16-11).
+SYNC_BERICHT=/opt/data/mk-scripts/bericht.py
 FILTER=( --filter-from "$SYNC_FILTER" )
 # De uitzondering + /.claude/** en + /.obsidian/** in het filter leunt op de ACL: socev mag daar niets schrijven. Vóór elke
 # ronde nagaan (± 10 ms); kan socev het toch, dan deze ronde niet (Fable wv813 #6). De na-ronde zet de ACL terug.
@@ -253,7 +256,7 @@ sync_lus(){
     echo "$(date '+%F %T') SYNC STOP: syncfilter $SYNC_FILTER werkt niet - geen bisync tot een image met een goed filter" >> "$SYNCLOG"
     printf '%s\n' "$FT" | head -20 >> "$SYNCLOG"
     # Hoorbaar (Fable wv813 #5): alleen bij een podstart, dus hooguit één bericht per start; best-effort.
-    [ -r /opt/data/mk-scripts/bericht.py ] && timeout 60 python3 /opt/data/mk-scripts/bericht.py --klasse normaal \
+    [ -r "$SYNC_BERICHT" ] && timeout 60 python3 "$SYNC_BERICHT" --klasse normaal \
       "Vault-sync staat stil sinds de herstart: het syncfilter van dit image werkt niet (bisync.log, SYNC STOP). Er is niets weg. Niet terug naar een image zonder filter: eerst nalopen (bouwplan uid-scheiding § 8)." \
       >/dev/null 2>&1 || true
     while true; do sleep 3600; done

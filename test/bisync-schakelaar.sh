@@ -42,6 +42,8 @@ rol(){ printf 'rol=primair\nkant=olares\ntijd=%s\ngelezen=%s\nreden=proef\n' "$(
 rol
 # shellcheck disable=SC1090
 . "$T/blok.sh"
+# wv3184: faalt de filtertoets hier ooit, dan geen echt bericht aan David maar een nep in de proefmap.
+printf 'import sys\nopen("%s/berichten", "a").write(" ".join(sys.argv[1:]) + "\\n")\n' "$T" > "$T/bericht.py"; SYNC_BERICHT="$T/bericht.py"
 L="$T/bin/bisync.log"; RC_LOG="$T/rclone.log"; : > "$RC_LOG"
 zet(){ printf '%s' "$2" > "$1"; }
 aanroepen(){ grep -c '^bisync' "$RC_LOG" 2>/dev/null || true; }

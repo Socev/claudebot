@@ -306,14 +306,34 @@ case "\$1" in listremotes) echo "gdrive:";; bisync) echo "\$(date +%s) bisync" >
 exit 0
 EOF
 chmod +x "$B/nep/rclone"
-{
-  echo 'set -u'; echo "export PATH=$B/nep:\$PATH"; echo "VAULT=$B/vault; BIN=$B/bin; log(){ echo \"\$*\"; }"
-  sed -n '/^SYNC_ENABLED=/,/^start_sync(){/p' run.sh | sed '$d'
-  echo 'rol_reset_podstart'; echo 'sync_lus'
-} > "$B/lus.sh"
+# wv3184: de lus mag nooit het echte bericht.py of de echte filtertoets raken. De echte filtertoets draait rclone, en dat is
+# hier de nep: hij faalde dus altijd → tak SYNC STOP → elke run een echt bericht aan David (16-11, vijf keer). Nu een nep-bericht
+# dat in $B schrijft en een nep-filtertoets die slaagt (of bewust faalt voor de SYNC STOP-toets).
+printf 'import sys\nopen("%s/berichten", "a").write(" | ".join(sys.argv[1:]) + "\\n")\n' "$B" > "$B/nep/bericht.py"
+printf '#!/usr/bin/env bash\necho "bisync-filter-toets: ok (nep)"\n' > "$B/nep/filtertoets-ok"
+printf '{"aan": true}' > "$B/bisync.json"
+printf '#!/usr/bin/env bash\necho "bisync-filter-toets: KAPOT (nep)"; exit 1\n' > "$B/nep/filtertoets-faalt"
+lusB(){ # $1 = scriptnaam, $2 = BIN-map, $3 = filtertoets
+  { echo 'set -u'; echo "export PATH=$B/nep:\$PATH"; echo "VAULT=$B/vault; BIN=$2; log(){ echo \"\$*\"; }"
+    sed -n '/^SYNC_ENABLED=/,/^start_sync(){/p' run.sh | sed '$d'
+    echo "SYNC_FILTER_TOETS=$3; SYNC_BERICHT=$B/nep/bericht.py"
+    # eigen schakelbestand en onderhoudsstand (wv1308): anders leest de proef /opt/data/bisync.json van de pod (uit sinds 26-10)
+    echo "BISYNC_SCHAKELAAR=$B/bisync.json; ONDERHOUD_BESTAND=$B/onderhoud-bestaat-niet.json; ROL_BESTAND=$2/uitwijk-rol"
+    echo 'rol_reset_podstart'; echo 'sync_lus'
+  } > "$1"
+}
+# Start in een eigen procesgroep (setsid zonder fork: pid = pgid) en ruim de hele groep op, kinderen en lus tegelijk:
+# "kill lus; pkill -P lus" liet elke run een wees-sleep 3600 achter (ouder 1).
+startB(){ setsid bash "$1" </dev/null & LUS=$!; sleep 0.2; [ "$(ps -o pgid= -p "$LUS" | tr -d ' ')" = "$LUS" ] || { echo "ROOD  B lus niet in eigen procesgroep"; FOUT=1; }; }
+stopB(){ kill -TERM -- "-$1" 2>/dev/null; for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -g "$1" >/dev/null || break; sleep 0.2; done; kill -KILL -- "-$1" 2>/dev/null; wait "$1" 2>/dev/null; }
 toetsB(){ if eval "$2"; then echo "GROEN $1"; else echo "ROOD  $1"; FOUT=1; fi; }
+lusB "$B/lus.sh" "$B/bin" "$B/nep/filtertoets-ok"
+# Poort: draait run.sh het bericht nog via een vast pad (oud run.sh zonder SYNC_BERICHT), dan de lus NIET starten.
+if grep -v '^SYNC_BERICHT=' "$B/lus.sh" | grep -q '/opt/data/mk-scripts/bericht\.py'; then
+  echo "ROOD  B run.sh stuurt SYNC STOP via een vast berichtpad: lus niet gestart (zou David echt berichten)"; FOUT=1
+else
 export SYNC_INTERVAL=1
-bash "$B/lus.sh" & LUS=$!
+startB "$B/lus.sh"
 sleep 3
 toetsB 'B podstart zet het rolbestand op passief' 'grep -q "^reden=podstart$" "$B/bin/uitwijk-rol"'
 toetsB 'B passief: geen bisync' '[ ! -s "$B/bisync-aanroepen" ]'
@@ -324,7 +344,17 @@ toetsB 'B primair (vers): bisync hervat' '[ "$(wc -l < "$B/bisync-aanroepen" 2>/
 o=$(( $(date +%s) - 400 )); printf 'rol=primair\nkant=olares\ntijd=%s\ngelezen=%s\nreden=x\n' "$(date +%s)" "$o" > "$B/bin/uitwijk-rol"
 sleep 2; c1=$(wc -l < "$B/bisync-aanroepen"); sleep 3; c2=$(wc -l < "$B/bisync-aanroepen")
 toetsB 'B primair maar laatste lezing te oud: bisync stil' '[ "$c1" = "$c2" ]'
-kill "$LUS" 2>/dev/null; pkill -P "$LUS" 2>/dev/null; sleep 0.3
+stopB "$LUS"
+toetsB 'B opgeruimd: niets meer in de procesgroep van de lus' '! pgrep -g "$LUS" >/dev/null'
+# SYNC STOP: filtertoets faalt → geen bisync, één bericht via SYNC_BERICHT (de nep), regel in het synclog
+mkdir -p "$B/bin2"; : > "$B/bisync-aanroepen"
+lusB "$B/lus-stop.sh" "$B/bin2" "$B/nep/filtertoets-faalt"
+startB "$B/lus-stop.sh"; sleep 2
+toetsB 'B filtertoets faalt: SYNC STOP in het synclog, geen bisync' 'grep -q "SYNC STOP: syncfilter" "$B/bin2/bisync.log" && [ ! -s "$B/bisync-aanroepen" ]'
+toetsB 'B filtertoets faalt: precies één bericht, via de nep' '[ "$(grep -c "Vault-sync staat stil" "$B/berichten" 2>/dev/null)" = 1 ]'
+stopB "$LUS"
+toetsB 'B opgeruimd na SYNC STOP: geen wees-sleep' '! pgrep -g "$LUS" >/dev/null'
+fi
 # rol_primair los: ontbrekend bestand
 ( BIN="$B/bin"; source <(sed -n '/^ROL_BESTAND=/,/^rol_reset_podstart(){/p' run.sh | sed '$d'); ROL_BESTAND="$B/bestaat-niet"; rol_primair ) && { echo "ROOD  B ontbrekend rolbestand = niet primair"; FOUT=1; } || echo "GROEN B ontbrekend rolbestand = niet primair"
 
