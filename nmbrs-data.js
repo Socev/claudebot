@@ -114,7 +114,9 @@ async function roep(methode, url, o) {
     }
     if (o.tekst) {
       const b = Buffer.from(await r.arrayBuffer());
-      return { status: r.status, tekst: b.length <= MAX_DOC ? b.toString('utf8') : null, groot: b.length > MAX_DOC };
+      // wv3228: ook de bytes en het content-type (zonder parameters), zodat een zip/utf-16/JSON-document gelezen en beschreven kan worden
+      return { status: r.status, tekst: b.length <= MAX_DOC ? b.toString('utf8') : null, groot: b.length > MAX_DOC, buf: b.length <= MAX_DOC ? b : null,
+        ct: String(r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase().slice(0, 60) || null };
     }
     let j = null;
     try { j = await r.json(); } catch (e) { j = null; }
@@ -325,7 +327,8 @@ const V = {
   leaveBalances: ['leaveGroupId', 'leaveBalance'],
   tabel: ['salaryTableId', 'tableCode', 'tableName'], versie: ['versionId', 'version', 'year', 'month'],
   stap: ['stepCode', 'stepDescription', 'amountMonth', 'amountFourWeeks', 'amountWeek', 'amountHour'],
-  run: ['payrollRunId', 'number', 'description', 'year', 'periodStart', 'periodEnd', 'createdAt', 'type', 'locked'],
+  // wv3228: control/visibleEmployeeLogin/visibleDocumentViewer (booleans) om te meten wanneer een run definitief wordt
+  run: ['payrollRunId', 'number', 'description', 'year', 'periodStart', 'periodEnd', 'createdAt', 'type', 'locked', 'control', 'visibleEmployeeLogin', 'visibleDocumentViewer'],
   uren: ['hourCode', 'hourCodeDescription', 'hours'],
 };
 // Veldnamen (nooit waarden) voor de peiling.
@@ -362,6 +365,8 @@ function db(dir) {
     // wv3208: betaallijst per POT-loonrun (netto + IBAN uit het SEPA-bestand van Nmbrs). Regels vervallen 60 dagen na het ophalen.
     'create table if not exists betaallijst (run text primary key, bedrijf text not null, status text not null, pogingen integer not null default 0, opgehaald text, ' +
     'formaat text, aantal integer, totaal_centen integer, medewerkers_run integer, controle text, dbtr_iban text, sha text, gemeld text, gedownload text, gewijzigd text);' +
+    // wv3228: wanneer een loonrun voor het eerst gezien, vergrendeld en voor medewerkers zichtbaar was (meting: komt locked op tijd?)
+    'create table if not exists runstaat (run text primary key, bedrijf text not null, eerst text not null, locked_sinds text, zichtbaar_sinds text, documenten_sinds text);' +
     'create table if not exists betaalregel (run text not null, volg integer not null, e2e text, naam text not null, iban text not null, centen integer not null, oms text, primary key (run, volg)) without rowid;');
   try { fs.chmodSync(p, 0o600); } catch (e) {}
   return d;
@@ -497,7 +502,7 @@ async function journaal(L, bedrijf, run, jaar) {
   return { status: 'document:wacht' };
 }
 // wv3208: taak afwachten en het document als tekst ophalen (zelfde ritme als het journaal). → { status, tekst? }
-async function taakDocument(L, r) {
+async function taakDocument(L, r, B) {
   if (r.status !== 200 || !r.j || !idVan(r.j.taskId)) return { status: 'taak:' + r.status };
   TAKEN.add(r.j.taskId);
   for (let i = 0; i < 8; i++) {
@@ -505,10 +510,9 @@ async function taakDocument(L, r) {
     const d = await L.haal('/api/documents/' + r.j.taskId, true);
     if (d.status === 202) continue;
     if (d.status !== 200 || d.tekst == null) return { status: 'document:' + d.status + (d.groot ? ':groot' : '') };
-    let tekst = d.tekst.replace(/^\uFEFF/, '');
-    // sommige documenten komen als base64 (octet-stream zonder XML); dan één keer uitpakken
-    if (tekst.indexOf('<') < 0 && /^[A-Za-z0-9+/=\s]{40,}$/.test(tekst)) tekst = Buffer.from(tekst.replace(/\s+/g, ''), 'base64').toString('utf8').replace(/^\uFEFF/, '');
-    return { status: 'ok', tekst: tekst };
+    // wv3228: uitpakken (utf-16, base64, JSON-omhulsel, zip) en de vorm beschrijven zonder inhoud (nmbrs-betaal.js ontpak)
+    const o = B.ontpak(d.buf || Buffer.from(d.tekst, 'utf8'), d.ct);
+    return { status: 'ok', tekst: o.tekst, vorm: o.vorm, ruw_sha: sha(d.buf || d.tekst) };
   }
   return { status: 'document:wacht' };
 }
@@ -534,7 +538,7 @@ async function betaalRonde(L, d, cid, jaar, invoer, uit) {
   for (const r of kand) {
     let doc, mw = null;
     try {
-      doc = await taakDocument(L, await L.haal('/api/companies/' + cid + '/runs/' + r.id + '/sepa?' + new URLSearchParams({ year: String(r.x.year) }).toString()));
+      doc = await taakDocument(L, await L.haal('/api/companies/' + cid + '/runs/' + r.id + '/sepa?' + new URLSearchParams({ year: String(r.x.year) }).toString()), B);
       if (doc.status === 'ok') { const l = await L.alle('/api/companies/' + cid + '/runs/' + r.id + '/employees', { year: String(r.x.year) }); mw = l === null ? null : l.filter(function (e) { return idVan(e && e.employeeId); }).length; }
     } catch (e) { if (e.reden === 'token' || e.reden === 'grens') throw e; doc = { status: 'netwerk' }; }
     const nu = new Date().toISOString();
@@ -547,7 +551,7 @@ async function betaalRonde(L, d, cid, jaar, invoer, uit) {
       uit.betaal.opnieuw += blijvend ? 0 : 1;
       continue;
     }
-    const p = B.leesPain(doc.tekst);
+    const p = doc.tekst == null ? { ok: false, fout: 'niet uit te pakken' } : B.leesPain(doc.tekst);
     const c = B.controle(p, { medewerkers_run: mw, pot_iban: invoer.pot_iban || null });
     // review wv3208 MOET 4: de POT-rekening is van de Facturen-app, niet van Nmbrs; ontbreekt hij nu, dan geen definitieve afkeuring
     // (de download controleert hem opnieuw en weigert zolang hij ontbreekt)
@@ -561,11 +565,13 @@ async function betaalRonde(L, d, cid, jaar, invoer, uit) {
       d.prepare("insert into betaallijst (run, bedrijf, status, pogingen, opgehaald, formaat, aantal, totaal_centen, medewerkers_run, controle, dbtr_iban, sha, gewijzigd) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
         'on conflict (run) do update set status = excluded.status, pogingen = excluded.pogingen, opgehaald = excluded.opgehaald, formaat = excluded.formaat, aantal = excluded.aantal, ' +
         'totaal_centen = excluded.totaal_centen, medewerkers_run = excluded.medewerkers_run, controle = excluded.controle, dbtr_iban = excluded.dbtr_iban, sha = excluded.sha, gewijzigd = excluded.gewijzigd')
-        .run(r.id, cid, status, r.pogingen + 1, nu, p.ok ? p.formaat : null, c.aantal, c.totaal_centen, mw, JSON.stringify({ hard: c.hard, zacht: c.zacht, periode_soort: bed.periode_soort || null }),
-          p.ok && p.dbtrs && p.dbtrs.length ? p.dbtrs.slice(0, 5).join(',') : null, sha(doc.tekst), nu);
+        .run(r.id, cid, status, r.pogingen + 1, nu, p.ok ? p.formaat : null, c.aantal, c.totaal_centen, mw, JSON.stringify({ hard: c.hard, zacht: c.zacht, periode_soort: bed.periode_soort || null,
+          vorm: Object.assign({}, doc.vorm || {}, p.ok ? {} : { lees: String(p.fout || '').slice(0, 60) }) }),   // wv3228: vingerafdruk zonder inhoud
+          p.ok && p.dbtrs && p.dbtrs.length ? p.dbtrs.slice(0, 5).join(',') : null, doc.tekst == null ? doc.ruw_sha : sha(doc.tekst), nu);
       d.exec('commit');
     } catch (e) { d.exec('rollback'); throw e; }
     uit.betaal.nieuw++; uit.betaal[status]++;
+    if (!p.ok) (uit.betaal.vorm = uit.betaal.vorm || []).push(Object.assign({ nummer: Number(r.x.number) || null }, doc.vorm || {}));   // wv3228: alleen de vorm, nooit inhoud
   }
   }
 // regels niet langer bewaren dan nodig (de lijst zelf blijft, zonder namen en rekeningnummers)
@@ -669,7 +675,16 @@ async function kindLees(invoer, dir, peil) {
         });
       });
       const zetRun = d.prepare('insert into loonrun (id, bedrijf, data) values (?, ?, ?) on conflict (id) do update set data = excluded.data');
-      runs.forEach(function (r) { const rid = idVan(r && r.payrollRunId); if (rid) { zetRun.run(rid, cid, JSON.stringify(kies(r, V.run))); uit.loonruns++; } });
+      const nuS = new Date().toISOString();
+      const zetStaat = d.prepare('insert into runstaat (run, bedrijf, eerst, locked_sinds, zichtbaar_sinds, documenten_sinds) values (?, ?, ?, ?, ?, ?) on conflict (run) do update set ' +
+        'locked_sinds = coalesce(runstaat.locked_sinds, excluded.locked_sinds), zichtbaar_sinds = coalesce(runstaat.zichtbaar_sinds, excluded.zichtbaar_sinds), ' +
+        'documenten_sinds = coalesce(runstaat.documenten_sinds, excluded.documenten_sinds)');
+      runs.forEach(function (r) {
+        const rid = idVan(r && r.payrollRunId);
+        if (!rid) return;
+        zetRun.run(rid, cid, JSON.stringify(kies(r, V.run))); uit.loonruns++;
+        zetStaat.run(rid, cid, nuS, r.locked === true ? nuS : null, r.visibleEmployeeLogin === true ? nuS : null, r.visibleDocumentViewer === true ? nuS : null);   // wv3228
+      });
       d.exec('commit');
     } catch (e) { d.exec('rollback'); throw e; }
     // journalen van nieuwe loonruns (laatste 13 maanden, nieuwste eerst, hooguit MAX_JOURNALEN per ronde)

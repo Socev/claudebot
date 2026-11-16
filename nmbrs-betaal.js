@@ -68,7 +68,8 @@ function alle(xml, n) {
 function leesPain(tekst) {
   if (typeof tekst !== 'string' || tekst.length < 50 || tekst.length > 8 * 1024 * 1024) return { ok: false, fout: 'leeg of te groot' };
   if (/<!DOCTYPE|<!ENTITY/i.test(tekst)) return { ok: false, fout: 'DOCTYPE/ENTITY in het bestand' };
-  const ns = /xmlns(?::\w+)?="urn:iso:std:iso:20022:tech:xsd:(pain\.001\.001\.\d\d)"/.exec(tekst);
+  // wv3228: namespace met enkele of dubbele aanhalingstekens
+  const ns = /xmlns(?::\w+)?\s*=\s*(["'])urn:iso:std:iso:20022:tech:xsd:(pain\.001\.001\.\d\d)\1/.exec(tekst);
   const kern = el(tekst, ['CstmrCdtTrfInitn']);
   if (!ns || kern == null) return { ok: false, fout: 'geen pain.001 (CstmrCdtTrfInitn)' };
   const kop = el(kern, ['GrpHdr']) || '';
@@ -98,7 +99,137 @@ function leesPain(tekst) {
       });
     }
   }
-  return { ok: true, formaat: ns[1], nb: Number.isInteger(nb) ? nb : null, ctrl_centen: ctrl == null ? null : centen(ont(ctrl)), dbtr, dbtrs, datum, regels };
+  return { ok: true, formaat: ns[2], nb: Number.isInteger(nb) ? nb : null, ctrl_centen: ctrl == null ? null : centen(ont(ctrl)), dbtr, dbtrs, datum, regels };
+}
+
+/*
+ * wv3228 (16-11-2026): het document van Nmbrs (GET /api/documents/{taak}) als bytes uitpakken tot XML-tekst, en een VINGERAFDRUK van de
+ * vorm geven. De eerste echte lijst (R11) was "onleesbaar": utf8-decodering leverde geen pain.001 op, en welke vorm het wel was, was niet
+ * te zien (alleen een sha). De vingerafdruk bevat nooit tekens uit de inhoud: bytes, content-type, begin-soort, de lagen die zijn
+ * uitgepakt, bij XML de naam van het wortelelement en de namespace-URN, bij JSON alleen de sleutelnamen op topniveau (≤ 10, alleen als
+ * ze op een veldnaam lijken). Geen namen, IBAN's of bedragen.
+ * Uitgepakt (hooguit 4 lagen): utf-16 met BOM (of zonder BOM maar met "<\0"), utf-8 met BOM, base64, een JSON-omhulsel met een
+ * base64-veld, en een zip met precies één .xml (alleen opslaan/deflate, geen versleuteling, geen zip64, ≤ 20 bestanden, ≤ 8 MB uitgepakt).
+ * → { tekst: string|null, vorm: {...} }
+ */
+const MAX_DOC_BYTES = 8 * 1024 * 1024, MAX_ZIP_BESTANDEN = 20, MAX_LAGEN = 4;
+const JSON_VELDEN = ['content', 'fileContent', 'filecontent', 'file', 'data', 'document', 'documentContent', 'bytes', 'base64', 'body', 'value'];
+// review wv3228 MOET 1: de vingerafdruk neemt alleen waarden van VASTE lijsten over; al het andere wordt '?' / 'anders' (een sleutel,
+// wortel of content-type kan anders een naam bevatten).
+const VORM_SLEUTELS = new Set(JSON_VELDEN.concat(['fileName', 'filename', 'name', 'contentType', 'mimeType', 'mediaType', 'type', 'documentId', 'taskId',
+  'id', 'status', 'size', 'length', 'encoding', 'format', 'extension', 'createdAt', 'error', 'errors', 'message', 'title', 'detail', 'traceId',
+  'success', 'ok', 'result', 'payload', 'pagination', 'links', 'metadata']));
+const VORM_WORTELS = new Set(['Document', 'CstmrCdtTrfInitn', 'transactions', 'Envelope', 'html', 'Error', 'error', 'root', 'Root', 'Payments', 'payments', 'SEPA', 'Sepa']);
+const VORM_CT = new Set(['application/xml', 'text/xml', 'application/json', 'application/octet-stream', 'application/zip', 'application/x-zip-compressed',
+  'text/plain', 'application/pdf', 'text/csv', 'text/html', 'application/base64', 'application/problem+json']);
+const VORM_NS = new Set(['http://www.w3.org/1999/xhtml', 'http://schemas.xmlsoap.org/soap/envelope/', 'http://www.w3.org/2003/05/soap-envelope']);
+function veldNaam(k) { return VORM_SLEUTELS.has(k) ? k : '?'; }
+function nsVorm(u) {
+  if (/^urn:iso:std:iso:20022:tech:xsd:(pain|camt)\.\d{3}\.\d{3}\.\d{2}$/.test(u)) return u;
+  if (VORM_NS.has(u)) return u;
+  return 'anders';
+}
+function beginSoort(b) {
+  if (b.length >= 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04) return 'zip';
+  if (b.length >= 2 && ((b[0] === 0xff && b[1] === 0xfe) || (b[0] === 0xfe && b[1] === 0xff))) return 'utf16-bom';
+  if (b.length >= 4 && ((b[0] === 0x3c && b[1] === 0 && b[2] !== 0) || (b[0] === 0 && b[1] === 0x3c))) return 'utf16';
+  let i = b.length >= 3 && b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf ? 3 : 0;
+  while (i < b.length && i < 4096 && (b[i] === 0x20 || b[i] === 0x09 || b[i] === 0x0a || b[i] === 0x0d)) i++;
+  if (i >= b.length) return 'leeg';
+  if (b[i] === 0x3c) return 'xml';
+  if (b[i] === 0x7b || b[i] === 0x5b || b[i] === 0x22) return 'json';
+  const kop = b.subarray(i, Math.min(b.length, i + 4096)).toString('latin1');
+  if (/^[A-Za-z0-9+/=\r\n]{40,}$/.test(kop) || /^[A-Za-z0-9+/=\r\n]{40,}$/.test(b.subarray(i).toString('latin1').trim())) return 'base64';
+  return 'anders';
+}
+function utf16(b) {
+  if (b[0] === 0xff && b[1] === 0xfe) return b.subarray(2).toString('utf16le');
+  if (b[0] === 0xfe && b[1] === 0xff) { const c = Buffer.from(b.subarray(2, b.length - (b.length % 2))); c.swap16(); return c.toString('utf16le'); }
+  if (b[0] === 0 && b[1] === 0x3c) { const c = Buffer.from(b.subarray(0, b.length - (b.length % 2))); c.swap16(); return c.toString('utf16le'); }
+  return b.subarray(0, b.length - (b.length % 2)).toString('utf16le');
+}
+function b64(s) {
+  const t = String(s).replace(/\s+/g, '');
+  if (t.length < 40 || t.length > MAX_DOC_BYTES * 1.4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(t)) return null;
+  return Buffer.from(t, 'base64');
+}
+// zip: centrale map lezen (grootte staat daar, ook bij een data descriptor); precies één .xml (of precies één bestand) uitpakken.
+function zipEen(b, vorm) {
+  const zlib = require('zlib');
+  let eocd = -1;
+  for (let i = b.length - 22; i >= Math.max(0, b.length - 22 - 65535); i--) if (b.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) { vorm.zip = 'geen_centrale_map'; return null; }
+  const n = b.readUInt16LE(eocd + 10), cdOff = b.readUInt32LE(eocd + 16);
+  if (n === 0xffff || cdOff === 0xffffffff) { vorm.zip = 'zip64'; return null; }
+  if (n > MAX_ZIP_BESTANDEN) { vorm.zip = 'te_veel_bestanden'; vorm.zip_bestanden = n; return null; }
+  const ent = [];
+  let o = cdOff;
+  for (let k = 0; k < n; k++) {
+    if (o + 46 > b.length || b.readUInt32LE(o) !== 0x02014b50) { vorm.zip = 'centrale_map_kapot'; return null; }
+    const vlag = b.readUInt16LE(o + 8), meth = b.readUInt16LE(o + 10), csz = b.readUInt32LE(o + 20), usz = b.readUInt32LE(o + 24);
+    const nl = b.readUInt16LE(o + 28), xl = b.readUInt16LE(o + 30), cl = b.readUInt16LE(o + 32), loh = b.readUInt32LE(o + 42);
+    const naam = b.subarray(o + 46, o + 46 + nl).toString('utf8');
+    ent.push({ vlag, meth, csz, usz, loh, xml: /\.xml$/i.test(naam), map: /\/$/.test(naam) });
+    o += 46 + nl + xl + cl;
+  }
+  const bestanden = ent.filter((e) => !e.map);
+  vorm.zip_bestanden = bestanden.length;
+  vorm.zip_xml = bestanden.filter((e) => e.xml).length;   // aantallen, nooit bestandsnamen (die kunnen een naam bevatten)
+  const xml = bestanden.filter((e) => e.xml);
+  const e = xml.length === 1 ? xml[0] : bestanden.length === 1 ? bestanden[0] : null;
+  if (!e) { vorm.zip = 'niet_precies_een_xml'; return null; }
+  if (e.vlag & 1) { vorm.zip = 'versleuteld'; return null; }
+  if (e.usz > MAX_DOC_BYTES || e.csz > b.length) { vorm.zip = 'te_groot'; return null; }
+  if (e.loh + 30 > b.length || b.readUInt32LE(e.loh) !== 0x04034b50) { vorm.zip = 'lokale_kop_kapot'; return null; }
+  const start = e.loh + 30 + b.readUInt16LE(e.loh + 26) + b.readUInt16LE(e.loh + 28);
+  const ruw = b.subarray(start, start + e.csz);
+  if (ruw.length !== e.csz) { vorm.zip = 'afgekapt'; return null; }
+  try {
+    if (e.meth === 0) return Buffer.from(ruw);
+    if (e.meth === 8) { const u = zlib.inflateRawSync(ruw, { maxOutputLength: MAX_DOC_BYTES }); if (u.length !== e.usz) { vorm.zip = 'grootte_wijkt_af'; return null; } return u; }
+  } catch (x) { vorm.zip = x && x.code === 'ERR_BUFFER_TOO_LARGE' ? 'te_groot' : 'inflate_fout'; return null; }
+  vorm.zip = 'methode_' + e.meth; return null;
+}
+function xmlVorm(t, vorm) {
+  const z = t.replace(/^\uFEFF/, '').replace(/^\s*(<\?[\s\S]*?\?>\s*|<!--[\s\S]*?-->\s*)*/, '');
+  const m = /^<([A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]{0,60})([^>]*)>/.exec(z);
+  if (!m) { vorm.wortel = null; return; }
+  vorm.wortel = VORM_WORTELS.has(m[2]) ? m[2] : 'anders';
+  const pre = m[1] ? m[1].slice(0, -1) : '';
+  const nsRe = new RegExp('xmlns' + (pre ? ':' + pre.replace(/[.-]/g, '\\$&') : '') + '\\s*=\\s*(["\'])([^"\']{0,200})\\1');
+  const ns = nsRe.exec(m[3]);
+  vorm.ns = ns ? nsVorm(ns[2]) : null;
+}
+function ontpak(buf, ct) {
+  const b0 = Buffer.isBuffer(buf) ? buf : Buffer.from(typeof buf === 'string' ? buf : '', 'utf8');
+  const ctK = ct ? String(ct).split(';')[0].trim().toLowerCase() : '';
+  const vorm = { bytes: b0.length, ct: ctK ? (VORM_CT.has(ctK) ? ctK : 'anders') : null, begin: beginSoort(b0), lagen: [] };
+  if (b0.length > MAX_DOC_BYTES) { vorm.lagen.push('te_groot'); return { tekst: null, vorm }; }
+  let b = b0;
+  for (let laag = 0; laag < MAX_LAGEN; laag++) {
+    const s = beginSoort(b);
+    vorm.lagen.push(s);
+    if (s === 'xml') { const t = b.toString('utf8').replace(/^\uFEFF/, ''); xmlVorm(t, vorm); return { tekst: t, vorm }; }
+    if (s === 'utf16-bom' || s === 'utf16') { const t = utf16(b).replace(/^\uFEFF/, ''); if (!/^\s*</.test(t)) break; xmlVorm(t, vorm); return { tekst: t, vorm }; }
+    if (s === 'zip') { const u = zipEen(b, vorm); if (!u) break; b = u; continue; }
+    if (s === 'base64') { const u = b64(b.toString('latin1')); if (!u) break; b = u; continue; }
+    if (s === 'json') {
+      let j; try { j = JSON.parse(b.toString('utf8').replace(/^\uFEFF/, '')); } catch (x) { vorm.json = 'onleesbaar'; break; }
+      if (typeof j === 'string') { const u = b64(j); if (u) { b = u; continue; } if (/^\s*</.test(j)) { b = Buffer.from(j, 'utf8'); continue; } break; }
+      if (!j || typeof j !== 'object' || Array.isArray(j)) { vorm.json = Array.isArray(j) ? 'lijst' : typeof j; break; }
+      vorm.json_sleutels = Object.keys(j).slice(0, 10).map(veldNaam); vorm.json_aantal = Object.keys(j).length;
+      // het base64-veld: eerst bekende namen, dan één niveau dieper onder data/document, dan elk lang base64-veld op topniveau
+      let w = null;
+      const zoek = (o) => { for (const k of JSON_VELDEN) if (o && typeof o[k] === 'string' && (b64(o[k]) || /^\s*</.test(o[k]))) return o[k]; return null; };
+      w = zoek(j) || zoek(j.data && typeof j.data === 'object' ? j.data : null) || zoek(j.document && typeof j.document === 'object' ? j.document : null);
+      if (!w) for (const k of Object.keys(j).slice(0, 50)) if (typeof j[k] === 'string' && j[k].length >= 200 && b64(j[k])) { w = j[k]; break; }
+      if (!w) { vorm.json = 'geen_inhoudsveld'; break; }
+      if (/^\s*</.test(w)) { b = Buffer.from(w, 'utf8'); continue; }
+      b = b64(w); continue;
+    }
+    break;
+  }
+  return { tekst: null, vorm };
 }
 
 /*
@@ -176,4 +307,4 @@ function bestand(a) {
   return { ok: true, naam: bestandNaam(a.run, a.datum), tekst: x.tekst, aantal: regels.length, totaal_centen: regels.reduce((s, r) => s + r.centen, 0), sha256: S.sha256(x.tekst) };
 }
 
-module.exports = { leesPain, controle, bestand, mod97, centen, ibanNorm, maandTekst, bestandNaam, UITLEG, MAX_REGELS };
+module.exports = { ontpak, leesPain, controle, bestand, mod97, centen, ibanNorm, maandTekst, bestandNaam, UITLEG, MAX_REGELS };
