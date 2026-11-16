@@ -605,6 +605,10 @@ jobs:
       - name: "nachtketen (wv1868, nachtorkestrator)"
         if: ${{ !cancelled() }}
         run: bash test/nachtketen.sh
+      # wv3194: inhaal gemiste weekrondes — T uit de schemaregel (zomertijd), elke voorwaarde met kruisproef, staat (één keer per tick), markeer, server-koppeling.
+      - name: "weekinhaal (wv3194, gemiste weekrondes via n8n-MCP inhalen)"
+        if: ${{ !cancelled() }}
+        run: node --test test/weekinhaal.test.js
       - name: "weer-ochtend (wv2389, idee 28: weerregel in het ochtendbericht)"
         if: ${{ !cancelled() }}
         run: bash test/weer-ochtend.sh
