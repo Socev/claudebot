@@ -434,7 +434,7 @@ test('server.js: sleutel via de Management-API (niet uit de omgeving), alleen op
   const s = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8');
   const blok = s.slice(s.indexOf('// ── PDF-lezer via de Claude-API (wv1431'), s.indexOf('async function pdfBatchTik()'));
   assert.match(blok, /const PDF_SLEUTEL_NAAM = 'anthropic_api_key_pdf';/);
-  assert.match(blok, /api\.supabase\.com\/v1\/projects\//);
+  assert.match(blok, /sbBeheerQuery\("select decrypted_secret as w from vault\.decrypted_secrets where name = '" \+ PDF_SLEUTEL_NAAM/);   // wv3180: kluis via beheer-SQL (Management-API of lokaal)
   assert.ok(!/process\.env\.ANTHROPIC/.test(blok), 'geen ANTHROPIC_* uit de omgeving');
   assert.match(blok, /function pdfSchaduw\(job\) \{ if \(!pdfLezer \|\| !rolPrimair\(\)\) return false;/);
   assert.match(s, /pdf_lezer: pdfLezerInfo\(\)/);
