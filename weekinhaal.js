@@ -287,6 +287,11 @@ function maak(dep) {
   }
 
   async function start(item, b, nu) {
+    // Codex-bouwreview MOET 2: de poort kan tijdens de netwerklezingen dichtgaan (rolverlies, noodrem, uitrol, sessie) -> vlak vóór het vastleggen opnieuw
+    if (typeof dep.uit === 'function' && dep.uit()) return 'niet gestart: noodrem';
+    if (typeof dep.rolOk === 'function' && !dep.rolOk()) return 'niet gestart: poort dicht vlak voor de start';
+    if (typeof dep.magStarten === 'function' && !dep.magStarten()) return 'niet gestart: uitrol of onderhoud vlak voor de start';
+    try { if (typeof dep.sessieBezig === 'function' && dep.sessieBezig(item)) return 'niet gestart: sessie/ronde bezig vlak voor de start'; } catch (e) { return 'niet gestart: sessie niet te toetsen'; }
     // eerst vastleggen; bestaat de sleutel intussen (markeer of een andere tik), dan niets
     const vast = opslag.onder(function (s) {
       if (s.rondes[b.sleutel]) return false;
@@ -317,6 +322,16 @@ function maak(dep) {
     const sp = workflowSpec(r.json);
     if (sp.fout) return { ok: false, fout: sp.fout };
     const T = new Date(laatsteTick(sp.spec, nu)).toISOString(), sleutel = item.id + '|' + T;
+    // Codex-bouwreview MOET 1: een lopende inhaal van deze stroom is een reservering; een handmatige ronde wacht tot die klaar is
+    const loopt = Object.keys(opslag.lees().rondes).map(function (k) { return opslag.lees().rondes[k]; }).find(function (x) {
+      return x.workflow === item.id && (x.status === 'gestart' || (x.status === 'ingehaald' && (x.run_status == null || LOPEND.indexOf(x.run_status) >= 0) && nu - Date.parse(x.op) <= ZOMBIE_MS));
+    });
+    if (loopt) {
+      let st = loopt.run_status || null;
+      if (loopt.execution_id) { try { const x = await dep.n8n('GET', '/executions/' + encodeURIComponent(loopt.execution_id)); st = x && x.status === 200 && x.json ? x.json.status : st; } catch (e) {} }
+      if (loopt.status === 'gestart' || !st || LOPEND.indexOf(st) >= 0) return { ok: false, inhaal_loopt: true, workflow: item.naam, execution_id: loopt.execution_id || null,
+        fout: 'weekinhaal van deze ronde loopt nog (n8n-run ' + (loopt.execution_id || 'nog niet gevonden') + '); niet met de hand draaien, wacht tot hij klaar is' };
+    }
     let vorig = null;
     opslag.onder(function (s) { vorig = s.rondes[sleutel] || null; if (vorig) return false; s.rondes[sleutel] = { workflow: item.id, naam: item.naam, comp: item.comp, T: T, status: 'handmatig', op: new Date(nu).toISOString() }; return true; });
     return { ok: true, workflow: item.naam, T: T, T_nl: isoNl(Date.parse(T)), status: vorig ? vorig.status : 'handmatig', al: !!vorig };
