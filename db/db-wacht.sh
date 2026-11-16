@@ -154,10 +154,19 @@ terug_herstel(){
   id="$(sed -n 's/^id=//p' "$j" | head -1 | tr -cd 'A-Za-z0-9-')"; oud="$(sed -n 's/^oud=//p' "$j" | head -1 | tr -cd 'A-Za-z0-9.-')"
   lsn="$(sed -n 's/^lsn=//p' "$j" | head -1 | tr -cd '0-9A-F/')"; tli="$(sed -n 's/^tli=//p' "$j" | head -1 | tr -cd '0-9')"
   sid="$(sed -n 's/^sid=//p' "$j" | head -1 | tr -cd '0-9')"
-  if [ -s "$DATA/PG_VERSION" ]; then
-    log "terug $id: onderbroken na het inzetten; wissel afgemaakt"
-    [ -e "$BASIS/terug-$id.json" ] || terug_uitkomst "$id" gewisseld "kopie ingezet (na onderbreking afgemaakt), oude datamap opzij" ",\"oud\":\"$oud\",\"checkpoint_lsn\":\"$lsn\",\"tijdlijn\":${tli:-0},\"systeem_id\":\"$sid\""
-  elif [ -n "$oud" ] && [ -s "$BASIS/17/$oud/PG_VERSION" ]; then
+  if [ -z "$oud" ] || [ ! -e "$BASIS/17/$oud" ]; then
+    # Codex ronde 2: de eerste verplaatsing gebeurde nog niet → de datamap is nog de oude databank; nooit "gewisseld" melden
+    log "terug $id: onderbroken vóór de wissel; huidige datamap blijft"
+    terug_uitkomst "$id" fout "wissel onderbroken vóór het verplaatsen; huidige databank blijft"
+  elif [ -s "$DATA/PG_VERSION" ]; then
+    if [ "$(controle "$DATA" 'Latest checkpoint location')" = "$lsn" ] && [ "$(controle "$DATA" "Latest checkpoint's TimeLineID")" = "$tli" ] \
+       && [ "$(controle "$DATA" 'Database system identifier')" = "$sid" ]; then
+      log "terug $id: onderbroken na het inzetten (datamap = de kopie volgens pg_controldata); wissel afgemaakt"
+      [ -e "$BASIS/terug-$id.json" ] || terug_uitkomst "$id" gewisseld "kopie ingezet (na onderbreking afgemaakt), oude datamap opzij" ",\"oud\":\"$oud\",\"checkpoint_lsn\":\"$lsn\",\"tijdlijn\":${tli:-0},\"systeem_id\":\"$sid\""
+    else
+      log "terug $id: datamap én $oud bestaan, en de datamap is niet de kopie; geen start (machinekamer)"; exit 1
+    fi
+  elif [ -s "$BASIS/17/$oud/PG_VERSION" ]; then
     [ -e "$DATA" ] && mv "$DATA" "$BASIS/17/data.kapot-$(date -u +%Y%m%d-%H%M%S)"
     if mv "$BASIS/17/$oud" "$DATA"; then
       log "terug $id: onderbroken tussen de verplaatsingen; oude datamap teruggezet"
@@ -166,7 +175,7 @@ terug_herstel(){
       log "terug $id: oude datamap terugzetten faalde; geen start (machinekamer)"; exit 1
     fi
   else
-    log "terug $id: onderbroken en geen oude datamap ($oud) te vinden; geen start (machinekamer)"; exit 1
+    log "terug $id: onderbroken en geen bruikbare datamap of $oud; geen start (machinekamer)"; exit 1
   fi
   rm -f "$j"
 }
