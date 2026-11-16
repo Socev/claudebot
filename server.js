@@ -2496,8 +2496,8 @@ const onderhoud = !ONDERHOUD_MOD ? { stand: function () { return { aan: false, o
   alarmBestand: ONDERHOUD_BESTAND + '.alarm', spawn: spawn, fout: logError, log: function (s) { schrijfLog(nu() + ' ' + s); },
   tijdNl: function (iso) { return new Date(iso).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' }); },
   bericht: function (tekst, sleutel) {
-    return berichtIntern({ kanaal: 'machinekamer', bron: 'onderhoud', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: sleutel }).then(function (r) {
-      if (r.status !== 200) throw new Error('bericht gaf ' + r.status);
+    return berichtIntern({ kanaal: 'machinekamer', bron: 'onderhoud', klasse: 'normaal', tekst: tekst, sleutel: sleutel }).then(function (r) {
+      if (r.status !== 200) throw berichtFout(r);   // wv3238: soort 'melding' bestond niet (400); machinekamer = archief
       return r;
     });
   } });
@@ -15675,11 +15675,19 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'weer-avond',           // wv2605: avondseintje bij vroeg vertrek (gladheid/storm/onweer/KNMI 05:00–08:00 morgen); hoofdkanaal, soort dag
   'nieuwsbrief',          // wv2190: wekelijkse bloemlezing uit de nieuwsbrieven (za 09:15, AI - Nieuwsbrief-bloemlezing); hoofdkanaal, soort dag
   'beleggen-week',        // wv2993: OVIS Beleggen weekbericht (zondag 09:00; alleen aantallen, geen namen of bedragen); hoofdkanaal, soort dag
-  'dagsamenvatting']);    // wv589: dagsamenvatting "Gebeurd" 07:15 (idee 13 § 4.6): machinekamer, geen MELD_SOORT-regel = archief, geen seintje
+  'dagsamenvatting',      // wv589: dagsamenvatting "Gebeurd" 07:15 (idee 13 § 4.6): machinekamer, geen MELD_SOORT-regel = archief, geen seintje
+  // wv3238: deze bronnen riepen berichtIntern al aan maar stonden hier niet (400 'onbekende bron', stil weggevallen; gemeten 16-11).
+  // test/bericht-bronnen.sh toetst elke letterlijke bron/soort in een berichtIntern-aanroep tegen deze lijst en MELD_SOORTEN.
+  'pot-loonrun',          // wv3208: POT-salarissen staan klaar (periode, aantal, totaal; geen namen); hoofdkanaal, soort dag (David wil het seintje)
+  'pot-nmbrs',            // wv2800: nieuwe verschillen personeel OVIS POT ↔ Nmbrs; machinekamer, archief
+  'ghawa-deel',           // wv2889: Delen met ECG, slot 2 (iemand erbij/eraf); machinekamer, archief
+  'personeelsscherm',     // wv3020: aanvraag extra pagina / publicatie Personeelsscherm; machinekamer, archief
+  'onderhoud',            // wv1271: onderhoudsstand vault > 2 uur, één alarm; machinekamer, archief
+  'facturen-sepa-door']);  // wv2465: SEPA-batch Tolgaarde zelf naar nogbetalen@; hoofdkanaal, soort dag (zet de aanroep zelf)
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
 const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag' };
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'pot-loonrun': 'dag' };
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
@@ -16125,6 +16133,13 @@ function berichtKaartZin(p) {
   return '(al afgehandeld op ' + kaart + ' in Voor jou)';
 }
 
+// wv3238: fout voor logError na een niet-200 van berichtIntern: status en de vaste foutzin van de route (code), nooit de tekst.
+function berichtFout(r) {
+  const e = new Error('bericht gaf ' + (r ? r.status : '?'));
+  e.status = r ? r.status : 0;
+  if (r && r.j && typeof r.j.fout === 'string') e.code = r.j.fout.slice(0, 80);
+  return e;
+}
 // wv895: een bericht van de pod zelf (manager-ronde op afroep), via precies dezelfde weg als POST /bericht: een kleine stand-in voor res
 // (berichtStuur gebruikt alleen headersSent, writeHead en end; res._log mag). Geeft {status, j}; na 30 s zonder antwoord {status: 0}.
 function berichtIntern(d) {
@@ -23131,8 +23146,11 @@ async function ghawaSeintjeZet(hash, naam, door, versie) {
   return z.id;
 }
 async function ghawaSeintjeMelding(hash, soort, tekst) {
-  try { await berichtIntern({ kanaal: 'machinekamer', bron: 'ghawa-deel', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: 'ghawa-seintje:' + soort + ':' + String(hash).slice(0, 12) }); }
-  catch (e) { logError('ghawa-deel-seintje', e); }
+  // wv3238: zonder soort (machinekamer = archief) en een niet-200 telt als fout (berichtIntern gooit niet)
+  try {
+    const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'ghawa-deel', klasse: 'normaal', tekst: tekst, sleutel: 'ghawa-seintje:' + soort + ':' + String(hash).slice(0, 12) });
+    if (!r || r.status !== 200) logError('ghawa-deel-seintje', berichtFout(r));
+  } catch (e) { logError('ghawa-deel-seintje', e); }
 }
 async function ghawaDeelSeintje(hash, naam, door) {
   const hs = String(hash).slice(0, 12), t0 = new Date().toISOString();   // t0 = versie van deze toevoeging
@@ -23849,8 +23867,8 @@ const personeelsscherm = (function () {
         return { id: z.id, bestond: !!z.bestond };
       },
       melding: async function (sleutel, tekst) {
-        const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'personeelsscherm', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: sleutel });
-        if (!r || r.status !== 200) throw new Error('melding gaf HTTP ' + (r ? r.status : '?'));
+        const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'personeelsscherm', klasse: 'normaal', tekst: tekst, sleutel: sleutel });
+        if (!r || r.status !== 200) { const e = berichtFout(r); logError('personeelsscherm-melding', e); throw e; }   // wv3238
       } });
   } catch (e) { logError('personeelsscherm', new Error('laden faalde')); return null; }
 })();
@@ -28167,7 +28185,7 @@ async function nmbrsBetaalNa() {
   }).join('\n');
   const sl = crypto.createHash('sha256').update(nieuw.map(function (l) { return l.run; }).join(',')).digest('hex').slice(0, 16);
   const r = await berichtIntern({ kanaal: 'hoofd', bron: 'pot-loonrun', klasse: 'normaal', tekst: tekst, sleutel: 'pot-loonrun-' + sl });
-  if (r.status !== 200) { logError('pot-loonrun', new Error('bericht gaf ' + r.status)); return { ok: false, nieuw: nieuw.length }; }
+  if (r.status !== 200) { logError('pot-loonrun', berichtFout(r)); return { ok: false, nieuw: nieuw.length }; }
   await nmbrsKind('betaalgemeld', { runs: nieuw.map(function (l) { return l.run; }) });
   return { ok: true, nieuw: nieuw.length };
 }
@@ -28269,8 +28287,8 @@ async function nmbrsSignalenNa() {
     nieuw.slice(0, 25).map(function (x) { return '- ' + x.soort + ' ' + String(x.tekst || '').slice(0, 200); }).join('\n') + (nieuw.length > 25 ? '\n- en ' + (nieuw.length - 25) + ' meer (volgen bij de volgende ronde)' : '');
   // sleutel per inhoud: de pod ontdubbelt op sleutel (24 uur); een tweede, ander bericht op dezelfde dag mag niet stil wegvallen
   const sl = crypto.createHash('sha256').update(nieuw.slice(0, 25).map(function (x) { return x.sleutel; }).join('\n')).digest('hex').slice(0, 16);
-  const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'nmbrs', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: 'nmbrs-signalen:' + dag + ':' + sl });
-  if (r.status !== 200) { logError('nmbrs-signalen', new Error('bericht gaf ' + r.status)); return { ok: false, nieuw: nieuw.length }; }
+  const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'nmbrs', klasse: 'normaal', tekst: tekst, sleutel: 'nmbrs-signalen:' + dag + ':' + sl });
+  if (r.status !== 200) { logError('nmbrs-signalen', berichtFout(r)); return { ok: false, nieuw: nieuw.length }; }   // wv3238: met status en code
   // review wv2797 MOET 7: alleen wat echt in het bericht stond als gemeld; de rest blijft nieuw voor de volgende ronde
   await nmbrsKind('gemeld', { sleutels: nieuw.slice(0, 25).map(function (x) { return x.sleutel; }) });
   return { ok: true, nieuw: Math.min(nieuw.length, 25), over: Math.max(0, nieuw.length - 25) };
@@ -28317,8 +28335,8 @@ async function potNmbrsNa() {
       nieuw.slice(0, 15).map(function (v) { return '- ' + String(v.naam || '').slice(0, 60) + ': ' + String(v.veld).slice(0, 40) + ' app ' + String(v.app == null ? 'leeg' : v.app).slice(0, 60) + ', Nmbrs ' + String(v.nmbrs == null ? 'leeg' : v.nmbrs).slice(0, 60); }).join('\n') +
       (nieuw.length > 15 ? '\n- en ' + (nieuw.length - 15) + ' meer (scherm Personeel)' : '');
     const sl = crypto.createHash('sha256').update(JSON.stringify(nieuw)).digest('hex').slice(0, 16);
-    const b = await berichtIntern({ kanaal: 'machinekamer', bron: 'pot-nmbrs', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: 'pot-nmbrs:' + dag + ':' + sl });
-    if (b.status !== 200) logError('pot-nmbrs', new Error('bericht gaf ' + b.status));
+    const b = await berichtIntern({ kanaal: 'machinekamer', bron: 'pot-nmbrs', klasse: 'normaal', tekst: tekst, sleutel: 'pot-nmbrs:' + dag + ':' + sl });
+    if (b.status !== 200) logError('pot-nmbrs', berichtFout(b));   // wv3238
   }
   return { ok: r.ok === true, nieuw: r.nieuw, bijgewerkt: r.bijgewerkt, verschillen: r.verschillen.length, nieuwe_verschillen: nieuw.length };
 }
@@ -29093,7 +29111,7 @@ function sdPlan(ms) {
 }
 async function sdBericht(tekst) {
   const r = await berichtIntern({ kanaal: 'hoofd', bron: 'facturen-sepa-door', klasse: 'normaal', soort: 'dag', tekst: tekst, sleutel: 'facturen-sepa-door-' + crypto.createHash('sha256').update(tekst).digest('hex').slice(0, 16) });
-  if (!r || r.status !== 200) throw new Error('bericht niet bezorgd (' + (r && r.status) + ')');
+  if (!r || r.status !== 200) throw berichtFout(r);   // wv3238: bron stond niet in BERICHT_BRONNEN
 }
 function sdMeld(tekst) { sdBericht(tekst).catch(function (e) { logError('facturen-sepa-door', e); }); }
 function sdKenmerk(ref) { return '…' + String(ref || '').slice(-8); }

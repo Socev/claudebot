@@ -411,6 +411,10 @@ jobs:
       - name: "schrijflog-vroeg (wv2155, logpad vóór de initialisatie)"
         if: ${{ !cancelled() }}
         run: bash test/schrijflog-vroeg.sh
+      # wv3238: elke berichtIntern-aanroep met een bron uit BERICHT_BRONNEN en een soort uit MELD_SOORTEN (vijf meldingen vielen stil weg met 400).
+      - name: "bericht-bronnen (wv3238, interne meldingen niet stil weg)"
+        if: ${{ !cancelled() }}
+        run: bash test/bericht-bronnen.sh
       # Vault zonder symlinks (wv900): vault-veilig.js/vault_veilig.py — link op de doelnaam, map-symlink, hangende link, vaste tmp-namen,
       # fifo, ACL-masker, flock; potVzRegister uit server.js in een vm; geen vaste tmp-naam of append op een vaultpad meer in server.js.
       - name: "vault-veilig (wv900, geen symlink volgen in de vault)"
