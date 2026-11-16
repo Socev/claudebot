@@ -356,6 +356,7 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
   // wv2453: idem de blokken Tripper, Calendar en Shopper (eigen toetsen; Tripper brak dit knipsel sinds wv2136 met appStaat)
   // wv3004: sindsdien kwamen GHAWA, Beleggen, Personeelsscherm, Pakjes en OSINT erbij (GHAWA brak het met appStaat): knip elk blok
   // '// ── OVIS …' t/m '// ── einde OVIS … ──' generiek weg; elk heeft een eigen toets
+  // wv3167: idem het Promedico-blok (wv3143, appStaat; eigen toets test/promedico-*.sh) — brak dit knipsel sinds d9b2364
   const hb = src.indexOf('// ── Second Brain (wv832'), he = src.indexOf('// ── einde secondbrain');
   const db0 = src.indexOf('// ── OVIS Docs › Delen (wv1382'), de = src.indexOf('// ── einde docs delen');
   const gestuurd = [];
@@ -370,7 +371,8 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
     AbortSignal, encodeURIComponent, fetch: async (url, o) => { fetchLog.push({ url, o }); return { status: 200, json: async () => fetchAntw(url, o) }; } });
   vm.runInContext((/^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0] +
     /^const APP_VAST_BEHEER_DICHT = [^\n]*\n/m.exec(src)[0] + /^function appVastBeheerDicht\(a\) \{[^\n]*\n/m.exec(src)[0]) + src.slice(hb, he) + '\n' + src.slice(db0, de).replace(/\/\/ ── MemoryLane delen \(wv2114[\s\S]*?\/\/ ── einde MemoryLane delen ──\n/, '')
-    .replace(/^\/\/ ── OVIS (?!Docs)[^\n]*\n[\s\S]*?^\/\/ ── einde OVIS [^\n]*──\n/gm, '') + ';globalThis.__dd = { docsDelen, appDocs, docsDelenInfo, docsCf, docsAccess, docsAccessBodyOk };', ctx, { filename: 'server.js#docs' });
+    .replace(/^\/\/ ── OVIS (?!Docs)[^\n]*\n[\s\S]*?^\/\/ ── einde OVIS [^\n]*──\n/gm, '')
+    .replace(/^\/\/ ── Promedico-laag in Calendar \(wv3143\) ──\n[\s\S]*?^\/\/ ── einde Promedico-laag ──\n/m, '') + ';globalThis.__dd = { docsDelen, appDocs, docsDelenInfo, docsCf, docsAccess, docsAccessBodyOk };', ctx, { filename: 'server.js#docs' });
   toets('5 koppeling laadt (docsDelen aan)', !!ctx.__dd.docsDelen && ctx.__dd.docsDelenInfo().aan === true, ctx.__dd.docsDelenInfo());
   let res = { _app: {} };
   await ctx.__dd.appDocs({}, res, { soort: 'meereizend' }, { vers: false }, { pad: '01_Ontwikkeling/Reis.md', soort: 'openbaar', sha: 'a'.repeat(64) }, 'POST /app/docs/delen');
