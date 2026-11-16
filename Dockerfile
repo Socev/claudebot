@@ -6,13 +6,29 @@ FROM node:22-bookworm-slim
 
 # git is nodig voor de GHAWA-workspace (node:slim bevat 'm niet standaard).
 # openssh-client is nodig voor de deploy key van socev.dev (git-over-SSH); 18-8-2026.
-# acl (setfacl/getfacl) en python3 (al aanwezig via ocrmypdf, nu expliciet) voor de uid-scheiding: wv699, 21-10-2026.
+# acl (setfacl/getfacl) en python3 (vroeger via ocrmypdf, nu expliciet) voor de uid-scheiding: wv699, 21-10-2026.
 # apt-get upgrade (CISO 6-10-2026, akkoord David bundel 5): het basisimage loopt achter op de
 # Debian-beveiligingsupdates (trivy: libpcre2, perl); zo neemt elke bouw de openstaande fixes mee.
 RUN apt-get update && apt-get upgrade -y --no-install-recommends && apt-get install -y --no-install-recommends \
-      ca-certificates curl unzip bash procps tzdata gosu git openssh-client pandoc poppler-utils ocrmypdf tesseract-ocr-nld \
+      ca-certificates curl unzip bash procps tzdata gosu git openssh-client pandoc poppler-utils ghostscript tesseract-ocr tesseract-ocr-nld \
       acl python3 \
  && rm -rf /var/lib/apt/lists/*
+
+# ocrmypdf en Pillow uit PyPI in plaats van apt (wv3167, CISO 16-11-2026). Het Debian-pakket ocrmypdf trok python3-pil 9.4 mee:
+# 7 CRITICAL + 33 HIGH zonder fix in bookworm (trivy). Nu de actuele wheels in /usr/local/lib/python3.11/dist-packages
+# (systeem-python, dus ook `python3 -I` van studio-beeld.py en de Imagine-toetsen ziet ze); ghostscript en tesseract blijven uit apt.
+# Niet gepind (zoals de Claude-CLI): elke bouw neemt de laatste fixes mee; de versies staan in /app/cli-versies.txt.
+# uv (vaste release + sha256) alleen tijdens deze stap; hij blijft niet in het image.
+ARG UV_VERSIE=0.13.8
+ARG UV_SHA256=5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91
+RUN curl -fsSL -o /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/${UV_VERSIE}/uv-x86_64-unknown-linux-gnu.tar.gz" \
+ && echo "${UV_SHA256}  /tmp/uv.tgz" | sha256sum -c - \
+ && mkdir /tmp/uv && tar -xzf /tmp/uv.tgz -C /tmp/uv --strip-components=1 \
+ && UV_NO_CACHE=1 /tmp/uv/uv pip install --system --break-system-packages --python /usr/bin/python3 'pillow>=12' 'ocrmypdf>=17' \
+ && rm -rf /tmp/uv /tmp/uv.tgz \
+ && ! dpkg -s python3-pil >/dev/null 2>&1 \
+ && python3 -I -c "import PIL, sys; assert PIL.__file__.startswith('/usr/local/'), PIL.__file__; print('Pillow', PIL.__version__)" \
+ && ocrmypdf --version
 
 # npm zelf bijwerken (CISO 6-10-2026): de npm die met node:22 meekomt bevat oude pacote, sigstore,
 # brace-expansion, picomatch en ip-address met bekende lekken. Hoofdversie 11 (werkt op node 22.9+);
@@ -51,7 +67,9 @@ RUN mkdir -p /app && { echo "gebouwd: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
       echo "claude-code: $(claude --version 2>/dev/null || echo onbekend)"; \
       echo "codex: $(codex --version 2>/dev/null || echo onbekend)"; \
       echo "agy: $(agy --version 2>/dev/null || echo onbekend)"; \
-      echo "node: $(node --version)"; } | tee /app/cli-versies.txt
+      echo "node: $(node --version)"; \
+      echo "ocrmypdf: $(ocrmypdf --version 2>/dev/null || echo onbekend)"; \
+      echo "pillow: $(python3 -I -c 'import PIL; print(PIL.__version__)' 2>/dev/null || echo onbekend)"; } | tee /app/cli-versies.txt
 
 # ── PGS-tool (3-10-2026, David: "alles draait mee in de huidige pod") ───────
 # bcftools/samtools/tabix voor genotypering op PGS-posities uit Davids BAM/VCF (01_Ontwikkeling/PGS-tool).

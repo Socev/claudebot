@@ -2,7 +2,7 @@
 # studio-beeld.py — beeldcontrole voor Studio, veldsoort 'beeld' (wv2482, fotoherstel fase 1, 7-11-2026).
 # Ontwerp: vault 01_Ontwikkeling/Studio - fotoherstel op Olares (ontwerp 5-11-2026).md § 7 (grenzen invoer en uitvoer).
 #
-# studio.js roept dit aan met `python3 -I studio-beeld.py <stand> ...` (Pillow uit het image, python3-pil via ocrmypdf), één
+# studio.js roept dit aan met `python3 -I studio-beeld.py <stand> ...` (Pillow uit het image, uit PyPI sinds wv3167), één
 # bestand per aanroep, met een tijdgrens. Uitvoer: precies één JSON-regel op stdout; exit 0 = gelukt, 2 = geweigerd (met reden).
 # Er gaat nooit beeldinhoud of een bestandsnaam naar stdout of een log, alleen formaat en afmetingen.
 #
