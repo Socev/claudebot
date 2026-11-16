@@ -29,11 +29,15 @@ fi
 # Volume kan root-owned aangemaakt zijn; geef het aan 'claude'. Sinds wv699 niet meer `chown -R`: de thuismap van socev
 # (1002) blijft van socev (anders verliest een terugdraai van fase 2 het hoofdkanaal, Fable #7), bestanden die socev in de
 # vault maakte blijven van socev (ze hebben een ACL voor claude), en -h: een symlink wordt zelf omgezet, nooit zijn doel.
-find /opt/data -path /opt/data/socev-thuis -prune -o ! -user claude ! -user socev -print0 2>/dev/null \
+# wv3180: /opt/data/pg is van OS-gebruiker pg (datamap 0700 pg); een chown naar claude zou postgres bij elke start laten weigeren.
+find /opt/data -path /opt/data/socev-thuis -prune -o -path /opt/data/pg -prune -o ! -user claude ! -user socev -print0 2>/dev/null \
   | xargs -0 -r chown -h claude:claude 2>/dev/null || true
 # Uid-scheiding fase 1 (wv699): gebruiker socev, rechten en de socev-loper. Bewust vóór fetch-secrets: de loper en zijn
 # root-herstartlus krijgen zo nooit een pod-sleutel in hun omgeving. Faalt hier iets, dan start de pod gewoon door.
 /app/socev-voorbereiding.sh || true
+# Eigen databank (wv3180): db-wacht.sh start Postgres als gebruiker pg, op de achtergrond en vóór fetch-secrets (dus zonder pod-sleutels
+# in zijn omgeving). Faalt het, dan start de pod gewoon door (de databank is dan weg; /health db en db-wacht.log tonen het).
+[ -x /app/db/db-wacht.sh ] && { /app/db/db-wacht.sh </dev/null >/dev/null 2>&1 & }
 # fetch-secrets.sh haalt de podsecrets op en exec't daarna de rest van de keten,
 # zodat run.sh en server.js ze als omgeving erven. Dat dit VOOR gosu staat is
 # bewust: gosu behoudt de omgeving over de privilegedrop heen (su - zou hem

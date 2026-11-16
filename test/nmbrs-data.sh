@@ -462,7 +462,7 @@ srv.listen(0, '127.0.0.1', async function () {
         return { ok: false, status: 400, json: async () => ({}), text: async () => 'fout met ' + q };
       } };
     vm.createContext(g);
-    vm.runInContext(ssrc.slice(k1, k2) + '\n' + ssrc.slice(b1, b2) + '\n;globalThis.__t = { nmbrsTerug, nmbrsSmal, nmbrsInfo, nmbrsRondeDraai, nmbrsVaultMedewerkers };', g);
+    vm.runInContext((function () { const a = ssrc.indexOf('/* sbBeheer:begin'), b = ssrc.indexOf('/* sbBeheer:einde */'); if (a < 0 || b < a) throw new Error('sbBeheer-blok niet gevonden'); return ssrc.slice(a, b); })() + '\n' + ssrc.slice(k1, k2) + '\n' + ssrc.slice(b1, b2) + '\n;globalThis.__t = { nmbrsTerug, nmbrsSmal, nmbrsInfo, nmbrsRondeDraai, nmbrsVaultMedewerkers };', g);
     const S = g.__t;
     async function vraag(url, methode) { let res; const p = new Promise((k) => { res = { statusCode: 0, headersSent: false, _log: {}, writeHead(st) { this.statusCode = st; this.headersSent = true; }, end(t) { k({ status: this.statusCode, tekst: String(t || '') }); } }; }); S.nmbrsTerug({ url: url, method: methode || 'GET', resume() {} }, res); return p; }
     mgmt = 0;

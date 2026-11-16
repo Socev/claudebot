@@ -104,6 +104,34 @@ RUN id claude 2>/dev/null || useradd -u 1001 -d /opt/data -s /bin/bash claude
 RUN id socev 2>/dev/null || { groupadd -g 1002 socev && useradd -u 1002 -g 1002 -d /opt/data/socev-thuis -M -s /usr/sbin/nologin socev; } \
  && test "$(id -u socev):$(id -g socev):$(id -G socev)" = "1002:1002:1002"
 
+# ── Eigen databank (wv3180, ontwerp 01_Ontwikkeling/Databank naar Olares en R230 § 1) ─────────────────────────────────────────────
+# Postgres 17 + pgvector uit PGDG (aptsleutel gepind op vingerafdruk; apt toetst de handtekeningen via signed-by) en PostgREST als
+# statische release (vaste versie + sha256). Versies van Postgres volgen de imagebouw (minor-updates); PostgREST staat vast.
+# Geen standaardcluster (createcluster.conf); de data staat op het volume (/opt/data/pg, gebruiker pg) en start via /app/db/db-wacht.sh.
+# OS-gebruiker pg (geen lid van claude/socev) en groep pgsock voor de socket: claude is lid, socev niet.
+ARG PGDG_VINGER=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+ARG POSTGREST_VERSIE=v14.18
+ARG POSTGREST_SHA256=98de1c0be7787aea5f5e11a25f303ea0077634d6fc1000b687bfa825fd27d299
+COPY db/pgdg-vinger.py /tmp/pgdg-vinger.py
+RUN curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+ && python3 /tmp/pgdg-vinger.py /tmp/pgdg.asc "${PGDG_VINGER}" \
+ && install -d -m 0755 /usr/share/postgresql-common/pgdg /etc/postgresql-common \
+ && cp /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list \
+ && echo "create_main_cluster = false" > /etc/postgresql-common/createcluster.conf \
+ && apt-get update && apt-get install -y --no-install-recommends postgresql-17 postgresql-client-17 postgresql-17-pgvector zstd xz-utils \
+ && rm -rf /var/lib/apt/lists/* /tmp/pgdg.asc /tmp/pgdg-vinger.py \
+ && curl -fsSL -o /tmp/pgrst.tar.xz "https://github.com/PostgREST/postgrest/releases/download/${POSTGREST_VERSIE}/postgrest-${POSTGREST_VERSIE}-linux-static-x86-64.tar.xz" \
+ && echo "${POSTGREST_SHA256}  /tmp/pgrst.tar.xz" | sha256sum -c - \
+ && tar -xJf /tmp/pgrst.tar.xz -C /usr/local/bin postgrest && chmod 0755 /usr/local/bin/postgrest && rm -f /tmp/pgrst.tar.xz \
+ && /usr/local/bin/postgrest --version && /usr/lib/postgresql/17/bin/postgres --version \
+ && test -f /usr/share/postgresql/17/extension/vector.control \
+ && groupadd -r pgsock && useradd -r -M -U -d /opt/data/pg -s /usr/sbin/nologin pg \
+ && usermod -aG pgsock pg && usermod -aG pgsock claude \
+ && id -nG claude | grep -qw pgsock && ! id -nG socev | grep -qw pgsock && ! id -nG pg | grep -qwE 'claude|socev' \
+ && test "$(id -u socev):$(id -g socev):$(id -G socev)" = "1002:1002:1002"
+
 ENV HOME=/opt/data
 # Codex: auth.json, config.toml en sessies op het persistente volume, naast /opt/data/.claude.
 ENV CODEX_HOME=/opt/data/.codex
@@ -131,6 +159,8 @@ COPY run.sh /app/run.sh
 COPY entrypoint.sh /app/entrypoint.sh
 COPY fetch-secrets.sh /app/fetch-secrets.sh
 COPY supervisor.js /app/supervisor.js
+# wv3180: databank (db-wacht, init-SQL, configuratie, PostgREST-config, sleutelluik, beheer-SQL, vergelijker) — image-categorie
+COPY db/ /app/db/
 COPY uitrol.sh /app/uitrol.sh
 # Bootstrap-config voor Codex; entrypoint kopieert hem alleen als er nog geen staat.
 COPY codex-config.toml /app/codex-config.toml
@@ -248,6 +278,11 @@ COPY package.json /app/package.json
 RUN npm install --omit=dev --no-audit --no-fund \
  && npm cache clean --force
 
+RUN chown -R root:root /app/db && chmod 0755 /app/db && chmod 0644 /app/db/* && chmod 0755 /app/db/db-wacht.sh /app/db/wal-archief.sh \
+ && rm -f /app/db/pgdg-vinger.py \
+ && printf '#!/bin/sh\n# wv3180: beheer-SQL op de eigen databank (stdin → JSON-rijen), zie /app/db/sb-sql.js\nexec node /app/db/sb-sql.js "$@"\n' > /app/sb-sql \
+ && chmod 0755 /app/sb-sql && ln -sf /app/db/db-wacht.sh /app/db-wacht.sh \
+ && node -e "require('/app/node_modules/pg'); require('/app/node_modules/postgres-array')"
 RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh /app/uitrol.sh \
       /app/socev-voorbereiding.sh /app/socev-rechten.sh /app/playwright-mcp.sh \
  && chmod 0644 /app/socev-loper.js /app/loper-bind.py /app/socev-thuis.py /app/argv-wacht.py /etc/claude-code/managed-settings.json /app/web-jev.py /app/jev-pod.js \
@@ -255,6 +290,6 @@ RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh /app/uitrol.sh
  && chown -R root:root /app/socev-* /app/loper-bind.py /app/argv-wacht.py /app/playwright-mcp.sh /etc/claude-code /app/web-jev.py /app/jev-pod.js \
       /app/bisync-filter.txt /app/bisync-filter-toets.sh /app/syncthing-stignore.txt /app/syncthing-filter-toets.py
 
-EXPOSE 8080
+EXPOSE 8080 8091
 # entrypoint draait als root (chown volume), zakt dan naar 'claude'
 ENTRYPOINT ["/app/entrypoint.sh"]

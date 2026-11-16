@@ -388,14 +388,44 @@ async function haalN8n() {
   throw new Error('n8n: meer dan 40 pagina\'s');
 }
 const SB_PROJECT = 'tiwfbqwttnknnblhqpoo';
+
+// wv3180: beheer-SQL — zonder SB_SQL_LOKAAL=1 de Supabase-Management-API (oude gedrag), met SB_SQL_LOKAAL=1 /app/sb-sql (eigen Postgres
+// over de socket, zelfde uitvoervorm). Geeft een Response; null = geen toegang. Kindproces met minimale omgeving, query via stdin.
+function sbBeheerKan() {
+  if (process.env.SB_SQL_LOKAAL === '1') return true;
+  return !!(SB_PROJECT && process.env.SUPABASE_MCP_TOKEN);
+}
+function sbBeheerQuery(sql, opties) {
+  const o = opties || {};
+  const ms = o.ms || 20000;
+  if (process.env.SB_SQL_LOKAAL === '1') {
+    return new Promise(function (resolve) {
+      let uit = '', fout = '', klaar = false;
+      const einde = function (st, t) { if (klaar) return; klaar = true; clearTimeout(klok); resolve(new Response(t, { status: st, headers: { 'content-type': 'application/json' } })); };
+      const k = require('child_process').spawn(process.env.SB_SQL_BIN || '/app/sb-sql', [], { stdio: ['pipe', 'pipe', 'pipe'],
+        env: { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME || '/opt/data', SB_SQL_TIMEOUT_MS: String(ms) } });
+      const klok = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, ms + 2000);
+      k.stdout.on('data', function (d) { uit += d; });
+      k.stderr.on('data', function (d) { if (fout.length < 8192) fout += d; });
+      k.on('error', function () { einde(503, JSON.stringify({ message: 'Failed to run sql query: sb-sql niet te starten' })); });
+      k.on('close', function (code) {
+        if (code === 0) return einde(201, uit || '[]');
+        let msg = 'sb-sql faalde'; try { msg = JSON.parse(fout.trim().split('\n').pop()).message || msg; } catch (e) {}
+        einde(code === null ? 504 : 400, JSON.stringify({ message: 'Failed to run sql query: ' + msg }));
+      });
+      k.stdin.on('error', function () {});
+      k.stdin.end(sql);
+    });
+  }
+  const ref = SB_PROJECT;
+  if (!ref || !process.env.SUPABASE_MCP_TOKEN) return Promise.resolve(null);
+  return fetch('https://api.supabase.com/v1/projects/' + ref + '/database/query', { method: 'POST', redirect: 'error',
+    headers: { Authorization: 'Bearer ' + process.env.SUPABASE_MCP_TOKEN, 'Content-Type': 'application/json', 'User-Agent': o.ua || 'socev-pod/1' },
+    body: JSON.stringify({ query: sql }), signal: AbortSignal.timeout(ms) });
+}
 async function haalHartslag() {
-  const t = process.env.SUPABASE_MCP_TOKEN;
-  if (!t) throw new Error('SUPABASE_MCP_TOKEN ontbreekt');
-  const r = await fetch('https://api.supabase.com/v1/projects/' + SB_PROJECT + '/database/query', { method: 'POST',
-    headers: { authorization: 'Bearer ' + t, 'content-type': 'application/json', 'user-agent': 'socev-werkers/1.0' },
-    // dezelfde RPC als de app (één definitie van "te laat", Opus-review wv1707 #3). read_only kan hier niet: die rol mag de functie niet
-    // uitvoeren (gemeten 27-10); de querytekst staat vast en leest alleen.
-    body: JSON.stringify({ query: 'select component, drempel_min, laatste_ronde, minuten_sinds, oordeel from public.mk_hartslag_stand()' }), signal: AbortSignal.timeout(30000) });
+  if (!sbBeheerKan()) throw new Error('SUPABASE_MCP_TOKEN ontbreekt');
+  const r = await sbBeheerQuery('select component, drempel_min, laatste_ronde, minuten_sinds, oordeel from public.mk_hartslag_stand()', { ua: 'socev-werkers/1.0', ms: 30000 });
   if (!r.ok) throw new Error('supabase http ' + r.status);
   const j = await r.json();
   if (!Array.isArray(j)) throw new Error('supabase: antwoord is geen lijst');
@@ -403,11 +433,8 @@ async function haalHartslag() {
 }
 // wv1733: schakelaarstand (dezelfde RPC als de pod); fout = null, dan telt een uitgezette werker als 'uit of weg' en staat er een fout bij
 async function haalSchakelaars() {
-  const t = process.env.SUPABASE_MCP_TOKEN;
-  if (!t) throw new Error('SUPABASE_MCP_TOKEN ontbreekt');
-  const r = await fetch('https://api.supabase.com/v1/projects/' + SB_PROJECT + '/database/query', { method: 'POST',
-    headers: { authorization: 'Bearer ' + t, 'content-type': 'application/json', 'user-agent': 'socev-werkers/1.0' },
-    body: JSON.stringify({ query: 'select public.mk_schakelaar_stand() as s' }), signal: AbortSignal.timeout(30000) });
+  if (!sbBeheerKan()) throw new Error('SUPABASE_MCP_TOKEN ontbreekt');
+  const r = await sbBeheerQuery('select public.mk_schakelaar_stand() as s', { ua: 'socev-werkers/1.0', ms: 30000 });
   if (!r.ok) throw new Error('supabase schakelaar http ' + r.status);
   const j = await r.json();
   const s = Array.isArray(j) && j[0] ? j[0].s : null;

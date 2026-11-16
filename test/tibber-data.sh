@@ -293,7 +293,7 @@ srv.listen(0, '127.0.0.1', async function () {
         return { ok: false, status: 400, json: async () => ({}), text: async () => 'fout met ' + q };
       } };
     vm.createContext(g);
-    vm.runInContext(ssrc.slice(k1, k2) + '\n' + ssrc.slice(b1, b2) + '\n;globalThis.__t = { tibberTerug, tibberSmal, tibberInfo, tibberRondeDraai, tibberNaBankRonde };', g);
+    vm.runInContext((function () { const a = ssrc.indexOf('/* sbBeheer:begin'), b = ssrc.indexOf('/* sbBeheer:einde */'); if (a < 0 || b < a) throw new Error('sbBeheer-blok niet gevonden'); return ssrc.slice(a, b); })() + '\n' + ssrc.slice(k1, k2) + '\n' + ssrc.slice(b1, b2) + '\n;globalThis.__t = { tibberTerug, tibberSmal, tibberInfo, tibberRondeDraai, tibberNaBankRonde };', g);
     const S = g.__t;
     function nepReq(url, methode) { return { url: url, method: methode || 'GET', resume() {} }; }
     function nepRes() { return new Promise((klaar) => { const r = { statusCode: 0, headersSent: false, _log: {}, writeHead(st) { this.statusCode = st; this.headersSent = true; }, end(t) { klaar({ status: this.statusCode, tekst: String(t || '') }); } }; r.p = null; klaar.r = r; S.__res = r; }); }

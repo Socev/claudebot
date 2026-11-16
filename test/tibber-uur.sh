@@ -168,7 +168,7 @@ srv.listen(0, '127.0.0.1', async function () {
         return { ok: false, status: 400, json: async () => ({}), text: async () => 'fout met ' + q };
       } };
     vm.createContext(g);
-    vm.runInContext(ssrc.slice(k1, k2) + '\n' + ssrc.slice(b1, b2) + '\n;globalThis.__t = { tibberSmal, tibberInfo, tibberUurDraai, tibberUurNaBankRonde, tibberUurLees };', g);
+    vm.runInContext((function () { const a = ssrc.indexOf('/* sbBeheer:begin'), b = ssrc.indexOf('/* sbBeheer:einde */'); if (a < 0 || b < a) throw new Error('sbBeheer-blok niet gevonden'); return ssrc.slice(a, b); })() + '\n' + ssrc.slice(k1, k2) + '\n' + ssrc.slice(b1, b2) + '\n;globalThis.__t = { tibberSmal, tibberInfo, tibberUurDraai, tibberUurNaBankRonde, tibberUurLees };', g);
     const S = g.__t;
     M.eind = Math.floor(Date.now() / 3600000) * 3600000; M.leeg = 8; M.log = [];
     let sm = await S.tibberSmal({ opdracht: 'uur' }, { mk: false });
