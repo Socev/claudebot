@@ -309,4 +309,12 @@ async function n8nKlaar(lijst, haal, a, amsVan, podBezig) {
   return open.length ? { klaar: false, reden: open.join(', ') } : { klaar: true, notitie: notities.join(', ') || null };
 }
 
-module.exports = { maak: maak, n8nKlaar: n8nKlaar, procLeeft: procLeeft, procStart: procStart, BEWAAR: BEWAAR };
+// ── wv3169: rust na terugkeer ──
+// Na een databankstoring flakkert de rol een paar minuten (16-11: primair 04:32–04:35, passief tot 04:40, weer even passief 04:51);
+// een stap die daarin start verbrandt zijn pogingen. Daarom start de keten pas als de pod `rustMs` onafgebroken primair is.
+// rolNaam = rol.rol, sindsMs = rol.sinds_rol (tijdstip van de laatste rolwissel), nuMs = Date.now().
+function rolRustig(rolNaam, sindsMs, nuMs, rustMs) {
+  return rolNaam === 'primair' && typeof sindsMs === 'number' && isFinite(sindsMs) && nuMs - sindsMs >= rustMs;
+}
+
+module.exports = { maak: maak, n8nKlaar: n8nKlaar, procLeeft: procLeeft, procStart: procStart, rolRustig: rolRustig, BEWAAR: BEWAAR };
