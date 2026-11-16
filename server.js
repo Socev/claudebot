@@ -28161,8 +28161,8 @@ async function nmbrsBetaalNa() {
   const eur = function (c) { return '€ ' + (Number(c || 0) / 100).toLocaleString('nl-NL', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
   const tekst = nieuw.map(function (l) {
     return l.status === 'klaar' && !l.hard.length
-      ? 'POT-salarissen ' + l.periode + ' (loonrun ' + l.nummer + ') staan klaar: ' + l.aantal + ' betaling' + (l.aantal === 1 ? '' : 'en') + ', ' + eur(l.totaal_centen) + ' totaal. ' +
-        'Kies in Facturen › Betalen › POT de betaaldatum en download het bestand voor POT-invoer.' + (l.zacht.length ? ' Let op: ' + l.zacht.join('; ') + '.' : '')
+      ? 'POT-salarissen ' + l.periode + ' (loonrun ' + l.nummer + ') staan ' + (l.gewijzigd ? 'opnieuw klaar, gewijzigd sinds de vorige melding: ' : 'klaar: ') + l.aantal + ' betaling' + (l.aantal === 1 ? '' : 'en') + ', ' + eur(l.totaal_centen) + ' totaal. ' +
+        'Kies in Facturen › Betalen › POT de betaaldatum en download de betaallijst voor POT-invoer.' + (l.zacht.length ? ' Let op: ' + l.zacht.join('; ') + '.' : '')
       : 'POT-salarissen ' + l.periode + ' (loonrun ' + l.nummer + '): nog geen bestand mogelijk (' + l.hard.join('; ') + '). Zie Facturen › Betalen › POT; tot dan geldt de lijst van Aurore.';
   }).join('\n');
   const sl = crypto.createHash('sha256').update(nieuw.map(function (l) { return l.run; }).join(',')).digest('hex').slice(0, 16);
@@ -28182,7 +28182,7 @@ async function nmbrsLoonrunApp(req, padW, d, a, s) {
     if (!x.j || x.j.ok !== true) return { status: 500, j: { ok: false, fout: 'de betaallijsten zijn nu niet te lezen' } };
     const r = nmbrsRondeLees(), S = require(path.join(__dirname, 'facturen-sepa.js'));
     const g = S.grenzen(new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }));
-    return { status: 200, j: { ok: true, documentrecht: !!(r && r.documentrecht), ronde: r ? r.eind || null : null, vroegst: g.vroegst, uiterst: g.uiterst,
+    return { status: 200, j: { ok: true, documentrecht: !!(r && r.documentrecht), bankrecht: !!(r && r.bankrecht), ronde: r ? r.eind || null : null, vroegst: g.vroegst, uiterst: g.uiterst,
       pot_rekening: !!pr, lijsten: x.j.lijsten } };
   }
   if (req.method === 'POST' && padW === '/app/facturen/loonrun-bestand') {
@@ -28192,13 +28192,14 @@ async function nmbrsLoonrunApp(req, padW, d, a, s) {
     const nu0 = Date.now();
     const vandaag = new Date(nu0).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
     const cre = new Date(nu0).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam', hourCycle: 'h23' }).replace(' ', 'T').slice(0, 19);
-    const x = await nmbrsKind('betaalbestand', { run: String(d && d.run || '').slice(0, 64), datum: String(d && d.datum || '').slice(0, 10), bewust: !!(d && d.bewust === true),
+    const formaat = d && d.formaat === 'csv' ? 'csv' : 'xml';   // wv3232: CSV voor de extensie (zelfde formaat als de lijst van Nmbrs) of pain.001
+    const x = await nmbrsKind('betaalbestand', { run: String(d && d.run || '').slice(0, 64), formaat: formaat, versie: String(d && d.versie || '').slice(0, 16), datum: String(d && d.datum || '').slice(0, 10), bewust: !!(d && d.bewust === true),
       vandaag: vandaag, cre_dt_tm: cre, msg_hex: crypto.randomBytes(4).toString('hex'), pot: pot || {} });
     const u = x.j || { ok: false, fout: 'het bestand is nu niet te maken' };
-    schrijfLog(nu() + ' pot-loonrun ' + velden({ opdracht: 'bestand', ok: u.ok === true, code: u.code, aantal: u.aantal }));
-    if (u.ok !== true) return { status: u.code === 'bewust' || u.code === 'datum' || u.code === 'controle' ? 409 : 400, j: { ok: false, fout: String(u.fout || 'mislukt').slice(0, 400), code: u.code } };
+    schrijfLog(nu() + ' pot-loonrun ' + velden({ opdracht: 'bestand', formaat: formaat, ok: u.ok === true, code: u.code, aantal: u.aantal }));
+    if (u.ok !== true) return { status: u.code === 'bewust' || u.code === 'datum' || u.code === 'controle' || u.code === 'versie' ? 409 : 400, j: { ok: false, fout: String(u.fout || 'mislukt').slice(0, 400), code: u.code } };
     return { status: 200, j: { ok: true, aantal: u.aantal, totaal_centen: u.totaal_centen,
-      bestand: { naam: u.naam, inhoud: Buffer.from(u.tekst, 'utf8').toString('base64'), type: 'application/xml', codering: 'base64', sha256: u.sha256 } } };
+      bestand: { naam: u.naam, inhoud: Buffer.from(u.tekst, 'utf8').toString('base64'), type: u.type === 'text/csv' ? 'text/csv' : 'application/xml', codering: 'base64', sha256: u.sha256 } } };
   }
   return { status: 404, j: { ok: false, fout: 'onbekend' } };
 }

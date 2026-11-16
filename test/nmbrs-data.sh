@@ -148,11 +148,19 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('GET op het tokenendpoint geweigerd', weigert('GET', BASIS + '/connect/token'));
     toets('PUT/DELETE/PATCH geweigerd', weigert('PUT', BASIS + '/api/companies') && weigert('DELETE', BASIS + '/api/companies') && weigert('PATCH', BASIS + '/api/companies'));
     const c = BASIS + '/api/companies/' + C1;
-    toets('verboden endpoints geweigerd (privateInfos, personalinfo, addresses, bankaccounts, children, partner, absences)',
-      ['privateInfos', 'personalinfo', 'addresses', 'bankaccounts', 'children', 'partner', 'absences', 'wagetaxsettings', 'svwsettings'].every((x) => weigert('GET', c + '/employees/' + x)));
-    // wv3208: het SEPA-betaalbestand van een loonrun mag (alleen met year; paymentDate niet), loonstroken nog steeds niet
-    toets('loonstroken en documentmappen geweigerd; SEPA van een run alleen met year', weigert('GET', c + '/runs/' + R10 + '/payslips?year=2026') && !weigert('GET', c + '/runs/' + R10 + '/sepa?year=2026') &&
-      weigert('GET', c + '/runs/' + R10 + '/sepa?year=2026&paymentDate=2026-11-25') && weigert('GET', c + '/wagetaxes/' + R10 + '/sepa?year=2026') &&
+    toets('verboden endpoints geweigerd (privateInfos, personalinfo, addresses, children, partner, absences)',
+      ['privateInfos', 'personalinfo', 'addresses', 'children', 'partner', 'absences', 'wagetaxsettings', 'svwsettings'].every((x) => weigert('GET', c + '/employees/' + x)));
+    // wv3232: bankrekeningen van medewerkers wel (lijst), per medewerker niet; bedrijfsrekeningen niet
+    toets('wv3232: employees/bankaccounts als lijst mag, met employeeId/createdFrom niet; per medewerker en bedrijfsrekeningen niet',
+      !weigert('GET', c + '/employees/bankaccounts?pageNumber=1&pageSize=100') && weigert('GET', c + '/employees/bankaccounts?employeeId=' + E1) &&
+      weigert('GET', BASIS + '/api/employees/' + E1 + '/bankaccount') && weigert('GET', c + '/bankaccounts'));
+    // wv3232: de SEPA-route is weg; de run output alleen met year en de looncodes 9880/9900 (elk hooguit één keer)
+    toets('wv3232: SEPA van een run geweigerd; run output alleen met year + 9880/9900', weigert('GET', c + '/runs/' + R10 + '/sepa?year=2026') &&
+      !weigert('GET', c + '/runs/' + R10 + '/wagecodes/xml?year=2026&wageCodes=9880&wageCodes=9900') && weigert('GET', c + '/runs/' + R10 + '/wagecodes/xml?year=2026') && weigert('GET', c + '/runs/' + R10 + '/wagecodes/xml?wageCodes=9880&wageCodes=9900') &&
+      weigert('GET', c + '/runs/' + R10 + '/wagecodes/xml?year=2026&wageCodes=9880') &&
+      weigert('GET', c + '/runs/' + R10 + '/wagecodes/xml?year=2026&wageCodes=8800') && weigert('GET', c + '/runs/' + R10 + '/wagecodes/xml?year=2026&wageCodes=9880&wageCodes=9880') &&
+      weigert('GET', c + '/runs/' + R10 + '/wagecodes?year=2026'));
+    toets('loonstroken en documentmappen geweigerd', weigert('GET', c + '/runs/' + R10 + '/payslips?year=2026') && weigert('GET', c + '/wagetaxes/' + R10 + '/sepa?year=2026') &&
       weigert('GET', BASIS + '/api/employees/' + E1 + '/payslipperperiod') && weigert('GET', BASIS + '/api/employees/' + E1 + '/documents/folders') && weigert('GET', c + '/bankaccounts'));
     toets('document zonder eigen journaaltaak geweigerd', weigert('GET', BASIS + '/api/documents/' + TAAK));
     toets('andere host geweigerd', weigert('GET', 'https://elders.invalid/api/companies') && weigert('POST', 'https://elders.invalid/connect/token'));
@@ -164,11 +172,15 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('geen eigen netwerk- of procesmodule', !/require\('(node:)?(http|https|net|tls|child_process|dgram)'\)/.test(src));
     toets('toetsbasis alleen 127.0.0.1', (() => { try { require('child_process').execFileSync(process.execPath, [SCRIPT, 'stand'], { env: { PATH: process.env.PATH, NMBRS_API_BASIS: 'http://10.0.0.1:80', NMBRS_DIR: path.join(W, 'x') }, input: '{}', stdio: 'pipe' }); return false; } catch (e) { return true; } })());
     toets('uitrol.sh en Dockerfile: nmbrs-data.js gaat mee in de release', /^RELEASE_OPTIONEEL="[^"]*\bnmbrs-data\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY nmbrs-data\.js \/app\/release-bootstrap\/nmbrs-data\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
-    toets('scopes exact: gelijk ja, ontbrekend nee, extra nee', TM.scopesExact(T.SCOPES.slice()) && !TM.scopesExact(T.SCOPES.slice(1)) && !TM.scopesExact(T.SCOPES.concat(['employee.bankaccount.read'])));
+    toets('scopes exact: gelijk ja, ontbrekend nee, extra nee', TM.scopesExact(T.SCOPES.slice()) && !TM.scopesExact(T.SCOPES.slice(1)) && !TM.scopesExact(T.SCOPES.concat(['employee.payrollsettings.read'])));
+    // wv3232: de set van wv3208 (13, zonder bankrecht) blijft geldig; basis + alleen bankrecht niet
+    toets('wv3232: set zonder bankrecht ja, basis + bank zonder documentrecht nee', TM.scopesExact(T.SCOPES_V13.slice()) && T.SCOPES.length === 14 && T.SCOPES_V13.length === 13 &&
+      !TM.scopesExact(T.SCOPES_BASIS.concat(['employee.bankaccount.read'])));
     // wv3208: de oude basisset (zonder documentrecht) blijft geldig; half documentrecht niet
     toets('scopes: oude basisset ja, basis + één documentscope nee', TM.scopesExact(T.SCOPES_BASIS.slice()) && !TM.scopesExact(T.SCOPES_BASIS.concat(['document.read'])) && !TM.scopesExact(T.SCOPES_BASIS.concat(['company.document.read'])));
-    toets('geen schrijf- of bankscope; documentscope alleen company.document.read en document.read', !T.SCOPES.some((s) => !/\.read$/.test(s) && s !== 'offline_access') &&
-      !T.SCOPES.some((s) => /bankaccount|payrollsettings\.read$/.test(s) && s !== 'company.payrollsettings.read') &&
+    toets('geen schrijfscope; bank alleen employee.bankaccount.read; documentscope alleen company.document.read en document.read', !T.SCOPES.some((s) => !/\.read$/.test(s) && s !== 'offline_access') &&
+      JSON.stringify(T.SCOPES.filter((s) => /bank/.test(s))) === JSON.stringify(['employee.bankaccount.read']) &&
+      !T.SCOPES.some((s) => /payrollsettings\.read$/.test(s) && s !== 'company.payrollsettings.read') &&
       JSON.stringify(T.SCOPES.filter((s) => /document/.test(s)).sort()) === JSON.stringify(['company.document.read', 'document.read']));
 
     // 2. link en state
@@ -185,11 +197,11 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('state na 48 uur dicht', !TM.stateOpen(DIR, st2));
 
     // 3. terugkeer: verkeerde scope → ingetrokken, niets bewaard
-    M.scope = T.SCOPES.slice(0, -1).join(' ');
+    M.scope = T.SCOPES.filter((x) => x !== 'document.read').join(' ');   // wv3232: SCOPES zonder de laatste (bank) is nu de geldige set van wv3208
     let u = await TM.terug(kluisDeps(DIR), st, 'code-goed', '');
     toets('ontbrekende scope → geweigerd, ingetrokken (refresh + access), niets in de kluis', u.soort === 'scope' && !K.rij.refresh && !TM.noodLees(DIR) && M.intrek.join(',') === 'refresh_token,access_token', [u, M.intrek]);
     toets('state na weigering verbruikt', !TM.stateOpen(DIR, st));
-    M.scope = SCOPES + ' employee.bankaccount.read'; M.intrek = [];
+    M.scope = SCOPES + ' employee.payrollsettings.read'; M.intrek = [];
     u = await TM.terug(kluisDeps(DIR), new URL(TM.linkMaak(DIR, 'cid-proef-0001').url).searchParams.get('state'), 'code-goed', '');
     toets('extra scope → geweigerd en ingetrokken', u.soort === 'scope' && !K.rij.refresh && M.intrek.length === 2, u);
     M.scope = SCOPES;
