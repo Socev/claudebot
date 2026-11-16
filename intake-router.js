@@ -107,6 +107,25 @@ function markerWeging(x) {
   return { hard: waarom.length > 0, waarom };
 }
 
+// ── VECOZO ION-melding (wv3176; David 16-11-2026 07:34, knop-Ja d4f5536a "zulke meldingen voortaan buiten de vault houden") ── Een
+// "ION Patiëntrelaties beëindigd" van VECOZO draagt per patiënt een RelatieID (grondwet 3), maar de patiëntpoort ziet er alleen een
+// patiëntwoord in (zacht): 12-11 kwam er zo een via gmail:groenhouten in de vault. Dezelfde deterministische regel als isIonMelding in
+// n8n AI - Outlook meelezen (wv1056, Fable-review): onderwerp (of bijlagenaam) met ION + patiëntrelatie, samen met een VECOZO-afzender,
+// een RelatieID of beëindigd/gewijzigd; of een VECOZO-afzender met een RelatieID in de tekst. Uitkomst: hard kenmerk 'ion_melding' =
+// stil buiten de Brain (wel geteld als hard/buiten de Brain). De afzender hoeft niet DKIM-uitgelijnd te zijn: een vervalste VECOZO-afzender
+// houdt hooguit een stuk te veel buiten de Brain, en dat haalt David terug met "Geen patiënt — verwerk".
+function zonderAccent(t) { return String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
+function ionMelding(x) {
+  x = x || {};
+  const ond = zonderAccent(String(x.onderwerp || '') + ' ' + (x.bijlagenamen || []).map(function (n) { return String(n || ''); }).join(' '));
+  const txt = zonderAccent((x.teksten || []).join('\n'));
+  const ion = /\bION\b/i.test(ond) && /pat\S{0,10}\s*-?\s*relatie/i.test(ond);
+  const relId = /\brelatie\s*-?\s*id\b/i.test(txt) || /\b\d{14}\b/.test(txt);
+  const vanVecozo = /@([a-z0-9-]+\.)*vecozo\.nl\s*>?\s*$/i.test(String(x.van || '').trim()) || /vecozo/i.test(String(x.van_naam || ''));
+  if (ion && (vanVecozo || relId || /be\S{0,6}indigd|gewijzigd/i.test(ond))) return true;
+  return vanVecozo && relId;
+}
+
 // ── privégrens (wv2336, stap 4; ontwerp mk-scripts/wv2336/ontwerp-privegrens.md, review gpt-5.5 3-11): SCHADUW ── Een stuk dat een persoon uit
 // de privékring (familiepagina's in de vault; podbestand prive-kring.json, 0600) noemt én over gezondheid gaat, hoort nooit vanzelf bij een
 // zakelijke entiteit. Nu alleen rekenen en loggen (besluit 'prive_grens', zonder namen of ids); live pas na een week schaduw en adresmatch.
@@ -1343,6 +1362,9 @@ function maak(o) {
       if (ingang !== 'geen') marker = routerMarker === 'gemarkeerd' ? 'gemarkeerd' : (ingang || 'nog_niet');
       else marker = routerMarker === 'geen' || routerMarker === 'niet_gedraaid' ? 'geen' : routerMarker;
         const soorten = Array.from(new Set([].concat(safeJson(s.marker_soorten) || [], (eigen && eigen.soorten) || [])));
+        // wv3176: een ION-melding is altijd gemarkeerd en hard, ongeacht wat de patiëntpoort vond (alleen de soort, nooit tekst in het besluit)
+        const ion = ionMelding({ van: vanAdres, van_naam: meta.van_naam, onderwerp, bijlagenamen: namen, teksten: lt.delen.map(function (d) { return d.tekst; }) });
+        if (ion) { marker = 'gemarkeerd'; if (soorten.indexOf('ion_melding') < 0) soorten.push('ion_melding'); }
         B('marker', marker, null, { ingang: ingang || null, router: routerMarker, soorten, versie: eigen ? eigen.versie : s.marker_versie, eigen_uitzondering: !!(eigen && eigen.eigen_uitzondering) });
         if (marker !== 'geen' && naKeuze) B('marker_keuze', 'gewoon_verwerken', null, { door: 'david', leren: false });
         // wv2336: hard of zacht (alleen soorten en redenen in het besluit, nooit tekst); stand 'door' = zacht gaat door, hard stil buiten de Brain
@@ -1354,6 +1376,7 @@ function maak(o) {
           try { if (eigen && o.marker._intern && o.marker.laadEigen) pers = o.marker._intern.personen(o.marker._intern.stukken(wTeksten), o.marker.laadEigen()); } catch (e) { pers = null; }
           const dkimW = s.profiel === 'mail@1' ? dkimUitslag(lt.mail && lt.mail.ar.length ? lt.mail.ar : (meta.authentication_results ? [meta.authentication_results] : []), vanAdres, { authserv: 'mx.google.com' }) : null;
           weging = markerWeging({ soorten: eigen ? eigen.soorten : [], personen: pers, teksten: wTeksten, afzender_domein: dkimW && dkimW.uitgelijnd ? domeinVan(vanAdres) : '' });
+          if (ion) weging = { hard: true, waarom: weging.waarom.concat(['ion_melding']) };
           const st = markerStand();
           B('marker_weging', weging.hard ? 'hard' : 'zacht', null, { waarom: weging.waarom, stand: st, live: !!live });
           if (live && st === 'door') {
@@ -3025,4 +3048,4 @@ async function zetKaarten(kaarten, h) {
   return gezet;
 }
 
-module.exports = { maak, K, kaartenVoorDag, zetKaarten, REGELVERSIE, PROFIELEN, markerWeging, priveGrens };
+module.exports = { maak, K, kaartenVoorDag, zetKaarten, REGELVERSIE, PROFIELEN, markerWeging, ionMelding, priveGrens };
