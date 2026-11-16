@@ -88,6 +88,9 @@ const N8N = [
   // wv2721 (Data Manager DM12, 8-11-2026): actief in n8n sinds 5-11 (wv2486), nog niet in het register
   {"id": "n8n-nprUcZeDfbL4m6U0", "naam": "GEZOCHT-agenda", "soort": "routine", "module": "facturen", "n8n": "nprUcZeDfbL4m6U0", "model": "geen", "hartslag": [], "uitkomst": "hele-dag-item GEZOCHT in de GEZOCHT-agenda's van Tolgaarde en Groenhouten op een vinkje in DocPlan › Bezetting (grondwet 1 en 7)"},
   {"id": "n8n-OQBs2wP6YugOHhQC", "naam": "Waarnemingzoeker", "soort": "routine", "n8n": "OQBs2wP6YugOHhQC", "model": "geen", "hartslag": [], "uitkomst": "Bericht aan David (hoofd)"},
+  // wv3190 (Data Manager DM12, 16-11-2026): actief in n8n, nog niet in het register (Inlogwachter sinds 8-11, wv2786; Inhaalslag sinds 16-11, wv3169)
+  {"id": "n8n-T3Dk2R7WUtoc9rKw", "naam": "Inlogwachter (Google)", "soort": "routine", "n8n": "T3Dk2R7WUtoc9rKw", "model": "geen", "hartslag": [], "uitkomst": "meting per Google-credential naar de pod (POST /inlog-meting → /health inlog_koppelingen); box-rij + bericht aan David bij een geweigerde inlog"},
+  {"id": "n8n-SubbVZFYvCRVxjKH", "naam": "Inhaalslag (nachtklussen na een databankstoring)", "soort": "routine", "n8n": "SubbVZFYvCRVxjKH", "model": "geen", "hartslag": [], "uitkomst": "retry van mislukte nachtruns uit n8n Data Table inhaal_wachtrij; geen bericht (de tabel is het spoor)"},
 ];
 
 // ── werkers buiten n8n (pod-tijdklok, pod-scripts, de tikker) — rooster als tekst, de klok staat in de code die erbij genoemd is ──
@@ -103,8 +106,10 @@ const POD = [
   // wv2177 (DM12): de nachtketen zelf (één slotstempel) en de zoekstappen erin stempelden zonder werker
   { id: 'sb2-nachtketen', naam: 'SB2-nachtketen (nachtstappen in volgorde)', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke nacht tot 07:40',
     model: 'geen', hartslag: ['sb2_nachtketen'], uitkomst: 'slotstempel + box-rij bij een mislukte of onvolledige stap', uitzetbaar: false, bron: 'nachtketen.js, server.js NK_MOD' },
-  { id: 'sb2-zoeken', naam: 'SB2 zoeken (feitenlijst, zoekindex, zoekleer)', soort: 'routine', module: 'intake', trigger: 'pod-tijdklok', rooster: 'elke nacht 05:00–07:00 (in de nachtketen)',
-    model: 'geen', hartslag: ['sb2-feitenlijst', 'sb2-zoekindex', 'sb2-zoekleer'], uitkomst: 'secondbrain.identifier + zoekindex voor Zoek snel', bron: 'server.js sb2ZoekKlok → socev-scripts feitenlijst.py, zoekindex.py, zoekleer.py' },
+  // wv3190 (DM12): sb2-datumcontrole (wv2839) is een vierde sb2ZoekKlok in dezelfde nachtketen
+  { id: 'sb2-zoeken', naam: 'SB2 zoeken (feitenlijst, zoekindex, zoekleer, datumcontrole)', soort: 'routine', module: 'intake', trigger: 'pod-tijdklok', rooster: 'elke nacht 05:00–07:00 (in de nachtketen)',
+    model: 'geen', hartslag: ['sb2-feitenlijst', 'sb2-zoekindex', 'sb2-zoekleer', 'sb2-datumcontrole'], uitkomst: 'secondbrain.identifier + zoekindex voor Zoek snel; datumkandidaten op de tijdlijn + meetstandregel in Meldingen',
+    bron: 'server.js sb2ZoekKlok → socev-scripts feitenlijst.py, zoekindex.py, zoekleer.py, datumcontrole.py' },
   { id: 'socev-run-veeg', naam: 'Opruimronde crash-vangnet', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke nacht 03:50–04:49',
     model: 'geen', hartslag: ['socev-run-veeg'], uitkomst: 'opgeruimde runs', bron: 'sb2-nacht.js → socev-run --veeg' },
   { id: 'ovis-kalender', naam: 'OVIS Calendar (externe kalenders)', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke dag 06:35–07:34',
@@ -126,6 +131,21 @@ const POD = [
     model: 'geen', hartslag: [], uitkomst: 'één mail per nota naar het factuuradres (grondwet 1, uitzondering)', bron: 'server.js potVzTik' },
   { id: 'app-meldingen', naam: 'App-seintjes', soort: 'routine', trigger: 'pod', rooster: 'doorlopend',
     model: 'geen', hartslag: [], uitkomst: 'seintje op de telefoon', uitzetbaar: false, bron: 'server.js appPushMeldTik' },
+  // wv3190 (DM12, 16-11-2026): pod-klokken en weekreeksen in de werkvoorraad die al stempelden zonder werker
+  { id: 'beleggen-nieuws', naam: 'OVIS Beleggen (nieuws ophalen + weekbericht)', soort: 'routine', module: 'financien', trigger: 'pod-tijdklok', rooster: 'elke dag 06:40 (ophalen), zondag 09:00 (weekronde)',
+    model: 'claude-sonnet-5-5', hartslag: ['beleggen-ophaal'], uitkomst: 'weekbericht aan David (hoofd) + box-rij bij een bron die drie dagen faalt', bron: 'server.js beleggenNieuwsTik → beleggen-nieuws.js (wv2993)' },
+  { id: 'ovis-nza-wachter', naam: 'OVIS NZa-wachter', soort: 'wachter', trigger: 'pod-tijdklok', rooster: 'elke dag één ronde tussen 07:50 en 09:49',
+    model: 'geen', hartslag: ['ovis-nza-wachter'], uitkomst: 'NZa-bibliotheek + index, Nieuw op het scherm; bericht aan David alleen bij een nieuwe beschikking, beleidsregel, bezwaarbeslissing of CBb-uitspraak',
+    bron: 'server.js nzaWachterTik → mk-scripts/ovis-nza/wachter.py ronde (wv3113)' },
+  { id: 'cijfermeester-week', naam: 'Cijfer-Meester weekronde', soort: 'routine', trigger: 'tikker', rooster: 'zondag 06:15 (werkvoorraadrij; het script zet zelf de rij van volgende week)',
+    model: 'claude-sonnet-5-5', hartslag: ['cijfermeester_week'], uitkomst: 'zorgdata bijgewerkt (bronwachter + vaste CBS-recepten); box-rij alleen bij nieuws', bron: 'mk-scripts/cijfer-meester/week.py run (wv3080)' },
+  { id: 'nhg-wachter', naam: 'NHG-wachter (bronnen OVIS Spoed)', soort: 'wachter', trigger: 'tikker', rooster: '1e van de maand 06:30 (werkvoorraadrij; het script zet zelf de rij van volgende maand)',
+    model: 'claude-sonnet-5-5', hartslag: ['nhg_wachter'], uitkomst: 'stil bij gelijk; vraag aan David (knoppen) bij een gewijzigde NHG-bron; box-regel bij onleesbaar', bron: 'mk-scripts/wv-spoed/nhg-wachter.py run (wv2926)' },
+  { id: 'leusdocs-ronde', naam: 'Leusdocs GGZ-aanmeldstop (weekronde)', soort: 'wachter', trigger: 'tikker', rooster: 'maandag 05:30 (werkvoorraadrij; het script zet zelf de rij van volgende week)',
+    model: 'claude-sonnet-5-5 (oordeel gpt-5.5)', hartslag: ['leusdocs_ronde'], uitkomst: 'aanmeldstopvelden op leusdocs.nl bijgewerkt; twijfel als Voor jou-kaart; één regel aan David per week bij wijzigingen',
+    bron: 'mk-scripts/leusdocs-ggz/ronde.py run (wv2862)' },
+  { id: 'leusdocs-fto', naam: 'Leusdocs FTO-medicatieafspraken (dagcontrole)', soort: 'wachter', trigger: 'tikker', rooster: 'elke dag 07:00 (werkvoorraadrij; het script zet zelf de rij van morgen)',
+    model: 'claude-sonnet-5-5', hartslag: ['leusdocs_fto'], uitkomst: 'stil bij gelijk; vraag aan David (knoppen) bij een wijziging; box (dag 1) en David (dag 3) bij onleesbaar', bron: 'mk-scripts/leusdocs-fto/ronde.py run (wv2869)' },
 ];
 
 // ── actieve n8n-workflows die geen werker zijn (kanaal, luik, JIMMY) ──
@@ -151,6 +171,7 @@ const OVERIG = [
   {"n8n": "3oiAigcCz6LNmeBd", "naam": "Socev Agenda", "soort": "luik"},
   {"n8n": "p79ai87zzTjMIuYq", "naam": "Verbeterlog (webhook)", "soort": "luik"},
   {"n8n": "Bl2ZEi8H36CbSu48", "naam": "Voorlezen (Gemini-stem)", "soort": "luik"},
+  {"n8n": "j9pYhfuDIZ5W4dTV", "naam": "Promedico-agenda ontvanger", "soort": "luik"},   // wv3190 (DM12): doorgeefluik extensie → pod /promedico-agenda/stand (wv3132)
   {"n8n": "L2ODO5KsHlwiw4x1", "naam": "Voorwerk-blok (fase D)", "soort": "luik"},
   {"n8n": "SLYiYwqAabFlC8H3", "naam": "Voorwerk-knoppen", "soort": "luik"},
   {"n8n": "8SohM1ujMQqybT5p", "naam": "Werkkamer-bijlage", "soort": "luik"},
@@ -165,7 +186,7 @@ const OVERIG = [
   {"n8n": "rA3bpcRfShuLXIk2", "naam": "FV2 - Hulp - Backtest Harvest (eenmalig, handmatig)", "soort": "luik"},
   {"n8n": "rzFcROmWRQsINhBE", "naam": "FV2 - Sub - Forward na OK (dashboard/Telegram)", "soort": "luik"},
   {"n8n": "Z8lwj3ctPEuXPqPE", "naam": "FV2 - Sub - Normaliseer document", "soort": "luik"},
-  {"n8n": "4R2JPMAwJq9xCZNi", "naam": "GHAWA Website via Telegram", "soort": "kanaal"},
+  {"n8n": "4R2JPMAwJq9xCZNi", "naam": "GHAWA Website via Telegram", "soort": "kanaal", "bewust_uit": true},   // wv3190: door David gearchiveerd 10-11-2026 (wv2885)
   {"n8n": "mPIDK1kI5x6zB6iu", "naam": "JIMMY - Chat via Telegram", "soort": "jimmy", "bewust_uit": true},
   {"n8n": "sXgSLOEYc9mBcThI", "naam": "JIMMY - Cijfercontrole", "soort": "jimmy", "bewust_uit": true},
   {"n8n": "yC3NwNYJgHo6B5jb", "naam": "JIMMY - Dromen", "soort": "jimmy", "bewust_uit": true},
