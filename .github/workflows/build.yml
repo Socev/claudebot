@@ -1010,6 +1010,13 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/src:ro --user claude --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} /src/test/omzet.sh
 
+      # WAAROM (wv3167, 16-11-2026). ocrmypdf en Pillow komen sinds de CISO-ronde van 16-11 uit PyPI in plaats van apt (python3-pil
+      # van bookworm had 7 CRITICAL zonder fix). Deze stap toetst in het image: python3-pil weg, Pillow uit /usr/local, ocrmypdf zet
+      # een tekstlaag op een verzonnen proef-PDF (nld), studio-beeld.py verkleint met Pillow, bcftools/samtools/tabix starten.
+      - name: "Rooktest - ocrmypdf, Pillow en PGS-gereedschap (wv3167)"
+        run: |
+          docker run --rm -v "$PWD":/src:ro --user claude --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} /src/test/image-gereedschap.sh
+
       # WAAROM (wv1308, 26-10-2026). bisync met Drive gaat uit via het schakelbestand /opt/data/bisync.json (ontwerp OVIS Intake
       # § 11.4 stap 0). Een ontbrekend of kapot bestand, {"aan": false} of de onderhoudsstand van de vault mag nooit een ronde,
       # zelfherstel-resync of eerste koppeling geven; de stand wordt ook onder de vault-grendel gelezen. Deze stap draait het
