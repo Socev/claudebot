@@ -4273,6 +4273,7 @@ function handleRequest(req, res) {
       werkers: typeof werkersInfo === 'function' ? werkersInfo() : { aan: false },   // wv1707 (OVIS M4a): Ploeg-register (aantal werkers, laatste n8n-lezing, check-aantallen; geen namen)
       mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },
       pot_app: typeof potAppInfo === 'function' ? potAppInfo() : { aan: false },   // wv1894: OVIS POT (lezen)   // wv1269: App Mediatheek (aantallen, geen inhoud)
+      weekinhaal: typeof weekinhaalInfo === 'function' ? weekinhaalInfo() : { aan: false },   // wv3194: inhaal gemiste weekrondes (laatste tik, aantallen deze week, bezig)
       nieuwsbrief: nieuwsbriefInfo(),   // wv2190: nieuwsbrief-bloemlezing (laatste ronde, bezig; geen inhoud)
       te_lezen: { aan: typeof teLezenMod !== 'undefined' && !!teLezenMod },   // wv2245: Te lezen in Voor jou (module in de release)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
@@ -20912,6 +20913,52 @@ async function nachtketenTik() {
   try { await nachtketen.tik(); } catch (e) { logError('nachtketen-tik', e); }
 }
 if (nachtketen && SERVER_ECHT) { setInterval(function () { nachtketenTik(); }, 60000).unref(); }
+// ── wv3194: inhaal gemiste weekrondes (ontwerp 01_Ontwikkeling/Inhaal gemiste weekrondes (ontwerp 16-11-2026).md, review wv3191) ──
+// Elke 15 min (echte pod, primair en >= 15 min rustig, noodrem WEEKINHAAL=0): een wekelijkse n8n-ronde waarvan de schema-tick niet vuurde
+// (geen executie na de tick, hartslag ouder dan de tick) binnen 36 u één keer starten via n8n-MCP execute_workflow (production).
+// Vergrendeling met handmatige rondes: geen lopende/wachtende podbeurt in zijn sessie (jobs per chat_id), Harvester/Nieuwsbrief niet bezig;
+// een handmatige ronde buiten de sessie legt de machinekamer eerst vast met `node weekinhaal.js markeer <workflow>`. Staat /opt/data/weekinhaal.json.
+/* weekinhaal:begin */
+const WEEKINHAAL_RUST_MS = 15 * 60 * 1000;
+const weekinhaal = (function () {
+  try {
+    const W = require('./weekinhaal.js');
+    return W.maak({
+      n8n: W.n8nApi,
+      mcpStart: function (args, ms) { return W.mcpAanroep(process.env.N8N_MCP_URL || '', process.env.N8N_MCP_TOKEN || '', args, ms); },
+      hartslag: async function () {
+        const d = await appSbRpc('mk_hartslag_stand', {}, 10000);
+        const rijen = Array.isArray(d) ? d : [];
+        const o = {}; rijen.forEach(function (r) { if (r && r.component) o[r.component] = r.laatste_ronde || null; });
+        return rijen.length ? o : null;
+      },
+      rolOk: function () {
+        if (!rolPrimair()) return false;
+        return typeof rol.sinds_rol === 'number' && Date.now() - rol.sinds_rol >= WEEKINHAAL_RUST_MS;
+      },
+      sessieBezig: function (item) {
+        if (item.ronde === 'harvester') return !!(harvester && harvester.health().bezig);
+        if (item.ronde === 'nieuwsbrief') return !!(nieuwsbrief && nieuwsbrief.health().bezig);
+        return Object.keys(jobs).some(function (k) { const j = jobs[k]; return j && String(j.chat_id || '') === item.sessie && (j.status === 'pending' || j.status === 'running'); });
+      },
+      magStarten: function () { return !uitrolWacht().wacht && !onderhoud.houdtTegen({ bron: '', gereedschap: null }); },
+      uit: function () { return process.env.WEEKINHAAL === '0'; },
+      box: function (t) { return ovisBoxRij(t); },
+      log: function (r) { schrijfLog(nu() + ' ' + r); },
+    });
+  } catch (e) { logError('weekinhaal', e); return null; }
+})();
+/* weekinhaal:eind */
+function weekinhaalInfo() {
+  if (!weekinhaal) return { aan: false, module: false };
+  try { return weekinhaal.health(); } catch (e) { return { fout: true }; }
+}
+async function weekinhaalTik() {
+  if (!weekinhaal || !SERVER_ECHT) return;
+  try { await weekinhaal.tik(); } catch (e) { logError('weekinhaal-tik', e); }
+  try { weekinhaal.opruimen(); } catch (e) {}
+}
+if (weekinhaal && SERVER_ECHT) { setTimeout(function () { weekinhaalTik(); }, 240000).unref(); setInterval(function () { weekinhaalTik(); }, 15 * 60000).unref(); }
 // ── wv2016 (SB2 fase 6b): maandklok van de herstelproef (waarom, moment en proefdag in sb2-nacht.js maakMaandRonde) ──
 // Elke 5 min (echte pod, rol primair, schakelaar aan): vanaf de eerste zondag van de maand 10:00–22:59 (inhalen tot 2 dagen later), één
 // ronde per maand op de kopie van de 1e: socev-run --naam sb2-herstelproef --max-min 30 -- herstelproef.py draai --dag <JJJJ-MM-01> --klok.
