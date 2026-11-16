@@ -17780,6 +17780,12 @@ async function appFacturen(req, res, a, s, d, route) {
     res._app.reden = 'facturen ' + x.reden;
     return appStuur(res, x.status, x.j);
   }
+  if (padW === '/app/facturen/loonruns' || padW === '/app/facturen/loonrun-bestand') {   // wv3208: POT-salarissen uit Nmbrs
+    const x = await nmbrsLoonrunApp(req, padW, d || {}, a, s);
+    if (x.status === 200 && req.method === 'GET') res._app.stil = true;
+    res._app.reden = 'facturen ' + padW.slice('/app/facturen/'.length) + ' ' + x.status;
+    return appStuur(res, x.status, x.j);
+  }
   if (padW === '/app/facturen/waarnemers' || padW.indexOf('/app/facturen/waarnemers/') === 0) {
     if (!docplanTotaal) return appWeiger(res, 404, 'Waarnemers zit niet in deze versie van de pod', 'facturen waarnemers ontbreekt');
     const x = docplanTotaal.app({ methode: req.method, pad: padW, rol: facturenRoutes.rolVoor(null, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' }), primair: rolPrimair() });
@@ -27694,7 +27700,68 @@ async function nmbrsKind(opdracht, invoer) {
   if (r.code !== 0 && r.stderr) logError('nmbrs-' + opdracht, new Error(String(r.stderr).slice(0, 200)));
   return { code: r.code, j: j && typeof j === 'object' ? j : null };
 }
-function nmbrsDeps() { return { dir: NMBRS_DIR, kluisLees: nmbrsKluisLees, kluisZet: nmbrsKluisZet, kind: nmbrsKind }; }
+function nmbrsDeps() { return { dir: NMBRS_DIR, kluisLees: nmbrsKluisLees, kluisZet: nmbrsKluisZet, kind: nmbrsKind, potIban: function () { const p = nmbrsPotRekening(); return p ? p.iban : null; } }; }
+// wv3208: de POT-rekening zoals de Facturen-app hem kent (van-rekening van de betaallijst); null als Facturen dicht is of de rekening ontbreekt.
+function nmbrsPotRekening() {
+  try {
+    const fdb = typeof facturenOpen === 'function' ? facturenOpen() : null;
+    if (!fdb || !fdb.db) return null;
+    const r = fdb.db.prepare("SELECT k.iban, e.naam, e.naam_kort FROM rekening k JOIN entiteit e ON e.sleutel = k.entiteit WHERE k.entiteit = 'pot' AND k.controle = 1 AND k.bank = 'ABN' ORDER BY k.id").all();
+    if (r.length !== 1) return null;   // geen of meer dan één: niet raden
+    return { iban: String(r[0].iban || '').replace(/\s+/g, '').toUpperCase(), naam: r[0].naam || r[0].naam_kort || 'POT' };
+  } catch (e) { logError('nmbrs-pot-rekening', e); return null; }
+}
+// wv3208: na een geslaagde ronde één melding in de app per nieuwe POT-betaallijst (alleen periode, aantal en totaal; geen namen).
+async function nmbrsBetaalNa() {
+  const pr = nmbrsPotRekening();
+  const s = await nmbrsKind('betaallijst', { pot_iban: pr ? pr.iban : null });
+  if (!s.j || s.j.ok !== true) return { ok: false };
+  const nieuw = (s.j.lijsten || []).filter(function (l) { return !l.gemeld && (l.status === 'klaar' || l.status === 'afgekeurd'); });
+  if (!nieuw.length) return { ok: true, nieuw: 0 };
+  const eur = function (c) { return '€ ' + (Number(c || 0) / 100).toLocaleString('nl-NL', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+  const tekst = nieuw.map(function (l) {
+    return l.status === 'klaar' && !l.hard.length
+      ? 'POT-salarissen ' + l.periode + ' (loonrun ' + l.nummer + ') staan klaar: ' + l.aantal + ' betaling' + (l.aantal === 1 ? '' : 'en') + ', ' + eur(l.totaal_centen) + ' totaal. ' +
+        'Kies in Facturen › Betalen › POT de betaaldatum en download het bestand voor POT-invoer.' + (l.zacht.length ? ' Let op: ' + l.zacht.join('; ') + '.' : '')
+      : 'POT-salarissen ' + l.periode + ' (loonrun ' + l.nummer + '): nog geen bestand mogelijk (' + l.hard.join('; ') + '). Zie Facturen › Betalen › POT; tot dan geldt de lijst van Aurore.';
+  }).join('\n');
+  const sl = crypto.createHash('sha256').update(nieuw.map(function (l) { return l.run; }).join(',')).digest('hex').slice(0, 16);
+  const r = await berichtIntern({ kanaal: 'hoofd', bron: 'pot-loonrun', klasse: 'normaal', tekst: tekst, sleutel: 'pot-loonrun-' + sl });
+  if (r.status !== 200) { logError('pot-loonrun', new Error('bericht gaf ' + r.status)); return { ok: false, nieuw: nieuw.length }; }
+  await nmbrsKind('betaalgemeld', { runs: nieuw.map(function (l) { return l.run; }) });
+  return { ok: true, nieuw: nieuw.length };
+}
+// wv3208: Facturen › Betalen › POT — GET /app/facturen/loonruns (lijsten) en POST /app/facturen/loonrun-bestand {run, datum, bewust}
+// (verse vingerafdruk; het antwoord is het bestand als download, net als een SEPA-batch). Niets wordt betaald of verstuurd.
+async function nmbrsLoonrunApp(req, padW, d, a, s) {
+  if (!nmbrsData) return { status: 404, j: { ok: false, fout: 'Nmbrs zit niet in deze versie van de pod' } };
+  if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
+  if (req.method === 'GET' && padW === '/app/facturen/loonruns') {
+    const pr = nmbrsPotRekening();
+    const x = await nmbrsKind('betaallijst', { pot_iban: pr ? pr.iban : null });
+    if (!x.j || x.j.ok !== true) return { status: 500, j: { ok: false, fout: 'de betaallijsten zijn nu niet te lezen' } };
+    const r = nmbrsRondeLees(), S = require(path.join(__dirname, 'facturen-sepa.js'));
+    const g = S.grenzen(new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }));
+    return { status: 200, j: { ok: true, documentrecht: !!(r && r.documentrecht), ronde: r ? r.eind || null : null, vroegst: g.vroegst, uiterst: g.uiterst,
+      pot_rekening: !!pr, lijsten: x.j.lijsten } };
+  }
+  if (req.method === 'POST' && padW === '/app/facturen/loonrun-bestand') {
+    if (!appVersOk(a, s)) return { status: 403, j: { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true } };
+    s.vers_tot = 0;
+    const pot = nmbrsPotRekening();
+    const nu0 = Date.now();
+    const vandaag = new Date(nu0).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    const cre = new Date(nu0).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam', hourCycle: 'h23' }).replace(' ', 'T').slice(0, 19);
+    const x = await nmbrsKind('betaalbestand', { run: String(d && d.run || '').slice(0, 64), datum: String(d && d.datum || '').slice(0, 10), bewust: !!(d && d.bewust === true),
+      vandaag: vandaag, cre_dt_tm: cre, msg_hex: crypto.randomBytes(4).toString('hex'), pot: pot || {} });
+    const u = x.j || { ok: false, fout: 'het bestand is nu niet te maken' };
+    schrijfLog(nu() + ' pot-loonrun ' + velden({ opdracht: 'bestand', ok: u.ok === true, code: u.code, aantal: u.aantal }));
+    if (u.ok !== true) return { status: u.code === 'bewust' || u.code === 'datum' || u.code === 'controle' ? 409 : 400, j: { ok: false, fout: String(u.fout || 'mislukt').slice(0, 400), code: u.code } };
+    return { status: 200, j: { ok: true, aantal: u.aantal, totaal_centen: u.totaal_centen,
+      bestand: { naam: u.naam, inhoud: Buffer.from(u.tekst, 'utf8').toString('base64'), type: 'application/xml', codering: 'base64', sha256: u.sha256 } } };
+  }
+  return { status: 404, j: { ok: false, fout: 'onbekend' } };
+}
 function nmbrsSchoon(u) { const o = {}; Object.keys(u || {}).forEach(function (k) { if (k[0] !== '_') o[k] = u[k]; }); return o; }
 function nmbrsRondeLees() { try { return JSON.parse(fs.readFileSync(path.join(NMBRS_DIR, 'ronde.json'), 'utf8')); } catch (e) { return null; } }
 function nmbrsInfo() {
@@ -27834,6 +27901,9 @@ async function nmbrsRondeDraai(opdracht, bron) {
       catch (e) { logError('nmbrs-signalen', e); }
       try { const v = await nmbrsVaultNa(false); u.vault = { ok: v.ok, dossiers: v.dossiers, verloop: v.verloop, gelijk: v.gelijk, ontbreekt: v.ontbreekt, fout: v.fout }; }   // wv2799
       catch (e) { logError('nmbrs-vault', e); }
+    }
+    if (u.ok === true && opdracht === 'ronde') {   // wv3208: nieuwe POT-betaallijst → één melding in de app
+      try { const b = await nmbrsBetaalNa(); u.betaal_gemeld = b.nieuw || 0; } catch (e) { logError('pot-loonrun', e); }
     }
     if (u.ok === true && opdracht === 'ronde') {   // wv2800: daarna het POT-personeel overnemen in OVIS POT (schakelaar, zie potNmbrsNa)
       try { const p = await potNmbrsNa(); u.pot = { ok: p.ok === true, reden: p.reden }; } catch (e) { logError('pot-nmbrs', e); }

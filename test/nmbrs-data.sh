@@ -150,7 +150,9 @@ srv.listen(0, '127.0.0.1', async function () {
     const c = BASIS + '/api/companies/' + C1;
     toets('verboden endpoints geweigerd (privateInfos, personalinfo, addresses, bankaccounts, children, partner, absences)',
       ['privateInfos', 'personalinfo', 'addresses', 'bankaccounts', 'children', 'partner', 'absences', 'wagetaxsettings', 'svwsettings'].every((x) => weigert('GET', c + '/employees/' + x)));
-    toets('loonstroken, SEPA en documentmappen geweigerd', weigert('GET', c + '/runs/' + R10 + '/payslips?year=2026') && weigert('GET', c + '/runs/' + R10 + '/sepa?year=2026') &&
+    // wv3208: het SEPA-betaalbestand van een loonrun mag (alleen met year; paymentDate niet), loonstroken nog steeds niet
+    toets('loonstroken en documentmappen geweigerd; SEPA van een run alleen met year', weigert('GET', c + '/runs/' + R10 + '/payslips?year=2026') && !weigert('GET', c + '/runs/' + R10 + '/sepa?year=2026') &&
+      weigert('GET', c + '/runs/' + R10 + '/sepa?year=2026&paymentDate=2026-11-25') && weigert('GET', c + '/wagetaxes/' + R10 + '/sepa?year=2026') &&
       weigert('GET', BASIS + '/api/employees/' + E1 + '/payslipperperiod') && weigert('GET', BASIS + '/api/employees/' + E1 + '/documents/folders') && weigert('GET', c + '/bankaccounts'));
     toets('document zonder eigen journaaltaak geweigerd', weigert('GET', BASIS + '/api/documents/' + TAAK));
     toets('andere host geweigerd', weigert('GET', 'https://elders.invalid/api/companies') && weigert('POST', 'https://elders.invalid/connect/token'));
@@ -163,7 +165,11 @@ srv.listen(0, '127.0.0.1', async function () {
     toets('toetsbasis alleen 127.0.0.1', (() => { try { require('child_process').execFileSync(process.execPath, [SCRIPT, 'stand'], { env: { PATH: process.env.PATH, NMBRS_API_BASIS: 'http://10.0.0.1:80', NMBRS_DIR: path.join(W, 'x') }, input: '{}', stdio: 'pipe' }); return false; } catch (e) { return true; } })());
     toets('uitrol.sh en Dockerfile: nmbrs-data.js gaat mee in de release', /^RELEASE_OPTIONEEL="[^"]*\bnmbrs-data\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY nmbrs-data\.js \/app\/release-bootstrap\/nmbrs-data\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
     toets('scopes exact: gelijk ja, ontbrekend nee, extra nee', TM.scopesExact(T.SCOPES.slice()) && !TM.scopesExact(T.SCOPES.slice(1)) && !TM.scopesExact(T.SCOPES.concat(['employee.bankaccount.read'])));
-    toets('geen schrijf-, bank- of documentscope gevraagd', !T.SCOPES.some((s) => !/\.read$/.test(s) && s !== 'offline_access') && !T.SCOPES.some((s) => /bankaccount|document|payrollsettings\.read$/.test(s) && s !== 'company.payrollsettings.read'));
+    // wv3208: de oude basisset (zonder documentrecht) blijft geldig; half documentrecht niet
+    toets('scopes: oude basisset ja, basis + één documentscope nee', TM.scopesExact(T.SCOPES_BASIS.slice()) && !TM.scopesExact(T.SCOPES_BASIS.concat(['document.read'])) && !TM.scopesExact(T.SCOPES_BASIS.concat(['company.document.read'])));
+    toets('geen schrijf- of bankscope; documentscope alleen company.document.read en document.read', !T.SCOPES.some((s) => !/\.read$/.test(s) && s !== 'offline_access') &&
+      !T.SCOPES.some((s) => /bankaccount|payrollsettings\.read$/.test(s) && s !== 'company.payrollsettings.read') &&
+      JSON.stringify(T.SCOPES.filter((s) => /document/.test(s)).sort()) === JSON.stringify(['company.document.read', 'document.read']));
 
     // 2. link en state
     const l = TM.linkMaak(DIR, 'cid-proef-0001');
