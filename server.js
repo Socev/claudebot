@@ -20864,8 +20864,11 @@ function nachtketenInfo() {
   if (!nachtketen) return { aan: false, module: false };
   try { return Object.assign(nachtketen.info(), { aan: nachtketenAan() }); } catch (e) { return { fout: true }; }
 }
+const NACHTKETEN_RUST_MS = 10 * 60 * 1000;   // wv3169
 async function nachtketenTik() {
   if (!nachtketen || !SERVER_ECHT || !rolPrimair() || !nachtketenAan()) return;
+  // wv3169: pas na 10 min onafgebroken primair (flakkerende minuten na een databankherstel verbranden anders de pogingen)
+  if (NK_MOD && typeof NK_MOD.rolRustig === 'function' && !NK_MOD.rolRustig(rol.rol, rol.sinds_rol, Date.now(), NACHTKETEN_RUST_MS)) return;
   try { await nachtketen.tik(); } catch (e) { logError('nachtketen-tik', e); }
 }
 if (nachtketen && SERVER_ECHT) { setInterval(function () { nachtketenTik(); }, 60000).unref(); }

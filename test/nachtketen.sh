@@ -267,6 +267,15 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
   toets('server.js: oude klokken zwijgen met de vlag (6 tikken + secondbrain + ovisTik)', (sv.match(/if \(nachtketenActief\(\)\) return;   \/\/ wv1868/g) || []).length === 6 && /!nachtketenActief\(\)\) secondbrain\.nacht\(/.test(sv) && /const keten = nachtketenActief\(\);/.test(sv));
   toets('server.js: vlag NACHTKETEN=uit wint, aan.json standaard uit', /process\.env\.NACHTKETEN === 'uit'\) return false/.test(sv) && /j\.aan === true/.test(sv));
   toets('server.js: keten tikt elke minuut, alleen echt + primair + vlag', /if \(!nachtketen \|\| !SERVER_ECHT \|\| !rolPrimair\(\) \|\| !nachtketenAan\(\)\) return;/.test(sv) && /nachtketenTik\(\); \}, 60000\)/.test(sv));
+  toets('server.js: keten wacht 10 min onafgebroken primair (wv3169)', /const NACHTKETEN_RUST_MS = 10 \* 60 \* 1000;/.test(sv) && /!NK_MOD\.rolRustig\(rol\.rol, rol\.sinds_rol, Date\.now\(\), NACHTKETEN_RUST_MS\)\) return;/.test(sv));
+  {
+    const R = 10 * 60000, t = Date.parse('2026-11-16T04:32:24Z');
+    toets('rolRustig: 5 min primair = geen stap (wv3169)', K.rolRustig('primair', t, t + 5 * 60000, R) === false);
+    toets('rolRustig: 11 min primair = stap (wv3169)', K.rolRustig('primair', t, t + 11 * 60000, R) === true);
+    toets('rolRustig: precies 10 min = stap', K.rolRustig('primair', t, t + R, R) === true);
+    toets('rolRustig: passief (ook lang) = geen stap', K.rolRustig('passief', t, t + 60 * 60000, R) === false);
+    toets('rolRustig: geen sinds_rol = geen stap', K.rolRustig('primair', undefined, t, R) === false && K.rolRustig('primair', NaN, t, R) === false);
+  }
   toets('server.js: geen nieuwe stap tijdens een wachtende uitrol', /magStarten: function \(\) \{ return !uitrolWacht\(\)\.wacht; \}/.test(sv));
   toets('server.js: /health.nachtketen', /nachtketen: typeof nachtketenInfo === 'function' \? nachtketenInfo\(\)/.test(sv));
   toets('server.js: R6-staatbestand voor veeg en de zeven dagrondes (wv1430: + sb2-steekwoorden; wv1963: + sb2-proefloper; wv2016: + maandklok herstelproef; wv2041: + uitwijk-cred; wv2273: + shopper-proactief, buiten de keten; wv3113: + ovis-nza-wachter, buiten de keten)', (sv.match(/staatBestand: path\.join\(KLOKKEN_DIR/g) || []).length === 11);
@@ -320,7 +329,7 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     let swAan = false, plAan = false;
     const ctx = vm.createContext({
       require: require, __dirname: process.cwd(), path: path, fs: fs, console: console, Date: Date, Promise: Promise, Object: Object, String: String, Number: Number, JSON: JSON, Intl: Intl, isNaN: isNaN, setTimeout: setTimeout,
-      NACHTKETEN_DIR: path.join(d, 'vm-keten'), SERVER_ECHT: true, rolPrimair: () => true, nachtketenAan: () => true,
+      NACHTKETEN_DIR: path.join(d, 'vm-keten'), SERVER_ECHT: true, rolPrimair: () => true, nachtketenAan: () => true, rol: { rol: 'primair', sinds_rol: Date.now() - 5 * 60000 },   // wv3169: eerst pas 5 min primair
       logError: (w, e) => roep.push('FOUT ' + w + ' ' + (e && e.message)), schrijfLog: () => {}, nu: () => 'nu',
       ovisAms: () => Object.assign({ klok: tijd.datum + ' ' + String(tijd.uur).padStart(2, '0') + ':' + String(tijd.min).padStart(2, '0') }, tijd),
       ovisStaatLees: () => ({}), ovisLoopt: { nu: null, sinds: 0 }, OVIS_NACHT_MAX_MS: 1200000, ovis: {},
@@ -352,6 +361,8 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     const tikk = async () => { await K2.nachtketenTik(); await wacht(15); };
     const zetT = async (u, m, n) => { tijd = { datum: '2026-11-11', uur: u, min: m }; for (let i = 0; i < (n || 4); i++) await tikk(); };
     await zetT(0, 50); toets('vm: vóór 01:00 niets', roep.length === 0, roep);
+    await zetT(1, 0, 3); toets('vm: rol pas 5 min primair = geen stap, ook na 01:00 (wv3169)', roep.length === 0, roep);
+    ctx.rol.sinds_rol = Date.now() - 11 * 60000;
     await zetT(1, 0, 3); await zetT(2, 30, 3);
     toets('vm: ovis-nacht (buiten-venster, opSpawn) → linter/manifest (keten) → Bibliothecaris → herstelreferentie (wv1962, vanaf 02:05)', roep.join('|') === 'ovis-nacht:2026-11-11:true:function|sb2:2026-11-11:true:function:function|biblio:2026-11-11:object|herstelref:2026-11-11:object', roep);
     roep.length = 0; await zetT(3, 5, 5);   // wv2022: één tik meer voor sb2-synapsen; wv2383: en één voor sb2-berichten
