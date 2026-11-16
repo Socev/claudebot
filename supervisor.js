@@ -346,35 +346,75 @@ function verwerkCrash() {
 const DB_NEVEN = [
   { naam: 'postgrest', bin: '/usr/local/bin/postgrest', args: ['/app/db/postgrest.conf'], nodig: ['/usr/local/bin/postgrest', '/app/db/postgrest.conf', '/opt/data/.pg/jwt.key'] },
   { naam: 'db-luik', bin: process.execPath, args: ['/app/db/db-luik.js'], nodig: ['/app/db/db-luik.js', '/opt/data/.pg/jwt.key', '/opt/data/.pg/luik-sleutels.json'] },
+  // wv3187: tunnel voor de warme reserve op de R230 (ontwerp § 5). De R230 luistert op zijn eigen 127.0.0.1:55432 en komt hier binnen
+  // op 127.0.0.1:5432 (pg_hba: alleen `replication reserve`, scram). Alleen als het reservewachtwoord er is; uit met /opt/data/pg-reserve-uit.
+  // ExitOnForwardFailure: hangt de oude poort nog aan de R230-kant, dan stopt ssh en volgt de backoff. ServerAlive: dode verbinding
+  // na ± 45 s weg. Ontbreekt iets bij de start, dan elke 5 min opnieuw kijken (opnieuwMs).
+  { naam: 'db-tunnel', bin: process.env.DB_TUNNEL_BIN || '/usr/bin/ssh', uit: process.env.DB_TUNNEL_UIT || '/opt/data/pg-reserve-uit',
+    opnieuwMs: Number(process.env.DB_TUNNEL_OPNIEUW_MS) || 300000,
+    args: ['-F', '/opt/data/.ssh/config', '-N', '-T', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15',
+      '-o', 'ServerAliveCountMax=3', '-R', '127.0.0.1:55432:127.0.0.1:5432', 'r230'],
+    nodig: process.env.DB_TUNNEL_NODIG ? process.env.DB_TUNNEL_NODIG.split(':') : ['/usr/bin/ssh', '/opt/data/.ssh/config', '/opt/data/.pg/reserve.wachtwoord'] },
 ];
+// wv3187: stand van de diensten voor /health.db (pid, sinds, herstarts, laatste stop); geen sleutels, geen argumenten
+const DB_NEVEN_STAND = path.join(BIN, 'db-diensten.json');
+function nevenStandSchrijf() {
+  const uit = {};
+  Object.keys(nevenStaat).forEach(function (n) {
+    const st = nevenStaat[n];
+    uit[n] = { pid: st.kind ? st.kind.pid : null, sinds: st.kind && st.gestart ? new Date(st.gestart).toISOString() : null,
+      herstarts: st.herstarts || 0, laatste_stop: st.laatsteStop || null, reden_uit: st.redenUit || null };
+  });
+  try { fs.writeFileSync(DB_NEVEN_STAND + '.tmp', JSON.stringify(uit), { mode: 0o600 }); fs.renameSync(DB_NEVEN_STAND + '.tmp', DB_NEVEN_STAND); } catch (e) {}
+}
 const DB_NEVEN_WACHT = [2000, 5000, 10000, 30000, 60000];
 const DB_NEVEN_LOG = path.join(BIN, 'db-diensten.log');
 const nevenStaat = {};
 function startNeven(d) {
   if (stoppen) return;
   if (process.env.DB_DIENSTEN_UIT === '1' || fs.existsSync('/opt/data/pg-uit')) return;
-  if (!d.nodig.every(function (f) { try { fs.accessSync(f, fs.constants.R_OK); return true; } catch (e) { return false; } })) {
-    if (!nevenStaat[d.naam]) log(d.naam + ': niet gestart (bestanden of sleutels ontbreken)');
-    nevenStaat[d.naam] = { kind: null, n: 0 };
+  const uitgezet = d.uit && fs.existsSync(d.uit);
+  if (uitgezet || !d.nodig.every(function (f) { try { fs.accessSync(f, fs.constants.R_OK); return true; } catch (e) { return false; } })) {
+    const reden = uitgezet ? 'uitgezet (' + d.uit + ')' : 'bestanden of sleutels ontbreken';
+    const vorig = nevenStaat[d.naam];
+    if (!vorig || vorig.redenUit !== reden) log(d.naam + ': niet gestart (' + reden + ')');
+    nevenStaat[d.naam] = Object.assign(vorig || { n: 0 }, { kind: null, redenUit: reden });
+    nevenStandSchrijf();
+    if (d.opnieuwMs) setTimeout(function () { startNeven(d); }, d.opnieuwMs).unref();
     return;
   }
   const st = nevenStaat[d.naam] || (nevenStaat[d.naam] = { kind: null, n: 0 });
+  st.redenUit = null;
   let uit = 'ignore';
   try { uit = fs.openSync(DB_NEVEN_LOG, 'a', 0o600); } catch (e) { uit = 'ignore'; }
   const k = spawn(d.bin, d.args, { stdio: ['ignore', uit, uit], env: { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME || '/opt/data', TZ: 'UTC' } });
   if (typeof uit === 'number') { try { fs.closeSync(uit); } catch (e) {} }
   st.kind = k; st.gestart = Date.now();
   log(d.naam + ' gestart (pid ' + k.pid + ')');
+  nevenStandSchrijf();
   k.on('error', function (e) { log(d.naam + ': start faalde (' + (e && e.code || 'fout') + ')'); });
   k.on('exit', function (code, sig) {
     st.kind = null;
     if (stoppen) return;
+    st.herstarts = (st.herstarts || 0) + 1; st.laatsteStop = { tijd: new Date().toISOString(), uitkomst: String(sig || code) };
+    nevenStandSchrijf();
     if (Date.now() - st.gestart > 300000) st.n = 0;
     const w = DB_NEVEN_WACHT[Math.min(st.n, DB_NEVEN_WACHT.length - 1)]; st.n++;
     log(d.naam + ' stopte (' + (sig || code) + ') - herstart over ' + w + ' ms');
     setTimeout(function () { startNeven(d); }, w);
   });
 }
+// Codex ZOU 1: de uit-schakelaar (d.uit) ook tijdens het draaien bekijken; gezet → het proces stoppen (de exit-afhandeling start hem
+// niet opnieuw zolang de schakelaar er staat en kijkt elke opnieuwMs). Eens per minuut.
+setInterval(function () {
+  if (stoppen) return;
+  DB_NEVEN.forEach(function (d) {
+    const st = nevenStaat[d.naam];
+    if (d.uit && st && st.kind && fs.existsSync(d.uit)) {
+      log(d.naam + ': uitgezet (' + d.uit + ') - stoppen'); st.redenUit = 'uitgezet (' + d.uit + ')'; try { st.kind.kill('SIGTERM'); } catch (e) {}
+    }
+  });
+}, Number(process.env.DB_NEVEN_TIK_MS) || 60000).unref();
 function stopNeven() {
   Object.keys(nevenStaat).forEach(function (n) { const k = nevenStaat[n] && nevenStaat[n].kind; if (k) { try { k.kill('SIGTERM'); } catch (e) {} } });
 }

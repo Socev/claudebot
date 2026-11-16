@@ -36,6 +36,13 @@ if [ "$(id -u)" = "0" ]; then
   if [ -f /opt/data/.pg/kluis.key ]; then
     install -o pg -g pg -m 0400 /opt/data/.pg/kluis.key "$BASIS/kluis.key" || log "kluissleutel kopiëren faalde"
   fi
+  # wv3187: replicatiewachtwoord van rol reserve (warme reserve op de R230, ontwerp § 5); init-reserve.sql leest het als pg.
+  # Zonder bestand: geen rol en geen slot (en een oud bestand gaat weg).
+  if [ -s /opt/data/.pg/reserve.wachtwoord ]; then
+    install -o pg -g pg -m 0400 /opt/data/.pg/reserve.wachtwoord "$BASIS/reserve.pw" || log "reservewachtwoord kopiëren faalde"
+  else
+    rm -f "$BASIS/reserve.pw"
+  fi
   if echo -500 > /proc/self/oom_score_adj 2>/dev/null; then log "oom_score_adj -500"; else log "oom_score_adj niet te zetten (geen CAP_SYS_RESOURCE)"; fi
   exec gosu pg "$0" --lus
 fi
@@ -60,6 +67,14 @@ init_sql(){
     log "init-SQL toegepast"
   else
     log "init-SQL faalde (zie hierboven)"
+  fi
+  # wv3187: rol reserve + slot r230 apart (een fout hier raakt de rest van de init niet)
+  if [ -f "$INIT/init-reserve.sql" ]; then
+    if PG_RESERVE_PW="$BASIS/reserve.pw" "$PGBIN/psql" -X -q -h "$SOCK" -U pgbaas -d postgres -v ON_ERROR_STOP=1 -f "$INIT/init-reserve.sql" >> "$LOG" 2>&1; then
+      log "reserve-SQL toegepast"
+    else
+      log "reserve-SQL faalde (zie hierboven)"
+    fi
   fi
 }
 WACHT=(2 5 10 20 30 60)

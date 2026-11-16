@@ -436,6 +436,10 @@ jobs:
       - name: Promedico-botsingen (wv3145, nachtstap fase 2)
         if: ${{ !cancelled() }}
         run: bash test/promedico-botsingen.sh
+      # Tunnel voor de databankreserve op de R230 (wv3187): start met bestanden, herstart na kill, uit-schakelaar ook tijdens draaien, stand zonder argumenten.
+      - name: "supervisor db-tunnel (wv3187, reserve R230)"
+        if: ${{ !cancelled() }}
+        run: bash test/supervisor-db-tunnel.sh
       # OVIS Intake, aanleverweg (wv1282): CI-poort (alleen fs/path/crypto/node:sqlite, Authorization alleen naar de hash, register alleen in de
       # module), sleutels, envelop per veldtype, naampoort (elke WINCODE-soort), bytes, dubbel/afwijkend, herzienbaar, padpoging, onvolledig,
       # onderhoud, vrije velden, leesluik, de 23 markergevallen + bewaarregel, en per profiel voorbeeld, weigering en rondreis.

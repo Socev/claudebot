@@ -2366,6 +2366,10 @@ function dbVraag() {
   try { socket = fs.statSync('/run/pg/.s.PGSQL.5432').isSocket(); } catch (e) { socket = false; }
   const basis = { aan: socket || fs.existsSync('/app/db/db-wacht.sh'), socket: socket, sb_sql_lokaal: process.env.SB_SQL_LOKAAL === '1',
     adres_lokaal: /^http:\/\/127\.0\.0\.1:8091\/?$/.test(String(process.env.SUPABASE_URL || '')), gemeten: new Date().toISOString() };
+  // wv3187: tunnel naar de R230 (stand van supervisor.js) en de reserve (pg_stat_replication + slot r230, via /app/sb-sql)
+  basis.tunnel = dbTunnelStand();
+  basis.reserve = dbReserve;
+  if (socket) dbReserveVraag();
   let klaar = false;
   const einde = function (luik) { if (klaar) return; klaar = true; dbStand = Object.assign(basis, { luik: luik }); };
   try {
@@ -2382,6 +2386,37 @@ function dbVraag() {
     req.on('timeout', function () { req.destroy(); einde({ ok: false, fout: 'luik antwoordt niet binnen 3 s' }); });
     req.on('error', function (e) { einde({ ok: false, fout: 'luik niet bereikbaar (' + (e.code || 'fout') + ')' }); });
   } catch (e) { einde({ ok: false, fout: 'fout' }); }
+}
+function dbTunnelStand() {
+  let j = null;
+  try { j = JSON.parse(fs.readFileSync(path.join(process.env.BIN_DIR || '/opt/data/bin', 'db-diensten.json'), 'utf8'))['db-tunnel'] || null; } catch (e) { j = null; }
+  if (!j) return { aan: false, reden: 'geen stand (supervisor zonder tunnel of nog niet gestart)' };
+  let leeft = false;
+  if (j.pid) { try { process.kill(j.pid, 0); leeft = true; } catch (e) { leeft = e.code === 'EPERM'; } }
+  return { aan: leeft, sinds: leeft ? j.sinds : null, herstarts: j.herstarts || 0, laatste_stop: j.laatste_stop || null, reden_uit: j.reden_uit || null };
+}
+// Reserve (wv3187): achterstand in seconden (replay_lag; null = geen recente schrijfactie, dan telt achter_bytes) en bytes, en hoeveel
+// WAL het slot vasthoudt. Eén query per minuut als rol postgres (pg_monitor). Boxregel/nachtcheck: > 15 min of slot-WAL > 2 GB.
+let dbReserve = null;
+const DB_RESERVE_SQL = "select (select json_build_object('staat', state, 'sinds', backend_start, 'achter_s', round(extract(epoch from replay_lag)::numeric, 1), " +
+  "'achter_bytes', pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint, 'antwoord', reply_time) from pg_stat_replication where application_name = 'r230' " +
+  "order by backend_start desc limit 1) as verbinding, (select json_build_object('actief', active, 'wal_bytes', pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint, " +
+  "'wal_status', wal_status) from pg_replication_slots where slot_name = 'r230') as slot";
+function dbReserveVraag() {
+  try {
+    const k = require('child_process').execFile('/app/sb-sql', [], { timeout: 10000, maxBuffer: 64 * 1024 }, function (err, uit) {
+      const nu = new Date().toISOString();
+      if (err) { dbReserve = { gemeten: nu, fout: 'sb-sql faalde' }; return; }
+      let r = null; try { r = JSON.parse(uit)[0]; } catch (e) { r = null; }
+      if (!r) { dbReserve = { gemeten: nu, fout: 'antwoord onleesbaar' }; return; }
+      const v = r.verbinding || null, sl = r.slot || null;
+      dbReserve = { gemeten: nu, slot: sl ? { actief: sl.actief === true, wal_bytes: sl.wal_bytes, wal_status: sl.wal_status } : null,
+        verbonden: !!(v && v.staat === 'streaming'), staat: v ? v.staat : null, sinds: v ? v.sinds : null,
+        achter_s: v && v.achter_s != null ? Number(v.achter_s) : null, achter_bytes: v ? v.achter_bytes : null, antwoord: v ? v.antwoord : null };
+    });
+    k.stdin.on('error', function () {});
+    k.stdin.end(DB_RESERVE_SQL);
+  } catch (e) { dbReserve = { gemeten: new Date().toISOString(), fout: 'sb-sql niet te starten' }; }
 }
 if (SERVER_ECHT === true) { setTimeout(dbVraag, 8000).unref(); setInterval(dbVraag, 60 * 1000).unref(); }
 // wv716 (ontwerp wv703 D, Fable: bouwen): geheugen en lusvertraging van dit proces op /health.proces (niet op /health/publiek).

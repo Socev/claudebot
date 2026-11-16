@@ -6,7 +6,9 @@ set -u
 IMAGE="$1"; C=rooktest-db
 rood=0; ok(){ if [ "$1" = 0 ]; then echo "  OK    $2"; else echo "  ROOD  $2"; rood=$((rood+1)); fi; }
 docker rm -f $C >/dev/null 2>&1 || true
-docker run -d --name $C --entrypoint /bin/bash "$IMAGE" -c 'mkdir -p /opt/data/bin && chown claude:claude /opt/data /opt/data/bin && /app/db/db-wacht.sh & exec sleep 600' >/dev/null
+# wv3187: met een (wegwerp)replicatiewachtwoord, zodat init-reserve.sql de rol reserve en het slot r230 aanmaakt
+RW="rookreserve$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+docker run -d --name $C -e RW="$RW" --entrypoint /bin/bash "$IMAGE" -c 'mkdir -p /opt/data/bin /opt/data/.pg && printf "%s" "$RW" > /opt/data/.pg/reserve.wachtwoord && chmod 600 /opt/data/.pg/reserve.wachtwoord && chown -R claude:claude /opt/data/.pg && chown claude:claude /opt/data /opt/data/bin && /app/db/db-wacht.sh & exec sleep 600' >/dev/null
 for i in $(seq 1 60); do docker exec $C grep -q "init-SQL toegepast" /opt/data/pg/db-wacht.log 2>/dev/null && break; sleep 1; done
 docker exec $C cat /opt/data/pg/db-wacht.log 2>/dev/null | tail -5
 docker exec $C grep -q "init-SQL toegepast" /opt/data/pg/db-wacht.log; ok $? "db-wacht: initdb, postgres op, init-SQL toegepast"
@@ -17,6 +19,15 @@ docker exec -u socev $C /usr/lib/postgresql/17/bin/psql -X -h /run/pg -U postgre
 docker exec -u socev $C /usr/lib/postgresql/17/bin/psql -X -h 127.0.0.1 -U postgres -d postgres -c 'select 1' >/dev/null 2>&1; [ $? != 0 ]; ok $? "socev kan niet inloggen (127.0.0.1)"
 docker exec -u claude $C /usr/lib/postgresql/17/bin/psql -X -h 127.0.0.1 -U postgres -d postgres -c 'select 1' >/dev/null 2>&1; [ $? != 0 ]; ok $? "ook claude niet via 127.0.0.1 (alleen socket-peer)"
 docker exec -u claude $C /usr/lib/postgresql/17/bin/psql -X -h /run/pg -U pgbaas -d postgres -c 'select 1' >/dev/null 2>&1; [ $? != 0 ]; ok $? "claude kan geen superuser pgbaas worden"
+# wv3187: reserve — rol alleen REPLICATION, slot r230, replicatie via 127.0.0.1 met wachtwoord ja, gewone verbinding als reserve nee,
+# wachtwoord nergens in de log
+docker exec $C grep -q "reserve-SQL toegepast" /opt/data/pg/db-wacht.log; ok $? "init-reserve.sql toegepast"
+R=$(docker exec -u claude $C sh -c "echo \"select (select rolreplication::text||rolsuper::text||rolcanlogin::text from pg_roles where rolname='reserve') as r, (select count(*) from pg_replication_slots where slot_name='r230' and slot_type='physical')::int as s\" | /app/sb-sql" 2>&1)
+[ "$R" = '[{"r":"truefalsetrue","s":1}]' ]; ok $? "rol reserve (replication, geen superuser) + slot r230 ($R)"
+docker exec -e PGPASSWORD="$RW" $C /usr/lib/postgresql/17/bin/psql -X -At "host=127.0.0.1 user=reserve replication=true dbname=postgres" -c IDENTIFY_SYSTEM >/dev/null 2>&1; ok $? "replicatie als reserve via 127.0.0.1 met wachtwoord"
+docker exec -e PGPASSWORD="$RW" $C /usr/lib/postgresql/17/bin/psql -X -At "host=127.0.0.1 user=reserve dbname=postgres" -c 'select 1' >/dev/null 2>&1; [ $? != 0 ]; ok $? "reserve kan geen gewone databankverbinding openen"
+docker exec -e PGPASSWORD=fout $C /usr/lib/postgresql/17/bin/psql -X -At "host=127.0.0.1 user=reserve replication=true dbname=postgres" -c IDENTIFY_SYSTEM >/dev/null 2>&1; [ $? != 0 ]; ok $? "fout wachtwoord geweigerd"
+docker exec $C sh -c "cat /opt/data/pg/db-wacht.log /opt/data/pg/log/* 2>/dev/null" | grep -qF "$RW"; [ $? != 0 ]; ok $? "wachtwoord niet in db-wacht.log of de postgres-log"
 P=$(docker exec $C stat -c '%U:%G %a' /run/pg /opt/data/pg/17/data | tr '\n' ' ')
 [ "$P" = "pg:pgsock 750 pg:pg 700 " ]; ok $? "rechten socketmap en datamap ($P)"
 docker exec -u claude $C sh -c 'umask 077; mkdir -p /opt/data/.pg && head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n" > /opt/data/.pg/jwt.key && K=sb_secret_rooktest_$(head -c 8 /dev/urandom | od -An -tx1 | tr -d " \n") && printf "%s" "$K" > /tmp/k && H=$(printf "%s" "$K" | sha256sum | cut -c1-64) && printf "{\"sleutels\":[{\"naam\":\"rook\",\"rol\":\"service_role\",\"sha256\":\"%s\"}]}" "$H" > /opt/data/.pg/luik-sleutels.json && (nohup /usr/local/bin/postgrest /app/db/postgrest.conf > /tmp/pgrst.log 2>&1 &) && (nohup node /app/db/db-luik.js > /tmp/luik.log 2>&1 &)'
