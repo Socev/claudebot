@@ -156,6 +156,7 @@ terug_herstel(){
   sid="$(sed -n 's/^sid=//p' "$j" | head -1 | tr -cd '0-9')"
   if [ -z "$oud" ] || [ ! -e "$BASIS/17/$oud" ]; then
     # Codex ronde 2: de eerste verplaatsing gebeurde nog niet → de datamap is nog de oude databank; nooit "gewisseld" melden
+    [ -s "$DATA/PG_VERSION" ] || { log "terug $id: geen datamap en geen $oud; geen start, dagboek blijft (machinekamer)"; exit 1; }
     log "terug $id: onderbroken vóór de wissel; huidige datamap blijft"
     terug_uitkomst "$id" fout "wissel onderbroken vóór het verplaatsen; huidige databank blijft"
   elif [ -s "$DATA/PG_VERSION" ]; then
