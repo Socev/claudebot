@@ -124,6 +124,12 @@ start_wacht
 for _ in $(seq 1 40); do [ "$(q 'select 1')" = 1 ] && break; sleep 0.5; done
 ok "O onderbroken wissel: oude map teruggezet, zelfde data, uitkomst fout, dagboek weg" '[ "$(telling)" = "$VOOR" ] && [ ! -e "$T/pg/17/data.oud-sim" ] && grep -q "onderbroken" "$T/pg/terug-20261116-200009-99999999.json" && [ ! -e "$T/pg/terug-bezig" ]'
 stop_wacht
+# Codex ronde 2: dagboek geschreven, maar nog niets verplaatst → huidige databank blijft, uitkomst fout (nooit "gewisseld")
+printf 'id=20261116-200010-88888888\noud=data.oud-nooit\nnieuw=terug-x\nlsn=%s\ntli=2\nsid=%s\n' "$LSN" "$SID" > "$T/pg/terug-bezig"
+start_wacht
+for _ in $(seq 1 40); do [ "$(q 'select 1')" = 1 ] && break; sleep 0.5; done
+ok "O dagboek zonder verplaatsing: geen 'gewisseld', zelfde data, dagboek weg" 'grep -q "\"uitkomst\":\"fout\"" "$T/pg/terug-20261116-200010-88888888.json" && [ "$(telling)" = "$VOOR" ] && [ ! -e "$T/pg/terug-bezig" ]'
+stop_wacht
 mv "$T/pg/17/data" "$T/pg/17/data.oud-zonder-dagboek"
 start_wacht; sleep 3
 ok "O geen datamap maar wel data.oud-*: geen initdb, db-wacht stopt" '! kill -0 "$WPID" 2>/dev/null && [ ! -e "$T/pg/17/data" ] && grep -q "geen initdb" "$T/pg/db-wacht.log"'
