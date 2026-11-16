@@ -20,10 +20,11 @@ function knip(begin, eind) {
 const reset = knip('// ── wv363: nachtreset', '// ── einde nachtreset');
 const domein = knip('const LESSEN_DOMEIN = {', 'function lessenSb()');
 
-function maak(env) {
+function maak(env, metCode) {
   const ctx = {
     process: { env: env || {} }, console, Intl, Date, Number,
     DEFAULT_WS: 'vault', RUNTIMES_LIJST: ['claude', 'codex', 'gemini'],
+    CODE_APPS: require('./code-apps.js'), CODE_IDS: metCode ? require('./code-apps.js').APPS.map(function (a) { return a.id; }) : [],   // wv3227
     chatSessions: {}, bewaard: 0, rij: [], log: [], intervallen: 0,
     sessionKey: function (ws, c) { return c ? (ws === 'vault' ? c : ws + ':' + c) : ''; },
     sessieSleutel: function (k, rt) { return k ? ((rt && rt !== 'claude') ? rt + ':' + k : k) : ''; },
@@ -49,6 +50,10 @@ toets('telegram-debug blijft machine', c.lessenDomein('telegram-debug', '') === 
 toets('ovis-nza: geen lessen (wv3087, vertrouwelijk dossier)', c.lessenDomein('ovis-nza', '') === 'geen');
 toets('machinekamer:-label wint', c.lessenDomein('cijfer-meester', 'machinekamer:x') === 'machine');
 toets('onbekend -> null (alle domeinen)', c.lessenDomein('iets-anders', '') === null);
+const cc = maak({}, true);   // wv3227: met het register
+toets('wv3227: OVIS Code-sessie -> machine; verzonnen id -> null', cc.lessenDomein('ovis-code-texere', '') === 'machine' && cc.lessenDomein('ovis-code-onzin', '') === null && c.lessenDomein('ovis-code-texere', '') === null);
+const gc = cc.nachtresetTik(Date.parse('2026-10-10T02:10:00Z'));
+toets('wv3227: 04:10 ook elke OVIS Code-sessie in de wachtrij (5 + 70), geen verzonnen', gc.length === 5 + cc.CODE_IDS.length && gc.indexOf('ovis-code-texere') >= 0 && gc.indexOf('ovis-code-onzin') < 0, gc.length);
 
 // K3: de gedeelde bot doet geen lessenaanroep; de app-sessie vraagt domein 'beide' op
 const lesBlok = knip('const LESSEN_AAN = ', 'async function processJob');

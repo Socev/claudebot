@@ -154,7 +154,7 @@ Promise.all([ctx2.runBrein('codex', 'p', '', '/o', V, '', { tekst: 'mk' }), ctx2
   toets('runMetFallback: mk-run op limiet met codex-terugval geeft limiet, niet mk-alleen-claude', fr.error === 'limiet', fr);
   // processJob / processAgent
   const pj = stuk('async function processJob(', 'async function processAgent(');
-  toets('processJob: tekst alleen in de vault, niet bij lezen of managers', /if \(!lezen && !managerCwd && ws === DEFAULT_WS\) runOpts\.tekst = runIsMk\(chatId, ws\) \? 'mk' : 'smal';/.test(pj));
+  toets('processJob: tekst alleen in de vault, niet bij lezen of managers', /if \(!lezen && !managerCwd && ws === DEFAULT_WS\) runOpts\.tekst = runIsMk\(chatId, ws, j\) \? 'mk' : 'smal';/.test(pj));   // wv3227: j erbij (OVIS Code-klasse)
   toets('processJob: tekst vóór de run gezet', pj.indexOf('runOpts.tekst =') < pj.indexOf('await runMetFallback('));
   const pa = stuk('async function processAgent(', '\n}\n');
   toets('processAgent: mk volgt agentIsMk, alleen in de vault, vóór de eerste run', /if \(ws === DEFAULT_WS\) runOpts\.tekst = agentIsMk\(entry\.label, j\.smal, j\.beperkt\) \? 'mk' : 'smal';/.test(pa) &&
