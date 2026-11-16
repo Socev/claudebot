@@ -841,11 +841,20 @@ afsluiten(){
   [ -n "${ST_PID:-}" ] && st_stop "podstop (SIGTERM)"   # wv1277: Syncthing netjes laten afsluiten (index op het volume)
   [ -n "${API_PID:-}" ] && kill -TERM "$API_PID" 2>/dev/null
   for _ in $(seq 1 40); do
-    kill -0 "${API_PID:-0}" 2>/dev/null || { log "supervisor is gestopt — run.sh stopt"; exit 0; }
+    kill -0 "${API_PID:-0}" 2>/dev/null || { log "supervisor is gestopt — run.sh stopt"; db_stop; exit 0; }
     sleep 0.5
   done
   log "supervisor stopt niet binnen 20 s — alsnog stoppen"
+  db_stop
   exit 0
+}
+# wv3180: eigen Postgres netjes stoppen (fast shutdown) vóór PID 1 eindigt; anders SIGKILL en crashherstel bij de volgende start.
+# db-wacht.sh (gebruiker pg) kijkt elke seconde of /run/pgstop/stop bestaat; alleen claude kan dat bestand zetten.
+db_stop(){
+  [ -d /run/pgstop ] || return 0
+  : > /run/pgstop/stop 2>/dev/null || return 0
+  for _ in $(seq 1 30); do [ -S /run/pg/.s.PGSQL.5432 ] || { log "databank gestopt"; return 0; }; sleep 0.5; done
+  log "databank stopt niet binnen 15 s"
 }
 trap afsluiten TERM INT
 

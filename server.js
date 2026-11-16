@@ -46,6 +46,52 @@ const path = require('path');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
+/* sbBeheer:begin — toetsen knippen dit blok mee (test/tibber-*.sh, nmbrs-data.sh, bankluis-poort.sh) */
+// wv3180: beheer-SQL (vervanger van de Supabase-Management-API POST /v1/projects/<ref>/database/query). Zonder SB_SQL_LOKAAL=1 precies
+// het oude gedrag (Management-API met SUPABASE_MCP_TOKEN); met SB_SQL_LOKAAL=1 lokaal via /app/sb-sql (eigen Postgres, rol postgres over
+// de socket, zelfde uitvoervorm). Geeft een Response (ok/status/json/text) zodat de aanroepplekken gelijk blijven; null = geen toegang.
+// Het kindproces krijgt een minimale omgeving (geen pod-sleutels); de query gaat via stdin, nooit via argv.
+function sbBeheerKan() {
+  if (process.env.SB_SQL_LOKAAL === '1') return true;
+  return !!(/^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || '')) && process.env.SUPABASE_MCP_TOKEN);
+}
+function sbBeheerQuery(sql, opties) {
+  const o = opties || {};
+  const ms = o.ms || 20000;
+  if (process.env.SB_SQL_LOKAAL === '1') return sbBeheerLokaal(sql, ms);
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  const ref = o.ref || (m ? m[1] : '');
+  if (!ref || !pat) return Promise.resolve(null);
+  return fetch((o.basis || 'https://api.supabase.com') + '/v1/projects/' + ref + '/database/query', { method: 'POST', redirect: 'error',
+    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': o.ua || 'socev-pod/1' },
+    body: JSON.stringify({ query: sql }), signal: AbortSignal.timeout(ms) });
+}
+function sbBeheerLokaal(sql, ms) {
+  return new Promise(function (resolve) {
+    let uit = '', fout = '', klaar = false;
+    const einde = function (status, tekst) {
+      if (klaar) return; klaar = true; clearTimeout(klok);
+      resolve(new Response(tekst, { status: status, headers: { 'content-type': 'application/json' } }));
+    };
+    const k = require('child_process').spawn(process.env.SB_SQL_BIN || '/app/sb-sql', [], { stdio: ['pipe', 'pipe', 'pipe'],
+      env: { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME || '/opt/data', SB_SQL_TIMEOUT_MS: String(ms) } });
+    const klok = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, ms + 2000);
+    k.stdout.on('data', function (d) { uit += d; });
+    k.stderr.on('data', function (d) { if (fout.length < 8192) fout += d; });
+    k.on('error', function () { einde(503, JSON.stringify({ message: 'Failed to run sql query: sb-sql niet te starten' })); });
+    k.on('close', function (code) {
+      if (code === 0) return einde(201, uit || '[]');
+      let msg = 'sb-sql faalde';
+      try { msg = JSON.parse(fout.trim().split('\n').pop()).message || msg; } catch (e) {}
+      einde(code === null ? 504 : 400, JSON.stringify({ message: 'Failed to run sql query: ' + msg }));
+    });
+    k.stdin.on('error', function () {});
+    k.stdin.end(sql);
+  });
+}
+/* sbBeheer:einde */
+
 // ── wv349: een proefkopie raakt nooit de echte paden ─────────────────────────
 // Alleen de release die de supervisor start (dit bestand ligt in RELEASE_DIR) krijgt de echte paden als standaard.
 // Een proefkopie erft via de agentshell HOME=/opt/data, RELEASE_DIR en PORT=8080, maar ligt elders. Zonder eigen env
@@ -4061,14 +4107,9 @@ async function account2Token() {
   if (account2.waarde) return account2.waarde;
   if (Date.now() - account2.gehaald < 10 * 60 * 1000) return '';
   account2.gehaald = Date.now();
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(process.env.SUPABASE_URL || '');
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) { account2.fout = 'geen SUPABASE_URL of SUPABASE_MCP_TOKEN'; return ''; }
+  if (!sbBeheerKan()) { account2.fout = 'geen SUPABASE_URL of SUPABASE_MCP_TOKEN'; return ''; }
   try {
-    const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', {
-      method: 'POST', headers: { authorization: 'Bearer ' + pat, 'content-type': 'application/json', 'user-agent': 'socev-pod-account2/1' },
-      body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = 'claude_oauth_token_2'" }),
-      signal: AbortSignal.timeout(20000) });
+    const r = await sbBeheerQuery("select decrypted_secret as w from vault.decrypted_secrets where name = 'claude_oauth_token_2'", { ua: 'socev-pod-account2/1', ms: 20000 });
     if (!r.ok) { account2.fout = 'kluis http ' + r.status; return ''; }
     const rijen = await r.json();
     const w = Array.isArray(rijen) && rijen.length === 1 && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
@@ -17019,13 +17060,8 @@ let studioSleutelCache = null;   // { w, tot }
 async function studioSleutel() {
   if (process.env.ROUTER_STUDIO_KEY) return process.env.ROUTER_STUDIO_KEY;
   if (studioSleutelCache && Date.now() < studioSleutelCache.tot) return studioSleutelCache.w;
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) return null;
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-studio/1' },
-    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + STUDIO_SLEUTEL_NAAM + "'" }),
-    signal: AbortSignal.timeout(20000) });
+  if (!sbBeheerKan()) return null;
+  const r = await sbBeheerQuery("select decrypted_secret as w from vault.decrypted_secrets where name = '" + STUDIO_SLEUTEL_NAAM + "'", { ua: 'socev-studio/1', ms: 20000 });
   if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
   const rijen = await r.json();
   const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
@@ -17982,13 +18018,8 @@ const facturenPaypalStaat = { bezig: false, laatste: null, sleutel: null, boxDag
 async function paypalZakelijkSleutels() {
   const c = facturenPaypalStaat.sleutel;
   if (c && Date.now() < c.tot) return c.w;
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) return null;
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-facturen-paypal/1' },
-    body: JSON.stringify({ query: "select name, decrypted_secret as w from vault.decrypted_secrets where name in ('paypal_zakelijk_client_id', 'paypal_zakelijk_secret')" }),
-    signal: AbortSignal.timeout(20000) });
+  if (!sbBeheerKan()) return null;
+  const r = await sbBeheerQuery("select name, decrypted_secret as w from vault.decrypted_secrets where name in ('paypal_zakelijk_client_id', 'paypal_zakelijk_secret')", { ua: 'socev-facturen-paypal/1', ms: 20000 });
   if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
   const rijen = await r.json();
   const w = { id: '', geheim: '' };
@@ -18957,13 +18988,8 @@ function mailmanRoute(req, res) {
 const PROMEDICO_AGENDA_DIR = process.env.PROMEDICO_AGENDA_DIR || '/opt/data/promedico-agenda';
 async function promedicoKluisLees(naam) {
   if (!/^[a-z0-9_]+$/.test(naam)) throw new Error('naam');
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(process.env.SUPABASE_URL || '');
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) throw new Error('geen kluistoegang');
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', {
-    method: 'POST', headers: { authorization: 'Bearer ' + pat, 'content-type': 'application/json', 'user-agent': 'socev-pod-promedico-agenda/1' },
-    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + naam + "'" }),
-    signal: AbortSignal.timeout(8000) });
+  if (!sbBeheerKan()) throw new Error('geen kluistoegang');
+  const r = await sbBeheerQuery("select decrypted_secret as w from vault.decrypted_secrets where name = '" + naam + "'", { ua: 'socev-pod-promedico-agenda/1', ms: 8000 });
   if (!r.ok) throw new Error('kluis http ' + r.status);
   const rijen = await r.json();
   if (!Array.isArray(rijen)) throw new Error('kluis vorm');
@@ -19501,13 +19527,8 @@ const PDF_SLEUTEL_NAAM = 'anthropic_api_key_pdf';
 let pdfSleutelCache = null;   // { w, tot }; alleen in het geheugen
 async function pdfSleutel() {
   if (pdfSleutelCache && Date.now() < pdfSleutelCache.tot) return pdfSleutelCache.w;
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) return null;
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-pdf-lezer/1' },
-    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + PDF_SLEUTEL_NAAM + "'" }),
-    signal: AbortSignal.timeout(20000) });
+  if (!sbBeheerKan()) return null;
+  const r = await sbBeheerQuery("select decrypted_secret as w from vault.decrypted_secrets where name = '" + PDF_SLEUTEL_NAAM + "'", { ua: 'socev-pdf-lezer/1', ms: 20000 });
   if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
   const rijen = await r.json();
   const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
@@ -19608,13 +19629,8 @@ let openaiSleutelCache = null;   // { w, tot }; alleen in het geheugen
 async function openaiSleutel() {
   if (process.env.OPENAI_TOETS_SLEUTEL && !SERVER_ECHT) return process.env.OPENAI_TOETS_SLEUTEL;   // alleen de toets (nep-API op 127.0.0.1)
   if (openaiSleutelCache && Date.now() < openaiSleutelCache.tot) return openaiSleutelCache.w;
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) return null;
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-openai-hulp/1' },
-    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + OPENAI_SLEUTEL_NAAM + "'" }),
-    signal: AbortSignal.timeout(20000) });
+  if (!sbBeheerKan()) return null;
+  const r = await sbBeheerQuery("select decrypted_secret as w from vault.decrypted_secrets where name = '" + OPENAI_SLEUTEL_NAAM + "'", { ua: 'socev-openai-hulp/1', ms: 20000 });
   if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
   const rijen = await r.json();
   const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
@@ -20494,12 +20510,8 @@ const uitwijkCred = (function () {
 const WEER_SLEUTEL_NAAM = 'openweathermap_api_key';
 let weerSleutelCache = null;   // { w, tot }; alleen in het geheugen
 async function weerBeheer(query) {
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) throw new Error('beheer-API niet ingesteld');
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-weer/1' },
-    body: JSON.stringify({ query: query }), signal: AbortSignal.timeout(20000) });
+  if (!sbBeheerKan()) throw new Error('beheer-API niet ingesteld');
+  const r = await sbBeheerQuery(query, { ua: 'socev-weer/1', ms: 20000 });
   if (!r.ok) { await r.text().catch(function () {}); throw new Error('beheer gaf HTTP ' + r.status); }
   return r.json();
 }
@@ -22051,13 +22063,8 @@ async function mlKluis(naam) {
   if (!ML_KLUIS[naam]) return null;
   const c = mlKluisCache.get(naam);
   if (c && Date.now() < c.tot) return c.w;
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) return null;
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-memorylane/1' },
-    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + naam + "'" }),
-    signal: AbortSignal.timeout(20000) });
+  if (!sbBeheerKan()) return null;
+  const r = await sbBeheerQuery("select decrypted_secret as w from vault.decrypted_secrets where name = '" + naam + "'", { ua: 'socev-memorylane/1', ms: 20000 });
   if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
   const rijen = await r.json();
   const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w : '';
@@ -25448,10 +25455,8 @@ async function smalSbQuery(sql) {
   const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
   const ref = m ? m[1] : (!SERVER_ECHT ? 'proef' : '');
   const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!ref || !pat) return { status: 503, fout: 'geen SUPABASE_URL of beheersleutel op de pod' };
-  const r = await fetch(SMAL_SB_MGMT + '/v1/projects/' + ref + '/database/query', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-smal/1' },
-    body: JSON.stringify({ query: sql }), signal: AbortSignal.timeout(30000) });
+  if (process.env.SB_SQL_LOKAAL !== '1' && (!ref || !pat)) return { status: 503, fout: 'geen SUPABASE_URL of beheersleutel op de pod' };   // wv3180: lokaal kan zonder
+  const r = await sbBeheerQuery(sql, { ua: 'socev-smal/1', ms: 30000, basis: SMAL_SB_MGMT, ref: ref });
   const t = await r.text();
   if (!r.ok) {
     let msg = t; try { msg = JSON.parse(t).message || t; } catch (e) {}
@@ -25708,13 +25713,8 @@ function bankIsPad(req) { return reqPath(req) === '/bank/terug'; }
 // De twee kluiswaarden via de Management-API (zelfde route als mk-scripts/kluis-waarde.py; nooit sb_pod_secrets_lezen).
 async function bankSleutels() {
   if (bankSleutelCache && Date.now() < bankSleutelCache.tot) return bankSleutelCache.w;
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) return null;
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-bankluis/1' },
-    body: JSON.stringify({ query: "select name, decrypted_secret as w from vault.decrypted_secrets where name in ('enablebanking_app_key', 'enablebanking_app_id', 'bunq_api_key')" }),
-    signal: AbortSignal.timeout(20000) });
+  if (!sbBeheerKan()) return null;
+  const r = await sbBeheerQuery("select name, decrypted_secret as w from vault.decrypted_secrets where name in ('enablebanking_app_key', 'enablebanking_app_id', 'bunq_api_key')", { ua: 'socev-bankluis/1', ms: 20000 });
   if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
   const rijen = await r.json();
   const w = { sleutel: '', app_id: '', bunq_sleutel: '' };
@@ -27267,12 +27267,8 @@ try { tibberData = require(TIBBER_SCRIPT); } catch (e) { tibberData = null; }   
 let tibberRondeBezig = false;
 function tibberIsPad(req) { return reqPath(req) === '/tibber/terug'; }
 async function tibberMgmt(query) {
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) throw new Error('kluistoegang ontbreekt op de pod');
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST', redirect: 'error',
-    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-tibber/1' },
-    body: JSON.stringify({ query: query }), signal: AbortSignal.timeout(20000) });
+  if (!sbBeheerKan()) throw new Error('kluistoegang ontbreekt op de pod');
+  const r = await sbBeheerQuery(query, { ua: 'socev-tibber/1', ms: 20000 });
   // het antwoord van een fout kan de query (met het token) citeren: alleen de status
   if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
   const j = await r.json();
@@ -27545,12 +27541,8 @@ try { nmbrsData = require(NMBRS_SCRIPT); } catch (e) { nmbrsData = null; }   // 
 let nmbrsRondeBezig = false;
 function nmbrsIsPad(req) { return reqPath(req) === '/nmbrs/terug'; }
 async function nmbrsMgmt(query) {
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) throw new Error('kluistoegang ontbreekt op de pod');
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST', redirect: 'error',
-    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-nmbrs/1' },
-    body: JSON.stringify({ query: query }), signal: AbortSignal.timeout(20000) });
+  if (!sbBeheerKan()) throw new Error('kluistoegang ontbreekt op de pod');
+  const r = await sbBeheerQuery(query, { ua: 'socev-nmbrs/1', ms: 20000 });
   if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }   // het antwoord kan de query citeren
   const j = await r.json();
   if (!Array.isArray(j)) throw new Error('kluis gaf geen rijen');
@@ -28070,13 +28062,8 @@ function potVzToetsenMag(ts, bron) {
 let potVzGeheimCache = null;   // { w, tot }
 async function potVzVerzendGeheim() {
   if (potVzGeheimCache && Date.now() < potVzGeheimCache.tot) return potVzGeheimCache.w;
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
-  const pat = process.env.SUPABASE_MCP_TOKEN;
-  if (!m || !pat) return null;
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-pot-verzend/1' },
-    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + POT_VZ_GEHEIM_NAAM + "'" }),
-    signal: AbortSignal.timeout(20000) });
+  if (!sbBeheerKan()) return null;
+  const r = await sbBeheerQuery("select decrypted_secret as w from vault.decrypted_secrets where name = '" + POT_VZ_GEHEIM_NAAM + "'", { ua: 'socev-pot-verzend/1', ms: 20000 });
   if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
   const rijen = await r.json();
   const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';

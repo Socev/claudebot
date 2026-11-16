@@ -20,6 +20,41 @@ const D = require(path.join(__dirname, '..', 'facturen-db.js'));
 const P = require(path.join(__dirname, '..', 'facturen-paypal.js'));
 const L = require(path.join(__dirname, '..', 'paypal-zakelijk-lezer.js'));
 
+// wv3180: beheer-SQL — zonder SB_SQL_LOKAAL=1 de Supabase-Management-API (oude gedrag), met SB_SQL_LOKAAL=1 /app/sb-sql (eigen Postgres
+// over de socket, zelfde uitvoervorm). Geeft een Response; null = geen toegang. Kindproces met minimale omgeving, query via stdin.
+function sbBeheerKan() {
+  if (process.env.SB_SQL_LOKAAL === '1') return true;
+  return !!(((/^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || '')) || [])[1] || '') && process.env.SUPABASE_MCP_TOKEN);
+}
+function sbBeheerQuery(sql, opties) {
+  const o = opties || {};
+  const ms = o.ms || 20000;
+  if (process.env.SB_SQL_LOKAAL === '1') {
+    return new Promise(function (resolve) {
+      let uit = '', fout = '', klaar = false;
+      const einde = function (st, t) { if (klaar) return; klaar = true; clearTimeout(klok); resolve(new Response(t, { status: st, headers: { 'content-type': 'application/json' } })); };
+      const k = require('child_process').spawn(process.env.SB_SQL_BIN || '/app/sb-sql', [], { stdio: ['pipe', 'pipe', 'pipe'],
+        env: { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME || '/opt/data', SB_SQL_TIMEOUT_MS: String(ms) } });
+      const klok = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, ms + 2000);
+      k.stdout.on('data', function (d) { uit += d; });
+      k.stderr.on('data', function (d) { if (fout.length < 8192) fout += d; });
+      k.on('error', function () { einde(503, JSON.stringify({ message: 'Failed to run sql query: sb-sql niet te starten' })); });
+      k.on('close', function (code) {
+        if (code === 0) return einde(201, uit || '[]');
+        let msg = 'sb-sql faalde'; try { msg = JSON.parse(fout.trim().split('\n').pop()).message || msg; } catch (e) {}
+        einde(code === null ? 504 : 400, JSON.stringify({ message: 'Failed to run sql query: ' + msg }));
+      });
+      k.stdin.on('error', function () {});
+      k.stdin.end(sql);
+    });
+  }
+  const ref = ((/^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || '')) || [])[1] || '');
+  if (!ref || !process.env.SUPABASE_MCP_TOKEN) return Promise.resolve(null);
+  return fetch('https://api.supabase.com/v1/projects/' + ref + '/database/query', { method: 'POST', redirect: 'error',
+    headers: { Authorization: 'Bearer ' + process.env.SUPABASE_MCP_TOKEN, 'Content-Type': 'application/json', 'User-Agent': o.ua || 'socev-pod/1' },
+    body: JSON.stringify({ query: sql }), signal: AbortSignal.timeout(ms) });
+}
+
 const DIR = process.env.FACTUREN_DIR || '/opt/data/facturen';
 const WIE = 'machinekamer';
 
@@ -35,12 +70,8 @@ function openGoed(schrijven) {
   return D.open(DIR);
 }
 async function sleutels() {
-  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
-  if (!m || !process.env.SUPABASE_MCP_TOKEN) throw new Error('kluistoegang ontbreekt (SUPABASE_URL of SUPABASE_MCP_TOKEN)');
-  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + process.env.SUPABASE_MCP_TOKEN, 'Content-Type': 'application/json', 'User-Agent': 'socev-facturen-paypal/1' },
-    body: JSON.stringify({ query: "select name, decrypted_secret as w from vault.decrypted_secrets where name in ('paypal_zakelijk_client_id', 'paypal_zakelijk_secret')" }),
-    signal: AbortSignal.timeout(20000) });
+  if (!sbBeheerKan()) throw new Error('kluistoegang ontbreekt (SUPABASE_URL of SUPABASE_MCP_TOKEN)');
+  const r = await sbBeheerQuery("select name, decrypted_secret as w from vault.decrypted_secrets where name in ('paypal_zakelijk_client_id', 'paypal_zakelijk_secret')", { ua: 'socev-facturen-paypal/1', ms: 20000 });
   if (!r.ok) throw new Error('kluis gaf HTTP ' + r.status);
   const w = { id: '', geheim: '' };
   for (const x of await r.json()) {

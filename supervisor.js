@@ -337,12 +337,55 @@ function verwerkCrash() {
   herstartNa(ms);
 }
 
+
+// ── Databankdiensten (wv3180) ───────────────────────────────────────────────
+// PostgREST (127.0.0.1:3001) en de sleutelluik db-luik.js (0.0.0.0:8091) naast de app. Postgres zelf start db-wacht.sh (root → pg)
+// vanuit entrypoint.sh. Beide diensten starten alleen als hun binaire/bestanden en sleutels er zijn (anders: niets, geen fout);
+// sterven ze, dan herstart met oplopende wachttijd. Minimale omgeving: geen pod-sleutels erin. Los van het kind: een crash van een
+// dienst raakt de app niet, en een app-herstart (code-uitrol) laat de databank staan.
+const DB_NEVEN = [
+  { naam: 'postgrest', bin: '/usr/local/bin/postgrest', args: ['/app/db/postgrest.conf'], nodig: ['/usr/local/bin/postgrest', '/app/db/postgrest.conf', '/opt/data/.pg/jwt.key'] },
+  { naam: 'db-luik', bin: process.execPath, args: ['/app/db/db-luik.js'], nodig: ['/app/db/db-luik.js', '/opt/data/.pg/jwt.key', '/opt/data/.pg/luik-sleutels.json'] },
+];
+const DB_NEVEN_WACHT = [2000, 5000, 10000, 30000, 60000];
+const DB_NEVEN_LOG = path.join(BIN, 'db-diensten.log');
+const nevenStaat = {};
+function startNeven(d) {
+  if (stoppen) return;
+  if (process.env.DB_DIENSTEN_UIT === '1' || fs.existsSync('/opt/data/pg-uit')) return;
+  if (!d.nodig.every(function (f) { try { fs.accessSync(f, fs.constants.R_OK); return true; } catch (e) { return false; } })) {
+    if (!nevenStaat[d.naam]) log(d.naam + ': niet gestart (bestanden of sleutels ontbreken)');
+    nevenStaat[d.naam] = { kind: null, n: 0 };
+    return;
+  }
+  const st = nevenStaat[d.naam] || (nevenStaat[d.naam] = { kind: null, n: 0 });
+  let uit = 'ignore';
+  try { uit = fs.openSync(DB_NEVEN_LOG, 'a', 0o600); } catch (e) { uit = 'ignore'; }
+  const k = spawn(d.bin, d.args, { stdio: ['ignore', uit, uit], env: { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME || '/opt/data', TZ: 'UTC' } });
+  if (typeof uit === 'number') { try { fs.closeSync(uit); } catch (e) {} }
+  st.kind = k; st.gestart = Date.now();
+  log(d.naam + ' gestart (pid ' + k.pid + ')');
+  k.on('error', function (e) { log(d.naam + ': start faalde (' + (e && e.code || 'fout') + ')'); });
+  k.on('exit', function (code, sig) {
+    st.kind = null;
+    if (stoppen) return;
+    if (Date.now() - st.gestart > 300000) st.n = 0;
+    const w = DB_NEVEN_WACHT[Math.min(st.n, DB_NEVEN_WACHT.length - 1)]; st.n++;
+    log(d.naam + ' stopte (' + (sig || code) + ') - herstart over ' + w + ' ms');
+    setTimeout(function () { startNeven(d); }, w);
+  });
+}
+function stopNeven() {
+  Object.keys(nevenStaat).forEach(function (n) { const k = nevenStaat[n] && nevenStaat[n].kind; if (k) { try { k.kill('SIGTERM'); } catch (e) {} } });
+}
+
 // ── stoppen ─────────────────────────────────────────────────────────────────
 function afsluiten(signaal) {
   if (stoppen) return;
   stoppen = true;
   log('signaal ' + signaal + ' ontvangen - doorgeven aan het kind');
   stopKind(signaal);
+  stopNeven();   // wv3180
   const grens = Date.now() + STOP_GENADE_MS;
   const tik = setInterval(function () {
     if (!kind) { clearInterval(tik); log('kind is gestopt - supervisor stopt'); process.exit(0); }
@@ -363,6 +406,7 @@ process.on('SIGINT', () => afsluiten('SIGINT'));
   fs.mkdirSync(RELEASES, { recursive: true });
   zorgVoorModules();
   bootstrapIndienNodig();
+  DB_NEVEN.forEach(startNeven);   // wv3180: PostgREST + db-luik (los van het kind)
 
   kind = startKind();
   if (!kind) {

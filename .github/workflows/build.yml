@@ -614,6 +614,12 @@ jobs:
       - name: "box-archief (wv2902, MrLean ML7/ML8: wekelijkse archiefstap box + Open vragen)"
         if: ${{ !cancelled() }}
         run: bash test/box-archief.sh
+      - name: "db-luik (wv3180, sleutelluik eigen databank: sleutels, rol, prefix, Profile, grenzen, log)"
+        if: ${{ !cancelled() }}
+        run: bash test/db-luik.sh
+      - name: "sb-beheer (wv3180, beheer-SQL lokaal of Management-API achter SB_SQL_LOKAAL)"
+        if: ${{ !cancelled() }}
+        run: bash test/sb-beheer.sh
       # Publicatieservice (wv1869, SB2 fase 3b): bronnotities + register via de outbox (nep-Supabase met de regels van 0012), proef 7 en 8.
       - name: "intake-publicatie (wv1869, publicatieservice)"
         if: ${{ !cancelled() }}
@@ -948,6 +954,10 @@ jobs:
             }
             console.log("rooktest geslaagd - draaiende versie " + j.versie);
           '
+
+      # wv3180: eigen databank in het image (Postgres via db-wacht als pg, sb-sql, socev geweigerd, PostgREST + db-luik).
+      - name: Rooktest - eigen databank
+        run: bash test/db-rook.sh ghcr.io/socev/claudebot:${{ github.run_number }}
 
       # WAAROM DEZE STAP BESTAAT (23-9-2026). De Claude Code-CLI is bewust niet vastgepind:
       # elk nieuw image pakt de nieuwste. Dat is goed (nieuwe modellen, zoals Opus 5.5 dat
