@@ -30,6 +30,8 @@ grant execute on function auth.role(), auth.uid(), auth.jwt() to postgres, anon,
 create schema if not exists vault authorization kluis_eigenaar;
 alter schema vault owner to kluis_eigenaar;
 grant usage on schema vault to postgres, service_role;
+-- Codex MOET 3: de SECURITY DEFINER-functies (eigenaar kluis_eigenaar) roepen pgp_sym_* in schema extensions aan
+grant usage on schema extensions to kluis_eigenaar;
 create table if not exists vault.secrets (
   id uuid primary key default gen_random_uuid(),
   name text,
@@ -56,6 +58,7 @@ alter function vault._sleutel() owner to kluis_lezer;
 revoke all on function vault._sleutel() from public;
 grant execute on function pg_catalog.pg_read_file(text) to kluis_lezer;
 grant execute on function vault._sleutel() to postgres, kluis_eigenaar;
+grant execute on function extensions.pgp_sym_encrypt_bytea(bytea, text, text), extensions.pgp_sym_decrypt_bytea(bytea, text) to kluis_eigenaar;
 
 create or replace view vault.decrypted_secrets with (security_barrier) as
   select s.id, s.name, s.description, s.secret,
