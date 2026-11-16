@@ -2358,6 +2358,32 @@ function schijfdrukStart() {
   setTimeout(schijfdrukVraag, 5000).unref();
   setInterval(schijfdrukVraag, 60 * 1000).unref();
 }
+// wv3180: eigen databank (nog niet in gebruik) op /health.db — Postgres-socket, de /health van db-luik (PostgREST gereed, aantal sleutels)
+// en of de pod al lokaal werkt (SB_SQL_LOKAAL, SUPABASE_URL). Eens per minuut, alleen in de echte release; geen SQL, geen sleutels.
+let dbStand = { aan: false };
+function dbVraag() {
+  let socket = false;
+  try { socket = fs.statSync('/run/pg/.s.PGSQL.5432').isSocket(); } catch (e) { socket = false; }
+  const basis = { aan: socket || fs.existsSync('/app/db/db-wacht.sh'), socket: socket, sb_sql_lokaal: process.env.SB_SQL_LOKAAL === '1',
+    adres_lokaal: /^http:\/\/127\.0\.0\.1:8091\/?$/.test(String(process.env.SUPABASE_URL || '')), gemeten: new Date().toISOString() };
+  let klaar = false;
+  const einde = function (luik) { if (klaar) return; klaar = true; dbStand = Object.assign(basis, { luik: luik }); };
+  try {
+    const req = http.get({ host: '127.0.0.1', port: 8091, path: '/health', agent: false, timeout: 3000 }, function (res) {
+      let t = '';
+      res.setEncoding('utf8');
+      res.on('data', function (d) { if (t.length < 10000) t += d; });
+      res.on('end', function () {
+        let j = null; try { j = JSON.parse(t); } catch (e) { j = null; }
+        einde(j ? { ok: j.ok === true, postgrest: j.postgrest_ready === true, sleutels: j.sleutels, fout: j.sleutel_fout || null } : { ok: false, fout: 'antwoord onleesbaar' });
+      });
+      res.on('error', function () { einde({ ok: false, fout: 'luik antwoordt niet' }); });
+    });
+    req.on('timeout', function () { req.destroy(); einde({ ok: false, fout: 'luik antwoordt niet binnen 3 s' }); });
+    req.on('error', function (e) { einde({ ok: false, fout: 'luik niet bereikbaar (' + (e.code || 'fout') + ')' }); });
+  } catch (e) { einde({ ok: false, fout: 'fout' }); }
+}
+if (SERVER_ECHT === true) { setTimeout(dbVraag, 8000).unref(); setInterval(dbVraag, 60 * 1000).unref(); }
 // wv716 (ontwerp wv703 D, Fable: bouwen): geheugen en lusvertraging van dit proces op /health.proces (niet op /health/publiek).
 // monitorEventLoopDelay is één libuv-timer (20 ms) met een histogram; elke volle minuut uitlezen en leegmaken, en de waarden van
 // die minuut tonen. Meet een sluipende JS-lus of GC-druk (de minuut vóór een syscall-hang blijft leeg); de bewaker neemt het
@@ -4314,6 +4340,8 @@ function handleRequest(req, res) {
       bewaker: bewakerInfo(),
       // wv3124: schijfdrukmeting per minuut (schijfdruk.js): laatste minuut, piek 24 u met tijdstip; ring onder scripts-staat/schijfdruk
       schijfdruk: schijfdrukStand,
+      // wv3180: eigen databank (Postgres + PostgREST + db-luik in de pod; nog niet in gebruik zolang adres_lokaal false is)
+      db: dbStand,
       promedico_agenda: promedicoAgenda ? Object.assign({}, promedicoAgenda.health(), { app: typeof promedicoAppInfo === 'function' ? promedicoAppInfo() : { aan: false }, botsingen: typeof promedicoBotsingenInfo === 'function' ? promedicoBotsingenInfo() : { aan: false } }) : null,   // wv3132; wv3143: .app = Calendar-laag (laatste {op, dagen, ms}, geen tekst)
       // wv698: argv-detector (sleutelwaarden in /proc/*/cmdline); treffers_24u > 0 = er lekt iets, zie de box
       detector: argvDetInfo(),
