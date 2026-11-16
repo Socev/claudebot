@@ -273,3 +273,24 @@ test('server.js-koppeling: sessievergrendeling per chat_id, 409-rondes, rustpoor
   ctx.uitrolWacht = () => ({ wacht: true }); assert.equal(gevangen.magStarten(), false);
   ctx.uitrolWacht = () => ({ wacht: false }); ctx.onderhoud.houdtTegen = () => true; assert.equal(gevangen.magStarten(), false);
 });
+
+// ── Codex-bouwreview wv3194 ──
+test('MOET 2: poort gaat dicht tijdens de lezingen -> niet vastleggen, niet starten', async () => {
+  for (const zet of [(st) => { st.rol = false; }, (st) => { st.uit = true; }, (st) => { st.mag = false; }, (st) => { st.sessieBezig = true; }]) {
+    const { st, m, dep } = opstelling();
+    const hsOud = dep.hartslag;
+    dep.hartslag = async () => { const h = await hsOud(); zet(st); return h; };   // dicht na de eerste poort, vóór de start
+    const r = await m.tik();
+    assert.equal(st.mcp.length, 0); assert.match(r.per[0].besluit, /niet gestart|bezig|uitrol/);
+    assert.deepEqual(m.staat().rondes, {});
+  }
+});
+test('MOET 1: markeer weigert zolang een inhaal van die stroom loopt; daarna wel', async () => {
+  const { st, m } = opstelling();
+  await m.tik();
+  const r = await m.markeer('comp_a');
+  assert.equal(r.ok, false); assert.equal(r.inhaal_loopt, true); assert.equal(r.execution_id, '900000');
+  st.exec.wfA[0].status = 'success';
+  const r2 = await m.markeer('comp_a');
+  assert.equal(r2.ok, true); assert.equal(r2.al, true); assert.equal(r2.status, 'ingehaald');
+});
