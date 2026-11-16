@@ -101,6 +101,96 @@ test('maandTekst en bestandsnaam zonder namen', () => {
   assert.equal(B.maandTekst({ year: 2026, periodEnd: 11 }, '4-weeks'), 'periode 11 2026');
 });
 
+// ── wv3228: vorm van het Nmbrs-document (vingerafdruk zonder inhoud) en uitpakken ───────────────────────────────────────
+const zlib = require('zlib');
+// Minimale zip (verzonnen inhoud): methode 8 (deflate) of 0; met descriptor = groottes alleen in de centrale map en een data descriptor.
+function maakZip(bestanden, o) {
+  o = o || {};
+  const lok = [], cd = []; let off = 0;
+  for (const f of bestanden) {
+    const naam = Buffer.from(f.naam, 'utf8'), data = Buffer.isBuffer(f.data) ? f.data : Buffer.from(f.data, 'utf8');
+    const meth = f.meth == null ? 8 : f.meth, comp = meth === 8 ? zlib.deflateRawSync(data) : data;
+    const crc = zlib.crc32 ? zlib.crc32(data) : 0, vlag = (o.descriptor ? 8 : 0) | (f.versleuteld ? 1 : 0);
+    const usz = f.usz != null ? f.usz : data.length;
+    const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(vlag, 6); lh.writeUInt16LE(meth, 8);
+    lh.writeUInt32LE(o.descriptor ? 0 : crc, 14); lh.writeUInt32LE(o.descriptor ? 0 : comp.length, 18); lh.writeUInt32LE(o.descriptor ? 0 : usz, 22); lh.writeUInt16LE(naam.length, 26);
+    const dd = o.descriptor ? Buffer.alloc(16) : Buffer.alloc(0);
+    if (o.descriptor) { dd.writeUInt32LE(0x08074b50, 0); dd.writeUInt32LE(crc, 4); dd.writeUInt32LE(comp.length, 8); dd.writeUInt32LE(usz, 12); }
+    const ch = Buffer.alloc(46); ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(vlag, 8); ch.writeUInt16LE(meth, 10);
+    ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(usz, 24); ch.writeUInt16LE(naam.length, 28); ch.writeUInt32LE(off, 42);
+    lok.push(lh, naam, comp, dd); cd.push(ch, naam); off += 30 + naam.length + comp.length + dd.length;
+  }
+  const cdb = Buffer.concat(cd), e = Buffer.alloc(22);
+  e.writeUInt32LE(0x06054b50, 0); e.writeUInt16LE(bestanden.length, 8); e.writeUInt16LE(bestanden.length, 10); e.writeUInt32LE(cdb.length, 12); e.writeUInt32LE(off, 16);
+  return Buffer.concat(lok.concat([cdb, e]));
+}
+const geenInhoud = (v) => { const t = JSON.stringify(v); return ![I1, I2, I3, POT, 'Proef', 'Anna', '2345', 'E2E-', 'Salaris'].some((x) => t.includes(x)); };
+function leesVia(buf, ct) { const o = B.ontpak(buf, ct); return { o, p: o.tekst == null ? null : B.leesPain(o.tekst) }; }
+test('wv3228 ontpak: utf-8 (met/zonder BOM), utf-16 LE/BE met BOM en zonder BOM → leesbaar, vorm zonder inhoud', () => {
+  const x = nmbrsPain();
+  for (const [naam, buf, begin] of [['utf8', Buffer.from(x, 'utf8'), 'xml'], ['utf8-bom', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(x)]), 'xml'],
+    ['utf16le-bom', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(x.replace('UTF-8', 'UTF-16'), 'utf16le')]), 'utf16-bom'],
+    ['utf16be-bom', (() => { const b = Buffer.from(x, 'utf16le'); b.swap16(); return Buffer.concat([Buffer.from([0xfe, 0xff]), b]); })(), 'utf16-bom'],
+    ['utf16le-zonder', Buffer.from(x, 'utf16le'), 'utf16']]) {
+    const { o, p } = leesVia(buf, 'application/xml; charset=utf-8');
+    assert.equal(p && p.ok, true, naam); assert.equal(p.regels.length, 3, naam);
+    assert.equal(o.vorm.begin, begin, naam); assert.equal(o.vorm.ct, 'application/xml', naam); assert.equal(o.vorm.bytes, buf.length, naam);
+    assert.equal(o.vorm.wortel, 'Document', naam); assert.equal(o.vorm.ns, 'urn:iso:std:iso:20022:tech:xsd:pain.001.001.03', naam);
+    assert.ok(geenInhoud(o.vorm), naam + ' ' + JSON.stringify(o.vorm));
+  }
+});
+test('wv3228 ontpak: base64, JSON-omhulsel (content / data.content / willekeurig veld / JSON-string), zip deflate/stored/descriptor → leesbaar', () => {
+  const x = nmbrsPain(), b = Buffer.from(x).toString('base64');
+  const gevallen = [
+    ['base64', Buffer.from(b.replace(/(.{76})/g, '$1\r\n')), ['base64', 'xml']],
+    ['json-content', Buffer.from(JSON.stringify({ fileName: 'Proef Anna.xml', contentType: 'application/xml', content: b })), ['json', 'xml']],
+    ['json-data', Buffer.from(JSON.stringify({ data: { fileContent: b }, ok: true })), ['json', 'xml']],
+    ['json-anders', Buffer.from(JSON.stringify({ naamloos: b, x: 1 })), ['json', 'xml']],
+    ['json-string', Buffer.from(JSON.stringify(b)), ['json', 'xml']],
+    ['json-xml-tekst', Buffer.from(JSON.stringify({ content: x })), ['json', 'xml']],
+    ['zip-deflate', maakZip([{ naam: 'SEPA Proef Anna.xml', data: x }]), ['zip', 'xml']],
+    ['zip-stored', maakZip([{ naam: 'a.xml', data: x, meth: 0 }]), ['zip', 'xml']],
+    ['zip-descriptor', maakZip([{ naam: 'map/', data: '' , meth: 0 }, { naam: 'b.XML', data: x }, { naam: 'leesmij.txt', data: 'hallo' }], { descriptor: true }), ['zip', 'xml']],
+    ['base64-zip', Buffer.from(maakZip([{ naam: 'c.xml', data: x }]).toString('base64')), ['base64', 'zip', 'xml']],
+    ['json-zip', Buffer.from(JSON.stringify({ content: maakZip([{ naam: 'd.xml', data: x }]).toString('base64') })), ['json', 'zip', 'xml']],
+  ];
+  for (const [naam, buf, lagen] of gevallen) {
+    const { o, p } = leesVia(buf, 'application/octet-stream');
+    assert.equal(p && p.ok, true, naam + ' ' + JSON.stringify(o.vorm)); assert.equal(p.regels.length, 3, naam); assert.deepEqual(o.vorm.lagen, lagen, naam);
+    assert.ok(geenInhoud(o.vorm), naam + ' ' + JSON.stringify(o.vorm));
+  }
+  const j = B.ontpak(Buffer.from(JSON.stringify({ fileName: 'Proef Anna.xml', content: b })), 'application/json').vorm;
+  assert.deepEqual(j.json_sleutels, ['fileName', 'content']); assert.equal(j.ct, 'application/json');
+});
+test('wv3228 ontpak: niet te lezen → tekst null, vorm beschrijft het (pdf, json zonder inhoud, zip met twee xml, versleuteld, te groot, leeg)', () => {
+  const x = nmbrsPain();
+  const v = (buf, ct) => { const o = B.ontpak(buf, ct); assert.equal(o.tekst, null, JSON.stringify(o.vorm)); assert.ok(geenInhoud(o.vorm), JSON.stringify(o.vorm)); return o.vorm; };
+  assert.equal(v(Buffer.from('%PDF-1.4\nProef Anna NL69TEST0000000001\n'), 'application/pdf').begin, 'anders');
+  const j = v(Buffer.from(JSON.stringify({ status: 'Proef Anna', 'NL69TEST0000000001': 1, aantal: 3 })), 'application/json');
+  assert.equal(j.json, 'geen_inhoudsveld'); assert.deepEqual(j.json_sleutels, ['status', '?', '?']); assert.equal(j.json_aantal, 3);
+  assert.equal(v(maakZip([{ naam: 'a.xml', data: x }, { naam: 'b.xml', data: x }])).zip, 'niet_precies_een_xml');
+  assert.equal(v(maakZip([{ naam: 'a.xml', data: x, versleuteld: true }])).zip, 'versleuteld');
+  assert.equal(v(maakZip([{ naam: 'a.xml', data: x, usz: 9 * 1024 * 1024 }])).zip, 'te_groot');
+  // zip-bom: echte uitgepakte grootte > 8 MB terwijl de centrale map klein zegt
+  assert.ok(['te_groot', 'grootte_wijkt_af'].includes(v(maakZip([{ naam: 'a.xml', data: Buffer.alloc(9 * 1024 * 1024, 0x20), usz: 100 }])).zip));
+  assert.equal(v(Buffer.alloc(0)).begin, 'leeg');
+  assert.equal(v(Buffer.from('{kapot')).json, 'onleesbaar');
+  // een JSON-sleutel die op inhoud lijkt komt als '?'
+  assert.deepEqual(B.ontpak(Buffer.from(JSON.stringify({ 'Proef Anna heeft NL69': 1 })), null).vorm.json_sleutels, ['?']);
+  // review MOET 1: sleutel, wortel, namespace en content-type alleen van vaste lijsten
+  assert.deepEqual(B.ontpak(Buffer.from(JSON.stringify({ Anna: 1, 'Jan.Jansen': 2, content: 'kort' })), null).vorm.json_sleutels, ['?', '?', 'content']);
+  const w = B.ontpak(Buffer.from('<Anna xmlns="urn:proef:Anna:Jansen"><x/></Anna>'), 'text/anna-jansen').vorm;
+  assert.equal(w.wortel, 'anders'); assert.equal(w.ns, 'anders'); assert.equal(w.ct, 'anders');
+  const w2 = B.ontpak(Buffer.from('<p:Jansen xmlns:p="http://proef.invalid/Anna"/>'), 'application/xml; name=Anna').vorm;
+  assert.equal(w2.wortel, 'anders'); assert.equal(w2.ns, 'anders'); assert.equal(w2.ct, 'application/xml');
+  assert.equal(B.ontpak(Buffer.from('<Document xmlns="http://www.w3.org/2026/Anna/Jansen"/>'), null).vorm.ns, 'anders');
+  assert.ok(!JSON.stringify([w, w2]).includes('Anna') && !JSON.stringify([w, w2]).includes('Jansen'));
+});
+test('wv3228 leesPain: namespace tussen enkele aanhalingstekens', () => {
+  const p = B.leesPain(nmbrsPain().replace('xmlns:p="urn:iso:std:iso:20022:tech:xsd:pain.001.001.03"', "xmlns:p='urn:iso:std:iso:20022:tech:xsd:pain.001.001.03'"));
+  assert.equal(p.ok, true); assert.equal(p.formaat, 'pain.001.001.03');
+});
+
 // ── kindopdrachten tegen een nagebootste API ────────────────────────────────────────────────────────────────────────
 const C1 = 'c0000000-0000-4000-8000-000000000001', D1 = 'd0000000-0000-4000-8000-000000000001';
 const RUN = 'r0000000-0000-4000-8000-000000000012', RUNOUD = 'r0000000-0000-4000-8000-000000000011', RUNOPEN = 'r0000000-0000-4000-8000-000000000013';
@@ -115,12 +205,12 @@ function nep(M) {
     if (u.pathname === '/api/companies/' + C1 + '/runs') {
       if (u.searchParams.get('year') !== '2026') return stuur(200, pagina([]));
       const recent = new Date(Date.now() - 2 * 86400000).toISOString(), oud = new Date(Date.now() - 80 * 86400000).toISOString();
-      return stuur(200, pagina([{ payrollRunId: RUN, number: 12, description: 'November 2026', year: 2026, periodStart: 11, periodEnd: 11, createdAt: recent, type: 'normal', locked: true },
+      return stuur(200, pagina([{ payrollRunId: RUN, number: 12, description: 'November 2026', year: 2026, periodStart: 11, periodEnd: 11, createdAt: recent, type: 'normal', locked: true, control: true, visibleEmployeeLogin: true, visibleDocumentViewer: false },
         { payrollRunId: RUNOUD, number: 11, description: 'Oud', year: 2026, periodStart: 10, periodEnd: 10, createdAt: oud, type: 'normal', locked: true },
         { payrollRunId: RUNOPEN, number: 13, description: 'Open', year: 2026, periodStart: 11, periodEnd: 11, createdAt: recent, type: 'normal', locked: false }]));
     }
     if (u.pathname === '/api/companies/' + C1 + '/runs/' + RUN + '/sepa') { if (u.searchParams.get('year') !== '2026') return stuur(400, {}); return stuur(200, { taskId: TAAK }); }
-    if (u.pathname === '/api/documents/' + TAAK) { if (M.doc202-- > 0) return stuur(202, '"Document is being processed"'); res.writeHead(200, { 'Content-Type': 'application/octet-stream' }); return res.end(M.pain); }
+    if (u.pathname === '/api/documents/' + TAAK) { if (M.doc202-- > 0) return stuur(202, '"Document is being processed"'); res.writeHead(200, { 'Content-Type': M.ct || 'application/octet-stream' }); return res.end(M.pain); }
     if (u.pathname === '/api/companies/' + C1 + '/runs/' + RUN + '/employees') return stuur(200, pagina([1, 2, 3].map((i) => ({ employeeId: 'e0000000-0000-4000-8000-00000000000' + i, employeeNumber: 100 + i }))));
     if (/journalsemployee$/.test(u.pathname)) return stuur(403, { title: 'Forbidden' });
     if (/\/api\/companies\/[^/]+\/(employees|salarytables)/.test(u.pathname)) return stuur(200, pagina([]));
@@ -248,4 +338,40 @@ test('ronde: afgekeurd bestand (mod-97) → status afgekeurd, geen bestand', asy
     const b = await kind(dir, 'betaalbestand', { run: RUN, datum: '2026-11-25', vandaag: '2026-11-16', msg_hex: '0a1b2c3d', cre_dt_tm: '2026-11-16T12:00:00', pot: { iban: POT, naam: 'Proef POT' } });
     assert.equal(b.code, 'controle');
   } finally { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('wv3228 ronde: zip-document → klaar; JSON zonder inhoud → afgekeurd met vorm in controle en ronde-uitvoer (zonder inhoud); runstaat', async () => {
+  for (const geval of ['zip', 'json']) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nb-kind-'));
+    const M = geval === 'zip' ? { log: [], doc202: 0, ct: 'application/zip', pain: maakZip([{ naam: 'SEPA.xml', data: nmbrsPain() }], { descriptor: true }) }
+      : { log: [], doc202: 0, ct: 'application/json; charset=utf-8', pain: JSON.stringify({ documentId: 'x', status: 'Proef Anna', aantal: 3 }) };
+    const srv = nep(M); await new Promise((k) => srv.listen(0, '127.0.0.1', k));
+    const env = { NMBRS_API_BASIS: 'http://127.0.0.1:' + srv.address().port };
+    try {
+      await kind(dir, 'betaalgemeld', { runs: [] }, env);
+      const { DatabaseSync } = require('node:sqlite');
+      let d = new DatabaseSync(path.join(dir, 'nmbrs.sqlite'));
+      d.prepare("insert into bedrijf_entiteit (bedrijf, entiteit, door, sinds) values (?, 'POT', 'toets', '2026-11-16')").run(C1); d.close();
+      const r = await kind(dir, 'ronde', { access: 'at-' + 'a'.repeat(30), sub: 'sub-proef-0000000000001', doc: true, pot_iban: POT }, env);
+      assert.equal(r.ok, true, JSON.stringify(r));
+      d = new DatabaseSync(path.join(dir, 'nmbrs.sqlite'));
+      const b = d.prepare('select status, formaat, controle from betaallijst where run = ?').get(RUN);
+      const st = d.prepare('select * from runstaat where run = ?').get(RUN), open = d.prepare('select * from runstaat where run = ?').get(RUNOPEN);
+      const data = JSON.parse(d.prepare('select data from loonrun where id = ?').get(RUN).data);
+      d.close();
+      const c = JSON.parse(b.controle);
+      if (geval === 'zip') {
+        assert.equal(b.status, 'klaar', b.controle); assert.equal(b.formaat, 'pain.001.001.03'); assert.deepEqual(c.vorm.lagen, ['zip', 'xml']); assert.equal(c.vorm.ct, 'application/zip');
+        assert.ok(!r.betaal.vorm);
+      } else {
+        assert.equal(b.status, 'afgekeurd'); assert.equal(b.formaat, null);
+        assert.deepEqual(c.vorm.json_sleutels, ['documentId', 'status', '?']); assert.equal(c.vorm.json, 'geen_inhoudsveld'); assert.equal(c.vorm.begin, 'json'); assert.equal(c.vorm.ct, 'application/json');
+        assert.equal(r.betaal.vorm.length, 1); assert.equal(r.betaal.vorm[0].nummer, 12); assert.deepEqual(r.betaal.vorm[0].json_sleutels, ['documentId', 'status', '?']);
+        assert.ok(!JSON.stringify(r).includes('Proef Anna') && !b.controle.includes('Proef Anna'));
+      }
+      assert.ok(st.locked_sinds && st.zichtbaar_sinds && !st.documenten_sinds, JSON.stringify(st));
+      assert.ok(open && !open.locked_sinds && !open.zichtbaar_sinds, JSON.stringify(open));
+      assert.equal(data.visibleEmployeeLogin, true); assert.equal(data.control, true);
+    } finally { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  }
 });
