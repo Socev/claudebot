@@ -231,7 +231,7 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
       reqPath: (req) => (req.url || '').split('?')[0], rolPoort: (res, verder) => verder(), rol: { eerste: true }, rolPrimair: () => true, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 50 };
     g.spawn = klokSpawn;
     const ctx = vm.createContext(g);
-    vm.runInContext(src.slice(k1, k2) + '\n' + src.slice(a, b) + '\n;globalThis.__h = { bankRonde, bankKaarten, bankRondeStart, bankRondeUitkomst };', ctx, { filename: 'server.js#bank' });
+    vm.runInContext((function () { const a = src.indexOf('/* sbBeheer:begin'), b = src.indexOf('/* sbBeheer:einde */'); if (a < 0 || b < a) throw new Error('sbBeheer-blok niet gevonden'); return src.slice(a, b); })() + '\n' + src.slice(k1, k2) + '\n' + src.slice(a, b) + '\n;globalThis.__h = { bankRonde, bankKaarten, bankRondeStart, bankRondeUitkomst };', ctx, { filename: 'server.js#bank' });
     const h = ctx.__h;
     // wv776: de maandronde vaste lasten heeft een eigen toets (test/vaste-lasten-ronde.sh); hier niet laten meedraaien op de 3e–10e
     ctx.vasteLastenRonde = async function () { return { gedaan: false, reden: 'toets' }; };

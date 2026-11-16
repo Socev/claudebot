@@ -69,7 +69,7 @@ api.listen(0, '127.0.0.1', async function () {
     logError: (w, e) => logs.push(w + ': ' + (e && e.message || e)), schrijfLog: (r) => logs.push(r), nu: () => 'NU', velden: (o) => JSON.stringify(o),
     reqPath: (req) => (req.url || '').split('?')[0], rol: { eerste: true }, rolPrimair: () => true, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 50 };
   const ctx = vm.createContext(g);
-  vm.runInContext(src.slice(k1, k2) + '\n' + src.slice(a, b) + '\n;globalThis.__h = { bankSmal, bankEnv, sessie: () => bunqSessie };', ctx, { filename: 'server.js#bank' });
+  vm.runInContext((function () { const a = src.indexOf('/* sbBeheer:begin'), b = src.indexOf('/* sbBeheer:einde */'); if (a < 0 || b < a) throw new Error('sbBeheer-blok niet gevonden'); return src.slice(a, b); })() + '\n' + src.slice(k1, k2) + '\n' + src.slice(a, b) + '\n;globalThis.__h = { bankSmal, bankEnv, sessie: () => bunqSessie };', ctx, { filename: 'server.js#bank' });
   const h = ctx.__h;
   try {
     toets('bankEnv geeft BUNQ_API_BASIS door (alleen toets), geen PAT', h.bankEnv().BUNQ_API_BASIS && !h.bankEnv().SUPABASE_MCP_TOKEN, Object.keys(h.bankEnv()));

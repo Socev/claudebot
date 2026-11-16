@@ -46,7 +46,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
-/* sbBeheer:begin — toetsen knippen dit blok mee (test/tibber-*.sh, nmbrs-data.sh, bankluis-poort.sh) */
+/* sbBeheer:begin — toetsen knippen dit blok mee (test/tibber-*.sh, nmbrs-data.sh, bankluis-poort.sh, bunq-poort.sh, bank-ronde.sh) */
 // wv3180: beheer-SQL (vervanger van de Supabase-Management-API POST /v1/projects/<ref>/database/query). Zonder SB_SQL_LOKAAL=1 precies
 // het oude gedrag (Management-API met SUPABASE_MCP_TOKEN); met SB_SQL_LOKAAL=1 lokaal via /app/sb-sql (eigen Postgres, rol postgres over
 // de socket, zelfde uitvoervorm). Geeft een Response (ok/status/json/text) zodat de aanroepplekken gelijk blijven; null = geen toegang.
