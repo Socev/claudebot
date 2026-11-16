@@ -22,8 +22,14 @@
  */
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
 
-const SCOPES = ['offline_access', 'user.info.read', 'debtor.info.read', 'company.info.read', 'company.payrollsettings.read', 'company.leave.read',
+const SCOPES_BASIS = ['offline_access', 'user.info.read', 'debtor.info.read', 'company.info.read', 'company.payrollsettings.read', 'company.leave.read',
   'employee.info.read', 'employee.employment.read', 'employee.orgstructure.read', 'employee.payment.read', 'employee.leave.read'];
+// wv3208 (David 16-11-2026, POT-loonrun als betaallijst): het SEPA-betaalbestand van een loonrun is een "company document" (taak) en de
+// inhoud halen is document.read (portaal, lijst van scopes: "company.document.read - Generate company documents", "document.read - View and
+// download document content"). Zonder deze twee gaf journalsemployee 403. Een token met alleen de basisset blijft geldig (geen betaallijst);
+// de toestemmingslink vraagt de volle set. Bewust niet: employee.bankaccount.read (het IBAN staat al in het betaalbestand van Nmbrs).
+const SCOPES_DOC = ['company.document.read', 'document.read'];
+const SCOPES = SCOPES_BASIS.concat(SCOPES_DOC);
 const REDIRECT = 'https://bank.socev.dev/nmbrs/terug';
 const UA = 'Socev/1.0';
 const STATE_MS = 48 * 3600 * 1000;
@@ -55,13 +61,15 @@ const PADEN_GET = [
   ['^/api/companies/' + G + '/period$', []], ['^/api/companies/' + G + '/salarytables$', Q_LIJST], ['^/api/salarytable/' + G + '$', Q_LIJST],
   ['^/api/companies/' + G + '/salarytable/' + G + '/content$', Q_LIJST], ['^/api/companies/' + G + '/runs$', Q_LIJST.concat(['year'])],
   ['^/api/companies/' + G + '/runs/' + G + '/journalsemployee$', ['year']], ['^/api/documents/(' + G + ')$', []],
+  ['^/api/companies/' + G + '/runs/' + G + '/sepa$', ['year']],   // wv3208: betaalbestand van een loonrun (taak; inhoud via /api/documents)
+  ['^/api/companies/' + G + '/runs/' + G + '/employees$', Q_LIJST.concat(['year'])],   // wv3208: wie zit er in de run (alleen id + nummer)
   ['^/api/companies/' + G + '/employees$', Q_LIJST],
   ['^/api/companies/' + G + '/employees/(employments|contracts|schedules|functions|departments|salaries|leaveBalances)$', Q_LIJST],
   ['^/api/companies/' + G + '/hourcodes$', Q_LIJST], ['^/api/employees/' + G + '/(fixedhours|variablehours)$', Q_LIJST.concat(['year', 'period'])],
 ].map(function (x) { return { re: new RegExp(x[0]), q: x[1] }; });
 const DOC_PAD = 10;   // index van /api/documents in PADEN_GET
 const Q_VORM = { pageNumber: /^[1-9]\d{0,2}$/, pageSize: /^(100|[1-9]\d?)$/, year: /^20\d\d$/, period: /^([1-9]|[1-4]\d|5[0-3])$/ };
-const TAKEN = new Set();   // taskIds die dit proces zelf van journalsemployee kreeg
+const TAKEN = new Set();   // taskIds die dit proces zelf van journalsemployee of sepa kreeg
 function verzoekToets(methode, url) {
   let u;
   try { u = new URL(url); } catch (e) { throw new NmbrsFout('pad', 'Nmbrs-adres niet toegestaan'); }
@@ -125,11 +133,14 @@ function scopesVan(j) {
   } catch (e) {}
   return null;
 }
-function scopesExact(lijst) {
+function scopesGelijk(lijst, set) {
   if (!Array.isArray(lijst)) return false;
-  const a = new Set(lijst), b = new Set(SCOPES);
-  return a.size === b.size && SCOPES.every(function (s) { return a.has(s); });
+  const a = new Set(lijst);
+  return a.size === set.length && set.every(function (s) { return a.has(s); });
 }
+// Exact de volle set (met documentrecht) of exact de oude basisset (vóór wv3208 gegeven); al het andere = andere rechten.
+function scopesExact(lijst) { return scopesGelijk(lijst, SCOPES) || scopesGelijk(lijst, SCOPES_BASIS); }
+function scopesDoc(lijst) { return scopesGelijk(lijst, SCOPES); }
 async function intrek(id, geheim, token, soort) {
   try { const r = await roep('POST', AUTH_BASIS + INTREK_PAD, { basic: [id, geheim], form: { token: token, token_type_hint: soort } }); return r.status === 200; }
   catch (e) { return false; }
@@ -145,9 +156,9 @@ async function tokenVraag(form, id, geheim) {
   if (!scopesExact(scopes)) {   // andere rechten dan gevraagd: intrekken en melden (ontwerp punt 3)
     if (refresh) await intrek(id, geheim, refresh, 'refresh_token');
     await intrek(id, geheim, r.j.access_token, 'access_token');
-    throw new NmbrsFout('scope', 'Nmbrs gaf andere rechten dan gevraagd (' + (scopes ? scopes.length : 0) + ' scopes; verwacht exact ' + SCOPES.length + '); ingetrokken');
+    throw new NmbrsFout('scope', 'Nmbrs gaf andere rechten dan gevraagd (' + (scopes ? scopes.length : 0) + ' scopes; verwacht exact ' + SCOPES.length + ' of ' + SCOPES_BASIS.length + '); ingetrokken');
   }
-  return { access: r.j.access_token, refresh: refresh, verloopt_s: Number(r.j.expires_in) || null };
+  return { access: r.j.access_token, refresh: refresh, verloopt_s: Number(r.j.expires_in) || null, doc: scopesDoc(scopes) };
 }
 function noodPad(dir) { return path.join(dir, 'refresh.nood'); }
 function noodSchrijf(dir, refresh) {
@@ -255,9 +266,10 @@ async function ronde(deps, opdracht) {
     }
     noodWis(dir);
     uit.geroteerd = !!(nieuw && nieuw !== refresh);
-    const r = await deps.kind(opdracht === 'peil' ? 'peil' : 'ronde', { access: v.j._access, sub: k.sub });
+    const r = await deps.kind(opdracht === 'peil' ? 'peil' : 'ronde', { access: v.j._access, sub: k.sub, doc: v.j.doc === true,
+      pot_iban: typeof deps.potIban === 'function' ? deps.potIban() : null });
     const j = r.j || { ok: false, fout: 'lezen gaf geen JSON (exit ' + r.code + ')' };
-    return Object.assign(uit, j, { begin: uit.begin, geroteerd: uit.geroteerd, nood_hersteld: uit.nood_hersteld });
+    return Object.assign(uit, j, { begin: uit.begin, geroteerd: uit.geroteerd, nood_hersteld: uit.nood_hersteld, documentrecht: v.j.doc === true });
   } catch (e) {
     return Object.assign(uit, { reden: e.reden || 'fout', fout: String(e && e.message || e).slice(0, 200), nood: e.reden === 'kluis' ? true : undefined });
   } finally { slotLos(dir); }
@@ -346,7 +358,12 @@ function db(dir) {
     'create table if not exists uren (medewerker text not null, jaar integer not null, periode integer not null, uren real not null, gezien text not null, primary key (medewerker, jaar, periode)) without rowid;' +
     'create table if not exists bedrijf_entiteit (bedrijf text primary key, entiteit text not null, door text, sinds text not null);' +
     'create table if not exists signaal (sleutel text primary key, soort text not null, eerst text not null, laatst text not null, gemeld text);' +
-    'create table if not exists ronde (volg integer primary key, begin text, eind text, ok integer, uitkomst text);');
+    'create table if not exists ronde (volg integer primary key, begin text, eind text, ok integer, uitkomst text);' +
+    // wv3208: betaallijst per POT-loonrun (netto + IBAN uit het SEPA-bestand van Nmbrs). Regels vervallen 60 dagen na het ophalen.
+    'create table if not exists betaallijst (run text primary key, bedrijf text not null, status text not null, pogingen integer not null default 0, opgehaald text, ' +
+    'formaat text, aantal integer, totaal_centen integer, medewerkers_run integer, controle text, dbtr_iban text, sha text, gemeld text, gedownload text, gewijzigd text);' +
+    'create table if not exists betaalregel (run text not null, volg integer not null, e2e text, naam text not null, iban text not null, centen integer not null, oms text, primary key (run, volg)) without rowid;');
+  try { fs.chmodSync(p, 0o600); } catch (e) {}
   return d;
 }
 function lid(d, sql, args) { const s = d.prepare(sql); return s.all.apply(s, args || []); }
@@ -478,6 +495,82 @@ async function journaal(L, bedrijf, run, jaar) {
     return { status: 'ok', regels: journaalRegels(boom), namen: [...set].slice(0, 200) };
   }
   return { status: 'document:wacht' };
+}
+// wv3208: taak afwachten en het document als tekst ophalen (zelfde ritme als het journaal). → { status, tekst? }
+async function taakDocument(L, r) {
+  if (r.status !== 200 || !r.j || !idVan(r.j.taskId)) return { status: 'taak:' + r.status };
+  TAKEN.add(r.j.taskId);
+  for (let i = 0; i < 8; i++) {
+    await slaap(PAUZE_MS * 5 * (i + 1));
+    const d = await L.haal('/api/documents/' + r.j.taskId, true);
+    if (d.status === 202) continue;
+    if (d.status !== 200 || d.tekst == null) return { status: 'document:' + d.status + (d.groot ? ':groot' : '') };
+    let tekst = d.tekst.replace(/^\uFEFF/, '');
+    // sommige documenten komen als base64 (octet-stream zonder XML); dan één keer uitpakken
+    if (tekst.indexOf('<') < 0 && /^[A-Za-z0-9+/=\s]{40,}$/.test(tekst)) tekst = Buffer.from(tekst.replace(/\s+/g, ''), 'base64').toString('utf8').replace(/^\uFEFF/, '');
+    return { status: 'ok', tekst: tekst };
+  }
+  return { status: 'document:wacht' };
+}
+// wv3208: betaallijsten van nieuwe, vergrendelde loonruns van de POT (bedrijf_entiteit = POT), alleen met documentrecht. Per run: het
+// SEPA-bestand van Nmbrs (zonder betaaldatum; die kiest David in de app), het aantal medewerkers in de run, controles (nmbrs-betaal.js).
+// Bewaard: aantallen, totaal, controlecodes, en de regels (naam, IBAN, netto, kenmerk) in betaalregel; nooit in een log of ronde-uitvoer.
+// Alleen vergrendelde runs (locked): een vergrendelde run verandert niet meer; een correctie is in Nmbrs een nieuwe run.
+const BETAAL_DAGEN = 45, BETAAL_PER_RONDE = 3, BETAAL_BEWAAR_DAGEN = 60;
+async function betaalRonde(L, d, cid, jaar, invoer, uit) {
+  betaalBewaar(d);   // review wv3208 MOET 3: bewaartermijn altijd, ook zonder documentrecht of POT-koppeling
+  let B;
+  try { B = require('./nmbrs-betaal.js'); } catch (e) { uit.betaal = { fout: 'nmbrs-betaal.js ontbreekt' }; return; }   // de rest van de ronde gaat door
+  const ent = d.prepare('select entiteit from bedrijf_entiteit where bedrijf = ?').get(cid);
+  if (!ent || ent.entiteit !== 'POT') return;
+  uit.betaal = uit.betaal || { recht: invoer.doc === true, nieuw: 0, klaar: 0, afgekeurd: 0, opnieuw: 0 };
+  if (invoer.doc !== true) return;
+  const grens = Date.now() - BETAAL_DAGEN * 86400000;
+  const kand = lid(d, "select l.id, l.data, b.status, b.pogingen from loonrun l left join betaallijst b on b.run = l.id where l.bedrijf = ? and (b.run is null or b.status = 'opnieuw')", [cid])
+    .map(function (r) { return { id: r.id, x: JSON.parse(r.data), pogingen: r.pogingen || 0 }; })
+    .filter(function (r) { return r.x.locked === true && Date.parse(r.x.createdAt) >= grens && r.x.year >= jaar - 1; })
+    .sort(function (a, c) { return Date.parse(c.x.createdAt) - Date.parse(a.x.createdAt); }).slice(0, BETAAL_PER_RONDE);
+  const bed = d.prepare('select periode_soort from bedrijf where id = ?').get(cid) || {};
+  for (const r of kand) {
+    let doc, mw = null;
+    try {
+      doc = await taakDocument(L, await L.haal('/api/companies/' + cid + '/runs/' + r.id + '/sepa?' + new URLSearchParams({ year: String(r.x.year) }).toString()));
+      if (doc.status === 'ok') { const l = await L.alle('/api/companies/' + cid + '/runs/' + r.id + '/employees', { year: String(r.x.year) }); mw = l === null ? null : l.filter(function (e) { return idVan(e && e.employeeId); }).length; }
+    } catch (e) { if (e.reden === 'token' || e.reden === 'grens') throw e; doc = { status: 'netwerk' }; }
+    const nu = new Date().toISOString();
+    if (doc.status !== 'ok') {
+      const code = Number((/:(\d{3})/.exec(doc.status) || [])[1]);
+      const blijvend = (code >= 400 && code < 500 && code !== 429) || r.pogingen + 1 >= 5;
+      d.prepare("insert into betaallijst (run, bedrijf, status, pogingen, controle, gewijzigd) values (?, ?, ?, ?, ?, ?) on conflict (run) do update set status = excluded.status, " +
+        'pogingen = excluded.pogingen, controle = excluded.controle, gewijzigd = excluded.gewijzigd')
+        .run(r.id, cid, blijvend ? 'blijvend' : 'opnieuw', r.pogingen + 1, JSON.stringify({ ophalen: doc.status }), nu);
+      uit.betaal.opnieuw += blijvend ? 0 : 1;
+      continue;
+    }
+    const p = B.leesPain(doc.tekst);
+    const c = B.controle(p, { medewerkers_run: mw, pot_iban: invoer.pot_iban || null });
+    // review wv3208 MOET 4: de POT-rekening is van de Facturen-app, niet van Nmbrs; ontbreekt hij nu, dan geen definitieve afkeuring
+    // (de download controleert hem opnieuw en weigert zolang hij ontbreekt)
+    c.hard = c.hard.filter(function (h) { return h !== 'pot_rekening_onbekend'; });
+    const status = c.hard.length ? 'afgekeurd' : 'klaar';
+    d.exec('begin');
+    try {
+      d.prepare('delete from betaalregel where run = ?').run(r.id);
+      const zet = d.prepare('insert into betaalregel (run, volg, e2e, naam, iban, centen, oms) values (?, ?, ?, ?, ?, ?, ?)');
+      if (p.ok) p.regels.slice(0, B.MAX_REGELS).forEach(function (x, i) { zet.run(r.id, i + 1, x.e2e ? String(x.e2e).slice(0, 35) : null, String(x.naam || '').slice(0, 140), String(x.iban || '').slice(0, 34), Number.isSafeInteger(x.centen) ? x.centen : 0, x.oms ? String(x.oms).slice(0, 140) : null); });
+      d.prepare("insert into betaallijst (run, bedrijf, status, pogingen, opgehaald, formaat, aantal, totaal_centen, medewerkers_run, controle, dbtr_iban, sha, gewijzigd) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        'on conflict (run) do update set status = excluded.status, pogingen = excluded.pogingen, opgehaald = excluded.opgehaald, formaat = excluded.formaat, aantal = excluded.aantal, ' +
+        'totaal_centen = excluded.totaal_centen, medewerkers_run = excluded.medewerkers_run, controle = excluded.controle, dbtr_iban = excluded.dbtr_iban, sha = excluded.sha, gewijzigd = excluded.gewijzigd')
+        .run(r.id, cid, status, r.pogingen + 1, nu, p.ok ? p.formaat : null, c.aantal, c.totaal_centen, mw, JSON.stringify({ hard: c.hard, zacht: c.zacht, periode_soort: bed.periode_soort || null }),
+          p.ok && p.dbtrs && p.dbtrs.length ? p.dbtrs.slice(0, 5).join(',') : null, sha(doc.tekst), nu);
+      d.exec('commit');
+    } catch (e) { d.exec('rollback'); throw e; }
+    uit.betaal.nieuw++; uit.betaal[status]++;
+  }
+  }
+// regels niet langer bewaren dan nodig (de lijst zelf blijft, zonder namen en rekeningnummers)
+function betaalBewaar(d) {
+  d.prepare("delete from betaalregel where run in (select run from betaallijst where coalesce(opgehaald, gewijzigd) < ?)").run(new Date(Date.now() - BETAAL_BEWAAR_DAGEN * 86400000).toISOString());
 }
 function periodeVan(j) {
   const x = Array.isArray(j && j.data) ? j.data[0] : (j && j.data) || j;
@@ -621,6 +714,7 @@ async function kindLees(invoer, dir, peil) {
         else d.prepare('delete from uren where medewerker = ? and jaar = ? and periode = ?').run(m.medewerker, r.x.year, per);
       }
     }
+    await betaalRonde(L, d, cid, jaar, invoer, uit);   // wv3208
   }
   uit.vragen = L.vragen;
   uit.eindpunten = L.eindpunten;
@@ -1165,7 +1259,79 @@ function kindVault(invoer, dir) {
   const nu = Date.parse(dag + 'T00:00:00Z');
   return Object.assign({ ok: true }, vaultBereken(geladen, koppelingLees(dir), nu));
 }
+// ── wv3208: betaallijst voor de app (Facturen › Betalen › POT) ──────────────────────────────────────────────────────────
+// 'betaallijst' → de lijsten van de laatste 60 dagen (met regels voor "wat er in het bestand komt": naam, netto, laatste 4 van het IBAN).
+// 'betaalbestand' {run, datum, vandaag, msg_hex, cre_dt_tm, bewust, pot: {iban, naam}} → het pain.001.001.09 voor de extensie (tekst).
+// 'betaalgemeld' {runs} → gemeld zetten (na Davids ene app-melding per nieuwe run).
+function betaalRun(d, run) {
+  const l = d.prepare("select b.*, l.data as rdata from betaallijst b join loonrun l on l.id = b.run where b.run = ?").get(run);
+  if (!l) return null;
+  const x = JSON.parse(l.rdata), c = l.controle ? JSON.parse(l.controle) : {};
+  return { l: l, run: { year: x.year, number: x.number, periodEnd: x.periodEnd, periodStart: x.periodStart, createdAt: x.createdAt, type: x.type }, c: c };
+}
+// De controle opnieuw op de bewaarde regels met de POT-rekening van nu (lijst én download rekenen zo hetzelfde). Alleen voor status klaar.
+function betaalHercontrole(B, b, regels, potIban) {
+  const c = B.controle({ ok: true, nb: b.l.aantal, ctrl_centen: b.l.totaal_centen, dbtrs: b.l.dbtr_iban ? String(b.l.dbtr_iban).split(',') : [],
+    regels: regels.map(function (r) { return Object.assign({ munt: 'EUR' }, r); }) }, { medewerkers_run: b.l.medewerkers_run, pot_iban: potIban || null });
+  // review wv3208 nacontrole: wat alleen het bronbestand kon zeggen (geen controletotaal in de kop) blijft een zacht punt
+  ((b.c && b.c.zacht) || []).forEach(function (z) { if (z === 'kop_zonder_controletotaal' && c.zacht.indexOf(z) < 0) c.zacht.push(z); });
+  return c;
+}
+function kindBetaallijst(invoer, dir) {
+  if (!fs.existsSync(path.join(dir, 'nmbrs.' + 'sqlite'))) return { ok: true, lijsten: [] };
+  const B = require('./nmbrs-betaal.js');
+  const d = db(dir);
+  try {
+    betaalBewaar(d);
+    const grens = new Date(Date.now() - BETAAL_BEWAAR_DAGEN * 86400000).toISOString();
+    const runs = lid(d, "select run from betaallijst where coalesce(opgehaald, gewijzigd) >= ? order by coalesce(opgehaald, gewijzigd) desc limit 12", [grens]).map(function (r) { return r.run; });
+    const lijsten = runs.map(function (id) {
+      const b = betaalRun(d, id); if (!b) return null;
+      const ruw = lid(d, 'select naam, iban, centen from betaalregel where run = ? order by volg', [id]);
+      const regels = ruw.map(function (r) { return { naam: r.naam, iban4: '…' + String(r.iban).slice(-4), centen: r.centen }; });
+      // klaar + regels nog aanwezig: hard/zacht zoals de download ze nu zou rekenen (POT-rekening van nu)
+      if (b.l.status === 'klaar' && ruw.length === b.l.aantal) { const h = betaalHercontrole(B, b, ruw, invoer && invoer.pot_iban); b.c = Object.assign({}, b.c, { hard: h.hard, zacht: h.zacht }); }
+      else if (b.l.status === 'klaar') b.c = Object.assign({}, b.c, { hard: ['regels_gewist'] });
+      return { run: id, jaar: b.run.year, nummer: b.run.number, periode: B.maandTekst(b.run, b.c.periode_soort), aangemaakt: b.run.createdAt, status: b.l.status,
+        opgehaald: b.l.opgehaald, aantal: b.l.aantal, totaal_centen: b.l.totaal_centen, medewerkers_run: b.l.medewerkers_run,
+        hard: (b.c.hard || []).map(function (h) { return B.UITLEG[h] || h; }), zacht: (b.c.zacht || []).map(function (h) { return B.UITLEG[h] || h; }),
+        ophalen: b.c.ophalen || null, gemeld: b.l.gemeld, gedownload: b.l.gedownload, regels: regels };
+    }).filter(Boolean);
+    return { ok: true, lijsten: lijsten };
+  } finally { d.close(); }
+}
+function kindBetaalbestand(invoer, dir) {
+  const B = require('./nmbrs-betaal.js');
+  if (!idVan(invoer.run)) return { ok: false, code: 'invoer', fout: 'run ontbreekt' };
+  const d = db(dir);
+  try {
+    const b = betaalRun(d, invoer.run);
+    if (!b) return { ok: false, code: 'onbekend', fout: 'deze loonrun heeft geen betaallijst' };
+    if (b.l.status !== 'klaar') return { ok: false, code: 'controle', fout: 'deze betaallijst is niet klaar (' + b.l.status + ')' };
+    betaalBewaar(d);
+    // munt: bij het ophalen al als EUR getoetst (anders status afgekeurd)
+    const regels = lid(d, 'select e2e, naam, iban, centen, oms from betaalregel where run = ? order by volg', [invoer.run]).map(function (r) { return Object.assign({ munt: 'EUR' }, r); });
+    if (regels.length !== b.l.aantal) return { ok: false, code: 'controle', fout: 'de regels zijn er niet meer (na 60 dagen gewist); wacht op de volgende ronde of vraag de machinekamer' };
+    // de controle opnieuw op de bewaarde regels, met de POT-rekening van nu (de Facturen-app kan intussen gewijzigd zijn)
+    const c = betaalHercontrole(B, b, regels, invoer.pot && invoer.pot.iban);
+    const u = B.bestand({ run: b.run, periode_soort: b.c.periode_soort, regels: regels, controle: c, pot: invoer.pot || {}, datum: invoer.datum, vandaag: invoer.vandaag,
+      msg_hex: invoer.msg_hex, cre_dt_tm: invoer.cre_dt_tm, bewust: invoer.bewust === true });
+    if (u.ok) d.prepare('update betaallijst set gedownload = ? where run = ?').run(new Date().toISOString(), invoer.run);
+    return u;
+  } finally { d.close(); }
+}
+function kindBetaalgemeld(invoer, dir) {
+  const d = db(dir);
+  try {
+    const zet = d.prepare('update betaallijst set gemeld = ? where run = ? and gemeld is null');
+    let n = 0; (Array.isArray(invoer.runs) ? invoer.runs : []).slice(0, 20).forEach(function (r) { if (idVan(r)) n += Number(zet.run(new Date().toISOString(), r).changes); });
+    return { ok: true, gemeld: n };
+  } finally { d.close(); }
+}
 async function kind(opdracht, invoer, dir) {
+  if (opdracht === 'betaallijst') return kindBetaallijst(invoer, dir);   // wv3208
+  if (opdracht === 'betaalbestand') return kindBetaalbestand(invoer, dir);
+  if (opdracht === 'betaalgemeld') return kindBetaalgemeld(invoer, dir);
   if (opdracht === 'stand') return kindStand(dir);
   if (opdracht === 'pot') return kindPot(dir);
   if (opdracht === 'pma') return kindPma(dir);   // wv3047
@@ -1195,7 +1361,7 @@ async function kind(opdracht, invoer, dir) {
   const t = await tokenVraag(form, id, geheim);
   const refresh = t.refresh || (opdracht === 'ververs' ? invoer.refresh : null);
   if (refresh) noodSchrijf(dir, refresh);   // vóór stdout
-  return { ok: true, _access: t.access, _refresh: refresh, verloopt_s: t.verloopt_s, nieuw_refresh: !!t.refresh };
+  return { ok: true, _access: t.access, _refresh: refresh, verloopt_s: t.verloopt_s, nieuw_refresh: !!t.refresh, doc: t.doc === true };
 }
 
 if (require.main === module) {
@@ -1211,5 +1377,5 @@ if (require.main === module) {
   });
 }
 
-module.exports = { SCOPES, REDIRECT, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodSchrijf, noodWis, doodLees, doodZet, verzoekToets, kies, scopesExact,
+module.exports = { SCOPES, SCOPES_BASIS, SCOPES_DOC, REDIRECT, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodSchrijf, noodWis, doodLees, doodZet, verzoekToets, kies, scopesExact,
   sha, xmlBoom, journaalRegels, signalenBereken, caoBlokken, periodeStart, NmbrsFout, vaultBereken, blokZet, vaultPadGoed, BLOK_BEGIN, BLOK_EIND, dagUren };
