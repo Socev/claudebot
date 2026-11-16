@@ -55,7 +55,10 @@ fi
 
 [ "${1:-}" = "--lus" ] || { echo "gebruik: als root starten (entrypoint)" >&2; exit 2; }
 umask 077
+initdb_als_leeg(){
 if [ ! -s "$DATA/PG_VERSION" ]; then
+  # Codex MOET 2: nooit een lege databank maken naast een opzij gezette (dan is er iets misgegaan bij een terugwissel)
+  if ls -d "$BASIS"/17/data.oud-* >/dev/null 2>&1; then log "geen datamap maar wel 17/data.oud-*: geen initdb, geen start (machinekamer)"; exit 1; fi
   log "lege datamap: initdb"
   if "$PGBIN/initdb" -D "$DATA" -U pgbaas --auth-local=peer --auth-host=reject --encoding=UTF8 --locale=C.UTF-8 \
        --locale-provider=icu --icu-locale=en-US --data-checksums >> "$LOG" 2>&1; then
@@ -64,6 +67,7 @@ if [ ! -s "$DATA/PG_VERSION" ]; then
     log "initdb faalde — geen databank"; exit 1
   fi
 fi
+}
 
 PID=""
 stop_gevraagd(){ [ -e "$STOPMAP/stop" ]; }
@@ -129,15 +133,46 @@ terug_uitvoeren(){
   for _ in $(seq 1 120); do kill -0 "$PID" 2>/dev/null || break; sleep 0.5; done
   if kill -0 "$PID" 2>/dev/null; then rm -rf "$nieuw"; terug_uitkomst "$id" fout "postgres stopte niet binnen 60 s; huidige databank blijft"; TERUG_HERSTART=1; return 0; fi
   oud="data.oud-$(date -u +%Y%m%d-%H%M%S)"
-  if ! mv "$DATA" "$BASIS/17/$oud"; then rm -rf "$nieuw"; terug_uitkomst "$id" fout "huidige datamap niet opzij te zetten; blijft"; TERUG_HERSTART=1; return 0; fi
+  # Codex MOET 2: dagboek vóór de eerste verplaatsing; valt het proces tussen de twee mv's weg, dan zet terug_herstel bij de
+  # volgende start de oude map terug (vóór initdb kan draaien)
+  printf 'id=%s\noud=%s\nnieuw=%s\nlsn=%s\ntli=%s\nsid=%s\n' "$id" "$oud" "terug-$id" "$k_lsn" "$k_tli" "$k_sid" > "$BASIS/terug-bezig.tmp" \
+    && sync "$BASIS/terug-bezig.tmp" 2>/dev/null; mv -f "$BASIS/terug-bezig.tmp" "$BASIS/terug-bezig" && sync "$BASIS" 2>/dev/null
+  if ! mv "$DATA" "$BASIS/17/$oud"; then rm -f "$BASIS/terug-bezig"; rm -rf "$nieuw"; terug_uitkomst "$id" fout "huidige datamap niet opzij te zetten; blijft"; TERUG_HERSTART=1; return 0; fi
   if ! mv "$d" "$DATA"; then
-    mv "$BASIS/17/$oud" "$DATA"; rm -rf "$nieuw"; terug_uitkomst "$id" fout "kopie niet op zijn plek te zetten; oude datamap terug"; TERUG_HERSTART=1; return 0
+    mv "$BASIS/17/$oud" "$DATA"; rm -f "$BASIS/terug-bezig"; rm -rf "$nieuw"; terug_uitkomst "$id" fout "kopie niet op zijn plek te zetten; oude datamap terug"; TERUG_HERSTART=1; return 0
   fi
+  sync "$BASIS/17" 2>/dev/null
   chmod 0700 "$DATA"; rmdir "$nieuw" 2>/dev/null || true
   terug_uitkomst "$id" gewisseld "kopie ingezet, oude datamap opzij" ",\"oud\":\"$oud\",\"checkpoint_lsn\":\"$k_lsn\",\"tijdlijn\":$k_tli,\"systeem_id\":\"$k_sid\""
+  rm -f "$BASIS/terug-bezig"
   TERUG_HERSTART=1
 }
+# Bij de start (vóór initdb): een onderbroken wissel afmaken (kopie stond al op zijn plek) of terugdraaien (oude map terug).
+terug_herstel(){
+  local j="$BASIS/terug-bezig" id oud lsn tli sid
+  [ -s "$j" ] || return 0
+  id="$(sed -n 's/^id=//p' "$j" | head -1 | tr -cd 'A-Za-z0-9-')"; oud="$(sed -n 's/^oud=//p' "$j" | head -1 | tr -cd 'A-Za-z0-9.-')"
+  lsn="$(sed -n 's/^lsn=//p' "$j" | head -1 | tr -cd '0-9A-F/')"; tli="$(sed -n 's/^tli=//p' "$j" | head -1 | tr -cd '0-9')"
+  sid="$(sed -n 's/^sid=//p' "$j" | head -1 | tr -cd '0-9')"
+  if [ -s "$DATA/PG_VERSION" ]; then
+    log "terug $id: onderbroken na het inzetten; wissel afgemaakt"
+    [ -e "$BASIS/terug-$id.json" ] || terug_uitkomst "$id" gewisseld "kopie ingezet (na onderbreking afgemaakt), oude datamap opzij" ",\"oud\":\"$oud\",\"checkpoint_lsn\":\"$lsn\",\"tijdlijn\":${tli:-0},\"systeem_id\":\"$sid\""
+  elif [ -n "$oud" ] && [ -s "$BASIS/17/$oud/PG_VERSION" ]; then
+    [ -e "$DATA" ] && mv "$DATA" "$BASIS/17/data.kapot-$(date -u +%Y%m%d-%H%M%S)"
+    if mv "$BASIS/17/$oud" "$DATA"; then
+      log "terug $id: onderbroken tussen de verplaatsingen; oude datamap teruggezet"
+      terug_uitkomst "$id" fout "wissel onderbroken; oude datamap teruggezet"
+    else
+      log "terug $id: oude datamap terugzetten faalde; geen start (machinekamer)"; exit 1
+    fi
+  else
+    log "terug $id: onderbroken en geen oude datamap ($oud) te vinden; geen start (machinekamer)"; exit 1
+  fi
+  rm -f "$j"
+}
 
+terug_herstel
+initdb_als_leeg
 WACHT=(2 5 10 20 30 60)
 n=0
 while ! stop_gevraagd; do
