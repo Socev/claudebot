@@ -57,6 +57,7 @@ function server(naam, poort, extraEnv) {
     OFFSITE_SCRIPT: OFF, OFFSITE_BACKUP_LOG: path.join(d, 'backup.log') }, extraEnv || {});
   delete env.AGENT_WEBHOOK_URL; delete env.SOCEV_AGENT_RUN; delete env.ROL_BESTAND; delete env.CLOUDFLARE_TUNNEL_TOKEN_OLARES;
   if (!extraEnv || !('SOCEV_KANT' in extraEnv)) delete env.SOCEV_KANT;
+  ['SCHEIDS_URL', 'SCHEIDS_LEES_SLEUTEL', 'SCHEIDS_SLEUTEL_BESTAND'].forEach((k) => { if (!extraEnv || !(k in extraEnv)) delete env[k]; });   // wv3179: nooit de echte
   const p = spawn(process.execPath, [path.join(d, 'server.js')], { env, detached: true, stdio: ['ignore', fs.openSync(path.join(d, 'out.log'), 'a'), fs.openSync(path.join(d, 'out.log'), 'a')] });
   return { p, d, poort, rolbestand: path.join(d, 'home', 'bin', 'uitwijk-rol') };
 }
@@ -96,6 +97,7 @@ const fwGet = (s) => req(s, 'GET', '/auto/ota/', undefined, { 'Device-Id': '02:5
     let h = await wachtRol(s1, 'primair', 3000), r0;
     toets('1 rol primair bij actieve_kant olares', h.rol === 'primair' && h.kant === 'olares' && h.uitwijk && h.uitwijk.actieve_kant === 'olares', JSON.stringify(h.uitwijk));
     toets('1 /health ok blijft true', h.ok === true);
+    toets('1 proefkopie zonder SCHEIDS_URL leest de nep-RPC (bron rpc-proef)', h.uitwijk && h.uitwijk.bron === 'rpc-proef', h.uitwijk && h.uitwijk.bron);
     const pub = await req(s1, 'GET', '/health/publiek');
     toets('1 /health/publiek: ok, dienst, kant, rol', pub.ok === true && pub.kant === 'olares' && pub.rol === 'primair' && Object.keys(pub).filter((k) => k[0] !== '_').sort().join(',') === 'dienst,kant,ok,rol', JSON.stringify(pub));
     toets('1 rolbestand primair + kant + gelezen', /^rol=primair$/m.test(lees(s1.rolbestand)) && /^kant=olares$/m.test(lees(s1.rolbestand)) && /^gelezen=[1-9]\d+$/m.test(lees(s1.rolbestand)), lees(s1.rolbestand).replace(/\n/g, ' '));
@@ -237,6 +239,58 @@ const fwGet = (s) => req(s, 'GET', '/auto/ota/', undefined, { 'Device-Id': '02:5
     // s1 kreeg geen UITWIJK_3B_BIN en zag in deel 2 de stand vps: een proefkopie roept nooit het echte script aan
     toets('8 proefkopie zonder UITWIJK_3B_BIN: echt script niet aangeroepen, één logregel', (lees(path.join(s1.d, 'api.log')).match(/uitwijk3b fout=script_ontbreekt/g) || []).length === 1
       && !/\/opt\/data\/bin\/uitwijk-3b/.test(lees(path.join(s1.d, 'api.log'))), (lees(path.join(s1.d, 'api.log')).match(/uitwijk3b.*/g) || []).join(' | '));
+
+    // ── 9. scheidsrechter op Cloudflare (wv3179): nep-Worker POST /lees met Bearer-leessleutel; Supabase niet meer gelezen
+    const SLEUTEL = 'scheids_' + 'a1'.repeat(24);
+    let wModus = 'olares', wLezingen = 0, wKop = null;
+    const nepW = http.createServer((q, s) => {
+      if (q.method !== 'POST' || q.url !== '/lees') { s.writeHead(404); return s.end('{}'); }
+      wLezingen++; wKop = { auth: q.headers.authorization || '', apikey: q.headers.apikey || null };
+      if (wKop.auth !== 'Bearer ' + SLEUTEL) { s.writeHead(401, { 'content-type': 'application/json' }); return s.end('{"ok":false}'); }
+      if (wModus === '503') { s.writeHead(503); return s.end('{"ok":false,"fout":"databank"}'); }
+      s.writeHead(200, { 'content-type': 'application/json' });
+      s.end(JSON.stringify([{ actieve_kant: wModus, sinds: '2026-11-16T08:00:00.000Z', versie: 4, door: 'toets', reden: null }]));
+    });
+    await new Promise((r) => nepW.listen(0, '127.0.0.1', r));
+    const WURL = 'http://127.0.0.1:' + nepW.address().port;
+    const SBEST = path.join(W, 'scheids-lees.key'); fs.writeFileSync(SBEST, SLEUTEL + '\n', { mode: 0o600 });
+    modus = 'vps'; const sbVoor = lezingen;        // nep-Supabase zegt vps: wie hem nog leest, wordt passief
+    const s9 = server('s9', vrijePoort(), { SCHEIDS_URL: WURL, SCHEIDS_SLEUTEL_BESTAND: SBEST }); alle.push(s9); await wacht(s9);
+    h = await wachtRol(s9, 'primair', 3000);
+    toets('9 scheids olares -> primair, bron scheids, versie zichtbaar', h.rol === 'primair' && h.uitwijk.bron === 'scheids' && h.uitwijk.stand_versie === 4 && h.uitwijk.stand_sinds === '2026-11-16T08:00:00.000Z', JSON.stringify(h.uitwijk && [h.uitwijk.bron, h.uitwijk.reden, h.uitwijk.fout, h.uitwijk.stand_versie]));
+    toets('9 Bearer-leessleutel uit het bestand, geen apikey-kop', wKop && wKop.auth === 'Bearer ' + SLEUTEL && wKop.apikey === null);
+    toets('9 Supabase-RPC niet meer gelezen', lezingen === sbVoor, (lezingen - sbVoor) + ' lezing(en)');
+    wModus = 'vps'; h = await wachtRol(s9, 'passief', 3000);
+    toets('9 scheids vps -> passief', h.rol === 'passief' && /actieve kant is vps/.test(h.uitwijk.reden), h.uitwijk && h.uitwijk.reden);
+    wModus = 'olares'; h = await wachtRol(s9, 'primair', 3000);
+    toets('9 scheids weer olares -> primair', h.rol === 'primair');
+    wModus = '503'; await slaap(1000); h = await req(s9, 'GET', '/health');
+    toets('9 scheids 503: binnen de gratie primair, fout zichtbaar', h.rol === 'primair' && /scheids http 503/.test(h.uitwijk.fout || ''), JSON.stringify(h.uitwijk && [h.uitwijk.rol, h.uitwijk.fout]));
+    h = await wachtRol(s9, 'passief', 4000);
+    toets('9 scheids 503: na de gratie passief (fail-closed)', h.rol === 'passief' && /niet te lezen/.test(h.uitwijk.reden), h.uitwijk && h.uitwijk.reden);
+    wModus = 'olares'; h = await wachtRol(s9, 'primair', 2000);
+    toets('9 scheids terug -> primair', h.rol === 'primair');
+    stop(s9);
+    // foute sleutel (401) en ontbrekende sleutel: passief vanaf de start
+    const SFOUT = path.join(W, 'scheids-fout.key'); fs.writeFileSync(SFOUT, 'scheids_' + 'b2'.repeat(24) + '\n');
+    const s10 = server('s10', vrijePoort(), { SCHEIDS_URL: WURL, SCHEIDS_SLEUTEL_BESTAND: SFOUT }); alle.push(s10); await wacht(s10);
+    await slaap(600); h = await req(s10, 'GET', '/health');
+    toets('9 foute leessleutel (401) -> passief', h.rol === 'passief' && /scheids http 401/.test(h.uitwijk.reden), h.uitwijk && h.uitwijk.reden);
+    stop(s10);
+    const s11 = server('s11', vrijePoort(), { SCHEIDS_URL: WURL, SCHEIDS_SLEUTEL_BESTAND: path.join(W, 'bestaat-niet.key') }); alle.push(s11); await wacht(s11);
+    await slaap(600); h = await req(s11, 'GET', '/health');
+    toets('9 geen leessleutel -> passief, met reden', h.rol === 'passief' && /leessleutel ontbreekt/.test(h.uitwijk.reden), h.uitwijk && h.uitwijk.reden);
+    toets('9 zonder sleutel geen aanroep naar de Worker met lege kop', !wKop || wKop.auth !== 'Bearer ');
+    stop(s11);
+    // env SCHEIDS_LEES_SLEUTEL (fetch-secrets, ook op de R230) gaat voor het bestand
+    const s12 = server('s12', vrijePoort(), { SCHEIDS_URL: WURL, SCHEIDS_SLEUTEL_BESTAND: SFOUT, SCHEIDS_LEES_SLEUTEL: SLEUTEL }); alle.push(s12); await wacht(s12);
+    h = await wachtRol(s12, 'primair', 3000);
+    toets('9 env-leessleutel gaat voor het bestand', h.rol === 'primair' && h.uitwijk.bron === 'scheids');
+    stop(s12);
+    // een proefkopie zonder SCHEIDS_URL leest de nep-RPC (bron rpc-proef); productie niet (SERVER_ECHT = vast adres)
+    toets('9 productiepad: vast Worker-adres in de code', /const SCHEIDS_URL_ECHT = 'https:\/\/socev-scheids\.d-schaap\.workers\.dev';/.test(fs.readFileSync('server.js', 'utf8'))
+      && /process\.env\.SCHEIDS_URL \|\| \(SERVER_ECHT \? SCHEIDS_URL_ECHT : ''\)/.test(fs.readFileSync('server.js', 'utf8')));
+    nepW.close();
   } catch (e) { toets('uitzondering', false, e.stack); }
   alle.forEach(stop); sb.close();
   console.log(fout ? ('ROOD: ' + fout + ' toets(en)') : 'deel A groen');

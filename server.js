@@ -24456,8 +24456,10 @@ async function appZoekSnel(req, res, a, d) {
 
 
 // ── Rolwachter (uitwijk stap 3, 6-10-2026) ─────────────────────────────────────────────────────────
-// Er is altijd maar één actieve kant (olares | vps); die staat in Supabase (machinekamer.uitwijk_stand, RPC
-// uitwijk_stand_lees). Een pod die niet de actieve kant is, is PASSIEF: /run, /agent en de kastjepaden geven 409 (de
+// Er is altijd maar één actieve kant (olares | vps); die staat sinds wv3179 (16-11-2026) bij de scheidsrechter op Cloudflare
+// (Worker socev-scheids + D1, POST /lees met een eigen leessleutel), niet meer in Supabase: in de nacht van 16-11 maakte een
+// bevroren databank de pod passief, en de databank verhuist naar Olares (de scheidsrechter moet buiten beide servers staan).
+// De oude RPC uitwijk_stand_lees bestaat nog 14 dagen maar wordt door productie niet meer gelezen. Een pod die niet de actieve kant is, is PASSIEF: /run, /agent en de kastjepaden geven 409 (de
 // OTA-vraag 503, stap 9), en hij schrijft niets naar gedeelde opslag (offsite hier; bisync en GHAWA in run.sh via het rolbestand).
 // Fail-closed: na elke processtart (ook een code-uitrol) passief tot een verse lezing (Fable-review plan #1).
 // Tijdens bedrijf houdt een mislukte lezing de rol hooguit ROL_GRATIE_MS vast, daarna passief: zonder grens bleef
@@ -24471,7 +24473,7 @@ const ROL_INTERVAL_FOUT_MS = 15 * 1000;   // na een mislukte lezing (en tot de e
 const ROL_TIMEOUT_MS = 5000;
 const ROL_GRATIE_MS = 180 * 1000;         // zo lang mag een eerder gelezen rol blijven staan zonder verse lezing
 const ROL_START_WACHT_MS = 6000;          // /run en /agent wachten hooguit zo lang op de eerste lezing
-const rol = { rol: 'passief', reden: 'start: nog niet gelezen', actieve_kant: null, stand_sinds: null,
+const rol = { rol: 'passief', reden: 'start: nog niet gelezen', actieve_kant: null, stand_sinds: null, stand_versie: null,
   sinds_rol: Date.now(), gelezen: 0, laatste_poging: 0, fout: null, fouten_op_rij: 0, wissels: 0, eerste: 0 };
 let rolEersteKlaar = null;
 const rolEerste = new Promise(function (r) { rolEersteKlaar = r; });
@@ -24499,17 +24501,45 @@ function rolZet(nieuw, reden) {
   rol.reden = reden;
 }
 
+// Scheidsrechter (wv3179): adres vast in de code (env SCHEIDS_URL alleen als vervanging), leessleutel uit env
+// SCHEIDS_LEES_SLEUTEL (fetch-secrets, kluis scheids_lees_sleutel; zo krijgt ook de pod op de R230 hem) of anders het bestand
+// /opt/data/.scheids/lees.key (0600 claude). Geen sleutel = lezing mislukt = passief (fail-closed), net als een storing.
+// Een proefkopie (test/*.sh) zonder SCHEIDS_URL leest de nep-RPC op SUPABASE_URL zoals vóór wv3179: alleen voor de
+// bestaande toetsen, productie (SERVER_ECHT) komt daar nooit.
+const SCHEIDS_URL_ECHT = 'https://socev-scheids.d-schaap.workers.dev';
+const SCHEIDS_URL = (process.env.SCHEIDS_URL || (SERVER_ECHT ? SCHEIDS_URL_ECHT : '')).replace(/\/$/, '');
+const SCHEIDS_SLEUTEL_BESTAND = serverPad('scheids_sleutel', process.env.SCHEIDS_SLEUTEL_BESTAND, '/opt/data/.scheids/lees.key', serverProefDeel('scheids-lees.key'));
+const ROL_BRON = SCHEIDS_URL ? 'scheids' : 'rpc-proef';
+
+function rolScheidsSleutel() {
+  const e = String(process.env.SCHEIDS_LEES_SLEUTEL || '').trim();
+  if (e) return e;
+  try { return fs.readFileSync(SCHEIDS_SLEUTEL_BESTAND, 'utf8').trim(); } catch (x) { return ''; }
+}
+
+function rolStandUit(j) {
+  const k = Array.isArray(j) && j[0] ? j[0].actieve_kant : null;
+  if (ROL_KANTEN.indexOf(k) < 0) throw new Error('ongeldige stand');
+  return { actieve_kant: k, sinds: j[0].sinds || null, versie: Number.isInteger(j[0].versie) ? j[0].versie : null };
+}
+
 async function rolLeesRpc() {
+  if (ROL_BRON === 'scheids') {
+    const sleutel = rolScheidsSleutel();
+    if (!sleutel) throw new Error('scheids-leessleutel ontbreekt');
+    const r = await fetch(SCHEIDS_URL + '/lees', { method: 'POST',
+      headers: { Authorization: 'Bearer ' + sleutel, 'Content-Type': 'application/json', 'User-Agent': 'socev-pod-rolwachter' }, body: '{}',
+      signal: AbortSignal.timeout(ROL_TIMEOUT_MS), redirect: 'error' });
+    if (!r.ok) throw new Error('scheids http ' + r.status);
+    return rolStandUit(await r.json());
+  }
   const url = (process.env.SUPABASE_URL || '').replace(/\/$/, ''), key = process.env.SUPABASE_SERVICE_ROLE || '';
   if (!url || !key) throw new Error('supabase-omgeving ontbreekt');
   const r = await fetch(url + '/rest/v1/rpc/uitwijk_stand_lees', { method: 'POST',
     headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: '{}',
     signal: AbortSignal.timeout(ROL_TIMEOUT_MS) });
   if (!r.ok) throw new Error('rpc http ' + r.status);
-  const j = await r.json();
-  const k = Array.isArray(j) && j[0] ? j[0].actieve_kant : null;
-  if (ROL_KANTEN.indexOf(k) < 0) throw new Error('ongeldige stand');
-  return { actieve_kant: k, sinds: j[0].sinds || null };
+  return rolStandUit(await r.json());
 }
 
 async function rolRonde() {
@@ -24519,7 +24549,7 @@ async function rolRonde() {
   try {
     const s = await rolLeesRpc();
     rol.gelezen = Date.now(); rol.fout = null; rol.fouten_op_rij = 0;
-    rol.actieve_kant = s.actieve_kant; rol.stand_sinds = s.sinds;
+    rol.actieve_kant = s.actieve_kant; rol.stand_sinds = s.sinds; rol.stand_versie = s.versie;
     if (ROL_KANT === 'onbekend') rolZet('passief', 'SOCEV_KANT ongeldig');
     else rolZet(s.actieve_kant === ROL_KANT ? 'primair' : 'passief', 'actieve kant is ' + s.actieve_kant);
   } catch (e) {
@@ -24558,8 +24588,8 @@ function rolPoort(res, verder) {
 }
 
 function rolInfo() {
-  return { kant: ROL_KANT, rol: rol.rol, reden: rol.reden, actieve_kant: rol.actieve_kant,
-    stand_sinds: rol.stand_sinds, sinds_rol_iso: new Date(rol.sinds_rol).toISOString(),
+  return { kant: ROL_KANT, rol: rol.rol, reden: rol.reden, actieve_kant: rol.actieve_kant, bron: ROL_BRON,
+    stand_sinds: rol.stand_sinds, stand_versie: rol.stand_versie, sinds_rol_iso: new Date(rol.sinds_rol).toISOString(),
     gelezen_iso: rol.gelezen ? new Date(rol.gelezen).toISOString() : null,
     leeftijd_s: rol.gelezen ? Math.round((Date.now() - rol.gelezen) / 1000) : null,
     fout: rol.fout, fouten_op_rij: rol.fouten_op_rij, wissels: rol.wissels, runsh_poort: ROL_RUNSH_POORT,
