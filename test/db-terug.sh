@@ -113,6 +113,22 @@ uit="$(ronde)"
 ok "W tweede ronde: weer klaar, geen tweede wissel, nieuwe schrijfactie blijft" 'printf "%s" "$uit" | grep -q "\"uitkomst\":\"klaar\"" && [ "$(ls -d "$T"/pg/17/data.oud-* | wc -l)" = 1 ] && [ "$(q "select count(*) from public.proef where id = 9002")" = 1 ]'
 ok "W db-wacht leeft nog (zelfde lus)" 'kill -0 "$WPID" 2>/dev/null && grep -q "terug-modus: postgres opnieuw starten" "$T/pg/db-wacht.log"'
 
+# ── O: Codex MOET 2 — wissel onderbroken tussen de twee verplaatsingen → bij de start oude map terug, nooit initdb ──
+start_wacht(){ PG_BASIS="$T/pg" PG_SOCK="$T/sock" PG_STOPMAP="$T/stop" PG_INIT_MAP="$T/init" bash "$SRC/db/db-wacht.sh" --lus </dev/null >/dev/null 2>&1 & WPID=$!; }
+stop_wacht(){ : > "$T/stop/stop"; for _ in $(seq 1 40); do kill -0 "$WPID" 2>/dev/null || break; sleep 0.5; done; rm -f "$T/stop/stop"; }
+VOOR="$(telling)"; stop_wacht
+ok "O db-wacht netjes gestopt" '! kill -0 "$WPID" 2>/dev/null'
+printf 'id=20261116-200009-99999999\noud=data.oud-sim\nnieuw=terug-sim\nlsn=0/1\ntli=2\nsid=1\n' > "$T/pg/terug-bezig"
+mv "$T/pg/17/data" "$T/pg/17/data.oud-sim"
+start_wacht
+for _ in $(seq 1 40); do [ "$(q 'select 1')" = 1 ] && break; sleep 0.5; done
+ok "O onderbroken wissel: oude map teruggezet, zelfde data, uitkomst fout, dagboek weg" '[ "$(telling)" = "$VOOR" ] && [ ! -e "$T/pg/17/data.oud-sim" ] && grep -q "onderbroken" "$T/pg/terug-20261116-200009-99999999.json" && [ ! -e "$T/pg/terug-bezig" ]'
+stop_wacht
+mv "$T/pg/17/data" "$T/pg/17/data.oud-zonder-dagboek"
+start_wacht; sleep 3
+ok "O geen datamap maar wel data.oud-*: geen initdb, db-wacht stopt" '! kill -0 "$WPID" 2>/dev/null && [ ! -e "$T/pg/17/data" ] && grep -q "geen initdb" "$T/pg/db-wacht.log"'
+mv "$T/pg/17/data.oud-zonder-dagboek" "$T/pg/17/data"; start_wacht
+for _ in $(seq 1 40); do [ "$(q 'select 1')" = 1 ] && break; sleep 0.5; done
 # ── S: de haak in server.js (statisch): alleen kant olares + verse stand vps + eigen databank, na elke rolronde ──
 ok "S rolwachter roept db-terug aan na elke ronde" 'grep -q "try { dbTerugRonde(); } catch (e) { logError(.dbterug., e); }" "$SRC/server.js"'
 ok "S alleen kant olares, verse lezing vps, met socket" 'sed -n "/^function dbTerugRonde/,/^}/p" "$SRC/server.js" | grep -q "ROL_KANT !== .olares." && sed -n "/^function dbTerugRonde/,/^}/p" "$SRC/server.js" | grep -q "rol.actieve_kant === .vps. && rol.gelezen && Date.now() - rol.gelezen < 30000" && sed -n "/^function dbTerugRonde/,/^}/p" "$SRC/server.js" | grep -q "s.PGSQL.5432"'
