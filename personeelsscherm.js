@@ -1,6 +1,6 @@
 'use strict';
 /**
- * personeelsscherm.js — OVIS Personeelsscherm fase 0 (wv2991, 13-11-2026).
+ * personeelsscherm.js — OVIS Scherm (zichtbare naam sinds wv3214, 16-11-2026; vroeger "Personeelsscherm"; id, routes en bestanden ongewijzigd) fase 0 (wv2991, 13-11-2026).
  *
  * WAAROM. David (13-11 in de app): een Raspberry Pi aan de tv in de personeelskamer toont personeel.socev.dev; alleen dat kastje en hij
  * (Google-inlog) komen erin; de machinekamer onderhoudt het scherm. Plan: vault 01_Ontwikkeling "OVIS Personeelsscherm - plan (Fable 5.2,
@@ -106,7 +106,7 @@ var P=document.querySelectorAll('.paneel');if(P.length>1){var L=[],S=0,i;for(i=0
 var q=Math.floor(n.getTime()/1000)%S,c=Math.floor(n.getTime()/1000/S);for(i=0;i<L.length;i++){L[i][0].classList.toggle('aan',q>=L[i][1]&&q<L[i][1]+L[i][2]);
 var B=L[i][0].querySelectorAll('.blad');for(var j=0;j<B.length;j++){B[j].classList.toggle('aan',j===c%B.length);}}}}t();setInterval(t,1000);})();`;
   if (leeg) {
-    return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta http-equiv="refresh" content="60"><title>Personeelsscherm</title>
+    return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta http-equiv="refresh" content="60"><title>OVIS Scherm</title>
 <style>*{cursor:none!important}html,body{margin:0;height:100%;background:#000;color:#444;font-family:'Liberation Sans',Arial,Helvetica,sans-serif;overflow:hidden}#doek{position:relative;width:1920px;height:1080px;transform-origin:0 0;background:#000}#klok{position:absolute;right:38px;bottom:38px;font-size:46px}#dag,#wd{display:none}</style></head>
 <body data-soort="leeg" data-gemaakt="${Number(gemaakt)}"><div id="doek"><div id="klok"></div><div id="wd"></div><div id="dag"></div></div><script>${klokScript}</script></body></html>`;
   }
@@ -155,7 +155,7 @@ var B=L[i][0].querySelectorAll('.blad');for(var j=0;j<B.length;j++){B[j].classLi
     + (sc.intro ? `<p class="intro">${esc(sc.intro)}</p>` : '')
     + `<div class="punten">${sc.punten.map((x) => `<div class="punt"><div class="pt">${esc(x.titel)}</div>${x.tekst ? `<div class="px">${esc(x.tekst)}</div>` : ''}</div>`).join('')}</div>`
     + `<div class="voet">Bron: ${esc(sc.bron)}</div></section>`).join('');
-  return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta http-equiv="refresh" content="60"><title>Personeelsscherm</title>
+  return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta http-equiv="refresh" content="60"><title>OVIS Scherm</title>
 <style>
 *{box-sizing:border-box;cursor:none!important}
 html,body{margin:0;height:100%;background:#fff;color:#5B5C60;font-family:'Liberation Sans',Arial,Helvetica,sans-serif;overflow:hidden}
@@ -560,9 +560,9 @@ function aanvraagTekst(x) { return String(x == null ? '' : x).replace(/[\u0000-\
 function aanvraagOpdracht(tekst, vandaag) {
   const F = '/opt/data/mk-scripts/personeelsscherm/fase2';
   return [
-    'OPDRACHT (machinekamer, OVIS Personeelsscherm: extra infoscherm op Davids aanvraag; vaste tekst van de pod, wv3020; herkomst david)',
+    'OPDRACHT (machinekamer, OVIS Scherm: extra infoscherm op Davids aanvraag; vaste tekst van de pod, wv3020; herkomst david)',
     '',
-    'WAAROM: David vroeg op ' + datumNl(vandaag) + ' in Apps › Personeelsscherm om een extra pagina op de tv in de personeelskamer. Zijn woorden, letterlijk (dit is de opdracht):',
+    'WAAROM: David vroeg op ' + datumNl(vandaag) + ' in Apps › OVIS Scherm om een extra pagina op de tv in de personeelskamer. Zijn woorden, letterlijk (dit is de opdracht):',
     '«' + tekst + '»',
     '',
     'WAT:',
@@ -572,12 +572,12 @@ function aanvraagOpdracht(tekst, vandaag) {
     '   Nooit patiëntgegevens, namen van burgers, adressen, mailadressen, telefoonnummers of links. Kan het zo niet (onduidelijk, niet te onderbouwen, past niet op één scherm): geen scherm,',
     '   maar één Voor jou-kaart (besluit) met je vraag aan David in gewone taal (geblokkeerde vervolgrij), en klaar.',
     '3. Set in ' + F + '/set-aanvraag-<wv van deze rij>.json, vorm als set-concept.json met één scherm, plus "aanvraag": "<wv van deze rij>" (dan ziet David in de app',
-    '   dat de kaart klaarstaat). Kaart: titel "Personeelsscherm — dit infoscherm tonen?", waarom ≤ 400 (Davids vraag in één zin, waar het op de tv komt: om de beurt met de agenda, 20 s),',
+    '   dat de kaart klaarstaat). Kaart: titel "OVIS Scherm — dit infoscherm tonen?", waarom ≤ 400 (Davids vraag in één zin, waar het op de tv komt: om de beurt met de agenda, 20 s),',
     '   waar "overal", deadline vandaag + 7, na: ["Ja = dit scherm staat binnen 5 minuten op de tv tot de genoemde datum. Nee = niets. Anders = zeg wat er anders moet."].',
     '4. node ' + F + '/set.cjs kaart <set> > <kaart.json> (weigert een ongeldige set); node ' + F + '/scherm-toets.cjs /opt/data/claudebot-src/personeelsscherm.js <set> /tmp/<map> (alles GROEN).',
     '5. Kaartrij: kopieer ' + F + '/opdracht-set-ja.txt naar een werkbestand en zet python3 /opt/data/mk-scripts/werkvoorraad.py zet --ouder-job "$SOCEV_AGENT_RUN"',
     '   --label "machinekamer:personeelsscherm-aanvraag-ja-<wv van deze rij>" --herkomst david --prompt-bestand <werkbestand> --status geblokkeerd',
-    '   --geblokkeerd-door "David: Ja op het nieuwe infoscherm" --voor-jou <kaart.json> --samenvatting "Personeelsscherm: nieuw infoscherm op jouw aanvraag ter goedkeuring."',
+    '   --geblokkeerd-door "David: Ja op het nieuwe infoscherm" --voor-jou <kaart.json> --samenvatting "OVIS Scherm: nieuw infoscherm op jouw aanvraag ter goedkeuring."',
     '   Dan node ' + F + '/set.cjs toevoegen <set> wv<nieuw> en python3 ' + F + '/controleer.py wv<nieuw> → GELIJK (ONGELIJK = uitzoeken, niet negeren).',
     '   Zet de vraag in 00_Systeem/Open vragen aan David.md.',
     '6. Vastleggen: één regel in § Log van 01_Ontwikkeling/OVIS Personeelsscherm - plan (Fable 5.2, 13-11-2026).md en een box-rij #personeelsscherm.',
@@ -881,7 +881,7 @@ function maak(o) {
   async function medischZet(idRuw, vast) {
     const id = String(idRuw == null ? '' : idRuw);
     if (!/^[0-9a-f]{16}$/.test(id)) return { status: 400, body: { ok: false, fout: 'Onbekend bericht.' } };
-    if (!toestemming()) return { status: 409, body: { ok: false, fout: 'Het personeelsscherm toont nu geen berichten.' } };
+    if (!toestemming()) return { status: 409, body: { ok: false, fout: 'Het OVIS Scherm toont nu geen berichten.' } };
     const t = nu();
     let gevonden = false;
     wijzig((s) => {
@@ -916,7 +916,7 @@ function maak(o) {
     try {
       const label = 'machinekamer:personeelsscherm-aanvraag-' + dag.replace(/-/g, '') + '-' + crypto.createHash('sha256').update(tekst.toLowerCase()).digest('hex').slice(0, 8);
       let z;
-      try { z = await o.werkvoorraad({ label, prompt: aanvraagOpdracht(tekst, dag), samenvatting: ('Personeelsscherm: David vraagt een extra pagina — ' + tekst).slice(0, 200), notitie: 'pod wv3020: Apps › Personeelsscherm, Nieuwe pagina' }); }
+      try { z = await o.werkvoorraad({ label, prompt: aanvraagOpdracht(tekst, dag), samenvatting: ('OVIS Scherm: David vraagt een extra pagina — ' + tekst).slice(0, 200), notitie: 'pod wv3020: Apps › OVIS Scherm, Nieuwe pagina' }); }
       catch (e) { fout('personeelsscherm-aanvraag', new Error('werkvoorraad: ' + String(e && e.message).slice(0, 60))); z = null; }
       if (!z || !/^\d{1,7}$/.test(String(z.id))) return { status: 503, body: { ok: false, fout: 'De aanvraag kon niet worden doorgegeven; probeer het zo opnieuw.' } };
       wijzig((s) => { s.aanvragen = (s.aanvragen || []).filter((a) => a && t - a.op < AANVRAAG_BEWAAR_MS).concat([{ op: t, tekst, wv: Number(z.id) }]).slice(-20); });
@@ -971,7 +971,7 @@ function maak(o) {
     const code = String(codeRuw == null ? '' : codeRuw).replace(/[\s-]/g, '');
     if (!/^\d{8}$/.test(code)) return { status: 400, body: { ok: false, fout: 'De code bestaat uit 8 cijfers.' } };
     const c = config();
-    if (!c || !c.account || !c.access_app_id || !c.access_app || !c.eigenaar) return { status: 503, body: { ok: false, fout: 'Het personeelsscherm is nog niet ingericht; meld het de machinekamer.' } };
+    if (!c || !c.account || !c.access_app_id || !c.access_app || !c.eigenaar) return { status: 503, body: { ok: false, fout: 'Het OVIS Scherm is nog niet ingericht; meld het de machinekamer.' } };
     const t0 = nu();
     const s0 = leesStand();
     const fouten = (s0.foutcodes || []).filter((x) => x > t0 - FOUT_VENSTER);
@@ -1030,7 +1030,7 @@ function maak(o) {
       }
       wijzig((x) => { x.token = { id: token.id, client_id: token.client_id, ip_eis: true, aangemaakt: token.aangemaakt, verloopt: token.verloopt };   // het adres zelf staat alleen in D1 en het Access-beleid
         x.koppel_open_tot = null; x.vreemd = null; x.foutcodes = []; x.gekoppeld_op = t0; x.stil_gemeld = null; });
-      try { await melding('personeelsscherm-koppel:' + token.id, 'Personeelsscherm: kastje gekoppeld (' + iso(t0).slice(0, 16) + ' UTC). Sleutel ' + TOKEN_NAAM + ' (id ' + token.id + ') verloopt ' + iso(token.verloopt).slice(0, 10) + ', werkt alleen vanaf het adres waarmee de code werd aangevraagd. Zet de rij in het sleutelregister.'); } catch (e) { fout('personeelsscherm-melding', e); }
+      try { await melding('personeelsscherm-koppel:' + token.id, 'OVIS Scherm: kastje gekoppeld (' + iso(t0).slice(0, 16) + ' UTC). Sleutel ' + TOKEN_NAAM + ' (id ' + token.id + ') verloopt ' + iso(token.verloopt).slice(0, 10) + ', werkt alleen vanaf het adres waarmee de code werd aangevraagd. Zet de rij in het sleutelregister.'); } catch (e) { fout('personeelsscherm-melding', e); }
       try { if (!leesStand().gemaakt) await publiceer(); } catch (e) { fout('personeelsscherm-publiceer', e); }
       return { status: 200, body: { ok: true, gekoppeld: true } };
     } finally { bezig = false; }
@@ -1049,14 +1049,14 @@ function maak(o) {
   }
   async function intrek() {
     const c = config();
-    if (!c) return { status: 503, body: { ok: false, fout: 'Het personeelsscherm is nog niet ingericht.' } };
+    if (!c) return { status: 503, body: { ok: false, fout: 'Het OVIS Scherm is nog niet ingericht.' } };
     if (bezig) return { status: 409, body: { ok: false, fout: 'Er loopt al een koppeling; wacht even.' } };
     bezig = true;
     try {
       await zorgSchema();
       const id = (leesStand().token || {}).id;
       await intrekIntern(c);
-      try { await melding('personeelsscherm-intrek:' + (id || nu()), 'Personeelsscherm: sleutel ' + TOKEN_NAAM + (id ? ' (id ' + id + ')' : '') + ' ingetrokken via de app. Zet de rij in het sleutelregister op ingetrokken.'); } catch (e) { fout('personeelsscherm-melding', e); }
+      try { await melding('personeelsscherm-intrek:' + (id || nu()), 'OVIS Scherm: sleutel ' + TOKEN_NAAM + (id ? ' (id ' + id + ')' : '') + ' ingetrokken via de app. Zet de rij in het sleutelregister op ingetrokken.'); } catch (e) { fout('personeelsscherm-melding', e); }
       return { status: 200, body: { ok: true } };
     } catch (e) {
       fout('personeelsscherm-intrek', new Error('intrekken: ' + String(e && e.message).slice(0, 80)));
@@ -1146,14 +1146,14 @@ function maak(o) {
     // meldingen: nooit vaker dan één keer per voorval of per dag
     if (live.vreemd && live.vreemd.op && s.vreemd_gemeld !== live.vreemd.op) {
       wijzig((x) => { x.vreemd_gemeld = live.vreemd.op; });
-      try { await melding('personeelsscherm-vreemd:' + live.vreemd.op, 'Personeelsscherm: de sleutel van het kastje werd ' + iso(live.vreemd.op).slice(0, 16) + ' UTC gebruikt vanaf een ander internetadres (land ' + (live.vreemd.land || '?') + ') en geweigerd. Mogelijk een gestolen kaart of een nieuw adres van de praktijk: David kan in Apps › Personeelsscherm de sleutel intrekken.', true); } catch (e) { fout('personeelsscherm-melding', e); }
+      try { await melding('personeelsscherm-vreemd:' + live.vreemd.op, 'OVIS Scherm: de sleutel van het kastje werd ' + iso(live.vreemd.op).slice(0, 16) + ' UTC gebruikt vanaf een ander internetadres (land ' + (live.vreemd.land || '?') + ') en geweigerd. Mogelijk een gestolen kaart of een nieuw adres van de praktijk: David kan in Apps › OVIS Scherm de sleutel intrekken.', true); } catch (e) { fout('personeelsscherm-melding', e); }
     }
     if (s.token && s.gekoppeld_op && t - s.gekoppeld_op > STIL_MS && inWerktijd(t)) {
       const laatst = live.hartslag ? live.hartslag.op : 0;
       const dag = amsDelen(t).datum;
       if (t - laatst > STIL_MS && s.stil_gemeld !== dag) {
         wijzig((x) => { x.stil_gemeld = dag; });
-        try { await melding('personeelsscherm-stil:' + dag, 'Personeelsscherm: het kastje meldde zich ' + (laatst ? 'sinds ' + iso(laatst).slice(0, 16) + ' UTC' : 'nog nooit') + ' niet meer (werktijd). Stroom, kabel of internet van de praktijk?'); } catch (e) { fout('personeelsscherm-melding', e); }
+        try { await melding('personeelsscherm-stil:' + dag, 'OVIS Scherm: het kastje meldde zich ' + (laatst ? 'sinds ' + iso(laatst).slice(0, 16) + ' UTC' : 'nog nooit') + ' niet meer (werktijd). Stroom, kabel of internet van de praktijk?'); } catch (e) { fout('personeelsscherm-melding', e); }
       }
     }
     return { ok: true };

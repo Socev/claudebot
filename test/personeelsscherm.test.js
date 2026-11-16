@@ -589,7 +589,7 @@ test('wv3020 aanvraag: precies één rij met Davids woorden letterlijk; zelfde t
   assert.strictEqual(r.status, 200); assert.strictEqual(rijen.length, 1);
   assert.ok(rijen[0].prompt.includes('«' + tekst + '»'), 'letterlijk');
   assert.match(rijen[0].label, /^machinekamer:personeelsscherm-aanvraag-20261116-[0-9a-f]{8}$/);
-  assert.match(rijen[0].prompt, /Personeelsscherm — dit infoscherm tonen\?/); assert.match(rijen[0].prompt, /"aanvraag"/);
+  assert.match(rijen[0].prompt, /OVIS Scherm — dit infoscherm tonen\?/); assert.match(rijen[0].prompt, /"aanvraag"/);
   r = await vraag('  de GRIEPVACCINATIE-campagne:   data en wie wat doet ');
   assert.strictEqual(r.status, 200); assert.strictEqual(r.body.al, true); assert.strictEqual(rijen.length, 1, 'geen tweede rij');
   assert.strictEqual((await vraag('')).status, 400); assert.strictEqual((await vraag('x'.repeat(501))).status, 400); assert.strictEqual(rijen.length, 1);
