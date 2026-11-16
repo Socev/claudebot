@@ -133,7 +133,11 @@ stop_wacht
 mv "$T/pg/17/data" "$T/pg/17/data.oud-zonder-dagboek"
 start_wacht; sleep 3
 ok "O geen datamap maar wel data.oud-*: geen initdb, db-wacht stopt" '! kill -0 "$WPID" 2>/dev/null && [ ! -e "$T/pg/17/data" ] && grep -q "geen initdb" "$T/pg/db-wacht.log"'
-mv "$T/pg/17/data.oud-zonder-dagboek" "$T/pg/17/data"; start_wacht
+mv "$T/pg/17/data.oud-zonder-dagboek" "$T/pg/17/data.bewaar"
+printf 'id=20261116-200011-77777777\noud=data.oud-nooit\nnieuw=terug-x\nlsn=0/1\ntli=2\nsid=1\n' > "$T/pg/terug-bezig"
+start_wacht; sleep 3
+ok "O dagboek, geen datamap, geen oude map: geen initdb, dagboek blijft (Codex ronde 3)" '! kill -0 "$WPID" 2>/dev/null && [ ! -e "$T/pg/17/data" ] && [ -s "$T/pg/terug-bezig" ]'
+rm -f "$T/pg/terug-bezig"; mv "$T/pg/17/data.bewaar" "$T/pg/17/data"; start_wacht
 for _ in $(seq 1 40); do [ "$(q 'select 1')" = 1 ] && break; sleep 0.5; done
 # ── S: de haak in server.js (statisch): alleen kant olares + verse stand vps + eigen databank, na elke rolronde ──
 ok "S rolwachter roept db-terug aan na elke ronde" 'grep -q "try { dbTerugRonde(); } catch (e) { logError(.dbterug., e); }" "$SRC/server.js"'
