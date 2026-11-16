@@ -9860,7 +9860,7 @@ function codeStandInfo() {
   return { aan: true, apps: CODE_IDS.length, gemeten: s ? s.gemeten || null : null, poging: s ? s.poging || null : null, fout: s ? s.fout || null : 'nog niet gemeten',
     onbekend: s && s.onbekend ? { pages: (s.onbekend.pages || []).length, workers: (s.onbekend.workers || []).length, repos: (s.onbekend.repos || []).length } : null, lopend: codeBezig.size };
 }
-if (SERVER_ECHT) {
+if (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT && typeof CODE_WERK !== 'undefined') {   // typeof: de poorttoets laadt dit blok als knipsel
   setInterval(function () { codeStandTik(); }, 60 * 60 * 1000).unref();
   setTimeout(function () { codeStandTik(); }, 3 * 60 * 1000).unref();
 }
