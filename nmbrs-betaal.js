@@ -4,17 +4,19 @@
  *
  * WAAROM. David (16-11-2026, knop-Ja 8c6dd086): "Socev ziet een nieuwe POT-loonrun zelf in Nmbrs en zet hem als betaallijst klaar voor de
  * klikrobot, met Davids betaaldatum." De POT-rekening is bij ABN een privérekening: geen batchupload, dus zet de Chrome-extensie POT-invoer
- * elke betaling los in de ABN-takenlijst. Tot nu toe kwam de betaallijst als CSV van Aurore en tikte David de rest. Nmbrs maakt per loonrun
- * zelf een SEPA-betaalbestand (GET runs/{id}/sepa → taak → documents/{taak}); nmbrs-data.js haalt het op, dit bestand leest en controleert
- * het, en maakt op Davids verzoek een nieuw pain.001.001.09 (facturen-sepa.js, hetzelfde formaat als de POT-batch van de Facturen-app) met
- * de betaaldatum die David kiest en de POT-rekening uit de Facturen-app als van-rekening.
+ * elke betaling los in de ABN-takenlijst. wv3208–3229 haalden daarvoor het SEPA-document van Nmbrs op; dat is voor de POT leeg (0 bytes).
+ * David 16-11 17:59: "Nmbrs levert geen SEPA voor de POT, maar een CSV … daarom hadden we afgesproken dat jij hem maakt." Sinds wv3232
+ * maakt Socev de lijst dus zelf: netto per medewerker uit de run output (looncode 9880 Per Bank; 9900 Totaal netto ter controle), IBAN uit
+ * employees/bankaccounts, naam en personeelsnummer uit de eigen Nmbrs-kopie. Download als CSV in het formaat van de Nmbrs-betaallijst
+ * (dat de extensie al leest, plus kolom Betaaldatum) of als pain.001.001.09 (facturen-sepa.js) met de POT-rekening uit de Facturen-app.
  *
  * GRENS. Hier wordt niets betaald of verstuurd. Het bestand gaat alleen als download naar Davids app; hij zet het met de extensie in de
  * ABN-takenlijst en ondertekent daar zelf (grondwet 1 en 6).
  *
- * CONTROLES (hard = geen bestand): elk IBAN haalt mod-97, geen bedrag ≤ 0, de som en het aantal kloppen met de kop van het Nmbrs-bestand,
- * hooguit 500 regels, geen dubbel IBAN+bedrag. Zacht (David ziet het en vinkt het bewust aan): aantal betalingen ≠ aantal medewerkers in de
- * loonrun, van-rekening in het Nmbrs-bestand ≠ POT-rekening in Facturen, of geen POT-rekening bekend.
+ * CONTROLES (hard = geen bestand): run output leesbaar, minstens één betaling, elk IBAN haalt mod-97, geen bedrag ≤ 0, elke betaalde
+ * medewerker bekend (naam + personeelsnummer), geen dubbel IBAN, hooguit 500 regels. Zacht (David ziet het en vinkt het bewust aan): aantal
+ * betalingen ≠ aantal medewerkers in de loonrun, netto niet helemaal per bank (som 9880 ≠ som 9900), IBAN kort geleden gewijzigd, de run
+ * is in Nmbrs nog niet vergrendeld (voorlopig), of de lijst wijzigde na de download.
  */
 const S = require('./facturen-sepa.js');
 
@@ -59,47 +61,6 @@ function alle(xml, n) {
   const uit = []; let m;
   while ((m = re.exec(xml)) && uit.length <= MAX_REGELS + 1) uit.push(m[1]);
   return uit;
-}
-
-/*
- * Het SEPA-bestand van Nmbrs lezen (pain.001, versie .03 of .09; namespace maakt niet uit).
- * → { ok, fout?, formaat, nb, ctrl_centen, dbtr: {naam, iban}, datum, regels: [{ e2e, naam, iban, centen, oms }] }
- */
-function leesPain(tekst) {
-  if (typeof tekst !== 'string' || tekst.length < 50 || tekst.length > 8 * 1024 * 1024) return { ok: false, fout: 'leeg of te groot' };
-  if (/<!DOCTYPE|<!ENTITY/i.test(tekst)) return { ok: false, fout: 'DOCTYPE/ENTITY in het bestand' };
-  // wv3228: namespace met enkele of dubbele aanhalingstekens
-  const ns = /xmlns(?::\w+)?\s*=\s*(["'])urn:iso:std:iso:20022:tech:xsd:(pain\.001\.001\.\d\d)\1/.exec(tekst);
-  const kern = el(tekst, ['CstmrCdtTrfInitn']);
-  if (!ns || kern == null) return { ok: false, fout: 'geen pain.001 (CstmrCdtTrfInitn)' };
-  const kop = el(kern, ['GrpHdr']) || '';
-  const nbT = el(kop, ['NbOfTxs']), nb = nbT == null || !/^\s*\d{1,6}\s*$/.test(ont(nbT)) ? null : Number(ont(nbT));   // ontbreekt = null, nooit 0
-  const ctrl = el(kop, ['CtrlSum']);
-  const pmt = alle(kern, 'PmtInf');
-  const regels = [];
-  let dbtr = null, datum = null;
-  const dbtrs = [];   // review wv3208 MOET 2: de van-rekening van élk blok
-  for (const p of pmt) {
-    const di = el(p, ['DbtrAcct', 'IBAN']), dn = el(p, ['Dbtr', 'Nm']);
-    const dib = di == null ? null : ibanNorm(ont(di));
-    if (dib && dbtrs.indexOf(dib) < 0) dbtrs.push(dib);
-    if (!dbtr) dbtr = { naam: dn == null ? null : ont(dn), iban: dib };
-    const dt = el(p, ['ReqdExctnDt', 'Dt']) || el(p, ['ReqdExctnDt']);
-    if (!datum && dt) datum = ont(dt).slice(0, 10);
-    for (const t of alle(p, 'CdtTrfTxInf')) {
-      const a = el(t, ['InstdAmt']);
-      regels.push({
-        e2e: el(t, ['EndToEndId']) == null ? null : ont(el(t, ['EndToEndId'])),
-        naam: el(t, ['Cdtr', 'Nm']) == null ? null : ont(el(t, ['Cdtr', 'Nm'])),
-        iban: el(t, ['CdtrAcct', 'IBAN']) == null ? null : ibanNorm(ont(el(t, ['CdtrAcct', 'IBAN']))),
-        centen: a == null ? null : centen(ont(a)),
-        // review wv3208 MOET 1: attribuut met enkele of dubbele aanhalingstekens; geen valuta = geen euro (hard)
-        munt: (/<(?:\w+:)?InstdAmt\b[^>]*\bCcy\s*=\s*(["'])([A-Za-z]{3})\1/.exec(t) || [])[2] || null,
-        oms: el(t, ['Ustrd']) == null ? null : ont(el(t, ['Ustrd'])),
-      });
-    }
-  }
-  return { ok: true, formaat: ns[2], nb: Number.isInteger(nb) ? nb : null, ctrl_centen: ctrl == null ? null : centen(ont(ctrl)), dbtr, dbtrs, datum, regels };
 }
 
 /*
@@ -233,46 +194,115 @@ function ontpak(buf, ct) {
 }
 
 /*
- * Controles. o = { medewerkers_run (getal of null), pot_iban (IBAN van de POT-rekening in Facturen, of null) }.
- * → { hard: [code…], zacht: [code…], aantal, totaal_centen }. Codes, geen namen of bedragen (ze gaan naar logs en meldingen).
+ * wv3232: de run output van Nmbrs lezen (GET runs/{id}/wagecodes/xml?year=&wageCodes=9880&wageCodes=9900 → taak → document; gemeten 16-11:
+ * <reports><report><employeeid/><period/><year/><runnumber/><lines><line><code/><description/><value>1234.56</value></line>…).
+ * Een run over meer periodes heeft meer reports per medewerker: optellen. Andere looncodes worden genegeerd (de pod vraagt ze ook niet).
+ * → { ok, fout?, rapporten, per: { employeeId: { bank, netto } } (centen), onleesbaar (een regel of id niet te lezen) }
  */
-function controle(p, o) {
+const CODE_BANK = 9880, CODE_NETTO = 9900;
+function leesRunOutput(tekst) {
+  if (typeof tekst !== 'string' || !tekst.trim() || tekst.length > MAX_DOC_BYTES) return { ok: false, fout: 'leeg of te groot' };
+  if (/<!DOCTYPE|<!ENTITY/i.test(tekst)) return { ok: false, fout: 'DOCTYPE/ENTITY in het bestand' };
+  if (!/^\s*(<\?[\s\S]*?\?>\s*)?<reports[\s>]/.test(tekst.replace(/^\uFEFF/, ''))) return { ok: false, fout: 'geen run output (reports)' };
+  // review wv3232 ronde 2 MOET 1: een afgekapt of half document nooit als (gedeeltelijke) lijst: sluittag aan het eind en elk element dicht
+  const tel = (re) => (tekst.match(re) || []).length;
+  if (!/<\/reports>\s*$/.test(tekst) || tel(/<reports[\s>]/g) !== 1 || tel(/<report[\s>]/g) !== tel(/<\/report>/g) || tel(/<line[\s>]/g) !== tel(/<\/line>/g) ||
+    tel(/<lines[\s>]/g) !== tel(/<\/lines>/g)) return { ok: false, fout: 'run output onvolledig' };
+  const reps = alle(tekst, 'report');
+  if (reps.length !== tel(/<report[\s>]/g) && reps.length <= MAX_REGELS) return { ok: false, fout: 'run output onvolledig' };
+  const per = Object.create(null), sleutels = new Set();
+  let onleesbaar = false, dubbel = false;
+  for (const r of reps) {
+    const e = el(r, ['employeeid']), id = e == null ? '' : ont(e);
+    if (!/^[0-9A-Za-z-]{1,64}$/.test(id)) { onleesbaar = true; continue; }
+    // review wv3232 MOET 2: twee reports voor dezelfde medewerker, periode, jaar en run = dubbel salaris; hard
+    const k = id + '|' + ['year', 'period', 'runnumber'].map((n) => ont(el(r, [n]) || '')).join('|');
+    if (sleutels.has(k)) dubbel = true;
+    sleutels.add(k);
+    for (const l of alle(r, 'line')) {
+      const c = el(l, ['code']), v = el(l, ['value']);
+      // review wv3232 ronde 3 MOET 1: een regel zonder (leesbare) code kan een 9880 zijn: hard onleesbaar, niet stil overslaan
+      const code = c == null || !/^\s*\d{1,6}\s*$/.test(ont(c)) ? null : Number(ont(c));
+      if (code === null) { onleesbaar = true; continue; }
+      if (code !== CODE_BANK && code !== CODE_NETTO) continue;
+      const cent = v == null ? null : centen(ont(v));
+      if (!Number.isSafeInteger(cent)) { onleesbaar = true; continue; }
+      const p = per[id] || (per[id] = { bank: 0, netto: 0 });
+      if (code === CODE_BANK) p.bank += cent; else p.netto += cent;
+    }
+  }
+  return { ok: true, rapporten: reps.length, te_veel: reps.length > MAX_REGELS, per, onleesbaar, dubbel };
+}
+/*
+ * Regels maken. o = { medewerkers: { id: { persnr, naam } }, ibans: { id: { iban, recent } } of null (geen bankrecht) }.
+ * Eén regel per medewerker met Per Bank ≠ 0 (ook negatief: dat keurt de controle af). → { regels: [{ mw, persnr, naam, iban, centen, netto, recent }] }
+ */
+function regelsUitRun(ro, o) {
   o = o || {};
-  const hard = [], zacht = [];
-  const r = (p && p.regels) || [];
-  if (!p || !p.ok) hard.push('onleesbaar');
+  const regels = [];
+  if (!ro || !ro.ok) return { regels };
+  for (const id of Object.keys(ro.per)) {
+    const p = ro.per[id];
+    if (p.bank === 0) continue;
+    const m = (o.medewerkers || {})[id] || null, b = o.ibans ? o.ibans[id] || null : null;
+    regels.push({ mw: id, persnr: m ? m.persnr : null, naam: m ? m.naam : null, iban: b && b.iban ? ibanNorm(b.iban) : null, centen: p.bank, netto: p.netto, recent: !!(b && b.recent) });
+  }
+  regels.sort((a, c) => String(a.naam || '').localeCompare(String(c.naam || ''), 'nl') || String(a.persnr).localeCompare(String(c.persnr)));
+  return { regels };
+}
+// Controles op de regels zelf (ook bij lijst en download opnieuw, op de bewaarde regels). metIban: false = nog geen bankrecht.
+function controleRegels(r, metIban) {
+  const hard = [];
   if (!r.length) hard.push('leeg');
   if (r.length > MAX_REGELS) hard.push('te_veel_regels');
-  if (r.some((x) => !mod97(x.iban))) hard.push('iban_mod97');
   if (r.some((x) => !Number.isSafeInteger(x.centen))) hard.push('bedrag_onleesbaar');
   else if (r.some((x) => x.centen <= 0)) hard.push('bedrag_niet_positief');
-  if (r.some((x) => String(x.munt || '').toUpperCase() !== 'EUR')) hard.push('geen_euro');
-  if (r.some((x) => !x.naam || !S.tekst(x.naam, 70))) hard.push('naam_leeg');
-  const totaal = r.reduce((s, x) => s + (Number.isSafeInteger(x.centen) ? x.centen : 0), 0);
-  if (p && p.nb != null && p.nb !== r.length) hard.push('aantal_kop');
-  if (p && p.ctrl_centen != null && p.ctrl_centen !== totaal) hard.push('som_kop');
-  if (p && p.ok && (p.nb == null || p.ctrl_centen == null)) zacht.push('kop_zonder_controletotaal');
-  const gezien = new Set();
-  for (const x of r) { const k = x.iban + '|' + x.centen; if (gezien.has(k)) { hard.push('dubbel'); break; } gezien.add(k); }
-  if (!Number.isInteger(o.medewerkers_run)) zacht.push('medewerkers_run_onbekend');
-  else if (o.medewerkers_run !== r.length) zacht.push('aantal_medewerkers');
-  if (!o.pot_iban || !mod97(o.pot_iban)) hard.push('pot_rekening_onbekend');
-  else {
-    const v = p && Array.isArray(p.dbtrs) ? p.dbtrs : p && p.dbtr && p.dbtr.iban ? [p.dbtr.iban] : [];
-    if (v.some((i) => ibanNorm(i) !== ibanNorm(o.pot_iban))) zacht.push('andere_van_rekening');
+  if (r.some((x) => !x.naam || !S.tekst(x.naam, 70) || !x.persnr)) hard.push('medewerker_onbekend');
+  if (metIban) {
+    if (r.some((x) => !x.iban)) hard.push('iban_ontbreekt');
+    else if (r.some((x) => !mod97(x.iban))) hard.push('iban_mod97');
+    const gezien = new Set();
+    for (const x of r) { if (!x.iban) continue; if (gezien.has(x.iban)) { hard.push('dubbel'); break; } gezien.add(x.iban); }
   }
-  return { hard: [...new Set(hard)], zacht: [...new Set(zacht)], aantal: r.length, totaal_centen: totaal };
+  return hard;
+}
+/*
+ * o = { in_run: [employeeId] of null, definitief: run vergrendeld, met_iban: bankrecht (anders geen IBAN-controles; status wacht_iban) }. → { hard, zacht, aantal, totaal_centen, netto_centen }.
+ * Codes, geen namen of bedragen (ze gaan naar de app en de melding).
+ */
+function controleRun(ro, sam, o) {
+  o = o || {};
+  const r = (sam && sam.regels) || [], hard = [], zacht = [];
+  if (!ro || !ro.ok || ro.onleesbaar) hard.push('onleesbaar');
+  if (ro && ro.te_veel) hard.push('te_veel_regels');
+  if (ro && ro.dubbel) hard.push('dubbel_rapport');
+  hard.push(...controleRegels(r, o.met_iban === true));
+  const totaal = r.reduce((s, x) => s + (Number.isSafeInteger(x.centen) ? x.centen : 0), 0);
+  const netto = ro && ro.ok ? Object.keys(ro.per).reduce((s, k) => s + ro.per[k].netto, 0) : 0;
+  if (ro && ro.ok && (netto !== totaal || Object.keys(ro.per).some((k) => ro.per[k].netto !== ro.per[k].bank))) zacht.push('netto_niet_alles_per_bank');
+  if (!Array.isArray(o.in_run)) zacht.push('medewerkers_run_onbekend');
+  else {
+    if (o.in_run.length !== r.length) zacht.push('aantal_medewerkers');
+    const set = new Set(o.in_run);
+    if (r.some((x) => !set.has(x.mw))) zacht.push('niet_in_run');
+  }
+  if (r.some((x) => x.recent)) zacht.push('iban_recent_gewijzigd');
+  if (o.definitief !== true) zacht.push('voorlopig');
+  return { hard: [...new Set(hard)], zacht: [...new Set(zacht)], aantal: r.length, totaal_centen: totaal, netto_centen: netto };
 }
 const UITLEG = {
-  onleesbaar: 'het bestand van Nmbrs is geen leesbaar SEPA-bestand', leeg: 'er staan geen betalingen in', te_veel_regels: 'meer dan 500 betalingen',
-  iban_mod97: 'een rekeningnummer haalt de controle (mod-97) niet', bedrag_onleesbaar: 'een bedrag is niet te lezen',
-  bedrag_niet_positief: 'een bedrag is nul of negatief', geen_euro: 'een bedrag is niet (aantoonbaar) in euro', naam_leeg: 'een betaling heeft geen naam',
-  aantal_kop: 'het aantal betalingen klopt niet met de kop van het bestand', som_kop: 'het totaal klopt niet met de kop van het bestand',
-  dubbel: 'twee betalingen met hetzelfde rekeningnummer en bedrag', pot_rekening_onbekend: 'de POT-rekening staat niet (geldig) in de Facturen-app',
-  kop_zonder_controletotaal: 'het bestand van Nmbrs heeft geen controletotaal in de kop',
+  onleesbaar: 'de run output van Nmbrs is niet (helemaal) te lezen', leeg: 'er staan geen betalingen in', te_veel_regels: 'meer dan 500 betalingen',
+  iban_mod97: 'een rekeningnummer haalt de controle (mod-97) niet', iban_ontbreekt: 'van een medewerker staat geen rekeningnummer in Nmbrs',
+  bedrag_onleesbaar: 'een bedrag is niet te lezen', bedrag_niet_positief: 'een bedrag is nul of negatief',
+  medewerker_onbekend: 'een betaalde medewerker staat (nog) niet in de kopie van Nmbrs (naam of personeelsnummer ontbreekt)',
+  dubbel: 'twee betalingen naar hetzelfde rekeningnummer', dubbel_rapport: 'Nmbrs noemt dezelfde medewerker twee keer voor dezelfde periode in deze loonrun', pot_rekening_onbekend: 'de POT-rekening staat niet (geldig) in de Facturen-app',
   medewerkers_run_onbekend: 'het aantal medewerkers in de loonrun is niet bekend', aantal_medewerkers: 'het aantal betalingen is anders dan het aantal medewerkers in de loonrun',
-  andere_van_rekening: 'Nmbrs noemt een andere van-rekening dan de POT-rekening; het bestand gebruikt de POT-rekening',
+  niet_in_run: 'een betaling is voor iemand die Nmbrs niet bij deze loonrun noemt',
+  netto_niet_alles_per_bank: 'niet het hele netto gaat per bank (Per Bank wijkt af van Totaal netto)',
+  iban_recent_gewijzigd: 'een rekeningnummer is de laatste 45 dagen in Nmbrs gewijzigd; controleer dat even',
+  voorlopig: 'de loonrun is in Nmbrs nog niet vergrendeld; bedragen kunnen nog wijzigen', gewijzigd_na_download: 'de lijst is gewijzigd sinds je vorige download',
   regels_gewist: 'de regels zijn na 60 dagen gewist',
+  verouderd: 'de lijst is meer dan 2 dagen niet bij Nmbrs nagekeken (bedragen en rekeningnummers); wacht op de ochtendronde of gebruik de lijst van Aurore',
 };
 
 function maandTekst(run, periodeSoort) {
@@ -280,31 +310,55 @@ function maandTekst(run, periodeSoort) {
   if (periodeSoort === 'month' && p >= 1 && p <= 12) return MAAND[p - 1] + ' ' + j;
   return 'periode ' + (Number.isInteger(p) ? p : '?') + ' ' + j;
 }
-// Bestandsnaam zonder namen: POT-salarissen-2026-R12-betaal-2026-11-25.xml
-function bestandNaam(run, datum) {
-  return 'POT-salarissen-' + Number(run.year) + '-R' + Number(run.number) + '-betaal-' + datum + '.xml';
+// Bestandsnaam zonder namen: POT-salarissen-2026-R12-betaal-2026-11-25.csv / .xml
+function bestandNaam(run, datum, ext) {
+  return 'POT-salarissen-' + Number(run.year) + '-R' + Number(run.number) + '-betaal-' + datum + '.' + (ext || 'xml');
 }
-
-/*
- * Het bestand voor de extensie. a = { run: {year, number, periodEnd}, periode_soort, regels (uit leesPain), controle, pot: {iban, naam},
- * datum, vandaag, msg_hex (8 hex, van de beller), cre_dt_tm, bewust (zachte punten gezien) }.
- * → { ok:true, naam, tekst, aantal, totaal_centen, sha256 } of { ok:false, fout, code }
- */
-function bestand(a) {
+// "Achternaam, Voornaam tussenvoegsel" → "Voornaam tussenvoegsel Achternaam" (voor het SEPA-bestand; de extensie draait CSV-namen zelf om)
+function naamGewoon(n) { const m = /^([^,]+),\s*(.+)$/.exec(String(n || '')); return m ? m[2].trim() + ' ' + m[1].trim() : String(n || '').trim(); }
+function vooraf(a) {
   const c = a.controle || {};
   if ((c.hard || []).length) return { ok: false, code: 'controle', fout: 'niet te maken: ' + c.hard.map((h) => UITLEG[h] || h).join('; ') };
   if ((c.zacht || []).length && a.bewust !== true) return { ok: false, code: 'bewust', fout: 'bevestig eerst dat je dit gezien hebt: ' + c.zacht.map((h) => UITLEG[h] || h).join('; ') };
   const df = S.datumFout(a.datum, a.vandaag);
   if (df) return { ok: false, code: 'datum', fout: df };
+  return null;
+}
+
+/*
+ * pain.001.001.09 voor de extensie. a = { run: {year, number, periodEnd}, periode_soort, regels: [{persnr, naam, iban, centen}], controle,
+ * pot: {iban, naam}, datum, vandaag, msg_hex (8 hex, van de beller), cre_dt_tm, bewust (zachte punten gezien) }.
+ * → { ok:true, naam, tekst, type, aantal, totaal_centen, sha256 } of { ok:false, fout, code }
+ */
+function bestand(a) {
+  const v = vooraf(a); if (v) return v;
+  if (!a.pot || !a.pot.iban || !mod97(a.pot.iban)) return { ok: false, code: 'controle', fout: 'niet te maken: ' + UITLEG.pot_rekening_onbekend + ' (de CSV kan wel)' };
   const oms = 'Salaris ' + maandTekst(a.run, a.periode_soort);
   const regels = a.regels.map((x, i) => ({
-    factuur: S.id(x.e2e && x.e2e !== 'NOTPROVIDED' ? x.e2e : 'POT-' + a.run.year + '-R' + a.run.number + '-' + (i + 1), 35) || ('POT-R' + a.run.number + '-' + (i + 1)),
-    datum: a.datum, centen: x.centen, iban: x.iban, naam: x.naam, rmt: { ustrd: S.tekst(x.oms || oms, 140) || oms },
+    factuur: S.id('POT-' + a.run.year + '-R' + a.run.number + '-' + (x.persnr || i + 1), 35) || ('POT-R' + a.run.number + '-' + (i + 1)),
+    datum: a.datum, centen: x.centen, iban: x.iban, naam: naamGewoon(x.naam), rmt: { ustrd: oms },
   }));
   const kop = { msg_id: S.nieuwMsgId(a.vandaag, a.msg_hex), cre_dt_tm: a.cre_dt_tm, initg_naam: a.pot.naam, dbtr_naam: a.pot.naam,
     dbtr_iban: ibanNorm(a.pot.iban), dbtr_bic: S.bicVoor(a.pot.iban) };
   const x = S.xml(kop, regels);
-  return { ok: true, naam: bestandNaam(a.run, a.datum), tekst: x.tekst, aantal: regels.length, totaal_centen: regels.reduce((s, r) => s + r.centen, 0), sha256: S.sha256(x.tekst) };
+  return { ok: true, naam: bestandNaam(a.run, a.datum, 'xml'), tekst: x.tekst, type: 'application/xml', aantal: regels.length, totaal_centen: regels.reduce((s, r) => s + r.centen, 0), sha256: S.sha256(x.tekst) };
+}
+/*
+ * CSV in het formaat van de Nmbrs-betaallijst die de extensie POT-invoer leest (bouwplan POT-invoer, gemeten op Aurores R11-lijst):
+ * Type;Persnr;Naam;Rekeningnr;BIC;IBAN;Bedrag pos.;Bedrag neg.;Periode;Betaaldatum;  — puntkomma ook aan het eind, Type Bankrekening,
+ * bedragen in NL-notatie, periode 2026-11-M, betaaldatum JJJJ-MM-DD (de extensie neemt die over en zet het datumveld vast).
+ * UTF-8 met BOM (de extensie respecteert een BOM), regeleinde CRLF. Velden zonder ; " of regeleinde; geen = + - @ vooraan.
+ */
+function csvVeld(t) { return String(t == null ? '' : t).replace(/[;"\r\n\t]/g, ' ').replace(/^[=+\-@\s]+/, '').trim(); }
+function csvBedrag(c) { return Math.floor(c / 100) + ',' + String(c % 100).padStart(2, '0'); }
+function csvBestand(a) {
+  const v = vooraf(a); if (v) return v;
+  const per = Number(a.run.year) + '-' + String(Number(a.run.periodEnd)).padStart(2, '0') + '-' + (a.periode_soort === 'month' ? 'M' : a.periode_soort === '4-weeks' ? '4W' : 'W');
+  const kop = 'Type;Persnr;Naam;Rekeningnr;BIC;IBAN;Bedrag pos.;Bedrag neg.;Periode;Betaaldatum;';
+  const rijen = a.regels.map((x) => ['Bankrekening', csvVeld(x.persnr), csvVeld(x.naam), ibanNorm(x.iban), S.bicVoor(x.iban) || '', ibanNorm(x.iban), csvBedrag(x.centen), '0,00', per, a.datum].join(';') + ';');
+  const tekst = '\uFEFF' + [kop].concat(rijen).join('\r\n') + '\r\n';
+  return { ok: true, naam: bestandNaam(a.run, a.datum, 'csv'), tekst, type: 'text/csv', aantal: rijen.length, totaal_centen: a.regels.reduce((s, r) => s + r.centen, 0), sha256: S.sha256(tekst) };
 }
 
-module.exports = { ontpak, leesPain, controle, bestand, mod97, centen, ibanNorm, maandTekst, bestandNaam, UITLEG, MAX_REGELS };
+module.exports = { ontpak, leesRunOutput, regelsUitRun, controleRegels, controleRun, bestand, csvBestand, naamGewoon, mod97, centen, ibanNorm, maandTekst, bestandNaam, UITLEG,
+  MAX_REGELS, CODE_BANK, CODE_NETTO };
