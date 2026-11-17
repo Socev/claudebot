@@ -1,0 +1,26 @@
+{
+ "titel": "Foto's → 3D",
+ "uitleg": "Maakt van 2 tot 32 foto's van één stilstaande plek een 3D-scène waar je in de app in rond kunt kijken. Rekent op de eigen videokaart (Olares, InfiniSplat v2); niets gaat naar buiten. Kies een heel album in Immich (de pod kiest er hooguit 32 uit, op volgorde van opname) of losse foto's.",
+ "waarschuwing": "Alleen je eigen privéfoto's van één stilstaande plek; nooit iets uit de praktijk of met patiënten.",
+ "motor": "splat",
+ "status": "proef",
+ "uitvoer": "3d",
+ "bron": "Olares-app splat (InfiniSplat v2 + Depth Anything 3, alleen niet-commercieel/privé); wv3272 (ontwerp mk-opdrachten/wv3270-splat-fase2/ontwerp.md). Voorbeeld in de repo: studio-flows/fotos-naar-3d/flow.yaml; op de pod in /opt/data/studio/flows/fotos-naar-3d/",
+ "tijd": "± 2–5 min (rekenen ± 30 s, inpakken 1–3 min)",
+ "max_seconden": 900,
+ "gpu_mib_schatting": 16000,
+ "max_per_dag": 6,
+ "prijs": {
+  "eenheid": "scène",
+  "bedrag": 0,
+  "bron": "lokaal op Olares"
+ },
+ "velden": [
+  {
+   "naam": "fotos",
+   "label": "Foto's (heel album of 2–32 losse)",
+   "soort": "beelden",
+   "verplicht": true
+  }
+ ]
+}
