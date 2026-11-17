@@ -130,7 +130,13 @@ jobs:
           if [ "$(echo "$N" | grep -cE "\bfetch\s*\(")" != "1" ] || ! echo "$N" | grep -qE "const doel = verzoekToets\(methode, url\);" || ! echo "$N" | grep -qE "redirect: 'error'"; then echo "::error::nmbrs-data.js: fetch buiten roep(), zonder verzoekToets of met redirects"; exit 1; fi
           if echo "$N" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|import\(|process\.binding"; then echo "::error::nmbrs-data.js laadt een netwerk- of procesmodule"; exit 1; fi
           if echo "$N" | grep -nE "roep\('(PUT|PATCH|DELETE)'"; then echo "::error::nmbrs-data.js schrijft naar Nmbrs"; exit 1; fi
-          if echo "$N" | grep -nE "\['\^/api/.*(privateInfos|personalinfo|addresses|bankaccounts|children|partner|absences|payslip|documents/folders|wagetax|svw)"; then echo "::error::nmbrs-data.js: verboden endpoint op de witte lijst"; exit 1; fi
+          # wv3256: één uitzondering op 'bank' — precies de lijst employees/bankaccounts (IBAN per medewerker, alleen paginering) voor de
+          # POT-betaallijst (wv3232). Toestemming: David gaf 16-11-2026 19:14 in Nmbrs zelf het leesrecht employee.bankaccount.read, na
+          # Voor jou-kaart wv3236 ("voor de rekeningnummers moet Nmbrs één extra leesrecht krijgen (bankrekeningen lezen)"; Open vragen
+          # 16-11 19:15). Alleen deze letterlijke regel valt weg; elke andere bankroute of extra queryparameter blijft verboden.
+          NB_OK="['^/api/companies/' + G + '/employees/bankaccounts\$', Q_LIJST]"
+          NV="${N//"$NB_OK"/}"
+          if echo "$NV" | grep -nE "\['\^/api/.*(privateInfos|personalinfo|addresses|bankaccount|children|partner|absences|payslip|documents/folders|wagetax|svw)"; then echo "::error::nmbrs-data.js: verboden endpoint op de witte lijst"; exit 1; fi
           if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' | grep -vE '^(test/|nmbrs-data\.js$)' | xargs grep -nE "api\.nmbrsapp\.com|identityservice\.nmbrs\.com" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een ander bestand dan nmbrs-data.js roept Nmbrs aan"; exit 1; fi
           echo "nmbrs-data.js: alleen lezen."
           # tibber-uur.js (wv2707): oude GraphQL-API alleen lezen. Eén fetch (POST op /v1-beta/gql), geen netwerk- of procesmodule, geen schrijvende query.
