@@ -48,8 +48,8 @@
 //
 // LAAT BEWEGEN (wv3266, 17-11-2026; plan vault "01_Ontwikkeling/OVIS Imagine - foto naar bewegend beeld (Fable 5.2, 15-11-2026).md" § 3.2,
 // § Log 17-11; David Ja 17-11 13:31 op het advies): een foto (of versie) wordt een clip van 5 s, zonder geluid, als NIEUWE versie (mp4) bij
-// dezelfde bron; het origineel blijft. Twee keuzes (BEWEGEN): "Trouw aan gezichten" (MiniMax-H3, 768, 124 beelden/24 fps, ± 9 min,
-// voorgekozen) en "Snel" (Wan 2.2 met lightx2v-versneller, 720, 81 beelden/16 fps, ± 4 min). Verborgen Studio-flows video-minimax-trouw en
+// dezelfde bron; het origineel blijft. Twee keuzes (BEWEGEN): "Snel" (Wan 2.2 met lightx2v-versneller, 720, 81 beelden/16 fps, ± 4 min,
+// voorgekozen sinds de meting van 17-11, zie BEWEGEN) en "Trouw aan gezichten" (MiniMax-H3, 768, 124 beelden/24 fps, ± 9 min). Verborgen Studio-flows video-minimax-trouw en
 // video-wan-snel (generator mk-scripts/imagine-video-plan/fase1/maak-video-flows.py). De pod zet de foto op de exacte maat (studio-beeld.py
 // pijp-maat), studio.js maakt de clip in het geheugen (beelden over de websocket, geheugenwacht, ffmpeg) en geeft mp4 + eerste beeld terug;
 // hier wordt dat een versie (ext mp4, weergaveversie = eerste beeld). Vak leeg = BEWEGEN_STANDAARD (levendige beweging). Eén filmpje tegelijk,
@@ -97,17 +97,22 @@ function soortVan(b) {
   return null;
 }
 const MIME = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', mp4: 'video/mp4' };
-// wv3266: Laat bewegen (zie de kop). Volgorde = volgorde in de app; de eerste is voorgekozen. tijd = gemeten 17-11 (wv3240) + laden.
+// wv3266: Laat bewegen (zie de kop). Volgorde = volgorde in de app. tijd = gemeten 17-11 (wv3240) + laden.
+// Voorgekozen = Snel, niet Trouw (Davids keuze 17-11 13:31 was Trouw): gemeten 17-11 13:00–13:35 via deze code past MiniMax-H3 niet in het
+// werkgeheugen van ComfyUI zoals die nu opstart (vrij zakte bij het laden naar 8,9–10,5 GB en bij het decoderen naar 4,8 GB; de geheugenwacht
+// brak 3 van 3 runs af). Snel lukte (215 s) zolang ComfyUI met ± 42 GB vrij begon. Terug naar Trouw = BEWEGEN_VOORKEUR.
 const BEWEGEN = [
-  { model: 'trouw', flow: 'video-minimax-trouw', naam: 'Trouw aan gezichten', kort: 'MiniMax-H3', tijd: '± 9 min', kort_zijde: 768, lang_max: 1376, veelvoud: 32,
-    karakter: 'gezichten blijven het best behouden; camera zoomt rustig in' },
   { model: 'snel', flow: 'video-wan-snel', naam: 'Snel', kort: 'Wan 2.2', tijd: '± 4 min', kort_zijde: 720, lang_max: 1280, veelvoud: 16,
     karakter: 'veel beweging; gezichten veranderen soms bij lachen' },
+  { model: 'trouw', flow: 'video-minimax-trouw', naam: 'Trouw aan gezichten', kort: 'MiniMax-H3', tijd: '± 9 min', kort_zijde: 768, lang_max: 1376, veelvoud: 32,
+    karakter: 'gezichten blijven het best behouden; camera zoomt rustig in',
+    let: 'Past nu meestal niet in het werkgeheugen van de server: Imagine breekt het filmpje dan af om ComfyUI te beschermen.' },
 ];
+const BEWEGEN_VOORKEUR = 'snel';
 const BEWEGEN_STANDAARD = 'Lively, natural motion. Everyone in the picture moves naturally: they look at each other, smile and laugh, turn their heads '
   + 'and shift their posture a little. Slow, smooth camera zoom-in. Faces stay exactly the same, no new people, no cuts.';
 const BEWEGEN_STAND = 'bewegen';
-function bewegenModel(m) { if (m === undefined || m === null || m === '') return BEWEGEN[0]; return BEWEGEN.find(function (x) { return x.model === m; }) || null; }
+function bewegenModel(m) { if (m === undefined || m === null || m === '') return BEWEGEN.find(function (x) { return x.model === BEWEGEN_VOORKEUR; }) || BEWEGEN[0]; return BEWEGEN.find(function (x) { return x.model === m; }) || null; }
 function schoon(t, max) { return String(t == null ? '' : t).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max); }
 
 function maak(deps) {
@@ -473,10 +478,10 @@ function maak(deps) {
     for (const b of BEWEGEN) {
       let f = null;
       try { f = await S.flowVan(b.flow); } catch (e) { f = null; }
-      uit.push({ model: b.model, naam: b.naam, kort: b.kort, karakter: b.karakter, tijd: b.tijd, klaar: !!(f && f.klaar),
+      uit.push({ model: b.model, naam: b.naam, kort: b.kort, karakter: b.karakter, tijd: b.tijd, let: b.let || null, klaar: !!(f && f.klaar),
         reden: f ? f.reden : 'deze keuze staat niet in de Studio', vers_per_keer: !!(f && f.vers_per_keer) });
     }
-    return { modellen: uit, standaard: BEWEGEN[0].model, duur_s: 5, opdracht_max: GRENS.opdracht_max,
+    return { modellen: uit, standaard: BEWEGEN_VOORKEUR, duur_s: 5, opdracht_max: GRENS.opdracht_max,
       bezig: !!open().prepare("SELECT 1 FROM taak WHERE stand = ? AND status IN ('wacht','bezig')").get(BEWEGEN_STAND) };
   }
   async function bewegen(d, ctx, apparaat) {

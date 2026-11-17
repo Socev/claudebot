@@ -5,7 +5,7 @@
 // geheugenwacht (ram_free onder 12 GB → eigen prompt onderbreken, "afgebroken: server te vol", niets herhaald); één filmpje tegelijk; geschiedenis
 // weg en invoer 1×1; plafond; niet in incognito en niet via de Studio-tab; filmpje niet verder te bewerken; Immich zonder stapel.
 // Kruisproeven (moeten ROOD): IMAGINE_KRUIS=kwacht (geheugenwacht uit), =kfree (geen /free vooraf), =khist (geschiedenis niet gewist),
-// =kpoort (videoflow zonder geheugenpoort toegestaan). Verzonnen beelden en teksten; raakt de echte ComfyUI niet.
+// =kpoort (videoflow zonder geheugenpoort toegestaan), =kstop (Stop tijdens ffmpeg pas na de tijdgrens). Verzonnen beelden en teksten; raakt de echte ComfyUI niet.
 // Vraagt python3 met Pillow en ffmpeg (FFMPEG=<pad>, anders /opt/data/tools/ffmpeg/ffmpeg of ffmpeg in PATH).
 const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
 const { execFileSync } = require('child_process');
@@ -30,6 +30,7 @@ function wijzig(f, oud, nieuw) { const p = path.join(MOD, f); const s = fs.readF
 if (KRUIS === 'kwacht') wijzig('studio.js', 'if (vrij < VIDEO.ram_wacht_bytes) {', 'if (false) {');
 if (KRUIS === 'kfree') wijzig('studio.js', "        if (videoTaak) {\n          // wv3266 (geheugenwacht)", "        if (false) {\n          // wv3266 (geheugenwacht)");
 if (KRUIS === 'khist') wijzig('studio.js', 'async function histWisNu(pid) {', 'async function histWisNu(pid) { return true;');
+if (KRUIS === 'kstop') wijzig('studio.js', 'if (ctl && ctl.gestopt && !af) {', 'if (false) {');
 if (KRUIS === 'kpoort') wijzig('studio.js', 'if (videoTaak && !(f.ram_mib_schatting > 0 && f.zonder_taalmodel && f.vrij_na))', 'if (false)');
 const studioMod = require(path.join(MOD, 'studio.js'));
 const imagineMod = require(path.join(MOD, 'imagine.js'));
@@ -98,8 +99,8 @@ function mp4Beelden(p) {
   // 1. stand in de app
   let r = await roep('/app/imagine');
   const bw = r.body.bewegen;
-  toets('B1 GET /app/imagine: twee keuzes, Trouw voorgekozen, beide klaar, tijden ± 9 en ± 4 min', bw && bw.modellen.length === 2 && bw.standaard === 'trouw'
-    && bw.modellen[0].model === 'trouw' && bw.modellen[0].naam === 'Trouw aan gezichten' && bw.modellen[0].tijd === '± 9 min' && bw.modellen[1].naam === 'Snel' && bw.modellen[1].tijd === '± 4 min'
+  toets('B1 GET /app/imagine: twee keuzes, Snel voorgekozen (meting 17-11), Trouw met een let-regel, beide klaar, tijden ± 4 en ± 9 min', bw && bw.modellen.length === 2 && bw.standaard === 'snel'
+    && bw.modellen[0].model === 'snel' && bw.modellen[0].tijd === '± 4 min' && bw.modellen[1].naam === 'Trouw aan gezichten' && bw.modellen[1].tijd === '± 9 min' && /werkgeheugen/.test(bw.modellen[1].let || '') && !bw.modellen[0].let
     && bw.modellen.every((m) => m.klaar) && bw.duur_s === 5 && bw.bezig === false, bw);
   toets('B1 videoflows niet als bewerkstand', !r.body.standen.some((s) => /video/.test(s.id)));
   r = await roep('/app/imagine/laad', { data: beeld(600, 850).toString('base64'), titel: 'Verzonnen verloop' });
@@ -143,8 +144,8 @@ function mp4Beelden(p) {
   const EIGEN = 'Iedereen zwaait langzaam EIGENmerk' + crypto.randomBytes(4).toString('hex');
   C.scenario = 'hang';
   const pr1 = C.prompts.length;
-  r = await roep('/app/imagine/bewegen', { versie: v1, beweging: EIGEN, beurt_id: nb() });
-  toets('B6 zonder keuze = Trouw (MiniMax) gestart', r.status === 200, r);
+  r = await roep('/app/imagine/bewegen', { versie: v1, model: 'trouw', beweging: EIGEN, beurt_id: nb() });
+  toets('B6 Trouw (MiniMax) gestart', r.status === 200, r);
   const tTrouw = r.body.taak.id;
   await totDat(async () => C.prompts.length > pr1, 10000);
   const p2 = C.prompts[pr1] && C.prompts[pr1].prompt;
@@ -200,6 +201,31 @@ function mp4Beelden(p) {
   r = await roep('/app/imagine/v/' + vv.id + '/immich', { album: crypto.randomUUID() });
   const up = opgeladen.find((x) => x && x.data);
   toets('B13 Zet in Immich: mp4, beschrijving "Gemaakt met AI (Wan 2.2)", geen stapel', r.status === 200 && up && up.data.subarray(4, 8).toString() === 'ftyp' && up.beschrijving === 'Gemaakt met AI (Wan 2.2)' && opgeladen.indexOf('stapel') < 0, { r: r.status, b: up && up.beschrijving });
+
+  // 7. Stop tijdens het maken van de mp4 (review Codex ZOU 1): een trage nep-ffmpeg; Stop moet binnen enkele seconden werken, niets achterlaten
+  const TRAAG = path.join(W, 'traag-ffmpeg.sh');
+  fs.writeFileSync(TRAAG, '#!/bin/sh\ncat > /dev/null\nsleep 30\n', { mode: 0o700 });
+  const STUDIO2 = path.join(POD, 'studio2');
+  fs.cpSync(path.join(STUDIO, 'flows'), path.join(STUDIO2, 'flows'), { recursive: true });
+  const S2 = studioMod.maak({ dir: STUDIO2, bewaar: () => { throw new Error('Bestanden mag niet'); }, primair: () => true, sleutel: async () => null,
+    routerUrl: 'http://127.0.0.1:1', comfyUrl: nep.url, flowstudioUrl: 'http://127.0.0.1:1', taalmodelUrl: null, nu: klok, meminfo: MEMINFO, ffmpeg: TRAAG,
+    log: schrijfLog, fout: (w, e) => schrijfLog('FOUT ' + w + ': ' + (e && e.message)), merk: path.join(POD, 'imagine2', 'incognito-merk.json'),
+    tempo: { poll: 30, wachtStap: 40, wachtMax: 1500, naFree: 10, naloopStart: 0, ramWacht: 40 } });
+  const I2 = imagineMod.maak({ dir: path.join(POD, 'imagine2'), studio: S2, primair: () => true, nu: klok, log: schrijfLog, fout: () => {}, tempo: { ronde: 3600000 } });
+  const roep2 = (pad, body) => I2.app({ pad: pad, methode: body === undefined ? 'GET' : 'POST', body: body, apparaat: 'apparaat-a', ctx: ctx });
+  r = await roep2('/app/imagine/laad', { data: beeld(200, 300).toString('base64') });
+  r = await roep2('/app/imagine/bewegen', { versie: r.body.versie, model: 'snel', beurt_id: nb() });
+  const tS = r.body.taak && r.body.taak.id;
+  let fase = null;
+  await totDat(async () => { const x = (await roep2('/app/imagine')).body.taken.find((y) => y.id === tS); fase = x && x.fase; return fase === 'filmpje maken'; }, 20000);
+  const tStop = Date.now();
+  await roep2('/app/imagine/stop/' + tS, {});
+  let tg = null;
+  await totDat(async () => { tg = (await roep2('/app/imagine')).body.taken.find((y) => y.id === tS); return tg && tg.status !== 'bezig' && tg.status !== 'wacht'; }, 10000);
+  toets('B14 Stop tijdens "filmpje maken" werkt binnen 3 s (niet pas na de tijdgrens van ffmpeg)', fase === 'filmpje maken' && tg && tg.status === 'gestopt' && Date.now() - tStop < 3000, { fase, tg, ms: Date.now() - tStop });
+  await slaap(300);
+  toets('B14 na Stop geen mp4 in de werkmap', !fs.existsSync(path.join(STUDIO2, 'werk')) || fs.readdirSync(path.join(STUDIO2, 'werk')).length === 0);
+  I2.stopTimers(); S2.stopTimers();
 
   nep.sluit(); I.stopTimers(); S.stopTimers();
   console.log((fouten ? 'ROOD' : 'GROEN') + ' imagine-bewegen: ' + goed + ' groen, ' + fouten + ' rood');

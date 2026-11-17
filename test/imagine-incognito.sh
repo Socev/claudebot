@@ -68,7 +68,7 @@ done
 node --no-warnings test/imagine-bewegen.test.js > /tmp/imagine-toets.$$ 2>&1; r=$?
 tail -n 1 /tmp/imagine-toets.$$; grep -E "^ROOD" /tmp/imagine-toets.$$
 [ $r = 0 ] || { echo "ROOD  test/imagine-bewegen.test.js"; f=1; }
-for k in kwacht:"B8 geheugenwacht" kfree:"B3 /free vóór het indienen" khist:"B5 eigen /history-regel weg" kpoort:"B10 videoflow zonder geheugenpoort"; do
+for k in kwacht:"B8 geheugenwacht" kfree:"B3 /free vóór het indienen" khist:"B5 eigen /history-regel weg" kpoort:"B10 videoflow zonder geheugenpoort" kstop:"B14 Stop tijdens"; do
   IMAGINE_KRUIS=${k%%:*} node --no-warnings test/imagine-bewegen.test.js > /tmp/imagine-toets.$$ 2>&1
   if [ $? = 0 ]; then echo "ROOD  kruisproef ${k%%:*} bleef groen"; f=1
   elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"
