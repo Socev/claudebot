@@ -82,7 +82,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 \
       libxkbcommon0 libasound2 libatspi2.0-0 libxcomposite1 libxdamage1 libxrandr2 \
       libpango-1.0-0 libcairo2 libxext6 libxfixes3 fonts-liberation \
- && rm -rf /var/lib/apt/lists/*
+      xvfb \
+ && rm -rf /var/lib/apt/lists/* && test -x /usr/bin/Xvfb && test -x /usr/bin/xkbcomp \
+ && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 
 # MCP-server + de Chromium-build zelf, in de image (deterministisch, overleeft
 # reboots en rebuilds). Versie vast en de browser via de MCP zelf (wv604, 19-10-2026):
@@ -94,6 +96,11 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN npm install -g @playwright/mcp@0.0.83 \
  && playwright-mcp install-browser chromium \
  && chmod -R a+rX /opt/pw-browsers
+# Gedeelde browser (wv3251, 17-11-2026, Davids JA): Patchright = Playwright zonder de bekende automatiseringssporen, als motor onder
+# dezelfde browser-tools (browser-mcp.js, hieronder naar /app). Versie vast, gelijk aan de 1.64-lijn van de MCP; Xvfb (hierboven)
+# geeft Chrome een onzichtbaar scherm. Geen eigen browserdownload: browser-mcp.js gebruikt de Chromium in /opt/pw-browsers.
+RUN npm install -g patchright@1.64.3 \
+ && test -f /usr/local/lib/node_modules/patchright/node_modules/patchright-core/lib/coreBundle.js
 
 # Non-root gebruiker: 'claude' weigert bypassPermissions als root.
 # HOME = /opt/data (hierop mount Olares het persistent volume).
@@ -168,6 +175,8 @@ COPY codex-config.toml /app/codex-config.toml
 # loper-socket bindt, de loper zelf en de Playwright-regel voor socev. Keten-categorie: een loper die met een uitrol mee
 # zou bewegen, zou 1001 de code van een 1002-proces laten bepalen.
 COPY socev-voorbereiding.sh socev-rechten.sh socev-thuis.py loper-bind.py socev-loper.js playwright-mcp.sh codex-config-socev.toml /app/
+# wv3251: de gedeelde browser (MCP op Patchright) voor socev én claude; root-eigendom, alleen via een nieuw image te wijzigen.
+COPY browser-mcp.js /app/
 # Syncfilter van de vault (wv813): scripts en Windows-code niet naar Drive/Davids pc; run.sh toetst het vóór de eerste bisync.
 # Root-eigendom en in het image: socev noch een uitrol kan het filter verruimen.
 COPY bisync-filter.txt bisync-filter-toets.sh /app/
@@ -286,9 +295,9 @@ RUN chown -R root:root /app/db && chmod 0755 /app/db && chmod 0644 /app/db/* && 
  && node -e "require('/app/node_modules/pg'); require('/app/node_modules/postgres-array')"
 RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh /app/uitrol.sh \
       /app/socev-voorbereiding.sh /app/socev-rechten.sh /app/playwright-mcp.sh \
- && chmod 0644 /app/socev-loper.js /app/loper-bind.py /app/socev-thuis.py /app/argv-wacht.py /etc/claude-code/managed-settings.json /app/web-jev.py /app/jev-pod.js \
+ && chmod 0644 /app/browser-mcp.js /app/socev-loper.js /app/loper-bind.py /app/socev-thuis.py /app/argv-wacht.py /etc/claude-code/managed-settings.json /app/web-jev.py /app/jev-pod.js \
       /app/bisync-filter.txt /app/bisync-filter-toets.sh /app/syncthing-stignore.txt /app/syncthing-filter-toets.py \
- && chown -R root:root /app/socev-* /app/loper-bind.py /app/argv-wacht.py /app/playwright-mcp.sh /etc/claude-code /app/web-jev.py /app/jev-pod.js \
+ && chown -R root:root /app/browser-mcp.js /app/socev-* /app/loper-bind.py /app/argv-wacht.py /app/playwright-mcp.sh /etc/claude-code /app/web-jev.py /app/jev-pod.js \
       /app/bisync-filter.txt /app/bisync-filter-toets.sh /app/syncthing-stignore.txt /app/syncthing-filter-toets.py
 
 EXPOSE 8080 8091
