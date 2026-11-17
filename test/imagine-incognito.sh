@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Toetst OVIS Imagine fase 1 (wv2984), fase 2 (wv3021, test/imagine-fase2.test.js; plan § 3.4) en opdracht uitbreiden (wv3044, test/imagine-uitbreiden.test.js): test/imagine.test.js (gewone stand + incognito tegen een nagebouwde ComfyUI met mappen op
+# Toetst OVIS Imagine fase 1 (wv2984), Laat bewegen (wv3266, test/imagine-bewegen.test.js; vraagt ffmpeg), fase 2 (wv3021, test/imagine-fase2.test.js; plan § 3.4) en opdracht uitbreiden (wv3044, test/imagine-uitbreiden.test.js): test/imagine.test.js (gewone stand + incognito tegen een nagebouwde ComfyUI met mappen op
 # schijf, schuifbare klok, zoektocht op merk/woord/beeld in alles wat de pod schrijft, ook uitgepakte .gz, en herstartproef) moet GROEN;
 # dezelfde toets met elk van de drie kruisproeven (uitvoer via PreviewImage, geen opruiming van de geschiedenis, incognito-invoer naar schijf)
 # moet ROOD. Plus de CI-poort: imagine.js laadt alleen fs/path/crypto/node:sqlite, doet zelf geen netwerk of proces, en het incognitodeel
@@ -60,6 +60,16 @@ tail -n 1 /tmp/imagine-toets.$$; grep -E "^ROOD" /tmp/imagine-toets.$$
 [ $r = 0 ] || { echo "ROOD  test/imagine-uitbreiden.test.js"; f=1; }
 for k in khist:"1 geschiedenis van ComfyUI leeg na uitbreiden" klog:"1 tekst en eigen woord nergens op schijf" kpoort:"U3 PreviewAny op iets anders" kwis:"1w prompt nog in de rij na afloop" kstart:"2r wissen tijdens het starten"; do
   IMAGINE_KRUIS=${k%%:*} node --no-warnings test/imagine-uitbreiden.test.js > /tmp/imagine-toets.$$ 2>&1
+  if [ $? = 0 ]; then echo "ROOD  kruisproef ${k%%:*} bleef groen"; f=1
+  elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"
+  else echo "ROOD  kruisproef ${k%%:*} werd rood, maar niet op ${k#*:}"; grep -E "^ROOD" /tmp/imagine-toets.$$ | head -3; f=1; fi
+done
+# wv3266: Laat bewegen (videoflows, beelden over de websocket, mp4 met ffmpeg, geheugenwacht); vier kruisproeven moeten ROOD
+node --no-warnings test/imagine-bewegen.test.js > /tmp/imagine-toets.$$ 2>&1; r=$?
+tail -n 1 /tmp/imagine-toets.$$; grep -E "^ROOD" /tmp/imagine-toets.$$
+[ $r = 0 ] || { echo "ROOD  test/imagine-bewegen.test.js"; f=1; }
+for k in kwacht:"B8 geheugenwacht" kfree:"B3 /free vóór het indienen" khist:"B5 eigen /history-regel weg" kpoort:"B10 videoflow zonder geheugenpoort"; do
+  IMAGINE_KRUIS=${k%%:*} node --no-warnings test/imagine-bewegen.test.js > /tmp/imagine-toets.$$ 2>&1
   if [ $? = 0 ]; then echo "ROOD  kruisproef ${k%%:*} bleef groen"; f=1
   elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"
   else echo "ROOD  kruisproef ${k%%:*} werd rood, maar niet op ${k#*:}"; grep -E "^ROOD" /tmp/imagine-toets.$$ | head -3; f=1; fi

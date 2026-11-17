@@ -45,6 +45,15 @@
 // tekst (de app stuurt hem als opdracht naar /nieuw: gewone stand = bij de versie bewaard zoals elke opdracht, titel uit zijn eigen tekst)
 // of zijn eigen. De beeldflows breiden zelf niet meer uit (MOSS: TextGenerate eruit; wv3044), dus schakelaar uit = de eigen tekst letterlijk.
 // Incognito: zelfde weg met geheim (merk, telregel), weg bij Alles wissen, bij verlopen en zodra de opdracht gebruikt is.
+//
+// LAAT BEWEGEN (wv3266, 17-11-2026; plan vault "01_Ontwikkeling/OVIS Imagine - foto naar bewegend beeld (Fable 5.2, 15-11-2026).md" § 3.2,
+// § Log 17-11; David Ja 17-11 13:31 op het advies): een foto (of versie) wordt een clip van 5 s, zonder geluid, als NIEUWE versie (mp4) bij
+// dezelfde bron; het origineel blijft. Twee keuzes (BEWEGEN): "Trouw aan gezichten" (MiniMax-H3, 768, 124 beelden/24 fps, ± 9 min,
+// voorgekozen) en "Snel" (Wan 2.2 met lightx2v-versneller, 720, 81 beelden/16 fps, ± 4 min). Verborgen Studio-flows video-minimax-trouw en
+// video-wan-snel (generator mk-scripts/imagine-video-plan/fase1/maak-video-flows.py). De pod zet de foto op de exacte maat (studio-beeld.py
+// pijp-maat), studio.js maakt de clip in het geheugen (beelden over de websocket, geheugenwacht, ffmpeg) en geeft mp4 + eerste beeld terug;
+// hier wordt dat een versie (ext mp4, weergaveversie = eerste beeld). Vak leeg = BEWEGEN_STANDAARD (levendige beweging). Eén filmpje tegelijk,
+// niet in incognito (geen route), telt mee voor 5 GB, 5 in de rij en 30 per dag. Een filmpje kan niet verder bewerkt worden.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -87,7 +96,18 @@ function soortVan(b) {
   if (b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
   return null;
 }
-const MIME = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+const MIME = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', mp4: 'video/mp4' };
+// wv3266: Laat bewegen (zie de kop). Volgorde = volgorde in de app; de eerste is voorgekozen. tijd = gemeten 17-11 (wv3240) + laden.
+const BEWEGEN = [
+  { model: 'trouw', flow: 'video-minimax-trouw', naam: 'Trouw aan gezichten', kort: 'MiniMax-H3', tijd: '± 9 min', kort_zijde: 768, lang_max: 1376, veelvoud: 32,
+    karakter: 'gezichten blijven het best behouden; camera zoomt rustig in' },
+  { model: 'snel', flow: 'video-wan-snel', naam: 'Snel', kort: 'Wan 2.2', tijd: '± 4 min', kort_zijde: 720, lang_max: 1280, veelvoud: 16,
+    karakter: 'veel beweging; gezichten veranderen soms bij lachen' },
+];
+const BEWEGEN_STANDAARD = 'Lively, natural motion. Everyone in the picture moves naturally: they look at each other, smile and laugh, turn their heads '
+  + 'and shift their posture a little. Slow, smooth camera zoom-in. Faces stay exactly the same, no new people, no cuts.';
+const BEWEGEN_STAND = 'bewegen';
+function bewegenModel(m) { if (m === undefined || m === null || m === '') return BEWEGEN[0]; return BEWEGEN.find(function (x) { return x.model === m; }) || null; }
 function schoon(t, max) { return String(t == null ? '' : t).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max); }
 
 function maak(deps) {
@@ -219,6 +239,7 @@ function maak(deps) {
     return { id: v.id, bron: v.bron, voorganger: v.voorganger || null, nr: v.nr, stand: v.stand || null, model: v.model || null, opdracht: v.opdracht || null,
       gemaakt: v.gemaakt, breed: v.breed, hoog: v.hoog, bytes: v.bytes, ext: v.ext, duur_s: v.duur_s || null,
       masker: !!v.masker, refs: v.refs || 0, naad_px: v.naad_px == null ? null : v.naad_px, vergelijk: v.vergelijk || null,   // wv3021
+      video: v.ext === 'mp4',   // wv3266
       immich: v.immich_asset ? { link: v.immich_link || null, noot: v.immich_noot || null } : null };
   }
   function lijst() {
@@ -290,7 +311,9 @@ function maak(deps) {
     const bufs = [];
     for (const id of ids) {
       if (!HEX16.test(String(id)) || id === eigen || ids.indexOf(id) !== ids.lastIndexOf(id)) return { status: 400, fout: 'kies twee verschillende voorbeelden, niet het beeld zelf' };
-      if (!versie(id)) return { status: 404, fout: 'een voorbeeld bestaat niet (meer)' };
+      const rv = versie(id);
+      if (!rv) return { status: 404, fout: 'een voorbeeld bestaat niet (meer)' };
+      if (rv.ext === 'mp4') return { status: 409, fout: 'een filmpje kan geen voorbeeld zijn; kies een foto' };   // wv3266
       try { bufs.push(fs.readFileSync(toonPad(id))); } catch (e) { return { status: 410, fout: 'een voorbeeld is weg' }; }
     }
     return { bufs: bufs };
@@ -303,6 +326,7 @@ function maak(deps) {
     if (!v) return { status: 404, fout: 'dit beeld bestaat niet (meer)' };
     const s = stand(d.stand);
     if (!s) return { status: 400, fout: 'onbekende bewerking' };
+    if (v.ext === 'mp4') return { status: 409, fout: 'een filmpje kan niet bewerkt worden; kies een foto' };   // wv3266
     let bytes;
     try { bytes = fs.readFileSync(bestand(v)); } catch (e) { return { status: 410, fout: 'het beeldbestand is weg' }; }
     const rf = refsGewoon(d, v.id);
@@ -416,6 +440,7 @@ function maak(deps) {
     const v = versie(id);
     if (!v) return { status: 404, fout: 'dit beeld bestaat niet (meer)' };
     if (v.vergelijk) return { status: 409, fout: 'kies eerst welke versie je uit de vergelijking bewaart' };
+    if (v.ext === 'mp4') return { status: 409, fout: 'een filmpje kan niet bijgesneden worden' };   // wv3266
     d = d && typeof d === 'object' ? d : {};
     const x = breuk(d.x), y = breuk(d.y), b = breuk(d.b), h = breuk(d.h), dr = Number(d.draai) || 0;
     if (![x, y, b, h].every(Number.isFinite) || x < 0 || y < 0 || b <= 0 || h <= 0 || x + b > 1.000001 || y + h > 1.000001 || [0, 90, 180, 270].indexOf(dr) < 0)
@@ -441,6 +466,80 @@ function maak(deps) {
     } catch (e) { try { fs.rmSync(path.join(BEELDEN, v.bron, nid + '.' + t.soort), { force: true }); fs.rmSync(toonPad(nid), { force: true }); } catch (e2) {} fout('imagine', new Error('bijsnijden bewaren mislukt')); return { status: 500, fout: 'de nieuwe versie kon niet bewaard worden' }; }
     log('imagine snij versie=' + nid + ' draai=' + dr);
     return { status: 200, versie: nid };
+  }
+  // ── wv3266: Laat bewegen (gewone stand; zie de kop) ──
+  async function bewegenStand() {
+    const uit = [];
+    for (const b of BEWEGEN) {
+      let f = null;
+      try { f = await S.flowVan(b.flow); } catch (e) { f = null; }
+      uit.push({ model: b.model, naam: b.naam, kort: b.kort, karakter: b.karakter, tijd: b.tijd, klaar: !!(f && f.klaar),
+        reden: f ? f.reden : 'deze keuze staat niet in de Studio', vers_per_keer: !!(f && f.vers_per_keer) });
+    }
+    return { modellen: uit, standaard: BEWEGEN[0].model, duur_s: 5, opdracht_max: GRENS.opdracht_max,
+      bezig: !!open().prepare("SELECT 1 FROM taak WHERE stand = ? AND status IN ('wacht','bezig')").get(BEWEGEN_STAND) };
+  }
+  async function bewegen(d, ctx, apparaat) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    if (schijf().vol) return { status: 507, fout: 'de bibliotheek van Imagine is vol (5 GB); gooi eerst iets weg' };
+    const v = versie(d && d.versie);
+    if (!v) return { status: 404, fout: 'dit beeld bestaat niet (meer)' };
+    if (v.ext === 'mp4') return { status: 409, fout: 'dit is al een filmpje; kies een foto' };
+    if (v.vergelijk) return { status: 409, fout: 'kies eerst welke versie je uit de vergelijking bewaart' };
+    const bm = bewegenModel(d.model);
+    if (!bm) return { status: 400, fout: 'onbekende keuze; kies Trouw aan gezichten of Snel' };
+    const eigen = schoon(d.beweging, GRENS.opdracht_max);
+    // één filmpje tegelijk (ook niet in de rij); studio.js toetst het nog eens synchroon bij het in de rij zetten
+    if (open().prepare("SELECT 1 FROM taak WHERE stand = ? AND status IN ('wacht','bezig')").get(BEWEGEN_STAND)) return { status: 409, fout: 'er wordt al een filmpje gemaakt; wacht tot dat klaar is' };
+    let bytes;
+    try { bytes = fs.readFileSync(bestand(v)); } catch (e) { return { status: 410, fout: 'het beeldbestand is weg' }; }
+    const id = hex16();
+    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt) VALUES (?, NULL, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, BEWEGEN_STAND, 'wacht', iso());
+    let m;
+    try { m = await S.beeldPijp(['pijp-maat', String(bm.kort_zijde), String(bm.lang_max), String(bm.veelvoud)], bytes); }
+    catch (e) { m = { ok: false }; }
+    bytes = null;
+    if (!m.ok || !m.bytes || !(m.breed > 0) || !(m.hoog > 0)) { open().prepare('DELETE FROM taak WHERE id = ?').run(id); return { status: 400, fout: 'de foto kon niet klaargezet worden' + (m.reden ? ': ' + m.reden : '') }; }
+    const velden = { opdracht: eigen || BEWEGEN_STANDAARD, pod_b: m.breed, pod_h: m.hoog };
+    let r;
+    try {
+      r = await S.maakGeheugen({ flow: bm.flow, velden: velden, beeld: m.bytes, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
+        klaar: function (u) { return bewegenKlaar(id, v, bm, eigen || null, u); } }, ctx);
+    } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
+    if (r.status !== 200 || r.al) open().prepare('DELETE FROM taak WHERE id = ?').run(id);
+    if (r.status !== 200) return r;
+    if (r.al) { const t = open().prepare('SELECT * FROM taak WHERE studio = ?').get(r.taak.id); return { status: 200, taak: t ? taakUit(t) : null, al: true }; }
+    open().prepare('UPDATE taak SET studio = ? WHERE id = ?').run(r.taak.id, id);
+    log('imagine bewegen taak=' + id + ' model=' + bm.model + ' maat=' + m.breed + 'x' + m.hoog + (eigen ? ' eigen=1' : ''));
+    return { status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(id)) };
+  }
+  // Resultaat: één mp4 als nieuwe versie (voorganger = de foto), weergaveversie = eerste beeld van de clip
+  async function bewegenKlaar(taakId, v, bm, eigen, u) {
+    const d = open();
+    const zet = function (status, reden, versieId) { d.prepare('UPDATE taak SET status = ?, reden = ?, eind = ?, versie = ? WHERE id = ?').run(status, reden || null, iso(), versieId || null, taakId); };
+    const c = (u.beelden || [])[0];
+    (u.beelden || []).slice(1).forEach(function (x) { x.bytes = null; x.affiche = null; });
+    if (u.status !== 'klaar' || !c || !c.video || !Buffer.isBuffer(c.bytes)) return zet(u.status === 'klaar' ? 'mislukt' : u.status, u.reden || 'geen filmpje');
+    const mp4 = c.bytes;
+    let toon = null;
+    try { const t = await S.beeldPijp(['pijp-toon', String(GRENS.toon_px)], c.affiche); toon = t.ok && t.bytes ? t.bytes : null; } catch (e) { toon = null; }
+    c.bytes = null; c.affiche = null;
+    if (!toon) return zet('mislukt', 'het eerste beeld van het filmpje was onleesbaar');
+    if (!d.prepare('SELECT 1 FROM bron WHERE id = ?').get(v.bron)) return zet('mislukt', 'het beeld is intussen weggegooid');
+    if (schijf().bytes + mp4.length + toon.length > GRENS.schijf) return zet('mislukt', 'de bibliotheek is vol (5 GB); niets bewaard');
+    const nr = (d.prepare('SELECT MAX(nr) AS n FROM versie WHERE bron = ?').get(v.bron).n || 0) + 1;
+    const id = hex16();
+    try {
+      schrijf(path.join(BEELDEN, v.bron, id + '.mp4'), mp4);
+      schrijf(toonPad(id), toon);
+      d.prepare('INSERT INTO versie (id, bron, voorganger, nr, stand, model, opdracht, gemaakt, breed, hoog, bytes, toon_bytes, ext, duur_s, masker, refs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)')
+        .run(id, v.bron, v.id, nr, BEWEGEN_STAND, u.model || bm.kort, eigen, iso(), c.breed, c.hoog, mp4.length, toon.length, 'mp4', u.duur_s || null);
+    } catch (e) {
+      try { fs.rmSync(path.join(BEELDEN, v.bron, id + '.mp4'), { force: true }); fs.rmSync(toonPad(id), { force: true }); } catch (e2) {}
+      fout('imagine', new Error('filmpje bewaren mislukt')); return zet('mislukt', 'het filmpje kon niet bewaard worden');
+    }
+    zet('klaar', null, id);
+    log('imagine bewegen klaar taak=' + taakId + ' versie=' + id + ' beelden=' + (c.beelden || 0) + ' bytes=' + mp4.length);
   }
   // ── wv2990: nieuw beeld uit tekst (gewone stand) ──
   function titelUit(opdracht) { return opdracht.length > 60 ? opdracht.slice(0, 59).trim() + '…' : opdracht; }
@@ -568,7 +667,7 @@ function maak(deps) {
         }
         if (album) { const a = await c.album(album); if (!a) return { status: 404, fout: 'dit album bestaat niet (meer)' }; albums = [a]; }
       } catch (e) { fout('imagine-immich', new Error('immich niet bereikbaar')); return { status: 503, fout: 'Immich is nu niet bereikbaar' }; }
-      const generatief = v.stand && ['krassen', 'opdracht-qwen', 'opdracht-flux', TEKST.id].indexOf(v.stand) >= 0;   // wv2990: ook tekst naar beeld
+      const generatief = v.stand && ['krassen', 'opdracht-qwen', 'opdracht-flux', TEKST.id, BEWEGEN_STAND].indexOf(v.stand) >= 0;   // wv2990: ook tekst naar beeld; wv3266: filmpje
       const beschrijving = v.model ? (generatief ? 'Gemaakt met AI (' + v.model + ')' : 'Hersteld met AI (' + v.model + ')') : null;
       let up;
       try { up = await c.uploaden({ data: data, taak: v.id, opname: opname, beschrijving: beschrijving }); }
@@ -576,7 +675,8 @@ function maak(deps) {
       const link = c.basis ? c.basis + '/photos/' + up.id : null;
       open().prepare('UPDATE versie SET immich_asset = ?, immich_link = ? WHERE id = ?').run(up.id, link, v.id);   // eerst vastleggen: nooit twee keer
       const noten = [];
-      if (up.nieuw && stapelKan && v.nr > 1) { try { const r = await c.stapelen(up.id, b.immich); if (!r.gestapeld) noten.push('geen stapel: ' + r.reden); } catch (e) { noten.push('stapel maken lukte niet'); } }
+      // wv3266: een filmpje niet onder de foto stapelen (dan zie je het niet in de tijdlijn)
+      if (up.nieuw && stapelKan && v.nr > 1 && v.ext !== 'mp4') { try { const r = await c.stapelen(up.id, b.immich); if (!r.gestapeld) noten.push('geen stapel: ' + r.reden); } catch (e) { noten.push('stapel maken lukte niet'); } }
       let n = 0;
       if (up.nieuw) for (const a of albums) { try { if (await c.inAlbum(a.id, up.id)) n++; } catch (e) { /* telt niet */ } }
       if (!up.nieuw) noten.push('dit beeld stond al in Immich');
@@ -943,7 +1043,7 @@ function maak(deps) {
     let m;
     if (!post && p === '/app/imagine') {
       const l = lijst();
-      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, standen: await standen(), tekst: (await standen([TEKST]))[0], teksten: await standen(TEKSTEN), tekst_standaard: TEKST.model, uitbreiden: await uitbStand(), schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
+      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, standen: await standen(), bewegen: await bewegenStand(), tekst: (await standen([TEKST]))[0], teksten: await standen(TEKSTEN), tekst_standaard: TEKST.model, uitbreiden: await uitbStand(), schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
         incognito: { nog_te_wissen: S.incognito().nog_te_wissen } } };
     }
     if (!post && (m = /^\/app\/imagine\/bron\/([a-f0-9]{16})$/.exec(p))) { const b = bronMet(m[1]); return b ? { status: 200, body: Object.assign({ ok: true }, b) } : { status: 404, body: { ok: false, fout: 'dit beeld bestaat niet (meer)' } }; }
@@ -951,6 +1051,7 @@ function maak(deps) {
     if (post && p === '/app/imagine/laad') return uit(await laad(d), 'imagine laad');
     if (post && p === '/app/imagine/bewerk') return uit(await bewerk(d, ctx, a), 'imagine bewerk');
     if (post && p === '/app/imagine/nieuw') return uit(await nieuw(d, ctx, a), 'imagine nieuw');   // wv2990
+    if (post && p === '/app/imagine/bewegen') return uit(await bewegen(d, ctx, a), 'imagine bewegen');   // wv3266 (niet in incognito)
     if (post && p === '/app/imagine/uitbreiden') return uit(await uitbreid(a, d, ctx, false), 'imagine uitbreiden');   // wv3044
     if (!post && (m = /^\/app\/imagine\/uitbreiden\/([a-f0-9]{16})$/.exec(p))) return uit(uitbLees(a, m[1], false), 'imagine uitbreiden lees');
     if (post && (m = /^\/app\/imagine\/uitbreiden\/([a-f0-9]{16})\/weg$/.exec(p))) return uit(uitbStop(a, m[1], false), 'imagine uitbreiden weg');
@@ -996,7 +1097,7 @@ function maak(deps) {
         schijf_bytes: schijf().bytes, incognito_nog_te_wissen: S.incognito().nog_te_wissen };
     } catch (e) { return { aan: true, fout: true }; }
   }
-  return { app: app, info: info, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB, stopTimers: function () { clearInterval(timer); }, _inc: inc, _ronde: incRonde, _uitb: uitb, _uitbRonde: uitbRonde, _db: function () { return open(); } };
+  return { app: app, info: info, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB, stopTimers: function () { clearInterval(timer); }, _inc: inc, _ronde: incRonde, _uitb: uitb, _uitbRonde: uitbRonde, _db: function () { return open(); } };
 }
 
-module.exports = { maak: maak, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB };
+module.exports = { maak: maak, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB };

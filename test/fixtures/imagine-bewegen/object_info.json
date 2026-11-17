@@ -1,0 +1,515 @@
+{
+"LoadImage": {
+"python_module": "nodes",
+"output_node": false,
+"input": {
+"required": {
+"image": [
+[
+"example.png"
+],
+{
+"image_upload": true
+}
+]
+}
+}
+},
+"UNETLoader": {
+"python_module": "nodes",
+"output_node": false,
+"input": {
+"required": {
+"unet_name": [
+[
+"minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+"wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+"wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+]
+],
+"weight_dtype": [
+[
+"default"
+],
+{
+"advanced": true
+}
+]
+}
+}
+},
+"LoraLoaderModelOnly": {
+"python_module": "nodes",
+"output_node": false,
+"input": {
+"required": {
+"model": [
+"MODEL"
+],
+"lora_name": [
+[
+"wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+"wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
+]
+],
+"strength_model": [
+"FLOAT",
+{
+"default": 1,
+"min": -100,
+"max": 100,
+"step": 0.01
+}
+]
+}
+}
+},
+"ModelSamplingSD3": {
+"python_module": "comfy_extras.nodes_model_advanced",
+"output_node": false,
+"input": {
+"required": {
+"model": [
+"MODEL"
+],
+"shift": [
+"FLOAT",
+{
+"default": 3,
+"min": 0,
+"max": 100,
+"step": 0.01
+}
+]
+}
+}
+},
+"CLIPLoader": {
+"python_module": "nodes",
+"output_node": false,
+"input": {
+"required": {
+"clip_name": [
+[
+"qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+"umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+]
+],
+"type": [
+[
+"wan",
+"minimax"
+]
+]
+},
+"optional": {
+"device": [
+[
+"default"
+],
+{
+"advanced": true
+}
+]
+}
+}
+},
+"CLIPTextEncode": {
+"python_module": "nodes",
+"output_node": false,
+"input": {
+"required": {
+"text": [
+"STRING",
+{
+"multiline": true,
+"dynamicPrompts": true
+}
+],
+"clip": [
+"CLIP",
+{}
+]
+}
+}
+},
+"VAELoader": {
+"python_module": "nodes",
+"output_node": false,
+"input": {
+"required": {
+"vae_name": [
+[
+"minimax_h3_video_vae_fp16.safetensors",
+"wan_2.1_vae.safetensors"
+]
+]
+}
+}
+},
+"WanImageToVideo": {
+"python_module": "comfy_extras.nodes_wan",
+"output_node": false,
+"input": {
+"required": {
+"positive": [
+"CONDITIONING",
+{}
+],
+"negative": [
+"CONDITIONING",
+{}
+],
+"vae": [
+"VAE",
+{}
+],
+"width": [
+"INT",
+{
+"default": 832,
+"min": 16,
+"max": 16384,
+"step": 16
+}
+],
+"height": [
+"INT",
+{
+"default": 480,
+"min": 16,
+"max": 16384,
+"step": 16
+}
+],
+"length": [
+"INT",
+{
+"default": 81,
+"min": 1,
+"max": 16384,
+"step": 4
+}
+],
+"batch_size": [
+"INT",
+{
+"default": 1,
+"min": 1,
+"max": 4096
+}
+]
+},
+"optional": {
+"clip_vision_output": [
+"CLIP_VISION_OUTPUT",
+{}
+],
+"start_image": [
+"IMAGE",
+{}
+],
+"ref_pad_image": [
+"IMAGE",
+{}
+]
+}
+}
+},
+"KSamplerAdvanced": {
+"python_module": "nodes",
+"output_node": false,
+"input": {
+"required": {
+"model": [
+"MODEL"
+],
+"add_noise": [
+[
+"enable",
+"disable"
+],
+{
+"advanced": true
+}
+],
+"noise_seed": [
+"INT",
+{
+"default": 0,
+"min": 0,
+"max": 18446744073709552000,
+"control_after_generate": true
+}
+],
+"steps": [
+"INT",
+{
+"default": 20,
+"min": 1,
+"max": 10000
+}
+],
+"cfg": [
+"FLOAT",
+{
+"default": 8,
+"min": 0,
+"max": 100,
+"step": 0.1,
+"round": 0.01
+}
+],
+"sampler_name": [
+[
+"euler"
+]
+],
+"scheduler": [
+[
+"simple"
+]
+],
+"positive": [
+"CONDITIONING"
+],
+"negative": [
+"CONDITIONING"
+],
+"latent_image": [
+"LATENT"
+],
+"start_at_step": [
+"INT",
+{
+"default": 0,
+"min": 0,
+"max": 10000,
+"advanced": true
+}
+],
+"end_at_step": [
+"INT",
+{
+"default": 10000,
+"min": 0,
+"max": 10000,
+"advanced": true
+}
+],
+"return_with_leftover_noise": [
+[
+"disable",
+"enable"
+],
+{
+"advanced": true
+}
+]
+}
+}
+},
+"VAEDecode": {
+"python_module": "nodes",
+"output_node": false,
+"input": {
+"required": {
+"samples": [
+"LATENT",
+{}
+],
+"vae": [
+"VAE",
+{}
+]
+}
+}
+},
+"SaveImageWebsocket": {
+"python_module": "custom_nodes.websocket_image_save",
+"output_node": true,
+"input": {
+"required": {
+"images": [
+"IMAGE"
+]
+}
+}
+},
+"MiniMaxH3ImageToVideo": {
+"python_module": "comfy_extras.nodes_minimax_h3",
+"output_node": false,
+"input": {
+"required": {
+"clip": [
+"CLIP",
+{}
+],
+"vae": [
+"VAE",
+{}
+],
+"prompt": [
+"STRING",
+{
+"multiline": true,
+"dynamicPrompts": true
+}
+],
+"width": [
+"INT",
+{
+"default": 1344,
+"min": 32,
+"max": 16384,
+"step": 32
+}
+],
+"height": [
+"INT",
+{
+"default": 768,
+"min": 32,
+"max": 16384,
+"step": 32
+}
+],
+"length": [
+"INT",
+{
+"default": 124,
+"min": 5,
+"max": 3600,
+"step": 17
+}
+]
+},
+"optional": {
+"first_frame": [
+"IMAGE",
+{}
+],
+"last_frame": [
+"IMAGE",
+{}
+]
+}
+}
+},
+"RandomNoise": {
+"python_module": "comfy_extras.nodes_custom_sampler",
+"output_node": false,
+"input": {
+"required": {
+"noise_seed": [
+"INT",
+{
+"default": 0,
+"min": 0,
+"max": 18446744073709552000,
+"control_after_generate": true
+}
+]
+}
+}
+},
+"KSamplerSelect": {
+"python_module": "comfy_extras.nodes_custom_sampler",
+"output_node": false,
+"input": {
+"required": {
+"sampler_name": [
+"COMBO",
+{
+"multiselect": false,
+"options": [
+"res_multistep"
+]
+}
+]
+}
+}
+},
+"BasicScheduler": {
+"python_module": "comfy_extras.nodes_custom_sampler",
+"output_node": false,
+"input": {
+"required": {
+"model": [
+"MODEL",
+{}
+],
+"scheduler": [
+"COMBO",
+{
+"multiselect": false,
+"options": [
+"simple"
+]
+}
+],
+"steps": [
+"INT",
+{
+"default": 20,
+"min": 1,
+"max": 10000
+}
+],
+"denoise": [
+"FLOAT",
+{
+"default": 1,
+"min": 0,
+"max": 1,
+"step": 0.01
+}
+]
+}
+}
+},
+"BasicGuider": {
+"python_module": "comfy_extras.nodes_custom_sampler",
+"output_node": false,
+"input": {
+"required": {
+"model": [
+"MODEL",
+{}
+],
+"conditioning": [
+"CONDITIONING",
+{}
+]
+}
+}
+},
+"SamplerCustomAdvanced": {
+"python_module": "comfy_extras.nodes_custom_sampler",
+"output_node": false,
+"input": {
+"required": {
+"noise": [
+"NOISE",
+{}
+],
+"guider": [
+"GUIDER",
+{}
+],
+"sampler": [
+"SAMPLER",
+{}
+],
+"sigmas": [
+"SIGMAS",
+{}
+],
+"latent_image": [
+"LATENT",
+{}
+]
+}
+}
+}
+}

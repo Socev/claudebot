@@ -27,6 +27,8 @@
  *   POST /api/assets  (multipart)                      ALLEEN een nieuwe foto: jpg/png/webp ≤ 25 MB, bestandsnaam socev-studio-<taak>.<ext> (als naam van het deel)
  *        (Immich 3.3.5 kent geen deviceAssetId meer: de bestandsnaam is het eigen merk), opnamedatum, en hooguit een XMP-zijbestand
  *        met alleen een beschrijving. Geen zichtbaarheid, favoriet, live-foto of metadata-velden.
+ *        wv3266 (OVIS Imagine "Laat bewegen"): ook een eigen filmpje, mp4 ≤ 25 MB (ftyp-kop isom/mp42/avc1), naam socev-studio-<taak>.mp4;
+ *        verder dezelfde regels. Het origineel lezen blijft alleen jpg/png/webp.
  *   POST /api/stacks  {assetIds: [eigen, origineel]}   stapel van precies twee: de eigen nieuwe foto bovenop + het origineel; alleen als de
  *        eigen foto in DEZE sessie door uploaden() nieuw is gemaakt (status created) en GET /api/assets van het origineel geen stack heeft
  *   PUT  /api/albums/<uuid>/assets  {ids: [eigen]}     precies één id, en alleen die eigen nieuwe foto (zelfde regel)
@@ -41,7 +43,12 @@ const BUCKET_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}
 const MAX_JSON = 8 * 1024 * 1024, MAX_BEELD = 4 * 1024 * 1024;
 // wv2614: origineel lezen ≤ 20 MB (ontwerp § 7); uploaden ≤ 25 MB (Studio-uitvoer is ≤ 10 MB of ≤ 16 MP); XMP-zijbestand ≤ 8 kB
 const MAX_ORIGINEEL = 20 * 1024 * 1024, MAX_UPLOAD = 25 * 1024 * 1024, MAX_XMP = 8 * 1024;
-const EIGEN_NAAM_RE = /^socev-studio-[a-f0-9]{16}\.(jpg|png|webp)$/;
+const EIGEN_NAAM_RE = /^socev-studio-[a-f0-9]{16}\.(jpg|png|webp|mp4)$/;
+// wv3266: eigen mp4 (ffmpeg op de pod schrijft ftyp isom); alleen voor uploaden, niet voor het origineel
+function isMp4(b) {
+  return Buffer.isBuffer(b) && b.length >= 12 && b.subarray(4, 8).toString('latin1') === 'ftyp' && ['isom', 'mp42', 'avc1'].indexOf(b.subarray(8, 12).toString('latin1')) >= 0;
+}
+function uploadSoort(b) { return soortUitBytes(b) || (isMp4(b) ? 'mp4' : null); }
 const DATUM_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/;
 const UPLOAD_VELDEN = ['assetData', 'filename', 'fileCreatedAt', 'fileModifiedAt', 'sidecarData'];
 function soortUitBytes(b) {
@@ -136,7 +143,7 @@ function weiger(methode, pad, query, body) {
     if (!bk.every(function (k) { return UPLOAD_VELDEN.indexOf(k) >= 0; })) return 'body';   // nooit visibility, isFavorite, livePhotoVideoId, metadata
     if (!Buffer.isBuffer(body.assetData) || !body.assetData.length || body.assetData.length > MAX_UPLOAD) return 'body';
     const ext = typeof body.filename === 'string' && EIGEN_NAAM_RE.exec(body.filename);
-    if (!ext || soortUitBytes(body.assetData) !== ext[1]) return 'body';
+    if (!ext || uploadSoort(body.assetData) !== ext[1]) return 'body';
     if (typeof body.fileCreatedAt !== 'string' || !DATUM_RE.test(body.fileCreatedAt) || !Number.isFinite(Date.parse(body.fileCreatedAt))) return 'body';
     if (typeof body.fileModifiedAt !== 'string' || !DATUM_RE.test(body.fileModifiedAt) || !Number.isFinite(Date.parse(body.fileModifiedAt))) return 'body';
     if (body.sidecarData !== undefined && (!Buffer.isBuffer(body.sidecarData) || body.sidecarData.length > MAX_XMP || !XMP_RE.test(body.sidecarData.toString('utf8')))) return 'body';
@@ -210,7 +217,7 @@ function maak(o) {
     let lijf;
     if (methode === 'POST' && pad === '/api/assets') {
       // multipart: fetch zet zelf Content-Type met boundary
-      const ext = EIGEN_NAAM_RE.exec(body.filename)[1], mime = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext];
+      const ext = EIGEN_NAAM_RE.exec(body.filename)[1], mime = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', mp4: 'video/mp4' }[ext];
       lijf = new FormData();
       // de eigen naam gaat als bestandsnaam van het deel mee (wordt originalFileName), NIET als formulierveld filename: Immich 3.3.5 toetst
       // dan ook het zijbestand op die naam ("Unsupported file type ….jpg", gemeten 7-11-2026)
@@ -358,7 +365,7 @@ function maak(o) {
   async function albumsVan(id) { if (!u(id)) throw new Error('immich: ongeldige foto'); const r = await verzoek('GET', '/api/albums', { assetId: id }); return Array.isArray(r) ? r.map(albumKort).filter(Boolean) : []; }
   // Nieuwe foto. o = { data: Buffer, taak: 16 hex, opname: ISO, beschrijving? } → { id, nieuw } (nieuw = false: Immich kende dezelfde bytes al)
   async function uploaden(x) {
-    const ext = soortUitBytes(x && x.data);
+    const ext = uploadSoort(x && x.data);   // wv3266: ook mp4
     if (!ext || !/^[a-f0-9]{16}$/.test(String(x.taak || ''))) throw new Error('immich: ongeldige upload');
     const body = { assetData: x.data, filename: 'socev-studio-' + x.taak + '.' + ext, fileCreatedAt: x.opname, fileModifiedAt: x.opname };
     if (x.beschrijving) body.sidecarData = xmpBeschrijving(x.beschrijving);

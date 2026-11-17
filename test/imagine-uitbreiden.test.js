@@ -20,7 +20,7 @@ for (const f of ['studio.js', 'studio-beeld.py', 'elevenlabs-credits.js', 'imagi
 function wijzig(f, oud, nieuw) { const p = path.join(MOD, f); const s = fs.readFileSync(p, 'utf8'); if (s.indexOf(oud) < 0) throw new Error('kruisproef: tekst niet gevonden in ' + f); fs.writeFileSync(p, s.split(oud).join(nieuw)); }
 if (KRUIS === 'khist') wijzig('studio.js', 'async function histWisNu(pid) {', 'async function histWisNu(pid) { return true;');
 if (KRUIS === 'klog') wijzig('imagine.js', "if (t) { x.status = 'klaar'; x.tekst = t; }", "if (t) { x.status = 'klaar'; x.tekst = t; log('imagine uitbreiden tekst=' + t); }");
-if (KRUIS === 'kwis') wijzig('studio.js', 'if (pid && tekstModus) { for (let i = 0; i < 60; i++)', 'if (false) { for (let i = 0; i < 60; i++)');
+if (KRUIS === 'kwis') wijzig('studio.js', 'if (pid && (tekstModus || vid)) { for (let i = 0; i < 60; i++)', 'if (false) { for (let i = 0; i < 60; i++)');
 if (KRUIS === 'kstart') wijzig('imagine.js', "      try { S.stopGeheugen(r.taak.id, geheim ? a : undefined); } catch (e) {}\n      x.tekst = null;", "      x.tekst = null;");
 if (KRUIS === 'kpoort') wijzig('studio.js', '|| !Object.hasOwn(api, sr[0]) || !api[sr[0]] || KNOPEN.tekst_bron.indexOf(api[sr[0]].class_type) < 0)', '|| !Object.hasOwn(api, sr[0]) || !api[sr[0]])');
 const studioMod = require(path.join(MOD, 'studio.js'));

@@ -1,0 +1,69 @@
+{
+ "ai_model": "MiniMax-H3",
+ "titel": "Imagine: laat bewegen · Trouw aan gezichten (MiniMax-H3)",
+ "uitleg": "Laat een foto 5 seconden bewegen (zonder geluid). Alleen via Imagine; de beelden komen over de websocket, de pod maakt de mp4.",
+ "motor": "comfyui",
+ "status": "actief",
+ "uitvoer": "video",
+ "fps": 24,
+ "verborgen": true,
+ "ram_mib_schatting": 24000,
+ "gpu_mib_schatting": 19000,
+ "vrij_na": true,
+ "zonder_taalmodel": true,
+ "bron": "video_minimax_h3_i2v zonder turbo-LoRA, 20 stappen res_multistep, shift_video standaard (12), VAE fp16, geen geluid, 124 beelden/24 fps, korte zijde 768; proef 2 wv3240: 543 s, 20,1 GB VRAM, ram_free min 19,0 GB (machinekamer wv3266, 17-11-2026)",
+ "tijd": "± 9 min",
+ "max_seconden": 900,
+ "max_per_dag": 30,
+ "prijs": {
+  "eenheid": "filmpje",
+  "bedrag": 0,
+  "bron": "lokaal op Olares"
+ },
+ "velden": [
+  {
+   "naam": "foto",
+   "label": "Foto",
+   "soort": "beeld",
+   "verplicht": true,
+   "pad": "1.inputs.image"
+  },
+  {
+   "naam": "opdracht",
+   "label": "Beweging in woorden",
+   "soort": "tekstvak",
+   "verplicht": true,
+   "max": 3000,
+   "pad": "104.inputs.prompt"
+  },
+  {
+   "naam": "pod_b",
+   "label": "Breedte (pod)",
+   "soort": "getal",
+   "verplicht": true,
+   "min": 64,
+   "max": 2048,
+   "pad": [
+    "104.inputs.width"
+   ]
+  },
+  {
+   "naam": "pod_h",
+   "label": "Hoogte (pod)",
+   "soort": "getal",
+   "verplicht": true,
+   "min": 64,
+   "max": 2048,
+   "pad": [
+    "104.inputs.height"
+   ]
+  },
+  {
+   "naam": "seed",
+   "label": "Seed",
+   "soort": "seed",
+   "meer": true,
+   "pad": "15.inputs.noise_seed"
+  }
+ ]
+}

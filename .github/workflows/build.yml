@@ -555,6 +555,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           python3 -c "import PIL" 2>/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil)
+          command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)   # wv3266: Laat bewegen maakt een echte mp4
           bash test/imagine-incognito.sh
       # OVIS GHAWA (wv2877): ghawa.js (invoer, rekenkern op de cent, routes zonder donateurs of GHAWA-bankvelden) en het server.js-blok.
       # wv2880: + ghawa-bij.js (fase 2: GHAWA-bank uit Facturen, Ecobank-afschriften, fondsen, maandronde) in test/ghawa-bij.test.js.
