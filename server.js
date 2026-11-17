@@ -12115,8 +12115,11 @@ async function appSwSetVoor(p) {
 // Zoals keuze.publiek: geen paden, teksten door de sleuteltoets (de namen komen uit de vault)
 function appSwPubliek(s) {
   const tk = function (x, n) { return appKort(appSleutelMasker(String(x == null ? '' : x)), n); };
-  return { kenmerk: String(s.kenmerk), gesloten: s.gesloten ? String(s.gesloten) : null,
-    woorden: (Array.isArray(s.woorden) ? s.woorden : []).slice(0, 60).map(function (w) {
+  // review MOET 4: alle open woorden (de nachtronde houdt er hooguit 15 open), van de gekozen alleen de laatste 30
+  const alle = Array.isArray(s.woorden) ? s.woorden.filter(function (w) { return w && typeof w === 'object'; }) : [];
+  const gekozen = alle.filter(function (w) { return w.keuze; }), houd = new Set(gekozen.slice(-30));
+  return { kenmerk: String(s.kenmerk), gesloten: s.gesloten ? String(s.gesloten) : null, gekozen_verborgen: gekozen.length - houd.size,
+    woorden: alle.filter(function (w) { return !w.keuze || houd.has(w); }).map(function (w) {
       const k = w.keuze && typeof w.keuze === 'object' ? w.keuze : null;
       return { sleutel: String(w.sleutel), woord: tk(w.woord, 100), stukken: Number(w.stukken) | 0, wat: w.wat === 'kies' ? 'kies' : 'zonder',
         opties: (Array.isArray(w.opties) ? w.opties : []).slice(0, 6).map(function (o) { return { id: String(o.id), naam: tk(o.naam, 100) }; }),
@@ -12188,7 +12191,7 @@ async function appVoorJouWoord(req, res, a, d) {
   if (r.j.keuze === 'maken') {
     try { await appSwMakenRij(kenmerk); } catch (e) {
       logError('app-sw-keuze', e);
-      melding = 'Vastgelegd; de klus voor de machinekamer kon ik nu niet zetten. De nachtronde meldt het woord dan morgen.';
+      melding = 'Vastgelegd; de klus voor de machinekamer kon ik nu niet zetten. Blijft het liggen, dan meldt de nachtronde het aan de machinekamer.';
     }
   }
   let punt;
