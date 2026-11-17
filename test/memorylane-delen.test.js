@@ -1340,12 +1340,13 @@ test('wv3264 Levenskalender: lijst geeft precisie, video, stem, kring en punt bi
       assert.strictEqual(typeof h.stem, 'boolean');
       assert.deepStrictEqual(Object.keys(h.kring).sort(), ['familie', 'shizzle']);
       assert.ok('punt' in h);
+      assert.ok(typeof h.nieuw_op === 'string' && !Number.isNaN(Date.parse(h.nieuw_op)), 'wv3265: nieuw_op = tijdstip');
     }
     assert.strictEqual(k(hb).stem, false, 'zonder vertelling geen stem');
     const t = o.ml.lijst({ toon: true }).body.herinneringen;
     assert.ok(t.length > 0);
     for (const h of t) {
-      for (const w of ['stem', 'kring', 'punt']) assert.ok(!(w in h), 'toonlijst heeft geen ' + w);
+      for (const w of ['stem', 'kring', 'punt', 'nieuw_op']) assert.ok(!(w in h), 'toonlijst heeft geen ' + w);
       assert.ok('precisie' in h && 'video' in h);
     }
   } finally { o.sluit(); }

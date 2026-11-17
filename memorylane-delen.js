@@ -1069,10 +1069,11 @@ function maak(o) {
     const toon = !!(opt && opt.toon);
     bijwerken();
     // wv3264: bij David ook de kring (Familie/Shizzle, zoals Delen hem toont) en het kaartpunt; nooit in de toonmodus
+    // wv3265 (Levenskalender deel B, blok Nieuw): nieuw_op = wanneer de herinnering erbij kwam (ml_herinnering.aangemaakt); alleen bij David
     const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen' && h.status !== 'samengevoegd' && (!toon || toonbaar(h))).map((h) => {
       if (toon) return toonKort(kort(h));
       const p = paginaLees(h.hid), x = sam(h, p), k = kort(h, p, x), kr = kringVan(h, k.titel);
-      return Object.assign(k, { kring: { familie: !!kr.familie, shizzle: !!kr.shizzle }, punt: puntVan(h) });
+      return Object.assign(k, { kring: { familie: !!kr.familie, shizzle: !!kr.shizzle }, punt: puntVan(h), nieuw_op: h.aangemaakt || null });
     });
     alle.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : a.hid < b.hid ? -1 : 1));
     if (toon) {
