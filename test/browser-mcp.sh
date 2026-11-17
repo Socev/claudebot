@@ -8,7 +8,8 @@
 #     image, zet ook EIS_SCHERM) motor = patchright, /app/playwright-mcp.sh loopt via browser-mcp.js
 # Lokaal (zonder image): BROWSER_MOTOR_PAD=<pad naar patchright-core> bash test/browser-mcp.sh  (TOETS_MCP_ARGS=--no-sandbox in een
 # user-namespace-proef met Xvfb, waar alles als root draait)
-# CI: docker run --rm -v "$PWD":/src:ro --user claude --entrypoint bash <image> -c 'EIS_IMAGE=1 bash /src/test/browser-mcp.sh'
+# CI: docker run --rm -v "$PWD":/src:ro --user claude --entrypoint bash <image> -c 'EIS_IMAGE=1 TOETS_MCP_ARGS=--no-sandbox bash /src/test/browser-mcp.sh'
+#   (docker heeft geen user-namespaces voor de Chromium-sandbox, zoals bij test/ophalen.sh; in de pod blijft de sandbox aan; wv3256)
 set -u
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 BMCP="${BMCP:-$SRC/browser-mcp.js}"
@@ -129,7 +130,7 @@ if [ "${EIS_SCHERM:-}" = 1 ]; then
 fi
 if [ "${EIS_IMAGE:-}" = 1 ]; then
   # De echte ingang van de tools (zelfde regel als in .claude.json van socev): /app/playwright-mcp.sh → browser-mcp.js → patchright.
-  node "$W/client.js" "[$NAV]" /app/playwright-mcp.sh > "$W/g5.txt" 2>"$W/g5.err"
+  node "$W/client.js" "[$NAV]" /app/playwright-mcp.sh ${TOETS_MCP_ARGS:-} > "$W/g5.txt" 2>"$W/g5.err"
   grep -q 'Page Title: Proefpagina wv3251' "$W/g5.txt" && ok "5 via /app/playwright-mcp.sh: proefpagina geopend" || nee "5 via /app/playwright-mcp.sh" "$(head -c 300 "$W/g5.txt") $(tail -3 "$W/g5.err")"
   grep -q '"motor":"patchright"' "$TMPDIR/browser-mcp.log" 2>/dev/null && ok "5 via /app/playwright-mcp.sh: motor patchright (log)" || nee "5 via /app/playwright-mcp.sh: motor patchright" "$(cat "$TMPDIR/browser-mcp.log" 2>&1)"
 fi
