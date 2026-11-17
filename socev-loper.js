@@ -170,6 +170,8 @@ function opStart(v, sock) {
   const eigenUmask = process.umask(KIND_UMASK);   // alleen voor het kind; direct terug (UMASK, wv2282)
   try {
     kind = spawn(bin, args, { cwd: cwd, env: env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    // wv3202: agents vallen bij geheugennood vóór postgres (verhogen mag zonder recht; kinderen erven het)
+    try { if (kind.pid) fs.writeFileSync('/proc/' + kind.pid + '/oom_score_adj', '1000'); } catch (e) { /* geen /proc: niets */ }
   } catch (e) { return { fout: 'spawn-mislukt', code: e.code || null }; }
   finally { process.umask(eigenUmask); }
   const j = { id: v.id, brein: v.brein, pid: kind.pid || null, kind: kind, gestart: Date.now(), klaar: 0, code: null, signaal: null,

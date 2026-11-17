@@ -924,7 +924,15 @@ function weesLeeft(pid, jobId, a) {
     return fs.readFileSync('/proc/' + pid + '/environ').indexOf(Buffer.from('SOCEV_AGENT_RUN=' + jobId + '\0')) !== -1;
   } catch (e) { return false; }
 }
+// wv3202: agents (claude/codex/agy en alles wat zij starten) vallen bij geheugennood vóór postgres. Verhogen van oom_score_adj mag
+// zonder CAP_SYS_RESOURCE (verlagen niet: postgres -500 lukt op Olares niet). spawn() is synchroon fork+exec en de kinderen erven
+// de waarde, dus direct na spawn zetten dekt ook hun MCP-servers en browsers. Loper-kinderen (socev) zet socev-loper.js zelf.
+function oomEerst(pid) {
+  if (!pid) return false;
+  try { fs.writeFileSync('/proc/' + pid + '/oom_score_adj', '1000'); return true; } catch (e) { return false; }
+}
 function weesSpawnMeld(opts, child, sessie, transcript) {
+  if (child && !child.loper) oomEerst(child.pid);
   if (!opts || typeof opts.opSpawn !== 'function' || !child || !child.pid) return;
   const st = appProcStat(child.pid);   // wv715: starttijd, zodat een 1002-wees zonder environ te herkennen is
   try { opts.opSpawn({ pid: child.pid, sessie: sessie || null, transcript: transcript || null, loper_id: child.loperId || null, pid_start: st ? st.start : null }); }
@@ -19756,7 +19764,7 @@ async function voorwerkOnderzoek(o) {
       '--max-turns', '30', '--system-prompt', o.systeem, '--json-schema', JSON.stringify(o.schema)];
     const r = await new Promise(function (klaar) {
       let k, uit = '';
-      try { k = spawn(HARVESTER_BIN, args, { cwd: path.join(map, 'w'), env: env, stdio: ['pipe', 'pipe', 'ignore'] }); } catch (e) { return klaar({ ok: false, fout: 'claude start niet' }); }
+      try { k = spawn(HARVESTER_BIN, args, { cwd: path.join(map, 'w'), env: env, stdio: ['pipe', 'pipe', 'ignore'] }); oomEerst(k.pid); } catch (e) { return klaar({ ok: false, fout: 'claude start niet' }); }
       k.stdin.on('error', function () {});
       try { k.stdin.end(o.prompt); } catch (e) {}
       const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, VOORWERK_RUN_MS);
@@ -20373,7 +20381,7 @@ async function harvesterClaude(systeem, prompt, schema, o) {
       '--permission-prompts', 'none', '--no-session-persistence', '--model', HARVESTER_MODEL, '--effort', 'low', '--system-prompt', systeem,
       '--json-schema', JSON.stringify(schema)];
     let k, uit = '', fout = '';
-    try { k = spawn(HARVESTER_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    try { k = spawn(HARVESTER_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); oomEerst(k.pid); }
     catch (e) { opruim(); return klaar({ ok: false, fout: 'claude start niet' }); }
     k.stdin.on('error', function () {});
     try { k.stdin.end(prompt); } catch (e) {}
@@ -27110,7 +27118,7 @@ function bankClaude(groepen, cats) {
       '--json-schema', JSON.stringify(bankAiSchema(cats))];
     // De prompt (met omschrijvingen en tegenpartijen) via stdin, niet in argv: argv is voor elk proces op de pod te lezen (Fable wv687 #5).
     let k, uit = '', fout = '';
-    try { k = spawn(BANK_AI_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    try { k = spawn(BANK_AI_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); oomEerst(k.pid); }
     catch (e) { opruim(); return klaar({ ok: false, fout: 'claude start niet' }); }
     k.stdin.on('error', function () {});
     try { k.stdin.end(prompt); } catch (e) {}

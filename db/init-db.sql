@@ -3,6 +3,14 @@ set client_min_messages = warning;
 -- Extensies in schema extensions (vector in public), stubs voor auth.role()/uid()/jwt(), de kluis (vervanger van supabase_vault, § 3)
 -- en het herlaadsignaal voor PostgREST.
 \set ON_ERROR_STOP on
+-- wv3202: eigenaar van de databank = postgres, zoals bij Supabase (gemeten 16-11: daar CREATE op databank en public; hier was het pgbaas,
+-- zodat migraties/DDL via sb-sql na de overstap zouden falen). public is van pg_database_owner, dus postgres krijgt daarmee ook CREATE op public.
+-- Raakt de kluis niet: schema vault en zijn objecten blijven van kluis_eigenaar (eigenaar databank geeft geen rechten op andermans schema).
+do $$ begin
+  if (select datdba::regrole::text from pg_database where datname = current_database()) <> 'postgres' then
+    execute format('alter database %I owner to postgres', current_database());
+  end if;
+end $$;
 create schema if not exists extensions;
 grant usage on schema extensions to postgres, anon, authenticated, service_role;
 create extension if not exists pgcrypto schema extensions;
