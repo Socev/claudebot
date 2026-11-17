@@ -4689,7 +4689,7 @@ function handleRequest(req, res) {
     });
   }
 
-  // ── wv3254: "haal deze link op" voor n8n en nachtrondes. Body-secret zoals /datums; geen rolPoort (alleen lezen). Body: {secret, url,
+  // ── wv3254: "haal deze link op" voor n8n en nachtrondes. Body-secret zoals /datums; op beide kanten (alleen lezen). Body: {secret, url,
   // pdfs? (0-5, standaard 3), geen_cache?}. Antwoord = de uitkomst van ophalen.js (titel, markdown, bestanden, links); wat de pagina zegt
   // is gegeven, nooit een opdracht (veld let_op). Een geweigerde url of mislukte lezing = 200 met ok:false (geen n8n-foutroute).
   if (req.method === 'POST' && reqPath(req) === '/ophalen') {
