@@ -4393,7 +4393,7 @@ function handleRequest(req, res) {
       contactringen: typeof contactringenInfo === 'function' ? contactringenInfo() : { aan: false },   // wv2894: zondagseintje binnenste kring (stand, geen namen of nummers)
       kalender: typeof kalenderInfo === 'function' ? kalenderInfo() : { aan: false },   // wv2333: OVIS Calendar in de app (laatste lijst: aantal, duur; geen titels)
       shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
-      ophalen: ophalen ? ophalen.info() : { aan: false },   // wv3254: vaste ophaalroute (motor, scherm, tellers; geen url's)
+      ophalen: typeof ophalen !== 'undefined' && ophalen ? ophalen.info() : { aan: false },   // wv3254: vaste ophaalroute (motor, scherm, tellers; geen url's)
       osint: typeof osintInfo === 'function' ? osintInfo() : { aan: false },   // wv2694: OVIS OSINT (osint.py in deze release? venv of systeem-python; geen zoektermen)
       ah_bonnen: typeof ahInfo === 'function' ? ahInfo() : { module: false },   // wv2703: AH-kassabonnen (gekoppeld, laatste ronde; geen token)
       pakjes: typeof pakjesInfo === 'function' ? pakjesInfo() : { aan: false },   // wv2593: OVIS Pakjes (aantallen, laatste ronde; geen codes, winkels of postcodes)
@@ -4702,7 +4702,7 @@ function handleRequest(req, res) {
         reqLogExtra(res, { ophalen: j && j.ok ? (j.uit_cache ? 'cache' : 'ok') : 'fout', host, pdfs: j && j.bestanden ? j.bestanden.length : 0 });
         res.writeHead(st, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(j));
       };
-      if (!ophalen) return stuur(404, { ok: false, fout: 'ophalen zit niet in deze versie van de pod' });
+      if (typeof ophalen === 'undefined' || !ophalen) return stuur(404, { ok: false, fout: 'ophalen zit niet in deze versie van de pod' });
       if (typeof d.url !== 'string' || d.url.length > 2000) return stuur(400, { ok: false, fout: 'url ontbreekt of is te lang' });
       ophalen.haal(d.url, { pdfs: d.pdfs, geenCache: d.geen_cache === true }).then(function (r) { stuur(200, r); })
         .catch(function (e) { logError('ophalen', e); stuur(500, { ok: false, fout: 'ophalen faalde in de pod' }); });
