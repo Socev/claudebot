@@ -126,6 +126,8 @@ function maakProxy(o) {
         res.writeHead(a.statusCode || 502, a.headers); a.pipe(res);
       });
       v.on('error', () => { try { res.writeHead(502); } catch (x) { /* al begonnen */ } res.end(); });
+      // browser sluit (afgebroken download, tijdsgrens): ook de verbinding naar de site dicht
+      res.on('close', () => { try { v.destroy(); } catch (x) { /* weg */ } });
       req.pipe(v);
     });
   });
@@ -186,6 +188,41 @@ function standaardStaat() { return schrijfbaar('/opt/data/.ophalen-staat') ? '/o
 function standaardDownloads() { return schrijfbaar('/opt/data/browser-downloads') ? '/opt/data/browser-downloads' : path.join(os.homedir(), 'browser-downloads'); }
 function leeft(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 
+// Tempo per site, gedeeld over processen van dezelfde gebruiker: bestand <staat>/tempo/<hash van het basisdomein> met het vroegste
+// volgende tijdstip; mkdir-slot eromheen. wacht(host) reserveert het bezoek vóór het gebeurt (ouder voor de pagina, kind voor elke pdf).
+function maakTempo(staat, tempoMs, nu) {
+  nu = nu || Date.now;
+  try { fs.mkdirSync(path.join(staat, 'tempo'), { recursive: true, mode: 0o700 }); } catch (e) { /* later fout */ }
+  function bestand(host) { return path.join(staat, 'tempo', crypto.createHash('sha256').update(basisDomein(host)).digest('hex').slice(0, 16)); }
+  async function metSlot(host, fn) {
+    const sl = bestand(host) + '.slot';
+    for (let i = 0; i < 200; i++) {
+      try { fs.mkdirSync(sl); try { return fn(); } finally { try { fs.rmdirSync(sl); } catch (e) { /* weg */ } } }
+      catch (e) {
+        if (e.code !== 'EEXIST') return fn();
+        try { if (Date.now() - fs.statSync(sl).mtimeMs > 30000) fs.rmdirSync(sl); } catch (x) { /* weg */ }
+        await slaap(50);
+      }
+    }
+    return fn();
+  }
+  async function wacht(host, tot) {
+    for (;;) {
+      const w = await metSlot(host, function () {
+        const b = bestand(host);
+        let vroegst = 0;
+        try { vroegst = Number(fs.readFileSync(b, 'utf8')) || 0; } catch (e) { vroegst = 0; }
+        if (nu() >= vroegst) { try { fs.writeFileSync(b, String(nu() + tempoMs)); } catch (e) { /* bijzaak */ } return 0; }
+        return vroegst - nu();
+      });
+      if (!w) return true;
+      if (tot && Date.now() + w > tot) return false;
+      await slaap(Math.min(w, tempoMs || 1));
+    }
+  }
+  return { wacht };
+}
+
 function maak(o) {
   o = o || {};
   const staat = o.staat || standaardStaat();
@@ -217,35 +254,6 @@ function maak(o) {
       await slaap(500);
     }
   }
-  // Tempo per site: bestand tempo/<hash van het basisdomein> met het vroegste volgende tijdstip; mkdir-slot eromheen.
-  function tempoBestand(host) { return path.join(staat, 'tempo', crypto.createHash('sha256').update(basisDomein(host)).digest('hex').slice(0, 16)); }
-  async function metTempoSlot(host, fn) {
-    const sl = tempoBestand(host) + '.slot';
-    for (let i = 0; i < 200; i++) {
-      try { fs.mkdirSync(sl); try { return fn(); } finally { try { fs.rmdirSync(sl); } catch (e) { /* weg */ } } }
-      catch (e) {
-        if (e.code !== 'EEXIST') return fn();
-        try { if (Date.now() - fs.statSync(sl).mtimeMs > 30000) fs.rmdirSync(sl); } catch (x) { /* weg */ }
-        await slaap(50);
-      }
-    }
-    return fn();
-  }
-  async function wachtTempo(host) {
-    for (;;) {
-      const wacht = await metTempoSlot(host, function () {
-        const b = tempoBestand(host);
-        let vroegst = 0;
-        try { vroegst = Number(fs.readFileSync(b, 'utf8')) || 0; } catch (e) { vroegst = 0; }
-        if (nu() >= vroegst) { fs.writeFileSync(b, String(nu() + tempoMs)); return 0; }
-        return vroegst - nu();
-      });
-      if (!wacht) return;
-      await slaap(Math.min(wacht, tempoMs));
-    }
-  }
-  async function zetTempo(host) { await metTempoSlot(host, () => { fs.writeFileSync(tempoBestand(host), String(nu() + tempoMs)); }); }
-
   function cachePad(sleutel) { return path.join(staat, 'cache', crypto.createHash('sha256').update(sleutel).digest('hex').slice(0, 32) + '.json'); }
   function uitCache(sleutel) {
     try {
@@ -332,10 +340,9 @@ function maak(o) {
     const dir = fs.mkdtempSync(path.join(o.tmp || os.tmpdir(), 'ophalen-'));
     try {
       fs.chmodSync(dir, 0o700);
-      await wachtTempo(t.host);
       const ms = Math.min(o.kindMs || (KIND_MS + pdfs * PDF_MS), 240000);
-      const k = await viaKind({ url: t.url, dir, motor: motor.pad, motornaam: motor.naam, exe, ms, pdfs, tempoMs, pdfMax: o.pdfMaxBytes || PDF_MAX_BYTES, proef: o.proef || null }, dir, ms);
-      for (const h of (k && k.bezocht) || []) await zetTempo(h).catch(() => null);
+      const k = await viaKind({ url: t.url, dir, motor: motor.pad, motornaam: motor.naam, exe, ms, pdfs, tempoMs, staat, pdfMax: o.pdfMaxBytes || PDF_MAX_BYTES, proef: o.proef || null,
+        zonderSandbox: o.zonderSandbox === true }, dir, ms);
       if (!k || k.fout) { teller.mislukt++; return fout((k && k.fout) || 'mislukt', k && k.status ? { status: k.status } : null); }
       const datum = new Date(nu()).toISOString().slice(0, 10);
       const map = path.join(downloads, datum);
@@ -410,14 +417,13 @@ async function kind(invoerPad, uitPad) {
   const dl = path.join(d.dir, 'dl'), pdfDir = path.join(d.dir, 'pdf');
   fs.mkdirSync(dl, { mode: 0o700 }); fs.mkdirSync(pdfDir, { mode: 0o700 });
   const uit = { status: 0, eind: d.url, titel: '', html: null, links: [], pdf_links: [], bestanden: [], bezocht: [], opmerkingen: [], motor: d.motornaam, scherm: 'headless' };
-  let ctx = null;
-  const laatst = {};
+  let ctx = null, wachter = null, waakhond = null;
+  const nietVerwacht = (x) => { x.cancel().catch(() => null); x.delete().catch(() => null); };
+  const gedeeld = maakTempo(d.staat, d.tempoMs);
+  // vóór elk eigen bezoek (pdf, PUC-link) het tijdstip reserveren in het gedeelde tempo; lukt dat niet binnen de tijd: overslaan
   async function tempo(u) {
-    let h; try { h = basisDomein(new URL(u).hostname); } catch (e) { return; }
-    const w = (laatst[h] || 0) + d.tempoMs - Date.now();
-    if (w > 0) await slaap(Math.min(w, rest()));
-    laatst[h] = Date.now();
-    try { uit.bezocht.push(new URL(u).hostname); } catch (e) { /* weg */ }
+    let h; try { h = new URL(u).hostname; } catch (e) { return false; }
+    return gedeeld.wacht(h, tot - 3000);
   }
   function mapGrootte() { let n = 0; try { for (const f of fs.readdirSync(dl)) { try { n += fs.statSync(path.join(dl, f)).size; } catch (e) { /* weg */ } } } catch (e) { /* weg */ } return n; }
   async function bewaarDownload(download, bron) {
@@ -439,12 +445,17 @@ async function kind(invoerPad, uitPad) {
     uit.bestanden.push({ pad: doel, bron });
     return true;
   }
-  // Ga naar u op page. → {download} | {resp}
+  // Ga naar u op page. → {download} | {resp}. Alleen een download die het bezoek zelf oplevert (goto faalt of geeft geen antwoord) is
+  // de onze; een download die naast een gewoon geladen pagina binnenkomt gaat weg (Codex MOET 1).
   async function ga(page, u, ms) {
-    const dlP = page.waitForEvent('download', { timeout: ms }).then((x) => ({ download: x }), () => null);
+    let gekregen = null;
+    wachter = (x) => { if (!gekregen) gekregen = x; else nietVerwacht(x); };
     let resp = null, fout = null;
     try { resp = await page.goto(u, { waitUntil: 'domcontentloaded', timeout: ms }); } catch (e) { fout = e; }
-    if (fout || !resp) { const x = await Promise.race([dlP, slaap(3000).then(() => null)]); if (x) return x; }
+    if (fout || !resp) { for (let i = 0; !gekregen && i < 30; i++) await slaap(100); }
+    wachter = null;
+    if (gekregen && (fout || !resp)) return { download: gekregen };
+    if (gekregen) nietVerwacht(gekregen);
     if (fout) throw fout;
     return { resp };
   }
@@ -463,17 +474,24 @@ async function kind(invoerPad, uitPad) {
     fs.writeFileSync(path.join(profiel, 'Default', 'Preferences'), JSON.stringify({ plugins: { always_open_pdf_externally: true }, download: { prompt_for_download: false } }));
     const opt = { executablePath: d.exe || undefined, headless: !scherm, timeout: rest(), proxy, ignoreDefaultArgs: ['--disable-popup-blocking'], args: BROWSER_ARGS,
       acceptDownloads: true, downloadsPath: dl, locale: 'nl-NL', timezoneId: 'Europe/Amsterdam', viewport: { width: 1366, height: 900 } };
-    try { ctx = await pw.chromium.launchPersistentContext(profiel, Object.assign({ chromiumSandbox: true }, opt)); }
-    catch (e) { ctx = await pw.chromium.launchPersistentContext(profiel, Object.assign({}, opt, { chromiumSandbox: false, timeout: rest() })); }
+    // Codex MOET 2: altijd met de Chromium-sandbox (gemeten 17-11: werkt in de pod); geen stille terugval. Alleen de CI-toets in docker
+    // (geen user-namespaces) zet hem via maak({zonderSandbox}) uit; CLI en route doen dat nooit.
+    try { ctx = await pw.chromium.launchPersistentContext(profiel, Object.assign({ chromiumSandbox: d.zonderSandbox !== true }, opt)); }
+    catch (e) { return schrijf({ fout: 'browser start niet (met sandbox): ' + String(e && e.message || e).split('\n')[0].slice(0, 120) }); }
     await ctx.addInitScript(function () {
       try { window.open = function () { return null; }; } catch (e) { /* weg */ }
       for (const n of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel']) { try { Object.defineProperty(window, n, { value: undefined, configurable: false, writable: false }); } catch (e) { /* weg */ } }
     }).catch(() => null);
     const page = ctx.pages()[0] || await ctx.newPage();
-    // geen pop-ups: elk ander tabblad gaat meteen dicht
-    ctx.on('page', function (p) { if (p !== page) p.close().catch(() => null); });
+    // Codex MOET 1: alleen een download die wij verwachten (in ga()) mag lopen; elke andere gaat meteen weg, en een waakhond breekt
+    // elke lopende download af zodra de downloadmap boven de grens komt.
+    const lopend = new Set();
+    page.on('download', function (x) { lopend.add(x); x.failure().then(() => lopend.delete(x), () => lopend.delete(x)); if (wachter) wachter(x); else nietVerwacht(x); });
+    waakhond = setInterval(function () { if (mapGrootte() > d.pdfMax) for (const x of lopend) x.cancel().catch(() => null); }, 200);
+    // geen pop-ups: elk ander tabblad gaat meteen dicht (en een download daaruit ook)
+    ctx.on('page', function (p) { if (p !== page) { p.on('download', nietVerwacht); p.close().catch(() => null); } });
 
-    await tempo(d.url);
+    if (!(await tempo(d.url))) return schrijf({ fout: 'te druk op deze site (tempo per site); probeer het zo opnieuw' });
     const eerste = await ga(page, d.url, rest());
     if (eerste.download) {
       await bewaarDownload(eerste.download, d.url);
@@ -542,8 +560,8 @@ async function kind(invoerPad, uitPad) {
         }
         if (!href) uit.opmerkingen.push('PUC-pdf niet op tijd gemaakt');
         else {
-          await tempo(href);
-          try {
+          if (!(await tempo(href))) { uit.opmerkingen.push('tijd op voor de PUC-pdf (tempo per site)'); href = null; }
+          if (href) try {
             const x = await ga(page, href, Math.min(PDF_MS, rest()));
             if (x.download) await bewaarDownload(x.download, uit.eind.split('#')[0]);
             else if (isPdfResp(x.resp)) { const buf = await x.resp.body().catch(() => null); if (buf) bewaarBuf(buf, uit.eind.split('#')[0]); }
@@ -556,7 +574,7 @@ async function kind(invoerPad, uitPad) {
     for (const l of uit.pdf_links.slice(0, Math.max(0, d.pdfs - uit.bestanden.length))) {
       if (tot - Date.now() < 5000) { uit.opmerkingen.push('tijd op: niet alle pdf-links opgehaald'); break; }
       if (!hostOk(new URL(l.url).hostname) && !(d.proef && d.proef[schoneHost(new URL(l.url).hostname)])) { uit.opmerkingen.push('pdf-link ' + l.url + ' overgeslagen (geen sitenaam)'); continue; }
-      await tempo(l.url);
+      if (!(await tempo(l.url))) { uit.opmerkingen.push('tijd op: niet alle pdf-links opgehaald'); break; }
       try {
         const x = await ga(page, l.url, Math.min(PDF_MS, rest()));
         if (x.download) await bewaarDownload(x.download, l.url);
@@ -567,7 +585,7 @@ async function kind(invoerPad, uitPad) {
     schrijf(uit);
   } catch (e) {
     schrijf({ fout: /Timeout/i.test(String(e && e.message)) ? 'de pagina laadde niet op tijd' : 'browser: ' + String(e && e.message || e).split('\n')[0].slice(0, 160), bezocht: uit.bezocht });
-  } finally { if (ctx) await ctx.close().catch(() => null); px.srv.close(); }
+  } finally { if (waakhond) clearInterval(waakhond); if (ctx) await ctx.close().catch(() => null); px.srv.close(); }
 }
 
 // ── CLI ──

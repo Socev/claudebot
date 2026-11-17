@@ -1124,11 +1124,12 @@ jobs:
           done
 
       # wv3254: "haal deze link op" in het image (/app/ophalen.js, Patchright + Xvfb, echte Chromium), als claude én socev; lokale proefserver.
+      # Docker heeft geen user-namespaces voor de Chromium-sandbox: alleen de toets zet hem uit (in de pod is hij verplicht, gemeten 17-11).
       - name: "Rooktest - ophaalroute (wv3254)"
         run: |
           for u in claude socev; do
             echo "== als $u"
-            docker run --rm -v "$PWD":/src:ro --user $u --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} -c 'OPHALEN_JS=/app/ophalen.js EIS_BROWSER=1 bash /src/test/ophalen.sh' || exit 1
+            docker run --rm -v "$PWD":/src:ro --user $u --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} -c 'OPHALEN_JS=/app/ophalen.js EIS_BROWSER=1 OPHALEN_TOETS_ZONDER_SANDBOX=1 bash /src/test/ophalen.sh' || exit 1
           done
 
       - name: Rooktest opruimen
