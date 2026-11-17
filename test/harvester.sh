@@ -350,7 +350,7 @@ let invoer=''; process.stdin.on('data',c=>invoer+=c); process.stdin.on('end',()=
   let acc2 = 'sk-ant-oat-twee', bezwaar = null, vangnet = { mag: false, reden: 'account 1 onder Davids reserve' }, rpc = [];
   const ctx = vm.createContext({ require, process: Object.assign({}, process, { env: Object.assign({}, process.env, { HARVESTER_CLAUDE_BIN: nep, TMPDIR: W, SUPABASE_SERVICE_ROLE: 'geheim2', CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-een', API_SECRET: 'geheim' }) }),
     fs, path, Buffer, console, setTimeout, clearTimeout, setImmediate, JSON, Date, Promise,
-    __dirname: process.cwd(), spawn: require('child_process').spawn, VAULT, serverPad: (n, e, echt) => path.join(W, 'srv-' + n), serverProefDeel: (d) => d, logError: () => {},
+    __dirname: process.cwd(), spawn: require('child_process').spawn, metOomEerst: (f) => f(), VAULT, serverPad: (n, e, echt) => path.join(W, 'srv-' + n), serverProefDeel: (d) => d, logError: () => {},
     appSbRpc: async (f, b) => { rpc.push([f, b]); return {}; },
     kiesAccount: (o) => (o && o.account === 2 && !bezwaar ? 2 : 1), account2Token: async () => acc2, account1Vangnet: async () => vangnet,
     appWeiger: (res, st, f, r) => ({ st, f, r }), appStuur: (res, st, j) => ({ st, j }), appRolOk: async () => ctx.__primair, appTeller: () => true,   // de echte tellerlijst staat in appStaat (poortblok); hieronder apart getoetst
