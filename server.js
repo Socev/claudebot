@@ -2865,6 +2865,26 @@ function postJson(urlStr, payload, cb) {
   req.end(body);
 }
 
+/* agentStil:begin */
+// wv3248 (David 17-11-2026, op het FTO-rapport "stand gelijk, geen wijziging": "Dit hoef ik niet dagelijks als melding te zien;
+// Ik wil het alleen weten als het afwijkt / mis gaat"). Een machinekamer:-agent die geslaagd is, als eindrapport exact NIETS
+// geeft en geen bestanden in OUTDIR achterlaat, rondt STIL af: geen n8n-rapport (AI - Agent-rapport, route machinekamer ->
+// bericht in de app) en geen rapport.md in app-bestanden. Register rapport = 'stil', log soort agent-stil. Nooit stil: mislukt
+// (ok false of een fout), tussenstand, een eindtekst met een herstart- of eindcontroleregel (dan is het niet meer exact NIETS),
+// bestanden, of een andere route (socev: weegt NIETS zelf in n8n; david: is ongefilterd op verzoek).
+const AGENT_STIL_RE = /^NIETS\.?$/i;
+function agentStil(label, r, files) {
+  if (!r || r.ok !== true || r.error || r.tussenstand) return false;
+  if (!/^\s*machinekamer\s*:/i.test(String(label || ''))) return false;
+  if (Array.isArray(files) && files.length) return false;
+  return typeof r.output === 'string' && AGENT_STIL_RE.test(r.output.trim());
+}
+function agentStilAf(entry, jobId) {
+  entry.rapport = 'stil';
+  saveAgents();
+  schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'agent-stil', job_id: jobId, label: String(entry.label || '').slice(0, 120) }));
+}
+/* agentStil:einde */
 function sendReport(entry, result, attempt) {
   attempt = attempt || 1;
   if (!AGENT_WEBHOOK_URL) {
@@ -3389,11 +3409,13 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     // dus het webhookrapport krijgt de volledige uitvoer apart mee. Anders zou
     // juist bij een grote agentrun een leeg rapport naar Telegram gaan.
     const volledigeUitvoer = (typeof r.output === 'string') ? r.output : '';
-    appRapport = volledigeUitvoer || (r.error ? 'Mislukt: ' + String(r.error) : '');
+    const stil = agentStil(entry.label, r, r.files);   // wv3248: geslaagde machinekamer:-agent met exact NIETS en geen bestanden
+    appRapport = stil ? null : (volledigeUitvoer || (r.error ? 'Mislukt: ' + String(r.error) : ''));
     j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
     jobEindLog(jobId, j, ws);
     entry.status = 'done'; entry.ok = !!r.ok; entry.error = agentFoutcode(r.error); entry.ended = Date.now(); saveAgents();
-    sendReport(entry, Object.assign({}, r, { output: volledigeUitvoer }));
+    if (stil) agentStilAf(entry, jobId);
+    else sendReport(entry, Object.assign({}, r, { output: volledigeUitvoer }));
     autoNaAfloop(jobId, { ok: !!r.ok, output: volledigeUitvoer }, entry && entry.label);   // spraakkastje: terugkomen in de auto
   } catch (e) {
     logError('processAgent', e);
@@ -3559,9 +3581,11 @@ function weesAfleveren(id) {
   const j = jobs[id];
   if (j && j.result) j.result.files = files;
   // Fable-review diff K2 wv211: niets tussen 'register' en sendReport mag het rapport tegenhouden.
-  sendReport(a, r);
+  // wv3248: behalve de stille afloop (geslaagd, exact NIETS, machinekamer:, geen bestanden); agentStil gooit niet.
+  const stil = agentStil(a.label, r, files);
+  if (stil) agentStilAf(a, id); else sendReport(a, r);
   try { autoNaAfloop(id, { ok: r.ok, output: r.output }, a.label); } catch (err) { logError('wees-auto', err); }
-  try { appBewaarAgent(id, a, outdir, r.output, r.ok, false); } catch (err) { logError('wees-appbewaar', err); }
+  try { appBewaarAgent(id, a, outdir, stil ? null : r.output, r.ok, false); } catch (err) { logError('wees-appbewaar', err); }
   try { fs.rmSync(path.join(IO, id), { recursive: true, force: true }); } catch (err) {}
   try { fs.rmSync(eindVoorlopigPad(id), { force: true }); } catch (err) {}
 }
@@ -9460,7 +9484,7 @@ async function appAgents(req, res, a) {
       label_kort: appLabelGewoon(a.label), wv: w ? w.id : null, route: route, status: status,
       gestart: a.started ? new Date(a.started).toISOString() : null, geeindigd: a.ended ? new Date(a.ended).toISOString() : null,
       herstart: a.herstart ? String(a.herstart).slice(0, 80) : null,
-      rapport_bezorgd: rap === 'verzonden' ? 'ja' : (rap.indexOf('herkansing-') === 0 || rap === 'wacht-op-primair') ? 'opnieuw' : rap.indexOf('mislukt') === 0 || rap === 'geen-webhook-geconfigureerd' ? 'nee' : null,
+      rapport_bezorgd: rap === 'verzonden' ? 'ja' : rap === 'stil' ? null : (rap.indexOf('herkansing-') === 0 || rap === 'wacht-op-primair') ? 'opnieuw' : rap.indexOf('mislukt') === 0 || rap === 'geen-webhook-geconfigureerd' ? 'nee' : null,
       rapport: !!(m && m.rapport), bestanden: m ? m.bestanden.length : 0 };
   });
   const lopend = agents.filter(function (a) { return a.status === 'loopt' || a.status === 'wacht'; })

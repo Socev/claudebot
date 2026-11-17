@@ -415,6 +415,10 @@ jobs:
       - name: "bericht-bronnen (wv3238, interne meldingen niet stil weg)"
         if: ${{ !cancelled() }}
         run: bash test/bericht-bronnen.sh
+      # wv3248: machinekamer:-agent met eindrapport exact NIETS (geslaagd, geen bestanden) rondt stil af: geen n8n-rapport, geen app-rapport.
+      - name: "agent-stil (wv3248, NIETS = geen melding bij machinekamer:)"
+        if: ${{ !cancelled() }}
+        run: bash test/agent-stil.sh
       # Vault zonder symlinks (wv900): vault-veilig.js/vault_veilig.py — link op de doelnaam, map-symlink, hangende link, vaste tmp-namen,
       # fifo, ACL-masker, flock; potVzRegister uit server.js in een vm; geen vaste tmp-naam of append op een vaultpad meer in server.js.
       - name: "vault-veilig (wv900, geen symlink volgen in de vault)"
