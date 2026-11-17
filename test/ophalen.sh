@@ -89,7 +89,7 @@ function maakPdf(tekst) {
     else { console.log('OVER  4 geen browsermotor/Chromium op deze machine'); over++; }
   } else {
     const PDF = maakPdf('Proefpdf tariefbeschikking 2027');
-    const hits = {}; const tijden = {};
+    const hits = {}; const tijden = {}; const groot = { bytes: 0, af: false };
     const srv = http.createServer((q, s) => {
       const p = q.url.replace(/^https?:\/\/[^/]+/, '').split('?')[0];
       hits[p] = (hits[p] || 0) + 1; (tijden[p] = tijden[p] || []).push(Date.now());
@@ -103,11 +103,20 @@ function maakPdf(tekst) {
       if (p === '/door1') { s.writeHead(302, { location: 'http://127.0.0.1:' + srv.address().port + '/geheim' }); return s.end(); }
       if (p === '/door2') { s.writeHead(302, { location: 'http://localhost:' + srv.address().port + '/geheim' }); return s.end(); }
       if (p === '/traag') return; // antwoordt nooit
+      if (p === '/auto') { s.setHeader('content-type', 'text/html'); return s.end('<html><head><title>Auto</title></head><body><main><p>' + 'pagina die zelf een download start '.repeat(10) + '</p><a href="/stuk.pdf?auto">pdf</a></main>'
+        + '<script>setTimeout(function(){var a=document.createElement("a");a.href="/groot.bin";a.download="groot.bin";document.body.appendChild(a);a.click();},50)</script></body></html>'); }
+      if (p === '/groot.bin') {
+        s.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="groot.bin"' });
+        let n = 0; const blok = Buffer.alloc(65536, 7); groot.start = Date.now();
+        const iv = setInterval(() => { if (n >= 400) { clearInterval(iv); groot.af = true; return s.end(); } n++; groot.bytes += blok.length; s.write(blok); }, 15);
+        s.on('close', () => { clearInterval(iv); groot.dicht = Date.now(); }); return;
+      }
       s.setHeader('content-type', 'text/html'); s.end('<html><head><title>Andere</title></head><body><main><p>' + 'andere pagina '.repeat(30) + '</p></main></body></html>');
     });
     await new Promise((k) => srv.listen(0, '127.0.0.1', k));
     const proef = { 'proef.socev.test': { ip: '127.0.0.1', poort: srv.address().port } };
-    const O = { staat: path.join(T, 's4'), downloads: path.join(T, 'd4'), proef, tempoMs: 3000 };
+    // docker in CI heeft geen user-namespaces voor de Chromium-sandbox; alleen dan (OPHALEN_TOETS_ZONDER_SANDBOX=1) zonder
+    const O = { staat: path.join(T, 's4'), downloads: path.join(T, 'd4'), proef, tempoMs: 3000, zonderSandbox: process.env.OPHALEN_TOETS_ZONDER_SANDBOX === '1' };
     const mk = M.maak(O);
     let t0 = Date.now();
     const r = await mk.haal('http://proef.socev.test/pagina', { pdfs: 3 });
@@ -132,6 +141,10 @@ function maakPdf(tekst) {
     const r4 = await mk.haal('http://proef.socev.test/door1', { geenCache: true });
     const r5 = await mk.haal('http://proef.socev.test/door2', { geenCache: true });
     toets('4l doorsturen naar 127.0.0.1 en localhost komt nooit aan', !hits['/geheim'] && hits['/door1'] === 1 && hits['/door2'] === 1, { hits, r4: r4.fout || r4.markdown, r5: r5.fout || r5.markdown });
+    const rA = await mk.haal('http://proef.socev.test/auto', { pdfs: 1, geenCache: true });
+    await slaap(1500);
+    const inD4 = (function tel(d) { let n = 0; try { for (const f of fs.readdirSync(d)) { const q = path.join(d, f); n += fs.statSync(q).isDirectory() ? tel(q) : (/groot/.test(f) ? 1 : 0); } } catch (e) { /* leeg */ } return n; })(path.join(T, 'd4'));
+    toets('4q download die de pagina zelf start: binnen 1,5 s afgebroken, niets bewaard (wel de gevraagde pdf)', rA.ok && rA.bestanden.length === 1 && !groot.af && groot.dicht - groot.start < 1500 && inD4 === 0, { ok: rA.ok, fout: rA.fout, groot, inD4, hit: hits['/groot.bin'] });
     // tijdsgrens
     const mkT = M.maak(Object.assign({}, O, { staat: path.join(T, 's5'), kindMs: 4000, tempoMs: 0 }));
     t0 = Date.now();
