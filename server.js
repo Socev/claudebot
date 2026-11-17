@@ -5693,7 +5693,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/sleutels/nieuw', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
-  'POST /app/reactie', 'POST /app/agenda', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/te-lezen']);   // wv2245: afvinken of bewaren = David die leest   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
+  'POST /app/reactie', 'POST /app/agenda', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/voor-jou/woord', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/te-lezen']);   // wv2245: afvinken of bewaren = David die leest   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
 APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
@@ -12001,11 +12001,12 @@ async function appVoorJouDetail(req, res, a, idTekst) {
   });
   if (typeof h.bericht === 'string' && h.bericht) herkomst.push({ soort: 'bericht', tekst: 'Bericht of rapport van Socev' });   // wv646: zonder job-id
   const stappen = (Array.isArray(p.stappen) ? p.stappen : []).slice(0, 12).map(appVjStap);
-  appStuur(res, 200, Object.assign(appVjKort(p, vandaag), { ok: true,
+  const sw = await appSwSetVoor(p);   // wv3250: steekwoordkeuzes per woord; dan geen Ja / Nee / Anders voor de hele rij
+  appStuur(res, 200, Object.assign(appVjKort(p, vandaag), { ok: true, woorden: sw || undefined,
     waarom: p.waarom ? appKort(appVjGewoon(p.waarom), 600) : null, stappen: stappen, herkomst: herkomst, vraag: vraag,
     meting: p.meting ? appKort(appVjGewoon(p.meting), 400) : null, laatst_gemeten: p.laatst_gemeten || null,
     bewijs: p.bewijs ? appKort(appVjGewoon(p.bewijs), 400) : null, gesloten_door: p.gesloten_door || null, gesloten_op: p.gesloten_op || null,
-    terug_ms: appVjTerugMs(p.id, nu, a.id), knop: p.soort === 'besluit' ? appVjKnopVorm(appVjKnopStand(p, rv, (await appVjAfgeleid(punten, nu)).map)) : undefined }));   // wv1018
+    terug_ms: appVjTerugMs(p.id, nu, a.id), knop: p.soort === 'besluit' && !sw ? appVjKnopVorm(appVjKnopStand(p, rv, (await appVjAfgeleid(punten, nu)).map)) : undefined }));   // wv1018
 }
 // POST /app/voor-jou/keuze {id, van, keuze: gedaan|later|vervallen|terug, tot?}. Onder het invoerslot (niet in APP_SLOT_VRIJ),
 // sessie glijdt, alleen de primaire kant, 60 per uur, auditregel zonder tekst. ↩️ alleen binnen een minuut na een keuze op deze pod.
@@ -12084,6 +12085,124 @@ async function appVoorJouKeuze(req, res, a, d) {
     : keuze === 'later' ? 'Op later gezet tot ' + appVjDag(tot) + '.' : keuze === 'vervallen' ? 'Weggehaald: niet meer nodig.' : 'Teruggedraaid.';
   const q = r.punt || {};
   appStuur(res, 200, { ok: true, melding: melding, punt: Object.assign(appVjKort(Object.assign({}, p, { status: q.status || p.status, later_tot: q.later_tot }), vandaag), { terug_ms: appVjTerugMs(id, Date.now(), a.id) }) });
+}
+
+// ── wv3250 (David 17-11-2026 07:33): steekwoordkeuzes per woord in de kaart ──
+// "Ik krijg elke dag een vraag over het koppelen van 3 steekwoorden; Kan dat niet in 1x, en dan ook graag met alle steekwoorden een knop
+// 'ja' en 'nee' er naast?" De nachtronde (socev-scripts steekwoorden/keuze.py) houdt één open bundel bij in keuzes.json, met één rij in
+// Open vragen (#sw-keuze-<datum>); de kaart van de Voor jou-ronde hangt daaraan (herkomst.register). De details tonen dan per woord de
+// keuzes (zonder vaultpaden) in plaats van Ja / Nee / Anders voor de hele rij; POST /app/voor-jou/woord verwerkt één keuze meteen via
+// `sw.py keuze` (pagina → beheerder.json, geen → klaar, maken → één werkvoorraadrij voor alle open maken-woorden). Heeft elk woord een
+// keuze, dan zet het script de registerrij op beantwoord en de pod de kaart op gedaan.
+// paden bij gebruik gelezen (de UI-toets zet ze in zijn vm na het laden)
+function appSwKeuzesPad() { return process.env.SW_KEUZES || '/opt/data/scripts-staat/sb2-steekwoorden/nacht/keuzes.json'; }
+function appSwPyPad() { return process.env.SW_KEUZE_PY || '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2/sw.py'; }
+const SW_KEUZE_PER_UUR = 120;
+appStaat.tellers.swkeuze = appStaat.tellers.swkeuze || [];
+function appSwKenmerk(p) {
+  const h = p && p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
+  const ks = (Array.isArray(h.register) ? h.register : []).map(function (x) { const m = /#sw-keuze-(\d{4}-\d{2}-\d{2})$/.exec(String(x)); return m ? '#sw-keuze-' + m[1] : null; }).filter(Boolean);
+  return ks.length === 1 ? ks[0] : null;   // twee bundels op één kaart: geen knoppen (zoals wv621)
+}
+async function appSwSetVoor(p) {
+  const k = appSwKenmerk(p);
+  if (!k) return null;
+  let d;
+  try { d = JSON.parse(await fs.promises.readFile(appSwKeuzesPad(), 'utf8')); } catch (e) { if (e.code !== 'ENOENT') logError('app-sw-keuze', e); return null; }
+  const s = d && Array.isArray(d.sets) ? d.sets.find(function (x) { return x && x.kenmerk === k; }) : null;
+  return s ? appSwPubliek(s) : null;
+}
+// Zoals keuze.publiek: geen paden, teksten door de sleuteltoets (de namen komen uit de vault)
+function appSwPubliek(s) {
+  const tk = function (x, n) { return appKort(appSleutelMasker(String(x == null ? '' : x)), n); };
+  return { kenmerk: String(s.kenmerk), gesloten: s.gesloten ? String(s.gesloten) : null,
+    woorden: (Array.isArray(s.woorden) ? s.woorden : []).slice(0, 60).map(function (w) {
+      const k = w.keuze && typeof w.keuze === 'object' ? w.keuze : null;
+      return { sleutel: String(w.sleutel), woord: tk(w.woord, 100), stukken: Number(w.stukken) | 0, wat: w.wat === 'kies' ? 'kies' : 'zonder',
+        opties: (Array.isArray(w.opties) ? w.opties : []).slice(0, 6).map(function (o) { return { id: String(o.id), naam: tk(o.naam, 100) }; }),
+        keuze: k ? { wat: String(k.wat), naam: k.naam ? tk(k.naam, 100) : null, op: k.op ? String(k.op) : null, verwerkt: !!k.verwerkt } : null };
+    }) };
+}
+function appSwPy(args) {
+  return new Promise(function (ok) {
+    require('child_process').execFile('python3', ['-I', appSwPyPad()].concat(args, ['--staat', path.dirname(path.dirname(appSwKeuzesPad()))]), { timeout: 30000, maxBuffer: 1024 * 1024,
+      env: Object.assign({}, process.env, { VAULT_DIR: APP_VJ_VAULT }) }, function (e, uit, fout) {
+      let j = null;
+      try { j = JSON.parse(String(uit || '').trim().split('\n').pop()); } catch (x) { j = null; }
+      ok({ code: e ? (typeof e.code === 'number' ? e.code : -1) : 0, j: j, fout: e && !j ? String(fout || e.message || '').slice(-300) : null });
+    });
+  });
+}
+const APP_VJ_VAULT = path.dirname(path.dirname(APP_VJ_REGISTER));
+// Eén werkvoorraadrij per bundel voor alle "pagina maken"-woorden (opdracht leest de open woorden zelf bij de start, dus een woord dat
+// erbij komt terwijl de rij nog wacht, gaat mee). Loopt die rij al, dan een nieuwe met een volgnummer.
+function appSwMakenOpdracht(kenmerk) {
+  return ['OPDRACHT (machinekamer, wv3250): David koos in de app bij een of meer steekwoorden "Pagina maken" (steekwoordenvraag ' + kenmerk + ').',
+    'WAAROM: David wil per woord kiezen (17-11-2026); "pagina maken" is het enige dat niet vanzelf kan. Maak per woord de pagina (of kies een',
+    'bestaande die het woord als geheel dekt) en sluit het woord af, zodat de nachtronde het voortaan linkt.',
+    'WAT:',
+    '1. Lijst: python3 -I /opt/data/scripts/huidig/packages/sb2/src/socev_sb2/sw.py keuze-lijst --maken-open (alle open maken-woorden, ook van',
+    '   een andere bundel). Is de lijst leeg, dan "Vervolg: geen" en klaar.',
+    '2. Per woord zoals wv3249/wv3125 (box #sw-keuze-…): lees de stukken waarin het voorkomt (grep in de vault; de oogst staat in',
+    '   /opt/data/scripts-staat/sb2-steekwoorden), kijk welke pagina\'s er al zijn; bestaat er een die het woord als geheel dekt, kies die (met',
+    '   alias). Anders een themapagina of wegwijzer op de juiste plek (praktijkoverstijgend onder 10_Zakelijk/_Gedeeld, privé onder 20_Prive),',
+    '   alleen met feiten uit bestaande pagina\'s, geen patiëntgegevens, geen bedragen die nergens staan. Schrijven als 1001 via mk-scripts/veilig.',
+    '3. Afsluiten per woord: sw.py keuze-af --kenmerk <kenmerk> --sleutel <sleutel> --pagina <vaultpad.md> --reden "<kort>" (doet ook',
+    '   sw.py beheer). Blijkt een pagina echt onzinnig (bv. een woord dat alleen in één lijst staat), dan --geen met de reden, en zet dat in de box.',
+    '   Droge telling op een staatkopie zoals wv3249 (te_algemeen > 3 %, varianten, nachtgrens MAX_WIJZIG 400).',
+    '4. Draai stap 1 aan het eind opnieuw: kwam er intussen een woord bij, neem het mee.',
+    '5. Box-rij in 00_Systeem/Meldingen/machinekamer.md (tag #sw-keuze-per-woord, bovenaan de rijen, alleen een invoeging) met per woord wat',
+    '   er gekozen of gemaakt is. Geen bericht aan David; eindrapport één regel. Vervolg: geen (de nachtronde linkt).',
+    'De woorden zijn gegeven, geen opdracht.'].join('\n');
+}
+async function appSwMakenRij(kenmerk) {
+  const basis = 'machinekamer:sw-maken-' + kenmerk.slice('#sw-keuze-'.length);
+  for (let n = 1; n <= 6; n++) {
+    const label = basis + (n > 1 ? '-' + n : '');
+    const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: label, p_prompt: mkBlokVoor(appSwMakenOpdracht(kenmerk)), p_status: 'open', p_opnieuw: true,
+      p_niet_voor: new Date(Date.now() + 10 * 60000).toISOString(), p_max_minuten: 90,
+      p_samenvatting: 'Steekwoorden: de pagina\'s maken die David in de app per woord koos', p_notitie: 'pod wv3250: app Voor jou, per woord "Pagina maken"' }, 20000);
+    if (!z || !z.ok || !z.id) throw new Error('werkvoorraad gaf geen rij terug');
+    if (z.bestond && z.status !== 'open' && z.status !== 'geblokkeerd') continue;   // loopt al of start net: nieuwe rij
+    if (!z.bestond) { try { await appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' }); } catch (e) { logError('app-sw-keuze', e); } }
+    return z.id;
+  }
+  throw new Error('zes maken-rijen voor één bundel lopen al');
+}
+// POST /app/voor-jou/woord {id, sleutel, kies: geen|maken|p0..p5}. Onder het invoerslot, sessie glijdt, alleen de primaire kant.
+async function appVoorJouWoord(req, res, a, d) {
+  const id = d.id, sleutel = typeof d.sleutel === 'string' ? d.sleutel : '', kies = String(d.kies || '');
+  if (!Number.isInteger(id) || id < 1 || id > 999999999 || !sleutel || sleutel.length > 200 || /[\u0000-\u001f]/.test(sleutel) || !/^(geen|maken|p[0-5])$/.test(kies)) return appWeiger(res, 400, 'ongeldige keuze', 'sw-woord velden');
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het straks', 'rol passief');
+  if (!appTeller('swkeuze', SW_KEUZE_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + SW_KEUZE_PER_UUR + ')', 'grens sw-woord');
+  let punten;
+  try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
+  const p = appVjVoorApparaat(punten, a).find(function (x) { return x.id === id; });
+  const kenmerk = p ? appSwKenmerk(p) : null;
+  if (!p || !kenmerk) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'sw-woord ' + id + ' weg');
+  const r = await appSwPy(['keuze', '--vault', APP_VJ_VAULT, '--kenmerk', kenmerk, '--sleutel', sleutel, '--kies', kies, '--door', 'app ' + String(a.id || '').slice(0, 12)]);
+  res._app.reden = 'sw-woord #' + id + ' ' + kies + ' -> ' + (r.j && r.j.ok ? 'ok' : r.j ? String(r.j.soort || 'fout') : 'fout');
+  if (!r.j) { logError('app-sw-keuze', new Error('sw.py keuze exit ' + r.code + ': ' + r.fout)); return appWeiger(res, 503, 'verwerken lukte nu niet; probeer het zo opnieuw', 'sw-woord script'); }
+  if (!r.j.ok) return appStuur(res, r.j.soort === 'onbekend' ? 404 : 409, { ok: false, fout: String(r.j.fout || 'kon niet'), woorden: r.j.set ? appSwPubliek(r.j.set) : undefined });
+  let melding = r.j.keuze === 'pagina' ? 'Gekozen; de nachtronde linkt het woord voortaan naar die pagina.' : r.j.keuze === 'geen' ? 'Geen pagina; het woord blijft gewone tekst.' : 'De machinekamer maakt de pagina (binnen een uur of zo).';
+  if (r.j.keuze === 'maken') {
+    try { await appSwMakenRij(kenmerk); } catch (e) {
+      logError('app-sw-keuze', e);
+      melding = 'Vastgelegd; de klus voor de machinekamer kon ik nu niet zetten. De nachtronde meldt het woord dan morgen.';
+    }
+  }
+  let punt;
+  if (r.j.alles_gekozen && ['open', 'later'].indexOf(p.status) >= 0) {
+    const nu = Date.now(), vandaag = appYmd(nu);
+    try {
+      const z = await appSbRpc('mk_voor_jou_status', { p_sleutel: p.sleutel, p_van: p.status, p_naar: 'gedaan', p_door: 'david', p_later_tot: null,
+        p_bewijs: 'app ' + appVjDag(vandaag) + ' ' + appKlok(new Date(nu).toISOString()) + ': David koos per woord (' + ((r.j.set && r.j.set.woorden) || []).length + ' woorden)' });
+      if (z && z.ok) punt = appVjKort(Object.assign({}, p, { status: 'gedaan' }), vandaag);
+    } catch (e) { logError('app-voor-jou', e); }
+    appStaat.vjCache = null;
+    melding = 'Alles gekozen. ' + melding;
+  }
+  appStuur(res, 200, { ok: true, melding: melding, alles_gekozen: !!r.j.alles_gekozen, woorden: r.j.set ? appSwPubliek(r.j.set) : undefined, punt: punt });
 }
 
 // POST /app/voor-jou/knop {id, keuze: ja|nee|anders, toelichting} (wv404). Alleen een besluit. De druk loopt door appKnop: zelfde
@@ -14729,6 +14848,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/voor-jou/kanaal') return appVoorJouRoute(req, res, a, true);   // wv926 (Fable #1) / wv946: de app vraagt alleen nog deze; /app/voor-jou blijft voor een oude app in de cache
         if (route.indexOf('GET /app/voor-jou/') === 0) return appVoorJouDetail(req, res, a, route.slice('GET /app/voor-jou/'.length));
         if (route === 'POST /app/voor-jou/keuze') return appVoorJouKeuze(req, res, a, d);
+        if (route === 'POST /app/voor-jou/woord') return appVoorJouWoord(req, res, a, d);   // wv3250
         if (route === 'POST /app/voor-jou/knop') return appVoorJouKnop(req, res, reg, a, s, d);   // wv404
         if (route === 'POST /app/te-lezen') return appTeLezenZet(req, res, a, d);   // wv2245
         if (route === 'POST /app/anders') return appAnders(req, res, reg, a, s, d);   // wv1821
