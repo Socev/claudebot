@@ -49,7 +49,9 @@ if [ "$(id -u)" = "0" ]; then
   else
     rm -f "$BASIS/reserve.pw"
   fi
-  if echo -500 > /proc/self/oom_score_adj 2>/dev/null; then log "oom_score_adj -500"; else log "oom_score_adj niet te zetten (geen CAP_SYS_RESOURCE)"; fi
+  # wv3202: lukt alleen met CAP_SYS_RESOURCE (Olares geeft die niet; postgres blijft dan op de containerwaarde). Daarom zet de pod
+  # zijn agentprocessen op 1000 (server.js oomEerst, socev-loper.js): die vallen bij geheugennood eerst.
+  if echo -500 > /proc/self/oom_score_adj 2>/dev/null; then log "oom_score_adj -500"; else log "oom_score_adj niet te zetten (geen CAP_SYS_RESOURCE); agents staan op 1000"; fi
   exec gosu pg "$0" --lus
 fi
 

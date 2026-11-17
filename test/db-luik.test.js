@@ -153,7 +153,13 @@ async function echt() {
     ok(r.st === 406, 'Content-Profile vault (niet ontsloten): 406');
     r = await vraag(pLuik, 'GET', '/rest/v1/', { apikey: SVC, accept: 'application/openapi+json' });
     let paden = 0; try { paden = Object.keys(JSON.parse(r.lijf).paths).length; } catch (e) {}
-    ok(r.st === 200 && paden > 200, 'OpenAPI-overzicht via de luik (' + paden + ' paden)');
+    // wv3202: > 200 paden kan alleen met de echte schema's erin (Supabase: 376 functies in public). DB_LUIK_ECHT_OBJECTEN = aantal eigen
+    // tabellen/views/functies in public (db-luik.sh telt ze via sb-sql); op een lege databank alleen de twee toetsfuncties eisen.
+    let lijst = []; try { lijst = Object.keys(JSON.parse(r.lijf).paths); } catch (e) {}
+    const objecten = Number(process.env.DB_LUIK_ECHT_OBJECTEN || '1000');
+    const toets = lijst.indexOf('/rpc/luik_toets_reeks') >= 0 && lijst.indexOf('/rpc/luik_toets_rol') >= 0;
+    if (objecten > 200) ok(r.st === 200 && paden > 200 && toets, 'OpenAPI-overzicht via de luik (' + paden + ' paden, ' + objecten + ' objecten)');
+    else ok(r.st === 200 && toets, 'OpenAPI-overzicht via de luik, lege databank (' + paden + ' paden, ' + objecten + ' objecten; > 200 pas na herstel)');
   } finally { luik.kill('SIGTERM'); fs.rmSync(map, { recursive: true, force: true }); }
 }
 

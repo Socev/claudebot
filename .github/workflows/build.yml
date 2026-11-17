@@ -644,6 +644,9 @@ jobs:
       - name: "db-luik (wv3180, sleutelluik eigen databank: sleutels, rol, prefix, Profile, grenzen, log)"
         if: ${{ !cancelled() }}
         run: bash test/db-luik.sh
+      - name: "oom-agents (wv3202, agents op oom_score_adj 1000 zodat postgres bij geheugennood blijft staan)"
+        if: ${{ !cancelled() }}
+        run: bash test/oom-agents.sh
       - name: "sb-beheer (wv3180, beheer-SQL lokaal of Management-API achter SB_SQL_LOKAAL)"
         if: ${{ !cancelled() }}
         run: bash test/sb-beheer.sh
