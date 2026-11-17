@@ -108,6 +108,22 @@ const VOORBEWERKING = ['grijs-niveaus'];
 // het origineel. Bij een upload als bron: alleen in het album dat David kiest. Het origineel wordt nooit gewijzigd of verwijderd (witte
 // lijst in immich.js). Eén keer per taak (taak.immich); in log en audit alleen taak-id en tellingen, nooit albumnamen of asset-ids.
 const IMMICH = { albums_max: 20, fotos_max: 500, upload_max: 25 * 1024 * 1024 };
+// ── Video (wv3266, OVIS Imagine "Laat bewegen"; plan vault "OVIS Imagine - foto naar bewegend beeld (Fable 5.2, 15-11-2026)" § 3.2 en § Log 17-11) ──
+// Een geheugen-taak met uitvoer 'video' (alleen via imagine.js, niet in incognito, nooit via de Studio-tab): de flow eindigt in SaveImageWebsocket,
+// elk beeld van de clip komt als PNG over de websocket (81 bij Wan, 124 bij MiniMax; gemeten tot 288 MB per clip), de pod maakt er met ffmpeg
+// een mp4 van (H.264, yuv420p, crf 20, zonder geluid, faststart) en geeft die plus het eerste beeld (affiche) aan imagine.js. In ComfyUI blijft
+// niets staan (geen SaveVideo: de knopentoets weigert elke andere uitvoerknoop). Eén videotaak tegelijk (ook niet in de rij een tweede).
+// GEHEUGENWACHT (David 16-11: de Olares-noodgreep "memory critical" stopte ComfyUI tijdens een video-run; gemeten 17-11: ComfyUI ram_free zakte
+// bij het VAE-decoderen seconden lang tot 9,1 GB bij MiniMax shift 24, 19,0 GB bij MiniMax standaard, 56,9 GB bij Wan met versneller):
+// vóór elke videotaak POST /free (bij een lege rij), tijdens de taak elke 2 s /system_stats; ram_free onder 12 GB = eigen prompt onderbreken,
+// taak "afgebroken: server te vol", geen herhaling. Een videoflow moet daarnaast de geheugenpoort hebben (ram_mib_schatting, zonder_taalmodel,
+// vrij_na), anders weigert de motor hem.
+const VIDEO = { beelden_max: 160, bytes_max: 800 * 1024 * 1024, ram_wacht_bytes: 12e9, ram_wacht_ms: 2000, ffmpeg_ms: 180 * 1000, crf: 20,
+  ffmpeg: '/opt/data/tools/ffmpeg/ffmpeg' };
+function pngMaat(b) {
+  if (!b || b.length < 24 || b[0] !== 0x89 || b.subarray(1, 4).toString('latin1') !== 'PNG' || b.subarray(12, 16).toString('latin1') !== 'IHDR') return null;
+  return { breed: b.readUInt32BE(16), hoog: b.readUInt32BE(20) };
+}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const LEEG_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');   // 1×1
 function beeldSoort(b) {
@@ -347,7 +363,8 @@ function maak(deps) {
   const doeFetch = deps.fetch || fetch;
   const klok = deps.nu || Date.now;
   const T = Object.assign({ poll: POLL_MS, wachtStap: COMFY_WACHT_STAP_MS, wachtMax: COMFY_WACHT_MAX_MS, fsTimeout: 6000,
-    taalmodelMs: GEHEUGEN.taalmodel_ms, naFree: GEHEUGEN.na_free_ms }, deps.tempo || {});
+    taalmodelMs: GEHEUGEN.taalmodel_ms, naFree: GEHEUGEN.na_free_ms, ramWacht: VIDEO.ram_wacht_ms }, deps.tempo || {});
+  const FFMPEG = deps.ffmpeg || VIDEO.ffmpeg;   // wv3266
   // wv2679: adres van het lokale taalmodel (alleen GET /health); deps.taalmodelUrl === null = geen taalmodel (toets)
   const TAALMODEL = deps.taalmodelUrl === null ? null : String(deps.taalmodelUrl || GEHEUGEN.taalmodel).replace(/\/+$/, '');   // tempo: alleen de toets
   const log = deps.log || function () {};
@@ -455,6 +472,7 @@ function maak(deps) {
           ai_model: /^[A-Za-z0-9][A-Za-z0-9 .+-]{1,39}$/.test(String(y.ai_model || '')) ? String(y.ai_model) : null,   // wv2614: beschrijving in Immich
           // wv2679: geheugenpoort (zie GEHEUGEN); alleen strenger te maken, de marge en het taalmodeladres staan in de pod
           ram_mib_schatting: Math.max(0, Math.min(200000, Number(y.ram_mib_schatting) || 0)), vrij_na: y.vrij_na === true, zonder_taalmodel: y.zonder_taalmodel === true,
+          fps: Math.max(8, Math.min(30, Math.round(Number(y.fps) || 16))),   // wv3266: beelden per seconde van de mp4 (uitvoer video)
         });
         if (['comfyui', 'piper', 'elevenlabs'].indexOf(f.motor) < 0) f.fout = 'onbekende motor';
         if (['proef', 'actief', 'uit'].indexOf(f.status) < 0) f.fout = 'onbekende status';
@@ -980,6 +998,7 @@ function maak(deps) {
     if (!f) return { status: 404, fout: 'deze flow bestaat niet (meer)' };
     if (f.fout || f.reden || f.status === 'uit') return { status: 409, fout: 'deze flow kan nu niet: ' + (f.fout || f.reden || 'staat uit') };
     if (f.uitvoer === 'tekst') return { status: 409, fout: 'deze stap kan alleen via Imagine (opdracht uitbreiden)' };   // wv3044: de Studio-weg zou de tekst in ComfyUI's geschiedenis laten
+    if (f.uitvoer === 'video' && f.motor === 'comfyui') return { status: 409, fout: 'bewegend beeld kan alleen via Imagine (Laat bewegen)' };   // wv3266: alleen de geheugen-weg met geheugenwacht
     const w = waardenVan(f, d.velden);
     if (w.fout) return { status: 400, fout: w.fout };
     // wv782: betaald — stem en model uit de witte lijst, prijs vooraf en plafond (vóór de vingerafdruk: geen vingerafdruk verbruiken
@@ -1078,6 +1097,9 @@ function maak(deps) {
     if (metBeeld && !v) return { status: 409, fout: 'deze bewerking neemt geen foto' };
     if (metBeeld && f.uitvoer === 'tekst') return { status: 400, fout: 'deze stap neemt geen foto' };   // wv3044
     if (!metBeeld && (v || (f.uitvoer !== 'beeld' && f.uitvoer !== 'tekst'))) return { status: 400, fout: 'geen beeld' };   // wv2990: alleen tekst naar beeld zonder foto; wv3044: of tekst naar tekst
+    // wv3266: video alleen met een foto, niet geheim, één tegelijk (ook geen tweede in de rij)
+    if (f.uitvoer === 'video' && geheim) return { status: 409, fout: 'laten bewegen kan niet in incognito' };
+    if (f.uitvoer === 'video' && videoLoopt()) return { status: 409, fout: 'er wordt al een filmpje gemaakt; wacht tot dat klaar is' };
     const telt = f.uitvoer !== 'tekst';   // wv3044: opdracht uitbreiden telt niet voor de 30 per dag (Imagine begrenst het zelf); wel voor de rij
     const invoer = Object.assign({}, o.velden && typeof o.velden === 'object' ? o.velden : {});
     if (v) invoer[v.naam] = { n: 1 };
@@ -1098,6 +1120,7 @@ function maak(deps) {
     const al2 = st.geheugen.find(function (t) { return t.beurt_id === beurt; });
     if (al2) return { status: 200, taak: geheugenUit(al2), al: true };
     if (geheim && st.blok) return { status: 409, fout: NOG_TE_WISSEN };
+    if (f.uitvoer === 'video' && videoLoopt()) return { status: 409, fout: 'er wordt al een filmpje gemaakt; wacht tot dat klaar is' };   // wv3266: na de await opnieuw
     if (telt && vandaagN() >= GRENS.per_dag) return { status: 429, fout: 'vandaag al ' + GRENS.per_dag + ' bewerkingen gemaakt; morgen weer' };
     if (st.rij.length >= GRENS.rij) return { status: 429, fout: 'er staan al ' + GRENS.rij + ' taken in de rij; wacht tot er een klaar is' };
     const bytes = metBeeld ? (r.verkleind ? r.bytes : o.beeld) : null;
@@ -1121,6 +1144,7 @@ function maak(deps) {
     setImmediate(volgende);
     return { status: 200, taak: geheugenUit(t) };
   }
+  function videoLoopt() { return st.geheugen.some(function (t) { return t.uitvoer === 'video' && (t.status === 'wacht' || t.status === 'bezig'); }); }   // wv3266
   function geheugenUit(t) {
     return { id: t.id, status: t.status, fase: t.fase || null, procent: t.procent == null ? null : t.procent, gemaakt: t.gemaakt, start: t.start || null,
       plek_in_rij: t.status === 'wacht' ? st.rij.indexOf(t.id) + 1 : null, flow: t.flow, titel: t.titel, reden: t.reden || null };
@@ -1631,6 +1655,9 @@ function maak(deps) {
     // wv2983: een fotoflow stuurt zijn resultaat over de websocket als ComfyUI SaveImageWebsocket kent (niets in de tijdelijke map)
     // wv2984: een geheugen-taak (Imagine) alleen zo; zonder die knoop geen terugval op de Preview-weg
     const tekstTaak = !!t.geheugen && t.uitvoer === 'tekst';   // wv3044: opdracht uitbreiden (tekst over de websocket, geen beeld)
+    const videoTaak = !!t.geheugen && t.uitvoer === 'video';   // wv3266: Laat bewegen (beelden over de websocket, mp4 op de pod)
+    if (t.uitvoer === 'video' && !videoTaak) return { fout: 'bewegend beeld kan alleen via Imagine; niets ingediend' };
+    if (videoTaak && !(f.ram_mib_schatting > 0 && f.zonder_taalmodel && f.vrij_na)) return { fout: 'een videoflow moet de geheugenpoort hebben (werkgeheugen, taalmodel uit, vrijgeven na afloop); niets ingediend' };
     if (t.geheugen && !tekstTaak && !wsKan(info)) return { fout: 'ComfyUI kent SaveImageWebsocket niet (meer); zonder kan Imagine niets maken. Er is niets ingediend.' };
     const toets = flowToets(v.api, info, { ws: !tekstTaak && (!!t.beeld || !!t.geheugen) && wsKan(info), geheugen: !!t.geheugen, tekst: tekstTaak });   // wv2990: een geheugen-taak altijd via de websocket; wv3038: en niets anders
     if (toets.fout) return { fout: 'knopentoets: ' + toets.fout };
@@ -1652,6 +1679,17 @@ function maak(deps) {
       let q;
       try { q = await comfyRij(); voor = await comfyStats(); } catch (e) { return { fout: foutTekst(e.message) }; }
       if (!q.lopend.length && !q.wacht.length && f.ram_mib_schatting > 0) {
+        if (videoTaak) {
+          // wv3266 (geheugenwacht): vóór elke videotaak de gewichten van een vorige taak uit het geheugen van ComfyUI, alleen bij een lege rij
+          t.fase = 'geheugen vrijmaken';
+          let fr = null;
+          try { fr = await comfyPost('/free', { unload_models: true, free_memory: true }); } catch (e) { fr = null; }
+          if (!fr || !fr.ok) return { fout: 'ComfyUI gaf het geheugen niet vrij vóór het filmpje; er is niets gestart. Probeer het zo opnieuw.' };
+          st.comfyFreeGedaan = true;
+          await wacht(T.naFree, ctl);
+          if (ctl.gestopt) return { fout: 'gestopt' };
+          try { voor = await comfyStats(); } catch (e) { return { fout: foutTekst(e.message) }; }
+        }
         // wv2679: zware flow — geen wachten op geheugen, maar meten, één keer /free, en anders een duidelijke weigering
         const g = await geheugenPoort(t, f, voor, ctl);
         if (g.fout) return { fout: g.fout };
@@ -1730,6 +1768,10 @@ function maak(deps) {
     const tekstModus = !wsModus && Array.isArray(toets.tekst_knopen) && toets.tekst_knopen.length === 1;
     const wsBeelden = [], perPid = {};
     let wsKnoop = null, wsBytes = 0, wsDicht = false;
+    // wv3266: een videotaak krijgt alle beelden van de clip (hooguit VIDEO.beelden_max, samen ≤ VIDEO.bytes_max); verder als hierboven
+    const vid = !!t.geheugen && t.uitvoer === 'video' && wsModus;
+    const maxN = vid ? VIDEO.beelden_max : 8, maxTot = vid ? VIDEO.bytes_max : 2 * BEELD.uit_lees_max;
+    let wachter = null;
     const eind = function (p) { return perPid[p] || (perPid[p] = { klaar: false, fout: null }); };
     try {
       ws = new WebSocket(COMFY.replace(/^http/, 'ws') + '/ws?clientId=' + clientId);
@@ -1739,7 +1781,7 @@ function maak(deps) {
           if (!wsModus) return;
           const b = Buffer.from(ev.data);
           if (b.length < 9 || b.readUInt32BE(0) !== 1 || b.readUInt32BE(4) !== 2 || toets.ws_knopen.indexOf(String(wsKnoop)) < 0) return;
-          if (wsBeelden.length >= 8 || b.length - 8 > BEELD.uit_lees_max || wsBytes + b.length > 2 * BEELD.uit_lees_max) { wsFout = wsFout || 'ComfyUI stuurde te veel of te grote beelden'; return; }
+          if (wsBeelden.length >= maxN || b.length - 8 > BEELD.uit_lees_max || wsBytes + b.length > maxTot) { wsFout = wsFout || 'ComfyUI stuurde te veel of te grote beelden'; return; }
           wsBytes += b.length;
           wsBeelden.push(b.subarray(8));
           return;
@@ -1812,11 +1854,19 @@ function maak(deps) {
         }
       }
       const grens = klok() + f.max_seconden * 1000;
+      if (vid) wachter = ramWachter(ctl);   // wv3266: geheugenwacht zolang de clip loopt
       let hist = null, snel = 0;
       for (;;) {
         // na "klaar" van de websocket hooguit 20 snelle peilingen, daarna weer het gewone tempo (Fable wv707 #7)
         await wacht((klaarWs || ev0.klaar) && snel++ < 20 ? 50 : T.poll, ctl);
         st.comfyLaatst = klok();
+        if (wachter && wachter.te_vol) {
+          // wv3266: werkgeheugen van ComfyUI onder de grens — eigen prompt onderbreken, niets herhalen
+          await comfyEigenStop(pid);
+          t.meting.geheugenwacht = 'afgebroken';
+          log('studio taak=' + t.id + ' geheugenwacht: afgebroken bij ram_vrij_mib=' + wachter.min_mib);
+          return { fout: 'afgebroken: server te vol (het werkgeheugen van ComfyUI zakte onder ' + Math.round(VIDEO.ram_wacht_bytes / 1e9) + ' GB); er wordt niets herhaald' };
+        }
         if (ctl.gestopt || klok() > grens) {
           await comfyEigenStop(pid);
           return ctl.gestopt ? { fout: 'gestopt' } : { fout: 'ComfyUI deed er langer over dan ' + f.max_seconden + ' s; eigen taak gestopt' };
@@ -1836,6 +1886,21 @@ function maak(deps) {
         if (hist && hist.outputs && (hist.status ? hist.status.completed !== false : true) && Object.keys(hist.outputs).length) { break; }
       }
       t.gpu_s = Math.round((klok() - t.gpu_start) / 1000);
+      if (wachter) { wachter.aan = false; t.meting.ram_vrij_min_mib = wachter.min_mib; }
+      if (vid) {
+        // wv3266: alle beelden moeten PNG zijn van dezelfde maat; dan de mp4 (ffmpeg via een pijp, alleen het eindbestand kort op schijf)
+        const n = wsBeelden.length, m0 = pngMaat(wsBeelden[0]);
+        if (n < 2 || !m0) return { fout: 'ComfyUI gaf geen bruikbare beelden voor een filmpje terug' };
+        if (wsBeelden.some(function (b) { const m = pngMaat(b); return !m || m.breed !== m0.breed || m.hoog !== m0.hoog; })) return { fout: 'de beelden van het filmpje hebben niet allemaal dezelfde maat' };
+        if (m0.breed % 2 || m0.hoog % 2 || m0.breed * m0.hoog > BEELD.max_mp_uit * 1e6) return { fout: 'de maat van het filmpje klopt niet' };
+        t.fase = 'filmpje maken'; t.procent = 99;
+        const mp = await maakMp4(wsBeelden, f.fps, ctl);
+        if (mp.fout) return { fout: mp.fout };
+        t._uit.push({ bytes: mp.bytes, ext: 'mp4', breed: m0.breed, hoog: m0.hoog, video: true, beelden: n, fps: f.fps, affiche: Buffer.from(wsBeelden[0]) });
+        t.meting.uit_breed = m0.breed; t.meting.uit_hoog = m0.hoog; t.meting.beelden = n; t.meting.mp4_bytes = mp.bytes.length; t.meting.mp4_s = mp.duur_s;
+        try { const na = await comfyStats(); t.meting.vram_vrij_na_mib = na.vram_vrij_mib; t.meting.ram_vrij_na_mib = na.ram_vrij_mib; } catch (e) {}
+        return { ok: true };
+      }
       if (tekstModus) {
         // wv3044: de tekst alleen in het geheugen van de taak (t._tekst → geheugenAf → imagine.js); nooit in een log, audit of bestand
         const tx = typeof ev0.tekst === 'string' ? schoon(ev0.tekst, KNOPEN.tekst_max).trim() : '';
@@ -1895,15 +1960,76 @@ function maak(deps) {
       return { ok: true };
     } finally {
       sluit();
+      if (wachter) { wachter.aan = false; if (t.meting && wachter.min_mib != null) t.meting.ram_vrij_min_mib = wachter.min_mib; }
       wsBeelden.length = 0;
       Object.keys(perPid).forEach(function (k) { perPid[k].tekst = null; });   // wv3044
       // wv2983: onze regel uit ComfyUI's geschiedenis (daar staat de opdrachttekst en bij Preview de verwijzing naar het resultaat).
       // Nu wissen en natellen; staat hij er nog (stop of time-out: de regel komt pas ná afloop), dan wist vrijRonde hem later.
       // wv3044: bij tekstuitvoer staat de gemaakte tekst in die regel; gemeten 14-11 (echte ComfyUI 0.44): na execution_success staat de
       // prompt nog even in de rij, dus de eerste poging faalt bijna altijd. Daarom hier hooguit 15 s opnieuw (elke 250 ms) vóór de minuutronde.
-      if (pid && tekstModus) { for (let i = 0; i < 60; i++) { if (await histWisNu(pid)) break; await wacht(250); } }
+      if (pid && (tekstModus || vid)) { for (let i = 0; i < 60; i++) { if (await histWisNu(pid)) break; await wacht(250); } }   // wv3266: ook de bewegingsopdracht
       if (pid) await histWis(pid);
     }
+  }
+  // ── wv3266: geheugenwacht en mp4 (zie VIDEO bovenaan) ──
+  // Elke T.ramWacht ms /system_stats; ram_free onder VIDEO.ram_wacht_bytes = te_vol en de pollende lus wakker maken. Eigen slaap (niet wacht(),
+  // dat zet ctl.wek voor de hoofdlus).
+  function ramWachter(ctl) {
+    const w = { aan: true, te_vol: false, min_mib: null, n: 0 };
+    (async function () {
+      while (w.aan) {
+        try {
+          const j = await (await comfyGet('/system_stats')).json();
+          const vrij = Number(j && j.system && j.system.ram_free);
+          if (w.aan && isFinite(vrij) && vrij > 0) {
+            w.n++;
+            const mib = Math.round(vrij / 1048576);
+            w.min_mib = w.min_mib == null ? mib : Math.min(w.min_mib, mib);
+            if (vrij < VIDEO.ram_wacht_bytes) { w.te_vol = true; w.aan = false; try { if (ctl.wek) ctl.wek(); } catch (e) {} break; }
+          }
+        } catch (e) { /* volgende meting */ }
+        await new Promise(function (r) { setTimeout(r, T.ramWacht); });
+      }
+    })().catch(function () {});
+    return w;
+  }
+  // PNG-beelden → mp4 (H.264, yuv420p, crf 20, zonder geluid, faststart, zonder metadata). Invoer via stdin; uitvoer kort in de werkmap (mp4 met
+  // faststart vraagt een bestand), meteen gelezen en weg. → { bytes, duur_s } of { fout }
+  function maakMp4(beelden, fps, ctl) {
+    return new Promise(function (klaar) {
+      try { if (!fs.statSync(FFMPEG).isFile()) return klaar({ fout: 'geen ffmpeg op de pod' }); } catch (e) { return klaar({ fout: 'geen ffmpeg op de pod' }); }
+      mkdir(WERK);
+      const uit = path.join(WERK, 'video-' + hex16() + '.mp4');
+      const t0 = klok();
+      let k, af = false, err = '';
+      const eind = function (r) {
+        if (af) return; af = true; clearTimeout(tm);
+        let bytes = null;
+        if (!r) { try { bytes = fs.readFileSync(uit); } catch (e) { bytes = null; } }
+        try { fs.rmSync(uit, { force: true }); } catch (e) {}
+        if (r) return klaar(r);
+        if (!bytes || bytes.length < 32 || bytes.subarray(4, 8).toString('latin1') !== 'ftyp') return klaar({ fout: 'ffmpeg maakte geen leesbaar filmpje' });
+        klaar({ bytes: bytes, duur_s: Math.round((klok() - t0) / 100) / 10 });
+      };
+      const args = ['-hide_banner', '-loglevel', 'error', '-f', 'image2pipe', '-c:v', 'png', '-framerate', String(fps), '-i', 'pipe:0',
+        '-an', '-c:v', 'libx264', '-preset', 'medium', '-crf', String(VIDEO.crf), '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+        '-map_metadata', '-1', '-threads', '2', '-y', uit];
+      try { k = spawn(FFMPEG, args, { env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' }, stdio: ['pipe', 'ignore', 'pipe'] }); }
+      catch (e) { return eind({ fout: 'ffmpeg start niet' }); }
+      const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} eind({ fout: 'ffmpeg deed er langer over dan ' + Math.round(VIDEO.ffmpeg_ms / 1000) + ' s' }); }, VIDEO.ffmpeg_ms);
+      k.stderr.on('data', function (b) { if (err.length < 600) err += b; });
+      k.stdin.on('error', function () {});
+      k.on('error', function () { eind({ fout: 'ffmpeg start niet' }); });
+      k.on('close', function (code) { if (code !== 0) return eind({ fout: 'ffmpeg faalde (code ' + code + '): ' + foutTekst(err.split('\n')[0] || '') }); eind(null); });
+      (async function () {
+        for (const b of beelden) {
+          if (af || (ctl && ctl.gestopt)) break;
+          if (!k.stdin.write(b)) await new Promise(function (r) { k.stdin.once('drain', r); k.once('close', r); });
+        }
+        try { k.stdin.end(); } catch (e) {}
+        if (ctl && ctl.gestopt && !af) { try { k.kill('SIGKILL'); } catch (e) {} eind({ fout: 'gestopt' }); }
+      })().catch(function () { try { k.kill('SIGKILL'); } catch (e) {} eind({ fout: 'ffmpeg kreeg de beelden niet' }); });
+    });
   }
   // Eerst de rij: zolang onze prompt daar staat, is zijn regel er nog niet (ComfyUI schrijft hem bij het afronden, onder dezelfde slot
   // als het uit de rij halen). Pas als hij niet meer in de rij staat, wissen en natellen.
@@ -2160,4 +2286,4 @@ function maak(deps) {
   };
 }
 
-module.exports = { maak: maak, flowToets: flowToets, knoopToets: knoopToets, KNOPEN: KNOPEN, GRENS: GRENS, BEELD: BEELD };
+module.exports = { maak: maak, flowToets: flowToets, knoopToets: knoopToets, KNOPEN: KNOPEN, GRENS: GRENS, BEELD: BEELD, VIDEO: VIDEO };

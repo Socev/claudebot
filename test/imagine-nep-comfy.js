@@ -9,6 +9,8 @@
 // wv3044: TextGenerateV2 → PreviewAny (opdracht uitbreiden): stuurt 'executed' met { text: [C.uitTekst + opdracht] } naar de client en zet die
 // tekst in de geschiedenis (zoals ComfyUI 0.44 de ui-uitvoer van PreviewAny bewaart), zodat de toets kan zien dat de pod hem weghaalt.
 // C.laatsteUpload = kopie van de laatste upload (alleen in het geheugen van de nep, voor de toets).
+// wv3266: o.oi = extra knopen voor /object_info (fixture); een prompt met WanImageToVideo/MiniMaxH3ImageToVideo stuurt length beelden (de invoer)
+// over de websocket; C.ramVrij = ram_free van /system_stats (bytes); C.gebeurd = volgorde van /free, /prompt en /interrupt.
 const fs = require('fs'), path = require('path'), http = require('http'), crypto = require('crypto');
 const { execFileSync } = require('child_process');
 function omgekeerd(buf, deel) {
@@ -42,7 +44,19 @@ function start(dir, o) {
     ImageCompositeMasked: { python_module: 'comfy_extras.nodes_mask', input: { required: { destination: ['IMAGE', {}], source: ['IMAGE', {}], x: ['INT', {}], y: ['INT', {}], resize_source: ['BOOLEAN', {}] }, optional: { mask: ['MASK', {}] } } },
   };
   if (o.zonderWs) delete OI.SaveImageWebsocket;
-  const C = { prompts: [], hist: {}, histDelete: [], interrupts: [], free: 0, rij: { queue_running: [], queue_pending: [] }, ws: {}, scenario: 'goed', n: 0, hangt: null, t2iBeeld: null, uploads: 0, laatsteUpload: null, uitTekst: 'UITGEBREID ', tekstWacht: 0 };
+  // wv3266: extra knopen erbij; bestaat een knoop al (CLIPLoader), dan de keuzelijsten verenigen zodat andere flows in dezelfde toets blijven werken
+  if (o.oi) for (const [k, v] of Object.entries(o.oi)) {
+    if (!OI[k]) { OI[k] = v; continue; }
+    const a = JSON.parse(JSON.stringify(OI[k]));
+    for (const sect of ['required', 'optional']) for (const [veld, spec] of Object.entries((v.input || {})[sect] || {})) {
+      a.input[sect] = a.input[sect] || {};
+      const oud = a.input[sect][veld];
+      if (oud && Array.isArray(oud[0]) && Array.isArray(spec[0])) oud[0] = [...new Set([...oud[0], ...spec[0]])];
+      else if (!oud) a.input[sect][veld] = spec;
+    }
+    OI[k] = a;
+  }
+  const C = { prompts: [], hist: {}, histDelete: [], interrupts: [], free: 0, rij: { queue_running: [], queue_pending: [] }, ws: {}, scenario: 'goed', n: 0, hangt: null, t2iBeeld: null, uploads: 0, laatsteUpload: null, uitTekst: 'UITGEBREID ', tekstWacht: 0, ramVrij: 60 * 1073741824, stats: 0, gebeurd: [] };
   const histPad = path.join(dir, 'history.json');
   const histBewaar = () => fs.writeFileSync(histPad, JSON.stringify(C.hist));
   histBewaar();
@@ -74,7 +88,12 @@ function start(dir, o) {
     for (const id of Object.keys(prompt)) {
       const k = prompt[id].class_type;
       zendTekst(cid, { type: 'executing', data: { node: id, prompt_id: pid } });
-      if (k === 'SaveImageWebsocket') zendBeeld(cid, invoer);
+      if (k === 'SaveImageWebsocket') {
+        // wv3266: video = length beelden (de invoer), anders één
+        const v = Object.keys(prompt).map((x) => prompt[x]).find((x) => x.class_type === 'WanImageToVideo' || x.class_type === 'MiniMaxH3ImageToVideo');
+        const n = v ? Number(v.inputs.length) || 1 : 1;
+        for (let i = 0; i < n; i++) zendBeeld(cid, invoer);
+      }
       if (k === 'PreviewAny') {   // wv3044
         const src = prompt[id].inputs.source, g = src && prompt[src[0]];
         const pl = g && g.inputs.prompt && prompt[g.inputs.prompt[0]];
@@ -111,10 +130,10 @@ function start(dir, o) {
       if (req.url === '/object_info') return stuur(200, OI);
       if (req.url === '/queue' && req.method === 'GET') return stuur(200, C.rij);
       if (req.url === '/queue' && req.method === 'POST') { const j = JSON.parse(body.toString() || '{}'); C.rij.queue_pending = C.rij.queue_pending.filter((x) => (j.delete || []).indexOf(x[1]) < 0); return stuur(200, {}); }
-      if (req.url === '/system_stats') return stuur(200, { system: { ram_free: 60 * 1073741824 }, devices: [{ vram_total: 24000 * 1048576, vram_free: 20000 * 1048576 }] });
+      if (req.url === '/system_stats') { C.stats++; return stuur(200, { system: { ram_free: C.ramVrij }, devices: [{ vram_total: 24000 * 1048576, vram_free: 20000 * 1048576 }] }); }
       if (req.url === '/prompt' && req.method === 'POST') {
         const j = JSON.parse(body.toString());
-        C.prompts.push(j);
+        C.prompts.push(j); C.gebeurd.push('prompt');
         const pid = typeof j.prompt_id === 'string' && j.prompt_id ? j.prompt_id : 'pid-' + C.prompts.length;
         // promptWacht: het antwoord (en de rij) komt pas na zoveel ms — het venster tussen indienen en bevestigen
         const nu = () => { C.rij = { queue_running: [[1, pid, j.prompt, {}, []]], queue_pending: [] }; setTimeout(() => draai(pid, j.prompt, j.client_id), C.draaiWacht || 30); stuur(200, { prompt_id: pid, number: C.prompts.length }); };
@@ -136,12 +155,12 @@ function start(dir, o) {
         res.writeHead(200, { 'Content-Type': 'image/png' }); return res.end(fs.readFileSync(f));
       }
       if (req.url === '/interrupt') {
-        C.interrupts.push(JSON.parse(body.toString() || '{}'));
+        C.interrupts.push(JSON.parse(body.toString() || '{}')); C.gebeurd.push('interrupt');
         const h = C.hangt; C.hangt = null;
         if (h) setTimeout(() => { afronden(h.pid, h.prompt, h.cid, {}, { status_str: 'error', completed: false, messages: [['execution_interrupted', {}]] }); zendTekst(h.cid, { type: 'execution_interrupted', data: { prompt_id: h.pid } }); }, 60);
         return stuur(200, {});
       }
-      if (req.url === '/free') { C.free++; return stuur(200, {}); }
+      if (req.url === '/free') { C.free++; C.gebeurd.push('free'); return stuur(200, {}); }
       stuur(404, {});
     });
   });

@@ -15,6 +15,7 @@
 #                                         JSON op stdout. Niets op schijf (incognito). pijp-toon = weergaveversie: rechtop, ≤ px, JPEG 85.
 #                                         Schrijft pijp-neem/-uit niets naar fd 3, dan blijft het beeld zoals het kwam.
 #   pijp-pakket <max_mp> <ref_mp> | pijp-naad <x> <y> <b> <h> | pijp-snij <x> <y> <b> <h> <draai>   (wv3021, OVIS Imagine fase 2)
+#   pijp-maat <kort> <lang_max> <veelvoud>   (wv3266, Laat bewegen: exacte maat voor de videoflow, PNG)
 #                                         pakket: stdin = rijtje [4 bytes lengte][bytes]: beeld, masker (lengte 0 = geen), 0-2 voorbeelden.
 #                                         Eén RGBA-PNG (alles naast elkaar, samen <= max_mp; voorbeelden <= ref_mp): het beeld links met in
 #                                         alfa 255 - masker (masker = het getekende stuk, gegroeid en zacht gemaakt; 255 = alles blijft, zonder
@@ -168,6 +169,21 @@ def pijp(a):
         naad(data, [int(x) for x in a[1:5]], uit, lever)
     if a[0] == "pijp-snij" and len(a) == 6:
         snij(im, formaat, [float(x) for x in a[1:5]], int(a[5]), uit, lever)
+    if a[0] == "pijp-maat" and len(a) == 4:
+        # wv3266 (Laat bewegen): rechtop, RGB, korte zijde = kort (lange zijde hooguit lang_max), beide een veelvoud van veelvoud; LANCZOS; PNG
+        kort, lang_max, veelvoud = int(a[1]), int(a[2]), int(a[3])
+        if not (64 <= kort <= 2048 and kort <= lang_max <= 4096 and veelvoud in (8, 16, 32, 64)):
+            klaar(2, ok=False, reden="onbekende maat")
+        im = ImageOps.exif_transpose(im)
+        B, H = im.size
+        f = min(kort / min(B, H), lang_max / max(B, H))
+        nb, nh = [max(veelvoud, int(round(x * f / veelvoud)) * veelvoud) for x in (B, H)]
+        if im.mode in ("RGBA", "LA", "P"):
+            achter = Image.new("RGB", im.size, (255, 255, 255))
+            achter.paste(im.convert("RGBA"), mask=im.convert("RGBA").split()[3])
+            im = achter
+        im.convert("RGB").resize((nb, nh), Image.LANCZOS).save(uit, "PNG")
+        lever(formaat=formaat, breed=nb, hoog=nh)
     if a[0] == "pijp-toon" and len(a) == 2:
         px = max(64, min(4096, int(a[1])))
         im = ImageOps.exif_transpose(im)

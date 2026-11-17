@@ -834,10 +834,12 @@ function nepStudioImmich() {
 test('wv2614 witte lijst: origineel lezen, foto-gegevens, albums van een foto; nieuwe foto alleen in eigen vorm; stapel van twee; één id in een album', () => {
   const a = uuid(), b = uuid(), t = 'a1b2c3d4e5f60718', P = png(), J = jpeg(false), W = webp(false), X = IM.xmpBeschrijving('Hersteld met AI (SeedVR2), origineel in de stapel');
   const D = '1936-03-01T12:00:00.000Z';
+  const M4 = Buffer.concat([Buffer.from([0, 0, 0, 32]), Buffer.from('ftypisom'), Buffer.alloc(40)]);   // wv3266: kop van een verzonnen mp4
   const goed = [['GET', '/api/assets/' + a + '/original'], ['GET', '/api/assets/' + a], ['GET', '/api/albums', { assetId: a }], ['GET', '/api/users/me'], ['GET', '/api/api-keys/me'],
     ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D }],
     ['POST', '/api/assets', undefined, { assetData: J, filename: 'socev-studio-' + t + '.jpg', fileCreatedAt: '2020-01-01T10:00:00+01:00', fileModifiedAt: D, sidecarData: X }],
     ['POST', '/api/assets', undefined, { assetData: W, filename: 'socev-studio-' + t + '.webp', fileCreatedAt: D, fileModifiedAt: D }],
+    ['POST', '/api/assets', undefined, { assetData: M4, filename: 'socev-studio-' + t + '.mp4', fileCreatedAt: D, fileModifiedAt: D, sidecarData: X }],   // wv3266: eigen filmpje
     ['POST', '/api/stacks', undefined, { assetIds: [a, b] }], ['PUT', '/api/albums/' + a + '/assets', undefined, { ids: [b] }]];
   for (const [m, p, q, bd] of goed) assert.strictEqual(IM.weiger(m, p, q, bd), null, m + ' ' + p);
   const fout = [
@@ -846,6 +848,9 @@ test('wv2614 witte lijst: origineel lezen, foto-gegevens, albums van een foto; n
     ['POST', '/api/assets', undefined, { assetData: P, filename: 'IMG_0001.png', fileCreatedAt: D, fileModifiedAt: D }],
     ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.jpg', fileCreatedAt: D, fileModifiedAt: D }],   // naam past niet bij de bytes
     ['POST', '/api/assets', undefined, { assetData: Buffer.from('GIF89a-verzonnen-gif'), filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D }],
+    ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.mp4', fileCreatedAt: D, fileModifiedAt: D }],   // wv3266: png met mp4-naam
+    ['POST', '/api/assets', undefined, { assetData: M4, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D }],   // wv3266: mp4 met png-naam
+    ['POST', '/api/assets', undefined, { assetData: Buffer.concat([Buffer.from([0, 0, 0, 32]), Buffer.from('ftypqt  '), Buffer.alloc(40)]), filename: 'socev-studio-' + t + '.mp4', fileCreatedAt: D, fileModifiedAt: D }],   // wv3266: ander merk (mov)
     ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D, visibility: 'hidden' }],
     ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D, livePhotoVideoId: a }],
     ['POST', '/api/assets', undefined, { assetData: P, filename: 'socev-studio-' + t + '.png', fileCreatedAt: D, fileModifiedAt: D, metadata: [] }],

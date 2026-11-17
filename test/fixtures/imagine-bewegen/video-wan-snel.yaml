@@ -1,0 +1,69 @@
+{
+ "ai_model": "Wan 2.2",
+ "titel": "Imagine: laat bewegen · Snel (Wan 2.2)",
+ "uitleg": "Laat een foto 5 seconden bewegen (zonder geluid). Alleen via Imagine; de beelden komen over de websocket, de pod maakt de mp4.",
+ "motor": "comfyui",
+ "status": "actief",
+ "uitvoer": "video",
+ "fps": 16,
+ "verborgen": true,
+ "ram_mib_schatting": 16000,
+ "gpu_mib_schatting": 15000,
+ "vrij_na": true,
+ "zonder_taalmodel": true,
+ "bron": "video_wan2_2_14B_i2v met lightx2v 4 stappen (2+2, cfg 1, shift 5), 81 beelden/16 fps, korte zijde 720; proef 2 wv3240: 226 s, 15,8 GB VRAM, ram_free min 56,9 GB (machinekamer wv3266, 17-11-2026)",
+ "tijd": "± 4 min",
+ "max_seconden": 900,
+ "max_per_dag": 30,
+ "prijs": {
+  "eenheid": "filmpje",
+  "bedrag": 0,
+  "bron": "lokaal op Olares"
+ },
+ "velden": [
+  {
+   "naam": "foto",
+   "label": "Foto",
+   "soort": "beeld",
+   "verplicht": true,
+   "pad": "1.inputs.image"
+  },
+  {
+   "naam": "opdracht",
+   "label": "Beweging in woorden",
+   "soort": "tekstvak",
+   "verplicht": true,
+   "max": 3000,
+   "pad": "93.inputs.text"
+  },
+  {
+   "naam": "pod_b",
+   "label": "Breedte (pod)",
+   "soort": "getal",
+   "verplicht": true,
+   "min": 64,
+   "max": 2048,
+   "pad": [
+    "98.inputs.width"
+   ]
+  },
+  {
+   "naam": "pod_h",
+   "label": "Hoogte (pod)",
+   "soort": "getal",
+   "verplicht": true,
+   "min": 64,
+   "max": 2048,
+   "pad": [
+    "98.inputs.height"
+   ]
+  },
+  {
+   "naam": "seed",
+   "label": "Seed",
+   "soort": "seed",
+   "meer": true,
+   "pad": "86.inputs.noise_seed"
+  }
+ ]
+}
