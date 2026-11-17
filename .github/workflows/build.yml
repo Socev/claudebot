@@ -603,6 +603,11 @@ jobs:
       - name: "winkel-browser (wv2949, Shopper browserroute)"
         if: ${{ !cancelled() }}
         run: bash test/winkel-browser.sh
+      # wv3254: vaste ophaalroute (ophalen.js): url-toets, proxy-adresgrens (ip, intern adres, poort, upgrade), kale omgeving; met Chromium ook
+      # pagina → markdown + pdf, doorsturen naar intern nooit aan, tempo, cache, tijdsgrens, slot. Hier zonder browser; in het image hieronder met.
+      - name: "ophalen (wv3254, haal deze link op)"
+        if: ${{ !cancelled() }}
+        run: bash test/ophalen.sh
       # MemoryLane R2 (wv2118): verhaal uit een opname (Claude zonder tools, nep-API), citaattoets, datum door code, injectie, categorie volgt,
       # voorstellen alleen na Ja, Davids aanpassing wint, plafond/dienstfout/grendel, padpoorten.
       - name: "herinneringen-verhaal (wv2118, MemoryLane R2)"
@@ -1116,6 +1121,14 @@ jobs:
           for u in claude socev; do
             echo "== als $u"
             docker run --rm -v "$PWD":/src:ro --user $u --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} -c 'EIS_IMAGE=1 bash /src/test/browser-mcp.sh' || exit 1
+          done
+
+      # wv3254: "haal deze link op" in het image (/app/ophalen.js, Patchright + Xvfb, echte Chromium), als claude én socev; lokale proefserver.
+      - name: "Rooktest - ophaalroute (wv3254)"
+        run: |
+          for u in claude socev; do
+            echo "== als $u"
+            docker run --rm -v "$PWD":/src:ro --user $u --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} -c 'OPHALEN_JS=/app/ophalen.js EIS_BROWSER=1 bash /src/test/ophalen.sh' || exit 1
           done
 
       - name: Rooktest opruimen
