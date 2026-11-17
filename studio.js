@@ -1208,7 +1208,8 @@ function maak(deps) {
         else {
           audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: t.status, duur_s: t.duur_s, bestanden: t._uit.length, bron: 'imagine', proef: !!t.proef,
             reden: t.status === 'klaar' ? null : String(t.reden || '').slice(0, 160) });
-          log('studio taak=' + t.id + ' flow=' + t.flow + ' bron=imagine uitkomst=' + t.status + ' duur_s=' + t.duur_s);
+          log('studio taak=' + t.id + ' flow=' + t.flow + ' bron=imagine uitkomst=' + t.status + ' duur_s=' + t.duur_s
+            + (t.meting && t.meting.ram_vrij_min_mib != null ? ' ram_vrij_min_mib=' + t.meting.ram_vrij_min_mib : ''));   // wv3266: geheugenwacht
         }
         geheugenAf(t);
         return;
@@ -1981,7 +1982,7 @@ function maak(deps) {
         try {
           const j = await (await comfyGet('/system_stats')).json();
           const vrij = Number(j && j.system && j.system.ram_free);
-          if (w.aan && isFinite(vrij) && vrij > 0) {
+          if (w.aan && isFinite(vrij) && vrij >= 0) {   // review Codex ZOU 2: ook 0 telt (en breekt af)
             w.n++;
             const mib = Math.round(vrij / 1048576);
             w.min_mib = w.min_mib == null ? mib : Math.min(w.min_mib, mib);
@@ -2001,9 +2002,9 @@ function maak(deps) {
       mkdir(WERK);
       const uit = path.join(WERK, 'video-' + hex16() + '.mp4');
       const t0 = klok();
-      let k, af = false, err = '';
+      let k, af = false, err = '', tm = null, stopTik = null;   // vooraf: eind() kan al vóór de spawn nodig zijn
       const eind = function (r) {
-        if (af) return; af = true; clearTimeout(tm);
+        if (af) return; af = true; clearTimeout(tm); clearInterval(stopTik);
         let bytes = null;
         if (!r) { try { bytes = fs.readFileSync(uit); } catch (e) { bytes = null; } }
         try { fs.rmSync(uit, { force: true }); } catch (e) {}
@@ -2016,18 +2017,26 @@ function maak(deps) {
         '-map_metadata', '-1', '-threads', '2', '-y', uit];
       try { k = spawn(FFMPEG, args, { env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' }, stdio: ['pipe', 'ignore', 'pipe'] }); }
       catch (e) { return eind({ fout: 'ffmpeg start niet' }); }
-      const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} eind({ fout: 'ffmpeg deed er langer over dan ' + Math.round(VIDEO.ffmpeg_ms / 1000) + ' s' }); }, VIDEO.ffmpeg_ms);
+      tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} eind({ fout: 'ffmpeg deed er langer over dan ' + Math.round(VIDEO.ffmpeg_ms / 1000) + ' s' }); }, VIDEO.ffmpeg_ms);
+      // review Codex ZOU 1: Stop werkt ook tijdens het encoderen (niet pas na de tijdgrens)
+      stopTik = setInterval(function () { if (ctl && ctl.gestopt && !af) { try { k.kill('SIGKILL'); } catch (e) {} eind({ fout: 'gestopt' }); } }, 250);
       k.stderr.on('data', function (b) { if (err.length < 600) err += b; });
       k.stdin.on('error', function () {});
       k.on('error', function () { eind({ fout: 'ffmpeg start niet' }); });
-      k.on('close', function (code) { if (code !== 0) return eind({ fout: 'ffmpeg faalde (code ' + code + '): ' + foutTekst(err.split('\n')[0] || '') }); eind(null); });
+      k.on('close', function (code) {
+        if (af) { try { fs.rmSync(uit, { force: true }); } catch (e) {} return; }   // na Stop of tijdgrens: wat ffmpeg nog schreef, ook weg
+        if (code !== 0) return eind({ fout: 'ffmpeg faalde (code ' + code + '): ' + foutTekst(err.split('\n')[0] || '') });
+        eind(null);
+      });
       (async function () {
         for (const b of beelden) {
           if (af || (ctl && ctl.gestopt)) break;
-          if (!k.stdin.write(b)) await new Promise(function (r) { k.stdin.once('drain', r); k.once('close', r); });
+          if (!k.stdin.write(b)) await new Promise(function (r) {   // één paar luisteraars per wachtmoment, daarna weer weg (anders stapelen ze op)
+            const door = function () { k.stdin.removeListener('drain', door); k.removeListener('close', door); r(); };
+            k.stdin.once('drain', door); k.once('close', door);
+          });
         }
         try { k.stdin.end(); } catch (e) {}
-        if (ctl && ctl.gestopt && !af) { try { k.kill('SIGKILL'); } catch (e) {} eind({ fout: 'gestopt' }); }
       })().catch(function () { try { k.kill('SIGKILL'); } catch (e) {} eind({ fout: 'ffmpeg kreeg de beelden niet' }); });
     });
   }
