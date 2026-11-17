@@ -12101,7 +12101,7 @@ const SW_KEUZE_PER_UUR = 120;
 appStaat.tellers.swkeuze = appStaat.tellers.swkeuze || [];
 function appSwKenmerk(p) {
   const h = p && p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
-  const ks = (Array.isArray(h.register) ? h.register : []).map(function (x) { const m = /#sw-keuze-(\d{4}-\d{2}-\d{2})$/.exec(String(x)); return m ? '#sw-keuze-' + m[1] : null; }).filter(Boolean);
+  const ks = (Array.isArray(h.register) ? h.register : []).map(function (x) { const m = /#sw-keuze-(\d{4}-\d{2}-\d{2}(?:-\d{1,2})?)$/.exec(String(x)); return m ? '#sw-keuze-' + m[1] : null; }).filter(Boolean);
   return ks.length === 1 ? ks[0] : null;   // twee bundels op één kaart: geen knoppen (zoals wv621)
 }
 async function appSwSetVoor(p) {
