@@ -315,10 +315,11 @@ function maak(o) {
       const r = await verzoek('GET', '/api/timeline/bucket', { albumId: id, timeBucket: tb, order: 'asc', withCoordinates: 'true' });
       const n = r && Array.isArray(r.id) ? r.id.length : 0;
       const kol = (k) => (r && Array.isArray(r[k]) ? r[k] : []);
-      const fc = kol('fileCreatedAt'), off = kol('localOffsetHours'), la = kol('latitude'), lo = kol('longitude'), tr = kol('isTrashed');
+      const fc = kol('fileCreatedAt'), off = kol('localOffsetHours'), la = kol('latitude'), lo = kol('longitude'), tr = kol('isTrashed'), isb = kol('isImage');
       for (let i = 0; i < n && uit.length < grens; i++) {
         if (tr[i] === true) continue;
-        uit.push({ dag: plaatselijkeDag(fc[i], off[i]), lat: geldigGetal(la[i], 90), lon: geldigGetal(lo[i], 180) });
+        // wv3264: vid = video (isImage false), alleen als Immich de kolom meegeeft
+        uit.push({ dag: plaatselijkeDag(fc[i], off[i]), lat: geldigGetal(la[i], 90), lon: geldigGetal(lo[i], 180), vid: Array.isArray(r && r.isImage) ? isb[i] === false : undefined });
       }
     }
     return uit;

@@ -47,7 +47,7 @@ const VIDEO_BUDGET = 150 * 1000 * 1000;   // wv2938: alle video's buiten samen (
 // meer door, api.log elk uur vol, en ook de rondes en de oude deellinks (ml-d1) faalden. Nu hooguit FOTO_MAX_TIK pogingen per tik
 // (40 x 3 = 120/min = 600 per 5 min, de helft van de grens) en stoppen bij de eerste fout; die foto gaat achteraan en komt de volgende tik terug.
 const LIJST_VELDEN = ['hid', 'soort', 'bron', 'status', 'titel', 'wanneer', 'wanneer_bron', 'datum', 'categorie', 'gevoelig', 'personen', 'plaatsen', 'voorvallen',
-  'audio', 'binnen', 'vastgehouden', 'stukken', 'zicht', 'album', 'plaatje', 'plaatje_kan', 'dicht'];
+  'audio', 'binnen', 'vastgehouden', 'stukken', 'zicht', 'album', 'plaatje', 'plaatje_kan', 'dicht', 'precisie', 'video'];   // wv3264: + precisie, video
 const DETAIL_VELDEN = LIJST_VELDEN.concat(['verhaal', 'stukken_lijst', 'voorstellen']);
 
 const SCHEMA_SQL = `
@@ -138,6 +138,7 @@ function lijstItem(pid, t) {
   const u = kies(t, LIJST_VELDEN);
   u.hid = pid; u.audio = 0; u.binnen = 0; u.vastgehouden = 0; u.stukken = 0; u.zicht = { familie: false, vrienden: false }; u.plaatje_kan = false; u.dicht = false;
   u.album = t.album ? { status: t.album.status, aantal: t.album.aantal } : null;
+  u.video = typeof t.video === 'number' ? t.video : null;   // wv3264: aantal video's (zonder stem, kring of punt: die gaan nooit naar buiten)
   u.personen = (t.personen || []).map(String); u.plaatsen = (t.plaatsen || []).map(String); u.voorvallen = (t.voorvallen || []).map(String);
   return u;
 }
@@ -186,7 +187,7 @@ function maak(o) {
     const d = jaar ? jaar + '-' + mm : null;
     return { hid: pidVan(k, hid), soort: 'los', bron: null, status: 'actief', titel: '', wanneer: jaar || '', wanneer_bron: null, datum: d ? '1|' + d + '|' + d : '0|',
       categorie: 'prive', gevoelig: true, personen: [], plaatsen: [], voorvallen: [], audio: 0, binnen: 0, vastgehouden: 0, stukken: 0,
-      zicht: { familie: false, vrienden: false }, album: null, plaatje: false, plaatje_kan: false, dicht: true };
+      zicht: { familie: false, vrienden: false }, album: null, plaatje: false, plaatje_kan: false, dicht: true, precisie: jaar ? 'jaar' : null, video: null };
   }
   const raakCache = new Map();
   function raak(d) {
