@@ -16,7 +16,7 @@ case "$UA" in *@*|*mailto*|"") echo "ROOD  server.js: user-agent van Beleggen dr
 grep -qF "if (!beleggenNieuws || !SERVER_ECHT || !rolPrimair() || beleggenNieuwsBezig) return;" server.js || { echo "ROOD  server.js: klok niet beperkt tot echte pod + rol primair"; f=1; }
 grep -qF "if (beleggenNieuws && SERVER_ECHT) { setInterval(function () { beleggenNieuwsTik(); }, 5 * 60000).unref(); }" server.js || { echo "ROOD  server.js: klok van 5 min ontbreekt"; f=1; }
 grep -qE "^  'beleggen-week',  " server.js || { echo "ROOD  server.js: bron beleggen-week niet in de bronnenlijst"; f=1; }
-grep -qF "nieuwsbrief: 'dag', 'beleggen-week': 'dag' };" server.js || { echo "ROOD  server.js: MELD_SOORT beleggen-week ≠ dag"; f=1; }
+grep -qE "^const MELD_SOORT = \{.*[{ ]'beleggen-week': 'dag'[,} ]" server.js || { echo "ROOD  server.js: MELD_SOORT beleggen-week ≠ dag"; f=1; }   # wv3256: niet meer op de laatste plek (wv3238 zette pot-loonrun erachter)
 grep -qF "route === 'GET /app/beleggen/week'" server.js || { echo "ROOD  server.js: GET /app/beleggen/week ontbreekt"; f=1; }
 grep -qF "kanaal: 'hoofd', bron: 'beleggen-week', klasse: 'normaal', soort: 'dag'" server.js || { echo "ROOD  server.js: seintje niet via berichtIntern (hoofd, dag)"; f=1; }
 grep -qF "H.veiligHaal(url, { ua: BELEGGEN_UA }, accept)" server.js || { echo "ROOD  server.js: ophalen niet via veiligHaal"; f=1; }
