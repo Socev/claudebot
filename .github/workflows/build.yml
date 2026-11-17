@@ -1103,6 +1103,15 @@ jobs:
         run: |
           bash test/uid-scheiding.sh ghcr.io/socev/claudebot:${{ github.run_number }} /tmp/chart.env
 
+      # wv3251: gedeelde browser — browser-mcp.js op Patchright met een eigen Xvfb-scherm (cookie), vast profiel met slot, terugval los;
+      # als claude én als socev (beide gebruiken hem via hun playwright-mcp.sh). Lokale proefpagina, geen externe site.
+      - name: "Rooktest - gedeelde browser (wv3251, Patchright + Xvfb)"
+        run: |
+          for u in claude socev; do
+            echo "== als $u"
+            docker run --rm -v "$PWD":/src:ro --user $u --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} -c 'EIS_IMAGE=1 bash /src/test/browser-mcp.sh' || exit 1
+          done
+
       - name: Rooktest opruimen
         if: always()
         run: |
