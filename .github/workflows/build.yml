@@ -401,6 +401,12 @@ jobs:
         run: |
           python3 -c "import PIL" 2>/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil)
           bash test/studio-ws.sh
+      # wv3272: Studio-motor splat (Foto's → 3D) tegen een nep-loper (taakmap-protocol, hartslag, stop), EXIF eraf, symlinks, slot, opruimen
+      - name: "studio-splat (wv3272, InfiniSplat fase 2)"
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -c "import PIL" 2>/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil)
+          bash test/studio-splat.sh
       # wv2614: Studio × Immich (foto uit Immich als bron, Zet in Immich: nieuwe foto + stapel + albums, origineel onveranderd)
       - name: "studio-immich (wv2614, fotoherstel fase 2)"
         if: ${{ !cancelled() }}

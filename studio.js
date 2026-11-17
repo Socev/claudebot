@@ -53,10 +53,34 @@
 //     /free nog moet). Lukt dat schrijven niet, dan niets indienen. Een id gaat pas uit het merk als zijn geschiedenisregel aantoonbaar weg
 //     is; /free (ook de uitvoercache van ComfyUI) alleen bij een lege rij. geheimNaloop() doet dat elke minuut, bij Alles wissen en na
 //     een herstart (merk gelezen bij het laden); tot het merk leeg is en de invoer 1×1 is: nog_te_wissen.
+//
+// FOTO'S → 3D (wv3272, InfiniSplat fase 2 rij A, 17-11-2026; ontwerp /opt/data/mk-opdrachten/wv3270-splat-fase2/ontwerp.md, Codex r1 verwerkt).
+// Vijfde motor `splat`: de Olares-app `splat` (eigen videokaart) rekent een 3D-scène (Gaussian splats) uit 2–32 foto's. Veldsoort `beelden`
+// (één per flow, alleen bij motor splat): { immich_album: <uuid> } (de pod kiest uit het album alleen beelden, op opnametijd, gelijkmatig
+// hooguit 32) of { immich: [<uuid>, …] } (2–32, uniek). De asset-ids staan alleen in het geheugen van dit proces (st.splatIds), nooit in
+// taken.json, audit of log; daar staan alleen aantal en bron (album|los). De motor (motorSplat):
+//   poort   ruimte (scènes samen + 1 GB ≤ 10 GB, schijf ≥ 5 GB vrij), hartslag van de app (taken/.loper.json ≤ 60 s oud), VRAM via dezelfde wacht
+//           als ComfyUI-flows (rij leeg, vrij ≥ gpu_mib_schatting, hooguit 30 min);
+//   foto's  Immich (origineel jpg/png/webp ≤ 20 MB, anders het grote voorbeeld) → studio-beeld.py splat-voor (rechtop, ≤ 1600 px, JPEG 92
+//           zonder metadata, getoetst op APP1/APP2/APP13) → taakmap st-<id>.nieuw → rename (protocol van de proef, Systeemoverzicht);
+//   volgen  elke POLL stand.json/klaar.json (O_NOFOLLOW, ≤ 64 kB); niet geclaimd binnen 2 min = weg + mislukt; grens 16 min;
+//   stop    leeg `stop` in de taakmap; het slot gaat pas vrij als de app het bevestigt (klaar.json, of hartslag bezig:false ná het verzoek).
+//           Geen bevestiging binnen 2 min: taak mislukt, st.splatHangt houdt de rij dicht; de minuutronde kijkt verder. Hartslag > 10 min weg:
+//           box-rij, en dan mogen ComfyUI/Imagine weer (splat-taken blijven geweigerd tot de app terug is) (review r1 MOET 2);
+//   netwerk netwerkpogingen > 0 of een adres buiten 10.233.0.0/16 en 192.168.20.54 = mislukt + box-rij (ontwerp § 2);
+//   inpakken scene.ply via een fd gekopieerd naar /opt/data/splats/<id>/ruw.ply (review r1 MOET 1), splat-transform 2.6.0 (CPU, nice 10):
+//           vol.sog (≤ 3 mln puntjes) en licht.sog (1 mln), kaart.json met controlegetallen; de taakmap (met Davids foto's) meteen weg;
+//           na het inpakken opnieuw gemeten: boven het plafond gaat ruw.ply meteen weg (review r1 ZOU 1);
+//   Bestanden alleen voorbeeld.jpg (zodat de resultaatkaart werkt); de scène zelf via GET /app/studio/splat/<id>/<licht|vol>.sog.
+// Opruimen (minuutronde): ruw.ply na 30 dagen; st-*-mappen van geen lopende taak, ouder dan 1 uur, alleen na klaar.json of als de app
+// niet (meer) bezig is. Een scène blijft tot David hem wist (POST /app/studio/splat/<id>/verwijder: map + voorbeeld in Bestanden).
+// Hulpstukken voor de gedeelde taakmap: studio-splat.js (ontbreekt die, dan staat de flow op "kapot", de rest van Studio werkt gewoon).
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+let splatModCache = null;
+function splatLib() { if (splatModCache === null) { try { splatModCache = require('./studio-splat.js'); } catch (e) { splatModCache = false; } } return splatModCache || null; }
 
 const GRENS = { rij: 5, per_dag: 30, tekst_max: 3000, aantal_max: 4, bestand_max: 20 * 1024 * 1024, taken_bewaar_ms: 30 * 86400000 };
 const ROUTER_MODELLEN_MS = 60 * 1000;
@@ -373,6 +397,10 @@ function maak(deps) {
     fs: {}, info: { op: 0, d: null }, comfyLaatst: 0, comfyFreeGedaan: true, timer: null, histWis: [],
     geheugen: [], gTel: { dag: '', n: 0 }, merk: { pids: [], free: false }, herstartMerk: false, naloopBezig: null, blok: false, freeVraag: false };   // wv2984
   const MERK = deps.merk || null;   // wv2984: pad van het incognito-merkbestand (null = geen geheime taken)
+  // wv3272: motor splat; deps.splat = alleen de toets (paden, tempo); deps.box(kop, regels) = box-rij in de machinekamer
+  const SP = splatLib() ? splatLib().cfgVan(deps.splat) : null;
+  st.splatIds = new Map();     // taak-id → asset-ids (alleen in het geheugen)
+  st.splatHangt = null;        // { taak, naam, sinds, lang, box } zolang de app een stop niet bevestigde
 
   // ── opslag ──
   function mkdir(p) { fs.mkdirSync(p, { recursive: true, mode: 0o700 }); }
@@ -474,13 +502,22 @@ function maak(deps) {
           ram_mib_schatting: Math.max(0, Math.min(200000, Number(y.ram_mib_schatting) || 0)), vrij_na: y.vrij_na === true, zonder_taalmodel: y.zonder_taalmodel === true,
           fps: Math.max(8, Math.min(30, Math.round(Number(y.fps) || 16))),   // wv3266: beelden per seconde van de mp4 (uitvoer video)
         });
-        if (['comfyui', 'piper', 'elevenlabs'].indexOf(f.motor) < 0) f.fout = 'onbekende motor';
+        if (['comfyui', 'piper', 'elevenlabs', 'splat'].indexOf(f.motor) < 0) f.fout = 'onbekende motor';
+        f.waarschuwing = schoon(y.waarschuwing, 240) || null;   // wv3272: vast schermzinnetje van de flow
         if (['proef', 'actief', 'uit'].indexOf(f.status) < 0) f.fout = 'onbekende status';
         if (f.motor === 'comfyui') f.api = JSON.parse(fs.readFileSync(path.join(FLOWS, n, 'flow.json'), 'utf8'));
         f.velden = f.velden.map(veldNorm).filter(Boolean);
         const nBeeld = f.velden.filter(function (v) { return v.soort === 'beeld'; }).length;   // wv2482
         if (nBeeld > 1) f.fout = 'hooguit één foto per flow';
         else if (nBeeld && f.motor !== 'comfyui') f.fout = 'een foto als invoer kan alleen bij ComfyUI';
+        // wv3272: meerdere foto's alleen bij motor splat, precies één zo'n veld; zonder studio-splat.js kan het niet
+        const nBeelden = f.velden.filter(function (v) { return v.soort === 'beelden'; }).length;
+        if (nBeelden && f.motor !== 'splat') f.fout = 'meerdere foto\'s als invoer kan alleen bij de 3D-motor';
+        if (f.motor === 'splat') {
+          f.uitvoer = '3d';
+          if (nBeelden !== 1 || nBeeld) f.fout = 'een 3D-flow heeft precies één veld met foto\'s nodig';
+          else if (!SP) f.fout = 'de 3D-onderdelen ontbreken in deze versie van de pod';
+        }
         if (f.motor === 'elevenlabs') {
           // wv782: betaald. Tarieven en modellen uit de pod (ELEVEN), nooit uit flow.yaml: een flow kan zichzelf niet goedkoper maken.
           f.betaald = true; f.aanbieder = 'elevenlabs'; f.uitvoer = 'geluid';
@@ -508,7 +545,7 @@ function maak(deps) {
     if (!/^[A-Za-z0-9_:.\-]{1,80}$/.test(naam)) return null;
     let soort = String(v.soort || v.type || 'tekst');
     soort = { text: 'tekst', textarea: 'tekstvak', number: 'getal', select: 'keuze', batch: 'aantal', boolean: 'schakel' }[soort] || soort;
-    if (['tekst', 'tekstvak', 'getal', 'keuze', 'aantal', 'schakel', 'seed', 'beeld'].indexOf(soort) < 0) return null;
+    if (['tekst', 'tekstvak', 'getal', 'keuze', 'aantal', 'schakel', 'seed', 'beeld', 'beelden'].indexOf(soort) < 0) return null;
     const o = { naam: naam, label: schoon(v.label || naam, 80), soort: soort, verplicht: v.verplicht === true || v.required === true,
       meer: v.meer === true, standaard: v.standaard !== undefined ? v.standaard : v.default };
     if (soort === 'keuze') {
@@ -544,6 +581,7 @@ function maak(deps) {
       });
       o.verplicht = true;
     }
+    if (soort === 'beelden') { o.min = 2; o.max = 32; o.verplicht = true; o.bron = ['immich_album', 'immich']; }   // wv3272
     if (v.pad !== undefined) o.pad = (Array.isArray(v.pad) ? v.pad : [v.pad]).map(String).filter(function (p) { return /^[A-Za-z0-9_:]{1,40}\.inputs\.[A-Za-z0-9_.]{1,80}$/.test(p); });
     if (v.associateRole === 'prompt' || v.rol === 'prompt') o.rol = 'prompt';
     return o;
@@ -652,7 +690,9 @@ function maak(deps) {
     const klaar = !f.fout && !f.reden && f.status !== 'uit';
     return { id: f.id, titel: f.titel, uitleg: f.uitleg || '', motor: f.motor,
       motor_naam: f.motor === 'router' ? 'lokaal · FlowStudio via Router' : f.motor === 'piper' ? 'lokaal · Piper op de pod (CPU)'
-        : f.motor === 'elevenlabs' ? 'betaald · ElevenLabs via Router (de tekst gaat naar ElevenLabs, VS)' : 'lokaal · ComfyUI rechtstreeks',
+        : f.motor === 'elevenlabs' ? 'betaald · ElevenLabs via Router (de tekst gaat naar ElevenLabs, VS)'
+        : f.motor === 'splat' ? 'lokaal · 3D-app op Olares (eigen videokaart)' : 'lokaal · ComfyUI rechtstreeks',
+      waarschuwing: f.waarschuwing || null,   // wv3272
       status: f.status, uitvoer: f.uitvoer, klaar: klaar, reden: f.fout || f.reden || (f.status === 'uit' ? 'staat uit' : null),
       prijs: f.betaald ? 'ElevenLabs-credits · ± 1 credit per 2 tekens (v3 en Multilingual 1 per teken)' : 'gratis', tijd: f.tijd || '',
       vers_per_keer: f.status === 'proef' || f.betaald === true, bandje: f.bandje === true, stem: f.stem || null,
@@ -679,6 +719,7 @@ function maak(deps) {
     // wv782: een betaalde flow zonder Router-sleutel wacht (kopie: het cache-object van lokaleFlows blijft schoon)
     Object.keys(lok).forEach(function (k) {
       const f = lok[k];
+      if (f.motor === 'splat' && !f.fout) { const r = splatReden(); if (r) { lijst.push(Object.assign({}, f, { reden: r })); return; } }   // wv3272
       if (f.betaald && !f.fout && !sleutel) lijst.push(Object.assign({}, f, { reden: sleutelFout ? 'de kluis is nu niet bereikbaar; de Router-sleutel kan niet gelezen worden' : 'wacht op de Router-sleutel (router_studio_key)' }));
       else lijst.push(f);
     });
@@ -693,13 +734,14 @@ function maak(deps) {
     const gpuS = st.taken.filter(function (t) { return t.gpu_s > 0 && dagNL(Date.parse(t.gemaakt)).slice(0, 7) === maand; })
       .reduce(function (s, t) { return s + t.gpu_s; }, 0);
     return { vandaag: vandaagN(), per_dag: GRENS.per_dag, in_rij: st.rij.length, rij_max: GRENS.rij, bezig: st.bezig ? (st.bezig.geheim ? 'incognito' : st.bezig.naloop ? 'opruimen' : st.bezig.id) : null,
-      gpu_minuten_maand: Math.round(gpuS / 6) / 10, elevenlabs: bundelUit() };
+      gpu_minuten_maand: Math.round(gpuS / 6) / 10, elevenlabs: bundelUit(),
+      splat_wacht: st.splatHangt ? (st.splatHangt.lang ? 'de 3D-app reageert niet; 3D-taken wachten' : 'wacht tot de 3D-app stopt') : null };   // wv3272
   }
   function taakUit(t) {
     return { id: t.id, flow: t.flow, titel: t.titel, motor: t.motor, uitvoer: t.uitvoer, status: t.status, fase: t.fase || null, procent: t.procent == null ? null : t.procent,
       reden: t.reden || null, gemaakt: t.gemaakt, start: t.start || null, eind: t.eind || null, duur_s: t.duur_s || null, velden: t.velden,
       bestanden: t.bestanden || [], plek_in_rij: t.status === 'wacht' ? st.rij.indexOf(t.id) + 1 : null, meting: t.meting || null,
-      bron: t.bron || null, noot: t.noot || null,
+      bron: t.bron || null, noot: t.noot || null, splat: t.splat || null,   // wv3272: alleen bron, aantallen, maten
       beeld: t.beeld ? { breed: t.beeld.breed, hoog: t.beeld.hoog, verkleind: t.beeld.verkleind === true, immich: t.beeld.immich || null } : null,   // wv2482, wv2614
       immich: t.immich ? { stapel: t.immich.stapel === true, albums: t.immich.albums || 0, dubbel: t.immich.dubbel === true, link: t.immich.link || null, noot: t.immich.noot || null } : null,   // wv2614
       betaald: t.betaald === true, kosten_credits: t.betaald ? (vb[t.id] ? creditsVan(vb[t.id]) : t.prijs_vooraf || 0) : 0,
@@ -732,6 +774,18 @@ function maak(deps) {
         if (!Number.isSafeInteger(w) || w < 0) return { fout: 'seed moet een geheel getal ≥ 0 zijn' };
       } else if (v.soort === 'schakel') {
         w = w === true || w === 'true' || w === 1;
+      } else if (v.soort === 'beelden') {
+        // wv3272: heel Immich-album of 2–32 losse foto's uit Immich; ids alleen als UUID
+        if (w && typeof w === 'object' && !Array.isArray(w) && typeof w.immich_album === 'string') {
+          if (!UUID_RE.test(w.immich_album)) return { fout: v.label + ': onbekend album in Immich' };
+          w = { album: w.immich_album };
+        } else if (w && typeof w === 'object' && Array.isArray(w.immich)) {
+          const l = w.immich.map(String);
+          if (l.length < 2 || l.length > 32) return { fout: v.label + ': kies 2 tot 32 foto\'s' };
+          if (!l.every(function (x) { return UUID_RE.test(x); })) return { fout: v.label + ': onbekende foto in Immich' };
+          if (new Set(l).size !== l.length) return { fout: v.label + ': een foto staat er twee keer in' };
+          w = { los: l };
+        } else return { fout: v.label + ': kies een album of foto\'s uit Immich' };
       } else if (v.soort === 'beeld') {
         // wv2482: alleen het nummer van een klaarstaande upload van dít apparaat; naam en inhoud komen van de pod
         // wv2614: of het id van een foto in Immich (de pod haalt hem zelf)
@@ -765,13 +819,13 @@ function maak(deps) {
   // ── foto als invoer (wv2482; zie BEELD bovenaan) ──
   // python3 -I studio-beeld.py <stand> …: één JSON-regel terug; exit 2 = geweigerd met reden. Nooit de bestandsnaam doorgeven.
   const PY = deps.python || { bin: 'python3', script: path.join(__dirname, 'studio-beeld.py') };
-  function beeldPy(args) {
+  function beeldPy(args, ms) {
     return new Promise(function (klaar) {
       let k, uit = '', af = false;
       const eind = function (r) { if (af) return; af = true; clearTimeout(tm); klaar(r); };
       try { k = spawn(PY.bin, ['-I', PY.script].concat(args), { env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'ignore'] }); }
       catch (e) { return klaar({ ok: false, reden: 'de beeldcontrole start niet' }); }
-      const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} eind({ ok: false, reden: 'de beeldcontrole duurde te lang' }); }, BEELD.py_ms);
+      const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} eind({ ok: false, reden: 'de beeldcontrole duurde te lang' }); }, ms || BEELD.py_ms);
       k.stdout.on('data', function (b) { if (uit.length < 4000) uit += b; });
       k.on('error', function () { eind({ ok: false, reden: 'de beeldcontrole start niet' }); });
       k.on('close', function (code) {
@@ -1011,6 +1065,20 @@ function maak(deps) {
       if (!tekst) return { status: 400, fout: 'de tekst is leeg' };
       prijs = prijsVooraf(tekst.length, w.waarden.model);
     }
+    // wv3272: 3D — eerst de goedkope vingerafdrukvraag, dan ruimte en (bij een album) de lijst uit Immich; ids alleen in het geheugen
+    let sp = null;
+    if (f.motor === 'splat') {
+      if (f.status === 'proef' && !ctx.versOk()) return { status: 403, fout: 'deze flow is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
+      const rz = splatLib().ruimteToets(SP);
+      if (rz) return { status: 409, fout: 'Kan nu niet: ' + rz + '.' };
+      const v = f.velden.find(function (x) { return x.soort === 'beelden'; });
+      const kz = w.waarden[v.naam];
+      if (kz.album) {
+        const a = await splatAlbum(kz.album);
+        if (a.fout) return a;
+        sp = { veld: v.naam, bron: 'album', ids: a.ids, in_album: a.in_album };
+      } else sp = { veld: v.naam, bron: 'los', ids: kz.los.slice() };
+    }
     // wv2482: foto overnemen en toetsen vóór het synchrone stuk (async: Pillow). Elke weigering hieronder ruimt de map weer op.
     let bk = null;
     if (f.velden.some(function (v) { return v.soort === 'beeld'; })) {
@@ -1025,11 +1093,11 @@ function maak(deps) {
         return { status: bk.status, fout: bk.fout };
       }
     }
-    const r = maakSync(f, w, ctx, beurt, prijs, extra, bk);
+    const r = maakSync(f, w, ctx, beurt, prijs, extra, bk, sp);
     if (bk) bk.opruim();   // na een geslaagde taak is de map al verplaatst (niets te doen); anders weg
     return r;
   }
-  function maakSync(f, w, ctx, beurt, prijs, extra, bk) {
+  function maakSync(f, w, ctx, beurt, prijs, extra, bk, sp) {
     // vanaf hier synchroon tot de taak in de rij staat (twee tabbladen = niet twee keer dezelfde vingerafdruk)
     if (st.taken.find(function (t) { return t.beurt_id === beurt; })) return { status: 200, taak: taakUit(st.taken.find(function (t) { return t.beurt_id === beurt; })), al: true };
     if (vandaagN() >= GRENS.per_dag) return { status: 429, fout: 'vandaag al ' + GRENS.per_dag + ' taken gemaakt; morgen weer' };
@@ -1057,6 +1125,13 @@ function maak(deps) {
       t.velden[bk.beeld.veld] = '(foto)';
       t.beeld = bk.beeld;
       if (bk.noot) t.noot = bk.noot;
+    }
+    if (sp) {
+      // wv3272: in velden en taken.json alleen het aantal en de bron; de ids alleen in het geheugen (st.splatIds)
+      t.velden[sp.veld] = '(' + sp.ids.length + ' foto\'s ' + (sp.bron === 'album' ? 'uit een album' : 'uit Immich') + ')';
+      t.splat = { bron: sp.bron, fotos: sp.ids.length };
+      if (sp.in_album) t.splat.in_album = sp.in_album;
+      st.splatIds.set(t.id, sp.ids);
     }
     if (f.betaald) {
       // write-ahead: eerst reserveren, dan pas in de rij (lukt het schrijven niet, dan geen taak en dus geen aanroep)
@@ -1185,6 +1260,7 @@ function maak(deps) {
   // ── wachtrij: één tegelijk ──
   function volgende() {
     if (st.bezig || !st.rij.length) return;
+    if (st.splatHangt && !st.splatHangt.lang) return;   // wv3272 (review r1 MOET 2): eerst moet de 3D-app de stop bevestigen
     const id = st.rij.shift();
     const t = vindTaak(id);
     if (!t || t.status !== 'wacht') return setImmediate(volgende);
@@ -1248,6 +1324,7 @@ function maak(deps) {
     else if (f.motor === 'router') r = await motorRouter(t, f, out, ctl);
     else if (f.motor === 'comfyui') r = await motorComfy(t, f, out, ctl);
     else if (f.motor === 'elevenlabs') r = await motorEleven(t, f, out, ctl);
+    else if (f.motor === 'splat') r = await motorSplat(t, f, out, ctl);   // wv3272
     else return { fout: 'onbekende motor' };
     if (!r || !r.ok || (ctl.gestopt && !t.geleverd)) return r;
     // wv743: telefoonversies (8 kHz PCM + µ-law) naast het origineel; mislukt het, dan het origineel toch bewaren met een noot
@@ -2193,6 +2270,7 @@ function maak(deps) {
 
   // GPU teruggeven (§ 5.3 stap 8): 10 min na de laatste Studio-taak in ComfyUI, alleen bij een lege rij, één keer.
   async function vrijRonde() {
+    try { splatRonde(); } catch (e) { fout('studio-splat-ronde', e); }   // wv3272
     // wv2482: staat er nog een foto in ComfyUI (1×1 mislukt of pod herstart midden in een taak), dan eerst die leegmaken
     if (!st.bezig && fs.existsSync(VUIL)) { if (await comfyLeeg()) { zetVuil(false); log('studio comfy-invoer alsnog leeggemaakt'); } }
     await histRonde().catch(function () {});   // wv2983
@@ -2214,6 +2292,290 @@ function maak(deps) {
     });
   }
 
+  // ── wv3272: motor splat (Foto's → 3D; zie de kop en studio-splat.js) ──
+  function splatReden() {
+    if (!SP) return 'de 3D-onderdelen ontbreken in deze versie van de pod';
+    if (st.splatHangt) return st.splatHangt.lang ? 'de 3D-app reageert niet meer op een stop; de machinekamer kijkt ernaar' : 'de 3D-app is nog bezig met stoppen van de vorige taak';
+    const h = splatLib().leesHartslag(SP, klok());
+    return h.vers ? null : 'de 3D-app staat uit';
+  }
+  // Heel album: alleen beelden (geen video's), op opnametijd, gelijkmatig hooguit 32. → { ids, in_album } of { status, fout }
+  async function splatAlbum(albumId) {
+    const im = immichClient();
+    if (!im || typeof im.albumFotos !== 'function') return { status: 409, fout: 'Immich is hier niet gekoppeld' };
+    let l;
+    try { l = await im.albumFotos(albumId, IMMICH.fotos_max); }
+    catch (e) { if (e && e.code === 'HTTP' && (e.status === 404 || e.status === 400)) return { status: 404, fout: 'dit album bestaat niet (meer)' }; return immichNiet(e); }
+    const beelden = (Array.isArray(l) ? l : []).filter(function (x) { return x && x.beeld === true && UUID_RE.test(String(x.id)); })
+      .map(function (x, i) { return { id: x.id, k: String(x.dag || '') + ' ' + String(x.tijd || ''), i: i }; })
+      .sort(function (a, b) { return a.k < b.k ? -1 : a.k > b.k ? 1 : a.i - b.i; });   // opnametijd; gelijk = volgorde van Immich
+    if (beelden.length < SP.fotos_min) return { status: 409, fout: 'dit album heeft minder dan ' + SP.fotos_min + ' foto\'s (video\'s tellen niet)' };
+    const k = Math.min(SP.fotos_max, beelden.length), ids = [];
+    for (let j = 0; j < k; j++) ids.push(beelden[k === 1 ? 0 : Math.round(j * (beelden.length - 1) / (k - 1))].id);
+    return { ids: Array.from(new Set(ids)), in_album: beelden.length };
+  }
+  function splatBox(kop, regels) { try { if (typeof deps.box === 'function') deps.box(kop, regels); } catch (e) { fout('studio-splat-box', e); } }
+  async function motorSplat(t, f, out, ctl) {
+    const L = splatLib();
+    const ids = st.splatIds.get(t.id);
+    st.splatIds.delete(t.id);
+    if (!L || !SP) return { fout: 'de 3D-onderdelen ontbreken in deze versie van de pod' };
+    if (st.splatHangt) return { fout: 'de 3D-app heeft een vorige stop nog niet bevestigd; er is niets gestart' };
+    if (!ids || ids.length < SP.fotos_min) return { fout: 'de lijst met foto\'s is er niet meer (pod herstart?); kies ze opnieuw' };
+    t.splat = Object.assign({}, t.splat || {});
+    // 1. poort: ruimte, hartslag, ComfyUI-rij leeg en genoeg vrij videogeheugen (zelfde wacht als ComfyUI-flows)
+    const rz = L.ruimteToets(SP);
+    if (rz) return { fout: 'Kan nu niet: ' + rz + '. Er is niets gestart.' };
+    const tot = klok() + T.wachtMax;
+    let voor;
+    for (;;) {
+      if (ctl.gestopt) return { fout: 'gestopt' };
+      const h = L.leesHartslag(SP, klok());
+      if (!h.vers) return { fout: 'de 3D-app staat uit (geen hartslag); er is niets klaargezet' };
+      let q;
+      try { q = await comfyRij(); voor = await comfyStats(); } catch (e) { return { fout: 'videogeheugen niet te meten (ComfyUI): ' + foutTekst(e.message) + '; er is niets klaargezet' }; }
+      if (!h.bezig && !q.lopend.length && !q.wacht.length && voor.vram_vrij_mib >= f.gpu_mib_schatting) break;
+      if (klok() > tot) return { fout: 'de videokaart bleef ' + Math.round(T.wachtMax / 60000) + ' min bezet; niets klaargezet' };
+      t.fase = h.bezig ? 'wacht: de 3D-app rekent nog iets anders' : q.lopend.length || q.wacht.length ? 'wacht: ComfyUI is bezig met iets anders'
+        : 'wacht: te weinig vrij videogeheugen (' + voor.vram_vrij_mib + ' MiB)';
+      await wacht(T.wachtStap, ctl);
+    }
+    t.meting = { vram_vrij_voor_mib: voor.vram_vrij_mib };
+    // 2. foto's ophalen (Immich) en klaarzetten (studio-beeld.py splat-voor); nooit een id of naam in fase, log of reden
+    const werk = path.join(WERK, t.id), ruwIn = path.join(werk, 'ruw'), klaarMap = path.join(werk, 'fotos');
+    mkdir(ruwIn); mkdir(klaarMap);
+    t.fase = 'foto\'s ophalen uit Immich'; t.procent = 0;
+    let mis = 0, voorbeeldNoot = 0;
+    for (let i = 0; i < ids.length; i++) {
+      if (ctl.gestopt) return { fout: 'gestopt' };
+      const hi = await immichHaal(ids[i]);
+      if (hi.fout) { if (hi.status === 503 || hi.status === 409) return { fout: hi.fout + '; er is niets klaargezet' }; mis++; continue; }
+      const soort = beeldSoort(hi.bytes);
+      if (!soort || hi.bytes.length > BEELD.max_bytes) { mis++; continue; }
+      if (hi.noot) voorbeeldNoot++;
+      fs.writeFileSync(path.join(ruwIn, String(i + 1).padStart(2, '0') + '.' + soort), hi.bytes, { mode: 0o600, flag: 'wx' });
+      t.procent = Math.round((i + 1) / ids.length * 30);
+    }
+    t.fase = 'foto\'s klaarzetten (rechtop, zonder metadata)';
+    const pv = await beeldPy(['splat-voor', ruwIn, klaarMap], SP.voor_ms);
+    try { fs.rmSync(ruwIn, { recursive: true, force: true }); } catch (e) {}
+    if (!pv.ok) return { fout: 'foto\'s geweigerd: ' + pv.reden };
+    t.splat.fotos = pv.n;
+    const over = mis + (Number(pv.overgeslagen) || 0);
+    if (over) t.splat.overgeslagen = over;
+    if (voorbeeldNoot) t.noot = voorbeeldNoot + ' foto(\'s) uit Immich waren geen jpg/png/webp of groter dan 20 MB: gewerkt met het grote voorbeeldbeeld';
+    try { fs.copyFileSync(path.join(klaarMap, 'voorbeeld.jpg'), path.join(out, 'voorbeeld.jpg')); fs.rmSync(path.join(klaarMap, 'voorbeeld.jpg')); }
+    catch (e) { return { fout: 'het voorbeeldplaatje ontbreekt' }; }
+    const fotos = fs.readdirSync(klaarMap).filter(function (n) { return /^\d{2}\.jpg$/.test(n); }).sort()
+      .map(function (n) { return { naam: n, bytes: fs.readFileSync(path.join(klaarMap, n)) }; });
+    if (ctl.gestopt) return { fout: 'gestopt' };
+    // 3. taakmap klaarzetten (st-<id>.nieuw → st-<id>)
+    let naam;
+    try { naam = L.maakTaakmap(SP, t.id, fotos); }
+    catch (e) { L.wisTaakmap(SP, L.mapNaam(t.id) + '.nieuw'); return { fout: 'de taak kon niet klaargezet worden: ' + schoon(e && e.message, 100) }; }
+    finally { fotos.length = 0; try { fs.rmSync(klaarMap, { recursive: true, force: true }); } catch (e) {} }
+    // 4. volgen
+    const start = klok();
+    let stopOp = null, grensFout = null, s = null, bevestigd = false;
+    t.fase = 'wacht tot de 3D-app de taak oppakt'; t.procent = null;
+    for (;;) {
+      await wacht(T.poll, ctl);
+      s = L.leesTaakmap(SP, naam);
+      if (s.weg) return { fout: 'de taakmap van de 3D-app verdween of klopt niet meer; niets bewaard' };
+      if (s.klaar) break;
+      if (!stopOp && !s.geclaimd && klok() - start > SP.claim_ms) {
+        // niet opgepakt: eerst stop (pakt hij hem toch net, dan rekent hij niet), dan weg
+        L.schrijfStop(SP, naam);
+        const s2 = L.leesTaakmap(SP, naam);
+        if (!s2.geclaimd) { L.wisTaakmap(SP, naam); return { fout: 'de 3D-app pakte de taak niet op binnen ' + Math.round(SP.claim_ms / 60000) + ' min; er is niets gerekend' }; }
+        stopOp = klok(); grensFout = 'de 3D-app pakte de taak te laat op';
+      }
+      if (!stopOp) {
+        if (s.geclaimd) t.fase = '3D rekenen' + (s.stand && typeof s.stand.fase === 'string' && /^[a-z ]{2,30}$/.test(s.stand.fase) ? ': ' + s.stand.fase : '');
+        if (ctl.gestopt || klok() - start > SP.grens_ms) {
+          if (!ctl.gestopt) grensFout = 'de 3D-app deed er langer over dan ' + Math.round(SP.grens_ms / 60000) + ' min';
+          L.schrijfStop(SP, naam);
+          stopOp = klok(); t.fase = 'stoppen';
+        }
+        continue;
+      }
+      // stop gevraagd: bevestiging = klaar.json (hierboven) of hartslag bezig:false ná het verzoek
+      const hb = L.leesHartslag(SP, klok());
+      if (hb.vers && !hb.bezig && hb.tijd_s * 1000 > stopOp) { bevestigd = true; break; }
+      if (klok() - stopOp > SP.stop_bevestig_ms) {
+        st.splatHangt = { taak: t.id, naam: naam, sinds: stopOp, lang: false, box: false };
+        log('studio splat taak=' + t.id + ' stop niet bevestigd; rij dicht tot de 3D-app stopt');
+        return { fout: (grensFout || 'gestopt') + '; de 3D-app bevestigt de stop nog niet, nieuwe taken wachten tot hij gestopt is', noot: 'gestopt; de 3D-app moet de stop nog bevestigen' };
+      }
+    }
+    // klaar.json of bevestigde stop
+    const k = s && s.klaar ? s.klaar : null;
+    const nt = k ? L.netwerkToets(k, s.meting) : null;
+    if (k) {
+      t.meting = Object.assign(t.meting || {}, { rekenen: L.metingKort(s.meting), loper_duur_s: Number(k.duur_s) || null, loper: schoon(k.loper, 12),
+        netwerk: { pogingen: nt.pogingen, sockets: nt.sockets, rekenproces: nt.rekenproces, buiten: nt.buiten } });
+      log('studio splat taak=' + t.id + ' status=' + schoon(k.status || (k.ok ? 'ok' : 'fout'), 10) + ' duur_s=' + (Number(k.duur_s) || 0) + ' netwerkpogingen=' + nt.pogingen
+        + ' sockets=' + nt.sockets + ' rekenproces=' + nt.rekenproces + ' buiten=' + nt.buiten);
+    }
+    if (nt && nt.afwijking) {
+      L.wisTaakmap(SP, naam);
+      splatBox('Studio 3D-taak: netwerkafwijking bij de 3D-app (' + nt.reden + ') #infinisplat (pod, automatisch)', ['status: open',
+        'van: pod studio.js motorSplat, taak ' + t.id, 'gemeten: netwerkpogingen ' + nt.pogingen + ', sockets ' + nt.sockets + ', rekenproces ' + nt.rekenproces + ', buiten Olares ' + nt.buiten,
+        'gevolg: de taak is als mislukt gemarkeerd en de scène is niet bewaard; de taakmap is gewist',
+        'voorstel: klaar.json/meting.json van de volgende taak naast fase 1 leggen (plan InfiniSplat § Log); adressen duiden met gethostbyaddr']);
+      return { fout: 'netwerkafwijking bij de 3D-app (' + nt.reden + '); de scène is niet bewaard' };
+    }
+    if (stopOp || ctl.gestopt) { L.wisTaakmap(SP, naam); return { fout: grensFout || 'gestopt' }; }
+    if (k && k.ok === true && nt.ontbreekt) { L.wisTaakmap(SP, naam); return { fout: 'de netwerkmeting van de 3D-app ontbreekt (' + nt.reden + '); de scène is niet bewaard' }; }
+    if (!k || k.ok !== true) {
+      L.wisTaakmap(SP, naam);
+      return { fout: '3D rekenen mislukte' + (k && k.fout ? ': ' + foutTekst(String(k.fout).replace(/\/[^\s:'"]+/g, '…')).slice(0, 160) : '') };
+    }
+    // 5. scène overnemen (fd-kopie) en de taakmap meteen weg (Davids foto's)
+    const doel = path.join(SP.opslag, t.id);
+    const weg = function () { try { fs.rmSync(doel, { recursive: true, force: true }); } catch (e) {} };
+    try { fs.mkdirSync(SP.opslag, { recursive: true, mode: 0o700 }); fs.mkdirSync(doel, { mode: 0o700 }); }
+    catch (e) { L.wisTaakmap(SP, naam); return { fout: 'de opslagmap voor de scène kon niet gemaakt worden' }; }
+    t.fase = 'scène overnemen';
+    let ruw;
+    try { ruw = await L.kopieerRuw(SP, naam, doel); }
+    catch (e) { L.wisTaakmap(SP, naam); weg(); return { fout: 'scène overnemen mislukte: ' + schoon(e && e.message, 120) }; }
+    L.wisTaakmap(SP, naam);
+    const puntjes = L.plyPuntjes(path.join(doel, 'ruw.ply'));
+    if (!puntjes) { weg(); return { fout: 'de scène van de 3D-app is onleesbaar (geen ply-kop)' }; }
+    // 6. inpakken (CPU in de pod)
+    const t0 = klok();
+    const maten = { vol: Math.min(puntjes, SP.vol_max), licht: Math.min(puntjes, SP.licht) };
+    for (const m of ['vol', 'licht']) {
+      if (ctl.gestopt) { weg(); return { fout: 'gestopt' }; }
+      t.fase = 'inpakken: ' + (m === 'vol' ? 'volle' : 'lichte') + ' maat';
+      const args = puntjes > maten[m] ? ['ruw.ply', '-F', String(maten[m]), m + '.sog'] : ['ruw.ply', m + '.sog'];
+      const r = await L.splatTransform(SP, doel, args, SP.inpak_ms, ctl);
+      if (!r.ok) { weg(); return { fout: r.fout === 'gestopt' ? 'gestopt' : 'inpakken mislukte: ' + r.fout }; }
+      t.splat['inpakken_' + m + '_s'] = Math.round(r.ms / 100) / 10;
+    }
+    try { fs.copyFileSync(path.join(out, 'voorbeeld.jpg'), path.join(doel, 'voorbeeld.jpg')); fs.chmodSync(path.join(doel, 'voorbeeld.jpg'), 0o600); } catch (e) {}
+    const bytes = {}, sha = {};
+    for (const b of ['licht.sog', 'vol.sog', 'voorbeeld.jpg']) {
+      try { const p = path.join(doel, b); const s2 = fs.lstatSync(p); if (!s2.isFile()) throw new Error('geen bestand'); bytes[b] = s2.size; sha[b] = await L.sha256Bestand(p); }
+      catch (e) { weg(); return { fout: 'na het inpakken ontbreekt ' + b }; }
+    }
+    bytes['ruw.ply'] = ruw.bytes; sha['ruw.ply'] = ruw.sha256;
+    const kaart = { taak: t.id, gemaakt: new Date(klok()).toISOString(), fotos: t.splat.fotos, bron: t.splat.bron,
+      model: { bundel_git: L.bundelGit(SP), gewichten_sha256: SP.gewichten_sha256, loper: k.loper ? schoon(k.loper, 12) : null },
+      puntjes: { ruw: puntjes, vol: maten.vol, licht: maten.licht }, bytes: bytes, sha256: sha,
+      meting: L.metingKort(s.meting), netwerk: t.meting.netwerk, duur: { rekenen_s: Number(k.duur_s) || null, inpakken_s: Math.round((klok() - t0) / 1000) },
+      ruw_tot: new Date(klok() + SP.ruw_ms).toISOString() };
+    try { schrijfJson(path.join(doel, 'kaart.json'), kaart); } catch (e) { weg(); return { fout: 'kaart.json schrijven mislukte' }; }
+    // 7. plafond opnieuw (review r1 ZOU 1): erboven gaat ruw.ply meteen weg, de scène blijft
+    if (L.du(SP.opslag) > SP.plafond) {
+      try { fs.rmSync(path.join(doel, 'ruw.ply'), { force: true }); } catch (e) {}
+      t.noot = (t.noot ? t.noot + '; ' : '') + 'de 3D-scènes zitten boven ' + Math.round(SP.plafond / 1024 ** 3) + ' GB: de ruwe scène is meteen gewist (opnieuw inpakken kan dan niet)';
+    }
+    Object.assign(t.splat, { puntjes: { ruw: puntjes, vol: maten.vol, licht: maten.licht }, bytes: { licht: bytes['licht.sog'], vol: bytes['vol.sog'] },
+      rekenen_s: Number(k.duur_s) || null, inpakken_s: kaart.duur.inpakken_s, vram_piek_mib: kaart.meting.vram_piek_toestel_mib || null });
+    t.fase = 'bewaren';
+    return { ok: true };
+  }
+  // Minuutronde (en bij het laden): hangende stop volgen, weesmappen in de gedeelde taakmap, ruw.ply na 30 dagen.
+  function splatRonde() {
+    const L = splatLib();
+    if (!L || !SP) return;
+    const nu = klok();
+    const h = L.leesHartslag(SP, nu);
+    if (st.splatHangt) {
+      const sh = st.splatHangt, s = L.leesTaakmap(SP, sh.naam);
+      const ok = s.weg || !!s.klaar || (h.vers && !h.bezig && h.tijd_s * 1000 > sh.sinds);
+      if (ok) {
+        if (!s.weg) L.wisTaakmap(SP, sh.naam);
+        log('studio splat stop alsnog bevestigd na ' + Math.round((nu - sh.sinds) / 60000) + ' min; rij weer open');
+        st.splatHangt = null;
+        setImmediate(volgende);
+      } else if (!h.vers && nu - sh.sinds > SP.hangt_box_ms && !sh.lang) {
+        sh.lang = true;
+        if (!sh.box) { sh.box = true; splatBox('Studio 3D-app reageert niet op een stop #infinisplat (pod, automatisch)', ['status: open',
+          'van: pod studio.js splatRonde, taak ' + sh.taak, 'gemeten: geen hartslag (taken/.loper.json) meer sinds ruim ' + Math.round(SP.hangt_box_ms / 60000) + ' min na het stopverzoek',
+          'gevolg: 3D-taken worden geweigerd tot de app weer een hartslag geeft; ComfyUI en Imagine draaien weer',
+          'voorstel: `olares-eigen status splat`; zo nodig `olares-eigen restart splat`; daarna ruimt de minuutronde de taakmap op']); }
+        setImmediate(volgende);
+      }
+    }
+    // weesmappen: st-* van geen lopende taak, ouder dan wees_ms; alleen na klaar.json, zonder claim, of als de app niet (meer) bezig is
+    let namen = [];
+    try { if (L.echteMap(SP.taken, SP.uid)) namen = fs.readdirSync(SP.taken); } catch (e) { namen = []; }
+    const lopend = st.bezig && !st.bezig.geheim ? 'st-' + st.bezig.id : null;
+    namen.forEach(function (n) {
+      const m = /^st-([a-f0-9]{16})(\.nieuw)?$/.exec(n);
+      if (!m || n === lopend || n === lopend + '.nieuw' || (st.splatHangt && st.splatHangt.naam === n)) return;
+      let mt = 0;
+      try { mt = fs.lstatSync(path.join(SP.taken, n)).mtimeMs; } catch (e) { return; }
+      const s = L.leesTaakmap(SP, n);
+      if (s.weg) return;
+      if (!m[2] && s.geclaimd && !s.klaar) {
+        // geclaimd zonder klaar.json en niet van ons (pod herstart): eerst stop, dan houdt het slot dicht tot de app het bevestigt
+        if (!(h.vers && !h.bezig) && !st.splatHangt) {
+          L.schrijfStop(SP, n);
+          st.splatHangt = { taak: m[1], naam: n, sinds: nu, lang: false, box: false };
+          log('studio splat wees-taakmap ' + n + ' nog bezig bij de 3D-app; stop gevraagd, rij dicht tot bevestigd');
+          return;
+        }
+        if (!(h.vers && !h.bezig)) return;
+      }
+      if (nu - mt < SP.wees_ms) return;
+      if (L.wisTaakmap(SP, n)) log('studio splat wees-taakmap weg (' + (s.klaar ? 'klaar' : s.geclaimd ? 'app niet bezig' : 'nooit opgepakt') + ')');
+    });
+    // ruw.ply na 30 dagen
+    let scènes = [];
+    try { scènes = fs.readdirSync(SP.opslag).filter(function (x) { return L.TAAK_RE.test(x); }); } catch (e) { scènes = []; }
+    scènes.forEach(function (id) {
+      const p = path.join(SP.opslag, id, 'ruw.ply');
+      try { const s = fs.lstatSync(p); if (nu - s.mtimeMs > SP.ruw_ms) { fs.rmSync(p, { force: true }); log('studio splat ruw.ply weg na ' + Math.round(SP.ruw_ms / 86400000) + ' dagen'); } } catch (e) {}
+    });
+  }
+  // Routes (server.js): kaart, bestand (fd voor een stroom), verwijderen. Alleen scènes met een kaart.json van dezelfde taak.
+  function splatScene(id) {
+    const L = splatLib();
+    if (!L || !SP || !L.TAAK_RE.test(String(id))) return null;
+    const dir = path.join(SP.opslag, id);
+    if (!L.echteMap(dir)) return null;
+    const k = L.leesJsonVeilig(path.join(dir, 'kaart.json'), 256 * 1024);
+    return k && k.taak === id ? { dir: dir, kaart: k } : null;
+  }
+  function splatKaart(id) {
+    const sc = splatScene(id);
+    if (!sc) return { status: 404, fout: 'deze 3D-scène bestaat niet (meer)' };
+    const k = sc.kaart;
+    return { status: 200, kaart: { taak: k.taak, gemaakt: k.gemaakt, fotos: k.fotos, bron: k.bron, puntjes: k.puntjes,
+      bytes: { licht: k.bytes && k.bytes['licht.sog'], vol: k.bytes && k.bytes['vol.sog'] }, duur: k.duur, ruw: splatLib().bestaatL(path.join(sc.dir, 'ruw.ply')) } };
+  }
+  // → { status: 200, fd, grootte } (de aanroeper sluit de fd via de stroom) of { status, fout }
+  function splatBestand(id, maat) {
+    if (maat !== 'licht' && maat !== 'vol') return { status: 404, fout: 'onbekende maat' };
+    const sc = splatScene(id);
+    if (!sc) return { status: 404, fout: 'deze 3D-scène bestaat niet (meer)' };
+    let fd;
+    try { fd = fs.openSync(path.join(sc.dir, maat + '.sog'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
+    catch (e) { return { status: 404, fout: 'dit bestand van de scène ontbreekt' }; }
+    const s = fs.fstatSync(fd);
+    if (!s.isFile() || s.size > 200 * 1024 * 1024) { fs.closeSync(fd); return { status: 404, fout: 'dit bestand van de scène ontbreekt' }; }
+    return { status: 200, fd: fd, grootte: s.size };
+  }
+  function splatWis(id) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    const sc = splatScene(id);
+    if (!sc) return { status: 404, fout: 'deze 3D-scène bestaat niet (meer)' };
+    if (st.bezig && st.bezig.id === id) return { status: 409, fout: 'deze taak loopt nog' };
+    try { fs.rmSync(sc.dir, { recursive: true, force: true }); } catch (e) { fout('studio-splat-wis', e); return { status: 500, fout: 'wissen lukte niet' }; }
+    let bestanden = false;
+    try { bestanden = typeof deps.wisBewaard === 'function' ? deps.wisBewaard(id) === true : false; } catch (e) { fout('studio-splat-wis', e); }
+    const t = st.taken.find(function (x) { return x.id === id; });
+    if (t && t.splat) { t.splat.gewist = new Date(klok()).toISOString(); t.bestanden = bestanden ? [] : t.bestanden; bewaarTaken(); }
+    audit({ taak: id, motor: 'splat', uitkomst: 'scene-gewist', bestanden_gewist: bestanden });
+    log('studio splat taak=' + id + ' scène gewist' + (bestanden ? ' (+ voorbeeld in Bestanden)' : ''));
+    return { status: 200, gewist: true, bestanden: bestanden };
+  }
+  if (SP) { try { splatRonde(); } catch (e) { fout('studio-splat-ronde', e); } }   // na een herstart meteen kijken (hangende taakmap houdt de rij dicht)
+
   // ── stop / activeer ──
   function stopTaak(id) {
     if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
@@ -2223,6 +2585,7 @@ function maak(deps) {
       st.rij = st.rij.filter(function (x) { return x !== id; });
       t.status = 'gestopt'; t.reden = 'uit de rij gehaald'; t.eind = new Date(klok()).toISOString(); t.fase = null;
       if (t.betaald) { try { verbruikZet(t.id, t.aanbieder, 'vrijgegeven', 0); } catch (e) { fout('studio-verbruik', e); } }   // wv782
+      st.splatIds.delete(t.id);   // wv3272
       audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: 'gestopt', duur_s: 0, bestanden: 0, kosten_credits: 0 });
       bewaarTaken();
       return { status: 200, taak: taakUit(t) };
@@ -2282,7 +2645,7 @@ function maak(deps) {
     stop: stopTaak,
     activeer: activeer,
     teller: stand,
-    health: function () { return { taken_vandaag: vandaagN(), bezig: !!st.bezig, in_rij: st.rij.length }; },
+    health: function () { return { taken_vandaag: vandaagN(), bezig: !!st.bezig, in_rij: st.rij.length, splat: SP ? { hangt: !!st.splatHangt } : null }; },
     toetsFlow: toetsFlow,
     _vrijRonde: vrijRonde,   // wv2482: alleen de toets (anders elke minuut via de timer)
     // wv2984: OVIS Imagine (geheugen-taken; incognito)
@@ -2290,6 +2653,7 @@ function maak(deps) {
     stopGeheugen: stopGeheugen, geheimWis: geheimWis, geheimNaloop: geheimNaloop,
     incognito: function () { return { nog_te_wissen: nogTeWissen(), blok: st.blok, herstart: st.herstartMerk }; },
     beeldPijp: beeldPijp, immichHaal: immichHaal, flowVan: async function (id) { const c = await catalogus(false); const f = c.flows.find(function (x) { return x.id === id; }); return f ? flowUit(f) : null; },
+    splatKaart: splatKaart, splatBestand: splatBestand, splatWis: splatWis, _splatRonde: splatRonde,   // wv3272
     stopTimers: function () { clearInterval(st.timer); },
     _st: st,
   };

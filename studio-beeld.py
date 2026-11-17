@@ -25,6 +25,11 @@
 #                                         voor pixel terug en telt hoeveel pixels het resultaat daar anders had (PNG naar fd 3).
 #                                         snij: bijsnijden (breuken 0-1 van het rechtop gezette beeld) en draaien (0/90/180/270 met de klok mee),
 #                                         exact: PNG (boven 20 MB: JPEG 95, 'omgezet').
+#   splat-voor <in-map> <uit-map>         (wv3272, Foto's → 3D) elk bestand in <in-map> (door de pod genummerd op opnametijd): ≤ 20 MB en
+#                                         ≤ 50 MP vóór het decoderen, type uit de bytes (JPEG/PNG/WEBP), volledig decoderen, rechtop (EXIF), RGB,
+#                                         lange zijde ≤ 1600 px, opnieuw opgeslagen als JPEG 92 uit alleen de pixels (geen EXIF, XMP, ICC, GPS),
+#                                         als <uit-map>/01.jpg … 32.jpg; plus voorbeeld.jpg (eerste foto, 480 px). Toets na afloop: geen APP1/APP2/
+#                                         APP13-segment in de uitvoer. Een onleesbare foto wordt overgeslagen (geteld); JSON: n, overgeslagen.
 #   voor <in> <uit.png> <soort>           voorbewerking vóór ComfyUI (wv2679), soort uit een vaste lijst:
 #                                         grijs-niveaus = rechtop (EXIF), grijs, niveaus 1 %–99 % gemeten in het binnenste zonder egale
 #                                         scanrand en toegepast op het hele beeld (de rand wordt wit; de maten blijven gelijk)
@@ -43,11 +48,11 @@ def klaar(code, **kw):
     sys.exit(code)
 
 
-def grenzen():
+def grenzen(cpu=90):
     # geheugen en rekentijd begrensd: een kwaadaardig of kapot bestand kan de pod niet volzetten
     try:
         resource.setrlimit(resource.RLIMIT_AS, (2 * 1024 ** 3, 2 * 1024 ** 3))
-        resource.setrlimit(resource.RLIMIT_CPU, (90, 90))
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
     except Exception:
         pass
 
@@ -348,8 +353,95 @@ def snij(im, formaat, br, draai, uit, lever):
     lever(breed=im.size[0], hoog=im.size[1], ext="png", omgezet=False)
 
 
+SPLAT_BYTES_MAX = 20 * 1024 * 1024
+SPLAT_ZIJDE = 1600
+SPLAT_VOORBEELD = 480
+SPLAT_MAX = 32
+
+
+def jpeg_segmenten(b):
+    # markers van SOI tot SOS (de kopsegmenten); None als het geen nette JPEG is
+    if b[:2] != b"\xff\xd8":
+        return None
+    i, uit = 2, []
+    while i + 4 <= len(b):
+        if b[i] != 0xFF:
+            return None
+        m = b[i + 1]
+        if m == 0xD9:
+            break
+        lengte = (b[i + 2] << 8) | b[i + 3]
+        uit.append(m)
+        if m == 0xDA:   # SOS: daarna de beelddata
+            break
+        i += 2 + lengte
+    return uit
+
+
+def schoon_jpeg(im, zijde, kwaliteit):
+    # nieuw beeld uit alleen de pixels: geen info, geen EXIF/XMP/ICC; daarna de kopsegmenten nagelopen
+    import io
+    from PIL import Image
+    im = im.copy()
+    im.thumbnail((zijde, zijde), Image.LANCZOS)
+    kaal = Image.frombytes("RGB", im.size, im.tobytes())
+    buf = io.BytesIO()
+    kaal.save(buf, "JPEG", quality=kwaliteit, optimize=True)
+    data = buf.getvalue()
+    seg = jpeg_segmenten(data)
+    if seg is None or any(m in (0xE1, 0xE2, 0xED) for m in seg):
+        klaar(2, ok=False, reden="metadata bleef in het beeld")
+    return data, kaal.size
+
+
+def splat_voor(in_map, uit_map):
+    from PIL import Image, ImageOps
+    Image.MAX_IMAGE_PIXELS = int(DECODE_MAX_MP * 1_000_000)
+    warnings.simplefilter("error", Image.DecompressionBombWarning)
+    namen = sorted(n for n in os.listdir(in_map) if not n.startswith("."))
+    n, over, maten = 0, 0, []
+    for naam in namen:
+        if n >= SPLAT_MAX:
+            break
+        p = os.path.join(in_map, naam)
+        try:
+            st = os.lstat(p)
+            if not os.path.isfile(p) or os.path.islink(p) or st.st_size > SPLAT_BYTES_MAX or st.st_size < 12:
+                over += 1
+                continue
+            im = Image.open(p, formats=["JPEG", "PNG", "WEBP"])
+            if im.size[0] * im.size[1] > DECODE_MAX_MP * 1_000_000 or getattr(im, "n_frames", 1) > 1:
+                over += 1
+                continue
+            if im.format == "JPEG":
+                im.draft("RGB", (SPLAT_ZIJDE, SPLAT_ZIJDE))   # DCT-schaal bij het decoderen; leest nog steeds de hele stroom
+            im.load()
+            im = ImageOps.exif_transpose(im).convert("RGB")
+        except Exception:
+            over += 1
+            continue
+        data, maat = schoon_jpeg(im, SPLAT_ZIJDE, 92)
+        n += 1
+        doel = os.path.join(uit_map, "%02d.jpg" % n)
+        fd = os.open(doel, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        maten.append(maat)
+        if n == 1:
+            vb, _ = schoon_jpeg(im, SPLAT_VOORBEELD, 85)
+            fd = os.open(os.path.join(uit_map, "voorbeeld.jpg"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(vb)
+        im.close()
+    if n < 2:
+        klaar(2, ok=False, reden="minder dan 2 bruikbare foto's (%d overgeslagen)" % over, n=n, overgeslagen=over)
+    klaar(0, ok=True, n=n, overgeslagen=over, lange_zijde_max=max(max(b, h) for b, h in maten))
+
+
 def main(a):
-    grenzen()
+    grenzen(600 if a[:1] == ["splat-voor"] else 90)
+    if len(a) == 3 and a[0] == "splat-voor":
+        splat_voor(a[1], a[2])
     if a and a[0].startswith("pijp-"):
         pijp(a)
     if len(a) == 4 and a[0] == "neem":

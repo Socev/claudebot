@@ -17772,6 +17772,8 @@ const studio = (function () {
       // wv2614: Immich als bron en bestemming. Getter: immichMl staat verderop in dit bestand (pas bij een verzoek opgehaald, geen TDZ bij laden)
       immich: function () { try { return immichMl; } catch (e) { return null; } }, leesBewaard: appStudioLeesBewaard,
       naKlaar: function (t) { return bandjes ? bandjes.naKlaar(t) : null; },   // wv743: register bijwerken na een bandje
+      // wv3272: Foto's → 3D — box-rij bij een netwerkafwijking of een 3D-app die niet stopt; het voorbeeld in Bestanden wissen met de scène
+      box: function (kop, regels) { return werkerBoxRij(kop, regels); }, wisBewaard: appStudioWisBewaard,
       merk: path.join(IMAGINE_DIR, 'incognito-merk.json') });   // wv2984: OVIS Imagine incognito (alleen prompt-id's; herstart-opruiming)
   } catch (e) { logError('studio', e); return null; }
 })();
@@ -17802,6 +17804,19 @@ function appStudioLeesBewaard(jobId, n) {
   try { const st = fs.lstatSync(p); if (!st.isFile() || st.size > 25 * 1024 * 1024) return null; return fs.readFileSync(p); } catch (e) { return null; }
 }
 appStaat.tellers['studio-immich'] = [];
+appStaat.tellers['studio-splat'] = [];   // wv3272
+// wv3272: het voorbeeldplaatje van een 3D-taak uit Bestanden wissen (Verwijder scène). Alleen een Studio-bewaring van motor splat, echte map.
+function appStudioWisBewaard(jobId) {
+  const m = appBewaardVan(jobId);
+  if (!m || m.soort !== 'studio' || !m.studio || m.studio.motor !== 'splat' || !APP_DAG_RE.test(String(m.dag))) return false;
+  const dir = path.join(APP_BESTANDEN_DIR, m.dag, jobId);
+  try { const st = fs.lstatSync(dir); if (!st.isDirectory() || st.isSymbolicLink()) return false; } catch (e) { return false; }
+  const totaal = (m.bestanden || []).reduce(function (t, b) { return t + (b && !b.van ? Number(b.grootte) || 0 : 0); }, 0);
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { logError('studio-splat-bestanden', e); return false; }
+  appStaat.bestandenIndex = null;
+  appStaat.bestandenTotaal = Math.max(0, (appStaat.bestandenTotaal || 0) - totaal);
+  return true;
+}
 appStaat.tellers['studio-immich-foto'] = [];
 // Routes (bouwplan § 5.5). Maak op een flow op proef en Activeer eisen een verse vingerafdruk van dít apparaat (§ 4.4d),
 // gecontroleerd en verbruikt in studio.js zonder await ertussen. Schrijven alleen op de primaire kant (studio.js).
@@ -17841,6 +17856,27 @@ async function appStudio(req, res, a, s, d, route) {
   if ((m = new RegExp('^GET /app/studio/immich/album/' + UU + '$').exec(route))) { res._app.stil = true; const r = await studio.immichFotos(m[1]); return stuur(r, { fotos: r.fotos }); }
   m = /^POST \/app\/studio\/taak\/([a-f0-9]{16})\/immich$/.exec(route);
   if (m) { const r = await studio.zetInImmich(m[1], d || {}); if (r.status === 200) res._app.reden = 'studio immich ' + m[1] + (r.al ? ' (al)' : ''); return stuur(r, { taak: r.taak, al: r.al === true }); }
+  // wv3272: Foto's → 3D — de scène voor de kijker in de app (stroom met lengte; alleen eigen sessie), het kaartje, en verwijderen
+  if (/^(GET|POST) \/app\/studio\/splat\//.test(route) && typeof studio.splatBestand !== 'function') return appWeiger(res, 404, '3D zit niet in deze versie van de pod', 'studio splat ontbreekt');
+  if ((m = /^GET \/app\/studio\/splat\/([a-f0-9]{16})\/(licht|vol)\.sog$/.exec(route))) {
+    res._app.stil = true;
+    if (!appTeller('studio-splat', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens studio-splat');
+    const r = studio.splatBestand(m[1], m[2]);
+    if (r.status !== 200) return stuur(r);
+    res._app.status = 200;
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(r.grootte), 'Cache-Control': 'private, max-age=3600',
+      'X-Content-Type-Options': 'nosniff', 'X-App-Pod': '1' });
+    const rs = fs.createReadStream('', { fd: r.fd, autoClose: true });
+    rs.on('error', function (e) { logError('studio-splat-stroom', e); try { res.destroy(); } catch (x) {} });
+    res.on('close', function () { rs.destroy(); });
+    return rs.pipe(res);
+  }
+  if ((m = /^GET \/app\/studio\/splat\/([a-f0-9]{16})\/kaart$/.exec(route))) { res._app.stil = true; const r = studio.splatKaart(m[1]); return stuur(r, { kaart: r.kaart }); }
+  if ((m = /^POST \/app\/studio\/splat\/([a-f0-9]{16})\/verwijder$/.exec(route))) {
+    const r = studio.splatWis(m[1]);
+    if (r.status === 200) res._app.reden = 'studio splat verwijder ' + m[1];
+    return stuur(r, { gewist: true, bestanden: r.bestanden === true });
+  }
   return appWeiger(res, 404, 'onbekend', 'studio route');
 }
 // ── einde studio ──
