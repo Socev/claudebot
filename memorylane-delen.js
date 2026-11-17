@@ -933,7 +933,8 @@ function maak(o) {
   function toonKort(k) {
     return { hid: k.hid, soort: k.soort, bron: k.bron, status: k.status, titel: k.titel, wanneer: k.wanneer, wanneer_bron: k.wanneer_bron, datum: k.datum, categorie: k.categorie,
       gevoelig: false, personen: k.personen, plaatsen: k.plaatsen, voorvallen: k.voorvallen, audio: k.audio, binnen: 0, vastgehouden: 0, stukken: 0,
-      zicht: { familie: false, vrienden: false }, album: k.album ? { status: k.album.status, aantal: k.album.aantal } : null, plaatje: !!k.plaatje, plaatje_kan: false };
+      zicht: { familie: false, vrienden: false }, album: k.album ? { status: k.album.status, aantal: k.album.aantal } : null, plaatje: !!k.plaatje, plaatje_kan: false,
+      precisie: k.precisie || null, video: typeof k.video === 'number' ? k.video : null };   // wv3264: geen stem, kring of punt
   }
   // ── wv2636: kringen (MemoryLane delen op memorylane.socev.dev; ontwerp vault 01_Ontwikkeling "MemoryLane op een eigen adres" § 4) ──
   // Basis: actief, geen losse bijdrage van een bezoeker, opname alleen met notitie en geen proef, geen gevoelig-vinkje. Daarbovenop per kring:
@@ -1033,13 +1034,46 @@ function maak(o) {
       verhaal_stand: h.soort === 'opname' ? (x ? x.stand : null) : null,
       stukken: st.filter((y) => y.status !== 'weggegooid').length, binnen: st.filter((y) => y.status === 'binnen').length,
       vastgehouden: st.filter((y) => y.status === 'vastgehouden').length, album: F ? F.kort(h.hid) : null,
-      plaatje: P ? P.heeft(h.hid) : false, plaatje_kan: !plaatjeNiet(h) };
+      plaatje: P ? P.heeft(h.hid) : false, plaatje_kan: !plaatjeNiet(h),
+      // wv3264 (Levenskalender, ontwerp 17-11 § Bouwplan): precisie van de datum (dag|maand|jaar|ongeveer_jaar|decennium|null), het aantal
+      // video's in het album (null = onbekend) en of er een vertelling in Davids eigen stem klaarstaat
+      precisie: w.precisie || null, video: videoVan(h), stem: stemKlaar(h, p, x) };
+  }
+  // wv3264: aantal video's uit het fotospoor (alleen fotoalbums; reizen en opnames: null = onbekend)
+  function videoVan(h) { const sp = F && typeof F.spoor === 'function' ? F.spoor(h.hid) : null; return sp && typeof sp.videos === 'number' ? sp.videos : null; }
+  // wv3264: staat er een vertelling in eigen stem klaar die bij het huidige verhaal hoort? Snel pad: zonder bewaarde vertelling geen tekst rekenen.
+  function stemKlaar(h, p, x) {
+    if (!V || vertellerNiet(h)) return false;
+    const heeft = (vorm) => V.stand(h.hid, null, vorm).stand !== null;
+    if (!heeft('voorlezen') && !(S && heeft('verhaal'))) return false;
+    try {
+      const a = vertellerKort(h, p, x), b = vertelVerhaalKort(h, p, x);
+      return !!((a && a.stand === 'klaar' && !a.kan) || (b && b.stand === 'klaar' && !b.kan));
+    } catch (e) { fout('ml-stem-lijst', e); return false; }
+  }
+  // wv3264: het kaartpunt voor David (nooit in de toonmodus of naar buiten): fotospoor, anders de reispagina (Tripper)
+  function puntVan(h) {
+    const sp = F && typeof F.spoor === 'function' ? F.spoor(h.hid) : null;
+    if (sp && sp.punt) return sp.punt;
+    if (h.soort !== 'reis') return null;
+    try { const t = o.vv.lees(path.join(o.vault, h.ref), 'utf8'); return REIZEN.kaartPunt(REIZEN.plekkenVan(t)); } catch (e) { return null; }
   }
   // opt.toon (wv2306): de toonmodus van dit apparaat staat aan → alleen toonbare herinneringen, ingekort; geen gevoelige categorie in de lijst
+  // wv3264 (risico 6 van het Levenskalender-ontwerp): duur van de lijst-aanroep, zichtbaar in /health (memorylane_delen.lijst_ms)
+  const lijstDuur = { laatste: null, max: null, n: 0, op: null };
   function lijst(opt) {
+    const t0 = Date.now();
+    try { return lijstIn(opt); } finally { const d = Date.now() - t0; lijstDuur.laatste = d; lijstDuur.max = Math.max(lijstDuur.max || 0, d); lijstDuur.n++; lijstDuur.op = iso(nu()); }
+  }
+  function lijstIn(opt) {
     const toon = !!(opt && opt.toon);
     bijwerken();
-    const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen' && h.status !== 'samengevoegd' && (!toon || toonbaar(h))).map((h) => (toon ? toonKort(kort(h)) : kort(h)));
+    // wv3264: bij David ook de kring (Familie/Shizzle, zoals Delen hem toont) en het kaartpunt; nooit in de toonmodus
+    const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen' && h.status !== 'samengevoegd' && (!toon || toonbaar(h))).map((h) => {
+      if (toon) return toonKort(kort(h));
+      const p = paginaLees(h.hid), x = sam(h, p), k = kort(h, p, x), kr = kringVan(h, k.titel);
+      return Object.assign(k, { kring: { familie: !!kr.familie, shizzle: !!kr.shizzle }, punt: puntVan(h) });
+    });
     alle.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : a.hid < b.hid ? -1 : 1));
     if (toon) {
       return { status: 200, body: { ok: true, toon: true, herinneringen: alle, immich: F ? { aan: true } : { aan: false },
@@ -1820,7 +1854,7 @@ function maak(o) {
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
     const ks = Object.fromEntries(db.prepare('SELECT uitkomst, count(*) n FROM ml_koppel GROUP BY uitkomst').all().map((r) => [r.uitkomst, r.n]));
-    return { herinneringen: q.hAlle.all().length, samengevoegd: q.hAlle.all().filter((h) => h.status === 'samengevoegd').length, koppel: ks, stukken: st, immich: F ? F.info() : null, video: VID ? VID.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, vertelscript: S ? S.info() : null,
+    return { lijst_ms: Object.assign({}, lijstDuur), herinneringen: q.hAlle.all().length, samengevoegd: q.hAlle.all().filter((h) => h.status === 'samengevoegd').length, koppel: ks, stukken: st, immich: F ? F.info() : null, video: VID ? VID.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, vertelscript: S ? S.info() : null,
       vertel_auto: S ? { uit: fs.existsSync(AUTO_UIT), laatst: autoLaatst } : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }

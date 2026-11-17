@@ -1323,3 +1323,30 @@ test('wv2932: een reis met een samengevoegd fotoalbum gaat niet vanzelf bij een 
     assert.strictEqual(stat(o, hr).status, 'actief'); assert.strictEqual(stat(o, ha).status, 'samengevoegd');
   } finally { o.sluit(); }
 });
+
+test('wv3264 Levenskalender: lijst geeft precisie, video, stem, kring en punt bij David; toonmodus zonder stem, kring en punt', async () => {
+  const o = omgeving();
+  try {
+    o.opname(RA, 'gezin', false); o.opname(RB, 'gezin', false);
+    o.staat.verhalen[RB] = { titel: 'Regen in Proefdorp', alineas: ['Het regende.'], datum_van: '1995-01-01', datum_tot: '1995-12-31', datum_precisie: 'jaar' };
+    o.reis('2022 - Proefstad.md', 'reis', '2022-05-01 – 2022-05-04');
+    o.ml.lijst();
+    const ha = o.hid('opname', RA), hb = o.hid('opname', RB), hr = o.hid('reis', '20_Prive/Reizen/2022 - Proefstad.md');
+    assert.strictEqual(o.ml.wanneer(ha, { van: '2001-07' }).status, 200);
+    const l = o.ml.lijst().body.herinneringen, k = (h) => l.find((x) => x.hid === h);
+    assert.strictEqual(k(ha).precisie, 'maand'); assert.strictEqual(k(hb).precisie, 'jaar'); assert.strictEqual(k(hr).precisie, 'dag');
+    for (const h of l) {
+      assert.ok(h.video === null || typeof h.video === 'number', 'video = aantal of null');
+      assert.strictEqual(typeof h.stem, 'boolean');
+      assert.deepStrictEqual(Object.keys(h.kring).sort(), ['familie', 'shizzle']);
+      assert.ok('punt' in h);
+    }
+    assert.strictEqual(k(hb).stem, false, 'zonder vertelling geen stem');
+    const t = o.ml.lijst({ toon: true }).body.herinneringen;
+    assert.ok(t.length > 0);
+    for (const h of t) {
+      for (const w of ['stem', 'kring', 'punt']) assert.ok(!(w in h), 'toonlijst heeft geen ' + w);
+      assert.ok('precisie' in h && 'video' in h);
+    }
+  } finally { o.sluit(); }
+});

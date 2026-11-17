@@ -746,7 +746,7 @@ test('wv2468 sync: fotospoor alleen voor kandidaten met spoor, opnieuw bij een a
   assert.strictEqual((await F.sync(kand, false)).spoor, 8);
   // alleen hid, aantallen, datums, afgeronde plek en tijd in de tabel
   const kol = db.prepare('PRAGMA table_info(ml_fotospoor)').all().map((k) => k.name).sort().join();
-  assert.strictEqual(kol, 'aantal_bij,fotos,hid,lat,lon,met_dag,met_gps,op,tot,van');
+  assert.strictEqual(kol, 'aantal_bij,fotos,hid,lat,lon,met_dag,met_gps,op,tot,van,videos');   // wv3264: + videos (aantal)
   assert.ok(db.prepare('SELECT lat, lon FROM ml_fotospoor WHERE lat IS NOT NULL').all().every((r) => Math.round(r.lat * 10) === r.lat * 10 && Math.round(r.lon * 10) === r.lon * 10));
   assert.deepStrictEqual(F.info().fotospoor, { gerekend: 9, periode: 1, punt: 1 });
   // Immich faalt tijdens het spoor: één fout gelogd (geen namen), de ronde stopt, de oude uitkomst blijft
@@ -912,4 +912,12 @@ test('wv2614 stapelen: alleen als het origineel geen stapel heeft (vlak ervoor g
   const gif = st.zetFoto({ data: Buffer.from('GIF89a-verzonnen-gif-bytes-hier') });
   await assert.rejects(st.client.origineel(gif), (e) => e.code === 'SOORT');
   assert.strictEqual(await st.client.fotoInfo(uuid()), null);
+});
+
+test('wv3264 spoorUit telt video\'s: vid true telt, zonder vid-kolom -1 (onbekend), leeg album 0', () => {
+  const f = (vid) => ({ dag: '2014-07-01', lat: null, lon: null, vid });
+  assert.strictEqual(MF.spoorUit([f(true), f(false), f(true)]).videos, 2);
+  assert.strictEqual(MF.spoorUit([f(false), f(false)]).videos, 0);
+  assert.strictEqual(MF.spoorUit([f(undefined), f(undefined)]).videos, -1);
+  assert.strictEqual(MF.spoorUit([]).videos, 0);
 });

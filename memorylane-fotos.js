@@ -69,7 +69,10 @@ function spoorUit(spoor) {
   }
   let lat = null, lon = null;
   if (gps.length >= SPOOR_MIN_GPS) { lat = een(mediaan(gps.map((x) => x.lat))); lon = een(mediaan(gps.map((x) => x.lon))); }
-  return { fotos: l.length, met_dag: dagen.length, met_gps: gps.length, van, tot, lat, lon };
+  // wv3264 (Levenskalender): hoeveel video's in het album (immich.js albumSpoor: vid). -1 = de bron zei het niet (dan niet steeds opnieuw
+  // vragen); een leeg album = 0
+  const videos = !l.length ? 0 : l.some((x) => x && typeof x.vid === 'boolean') ? l.filter((x) => x && x.vid === true).length : -1;
+  return { fotos: l.length, met_dag: dagen.length, met_gps: gps.length, van, tot, lat, lon, videos };
 }
 
 function code(soort, ref) { return crypto.createHash('sha256').update(String(soort) + '|' + String(ref)).digest('hex').slice(0, 16); }
@@ -102,6 +105,8 @@ function maak(o) {
   const db = o.db, im = o.immich, nu = typeof o.nu === 'function' ? o.nu : Date.now;
   const fout = (l, e) => { if (o.fout) o.fout(l, e); };
   db.exec(SCHEMA_SQL);
+  // wv3264: aantal video's per album (voor het filter Met video van de Levenskalender); oude rijen hebben NULL tot de volgende spoorronde
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('ml_fotospoor') WHERE name = 'videos'").get()) db.exec('ALTER TABLE ml_fotospoor ADD COLUMN videos INTEGER');
   const q = {
     a: db.prepare('SELECT * FROM ml_album WHERE hid = ?'),
     alle: db.prepare('SELECT * FROM ml_album'),
@@ -116,9 +121,9 @@ function maak(o) {
     aantal: db.prepare('UPDATE ml_album SET aantal = ? WHERE hid = ?'),
     tel: db.prepare('SELECT status, count(*) n FROM ml_album GROUP BY status'),
     spoor: db.prepare('SELECT * FROM ml_fotospoor WHERE hid = ?'),
-    spoorZet: db.prepare('INSERT INTO ml_fotospoor (hid, aantal_bij, fotos, met_dag, met_gps, van, tot, lat, lon, op) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    spoorZet: db.prepare('INSERT INTO ml_fotospoor (hid, aantal_bij, fotos, met_dag, met_gps, van, tot, lat, lon, op, videos) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
       'ON CONFLICT (hid) DO UPDATE SET aantal_bij = excluded.aantal_bij, fotos = excluded.fotos, met_dag = excluded.met_dag, met_gps = excluded.met_gps, ' +
-      'van = excluded.van, tot = excluded.tot, lat = excluded.lat, lon = excluded.lon, op = excluded.op'),
+      'van = excluded.van, tot = excluded.tot, lat = excluded.lat, lon = excluded.lon, op = excluded.op, videos = excluded.videos'),
     spoorTel: db.prepare('SELECT count(*) n, sum(van IS NOT NULL) periode, sum(lat IS NOT NULL) punt FROM ml_fotospoor'),
   };
   let laatsteSync = 0, laatsteFout = 0, stand = { sleutel: null, fout: null, op: null, nieuw: 0, overgenomen: 0, weg: 0 };
@@ -190,6 +195,7 @@ function maak(o) {
         if (!a) continue;
         const s = q.spoor.get(k.hid);
         if (!s || s.aantal_bij !== a.aantal) nodig.push({ hid: k.hid, id: a.id, aantal: a.aantal, op: '' });
+        else if (s.videos === null || s.videos === undefined) nodig.push({ hid: k.hid, id: a.id, aantal: a.aantal, op: ' ' });   // wv3264: video's nog niet geteld
         else if (nu() - Date.parse(s.op) >= SPOOR_VERS_MS) nodig.push({ hid: k.hid, id: a.id, aantal: a.aantal, op: s.op });
       }
       nodig.sort((x, y) => (x.op < y.op ? -1 : x.op > y.op ? 1 : 0));
@@ -197,7 +203,7 @@ function maak(o) {
         let u;
         try { u = n.aantal ? spoorUit(await im.albumSpoor(n.id)) : spoorUit([]); }
         catch (e) { laatsteFout = nu(); fout('ml-immich-spoor', e); break; }
-        q.spoorZet.run(n.hid, n.aantal, u.fotos, u.met_dag, u.met_gps, u.van, u.tot, u.lat, u.lon, t); r.spoor++;
+        q.spoorZet.run(n.hid, n.aantal, u.fotos, u.met_dag, u.met_gps, u.van, u.tot, u.lat, u.lon, t, u.videos); r.spoor++;
       }
     }
     stand = { sleutel: true, fout: null, op: t, albums: lijst.length, ...r };
@@ -208,7 +214,7 @@ function maak(o) {
     const rij = q.a.get(hid), s = rij && rij.status === 'actief' ? q.spoor.get(hid) : null;
     if (!s) return null;
     return { fotos: s.fotos, met_dag: s.met_dag, met_gps: s.met_gps, van: s.van || null, tot: s.tot || null,
-      punt: s.lat !== null && s.lon !== null ? { lat: s.lat, lon: s.lon } : null, op: s.op };
+      punt: s.lat !== null && s.lon !== null ? { lat: s.lat, lon: s.lon } : null, op: s.op, videos: typeof s.videos === 'number' && s.videos >= 0 ? s.videos : null };
   }
   async function albumMaken(k) {
     const rij = q.a.get(k.hid);
