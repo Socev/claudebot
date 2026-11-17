@@ -177,6 +177,8 @@ COPY codex-config.toml /app/codex-config.toml
 COPY socev-voorbereiding.sh socev-rechten.sh socev-thuis.py loper-bind.py socev-loper.js playwright-mcp.sh codex-config-socev.toml /app/
 # wv3251: de gedeelde browser (MCP op Patchright) voor socev én claude; root-eigendom, alleen via een nieuw image te wijzigen.
 COPY browser-mcp.js /app/
+# wv3254: "haal deze link op" (ophalen.js) als CLI voor iedereen, ook Socev (node /app/ophalen.js <url>); gebruikt browser-mcp.js hiernaast.
+COPY ophalen.js /app/
 # Syncfilter van de vault (wv813): scripts en Windows-code niet naar Drive/Davids pc; run.sh toetst het vóór de eerste bisync.
 # Root-eigendom en in het image: socev noch een uitrol kan het filter verruimen.
 COPY bisync-filter.txt bisync-filter-toets.sh /app/
@@ -295,9 +297,9 @@ RUN chown -R root:root /app/db && chmod 0755 /app/db && chmod 0644 /app/db/* && 
  && node -e "require('/app/node_modules/pg'); require('/app/node_modules/postgres-array')"
 RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh /app/uitrol.sh \
       /app/socev-voorbereiding.sh /app/socev-rechten.sh /app/playwright-mcp.sh \
- && chmod 0644 /app/browser-mcp.js /app/socev-loper.js /app/loper-bind.py /app/socev-thuis.py /app/argv-wacht.py /etc/claude-code/managed-settings.json /app/web-jev.py /app/jev-pod.js \
+ && chmod 0644 /app/browser-mcp.js /app/ophalen.js /app/socev-loper.js /app/loper-bind.py /app/socev-thuis.py /app/argv-wacht.py /etc/claude-code/managed-settings.json /app/web-jev.py /app/jev-pod.js \
       /app/bisync-filter.txt /app/bisync-filter-toets.sh /app/syncthing-stignore.txt /app/syncthing-filter-toets.py \
- && chown -R root:root /app/browser-mcp.js /app/socev-* /app/loper-bind.py /app/argv-wacht.py /app/playwright-mcp.sh /etc/claude-code /app/web-jev.py /app/jev-pod.js \
+ && chown -R root:root /app/browser-mcp.js /app/ophalen.js /app/socev-* /app/loper-bind.py /app/argv-wacht.py /app/playwright-mcp.sh /etc/claude-code /app/web-jev.py /app/jev-pod.js \
       /app/bisync-filter.txt /app/bisync-filter-toets.sh /app/syncthing-stignore.txt /app/syncthing-filter-toets.py
 
 EXPOSE 8080 8091

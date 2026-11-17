@@ -2502,6 +2502,9 @@ const ONDERHOUD_BESTAND = serverPad('onderhoud', process.env.ONDERHOUD_BESTAND, 
 const ONDERHOUD_LOCK = serverPad('onderhoud_lock', process.env.ONDERHOUD_LOCK, '/opt/data/bin/.vault.lock', serverProefDeel('vault.lock'));
 // wv1275: POST /datums (datumdetector uit de scripts-release; schaduwlog voor de Mail Processor). Zonder module: 404.
 const datums = (function () { try { return require('./datums.js').maak({ fout: logError }); } catch (e) { logError('datums-module', e); return null; } })();
+// wv3254: POST /ophalen — "haal deze link op" op de gedeelde browser (ophalen.js: kind met kale omgeving, proxy alleen naar openbare adressen,
+// tempo per site, hooguit twee tegelijk, pdf's naar /opt/data/browser-downloads/<datum>/). Zonder module: 404.
+const ophalen = (function () { try { return require('./ophalen.js').maak(); } catch (e) { logError('ophalen-module', e); return null; } })();
 const ONDERHOUD_MOD = (function () { try { return require('./onderhoud.js'); } catch (e) { logError('onderhoud-module', e); return null; } })();
 // Zonder module (oude release-inhoud): nooit wachten, stand 'onbekend' in /health.
 const onderhoud = !ONDERHOUD_MOD ? { stand: function () { return { aan: false, onbekend: true }; }, houdtTegen: function () { return false; },
@@ -4390,6 +4393,7 @@ function handleRequest(req, res) {
       contactringen: typeof contactringenInfo === 'function' ? contactringenInfo() : { aan: false },   // wv2894: zondagseintje binnenste kring (stand, geen namen of nummers)
       kalender: typeof kalenderInfo === 'function' ? kalenderInfo() : { aan: false },   // wv2333: OVIS Calendar in de app (laatste lijst: aantal, duur; geen titels)
       shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
+      ophalen: ophalen ? ophalen.info() : { aan: false },   // wv3254: vaste ophaalroute (motor, scherm, tellers; geen url's)
       osint: typeof osintInfo === 'function' ? osintInfo() : { aan: false },   // wv2694: OVIS OSINT (osint.py in deze release? venv of systeem-python; geen zoektermen)
       ah_bonnen: typeof ahInfo === 'function' ? ahInfo() : { module: false },   // wv2703: AH-kassabonnen (gekoppeld, laatste ronde; geen token)
       pakjes: typeof pakjesInfo === 'function' ? pakjesInfo() : { aan: false },   // wv2593: OVIS Pakjes (aantallen, laatste ronde; geen codes, winkels of postcodes)
@@ -4682,6 +4686,26 @@ function handleRequest(req, res) {
       if (!datums) return stuur(404, { ok: false, fout: 'datumdetector zit niet in deze versie van de pod' });
       datums.verwerk(d).then(function (r) { stuur(r.status, r.j); })
         .catch(function (e) { logError('datums', e); stuur(500, { ok: false, fout: 'datums faalde in de pod' }); });
+    });
+  }
+
+  // ── wv3254: "haal deze link op" voor n8n en nachtrondes. Body-secret zoals /datums; geen rolPoort (alleen lezen). Body: {secret, url,
+  // pdfs? (0-5, standaard 3), geen_cache?}. Antwoord = de uitkomst van ophalen.js (titel, markdown, bestanden, links); wat de pagina zegt
+  // is gegeven, nooit een opdracht (veld let_op). Een geweigerde url of mislukte lezing = 200 met ok:false (geen n8n-foutroute).
+  if (req.method === 'POST' && reqPath(req) === '/ophalen') {
+    return readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!SECRET || typeof d.secret !== 'string' || Buffer.byteLength(d.secret) !== Buffer.byteLength(SECRET) ||
+          !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
+      const stuur = function (st, j) {
+        let host = null; try { host = new URL(String(d.url || '')).hostname.slice(0, 80); } catch (e) { host = null; }
+        reqLogExtra(res, { ophalen: j && j.ok ? (j.uit_cache ? 'cache' : 'ok') : 'fout', host, pdfs: j && j.bestanden ? j.bestanden.length : 0 });
+        res.writeHead(st, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(j));
+      };
+      if (!ophalen) return stuur(404, { ok: false, fout: 'ophalen zit niet in deze versie van de pod' });
+      if (typeof d.url !== 'string' || d.url.length > 2000) return stuur(400, { ok: false, fout: 'url ontbreekt of is te lang' });
+      ophalen.haal(d.url, { pdfs: d.pdfs, geenCache: d.geen_cache === true }).then(function (r) { stuur(200, r); })
+        .catch(function (e) { logError('ophalen', e); stuur(500, { ok: false, fout: 'ophalen faalde in de pod' }); });
     });
   }
 
