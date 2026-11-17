@@ -1116,11 +1116,13 @@ jobs:
 
       # wv3251: gedeelde browser — browser-mcp.js op Patchright met een eigen Xvfb-scherm (cookie), vast profiel met slot, terugval los;
       # als claude én als socev (beide gebruiken hem via hun playwright-mcp.sh). Lokale proefpagina, geen externe site.
+      # wv3256: docker in CI heeft geen user-namespaces voor de Chromium-sandbox (run 44038235962: 'Chromium sandboxing failed!'); alleen de
+      # toets geeft --no-sandbox mee (zoals OPHALEN_TOETS_ZONDER_SANDBOX bij de ophaalroute), browser-mcp.js zelf verandert niet.
       - name: "Rooktest - gedeelde browser (wv3251, Patchright + Xvfb)"
         run: |
           for u in claude socev; do
             echo "== als $u"
-            docker run --rm -v "$PWD":/src:ro --user $u --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} -c 'EIS_IMAGE=1 bash /src/test/browser-mcp.sh' || exit 1
+            docker run --rm -v "$PWD":/src:ro --user $u --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} -c 'EIS_IMAGE=1 TOETS_MCP_ARGS=--no-sandbox bash /src/test/browser-mcp.sh' || exit 1
           done
 
       # wv3254: "haal deze link op" in het image (/app/ophalen.js, Patchright + Xvfb, echte Chromium), als claude én socev; lokale proefserver.
