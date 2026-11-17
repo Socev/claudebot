@@ -706,7 +706,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     'console.log(JSON.stringify({structured_output:{soort:"geen",tekst:"",waarden:[],bronnen:[]},usage:{input_tokens:3,output_tokens:9},duration_ms:5,total_cost_usd:0.0042}));});\n');
   fs.chmodSync(NEP, 0o755);
   const hctx = vm.createContext({ require, process: Object.assign({}, process, { env: Object.assign({}, process.env, { TMPDIR: W }) }), fs, path, setTimeout, clearTimeout,
-    spawn: require('child_process').spawn, HARVESTER_BIN: NEP, HARVESTER_MODEL: 'claude-sonnet-5-5', HARVESTER_ENV: ['HOME', 'PATH', 'TMPDIR'],
+    spawn: require('child_process').spawn, metOomEerst: (f) => f(), HARVESTER_BIN: NEP, HARVESTER_MODEL: 'claude-sonnet-5-5', HARVESTER_ENV: ['HOME', 'PATH', 'TMPDIR'],
     kiesAccount: () => 2, account2Token: async () => 'sk-ant-oat-twee', account1Vangnet: async () => ({ mag: false, reden: 'x' }) });
   vm.runInContext(hc[0] + '\n;globalThis.__h = harvesterClaude;', hctx);
   const h1 = await hctx.__h('SYS', 'VRAAG btw', { type: 'object' }, { timeoutMs: 12000 });

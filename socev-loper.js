@@ -167,13 +167,18 @@ function opStart(v, sock) {
   env.USER = 'socev'; env.LOGNAME = 'socev'; env.SHELL = '/bin/bash';
   if (!env.PATH) env.PATH = '/usr/local/bin:/usr/bin:/bin';
   let kind;
+  // wv3202 (Codex MOET 1): agents vallen bij geheugennood vóór postgres. Zelf op oom_score_adj 1000 vlak vóór de synchrone spawn (het kind
+  // erft het vanaf de fork, dus ook alles wat het meteen start), direct erna terug (terug tot de startwaarde mag zonder recht).
+  let oomOud = null;
+  try { oomOud = fs.readFileSync('/proc/self/oom_score_adj', 'utf8').trim(); fs.writeFileSync('/proc/self/oom_score_adj', '1000'); } catch (e) { oomOud = null; }
   const eigenUmask = process.umask(KIND_UMASK);   // alleen voor het kind; direct terug (UMASK, wv2282)
   try {
     kind = spawn(bin, args, { cwd: cwd, env: env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    // wv3202: agents vallen bij geheugennood vóór postgres (verhogen mag zonder recht; kinderen erven het)
-    try { if (kind.pid) fs.writeFileSync('/proc/' + kind.pid + '/oom_score_adj', '1000'); } catch (e) { /* geen /proc: niets */ }
   } catch (e) { return { fout: 'spawn-mislukt', code: e.code || null }; }
-  finally { process.umask(eigenUmask); }
+  finally {
+    process.umask(eigenUmask);
+    if (oomOud !== null && oomOud !== '1000') { try { fs.writeFileSync('/proc/self/oom_score_adj', oomOud); } catch (e) { log('fout oom-terug ' + (e.code || '')); } }
+  }
   const j = { id: v.id, brein: v.brein, pid: kind.pid || null, kind: kind, gestart: Date.now(), klaar: 0, code: null, signaal: null,
     uit: { delen: [], lengte: 0, totaal: 0, afgekapt: false }, fout: { delen: [], lengte: 0, totaal: 0, afgekapt: false },
     volgers: new Set([sock]) };

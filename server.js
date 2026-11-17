@@ -925,14 +925,18 @@ function weesLeeft(pid, jobId, a) {
   } catch (e) { return false; }
 }
 // wv3202: agents (claude/codex/agy en alles wat zij starten) vallen bij geheugennood vóór postgres. Verhogen van oom_score_adj mag
-// zonder CAP_SYS_RESOURCE (verlagen niet: postgres -500 lukt op Olares niet). spawn() is synchroon fork+exec en de kinderen erven
-// de waarde, dus direct na spawn zetten dekt ook hun MCP-servers en browsers. Loper-kinderen (socev) zet socev-loper.js zelf.
-function oomEerst(pid) {
-  if (!pid) return false;
-  try { fs.writeFileSync('/proc/' + pid + '/oom_score_adj', '1000'); return true; } catch (e) { return false; }
+// zonder CAP_SYS_RESOURCE (verlagen onder de startwaarde niet: postgres -500 lukt op Olares niet). Racevrij (Codex MOET 1): de server
+// zet ZICHZELF vlak vóór de synchrone spawn (fork+exec) op 1000, het kind erft dat vanaf de fork, en de server gaat direct terug naar
+// zijn oude waarde (terug tot de startwaarde mag wel). Loper-kinderen (socev) doet socev-loper.js op dezelfde manier.
+function metOomEerst(start) {
+  let oud = null;
+  try { oud = fs.readFileSync('/proc/self/oom_score_adj', 'utf8').trim(); fs.writeFileSync('/proc/self/oom_score_adj', '1000'); } catch (e) { oud = null; }
+  try { return start(); }
+  finally {
+    if (oud !== null && oud !== '1000') { try { fs.writeFileSync('/proc/self/oom_score_adj', oud); } catch (e) { logError('oom-terug', e); } }
+  }
 }
 function weesSpawnMeld(opts, child, sessie, transcript) {
-  if (child && !child.loper) oomEerst(child.pid);
   if (!opts || typeof opts.opSpawn !== 'function' || !child || !child.pid) return;
   const st = appProcStat(child.pid);   // wv715: starttijd, zodat een 1002-wees zonder environ te herkennen is
   try { opts.opSpawn({ pid: child.pid, sessie: sessie || null, transcript: transcript || null, loper_id: child.loperId || null, pid_start: st ? st.start : null }); }
@@ -1526,7 +1530,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // wv715: smal + stand → als socev via de loper (zelfde contract als een ChildProcess; kill gaat via de loper).
     const projDir = viaLoper ? socevProjectDirFor(cwd) : projectDirFor(cwd);
     const child = viaLoper ? loperSpawn('claude', args, { cwd: cwd, env: env, id: loperJobId(opts) })
-      : spawn('claude', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      : metOomEerst(function () { return spawn('claude', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); });
     if (viaLoper) child.once('spawn', function () { weesSpawnMeld(opts, child, eigenId, path.join(projDir, eigenId + '.jsonl')); });
     else weesSpawnMeld(opts, child, eigenId, path.join(projDir, eigenId + '.jsonl'));
     const t0 = Date.now();
@@ -1728,7 +1732,7 @@ function runCodex(prompt, threadId, outdir, cwd, model, opts) {
     args.push('--', prompt);
     const env = Object.assign({}, basisOmgeving(opts), { OUTDIR: outdir, CODEX_HOME: CODEX_HOME }, (opts && opts.env) || {});
     delete env.CLAUDE_OAUTH_TOKEN_2;   // wv781
-    const child = spawn('codex', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = metOomEerst(function () { return spawn('codex', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); });
     weesSpawnMeld(opts, child, null, null);
     const t0 = Date.now();
     let out = '', err = '', rest = '', lastStdout = t0, killedReason = null;
@@ -1888,7 +1892,7 @@ function agyPoging(prompt, conversationId, outdir, cwd, model, effort, opts) {
     const t0 = Date.now();
     let child;
     try {
-      child = spawn(AGY_BIN, args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = metOomEerst(function () { return spawn(AGY_BIN, args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); });
     } catch (e) { return resolve({ ok: false, error: 'gemini-fout', output: String(e), runtime: 'gemini' }); }
     weesSpawnMeld(opts, child, null, null);
     let out = '', err = '', lastStdout = t0, killedReason = null;
@@ -19764,7 +19768,7 @@ async function voorwerkOnderzoek(o) {
       '--max-turns', '30', '--system-prompt', o.systeem, '--json-schema', JSON.stringify(o.schema)];
     const r = await new Promise(function (klaar) {
       let k, uit = '';
-      try { k = spawn(HARVESTER_BIN, args, { cwd: path.join(map, 'w'), env: env, stdio: ['pipe', 'pipe', 'ignore'] }); oomEerst(k.pid); } catch (e) { return klaar({ ok: false, fout: 'claude start niet' }); }
+      try { k = metOomEerst(function () { return spawn(HARVESTER_BIN, args, { cwd: path.join(map, 'w'), env: env, stdio: ['pipe', 'pipe', 'ignore'] }); }); } catch (e) { return klaar({ ok: false, fout: 'claude start niet' }); }
       k.stdin.on('error', function () {});
       try { k.stdin.end(o.prompt); } catch (e) {}
       const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, VOORWERK_RUN_MS);
@@ -20381,7 +20385,7 @@ async function harvesterClaude(systeem, prompt, schema, o) {
       '--permission-prompts', 'none', '--no-session-persistence', '--model', HARVESTER_MODEL, '--effort', 'low', '--system-prompt', systeem,
       '--json-schema', JSON.stringify(schema)];
     let k, uit = '', fout = '';
-    try { k = spawn(HARVESTER_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); oomEerst(k.pid); }
+    try { k = metOomEerst(function () { return spawn(HARVESTER_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); }); }
     catch (e) { opruim(); return klaar({ ok: false, fout: 'claude start niet' }); }
     k.stdin.on('error', function () {});
     try { k.stdin.end(prompt); } catch (e) {}
@@ -27118,7 +27122,7 @@ function bankClaude(groepen, cats) {
       '--json-schema', JSON.stringify(bankAiSchema(cats))];
     // De prompt (met omschrijvingen en tegenpartijen) via stdin, niet in argv: argv is voor elk proces op de pod te lezen (Fable wv687 #5).
     let k, uit = '', fout = '';
-    try { k = spawn(BANK_AI_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); oomEerst(k.pid); }
+    try { k = metOomEerst(function () { return spawn(BANK_AI_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); }); }
     catch (e) { opruim(); return klaar({ ok: false, fout: 'claude start niet' }); }
     k.stdin.on('error', function () {});
     try { k.stdin.end(prompt); } catch (e) {}
