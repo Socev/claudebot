@@ -360,6 +360,14 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     const st = proef({ thuis: onecall((i, u2) => { if (i === 13) u2.wind_gust = 22; }) });
     await st.doe();
     toets('23 storm in de drempels: geen dubbele wind in het dagdeel', st.buffer[0].tekst === 'Weer: 4 tot 12 °C, droog. Windstoten tot 80 km/u (vanaf 13:00).', st.buffer);
+    // review wv3281: null/'' zijn geen 0 °C; een geldig dagmaximum blijft staan als het minimum ontbreekt; hittezin blijft als het dagdeel 'm niet noemt
+    const D = W._intern.dagDeel, BV = { werkdag: false };
+    const n1 = D(onecall(null, { daily: [{ dt: UUR0 + 12 * 3600, temp: { min: null, max: '' } }] }), onecall(), BV, DATUM, false, []);
+    toets('23 dagwaarde null/leeg: terugval op de uren (8 °C), geen 0 °C', n1 === '8 °C, droog', n1);
+    const n2 = D(onecall((i, u) => { u.temp = 20 + (i % 3); }, { daily: [{ dt: UUR0 + 12 * 3600, temp: { min: null, max: 34 } }] }), onecall(), BV, DATUM, false, []);
+    toets('23 alleen het dagminimum ontbreekt: maximum 34 blijft (tropische dag)', /^20 tot 34 °C \(tropische dag\)/.test(n2), n2);
+    const R = W._intern.regel;
+    toets('23 hittezin blijft als het dagdeel geen tropische dag noemt', /tropische dag/.test(n2) && /Warm, tot 31/.test(R([{ soort: 'hitte', zin: 'warm, tot 31 °C' }], [], '20 tot 28 °C, droog')), R([{ soort: 'hitte', zin: 'warm, tot 31 °C' }], [], '20 tot 28 °C, droog'));
     const lg = W._intern.dagDeel({ hourly: [], daily: [] }, { hourly: [] }, { werkdag: false }, DATUM, false, []);
     toets('23 dagDeel zonder uren: leeg (geen gok)', lg === '', lg);
     const k = proef({ ophalen: async () => ({ status: 503, json: null }) });
