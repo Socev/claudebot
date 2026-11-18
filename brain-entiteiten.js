@@ -163,8 +163,15 @@ function leesSqlite(pad, sql, args) {
   finally { try { db.close(); } catch (e) { /* al dicht */ } }
 }
 
+// wv3298 (idee 35 meetpunt 3): bankposten per partij uit bank-partij.js; ontbreekt die module (terugrol), dan geen blok Bank.
+const BANK_PARTIJ = (function () { try { return require('./bank-partij.js'); } catch (e) { return null; } })();
+const BANK_CACHE_MS = 300000;
+
 function maak(o) {
   const rpc = o.rpc, lees = o.lees, vault = o.vault, facturenPad = o.facturenPad || null;
+  const bankPad = o.bankPad || null;   // wv3298: privébank (bank-archief transacties.sqlite), alleen lezen
+  const bankMod = o.bankPartij !== undefined ? o.bankPartij : BANK_PARTIJ;
+  let bankCache = null;
   const deadlines = typeof o.deadlines === 'function' ? o.deadlines : function () { return null; };
   const nu = typeof o.nu === 'function' ? o.nu : Date.now;
   const masker = typeof o.masker === 'function' ? o.masker : geenMasker;   // sleutelmasker (grondwet 2), op alle tekst
@@ -221,6 +228,22 @@ function maak(o) {
     return { aantal: rijen.length, laatste: rijen.slice(0, 5).map(function (f) {
       return { datum: f.factuurdatum || null, bedrag_cent: typeof f.bedrag === 'number' ? Math.round(f.bedrag) : null, status: f.status || null };
     }) };
+  }
+
+  // wv3298: blok Bank — aantal posten, eerste en laatste datum en de schrijfwijzen per kant (zakelijk uit de Facturen-app, privé uit het
+  // bank-archief), via naam/alias van precies één knoop plus de filiaalregel (bank-partij.js). Geen bedragen, geen IBAN. Eigen entiteiten
+  // niet (dat zijn overboekingen tussen eigen rekeningen). Index over alle posten, 5 minuten bewaard.
+  function bankVan(k, reg) {
+    if (!bankMod || isEigen(k) || (!facturenPad && !bankPad)) return null;
+    try {
+      if (!bankCache || nu() - bankCache.t >= BANK_CACHE_MS) {
+        bankCache = { t: nu(), idx: bankMod.index({ facturenPad: facturenPad, bankPad: bankPad, knopen: reg.knopen, handvatten: reg.handvatten, isEigen: isEigen }) };
+      }
+      const b = bankMod.blokVoor(bankCache.idx, k.id);
+      if (!b) return null;
+      [b.zakelijk, b.prive].forEach(function (x) { if (x && x.schrijfwijzen) x.schrijfwijzen = x.schrijfwijzen.map(function (n) { return masker(maskeerIban(n)); }); });
+      return b;
+    } catch (e) { return null; }
   }
 
   // wv1771: contactgegevens uit Google voor een persoon met een Google-koppeling → null (geen koppeling) of { bron, voorgesteld, mailadressen,
@@ -458,6 +481,7 @@ function maak(o) {
       kvk: k.kvk ? masker(String(k.kvk)) : null, agb: k.agb ? masker(String(k.agb)) : null,
       iban: vast || !k.iban ? null : masker(String(k.iban)),
       facturen: vast ? null : facturenVan(k, reg),
+      bank: vast ? null : bankVan(k, reg),   // wv3298
       deadlines: vast ? null : deadlinesVan(k, persoon ? { pagina: rel, patronen: pat } : null),
       contact: vast || !persoon ? null : await googleVan(k, reg),   // wv1771
       stukken: null,   // komt met OVIS Intake (stap 2); nu nog geen logboek per partij
@@ -473,7 +497,7 @@ function maak(o) {
       })) } };
   }
 
-  return { lijst: lijst, zoek: zoek, detail: detail, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; } };
+  return { lijst: lijst, zoek: zoek, detail: detail, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; bankCache = null; } };
 }
 
 module.exports = { telNl: telNl, maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, maskeerIban: maskeerIban, zichtbaar: zichtbaar, groepVan: groepVan,

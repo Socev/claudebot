@@ -22354,6 +22354,7 @@ function brainEntMaak() {
   try {
     brainEnt = BRAIN_ENT_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT, lees: function (p) { return VV().lees(p, 'utf8'); },
       facturenPad: path.join(FACTUREN_DIR, 'facturen.sqlite'), deadlines: function () { return appProjecten().deadlines; },
+      bankPad: path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite'),   // wv3298: blok Bank (alleen lezen)
       masker: function (t) { return appSleutelMasker(SB_MASKER ? SB_MASKER(t, false) : t); },   // wv1930: het sleutelmasker blijft op alle tekst (ook de naamregels van Second Brain; review ZOU 2)
       kaart: function () { const k = secondbrain && secondbrain.vers(false); return k && Array.isArray(k.bestanden) ? k.bestanden : null; },   // wv1930: privépersonen en Dossier
       rpc: (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE) ? appSbRpc : null });
