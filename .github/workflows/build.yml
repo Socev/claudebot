@@ -727,6 +727,9 @@ jobs:
       - name: "brain-entiteiten (wv1734, OVIS M5: Brain › Entiteiten & Personen)"
         if: ${{ !cancelled() }}
         run: bash test/brain-entiteiten.sh
+      - name: "bank-partij (wv3298, idee 35: blok Bank per partij in Brain › Entiteiten)"
+        if: ${{ !cancelled() }}
+        run: bash test/bank-partij.sh
       - name: "werkers (wv1707, OVIS M4a: Ploeg-register)"
         if: ${{ !cancelled() }}
         run: bash test/werkers.sh
