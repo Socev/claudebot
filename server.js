@@ -46,6 +46,28 @@ const path = require('path');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
+/* adresEnv:begin — test/adres-env.sh knipt dit blok */
+// wv3207 (databankoverstap, ontwerp § 8 stap 3): na de overstap schrijft de machinekamer /opt/data/.pg/adres.env met precies
+// SUPABASE_URL=http://127.0.0.1:8091 en SB_SQL_LOKAAL=1. server.js zet die bij zijn start in process.env, vóór alle andere code;
+// alles wat hij daarna start (agents, machinekamer-, manager- en socev-sessies, werkers) erft het. Zo werkt een code-uitrol
+// (alleen server.js herstart) hetzelfde als een podstart (daar zet fetch-secrets.sh ze al). Alleen op kant olares (de uitwijk
+// zet zijn eigen adres) en alleen in exact deze vorm: een ander bestand wordt genegeerd met één logregel, nooit een vrij adres.
+function pasAdresEnvToe(env, bestand) {
+  if ((env.SOCEV_KANT || 'olares') !== 'olares') return 'andere kant';
+  let t;
+  try { t = fs.readFileSync(bestand, 'utf8'); } catch (e) { return 'geen bestand'; }
+  // Codex ZOU 1: dezelfde regels als fetch-secrets.sh (lege regels en #-regels weg, verder exact; CRLF of spaties = onbekende vorm)
+  const regels = t.split('\n').filter(function (r) { return !/^[ \t]*(#.*)?$/.test(r); }).sort();
+  if (regels.length !== 2 || regels[0] !== 'SB_SQL_LOKAAL=1' || regels[1] !== 'SUPABASE_URL=http://127.0.0.1:8091') return 'onbekende vorm';
+  env.SUPABASE_URL = 'http://127.0.0.1:8091';
+  env.SB_SQL_LOKAAL = '1';
+  return 'lokaal';
+}
+/* adresEnv:end */
+const ADRES_ENV_UITKOMST = pasAdresEnvToe(process.env, process.env.SOCEV_ADRES_ENV || '/opt/data/.pg/adres.env');
+if (ADRES_ENV_UITKOMST === 'onbekende vorm') console.error(new Date().toISOString() + ' LET OP: /opt/data/.pg/adres.env heeft een onbekende vorm - genegeerd (Supabase-adres blijft)');
+else if (ADRES_ENV_UITKOMST === 'lokaal') console.log(new Date().toISOString() + ' databank: eigen databank in de pod (adres.env)');
+
 /* sbBeheer:begin — toetsen knippen dit blok mee (test/tibber-*.sh, nmbrs-data.sh, bankluis-poort.sh, bunq-poort.sh, bank-ronde.sh) */
 // wv3180: beheer-SQL (vervanger van de Supabase-Management-API POST /v1/projects/<ref>/database/query). Zonder SB_SQL_LOKAAL=1 precies
 // het oude gedrag (Management-API met SUPABASE_MCP_TOKEN); met SB_SQL_LOKAAL=1 lokaal via /app/sb-sql (eigen Postgres, rol postgres over
