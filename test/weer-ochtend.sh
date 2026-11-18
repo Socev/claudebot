@@ -52,13 +52,16 @@ function proef(o) {
   st.doe = (a) => w.doe({ ams: Object.assign({ datum: DATUM, uur: 6, min: 40 }, a || {}) });
   return st;
 }
+// wv3281: sinds de dagregel staat er elke dag een rij "Weer: <dagdeel>. <drempels>." drempel() geeft het drempeldeel zoals vroeger
+// ("Weer: <drempels>." of '' als er geen drempel was); null als er geen rij is.
+const drempel = (x) => { const t = x.buffer[0] && x.buffer[0].tekst; if (!t) return null; const m = /^Weer: [^.]*°C[^.]*\.(?: (.*))?$/.exec(t); return m ? (m[1] ? 'Weer: ' + m[1] : '') : t; };
 const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h': 1.2 }; u.weather = [{ id: 501 }]; } };
 (async function () {
   // 1. droge dag: geen rij, wel beide vakken (vrije dag), lat/lon op 1 decimaal
   {
     const x = proef();
     const r = await x.doe();
-    toets('1 droge vrije dag: ok, geen treffers, geen buffer-rij, geen box', r.ok && x.buffer.length === 0 && x.box.length === 0 && r.detail.treffers.length === 0, r);
+    toets('1 droge vrije dag: ok, geen treffers, één rij alleen met het dagdeel, geen box (wv3281)', r.ok && x.buffer.length === 1 && x.buffer[0].tekst === 'Weer: 4 tot 12 °C, droog.' && x.box.length === 0 && r.detail.treffers.length === 0, r);
     const q = x.aanroepen.map((u) => new URL(u).searchParams);
     toets('1 vrije dag: beide vakken gevraagd (Thuis + praktijk)', x.aanroepen.length === 2 && q[0].get('lat') === '51.9' && q[0].get('lon') === '5.3' && q[1].get('lat') === '52.0' && q[1].get('lon') === '5.6', x.aanroepen.length);
     toets('1 lat/lon met precies 1 decimaal in elke aanroep', q.every((p) => /^\d+\.\d$/.test(p.get('lat')) && /^\d+\.\d$/.test(p.get('lon'))));
@@ -70,7 +73,7 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
   {
     const x = proef({ kalender: DIENST, thuis: onecall(regenUur(7)) });
     const r = await x.doe();
-    toets('2 regen bij vertrek: één rij met "regen als je vertrekt" en tijd 7:00', x.buffer.length === 1 && x.buffer[0].datum === DATUM && /^Weer: Rond 7:00 regen als je vertrekt \(± 1 mm\)\.$/.test(x.buffer[0].tekst), x.buffer);
+    toets('2 regen bij vertrek: één rij met "regen als je vertrekt" en tijd 7:00', x.buffer.length === 1 && x.buffer[0].datum === DATUM && /^Weer: 4 tot 12 °C\. Rond 7:00 regen als je vertrekt \(± 1 mm\)\.$/.test(x.buffer[0].tekst), x.buffer);
     toets('2 werkdag via de dienstcode, praktijk Tolgaarde', r.detail.werkdag === true && r.detail.praktijk === 'Tolgaarde', r.detail);
   }
   // 3. al weg om 06:40: geen vertrekdeel (ook niet als de locatie te oud is)
@@ -79,13 +82,13 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     await x.doe();
     const y = proef({ kalender: DIENST, thuis: onecall(regenUur(7)), locatie: { plek: 'Thuis', leeftijd_s: 3600 } });
     await y.doe();
-    toets('3 al weg om 06:40 of locatie > 30 min: geen vertrekregen, geen rij', x.buffer.length === 0 && y.buffer.length === 0, [x.buffer, y.buffer]);
+    toets('3 al weg om 06:40 of locatie > 30 min: geen vertrekregen, geen drempel', drempel(x) === '' && drempel(y) === '', [x.buffer, y.buffer]);
   }
   // 3b. vrije dag: geen vertrekregen, ook al is hij thuis
   {
     const x = proef({ thuis: onecall(regenUur(7)) });
     await x.doe();
-    toets('3b vrije dag: geen vertrekregen', x.buffer.length === 0, x.buffer);
+    toets('3b vrije dag: geen vertrekregen (wel de kans overdag in het dagdeel)', drempel(x) === '' && /80% kans op regen overdag/.test(x.buffer[0].tekst), x.buffer);
   }
   // 3c. vertrekvenster tot de eerste afspraak (08:00 NL); een afspraak om 07:00 = al onderweg (diffreview MOET 1)
   {
@@ -93,8 +96,8 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     const x = proef({ kalender: om(8), thuis: onecall(regenUur(8)) }); await x.doe();
     const y = proef({ kalender: om(8), thuis: onecall(regenUur(7)) }); await y.doe();
     const z = proef({ kalender: om(7), thuis: onecall(regenUur(7)) }); await z.doe();
-    toets('3c afspraak 08:00: regen om 8:00 valt buiten het vertrekvenster, om 7:00 erbinnen', x.buffer.length === 0 && y.buffer.length === 1, [x.buffer, y.buffer]);
-    toets('3c eerste afspraak om 07:00: geen vertrekdeel', z.buffer.length === 0, z.buffer);
+    toets('3c afspraak 08:00: regen om 8:00 valt buiten het vertrekvenster, om 7:00 erbinnen', drempel(x) === '' && /regen als je vertrekt/.test(drempel(y)), [x.buffer, y.buffer]);
+    toets('3c eerste afspraak om 07:00: geen vertrekdeel', drempel(z) === '', z.buffer);
   }
   // 4. regen op de terugrit (praktijkvak, 16:30–19:00 zonder Werk-afspraak; Groenhouten-dienst → Groenhouten-vak)
   {
@@ -112,45 +115,45 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     await x.doe();
     const y = proef({ kalender: werk, praktijk: onecall(regenUur(20)) });
     await y.doe();
-    toets('4b getimede Werk-afspraak tot 20:00: regen om 17:00 telt niet, om 20:00 wel', x.buffer.length === 0 && y.buffer.length === 1 && /Rond 20:00 regen op je terugrit/.test(y.buffer[0].tekst), [x.buffer, y.buffer]);
+    toets('4b getimede Werk-afspraak tot 20:00: regen om 17:00 telt niet, om 20:00 wel', drempel(x) === '' && y.buffer.length === 1 && /Rond 20:00 regen op je terugrit/.test(y.buffer[0].tekst), [x.buffer, y.buffer]);
   }
   // 5. onweer, 6. gladheid, 7. storm, 8. hitte, 9. KNMI-waarschuwing (vrije dag: die gelden ook zonder werk)
   {
     const x = proef({ thuis: onecall((i, u) => { if (i === 15 || i === 16) u.weather = [{ id: 211 }]; }) });
     await x.doe();
-    toets('5 onweer 15:00–17:00', x.buffer.length === 1 && x.buffer[0].tekst === 'Weer: Kans op onweer tussen 15:00 en 17:00.', x.buffer);
+    toets('5 onweer 15:00–17:00', drempel(x) === 'Weer: Kans op onweer tussen 15:00 en 17:00.', x.buffer);
   }
   {
     const x = proef({ thuis: onecall((i, u) => { if (i >= 5 && i <= 8) u.temp = 0; if (i === 6) u.snow = { '1h': 0.3 }; }) });
     await x.doe();
-    toets('6 gladheid: vorst + sneeuw om 6:00, nat vorig uur om 7:00 → tot 8:00', x.buffer.length === 1 && x.buffer[0].tekst === 'Weer: Vanochtend tot 8:00 kans op gladheid.', x.buffer);
+    toets('6 gladheid: vorst + sneeuw om 6:00, nat vorig uur om 7:00 → tot 8:00', drempel(x) === 'Weer: Vanochtend tot 8:00 kans op gladheid.', x.buffer);
     const y = proef({ thuis: onecall((i, u) => { if (i >= 5 && i <= 8) u.temp = 0; }) });
     await y.doe();
-    toets('6 alleen vorst zonder neerslag: geen gladheidsregel', y.buffer.length === 0, y.buffer);
+    toets('6 alleen vorst zonder neerslag: geen gladheidsregel', drempel(y) === '', y.buffer);
   }
   {
     const x = proef({ thuis: onecall((i, u) => { if (i === 13) u.wind_gust = 22; if (i === 14) u.wind_gust = 24; }) });
     await x.doe();
-    toets('7 storm: windstoten ≥ 20 m/s → km/u op 5 afgerond', x.buffer.length === 1 && x.buffer[0].tekst === 'Weer: Windstoten tot 85 km/u (vanaf 13:00).', x.buffer);
+    toets('7 storm: windstoten ≥ 20 m/s → km/u op 5 afgerond', drempel(x) === 'Weer: Windstoten tot 85 km/u (vanaf 13:00).' && !/windstoten/.test(x.buffer[0].tekst.split('. ')[0]), x.buffer);
   }
   {
     const j = onecall(); j.daily[0].temp.max = 31.4;
     const x = proef({ thuis: j });
     await x.doe();
-    toets('8 hitte: dagmaximum ≥ 30 °C', x.buffer.length === 1 && x.buffer[0].tekst === 'Weer: Warm, tot 31 °C.', x.buffer);
+    toets('8 hitte: dagmaximum ≥ 30 °C staat in het dagdeel, geen dubbele hittezin (wv3281)', x.buffer.length === 1 && x.buffer[0].tekst === 'Weer: 4 tot 31 °C (tropische dag), droog.', x.buffer);
   }
   {
     const al = [{ sender_name: 'KNMI', event: 'Code geel wind', start: Date.parse(DATUM + 'T08:00:00Z') / 1000, end: Date.parse(DATUM + 'T14:00:00Z') / 1000, description: 'lange tekst die er niet in hoort', tags: ['Wind'] }];
     const x = proef({ thuis: onecall(null, { alerts: al }), praktijk: onecall(null, { alerts: al }) });
     await x.doe();
-    toets('9 KNMI-waarschuwing: naam + eindtijd, ontdubbeld over beide vakken, zonder de lange tekst', x.buffer.length === 1 && x.buffer[0].tekst === 'Weer: KNMI Code geel wind tot 15:00.', x.buffer);
+    toets('9 KNMI-waarschuwing: naam + eindtijd, ontdubbeld over beide vakken, zonder de lange tekst', drempel(x) === 'Weer: KNMI code geel voor harde wind tot 15:00.', x.buffer);
     const p = proef({ praktijk: onecall(null, { alerts: al }) }); await p.doe();
     const q = proef({ kalender: DIENST, praktijk: onecall(null, { alerts: al }) }); await q.doe();
-    toets('9 waarschuwing alleen in het praktijkvak: niet op een vrije dag, wel op een werkdag (MOET 2)', p.buffer.length === 0 && q.buffer.length === 1 && /KNMI Code geel wind/.test(q.buffer[0].tekst), [p.buffer, q.buffer]);
+    toets('9 waarschuwing alleen in het praktijkvak: niet op een vrije dag, wel op een werkdag (MOET 2)', drempel(p) === '' && /KNMI code geel voor harde wind/.test(drempel(q)), [p.buffer, q.buffer]);
     const oud = [{ sender_name: 'KNMI', event: 'Code geel gladheid', start: Date.parse(DATUM + 'T00:00:00Z') / 1000, end: Date.parse(DATUM + 'T04:30:00Z') / 1000 }];
     const y = proef({ thuis: onecall(null, { alerts: oud }) });
     await y.doe();
-    toets('9 waarschuwing die vóór 06:00 afloopt: geen regel', y.buffer.length === 0, y.buffer);
+    toets('9 waarschuwing die vóór 06:00 afloopt: geen drempel', drempel(y) === '', y.buffer);
   }
   // 10. meerdere treffers = één regel, waarschuwing eerst, ≤ ± 160 tekens
   {
@@ -159,7 +162,7 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     const x = proef({ kalender: DIENST, thuis: t, praktijk: onecall(regenUur(18)) });
     await x.doe();
     const tk = x.buffer[0] && x.buffer[0].tekst;
-    toets('10 meerdere treffers: één rij, begint met de waarschuwing, ≤ 160 tekens', x.buffer.length === 1 && /^Weer: KNMI Code oranje wind tot 21:00; /.test(tk) && tk.length <= 160, tk);
+    toets('10 meerdere treffers: één rij, begint met de waarschuwing, ≤ 160 tekens', x.buffer.length === 1 && /^Weer: KNMI code oranje voor harde wind tot 21:00; /.test(drempel(x)) && drempel(x).length <= 160 && tk.length <= 280 && /^Weer: 4 tot 12 °C\. KNMI/.test(tk), tk);
   }
   // 11. API-fout: dag 1 stil, dag 2 één box-rij, dag 3 geen tweede; daarna een goede dag en weer opnieuw meldbaar
   {
@@ -220,7 +223,7 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     const lang = [{ sender_name: 'KNMI', event: 'Code oranje ' + 'heel erg lange waarschuwingsnaam '.repeat(5), start: Date.parse(DATUM + 'T06:00:00Z') / 1000, end: Date.parse(DATUM + 'T20:00:00Z') / 1000 }];
     const y = proef({ thuis: onecall((i, u) => { if (i === 12) u.wind_gust = 25; }, { alerts: lang }) });
     await y.doe();
-    toets('16 lange waarschuwing: regel ≤ 160 tekens', y.buffer.length === 1 && y.buffer[0].tekst.length <= 160, y.buffer);
+    toets('16 lange onbekende waarschuwing: algemene Nederlandse zin, drempeldeel ≤ 160, regel ≤ 280', y.buffer.length === 1 && drempel(y).length <= 160 && y.buffer[0].tekst.length <= 280 && /KNMI weerwaarschuwing code oranje tot 21:00/.test(y.buffer[0].tekst) && !/lange|waarschuwingsnaam/.test(y.buffer[0].tekst), y.buffer);
   }
   // 18. wv2592: werkdag ook uit de locatie (6-11 gemist: op het werk zonder dienst of Werk-afspraak)
   {
@@ -230,7 +233,7 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     toets('18 ma–vr + 2 werkdagen deze week: werkdag (locatie_week), praktijk Groenhouten, terugritregen', r.detail.werkdag === true && r.detail.werk_bron === 'locatie_week' && r.detail.praktijk === 'Groenhouten' && q[1].get('lat') === '52.1' && x.buffer.length === 1 && /terugrit/.test(x.buffer[0].tekst), [r.detail, x.buffer]);
     const y = proef({ werkRecent: { dagen: 1, plek: null }, praktijk: onecall(regenUur(17)) });
     const ry = await y.doe();
-    toets('18 maar 1 werkdag deze week: vrije dag, geen terugritregen', ry.detail.werkdag === false && ry.detail.werk_bron === null && y.buffer.length === 0, [ry.detail, y.buffer]);
+    toets('18 maar 1 werkdag deze week: vrije dag, geen terugritregen', ry.detail.werkdag === false && ry.detail.werk_bron === null && drempel(y) === '', [ry.detail, y.buffer]);
     const z = proef({ werkRecent: { dagen: 4, plek: 'Huisartsenpraktijk Tolgaarde' } });
     const rz = await z.doe({ datum: '2026-11-14' });
     toets('18 zaterdag telt niet als werkdag uit de locatieweek', rz.detail.werkdag === false, rz.detail);
@@ -265,38 +268,38 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     const x = proef({ afspraken: [ev('Gezin', 14, NAAM)], geo: geo, ver: ver });
     const r = await x.doe();
     const geoUrl = x.aanroepen.filter((u) => u.indexOf('/geo/1.0/') >= 0);
-    toets('20 afspraak elders: regel met tijd, plaats, regen en windstoten', x.buffer.length === 1 && x.buffer[0].tekst === 'Weer: 14:00 Fopstad: regen (± 1 mm), windstoten tot 75 km/u.', x.buffer);
+    toets('20 afspraak elders: regel met tijd, plaats, regen en windstoten', drempel(x) === 'Weer: 14:00 Fopstad: regen (± 1 mm), windstoten tot 75 km/u.', x.buffer);
     toets('20 naar de Geocoding-API alleen de plaatsnaam (geen straat, postcode of titel)', geoUrl.length === 1 && new URL(geoUrl[0]).searchParams.get('q') === 'Fopstad' && !/Nepstraat|9999|Geheim/.test(x.aanroepen.join(' ')), geoUrl.map((u) => u.replace(/appid=[^&]*/, '')));
     toets('20 One Call voor het vak van de plaats op 1 decimaal; 4 aanroepen totaal', x.aanroepen.length === 4 && x.aanroepen.some((u) => /lat=53\.2&lon=6\.6&/.test(u)), x.aanroepen.length);
     toets('20 log en detail zonder plaatsnaam of sleutel', !/Fopstad|Nepstraat/.test(JSON.stringify([x.log, r.detail])) && JSON.stringify(x.log).indexOf(SLEUTEL) < 0 && r.detail.elders.treffers === 1, [x.log, r.detail]);
     const w = proef({ afspraken: [ev('Werk', 14, NAAM), ev('Schapies', 15, NAAM)], geo: geo, ver: ver });
     await w.doe();
-    toets('20 Werk-agenda (en andere dan David/Gezin/HAGRO): nooit opgezocht', w.aanroepen.length === 2 && w.buffer.length === 0, w.aanroepen.length);
+    toets('20 Werk-agenda (en andere dan David/Gezin/HAGRO): nooit opgezocht', w.aanroepen.length === 2 && drempel(w) === '', w.aanroepen.length);
     const dz = proef({ afspraken: [ev('David', 14, 'Neplaan 1, 9998 ZZ Dichtbij')], geo: geo, ver: ver });
     await dz.doe();
-    toets('20 binnen 15 km van Thuis/praktijk: geocode wel, geen One Call, geen regel', dz.aanroepen.length === 3 && dz.buffer.length === 0, dz.aanroepen.length);
+    toets('20 binnen 15 km van Thuis/praktijk: geocode wel, geen One Call, geen regel', dz.aanroepen.length === 3 && drempel(dz) === '', dz.aanroepen.length);
     const vw = proef({ afspraken: [ev('David', 14, 'Nepweg 2, 9997 ZZ Verweg')], geo: geo, ver: ver });
     await vw.doe();
-    toets('20 buiten NL/BE/DE: geen One Call', vw.aanroepen.length === 3 && vw.buffer.length === 0, vw.aanroepen.length);
+    toets('20 buiten NL/BE/DE: geen One Call', vw.aanroepen.length === 3 && drempel(vw) === '', vw.aanroepen.length);
     const hd = proef({ afspraken: [ev('David', 14, NAAM, { hele_dag: true, start: DATUM }), ev('David', 6, NAAM), ev('David', 14, NAAM, { status: 'cancelled' }), ev('David', 14, 'Zoom')], geo: geo, ver: ver });
     await hd.doe();
-    toets('20 hele dag, vóór 07:00, geannuleerd of geen plaats: overgeslagen', hd.aanroepen.length === 2 && hd.buffer.length === 0, hd.aanroepen.length);
+    toets('20 hele dag, vóór 07:00, geannuleerd of geen plaats: overgeslagen', hd.aanroepen.length === 2 && drempel(hd) === '', hd.aanroepen.length);
     const veel = proef({ afspraken: ['Aa', 'Bb', 'Cc', 'Dd', 'Ee'].map((p, i) => ev('David', 9 + i, 'Nepweg ' + i + ', 999' + i + ' ZZ Plaats' + p)), geo: geo, ver: () => onecall() });
     await veel.doe();
     toets('20 hooguit 3 plaatsen (3 geocodes, 3 One Calls)', veel.aanroepen.filter((u) => /\/geo\//.test(u)).length === 3 && veel.aanroepen.length === 8, veel.aanroepen.length);
     const dub = proef({ afspraken: [ev('David', 15, NAAM), ev('Gezin', 14, 'Ander 1, 9999 ZZ Fopstad')], geo: geo, ver: ver });
     await dub.doe();
-    toets('20 dezelfde plaats twee keer: één opzoeking, de vroegste afspraak telt', dub.aanroepen.length === 4 && dub.buffer.length === 1 && /^Weer: 14:00 Fopstad/.test(dub.buffer[0].tekst), dub.buffer);
+    toets('20 dezelfde plaats twee keer: één opzoeking, de vroegste afspraak telt', dub.aanroepen.length === 4 && /^Weer: 14:00 Fopstad/.test(drempel(dub)), dub.buffer);
     const af = proef({ afspraken: 'fout', kalender: DIENST, praktijk: onecall(regenUur(17)) });
     const ra = await af.doe();
     toets('20 agenda niet leesbaar: stil, thuisdeel blijft, geen box', ra.ok && ra.detail.elders.stand === 'agenda niet leesbaar' && af.buffer.length === 1 && /terugrit/.test(af.buffer[0].tekst) && af.box.length === 0, [ra.detail, af.buffer]);
     const sam = proef({ afspraken: [ev('Gezin', 14, NAAM)], geo: geo, ver: ver, kalender: DIENST, praktijk: onecall(regenUur(17)), thuis: onecall((i, u) => { if (i === 13) u.wind_gust = 22; }) });
     await sam.doe();
     const ts = sam.buffer[0] && sam.buffer[0].tekst;
-    toets('20 samen met het thuisdeel: thuis eerst, plek erachter, ≤ 280 tekens', sam.buffer.length === 1 && /^Weer: Windstoten tot 80 km\/u \(vanaf 13:00\); rond 17:00 regen op je terugrit \(± 1 mm\); 14:00 Fopstad: /.test(ts) && ts.length <= 280, ts);
+    toets('20 samen met het thuisdeel: thuis eerst, plek erachter, ≤ 280 tekens', sam.buffer.length === 1 && /^Weer: Windstoten tot 80 km\/u \(vanaf 13:00\); rond 17:00 regen op je terugrit \(± 1 mm\); 14:00 Fopstad: /.test(drempel(sam)) && ts.length <= 280, ts);
     const gf = proef({ afspraken: [ev('Gezin', 14, NAAM)], ophalen: async (u) => (u.indexOf('/geo/') >= 0 ? { status: 500, json: null } : { status: 200, json: onecall() }) });
     const rg = await gf.doe();
-    toets('20 geocode-fout: stil, ok, geen box, geen rij', rg.ok && !rg.detail.fout && gf.box.length === 0 && gf.buffer.length === 0 && rg.detail.elders.fouten === 1, rg.detail);
+    toets('20 geocode-fout: stil, ok, geen box, geen drempel', rg.ok && !rg.detail.fout && gf.box.length === 0 && drempel(gf) === '' && rg.detail.elders.fouten === 1, rg.detail);
     const dn = proef({ afspraken: [ev('David', 14, 'Nepweg 9, 9996 ZZ Dubbelnaam')], geo: geo, ver: ver });
     await dn.doe();
     toets('20 eerste geocode buiten NL/BE/DE: de eerste in NL/BE/DE telt (ronde 2 ZOU 1), limit 5', dn.buffer.length === 1 && /14:00 Dubbelnaam:/.test(dn.buffer[0].tekst) && dn.aanroepen.some((u) => /\/geo\/.*limit=5/.test(u)), dn.buffer);
@@ -306,6 +309,63 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     const droog = proef({ afspraken: [ev('Gezin', 14, NAAM)], geo: geo, ver: ver });
     const rd = await droog.w.doe({ droog: true, ams: { datum: DATUM, uur: 6, min: 40 } });
     toets('20 droog: regel terug, niets in de buffer', rd.droog && /Fopstad/.test(rd.regel) && droog.buffer.length === 0, rd);
+  }
+  // 23. wv3281 (David Ja 18-11): dagregel elke ochtend + waarschuwingsnamen in het Nederlands (verzonnen data)
+  {
+    const N = W._intern.waarschuwingNaam;
+    const tabel = [['Moderate Fog', 'code geel voor mist'], ['Severe Wind', 'code oranje voor harde wind'], ['Moderate Snow-ice', 'code geel voor gladheid'],
+      ['Extreme thunderstorm', 'code rood voor onweer'], ['Moderate rain-flood', 'code geel voor wateroverlast'], ['Moderate rain', 'code geel voor veel regen'],
+      ['Moderate high-temperature', 'code geel voor hitte'], ['Severe low-temperature', 'code oranje voor strenge kou'], ['Moderate coastalevent', 'code geel voor hoogwater aan de kust'],
+      ['Moderate forest-fire', 'code geel voor natuurbrand'], ['Moderate avalanches', 'weerwaarschuwing code geel'], ['Minor Fog', 'waarschuwing voor mist'],
+      ['Yellow notice for the office', 'weerwaarschuwing code geel'], ['Code oranje wind', 'code oranje voor harde wind'], ['Code geel gladheid', 'code geel voor gladheid'],
+      ['Snow', 'waarschuwing voor sneeuw'], ['Some Unknown Thing', 'weerwaarschuwing'], ['', 'weerwaarschuwing'], [null, 'weerwaarschuwing']];
+    const fout = tabel.filter((t) => N(t[0]) !== t[1]).map((t) => [t[0], N(t[0]), t[1]]);
+    toets('23 vertaaltabel waarschuwingen (MeteoAlarm/KNMI-namen → Nederlands, onbekend = weerwaarschuwing)', fout.length === 0, fout);
+    const mist = [{ sender_name: 'Koninklijk Nederlands Meteorologisch Instituut (KNMI)', event: 'Moderate Fog', start: Date.parse(DATUM + 'T05:00:00Z') / 1000, end: Date.parse(DATUM + 'T09:00:00Z') / 1000 }];
+    const x = proef({ thuis: onecall(null, { alerts: mist }) });
+    await x.doe();
+    toets('23 "Moderate Fog" van het KNMI: Nederlandse zin in de briefing, geen Engels', x.buffer.length === 1 && x.buffer[0].tekst === 'Weer: 4 tot 12 °C, droog. KNMI code geel voor mist tot 10:00.' && !/Moderate|Fog/.test(x.buffer[0].tekst), x.buffer);
+    const vreemd = [{ sender_name: 'Iemand', event: 'Weird Phenomenon', start: Date.parse(DATUM + 'T08:00:00Z') / 1000, end: Date.parse(DATUM + 'T12:00:00Z') / 1000 }];
+    const y = proef({ thuis: onecall(null, { alerts: vreemd }) });
+    await y.doe();
+    toets('23 onbekende waarschuwing van een andere afzender: "weerwaarschuwing", geen Engels, geen KNMI', drempel(y) === 'Weer: Weerwaarschuwing tot 13:00.', y.buffer);
+    const zin = W._intern.eldersZin(onecall(null, { alerts: [{ event: 'Moderate Fog', start: UUR0 + 13 * 3600, end: UUR0 + 15 * 3600 }] }), DATUM, 14 * 60, 'Fopstad');
+    toets('23 afspraak elders: waarschuwingsnaam ook daar Nederlands', zin === '14:00 Fopstad: code geel voor mist', zin);
+    const av = W._intern.vroegTreffers(onecall(null, { alerts: [{ sender_name: 'KNMI', event: 'Moderate Snow-ice', start: UUR0 + 4 * 3600, end: UUR0 + 9 * 3600 }] }), DATUM);
+    toets('23 avondseintje: waarschuwingsnaam Nederlands', av.length === 1 && av[0].zin === 'KNMI code geel voor gladheid tot 9:00', av);
+  }
+  {
+    // dagdeel op een werkdag: thuis om 06:40, kans 50% op de terugrit zonder regendrempel (0,3 mm) → in het dagdeel, geen drempelzin
+    const x = proef({ kalender: DIENST, praktijk: onecall((i, u) => { if (i === 17) { u.pop = 0.5; u.rain = { '1h': 0.3 }; } }) });
+    await x.doe();
+    toets('23 werkdag, kans onder de drempel: "50% kans op regen op je terugrit" in het dagdeel', x.buffer.length === 1 && x.buffer[0].tekst === 'Weer: 4 tot 12 °C, 50% kans op regen op je terugrit.', x.buffer);
+    const y = proef({ kalender: DIENST, thuis: onecall((i, u) => { if (i === 8) u.pop = 0.3; }), praktijk: onecall((i, u) => { if (i === 18) { u.pop = 0.7; u.rain = { '1h': 0.4 }; } }) });
+    await y.doe();
+    toets('23 werkdag, beide vensters: het hoogste venster telt, afgerond op 10%', y.buffer[0].tekst === 'Weer: 4 tot 12 °C, 70% kans op regen op je terugrit.', y.buffer);
+    const z = proef({ kalender: DIENST, locatie: { plek: 'Huisartsenpraktijk Tolgaarde', leeftijd_s: 60 } });
+    await z.doe();
+    toets('23 al op de praktijk om 06:40: alleen de terugrit telt ("droog op je terugrit")', z.buffer[0].tekst === 'Weer: 4 tot 12 °C, droog op je terugrit.', z.buffer);
+    const w = proef({ kalender: DIENST });
+    await w.doe();
+    toets('23 werkdag thuis om 06:40, alles droog: "droog onderweg"', w.buffer[0].tekst === 'Weer: 4 tot 12 °C, droog onderweg.', w.buffer);
+    // sneeuw, vorst, wind onder de stormdrempel; dagwaarde ontbreekt → uren 07–21
+    const sn = onecall((i, u) => { u.temp = -3 + (i % 24 >= 12 ? 4 : 0); if (i === 11) { u.pop = 0.9; u.snow = { '1h': 2.2 }; u.weather = [{ id: 601 }]; } if (i === 15) u.wind_gust = 15.5; }, { daily: [] });
+    const v = proef({ thuis: sn });
+    await v.doe();
+    toets('23 vrije dag: sneeuw, vorst (uren als terugval), wind ≥ 14 m/s', v.buffer.length === 1 && /^Weer: -3 tot 1 °C, 90% kans op sneeuw overdag \(± 2 mm\), windstoten tot 55 km\/u\./.test(v.buffer[0].tekst), v.buffer);
+    toets('23 dagdeel ≤ 120 tekens (met "Weer: " en de punt)', v.buffer[0].tekst.split('. ')[0].length + 1 <= 120, v.buffer[0].tekst.length);
+    const u = proef({ thuis: onecall((i, u2) => { u2.temp = 'x'; }, { daily: [{ dt: UUR0 + 12 * 3600, temp: { min: 'x', max: null } }] }) });
+    await u.doe();
+    toets('23 geen bruikbare temperatuur: dagdeel zonder temperatuur, wel een rij', u.buffer.length === 1 && u.buffer[0].tekst === 'Weer: Droog.', u.buffer);
+    const st = proef({ thuis: onecall((i, u2) => { if (i === 13) u2.wind_gust = 22; }) });
+    await st.doe();
+    toets('23 storm in de drempels: geen dubbele wind in het dagdeel', st.buffer[0].tekst === 'Weer: 4 tot 12 °C, droog. Windstoten tot 80 km/u (vanaf 13:00).', st.buffer);
+    const lg = W._intern.dagDeel({ hourly: [], daily: [] }, { hourly: [] }, { werkdag: false }, DATUM, false, []);
+    toets('23 dagDeel zonder uren: leeg (geen gok)', lg === '', lg);
+    const k = proef({ ophalen: async () => ({ status: 503, json: null }) });
+    const rk = await k.doe();
+    toets('23 geen ophaling: geen rij en geen gok (stil)', rk.ok && /http 503/.test(rk.detail.fout) && k.buffer.length === 0, rk);
+    toets('23 detail en log melden het dagdeel', w.log.some((l) => /"dagdeel":1/.test(l)), w.log);
   }
   // 22. wv2605 (idee 28 § 9): avondseintje bij vroeg vertrek. Vandaag = di 10-11 (avond), morgen = wo 11-11 (DATUM)
   {
@@ -396,7 +456,7 @@ const regenUur = (h) => (i, u) => { if (i === h) { u.pop = 0.8; u.rain = { '1h':
     const h = avondProef({ kalender: DIENST, thuis: onecall((i, u) => { if (i === 6) { u.wind_gust = 23; u.weather = [{ id: 211 }]; } }, { alerts: [ALERT(3, 12, 'Code oranje wind'), ALERT(14, 20, 'Code geel onweer')] }) });
     await h.tik();
     const ht = h.berichten[0] && h.berichten[0].tekst;
-    toets('22h waarschuwing eerst, dan storm en onweer; waarschuwing van 14–20 niet', /^Weer morgenvroeg \(5–8 uur, je heenweg\): KNMI Code oranje wind tot 12:00; windstoten tot 85 km\/u; kans op onweer rond 6:00\.$/.test(ht || '') && !/geel/.test(ht), ht);
+    toets('22h waarschuwing eerst, dan storm en onweer; waarschuwing van 14–20 niet', /^Weer morgenvroeg \(5–8 uur, je heenweg\): KNMI code oranje voor harde wind tot 12:00; windstoten tot 85 km\/u; kans op onweer rond 6:00\.$/.test(ht || '') && !/geel/.test(ht), ht);
     const h2 = avondProef({ kalender: DIENST, thuis: onecall((i, u) => { if (i === 9) { u.temp = -2; u.snow = { '1h': 1 }; u.weather = [{ id: 601 }]; } }, { alerts: [ALERT(10, 14, 'Code geel gladheid')] }) });
     await h2.tik();
     toets('22h gladheid en waarschuwing pas na 08:00: niets', h2.berichten.length === 0);
