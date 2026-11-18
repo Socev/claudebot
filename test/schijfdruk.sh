@@ -17,6 +17,10 @@
 #                'niet vast te stellen' zonder NVMe; geen incident en geen bericht bij alleen een traag venster.
 #   K incident   vastzittende I/O of status ≠ live: precies één box-rij #schijf-hapert en één bericht (nep-bericht.py), geen tweede na
 #                een herstart (haper.json), in de stille uren wel de rij en geen bericht, een gezonde schijf geen rij.
+#   L haperen  (wv3292, 18-11) een incident vervalt niet meer stil: box schrijven faalt tijdens de hapering en lukt pas na herstel →
+#                toch één rij (met begin, einde, resets, piek) en één bericht; herstart midden in een incident (kill -9) houdt het incident
+#                (haper.json); 's nachts voorbij = rij meteen, bericht pas na 07:00 met "tussen ... en ..."; trage opdrachten houden het
+#                incident open; wat een dag na het einde nog openstaat vervalt en staat in /health.
 #   G kosten     echte /proc: CPU-tijd en geheugen van de meter per sample, en wat dat per minuut betekent.
 # Kruisproef: SCHIJFDRUK_KRUIS=1 laat de toets een bewust foute kopie draaien (delta zonder aftrekken): A moet dan rood zijn.
 set -u
@@ -254,6 +258,60 @@ MK=$(start shaK4)
 for i in 1 2 3 4 5 6 7 8 9 10; do nepsys live $((i*50)) $((i*400)) $((i*50)) $((i*50)) $((i*400)) $((i*50)) $((i%2)) $((i*20)); sleep 0.3; done
 { grep -q "#schijf-hapert" "$W/box.md" || [ -s "$W/bericht.log" ]; } && rood "K4: melding bij een gezonde schijf" || groen "K4: gezonde, bezige schijf geeft geen melding"
 kill "$MK" 2>/dev/null
+
+# ── L haperen: incident vervalt niet stil (wv3292) ─────────────────────────────────────────────────────────────────
+hj(){ python3 -c "import json,sys; j=json.load(open(sys.argv[1])); print(eval(sys.argv[2], {'j': j}))" "$S/haper.json" "$1" 2>/dev/null; }
+# L1 box schrijven faalt tijdens de hapering (map alleen-lezen = schijf hangt), lukt pas na herstel
+opzet l1; nep "$P" 0.00 1000 2000 300; nepsys resetting 100 0 100 200 0 400 0 1000
+chmod a-w "$W/box.md" "$W"
+ML=$(start shaL1 SCHIJFDRUK_HAPER_HERSTEL_MS=1000 SCHIJFDRUK_HAPER_BEWAAR_MS=0)
+sleep 1.5; nepsys live 100 0 100 200 0 400 0 1000; sleep 0.4; chmod u+w "$W" "$W/box.md"
+wachtOp '[ "$(grep -c "#schijf-hapert" "$W/box.md")" -ge 1 ]' 10
+sleep 1
+[ "$(grep -c "#schijf-hapert" "$W/box.md")" = "1" ] && groen "L1: rij komt alsnog na herstel (schrijven faalde tijdens de hapering)" || rood "L1: $(grep -c '#schijf-hapert' "$W/box.md") rijen (main: incident viel na herstel weg)"
+grep -q "Schijf van Olares haperde [0-9:]*–[0-9:]* (1× reset" "$W/box.md" && grep -q "gemeten: nvme0n1: .*begin [0-9:]*, einde [0-9:]*" "$W/box.md" && groen "L1: rij noemt begin, einde en aantal resets" || rood "L1: rij: $(grep -A3 'hapert\|haperde' "$W/box.md" | head -c 500)"
+[ "$(grep -c . "$W/bericht.log" 2>/dev/null)" = "1" ] && grep -q "tussen [0-9:]* en [0-9:]* haperde de schijf" "$W/bericht.log" && groen "L1: één bericht met tijdvak" || rood "L1: bericht.log: $(cat "$W/bericht.log" 2>/dev/null)"
+wachtOp '[ "$(vraag /samenvatting | json "j[\"nvme\"][\"incident\"]")" = "None" ]' 5 && [ "$(hj 'j["incident"]')" = "None" ] && groen "L1: daarna is het incident gesloten (ook in haper.json)" || rood "L1: incident blijft: $(vraag /samenvatting | json 'j["nvme"]["incident"]')"
+kill "$ML" 2>/dev/null; chmod -R u+w "$W"
+# L2 herstart midden in een nachtelijk incident; L3 bericht pas na 07:00
+opzet l2; nep "$P" 0.00 1000 2000 300; nepsys resetting 100 0 100 200 0 400 0 1000
+chmod a-w "$W/box.md" "$W"
+ML=$(start shaL2a SCHIJFDRUK_UUR=2 SCHIJFDRUK_HAPER_HERSTEL_MS=1000 SCHIJFDRUK_HAPER_BEWAAR_MS=0)
+wachtOp '[ "$(hj "j[\"incident\"][\"resets\"]")" = "1" ]' 6
+SINDS1=$(hj 'j["incident"]["sinds"]')
+[ -n "$SINDS1" ] && [ "$SINDS1" != "None" ] && groen "L2: lopend incident staat in haper.json" || rood "L2: geen incident in haper.json: $(cat "$S/haper.json" 2>/dev/null)"
+kill -9 "$ML" 2>/dev/null; sleep 0.3; chmod u+w "$W" "$W/box.md"; nepsys live 100 0 100 200 0 400 0 1000
+ML=$(start shaL2b SCHIJFDRUK_UUR=2 SCHIJFDRUK_HAPER_HERSTEL_MS=1000 SCHIJFDRUK_HAPER_BEWAAR_MS=0)
+wachtOp '[ "$(vraag /samenvatting | json "j[\"nvme\"][\"incident\"][\"einde_iso\"] is not None and j[\"nvme\"][\"incident\"][\"box_rij\"]")" = "True" ]' 10
+SI=$(vraag /samenvatting | json 'j["nvme"]["incident"]')
+[ "$(grep -c "#schijf-hapert" "$W/box.md")" = "1" ] && [ "$(vraag /samenvatting | json 'j["nvme"]["incident"]["resets"]')" = "1" ] && \
+  [ "$(vraag /samenvatting | json 'j["nvme"]["incident"]["sinds_iso"]')" = "$(python3 -c "import datetime,sys; print(datetime.datetime.fromtimestamp(int(sys.argv[1])/1000, datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z'))" "$SINDS1")" ] \
+  && groen "L2: na kill -9 en herstart hetzelfde incident (zelfde begin, 1 reset) en één rij" || rood "L2: na herstart: rijen $(grep -c '#schijf-hapert' "$W/box.md"), incident $SI"
+[ ! -s "$W/bericht.log" ] && [ "$(vraag /samenvatting | json 'j["nvme"]["incident"]["bericht_david"]')" = "False" ] && groen "L3: om 02:00 geen bericht, het incident wacht (voorbij, nog te melden)" || rood "L3: bericht in de stille uren of incident weg: $(cat "$W/bericht.log" 2>/dev/null) / $SI"
+kill "$ML" 2>/dev/null; wachtOp '! kill -0 "$ML" 2>/dev/null' 5
+ML=$(start shaL2c SCHIJFDRUK_UUR=8 SCHIJFDRUK_HAPER_HERSTEL_MS=1000 SCHIJFDRUK_HAPER_BEWAAR_MS=0)
+wachtOp '[ -s "$W/bericht.log" ]' 8; sleep 1
+[ "$(grep -c . "$W/bericht.log")" = "1" ] && grep -q "tussen [0-9:]* en [0-9:]* haperde de schijf van Olares (1 keer opnieuw opgestart)" "$W/bericht.log" && [ "$(grep -c "#schijf-hapert" "$W/box.md")" = "1" ] \
+  && groen "L3: na 07:00 (en na een herstart) één bericht met tijdvak, geen tweede rij" || rood "L3: bericht.log: $(cat "$W/bericht.log" 2>/dev/null); rijen $(grep -c '#schijf-hapert' "$W/box.md")"
+wachtOp '[ "$(hj "j[\"incident\"]")" = "None" ]' 5 && groen "L3: daarna incident gesloten in haper.json" || rood "L3: haper.json: $(cat "$S/haper.json")"
+kill "$ML" 2>/dev/null
+# L4 trage opdrachten (status live, geen stilstand) houden het incident open; de piek telt mee
+opzet l4; nep "$P" 0.00 1000 2000 300; nepsys resetting 100 0 100 200 0 400 0 1000
+ML=$(start shaL4 SCHIJFDRUK_HAPER_HERSTEL_MS=1000 SCHIJFDRUK_HAPER_BEWAAR_MS=0)
+sleep 1
+for i in 1 2 3 4 5 6 7 8 9 10; do nepsys live 100 0 100 $((200+i*10)) $((i*80)) $((400+i*80000)) 0 $((1000+i*100)); sleep 0.3; done
+SI=$(vraag /samenvatting | json 'j["nvme"]["incident"]')
+[ "$(vraag /samenvatting | json 'j["nvme"]["incident"]["einde_iso"] is None and j["nvme"]["incident"]["piek_ms"] >= 8000')" = "True" ] && groen "L4: 3 s lang 8 s per opdracht (status live): incident blijft open, piek 8000 ms" || rood "L4: incident $SI"
+sleep 2.5
+[ "$(vraag /samenvatting | json 'j["nvme"]["incident"]')" = "None" ] && groen "L4: daarna gezond: incident voorbij en (rij + bericht gedaan) gesloten" || rood "L4: na herstel: $(vraag /samenvatting | json 'j["nvme"]["incident"]')"
+kill "$ML" 2>/dev/null
+# L5 wat een dag (hier 2 s) na het einde nog openstaat vervalt en staat in /health
+opzet l5; nep "$P" 0.00 1000 2000 300; nepsys resetting 100 0 100 200 0 400 0 1000
+ML=$(start shaL5 SCHIJFDRUK_UUR=2 SCHIJFDRUK_HAPER_HERSTEL_MS=1000 SCHIJFDRUK_HAPER_BEWAAR_MS=0 SCHIJFDRUK_HAPER_VERVAL_MS=2000)
+sleep 1; nepsys live 100 0 100 200 0 400 0 1000; sleep 5
+[ "$(vraag /samenvatting | json 'j["nvme"]["incident"] is None and j["nvme"]["vervallen"]["wat"] == "bericht"')" = "True" ] && [ ! -s "$W/bericht.log" ] && [ "$(grep -c "#schijf-hapert" "$W/box.md")" = "1" ] \
+  && groen "L5: bericht vervalt na de grens, staat als vervallen in de samenvatting; rij wel" || rood "L5: $(vraag /samenvatting | json 'j["nvme"]')"
+kill "$ML" 2>/dev/null
 
 # ── G kosten (echte /proc, 100 ms-tik) ────────────────────────────────────────────────────────────────────────────
 opzet g

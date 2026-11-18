@@ -27,6 +27,10 @@
  *             'drukte van elders' met de getallen in de box-rij. Status ≠ live of een vastzittende I/O (inflight > 0 en ≥ 30 s geen
  *             afgeronde opdracht: lezen, schrijven, discard of flush) = altijd een box-rij [direct] en hooguit 1x per dag één regel aan David via bericht.py (niet 23:00-07:00).
  *             Geen noodstop. Leesstuk: 00_Systeem/Schijf van Olares.md.
+ *             (wv3292) Een incident vervalt niet meer stil: na 3 min gezond (live, geen stilstand, geen opdrachten > 500 ms) is het
+ *             voorbij, maar het blijft bestaan ("voorbij, nog te melden") tot de box-rij geschreven en het bericht verstuurd is, of tot
+ *             een dag na het einde (dan staat het als vervallen in /health). Het lopende incident staat in haper.json, zodat een
+ *             herstart het niet wist. De box-rij en het bericht noemen dan begin, einde, aantal resets en de piek.
  * Uitzetten: touch /opt/data/schijfdruk-uit (gelezen bij de start van het proces) of SCHIJFDRUK=0 in de omgeving van server.js.
  * Toets: test/schijfdruk.sh (nep-/proc, eigen paden; raakt de pod niet).
  */
@@ -80,7 +84,11 @@ const C = {
   nvWeinigMb: getal('SCHIJFDRUK_NV_WEINIG_MB', 600), // MB per minuut (lezen + schrijven) onder dit = "weinig verkeer"
   haperBoxPauze: getal('SCHIJFDRUK_HAPER_BOX_PAUZE_MS', 30 * 60000),   // tussen twee box-rijen van twee verschillende incidenten
   haperBerichtPauze: getal('SCHIJFDRUK_HAPER_BERICHT_PAUZE_MS', 24 * 3600000),   // hooguit 1 bericht per dag aan David
-  haperHerstelMs: getal('SCHIJFDRUK_HAPER_HERSTEL_MS', 3 * 60000)   // zo lang gezond = incident voorbij
+  haperHerstelMs: getal('SCHIJFDRUK_HAPER_HERSTEL_MS', 3 * 60000),   // zo lang gezond (live, geen stilstand, geen trage opdrachten) = incident voorbij
+  // wv3292: een voorbij incident blijft bestaan tot box-rij en bericht gedaan zijn; na zo lang na het einde vervalt wat nog openstaat
+  haperVervalMs: getal('SCHIJFDRUK_HAPER_VERVAL_MS', 24 * 3600000),
+  haperBewaarMs: getal('SCHIJFDRUK_HAPER_BEWAAR_MS', 30000),   // het lopende incident hooguit zo vaak naar haper.json (overleeft een herstart)
+  boxKindMs: getal('SCHIJFDRUK_BOX_MS', 30000)                 // grens voor het kind-proces dat de box-rij schrijft
 };
 const SYS = process.env.SCHIJFDRUK_SYS || '/sys';
 const HAPER_BESTAND = path.join(DIR, 'haper.json');
@@ -211,9 +219,12 @@ let nvDev = [];            // [{ ctrl, blok, temp }]  temp = pad naar temp1_inpu
 let nvOntdekt = 0;
 const nvAcc = {};          // per blok: { vorig: {st, ms}, acc, niet: Set, stilSinds }
 let nvBezig = false;
-let incident = null;       // { sinds, reden, details, gezondSinds, boxKlaar, msgKlaar, boxLaatst, boxPog, msgLaatst, msgPog }
-let haperBezig = false;
-let haperStaat = { box: 0, bericht: 0 };   // ms van de laatste box-rij en het laatste bericht (ook na een herstart: haper.json)
+// incident: { sinds, einde, laatstSlecht, reden, details, gezondSinds, resets, piekMs, piekT, stilMax, boxKlaar, msgKlaar, boxLaatst, boxPog,
+// msgLaatst, msgPog }. einde = null zolang het duurt; daarna "voorbij, nog te melden" tot box-rij én bericht gedaan zijn (of vervallen).
+// Staat in haper.json (wv3292), zodat een herstart van de meter midden in een hapering het incident niet wist (18-11 02:55Z gebeurd).
+let incident = null;
+let haperBezig = false, haperVuil = false, haperBewaarBezig = false, haperBewaarLaatst = 0;
+let haperStaat = { box: 0, bericht: 0, vervallen: null };   // ms van de laatste box-rij en het laatste bericht (ook na een herstart: haper.json)
 const nul = () => ({ n: 0, dr: 0, dw: 0, drs: 0, dws: 0, drt: 0, dwt: 0, dtk: 0, dms: 0, lm: 0, stil: 0, infl: 0 });
 
 async function nvOntdek() {
@@ -239,6 +250,7 @@ async function nvTik() {
   try {
     if (!nvDev.length ? Date.now() - nvOntdekt > 60000 : Date.now() - nvOntdekt > 5 * 60000) await nvOntdek();
     let probleem = null;
+    const w = { resets: 0, lat: 0, stil: 0 };   // wv3292: voor het incident (overgangen naar ≠ live, slechtste ms per opdracht van dit venster)
     for (const d of nvDev) {
       if (fsOpen > MAXOPEN) break;
       const staatT = await lees(SYS + '/class/nvme/' + d.ctrl + '/state', C.proc);
@@ -247,6 +259,7 @@ async function nvTik() {
       const a = nvAcc[d.blok] || (nvAcc[d.blok] = { vorig: null, acc: nul(), niet: new Set(), stilSinds: null });
       const staat = staatT === null ? null : staatT.trim();
       if (staat && staat !== 'live') a.niet.add(staat);
+      if (staat) { const niet = staat !== 'live'; if (niet && !a.wasNiet) w.resets++; a.wasNiet = niet; }
       let stil = 0;
       if (st) {
         const v = a.vorig;
@@ -259,6 +272,7 @@ async function nvTik() {
             const x = a.acc;
             x.n++; x.dr += dr; x.dw += dw; x.drs += drs; x.dws += dws; x.drt += drt; x.dwt += dwt; x.dtk += dtk; x.dms += m - v.ms;
             x.lm = Math.max(x.lm, dr ? drt / dr : 0, dw ? dwt / dw : 0); x.stil = Math.max(x.stil, stil); x.infl = st.infl;
+            w.lat = Math.max(w.lat, dr ? drt / dr : 0, dw ? dwt / dw : 0); w.stil = Math.max(w.stil, stil);
           }
         }
         a.vorig = { st: st, ms: m };
@@ -266,7 +280,8 @@ async function nvTik() {
       if (staat && staat !== 'live') probleem = probleem || { reden: 'status "' + staat + '" in plaats van live', blok: d.blok, staat: staat, stil: stil, infl: st ? st.infl : null };
       else if (stil >= C.nvStilS) probleem = probleem || { reden: 'vastzittende I/O: ' + st.infl + ' opdrachten wachten en al ' + stil + ' s is er geen enkele afgerond', blok: d.blok, staat: staat, stil: stil, infl: st.infl };
     }
-    incidentBijwerken(probleem);
+    w.traag = w.lat > C.nvLatMs;
+    incidentBijwerken(probleem, w);
   } catch (e) {} finally { nvBezig = false; }
 }
 async function nvVoorRecord() {
@@ -330,8 +345,11 @@ function nvSamenvatting() {
     }
   }
   return { apparaten: apparaten, vensters_per_minuut_verwacht: Math.round(60000 / C.nvTik),
-    incident: incident ? { sinds_iso: new Date(incident.sinds).toISOString(), reden: incident.reden, box_rij: incident.boxKlaar, bericht_david: incident.msgKlaar, pogingen_box: incident.boxPog, pogingen_bericht: incident.msgPog } : null,
-    laatste_box_iso: haperStaat.box ? new Date(haperStaat.box).toISOString() : null, laatste_bericht_iso: haperStaat.bericht ? new Date(haperStaat.bericht).toISOString() : null };
+    incident: incident ? { sinds_iso: new Date(incident.sinds).toISOString(), einde_iso: incident.einde ? new Date(incident.einde).toISOString() : null, reden: incident.reden,
+      resets: incident.resets, piek_ms: rond(incident.piekMs, 10), langste_stil_s: incident.stilMax, box_rij: incident.boxKlaar, bericht_david: incident.msgKlaar,
+      pogingen_box: incident.boxPog, pogingen_bericht: incident.msgPog } : null,
+    laatste_box_iso: haperStaat.box ? new Date(haperStaat.box).toISOString() : null, laatste_bericht_iso: haperStaat.bericht ? new Date(haperStaat.bericht).toISOString() : null,
+    vervallen: haperStaat.vervallen };
 }
 
 // ── het hapering-incident: status ≠ live of een vastzittende I/O is altijd een box-rij (direct) en één regel aan David (1x/dag) ────────
@@ -339,16 +357,41 @@ function stilleUren() {
   const uur = process.env.SCHIJFDRUK_UUR !== undefined ? parseInt(process.env.SCHIJFDRUK_UUR, 10) : parseInt(amsterdam().slice(11, 13), 10);
   return uur >= 23 || uur < 7;
 }
-function incidentBijwerken(p) {
+function nieuwIncident(nu, p) {
+  return { sinds: nu, einde: null, laatstSlecht: nu, reden: p.reden, details: p, gezondSinds: null, resets: 0, piekMs: 0, piekT: null, stilMax: 0,
+    boxKlaar: false, msgKlaar: false, boxLaatst: 0, boxPog: 0, msgLaatst: 0, msgPog: 0 };
+}
+// p = een probleem (status ≠ live of vastzittende I/O) of null; w = { resets, lat, stil, traag } van dit venster van 10 s.
+// wv3292: "gezond" is live, geen stilstand én geen trage opdrachten (> C.nvLatMs ms): 18-11 bleef de schijf na de laatste reset nog
+// 9 min op 10-50 s per opdracht hangen. Na C.haperHerstelMs gezond is het incident voorbij (einde = laatste slechte venster), maar het
+// blijft bestaan tot de box-rij en het bericht gedaan zijn; vroeger viel het dan weg, ook als het schrijven op de hangende schijf
+// mislukt was en het bericht op 07:00 wachtte (18-11: geen rij, geen bericht).
+function incidentBijwerken(p, w) {
   const nu = Date.now();
+  w = w || {};
+  let i = incident;
   if (p) {
-    if (!incident) incident = { sinds: nu, reden: p.reden, details: p, gezondSinds: null, boxKlaar: false, msgKlaar: false, boxLaatst: 0, boxPog: 0, msgLaatst: 0, msgPog: 0 };
-    incident.gezondSinds = null; incident.details = p;
-  } else if (incident) {
-    if (incident.gezondSinds === null) incident.gezondSinds = nu;
-    if (nu - incident.gezondSinds >= C.haperHerstelMs) incident = null;   // drie minuten gezond: voorbij; een volgende is een nieuw incident
+    if (i && i.einde && i.boxKlaar) i = null;   // voorbij en al in de box: een nieuwe hapering is een nieuw incident (bericht: 1x per dag)
+    if (!i) { i = incident = nieuwIncident(nu, p); haperVuil = true; }
+    else if (i.einde) { i.einde = null; haperVuil = true; }   // nog niet gemeld: hetzelfde incident loopt door
+    i.gezondSinds = null; i.details = p; i.laatstSlecht = nu; haperVuil = true;   // laatstSlecht = later het einde: bewaren (throttle C.haperBewaarMs; Codex MOET 1)
+  } else if (i && !i.einde) {
+    if (w.traag || w.stil > 0) { i.gezondSinds = null; i.laatstSlecht = nu; haperVuil = true; }
+    else if (i.gezondSinds === null) i.gezondSinds = nu;
+    else if (nu - i.gezondSinds >= C.haperHerstelMs) {
+      i.einde = i.laatstSlecht;   // het laatste venster waarin de schijf nog hapte
+      i.boxPog = 0; i.boxLaatst = 0; i.msgPog = 0; i.msgLaatst = 0;   // de schijf leeft weer: een nieuwe reeks snelle pogingen
+      haperVuil = true;
+    }
   }
+  if (i && !i.einde) {
+    if (w.resets) { i.resets += w.resets; haperVuil = true; }
+    if ((w.lat || 0) > i.piekMs) { i.piekMs = w.lat; i.piekT = nu; haperVuil = true; }
+    if ((w.stil || 0) > i.stilMax) { i.stilMax = w.stil; haperVuil = true; }
+  }
+  if (i && i.einde && i.boxKlaar && i.msgKlaar) { incident = null; haperVuil = true; }
   if (incident) haperVerwerk().catch(() => {});
+  if (haperVuil && !haperBewaarBezig && nu - haperBewaarLaatst >= C.haperBewaarMs && fsOpen < MAXOPEN) haperBewaar().catch(() => {});
 }
 function stuurBericht(tekst) {
   if (!fs.existsSync(BERICHT)) return Promise.resolve(false);
@@ -364,17 +407,32 @@ function stuurBericht(tekst) {
 }
 function haperRij(i, nu) {
   const d = i.details || {};
-  const lijst = buf.filter((r) => r.ms >= nu - 15 * 60000 && r.nv);
+  const tot = i.einde || nu;
+  const lijst = buf.filter((r) => r.ms >= Math.min(i.sinds - 60000, nu - 15 * 60000) && r.ms <= tot + 120000 && r.nv);
   const o = nvOordeel(lijst);
+  const duur = Math.max(1, Math.round((tot - i.sinds) / 60000));
+  const tellers = (i.resets ? i.resets + ' keer status ≠ live (controllerreset)' : 'status bleef live') + '; piek ' + rond(i.piekMs, 10) + ' ms per opdracht' +
+    (i.piekT ? ' om ' + hhmm(i.piekT) : '') + '; langste stilstand ' + i.stilMax + ' s';
   const velden = [
-    ['status', 'open — de NVMe-schijf van Olares zelf meldt een probleem (niet een andere app); kijk of de server er last van heeft (/health.schijfdruk.nvme) en vergelijk met de incidenten van 5/6-10 en 9-10 in 00_Systeem/Schijf van Olares.md'],
-    ['van', 'schijfdruk.js (wv3126, release ' + SHA + ')'],
-    ['gemeten', d.blok + ': ' + i.reden + '; sinds ' + hhmm(i.sinds) + ' (nu ' + hhmm(nu) + '); laatste 15 min: ' + o.tekst],
+    ['status', 'open — de NVMe-schijf van Olares zelf meldt een probleem (niet een andere app); kijk of de server er last van heeft (/health.schijfdruk.nvme) en vergelijk met de incidenten van 5/6-10, 9-10 en 18-11 in 00_Systeem/Schijf van Olares.md'],
+    ['van', 'schijfdruk.js (wv3126/wv3292, release ' + SHA + ')'],
+    ['gemeten', (d.blok || 'nvme') + ': ' + i.reden + '; begin ' + hhmm(i.sinds) + (i.einde ? ', einde ' + hhmm(i.einde) + ' (' + duur + ' min; rij geschreven ' + hhmm(nu) + ')' : ' (duurt nog, nu ' + hhmm(nu) + ')') +
+      '; ' + tellers + '; tijdvak: ' + o.tekst],
     ['verloop', 'ring ' + DIR + '/ring-*.jsonl (veld nv per minuut: status, MB, ms per opdracht, inflight, stilstand, temperatuur); bij een ingreep van de bewaker staan de laatste 15 min in bin/bewaker-bewijs-*.json'],
-    ['David', 'krijgt hooguit 1x per dag één regel in de app (niet 23:00-07:00); geen noodstop en geen ingreep door de meter'],
+    ['David', 'krijgt hooguit 1x per dag één regel in de app (niet 23:00-07:00; een nachtelijk incident de eerste keer na 07:00); geen noodstop en geen ingreep door de meter'],
     ['voorstel', 'dmesg, journal en SMART zijn vanuit de pod niet leesbaar: laat de Olares-zijde (host) de NVMe-log nalopen als dit terugkeert; schijf, firmware en energiebeheer zijn daar te beoordelen']];
-  return '\n## [direct] ' + amsterdam().slice(0, 16) + ' — Schijf van Olares hapert: ' + i.reden.slice(0, 80) + ' #schijf-hapert\n' +
+  const kop = i.einde ? 'Schijf van Olares haperde ' + hhmm(i.sinds) + '–' + hhmm(i.einde) + ' (' + (i.resets ? i.resets + '× reset, ' : '') + 'piek ' + Math.round(i.piekMs / 100) / 10 + ' s per opdracht)'
+    : 'Schijf van Olares hapert: ' + i.reden.slice(0, 80);
+  return '\n## [direct] ' + amsterdam().slice(0, 16) + ' — ' + kop + ' #schijf-hapert\n' +
     velden.map((v) => '- ' + v[0] + ': ' + String(v[1]).replace(/[\r\n]+/g, ' ').slice(0, 1500)).join('\n') + '\n';
+}
+function haperBerichtTekst(i) {
+  if (!i.einde) return 'De schijf van Olares hapert weer, zoals in oktober. De app kan daardoor even traag zijn of een foutmelding geven. Het staat vastgelegd voor de machinekamer; je hoeft niets te doen.';
+  const dag = (ms) => amsterdam(new Date(ms)).slice(0, 10);
+  const van = hhmm(i.sinds), uur = parseInt(van.slice(0, 2), 10);
+  const wanneer = dag(i.sinds) === dag(Date.now()) ? (uur < 7 ? 'Vannacht' : 'Vandaag') : 'Op ' + dag(i.sinds).slice(8, 10).replace(/^0/, '') + '-' + dag(i.sinds).slice(5, 7).replace(/^0/, '');
+  return wanneer + ' tussen ' + van + ' en ' + hhmm(i.einde) + ' haperde de schijf van Olares' + (i.resets ? ' (' + i.resets + ' keer opnieuw opgestart)' : '') +
+    '. De app kan toen traag zijn geweest of een foutmelding gegeven hebben. Het staat vastgelegd voor de machinekamer; je hoeft niets te doen.';
 }
 // Pogingen per kanaal: de eerste 10 elke minuut, daarna elke 30 minuten zolang het incident duurt (een schrijfstoring in de stille uren
 // mag het bericht van de ochtend niet blokkeren, en een mislukt bericht niet de box-rij).
@@ -384,24 +442,48 @@ async function haperVerwerk() {
   if (haperBezig || !i || (i.boxKlaar && i.msgKlaar)) return;
   haperBezig = true;
   try {
+    if (i.einde && nu - i.einde >= C.haperVervalMs) {   // wv3292: wat een dag na het einde nog openstaat vervalt (staat in /health)
+      const kan = [];
+      if (!i.boxKlaar) { i.boxKlaar = true; kan.push('box-rij'); }
+      if (!i.msgKlaar) { i.msgKlaar = true; kan.push('bericht'); }
+      haperStaat.vervallen = { incident_sinds_iso: new Date(i.sinds).toISOString(), wat: kan.join('+'), op_iso: new Date(nu).toISOString() };
+      haperVuil = true; return;
+    }
     if (!i.boxKlaar && nu - i.boxLaatst >= haperWacht(i.boxPog)) {
       if (nu - haperStaat.box < C.haperBoxPauze) i.boxKlaar = true;   // net een rij gezet voor een vorig incident: geen tweede
       else {
         i.boxPog++; i.boxLaatst = nu;
         if (await boxRijVeilig(haperRij(i, nu))) { i.boxKlaar = true; haperStaat.box = nu; await haperBewaar(); }
+        else haperVuil = true;   // pogingen bewaren
       }
     }
     if (!i.msgKlaar && nu - i.msgLaatst >= haperWacht(i.msgPog)) {
       if (nu - haperStaat.bericht < C.haperBerichtPauze) i.msgKlaar = true;   // hooguit 1x per dag
       else if (!stilleUren()) {
         i.msgPog++; i.msgLaatst = nu;
-        if (await stuurBericht('De schijf van Olares hapert weer, zoals in oktober. De app kan daardoor even traag zijn of een foutmelding geven. Het staat vastgelegd voor de machinekamer; je hoeft niets te doen.')) { i.msgKlaar = true; haperStaat.bericht = nu; await haperBewaar(); }
+        if (await stuurBericht(haperBerichtTekst(i))) { i.msgKlaar = true; haperStaat.bericht = nu; await haperBewaar(); }
       }
     }
   } catch (e) {} finally { haperBezig = false; }
 }
-function haperBewaar() {
-  return schrijfAtomair(HAPER_BESTAND, JSON.stringify({ box_iso: haperStaat.box ? new Date(haperStaat.box).toISOString() : null, bericht_iso: haperStaat.bericht ? new Date(haperStaat.bericht).toISOString() : null }) + '\n');
+const INC_VELDEN = ['sinds', 'einde', 'laatstSlecht', 'reden', 'details', 'resets', 'piekMs', 'piekT', 'stilMax', 'boxKlaar', 'msgKlaar', 'boxPog', 'msgPog'];
+async function haperBewaar() {
+  haperBewaarBezig = true; haperBewaarLaatst = Date.now(); haperVuil = false;
+  const inc = incident ? Object.fromEntries(INC_VELDEN.map((k) => [k, incident[k]])) : null;
+  try {
+    const ok = await schrijfAtomair(HAPER_BESTAND, JSON.stringify({ box_iso: haperStaat.box ? new Date(haperStaat.box).toISOString() : null,
+      bericht_iso: haperStaat.bericht ? new Date(haperStaat.bericht).toISOString() : null, vervallen: haperStaat.vervallen, incident: inc }) + '\n');
+    if (!ok) haperVuil = true;
+    return ok;
+  } finally { haperBewaarBezig = false; }
+}
+function haperLaad(j) {
+  haperStaat = { box: Date.parse(j.box_iso) || 0, bericht: Date.parse(j.bericht_iso) || 0, vervallen: j.vervallen || null };
+  const v = j.incident;
+  if (v && Number.isFinite(v.sinds) && typeof v.reden === 'string') {
+    incident = Object.assign(nieuwIncident(v.sinds, { reden: v.reden }), Object.fromEntries(INC_VELDEN.filter((k) => v[k] !== undefined).map((k) => [k, v[k]])));
+    incident.gezondSinds = null; incident.boxLaatst = 0; incident.msgLaatst = 0;   // na een herstart meteen weer proberen
+  }
 }
 
 // ── geheugen, bestanden ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -527,7 +609,7 @@ function boxRijVeilig(rij) {
   return new Promise(function (resolve) {
     let k, klaar = false;
     const einde = (v) => { if (!klaar) { klaar = true; clearTimeout(t); resolve(v); } };
-    const t = setTimeout(() => { try { k.kill('SIGKILL'); } catch (e) {} einde(false); }, 30000);
+    const t = setTimeout(() => { try { k.kill('SIGKILL'); } catch (e) {} einde(false); }, C.boxKindMs);
     try { k = spawn(process.execPath, ['-e', BOX_KIND, vv, BOX, JSON.stringify(rij)], { stdio: 'ignore', cwd: '/' }); }
     catch (e) { einde(false); return; }
     k.on('error', () => einde(false));
@@ -603,7 +685,7 @@ process.on('unhandledRejection', function () {});
   await wacht(600);   // een gelijktijdige starter kan het slot nog overschrijven (Codex MOET 3): pas luisteren als het na 600 ms nog van mij is
   if (await slotIsVan_mij() !== true) process.exit(0);
   const hp = await lees(HAPER_BESTAND, 3000);
-  try { const j = JSON.parse(hp); haperStaat = { box: Date.parse(j.box_iso) || 0, bericht: Date.parse(j.bericht_iso) || 0 }; } catch (e) {}
+  try { haperLaad(JSON.parse(hp)); } catch (e) {}
   const al = await lees(ALARM_BESTAND, 3000);
   try { laatsteAlarm = Date.parse(JSON.parse(al).laatste_iso) || 0; } catch (e) {}
   geschiedenisFout = await geschiedenis();
