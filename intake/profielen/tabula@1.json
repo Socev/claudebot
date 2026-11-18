@@ -1,0 +1,37 @@
+{
+ "profiel": "tabula",
+ "versie": 1,
+ "omschrijving": "Eén blad uit OVIS Tabula (Davids kladblok) dat David met 'Stuur naar de Second Brain' aanleverde (wv3299). Alleen intern aan te leveren door tabula-loket.js (de pod haalt de opdracht zelf op bij het loket tabula.socev.dev; Tabula kent geen sleutel van de pod). De router beslist (marker, Jev, entiteit); alleen de kennislens (of geen/vragen/systeem), nooit facturen, keten of deadlines. David koos voor Tabula zelf geen poorten (ontwerp § 4); de innamefilters van Intake gelden zoals voor elke bron.",
+ "bronnen": [
+  "app:tabula"
+ ],
+ "bron_id": {
+  "vorm": "^[0-9a-f]{24}$",
+  "uitleg": "24 hex van sha256(blad-id + tekst): hetzelfde blad met dezelfde tekst = dubbel"
+ },
+ "herzienbaar": false,
+ "alleen_intern": true,
+ "meta": {
+  "onderwerp": { "type": "tekst", "min": 1, "max": 300, "verplicht": true },
+  "blad": { "type": "tekst", "max": 120, "vorm": "^[A-Za-z0-9._:-]{1,120}$", "verplicht": true },
+  "geschreven_op": { "type": "tijd", "verplicht": true },
+  "sleutels_weggelaten": { "type": "geheel", "min": 0, "verplicht": true },
+  "ingekort": { "type": "ja/nee", "verplicht": true }
+ },
+ "onderdelen": {
+  "hoofdtekst": { "min": 1, "max": 1, "mime": ["text/markdown"], "max_mb": 1 }
+ },
+ "archief": {
+  "schrijf_rol": "hoofdtekst",
+  "map": "_INBOX",
+  "naam": "^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}_tabula_[a-z0-9-]{1,80}\\.md$"
+ },
+ "privacy": {
+  "access_context": "strikt_prive"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "intake-router.js (kennislens → raw_input van de entiteit)",
+  "second-brain-verwerk-raw-input"
+ ]
+}

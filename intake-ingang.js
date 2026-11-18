@@ -1182,7 +1182,9 @@ function maak(o) {
     // wv1969 (MemoryLane R1): het transcript van een ingesproken herinnering, alleen vanuit herinneringen.js (de audio komt nooit in Intake)
     ramble: { id: 'intern-ramble', route: 'ramble', profielen: ['ramble@1'], bronnen: ['app:ramble'], lezen: [], intern: true },
     // wv2660: een webpagina die David met de Chrome-extensie aanleverde, alleen vanuit brain-web.js (POST /app/brain/webpagina, Davids app-sessie)
-    webpagina: { id: 'intern-webpagina', route: 'webpagina', profielen: ['webpagina@1'], bronnen: ['web:david'], lezen: [], intern: true } };
+    webpagina: { id: 'intern-webpagina', route: 'webpagina', profielen: ['webpagina@1'], bronnen: ['web:david'], lezen: [], intern: true },
+    // wv3299: een blad uit OVIS Tabula (Stuur naar de Second Brain), alleen vanuit tabula-loket.js (opdracht opgehaald bij tabula.socev.dev)
+    tabula: { id: 'intern-tabula', route: 'tabula', profielen: ['tabula@1'], bronnen: ['app:tabula'], lezen: [], intern: true } };
   function nepReq(method, headers, buf) {
     const h = {};
     const r = { method, url: '/intake/intern', headers, complete: true, resume() {}, on(ev, f) {
