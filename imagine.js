@@ -49,7 +49,7 @@
 // LAAT BEWEGEN (wv3266, 17-11-2026; plan vault "01_Ontwikkeling/OVIS Imagine - foto naar bewegend beeld (Fable 5.2, 15-11-2026).md" § 3.2,
 // § Log 17-11; David Ja 17-11 13:31 op het advies): een foto (of versie) wordt een clip van 5 s, zonder geluid, als NIEUWE versie (mp4) bij
 // dezelfde bron; het origineel blijft. Twee keuzes (BEWEGEN): "Snel" (Wan 2.2 met lightx2v-versneller, 720, 81 beelden/16 fps, ± 4 min,
-// voorgekozen sinds de meting van 17-11, zie BEWEGEN) en "Trouw aan gezichten" (MiniMax-H3, 768, 124 beelden/24 fps, ± 9 min). Verborgen Studio-flows video-minimax-trouw en
+// voorgekozen 17-11) en "Trouw aan gezichten" (MiniMax-H3, 768, 124 beelden/24 fps, ± 9 min; weer voorgekozen sinds 18-11, zie BEWEGEN). Verborgen Studio-flows video-minimax-trouw en
 // video-wan-snel (generator mk-scripts/imagine-video-plan/fase1/maak-video-flows.py). De pod zet de foto op de exacte maat (studio-beeld.py
 // pijp-maat), studio.js maakt de clip in het geheugen (beelden over de websocket, geheugenwacht, ffmpeg) en geeft mp4 + eerste beeld terug;
 // hier wordt dat een versie (ext mp4, weergaveversie = eerste beeld). Vak leeg = BEWEGEN_STANDAARD (levendige beweging). Eén filmpje tegelijk,
@@ -98,17 +98,16 @@ function soortVan(b) {
 }
 const MIME = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', mp4: 'video/mp4' };
 // wv3266: Laat bewegen (zie de kop). Volgorde = volgorde in de app. tijd = gemeten 17-11 (wv3240) + laden.
-// Voorgekozen = Snel, niet Trouw (Davids keuze 17-11 13:31 was Trouw): gemeten 17-11 13:00–13:35 via deze code past MiniMax-H3 niet in het
-// werkgeheugen van ComfyUI zoals die nu opstart (vrij zakte bij het laden naar 8,9–10,5 GB en bij het decoderen naar 4,8 GB; de geheugenwacht
-// brak 3 van 3 runs af). Snel lukte (215 s) zolang ComfyUI met ± 42 GB vrij begon. Terug naar Trouw = BEWEGEN_VOORKEUR.
+// Voorgekozen = Trouw (Davids keuze 17-11 13:31). 17-11 brak MiniMax-H3 3 van 3 keer af op de geheugenwacht (RAM-pressure-cache van ComfyUI hield
+// tekstmodel en VAE de hele prompt vast); sinds 18-11 start ComfyUI met --cache-none en lukte via deze code Snel 203 s + Trouw 2× (484/463 s),
+// laagste vrij 19,9 / 28,1 GB bij het laden, decoderen zonder dip (wv3278). Zonder --cache-none past Trouw weer niet: dan terug = BEWEGEN_VOORKEUR 'snel'.
 const BEWEGEN = [
   { model: 'snel', flow: 'video-wan-snel', naam: 'Snel', kort: 'Wan 2.2', tijd: '± 4 min', kort_zijde: 720, lang_max: 1280, veelvoud: 16,
     karakter: 'veel beweging; gezichten veranderen soms bij lachen' },
   { model: 'trouw', flow: 'video-minimax-trouw', naam: 'Trouw aan gezichten', kort: 'MiniMax-H3', tijd: '± 9 min', kort_zijde: 768, lang_max: 1376, veelvoud: 32,
-    karakter: 'gezichten blijven het best behouden; camera zoomt rustig in',
-    let: 'Past nu meestal niet in het werkgeheugen van de server: Imagine breekt het filmpje dan af om ComfyUI te beschermen.' },
+    karakter: 'gezichten blijven het best behouden; camera zoomt rustig in' },
 ];
-const BEWEGEN_VOORKEUR = 'snel';
+const BEWEGEN_VOORKEUR = 'trouw';
 const BEWEGEN_STANDAARD = 'Lively, natural motion. Everyone in the picture moves naturally: they look at each other, smile and laugh, turn their heads '
   + 'and shift their posture a little. Slow, smooth camera zoom-in. Faces stay exactly the same, no new people, no cuts.';
 const BEWEGEN_STAND = 'bewegen';

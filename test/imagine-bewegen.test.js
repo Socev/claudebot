@@ -99,8 +99,8 @@ function mp4Beelden(p) {
   // 1. stand in de app
   let r = await roep('/app/imagine');
   const bw = r.body.bewegen;
-  toets('B1 GET /app/imagine: twee keuzes, Snel voorgekozen (meting 17-11), Trouw met een let-regel, beide klaar, tijden ± 4 en ± 9 min', bw && bw.modellen.length === 2 && bw.standaard === 'snel'
-    && bw.modellen[0].model === 'snel' && bw.modellen[0].tijd === '± 4 min' && bw.modellen[1].naam === 'Trouw aan gezichten' && bw.modellen[1].tijd === '± 9 min' && /werkgeheugen/.test(bw.modellen[1].let || '') && !bw.modellen[0].let
+  toets('B1 GET /app/imagine: twee keuzes, Trouw voorgekozen (meting 18-11 met --cache-none), geen let-regel meer, beide klaar, tijden ± 4 en ± 9 min', bw && bw.modellen.length === 2 && bw.standaard === 'trouw'
+    && bw.modellen[0].model === 'snel' && bw.modellen[0].tijd === '± 4 min' && bw.modellen[1].naam === 'Trouw aan gezichten' && bw.modellen[1].tijd === '± 9 min' && !bw.modellen[1].let && !bw.modellen[0].let
     && bw.modellen.every((m) => m.klaar) && bw.duur_s === 5 && bw.bezig === false, bw);
   toets('B1 videoflows niet als bewerkstand', !r.body.standen.some((s) => /video/.test(s.id)));
   r = await roep('/app/imagine/laad', { data: beeld(600, 850).toString('base64'), titel: 'Verzonnen verloop' });
