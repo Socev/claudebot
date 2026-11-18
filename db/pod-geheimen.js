@@ -8,7 +8,7 @@
  * als PostgREST teruggeeft, zodat fetch-secrets het met dezelfde klasseer/uitpak verwerkt.
  * Exit 0 = antwoord geschreven (ook ok:false); exit 1 = geen verbinding of fout (fetch-secrets probeert dan opnieuw);
  * nooit een foutmelding met inhoud (alleen de Postgres-foutcode op stderr).
- * Omgeving: POD_GEHEIMEN_SOCKET (standaard /run/pg), POD_GEHEIMEN_DB (postgres).
+ * Omgeving (alleen voor toetsen): POD_GEHEIMEN_SOCKET (standaard /run/pg), POD_GEHEIMEN_PORT (5432), POD_GEHEIMEN_DB (postgres).
  */
 'use strict';
 const pg = require('pg');
@@ -16,6 +16,7 @@ const pg = require('pg');
 (async function () {
   const c = new pg.Client({
     host: process.env.POD_GEHEIMEN_SOCKET || '/run/pg',
+    port: parseInt(process.env.POD_GEHEIMEN_PORT || '5432', 10),
     database: process.env.POD_GEHEIMEN_DB || 'postgres',
     user: 'postgres',
     application_name: 'pod-geheimen',
