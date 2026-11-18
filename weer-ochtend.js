@@ -291,15 +291,18 @@ function eldersZin(j, datum, m, naam) {
 const DAG_MAX = 112;                     // + "Weer: " en de punt ≈ 120
 const WIND_DAG = 14;                     // m/s, stoten
 const KANS_DAG = 0.2;                    // daaronder heet het droog
+function tGetal(x) { return x == null || x === '' || typeof x === 'boolean' ? NaN : Number(x); }
 function dagDeel(thuis, praktijk, beeld, datum, thuisOm0640, delen) {
   delen = Array.isArray(delen) ? delen : [];
   const stuk = [];
   // temperatuur: dagwaarde van vandaag, anders de uren 07:00–21:00
   const dg = Array.isArray(thuis && thuis.daily) ? thuis.daily.find(function (d) { return d && ams(Number(d.dt) * 1000).datum === datum; }) : null;
-  let lo = dg && dg.temp ? Number(dg.temp.min) : NaN, hi = dg && dg.temp ? Number(dg.temp.max) : NaN;
+  // review wv3281: null/'' tellen niet als 0 °C, en elke grens valt los terug op de uren (een geldig dagmaximum blijft staan)
+  let lo = tGetal(dg && dg.temp && dg.temp.min), hi = tGetal(dg && dg.temp && dg.temp.max);
   if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
-    const t = urenIn(thuis, datum, 7 * 60, 21 * 60).map(function (x) { return Number(x.u.temp); }).filter(Number.isFinite);
-    lo = t.length ? Math.min.apply(null, t) : NaN; hi = t.length ? Math.max.apply(null, t) : NaN;
+    const t = urenIn(thuis, datum, 7 * 60, 21 * 60).map(function (x) { return tGetal(x.u.temp); }).filter(Number.isFinite);
+    if (!Number.isFinite(lo)) lo = t.length ? Math.min.apply(null, t) : NaN;
+    if (!Number.isFinite(hi)) hi = t.length ? Math.max.apply(null, t) : NaN;
   }
   if (Number.isFinite(lo) && Number.isFinite(hi)) {
     const a = Math.round(Math.min(lo, hi)), b = Math.round(Math.max(lo, hi));
@@ -547,10 +550,10 @@ function maak(o) {
     let el;
     try { el = await elders(s, datum, sl, vakken); } catch (e) { el = { zinnen: [], stand: 'fout', fouten: 1 }; }
     // wv3281: elke ochtend het dagdeel; een kapot antwoord kost alleen het dagdeel, niet de drempels. Staat de temperatuur erin, dan
-    // valt de hittezin weg (het dagdeel noemt het maximum al, met "tropische dag").
+    // valt de hittezin alleen weg als het dagdeel zelf "tropische dag" zegt (review MOET 1: anders blijft de hittezin staan).
     let dag = '';
     try { dag = dagDeel(rT.j, rP.j, beeld, datum, thuisOm0640, delen); } catch (e) { dag = ''; }
-    const delenRegel = /°C/.test(dag) ? delen.filter(function (d) { return d.soort !== 'hitte'; }) : delen;
+    const delenRegel = /tropische dag/.test(dag) ? delen.filter(function (d) { return d.soort !== 'hitte'; }) : delen;
     const tekst = masker(regel(delenRegel, el.zinnen, dag));
     const detail = { dagdeel: !!dag, treffers: delen.map(function (d) { return d.soort; }), werkdag: beeld.werkdag, werk_bron: beeld.werk_bron, praktijk: beeld.praktijk, thuis_0640: thuisOm0640,
       elders: { stand: el.stand, kandidaten: el.kandidaten | 0, ver: el.ver | 0, treffers: el.zinnen.length, fouten: el.fouten | 0 },
