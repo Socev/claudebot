@@ -4409,6 +4409,7 @@ function handleRequest(req, res) {
       mail_sluit: typeof mailSluitInfo === 'function' ? mailSluitInfo() : { aan: false },   // wv3091: OVIS Mail fase 2 (sluitcontrole; alleen tellingen)
       mail_voorwerk: typeof mailVoorwerkInfo === 'function' ? mailVoorwerkInfo() : { aan: false },   // wv2455: voorwerk bij vragen in Mail (tellingen, geen inhoud)   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
+      tabula: typeof tabulaInfo === 'function' ? tabulaInfo() : { aan: false },   // wv3299: OVIS Tabula-opdrachtenloket (lijn, laatste ophaalronde, dagtellers per soort; nooit tekst, titel of code)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
       weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
@@ -24703,6 +24704,66 @@ async function appBrainWeb(req, res, a, d) {
   res._app.reden = ('brain-web ' + (j.ok ? j.uitkomst + ' ' + (j.wijze || '') + ' ' + (j.tekens || 0) + 't' + (j.sleutels_weggelaten ? ' sleutels=' + j.sleutels_weggelaten : '') + (j.stuk_id ? ' ' + j.stuk_id : '') : 'geweigerd ' + r.status)).slice(0, 160);
   return appStuur(res, r.status, j);
 }
+
+// ── OVIS Tabula-opdrachtenloket (wv3299, 18-11-2026; Davids Ja 18-11 15:02, vraag-id 7687f5a0) ──
+// tabula-loket.js haalt opdrachten van Davids kladblok op bij het loket tabula.socev.dev (open lijn + vangnet-GET, alleen uitgaand) en legt het
+// antwoord terug. Hier alleen de koppeling: podcode (kluis tabula_pod_code; alleen de SHA-256 staat in D1 ovis-tabula), de Anthropic-sleutel
+// van de pdf-lezer (pdfSleutel, nooit in env of bij een kind), de SDK, de Steekwoordenlijst en 'brain' via OVIS Intake (tabula@1, app:tabula,
+// alleen met intake/router.json live › app:tabula). Schakelaar TABULA_DIR/tabula.json {"aan": true}; alleen op de primaire kant.
+// Bouwinstructie: vault "01_Ontwikkeling/OVIS Tabula - opdrachtenloket, podkant (bouwinstructie voor de machinekamer, 18-11-2026).md".
+const TABULA_DIR = serverPad('tabula', process.env.TABULA_DIR, '/opt/data/tabula', serverProefDeel('tabula'));
+const TABULA_CODE_NAAM = 'tabula_pod_code';
+let tabulaCodeCache = null;   // { w, tot }; alleen in het geheugen
+async function tabulaCode() {
+  if (process.env.TABULA_TOETS_CODE && !SERVER_ECHT) return process.env.TABULA_TOETS_CODE;   // alleen de toets (nep-loket op 127.0.0.1)
+  if (tabulaCodeCache && Date.now() < tabulaCodeCache.tot) return tabulaCodeCache.w;
+  if (!sbBeheerKan()) return null;
+  const r = await sbBeheerQuery("select decrypted_secret as w from vault.decrypted_secrets where name = '" + TABULA_CODE_NAAM + "'", { ua: 'socev-tabula/1', ms: 20000 });
+  if (!r || !r.ok) { if (r) await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + (r ? r.status : 'geen antwoord')); }
+  const rijen = await r.json();
+  const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
+  tabulaCodeCache = { w: w || null, tot: Date.now() + (w ? 10 : 2) * 60 * 1000 };
+  return tabulaCodeCache.w;
+}
+function tabulaWacht(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+// brain: aanleveren bij OVIS Intake en de router meteen laten kijken; daarna een eerlijke zin over de plek (± 50 s wachten, nooit een verzonnen pad)
+async function tabulaBrain(x) {
+  const T = require(path.join(__dirname, 'tabula-loket.js'));
+  if (!intake || typeof intake.leverIntern !== 'function' || !intakeLiveBron('app:tabula')) return { ok: false, output: 'Stuur naar de Second Brain staat nu uit in OVIS Intake; er is niets opgeslagen.' };
+  const geheimen = require(path.join(__dirname, 'brain-web.js')).K.geheimen;
+  const e = T.brainEnvelop(x, geheimen, Date.now());
+  if (e.fout) return { ok: false, output: e.fout };
+  let r = null;
+  try { r = await intake.leverIntern('tabula', e.env, {}); } catch (err) { logError('tabula-intake', err); r = null; }
+  if (!r) return { ok: false, output: 'OVIS Intake nam het blad nu niet aan; probeer het zo nog eens.' };
+  if (!r.ok) return { ok: false, output: 'OVIS Intake weigerde het blad (' + String(r.reden || 'onbekend').slice(0, 60) + ').' };
+  const id = r.stuk_id, dubbel = r.uitkomst === 'dubbel';
+  const ir = intakeRouterHaal();
+  let p = ir && id ? ir.plekVan(id) : null;
+  const klaar = function (q) { return !!(q && (q.paden.length || ['vastgehouden', 'twijfel', 'bewaard', 'weg'].indexOf(q.staat) >= 0)); };
+  const t0 = Date.now();
+  while (ir && id && !klaar(p) && Date.now() - t0 < 50000) {
+    let u = null;
+    try { u = await ir.ronde(); } catch (err) { logError('tabula-router', err); }
+    p = ir.plekVan(id);
+    if (!klaar(p)) await tabulaWacht(u && u.bezig ? 2000 : 4000);
+  }
+  return { ok: true, output: T.plekZin(p, dubbel) };
+}
+const tabulaLoket = (function () {
+  const p = path.join(__dirname, 'tabula-loket.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    fs.mkdirSync(TABULA_DIR, { recursive: true, mode: 0o700 });
+    return require(p).maak({ dir: TABULA_DIR, basis: SERVER_ECHT ? null : process.env.TABULA_TOETS_BASIS, apiBasis: SERVER_ECHT ? null : process.env.TABULA_TOETS_API,
+      fetch: function (u, opt) { return fetch(u, opt); }, WebSocket: globalThis.WebSocket, code: tabulaCode,
+      sleutel: SERVER_ECHT || !process.env.TABULA_TOETS_SLEUTEL ? pdfSleutel : function () { return Promise.resolve(process.env.TABULA_TOETS_SLEUTEL); }, sdk: pdfSdk,
+      steekPad: path.join(VAULT, '00_Systeem', 'Steekwoordenlijst.md'), brain: tabulaBrain, primair: rolPrimair,
+      log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: function (waar, e) { if (e) logError(waar, e); } });
+  } catch (e) { logError('tabula-loket', e); return null; }
+})();
+function tabulaInfo() { if (!tabulaLoket) return { aan: false, module: false }; try { return tabulaLoket.health(); } catch (e) { return { fout: true }; } }
+if (tabulaLoket && (SERVER_ECHT || process.env.TABULA_TOETS_BASIS)) setTimeout(function () { try { tabulaLoket.start(); } catch (e) { logError('tabula-start', e); } }, SERVER_ECHT ? 20000 : 500).unref();
 
 // ── Syncthing (wv1277, 25-10-2026) ─────────────────────────────────────────────────────────────────────────────────────────
 // run.sh start en bewaakt Syncthing (vault ↔ Synology thuis, laptop, werk-pc) en schrijft /opt/data/syncthing/status.json; hier
