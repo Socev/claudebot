@@ -6,7 +6,9 @@
  * WAT. Nachtketenstap weer-ochtend (06:40): haalt de verwachting op bij OpenWeatherMap One Call 3.0 voor twee vakken (Thuis en de
  * praktijk; lat/lon op 1 decimaal, elke dag allebei, ook op vrije dagen: geen werkpatroon uit de aanroepen af te lezen), toetst de
  * drempels (§ 3) in de vensters (§ 4) en zet bij een treffer één rij in ochtend_buffer (bron 'weer', datum vandaag). De Dagelijkse
- * briefing zet die regel letterlijk onder de kop (niet via het taalmodel). Geen treffer = geen rij = niets in het ochtendbericht.
+ * briefing zet die regel letterlijk onder de kop (niet via het taalmodel).
+ * DAGREGEL (wv3281, David Ja 18-11-2026): sinds 18-11 elke ochtend een rij, ook zonder drempel: temperatuur, neerslagkans onderweg en wind
+ * (dagDeel), met de drempelzinnen erachter. Waarschuwingsnamen in het Nederlands (waarschuwingNaam). Geen ophaling = geen regel, geen gok.
  *
  * AVOND (wv2605, idee 28 § 9). avond(): de avond vóór een werkdag één aanroep voor het Thuisvak en bij gladheid, storm, onweer of een
  * KNMI-waarschuwing in 05:00–08:00 van morgen één appbericht aan David (21:00–22:30, nooit in de stille uren, hooguit één per avond).
@@ -92,6 +94,37 @@ function plaatsUit(loc) {
 }
 function mmTekst(x) { const r = Math.max(0.5, Math.round(x * 2) / 2); return (Number.isInteger(r) ? String(r) : r.toFixed(1)).replace('.', ','); }
 
+// wv3281: de waarschuwingsnaam komt van OpenWeatherMap in het Engels (MeteoAlarm/KNMI: "Moderate Fog", "Severe Wind", "Moderate Snow-ice";
+// 8 en 10-11 stond "KNMI Moderate Fog" in de briefing). Kleine tabel naar het Nederlands; wat we niet herkennen wordt een algemene
+// "weerwaarschuwing", nooit de Engelse tekst. Niveau: Moderate/yellow = code geel, Severe/orange = oranje, Extreme/red = rood (Minor = geen code).
+const W_NIVEAU = [[/\b(extreme|red|rood|rode)\b/, 'rood'], [/\b(severe|orange|oranje)\b/, 'oranje'], [/\b(moderate|yellow|geel|gele)\b/, 'geel']];
+const W_SOORT = [
+  [/fog|mist|nevel/, 'mist'],
+  [/coastal|kust|surge|hoogwater/, 'hoogwater aan de kust'],
+  [/thunder|onweer/, 'onweer'],
+  [/\bice\b|\bicing\b|ijzel|glad|slippery/, 'gladheid'],
+  [/snow|sneeuw/, 'sneeuw'],
+  [/flood|overstrom|wateroverlast/, 'wateroverlast'],
+  [/wind|storm|gale|gust/, 'harde wind'],
+  [/rain|regen|precipitation|neerslag/, 'veel regen'],
+  [/high.?temp|heat|hitte/, 'hitte'],
+  [/low.?temp|cold|kou|vorst|frost/, 'strenge kou'],
+  [/forest.?fire|wild.?fire|natuurbrand/, 'natuurbrand'],
+];
+function waarschuwingNaam(event) {
+  const s = String(event == null ? '' : event).toLowerCase().replace(/[_]+/g, ' ');
+  let niveau = null, soort = null;
+  for (const [re, n] of W_NIVEAU) if (re.test(s)) { niveau = n; break; }
+  for (const [re, n] of W_SOORT) if (re.test(s)) { soort = n; break; }
+  if (niveau && soort) return 'code ' + niveau + ' voor ' + soort;
+  if (soort) return 'waarschuwing voor ' + soort;
+  if (niveau) return 'weerwaarschuwing code ' + niveau;
+  return 'weerwaarschuwing';
+}
+function alertZin(a) {   // "KNMI code geel voor mist" (zonder tijd); KNMI erbij als de afzender of de naam het KNMI noemt
+  return (/knmi/i.test(String(a && a.event || '') + ' ' + String(a && a.sender_name || '')) ? 'KNMI ' : '') + waarschuwingNaam(a && a.event);
+}
+
 // § 3: één uur uit de verwachting; dt = begin van het uur (unix s)
 function uurRegen(u) { return getal(u.pop) >= 0.6 && getal(u.rain && u.rain['1h']) >= 0.5; }
 function uurNeerslag(u) { return getal(u.rain && u.rain['1h']) > 0 || getal(u.snow && u.snow['1h']) > 0; }
@@ -168,13 +201,12 @@ function treffers(thuis, praktijk, beeld, datum, thuisOm0640) {
       const sMin = sd.datum < datum ? 0 : sd.datum > datum ? 24 * 60 : sd.uur * 60 + sd.min;
       const eMin = ed.datum > datum ? 24 * 60 : ed.datum < datum ? 0 : ed.uur * 60 + ed.min;
       if (!(sMin < 22 * 60 && eMin > 6 * 60)) return;
-      const naam = String(a.event || 'waarschuwing').replace(/\s+/g, ' ').trim().slice(0, 50);
+      const naam = alertZin(a);   // wv3281: Nederlands, nooit de Engelse naam
       const k = naam.toLowerCase() + '|' + e;
       if (gezien[k]) return;
       gezien[k] = true;
-      const knmi = /knmi/i.test(naam) || !/knmi/i.test(String(a.sender_name || '')) ? '' : 'KNMI ';
       const tot = ed.datum === datum ? ' tot ' + hhmm(ed.uur * 60 + ed.min) : ed.datum > datum ? ' tot morgen ' + hhmm(ed.uur * 60 + ed.min) : '';
-      delen.push({ soort: 'waarschuwing', zin: knmi + naam + tot });
+      delen.push({ soort: 'waarschuwing', zin: naam + tot });
     });
   });
   // gladheid 06:00–10:00 (Thuis) en in het terugvenster (praktijk, op een werkdag)
@@ -245,33 +277,91 @@ function eldersZin(j, datum, m, naam) {
     const sMin = sd.datum < datum ? -1440 : sd.datum > datum ? 2880 : sd.uur * 60 + sd.min;
     const eMin = ed.datum > datum ? 2880 : ed.datum < datum ? -1440 : ed.uur * 60 + ed.min;
     if (!(sMin < m + 60 && eMin > m - 60)) return;
-    namen[String(a.event || 'waarschuwing').replace(/\s+/g, ' ').trim().slice(0, 40)] = true;
+    namen[waarschuwingNaam(a.event)] = true;   // wv3281: Nederlands
   });
   const w = Object.keys(namen);
   if (!d.length && !w.length) return null;
   return hhmm(m) + ' ' + naam + ': ' + w.concat(d).join(', ');
 }
 
-// één regel, hooguit ± 160 tekens; delen die niet passen vallen weg (de zwaarste staan vooraan)
-function regel(delen, elders) {
+// wv3281 (David Ja 18-11-2026): elke ochtend een dagdeel, ook zonder drempel: temperatuur min/max (Thuis), de kans op neerslag in de uren
+// dat David onderweg is (werkdag: bij vertrek als hij om 06:40 nog thuis is, en de terugrit bij de praktijk; vrije dag: 07:00–21:00
+// Thuis) en de wind als die iets uitmaakt (stoten ≥ 14 m/s ≈ 50 km/u). Een regentreffer of storm uit § 3 zegt het al preciezer: dan
+// valt dat stuk hier weg. Hooguit DAG_MAX tekens; wat niet past valt weg (wind eerst, dan neerslag).
+const DAG_MAX = 112;                     // + "Weer: " en de punt ≈ 120
+const WIND_DAG = 14;                     // m/s, stoten
+const KANS_DAG = 0.2;                    // daaronder heet het droog
+function dagDeel(thuis, praktijk, beeld, datum, thuisOm0640, delen) {
+  delen = Array.isArray(delen) ? delen : [];
+  const stuk = [];
+  // temperatuur: dagwaarde van vandaag, anders de uren 07:00–21:00
+  const dg = Array.isArray(thuis && thuis.daily) ? thuis.daily.find(function (d) { return d && ams(Number(d.dt) * 1000).datum === datum; }) : null;
+  let lo = dg && dg.temp ? Number(dg.temp.min) : NaN, hi = dg && dg.temp ? Number(dg.temp.max) : NaN;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
+    const t = urenIn(thuis, datum, 7 * 60, 21 * 60).map(function (x) { return Number(x.u.temp); }).filter(Number.isFinite);
+    lo = t.length ? Math.min.apply(null, t) : NaN; hi = t.length ? Math.max.apply(null, t) : NaN;
+  }
+  if (Number.isFinite(lo) && Number.isFinite(hi)) {
+    const a = Math.round(Math.min(lo, hi)), b = Math.round(Math.max(lo, hi));
+    stuk.push((a === b ? a + ' °C' : a + ' tot ' + b + ' °C') + (b >= 30 ? ' (tropische dag)' : ''));
+  }
+  // neerslag in de reisuren
+  if (!delen.some(function (d) { return /^regen/.test(d.soort); })) {
+    const vensters = [];
+    if (beeld && beeld.werkdag) {
+      if (thuisOm0640 && beeld.vertrek) vensters.push({ naam: 'bij vertrek', j: thuis, van: beeld.vertrek.van, tot: beeld.vertrek.tot });
+      if (beeld.terug) vensters.push({ naam: 'op je terugrit', j: praktijk, van: beeld.terug.van, tot: beeld.terug.tot });
+    }
+    if (!vensters.length) vensters.push({ naam: 'overdag', j: thuis, van: 7 * 60, tot: 21 * 60, vrij: true });
+    let best = null;
+    for (const v of vensters) {
+      const u = urenIn(v.j, datum, v.van, v.tot);
+      if (!u.length) continue;
+      const pop = u.reduce(function (m, x) { return Math.max(m, getal(x.u.pop)); }, 0);
+      const mm = u.reduce(function (m, x) { return m + getal(x.u.rain && x.u.rain['1h']) + getal(x.u.snow && x.u.snow['1h']); }, 0);
+      const sneeuw = u.some(function (x) { const id = uurId(x.u); return (id >= 600 && id <= 622) || getal(x.u.snow && x.u.snow['1h']) > 0; });
+      if (!best || pop > best.pop) best = { naam: v.naam, vrij: !!v.vrij, pop: pop, mm: mm, sneeuw: sneeuw };
+    }
+    if (best && best.pop < KANS_DAG) stuk.push(best.vrij ? 'droog' : vensters.length > 1 ? 'droog onderweg' : 'droog ' + best.naam);
+    else if (best) stuk.push(Math.min(100, Math.round(best.pop * 10) * 10) + '% kans op ' + (best.sneeuw ? 'sneeuw' : 'regen') + ' ' + best.naam + (best.mm >= 0.5 ? ' (± ' + mmTekst(best.mm) + ' mm)' : ''));
+  }
+  // wind
+  if (!delen.some(function (d) { return d.soort === 'storm'; })) {
+    let u = urenIn(thuis, datum, 7 * 60, 21 * 60);
+    if (beeld && beeld.werkdag && beeld.terug) u = u.concat(urenIn(praktijk, datum, beeld.terug.van, beeld.terug.tot));
+    const max = u.reduce(function (m, x) { return Math.max(m, getal(x.u.wind_gust)); }, 0);
+    if (max >= WIND_DAG) stuk.push('windstoten tot ' + Math.round(max * 3.6 / 5) * 5 + ' km/u');
+  }
+  let t = '';
+  for (const z of stuk) { const bij = (t ? ', ' : '') + z; if ((t + bij).length > DAG_MAX) break; t += bij; }
+  return t;
+}
+
+// één regel. Met dagdeel (wv3281): "Weer: <dagdeel>. <Drempels>." Zonder dagdeel zoals vroeger: "Weer: <Drempels>.", het drempeldeel
+// hooguit ± 160 tekens; delen die niet passen vallen weg (de zwaarste staan vooraan). Alles samen hooguit 280 (de briefing kapt op 300).
+function regel(delen, elders, dag) {
   elders = Array.isArray(elders) ? elders : [];
-  if (!delen.length && !elders.length) return '';
-  let t = 'Weer: ';
+  dag = String(dag == null ? '' : dag).replace(/\s+/g, ' ').trim().replace(/[.;,]+$/, '');
+  if (!delen.length && !elders.length && !dag) return '';
+  const pre = dag ? 'Weer: ' + dag.charAt(0).toUpperCase() + dag.slice(1) + '. ' : 'Weer: ';
+  const max = Math.min(REGEL_TOTAAL_MAX, pre.length - 6 + REGEL_MAX);
+  let t = pre;
   let n = 0;
   for (const d of delen) {
     const z = (n === 0 ? d.zin.charAt(0).toUpperCase() + d.zin.slice(1) : d.zin);
     const bij = (n ? '; ' : '') + z;
-    if (n && (t + bij + '.').length > REGEL_MAX) continue;
+    if (n && (t + bij + '.').length > max) continue;
     t += bij; n++;
   }
-  if (t.length + 1 > REGEL_MAX) t = t.slice(0, REGEL_MAX - 2).replace(/\s+\S*$/, '') + '…';
+  if (t.length + 1 > max) t = t.slice(0, max - 2).replace(/\s+\S*$/, '') + '…';
   // wv2592: het weer bij afspraken elders achter het thuisdeel, samen hooguit 280 tekens (de briefing kapt op 300)
-  for (const z of elders) {
+  for (const z0 of elders) {
+    const z = n === 0 ? z0.charAt(0).toUpperCase() + z0.slice(1) : z0;
     const bij = (n ? '; ' : '') + z;
     if ((t + bij + '.').length > REGEL_TOTAAL_MAX) continue;
     t += bij; n++;
   }
-  if (!n) return '';
+  if (!n) return dag ? pre.trim() : '';
   return t + '.';
 }
 
@@ -296,13 +386,12 @@ function vroegTreffers(j, morgen) {
     const sMin = sd.datum < morgen ? -1 : sd.datum > morgen ? 24 * 60 : sd.uur * 60 + sd.min;
     const eMin = ed.datum > morgen ? 24 * 60 : ed.datum < morgen ? -1 : ed.uur * 60 + ed.min;
     if (!(sMin < VROEG_TOT && eMin > VROEG_VAN)) return;
-    const naam = String(a.event || 'waarschuwing').replace(/\s+/g, ' ').trim().slice(0, 50);
+    const naam = alertZin(a);   // wv3281: Nederlands
     const k = naam.toLowerCase() + '|' + e;
     if (gezien[k]) return;
     gezien[k] = true;
-    const knmi = /knmi/i.test(naam) || !/knmi/i.test(String(a.sender_name || '')) ? '' : 'KNMI ';
     const tot = ed.datum === morgen ? ' tot ' + hhmm(ed.uur * 60 + ed.min) : ed.datum > morgen ? ' tot na morgen' : '';
-    delen.push({ soort: 'waarschuwing', zin: knmi + naam + tot });
+    delen.push({ soort: 'waarschuwing', zin: naam + tot });
   });
   const uren = urenIn(j, morgen, VROEG_VAN, VROEG_TOT);
   const glad = uren.filter(function (x) { return uurGlad(x.u, x.vorig); });
@@ -457,8 +546,13 @@ function maak(o) {
     const vakken = pl.filter(function (p) { return p && (p === pThuis || p.klasse === 'thuis' || praktijkNaam(p.naam)) && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon)); }).map(vak);
     let el;
     try { el = await elders(s, datum, sl, vakken); } catch (e) { el = { zinnen: [], stand: 'fout', fouten: 1 }; }
-    const tekst = masker(regel(delen, el.zinnen));
-    const detail = { treffers: delen.map(function (d) { return d.soort; }), werkdag: beeld.werkdag, werk_bron: beeld.werk_bron, praktijk: beeld.praktijk, thuis_0640: thuisOm0640,
+    // wv3281: elke ochtend het dagdeel; een kapot antwoord kost alleen het dagdeel, niet de drempels. Staat de temperatuur erin, dan
+    // valt de hittezin weg (het dagdeel noemt het maximum al, met "tropische dag").
+    let dag = '';
+    try { dag = dagDeel(rT.j, rP.j, beeld, datum, thuisOm0640, delen); } catch (e) { dag = ''; }
+    const delenRegel = /°C/.test(dag) ? delen.filter(function (d) { return d.soort !== 'hitte'; }) : delen;
+    const tekst = masker(regel(delenRegel, el.zinnen, dag));
+    const detail = { dagdeel: !!dag, treffers: delen.map(function (d) { return d.soort; }), werkdag: beeld.werkdag, werk_bron: beeld.werk_bron, praktijk: beeld.praktijk, thuis_0640: thuisOm0640,
       elders: { stand: el.stand, kandidaten: el.kandidaten | 0, ver: el.ver | 0, treffers: el.zinnen.length, fouten: el.fouten | 0 },
       kalender: kal ? 'gelezen' : 'niet leesbaar', aanroepen: s.teller | 0, waarschuwingen: ((rT.j.alerts || []).length) + '/' + ((rP.j.alerts || []).length) };
     if (droog) { laatst = { op: new Date(nu()).toISOString(), droog: true, treffers: delen.length }; return { ok: true, droog: true, regel: tekst, detail: detail }; }
@@ -469,7 +563,7 @@ function maak(o) {
     delete s.fout_sinds; delete s.box_gemeld; delete s.laatste_fout;
     try { staatZet(s); } catch (e) { /* stil; morgen opnieuw */ }
     laatst = { op: new Date(nu()).toISOString(), treffers: delen.length };
-    if (o.log) o.log({ opdracht: 'weer-ochtend', ok: true, treffers: delen.map(function (d) { return d.soort; }).join(',') || 'geen', aanroepen: s.teller | 0, werkdag: beeld.werkdag ? 1 : 0,
+    if (o.log) o.log({ opdracht: 'weer-ochtend', ok: true, dagdeel: dag ? 1 : 0, treffers: delen.map(function (d) { return d.soort; }).join(',') || 'geen', aanroepen: s.teller | 0, werkdag: beeld.werkdag ? 1 : 0,
       werk_bron: beeld.werk_bron || 'geen', elders: el.zinnen.length + '/' + (el.ver | 0) + '/' + (el.kandidaten | 0) });
     return { ok: true, detail: detail };
   }
@@ -532,4 +626,4 @@ function maak(o) {
   return { doe: doe, avond: avond, info: info };
 }
 
-module.exports = { maak: maak, _intern: { dagBeeld: dagBeeld, treffers: treffers, regel: regel, urenIn: urenIn, ams: ams, plaatsUit: plaatsUit, eldersKandidaten: eldersKandidaten, eldersZin: eldersZin, vroegTreffers: vroegTreffers, avondRegel: avondRegel, dagErna: dagErna } };
+module.exports = { maak: maak, _intern: { dagBeeld: dagBeeld, treffers: treffers, regel: regel, urenIn: urenIn, ams: ams, plaatsUit: plaatsUit, eldersKandidaten: eldersKandidaten, eldersZin: eldersZin, dagDeel: dagDeel, waarschuwingNaam: waarschuwingNaam, vroegTreffers: vroegTreffers, avondRegel: avondRegel, dagErna: dagErna } };
