@@ -87,6 +87,37 @@ RPC_PAD="/rest/v1/rpc/sb_pod_secrets_lezen"
 POGINGEN=3
 WACHT=(2 5 15)
 
+# ── Eigen databank (wv3207, databankoverstap) ───────────────────────────────
+#
+# WAAROM. Na de overstap staat de kluis in de eigen databank in de pod en blijft het oude Supabase-project 14 dagen
+# alleen-lezen staan. Daar faalt sb_pod_secrets_lezen (hij schrijft een regel in pod_bootstrap_log), dus zonder deze
+# route zou elke podstart na de overstap zonder secrets eindigen (exit 78) - en een kluiswijziging na de overstap zou
+# nooit meer in de pod komen.
+# SCHAKELAAR: /opt/data/.pg/adres.env (map 0700 claude; geschreven bij de overstap) met precies twee regels:
+#   SUPABASE_URL=http://127.0.0.1:8091   en   SB_SQL_LOKAAL=1
+# Dan dezelfde functie op de eigen databank over de unix-socket (gosu claude node /app/db/pod-geheimen.js, het
+# bootstrapgeheim als queryparameter; de luik op 8091 start pas later, in supervisor.js), met meer geduld: postgres
+# start vlak hiervoor in db-wacht.sh. Beide variabelen gaan de omgeving in (server.js leest adres.env bij zijn start
+# ook zelf, zodat een code-uitrol zonder podstart hetzelfde ziet). Alleen op kant olares: op de uitwijk zet naar-vps
+# zijn eigen adres. Een bestand met een andere vorm wordt met een logregel genegeerd: nooit een vrij adres uit een bestand.
+ADRES_ENV="${FETCH_SECRETS_ADRES_ENV:-/opt/data/.pg/adres.env}"
+LOKAAL=0
+if [ "$KANT" = olares ] && [ -f "$ADRES_ENV" ]; then
+  if [ "$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$ADRES_ENV" 2>/dev/null | LC_ALL=C sort)" = "$(printf 'SB_SQL_LOKAAL=1\nSUPABASE_URL=http://127.0.0.1:8091')" ]; then
+    LOKAAL=1
+    export SUPABASE_URL="http://127.0.0.1:8091" SB_SQL_LOKAAL=1
+    POGINGEN=8
+    WACHT=(2 3 5 10 15 20 30)
+    log "eigen databank (adres.env): kluis via de unix-socket"
+  else
+    log "LET OP: adres.env heeft een onbekende vorm - genegeerd, Supabase-route"
+  fi
+fi
+# Codex MOET 1: de hele aanroep begrensd (een hangende backend mag de podstart niet vasthouden): na 30 s weg = transport, herkansing.
+lokaal_rpc() {
+  timeout -k 5 30 gosu claude node /app/db/pod-geheimen.js 2>/dev/null
+}
+
 # ── Wat er geladen wordt: ALLES wat de kluis teruggeeft ─────────────────────
 #
 # Tot 19-8-2026 was VERWACHT ook het FILTER: alleen namen uit die lijst werden
@@ -217,12 +248,17 @@ ANTWOORD=""
 GEDAAN=0
 for ((i = 1; i <= POGINGEN; i++)); do
   GEDAAN=$i
+  if [ "$LOKAAL" = 1 ]; then
+    RUW="$(lokaal_rpc)"
+    CURL_CODE=$?
+  else
   RUW="$(bouw_body | curl -sS -m 20 -X POST "${SUPABASE_URL}${RPC_PAD}" \
     -H "apikey: ${SB_SLEUTEL}" \
     -H "Authorization: Bearer ${SB_SLEUTEL}" \
     -H 'Content-Type: application/json' \
     -d @- 2>/dev/null)"
   CURL_CODE=$?
+  fi
 
   if [ "$CURL_CODE" -ne 0 ]; then
     KLASSE="transport"
@@ -233,7 +269,7 @@ for ((i = 1; i <= POGINGEN; i++)); do
   case "$KLASSE" in
     ok)
       ANTWOORD="$RUW"
-      log "RPC geslaagd bij poging $i"
+      log "RPC geslaagd bij poging $i$([ "$LOKAAL" = 1 ] && echo ' (eigen databank)')"
       break
       ;;
     geweigerd)
