@@ -19801,6 +19801,8 @@ function intakeRouterHaal() {
     intakeRouterMod = require(p).maak({ dir: INTAKE_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       pdfBbox: function (pad) { return intakeProces('pdftotext', ['-q', '-bbox', '-l', '20', '-enc', 'UTF-8', pad, '-'], { ms: 30000 }); },
       paginas: async function (pad) { const t = await intakeProces('pdfinfo', [pad], { ms: 15000 }); const m = t && /^Pages:\s+(\d+)/m.exec(t); return m ? Number(m[1]) : null; },
+      // wv3403 (A29): xml-deel van een kantoorbestand (xlsx, pptx, odt/ods/odp); afgekapt op de 4e6 tekens van intakeProces = null (onleesbaar)
+      zip: async function (pad, deel) { const t = await intakeProces('unzip', ['-p', '-C', pad, deel], { ms: 30000 }); return typeof t === 'string' && t.length < 4e6 ? t : null; },
       ocr: intakeOcr, docx: intakeDocx, pdfSchaduw: pdfSchaduw,   // wv1431: schaduw PDF-lezer (alleen beoordeelde stukken)
       pdfLees: pdfLeesIntake,   // wv1921: PDF-lezer live (markdown in het kennisbestand; lokale tekst als terugval)
       datums: datums ? function (d) { return datums.blok(d); } : null,   // wv1276: datumdetector → blok datums in de kop van het kennisbestand

@@ -119,7 +119,8 @@ toets('200.000 trefferregels: geen stack-fout, alle geteld', ok, n);
 // koppelingen in de bron (zonder die regels valt de route terug op de oude stand)
 const fs = require('fs');
 const lees = (f) => fs.readFileSync(path.join(SRC, f), 'utf8');
-toets('zoek-snel.js gebruikt de strenge stand en laat een regel met een wachtwoordwoord weg', /maskerBasis\(t, v, b, true\)/.test(lees('zoek-snel.js')) && /WACHTWOORDWOORD\.test\(ruw\)\) continue/.test(lees('zoek-snel.js')));
+// wv3438 (afspraak David 19-11: niet filteren): Zoek snel is Davids eigen zoeken en gebruikt weer het gewone masker (zoals vóór 19-11)
+toets('zoek-snel.js gebruikt NIET de strenge stand en laat geen regel met een wachtwoordwoord weg', !/maskerBasis\(t, v, b, true\)/.test(lees('zoek-snel.js')) && !/WACHTWOORDWOORD/.test(lees('zoek-snel.js')));
 toets('docs-delen.js poort in de strenge stand, ook op de tabelrijen', /opt\.masker\(proef, false, null, true\)/.test(lees('docs-delen.js')) && /r\.rijen/.test(lees('docs-delen.js')));
 toets('uitrol.sh en Dockerfile nemen geheimen.js mee', /RELEASE_OPTIONEEL="[^"]*\bgeheimen\.js\b/.test(lees('uitrol.sh')) && /COPY geheimen\.js \/app\/release-bootstrap\/geheimen\.js/.test(lees('Dockerfile')));
 console.log(goed + ' groen, ' + fouten + ' rood');
