@@ -19899,6 +19899,7 @@ function intakeRouterHaal() {
       // wv2336: privékring voor de privégrens (schaduw); podbestand 0600 gebouwd door mk-scripts/wv2336/maak-prive-kring.py; mtime-cache
       priveKring: function () { const f = path.join(INTAKE_DIR, 'prive-kring.json'); try { const st = fs.statSync(f); if (!intakePriveKring || intakePriveKring.m !== st.mtimeMs) intakePriveKring = { m: st.mtimeMs, j: JSON.parse(fs.readFileSync(f, 'utf8')) }; return intakePriveKring.j; } catch (e) { return null; } },
       markerStand: function () { const j = intakeRouterStand(); return j && typeof j.marker_zacht === 'string' ? j.marker_zacht : 'schaduw'; },
+      markerHardStand: function () { const j = intakeRouterStand(); return j && typeof j.marker_hard === 'string' ? j.marker_hard : 'buiten'; },   // wv3440
       jev: intakeJev, mailmanJev: intakeMailmanJev, indeling: intakeIndeling, vv: VV(), vault: VAULT,
       vaultPauze: function () { try { return onderhoud.stand().aan === true || ovisAms().uur === 1; } catch (e) { return true; } },
       naamOk: function (n) { try { return !require(path.join(__dirname, 'intake-ingang.js')).naampoort(n, intake._soorten); } catch (e) { return false; } },
