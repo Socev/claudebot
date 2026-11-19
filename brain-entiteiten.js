@@ -7,9 +7,8 @@
 // enige gebruiker hier."): alles voor David, niets naar derden. Dus: medewerkers met hun hele pagina, kenmerken, deadlines (ook HR) en
 // Dossier; privépersonen uit 20_Prive (Familie, Gambia/Personen, Shizzle, Relaties) rechtstreeks uit de vault in de groep "prive", zonder
 // registerwijziging; de stamboom (± 1080 pagina's) alleen als zoekresultaat; rekeningnummers onverkort en het gegenereerde blok op de
-// pagina; Wat OVIS weet ook aan de privékant. Wat blijft: het sleutelmasker (grondwet 2) op alle tekst, en de schakelaar voor een vaste
-// plek (APP_VAST_AFSCHERMEN, wv1901): staat die aan, dan op dat apparaat alleen organisaties aan de zakelijke kant, rekeningnummers van
-// derden gemaskeerd, zonder facturen, deadlines en Dossier.
+// pagina; Wat OVIS weet ook aan de privékant. Wat blijft: het sleutelmasker (grondwet 2) op alle tekst. De oude vaste-plekschakelaar
+// (wv1901) en zijn takken zijn weg sinds wv3446: elk apparaat ziet hetzelfde.
 // wv1771 (OVIS plek 7 fase B): bij een persoon met een Google-koppeling de mailadressen en telefoonnummers uit dat Google-contact
 // (RPC public.ovis_personen_lees). wv1948 (stap C, E6): ook adressen en verjaardag (migratie knoop/0006), en ook bij een koppeling die nog
 // op Davids Ja wacht — met voorgesteld: true, zodat de app het zo labelt. Dat is tonen aan David, geen kenmerk: de mailrouter gebruikt

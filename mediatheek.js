@@ -27,7 +27,7 @@
 // niet), alleen https, alleen een host uit EXTERN_HOSTS, ≤ 300 tekens, geen gebruikersdeel, poort of rare tekens, en dan zonder
 // `bestanden:`. Zo'n stuk telt als stuk (geen bestand, niet om af te spelen); de App toont "Open bij <host>". De padcontrole voor
 // echte bestanden (M1–M4) blijft ongewijzigd: een extern stuk heeft geen bestand-id.
-// Alles alleen lezen; de module schrijft niets. Privé-module: op een vaste plek open, een bestand ophalen onder het invoerslot (server.js, wv1901); dicht alleen als APP_VAST_AFSCHERMEN aan staat.
+// Alles alleen lezen; de module schrijft niets. Privé-module: op een vaste plek open, een bestand ophalen onder het invoerslot (server.js, wv1901/wv3446).
 
 const fs = require('fs');
 const path = require('path');
