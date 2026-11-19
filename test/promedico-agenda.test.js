@@ -257,7 +257,7 @@ const logRegels = function (c, w) { const p = pagina(c, w); return p.slice(p.ind
   await t('wv3438: herschrijfZonderTekst zet tekst terug op een pagina met [tekst], laat andere pagina\'s en onbekende weken staan', async function () {
     const c = maak(); await c.ont.verwerk(omhul(stand()));
     const pad = path.join(c.map, 'Promedico-agenda 2026-W47.md'), los = path.join(c.map, 'Promedico-agenda 2026-W40.md');
-    fs.writeFileSync(pad, 'oude pagina\n- 15:30–17:30 brief_info: [tekst] (herhalend)\nDagnotitie: [tekst]\n');
+    fs.writeFileSync(pad, 'oude pagina\n- 15:30–17:30 brief_info: [tekst] (herhalend)\n');   // alleen een herhalende regel (Fable ZOU 2)
     fs.writeFileSync(los, 'week buiten de staat\n- 08:00–09:00 consult: [tekst]\n');
     const r = await c.ont.herschrijfZonderTekst();
     assert.deepStrictEqual(r, { herschreven: ['2026-W47'] }, JSON.stringify(r));
