@@ -20107,13 +20107,6 @@ const promedicoAgenda = (function () {
       podGeheimOk: berichtGeheimOk, kluisLees: promedicoKluisLees });
   } catch (e) { logError('promedico-agenda', e); return null; }
 })();
-// A24 (actieplan Fable-reviews 19-11-2026): weekpagina's van vóór deze versie met vrije HIS-tekst één keer opnieuw schrijven (alleen
-// weken uit de staat, alleen pagina's met “ ”; daarna doet dit niets meer). Log alleen weeknummers of de foutsoort, nooit tekst.
-if (promedicoAgenda && promedicoAgenda.herschrijfMetTekst) setTimeout(function () {
-  promedicoAgenda.herschrijfMetTekst().then(function (r) {
-    if (r.herschreven.length) console.log('[promedico-agenda] weekpagina zonder vrije tekst herschreven: ' + r.herschreven.join(','));
-  }, function (e) { console.log('[promedico-agenda] herschrijven mislukt: ' + (e && e.code ? e.code : 'fout')); });
-}, 60 * 1000).unref();
 function promedicoAgendaIsPad(req) { const p = reqPath(req); return p === '/promedico-agenda' || p.indexOf('/promedico-agenda/') === 0; }
 function promedicoAgendaRoute(req, res) {
   const stuur = function (status, obj) { try { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(obj)); } catch (e) { /* verbinding weg */ } };
