@@ -776,8 +776,7 @@ function maak(o) {
     const inhoud = {
       datum: vandaag,
       weer: weer || null,
-      // wv3401 (Codex MOET 1): ook de bewaarde agenda (tijdlijn faalt) door de naamtoets
-      agenda: !aan ? [] : rijen ? agendaPunten(rijen, vandaag, eigenPunten()) : (Array.isArray(oud.agenda) ? oud.agenda.filter((a) => a && !heeftNaam(a.titel)) : []),
+      agenda: !aan ? [] : rijen ? agendaPunten(rijen, vandaag, eigenPunten()) : (Array.isArray(oud.agenda) ? oud.agenda : []),
       artsen: aan ? (rijen ? artsenVandaag(rijen, vandaag, meds, vol) : (oud.datum === vandaag && Array.isArray(oud.artsen) && !!oud.volle_naam === vol ? oud.artsen : [])) : null,
       jarig: aan ? jarigen(meds, vandaag) : null,
       persoonsvakken: aan,
@@ -811,8 +810,7 @@ function maak(o) {
     const nieuws = aan && nieuwsActief() && nieuwsGeldig(i.nieuws, t) ? i.nieuws : null;
     // wv3154: medisch nieuws ook bij elke publicatie opnieuw tegen registerzin, uit-knoppen, vasthoudtermijn en leeftijd
     const medisch = medischOpTv(s, t);
-    const agenda = Array.isArray(i.agenda) ? i.agenda.filter((a) => a && !heeftNaam(a.titel)) : [];   // wv3401: ook een stand van vóór de naamtoets
-    return Object.assign({}, i, { agenda, artsen: aan ? artsen : null, jarig: aan ? i.jarig : null, info, nieuws, medisch,
+    return Object.assign({}, i, { artsen: aan ? artsen : null, jarig: aan ? i.jarig : null, info, nieuws, medisch,
       wd_tekst: d.wdl, dag_tekst: d.dg + ' ' + d.mnl, klok_tekst: String(a.uur).padStart(2, '0') + ':' + String(a.min).padStart(2, '0') });
   }
   function inhoudSha(i) { const c = Object.assign({}, i || {}); delete c.bronnen; return crypto.createHash('sha256').update(JSON.stringify(c)).digest('hex'); }
