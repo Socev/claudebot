@@ -66,6 +66,7 @@ const DOMEINEN = ['Tolgaarde', 'Groenhouten', 'HAGRO', 'POT', 'DBH', 'Holding', 
 // Sinds wv3405 (A32 deel 1) staat de patroonlijst in geheimen.js (één lijst voor alle filters). Weergave (streng weg) = precies het masker van
 // vóór wv3405: app-weergave en de schrijfpoorten van de vault. streng = poortstand voor alles wat het huis verlaat (Zoek snel-model, Docs › Delen).
 const GEHEIMEN = require('./geheimen.js');
+const LW = require('./lees-of-weiger.js');   // wv3423 (B80): niet kunnen lezen is nooit leeg
 function masker(t, vast, bsnMasker, streng) {
   let s = GEHEIMEN.maskeer(t, { streng: streng === true }).tekst;
   if (vast) {
@@ -187,6 +188,8 @@ function maak(opt) {
   let bouwBezig = null;
   let laatsteHash = null;
   let laatsteNacht = null;
+  // wv3423 (B80): wat de laatste bouw niet kon lezen (deelmappen, voor /health) en de laatste mislukte bouw (oude kaart bleef staan)
+  let overgeslagen = [], bouwFout = null;
   let bestandBezig = 0, zoekBezig = false, laatsteDwang = 0;
   let echteVault = null;
   // wv2607: linkdoelen per md-bestand uit de vorige bouw, op pad met mtime + ctime + grootte (ctime verandert bij elke schrijfactie en is
@@ -206,11 +209,12 @@ function maak(opt) {
     try { fs.mkdirSync(DIR, { recursive: true, mode: 0o700 }); fs.chmodSync(DIR, 0o700); } catch (e) { fout('secondbrain-dir', e); }
   }
 
+  // wv3423 (B80): een onleesbare wortel gooit (NietGelezen; vers() houdt dan de oude kaart), een onleesbare deelmap telt mee in /health
   function wandel() {
-    const lijst = [];
+    const lijst = [], over = [];
     const stap = function (abs, rel) {
-      let items;
-      try { items = fs.readdirSync(abs, { withFileTypes: true }); } catch (e) { return; }
+      const items = LW.leesMap(abs, { lees: opt.leesMap, rel: rel, overgeslagen: rel ? over : undefined });
+      if (!items) return;
       items.sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
       for (const e of items) {
         const naam = e.name;
@@ -229,6 +233,7 @@ function maak(opt) {
       }
     };
     stap(VAULT, '');
+    overgeslagen = over;
     return lijst;
   }
 
@@ -280,6 +285,8 @@ function maak(opt) {
   function bouw() {
     const t0 = Date.now();
     const bestanden = wandel();
+    // wv3423 (B80): een leesbare maar lege wortel (lege mount) terwijl de vorige kaart bestanden had = niet gemeten; de oude kaart blijft
+    LW.nulTerwijlBekend(bestanden.length, kaart ? kaart.bestanden.length : 0, 'vault');
     // wv2607: niets veranderd sinds de vorige bouw (zelfde paden, mtime, ctime, grootte) = dezelfde kaart, alleen weer vers
     const sig = crypto.createHash('sha256').update(bestanden.map(function (b) { return b.p + '\u0000' + b.m + '\u0000' + b.c + '\u0000' + b.g; }).join('\u0001')).digest('hex');
     if (kaart && kaart.sig === sig && kaart.op) { kaart.op = nu(); kaart.duur = Date.now() - t0; kaart.hergebruik = (kaart.hergebruik || 0) + 1; return kaart; }
@@ -372,7 +379,9 @@ function maak(opt) {
     if (!dwing && kaart && nu() - kaart.op < KAART_VERS_MS) return kaart;
     if (bouwBezig) return kaart || bouw();
     bouwBezig = true;
-    try { return bouw(); } catch (e) { fout('secondbrain-bouw', e); return kaart; } finally { bouwBezig = null; }
+    try { const k = bouw(); bouwFout = null; return k; }
+    catch (e) { bouwFout = { t: new Date(nu()).toISOString(), fout: String(e && e.message || e).slice(0, 160) }; fout('secondbrain-bouw', e); return kaart; }
+    finally { bouwBezig = null; }
   }
 
   // Mag dit bestand op dit apparaat (P2) en in deze weergave (P4)? Op een vaste plek is verborgen ook dicht: in Bronnen-mappen staan
@@ -883,7 +892,9 @@ function maak(opt) {
     const k = kaart;
     return { aan: true, knopen: k ? k.bestanden.length : 0, lijnen: k ? k.bestanden.reduce(function (n, b) { return n + b.l.length; }, 0) : 0,
       gebouwd: k && k.op ? new Date(k.op).toISOString() : null, duur_ms: k ? k.duur : null, nacht: laatsteNacht,
-      gelezen: k && typeof k.gelezen === 'number' ? k.gelezen : null, hergebruik: k ? k.hergebruik || 0 : 0 };   // wv2607: linkcache zichtbaar
+      gelezen: k && typeof k.gelezen === 'number' ? k.gelezen : null, hergebruik: k ? k.hergebruik || 0 : 0,   // wv2607: linkcache zichtbaar
+      overgeslagen: overgeslagen.length, overgeslagen_mappen: overgeslagen.slice(0, 5).map(function (x) { return x.pad.split('/').slice(0, 2).join('/') + ' (' + x.code + ')'; }),   // wv3423 (B80)
+      bouw_fout: bouwFout };
   }
 
   return { mkdir: mkdir, laadBewaard: laadBewaard, app: app, health: health, vers: vers, koppelNaam: koppelNaam, nacht: nacht, bron: bron,

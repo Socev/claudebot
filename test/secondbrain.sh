@@ -483,6 +483,43 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   ctx.__sb.secondbrainFinPagina(fd);
   toets('9 Financiën: pagina bij de passende post, niet bij de rest', fd.vaste_lasten.rijen[0].pagina === '10_Zakelijk/Tolgaarde/Verzekeringen.md' && !fd.vaste_lasten.rijen[1].pagina && fd.paypal.diensten[0].pagina === '10_Zakelijk/Tolgaarde/Verzekeringen.md', fd);
 
+  // ── 12. wv3423 (B80): niet kunnen lezen is nooit leeg — oude kaart blijft, overgeslagen deelmappen in /health ──
+  { const VB = path.join(W, 'vault-b80'), DB = path.join(W, 'staat-b80');
+    const zetB = (p, t) => { fs.mkdirSync(path.dirname(path.join(VB, p)), { recursive: true }); fs.writeFileSync(path.join(VB, p), t); };
+    zetB('10_Zakelijk/A.md', '# A\n[[B]]\n'); zetB('10_Zakelijk/B.md', '# B\n'); zetB('20_Prive/C.md', '# C\n');
+    let klok = 1000000, lees = null;
+    const sbB = S.maak({ vault: VB, dir: DB, nu: () => klok, leesMap: (abs) => (lees ? lees(abs) : fs.readdirSync(abs, { withFileTypes: true })) });
+    const k1 = sbB.vers(true), json1 = fs.readFileSync(path.join(DB, 'kaart.json'), 'utf8');
+    toets('12 eerste bouw: 3 bestanden', k1.bestanden.length === 3 && sbB.health().overgeslagen === 0 && sbB.health().bouw_fout === null, sbB.health());
+    const fout = (code) => () => { const e = new Error(code); e.code = code; throw e; };
+    // onleesbare wortel (EACCES): oude kaart blijft, kaart.json gelijk, fout zichtbaar
+    lees = (abs) => abs === VB ? fout('EACCES')() : fs.readdirSync(abs, { withFileTypes: true }); klok += 1e9;
+    let k = sbB.vers(true);
+    toets('12 wortel EACCES: oude kaart blijft (3), kaart.json ongewijzigd, bouw_fout in health', k === k1 && k.bestanden.length === 3 && fs.readFileSync(path.join(DB, 'kaart.json'), 'utf8') === json1 && /EACCES/.test((sbB.health().bouw_fout || {}).fout), sbB.health());
+    // wortel EIO idem
+    lees = (abs) => abs === VB ? fout('EIO')() : fs.readdirSync(abs, { withFileTypes: true }); klok += 1e9;
+    k = sbB.vers(true);
+    toets('12 wortel EIO: oude kaart blijft', k === k1 && fs.readFileSync(path.join(DB, 'kaart.json'), 'utf8') === json1);
+    // onleesbare deelmap: kaart zonder die map, maar /health telt hem
+    lees = (abs) => abs === path.join(VB, '20_Prive') ? fout('EIO')() : fs.readdirSync(abs, { withFileTypes: true }); klok += 1e9;
+    k = sbB.vers(true);
+    toets('12 deelmap EIO: overgeslagen 1 in health met map en code, geen bouw_fout', k.bestanden.length === 2 && sbB.health().overgeslagen === 1 && sbB.health().overgeslagen_mappen[0] === '20_Prive (EIO)' && sbB.health().bouw_fout === null, sbB.health());
+    lees = null; klok += 1e9; k = sbB.vers(true);
+    toets('12 weer leesbaar: 3 bestanden, overgeslagen 0', k.bestanden.length === 3 && sbB.health().overgeslagen === 0);
+    const json2 = fs.readFileSync(path.join(DB, 'kaart.json'), 'utf8');
+    // hernoemde vault (echte fs, geen nep-lezer): oude kaart blijft
+    fs.renameSync(VB, VB + '-weg'); klok += 1e9;
+    const kh = sbB.vers(true);
+    toets('12 hernoemde vault: oude kaart blijft, kaart.json ongewijzigd', kh.bestanden.length === 3 && fs.readFileSync(path.join(DB, 'kaart.json'), 'utf8') === json2 && /ENOENT/.test((sbB.health().bouw_fout || {}).fout), sbB.health());
+    // lege mount: wortel leesbaar maar leeg terwijl de kaart bestanden had
+    fs.mkdirSync(VB); klok += 1e9;
+    const kl = sbB.vers(true);
+    toets('12 lege mount: oude kaart blijft (niet gemeten), kaart.json ongewijzigd', kl.bestanden.length === 3 && fs.readFileSync(path.join(DB, 'kaart.json'), 'utf8') === json2 && /0 gevonden/.test((sbB.health().bouw_fout || {}).fout), sbB.health());
+    // zonder eerdere kaart en zonder vault: geen kaart (503), niet "0 knopen"
+    const sbC = S.maak({ vault: path.join(W, 'bestaat-niet'), dir: path.join(W, 'staat-c') });
+    toets('12 lees-of-weiger.js gaat mee in de release (uitrol.sh + Dockerfile)', /^RELEASE_OPTIONEEL="[^"]*\blees-of-weiger\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY lees-of-weiger\.js \/app\/release-bootstrap\/lees-of-weiger\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
+    toets('12 geen vault, geen oude kaart: geen kaart (niet een lege)', !sbC.vers(true) && sbC.health().knopen === 0 && !!sbC.health().bouw_fout); }
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
