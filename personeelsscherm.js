@@ -216,6 +216,24 @@ const INHOUD_MS = 30 * 60000;          // inhoud opnieuw verzamelen
 const WEER_MS = 2 * UUR;               // weer hooguit elke 2 uur ophalen (≤ 12 per dag)
 const WEER_OUD_MS = 12 * UUR;          // ouder weer valt weg
 const TITEL_WEG = /priv[eé]|vertrouwelijk|persoonlijk|patiënt|patient|ziek|verlof|vakantie|uitvaart|begrafenis|overl|condoleance|@|\d{6,}/i;
+// wv3401 (Fable-review personeel B2): een titel met een persoonsnaam valt weg (registerrij: geen achternamen van anderen dan de artsen).
+// Eenvoudige naamtoets, liever een onschuldige titel te weinig dan een naam op de tv. Naam = Hoofdletter + kleine letters (geen afkorting
+// als HAGRO/ONTiE). Slaat aan op: (1) gelegenheid of voorzetsel + naam ("Afscheid Jan", "Lunch met Fenna", "Receptie voor Piet"),
+// (2) aanspreekvorm + naam ("dr. Vos", "Dokter Vos"), (3) korte voornaam + tussenvoegsel + naam ("Kees van Dijk"), (4) twee namen achter
+// elkaar die niet aan het begin van de titel of van een deel na - : / ( staan ("Lunch Jan Jansen"; "Evaluatie Duurzaamheid" na "FTO -" niet).
+// Gemeten 19-11 op de echte HAGRO-tijdlijn 2025-11..2027-01: 22 titels, 0 weggevallen.
+const NAAM_W = "[A-ZÀ-Þ][a-zß-ÿ]+(?:-[A-ZÀ-Þ][a-zß-ÿ]+)?";
+const ci = (w) => w.split('|').map((x) => '[' + x[0].toUpperCase() + x[0] + ']' + x.slice(1)).join('|');   // alleen de eerste letter vrij; de naam blijft hoofdlettergevoelig
+const NAAM_TOETS = [
+  new RegExp("(?:^|[\\s(])(?:" + ci('afscheid\\w*|receptie|jubileum|verjaardag|felicit\\w*|memoriam|welkom|bedankt|namens|ere|met|door|bij') + ")\\s+(?:(?:van|voor|aan)\\s+)?(?:(?:" + ci('dr|drs|mr|prof|mevr|mw|dhr') + ")\\.?\\s+)?" + NAAM_W + "(?![\\wÀ-ÿ])"),
+  new RegExp("(?:^|[\\s(])(?:" + ci('dr|drs|mr|prof|mevr|mw|dhr') + ")\\.?\\s+" + NAAM_W + "(?![\\wÀ-ÿ])"),
+  new RegExp("(?:^|[\\s(])(?:" + ci('dokter|mevrouw|meneer|collega|huisarts') + ")\\s+" + NAAM_W + "(?![\\wÀ-ÿ])"),
+  new RegExp("(?:^|[\\s(])[A-ZÀ-Þ][a-zß-ÿ]{1,9}\\s+(?:van der|van den|van de|van|de|der|den|ter|ten|te|in 't|op de)\\s+" + NAAM_W + "(?![\\wÀ-ÿ])"),
+  // (4) zonder bijvoeglijk woord vooraan (Regionaal, Medische, Landelijk) en zonder zaakwoord achteraan (Zorgnetwerk, Overleg, Festival)
+  new RegExp("[^\\s\\-–:/(|&+]\\s+(?![A-ZÀ-Þ][a-zß-ÿ]*(?:aal|ale|ief|ieve|isch|ische|lijk|lijke|eel|ele|ig|ige|baar|bare|nieuwe|goede|grote|kleine|eerste|open)(?![\\wÀ-ÿ]))[A-ZÀ-Þ][a-zß-ÿ]{1,11}\\s+"
+    + "(?![A-ZÀ-Þ][a-zß-ÿ]*(?:netwerk|overleg|zorg|dag|avond|middag|ochtend|bijeenkomst|symposium|congres|festival|borrel|vergadering|scholing|cursus|training|beweging|thuis|wijk|praktijk|centrum|huis|team|groep|raad|platform|week|caf[eé]|lunch|diner|markt|beurs|dienst|werk)(?![\\wÀ-ÿ]))[A-ZÀ-Þ][a-zß-ÿ]{1,11}(?![\\wÀ-ÿ])"),
+];
+function heeftNaam(t) { const x = String(t || ''); return NAAM_TOETS.some((r) => r.test(x)); }
 // fase 2 (wv3015)
 const VOLLE_NAAM_ZIN = 'artsen van vandaag (voor- en achternaam';   // staat deze zin in de registertekst, dan volle naam
 const INFO_ZIN = 'infoschermen) alleen na Davids knop';             // staat deze zin in de registertekst, dan infoschermen (met Ja per set; Fable ZOU 3)
@@ -483,7 +501,7 @@ function agendaPunten(rijen, vandaag, eigen) {
     if (!r || r.status !== 'actief' || !(r.feed === 'google-hagro' || r.sync_agenda === 'hagro')) continue;
     if (!r.begin_datum || r.begin_datum < vandaag) continue;
     const t = String(r.titel || '').replace(/\s+/g, ' ').trim();
-    if (!t || t.length > 70 || TITEL_WEG.test(t)) continue;
+    if (!t || t.length > 70 || TITEL_WEG.test(t) || heeftNaam(t)) continue;
     if ((Array.isArray(r.entiteiten) ? r.entiteiten : []).some((e) => e && e.rol === 'betreft')) continue;   // gaat over een persoon
     uit.push({ datum: r.begin_datum, sort: r.begin_datum + (r.hele_dag ? '00:00' : hhmmAms(r.begin_tijd)), titel: t,
       tijd: r.hele_dag ? 'hele dag' : hhmmAms(r.begin_tijd) + (r.eind_tijd ? '–' + hhmmAms(r.eind_tijd) : ''), label: 'HAGRO' });
@@ -491,7 +509,7 @@ function agendaPunten(rijen, vandaag, eigen) {
   for (const e of Array.isArray(eigen) ? eigen : []) {
     if (!e || !/^\d{4}-\d{2}-\d{2}$/.test(e.datum || '') || e.datum < vandaag || e.datum > plusDag(vandaag, AGENDA_DAGEN)) continue;
     const t = String(e.titel || '').replace(/\s+/g, ' ').trim();
-    if (!t || t.length > 70 || TITEL_WEG.test(t)) continue;
+    if (!t || t.length > 70 || TITEL_WEG.test(t) || heeftNaam(t)) continue;
     const tijd = /^\d{2}:\d{2}$/.test(e.tijd || '') ? e.tijd : 'hele dag';
     uit.push({ datum: e.datum, sort: e.datum + (tijd === 'hele dag' ? '00:00' : tijd), titel: t, tijd, label: 'Praktijk' });
   }
@@ -649,6 +667,8 @@ function maak(o) {
     catch (e) { return null; }
   }
   function toestemming() { return !!registerRij(); }
+  // wv3401 (Fable-review personeel B3): onleesbaar register (weg, kapot, zonder rijen) apart van 'rij uit', voor één melding; beide = zwart scherm
+  function registerLeesbaar() { try { const r = JSON.parse(fs.readFileSync(registerPad, 'utf8')); return !!(r && Array.isArray(r.rijen)); } catch (e) { return false; } }
   // wv3015: wat de tekst van de rij toestaat (bij verschil geldt de tekst, registerkop)
   function rijMag(zin, id) { const r = registerRij(id); return !!r && Array.isArray(r.tekst) && r.tekst.map(String).join(' ').replace(/\s+/g, ' ').includes(zin); }
   const volleNaamMag = () => rijMag(VOLLE_NAAM_ZIN);
@@ -745,18 +765,18 @@ function maak(o) {
     const s = leesStand(), vandaag = ymd(t), oud = s.inhoud || {};
     const aan = toestemming(), vol = aan && volleNaamMag();
     let rijen = null;
-    if (typeof o.tijdlijn === 'function') {
+    if (aan && typeof o.tijdlijn === 'function') {
       try { const r = await o.tijdlijn(vandaag, plusDag(vandaag, AGENDA_DAGEN)); if (Array.isArray(r)) rijen = r; else throw new Error('x'); }
       catch (e) { fout('personeelsscherm-agenda', new Error('tijdlijn lezen faalde')); }
     }
     const meds = aan ? leesMedewerkers(o.vault, vandaag) : [];
-    const weer = await weerVers(s, t);
+    const weer = aan ? await weerVers(s, t) : null;   // wv3401: zonder registerrij niets ophalen of tonen (rij dekt het hele scherm)
     const nieuws = aan ? await nieuwsVers(s, t) : null;   // wv3023
     if (aan) await medischVers(t);   // wv3154 (schrijft zelf in de stand)
     const inhoud = {
       datum: vandaag,
       weer: weer || null,
-      agenda: rijen ? agendaPunten(rijen, vandaag, eigenPunten()) : (Array.isArray(oud.agenda) ? oud.agenda : []),
+      agenda: !aan ? [] : rijen ? agendaPunten(rijen, vandaag, eigenPunten()) : (Array.isArray(oud.agenda) ? oud.agenda : []),
       artsen: aan ? (rijen ? artsenVandaag(rijen, vandaag, meds, vol) : (oud.datum === vandaag && Array.isArray(oud.artsen) && !!oud.volle_naam === vol ? oud.artsen : [])) : null,
       jarig: aan ? jarigen(meds, vandaag) : null,
       persoonsvakken: aan,
@@ -796,8 +816,10 @@ function maak(o) {
   function inhoudSha(i) { const c = Object.assign({}, i || {}); delete c.bronnen; return crypto.createHash('sha256').update(JSON.stringify(c)).digest('hex'); }
 
   // ── envelop ──
-  function envelop(s, t, leeg) {
+  function envelop(s, t, leeg0) {
     const volgnr = Math.max(Number(s.volgnr || 0) + 1, t);
+    // wv3401: zonder registerrij (uit, weg of register onleesbaar) altijd een lege envelop; Davids noodknop in de stand blijft zoals hij was
+    const leeg = !!leeg0 || !toestemming();
     const doc = { v: 1, soort: 'scherm', volgnr, gemaakt: t, houdbaar_tot: t + HOUDBAAR_MS, leeg: !!leeg,
       html: bouwHtml({ gemaakt: t, houdbaar_tot: t + HOUDBAAR_MS, leeg: !!leeg, logoSvg: leeg ? null : logoSvg(), inhoud: leeg ? null : schermInhoud(s, t) }),
       instellingen: { ophaal_s: 120 }, code: null };
@@ -1128,6 +1150,12 @@ function maak(o) {
     if (!sleutel() || !config()) return { overgeslagen: true };
     let s = leesStand();
     const t = nu();
+    // wv3401: register onleesbaar = zwart scherm (envelop) en één melding per voorval; weer leesbaar = vlag weg
+    const leesbaar = registerLeesbaar();
+    if (!leesbaar && !s.register_onleesbaar) {
+      s = wijzig((x) => { x.register_onleesbaar = t; });
+      try { await melding('personeelsscherm-register:' + t, 'OVIS Scherm: het toestemmingenregister is niet te lezen, daarom staat het scherm in de personeelskamer op zwart tot het weer te lezen is.'); } catch (e) { fout('personeelsscherm-melding', e); }
+    } else if (leesbaar && s.register_onleesbaar) s = wijzig((x) => { x.register_onleesbaar = null; });
     if (s.intrek_open) { try { await intrekIntern(config()); } catch (e) { fout('personeelsscherm-intrek', new Error('opnieuw intrekken faalde')); } }
     let nieuw = false;
     if (!s.inhoud_op || t - s.inhoud_op >= INHOUD_MS || ymd(s.inhoud_op) !== ymd(t) || (s.inhoud && s.inhoud.persoonsvakken) !== toestemming()
@@ -1183,6 +1211,6 @@ function maak(o) {
   return { app, tik, info, publiceer, open, koppel, intrek, leeg, leesD1, appStand, verzamel, toestemming, infoSchermen, infoKandidaten, infoZet, aanvraag, medischZet };
 }
 
-module.exports = { maak, bouwHtml, D1_SCHEMA, inWerktijd, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
+module.exports = { heeftNaam, maak, bouwHtml, D1_SCHEMA, inWerktijd, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
   VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, MEDISCH_ZIN, MEDISCH_RIJ, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN,
   _t: { medischTekst, medischItems, medischBijwerken, medischBeeld, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, artsenVandaag, jarigen, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };

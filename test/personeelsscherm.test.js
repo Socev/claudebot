@@ -47,7 +47,10 @@ function opzet(o = {}) {
   const D = nepD1(), C = nepCf(o), meld = [];
   for (const q of PS.D1_SCHEMA) D.sq.exec(q);   // zoals de Worker het al zette
   let klok = o.nu || Date.parse('2026-11-16T09:00:00Z');   // maandag 10:00 in Amsterdam
-  const m = PS.maak({ dir, d1: D.d1, cf: C.cf, nu: () => klok, melding: async (k, t) => { meld.push({ k, t }); }, fout: () => {} });
+  // wv3401: zonder registerrij is het scherm zwart; de basisopzet heeft daarom een eigen register met de rij aan (nooit het echte register)
+  const registerPad = path.join(dir, 'register.json');
+  fs.writeFileSync(registerPad, JSON.stringify({ rijen: [{ id: 'personeelsscherm-vast', status: 'aan', tekst: ['i. dag en klok'] }] }));
+  const m = PS.maak({ dir, registerPad, d1: D.d1, cf: C.cf, nu: () => klok, melding: async (k, t) => { meld.push({ k, t }); }, fout: () => {} });
   return { m, D, C, meld, dir, publicKey, zet: (t) => { klok = t; }, nu: () => klok };
 }
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
@@ -278,25 +281,77 @@ function fase1(o = {}) {
   const weer = { current: { temp: 6.4, weather: [{ id: 801, description: 'licht bewolkt' }] }, daily: [{ dt: 1763290800, temp: { max: 8.5, min: 3.4 } }, { dt: 1763377200, temp: { max: 7 }, weather: [{ id: 800 }] }] };
   const z = opzet(o);
   const tel = { tijdlijn: 0, weer: 0, nieuws: 0, medisch: 0, medisch_bron: [] };
-  const m = PS.maak({ dir: z.dir, vault, registerPad: reg, vragenPad, d1: z.D.d1, cf: z.C.cf, nu: z.nu, melding: async () => {}, fout: () => {},
-    tijdlijn: async () => { tel.tijdlijn++; if (o.tijdlijnFaalt) throw new Error('weg'); return rijen; }, weer: async () => { tel.weer++; return weer; },
+  const m = PS.maak({ dir: z.dir, vault, registerPad: reg, vragenPad, d1: z.D.d1, cf: z.C.cf, nu: z.nu, melding: async (k, t) => { z.meld.push({ k, t }); }, fout: () => {},
+    tijdlijn: async () => { tel.tijdlijn++; if (o.tijdlijnFaalt) throw new Error('weg'); return (o.extraRijen || []).concat(rijen); }, weer: async () => { tel.weer++; return weer; },
     nieuws: o.nieuws ? async () => { tel.nieuws++; return o.nieuws(); } : undefined, nieuwsTimeoutMs: o.nieuwsTimeoutMs,   // wv3023
     medisch: o.medisch ? async (b) => { tel.medisch++; tel.medisch_bron.push(b); return o.medisch(b); } : undefined });   // wv3154
-  return Object.assign(z, { m, zetReg, tel, vault, vragenPad });
+  return Object.assign(z, { m, zetReg, tel, vault, vragenPad, reg });
 }
 const html = (D) => { const r = D.sq.prepare('SELECT bytes FROM envelop WHERE id = 1').get(); return JSON.parse(Buffer.from(r.bytes, 'base64')).html; };
 
-test('fase 1 kruisproef: zonder registerrij geen artsen of jarigen (ook niet als de rij uit staat), wel dag, weer en agenda', async () => {
-  for (const aan of [false, 'uit']) {
-    const { m, D } = fase1({ aan });
-    const i = await m.verzamel(Date.parse('2026-11-16T09:00:00Z'));
+test('fase 1 kruisproef (wv3401: B3): zonder registerrij (weg, uit, register onleesbaar of weg) een lege envelop: geen namen, agenda of weer, niets opgehaald', async () => {
+  for (const aan of [false, 'uit', 'kapot', 'weg']) {
+    const f = fase1({ aan: aan === 'kapot' || aan === 'weg' ? true : aan });
+    if (aan === 'kapot') fs.writeFileSync(f.reg, '{ "rijen": [');
+    if (aan === 'weg') fs.unlinkSync(f.reg);
+    const i = await f.m.verzamel(Date.parse('2026-11-16T09:00:00Z'));
     assert.strictEqual(i.artsen, null); assert.strictEqual(i.jarig, null); assert.strictEqual(i.persoonsvakken, false);
-    await m.publiceer();
-    const h = html(D);
-    assert.doesNotMatch(h, /Artsen vandaag|Jarig deze week|Wietske|Jorrit|Fenna|Tygo|Waarnemer/);
-    assert.match(h, /HAGRO-vergadering/); assert.match(h, /Licht bewolkt/); assert.match(h, /Komende weken/);
-    assert.doesNotMatch(h, /Proefscherm|wordt ingericht/);
+    assert.deepStrictEqual(i.agenda, []); assert.strictEqual(i.weer, null);
+    assert.strictEqual(f.tel.tijdlijn, 0, 'agenda niet gelezen'); assert.strictEqual(f.tel.weer, 0, 'weer niet opgehaald');
+    const doc = await f.m.publiceer();
+    assert.strictEqual(doc.leeg, true, aan + ': lege envelop');
+    const h = html(f.D);
+    assert.match(h, /data-soort="leeg"/);
+    assert.doesNotMatch(h, /Artsen vandaag|Jarig deze week|Wietske|Jorrit|Fenna|Tygo|Waarnemer|HAGRO-vergadering|Licht bewolkt|Komende weken/);
   }
+});
+
+test('wv3401 B3: rij uit maakt de tv zwart, Davids noodknop in de stand blijft; register onleesbaar = één melding per voorval, weer leesbaar = scherm terug', async () => {
+  const f = fase1({ aan: true });
+  let t = Date.parse('2026-11-16T09:00:00Z'); f.zet(t);
+  await f.m.tik();
+  assert.match(html(f.D), /HAGRO-vergadering/);
+  // rij uit: volgende tik zwart; noodknop 'uit' zetten verandert dat niet en de stand onthoudt Davids keuze (niet leeg)
+  f.zetReg('uit');
+  t += 5 * 60000; f.zet(t); await f.m.tik();
+  assert.match(html(f.D), /data-soort="leeg"/);
+  const r = await f.m.leeg(false);
+  assert.strictEqual(r.body.leeg, true); assert.strictEqual(JSON.parse(fs.readFileSync(path.join(f.dir, 'stand.json'), 'utf8')).leeg, false);
+  assert.strictEqual(f.meld.length, 0, 'rij uit is Davids keuze: geen melding');
+  // register kapot: zwart en één melding, ook na drie tikken
+  f.zetReg(true);
+  t += 5 * 60000; f.zet(t); await f.m.tik();
+  assert.match(html(f.D), /HAGRO-vergadering/, 'rij weer aan = scherm terug');
+  fs.writeFileSync(f.reg, 'kapot');
+  for (let k = 0; k < 3; k++) { t += 5 * 60000; f.zet(t); await f.m.tik(); }
+  assert.match(html(f.D), /data-soort="leeg"/);
+  assert.strictEqual(f.meld.filter((x) => /^personeelsscherm-register:/.test(x.k)).length, 1, 'één melding');
+  assert.match(f.meld[0].t, /toestemmingenregister is niet te lezen/);
+  // weer leesbaar: scherm terug; opnieuw kapot = nieuw voorval, nieuwe melding
+  f.zetReg(true);
+  t += 5 * 60000; f.zet(t); await f.m.tik();
+  assert.match(html(f.D), /HAGRO-vergadering/);
+  fs.unlinkSync(f.reg);
+  t += 5 * 60000; f.zet(t); await f.m.tik();
+  assert.match(html(f.D), /data-soort="leeg"/);
+  assert.strictEqual(f.meld.filter((x) => /^personeelsscherm-register:/.test(x.k)).length, 2);
+});
+
+test('wv3401 B2: agendatitel met een persoonsnaam valt weg (HAGRO en eigen punten); titels zonder naam blijven (verzonnen)', async () => {
+  const met = ['Afscheid Jan Jansen', 'Receptie Piet', 'Lunch met Fenna', 'Overleg bij dr. Bakkerus', 'Borrel Kees van Dijk', 'Spreekuur Dokter Vos',
+    'Lunch Jan Jansen', 'Jubileum van Anne-Marie', 'afscheid van mw. Klaver', 'Etentje met collega Sanne', 'Bedankt Tygo'];
+  const zonder = ['Middag van het Regionaal Zorgnetwerk', 'Minisymposium Goede wondzorg', 'FTO - Evaluatie Duurzaamheid / Slaapklachten', 'FTO - Diabetes (met RIVM)',
+    'Openingsborrel Huisartsenpraktijk de Eikenhof', 'De Prins vertrekt - voorstelling + borrel (Week van de zorg)', 'Hagro meets Wilgen', 'Sportcafé Dorp in Beweging',
+    'Startbijeenkomst REGIO WLZ Thuis', 'Welzijn & Zorg Festival', 'WSV Netwerkbijeenkomst - Zelfredzaamheid', "Lunch met collega's", 'Overleg met ONTiE', 'Nieuwjaarsborrel HCE'];
+  for (const x of met) assert.ok(PS.heeftNaam(x), 'naam: ' + x);
+  for (const x of zonder) assert.ok(!PS.heeftNaam(x), 'geen naam: ' + x);
+  const rij = (titel, n) => ({ feed: 'google-hagro', sync_agenda: 'hagro', soort: 'afspraak', titel, status: 'actief', event_id: 100 + n, hele_dag: true, begin_datum: '2026-11-1' + (7 + (n % 3)), entiteiten: [] });
+  const f = fase1({ aan: true, extraRijen: [rij('Afscheid Jan Jansen', 0), rij('Lunch met Fenna', 1), rij('Minisymposium Goede wondzorg', 2)] });
+  fs.writeFileSync(path.join(f.dir, 'punten.json'), JSON.stringify([{ datum: '2026-11-18', titel: 'Receptie Piet' }, { datum: '2026-11-18', titel: 'Teamuitje' }]));
+  const i = await f.m.verzamel(Date.parse('2026-11-16T09:00:00Z'));
+  const t = i.agenda.map((a) => a.titel);
+  assert.ok(t.includes('Minisymposium Goede wondzorg') && t.includes('Teamuitje') && t.includes('HAGRO-vergadering'));
+  assert.ok(!t.some((x) => /Jansen|Fenna|Piet/.test(x)), 'geen namen: ' + t.join(' | '));
 });
 
 test('fase 1 met registerrij: voornaam + dagdeel, waarnemer zonder naam, jarigen met dag en maand; nooit achternaam, jaar of roostertitel', async () => {
@@ -330,6 +385,8 @@ test('fase 1 tik: inhoud elke 30 min, publiceert bij verandering; registerrij we
   assert.doesNotMatch(html(f.D), /Wietske|Fenna|Artsen vandaag/, 'zonder rij meteen weg, niet pas na 30 min');
   assert.strictEqual(f.m.info().persoonsvakken, false);
   assert.ok(f.tel.weer <= 1, 'weer niet elke tik');
+  assert.match(html(f.D), /data-soort="leeg"/, 'wv3401: zonder rij zwart');
+  f.zetReg(true);
   t += 3 * 3600000; f.zet(t); await f.m.tik();
   assert.strictEqual(f.tel.weer, 2);
 });
@@ -340,7 +397,7 @@ test('fase 1: oude stand met namen en registerrij weg → publiceer laat ze weg;
   f.zetReg(false);
   await f.m.publiceer();
   assert.doesNotMatch(html(f.D), /Wietske|Fenna/);
-  const g = fase1({ aan: false, tijdlijnFaalt: true });
+  const g = fase1({ aan: true, tijdlijnFaalt: true });
   const s = path.join(g.dir, 'stand.json');
   fs.writeFileSync(s, JSON.stringify({ inhoud: { datum: '2026-11-16', agenda: [{ wd: 'do', dg: '19', mn: 'nov', titel: 'Eerder gelezen', tijd: '16:00', label: 'HAGRO' }] } }));
   const i = await g.m.verzamel(g.nu());
