@@ -31,7 +31,8 @@ stand(){
   local d t r; d="$(dirname "$STAND")"; t="$d/.stand.$$"
   r="$(printf '%s' "${2:-}" | LC_ALL=C tr -d '\000-\037"\\' | cut -c1-200)"
   printf '{"stand":"%s","reden":"%s","tijd":"%s"}\n' "$1" "$r" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$t" 2>/dev/null \
-    && chmod 0640 "$t" 2>/dev/null && mv -f "$t" "$STAND" 2>/dev/null || rm -f "$t" 2>/dev/null
+    && chmod 0640 "$t" 2>/dev/null && { chgrp pgsock "$t" 2>/dev/null || true; } \
+    && mv -f "$t" "$STAND" 2>/dev/null || rm -f "$t" 2>/dev/null
   return 0
 }
 # B103: de noodschakelaar houdt alleen de databank tegen, niet de pod; weg = alsnog starten
@@ -49,7 +50,8 @@ wacht_pg_uit(){
 if [ "$(id -u)" = "0" ]; then
   id pg >/dev/null 2>&1 || exit 0
   # B103: standmap (pg schrijft, claude leest via groep pgsock; root schrijft de eerste stand)
-  mkdir -p "$(dirname "$STAND")"; chown pg:pgsock "$(dirname "$STAND")"; chmod 0750 "$(dirname "$STAND")"
+  # Codex MOET 1: groep pgsock op elk standbestand (setgid op de map + chgrp in stand()), anders leest claude een bestand van root of pg niet
+  mkdir -p "$(dirname "$STAND")"; chown pg:pgsock "$(dirname "$STAND")"; chmod 2750 "$(dirname "$STAND")"
   stand start "db-wacht gestart"
   wacht_pg_uit
   mkdir -p "$BASIS/17" "$BASIS/wal-archief" "$BASIS/log" "$SOCK" "$STOPMAP"

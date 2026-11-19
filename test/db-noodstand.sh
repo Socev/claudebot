@@ -99,7 +99,7 @@ if [ -x "$PGB/postgres" ] && [ "$(id -u)" != 0 ]; then
   mv "$B/pg/17/data.oud-proef" "$B/pg/17/data"
   wacht_op draait 40
   toets 'B5 oorzaak hersteld: databank start vanzelf, zonder herstart van db-wacht' "$(kill -0 "$WPID" 2>/dev/null && stand_is draait && "$PGB/pg_isready" -q -h "$B/sock" && echo 1)" "$(cat "$ST" 2>/dev/null)"
-  toets 'B6 stand is geldige JSON' "$(node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$ST" 2>/dev/null && echo 1)"
+  toets 'B6 stand is geldige JSON, groep pgsock (leesbaar voor claude, Codex MOET 1)' "$(node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$ST" 2>/dev/null && { ! getent group pgsock >/dev/null || [ "$(stat -c %G "$ST")" = pgsock ]; } && echo 1)" "$(stat -c '%U:%G %a' "$ST" 2>/dev/null)"
   stop_wacht; WPID=""
 else
   echo "OVERGESLAGEN B (geen PG 17 of root)"
