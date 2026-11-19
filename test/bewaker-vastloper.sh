@@ -104,7 +104,7 @@ serverPid(){ pgrep -f "$W/app/releases/[a-z]*/server\.js" | head -1; }
 toon(){ echo "--- log $(basename "$W") ---"; sed 's/^/  /' "$W/bin/supervisor.log"; }
 
 # ── 1. vastloper ──────────────────────────────────────────────────────────────────────────────────────────────────────
-opzet vastloper; touch "$W/traag-herstart"; start
+opzet vastloper; touch "$W/traag-herstart"; start BEWAKER_INSPECTOR=1   # wv3390: inspector staat standaard uit
 P1=$(serverPid); touch "$W/blokkeer"
 wachtOp 'uitslag: ' 90 || rood "vastloper: geen uitslag binnen 90 s"
 wachtOp 'klaar - de nieuwe server' 20
@@ -138,7 +138,7 @@ NB=$(cat "$W/bewaker-pid-2" 2>/dev/null)
 stop
 
 # ── 1b. fifo: systeemaanroep-hang (K1-beeld), pijpgenoot, pipe-lezer, 500 extra processen ─────────────────────────────
-opzet fifo; mkfifo "$W/fifo"; touch "$W/pijpgenoot"; start
+opzet fifo; mkfifo "$W/fifo"; touch "$W/pijpgenoot"; start BEWAKER_INSPECTOR=1
 P1=$(serverPid)
 for i in $(seq 1 50); do [ -s "$W/pijpgenoot-pid" ] && break; sleep 0.2; done
 GENOOT=$(cut -d' ' -f1 "$W/pijpgenoot-pid" 2>/dev/null)
