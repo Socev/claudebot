@@ -465,7 +465,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const hb = src.indexOf('// ── Second Brain (wv832'), he = src.indexOf('// ── einde secondbrain');
   const gestuurd = [];
   const ctx = vm2.createContext({ require, process: { env: { SECONDBRAIN_DIR: path.join(W, 'sd'), CLOUDFLARE_API_TOKEN: 'proef' } }, __dirname: process.cwd(), path, fs, crypto: require('crypto'), console, setInterval: () => ({ unref() {} }),
-    VAULT: V, logError: () => {}, appBsnMasker: (t) => t, appPoortGeheim: () => 'proefgeheim', smalCf: async () => ({ status: 200, j: { result: { chunks: [{ item: { key: 'vault/index.md' }, text: 'x', score: 0.5 }] } } }),
+    VAULT: V, logError: () => {}, vaultzoek: { zoekBrain: async () => [{ key: 'vault/index.md', text: 'x', score: 0.5 }] }, appBsnMasker: (t) => t, appPoortGeheim: () => 'proefgeheim', smalCf: async () => ({ status: 200, j: { result: { chunks: [{ item: { key: 'vault/index.md' }, text: 'x', score: 0.5 }] } } }),
     SMAL_CF_BASIS: 'x', SMAL_CF_ACCOUNT: 'y', appTeller: () => true, appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Date, Promise, JSON, String, Number, Array, Object, Math });
   // wv1901: de schakelaar en appAfscherm uit server.js (staan buiten dit blok)
   const afs = /^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0];
@@ -478,7 +478,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('9 koppeling wv1901: vaste plek + privé = 200 (David 28-10: op alle pc\'s alles)', gestuurd[1] && gestuurd[1].s === 200, gestuurd[1] && gestuurd[1].s);
   const res3 = { _app: {} };
   await ctx.__sb.appSecondBrain({}, res3, { soort: 'meereizend' }, { q: 'xy', betekenis: true }, 'POST /app/secondbrain/zoek');
-  toets('9 koppeling: betekenis leest item.key uit AI Search', gestuurd[2] && gestuurd[2].s === 200 && gestuurd[2].j.treffers.length === 1 && gestuurd[2].j.treffers[0].pad === 'index.md', gestuurd[2]);
+  toets('9 koppeling: betekenis via vaultzoek (wv3295), key vault/<pad>', gestuurd[2] && gestuurd[2].s === 200 && gestuurd[2].j.treffers.length === 1 && gestuurd[2].j.treffers[0].pad === 'index.md', gestuurd[2]);
   const fd = { vaste_lasten: { rijen: [{ naam: 'Centraal Beheer' }, { naam: 'Ziggo' }] }, paypal: { diensten: [{ naam: 'centraal beheer b.v.' }] } };
   ctx.__sb.secondbrainFinPagina(fd);
   toets('9 Financiën: pagina bij de passende post, niet bij de rest', fd.vaste_lasten.rijen[0].pagina === '10_Zakelijk/Tolgaarde/Verzekeringen.md' && !fd.vaste_lasten.rijen[1].pagina && fd.paypal.diensten[0].pagina === '10_Zakelijk/Tolgaarde/Verzekeringen.md', fd);

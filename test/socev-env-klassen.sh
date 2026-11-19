@@ -104,6 +104,7 @@ const env = Object.assign({}, process.env, geheim, mag, {
 delete env.SOCEV_AGENT_RUN;
 env.AGENT_WEBHOOK_URL = 'http://127.0.0.1:' + rpc.address().port + '/agentrapport';   // wv424b #9: payload vangen
 env.SMAL_CF_BASIS = 'http://127.0.0.1:' + rpc.address().port; env.SMAL_SB_MGMT = 'http://127.0.0.1:' + rpc.address().port; env.SMAL_TG_SCRIPT = path.join(W, 'tg.js');
+env.VAULTZOEK_SOCKET = path.join(W, 'geen-pg');   // wv3295: nooit de echte databank
 return spawn(process.execPath, [path.join(d, 'server.js')], { env, detached: true, stdio: ['ignore', fs.openSync(path.join(d, 'stdout.log'), 'a'), fs.openSync(path.join(d, 'stdout.log'), 'a')] });
 };
 let p = null;
@@ -247,9 +248,11 @@ rpc.listen(0, '127.0.0.1', async function () {
     const g1b = await req('POST', '/smal/les', { secret: SMAL, lessen: Array.from({ length: 21 }, () => ({ kort: 'een les van tien tekens of meer' })) });
     const g1c = await req('POST', '/smal/les', { secret: SMAL, lessen: { kort: 'kort' } });
     toets('G /smal/les: meer dan 20 of een te korte les -> 400, niets geschreven', g1b._status === 400 && g1c._status === 400 && lesRpc.length === 2, [g1b._status, g1c._status, lesRpc.length].join());
+    const nCf0 = cfVragen.length;
     const g2 = await req('POST', '/smal/vault-zoek', { secret: SMAL, query: 'wie regelt de verzekering', max_num_results: 500 });
-    const cv = cfVragen[cfVragen.length - 1] || {};
-    toets('G /smal/vault-zoek: naar AI Search /search van vault met het pod-token, max 50 resultaten', g2._status === 200 && g2.success === true && /ai-search\/instances\/vault\/search$/.test(cv.url) && cv.auth === 'Bearer x' && cv.body.max_num_results === 50, JSON.stringify(cv).slice(0, 200));
+    const aiSearch = cfVragen.slice(nCf0).filter((c) => /ai-search/.test(c.url || '')).length;
+    // wv3295: zoeken op betekenis via de eigen databank (vaultzoek.js); hier is er geen databank → 502 met vaste fout, nooit AI Search
+    toets('G /smal/vault-zoek: eigen databank, geen AI Search-aanroep (zonder databank 502)', aiSearch === 0 && g2._status === 502 && /eigen databank/.test(g2.fout || ''), JSON.stringify(g2).slice(0, 200));
     const nCf = cfVragen.length;
     const schrijf = ['DELETE FROM reeks', 'WITH a AS (SELECT 1) DELETE FROM reeks', 'SELECT 1; DROP TABLE reeks', 'INSERT INTO reeks VALUES (1)', 'select 1;\nupdate reeks set bedrag=0',
       'PRAGMA table_info(reeks)', 'REPLACE INTO reeks VALUES (1)', 'ATTACH DATABASE x AS y', ''];

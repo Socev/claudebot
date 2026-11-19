@@ -4386,6 +4386,7 @@ function handleRequest(req, res) {
       scripts_veeg: typeof scriptsVeegInfo === 'function' ? scriptsVeegInfo() : { aan: false },   // wv1311: opruimronde socev-run --veeg (exit, aantal opgeveegd; geen namen)
       shopper_proactief: typeof shopperProactiefInfo === 'function' ? shopperProactiefInfo() : { aan: false },   // wv2273: Shopper vanzelf (datum, exit, duur)
       ovis_kalender: typeof ovisKalenderInfo === 'function' ? ovisKalenderInfo() : { aan: false },   // wv1385: OVIS Calendar-feeds (datum, exit, duur; geen namen of URL's)
+      vaultzoek: typeof vaultzoekInfo === 'function' ? vaultzoekInfo() : { aan: false },   // wv3295: zoeken op betekenis (eigen databank; tellingen, geen inhoud)
       ovis_agenda: typeof ovisAgendaInfo === 'function' ? ovisAgendaInfo() : { aan: false },   // wv1411: OVIS Calendar Google-spiegel (datum, exit, duur; geen titels)
       ovis_deadlines: typeof ovisDeadlinesInfo === 'function' ? ovisDeadlinesInfo() : { aan: false },   // wv1412: deadline-register → tijdlijn + momentopname (datum, exit, duur)
       ovis: typeof ovisInfo === 'function' ? ovisInfo() : { aan: false },   // wv979: OVIS-register (laatste dag-, nacht- en Bibliothecarisronde; aantallen, geen inhoud)
@@ -22964,6 +22965,45 @@ async function appIdeeen(req, res, a, d, route, s) {
 }
 // ── einde ideeënbeurs ──
 
+// ── Zoeken op betekenis in de eigen databank (wv3295; ontwerp vault 01_Ontwikkeling/Zoeken op betekenis in eigen databank (ontwerp 19-11-2026).md) ──
+// WAAROM. Cloudflare AI Search (instantie vault) gaat 1-12-2026 factureren (schatting $225,83/mnd, vrijwel alles herinlezen, 0 zoekvragen in
+// 2 weken); David JA 18-11 09:55 (548baeb0): naar onze eigen databank. vaultzoek.js zoekt (alleen lezen, schema vaultzoek: pgvector + tekst);
+// vaultzoek-index.py vult de index elke nacht 02:10–04:49 via socev-run (hartslag vaultzoek, 36 u), met alleen nieuwe brokken in een
+// dagbudget aan Workers AI-neurons (gratis tegoed). Vraag inbedden = lessenVector (zelfde model bge-m3 als de index).
+const vaultzoek = (function () {
+  const p = path.join(__dirname, 'vaultzoek.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ vector: lessenVector, fout: logError }); } catch (e) { logError('vaultzoek', e); return null; }
+})();
+const vaultzoekRonde = (function () {
+  const p = path.join(__dirname, 'sb2-nacht.js'), script = path.join(__dirname, 'vaultzoek-index.py');
+  if (!fs.existsSync(p) || !fs.existsSync(script)) return null;
+  try {
+    const m = require(p);
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'vaultzoek', hartslag: 'vaultzoek', staatBestand: path.join(KLOKKEN_DIR, 'vaultzoek.json'),
+      maxMin: 45, pogingen: 2, venster: { van: [2, 10], tot: [4, 50] }, socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env,
+      argv: ['python3', '-I', script, 'ronde', '--max-min', '40'] }) : null;
+  } catch (e) { logError('vaultzoek-ronde', e); return null; }
+})();
+async function vaultzoekTik() {
+  if (!vaultzoekRonde || !SERVER_ECHT || !rolPrimair()) return;
+  try {
+    const u = await vaultzoekRonde.tik({ ams: ovisAms() });
+    if (u) schrijfLog(nu() + ' vaultzoek ' + velden({ exit: u.exit, ms: u.ms }));
+  } catch (e) { logError('vaultzoek-tik', e); }
+}
+if (vaultzoekRonde && SERVER_ECHT) { setInterval(function () { vaultzoekTik(); }, 5 * 60000).unref(); }
+function vaultzoekInfo() {
+  if (!vaultzoek) return { aan: false };
+  const uit = { aan: true, ronde: vaultzoekRonde ? vaultzoekRonde.info() : { aan: false } };
+  try {
+    const st = JSON.parse(fs.readFileSync('/opt/data/scripts-staat/vaultzoek/stand.json', 'utf8'));
+    uit.stand = { eind: st.eind, ingebed: st.ingebed, zonder_vector: st.zonder_vector, brokken: st.db_brokken, bestanden: st.db_bestanden,
+      neurons_vandaag_utc: st.neurons_vandaag_utc, stop: st.stop, met_mail: st.met_mail };
+  } catch (e) { uit.stand = null; }
+  return uit;
+}
+
 // ── Second Brain (wv832; bouwplan vault 01_Ontwikkeling/Second Brain - Obsidian-browser in de app (bouwplan 22-10-2026).md) ──
 // WAAROM. David 22-10-2026: "dat je kan klikken op een betaling en dat je dan naar de Obsidian Browser gaat … (App: "Second Brain", met in
 // Overzicht die mooie 3d-view van alle bestanden)". secondbrain.js bouwt de kaart (pad, domein, datum, links; geen inhoud) en geeft één
@@ -22990,17 +23030,10 @@ const secondbrain = (function () {
         catch (e) { return false; }
       },
       hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
+      // wv3295: eigen databank (vaultzoek.js) in plaats van Cloudflare AI Search; zelfde vorm [{key: 'vault/<pad>', text, score}]
       betekenis: async function (q) {
-        if (!process.env.CLOUDFLARE_API_TOKEN) return null;
-        const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/ai-search/instances/vault/search',
-          { query: q, max_num_results: 30, score_threshold: 0.1 });
-        const ch = r.status === 200 && r.j && r.j.result && Array.isArray(r.j.result.chunks) ? r.j.result.chunks : null;
-        if (!ch) return null;
-        return ch.map(function (c) {
-          const it = c && c.item;
-          const key = it && typeof it === 'object' ? String(it.key || '') : ((/'key': '([^']+)'/.exec(String(it)) || [])[1] || '');
-          return { key: key, text: String(c && c.text || '').slice(0, 1000), score: Number(c && c.score) || 0 };
-        });
+        if (!vaultzoek) return null;
+        try { return await vaultzoek.zoekBrain(q); } catch (e) { logError('vaultzoek-brain', new Error('code ' + String(e && e.code || '?'))); return null; }
       } });
     s.mkdir();
     s.laadBewaard();
@@ -26753,15 +26786,14 @@ async function smalActie(actie, d, wie) {
     } catch (e) { embedFout = 'embedden mislukt: ' + String(e && e.message || e).slice(0, 160); }
     return { status: 200, j: { ok: !embedFout, ids: ids, ingebed: ingebed, notities: notities, fout: embedFout || undefined } };
   }
-  if (actie === 'vault-zoek') {
-    if (!process.env.CLOUDFLARE_API_TOKEN) return { status: 503, j: { ok: false, fout: 'geen Cloudflare-sleutel op de pod' } };
+  if (actie === 'vault-zoek') {   // wv3295: eigen databank (vaultzoek.js); antwoordvorm gelijk aan AI Search /search
+    if (!vaultzoek) return { status: 503, j: { ok: false, fout: 'zoeken op betekenis zit niet in deze versie van de pod' } };
     const query = String(d.query || '').trim().slice(0, 2000);
     if (!query) return { status: 400, j: { ok: false, fout: 'query ontbreekt' } };
     const n = Math.min(Math.max(parseInt(d.max_num_results, 10) || 8, 1), 50);
     const drempel = Math.min(Math.max(Number(d.score_threshold) || 0.1, 0), 1);
-    const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/ai-search/instances/vault/search',
-      { query: query, max_num_results: n, score_threshold: drempel });
-    return { status: r.status === 200 ? 200 : 502, j: r.j || { ok: false, fout: 'AI Search gaf HTTP ' + r.status } };
+    try { return { status: 200, j: await vaultzoek.zoekAiVorm(query, n, drempel) }; }
+    catch (e) { logError('vaultzoek-smal', new Error('code ' + String(e && e.code || '?'))); return { status: 502, j: { ok: false, fout: 'zoeken op betekenis faalde (eigen databank)' } }; }
   }
   if (actie === 'fin-sql') {
     if (!process.env.CLOUDFLARE_API_TOKEN) return { status: 503, j: { ok: false, fout: 'geen Cloudflare-sleutel op de pod' } };
