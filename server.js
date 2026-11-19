@@ -36,7 +36,7 @@
  *   GET  /health  -> status incl. sync-, inbox- en agentinformatie (voor de wachters)
  *
  * Env: VAULT_DIR, REPO_DIR, PORT, API_SECRET, IO_DIR, MAX_FILE_MB,
- *      AGENT_WEBHOOK_URL, AGENT_WEBHOOK_SECRET (nieuw), MAX_AGENTS (default 3)
+ *      AGENT_WEBHOOK_URL, AGENT_WEBHOOK_SECRET (nieuw), MAX_AGENTS (default 4; tijdelijk hoger via /opt/data/max-agents.json)
  */
 const http = require('http');
 const https = require('https');
@@ -376,7 +376,28 @@ const AGENTS_FILE = path.join(HOME, 'agent_jobs.json');
 const AGENT_WEBHOOK_URL = process.env.AGENT_WEBHOOK_URL || '';
 const AGENT_WEBHOOK_SECRET = process.env.AGENT_WEBHOOK_SECRET || SECRET;
 // wv781 (22-10-2026): 4 i.p.v. 3 sinds het tweede abonnement; gemeten 22-10: pod 2,7 van 16 GB, agent ± 330 MB rss, 2 cores, lus p99 21 ms
-const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || '4', 10);
+const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || '4', 10) || 4;
+// 19-11-2026 (David, app-knop fd9c5a09: "tot 6 agents tegelijk, zolang abonnement 2 nog loopt"): het plafond kan zonder podherstart
+// tijdelijk omhoog via /opt/data/max-agents.json {"max":6,"tot":"<ISO>"}; na "tot" vanzelf terug naar MAX_AGENTS. Alleen 1..8; onleesbaar,
+// zonder geldige "tot" of verlopen = MAX_AGENTS. Een expliciete env MAX_AGENTS (toetsen) gaat altijd voor. Gemeten 19-11: podgrens 16 GB /
+// 4 cores, anon 2,3 GB, agent ± 330 MB rss.
+const MAX_AGENTS_PAD = process.env.MAX_AGENTS_PAD || '/opt/data/max-agents.json';
+let maxAgentsCache = { mtime: -1, max: null, tot: 0 };
+function maxAgents() {
+  if (process.env.MAX_AGENTS) return MAX_AGENTS;
+  let st; try { st = fs.statSync(MAX_AGENTS_PAD); } catch (e) { return MAX_AGENTS; }
+  if (st.mtimeMs !== maxAgentsCache.mtime) {
+    let m = null, tot = 0;
+    try {
+      const j = JSON.parse(fs.readFileSync(MAX_AGENTS_PAD, 'utf8'));
+      const n = j && j.max, t = (j && typeof j.tot === 'string' && /(Z|[+-]\d\d:\d\d)$/.test(j.tot)) ? Date.parse(j.tot) : NaN;
+      // Fable-review 19-11: alleen een echt getal, tijd mét zone, en hooguit 14 dagen vooruit (anders wordt 'tijdelijk' blijvend)
+      if (typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 8 && Number.isFinite(t) && t <= Date.now() + 14 * 86400000) { m = n; tot = t; }
+    } catch (e) { logError('max-agents', e); }
+    maxAgentsCache = { mtime: st.mtimeMs, max: m, tot: tot };
+  }
+  return (maxAgentsCache.max !== null && Date.now() < maxAgentsCache.tot) ? maxAgentsCache.max : MAX_AGENTS;
+}
 const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 
 // ── verharding: logging ─────────────────────────────────────────────────────
@@ -2372,7 +2393,7 @@ function agentInfo() {
       else mislukt24++;
     }
   }
-  return { lopend: lopend, afgerond_24u: afgerond24, mislukt_24u: mislukt24, rapport_wacht: rapportWacht, kwetsbaar: kwetsbaar, kwetsbaar_redenen: redenen };
+  return { lopend: lopend, max: maxAgents(), afgerond_24u: afgerond24, mislukt_24u: mislukt24, rapport_wacht: rapportWacht, kwetsbaar: kwetsbaar, kwetsbaar_redenen: redenen };
 }
 
 // ── Uitrolmarker (7-10-2026, wv91, akkoord David) ──────────────────────────
@@ -4846,9 +4867,9 @@ function handleRequest(req, res) {
           res.writeHead(429, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ ok: false, error: 'terra-loopt', uitleg: 'er loopt al een Terra-bundel' }));
         }
-      } else if (agentInfo().lopend - terraLopend() >= MAX_AGENTS) {
+      } else if (agentInfo().lopend - terraLopend() >= maxAgents()) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ ok: false, error: 'max-agents', uitleg: 'Er lopen al ' + MAX_AGENTS + ' achtergrondagents; wacht tot er één klaar is.' }));
+        return res.end(JSON.stringify({ ok: false, error: 'max-agents', uitleg: 'Er lopen al ' + (agentInfo().lopend - terraLopend()) + ' achtergrondagents (maximum ' + maxAgents() + '); wacht tot er één klaar is.' }));
       }
       const wsFout = workspaceFout(d.workspace);
       if (wsFout) return weigerWorkspace(res, wsFout, '/agent');
@@ -4928,7 +4949,7 @@ function handleRequest(req, res) {
       };
     }).sort(function (a, b) { return (b.gestart || '').localeCompare(a.gestart || ''); });
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, max_agents: MAX_AGENTS, agents: lijst }));
+    return res.end(JSON.stringify({ ok: true, max_agents: maxAgents(), agents: lijst }));
   }
 
   if (req.method === 'POST' && req.url === '/result') {
@@ -9612,7 +9633,7 @@ async function appAgents(req, res, a) {
       try { const ooit = await appVjWvGekoppeld(); los = los.filter(function (w) { return !ooit.has(Number(w.wv)); }); } catch (e) { logError('app-agents', e); }
     }
   } catch (e) { logError('app-agents', e); voorJou = null; los = null; }
-  appStuur(res, 200, { ok: true, max: typeof MAX_AGENTS === 'number' ? MAX_AGENTS : null, lopend: lopend, rij: rij, rij_totaal: open.length, wacht_op_david: wachtOpDavid,
+  appStuur(res, 200, { ok: true, max: maxAgents(), lopend: lopend, rij: rij, rij_totaal: open.length, wacht_op_david: wachtOpDavid,
     voor_jou: voorJou, wacht_op_david_los: los, recent: recent, ruimte: ru, fout: fout });
 }
 // ── wv1029: idee 14 fase 2 — klussen als tabjes in de machinekamer (ontwerp "Machinekamer - parallelle draden" § 4.3.2 a) ──
