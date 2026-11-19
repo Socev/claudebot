@@ -36,10 +36,6 @@ im.save(os.path.join(d, 'vaal.jpg'), quality=95)
 Image.new('RGB', (800, 600), (200, 120, 60)).save(os.path.join(d, 'uit.png'))
 `, B]);
 const VAAL = fs.readFileSync(path.join(B, 'vaal.jpg')), UITBEELD = fs.readFileSync(path.join(B, 'uit.png'));
-// wv3407 (B155): de pod schrijft elke foto kaal opnieuw (rechtop, zonder EXIF/GPS) vóór ComfyUI; VAAL_KAAL = wat studio-beeld.py neem ervan maakt
-execFileSync('python3', ['-I', path.join(__dirname || '.', 'studio-beeld.py'), 'neem', path.join(B, 'vaal.jpg'), path.join(B, 'vaal-kaal'), '16']);
-const VAAL_KAAL = fs.readFileSync(path.join(B, 'vaal-kaal.jpg'));
-if (sha(VAAL_KAAL) === sha(VAAL)) throw new Error('neem schreef de foto niet opnieuw');
 function pix(buf) {   // grijs? en min/max van het binnenste
   const f = path.join(W, 'p-' + crypto.randomBytes(4).toString('hex') + '.png'); fs.writeFileSync(f, buf);
   return JSON.parse(execFileSync('python3', ['-I', '-c', `
@@ -168,7 +164,7 @@ const taal = http.createServer((req, res) => {
   toets('2 taalmodel één keer gevraagd', x.tm === 1, x.tm);
   toets('2 na de run precies één /free (vrij_na), vooraf geen', x.fr === 1, x.fr);
   toets('2 meting: host-geheugen vooraf en RAM na /free vastgelegd', x.t && x.t.meting && x.t.meting.host_vrij_voor_mib === 68000 && x.t.meting.ram_vrij_na_free_mib === 60000, x.t && x.t.meting);
-  toets('2 foto (kaal herschreven) naar ComfyUI en daarna 1×1', x.up.length === 2 && sha(x.up[0].inhoud) === sha(VAAL_KAAL), x.up.map((u) => u.inhoud.length));
+  toets('2 foto naar ComfyUI en daarna 1×1', x.up.length === 2 && sha(x.up[0].inhoud) === sha(VAAL), x.up.map((u) => u.inhoud.length));
 
   // 3. taalmodel draait (200) → geweigerd, niets naar ComfyUI
   herstel(); TM.stand = 'aan';
@@ -263,16 +259,16 @@ const taal = http.createServer((req, res) => {
   toets('13 niveaus hersteld: binnenste loopt van ≤ 8 tot ≥ 247 (was 110–200); rand wit', p13 && p13.min <= 8 && p13.max >= 247 && p13.rand[0] === 255, p13);
   const bw13 = x.t && bewaard[x.t.id];
   const voor13 = bw13 && bw13.bestanden.find((b) => /^voor\./.test(b.naam));
-  toets('13 voor.jpg in Bestanden = de kaal herschreven invoer', voor13 && sha(fs.readFileSync(voor13.pad)) === sha(VAAL_KAAL), bw13);
+  toets('13 voor.jpg in Bestanden = het origineel (byte voor byte)', voor13 && sha(fs.readFileSync(voor13.pad)) === sha(VAAL), bw13);
   toets('13 meting noemt de voorbewerking; geen restbestand in de werkmap', x.t && x.t.meting && x.t.meting.voorbewerking === 'grijs-niveaus' && !fs.existsSync(path.join(DIR, 'werk', x.t.id)), x.t && x.t.meting);
   // 14. contrast nee: ComfyUI krijgt de foto zoals hij kwam
   herstel();
   x = await draai('kleur', { contrast: 'nee', kleur: 'ddcolor_artistic.pth' });
-  toets('14 contrast nee: ComfyUI kreeg de kale foto zonder voorbewerking; checkpoint gedempt', x.t && x.t.status === 'klaar' && x.up[0] && sha(x.up[0].inhoud) === sha(VAAL_KAAL) && C.prompts[C.prompts.length - 1].prompt['2'].inputs.checkpoint === 'ddcolor_artistic.pth', x.t);
+  toets('14 contrast nee: ComfyUI kreeg de foto byte voor byte; checkpoint gedempt', x.t && x.t.status === 'klaar' && x.up[0] && sha(x.up[0].inhoud) === sha(VAAL) && C.prompts[C.prompts.length - 1].prompt['2'].inputs.checkpoint === 'ddcolor_artistic.pth', x.t);
   // 15. onbekende voorbewerking in flow.yaml: genegeerd (vaste lijst in de pod)
   herstel();
   x = await draai('kleur', { contrast: 'raar' });
-  toets('15 onbekende voorbewerking: genegeerd, foto zonder voorbewerking', x.t && x.t.status === 'klaar' && x.up[0] && sha(x.up[0].inhoud) === sha(VAAL_KAAL) && !(x.t.meting && x.t.meting.voorbewerking), x.t && x.t.meting);
+  toets('15 onbekende voorbewerking: genegeerd, foto onveranderd', x.t && x.t.status === 'klaar' && x.up[0] && sha(x.up[0].inhoud) === sha(VAAL) && !(x.t.meting && x.t.meting.voorbewerking), x.t && x.t.meting);
   // 16. studio-beeld.py weigert een onbekende soort zelf ook
   let py = null; try { execFileSync('python3', ['-I', 'studio-beeld.py', 'voor', path.join(B, 'vaal.jpg'), path.join(W, 'x.png'), 'rm -rf /']); } catch (e) { py = { code: e.status, uit: String(e.stdout) }; }
   toets('16 studio-beeld.py voor met onbekende soort: exit 2, niets geschreven', py && py.code === 2 && /onbekende voorbewerking/.test(py.uit) && !fs.existsSync(path.join(W, 'x.png')), py);

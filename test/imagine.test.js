@@ -53,15 +53,6 @@ Image.frombytes('RGB', (int(sys.argv[3]), int(sys.argv[4])), os.urandom(int(sys.
 `, f, merk, String(b || 160), String(h || 120)]);
   const buf = fs.readFileSync(f); fs.rmSync(f); return buf;
 }
-// wv3407 (B155): de pod schrijft het beeld kaal opnieuw vóór ComfyUI; vergelijk dus pixels en maat, en toets dat het tekstblok weg is
-function pix(buf) {
-  if (!buf || !buf.length) return 'leeg';
-  const f = path.join(W, 'p-' + crypto.randomBytes(4).toString('hex'));
-  fs.writeFileSync(f, buf);
-  try { return execFileSync('python3', ['-I', '-c', 'import sys, hashlib\nfrom PIL import Image\nim = Image.open(sys.argv[1]).convert("RGB")\nprint(im.size, hashlib.sha256(im.tobytes()).hexdigest())', f]).toString().trim(); }
-  catch (e) { return 'onleesbaar'; } finally { fs.rmSync(f, { force: true }); }
-}
-const kaal = (buf) => buf.length > 0 && buf.indexOf('tEXt') < 0 && buf.indexOf('merk') < 0;
 // naalden: het merk, het woord, en stukken van het beeld zelf (rauw en als base64 in alle drie de uitlijningen)
 function naalden(teksten, beelden) {
   const n = teksten.map((t) => ({ wat: 'tekst', b: Buffer.from(t) }));
@@ -152,8 +143,7 @@ function zoek(wortels, nn) {
   r = await roep('/app/imagine/v/' + v2.id + '/toon');
   toets('1 weergaveversie is JPEG', r.status === 200 && Buffer.from(r.body.data, 'base64')[0] === 0xff, r.status);
   r = await roep('/app/imagine/v/' + v2.id + '/deel/1');
-  const echo1 = r.status === 200 ? Buffer.from(r.body.data, 'base64') : Buffer.alloc(0);
-  toets('1 origineel in stukken = het resultaat (echo van de invoer: zelfde pixels, zonder tekstblok)', r.status === 200 && r.body.delen === 1 && pix(echo1) === pix(gewoon) && kaal(echo1) && !kaal(gewoon), r.status);
+  toets('1 origineel in stukken = precies het resultaat (echo van de invoer)', r.status === 200 && r.body.delen === 1 && Buffer.from(r.body.data, 'base64').equals(gewoon), r.status);
   toets('1 niets in Bestanden en niets in taken.json van de Studio', !fs.existsSync(path.join(STUDIO, 'taken.json')) || JSON.parse(fs.readFileSync(path.join(STUDIO, 'taken.json'))).taken.length === 0);
   r = await roep('/app/imagine/v/' + v1 + '/weg', {});
   toets('1 het origineel weggooien kan niet', r.status === 409, r);
@@ -254,7 +244,7 @@ function zoek(wortels, nn) {
   const toonInc = r.status === 200 ? Buffer.from(r.body.data, 'base64') : Buffer.alloc(0);
   r = await roep('/app/imagine/incognito/b/' + res.id + '/deel/1');
   const uitInc = r.status === 200 ? Buffer.from(r.body.data, 'base64') : Buffer.alloc(0);
-  toets('2 resultaat op te halen (weergave en origineel: zelfde pixels, zonder tekstblok)', toonInc.length > 100 && pix(uitInc) === pix(inc) && kaal(uitInc), { t: toonInc.length, u: uitInc.length });
+  toets('2 resultaat op te halen (weergave en origineel)', toonInc.length > 100 && uitInc.equals(inc), { t: toonInc.length, u: uitInc.length });
   toets('2 Studio-lijst toont de incognitotaak niet', !S.taken().taken.some((t) => t.flow === 'beeld-opdracht-qwen'));
   // 2t (wv2990): nieuw beeld uit tekst in incognito; het beeld van de nep draagt het opdrachtwoord (het zoeken vindt dus ook het resultaat)
   const T2 = 'woordT2I' + crypto.randomBytes(8).toString('hex');
