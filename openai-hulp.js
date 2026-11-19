@@ -96,13 +96,10 @@ const STANDAARD = {
   ms: 300000,                   // time-out per synchrone aanroep
 };
 const AFNEMER = /^[a-z0-9][a-z0-9-]{0,39}$/;
-// Geheimen die nooit in een prompt horen (grondwet 2). Vorm-herkenning, geen inhoud: raak = niet versturen.
-const GEHEIM = [
-  /\bsk-(proj-|ant-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}/, /\bsbp_[a-f0-9]{30,}/, /\bgh[pousr]_[A-Za-z0-9]{30,}/, /\bgithub_pat_[A-Za-z0-9_]{30,}/,
-  /\bAIza[0-9A-Za-z_-]{30,}/, /\bxox[abpr]-[A-Za-z0-9-]{20,}/, /-----BEGIN [A-Z ]*PRIVATE KEY-----/, /\beyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\./,
-  /\b\d{8,10}:AA[A-Za-z0-9_-]{30,}/, /\bBearer\s+[A-Za-z0-9._~+/-]{24,}/i,
-  /\b(wachtwoord|password|passwd|pwd)\s*[:=]\s*\S{6,}/i,
-];
+// Geheimen die nooit in een prompt horen (grondwet 2). Vorm-herkenning, geen inhoud: raak = niet versturen. Sinds wv3405 (A32 deel 1, Fable
+// imagine § O1) de gedeelde lijst van geheimen.js in de strenge poortstand (eerder een eigen lijst die o.a. korte/tabel-wachtwoorden, "het
+// wachtwoord is …", hex/AWS, client_secret en een URL met inlog doorliet).
+const GEHEIMEN = require('./geheimen.js');
 
 /*
  * Zoeken op het web (wv2266, 2-11-2026; OVIS Shopper S4-voorbereiding): Responses API met de tool web_search, land NL, optioneel een
@@ -162,13 +159,9 @@ function zoekBronnen(r) {
 function isObj(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
 function kort(s, n) { return s == null ? null : String(s).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, n); }
 function rond(x) { return Math.round(x * 1e6) / 1e6; }
-function geheimIn(t) { return GEHEIM.some(function (r) { return r.test(t); }); }
+function geheimIn(t) { return GEHEIMEN.heeft(t, { streng: true }); }
 // maskeer: true (bijv. een diff met verzonnen toetssleutels) → elk geheim-vormig stuk wordt '[geheim-gemaskeerd]' in plaats van weigeren
-function maskeer(t) {
-  let n = 0, uit = String(t);
-  for (const r of GEHEIM) uit = uit.replace(new RegExp(r.source, r.flags.indexOf('g') >= 0 ? r.flags : r.flags + 'g'), function () { n++; return '[geheim-gemaskeerd]'; });
-  return { tekst: uit, n: n };
-}
+function maskeer(t) { return GEHEIMEN.maskeer(t, { streng: true, vervang: '[geheim-gemaskeerd]' }); }
 // Model uit het antwoord ("gpt-5.4-mini-2026-03-17") → rij in de tabel; eerst exact, dan zonder datumstaart.
 function prijsDatum(model) { const k = prijsSleutel(model); return k && PRIJZEN[k].datum ? PRIJZEN[k].datum : PRIJS_DATUM; }
 function prijsSleutel(model) {

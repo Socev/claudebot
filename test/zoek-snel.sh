@@ -186,7 +186,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   // ── 8. blokcontext en dekking (wv1289; David 25-10: "Zoeken en DENKEN dat je alles kreeg, is schadelijk") ──
   zet('10_Zakelijk/Tolgaarde/Auto\'s.md', ['---', 'updated: 2026-10-22', 'aliases: ["Wagenpark"]', '---', '# Auto\'s — Tolgaarde', '', 'De gezinsauto\'s staan zakelijk verzekerd.', '',
     '## Auto\'s (kort)', '', '| Auto | Kenteken | Bouwjaar |', '|---|---|---|', '| Volvo XC90 | KJH-23-J | 2026 |', '| Mini JCW | JFJ-37-S | 2025 |',
-    '| Subaru Forester | TD-RG-01 | 1998 |', '| Koppeling | ' + SLEUTEL + ' |', '', 'Losse alinea zonder iets.', ''].join('\n'));
+    '| Subaru Forester | TD-RG-01 | 1998 |', '| Koppeling | ' + SLEUTEL + ' |', '| Portaal | https://beheer:Kort26x@portaal.example |', '', 'Losse alinea zonder iets.', ''].join('\n'));
   // blokken die dicht blijven (review wv1289 #1/#2): wachtwoordkolom, en een tabel onder een kop met "voorgesteld"
   zet('10_Zakelijk/Tolgaarde/Parkeren.md', ['# Parkeren', '', '| Kenteken | Wachtwoord portaal |', '|---|---|', '| PRK-01-X | hunter2geheim |', '',
     '## Voorgestelde vergunningen (niet besloten)', '', '| Wie | Kenteken |', '|---|---|', '| Andere | VG-55-66 |', ''].join('\n'));
@@ -200,8 +200,10 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   toets('8 kentekens: de hele tabel mee, ook rijen zonder het zoekwoord (alle vier de auto\'s, ook GJL-11-J)', ['KJH-23-J', 'JFJ-37-S', 'TD-RG-01', 'GJL-11-J'].every((k) => p8.indexOf(k) >= 0), p8);
   toets('8 blok: kop van de tabel en de kop erboven mee', /: \| Auto \| Kenteken \| Bouwjaar \|/.test(p8) && /: ## Auto's \(kort\)/.test(p8), p8);
   toets('8 blok: sleutel in een buurrij gemaskeerd', p8.indexOf(SLEUTEL) < 0 && /sleutel weggelaten/.test(p8), p8);
-  toets('8 blok dicht: wachtwoordkolom en tabel onder "voorgesteld" geven alleen de treffer, geen buurrijen (review #1/#2)', !/hunter2geheim|PRK-01-X|VG-55-66|Andere/.test(p8) &&
-    /: \| Kenteken \| Wachtwoord portaal \|/.test(p8), p8);
+  toets('8 blok: URL met inlog in een buurrij gemaskeerd (strenge poortstand, wv3405)', p8.indexOf('Kort26x') < 0 && /beheer:\[sleutel weggelaten\]@/.test(p8), p8);
+  // wv3405 (A32, Fable register-zoek § 1): ook de trefregel zelf gaat niet mee als er een wachtwoordwoord in staat (zoals laag 2)
+  toets('8 blok dicht: wachtwoordkolom en tabel onder "voorgesteld" geven geen buurrijen, en de trefregel met "Wachtwoord" gaat ook niet mee', !/hunter2geheim|PRK-01-X|VG-55-66|Andere/.test(p8) &&
+    !/Wachtwoord portaal/.test(p8), p8);
   toets('8 blok: losse alinea buiten het blok blijft buiten', !/Losse alinea/.test(p8), p8);
   const reus = (p8.split('### 10_Zakelijk/Groenhouten/Reus.md')[1] || '').split('\n### ')[0];
   toets('8 reuzentabel: eigen grens (≤ 24 regels, ≤ ± 2 kB), de andere pagina\'s blijven erin', reus.length > 0 && reus.split('\n').filter((l) => /^\d+: /.test(l)).length <= 27 &&

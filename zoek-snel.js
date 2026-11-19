@@ -261,6 +261,7 @@ const MELDING = {
 // Dekking in gewone taal (wv1289, David 25-10: "Zoeken en DENKEN dat je alles kreeg, is schadelijk"). Een geraakte grens eindigt nooit als
 // "niet gevonden"; ook zonder treffers zegt de melding welke delen van het Brein doorzocht zijn.
 const WORTEL_NAAM = { '10_Zakelijk': 'Zakelijk', '20_Prive': 'Privé' };
+const WACHTWOORDWOORD = require('./geheimen.js').WACHTWOORDWOORD;
 const BLOK_DICHT = /voorgesteld|wachtwoord|password|passwd|pincode|\bpin\b|token|secret|api[-_ ]?key|sleutel|credential|inloggegevens/i;
 const DOORZOCHT = 'Ik zocht in Zakelijk en Privé (ook notulen, gesprekken en gezondheid), niet in ruwe bronnen, conversaties, archief en systeempagina\'s.';
 const DOORZOCHT_VAST = 'Ik zocht op dit apparaat alleen in Zakelijk (zonder personeel en financiën), niet in bronnen, notulen, gesprekken en archief.';
@@ -385,7 +386,9 @@ function maak(opt) {
   const grepBin = opt.grep || 'grep';
   const nu = opt.nu || Date.now;
   const VV = opt.vv || require('./vault-veilig.js');
-  const masker = opt.masker || require('./secondbrain.js').masker;
+  // wv3405 (A32, Fable register-zoek § 1): alles hier gaat naar het model, dus de strenge poortstand van het masker (4e argument; geheimen.js)
+  const maskerBasis = opt.masker || require('./secondbrain.js').masker;
+  const masker = function (t, v, b) { return maskerBasis(t, v, b, true); };
   const isVastDicht = opt.isVastDicht || require('./secondbrain.js').isVastDicht;
   // wv1788: laag 1 = opt.feiten(vraag, vast) → Promise<jsonb van public.sb_zoek_identifier>; laag 2 = opt.index { cmd, args, db } (args vóór
   // 'zoek', bv. ['-I', '<release>/…/zoekindex.py']). Ontbreekt een van beide, dan slaat zoek() die laag over (zoals vóór wv1788).
@@ -639,6 +642,8 @@ function maak(opt) {
         if (x.mee.has(nr)) { blokBytes += Buffer.byteLength(x.mee.get(nr)) + 6; continue; }
         const ruw = nr === r.nr ? r.tekst : x.lijnen[nr - 1];
         if (ruw === undefined || !String(ruw).trim() || /voorgesteld/i.test(ruw)) continue;
+        // wv3405 (A32): een regel met een wachtwoordwoord gaat nooit mee, ook niet als treffer (laag 2 laat zulke regels al weg)
+        if (WACHTWOORDWOORD.test(ruw)) continue;
         const t = regelTekst(ruw), b = Buffer.byteLength(t) + 6;
         if (eerste) {
           if (bytes + b > MAX_CONTEXT || nRegels >= MAX_REGELS || (x.bytes > 0 && x.bytes + b > perPagina)) return false;

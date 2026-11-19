@@ -35,6 +35,10 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
   zet('01_Ontwikkeling/Zonder kop.md', 'Alleen tekst.\n');
   zet('01_Ontwikkeling/Sleutel.md', '# s\nToken: abcd_Qw3rTy7uIo9pAs1dFg5hJk2lZx4cVb6nM8qW0eR\n');
   zet('01_Ontwikkeling/Sleutel-in-link.md', '# s\n[hier](https://example.org/?token=Qw3rTy7uIo9pAs1dFg5hJk2lZx4cVb)\n');
+  // wv3405 (A32): strenge poortstand — kort wachtwoord in een tabelcel, URL met inlog, token direct na een / (verzonnen waarden)
+  zet('01_Ontwikkeling/Kort-wachtwoord.md', '# Portaal\n\n| Wat | Waarde |\n|---|---|\n| Wachtwoord | Qw3r!x |\n');
+  zet('01_Ontwikkeling/Url-inlog.md', '# Portaal\n\n[portaal](https://jan:Qw3rty9@portaal.example/start)\n');
+  zet('01_Ontwikkeling/Token-na-slash.md', '# Hook\n\n[hook](https://example.org/hook/Qw3rTy7uIo9pAs1dFg5hJk2lZx4c)\n');
   zet('01_Ontwikkeling/Iban.md', '# Betalen\nRekening NL91 ABNA 0417 1643 00.\n');
   zet('01_Ontwikkeling/Bsn.md', '# Formulier\nNummer 111222333.\n');
   zet('01_Ontwikkeling/Naam-titel.md', '# Afspraak met Jan Klaassen\n\nNiets bijzonders.\n');
@@ -118,6 +122,8 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
   const bev = await app('voorbeeld', { pad: '01_Ontwikkeling/Beveiliging/Plan.md' });
   toets('2 Beveiliging: sinds wv1931 zichtbaar voor David, maar nooit te delen (403 kan_niet)', bev.status === 403 && bev.j.kan_niet === true, bev);
   for (const [p, re, waarom] of [['01_Ontwikkeling/Sleutel.md', /sleutel/, 'sleutel'], ['01_Ontwikkeling/Sleutel-in-link.md', /sleutel/, 'sleutel in een linkadres'],
+    ['01_Ontwikkeling/Kort-wachtwoord.md', /sleutel/, 'kort wachtwoord in een tabelcel (wv3405)'], ['01_Ontwikkeling/Url-inlog.md', /sleutel/, 'URL met inlog (wv3405)'],
+    ['01_Ontwikkeling/Token-na-slash.md', /sleutel/, 'token direct na een / (wv3405)'],
     ['01_Ontwikkeling/Iban.md', /IBAN/, 'IBAN'], ['01_Ontwikkeling/Bsn.md', /BSN/, 'BSN']]) {
     const r = await app('voorbeeld', { pad: p });
     toets('2 weigeren: ' + waarom + ' (422, waarde niet in de melding)', r.status === 422 && re.test(r.j.fout) && !/Qw3r|0417|111222333/.test(JSON.stringify(r.j)), r);
