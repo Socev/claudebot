@@ -2655,8 +2655,12 @@ function gewenstStap(staat, g, draait, nuMs) {   // → { staat, melden: null | 
   return { staat: s, melden: { sleutel: sleutel, sinds: s.sinds.op } };
 }
 function gewenstKlok(ms) { return new Date(ms).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16); }
+function gewenstTitel(g, draait) { return 'Pod draait ' + (draait || 'onbekend') + ', bedoeld is ' + g.sha + ' (automatisch, wv3418)'; }
+function gewenstAlInBox(titel) {   // Codex ZOU 1: rij geschreven maar staat niet bewaard (uitval, schijffout) → na herstart niet nog eens
+  try { return fs.readFileSync(path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), 'utf8').indexOf(' — ' + titel + '\n') >= 0; } catch (e) { return false; }
+}
 function gewenstBoxRij(g, draait, sinds, nuMs) {
-  return '\n## [direct] ' + gewenstKlok(nuMs) + ' — Pod draait ' + (draait || 'onbekend') + ', bedoeld is ' + g.sha + ' (automatisch, wv3418)\n' +
+  return '\n## [direct] ' + gewenstKlok(nuMs) + ' — ' + gewenstTitel(g, draait) + '\n' +
     '- status: open\n- van: pod server.js (gewenst-wacht; één rij per verschil, geen herhaling zolang het blijft)\n' +
     '- gemeten: ' + GEWENST_PAD + ' zegt ' + g.sha + ' (gezet ' + (g.tijd || '?') + ' door ' + (g.door || '?') + (g.reden ? ', ' + g.reden : '') +
     '); /health versie is ' + (draait || 'onbekend') + ', zo sinds ' + gewenstKlok(sinds) + '. /health gewenst toont de stand.\n' +
@@ -2675,7 +2679,8 @@ function gewenstWacht() {
     const nuMs = Date.now(), g = gewenstLees(), draait = gewenstDraait(), uit = gewenstStap(gewenstStaat, g, draait, nuMs);
     gewenstStaat = uit.staat;
     if (uit.melden) {
-      if (ovisBoxRij(gewenstBoxRij(g, draait, uit.melden.sinds, nuMs)) === true) {
+      if (gewenstAlInBox(gewenstTitel(g, draait))) gewenstStaat.gemeld = uit.melden.sleutel;
+      else if (ovisBoxRij(gewenstBoxRij(g, draait, uit.melden.sinds, nuMs)) === true) {
         gewenstStaat.gemeld = uit.melden.sleutel;
         schrijfLog(nu() + ' gewenst-wacht box-rij ' + uit.melden.sleutel);
       }   // niet geschreven: gemeld blijft leeg, de volgende minuut opnieuw

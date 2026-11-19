@@ -28,7 +28,7 @@ function maak(opt) {
   const klok = { t: opt.t || START }, rijen = [], box = { faal: false };
   class NepDatum extends Date { constructor(...x) { super(...(x.length ? x : [klok.t])); } static now() { return klok.t; } }
   const ctx = {
-    fs: fs, path: path, Date: NepDatum, JSON: JSON, String: String, Math: Math,
+    fs: fs, path: path, Date: NepDatum, VAULT: path.join(T, 'vault'), JSON: JSON, String: String, Math: Math,
     process: { env: { APP_ROOT: T, GEWENST_WACHT: STAAT, RELEASE_SHA: opt.draait || DRAAIT, IMAGE_SHA: 'beeld' } },
     SERVER_ECHT: opt.echt === undefined ? true : opt.echt,
     rolPrimair: function () { return opt.primair === undefined ? true : opt.primair; },
@@ -75,6 +75,13 @@ toets('6 box faalt: geen rij, niet gemeld', m.rijen.length === 0 && m.f.gewenstI
 m.box.faal = false; minuten(m, 1);
 toets('6 box weer bereikbaar: precies één rij', m.rijen.length === 1); minuten(m, 30);
 toets('6 daarna geen herhaling', m.rijen.length === 1);
+// 6b. Codex ZOU 1: rij staat al in de box maar de staat ging verloren (uitval na het schrijven) → geen tweede rij
+fs.mkdirSync(path.join(T, 'vault', '00_Systeem', 'Meldingen'), { recursive: true });
+fs.writeFileSync(path.join(T, 'vault', '00_Systeem', 'Meldingen', 'machinekamer.md'), '# box\n' + m.rijen[0]);
+try { fs.unlinkSync(STAAT); } catch (e) {}
+m = maak({ t: m.klok.t }); minuten(m, 30);
+toets('6b staat kwijt, rij al in de box: geen tweede rij, wel gemeld', m.rijen.length === 0 && m.f.gewenstInfo().gemeld === BEDOELD + '>' + DRAAIT, JSON.stringify(m.f.gewenstInfo()));
+fs.rmSync(path.join(T, 'vault'), { recursive: true, force: true });
 // 7. kapot bestand
 fs.writeFileSync(GEW, '{kapot'); try { fs.unlinkSync(STAAT); } catch (e) {}
 m = maak(); minuten(m, 30);
