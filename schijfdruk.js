@@ -393,17 +393,10 @@ function incidentBijwerken(p, w) {
   if (incident) haperVerwerk().catch(() => {});
   if (haperVuil && !haperBewaarBezig && nu - haperBewaarLaatst >= C.haperBewaarMs && fsOpen < MAXOPEN) haperBewaar().catch(() => {});
 }
-function stuurBericht(tekst) {
+function stuurBericht(tekst) {   // wv3424: via meld.js (bericht.py, zelfde aanroep als de bewaker)
   if (!fs.existsSync(BERICHT)) return Promise.resolve(false);
-  return new Promise(function (resolve) {
-    let p, klaar = false;
-    const einde = (v) => { if (!klaar) { klaar = true; clearTimeout(t); resolve(v); } };
-    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch (e) {} einde(false); }, 120000);
-    try { p = spawn('python3', [BERICHT, '--klasse', 'normaal', '--sleutel', 'schijf-hapert', tekst], { stdio: 'ignore', cwd: '/', env: process.env }); }
-    catch (e) { einde(false); return; }
-    p.on('error', () => einde(false));
-    p.on('exit', (code) => einde(code === 0));
-  });
+  const m = meldInst();
+  return m ? m.bericht(tekst, 'schijf-hapert') : Promise.resolve(false);
 }
 function haperRij(i, nu) {
   const d = i.details || {};
@@ -453,7 +446,7 @@ async function haperVerwerk() {
       if (nu - haperStaat.box < C.haperBoxPauze) i.boxKlaar = true;   // net een rij gezet voor een vorig incident: geen tweede
       else {
         i.boxPog++; i.boxLaatst = nu;
-        if (await boxRijVeilig(haperRij(i, nu))) { i.boxKlaar = true; haperStaat.box = nu; await haperBewaar(); }
+        if (await boxRijVeilig(haperRij(i, nu), 'hapert-' + i.sinds)) { i.boxKlaar = true; haperStaat.box = nu; await haperBewaar(); }
         else haperVuil = true;   // pogingen bewaren
       }
     }
@@ -596,25 +589,20 @@ async function schrijfAtomair(p, inhoud) {
   const tmp = path.join(path.dirname(p), '.' + path.basename(p) + '.schijfdruk-' + crypto.randomBytes(4).toString('hex') + '.tmp');
   return metGrens(fsp.writeFile(tmp, inhoud).then(() => fsp.rename(tmp, p)).then(() => true), C.fs, false);
 }
-// De box-rij gaat via vault-veilig.wijzig (symlinkveilig, mapgrendel met flock, opnieuw lezen als het bestand intussen veranderde; Codex
-// MOET 2) in een kind-proces met time-out: een schijf die hangt, hangt het kind en niet deze meter.
-const BOX_KIND = "const vv = require(process.argv[1]);" +
-  "const ok = vv.wijzig(process.argv[2], function (t) {" +
-  " const m = /\\n## \\[[a-z]{2,10}\\] \\d{4}-\\d{2}-\\d{2}/.exec(t); if (!m) return null;" +
-  " return t.slice(0, m.index) + JSON.parse(process.argv[3]) + t.slice(m.index); }, { grendel: 5 });" +
-  "process.exit(ok ? 0 : 3);";
-function boxRijVeilig(rij) {
-  const vv = path.join(__dirname, 'vault-veilig.js');
-  if (!fs.existsSync(vv)) return Promise.resolve(false);
-  return new Promise(function (resolve) {
-    let k, klaar = false;
-    const einde = (v) => { if (!klaar) { klaar = true; clearTimeout(t); resolve(v); } };
-    const t = setTimeout(() => { try { k.kill('SIGKILL'); } catch (e) {} einde(false); }, C.boxKindMs);
-    try { k = spawn(process.execPath, ['-e', BOX_KIND, vv, BOX, JSON.stringify(rij)], { stdio: 'ignore', cwd: '/' }); }
-    catch (e) { einde(false); return; }
-    k.on('error', () => einde(false));
-    k.on('exit', (code) => einde(code === 0));
-  });
+// De box-rij gaat via meld.js (wv3424, B81: dezelfde module als bewaker.js): vault-veilig.wijzig (symlinkveilig, mapgrendel met flock,
+// opnieuw lezen als het bestand intussen veranderde; Codex MOET 2 van wv3124) in een kind-proces met time-out: een schijf die hangt, hangt
+// het kind en niet deze meter, en na de time-out krijgt het kind SIGKILL (geen late landing). Vast kenmerk per incident: een rij die er al
+// staat, wordt bij een volgende poging niet nog eens geschreven. De herkansing doet deze meter zelf (haperVerwerk), dus hier zonder.
+let meldMod = null;
+function meldInst() {
+  if (meldMod) return meldMod;
+  try { meldMod = require(process.env.SCHIJFDRUK_MELD || path.join(__dirname, 'meld.js')).maak({ box: BOX, bericht: BERICHT, kindMs: C.boxKindMs }); }
+  catch (e) { meldMod = null; }
+  return meldMod;
+}
+function boxRijVeilig(rij, kenmerk) {
+  const m = meldInst();
+  return m ? m.boxRij(rij, 'schijfdruk-' + kenmerk, { herkansing: false }) : Promise.resolve(false);
 }
 async function alarmRij(vanaf) {
   const nu = Date.now();
@@ -636,7 +624,7 @@ async function alarmRij(vanaf) {
     ['voorstel', o.hapert ? 'de schijf zelf hapert: zie 00_Systeem/Schijf van Olares.md; de Olares-zijde (host-log) moet de NVMe nalopen' : 'vergelijk het tijdvak met Immich/Takeout-import, back-ups en de nachtketen; bij een herhaling op hetzelfde uur de bron op de Olares-host zoeken']];
   const rij = '\n## [direct] ' + amsterdam().slice(0, 16) + ' — Schijfdruk hoog: full avg60 > ' + C.alarmPct + ' % al ' + Math.round((nu - vanaf) / 60000) + ' min' + (top ? ' (' + top.n + ')' : '') + ' — ' + o.label + ' #schijfdruk-hoog\n' +
     velden.map((v) => '- ' + v[0] + ': ' + String(v[1]).replace(/[\r\n]+/g, ' ').slice(0, 1500)).join('\n') + '\n';
-  return boxRijVeilig(rij);
+  return boxRijVeilig(rij, 'hoog-' + vanaf);
 }
 async function alarmControle(r) {
   const hoog = r.io && r.io[3] > C.alarmPct;

@@ -51,7 +51,7 @@ srv.listen(process.env.PORT, '127.0.0.1', function () {
   fs.writeFileSync(W + '/bewaker-pid-' + n, String(require('./bewaker.js').start({ serverPid: process.pid, poort: process.env.PORT })));
 });
 JS
-  cp "${BEWAKER_JS:-$HIER/bewaker.js}" "$W/app/releases/aaa/bewaker.js"
+  cp "${BEWAKER_JS:-$HIER/bewaker.js}" "$W/app/releases/aaa/bewaker.js"; cp "$HIER/meld.js" "$HIER/vault-veilig.js" "$W/app/releases/aaa/"   # wv3424
   cp "$W/app/releases/aaa/"* "$W/app/releases/bbb/"
   ln -s releases/aaa "$W/app/current"; ln -s releases/bbb "$W/app/vorige"
   printf '# box\n\n**Formaat** (proef)\n\n## [week] 2026-10-01 10:00 — bestaande rij\n- status: open\n' > "$W/box.md"
