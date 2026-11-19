@@ -11,7 +11,7 @@ WAT.
      secretpoort scant die kopie (fail-closed zoals sync-naar-r2.sh) en alleen uit die kopie wordt geknipt. Sterk patroon of
      onleesbaar → hele bestand eruit; zwak patroon (jwt in een maillink, naam=waarde) → de brokken rond die regel (± 2 regels) en
      elk brok onder een kopregel met een treffer. Wat eruit gaat wordt nooit opgeslagen of verstuurd.
-  2. .md/.txt ≤ 4 MB, met de uitsluitingen van vault-rag (filters.txt) plus de grote logboeken (box, box-archief, n8n-wijzigingslog,
+  2. .md/.txt ≤ 4 MB, met de uitsluitingen van vault-rag (filters.txt, o.a. de Promedico-weekpagina's) plus de grote logboeken (box, box-archief, n8n-wijzigingslog,
      00_Systeem/Tokens) en zolang de index in de databank postgres staat het mailarchief (--zonder-mail; zie db/vaultzoek.sql).
   3. Brokken van ± 1.000 tekens binnen een kopsectie (pad + kop erbij in de ingebedde tekst); alleen gewijzigde bestanden.
   4. Embeddings via Workers AI @cf/baai/bge-m3 (zelfde model en sleutel als de lessen), binnen een dagbudget in neurons per
@@ -55,6 +55,12 @@ MARGE = 2                   # regels rond een zwakke poorttreffer die ook weg mo
 UIT_MAP = {'.git', '.obsidian', 'node_modules', '.playwright-mcp', '__pycache__', '_INBOX', 'raw_input', '.trash', '.stversions'}
 UIT_PAD = ('00_Systeem/Vault-RAG/', '00_Systeem/Beveiliging/', '00_Systeem/Tokens/', '00_Systeem/Meldingen/Archief/', '90_Cijfermeester/')
 UIT_BESTAND = {'00_Systeem/Meldingen/machinekamer.md', '00_Systeem/n8n-wijzigingslog.md'}
+# A03 (actieplan Fable-reviews 19-11-2026): Promedico-weekpagina's niet inbedden (Workers AI = Cloudflare); vrije HIS-tekst kan een kale
+# achternaam bevatten. De botsingenpagina's ("… - botsingen.md") wel. Zelfde patroon staat in mk-scripts/vault-rag/filters.txt.
+UIT_RE = re.compile(r'^10_Zakelijk/Tolgaarde/Promedico-agenda/Promedico-agenda \d{4}-W\d{2}\.md$')
+# Rijen die al in de index staan blijven tot David over wissen besluit (actieplan C05): een uitgesloten pad zou anders als 'weg' gelden
+# en de ronde zou het wissen. Na zijn Ja: BEWAAR_RE = None (dan ruimt de volgende ronde ze op).
+BEWAAR_RE = UIT_RE
 MAIL = '30_Conversaties/Mail/'
 
 
@@ -230,13 +236,18 @@ def momentopname(paden):
 
 # ── vault doorlopen ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 def uitgesloten(rel, met_mail):
-    if rel in UIT_BESTAND or rel.startswith(UIT_PAD):
+    if rel in UIT_BESTAND or rel.startswith(UIT_PAD) or UIT_RE.match(rel):
         return True
     if rel.startswith('.claude/') and not rel.startswith('.claude/skills/'):
         return True
     if not met_mail and rel.startswith(MAIL):
         return True
     return False
+
+
+def weg_paden(db, schijf):
+    """Paden in de index die niet meer op schijf (in scope) staan: die gaan eruit, behalve wat tot een besluit bewaard blijft."""
+    return [p for p in db if p not in schijf and not (BEWAAR_RE and BEWAAR_RE.match(p))]
 
 
 def rang(rel):
@@ -378,7 +389,7 @@ def ronde(max_neurons, max_min, met_mail, droog):
 
     schijf = bestanden(met_mail)
     db = {r[0]: r[1] for r in sql('select pad, coalesce(sig, \'\') from vaultzoek.bestand')}
-    weg = [p for p in db if p not in schijf]
+    weg = weg_paden(db, schijf)
     nieuw = []
     for rel, (mt, gr, ct) in schijf.items():
         sig = '%s:%d:%d:%d' % (BROKVERSIE, mt, gr, ct)
