@@ -29,7 +29,7 @@ const dagTerug = (n) => { const d = new Date(vandaag + 'T12:00:00Z'); d.setUTCDa
 const eb = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const PEM = eb.privateKey.export({ type: 'pkcs8', format: 'pem' }), APP = '0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0';
 const G = { sleutel: PEM, app_id: APP };
-const E = { sessies: {}, n: 0, opvragen: [], forceer: {}, appFout: 0, sessieFout: 0 };
+const E = { sessies: {}, n: 0, opvragen: [], forceer: {}, appFout: 0, sessieFout: 0, van: [], afkap: false };
 const ebApi = http.createServer(function (req, res) {
   let body = ''; req.on('data', (c) => body += c);
   req.on('end', function () {
@@ -50,11 +50,12 @@ const ebApi = http.createServer(function (req, res) {
     m = /^\/accounts\/([^/]+)\/(balances|transactions)$/.exec(p);
     if (m) {
       E.opvragen.push(m[2]);
+      if (m[2] === 'transactions' && !u.searchParams.get('continuation_key')) E.van.push(u.searchParams.get('date_from'));
       if (E.forceer[m[2]]) return stuur(E.forceer[m[2]], {});
       const s = Object.values(E.sessies).find((x) => x.uid === m[1]);
       if (!s || s.status !== 'AUTHORIZED') return stuur(401, {});
       if (m[2] === 'balances') return stuur(200, { balances: [{ balance_type: 'CLBD', balance_amount: { currency: 'EUR', amount: '1234.56' } }] });
-      return stuur(200, { transactions: [{ entry_reference: 'r1', transaction_amount: { currency: 'EUR', amount: '95.50' }, credit_debit_indicator: 'DBIT', status: 'BOOK',
+      return stuur(200, { continuation_key: E.afkap ? 'p' + E.opvragen.length : undefined, transactions: [{ entry_reference: 'r1', transaction_amount: { currency: 'EUR', amount: '95.50' }, credit_debit_indicator: 'DBIT', status: 'BOOK',
         booking_date: dagTerug(2), creditor: { name: 'Energie Bakker BV' }, remittance_information: ['termijn'] }] });
     }
     stuur(404, {});
@@ -68,7 +69,7 @@ const UID = 4242, BSLEUTEL = 'sleutel' + 'x'.repeat(57), ITOK = 'i'.repeat(64);
 fs.writeFileSync(path.join(BD, 'bunq', 'staat.json'), JSON.stringify({ aangemaakt: '2026-10-20T22:05:00+02:00', omgeving: 'productie', permitted_ips: ['1.2.3.4'],
   private_key_pem: client.privateKey.export({ type: 'pkcs8', format: 'pem' }), installation_token: ITOK,
   server_public_key: bsrv.publicKey.export({ type: 'spki', format: 'pem' }), device_server_id: 1, user_id: UID, user_soort: 'UserPerson' }), { mode: 0o600 });
-const B = { sessies: new Set(), n: 0, sessieFout: 0, lijst: 0, betalingen: 0 };
+const B = { sessies: new Set(), n: 0, sessieFout: 0, lijst: 0, betalingen: 0, afkap: false, fout2: false, pag: 0 };
 const bt = (dagen) => new Date(Date.now() - dagen * 86400000).toISOString().replace('T', ' ').replace('Z', '000').slice(0, 26);
 function brek(soort, id, status, naam, iban, saldo) { return { [soort]: { id: id, status: status, description: naam, currency: 'EUR', balance: { currency: 'EUR', value: saldo }, alias: [{ type: 'IBAN', value: iban, name: 'D' }] } }; }
 const bunqApi = http.createServer(function (req, res) {
@@ -89,6 +90,11 @@ const bunqApi = http.createServer(function (req, res) {
         brek('MonetaryAccountBank', 4, 'CANCELLED', 'Oud', 'NL44BUNQ0000000004', '0.00')], Pagination: { older_url: null } }); }
     const m = /^\/v1\/user\/4242\/monetary-account\/(\d+)\/payment$/.exec(u.pathname);
     if (m) { B.betalingen++;
+      // A10: afkap = altijd nog een oudere pagina; fout2 = de tweede pagina van rekening 1 faalt (500)
+      if (m[1] === '1' && u.searchParams.get('older_id')) { B.pag++; if (B.fout2) return stuur(500, { Error: [{ error_description: 'storing' }] }); }
+      if (m[1] === '1' && B.afkap) return stuur(200, { Response: [{ Payment: { id: 600 - B.pag, created: bt(1), monetary_account_id: 1, amount: { currency: 'EUR', value: '-12.34' }, description: 'Supermarkt Jansen',
+        counterparty_alias: { display_name: 'Supermarkt Jansen', iban: 'NL99RABO0123456789' }, balance_after_mutation: { currency: 'EUR', value: '777.77' }, type: 'BUNQ' } }],
+        Pagination: { older_url: '/v1/user/' + UID + '/monetary-account/1/payment?count=200&older_id=' + (600 - B.pag) } });
       return stuur(200, { Response: m[1] === '1' ? [{ Payment: { id: 501, created: bt(1), monetary_account_id: 1, amount: { currency: 'EUR', value: '-12.34' }, description: 'Supermarkt Jansen',
         counterparty_alias: { display_name: 'Supermarkt Jansen', iban: 'NL99RABO0123456789' }, balance_after_mutation: { currency: 'EUR', value: '777.77' }, type: 'BUNQ' } }] : [], Pagination: { older_url: null } }); }
     stuur(404, {});
@@ -198,6 +204,31 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
     nulTellers();
     r = await draai(['ronde'], AL);
     toets('einddatum uit GET /sessions overgenomen (10 dagen over)', r.j.toestemming[0].dagen_over === 10, r.j.toestemming);
+
+    // ── A10 (actieplan 19-11): het venster schuift alleen op na een volledige opvraag ──
+    {
+      const oud = new Date(Date.now() - 15 * 86400000).toISOString(), eh = ebHash();
+      const bh = Object.keys(stand().rekeningen).find((h) => stand().rekeningen[h].bron === 'bunq' && stand().rekeningen[h].bunq_id === 1);
+      nulTellers(); zetStand((s) => { s.opgehaald[eh].transacties = oud; s.opgehaald[bh].transacties = oud; delete s.ronde.box; });
+      E.afkap = true; B.afkap = true; B.pag = 0; E.van = []; E.opvragen = [];
+      r = await draai(['ronde'], AL, { BUNQ_MAX_PAGINAS: '2' });
+      const verwachtVan = new Date(Date.parse(oud.slice(0, 10) + 'T12:00:00Z') - 10 * 86400000).toISOString().slice(0, 10);
+      toets('A10 ABN: ingekorte opvraag (60 pagina\'s) → niet geslaagd, fout afgekapt, venster blijft staan', r.j && !r.j.geslaagd && r.j.fouten.some((f) => f.bron === 'enablebanking' && f.reden === 'afgekapt') &&
+        stand().opgehaald[eh].transacties === oud && E.opvragen.filter((x) => x === 'transactions').length === 60 && E.van[0] === verwachtVan, [r.j && r.j.fouten, stand().opgehaald[eh], E.van]);
+      toets('A10 bunq: afgekapte opvraag → fout afgekapt, venster blijft staan', r.j.fouten.some((f) => f.bron === 'bunq' && f.reden === 'afgekapt') && stand().opgehaald[bh].transacties === oud, [r.j.fouten, stand().opgehaald[bh]]);
+      toets('A10: box-melding voor beide afgekapte bronnen, zonder bankdata', Array.isArray(r.j._box_ronde) && r.j._box_ronde.some((m) => m.bron === 'enablebanking' && m.reden === 'afgekapt') &&
+        r.j._box_ronde.some((m) => m.bron === 'bunq' && m.reden === 'afgekapt') && geenBankdata(JSON.stringify(r.j._box_ronde)), r.j._box_ronde);
+      nulTellers(); E.van = [];
+      r = await draai(['ronde'], AL, { BUNQ_MAX_PAGINAS: '2' });
+      toets('A10: tweede afgekapte ronde dezelfde dag: zelfde bereik opnieuw gevraagd, geen tweede box-melding', E.van[0] === verwachtVan && !r.j._box_ronde && stand().opgehaald[eh].transacties === oud, [E.van, r.j._box_ronde]);
+      nulTellers(); E.afkap = false; B.afkap = true; B.fout2 = true; B.pag = 0;
+      r = await draai(['ronde'], AL, { BUNQ_MAX_PAGINAS: '3' });
+      toets('A10 bunq: fout op de tweede pagina → fout gemeld, venster blijft staan; ABN volledig → venster wel opgeschoven', !r.j.geslaagd && r.j.fouten.some((f) => f.bron === 'bunq') &&
+        stand().opgehaald[bh].transacties === oud && stand().opgehaald[eh].transacties > oud && B.pag >= 1, [r.j.fouten, stand().opgehaald[bh], B.pag]);
+      nulTellers(); B.afkap = false; B.fout2 = false;
+      r = await draai(['ronde'], AL);
+      toets('A10: opvraag weer volledig → geslaagd en venster van bunq opgeschoven', r.j.geslaagd && stand().opgehaald[bh].transacties > oud, [r.j.fouten, stand().opgehaald[bh]]);
+    }
 
     // ── server.js: bankRonde en bankKaarten (vm, nagebootste Supabase) ──
     const src = fs.readFileSync('server.js', 'utf8');
@@ -326,6 +357,12 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
       kk._hoofd = { tekst: 'oud', sinds: new Date(Date.now() - 15 * 3600000).toISOString(), bank: 'ABN AMRO' }; fs.writeFileSync(kp, JSON.stringify(kk));
       uk = h.bankRondeUitkomst().j;
       toets('pod: hoofdregel ouder dan 14 u: weggegooid, niet gestuurd', !uk.hoofd_regel && uk.hoofd_vervallen === true && !JSON.parse(fs.readFileSync(kp, 'utf8'))._hoofd, uk); }
+    // A10: afgekapte opvraag → box-rij in de machinekamer
+    nulTellers(); zetStand((s) => { delete s.ronde.box; const eh = Object.keys(s.rekeningen).find((x) => s.rekeningen[x].bron !== 'bunq'); s.opgehaald[eh].transacties = new Date(Date.now() - 5 * 86400000).toISOString(); }); E.afkap = true;
+    u = await h.bankRonde();
+    E.afkap = false;
+    toets('pod: A10 afgekapte ABN-opvraag → box-rij "venster schuift niet op", geen hartslag', !u.geslaagd && u.hartslag === false &&
+      /## \[direct\] [^\n]*Enable Banking: transactie-opvraag afgekapt, venster schuift niet op/.test(fs.readFileSync(BOX, 'utf8')), u.fouten);
     kluisFout = true; vm.runInContext('bankSleutelCache = null', ctx);
     u = await h.bankRonde();
     toets('pod: kluis onbereikbaar → ronde niet ok, geen hartslag, geen kaartwerk', !u.ok && !u.geslaagd && u.hartslag === false && !u.kaarten, u);

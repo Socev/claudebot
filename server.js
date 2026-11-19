@@ -27115,6 +27115,11 @@ function bankBoxRij(m) {
       '- gemeten: ' + String(m.tekst || '').slice(0, 200) + '\n' +
       '- gevolg als er niets gebeurt: de cache en Davids bankvragen werken door, maar de database (`/opt/data/bank/transacties.sqlite`) loopt achter; zoek/maand/intern missen nieuwe posten.\n' +
       '- voorstel: `python3 .claude/skills/bank-lezen/bank.py archief` (API_SECRET) en api.log (`bank-archief fout=`) nalopen; schijf, rechten (600) en schema nagaan. Na herstel haalt de volgende ronde de cache incrementeel in (migreerCache).\n'
+      : m.reden === 'afgekapt' && (m.bron === 'enablebanking' || m.bron === 'bunq') ? '\n## [direct] ' + tijd + ' — ' + (m.bron === 'bunq' ? 'bunq' : 'Enable Banking') + ': transactie-opvraag afgekapt, venster schuift niet op (bank-ronde, automatisch)\n' +
+      '- status: open\n- van: pod bank-ronde (bank-lezer.js ronde via POST /bank-ronde; hooguit 1×/dag per bron; A10 actieplan 19-11)\n' +
+      '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: het opgehaalde deel staat in cache en database; het ontbrekende stuk wordt elke ronde (07:00/18:00) opnieuw gevraagd tot een opvraag volledig is. Blijft het afkappen, dan ontbreken posten en blijft de hartslag bank-ronde uit (Stiltewachter na 26 u).\n' +
+      '- voorstel: api.log (`opdracht=ronde`) en de tellers in `/opt/data/bank/stand.json` (paginas per rekening) nalopen; bij blijvend afkappen een eenmalige opvraag in delen (`bank.py transacties rekening=… van=… tot=…`) of de paginagrens (MAX_PAGINAS / BUNQ_MAX_PAGINAS) herzien.\n'
       : eb ? '\n## [direct] ' + tijd + ' — Enable Banking: ' + (m.reden === 'sleutel' ? 'sleutel of applicatie werkt niet' : 'toestemming bij de bank geldt niet meer') + ' (bank-ronde, automatisch)\n' +
       '- status: open\n- van: pod bank-ronde (bank-lezer.js ronde via POST /bank-ronde; hooguit 1×/dag per reden)\n' +
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
