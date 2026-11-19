@@ -1400,6 +1400,19 @@ function betaalspoorOvergang(van, gebeurtenis) {
   return o ? { ok: true, naar: o[2] } : { ok: false, fout: 'ongeldige_overgang', reden: van + ' → ' + gebeurtenis };
 }
 
+/*
+ * wv3452 (Fable-review M3): het betaalspoor na het losmaken van de laatste betaling van een factuur (betaald_gezien → zoals het stond). De
+ * bankcontrole schrijft bij bankmatch geen auditrij en laat ingevoerd_op/uitvoer_op staan, dus: stond hij in een batch (ingevoerd_op) → ingevoerd;
+ * anders de laatste spoorwissel van een mens of de bank (toch incasso, toch zelf betalen, teruggeboekt; `wissel` = het na-spoor uit die auditrij);
+ * anders het beginspoor van de betaalwijze (zelf → te_betalen, incasso → incasso_verwacht, betaald → betaald_vooraf; creditnota → betaald_vooraf).
+ */
+function betaalspoorNaOntkoppel(f, wissel) {
+  if (!f) throw new KernFout('factuur', 'betaalspoorNaOntkoppel vraagt een factuur');
+  if (f.ingevoerd_op) return 'ingevoerd';
+  if (wissel && wissel !== 'betaald_gezien' && BETAALSPOREN.includes(wissel)) return wissel;
+  try { return betaalspoorBegin(f.betaalwijze, f); } catch (e) { return 'te_betalen'; }
+}
+
 const OPDRACHT_STATUSSEN = ['wacht', 'opgehaald', 'gelukt', 'mislukt', 'geweigerd', 'teruggedraaid'];
 const OPGEHAALD_TIMEOUT_MS = 30 * 60 * 1000, MAX_POGINGEN = 3;
 function ms(iso) { const t = Date.parse(iso); if (!Number.isFinite(t)) throw new KernFout('tijd', 'ongeldige tijd'); return t; }
@@ -1612,7 +1625,7 @@ module.exports = {
   // leren
   leerUitBevestiging,
   // overgangen (§ 4.4)
-  STATUSSEN, GEBEURTENISSEN, STATUS_OVERGANGEN, statusOvergang, BETAALSPOREN, BETAALSPOOR_OVERGANGEN, betaalspoorBegin, betaalspoorOvergang, isCreditnota,
+  STATUSSEN, GEBEURTENISSEN, STATUS_OVERGANGEN, statusOvergang, BETAALSPOREN, BETAALSPOOR_OVERGANGEN, betaalspoorBegin, betaalspoorOvergang, betaalspoorNaOntkoppel, isCreditnota,
   OPDRACHT_STATUSSEN, claimbaar, opdrachtOvergang, verstuurNa, MAX_POGINGEN, OPGEHAALD_TIMEOUT_MS,
   // opdracht + vingerafdruk
   vingerafdrukCanoniek, vingerafdruk, maakOpdracht,
