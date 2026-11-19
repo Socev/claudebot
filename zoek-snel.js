@@ -262,7 +262,7 @@ const MELDING = {
 // "niet gevonden"; ook zonder treffers zegt de melding welke delen van het Brein doorzocht zijn.
 const WORTEL_NAAM = { '10_Zakelijk': 'Zakelijk', '20_Prive': 'Privé' };
 const WACHTWOORDWOORD = require('./geheimen.js').WACHTWOORDWOORD;
-const BLOK_DICHT = /voorgesteld|wachtwoord|password|passwd|pincode|\bpin\b|token|secret|api[-_ ]?key|sleutel|credential|inloggegevens/i;
+const BLOK_DICHT = /voorgesteld|wachtwoord|password|passwd|passphrase|pincode|inlogcode|toegangscode|\bpin\b|\bpwd?\b|token|secret|api[-_ ]?key|sleutel|credential|inloggegevens/i;   // wv3405: + de woorden van WACHTWOORDWOORD
 const DOORZOCHT = 'Ik zocht in Zakelijk en Privé (ook notulen, gesprekken en gezondheid), niet in ruwe bronnen, conversaties, archief en systeempagina\'s.';
 const DOORZOCHT_VAST = 'Ik zocht op dit apparaat alleen in Zakelijk (zonder personeel en financiën), niet in bronnen, notulen, gesprekken en archief.';
 const VOLLEDIG = 'Vraag het Socev voor een volledige zoektocht.';
