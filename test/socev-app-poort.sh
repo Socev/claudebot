@@ -5538,6 +5538,73 @@ async function bewijs(o) {
       delete ctx.schrijfLog; delete ctx.nu; delete ctx.velden; delete ctx.ovisBoxRij; ['RUNTIMES_LIJST', 'chatSessions', 'sessieSleutel', 'saveSessions', 'sessieResetOp'].forEach((k) => { delete ctx[k]; });
     }
 
+    // ── 22d. OVIS Code fase 2 (wv3243): draden — Nieuwe draad, beurt in een draad (eigen sessie + draadkop), overkoepelende regel in het
+    //        app-gesprek, verzonnen/andere app/hoofdletter = 400, 7e open draad 409, sluiten/heropenen, Nieuw gesprek per draad, vaultkopie ──
+    {
+      ctx.schrijfLog = () => {}; ctx.nu = () => ''; ctx.velden = () => ''; ctx.ovisBoxRij = () => true;
+      const VMAP = path.join(VAULT_T, '01_Ontwikkeling', 'OVIS Code'); fs.mkdirSync(VMAP, { recursive: true });
+      ctx.VV = () => require('./vault-veilig.js');
+      r = await vraag('POST', '/app/code/draad', { id: 'texere', titel: 'Server', doel: 'De server van Texere bijhouden' }, { pot: P.jar });
+      const D = r.j && r.j.draad && r.j.draad.d, DK = 'code-texere-' + D;
+      const dm = path.join(W, 'ovis-code', 'texere', 'draden', String(D));
+      toets('22d Nieuwe draad: 200, kanaal code-texere-d<8 hex>, map 0700 en draad.json 0600, stand stil', r.status === 200 && /^d[0-9a-f]{8}$/.test(D) && r.j.kanaal === DK && r.j.draad.stand === 'stil' &&
+        (fs.lstatSync(dm).mode & 0o777) === 0o700 && (fs.lstatSync(path.join(dm, 'draad.json')).mode & 0o777) === 0o600, JSON.stringify(r.j));
+      const n0 = gestart.length;
+      const rV = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'code-texere-d00000000', tekst: 'x' }, { pot: P.jar });
+      const rA = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'code-pot-' + D, tekst: 'x' }, { pot: P.jar });
+      const rH = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'code-texere-' + D.toUpperCase(), tekst: 'x' }, { pot: P.jar });
+      toets('22d verzonnen draad, draad onder een andere app, hoofdletters -> 400, niets gestart', rV.status === 400 && rA.status === 400 && rH.status === 400 && gestart.length === n0, JSON.stringify([rV.j, rA.j, rH.j]));
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: DK, tekst: 'hoe staat de server' }, { pot: P.jar });
+      const jd = r.j.job_id; await slaap(60);
+      const gd = gestart[gestart.length - 1] || {};
+      toets('22d beurt in de draad -> eigen sessie ovis-code-texere-d…, draadkop met titel/doel, eigen blok, Davids tekst erachter', r.status === 200 && gd.jobId === jd && gd.chatId === 'ovis-code-texere-' + D &&
+        gd.prompt.indexOf('[OVIS CODE · OVIS Texere (texere) · DRAAD ' + D + ']') === 0 && /titel «Server»; doel «De server van Texere bijhouden»/.test(gd.prompt) && /\[DEZE DRAAD/.test(gd.prompt) &&
+        /code-stand\.py rapport texere d[0-9a-f]{8}/.test(gd.prompt) && gd.prompt.indexOf('De vraag van David:') > 0 && gd.prompt.indexOf('[APP] hoe staat de server') > 0, JSON.stringify(gd).slice(0, 400));
+      toets('22d job is een app-beurt op het draadkanaal (voorwaarde voor de klasse)', jobs[jd] && jobs[jd].app && jobs[jd].app.kanaal === DK && !jobs[jd].agent);
+      r = await vraag('POST', '/app/code/draad/sluit', { id: 'texere', d: D }, { pot: P.jar });
+      toets('22d sluiten terwijl de draad loopt -> 409', r.status === 409, JSON.stringify(r.j));
+      fs.writeFileSync(path.join(dm, 'RAPPORT.md'), 'Server 3.4 draait.\nVolgende stap: zinnen.\n', { mode: 0o600 });
+      afmaken[jd]('Server 3.4 draait.'); await slaap(80);
+      await vraag('POST', '/app/uitslag', { job_id: jd }, { pot: P.jar });
+      toets('22d antwoord in het eigen logboek van de draad (niet in het app-gesprek)', fs.existsSync(path.join(LOGDIR, DK + '.jsonl')) && !/Server 3\.4 draait/.test(fs.existsSync(path.join(LOGDIR, 'code-texere.jsonl')) ? fs.readFileSync(path.join(LOGDIR, 'code-texere.jsonl'), 'utf8') : ''));
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'code-texere', tekst: 'overzicht graag' }, { pot: P.jar });
+      const ja = r.j.job_id; await slaap(60);
+      const ga = gestart[gestart.length - 1] || {};
+      toets('22d app-gesprek = overkoepelende draad: STAND en per draad één regel (titel, stand, rapportregel, sinds) erboven', r.status === 200 && ga.jobId === ja && ga.chatId === 'ovis-code-texere' &&
+        /\[OVIS CODE · STAND EN DRADEN/.test(ga.prompt) && /--- STAND\.md ---/.test(ga.prompt) && new RegExp('- Server · draad ' + D + ' · Stil · «Server 3\\.4 draait\\. Volgende stap: zinnen\\.» · sinds 20').test(ga.prompt) &&
+        ga.prompt.indexOf('[OVIS CODE · STAND EN DRADEN') < ga.prompt.indexOf('[APP] overzicht graag'), ga.prompt.slice(ga.prompt.indexOf('[OVIS CODE · STAND'), ga.prompt.indexOf('[OVIS CODE · STAND') + 900));
+      afmaken[ja]('ok'); await slaap(80);
+      const nP = fs.readdirSync(path.join(W, 'ovis-code', 'texere', 'draden')).length;
+      const rS = await vraag('POST', '/app/code/draad', { id: 'texere', titel: 'Sleutel ghp_' + 'a1B2'.repeat(9), doel: '' }, { pot: P.jar });
+      const rP = await vraag('POST', '/app/code/draad', { id: 'texere', titel: 'Brief', doel: 'Voor patiënt Jan Jansen geb. 01-02-1950 (verzonnen)' }, { pot: P.jar });
+      toets('22d Nieuwe draad met een sleutelvorm of patiëntkenmerk in titel/doel -> 400, niets aangemaakt (review MOET 1)', rS.status === 400 && /sleutel/.test(rS.j.fout) && rP.status === 400 && /patiënt/.test(rP.j.fout) &&
+        fs.readdirSync(path.join(W, 'ovis-code', 'texere', 'draden')).length === nP, JSON.stringify([rS.j, rP.j]));
+      const extra = [];
+      for (let i = 2; i <= 6; i++) { r = await vraag('POST', '/app/code/draad', { id: 'texere', titel: 'draad ' + i, doel: '' }, { pot: P.jar }); extra.push(r.status); }
+      r = await vraag('POST', '/app/code/draad', { id: 'texere', titel: 'zevende', doel: '' }, { pot: P.jar });
+      toets('22d 6 open draden mogen, de 7e -> 409', extra.every((x) => x === 200) && r.status === 409 && /6 open draden/.test(r.j.fout), JSON.stringify([extra, r.j]));
+      r = await vraag('POST', '/app/code/draad/sluit', { id: 'texere', d: D }, { pot: P.jar });
+      const rB = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: DK, tekst: 'nog iets' }, { pot: P.jar });
+      toets('22d gesloten draad: sluiten 200, een beurt erin -> 409 (eerst heropenen)', r.status === 200 && rB.status === 409 && /gesloten/.test(rB.j.fout), JSON.stringify([r.j, rB.j]));
+      r = await vraag('GET', '/app/code/apps', undefined, { pot: P.jar });
+      const txd = r.j && r.j.apps && r.j.apps.find((x) => x.id === 'texere');
+      const dS = txd && txd.draden.find((x) => x.d === D);
+      toets('22d GET /app/code/apps: draden per app met stand (gesloten = klaar), rapportregel, max_draden 6, geen podpad', r.status === 200 && txd.draden.length === 6 && dS && dS.stand === 'klaar' && /Server 3\.4/.test(dS.rapport) && r.j.max_draden === 6 &&
+        JSON.stringify(r.j).indexOf('/opt/data') < 0 && JSON.stringify(txd.draden).indexOf('draden/') < 0, JSON.stringify(txd && txd.draden).slice(0, 400));
+      r = await vraag('POST', '/app/code/draad', { id: 'texere', titel: 'zesde opnieuw', doel: '' }, { pot: P.jar });
+      const rO = await vraag('POST', '/app/code/draad/sluit', { id: 'texere', d: D, open: true }, { pot: P.jar });
+      toets('22d heropenen terwijl er al 6 open zijn -> 409; onbekende draad sluiten -> 400', r.status === 200 && rO.status === 409 && (await vraag('POST', '/app/code/draad/sluit', { id: 'texere', d: 'd00000000' }, { pot: P.jar })).status === 400, JSON.stringify(rO.j));
+      ctx.RUNTIMES_LIJST = ['claude']; ctx.chatSessions = { ['ovis-code-texere-' + D]: 's1', 'ovis-code-texere': 'blijft' }; ctx.sessieSleutel = (k) => k; ctx.saveSessions = () => {}; ctx.sessieResetOp = {};
+      r = await vraag('POST', '/app/code/nieuw', { id: 'texere', d: D }, { pot: P.jar });
+      const rN = await vraag('POST', '/app/code/nieuw', { id: 'texere', d: 'd00000000' }, { pot: P.jar });
+      toets('22d Nieuw gesprek in een draad wist alleen die sessie; onbekende draad 400', r.status === 200 && !ctx.chatSessions['ovis-code-texere-' + D] && ctx.chatSessions['ovis-code-texere'] === 'blijft' && rN.status === 400, JSON.stringify([r.j, rN.j, ctx.chatSessions]));
+      await slaap(3400);
+      const vk = path.join(VMAP, 'OVIS Texere.md');
+      const vt = fs.existsSync(vk) ? fs.readFileSync(vk, 'utf8') : '';
+      toets('22d leeskopie in de vault (01_Ontwikkeling/OVIS Code/OVIS Texere.md): draden met stand en rapport, STAND', /# OVIS Texere — OVIS Code \(leeskopie\)/.test(vt) && /\| Server — De server van Texere bijhouden \| Klaar \| Server 3\.4 draait/.test(vt) && /## STAND/.test(vt), vt.slice(0, 500));
+      delete ctx.schrijfLog; delete ctx.nu; delete ctx.velden; delete ctx.ovisBoxRij; delete ctx.VV; ['RUNTIMES_LIJST', 'chatSessions', 'sessieSleutel', 'saveSessions', 'sessieResetOp'].forEach((k) => { delete ctx[k]; });
+    }
+
     // ── 22. Cijfer-Meester (wv200, bouwplan § 4.9c): kanaal cijfer-meester -> eigen sessie, kop, geen knoppen/bijlagen/chat_log ──
     {
       const n0 = gestart.length, posts0 = chatlogStaat.posts.length;
@@ -5589,7 +5656,7 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/gezien', { tab: 'cijfer-meester' }, { pot: P.jar });
       toets('22 /app/gezien cijfer-meester -> 200', r.status === 200, JSON.stringify(r.j));
       const vs = fs.readFileSync('server.js', 'utf8');
-      toets('22 seintje -> tab cijfer-meester; werklessen app beide, gedeelde bot geen (wv363)', /\^antwoord \(hoofd\|machinekamer\|cijfer-meester\|ovis-nza(\|code-\[a-z0-9-\]\{2,30\})?\)\$/.test(vs) && /'cijfermeester': 'geen', 'cijfer-meester': 'beide', 'ovis-nza': 'geen'/.test(vs));
+      toets('22 seintje -> tab cijfer-meester; werklessen app beide, gedeelde bot geen (wv363)', /\^antwoord \(hoofd\|machinekamer\|cijfer-meester\|ovis-nza(\|code-\[a-z0-9-\]\{2,30\}(\(\?:-d\[0-9a-f\]\{8\}\)\?)?)?\)\$/.test(vs) && /'cijfermeester': 'geen', 'cijfer-meester': 'beide', 'ovis-nza': 'geen'/.test(vs));
       // Telegram-regressie: hoofd en machinekamer ongemoeid (kop alleen in cijfer-meester)
       const nH = gestart.length;
       r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'regressie hoofd' }, { pot: P.jar });

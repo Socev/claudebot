@@ -5812,7 +5812,12 @@ const APP_KNOP_KANALEN = { hoofd: true, machinekamer: true };
 // wv3227: OVIS Code — kanaal code-<id> per app uit het register, sessie ovis-code-<id>; knoppen, rij en "Antwoord hierop" zoals de
 // machinekamer (APP_RIJ_KANALEN, APP_ANTWOORD_OP_KANALEN), seintje naar {scherm: 'code', focus: id}.
 (typeof CODE_IDS === 'undefined' ? [] : CODE_IDS).forEach(function (id) { APP_KANALEN[CODE_APPS.KANAAL_VOOR + id] = CODE_APPS.SESSIE_VOOR + id; APP_KNOP_KANALEN[CODE_APPS.KANAAL_VOOR + id] = true; });
-function codeIdVanKanaal(k) { return typeof CODE_APPS !== 'undefined' && CODE_APPS ? CODE_APPS.idVanKanaal(k) : null; }   // typeof: vm-knipsels in toetsen kennen CODE_APPS niet
+function codeIdVanKanaal(k) {   // typeof: vm-knipsels in toetsen kennen CODE_APPS niet; wv3243: ook een draadkanaal code-<id>-d<8 hex> geeft de app
+  if (typeof CODE_APPS === 'undefined' || !CODE_APPS) return null;
+  const dr = CODE_APPS.draadVanKanaal ? CODE_APPS.draadVanKanaal(k) : null;
+  return dr ? dr.id : CODE_APPS.idVanKanaal(k);
+}
+function codeDraadVanKanaal(k) { return typeof CODE_APPS !== 'undefined' && CODE_APPS && CODE_APPS.draadVanKanaal ? CODE_APPS.draadVanKanaal(k) : null; }   // wv3243
 function appVraagVan(kanaal, out) { return APP_KNOP_KANALEN[kanaal] === true ? appVraagUit(out) : null; }
 // Kop voor elke app-beurt van de Cijfer-Meester: inhoudelijk de afbakening van de n8n-Poortwachter ("AI - Cijfermeester Bot"),
 // met de app-opmaak (CLAUDE.md "Cijfers in de app") in plaats van blokjes, en zonder VRAAG AAN DAVID. Wie de ene kop wijzigt,
@@ -7689,9 +7694,15 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
   let prompt = '[APP] ' + promptTekst;
   // wv3227: OVIS Code — werkbestanden eerst in orde (anders start de beurt niet, § 5f.4), dan de vaste kop uit de release
   const codeId = codeIdVanKanaal(kanaal);
+  const codeDr = codeDraadVanKanaal(kanaal);   // wv3243: draad onder de app
   if (codeId) {
     if (!codeWerkToets(codeId).ok) return { fout: 'werkbestanden' };
-    prompt = CODE_APPS.kop(codeId, CODE_WERK.werkmap(codeId)) + '\n' + prompt;
+    if (codeDr) {
+      const x = CODE_WERK.draadLees(codeDr.id, codeDr.d);
+      if (!x) return { fout: 'werkbestanden' };
+      if (x.gesloten) return { fout: 'draad dicht' };
+      prompt = codeKopMet(CODE_APPS.draadKop(codeDr.id, codeDr.d, x.titel, x.doel, CODE_WERK.werkmap(codeId)), codeDraadBlok(codeDr.id, x)) + '\n' + prompt;
+    } else prompt = codeKopMet(CODE_APPS.kop(codeId, CODE_WERK.werkmap(codeId)), codeOverzicht(codeId)) + '\n' + prompt;   // wv3243: STAND + regel per draad
   }
   if (kanaal === 'cijfer-meester') prompt = APP_CM_KOP + '\n' + prompt;   // wv200: kop vóór [APP], geen omlijsting
   if (kanaal === 'ovis-nza') prompt = APP_NZA_KOP + '\n' + prompt;   // wv3087: idem
@@ -7767,7 +7778,7 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
     return plek.then(function (kreeg) {
     if (!kreeg) return;
     // wv3227: vlak voor de start nog eens de werkbestanden (kan intussen veranderd zijn); afgekeurd = niet starten
-    if (codeId && !codeWerkToets(codeId).ok) {
+    if (codeId && (!codeWerkToets(codeId).ok || (codeDr && !(CODE_WERK.draadLees(codeDr.id, codeDr.d) || {}).titel))) {   // wv3243: draad weg = ook niet starten
       j.status = 'done'; j.done_at = Date.now(); j.app.gestart = true; if (meta.rij) appRijWeg(jobId);
       j.result = { ok: false, error: 'werkbestanden', output: CODE_WERK_TEKST };
       codePlekLos(jobId);
@@ -7795,6 +7806,7 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
       // appNaBeurt NIET teruggeven: een trage schijf mag de volgende beurt (ook uit Telegram) niet ophouden (Fable-review wv56 #3)
       return processJob(jobId, prompt + (staart || ''), '', [], chatId, DEFAULT_WS, keuze, '').then(function () {
         codePlekLos(jobId);
+        if (codeId) codeVaultKopieLater(codeId);   // wv3243: leeskopie in de vault na elke OVIS Code-beurt
         appNaBeurt(jobId).catch(function (e) { logError('app-na-beurt', e); });
       }, function (e) { codePlekLos(jobId); throw e; });
     });
@@ -7813,6 +7825,7 @@ function appStartFout(res, st) {
   if (st.fout === 'noodstop') return appWeiger(res, 503, 'de app staat uit (noodstop)', 'app-uit (tijdens het verzoek)');
   if (st.fout === 'omlijsting') return appWeiger(res, 503, 'de machinekamer-omlijsting ontbreekt op de pod; gebruik de debug-bot', 'omlijsting ontbreekt');
   if (st.fout === 'werkbestanden') { res._app.reden = 'werkbestanden afgekeurd'; return appStuur(res, 409, { ok: false, fout: CODE_WERK_TEKST, werkbestanden: true }); }   // wv3227
+  if (st.fout === 'draad dicht') return appWeiger(res, 409, 'deze draad is gesloten; heropen hem eerst', 'code draad dicht');   // wv3243
   if (st.fout === 'bestanden') return appWeiger(res, 500, 'de bestanden konden op de pod niet klaargezet worden; probeer het opnieuw', 'bestanden klaarzetten');
   if (st.fout === 'draad') return appWeiger(res, 409, st.melding || 'doorvragen lukt nu niet', 'draad (na wachten)');   // wv3156
   if (st.fout === 'rij vol') return appWeiger(res, 429, 'er staan al ' + APP_RIJ_GETYPT_MAX + ' berichten in de rij; wacht tot Socev er een heeft opgepakt', 'getypt rij vol (na wachten)');   // wv628
@@ -9889,6 +9902,7 @@ async function appCodeKlussen(a) {
       (per[id] = per[id] || []).push({ wv: d.wv, stand: stand, onderwerp: d.onderwerp, zin: d.zin || null, sinds: d.sinds || null });
     });
   });
+  codeKlussenCache = { op: Date.now(), per: per };   // wv3243: voor de overkoepelende regel bij de start van een beurt (geen await daar)
   return per;
 }
 async function appCodeApps(req, res, a) {
@@ -9912,13 +9926,220 @@ async function appCodeApps(req, res, a) {
   } catch (e) {}
   const uit = CODE_WERK.appsUit({ stand: CODE_WERK.standLees(), klussen: klussen, gesprek: gesprek, vraagOpen: vraagOpen, max: CODE_MAX_TEGELIJK, lopend: codeBezig.size });
   if (klusFout) uit.klussen_fout = klusFout;
+  // wv3243: draden per app (gespreksdraden; klussen staan in klussen en tonen in dezelfde lijst als soort klus) + chip
+  let dr = {};
+  try { dr = codeDradenStand(); } catch (e) { logError('app-code-draden', e); }
+  uit.max_draden = CODE_MAX_DRADEN;
+  uit.apps.forEach(function (x) {
+    x.draden = dr[x.id] || [];
+    if (x.chip !== 'wacht_op_jou' && x.draden.some(function (y) { return y.stand === 'wacht_op_jou'; })) x.chip = 'wacht_op_jou';
+    else if (x.chip === 'stil' && x.draden.some(function (y) { return y.stand === 'loopt'; })) x.chip = 'loopt';
+  });
   appStuur(res, 200, uit);
+}
+// ── wv3243: OVIS Code fase 2 — draden onder een app (bouwplan § 5c "Fase 2", § 5f) ──
+// Een draad = kanaal code-<id>-d<8 hex>, sessie ovis-code-<id>-d<8 hex>, opslag CODE_WERK (ovis-code.js). De kanalen bestaan alleen voor
+// draden die de pod in zijn staat heeft (bij de start ingelezen, bij Nieuwe draad toegevoegd, bij opruimen weg); de klasse toetst het
+// bestaan bovendien bij elke beurt opnieuw (codeSessieMk). Alleen Davids tik maakt een draad (POST /app/code/draad).
+const CODE_MAX_DRADEN = 6;   // alleen voor de melding; de harde grens zit in ovis-code.js (MAX_DRADEN_OPEN, zelfde waarde, toets)
+let codeKlussenCache = null;   // {op, per} uit appCodeKlussen
+function codeDraadAan(id, d) {
+  const k = CODE_APPS.draadKanaal(id, d), c = CODE_APPS.draadSessie(id, d);
+  if (!k || !c) return false;
+  APP_KANALEN[k] = c; APP_KNOP_KANALEN[k] = true; APP_RIJ_KANALEN[k] = true; APP_ANTWOORD_OP_KANALEN[k] = true; APP_KANAAL_VAN_CHAT[c] = k;
+  // typeof: NACHTRESET_SESSIES en LESSEN_DOMEIN staan buiten het app-blok (de poorttoets laadt alleen dat blok)
+  if (typeof NACHTRESET_SESSIES !== 'undefined' && NACHTRESET_SESSIES.indexOf(c) < 0) NACHTRESET_SESSIES.push(c);   // zoals het app-gesprek: elke nacht vers (STAND-blok en rapport blijven)
+  if (typeof LESSEN_DOMEIN !== 'undefined') LESSEN_DOMEIN[c] = 'machine';
+  return true;
+}
+function codeDraadUit(id, d) {
+  const k = CODE_APPS.draadKanaal(id, d), c = CODE_APPS.draadSessie(id, d);
+  if (!k || !c) return;
+  delete APP_KANALEN[k]; delete APP_KNOP_KANALEN[k]; delete APP_RIJ_KANALEN[k]; delete APP_ANTWOORD_OP_KANALEN[k]; delete APP_KANAAL_VAN_CHAT[c];
+  if (typeof NACHTRESET_SESSIES !== 'undefined') { const i = NACHTRESET_SESSIES.indexOf(c); if (i >= 0) NACHTRESET_SESSIES.splice(i, 1); }
+  if (typeof LESSEN_DOMEIN !== 'undefined') delete LESSEN_DOMEIN[c];
+}
+if (typeof CODE_WERK !== 'undefined' && CODE_WERK) { try { CODE_WERK.alleDraden().forEach(function (x) { codeDraadAan(x.id, x.d); }); } catch (e) { logError('ovis-code-draden', e); } }
+function codeKanaalBezig(k) {   // {loopt, inRij} voor één kanaal (app-beurten)
+  let loopt = false, inRij = 0;
+  Object.keys(jobs).forEach(function (jid) { const j = jobs[jid]; if (!j.app || j.app.kanaal !== k) return; if (j.status === 'running' || (j.status === 'pending' && j.app.gestart)) loopt = true; else if (j.status === 'pending') inRij++; });
+  return { loopt: loopt, inRij: inRij };
+}
+function codeVraagKanalen() {   // kanalen met een open VRAAG AAN DAVID
+  const uit = {};
+  try { const v = appVragen(), nu_ = Date.now(); Object.keys(v).forEach(function (sl) { const r = v[sl]; if (r && r.kanaal && !r.antwoord && nu_ - Date.parse(r.t || 0) < APP_VRAAG_GELDIG_MS) uit[r.kanaal] = true; }); } catch (e) {}
+  return uit;
+}
+function codeLogOp(k) { try { return new Date(fs.statSync(appLogPad(k)).mtimeMs).toISOString(); } catch (e) { return null; } }
+// Alle draden met hun stand (door de pod): {app-id: [{d, titel, doel, stand, rapport, sinds, gesloten, door, gesprek}]}
+function codeDradenStand(alleenId) {
+  const uit = {}, vraag = codeVraagKanalen();
+  (alleenId ? [alleenId] : CODE_IDS).forEach(function (id) {
+    const l = CODE_WERK.draden(id).lijst;
+    if (!l.length) return;
+    uit[id] = l.map(function (x) {
+      const k = CODE_APPS.draadKanaal(id, x.d), b = codeKanaalBezig(k), logOp = codeLogOp(k);
+      const st = CODE_WERK.draadStand(x, { vraag: !!vraag[k], loopt: b.loopt, inRij: b.inRij, logOp: logOp });
+      return { d: x.d, titel: x.titel, doel: x.doel, stand: st.stand, vanzelf: st.vanzelf, rapport: x.rapport ? x.rapport.tekst : null, rapport_op: x.rapport ? x.rapport.op : null,
+        sinds: x.gesloten || CODE_WERK.draadLaatst(x, logOp), gemaakt: x.gemaakt, gesloten: x.gesloten, door: x.door, gesprek: { loopt: b.loopt, in_rij: b.inRij, laatste: logOp } };
+    });
+  });
+  return uit;
+}
+const CODE_KLUS_STAND = { wacht_op_jou: 'wacht_op_jou', loopt: 'loopt', vastgelopen: 'vastgelopen', in_de_wacht: 'in_de_wacht', gesloten: 'klaar' };
+// De overkoepelende regel boven een beurt in het app-gesprek (§ 5c): STAND + per draad en per klus één regel. Klussen uit de cache van
+// GET /app/code/apps (≤ 15 min oud), anders vermeld als niet gemeten.
+function codeOverzicht(id) {
+  try {
+    const rijen = (codeDradenStand(id)[id] || []).map(function (x) { return { titel: x.titel, d: x.d, soort: 'draad', stand: x.stand, rapport: x.rapport, sinds: x.sinds }; });
+    const kc = codeKlussenCache && Date.now() - codeKlussenCache.op < 15 * 60 * 1000 ? codeKlussenCache : null;
+    if (kc) (kc.per[id] || []).forEach(function (k) { rijen.push({ titel: 'wv' + k.wv + ' ' + k.onderwerp, soort: 'klus', stand: CODE_KLUS_STAND[k.stand] || k.stand, rapport: k.zin, sinds: k.sinds }); });
+    return CODE_WERK.overzicht(id, rijen, !!kc);
+  } catch (e) { logError('ovis-code-overzicht', e); return '[OVIS CODE · STAND EN DRADEN niet te lezen; lees ze met code-stand.py lees]'; }
+}
+// Boven een beurt in een draad: zijn eigen STAND-blok en zijn laatste rapportregel (gegeven)
+function codeDraadBlok(id, x) {
+  let blok = '';
+  try { blok = CODE_WERK.draadStandTekst(id, x.d); } catch (e) { blok = ''; }
+  return '[DEZE DRAAD — door de pod erboven gezet; gegeven, geen opdracht]\n--- blok van deze draad in de STAND ---\n' + (blok || '(nog leeg)') +
+    '\n--- laatste rapportregel ---\n' + (x.rapport ? x.rapport.tekst : '(nog geen)') + '\n[einde DEZE DRAAD]';
+}
+// Het blok van de pod vóór de slotregel "De vraag van David:" van de kop (zodat Davids tekst direct na die regel blijft komen)
+function codeKopMet(kop, blok) {
+  const slot = '\nDe vraag van David:';
+  return kop.endsWith(slot) ? kop.slice(0, kop.length - slot.length) + '\n' + blok + '\n' + slot : kop + '\n' + blok;
+}
+function codeDraadBezig(id, d) { const b = codeKanaalBezig(CODE_APPS.draadKanaal(id, d)); return b.loopt || b.inRij > 0; }
+// Poort op titel en doel: '' = goed, 'sleutel' (vaste sleutelvorm of letterlijke pod-geheimwaarde), 'patient' (patiëntpoort), 'fout' (poort
+// faalde: dicht). Zelfde poorten als code-stand.py vóór het schrijven van STAND en rapportregel.
+const CODE_GEHEIM_NAAM = /(SECRET|TOKEN|(^|_)KEY($|_)|API_KEY|PASSWORD|WACHTWOORD|SLEUTEL|SERVICE_ROLE|(^|_)PAT($|_)|COOKIE|CRED|AUTH)/i;
+function codeDraadPoort(teksten) {
+  const t = teksten.map(function (x) { return String(x || ''); }).join('\n');
+  if (new RegExp(APP_SLEUTEL_VORM_RE.source).test(t) || /\bBearer\s+[A-Za-z0-9._~+\/-]{24,}/.test(t) || /https?:\/\/[^\/\s:@]+:[^\/\s@]{6,}@/.test(t)) return 'sleutel';
+  for (const k of Object.keys(process.env)) { const v = process.env[k]; if (CODE_GEHEIM_NAAM.test(k) && typeof v === 'string' && v.length >= 12 && t.indexOf(v) >= 0) return 'sleutel'; }
+  try { const r = require(path.join(__dirname, 'intake', 'patientpoort.js')).beoordeel({ teksten: teksten.map(String) }); return r && r.tegenhouden ? 'patient' : ''; }
+  catch (e) { logError('ovis-code-draad-poort', e); return 'fout'; }
+}
+// POST /app/code/draad {id, titel, doel}: Nieuwe draad (Davids tik). Hooguit CODE_MAX_DRADEN open per app (harde grens in ovis-code.js).
+function appCodeDraad(req, res, a, d) {
+  const id = d && typeof d.id === 'string' && CODE_APPS.app(d.id) ? d.id : null;
+  if (!id) return appWeiger(res, 400, 'onbekende app', 'code draad id');
+  if (typeof d.titel !== 'string' || !d.titel.trim() || d.titel.length > 200 || (d.doel != null && (typeof d.doel !== 'string' || d.doel.length > 600))) return appWeiger(res, 400, 'geef de draad een titel (en een doel in één zin)', 'code draad velden');
+  // review Codex wv3243 MOET 1: titel en doel gaan in prompts en de vaultkopie, dus eerst de geheimen- en patiëntpoort (dicht bij een fout)
+  const poort = codeDraadPoort([d.titel, d.doel || '']);
+  if (poort) return appWeiger(res, 400, poort === 'sleutel' ? 'er lijkt een sleutel in de titel of het doel te staan; noem hooguit de naam' :
+    poort === 'patient' ? 'de titel of het doel lijkt patiëntgegevens te bevatten; omschrijf het onderdeel zonder herkenbare personen' : 'de controle op patiëntgegevens lukte niet; probeer het zo opnieuw', 'code draad poort ' + poort);
+  let r;
+  try { r = CODE_WERK.draadMaak(id, d.titel, d.doel || ''); } catch (e) { logError('ovis-code-draad', e); r = { ok: false, fout: 'schrijf', reden: e.code || e.message }; }
+  if (!r.ok) {
+    if (r.fout === 'vol') return appWeiger(res, 409, 'er zijn al ' + CODE_MAX_DRADEN + ' open draden bij deze app; sluit er eerst een', 'code draad vol');
+    if (r.fout === 'werkbestanden') { codeWerkToets(id); return appStuur(res, 409, { ok: false, fout: CODE_WERK_TEKST, werkbestanden: true }); }
+    if (r.fout === 'titel') return appWeiger(res, 400, 'geef de draad een titel', 'code draad titel');
+    return appWeiger(res, 500, 'de draad kon op de pod niet gemaakt worden', 'code draad ' + String(r.reden || '').slice(0, 80));
+  }
+  codeDraadAan(id, r.draad.d);
+  schrijfLog(nu() + ' ovis-code draad-nieuw ' + velden({ app: id, d: r.draad.d }));
+  codeVaultKopieLater(id);
+  res._app.reden = 'nieuwe draad ' + id + '-' + r.draad.d;
+  appStuur(res, 200, { ok: true, draad: (codeDradenStand(id)[id] || []).filter(function (x) { return x.d === r.draad.d; })[0] || null, kanaal: CODE_APPS.draadKanaal(id, r.draad.d) });
+}
+// POST /app/code/draad/sluit {id, d, open?: true}: sluiten (David) of heropenen. Niet terwijl er een beurt in die draad loopt of wacht.
+function appCodeDraadSluit(req, res, a, d) {
+  const id = d && typeof d.id === 'string' && CODE_APPS.app(d.id) ? d.id : null;
+  const dd = id && typeof d.d === 'string' && CODE_APPS.DRAAD_RE.test(d.d) ? d.d : null;
+  if (!id || !dd || !CODE_WERK.draadBestaat(id, dd)) return appWeiger(res, 400, 'onbekende draad', 'code draad sluit id');
+  const open = d.open === true;
+  if (!open && codeDraadBezig(id, dd)) return appWeiger(res, 409, 'de Engineer is in deze draad nog bezig; sluiten kan zodra het antwoord er is', 'code draad sluit bezig');
+  const r = open ? CODE_WERK.draadHeropen(id, dd) : CODE_WERK.draadSluit(id, dd, 'david');
+  if (!r.ok) return r.fout === 'vol' ? appWeiger(res, 409, 'er zijn al ' + CODE_MAX_DRADEN + ' open draden bij deze app; sluit er eerst een', 'code draad heropen vol')
+    : appWeiger(res, 400, 'onbekende draad', 'code draad sluit ' + r.fout);
+  schrijfLog(nu() + ' ovis-code draad-' + (open ? 'heropend' : 'gesloten') + ' ' + velden({ app: id, d: dd }));
+  codeVaultKopieLater(id);
+  res._app.reden = (open ? 'draad heropend ' : 'draad gesloten ') + id + '-' + dd;
+  appStuur(res, 200, { ok: true });
+}
+// Leeskopie per app in de vault (§ 5c): 01_Ontwikkeling/OVIS Code/<App>.md, alleen door de pod; nooit invoer voor een OVIS Code-sessie
+// (geen kop of skill leest hem). Alleen schrijven als de tekst veranderde; de map moet bestaan (de pod maakt hem niet: geen mkdir in de vault).
+const CODE_VAULT_MAP = path.join(VAULT, '01_Ontwikkeling', 'OVIS Code');
+const codeVaultWacht = {};
+function codeVaultNaam(a) { return String(a.naam).replace(/[\/\\:*?"<>|#^\[\]]/g, '-').replace(/\s+/g, ' ').trim().slice(0, 80) + '.md'; }
+function codeVaultTekst(id) {
+  const a = CODE_APPS.app(id);
+  const dr = codeDradenStand(id)[id] || [];
+  const W = { wacht_op_jou: 'Wacht op jou', loopt: 'Loopt', in_de_wacht: 'In de wacht', stil: 'Stil', klaar: 'Klaar' };
+  const cel = function (t) { return String(t || '').replace(/[\r\n]+/g, ' ').replace(/\|/g, '/').slice(0, 300); };
+  const r = ['---', 'type: leeskopie', 'bron: pod (OVIS Code, wv3243)', 'app: ' + id, '---', '', '# ' + a.naam + ' — OVIS Code (leeskopie)', '',
+    '_Door de pod geschreven na elke beurt en bij elke draadwijziging. Niet bewerken: de bron staat op de pod. Deze pagina is nooit invoer voor OVIS Code._', '',
+    '## Draden', ''];
+  if (!dr.length) r.push('Geen draden.');
+  else {
+    r.push('| Draad | Stand | Laatste rapportregel | Sinds |', '|---|---|---|---|');
+    dr.forEach(function (x) { r.push('| ' + cel(x.titel) + (x.doel ? ' — ' + cel(x.doel) : '') + ' | ' + (W[x.stand] || x.stand) + ' | ' + cel(x.rapport || '—') + ' | ' + cel(x.sinds ? String(x.sinds).slice(0, 10) : '') + ' |'); });
+  }
+  r.push('', '## STAND', '', (CODE_WERK.standTekst(id) || '(nog leeg)').replace(/^# .*\n+/, ''));
+  dr.filter(function (x) { return x.stand !== 'klaar'; }).forEach(function (x) {
+    const b = CODE_WERK.draadStandTekst(id, x.d);
+    if (b) r.push('', '### Draad: ' + cel(x.titel), '', b.replace(/^#+ /gm, '#### '));
+  });
+  return r.join('\n') + '\n';
+}
+function codeVaultKopie(id) {
+  if (!CODE_WERK || !CODE_APPS.app(id)) return false;
+  try {
+    const st = fs.lstatSync(CODE_VAULT_MAP);
+    if (st.isSymbolicLink() || !st.isDirectory()) return false;
+  } catch (e) { return false; }
+  const pad = path.join(CODE_VAULT_MAP, codeVaultNaam(CODE_APPS.app(id)));
+  const nieuw = codeVaultTekst(id);
+  let oud = null;
+  try { oud = VV().lees(pad, 'utf8'); } catch (e) { oud = null; }
+  if (oud === nieuw) return false;
+  VV().schrijf(pad, nieuw);
+  return true;
+}
+function codeVaultKopieLater(id) {
+  if (codeVaultWacht[id]) return;
+  codeVaultWacht[id] = setTimeout(function () { delete codeVaultWacht[id]; try { codeVaultKopie(id); } catch (e) { logError('ovis-code-vault', e); } }, 3000);
+  if (codeVaultWacht[id].unref) codeVaultWacht[id].unref();
+}
+// Uurstap draden (alleen de actieve kant): 7 dagen stil = vanzelf Klaar; 90 dagen na sluiten weg (map, app-log, sessie); kopie bijwerken.
+function codeDradenTik() {
+  if (!CODE_WERK) return;
+  try { if (typeof rolPrimair === 'function' && !rolPrimair()) return; } catch (e) { return; }
+  const nu_ = Date.now(), WEG = require(path.join(__dirname, 'ovis-code.js')).WEG_DAGEN * 24 * 3600 * 1000;
+  let alle = {};
+  try { alle = codeDradenStand(); } catch (e) { return logError('ovis-code-draden', e); }
+  Object.keys(alle).forEach(function (id) {
+    let anders = false;
+    alle[id].forEach(function (x) {
+      try {
+        if (!x.gesloten && x.vanzelf) { CODE_WERK.draadSluit(id, x.d, 'stil'); anders = true; schrijfLog(nu() + ' ovis-code draad-stil-gesloten ' + velden({ app: id, d: x.d })); return; }
+        if (x.gesloten && nu_ - Date.parse(x.gesloten) > WEG && !codeDraadBezig(id, x.d)) {
+          const k = CODE_APPS.draadKanaal(id, x.d), key = sessionKey(DEFAULT_WS, CODE_APPS.draadSessie(id, x.d));
+          if (CODE_WERK.draadWeg(id, x.d)) {
+            try { fs.unlinkSync(appLogPad(k)); } catch (e) {}
+            RUNTIMES_LIJST.forEach(function (rt) { delete chatSessions[sessieSleutel(key, rt)]; }); saveSessions();
+            codeDraadUit(id, x.d); anders = true;
+            schrijfLog(nu() + ' ovis-code draad-weg ' + velden({ app: id, d: x.d }));
+          }
+        }
+      } catch (e) { logError('ovis-code-draad-tik', e); }
+    });
+    if (anders) codeVaultKopieLater(id);
+  });
+}
+function codeDradenTelling() {
+  let open = 0, dicht = 0;
+  try { CODE_WERK.alleDraden().forEach(function (x) { if (x.gesloten) dicht++; else open++; }); } catch (e) { return null; }
+  return { open: open, gesloten: dicht };
 }
 // Nieuw gesprek: de sessie van deze app begint vers (zoals /reset); STAND en logboek blijven. Niet terwijl er een beurt loopt of wacht.
 function appCodeNieuw(req, res, a, d) {
   const id = d && typeof d.id === 'string' && CODE_APPS.app(d.id) ? d.id : null;
   if (!id) return appWeiger(res, 400, 'onbekende app', 'code nieuw id');
-  const k = CODE_APPS.KANAAL_VOOR + id, chatId = APP_KANALEN[k];
+  // wv3243: {id, d} = Nieuw gesprek in een draad (alleen een draad die de pod kent)
+  if (d.d != null && !(typeof d.d === 'string' && CODE_APPS.DRAAD_RE.test(d.d) && CODE_WERK.draadBestaat(id, d.d) && APP_KANALEN[CODE_APPS.draadKanaal(id, d.d)])) return appWeiger(res, 400, 'onbekende draad', 'code nieuw draad');
+  const k = d.d != null ? CODE_APPS.draadKanaal(id, d.d) : CODE_APPS.KANAAL_VOOR + id, chatId = APP_KANALEN[k];
   if (Object.keys(jobs).some(function (jid) { const j = jobs[jid]; return !j.agent && j.chat_id === chatId && (j.status === 'pending' || j.status === 'running'); }))
     return appWeiger(res, 409, 'de Engineer is in dit gesprek nog bezig; wacht op het antwoord', 'code nieuw bezig');
   const key = sessionKey(DEFAULT_WS, chatId);
@@ -9943,11 +10164,14 @@ function codeStandInfo() {
   if (!CODE_WERK) return { aan: false };
   const s = CODE_WERK.standLees();
   return { aan: true, apps: CODE_IDS.length, gemeten: s ? s.gemeten || null : null, poging: s ? s.poging || null : null, fout: s ? s.fout || null : 'nog niet gemeten',
-    onbekend: s && s.onbekend ? { pages: (s.onbekend.pages || []).length, workers: (s.onbekend.workers || []).length, repos: (s.onbekend.repos || []).length } : null, lopend: codeBezig.size };
+    onbekend: s && s.onbekend ? { pages: (s.onbekend.pages || []).length, workers: (s.onbekend.workers || []).length, repos: (s.onbekend.repos || []).length } : null, lopend: codeBezig.size,
+    draden: codeDradenTelling() };   // wv3243
 }
 if (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT && typeof CODE_WERK !== 'undefined') {   // typeof: de poorttoets laadt dit blok als knipsel
   setInterval(function () { codeStandTik(); }, 60 * 60 * 1000).unref();
   setTimeout(function () { codeStandTik(); }, 3 * 60 * 1000).unref();
+  setInterval(function () { codeDradenTik(); }, 60 * 60 * 1000).unref();   // wv3243
+  setTimeout(function () { codeDradenTik(); }, 4 * 60 * 1000).unref();
 }
 async function appAgentRapport(req, res, jobId) {
   if (!APP_JOB_RE.test(jobId)) return appWeiger(res, 404, 'onbekend', 'rapport id');
@@ -10504,7 +10728,7 @@ function appSeintjeTab(id) {
   try { s = appPushLees().apparaten[id] || null; } catch (e) { return null; }
   const l = s && s.laatst;
   if (!l || !(l.status >= 200 && l.status < 300) || !(Date.now() - Date.parse(l.op) < APP_SEINTJE_TAB_MS)) return null;
-  const m = /^antwoord (hoofd|machinekamer|cijfer-meester|ovis-nza|code-[a-z0-9-]{2,30})$/.exec(String(l.reden || ''));
+  const m = /^antwoord (hoofd|machinekamer|cijfer-meester|ovis-nza|code-[a-z0-9-]{2,30}(?:-d[0-9a-f]{8})?)$/.exec(String(l.reden || ''));   // wv3243: ook een draad
   const tab = m ? m[1] : l.reden === 'meldingen' ? 'meldingen' : null;
   const cid = tab ? codeIdVanKanaal(tab) : null;   // wv3227: OVIS Code → plek code met de app als focus; onbekend id = geen doel
   if (tab && !cid && tab.indexOf('code-') === 0) return null;
@@ -14850,6 +15074,8 @@ function handleApp(req, res) {
         if (route === 'GET /app/draden') return appDraden(req, res, a);   // wv1029: klussen als tabjes (idee 14 fase 2)
         if (route === 'GET /app/code/apps') return CODE_WERK ? appCodeApps(req, res, a) : appWeiger(res, 404, 'onbekend', 'code uit');   // wv3227
         if (route === 'POST /app/code/nieuw') return CODE_WERK ? appCodeNieuw(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'code uit');   // wv3227
+        if (route === 'POST /app/code/draad') return CODE_WERK ? appCodeDraad(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'code uit');   // wv3243
+        if (route === 'POST /app/code/draad/sluit') return CODE_WERK ? appCodeDraadSluit(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'code uit');   // wv3243
         if (route.indexOf('GET /app/agent/') === 0) return appAgentRapport(req, res, route.slice('GET /app/agent/'.length));
         if (route === 'GET /app/bestanden') return appBestanden(req, res);
         if (route.indexOf('GET /app/bestand/') === 0) return appBestand(req, res, route.slice('GET /app/bestand/'.length));
@@ -26309,10 +26535,16 @@ function runIsMk(chatId, ws, j) {
 // /app/beurt of /app/knop met apparaat en vingerafdruk) op precies kanaal code-<id>, met <id> uit het register in deze release. Geen
 // patroon op vrije tekst: een verzonnen id, een hoofdletter, "ovis-code-" zonder id, een /agent (j.agent) of een /run (geen j.app;
 // /run weigert de naam ook al) = geen machinekamer-klasse.
+// wv3243 (fase 2, § 5f.1): een DRAAD-sessie ovis-code-<id>-d<8 hex> alleen als <id> in het register staat, de vorm exact klopt, de
+// app-beurt op precies kanaal code-<id>-d<8 hex> loopt én de draad in de pod-staat bestaat (CODE_WERK.draadBestaat: echte eigen mappen,
+// draad.json zonder link). Verzonnen draad, draad van een andere app, hoofdletter of gesymlinkte draadmap = geen machinekamer-klasse.
 function codeSessieMk(c, j) {
   if (typeof CODE_APPS === 'undefined' || !CODE_APPS || !j || j.agent || !j.app || typeof j.app.kanaal !== 'string' || j.chat_id !== c || j.workspace !== DEFAULT_WS) return false;
   const id = CODE_APPS.idVanSessie(c);
-  return !!id && j.app.kanaal === CODE_APPS.KANAAL_VOOR + id;
+  if (id) return j.app.kanaal === CODE_APPS.KANAAL_VOOR + id;
+  const dr = CODE_APPS.draadVanSessie ? CODE_APPS.draadVanSessie(c) : null;
+  if (!dr || j.app.kanaal !== CODE_APPS.draadKanaal(dr.id, dr.d)) return false;
+  return typeof CODE_WERK !== 'undefined' && !!CODE_WERK && CODE_WERK.draadBestaat(dr.id, dr.d) === true;
 }
 // /agent: volledige omgeving alleen met API_SECRET, label machinekamer: en niet beperkt.
 function agentIsMk(label, smal, beperkt) { return !smal && !beperkt && /^\s*machinekamer:/i.test(String(label || '')); }

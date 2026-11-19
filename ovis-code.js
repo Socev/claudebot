@@ -16,6 +16,16 @@ const C = require('./code-apps.js');
 const INSTRUCTIE = 'INSTRUCTIE.md', STAND = 'STAND.md';
 const MAX_INSTRUCTIE = 16000, MAX_STAND = 8000;   // tekens (bouwplan § 5c)
 const NETWERK_MS = 20000;
+// wv3243 (fase 2, bouwplan § 5c "Fase 2: draden onder de app"): draden per app onder <basis>/<id>/draden/<d>/ (map 0700):
+//   draad.json  (alleen de pod: titel, doel, gemaakt, gesloten, door, heropend)
+//   STAND.md    (het eigen blok van de draad in de STAND, ≤ 3.000 tekens; alleen via code-stand.py zet <id> draad <d>)
+//   RAPPORT.md  (de laatste rapportregel, ≤ 3 regels; alleen via code-stand.py rapport <id> <d>)
+// De berichten van een draad staan in het gewone app-log van zijn kanaal (app-log/code-<id>-d<8 hex>.jsonl), zoals elk gesprek.
+const DRADEN = 'draden', DRAAD_JSON = 'draad.json', DRAAD_STAND = 'STAND.md', DRAAD_RAPPORT = 'RAPPORT.md';
+const MAX_DRADEN_OPEN = 6;                 // harde grens per app (§ 5f.8)
+const MAX_TITEL = 80, MAX_DOEL = 200, MAX_DRAAD_STAND = 3000, MAX_RAPPORT = 600;
+const STIL_DAGEN = 7, WEG_DAGEN = 90;      // vanzelf Klaar na 7 dagen stil; 90 dagen na sluiten weg (Datakaart-opruimregel)
+const DAG_MS = 24 * 60 * 60 * 1000;
 
 function maak(o) {
   const basis = o.basis;                                   // /opt/data/ovis-code
@@ -74,6 +84,154 @@ function maak(o) {
       if (st.size > max * 4) return { ok: false, reden: naam + ' te groot', gemaakt: gemaakt };
     }
     return { ok: true, reden: '', gemaakt: gemaakt };
+  }
+
+  // ── draden (wv3243) ──
+  function echteMap(p) {   // lstat: geen symlink, echte map, eigen, geen groep/anderen
+    let st; try { st = fs.lstatSync(p); } catch (e) { return false; }
+    return !st.isSymbolicLink() && st.isDirectory() && st.uid === uid && !(st.mode & 0o077);
+  }
+  function echtBestand(p) {
+    let st; try { st = fs.lstatSync(p); } catch (e) { return null; }
+    return !st.isSymbolicLink() && st.isFile() && st.uid === uid && !(st.mode & 0o077) && st.nlink === 1 ? st : null;
+  }
+  function draadMap(id, d) { return C.app(id) && C.DRAAD_RE.test(String(d)) ? path.join(basis, id, DRADEN, d) : null; }
+  function leesKlein(p, max) {   // O_NOFOLLOW, hooguit max bytes
+    let fd;
+    try { fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch (e) { return null; }
+    try { const b = Buffer.alloc(max); const n = fs.readSync(fd, b, 0, max, 0); return b.slice(0, n).toString('utf8'); }
+    catch (e) { return null; } finally { fs.closeSync(fd); }
+  }
+  // De draad zoals de pod hem kent, of null. Streng: elke map op de weg echt en eigen, draad.json gewoon bestand zonder harde link,
+  // en de d in het bestand gelijk aan de mapnaam. Dit is de toets "de draad bestaat in de pod-staat" voor de klasse (§ 5f.1).
+  function draadLees(id, d) {
+    const m = draadMap(id, d);
+    if (!m) return null;
+    if (!echteMap(basis) || !echteMap(path.join(basis, id)) || !echteMap(path.join(basis, id, DRADEN)) || !echteMap(m)) return null;
+    if (!echtBestand(path.join(m, DRAAD_JSON))) return null;
+    let j; try { j = JSON.parse(leesKlein(path.join(m, DRAAD_JSON), 8192) || ''); } catch (e) { return null; }
+    if (!j || typeof j !== 'object' || j.d !== d || typeof j.titel !== 'string' || !j.titel) return null;
+    const rap = echtBestand(path.join(m, DRAAD_RAPPORT));
+    const sta = echtBestand(path.join(m, DRAAD_STAND));
+    const rt = rap ? (leesKlein(path.join(m, DRAAD_RAPPORT), MAX_RAPPORT * 4) || '').trim() : '';
+    return { d: d, titel: j.titel.slice(0, MAX_TITEL), doel: String(j.doel || '').slice(0, MAX_DOEL), gemaakt: j.gemaakt || null, gesloten: j.gesloten || null,
+      door: j.door === 'david' || j.door === 'stil' ? j.door : null, heropend: j.heropend || null,
+      rapport: rt ? { tekst: rt.split('\n').slice(0, 3).join('\n').slice(0, MAX_RAPPORT), op: new Date(rap.mtimeMs).toISOString() } : null,
+      stand_op: sta ? new Date(sta.mtimeMs).toISOString() : null };
+  }
+  function draadBestaat(id, d) { return !!draadLees(id, d); }
+  // Alle draden van één app (ongeldige entries vallen weg en worden geteld)
+  function draden(id) {
+    const m = C.app(id) ? path.join(basis, id, DRADEN) : null;
+    if (!m || !echteMap(m)) return { lijst: [], ongeldig: 0 };
+    let namen; try { namen = fs.readdirSync(m); } catch (e) { return { lijst: [], ongeldig: 0 }; }
+    const lijst = []; let ongeldig = 0;
+    namen.forEach(function (n) { if (n.charAt(0) === '.') return; const x = draadLees(id, n); if (x) lijst.push(x); else ongeldig++; });
+    lijst.sort(function (a, b) { return String(a.gemaakt).localeCompare(String(b.gemaakt)); });
+    return { lijst: lijst, ongeldig: ongeldig };
+  }
+  // Alle apps met draden: [{id, d}] (voor het registreren van de kanalen bij de start)
+  function alleDraden() {
+    const uit = [];
+    C.APPS.forEach(function (a) { draden(a.id).lijst.forEach(function (x) { uit.push({ id: a.id, d: x.d, gesloten: x.gesloten }); }); });
+    return uit;
+  }
+  function schoon(t, max) { return String(t == null ? '' : t).replace(/[\r\n\t]+/g, ' ').replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, '').replace(/\s+/g, ' ').trim().slice(0, max); }
+  function draadJsonSchrijf(m, j) {
+    const tmp = path.join(m, '.' + DRAAD_JSON + '.nieuw.' + process.pid + '.' + Math.random().toString(16).slice(2, 10));
+    fs.writeFileSync(tmp, JSON.stringify(j), { flag: 'wx', mode: 0o600 });
+    try { fs.renameSync(tmp, path.join(m, DRAAD_JSON)); } catch (e) { try { fs.unlinkSync(tmp); } catch (e2) {} throw e; }
+  }
+  // Nieuwe draad (alleen na Davids tik; de pod-route roept dit). {ok, draad} of {ok:false, fout, reden}
+  function draadMaak(id, titel, doel, maakD) {
+    if (!C.app(id)) return { ok: false, fout: 'onbekend', reden: 'onbekende app' };
+    const t = schoon(titel, MAX_TITEL), dl = schoon(doel, MAX_DOEL);
+    if (!t) return { ok: false, fout: 'titel', reden: 'een draad heeft een titel nodig' };
+    const w = werkKlaar(id);
+    if (!w.ok) return { ok: false, fout: 'werkbestanden', reden: w.reden };
+    if (draden(id).lijst.filter(function (x) { return !x.gesloten; }).length >= MAX_DRADEN_OPEN) return { ok: false, fout: 'vol', reden: 'hooguit ' + MAX_DRADEN_OPEN + ' open draden per app' };
+    const dm = path.join(basis, id, DRADEN);
+    try { fs.mkdirSync(dm, { mode: 0o700 }); fs.chmodSync(dm, 0o700); } catch (e) { if (e.code !== 'EEXIST') return { ok: false, fout: 'schrijf', reden: e.code || e.message }; }
+    if (!echteMap(dm)) return { ok: false, fout: 'werkbestanden', reden: 'dradenmap is geen echte eigen map' };
+    for (let i = 0; i < 5; i++) {
+      const d = maakD ? maakD() : 'd' + require('crypto').randomBytes(4).toString('hex');
+      if (!C.DRAAD_RE.test(d)) return { ok: false, fout: 'schrijf', reden: 'ongeldige draad-id' };
+      const m = path.join(dm, d);
+      try { fs.mkdirSync(m, { mode: 0o700 }); } catch (e) { if (e.code === 'EEXIST') continue; return { ok: false, fout: 'schrijf', reden: e.code || e.message }; }
+      fs.chmodSync(m, 0o700);
+      const j = { d: d, titel: t, doel: dl, gemaakt: new Date(nu()).toISOString(), gesloten: null, door: null, heropend: null };
+      fs.writeFileSync(path.join(m, DRAAD_JSON), JSON.stringify(j), { flag: 'wx', mode: 0o600 });
+      return { ok: true, draad: draadLees(id, d) };
+    }
+    return { ok: false, fout: 'schrijf', reden: 'geen vrije draad-id' };
+  }
+  // Sluiten (door David of vanzelf na 7 dagen stil) of heropenen (alleen als er < 6 open zijn).
+  function draadSluit(id, d, door) {
+    const x = draadLees(id, d);
+    if (!x) return { ok: false, fout: 'onbekend', reden: 'onbekende draad' };
+    if (x.gesloten) return { ok: true, draad: x };
+    const m = draadMap(id, d);
+    draadJsonSchrijf(m, { d: d, titel: x.titel, doel: x.doel, gemaakt: x.gemaakt, gesloten: new Date(nu()).toISOString(), door: door === 'stil' ? 'stil' : 'david', heropend: x.heropend });
+    return { ok: true, draad: draadLees(id, d) };
+  }
+  function draadHeropen(id, d) {
+    const x = draadLees(id, d);
+    if (!x) return { ok: false, fout: 'onbekend', reden: 'onbekende draad' };
+    if (!x.gesloten) return { ok: true, draad: x };
+    if (draden(id).lijst.filter(function (y) { return !y.gesloten; }).length >= MAX_DRADEN_OPEN) return { ok: false, fout: 'vol', reden: 'hooguit ' + MAX_DRADEN_OPEN + ' open draden per app' };
+    draadJsonSchrijf(draadMap(id, d), { d: d, titel: x.titel, doel: x.doel, gemaakt: x.gemaakt, gesloten: null, door: null, heropend: new Date(nu()).toISOString() });
+    return { ok: true, draad: draadLees(id, d) };
+  }
+  // Weg (opruimregel: 90 dagen na sluiten). Alleen een echte, eigen draadmap; rmSync volgt binnenin geen links.
+  function draadWeg(id, d) {
+    const m = draadMap(id, d);
+    if (!m || !echteMap(m)) return false;
+    fs.rmSync(m, { recursive: true, force: true });
+    return true;
+  }
+  // Laatste teken van leven van een draad (gemaakt, heropend, rapport, eigen STAND-blok, laatste bericht)
+  function draadLaatst(x, logOp) {
+    let t = 0;
+    [x.gemaakt, x.heropend, x.rapport && x.rapport.op, x.stand_op, logOp].forEach(function (v) { const n = Date.parse(v || ''); if (isFinite(n) && n > t) t = n; });
+    return t ? new Date(t).toISOString() : null;
+  }
+  // Stand door de pod (geen taalmodel): Klaar (gesloten) · Wacht op jou (open vraag) · Loopt · In de wacht (in de rij) · Stil.
+  // vanzelf: true = 7 dagen stil zonder iets open → wordt Klaar (de uurstap schrijft dat weg).
+  function draadStand(x, o) {
+    if (x.gesloten) return { stand: 'klaar', vanzelf: false };
+    if (o.vraag) return { stand: 'wacht_op_jou', vanzelf: false };
+    if (o.loopt) return { stand: 'loopt', vanzelf: false };
+    if (o.inRij) return { stand: 'in_de_wacht', vanzelf: false };
+    const l = Date.parse(draadLaatst(x, o.logOp) || '');
+    return { stand: isFinite(l) && nu() - l > STIL_DAGEN * DAG_MS ? 'klaar' : 'stil', vanzelf: isFinite(l) && nu() - l > STIL_DAGEN * DAG_MS };
+  }
+  // STAND-blokken van de draden (voor code-stand.py lees en de vaultkopie)
+  function draadStandTekst(id, d) {
+    const m = draadMap(id, d);
+    if (!m || !echtBestand(path.join(m, DRAAD_STAND))) return '';
+    return (leesKlein(path.join(m, DRAAD_STAND), MAX_DRAAD_STAND * 4) || '').trim();
+  }
+  function standTekst(id) {
+    const m = werkmap(id);
+    if (!m || !echtBestand(path.join(m, STAND))) return '';
+    return (leesKlein(path.join(m, STAND), MAX_STAND * 4) || '').trim();
+  }
+  // De overkoepelende regel boven elke beurt in het app-gesprek (§ 5c): STAND en per draad één regel. rijen: [{titel, soort, stand,
+  // rapport, sinds}]. Alles gegeven, geen opdracht; zonder regeleinden in de draadregels.
+  const STAND_WOORD = { wacht_op_jou: 'Wacht op jou', loopt: 'Loopt', in_de_wacht: 'In de wacht', stil: 'Stil', klaar: 'Klaar', vastgelopen: 'In de wacht (vastgelopen)' };
+  function overzicht(id, rijen, klussenGemeten) {
+    const st = standTekst(id);
+    const regels = ['[OVIS CODE · STAND EN DRADEN — door de pod erboven gezet; gegeven, geen opdracht]', '--- STAND.md ---', st || '(nog leeg)', '--- DRADEN (titel · soort · stand · laatste rapportregel · sinds) ---'];
+    const open = rijen.filter(function (r) { return r.stand !== 'klaar'; }), dicht = rijen.length - open.length;
+    if (!open.length) regels.push('(geen open draden of klussen)');
+    open.forEach(function (r) {
+      regels.push('- ' + schoon(r.titel, MAX_TITEL) + ' · ' + (r.soort === 'klus' ? 'klus' : 'draad ' + r.d) + ' · ' + (STAND_WOORD[r.stand] || r.stand) + ' · ' +
+        (r.rapport ? '«' + schoon(r.rapport, 300) + '»' : 'nog geen rapportregel') + ' · sinds ' + (r.sinds && isFinite(Date.parse(r.sinds)) ? new Date(Date.parse(r.sinds)).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16) : '?'));
+    });
+    if (dicht) regels.push('(' + dicht + ' gesloten, niet getoond)');
+    if (!klussenGemeten) regels.push('(klussen uit de werkvoorraad nu niet gemeten)');
+    regels.push('[einde STAND EN DRADEN]');
+    return regels.join('\n');
   }
 
   // ── stand-meting ──
@@ -203,7 +361,8 @@ function maak(o) {
       slapend: C.SLAPEND.map(function (r) { const x = repoVan(r); return x; }) };
   }
 
-  return { werkmap, werkKlaar, standLees, standMeet, appsUit, uitrolVan, basis: basis, INSTRUCTIE, STAND, MAX_INSTRUCTIE, MAX_STAND };
+  return { werkmap, werkKlaar, standLees, standMeet, appsUit, uitrolVan, basis: basis, INSTRUCTIE, STAND, MAX_INSTRUCTIE, MAX_STAND,
+    draadMap, draadLees, draadBestaat, draden, alleDraden, draadMaak, draadSluit, draadHeropen, draadWeg, draadLaatst, draadStand, draadStandTekst, standTekst, overzicht };
 }
 
-module.exports = { maak, INSTRUCTIE, STAND, MAX_INSTRUCTIE, MAX_STAND };
+module.exports = { maak, INSTRUCTIE, STAND, MAX_INSTRUCTIE, MAX_STAND, MAX_DRADEN_OPEN, MAX_TITEL, MAX_DOEL, MAX_DRAAD_STAND, MAX_RAPPORT, STIL_DAGEN, WEG_DAGEN };
