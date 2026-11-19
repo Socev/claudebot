@@ -1016,10 +1016,13 @@ function maak(o) {
     bijwerken();
     const uit = [];
     for (const h of q.hAlle.all()) {
-      if (h.status !== 'actief' || !inStraat(h)) continue;
-      const p = paginaLees(h.hid), s = sam(h, p), t = titelVan(h, p, s);
-      if (kringVan(h, t)[k]) uit.push({ hid: h.hid, open: true, item: toonKort(kort(h, p, s)) });
-      else { const w = wanneerInfo(h, p, s); uit.push({ hid: h.hid, open: false, jaar: w.van ? String(w.van).slice(0, 4) : null }); }
+      // A25 (Fable-review 19-11, memorylane § 3): één onleesbare pagina = dat huis dicht (fout: true), de rest van de straat gaat door
+      try {
+        if (h.status !== 'actief' || !inStraat(h)) continue;
+        const p = paginaLees(h.hid), s = sam(h, p), t = titelVan(h, p, s);
+        if (kringVan(h, t)[k]) uit.push({ hid: h.hid, open: true, item: toonKort(kort(h, p, s)) });
+        else { const w = wanneerInfo(h, p, s); uit.push({ hid: h.hid, open: false, jaar: w.van ? String(w.van).slice(0, 4) : null }); }
+      } catch (e) { fout('ml-publiek-huis', e); uit.push({ hid: h.hid, open: false, jaar: null, fout: true }); }
     }
     return uit;
   }

@@ -23319,6 +23319,7 @@ const memorylanePubliek = (function () {
   };
   try {
     return require(p).maak({ db: intake._db, ml: memorylaneDelen, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, fout: logError, categorieen: HERINNERINGEN_MOD.CATEGORIEEN,
+      box: function (t) { if (!ovisBoxRij(t)) throw new Error('box-rij niet geschreven'); },   // A25: één rij per storing; mislukt = volgende minuut opnieuw
       d1: async function (batch) { return d1Met(batch, await mlPubToken()); },
       // A08 (Fable-review 19-11): de noodstop gaat direct naar D1 en valt bij een kluisstoring terug op het pod-token (alleen deze ene
       // schrijfactie; de tik valt bij een kluisfout nog steeds NIET terug). Een D1-fout zelf krijgt geen tweede poging met een ander token.
@@ -23346,7 +23347,9 @@ const memorylanePubliek = (function () {
 })();
 let mlPubLoopt = false;
 async function memorylanePubliekTik(dwing) {
-  if (!memorylanePubliek || mlPubLoopt || !rolPrimair()) return;
+  if (!memorylanePubliek || !rolPrimair()) return;
+  memorylanePubliek.bewaak();   // A25: ook als de vorige tik nog hangt
+  if (mlPubLoopt) return;
   mlPubLoopt = true;
   try { await memorylanePubliek.tik(dwing); } catch (e) { logError('mlp-tik', e); } finally { mlPubLoopt = false; }
 }
