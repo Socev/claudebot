@@ -21422,6 +21422,29 @@ async function ovisDeadlinesTik() {
   } catch (e) { logError('ovis-deadlines-tik', e); }
 }
 if (ovisDeadlines && SERVER_ECHT) { setInterval(function () { ovisDeadlinesTik(); }, 5 * 60000).unref(); }
+// ── B14 (Fable-reviews 19-11): tarieven-wachter, waarom en werking in tarieven-wachter.js. Elk uur (echte pod, rol primair); vier weken voor de
+// belastingtarieven in OVIS Financiën aflopen precies één werkvoorraadrij (staat in klokken/tarieven-wachter.json), een fout één keer in de box.
+const TARIEVEN_WACHTER_STAAT = path.join(KLOKKEN_DIR, 'tarieven-wachter.json');
+let tarievenWachterLoopt = false;
+async function tarievenWachterTik() {
+  if (tarievenWachterLoopt || !rolPrimair()) return;
+  tarievenWachterLoopt = true;
+  try {
+    await require(path.join(__dirname, 'tarieven-wachter.js')).ronde({
+      groepen: function () { return require(path.join(__dirname, 'financien-advies.js')).geldigheid(); },
+      vandaag: function () { return ovisAms().datum; }, nu: function () { return ovisAms().klok; },
+      lees: function () { return appLeesStreng(TARIEVEN_WACHTER_STAAT, { gemeld: {}, fout: {} }); },
+      schrijf: function (st) { appSchrijfJson(TARIEVEN_WACHTER_STAAT, st); },
+      zet: async function (p) {
+        const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: p.label, p_prompt: mkBlokVoor(p.prompt), p_status: 'open', p_samenvatting: p.samenvatting, p_notitie: 'pod B14: tarieven-wachter' }, 20000);
+        if (!z || !z.ok || !z.id) throw new Error('werkvoorraad gaf geen rij terug');
+        return { id: z.id, bestond: !!z.bestond };
+      },
+      box: function (t) { return ovisBoxRij(t); }, log: function (t) { schrijfLog(nu() + ' ' + t); }, fout: function (e) { logError('tarieven-wachter', e); } });
+  } catch (e) { logError('tarieven-wachter', e); }
+  finally { tarievenWachterLoopt = false; }
+}
+if (SERVER_ECHT) { setTimeout(function () { tarievenWachterTik(); }, 200000).unref(); setInterval(function () { tarievenWachterTik(); }, 60 * 60000).unref(); }
 // ── Zoek snel laag 1 en 2 bijhouden (wv1788; waarom in zoek-snel.js, feitenlijst.py en zoekindex.py) ──
 // Elke 5 min (echte pod, rol primair), eenmaal per datum, via socev-run met hartslag (drempelrij machinekamer.hartslag, 48 u):
 // - sb2-feitenlijst 05:00–05:29: feitenlijst.py --laad --gelijktrekken (vault → secondbrain.identifier, daarna register → feitenlijst);

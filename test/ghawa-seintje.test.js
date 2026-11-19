@@ -190,7 +190,9 @@ test('8. onleesbare wachtstaat (review ZOU 1): info = fout en wacht -1, niets ov
 
 test('server.js: elke mk_werkvoorraad_zet-aanroeper van de pod zet het blok ervoor; /health.ghawa.deel.seintje; tik herhaalt', () => {
   const srv = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.strictEqual((srv.match(/appSbRpc\('mk_werkvoorraad_zet'/g) || []).length, 6, 'nieuwe aanroeper: eerst het blok regelen en deze telling aanpassen');
+  assert.strictEqual((srv.match(/appSbRpc\('mk_werkvoorraad_zet'/g) || []).length, 7, 'nieuwe aanroeper: eerst het blok regelen en deze telling aanpassen');
+  // B14 (tarieven-wachter, Fable-reviews 19-11): zevende aanroeper, zet het blok via mkBlokVoor
+  assert.match(srv, /async function tarievenWachterTik[\s\S]*?appSbRpc\('mk_werkvoorraad_zet', \{ p_label: p\.label, p_prompt: mkBlokVoor\(p\.prompt\)/);
   // wv3250 (steekwoordkeuze per woord, app Voor jou): zesde aanroeper, zet het blok via mkBlokVoor (wv3256 telling bijgewerkt)
   assert.match(srv, /async function appSwMakenRij[\s\S]*?appSbRpc\('mk_werkvoorraad_zet', \{ p_label: label, p_prompt: mkBlokVoor\(appSwMakenOpdracht\(/);
   // wv3020 (personeelsscherm, Nieuwe pagina): vijfde aanroeper, zet het blok via mkBlokVoor (wv3021 telling bijgewerkt)
