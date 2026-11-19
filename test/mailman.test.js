@@ -3094,7 +3094,7 @@ test('wv2455 zouWeg: alleen weg (nieuwsbrief, systeemmelding, geen actie); nooit
 });
 test('wv2469 zouWeg aangescherpt: betaal- en termijnwoorden, bank/overheid/loon/kluis-afzender en persoonlijk adres nooit vanzelf weg', () => {
   const b = { laag: 'weg', reden: 'nieuwsbrief', onderwerp: 'Nieuws van november', afzender: 'nieuws@vereniging.invalid' };
-  assert.equal(K.VANZELF_VERSIE, 2);
+  assert.ok(K.VANZELF_VERSIE >= 2);
   ['je maandelijkse afschrijving komt eraan', 'Your plan will renew', 'We hebben de betaling van uw bestelling ontvangen!', 'Geef uw watermeterstand door',
     'Nieuwe passen één jaar geldig: controleer de vervaldata', 'A spend cap has been configured', 'AI Credits Auto Upgrade Completed',
     'Action Required: Update your models', 'Niet vergeten: uw afspraak bij de garage', 'Your subscription to the Starter tier', 'Pensioenexport voor de werkgevers',
@@ -3108,6 +3108,25 @@ test('wv2469 zouWeg aangescherpt: betaal- en termijnwoorden, bank/overheid/loon/
     ['Bestelling 123 is verzonden', 'info@winkel.invalid'], ['I want to connect', 'invitations@netwerk.invalid'], ['Bericht van de school', 'info@thing.invalid']]
     .forEach(function (x) { assert.equal(K.zouWeg(Object.assign({}, b, { onderwerp: x[0], afzender: x[1] })), 'nieuwsbrief', x[0]); });
   assert.equal(K.zouWeg(Object.assign({}, b, { afzender: 'nieuws@thing.invalid' })), 'nieuwsbrief');   // 'ing' alleen als eigen domeindeel
+});
+test('wv2968 zouWeg aangescherpt na proefweek 2: verificatie, storing, budget/proefperiode, onderhoud, aanvraag, locatie, FW/RE, persoon, beleggen/gemeente', () => {
+  const b = { laag: 'weg', reden: 'nieuwsbrief', onderwerp: 'Nieuws van november', afzender: 'nieuws@vereniging.invalid' };
+  assert.equal(K.VANZELF_VERSIE, 3);
+  ['Verify your email address', 'Bevestig je e-mailadres', '[Nas] Opslagpool 1 is beschadigd', 'Volume degraded', 'Your project is running out of Disk IO Budget',
+    'Notification for free trial', 'Je proefperiode stopt bijna', 'Important Notice: Scheduled System Maintenance', 'Gepland onderhoud zaterdag', 'Bevestiging aanvraag [123]',
+    'Je deelt je realtime locatie met iemand', 'Iemand just messaged you', 'FW: Nieuwsbrief november', 'Re: je vraag', 'Antw: offerte', 'Je hebt opgezegd', 'Backup failure on server', 'Server is down']
+    .forEach(function (o) { assert.equal(K.zouWeg(Object.assign({}, b, { onderwerp: o })), null, o); });
+  ['no-reply@info.coinbase.com', 'no-reply@mail.degiro.com', 'info@bitvavo.com', 'info@gemeenteverzonnen.nl', 'no-reply@accounts.google.com',
+    'a.verzonnen@bedrijf.invalid', 'voornaam.achternaam@bedrijf.invalid']
+    .forEach(function (a) { assert.equal(K.zouWeg(Object.assign({}, b, { afzender: a })), null, a); });
+  // rolnamen met een punt en gewone nieuwsbrieven/bezorgmeldingen blijven kandidaat
+  [['Changelog oktober', 'support.api@dienst.invalid'], ['Nieuwsbrief', 'info.nl@winkel.invalid'], ['Je pakket is bezorgd', 'noreply@bezorger.invalid'],
+    ['We staan vanavond voor de deur tussen 17.30 - 21.30 uur', 'noreply@bezorger.invalid'], ['Bericht van de school', 'info@thing.invalid'], ['I want to connect', 'invitations@netwerk.invalid'],
+    ['Network backup voltooid', 'sns@nasmelding.invalid'], ['Bestelling bevestigd', 'no-reply@eten.invalid'], ['Black Friday deals', 'servicedesk@winkel.invalid']]
+    .forEach(function (x) { assert.equal(K.zouWeg(Object.assign({}, b, { onderwerp: x[0], afzender: x[1] })), 'nieuwsbrief', x[0]); });
+  assert.equal(K.persoonAdres('j.verzonnen@bedrijf.invalid'), true);
+  assert.equal(K.persoonAdres('noreply@bedrijf.invalid'), false);
+  assert.equal(K.persoonAdres('support.api@bedrijf.invalid'), false);
 });
 test('wv2455 zaakregister: zou_weg in de schaduw, Nooit per afzender, gemist en zelf, jij_open, voorwerkBron zonder tekst; Gmail onveranderd', () => {
   const { mm, dir, gm, fouten } = b8Kamer();
