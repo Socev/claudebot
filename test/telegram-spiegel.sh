@@ -6,6 +6,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
+const NEP_SB = require(require('path').resolve('test/nep-supabase.js'))();   // wv3398: eigen nep-Supabase (rolwachter), niet de echte databank
 const vrijePoort = require(require('path').resolve('test/vrije-poort.js'));
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http');
 const { spawn } = require('child_process');
@@ -35,7 +36,7 @@ const d = path.join(W, 'srv');
 ['home', 'vault', 'repo', 'io', 'jobout'].forEach((m) => fs.mkdirSync(path.join(d, m), { recursive: true }));
 const LOG = path.join(d, 'app-log'), UIT = path.join(d, 'app-uit');
 const poort = vrijePoort();
-const env = Object.assign({}, process.env, {
+const env = Object.assign({}, process.env, { SUPABASE_URL: NEP_SB.url, SUPABASE_SERVICE_ROLE: NEP_SB.sleutel,
   HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'), APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: LOG,
   APP_DATA_DIR: path.join(d, 'app-data'), APP_UIT_BESTAND: UIT,
   JOBOUT_DIR: path.join(d, 'jobout'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'),

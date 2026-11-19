@@ -38,8 +38,8 @@ toets 'A6b CRLF: genegeerd (zoals fetch-secrets)' "$([ "$(a 'SUPABASE_URL=http:/
 toets 'A6c spatie voor een regel: genegeerd' "$([ "$(a ' SUPABASE_URL=http://127.0.0.1:8091\nSB_SQL_LOKAAL=1\n')" = 'onbekende vorm|https://oud.supabase.co|-' ] && echo 1)"
 toets 'A6d ingesprongen commentaar en lege regel met spaties: lokaal' "$([ "$(a '  # x\n   \nSUPABASE_URL=http://127.0.0.1:8091\nSB_SQL_LOKAAL=1\n')" = 'lokaal|http://127.0.0.1:8091|1' ] && echo 1)"
 toets 'A7 kant vps: genegeerd' "$([ "$(a "$GOED" vps)" = 'andere kant|https://oud.supabase.co|-' ] && echo 1)"
-toets 'A8 server.js past het blok toe vóór sbBeheer' "$(node -e '
-const s = require("fs").readFileSync("server.js", "utf8"); const i = s.indexOf("const ADRES_ENV_UITKOMST = pasAdresEnvToe(process.env"), j = s.indexOf("/* sbBeheer:begin");
+toets 'A8 server.js past het blok toe vóór sbBeheer (alleen de echte release, wv3398)' "$(node -e '
+const s = require("fs").readFileSync("server.js", "utf8"); const i = s.indexOf("const ADRES_ENV_UITKOMST = SERVER_ECHT_VROEG ? pasAdresEnvToe(process.env"), j = s.indexOf("/* sbBeheer:begin");
 process.exit(i > 0 && i < j ? 0 : 1)' && echo 1)"
 
 # ── B. fetch-secrets.sh ─────────────────────────────────────────────────────

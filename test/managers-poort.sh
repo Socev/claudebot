@@ -375,9 +375,14 @@ fs.writeFileSync(path.join(d, 'bin', 'claude'), '#!/bin/sh\ncase " $* " in *" --
 for (const f of ['server.js', 'managers-poort.js', 'managers.js']) fs.copyFileSync(f, path.join(d, f));
 const ZEGEL = path.join(d, 'zegel.json');
 const vrij = () => new Promise((ok) => { const s = net.createServer(); s.listen(0, () => { const p = s.address().port; s.close(() => ok(p)); }); });
+// wv3398: eigen nep-Supabase voor de rolwachter (actieve kant olares). Vóór wv3398 las de proefserver zijn rol met de geërfde
+// SUPABASE_URL en service role uit de ECHTE databank; een proefkopie krijgt die nu niet meer.
+const nepSb = http.createServer((q, r) => { r.setHeader('content-type', 'application/json');
+  r.end(q.url.indexOf('/rest/v1/rpc/uitwijk_stand_lees') === 0 ? JSON.stringify([{ actieve_kant: 'olares', sinds: null }]) : '[]'); });
 (async function () {
+  await new Promise((r) => nepSb.listen(0, '127.0.0.1', r)); nepSb.unref();
   const poort = await vrij();
-  const env = Object.assign({}, process.env, { HOME: path.join(d, 'home'), VAULT_DIR: V, REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'),
+  const env = Object.assign({}, process.env, { SUPABASE_URL: 'http://127.0.0.1:' + nepSb.address().port, SUPABASE_SERVICE_ROLE: 'proef', HOME: path.join(d, 'home'), VAULT_DIR: V, REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'),
     APP_BESTANDEN_DIR: path.join(d, 'ab'), APP_LOG_DIR: path.join(d, 'al'), APP_DATA_DIR: path.join(d, 'ad'), APP_UIT_BESTAND: path.join(d, 'au'), TEL_UIT_BESTAND: path.join(d, 'tu'),
     JOBOUT_DIR: path.join(d, 'jo'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'), RUNTIME_FILE: path.join(d, 'runtime.json'), CODEX_HOME: path.join(d, 'codex'),
     SLEUTELPORTAAL_SLEUTEL: path.join(d, 'geen.key'), ROL_BESTAND: path.join(d, 'rol'), UITROL_MARKER: path.join(d, 'uitrol-wacht'), OFFSITE_INTERVAL_MIN: '0', AUTO_UIT_POD: '1',
