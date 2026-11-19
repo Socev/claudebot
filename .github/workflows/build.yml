@@ -499,6 +499,9 @@ jobs:
       - name: "memorylane-publiek-token (wv2738, eigen smal Cloudflare-token)"
         if: ${{ !cancelled() }}
         run: bash test/memorylane-publiek-token.sh
+      - name: "memorylane-toonmodus-kapot (A04, onleesbaar toonmodus.json = dicht)"
+        if: ${{ !cancelled() }}
+        run: bash test/memorylane-toonmodus-kapot.sh
       # MemoryLane-verteller in Davids eigen stem (wv2366): nep-ElevenLabs, plafond € 5/maand, weigeringen, verouderd, weghalen/opruimen,
       # geen tekst in het register.
       - name: "memorylane-verteller (wv2366, eigen stem)"
