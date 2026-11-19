@@ -1525,7 +1525,8 @@ function zichtbaarVoor(rol, f) {
  * incasso'"; ontwerp Facturen naar Cynthia § 1.4 en § 9). Pure functie: uit de feiten die facturen.js op de rij in de database vaststelt
  * (x) de LET OP-regels, belangrijkste eerst, zonder bedragen, namen of patiëntgegevens. Twijfel houdt niets tegen; Cynthia beslist.
  * x = { zonder_bijlage, iban_zwak: { sinds } | null, nagebeld_op, incasso, waarschuwingen: [eerder_in_batch|zegt_betaald|mogelijk_betaald|
- * kenmerk_fout], dubbel, drempel, valuta, scan, signalen: [soort] } → [tekst]
+ * kenmerk_fout], dubbel, drempel, valuta, scan, signalen: [soort], toch: 'incasso'|'teruggeboekt'|null, eerder_cynthia: { op, zeker } | null } → [tekst]
+ * (toch en eerder_cynthia sinds wv3372; onbekende waarschuwingen zoals bij_cynthia tellen niet mee)
  */
 const LET_OP_MAX = 3;
 const LET_OP_SIGNAAL = {
@@ -1543,7 +1544,11 @@ function letOp(x) {
   if (x.zonder_bijlage) r.push('factuur niet bijgevoegd (mogelijk patiëntgegevens); vraag David om de factuur');
   if (x.iban_zwak) r.push('rekeningnummer pas sinds ' + (dagMaand(x.iban_zwak.sinds) || 'kort') + ' bekend, niet nagebeld');
   if (x.nagebeld_op) r.push('nieuw rekeningnummer, door David nagebeld op ' + (dagMaand(x.nagebeld_op) || 'onbekende datum'));
-  if (x.incasso) r.push('is misschien via incasso');
+  // wv3372 (fase 2): David koos na een verwachte incasso "toch zelf betalen", of de bank boekte een eerdere betaling terug
+  if (x.toch === 'incasso') r.push('stond eerst op incasso; David koos toch zelf betalen (kijk of hij niet al is geïncasseerd)');
+  if (x.toch === 'teruggeboekt') r.push('een eerdere betaling van deze factuur is door de bank teruggeboekt; kijk het rekeningnummer na');
+  if (x.eerder_cynthia) r.push((x.eerder_cynthia.zeker ? 'ging al eerder naar Cynthia' : 'ging misschien al eerder naar Cynthia') + (dagMaand(x.eerder_cynthia.op) ? ' (' + dagMaand(x.eerder_cynthia.op) + ')' : ''));
+  if (x.incasso && x.toch !== 'incasso') r.push('is misschien via incasso');
   if (w.has('zegt_betaald')) r.push('factuur zegt al betaald, niet gezien op de bank');
   if (w.has('mogelijk_betaald')) r.push('er staat al een afschrijving met dit bedrag naar dit rekeningnummer');
   if (w.has('eerder_in_batch')) r.push('zat eerder in een betaalbatch');
