@@ -5,6 +5,8 @@
 # uitrol blijven ongemoeid. Alles in een eigen map: eigen git-repo, eigen APP_ROOT, een mini-supervisor die het kind start
 # met RELEASE_DIR = realpath(current) (of een verkeerde map: het voorval) en herstart bij exit, en een kleine server met
 # dezelfde echt-toets als server.js. Het productiekind (/opt/data/app/releases/...) wordt niet geraakt; dat toetsen we ook.
+# wv3418 (B39): uitrol.sh schrijft APP_ROOT/gewenst; een terugflip door de supervisor, een halve stand (current omgezet, oud kind
+# leeft) en een uitrol zonder supervisor geven exit 1 zonder "klaar" (vroeger LET OP + klaar + exit 0).
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
@@ -36,8 +38,12 @@ process.on('SIGTERM', function () { process.exit(0); });
 const SUPER = `const fs = require('fs'), path = require('path'), { spawn } = require('child_process');
 const APP = ${JSON.stringify(APP)}, FOUT = ${JSON.stringify(FOUT)};
 function start() {
-  const map = fs.realpathSync(path.join(APP, 'current')), sha = path.basename(map);
+  let map = fs.realpathSync(path.join(APP, 'current')), sha = path.basename(map);
   let f = ''; try { f = fs.readFileSync(FOUT, 'utf8').trim(); } catch (e) {}
+  if (f === 'flip:' + sha) {   // wv3418: terugflip nabootsen (de echte supervisor zet current naar vorige als de boot-zelfcontrole faalt)
+    const c = path.join(APP, 'current'); fs.unlinkSync(c); fs.symlinkSync(fs.readlinkSync(path.join(APP, 'vorige')), c);
+    map = fs.realpathSync(c); sha = path.basename(map);
+  }
   const rd = (f === 'alle' || f === sha) ? ${JSON.stringify(W)} : map;
   const k = spawn(process.execPath, [path.join(map, 'server.js')], { cwd: map, stdio: 'ignore',
     env: Object.assign({}, process.env, { RELEASE_SHA: sha, RELEASE_DIR: rd }) });
@@ -72,6 +78,8 @@ function uitrol(sha, extra) {
 }
 const link = (n) => { try { return fs.readlinkSync(path.join(APP, n)); } catch (e) { return ''; } };
 const logStaart = (n) => fs.readFileSync(path.join(W, 'uitrol.log'), 'utf8').split('\n').slice(-(n || 12)).join('\n');
+const gewenst = () => { try { return JSON.parse(fs.readFileSync(path.join(APP, 'gewenst'), 'utf8')); } catch (e) { return {}; } };
+const klaarNaar = (k) => new RegExp('klaar - uitgerold naar ' + k).test(logStaart(6));
 const boxRijen = () => (fs.readFileSync(BOX, 'utf8').match(/^## \[log\] .*Uitrol .* teruggezet/mg) || []).length;
 
 (async function () {
@@ -109,6 +117,7 @@ const boxRijen = () => (fs.readFileSync(BOX, 'utf8').match(/^## \[log\] .*Uitrol
     toets('1 goed: current = B, vorige = A', link('current') === 'releases/' + kort('B') && link('vorige') === 'releases/' + kort('A'), link('current') + ' / ' + link('vorige'));
     toets('1 goed: log "draait op de echte paden"', /nacontrole: .* draait op de echte paden \(echt: ja\)/.test(logStaart()), logStaart(3));
     toets('1 goed: geen box-rij', boxRijen() === 0);
+    toets('1 goed: gewenst = B (uitrol.sh)', gewenst().sha === kort('B') && gewenst().door === 'uitrol.sh' && !!gewenst().tijd, JSON.stringify(gewenst()));
 
     // 2. D met verkeerde RELEASE_DIR (alleen D): terug naar B, vorige terug naar A, box-rij, exit 1.
     fs.writeFileSync(FOUT, kort('D'));
@@ -119,6 +128,7 @@ const boxRijen = () => (fs.readFileSync(BOX, 'utf8').match(/^## \[log\] .*Uitrol
     toets('2 wegwerp: vorige terug naar A (vangnet blijft bruikbaar)', link('vorige') === 'releases/' + kort('A'), link('vorige'));
     toets('2 wegwerp: B draait weer echt', h && h.versie === kort('B') && h.server.echt === true, JSON.stringify(h));
     toets('2 wegwerp: log FOUT + "draait weer"', /FOUT: nacontrole - .* wegwerpmap/.test(logStaart()) && new RegExp(kort('B') + ' draait weer \\(echt: ja\\)').test(logStaart()), logStaart(6));
+    toets('2 wegwerp: gewenst terug naar B', gewenst().sha === kort('B') && /terug/.test(gewenst().reden || ''), JSON.stringify(gewenst()));
     toets('2 wegwerp: één box-rij, bovenaan onder **Formaat**', boxRijen() === 1 && /\*\*Formaat\*\*[^\n]*\n\n## \[log\] [^\n]*Uitrol [0-9a-f]{12} teruggezet/.test(fs.readFileSync(BOX, 'utf8')) && /kost als het blijft liggen: niets zolang/.test(fs.readFileSync(BOX, 'utf8')));
 
     // 3. Altijd een verkeerde RELEASE_DIR (oorzaak buiten de release): terug naar B, uitslag "ook B ... wegwerpmap", exit 1.
@@ -138,11 +148,31 @@ const boxRijen = () => (fs.readFileSync(BOX, 'utf8').match(/^## \[log\] .*Uitrol
     c = await uitrol(sha.D, { UITROL_DROOG: '1' });
     toets('5 droog: exit 0, current blijft C', c === 0 && link('current') === 'releases/' + kort('C'), c + ' ' + link('current'));
 
-    // 6. Geen draaiend kind (geen supervisor): nacontrole overgeslagen, ook met verkeerde RELEASE_DIR in de lucht.
+    // 5b. wv3418: terugflip nabootsen - de supervisor zet current terug naar vorige (C) en start C. Vroeger LET OP + "klaar" + exit 0.
+    fs.writeFileSync(FOUT, 'flip:' + kort('D'));
+    c = await uitrol(sha.D, { UITROL_NACONTROLE_MAX: '6' });
+    toets('5b terugflip: exit 1', c === 1, String(c));
+    toets('5b terugflip: geen "klaar", wel FOUT nacontrole', !klaarNaar(kort('D')) && /FOUT: nacontrole - \/health toont na 6s versie [0-9a-f]{12}, niet [0-9a-f]{12}/.test(logStaart(3)), logStaart(3));
+    toets('5b terugflip: gewenst = D, draaiend C (verschil zichtbaar)', gewenst().sha === kort('D') && link('current') === 'releases/' + kort('C') && ((await health()) || {}).versie === kort('C'), JSON.stringify(gewenst()) + ' ' + link('current'));
+
+    // 5c. Halve stand: current wijst al naar D, maar het kind van C leeft nog. Vroeger "niets om te doen" + exit 0.
+    fs.writeFileSync(FOUT, '');
+    fs.unlinkSync(path.join(APP, 'current')); fs.symlinkSync('releases/' + kort('D'), path.join(APP, 'current'));
+    c = await uitrol(sha.D, { UITROL_NACONTROLE_MAX: '4' });
+    toets('5c halve stand: exit 1 met "current wijst al naar", geen "niets om te doen"', c === 1 && /FOUT: current wijst al naar [0-9a-f]{12}, maar \/health toont na 4s versie/.test(logStaart(2)) && !/niets om te doen/.test(logStaart(2)), c + ' ' + logStaart(2));
+    toets('5c halve stand: gewenst = D', gewenst().sha === kort('D'), JSON.stringify(gewenst()));
+
+    // 5d. Herstel: uitrol C (current D -> C, kind herstart) = exit 0; nogmaals C (draait al) = exit 0 met "niets om te doen", gewenst = C.
+    c = await uitrol(sha.C);
+    toets('5d herstel: exit 0, "klaar", gewenst = C', c === 0 && klaarNaar(kort('C')) && gewenst().sha === kort('C'), c + ' ' + logStaart(3));
+    c = await uitrol(sha.C);
+    toets('5d al current en draait: exit 0, niets om te doen', c === 0 && /current wijst al naar [0-9a-f]{12} - niets om te doen/.test(logStaart(2)), c + ' ' + logStaart(2));
+
+    // 6. Geen draaiend kind (geen supervisor): de versie komt niet op -> exit 1 zonder "klaar" (wv3418; vroeger overgeslagen + exit 0).
     stopSupervisor(); await slaap(500);
     fs.writeFileSync(FOUT, 'alle');
-    c = await uitrol(sha.D);
-    toets('6 geen kind: exit 0, current = D, geen nacontrole', c === 0 && link('current') === 'releases/' + kort('D') && !/nacontrole/.test(logStaart(4)), logStaart(4));
+    c = await uitrol(sha.D, { UITROL_NACONTROLE_MAX: '4' });
+    toets('6 geen kind: exit 1, current = D, gewenst = D, geen "klaar"', c === 1 && link('current') === 'releases/' + kort('D') && gewenst().sha === kort('D') && !klaarNaar(kort('D')) && /FOUT: nacontrole - \/health toont na 4s versie -/.test(logStaart(2)), c + ' ' + logStaart(4));
 
     toets('7 productiekind niet geraakt', prodPids() === prodVoor, prodVoor + ' -> ' + prodPids());
   } catch (e) { toets('onverwachte fout', false, e.stack); }

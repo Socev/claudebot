@@ -8,7 +8,10 @@
 #           UITROL_DROOG=1 (niet omzetten, voor toetsen), UITROL_MARKER=<pad> (standaard /opt/data/uitrol-wacht),
 #           UITROL_NACONTROLE=0 (geen echt-nacontrole), UITROL_NACONTROLE_MAX=<s> (standaard 90), UITROL_BOX=<pad>
 #           UITROL_DATAKAART=0 (datakaart-poort uit, nood), UITROL_DATAKAART_PAD=<pad>, UITROL_POORT_ALLEEN=1 (stop na de poort, toets)
-#           exit 1 = mislukt, ook als de nacontrole terugzette (wv358)
+#           exit 1 = mislukt, ook als de nacontrole terugzette (wv358), en als de nieuwe versie niet binnen UITROL_NACONTROLE_MAX op
+#           /health verschijnt (wv3418: terugflip, halve stand, geen supervisor) - dan geen "klaar"
+#           Schrijft bij elke omzetting $APP_ROOT/gewenst ({sha,tijd,door,reden}): de bedoelde versie; server.js toont hem op /health
+#           (gewenst naast versie) en meldt een verschil van 10 min één keer in de machinekamer-box (wv3418, actieplan Fable 19-11 B39).
 #
 # WAAROM DIT EEN SCRIPT IS EN GEEN REGEL IN EEN PROMPT. De uitrol bestaat uit
 # symlink-chirurgie op een draaiende pod: `vorige` bijwerken, `current` omzetten,
@@ -321,47 +324,7 @@ try: print(int((json.load(sys.stdin).get("auto") or {}).get("tunnels",0)))
 except Exception: print(0)' 2>/dev/null || echo 0)"
 [ "${TUN:-0}" != "0" ] && log "LET OP: ${TUN} gesprek(ken) met het spraakkastje lopen; die breken af bij de herstart"
 
-# ── 3. omzetten ─────────────────────────────────────────────────────────────
-HUIDIG="$(readlink "$CURRENT" 2>/dev/null || echo '')"
-VORIGE_OUD="$(readlink "$VORIGE" 2>/dev/null || echo '')"   # wv358: terug te zetten als de nacontrole terugzet
-if [ "$HUIDIG" = "releases/$KORT" ]; then
-  log "current wijst al naar $KORT - niets om te doen"
-  exit 0
-fi
-
-# `vorige` wijst hierna naar wat NU draait: dat is het vangnet van de supervisor.
-if [ -n "$HUIDIG" ]; then
-  ln -sfn "$HUIDIG" "$VORIGE.nieuw" && mv -Tf "$VORIGE.nieuw" "$VORIGE" || fout "kon vorige niet zetten"
-  log "vorige -> $HUIDIG"
-fi
-ln -sfn "releases/$KORT" "$CURRENT.nieuw" && mv -Tf "$CURRENT.nieuw" "$CURRENT" || fout "kon current niet omzetten"
-log "current -> releases/$KORT"
-
-# ── 4. kind herstarten ──────────────────────────────────────────────────────
-# De supervisor start het kind vanzelf opnieuw op als het stopt, en doet dan zijn
-# boot-zelfcontrole. We stoppen dus alleen het kind; de supervisor doet de rest,
-# inclusief de terugflip als de nieuwe release niet gezond opkomt.
-# Alleen kinderen onder DEZE releases-map (wv358): een toets met een eigen APP_ROOT raakt zo nooit het productiekind.
-# Wat dit nog wel raakt: een proef die als `node /opt/data/app/releases/<sha>/server.js` op een andere poort draait.
-PIDS="$(pgrep -f "node .*${RELEASES}/[^/]*/server\.js" || true)"
-if [ -n "$PIDS" ]; then
-  log "kind stoppen (pid $(echo "$PIDS" | tr '\n' ' '))"
-  # shellcheck disable=SC2086
-  kill -TERM $PIDS 2>/dev/null || true
-else
-  log "geen draaiend kind gevonden - de supervisor start er zelf een"
-fi
-
-# ── 4b. nacontrole: draait de nieuwe release op de echte paden? (wv358, 10-10-2026) ──────────────────────
-# Sinds wv349 valt server.js terug op een wegwerpmap (/tmp/socev-app-proef-<pid>) als realpath(__dirname) niet gelijk
-# is aan realpath(RELEASE_DIR) (SERVER_ECHT). In productie betekent dat: verse Telegram-sessies, agents nooit afgerond,
-# rolbestand niet ververst, app op lege data - terwijl /health gewoon ok zegt, dus de boot-zelfcontrole van de
-# supervisor slaagt. Daarom hier: zodra /health de nieuwe versie toont, server.echt en app.echt lezen. Alleen een
-# expliciete false telt (een oude release zonder veld is geen meting). False -> current terug naar HUIDIG, vorige
-# terug naar wat hij was, het KORT-kind stoppen (de supervisor herstart vanaf HUIDIG mét boot-zelfcontrole), een rij
-# in de machinekamer-box en exit 1. Niet bij een droge uitrol (stopt hierboven), zonder gestopt kind (geen supervisor,
-# bijvoorbeeld een toets) of zonder HUIDIG (vers volume: niets om naar terug te gaan; de Werkvoorraad-tikker meldt het).
-# De periodieke kant (podstart, image-wissel) bewaakt n8n AI - Werkvoorraad-tikker (knoop Echt-alarm?).
+# Hulpstukken voor de nacontrole (stap 3 en 4b).
 BOX="${UITROL_BOX:-/opt/data/AI_SecondBrain/00_Systeem/Meldingen/machinekamer.md}"
 health_veld(){ curl -s -m 5 "http://127.0.0.1:${PORT:-8080}/health" | python3 -c 'import json,sys
 try:
@@ -389,18 +352,75 @@ def erin(s):
 vault_veilig.wijzig(p, erin)
 PYBOX
 }
-if [ "${UITROL_NACONTROLE:-1}" = "1" ] && [ -n "$PIDS" ] && [ -n "$HUIDIG" ]; then
-  NC_MAX="${UITROL_NACONTROLE_MAX:-90}"; NC_TOT=$((SECONDS + NC_MAX)); STAND="- onbekend"
-  while [ "$SECONDS" -lt "$NC_TOT" ]; do
-    STAND="$(health_veld)"; [ "${STAND%% *}" = "$KORT" ] && break
-    sleep 2
-  done
-  if [ "${STAND%% *}" != "$KORT" ]; then
-    log "LET OP: nacontrole - /health toont na ${NC_MAX}s versie ${STAND%% *}, niet $KORT (trage start of terugflip door de supervisor; zie supervisor.log)"
-  elif [ "${STAND#* }" = "ja" ]; then
+NC_MAX="${UITROL_NACONTROLE_MAX:-90}"
+# wv3418 (B39): de bedoelde versie vastleggen. Atomisch (tmp + mv); mislukt het, dan een LET OP en door (de uitrol zelf is niet kapot).
+GEWENST="$APP_ROOT/gewenst"
+gewenst_zet(){ printf '{"sha":"%s","tijd":"%s","door":"uitrol.sh","reden":"%s"}\n' "$1" "$(date -Iseconds)" "$2" > "$GEWENST.nieuw.$$" \
+  && mv -f "$GEWENST.nieuw.$$" "$GEWENST" || { rm -f "$GEWENST.nieuw.$$"; log "LET OP: kon $GEWENST niet schrijven"; }; return 0; }
+# Wacht tot /health versie $1 toont, hooguit NC_MAX s. Zet STAND ("<versie> ja|nee|onbekend"); 0 = gezien.
+wacht_op_versie(){ local tot=$((SECONDS + NC_MAX)); STAND="- onbekend"
+  while :; do STAND="$(health_veld)"; [ "${STAND%% *}" = "$1" ] && return 0; [ "$SECONDS" -ge "$tot" ] && return 1; sleep 2; done; }
+
+# ── 3. omzetten ─────────────────────────────────────────────────────────────
+HUIDIG="$(readlink "$CURRENT" 2>/dev/null || echo '')"
+VORIGE_OUD="$(readlink "$VORIGE" 2>/dev/null || echo '')"   # wv358: terug te zetten als de nacontrole terugzet
+if [ "$HUIDIG" = "releases/$KORT" ]; then
+  gewenst_zet "$KORT" "current wees al naar deze release"
+  # wv3418 (B39, review M4): de symlink zegt niets over wat draait. Halve stand (current omgezet, oud kind leeft nog) = exit 1.
+  if [ "${UITROL_NACONTROLE:-1}" = "1" ] && ! wacht_op_versie "$KORT"; then
+    fout "current wijst al naar $KORT, maar /health toont na ${NC_MAX}s versie ${STAND%% *} (halve stand: het oude kind draait nog, of terugflip/trage start; zie supervisor.log) - niet uitgerold"
+  fi
+  log "current wijst al naar $KORT - niets om te doen"
+  exit 0
+fi
+
+# `vorige` wijst hierna naar wat NU draait: dat is het vangnet van de supervisor.
+if [ -n "$HUIDIG" ]; then
+  ln -sfn "$HUIDIG" "$VORIGE.nieuw" && mv -Tf "$VORIGE.nieuw" "$VORIGE" || fout "kon vorige niet zetten"
+  log "vorige -> $HUIDIG"
+fi
+ln -sfn "releases/$KORT" "$CURRENT.nieuw" && mv -Tf "$CURRENT.nieuw" "$CURRENT" || fout "kon current niet omzetten"
+log "current -> releases/$KORT"
+gewenst_zet "$KORT" "uitrol"
+
+# ── 4. kind herstarten ──────────────────────────────────────────────────────
+# De supervisor start het kind vanzelf opnieuw op als het stopt, en doet dan zijn
+# boot-zelfcontrole. We stoppen dus alleen het kind; de supervisor doet de rest,
+# inclusief de terugflip als de nieuwe release niet gezond opkomt.
+# Alleen kinderen onder DEZE releases-map (wv358): een toets met een eigen APP_ROOT raakt zo nooit het productiekind.
+# Wat dit nog wel raakt: een proef die als `node /opt/data/app/releases/<sha>/server.js` op een andere poort draait.
+PIDS="$(pgrep -f "node .*${RELEASES}/[^/]*/server\.js" || true)"
+if [ -n "$PIDS" ]; then
+  log "kind stoppen (pid $(echo "$PIDS" | tr '\n' ' '))"
+  # shellcheck disable=SC2086
+  kill -TERM $PIDS 2>/dev/null || true
+else
+  log "geen draaiend kind gevonden - de supervisor start er zelf een"
+fi
+
+# ── 4b. nacontrole: draait de nieuwe release op de echte paden? (wv358, 10-10-2026) ──────────────────────
+# Sinds wv349 valt server.js terug op een wegwerpmap (/tmp/socev-app-proef-<pid>) als realpath(__dirname) niet gelijk
+# is aan realpath(RELEASE_DIR) (SERVER_ECHT). In productie betekent dat: verse Telegram-sessies, agents nooit afgerond,
+# rolbestand niet ververst, app op lege data - terwijl /health gewoon ok zegt, dus de boot-zelfcontrole van de
+# supervisor slaagt. Daarom hier: zodra /health de nieuwe versie toont, server.echt en app.echt lezen. Alleen een
+# expliciete false telt (een oude release zonder veld is geen meting). False -> current terug naar HUIDIG, vorige
+# terug naar wat hij was, het KORT-kind stoppen (de supervisor herstart vanaf HUIDIG mét boot-zelfcontrole), een rij
+# in de machinekamer-box en exit 1. Niet bij een droge uitrol (stopt hierboven). Zonder HUIDIG (vers volume) is er niets om naar
+# terug te gaan: dan alleen exit 1 (de Werkvoorraad-tikker meldt het). Sinds wv3418 ook zonder gestopt kind: de versie moet opkomen.
+# De periodieke kant (podstart, image-wissel) bewaakt n8n AI - Werkvoorraad-tikker (knoop Echt-alarm?).
+# wv3418 (B39, review M1): komt de nieuwe versie niet op (terugflip door de supervisor, geen supervisor, trage start), dan exit 1
+# zonder "klaar". Vroeger alleen een LET OP en daarna "klaar" met exit 0; zonder gevonden kind of zonder HUIDIG werd niets gemeten.
+# gewenst blijft $KORT: blijft het verschil staan, dan meldt server.js het na 10 min één keer in de box.
+if [ "${UITROL_NACONTROLE:-1}" = "1" ]; then
+  if ! wacht_op_versie "$KORT"; then
+    fout "nacontrole - /health toont na ${NC_MAX}s versie ${STAND%% *}, niet $KORT (terugflip door de supervisor, geen supervisor of trage start; zie supervisor.log) - niet uitgerold"
+  fi
+  if [ "${STAND#* }" = "ja" ]; then
     log "nacontrole: $KORT draait op de echte paden (echt: ja)"
   elif [ "${STAND#* }" != "nee" ]; then
     log "nacontrole: $KORT toont geen echt-veld (release van vóór wv349) - niet te toetsen"
+  elif [ -z "$HUIDIG" ]; then
+    fout "nacontrole - $KORT draait in een wegwerpmap (/health server.echt/app.echt false) en er is geen vorige release om naar terug te gaan"
   else
     log "FOUT: nacontrole - $KORT draait in een wegwerpmap (/health server.echt/app.echt false); terugzetten naar $HUIDIG"
     if [ "$(readlink "$CURRENT" 2>/dev/null)" != "releases/$KORT" ]; then
@@ -408,6 +428,7 @@ if [ "${UITROL_NACONTROLE:-1}" = "1" ] && [ -n "$PIDS" ] && [ -n "$HUIDIG" ]; th
     else
       ln -sfn "$HUIDIG" "$CURRENT.nieuw" && mv -Tf "$CURRENT.nieuw" "$CURRENT" || fout "kon current niet terugzetten (current wijst nog naar $KORT)"
       log "current -> $HUIDIG (teruggezet)"
+      gewenst_zet "$(basename "$HUIDIG")" "nacontrole zette $KORT terug (wegwerpmap)"
       if [ -n "$VORIGE_OUD" ] && [ -f "$APP_ROOT/$VORIGE_OUD/server.js" ]; then
         ln -sfn "$VORIGE_OUD" "$VORIGE.nieuw" && mv -Tf "$VORIGE.nieuw" "$VORIGE" && log "vorige -> $VORIGE_OUD (teruggezet)"
       else
@@ -422,11 +443,7 @@ if [ "${UITROL_NACONTROLE:-1}" = "1" ] && [ -n "$PIDS" ] && [ -n "$HUIDIG" ]; th
         log "geen kind van $KORT meer gevonden - de supervisor start vanaf $HUIDIG"
       fi
     fi
-    TERUG="$(basename "$HUIDIG")"; NC_TOT=$((SECONDS + NC_MAX)); STAND="- onbekend"
-    while [ "$SECONDS" -lt "$NC_TOT" ]; do
-      STAND="$(health_veld)"; [ "${STAND%% *}" = "$TERUG" ] && break
-      sleep 2
-    done
+    TERUG="$(basename "$HUIDIG")"; wacht_op_versie "$TERUG" || true
     if [ "${STAND%% *}" != "$TERUG" ]; then UITSLAG="na ${NC_MAX}s draait versie ${STAND%% *}, niet $TERUG - zie supervisor.log"
     elif [ "${STAND#* }" = "nee" ]; then UITSLAG="ook $TERUG draait in een wegwerpmap: de oorzaak zit buiten de release (supervisor/image, RELEASE_DIR) - pod herstarten of image nakijken"
     else UITSLAG="$TERUG draait weer (echt: ${STAND#* })"; fi
