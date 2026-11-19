@@ -34,6 +34,10 @@ docker exec -e PGPASSWORD="$RW" $C /usr/lib/postgresql/17/bin/psql -X -At "host=
 docker exec -e PGPASSWORD="$RW" $C /usr/lib/postgresql/17/bin/psql -X -At "host=127.0.0.1 user=reserve dbname=postgres" -c 'select 1' >/dev/null 2>&1; [ $? != 0 ]; ok $? "reserve kan geen gewone databankverbinding openen"
 docker exec -e PGPASSWORD=fout $C /usr/lib/postgresql/17/bin/psql -X -At "host=127.0.0.1 user=reserve replication=true dbname=postgres" -c IDENTIFY_SYSTEM >/dev/null 2>&1; [ $? != 0 ]; ok $? "fout wachtwoord geweigerd"
 docker exec $C sh -c "cat /opt/data/pg/db-wacht.log /opt/data/pg/log/* 2>/dev/null" | grep -qF "$RW"; [ $? != 0 ]; ok $? "wachtwoord niet in db-wacht.log of de postgres-log"
+# wv3389 (A09): het ALTER ROLE met het wachtwoord komt niet in pg_stat_statements (ook niet in zijn tekstbestand in de datamap)
+N=$(docker exec -u pg $C /usr/lib/postgresql/17/bin/psql -X -At -h /run/pg -U pgbaas -d postgres -c "select count(*) from extensions.pg_stat_statements where query ~* 'alter\s+role\s+reserve' or strpos(query, '$RW') > 0" 2>&1)
+[ "$N" = 0 ]; ok $? "wv3389: geen 'alter role reserve' of wachtwoord in pg_stat_statements ($N)"
+docker exec $C sh -c "grep -rqaF '$RW' /opt/data/pg/17/data/pg_stat_tmp /opt/data/pg/17/data/pg_stat 2>/dev/null"; [ $? != 0 ]; ok $? "wv3389: wachtwoord niet in pg_stat_tmp/pg_stat"
 P=$(docker exec $C stat -c '%U:%G %a' /run/pg /opt/data/pg/17/data | tr '\n' ' ')
 [ "$P" = "pg:pgsock 750 pg:pg 700 " ]; ok $? "rechten socketmap en datamap ($P)"
 P=$(docker exec $C stat -c '%U:%G %a' /opt/data/pg/terug /run/pgstop | tr '\n' ' ')
