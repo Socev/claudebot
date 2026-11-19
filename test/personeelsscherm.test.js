@@ -310,11 +310,12 @@ test('fase 1 met registerrij: voornaam + dagdeel, waarnemer zonder naam, jarigen
   assert.doesNotMatch(h, /Kwakkel|Bakkerus|Invaller|Testerink|Proefman|Oud|Ver Weg|1990|1985|JB 8-12|Andere|Morgen|Hugo|Kortnaam|Ed Kort|van Hoorn|SvH/);
 });
 
-test('fase 1 agenda: alleen HAGRO, actief, zonder privé/persoon/nummer, gesorteerd; tijd in Amsterdam', async () => {
+// wv3438 (afspraak David 19-11: niet filteren, B31): geen woord-, naam- of nummerfilter meer op titels; alleen HAGRO, actief en gesorteerd
+test('fase 1 agenda: alleen HAGRO en actief, elke titel (ook privé/persoon/nummer) op de tv, gesorteerd; tijd in Amsterdam', async () => {
   const { m } = fase1({ aan: true });
   const i = await m.verzamel(Date.parse('2026-11-16T09:00:00Z'));
-  assert.deepStrictEqual(i.agenda.map((a) => a.titel), ['HAGRO-vergadering', 'Nieuwjaarsborrel']);
-  assert.strictEqual(i.agenda[0].tijd, '16:00–18:00'); assert.strictEqual(i.agenda[0].wd, 'do'); assert.strictEqual(i.agenda[1].tijd, 'hele dag');
+  assert.deepStrictEqual(i.agenda.map((a) => a.titel), ['HAGRO-vergadering', 'Privé: gesprek', 'Overleg', 'Bel 0612345678', 'Nieuwjaarsborrel']);
+  assert.strictEqual(i.agenda[0].tijd, '16:00–18:00'); assert.strictEqual(i.agenda[0].wd, 'do'); assert.strictEqual(i.agenda[1].tijd, '11:00'); assert.strictEqual(i.agenda[4].tijd, 'hele dag');
 });
 
 test('fase 1 tik: inhoud elke 30 min, publiceert bij verandering; registerrij weg = volgende tik zonder namen; weer hooguit elke 2 uur', async () => {
@@ -352,7 +353,7 @@ test('fase 1 info: alleen tellingen, geen namen', async () => {
   await f.m.verzamel(f.nu());
   const j = JSON.stringify(f.m.info());
   assert.doesNotMatch(j, /Wietske|Fenna|Jorrit|HAGRO-vergadering/);
-  assert.match(j, /"vakken":\{"agenda":2,"artsen":6,"jarig":2,"weer":true,"info":0,"volle_naam":false,"nieuws":0\}/);
+  assert.match(j, /"vakken":\{"agenda":5,"artsen":6,"jarig":2,"weer":true,"info":0,"volle_naam":false,"nieuws":0\}/);
 });
 
 // ── wv3015 fase 2: volle naam achter de nieuwe registertekst, infoschermen alleen met Davids Ja op precies die kaart ──
@@ -1058,4 +1059,13 @@ test('wv3154 kop en samenvatting altijd ge-escaped; app-voorbeeld zonder bericht
   assert.match(h, /Kop &lt;b&gt;&amp;&quot;/); assert.match(h, /&lt;script&gt;x&lt;\/script&gt;/);
   const l = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 1, leeg: false, inhoud: { agenda: [], medisch: { nieuws: [], belangrijk: null, leeg_tonen: true } }, toon: 1 });
   assert.match(l, /Nog geen berichten/);
+});
+
+test('wv3438: agendatitel met volle naam komt op de tv; een lange titel wordt ingekort, niet weggelaten', () => {
+  const P = require('../personeelsscherm.js');
+  const rij = (titel, d) => ({ feed: 'google-hagro', sync_agenda: 'hagro', soort: 'afspraak', titel, status: 'actief', event_id: d, hele_dag: true, begin_datum: '2026-11-2' + d, entiteiten: [{ naam: 'Iemand', rol: 'betreft' }] });
+  const lang = 'Afscheid Jan Jansen en Piet de Vries van de huisartsenpraktijk met een hele lange titel erachteraan';
+  const a = P._t.agendaPunten([rij('Afscheid Jan Jansen', 1), rij('Patiëntenraad ziekenhuis overleg', 2), rij(lang, 3)], '2026-11-20', []);
+  assert.deepStrictEqual(a.map((x) => x.titel).slice(0, 2), ['Afscheid Jan Jansen', 'Patiëntenraad ziekenhuis overleg']);
+  assert.ok(a[2].titel.length === 70 && a[2].titel.endsWith('…') && a[2].titel.startsWith('Afscheid Jan Jansen en Piet'), a[2].titel);
 });

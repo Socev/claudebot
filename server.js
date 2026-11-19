@@ -20154,6 +20154,12 @@ const promedicoAgenda = (function () {
       podGeheimOk: berichtGeheimOk, kluisLees: promedicoKluisLees });
   } catch (e) { logError('promedico-agenda', e); return null; }
 })();
+// wv3438 (afspraak David 19-11: niet filteren): pagina's met "[tekst]" van de versie van 19-11 één keer opnieuw uit de staat, met de tekst.
+if (promedicoAgenda && promedicoAgenda.herschrijfZonderTekst) setTimeout(function () {
+  promedicoAgenda.herschrijfZonderTekst().then(function (r) {
+    if (r.herschreven.length) console.log('[promedico-agenda] weekpagina weer met tekst geschreven: ' + r.herschreven.join(','));
+  }, function (e) { console.log('[promedico-agenda] herschrijven mislukt: ' + (e && e.code ? e.code : 'fout')); });
+}, 60 * 1000).unref();
 function promedicoAgendaIsPad(req) { const p = reqPath(req); return p === '/promedico-agenda' || p.indexOf('/promedico-agenda/') === 0; }
 function promedicoAgendaRoute(req, res) {
   const stuur = function (status, obj) { try { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(obj)); } catch (e) { /* verbinding weg */ } };
