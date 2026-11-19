@@ -304,7 +304,7 @@ function serverRonde(t, o) {
   const k = src.indexOf('function sdVenster('), venster = src.slice(k, src.indexOf('\n', k));
   const log = { verstuur: [], bericht: [] };
   const appUit = path.join(t.dir, 'app-uit');
-  const ctx = vm.createContext({ crypto, Buffer, fs, process: { env: o.env || { FACTUREN_NOGBETALEN: 'auto' } }, Date: o.Date || Date, facturenRoutes: t.routes, SERVER_ECHT: true,
+  const ctx = vm.createContext({ crypto, Buffer, fs, path, FACTUREN_DIR: t.dir, process: { env: o.env || { FACTUREN_NOGBETALEN: 'auto' } }, Date: o.Date || Date, facturenRoutes: t.routes, SERVER_ECHT: true,
     rolPrimair: () => true, APP_UIT: appUit, SD_VAN: '"David Schaap" <dokterschaap@gmail.com>',
     facturenOpen: () => t.fdb, logError: () => {}, schrijfLog: () => {}, velden: (x) => JSON.stringify(x), nu: () => '', berichtFout: () => new Error('bericht'),
     potVzVerzenderOk: async (b) => (o.verzenderOk ? o.verzenderOk(b) : b === 'nogbetalen'), potVzVerzendGeheim: async () => 'g',
@@ -376,6 +376,17 @@ test('serverronde: noodstop, buiten 07–23, schakelaar uit, verzender afwijkend
     await x.ctx.nbTik();
     assert.deepEqual([t.rij(a).status, x.log.verstuur.length], ['wacht', 0], JSON.stringify(env));
   }
+  // schakelbestand: zonder env telt 'auto' in <FACTUREN_DIR>/nogbetalen-schakelaar; de env gaat voor
+  fs.writeFileSync(path.join(t.dir, 'nogbetalen-schakelaar'), 'auto\n');
+  x = serverRonde(t, { Date: klok(T), env: { FACTUREN_NOGBETALEN: 'uit' }, verstuur: ok });
+  await x.ctx.nbTik();
+  assert.deepEqual([t.rij(a).status, x.log.verstuur.length, x.ctx.nbInfo().modus], ['wacht', 0, 'uit'], 'env uit wint van het bestand');
+  fs.writeFileSync(path.join(t.dir, 'nogbetalen-schakelaar'), 'uit');
+  x = serverRonde(t, { Date: klok(T), env: {}, verstuur: ok });
+  assert.equal(x.ctx.nbInfo().modus, 'uit');
+  fs.writeFileSync(path.join(t.dir, 'nogbetalen-schakelaar'), ' Auto ');
+  assert.equal(x.ctx.nbInfo().modus, 'auto', 'bestand auto zonder env = aan');
+  fs.writeFileSync(path.join(t.dir, 'nogbetalen-schakelaar'), 'uit');
   // verzender kent bron nogbetalen niet → niets, rij blijft wachten; pas na 3 uur één regel per dag
   x = serverRonde(t, { Date: klok(T), verzenderOk: () => false, verstuur: ok });
   await x.ctx.nbTik();

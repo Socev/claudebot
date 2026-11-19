@@ -29911,10 +29911,15 @@ setInterval(function () { sdTik().catch(function (e) { logError('facturen-sepa-d
 // dat later alsnog verstuurd wordt is een dubbelrisico): zeker niet verstuurd = 'mislukt' + één regel aan David, geen automatische
 // herkansing (Fable-review facturen-kern M1); geen antwoord = 'onzeker': nooit opnieuw, één regel aan David. Dagplafond 25 (facturen.js, in de
 // transactie van de claim): daarboven wacht de rij tot de volgende dag, met één regel aan David per dag. Schakelaar FACTUREN_NOGBETALEN:
-// alleen 'auto' maakt rijen en verstuurt; al het andere (ook leeg) = uit.
+// alleen 'auto' maakt rijen en verstuurt; al het andere (ook leeg) = uit. Zonder env telt het schakelbestand <FACTUREN_DIR>/nogbetalen-schakelaar
+// (inhoud 'auto' = aan; gelezen bij elke tik en elk Bevestigen), zodat aan/uit na Davids woord geen podherstart vraagt; de env gaat altijd voor.
 const NB_TIK_MS = 5 * 60 * 1000;
 const nbStaat = { bezig: false, laatste: null, uitkomst: null, fouten_op_rij: 0, plafond_gemeld: null, verzender_gemeld: null };
-function nbModus() { return String(process.env.FACTUREN_NOGBETALEN || '').trim().toLowerCase() === 'auto' ? 'auto' : 'uit'; }
+function nbModus() {
+  const e = String(process.env.FACTUREN_NOGBETALEN || '').trim().toLowerCase();
+  if (e) return e === 'auto' ? 'auto' : 'uit';
+  try { return fs.readFileSync(path.join(FACTUREN_DIR, 'nogbetalen-schakelaar'), 'utf8').trim().toLowerCase() === 'auto' ? 'auto' : 'uit'; } catch (x) { return 'uit'; }
+}
 function nbAan() { return !!facturenRoutes && !!facturenRoutes.nogBetalen && SERVER_ECHT && rolPrimair() && nbModus() === 'auto'; }
 function nbNoodstop() { try { return fs.existsSync(APP_UIT); } catch (e) { return true; } }
 async function nbBericht(tekst) {
