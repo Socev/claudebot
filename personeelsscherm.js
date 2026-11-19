@@ -215,7 +215,9 @@ const JARIG_DAGEN = 7;
 const INHOUD_MS = 30 * 60000;          // inhoud opnieuw verzamelen
 const WEER_MS = 2 * UUR;               // weer hooguit elke 2 uur ophalen (≤ 12 per dag)
 const WEER_OUD_MS = 12 * UUR;          // ouder weer valt weg
-const TITEL_WEG = /priv[eé]|vertrouwelijk|persoonlijk|patiënt|patient|ziek|verlof|vakantie|uitvaart|begrafenis|overl|condoleance|@|\d{6,}/i;
+// wv3438 (afspraak David 19-11: niet filteren, B31): geen woord- of naamfilter meer op agendatitels; een lange titel wordt ingekort, niet weggelaten
+const TITEL_MAX = 70;
+const titelKort = (t) => (t.length > TITEL_MAX ? t.slice(0, TITEL_MAX - 1).trimEnd() + '…' : t);
 // fase 2 (wv3015)
 const VOLLE_NAAM_ZIN = 'artsen van vandaag (voor- en achternaam';   // staat deze zin in de registertekst, dan volle naam
 const INFO_ZIN = 'infoschermen) alleen na Davids knop';             // staat deze zin in de registertekst, dan infoschermen (met Ja per set; Fable ZOU 3)
@@ -482,16 +484,15 @@ function agendaPunten(rijen, vandaag, eigen) {
     const r = tijdlijnRij(r0);
     if (!r || r.status !== 'actief' || !(r.feed === 'google-hagro' || r.sync_agenda === 'hagro')) continue;
     if (!r.begin_datum || r.begin_datum < vandaag) continue;
-    const t = String(r.titel || '').replace(/\s+/g, ' ').trim();
-    if (!t || t.length > 70 || TITEL_WEG.test(t)) continue;
-    if ((Array.isArray(r.entiteiten) ? r.entiteiten : []).some((e) => e && e.rol === 'betreft')) continue;   // gaat over een persoon
+    const t = titelKort(String(r.titel || '').replace(/\s+/g, ' ').trim());
+    if (!t) continue;
     uit.push({ datum: r.begin_datum, sort: r.begin_datum + (r.hele_dag ? '00:00' : hhmmAms(r.begin_tijd)), titel: t,
       tijd: r.hele_dag ? 'hele dag' : hhmmAms(r.begin_tijd) + (r.eind_tijd ? '–' + hhmmAms(r.eind_tijd) : ''), label: 'HAGRO' });
   }
   for (const e of Array.isArray(eigen) ? eigen : []) {
     if (!e || !/^\d{4}-\d{2}-\d{2}$/.test(e.datum || '') || e.datum < vandaag || e.datum > plusDag(vandaag, AGENDA_DAGEN)) continue;
-    const t = String(e.titel || '').replace(/\s+/g, ' ').trim();
-    if (!t || t.length > 70 || TITEL_WEG.test(t)) continue;
+    const t = titelKort(String(e.titel || '').replace(/\s+/g, ' ').trim());
+    if (!t) continue;
     const tijd = /^\d{2}:\d{2}$/.test(e.tijd || '') ? e.tijd : 'hele dag';
     uit.push({ datum: e.datum, sort: e.datum + (tijd === 'hele dag' ? '00:00' : tijd), titel: t, tijd, label: 'Praktijk' });
   }

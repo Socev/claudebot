@@ -519,7 +519,25 @@ function maakOntvanger(o) {
       log: 'verwerkt ' + r.weken.join(',') + (r.weggelaten ? ' weggelaten ' + r.weggelaten + ' (' + r.soorten.join(',') + ')' : '') };
   }
   function health() { return { aan: !fs.existsSync(uitPad), geheim_geladen: !!geheim.waarde, laatste_verwerkt: stand.laatste_verwerkt, laatste_niet_herkend: stand.laatste_niet_herkend, laatste_weigering: stand.laatste_weigering, vandaag: stand.vandaag }; }
-  return { verwerk, health };
+  // wv3438 (afspraak David 19-11: niet filteren): weekpagina's die de versie van 19-11 (A24) zonder vrije tekst schreef ("[tekst]")
+  // één keer opnieuw uit de staat, zodat de tekst weer op de pagina staat. Alleen weken uit de staat; via de rij.
+  function herschrijfZonderTekst() {
+    const stap = function () {
+      const staat = leesStaat(), weken = new Set(), uit = [];
+      for (const d of Object.keys(staat.datums)) weken.add(isoWeek(d));
+      for (const w of Array.from(weken).sort()) {
+        let oud;
+        try { oud = fs.readFileSync(path.join(o.vault, map, weekPaginaNaam(w)), 'utf8'); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
+        if (!/: \[tekst\]$/m.test(oud)) continue;
+        schrijfPagina(staat, w); uit.push(w);
+      }
+      return { herschreven: uit };
+    };
+    const r = rij.then(stap, stap);
+    rij = r.catch(function () {});
+    return r;
+  }
+  return { verwerk, health, herschrijfZonderTekst };
 }
 
 module.exports = { maakOntvanger, weekPaginaNaam, toetsVorm, keurTekst, schoonTekst, mdVeilig, maakPagina, verwerkStand, verwerkNietHerkend, legeStaat, isoWeek, blokRegels, verschil, OMHULSEL_MAX, LIJF_MAX, KLUISNAAM, SCHEMA };
