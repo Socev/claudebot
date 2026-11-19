@@ -212,7 +212,8 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
       nulTellers(); zetStand((s) => { s.opgehaald[eh].transacties = oud; s.opgehaald[bh].transacties = oud; delete s.ronde.box; });
       E.afkap = true; B.afkap = true; B.pag = 0; E.van = []; E.opvragen = [];
       r = await draai(['ronde'], AL, { BUNQ_MAX_PAGINAS: '2' });
-      const verwachtVan = new Date(Date.parse(oud.slice(0, 10) + 'T12:00:00Z') - 10 * 86400000).toISOString().slice(0, 10);
+      // wv3435: Nederlandse kalenderdag van 'oud' (zoals bank-lezer.js dag()), niet de UTC-datum: om 00:30 NL scheelt dat een dag
+      const verwachtVan = new Date(Date.parse(new Date(oud).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }) + 'T12:00:00Z') - 10 * 86400000).toISOString().slice(0, 10);
       toets('A10 ABN: ingekorte opvraag (60 pagina\'s) → niet geslaagd, fout afgekapt, venster blijft staan', r.j && !r.j.geslaagd && r.j.fouten.some((f) => f.bron === 'enablebanking' && f.reden === 'afgekapt') &&
         stand().opgehaald[eh].transacties === oud && E.opvragen.filter((x) => x === 'transactions').length === 60 && E.van[0] === verwachtVan, [r.j && r.j.fouten, stand().opgehaald[eh], E.van]);
       toets('A10 bunq: afgekapte opvraag → fout afgekapt, venster blijft staan', r.j.fouten.some((f) => f.bron === 'bunq' && f.reden === 'afgekapt') && stand().opgehaald[bh].transacties === oud, [r.j.fouten, stand().opgehaald[bh]]);
