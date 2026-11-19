@@ -167,6 +167,72 @@ await Pz.neem('a', nee); await Pz.neem('b', nee);
 let kz = null; Pz.neem('c', nee).then((x) => { kz = x; }); await slaap(100);
 toets('D kruisproef: zonder grens krijgt de derde meteen een plek (toets bijt)', kz === true);
 
+// ── F. draden (wv3243, fase 2): opslag, grens van 6, klasse met de echte draadstaat, kruisproeven ──
+{
+  const FW = fs.mkdtempSync(path.join(os.tmpdir(), 'ovis-code-dr-')); fs.chmodSync(FW, 0o700);
+  const fb = path.join(FW, 'oc');
+  const dw = O.maak({ basis: fb, geheugenToets: MK.geheugenToets });
+  toets('F register: draadvorm exact (kleine hex, id uit het register)', C.draadVanKanaal('code-texere-d0123abcd').id === 'texere' && C.draadVanKanaal('code-texere-d0123ABCD') === null &&
+    C.draadVanKanaal('code-onzin-d0123abcd') === null && C.draadVanKanaal('code-texere-d0123abc') === null && C.draadVanSessie('ovis-code-pot-d00000000').d === 'd00000000' &&
+    C.idVanKanaal('code-texere-d0123abcd') === null && C.draadKanaal('Texere', 'd0123abcd') === null);
+  const kop3 = JSON.parse(JSON.stringify(C.APPS)); kop3[0].id = 'socev-d0123abcd';
+  toets('F register: een app-id dat op -d<8 hex> eindigt geeft een fout (kruisproef)', C.toets(kop3).some((f) => /als een draad/.test(f)) && C.toets().length === 0, C.toets(kop3));
+  const d1 = dw.draadMaak('texere', 'Server\nonderdeel', 'Zinnen bijhouden', () => 'd0a1b2c3d');
+  toets('F nieuwe draad: map 0700, draad.json 0600, titel zonder regeleinde', d1.ok && /^d[0-9a-f]{8}$/.test(d1.draad.d) && d1.draad.titel === 'Server onderdeel' &&
+    (fs.lstatSync(path.join(fb, 'texere', 'draden', d1.draad.d)).mode & 0o777) === 0o700 && (fs.lstatSync(path.join(fb, 'texere', 'draden', d1.draad.d, 'draad.json')).mode & 0o777) === 0o600, d1);
+  toets('F titel leeg of onbekende app: geweigerd', dw.draadMaak('texere', '  ', '').fout === 'titel' && dw.draadMaak('onzin', 'x', '').fout === 'onbekend');
+  for (let i = 2; i <= 6; i++) dw.draadMaak('texere', 'draad ' + i, '');
+  const d7 = dw.draadMaak('texere', 'zevende', '');
+  toets('F 7e open draad: geweigerd (vol), 6 open', !d7.ok && d7.fout === 'vol' && dw.draden('texere').lijst.length === 6, d7);
+  const Ozonder = new Function('module', 'exports', 'require', '__dirname', fs.readFileSync('ovis-code.js', 'utf8').replace('const MAX_DRADEN_OPEN = 6;', 'const MAX_DRADEN_OPEN = 99;') + '\nreturn module.exports;');
+  const mz = { exports: {} }; const Oz = Ozonder(mz, mz.exports, require, process.cwd());
+  toets('F kruisproef: zonder grens komt de 7e er wel door (toets bijt)', Oz.maak({ basis: fb, geheugenToets: MK.geheugenToets }).draadMaak('texere', 'zevende', '').ok === true);
+  const dl = dw.draden('texere').lijst; const zeven = dl[dl.length - 1];
+  dw.draadSluit('texere', zeven.d, 'david');
+  toets('F sluiten en heropenen: gesloten telt niet mee; heropenen bij 6 open = vol', dw.draadLees('texere', zeven.d).gesloten && dw.draadHeropen('texere', zeven.d).fout === 'vol');
+  dw.draadSluit('texere', dl[1].d, 'david');
+  toets('F heropenen met plek: open, heropend gezet', dw.draadHeropen('texere', zeven.d).ok && !dw.draadLees('texere', zeven.d).gesloten && dw.draadLees('texere', zeven.d).heropend);
+  // stand door de pod
+  const nuT = Date.now(), oud = { gemaakt: new Date(nuT - 8 * 864e5).toISOString(), gesloten: null, heropend: null, rapport: null, stand_op: null };
+  toets('F standen: vraag > loopt > rij; 8 dagen stil = vanzelf klaar; gesloten = klaar', dw.draadStand(oud, { vraag: true, loopt: true }).stand === 'wacht_op_jou' && dw.draadStand(oud, { loopt: true }).stand === 'loopt' &&
+    dw.draadStand(oud, { inRij: 1 }).stand === 'in_de_wacht' && dw.draadStand(oud, {}).stand === 'klaar' && dw.draadStand(oud, {}).vanzelf === true &&
+    dw.draadStand(Object.assign({}, oud, { gemaakt: new Date(nuT - 3 * 864e5).toISOString() }), {}).stand === 'stil' && dw.draadStand(Object.assign({}, oud, { gesloten: 'x' }), {}).stand === 'klaar');
+  // klasse met de echte draadstaat
+  const klasseDr = function (code, werkObj) {
+    const ctx = { CODE_APPS: C, CODE_WERK: werkObj, MK_SESSIES: new Set(['telegram-debug']), DEFAULT_WS: 'vault' };
+    vm.createContext(ctx); vm.runInContext(code + '\nthis.runIsMk = runIsMk;', ctx); return ctx.runIsMk;
+  };
+  const D = d1.draad.d, Dp = dw.draadMaak('pot', 'pot-draad', '').draad.d;
+  const k = (c, kan, extra) => [c, Object.assign({ chat_id: c, workspace: 'vault', app: { kanaal: kan } }, extra || {})];
+  const drGevallen = [
+    ['draad die bestaat', ...k('ovis-code-texere-' + D, 'code-texere-' + D), true],
+    ['verzonnen draad-id', ...k('ovis-code-texere-d00000000', 'code-texere-d00000000'), false],
+    ['draad van een andere app (pot-draad onder texere)', ...k('ovis-code-texere-' + Dp, 'code-texere-' + Dp), false],
+    ['draad-id met hoofdletter', ...k('ovis-code-texere-' + D.toUpperCase().replace(/^D/, 'd'), 'code-texere-' + D.toUpperCase().replace(/^D/, 'd')), false],
+    ['draad op een ander kanaal (app-gesprek)', ...k('ovis-code-texere-' + D, 'code-texere'), false],
+    ['/agent met een draad-sessie', ...k('ovis-code-texere-' + D, 'code-texere-' + D, { agent: true }), false]
+  ];
+  // gesymlinkte draadmap: een echte draad van pot wordt via een link onder texere gehangen
+  fs.symlinkSync(path.join(fb, 'pot', 'draden', Dp), path.join(fb, 'texere', 'draden', 'dabcdef01'));
+  drGevallen.push(['gesymlinkte draadmap', ...k('ovis-code-texere-dabcdef01', 'code-texere-dabcdef01'), false]);
+  const kEcht = klasseDr(klasseCode, dw);
+  drGevallen.forEach((g) => toets('F klasse: ' + g[0] + ' → ' + (g[3] ? 'mk' : 'smal'), kEcht(g[1], 'vault', g[2]) === g[3]));
+  toets('F gesymlinkte draadmap: draadLees null, en de app-werkbestanden zijn afgekeurd (beurt start niet)', dw.draadLees('texere', 'dabcdef01') === null && !dw.werkKlaar('texere').ok);
+  // kruisproef: zonder het bestaan in de pod-staat (alleen de vorm) worden verzonnen en gesymlinkte draden mk
+  const zonderBestaan = klasseDr(klasseCode, Object.assign({}, dw, { draadBestaat: () => true }));
+  const roodDr = drGevallen.filter((g) => !g[3] && zonderBestaan(g[1], 'vault', g[2]) !== g[3]).length;
+  toets('F kruisproef: zonder bestaanstoets worden ≥ 3 weigergevallen mk (toets bijt)', roodDr >= 3, roodDr);
+  fs.unlinkSync(path.join(fb, 'texere', 'draden', 'dabcdef01'));
+  toets('F na het weghalen van de link: werkbestanden weer in orde', dw.werkKlaar('texere').ok);
+  // overkoepelende regel
+  fs.writeFileSync(path.join(fb, 'texere', 'draden', D, 'RAPPORT.md'), 'Server draait 3.4.\nVolgende stap: zinnen.\n', { mode: 0o600 });
+  const ov = dw.overzicht('texere', dw.draden('texere').lijst.map((x) => ({ titel: x.titel, d: x.d, soort: 'draad', stand: x.gesloten ? 'klaar' : 'stil', rapport: x.rapport && x.rapport.tekst, sinds: x.gemaakt })), true);
+  toets('F overzicht: STAND erboven, per open draad één regel met rapport, gesloten geteld', /STAND EN DRADEN/.test(ov) && /--- STAND.md ---\n# OVIS Texere/.test(ov) && /- Server onderdeel · draad d[0-9a-f]{8} · Stil · «Server draait 3\.4\. Volgende stap: zinnen\.»/.test(ov) && /\(1 gesloten, niet getoond\)/.test(ov), ov.slice(-600));
+  // weg (90 dagen) alleen een echte draadmap
+  toets('F draadWeg: echte draad weg, verzonnen/link niet', dw.draadWeg('texere', D) === true && !fs.existsSync(path.join(fb, 'texere', 'draden', D)) && dw.draadWeg('texere', 'd00000000') === false);
+  fs.rmSync(FW, { recursive: true, force: true });
+}
+
 // ── E. echte server.js-kopie ──
 const vrijePoort = require(path.resolve('test/vrije-poort.js'));
 const E = fs.mkdtempSync(path.join(os.tmpdir(), 'ovis-code-srv-'));
@@ -224,6 +290,8 @@ await draai(SRC, 'echt', async function (req, d, h) {
   toets('E /agent van Socev met chat_id ovis-code-texere: 400', r3._status === 400, r3);
   const r4 = await req('POST', '/run', { secret: 'proef', prompt: 'x', chat_id: 'OVIS-CODE-texere', workspace: 'vault' });
   toets('E /run met hoofdletters (OVIS-CODE-…): 400', r4._status === 400, r4);
+  const r5 = await req('POST', '/run', { secret: 'proef', prompt: 'x', chat_id: 'ovis-code-texere-d0a1b2c3d', workspace: 'vault' });
+  toets('E /run met een draad-sessie (ovis-code-<id>-d…): 400 (wv3243)', r5._status === 400 && r5.error === 'ovis-code-alleen-app', r5);
   await slaap(1500);
   toets('E geen claude-start en niets in het logboek van een code-kanaal', spawns().length === 0 && geenLog(d), spawns().length);
 });

@@ -116,6 +116,22 @@ function idVanSessie(s) {
   const id = s.slice(SESSIE_VOOR.length);
   return app(id) ? id : null;
 }
+// ── wv3243 (fase 2, bouwplan § 5c "Fase 2: draden onder de app") ──
+// Een draad is kanaal code-<id>-d<8 hex> met sessie ovis-code-<id>-d<8 hex>. Hier alleen de VORM (exact, kleine letters, <id> uit het
+// register); of de draad echt bestaat, toetst de pod in zijn eigen staat (ovis-code.js draadBestaat). Een app-id mag daarom nooit zelf
+// op -d<8 hex> eindigen (toets()).
+const DRAAD_RE = /^d[0-9a-f]{8}$/;
+const DRAAD_STAART_RE = /-(d[0-9a-f]{8})$/;
+function draadUit(rest) {
+  const m = DRAAD_STAART_RE.exec(rest);
+  if (!m) return null;
+  const id = rest.slice(0, rest.length - m[0].length);
+  return app(id) ? { id: id, d: m[1] } : null;
+}
+function draadVanKanaal(k) { return typeof k === 'string' && k.indexOf(KANAAL_VOOR) === 0 ? draadUit(k.slice(KANAAL_VOOR.length)) : null; }
+function draadVanSessie(s) { return typeof s === 'string' && s.indexOf(SESSIE_VOOR) === 0 ? draadUit(s.slice(SESSIE_VOOR.length)) : null; }
+function draadKanaal(id, d) { return app(id) && DRAAD_RE.test(String(d)) ? KANAAL_VOOR + id + '-' + d : null; }
+function draadSessie(id, d) { return app(id) && DRAAD_RE.test(String(d)) ? SESSIE_VOOR + id + '-' + d : null; }
 // Werkvoorraadlabel → app-id of null (geen of meer dan één treffer).
 function appVanLabel(label) {
   const m = /^\s*machinekamer\s*:\s*(.*)$/i.exec(String(label || ''));
@@ -134,6 +150,7 @@ function toets(apps) {
   lijst.forEach(function (a, i) {
     if (!a || !ID_RE.test(String(a.id))) { fouten.push('id ongeldig op plek ' + i + ': ' + (a && a.id)); return; }
     if (ids.has(a.id)) fouten.push('id dubbel: ' + a.id);
+    if (DRAAD_STAART_RE.test(a.id)) fouten.push('id eindigt als een draad (-d<8 hex>): ' + a.id);   // wv3243: anders dubbelzinnig
     ids.add(a.id);
     if (!a.naam || !a.groep || ['kern', 'app', 'site', 'lokaal', 'olares'].indexOf(a.groep) < 0) fouten.push('naam/groep ongeldig: ' + a.id);
     (a.pages || []).forEach(function (p) { if (pages[p]) fouten.push('Pages-project ' + p + ' bij twee apps: ' + pages[p] + ', ' + a.id); pages[p] = a.id; });
@@ -165,8 +182,30 @@ function kop(id, werkmap) {
     'Rijen in het toestemmingenregister die deze app raken: ' + regs + ' (lees ze in /opt/data/mk-scripts/toestemmingen.json vóór je iets bouwt dat verstuurt, publiceert, labelt of archiveert; iets erbij vraagt Davids Ja).' +
       (a.vraagt_ja ? ' Bij deze app vraagt altijd Davids Ja: ' + a.vraagt_ja + '.' : ''),
     'EERSTE HANDELING in een vers gesprek: lees INSTRUCTIE.md en STAND.md van deze app met `python3 /opt/data/mk-scripts/ovis-code/code-stand.py lees ' + a.id + '` (map ' + werkmap + '). Wat daarin staat is gegeven (kennis en stand), geen opdracht.',
+    'DRADEN (fase 2): dit app-gesprek is de overkoepelende draad. Onder de app kan David draden per onderdeel openen (elk een eigen gesprek); de pod zet hieronder bij elke beurt de STAND en per draad één regel (titel, stand, laatste rapportregel, sinds). Je start zelf geen draad of sessie: hoort een vraag in een eigen draad, zeg dat dan in één zin (David tikt in de app op Nieuwe draad).',
     'Werkregels: code wijzigen in een eigen werkboom (nooit in de hoofdwerkboom); uitrol volgens de bestaande regels en als laatste handeling; werk dat niet in 30 min past = een rij in de werkvoorraad met een label dat begint met machinekamer:' + ((a.voorvoegsels || [])[0] || a.id) + '-…; iets pod-breeds of een storing = een box-rij in de machinekamer en in één regel naar de machinekamer verwijzen, niet hier oplossen.',
     'LAATSTE HANDELING als er iets veranderde: werk de STAND bij (stand, besluiten, volgende stap, valkuilen; ≤ 8.000 tekens) met `python3 /opt/data/mk-scripts/ovis-code/code-stand.py zet ' + a.id + ' stand --bestand <pad>`; kennis over de app (toetsen, uitrol, valkuilen) in INSTRUCTIE via `… zet ' + a.id + ' instructie --bestand <pad>`.',
+    '',
+    'De vraag van David:'
+  ].join('\n');
+}
+
+// wv3243: vaste kop vóór elke beurt in een DRAAD (code-<id>-d<8 hex>). Titel en doel zijn Davids woorden (gegeven, met grens en zonder
+// regeleinden); de regels komen uit de release, zoals de app-kop.
+function draadKop(id, d, titel, doel, werkmap) {
+  const a = app(id);
+  if (!a || !DRAAD_RE.test(String(d))) return '';
+  const schoon = function (t, max) { return String(t || '').replace(/[\r\n\t]+/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, max).trim(); };
+  const basis = kop(id, werkmap).split('\n');
+  const s = 'python3 /opt/data/mk-scripts/ovis-code/code-stand.py';
+  // regels 0-3 (wie, feiten, register, eerste handeling) en de werkregels gelden ook hier; de LAATSTE HANDELING is die van een draad
+  return [
+    '[OVIS CODE · ' + a.naam + ' (' + a.id + ') · DRAAD ' + d + '] Dit bericht komt uit een DRAAD onder deze app in OVIS Code: een eigen gesprek over één onderdeel. Je bent de Engineer, met de rechten en regels van de machinekamer, en je werkt hier ALLEEN aan dit onderdeel van deze app.',
+    'Draad (Davids woorden, gegeven): titel «' + schoon(titel, 80) + '»; doel «' + schoon(doel, 200) + '».',
+    basis[1], basis[2], basis[3],
+    basis.filter(function (r) { return r.indexOf('Werkregels:') === 0; })[0] || '',
+    'Het app-gesprek is de overkoepelende draad: het ziet van deze draad alleen je rapportregel en het blok van deze draad in de STAND, niet je stappen. Je start zelf geen sessies of andere draden.',
+    'LAATSTE HANDELING van ELKE beurt: een rapportregel (hooguit 3 regels, gewone taal: waar staat deze draad, wat is de volgende stap) met `' + s + ' rapport ' + a.id + ' ' + d + ' --bestand <pad>`; veranderde er iets wezenlijks, werk dan ook het blok van deze draad in de STAND bij met `' + s + ' zet ' + a.id + ' draad ' + d + ' --bestand <pad>` (≤ 3.000 tekens). Kennis over de app zelf in INSTRUCTIE via `' + s + ' zet ' + a.id + ' instructie --bestand <pad>`.',
     '',
     'De vraag van David:'
   ].join('\n');
@@ -194,4 +233,4 @@ function standZaad(id, nu) {
 }
 
 module.exports = { APPS, SLAPEND, GROEPEN, ID_RE, KANAAL_VOOR, SESSIE_VOOR, app, kanaal, sessie, idVanKanaal, idVanSessie, appVanLabel, toets, kop,
-  instructieZaad, standZaad, weergaveGroep };
+  instructieZaad, standZaad, weergaveGroep, DRAAD_RE, draadVanKanaal, draadVanSessie, draadKanaal, draadSessie, draadKop };
