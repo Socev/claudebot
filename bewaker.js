@@ -77,7 +77,9 @@ const C = {
   cpuSample: getal('BEWAKER_CPU_MS', 5000),
   markerGeduld: getal('BEWAKER_MARKER_GEDULD_MS', 420000),   // hooguit zo lang na de grens wijken voor een uitrolmarker
   bootMarge: getal('BEWAKER_BOOT_MARGE_MS', 30000),   // na gezond nog zo lang vorige=current: de supervisor toetst /health tot 25 s
-  inspector: process.env.BEWAKER_INSPECTOR !== '0',
+  // wv3390 (Fable 19-11 M7): standaard UIT. SIGUSR1 opent de Node-inspector op 127.0.0.1:9229 en niets sluit hem; overleeft
+  // de server de ingreep, dan kan elk lokaal proces er code mee draaien als claude. Opbrengst was 0 van 6. Aan: BEWAKER_INSPECTOR=1.
+  inspector: process.env.BEWAKER_INSPECTOR === '1',
   inspectorPoort: getal('BEWAKER_INSPECTOR_POORT', 9229),
   fs: 8000   // grens voor één bestandshandeling
 };

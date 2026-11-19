@@ -123,6 +123,29 @@ grep -q "greep niet in, hij antwoordde weer" "$W/box.md" && groen "zelf: boxrij"
 [ ! -s "$W/seintjes.txt" ] && groen "zelf: geen seintje" || rood "zelf: seintje: $(cat "$W/seintjes.txt")"
 toon; stop
 
+# ── E. inspector standaard uit (wv3390, Fable 19-11 M7) ────────────────────────────────────────────────────────────────
+# Zelfde beeld als C (server overleeft de ingreep), maar zonder BEWAKER_INSPECTOR in de omgeving (lege waarde = standaard).
+# Vóór wv3390 stuurde de bewaker SIGUSR1 en bleef de inspector van de overlevende server open op 9229. Kruisproef: main -> rood.
+# Echte verbinding, geen /proc/net/tcp: daarin staat de luisterende inspector op deze pod NIET (gemeten 19-11).
+luistert9229(){ (exec 3<>/dev/tcp/127.0.0.1/9229) 2>/dev/null; }
+if luistert9229; then echo "LET OP: poort 9229 is al bezet - geval E (inspector uit) wordt overgeslagen"; else
+opzet inspector; start BEWAKER_INSPECTOR=
+P1=$(serverPid)
+touch "$W/pauze"
+wachtOp 'INGREEP 1/3' 40 || rood "inspector: geen ingreep"
+rm -f "$W/pauze"
+wachtOp 'blijft bewaken|klaar - de nieuwe server' 60
+[ "$(serverPid)" = "$P1" ] && groen "inspector: server overleefde de ingreep (zelfde pid $P1)" || rood "inspector: opzet klopt niet, server herstart"
+sleep 2
+luistert9229 && rood "inspector: na de ingreep luistert er iets op 9229" || groen "inspector: na de ingreep luistert niets op 9229"
+B=$(ls "$W"/bin/bewaker-bewijs-*.json 2>/dev/null | head -1)
+if [ -n "$B" ]; then
+  python3 -c 'import json,sys; b=json.load(open(sys.argv[1])); print("  js", b.get("js")); assert (b.get("js") or {}).get("uit") == "uitgezet"' "$B" \
+    && groen "inspector: bewijsbestand geschreven, js = uitgezet" || rood "inspector: bewijsbestand zonder js=uitgezet"
+else rood "inspector: geen bewijsbestand"; fi
+toon; stop
+fi
+
 # ── D. start terwijl de stat niet te lezen is (Codex MOET 1) ──────────────────────────────────────────────────────────
 W="$TOP/start"; mkdir -p "$W/bin"; echo tijd > "$W/nepstat"; sleep 120 & P=$!
 BIN_DIR="$W/bin" BEWAKER_NEP_STAT="$W/nepstat" BEWAKER_SLOT="$W/slot" BEWAKER_STAAT="$W/staat" BEWAKER_BOX="$W/box.md" \
