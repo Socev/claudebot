@@ -421,6 +421,8 @@ function maak(o) {
     if (typeof v.invoer !== 'string' || !v.invoer) return { ok: false, status: 'invoer' };
     let instr = typeof v.instructies === 'string' ? v.instructies : '';
     let gemaskeerd = 0;
+    // groottegrens ook vóór het maskeren (Fable-review wv3405 MOET 2: het masker draait synchroon in het serverproces)
+    if (instr.length + v.invoer.length > i.max_tekens || Math.ceil((instr.length + v.invoer.length) / 3) > LANG_MAX) return weiger(afnemer, model, 'te_groot');
     if (v.maskeer === true) { const a = maskeerAlles(instr), b = maskeerAlles(v.invoer); instr = a.tekst; v = Object.assign({}, v, { invoer: b.tekst }); gemaskeerd = a.n + b.n; }
     const tekens = instr.length + v.invoer.length;
     if (tekens > i.max_tekens || Math.ceil(tekens / 3) > LANG_MAX) return weiger(afnemer, model, 'te_groot');

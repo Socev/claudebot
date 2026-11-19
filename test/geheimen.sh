@@ -81,6 +81,29 @@ const een = G.maskeer(alles, { streng: true }).tekst;
 toets('idempotent: maskeren van gemaskeerde tekst geeft 0 treffers', G.maskeer(een, { streng: true }).n === 0, G.maskeer(een, { streng: true }));
 const eenO = G.maskeer(alles, { streng: true, vervang: '[geheim-gemaskeerd]' }).tekst;
 toets('idempotent met openai-markering', G.maskeer(eenO, { streng: true }).n === 0 && G.maskeer(eenO).n === 0);
+// Fable-review wv3405 MOET 1: markering midden in een waarde (voorvoegsel vóór de sleutel) → na maskeren met de openai-markering geen treffer meer
+for (const t of ['TOKEN_URL=http://127.0.0.1:8080/cb?jwt=eyJ' + rnd(20) + '.eyJ' + rnd(12) + '.' + rnd(10), "const sleutel = 'v2:eyJ" + rnd(20) + '.eyJ' + rnd(12) + "'",
+  'webhook_secret: https://n8n2.example/hook?k=sk-' + rnd(30)]) {
+  const m = H.maskeer(t);
+  toets('idempotent met voorvoegsel vóór de sleutel: ' + t.slice(0, 22), m.n > 0 && !H.geheimIn(m.tekst), m);
+}
+// ZOU 1: tabel met het wachtwoord als kolomkop (markdown en de poortvorm van Docs › Delen)
+const tabel = '| Dienst | Wachtwoord |\n|---|---|\n| Mail | Qw3r!x |\n| Bank | zie kluis |';
+toets('kolomkop Wachtwoord: de cel eronder weg, verwijzing blijft', (function () { const m = G.maskeer(tabel, { streng: true }); return m.tekst.indexOf('Qw3r!x') < 0 && m.tekst.indexOf('zie kluis') > 0; })(), G.maskeer(tabel, { streng: true }));
+toets('kolomkop Wachtwoord in de poortvorm (cellen met | zonder voorloop)', G.heeft('Mail | Wachtwoord | \nMail | Qw3r!x | \n', { streng: true }));
+toets('kolomkop: openai-hulp weigert', H.geheimIn(tabel) === true);
+toets('tabel zonder wachtwoordkolom blijft staan', !G.heeft('| Dienst | Kenteken |\n|---|---|\n| Mail | AB-12-CD |', { streng: true }));
+// ZOU 2: URL met inlog zonder gebruikersnaam
+toets('URL met inlog zonder gebruikersnaam', G.maskeer('redis://:Gehe1m26@host.example:6379', { streng: true }).tekst.indexOf('Gehe1m26') < 0);
+// MOET 2: geen kwadratische/kubische tijd op lange invoer (alles ≤ 1,5 s; was 2–8 s)
+const factor = Math.max(1, Number(process.env.TOETS_TIJDFACTOR) || 1);
+for (const [naam, t] of [['50.000 woordtekens zonder spatie', rnd(50000, 'abcdef0123456789-_.')], ['wachtwoord: + 2.000 spaties + |', ww + ':' + ' '.repeat(2000) + '|'],
+  ['wachtwoord: + 2.000 regels + |', ww + ':' + '\n'.repeat(2000) + '|'], ['authorization: + 2.000 spaties + x', 'authorization:' + ' '.repeat(2000) + 'x'],
+  ['token 10.000 keer aaneen', 'token'.repeat(10000) + '=x'], ['400.000 tekens gewone tekst', 'Een gewone zin over facturen. '.repeat(13000)],
+  ['20.000 tabelregels', '| Dienst | Wachtwoord |\n' + '| a | b |\n'.repeat(20000)]]) {
+  const t0 = Date.now(); G.maskeer(t, { streng: true }); G.maskeer(t); const ms = Date.now() - t0;
+  toets('snel genoeg: ' + naam + ' (' + ms + ' ms)', ms < 1500 * factor, ms);
+}
 // UTF-16
 const u16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(ww + ' = Welkom2026!', 'utf16le')]);
 toets('UTF-16 (BOM) wordt gedecodeerd en dan herkend', G.heeft(G.tekstVan(u16), { streng: true }) && G.tekstVan(u16).indexOf(ww) === 0);

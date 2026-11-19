@@ -21,7 +21,8 @@
 // een wachtwoord met spaties, en een kale geheime waarde zonder label en zonder willekeurig patroon worden niet herkend.
 
 const WEG = '[sleutel weggelaten]';
-const MARKERING = /^\[(?:sleutel weggelaten|geheim-gemaskeerd)\]/;
+// een eerder ingezette markering (ook openai-hulp '[geheim-gemaskeerd]') ergens in een waarde: niet opnieuw maskeren (idempotent; Fable MOET 1)
+const AL_WEG = /\[(?:sleutel weggelaten|geheim-gemaskeerd)\]/;
 const heeftLetterEnCijfer = (s) => /[A-Za-z]/.test(s) && /[0-9]/.test(s);
 function willekeurig(tok) {
   const stukken = tok.match(/[A-Za-z0-9]{20,}/g) || [];
@@ -40,7 +41,7 @@ const lijktWachtwoord = (w) => /[0-9]/.test(w) || /[!@#$%^&*+=?~_\\\/<>{}()\[\]�
 // korte (pw, ww, pwd, pass, pin) alleen als heel woord.
 const WW_LANG = 'wachtwoord(?:en)?|password|passwd|passwort|passphrase|pincode|inlogcode|toegangscode|wifi-?code|wifi-?wachtwoord';
 const WW_KORT = 'pw|ww|pwd|pass|pin';
-const WW_LABEL = '(?:[A-Za-z0-9_.-]*(?:' + WW_LANG + ')|(?<![A-Za-z0-9])(?:' + WW_KORT + '))';
+const WW_LABEL = '(?:(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]{0,60}?(?:' + WW_LANG + ')|(?<![A-Za-z0-9])(?:' + WW_KORT + '))';
 // Het wachtwoordwoord zelf, voor plekken die een hele regel weglaten (Zoek snel laag 3, zoals laag 2).
 const WACHTWOORDWOORD = /wachtwoord|password|passwd|passphrase|pincode|inlogcode|toegangscode|inloggegevens|credential|(?<![A-Za-z0-9])(?:pw|pwd|pin)(?![A-Za-z0-9])/i;
 
@@ -62,12 +63,12 @@ function weergave(s, W, tel) {
   s = s.replace(/(bearer\s+)([A-Za-z0-9+\/=._-]{16,})/gi, function (m, a) { tel.n++; return a + W; });
   // een eerder ingezette markering (bv. openai-hulp '[geheim-gemaskeerd]', 19 tekens zonder spatie) is geen waarde: maskeren blijft idempotent
   s = s.replace(/((?:service_role|anon[_-]?key|api[_-]?key|token|password|passwd|wachtwoord)["'`]?\s*[:=]\s*["'`]?)([^\s"'`]{16,})/gi, function (m, a, w) {
-    if (MARKERING.test(w)) return m;
+    if (AL_WEG.test(w)) return m;
     tel.n++; return a + W;
   });
   // naam-route: secret/geheim/sleutel als naamdeel, waarde ≥ 12 tekens met letters én cijfers en geen omgevingsnaam (HOOFDLETTERS_ONDER)
   s = s.replace(/((?<![A-Za-z0-9_.-])["'`]?[A-Za-z0-9_.-]*(?:secret(?!ar)|geheim|sleutel)[A-Za-z0-9_.-]*["'`]?\s*[:=]\s*["'`]?)([^\s"'`]{12,})/gi,
-    function (m, a, w) { if (heeftLetterEnCijfer(w) && !/^[A-Z0-9_]+$/.test(w) && w.indexOf(W) < 0) { tel.n++; return a + W; } return m; });
+    function (m, a, w) { if (heeftLetterEnCijfer(w) && !/^[A-Z0-9_]+$/.test(w) && w.indexOf(W) < 0 && !AL_WEG.test(w)) { tel.n++; return a + W; } return m; });
   return s;
 }
 
@@ -103,13 +104,13 @@ function strengExtra(s, W, tel) {
   s = s.replace(/\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g, r);
   s = s.replace(/(AccountKey=)([A-Za-z0-9+\/=]{20,})/g, metKop);
   // URL met inlog: schema://gebruiker:wachtwoord@host
-  s = s.replace(/(\b[A-Za-z][A-Za-z0-9+.-]{1,20}:\/\/[^\s:\/@"'<>`]+:)([^\s@\/"'<>`]+)(?=@)/g, function (m, a, w) {
-    if (w.indexOf(W) >= 0 || isPlaatshouder(w)) return m;
+  s = s.replace(/(\b[A-Za-z][A-Za-z0-9+.-]{1,20}:\/\/[^\s:\/@"'<>`]{0,200}:)([^\s@\/"'<>`]+)(?=@)/g, function (m, a, w) {
+    if ((w.indexOf(W) >= 0 || AL_WEG.test(w)) || isPlaatshouder(w)) return m;
     tel.n++; return a + W;
   });
   // Authorization-kop en Basic
-  s = s.replace(/(authorization["'`]?\s*[:=]\s*["'`]?\s*(?:basic|bearer|token|digest|bot)?\s*)([^\s"'`,;]{8,})/gi, function (m, a, w) {
-    if (w.indexOf(W) >= 0 || isPlaatshouder(w)) return m;
+  s = s.replace(/(authorization["'`]?\s{0,20}[:=]\s{0,20}(?:["'`]\s{0,20})?(?:(?:basic|bearer|token|digest|bot)\s{1,20})?)([^\s"'`,;]{8,})/gi, function (m, a, w) {
+    if ((w.indexOf(W) >= 0 || AL_WEG.test(w)) || isPlaatshouder(w)) return m;
     tel.n++; return a + W;
   });
   s = s.replace(/(\bbasic\s+)([A-Za-z0-9+\/]{12,}={0,2})(?![A-Za-z0-9+\/=])/gi, function (m, a, w) {
@@ -118,21 +119,54 @@ function strengExtra(s, W, tel) {
   });
   // Wachtwoordwoord + waarde: "wachtwoord: …", "**Wachtwoord:** …", "| Wachtwoord | … |", {"password": "…"}, password=…, pw: …
   // Vanaf 6 tekens altijd (behalve plaatshouder), vanaf 4 als het eruitziet als een wachtwoord (cijfer, teken, hoofdletter midden in).
-  const scheiding = '\\**["\'`]?\\**\\s*(?:\\([^)\\n]{0,40}\\)\\s*)?(?:[:=]|\\|)\\s*\\**\\s*["\'`]?\\s*';
+  // alleen spaties/tabs (geen regelovergang): anders pakt een kopregel '| … | Wachtwoord |' de eerste cel van de volgende rij
+  const scheiding = '\\*{0,3}["\'`]?\\*{0,3}[ \\t]{0,20}(?:\\([^)\\n]{0,40}\\)[ \\t]{0,20})?(?:[:=]|\\|)[ \\t]{0,20}(?:\\*{1,3}[ \\t]{0,20})?(?:["\'`][ \\t]{0,20})?';
   s = s.replace(new RegExp('(' + WW_LABEL + scheiding + ')([^\\s"\'`|]{4,})', 'gi'), function (m, a, w) {
-    if (w.indexOf(W) >= 0 || isPlaatshouder(w)) return m;
+    if ((w.indexOf(W) >= 0 || AL_WEG.test(w)) || isPlaatshouder(w)) return m;
     if (w.length < 6 && !lijktWachtwoord(w)) return m;
     tel.n++; return a + W;
   });
   // "het wachtwoord is …" / "password was …": alleen als de waarde eruitziet als een wachtwoord (proza blijft staan)
   s = s.replace(new RegExp('(' + WW_LABEL + '\\s+(?:is|luidt|was|wordt|blijft|werd|=)\\s*:?\\s*["\'`]?)([^\\s"\'`|]{4,})', 'gi'), function (m, a, w) {
-    if (w.indexOf(W) >= 0 || isPlaatshouder(w) || !lijktWachtwoord(w)) return m;
+    if ((w.indexOf(W) >= 0 || AL_WEG.test(w)) || isPlaatshouder(w) || !lijktWachtwoord(w)) return m;
     tel.n++; return a + W;
   });
   // naam-route streng: secret/geheim/sleutel/token/key/auth/credential als naamdeel (ook JSON-sleutel), waarde ≥ 8 met letters én cijfers
-  s = s.replace(/((?<![A-Za-z0-9_.-])["'`]?[A-Za-z0-9_.-]*(?:secret(?!ar)|geheim|sleutel|token|api[-_]?key|apikey|[-_.]key|access[-_]?key|private[-_]?key|auth(?![a-z])|credential|client[-_]?id)[A-Za-z0-9_.-]*["'`]?\s*[:=]\s*["'`]?)([^\s"'`,;]{8,})/gi,
-    function (m, a, w) { if (heeftLetterEnCijfer(w) && !isPlaatshouder(w) && w.indexOf(W) < 0) { tel.n++; return a + W; } return m; });
+  s = s.replace(/((?<![A-Za-z0-9_.-])["'`]?[A-Za-z0-9_.-]{0,60}?(?:secret(?!ar)|geheim|sleutel|token|api[-_]?key|apikey|[-_.]key|access[-_]?key|private[-_]?key|auth(?![a-z])|credential|client[-_]?id)[A-Za-z0-9_.-]{0,60}["'`]?\s{0,20}[:=]\s{0,20}["'`]?)([^\s"'`,;]{8,})/gi,
+    function (m, a, w) { if (heeftLetterEnCijfer(w) && !isPlaatshouder(w) && w.indexOf(W) < 0 && !AL_WEG.test(w)) { tel.n++; return a + W; } return m; });
+  s = tabelKolommen(s, W, tel);
   return s;
+}
+
+// Tabel met een wachtwoordwoord als kolomkop (| Dienst | Wachtwoord |, ook de poortvorm 'Dienst | Wachtwoord | ' van Docs › Delen):
+// in elke volgende tabelrij gaat die cel weg (Fable-review wv3405 ZOU 1). Een tabel stopt bij een regel zonder |.
+function cellen(r) { return r.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|'); }
+function tabelKolommen(s, W, tel) {
+  if (s.indexOf('|') < 0) return s;
+  const regels = s.split('\n');
+  let kol = null;
+  for (let i = 0; i < regels.length; i++) {
+    const r = regels[i];
+    if (r.indexOf('|') < 0) { kol = null; continue; }
+    if (/^[\s|:\-]+$/.test(r)) continue;   // scheidingsrij
+    const c = cellen(r);
+    const kop = [];
+    c.forEach(function (x, k) { if (WACHTWOORDWOORD.test(x) && x.trim().length <= 60) kop.push(k); });
+    if (kop.length && c.every(function (x) { return x.trim().length <= 60; }) && !(kol && kol.length)) { kol = kop; continue; }
+    if (!kol) continue;
+    let veranderd = false;
+    kol.forEach(function (k) {
+      if (k >= c.length) return;
+      const w = c[k].trim();
+      if (!w || w.indexOf(W) >= 0 || AL_WEG.test(w) || isPlaatshouder(w) || /^[-–—]+$/.test(w) || (/\s/.test(w) && !lijktWachtwoord(w))) return;
+      c[k] = ' ' + W + ' '; tel.n++; veranderd = true;
+    });
+    if (veranderd) {
+      const voor = /^\s*\|/.test(r) ? r.match(/^\s*\|/)[0] : '', na = /\|\s*$/.test(r) ? r.match(/\|\s*$/)[0] : '';
+      regels[i] = voor + c.join('|') + na;
+    }
+  }
+  return regels.join('\n');
 }
 
 /**
