@@ -88,6 +88,12 @@ const SERVER_ECHT_VROEG = serverIsEcht(process.env, __dirname);
 const PROEF_AFSCHERMING = SERVER_ECHT_VROEG ? null : (function () {
   let ref = '';
   try { ref = fs.readFileSync(process.env.PROEF_REF_ENVIRON || '/proc/1/environ', 'latin1'); } catch (e) { ref = ''; }
+  // Codex MOET 1: zonder leesbare referentie valt de afscherming stil weg. In de pod (podsleutels geladen of /opt/data/.pg aanwezig)
+  // dan niet starten; daarbuiten (CI) zijn er geen podsleutels om af te schermen.
+  if (!ref.trim() && (process.env.SECRETS_GELADEN || fs.existsSync('/opt/data/.pg'))) {
+    console.error(new Date().toISOString() + ' proefserver start NIET: referentieomgeving (pid 1) niet te lezen, afscherming niet zeker (wv3398)');
+    process.exit(2);
+  }
   const a = schermProefAf(process.env, ref, function () { return crypto.randomBytes(24).toString('hex'); });
   a.ref = ref ? 'gelezen' : 'niet te lezen';
   const ouder = proefOuderNu(), t0 = Date.now();

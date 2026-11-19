@@ -7,6 +7,7 @@
 #   C  een geërfd API_SECRET werkt niet meer (401), de server kreeg een willekeurig geheim
 #   D  hij luistert op 127.0.0.1, niet op 0.0.0.0
 #   E  valt zijn ouder weg (afgebroken toets), dan stopt hij zichzelf binnen enkele seconden
+#   G  referentie (pid 1) niet te lezen terwijl podsleutels geladen zijn: de proefserver start niet (Codex MOET 1)
 #   F  (blok geknipt) SUPABASE_URL naar :8091 en SB_SQL_LOKAAL zonder SB_SQL_BIN gaan eruit; veilige namen blijven
 # SUPABASE_URL wijst in de serverruns naar een nep-Supabase van de toets zelf (rolwachter: actieve kant olares).
 # Alles met verzonnen waarden; geen netwerk buiten 127.0.0.1, geen echte sleutels, geen databank.
@@ -127,6 +128,15 @@ function luistertOp(poort) {
     let weg = false; for (let i = 0; i < 40 && !weg; i++) { await slaap(250); weg = !leeft(sp); }
     toets('E ouder weg: proefserver stopt zichzelf binnen 10 s', sp > 0 && weg, 'pid ' + sp);
     if (sp > 0 && !weg) { try { process.kill(sp, 'SIGKILL'); } catch (e) {} }
+
+    // ── G (Codex MOET 1): referentie niet te lezen in de pod -> proefserver start niet
+    const sg = maakServer('sg', { API_SECRET: 'toets-eigen-geheim', PROEF_REF_ENVIRON: path.join(W, 'bestaat-niet'), SECRETS_GELADEN: '1' });
+    let gp = null; for (let i = 0; i < 40 && !gp; i++) { await slaap(100); gp = sg.serverPid(); }
+    let gweg = false; for (let i = 0; i < 60 && !gweg; i++) { await slaap(250); gweg = gp > 0 && !leeft(gp); }
+    let gAntw = true; try { await req(sg, 'GET', '/health/publiek'); } catch (e) { gAntw = false; }
+    toets('G referentie onleesbaar in de pod: proefserver start niet', gweg && !gAntw && /start NIET/.test(fs.readFileSync(path.join(sg.d, 'stdout.log'), 'utf8')), 'pid ' + gp);
+    try { process.kill(sg.ouder.pid, 'SIGKILL'); } catch (e) {}
+    if (gp > 0 && leeft(gp)) { try { process.kill(gp, 'SIGKILL'); } catch (e) {} }
 
     // ── run 2: eigen API_SECRET van de toets; kijk wat een machinekamer-agent erft (die krijgt de volle omgeving van de server)
     // eigen nep-rolsleutel voor de nep-Supabase (zoals agent-start.sh); de overige geërfde sleutels blijven geërfd
