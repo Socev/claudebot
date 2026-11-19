@@ -78,11 +78,11 @@ function toets(regel, ctx) {
 }
 
 // Wat een apparaat te zien krijgt. open = het veld van de beurt; beurtApparaat = het apparaat dat typte; a = het vragende apparaat
-// ({ id, soort }); prive = de ene lijst privé-id's; vers = het antwoord is net klaar (een wissel geldt alleen voor het verse
+// ({ id, soort }); vers = het antwoord is net klaar (een wissel geldt alleen voor het verse
 // antwoord; uit de geschiedenis of later opgehaald is het een kaartlink). null = geen veld.
-function voorApparaat(open, beurtApparaat, a, prive, vers) {
+// wv3446: ook een privé-App op een vaste plek (geen afscherming per apparaat meer).
+function voorApparaat(open, beurtApparaat, a, vers) {
   if (!open || typeof open !== 'object' || !a || !a.id || a.id !== beurtApparaat) return null;
-  if (a.soort === 'vast' && Array.isArray(prive) && prive.indexOf(open.scherm) >= 0) return null;
   return { scherm: open.scherm, focus: open.focus || null, vorm: open.vorm === 'wissel' && vers ? 'wissel' : 'link' };
 }
 

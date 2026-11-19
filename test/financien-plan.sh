@@ -189,8 +189,8 @@ toets('geldstroom zonder volle maand: null', P.geldstroom(gd, { twaalf: [] }) ==
 const ov = fs.readFileSync('financien-overzicht.js', 'utf8'), app = fs.readFileSync('financien-app.js', 'utf8'), srv = fs.readFileSync('server.js', 'utf8');
 toets('overzicht() zet uitgaven.potjes en geldstroom via blok()', /uit\.uitgaven\.potjes = blok\('potjes'/.test(ov) && /uit\.geldstroom = blok\('geldstroom'/.test(ov));
 toets('vaste lasten: deze_maand uit afvinken, fout = leeg', /afvink = require\('\.\/financien-plan\.js'\)\.afvinken\(/.test(app) && /deze_maand: afvink/.test(app));
-toets('server.js: POST /app/financien/potje in de glijroutes en de routetabel, achter appPriveDicht en appTeller', /APP_GLIJD_ROUTES\.add\('POST \/app\/financien\/potje'\)/.test(srv) && /route === 'POST \/app\/financien\/potje'\) return appFinPotje/.test(srv) &&
-  /async function appFinPotje[\s\S]{0,400}appPriveDicht\(a, 'financien'\)/.test(srv) && /appTeller\('fin-potje'/.test(srv) && /VV\(\)\.wijzig\(pad, function \(t\) \{ return P\.potjesZet\(t, op, vandaag\); \}, \{ krimpGrens: true \}\)/.test(srv));
+toets('server.js: POST /app/financien/potje in de glijroutes en de routetabel, zonder vaste-plekweigering (wv3446), achter appTeller', /APP_GLIJD_ROUTES\.add\('POST \/app\/financien\/potje'\)/.test(srv) && /route === 'POST \/app\/financien\/potje'\) return appFinPotje/.test(srv) &&
+  /async function appFinPotje\(/.test(srv) && !/appPriveDicht/.test(srv) && /appTeller\('fin-potje'/.test(srv) && /VV\(\)\.wijzig\(pad, function \(t\) \{ return P\.potjesZet\(t, op, vandaag\); \}, \{ krimpGrens: true \}\)/.test(srv));
 toets('geen netwerk- of procesmodule in financien-plan.js', !/require\((['"])(https?|net|child_process|dgram|tls)\1\)/.test(fs.readFileSync('financien-plan.js', 'utf8')));
 toets('uitrol.sh en Dockerfile: financien-plan.js gaat mee in de release', /RELEASE_OPTIONEEL="[^"]*\bfinancien-plan\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&
   /COPY financien-plan\.js \/app\/release-bootstrap\/financien-plan\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));

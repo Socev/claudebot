@@ -3,7 +3,7 @@
 # koppeling in server.js. Toetst: zoektermen, handelingswoorden, woordenlijst (zelfde regels als woordenlijst.py; Sev → Sevilay als "gelezen
 # als", geen index-naam), woordgrens voor korte termen (Sev niet in Maarsseveen), uitgesloten mappen en bestanden (Bronnen, Conversaties,
 # Gezondheid, AGENTS.md …), symlinks (bestand, map, een zoekwortel die door een link is vervangen), sleutels gemaskeerd vóór het model,
-# "voorgesteld" eruit, vaste plek (alleen 10_Zakelijk, geen personeel, IBAN/BSN gemaskeerd, geen privé in "gelezen als"), natoets (letterlijk,
+# "voorgesteld" eruit, geen vaste-plekafscherming meer (wv3446), natoets (letterlijk,
 # streepjes en opmaak, verzonnen getal, telefoonnummer met spaties, chip die niet letterlijk is), bron buiten de lijst, modelfout, geen
 # treffers = geen aanroep; en server.js (schakelaar ontbreekt/uit/kapot = uit, grens, herhaalde zoek_id = één aanroep, ander apparaat,
 # één tegelijk, zoek_id die al een beurt is, app-log soort zoek en niet chat_log, systeemregel zonder haken en markeringen, hooguit 5,
@@ -136,22 +136,21 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     const r3f = await z2.zoek('Wat weet je van zzproefwoordqq');
     toets('3b weer leesbaar: gewoon "Niets gevonden." met volledige dekking', r3f.dekking && !r3f.dekking.onleesbaar && /^Niets gevonden\. /.test(r3f.melding), r3f); }
 
-  // ── 4. vaste plek ──
-  await z.zoek('Wat is de geboortedatum van Sev', { vast: true });
-  const p4 = laatsteprompt ? laatsteprompt.prompt : '';
+  // ── 4. vaste plek (wv3446: de oude vlag verandert niets meer; David 19-11: niet filteren) ──
   const r4 = await z.zoek('Wat is de geboortedatum van Sev', { vast: true });
-  toets('4 vaste plek: geen personeelspagina en geen "gelezen als" naar personeel', !/24-08-1980|123456782/.test(JSON.stringify(r4)) && r4.gelezen_als.length === 0, r4);
+  const r4n = await z.zoek('Wat is de geboortedatum van Sev');
+  toets('4 wv3446: oude vaste-plekvlag = zonder (zelfde bronnen en "gelezen als", geen vast-veld)', JSON.stringify(r4.bronnen) === JSON.stringify(r4n.bronnen) && JSON.stringify(r4.gelezen_als) === JSON.stringify(r4n.gelezen_als) && r4.vast === undefined, [r4, r4n]);
   laatsteprompt = null;
-  const r4k = await z.zoek('Wanneer is Kleintje geboren', { vast: true });
-  toets('4 vaste plek: geen privénaam uit de woordenlijst in de prompt of "gelezen als" (Fable diff #4)', !!laatsteprompt && /Kleintje kwam ook/.test(laatsteprompt.prompt) && !/Pietje Puk/.test(laatsteprompt.prompt) && r4k.gelezen_als.length === 0, laatsteprompt && laatsteprompt.prompt);
+  await z.zoek('Wanneer is Kleintje geboren', { vast: true });
+  toets('4 wv3446: "gelezen als" privénaam ook met de oude vaste-plekvlag in de prompt', !!laatsteprompt && /GELEZEN ALS \(woordenlijst\): Kleintje → Pietje Puk/.test(laatsteprompt.prompt), laatsteprompt && laatsteprompt.prompt);
   await z.zoek('Wanneer is Kleintje geboren');
   toets('4 meereizend: "gelezen als" privénaam wel in de prompt', /GELEZEN ALS \(woordenlijst\): Kleintje → Pietje Puk/.test(laatsteprompt.prompt), laatsteprompt.prompt);
   await z.zoek('Wat is het IBAN van Groenhouten', { vast: true });
   const p4b = laatsteprompt.prompt;
-  toets('4 vaste plek: IBAN gemaskeerd in de context', /IBAN weggelaten/.test(p4b) && !/0126 8194 16/.test(p4b), p4b);
+  toets('4 wv3446: IBAN niet gemaskeerd, ook met de oude vaste-plekvlag', !/IBAN weggelaten/.test(p4b) && /0126 8194 16/.test(p4b), p4b);
   aanroepen = 0;
   const r4c = await z.zoek('Wat is het kenteken van al mijn auto\'s', { vast: true });
-  toets('4 vaste plek: 20_Prive niet doorzocht', r4c.soort === 'geen' && aanroepen === 0, r4c);
+  toets('4 wv3446: 20_Prive ook met de oude vaste-plekvlag doorzocht', r4c.bronnen.some((b) => /^20_Prive\//.test(b.pad)), r4c);
 
   // ── 5. natoets en uitkomst ──
   const B = '10_Zakelijk/Tolgaarde/index.md';
@@ -246,20 +245,20 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   r8 = await z.zoek('Wat is het Zorgmail-adres van Tolgaarde');
   toets('8 "geen" bij volledige dekking: "niet gevonden in de N pagina\'s" met de doorzochte delen', r8.dekking.volledig === true && /^Niet gevonden in de \d+ pagina('s)? met een treffer\. Ik zocht in Zakelijk en Privé/.test(r8.melding), r8);
   r8 = await z.zoek('Wat is het Zorgmail-adres van Tolgaarde', { vast: true });
-  toets('8 vaste plek: de melding noemt alleen Zakelijk', /Ik zocht op dit apparaat alleen in Zakelijk/.test(r8.melding), r8);
+  toets('8 wv3446: melding met de oude vaste-plekvlag noemt Zakelijk en Privé', /Ik zocht in Zakelijk en Privé/.test(r8.melding) && !/op dit apparaat/.test(r8.melding), r8);
   aanroepen = 0;
   r8 = await z.zoek('Wat is de code van de zeppelinhangar', { vast: true });
-  toets('8 nul treffers op een vaste plek: doorzochte delen genoemd, geen model', aanroepen === 0 && /^Niets gevonden\. Ik zocht op dit apparaat alleen in Zakelijk/.test(r8.melding), r8);
+  toets('8 nul treffers (oude vaste-plekvlag): doorzochte delen genoemd, geen model', aanroepen === 0 && /^Niets gevonden\. Ik zocht in Zakelijk en Privé/.test(r8.melding), r8);
   // afgekapt zoeken (grep-grens): nooit "niet gevonden"
   const dk = { paginas: 5, paginas_mee: 5, regels: 9, regels_mee: 9, afgekapt: true, grens: true, volledig: false };
   toets('8 meldingVoor: afgekapt nooit "niet gevonden", wel "vraag het Socev"', ['geen', 'onzeker'].every((sr) => !/niet gevonden|niets gevonden/i.test(Z.meldingVoor(sr, dk, false)) && /Vraag het Socev/.test(Z.meldingVoor(sr, dk, false))) &&
     /niet alles doorzoeken/.test(Z.meldingVoor('geen', dk, false)) && /^Niets gevonden in wat ik kon doorzoeken/.test(Z.meldingVoor('leeg', { paginas: 0, paginas_mee: 0, afgekapt: true }, false)),
     ['geen', 'onzeker'].map((sr) => Z.meldingVoor(sr, dk, false)));
-  // vaste plek: eerst maskeren, dan inkorten (review #3: een BSN op ± 290 tekens werd een stuk van 7 cijfers dat het masker niet zag)
+  // wv3446: geen BSN-masker meer per apparaat; de lange buurregel gaat zoals op elk apparaat mee (eerst maskeren, dan inkorten blijft voor sleutels)
   zet('10_Zakelijk/Tolgaarde/Lang.md', '# Lang\n\n| Zeppelin | Opmerking |\n|---|---|\n| x | ' + 'a'.repeat(285) + ' 123456782 en verder ' + 'b'.repeat(60) + ' |\n');
   antwoordVan = null;
   await z.zoek('Zeppelin', { vast: true });
-  toets('8 vaste plek: lange buurregel eerst gemaskeerd, geen stuk BSN', !/123456/.test(laatsteprompt.prompt) && /\| x \| a/.test(laatsteprompt.prompt), laatsteprompt.prompt);
+  toets('8 wv3446: lange buurregel mee, ook met de oude vaste-plekvlag', /\| x \| a/.test(laatsteprompt.prompt), laatsteprompt.prompt);
   fs.rmSync(path.join(VAULT, '10_Zakelijk/Tolgaarde/Lang.md'));
   // CRLF-pagina's worden gevonden, en hun tabel gaat mee (review #6)
   zet('10_Zakelijk/Tolgaarde/Crlf.md', '---\r\nupdated: 2026-10-01\r\n---\r\n# Crlf\r\n\r\n| Zeppelin | Code |\r\n|---|---|\r\n| Graf | ZP-77-Q |\r\n');
@@ -355,7 +354,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   r9 = await z9.zoek('Wat zijn mijn kentekens');
   toets('9c "mijn" + soort met alleen eigen entiteiten: laag 1 mag (alle eigen kentekens)', r9.laag === 'identifier' && r9.waarden.length === 2 && /^Kentekens: /.test(r9.tekst), r9);
 
-  // 9d vaste plek: een privépagina valt in de natoets van laag 1; laag 2 krijgt --vast en filtert privé/personeel, maskeert IBAN
+  // 9d wv3446: de oude vaste-plekvlag verandert niets: laag 1 en 2 zoals zonder, nooit --vast naar de index; .. blijft weg (PAD_OK)
   feitenVan = l1([rij({ waarde: 'PR-77-IV', pagina: '20_Prive/Auto - Proefprive.md', regel: 2, code: 'PRIVE' })]);
   ixZet(ixAntw([deel('10_Zakelijk/Groenhouten/index.md', 'Groenhouten', [1, 2]),
     { pad: '20_Prive/Auto - Proefprive.md', kop: 'Proefprive', van: 1, tekst: '2: | Kenteken | PR-77-IV |' },
@@ -365,13 +364,10 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   antwoordVan = (p) => { prompts9.push(p); return { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }; };
   aanroepen = 0;
   r9 = await z9.zoek('kenteken proefprive', { vast: true });
-  toets('9d vaste plek: de dekkingsregel zegt "alleen Zakelijk"', /op dit apparaat alleen Zakelijk\.$/.test(r9.dekking_regel), r9.dekking_regel);
-  toets('9d vaste plek: laag 1 weg (privépagina), laag 2 met --vast', r9.lagen.feitenlijst.reden === 'natoets' && ixArgv()[0].indexOf('--vast') >= 0, { l: r9.lagen, a: ixArgv() });
-  const p9 = prompts9[0] || '';   // de modelvraag van laag 2 (laag 3 volgt na zijn "geen")
-  toets('9d vaste plek: geen privé-, personeels- of ..-pagina in de context; IBAN gemaskeerd', /### 10_Zakelijk\/Groenhouten\/index\.md/.test(p9) && !/PR-77-IV|123456782|Sevilay|lek|NL06 ABNA/.test(p9) && /IBAN weggelaten/.test(p9) &&
-    r9.lagen.tekstindex.weg === 3, { p: p9.slice(0, 600), t: r9.lagen.tekstindex });
+  const r9n = await z9.zoek('kenteken proefprive');
+  toets('9d wv3446: oude vaste-plekvlag = zonder (soort, laag, waarden, dekkingsregel), nooit --vast', r9.soort === r9n.soort && r9.laag === r9n.laag && JSON.stringify(r9.waarden) === JSON.stringify(r9n.waarden) &&
+    r9.dekking_regel === r9n.dekking_regel && !/alleen Zakelijk/.test(r9.dekking_regel || '') && ixArgv().every((x) => x.indexOf('--vast') < 0), { r9: r9, a: ixArgv() });
 
-  // 9e index te oud, ontbreekt, kapot of te traag: laag 3 (grep), en de dekkingsregel zegt het
   feitenVan = l1([], { soorten: [] });
   antwoordVan = (p, s) => ({ ok: true, data: { soort: 'antwoord', tekst: 'Het btw-nummer is NL863125190B01.', waarden: [{ label: 'BTW', waarde: 'NL863125190B01' }], bronnen: [B] } });
   ixZet(Object.assign(ixAntw([]), { gebouwd_op: new Date(Date.now() - 50 * 3600000).toISOString() }));
@@ -422,8 +418,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   r9 = await z9.zoek('Wat is de kleur van de zeppelinhangar');
   toets('9f nergens een treffer: "niets gevonden" met de regel, geen model', r9.soort === 'geen' && /^Niets gevonden\./.test(r9.melding) && /tekstindex \(bijgewerkt [^)]*\): geen treffer/.test(r9.melding), r9);
   toets('9g dekkingRegel: afgekapte feitenlijst noemt hoeveel bekeken', Z.dekkingRegel({ feitenlijst: { stand: 'ok', totaal: 25, getoond: 20, afgekapt: true, feiten_totaal: 300 } }) === 'Feitenlijst: 25 feiten (van 300), 20 bekeken, niet zeker genoeg.');
-  toets('9g vastOpen: alleen Zakelijk zonder personeel/financiën/..', Z.vastOpen('10_Zakelijk/Tolgaarde/index.md', SB.isVastDicht) && !Z.vastOpen('20_Prive/x.md', SB.isVastDicht) &&
-    !Z.vastOpen('10_Zakelijk/x/Financiën/y.md', SB.isVastDicht) && !Z.vastOpen('10_Zakelijk/x/medewerkers/y.md', SB.isVastDicht) && !Z.vastOpen('10_Zakelijk/../20_Prive/y.md', SB.isVastDicht));
+  toets('9g wv3446: vastOpen en NIET_MAP_VAST zijn weg', typeof Z.vastOpen === 'undefined' && typeof Z.NIET_MAP_VAST === 'undefined');
   antwoordVan = null;
 
   // ── 9h–9l. Opus-diffreview wv1788 ──
@@ -525,7 +520,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   const slotVrij = /const APP_SLOT_VRIJ = new Set\(\[([^\]]*)\]\)/.exec(src);
   toets('6 niet in APP_SLOT_VRIJ (vaste plek: onder het invoerslot)', slotVrij && slotVrij[1].indexOf('zoek-snel') < 0);
   toets('6 bijStart in het hoofdkanaal geeft de zoekregels mee', /: kanaal === 'hoofd' \? function \(\) \{ return typeof zoekSnelStaart === 'function' \? zoekSnelStaart\(\) : ''; \} : undefined \}\);/.test(src));
-  toets('6 wv1901: vaste plek zoekt de hele vault (schakelaar appAfscherm)', /zoekSnel\.zoek\(vraag, \{ vast: appAfscherm\(a\) \}\)/.test(src) && /^const APP_VAST_AFSCHERMEN = false;$/m.test(src));
+  toets('6 wv3446: elk apparaat zoekt de hele vault, geen afscherm-schakelaar meer', /zoekSnel\.zoek\(vraag, \{\}\)/.test(src) && !/APP_VAST_AFSCHERMEN|appAfscherm/.test(src));
   toets('6 nieuw-telling slaat soort zoek over', /if \(x\.soort === 'zoek'\) return;/.test(src));
   toets('6 Antwoord hierop en gesprek-zoeken kennen Zoek snel', /if \(x\.soort === 'zoek'\) return 'Zoek snel';   \/\/ wv1252\n  return 'je antwoord';/.test(src) && /if \(x\.soort === 'zoek'\) return 'Zoek snel';   \/\/ wv1252\n  return null;/.test(src));
   toets('6 uitrol.sh en Dockerfile kennen zoek-snel.js', /RELEASE_OPTIONEEL="[^"]* zoek-snel\.js[ "]/.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY zoek-snel\.js \/app\/release-bootstrap\/zoek-snel\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
@@ -553,7 +548,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     appSchrijfJson: (f, d) => fs.writeFileSync(f, JSON.stringify(d)),
     appEenRegel: eenRegel, appTijdKort: (ms) => new Date(ms).toISOString().slice(11, 16),
     harvesterClaude: async (sys, prompt, schema, o) => { modelN++; if (o.timeoutMs !== 20000) return { ok: false, fout: 'time-out niet 20 s' }; return modelVan ? modelVan(prompt, schema) : { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }; } });
-  vm.runInContext((/^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0]) + src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, zoekSnelStaart, zoekSnelTot, zoekSnelInfo, zoekSnelAan, zoekSnel };', ctx, { filename: 'server.js#zoek-snel' });
+  vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, zoekSnelStaart, zoekSnelTot, zoekSnelInfo, zoekSnelAan, zoekSnel };', ctx, { filename: 'server.js#zoek-snel' });
   const S = ctx.__z;
   toets('6 module geladen', !!S.zoekSnel);
   const A = { id: 'pixel', soort: 'mee' }, A2 = { id: 'laptop', soort: 'mee' };
@@ -640,7 +635,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     appSchrijfJson: (f, d) => fs.writeFileSync(f, JSON.stringify(d)),
     appEenRegel: eenRegel, appTijdKort: (ms) => new Date(ms).toISOString().slice(11, 16),
     harvesterClaude: async (sys, prompt, schema, o) => { modelN++; return modelVan ? modelVan(prompt, schema) : { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }; } });
-  vm.runInContext((/^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0]) + src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, zoekSnelInfo, zoekSnel, zoekSnelZout };', ctx10, { filename: 'server.js#zoek-snel-10' });
+  vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, zoekSnelInfo, zoekSnel, zoekSnelZout };', ctx10, { filename: 'server.js#zoek-snel-10' });
   const S10 = ctx10.__z;
   const roep10 = async (d) => { const res = st(); await S10.appZoekSnel({}, res, A, d); await new Promise((k) => setTimeout(k, 30)); return res; };
   rpcVan = async (fn) => fn === 'sb_query_run_zet' ? 7 : { totaal: 1, getoond: 1, afgekapt: false, genegeerd: [], soorten: ['kenteken'], rest_n: 1, feiten_totaal: 300,

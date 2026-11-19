@@ -178,7 +178,7 @@ toets('financien-vooruit.js: geen netwerk, geen proces, schrijft zelf niets', !!
   !/\b(writeFileSync|appendFileSync|renameSync|unlinkSync|rmSync|mkdirSync|openSync)\b/.test(src), null);
 const S = fs.readFileSync('server.js', 'utf8');
 toets('server.js: POST /app/financien/doel achter de Financiën-poort, met grens, via vault-veilig, geheugen weg', /route === 'POST \/app\/financien\/doel'\) return appFinDoel/.test(S) &&
-  /async function appFinDoel[\s\S]{0,400}appPriveDicht\(a, 'financien'\)/.test(S) && /appTeller\('fin-doel'/.test(S) && /VV\(\)\.wijzig\(pad, function \(t\) \{ return V\.doelenZet/.test(S) && /APP_GLIJD_ROUTES\.add\('POST \/app\/financien\/doel'\)/.test(S), null);
+  /async function appFinDoel\(/.test(S) && !/appPriveDicht/.test(S) && /appTeller\('fin-doel'/.test(S) && /VV\(\)\.wijzig\(pad, function \(t\) \{ return V\.doelenZet/.test(S) && /APP_GLIJD_ROUTES\.add\('POST \/app\/financien\/doel'\)/.test(S), null);
 toets('server.js: nieuw Doelen.md alleen als het er vlak voor de rename nog niet is (anders wijzig)', /VV\(\)\.schrijf\(pad, V\.doelenZet\('', op, vandaag\), \{ alsGelijk: function \(st\) \{ return !st; \} \}\)/.test(S), null);
 toets('financien-app: de maandbrief rekent op de peildatum van de briefing', /maandbrief\(A, a, o, D\)/.test(fs.readFileSync('financien-app.js', 'utf8')) && /o\.peil && /.test(fs.readFileSync('financien-app.js', 'utf8')), null);
 toets('server.js: maandbrief_fout geeft een box-rij en houdt het gewone blok niet tegen', /if \(j\.maandbrief_fout\) \{[\s\S]{0,300}bankBoxRij/.test(S), null);

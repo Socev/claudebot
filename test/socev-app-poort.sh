@@ -4134,10 +4134,10 @@ async function bewijs(o) {
       // vaste-plek-apparaat (review #5): geen Gezin/Schapies, geen concepten
       const nep = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
       await H.appVandaagRoute({}, nep, { id: 'x', soort: 'vast' });
-      toets('17 wv1901: vaste plek: alles, zoals meereizend (ook Gezin-afspraken en concepten)', nep.st === 200 && nep.b.vaste_plek === false && !!nep.b.concepten && nep.b.agenda && nep.b.agenda.vandaag.some((x) => /^(Gezin|Schapies)$/.test(x.kalender)) && nep.b.agenda.vandaag.length === 6 && nep.b.acties, JSON.stringify(nep.b && nep.b.agenda));
+      toets('17 wv1901: vaste plek: alles, zoals meereizend (ook Gezin-afspraken en concepten)', nep.st === 200 && !nep.b.vaste_plek && !!nep.b.concepten && nep.b.agenda && nep.b.agenda.vandaag.some((x) => /^(Gezin|Schapies)$/.test(x.kalender)) && nep.b.agenda.vandaag.length === 6 && nep.b.acties, JSON.stringify(nep.b && nep.b.agenda));
       const nep2 = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
       await H.appVandaagRoute({}, nep2, { id: 'y', soort: 'reist' });
-      toets('17 meereizend: alles', nep2.b.vaste_plek === false && nep2.b.concepten && nep2.b.agenda.vandaag.length === 6);
+      toets('17 meereizend: alles', !nep2.b.vaste_plek && nep2.b.concepten && nep2.b.agenda.vandaag.length === 6);
       // agenda stuk: de rest komt wel, met een fout in gewone taal
       H.appStaat.vandaag = null; agendaStaat.kapot = true;
       r = await vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
@@ -4998,11 +4998,11 @@ async function bewijs(o) {
         !/NL00ABNA|Jansen/.test(JSON.stringify(r.j)) && kArgs[0][0][0] === 'pot-afschrift-maanden' && kArgs[0][1] === 20000, JSON.stringify(r.j).slice(0, 400));
       const nep = () => ({ _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } });
       let n1 = nep(); await H.appPotAfschriften({}, n1, { id: 'x', soort: 'vast' });
-      // wv1901: ook op een vaste plek; maken, downloaden en concept (vingerafdruk blijft) alleen dicht als de vaste plek afschermt
+      // wv1901/wv3446: ook op een vaste plek; maken, downloaden en concept zonder vaste-plekweigering (vingerafdruk voor het concept blijft)
       const sv20 = fs.readFileSync('server.js', 'utf8');
-      toets('20g wv1901: vaste plek: overzicht met maanden zoals meereizend; maken/bestand/concept alleen dicht via appAfscherm', n1.st === 200 && n1.b.vaste_plek === false && Array.isArray(n1.b.maanden) && n1.b.maanden.length === 2
-        && /async function appPotMaak\(req, res, a, d\) \{\n  if \(appAfscherm\(a\)\) return appWeiger\(res, 403/.test(sv20) && /async function appPotBestand\(req, res, a, rest\) \{\n  if \(appAfscherm\(a\)\) return appWeiger\(res, 403/.test(sv20)
-        && /async function appPotConcept\(req, res, a, s, d\) \{\n  if \(appAfscherm\(a\)\) return appWeiger\(res, 403/.test(sv20) && /if \(!appVersOk\(a, s\)\) \{ res\._app\.reden = 'pot-concept, niet vers'/.test(sv20), JSON.stringify(n1.b).slice(0, 200));
+      toets('20g wv3446: vaste plek: overzicht met maanden zoals meereizend; maken/bestand/concept zonder vaste-plekweigering', n1.st === 200 && n1.b.vaste_plek === false && Array.isArray(n1.b.maanden) && n1.b.maanden.length === 2
+        && /async function appPotMaak\(req, res, a, d\) \{\n  const maand = potAfMaandUit/.test(sv20) && /async function appPotBestand\(req, res, a, rest\) \{\n  const m0 = /.test(sv20)
+        && /async function appPotConcept\(req, res, a, s, d\) \{\n  const maand = potAfMaandUit/.test(sv20) && !/appAfscherm/.test(sv20) && /if \(!appVersOk\(a, s\)\) \{ res\._app\.reden = 'pot-concept, niet vers'/.test(sv20), JSON.stringify(n1.b).slice(0, 200));
       kAntw['pot-afschrift-maanden'] = { code: 2, j: { ok: false, fout: 'gebruik: zoek | maand' } };
       r = await vraag('GET', '/app/pot-afschriften', undefined, { pot: P.jar });
       toets('20g oudere bank-lezer: 503 "wordt net bijgewerkt"', r.status === 503 && /bijgewerkt/.test(r.j.fout), JSON.stringify(r.j));
@@ -7134,7 +7134,7 @@ async function bewijs(o) {
       const nepRes = () => ({ _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } });
       let nr = nepRes();
       await H.appVoorJouRoute({}, nr, { id: 'x', soort: 'vast' });
-      toets('27 wv1901: vaste plek: ook het privé-punt in de lijst, zoals meereizend', nr.st === 200 && nr.b.punten.some((x) => x.id === 9) && nr.b.punten.length === 8 && nr.b.vaste_plek === false, JSON.stringify(nr.b.punten.map((x) => x.id)));
+      toets('27 wv1901: vaste plek: ook het privé-punt in de lijst, zoals meereizend', nr.st === 200 && nr.b.punten.some((x) => x.id === 9) && nr.b.punten.length === 8 && !nr.b.vaste_plek, JSON.stringify(nr.b.punten.map((x) => x.id)));
       // ── 27 wv1706 (OVIS M3b): module + doel uit herkomst, alleen vaste vormen; vaste plek nooit naar een privé-module ──
       {
         const D = (h, soort) => JSON.stringify(H.appVjDoel({ herkomst: h }, { id: 'x', soort: soort || 'reist' }));
@@ -8355,7 +8355,7 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
       const j = r.j || {}, E = {};
       (j.entiteiten || []).forEach((e) => { E[e.code] = e; });
-      toets('29 200, entiteiten in vaste volgorde, vaste_plek false, vandaag', r.status === 200 && (j.entiteiten || []).map((e) => e.code).join() === 'TG,GH,POT,KM,HOLD,PROJ,REGIO,PRIVE,OVERIG' && j.vaste_plek === false && j.vandaag === V && !!j.bijgewerkt, JSON.stringify((j.entiteiten || []).map((e) => e.code)) + ' ' + JSON.stringify(j.fouten));
+      toets('29 200, entiteiten in vaste volgorde, vaste_plek false, vandaag', r.status === 200 && (j.entiteiten || []).map((e) => e.code).join() === 'TG,GH,POT,KM,HOLD,PROJ,REGIO,PRIVE,OVERIG' && !j.vaste_plek && j.vandaag === V && !!j.bijgewerkt, JSON.stringify((j.entiteiten || []).map((e) => e.code)) + ' ' + JSON.stringify(j.fouten));
       toets('29 scheve rij -> één regel in fouten (niet stil overgeslagen)', j.fouten && j.fouten.length === 1 && /1 regel in het deadline-register kon ik niet lezen/.test(j.fouten[0]), JSON.stringify(j.fouten));
       const titels = (c) => (E[c] ? E[c].deadlines.map((x) => x.titel) : []);
       const alle = Object.keys(E).flatMap(titels);
@@ -8386,7 +8386,7 @@ async function bewijs(o) {
       const vb = nep.b || {};
       const nepR = { _app: {}, writeHead(s) { this.st = s; }, end(x) { this.b = JSON.parse(x); } };
       await H.appProjectenRoute({}, nepR, { id: 'y', soort: 'reist' });
-      toets('29 wv1901: vaste plek: alles zoals meereizend (ook Privé/Overig, personeelszaken en lopend)', nep.st === 200 && vb.vaste_plek === false && JSON.stringify(vb.entiteiten) === JSON.stringify(nepR.b.entiteiten) && vb.entiteiten.some((e) => /^(PRIVE|OVERIG)$/.test(e.code)) && /Detachering/.test(JSON.stringify(vb)), JSON.stringify(vb.entiteiten && vb.entiteiten.map((e) => e.code)));
+      toets('29 wv1901: vaste plek: alles zoals meereizend (ook Privé/Overig, personeelszaken en lopend)', nep.st === 200 && !vb.vaste_plek && JSON.stringify(vb.entiteiten) === JSON.stringify(nepR.b.entiteiten) && vb.entiteiten.some((e) => /^(PRIVE|OVERIG)$/.test(e.code)) && /Detachering/.test(JSON.stringify(vb)), JSON.stringify(vb.entiteiten && vb.entiteiten.map((e) => e.code)));
       // één bron weg -> regel in fouten; beide weg -> 503 (met auditregel)
       const acBewaar = fs.readFileSync(AC, 'utf8'), dlBewaar = fs.readFileSync(DL, 'utf8');
       fs.unlinkSync(AC); H.appStaat.projecten = null;

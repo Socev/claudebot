@@ -86,7 +86,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('1 standaard zonder Bronnen en 30_Conversaties (P4), met teller', !sp.some((p) => /\/Bronnen\//.test(p) || /^30_Conversaties\//.test(p)) && std.j.verborgen_n === 3, { n: std.j.verborgen_n });
   const vast = await sb.app('POST /app/secondbrain/kaart', { alles: true }, { vast: true });
   const vp = vast.j.knopen.map((x) => x[0]);
-  toets('1 vaste plek: geen 20_Prive, 30_Conversaties, Medewerkers, Meldingen (P2)', !vp.some((p) => /^20_Prive\//.test(p) || /^30_Conversaties\//.test(p) || /\/Medewerkers\//.test(p) || /^00_Systeem\/Meldingen\//.test(p)) && vp.indexOf('index.md') >= 0, vp);
+  toets('1 wv3446: ook met de oude vaste-plekvlag de hele vault (20_Prive, 30_Conversaties, Medewerkers, Meldingen)', vp.some((p) => /^20_Prive\//.test(p)) && vp.some((p) => /^00_Systeem\/Meldingen\//.test(p)) && vp.indexOf('index.md') >= 0, vp);
   toets('1 lijnen verwijzen alleen naar knopen in het antwoord', vast.j.lijnen.every((i) => i >= 0 && i < vast.j.knopen.length));
   toets('1 kaart.json 0600 in een 0700-map buiten de vault', (fs.statSync(path.join(D, 'kaart.json')).mode & 0o777) === 0o600 && (fs.statSync(D).mode & 0o777) === 0o700 && !fs.existsSync(path.join(V, 'kaart.json')));
   const kj = fs.readFileSync(path.join(D, 'kaart.json'), 'utf8');
@@ -135,15 +135,15 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   for (const p of ['20_Prive/Gezondheid/Bloed.md', '10_Zakelijk/Tolgaarde/Medewerkers/Jan Jansen.md', '00_Systeem/Meldingen/machinekamer.md', '30_Conversaties/WhatsApp/2026-10-22.md',
     '00_Systeem/Beveiliging/Sleutelregister.md'])   // wv1931-review MOET 1: vroeger NOOIT_MAP, nu vast-dicht
     vastP.push((await sb.app('POST /app/secondbrain/open', { pad: p }, { vast: true })).status);
-  toets('3 vaste plek: privé, personeel, box, gesprekken dicht (404)', vastP.every((s) => s === 404), vastP);
+  toets('3 wv3446: privé, personeel, box, gesprekken ook met de oude vaste-plekvlag open (200)', vastP.every((s) => s === 200), vastP);
   const vastB = [];
   for (const p of ['TempFinData/cf_token.txt', 'Claude outputs/x.pdf']) vastB.push((await sb.app('POST /app/secondbrain/bestand', { pad: p }, { vast: true })).status);
   const telB = (await sb.app('POST /app/secondbrain/bestand', { pad: 'Claude outputs/x.pdf' }, {})).status;
-  toets('3 wv1931: TempFinData en Claude outputs op een afschermende vaste plek dicht (404), elders open', vastB.every((s) => s === 404) && telB === 200, vastB.concat([telB]));
+  toets('3 wv3446: TempFinData en Claude outputs overal open, ook met de oude vaste-plekvlag', vastB.every((s) => s === 200) && telB === 200, vastB.concat([telB]));
   const ovv = await sb.app('POST /app/secondbrain/open', { pad: '01_Ontwikkeling/Plan.md' }, { vast: true });
-  toets('3 vaste plek: link naar David Schaap (HAGRO + Gambia) wordt één kandidaat (Gambia valt weg)', ovv.j.doelen['david schaap'] && ovv.j.doelen['david schaap'].p === '10_Zakelijk/HAGRO/David Schaap.md', ovv.j.doelen['david schaap']);
+  toets('3 wv3446: link naar David Schaap blijft twee kandidaten (HAGRO + Gambia), ook met de oude vaste-plekvlag', ovv.j.doelen['david schaap'] && Array.isArray(ovv.j.doelen['david schaap'].k) && ovv.j.doelen['david schaap'].k.length === 2, ovv.j.doelen['david schaap']);
   const ovb = await sb.app('POST /app/secondbrain/open', { pad: '10_Zakelijk/Tolgaarde/Verzekeringen.md' }, { vast: true });
-  toets('3 vaste plek: backlinks zonder dichte bronnen', ovb.j.terug.every((p) => !/^20_Prive|Medewerkers|^30_/.test(p)));
+  toets('3 wv3446: backlinks ook uit privé en personeel, ook met de oude vaste-plekvlag', JSON.stringify(ovb.j.terug) === JSON.stringify((await sb.app('POST /app/secondbrain/open', { pad: '10_Zakelijk/Tolgaarde/Verzekeringen.md' }, {})).j.terug));
   toets('3 NFC: NFD-bestandsnaam ook met NFC-pad te openen', (await sb.app('POST /app/secondbrain/open', { pad: '10_Zakelijk/Holding/Café notitie.md' }, {})).status === 200);
   toets('3 groter dan 2 MB: 413', (await sb.app('POST /app/secondbrain/open', { pad: '01_Ontwikkeling/Groot.md' }, {})).status === 413);
   toets('3 een niet-md via open: 404', (await sb.app('POST /app/secondbrain/open', { pad: '01_Ontwikkeling/schema.png' }, {})).status === 404);
@@ -154,11 +154,11 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const vm = await sb.app('POST /app/secondbrain/open', { pad: '10_Zakelijk/Tolgaarde/Medewerkers/Jan Jansen.md' }, {});
   toets('3 telefoon: personeel wel, IBAN niet gemaskeerd (alleen op vast)', vm.status === 200 && vm.j.md.indexOf('NL12ABNA0123456789') >= 0);
 
-  // Fable diffreview: op een vaste plek is verborgen (Bronnen) ook dicht, ook met alles
-  toets('3 vaste plek: Bronnen (verborgen) dicht, ook via open', (await sb.app('POST /app/secondbrain/open', { pad: '10_Zakelijk/Tolgaarde/Bronnen/_register.md' }, { vast: true })).status === 404 &&
-    (await sb.app('POST /app/secondbrain/bestand', { pad: '10_Zakelijk/Tolgaarde/Bronnen/scan.pdf' }, { vast: true })).status === 404);
-  toets('3 vaste plek: kaart met alles zonder Bronnen', !(await sb.app('POST /app/secondbrain/kaart', { alles: true }, { vast: true })).j.knopen.some((x) => /\/Bronnen\//.test(x[0])));
-  const a404 = await sb.app('POST /app/secondbrain/open', { pad: '20_Prive/Gezondheid/Bloed.md' }, { vast: true });
+  // wv3446: verborgen (Bronnen) gaat via een link open, ook met de oude vaste-plekvlag
+  toets('3 wv3446: Bronnen (verborgen) via open, ook met de oude vaste-plekvlag', (await sb.app('POST /app/secondbrain/open', { pad: '10_Zakelijk/Tolgaarde/Bronnen/_register.md' }, { vast: true })).status === 200 &&
+    (await sb.app('POST /app/secondbrain/bestand', { pad: '10_Zakelijk/Tolgaarde/Bronnen/scan.pdf' }, { vast: true })).status === 200);
+  toets('3 wv3446: kaart met alles bevat Bronnen, ook met de oude vaste-plekvlag', (await sb.app('POST /app/secondbrain/kaart', { alles: true }, { vast: true })).j.knopen.some((x) => /\/Bronnen\//.test(x[0])));
+  const a404 = await sb.app('POST /app/secondbrain/open', { pad: '20_Prive/Gezondheid/Bestaat Niet Bloed.md' }, {});
   toets('3 audit bij 404: hmac van het gevraagde pad, geen domein, geen pad', a404.audit.h && a404.audit.domein === null && JSON.stringify(a404.audit).indexOf('Bloed') < 0, a404.audit);
   // ── 4. bestand ──
   const b1 = await sb.app('POST /app/secondbrain/bestand', { pad: '01_Ontwikkeling/schema.png' }, {});
@@ -166,7 +166,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const b2 = await sb.app('POST /app/secondbrain/bestand', { pad: '20_Prive/Financien/data.csv' }, {});
   toets('4 bestand: tekst door het masker', b2.status === 200 && Buffer.from(b2.j.inhoud, 'base64').toString('utf8').indexOf('[sleutel weggelaten]') >= 0, Buffer.from(b2.j.inhoud || '', 'base64').toString());
   toets('4 bestand: md via bestand = 404', (await sb.app('POST /app/secondbrain/bestand', { pad: 'index.md' }, {})).status === 404);
-  toets('4 bestand: vaste plek + privé = 404', (await sb.app('POST /app/secondbrain/bestand', { pad: '20_Prive/Financien/data.csv' }, { vast: true })).status === 404);
+  toets('4 wv3446: bestand privé ook met de oude vaste-plekvlag 200', (await sb.app('POST /app/secondbrain/bestand', { pad: '20_Prive/Financien/data.csv' }, { vast: true })).status === 200);
   toets('4 bestand: pdf in Bronnen (verborgen) wel te openen', (await sb.app('POST /app/secondbrain/bestand', { pad: '10_Zakelijk/Tolgaarde/Bronnen/scan.pdf' }, {})).status === 200);
 
   // ── 5. zoeken ──
@@ -177,7 +177,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const z2 = await sb.app('POST /app/secondbrain/zoek', { q: 'verzekering', alles: true }, {});
   toets('5 zoeken met alles: ook Bronnen en gesprekken', z2.j.treffers.some((t) => /Bronnen/.test(t.pad)) && z2.j.treffers.some((t) => /^30_/.test(t.pad)));
   const z3 = await sb.app('POST /app/secondbrain/zoek', { q: 'verzekering', alles: true }, { vast: true });
-  toets('5 zoeken op vast: geen privé of gesprekken', !z3.j.treffers.some((t) => /^20_|^30_/.test(t.pad)), z3.j.treffers);
+  toets('5 wv3446: zoeken met de oude vaste-plekvlag = zonder', JSON.stringify(z3.j.treffers) === JSON.stringify((await sb.app('POST /app/secondbrain/zoek', { q: 'verzekering', alles: true }, {})).j.treffers) && z3.j.treffers.some((t) => /^20_|^30_/.test(t.pad)), z3.j.treffers);
   const z4 = await sb.app('POST /app/secondbrain/zoek', { q: 'financien cafe' }, {});
   toets('5 zoeken zonder accenten vindt Financiën en café', z4.j.treffers.some((t) => t.pad === '10_Zakelijk/Tolgaarde/Verzekeringen.md'), z4.j);
   const z5 = await sb.app('POST /app/secondbrain/zoek', { q: 'Token' }, {});
@@ -187,7 +187,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('5 betekenis: treffers buiten de kaart en verborgen weg, fragment gemaskeerd', zb.j.treffers.map((t) => t.pad).join() === '20_Prive/Gezondheid/Bloed.md,10_Zakelijk/Tolgaarde/Verzekeringen.md' &&
     zb.j.treffers[0].fragment.indexOf(TOKEN) < 0, zb.j.treffers);
   const zbv = await sb.app('POST /app/secondbrain/zoek', { q: 'polis', betekenis: true }, { vast: true });
-  toets('5 betekenis op vast: geen privé', zbv.j.treffers.map((t) => t.pad).join() === '10_Zakelijk/Tolgaarde/Verzekeringen.md', zbv.j.treffers);
+  toets('5 wv3446: betekenis met de oude vaste-plekvlag ook privé', zbv.j.treffers.some((t) => /^20_Prive/.test(t.pad)), zbv.j.treffers);
 
   // ── 5b. zoekfilter soorten (wv1940): vaste codes, soort én plek, afgekapt per soort, teller, betekenis, vaste plek ──
   {
@@ -229,7 +229,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     for (const f of fout) st.push((await z('rapport', f)).status);
     toets('5b onbekende of verkeerde code: 400', st.every((x) => x === 400), st);
     const p9 = await z('rapport', ['pdf'], { vast: true });
-    toets('5b vaste plek: geen privé en geen Bronnen, teller ook niet', !pd(p9).some((p) => /^20_|Bronnen/.test(p)) && p9.j.tel.pdf === 45, p9.j.tel);
+    toets('5b wv3446: met de oude vaste-plekvlag dezelfde treffers en teller', await (async () => { const p0 = (await z('rapport', ['pdf'])).j; return JSON.stringify(p9.j.treffers) === JSON.stringify(p0.treffers) && JSON.stringify(p9.j.tel) === JSON.stringify(p0.tel); })(), p9.j.tel);
     const pb = await z('rapport', ['paginas', 'vault'], {}, { betekenis: true });
     const pb2 = await z('rapport', ['pdf'], {}, { betekenis: true });
     toets('5b betekenis: zelfde filter op het pad van de treffers', pd(pb).join() === 'Pagina.md' && pd(pb2).join() === 'Rapporten/rapport-1.pdf', [pd(pb), pd(pb2)]);
@@ -241,7 +241,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('6 koppel: "Centraal Beheer" (zonder B.V., andere hoofdletters) → pagina', sb.koppelNaam('CENTRAAL BEHEER') === '10_Zakelijk/Tolgaarde/Verzekeringen.md' && sb.koppelNaam('Weg') === null && sb.koppelNaam('Iets anders') === null);
 
   const zv = await sb.app('POST /app/secondbrain/zoek', { q: 'bron', alles: true }, { vast: true });
-  toets('5 zoeken op vast met alles: geen Bronnen', !zv.j.treffers.some((t) => /Bronnen/.test(t.pad)), zv.j.treffers);
+  toets('5 wv3446: zoeken met alles en de oude vaste-plekvlag: ook Bronnen', zv.j.treffers.some((t) => /Bronnen/.test(t.pad)), zv.j.treffers);
   // fragment: een sleutel op de knipgrens (60 tekens voor de treffer) blijft gemaskeerd (Fable diffreview K4)
   const lang = 'Qw3rTy7uIo9pAs1dFg5hJk2lZx4cVb6nM8qW0eR';
   zet('01_Ontwikkeling/Grens.md', '# grens\n' + 'x'.repeat(30) + ' ' + lang + ' ' + 'y'.repeat(5) + ' grenswoord hier\n');
@@ -297,9 +297,9 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       ix((t) => t.pad === '01_Ontwikkeling/Weinig.md') < ix((t) => t.waar === 'map') && (ix((t) => /^30_/.test(t.pad)) < 0 || ix((t) => /^30_/.test(t.pad)) > ix((t) => t.pad === '01_Ontwikkeling/Weinig.md')), tk.map((t) => t.waar + ' ' + t.pad).slice(0, 6));
     toets('5c de map-wirwar (60 overleggen) staat niet vóór de pagina\'s, en houdt plek voor tekst', r.treffers.length === 40 && r.afgekapt === true &&
       r.treffers.findIndex((t) => t.waar === 'map') > r.treffers.findIndex((t) => t.pad === '01_Ontwikkeling/Allevoorbeeldig.md') && r.groepen.entiteiten === 3, { n: r.treffers.length, g: r.groepen });
-    toets('5c opt.entiteiten krijgt de vraag en de vaste plek', entVraag && entVraag[0] === 'Voorbeeld' && entVraag[1] === false, entVraag);
+    toets('5c opt.entiteiten krijgt alleen de vraag (wv3446)', entVraag && entVraag[0] === 'Voorbeeld' && entVraag[1] === undefined, entVraag);
     const rv = (await sb3.app('POST /app/secondbrain/zoek', { q: 'Voorbeeld', soorten: [] }, { vast: true })).j;
-    toets('5c vaste plek: vast mee naar het register; elk pad nog langs de kaart', entVraag[1] === true && rv.treffers.every((t) => !/^20_|^30_/.test(t.pad)), rv.treffers.filter((t) => /^20_|^30_/.test(t.pad)));
+    toets('5c wv3446: geen vaste-plekvlag naar het register; zelfde treffers als zonder', entVraag[1] === undefined && JSON.stringify(rv.treffers) === JSON.stringify((await sb3.app('POST /app/secondbrain/zoek', { q: 'Voorbeeld', soorten: [] }, {})).j.treffers), rv.treffers);
     const rk = (await sb3.app('POST /app/secondbrain/zoek', { q: 'Voorbeeld', soorten: ['vault'] }, {})).j;
     toets('5c chip Vault: entiteit blijft, privé-entiteit en gesprekken alleen als ze in de vault-plek vallen', rk.treffers[0].groep === 'entiteiten' && !rk.treffers.some((t) => /^30_/.test(t.pad)), rk.treffers.slice(0, 3));
     const rp = (await sb3.app('POST /app/secondbrain/zoek', { q: 'Voorbeeld', soorten: ['pdf'] }, {})).j;
@@ -373,18 +373,18 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     klok += 200000;
     const r7 = await s10.app('GET /app/secondbrain', {}, { vast: false });
     toets('8b bestand weg: uit de kaart en uit de links', r7.j.knopen.every((k) => k[0] !== 'c.md') && s10.health().gelezen === 0, s10.health());
-    // afscherming: vast en open om en om uit dezelfde kaart, elk zijn eigen filtering
+    // wv3446: de oude vaste-plekvlag verandert niets meer (zelfde kaart, zelfde lijst)
     const kv = s10.vers(false);
     const v1 = await s10.app('GET /app/secondbrain', {}, { vast: true });
     const o1 = await s10.app('POST /app/secondbrain/kaart', { alles: true }, { vast: false });
     const v2 = await s10.app('POST /app/secondbrain/kaart', { alles: true }, { vast: true });
     const o2 = await s10.app('GET /app/secondbrain', {}, { vast: false });
     const pv = (r) => r.j.knopen.map((k) => k[0]);
-    toets('8b vaste plek: geen personeel of bronnen, ook na een open apparaat (zelfde kaart)', s10.vers(false) === kv && [v1, v2].every((r) => r.j.vaste_plek === true && pv(r).indexOf('10_Zakelijk/Personeel/dossier.md') < 0 && pv(r).indexOf('10_Zakelijk/Bronnen/bron.md') < 0), [pv(v1), pv(v2)]);
-    toets('8b open apparaat: personeel erin, bronnen alleen met alles', pv(o2).indexOf('10_Zakelijk/Personeel/dossier.md') >= 0 && pv(o2).indexOf('10_Zakelijk/Bronnen/bron.md') < 0 && pv(o1).indexOf('10_Zakelijk/Bronnen/bron.md') >= 0 && o2.j.vaste_plek === false, [pv(o1), pv(o2)]);
+    toets('8b wv3446: met de oude vaste-plekvlag personeel erin, zelfde kaart', s10.vers(false) === kv && [v1, v2].every((r) => !r.j.vaste_plek && pv(r).indexOf('10_Zakelijk/Personeel/dossier.md') >= 0) && JSON.stringify(pv(v1)) === JSON.stringify(pv(o2)) && JSON.stringify(pv(v2)) === JSON.stringify(pv(o1)), [pv(v1), pv(v2)]);
+    toets('8b open apparaat: personeel erin, bronnen alleen met alles', pv(o2).indexOf('10_Zakelijk/Personeel/dossier.md') >= 0 && pv(o2).indexOf('10_Zakelijk/Bronnen/bron.md') < 0 && pv(o1).indexOf('10_Zakelijk/Bronnen/bron.md') >= 0 && !o2.j.vaste_plek, [pv(o1), pv(o2)]);
     const kj = JSON.parse(fs.readFileSync(path.join(W, 'staat10', 'kaart.json'), 'utf8'));
     toets('8b ctime en linkcache niet in kaart.json, de kaart (vers) of het antwoord', kj.bestanden.every((b) => !('c' in b) && !('doelen' in b)) && s10.vers(false).bestanden.every((b) => !('c' in b) && !('doelen' in b))
-      && [o1, o2, v1, v2].every((r) => r.j.knopen.every((k) => k.length === 5) && Object.keys(r.j).sort().join() === 'alles,bijgewerkt,domeinen,knopen,lijnen,ok,vaste_plek,verborgen_n'), kj.bestanden[0]);
+      && [o1, o2, v1, v2].every((r) => r.j.knopen.every((k) => k.length === 5) && Object.keys(r.j).sort().join() === 'alles,bijgewerkt,domeinen,knopen,lijnen,ok,verborgen_n'), kj.bestanden[0]);
   }
 
   // ── 8c. wv3003: linkcache op schijf, zodat de eerste bouw na een herstart niet alles opnieuw leest; even streng als in het geheugen ──
@@ -455,7 +455,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('9 invoerslot op vaste plek geldt (niet in APP_SLOT_VRIJ)', slotVrij.indexOf('secondbrain') < 0);
   toets('9 audit: reden met domein en h=, niet het pad', /res\._app\.reden = 'secondbrain ' \+ actie \+ \(au\.domein \? ' ' \+ au\.domein : ''\) \+ \(au\.h \? ' h=' \+ au\.h : ''\)/.test(src) && !/res\._app\.reden = [^\n]*d\.pad/.test(src));
   toets('9 GET /app/secondbrain valt op een vaste plek onder het invoerslot', src.indexOf("  if (route === 'GET /app/secondbrain') return true;") > src.indexOf('function appInvoerRoute('));
-  toets('9 vast doorgegeven aan de module', /secondbrain\.app\(route, d \|\| \{\}, \{ vast: appAfscherm\(a\) \}\)/.test(src));   // wv1901
+  toets('9 wv3446: geen vaste-plekvlag meer naar de module', /secondbrain\.app\(route, d \|\| \{\}, \{\}\)/.test(src) && !/appAfscherm/.test(src));
   toets('9 /health.secondbrain', /secondbrain: secondbrainInfo\(\),/.test(src));
   toets('9 Financiën verrijkt vóór de cache', /if \(typeof secondbrainFinPagina === 'function'\) secondbrainFinPagina\(d\);[^\n]*\n  appFinCache = /.test(src));
   toets('9 blokmarkers voor de UI-toets', src.indexOf('// ── Second Brain (wv832') > 0 && src.indexOf('// ── einde secondbrain') > src.indexOf('// ── Second Brain (wv832'));
@@ -467,9 +467,8 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const ctx = vm2.createContext({ require, process: { env: { SECONDBRAIN_DIR: path.join(W, 'sd'), CLOUDFLARE_API_TOKEN: 'proef' } }, __dirname: process.cwd(), path, fs, crypto: require('crypto'), console, setInterval: () => ({ unref() {} }),
     VAULT: V, logError: () => {}, vaultzoek: { zoekBrain: async () => [{ key: 'vault/index.md', text: 'x', score: 0.5 }] }, appBsnMasker: (t) => t, appPoortGeheim: () => 'proefgeheim', smalCf: async () => ({ status: 200, j: { result: { chunks: [{ item: { key: 'vault/index.md' }, text: 'x', score: 0.5 }] } } }),
     SMAL_CF_BASIS: 'x', SMAL_CF_ACCOUNT: 'y', appTeller: () => true, appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Date, Promise, JSON, String, Number, Array, Object, Math });
-  // wv1901: de schakelaar en appAfscherm uit server.js (staan buiten dit blok)
-  const afs = /^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0];
-  vm2.runInContext(afs + src.slice(hb, he) + ';globalThis.__sb = { secondbrain, appSecondBrain, secondbrainFinPagina };', ctx, { filename: 'server.js#secondbrain' });
+  // wv3446: geen afscherm-schakelaar meer buiten dit blok
+  vm2.runInContext(src.slice(hb, he) + ';globalThis.__sb = { secondbrain, appSecondBrain, secondbrainFinPagina };', ctx, { filename: 'server.js#secondbrain' });
   const res = { _app: {} };
   await ctx.__sb.appSecondBrain({}, res, { soort: 'meereizend' }, { pad: '10_Zakelijk/Tolgaarde/Verzekeringen.md' }, 'POST /app/secondbrain/open');
   toets('9 koppeling: open geeft 200 en reden zonder pad', gestuurd[0] && gestuurd[0].s === 200 && /^secondbrain open Tolgaarde h=[0-9a-f]{16}$/.test(res._app.reden), { g: gestuurd[0] && gestuurd[0].s, r: res._app.reden });

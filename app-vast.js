@@ -36,15 +36,12 @@ function uitBestand(j) {
   return { lijst: schoon(j.vast), standaard: false };
 }
 
-// Wat een apparaat te zien krijgt. Vaste plek: geen privé-App en geen subkaart (§ 2.3); de pod filtert vóór het uitleveren.
-function voorApparaat(lijst, vastePlek, prive) {
-  if (!vastePlek) return lijst.slice();
-  return lijst.filter(function (x) { return !x.focus && prive.indexOf(x.scherm) < 0; });
-}
+// wv3446: geen afscherming per apparaat meer (David 19-11-2026: "dat soort filtering doe je niet meer. NERGENS."); elk apparaat ziet en
+// wijzigt de hele lijst, de Apps-volgorde en de werkruimtes (de oude voorApparaat en de 403's voor een vaste plek zijn weg).
 
 // Eén wijziging. d = { actie: 'zet' | 'los', scherm, focus?, vervang?: { scherm, focus? } }.
 // Uitkomst { ok: true, lijst, veranderd } of { ok: false, status, fout, reden }.
-function pas(lijst, d, vastePlek) {
+function pas(lijst, d) {
   const actie = d && d.actie;
   if (actie !== 'zet' && actie !== 'los') return { ok: false, status: 400, fout: 'onbekende actie', reden: 'vast actie' };
   const r = regel(d);
@@ -56,7 +53,6 @@ function pas(lijst, d, vastePlek) {
     nieuw.splice(i, 1);
     return { ok: true, lijst: nieuw, veranderd: true };
   }
-  if (vastePlek) return { ok: false, status: 403, fout: 'Vastzetten doe je op je telefoon of een meereizend apparaat; hier zie je maar een deel van de lijst.', reden: 'vast zet vanaf vaste plek' };
   if (d.vervang !== undefined) {   // vóór "al zo" (Fable diff #2): na een race tussen twee apparaten kan r al (onzichtbaar) vast staan
     const v = regel(d.vervang);
     const j = v ? nieuw.findIndex(function (y) { return zelfde(y, v); }) : -1;
@@ -119,9 +115,8 @@ function strengeLijst(l, wat) {   // van de app: elk id moet bekend zijn, geen d
 }
 // Eén wijziging: d = { versie, volgorde, favorieten, sortering } (de hele stand). versie = de versie die de app had; is die intussen
 // veranderd (ander toestel), dan 409 met de stand van nu (de app neemt die over). Uitkomst { ok, stand, veranderd } of { ok: false, status, fout, reden }.
-function volgordePas(nu, d, vastePlek) {
+function volgordePas(nu, d) {
   if (!d || typeof d !== 'object' || Array.isArray(d)) return { ok: false, status: 400, fout: 'ongeldige vraag', reden: 'volgorde vorm' };
-  if (vastePlek) return { ok: false, status: 403, fout: 'Rangschikken doe je op je telefoon of een meereizend apparaat.', reden: 'volgorde vaste plek' };
   if (!Number.isSafeInteger(d.versie) || d.versie < 0) return { ok: false, status: 400, fout: 'versie ontbreekt', reden: 'volgorde versie vorm' };
   if (d.versie !== nu.versie) return { ok: false, status: 409, fout: 'de volgorde is intussen op een ander apparaat gewijzigd', reden: 'volgorde versie oud' };
   const v = strengeLijst(d.volgorde, 'volgorde'); if (v.fout) return { ok: false, status: 400, fout: v.fout, reden: v.reden };
@@ -134,9 +129,9 @@ function volgordePas(nu, d, vastePlek) {
 function naarBestand(stand, nuIso) {
   return { versie: stand.versie, bijgewerkt: nuIso, volgorde: stand.volgorde, favorieten: stand.favorieten, sortering: stand.sortering };
 }
-// Wat een apparaat ziet; vaste plek die afschermt: zonder privé-App (zoals vast.json)
-function volgordeVoorApparaat(stand, vastePlek, prive) {
-  const weg = function (l) { return vastePlek ? l.filter(function (x) { return prive.indexOf(x) < 0; }) : l.slice(); };
+// Wat een apparaat ziet (op elk apparaat hetzelfde)
+function volgordeVoorApparaat(stand) {
+  const weg = function (l) { return l.slice(); };
   return { versie: stand.versie, volgorde: weg(stand.volgorde), favorieten: weg(stand.favorieten), sortering: stand.sortering, standaard: !!stand.standaard };
 }
 
@@ -227,10 +222,9 @@ function werkruimtesUitBestand(j) {
   const v = Number(j && j.versie);
   return { versie: j ? (Number.isSafeInteger(v) && v > 0 ? v : 1) : 0, sets: sets };
 }
-// Eén wijziging: d = { versie, id, set } (set null = standaard terug). Andere versie = 409 (ander apparaat); vaste plek = 403.
-function werkruimtePas(nu, d, vastePlek) {
+// Eén wijziging: d = { versie, id, set } (set null = standaard terug). Andere versie = 409 (ander apparaat).
+function werkruimtePas(nu, d) {
   if (!d || typeof d !== 'object' || Array.isArray(d)) return { ok: false, status: 400, fout: 'ongeldige vraag', reden: 'werkruimte vorm' };
-  if (vastePlek) return { ok: false, status: 403, fout: 'Een werkruimte bewaren doe je op je telefoon of laptop.', reden: 'werkruimte vaste plek' };
   if (!Number.isSafeInteger(d.versie) || d.versie < 0) return { ok: false, status: 400, fout: 'versie ontbreekt', reden: 'werkruimte versie vorm' };
   if (d.versie !== nu.versie) return { ok: false, status: 409, fout: 'de werkruimtes zijn intussen op een ander apparaat gewijzigd', reden: 'werkruimte versie oud' };
   if (WERKRUIMTE_IDS.indexOf(d.id) < 0) return { ok: false, status: 400, fout: 'onbekende werkruimte', reden: 'werkruimte id' };
@@ -250,12 +244,12 @@ function werkruimtePas(nu, d, vastePlek) {
   return { ok: true, veranderd: true, stand: { versie: nu.versie + 1, sets: sets } };
 }
 function werkruimtesNaarBestand(stand, nuIso) { return { versie: stand.versie, bijgewerkt: nuIso, sets: stand.sets }; }
-// Wat een apparaat ziet; op een vaste plek zonder privé-App (zoals de Apps-volgorde); een indeling met minder dan twee over vervalt
-function werkruimtesVoorApparaat(stand, vastePlek, prive) {
+// Wat een apparaat ziet (op elk apparaat hetzelfde); een indeling met minder dan twee vervalt
+function werkruimtesVoorApparaat(stand) {
   const sets = {};
   Object.keys(stand.sets).forEach(function (id) {
     const s = stand.sets[id];
-    const weg = function (l) { return vastePlek ? l.filter(function (x) { return prive.indexOf(x) < 0; }) : l.slice(); };
+    const weg = function (l) { return l.slice(); };
     const tabs = weg(s.tabs);
     const naast = s.naast ? weg(s.naast) : null;
     sets[id] = { tabs: tabs, naast: naast && naast.length >= 2 ? naast : null };
@@ -263,7 +257,7 @@ function werkruimtesVoorApparaat(stand, vastePlek, prive) {
   return { versie: stand.versie, sets: sets, ids: WERKRUIMTE_IDS, max: WERKRUIMTE_MAX };
 }
 
-module.exports = { STANDAARD, MAX, regel, schoon, uitBestand, voorApparaat, pas,
+module.exports = { STANDAARD, MAX, regel, schoon, uitBestand, pas,
   APP_IDS, APP_VERVALLEN, VOLGORDE_MAX, SORTERINGEN, beginFavorieten, volgordeUitBestand, volgordePas, naarBestand, volgordeVoorApparaat,
   tellingUitBestand, telOpen, meest, TEL_DUBBEL_MS, MEEST_NA_DAGEN,
   WERKRUIMTE_IDS, WERKRUIMTE_PLEKKEN, WERKRUIMTE_MAX, werkruimtesUitBestand, werkruimtePas, werkruimtesNaarBestand, werkruimtesVoorApparaat };   // wv2929

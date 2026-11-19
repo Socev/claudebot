@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Toetst wv2929 (OVIS als besturingssysteem, fase 4: eigen werkruimtes): app-vast.js (werkruimtesUitBestand, werkruimtePas,
 # werkruimtesVoorApparaat) en de route appWerkruimtesRoute in server.js. Toetst: alleen vaste id's en bekende tabs, ≤ 8, naast 2–3 en ⊆ tabs,
-# versie (409), standaard terug (set null), op schijf alleen id's, kapot bestand = standaard, vaste plek die afschermt: lezen zonder privé, bewaren 403.
+# versie (409), standaard terug (set null), op schijf alleen id's, kapot bestand = standaard, wv3446: een vaste plek leest en bewaart zoals elk apparaat.
 # Gebruik: bash test/werkruimtes.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -42,17 +42,17 @@ r = L.werkruimtePas(nu1, { versie: 1, id: 'geld', set: null }, false);
 toets('6 standaard terug: set weg, versie 2', r.ok && r.veranderd && r.stand.versie === 2 && !r.stand.sets.geld, r);
 r = L.werkruimtePas(nu0, { versie: 0, id: 'geld', set: null }, false);
 toets('6b standaard terug zonder eigen set = niets veranderd', r.ok && !r.veranderd, r);
-r = L.werkruimtePas(nu1, { versie: 1, id: 'eigen', set: { tabs: ['pot'] } }, true);
-toets('7 vaste plek die afschermt: bewaren 403', !r.ok && r.status === 403, r);
-const v = L.werkruimtesVoorApparaat({ versie: 1, sets: { geld: { tabs: ['facturen', 'financien', 'pot'], naast: ['facturen', 'financien'] } } }, true, ['financien', 'gezondheid', 'memorylane']);
-toets('8 vaste plek die afschermt: privé-App uit de set, indeling < 2 vervalt', v.sets.geld.tabs.join() === 'facturen,pot' && v.sets.geld.naast === null, v);
+r = L.werkruimtePas(nu1, { versie: 1, id: 'eigen', set: { tabs: ['pot'] } });
+toets('7 wv3446: bewaren zonder apparaatonderscheid', r.ok && r.veranderd && L.werkruimtePas.length === 2, r);
+const v = L.werkruimtesVoorApparaat({ versie: 1, sets: { geld: { tabs: ['facturen', 'financien', 'pot'], naast: ['facturen', 'financien'] } } });
+toets('8 wv3446: privé-App blijft in de set, indeling blijft', v.sets.geld.tabs.join() === 'facturen,financien,pot' && v.sets.geld.naast.join() === 'facturen,financien', v);
 const v2 = L.werkruimtesVoorApparaat({ versie: 1, sets: { geld: { tabs: ['facturen', 'financien'], naast: ['facturen', 'financien'] } } }, false, ['financien']);
 toets('8b eigen apparaat: ongewijzigd', v2.sets.geld.tabs.join() === 'facturen,financien' && v2.sets.geld.naast.join() === 'facturen,financien', v2);
 
 // ── server.js: de route in een eigen context ──
 const src = fs.readFileSync('server.js', 'utf8');
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'werkruimtes-'));
-const p0 = src.indexOf('const APP_PRIVE_MODULES'), p1 = src.indexOf('\n', src.indexOf('function appPriveDicht', p0));
+const p0 = src.indexOf('const APP_PRIVE_MODULES'), p1 = src.indexOf('\n', p0);
 function lees(f, leeg) { let t; try { t = fs.readFileSync(f, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return leeg; throw e; } return JSON.parse(t); }
 let schrijfTel = 0, antw = [], flog = [];
 function schrijf(f, d) { schrijfTel++; fs.writeFileSync(f, JSON.stringify(d)); }
@@ -62,7 +62,7 @@ const ctx = { require: require, path: path, fs: { existsSync: () => true, rename
   appStuur: (res, st, o) => { res._app.status = st; antw.push({ st, o }); }, appWeiger: (res, st, f, reden) => { res._app.reden = reden; antw.push({ st, o: { ok: false, fout: f } }); } };
 vm.createContext(ctx);
 const knip = (van, tot) => { const i = src.indexOf(van), j = src.indexOf(tot, i); if (i < 0 || j < 0) throw new Error('niet gevonden: ' + van); return src.slice(i, j); };
-vm.runInContext(src.slice(p0, p1).replace(/APP_VAST_AFSCHERMEN && /, '') + '\nlet appVastMod = null;\n' + knip('function appVastModule()', 'function appVastRoute(') +
+vm.runInContext(src.slice(p0, p1) + '\nlet appVastMod = null;\n' + knip('function appVastModule()', 'function appVastRoute(') +
   knip('function appWerkruimtesRoute(', 'var appAppsLaatst') + '\nthis.R = appWerkruimtesRoute;', ctx);
 const res = () => ({ _app: {} });
 const A = { id: 'telefoon', soort: 'mee' }, B = { id: 'laptop', soort: 'mee' }, P = { id: 'pc', soort: 'vast' };
@@ -81,7 +81,7 @@ toets('22 oude versie → 409 met de stand van nu, niets geschreven', antw[0].st
 antw = [];
 ctx.R({ method: 'GET' }, res(), P, {});
 ctx.R({ method: 'POST' }, res(), P, { versie: 1, id: 'geld', set: { tabs: ['pot'] } });
-toets('23 vaste plek (afschermend): privé weg, indeling vervalt; bewaren 403', antw[0].o.sets.eigen.tabs.join() === 'facturen,intake' && antw[0].o.sets.eigen.naast === null && antw[0].o.vaste_plek === true && antw[1].st === 403 && schrijfTel === s0, antw);
+toets('23 wv3446: vaste plek ziet alles en bewaart (200, geschreven)', antw[0].o.sets.eigen.tabs.join() === 'facturen,gezondheid,intake' && antw[0].o.sets.eigen.naast.join() === 'facturen,gezondheid' && !antw[0].o.vaste_plek && antw[1].st === 200 && schrijfTel === s0 + 1, antw);
 fs.writeFileSync(ctx.APP_WERKRUIMTES, '{kapot');
 antw = []; flog = [];
 ctx.R({ method: 'GET' }, res(), A, {});

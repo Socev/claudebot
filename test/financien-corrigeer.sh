@@ -193,10 +193,10 @@ if (C) {
 }
 // server.js: routes, poort, grenzen
 const srv = fs.readFileSync('server.js', 'utf8');
-toets('server.js: de vier routes in de routetabel naar appFinCorrigeer, schrijfroutes in de glijroutes, achter appPriveDicht en appTeller',
+toets('server.js: de vier routes in de routetabel naar appFinCorrigeer, schrijfroutes in de glijroutes, zonder vaste-plekweigering (wv3446), achter appTeller',
   /\['POST \/app\/financien\/corrigeer', 'POST \/app\/financien\/herstel', 'POST \/app\/financien\/naam', 'POST \/app\/financien\/regels'\]\.indexOf\(route\) >= 0\) return appFinCorrigeer/.test(srv) &&
   /\['POST \/app\/financien\/corrigeer', 'POST \/app\/financien\/herstel', 'POST \/app\/financien\/naam'\]\.forEach\(function \(r\) \{ APP_GLIJD_ROUTES\.add\(r\)/.test(srv) &&
-  /async function appFinCorrigeer[\s\S]{0,300}appPriveDicht\(a, 'financien'\)/.test(srv) && /appTeller\('fin-corrigeer'/.test(srv) && /appTeller\('fin-naam'/.test(srv) && /appTeller\('fin-regels'/.test(srv), null);
+  /async function appFinCorrigeer\(/.test(srv) && !/appPriveDicht/.test(srv) && /appTeller\('fin-corrigeer'/.test(srv) && /appTeller\('fin-naam'/.test(srv) && /appTeller\('fin-regels'/.test(srv), null);
 toets('server.js: app-corrigeer in BANK_LOKAAL, niet in BANK_OPDRACHTEN (niet via /smal/bank)', /const BANK_LOKAAL = \[[^\]]*'app-corrigeer'/.test(srv) && !/const BANK_OPDRACHTEN = \[[^\]]*'app-corrigeer/.test(srv), null);
 const rel = fs.readFileSync('uitrol.sh', 'utf8'), dock = fs.readFileSync('Dockerfile', 'utf8'), fc = fs.readFileSync('financien-corrigeer.js', 'utf8');
 toets('release: financien-corrigeer.js in RELEASE_OPTIONEEL en de Dockerfile', /RELEASE_OPTIONEEL="[^"]*\bfinancien-corrigeer\.js\b/.test(rel) && /COPY financien-corrigeer\.js \/app\/release-bootstrap\/financien-corrigeer\.js/.test(dock), null);

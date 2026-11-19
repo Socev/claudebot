@@ -45,7 +45,7 @@ const hb = Object.assign(rap(null, NU - U), { bron: 'briefing', agent_job: undef
 const u2 = T.uit({ per: { hoofd: [h1, hb], machinekamer: [] }, klussen, staat: {}, tabs: {}, vraag, nu: NU });
 toets('2a hoofdkanaal: agentrapport-david wel, briefing niet', u2.punten.length === 1 && u2.punten[0].job_id === h1.job_id && u2.punten[0].kanaal === 'hoofd');
 const u2v = T.uit({ per: { hoofd: [h1], machinekamer: [r1] }, klussen, staat: {}, tabs: {}, vraag, vast: true, nu: NU });
-toets('2b vaste plek: niets uit het hoofdkanaal, machinekamer wel', u2v.punten.length === 1 && u2v.punten[0].kanaal === 'machinekamer');
+toets('2b wv3446: ook met de oude vaste-plekvlag hoofdkanaal en machinekamer', u2v.punten.length === 2 && u2v.punten.some((p) => p.kanaal === 'hoofd'));
 // ── 3. antwoorden op Davids eigen beurt ──
 const b1 = beurt('knop', NU - 2 * U, { bestanden: ['Proefplan.md'] }), b2 = beurt('bericht', NU - 3 * U), b3 = beurt('bericht', NU - U, { vraag_hash: 'abcd1234', antwoord: 'Klaar.\n\nVRAAG AAN DAVID: Zal ik het aanzetten?' });
 const b4 = beurt('telegram', NU - U), b5 = beurt('zoek', NU - U), b6 = beurt('bericht', NU - U, { antwoord: '' });
@@ -85,8 +85,8 @@ toets('6f bewaren: in de staat, en een eerder vinkje gaat eraf (weer te lezen)',
 const u6g = T.uit({ per: per1, klussen, staat: z.staat, tabs: {}, vraag, nu: NU });
 toets('6g een bewaarde eigen klus staat erin als bewaard', u6g.punten.some((p) => p.job_id === r3.job_id && p.soort === 'bewaard'));
 z = T.zet(z.staat, { job_id: r3.job_id, kanaal: 'machinekamer', actie: 'niet-bewaren' }, NU);
-toets('6g2 de lijst noemt de bewaarde ids (voor ★ in het gesprek); op een vaste plek niet die uit het hoofdkanaal', JSON.stringify(u6g.bewaard) === JSON.stringify([r3.job_id])
-  && JSON.stringify(T.uit({ per: {}, klussen, staat: { bewaard: { [r3.job_id]: { kanaal: 'hoofd', op: iso(NU) } } }, tabs: {}, vraag, vast: true, nu: NU }).bewaard) === '[]');
+toets('6g2 de lijst noemt de bewaarde ids (voor ★ in het gesprek); wv3446: ook met de oude vaste-plekvlag die uit het hoofdkanaal', JSON.stringify(u6g.bewaard) === JSON.stringify([r3.job_id])
+  && JSON.stringify(T.uit({ per: {}, klussen, staat: { bewaard: { [r3.job_id]: { kanaal: 'hoofd', op: iso(NU) } } }, tabs: {}, vraag, vast: true, nu: NU }).bewaard) === JSON.stringify([r3.job_id]));
 toets('6h niet meer bewaren', !z.fout && !z.staat.bewaard[r3.job_id]);
 toets('6i ongeldig: job, actie, gesprek', T.zet({}, { job_id: 'x', kanaal: 'machinekamer', actie: 'gezien' }, NU).fout === 'ongeldig bericht' && T.zet({}, { job_id: r1.job_id, kanaal: 'machinekamer', actie: 'wis' }, NU).fout === 'onbekende actie' && T.zet({}, { job_id: r1.job_id, kanaal: 'cijfer-meester', actie: 'gezien' }, NU).fout === 'onbekend gesprek');
 // ── 7. het getal ──
@@ -135,7 +135,7 @@ toets('10a route POST /app/te-lezen bestaat en glijdt (David die leest), niet in
 toets('10b te_lezen alleen in /app/voor-jou/kanaal, en de t:-sleutels gaan mee in gezien', /teLezen\.punten\.forEach\(function \(p\) \{ sleutels\.push\(p\.sleutel\); \}\)/.test(S) && /te_lezen: teLezen/.test(S));
 toets('10c te-lezen.js staat in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bte-lezen\.js\b/.test(UR));
 toets('10d module laadt geen netwerk-, proces- of bestandsmodule', !/require\(/.test(fs.readFileSync('te-lezen.js', 'utf8').replace(/^\s*\/\/.*$/gm, '')));
-toets('10e vaste plek: hoofdkanaal geweigerd in de route', /appAfscherm\(a\) && kanaal === 'hoofd'\) return appWeiger\(res, 403/.test(S));
+toets('10e wv3446: hoofdkanaal niet meer geweigerd per apparaat', !/te-lezen vast hoofd/.test(S) && !/appAfscherm/.test(S));
 console.log(`\nte-lezen: ${goed} groen, ${fouten} rood`);
 process.exit(fouten ? 1 : 0);
 JS

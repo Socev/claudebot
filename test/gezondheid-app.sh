@@ -174,9 +174,8 @@ const srv = http.createServer(function (req, res) {
   toets('uitrol.sh: gezondheid-app.js optioneel in de release', /RELEASE_OPTIONEEL="[^"]*\bgezondheid-app\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
   toets('Dockerfile: gezondheid-app.js in release-bootstrap', /COPY gezondheid-app\.js \/app\/release-bootstrap\/gezondheid-app\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
   const a0 = src.indexOf('let appGezMod;'), b0 = src.indexOf('// ── wv787: POT-afschriften', a0);
-  // wv1051 bracht appPriveDicht + APP_PRIVE_MODULES buiten dit blok; de echte regels meenemen (CI 274/275 rood op ReferenceError)
-  const prive = (src.match(/^const APP_PRIVE_MODULES = [^\n]*/m) || [''])[0] + '\n' + (src.match(/^const APP_VAST_AFSCHERMEN = [^\n]*/m) || [''])[0] + '\n' +
-    (src.match(/^function appAfscherm\(a\) \{[\s\S]*?\n\}/m) || [''])[0] + '\n' + (src.match(/^function appPriveDicht\([^\n]*/m) || [''])[0] + '\n';   // wv1901
+  // wv1051 bracht APP_PRIVE_MODULES buiten dit blok; de echte regel meenemen (CI 274/275 rood op ReferenceError). wv3446: afscherm-schakelaar weg
+  const prive = (src.match(/^const APP_PRIVE_MODULES = [^\n]*/m) || [''])[0] + '\n';
   const blok = prive + src.slice(a0, b0) + '\nthis.appGezondheid = appGezondheid; this.gezondheidInfo = gezondheidInfo;';
   let antw = [];
   let nep = { aanroepen: 0, volgende: null };

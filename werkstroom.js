@@ -21,7 +21,6 @@ const STAPPEN = ['binnen', 'besluit', 'twijfel', 'intake', 'facturen', 'verkoop'
 // Verkoop: open fasen die bij David liggen (de rest van open wacht op MailMan zelf: pdf-toets, doorsturen, archiveren)
 const VK_DAVID = ['zelf', 'blijft', 'onzeker', 'geweigerd', 'mislukt', 'archief_mislukt'];
 const MAX = 200;
-const PRIVE = 'gmail:david';   // afgeschermd op een vaste plek die afschermt (appAfscherm; sinds wv1901 uit)
 
 // Eén journaalrij van verkoopTab → alleen wat de werkstroom mag tonen (allowlist; nieuwe velden in mailman.js gaan nooit vanzelf mee)
 function verkoopRij(r) {
@@ -64,9 +63,8 @@ function maak(o) {
   const fac = function (pad, opt) { if (!o.facturen) throw new Error('Facturen niet geladen'); const r = o.facturen(pad, opt || {}); if (!r || r.status !== 200) throw new Error('facturen ' + (r && r.status)); return r.j; };
 
   async function tellers(opt) {
-    const af = !!(opt && opt.afscherm);
     const [m, i, f, v] = await Promise.all([
-      bron('mailman', function () { return { pv: mm().werkstroomTel().filter(function (p) { return !(af && p.id === PRIVE); }) }; }),
+      bron('mailman', function () { return { pv: mm().werkstroomTel() }; }),
       bron('intake', function () { return ir().werkstroomTel(); }),
       bron('facturen', function () { return fac('/app/facturen', opt).tellers || {}; }),
       bron('verkoop', vk),
@@ -89,13 +87,12 @@ function maak(o) {
   // Lijst van één stap: { regels: [{ sleutel, bron, tijd, postvak, mm | stuk | factuur }], mailman?, intake?, fouten }
   async function lijst(stap, pvSleutel, opt) {
     if (STAPPEN.indexOf(stap) < 0) return null;
-    const af = !!(opt && opt.afscherm);
     const wilMm = stap === 'binnen' || stap === 'besluit' || stap === 'twijfel' || stap === 'verwerkt';
     const wilIk = stap === 'binnen' || stap === 'intake' || stap === 'verwerkt';
     const pvVan = function (bronId) { return !pvSleutel || sleutelVan(bronId) === pvSleutel; };
     const [m, i, f, v] = await Promise.all([
       wilMm ? bron('mailman', function () {
-        const pvs = mm().werkstroomTel().map(function (p) { return p.id; }).filter(function (id) { return pvVan(id) && !(af && id === PRIVE); });
+        const pvs = mm().werkstroomTel().map(function (p) { return p.id; }).filter(function (id) { return pvVan(id); });
         if (!pvs.length) return { rijen: [], postvakken: [] };
         const uit = { rijen: [], postvakken: [], afgekapt: false };
         for (const id of pvs) {   // per postvak (werkstroomLijst kent één of alle); hooguit twee postvakken
@@ -116,7 +113,7 @@ function maak(o) {
     if (m && m.fout) fouten.push('mailman');
     else if (m) regels = regels.concat(m.rijen.map(function (r) { return { sleutel: 'mm-' + r.id, bron: 'mailman', postvak: r.postvak, tijd: r.ontvangen || r.tijd, mm: r }; }));
     if (i && i.fout) fouten.push('intake');
-    else if (i) regels = regels.concat(i.stukken.slice(0, MAX).filter(function (s) { return pvVan(s.bron) && !(af && s.bron === PRIVE); })
+    else if (i) regels = regels.concat(i.stukken.slice(0, MAX).filter(function (s) { return pvVan(s.bron); })
       .map(function (s) { return { sleutel: 'ik-' + s.stuk_id, bron: 'intake', postvak: s.bron, tijd: s.op, stuk: s }; }));
     if (f && f.fout) fouten.push('facturen');
     else if (f) regels = regels.concat((f.facturen || []).map(function (x) { return { sleutel: 'fac-' + x.id, bron: 'facturen', postvak: null, tijd: x.aangemaakt_op || null, factuur: x }; }));

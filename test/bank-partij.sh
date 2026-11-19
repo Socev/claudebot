@@ -108,7 +108,7 @@ const T = BE.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facture
 (async () => {
   const d = await T.detail('org:ah', false);
   toets('5 detail: weet.bank met beide kanten', d.status === 200 && d.j.weet.bank && d.j.weet.bank.zakelijk.posten === 2 && d.j.weet.bank.prive.posten === 2, d.j.weet.bank);
-  toets('5b vaste plek: geen blok', (await T.detail('org:ah', true)).j.weet.bank === null);
+  toets('5b wv3446: ook met een (oude) vaste-plekvlag het blok', (await T.detail('org:ah', true)).j.weet.bank !== null);
   toets('5c eigen entiteit: geen blok', (await T.detail('VB', false)).j.weet.bank === null);
   const T2 = BE.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturenPad: fpad, bankPad: bpad, bankPartij: null });
   toets('5d module weg (terugrol): geen blok, detail blijft', (await T2.detail('org:ah', false)).j.weet.bank === null && (await T2.detail('org:ah', false)).status === 200);

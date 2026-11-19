@@ -206,7 +206,7 @@ const wacht = () => new Promise((r) => setImmediate(r));
     toets('8 hartslag op tijd / te laat / nog nooit', c.hartslag === 'op tijd' && d.hartslag === 'te laat' && ds.hartslag === 'nog nooit', k.map((x) => x.hartslag));
     toets('8 CISO: top met detail op de telefoon, kan draaien, rooster', c.bevindingen.top.length === 1 && c.bevindingen.top[0].detail === 'pad /opt/data/x' && c.kan === true && c.rooster === 'elke maandag 06:00', c);
     k = m.stand(sb, { vast: true });
-    toets('8 vaste plek: geen detail, CISO alleen aantallen', k.find((x) => x.id === 'ciso').bevindingen.top.length === 0 && k.find((x) => x.id === 'ciso').bevindingen.aantal === 2 && k.every((x) => x.bevindingen.top.every((b) => b.detail === '')));
+    toets('8 wv3446: ook met de oude vaste-plekvlag detail en CISO-top (geen afscherming)', JSON.stringify(k.map((x) => x.bevindingen)) === JSON.stringify(m.stand(sb).map((x) => x.bevindingen)) && k.find((x) => x.id === 'ciso').bevindingen.top.length > 0);
     toets('8 databank onleesbaar → kaarten zonder bevindingen, hartslag onbekend', m.stand(null, {}).every((x) => x.bevindingen === null && x.hartslag === 'onbekend'));
     await m.start('data', 'david');
     k = m.stand(sb, {});

@@ -34,8 +34,6 @@ function entiteitCode(x) {
   if (Object.prototype.hasOwnProperty.call(ENTITEIT_ALIAS, s)) s = ENTITEIT_ALIAS[s];
   return ENTITEITEN.has(s) ? s : 'onbekend';
 }
-// op een vaste plek (werk-pc) geen privé en geen schaduwtellingen van WhatsApp en Signal (review #6)
-function priveBron(id) { return /^intake:(whatsapp|signal)/.test(id); }
 
 // raw_input-mappen → entiteit (alleen de mapnaam, nooit wat erin staat)
 function rawMappen(vault) {
@@ -168,9 +166,10 @@ function maak(o) {
     return { t, vandaag, week_van: weekVan, bronnen: [...bronnen.values()] };
   }
 
-  function vorm(m, vastePlek) {
-    const bronnen = m.bronnen.filter((b) => !(vastePlek && priveBron(b.id))).map((b) => {
-      const entiteiten = [...b.ent.entries()].filter(([e]) => !(vastePlek && e === 'prive'))
+  // wv3446: op elk apparaat alle bronnen, ook Privé, WhatsApp en Signal (geen afscherming per apparaat meer)
+  function vorm(m) {
+    const bronnen = m.bronnen.map((b) => {
+      const entiteiten = [...b.ent.entries()]
         .map(([entiteit, r]) => ({ entiteit, vandaag: r.vandaag, week: r.week, ...(b.id === 'raw_input' ? { wachtend: r.wachtend } : {}) }))
         .filter((r) => r.week > 0 || r.vandaag > 0 || r.wachtend > 0)
         .sort((x, y) => y.week - x.week || (y.wachtend || 0) - (x.wachtend || 0) || x.entiteit.localeCompare(y.entiteit));
@@ -182,16 +181,16 @@ function maak(o) {
       if (b.afgekapt) uit.afgekapt = true;
       return uit;
     });
-    return { ok: true, gemeten_op: new Date(m.t).toISOString(), vandaag: m.vandaag, week_van: m.week_van, vaste_plek: !!vastePlek, bronnen };
+    return { ok: true, gemeten_op: new Date(m.t).toISOString(), vandaag: m.vandaag, week_van: m.week_van, vaste_plek: false, bronnen };
   }
 
-  async function telling(vastePlek) {
+  async function telling() {
     if (!cache || nu() - cache.t > CACHE_MS) {
       const c = { t: nu(), p: meet() };
       cache = c;
       c.p.catch(() => { if (cache === c) cache = null; });
     }
-    return vorm(await cache.p, vastePlek);
+    return vorm(await cache.p);
   }
   return { telling, _meet: meet, _vorm: vorm };
 }

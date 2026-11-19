@@ -15,7 +15,7 @@ fi
 echo "GROEN CI-poort: mailvoorwerk.js alleen lokaal"
 f=0
 grep -q "route === 'POST /app/mail/voorwerk' || route === 'POST /app/mail/voorwerk/maak' || route === 'POST /app/mail/voorwerk/gmail') return typeof appMailVoorwerk" server.js || { echo "ROOD  server.js: voorwerkroutes niet gekoppeld"; f=1; }
-grep -q "if (appAfscherm(a)) return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'voorwerk afgeschermd');" server.js || { echo "ROOD  server.js: voorwerk toont privépost op een afgeschermd apparaat"; f=1; }
+! grep -q "'voorwerk afgeschermd'" server.js || { echo "ROOD  server.js: voorwerk schermt privépost nog af (wv3446: weg)"; f=1; }
 grep -q "if (!b || b.postvak !== 'gmail:david') return null;" server.js || { echo "ROOD  server.js: voorwerk leest niet alleen privé via mailBron"; f=1; }
 grep -q "claude: harvesterClaude," server.js || { echo "ROOD  server.js: voorwerk niet via de modelaanroep zonder tools"; f=1; }
 grep -q "if (rolPrimair()) mailVoorwerk.tik()" server.js || { echo "ROOD  server.js: tik niet alleen op de actieve kant"; f=1; }

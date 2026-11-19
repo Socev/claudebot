@@ -91,8 +91,9 @@ toets('4j2 nachtwachters in een eigen sessie, niet hoofd', ['actie-bewaker', 'ag
   return w && w.sessie === sk;
 }), W.WERKERS.filter((x) => /wachter|bewaker/.test(x.skill || '')).map((x) => x.skill + '=' + x.sessie));
 const sv = W.stand({ workflows: live, hartslag: hs, nu: NU, vast: true });
-toets('4k vaste plek: geen sessie, skill, bron, uitkomst of id', [].concat(...W.SOORTEN.map((s) => sv.groepen[s])).every((x) => !('sessie' in x) && !('skill' in x) && !('bron' in x) && x.uitkomst === '' && x.n8n === null));
-toets('4k2 vaste plek: check zonder namen of id\'s, wel de aantallen', sv.check.ontbreekt.length === 1 && sv.check.ontbreekt[0].naam === '' && sv.check.ontbreekt[0].id === '' && sv.check.hartslag_zonder_werker[0] === '' && sv.check.n8n_actief === live.length);
+const sz = W.stand({ workflows: live, hartslag: hs, nu: NU });
+toets('4k wv3446: ook met de oude vaste-plekvlag sessie, skill, bron, uitkomst en id (zelfde uitvoer)', JSON.stringify(sv) === JSON.stringify(sz) && [].concat(...W.SOORTEN.map((s) => sv.groepen[s])).every((x) => 'sessie' in x && 'skill' in x && 'bron' in x));
+toets('4k2 wv3446: check met namen en id\'s', sv.check.ontbreekt.length === 1 && sv.check.ontbreekt[0].naam !== '' && sv.check.ontbreekt[0].id !== '' && sv.check.n8n_actief === live.length);
 const sw = W.stand({ workflows: { data: [] }, hartslag: { rijen: [] }, nu: NU });
 toets('4k3 vreemde vorm (geen lijst) = niet gemeten, niet "alles uit" of "nooit"', [].concat(...W.SOORTEN.map((s) => sw.groepen[s])).every((x) => x.status !== 'uit' && x.status !== 'nog nooit') && sw.check.n8n_actief === null && sw.fout.n8n && sw.fout.hartslag);
 const sf = W.stand({ workflows: null, hartslag: null, nu: NU });
@@ -124,7 +125,7 @@ toets('6d2 één lezing tegelijk (gedeelde promise), vreemde vorm = fout', /werk
 const wsrc = fs.readFileSync('werkers.js', 'utf8');
 toets('6j CLI schrijft alleen via vault-veilig.js uit de release', /require\(path\.join\(__dirname, 'vault-veilig\.js'\)\)/.test(wsrc) && !/writeFileSync\(tmp/.test(wsrc) && !/mk-scripts\/veilig/.test(wsrc));
 toets('6k CLI: hartslag via mk_hartslag_stand (één definitie)', /from public\.mk_hartslag_stand\(\)/.test(wsrc));
-toets('6e vaste plek en schakelaars doorgegeven', /WERKERS_MOD\.stand\(\{ workflows: wf, hartslag: hs, schakelaars: sk, vast: appAfscherm\(a\) \}\)/.test(s));   // wv1901
+toets('6e schakelaars doorgegeven, geen vaste-plekvlag meer (wv3446)', /WERKERS_MOD\.stand\(\{ workflows: wf, hartslag: hs, schakelaars: sk \}\)/.test(s));
 toets('6f stil in het auditlog', /appWerkers[\s\S]{0,1600}res\._app\.stil = true/.test(s));
 const u = fs.readFileSync('uitrol.sh', 'utf8');
 toets('6g RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bwerkers\.js\b/.test(u));
@@ -150,8 +151,8 @@ const ku = a7.find((x) => x.id === uitzetbaar.id), kn = a7.find((x) => x.id === 
 toets('7h kaart: uit door David, knop aan', ku.status === 'uit door David' && JSON.stringify(ku.kan) === '["aan"]' && ku.schakelaar.stand === 'uit', ku);
 toets('7i kaart: verlopen pauze zichtbaar', kn.status === 'pauze voorbij, nog uit' && JSON.stringify(kn.kan) === '["aan"]', kn);
 toets('7j check: uit door David is geen bevinding, verlopen pauze wel', !s7.check.niet_actief.some((x) => x.id === uitzetbaar.n8n) && s7.check.niet_actief.some((x) => x.id === nietUit.n8n));
-toets('7k knoppen: uitzetbaar uit, anders pauze, pod-werker en vaste plek geen', a7.find((x) => x.n8n && x.id !== uitzetbaar.id && x.uitzetbaar && x.actief).kan[0] === 'uit' &&
-  a7.find((x) => x.id === pod.id).kan.length === 0 && [].concat(...W.SOORTEN.map((x) => W.stand({ workflows: live7, hartslag: hs, schakelaars: rij, nu: NU, vast: true }).groepen[x])).every((x) => x.kan.length === 0));
+toets('7k knoppen: uitzetbaar uit, anders pauze, pod-werker geen; wv3446: de oude vaste-plekvlag verandert niets', a7.find((x) => x.n8n && x.id !== uitzetbaar.id && x.uitzetbaar && x.actief).kan[0] === 'uit' &&
+  a7.find((x) => x.id === pod.id).kan.length === 0 && [].concat(...W.SOORTEN.map((x) => W.stand({ workflows: live7, hartslag: hs, schakelaars: rij, nu: NU, vast: true }).groepen[x])).some((x) => x.kan.length > 0));
 const s7z = W.stand({ workflows: live.concat([{ id: uitzetbaar.n8n, name: 'x', active: true, nodes: [] }]), hartslag: hs, schakelaars: [{ werker: uitzetbaar.id, stand: 'uit', geldig: true }], nu: NU });
 const kz = [].concat(...W.SOORTEN.map((x) => s7z.groepen[x])).find((x) => x.id === uitzetbaar.id);
 toets('7q uit-rij maar n8n actief: rij telt niet (Opus Z2)', kz.status !== 'uit door David' && kz.schakelaar === null && JSON.stringify(kz.kan) === '["uit"]', kz);

@@ -95,8 +95,8 @@ toets('5a dagen met klussen, nieuwste eerst, alleen *-pod.jsonl', s.dagen.join()
 toets('5b tank doorgegeven', s.tank && s.tank.account1.vijf_uur === 0.5, s.tank);
 // 6 vaste plek
 const sv = tt.stand({ vast: true });
-toets('6a vaste plek: geen kluslabels', sv.vaste_plek === true && sv.duurste.every(function (x) { return x.label === null; }), sv.duurste[1]);
-toets('6b vaste plek: geen onderdeel bij gesprekken', sv.duurste[0].onderdeel === null && sv.duurste[1].onderdeel === 'werkvoorraad-agent', sv.duurste.slice(0, 2));
+toets('6a wv3446: ook met de oude vaste-plekvlag dezelfde duurste klussen (labels zoals overal)', sv.vaste_plek === false && JSON.stringify(sv.duurste) === JSON.stringify(tt.stand({}).duurste), sv.duurste[1]);
+toets('6b wv3446: onderdeel ook bij gesprekken', sv.duurste[1].onderdeel === 'werkvoorraad-agent' && sv.duurste.some(function (x) { return /^gesprek-/.test(x.soort) && x.onderdeel; }), sv.duurste.slice(0, 2));
 toets('6c vaste plek: wv en bedragen wel', sv.duurste[1].wv === 'wv901' && sv.duurste[1].eur === 23.2, sv.duurste[1]);
 // 7 dag
 const d = tt.dag('2030-01-02', {});
@@ -111,7 +111,7 @@ toets('7g account 2 en begin', d.klussen[0].account === 2 && d.klussen[0].begin 
 toets('7h ongeldige datum = null', tt.dag('../../x', {}) === null && tt.dag('2030-1-2', {}) === null);
 toets('7i dag zonder bestand = leeg', tt.dag('2030-02-01', {}).leeg === true);
 toets('7j lege dag = 0 klussen', tt.dag('2030-01-01', {}).aantal === 0);
-toets('7k vaste plek dag: geen label', tt.dag('2030-01-02', { vast: true }).klussen[0].label === null);
+toets('7k wv3446: dag met de oude vaste-plekvlag = zonder', JSON.stringify(tt.dag('2030-01-02', { vast: true }).klussen) === JSON.stringify(tt.dag('2030-01-02', {}).klussen));
 // 8 symlink en grootte
 const W = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tokens-l-')));
 fs.mkdirSync(path.join(W, '00_Systeem', 'Tokens', 'klussen'), { recursive: true });
@@ -207,7 +207,7 @@ const b = src.slice(src.indexOf('// ── TokenCounter (wv1742'), src.indexOf('
 toets('10b zonder module 404', /if \(!tokenteller\) return appWeiger\(res, 404/.test(b));
 toets('10c teller tokens', /appTeller\('tokens', 600, 3600000\)/.test(b));
 toets('10d stil bij 200', /res\._app\.stil = true;\s*return appStuur\(res, 200, uit\)/.test(b));
-toets('10e vaste plek doorgegeven (wv1901: via appAfscherm)', /const vast = appAfscherm\(a\)/.test(b) && /stand\(\{ vast: vast/.test(b) && /dag\(m\[1\], \{ vast: vast \}\)/.test(b));
+toets('10e wv3446: geen vaste-plekvlag meer', !/appAfscherm|vast: vast/.test(b) && /tokenteller\.stand\(\{ tank:/.test(b) && /dag\(m\[1\], \{\}\)/.test(b));
 toets('10f vault-veilig doorgegeven', /vv: VV\(\)/.test(b));
 toets('10l tank: één lopende lezing gedeeld', /if \(tokentellerTankBezig\) return tokentellerTankBezig;/.test(b));
 toets('10g /health.tokenteller', /tokenteller: typeof tokenteller !== 'undefined' && !!tokenteller/.test(src));

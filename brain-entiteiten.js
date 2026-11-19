@@ -20,7 +20,6 @@ const crypto = require('crypto');
 const CACHE_MS = 60000;
 const PAGINA_RE = /^(10_Zakelijk|20_Prive)\/(?:[^/\0]+\/)*[^/\0]+\.md$/;
 const IBAN_IN_TEKST = /\b[A-Z]{2}[0-9]{2}(?:[\s.\-\u00a0]?[A-Z0-9]{4}){2,7}(?:[\s.\-\u00a0]?[A-Z0-9]{1,4})?\b/gi;   // diffreview ZOU 6: ook kleine letters, punt, streep
-const BLOK_RE = /<!-- ovis:blok begin[^>]*-->[\s\S]*?<!-- ovis:blok eind -->\n?/g;
 const MAX_TEKST = 60000;
 const GOOGLE_RE = /^people\/c[0-9]{1,30}$/;
 // "+31 6 1234 5678" → "0612345678"; buitenland "+220 …" → "00220…" (zelfde normaalvorm als het register)
@@ -51,19 +50,16 @@ function priveKant(k) {
   return String(k.vault_pagina || '').indexOf('20_Prive/') === 0 || String(k.vault_pad || '').indexOf('20_Prive/') === 0 || k.id === 'PRIVE' ||
     (voor.length > 0 && voor.every(function (c) { return c === 'PRIVE'; }));
 }
-// wv1930: elke actieve knoop is zichtbaar. Alleen met de schakelaar voor een vaste plek aan (wv1901) daar alleen organisaties aan de
-// zakelijke kant.
-function zichtbaar(k, vast) {
-  if (!k || k.actief === false) return false;
-  if (vast && (isPersoon(k) || priveKant(k))) return false;
-  return true;
+// wv1930: elke actieve knoop is zichtbaar, op elk apparaat (de vaste-plektak van wv1901 is weg sinds wv3446).
+function zichtbaar(k) {
+  return !!k && k.actief !== false;
 }
 function groepVan(k) { return isPersoon(k) ? 'persoon' : (GROEP[k.rol] || (isEigen(k) ? 'eigen' : 'leverancier')); }
 function norm(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
 // Woorden voor naamvergelijking: zonder accenten, kleine letters, alles wat geen letter of cijfer is een spatie ("K. Verzonnen" → "k verzonnen")
 function woorden(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
 function ibanNorm(x) { return String(x || '').replace(/[\s.\- ]/g, '').toUpperCase(); }
-// Alleen met de vaste-plekschakelaar aan: het eigen rekeningnummer van een eigen entiteit blijft staan, elk ander wordt gemaskeerd
+// Het eigen rekeningnummer van een eigen entiteit blijft staan, elk ander wordt gemaskeerd (alleen nog voor de schrijfwijzen in bankVan)
 function maskeerIban(t, eigen) {
   return String(t).replace(IBAN_IN_TEKST, function (m) {
     const n = ibanNorm(m);
@@ -98,16 +94,14 @@ function fmAliassen(fm) {
 }
 
 // Pagina: frontmatter eraf (de stamgegevens komen uit het register), de markeringen van het gegenereerde blok eraf (de inhoud blijft,
-// wv1930), wikilinks als gewone tekst, het sleutelmasker erover. Alleen met de vaste-plekschakelaar aan: het blok helemaal weg en elk
-// IBAN gemaskeerd behalve het eigen nummer van een eigen entiteit (opties.eigenIban).
+// wv1930), wikilinks als gewone tekst, het sleutelmasker erover. Geen IBAN-masker en geen weggelaten blok meer (vaste-plektak weg, wv3446).
 function paginaTekst(ruw, opties) {
-  const o = opties && typeof opties === 'object' ? opties : { vast: true, eigenIban: opties || null };   // oude aanroep (ruw, eigenIban)
+  const o = opties && typeof opties === 'object' ? opties : {};
   const masker = typeof o.masker === 'function' ? o.masker : geenMasker;
   let t = String(ruw).replace(/\r\n?/g, '\n');
   if (t.indexOf('---\n') === 0) { const e = t.indexOf('\n---', 4); if (e > 0) t = t.slice(t.indexOf('\n', e + 1) + 1 || t.length); }
-  t = o.vast ? t.replace(BLOK_RE, '') : t.replace(/<!-- ovis:blok (?:begin|eind)[^>]*-->\n?/g, '');
+  t = t.replace(/<!-- ovis:blok (?:begin|eind)[^>]*-->\n?/g, '');
   t = t.replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2').replace(/\[\[([^\]]+)\]\]/g, function (m, p) { return String(p).split('/').pop().replace(/\.md$/, ''); });
-  if (o.vast) t = maskeerIban(t, o.eigenIban || null);
   t = masker(t);
   t = t.replace(/\n{3,}/g, '\n\n').trim();
   return t.length > MAX_TEKST ? t.slice(0, MAX_TEKST) + '\n\n…' : t;
@@ -353,30 +347,27 @@ function maak(o) {
     return { stukken: uit.slice(0, DOSSIER_MAX).map(function (x) { return { pad: x.pad, titel: x.titel, ext: x.ext, soort: x.soort, datum: x.datum }; }), totaal: uit.length };
   }
 
-  async function lijst(vast) {
+  async function lijst() {
     const reg = await register();
-    const uit = reg.knopen.filter(function (k) { return zichtbaar(k, vast); }).map(function (k) {
+    const uit = reg.knopen.filter(function (k) { return zichtbaar(k); }).map(function (k) {
       return { id: k.id, sleutel: sleutelVan(k.id), naam: masker(k.naam), groep: groepVan(k), rol: ROL_WOORD[k.rol] || k.rol || null, concept: !!k.concept,
-        voor: Array.isArray(k.voor) ? k.voor.filter(function (c) { return !(vast && c === 'PRIVE'); }) : [],
+        voor: Array.isArray(k.voor) ? k.voor.slice() : [],
         aliassen: (k.aliassen || []).slice(0, 5).map(masker), prive: priveKant(k), pagina: !!k.vault_pagina, handvatten: (reg.handvatten[k.id] || []).length, register: true };
     });
-    let stamboom = 0, priveFout = null;
-    if (!vast) {
-      const pv = prive();
-      const metKnoop = new Set(reg.knopen.filter(function (k) { return k.actief !== false; }).map(function (k) { return String(k.vault_pagina || ''); }));   // review ZOU 7
-      pv.personen.forEach(function (x) { if (!metKnoop.has(x.pad)) uit.push(priveRegel(x)); });
-      stamboom = pv.stamboom.length; priveFout = pv.fout;
-    }
+    const pv = prive();
+    const metKnoop = new Set(reg.knopen.filter(function (k) { return k.actief !== false; }).map(function (k) { return String(k.vault_pagina || ''); }));   // review ZOU 7
+    pv.personen.forEach(function (x) { if (!metKnoop.has(x.pad)) uit.push(priveRegel(x)); });
+    const stamboom = pv.stamboom.length, priveFout = pv.fout;
     uit.sort(function (a, b) { return (a.groep === 'eigen' ? 0 : 1) - (b.groep === 'eigen' ? 0 : 1) || a.naam.localeCompare(b.naam, 'nl'); });
     const groepen = {};
     uit.forEach(function (k) { groepen[k.groep] = (groepen[k.groep] || 0) + 1; });
-    return { ok: true, vaste_plek: !!vast, knopen: uit, groepen: groepen, totaal: uit.length, stamboom: stamboom, prive_fout: priveFout, gemeten_op: new Date(nu()).toISOString() };
+    return { ok: true, vaste_plek: false, knopen: uit, groepen: groepen, totaal: uit.length, stamboom: stamboom, prive_fout: priveFout, gemeten_op: new Date(nu()).toISOString() };
   }
 
   // Zoeken in de stamboom (wv1930): q = woorden zonder accenten (de app stuurt a-z, 0-9 en -), ten minste 2 tekens; treffers op naam
-  async function zoek(q, vast) {
+  async function zoek(q) {
     const w = woorden(String(q || '').replace(/-/g, ' '));
-    if (vast || w.replace(/ /g, '').length < 2) return { ok: true, q: w, knopen: [], totaal: 0 };
+    if (w.replace(/ /g, '').length < 2) return { ok: true, q: w, knopen: [], totaal: 0 };
     const pv = prive();
     const hit = pv.stamboom.filter(function (x) { return woorden(x.naam).indexOf(w) >= 0 || norm(x.naam).indexOf(w.replace(/ /g, '')) >= 0; })
       .sort(function (a, b) { return a.naam.localeCompare(b.naam, 'nl'); });
@@ -386,8 +377,8 @@ function maak(o) {
   // wv2077 (David 31-10: "als ik een naam of entiteit zoek, moet de Entiteitspagina bovenaan staan"): voor Brain › Zoeken de partijen
   // waarvan de naam, een alias (register, handvat of pagina) of de paginanaam past, met hun vaultpad. Alleen hele woorden of het begin van
   // een woord ("Abel" past niet in "Allekabels"). sterk: 0 = precies de naam, 1 = alle woorden als heel woord, 2 = begin van een woord.
-  // Zelfde grens als de lijst (zichtbaar, privé alleen zonder vaste plek); secondbrain.js toetst elk pad daarna nog aan de kaart.
-  async function naamTreffers(q, vast) {
+  // Zelfde grens als de lijst (zichtbaar); secondbrain.js toetst elk pad daarna nog aan de kaart.
+  async function naamTreffers(q) {
     const qw = woorden(q);
     const qs = qw ? qw.split(' ') : [];
     if (qw.replace(/ /g, '').length < 2) return [];
@@ -409,12 +400,12 @@ function maak(o) {
     try { reg = await register(); } catch (e) { reg = null; }
     if (reg) reg.knopen.forEach(function (k) {
       const rel = String(k.vault_pagina || '');
-      if (k.actief === false || !zichtbaar(k, vast) || !PAGINA_RE.test(rel) || rel.split('/').indexOf('..') >= 0) return;
+      if (k.actief === false || !zichtbaar(k) || !PAGINA_RE.test(rel) || rel.split('/').indexOf('..') >= 0) return;
       const namen = [k.naam, stam(rel)].concat(k.aliassen || []).concat((reg.handvatten[k.id] || []).filter(function (h) { return h.soort === 'alias'; }).map(function (h) { return h.waarde; }));
       const s = sterkVan(namen);
       if (s < 9) uit.push({ pad: rel, naam: masker(k.naam), soort: ROL_WOORD[k.rol] || (isPersoon(k) ? 'persoon' : null), sleutel: sleutelVan(k.id), sterk: s, r: isEigen(k) ? 0 : 1 });
     });
-    if (!vast) {
+    {
       const pv = prive();
       const gehad = new Set(uit.map(function (x) { return x.pad; }));
       pv.personen.concat(pv.stamboom).forEach(function (x) {
@@ -448,28 +439,28 @@ function maak(o) {
   }
 
   // detail op knoop-id, op de sleutel uit de lijst (12 hex) of op de sleutel van een privépersoon
-  async function detail(id, vast) {
+  async function detail(id) {
     const reg = await register();
     const isSl = /^[0-9a-f]{12}$/.test(String(id));
     const k = reg.knopen.find(function (x) { return x.id === id; }) || (isSl ? reg.knopen.find(function (x) { return sleutelVan(x.id) === id; }) : undefined);
     if (!k) {
-      if (!vast && isSl) {
+      if (isSl) {
         const pv = prive();
         const x = pv.personen.concat(pv.stamboom).find(function (y) { return sleutelVan(y.pad) === id; });
         if (x) return priveDetail(x);
       }
       return { status: 404, j: { ok: false, fout: 'niet gevonden' } };
     }
-    if (!zichtbaar(k, vast)) return { status: 404, j: { ok: false, fout: 'niet gevonden' } };
+    if (!zichtbaar(k)) return { status: 404, j: { ok: false, fout: 'niet gevonden' } };
     const eigen = isEigen(k), persoon = isPersoon(k);
     let tekst = null, paginaFout = null, ruw = '';
     const rel = String(k.vault_pagina || '');
     if (!PAGINA_RE.test(rel) || rel.split('/').indexOf('..') >= 0) paginaFout = 'Geen pagina in het register.';
     else {
-      try { ruw = lees(path.join(vault, rel)); tekst = paginaTekst(ruw, { vast: vast, eigenIban: eigen ? k.iban : null, masker: masker }); }
+      try { ruw = lees(path.join(vault, rel)); tekst = paginaTekst(ruw, { masker: masker }); }
       catch (e) { paginaFout = 'De pagina is nu niet te lezen.'; }
     }
-    const ib = vast ? maskeerIban : geenMasker;
+    const ib = geenMasker;
     const h = (reg.handvatten[k.id] || []).map(function (x) {
       return { soort: HANDVAT_WOORD[x.soort] || x.soort, waarde: masker(ib(String(x.waarde))).slice(0, x.soort === 'kenmerkpatroon' ? 60 : 120),
         status: STATUS_WOORD[x.status] || x.status, intrekking: !!x.intrekking };
@@ -479,19 +470,19 @@ function maak(o) {
     const pat = persoon ? naamPatronen([k.naam, rel ? stamVan(rel) : ''].concat(aliassen)) : [];
     const weet = { handvatten: h,
       kvk: k.kvk ? masker(String(k.kvk)) : null, agb: k.agb ? masker(String(k.agb)) : null,
-      iban: vast || !k.iban ? null : masker(String(k.iban)),
-      facturen: vast ? null : facturenVan(k, reg),
-      bank: vast ? null : bankVan(k, reg),   // wv3298
-      deadlines: vast ? null : deadlinesVan(k, persoon ? { pagina: rel, patronen: pat } : null),
-      contact: vast || !persoon ? null : await googleVan(k, reg),   // wv1771
+      iban: !k.iban ? null : masker(String(k.iban)),
+      facturen: facturenVan(k, reg),
+      bank: bankVan(k, reg),   // wv3298
+      deadlines: deadlinesVan(k, persoon ? { pagina: rel, patronen: pat } : null),
+      contact: !persoon ? null : await googleVan(k, reg),   // wv1771
       stukken: null,   // komt met OVIS Intake (stap 2); nu nog geen logboek per partij
       register: { concept: !!k.concept, compilatie: k.compilatienummer || null, gecompileerd_op: k.gecompileerd_op || null }, in_register: true };
-    return { status: 200, j: { ok: true, vaste_plek: !!vast,
+    return { status: 200, j: { ok: true, vaste_plek: false,
       knoop: { id: k.id, naam: masker(k.naam), groep: groepVan(k), rol: ROL_WOORD[k.rol] || k.rol || null, concept: !!k.concept,
-        voor: Array.isArray(k.voor) ? k.voor.filter(function (c) { return !(vast && c === 'PRIVE'); }) : [], aliassen: (k.aliassen || []).map(masker), prive: priveKant(k),
+        voor: Array.isArray(k.voor) ? k.voor.slice() : [], aliassen: (k.aliassen || []).map(masker), prive: priveKant(k),
         pagina_pad: paginaFout ? null : rel, opmerking: k.opmerking ? masker(ib(String(k.opmerking))).slice(0, 400) : null, register: true },
       tekst: tekst, pagina_fout: paginaFout, weet: weet,
-      dossier: vast || !persoon ? null : dossierVan(rel, pat, (Array.isArray(k.voor) ? k.voor : []).map(function (c) {
+      dossier: !persoon ? null : dossierVan(rel, pat, (Array.isArray(k.voor) ? k.voor : []).map(function (c) {
         const e = reg.knopen.find(function (x) { return x.id === c && isEigen(x); });
         return e ? wortelVan(e.vault_pagina) : null;
       })) } };

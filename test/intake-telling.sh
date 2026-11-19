@@ -102,8 +102,8 @@ const goedeRpc = async (fn, body) => { rpcVraag = { fn, body }; return rpcRijen;
 
   const vast = await t.telling(true);
   const vb = (id) => vast.bronnen.find((x) => x.id === id);
-  toets('9 vaste plek: geen privé, ook niet in de totalen', vast.vaste_plek === true && JSON.stringify(vast).indexOf('"prive"') < 0 && vb('gmail:david').vandaag === 3 && vb('gmail:david').week === 7 && vb('raw_input').wachtend === 5 && vb('intake:gmail:david').vandaag === 0, vb('gmail:david'));
-  toets('9b vaste plek: geen schaduwtelling van WhatsApp of Signal', !vb('intake:whatsapp:nl') && !!b('intake:whatsapp:nl'));
+  toets('9 wv3446: ook met de oude vaste-plekvlag alles, ook privé (zelfde uitvoer, behalve het tijdstip)', JSON.stringify(Object.assign({}, vast, { gemeten_op: 0 })) === JSON.stringify(Object.assign({}, uit, { gemeten_op: 0 })) && vast.vaste_plek === false, vb('gmail:david'));
+  toets('9b wv3446: ook de schaduwtelling van WhatsApp en Signal', !!vb('intake:whatsapp:nl') && !!b('intake:whatsapp:nl'));
 
   // cache: binnen 60 s geen tweede meting
   let n = 0;
@@ -129,7 +129,7 @@ const goedeRpc = async (fn, body) => { rpcVraag = { fn, body }; return rpcRijen;
   // server.js, uitrol, Dockerfile
   const srv = fs.readFileSync('server.js', 'utf8');
   toets('13 route GET /app/intake in server.js', /route === 'GET \/app\/intake'\) return typeof appIntakeTelling === 'function'/.test(srv));
-  toets('13b vaste plek doorgegeven, stil, grens', /T\.telling\(appAfscherm\(a\)\)/.test(srv) && /appTeller\('intake', 600, 3600000\)/.test(srv));
+  toets('13b wv3446: geen vaste-plekvlag meer, stil, grens', /T\.telling\(\)/.test(srv) && /appTeller\('intake', 600, 3600000\)/.test(srv));
   toets('13c zonder module 404', /intake-telling ontbreekt/.test(srv));
   toets('14 uitrol.sh: intake-telling.js optioneel in de release', /^RELEASE_OPTIONEEL="[^"]*\bintake-telling\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));
   toets('15 Dockerfile: intake-telling.js in release-bootstrap', /COPY intake-telling\.js \/app\/release-bootstrap\/intake-telling\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));

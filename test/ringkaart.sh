@@ -60,14 +60,14 @@ toets('3d dubbele naam krijgt de component', naam('voorwerk') === 'Voorwerk (ver
 toets('3e lege omschrijving = component, onbekend oordeel = onbeoordeelbaar, null blijft null', naam('raar') === 'raar' && w.find((x) => x.c === 'raar').oordeel === 'onbeoordeelbaar' && w.find((x) => x.c === 'raar').min === null);
 toets('3f geen omschrijving of regel in de uitvoer', !w.some((x) => 'omschrijving' in x || 'regel' in x));
 const wv = R.wachters([rij('locatie', 'Locatie van Davids telefoon via Tasker', 'vers')], true);
-toets('3g vaste plek: naam = component', wv[0].naam === 'locatie');
+toets('3g wv3446: ook met de oude vaste-plekvlag de leesbare naam', wv[0].naam !== 'locatie');
 toets('3h te lang: haakjesgroep weg vóór afkappen', R.wachterNaam('Teams meelezen op de praktijk-pc (Taakplanner elke 15 min): berichten', 'teams') === 'Teams meelezen op de praktijk-pc', R.wachterNaam('Teams meelezen op de praktijk-pc (Taakplanner elke 15 min): berichten', 'teams'));
 
 // 4 stand
 const st = m.stand([rij('bank-ronde', 'AI - Bank-ronde', 'vers')], false);
 toets('4a stand: wachters, skills met zin, kanalen, geen fout', st.ok && st.wachters.length === 1 && st.skills[0].zin && st.kanalen.length === 3 && st.fout === null && st.vaste_plek === false, st);
 const sv = m.stand([rij('bank-ronde', 'AI - Bank-ronde', 'vers')], true);
-toets('4b vaste plek: geen skillzin', sv.vaste_plek === true && sv.skills.every((x) => x.zin === null), sv.skills);
+toets('4b wv3446: ook met de oude vaste-plekvlag de skillzin', sv.vaste_plek === false && sv.skills.some((x) => x.zin), sv.skills);
 const sf = m.stand(null, false);
 toets('4c hartslag niet leesbaar: alleen die fout, skills en kanalen er wel', sf.fout && sf.fout.wachters && !sf.fout.skills && sf.wachters.length === 0 && sf.skills.length === 3, sf.fout);
 const m2 = R.maak({ vault: path.join(V, 'bestaat-niet') });
@@ -85,7 +85,7 @@ const b = src.slice(src.indexOf('// ── Ringkaart (wv888'), src.indexOf('// �
 toets('5b zonder module 404', /if \(!ringkaart\) return appWeiger\(res, 404/.test(b));
 toets('5c teller ringkaart', /appTeller\('ringkaart', 600, 3600000\)/.test(b));
 toets('5d stil alleen na geslaagd lezen (vlak voor 200)', /res\._app\.stil = true;\s*return appStuur\(res, 200, uit\)/.test(b));
-toets('5e vaste plek via appAfscherm (wv1901)', /const vast = appAfscherm\(a\)/.test(b));
+toets('5e wv3446: geen vaste-plekvlag meer', !/appAfscherm/.test(b) && /ringkaart\.stand\(await ringkaartRijen\(\)\)/.test(b));
 toets('5f RPC mk_hartslag_stand met buffer', /appSbRpc\('mk_hartslag_stand'/.test(b) && /RINGKAART_HARTSLAG_MS/.test(b));
 toets('5g /health.ringkaart', /ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart/.test(src));
 toets('5h ringkaart.js in RELEASE_OPTIONEEL', /^RELEASE_OPTIONEEL="[^"]*\bringkaart\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));

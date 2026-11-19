@@ -420,8 +420,7 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
     SMAL_CF_BASIS: 'https://cf', SMAL_CF_ACCOUNT: 'acc', appTeller: () => true, appVersOk: (a, s) => s.vers === true,
     appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Date, Promise, JSON, String, Number, Array, Object, Math, Buffer, Map, Set,
     AbortSignal, encodeURIComponent, fetch: async (url, o) => { fetchLog.push({ url, o }); return { status: 200, json: async () => fetchAntw(url, o) }; } });
-  vm.runInContext((/^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0] +
-    /^const APP_VAST_BEHEER_DICHT = [^\n]*\n/m.exec(src)[0] + /^function appVastBeheerDicht\(a\) \{[^\n]*\n/m.exec(src)[0]) + src.slice(hb, he) + '\n' + src.slice(db0, de).replace(/\/\/ ── MemoryLane delen \(wv2114[\s\S]*?\/\/ ── einde MemoryLane delen ──\n/, '')
+  vm.runInContext((/^const APP_VAST_BEHEER_DICHT = [^\n]*\n/m.exec(src)[0] + /^function appVastBeheerDicht\(a\) \{[^\n]*\n/m.exec(src)[0]) + src.slice(hb, he) + '\n' + src.slice(db0, de).replace(/\/\/ ── MemoryLane delen \(wv2114[\s\S]*?\/\/ ── einde MemoryLane delen ──\n/, '')
     .replace(/^\/\/ ── OVIS (?!Docs)[^\n]*\n[\s\S]*?^\/\/ ── einde OVIS [^\n]*──\n/gm, '')
     .replace(/^\/\/ ── Promedico-laag in Calendar \(wv3143\) ──\n[\s\S]*?^\/\/ ── einde Promedico-laag ──\n/m, '') + ';globalThis.__dd = { docsDelen, appDocs, docsDelenInfo, docsCf, docsAccess, docsAccessBodyOk };', ctx, { filename: 'server.js#docs' });
   toets('5 koppeling laadt (docsDelen aan)', !!ctx.__dd.docsDelen && ctx.__dd.docsDelenInfo().aan === true, ctx.__dd.docsDelenInfo());

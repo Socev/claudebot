@@ -249,9 +249,9 @@ function maak(o) {
     });
     return open.length;
   }
-  // De kaarten voor de App. sb = uitkomst van mk_managers_stand (of null), vast = vaste plek (geen detail; CISO alleen aantallen).
-  function stand(sb, opt) {
-    const t = nu(), vast = !!(opt && opt.vast), s = lees();
+  // De kaarten voor de App. sb = uitkomst van mk_managers_stand (of null). Op elk apparaat alles (wv3446: vaste-plektak weg).
+  function stand(sb) {
+    const t = nu(), s = lees();
     return MANAGERS.map(function (m) {
       const d = sb && sb[m.id] ? sb[m.id] : null;
       const h = d && d.hartslag ? d.hartslag : null;
@@ -267,9 +267,9 @@ function maak(o) {
       if (d) {
         const top = (Array.isArray(d.top) ? d.top : []).map(function (b) {
           return { id: String(b.id || ''), ernst: String(b.ernst || ''), status: String(b.status || ''), samenvatting: String(b.samenvatting || ''),
-            detail: vast ? '' : String(b.detail || ''), sinds: b.eerst_gezien || null };
+            detail: String(b.detail || ''), sinds: b.eerst_gezien || null };
         });
-        bev = { aantal: Number(d.aantal) || 0, per_ernst: d.per_ernst || {}, top: vast && m.id === 'ciso' ? [] : top.slice(0, 5), verborgen: vast };
+        bev = { aantal: Number(d.aantal) || 0, per_ernst: d.per_ernst || {}, top: top.slice(0, 5), verborgen: false };
       }
       return { id: m.id, naam: m.naam, bewaakt: m.bewaakt, rooster: roosterTekst(m), soort: m.soort || 'sessie',
         volgende: (function () { const v = volgendeWeekronde(m, t); return v ? new Date(v).toISOString() : null; })(),
