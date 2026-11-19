@@ -32,12 +32,25 @@
  *      Blijft het kind in een crashlus, dan volgt alsnog één terugflip.
  *   5. SIGTERM/SIGINT gaan door naar het kind, zodat een K8s-stop schoon verloopt.
  *
- * TWEE GRENZEN, BEWUST
- *   - Er wordt HOOGSTENS ÉÉN KEER teruggeflipt per supervisor-leven. Een tweede
- *     terugflip zou heen en weer gaan tussen twee versies die allebei stuk zijn
- *     (bijvoorbeeld doordat er een env-variabele ontbreekt, wat geen van beide
- *     releases oplost). Dan is doorproberen met oplopende wachttijd eerlijker: de
- *     storing blijft zichtbaar in plaats van weggepoetst.
+ * DRIE GRENZEN, BEWUST
+ *   - Er wordt HOOGSTENS ÉÉN KEER teruggeflipt zolang er sindsdien niets gezond
+ *     heeft gedraaid. Een tweede terugflip zou heen en weer gaan tussen twee versies
+ *     die allebei stuk zijn (bijvoorbeeld doordat er een env-variabele ontbreekt,
+ *     wat geen van beide releases oplost). Dan is doorproberen met oplopende
+ *     wachttijd eerlijker: de storing blijft zichtbaar in plaats van weggepoetst.
+ *     wv3420 (actieplan 19-11 B60, Fable-review uitrol H3): draait daarna hetzelfde
+ *     kind TERUGFLIP_HERSTEL_MS (10 min) gezond, dan komt het budget terug. Vóór
+ *     deze wijziging bleef het vangnet na één (valse) terugflip weg tot de volgende
+ *     podherstart (15-11: ± 15 uitrols zonder vangnet). Heen en weer kan niet: na
+ *     een terugflip wijzen current en vorige naar dezelfde release, pas een nieuwe
+ *     uitrol zet een andere `vorige`.
+ *   - Er draait NOOIT een tweede kind naast een levend kind (wv3420, B60). Op 18-11
+ *     stierf een kind in State D (schijfhapering) pas seconden na SIGKILL; zijn late
+ *     exit wiste de verwijzing naar zijn opvolger en de supervisor startte er nóg
+ *     een: ± 3,5 u liep een tweede server.js zonder poort maar met alle klokjes mee.
+ *     Nu telt alleen de exit van het HUIDIGE kind, en een nieuw kind start pas als
+ *     elk eerder kind aantoonbaar weg is (exit-gebeurtenis binnen). server.js stopt
+ *     zelf als zijn poort bezet is (EADDRINUSE), voor het geval er toch iets op zit.
  *   - De supervisor stopt nooit uit zichzelf. Zolang hij leeft, leeft de pod, en
  *     is /health het eerlijke antwoord op de vraag of het werkt.
  */
@@ -68,6 +81,8 @@ const CRASH_VENSTER_MS = 60000;   // "snel achter elkaar" = binnen deze tijd
 const CRASH_GRENS = 3;            // zoveel snelle crashes = release verdacht
 const BACKOFF_MS = [1000, 2000, 5000, 10000, 20000, 30000];
 const STOP_GENADE_MS = 15000;
+// wv3420: zoveel ms hetzelfde kind gezond = terugflipbudget en backoff terug (standaard 10 min)
+const TERUGFLIP_HERSTEL_MS = parseInt(process.env.TERUGFLIP_HERSTEL_MS || '600000', 10);
 
 let kind = null;
 let stoppen = false;
@@ -80,6 +95,12 @@ let herstartTeller = 0;
 // een gezonde release terugflippen.
 let herstartTimer = null;
 let laatsteExit = null;   // { code, signaal } van het laatst gestopte kind
+// wv3420 (B60): elk kind dat nog geen exit-gebeurtenis gaf, ook een oud kind dat al SIGKILL kreeg maar in State D
+// hangt. Een nieuw kind start pas als deze set leeg is (startAlsVrij); de exit van een kind dat niet meer `kind` is,
+// raakt `kind` niet en telt niet als crash.
+const levend = new Set();
+let startBezig = false;
+let budgetTimer = null;
 
 // Per regel toevoegen, nooit via een stream: na een logrotatie blijft een open
 // stream naar de oude inode schrijven en verdwijnt het log geruisloos.
@@ -188,12 +209,21 @@ function startKind() {
     stdio: ['ignore', uit === 'inherit' ? 'inherit' : uit, uit === 'inherit' ? 'inherit' : uit]
   });
   log('kind gestart (pid ' + k.pid + ') vanaf release ' + path.basename(map));
+  levend.add(k);
 
   k.on('exit', function (code, signaal) {
+    levend.delete(k);
+    // wv3420 (B60): alleen het HUIDIGE kind. De late exit van een vervangen of al opgegeven kind mag de verwijzing naar
+    // zijn opvolger niet wissen en geen herstart of crashtelling geven (18-11: daardoor een tweede server.js).
+    if (k !== kind) {
+      if (!stoppen) log('eerder kind (pid ' + k.pid + ') nu pas gestopt (code ' + code + ', signaal ' + signaal + ') - geen herstart, telt niet als crash');
+      return;
+    }
     kind = null;
     laatsteExit = { code: code, signaal: signaal };
     if (stoppen) return;
     log('kind gestopt (code ' + code + ', signaal ' + signaal + ')');
+    if (k.vervangen) return;   // terugflip: bewaakOpkomst start zelf de opvolger, zodra dit kind weg is
     // SIGTERM stuurt alleen uitrol.sh (of wijzelf, en dan is `stoppen` al waar):
     // een gewenste herstart. Een nette exit 0 idem - server.js stopt nooit uit
     // zichzelf met 0. Niet tellen als crash, niet uitstellen.
@@ -211,16 +241,47 @@ function herstartNa(ms) {
   herstartTimer = setTimeout(function () {
     herstartTimer = null;
     if (stoppen || kind) return;
-    kind = startKind();
-    if (!kind) return;
     // Fouten hier mogen de supervisor nooit omleggen: hij is het laatste wat nog leeft.
-    bewaakOpkomst('zelfcontrole na herstart mislukt', kind)
-      .catch(function (e) { log('zelfcontrole na herstart faalde: ' + (e && e.message ? e.message : 'onbekend')); });
+    startAlsVrij('herstart').then(function (k) {
+      if (!k) return;
+      return bewaakOpkomst('zelfcontrole na herstart mislukt', k);
+    }).catch(function (e) { log('zelfcontrole na herstart faalde: ' + (e && e.message ? e.message : 'onbekend')); });
   }, ms);
 }
 
+// wv3420 (B60): leeft er nog een eerder kind (SIGKILL gegeven, maar de exit kwam nog niet binnen: State D), dan eerst
+// wachten tot het weg is. Zonder plafond: een tweede server.js naast een levende is erger dan even geen server (de oude
+// houdt de poort toch vast). Geeft false als de supervisor intussen stopt.
+async function wachtTotOudWeg(waarom) {
+  if (!levend.size) return true;
+  const pids = function () { return Array.from(levend).map(function (k) { return k.pid; }).join(' '); };
+  log('nieuw kind wacht (' + waarom + '): eerder kind leeft nog (pid ' + pids() + ') - SIGKILL en wachten tot het weg is, nooit twee tegelijk');
+  const begin = Date.now();
+  let gemeld = begin;
+  while (levend.size) {
+    if (stoppen) return false;
+    levend.forEach(function (k) { try { k.kill('SIGKILL'); } catch (e) {} });
+    await wacht(500);
+    if (Date.now() - gemeld >= 60000) { gemeld = Date.now(); log('eerder kind leeft nog na ' + Math.round((gemeld - begin) / 1000) + ' s (pid ' + pids() + ') - blijft wachten'); }
+  }
+  log('eerder kind is weg na ' + Math.round((Date.now() - begin) / 1000) + ' s - nieuw kind mag starten');
+  return true;
+}
+
+// De enige plek die na de opstart een nieuw kind start (herstart én terugflip). Eén start tegelijk.
+async function startAlsVrij(waarom) {
+  if (startBezig) return null;
+  startBezig = true;
+  try {
+    if (!(await wachtTotOudWeg(waarom))) return null;
+    if (stoppen || kind) return null;
+    kind = startKind();
+    return kind;
+  } finally { startBezig = false; }
+}
+
 function stopKind(signaal) {
-  if (kind && kind.pid) { try { kind.kill(signaal); } catch (e) {} }
+  levend.forEach(function (k) { if (k.pid) { try { k.kill(signaal); } catch (e) {} } });
 }
 
 // ── gezondheid ──────────────────────────────────────────────────────────────
@@ -296,7 +357,7 @@ function terugflip(reden) {
  */
 async function bewaakOpkomst(reden, k) {
   const gezond = await bootZelfcontrole(k);
-  if (gezond) return true;
+  if (gezond) { planBudgetTerug(k); return true; }
   // Review-fix B1: alleen een kind dat LEEFT maar niet gezond wordt is ziek.
   // Is het kind weg omdat wij stoppen, omdat uitrol.sh het net een SIGTERM gaf,
   // of omdat het al door een ander kind is vervangen, dan is dat geen oordeel
@@ -311,16 +372,43 @@ async function bewaakOpkomst(reden, k) {
   if (herstartTimer) { clearTimeout(herstartTimer); herstartTimer = null; }
 
   log('kind stoppen en opnieuw starten vanaf de teruggezette release');
-  stoppen = true; stopKind('SIGTERM');
-  await wacht(3000);
-  stopKind('SIGKILL');
-  await wacht(500);
-  stoppen = false;
-  kind = startKind();
-  const opnieuw = await bootZelfcontrole(kind);
+  // wv3420 (B60): niet meer `stoppen` als vlag (dat blokkeerde ook een echte SIGTERM van K8s in dit venster), en
+  // pas een nieuw kind als het oude aantoonbaar weg is (startAlsVrij), ook als SIGKILL pas na minuten werkt.
+  const oud = kind;
+  if (oud) { oud.vervangen = true; try { oud.kill('SIGTERM'); } catch (e) {} }
+  for (let i = 0; i < 30 && levend.size; i++) await wacht(100);
+  if (stoppen) return false;
+  const nieuw = await startAlsVrij('terugflip');
+  if (!nieuw) return false;
+  const opnieuw = await bootZelfcontrole(nieuw);
+  if (stoppen) return false;
   log(opnieuw ? 'teruggezette release is gezond'
               : 'ook de teruggezette release komt niet gezond op - dit vraagt David');
+  if (opnieuw) planBudgetTerug(nieuw);
   return opnieuw;
+}
+
+// wv3420 (B60, Fable-review uitrol H3): draait hetzelfde kind TERUGFLIP_HERSTEL_MS na een geslaagde opkomst nog en geeft
+// /health ok, dan krijgt de supervisor zijn terugflip terug en begint de backoff weer klein. Niet gezond op dat moment:
+// over een minuut opnieuw kijken, zolang het hetzelfde kind is. Een nieuw kind plant opnieuw (bij zijn eigen opkomst).
+function planBudgetTerug(k) {
+  if (budgetTimer) clearTimeout(budgetTimer);
+  budgetTimer = null;
+  if (!terugflipGedaan && herstartTeller === 0 && !crashTijden.length) return;
+  const kijk = function (na) {
+    budgetTimer = setTimeout(function () {
+      budgetTimer = null;
+      if (stoppen || kind !== k) return;
+      health().then(function (j) {
+        if (stoppen || kind !== k) return;
+        if (!j) { kijk(60000); return; }
+        if (terugflipGedaan) log('terugflipbudget terug: hetzelfde kind (pid ' + k.pid + ', release ' + huidigeSha() + ') draait ' +
+          Math.round(TERUGFLIP_HERSTEL_MS / 60000 * 10) / 10 + ' min gezond - een volgende kapotte release wordt weer teruggeflipt');
+        terugflipGedaan = false; herstartTeller = 0; crashTijden = [];
+      });
+    }, na);
+  };
+  kijk(TERUGFLIP_HERSTEL_MS);
 }
 
 function verwerkCrash() {
@@ -436,11 +524,11 @@ function afsluiten(signaal) {
   if (stoppen) return;
   stoppen = true;
   log('signaal ' + signaal + ' ontvangen - doorgeven aan het kind');
-  stopKind(signaal);
+  stopKind(signaal);   // wv3420: alle levende kinderen, ook een eerder kind dat nog in State D hangt
   stopNeven();   // wv3180
   const grens = Date.now() + STOP_GENADE_MS;
   const tik = setInterval(function () {
-    if (!kind) { clearInterval(tik); log('kind is gestopt - supervisor stopt'); process.exit(0); }
+    if (!levend.size) { clearInterval(tik); log('kind is gestopt - supervisor stopt'); process.exit(0); }
     if (Date.now() > grens) {
       clearInterval(tik);
       log('kind stopt niet binnen ' + Math.round(STOP_GENADE_MS / 1000) + ' s - SIGKILL');

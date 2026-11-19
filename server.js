@@ -31265,6 +31265,18 @@ if (!SERVER_ECHT) {
 }
 
 try { appWeesVasthouden(); } catch (e) { logError('app-wees-vast', e); }   // wv722: vóór listen, dus vóór elke /run of app-beurt
+// wv3420 (actieplan 19-11 B60): krijgt deze server zijn poort niet (EADDRINUSE: er draait al een server.js), dan stopt hij
+// meteen met exit 98. Vroeger ving uncaughtException dit af en bleef hij leven zonder poort maar met alle klokjes (18-11:
+// ± 3,5 u een tweede server.js naast de echte). Exit ≠ 0 telt bij de supervisor als crash; die start pas opnieuw als elk
+// eerder kind weg is. Andere fouten van de server: alleen loggen, zoals voorheen via uncaughtException.
+server.on('error', function (err) {
+  if (err && (err.code === 'EADDRINUSE' || err.code === 'EACCES') && !server.listening) {
+    logError('listen', err);
+    schrijfLog(nu() + ' server stopt: poort ' + PORT + ' niet te krijgen (' + err.code + ') - geen tweede server.js zonder poort');
+    process.exit(98);
+  }
+  logError('server', err);
+});
 // wv3398: alleen de echte release luistert op alle adressen (Service/tunnel); een proefkopie alleen op 127.0.0.1.
 server.listen(PORT, SERVER_ECHT ? '0.0.0.0' : '127.0.0.1', function () {
   console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents, breinen claude|codex|gemini) luistert op :' + PORT +
