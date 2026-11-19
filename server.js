@@ -227,6 +227,16 @@ function VV() { if (!VV_MOD) VV_MOD = require(path.join(__dirname, 'vault-veilig
 const REPO = process.env.REPO_DIR || '/opt/data/repo';
 const PORT = process.env.PORT || 8080;
 const SECRET = process.env.API_SECRET || '';
+// wv3410 (actieplan Fable 19-11, B03): fail-closed toets voor de body-secret-routes /runtime, /run, /werkkamer-tegels, /agent,
+// /result en /reset. Zonder API_SECRET (bv. kluis overgeslagen bij opstart) 503 in plaats van alles open; vergelijking in vaste tijd.
+// 0 = goed, anders de HTTP-status.
+function podGeheimStatus(s) {
+  if (!SECRET) return 503;
+  if (typeof s !== 'string') return 401;
+  const a = Buffer.from(s), b = Buffer.from(SECRET);
+  return (a.length === b.length && crypto.timingSafeEqual(a, b)) ? 0 : 401;
+}
+function weigerGeheim(res, st) { res.writeHead(st); return res.end(st === 503 ? 'API_SECRET ontbreekt op de pod' : 'unauthorized'); }
 const IO = serverPad('io', process.env.IO_DIR, '/opt/data/io', serverProefDeel('io'));
 const MAX_FILE = (parseInt(process.env.MAX_FILE_MB || '20', 10)) * 1024 * 1024;
 const SESS_FILE = path.join(HOME, 'chat_sessions.json');
@@ -4616,7 +4626,7 @@ function handleRequest(req, res) {
   if (req.method === 'POST' && req.url === '/runtime') {
     return readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
-      if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
+      { const gst = podGeheimStatus(d.secret); if (gst) return weigerGeheim(res, gst); }
       const z = runtimeZet(d, 'api');
       if (z.fout) return weigerRuntime(res, z.fout, '/runtime');
       if (z.schrijffout) { res.writeHead(500); return res.end('runtime.json niet schrijfbaar'); }
@@ -4629,7 +4639,7 @@ function handleRequest(req, res) {
   if (req.method === 'POST' && req.url === '/run') {
     return rolPoort(res, function () { readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
-      if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
+      { const gst = podGeheimStatus(d.secret); if (gst) return weigerGeheim(res, gst); }
       const prompt = (d.prompt || '').toString().trim();
       if (!prompt) { res.writeHead(400); return res.end('missing prompt'); }
       const chatId = (d.chat_id != null && d.chat_id !== '') ? String(d.chat_id) : '';
@@ -4870,7 +4880,7 @@ function handleRequest(req, res) {
     const eind = Date.now() + WK_TOTAAL_MS;   // totaalgrens inclusief de wachttijd van rolPoort (n8n-timeout 60 s)
     return rolPoort(res, function () { readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
-      if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
+      { const gst = podGeheimStatus(d.secret); if (gst) return weigerGeheim(res, gst); }
       werkkamerTegels(eind).then(function (uit) {
         reqLogExtra(res, { wk_todoist: uit.todoist.items.length, wk_deadlines: uit.deadlines.items.length, wk_ms: uit.duur_ms });
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -4891,7 +4901,7 @@ function handleRequest(req, res) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       // wv424: SOCEV_AGENT_SLEUTEL (Socev buiten de machinekamer) start alleen smalle agents.
       const smal = socevAgentSleutelOk(d.secret);
-      if (SECRET && d.secret !== SECRET && !smal) { res.writeHead(401); return res.end('unauthorized'); }
+      { const gst = podGeheimStatus(d.secret); if (gst === 503 || (gst && !smal)) return weigerGeheim(res, gst); }
       const prompt = (d.prompt || '').toString().trim();
       if (!prompt) { res.writeHead(400); return res.end('missing prompt'); }
       const label = (d.label || '').toString().trim().slice(0, 120) || 'naamloze agent';
@@ -5023,7 +5033,7 @@ function handleRequest(req, res) {
       // wv424: SOCEV_AGENT_SLEUTEL mag alleen het resultaat van een smalle agent ophalen.
       const smalOk = socevAgentSleutelOk(d.secret) && !!((jobs[d.job_id] && jobs[d.job_id].smal) ||
         (agentsReg[d.job_id] && agentsReg[d.job_id].omgeving === 'smal'));   // ook een smalle wees na een herstart (Fable wv424 #8)
-      if (SECRET && d.secret !== SECRET && !smalOk) { res.writeHead(401); return res.end('unauthorized'); }
+      { const gst = podGeheimStatus(d.secret); if (gst === 503 || (gst && !smalOk)) return weigerGeheim(res, gst); }
       const j = jobs[d.job_id];
       res._log = { job_id: d.job_id, workspace: j && j.workspace };
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -5076,7 +5086,7 @@ function handleRequest(req, res) {
   if (req.method === 'POST' && req.url === '/reset') {
     return readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
-      if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
+      { const gst = podGeheimStatus(d.secret); if (gst) return weigerGeheim(res, gst); }
       const chatId = (d.chat_id != null) ? String(d.chat_id) : '';
       const wsFout = workspaceFout(d.workspace);
       if (wsFout) return weigerWorkspace(res, wsFout, '/reset');
