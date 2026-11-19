@@ -528,7 +528,7 @@ function maakOntvanger(o) {
       for (const w of Array.from(weken).sort()) {
         let oud;
         try { oud = fs.readFileSync(path.join(o.vault, map, weekPaginaNaam(w)), 'utf8'); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
-        if (!/: \[tekst\]$/m.test(oud)) continue;
+        if (!/: \[tekst\]( \(herhalend\))?$/m.test(oud)) continue;
         schrijfPagina(staat, w); uit.push(w);
       }
       return { herschreven: uit };
