@@ -58,6 +58,28 @@ function conceptSchema() {
 
 // deps: { vault, dir, aix (aix.js-instantie), fout?(soort, e), harvester? (module voor leesBus), filter?, klok?, plaatjes? (map proefschermen),
 //         claude?(systeem, prompt, schema) -> {ok, data|fout}, voorJou?(p) -> Promise }
+// B137 (Fable-review 19-11, M8): alleen ENOENT telt als leeg. Een andere leesfout (EIO, EACCES) of een kapot bestand (geen JSON-object)
+// gooit een fout met code KAPOT: de aanroeper schrijft dan niets terug (anders overschrijft de volgende schrijfactie de oude inhoud). Het
+// kapotte bestand blijft staan; er komt één kopie naast (<naam>.kapot-<mtime>) en één melding per kopie.
+const kapotGemeld = new Set();
+function leesStreng(p, leeg, fout, naam) {
+  let t;
+  try { t = fs.readFileSync(p, 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return leeg; throw kapotFout(p, e, fout, naam); }
+  let j; try { j = JSON.parse(t); } catch (e) { j = undefined; }
+  if (j && typeof j === 'object' && !Array.isArray(j)) return j;
+  throw kapotFout(p, null, fout, naam);
+}
+function kapotFout(p, e, fout, naam) {
+  let apart = null;
+  try { const st = fs.statSync(p); apart = p + '.kapot-' + Math.floor(st.mtimeMs); if (!fs.existsSync(apart)) fs.copyFileSync(p, apart, fs.constants.COPYFILE_EXCL); }
+  catch (x) { apart = null; }
+  const f = Object.assign(new Error(naam + ' is onleesbaar' + (e && e.code ? ' (' + e.code + ')' : ' (geen geldig bestand)') + (apart ? ', kopie apart gezet' : '') +
+    '; er is niets overschreven'), { code: 'KAPOT', oorzaak: e && e.code || 'parse', apart: apart });
+  const sleutel = apart || (p + ':' + (e && e.code));
+  if (!kapotGemeld.has(sleutel)) { kapotGemeld.add(sleutel); try { fout(naam + '-kapot', f); } catch (x) { /* melden mag niet zelf falen */ } }
+  return f;
+}
+
 function maak(deps) {
   const VAULT = deps.vault, DIR = deps.dir;
   const klok = deps.klok || Date.now;
@@ -72,7 +94,9 @@ function maak(deps) {
   let plaatsBezig = false, weekBezig = false;
 
   function mkdir() { fs.mkdirSync(path.join(DIR, 'tmp'), { recursive: true, mode: 0o700 }); try { fs.chmodSync(DIR, 0o700); fs.chmodSync(path.join(DIR, 'tmp'), 0o700); } catch (e) {} }
-  function leesJson(p, leeg) { try { const j = JSON.parse(fs.readFileSync(p, 'utf8')); return j && typeof j === 'object' ? j : leeg; } catch (e) { return leeg; } }
+  function leesJson(p, leeg) { return leesStreng(p, leeg, fout, 'aix ' + path.basename(p)); }   // B137: alleen ENOENT = leeg; anders KAPOT en niets schrijven
+  // alleen voor bestanden die deze module nooit terugschrijft (herkomst.json van de proefschermen): kapot = leeg is daar onschadelijk
+  function leesJsonLos(p, leeg) { try { const j = JSON.parse(fs.readFileSync(p, 'utf8')); return j && typeof j === 'object' ? j : leeg; } catch (e) { return leeg; } }
   function schrijfJson(p, j) { mkdir(); const tmp = p + '.' + process.pid + '.' + crypto.randomBytes(3).toString('hex'); fs.writeFileSync(tmp, JSON.stringify(j, null, 1), { mode: 0o600 }); fs.renameSync(tmp, p); }
   function staatLees() {
     const s = leesJson(P.staat, {});
@@ -214,10 +238,12 @@ function maak(deps) {
   function journaal() {
     const per = {};
     let t = '';
-    try { t = fs.readFileSync(P.journaal, 'utf8'); } catch (e) { return per; }
+    // B137/M8: alleen 'bestaat niet' is een leeg journaal; een leesfout (EIO) zou alle gedeelde kaarten weer klaar voor Plaats zetten
+    try { t = fs.readFileSync(P.journaal, 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return per; throw kapotFout(P.journaal, e, fout, 'aix journaal.jsonl'); }
     t.split('\n').forEach(function (r) {
       if (!r.trim()) return;
-      let j; try { j = JSON.parse(r); } catch (e) { return; }
+      // Codex MOET 2 (B137): een kapotte regel kan een 'gedeeld' zijn; overslaan zou die kaart weer klaarzetten voor Plaats → KAPOT
+      let j; try { j = JSON.parse(r); } catch (e) { throw kapotFout(P.journaal, null, fout, 'aix journaal.jsonl'); }
       if (!j || typeof j.id !== 'string') return;
       const x = per[j.id] || (per[j.id] = { keuze: null, keuze_hash: null, gedeeld: null, bezig: null, fout: null });
       if (j.soort === 'keuze') { x.keuze = j.keuze; x.keuze_hash = j.hash; x.keuze_op = j.t; }
@@ -290,7 +316,7 @@ function maak(deps) {
   // herkomst.json als gewoon bestand; een koppeling telt als geen herkomst (Fable wv954 #5)
   function herkomstLees() {
     try { if (fs.lstatSync(P.herkomst).isSymbolicLink()) return {}; } catch (e) { return {}; }
-    const b = (leesJson(P.herkomst, {}) || {}).bestanden;
+    const b = (leesJsonLos(P.herkomst, {}) || {}).bestanden;
     return b && typeof b === 'object' ? b : {};
   }
   // verwacht: de sha256 die in de kaarthash zat toen David Deel koos (plaatsBundel); dan gaat alleen precies dat beeld mee (Fable wv954 #6)

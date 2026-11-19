@@ -118,14 +118,29 @@ function waaromTekst(d, namen) {
 function maak(io) {
   const nu = io.nu || Date.now;
   const fout = io.fout || function () {};
+  // B137 (Fable-review ovis-mail 19-11): alleen 'bestaat niet' (io.lees geeft null) is een lege staat. Gooit io.lees (leesfout, kapot JSON) of
+  // is het geen staat van versie 1, dan krijgt de aanroeper een lege staat met kapot = true: bewaar weigert die (anders wist de volgende
+  // schrijfactie 14 dagen 'Laat zo', meldingen en box-sleutels), de App zegt dat de lijst nu niet te lezen is, één melding per soort fout.
+  const kapotGemeld = new Set(), boxKapot = new Set();
+  const LEEG = function () { return { versie: 1, dagen: {}, klaar: {}, gemeld: {}, laatste: null, box: {} }; };
+  const KAPOT_TEKST = 'De lijst Niet in je inbox gekomen is nu niet te lezen; er is niets gewist en de machinekamer krijgt een melding';
+  function staatKapot(e) {
+    const sleutel = String(e && e.code || 'kapot');
+    if (!kapotGemeld.has(sleutel)) { kapotGemeld.add(sleutel); try { fout('mail-sluit-staat-kapot', Object.assign(new Error('sluit.json onleesbaar; niet overschreven'), { code: sleutel })); } catch (x) {} }
+    const s = LEEG();
+    Object.defineProperty(s, 'kapot', { value: true });
+    return s;
+  }
   function staat() {
     let s = null;
-    try { s = io.lees(); } catch (e) { s = null; }
-    s = isObj(s) && s.versie === 1 ? s : { versie: 1, dagen: {}, klaar: {}, gemeld: {}, laatste: null, box: {} };
+    try { s = io.lees(); } catch (e) { return staatKapot(e); }
+    if (s === null || s === undefined) s = LEEG();
+    else if (!isObj(s) || s.versie !== 1) return staatKapot(null);
     for (const k of ['dagen', 'klaar', 'gemeld', 'box']) if (!isObj(s[k])) s[k] = {};
     return s;
   }
   function bewaar(s) {
+    if (s.kapot) throw Object.assign(new Error('sluit.json onleesbaar: niet overschreven'), { code: 'KAPOT' });
     const grens = dagErbij(amsDag(nu()), -BEWAAR_DAGEN);
     for (const d of Object.keys(s.dagen)) if (!DAG_RE.test(d) || d < grens) delete s.dagen[d];
     const grensMs = nu() - BEWAAR_DAGEN * 86400000;
@@ -216,6 +231,7 @@ function maak(io) {
   // staan, en zegt de App dat de som van die dag niet compleet is. Eerst al het Gmail-werk
   // (awaits), dan pas de staat lezen, samenvoegen en schrijven zonder await ertussen (MOET 3 ronde 1: een tik van David blijft staan).
   async function ronde() {
+    if (staat().kapot) throw Object.assign(new Error('sluit.json onleesbaar: ronde niet gedraaid'), { code: 'KAPOT' });   // B137: eerst de staat, dan pas Gmail
     const vandaag = amsDag(nu());
     const uitkomsten = [];
     for (let i = TERUG_DAGEN; i >= 1; i--) {
@@ -271,6 +287,7 @@ function maak(io) {
   // box-rij hooguit één keer per sleutel per 14 dagen
   function boxNieuw(sleutel) {
     const s = staat();
+    if (s.kapot) { if (boxKapot.has(sleutel)) return false; boxKapot.add(sleutel); return true; }   // B137: zonder staat één keer per proces
     if (s.box[sleutel]) return false;
     s.box[sleutel] = new Date(nu()).toISOString();
     bewaar(s);
@@ -279,6 +296,7 @@ function maak(io) {
   // De lijst voor de App: open gesprekken van de bewaarde dagen (nieuwste eerst, elk gesprek één keer), plus de som van gisteren
   function lijst() {
     const s = staat();
+    if (s.kapot) return { status: 503, j: { ok: false, kapot: true, fout: KAPOT_TEKST } };
     const items = [], gezien = new Set();
     for (const dag of Object.keys(s.dagen).sort().reverse()) {
       for (const x of (s.dagen[dag].lijst || [])) {
@@ -296,6 +314,7 @@ function maak(io) {
     const draad = String(d.draad || ''), hoe = String(d.hoe || '');
     if (!ID_RE.test(draad) || (hoe !== 'gezien' && hoe !== 'terug')) return { status: 400, j: { ok: false, fout: 'onbekend' } };
     const s = staat();
+    if (s.kapot) return { status: 503, j: { ok: false, kapot: true, fout: KAPOT_TEKST } };
     const bekend = Object.keys(s.dagen).some(function (k) { return (s.dagen[k].lijst || []).some(function (x) { return x.draad === draad; }); });
     if (!bekend) return { status: 404, j: { ok: false, fout: 'Dit gesprek staat niet op de lijst' } };
     s.klaar[draad] = { hoe, op: new Date(nu()).toISOString() };
@@ -304,6 +323,7 @@ function maak(io) {
   }
   function info() {
     const s = staat();
+    if (s.kapot) return { aan: true, kapot: true, laatste: null, dagen: 0, open: 0 };
     const open = lijst().j.items.length;
     return { aan: true, laatste: s.laatste, dagen: Object.keys(s.dagen).length, open };
   }

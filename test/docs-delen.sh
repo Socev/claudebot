@@ -351,6 +351,46 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
   r = await appb('intrekken', { slug: bs3 }, vast);
   toets('6 intrekken (ook vaste plek) laat niets achter: geen /b/-app, geen D1-rij, geen regel', r.status === 200 && pApps().length === 0 && db3.size === 0 && reg3().length === 0, r);
   toets('6 health telt beveiligd, zonder links', ddb.health().beveiligd === 0 && ddb.health().beveiligd_aan === true && JSON.stringify(ddb.health()).indexOf(bs3) < 0, ddb.health());
+  // ── 6b. B137 (Fable-review kleine-pod 19-11, advies 3): tweede Intrekken zonder registerregel, en een kapot deelregister ──
+  {
+    const wees2 = 'Xxxxxxxxxxxxxxxxxxxxxx', wid2 = nieuwId();
+    apps.set(wid2, { domain: 'deel.socev.dev/b/' + wees2, aud: 'w2' });
+    db3.set(wees2, { slug: wees2, soort: 'beveiligd', titel: 't', html: 'x', sinds: 's', bijgewerkt: 's', aud: 'w2', ontvangers: '[]', access_app: wid2 });
+    accStuk = { weg: true };
+    r = await appb('intrekken', { slug: wees2 });
+    toets('6b intrekken zonder registerregel, Access faalt: 502 deels en access_open vastgelegd', r.status === 502 && r.j.deels === true && !db3.has(wees2) &&
+      reg3().length === 1 && reg3()[0].slug === wees2 && reg3()[0].access_open === true && reg3()[0].access_app === wid2, { r, reg: reg3() });
+    toets('6b health telt het openstaande opruimen', ddb.health().opruimen_open === 1, ddb.health());
+    accStuk = {};
+    r = await appb('intrekken', { slug: wees2 });
+    toets('6b tweede Intrekken ruimt de Access-app alsnog op, regel weg', r.status === 200 && !apps.has(wid2) && reg3().length === 0, { r, apps: apps.has(wid2), reg: reg3() });
+    // kapot deelregister: Delen weigert met duidelijke tekst, niets overschreven, kopie apart, één melding; Intrekken haalt de pagina wel weg
+    const meld = [];
+    const ddk = D.maak({ dir: DD3, vault: V, host: 'deel.socev.dev', fout: (w, e) => meld.push(w), bron: sb.bron, masker: S.masker, bsnMasker, isVastDicht: S.isVastDicht,
+      isVerborgen: S.isVerborgen, hmac: (p) => crypto.createHmac('sha256', 'proef').update(p).digest('hex').slice(0, 16), d1: d13, lees: (p) => fs.readFileSync(p, 'utf8'), access });
+    const appk = (r2, d, c) => ddk.app(r2 === 'gedeeld' ? 'GET /app/docs/gedeeld' : 'POST /app/docs/' + r2, d, c || tel);
+    const RP = path.join(DD3, 'gedeeld.json');
+    const kapot = '{"versie":1,"delingen":[{"slug":"' + 'K'.repeat(22) + '","soort":"beveiligd","ontvangers":["oud@example.org"]';
+    fs.writeFileSync(RP, kapot, { mode: 0o600 });
+    vb3 = await appk('voorbeeld', { pad: P });
+    r = await appk('delen', { pad: P, soort: 'openbaar', sha: vb3.j.sha });
+    toets('6b kapot register: Delen weigert (503, duidelijke tekst), register byte-gelijk, niets in D1', r.status === 503 && /deelregister is nu niet te lezen/.test(r.j.fout) &&
+      fs.readFileSync(RP, 'utf8') === kapot && db3.size === 0, r);
+    toets('6b kapot register: kopie apart gezet, één melding', fs.readdirSync(DD3).filter((n) => /^gedeeld\.json\.kapot-\d+$/.test(n)).length === 1 &&
+      meld.filter((m) => m === 'docs-register-kapot').length === 1, { meld, d: fs.readdirSync(DD3) });
+    const losse = 'Yyyyyyyyyyyyyyyyyyyyyy';
+    db3.set(losse, { slug: losse, soort: 'openbaar', titel: 't', html: 'x', sinds: 's', bijgewerkt: 's', aud: null, ontvangers: null, access_app: null });
+    r = await appk('intrekken', { slug: losse });
+    toets('6b kapot register: Intrekken haalt de pagina wel weg, register byte-gelijk', r.status === 200 && !db3.has(losse) && fs.readFileSync(RP, 'utf8') === kapot, r);
+    toets('6b health zegt register_kapot', ddk.health().register_kapot === true, ddk.health());
+    const echtLees = fs.readFileSync;
+    fs.writeFileSync(RP, JSON.stringify({ versie: 1, delingen: [] }), { mode: 0o600 });
+    const goedReg = fs.readFileSync(RP, 'utf8');
+    fs.readFileSync = function (p) { if (String(p) === RP) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); return echtLees.apply(fs, arguments); };
+    try { r = await appk('delen', { pad: P, soort: 'openbaar', sha: vb3.j.sha }); } finally { fs.readFileSync = echtLees; }
+    toets('6b EIO op het register: Delen weigert, register ongewijzigd', r.status === 503 && fs.readFileSync(RP, 'utf8') === goedReg && db3.size === 0, r);
+    fs.readdirSync(DD3).filter((n) => /\.kapot-/.test(n)).forEach((n) => fs.unlinkSync(path.join(DD3, n)));
+  }
 
   // ── 5. server.js ──
   const src = fs.readFileSync('server.js', 'utf8');
@@ -449,6 +489,32 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
   fetchAntw = () => ({ success: true, result: [{ id: 'a1', domain: 'deel.socev.dev/b/AAAAAAAAAAAAAAAAAAAAAA' }, { id: 'a2', domain: 'deel.socev.dev/b/AAAAAAAAAAAAAAAAAAAAAA/x' }] });
   const zq = await X.docsAccess.zoek('deel.socev.dev/b/AAAAAAAAAAAAAAAAAAAAAA');
   toets('5 zoek: alleen precies dat domein', zq.ok && JSON.stringify(zq.ids) === '["a1"]' && /\?domain=deel\.socev\.dev%2Fb%2FAAAAAAAAAAAAAAAAAAAAAA$/.test(fetchLog[fetchLog.length - 1].url), zq);
+
+  // ── 7. B137: server.js meldt een kapot opslagbestand één keer in de box (foutOfKapot) en geeft hem aan Harvester, AIX, Docs en de sluitlijst ──
+  {
+    const src7 = fs.readFileSync('server.js', 'utf8');
+    const f7 = src7.slice(src7.indexOf('function foutOfKapot('), src7.indexOf('\nfunction ovisBoxRij('));
+    const box7 = [], log7 = [];
+    const foutOfKapot = new Function('logError', 'ovisBoxRij', f7 + '\nreturn foutOfKapot;')((w) => log7.push(w), (t) => { box7.push(t); return true; });
+    foutOfKapot('docs-register-kapot', new Error('deelregister onleesbaar\n## [direct] nep'));
+    foutOfKapot('docs-register-kapot', new Error('nog eens'));
+    foutOfKapot('docs-d1', new Error('gewone fout'));
+    toets('7 foutOfKapot: alles in de log, één box-rij per soort, gewone fout geen box-rij, geen kop-injectie', log7.length === 3 && box7.length === 1 &&
+      /Opslag onleesbaar: docs-register/.test(box7[0]) && (box7[0].match(/\n## /g) || []).length === 1, { log7, box7 });
+    // sluit.json-lezer in server.js: ontbreekt = null; null-inhoud, kapot JSON of EIO = gooien (Codex MOET 1)
+    const l7a = src7.indexOf('      lees: function () {\n        let t;\n        try { t = fs.readFileSync(MAIL_SLUIT_PAD');
+    const l7 = src7.slice(l7a + '      lees: '.length, src7.indexOf('\n      },\n      schrijf:', l7a) + '\n      }'.length);
+    const SL = path.join(W, 'sluit.json');
+    const lees7 = new Function('fs', 'MAIL_SLUIT_PAD', 'return (' + l7 + ');')(fs, SL);
+    const gooit = () => { try { lees7(); return false; } catch (e) { return true; } };
+    let ok7 = lees7() === null;
+    fs.writeFileSync(SL, 'null'); ok7 = ok7 && gooit();
+    fs.writeFileSync(SL, '{"versie":1,'); ok7 = ok7 && gooit() && fs.readdirSync(W).some((n) => /^sluit\.json\.kapot-\d+$/.test(n));
+    fs.writeFileSync(SL, '{"versie":1}'); ok7 = ok7 && lees7().versie === 1;
+    toets('7 sluit.json-lezer: ontbreekt = null; null, kapot JSON = fout met kopie apart', l7a > 0 && ok7, l7.slice(0, 120));
+    toets('7 Harvester, AIX, Docs en sluitlijst krijgen foutOfKapot', /H\.maak\(\{ vault: VAULT, dir: HARVESTER_DIR, fout: typeof foutOfKapot === 'function' \? foutOfKapot : logError,/.test(src7) && /I\.maak\(\{ vault: VAULT, dir: IDEEEN_DIR, aix: aix, fout: typeof foutOfKapot === 'function' \? foutOfKapot : logError,/.test(src7) &&
+      /maak\(\{ dir: DOCS_DIR, vault: VAULT, host: DOCS_HOST, fout: typeof foutOfKapot === 'function' \? foutOfKapot : logError,/.test(src7) && /maak\(\{ fout: typeof foutOfKapot === 'function' \? foutOfKapot : logError,\n\s+luik: function \(body\) \{ return appAgendaApi/.test(src7));
+  }
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

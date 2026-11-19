@@ -663,6 +663,33 @@ M.mkdir();
       /if \(u\.nieuw\.length\) aixRonde\.voorstel\.box = aixBoxKlaar\(/.test(src) && /if \(u\.klaar > 0\) aixRonde\.week\.box = aixBoxKlaar\(/.test(src));
   }
 
+  // ── 17. B137 (Fable-review 19-11, M8): een leesfout of kapot bestand is nooit 'leeg' ──
+  {
+    const JP = path.join(DIR, 'journaal.jsonl'), SP = path.join(DIR, 'staat.json');
+    const jVoor = fs.readFileSync(JP, 'utf8');
+    const echtLees = fs.readFileSync;
+    fs.readFileSync = function (p, o) { if (String(p) === JP) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); return echtLees.apply(fs, arguments); };
+    let e1 = null, r1 = null; try { r1 = await M.app('POST /app/ideeen/kaart/k01/deel', { __apparaat: 'tel1' }); } catch (e) { e1 = e; }
+    let e2 = null; try { await M.app('GET /app/ideeen', {}); } catch (e) { e2 = e; }
+    fs.readFileSync = echtLees;
+    toets('17 EIO op het journaal: Deel weigert (KAPOT), journaal ongewijzigd', e1 && e1.code === 'KAPOT' && fs.readFileSync(JP, 'utf8') === jVoor, { e: e1 && e1.message, r: r1 && r1.status });
+    toets('17 EIO op het journaal: de lijst toont geen gedeelde kaarten als ongedeeld maar weigert', e2 && e2.code === 'KAPOT', e2 && e2.message);
+    const sVoor = '{"bus":{},"gezien_tot":"2026-10-01T00:00:00.000Z"';   // half geschreven
+    fs.writeFileSync(SP, sVoor);
+    let e3 = null; try { await M.app('POST /app/ideeen/gezien', { tot: new Date(nu - 1000).toISOString() }); } catch (e) { e3 = e; }
+    toets('17 kapot staat.json: gezien weigert, bestand bewaard, kopie apart', e3 && e3.code === 'KAPOT' && fs.readFileSync(SP, 'utf8') === sVoor &&
+      fs.readdirSync(DIR).some((n) => /^staat\.json\.kapot-\d+$/.test(n)), e3 && e3.message);
+    // Codex MOET 2: een kapotte regel middenin (kan een 'gedeeld' zijn) = KAPOT, geen stille 'niet gedeeld'
+    fs.writeFileSync(JP, jVoor.replace(/\n/, '\n{"t":"2026-10-24T03:26:00.000Z","soort":"gedeeld","id":"k0\n'));
+    const jKapot = fs.readFileSync(JP, 'utf8');
+    let e5 = null; try { await M.app('POST /app/ideeen/kaart/k01/deel', { __apparaat: 'tel1' }); } catch (e) { e5 = e; }
+    toets('17 kapotte journaalregel: Deel weigert (KAPOT), journaal ongewijzigd', e5 && e5.code === 'KAPOT' && fs.readFileSync(JP, 'utf8') === jKapot, e5 && e5.message);
+    fs.writeFileSync(JP, jVoor);
+    fs.unlinkSync(SP);
+    const r4 = await M.app('POST /app/ideeen/gezien', { tot: new Date(nu - 1000).toISOString() });
+    toets('17 ontbrekend staat.json telt wel als leeg', r4.status === 200, r4);
+  }
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
