@@ -73,7 +73,7 @@ const AANSLUITING = { A: 'ECG bank statements per quarter', B: 'Cheques against 
 const GIFT = ['Donation (bank transfer)', 'Donation online (Mollie)', 'Sponsor AFAS (pharmacy)', 'Unknown'];
 const RENTE_KOSTEN = ['Interest', 'Bank costs', 'Bank fee foreign payment', 'Other costs'];
 const HOUDBAAR_MS = 72 * 3600000, VERS_MS = 6 * 3600000, RONDE_MS = 15 * 60000, TERUG_MS = 24 * 3600000, LOG_MS = 3600000;
-const STUK = 60000, MAX_AANROEPEN = 20, GRENS = 1e13;
+const STUK = 60000, MAX_AANROEPEN = 20, GRENS = 1e13, FOUT_MELD_MS = 24 * 3600000;
 const PENDING = '[text pending review]', HOLD = '[text not shared]';
 const FLOAT = new Set(['rate', 'pct']);
 // algemene woorden die in donateursnamen voorkomen maar niemand aanwijzen (geen namen; alleen soort- en verbindingswoorden)
@@ -136,7 +136,8 @@ function varianten(naam) {   // "Jan K. Voorbeeld" → ook "Jan Voorbeeld" (midd
 }
 function isTweeVrij(n) { const x = norm(n); return /\bdavid\b/.test(x) || /\bmomodou\b/.test(x); }
 function lijstenVan(db, vault, S) {
-  const a = (sql) => { try { return db.prepare(sql).all(); } catch (e) { return []; } };
+  // wv3394 (Fable-review 19-11 L7): een databankfout gooit (geen ronde, signaal via maak); vroeger werd de poort stil korter (catch → [])
+  const a = (sql) => db.prepare(sql).all();
   const prive = new Set(), personen = new Map(), rekeningen = new Set();   // personen: naam → label-soort
   for (const r of a("SELECT naam FROM donateur WHERE soort IS NULL OR soort NOT IN ('Organisation', 'Sponsor', 'Online')")) if (r.naam) prive.add(String(r.naam).trim());
   const orgDon = new Set(a("SELECT naam FROM donateur WHERE soort IN ('Organisation', 'Sponsor', 'Online')").map((r) => norm(r.naam)));
@@ -244,11 +245,13 @@ function maakLabels(l, sleutel) {
 }
 const REK_LABEL = [[/\bGMD\b.*ECG|ECG.*\bGMD\b|^GMD\b/i, 'ECG GMD account'], [/ECG EUR|^EUR\b/i, 'ECG EUR account'],   // nummers: lijstenVan().rekLabels
   [/GHAWA/i, 'GHAWA (NL)'], [/Wilde Ganzen/i, 'Wilde Ganzen']];
-function rekLabel(v, extra) {
+function rekLabel(v, extra, terug) {
   if (v == null || v === '') return null;
   const s = String(v);
   for (const [re, l] of (extra || []).concat(REK_LABEL)) if (re.test(s)) return l;
-  return /\d{4,}/.test(s) ? 'account …' + (s.match(/\d+/g) || ['']).pop().slice(-4) : s;
+  if (/\d{4,}/.test(s)) return 'account …' + (s.match(/\d+/g) || ['']).pop().slice(-4);
+  // wv3394 (Fable-review 19-11 H2): een onbekende waarde (bv. een naam die op geen lijst staat) alleen via Davids tekstgoedkeuring; zonder terug: pending
+  return typeof terug === 'function' ? terug(s) : PENDING;
 }
 function wieOrg(w) {
   const s = String(w || ''), d = /david/i.test(s), m = /momodou/i.test(s);
@@ -326,10 +329,19 @@ function bouwPakketten(x) {
   const REF_WOORD = /^(invoice|receipt|inv|ref|no|nr|chq|cheque|part|of|and)$/i;
   const ref = (v, onderdeel, waar) => {
     if (v == null || v === '') return null;
-    const m = maskeer(String(v).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim());
+    const schoon = String(v).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
+    // wv3394 (Fable-review 19-11 H2): eerst de cijfers aaneen, dan maskeren en de vorm toetsen ("111 222 3334" haalde anders de vorm en ontliep
+    // maskeer en de poort). Ontstaat zo een reeks van ≥ 8 cijfers, dan langs Davids tekstgoedkeuring (gemaskeerd); "2.5" of "1/2" blijft gewoon.
+    const aaneen = cijfersAaneen(schoon);
+    if (aaneen !== schoon && /\d{8,}/.test(aaneen)) return tekst(aaneen, onderdeel || 'reference', waar || 'reference');
+    const m = maskeer(schoon);
     const vorm = m.length <= 40 && /^[A-Za-z0-9…][A-Za-z0-9 .,&\/#…-]*$/.test(m) && m.split(/[ .,&\/#-]+/).filter(Boolean).every((w) => /\d/.test(w) || REF_WOORD.test(w));   // ronde 2 MOET 1: geen korte woorden
     return vorm ? m : tekst(v, onderdeel || 'reference', waar || 'reference');
   };
+  // wv3394 (Fable-review 19-11 H2): fase, project en munt gingen kaal mee; alleen een vaste waarde blijft, de rest langs de tekstgoedkeuring
+  const vast = (lijst) => (v, onderdeel, waar) => (v == null || v === '' ? null : lijst.indexOf(String(v)) >= 0 ? String(v) : tekst(v, onderdeel, waar));
+  const fase = vast(Object.keys(FASE_EN)), project = vast(['Building', 'Pharmacy']), munt = vast(['GMD', 'EUR']);
+  const rek = (v, onderdeel, waar) => rekLabel(v, x.rekLabels, (s) => tekst(s, onderdeel, waar));
   const datum = (v) => (v && /^\d{4}-\d{2}-\d{2}/.test(String(v)) ? String(v).slice(0, 10) : null);
   const k = x.k, d = x.d, r = x.rijen;
   const asOf = { expenditure: k.standen.uitgaven, ecg_gmd: k.standen.ecg_gmd, ecg_eur: k.standen.ecg_eur };
@@ -348,7 +360,7 @@ function bouwPakketten(x) {
   pakket.overview = { as_of: asOf,
     construction: { budget: k.bouw.begroot, realised: k.bouw.gerealiseerd, not_needed: k.bouw.niet_nodig, open: k.bouw.open, pct: pm(k.bouw.pct) },
     pharmacy: { budget: k.apotheek.begroot, open: k.apotheek.open },
-    phases: k.fasen.map((f) => ({ id: f.id, name: f.id, budget: f.begroot, realised: f.gerealiseerd, not_needed: f.niet_nodig, open: f.open, pct: pm(f.pct) })),
+    phases: k.fasen.map((f) => ({ id: fase(f.id, 'overview', 'phase'), name: fase(f.id, 'overview', 'phase'), budget: f.begroot, realised: f.gerealiseerd, not_needed: f.niet_nodig, open: f.open, pct: pm(f.pct) })),
     ecg_balance: { gmd: k.ecg.gmd.saldo, gmd_date: k.ecg.gmd.datum, eur: k.ecg.eur.saldo, eur_date: k.ecg.eur.datum },
     to_raise_eur_cent: teWerven, to_raise_as_of: blok ? blok.as_of : null,
     reconciliation: [
@@ -369,25 +381,25 @@ function bouwPakketten(x) {
     const regels = r.regels.filter((x2) => actNr.has(x2.activiteit));
     const rIds = new Set(regels.map((x2) => x2.id));
     pakket[id] = { as_of: asOf,
-      phases: fasen.map((f) => ({ id: f.id, name: f.id, description: FASE_EN[f.id] || null, budget: f.begroot, realised: f.gerealiseerd, not_needed: f.niet_nodig, open: f.open, overrun: f.overschrijding || 0 })),
-      activities: acts.map((a) => ({ nr: a.nr, phase: a.fase, name: tekst(a.naam, id, 'activity ' + a.nr), status: tekst(a.status, id, 'activity ' + a.nr + ' status'),
+      phases: fasen.map((f) => ({ id: fase(f.id, id, 'phase'), name: fase(f.id, id, 'phase'), description: FASE_EN[f.id] || null, budget: f.begroot, realised: f.gerealiseerd, not_needed: f.niet_nodig, open: f.open, overrun: f.overschrijding || 0 })),
+      activities: acts.map((a) => ({ nr: a.nr, phase: fase(a.fase, id, 'activity ' + a.nr + ' phase'), name: tekst(a.naam, id, 'activity ' + a.nr), status: tekst(a.status, id, 'activity ' + a.nr + ' status'),
         note: tekst(r.actToel.get(a.nr), id, 'activity ' + a.nr + ' note'), budget: a.begroot, realised: a.gerealiseerd, not_needed: a.niet_nodig, open: a.open, overrun: a.overschrijding })),
       lines: regels.map((g) => { const kk = regelK.get(g.id) || {}; return { id: g.id, activity: g.activiteit, item: tekst(g.post, id, 'line ' + g.id), qty: g.aantal == null ? null : ref(g.aantal, id, 'line ' + g.id + ' qty'),
         price: g.prijs_cent, budget: g.begroot_cent, realised: kk.gerealiseerd || 0, open: kk.open == null ? null : kk.open, status: tekst(g.status, id, 'line ' + g.id + ' status') }; }),
       expenditures: r.uitgaven.filter((u) => rIds.has(u.regel)).map((u) => ({ id: u.id, date: datum(u.datum), line: u.regel, description: tekst(u.omschrijving, id, 'expenditure ' + u.id),
-        reference: ref(u.referentie, id, 'expenditure ' + u.id + ' reference'), gmd: u.gmd_cent, paid_from: rekLabel(u.betaald_van, x.rekLabels), method: tekst(u.betaalwijze, id, 'expenditure ' + u.id + ' method'),
+        reference: ref(u.referentie, id, 'expenditure ' + u.id + ' reference'), gmd: u.gmd_cent, paid_from: rek(u.betaald_van, id, 'expenditure ' + u.id + ' paid from'), method: tekst(u.betaalwijze, id, 'expenditure ' + u.id + ' method'),
         cheque: ref(u.cheque, id, 'expenditure ' + u.id + ' cheque'), evidence: tekst(u.bewijs, id, 'expenditure ' + u.id + ' evidence') })) };
   }
   // ECG accounts
   pakket.accounts = { as_of: asOf,
     balances: [{ account: 'ECG GMD account', currency: 'GMD', balance: k.ecg.gmd.saldo, date: k.ecg.gmd.datum }, { account: 'ECG EUR account', currency: 'EUR', balance: k.ecg.eur.saldo, date: k.ecg.eur.datum }],
-    bank: r.bank.map((b) => ({ account: b.munt === 'GMD' ? 'ECG GMD account' : b.munt === 'EUR' ? 'ECG EUR account' : rekLabel(b.rekening, x.rekLabels), date: datum(b.datum), reference: ref(b.referentie, 'accounts', 'bank reference'),
-      amount: b.bedrag_cent, currency: b.munt, balance: b.saldo_cent, kind: tekst(b.soort, 'accounts', 'bank kind'), cheque: ref(b.cheque, 'accounts', 'bank cheque'), payee: b.begunstigde ? x.lab.payee(b.begunstigde) : null })),
-    flows: r.stromen.map((s) => ({ id: s.id, date: datum(s.datum), kind: tekst(s.soort, 'accounts', 'flow ' + s.id), from: rekLabel(s.van, x.rekLabels), to: rekLabel(s.naar, x.rekLabels), eur: s.eur_cent, gmd: s.gmd_cent,
+    bank: r.bank.map((b) => ({ account: b.munt === 'GMD' ? 'ECG GMD account' : b.munt === 'EUR' ? 'ECG EUR account' : rek(b.rekening, 'accounts', 'bank account'), date: datum(b.datum), reference: ref(b.referentie, 'accounts', 'bank reference'),
+      amount: b.bedrag_cent, currency: munt(b.munt, 'accounts', 'bank currency'), balance: b.saldo_cent, kind: tekst(b.soort, 'accounts', 'bank kind'), cheque: ref(b.cheque, 'accounts', 'bank cheque'), payee: b.begunstigde ? x.lab.payee(b.begunstigde) : null })),
+    flows: r.stromen.map((s) => ({ id: s.id, date: datum(s.datum), kind: tekst(s.soort, 'accounts', 'flow ' + s.id), from: rek(s.van, 'accounts', 'flow ' + s.id + ' from'), to: rek(s.naar, 'accounts', 'flow ' + s.id + ' to'), eur: s.eur_cent, gmd: s.gmd_cent,
       rate: s.eur_cent && s.gmd_cent ? Math.round((s.gmd_cent / s.eur_cent) * 100) / 100 : null, reference: ref(s.referentie, 'accounts', 'flow ' + s.id + ' reference'), purpose: tekst(s.doel, 'accounts', 'flow ' + s.id + ' purpose') })) };
   // Funds (alleen Grant / Sponsor / Own funds)
   pakket.funds = { as_of: asOf, funds: r.fondsen.filter((f) => /^(grant|sponsor|own funds)$/i.test(String(f.soort || ''))).map((f) => ({ id: f.id, giver: tekst(f.gever, 'funds', 'fund ' + f.id),
-    kind: f.soort, project: f.project, purpose: tekst(f.doel, 'funds', 'fund ' + f.id + ' purpose'), eur: f.eur_cent, date: datum(f.datum), status: tekst(f.status, 'funds', 'fund ' + f.id + ' status'), deadline: datum(f.termijn) })) };
+    kind: f.soort, project: project(f.project, 'funds', 'fund ' + f.id + ' project'), purpose: tekst(f.doel, 'funds', 'fund ' + f.id + ' purpose'), eur: f.eur_cent, date: datum(f.datum), status: tekst(f.status, 'funds', 'fund ' + f.id + ' status'), deadline: datum(f.termijn) })) };
   // GHAWA totals
   pakket.totals = blok ? blok : null;
   // Open questions
@@ -440,6 +452,16 @@ function maak(o) {
   try { sleutel = fs.readFileSync(SLEUTEL_PAD); } catch (e) { try { fs.writeFileSync(SLEUTEL_PAD, crypto.randomBytes(32), { mode: 0o600, flag: 'wx' }); } catch (e2) { /* tegelijk aangemaakt */ } sleutel = fs.readFileSync(SLEUTEL_PAD); }
   if (sleutel.length < 32) throw new Error('deel-sleutel te kort');
 
+  // wv3394 (Fable-review 19-11 L7): kan de namenlijst niet gelezen worden, dan geen ronde (lijstenVan gooit) en één regel in Vraagt aandacht
+  function lijsten(db) {
+    let l;
+    try { l = lijstenVan(db, o.vault, S); } catch (e) {
+      signaal('namenlijst', 'Delen met ECG: de namen- en rekeningenlijst voor de poort is niet te lezen; er gaat niets nieuws naar buiten tot dat is opgelost (machinekamer kijkt mee).');
+      throw e;
+    }
+    signaalDicht('namenlijst');
+    return l;
+  }
   // alles wat een ronde nodig heeft, in één keer gelezen
   function lees() {
     const d = G.leesData(o.dbPad); d.vandaag = amsDag(nu());
@@ -455,7 +477,7 @@ function maak(o) {
         fondsen: a('SELECT id, gever, soort, project, doel, eur_cent, datum, status, termijn FROM fonds ORDER BY id'),
         vragen: a('SELECT id, onderwerp, vraag, gmd_cent, wie, status, antwoord FROM open_vraag ORDER BY id'),
         actToel: new Map(a('SELECT nr, toelichting FROM activiteit').map((x) => [x.nr, x.toelichting])) };
-      l = lijstenVan(db, o.vault, S);
+      l = lijsten(db);
       goed = new Map(a('SELECT hash, besluit FROM deel_tekst').map((x) => [x.hash, x.besluit]));
       gedeeld = new Set(a('SELECT sleutel FROM deel_overleg').map((x) => x.sleutel));
       const hs = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_historie'").get();
@@ -644,7 +666,7 @@ function maak(o) {
     const res = await d1([{ sql: 'SELECT onderdeel, stuk, json FROM deel ORDER BY onderdeel, stuk', params: [] }]);
     const rijen = (res[0] && res[0].results) || [];
     const per = new Map(); for (const r of rijen) per.set(r.onderdeel, (per.get(r.onderdeel) || '') + r.json);
-    const db = open(true); let l; try { l = lijstenVan(db, o.vault, S); } finally { db.close(); }
+    const db = open(true); let l; try { l = lijsten(db); } finally { db.close(); }
     const p = poortLijsten(l), uit = { gelezen: per.size, dicht: [], ok: [] };
     for (const [id, json] of per) {
       let doc = null; try { doc = JSON.parse(json); } catch (e) { doc = null; }
@@ -671,32 +693,59 @@ function maak(o) {
   }
 
   // ── de tik (server.js, elke minuut): open intrekkingen opnieuw, ronde bij een wijziging (≥ 15 min) of elke 6 u, teruglezen 1×/dag, log 1×/uur ──
+  // wv3394 (Fable-review 19-11 L8): elke stap een eigen try (een fout in een vroege stap slaat de rest niet meer over); mislukken de tikken 24 uur
+  // aan één stuk, dan geeft tik() één keer u.melden (server.js stuurt de melding en bevestigt met foutGemeld), ruim vóór de site na 72 u 'Paused' toont.
   let laatst = null, vuil = 1, gedaan = 0, laatsteRonde = 0, laatsteLog = 0;
-  async function tik(dwing) {
-    const u = { op: iso(nu()) };
+  const foutReden = (e) => String(e && e.message || e).replace(/[^\w .:-]/g, '').slice(0, 60);
+  function foutReeks(fouten) {   // fout_sinds = eerste mislukte tik sinds de laatste foutloze; foutloos wist hem
     try {
-      if (!IDS.some(isAan) && !metDb((db) => db.prepare('SELECT 1 FROM deel_obj LIMIT 1').get()) && !metDb((db) => db.prepare('SELECT 1 FROM deel_kijker LIMIT 1').get()) && stand('noodstop') !== '1' && stand('noodstop_d1') !== '1') { laatst = u; return u; }
+      if (!fouten.length) { if (stand('fout_sinds')) standZet('fout_sinds', ''); return null; }
+      let sinds = stand('fout_sinds');
+      if (!sinds) { sinds = iso(nu()); standZet('fout_sinds', sinds); }
+      if (nu() - Date.parse(sinds) >= FOUT_MELD_MS && stand('fout_gemeld') !== sinds) return { sinds, stappen: [...new Set(fouten.map((f) => f.split(':')[0]))].join(', ') };
+    } catch (e) { fout('ghawa-deel-tik', e); }
+    return null;
+  }
+  async function tik(dwing) {
+    const u = { op: iso(nu()) }, fouten = [];
+    const stap = async (naam, fn) => { try { await fn(); } catch (e) { fout('ghawa-deel-tik', e); fouten.push(naam + ': ' + foutReden(e)); } };
+    let rust = false;
+    await stap('stand', async () => {
+      rust = !IDS.some(isAan) && !metDb((db) => db.prepare('SELECT 1 FROM deel_obj LIMIT 1').get()) && !metDb((db) => db.prepare('SELECT 1 FROM deel_kijker LIMIT 1').get()) && stand('noodstop') !== '1' && stand('noodstop_d1') !== '1';
+    });
+    if (!rust && !fouten.length) {
       // intrekkingen die nog niet bevestigd zijn: elke minuut opnieuw, vooraan
-      const open1 = metDb((db) => db.prepare('SELECT onderdeel FROM deel_obj WHERE dicht IS NOT NULL AND dicht_bevestigd IS NULL').all()).map((r) => r.onderdeel);
-      for (const id of open1) await inRij(() => sluitOnderdeel(id, 'opnieuw'), true);
+      await stap('intrekken', async () => {
+        const open1 = metDb((db) => db.prepare('SELECT onderdeel FROM deel_obj WHERE dicht IS NOT NULL AND dicht_bevestigd IS NULL').all()).map((r) => r.onderdeel);
+        for (const id of open1) await inRij(() => sluitOnderdeel(id, 'opnieuw'), true);
+      });
       // review wv2889 ronde 1 MOET 2: ook een noodstop of iemand eraf die D1 nog niet bevestigde, elke minuut opnieuw en vooraan
-      const nood = stand('noodstop') === '1';
-      if (stand('noodstop_d1') !== (nood ? '1' : '0') && (nood || stand('noodstop_d1') === '1')) await inRij(() => noodD1(nood), true);
-      for (const r of metDb((db) => db.prepare('SELECT hash FROM deel_kijker WHERE weg_op IS NOT NULL AND weg_bevestigd IS NULL').all())) {
-        await inRij(() => kijkerD1(r.hash, false), true);
-        metDb((db) => db.prepare('UPDATE deel_kijker SET weg_bevestigd = ? WHERE hash = ? AND weg_op IS NOT NULL').run(iso(nu()), r.hash));
-      }
+      await stap('noodstop', async () => {
+        const nood = stand('noodstop') === '1';
+        if (stand('noodstop_d1') !== (nood ? '1' : '0') && (nood || stand('noodstop_d1') === '1')) await inRij(() => noodD1(nood), true);
+      });
+      await stap('kijker', async () => {
+        for (const r of metDb((db) => db.prepare('SELECT hash FROM deel_kijker WHERE weg_op IS NOT NULL AND weg_bevestigd IS NULL').all())) {
+          await inRij(() => kijkerD1(r.hash, false), true);
+          metDb((db) => db.prepare('UPDATE deel_kijker SET weg_bevestigd = ? WHERE hash = ? AND weg_op IS NOT NULL').run(iso(nu()), r.hash));
+        }
+      });
       if (dwing || (vuil !== gedaan && nu() - laatsteRonde >= RONDE_MS) || nu() - laatsteRonde >= VERS_MS) {
-        const start = vuil;
-        u.ronde = await inRij(ronde); laatsteRonde = nu(); gedaan = start;
+        await stap('ronde', async () => { const start = vuil; u.ronde = await inRij(ronde); laatsteRonde = nu(); gedaan = start; });
       }
-      const lt = stand('laatste_terug');
-      if (IDS.some(isAan) && (!lt || nu() - Date.parse(lt) >= TERUG_MS)) u.terug = await inRij(terugLees);
-      if (nu() - laatsteLog >= LOG_MS) { u.log = await inRij(logOphalen); laatsteLog = nu(); }
-    } catch (e) { fout('ghawa-deel-tik', e); u.fout = String(e && e.message || e).replace(/[^\w .:-]/g, '').slice(0, 80); standZet('laatste_fout', iso(nu())); }
+      await stap('terug', async () => {
+        const lt = stand('laatste_terug');
+        if (IDS.some(isAan) && (!lt || nu() - Date.parse(lt) >= TERUG_MS)) u.terug = await inRij(terugLees);
+      });
+      if (nu() - laatsteLog >= LOG_MS) await stap('log', async () => { u.log = await inRij(logOphalen); laatsteLog = nu(); });
+    }
+    if (fouten.length) { u.fout = fouten.join('; ').slice(0, 80); try { standZet('laatste_fout', iso(nu())); } catch (e) { /* databank zelf weg: staat al in u.fout */ } }
+    const m = foutReeks(fouten);
+    if (m) u.melden = m;
     laatst = u;
     return u;
   }
+  function foutGemeld(sinds) { if (typeof sinds === 'string' && sinds) standZet('fout_gemeld', sinds); }
 
   // ── voor de app (Apps › GHAWA › Delen met ECG) ──
   async function schakel(id, aan) {
@@ -786,10 +835,10 @@ function maak(o) {
   function health() {
     let aan = 0; try { aan = IDS.filter(isAan).length; } catch (e) { aan = -1; }
     return { aan: true, onderdelen_aan: aan, noodstop: stand('noodstop') === '1', laatste_push: stand('laatste_push'), laatste_ronde: stand('laatste_ronde'),
-      laatste_terug: stand('laatste_terug'), kijkers: Number(stand('bezoekers_n') || 0), fout: !!(laatst && laatst.fout) };
+      laatste_terug: stand('laatste_terug'), kijkers: Number(stand('bezoekers_n') || 0), fout: !!(laatst && laatst.fout), fout_sinds: stand('fout_sinds') || null };
   }
   function markeerVuil() { vuil++; }
-  return { tik, ronde: () => inRij(ronde), terugLees: () => inRij(terugLees), logOphalen: () => inRij(logOphalen), schakel, noodstop, kijkerErbij, kijkerEraf, tekstBesluit, overlegDeel,
+  return { tik, foutGemeld, ronde: () => inRij(ronde), terugLees: () => inRij(terugLees), logOphalen: () => inRij(logOphalen), schakel, noodstop, kijkerErbij, kijkerEraf, tekstBesluit, overlegDeel,
     staat, health, markeerVuil, _lees: lees, _bouw: bouw, _rij: inRij, _zet: zet };
 }
 
