@@ -1043,6 +1043,11 @@ jobs:
       - name: Rooktest - adres.env (databankoverstap)
         run: docker run --rm -u claude -v "$PWD:/src:ro" --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} /src/test/adres-env.sh
 
+      # B103 (actieplan Fable 19-11): pod start ook zonder eigen databank — noodstand 'databank-weg' in fetch-secrets (pg-uit, geen
+      # antwoord), db-wacht wacht i.p.v. exit en start na herstel vanzelf, run.sh herstart de container zodra de databank er is, /health.noodstand.
+      - name: Rooktest - noodstand zonder databank (B103)
+        run: docker run --rm -u claude -v "$PWD:/src:ro" --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} /src/test/db-noodstand.sh
+
       # WAAROM DEZE STAP BESTAAT (23-9-2026). De Claude Code-CLI is bewust niet vastgepind:
       # elk nieuw image pakt de nieuwste. Dat is goed (nieuwe modellen, zoals Opus 5.5 dat
       # CLI >= 2.1.280 eist), maar een nieuwe CLI kan ook een vlag schrappen of hernoemen

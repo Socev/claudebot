@@ -36,7 +36,10 @@ find /opt/data -path /opt/data/socev-thuis -prune -o -path /opt/data/pg -prune -
 # root-herstartlus krijgen zo nooit een pod-sleutel in hun omgeving. Faalt hier iets, dan start de pod gewoon door.
 /app/socev-voorbereiding.sh || true
 # Eigen databank (wv3180): db-wacht.sh start Postgres als gebruiker pg, op de achtergrond en vóór fetch-secrets (dus zonder pod-sleutels
-# in zijn omgeving). Faalt het, dan start de pod gewoon door (de databank is dan weg; /health db en db-wacht.log tonen het).
+# in zijn omgeving). Let op: met /opt/data/.pg/adres.env staat de kluis (ook het Claude-token) in deze databank. Komt hij niet op
+# (noodschakelaar /opt/data/pg-uit, een start die niet kan), dan wacht db-wacht en probeert hij later opnieuw, en start fetch-secrets
+# de pod in de noodstand 'databank-weg': zonder kluissecrets, zichtbaar in /health.noodstand en het containerlog; run.sh herstart de
+# container zodra de databank antwoordt (B103). Zonder adres.env (Supabase-route) verandert er niets.
 [ -x /app/db/db-wacht.sh ] && { /app/db/db-wacht.sh </dev/null >/dev/null 2>&1 & }
 # fetch-secrets.sh haalt de podsecrets op en exec't daarna de rest van de keten,
 # zodat run.sh en server.js ze als omgeving erven. Dat dit VOOR gosu staat is

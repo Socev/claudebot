@@ -8,7 +8,13 @@
 #     kopie van de uitwijkdatabank in /opt/data/pg/terug/<id>/data.tar inzetten: uitpakken en toetsen terwijl postgres nog draait,
 #     dan netjes stoppen, de huidige datamap opzij (17/data.oud-<tijd>, nooit gewist), de kopie op zijn plek, postgres weer starten.
 #     Uitkomst in /opt/data/pg/terug-<id>.json (0640 pg:pgsock). Faalt een toets vóór het stoppen, dan blijft alles zoals het was.
-# Noodschakelaar: /opt/data/pg-uit bestaat → niets starten. Faalt hier iets, dan start de pod gewoon door (de databank is dan weg).
+# Noodschakelaar (B103, 19-11-2026): /opt/data/pg-uit bestaat → de databank start niet, db-wacht WACHT tot het bestand weg is en start
+#   hem dan alsnog. De pod draait door: fetch-secrets.sh komt dan op in de noodstand 'databank-weg' (de kluis staat in deze databank),
+#   en run.sh laat de container herstarten zodra de databank antwoordt, zodat de kluissecrets er dan wel zijn.
+# Kan de databank niet starten (half terugzetten, initdb faalt): niet meer stoppen (niemand herstartte db-wacht daarna), maar wachten
+#   met oplopende tussentijd (1 → 10 min) en opnieuw proberen; de reden staat in db-wacht.log en in de stand.
+# Stand: $PG_STAND (/run/pgstand/stand, 0640 pg:pgsock), één JSON-regel {stand: uit|wacht|start|draait|herstart|gestopt, reden, tijd}.
+#   fetch-secrets.sh (root) en server.js (/health.noodstand.databank) lezen hem; geen sleutels, geen SQL.
 set -u
 PGBIN="${PG_BIN:-/usr/lib/postgresql/17/bin}"
 BASIS="${PG_BASIS:-/opt/data/pg}"
@@ -17,13 +23,35 @@ SOCK="${PG_SOCK:-/run/pg}"
 STOPMAP="${PG_STOPMAP:-/run/pgstop}"
 INIT="${PG_INIT_MAP:-/app/db}"
 LOG="$BASIS/db-wacht.log"
+PG_UIT="${PG_UIT:-/opt/data/pg-uit}"
+STAND="${PG_STAND:-/run/pgstand/stand}"
 log(){ printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG" 2>/dev/null || true; }
+# stand <stand> [reden] — atomair (tmp + mv in dezelfde map); de reden zonder aanhalingstekens, backslashes en stuurtekens (geldige JSON)
+stand(){
+  local d t r; d="$(dirname "$STAND")"; t="$d/.stand.$$"
+  r="$(printf '%s' "${2:-}" | LC_ALL=C tr -d '\000-\037"\\' | cut -c1-200)"
+  printf '{"stand":"%s","reden":"%s","tijd":"%s"}\n' "$1" "$r" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$t" 2>/dev/null \
+    && chmod 0640 "$t" 2>/dev/null && mv -f "$t" "$STAND" 2>/dev/null || rm -f "$t" 2>/dev/null
+  return 0
+}
+# B103: de noodschakelaar houdt alleen de databank tegen, niet de pod; weg = alsnog starten
+wacht_pg_uit(){
+  [ -e "$PG_UIT" ] || return 0
+  log "noodschakelaar $PG_UIT: databank blijft uit tot het bestand weg is (de pod draait door in noodstand)"
+  stand uit "noodschakelaar pg-uit staat aan"
+  while [ -e "$PG_UIT" ]; do [ -e "$STOPMAP/stop" ] && { stand gestopt "stopverzoek"; exit 0; }; sleep 5; done
+  log "noodschakelaar weg: databank start"
+  stand start "noodschakelaar weg"
+}
 
 [ -x "$PGBIN/postgres" ] || exit 0
-[ -e /opt/data/pg-uit ] && exit 0
 
 if [ "$(id -u)" = "0" ]; then
   id pg >/dev/null 2>&1 || exit 0
+  # B103: standmap (pg schrijft, claude leest via groep pgsock; root schrijft de eerste stand)
+  mkdir -p "$(dirname "$STAND")"; chown pg:pgsock "$(dirname "$STAND")"; chmod 0750 "$(dirname "$STAND")"
+  stand start "db-wacht gestart"
+  wacht_pg_uit
   mkdir -p "$BASIS/17" "$BASIS/wal-archief" "$BASIS/log" "$SOCK" "$STOPMAP"
   chown pg:pgsock "$BASIS" "$BASIS/wal-archief" "$BASIS/log"; chmod 0750 "$BASIS" "$BASIS/wal-archief" "$BASIS/log"
   chown pg:pg "$BASIS/17"; chmod 0700 "$BASIS/17"
@@ -183,8 +211,17 @@ terug_herstel(){
   rm -f "$j"
 }
 
-terug_herstel
-initdb_als_leeg
+wacht_pg_uit
+# B103: een start die niet kan (exit 1 in terug_herstel/initdb_als_leeg, in een subshell) stopt db-wacht niet meer: wachten en opnieuw.
+# Herstelt iemand de oorzaak (bv. een achtergebleven 17/data.oud-* opgeruimd), dan start de databank vanzelf, zonder podherstart.
+HW="${PG_HERSTEL_S:-60}"   # alleen een toets zet dit korter
+until ( terug_herstel && initdb_als_leeg ); do
+  reden="$(tail -n 1 "$LOG" 2>/dev/null | cut -d' ' -f2-)"
+  stand wacht "${reden:-databank kan niet starten (zie db-wacht.log)}"
+  log "databank start niet; opnieuw over ${HW}s"
+  for _ in $(seq 1 "$HW"); do stop_gevraagd && { stand gestopt "stopverzoek"; exit 0; }; sleep 1; done
+  HW=$(( HW * 2 )); [ "$HW" -gt 600 ] && HW=600
+done
 WACHT=(2 5 10 20 30 60)
 n=0
 while ! stop_gevraagd; do
@@ -192,13 +229,14 @@ while ! stop_gevraagd; do
   PID=$!
   log "postgres gestart (pid $PID)"
   init_sql
+  if kill -0 "$PID" 2>/dev/null && "$PGBIN/pg_isready" -q -h "$SOCK"; then stand draait; fi
   gestart=$(date +%s)
   while kill -0 "$PID" 2>/dev/null; do
     if stop_gevraagd; then
       log "stopverzoek: fast shutdown"
       kill -INT "$PID" 2>/dev/null
       for _ in $(seq 1 30); do kill -0 "$PID" 2>/dev/null || break; sleep 0.5; done
-      log "postgres gestopt"; exit 0
+      log "postgres gestopt"; stand gestopt "stopverzoek"; exit 0
     fi
     if terug_open; then terug_uitvoeren; [ "$TERUG_HERSTART" = 1 ] && break; fi
     sleep 1
@@ -208,5 +246,6 @@ while ! stop_gevraagd; do
   [ $(( $(date +%s) - gestart )) -gt 300 ] && n=0
   w=${WACHT[$n]}; [ $n -lt $(( ${#WACHT[@]} - 1 )) ] && n=$((n+1))
   log "postgres stopte (rc $rc) — herstart over ${w}s"
-  for _ in $(seq 1 "$w"); do stop_gevraagd && exit 0; sleep 1; done
+  stand herstart "postgres stopte (rc $rc), herstart over ${w}s"
+  for _ in $(seq 1 "$w"); do stop_gevraagd && { stand gestopt "stopverzoek"; exit 0; }; sleep 1; done
 done
