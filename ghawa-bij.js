@@ -21,8 +21,19 @@
 const fs = require('fs');
 const path = require('path');
 
-const REK_GHAWA = { NL00TRIO0000000001: 'Current', NL00TRIO0000000002: 'Savings' };
-const ECG_REK = { '9990000001': 'GMD', '9990000002': 'EUR' };
+// Rekeningnummers van GHAWA en ECG staan alleen op de pod, in de tabel instelling (rekeningen_ghawa: IBAN → Current/Savings;
+// rekeningen_ecg: nummer → GMD/EUR; JSON), nooit in de code: deze repo is openbaar (wv3388, actieplan A12). Ontbreekt een sleutel, dan
+// weigert de bank- of afschriftronde met een signaal in plaats van te gokken.
+function rekeningenUit(db) {
+  const lees = (k) => {
+    try {
+      const r = db.prepare('SELECT waarde FROM instelling WHERE sleutel = ?').get(k);
+      const j = r && r.waarde ? JSON.parse(r.waarde) : null;
+      return j && typeof j === 'object' && !Array.isArray(j) ? j : {};
+    } catch (e) { return {}; }
+  };
+  return { ghawa: lees('rekeningen_ghawa'), ecg: lees('rekeningen_ecg') };
+}
 const GIFT_GRENS = 500000;   // bijschrijving van een onbekende tegenrekening onder € 5.000 = gift; daarboven (sponsor?) vraagt een tik
 const SOORT_ONBEKEND = 'Unknown';
 const FONDS_STATUS = ['Committed - not yet received', 'Received by GHAWA NL', 'Received by ECG', 'Expected per year', 'Withdrawn'];
@@ -117,7 +128,7 @@ function leerKaart(db) {
 }
 // t = regel uit Facturen; geeft { soort, donateur, door }
 function deelInGhawa(t, leer, rekeningen) {
-  const REK = rekeningen || REK_GHAWA;
+  const REK = rekeningen || {};
   const c = code(t), inn = t.bedrag_centen > 0, ti = t.tegenpartij_iban || null;
   if (ti && REK[ti] && ti !== t.eigen_iban) return { soort: 'Internal transfer (current/savings)', donateur: null, door: 'regel' };
   if (!inn && (c === 'KN' || /^triodos bank\b.*kosten/i.test(String(t.omschrijving || '')))) return { soort: 'Bank costs', donateur: null, door: 'regel' };
@@ -131,7 +142,7 @@ function deelInGhawa(t, leer, rekeningen) {
 }
 // Leest Facturen (alleen lezen). → { regels, ankers } of null als de databank er niet is.
 function leesFacturen(facPad, rekeningen) {
-  const REK = rekeningen || REK_GHAWA;
+  const REK = rekeningen || {};
   if (!facPad || !fs.existsSync(facPad)) return null;
   const { DatabaseSync } = require('node:sqlite');
   const f = new DatabaseSync(facPad, { readOnly: true });
@@ -159,7 +170,8 @@ function leesFacturen(facPad, rekeningen) {
 // Vergelijkt en neemt over. db = schrijfbare ghawa-databank (gemigreerd). → { uitkomst, nieuw, onbekend, fout? }
 function bankBij(db, facPad, o) {
   const nu = nuIso(o);
-  const REK = (o && o.rekeningen) || REK_GHAWA;
+  const REK = (o && o.rekeningen) || rekeningenUit(db).ghawa;
+  if (Object.keys(REK).length !== 2 || Object.values(REK).sort().join() !== 'Current,Savings') return weiger('de twee rekeningen van GHAWA staan niet (goed) in de instellingen (rekeningen_ghawa)');
   const F = (o && o.facturen) || leesFacturen(facPad, REK);
   if (!F) return { uitkomst: 'geen bron', nieuw: 0, onbekend: 0 };
   if (F.regels.some((t) => t.valuta !== 'EUR' || !Number.isSafeInteger(t.bedrag_centen) || !/^\d{4}-\d{2}-\d{2}$/.test(String(t.boekdatum)))) {
@@ -437,7 +449,9 @@ function ecgAfschrift(db, inv, hulp, o) {
   }
   if (lees.fout) return weiger(lees.fout, { formaat: lees.formaat });
   const rek = String(lees.rekening || '').replace(/\D/g, '');
-  const munt = ECG_REK[rek];
+  const ECG = (o && o.ecgRekeningen) || rekeningenUit(db).ecg;
+  if (!Object.keys(ECG).length) return weiger('de rekeningnummers van ECG staan niet in de instellingen (rekeningen_ecg)', { formaat: lees.formaat });
+  const munt = Object.prototype.hasOwnProperty.call(ECG, rek) && /^(GMD|EUR)$/.test(ECG[rek]) ? ECG[rek] : null;
   if (!munt) return weiger(rek ? 'dit afschrift is van een andere rekening (eindigt op ' + rek.slice(-3) + '), niet van ECG' : 'het rekeningnummer van ECG staat niet in het afschrift', { formaat: lees.formaat });
   const rijen = lees.rijen;
   if (!rijen.length) return weiger('er staan geen boekingen in', { formaat: lees.formaat, rekening: rek, munt });
@@ -590,6 +604,6 @@ function rondeKaart(st, nu) {
     herkomst: { handmatig: 'ghawa-maandronde', maand: m, module: 'ghawa', doel: { scherm: 'ghawa', focus: 'ronde' } } };
 }
 
-module.exports = { REK_GHAWA, ECG_REK, SOORT_ONBEKEND, FONDS_STATUS, RONDE_STAPPEN, AFVINKBAAR, BIJ_TABELLEN, SCHEMA_BIJ, migreer, fase2Gegevens,
+module.exports = { rekeningenUit, SOORT_ONBEKEND, FONDS_STATUS, RONDE_STAPPEN, AFVINKBAAR, BIJ_TABELLEN, SCHEMA_BIJ, migreer, fase2Gegevens,
   leesFacturen, bankBij, deelInGhawa, chequeNaam, leerKaart, indelen, datumEco, centEco, leesEcgCsv, leesEcgPdfTekst, pdfNaarTekst, deelInEcg, ecgAfschrift,
   koppelStromen, fondsZet, rondeZet, rondeKaart, maandVan, dagen, ibanUit };

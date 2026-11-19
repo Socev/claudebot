@@ -26,7 +26,13 @@ const nieuw = [['f5', '2026-01-10', 2500, { tegenpartij_naam: DONOR, tegenpartij
   ['f6', '2026-01-11', 4000, { tegenpartij_naam: 'Nieuwe Gever Jansen', tegenpartij_iban: 'NL77NIEU0000000001' }],
   ['f7', '2026-01-12', -2000, { tegenpartij_naam: 'Vreemde Winkel', tegenpartij_iban: 'NL88VREE0000000002', transactietype: 'TRIODOS:ID' }],
   ['f8', '2026-01-13', -300, { transactietype: 'TRIODOS:KN' }], ['f9', '2026-01-14', 900000, { tegenpartij_naam: 'Grote Gift', tegenpartij_iban: 'NL66GROT0000000003' }]];
-function open(db) { const x = new DatabaseSync(db); B.migreer(x); return x; }
+// verzonnen ECG-rekeningen; de echte staan alleen op de pod in instelling rekeningen_ecg (wv3388)
+const ECG = { '9990000017': 'GMD', '9990000025': 'EUR' };
+function open(db) {
+  const x = new DatabaseSync(db); B.migreer(x);
+  x.prepare('INSERT OR REPLACE INTO instelling (sleutel, waarde, toelichting) VALUES (?, ?, ?)').run('rekeningen_ecg', JSON.stringify(ECG), 'toets');
+  return x;
+}
 
 test('GHAWA-bank: nieuwe regels erbij, ingedeeld, saldo doorgerekend, tweede keer niets', () => {
   const { db } = vers(); const x = open(db);
@@ -99,12 +105,12 @@ test('ECG-afschrift: csv erin, ontdubbeld, ingedeeld, omwisseling gekoppeld, sal
     ['03 Aug 2026', 'B/O ELITE CARE GROUP, IFO SOLAR WINKEL, panels', 'I61X0003AB', -9000, 70000], ['03 Aug 2026', 'B/O ELITE CARE GROUP, IFO SOLAR WINKEL, panels', 'I61X0003AB', -100, 69900]];
   const eur = [['01 Aug 2026', '0001TRF b/o 1/ Stichting GHAWA iro / ROC/abc', 'TRF0001AB12', 2000, 5975], ['01 Aug 2026', 'B/O ELITE CARE GROUP, IFO ELITE CARE GROUP, Cheque 5', 'I61X0001AB', -1000, 4975],
     ['01 Aug 2026', 'B/O ELITE CARE GROUP, IFO ELITE CARE GROUP, Cheque 5', 'I61X0001AB', -5, 4970]];
-  const r1 = B.ecgAfschrift(x, { naam: 'gmd.csv', bytes: eco('9990000001', 'GMD', gmd.slice(0, 3)) }, hulp, NU);
+  const r1 = B.ecgAfschrift(x, { naam: 'gmd.csv', bytes: eco('9990000017', 'GMD', gmd.slice(0, 3)) }, hulp, NU);
   assert.deepStrictEqual([r1.uitkomst, r1.munt, r1.nieuw], ['overgenomen', 'GMD', 3]);
-  const r2 = B.ecgAfschrift(x, { naam: 'gmd2.csv', bytes: eco('9990000001', 'GMD', gmd.slice(1)) }, hulp, NU);   // overlap van twee regels
+  const r2 = B.ecgAfschrift(x, { naam: 'gmd2.csv', bytes: eco('9990000017', 'GMD', gmd.slice(1)) }, hulp, NU);   // overlap van twee regels
   assert.deepStrictEqual([r2.uitkomst, r2.nieuw, r2.al_bekend], ['overgenomen', 2, 2]);
-  assert.strictEqual(B.ecgAfschrift(x, { naam: 'gmd2.csv', bytes: eco('9990000001', 'GMD', gmd.slice(1)) }, hulp, NU).uitkomst, 'al ingelezen');
-  const r3 = B.ecgAfschrift(x, { naam: 'eur.csv', bytes: eco('9990000002', 'EUR', eur) }, hulp, NU);
+  assert.strictEqual(B.ecgAfschrift(x, { naam: 'gmd2.csv', bytes: eco('9990000017', 'GMD', gmd.slice(1)) }, hulp, NU).uitkomst, 'al ingelezen');
+  const r3 = B.ecgAfschrift(x, { naam: 'eur.csv', bytes: eco('9990000025', 'EUR', eur) }, hulp, NU);
   assert.deepStrictEqual([r3.uitkomst, r3.nieuw, r3.geldstromen], ['overgenomen', 3, 2]);   // omwisseling + overboeking van GHAWA
   const s = x.prepare("SELECT munt, soort, cheque FROM bankregel_ecg WHERE herkomst = 'afschrift' ORDER BY volg").all();
   assert.deepStrictEqual(s.map((y) => y.soort), ['Conversion in', 'Cheque withdrawal', 'Bank charge', 'Payment to supplier', 'Bank charge', 'Transfer in from NL', 'Conversion out', 'Bank charge']);
@@ -122,9 +128,9 @@ test('ECG-afschrift: csv erin, ontdubbeld, ingedeeld, omwisseling gekoppeld, sal
 test('ECG-afschrift weigert: gat, saldo dat niet sluit, andere rekening, Triodos-export, geen export', () => {
   const { db } = vers(); const x = open(db);
   const nee = (naam, buf, re) => { const r = B.ecgAfschrift(x, { naam, bytes: buf }, hulp, NU); assert.strictEqual(r.uitkomst, 'geweigerd', naam); assert.match(r.fout, re, naam); };
-  nee('gat.csv', eco('9990000001', 'GMD', [['05 Aug 2026', 'COMMISSION', 'I61C0001', -100, 49400]]), /ontbreekt een periode/);
-  nee('kapot.csv', eco('9990000001', 'GMD', [['05 Aug 2026', 'COMMISSION', 'I61C0001', -100, 59400], ['06 Aug 2026', 'COMMISSION', 'I61C0002', -100, 59000]]), /sluiten niet/);
-  nee('eigen.csv', eco('9990000003', 'GMD', [['05 Aug 2026', 'COMMISSION', 'I61C0001', -100, 59400]]), /andere rekening/);
+  nee('gat.csv', eco('9990000017', 'GMD', [['05 Aug 2026', 'COMMISSION', 'I61C0001', -100, 49400]]), /ontbreekt een periode/);
+  nee('kapot.csv', eco('9990000017', 'GMD', [['05 Aug 2026', 'COMMISSION', 'I61C0001', -100, 59400], ['06 Aug 2026', 'COMMISSION', 'I61C0002', -100, 59000]]), /sluiten niet/);
+  nee('eigen.csv', eco('9990000099', 'GMD', [['05 Aug 2026', 'COMMISSION', 'I61C0001', -100, 59400]]), /andere rekening/);
   nee('triodos.csv', Buffer.from('05-08-2026,NL00TRIO0000000001,"1,00",Credit,X,,ET,y,"1,00"\n'), /Triodos-export/);
   nee('leeg.csv', Buffer.from('a,b,c\n'), /geen Ecobank-export/);
   assert.strictEqual(x.prepare("SELECT COUNT(*) AS n FROM bankregel_ecg WHERE herkomst = 'afschrift'").get().n, 0);
@@ -132,9 +138,26 @@ test('ECG-afschrift weigert: gat, saldo dat niet sluit, andere rekening, Triodos
   x.close();
 });
 
+test('wv3388: rekeningnummers alleen uit de instellingen; ontbreken ze, dan weigeren bank en afschrift met een signaal', () => {
+  const { db } = vers(); const x = new DatabaseSync(db); B.migreer(x);   // zonder rekeningen_ecg / rekeningen_ghawa
+  assert.deepStrictEqual(B.rekeningenUit(x), { ghawa: {}, ecg: {} });
+  const a = B.ecgAfschrift(x, { naam: 'g.csv', bytes: eco('9990000017', 'GMD', [['05 Aug 2026', 'COMMISSION', 'I61C0001', -100, 59400]]) }, hulp, NU);
+  assert.strictEqual(a.uitkomst, 'geweigerd'); assert.match(a.fout, /rekeningen_ecg/);
+  const b = B.bankBij(x, null, Object.assign({ facturen: fac(nieuw) }, NU));
+  assert.strictEqual(b.uitkomst, 'geweigerd'); assert.match(b.fout, /rekeningen_ghawa/);
+  assert.strictEqual(x.prepare("SELECT COUNT(*) AS n FROM bankregel_ghawa WHERE herkomst = 'bank'").get().n, 0);
+  // met de instellingen: dezelfde ronde neemt over
+  x.prepare('INSERT INTO instelling (sleutel, waarde, toelichting) VALUES (?, ?, ?)').run('rekeningen_ghawa', JSON.stringify(REKS), 'toets');
+  assert.deepStrictEqual(B.rekeningenUit(x).ghawa, REKS);
+  assert.strictEqual(B.bankBij(x, null, Object.assign({ facturen: fac(nieuw) }, NU)).uitkomst, 'bijgewerkt');
+  x.prepare('INSERT INTO instelling (sleutel, waarde, toelichting) VALUES (?, ?, ?)').run('rekeningen_ecg', '{kapot', 'toets');
+  assert.deepStrictEqual(B.rekeningenUit(x).ecg, {});
+  x.close();
+});
+
 test('ECG-afschrift als pdf-tekst (pdftotext -layout, nieuwste eerst, bedrag = saldoverschil)', () => {
   const { db } = vers(); const x = open(db);
-  const tekst = ['ECOBANK THE GAMBIA', 'Account Number: 9990000001   Currency: GMD', 'Opening Balance            595.00', '',
+  const tekst = ['ECOBANK THE GAMBIA', 'Account Number: 9990000017   Currency: GMD', 'Opening Balance            595.00', '',
     'Date        Value Date  Description                         Reference          Debit        Credit       Balance',
     '03-AUG-26   03-AUG-26   EGM CHQ NO 6 PAID TO BOUWER B       I64CQ0006AB     1,000.00                    1,395.00',
     '            continued text of the line above',
@@ -184,7 +207,7 @@ test('maandronde, kaart na 35 dagen (één per maand), routes en herinvoer', () 
   assert.strictEqual(r.stappen[3].klaar, true); assert.strictEqual(r.stappen[4].later, true);
   assert.strictEqual(m.maandKaart(), null);   // nog nooit een afschrift via de app: de aanleverkaart dekt dit
   const y = open(db);
-  B.ecgAfschrift(y, { naam: 'g.csv', bytes: eco('9990000001', 'GMD', [['23 Jul 2026', 'COMMISSION', 'I61C0001', -100, 59400]]) }, hulp, NU); y.close();
+  B.ecgAfschrift(y, { naam: 'g.csv', bytes: eco('9990000017', 'GMD', [['23 Jul 2026', 'COMMISSION', 'I61C0001', -100, 59400]]) }, hulp, NU); y.close();
   const k = m.maandKaart();
   assert.strictEqual(k.sleutel, 'ghawa-maandronde-2026-11'); assert.ok(k.waarom.length <= 400 && k.titel.length <= 90);
   m.kaartGezet(k.sleutel);
@@ -197,7 +220,7 @@ test('maandronde, kaart na 35 dagen (één per maand), routes en herinvoer', () 
   // POST-routes en onbekend
   assert.strictEqual(m.app({ pad: '/app/ghawa/onzin', methode: 'POST', body: {} }).status, 404);
   assert.strictEqual(m.app({ pad: '/app/ghawa/afschrift', methode: 'POST', body: { bestand: '' } }).status, 400);
-  const up = m.app({ pad: '/app/ghawa/afschrift', methode: 'POST', body: { naam: 'n.csv', bestand: eco('9990000001', 'GMD', [['24 Jul 2026', 'COMMISSION', 'I61C0002', -100, 59300]]).toString('base64') } });
+  const up = m.app({ pad: '/app/ghawa/afschrift', methode: 'POST', body: { naam: 'n.csv', bestand: eco('9990000017', 'GMD', [['24 Jul 2026', 'COMMISSION', 'I61C0002', -100, 59300]]).toString('base64') } });
   assert.strictEqual(up.status, 200); assert.match(up.reden, /overgenomen GMD nieuw 1/);
   // herinvoer weigert nu (bijgehouden regels) en kan alleen met forceer
   assert.throws(() => G.invoer(map, db), /bijgehouden regels/);
@@ -229,20 +252,20 @@ test('review wv2880: lege bronrekening, rekening alleen uit de pdf-kop, geldstro
     const r = B.bankBij(x, null, Object.assign({ facturen: fac(nieuw), rekeningen: REKS }, NU));
     assert.strictEqual(r.uitkomst, 'geweigerd'); assert.match(r.fout, /spaarrekening: 1 eerder overgenomen/); x.close(); }
   // MOET 2: kop noemt een andere rekening, een ECG-nummer staat alleen in een omschrijving → geweigerd (andere rekening)
-  { const tekst = ['ECOBANK', 'Account Number: 9990000003   Currency: GMD', 'Opening Balance 595.00', '',
-      '03-AUG-26   TRANSFER TO 9990000001 ELITE CARE      I64X0006AB     100.00        495.00'].join('\n');
-    const r = B.leesEcgPdfTekst(tekst); assert.strictEqual(r.rekening, '9990000003');
+  { const tekst = ['ECOBANK', 'Account Number: 9990000099   Currency: GMD', 'Opening Balance 595.00', '',
+      '03-AUG-26   TRANSFER TO 9990000017 ELITE CARE      I64X0006AB     100.00        495.00'].join('\n');
+    const r = B.leesEcgPdfTekst(tekst); assert.strictEqual(r.rekening, '9990000099');
     const { db } = vers(); const x = open(db);
     assert.match(B.ecgAfschrift(x, { naam: 'v.pdf', bytes: Buffer.from('%PDF-1.4 v') }, { csvLees: G.csvLees, pdfNaarTekst: () => ({ tekst }) }, NU).fout, /andere rekening/);
-    assert.match(B.leesEcgPdfTekst(tekst.replace('Account Number: 9990000003', 'Statement')).fout, /niet in de kop/);
-    assert.match(B.leesEcgPdfTekst(tekst.replace('Currency: GMD', 'Account 9990000002')).fout, /meerdere/); x.close(); }
+    assert.match(B.leesEcgPdfTekst(tekst.replace('Account Number: 9990000099', 'Statement')).fout, /niet in de kop/);
+    assert.match(B.leesEcgPdfTekst(tekst.replace('Currency: GMD', 'Account 9990000025')).fout, /meerdere/); x.close(); }
   // MOET 3: eerst alleen de kosten van een omwisseling (lijkt de grootste), daarna de hele dag: de geldstroom krijgt het echte bedrag
   { const { db } = vers(); const x = open(db);
-    B.ecgAfschrift(x, { naam: 'g.csv', bytes: eco('9990000001', 'GMD', [['01 Aug 2026', 'B/O ELITE CARE GROUP, IFO ELITE CARE GROUP, Cheque 7', 'I61X0007AB', 80000, 139500]]) }, hulp, NU);
+    B.ecgAfschrift(x, { naam: 'g.csv', bytes: eco('9990000017', 'GMD', [['01 Aug 2026', 'B/O ELITE CARE GROUP, IFO ELITE CARE GROUP, Cheque 7', 'I61X0007AB', 80000, 139500]]) }, hulp, NU);
     const fee = ['01 Aug 2026', 'B/O ELITE CARE GROUP, IFO ELITE CARE GROUP, Cheque 7', 'I61X0007AB', -5, 3970], hoofd = ['01 Aug 2026', 'B/O ELITE CARE GROUP, IFO ELITE CARE GROUP, Cheque 7', 'I61X0007AB', -1000, 2970];
-    B.ecgAfschrift(x, { naam: 'e1.csv', bytes: eco('9990000002', 'EUR', [fee]) }, hulp, NU);
+    B.ecgAfschrift(x, { naam: 'e1.csv', bytes: eco('9990000025', 'EUR', [fee]) }, hulp, NU);
     assert.strictEqual(x.prepare("SELECT eur_cent FROM geldstroom WHERE herkomst = 'afschrift' AND soort LIKE 'Conversion%'").get().eur_cent, 5);
-    const r = B.ecgAfschrift(x, { naam: 'e2.csv', bytes: eco('9990000002', 'EUR', [fee, hoofd]) }, hulp, NU);
+    const r = B.ecgAfschrift(x, { naam: 'e2.csv', bytes: eco('9990000025', 'EUR', [fee, hoofd]) }, hulp, NU);
     assert.deepStrictEqual([r.uitkomst, r.nieuw, r.al_bekend], ['overgenomen', 1, 1]);
     assert.deepStrictEqual(x.prepare("SELECT eur_cent, gmd_cent FROM geldstroom WHERE herkomst = 'afschrift'").all().map((y) => [y.eur_cent, y.gmd_cent]), [[1000, 80000]]);
     assert.deepStrictEqual(x.prepare("SELECT soort FROM bankregel_ecg WHERE herkomst = 'afschrift' AND munt = 'EUR' ORDER BY volg").all().map((y) => y.soort), ['Bank charge', 'Conversion out']);

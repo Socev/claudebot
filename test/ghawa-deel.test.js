@@ -374,3 +374,18 @@ test('MOET 4 (ronde 1 en 2): elk blok dat buiten kán staan telt mee — push mi
   assert.strictEqual(hist(), h3, 'zelfde blok, geen nieuwe historie');
   assert.strictEqual(deelVan(o, 'totals').balance.eur_cent, s0 + 302 + 303 + 304 + 305 + 306 + 307);
 });
+
+test('wv3388: ECG-rekeningnummer krijgt zijn label uit de instelling op de pod, niet uit de code', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE instelling (sleutel TEXT PRIMARY KEY, waarde TEXT, toelichting TEXT)');
+  const leeg = D.lijstenVan(db, os.tmpdir(), { leesVault: () => ({}) });
+  assert.deepStrictEqual(leeg.rekLabels, []);
+  assert.strictEqual(D.rekLabel('9990000017', leeg.rekLabels), 'account …0017');   // zonder instelling: geen nummer in de code
+  db.prepare('INSERT INTO instelling VALUES (?, ?, ?)').run('rekeningen_ecg', JSON.stringify({ '9990000017': 'GMD', '9990000025': 'EUR' }), 'toets');
+  const l = D.lijstenVan(db, os.tmpdir(), { leesVault: () => ({}) });
+  assert.strictEqual(D.rekLabel('9990000017', l.rekLabels), 'ECG GMD account');
+  assert.strictEqual(D.rekLabel('naar 9990000025', l.rekLabels), 'ECG EUR account');
+  assert.strictEqual(D.rekLabel('GMD 1234567890', l.rekLabels), 'ECG GMD account');
+  assert.ok(l.rekeningen.includes('9990000017') && l.rekeningen.includes('9990000025'), 'nummers in de poortlijst');
+  db.close();
+});
