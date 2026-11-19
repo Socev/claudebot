@@ -1611,6 +1611,41 @@ function nogBetalenMail(m) {
   if (m.proef) regels.unshift('PROEF - verzonnen factuur, niet betalen.', '');
   return { onderwerp, bericht: regels.join('\n').slice(0, 2000), ref };
 }
+/*
+ * wv3455 (fase 3, ontwerp § 4; registerrij nogbetalen-herinnering): één herinnering per entiteit per dag aan Cynthia, zonder aanhef of groet.
+ * m = { id (16 hex, de mailrij), entiteit, bank_tot (dag t/m waar de bank van die entiteit bijgewerkt is), proef, facturen: [{ id, leverancier,
+ * centen, valuta, vervaldatum, verzoek_dag }] } → { onderwerp, bericht, ref }. Onderwerp "NOG NIET BETAALD GEZIEN - <entiteit> - N facturen"
+ * (≤ 200); getoond = het aantal facturen dat echt in de tekst staat (nhClaim bundelt er niet meer). Per factuur één regel: leverancier, bedrag, uiterlijk, dag van het betaalverzoek en het kenmerk van dat verzoek (NB + factuur-id), zodat
+ * Cynthia de eerdere mail terugvindt. Geen IBAN, omschrijving of bijlage: alles staat al in het betaalverzoek.
+ */
+const HERINNERING_MAX_REGELS = 25;
+function herinneringMail(m) {
+  m = m || {};
+  if (!/^[0-9a-f]{16}$/.test(String(m.id || ''))) throw new KernFout('nogbetalen', 'herinnering-id ongeldig');
+  const lijst = Array.isArray(m.facturen) ? m.facturen : [];
+  if (!lijst.length || lijst.some((f) => !/^[0-9a-f]{16}$/.test(String(f && f.id || '')))) throw new KernFout('nogbetalen', 'geen of ongeldige facturen');
+  const ref = 'NH' + m.id;
+  const ent = eenRegel(m.entiteit, 40) || 'onbekend';
+  const n = lijst.length;
+  const onderwerp = ((m.proef ? 'PROEF - ' : '') + 'NOG NIET BETAALD GEZIEN - ' + ent + ' - ' + n + (n === 1 ? ' factuur' : ' facturen')).slice(0, 200);
+  const regels = [];
+  if (m.proef) regels.push('PROEF - verzonnen facturen, niets doen.', '');
+  regels.push('Nog niet betaald gezien op de bank:', '');
+  const staart = ['', 'De bank van ' + ent + (isIsoDatum(m.bank_tot) ? ' is bijgewerkt t/m ' + dagMaand(m.bank_tot) + '-' + m.bank_tot.slice(0, 4) : ' is bijgewerkt') +
+    '. Al betaald, bijvoorbeeld samen in één overboeking? Dan hoeft er niets te gebeuren.', '', 'Kenmerk ' + ref];
+  // binnen 3000 tekens (de verzender weigert langer) en het kenmerk altijd heel: regels tot het budget op is, dan "en nog N"
+  const budget = 3000 - staart.join('\n').length - 40;
+  let lengte = regels.join('\n').length, getoond = 0;
+  for (const f of lijst.slice(0, HERINNERING_MAX_REGELS)) {
+    const uit = isIsoDatum(f.vervaldatum) ? ' - uiterlijk ' + dagMaand(f.vervaldatum) : '';
+    const vz = isIsoDatum(f.verzoek_dag) ? ' - verzoek van ' + dagMaand(f.verzoek_dag) : '';
+    const r = '- ' + (eenRegel(f.leverancier, 80) || 'onbekende leverancier') + ' ' + bedragNl(f.centen, f.valuta) + uit + vz + ' (kenmerk NB' + f.id + ')';
+    if (lengte + 1 + r.length > budget) break;
+    regels.push(r); lengte += 1 + r.length; getoond++;
+  }
+  if (n > getoond) regels.push('- en nog ' + (n - getoond) + '; vraag David');
+  return { onderwerp, bericht: regels.concat(staart).join('\n'), ref, getoond };
+}
 
 module.exports = {
   KernFout,
@@ -1633,4 +1668,6 @@ module.exports = {
   zichtbaarVoor,
   // betaalverzoek naar Cynthia (wv3369)
   letOp, nogBetalenMail, LET_OP_MAX,
+  // herinnering aan Cynthia (wv3455)
+  herinneringMail, HERINNERING_MAX_REGELS,
 };

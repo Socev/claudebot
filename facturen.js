@@ -2138,6 +2138,176 @@ function nbInfo(fdb, nu) {
     per_dag: NOGBETALEN.per_dag, onzeker: n("SELECT count(*) AS n FROM betaal_verzending WHERE status = 'onzeker'"), mislukt: n("SELECT count(*) AS n FROM betaal_verzending WHERE status = 'mislukt'"),
     verstuurd: n("SELECT count(*) AS n FROM betaal_verzending WHERE status = 'verstuurd'"), laatste: l };
 }
+// ─────────────────────── herinnering aan Cynthia (nogbetalen@, wv3455, fase 3) ───────────────────────
+
+/*
+ * wv3455 (ontwerp "Facturen naar Cynthia - nogbetalen" § 4; Davids Ja 19-11-2026 22:46 met verse vingerafdruk, vraag-id f88d6554, registerrij
+ * nogbetalen-herinnering): "Herinnering 'NOG NIET BETAALD GEZIEN - <praktijk>' alleen naar nogbetalen@huisartsentolgaarde.nl, direct: hooguit
+ * één per factuur die als betaalverzoek daarheen ging, alleen als de bank van die praktijk is bijgewerkt tot na de termijn en de betaling er
+ * niet staat. Per praktijk per dag gebundeld, werkdagen 08–17 uur, hooguit 5 per dag, geen cc."
+ * Kandidaat: factuur op te_betalen (nbNiet null: niet betaald gezien, niet via kaart/PayPal, geen netto koppeling) met een VERSTUURD betaalverzoek
+ * (de laatste telt voor de dag). Termijn en bankstand: B.herinneringTermijn / B.herinneringStand (alle actieve rekeningen van de entiteit
+ * bijgewerkt tot ná de termijn). Open koppelvoorstel of open signaal op de factuur (behalve te_betalen_niet_betaald, dat is dit zelf) → geen
+ * herinnering maar één regel aan David (betaal_herinnering soort david). nhClaim zet in één transactie de mailrij op 'verzenden' en per factuur
+ * herinnerd_op, vóór de aanroep van de verzender (server.js); de rij gaat nooit terug, dus nooit opnieuw na een onzekere verzending, en ook
+ * geen herkansing na een zekere weigering (registerrij: hooguit één per factuur). 7 dagen na een verstuurde herinnering nog niet betaald gezien →
+ * één regel aan David (gemeld_op, één keer), daarna stilte. Schakelaar, noodstop, venster en verzender: server.js.
+ */
+const NB_HERINNER = Object.freeze({ per_dag: 5, uur_van: 8, uur_tot: 17, na_dagen: 7, hangt_min: 15 });
+const NH_STATUS = ['verzenden', 'verstuurd', 'onzeker', 'mislukt'];
+// Werkdag in Nederland: ma–vr, geen feestdag (zelfde lijst als de verzender en pot-verzend.js: ook Goede Vrijdag, Koningsdag, 5 mei)
+function nhWerkdag(ymd) {
+  if (!K.isIsoDatum(ymd)) return false;
+  const w = new Date(ymd + 'T12:00:00Z').getUTCDay();
+  if (w === 0 || w === 6) return false;
+  const j = Number(ymd.slice(0, 4)), md = ymd.slice(5), p = S.pasen(j);
+  const kd = new Date(Date.UTC(j, 3, 27)).getUTCDay() === 0 ? '04-26' : '04-27';
+  return !(['01-01', kd, '05-05', '12-25', '12-26'].includes(md) || [-2, 0, 1, 39, 49, 50].some((x) => K.plusDagen(p, x) === ymd));
+}
+function nhVenster(nu) {
+  const uur = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(new Date(nu)));
+  return nhWerkdag(dagAmsterdam(nu)) && uur >= NB_HERINNER.uur_van && uur < NB_HERINNER.uur_tot;
+}
+// Open koppelvoorstel of open signaal op de factuur → korte reden (zonder inhoud), anders null
+function nhOpenVraag(fdb, factuurId) {
+  if (fdb.db.prepare("SELECT 1 FROM voorstel WHERE status = 'open' AND EXISTS (SELECT 1 FROM json_each(voorstel.facturen) j WHERE j.value = ?) LIMIT 1").get(factuurId))
+    return 'er staat een koppelvoorstel open (bankregel bij deze factuur)';
+  const s = fdb.db.prepare("SELECT soort FROM signaal WHERE status = 'open' AND soort <> 'te_betalen_niet_betaald' AND EXISTS (SELECT 1 FROM json_each(signaal.facturen) j WHERE j.value = ?) ORDER BY soort LIMIT 1").get(factuurId);
+  return s ? 'er staat een signaal open (' + s.soort + ')' : null;
+}
+function nhVerw(fdb, vandaag) {
+  return { dekking: bankDekking(fdb), actief: bankActief(fdb, vandaag), rekeningen: fdb.db.prepare('SELECT iban, entiteit, controle FROM rekening').all(), vandaag };
+}
+/*
+ * Per open factuur met een verstuurd betaalverzoek: { factuur, verzending, entiteit, verzoek_dag, termijn, stand, dekking, open (reden|null) }.
+ * Alleen lezen (ook voor de toets en /health).
+ */
+function nhStanden(fdb, nu, verw) {
+  const vandaag = dagAmsterdam(nu);
+  verw = verw || nhVerw(fdb, vandaag);
+  const laatste = new Map();
+  for (const v of fdb.db.prepare("SELECT v.id, v.factuur, v.entiteit, coalesce(v.verzonden_op, v.bijgewerkt_op) AS op FROM betaal_verzending v JOIN factuur f ON f.id = v.factuur " +
+    "WHERE v.status = 'verstuurd' AND f.betaalspoor = 'te_betalen' ORDER BY v.factuur, op, v.aangemaakt_op").all()) laatste.set(v.factuur, v);
+  const uit = [];
+  for (const v of laatste.values()) {
+    const f = D.factuurVoorKern(fdb, v.factuur);
+    if (nbNiet(fdb, f) || f.entiteit !== v.entiteit) continue;
+    const verzoek_dag = dagAmsterdam(Date.parse(v.op));
+    const termijn = B.herinneringTermijn(f.vervaldatum, verzoek_dag);
+    if (!termijn) continue;
+    const st = B.herinneringStand({ entiteit: f.entiteit, termijn }, verw);
+    uit.push({ factuur: f.id, verzending: v.id, entiteit: f.entiteit, verzoek_dag, termijn, stand: st.stand, dekking: st.dekking,
+      open: st.stand === 'te_laat' ? nhOpenVraag(fdb, f.id) : null, f });
+  }
+  return uit;
+}
+/*
+ * Voor server.js, alleen binnen het venster, met de schakelaar aan en de verzender in orde. Eén transactie: regels aan David vastleggen (soort
+ * david), per entiteit hooguit één mailrij per dag op 'verzenden' (plafond per_dag over alle entiteiten), per factuur herinnerd_op.
+ * → { mails: [{ id, aan, ref, onderwerp, bericht, entiteit, aantal }], david: [{ factuur, entiteit, leverancier, bedrag, reden }], plafond }
+ */
+function nhClaim(fdb, nu, o) {
+  o = o || {};
+  const vandaag = dagAmsterdam(nu), wanneer = nuIso(nu);
+  return D.transactie(fdb, function () {
+    const perEnt = new Map(), david = [];
+    for (const x of nhStanden(fdb, nu)) {
+      if (x.stand !== 'te_laat') continue;
+      if (x.open) {
+        if (fdb.db.prepare("SELECT 1 FROM betaal_herinnering WHERE factuur = ? AND soort = 'david'").get(x.factuur)) continue;
+        D.voegToe(fdb, 'betaal_herinnering', { factuur: x.factuur, soort: 'david', verzending: x.verzending, entiteit: x.entiteit, termijn: x.termijn, reden: kort(x.open, 200),
+          gemeld_op: wanneer, aangemaakt_op: wanneer });
+        D.audit(fdb, { wie: 'pod (nogbetalen)', wat: 'nogbetalen_herinnering_david', object_soort: 'factuur', object_id: x.factuur, entiteit: x.entiteit,
+          na: { termijn: x.termijn, reden: kort(x.open, 120) }, wanneer });
+        david.push({ factuur: x.factuur, entiteit: x.entiteit, leverancier: x.f.leverancier_naam || null, centen: x.f.incl, valuta: x.f.valuta, reden: x.open });
+        continue;
+      }
+      if (fdb.db.prepare("SELECT 1 FROM betaal_herinnering WHERE factuur = ? AND soort = 'herinnering'").get(x.factuur)) continue;
+      if (!perEnt.has(x.entiteit)) perEnt.set(x.entiteit, []);
+      perEnt.get(x.entiteit).push(x);
+    }
+    let al = Number(fdb.db.prepare('SELECT count(*) AS n FROM herinnering_mail WHERE dag = ?').get(vandaag).n);
+    const mails = [];
+    let plafond = false;
+    for (const ent of [...perEnt.keys()].sort()) {
+      if (fdb.db.prepare('SELECT 1 FROM herinnering_mail WHERE entiteit = ? AND dag = ?').get(ent, vandaag)) continue;   // al één vandaag: morgen
+      if (al >= NB_HERINNER.per_dag) { plafond = true; break; }
+      // Codex-review MOET 2: hooguit zoveel facturen als de mail echt toont (K.HERINNERING_MAX_REGELS en het tekstbudget); de rest blijft
+      // ongeclaimd en gaat in de mail van de volgende werkdag. Zo krijgt elke geclaimde factuur zijn eigen regel bij Cynthia.
+      let lijst = perEnt.get(ent).sort((a, b) => (a.termijn < b.termijn ? -1 : a.termijn > b.termijn ? 1 : String(a.factuur).localeCompare(String(b.factuur))))
+        .slice(0, K.HERINNERING_MAX_REGELS);
+      const e = fdb.db.prepare('SELECT naam, naam_kort FROM entiteit WHERE sleutel = ?').get(ent) || {};
+      const id = D.nieuwId();
+      const bouw = (l) => K.herinneringMail({ id, entiteit: e.naam_kort || e.naam || ent, bank_tot: l.map((x) => x.dekking).filter(Boolean).sort()[0] || null, proef: !!o.proef,
+        facturen: l.map((x) => ({ id: x.factuur, leverancier: x.f.leverancier_naam, centen: x.f.incl, valuta: x.f.valuta, vervaldatum: x.f.vervaldatum, verzoek_dag: x.verzoek_dag })) });
+      let m = bouw(lijst);
+      if (m.getoond < lijst.length) { lijst = lijst.slice(0, Math.max(1, m.getoond)); m = bouw(lijst); }
+      D.voegToe(fdb, 'herinnering_mail', { id, entiteit: ent, dag: vandaag, aan: NOGBETALEN.aan, status: 'verzenden', aantal: lijst.length, aangemaakt_op: wanneer, bijgewerkt_op: wanneer });
+      for (const x of lijst) {
+        D.voegToe(fdb, 'betaal_herinnering', { factuur: x.factuur, soort: 'herinnering', verzending: x.verzending, entiteit: ent, termijn: x.termijn, mail: id,
+          herinnerd_op: wanneer, aangemaakt_op: wanneer });
+        D.audit(fdb, { wie: 'pod (nogbetalen)', wat: 'nogbetalen_herinnering', object_soort: 'factuur', object_id: x.factuur, entiteit: ent,
+          na: { mail: id, aan: NOGBETALEN.aan, termijn: x.termijn, bank_tot: x.dekking }, wanneer });
+      }
+      al++;
+      mails.push({ id, aan: NOGBETALEN.aan, ref: m.ref, onderwerp: m.onderwerp, bericht: m.bericht, entiteit: ent, aantal: lijst.length });
+    }
+    return { mails, david, plafond };
+  });
+}
+// Na de aanroep: verzenden → verstuurd | onzeker | mislukt; onzeker → verstuurd. → true als de rij zo stond.
+function nhUitkomst(fdb, id, van, naar, velden, nu) {
+  if (!ID_RE.test(String(id || ''))) weiger(400, 'id ongeldig');
+  if (!NH_STATUS.includes(naar)) weiger(400, 'status ongeldig');
+  const z = Object.assign({}, velden || {});
+  return D.transactie(fdb, function () {
+    const u = fdb.db.prepare('UPDATE herinnering_mail SET status = ?, message_id = coalesce(?, message_id), reden = ?, verzonden_op = coalesce(?, verzonden_op), bijgewerkt_op = ? WHERE id = ? AND status = ?')
+      .run(naar, z.message_id ? String(z.message_id).slice(0, 80) : null, z.reden ? kort(z.reden, 300) : null, z.verzonden_op || null, nuIso(nu), id, van);
+    if (Number(u.changes) !== 1) return false;
+    const m = fdb.db.prepare('SELECT entiteit, aantal FROM herinnering_mail WHERE id = ?').get(id);
+    D.audit(fdb, { wie: 'pod (nogbetalen)', wat: 'nogbetalen_herinnering_' + naar, object_soort: 'herinnering_mail', object_id: id, entiteit: m.entiteit,
+      voor: { status: van }, na: { aantal: m.aantal, message_id: z.message_id || null, reden: z.reden ? kort(z.reden, 160) : null }, wanneer: nuIso(nu) });
+    return true;
+  });
+}
+function nhHangend(fdb, nu) {
+  return fdb.db.prepare("SELECT id, entiteit, aantal FROM herinnering_mail WHERE status = 'verzenden' AND bijgewerkt_op < ? ORDER BY aangemaakt_op LIMIT 10").all(nuIso(nu - NB_HERINNER.hangt_min * 60000));
+}
+/*
+ * 7 dagen na een verstuurde herinnering nog niet betaald gezien → één regel aan David. gemeld_op gaat in dezelfde transactie van NULL naar nu
+ * (vóór het bericht; de trigger laat hem daarna niet meer wijzigen). Is de factuur intussen betaald of weg, dan nooit een regel.
+ * → [{ factuur, entiteit, leverancier, centen, valuta, herinnerd_op }]
+ */
+function nhNaWeek(fdb, nu) {
+  const wanneer = nuIso(nu), grens = nuIso(nu - NB_HERINNER.na_dagen * 86400000);
+  return D.transactie(fdb, function () {
+    const uit = [];
+    // Codex-review MOET 1: geen LIMIT vóór het overslaan van betaalde facturen (die blijven gemeld_op NULL en zouden latere verdringen); het
+    // aantal rijen is klein (hooguit één per factuur die ooit een herinnering kreeg), de uitvoer wel begrensd.
+    for (const h of fdb.db.prepare("SELECT h.id, h.factuur, h.entiteit, h.herinnerd_op FROM betaal_herinnering h JOIN herinnering_mail m ON m.id = h.mail " +
+      "JOIN factuur f ON f.id = h.factuur WHERE h.soort = 'herinnering' AND h.gemeld_op IS NULL AND m.status = 'verstuurd' AND h.herinnerd_op <= ? AND f.betaalspoor = 'te_betalen' " +
+      'ORDER BY h.herinnerd_op, h.id').all(grens)) {
+      if (uit.length >= 50) break;
+      const f = D.factuurVoorKern(fdb, h.factuur);
+      if (nbNiet(fdb, f)) continue;
+      const u = fdb.db.prepare('UPDATE betaal_herinnering SET gemeld_op = ? WHERE id = ? AND gemeld_op IS NULL').run(wanneer, h.id);
+      if (Number(u.changes) !== 1) continue;
+      D.audit(fdb, { wie: 'pod (nogbetalen)', wat: 'nogbetalen_herinnering_week', object_soort: 'factuur', object_id: h.factuur, entiteit: h.entiteit, na: { herinnerd_op: h.herinnerd_op }, wanneer });
+      uit.push({ factuur: h.factuur, entiteit: h.entiteit, leverancier: f.leverancier_naam || null, centen: f.incl, valuta: f.valuta, herinnerd_op: h.herinnerd_op });
+    }
+    return uit;
+  });
+}
+// Voor /health: aantallen, geen inhoud
+function nhInfo(fdb, nu) {
+  const n = (sql, ...a) => Number(fdb.db.prepare(sql).get(...a).n);
+  let wacht = 0, te_laat = 0, bank_achter = 0;
+  try { for (const x of nhStanden(fdb, nu)) { if (x.stand === 'wacht') wacht++; else if (x.stand === 'te_laat') te_laat++; else bank_achter++; } } catch (e) { /* alleen info */ }
+  return { per_dag: NB_HERINNER.per_dag, vandaag: n('SELECT count(*) AS n FROM herinnering_mail WHERE dag = ?', dagAmsterdam(nu)),
+    verstuurd: n("SELECT count(*) AS n FROM herinnering_mail WHERE status = 'verstuurd'"), onzeker: n("SELECT count(*) AS n FROM herinnering_mail WHERE status = 'onzeker'"),
+    mislukt: n("SELECT count(*) AS n FROM herinnering_mail WHERE status = 'mislukt'"), herinnerd: n("SELECT count(*) AS n FROM betaal_herinnering WHERE soort = 'herinnering'"),
+    david: n("SELECT count(*) AS n FROM betaal_herinnering WHERE soort = 'david'"), open: { wacht, te_laat, bank_achter } };
+}
 // ─────────────────────── maandspecificatie PayPal en creditcard voor de boekhouder (wv2060) ───────────────────────
 
 /*
@@ -4427,6 +4597,17 @@ function maak(opties) {
     info: (fdb, nu) => nbInfo(fdb, nu),
     aanOk: nbAanOk,
     AAN: NOGBETALEN.aan, PER_DAG: NOGBETALEN.per_dag, MAX_UUR: NOGBETALEN.max_uur,
+    // wv3455: herinnering (fase 3)
+    herinnering: {
+      venster: (nu) => nhVenster(nu),
+      claim: (fdb, nu, o) => nhClaim(fdb, nu, o),
+      uitkomst: (fdb, id, van, naar, velden, nu) => nhUitkomst(fdb, id, van, naar, velden, nu),
+      hangend: (fdb, nu) => nhHangend(fdb, nu),
+      naWeek: (fdb, nu) => nhNaWeek(fdb, nu),
+      standen: (fdb, nu) => nhStanden(fdb, nu).map((x) => ({ factuur: x.factuur, entiteit: x.entiteit, verzoek_dag: x.verzoek_dag, termijn: x.termijn, stand: x.stand, dekking: x.dekking, open: x.open })),
+      info: (fdb, nu) => nhInfo(fdb, nu),
+      PER_DAG: NB_HERINNER.per_dag,
+    },
   };
   return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, maandspec, sepaDoor, nogBetalen, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, betaalMeldingJob, betaalMeldingKlaar, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
 }

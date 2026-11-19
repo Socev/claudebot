@@ -400,6 +400,7 @@ jobs:
           t test/facturen-nogbetalen.sh   # wv3369: betaalverzoek naar Cynthia (nogbetalen@) — kern, M26, Bevestigen/terugdraaien, LET OP, plafond, noodstop, onzeker = nooit opnieuw
           t test/facturen-nogbetalen-app.sh   # wv3372: fase 2 — stand op de betaallijst, knop Naar Cynthia / Stuur opnieuw (nooit na onzeker), Laat Cynthia kiezen (leert geen betaalwijze), SEPA ligt al bij Cynthia, toch zelf/terugboeking
           t test/facturen-ontkoppel.sh   # wv3452: Fable-review M3 — koppeling bankregel ↔ factuur los (alleen David, vingerafdruk), spoor terug zoals het stond, afwijsrij voor de bankcontrole, signaal terug, bijschrijving geen betaling
+          t test/facturen-nogbetalen-herinnering.sh   # wv3455: fase 3 — herinnering aan Cynthia: termijn, bank achter = niets, één per factuur, bundel per entiteit per dag, werkdag 08–17, plafond 5, onzeker nooit opnieuw, ontkoppeld wel, open voorstel → David, na 7 dagen één regel
           t test/facturen-groep.sh   # wv2661: Bevestig N zonder twijfel en Koppel N zekere — poort per factuur/voorstel op de pod, één vingerafdruk, hooguit 25
           t test/db-reserve-wacht.sh   # wv3416: stille reservewacht R230 — één box-rij per afwijking na de drempel, geen herhaling/herstelrij, staat over herstart, /health ververst zonder socket
           t test/gewenst-wacht.sh   # wv3418 (B39): bedoelde versie (APP_ROOT/gewenst van uitrol.sh) — /health gewenst naast versie, één box-rij na 10 min verschil, geen herhaling, staat over herstart

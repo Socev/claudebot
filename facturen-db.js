@@ -1318,6 +1318,76 @@ CREATE TRIGGER IF NOT EXISTS ontkoppeling_blijft BEFORE DELETE ON ontkoppeling B
 CREATE TRIGGER IF NOT EXISTS ontkoppeling_vast BEFORE UPDATE ON ontkoppeling BEGIN SELECT RAISE(ABORT, 'ontkoppeling: rijen blijven'); END;
 `;
 
+/*
+ * wv3455 (fase 3 nogbetalen, ontwerp § 4; Davids Ja 19-11-2026 22:46 met verse vingerafdruk, vraag-id f88d6554, registerrij
+ * nogbetalen-herinnering): herinnering aan Cynthia als een betaalverzoek na de termijn niet betaald op de bank staat.
+ * herinnering_mail: één rij per verstuurde (of geprobeerde) mail; UNIQUE (entiteit, dag) = hooguit één mail per entiteit per Amsterdamse dag.
+ *   De rij ontstaat direct op 'verzenden' (in dezelfde transactie als de claim, vóór de aanroep van de verzender) en gaat alleen vooruit.
+ * betaal_herinnering: één rij per factuur per soort (UNIQUE): 'herinnering' (zit in een mail; herinnerd_op gezet bij de claim, dus vóór het
+ *   versturen) of 'david' (open koppelvoorstel of open signaal: één regel aan David i.p.v. een herinnering; gemeld_op meteen gezet).
+ *   gemeld_op van een herinnering: de ene regel aan David als de factuur 7 dagen later nog niet betaald gezien is; alleen van NULL naar een
+ *   waarde. Rijen blijven (geen DELETE), de rest staat vast. Alleen nogbetalen@, nooit Privé, alleen een factuur waarvan het betaalverzoek
+ *   verstuurd is en die nog op te_betalen staat (trigger).
+ * Terugrol: `DELETE FROM schema_migratie WHERE versie = 28` (de oude code kijkt niet naar deze tabellen). Herhaalbaar.
+ */
+const M28 = `
+CREATE TABLE IF NOT EXISTS herinnering_mail (
+  id TEXT PRIMARY KEY ${ID('id')},
+  entiteit TEXT NOT NULL REFERENCES entiteit(sleutel) CHECK (entiteit <> 'prive'),
+  dag TEXT NOT NULL ${DATUM('dag')},
+  aan TEXT NOT NULL CHECK (aan = '${NOGBETALEN_AAN}'),
+  status TEXT NOT NULL CHECK (status IN ('verzenden','verstuurd','onzeker','mislukt')),
+  aantal INTEGER NOT NULL CHECK (aantal BETWEEN 1 AND 200),
+  message_id TEXT CHECK (message_id IS NULL OR length(message_id) <= 80),
+  reden TEXT CHECK (reden IS NULL OR length(reden) <= 300),
+  verzonden_op TEXT,
+  aangemaakt_op TEXT NOT NULL,
+  bijgewerkt_op TEXT NOT NULL,
+  UNIQUE (entiteit, dag)
+);
+CREATE INDEX IF NOT EXISTS herinnering_mail_dag ON herinnering_mail (dag);
+CREATE INDEX IF NOT EXISTS herinnering_mail_status ON herinnering_mail (status, bijgewerkt_op);
+CREATE TRIGGER IF NOT EXISTS herinnering_mail_blijft BEFORE DELETE ON herinnering_mail BEGIN SELECT RAISE(ABORT, 'herinnering_mail: rijen blijven'); END;
+CREATE TRIGGER IF NOT EXISTS herinnering_mail_nieuw BEFORE INSERT ON herinnering_mail WHEN NEW.status <> 'verzenden'
+BEGIN SELECT RAISE(ABORT, 'herinnering_mail: begint op verzenden'); END;
+CREATE TRIGGER IF NOT EXISTS herinnering_mail_vooruit BEFORE UPDATE ON herinnering_mail
+  WHEN NEW.id IS NOT OLD.id OR NEW.entiteit IS NOT OLD.entiteit OR NEW.dag IS NOT OLD.dag OR NEW.aan IS NOT OLD.aan OR NEW.aantal IS NOT OLD.aantal
+    OR NEW.aangemaakt_op IS NOT OLD.aangemaakt_op
+    OR (NEW.status <> OLD.status AND NOT (
+      (OLD.status = 'verzenden' AND NEW.status IN ('verstuurd','onzeker','mislukt')) OR
+      (OLD.status = 'onzeker' AND NEW.status = 'verstuurd')))
+  BEGIN SELECT RAISE(ABORT, 'herinnering_mail: alleen vooruit'); END;
+CREATE TABLE IF NOT EXISTS betaal_herinnering (
+  id INTEGER PRIMARY KEY,
+  factuur TEXT NOT NULL REFERENCES factuur(id),
+  soort TEXT NOT NULL CHECK (soort IN ('herinnering','david')),
+  verzending TEXT NOT NULL REFERENCES betaal_verzending(id),
+  entiteit TEXT NOT NULL REFERENCES entiteit(sleutel) CHECK (entiteit <> 'prive'),
+  termijn TEXT NOT NULL ${DATUM('termijn')},
+  mail TEXT REFERENCES herinnering_mail(id),
+  reden TEXT CHECK (reden IS NULL OR length(reden) <= 200),
+  herinnerd_op TEXT,
+  gemeld_op TEXT,
+  aangemaakt_op TEXT NOT NULL,
+  CHECK ((soort = 'herinnering' AND mail IS NOT NULL AND herinnerd_op IS NOT NULL) OR (soort = 'david' AND mail IS NULL AND herinnerd_op IS NULL AND gemeld_op IS NOT NULL)),
+  UNIQUE (factuur, soort)
+);
+CREATE INDEX IF NOT EXISTS betaal_herinnering_mail ON betaal_herinnering (mail);
+CREATE TRIGGER IF NOT EXISTS betaal_herinnering_blijft BEFORE DELETE ON betaal_herinnering BEGIN SELECT RAISE(ABORT, 'betaal_herinnering: rijen blijven'); END;
+CREATE TRIGGER IF NOT EXISTS betaal_herinnering_nieuw BEFORE INSERT ON betaal_herinnering
+WHEN NOT EXISTS (SELECT 1 FROM factuur f JOIN betaal_verzending v ON v.factuur = f.id WHERE f.id = NEW.factuur AND v.id = NEW.verzending
+    AND v.status = 'verstuurd' AND f.entiteit = NEW.entiteit AND v.entiteit = NEW.entiteit AND f.entiteit <> 'prive' AND f.alleen_eigenaar = 0
+    AND f.soort = 'factuur' AND f.betaalspoor = 'te_betalen')
+  OR (NEW.mail IS NOT NULL AND NOT EXISTS (SELECT 1 FROM herinnering_mail m WHERE m.id = NEW.mail AND m.entiteit = NEW.entiteit AND m.status = 'verzenden'))
+BEGIN SELECT RAISE(ABORT, 'betaal_herinnering: alleen een verstuurd betaalverzoek van een open, zakelijke factuur'); END;
+CREATE TRIGGER IF NOT EXISTS betaal_herinnering_vast BEFORE UPDATE ON betaal_herinnering
+  WHEN NEW.id IS NOT OLD.id OR NEW.factuur IS NOT OLD.factuur OR NEW.soort IS NOT OLD.soort OR NEW.verzending IS NOT OLD.verzending
+    OR NEW.entiteit IS NOT OLD.entiteit OR NEW.termijn IS NOT OLD.termijn OR NEW.mail IS NOT OLD.mail OR NEW.reden IS NOT OLD.reden
+    OR NEW.herinnerd_op IS NOT OLD.herinnerd_op OR NEW.aangemaakt_op IS NOT OLD.aangemaakt_op
+    OR (OLD.gemeld_op IS NOT NULL AND NEW.gemeld_op IS NOT OLD.gemeld_op)
+  BEGIN SELECT RAISE(ABORT, 'betaal_herinnering: rijen blijven (alleen gemeld_op één keer)'); END;
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -1345,13 +1415,14 @@ const MIGRATIES = [
   { versie: 25, naam: "factuur: status 'concept_verwijderd' (Gmail-concept door David weggegooid, wv3074)", fn: (db) => M25(db) },
   { versie: 26, naam: 'betaalverzoek naar Cynthia (nogbetalen@): betaal_verzending (wv3369)', sql: M26 },
   { versie: 27, naam: 'koppeling bankregel ↔ factuur los maken: ontkoppeling (spoor + afwijsrij voor de bankcontrole, wv3452)', sql: M27 },
+  { versie: 28, naam: 'herinnering aan Cynthia bij een niet betaald gezien betaalverzoek: herinnering_mail, betaal_herinnering (wv3455)', sql: M28 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
   'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel', 'afzender_regel',
   'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso', 'paypal_regel', 'boekstuk_verzending', 'boekstuk_vrijgave', 'sepa_verzending',
-  'betaal_verzending', 'ontkoppeling'];
+  'betaal_verzending', 'ontkoppeling', 'herinnering_mail', 'betaal_herinnering'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 

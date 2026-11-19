@@ -18730,7 +18730,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), boekstuk: typeof bsInfo === 'function' ? bsInfo() : undefined, sepa_door: typeof sdInfo === 'function' ? sdInfo() : undefined, nogbetalen: typeof nbInfo === 'function' ? nbInfo() : undefined, waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel, jaaropgaaf: !!docplanJaaropgaaf } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), boekstuk: typeof bsInfo === 'function' ? bsInfo() : undefined, sepa_door: typeof sdInfo === 'function' ? sdInfo() : undefined, nogbetalen: typeof nbInfo === 'function' ? nbInfo() : undefined, nogbetalen_herinnering: typeof nhInfo === 'function' ? nhInfo() : undefined, waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel, jaaropgaaf: !!docplanJaaropgaaf } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -29838,7 +29838,10 @@ function potVzInfo() {
 const POT_VZ_GEHEIM_NAAM = 'n8n_verzender_versturen_secret';
 // sha256 van de jsCode van de Code-knoop Toetsen in AI - Facturen-verzender, zoals gepubliceerd door wv921. Wijkt de workflow af, dan
 // verstuurt de pod niets en wordt alles concept (Fable #10). Bewuste wijziging aan de verzender = deze waarde mee wijzigen (nieuw image).
-const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '0c4122194217e0bfaa93e312d98f3bb55798d16eef9a0984e0a2b804b2752c98';
+const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '2e60f6b4c0f6baacc547ff86e4e9c95db9376dc84420dadd5fa81bc0d2c2c30b';
+// wv3455: de Toetsen-code van wv3369/wv3370 (zonder bron nogbetalen_herinnering) blijft gelden voor alle andere bronnen zolang image en workflow niet
+// op dezelfde minuut wisselen; bron nogbetalen_herinnering eist de nieuwe. Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
+const POT_VZ_TOETSEN_NOGBETALEN = '0c4122194217e0bfaa93e312d98f3bb55798d16eef9a0984e0a2b804b2752c98';
 // wv3369: de Toetsen-code van wv2480 (zonder bron nogbetalen) blijft gelden voor pot, boekstuk, sepa en facturen zolang image en workflow niet op
 // dezelfde minuut wisselen; bron nogbetalen eist de nieuwe. Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
 const POT_VZ_TOETSEN_DIRECT = '509d97e44222f962dd6c286fa211ae82b60b06092222a29b6c909797a7984cf7';
@@ -29853,6 +29856,8 @@ const POT_VZ_TOETSEN_SHA_VORIG = '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7
 const POT_VZ_TOETSEN_BOEKSTUK = '8fec24893c22a23d54e56d8749b6c186d63897634e9e10608f97ee6336ddbcbb';
 function potVzToetsenMag(ts, bron) {
   if (ts === POT_VZ_TOETSEN_SHA) return true;
+  if (bron === 'nogbetalen_herinnering') return false;   // wv3455: alleen met de nieuwe Toetsen-code
+  if (ts === POT_VZ_TOETSEN_NOGBETALEN) return true;
   if (bron === 'nogbetalen') return false;   // wv3369: alleen met de nieuwe Toetsen-code
   if (ts === POT_VZ_TOETSEN_DIRECT) return true;
   if (bron === 'facturen') return false;   // wv2480: direct uit Facturen alleen met de nieuwe Toetsen-code
@@ -30523,6 +30528,106 @@ function nbPlan(ms) {
   nbPlanTimer = setTimeout(function () { nbPlanTimer = null; nbTik().catch(function (e) { logError('facturen-nogbetalen', e); }); }, ms || 1500);
   if (nbPlanTimer.unref) nbPlanTimer.unref();
 }
+
+// ── wv3455: herinnering aan Cynthia (fase 3 nogbetalen; Davids Ja 19-11-2026 22:46 met verse vingerafdruk, vraag-id f88d6554) ─────────────────
+// Registerrij nogbetalen-herinnering. Logica en staat in facturen.js (nogBetalen.herinnering: herinnering_mail + betaal_herinnering, M28). Hier:
+// elke 5 minuten, alleen op de primaire kant, alleen als het betaalverzoek (FACTUREN_NOGBETALEN) én de herinnering aan staan, alleen op werkdagen
+// 08:00–17:00 Amsterdam, niet onder de noodstop (APP_UIT, vóór de claim en per mail gelezen), alleen als de gepubliceerde Toetsen-code bron
+// nogbetalen_herinnering kent. Schakelaar FACTUREN_NB_HERINNERING: alleen 'auto' = aan; zonder env telt <FACTUREN_DIR>/nogbetalen-herinnering-
+// schakelaar (inhoud 'auto'), de env gaat altijd voor. Uit tot Davids woord. Geen antwoord = onzeker (nooit opnieuw), zekere weigering = mislukt
+// (ook geen herkansing: hooguit één herinnering per factuur); beide met één regel aan David. Regels aan David via nbMeld (zelfde bron).
+const nhStaat = { bezig: false, laatste: null, uitkomst: null, fouten_op_rij: 0, plafond_gemeld: null, verzender_gemeld: null };
+function nhModus() {
+  const e = String(process.env.FACTUREN_NB_HERINNERING || '').trim().toLowerCase();
+  if (e) return e === 'auto' ? 'auto' : 'uit';
+  try { return fs.readFileSync(path.join(FACTUREN_DIR, 'nogbetalen-herinnering-schakelaar'), 'utf8').trim().toLowerCase() === 'auto' ? 'auto' : 'uit'; } catch (x) { return 'uit'; }
+}
+function nhAan() { return nbAan() && !!facturenRoutes.nogBetalen.herinnering && nhModus() === 'auto'; }
+function nhDag(t) { return new Date(t).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
+function nhBedrag(c, v) { return Number.isSafeInteger(c) ? ((v && v !== 'EUR' ? String(v).slice(0, 3) + ' ' : '€ ') + (Math.abs(c) / 100).toFixed(2).replace('.', ',')) : 'onbekend bedrag'; }
+function nhFactuurTekst(x) { return String(x.leverancier || 'onbekende leverancier').slice(0, 60) + ' ' + nhBedrag(x.centen, x.valuta) + ' (' + String(x.entiteit || '') + ', kenmerk …' + String(x.factuur).slice(-6) + ')'; }
+function nhLijst(l) { return l.slice(0, 5).map(nhFactuurTekst).join('; ') + (l.length > 5 ? ' en nog ' + (l.length - 5) : ''); }
+async function nhTik() {
+  if (!nhAan() || nhStaat.bezig) return;
+  const fdb = facturenOpen();
+  if (!fdb) return;
+  const H = facturenRoutes.nogBetalen.herinnering;
+  nhStaat.bezig = true;
+  try {
+    for (const h of H.hangend(fdb, Date.now())) {
+      if (H.uitkomst(fdb, h.id, 'verzenden', 'onzeker', { reden: 'de pod stopte midden in het versturen' }, Date.now()))
+        nbMeld('Niet zeker of de herinnering aan Cynthia over ' + h.aantal + (h.aantal === 1 ? ' factuur' : ' facturen') + ' van ' + h.entiteit + ' (nogbetalen@) ging: de pod stopte midden in het versturen. Kijk in Gmail bij Verzonden; ik stuur hem niet nog eens.');
+    }
+    const t = Date.now();
+    if (nbNoodstop() || !H.venster(t)) { nhStaat.laatste = new Date().toISOString(); nhStaat.fouten_op_rij = 0; return; }
+    const week = H.naWeek(fdb, t);
+    if (week.length) nbMeld('Een week na de herinnering aan Cynthia nog niet betaald gezien op de bank: ' + nhLijst(week) + '. Ik stuur geen nieuwe herinnering; kijk het even na.');
+    let ok = false;
+    try { ok = await potVzVerzenderOk('nogbetalen_herinnering'); } catch (e) { ok = false; }
+    let geheim = null;
+    if (ok) { try { geheim = await potVzVerzendGeheim(); } catch (e) { geheim = null; } }
+    if (!ok || !geheim) {
+      const dag = nhDag(t);
+      if (nhStaat.verzender_gemeld !== dag && H.standen(fdb, t).some(function (x) { return x.stand === 'te_laat'; })) {
+        nhStaat.verzender_gemeld = dag;
+        nbMeld('Herinneringen aan Cynthia (nogbetalen@) wachten: ' + (!ok ? 'de verzender kent ze nog niet of wijkt af van de pod' : 'het verzendgeheim is niet te lezen') + '. Er is niets verstuurd; ik meld het de machinekamer.');
+      }
+    } else {
+      const c = H.claim(fdb, t);
+      if (c.david.length) nbMeld('Niet betaald gezien na de termijn, maar ik stuur Cynthia geen herinnering omdat er iets openstaat: ' +
+        c.david.slice(0, 5).map(function (x) { return nhFactuurTekst(x) + ': ' + x.reden; }).join('; ') + (c.david.length > 5 ? ' en nog ' + (c.david.length - 5) : '') + '. Kijk het na in Facturen › Bankcontrole.');
+      for (let i = 0; i < c.mails.length; i++) {
+        const m = c.mails[i];
+        if (nbNoodstop()) {   // al geclaimd, nog niet aangeroepen: zeker niet verstuurd
+          for (const r of c.mails.slice(i)) H.uitkomst(fdb, r.id, 'verzenden', 'mislukt', { reden: 'noodstop vóór het versturen' }, Date.now());
+          nbMeld('De noodstop hield ' + (c.mails.length - i) + ' herinnering(en) aan Cynthia tegen. Er is niets verstuurd; die facturen krijgen geen herinnering meer.');
+          break;
+        }
+        if (!facturenRoutes.nogBetalen.aanOk(m.aan)) { H.uitkomst(fdb, m.id, 'verzenden', 'mislukt', { reden: 'ander adres dan nogbetalen@' }, Date.now()); continue; }
+        let a;
+        try { a = await potVzVerstuur({ bron: 'nogbetalen_herinnering', modus: 'versturen', ref: m.ref, aan: facturenRoutes.nogBetalen.AAN, onderwerp: m.onderwerp, bericht: m.bericht, van: SD_VAN, bijlagen: [] }); }
+        catch (e) { a = e && e.zekerNietVerstuurd ? { status: -1, j: { ok: false, code: e.code || 'vooraf', fout: String(e.message || '').slice(0, 80) } } : { status: 0, j: null }; }
+        const j = a && a.j;
+        const wie = 'De herinnering aan Cynthia over ' + m.aantal + (m.aantal === 1 ? ' factuur' : ' facturen') + ' van ' + m.entiteit;
+        let st;
+        if (a && a.status === 200 && j && j.ok === true && typeof j.message_id === 'string' && j.message_id) {
+          H.uitkomst(fdb, m.id, 'verzenden', 'verstuurd', { message_id: j.message_id, verzonden_op: new Date().toISOString() }, Date.now());
+          st = 'verstuurd';
+        } else {
+          const zeker = a && j && j.ok === false && (a.status === -1 || (a.status >= 400 && a.status < 500) || (a.status === 502 && j.code === 'gmail_concept'));
+          const code = (a ? a.status : '?') + (j && j.code ? ' ' + String(j.code).slice(0, 30) : '');
+          if (zeker) {
+            H.uitkomst(fdb, m.id, 'verzenden', 'mislukt', { reden: 'de verzender verstuurde niet (' + (a.status === -1 ? 'vooraf' : code) + ')' }, Date.now());
+            nbMeld(wie + ' ging niet weg: de verzender verstuurde niet (' + (a.status === -1 ? 'vooraf' : code) + '). Er is niets verstuurd; ik probeer het niet opnieuw.');
+            st = 'mislukt';
+          } else {
+            H.uitkomst(fdb, m.id, 'verzenden', 'onzeker', { reden: 'geen bevestiging van de verzender (' + code + ')' }, Date.now());
+            nbMeld('Niet zeker of ' + wie.charAt(0).toLowerCase() + wie.slice(1) + ' (nogbetalen@) wegging: de verzender gaf geen bevestiging. Kijk in Gmail bij Verzonden; ik stuur hem niet nog eens.');
+            st = 'onzeker';
+          }
+        }
+        nhStaat.uitkomst = { mail: m.id, stap: st, op: new Date().toISOString() };
+        schrijfLog(nu() + ' facturen-nogbetalen herinnering ' + velden({ mail: m.id, stap: st, aantal: m.aantal }));
+      }
+      if (c.plafond) {
+        const dag = nhDag(t);
+        if (nhStaat.plafond_gemeld !== dag) { nhStaat.plafond_gemeld = dag; nbMeld('Vandaag gingen er al ' + H.PER_DAG + ' herinneringen naar Cynthia (het dagplafond). De rest gaat de volgende werkdag.'); }
+      }
+    }
+    nhStaat.laatste = new Date().toISOString(); nhStaat.fouten_op_rij = 0;
+  } catch (e) {
+    nhStaat.fouten_op_rij++;
+    logError('facturen-nogbetalen', e);
+  } finally { nhStaat.bezig = false; }
+}
+function nhInfo() {
+  try {
+    const f = facturenOpen();
+    return Object.assign({ aan: nhAan(), modus: nhModus(), laatste_tik: nhStaat.laatste, fouten_op_rij: nhStaat.fouten_op_rij, uitkomst: nhStaat.uitkomst },
+      f && facturenRoutes && facturenRoutes.nogBetalen && facturenRoutes.nogBetalen.herinnering ? facturenRoutes.nogBetalen.herinnering.info(f, Date.now()) : {});
+  } catch (e) { return { fout: String(e && e.message || e).slice(0, 80) }; }
+}
+setInterval(function () { nhTik().catch(function (e) { logError('facturen-nogbetalen', e); }); }, NB_TIK_MS).unref();
 
 // Eenmalige vrijgave: kaart (machinekamer via POST /facturen/boekstuk {actie: 'kaart'}), knoproute (appVoorJouKnop, zoals potVzKnopVoor)
 async function bsKaartZet(fdb, voorbeeld) {

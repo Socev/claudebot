@@ -3,7 +3,7 @@
 const t = $('Toetsen').first().json;
 const sd = $getWorkflowStaticData('global');
 sd.pot = (Array.isArray(sd.pot) ? sd.pot : []).filter((x) => Date.now() - x < 86400000);
-if (!['facturen', 'facturen_proef', 'nogbetalen', 'nogbetalen_proef'].includes(t.bron)) sd.pot.push(Date.now());
+if (!['facturen', 'facturen_proef', 'nogbetalen', 'nogbetalen_proef', 'nogbetalen_herinnering'].includes(t.bron)) sd.pot.push(Date.now());
 const g = $input.first().json || {};
 // wv3370: een betaalverzoek zonder bijlage (nogbetalen, patiëntkenmerk) loopt via 'Gmail concept (pot, zonder bijlage)'; precies één van de twee draaide
 const c = $('Gmail concept (pot)').isExecuted ? $('Gmail concept (pot)') : $('Gmail concept (pot, zonder bijlage)');
