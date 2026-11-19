@@ -783,8 +783,8 @@ async function overweeg(stil) {
       ['status', 'open'], ['van', 'bewaker.js (levensbewaking wv701, release ' + SHA + ')'],
       ['gemeten', 'geen antwoord op /health/publiek sinds ' + tijdKort(laatsteOkWand) + ' (' + Math.round(stil / 1000) + ' s, ' + missers + ' missers); ouder van server ' + SERVER + ' is pid ' + (st && st.ppid) + ' (' + eenRegel(String(sup || '?').replace(/\0/g, ' '), 80) + ')'],
       ['gevolg als er niets gebeurt', 'de pod blijft stil tot iemand hem herstart'],
-      ['voorstel', 'procesboom nakijken (ps -ef); zo nodig David vragen de pod te herstarten']], 'geen-sup-' + SERVER);
-    await seintje('De server reageert al ' + Math.round(stil / 60000) + ' minuten niet en ik kan hem niet zelf herstarten. Herstart de pod in Olares als ik over een paar minuten nog niet antwoord.', 'bewaker-geen-sup-' + SERVER);
+      ['voorstel', 'procesboom nakijken (ps -ef); zo nodig David vragen de pod te herstarten']], 'geen-sup-' + SERVER + '-' + SERVER_START);   // Codex MOET 1: pid kan na een herstart terugkomen
+    await seintje('De server reageert al ' + Math.round(stil / 60000) + ' minuten niet en ik kan hem niet zelf herstarten. Herstart de pod in Olares als ik over een paar minuten nog niet antwoord.', 'bewaker-geen-sup-' + SERVER + '-' + SERVER_START);
     return;
   }
   // wv3421: wacht hij op de schijf, dan niet doden tot grens + schijfPlafond (doden helpt dan niet en kost de terugflip).
