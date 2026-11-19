@@ -13,6 +13,12 @@
 #               pauze voorbij -> "weer gezond zonder herstart" en dezelfde bewaker bewaakt door (en grijpt opnieuw in).
 #   C zelf      server hangt, komt tijdens de momentopname terug -> niet stoppen ("antwoordt-weer"), geen seintje.
 #   D start     bewaker start terwijl de stat 'tijd' geeft -> blijft proberen; leesbaar -> start; ESRCH -> stopt.
+#   F schijf    (wv3421) server hangt in State D op jbd2 (nep-stat 'D <wchan>') -> geen ingreep binnen grens + plafond; voorbij ->
+#               één box-rij "wacht op de schijf", geen seintje; hangt hij weer tot over het plafond -> toch ingreep.
+#   G blijft    (wv3421) SIGKILL komt niet aan (nep 'onstopbaar'): vorige blijft beschermd; sterft het kind later, dan pas na een
+#               gezonde opvolger vorige terug, geen "herstart de pod"; G2: komt hij binnen blijftWacht niet weg -> vorige blijft
+#               beschermd tot de bewaker van een gezonde opvolger hem terugzet (oudHerstel).
+#   H incident  (wv3421) schijfdruk.js meldt een lopend NVMe-incident (nep-socket) -> ook dat stelt de ingreep uit.
 set -u
 HIER="$(cd "$(dirname "$0")/.." && pwd)"
 TOP="$(mktemp -d)"
@@ -55,7 +61,7 @@ JS
 start(){
   env APP_ROOT="$W/app" BIN_DIR="$W/bin" PORT="$POORT" BOOT_TIMEOUT_MS=4000 APP_BOOTSTRAP="$W/geen" PROEF_WERK="$W" \
     UITROL_MARKER="$W/uitrol-wacht" BEWAKER_UIT="$W/bewaker-uit" BEWAKER_BOX="$W/box.md" BEWAKER_BERICHT="$W/bericht.py" \
-    BEWAKER_AGENTS="$W/agent_jobs.json" API_LOG="$W/bin/api.log" BEWAKER_NEP_STAT="$W/nepstat" BEWAKER_INSPECTOR=0 \
+    BEWAKER_AGENTS="$W/agent_jobs.json" API_LOG="$W/bin/api.log" BEWAKER_NEP_STAT="$W/nepstat" BEWAKER_INSPECTOR=0 SCHIJFDRUK_SOCK="$W/geen.sock" \
     BEWAKER_TIK_MS=1000 BEWAKER_TIMEOUT_MS=3000 BEWAKER_GRENS_MS=10000 BEWAKER_MIN_MISSERS=3 BEWAKER_CONTEXT_MS=2000 \
     BEWAKER_GENADE_MS=2000 BEWAKER_KILL_WACHT_MS=5000 BEWAKER_TERUG_MS=30000 BEWAKER_CPU_MS=1000 BEWAKER_BOOT_MARGE_MS=1000 BEWAKER_UUR=12 "$@" \
     setsid node "$HIER/supervisor.js" > "$W/supervisor.uit" 2>&1 &
@@ -145,6 +151,75 @@ if [ -n "$B" ]; then
 else rood "inspector: geen bewijsbestand"; fi
 toon; stop
 fi
+
+# ── F. server wacht op de schijf (State D op jbd2) ────────────────────────────────────────────────────────────────────
+opzet schijf; start BEWAKER_SCHIJF_PLAFOND_MS=25000
+P1=$(serverPid)
+echo "D jbd2_log_wait_commit" > "$W/nepstat"; touch "$W/pauze"
+wachtOp 'wacht op de schijf \(hoofdthread in State D \(jbd2_log_wait_commit\)\)' 40 && groen "schijf: uitstel met bewijs State D (jbd2)" || rood "schijf: geen uitstel gelogd"
+sleep 12
+[ "$(telIn 'INGREEP')" = "0" ] && groen "schijf: geen ingreep binnen grens + plafond" || rood "schijf: toch ingegrepen binnen het plafond"
+[ "$(readlink "$W/app/vorige")" = "releases/bbb" ] && groen "schijf: vorige niet aangeraakt" || rood "schijf: vorige=$(readlink "$W/app/vorige")"
+rm -f "$W/pauze"; : > "$W/nepstat"
+wachtOp 'wachtte op de schijf - de bewaker greep niet in' 20 && groen "schijf: voorbij -> regel in het log" || rood "schijf: geen afsluitregel"
+sleep 2
+[ "$(grep -c 'op de schijf; bewaker greep niet in' "$W/box.md")" = "1" ] && groen "schijf: precies één box-rij 'wacht op de schijf'" || rood "schijf: box-rijen: $(grep -c 'op de schijf; bewaker greep niet in' "$W/box.md")"
+[ ! -s "$W/seintjes.txt" ] && groen "schijf: geen seintje" || rood "schijf: seintje: $(cat "$W/seintjes.txt")"
+[ "$(cat "$W/starts")" = "1" ] && [ "$(serverPid)" = "$P1" ] && groen "schijf: geen herstart" || rood "schijf: herstart (starts=$(cat "$W/starts"))"
+sleep 3; echo "D folio_wait_bit_common" > "$W/nepstat"; touch "$W/pauze"   # weer, nu tot over het plafond
+wachtOp 'INGREEP 1/3' 60 && groen "schijf: na het plafond toch een ingreep" || rood "schijf: geen ingreep na het plafond"
+grep -q 'plafond) - toch ingrijpen' "$W/bin/supervisor.log" && groen "schijf: reden 'plafond' gelogd" || rood "schijf: geen plafondregel"
+wachtOp 'klaar - de nieuwe server|blijft bewaken' 60
+grep -q 'gewacht op de schijf' "$W/box.md" && groen "schijf: ingreep-rij noemt de schijfwacht" || rood "schijf: ingreep-rij zonder schijfwacht"
+[ "$(grep -c 'op de schijf; bewaker greep niet in' "$W/box.md")" = "1" ] && groen "schijf: geen tweede 'wacht op de schijf'-rij" || rood "schijf: tweede schijfrij"
+toon; stop
+
+# ── G. pad 'blijft': SIGKILL komt (nog) niet aan; kind sterft later ──────────────────────────────────────────────────
+opzet blijft; start BEWAKER_SCHIJF_PLAFOND_MS=0 BEWAKER_BLIJFT_WACHT_MS=40000
+P1=$(serverPid)
+echo "D jbd2_log_wait_commit onstopbaar" > "$W/nepstat"; touch "$W/pauze"
+wachtOp 'INGREEP 1/3' 40 || rood "blijft: geen ingreep"
+wachtOp 'leeft nog .* na SIGKILL' 40 && groen "blijft: SIGKILL kwam niet aan" || rood "blijft: geen 'leeft nog na SIGKILL'"
+sleep 3
+[ "$(readlink "$W/app/vorige")" = "releases/aaa" ] && groen "blijft: vorige blijft beschermd (= current) zolang het kind leeft" || rood "blijft: vorige al terug: $(readlink "$W/app/vorige")"
+: > "$W/nepstat"; rm -f "$W/pauze"; kill -9 "$P1"   # het kind sterft alsnog (de schijf is terug)
+wachtOp 'uitslag: ' 60 || rood "blijft: geen uitslag"
+grep -q "server $P1: sigkill-laat" "$W/bin/supervisor.log" && groen "blijft: uitkomst sigkill-laat" || rood "blijft: uitkomst $(grep -oE "server $P1: [a-z-]+$" "$W/bin/supervisor.log")"
+L_GEZOND=$(grep -n 'boot-zelfcontrole geslaagd\|zelfcontrole na herstart geslaagd\|/health meldt ok' "$W/bin/supervisor.log" | tail -1 | cut -d: -f1)
+L_TERUG=$(grep -n 'vorige -> releases/bbb (teruggezet)' "$W/bin/supervisor.log" | head -1 | cut -d: -f1)
+[ -n "$L_TERUG" ] && [ -n "$L_GEZOND" ] && [ "$L_TERUG" -gt "$L_GEZOND" ] && groen "blijft: vorige pas terug na een gezonde opvolger (regel $L_TERUG > $L_GEZOND)" || rood "blijft: volgorde gezond=$L_GEZOND terug=$L_TERUG"
+[ "$(readlink "$W/app/vorige")" = "releases/bbb" ] && [ "$(readlink "$W/app/current")" = "releases/aaa" ] && groen "blijft: links weer current=aaa vorige=bbb" || rood "blijft: links current=$(readlink "$W/app/current") vorige=$(readlink "$W/app/vorige")"
+[ "$(telIn 'TERUGFLIP')" = "0" ] && groen "blijft: geen terugflip" || rood "blijft: TERUGFLIP"
+grep -qi 'herstart de pod' "$W/seintjes.txt" 2>/dev/null && rood "blijft: toch 'herstart de pod' aan David" || groen "blijft: geen valse 'herstart de pod'"
+toon; stop
+
+opzet blijft2; start BEWAKER_SCHIJF_PLAFOND_MS=0 BEWAKER_BLIJFT_WACHT_MS=4000 BEWAKER_OUD_HERSTEL_MS=1000
+P1=$(serverPid)
+echo "D jbd2_log_wait_commit onstopbaar" > "$W/nepstat"; touch "$W/pauze"
+wachtOp 'uitslag: ' 60 || rood "blijft2: geen uitslag"
+grep -q "server $P1: blijft" "$W/bin/supervisor.log" && groen "blijft2: uitkomst blijft na de wachttijd" || rood "blijft2: uitkomst $(grep -oE "server $P1: [a-z-]+$" "$W/bin/supervisor.log")"
+grep -q 'vorige blijft beschermd' "$W/bin/supervisor.log" && groen "blijft2: log 'vorige blijft beschermd'" || rood "blijft2: geen log 'vorige blijft beschermd'"
+sleep 2
+[ "$(readlink "$W/app/vorige")" = "releases/aaa" ] && groen "blijft2: vorige nog beschermd" || rood "blijft2: vorige=$(readlink "$W/app/vorige")"
+grep -qi 'herstart de pod' "$W/seintjes.txt" 2>/dev/null && groen "blijft2: nu wel 'herstart de pod'" || rood "blijft2: geen seintje"
+: > "$W/nepstat"; rm -f "$W/pauze"; kill -9 "$P1"   # pod-herstel: kind weg, supervisor start een gezonde opvolger
+wachtOp 'is gezond - nu terugzetten' 40 && groen "blijft2: bewaker van de gezonde opvolger zet vorige terug" || rood "blijft2: geen oudHerstel"
+sleep 1
+[ "$(readlink "$W/app/vorige")" = "releases/bbb" ] && groen "blijft2: vorige weer bbb" || rood "blijft2: vorige=$(readlink "$W/app/vorige")"
+[ "$(telIn 'TERUGFLIP')" = "0" ] && groen "blijft2: geen terugflip" || rood "blijft2: TERUGFLIP"
+toon; stop
+
+# ── H. schijfdruk.js meldt een lopend incident (nep-socket) ───────────────────────────────────────────────────────────
+opzet incident
+node -e 'require("http").createServer((q,r)=>{r.end(JSON.stringify({ok:true,schrijven:{hangt_s:0},nvme:{incident:{sinds_iso:new Date(Date.now()-60000).toISOString(),einde_iso:null,reden:"status resetting"}}}))}).listen(process.argv[1])' "$W/meter.sock" &
+NEPSOCK=$!
+start BEWAKER_SCHIJF_PLAFOND_MS=25000 SCHIJFDRUK_SOCK="$W/meter.sock"
+touch "$W/pauze"
+wachtOp 'wacht op de schijf \(schijfdruk: lopend incident' 40 && groen "incident: uitstel op een lopend schijfdruk-incident" || rood "incident: geen uitstel"
+sleep 8
+[ "$(telIn 'INGREEP')" = "0" ] && groen "incident: geen ingreep" || rood "incident: toch ingegrepen"
+kill "$NEPSOCK" 2>/dev/null
+toon; stop
 
 # ── D. start terwijl de stat niet te lezen is (Codex MOET 1) ──────────────────────────────────────────────────────────
 W="$TOP/start"; mkdir -p "$W/bin"; echo tijd > "$W/nepstat"; sleep 120 & P=$!

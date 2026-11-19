@@ -31,6 +31,13 @@
  *             antwoordt hij weer, dan niet stoppen. Na een ingreep zonder stop blijft dezelfde bewaker bewaken (7-11-2026:
  *             een pod-brede stilstand liet de bewaker een levende server 'al-weg' noemen, waarna hij zichzelf stopte).
  *   herstart  doet de supervisor (verwerkCrash): het kind sterft aan SIGKILL en telt als één crash.
+ *   schijf    (wv3421, Fable 19-11 bewaker-schijf H1/H2/M6) Wacht de server op de schijf (hoofdthread State D op jbd2/folio/
+ *             open_last_lookups, of een lopend incident of vastzittende schrijfopdracht in schijfdruk.js), dan grijpt de bewaker
+ *             niet in tot grens + schijfPlafond (15 min): doden helpt dan niet (15-11 en 18-11 kwam geen herstart gezond op
+ *             voordat de schijf terug was) en kost de terugflip. Eén box-rij "wacht op schijf", pas als het voorbij is (een rij
+ *             schrijven op een hangende schijf landt laat en kan rijen van anderen overschrijven). Bij 'blijft' (SIGKILL komt
+ *             niet aan) wacht hij tot blijftWacht op het einde van het kind; `vorige` gaat pas terug na een GEZONDE opvolger
+ *             (zelfde of nieuwe server), anders houdt hij hem beschermd en zet oudHerstel van een gezonde bewaker hem later terug.
  *   bewijs    (wv716) naast CPU, threads/wchan en JS-stapel ook de fd-opbouw (alleen readlink), pijpgenoten (een ander proces
  *             met de signaalpijp van server.js: K1) en pipe-lezers (pipe_read met /proc/ in de cmdline), zombie-kinderen
  *             (K2-spoor); elk onderdeel met een eigen grens, parallel en tijdens de CPU-wacht.
@@ -77,6 +84,12 @@ const C = {
   cpuSample: getal('BEWAKER_CPU_MS', 5000),
   markerGeduld: getal('BEWAKER_MARKER_GEDULD_MS', 420000),   // hooguit zo lang na de grens wijken voor een uitrolmarker
   bootMarge: getal('BEWAKER_BOOT_MARGE_MS', 30000),   // na gezond nog zo lang vorige=current: de supervisor toetst /health tot 25 s
+  // wv3421: wacht de server op de schijf, dan pas ingrijpen na grens + schijfPlafond; bij 'blijft' zo lang wachten op het einde van het kind
+  schijfPlafond: getal('BEWAKER_SCHIJF_PLAFOND_MS', 15 * 60000),
+  schijfNawerking: getal('BEWAKER_SCHIJF_NAWERKING_MS', 60000),   // zo lang na het laatste schijfbewijs nog als schijfhang tellen
+  schijfRijPauze: getal('BEWAKER_SCHIJF_RIJ_PAUZE_MS', 3600000),   // hooguit één "wacht op schijf"-rij per uur (staat, ook over bewakers heen)
+  blijftWacht: getal('BEWAKER_BLIJFT_WACHT_MS', 15 * 60000),
+  oudHerstel: getal('BEWAKER_OUD_HERSTEL_MS', 10 * 60000),   // een blijven staand vorige-herstel van een andere ingreep: zo oud, en ik gezond
   // wv3390 (Fable 19-11 M7): standaard UIT. SIGUSR1 opent de Node-inspector op 127.0.0.1:9229 en niets sluit hem; overleeft
   // de server de ingreep, dan kan elk lokaal proces er code mee draaien als claude. Opbrengst was 0 van 6. Aan: BEWAKER_INSPECTOR=1.
   inspector: process.env.BEWAKER_INSPECTOR === '1',
@@ -143,6 +156,12 @@ async function procStatR(pid) {
   if (pid === SERVER && NEP_STAT) {
     const nep = String(await lees(NEP_STAT, 1000) || '').trim();
     if (nep === 'tijd') return { fout: 'tijd' };
+    // wv3421: 'D <wchan>' = de echte stat met State D (de wchan levert hoofdWchan); 'onstopbaar' erachter = signalen komen niet aan
+    if (/^D\b/.test(nep)) {
+      const st = await procStatR('' + pid);
+      if (st.st) st.st.state = 'D';
+      return st;
+    }
     if (nep === 'andere-start') {
       const st = await procStatR('' + pid);
       if (st.st) st.st.start = String(Number(st.st.start) + 1);
@@ -156,6 +175,17 @@ async function procStatR(pid) {
     stime: parseInt(na[12], 10), start: na[19], comm: s.slice(s.indexOf('(') + 1, s.lastIndexOf(')')) } };
 }
 async function procStat(pid) { return (await procStatR(pid)).st || null; }
+async function nepStat() { return NEP_STAT ? String(await lees(NEP_STAT, 1000) || '').trim() : ''; }
+async function hoofdWchan() {
+  const nep = await nepStat();
+  if (/^D\b/.test(nep)) return nep.split(/\s+/)[1] || '';
+  return eenRegel(await lees('/proc/' + SERVER + '/wchan', 2000), 80);
+}
+// Toetshaak: met 'onstopbaar' in de nep-stat doet een signaal niets (een kind in D dat SIGKILL pas na de schijf ontvangt).
+async function signaal(sig) {
+  if (/\bonstopbaar\b/.test(await nepStat())) { await log('toetshaak: ' + sig + ' komt niet aan (onstopbaar)'); return; }
+  process.kill(SERVER, sig);
+}
 let SERVER_START = null;
 // Is DIT proces (zelfde pid én starttijd) gemeten weg? 'weg' alleen op bewijs: een ander starttijdstip, state Z/X, of
 // ESRCH van kill(pid, 0). Een mislukte of trage /proc-lezing = 'onbekend' (wv2646). Vóór elk signaal opnieuw gevraagd.
@@ -447,6 +477,41 @@ function schijfdrukRecent() {
     req.on('error', (e) => einde({ fout: 'schijfdruk: meter niet bereikbaar (' + (e.code || e.message) + ')' }));
   });
 }
+// wv3421: wacht de server op de schijf? Bewijs: (1) hoofdthread in State D met een wchan van het ext4-journaal of de paginacache
+// (jbd2_log_wait_commit, folio_wait_bit_common, open_last_lookups: 15-11 en 18-11 gemeten), vijf steekproeven over ± 1 s;
+// (2) schijfdruk.js meldt een lopend NVMe-incident of een eigen schrijfopdracht die ≥ 30 s hangt (unix-socket, uit zijn geheugen).
+// Null = geen bewijs. Een JS-lus of een andere hang staat niet in D op die plekken: daar grijpt de bewaker meteen in, als altijd.
+const SCHIJF_WCHAN = /jbd2|folio|open_last_lookups|wait_on_page/;
+function schijfdrukSamenvatting() {
+  return new Promise(function (resolve) {
+    let klaar = false;
+    const einde = (v) => { if (!klaar) { klaar = true; resolve(v); } };
+    const req = http.get({ socketPath: SCHIJFDRUK_SOCK, path: '/samenvatting', agent: false, timeout: 2000 }, function (res) {
+      let s = '';
+      res.setEncoding('utf8');
+      res.on('data', (d) => { if (s.length < 400000) s += d; });
+      res.on('end', () => { try { einde(JSON.parse(s)); } catch (e) { einde(null); } });
+      res.on('error', () => einde(null));
+    });
+    req.on('timeout', () => { req.destroy(); einde(null); });
+    req.on('error', () => einde(null));
+  });
+}
+async function schijfBewijs() {
+  for (let i = 0; i < 5; i++) {
+    const st = await procStat(SERVER);
+    if (st && st.state === 'D') {
+      const w = await hoofdWchan();
+      if (SCHIJF_WCHAN.test(w)) return 'hoofdthread in State D (' + w + ')';
+    }
+    if (i < 4) await wacht(200);
+  }
+  const j = await metGrens(schijfdrukSamenvatting(), 3000, null);
+  const inc = j && j.nvme && j.nvme.incident;
+  if (inc && !inc.einde_iso) return 'schijfdruk: lopend incident sinds ' + tijdKort(Date.parse(inc.sinds_iso)) + ' (' + eenRegel(inc.reden, 60) + ')';
+  if (j && j.schrijven && j.schrijven.hangt_s >= 30) return 'schijfdruk: eigen schrijfopdracht hangt al ' + j.schrijven.hangt_s + ' s';
+  return null;
+}
 async function momentopname(stilS, b) {
   Object.assign(b, { tijd_iso: new Date().toISOString(), server_pid: SERVER, release: SHA, stil_s: stilS, missers: missers,
     laatste_gezond: laatsteContext });
@@ -534,13 +599,13 @@ async function dood() {
   const s0 = await staatVoorSignaal();
   if (s0.staat === 'weg') { await log('server ' + SERVER + ' is al weg: ' + s0.waarom); return 'al-weg'; }
   if (s0.staat === 'onbekend') { await log('server ' + SERVER + ' niet te meten (' + s0.waarom + ') - geen signaal'); return 'onbekend'; }
-  try { process.kill(SERVER, 'SIGTERM'); } catch (e) { return e.code === 'ESRCH' ? 'al-weg' : 'onbekend'; }
+  try { await signaal('SIGTERM'); } catch (e) { return e.code === 'ESRCH' ? 'al-weg' : 'onbekend'; }
   await log('SIGTERM naar server ' + SERVER);
   if (await wachtTotWeg(C.genade)) return 'sigterm';
   const s1 = await staatVoorSignaal();
   if (s1.staat === 'weg') return 'sigterm';
   if (s1.staat === 'onbekend') { await log('server ' + SERVER + ' na SIGTERM niet te meten (' + s1.waarom + ') - geen SIGKILL'); return 'onbekend'; }
-  try { process.kill(SERVER, 'SIGKILL'); } catch (e) { return 'sigterm'; }
+  try { await signaal('SIGKILL'); } catch (e) { return 'sigterm'; }
   await log('server ' + SERVER + ' stopte niet binnen ' + Math.round(C.genade / 1000) + ' s - SIGKILL');
   if (await wachtTotWeg(C.killWacht)) return 'sigkill';
   return 'blijft';
@@ -651,6 +716,7 @@ async function weesProeven() {
 // ── de lus ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 let gewapend = false, laatsteOkMono = null, laatsteOkWand = null, missers = 0, laatsteContext = null, contextMono = -Infinity;
 let opgegeven = false, bezig = false, wegTeller = 0, onbekendGemeld = false;
+let schijfLaatst = null, schijfUitstel = null, gewapendMono = null;   // wv3421
 
 async function tik() {
   // Twee keer op rij: één trage /proc-lezing mag de bewaking niet beëindigen (Fable wv701-code #6).
@@ -666,9 +732,12 @@ async function tik() {
   }
   const ok = await vraag('/health/publiek');
   if (ok) {
-    if (!gewapend) { gewapend = true; await log('gewapend: server ' + SERVER + ' (release ' + SHA + ') antwoordt op /health/publiek'); }
+    if (!gewapend) { gewapend = true; gewapendMono = mono(); await log('gewapend: server ' + SERVER + ' (release ' + SHA + ') antwoordt op /health/publiek'); }
     else if (missers >= 4) await log('server ' + SERVER + ' antwoordt weer, na ' + missers + ' missers');
+    const stilWas = laatsteOkMono === null ? 0 : mono() - laatsteOkMono, okWas = laatsteOkWand;
     missers = 0; laatsteOkMono = mono(); laatsteOkWand = Date.now();
+    schijfLaatst = null;   // schijfbewijs geldt alleen binnen één stilte
+    if (schijfUitstel) { const u = schijfUitstel; schijfUitstel = null; await schijfRij(u, stilWas, okWas); }
     for (const k in gemeld) delete gemeld[k];
     if (mono() - contextMono >= C.context) {
       contextMono = mono();
@@ -716,6 +785,21 @@ async function overweeg(stil) {
     await seintje('De server reageert al ' + Math.round(stil / 60000) + ' minuten niet en ik kan hem niet zelf herstarten. Herstart de pod in Olares als ik over een paar minuten nog niet antwoord.', 'bewaker-geen-sup-' + SERVER);
     return;
   }
+  // wv3421: wacht hij op de schijf, dan niet doden tot grens + schijfPlafond (doden helpt dan niet en kost de terugflip).
+  const bewijs = await schijfBewijs();
+  if (bewijs) schijfLaatst = { mono: mono(), wat: bewijs };
+  const schijfNu = schijfLaatst && mono() - schijfLaatst.mono <= C.schijfNawerking;
+  if (schijfNu && stil < C.grens + C.schijfPlafond) {
+    if (!schijfUitstel) {
+      schijfUitstel = { sindsMono: mono(), sindsWand: Date.now(), stilBijStart: stil, wat: schijfLaatst.wat };
+      await log('server ' + SERVER + ' antwoordt ' + Math.round(stil / 1000) + ' s niet, maar wacht op de schijf (' + schijfLaatst.wat + ') - niet ingrijpen tot ' +
+        Math.round((C.grens + C.schijfPlafond) / 60000) + ' min stilte');
+    }
+    schijfUitstel.laatst = schijfLaatst.wat;
+    return;
+  }
+  if (schijfUitstel) await log(schijfNu ? 'server ' + SERVER + ' wacht nog op de schijf, maar is al ' + Math.round(stil / 60000) + ' min stil (plafond) - toch ingrijpen'
+    : 'geen schijfbewijs meer en server ' + SERVER + ' nog stil - ingrijpen');
   const s = await leesStaat();
   const recent = recenteIngrepen(s);
   if (recent.length >= C.remMax) {
@@ -761,14 +845,26 @@ async function ingreepKern(stil, s, n) {
   // wv2646: antwoordt hij intussen weer (de momentopname duurt tot een minuut, een pod-brede stilstand is dan vaak voorbij),
   // dan niet stoppen. 'onbekend' = niet te meten of het nog hetzelfde proces is: geen signaal.
   const alWeer = await vraag('/health/publiek');
-  const uitkomst = alWeer ? 'antwoordt-weer' : await dood();
-  const gestopt = uitkomst === 'al-weg' || uitkomst === 'sigterm' || uitkomst === 'sigkill';
+  let uitkomst = alWeer ? 'antwoordt-weer' : await dood();
+  // wv3421 (Fable 19-11 H2/M6): SIGKILL is verstuurd maar een proces in State D sterft pas als de schijf terug is (18-11: 47 s na de
+  // 30 s). Niet na 30 s "herstart de pod" roepen en vorige terugzetten, maar tot blijftWacht wachten op het einde van het kind.
+  if (uitkomst === 'blijft') {
+    await log('server ' + SERVER + ' leeft nog ' + Math.round(C.killWacht / 1000) + ' s na SIGKILL (State ' + ((await procStat(SERVER)) || {}).state +
+      ') - vorige blijft beschermd; wacht tot ' + Math.round(C.blijftWacht / 60000) + ' min op het einde');
+    if (await wachtTotWeg(C.blijftWacht)) uitkomst = 'sigkill-laat';
+  }
+  const gestopt = uitkomst === 'al-weg' || uitkomst === 'sigterm' || uitkomst === 'sigkill' || uitkomst === 'sigkill-laat';
   await log('server ' + SERVER + ': ' + uitkomst);
   if (gestopt) await geefSlot();
   const kinderen = gestopt ? await ruimKinderenOp(Array.isArray(bewijs.kinderen) ? bewijs.kinderen : [], serverPgrp) : [];
   const terug = uitkomst === 'blijft' ? null : await wachtOpGezond(C.terug);
   if (vorige && terug) await wacht(C.bootMarge);
-  const herstel = await herstelVorige(vorige);
+  // wv3421: vorige alleen terug na een GEZONDE server (de opvolger, of dezelfde die weer antwoordt). Zonder dat zou een trage of
+  // hangende opvolger de boot-zelfcontrole missen en naar de oude release terugflippen (18-11 02:53Z). Blijft het herstel staan,
+  // dan zet oudHerstel van de bewaker van een gezonde server het later terug (vorige_herstel staat in bewaker-staat.json).
+  const herstel = !vorige ? await herstelVorige(null) : terug ? await herstelVorige(vorige)
+    : 'vorige blijft beschermd (-> ' + vorige.current + ') tot een gezonde server; daarna zet een bewaker hem terug';
+  if (vorige && !terug) await log(herstel);
   const curNa = await leesLink(CURRENT);
   const flip = vorige && curNa && curNa !== vorige.current ? 'LET OP: current wijst nu naar ' + curNa + ' (was ' + vorige.current + ')' : null;
   const ctx = laatsteContext;
@@ -776,10 +872,10 @@ async function ingreepKern(stil, s, n) {
     ' beurt(en)' + (ctx.lopend.wees ? ' (waarvan ' + ctx.lopend.wees + ' wees-CLI, die server.js na de herstart opnieuw vasthoudt: wv722)' : '') + ', ' + (ctx.lopend.onopgehaald || 0) + ' onopgehaald resultaat, ' + (ctx.agents_lopend || 0) + ' agent(s)' : 'geen gezonde meting met lopende beurten bekend';
   const beurtWeg = !!(ctx && ctx.lopend && (ctx.lopend.beurten || ctx.lopend.onopgehaald));
   let uitslag;
-  if (uitkomst === 'blijft') uitslag = 'server ' + SERVER + ' reageert ook niet op SIGKILL (State ' + (bewijs.status && bewijs.status.State) + ') - herstart lukt niet, pod herstarten';
+  if (uitkomst === 'blijft') uitslag = 'server ' + SERVER + ' reageert ook ' + Math.round((C.killWacht + C.blijftWacht) / 60000) + ' min na SIGKILL niet (State ' + (bewijs.status && bewijs.status.State) + ') - herstart lukt niet, pod herstarten';
   else if (!gestopt && terug) uitslag = 'zelfde server ' + SERVER + ' weer gezond zonder herstart (na ' + terug.na_s + ' s)';
   else if (!gestopt) uitslag = 'niet gestopt (niet te meten of het nog hetzelfde proces is) en na ' + Math.round(C.terug / 1000) + ' s nog niet gezond';
-  else if (terug) uitslag = 'weer gezond na ' + terug.na_s + ' s (versie ' + (terug.versie || '?') + ')';
+  else if (terug) uitslag = (uitkomst === 'sigkill-laat' ? 'stierf pas na de wachttijd van SIGKILL (wachtte op de schijf); ' : '') + 'weer gezond na ' + terug.na_s + ' s (versie ' + (terug.versie || '?') + ')';
   else uitslag = 'na ' + Math.round(C.terug / 1000) + ' s nog niet gezond - zie supervisor.log';
   if (uitkomst === 'blijft') opgegeven = true;
   await log('uitslag: ' + uitslag + (flip ? '; ' + flip : '') + '; ' + herstel);
@@ -788,7 +884,8 @@ async function ingreepKern(stil, s, n) {
   await boxRij('Server reageerde ' + Math.max(1, Math.round(stilS / 60)) + ' min niet; bewaker ' + wat + ' (' + n + 'e keer dit uur)', [
     ['status', 'open — oorzaak in wv700; momentopname ' + (bewaard ? '`' + bewijsPad + '`' : 'niet bewaard')],
     ['van', 'bewaker.js (levensbewaking wv701, release ' + SHA + ')'],
-    ['gemeten', 'geen antwoord op /health/publiek sinds ' + tijdKort(laatsteOkWand) + ' (' + stilS + ' s, ' + missers + ' missers op rij); ' + kortBewijs(bewijs) +
+    ['gemeten', 'geen antwoord op /health/publiek sinds ' + tijdKort(laatsteOkWand) + ' (' + stilS + ' s, ' + missers + ' missers op rij); ' +
+      (schijfUitstel ? 'eerst ' + minuten(Math.round((mono() - schijfUitstel.sindsMono) / 1000)) + ' gewacht op de schijf (' + schijfUitstel.wat + '; laatst: ' + schijfUitstel.laatst + '); ' : '') + kortBewijs(bewijs) +
       '; stoppen: ' + uitkomst + (kinderen.length ? '; losse kinderen gestopt: ' + kinderen.join(', ') : '') + '; ' + uitslag + (flip ? '; ' + flip : '') + '; ' + herstel],
     ['verloren', verloren + (beurtWeg ? '; een app-beurt die toen liep, vangt server.js na de herstart op (beurt-lopend.json, wv716: antwoord alsnog in de app of een regel "verloren"); een Telegram-beurt niet (n8n krijgt /result found:false); agents rondt de weesafhandeling af' : '')],
     ['gevolg als er niets gebeurt', 'de bewaker vangt het op (hooguit ' + C.remMax + '×/uur), maar de oorzaak blijft en elke keer gaat een lopend antwoord verloren'],
@@ -806,14 +903,39 @@ async function ingreepKern(stil, s, n) {
   // met een verse telling, zodat een volgende ingreep weer de volle grens en het minimum aan missers nodig heeft.
   if (gestopt || await serverWeg()) { await log('bewaker van server ' + SERVER + ' klaar - de nieuwe server start zijn eigen bewaker'); process.exit(0); }
   missers = 0; laatsteOkMono = mono(); if (terug) laatsteOkWand = Date.now();
+  schijfUitstel = null; schijfLaatst = null;   // wv3421: de ingreep-rij noemde de schijfwacht al
   await log('server ' + SERVER + ' is niet aantoonbaar weg - bewaker blijft bewaken');
+}
+
+// wv3421: één box-rij per schijfwacht, pas als die voorbij is (dan is de schijf er weer), hooguit één per schijfRijPauze.
+async function schijfRij(u, stilWas, okWas) {
+  const duur = Math.round((stilWas || 0) / 1000);
+  await log('server ' + SERVER + ' antwoordt weer na ' + duur + ' s; wachtte op de schijf - de bewaker greep niet in');
+  const s = await leesStaat();
+  if (typeof s.schijf_rij === 'number' && Date.now() - s.schijf_rij < C.schijfRijPauze && s.schijf_rij <= Date.now() + 60000) {
+    await log('geen box-rij "wacht op schijf": er staat er al een van ' + tijdKort(s.schijf_rij));
+    return;
+  }
+  s.schijf_rij = Date.now();
+  await schrijfStaat(s);
+  await boxRij('Server wachtte ' + minuten(duur) + ' op de schijf; bewaker greep niet in', [
+    ['status', 'open — oorzaak is de schijf (zie #schijf-hapert in de box en /health.schijfdruk), niet server.js'],
+    ['van', 'bewaker.js (levensbewaking, schijfwacht wv3421, release ' + SHA + ')'],
+    ['gemeten', 'geen antwoord op /health/publiek van ' + tijdKort(okWas) + ' tot ' + tijdKort(Date.now()) + ' (' + duur + ' s); bewijs: ' + u.wat +
+      (u.laatst && u.laatst !== u.wat ? '; laatst: ' + u.laatst : '') + '; geen herstart (plafond ' + Math.round((C.grens + C.schijfPlafond) / 60000) + ' min stilte)'],
+    ['gevolg als er niets gebeurt', 'niets extra: de server liep zelf weer; lopende beurten bleven heel'],
+    ['voorstel', 'geen; bij herhaling de schijf van Olares nakijken (00_Systeem/Schijf van Olares.md)']]);
 }
 
 // Een vorige-herstel dat bleef staan (bewaker stierf halverwege een ingreep): terugzetten als de links nog kloppen.
 async function oudHerstel() {
   const s = await leesStaat();
   const h = s.vorige_herstel;
-  if (h && typeof h.tijd === 'number' && Date.now() - h.tijd > 10 * 60 * 1000) await herstelVorige(h);
+  // wv3421: pas als ik (de bewaker van een gezonde server) al bootMarge gewapend ben: de supervisor toetst een herstart tot 25 s
+  if (h && typeof h.tijd === 'number' && Date.now() - h.tijd > C.oudHerstel && gewapendMono !== null && mono() - gewapendMono >= C.bootMarge) {
+    await log('vorige-herstel van een eerdere ingreep staat nog (' + tijdKort(h.tijd) + ') en server ' + SERVER + ' is gezond - nu terugzetten');
+    await herstelVorige(h);
+  }
 }
 
 process.on('uncaughtException', (e) => { log('fout (gaat door): ' + eenRegel(e && e.stack, 400)); });
