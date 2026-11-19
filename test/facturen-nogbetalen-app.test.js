@@ -333,6 +333,14 @@ test('Toch zelf betalen (incasso niet gezien) → rij toch_zelf met LET OP; scha
 
 test('Opnieuw betalen bij een terugboeking → rij toch_zelf met LET OP teruggeboekt en "ging al eerder"; Leverancier incasseert → geen rij', () => {
   const t = opzet();
+  const terugTx = (a) => {
+    const f = t.fac(a);
+    const b = t.fdb.db.prepare("SELECT * FROM bank_transactie WHERE entiteit = 'tolgaarde' AND verwijderd_op IS NULL AND bedrag_centen < 0 LIMIT 1").get();
+    const tid = D.nieuwId();
+    D.voegToe(t.fdb, 'bank_transactie', { id: tid, bestand: b.bestand, rekening: b.rekening, entiteit: 'tolgaarde', eigen_iban: b.eigen_iban, boekdatum: '2026-11-20', bedrag_centen: f.incl,
+      valuta: 'EUR', tegenpartij_naam: 'Proef terug', tegenpartij_iban: f.iban, formaat: b.formaat, entry_ref: 'proef:terug-' + tid, alleen_eigenaar: 0, aangemaakt_op: new Date(NU + 86400000).toISOString() });
+    return tid;
+  };
   const maak = () => {
     const a = oudeTeBetalen(t);
     // was verstuurd naar Cynthia, betaald gezien
@@ -340,11 +348,7 @@ test('Opnieuw betalen bij een terugboeking → rij toch_zelf met LET OP teruggeb
     const v = t.routes.nogBetalen.voorbereid(t.fdb, t.rij(a).id, { nu: NU + 60000 });
     t.routes.nogBetalen.uitkomst(t.fdb, v.id, 'verzenden', 'verstuurd', { message_id: 'proef-t' + a.slice(-4), verzonden_op: '2026-11-19T12:31:00Z' }, NU + 61000);
     t.fdb.db.prepare("UPDATE factuur SET betaalspoor = 'betaald_gezien', betaald_gezien_op = '2026-11-19' WHERE id = ?").run(a);
-    const f = t.fac(a);
-    const b = t.fdb.db.prepare("SELECT * FROM bank_transactie WHERE entiteit = 'tolgaarde' AND verwijderd_op IS NULL LIMIT 1").get();
-    const tid = D.nieuwId();
-    D.voegToe(t.fdb, 'bank_transactie', { id: tid, bestand: b.bestand, rekening: b.rekening, entiteit: 'tolgaarde', eigen_iban: b.eigen_iban, boekdatum: '2026-11-20', bedrag_centen: f.incl,
-      valuta: 'EUR', tegenpartij_naam: 'Proef terug', tegenpartij_iban: f.iban, formaat: b.formaat, entry_ref: 'proef:terug-' + tid, alleen_eigenaar: 0, aangemaakt_op: new Date(NU + 86400000).toISOString() });
+    const tid = terugTx(a);
     const sid = D.nieuwId();
     t.fdb.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, entiteit, transacties, facturen, aangemaakt_op) VALUES (?, ?, 'teruggeboekt', 'proef', 'tolgaarde', ?, ?, ?)")
       .run(sid, 'proef-terug-' + a, JSON.stringify([tid]), JSON.stringify([a]), new Date(NU + 86400000).toISOString());
@@ -361,6 +365,26 @@ test('Opnieuw betalen bij een terugboeking → rij toch_zelf met LET OP teruggeb
   const lo = JSON.parse(rij.let_op);
   assert.ok(lo.some((y) => /door de bank teruggeboekt/.test(y)) && lo.some((y) => /ging al eerder naar Cynthia \(19-11\)/.test(y)), rij.let_op);
   assert.equal(betaalRij(t, x.a, { nu: nu2 }).rij.cynthia.status, 'wacht');
+  // Codex-review MOET 1: dat verzoek gaat weg; een tweede signaal over dezelfde terugboeking (spoor staat al op te betalen) maakt géén tweede
+  const v2 = t.routes.nogBetalen.voorbereid(t.fdb, rij.id, { nu: nu2 + 60000 });
+  t.routes.nogBetalen.uitkomst(t.fdb, v2.id, 'verzenden', 'verstuurd', { message_id: 'proef-t2', verzonden_op: new Date(nu2 + 61000).toISOString() }, nu2 + 61000);
+  const sid2 = D.nieuwId();
+  t.fdb.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, entiteit, transacties, facturen, aangemaakt_op) VALUES (?, ?, 'teruggeboekt', 'proef', 'tolgaarde', ?, ?, ?)")
+    .run(sid2, 'proef-terug2-' + x.a, JSON.stringify([terugTx(x.a)]), JSON.stringify([x.a]), new Date(nu2 + 120000).toISOString());
+  const r3 = t.call('POST', 'signaal', { id: sid2, knop: 'opnieuw_betalen' }, { nu: nu2 + 180000 });
+  assert.equal(r3.status, 200, JSON.stringify(r3.j));
+  assert.equal(r3.j.nogbetalen, undefined, 'geen tweede betaalverzoek');
+  assert.equal(t.rijen(x.a).length, 2, 'eerste (verstuurd) + toch_zelf (verstuurd)');
+  // een echte nieuwe cyclus (weer betaald gezien, de bankronde boekt opnieuw terug) mag wel weer één
+  t.fdb.db.prepare("UPDATE factuur SET betaalspoor = 'te_betalen' WHERE id = ?").run(x.a);
+  D.audit(t.fdb, { wie: 'bankcontrole', wat: 'betaalspoor_teruggeboekt', object_soort: 'factuur', object_id: x.a, voor: { betaalspoor: 'betaald_gezien' }, na: { betaalspoor: 'te_betalen' }, wanneer: new Date(nu2 + 86400000).toISOString() });
+  const sid3 = D.nieuwId();
+  t.fdb.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, entiteit, transacties, facturen, aangemaakt_op) VALUES (?, ?, 'teruggeboekt', 'proef', 'tolgaarde', ?, ?, ?)")
+    .run(sid3, 'proef-terug3-' + x.a, JSON.stringify([terugTx(x.a)]), JSON.stringify([x.a]), new Date(nu2 + 86400000).toISOString());
+  const r4 = t.call('POST', 'signaal', { id: sid3, knop: 'opnieuw_betalen' }, { nu: nu2 + 86400000 + 60000 });
+  assert.equal(r4.status, 200, JSON.stringify(r4.j));
+  assert.equal(r4.j.nogbetalen && r4.j.nogbetalen.status, 'wacht', 'nieuwe terugboeking = één nieuw verzoek');
+  assert.equal(t.rijen(x.a).length, 3);
   // Leverancier incasseert: spoor incasso verwacht, geen betaalverzoek
   const y = maak();
   const r2 = t.call('POST', 'signaal', { id: y.sid, knop: 'leverancier_incasseert' }, { nu: nu2 });
