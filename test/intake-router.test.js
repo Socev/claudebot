@@ -522,3 +522,15 @@ test('server.js (wv1408): router-app alleen met schakelaar, schrijven alleen pri
   assert.match(f, /intakeRouterStand\(\) \? intakeRouterHaal\(\) : null/);
   assert.match(f, /if \(!rolPrimair\(\)\) return appWeiger\(res, 503/);
 });
+
+// wv3438: Intake leest xlsx/ods/pptx/odt als gewone tekst (wv3403), zonder aparte poorttekst met kolomkoppen (afspraak David 19-11: niet filteren)
+test('kantoorTekst: xlsx met gedeelde tekst, ods, pptx en odt worden gelezen; geen poortveld', function () {
+  const R = require('../intake-router.js');
+  const x = R.kantoorTekst('xlsx', { gedeeld: '<sst><si><t>Naam</t></si><si><t>Bedrag</t></si><si><t>Testpersoon</t></si></sst>',
+    bladen: '<worksheet><sheetData><row><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row><c r="A2" t="s"><v>2</v></c><c r="B2"><v>42</v></c></row></sheetData></worksheet>' });
+  assert.strictEqual(x.tekst, 'Naam\tBedrag\nTestpersoon\t42'); assert.strictEqual(x.poort, undefined); assert.strictEqual(x.onvolledig, false);
+  const o = R.kantoorTekst('ods', { inhoud: '<table:table table:name="b"><table:table-row><table:table-cell><text:p>Een</text:p></table:table-cell><table:table-cell><text:p>Twee</text:p></table:table-cell></table:table-row></table:table>' });
+  assert.strictEqual(o.tekst, 'Een\tTwee');
+  assert.strictEqual(R.kantoorTekst('pptx', { inhoud: '<a:p><a:r><a:t>Dia een</a:t></a:r></a:p><a:p><a:r><a:t>Regel twee</a:t></a:r></a:p>' }).tekst, 'Dia een\nRegel twee\n');
+  assert.strictEqual(R.kantoorTekst('odf', { inhoud: '<text:h>Kop</text:h><text:p>Alinea &amp; meer</text:p>' }).tekst, 'Kop\nAlinea & meer\n');
+});

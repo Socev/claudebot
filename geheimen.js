@@ -9,7 +9,7 @@
 // Twee standen:
 // - weergave (streng false): precies het masker dat secondbrain.js tot wv3405 had (app-weergave en de schrijfpoorten van de vault). Bewust
 //   ongewijzigd: David ziet zijn pagina's zoals eerst en opslaan weigert niet vaker.
-// - streng (streng true): voor alles wat het huis verlaat (modelcontext van Zoek snel, Docs › Delen, openai-hulp). Daarbovenop: wachtwoordwoorden
+// - streng (streng true): voor alles wat het huis verlaat (Docs › Delen, openai-hulp; Zoek snel sinds wv3438 niet meer: Davids eigen zoeken). Daarbovenop: wachtwoordwoorden
 //   met korte waarden (ook "het wachtwoord is …", tabelcel, vet label, JSON-sleutel), pw/ww/pwd/pass/pin, namen met secret/token/key/auth/
 //   credential vanaf 8 tekens, URL met inlog, Authorization/Basic, vaste sleutelvoorvoegsels (sb_secret_, sbp_, GOCSPX-, glpat-, AGE-SECRET-KEY,
 //   Stripe, Slack xoxe, npm_, hf_, whsec_, SendGrid, Azure AccountKey), PGP-privésleutel, en kale tokens ook direct na een /. Een NUL-teken
@@ -42,7 +42,7 @@ const lijktWachtwoord = (w) => /[0-9]/.test(w) || /[!@#$%^&*+=?~_\\\/<>{}()\[\]�
 const WW_LANG = 'wachtwoord(?:en)?|password|passwd|passwort|passphrase|pincode|inlogcode|toegangscode|wifi-?code|wifi-?wachtwoord';
 const WW_KORT = 'pw|ww|pwd|pass|pin';
 const WW_LABEL = '(?:(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]{0,60}?(?:' + WW_LANG + ')|(?<![A-Za-z0-9])(?:' + WW_KORT + '))';
-// Het wachtwoordwoord zelf, voor plekken die een hele regel weglaten (Zoek snel laag 3, zoals laag 2).
+// Het wachtwoordwoord zelf, voor plekken die een hele regel weglaten (sinds wv3438 niet meer gebruikt door Zoek snel laag 3).
 const WACHTWOORDWOORD = /wachtwoord|password|passwd|passphrase|pincode|inlogcode|toegangscode|inloggegevens|credential|(?<![A-Za-z0-9])(?:pw|pwd|pin)(?![A-Za-z0-9])/i;
 
 // ── weergave: het masker van secondbrain.js (P5) zoals het was, in dezelfde volgorde ────────────────────────────────────────────
