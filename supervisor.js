@@ -343,6 +343,12 @@ function verwerkCrash() {
 // vanuit entrypoint.sh. Beide diensten starten alleen als hun binaire/bestanden en sleutels er zijn (anders: niets, geen fout);
 // sterven ze, dan herstart met oplopende wachttijd. Minimale omgeving: geen pod-sleutels erin. Los van het kind: een crash van een
 // dienst raakt de app niet, en een app-herstart (code-uitrol) laat de databank staan.
+// wv3398 (actieplan B82; incident 19-11 16:03): alleen de echte supervisor (/app/supervisor.js, gestart door run.sh) start de ECHTE
+// diensten. Een kopie in een toets (test/supervisor-*.sh, bewaker-*.sh, stop-voor-start.sh ...) startte anders een echte PostgREST met
+// /app/db/postgrest.conf: die nam de socket /run/pgrst/pgrst.sock van de productie-PostgREST over en liet bij het einde van de toets een
+// dode socket achter (19-11 15:04-15:25 UTC: elke databankaanroep 502), of bleef als wees met een eigen verbindingspool draaien.
+// Een kopie start een dienst alleen als de toets het binaire bestand zelf vervangt (nu: DB_TUNNEL_BIN, nep-ssh).
+const SUPERVISOR_ECHT = (function () { try { return fs.realpathSync(__filename) === '/app/supervisor.js'; } catch (e) { return false; } })();
 const DB_NEVEN = [
   { naam: 'postgrest', bin: '/usr/local/bin/postgrest', args: ['/app/db/postgrest.conf'], nodig: ['/usr/local/bin/postgrest', '/app/db/postgrest.conf', '/opt/data/.pg/jwt.key'] },
   { naam: 'db-luik', bin: process.execPath, args: ['/app/db/db-luik.js'], nodig: ['/app/db/db-luik.js', '/opt/data/.pg/jwt.key', '/opt/data/.pg/luik-sleutels.json'] },
@@ -350,7 +356,7 @@ const DB_NEVEN = [
   // op 127.0.0.1:5432 (pg_hba: alleen `replication reserve`, scram). Alleen als het reservewachtwoord er is; uit met /opt/data/pg-reserve-uit.
   // ExitOnForwardFailure: hangt de oude poort nog aan de R230-kant, dan stopt ssh en volgt de backoff. ServerAlive: dode verbinding
   // na ± 45 s weg. Ontbreekt iets bij de start, dan elke 5 min opnieuw kijken (opnieuwMs).
-  { naam: 'db-tunnel', bin: process.env.DB_TUNNEL_BIN || '/usr/bin/ssh', uit: process.env.DB_TUNNEL_UIT || '/opt/data/pg-reserve-uit',
+  { naam: 'db-tunnel', bin: process.env.DB_TUNNEL_BIN || '/usr/bin/ssh', nep: !!process.env.DB_TUNNEL_BIN, uit: process.env.DB_TUNNEL_UIT || '/opt/data/pg-reserve-uit',
     opnieuwMs: Number(process.env.DB_TUNNEL_OPNIEUW_MS) || 300000,
     args: ['-F', '/opt/data/.ssh/config', '-N', '-T', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15',
       '-o', 'ServerAliveCountMax=3', '-R', '127.0.0.1:55432:127.0.0.1:5432', 'r230'],
@@ -373,6 +379,12 @@ const nevenStaat = {};
 function startNeven(d) {
   if (stoppen) return;
   if (process.env.DB_DIENSTEN_UIT === '1' || fs.existsSync('/opt/data/pg-uit')) return;
+  if (!SUPERVISOR_ECHT && !d.nep) {   // wv3398: een proefkopie raakt de echte databankdiensten niet
+    log(d.naam + ': niet gestart (proefkopie van supervisor.js, geen echte databankdienst)');
+    nevenStaat[d.naam] = { kind: null, n: 0, redenUit: 'proefkopie' };
+    nevenStandSchrijf();
+    return;
+  }
   const uitgezet = d.uit && fs.existsSync(d.uit);
   if (uitgezet || !d.nodig.every(function (f) { try { fs.accessSync(f, fs.constants.R_OK); return true; } catch (e) { return false; } })) {
     const reden = uitgezet ? 'uitgezet (' + d.uit + ')' : 'bestanden of sleutels ontbreken';

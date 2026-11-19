@@ -46,6 +46,64 @@ const path = require('path');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
+/* proefAfscherming:begin — test/proef-afscherming.sh knipt dit blok */
+// wv3398 (actieplan 19-11 B82; Fable-review beveiliging § 2, databank H1): elke toets draait een KOPIE van server.js buiten de release
+// (/tmp/...). Die kopie erfde via de agentshell de volle pod-omgeving: echte sleutels (API_SECRET, SUPABASE_SERVICE_ROLE, N8N_API_KEY,
+// CLOUDFLARE_API_TOKEN ...), SB_SQL_LOKAAL=1 en het adres van de eigen databank (ook via adres.env), luisterde op 0.0.0.0 met een
+// openbaar toetswachtwoord en bleef na een afgebroken toets als wees leven (19-11: vier stuks). Eén toets zonder nepsleutel kon zo rijen
+// in productie schrijven of wissen. Daarom, alleen voor een kopie buiten de release (zelfde toets als SERVER_ECHT hieronder):
+//   - elke geërfde podwaarde gaat eruit: zelfde naam én zelfde waarde als in de omgeving van pid 1 (de podstart, waar fetch-secrets.sh
+//     de sleutels zet), behalve de onschuldige namen in PROEF_VEILIG; een toets die zelf een (nep)waarde zet, houdt die;
+//   - SUPABASE_URL naar de eigen databank (poort 8091) gaat eruit, SB_SQL_LOKAAL alleen met een eigen (nep-)SB_SQL_BIN;
+//   - zonder API_SECRET een willekeurig geheim per run; adres.env wordt niet toegepast; listen op 127.0.0.1 (onderaan);
+//   - de kopie stopt zichzelf als zijn ouder wegvalt (afgebroken toets) of na PROEF_MAX_MS (standaard 3 uur).
+// Productie (supervisor start releases/<sha>/server.js met RELEASE_DIR) raakt dit niet; uitrol.sh rolt terug bij echt=false.
+function serverIsEcht(env, dir) {
+  try { return !!env.RELEASE_DIR && fs.realpathSync(dir) === fs.realpathSync(env.RELEASE_DIR); } catch (e) { return false; }
+}
+const PROEF_VEILIG = new Set(['HOME', 'PATH', 'PWD', 'SHLVL', 'TZ', 'LANG', 'HOSTNAME', 'NODE_VERSION', 'YARN_VERSION', 'PUID', 'PGID',
+  'PLAYWRIGHT_BROWSERS_PATH', 'DISABLE_AUTOUPDATER', 'AGY_CLI_DISABLE_AUTO_UPDATE', 'APP_ROOT', 'APP_BOOTSTRAP', 'CODEX_HOME', 'VAULT_DIR',
+  'REPO_DIR', 'PORT', 'IMAGE_SHA', 'GIT_USER_NAME', 'GIT_USER_EMAIL', 'FETCH_SECRETS_KANT', 'SECRETS_GELADEN', 'TMPDIR']);
+function schermProefAf(env, refTekst, maakGeheim) {
+  const ref = {};
+  String(refTekst || '').split('\0').forEach(function (r) { const i = r.indexOf('='); if (i > 0) ref[r.slice(0, i)] = r.slice(i + 1); });
+  const weg = [];
+  Object.keys(env).forEach(function (k) {
+    if (PROEF_VEILIG.has(k) || !Object.prototype.hasOwnProperty.call(ref, k) || ref[k] === '' || env[k] !== ref[k]) return;
+    delete env[k]; weg.push(k);
+  });
+  if (/:8091(\/|$)/.test(String(env.SUPABASE_URL || ''))) { delete env.SUPABASE_URL; weg.push('SUPABASE_URL'); }
+  if (env.SB_SQL_LOKAAL !== undefined && !env.SB_SQL_BIN) { delete env.SB_SQL_LOKAAL; weg.push('SB_SQL_LOKAAL'); }
+  const geheim = !env.API_SECRET;
+  if (geheim) env.API_SECRET = maakGeheim();
+  return { weg: weg.sort(), geheim: geheim };
+}
+// Leeft de ouder nog? Node's process.ppid is vast vanaf de start; /proc/self/stat geeft de huidige ouder (na een wees: 1 of een subreaper).
+function proefOuderNu() {
+  try { const s = fs.readFileSync('/proc/self/stat', 'utf8'); return parseInt(s.slice(s.lastIndexOf(')') + 2).split(' ')[1], 10) || null; }
+  catch (e) { return null; }
+}
+/* proefAfscherming:end */
+const SERVER_ECHT_VROEG = serverIsEcht(process.env, __dirname);
+const PROEF_AFSCHERMING = SERVER_ECHT_VROEG ? null : (function () {
+  let ref = '';
+  try { ref = fs.readFileSync(process.env.PROEF_REF_ENVIRON || '/proc/1/environ', 'latin1'); } catch (e) { ref = ''; }
+  const a = schermProefAf(process.env, ref, function () { return crypto.randomBytes(24).toString('hex'); });
+  a.ref = ref ? 'gelezen' : 'niet te lezen';
+  const ouder = proefOuderNu(), t0 = Date.now();
+  const maxMs = Number(process.env.PROEF_MAX_MS) > 0 ? Number(process.env.PROEF_MAX_MS) : 3 * 60 * 60 * 1000;
+  setInterval(function () {
+    const nu = proefOuderNu();
+    const reden = (ouder && nu && nu !== ouder) ? 'ouder ' + ouder + ' weg' : (Date.now() - t0 > maxMs ? 'langer dan ' + Math.round(maxMs / 60000) + ' min' : '');
+    if (!reden) return;
+    console.error(new Date().toISOString() + ' proefserver stopt zichzelf: ' + reden + ' (wv3398)');
+    process.exit(3);
+  }, Number(process.env.PROEF_OUDER_TIK_MS) > 0 ? Number(process.env.PROEF_OUDER_TIK_MS) : 2000).unref();
+  console.error(new Date().toISOString() + ' proefserver afgeschermd: ' + (a.weg.length ? a.weg.length + ' geërfde podwaarden weg (' + a.weg.join(',') + ')' : 'geen geërfde podwaarden') +
+    (a.geheim ? ', willekeurig API_SECRET' : '') + ', referentie ' + a.ref + ', luistert op 127.0.0.1');
+  return a;
+})();
+
 /* adresEnv:begin — test/adres-env.sh knipt dit blok */
 // wv3207 (databankoverstap, ontwerp § 8 stap 3): na de overstap schrijft de machinekamer /opt/data/.pg/adres.env met precies
 // SUPABASE_URL=http://127.0.0.1:8091 en SB_SQL_LOKAAL=1. server.js zet die bij zijn start in process.env, vóór alle andere code;
@@ -64,7 +122,8 @@ function pasAdresEnvToe(env, bestand) {
   return 'lokaal';
 }
 /* adresEnv:end */
-const ADRES_ENV_UITKOMST = pasAdresEnvToe(process.env, process.env.SOCEV_ADRES_ENV || '/opt/data/.pg/adres.env');
+// wv3398: alleen de echte release past adres.env toe; een proefkopie nooit (die zou anders de eigen databank krijgen).
+const ADRES_ENV_UITKOMST = SERVER_ECHT_VROEG ? pasAdresEnvToe(process.env, process.env.SOCEV_ADRES_ENV || '/opt/data/.pg/adres.env') : 'proef';
 if (ADRES_ENV_UITKOMST === 'onbekende vorm') console.error(new Date().toISOString() + ' LET OP: /opt/data/.pg/adres.env heeft een onbekende vorm - genegeerd (Supabase-adres blijft)');
 else if (ADRES_ENV_UITKOMST === 'lokaal') console.log(new Date().toISOString() + ' databank: eigen databank in de pod (adres.env)');
 
@@ -31000,7 +31059,8 @@ if (!SERVER_ECHT) {
 }
 
 try { appWeesVasthouden(); } catch (e) { logError('app-wees-vast', e); }   // wv722: vóór listen, dus vóór elke /run of app-beurt
-server.listen(PORT, '0.0.0.0', function () {
+// wv3398: alleen de echte release luistert op alle adressen (Service/tunnel); een proefkopie alleen op 127.0.0.1.
+server.listen(PORT, SERVER_ECHT ? '0.0.0.0' : '127.0.0.1', function () {
   console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents, breinen claude|codex|gemini) luistert op :' + PORT +
     ' (vault=' + VAULT + ', repo=' + REPO + ')');
   bewakerStart();

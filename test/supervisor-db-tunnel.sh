@@ -22,6 +22,11 @@ stand(){ node -e 'try{const j=JSON.parse(require("fs").readFileSync(process.argv
 leeft(){ [ -n "$1" ] && [ "$1" != null ] && kill -0 "$1" 2>/dev/null; }
 sleep 3
 p1=$(stand pid); ok "tunnel gestart, pid in de stand" 'leeft "$p1"'
+# wv3398 (incident 19-11 16:03): een kopie van supervisor.js start geen echte PostgREST of db-luik (die nam de productiesocket over)
+dstand(){ node -e 'try{const j=JSON.parse(require("fs").readFileSync(process.argv[1]))[process.argv[2]]||{};console.log(j.pid+" "+j.reden_uit)}catch(e){console.log("geen")}' "$WERK/bin/db-diensten.json" "$1"; }
+ok "proefkopie: postgrest niet gestart (reden proefkopie)" '[ "$(dstand postgrest)" = "null proefkopie" ]'
+ok "proefkopie: db-luik niet gestart (reden proefkopie)" '[ "$(dstand db-luik)" = "null proefkopie" ]'
+ok "proefkopie: geen kindproces postgrest of db-luik" '! ps -o args= --ppid "$SUP" | grep -q "postgrest\|db-luik"'
 ok "stand zonder argumenten of paden" '! grep -q "nep-ssh\|wachtwoord\|-R" "$WERK/bin/db-diensten.json"'
 kill "$p1"; sleep 4
 p2=$(stand pid); h=$(stand herstarts)

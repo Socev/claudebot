@@ -84,7 +84,8 @@ rpc.listen(0, '127.0.0.1', async function () {
     toets('A toegestane variabelen (leesluiken, inlogtoken, HOME/PATH/TZ, OUTDIR, marker) wel aanwezig', sa && mist.length === 0, mist.join(','));
     const lijst = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR', 'NODE_VERSION', 'DISABLE_AUTOUPDATER', 'CLAUDE_CODE_OAUTH_TOKEN',
       'CLAUDE_EFFORT', 'PLAYWRIGHT_BROWSERS_PATH', 'VAULT_DIR', 'N8N_WEBHOOK_AGENDA_API', 'N8N_WEBHOOK_WERKROOSTER', 'N8N_WEBHOOK_WHATSAPP',
-      'SUPABASE_RPC_CONTACTEN', 'OUTDIR', 'ANTHROPIC_MODEL', 'SOCEV_AGENT_RUN'];
+      'SUPABASE_RPC_CONTACTEN', 'OUTDIR', 'ANTHROPIC_MODEL', 'SOCEV_AGENT_RUN',
+      'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS'];   // wv2749: de pod zet hem zelf voor elke agent (geen sleutel)
     const vreemd = ea.filter((k) => lijst.indexOf(k) < 0);
     toets('A omgeving is een allowlist (niets onbekends)', sa && vreemd.length === 0, vreemd.join(','));
     toets('A verboden tools blijven (--disallowedTools)', sa && sa.args.includes('--disallowedTools'));

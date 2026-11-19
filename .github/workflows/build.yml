@@ -432,6 +432,14 @@ jobs:
       - name: "agent-stil (wv3248, NIETS = geen melding bij machinekamer:)"
         if: ${{ !cancelled() }}
         run: bash test/agent-stil.sh
+      # wv3398 (actieplan B82): een proefkopie van server.js erft geen podsleutels, geen eigen databank (adres.env/SB_SQL_LOKAAL),
+      # luistert op 127.0.0.1 en stopt zichzelf als zijn toets wegvalt; de bewaker meldt een achtergebleven kopie buiten de releases.
+      - name: "proef-afscherming (wv3398, toetskopie zonder echte sleutels of databank)"
+        if: ${{ !cancelled() }}
+        run: bash test/proef-afscherming.sh
+      - name: "bewaker-wees-proef (wv3398, achtergebleven proefkopie gemeld)"
+        if: ${{ !cancelled() }}
+        run: bash test/bewaker-wees-proef.sh
       # Vault zonder symlinks (wv900): vault-veilig.js/vault_veilig.py — link op de doelnaam, map-symlink, hangende link, vaste tmp-namen,
       # fifo, ACL-masker, flock; potVzRegister uit server.js in een vm; geen vaste tmp-naam of append op een vaultpad meer in server.js.
       - name: "vault-veilig (wv900, geen symlink volgen in de vault)"

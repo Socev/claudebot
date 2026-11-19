@@ -81,6 +81,8 @@ const C = {
   // de server de ingreep, dan kan elk lokaal proces er code mee draaien als claude. Opbrengst was 0 van 6. Aan: BEWAKER_INSPECTOR=1.
   inspector: process.env.BEWAKER_INSPECTOR === '1',
   inspectorPoort: getal('BEWAKER_INSPECTOR_POORT', 9229),
+  weesTik: getal('BEWAKER_WEES_MS', 600000),   // wv3398: zo vaak zoeken naar achtergebleven proefkopieën van server.js
+  weesGrens: getal('BEWAKER_WEES_GRENS_MS', 3 * 3600000 + 15 * 60000),   // ouder dan dit = wees (proefkopie stopt zichzelf na 3 u)
   fs: 8000   // grens voor één bestandshandeling
 };
 const BIN = process.env.BIN_DIR || '/opt/data/bin';
@@ -599,6 +601,53 @@ function seintje(tekst, sleutel) {
 function minuten(s) { const m = Math.max(1, Math.round(s / 60)); return m + (m === 1 ? ' minuut' : ' minuten'); }
 function tijdKort(ms) { return amsterdam(new Date(ms)).slice(11, 16); }
 
+// ── wv3398 (actieplan 19-11 B82): achtergebleven proefkopieën van server.js ──────────────────────────────────────────
+// Een toets draait een kopie van server.js buiten de releases. Sinds wv3398 schermt zo'n kopie zich af en stopt hij zichzelf (ouder
+// weg of na 3 uur), maar een toets kan ook OUDE code draaien (git show <sha>:server.js) die dat niet kent: 19-11 leefden er vier met
+// de volle podomgeving. Dit vangnet MELDT (box, één rij per nieuwe vondst); het doodt niets.
+const PROC = process.env.BEWAKER_PROC || '/proc';
+let weesMono = -Infinity;
+async function weesProeven() {
+  if (mono() - weesMono < C.weesTik) return;
+  weesMono = mono();
+  const namen = await metGrens(fsp.readdir(PROC), C.fs, null);
+  if (!namen) return;
+  const up = parseFloat(String(await lees(path.join(PROC, 'uptime'), 2000) || '').split(' ')[0]);
+  if (!(up > 0)) return;
+  const releases = path.join(APP_ROOT, 'releases') + path.sep, current = path.join(APP_ROOT, 'current') + path.sep;
+  const s = await leesStaat();
+  const gemeld = (s.wees_gemeld && typeof s.wees_gemeld === 'object') ? s.wees_gemeld : {};
+  const nieuw = [];
+  for (const n of namen) {
+    if (!/^\d+$/.test(n) || Number(n) === SERVER || Number(n) === process.pid) continue;
+    const args = String(await lees(path.join(PROC, n, 'cmdline'), 1000) || '').split('\0').filter(Boolean);
+    if (args.length < 2 || path.basename(args[0]) !== 'node') continue;
+    const js = args.slice(1).find((a) => path.basename(a) === 'server.js');
+    if (!js) continue;
+    let pad = js;
+    if (!path.isAbsolute(js)) { const cwd = await leesLink(path.join(PROC, n, 'cwd')); if (!cwd) continue; pad = path.join(cwd, js); }
+    if (pad.startsWith(releases) || pad.startsWith(current)) continue;
+    const st = await procStat(n);
+    if (!st) continue;
+    const leeftijdMs = (up - Number(st.start) / 100) * 1000;   // starttijd in kloktikken (USER_HZ 100) sinds de boot
+    if (!(leeftijdMs > C.weesGrens)) continue;
+    const sleutel = n + ':' + st.start;
+    if (gemeld[sleutel]) continue;
+    gemeld[sleutel] = Date.now();
+    nieuw.push('pid ' + n + ' ' + eenRegel(pad, 120) + ' (' + Math.round(leeftijdMs / 3600000 * 10) / 10 + ' u, ouder ' + st.ppid + ')');
+  }
+  if (!nieuw.length) return;
+  const sleutels = Object.keys(gemeld).sort((a, b) => gemeld[b] - gemeld[a]).slice(0, 50);
+  s.wees_gemeld = {}; sleutels.forEach((k) => { s.wees_gemeld[k] = gemeld[k]; });
+  await schrijfStaat(s);
+  await log('achtergebleven proefkopie van server.js: ' + nieuw.join('; '));
+  await boxRij('Achtergebleven proefkopie van server.js (' + nieuw.length + ')', [
+    ['status', 'open'], ['van', 'bewaker.js (wv3398, release ' + SHA + ')'],
+    ['gemeten', nieuw.join('; ')],
+    ['gevolg als er niets gebeurt', 'een toetskopie buiten de releases blijft draaien; oude code zonder afscherming kan echte sleutels in zijn omgeving hebben'],
+    ['voorstel', 'nakijken welke toets hem achterliet (map in het pad) en het proces stoppen (eigen toetsproces, intern en omkeerbaar)']]);
+}
+
 // ── de lus ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 let gewapend = false, laatsteOkMono = null, laatsteOkWand = null, missers = 0, laatsteContext = null, contextMono = -Infinity;
 let opgegeven = false, bezig = false, wegTeller = 0, onbekendGemeld = false;
@@ -627,6 +676,7 @@ async function tik() {
       if (j) laatsteContext = { tijd_iso: new Date().toISOString(), versie: j.versie, lopend: j.lopend || null,
         agents_lopend: j.agents ? j.agents.lopend : null, proces: j.proces || null };   // wv716: rss/heap/lusvertraging van de minuut ervoor
       await oudHerstel();   // ook als een bewaker halverwege stierf en de nieuwe meteen startte (Fable wv701-code #4)
+      try { await weesProeven(); } catch (e) { await log('fout in weesProeven: ' + eenRegel(e && e.stack, 300)); }
     }
     return;
   }

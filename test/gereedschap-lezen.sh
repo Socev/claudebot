@@ -7,6 +7,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
+const NEP_SB = require(require('path').resolve('test/nep-supabase.js'))();   // wv3398: eigen nep-Supabase (rolwachter), niet de echte databank
 const vrijePoort = require(require('path').resolve('test/vrije-poort.js'));
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http');
 const { spawn } = require('child_process');
@@ -37,7 +38,7 @@ fs.writeFileSync(path.join(W, 'bin', 'codex'), '#!/bin/sh\necho codex-mocht-niet
 const d = path.join(W, 'srv');
 ['home', 'vault', 'repo', 'io', 'jobout'].forEach((m) => fs.mkdirSync(path.join(d, m), { recursive: true }));
 const poort = vrijePoort();
-const env = Object.assign({}, process.env, {
+const env = Object.assign({}, process.env, { SUPABASE_URL: NEP_SB.url, SUPABASE_SERVICE_ROLE: NEP_SB.sleutel,
   HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'), APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'), APP_DATA_DIR: path.join(d, 'app-data'), APP_UIT_BESTAND: path.join(d, 'app-uit'), TEL_UIT_BESTAND: path.join(d, 'tel-uit'),
   JOBOUT_DIR: path.join(d, 'jobout'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'),
   RUNTIME_FILE: path.join(d, 'runtime.json'), CODEX_HOME: path.join(d, 'codex'), SLEUTELPORTAAL_SLEUTEL: path.join(d, 'geen.key'),
@@ -76,7 +77,8 @@ const run = (extra) => req('POST', '/run', Object.assign({ secret: 'proef', work
     toets('A cwd = eigen jobmap, niet de vault', sa && sa.cwd === path.join(d, 'io', a.job_id), sa && sa.cwd);
     toets('A OUTDIR binnen de jobmap', sa && sa.outdir === path.join(d, 'io', a.job_id, 'out'));
     toets('A geen N8N_API_KEY/API_SECRET/Telegram-sessie/backupwachtwoord in de omgeving', sa && !sa.n8n && !sa.api && !sa.tg && !sa.backup);
-    const toegestaan = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR', 'NODE_VERSION', 'DISABLE_AUTOUPDATER', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_EFFORT', 'OUTDIR', 'ANTHROPIC_MODEL'];
+    const toegestaan = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR', 'NODE_VERSION', 'DISABLE_AUTOUPDATER', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_EFFORT', 'OUTDIR', 'ANTHROPIC_MODEL',
+      'SOCEV_SESSIE', 'SOCEV_BEURT'];   // de pod zet ze zelf per beurt (sessienaam, job-id; geen sleutel)
     const vreemd = sa ? sa.envNamen.filter((k) => toegestaan.indexOf(k) < 0) : ['?'];
     toets('A omgeving is een allowlist', sa && vreemd.length === 0 && sa.envNamen.includes('HOME') && sa.envNamen.includes('PATH'), vreemd.join(','));
     toets('A geen --resume ondanks chat_id + session_id', !arg.includes('--resume') && arg.includes('--session-id'));

@@ -6,6 +6,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
+const NEP_SB = require(require('path').resolve('test/nep-supabase.js'))();   // wv3398: eigen nep-Supabase (rolwachter), niet de echte databank
 const vrijePoort = require(require('path').resolve('test/vrije-poort.js'));
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http'), vm = require('vm');
 const { spawn, execSync } = require('child_process');
@@ -52,7 +53,7 @@ function maakServer() {
   const d = path.join(W, 's');
   ['home', 'vault', 'repo', 'io', 'jobout'].forEach((m) => fs.mkdirSync(path.join(d, m), { recursive: true }));
   fs.copyFileSync('server.js', path.join(d, 'server.js'));
-  const env = Object.assign({}, process.env, {
+  const env = Object.assign({}, process.env, { SUPABASE_URL: NEP_SB.url, SUPABASE_SERVICE_ROLE: NEP_SB.sleutel,
     HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'), APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'), APP_DATA_DIR: path.join(d, 'app-data'), APP_UIT_BESTAND: path.join(d, 'app-uit'), TEL_UIT_BESTAND: path.join(d, 'tel-uit'),
     JOBOUT_DIR: path.join(d, 'jobout'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'),
     RUNTIME_FILE: path.join(d, 'runtime.json'), CODEX_HOME: path.join(d, 'codex'), SLEUTELPORTAAL_SLEUTEL: path.join(d, 'geen.key'),
