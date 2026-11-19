@@ -189,12 +189,14 @@ hook.listen(0, '127.0.0.1', async () => {
     const rap = id => rapporten.find(x => x.job_id === id) || {};
     const A = rap(ids.WEES);
     toets('A: done, ok, rapport verzonden, eindcontrole overgeslagen (wees), wacht-vlag weg', st(ids.WEES).status === 'done' && st(ids.WEES).ok === true && st(ids.WEES).rapport === 'verzonden' && st(ids.WEES).eindcontrole === 'overgeslagen (wees)' && !st(ids.WEES).rapport_wacht, JSON.stringify(st(ids.WEES)));
-    toets('A: rapport = podregel + beide tekstblokken van de slotbeurt (uit het bevroren rapport; transcript was weg)', A.ok === true && /^\[Pod: deze agent liep door/.test(A.output || '') && /Eerste deel van het eindrapport\.\n\nTweede deel: KLAAR-WEES\./.test(A.output || '') && !/Ik begin/.test(A.output || ''), JSON.stringify(A.output));
+    toets('A: rapport = alleen de beide tekstblokken van de slotbeurt, zonder podregel (wv3458; uit het bevroren rapport; transcript was weg)', A.ok === true && /^Eerste deel van het eindrapport/.test(A.output || '') && !/Pod: deze agent liep door/.test(A.output || '') && /Eerste deel van het eindrapport\.\n\nTweede deel: KLAAR-WEES\./.test(A.output || '') && !/Ik begin/.test(A.output || ''), JSON.stringify(A.output));
     toets('A: bestand uit OUTDIR mee in het rapport (na een herstart, Fable K2)', (A.files || []).some(f => f.name === 'rapport-WEES.md') && !(A.files || []).some(f => f.name === 'wees-rapport.json'), JSON.stringify((A.files || []).map(f => f.name)));
     toets('A: jobmap opgeruimd', !fs.existsSync(path.join(d, 'io', ids.WEES)));
     const M = rap(ids.MIDDEN);
     toets('M: gestopt midden in een tool_use -> ok false, wees-zonder-eindtekst', M.ok === false && M.error === 'wees-zonder-eindtekst' && st(ids.MIDDEN).error === 'wees-zonder-eindtekst', JSON.stringify(M).slice(0, 300));
+    toets('M: zonder eindtekst blijft de podregel (wv3458: dan zegt hij "mogelijk niet af")', /^\[Pod: deze agent liep door/.test(M.output || ''), JSON.stringify(M.output).slice(0, 200));
     const D = rap(ids.HANG);
+    toets('D: bovengrens houdt de podregel (wv3458)', /^\[Pod: deze agent liep door/.test(D.output || ''), JSON.stringify(D.output).slice(0, 200));
     toets('D: afgerond met afgebroken-bovengrens', D.ok === false && D.error === 'afgebroken-bovengrens' && st(ids.HANG).error === 'afgebroken-bovengrens', JSON.stringify(st(ids.HANG)));
     const G = rap(ids.GAP);
     toets('G2: zonder bevroren rapport en zonder transcript -> ok false, wees-zonder-eindtekst (ook in het register)', G.ok === false && G.error === 'wees-zonder-eindtekst' &&

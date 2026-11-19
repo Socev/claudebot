@@ -3798,7 +3798,11 @@ function weesStop(a, reden) {
 //     dagen opruimen, Fable K1), zodat het ook na een nieuwe herstart van server.js werkt. Geen jobs[id] voor zo'n
 //     entry na een herstart (Fable K4): /result found:false is het veilige pad voor de tikker.
 function weesRapportPad(id) { return path.join(IO, id, 'wees-rapport.json'); }
-function weesTekst(e, fout) { return WEES_KOP + '\n\n' + (fout ? (e.tekst ? e.tekst + '\n\n' : '') + WEES_GEEN_TEKST : e.tekst); }
+// wv3458 (David 19-11 21:59: "deze zin lees ik in 50% van de agentrapporten"): de kop alleen nog als er GEEN geldige eindtekst
+// is (fout: dan zegt hij iets, "mogelijk niet af"). Met een echte eindtekst (end_turn, geen wachtzin) is het rapport gewoon af:
+// geen kop in het rapport. Gemeten 28-10 t/m 19-11: 252 van 257 wezen hadden er een. Het spoor blijft in het register
+// (wees, eindcontrole 'overgeslagen (wees)') en in de logregel wees-afgerond.
+function weesTekst(e, fout) { return fout ? WEES_KOP + '\n\n' + (e.tekst ? e.tekst + '\n\n' : '') + WEES_GEEN_TEKST : e.tekst; }
 
 function weesAfronden(id) {
   const a = agentsReg[id];
