@@ -2523,7 +2523,10 @@ function dbVraag() {
   basis.tunnel = dbTunnelStand();
   basis.reserve = dbReserve;
   basis.terug = dbTerug.laatste_iso ? { laatste: dbTerug.laatste_iso, uitkomst: dbTerug.uitkomst, id: dbTerug.id, fout: dbTerug.fout, bezig: dbTerug.bezig } : null;
+  // wv3416 (B35): zonder socket ook de reservestand verversen (anders toont /health de laatste goede meting), en de wacht laten tellen
   if (socket) dbReserveVraag();
+  else { dbReserve = { gemeten: basis.gemeten, fout: 'geen databanksocket' }; dbReserveWacht(); }
+  basis.reserve_wacht = dbReserveWachtStand();
   let klaar = false;
   const einde = function (luik) { if (klaar) return; klaar = true; dbStand = Object.assign(basis, { luik: luik }); };
   try {
@@ -2555,23 +2558,63 @@ let dbReserve = null;
 const DB_RESERVE_SQL = "select (select json_build_object('staat', state, 'sinds', backend_start, 'achter_s', round(extract(epoch from replay_lag)::numeric, 1), " +
   "'achter_bytes', pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint, 'antwoord', reply_time) from pg_stat_replication where application_name = 'r230' " +
   "order by backend_start desc limit 1) as verbinding, (select json_build_object('actief', active, 'wal_bytes', pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint, " +
-  "'wal_status', wal_status) from pg_replication_slots where slot_name = 'r230') as slot";
+  "'wal_status', wal_status) from pg_replication_slots where slot_name = 'r230') as slot, " +
+  // wv3416 (B35): archiver (faalt hij nu?) en grootte van pg_wal (pg_ls_waldir via pg_monitor)
+  "(select json_build_object('mislukt', failed_count, 'laatste_fout', last_failed_time, 'laatste_ok', last_archived_time) from pg_stat_archiver) as archief, " +
+  "(select sum(size)::bigint from pg_ls_waldir()) as pg_wal";
 function dbReserveVraag() {
   try {
     const k = require('child_process').execFile('/app/sb-sql', [], { timeout: 10000, maxBuffer: 64 * 1024 }, function (err, uit) {
       const nu = new Date().toISOString();
-      if (err) { dbReserve = { gemeten: nu, fout: 'sb-sql faalde' }; return; }
+      if (err) { dbReserve = { gemeten: nu, fout: 'sb-sql faalde' }; dbReserveWacht(); return; }
       let r = null; try { r = JSON.parse(uit)[0]; } catch (e) { r = null; }
-      if (!r) { dbReserve = { gemeten: nu, fout: 'antwoord onleesbaar' }; return; }
+      if (!r) { dbReserve = { gemeten: nu, fout: 'antwoord onleesbaar' }; dbReserveWacht(); return; }
       const v = r.verbinding || null, sl = r.slot || null;
       dbReserve = { gemeten: nu, slot: sl ? { actief: sl.actief === true, wal_bytes: sl.wal_bytes, wal_status: sl.wal_status } : null,
         verbonden: !!(v && v.staat === 'streaming'), staat: v ? v.staat : null, sinds: v ? v.sinds : null,
-        achter_s: v && v.achter_s != null ? Number(v.achter_s) : null, achter_bytes: v ? v.achter_bytes : null, antwoord: v ? v.antwoord : null };
+        achter_s: v && v.achter_s != null ? Number(v.achter_s) : null, achter_bytes: v ? v.achter_bytes : null, antwoord: v ? v.antwoord : null,
+        archief: r.archief || null, pg_wal_bytes: r.pg_wal != null ? Number(r.pg_wal) : null };
+      dbReserveWacht();
     });
     k.stdin.on('error', function () {});
     k.stdin.end(DB_RESERVE_SQL);
-  } catch (e) { dbReserve = { gemeten: new Date().toISOString(), fout: 'sb-sql niet te starten' }; }
+  } catch (e) { dbReserve = { gemeten: new Date().toISOString(), fout: 'sb-sql niet te starten' }; dbReserveWacht(); }
 }
+// wv3416 (actieplan Fable 19-11, B35): stille reservewacht. Na elke meting beslist db-reserve-wacht.js (puur) of een afwijking lang genoeg
+// staat voor één box-rij (verbinding 30 min, slot 5 min, archief/pg_wal/meting 30 min; geen herhaling, geen rij bij herstel). Alleen als
+// de reserve bedoeld is: echte release, primaire kant, reservewachtwoord aanwezig en de tunnel niet bewust uit. Staat in een klein
+// bestand, zodat een herstart een gemelde afwijking niet opnieuw meldt. test/db-reserve-wacht.sh knipt het blok tussen de markers.
+/* dbReserveWacht:begin */
+const DB_RESERVE_WACHT_PAD = serverPad('db_reserve_wacht', process.env.DB_RESERVE_WACHT, '/opt/data/scripts-staat/db-reserve-wacht.json', serverProefDeel('db-reserve-wacht.json'));
+const DB_RESERVE_WW = process.env.DB_RESERVE_WW || '/opt/data/.pg/reserve.wachtwoord';
+const DB_RESERVE_UIT = process.env.DB_TUNNEL_UIT || '/opt/data/pg-reserve-uit';
+let dbReserveWachtStaat = null, dbReserveWachtMod = null;
+function dbReserveWachtBedoeld() {
+  if (SERVER_ECHT !== true) return false;
+  try { if (!rolPrimair()) return false; } catch (e) { return false; }
+  return fs.existsSync(DB_RESERVE_WW) && !fs.existsSync(DB_RESERVE_UIT);
+}
+function dbReserveWacht() {
+  try {
+    if (!dbReserveWachtBedoeld()) return;
+    if (!dbReserveWachtMod) dbReserveWachtMod = require(path.join(__dirname, 'db-reserve-wacht.js'));
+    if (!dbReserveWachtStaat) { try { dbReserveWachtStaat = JSON.parse(fs.readFileSync(DB_RESERVE_WACHT_PAD, 'utf8')); } catch (e) { dbReserveWachtStaat = {}; } }
+    const nuMs = Date.now(), uit = dbReserveWachtMod.stap(dbReserveWachtStaat, dbReserve, nuMs);
+    const veranderd = JSON.stringify(uit.staat) !== JSON.stringify(dbReserveWachtStaat);
+    if (uit.melden.length) {
+      if (ovisBoxRij(dbReserveWachtMod.boxRij(uit.melden, nuMs)) !== true) return;   // niet geschreven: staat niet bijwerken, volgende minuut opnieuw
+      schrijfLog(nu() + ' db-reserve-wacht box-rij ' + uit.melden.map(function (m) { return m.soort; }).join(','));
+    }
+    dbReserveWachtStaat = uit.staat;
+    if (veranderd) { const t = DB_RESERVE_WACHT_PAD + '.tmp'; fs.writeFileSync(t, JSON.stringify(dbReserveWachtStaat), { mode: 0o600 }); fs.renameSync(t, DB_RESERVE_WACHT_PAD); }
+  } catch (e) { logError('db-reserve-wacht', e); }
+}
+function dbReserveWachtStand() {
+  if (!dbReserveWachtStaat) return null;
+  const iso = function (o) { const u = {}; Object.keys(o || {}).forEach(function (k) { u[k] = new Date(o[k].op || o[k]).toISOString(); }); return u; };
+  return { afwijking_sinds: iso(dbReserveWachtStaat.sinds), gemeld: iso(dbReserveWachtStaat.gemeld) };
+}
+/* dbReserveWacht:einde */
 if (SERVER_ECHT === true) { setTimeout(dbVraag, 8000).unref(); setInterval(dbVraag, 60 * 1000).unref(); }
 // wv716 (ontwerp wv703 D, Fable: bouwen): geheugen en lusvertraging van dit proces op /health.proces (niet op /health/publiek).
 // monitorEventLoopDelay is één libuv-timer (20 ms) met een histogram; elke volle minuut uitlezen en leegmaken, en de waarden van
