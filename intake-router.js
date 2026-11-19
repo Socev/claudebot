@@ -11,7 +11,7 @@
  *
  * STAPPEN (§ 3.2; stap 1 en 4 deed de ontvangstlaag al):
  *   2 lokale tekst in quarantaine: tekstonderdelen, het origineel (rfc822: koppen + tekstdelen), pdftotext -bbox (woorden met positie),
- *     OCR (tesseract) voor een pdf zonder tekstlaag of een afbeelding, docx via unzip. Alleen in het geheugen en in <dir>/quarantaine/<stuk>
+ *     OCR (tesseract) voor een pdf zonder tekstlaag of een afbeelding, docx, xlsx, pptx en odt/ods/odp via unzip. Alleen in het geheugen en in <dir>/quarantaine/<stuk>
  *     (OCR-tussenbestanden), die map is na elk stuk weer leeg. Representaties (de markdown die de route zelf maakte) leest de router NIET:
  *     die bevatten de indeling van het model en zouden de meting rond maken.
  *   3 marker: de uitslag van de ontvangstlaag plus dezelfde patientpoort-2.0 op de eigen lokale tekst (ook OCR). Gemarkeerd of niet te
@@ -69,6 +69,13 @@ const LEES_MAX = 2 * 1024 * 1024;       // per tekstonderdeel
 const TEKST_MIN = 40;                   // tekens zonder witruimte: daaronder geen tekstlaag (gelijk aan de marker)
 const HANDVAT_MS = 10 * 60000;
 const PDF_PAGINAS = 20, OCR_PAGINAS = 5;   // zoveel leest de router (pdftotext -l 20, pdftoppm -l 5); meer = niet volledig gelezen
+const PAGINA_MIN = 20;                  // wv3403 (A29, Fable N3): een PDF-pagina met minder tekst (scan, leeg) is niet gelezen; gelijk aan de poorttoets
+// wv3403 (A29): kantoorbestanden als zip met xml (zoals docx): soort → de delen die de tekst dragen (unzip -p, jokers mogen)
+const KANTOOR = {
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'application/vnd.oasis.opendocument.text': 'odf', 'application/vnd.oasis.opendocument.spreadsheet': 'ods', 'application/vnd.oasis.opendocument.presentation': 'odf',
+};
 const KOP_MAX = 1500;                  // tekens per deel die als kop tellen voor de soortwoorden
 const KETEN_BEGIN = 600;               // wv2684: de extra ketenherkenning kijkt alleen naar het begin van elk deel
 const PER_RONDE = 20;
@@ -320,6 +327,86 @@ function bboxRegels(html) {
     else { huidig = { p: w.p, y: w.y, woorden: [w] }; regels.push(huidig); }
   }
   return regels.map(function (r) { r.woorden.sort(function (a, b) { return a.x - b.x; }); return { pagina: r.p, y: Math.round(r.y), x: Math.round(r.woorden[0].x), tekst: r.woorden.map(function (w) { return w.w; }).join(' ') }; });
+}
+// wv3403 (A29): xml-tekst zonder opmaak (entiteiten; &amp; als laatste, anders wordt &amp;lt; een <)
+function xmlTekst(x) {
+  return String(x || '').replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&#(x[0-9a-fA-F]+|\d+);/g, function (m, n) { const c = n[0] === 'x' ? parseInt(n.slice(1), 16) : Number(n); try { return String.fromCodePoint(c); } catch (e) { return ' '; } })
+    .replace(/&amp;/g, '&');
+}
+// wv3403 (A29): tekst van een kantoorbestand uit zijn xml-delen. → { tekst, poort?, onvolledig? }. xlsx/ods: per blad de rijen, cellen met tab op hun
+// kolom; poort = dezelfde rijen met de kop van de kolom voor elke cel ("BSN: <nummer>"), want de patiëntpoort weegt een getal zonder
+// kop als los. pptx: per alinea een regel; odt/odp (content.xml): alinea's en kopjes per regel.
+const KOLOM_MAX = 200, LEEG_REEKS_MAX = 50;   // tegen een kolom XFD of 16384 herhaalde lege cellen
+function kolomNr(r) { const m = /^([A-Z]{1,3})\d*$/.exec(String(r || '')); if (!m) return -1; let n = 0; for (const c of m[1]) n = n * 26 + (c.charCodeAt(0) - 64); return n - 1; }
+function bladenTekst(bladen, onvolledig) {
+  const tekst = [], poort = [];
+  for (const blad of bladen) {
+    let kop = null;
+    for (const rij of blad) {
+      if (!rij.some(function (c) { return /\S/.test(c || ''); })) continue;
+      const vol = rij.map(function (c) { return c || ''; });
+      tekst.push(vol.join('\t').replace(/\t+$/, ''));
+      if (!kop) { kop = vol.map(function (c) { return c.replace(/\s+/g, ' ').trim().slice(0, 60); }); poort.push(tekst[tekst.length - 1]); continue; }
+      poort.push(vol.map(function (c, i) { return c && kop[i] ? kop[i] + ': ' + c : c; }).join('\t').replace(/\t+$/, ''));
+    }
+  }
+  return { tekst: tekst.join('\n'), poort: poort.join('\n'), onvolledig: !!onvolledig };
+}
+function kantoorTekst(soort, d) {
+  d = d || {};
+  if (soort === 'xlsx') {
+    let onvolledig = false;   // Codex wv3403 MOET 1: een verwijzing naar gedeelde tekst die er niet is = niet volledig gelezen
+    const gedeeld = String(d.gedeeld || '').split(/<si\b/).slice(1).map(function (si) {
+      const t = []; si.replace(/<rPh\b[\s\S]*?<\/rPh>/g, '').replace(/<t\b[^>]*>([\s\S]*?)<\/t>/g, function (m, x) { t.push(x); return m; }); return xmlTekst(t.join(''));
+    });
+    const bladen = String(d.bladen || '').split(/<worksheet\b/).slice(1).map(function (ws) {
+      const rijen = [];
+      ws.replace(/<row\b[^>]*>([\s\S]*?)<\/row>/g, function (m, rij) {
+        const cellen = [];
+        rij.replace(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g, function (m2, attr, binnen) {
+          const t = (/\bt="(\w+)"/.exec(attr) || [])[1] || 'n';
+          binnen = binnen || '';
+          let w = '';
+          if (t === 'inlineStr') { const p = []; binnen.replace(/<t\b[^>]*>([\s\S]*?)<\/t>/g, function (m3, x) { p.push(x); return m3; }); w = xmlTekst(p.join('')); }
+          else { const v = /<v\b[^>]*>([\s\S]*?)<\/v>/.exec(binnen); if (v && t === 's' && typeof gedeeld[Number(v[1])] !== 'string') onvolledig = true;
+          w = v ? (t === 's' ? (gedeeld[Number(v[1])] || '') : xmlTekst(v[1])) : ''; }
+          let k = kolomNr((/\br="([A-Z]+\d*)"/.exec(attr) || [])[1]);
+          if (k < 0 || k < cellen.length || k > KOLOM_MAX) k = cellen.length;
+          while (cellen.length < k) cellen.push('');
+          cellen.push(w);
+          return m2;
+        });
+        rijen.push(cellen);
+        return m;
+      });
+      return rijen;
+    });
+    return bladenTekst(bladen, onvolledig);
+  }
+  const x = String(d.inhoud || '');
+  if (soort === 'ods') {
+    const bladen = x.split(/<table:table[\s>]/).slice(1).map(function (tb) {
+      const rijen = [];
+      tb.replace(/<table:table-row\b[^>]*?(?:\/>|>([\s\S]*?)<\/table:table-row>)/g, function (m, rij) {
+        const cellen = [];
+        String(rij || '').replace(/<table:(?:covered-)?table-cell\b([^>]*?)(?:\/>|>([\s\S]*?)<\/table:(?:covered-)?table-cell>)/g, function (m2, attr, binnen) {
+          const w = xmlTekst(String(binnen || '').replace(/<\/text:p>/g, ' ').replace(/<text:s\b[^>]*\/>/g, ' ')).trim();
+          const n = Math.min(Math.max(1, Number((/table:number-columns-repeated="(\d+)"/.exec(attr) || [])[1]) || 1), w ? 1 : LEEG_REEKS_MAX);
+          // Codex wv3403 MOET 2: een gevulde cel gaat altijd mee; alleen lege opvulling stopt bij KOLOM_MAX
+          for (let i = 0; i < n; i++) { if (!w && cellen.length > KOLOM_MAX) break; cellen.push(w); }
+          return m2;
+        });
+        rijen.push(cellen);
+        return m;
+      });
+      return rijen;
+    });
+    return bladenTekst(bladen);
+  }
+  if (soort === 'pptx') return { tekst: xmlTekst(x.replace(/<\/a:p>/g, '\n').replace(/<a:br\b[^>]*\/>/g, '\n').replace(/<a:tab\b[^>]*\/>/g, '\t')) };
+  return { tekst: xmlTekst(x.replace(/<\/text:(p|h)>/g, '\n').replace(/<text:(line-break|soft-page-break)\b[^>]*\/>/g, '\n').replace(/<text:tab\b[^>]*\/>/g, '\t')
+    .replace(/<text:s\b[^>]*\/>/g, ' ').replace(/<\/table:table-cell>/g, '\t').replace(/<\/table:table-row>/g, '\n')) };
 }
 function tekstRegels(t) { return String(t || '').split(/\r?\n/).map(function (s, i) { return { regel: i + 1, tekst: s }; }); }
 function zonderWit(t) { return String(t || '').replace(/\s/g, '').length; }
@@ -1107,7 +1194,7 @@ CREATE TABLE IF NOT EXISTS systeem_post (id INTEGER PRIMARY KEY, stuk_id TEXT NO
 /*
  * maak(o) → { ronde, info, telling, lijst, verwerkStuk, kaarten, sluit }
  * o = { dir, dbPad?, blobPad(sha) , pdfBbox(pad) → Promise<html|null>, ocr(pad, mime, werkmap) → Promise<tekst|null>,
- *       docx(pad) → Promise<tekst|null>, marker (patientpoort), handvatten() → Promise<json>, nu?, fout?, jev? }
+ *       docx(pad) → Promise<tekst|null>, zip(pad, deel) → Promise<xml|null> (wv3403: unzip -p; afgekapt = null), marker (patientpoort), handvatten() → Promise<json>, nu?, fout?, jev? }
  */
 function maak(o) {
   const nu = typeof o.nu === 'function' ? o.nu : Date.now;
@@ -1232,6 +1319,13 @@ function maak(o) {
         }
         // wv3395 (A14, Fable 9-11 #6): de poort leest alle tekstpagina's van een lang stuk (los van de 20 pagina's van de router);
         // lukt dat volledig, dan telt het stuk voor de marker als volledig gelezen (poortVolledig) en weegt de marker de hele tekst
+        // wv3403 (A29, Fable N3): een pagina zonder tekst (scan tussen tekstpagina's, leeg) of minder pagina's dan verwacht = niet volledig gelezen
+        if (!ocr && zonderWit(t) >= TEKST_MIN) {
+          const npag = (String(html || '').match(/<page\b/g) || []).length;
+          const perPag = new Array(npag + 1).fill(0);
+          for (const rg of regels) if (rg.pagina >= 1 && rg.pagina <= npag) perPag[rg.pagina] += zonderWit(rg.tekst);
+          if (npag < (paginas == null ? 1 : Math.min(paginas, PDF_PAGINAS)) || perPag.slice(1).some(function (n) { return n < PAGINA_MIN; })) deels = true;
+        }
         if (zonderWit(t) >= TEKST_MIN) {
           const r = { x: x(t, regels), ocr, deels };
           if (deels && !ocr && opt.poort && o.pdfPoort) {
@@ -1239,7 +1333,7 @@ function maak(o) {
             // Fable-review KAN 7: volledig = elke pagina heeft tekst (een scanpagina tussen tekstpagina's is niet gelezen, N3) en het
             // aantal pagina's klopt; anders blijft het deel 'niet volledig' (zoals vóór wv3395)
             const pag = typeof vol === 'string' ? vol.replace(/\f\s*$/, '').split('\f') : [];
-            if (pag.length && (paginas == null || pag.length >= paginas) && pag.every(function (x) { return zonderWit(x) >= 20; })) { r.x.poort = vol; r.poortVolledig = true; }
+            if (pag.length && (paginas == null || pag.length >= paginas) && pag.every(function (x) { return zonderWit(x) >= PAGINA_MIN; })) { r.x.poort = vol; r.poortVolledig = true; }
           }
           return r;
         }
@@ -1254,6 +1348,25 @@ function maak(o) {
       if (km === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' && o.docx) {
         const t = await o.docx(p);
         if (t && zonderWit(t) >= TEKST_MIN) return { x: x(t) };
+        return { onleesbaar: true };
+      }
+      // wv3403 (A29, Fable N3 proef G): xlsx, pptx, odt, ods en odp via unzip zoals docx; mislukt of afgekapt = onleesbaar, te lang = deels
+      if (KANTOOR[km] && o.zip) {
+        const soort = KANTOOR[km];
+        let k = null;
+        if (soort === 'xlsx') {
+          const bladen = await o.zip(p, 'xl/worksheets/sheet*.xml');
+          if (typeof bladen === 'string') k = kantoorTekst('xlsx', { bladen, gedeeld: await o.zip(p, 'xl/sharedStrings.xml') });
+        } else {
+          const inhoud = await o.zip(p, soort === 'pptx' ? 'ppt/slides/slide*.xml' : 'content.xml');
+          if (typeof inhoud === 'string') k = kantoorTekst(soort, { inhoud });
+        }
+        if (k && zonderWit(k.tekst) >= TEKST_MIN) {
+          const te = k.onvolledig === true || k.tekst.length > LEES_MAX || (typeof k.poort === 'string' && k.poort.length > 2 * LEES_MAX);
+          const xx = x(k.tekst.slice(0, LEES_MAX));
+          if (typeof k.poort === 'string') xx.poort = k.poort.slice(0, 2 * LEES_MAX);   // de marker leest de tabel met kolomkoppen
+          return { x: xx, deels: te };
+        }
         return { onleesbaar: true };
       }
       return { onleesbaar: true };
@@ -3095,4 +3208,4 @@ async function zetKaarten(kaarten, h) {
   return gezet;
 }
 
-module.exports = { maak, K, kaartenVoorDag, zetKaarten, REGELVERSIE, PROFIELEN, markerWeging, ionMelding, priveGrens };
+module.exports = { maak, K, kaartenVoorDag, zetKaarten, REGELVERSIE, PROFIELEN, markerWeging, ionMelding, priveGrens, kantoorTekst };
