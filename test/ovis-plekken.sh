@@ -221,7 +221,9 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     zet(P.DL_PAD, DL(['| 2026-11-30 | TG | x | — | 1 | — |']));
     zet('90_Cijfermeester/10_Verwerkt/a.pdf', 'x'); zet('90_Cijfermeester/20_Producten/p.html', 'x'); zet('90_Cijfermeester/Bibliotheek.md', '---\nbronnen: 2\nproducten: 1\n---\n');
     zet('40_Kennisbronnen/index.md', 'x'); zet('40_Kennisbronnen/NZa/Bronnen/k.pdf', 'x'); zet('40_Kennisbronnen/NZa/Bronnen/k (bronnotitie).md', '---\ntype: bron\n---\n');   // wv1877
-    const db = { knopen: [{ id: 'org:kpn', soort: 'organisatie', naam: 'KPN', aliassen: [], vault_pagina: 'x.md', concept: true }], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [], kaarten: [] };
+    fs.mkdirSync(path.join(v, '10_Zakelijk/_Gedeeld/Relaties'), { recursive: true });   // wv3423 (B80): zoals de echte vault; ontbreekt hij = niet gemeten
+    // wv3423: geen vault_pagina — deze proefvault heeft geen entiteitpagina's (anders 'niet gemeten' door het nulvangnet); plek 9–14 is wat hier telt
+    const db = { knopen: [{ id: 'org:kpn', soort: 'organisatie', naam: 'KPN', aliassen: [], concept: true }], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [], kaarten: [] };
     let cm = { bronnen: [{ id: 1, bestandspad: '10_Verwerkt/a.pdf', in_bibliotheek: true }, { id: 2, bestandspad: '40_Kennisbronnen/NZa/Bronnen/k.pdf', in_bibliotheek: true }], producten: [{ id: 1, bestandspad: '90_Cijfermeester/20_Producten/p.html' }] };
     const sbRpc = async (fn, body) => {
       if (fn === 'ovis_register_lees') return JSON.parse(JSON.stringify(db));
@@ -356,7 +358,8 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     zet('20_Prive/Gezondheid/index.md', PG('actueel', ['olares:health-pod']));
     zet('20_Prive/Gezondheid/Knie/Proef - geheimeziekte.md', PG('actueel', ['cloudflare:d1-knie/mijlpalen#proefweg', 'olares:health-pod/diagnoses#1']));
     zet('20_Prive/Gezondheid/.verborgen.md', PG('actueel', ['cloudflare:d1-knie/mijlpalen#telniet']));
-    const db = { knopen: [{ id: 'org:x', soort: 'organisatie', naam: 'X', aliassen: [], vault_pagina: 'x.md', concept: true }], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [], kaarten: [] };
+    fs.mkdirSync(path.join(vg, '10_Zakelijk/_Gedeeld/Relaties'), { recursive: true });   // wv3423 (B80), zie hierboven
+    const db = { knopen: [{ id: 'org:x', soort: 'organisatie', naam: 'X', aliassen: [], concept: true }], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [], kaarten: [] };
     const sbRpc = async (fn, body) => {
       if (fn === 'ovis_register_lees') return JSON.parse(JSON.stringify(db));
       if (fn === 'ovis_zorgdata_paden') throw new Error('rpc http 404');

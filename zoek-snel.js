@@ -37,6 +37,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const LW = require('./lees-of-weiger.js');   // wv3423 (B80): niet kunnen lezen is nooit leeg
 
 const MAX_VRAAG = 200;
 const MAX_TERMEN = 6;
@@ -267,9 +268,9 @@ const DOORZOCHT_VAST = 'Ik zocht op dit apparaat alleen in Zakelijk (zonder pers
 const VOLLEDIG = 'Vraag het Socev voor een volledige zoektocht.';
 const pag = function (n) { return n + (n === 1 ? ' pagina' : ' pagina\'s'); };
 function dekkingZin(d) {
-  const mis = d.ontbreekt_naam ? ', en ik kon nu niet in ' + d.ontbreekt_naam + ' zoeken' : '';
+  const mis = (d.ontbreekt_naam ? ', en ik kon nu niet in ' + d.ontbreekt_naam + ' zoeken' : '') + (d.onleesbaar ? ', en ik kon niet alles lezen' : '');   // wv3423 (B80)
   if ((d.afgekapt || d.bestand_vol) && !d.paginas_mee) return 'Ik kon niet alles doorzoeken' + mis + '.';
-  if (!d.paginas) return mis ? 'Ik kon nu niet in ' + d.ontbreekt_naam + ' zoeken.' : '';
+  if (!d.paginas) return d.ontbreekt_naam ? 'Ik kon nu niet in ' + d.ontbreekt_naam + ' zoeken' + (d.onleesbaar ? ', en ik kon niet alles lezen.' : '.') : d.onleesbaar ? 'Ik kon niet alles lezen.' : '';
   const kern = d.paginas_mee < d.paginas ? 'Ik bekeek ' + d.paginas_mee + ' van de ' + pag(d.paginas) + ' met een treffer'
     : (d.paginas === 1 ? 'Ik bekeek de pagina met een treffer' : 'Ik bekeek alle ' + pag(d.paginas) + ' met een treffer') +
       (d.regels_mee < d.regels ? ', maar niet elke treffer' : ', van sommige alleen een deel');
@@ -277,7 +278,7 @@ function dekkingZin(d) {
 }
 function meldingVoor(soort, d, vast) {
   const waar = vast ? DOORZOCHT_VAST : DOORZOCHT;
-  if (soort === 'leeg') return d && (d.afgekapt || d.bestand_vol || d.ontbreekt) ? 'Niets gevonden in wat ik kon doorzoeken. ' + dekkingZin(d) + ' ' + waar + ' ' + VOLLEDIG
+  if (soort === 'leeg') return d && (d.afgekapt || d.bestand_vol || d.ontbreekt || d.onleesbaar) ? 'Niets gevonden in wat ik kon doorzoeken. ' + dekkingZin(d) + ' ' + waar + ' ' + VOLLEDIG
     : 'Niets gevonden. ' + waar;
   if (!d) return MELDING[soort] || null;
   if (soort === 'geen') return d.volledig ? 'Niet gevonden in de ' + pag(d.paginas) + ' met een treffer. ' + waar
@@ -481,7 +482,8 @@ function maak(opt) {
           if (vast && isVastDicht(pad)) return;
           regels.push({ pad: pad, nr: Number(m[3]), tekst: m[4] });
         });
-        klaar({ regels: regels, afgekapt: te, code: code, wortels: wortels.map(function (w) { return w.wortel; }) });
+        // wv3423 (B80): exit 2 = grep kon iets niet lezen (map of bestand); telt als grens, nooit als "niets gevonden"
+        klaar({ regels: regels, afgekapt: te, code: code, onleesbaar: LW.grepOnleesbaar(code), wortels: wortels.map(function (w) { return w.wortel; }) });
       });
     });
   }
@@ -676,9 +678,9 @@ function maak(opt) {
     // een zoekmap die niet geopend kon worden (niet op zijn plek), telt als grens en wordt genoemd (review #4)
     const ontbreekt = Array.isArray(gv.wortels) ? (vast ? WORTELS_VAST : WORTELS).filter(function (w) { return gv.wortels.indexOf(w) < 0; }) : [];
     const dekking = { paginas: paginas.length, paginas_mee: paginasMee, regels: regelsTotaal, regels_mee: regelsMee,
-      afgekapt: !!gv.afgekapt || undefined, bestand_vol: vol || undefined, ontbreekt: ontbreekt.length ? ontbreekt.length : undefined,
+      afgekapt: !!gv.afgekapt || undefined, bestand_vol: vol || undefined, ontbreekt: ontbreekt.length ? ontbreekt.length : undefined, onleesbaar: !!gv.onleesbaar || undefined,
       ontbreekt_naam: ontbreekt.length ? ontbreekt.map(function (w) { return WORTEL_NAAM[w] || 'een deel'; }).join(' en ') : undefined };
-    dekking.grens = !!(grens || gv.afgekapt || vol || ontbreekt.length);
+    dekking.grens = !!(grens || gv.afgekapt || vol || ontbreekt.length || gv.onleesbaar);
     dekking.volledig = !dekking.grens && paginasMee === paginas.length && regelsMee === regelsTotaal;
     return { tekst: blokken.join('\n\n'), bronnen: bronnen, regels: nRegels, dekking: dekking };
   }

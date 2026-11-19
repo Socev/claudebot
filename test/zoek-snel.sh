@@ -120,6 +120,21 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     /kon nu niet in Privé zoeken/.test(r3w.melding) && !/^Niet gevonden|^Niets gevonden\. /.test(r3w.melding), r3w);
   fs.unlinkSync(path.join(VAULT, '20_Prive'));
   fs.renameSync(path.join(VAULT, '20_Prive-echt'), path.join(VAULT, '20_Prive'));
+  // 3b wv3423 (B80): een map die grep niet kan lezen (chmod 000, exit 2) is een grens, nooit "Niets gevonden" met volledige dekking
+  { const dicht = path.join(VAULT, '10_Zakelijk/DichtProef');
+    fs.mkdirSync(dicht, { recursive: true }); fs.writeFileSync(path.join(dicht, 'x.md'), '# x\nzzproefwoordqq staat hier\n'); fs.chmodSync(dicht, 0o000);
+    let leesbaar = false; try { fs.readdirSync(dicht); leesbaar = true; } catch (e) {}
+    if (leesbaar) toets('3b (overgeslagen: draait als root, chmod 000 houdt niets tegen)', true);
+    else {
+      const r3d = await z2.zoek('Wat weet je van zzproefwoordqq');
+      toets('3b onleesbare map, geen treffers: niet "Niets gevonden." maar "niet alles kunnen lezen", dekking niet volledig', r3d.dekking && r3d.dekking.onleesbaar === true && r3d.dekking.grens === true && r3d.dekking.volledig === false &&
+        /niet alles lezen/.test(r3d.melding) && !/^Niets gevonden\. /.test(r3d.melding), r3d);
+      const r3e = await z2.zoek('Wat is het kenteken van al mijn auto\'s');
+      toets('3b onleesbare map, wel treffers: dekking niet volledig (grens)', r3e.dekking && r3e.dekking.onleesbaar === true && r3e.dekking.volledig === false, r3e.dekking);
+    }
+    fs.chmodSync(dicht, 0o755); fs.rmSync(dicht, { recursive: true, force: true });
+    const r3f = await z2.zoek('Wat weet je van zzproefwoordqq');
+    toets('3b weer leesbaar: gewoon "Niets gevonden." met volledige dekking', r3f.dekking && !r3f.dekking.onleesbaar && /^Niets gevonden\. /.test(r3f.melding), r3f); }
 
   // ── 4. vaste plek ──
   await z.zoek('Wat is de geboortedatum van Sev', { vast: true });

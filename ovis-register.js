@@ -17,6 +17,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const LW = require('./lees-of-weiger.js');   // wv3423 (B80): niet kunnen lezen is nooit leeg
 
 const BLOK_BEGIN = '<!-- ovis:blok begin -->', BLOK_EIND = '<!-- ovis:blok eind -->';
 // SB2 fase 1a (wv1271, bouwplan Second Brain 2.0 § 6 K2): het begin draagt id + content_hash (16 hex van sha256 over de tekst tussen begin
@@ -2233,10 +2234,16 @@ function metMailadres(rel, tekst, adres, zaad) {
 function maak(o) {
   const vault = o.vault, nu = o.nu || Date.now, log = o.log || function () {};
   o.lijst = o.lijst || lijstMapVan(vault);
-  // strikt (wv1763, Fable ZOU 1): een map onder 10_Zakelijk die niet te lezen is gooit (niet gemeten), in plaats van "geen pagina's"
+  // strikt (wv1763, Fable ZOU 1): een map onder 10_Zakelijk die niet te lezen is gooit (niet gemeten), in plaats van "geen pagina's".
+  // wv3423 (B80): onder 20_Prive gooit elke leesfout behalve "bestaat niet" (EACCES, EIO, …); een weggevallen vault vangt 10_Zakelijk
+  // (ENOENT gooit daar) en anders het nulvangnet. De fout is NietGelezen.
+  // Codex wv3423 MOET 1: een map onder 20_Prive die niet bestaat staat in uit.ontbrak; nulVangnet weigert als het register daar pagina's kent.
   function vind(strikt) {
-    const uit = [];
-    function lijstMap(rel) { try { return o.lijst(rel); } catch (e) { if (strikt && /^10_Zakelijk(\/|$)/.test(rel)) throw e; return []; } }
+    const uit = [], ontbrak = [];
+    function lijstMap(rel) {
+      try { return o.lijst(rel); }
+      catch (e) { if (strikt && (/^10_Zakelijk(\/|$)/.test(rel) || !(e && e.code === 'ENOENT'))) throw new LW.NietGelezen(rel, e); ontbrak.push(rel); return []; }
+    }
     lijstMap('10_Zakelijk').forEach(function (m) {
       if (!m.map || m.naam.startsWith('.')) return;
       if (m.naam === '_Gedeeld') { lijstMap('10_Zakelijk/_Gedeeld/Relaties').forEach(function (x) { if (relatiePagina(x)) uit.push('10_Zakelijk/_Gedeeld/Relaties/' + x.naam); }); return; }
@@ -2244,7 +2251,9 @@ function maak(o) {
     });
     lijstMap('20_Prive').forEach(function (x) { if (x.bestand && /^Entiteit - .+\.md$/.test(x.naam)) uit.push('20_Prive/' + x.naam); });
     lijstMap('20_Prive/Relaties').forEach(function (x) { if (relatiePagina(x)) uit.push('20_Prive/Relaties/' + x.naam); });
-    return uit.sort().slice(0, MAX_PAGINAS);
+    const r = uit.sort().slice(0, MAX_PAGINAS);
+    r.ontbrak = ontbrak;
+    return r;
   }
   // wv1011: kandidaat-persoonspagina's — alle .md onder 10_Zakelijk/<map>/(…/){0,2} buiten bronnen, archief, notulen, relaties en skills
   function vindPersonen() {
@@ -2263,6 +2272,18 @@ function maak(o) {
   // → { paginas, paden (alle kandidaat-paden), fout } — zonder zegelsleutel worden personen niet gelezen (niet gemeten; niets gestuurd,
   // niets opgelost, geen BB2): fail closed
   let perStand = { paden: new Set(), fout: null };
+  // wv3423 (B80): 0 entiteitpagina's gelezen terwijl het register er > 0 op een vaultpagina kent = niet gemeten (vault weg, hernoemd,
+  // lege mount), nooit "alle pagina's weg". Gooit NietGelezen.
+  // Codex wv3423 MOET 1: ook per ontbrekende map (ENOENT onder 20_Prive): kent het register daar pagina's, dan niet gemeten.
+  // paden = vind(true) (heeft .ontbrak), of leesAlles(true) (pagina's, idem).
+  function nulVangnet(paden, reg) {
+    const bekend = ((reg && reg.knopen) || []).filter(function (k) { return k && typeof k.vault_pagina === 'string' && k.vault_pagina && k.soort !== 'persoon'; });
+    LW.nulTerwijlBekend(paden.filter(function (p) { return typeof p === 'string' || !p.persoon; }).length, bekend.length, 'entiteitpagina\'s');
+    (paden.ontbrak || []).forEach(function (rel) {
+      const n = bekend.filter(function (k) { return k.vault_pagina.indexOf(rel + '/') === 0; }).length;
+      if (n) throw new LW.NietGelezen(rel + ' bestaat niet, terwijl het register er ' + n + ' pagina(\'s) kent', { code: 'LEEG' });
+    });
+  }
   function leesPersonen() {
     const uit = [], paden = vindPersonen();
     let sleutel = null;
@@ -2279,12 +2300,16 @@ function maak(o) {
     perStand = { paden: new Set(paden), fout: null };
     return uit;
   }
-  function leesAlles() {
-    return vind().map(function (rel) {
+  // wv3423 (B80): strikt voor de Bibliothecaris en de kaarten — een onleesbare map is niet gemeten, geen "pagina weg"
+  function leesAlles(strikt) {
+    const paden = vind(!!strikt);
+    const uit = paden.map(function (rel) {
       let t;
       try { t = o.lees(path.join(vault, rel)); } catch (e) { return { pad: rel, fouten: ['niet te lezen (' + String(e && e.code || e && e.message || e).slice(0, 40) + ')'] }; }
       const p = leesPagina(rel, t); p.tekst = t; return p;
     }).concat(leesPersonen());   // wv1011: personen zonder tekst (geen blok, geen BB8 op hun pagina)
+    uit.ontbrak = paden.ontbrak;
+    return uit;
   }
   // wv1763: alleen de entiteitpagina's (stampagina's), voor de POT-verzender elke paar minuten. Gooit als een map onder 10_Zakelijk niet te
   // lezen is (vind() slikt dat gewoonlijk in en zou dan "geen pagina's" geven: dat is niet gemeten, geen afwezigheid).
@@ -2539,9 +2564,12 @@ function maak(o) {
   // Bibliothecaris: leest, vergelijkt, schrijft bevindingen (BB), stempelt (niet op afroep). opties.sinds = log sinds (ISO).
   async function bibliothecaris(opties) {
     opties = opties || {};
+    // wv3423 (B80): een onleesbare vault gooit al vóór het compileren (niet gemeten: geen stempel, niets opgelost, geen kaart)
+    nulVangnet(vind(true), await register());
     const c = await compileer('afroep', { droog: !!opties.droog });   // diffreview #1: eerst bijwerken (alleen databank), fouten worden BB6
     const reg = await register(opties.sinds || new Date(nu() - 36 * 3600000).toISOString());
-    const paginas = leesAlles();
+    const paginas = leesAlles(true);
+    nulVangnet(paginas, reg);
     const pot = o.pot ? await potMeting(o.pot) : null;   // wv981: plek 4 (alleen lezen); o.pot = { d1(batch) } (dossier vervallen, wv2256)
     let bank = null;   // wv1010: plek 6 (alleen lezen); o.bank = bankLezer(pad)
     if (o.bank) { const lb = leesBank(); bank = Object.assign(lb, { meting: bankMeting(o.bank, bankVerwijzingen(lb)), nu: nu() }); }
@@ -2621,7 +2649,9 @@ function maak(o) {
   async function kaarten(opties) {
     opties = opties || {};
     const soorten = opties.soorten || ['kritiek', 'bundel', 'biblio', 'feit'], uit = { gezet: [], fouten: [], weg: 0, redenen: {} };
+    const paginas = leesAlles(true);   // wv3423 (B80): eerst lezen; niet te lezen = geen kaartenronde (ook niets weg)
     let reg = await register();
+    nulVangnet(paginas, reg);
     const t = nu();
     for (const k of (reg.kaarten || []).filter(function (x) { return x.status === 'open' && Date.parse(x.aangemaakt) < t - 3600000; })) {
       if (opties.droog) continue;
@@ -2636,7 +2666,7 @@ function maak(o) {
       try { const f = await o.sbRpc('sb_identifier_te_bevestigen', { p_max: 200 }); reg.feiten = Array.isArray(f) ? f : null; }
       catch (e) { reg.feiten = null; uit.fouten.push({ sleutel: 'feit', fout: 'feiten lezen: ' + String(e && e.message || e).slice(0, 120) }); }
     }
-    const p = plan(reg, leesAlles(), { nu: t, soorten: soorten, potEerste: opties.potEerste });   // wv1763: eerste-gebruikkaart factuuradres POT
+    const p = plan(reg, paginas, { nu: t, soorten: soorten, potEerste: opties.potEerste });   // wv1763: eerste-gebruikkaart factuuradres POT
     uit.redenen = p.redenen;
     for (const k of p.kaarten) {
       if (opties.droog) { uit.gezet.push(k.sleutel); continue; }

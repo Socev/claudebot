@@ -162,6 +162,7 @@ function nepDb(start) {
 }
 function wegwerpVault(paginas) {
   const v = fs.mkdtempSync(path.join(os.tmpdir(), 'ovis-'));
+  fs.mkdirSync(path.join(v, '10_Zakelijk'), { recursive: true });   // wv3423: een echte vault heeft altijd 10_Zakelijk (ontbreekt hij = niet gemeten)
   Object.keys(paginas).forEach((rel) => { fs.mkdirSync(path.join(v, path.dirname(rel)), { recursive: true }); fs.writeFileSync(path.join(v, rel), paginas[rel]); });
   return v;
 }
@@ -360,6 +361,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ovis-srv-'));
     process.env.BANK_DIR = path.join(dir, 'bank');   // wv1010: nooit de echte bankdatabank in de toets (ontbreekt = niet gemeten)
     const box = path.join(dir, 'vault/00_Systeem/Meldingen/machinekamer.md');
+    fs.mkdirSync(path.join(dir, 'vault/10_Zakelijk'), { recursive: true });   // wv3423: zonder 10_Zakelijk is de Bibliothecaris niet gemeten
     fs.mkdirSync(path.dirname(box), { recursive: true }); fs.writeFileSync(box, '# box\n\n## [log] 2026-10-24 10:00 — iets\n- status: open\n');
     const st = { klok: { datum: '2026-10-25', uur: 1, min: 15, klok: '2026-10-25 01:15' }, spawns: [], rpc: [], primair: true, kind: { code: 0, uit: '{"ok":true,"paginas":12,"gestuurd":0,"blokken":12,"fouten":[]}' } };
     const nepSpawn = function (cmd, args) {
@@ -1041,7 +1043,8 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const PROEF = { [REKP('Hoofd', '0011')]: rekTekst(IA, 'PRIVE'), [REKP('Kind A Sparen', '0022')]: rekTekst(IB, 'PRIVE'), [POTP]: rekTekst(IP, 'POT'), '20_Prive/Financien/Bankregels.md': REGELS_T,
       '20_Prive/Financien/Notitie.md': '# Notitie\n\nGeen verwijzing.\n' };
     const v9 = wegwerpVault(PROEF);
-    const n9 = nepDb({ knopen: REG().knopen, handvatten: REG().handvatten, contact: [], vertaling: [], bevindingen: [], log: [] });
+    // wv3423: deze proefvault heeft geen enkele entiteitpagina; met vault_pagina in het register zou dat 'niet gemeten' zijn (nulvangnet B80)
+    const n9 = nepDb({ knopen: REG().knopen.map((k) => { const c = Object.assign({}, k); delete c.vault_pagina; return c; }), handvatten: REG().handvatten, contact: [], vertaling: [], bevindingen: [], log: [] });
     let bankIo = { meet: (b) => { const m = M(); return Object.keys(R.BANK_SQL).map((k) => m[k]).concat(b.length > Object.keys(R.BANK_SQL).length ? [[]] : []); } };
     const m9 = R.maak({ vault: v9, sbRpc: n9.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: (p, t) => fs.writeFileSync(p, t), nu: () => Date.parse('2026-10-28T01:15:00Z'), bank: { meet: (b) => bankIo.meet(b) } });
     let c9 = await m9.compileer('nacht', { grendel: true });
@@ -1365,6 +1368,44 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     toets('12 D1 weg: fin-bevindingen blijven open, zin zegt niet gemeten', voor11 > 0 && n11.db.bevindingen.filter((b) => /-fin-/.test(b.bevinding_id)).length === voor11 && /D1 fin niet gemeten/.test(b11.zin), [voor11, b11.zin]);
     c11 = await m11.compileer('nacht', { grendel: true });
     toets('12 D1 weg: nacht raakt geen kerncijferpagina aan, meldt de fout', c11.finblokken === 0 && c11.fouten.some((f) => f.pad === '(D1 fin)'), c11.fouten);
+  }
+  // ── 13. wv3423 (B80): niet kunnen lezen is nooit leeg — geen stempel, niets op opgelost, geen kaart dicht ──
+  { const sha = R.vingerafdruk(TG).sha;
+    const OPEN = { bevinding_id: 'BB3-TG-proef', check_id: 'BB3', status: 'open', samenvatting: 'proef', detail: 'proef', ernst: 'warning' };
+    const basis = () => ({ knopen: [Object.assign({}, TGRIJ, { bron_sha: sha, laatst_door: 'compiler' })], handvatten: TGH, contact: [], vertaling: VERT, bevindingen: [Object.assign({}, OPEN)], log: [] });
+    const echt = (v) => (rel) => fs.readdirSync(path.join(v, rel), { withFileTypes: true }).map((d) => ({ naam: d.name, map: d.isDirectory(), bestand: d.isFile() }));
+    const mk = (v, n, lijst) => R.maak({ vault: v, sbRpc: n.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: (p, t) => fs.writeFileSync(p, t), nu: () => Date.parse('2026-10-24T23:15:00Z'), lijst: lijst });
+    const fout = (code) => (rel) => { const e = new Error(code + ': proef ' + rel); e.code = code; throw e; };
+    const geschreven = (n) => n.calls.filter((c) => c.fn === 'mk_hartslag_stempel' || c.fn === 'ovis_bibliothecaris_zet' || c.fn === 'ovis_handvat_activeer').map((c) => c.fn);
+    // controle: leesbare vault → de open bevinding gaat op opgelost (dus de proeven hieronder meten echt iets)
+    { const v = wegwerpVault({ [TGP]: TG }), n = nepDb(basis()), b = await mk(v, n).bibliothecaris();
+      toets('13 controle: leesbaar = open bevinding opgelost en stempel', b.opgelost === 1 && b.gestempeld === true && !n.db.bevindingen.some((x) => x.bevinding_id === OPEN.bevinding_id), b); }
+    const scenario = async (naam, v, lijst, re, metPrive) => {
+      const b0 = () => { const x = basis(); if (metPrive) x.knopen.push({ id: 'org:proefprive', soort: 'organisatie', rol: 'leverancier', naam: 'Proefprive', vault_pagina: '20_Prive/Relaties/Proefprive.md', aliassen: [] }); return x; };
+      const n = nepDb(b0());
+      let fb = null; try { await mk(v, n, lijst).bibliothecaris(); } catch (e) { fb = e; }
+      toets('13 ' + naam + ': Bibliothecaris eindigt als fout (niet gemeten)', !!fb && fb.code === 'NIET_GELEZEN' && re.test(fb.message), fb && fb.message);
+      toets('13 ' + naam + ': geen stempel, niets geschreven, bevinding blijft open', geschreven(n).length === 0 && n.db.bevindingen.length === 1 && n.db.bevindingen[0].status === 'open', geschreven(n));
+      const n2 = nepDb(Object.assign(b0(), { kaarten: [{ sleutel: 'ovis-proef', status: 'open', aangemaakt: '2026-10-01T00:00:00Z' }] }));
+      let fk = null; try { await mk(v, n2, lijst).kaarten({ droog: false, vraagId: () => 'abcdef12' }); } catch (e) { fk = e; }
+      toets('13 ' + naam + ': kaartenronde eindigt als fout, geen kaart weg of gezet', !!fk && fk.code === 'NIET_GELEZEN' && geschreven(n2).length === 0 && !n2.calls.some((c) => c.fn === 'mk_voor_jou_zet'), [fk && fk.message, n2.calls.map((c) => c.fn)]);
+    };
+    const v = wegwerpVault({ [TGP]: TG });
+    await scenario('EACCES op 10_Zakelijk', v, fout('EACCES'), /10_Zakelijk.*EACCES/);
+    await scenario('EIO op een entiteitmap', v, (rel) => rel === '10_Zakelijk' ? echt(v)(rel) : fout('EIO')(rel), /10_Zakelijk\/Tolgaarde.*EIO/);
+    await scenario('EIO op 20_Prive', v, (rel) => /^20_Prive/.test(rel) ? fout('EIO')(rel) : echt(v)(rel), /20_Prive.*EIO/);
+    const vh = wegwerpVault({ [TGP]: TG }); fs.renameSync(vh, vh + '-hernoemd');
+    await scenario('hernoemde vault', vh, undefined, /10_Zakelijk.*ENOENT/);
+    await scenario('lege mount (0 pagina\'s, register kent er 1)', wegwerpVault({}), undefined, /0 gevonden terwijl er 1 bekend/);
+    // Codex MOET 1: 20_Prive/Relaties weg (ENOENT) terwijl het register daar een pagina kent, 10_Zakelijk wel leesbaar
+    { const vp = wegwerpVault({ [TGP]: TG }); fs.mkdirSync(path.join(vp, '20_Prive'));
+      await scenario('20_Prive/Relaties weg, register kent er een pagina', vp, undefined, /20_Prive\/Relaties bestaat niet.*1 pagina/, true); }
+    // 20_Prive die niet bestaat is geen fout (proefvaults, verse vault): gewoon gemeten
+    { const n = nepDb(basis()), b = await mk(wegwerpVault({ [TGP]: TG }), n, (rel) => /^20_Prive/.test(rel) ? fout('ENOENT')(rel) : echt(v)(rel)).bibliothecaris();
+      toets('13 20_Prive bestaat niet (ENOENT): gewoon gemeten', b.gestempeld === true, b.zin); }
+    // de POT-verzender (leesEntiteiten) blijft strikt op 10_Zakelijk
+    { let e0 = null; try { mk(v, nepDb(basis()), fout('EIO')).leesEntiteiten(); } catch (e) { e0 = e; }
+      toets('13 leesEntiteiten gooit nog steeds bij een onleesbare map', !!e0 && e0.code === 'NIET_GELEZEN', e0 && e0.message); }
   }
   console.log(goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
