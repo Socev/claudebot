@@ -62,11 +62,11 @@ rm -f "$W/pauze"
 sleep 15   # ruim voorbij de trage rename (12 s) en de herkansing (3 + 2 s)
 grep -q "rij van een ander" "$W/box.md" && groen "A1 rij van een ander blijft staan" || rood "A1 rij van een ander is weg (late schrijf met oude inhoud): $(grep -c '^## ' "$W/box.md") koppen"
 N=$(grep -c "geen supervisor als ouder" "$W/box.md" || true)
-K=$(grep -c "^- kenmerk: bewaker-geen-sup-$SP\$" "$W/box.md" || true)
-[ "$N" = "1" ] && [ "$K" = "1" ] && groen "A2 bewakerrij één keer, met kenmerk bewaker-geen-sup-$SP" || rood "A2 bewakerrij $N keer, kenmerk $K keer"
+K=$(grep -cE "^- kenmerk: bewaker-geen-sup-$SP-[0-9]+\$" "$W/box.md" || true)
+[ "$N" = "1" ] && [ "$K" = "1" ] && groen "A2 bewakerrij één keer, met kenmerk bewaker-geen-sup-$SP-<serverstart>" || rood "A2 bewakerrij $N keer, kenmerk $K keer"
 grep -q "Formaat" "$W/box.md" && grep -q "bestaande rij" "$W/box.md" && groen "A2 box verder heel" || rood "A2 box beschadigd"
 S=$(grep -c . "$W/seintjes.txt" 2>/dev/null || echo 0)
-[ "$S" = "1" ] && grep -q -- "--sleutel | bewaker-geen-sup-$SP" "$W/seintjes.txt" && groen "A3 om 02:00 één seintje naar bericht.py (die houdt het vast tot 07:00)" \
+[ "$S" = "1" ] && grep -qE -- "--sleutel \| bewaker-geen-sup-$SP-[0-9]+ " "$W/seintjes.txt" && groen "A3 om 02:00 één seintje naar bericht.py (die houdt het vast tot 07:00)" \
   || rood "A3 seintjes om 02:00: $S ($(head -c 200 "$W/seintjes.txt" 2>/dev/null))"
 kill -9 "$BW" 2>/dev/null; wait "$BW" 2>/dev/null
 

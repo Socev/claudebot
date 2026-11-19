@@ -13,16 +13,17 @@
  * een kenmerk dat er al staat nooit nog eens.
  *
  *   boxRij(rij, kenmerk, {herkansing})  rij bovenaan de box (vóór de eerste "## [soort] JJJJ-MM-DD"), via vault-veilig.wijzig (mapgrendel,
- *                                       opnieuw lezen als het bestand intussen veranderde). Mislukt de eerste poging en staat herkansing aan,
- *                                       dan neemt een losgekoppeld herkansproces het over (overleeft het einde van de bewaker): elke minuut,
+ *                                       opnieuw lezen als het bestand intussen veranderde). Met herkansing (standaard) doet één losgekoppelde
+ *                                       werker alle pogingen, ook de eerste (overleeft het einde van de bewaker): direct, dan elke minuut,
  *                                       na 10 pogingen elk halfuur, tot 24 u; steeds één poging tegelijk (een kind dat nog op de schijf
- *                                       wacht, wordt eerst afgewacht: niet meer processen dan nodig tijdens een incident).
+ *                                       wacht, wordt eerst afgewacht: niet meer processen dan nodig tijdens een incident). Zonder herkansing
+ *                                       (schijfdruk.js heeft een eigen lus) wordt een poging overgeslagen zolang het vorige kind niet weg is.
  *   bericht(tekst, sleutel)             altijd via mk-scripts/bericht.py; die en de pod houden een niet-dringend bericht in de stille uren
  *                                       zelf tot 07:00 vast (bericht.py _tot7, server.js berichtStilleUren). De sleutel maakt het één bericht.
  *   zetLink(pad, doel)                  symlink atomair vervangen (tmp + rename) in een kindproces; geen late landing na een time-out.
  *
  * Kind-aanroepen (intern): node meld.js poging <box> <kenmerk> <rij-json>   -> exit 0 geschreven, 4 kenmerk stond er al, 3 niet gelukt
- *                          node meld.js herkans <box> <kenmerk> <rij-json> <kind-ms> [<log>]
+ *                          node meld.js werker <box> <kenmerk> <rij-json> <kind-ms> [<log>]   (alle pogingen voor één rij)
  *                          node meld.js link <pad> <doel>
  * Omgeving (toetsen): MELD_HERKANS_MS (60000), MELD_HERKANS_TRAAG_MS (1800000), MELD_HERKANS_SNEL_N (10), MELD_HERKANS_MAX_MS (86400000),
  *                     MELD_VAULT_VEILIG (pad naar vault-veilig.js; standaard naast dit bestand).
@@ -81,18 +82,27 @@ function kind(args, ms, opties) {
 }
 
 function herkansWacht(pog) { return pog < getal('MELD_HERKANS_SNEL_N', 10) ? getal('MELD_HERKANS_MS', 60000) : getal('MELD_HERKANS_TRAAG_MS', 30 * 60000); }
-async function herkans(box, kenmerk, rij, kindMs, logPad) {
+// De werker doet ALLE pogingen voor één rij, ook de eerste (Codex MOET 2): steeds één kind tegelijk, en vóór elke volgende poging wacht hij
+// tot het vorige kind echt weg is (een kind dat na SIGKILL nog op de schijf wacht). De uitslag van de eerste poging gaat als één regel
+// ("ok"/"niet") naar stdout voor de aanroeper; daarna gaat hij losgekoppeld door.
+async function werker(box, kenmerk, rij, kindMs, logPad) {
   const begin = Date.now(), max = getal('MELD_HERKANS_MAX_MS', 24 * 3600000);
   const log = function (s) {
     if (!logPad) return;
     fs.appendFile(logPad, new Date().toISOString().replace('T', ' ').slice(0, 19) + ' [meld ' + process.pid + '] ' + s + '\n', function () {});
   };
+  process.stdout.on('error', function () {});   // de aanroeper sloot de pijp al (of bestaat niet meer)
   for (let pog = 0; ; pog++) {
-    await new Promise((r) => setTimeout(r, herkansWacht(pog)));
-    if (Date.now() - begin > max) { log('box-rij ' + kenmerk + ' opgegeven na ' + pog + ' herkansingen (24 u)'); return 3; }
+    if (pog > 0) {
+      await new Promise((r) => setTimeout(r, herkansWacht(pog - 1)));
+      if (Date.now() - begin > max) { log('box-rij ' + kenmerk + ' opgegeven na ' + pog + ' pogingen (24 u)'); return 3; }
+    }
     const u = await kind(['poging', box, kenmerk, JSON.stringify(rij)], kindMs);
-    if (u.code === 0 || u.code === 4) { log('box-rij ' + kenmerk + (u.code === 0 ? ' alsnog geschreven' : ' stond er al') + ' (herkansing ' + (pog + 1) + ')'); return 0; }
-    await u.weg;   // een kind dat nog op de schijf wacht eerst laten uitsterven: nooit twee pogingen tegelijk
+    const ok = u.code === 0 || u.code === 4;
+    if (pog === 0) { try { process.stdout.write(ok ? 'ok\n' : 'niet\n'); } catch (e) { /* pijp dicht */ } }
+    else if (ok) log('box-rij ' + kenmerk + (u.code === 0 ? ' alsnog geschreven' : ' stond er al') + ' (poging ' + (pog + 1) + ')');
+    if (ok) return 0;
+    await u.weg;   // nooit twee pogingen tegelijk
   }
 }
 
@@ -104,25 +114,44 @@ function maak(o) {
   const kindMs = o.kindMs || 30000;
   const lopend = {};   // kenmerk -> herkanser al gestart (geen tweede voor dezelfde rij)
 
+  let vorigWeg = null;   // zonder herkansing: kind van de vorige poging (nog niet weg = deze poging overslaan)
   async function boxRij(rij, kenmerk, opties) {
     opties = opties || {};
     const k = schoonKenmerk(kenmerk);
     const tekst = metKenmerk(rij, k);
     if (!o.box) { await log('LET OP: geen box opgegeven - geen rij'); return false; }
-    const u = await kind(['poging', o.box, k, JSON.stringify(tekst)], kindMs);
-    if (u.code === 0 || u.code === 4) return true;
-    const waarom = u.tijd ? 'niet binnen ' + Math.round(kindMs / 1000) + ' s (kind gestopt, landt niet later)' : u.fout ? 'kind: ' + u.fout : 'exit ' + u.code + ' (box niet leesbaar of geen anker)';
-    if (opties.herkansing === false || !k || lopend[k]) { await log('LET OP: box-rij ' + (k || '(zonder kenmerk)') + ' niet geschreven: ' + waarom); return false; }
+    if (opties.herkansing === false || !k) {
+      if (vorigWeg && !vorigWeg.klaar) { await log('LET OP: box-rij ' + (k || '(zonder kenmerk)') + ' overgeslagen: de vorige poging wacht nog op de schijf'); return false; }
+      const u = await kind(['poging', o.box, k, JSON.stringify(tekst)], kindMs);
+      const w = { klaar: false }; u.weg.then(() => { w.klaar = true; }); vorigWeg = w;
+      if (u.code === 0 || u.code === 4) return true;
+      await log('LET OP: box-rij ' + (k || '(zonder kenmerk)') + ' niet geschreven: ' + waarom(u));
+      return false;
+    }
+    if (lopend[k]) { await log('box-rij ' + k + ': de werker loopt al'); return false; }
     lopend[k] = true;
+    let w;
     try {
-      const h = cp.spawn(process.execPath, [__filename, 'herkans', o.box, k, JSON.stringify(tekst), String(kindMs), o.logBestand || ''],
-        { detached: true, stdio: 'ignore', cwd: '/' });
-      h.on('error', function () {});
-      h.unref();
-      await log('LET OP: box-rij ' + k + ' niet geschreven: ' + waarom + ' - herkansing loopt (pid ' + h.pid + ', elke minuut, later elk halfuur, tot 24 u)');
-    } catch (e) { await log('LET OP: box-rij ' + k + ' niet geschreven: ' + waarom + '; herkansing niet te starten: ' + e.message); }
+      w = cp.spawn(process.execPath, [__filename, 'werker', o.box, k, JSON.stringify(tekst), String(kindMs), o.logBestand || ''],
+        { detached: true, stdio: ['ignore', 'pipe', 'ignore'], cwd: '/' });
+    } catch (e) { await log('LET OP: box-rij ' + k + ' niet geschreven: werker niet te starten: ' + e.message); return false; }
+    const eerste = await new Promise(function (resolve) {
+      let buf = '', klaar = false;
+      const einde = (v) => { if (!klaar) { klaar = true; clearTimeout(t); resolve(v); } };
+      const t = setTimeout(() => einde('tijd'), kindMs + 5000);
+      w.on('error', () => einde('fout'));
+      w.on('exit', (code) => einde(code === 0 ? 'ok' : 'weg'));
+      w.stdout.on('data', function (d) { buf += d; if (buf.indexOf('\n') >= 0) einde(buf.trim()); });
+      w.stdout.on('error', () => {});
+    });
+    try { w.stdout.destroy(); } catch (e) { /* al dicht */ }
+    w.unref();
+    if (eerste === 'ok') return true;
+    await log('LET OP: box-rij ' + k + ' niet geschreven (' + (eerste === 'niet' ? 'eerste poging niet gelukt binnen ' + Math.round(kindMs / 1000) + ' s; een gestopt kind landt niet later' : eerste) +
+      ') - de werker (pid ' + w.pid + ') herkanst: elke minuut, na 10 pogingen elk halfuur, tot 24 u');
     return false;
   }
+  function waarom(u) { return u.tijd ? 'niet binnen ' + Math.round(kindMs / 1000) + ' s (kind gestopt, landt niet later)' : u.fout ? 'kind: ' + u.fout : 'exit ' + u.code + ' (box niet leesbaar of geen anker)'; }
 
   function bericht(tekst, sleutel, klasse) {
     if (!o.bericht || !fs.existsSync(o.bericht)) return log('seintje niet verstuurd: ' + (o.bericht || 'bericht.py') + ' ontbreekt').then(() => false);
@@ -152,7 +181,7 @@ if (require.main === module) {
   try {
     if (a[0] === 'poging') process.exit(poging(a[1], a[2], JSON.parse(a[3])));
     else if (a[0] === 'link') process.exit(link(a[1], a[2]));
-    else if (a[0] === 'herkans') herkans(a[1], a[2], JSON.parse(a[3]), parseInt(a[4], 10) || 30000, a[5] || '').then((c) => process.exit(c), () => process.exit(3));
-    else { process.stderr.write('gebruik: meld.js poging|link|herkans ...\n'); process.exit(2); }
+    else if (a[0] === 'werker') werker(a[1], a[2], JSON.parse(a[3]), parseInt(a[4], 10) || 30000, a[5] || '').then((c) => process.exit(c), () => process.exit(3));
+    else { process.stderr.write('gebruik: meld.js poging|link|werker ...\n'); process.exit(2); }
   } catch (e) { process.exit(3); }
 }

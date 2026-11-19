@@ -211,7 +211,8 @@ wachtOp 'uitslag: ' 60 || rood "uitrol: geen ingreep na het weghalen van de mark
 wachtOp 'klaar - de nieuwe server' 20
 toon
 [ "$(telIn 'INGREEP')" = "1" ] && groen "uitrol: precies één ingreep na de marker" || rood "uitrol: $(telIn 'INGREEP') ingrepen"
-grep -q "stille uren" "$W/bin/supervisor.log" && [ ! -s "$W/seintjes.txt" ] && grep -q "bewaker herstartte hem" "$W/box.md" && groen "uitrol: stille uren - box wel, seintje niet" || rood "uitrol: stille uren niet goed"
+# wv3424 (B81): in de stille uren gaat het seintje toch één keer naar bericht.py; die en de pod houden het tot 07:00 vast (eerder weggegooid).
+grep -q "stille uren" "$W/bin/supervisor.log" && [ "$(grep -c . "$W/seintjes.txt" 2>/dev/null)" = "1" ] && grep -q "bewaker herstartte hem" "$W/box.md" && groen "uitrol: stille uren - box en één seintje naar bericht.py (vastgehouden tot 07:00)" || rood "uitrol: stille uren niet goed ($(grep -c . "$W/seintjes.txt" 2>/dev/null) seintjes)"
 stop
 
 # ── 3b. wikkel: marker van uitrol-na-agents.sh telt niet (die wacht bij een hangende server alleen langer) ──────────
