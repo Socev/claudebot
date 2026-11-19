@@ -557,8 +557,12 @@ function maak(o) {
   const klok = () => { const t = Math.max(Math.floor(nu()), klokLaatst + 1); klokLaatst = t; return t; };
   // wat David dichtzette maar nog niet in de lokale databank vastligt (databankslot): het geheugen gaat voor de lokale stand, de tik legt het vast
   const uitGeheugen = new Set(), kijkerGeheugen = new Map();
+  // noodstop: { aan, v } zolang de lokale stand nog niet vastligt; v = het knopmoment (klok), ook bij elke herhaling
   let wilNood = null;
-  const noodGewenst = () => (wilNood !== null ? wilNood : stand('noodstop') === '1');
+  const noodGewenst = () => (wilNood !== null ? wilNood.aan : stand('noodstop') === '1');
+  const noodV = () => (wilNood !== null ? wilNood.v : Number(stand('noodstop_v')) || 0);
+  const noodLokaal = (aan, v) => metDb((db) => { db.exec('BEGIN IMMEDIATE'); try { const z = db.prepare('INSERT INTO deel_stand (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde');
+    z.run('noodstop', aan ? '1' : '0'); z.run('noodstop_v', String(v)); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; } });
 
   // intrekken: eerst buiten (blijvende blok-rij + inhoud weg in één batch), pas daarna lokaal en in een eigen try; bevestigd = D1 gaf succes.
   // Mislukt D1, dan blijft de lokale rij open (dicht zonder dicht_bevestigd) en herhaalt de tik hem; mislukt lokaal, dan houdt uitGeheugen hem vast.
@@ -566,7 +570,7 @@ function maak(o) {
     const t = klok();
     let fd = null;
     try {
-      await (direct ? d1Nu : d1Rij)([{ sql: 'INSERT INTO blok (soort, sleutel, op) VALUES (?, ?, ?) ON CONFLICT (soort, sleutel) DO UPDATE SET op = excluded.op', params: ['onderdeel', id, t] },
+      await (direct ? d1Nu : d1Rij)([{ sql: 'INSERT INTO blok (soort, sleutel, op) VALUES (?, ?, ?) ON CONFLICT (soort, sleutel) DO UPDATE SET op = max(blok.op, excluded.op)', params: ['onderdeel', id, t] },
         { sql: 'DELETE FROM deel WHERE onderdeel = ?', params: [id] }, { sql: 'DELETE FROM publicatie WHERE onderdeel = ?', params: [id] }]);
     } catch (e) { fd = e; }
     try {
@@ -585,14 +589,22 @@ function maak(o) {
   async function kijkerD1(hash, erbij, rol, t) {
     if (erbij) await d1Rij([{ sql: 'DELETE FROM blok WHERE soort = ? AND sleutel = ? AND op < ?', params: ['bezoeker', hash, t] },
       { sql: "INSERT INTO bezoeker (hash, rol) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM blok WHERE soort = 'bezoeker' AND sleutel = ?) ON CONFLICT (hash) DO UPDATE SET rol = excluded.rol", params: [hash, rol, hash] }]);
-    else await d1Nu([{ sql: 'INSERT INTO blok (soort, sleutel, op) VALUES (?, ?, ?) ON CONFLICT (soort, sleutel) DO UPDATE SET op = excluded.op', params: ['bezoeker', hash, klok()] },
+    else await d1Nu([{ sql: 'INSERT INTO blok (soort, sleutel, op) VALUES (?, ?, ?) ON CONFLICT (soort, sleutel) DO UPDATE SET op = max(blok.op, excluded.op)', params: ['bezoeker', hash, klok()] },
       { sql: 'DELETE FROM bezoeker WHERE hash = ?', params: [hash] }]);
   }
   // noodstop aan: buiten de wachtrij; uit: in de wachtrij (gewoon naar buiten). De lokale bevestiging staat los van D1.
-  const noodBatch = (aan) => [{ sql: 'INSERT INTO stand (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde', params: ['noodstop', aan ? '1' : '0'] }];
-  async function noodD1(aan) {
-    await (aan ? d1Nu : d1Rij)(noodBatch(aan));
+  // review wv3404 MOET 1: elke noodstopwijziging draagt de versie van haar knopmoment; D1 houdt de hoogste versie bij (noodstop_v) en schrijft de
+  // waarde alleen als deze wijziging die hoogste is. Een wachtende of laat aankomende 'uit' kan zo een nieuwere 'aan' nooit opheffen (en omgekeerd).
+  const noodBatch = (aan, v) => [
+    { sql: "INSERT INTO stand (sleutel, waarde) VALUES ('noodstop_v', ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = CASE WHEN CAST(excluded.waarde AS INTEGER) > CAST(stand.waarde AS INTEGER) THEN excluded.waarde ELSE stand.waarde END", params: [String(v)] },
+    { sql: "INSERT INTO stand (sleutel, waarde) SELECT 'noodstop', ? WHERE (SELECT waarde FROM stand WHERE sleutel = 'noodstop_v') = ? ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde", params: [aan ? '1' : '0', String(v)] }];
+  const geschreven = (r) => !(Array.isArray(r) && r[1] && r[1].meta && r[1].meta.changes === 0);
+  async function noodD1(aan, v) {
+    if (noodGewenst() !== aan) return false;   // David drukte intussen de andere kant op
+    const r = await (aan ? d1Nu : d1Rij)(noodBatch(aan, v));
+    if (!geschreven(r)) return false;   // D1 heeft een nieuwere wijziging; de tik stuurt de actuele
     standZet('noodstop_d1', aan ? '1' : '0');
+    return true;
   }
   function signaal(id, tekst) {   // één regel in Vraagt aandacht (ghawa.js toont de tabel signaal); nooit de treffer zelf
     metDb((db) => { try { db.prepare("INSERT INTO signaal (id, soort, tekst, op) VALUES (?, 'delen', ?, ?) ON CONFLICT (id) DO UPDATE SET tekst = excluded.tekst, op = excluded.op, dicht_op = NULL").run('delen:' + id, tekst, iso(nu())); } catch (e) { fout('ghawa-deel-signaal', e); } });
@@ -630,7 +642,7 @@ function maak(o) {
     await zorgSchema();
     const uit = { gezet: [], dicht: [], vers: [], poort: [], blok: null };
     const nood = noodGewenst();
-    if (stand('noodstop_d1') !== (nood ? '1' : '0')) await noodD1(nood);
+    if (stand('noodstop_d1') !== (nood ? '1' : '0')) await noodD1(nood, noodV());
     await bezoekersSync();
     const aan = IDS.filter(isAan);
     // onderdelen die uit staan maar nog (deels) buiten: dicht
@@ -738,8 +750,8 @@ function maak(o) {
   async function vastleggen() {
     if (wilNood !== null) {
       const w = wilNood;
-      if (w && stand('noodstop_d1') !== '1') await noodD1(true);
-      standZet('noodstop', w ? '1' : '0');
+      if (w.aan && stand('noodstop_d1') !== '1') await noodD1(true, w.v);
+      noodLokaal(w.aan, w.v);
       if (wilNood === w) wilNood = null;
     }
     let fe = null;   // elk item een eigen try: één mislukt item houdt de rest niet tegen
@@ -781,7 +793,7 @@ function maak(o) {
       // review wv2889 ronde 1 MOET 2: ook een noodstop of iemand eraf die D1 nog niet bevestigde, elke minuut opnieuw (dicht buiten de wachtrij)
       await stap('noodstop', async () => {
         const nood = noodGewenst();
-        if (stand('noodstop_d1') !== (nood ? '1' : '0') && (nood || stand('noodstop_d1') === '1')) await (nood ? noodD1(true) : inRij(() => noodD1(false), true));
+        if (stand('noodstop_d1') !== (nood ? '1' : '0') && (nood || stand('noodstop_d1') === '1')) { const v = noodV(); await (nood ? noodD1(true, v) : inRij(() => noodD1(false, v), true)); }
       });
       await stap('kijker', async () => {
         for (const r of metDb((db) => db.prepare('SELECT hash FROM deel_kijker WHERE weg_op IS NOT NULL AND weg_bevestigd IS NULL').all())) {
@@ -849,14 +861,16 @@ function maak(o) {
   async function noodstop(aan) {
     const nietB = { status: 200, body: { ok: true, noodstop: aan, bevestigd: false, fout: 'nog niet bevestigd; de pod probeert het elke minuut opnieuw' } };
     if (aan) {
-      wilNood = true;
+      const w = { aan: true, v: klok() };
+      wilNood = w;
       let buiten = true;
-      try { await d1Nu(noodBatch(true)); } catch (e) { fout('ghawa-deel-nood', e); buiten = false; }
-      try { standZet('noodstop', '1'); if (buiten) standZet('noodstop_d1', '1'); if (wilNood === true) wilNood = null; } catch (e) { fout('ghawa-deel-lokaal', e); }
+      try { buiten = geschreven(await d1Nu(noodBatch(true, w.v))); } catch (e) { fout('ghawa-deel-nood', e); buiten = false; }
+      try { noodLokaal(true, w.v); if (buiten) standZet('noodstop_d1', '1'); if (wilNood === w) wilNood = null; } catch (e) { fout('ghawa-deel-lokaal', e); }
       return buiten ? { status: 200, body: { ok: true, noodstop: true, bevestigd: true } } : nietB;
     }
-    standZet('noodstop', '0'); wilNood = null;
-    try { await inRij(() => noodD1(false), true); return { status: 200, body: { ok: true, noodstop: false, bevestigd: true } }; }
+    const v = klok();
+    noodLokaal(false, v); wilNood = null;
+    try { if (!(await inRij(() => noodD1(false, v), true))) return nietB; return { status: 200, body: { ok: true, noodstop: false, bevestigd: true } }; }
     catch (e) { fout('ghawa-deel-nood', e); return nietB; }
   }
   async function kijkerErbij(b, door) {

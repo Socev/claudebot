@@ -588,3 +588,43 @@ test('wv3404 A31: een heropen die laat aankomt maakt een nieuwere intrekking nie
   assert.ok(blokD1(o, 'onderdeel', 'funds') && blokD1(o, 'bezoeker', k.body.hash), 'ook na de tik dicht');
   assert.strictEqual(deelVan(o, 'funds'), null);
 });
+
+test('wv3404 review MOET 1: een wachtende of laat aankomende noodstop-uit heft een nieuwere noodstop-aan niet op (kruisproef: versie in D1)', async () => {
+  const o = omgeving();
+  await keurAlles(o); await alleAan(o, ['funds']); await o.m.ronde();
+  await o.m.noodstop(true);
+  // (1) uit wacht in de wachtrij achter een hangende ronde; intussen weer aan
+  let open; let poort = new Promise((r) => { open = r; });
+  o.d1.voor = (batch) => (batch.some((q) => /^INSERT INTO deel /.test(q.sql)) ? poort : null);
+  let db = o.sql(); db.prepare("UPDATE deel_obj SET hash = 'x' WHERE onderdeel = 'funds'").run(); db.close();
+  const r = o.m.ronde(); await slaap(20);
+  const uitP = o.m.noodstop(false);
+  await o.m.noodstop(true);
+  open(); await r; await uitP; o.d1.voor = null;
+  assert.strictEqual(d1Stand(o), '1', 'wachtende uit liet de noodstop los');
+  // (2) de uit-batch is al onderweg (voorbij elke controle in de pod) en komt pas na een nieuwere aan aan
+  await o.m.noodstop(false); assert.strictEqual(d1Stand(o), '0');
+  await o.m.noodstop(true);
+  poort = new Promise((r2) => { open = r2; });
+  o.d1.voor = (batch) => (batch.some((q) => /'noodstop', \?/.test(q.sql) && q.params[0] === '0') ? poort : null);
+  const uit2 = o.m.noodstop(false); await slaap(20);
+  const aan2 = o.m.noodstop(true);   // eerst lokaal aan, dan meteen naar D1 (de uit-batch hangt nog)
+  await aan2; open(); await uit2; o.d1.voor = null;
+  assert.strictEqual(d1Stand(o), '1', 'laat aankomende uit liet de noodstop los');
+  // de uit-batch zelf (geldig op het moment van versturen) kwam wél in D1 aan, maar schreef niets
+  assert.ok(o.d1.log.some((q) => /'noodstop', \?/.test(q.sql) && q.params[0] === '0'));
+  await o.m.tik(true);
+  assert.strictEqual(d1Stand(o), '1'); assert.strictEqual(o.m.health().noodstop, true);
+});
+
+test('wv3404 review MOET 2: een vertraagde intrekking zet de tijd van een nieuwer blok niet terug', async () => {
+  const o = omgeving();
+  await keurAlles(o); await alleAan(o, ['funds']); await o.m.ronde();
+  let open; const poort = new Promise((r) => { open = r; }); let eerste = true;
+  o.d1.voor = (batch) => { if (eerste && batch.some((q) => /^INSERT INTO blok/.test(q.sql))) { eerste = false; return poort; } return null; };
+  const p1 = o.m.schakel('funds', false); await slaap(20);
+  await o.m.schakel('funds', false);
+  const op2 = o.d1.db.prepare("SELECT op FROM blok WHERE soort = 'onderdeel' AND sleutel = 'funds'").get().op;
+  open(); await p1; o.d1.voor = null;
+  assert.strictEqual(o.d1.db.prepare("SELECT op FROM blok WHERE soort = 'onderdeel' AND sleutel = 'funds'").get().op, op2, 'blok-tijd liep terug');
+});
