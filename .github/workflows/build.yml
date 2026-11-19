@@ -112,6 +112,19 @@ jobs:
           if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' '*.sh' | grep -vE '^(test/|paypal-zakelijk-lezer\.js$)' | xargs grep -nE "api(-m)?(\.sandbox)?\.paypal\.com|/v[12]/(oauth2|reporting|payments|checkout|billing|vault)/" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een ander bestand dan paypal-zakelijk-lezer.js noemt de PayPal-API"; exit 1; fi
           echo "paypal-zakelijk-lezer.js: alleen token + transactielijst; facturen-paypal.js: lokaal."
 
+      # homey.js (wv3460): Homey (Athom MCP) alleen lezen. Eén fetch, altijd achter verzoekToets, redirects uit; alleen POST op het token-
+      # endpoint en op het MCP-adres met initialize/notifications/initialized/tools/list (geen tools/call); geen netwerk- of procesmodule;
+      # geen ander bestand (tests uitgezonderd) noemt mcp.athom.com.
+      - name: homey.js mag alleen lezen
+        if: ${{ !cancelled() }}
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' homey.js)
+          if [ "$(echo "$C" | grep -cE "\bfetch\s*\(")" != "1" ] || ! echo "$C" | grep -qE "const doel = verzoekToets\('POST', BASIS \+ pad, o\.rpc\);" || ! echo "$C" | grep -qE "redirect: 'error'"; then echo "::error::fetch buiten roep(), zonder verzoekToets of met redirects"; exit 1; fi
+          if ! echo "$C" | grep -qE "^const METHODEN = new Set\(\['initialize', 'notifications/initialized', 'tools/list'\]\);$"; then echo "::error::homey.js: MCP-methoden buiten initialize/tools/list"; exit 1; fi
+          if echo "$C" | grep -nE "tools/call|require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|import\(|process\.binding"; then echo "::error::homey.js roept tools/call aan of laadt een netwerk- of procesmodule"; exit 1; fi
+          if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' | grep -vE '^(test/|homey\.js$)' | xargs grep -nE "mcp\.athom\.com|api\.athom\.com" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een ander bestand dan homey.js roept Athom aan"; exit 1; fi
+          echo "homey.js: alleen lezen."
+
       # tibber-data.js (wv2625): Tibber Data API alleen lezen. Eén fetch, altijd achter verzoekToets, redirects uit; POST alleen op het
       # tokenendpoint; geen eigen netwerk- of procesmodule; geen ander bestand (tests uitgezonderd) roept data-api.tibber.com aan.
       - name: tibber-data.js mag alleen lezen
