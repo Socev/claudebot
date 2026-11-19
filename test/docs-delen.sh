@@ -12,9 +12,14 @@ const fs = require('fs'), path = require('path'), os = require('os'), crypto = r
 const S = require('./secondbrain.js'), D = require('./docs-delen.js'), VV = require('./vault-veilig.js');
 let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (!ok && extra !== undefined ? '  [' + JSON.stringify(extra).slice(0, 500) + ']' : '')); }
-// BSN-masker zoals appBsnMasker (elfproef), voor de toets
-const elf = (c) => { if (!/^\d{9}$/.test(c)) return false; let s = 0; for (let i = 0; i < 8; i++) s += Number(c[i]) * (9 - i); return (s - Number(c[8])) % 11 === 0; };
-const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)/g, (m) => elf(m.replace(/\D/g, '')) ? '[BSN]' : m);
+// BSN-masker: de echte appBsnMasker uit server.js (wv3399, B119: geen eigen toetskopie met een afwijkende regex meer)
+const bsnMasker = (function () {
+  const sv = fs.readFileSync('server.js', 'utf8');
+  const knip = (a, z) => { const i = sv.indexOf(a), j = sv.indexOf(z, i); if (i < 0 || j < 0) throw new Error('niet gevonden in server.js: ' + a); return sv.slice(i, j); };
+  return new Function(knip('const APP_BSN_MASKER', '\n') + '\n' + knip('function appElfproef(', '\nfunction appBsnAchtig(') + '\nreturn function (t) { return appBsnMasker(t, \'[BSN]\'); };')();
+})();
+toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met spaties niet (verzonnen nummers; wv3399)',
+  bsnMasker('nr 111-222-333.') === 'nr [BSN].' && bsnMasker('bel +31 6 1234 5671') === 'bel +31 6 1234 5671');
 
 (async function () {
   const W = fs.mkdtempSync(path.join(os.tmpdir(), 'deel1382-'));
