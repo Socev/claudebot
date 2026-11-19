@@ -463,6 +463,8 @@ test('A15 dossierlezer: overzichtspagina, tweede woningpagina, kopie van een box
     fs.writeFileSync(path.join(huis, 'Garageboxen.md'), OVERZICHT);
     fs.writeFileSync(path.join(huis, 'Garagebox Zkopie (box 7).md'), M.BOX1);
     fs.writeFileSync(path.join(huis, 'Garagebox nog te kopen.md'), '# Garagebox nog te kopen\n\n## Kerngegevens\n\n| Item | Waarde |\n|---|---|\n| Prijs | € 30.000 |\n');
+    fs.writeFileSync(path.join(huis, 'Garagebox bezichtiging.md'), '# Garagebox bezichtiging\n\n| Adres | Hofstraat 110-9, Apeldoorn |\n');   // adres, maar geen Kerngegevens
+    fs.writeFileSync(path.join(huis, 'Woning Zkopie.md'), M.WONING);   // tweede woningpagina die wel voldoet: de eerste telt
     fs.writeFileSync(path.join(huis, 'Woning A - oude notities.md'), '# Woning, oude notities\n\nLos lijstje.\n');
     fs.writeFileSync(path.join(huis, 'Woning B - zonder adres.md'), '# Woning\n\n## Kerngegevens\n\n- **Type:** proef.\n');
     const d = V.leesDossierMap(vault);
