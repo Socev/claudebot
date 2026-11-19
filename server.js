@@ -20524,12 +20524,22 @@ const mailSluit = (function () {
   const p = path.join(__dirname, 'mail-sluit.js');
   if (!fs.existsSync(p) || !mailman || typeof mailman.mailSluitBron !== 'function') return null;
   try {
-    return require(p).maak({ fout: logError,
+    return require(p).maak({ fout: typeof foutOfKapot === 'function' ? foutOfKapot : logError,
       luik: function (body) { return appAgendaApi(body, { timeoutMs: 120000 }); },
       mailman: mailman,
       poort: function (stuk) { return require(path.join(__dirname, 'intake', 'patientpoort.js')).beoordeel(stuk); },
       bekend: mailSluitBekend,
-      lees: function () { try { return JSON.parse(fs.readFileSync(MAIL_SLUIT_PAD, 'utf8')); } catch (e) { return null; } },
+      // B137: alleen 'bestaat niet' = null (lege staat); een leesfout of kapot JSON gooit (mail-sluit.js schrijft dan niets terug), met één kopie
+      // van het kapotte bestand ernaast (sluit.json.kapot-<mtime>)
+      lees: function () {
+        let t;
+        try { t = fs.readFileSync(MAIL_SLUIT_PAD, 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return null; throw e; }
+        try { const j = JSON.parse(t); if (j === null) throw new Error('null'); return j; }   // Codex MOET 1: alleen een ontbrekend bestand is null
+        catch (e) {
+          try { const apart = MAIL_SLUIT_PAD + '.kapot-' + Math.floor(fs.statSync(MAIL_SLUIT_PAD).mtimeMs); if (!fs.existsSync(apart)) fs.copyFileSync(MAIL_SLUIT_PAD, apart, fs.constants.COPYFILE_EXCL); } catch (x) {}
+          throw Object.assign(new Error('sluit.json kapot'), { code: 'KAPOT' });
+        }
+      },
       schrijf: function (st) { const t = MAIL_SLUIT_PAD + '.tmp'; fs.writeFileSync(t, JSON.stringify(st), { mode: 0o600 }); fs.renameSync(t, MAIL_SLUIT_PAD); } });
   } catch (e) { logError('mail-sluit', e); return null; }
 })();
@@ -20567,7 +20577,8 @@ async function mailSluitTik() {
           '\n- wat ik zag: in de laatste drie dagen ' + r.mist + ' gesprek(ken) buiten de inbox, niet in spam of prullenbak, zonder besluit van MailMan (alleen tellingen; de gesprekken staan in Mail › Niet in je inbox gekomen)\n- voorstel: rondes van AI - MailMan nalopen (tabel ronde in mailman.sqlite, volledig/afgekapt) en /health mail_sluit\n');
       }
       // review wv3091 MOET 1: ook een onvolledige uitkomst (ok false) telt als mislukt; na 3 pogingen één box-rij
-      if ((!r || !r.ok) && mailSluitStand.pogingen >= 3 && mailSluit.boxNieuw('fout-' + t.datum)) {
+      // B137: een kapotte sluit.json heeft al een eigen box-rij (foutOfKapot); dan niet nog eens een nachtrij
+      if ((!r || !r.ok) && mailSluitStand.pogingen >= 3 && !mailSluitInfo().kapot && mailSluit.boxNieuw('fout-' + t.datum)) {
         ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Mail sluitcontrole lukte vannacht niet (volledig) #ovis-mail-sluit\n- status: open\n- van: pod:mail-sluit — bevinding_id mail-sluit-fout-' + t.datum +
           '\n- wat ik zag: 3 pogingen zonder volledige uitkomst (leesluik mail_dag, MailMan of de contacten); wat wel lukte staat op de lijst, een eerdere volledige uitkomst van een dag blijft staan\n- voorstel: api.log (mail-sluit) en errors.log nalopen; n8n AI - Agenda-Wachter API actie mail_dag\n');
       }
@@ -20971,7 +20982,7 @@ const harvester = (function () {
   if (!fs.existsSync(p)) return null;
   try {
     const H = require(p);
-    const h = H.maak({ vault: VAULT, dir: HARVESTER_DIR, fout: logError, claude: harvesterClaude,
+    const h = H.maak({ vault: VAULT, dir: HARVESTER_DIR, fout: typeof foutOfKapot === 'function' ? foutOfKapot : logError, claude: harvesterClaude,
       aixKaarten: harvesterAix,
       // hartslag na elke geslaagde ronde, ook leeg (AI - Stiltewachter, rij hartslag-harvester; Fable wv820 #3)
       hartslag: async function (items, kaarten) {
@@ -21025,7 +21036,11 @@ async function appHarvester(req, res, a, d, route) {
   }
   let r;
   try { r = await harvester.app(route, d || {}); }
-  catch (e) { logError('app-harvester', e); return appWeiger(res, 500, 'fout op de pod', 'harvester uitzondering'); }
+  catch (e) {
+    logError('app-harvester', e);
+    if (e && e.code === 'KAPOT') return appWeiger(res, 503, 'de opslag van de Harvester is nu niet te lezen; er is niets overschreven', 'harvester opslag kapot');   // B137
+    return appWeiger(res, 500, 'fout op de pod', 'harvester uitzondering');
+  }
   if (r.status !== 200) res._app.reden = 'harvester: ' + String(r.j && r.j.fout || '').slice(0, 60);
   else if (route !== 'GET /app/harvester') res._app.reden = 'harvester ' + route.slice('POST /app/harvester/'.length) + ' ' + String(d && d.id || '').slice(0, 40);
   return appStuur(res, r.status, r.j);
@@ -21136,6 +21151,20 @@ function ovisNachtKind(opt) {
   });
 }
 function boxGeenGrendel() { logError('box-grendel', new Error('mapgrendel van de box niet binnen 5 s: zonder grendel geschreven (wv1944)')); }
+// B137 (Fable-reviews 19-11): een onleesbaar of kapot opslagbestand (Harvester, AIX, deelregister) wordt niet meer als leeg overschreven; de
+// module meldt het één keer per kapotte kopie met waar = '<naam>-kapot'. Dan naast de logregel één box-rij per soort per podleven.
+function foutOfKapot(waar, e) {
+  logError(waar, e);
+  const gemeld = foutOfKapot.gemeld || (foutOfKapot.gemeld = new Set());   // functie-eigenschap: de modules worden eerder in dit bestand gemaakt (geen TDZ)
+  if (!/-kapot$/.test(String(waar)) || gemeld.has(waar)) return;
+  gemeld.add(waar);
+  const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+  const naam = String(waar).replace(/-kapot$/, '').replace(/[^\w .-]/g, '').slice(0, 60);
+  ovisBoxRij('\n## [log] ' + tijd + ' — Opslag onleesbaar: ' + naam + ' (niets overschreven) #opslag-kapot\n- status: open\n- van: pod (server.js foutOfKapot, B137)\n' +
+    '- wat ik zag: ' + String(e && e.message || 'onleesbaar').replace(/\n/g, ' ').slice(0, 240) + '\n' +
+    '- gevolg: lezen en schrijven van dit onderdeel weigeren tot het bestand hersteld is; er is niets gewist\n' +
+    '- voorstel: bestand in de map van het onderdeel nakijken; herstellen uit de kopie <naam>.kapot-<tijd> ernaast of weghalen (dan begint die opslag leeg)\n');
+}
 function ovisBoxRij(tekst) {   // → true als de rij in de box staat (wv1303: de intake-hangers melden alleen dan het stuk als gemeld)
   try {
     return VV().wijzig(path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), function (t) {
@@ -22940,7 +22969,7 @@ const ideeen = (function () {
   try {
     const I = require(p);
     let Hmod = null; try { Hmod = require(path.join(__dirname, 'harvester.js')); } catch (e) {}
-    const i = I.maak({ vault: VAULT, dir: IDEEEN_DIR, aix: aix, fout: logError, harvester: Hmod, voorJou: aixVoorJou,
+    const i = I.maak({ vault: VAULT, dir: IDEEEN_DIR, aix: aix, fout: typeof foutOfKapot === 'function' ? foutOfKapot : logError, harvester: Hmod, voorJou: aixVoorJou,
       claude: function (s, pr, sc) { return typeof harvesterClaude === 'function' ? harvesterClaude(s, pr, sc) : Promise.resolve({ ok: false, fout: 'geen modelaanroep' }); } });
     i.mkdir();   // /opt/data/aix-winkel en tmp/ op 0700; staat en journaal 0600
     return i;
@@ -23088,7 +23117,11 @@ async function appIdeeen(req, res, a, d, route, s) {
     if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
     let u;
     try { u = await ideeen.plaatsEen(pm[1], { bevestiging: require(path.join(__dirname, 'ideeen.js')).BEVESTIGING_APP, hash: d && d.hash, apparaat: a && a.id }); }
-    catch (e) { logError('app-ideeen-plaats', e); return appWeiger(res, 502, 'plaatsen mislukte op de pod', 'ideeen plaats uitzondering'); }
+    catch (e) {
+      logError('app-ideeen-plaats', e);
+      if (e && e.code === 'KAPOT') return appWeiger(res, 503, 'de AIX-opslag op de pod is nu niet te lezen; er is niets geplaatst', 'ideeen plaats opslag kapot');   // B137
+      return appWeiger(res, 502, 'plaatsen mislukte op de pod', 'ideeen plaats uitzondering');
+    }
     res._app.reden = 'ideeen plaats ' + pm[1] + ' ' + u.status + (u.j && u.j.aix ? ' aix ' + u.j.aix : u.j && u.j.fout ? ' ' + String(u.j.fout).slice(0, 50) : '');
     schrijfLog(nu() + ' aix-plaats ' + velden({ id: pm[1], status: u.status, aix: u.j && u.j.aix || null, bijgewerkt: !!(u.j && u.j.bijgewerkt) }));
     return appStuur(res, u.status, u.j);
@@ -23099,7 +23132,11 @@ async function appIdeeen(req, res, a, d, route, s) {
   } else if ((route.indexOf('GET /app/ideeen/plaatje/') === 0 || route.indexOf('GET /app/ideeen/proefplaatje/') === 0) && !appTeller('ideeen-plaatje', 200, 3600000)) return appWeiger(res, 429, 'te veel plaatjes dit uur (max 200)', 'grens ideeen-plaatje');
   let r;
   try { r = await ideeen.app(route, Object.assign({}, d || {}, { __apparaat: a && a.id })); }   // apparaat alleen voor het journaal van Deel/Niet
-  catch (e) { logError('app-ideeen', e); return appWeiger(res, 502, 'AIX is nu niet bereikbaar', 'ideeen uitzondering'); }
+  catch (e) {
+    logError('app-ideeen', e);
+    if (e && e.code === 'KAPOT') return appWeiger(res, 503, 'de AIX-opslag op de pod is nu niet te lezen; er is niets overschreven', 'ideeen opslag kapot');   // B137
+    return appWeiger(res, 502, 'AIX is nu niet bereikbaar', 'ideeen uitzondering');
+  }
   if (r.status !== 200) res._app.reden = 'ideeen: ' + String(r.j && r.j.fout || '').slice(0, 60);
   else if (route.indexOf('POST /app/ideeen/kaart/') === 0) res._app.reden = 'ideeen ' + route.slice('POST /app/ideeen/'.length);
   else if (route === 'POST /app/ideeen/naar-ideeenbus') res._app.reden = 'ideeen naar-ideeenbus kaart ' + String(d && d.kaart || '').slice(0, 12);
@@ -23276,7 +23313,7 @@ const docsDelen = (function () {
     const S = require(path.join(__dirname, 'secondbrain.js'));
     // wv1901: de pagina lezen volgt de schakelaar (ctx.afscherm); ctx.vast blijft het echte soort voor "niet delen vanaf een vaste plek"
     const bron = function (pad, ctx) { return secondbrain.bron(pad, Object.assign({}, ctx, { vast: !!(ctx && ctx.afscherm) })); };
-    return require(p).maak({ dir: DOCS_DIR, vault: VAULT, host: DOCS_HOST, fout: logError, bron: bron, access: docsAccess,
+    return require(p).maak({ dir: DOCS_DIR, vault: VAULT, host: DOCS_HOST, fout: typeof foutOfKapot === 'function' ? foutOfKapot : logError, bron: bron, access: docsAccess,
       masker: S.masker, isVastDicht: S.isVastDicht, isVerborgen: S.isVerborgen, bsnMasker: function (t) { return appBsnMasker(t); },
       lees: function (x) { return VV().lees(x, 'utf8'); },
       hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },

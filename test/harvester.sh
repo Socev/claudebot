@@ -453,6 +453,50 @@ let invoer=''; process.stdin.on('data',c=>invoer+=c); process.stdin.on('end',()=
     toets('11 GET-lijst: bron aix aan, met laatste lezing', (await M2.app('GET /app/harvester', {})).j.bronnen.find((b) => b.id === 'aix').aan === true);
   }
 
+  // ── 12. B137 (Fable-review 19-11, M8 + M9): leesfout of kapot bestand is nooit 'leeg'; giftig bericht na twee mislukte modelrondes overgeslagen ──
+  {
+    const D4 = path.join(W, 'harvester-b137');
+    const meldingen = [];
+    let antw4 = { ok: false, fout: 'model kapot' }, aanroep4 = 0;
+    const M4 = H.maak({ vault: VAULT, dir: D4, klok, lookup, request, claude: async () => { aanroep4++; return antw4; }, hartslag: async () => true,
+      fout: (soort, e) => meldingen.push([soort, e && e.code]) });
+    M4.mkdir();
+    routes['feed.proef/feed'] = { body: atom.replace('</feed>', '<entry><id>gif1</id><published>' + new Date(t - 3600000).toISOString() + '</published><link href="https://blog.proef/gif"/><title>Giftig</title><content>x</content></entry></feed>') };
+    let r4 = await M4.ronde();
+    toets('12 M9 ronde 1: model faalt, bericht nog niet gezien', !r4.geslaagd && r4.items >= 1 && !r4.overgeslagen, r4);
+    const n4 = r4.items;
+    r4 = await M4.ronde();
+    toets('12 M9 ronde 2: model faalt opnieuw → berichten als gezien gemarkeerd en gemeld', !r4.geslaagd && r4.overgeslagen === n4 && /overgeslagen/.test(r4.fout), r4);
+    const a4 = aanroep4;
+    antw4 = { ok: true, data: { kaarten: [] } };
+    r4 = await M4.ronde();
+    toets('12 M9 ronde 3: het giftige bericht komt niet meer terug', r4.geslaagd && r4.items === 0 && aanroep4 === a4, r4);
+    // kaarten.json kapot (parsefout): geen schrijfactie, bestand bewaard, kopie apart, één melding
+    const KP = path.join(D4, 'kaarten.json');
+    fs.writeFileSync(KP, '{"versie":1,"kaarten":[{"id":"k0123456789","titel":"Oud"'); const kapotInhoud = fs.readFileSync(KP, 'utf8');
+    routes['feed.proef/feed'] = { body: atom.replace('</feed>', '<entry><id>vers1</id><published>' + new Date(t - 1800000).toISOString() + '</published><link href="https://blog.proef/vers"/><title>Vers</title><content>x</content></entry></feed>') };
+    antw4 = { ok: true, data: { kaarten: [{ item: 1, titel: 'Nieuw idee', kort: 'Een zin. Twee zinnen.', gaaf: { n: 3, waarom: 'a' }, handig: { n: 3, waarom: 'b' }, complex: { n: 2, waarom: 'c' }, past_bij: 'Apps' }] } };
+    let e4 = null; try { await M4.ronde(); } catch (e) { e4 = e; }
+    toets('12 M8 kapot kaarten.json: ronde weigert (KAPOT), bestand ongewijzigd', e4 && e4.code === 'KAPOT' && fs.readFileSync(KP, 'utf8') === kapotInhoud, e4 && e4.message);
+    toets('12 M8 kopie apart gezet en één melding', fs.readdirSync(D4).filter((n) => /^kaarten\.json\.kapot-\d+$/.test(n)).length === 1 && meldingen.filter((m) => /kaarten\.json-kapot/.test(m[0])).length === 1, { m: meldingen, d: fs.readdirSync(D4) });
+    let e5 = null; try { await M4.app('POST /app/harvester/weg', { id: 'k0123456789' }); } catch (e) { e5 = e; }
+    toets('12 M8 App-actie op kapot kaarten.json: weigert, niets geschreven', e5 && e5.code === 'KAPOT' && fs.readFileSync(KP, 'utf8') === kapotInhoud);
+    M4.rondeStart(); await new Promise((r) => setTimeout(r, 50));
+    const uk4 = M4.rondeUitkomst();
+    toets('12 M8 uitkomst voor n8n noemt het kapotte bestand', /Harvester-ronde mislukt: harvester kaarten\.json is onleesbaar/.test(uk4.j.regel || ''), uk4.j);
+    // EIO-nep op staat.json: geen schrijfactie
+    fs.writeFileSync(KP, JSON.stringify({ versie: 1, kaarten: [] }));
+    const SP = path.join(D4, 'staat.json'), staatVoor = fs.readFileSync(SP, 'utf8');
+    const echtLees = fs.readFileSync;
+    fs.readFileSync = function (p, o) { if (String(p) === SP) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); return echtLees.apply(fs, arguments); };
+    let e6 = null; try { await M4.ronde(); } catch (e) { e6 = e; } finally { fs.readFileSync = echtLees; }
+    toets('12 M8 EIO op staat.json: ronde weigert, staat en kaarten ongewijzigd', e6 && e6.code === 'KAPOT' && /EIO/.test(e6.message) && fs.readFileSync(SP, 'utf8') === staatVoor &&
+      JSON.parse(fs.readFileSync(KP, 'utf8')).kaarten.length === 0, e6 && e6.message);
+    fs.unlinkSync(KP);
+    r4 = await M4.ronde();
+    toets('12 ENOENT telt wel als leeg: ronde gaat door', r4.geslaagd, r4);
+  }
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

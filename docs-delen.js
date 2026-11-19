@@ -383,13 +383,32 @@ function maak(opt) {
   const lees = opt.lees || function (p) { return fs.readFileSync(p, 'utf8'); };
   let namen = null;   // { op, set }
 
+  // B137 (Fable-review kleine-pod 19-11, advies 3): alleen 'bestaat niet' is een leeg register. Een leesfout of een kapot bestand geeft een
+  // register met kapot = true: niet schrijven (anders zijn ontvangerslijsten en de koppeling pagina-link weg en krijgt een pagina een tweede
+  // link terwijl de oude blijft werken), het kapotte bestand blijft staan met een kopie ernaast, één melding per kopie; Delen weigert.
+  let kapotGemeld = null;
   function leesRegister() {
-    try {
-      const j = JSON.parse(fs.readFileSync(REG, 'utf8'));
-      return j && Array.isArray(j.delingen) ? j : { versie: 1, delingen: [] };
-    } catch (e) { if (e.code !== 'ENOENT') fout('docs-register-lees', e); return { versie: 1, delingen: [] }; }
+    let t;
+    try { t = fs.readFileSync(REG, 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return { versie: 1, delingen: [] }; return registerKapot(e); }
+    let j; try { j = JSON.parse(t); } catch (e) { j = null; }
+    return j && typeof j === 'object' && Array.isArray(j.delingen) ? j : registerKapot(null);
   }
+  function registerKapot(e) {
+    let apart = null;
+    try { const st = fs.statSync(REG); apart = REG + '.kapot-' + Math.floor(st.mtimeMs); if (!fs.existsSync(apart)) fs.copyFileSync(REG, apart, fs.constants.COPYFILE_EXCL); }
+    catch (x) { apart = null; }
+    const sleutel = apart || ('lees:' + (e && e.code));
+    if (kapotGemeld !== sleutel) {
+      kapotGemeld = sleutel;
+      fout('docs-register-kapot', Object.assign(new Error('deelregister onleesbaar' + (apart ? ', kopie apart gezet' : '')), { code: e && e.code || 'KAPOT' }));
+    }
+    const r = { versie: 1, delingen: [] };
+    Object.defineProperty(r, 'kapot', { value: true });   // niet in JSON: schrijfRegister weigert hem
+    return r;
+  }
+  const REG_KAPOT = 'het deelregister is nu niet te lezen; er is niets gedeeld of overschreven en de machinekamer krijgt een melding. Probeer het later nog eens';
   function schrijfRegister(r) {
+    if (r && r.kapot) throw Object.assign(new Error('deelregister onleesbaar: niet overschreven'), { code: 'KAPOT' });
     fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(DIR, 0o700); } catch (e) { /* niet van ons */ }
     const tmp = REG + '.tmp' + process.pid + '-' + crypto.randomBytes(3).toString('hex');
@@ -532,6 +551,7 @@ function maak(opt) {
         return { status: 409, j: { ok: false, fout: 'bevestig eerst de namen die op de pagina staan', namen: v.namen }, audit: v.audit };
     }
     const reg = leesRegister();
+    if (reg.kapot) return { status: 503, j: { ok: false, fout: REG_KAPOT }, audit: v.audit };
     const oud = huidigeDeling(reg, v.audit.h);
     if (oud && oud.soort !== soort)
       return { status: 409, j: { ok: false, soort_anders: true, fout: 'deze pagina is al ' + oud.soort + ' gedeeld; trek die deling eerst in (onder Gedeeld) en deel hem dan ' + soort }, audit: v.audit };
@@ -635,9 +655,15 @@ function maak(opt) {
       if (!z.ok) schoon = false;
       else for (const id of z.ids) { if (ids.indexOf(id) >= 0) continue; const w = await accWeg(id, slug, bekend); if (!w.ok) schoon = false; }
       if (!schoon) {
-        if (x) { x.access_open = true; try { schrijfRegister(reg); } catch (e) { fout('docs-register', e); } }
+        // B137: ook zonder registerregel (x null) access_open vastleggen, anders laat een tweede Intrekken (D1-rij al weg) de Access-app staan
+        // met de mailadressen van de ontvangers erin; de regel houdt de slug in de toestaanlijst tot het opruimen lukt
+        const y = x || { slug: slug, soort: 'beveiligd', titel: '(opruimen bij Cloudflare open)', sinds: new Date(nu()).toISOString(), access_app: rij && rij.access_app || null, alleen_opruimen: true };
+        y.access_open = true;
+        if (!x) reg.delingen.push(y);
+        try { schrijfRegister(reg); } catch (e) { fout('docs-register', e); }
         return { status: 502, audit: { domein: null, h: x ? x.h : null }, j: { ok: false, deels: true,
-          fout: 'de pagina is weg (de link werkt niet meer), maar het opruimen bij Cloudflare lukte niet helemaal; druk nog eens op Intrekken' } };
+          fout: 'de pagina is weg (de link werkt niet meer), maar het opruimen bij Cloudflare lukte niet helemaal; druk nog eens op Intrekken' +
+            (reg.kapot ? ' (het deelregister is nu niet te lezen; de machinekamer krijgt een melding)' : '') } };
       }
     }
     if (x) {
@@ -660,7 +686,7 @@ function maak(opt) {
   function health() {
     const reg = leesRegister();
     return { aan: true, host: HOST, gedeeld: reg.delingen.length, beveiligd: reg.delingen.filter((x) => x.soort === 'beveiligd').length,
-      beveiligd_aan: !!ACC, opruimen_open: reg.delingen.filter((x) => x.access_open).length };
+      beveiligd_aan: !!ACC, opruimen_open: reg.delingen.filter((x) => x.access_open).length, register_kapot: !!reg.kapot };
   }
 
   return { app: app, health: health };

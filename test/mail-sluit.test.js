@@ -354,3 +354,42 @@ test('review r5 ZOU 1: staat een gesprek al op de nieuwe lijst, dan komt de oude
   assert.equal(d.lijst.filter(function (x) { return x.draad === sp.draad; }).length, 1);
   assert.equal(d.aangevuld, 0);
 });
+
+test('B137 (Fable-review ovis-mail 19-11): leesfout of kapot sluit.json is nooit leeg — geen schrijfactie, App zegt het, één box-melding', async () => {
+  const a = ber({ labels: ['UNREAD'] });
+  let opslag = null, stuk = null, schrijven = 0;
+  const meld = [];
+  const MSx = require('../mail-sluit.js');
+  const k = MSx.maak({ nu: function () { return KLOK; }, fout: function (w) { meld.push(w); },
+    luik: async function () { return { berichten: [a], filters: [], labels: [] }; },
+    mailman: { mailSluitBron: function (ids) { const u = {}; ids.forEach(function (i) { u[i] = { gezien: true }; }); return u; } },
+    poort: function (s) { return poort.beoordeel(s); }, bekend: async function () { return false; },
+    lees: function () { if (stuk) throw stuk; return opslag ? JSON.parse(opslag) : null; },
+    schrijf: function (x) { schrijven++; opslag = JSON.stringify(x); } });
+  await k.ronde();
+  assert.equal(k.klaar({ draad: a.draad, hoe: 'gezien' }).status, 200);   // 'Laat zo' staat erin
+  const voor = opslag, n = schrijven;
+  for (const fout of [Object.assign(new Error('EIO'), { code: 'EIO' }), Object.assign(new Error('kapot'), { code: 'KAPOT' })]) {
+    stuk = fout;
+    await assert.rejects(k.ronde(), function (e) { return e.code === 'KAPOT'; });
+    const l = k.lijst();
+    assert.equal(l.status, 503); assert.match(l.j.fout, /niet te lezen/);
+    assert.equal(k.klaar({ draad: a.draad, hoe: 'terug' }).status, 503);
+    assert.equal(k.info().kapot, true);
+    assert.equal(k.ochtendOpen(), null);
+    assert.equal(opslag, voor, 'sluit.json niet overschreven');
+    assert.equal(schrijven, n);
+  }
+  assert.equal(k.boxNieuw('fout-2026-11-15'), true, 'de box-rij over de mislukte nacht komt er één keer');
+  assert.equal(k.boxNieuw('fout-2026-11-15'), false);
+  assert.deepEqual(meld.filter(function (m) { return m === 'mail-sluit-staat-kapot'; }).length, 2, 'één melding per soort fout');
+  // een staat van een andere vorm (geen versie 1) wordt ook niet overschreven
+  stuk = null; opslag = JSON.stringify({ versie: 2, iets: true });
+  assert.equal(k.lijst().status, 503);
+  await assert.rejects(k.ronde());
+  assert.equal(JSON.parse(opslag).versie, 2);
+  // bestaat niet = gewoon leeg beginnen
+  opslag = null;
+  await k.ronde();
+  assert.equal(k.lijst().status, 200);
+});
