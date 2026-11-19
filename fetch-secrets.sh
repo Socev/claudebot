@@ -113,6 +113,14 @@ if [ "$KANT" = olares ] && [ -f "$ADRES_ENV" ]; then
     log "LET OP: adres.env heeft een onbekende vorm - genegeerd, Supabase-route"
   fi
 fi
+# B103 (19-11-2026): staat de noodschakelaar /opt/data/pg-uit, dan start db-wacht.sh de databank bewust niet. Geen pogingen: meteen de
+# noodstand hieronder (bij "Gedifferentieerde degradatie").
+PG_UIT="${FETCH_SECRETS_PG_UIT:-/opt/data/pg-uit}"
+if [ "$LOKAAL" = 1 ] && [ -e "$PG_UIT" ]; then
+  POGINGEN=0
+  REDEN="noodschakelaar pg-uit staat aan"
+  log "noodschakelaar pg-uit staat aan: geen kluisaanroep (databank bewust uit)"
+fi
 # Codex MOET 1: de hele aanroep begrensd (een hangende backend mag de podstart niet vasthouden): na 30 s weg = transport, herkansing.
 lokaal_rpc() {
   timeout -k 5 30 gosu claude node /app/db/pod-geheimen.js 2>/dev/null
@@ -385,6 +393,23 @@ fi
 # nachtketen, geen heartbeat. Ontbreekt die, dan moet de pod ZICHTBAAR ongezond
 # zijn - non-zero afsluiten zodat kubelet met backoff herstart - en niet vaag
 # ziek doordraaien. De rest is degradatie: wel starten, wel een logregel.
+#
+# NOODSTAND 'databank-weg' (B103, 19-11-2026). Met adres.env staat de kluis in de eigen databank van de pod. Is die er niet (pg-uit,
+# een start die niet kan, of geen antwoord na alle pogingen), dan zou exit 78 de hele pod in een herstartlus leggen, terwijl de
+# databank bij een podstart niet vanzelf beter wordt en een pod die niet opkomt ook niet te repareren is. Dan dus WEL starten, zonder
+# kluissecrets, met POD_NOODSTAND in de omgeving: /health.noodstand toont het, en run.sh laat de container herstarten zodra de
+# databank antwoordt (dan komen de secrets er wel). Alleen bij de lokale route en alleen als de kluis NIETS antwoordde: een geweigerd
+# bootstrapgeheim of een kluis zonder Claude-token blijft fataal. De Supabase-route (geen adres.env) verandert niet.
+# Bewust geen kopie van het token naast de kluis (dat is sleutelbeheer, alleen met Davids Ja).
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ "$LOKAAL" = 1 ] && [ -z "$ANTWOORD" ] && [ "$REDEN" != "bootstrap geweigerd" ]; then
+  NOOD_REDEN="${REDEN:-databank antwoordt niet na $GEDAAN poging(en)}"
+  log "NOODSTAND databank-weg: ${NOOD_REDEN} - de pod start ZONDER kluissecrets (geen Claude, Telegram, n8n); container herstart vanzelf zodra de databank antwoordt"
+  export POD_NOODSTAND="databank-weg" POD_NOODSTAND_REDEN="$NOOD_REDEN" POD_NOODSTAND_SINDS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  export SECRETS_GELADEN=""
+  kant_toepassen
+  unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY SB_SLEUTEL
+  exec "$@"
+fi
 if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
   # Het getal in deze regel is het WERKELIJKE aantal pogingen, niet de bovengrens:
   # bij een geweigerde bootstrap is dat er een, en dat moet het log ook zeggen.

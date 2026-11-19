@@ -861,6 +861,28 @@ db_stop(){
 }
 trap afsluiten TERM INT
 
+# noodstand:begin — B103 (19-11-2026). fetch-secrets.sh startte de pod in de noodstand 'databank-weg' (POD_NOODSTAND): de kluis staat in
+# de eigen databank en die antwoordde niet, dus er zijn geen kluissecrets. Antwoordt de databank weer (twee rondes op rij, 30 s apart),
+# dan stopt run.sh netjes (afsluiten: supervisor en databank stoppen, exit 0) en herstart kubelet de container: fetch-secrets haalt
+# de secrets dan wel op. Zonder noodstand doet dit niets.
+NOODSTAND_GOED=0
+NOODSTAND_SOCK="${NOODSTAND_SOCK:-/run/pg}"
+NOODSTAND_PGREADY="${NOODSTAND_PGREADY:-/usr/lib/postgresql/17/bin/pg_isready}"
+noodstand_bewaak(){
+  [ -n "${POD_NOODSTAND:-}" ] || return 0
+  if [ -S "$NOODSTAND_SOCK/.s.PGSQL.5432" ] && "$NOODSTAND_PGREADY" -q -h "$NOODSTAND_SOCK" >/dev/null 2>&1; then
+    NOODSTAND_GOED=$((NOODSTAND_GOED + 1))
+  else
+    NOODSTAND_GOED=0
+  fi
+  if [ "$NOODSTAND_GOED" -ge 2 ]; then
+    log "noodstand $POD_NOODSTAND: de databank antwoordt weer - container stopt, zodat hij met de kluissecrets herstart"
+    afsluiten
+  fi
+}
+[ -n "${POD_NOODSTAND:-}" ] && log "NOODSTAND $POD_NOODSTAND sinds ${POD_NOODSTAND_SINDS:-?}: ${POD_NOODSTAND_REDEN:-} - geen kluissecrets; herstart vanzelf zodra de databank antwoordt"
+# noodstand:end
+
 # bewaker
 GIT_EVERY=300; last_git=$(date +%s)
 while true; do
@@ -875,5 +897,6 @@ while true; do
   socev_vol_indien_nodig
   socev_na_ronde_indien_nodig
   st_bewaak   # wv1277: Syncthing (schakelaar, rol, poort, symlink)
+  noodstand_bewaak   # B103: noodstand databank-weg → herstart zodra de databank er is
   sleep 30
 done

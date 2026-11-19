@@ -2511,6 +2511,21 @@ function schijfdrukStart() {
   setTimeout(schijfdrukVraag, 5000).unref();
   setInterval(schijfdrukVraag, 60 * 1000).unref();
 }
+/* noodstand:begin — B103 (19-11-2026): /health.noodstand. fetch-secrets.sh zet POD_NOODSTAND ('databank-weg') als de kluis in de eigen
+   databank niet antwoordde; de pod draait dan zonder kluissecrets en run.sh herstart de container zodra de databank er weer is.
+   databank = de stand van db-wacht.sh (/run/pgstand/stand: uit|wacht|start|draait|herstart|gestopt + reden), ook buiten de noodstand. */
+function noodstandInfo(env, standPad) {
+  env = env || process.env;
+  let db = null;
+  try {
+    const j = JSON.parse(fs.readFileSync(standPad || '/run/pgstand/stand', 'utf8'));
+    db = { stand: String(j.stand || '').slice(0, 20), reden: String(j.reden || '').slice(0, 200), tijd: j.tijd ? String(j.tijd).slice(0, 30) : null };
+  } catch (e) { db = null; }
+  if (!env.POD_NOODSTAND) return { aan: false, databank: db };
+  return { aan: true, soort: String(env.POD_NOODSTAND), reden: env.POD_NOODSTAND_REDEN || null, sinds: env.POD_NOODSTAND_SINDS || null, databank: db,
+    gevolg: 'geen kluissecrets: geen Claude-beurten, Telegram, n8n of tunnel', herstel: 'de container herstart vanzelf zodra de databank antwoordt' };
+}
+/* noodstand:end */
 // wv3180: eigen databank (nog niet in gebruik) op /health.db — Postgres-socket, de /health van db-luik (PostgREST gereed, aantal sleutels)
 // en of de pod al lokaal werkt (SB_SQL_LOKAAL, SUPABASE_URL). Eens per minuut, alleen in de echte release; geen SQL, geen sleutels.
 let dbStand = { aan: false };
@@ -4695,6 +4710,8 @@ function handleRequest(req, res) {
       schijfdruk: schijfdrukStand,
       // wv3180: eigen databank (Postgres + PostgREST + db-luik in de pod; nog niet in gebruik zolang adres_lokaal false is)
       db: dbStand,
+      // B103: noodstand databank-weg (pod zonder kluissecrets) + stand van db-wacht
+      noodstand: noodstandInfo(),
       promedico_agenda: promedicoAgenda ? Object.assign({}, promedicoAgenda.health(), { app: typeof promedicoAppInfo === 'function' ? promedicoAppInfo() : { aan: false }, botsingen: typeof promedicoBotsingenInfo === 'function' ? promedicoBotsingenInfo() : { aan: false } }) : null,   // wv3132; wv3143: .app = Calendar-laag (laatste {op, dagen, ms}, geen tekst)
       // wv698: argv-detector (sleutelwaarden in /proc/*/cmdline); treffers_24u > 0 = er lekt iets, zie de box
       detector: argvDetInfo(),
