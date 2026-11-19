@@ -386,6 +386,7 @@ jobs:
           t test/facturen-direct.sh   # wv2480: per leverancier concept of direct — elke eis + terugval, dagplafond 15, versie, onzeker = nooit opnieuw
           t test/facturen-nogbetalen.sh   # wv3369: betaalverzoek naar Cynthia (nogbetalen@) — kern, M26, Bevestigen/terugdraaien, LET OP, plafond, noodstop, onzeker = nooit opnieuw
           t test/facturen-groep.sh   # wv2661: Bevestig N zonder twijfel en Koppel N zekere — poort per factuur/voorstel op de pod, één vingerafdruk, hooguit 25
+          t test/db-reserve-wacht.sh   # wv3416: stille reservewacht R230 — één box-rij per afwijking na de drempel, geen herhaling/herstelrij, staat over herstart, /health ververst zonder socket
           t test/facturen-ingang.sh   # wv856: smalle ingang /fac — poortgeheim, servicetoken- en gebruikers-JWT, nooit eigenaar, praktijkmanager-scope, uploads, audit
           exit $rood
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
