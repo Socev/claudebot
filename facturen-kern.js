@@ -1518,6 +1518,82 @@ function zichtbaarVoor(rol, f) {
   return false;
 }
 
+// ───────────────────────────── betaalverzoek naar Cynthia (nogbetalen@, wv3369) ─────────────────────────────
+
+/*
+ * wv3369 (David 19-11-2026 12:17: "twijfelgevallen doorzetten, waarbij je de twijfel er in meldt, bijvoorbeeld: 'LET OP - is misschien via
+ * incasso'"; ontwerp Facturen naar Cynthia § 1.4 en § 9). Pure functie: uit de feiten die facturen.js op de rij in de database vaststelt
+ * (x) de LET OP-regels, belangrijkste eerst, zonder bedragen, namen of patiëntgegevens. Twijfel houdt niets tegen; Cynthia beslist.
+ * x = { zonder_bijlage, iban_zwak: { sinds } | null, nagebeld_op, incasso, waarschuwingen: [eerder_in_batch|zegt_betaald|mogelijk_betaald|
+ * kenmerk_fout], dubbel, drempel, valuta, scan, signalen: [soort] } → [tekst]
+ */
+const LET_OP_MAX = 3;
+const LET_OP_SIGNAAL = {
+  geen_factuur: 'bank zag een betaling zonder factuur bij deze leverancier', dubbele_factuur: 'lijkt op een eerdere factuur (mogelijk dubbel)',
+  incasso_niet_gezien: 'een verwachte incasso van deze leverancier is niet gezien', te_betalen_niet_betaald: 'een eerdere factuur staat nog open',
+  ingevoerd_niet_gezien: 'een eerdere betaling is niet op de bank gezien', onbekend_iban: 'de bank zag een onbekend rekeningnummer bij deze leverancier',
+  mogelijk_dubbel_geupload: 'mogelijk twee keer binnengekomen', teruggeboekt: 'een eerdere betaling is teruggeboekt', afwijkend_bedrag: 'een betaling week af van het factuurbedrag',
+  verzending_mislukt: 'doorsturen naar de boekhouder lukte niet',
+};
+function dagMaand(iso) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || '')); return m ? Number(m[3]) + '-' + Number(m[2]) : null; }
+function letOp(x) {
+  x = x || {};
+  const w = new Set(Array.isArray(x.waarschuwingen) ? x.waarschuwingen : []);
+  const r = [];
+  if (x.zonder_bijlage) r.push('factuur niet bijgevoegd (mogelijk patiëntgegevens); vraag David om de factuur');
+  if (x.iban_zwak) r.push('rekeningnummer pas sinds ' + (dagMaand(x.iban_zwak.sinds) || 'kort') + ' bekend, niet nagebeld');
+  if (x.nagebeld_op) r.push('nieuw rekeningnummer, door David nagebeld op ' + (dagMaand(x.nagebeld_op) || 'onbekende datum'));
+  if (x.incasso) r.push('is misschien via incasso');
+  if (w.has('zegt_betaald')) r.push('factuur zegt al betaald, niet gezien op de bank');
+  if (w.has('mogelijk_betaald')) r.push('er staat al een afschrijving met dit bedrag naar dit rekeningnummer');
+  if (w.has('eerder_in_batch')) r.push('zat eerder in een betaalbatch');
+  if (x.dubbel) r.push('lijkt op een eerdere factuur (mogelijk dubbel)');
+  if (x.drempel) r.push('bedrag hoger dan gebruikelijk');
+  if (x.valuta && x.valuta !== 'EUR') r.push('bedrag in ' + String(x.valuta).replace(/[^A-Z]/g, '').slice(0, 3) + ', geen euro');
+  if (x.scan) r.push('gelezen van een scan; vergelijk bedrag en rekeningnummer met de factuur');
+  if (w.has('kenmerk_fout')) r.push('betalingskenmerk klopt niet volgens de controle');
+  for (const s of [...new Set(Array.isArray(x.signalen) ? x.signalen : [])]) if (LET_OP_SIGNAAL[s]) r.push(LET_OP_SIGNAAL[s]);
+  return r;
+}
+/*
+ * De mail zelf (ontwerp § 2): geen aanhef, geen groet. m = { id, entiteit, leverancier, centen, valuta, iban, omschrijving, vervaldatum,
+ * van_rekening, let_op: [tekst], zonder_bijlage, proef } → { onderwerp, bericht, ref }. Onderwerp "NOG BETALEN - <entiteit> - <leverancier>
+ * <bedrag>[ - uiterlijk d-m][ - LET OP]" (≤ 200, LET OP achteraan zodat het begin sorteerbaar blijft); hooguit 3 LET OP-regels in de tekst.
+ * zonder_bijlage (kenmerk van patiëntgegevens, grondwet 3): geen omschrijving, alleen een factuurnummer zonder spaties.
+ */
+function eenRegel(t, max) { return String(t == null ? '' : t).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max); }
+function bedragNl(centen, valuta) {
+  if (!Number.isSafeInteger(centen)) return '(bedrag onbekend)';
+  const n = Math.abs(centen), eu = String(Math.floor(n / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + String(n % 100).padStart(2, '0');
+  return (centen < 0 ? '-' : '') + (!valuta || valuta === 'EUR' ? '€ ' : String(valuta).slice(0, 3) + ' ') + eu;
+}
+function ibanGroepen(iban) { return (ibanNorm(iban) || '').replace(/(.{4})(?=.)/g, '$1 '); }
+function nogBetalenMail(m) {
+  m = m || {};
+  if (!/^[0-9a-f]{16}$/.test(String(m.id || ''))) throw new KernFout('nogbetalen', 'factuur-id ongeldig');
+  const ref = 'NB' + m.id;
+  const ent = eenRegel(m.entiteit, 40) || 'onbekend', bedrag = bedragNl(m.centen, m.valuta);
+  const uiterlijk = isIsoDatum(m.vervaldatum) ? dagMaand(m.vervaldatum) : null;
+  const lo = Array.isArray(m.let_op) ? m.let_op.map((t) => eenRegel(t, 160)).filter(Boolean) : [];
+  const kop = (m.proef ? 'PROEF - ' : '') + 'NOG BETALEN - ' + ent + ' - ';
+  const staart = ' ' + bedrag + (uiterlijk ? ' - uiterlijk ' + uiterlijk : '') + (lo.length ? ' - LET OP' : '');
+  const lev = eenRegel(m.leverancier, Math.max(10, 200 - kop.length - staart.length)) || 'onbekende leverancier';
+  const onderwerp = (kop + lev + staart).slice(0, 200);
+  const regels = [];
+  for (const t of lo.slice(0, LET_OP_MAX)) regels.push('LET OP - ' + t);
+  if (lo.length > LET_OP_MAX) regels.push('(en nog ' + (lo.length - LET_OP_MAX) + (lo.length - LET_OP_MAX === 1 ? ' punt' : ' punten') + '; vraag David)');
+  if (regels.length) regels.push('');
+  regels.push(eenRegel(m.leverancier, 120) || 'onbekende leverancier', bedrag);
+  if (m.iban) regels.push(ibanGroepen(m.iban));
+  const oms = m.zonder_bijlage ? (/^[A-Za-z0-9.\/_-]{1,40}$/.test(String(m.nummer || '')) ? 'factuur ' + m.nummer : '') : eenRegel(m.omschrijving, 140);
+  if (oms) regels.push('Omschrijving: ' + oms);
+  if (isIsoDatum(m.vervaldatum)) regels.push('Uiterlijk: ' + dagMaand(m.vervaldatum) + '-' + m.vervaldatum.slice(0, 4));
+  regels.push('Van rekening: ' + ent + (/^\d{4}$/.test(String(m.van_rekening || '')) ? ' (eindigt op ' + m.van_rekening + ')' : ''));
+  regels.push('', (m.zonder_bijlage ? 'Factuur niet bijgevoegd.' : 'Factuur in de bijlage.') + ' Kenmerk ' + ref);
+  if (m.proef) regels.unshift('PROEF - verzonnen factuur, niet betalen.', '');
+  return { onderwerp, bericht: regels.join('\n').slice(0, 2000), ref };
+}
+
 module.exports = {
   KernFout,
   // basis
@@ -1537,4 +1613,6 @@ module.exports = {
   vingerafdrukCanoniek, vingerafdruk, maakOpdracht,
   // rollen
   zichtbaarVoor,
+  // betaalverzoek naar Cynthia (wv3369)
+  letOp, nogBetalenMail, LET_OP_MAX,
 };

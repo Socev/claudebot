@@ -879,6 +879,8 @@ function bevestig(fdb, r, d, nu, o) {
         verzendwijze_bij_bevestigen: lv ? lv.verzendwijze : null, verzendwijze_versie: lv ? lv.verzendwijze_versie : null });
       opdracht = { id: op.id, verstuur_na: op.verstuur_na, verzendwijze: lv ? lv.verzendwijze : null };
     }
+    // wv3369: zelf te betalen → in dezelfde transactie een betaalverzoek naar Cynthia (nogbetalen@), op het tijdstip van de opdracht
+    const nogbetalen = opdracht && spoor === 'te_betalen' && o && o.nogBetalen === 'auto' ? nbReserveer(fdb, r, f.id, 'bevestigen', opdracht.verstuur_na, nu, wanneer) : null;
     besluitRij(fdb, f.id, K.besluit('bevestigen', 'status', ov.naar, 'mens', (f.entiteit !== e.sleutel ? 'entiteit ' + (f.entiteit || '—') + ' → ' + e.sleutel + '; ' : '') +
       (f.betaalwijze !== betaalwijze ? 'betaalwijze ' + f.betaalwijze + ' → ' + betaalwijze : 'voorstel overgenomen')), r.wie, wanneer);
     D.audit(fdb, { wie: r.wie, wat: 'bevestigen', object_soort: 'factuur', object_id: f.id, entiteit: e.sleutel,
@@ -887,7 +889,7 @@ function bevestig(fdb, r, d, nu, o) {
     const kmelding = !koppel ? null : (koppel.nieuw ? 'Nieuwe leverancier ' + koppel.naam + ' onthouden: volgende facturen krijgen deze entiteit en betaalwijze' +
       (koppel.ibans ? ' en het nagebelde rekeningnummer' : '') + '.' : 'Gekoppeld aan leverancier ' + koppel.naam + '.') +
       (zussen ? ' Ook ' + zussen + (zussen === 1 ? ' andere open factuur' : ' andere open facturen') + ' van ' + koppel.naam + ' gekoppeld.' : '');
-    return { status: ov.naar, betaalspoor: spoor, opdracht, melding: [leer.melding, kmelding].filter(Boolean).join(' ') || null, leverancier: koppel ? { id: koppel.id, naam: koppel.naam, nieuw: koppel.nieuw } : undefined };
+    return { status: ov.naar, betaalspoor: spoor, opdracht, nogbetalen: nogbetalen || undefined, melding: [leer.melding, kmelding].filter(Boolean).join(' ') || null, leverancier: koppel ? { id: koppel.id, naam: koppel.naam, nieuw: koppel.nieuw } : undefined };
   });
 }
 /*
@@ -958,7 +960,7 @@ function bevestigGroep(fdb, r, d, nu, o) {
   const bevestigd = [], geweigerd = [];
   for (const x of rijen) {
     try {
-      const u = bevestig(fdb, r, { id: x.id, versie: x.versie }, nu, { zeker: true });
+      const u = bevestig(fdb, r, { id: x.id, versie: x.versie }, nu, { zeker: true, nogBetalen: o && o.nogBetalen });
       bevestigd.push({ id: x.id, status: u.status, betaalspoor: u.betaalspoor, verstuur_na: u.opdracht ? u.opdracht.verstuur_na : null });
     } catch (e) {
       geweigerd.push({ id: x.id, reden: e instanceof RouteFout ? kort(e.fout, 200) : 'onverwachte fout' });
@@ -1823,6 +1825,189 @@ function sepaDoorUitkomst(fdb, id, van, naar, velden, nu) {
       voor: { status: van }, na: { aan: v.aan, message_id: z.message_id || null, reden: z.reden ? kort(z.reden, 160) : null }, wanneer: nuIso(nu) });
     return true;
   });
+}
+// ─────────────────────── betaalverzoek naar Cynthia (nogbetalen@, wv3369) ───────────────────────
+
+/*
+ * wv3369 (David 19-11-2026 12:17: "Wij zetten geen betalingen meer klaar. Alles wat normaal klaargezet zou worden als betaling, zetten we nu
+ * als verzenden naar Cynthia (nogbetalen@huisartsentolgaarde.nl) ... DIRECT naar haar (dus niet als concept!) ... zonder aanhef, kort en
+ * krachtig: 'NOG BETALEN - Groenhouten'"; Ja met verse vingerafdruk 12:58, vraag-id 44356c0a; registerrij nogbetalen-cynthia). Ontwerp:
+ * 01_Ontwikkeling/Facturen naar Cynthia - nogbetalen (ontwerp 19-11-2026). Fase 1: na Bevestigen met betaalwijze zelf (betaalspoor te_betalen)
+ * van een zakelijke entiteit, niet alleen-eigenaar, geen creditnota, komt er in dezelfde transactie een rij in betaal_verzending ('wacht',
+ * verstuur_na = die van de boekhouder-opdracht: tot dan kan David terugdraaien en vervalt de rij). server.js verstuurt via AI - Facturen-
+ * verzender bron nogbetalen (eigen verzendgeheim): één mail aan alleen NOGBETALEN.aan, met de factuur als bijlage (vers van schijf, op sha256),
+ * twijfel als LET OP-regel (K.letOp). De rij gaat vóór de aanroep naar 'verzenden' en nooit terug; geen antwoord = 'onzeker' (nooit opnieuw);
+ * zeker niet verstuurd = 'mislukt' (geen automatische herkansing, Fable-review facturen-kern M1). Geen Gmail-concept als terugval.
+ * Kenmerk van patiëntgegevens (grondwet 3): geen bijlage en geen omschrijving. Al betaald (bankkoppeling, creditcard, PayPal): geen mail.
+ */
+const NOGBETALEN = Object.freeze({ aan: 'nogbetalen@huisartsentolgaarde.nl', per_dag: 25, max_uur: 36, hangt_min: 15, iban_dagen: 45, iban_min: 2 });
+const NB_STATUS = ['wacht', 'verzenden', 'verstuurd', 'onzeker', 'mislukt', 'vervallen'];
+const NB_ZET = ['status', 'reden', 'verzonden_op', 'message_id'];
+function nbAanOk(aan) { return String(aan || '').trim().toLowerCase() === NOGBETALEN.aan; }
+// Hoort deze factuur (D.factuurVoorKern) nu (nog) bij Cynthia? → null of de reden waarom niet (zonder inhoud).
+function nbNiet(fdb, f) {
+  if (!f) return 'factuur ontbreekt';
+  if (!f.entiteit || f.entiteit === 'prive') return 'Privé gaat niet naar Cynthia';
+  if (f.alleen_eigenaar) return 'alleen voor de eigenaar';
+  if (K.isCreditnota(f)) return 'creditnota: niets te betalen';
+  if (!ONDERWEG.includes(f.status) || !f.bevestigd_op) return 'niet (meer) bevestigd';
+  if (f.betaalspoor !== 'te_betalen') return f.betaalspoor === 'betaald_gezien' ? 'al betaald gezien op de bank' : 'staat niet meer op te betalen (' + f.betaalspoor + ')';
+  if (fdb.db.prepare('SELECT 1 FROM kaart_regel WHERE factuur = ? UNION ALL SELECT 1 FROM paypal_regel WHERE factuur = ? LIMIT 1').get(f.id, f.id)) return 'al betaald met creditcard of PayPal';
+  if (fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j) return 'er is al een bankbetaling aan gekoppeld';
+  return null;
+}
+// Kenmerk van patiëntgegevens (zelfde eisen als D.factuurTwijfel): op de factuur of een stuk, of de patiëntregel legde niet positief 'geen
+// kenmerk' vast, of een Intake-stuk zonder vastgelegd 'niet mogelijk medisch'. Dan geen bijlage en geen omschrijving.
+function nbPatient(fdb, f) {
+  if (f.patientkenmerk) return true;
+  const docs = fdb.db.prepare('SELECT patientkenmerk FROM document WHERE id IN (?, ?)').all(f.document_id, f.ubl_document_id || f.document_id);
+  if (!docs.length || docs.some((d) => d.patientkenmerk)) return true;
+  const pk = fdb.db.prepare("SELECT waarde FROM besluit WHERE factuur = ? AND stap = 'patientkenmerk' AND veld = 'patientkenmerk'").all(f.id).map((b) => String(b.waarde));
+  if (!pk.length || pk.some((w) => w !== '0')) return true;
+  const bron = f.bericht ? fdb.db.prepare('SELECT b.soort FROM bericht be JOIN bron b ON b.id = be.bron WHERE be.id = ?').get(f.bericht) : null;
+  if (bron && bron.soort === 'intake') {
+    const mm = fdb.db.prepare("SELECT waarde FROM besluit WHERE factuur = ? AND stap = 'herkomst' AND veld = 'mogelijk_medisch'").all(f.id).map((b) => String(b.waarde));
+    if (!mm.length || mm.some((w) => w !== '0')) return true;
+  }
+  return false;
+}
+/*
+ * De feiten voor K.letOp, op de rij in de database. iban_zwak (Fable-review facturen-bank H3): het IBAN is alleen uit de bankhistorie bekend
+ * (niet nagebeld, niet bij de leverancier vastgelegd, niet uit het archief) met minder dan 2 afschrijvingen of korter dan 45 dagen, of er staat
+ * een open onbekend_iban-signaal op de leverancier. De poort zelf verandert hier niet (box #fable-review-1911). Open signalen op de factuur
+ * gaan mee, behalve dubbel_betaald: daar staan nu valse signalen open (facturen-bank H1); eerst herijken.
+ */
+function nbFeiten(fdb, f, nu) {
+  const ctx = kernCtx(fdb, nu), vandaag = dagAmsterdam(nu);
+  const lev = leverancierKern(fdb, f.leverancier_id);
+  const b = sepaBeoordeel(fdb, f, lev, ctx, vandaag, null);
+  const zonder = nbPatient(fdb, f);
+  const iban = K.ibanNorm(f.iban);
+  let zwak = null;
+  if (iban && !f.nagebeld_op && !(lev && (lev.ibans || []).map(K.ibanNorm).includes(iban)) && !ctx.entiteiten.some((e) => e.ibans.map(K.ibanNorm).includes(iban))) {
+    const hk = K.ibanHistorieBekend(iban, lev, ctx);
+    if (hk && !hk.archief) {
+      const h = fdb.db.prepare('SELECT count(*) AS n, min(boekdatum) AS eerst FROM bank_transactie WHERE tegenpartij_iban = ? AND bedrag_centen < 0 AND verwijderd_op IS NULL').get(iban);
+      if (Number(h.n) < NOGBETALEN.iban_min || !h.eerst || K.dagenTussen(String(h.eerst).slice(0, 10), vandaag) < NOGBETALEN.iban_dagen) zwak = { sinds: h.eerst || null };
+    }
+  }
+  if (!zwak && f.leverancier_id && fdb.db.prepare("SELECT 1 FROM signaal WHERE status = 'open' AND soort = 'onbekend_iban' AND leverancier = ? LIMIT 1").get(f.leverancier_id)) zwak = { sinds: null };
+  const bw = fdb.db.prepare("SELECT waarde, toelichting FROM besluit WHERE factuur = ? AND stap = 'betaalwijze' AND veld = 'betaalwijze'").all(f.id);
+  const incasso = bw.some((x) => String(x.waarde) === 'incasso' || /tegenstrijdig|het stuk zegt|noemt incasso/.test(String(x.toelichting || ''))) ||
+    !!(lev && lev.standaard_betaalwijze === 'incasso');
+  const controles = Array.isArray(f.controles) ? f.controles : [];
+  const docs = fdb.db.prepare('SELECT soort, tekstlaag FROM document WHERE id IN (?, ?)').all(f.document_id, f.ubl_document_id || f.document_id);
+  const signalen = fdb.db.prepare("SELECT DISTINCT soort FROM signaal WHERE status = 'open' AND soort <> 'dubbel_betaald' AND EXISTS (SELECT 1 FROM json_each(signaal.facturen) j WHERE j.value = ?)").all(f.id).map((x) => x.soort);
+  const let_op = K.letOp({ zonder_bijlage: zonder, iban_zwak: zwak, nagebeld_op: f.nagebeld_op || null, incasso, waarschuwingen: b.waarschuwingen,
+    dubbel: !!f.dubbel_van, drempel: controles.some((c) => c && c.ok === false && (c.naam === 'drempel' || c.naam === 'drempel_vast')),
+    valuta: f.valuta, scan: !docs.length || docs.some((d) => !(d.soort === 'ubl' || (d.soort === 'pdf' && d.tekstlaag === 1))), signalen });
+  return { let_op, zonder_bijlage: zonder };
+}
+// In de transactie van bevestig. → { status, verstuur_na, let_op } of { niet: reden } (geen rij).
+function nbReserveer(fdb, r, factuurId, aanleiding, verstuurNa, nu, wanneer) {
+  const f = D.factuurVoorKern(fdb, factuurId);
+  const niet = nbNiet(fdb, f);
+  if (niet) return { niet };
+  const x = nbFeiten(fdb, f, nu);
+  const vol = Number(fdb.db.prepare('SELECT coalesce(max(volgnummer), 0) AS n FROM betaal_verzending WHERE factuur = ? AND aanleiding = ?').get(f.id, aanleiding).n) + 1;
+  const id = D.nieuwId();
+  D.voegToe(fdb, 'betaal_verzending', { id, factuur: f.id, aanleiding, volgnummer: vol, entiteit: f.entiteit, aan: NOGBETALEN.aan, status: 'wacht', verstuur_na: verstuurNa,
+    let_op: JSON.stringify(x.let_op), zonder_bijlage: x.zonder_bijlage ? 1 : 0, aangemaakt_door: r.wie, aangemaakt_op: wanneer, bijgewerkt_op: wanneer });
+  D.audit(fdb, { wie: r.wie, wat: 'nogbetalen_wacht', object_soort: 'factuur', object_id: f.id, entiteit: f.entiteit,
+    na: { rij: id, aan: NOGBETALEN.aan, verstuur_na: verstuurNa, let_op: x.let_op.length, zonder_bijlage: x.zonder_bijlage }, wanneer });
+  return { status: 'wacht', verstuur_na: verstuurNa, let_op: x.let_op };
+}
+function nbOpen(fdb, nu) {
+  return fdb.db.prepare("SELECT id, factuur, aangemaakt_op FROM betaal_verzending WHERE status = 'wacht' AND verstuur_na <= ? ORDER BY verstuur_na, aangemaakt_op LIMIT 30").all(nuIso(nu));
+}
+function nbHangend(fdb, nu) {
+  return fdb.db.prepare("SELECT id, factuur FROM betaal_verzending WHERE status = 'verzenden' AND bijgewerkt_op < ? ORDER BY aangemaakt_op LIMIT 10").all(nuIso(nu - NOGBETALEN.hangt_min * 60000));
+}
+function nbBijlage(fdb, f) {
+  const docs = [f.document_id, f.ubl_document_id].filter(Boolean).map((id) => fdb.db.prepare('SELECT naam, mime, sha256, soort FROM document WHERE id = ?').get(id)).filter(Boolean);
+  const d = docs.find((x) => x.soort === 'pdf') || docs.find((x) => x.soort === 'ubl');
+  if (!d) return { fout: 'geen PDF of UBL om mee te sturen' };
+  let bytes;
+  try { bytes = D.stukLees(fdb, d.sha256); } catch (e) { return { fout: 'stuk ontbreekt of is beschadigd' }; }
+  if (!bytes || D.sha256(bytes) !== d.sha256) return { fout: 'stuk komt niet overeen met zijn sha256' };
+  const ext = d.soort === 'pdf' ? '.pdf' : '.xml';
+  if (ext === '.pdf' && bytes.slice(0, 4).toString('latin1') !== '%PDF') return { fout: 'de PDF begint niet met %PDF' };
+  const stam = String(d.naam || 'factuur').replace(/\.[A-Za-z0-9]{1,5}$/, '').replace(/[\u0000-\u001f\u007f<>:"\/\\|?*]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100) || 'factuur';
+  return { naam: stam + ext, mime: ext === '.pdf' ? 'application/pdf' : 'application/xml', bytes, sha256: d.sha256 };
+}
+/*
+ * Voor server.js: de rij van 'wacht' naar 'verzenden', in één transactie met alle toetsen en het dagplafond. o = { nu, proef? }.
+ * → null (rij niet meer op 'wacht') | { id, actie: 'plafond' } (blijft wacht) | { id, actie: 'niet', status, reden } (vervallen of mislukt, zonder
+ * mail) | { id, actie: 'versturen', aan, ref, onderwerp, bericht, bijlagen: [{ naam, mime, bytes }], factuur, entiteit, let_op }.
+ */
+function nbVoorbereid(fdb, id, o) {
+  if (!ID_RE.test(String(id || ''))) weiger(400, 'id ongeldig');
+  const nu = o.nu;
+  return D.transactie(fdb, function () {
+    const v = fdb.db.prepare('SELECT * FROM betaal_verzending WHERE id = ?').get(id);
+    if (!v || v.status !== 'wacht') return null;
+    const wanneer = nuIso(nu);
+    const stop = (naar, reden) => {
+      const u = fdb.db.prepare('UPDATE betaal_verzending SET status = ?, reden = ?, bijgewerkt_op = ? WHERE id = ? AND status = ?').run(naar, kort(reden, 300), wanneer, id, 'wacht');
+      if (Number(u.changes) !== 1) return null;
+      D.audit(fdb, { wie: 'pod (nogbetalen)', wat: 'nogbetalen_' + naar, object_soort: 'factuur', object_id: v.factuur, entiteit: v.entiteit, voor: { status: 'wacht' }, na: { rij: id, reden: kort(reden, 160) }, wanneer });
+      return { id, actie: 'niet', status: naar, reden, factuur: v.factuur, entiteit: v.entiteit };
+    };
+    const f = D.factuurVoorKern(fdb, v.factuur);
+    const niet = nbNiet(fdb, f);
+    if (niet) return stop('vervallen', niet);
+    if (f.entiteit !== v.entiteit) return stop('vervallen', 'entiteit gewijzigd na Bevestigen');
+    if (!nbAanOk(v.aan)) return stop('mislukt', 'ander adres dan nogbetalen@');
+    if (nu - Date.parse(v.aangemaakt_op) > NOGBETALEN.max_uur * 3600000) return stop('mislukt', 'wachtte langer dan ' + NOGBETALEN.max_uur + ' uur');
+    const vandaag = dagAmsterdam(nu);
+    if (Number(fdb.db.prepare('SELECT count(*) AS n FROM betaal_verzending WHERE claim_dag = ?').get(vandaag).n) >= NOGBETALEN.per_dag) return { id, actie: 'plafond', factuur: v.factuur };
+    const x = nbFeiten(fdb, f, nu);
+    let bijlage = null;
+    if (!x.zonder_bijlage) {
+      bijlage = nbBijlage(fdb, f);
+      if (bijlage.fout) return stop('mislukt', bijlage.fout);
+    }
+    const e = fdb.db.prepare('SELECT naam, naam_kort FROM entiteit WHERE sleutel = ?').get(f.entiteit) || {};
+    const reks = sepaRekeningen(fdb).filter((k) => k.entiteit === f.entiteit);
+    const rmt = S.omschrijving(f);
+    let m;
+    try {
+      m = K.nogBetalenMail({ id: f.id, entiteit: e.naam_kort || e.naam || f.entiteit, leverancier: f.leverancier_naam, centen: f.incl, valuta: f.valuta, iban: f.iban,
+        omschrijving: rmt.strd ? rmt.strd.ref : rmt.ustrd, nummer: f.nummer, vervaldatum: f.vervaldatum, van_rekening: reks.length === 1 ? String(reks[0].iban).slice(-4) : null,
+        let_op: x.let_op, zonder_bijlage: x.zonder_bijlage, proef: !!o.proef });
+    } catch (e2) { return stop('mislukt', 'mailtekst niet op te bouwen'); }
+    const u = fdb.db.prepare("UPDATE betaal_verzending SET status = 'verzenden', claim_dag = ?, let_op = ?, zonder_bijlage = ?, bijlage_sha256 = ?, reden = NULL, bijgewerkt_op = ? WHERE id = ? AND status = 'wacht'")
+      .run(vandaag, JSON.stringify(x.let_op), x.zonder_bijlage ? 1 : 0, bijlage ? bijlage.sha256 : null, wanneer, id);
+    if (Number(u.changes) !== 1) return null;
+    D.audit(fdb, { wie: 'pod (nogbetalen)', wat: 'nogbetalen_verzenden', object_soort: 'factuur', object_id: f.id, entiteit: f.entiteit, voor: { status: 'wacht' },
+      na: { rij: id, aan: v.aan, bijlage_sha256: bijlage ? bijlage.sha256 : null, let_op: x.let_op.length, zonder_bijlage: x.zonder_bijlage }, wanneer });
+    return { id, actie: 'versturen', aan: v.aan, ref: m.ref, onderwerp: m.onderwerp, bericht: m.bericht, bijlagen: bijlage ? [{ naam: bijlage.naam, mime: bijlage.mime, bytes: bijlage.bytes }] : [],
+      factuur: f.id, entiteit: f.entiteit, let_op: x.let_op };
+  });
+}
+// Voor server.js: de stap na de aanroep. van → naar met velden (status-overgangen bewaakt de trigger). → true als de rij zo stond.
+function nbUitkomst(fdb, id, van, naar, velden, nu) {
+  if (!ID_RE.test(String(id || ''))) weiger(400, 'id ongeldig');
+  if (!NB_STATUS.includes(naar)) weiger(400, 'status ongeldig');
+  const z = Object.assign({}, velden || {}, { status: naar });
+  const k = Object.keys(z).filter((x) => NB_ZET.includes(x));
+  return D.transactie(fdb, function () {
+    const u = fdb.db.prepare('UPDATE betaal_verzending SET ' + k.map((x) => x + ' = ?').join(', ') + ', bijgewerkt_op = ? WHERE id = ? AND status = ?')
+      .run(...k.map((x) => (z[x] == null ? null : x === 'reden' ? kort(z[x], 300) : String(z[x]).slice(0, 80))), nuIso(nu), id, van);
+    if (Number(u.changes) !== 1) return false;
+    const v = fdb.db.prepare('SELECT factuur, entiteit, aan FROM betaal_verzending WHERE id = ?').get(id);
+    D.audit(fdb, { wie: 'pod (nogbetalen)', wat: 'nogbetalen_' + naar, object_soort: 'factuur', object_id: v.factuur, entiteit: v.entiteit,
+      voor: { status: van }, na: { rij: id, aan: v.aan, message_id: z.message_id || null, reden: z.reden ? kort(z.reden, 160) : null }, wanneer: nuIso(nu) });
+    return true;
+  });
+}
+// Voor /health: aantallen, geen inhoud
+function nbInfo(fdb, nu) {
+  const n = (sql, ...a) => Number(fdb.db.prepare(sql).get(...a).n);
+  const l = fdb.db.prepare('SELECT status, verzonden_op, bijgewerkt_op FROM betaal_verzending ORDER BY aangemaakt_op DESC LIMIT 1').get() || null;
+  return { wacht: n("SELECT count(*) AS n FROM betaal_verzending WHERE status = 'wacht'"), vandaag: n('SELECT count(*) AS n FROM betaal_verzending WHERE claim_dag = ?', dagAmsterdam(nu)),
+    per_dag: NOGBETALEN.per_dag, onzeker: n("SELECT count(*) AS n FROM betaal_verzending WHERE status = 'onzeker'"), mislukt: n("SELECT count(*) AS n FROM betaal_verzending WHERE status = 'mislukt'"),
+    verstuurd: n("SELECT count(*) AS n FROM betaal_verzending WHERE status = 'verstuurd'"), laatste: l };
 }
 // ─────────────────────── maandspecificatie PayPal en creditcard voor de boekhouder (wv2060) ───────────────────────
 
@@ -3956,9 +4141,10 @@ function maak(opties) {
       if (v.primair !== true) weiger(409, 'Facturen draait alleen op de primaire kant');
       const vo = { versOk: typeof v.versOk === 'function' ? v.versOk : () => false, versVerbruik: typeof v.versVerbruik === 'function' ? v.versVerbruik : () => {}, uploadNeem: v.uploadNeem,
         sepaDoor: v.sepaDoor,   // wv2465: 'auto' | 'concept' | anders niets (server.js FACTUREN_SEPA_DOOR)
+        nogBetalen: v.nogBetalen,   // wv3369: 'auto' | anders niets (server.js FACTUREN_NOGBETALEN)
         pdfTekst: typeof v.pdfTekst === 'function' ? v.pdfTekst : undefined };   // wv2958: ICS-overzicht als PDF herkennen (server.js facturenPdfTekst)
       switch (rest) {
-        case 'bevestig': return ok(bevestig(fdb, r, d, nu), 'bevestig ' + kort(d.id, 16));
+        case 'bevestig': return ok(bevestig(fdb, r, d, nu, { nogBetalen: vo.nogBetalen }), 'bevestig ' + kort(d.id, 16));
         case 'bevestig-groep': { const j = bevestigGroep(fdb, r, d, nu, vo); return ok(j, 'bevestig-groep ' + j.bevestigd.length + '/' + (j.bevestigd.length + j.geweigerd.length)); }   // wv2661
         case 'koppel-zeker': { const j = koppelZeker(fdb, r, d, nu, vo); return ok(j, 'koppel-zeker ' + j.gekoppeld.length + '/' + (j.gekoppeld.length + j.geweigerd.length)); }   // wv2661
         case 'terugdraaien': return ok(terugdraaien(fdb, r, d, nu), 'terugdraaien ' + kort(d.id, 16));
@@ -4038,7 +4224,17 @@ function maak(opties) {
     aanOk: sepaDoorAanOk,
     AAN: SEPA_DOOR.aan, ENTITEIT: SEPA_DOOR.entiteit, MAX_UUR: SEPA_DOOR_MAX_UUR,
   };
-  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, maandspec, sepaDoor, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, betaalMeldingJob, betaalMeldingKlaar, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
+  // wv3369: betaalverzoek naar Cynthia (nogbetalen@); server.js doet de verzender en de berichten
+  const nogBetalen = {
+    open: (fdb, nu) => nbOpen(fdb, nu),
+    hangend: (fdb, nu) => nbHangend(fdb, nu),
+    voorbereid: (fdb, id, o) => nbVoorbereid(fdb, id, o),
+    uitkomst: (fdb, id, van, naar, velden, nu) => nbUitkomst(fdb, id, van, naar, velden, nu),
+    info: (fdb, nu) => nbInfo(fdb, nu),
+    aanOk: nbAanOk,
+    AAN: NOGBETALEN.aan, PER_DAG: NOGBETALEN.per_dag, MAX_UUR: NOGBETALEN.max_uur,
+  };
+  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, maandspec, sepaDoor, nogBetalen, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, betaalMeldingJob, betaalMeldingKlaar, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
 }
 function ok(j, reden) { return { status: 200, j: Object.assign({ ok: true }, j), reden: reden || null }; }
 // Fouten naar een status. Triggers van facturen-db.js geven vaste teksten ("opdracht_prive: …"): die mogen door. Een CHECK of UNIQUE noemt

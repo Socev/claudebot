@@ -1241,6 +1241,61 @@ function M24(db, vervang) {
   }
 }
 
+/*
+ * wv3369 (David 19-11-2026 12:17: "Wij zetten geen betalingen meer klaar. Alles wat normaal klaargezet zou worden als betaling, zetten we
+ * nu als verzenden naar Cynthia (nogbetalen@huisartsentolgaarde.nl) ... DIRECT naar haar"; Ja met verse vingerafdruk 12:58, vraag-id
+ * 44356c0a, registerrij nogbetalen-cynthia). Eén rij per factuur per aanleiding (en volgnummer, voor "stuur opnieuw" in fase 2) = de grens
+ * tegen dubbel versturen, naar het patroon van sepa_verzending (M21): de rij ontstaat in dezelfde transactie als Bevestigen, 'verzenden'
+ * staat vóór de aanroep van de verzender, een rij gaat nooit weg en alleen vooruit (trigger). Drie lagen tegen een verkeerd adres: vaste
+ * constante in facturen.js, de CHECK hieronder, de witte lijst van de verzender. Privé nooit (CHECK + trigger), alleen-eigenaar en
+ * creditnota nooit (trigger op de factuur). claim_dag = de Amsterdamse dag waarop de rij naar 'verzenden' ging (dagplafond, in dezelfde
+ * transactie geteld). Geen mailtekst of bijlage erin, alleen de LET OP-regels (de app toont ze) en de sha256 van de bijlage.
+ * Terugrol: een release van vóór wv3369 opent deze database niet (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE
+ * versie = 26` (de oude code kijkt niet naar de tabel; de trigger op terugdraaien zit in deze code, niet in de database). Herhaalbaar.
+ */
+const NOGBETALEN_AAN = 'nogbetalen@huisartsentolgaarde.nl';
+const M26 = `
+CREATE TABLE IF NOT EXISTS betaal_verzending (
+  id TEXT PRIMARY KEY ${ID('id')},
+  factuur TEXT NOT NULL REFERENCES factuur(id),
+  aanleiding TEXT NOT NULL CHECK (aanleiding IN ('bevestigen','knop','toch_zelf')),
+  volgnummer INTEGER NOT NULL DEFAULT 1 CHECK (volgnummer BETWEEN 1 AND 9),
+  entiteit TEXT NOT NULL REFERENCES entiteit(sleutel) CHECK (entiteit <> 'prive'),
+  aan TEXT NOT NULL CHECK (aan = '${NOGBETALEN_AAN}'),
+  status TEXT NOT NULL CHECK (status IN ('wacht','verzenden','verstuurd','onzeker','mislukt','vervallen')),
+  verstuur_na TEXT NOT NULL,
+  let_op TEXT NOT NULL DEFAULT '[]' ${JSONL('let_op')},
+  zonder_bijlage INTEGER NOT NULL DEFAULT 0 ${BOOL('zonder_bijlage')},
+  bijlage_sha256 TEXT CHECK (bijlage_sha256 IS NULL OR (length(bijlage_sha256) = 64 AND bijlage_sha256 NOT GLOB '*[^0-9a-f]*')),
+  claim_dag TEXT ${DATUM('claim_dag')},
+  message_id TEXT CHECK (message_id IS NULL OR length(message_id) <= 80),
+  reden TEXT CHECK (reden IS NULL OR length(reden) <= 300),
+  verzonden_op TEXT,
+  aangemaakt_door TEXT NOT NULL,
+  aangemaakt_op TEXT NOT NULL,
+  bijgewerkt_op TEXT NOT NULL,
+  UNIQUE (factuur, aanleiding, volgnummer)
+);
+CREATE INDEX IF NOT EXISTS betaal_verzending_status ON betaal_verzending (status, verstuur_na);
+CREATE INDEX IF NOT EXISTS betaal_verzending_dag ON betaal_verzending (claim_dag);
+CREATE TRIGGER IF NOT EXISTS betaal_verzending_blijft BEFORE DELETE ON betaal_verzending BEGIN SELECT RAISE(ABORT, 'betaal_verzending: rijen blijven'); END;
+CREATE TRIGGER IF NOT EXISTS betaal_verzending_nieuw BEFORE INSERT ON betaal_verzending
+WHEN NEW.status <> 'wacht' OR NOT EXISTS (SELECT 1 FROM factuur f WHERE f.id = NEW.factuur AND f.entiteit = NEW.entiteit AND f.entiteit <> 'prive'
+  AND f.alleen_eigenaar = 0 AND f.soort = 'factuur' AND f.betaalspoor = 'te_betalen' AND f.bevestigd_op IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'betaal_verzending: alleen een bevestigde, zelf te betalen factuur van een zakelijke entiteit'); END;
+CREATE TRIGGER IF NOT EXISTS betaal_verzending_vooruit BEFORE UPDATE ON betaal_verzending
+  WHEN NEW.id IS NOT OLD.id OR NEW.factuur IS NOT OLD.factuur OR NEW.aanleiding IS NOT OLD.aanleiding OR NEW.volgnummer IS NOT OLD.volgnummer
+    OR NEW.entiteit IS NOT OLD.entiteit OR NEW.aan IS NOT OLD.aan OR NEW.verstuur_na IS NOT OLD.verstuur_na
+    OR NEW.aangemaakt_door IS NOT OLD.aangemaakt_door OR NEW.aangemaakt_op IS NOT OLD.aangemaakt_op
+    OR (OLD.claim_dag IS NOT NULL AND NEW.claim_dag IS NOT OLD.claim_dag)
+    OR (NEW.status <> OLD.status AND NOT (
+      (OLD.status = 'wacht' AND NEW.status IN ('verzenden','vervallen','mislukt')) OR
+      (OLD.status = 'verzenden' AND NEW.status IN ('verstuurd','onzeker','mislukt')) OR
+      (OLD.status = 'onzeker' AND NEW.status = 'verstuurd')))
+    OR (NEW.status = 'verzenden' AND OLD.status = 'wacht' AND NEW.claim_dag IS NULL)
+  BEGIN SELECT RAISE(ABORT, 'betaal_verzending: alleen vooruit'); END;
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -1266,12 +1321,14 @@ const MIGRATIES = [
   { versie: 23, naam: 'SEPA-batch: ook de POT (invoer per betaling met de extensie POT-invoer); Privé blijft uitgesloten (wv2842)', fn: (db) => M23(db) },
   { versie: 24, naam: "creditcard: kaart_bestand.formaat ook 'ics_pdf' (rekeningoverzicht als PDF, wv2958)", fn: (db) => M24(db) },
   { versie: 25, naam: "factuur: status 'concept_verwijderd' (Gmail-concept door David weggegooid, wv3074)", fn: (db) => M25(db) },
+  { versie: 26, naam: 'betaalverzoek naar Cynthia (nogbetalen@): betaal_verzending (wv3369)', sql: M26 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
   'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel', 'afzender_regel',
-  'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso', 'paypal_regel', 'boekstuk_verzending', 'boekstuk_vrijgave', 'sepa_verzending'];
+  'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso', 'paypal_regel', 'boekstuk_verzending', 'boekstuk_vrijgave', 'sepa_verzending',
+  'betaal_verzending'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 
@@ -1434,16 +1491,21 @@ function terugdraaien(fdb, factuurId, o) {
       return { ok: true, factuur: f.id, opdracht: null };
     }
     if (f.status !== 'in_wachtrij') return { ok: false, fout: 'ongeldige_overgang', reden: f.status + ' → terugdraaien' };
+    // wv3369: is het betaalverzoek al onderweg of verstuurd naar Cynthia (nogbetalen@), dan niet meer terug (zoals bij de koerier); wacht
+    // het nog, dan vervalt het in dezelfde transactie
+    if (fdb.db.prepare("SELECT 1 FROM betaal_verzending WHERE factuur = ? AND status IN ('verzenden','verstuurd','onzeker') LIMIT 1").get(f.id))
+      return { ok: false, fout: 'al_bij_cynthia', reden: 'het betaalverzoek is al naar Cynthia (nogbetalen@) gegaan; terugdraaien kan niet meer' };
     const op = fdb.db.prepare("SELECT id FROM opdracht WHERE factuur = ? AND status = 'wacht'").get(f.id);
     const r = fdb.db.prepare("UPDATE opdracht SET status = 'teruggedraaid', bijgewerkt_op = ? WHERE factuur = ? AND status = 'wacht'").run(wanneer, f.id);
     if (r.changes !== 1) return { ok: false, fout: 'al_opgehaald', reden: 'de koerier heeft de opdracht al opgehaald; terugdraaien kan niet meer' };
+    const nbWeg = Number(fdb.db.prepare("UPDATE betaal_verzending SET status = 'vervallen', reden = 'Bevestigen teruggedraaid', bijgewerkt_op = ? WHERE factuur = ? AND status = 'wacht'").run(wanneer, f.id).changes);
     const ov = K.statusOvergang('in_wachtrij', 'terugdraaien', { opdracht_status: 'wacht' });
     if (!ov.ok) throw new DbFout(ov.fout, ov.reden);
     const r2 = fdb.db.prepare("UPDATE factuur SET status = 'te_beoordelen', bevestigd_door = NULL, bevestigd_op = NULL, bijgewerkt_op = ?, versie = versie + 1 " +
       "WHERE id = ? AND status = 'in_wachtrij'").run(wanneer, f.id);
     if (r2.changes !== 1) throw new DbFout('race', 'factuur veranderde tijdens terugdraaien');
     audit(fdb, { wie: o.wie, wat: 'terugdraaien', object_soort: 'factuur', object_id: f.id, entiteit: f.entiteit,
-      voor: { status: 'in_wachtrij', opdracht: op && op.id, opdracht_status: 'wacht' }, na: { status: 'te_beoordelen', opdracht_status: 'teruggedraaid' }, wanneer });
+      voor: { status: 'in_wachtrij', opdracht: op && op.id, opdracht_status: 'wacht' }, na: Object.assign({ status: 'te_beoordelen', opdracht_status: 'teruggedraaid' }, nbWeg ? { betaalverzoek: 'vervallen' } : {}), wanneer });
     return { ok: true, factuur: f.id, opdracht: op && op.id };
   });
 }
