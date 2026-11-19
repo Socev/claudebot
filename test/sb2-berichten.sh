@@ -81,6 +81,7 @@ R.onleesbaar = stuk({ marker: 'niet_te_lezen', doel: 'GH' });
 R.medisch = stuk({ sam: { mogelijk_medisch: true, weging: 'zacht', na_keuze: true } });
 R.hard = stuk({ keuze: 'hard' });
 R.weging = stuk({ sam: { weging: 'hard', buiten_brain: true } });
+R.hardDoor = stuk({ sam: { mogelijk_medisch: true, weging: 'hard', na_keuze: true } });   // wv3440: marker_hard door
 R.vast = stuk({ staat: 'vastgehouden' });
 R.weg = stuk({ staat: 'weg' });
 R.quarantaine = stuk({ ps: 'quarantaine' });
@@ -104,6 +105,7 @@ for (const n of ['marker', 'markerNull', 'hard', 'weging', 'vast', 'weg']) {
   toets('scope: ' + n + ' → mee met een lege lijst en target null', !!x && x.mentions.length === 0 && x.target_org_id === null, x);
 }
 toets('scope: onleesbaar en "mogelijk medisch" gaan wél mee (grondwet 3, 3-11)', V.get(R.onleesbaar).mentions.length === 2 && V.get(R.onleesbaar).target_org_id === E.GH && V.get(R.medisch).mentions.length === 2);
+toets('scope (wv3440): hard dat doorging met mogelijk medisch gaat mee zoals zacht', V.get(R.hardDoor).mentions.length === 2, V.get(R.hardDoor));
 toets('scope: quarantaine, andere route, bijlage en niet gespiegeld niet verstuurd', !V.has(R.quarantaine) && !V.has(R.andereRoute) && !V.has(1999) && !V.has(R.nietGespiegeld));
 toets('target: PRIVE nooit, onbekende code null (geteld), afgewezen null', V.get(R.prive).target_org_id === null && V.get(R.onbekendDoel).target_org_id === null && t.doel_onbekend === 1 && V.get(R.afgewezen).target_org_id === null);
 toets('scope: stuk zonder live-rij gaat mee (met bestemming)', V.get(R.zonderLive).target_org_id === E.GH && V.get(R.zonderLive).mentions.length === 2);

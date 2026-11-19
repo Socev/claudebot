@@ -14,7 +14,7 @@
  *  1. Register via public.sb2_bericht_register (service_role): email/zorgmail/domein → entiteit, eigen entiteiten per short_code.
  *  2. Per route (schakelaar scripts-staat/sb2-berichten/aan.json {"aan": true, "routes": ["gmail.david"]}) ALLE gespiegelde mailversies van
  *     die route uit intake.sqlite (alleen lezen). Buiten scope (patiëntmarker niet geen/niet_te_lezen, vastgehouden of weg, keuze hard, buiten
- *     de Brain of harde weging) gaat mee met een lege lijst en target null, zodat eerdere rijen verdwijnen (review MOET 1); versies die de
+ *     de Brain of harde weging die niet doorging; wv3440: hard met mogelijk_medisch = door, zoals zacht) gaat mee met een lege lijst en target null, zodat eerdere rijen verdwijnen (review MOET 1); versies die de
  *     databank nog kent maar de pod niet meer (sb2_bericht_stand) ook. Quarantaine/verwijderd ruimt de RPC zelf op.
  *  3. Oplossen: Davids eigen adressen (router.json eigen_adressen) en alles wat op PRIVE uitkomt overslaan; exact in email/zorgmail; anders
  *     het langste domein dat gelijk is aan het adresdomein of er met een puntgrens op eindigt (review MOET 4), nooit via een openbaar
@@ -133,7 +133,7 @@ function versiesVan(db, route, opl) {
     else if (MARKER_OK.indexOf(r.marker_patient) < 0) reden = 'marker';
     else if (r.staat === 'vastgehouden' || r.staat === 'weg') reden = 'staat';
     else if (r.keuze === 'hard') reden = 'buiten_brain';
-    else if (sam.buiten_brain || sam.weging === 'hard') reden = 'buiten_brain';
+    else if (sam.buiten_brain || (sam.weging === 'hard' && !sam.mogelijk_medisch)) reden = 'buiten_brain';   // wv3440: hard dat doorging (marker_hard door) = zoals zacht
     const v = { revision_id: rev, target_org_id: null, mentions: [] };
     if (reden) tel(t.buiten, reden);
     else {

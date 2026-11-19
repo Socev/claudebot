@@ -780,6 +780,20 @@ test('wv3440 marker_hard door: hard stuk (brief, HIS-nummer) gaat door naar de B
   const tl = E.r.telling('2000-01-01T00:00:00Z', '2100-01-01T00:00:00Z');
   assert.equal(tl.marker_hard, 3); assert.equal(tl.buiten_brain, 1); assert.equal(tl.mogelijk_medisch, 2);
   E.r.sluit();
+  // review Fable ZOU 4: marker_hard door zonder marker_zacht door = vastgehouden (schaduw), en geen pdf-schaduwmodel op een doorgelaten hard stuk
+  const P = []; const Q = omgeving({ markerStand: () => 'schaduw', markerHardStand: () => 'door', pdfSchaduw: (j) => P.push(j) });
+  const h3 = Q.zet({ marker: 'gemarkeerd', soorten: ['brieftaal'], meta: { van: 'poli@voorbeeld.example', onderwerp: 'Verslag', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('poli@voorbeeld.example', 'Verslag', HARD_TEKST) }] });
+  await Q.r.ronde();
+  assert.equal(Q.db.prepare('SELECT staat FROM live_stuk WHERE stuk_id = ?').get(h3).staat, 'vastgehouden');
+  assert.deepEqual(Q.bestanden(), []);
+  Q.r.sluit();
+  const P2 = []; const D = omgeving({ markerStand: () => 'door', markerHardStand: () => 'door', pdfSchaduw: (j) => P2.push(j) });
+  D.zet({ marker: 'gemarkeerd', soorten: ['brieftaal'], meta: { van: 'poli@voorbeeld.example', onderwerp: 'Verslag', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('poli@voorbeeld.example', 'Verslag', HARD_TEKST) }, { rol: 'bijlage', naam: 'verslag.pdf', mime: 'application/pdf', bytes: Buffer.from('%PDF-1.4 verzonnen') }] });
+  await D.r.ronde();
+  assert.equal(P2.length, 0);
+  D.r.sluit();
   // onbekende waarde = buiten (zoals sinds wv2336)
   const S = omgeving({ markerStand: () => 'door', markerHardStand: () => 'Door ' });
   const h2 = S.zet({ marker: 'gemarkeerd', soorten: ['brieftaal'], meta: { van: 'poli@voorbeeld.example', onderwerp: 'Verslag', aan: ['david@voorbeeld.example'] },
