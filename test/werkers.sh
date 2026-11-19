@@ -84,6 +84,12 @@ toets('4g check: werker niet actief', st.check.niet_actief.length === 1 && st.ch
 toets('4h check: hartslag zonder werker, proefrij weg', JSON.stringify(st.check.hartslag_zonder_werker) === '["losse_component"]', st.check.hartslag_zonder_werker);
 toets('4i check: telling actief', st.check.n8n_actief === live.length);
 toets('4j sessie en skill buiten de vaste plek', alle.some((x) => x.sessie) && alle.some((x) => x.skill));
+// wv3413 (actieplan Fable 19-11, B16): de vier nachtwachters draaien elk in een eigen sessie (n8n Prompt opstellen + Sessie wissen),
+// nooit in Davids hoofdgesprek; de sessienaam staat ook in LESSEN_DOMEIN (server.js) als 'pa'.
+toets('4j2 nachtwachters in een eigen sessie, niet hoofd', ['actie-bewaker', 'agenda-wachter', 'correspondentie-wachter', 'personeels-wachter'].every(function (sk) {
+  const w = W.WERKERS.find((x) => x.skill === sk && x.soort === 'wachter');
+  return w && w.sessie === sk;
+}), W.WERKERS.filter((x) => /wachter|bewaker/.test(x.skill || '')).map((x) => x.skill + '=' + x.sessie));
 const sv = W.stand({ workflows: live, hartslag: hs, nu: NU, vast: true });
 toets('4k vaste plek: geen sessie, skill, bron, uitkomst of id', [].concat(...W.SOORTEN.map((s) => sv.groepen[s])).every((x) => !('sessie' in x) && !('skill' in x) && !('bron' in x) && x.uitkomst === '' && x.n8n === null));
 toets('4k2 vaste plek: check zonder namen of id\'s, wel de aantallen', sv.check.ontbreekt.length === 1 && sv.check.ontbreekt[0].naam === '' && sv.check.ontbreekt[0].id === '' && sv.check.hartslag_zonder_werker[0] === '' && sv.check.n8n_actief === live.length);
