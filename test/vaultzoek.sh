@@ -65,6 +65,14 @@ toets('9 uitsluitingen: box, box-archief, n8n-log, Tokens, Beveiliging, Vault-RA
           '30_Conversaties/Mail/Gesprekken/2020/2020-01.md', '90_Cijfermeester/x.md'])
       and not any(vz.uitgesloten(p, False) for p in ['.claude/skills/ciso/SKILL.md', '00_Systeem/Meldingen/structuur-wachter.md', 'CLAUDE.md', '30_Conversaties/WhatsApp/x.md'])
       and not vz.uitgesloten('30_Conversaties/Mail/Gesprekken/2020/2020-01.md', True))
+PM = '10_Zakelijk/Tolgaarde/Promedico-agenda/Promedico-agenda '
+toets('9b A03: Promedico-weekpagina uit, botsingenpagina en andere Tolgaarde-pagina in',
+      vz.uitgesloten(PM + '2026-W47.md', False) and vz.uitgesloten(PM + '2027-W01.md', True)
+      and not vz.uitgesloten(PM + '2026-W47 - botsingen.md', False) and not vz.uitgesloten('10_Zakelijk/Tolgaarde/Promedico-agenda/Overzicht.md', False)
+      and not vz.uitgesloten('10_Zakelijk/Tolgaarde/Personeel.md', False))
+db = {PM + '2026-W47.md': 's', PM + '2026-W47 - botsingen.md': 's', 'weg.md': 's', 'blijft.md': 's'}
+toets('9c A03/C05: bestaande index-rij van een weekpagina blijft tot het besluit; wat echt weg is gaat eruit',
+      sorted(vz.weg_paden(db, {'blijft.md': 1})) == [PM + '2026-W47 - botsingen.md', 'weg.md'], vz.weg_paden(db, {'blijft.md': 1}))
 toets('10 COPY-tekst: tab, nieuwe regel, backslash en NUL veilig', vz.cp('a\tb\nc\\d\x00\r') == 'a\\tb\\nc\\\\d\\r' and vz.cp(None) == '\\N')
 h1 = vz.brokhash(vz.embedtekst('a.md', 'K', 'tekst')); h2 = vz.brokhash(vz.embedtekst('b.md', 'K', 'tekst'))
 toets('11 hash per brok hangt af van model, pad, kop en tekst', h1 != h2 and h1 == vz.brokhash(vz.embedtekst('a.md', 'K', 'tekst')) and len(h1) == 64)

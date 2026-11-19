@@ -31,4 +31,7 @@ kruis herkend-negeren "const r = herkend ? verwerkStand(staat, s, gezienMs, t, o
 kruis veldnaam "const naam = RE_VELDNAAM.test(k) ? k : 'onleesbare naam';" "const naam = '';"
 kruis naam-niet-anoniem "const naam = RE_VELDNAAM.test(k) ? k : 'onleesbare naam';" "const naam = k;"
 kruis snoei-mislukt "for (const w of Object.keys(staat.mislukt)) levend.add(w);" ""
-echo "promedico-agenda: toets + 11 kruisproeven goed"
+kruis pagina-tekst "if (b.omschrijving) r += ': [tekst]';" "if (b.omschrijving) r += ': ' + b.omschrijving;"
+kruis pagina-dagnotitie "if (dag.dagnotitie) r.push('Dagnotitie: [tekst]');" "if (dag.dagnotitie) r.push('Dagnotitie: ' + dag.dagnotitie);"
+kruis herschrijf-m4 "for (const d of Object.keys(staat.datums)) weken.add(isoWeek(d));" "for (const f of fs.readdirSync(path.join(o.vault, map))) { const m = /(\\d{4}-W\\d{2})\\.md\$/.exec(f); if (m) weken.add(m[1]); }"
+echo "promedico-agenda: toets + 14 kruisproeven goed"
