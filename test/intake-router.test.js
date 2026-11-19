@@ -182,8 +182,7 @@ function stubs(extra) {
     marker: poort,
     pdfBbox: async function (p) {
       const b = fs.readFileSync(p, 'utf8');
-      // wv3403: het voorblad heeft een regel tekst (een pagina met minder dan 20 tekens telt sinds A29 als niet gelezen)
-      if (b === FACTUUR_PDF) return '<page>' + 'Factuur energielevering oktober'.split(' ').map(function (w, j) { return '<word xMin="' + (10 + j * 60) + '" yMin="10" xMax="' + (60 + j * 60) + '" yMax="20">' + w + '</word>'; }).join('') + '</page><page>' +
+      if (b === FACTUUR_PDF) return '<page><word xMin="10" yMin="10" xMax="50" yMax="20">Factuur</word></page><page>' +
         ['Factuurnummer: VE-2026-0042', 'Factuurdatum: 03-10-2026', 'Totaal: € 99,00', 'KvK: 12345678', 'www.voorbeeld-energie.example', 'Aan Testgaarde'].map(function (r, i) {
           return r.split(' ').map(function (w, j) { return '<word xMin="' + (10 + j * 60) + '" yMin="' + (40 + i * 15) + '" xMax="' + (60 + j * 60) + '" yMax="' + (50 + i * 15) + '">' + w + '</word>'; }).join('');
         }).join('') + '</page>';
