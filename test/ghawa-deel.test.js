@@ -378,6 +378,10 @@ test('MOET 4 (ronde 1 en 2): elk blok dat buiten kán staan telt mee — push mi
 test('wv3388: ECG-rekeningnummer krijgt zijn label uit de instelling op de pod, niet uit de code', () => {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE instelling (sleutel TEXT PRIMARY KEY, waarde TEXT, toelichting TEXT)');
+  // wv3394: lijstenVan gooit nu bij een ontbrekende tabel; de rest van de tabellen leeg erbij
+  db.exec('CREATE TABLE donateur (naam TEXT, soort TEXT); CREATE TABLE bankregel_ghawa (donateur TEXT, tegenpartij TEXT, soort TEXT, rekening TEXT, tegenrekening TEXT);' +
+    'CREATE TABLE bankregel_ecg (begunstigde TEXT, omschrijving TEXT, rekening TEXT); CREATE TABLE geldstroom (van TEXT, naar TEXT); CREATE TABLE afschrift (rekening TEXT);' +
+    'CREATE TABLE deel_naam (naam TEXT, soort TEXT)');
   const leeg = D.lijstenVan(db, os.tmpdir(), { leesVault: () => ({}) });
   assert.deepStrictEqual(leeg.rekLabels, []);
   assert.strictEqual(D.rekLabel('9990000017', leeg.rekLabels), 'account …0017');   // zonder instelling: geen nummer in de code
@@ -388,4 +392,93 @@ test('wv3388: ECG-rekeningnummer krijgt zijn label uit de instelling op de pod, 
   assert.strictEqual(D.rekLabel('GMD 1234567890', l.rekLabels), 'ECG GMD account');
   assert.ok(l.rekeningen.includes('9990000017') && l.rekeningen.includes('9990000025'), 'nummers in de poortlijst');
   db.close();
+});
+
+// ── wv3394 (actieplan Fable-reviews 19-11, A13 en B54) ──
+test('wv3394 A13: onbekende naam in van/betaald van, referentie met spaties, onbekende fase/project/munt alleen via Share; bekende waarden blijven', async () => {
+  const o = omgeving();
+  await keurAlles(o); await alleAan(o, ['construction', 'accounts', 'funds']); await o.m.ronde();
+  const db = o.sql();
+  db.prepare("UPDATE geldstroom SET van = 'Tamsin Wolkenveld', referentie = '111 222 3334' WHERE id = 'M002'").run();
+  db.prepare("UPDATE uitgave SET betaald_van = 'Barend Kasloper' WHERE id = 'T0002'").run();
+  db.prepare("UPDATE activiteit SET fase = 'Fase Zonnebloem' WHERE nr IN (2, '2')").run();
+  db.prepare("UPDATE fonds SET project = 'Project Kwakkelbos' WHERE id = 'F02'").run();
+  db.prepare("UPDATE bankregel_ecg SET munt = 'Hanneke Muntjak' WHERE id = 'B0009'").run();
+  db.close();
+  o.m.markeerVuil(); await o.m.ronde();
+  const acc = deelVan(o, 'accounts'), bouw = deelVan(o, 'construction'), fonds = deelVan(o, 'funds');
+  assert.ok(acc && bouw && fonds, 'onderdelen staan buiten (poort niet geraakt)');
+  const m2 = acc.flows.find((x) => x.id === 'M002');
+  assert.strictEqual(m2.from, D.PENDING, 'onbekende naam in van');
+  assert.strictEqual(m2.reference, D.PENDING, 'referentie met spaties');
+  assert.strictEqual(m2.to, 'ECG GMD account', 'bekend label blijft');
+  assert.strictEqual(acc.flows.find((x) => x.id === 'M001').from, 'GHAWA (NL)');
+  assert.strictEqual(bouw.expenditures.find((x) => x.id === 'T0002').paid_from, D.PENDING);
+  assert.strictEqual(bouw.expenditures.find((x) => x.id === 'T0001').paid_from, 'ECG GMD account');
+  assert.ok(bouw.activities.some((x) => x.phase === D.PENDING) && bouw.activities.some((x) => x.phase === 'Phase 1A'), 'onbekende fase pending, bekende blijft');
+  assert.strictEqual(fonds.funds.find((x) => x.id === 'F02').project, D.PENDING);
+  assert.strictEqual(fonds.funds.find((x) => x.id === 'F01').project, 'Pharmacy');
+  assert.ok(acc.bank.some((x) => x.currency === D.PENDING) && acc.bank.some((x) => x.currency === 'GMD'));
+  const log = JSON.stringify(o.d1.log);
+  for (const w of ['Wolkenveld', 'Kasloper', 'Zonnebloem', 'Kwakkelbos', 'Muntjak', '111 222', '1112223334']) assert.ok(!log.includes(w), w + ' niet naar D1');
+  const st = o.m.staat(), t = st.teksten.map((x) => x.tekst);
+  for (const w of ['Tamsin Wolkenveld', 'Barend Kasloper', 'Fase Zonnebloem', 'Project Kwakkelbos', 'Hanneke Muntjak', '…3334']) assert.ok(t.includes(w), w + ' onder Nieuwe teksten');
+  // na Share gaat precies die waarde mee
+  o.m.tekstBesluit(st.teksten.find((x) => x.tekst === 'Project Kwakkelbos').hash, 'share', 'toets');
+  await o.m.ronde();
+  assert.strictEqual(deelVan(o, 'funds').funds.find((x) => x.id === 'F02').project, 'Project Kwakkelbos');
+  assert.strictEqual(D.rekLabel('Iemand Onbekend'), D.PENDING, 'zonder terugval: pending, nooit de waarde');
+});
+
+test('wv3394 B54: kapotte namenlijst = geen ronde + signaal (weer leesbaar = signaal dicht); elke tikstap een eigen try', async () => {
+  const o = omgeving();
+  await keurAlles(o); await alleAan(o, ['construction']); await o.m.ronde();
+  let db = o.sql(); db.exec('ALTER TABLE donateur RENAME COLUMN naam TO naam_weg'); db.close();
+  const n0 = o.d1.log.length;
+  o.m.markeerVuil();
+  const u = await o.m.tik(true);
+  assert.ok(!u.ronde && /ronde/.test(u.fout || ''), 'geen ronde, wel een fout: ' + JSON.stringify(u));
+  assert.ok(!o.d1.log.slice(n0).some((q) => /INSERT INTO deel /.test(q.sql)), 'niets nieuws naar buiten');
+  db = o.sql();
+  const sg = db.prepare("SELECT tekst, dicht_op FROM signaal WHERE id = 'delen:namenlijst'").get();
+  assert.ok(sg && !sg.dicht_op && /namen/.test(sg.tekst), 'signaal in Vraagt aandacht');
+  db.exec('ALTER TABLE donateur RENAME COLUMN naam_weg TO naam'); db.close();
+  const u2 = await o.m.tik(true);
+  assert.ok(u2.ronde && !u2.fout, JSON.stringify(u2));
+  db = o.sql(); assert.ok(db.prepare("SELECT dicht_op FROM signaal WHERE id = 'delen:namenlijst'").get().dicht_op, 'signaal dicht'); db.close();
+  // een fout in een vroege stap (intrekken) slaat de ronde niet meer over
+  db = o.sql(); db.prepare("INSERT INTO deel_obj (onderdeel, dicht) VALUES ('questions', '2026-11-10T00:00:00Z') ON CONFLICT (onderdeel) DO UPDATE SET dicht = excluded.dicht, dicht_bevestigd = NULL").run(); db.close();
+  const echt = o.d1; let keer = 0;
+  const m = o.m;
+  o.d1.stuk = false;
+  // nep: alleen de intrekking faalt (blok-rij voor questions)
+  const orig = echt.db.prepare.bind(echt.db);
+  echt.db.prepare = (sql) => { if (/INSERT INTO blok/.test(sql) && keer++ < 1) throw new Error('nep'); return orig(sql); };
+  m.markeerVuil();
+  const u3 = await m.tik(true);
+  echt.db.prepare = orig;
+  assert.ok(/intrekken/.test(u3.fout || '') && u3.ronde, 'intrekken faalt, ronde loopt toch: ' + JSON.stringify(u3));
+});
+
+test('wv3394 B54: D1 24 uur onbereikbaar → precies één melding (pas na 24 u, opnieuw tot bevestigd); hersteld = teller weg', async () => {
+  const o = omgeving();
+  let t = NU; o.zetNu(t);
+  await keurAlles(o); await alleAan(o, ['construction']); await o.m.ronde();
+  o.d1.stuk = true;
+  const meldingen = [];
+  for (let i = 0; i <= 52; i++) {   // 26 uur, elke 30 min een tik
+    o.zetNu(t + i * 1800000);
+    const u = await o.m.tik();
+    assert.ok(u.fout, 'tik ' + i + ' faalt');
+    if (u.melden) { meldingen.push({ i, m: u.melden }); if (meldingen.length === 1) continue; o.m.foutGemeld(u.melden.sinds); }   // de eerste keer lukt het bericht niet
+  }
+  assert.strictEqual(meldingen.length, 2, 'eerste poging niet bevestigd → één herhaling, daarna stil: ' + JSON.stringify(meldingen.map((x) => x.i)));
+  assert.strictEqual(meldingen[0].i, 48, 'pas na 24 uur');
+  assert.strictEqual(meldingen[0].m.sinds, meldingen[1].m.sinds);
+  assert.ok(/ronde/.test(meldingen[0].m.stappen));
+  assert.ok(o.m.health().fout_sinds);
+  o.d1.stuk = false; o.zetNu(t + 53 * 1800000);
+  const u = await o.m.tik(true);
+  assert.ok(!u.fout && !u.melden, JSON.stringify(u));
+  assert.strictEqual(o.m.health().fout_sinds, null, 'hersteld: teller weg');
 });

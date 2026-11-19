@@ -23710,11 +23710,23 @@ const ghawaDeel = (function () {
       } });
   } catch (e) { logError('ghawa-deel', e); return null; }
 })();
-let ghawaDeelLoopt = false;
+let ghawaDeelLoopt = false, ghawaDeelMeldPoging = 0;
+// wv3394 (Fable-review 19-11 L8): mislukken de tikken 24 uur aan één stuk, dan één regel in de machinekamer (vóór ECG na 72 u 'Paused' ziet);
+// pas na een 200 bevestigd (foutGemeld), anders hooguit elke 10 minuten opnieuw. Geen inhoud, alleen de stappen en de tijd.
+async function ghawaDeelFoutMelding(m) {
+  if (!m || !m.sinds || Date.now() - ghawaDeelMeldPoging < 600000) return;
+  ghawaDeelMeldPoging = Date.now();
+  const sinds = new Date(m.sinds).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const tekst = 'GHAWA, Delen met ECG: de rondes naar ghawa.socev.dev mislukken al sinds ' + sinds + ' (stap: ' + String(m.stappen || '?').replace(/[^a-z, ]/g, '').slice(0, 60) + '). ' +
+    'Na 72 uur zonder geslaagde ronde ziet ECG "Paused". Kijk naar de D1-sleutel (kluisrij cloudflare_memorylane) en /health ghawa.deel.';
+  const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'ghawa-deel', klasse: 'normaal', tekst: tekst, sleutel: 'ghawa-deel-fout:' + m.sinds });
+  if (!r || r.status !== 200) { logError('ghawa-deel-melding', berichtFout(r)); return; }
+  ghawaDeel.foutGemeld(m.sinds);
+}
 async function ghawaDeelTik(dwing) {
   if (!ghawaDeel || ghawaDeelLoopt || !rolPrimair()) return;
   ghawaDeelLoopt = true;
-  try { await ghawaDeel.tik(dwing); } catch (e) { logError('ghawa-deel-tik', e); }
+  try { const u = await ghawaDeel.tik(dwing); if (u && u.melden) await ghawaDeelFoutMelding(u.melden); } catch (e) { logError('ghawa-deel-tik', e); }
   try { await ghawaSeintjeHerhaal(); } catch (e) { logError('ghawa-deel-seintje', e); } finally { ghawaDeelLoopt = false; }
 }
 if (ghawaDeel && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setTimeout(function () { ghawaDeelTik(); }, 150000).unref(); setInterval(function () { ghawaDeelTik(); }, 60000).unref(); }
