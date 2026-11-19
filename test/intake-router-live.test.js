@@ -745,6 +745,51 @@ test('wv3176 ION-melding via de Gmail-intake: hard (ion_melding), stil buiten de
   S.r.sluit();
 });
 
+// wv3440 (David 19-11-2026: "alles moet gewoon door!"): router.json marker_hard 'door' = hard gaat door zoals zacht, met het label mogelijk medisch
+test('wv3440 marker_hard door: hard stuk (brief, HIS-nummer) gaat door naar de Brain met label mogelijk medisch; ION blijft buiten; standaard buiten', async () => {
+  const E = omgeving({ markerStand: () => 'door', markerHardStand: () => 'door', live: () => ({ 'gmail:david': true, 'gmail:groenhouten': true }) });
+  const hard = E.zet({ marker: 'gemarkeerd', soorten: ['brieftaal'], meta: { van: 'poli@voorbeeld.example', onderwerp: 'Verslag', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('poli@voorbeeld.example', 'Verslag', HARD_TEKST) }] });
+  const his = E.zet({ marker: 'gemarkeerd', soorten: ['medisch'], meta: { van: 'scholing@voorbeeld.example', onderwerp: 'HIS-nummer 7654321', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('scholing@voorbeeld.example', 'HIS-nummer 7654321', ZACHT_TEKST) }] });
+  const ion = E.zet({ bron: 'gmail:groenhouten', marker: 'geen', soorten: ['patient_woord'], meta: { van: 'noreply@vecozo.nl', onderwerp: ' - ION Patiëntrelaties beëindigd', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('noreply@vecozo.nl', ' - ION Patiëntrelaties beëindigd', ION_TEKST) }] });
+  await E.r.ronde();
+  for (const id of [hard, his]) {
+    const ls = E.db.prepare('SELECT * FROM live_stuk WHERE stuk_id = ?').get(id);
+    assert.equal(ls.staat, 'klaar', id); assert.equal(ls.keuze, null);
+    const sm = JSON.parse(E.db.prepare('SELECT samenvatting FROM router_stuk WHERE stuk_id = ?').get(id).samenvatting);
+    assert.equal(sm.mogelijk_medisch, true); assert.equal(sm.weging, 'hard'); assert.equal(sm.buiten_brain, undefined);
+    assert.equal(E.db.prepare("SELECT uitkomst FROM besluit WHERE stuk_id = ? AND stap = 'marker_keuze'").get(id).uitkomst, 'hard_door');
+    const w = JSON.parse(E.db.prepare("SELECT bewijs FROM besluit WHERE stuk_id = ? AND stap = 'marker_weging'").get(id).bewijs);
+    assert.equal(w.hard_stand, 'door');
+    assert.ok(!E.tel.bewaar.some((b) => b[0] === id));
+  }
+  assert.ok(E.bestanden().some((p) => /Verslag/.test(p)), E.bestanden().join(','));
+  assert.ok(E.bestanden().some((p) => /HIS-nummer/.test(p)), E.bestanden().join(','));
+  // zelfde weg als zacht: Jev vóór de Brain (geen nieuwe weg naar buiten), geen kaart, besluit zonder tekst
+  assert.ok(E.tel.jev.some((x) => /ZWAARDVIS/.test(x)));
+  assert.equal(E.tel.kaarten.length, 0);
+  assert.ok(!/ZWAARDVIS|Proefpersoon/.test(JSON.stringify(E.db.prepare('SELECT * FROM besluit').all())));
+  const ov = await E.r.appOverzicht(20);
+  const oh = ov.stukken.find((s) => s.stuk_id === hard);
+  assert.equal(oh.mogelijk_medisch, true); assert.equal(oh.buiten_brain, false);
+  // ION: Davids eigen keuze van 16-11 blijft gelden
+  assert.equal(E.db.prepare('SELECT staat FROM live_stuk WHERE stuk_id = ?').get(ion).staat, 'bewaard');
+  assert.ok(!E.bestanden().some((p) => /ION/.test(p)));
+  const tl = E.r.telling('2000-01-01T00:00:00Z', '2100-01-01T00:00:00Z');
+  assert.equal(tl.marker_hard, 3); assert.equal(tl.buiten_brain, 1); assert.equal(tl.mogelijk_medisch, 2);
+  E.r.sluit();
+  // onbekende waarde = buiten (zoals sinds wv2336)
+  const S = omgeving({ markerStand: () => 'door', markerHardStand: () => 'Door ' });
+  const h2 = S.zet({ marker: 'gemarkeerd', soorten: ['brieftaal'], meta: { van: 'poli@voorbeeld.example', onderwerp: 'Verslag', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('poli@voorbeeld.example', 'Verslag', HARD_TEKST) }] });
+  await S.r.ronde();
+  assert.equal(S.db.prepare('SELECT staat FROM live_stuk WHERE stuk_id = ?').get(h2).staat, 'bewaard');
+  assert.deepEqual(S.bestanden(), []);
+  S.r.sluit();
+});
+
 test('wv2336 binnenbak: voorstel, kandidaten en reden zonder modelaanroep; keuze alleen op de actuele versie en herhaalveilig', async () => {
   const E = omgeving();
   const id = E.zet({ meta: { van: 'x@voorbeeld-energie.example', onderwerp: 'Brief', aan: ['david@voorbeeld.example'] },

@@ -92,6 +92,10 @@ const UITVOER_MAX = 5;                  // pogingen om een bestemming uit te voe
 //      vreemde persoon + medisch + een patiëntwoord, ook zonder bron.
 // Onleesbaar is nooit hard (er valt niets te wegen) en dus zacht: dat restrisico nam David met zijn antwoord (zie de Voor jou-kaart grondwet 3).
 const MARKER_STANDEN = ['schaduw', 'door'];   // schaduw = wegen en loggen, gedrag zoals vóór wv2336 (vasthouden); door = zacht gaat door, hard stil buiten
+// wv3440 (David 19-11-2026 18:18 "alles moet gewoon door!", Ja 766fbd2c): router.json marker_hard 'door' = ook een hard kenmerk gaat door
+// naar de Brain, precies als zacht (Jev, indeling, label mogelijk medisch). Elke andere waarde = buiten de Brain zoals sinds wv2336. Alleen
+// werkzaam bij marker_zacht 'door'. Een VECOZO ION-melding blijft buiten (Davids eigen keuze 16-11, wv3176).
+const MARKER_HARD_STANDEN = ['buiten', 'door'];
 const HIS_NUMMER = /\b(his|promedico)[\s-]?(pati[eë]nt[\s-]?)?(nummer|nr\.?|id)\s*[:#.]?\s*[A-Z]{0,3}[\s-]?\d{4,12}\b/i;
 const PATIENTNUMMER = /\bpati[eë]nt(en)?[\s-]?(nummer|nr\.?|id)\s*[:#.]?\s*[A-Z]{0,3}[\s-]?\d{4,12}\b/i;
 const PATIENT_BRON_DOMEIN = ['zorgmail.nl', 'promedico.nl', 'zorgdomein.nl', 'ksyos.nl', 'lifeline.nl', 'enovation.nl'];
@@ -1212,6 +1216,7 @@ function maak(o) {
   const pauze = new Map();   // stuk_id → ms van de laatste mislukte Jev- of vangnet-aanroep (niet elke ronde opnieuw)
   function liveStand() { let j = null; try { j = o.live ? o.live() : null; } catch (e) { j = null; } return isObj(j) ? j : {}; }
   function markerStand() { let v = null; try { v = o.markerStand ? o.markerStand() : null; } catch (e) { v = null; } return MARKER_STANDEN.indexOf(v) >= 0 ? v : 'schaduw'; }
+  function markerHardStand() { let v = null; try { v = o.markerHardStand ? o.markerHardStand() : null; } catch (e) { v = null; } return MARKER_HARD_STANDEN.indexOf(v) >= 0 ? v : 'buiten'; }
   function lenzenLive() { let l = null; try { l = o.lenzenLive ? o.lenzenLive() : null; } catch (e) { l = null; } return Array.isArray(l) && l.length ? l.filter(function (x) { return REGEL_LENZEN.indexOf(x) >= 0 || x === 'deadlines'; }) : LIVE_LENZEN_STANDAARD; }   // deadlines: geen regel-lens, wel live (wv1919)
   // Jev ná de marker, vóór elk model. MailMan-uitslag als die er is (alleen de mailtekst: niet bij een stuk met bijlage- of scantekst), anders de
   // n8n-webhook. Geen uitslag: wachten (pauze) tot JEV_WACHT_MS na compleet, daarna geen model en twijfel. → oordeel | 'wacht'
@@ -1482,11 +1487,12 @@ function maak(o) {
           const dkimW = s.profiel === 'mail@1' ? dkimUitslag(lt.mail && lt.mail.ar.length ? lt.mail.ar : (meta.authentication_results ? [meta.authentication_results] : []), vanAdres, { authserv: 'mx.google.com' }) : null;
           weging = markerWeging({ soorten: eigen ? eigen.soorten : [], personen: pers, teksten: wTeksten, afzender_domein: dkimW && dkimW.uitgelijnd ? domeinVan(vanAdres) : '' });
           if (ion) weging = { hard: true, waarom: weging.waarom.concat(['ion_melding']) };
-          const st = markerStand();
-          B('marker_weging', weging.hard ? 'hard' : 'zacht', null, { waarom: weging.waarom, stand: st, live: !!live });
+          const st = markerStand(), hardSt = markerHardStand();
+          B('marker_weging', weging.hard ? 'hard' : 'zacht', null, { waarom: weging.waarom, stand: st, hard_stand: hardSt, live: !!live });
           if (live && st === 'door') {
-            if (weging.hard) markerHard = true;
-            else { zachtDoor = true; B('marker_keuze', 'zacht_door', null, { door: 'router', leren: false }); }
+            // wv3440: hard gaat door zoals zacht als marker_hard 'door' staat; een ION-melding blijft altijd buiten (Davids keuze 16-11)
+            if (weging.hard && (hardSt !== 'door' || ion)) markerHard = true;
+            else { zachtDoor = true; B('marker_keuze', weging.hard ? 'hard_door' : 'zacht_door', null, { door: 'router', leren: false }); }
           }
         }
         if (marker !== 'geen' && !naKeuze && !zachtDoor) {
@@ -1605,7 +1611,7 @@ function maak(o) {
             afzender: af.knoop || null, afzender_kracht: af.kracht, afzender_kenmerken: af.kenmerken, aangeleverd_door: af.aangeleverd_door, voorgesteld_spoor: af.voorgesteld_spoor,
             dkim: dkim ? (dkim.uitgelijnd ? 'uitgelijnd' : (dkim.pass ? 'pass' : (dkim.gelezen ? 'geen_pass' : 'geen_uitslag'))) : null,
             entiteit: en.knoop || null, entiteit_kracht: en.kracht, label_route: labels, bestemmingen: bs, twijfel, regel: rg ? 'R' + rg.id + '@' + rg.versie : null, velden: vd.velden.map(function (v) { return v.veld; }), kenmerken: vd.kenmerken, geld: geldIn(tekst) };
-          if (live) { sam.live = true; sam.entiteit_bewijs = en.bewijs || (rg ? 'regel' : 'regels'); sam.jev = jv.gemeten ? (jv.boven ? 'boven' : 'onder') : 'geen_uitslag'; if (jv.overgeslagen) sam.jev_overgeslagen = jv.overgeslagen; if (schaduwLenzen.length) sam.schaduw_lenzen = schaduwLenzen.map(function (b) { return b.lens; }); if (naKeuze || zachtDoor) sam.na_keuze = true; if (zachtDoor || (naKeuze && marker !== 'geen')) sam.mogelijk_medisch = true; if (zachtDoor) sam.weging = 'zacht'; }
+          if (live) { sam.live = true; sam.entiteit_bewijs = en.bewijs || (rg ? 'regel' : 'regels'); sam.jev = jv.gemeten ? (jv.boven ? 'boven' : 'onder') : 'geen_uitslag'; if (jv.overgeslagen) sam.jev_overgeslagen = jv.overgeslagen; if (schaduwLenzen.length) sam.schaduw_lenzen = schaduwLenzen.map(function (b) { return b.lens; }); if (naKeuze || zachtDoor) sam.na_keuze = true; if (zachtDoor || (naKeuze && marker !== 'geen')) sam.mogelijk_medisch = true; if (zachtDoor) sam.weging = weging && weging.hard ? 'hard' : 'zacht'; }
           sam.label_gelijk = labels.length ? labels.indexOf(en.knoop) >= 0 : null;
           if (priveSchaduw) sam.prive_schaduw = priveSchaduw;   // wv2336: de privégrens zou dit stuk bij Privé zetten; echte uitkomst prive/zakelijk/onbekend
           bestem = bs;
