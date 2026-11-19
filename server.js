@@ -19002,6 +19002,8 @@ async function appFacturen(req, res, a, s, d, route) {
   if (req.method === 'POST' && pad === '/app/facturen/sepa-batch' && r.status === 200 && r.j && r.j.batch && r.j.bestand && !r.j.los_invoer) r.j.specificatie = facturenSpecNaBatch(fdb, rol, r.j.batch);
   // wv2465: een Tolgaarde-batch gaat meteen naar nogbetalen@ (de rij staat al op 'wacht'); het antwoord wacht er niet op
   if (req.method === 'POST' && pad === '/app/facturen/sepa-batch' && r.status === 200 && r.j && r.j.doorsturen && typeof sdPlan === 'function') sdPlan(1500);
+  // wv3372: knop Naar Cynthia / Stuur opnieuw, of "toch zelf betalen" bij een signaal: de rij staat op 'wacht' met verstuur_na = nu → meteen een ronde
+  if (req.method === 'POST' && r.status === 200 && r.j && r.j.nogbetalen && (pad === '/app/facturen/naar-cynthia' || pad === '/app/facturen/signaal') && typeof nbPlan === 'function') nbPlan(1500);
   // wv2060: na een ICS-overzicht in Uploads de kaart "ICS — transacties uploaden" bijwerken (dicht als het overzicht nu binnen is)
   if (req.method === 'POST' && pad === '/app/facturen/upload' && r.status === 200 && r.j && r.j.soort === 'creditcard') facturenMaandspecKaartPlan(1500);
   res._app.reden = 'facturen ' + (r.reden || pad.slice('/app/facturen'.length) || '/');
@@ -30392,6 +30394,13 @@ function nbInfo() {
   } catch (e) { return { fout: String(e && e.message || e).slice(0, 80) }; }
 }
 setInterval(function () { nbTik().catch(function (e) { logError('facturen-nogbetalen', e); }); }, NB_TIK_MS).unref();
+// wv3372: één extra ronde kort na de knop Naar Cynthia (de vaste tik is 5 min); nbTik zelf kijkt naar schakelaar, venster, verzender en noodstop
+let nbPlanTimer = null;
+function nbPlan(ms) {
+  if (nbPlanTimer) return;
+  nbPlanTimer = setTimeout(function () { nbPlanTimer = null; nbTik().catch(function (e) { logError('facturen-nogbetalen', e); }); }, ms || 1500);
+  if (nbPlanTimer.unref) nbPlanTimer.unref();
+}
 
 // Eenmalige vrijgave: kaart (machinekamer via POST /facturen/boekstuk {actie: 'kaart'}), knoproute (appVoorJouKnop, zoals potVzKnopVoor)
 async function bsKaartZet(fdb, voorbeeld) {

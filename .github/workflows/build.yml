@@ -385,6 +385,7 @@ jobs:
           t test/facturen-koerier.sh   # wv855: koerier — wachtrij, consistentiecontrole, idempotentie (antwoord verloren → één concept), postvak, uploads
           t test/facturen-direct.sh   # wv2480: per leverancier concept of direct — elke eis + terugval, dagplafond 15, versie, onzeker = nooit opnieuw
           t test/facturen-nogbetalen.sh   # wv3369: betaalverzoek naar Cynthia (nogbetalen@) — kern, M26, Bevestigen/terugdraaien, LET OP, plafond, noodstop, onzeker = nooit opnieuw
+          t test/facturen-nogbetalen-app.sh   # wv3372: fase 2 — stand op de betaallijst, knop Naar Cynthia / Stuur opnieuw (nooit na onzeker), Laat Cynthia kiezen (leert geen betaalwijze), SEPA ligt al bij Cynthia, toch zelf/terugboeking
           t test/facturen-groep.sh   # wv2661: Bevestig N zonder twijfel en Koppel N zekere — poort per factuur/voorstel op de pod, één vingerafdruk, hooguit 25
           t test/db-reserve-wacht.sh   # wv3416: stille reservewacht R230 — één box-rij per afwijking na de drempel, geen herhaling/herstelrij, staat over herstart, /health ververst zonder socket
           t test/gewenst-wacht.sh   # wv3418 (B39): bedoelde versie (APP_ROOT/gewenst van uitrol.sh) — /health gewenst naast versie, één box-rij na 10 min verschil, geen herhaling, staat over herstart
