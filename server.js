@@ -6472,23 +6472,45 @@ async function appTelegram(tekst) {
 
 // ── routes ──
 // wv2306 (MemoryLane R3, § 13.2): toonmodus per apparaat (blijft aan na herladen, slot of herstart van app en pod). Op schijf alleen
-// apparaat-id → tijd van aanzetten; geen inhoud. Onleesbaar bestand = leeg (gelogd).
+// apparaat-id → tijd van aanzetten; geen inhoud. Geen bestand = niemand in de toonmodus.
+// A04 (Fable-review 19-11, memorylane § 12): een onleesbaar of kapot bestand = DICHT: dan staat elk apparaat in de toonmodus (alleen de
+// toonroutes, geen seintjes), want een meekijker mag nooit de volle app zien. Bewust: ook David zelf zit er dan in tot het bestand hersteld is
+// (repareren of weghalen; de pod leest het elke minuut opnieuw). Zetten weigert dan (anders overschrijft één apparaat de lijst van de rest).
+// Eén logregel per poging en één box-rij per proces.
 // Pad naast de herinneringen (0700); HERINNERINGEN_DIR staat verderop in dit bestand, dus pas bij gebruik opgezocht (in een vm-knipsel zonder
 // dat deel: de app-data van de toets).
 function mlToonPad() { let d = null; try { d = HERINNERINGEN_DIR; } catch (e) { d = null; } return path.join(d || APP_DATA, 'toonmodus.json'); }
 const ML_TOON_ROUTES = [/^GET \/app\/memorylane\/(lijst|toon)$/, /^POST \/app\/memorylane\/toon$/, /^GET \/app\/memorylane\/h\/h[0-9a-f]{16}(\/fotos|\/audio\/[1-9][0-9]?)?$/,
   /^GET \/app\/memorylane\/v\/[0-9a-f-]{36}(\/[1-9][0-9]{0,2})?$/,   // wv2938: video (stand, stukken)
   /^GET \/app\/memorylane\/f\/[0-9a-f-]{36}\/(k|g)$/, /^GET \/app\/memorylane\/h\/h[0-9a-f]{16}\/gevel\/k$/, /^POST \/app\/aanwezig$/];   // wv2314: gevel
-let mlToon = null;
+let mlToon = null, mlToonKapotTot = 0, mlToonGemeld = false;
 function mlToonLees() {
   if (mlToon) return mlToon;
-  try { const j = appLeesStreng(mlToonPad(), {}); mlToon = j && typeof j.apparaten === 'object' && j.apparaten ? j : { apparaten: {} }; }
-  catch (e) { logError('ml-toon', e); mlToon = { apparaten: {} }; }
+  if (Date.now() < mlToonKapotTot) return null;
+  try {
+    const j = appLeesStreng(mlToonPad(), null);
+    if (j === null) mlToon = { apparaten: {} };
+    else if (j.apparaten && typeof j.apparaten === 'object' && !Array.isArray(j.apparaten)) mlToon = j;
+    else throw new Error('kapot: toonmodus.json zonder lijst apparaten');
+  } catch (e) {
+    mlToonKapotTot = Date.now() + 60000;
+    const waarom = e && e.name === 'SyntaxError' ? 'geen geldige JSON' : String(e && e.message || e).slice(0, 80);   // nooit een stuk van de inhoud
+    logError('ml-toon', new Error('toonmodus.json onleesbaar, toonmodus overal aan: ' + waarom));
+    if (!mlToonGemeld) { mlToonGemeld = true; try {
+      ovisBoxRij('\n## [direct] ' + new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16) + ' — MemoryLane-toonmodus overal aan: toonmodus.json onleesbaar (automatisch, A04)\n' +
+        '- status: open\n- van: pod server.js (mlToonLees, hooguit 1× per proces)\n- gemeten: ' + waarom.replace(/[\r\n`]/g, ' ') + '\n' +
+        '- gevolg als er niets gebeurt: elk apparaat (ook Davids eigen app) ziet alleen MemoryLane en krijgt geen seintjes.\n' +
+        '- voorstel: toonmodus.json naast de herinneringen herstellen of weghalen (weg = niemand in de toonmodus); de pod leest het binnen een minuut opnieuw.\n');
+    } catch (e2) { /* alleen een seintje */ } }
+    return null;
+  }
   return mlToon;
 }
-function mlToonAan(id) { return !!id && Object.prototype.hasOwnProperty.call(mlToonLees().apparaten, id); }
+function mlToonAan(id) { const t = mlToonLees(); return !!id && (t === null || Object.prototype.hasOwnProperty.call(t.apparaten, id)); }
 function mlToonZet(id, aan) {
-  const t = mlToonLees(), oud = Object.assign({}, t.apparaten);
+  const t = mlToonLees();
+  if (t === null) return false;   // A04: kapot bestand = niet overschrijven (de route geeft 503)
+  const oud = Object.assign({}, t.apparaten);
   if (aan) t.apparaten[id] = new Date().toISOString(); else delete t.apparaten[id];
   try { appSchrijfJson(mlToonPad(), t); return true; } catch (e) { logError('ml-toon', e); t.apparaten = oud; return false; }
 }
@@ -23268,13 +23290,22 @@ const memorylanePubliek = (function () {
   if (!memorylaneDelen || !fs.existsSync(p) || (!SERVER_ECHT && !process.env.ML_PUB_TOETS)) return null;
   const cfUrl = function (rest) { return SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + rest; };
   const r2Url = function (key) { if (!/^[fg]\/(familie|shizzle)\/[A-Za-z0-9_\/-]{1,80}$/.test(key)) throw new Error('r2-sleutel'); return cfUrl('/r2/buckets/' + ML_PUB_R2 + '/objects/' + key); };
+  const d1Met = async function (batch, tok) {
+    const r = await smalCf(cfUrl('/d1/database/' + ML_PUB_D1 + '/query'), { batch: batch }, tok);
+    const ok = r.status === 200 && r.j && r.j.success === true && Array.isArray(r.j.result) && r.j.result.length === batch.length && r.j.result.every(function (x) { return x && x.success !== false; });
+    if (!ok) throw new Error('D1 gaf HTTP ' + r.status);   // nooit sql of waarden in de fout
+    return r.j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [] }; });
+  };
   try {
     return require(p).maak({ db: intake._db, ml: memorylaneDelen, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, fout: logError, categorieen: HERINNERINGEN_MOD.CATEGORIEEN,
-      d1: async function (batch) {
-        const r = await smalCf(cfUrl('/d1/database/' + ML_PUB_D1 + '/query'), { batch: batch }, await mlPubToken());
-        const ok = r.status === 200 && r.j && r.j.success === true && Array.isArray(r.j.result) && r.j.result.length === batch.length && r.j.result.every(function (x) { return x && x.success !== false; });
-        if (!ok) throw new Error('D1 gaf HTTP ' + r.status);   // nooit sql of waarden in de fout
-        return r.j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [] }; });
+      d1: async function (batch) { return d1Met(batch, await mlPubToken()); },
+      // A08 (Fable-review 19-11): de noodstop gaat direct naar D1 en valt bij een kluisstoring terug op het pod-token (alleen deze ene
+      // schrijfactie; de tik valt bij een kluisfout nog steeds NIET terug). Een D1-fout zelf krijgt geen tweede poging met een ander token.
+      d1Nood: async function (batch) {
+        let tok;
+        try { tok = await mlPubToken(); }
+        catch (e) { if (!process.env.CLOUDFLARE_API_TOKEN) throw e; logError('mlp-noodstop', new Error('kluis onbereikbaar: noodstop via het pod-token')); tok = process.env.CLOUDFLARE_API_TOKEN; }
+        return d1Met(batch, tok);
       },
       r2: {
         put: async function (key, buf, mime) {
@@ -23415,8 +23446,11 @@ async function appMemorylane(req, res, a, s, route, d) {
       if (!memorylanePubliek) return antw('noodstop', { status: 404, body: { ok: false, fout: 'niet in deze versie van de pod' } });
       if (!d || typeof d.dicht !== 'boolean') return antw('noodstop', { status: 400, body: { ok: false, fout: 'dicht' } });
       if (!d.dicht && !naarBuiten('noodstop open')) return;
-      const st = memorylanePubliek.noodstop(d.dicht);
+      // A08: pas 'ok' als D1 de stand bevestigt (direct, buiten de tik om); anders 503 'nog niet dicht' en de tik probeert het elke minuut
+      const st = await memorylanePubliek.noodstop(d.dicht);
       setTimeout(function () { memorylanePubliekTik(); }, 0);
+      if (!st.bevestigd) return antw('noodstop', { status: 503, body: { ok: false, publiek: st,
+        fout: (d.dicht ? 'Nog niet dicht' : 'Nog niet open') + ': memorylane.socev.dev bevestigde het niet. De pod blijft het elke minuut proberen; druk gerust nog een keer.' } });
       return antw('noodstop', { status: 200, body: { ok: true, publiek: st } });
     }
     if ((m = /^POST \/app\/memorylane\/link\/(familie|vrienden)\/(aan|uit|vernieuw)$/.exec(route))) {

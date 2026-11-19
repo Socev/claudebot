@@ -117,9 +117,9 @@ function omgeving(opt) {
     try { return batch.map((q) => { const s = d1db.prepare(q.sql); return /^\s*SELECT/i.test(q.sql) ? { results: s.all(...q.params) } : (s.run(...q.params), { results: [] }); }); }
     catch (e) { st.sqlFouten = (st.sqlFouten || 0) + 1; throw new Error('D1 gaf HTTP 400'); }
   };
-  const r2 = { put: async (k, b, m) => { if (st.r2Uit) throw new Error('R2 put HTTP 500'); st.r2.set(k, { b: Buffer.from(b), m }); },
+  const r2 = { put: async (k, b, m) => { if (st.r2Wacht) await st.r2Wacht; if (st.r2Uit) throw new Error('R2 put HTTP 500'); st.r2.set(k, { b: Buffer.from(b), m }); },
     del: async (k) => { if (st.r2Uit) throw new Error('R2 del HTTP 500'); st.r2.delete(k); } };
-  const pub = MP.maak({ db: ing._db, ml, vault, vv: VV, dir: hdir, d1, r2, categorieen: H.CATEGORIEEN, nu: () => klok.t, videoBudget: opt && opt.budget, dagPerRonde: opt && opt.dagPerRonde, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)) });
+  const pub = MP.maak({ db: ing._db, ml, vault, vv: VV, dir: hdir, d1, r2, categorieen: H.CATEGORIEEN, nu: () => klok.t, videoBudget: opt && opt.budget, dagPerRonde: opt && opt.dagPerRonde, d1Nood: opt && opt.d1Nood, noodMs: opt && opt.noodMs, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)) });
   const ins = ing._db.prepare("INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES (?, 'los', ?, ?, 0, 'actief', ?, ?)");
   function album(hid, cat, titel, wanneer) {
     const t = '2026-11-01T10:00:00Z';
@@ -133,8 +133,8 @@ function omgeving(opt) {
 }
 const A = 'h00000000000000a1', B = 'h00000000000000b2', C = 'h00000000000000c3', D = 'h00000000000000d4';
 
-async function opgezet() {
-  const o = omgeving();
+async function opgezet(opt) {
+  const o = omgeving(opt);
   o.album(A, 'shizzle', 'Shizzle: Proefweekend - 2004', '2004-05');
   o.album(B, 'gezin', 'Zomervakantie 2015 - Proefland', '2015-07');
   o.album(C, 'prive', 'Proefdag Privé 2012', '2012-03');
@@ -350,11 +350,11 @@ test('bezoekers alleen bij status bevestigd; noodstop naar D1; geheim of patiën
     o.zetLijst('bevestigd');
     await o.pub.tik();
     assert.strictEqual(o.rijen('bezoeker').length, 3);
-    o.pub.noodstop(true);
+    await o.pub.noodstop(true);
     await o.pub.tik();
     assert.strictEqual(o.rijen('stand').find((r) => r.sleutel === 'noodstop').waarde, '1');
     assert.ok(!JSON.parse(o.rijen('stand').find((r) => r.sleutel === 'categorieen').waarde).some((c) => c.id === 'prive'), 'geen gevoelige categorie buiten');
-    o.pub.noodstop(false); await o.pub.tik();
+    await o.pub.noodstop(false); await o.pub.tik();
     assert.strictEqual(o.rijen('stand').find((r) => r.sleutel === 'noodstop').waarde, '0');
     // titel met een geheim → dicht in elke kring
     fs.writeFileSync(path.join(o.vault, M.MAP, B + '.md'), '---\ntype: herinnering-stukken\nherinnering_id: ' + B + '\nsoort: los\ntitel: "Vakantie nepgeheim-0123456789abcdef"\ntitel_bron: david\nwanneer: "2015-07"\n---\n');
@@ -365,6 +365,62 @@ test('bezoekers alleen bij status bevestigd; noodstop naar D1; geheim of patiën
     o.pub.markeerVuil();
     const u = await o.pub.tik();
     assert.ok(u.fout && !/Vakantie|Proef/.test(u.fout));
+  } finally { o.sluit(); }
+});
+
+// A08 (Fable-review 19-11, memorylane § 1): de noodstop gaat direct naar D1, ook als de tik net loopt (en hangt); 'dicht' pas na bevestiging
+const noodD1 = (o) => (o.rijen('stand').find((r) => r.sleutel === 'noodstop') || {}).waarde;
+test('A08 noodstop tijdens een lopende (hangende) tik komt meteen in D1; de app hoort pas daarna "dicht"', async () => {
+  const o = await opgezet();
+  try {
+    let los; o.st.r2Wacht = new Promise((r) => { los = r; });
+    const t = o.pub.tik(true);   // blijft hangen op de eerste R2-upload
+    for (let i = 0; i < 100 && o.st.r2.size === 0 && !o.pub.health().laatste_ronde; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.strictEqual(noodD1(o), '0', 'vóór de noodstop open');
+    assert.deepStrictEqual(await o.pub.tik(), { bezig: true }, 'de tik loopt nog');
+    const t0 = Date.now();
+    const u = await o.pub.noodstop(true);
+    assert.ok(Date.now() - t0 < 2000, 'binnen seconden');
+    assert.strictEqual(u.bevestigd, true); assert.strictEqual(u.noodstop, true);
+    assert.strictEqual(noodD1(o), '1', 'D1 dicht terwijl de tik nog hangt');
+    los(); o.st.r2Wacht = null; await t;
+    assert.strictEqual(noodD1(o), '1', 'de tik zet hem niet terug');
+    const v = await o.pub.noodstop(false);
+    assert.strictEqual(v.bevestigd, true); assert.strictEqual(v.noodstop, false); assert.strictEqual(noodD1(o), '0');
+  } finally { o.sluit(); }
+});
+test('A08 D1 stuk of te traag = niet bevestigd: de app ziet "nog niet dicht"; de tik maakt het daarna af', async () => {
+  const o = await opgezet();
+  try {
+    await o.pub.tik(true);
+    o.st.d1Uit = true;
+    const u = await o.pub.noodstop(true);
+    assert.strictEqual(u.bevestigd, false); assert.strictEqual(u.noodstop, false, 'niet "dicht" zolang D1 het niet bevestigde'); assert.strictEqual(u.noodstop_wens, true);
+    assert.strictEqual(noodD1(o), '0');
+    assert.ok(o.fouten.some((f) => /^mlp-noodstop: D1 gaf HTTP 500$/.test(f)), 'gelogd zonder inhoud');
+    o.st.d1Uit = false; await o.pub.tik();
+    assert.strictEqual(noodD1(o), '1', 'de volgende tik zet hem alsnog dicht'); assert.strictEqual(o.pub.info().noodstop, true);
+  } finally { o.sluit(); }
+  // te traag: na noodMs 'nog niet', de schrijfactie loopt door en telt zodra hij aankomt
+  const p = await opgezet({ noodMs: 30, d1Nood: async (b) => { await new Promise((r) => setTimeout(r, 150)); return p.d1(b); } });
+  try {
+    await p.pub.tik(true);
+    const u = await p.pub.noodstop(true);
+    assert.strictEqual(u.bevestigd, false); assert.ok(p.fouten.some((f) => /^mlp-noodstop: D1 gaf geen antwoord binnen/.test(f)));
+    await new Promise((r) => setTimeout(r, 250));
+    assert.strictEqual(noodD1(p), '1'); assert.strictEqual(p.pub.info().noodstop, true);
+  } finally { p.sluit(); }
+});
+test('A08 dicht en open vlak na elkaar: de laatste keuze wint in D1, ook als de eerste schrijfactie trager is (één rij)', async () => {
+  let n = 0;
+  const o = await opgezet({ d1Nood: async (b) => { const traag = n++ === 0; await new Promise((r) => setTimeout(r, traag ? 120 : 5)); return o.d1(b); } });
+  try {
+    await o.pub.tik(true);
+    n = 0;
+    const a = o.pub.noodstop(false), b = o.pub.noodstop(true);   // open (traag) en meteen weer dicht
+    const [ua, ub] = await Promise.all([a, b]);
+    assert.strictEqual(noodD1(o), '1', 'D1 eindigt dicht'); assert.strictEqual(ub.bevestigd, true); assert.strictEqual(ua.bevestigd, false, 'open is ingehaald');
+    assert.strictEqual(o.pub.info().noodstop, true);
   } finally { o.sluit(); }
 });
 

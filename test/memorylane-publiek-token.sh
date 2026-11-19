@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Toetst wv2738: memorylanePubliek (server.js) schrijft D1/R2 met het eigen token uit kluisrij cloudflare_memorylane, valt alleen bij een
-# ontbrekende rij terug op CLOUDFLARE_API_TOKEN, en valt bij een kluisfout NIET terug. Knipsel-toets in een vm; verzonnen tokens.
+# ontbrekende rij terug op CLOUDFLARE_API_TOKEN, en valt bij een kluisfout NIET terug. A08: alleen de noodstop (d1Nood) valt bij een kluisfout
+# wel terug op het pod-token. Knipsel-toets in een vm; verzonnen tokens.
 # Gebruik: bash test/memorylane-publiek-token.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -12,6 +13,9 @@ const c = s.indexOf('async function smalCf(url, body, tok)'), d = s.indexOf('\n}
 assert(a > 0 && b > a && c > 0 && d > c, 'knipsels niet gevonden');
 assert(/const ML_KLUIS = \{[^}]*cloudflare_memorylane: true/.test(s), 'ML_KLUIS mist cloudflare_memorylane');
 assert(/memorylanePubliek\.health\(\), \{ token: mlPubTokenSoort \}/.test(s), '/health mist token');
+// A08: de route wacht op de bevestiging van D1 en geeft anders 503 'nog niet dicht'
+assert(/const st = await memorylanePubliek\.noodstop\(d\.dicht\);/.test(s), 'noodstoproute wacht niet op D1');
+assert(/if \(!st\.bevestigd\) return antw\('noodstop', \{ status: 503,/.test(s), 'noodstoproute zegt ok zonder bevestiging');
 const code = s.slice(c, d) + '\n' + s.slice(a, b) + '\nthis.__o = __o; this.soort = function () { return mlPubTokenSoort; };';
 let ok = 0;
 async function geval(naam, kluis, env, verwacht) {
@@ -29,18 +33,25 @@ async function geval(naam, kluis, env, verwacht) {
   for (const [w, f] of [['d1', () => o.d1([{ sql: 'SELECT 1', params: [] }])], ['put', () => o.r2.put('f/familie/proef-1', Buffer.from('x'), 'text/plain')], ['del', () => o.r2.del('f/familie/proef-1')]]) {
     try { await f(); uit.push(w + ':ok'); } catch (e) { uit.push(w + ':' + e.message); }
   }
+  // A08: de noodstop (d1Nood) valt bij een kluisfout wél terug op het pod-token; zonder pod-token = fout (de app zegt 'nog niet dicht')
+  const n0 = gezien.length;
+  try { await o.d1Nood([{ sql: 'SELECT 1', params: [] }]); uit.push('nood:ok'); } catch (e) { uit.push('nood:' + e.message); }
+  uit.push('nood-auth:' + (gezien.length > n0 ? gezien[gezien.length - 1].auth : '-'));
+  gezien.splice(n0);
   assert.deepStrictEqual({ uit, auth: gezien.map((g) => g.auth), soort: ctx.soort() }, verwacht, naam);
   console.log('GROEN ' + naam); ok++;
 }
 (async () => {
   await geval('eigen token uit de kluis', 'EIGEN-verzonnen', { CLOUDFLARE_API_TOKEN: 'POD-verzonnen' },
-    { uit: ['d1:ok', 'put:ok', 'del:ok'], auth: ['Bearer EIGEN-verzonnen', 'Bearer EIGEN-verzonnen', 'Bearer EIGEN-verzonnen'], soort: 'eigen' });
+    { uit: ['d1:ok', 'put:ok', 'del:ok', 'nood:ok', 'nood-auth:Bearer EIGEN-verzonnen'], auth: ['Bearer EIGEN-verzonnen', 'Bearer EIGEN-verzonnen', 'Bearer EIGEN-verzonnen'], soort: 'eigen' });
   await geval('rij ontbreekt: terugval pod-token', null, { CLOUDFLARE_API_TOKEN: 'POD-verzonnen' },
-    { uit: ['d1:ok', 'put:ok', 'del:ok'], auth: ['Bearer POD-verzonnen', 'Bearer POD-verzonnen', 'Bearer POD-verzonnen'], soort: 'pod' });
+    { uit: ['d1:ok', 'put:ok', 'del:ok', 'nood:ok', 'nood-auth:Bearer POD-verzonnen'], auth: ['Bearer POD-verzonnen', 'Bearer POD-verzonnen', 'Bearer POD-verzonnen'], soort: 'pod' });
   await geval('geen van beide: geen verzoek', null, {},
-    { uit: ['d1:geen Cloudflare-sleutel', 'put:geen Cloudflare-sleutel', 'del:geen Cloudflare-sleutel'], auth: [], soort: null });
-  await geval('kluisfout: geen terugval', new Error('kluis gaf HTTP 500'), { CLOUDFLARE_API_TOKEN: 'POD-verzonnen' },
-    { uit: ['d1:kluis gaf HTTP 500', 'put:kluis gaf HTTP 500', 'del:kluis gaf HTTP 500'], auth: [], soort: null });
-  console.log('GROEN ' + ok + '/4');
+    { uit: ['d1:geen Cloudflare-sleutel', 'put:geen Cloudflare-sleutel', 'del:geen Cloudflare-sleutel', 'nood:geen Cloudflare-sleutel', 'nood-auth:-'], auth: [], soort: null });
+  await geval('kluisfout: tik valt niet terug, noodstop wel (pod-token)', new Error('kluis gaf HTTP 500'), { CLOUDFLARE_API_TOKEN: 'POD-verzonnen' },
+    { uit: ['d1:kluis gaf HTTP 500', 'put:kluis gaf HTTP 500', 'del:kluis gaf HTTP 500', 'nood:ok', 'nood-auth:Bearer POD-verzonnen'], auth: [], soort: null });
+  await geval('kluisfout zonder pod-token: noodstop faalt (nog niet dicht)', new Error('kluis gaf HTTP 500'), {},
+    { uit: ['d1:kluis gaf HTTP 500', 'put:kluis gaf HTTP 500', 'del:kluis gaf HTTP 500', 'nood:kluis gaf HTTP 500', 'nood-auth:-'], auth: [], soort: null });
+  console.log('GROEN ' + ok + '/5');
 })().catch((e) => { console.log('ROOD ' + e.message); process.exit(1); });
 JS

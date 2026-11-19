@@ -23,7 +23,10 @@
  *  - Dicht gaan (kring uit, gevoelig, weg): in één D1-batch eerst een blok-rij (de worker weigert meteen), dan de rijen weg; daarna de
  *    R2-objecten; het blok gaat pas weg als die allemaal weg zijn (anders herhaalt de volgende ronde).
  *  - Houdbaarheid: publicatie.geldig_tot = nu + 24 u na elke geslaagde ronde; duwt de pod een dag niet, dan zet de worker de straat dicht.
- *  - Noodstop: mlp_stand noodstop = 1 → D1 stand noodstop (de worker weigert alles). Uit mag altijd; weer open vraagt de app een vingerafdruk.
+ *  - Noodstop: mlp_stand noodstop = 1 → D1 stand noodstop (de worker weigert alles). Dicht mag altijd; weer open vraagt de app een vingerafdruk.
+ *    A08 (19-11-2026): direct naar D1 buiten de tik (o.d1Nood: valt bij een kluisstoring terug op het pod-token); de app zegt pas 'dicht' als
+ *    D1 het bevestigt (mlp_stand noodstop_d1). Lukt dat niet: 'nog niet dicht' en de tik probeert elke minuut. Uitweg als D1 of Cloudflare
+ *    zelf stuk is: het Access-beleid van memorylane.socev.dev leegmaken in het Cloudflare-dashboard (Systeemoverzicht).
  *  - Bezoekers: vaultpagina MemoryLane-bezoekers.md; alleen bij frontmatter status "bevestigd". In D1 alleen sha256(adres) → persoon-id + kring.
  *  - Logboek: de worker schrijft persoon-id, kring, huis-id en tijd (geen IP, geen inhoud); de pod haalt het op (mlp_log, met de hid) en wist het buiten.
  * PRIVACY. Nooit titels, namen of adressen in logs, fouten of /health: alleen aantallen.
@@ -35,7 +38,7 @@ const crypto = require('crypto');
 const MLD = require('./memorylane-delen.js');
 
 const KRINGEN = MLD.PKRINGEN;
-const RONDE_MS = 15 * 60000, LOG_MS = 5 * 60000, HOUDBAAR_MS = 24 * 3600000;
+const RONDE_MS = 15 * 60000, LOG_MS = 5 * 60000, HOUDBAAR_MS = 24 * 3600000, NOOD_MS = 25000;   // A08: zo lang wacht de app op D1
 const FOTO_BUDGET_MS = 40000, FOTO_TEGELIJK = 3, BATCH = 40, FOTO_MAX_TIK = 40;
 // wv2943: bezoekers krijgen hooguit de eerste 300 foto's van een album (de pod geeft Davids app er nu 500); de opnamedag komt per ronde
 // bij hooguit DAG_PER_RONDE al geplaatste foto's (± 23.000 bij de invoering: 50 D1-aanroepen per kring per ronde, binnen de Cloudflare-rem)
@@ -455,11 +458,7 @@ function maak(o) {
     const uit = { op: iso(nu()) };
     try {
       await zorgSchema();
-      const nood = stand('noodstop') === '1';
-      if (stand('noodstop_d1') !== (nood ? '1' : '0')) {
-        await d1([{ sql: 'INSERT INTO stand (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde', params: ['noodstop', nood ? '1' : '0'] }]);
-        q.standZet.run('noodstop_d1', nood ? '1' : '0');
-      }
+      if (stand('noodstop_d1') !== (stand('noodstop') === '1' ? '1' : '0')) await noodNaarD1();   // A08: zelfde rij als de directe noodstop
       uit.bezoekers = await bezoekersSync();
       for (let ronde = 0; ronde < 3 && (dwing || wijziging !== gedaan || nu() - laatsteRonde >= RONDE_MS); ronde++) {
         dwing = false;
@@ -485,7 +484,33 @@ function maak(o) {
   }
 
   // ── voor de app ──
-  function noodstop(aan) { q.standZet.run('noodstop', aan ? '1' : '0'); wijziging++; return info(); }
+  // A08 (Fable-review 19-11, memorylane § 1): de noodstop gaat meteen naar D1, buiten de tik om (die kan net lopen: `if (bezig) return`, of
+  // hangen). Alle schrijvers van D1 stand.noodstop lopen achter elkaar door noodKeten en lezen de gewenste waarde pas op hun beurt, dus een
+  // oudere waarde komt nooit na een nieuwere aan. noodstop_d1 = wat D1 bevestigd heeft; alleen dat telt in de app als 'dicht'.
+  let noodKeten = Promise.resolve();
+  function noodNaarD1() {
+    const p = noodKeten.then(async () => {
+      const w = stand('noodstop') === '1' ? '1' : '0';
+      await (o.d1Nood || o.d1)([{ sql: 'INSERT INTO stand (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde', params: ['noodstop', w] }]);
+      q.standZet.run('noodstop_d1', w);
+      return w;
+    });
+    noodKeten = p.catch(() => {});
+    return p;
+  }
+  // → info() + bevestigd (true = D1 heeft precies deze stand). Niet bevestigd: de wens blijft lokaal staan en de tik probeert het elke minuut.
+  async function noodstop(aan) {
+    const w = aan ? '1' : '0';
+    q.standZet.run('noodstop', w); wijziging++;
+    let bevestigd = false, klok = null;
+    try {
+      const op = await Promise.race([noodNaarD1(), new Promise((r) => { klok = setTimeout(() => r('tijd'), o.noodMs || NOOD_MS); })]);
+      bevestigd = op === w && stand('noodstop') === w;
+      if (op === 'tijd') fout('mlp-noodstop', new Error('D1 gaf geen antwoord binnen ' + Math.round((o.noodMs || NOOD_MS) / 1000) + ' s'));
+    } catch (e) { fout('mlp-noodstop', e); }
+    finally { if (klok) clearTimeout(klok); }
+    return Object.assign(info(), { bevestigd });
+  }
   function info() {
     const b = MLD.bezoekersLees(o.vault, o.vv);
     const per = q.logPer.all();
@@ -498,7 +523,8 @@ function maak(o) {
     // bezoekers met hun laatste bezoek (namen uit de vaultlijst, alleen voor Davids app)
     const bezoekers = b.rijen.map((r) => { const pid = persoonVan(r.naam), l = per.filter((x) => x.pid === pid);
       return { naam: r.naam, kring: r.kring, adressen: r.mails.length, bezoeken: l.reduce((n, x) => n + x.n, 0), laatst: l.reduce((m, x) => (x.laatst > m ? x.laatst : m), '') || null }; });
-    return { lijst_status: b.status, bezoekers, noodstop: stand('noodstop') === '1', laatste_ronde: stand('laatste_ronde'), wachtrij: wachtrij.length, tel, foto_tel: fotoTel,
+    // A08: noodstop = wat D1 bevestigde (de app zegt pas 'dicht' als het buiten dicht is); noodstop_wens = Davids laatste keuze op de pod
+    return { lijst_status: b.status, bezoekers, noodstop: stand('noodstop_d1') === '1', noodstop_wens: stand('noodstop') === '1', laatste_ronde: stand('laatste_ronde'), wachtrij: wachtrij.length, tel, foto_tel: fotoTel,
       laatst: laatst ? { op: laatst.op, fout: laatst.fout || null } : null };
   }
   // per hid: wie (naam) hem bekeek en wanneer het laatst (alleen Davids app)
@@ -508,7 +534,7 @@ function maak(o) {
     for (const r of q.logHid.all()) { (uit[r.hid] = uit[r.hid] || []).push({ naam: naam.get(r.pid) || 'onbekend', laatst: r.laatst }); }
     return uit;
   }
-  function health() { return { aan: true, laatste_ronde: stand('laatste_ronde'), wachtrij: wachtrij.length, bezoekers: Number(stand('bezoekers_n') || 0), noodstop: stand('noodstop') === '1', fout: laatst && laatst.fout ? true : false, fotos: fotoTel,
+  function health() { return { aan: true, laatste_ronde: stand('laatste_ronde'), wachtrij: wachtrij.length, bezoekers: Number(stand('bezoekers_n') || 0), noodstop: stand('noodstop') === '1', noodstop_buiten: stand('noodstop_d1') === '1', fout: laatst && laatst.fout ? true : false, fotos: fotoTel,
     video: Object.assign({ kan: videoKan, mb_buiten: Math.round(videoBytes() / 1e6), budget_mb: Math.round(budget / 1e6) }, videoTel) }; }
   function markeerVuil() { wijziging++; }
   return { tik, info, gezien, noodstop, health, markeerVuil, _pidVan: pidVan, _fidVan: fidVan, _persoonVan: persoonVan, _dichtItem: dichtItem, _wens: () => wens };
