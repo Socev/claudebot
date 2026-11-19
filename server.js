@@ -2714,6 +2714,31 @@ function gewenstInfo() {   // /health: null = geen gewenst-bestand
 }
 /* gewenstWacht:einde */
 if (SERVER_ECHT === true) { setTimeout(gewenstWacht, 30 * 1000).unref(); setInterval(gewenstWacht, 60 * 1000).unref(); }
+// wv3458 (19-11-2026): uitrollen worden gebundeld. Een klus meldt zijn SHA aan in /opt/data/uitrol-bundel/rij (uitrol-na-agents.sh);
+// één losgemaakte bundelaar rolt hooguit eens per uur (of meteen bij 0 agents) de nieuwste aangemelde commit uit. Een containerherstart
+// doodt die bundelaar; de rij blijft staan. Daarom: rij niet leeg → `uitrol-na-agents.sh --hervat` (neemt het slot alleen als er
+// geen bundelaar loopt; anders meteen exit 0). Kleine omgeving: geen sleutels en geen UITROL_-instellingen van server.js mee.
+// Alleen de echte release op de primaire kant. test/uitrol-bundel-hervat.sh knipt het blok tussen de markers.
+/* uitrolBundelHervat:begin */
+const UITROL_BUNDEL_RIJ = process.env.UITROL_BUNDEL_RIJ || '/opt/data/uitrol-bundel/rij';
+const UITROL_BUNDEL_SCRIPT = process.env.UITROL_BUNDEL_SCRIPT || '/opt/data/mk-scripts/uitrol-na-agents.sh';
+function uitrolBundelHervat() {
+  try {
+    if (SERVER_ECHT !== true) return false;
+    try { if (!rolPrimair()) return false; } catch (e) { return false; }
+    let n = 0;
+    try { n = fs.readdirSync(UITROL_BUNDEL_RIJ).filter(function (f) { return /^[0-9a-f]{40}$/.test(f); }).length; } catch (e) { return false; }
+    if (!n || !fs.existsSync(UITROL_BUNDEL_SCRIPT)) return false;
+    const env = { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME || '/opt/data', LANG: process.env.LANG || 'C.UTF-8' };
+    if (process.env.TZ) env.TZ = process.env.TZ;
+    const c = spawn('bash', [UITROL_BUNDEL_SCRIPT, '--hervat'], { cwd: '/', env: env, detached: true, stdio: 'ignore' });
+    c.on('error', function (e) { logError('uitrol-bundel-hervat', e); });
+    c.unref();
+    return true;
+  } catch (e) { logError('uitrol-bundel-hervat', e); return false; }
+}
+/* uitrolBundelHervat:einde */
+if (SERVER_ECHT === true) { setTimeout(uitrolBundelHervat, 2 * 60 * 1000).unref(); setInterval(uitrolBundelHervat, 5 * 60 * 1000).unref(); }
 // wv716 (ontwerp wv703 D, Fable: bouwen): geheugen en lusvertraging van dit proces op /health.proces (niet op /health/publiek).
 // monitorEventLoopDelay is één libuv-timer (20 ms) met een histogram; elke volle minuut uitlezen en leegmaken, en de waarden van
 // die minuut tonen. Meet een sluipende JS-lus of GC-druk (de minuut vóór een syscall-hang blijft leeg); de bewaker neemt het
