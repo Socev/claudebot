@@ -377,4 +377,12 @@ function advies(A, a, o) {
     uitleg: 'Vaste rekenregels met hun invoer en bron; Socev voert niets uit. Fiscaal en hypotheek: altijd laten toetsen door je adviseur. Volgorde: risico en deadline, dan zekerheid, dan euro\'s per jaar.' };
 }
 
-module.exports = { advies: advies, REGELS: REGELS, TARIEVEN: TARIEVEN, START_MIN: START_MIN, START_MAX: START_MAX, leesEnergie: leesEnergie, leesLijfrente: leesLijfrente, leesBox3: leesBox3 };
+// B14: de jaartabellen met hun 'geldig tot' (31-12 van het laatste jaar), voor de tarieven-wachter (tarieven-wachter.js). Spaarrente en
+// depositogarantie hebben geen jaar en tellen niet mee.
+const TARIEF_GROEPEN = { box2: 'box 2-tarief en schijfgrens (financien-overzicht.js TARIEVEN.box2)', aftrek: 'maximaal aftrektarief eigen woning (advies A1)',
+  excessief_lenen: 'grens excessief lenen (advies A7)', gebruikelijk_loon: 'normbedrag gebruikelijk loon (advies A7)' };
+function geldigheid(T) {
+  const t = T || TARIEVEN, gt = require('./financien-overzicht.js').geldigTot;
+  return Object.keys(TARIEF_GROEPEN).map(function (g) { const x = gt(t[g]); return x ? Object.assign({ groep: g, naam: TARIEF_GROEPEN[g] }, x) : null; }).filter(Boolean);
+}
+module.exports = { advies: advies, geldigheid: geldigheid, TARIEF_GROEPEN: TARIEF_GROEPEN, REGELS: REGELS, TARIEVEN: TARIEVEN, START_MIN: START_MIN, START_MAX: START_MAX, leesEnergie: leesEnergie, leesLijfrente: leesLijfrente, leesBox3: leesBox3 };

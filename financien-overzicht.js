@@ -422,9 +422,23 @@ function vermogenPunt(o) {
       woz: woz ? { jaar: woz.jaar, waarde: woz.woz } : null,
       niet_meegeteld: sal ? [{ tekst: 'Kinderrekeningen', bedrag: r2(liq.kinderen) }, { tekst: 'Gambia-rekeningen (geoormerkt)', bedrag: r2(liq.geoormerkt) }] : [],
       uitleg: 'Woning op de laatste taxatie (een schatting, geen marktwaarde van nu); de Holding telt hier niet mee.' },
-    holding: hold ? { eigen_vermogen: hold.eigen_vermogen, jaar: hold.jaar, liquide: hold.liquide, bron: hold.bron, box2: box2(hold.eigen_vermogen, Math.max(hold.jaar + 1, Number(nu.slice(0, 4)))),
-      rc_schuld: rc, uitleg: 'Boekwaarde uit de laatste jaarrekening, geen marktwaarde. "Na box 2" is indicatief: alles in één jaar uitgekeerd, één aanmerkelijk belang, zonder partnerverdeling; laat het toetsen door je adviseur. Je schuld aan de Holding (rekening-courant, woninglening) zit in dit eigen vermogen als vordering.' } : null,
+    holding: hold ? holdingBlok(hold, rc, nu) : null,
   };
+}
+// B14 (Fable-review financien 19-11 § stand 9-11 bevinding 3): ontbreekt het box 2-tarief voor het jaar, dan geen indicatie (ontwerp § 3.5),
+// maar niet meer stil: box2_ontbreekt en een zin in de uitleg (die toont de App al). De tarieven-wachter (tarieven-wachter.js) zet vier weken
+// voor het laatste tariefjaar afloopt één rij in de werkvoorraad om het volgende jaar in te vullen.
+function holdingBlok(hold, rc, nu) {
+  const jaar = Math.max(hold.jaar + 1, Number(String(nu).slice(0, 4))), b2 = box2(hold.eigen_vermogen, jaar);
+  const mist = !b2 && hold.eigen_vermogen > 0 && !TARIEVEN.box2[jaar];
+  return { eigen_vermogen: hold.eigen_vermogen, jaar: hold.jaar, liquide: hold.liquide, bron: hold.bron, box2: b2, box2_ontbreekt: mist ? jaar : null,
+    rc_schuld: rc, uitleg: 'Boekwaarde uit de laatste jaarrekening, geen marktwaarde. "Na box 2" is indicatief: alles in één jaar uitgekeerd, één aanmerkelijk belang, zonder partnerverdeling; laat het toetsen door je adviseur. Je schuld aan de Holding (rekening-courant, woninglening) zit in dit eigen vermogen als vordering.' +
+      (mist ? ' Geen indicatie "na box 2": het box 2-tarief voor ' + jaar + ' staat nog niet in de App (het komt erin zodra het officieel vaststaat).' : '') };
+}
+// B14: tot wanneer de tarieven gelden = 31-12 van het laatste jaar in de tabel (een jaartal als sleutel); geen jaar = null
+function geldigTot(tabel) {
+  const j = Object.keys(tabel || {}).filter(function (k) { return /^\d{4}$/.test(k); }).map(Number);
+  return j.length ? { laatste_jaar: Math.max.apply(null, j), geldig_tot: Math.max.apply(null, j) + '-12-31' } : null;
 }
 
 // ── stap 2: het overzicht ──
@@ -689,5 +703,5 @@ function regelsHerleiden(a) {
   return uit;
 }
 
-module.exports = { liquide: liquide, vermogenPunt: vermogenPunt, leesWoning: leesWoning, leesHolding: leesHolding, groepVan: groepVan, boekingen: boekingen, regelsHerleiden: regelsHerleiden, tpWoorden: tpWoorden, zonderIban: zonderIban, overzicht: overzicht, boekingenLijst: boekingenLijst, stroomZet: stroomZet, indelen: indelen, sleutelVan: sleutelVan, idVan: idVan, box2: box2,
+module.exports = { liquide: liquide, vermogenPunt: vermogenPunt, leesWoning: leesWoning, leesHolding: leesHolding, groepVan: groepVan, boekingen: boekingen, regelsHerleiden: regelsHerleiden, tpWoorden: tpWoorden, zonderIban: zonderIban, overzicht: overzicht, boekingenLijst: boekingenLijst, stroomZet: stroomZet, indelen: indelen, sleutelVan: sleutelVan, idVan: idVan, box2: box2, geldigTot: geldigTot, holdingBlok: holdingBlok,
   GEMENGD: GEMENGD, ENTITEIT: ENTITEIT, STROMEN: STROMEN, SUBSOORT: SUBSOORT, TARIEVEN: TARIEVEN, EENMALIG_GRENS: EENMALIG_GRENS, EIGENAREN: EIGENAREN, uitgaven: uitgaven, mediaan: mediaan };

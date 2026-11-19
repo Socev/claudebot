@@ -138,8 +138,24 @@ if (O) {
   const pv = o.vermogen.prive;
   toets('vermogen privé = 12.000 + 520.000 (laatste taxatie, na verbouwing) − 300.000 − 20.000 − 10.000; WOZ apart', pv.bedrag === 202000 && pv.delen.length === 5 && pv.woz.waarde === 600000 &&
     pv.delen[1].op === '2023-02-02', pv);
-  toets('Holding apart: eigen vermogen laatste jaar, box 2 indicatief (24,5 % tot de grens, 31 % erboven), nooit in privé', o.vermogen.holding.eigen_vermogen === 400000 && o.vermogen.holding.jaar === 2025 &&
-    o.vermogen.holding.box2.belasting === Math.round(68843 * 0.245 + (400000 - 68843) * 0.31) && pv.delen.every((x) => !/holding.*eigen vermogen/i.test(x.tekst)) && pv.bedrag !== pv.bedrag + 400000, o.vermogen.holding);
+  // B14: het box 2-jaar is max(jaarrekening + 1, dit jaar); de toets loopt ook na 1-1-2027 (TOETS_NU), dan met het tarief van dat jaar of zonder
+  const ho = o.vermogen.holding, J2 = Math.max(2026, Number(vandaag.slice(0, 4))), T2 = O.TARIEVEN.box2[J2];
+  toets('Holding apart: eigen vermogen laatste jaar, box 2 indicatief (laag tarief tot de grens, hoog erboven), nooit in privé', ho.eigen_vermogen === 400000 && ho.jaar === 2025 &&
+    (T2 ? ho.box2 && ho.box2.jaar === J2 && ho.box2.belasting === Math.round(Math.min(400000, T2.grens) * T2.laag + Math.max(0, 400000 - T2.grens) * T2.hoog) && ho.box2_ontbreekt === null
+      : ho.box2 === null && ho.box2_ontbreekt === J2) && pv.delen.every((x) => !/holding.*eigen vermogen/i.test(x.tekst)) && pv.bedrag !== pv.bedrag + 400000, ho);
+  // B14: ontbreekt het tarief, dan zegt de uitleg dat (de App toont de uitleg); is het er, dan geen zin over een ontbrekend tarief
+  toets('B14: box 2-tarief ontbreekt voor het jaar → geen indicatie, wel box2_ontbreekt en een zin in de uitleg (niet stil)', T2 ? !/staat nog niet in de App/.test(ho.uitleg)
+    : new RegExp('box 2-tarief voor ' + J2 + ' staat nog niet in de App').test(ho.uitleg), ho.uitleg);
+  const hold9 = { eigen_vermogen: 400000, jaar: 2025, liquide: 1, bron: 'x' };
+  const zonder = O.holdingBlok(hold9, null, '2031-01-10');
+  toets('B14: nepdatum januari 2031 (geen tarief): box2 null, box2_ontbreekt 2031, uitleg noemt 2031', zonder.box2 === null && zonder.box2_ontbreekt === 2031 && /voor 2031 staat nog niet/.test(zonder.uitleg), zonder);
+  O.TARIEVEN.box2[2031] = { grens: 70000, laag: 0.2, hoog: 0.3 };
+  const met = O.holdingBlok(hold9, null, '2031-01-10');
+  delete O.TARIEVEN.box2[2031];
+  toets('B14: nepdatum januari 2031 mét tarief in de tabel: de indicatie staat er weer (rekent met dat jaar)', met.box2 && met.box2.jaar === 2031 && met.box2.belasting === Math.round(70000 * 0.2 + 330000 * 0.3) && met.box2_ontbreekt === null &&
+    !/staat nog niet/.test(met.uitleg), met);
+  toets('B14: geldigTot = 31-12 van het laatste jaar in de tabel; zonder jaar null', JSON.stringify(O.geldigTot({ 2025: {}, 2026: {}, bron: 'x' })) === JSON.stringify({ laatste_jaar: 2026, geldig_tot: '2026-12-31' }) &&
+    O.geldigTot({ bron: 'x' }) === null && O.geldigTot(null) === null, null);
   toets('box 2 zonder tarief voor het jaar: geen indicatie', O.box2(100000, 2031) === null && O.box2(100000, 2026).netto === 100000 - Math.round(68843 * 0.245 + 31157 * 0.31), null);
   const nv = O.overzicht(A, a, { nu: vandaag, vanaf: mOud, saldi: null, vault: VAULT, fv: Object.assign({}, FV, { lees: () => ({ fouten: ['hypotheek'] }) }) });
   toets('zonder saldi en hypotheek: vermogen privé leeg met wat ontbreekt; vrij zegt dat de aflossing niet te lezen is', nv.vermogen.prive.bedrag === null && nv.vermogen.prive.ontbreekt.indexOf('hypotheek') >= 0 &&
@@ -221,8 +237,16 @@ if (O) {
     const sig = [{ soort: 'duurder', titel: 'Proefstroom', per_jaar: 120, zin: 'Proefstroom kost nu meer.' }, { soort: 'nieuw', titel: 'Kleintje', per_jaar: 24, zin: 'Kleintje is nieuw.' },
       { soort: 'weg', titel: 'Weg', zin: 'weg' }, { soort: 'dubbel', titel: 'Zonder bedrag', zin: 'dubbel' }];
     const vaste = { rijen: [{ naam: 'Proefverzekering', ritme: 'maand', categorie: 'verzekeringen', per_maand: 30 }, { naam: 'Jaarpolis', ritme: 'jaar', categorie: 'verzekeringen', per_maand: 10 }] };
-    const adv = (x) => D.advies(A, a, Object.assign({ ov: o, saldi: saldi, signalen: sig, vaste: vaste, nu: vandaag, vault: VAULT, fv: FV2 }, x || {}));
+    // B14: de rekentoetsen lopen ook na 1-1-2027 (TOETS_NU): het aftrektarief van 2026 (37,56 %) als proeftarief voor dit jaar
+    const JA = Number(vandaag.slice(0, 4)), TT = Object.assign({}, D.TARIEVEN, { aftrek: Object.assign({}, D.TARIEVEN.aftrek, { [JA]: 37.56 }) });
+    const adv = (x) => D.advies(A, a, Object.assign({ ov: o, saldi: saldi, signalen: sig, vaste: vaste, nu: vandaag, vault: VAULT, fv: FV2, tarieven: TT }, x || {}));
     const r = adv(), by = (re) => r.adviezen.filter((x) => re.test(x.regel));
+    const r31 = D.advies(A, a, { ov: o, saldi: saldi, signalen: sig, vaste: vaste, nu: '2031-01-10', vault: VAULT, fv: FV2 });
+    toets('B14: zonder aftrektarief voor het jaar (echte tabel, januari 2031) geen A1, wel in ontbreekt (de App toont "Niet getoond")', !r31.adviezen.some((x) => x.regel === 'A1') &&
+      r31.ontbreekt.some((x) => x.regel === 'A1' && /geen aftrektarief voor 2031/.test(x.waarom)), r31.ontbreekt);
+    toets('B14: geldigheid noemt box 2, aftrek, excessief lenen en gebruikelijk loon met 31-12 van hun laatste jaar', ['box2', 'aftrek', 'excessief_lenen', 'gebruikelijk_loon'].every((g) => {
+      const x = D.geldigheid().find((y) => y.groep === g), js = Object.keys(D.TARIEVEN[g]).filter((k) => /^\d{4}$/.test(k)).map(Number);
+      return x && x.laatste_jaar === Math.max(...js) && x.geldig_tot === Math.max(...js) + '-12-31' && x.naam; }), D.geldigheid());
     toets('advies: zonder fout; elk advies met bedrag reproduceerbaar uit zijn invoer (REGELS.reken)', !r.fouten.length && r.adviezen.length >= 5 && r.adviezen.filter((x) => x.euro_jaar != null || x.band).every((x) => {
       const u = D.REGELS[x.regel].reken(x.invoer, D.TARIEVEN); return u && u.euro_jaar === x.euro_jaar && JSON.stringify(u.band) === JSON.stringify(x.band); }), r);
     const a1 = by(/A1/)[0];

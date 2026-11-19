@@ -337,6 +337,8 @@ jobs:
           TOETS_NU=2026-11-03T10:00:00Z t test/financien-app.sh   # wv1044: ook op dag 1–9 van een maand (een toetspost in de toekomst schoof de peildag op)
           t test/financien-overzicht.sh   # wv2596: Financiën 8+ — stromen (som = boekingen), kerngetallen reproduceerbaar, privé en Holding apart, keuze per tegenpartij
           TOETS_NU=2026-01-02T10:00:00Z t test/financien-overzicht.sh   # wv2596: ook op 2 januari (jaarwissel in het venster)
+          TOETS_NU=2027-01-10T10:00:00Z t test/financien-overzicht.sh   # B14: ook na het laatste tariefjaar (geen indicatie, wel de zin; A1 in ontbreekt)
+          t test/tarieven-wachter.sh   # B14: vier weken voor de tarieven aflopen precies één werkvoorraadrij; fout één keer in de box
           t test/financien-bijsturen.sh   # wv2700: Financiën › Uitgaven "Zelf bij te sturen" (boodschappen, uit eten, stroom, streaming, abonnementen)
           t test/financien-plan.sh   # wv2706: Financiën — potjes, rekeningen afvinken, geldstroom (ideeën uit Sure)
           t test/financien-vermogen.sh   # wv2716: Financiën — vermogensverloop per maand (dagketen, trappen, onvolledig, laatste maand = punt; kruisproef)
