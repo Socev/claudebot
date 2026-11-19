@@ -50,7 +50,15 @@
 // 14. VERSTUREN_NOGBETALEN: schakelaar (false = 409). Eigen plafond NOGBETALEN_PER_DAG per Amsterdamse dag (elke geslaagde toets telt), los
 //     van het gedeelde pot/sepa/boekstuk-plafond (Fable-review verzenden 9); elke dag 07:00–23:00 Amsterdam. Nul of één bijlage (pdf of
 //     xml; nul = factuur met een kenmerk van patiëntgegevens, grondwet 3).
-// 14b. Bron nogbetalen_proef: dezelfde regels, maar alleen naar AAN_PROEF (de testalias), hooguit PROEF_PER_DAG per dag (eigen teller).
+// 14b. Bron nogbetalen_proef: dezelfde regels, maar alleen naar AAN_PROEF (de testalias), hooguit PROEF_PER_DAG per dag (eigen teller). Met
+//     ref NH + 16 hex gelden de regels van de herinnering (15), maar wel naar de testalias en met "PROEF - " voor het onderwerp.
+//
+// Bron nogbetalen_herinnering (wv3455, David Ja 19-11-2026 22:46 met verse vingerafdruk, vraag-id f88d6554; registerrij nogbetalen-herinnering):
+// één herinnering per praktijk per dag "NOG NIET BETAALD GEZIEN - <praktijk> - N facturen" naar Cynthia.
+// 15. Zelfde eigen verzendgeheim; alleen modus versturen; alleen AAN_NOGBETALEN; geen cc, bcc, draad, antwoordadres of token; afzender alleen
+//     POT_VAN. ref = NH + 16 hex en staat als "Kenmerk <ref>" in het bericht; onderwerp begint met "NOG NIET BETAALD GEZIEN - ", ≤ 200;
+//     bericht ≤ 3000; geen bijlage. VERSTUREN_NB_HERINNERING: schakelaar (false = 409). Werkdag 08:00–17:00 Amsterdam (zelfde feestdagen als
+//     bron pot). Eigen plafond NB_HERINNERING_PER_DAG per Amsterdamse dag (elke geslaagde toets telt), los van de andere tellers.
 // Haalt nooit iets op. Fout → { toets: { fout, code, status } } zonder binaire data; de workflow antwoordt dan met die status.
 // De pod vergelijkt vóór elke batch de sha256 van déze code met de waarde in zijn image (Fable #10): wie hier iets wijzigt, zet de
 // automatische verzending stil tot het image mee is gewijzigd.
@@ -84,6 +92,8 @@ const AAN_NOGBETALEN = ['nogbetalen@huisartsentolgaarde.nl'];   // wv3369: allee
 const VERSTUREN_NOGBETALEN = true;
 const NOGBETALEN_PER_DAG = 30;   // de pod houdt 25 aan (registerrij nogbetalen-cynthia)
 const NOGBETALEN_MAX = 20 * 1024 * 1024;
+const VERSTUREN_NB_HERINNERING = true;   // wv3455
+const NB_HERINNERING_PER_DAG = 5;   // registerrij nogbetalen-herinnering: hooguit 5 per dag
 
 function zichtbaar(ch) {
   const c = ch.codePointAt(0);
@@ -97,7 +107,7 @@ function saneer(n) {
   if (s.length > 120) { const i = s.lastIndexOf('.'); const ext = i > 0 ? s.slice(i) : ''; s = s.slice(0, 120 - ext.length).trim() + ext; }
   return s;
 }
-function venster(ms) {   // werkdag 09:00–12:00 Europe/Amsterdam; zelfde feestdagen als de pod (pot-verzend.js)
+function werkdagUur(ms) {   // { werkdag, uur } in Europe/Amsterdam; zelfde feestdagen als de pod (pot-verzend.js)
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' })
     .formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
   const ymd = `${p.year}-${p.month}-${p.day}`, uur = Number(p.hour), j = Number(p.year);
@@ -108,8 +118,10 @@ function venster(ms) {   // werkdag 09:00–12:00 Europe/Amsterdam; zelfde feest
   const kd = new Date(Date.UTC(j, 3, 27)).getUTCDay() === 0 ? '04-26' : '04-27';
   const feest = ['01-01', kd, '05-05', '12-25', '12-26'].includes(ymd.slice(5)) || [-2, 0, 1, 39, 49, 50].some((x) => plus(pasen, x) === ymd);
   const wd = new Date(ymd + 'T12:00:00Z').getUTCDay();
-  return wd !== 0 && wd !== 6 && !feest && uur >= 9 && uur < 12;
+  return { werkdag: wd !== 0 && wd !== 6 && !feest, uur };
 }
+function venster(ms) { const w = werkdagUur(ms); return w.werkdag && w.uur >= 9 && w.uur < 12; }   // werkdag 09:00–12:00
+function vensterHerinnering(ms) { const w = werkdagUur(ms); return w.werkdag && w.uur >= 8 && w.uur < 17; }   // wv3455: werkdag 08:00–17:00
 function dagAms(ms) { return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms)); }
 function vensterSepa(ms) {   // elke dag 07:00–23:00 Europe/Amsterdam (stille uren)
   const uur = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(new Date(ms)));
@@ -133,10 +145,11 @@ let aan = String(body.aan ?? '').trim().toLowerCase(), cc = '', van = '', ref = 
 if (!['concept', 'versturen'].includes(modus)) zet('modus is concept of versturen', 'modus', 400);
 // 5. geheimen: versturen alleen met het eigen geheim; het eigen geheim alleen voor versturen (pot, boekstuk, sepa, facturen, facturen_proef)
 const eigen = bron === 'pot' || bron === 'boekstuk' || bron === 'sepa';
-const nb = bron === 'nogbetalen' || bron === 'nogbetalen_proef';   // wv3369
+const nb = bron === 'nogbetalen' || bron === 'nogbetalen_proef' || bron === 'nogbetalen_herinnering';   // wv3369, wv3455
+const nh = bron === 'nogbetalen_herinnering' || (bron === 'nogbetalen_proef' && /^NH/.test(String(body.ref ?? '')));   // wv3455: herinnering
 const direct = (bron === 'facturen' || bron === 'facturen_proef') && modus === 'versturen';   // wv2480
 if (modus === 'versturen' && !versturenGeheim) zet('versturen kan alleen met het eigen verzendgeheim', 'secret', 401);
-if (versturenGeheim && !((eigen || direct || nb) && modus === 'versturen')) zet('dit geheim opent alleen versturen voor bron pot, boekstuk, sepa, facturen, facturen_proef, nogbetalen en nogbetalen_proef', 'secret', 403);
+if (versturenGeheim && !((eigen || direct || nb) && modus === 'versturen')) zet('dit geheim opent alleen versturen voor bron pot, boekstuk, sepa, facturen, facturen_proef, nogbetalen, nogbetalen_proef en nogbetalen_herinnering', 'secret', 403);
 
 if (bron === 'pot') {
   if (modus !== 'versturen') zet('bron pot kent alleen versturen', 'modus', 400);
@@ -197,19 +210,21 @@ if (bron === 'pot') {
   if (!versturenGeheim) zet('versturen kan alleen met het eigen verzendgeheim', 'secret', 401);
   const lijst = adressen(body.aan);
   if (lijst.length !== 1) zet('precies één adres in aan', 'aan', 400);
-  if (lijst.some((a) => !(bron === 'nogbetalen' ? AAN_NOGBETALEN : AAN_PROEF).includes(a))) zet('adres staat niet op de witte lijst van de verzender (' + bron + ')', 'witte_lijst', 403);
+  if (lijst.some((a) => !(bron === 'nogbetalen_proef' ? AAN_PROEF : AAN_NOGBETALEN).includes(a))) zet('adres staat niet op de witte lijst van de verzender (' + bron + ')', 'witte_lijst', 403);
   if (!VERSTUREN_NOGBETALEN) zet('versturen staat uit voor bron nogbetalen', 'versturen_uit', 409);
-  if (!vensterSepa(nu)) zet('bron ' + bron + ' verstuurt alleen tussen 07:00 en 23:00', 'buiten_venster', 409);
+  if (nh && !VERSTUREN_NB_HERINNERING) zet('versturen staat uit voor de herinnering', 'versturen_uit', 409);
+  if (nh ? !vensterHerinnering(nu) : !vensterSepa(nu)) zet('bron ' + bron + (nh ? ' (herinnering) verstuurt alleen op werkdagen tussen 08:00 en 17:00' : ' verstuurt alleen tussen 07:00 en 23:00'), 'buiten_venster', 409);
   for (const k of ['cc', 'bcc', 'thread_id', 'antwoord_aan', 'token']) if (body[k] !== undefined && body[k] !== '') zet('veld ' + k + ' is hier niet toegestaan', 'veld', 400);
   van = String(body.van ?? '');
   if (!POT_VAN.includes(van)) zet('afzender niet toegestaan', 'van', 400);
   ref = String(body.ref ?? '');
-  if (!/^NB[0-9a-f]{16}$/.test(ref)) zet('ref ontbreekt of is ongeldig', 'ref', 400);
-  if (!(onderwerp.indexOf('NOG BETALEN - ') === 0 || onderwerp.indexOf('PROEF - NOG BETALEN - ') === 0) || onderwerp.length > 200 || /[\r\n]/.test(onderwerp)) zet('onderwerp past niet bij een betaalverzoek', 'onderwerp', 400);
-  if (typeof body.bericht !== 'string' || !body.bericht || body.bericht.length > 2000) zet('bericht ontbreekt of is te lang', 'bericht', 400);
+  if (!(nh ? /^NH[0-9a-f]{16}$/ : /^NB[0-9a-f]{16}$/).test(ref)) zet('ref ontbreekt of is ongeldig', 'ref', 400);
+  const kop = nh ? 'NOG NIET BETAALD GEZIEN - ' : 'NOG BETALEN - ';
+  if (!(onderwerp.indexOf(kop) === 0 || onderwerp.indexOf('PROEF - ' + kop) === 0) || onderwerp.length > 200 || /[\r\n]/.test(onderwerp)) zet('onderwerp past niet bij een ' + (nh ? 'herinnering' : 'betaalverzoek'), 'onderwerp', 400);
+  if (typeof body.bericht !== 'string' || !body.bericht || body.bericht.length > (nh ? 3000 : 2000)) zet('bericht ontbreekt of is te lang', 'bericht', 400);
   else if (body.bericht.indexOf('Kenmerk ' + ref) < 0) zet('bericht noemt het kenmerk niet', 'bericht', 400);
   if (body.bijlagen !== undefined && body.bijlagen !== '') zet('bijlagen alleen als bestanden (multipart)', 'bijlagen', 400);
-  if (bestanden.length > 1) zet('hooguit één bijlage: de factuur', 'bijlagen', 400);
+  if (bestanden.length > (nh ? 0 : 1)) zet(nh ? 'een herinnering heeft geen bijlage' : 'hooguit één bijlage: de factuur', 'bijlagen', 400);
   aan = lijst.join(', ');
 } else if (bron === 'facturen' || bron === 'facturen_proef') {
   token = String(body.token ?? '');
@@ -260,6 +275,7 @@ sd.direct = (Array.isArray(sd.direct) ? sd.direct : []).filter((t) => nu - t < 2
 sd.proef = (Array.isArray(sd.proef) ? sd.proef : []).filter((t) => nu - t < 2 * 86400000);
 sd.nogbetalen = (Array.isArray(sd.nogbetalen) ? sd.nogbetalen : []).filter((t) => nu - t < 2 * 86400000);   // wv3369: per Amsterdamse dag
 sd.nbproef = (Array.isArray(sd.nbproef) ? sd.nbproef : []).filter((t) => nu - t < 2 * 86400000);
+sd.nbherinnering = (Array.isArray(sd.nbherinnering) ? sd.nbherinnering : []).filter((t) => nu - t < 2 * 86400000);   // wv3455: per Amsterdamse dag
 const vandaag = dagAms(nu);
 if (!fout && bron === 'facturen' && direct && sd.direct.filter((t) => dagAms(t) === vandaag).length >= FACTUREN_PER_DAG) zet('plafond van ' + FACTUREN_PER_DAG + ' directe verzendingen per dag bereikt', 'direct_plafond', 409);
 if (!fout && bron === 'facturen' && direct) sd.direct.push(nu);
@@ -269,6 +285,8 @@ if (!fout && bron === 'nogbetalen' && sd.nogbetalen.filter((t) => dagAms(t) === 
 if (!fout && bron === 'nogbetalen') sd.nogbetalen.push(nu);
 if (!fout && bron === 'nogbetalen_proef' && sd.nbproef.filter((t) => dagAms(t) === vandaag).length >= PROEF_PER_DAG) zet('plafond van ' + PROEF_PER_DAG + ' proeven per dag bereikt', 'plafond', 429);
 if (!fout && bron === 'nogbetalen_proef') sd.nbproef.push(nu);
+if (!fout && bron === 'nogbetalen_herinnering' && sd.nbherinnering.filter((t) => dagAms(t) === vandaag).length >= NB_HERINNERING_PER_DAG) zet('plafond van ' + NB_HERINNERING_PER_DAG + ' herinneringen per dag bereikt', 'plafond', 429);
+if (!fout && bron === 'nogbetalen_herinnering') sd.nbherinnering.push(nu);
 if (!fout && !eigen && !direct && !nb && sd.gemaakt.length >= PER_UUR) zet('plafond van ' + PER_UUR + ' per uur bereikt', 'plafond', 429);
 if (!fout && eigen && sd.pot.length >= POT_PER_DAG) zet('plafond van ' + POT_PER_DAG + ' verstuurde nota\'s per 24 uur bereikt', 'plafond', 429);
 if (!fout && bron === 'boekstuk' && sd.boekstuk.length >= BOEKSTUK_PER_30D) zet('plafond van ' + BOEKSTUK_PER_30D + ' boekstukken per 30 dagen bereikt', 'plafond', 429);

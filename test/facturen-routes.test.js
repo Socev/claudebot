@@ -2727,9 +2727,12 @@ test('wv2465: server.js — na een batch plannen, verzender per bron (sepa eist 
   assert.match(src, /pad === '\/app\/facturen\/sepa-batch' && r\.status === 200 && r\.j && r\.j\.doorsturen && typeof sdPlan === 'function'\) sdPlan\(1500\)/);
   assert.match(src, /sepaDoor: typeof sdModus === 'function' \? sdModus\(\) : null/);
   assert.match(src, /potVzVerstuur\(\{ bron: 'sepa', modus: 'versturen', ref: v\.ref, aan: facturenRoutes\.sepaDoor\.AAN,/);
-  const i = src.indexOf('function potVzToetsenMag('), mag = new Function('POT_VZ_TOETSEN_SHA', 'POT_VZ_TOETSEN_BOEKSTUK', 'POT_VZ_TOETSEN_SHA_VORIG', 'POT_VZ_TOETSEN_SEPA', 'POT_VZ_TOETSEN_DIRECT',
-    src.slice(i, src.indexOf('\n}\n', i) + 3) + 'return potVzToetsenMag;')('nieuw', 'boekstuk', 'vorig', 'sepa6edf', 'direct509');
-  assert.deepEqual(['sepa', 'boekstuk', 'pot', 'facturen', 'nogbetalen'].map((b) => mag('nieuw', b)), [true, true, true, true, true]);
+  const i = src.indexOf('function potVzToetsenMag('), mag = new Function('POT_VZ_TOETSEN_SHA', 'POT_VZ_TOETSEN_BOEKSTUK', 'POT_VZ_TOETSEN_SHA_VORIG', 'POT_VZ_TOETSEN_SEPA', 'POT_VZ_TOETSEN_DIRECT', 'POT_VZ_TOETSEN_NOGBETALEN',
+    src.slice(i, src.indexOf('\n}\n', i) + 3) + 'return potVzToetsenMag;')('nieuw', 'boekstuk', 'vorig', 'sepa6edf', 'direct509', 'nb0c41');
+  assert.deepEqual(['sepa', 'boekstuk', 'pot', 'facturen', 'nogbetalen', 'nogbetalen_herinnering'].map((b) => mag('nieuw', b)), [true, true, true, true, true, true]);
+  // wv3455: de Toetsen van wv3369 (nogbetalen) dient alles behalve de herinnering; de herinnering alleen met de nieuwste
+  assert.deepEqual(['sepa', 'boekstuk', 'pot', 'facturen', 'nogbetalen', 'nogbetalen_herinnering'].map((b) => mag('nb0c41', b)), [true, true, true, true, true, false]);
+  assert.deepEqual(['direct509', 'sepa6edf', 'boekstuk', 'vorig', 'anders'].map((t) => mag(t, 'nogbetalen_herinnering')), [false, false, false, false, false]);
   // wv3369: de Toetsen van wv2480 (direct) dient alles behalve nogbetalen; nogbetalen alleen met de nieuwste
   assert.deepEqual(['sepa', 'boekstuk', 'pot', 'facturen', 'nogbetalen'].map((b) => mag('direct509', b)), [true, true, true, true, false]);
   assert.deepEqual(['sepa6edf', 'boekstuk', 'vorig', 'anders'].map((t) => mag(t, 'nogbetalen')), [false, false, false, false]);

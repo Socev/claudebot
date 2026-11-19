@@ -1352,24 +1352,53 @@ function betaalVerwachting(f, o) {
   }
   let iban = null, tot = null;
   if (batch) { iban = ibanNorm(batch.eigen_iban); tot = dek.get(iban) || null; }
-  else {
-    // los ingevoerd: van welke rekening weten we niet. Alle actieve rekeningen van de entiteit (boeking in de 60 dagen vóór de verwachte
-    // datum) moeten voorbij de termijn zijn; de minst bijgewerkte telt (diffreview ZOU 2: anders vals alarm als de andere rekening verser is)
-    let geenGegevens = false;
-    for (const r of (o && o.rekeningen) || []) {
-      if (r.entiteit !== f.entiteit || controleVan(r) !== 1) continue;
-      const i = ibanNorm(r.iban), d = dek.get(i);
-      // natoets ZOU 2: actief = uitgaande betalingen in het venster (o.actief); zonder die lijst: een boeking in de 60 dagen ervoor. Een
-      // actieve rekening zonder verse gegevens houdt "niet gezien" tegen (bank_achter), ook als een andere rekening wel vers is.
-      if (o && o.actief ? !o.actief.has(i) : (!d || dagenTussen(d, verwacht) > ACTIEF_DAGEN)) continue;
-      if (!d) { tot = null; geenGegevens = true; continue; }
-      if (!geenGegevens && (!tot || d < tot)) tot = d;
-    }
-    if (geenGegevens) tot = null;
-  }
+  // los ingevoerd: van welke rekening weten we niet → alle actieve rekeningen van de entiteit (entiteitDekking)
+  else tot = entiteitDekking(f.entiteit, verwacht, o);
   const termijn_tot = plusWerkdagen(verwacht, BETAAL_TERMIJN);
   const stand = tot && tot >= termijn_tot ? 'niet_gezien' : o && isIsoDatum(o.vandaag) && o.vandaag > termijn_tot ? 'bank_achter' : 'wacht';
   return { verwacht, termijn_tot, iban, dekking: tot, batch: batch ? batch.pmtinf_id : null, batch_regels: batch ? batch.regels.length : 0, stand };
+}
+/*
+ * Tot welke dag de bank van een entiteit bijgewerkt is: alle actieve rekeningen van de entiteit (controle 1) moeten voorbij zijn; de minst
+ * bijgewerkte telt (diffreview wv2057 ZOU 2: anders vals alarm als de andere rekening verser is). Actief = uitgaande betalingen in het venster
+ * (o.actief); zonder die lijst: een boeking in de 60 dagen vóór `verwacht` (natoets ZOU 2). Een actieve rekening zonder gegevens → null (bank
+ * achter), ook als een andere rekening wel vers is. Geen actieve rekening → null. Gedeeld door betaalVerwachting en herinneringStand (wv3455).
+ */
+function entiteitDekking(entiteit, verwacht, o) {
+  const dek = (o && o.dekking) || new Map();
+  let tot = null;
+  for (const r of (o && o.rekeningen) || []) {
+    if (r.entiteit !== entiteit || controleVan(r) !== 1) continue;
+    const i = ibanNorm(r.iban), d = dek.get(i);
+    if (o && o.actief ? !o.actief.has(i) : (!d || dagenTussen(d, verwacht) > ACTIEF_DAGEN)) continue;
+    if (!d) return null;
+    if (!tot || d < tot) tot = d;
+  }
+  return tot;
+}
+/*
+ * wv3455 (fase 3 nogbetalen, ontwerp § 4; registerrij nogbetalen-herinnering): wanneer is een betaalverzoek aan Cynthia te laat? De latere van
+ * (uiterste betaaldatum) en (dag van het betaalverzoek + 5 werkdagen); zonder uiterste datum: dag van het betaalverzoek + 14 dagen; daarna nog
+ * BETAAL_TERMIJN (2) bankwerkdagen. → 'JJJJ-MM-DD' of null.
+ */
+const HERINNER_NA_MAIL_WERKDAGEN = 5, HERINNER_ZONDER_VERVAL_DAGEN = 14;
+function herinneringTermijn(vervaldatum, mailDag) {
+  if (!isIsoDatum(mailDag)) return null;
+  const na = plusWerkdagen(mailDag, HERINNER_NA_MAIL_WERKDAGEN);
+  const basis = isIsoDatum(vervaldatum) ? (vervaldatum > na ? vervaldatum : na) : plusDagen(mailDag, HERINNER_ZONDER_VERVAL_DAGEN);
+  return plusWerkdagen(basis, BETAAL_TERMIJN);
+}
+/*
+ * x = { entiteit, termijn }, o = { dekking, actief, rekeningen, vandaag } (zoals betaalVerwachting). → { stand, dekking }:
+ *   'wacht' (termijn nog niet voorbij), 'te_laat' (alle actieve rekeningen van de entiteit zijn bijgewerkt tot ná de termijn en de factuur staat
+ *   nog open), 'bank_achter' (termijn voorbij, maar een actieve rekening is nog niet zo ver, of de entiteit heeft geen actieve rekening).
+ * Bank achter = nooit een herinnering (registerrij: "alleen als de bank van die praktijk is bijgewerkt tot na de termijn").
+ */
+function herinneringStand(x, o) {
+  if (!x || !isIsoDatum(x.termijn) || !o || !isIsoDatum(o.vandaag)) return { stand: 'wacht', dekking: null };
+  const tot = entiteitDekking(x.entiteit, x.termijn, o);
+  if (!(o.vandaag > x.termijn)) return { stand: 'wacht', dekking: tot };
+  return { stand: tot && tot > x.termijn ? 'te_laat' : 'bank_achter', dekking: tot };
 }
 function dekkingVan(transacties) {
   const m = new Map();
@@ -2044,7 +2073,7 @@ module.exports = {
   formaatPast, mt940Dag, ingTaalKop, ingTaalTekst, FORMAAT_FAMILIE, FORMAAT_NAAM,
   // controle
   uitzonderingVoor, uitzonderingPast, INGEBOUWD_GEEN_SIGNAAL, oranjePatroon, categorieVoorstel, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
-  plusWerkdagen, betaalVerwachting, dekkingVan, eigenBetaling, BETAAL_TERMIJN, betaalMeldingTekst, eurTekst,
+  plusWerkdagen, betaalVerwachting, entiteitDekking, herinneringTermijn, herinneringStand, dekkingVan, eigenBetaling, BETAAL_TERMIJN, betaalMeldingTekst, eurTekst,
   // signalen
   maakSignaal, signaalSleutel, afhandelSignaal, terugvraagTekst, bandTekst, signaalUitleg,
   // uitleg (wv1317)
