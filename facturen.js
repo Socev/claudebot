@@ -1935,9 +1935,12 @@ function nbFeiten(fdb, f, nu, rijId) {
  * wv3372: "toch zelf betalen" na een verwachte incasso, of een teruggeboekte betaling, ná het laatste Bevestigen (audit van de signaalknop of de
  * bankronde) → 'incasso' | 'teruggeboekt' | null. De laatste telt.
  */
+function nbTochGebeurtenis(fdb, f) {
+  return fdb.db.prepare("SELECT wat, wanneer FROM audit WHERE object_soort = 'factuur' AND object_id = ? AND wat IN ('betaalspoor_toch_zelf_betalen','betaalspoor_teruggeboekt') " +
+    'AND wanneer >= ? ORDER BY wanneer DESC, id DESC LIMIT 1').get(f.id, String(f.bevestigd_op || '')) || null;
+}
 function nbToch(fdb, f) {
-  const a = fdb.db.prepare("SELECT wat FROM audit WHERE object_soort = 'factuur' AND object_id = ? AND wat IN ('betaalspoor_toch_zelf_betalen','betaalspoor_teruggeboekt') " +
-    'AND wanneer >= ? ORDER BY wanneer DESC, id DESC LIMIT 1').get(f.id, String(f.bevestigd_op || ''));
+  const a = nbTochGebeurtenis(fdb, f);
   return !a ? null : a.wat === 'betaalspoor_teruggeboekt' ? 'teruggeboekt' : 'incasso';
 }
 // Ging deze factuur eerder (een andere rij) al naar Cynthia? → { op, zeker } | null (verstuurd = zeker, onzeker = misschien)
@@ -2019,8 +2022,12 @@ function nbTochZelf(fdb, r, factuurId, nu, o) {
   const f = D.factuurVoorKern(fdb, factuurId);
   if (!f || f.betaalspoor !== 'te_betalen' || nbNiet(fdb, f)) return null;
   if (fdb.db.prepare("SELECT 1 FROM betaal_verzending WHERE factuur = ? AND status IN ('wacht','verzenden') LIMIT 1").get(f.id)) return null;
-  const l = fdb.db.prepare('SELECT status FROM betaal_verzending WHERE factuur = ? ORDER BY aangemaakt_op DESC, volgnummer DESC LIMIT 1').get(f.id);
+  const l = fdb.db.prepare('SELECT status, aangemaakt_op FROM betaal_verzending WHERE factuur = ? ORDER BY aangemaakt_op DESC, volgnummer DESC LIMIT 1').get(f.id);
   if (l && l.status === 'onzeker') return null;
+  // Codex-review MOET 1: hooguit één betaalverzoek per terugboeking of keuze "toch zelf". Er moet een spoorwissel (audit) zijn die nieuwer is dan
+  // de laatste rij; een tweede signaal over dezelfde terugboeking (spoor stond al op te_betalen, geen nieuwe audit) maakt dus geen tweede mail.
+  const g = nbTochGebeurtenis(fdb, f);
+  if (!g || (l && String(l.aangemaakt_op) >= String(g.wanneer))) return null;
   const wanneer = nuIso(nu);
   const x = nbReserveer(fdb, r, f.id, 'toch_zelf', wanneer, nu, wanneer);
   return x.niet ? null : x;
