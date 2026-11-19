@@ -7,7 +7,7 @@ f=0
 C=$(grep -vE '^\s*(\*|//)' mail-app.js)
 if echo "$C" | grep -nE "require\(|\bfetch\s*\(|process\.|console\.|\beval\(|writeFile|appendFile|createWriteStream"; then echo "ROOD  mail-app.js: eigen I/O, require of console (alles hoort via io)"; f=1; else echo "GROEN mail-app.js zonder eigen I/O"; fi
 grep -q "route === 'POST /app/mail/lijst' || route === 'POST /app/mail/gesprek' || route === 'POST /app/mail/bijlage' || route === 'POST /app/mail/todo' || route === 'POST /app/mail/todo/voorstel' || route === 'POST /app/mail/naar' || route === 'POST /app/mail/wijzig' || route === 'POST /app/mail/buiten' || route === 'POST /app/mail/buiten/klaar') return typeof appMailApp === 'function'" server.js || { echo "ROOD  server.js: routes niet gekoppeld"; f=1; }
-grep -q "if (appAfscherm(a)) return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'mail-app afgeschermd');" server.js || { echo "ROOD  server.js: afgeschermd apparaat ziet privépost"; f=1; }
+! grep -q "Privépost is op dit apparaat afgeschermd" server.js || { echo "ROOD  server.js: privépost nog afgeschermd per apparaat (wv3446: weg)"; f=1; }
 grep -q "if (soort !== 'lijst' || d.eerste !== true || d.q || d.pagina) res._app.stil = true;" server.js || { echo "ROOD  server.js: auditregel per lijst"; f=1; }
 grep -q "(d.q ? ' zoek' : '')" server.js || { echo "ROOD  server.js: reden zonder zoekvraag niet meer zo"; f=1; }
 if awk '/^async function appMailApp/,/^}/' server.js | grep -qE "reden = .*d\.q[^ ?]|reden = .*onderwerp|reden = .*titel"; then echo "ROOD  server.js: zoekvraag, onderwerp of titel in de logreden"; f=1; fi

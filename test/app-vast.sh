@@ -48,13 +48,11 @@ for (const d of [{ actie: 'weg', scherm: 'a' }, { actie: 'zet', scherm: 'Facture
 }
 r = L.pas([], { actie: 'zet', scherm: 'brain', focus: 'pagina:12', naam: 'Geheime pagina' }, false);
 toets('8 alleen scherm en focus komen in de lijst (geen naam)', r.ok && JSON.stringify(r.lijst) === '[{"scherm":"brain","focus":"pagina:12"}]', r);
-r = L.pas([{ scherm: 'facturen' }], { actie: 'zet', scherm: 'praktijken' }, true);
-toets('9 vaste plek: vastzetten geweigerd (403)', !r.ok && r.status === 403, r);
-r = L.pas([{ scherm: 'facturen' }], { actie: 'los', scherm: 'facturen' }, true);
-toets('9b vaste plek: losmaken mag', r.ok && r.veranderd && r.lijst.length === 0);
-const alle = [{ scherm: 'facturen' }, { scherm: 'financien' }, { scherm: 'gezondheid' }, { scherm: 'pot-afschriften' }, { scherm: 'brain', focus: 'pagina:1' }, { scherm: 'bestanden' }];
-toets('10 vaste plek: geen privé-App, geen subkaart', JSON.stringify(L.voorApparaat(alle, true, PRIVE)) === '[{"scherm":"facturen"},{"scherm":"bestanden"}]');
-toets('10b meereizend: alles', L.voorApparaat(alle, false, PRIVE).length === 6);
+r = L.pas([{ scherm: 'facturen' }], { actie: 'zet', scherm: 'praktijken' });
+toets('9 wv3446: vastzetten zonder apparaatonderscheid', r.ok && r.veranderd && r.lijst.length === 2, r);
+r = L.pas([{ scherm: 'facturen' }], { actie: 'los', scherm: 'facturen' });
+toets('9b losmaken', r.ok && r.veranderd && r.lijst.length === 0);
+toets('10 wv3446: geen voorApparaat-filter meer in app-vast.js', typeof L.voorApparaat === 'undefined');
 
 // ── server.js: appVastRoute in een eigen context ──
 const src = fs.readFileSync('server.js', 'utf8');
@@ -62,7 +60,7 @@ const W = fs.mkdtempSync(path.join(os.tmpdir(), 'appvast-'));
 const VAST = path.join(W, 'vast.json');
 const a0 = src.indexOf('let appVastMod = null;'), b0 = src.indexOf('// ── einde socev-app poort', a0);
 toets('11 blok gevonden', a0 > 0 && b0 > a0);
-const p0 = src.indexOf('const APP_PRIVE_MODULES'), p1 = src.indexOf('\n', src.indexOf('function appPriveDicht', p0));
+const p0 = src.indexOf('const APP_PRIVE_MODULES'), p1 = src.indexOf('\n', p0);
 function lees(f, leeg) { let t; try { t = fs.readFileSync(f, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return leeg; throw e; } return JSON.parse(t); }
 function schrijf(f, d) { schrijfTel++; fs.writeFileSync(f, JSON.stringify(d)); }
 let schrijfTel = 0, antw = [], flog = [];
@@ -71,7 +69,7 @@ function maakCtx(metModule) {
     logError: (w) => flog.push(w), console: console, appLeesStreng: lees, appSchrijfJson: schrijf, Date: Date, String: String, JSON: JSON,
     appStuur: (res, st, o) => antw.push({ st, o }), appWeiger: (res, st, f, reden) => { res._app.reden = reden; antw.push({ st, o: { ok: false, fout: f } }); } };
   vm.createContext(ctx);
-  vm.runInContext(src.slice(p0, p1) + '\n' + src.slice(a0, b0) + '\nthis.appVastRoute = appVastRoute; this.appPriveDicht = appPriveDicht;', ctx);
+  vm.runInContext(src.slice(p0, p1) + '\n' + src.slice(a0, b0) + '\nthis.appVastRoute = appVastRoute;', ctx);
   return ctx;
 }
 const C = maakCtx(true);
@@ -92,7 +90,7 @@ toets('14 nog eens vastzetten: 200, niet opnieuw geschreven', antw[0].st === 200
 antw = []; rs = res();
 C.appVastRoute({ method: 'GET' }, rs, P, {});
 // wv1901 (David 28-10: "op ALLE pc's toegang tot ALLES"): de werk-pc ziet dezelfde lijst en mag vastzetten (onder het invoerslot)
-toets('15 wv1901: werk-pc ziet de hele lijst (ook de privé-App), vaste_plek false', antw[0].o.vast.map((x) => x.scherm).join() === 'facturen,bestanden,financien' && antw[0].o.vaste_plek === false, antw[0]);
+toets('15 wv1901: werk-pc ziet de hele lijst (ook de privé-App), geen vaste_plek-vlag', antw[0].o.vast.map((x) => x.scherm).join() === 'facturen,bestanden,financien' && !antw[0].o.vaste_plek, antw[0]);
 antw = []; rs = res();
 C.appVastRoute({ method: 'POST' }, rs, P, { actie: 'zet', scherm: 'praktijken' });
 toets('16 wv1901: werk-pc zet iets vast → 200, geschreven', antw[0].st === 200 && schrijfTel === n0 + 1 && antw[0].o.vast.map((x) => x.scherm).join() === 'facturen,bestanden,financien,praktijken', antw[0]);
@@ -111,17 +109,11 @@ const C2 = maakCtx(false);
 antw = [];
 C2.appVastRoute({ method: 'GET' }, res(), A, {});
 toets('20 zonder app-vast.js → 404', antw[0].st === 404);
-toets('21 wv1901: appPriveDicht nergens dicht (schakelaar uit), ook niet op een vaste plek', !C.appPriveDicht(P, 'financien') && !C.appPriveDicht(P, 'pot-afschriften') && !C.appPriveDicht(P, 'gezondheid') && !C.appPriveDicht(P, 'mediatheek') && !C.appPriveDicht(A, 'financien') && !C.appPriveDicht(null, 'financien'));
-toets('21b wv1901: met de schakelaar aan (terugrol) weer alleen vaste plek × privé-id', (function () {
-  const c = vm.createContext({});
-  vm.runInContext(src.slice(p0, p1).replace('const APP_VAST_AFSCHERMEN = false;', 'const APP_VAST_AFSCHERMEN = true;') + '\nthis.d = appPriveDicht;', c);
-  return c.d(P, 'financien') && c.d(P, 'mediatheek') && !c.d(P, 'facturen') && !c.d(A, 'financien') && !c.d(null, 'financien');
-})());
+toets('21 wv3446: afscherm-schakelaar en appPriveDicht zijn weg uit server.js', !/APP_VAST_AFSCHERMEN|appAfscherm|appPriveDicht/.test(src));
 
 // ── bedrading ──
 toets('22 route GET en POST /app/vast in de routetabel', /route === 'GET \/app\/vast' \|\| route === 'POST \/app\/vast'\) return appVastRoute\(req, res, a, d\)/.test(src));
-toets('23 de drie vaste-plekweigeringen gebruiken de ene privélijst', /if \(appPriveDicht\(a, 'financien'\)\) return appStuur/.test(src) && /if \(appPriveDicht\(a, 'gezondheid'\)\) return appStuur/.test(src) && /if \(appPriveDicht\(a, 'pot-afschriften'\)\) return appStuur/.test(src));
-toets('23b geen losse a.soort === \'vast\'-weigering meer in die drie', !/if \(a\.soort === 'vast'\) return appStuur\(res, 200, \{ ok: true, vaste_plek: true, melding: '(Financiën|Gezondheid|POT-afschriften) staat/.test(src));
+toets('23 wv3446: Financiën, Gezondheid en POT-afschriften weigeren een vaste plek nergens meer', !/Financiën staat alleen op je telefoon|Gezondheid staat alleen op je telefoon|POT-afschriften staat alleen op je telefoon|POT-afschriften kan niet vanaf een pc/.test(src));
 toets('24 uitrol.sh: app-vast.js optioneel in de release', /^RELEASE_OPTIONEEL="[^"]*\bapp-vast\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));
 toets('26 losmaken valt niet onder het invoerslot, vastzetten wel', /if \(route === 'POST \/app\/vast' && d\.actie === 'los'\) return false;/.test(src));
 toets('25 Dockerfile: app-vast.js in release-bootstrap', /COPY app-vast\.js \/app\/release-bootstrap\/app-vast\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));

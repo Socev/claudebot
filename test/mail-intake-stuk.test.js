@@ -63,5 +63,5 @@ test('koppeling in appMailZaken: alleen het id, typeof-bewaakt, fout gelogd', fu
   assert.ok(body.includes("typeof mailIntakeStukken === 'function' && typeof mailmanIntakeOpen === 'function'"));
   assert.ok(body.includes("z.intake_stuk = st.get(String(z.draad)) || null;"));
   assert.ok(body.includes("logError('mail-zaken-intake', e)"));
-  assert.ok(body.indexOf('mail-zaken-intake') > body.indexOf("if (appAfscherm(a)) return appWeiger(res, 403"), 'na de afschermtoets');
+  assert.ok(body.indexOf('appAfscherm') < 0, 'wv3446: geen afschermtoets meer');
 });

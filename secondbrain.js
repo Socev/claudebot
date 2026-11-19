@@ -6,12 +6,13 @@
 // en zoeken. Voert idee 17b (vaultkaart) uit.
 //
 // Privacy (bouwplan § 4, Fable-review vooraf § 11):
-// - P2 op een apparaat met een vaste plek bestaan 20_Prive, 30_Conversaties, personeelsmappen, 00_Systeem/Meldingen en de 0b-werkmap
-//   niet: niet in de kaart, niet te openen, niet in zoeken, ook niet via een link of backlink (Fable M5).
+// - P2 (vervallen, wv1901/wv3446): een apparaat met een vaste plek ziet de hele vault, net als de telefoon. isVastDicht() bestaat nog
+//   alleen voor de poort van Docs › Delen (naar buiten; docs-delen.js).
 // - P3 nooit: punt-mappen, node_modules, Beveiliging, Tokens, Vault-RAG, TempFinData, Claude outputs, 0b-werkmap, Drive-conflictkopieën,
 //   symlinks, geen gewoon bestand, > 20 MB, en elke extensie die de App niet veilig toont (code, html, svg; Fable M1/M2).
 // - P4 standaard verborgen (Bronnen, raw_input, _INBOX, 30_Conversaties): alleen uit de kaart en de zoeklijst, via een link te openen.
-// - P5 elke tekst die de module teruggeeft gaat door masker() (secretpoort-patronen + kale tokens; op een vaste plek ook IBAN/BSN).
+// - P5 elke tekst die de module teruggeeft gaat door masker() (secretpoort-patronen + kale tokens). De IBAN/BSN-stand van masker()
+//   (tweede argument) gebruikt alleen nog de poort van Docs › Delen; de weergave voor David maskeert geen IBAN of BSN (wv3446).
 // - P7 openen alleen als het pad in de kaart staat (en voor dit apparaat mag), daarna realpath binnen de vault en lstat geen symlink.
 // - P8 de module geeft per verzoek een audit {domein, h} terug: een HMAC van het pad, nooit het pad zelf.
 // Alles alleen lezen; de module schrijft alleen zijn eigen kaart.json (0600) in dir, buiten de vault.
@@ -32,7 +33,7 @@ const MAX_ENT = 8, MIN_TEKST = 10, MAX_LEZEN = 300;   // wv2077: hooguit 8 entit
 const NOOIT_MAP = [];
 const VAST_DICHT_TOP = ['20_Prive', '30_Conversaties'];
 const VAST_DICHT_DEEL = ['medewerkers', 'personeel', 'gesprekken'];
-// wv1931 (Opus-review MOET 1): wat NOOIT_MAP vroeger verborg, blijft dicht als de vaste-plekschakelaar (wv1901) weer afschermt
+// VAST_DICHT_*: alleen nog voor isVastDicht(), de deelpoort van Docs › Delen (privé, gesprekken, personeel en systeem gaan niet naar buiten).
 const VAST_DICHT_PREFIX = ['00_Systeem/Meldingen/', '01_Ontwikkeling/0b-werkmap/', '00_Systeem/Beveiliging/', '01_Ontwikkeling/Beveiliging/',
   '00_Systeem/Tokens/', '00_Systeem/Vault-RAG/', 'TempFinData/', 'Claude outputs/'];
 const VERBORGEN_DEEL = ['bronnen', 'raw_input', '_inbox'];
@@ -195,7 +196,7 @@ function maak(opt) {
   // wv2607: linkdoelen per md-bestand uit de vorige bouw, op pad met mtime + ctime + grootte (ctime verandert bij elke schrijfactie en is
   // niet terug te zetten). Lezen + linksIn van ± 8.000 pagina's (± 200 MB) kostte ± 1,1 s per bouw; nu alleen gewijzigde bestanden. Het
   // oplossen (los) gebeurt elke bouw opnieuw over de hele lijst, want een nieuw of verdwenen bestand kan elk linkdoel veranderen.
-  // Geen afscherming hier: de kaart is één ongefilterde lijst en kaartVoor/mag filtert per verzoek op {vast} (zoals voorheen).
+  // Geen afscherming hier: de kaart is één ongefilterde lijst (sinds wv3446 ook per verzoek geen afscherming meer).
   let linkCache = new Map();
   // wv3003: de linkcache staat ook op schijf (linkcache.json naast kaart.json, 0600), zodat de eerste opening na een uitrol/podherstart niet
   // alle ± 8.500 pagina's opnieuw leest (gemeten 1,3 s; onder schijfdruk 15 s). Alleen pad + mtime + ctime + grootte + linkdoelen, geen
@@ -291,7 +292,7 @@ function maak(opt) {
     const sig = crypto.createHash('sha256').update(bestanden.map(function (b) { return b.p + '\u0000' + b.m + '\u0000' + b.c + '\u0000' + b.g; }).join('\u0001')).digest('hex');
     if (kaart && kaart.sig === sig && kaart.op) { kaart.op = nu(); kaart.duur = Date.now() - t0; kaart.hergebruik = (kaart.hergebruik || 0) + 1; return kaart; }
     const ctimes = bestanden.map(function (b) { const c = b.c; delete b.c; return c; });   // review wv2607 MOET 1: ctime niet op de kaart (vers() is te lezen)
-    bestanden.forEach(function (b) { b.d = domeinVan(b.p); b.v = isVerborgen(b.p); b.x = isVastDicht(b.p); b.l = []; });
+    bestanden.forEach(function (b) { b.d = domeinVan(b.p); b.v = isVerborgen(b.p); b.l = []; });
     const k = Object.assign({ bestanden: bestanden }, indexeer(bestanden));
     const nieuwCache = new Map();
     let gelezen = 0;
@@ -328,7 +329,7 @@ function maak(opt) {
   function bewaar(k) {
     try {
       const inhoud = JSON.stringify({ versie: 1, gebouwd: new Date(k.op).toISOString(), domeinen: DOMEINEN,
-        bestanden: k.bestanden.map(function (b) { return { p: b.p, d: b.d, s: b.s, m: b.m, g: b.g, v: b.v, x: b.x, l: b.l }; }) });
+        bestanden: k.bestanden.map(function (b) { return { p: b.p, d: b.d, s: b.s, m: b.m, g: b.g, v: b.v, l: b.l }; }) });
       const h = crypto.createHash('sha256').update(inhoud.replace(/"gebouwd":"[^"]*"/, '')).digest('hex');
       if (h === laatsteHash) return;
       mkdir();
@@ -384,9 +385,8 @@ function maak(opt) {
     finally { bouwBezig = null; }
   }
 
-  // Mag dit bestand op dit apparaat (P2) en in deze weergave (P4)? Op een vaste plek is verborgen ook dicht: in Bronnen-mappen staan
-  // sollicitatietranscripten en arbeidsovereenkomsten (Fable diffreview M2), en "alles" doet daar niets.
-  const mag = function (b, ctx) { return !(ctx.vast && (b.x || b.v)); };
+  // Weergave P4: verborgen (bronnen, raw_input, _INBOX, gesprekken) alleen uit kaart en zoeklijst, met "alles" erbij. Geen afscherming per
+  // apparaat meer (wv3446, David 19-11-2026: "dat soort filtering doe je niet meer. NERGENS.").
 
   function kaartVoor(ctx, alles) {
     const k = vers(false);
@@ -395,7 +395,6 @@ function maak(opt) {
     const tel = {};
     let verborgen = 0;
     k.bestanden.forEach(function (b, i) {
-      if (!mag(b, ctx)) return;
       if (!alles && b.v) { verborgen++; return; }
       naar.set(i, knopen.length);
       knopen.push(b);
@@ -410,7 +409,7 @@ function maak(opt) {
       }
     });
     knopen.forEach(function (b) { tel[b.d] = (tel[b.d] || 0) + 1; });
-    return { status: 200, j: { ok: true, bijgewerkt: new Date(k.op).toISOString(), vaste_plek: !!ctx.vast, alles: !!alles,
+    return { status: 200, j: { ok: true, bijgewerkt: new Date(k.op).toISOString(), alles: !!alles,
       domeinen: DOMEINEN.map(function (n, i) { return { i: i, naam: n, n: tel[n] || 0 }; }),
       knopen: knopen.map(function (b, li) { return [b.p, DOMEINEN.indexOf(b.d), b.s, new Date(b.m).toISOString().slice(0, 10), graad[li]]; }),
       lijnen: lijnen, verborgen_n: verborgen } };
@@ -426,7 +425,6 @@ function maak(opt) {
     if (i === undefined && nu() - laatsteDwang > 10000) { laatsteDwang = nu(); k = vers(true); i = k && k.perPad.get(sleutel(pad)); }
     if (i === undefined || !k) return null;
     const b = k.bestanden[i];
-    if (!mag(b, ctx)) return null;
     try {
       if (!echteVault) echteVault = fs.realpathSync(VAULT);
       const abs = path.join(VAULT, b.p);
@@ -452,7 +450,7 @@ function maak(opt) {
     return uit.slice(0, 30).map(function (e) {
       // naam en waarde samen door het masker (api_key: …), daarna de naam er weer af
       const kop = e.naam + ': ';
-      const m = masker(kop + e.waarde.replace(/^["']|["']$/g, ''), ctx.vast, bsnMasker);
+      const m = masker(kop + e.waarde.replace(/^["']|["']$/g, ''));
       return { naam: e.naam, waarde: (m.indexOf(kop) === 0 ? m.slice(kop.length) : m).slice(0, 500) };
     });
   }
@@ -476,17 +474,17 @@ function maak(opt) {
       const r = los(l.doel, z.b.p, l.md, k);
       if (r && r.i !== undefined) {
         const b = k.bestanden[r.i];
-        doelen[l.ruw] = mag(b, ctx) ? { p: b.p, s: b.s } : null;
+        doelen[l.ruw] = { p: b.p, s: b.s };
       } else if (r && r.k) {
-        const ks = r.k.map(function (i) { return k.bestanden[i]; }).filter(function (b) { return mag(b, ctx); });
+        const ks = r.k.map(function (i) { return k.bestanden[i]; });
         doelen[l.ruw] = ks.length === 1 ? { p: ks[0].p, s: ks[0].s } : ks.length ? { k: ks.map(function (b) { return b.p; }) } : null;
       } else doelen[l.ruw] = null;
     }
     const terug = [];
-    k.bestanden.forEach(function (b) { if (b.l.indexOf(z.i) >= 0 && mag(b, ctx)) terug.push(b.p); });
+    k.bestanden.forEach(function (b) { if (b.l.indexOf(z.i) >= 0) terug.push(b.p); });
     terug.sort(function (a, b) { return a.split('/').pop().localeCompare(b.split('/').pop(), 'nl'); });
     return { status: 200, audit: audit(z.b), j: { ok: true, pad: z.b.p, domein: z.b.d, gewijzigd: new Date(z.b.m).toISOString(),
-      grootte: z.b.g, eigenschappen: fm ? eigenschappen(fm, ctx) : [], md: masker(zonderMarkeringen(t), ctx.vast, bsnMasker), doelen: doelen, terug: terug.slice(0, 200),
+      grootte: z.b.g, eigenschappen: fm ? eigenschappen(fm, ctx) : [], md: masker(zonderMarkeringen(t)), doelen: doelen, terug: terug.slice(0, 200),
       terug_n: terug.length } };
   }
 
@@ -498,7 +496,7 @@ function maak(opt) {
     try {
       const ext = extVan(z.b.p);
       let buf = fs.readFileSync(z.abs);
-      if (z.b.s === 'tekst') buf = Buffer.from(masker(buf.toString('utf8'), ctx.vast, bsnMasker), 'utf8');
+      if (z.b.s === 'tekst') buf = Buffer.from(masker(buf.toString('utf8')), 'utf8');
       return { status: 200, audit: audit(z.b), j: { ok: true, naam: z.b.p.split('/').pop(), type: MIME[ext] || 'application/octet-stream',
         grootte: buf.length, inhoud: buf.toString('base64') } };
     } catch (e) {
@@ -544,7 +542,7 @@ function maak(opt) {
     const dl = delen(t);
     const body = dl.body.replace(/\r\n/g, '\n');
     return { status: 200, audit: audit(z.b), j: { ok: true, pad: z.b.p, versie: sha(t), bewerkbaar: !reden, reden: reden,
-      eigenschappen: dl.fmTekst ? eigenschappen(dl.fmTekst, ctx) : [], md: reden ? masker(body, ctx.vast, bsnMasker) : body } };
+      eigenschappen: dl.fmTekst ? eigenschappen(dl.fmTekst, ctx) : [], md: reden ? masker(body) : body } };
   }
   function bewaarVorige(p, t) {
     if (!opt.versieDir) return;
@@ -662,7 +660,7 @@ function maak(opt) {
   // de staart niet meer (Fable diffreview K4).
   function fragment(tekst, pos, ctx) {
     const ruimVan = Math.max(0, pos - 600);
-    const ruim = masker(tekst.slice(ruimVan, pos + 600), ctx.vast, bsnMasker);
+    const ruim = masker(tekst.slice(ruimVan, pos + 600));
     const rel = Math.min(ruim.length, pos - ruimVan);
     const van = Math.max(0, rel - 60);
     const f = ruim.slice(van, van + FRAGMENT * 2).replace(/\s+/g, ' ').trim().slice(0, FRAGMENT);
@@ -695,7 +693,7 @@ function maak(opt) {
     const keuze = zoekKeuze(d);
     if (keuze && keuze.fout) return { status: 400, j: { ok: false, fout: 'onbekende soort in het zoekfilter' } };
     const alles = !!(d && d.alles);
-    const plekGoed = function (b) { return mag(b, ctx) && (keuze ? !keuze.plek.size || keuze.plek.has(plekCode(b)) : alles || !b.v); };
+    const plekGoed = function (b) { return (keuze ? !keuze.plek.size || keuze.plek.has(plekCode(b)) : alles || !b.v); };
     const past = function (b) { return plekGoed(b) && (!keuze || !keuze.soort.size || keuze.soort.has(soortCode(b))); };
     // de vault zelf eerst, dan Bronnen en gesprekken (die zoeken nu standaard mee; zonder voorrang verdringen de dagdumps de pagina's)
     const rang = function (b) { return b.v ? 1 : 0; };
@@ -714,7 +712,7 @@ function maak(opt) {
         const b = k.bestanden[i];
         if (!past(b)) continue;   // wv1940: zelfde filter als de tekstzoek
         gezien.add(i);
-        uit.push({ pad: b.p, waar: 'betekenis', fragment: masker(String(c.text || ''), ctx.vast, bsnMasker).replace(/\s+/g, ' ').trim().slice(0, FRAGMENT) });
+        uit.push({ pad: b.p, waar: 'betekenis', fragment: masker(String(c.text || '')).replace(/\s+/g, ' ').trim().slice(0, FRAGMENT) });
         if (uit.length >= MAX_TREFFERS) break;
       }
       return { status: 200, j: { ok: true, q: q, treffers: uit, betekenis: true } };
@@ -759,7 +757,7 @@ function maak(opt) {
       if (typeof opt.entiteiten === 'function') {
         let rij = null;
         try {
-          rij = await Promise.race([Promise.resolve(opt.entiteiten(q, !!ctx.vast)), new Promise(function (ok) { setTimeout(function () { ok(null); }, 2500).unref(); })]);
+          rij = await Promise.race([Promise.resolve(opt.entiteiten(q)), new Promise(function (ok) { setTimeout(function () { ok(null); }, 2500).unref(); })]);
         } catch (e) { rij = null; }
         if (!Array.isArray(rij)) entFout = true;
         else for (const e of rij) {

@@ -135,13 +135,13 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   toets('2d privépersoon: eigen sleutel (12 hex van het pad), aliassen uit de frontmatter, voor PRIVE', sv.sleutel === B.sleutelVan('20_Prive/Shizzle/Bram Verzonnen (Vriend).md') && sv.aliassen.includes('Bram') && sv.voor.join() === 'PRIVE' && sv.prive === true && sv.register === false, sv);
   toets('2e aliassen als lijst met streepjes', pv.find((k) => k.naam === 'Tante Verzonnen').aliassen.join('|') === 'Tantje|T. Verzonnen');
   toets('3 inactieve knoop niet', !ids.includes('org:weg'));
-  toets('4 vaste-plekschakelaar: alleen organisaties aan de zakelijke kant, geen privépersonen, geen stamboom', JSON.stringify(vids.sort()) === JSON.stringify(['VB', 'org:kapot', 'org:voorbeeld-energie'].sort()) && v.vaste_plek === true && v.stamboom === 0, vids);
-  toets('4b vaste plek: PRIVE niet in voor', v.knopen.find((k) => k.id === 'org:voorbeeld-energie').voor.join() === 'VB');
+  toets('4 wv3446: ook met de oude vaste-plekvlag dezelfde lijst (personen, privé, stamboom)', JSON.stringify(vids.slice().sort()) === JSON.stringify(ids.slice().sort()) && !v.vaste_plek && v.stamboom === l.stamboom, vids);
+  toets('4b wv3446: PRIVE blijft in voor', v.knopen.find((k) => k.id === 'org:voorbeeld-energie').voor.join() === l.knopen.find((k) => k.id === 'org:voorbeeld-energie').voor.join());
   toets('5 eigen entiteiten bovenaan, groepen geteld', l.knopen[0].groep === 'eigen' && l.groepen.persoon === 6 && l.groepen.eigen === 2 && l.groepen.instantie === 1, l.groepen);
   toets('6 register één keer gelezen (cache)', rpcAanroepen === 1, rpcAanroepen);
 
   const z = await T.zoek('oudverzonnen', false), z1 = await T.zoek('henk-oud', false), z0 = await T.zoek('h', false), zv = await T.zoek('oudverzonnen', true);
-  toets('6b stamboom via zoeken (≥ 2 tekens, ook met streepjes), niet op een vaste plek', z.totaal === 2 && z.knopen.every((k) => k.groep === 'prive' && k.rol === 'stamboom') && z1.totaal === 1 && z0.totaal === 0 && zv.totaal === 0, [z, z1]);
+  toets('6b stamboom via zoeken (≥ 2 tekens, ook met streepjes), ook met de oude vaste-plekvlag', z.totaal === 2 && z.knopen.every((k) => k.groep === 'prive' && k.rol === 'stamboom') && z1.totaal === 1 && z0.totaal === 0 && zv.totaal === 2, [z, z1, zv]);
   const hd = await T.detail(z1.knopen[0].sleutel, false);
   toets('6c stamboompersoon openen op zijn sleutel: pagina zonder frontmatter', hd.status === 200 && /# Henk/.test(hd.j.tekst) && !/type: persoon/.test(hd.j.tekst) && hd.j.knoop.groep === 'prive', hd.j);
 
@@ -163,8 +163,8 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   toets('13b facturen van een eigen entiteit zonder code-afbeelding: 0', e.j.weet.facturen && e.j.weet.facturen.aantal === 0, e.j.weet.facturen);
 
   const vd = await T.detail('org:voorbeeld-energie', true), ve = await T.detail('VB', true);
-  toets('14 vaste plek: geen facturen, geen deadlines, blok weg, IBAN van een derde gemaskeerd, eigen IBAN niet', vd.status === 200 && vd.j.weet.facturen === null && vd.j.weet.deadlines === null && !/Wat OVIS van deze/.test(vd.j.tekst) && !/NL00 ?TEST/.test(vd.j.tekst) && ve.j.tekst.includes(IBAN) && /Huur naar \[rekeningnummer\]/.test(ve.j.tekst) && ve.j.weet.iban === null, [vd.j.tekst, ve.j.tekst]);
-  toets('15 vaste plek: privékant, personen en privépersonen 404', (await T.detail('org:voorbeeld-streaming', true)).status === 404 && (await T.detail('PRIVE', true)).status === 404 && (await T.detail('per:notaris-verzonnen', true)).status === 404 && (await T.detail(sv.sleutel, true)).status === 404);
+  toets('14 wv3446: met de oude vaste-plekvlag precies hetzelfde detail als zonder (facturen, deadlines, blok, IBAN)', vd.status === 200 && JSON.stringify(vd.j) === JSON.stringify(d.j) && JSON.stringify(ve.j) === JSON.stringify(e.j) && /NL00 ?TEST/.test(vd.j.tekst), [vd.j.tekst, ve.j.tekst]);
+  toets('15 wv3446: privékant, personen en privépersonen ook met de oude vaste-plekvlag 200', (await T.detail('org:voorbeeld-streaming', true)).status === 200 && (await T.detail('PRIVE', true)).status === 200 && (await T.detail('per:notaris-verzonnen', true)).status === 200 && (await T.detail(sv.sleutel, true)).status === 200);
   toets('16 persoon met privépagina in het register: zichtbaar met pagina', (await T.detail('per:jan-verzonnen', false)).j.tekst === '# Jan Verzonnen');
 
   const m = await T.detail('per:piet-verzonnen', false), mj = JSON.stringify(m.j);
@@ -243,8 +243,8 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   toets('23c alleen hele woorden of het begin: "oorbeeld" past nergens; inactief en pagina buiten de vault niet', (await nt('oorbeeld', false)).length === 0 &&
     (await nt('Opgeheven', false)).length === 0 && (await nt('Kapotte', false)).length === 0, [await nt('oorbeeld', false)]);
   const n4 = await nt('Bram', false), n4v = await nt('Bram', true);
-  toets('23d privépersoon en stamboom zonder vaste plek, niet met vaste plek', n4.some((p) => /Bram Verzonnen \(Vriend\)\.md/.test(p)) && (await nt('Henk Oudverzonnen', false))[0] === '20_Prive/Familie/Stamboom/Henk Oudverzonnen.md#0' &&
-    n4v.length === 0 && (await nt('Voorbeeld Streaming', true)).length === 0, [n4, n4v]);
+  toets('23d privépersoon en stamboom, ook met de oude vaste-plekvlag', n4.some((p) => /Bram Verzonnen \(Vriend\)\.md/.test(p)) && (await nt('Henk Oudverzonnen', false))[0] === '20_Prive/Familie/Stamboom/Henk Oudverzonnen.md#0' &&
+    JSON.stringify(n4v) === JSON.stringify(n4), [n4, n4v]);
   const n5 = await nt('Voorbeeld', false);
   toets('23e volgorde: sterkte eerst (Voorbeeld Energie, heel woord, vóór Voorbeeldpraktijk, begin van een woord)', n5.indexOf('10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Energie.md#1') >= 0 &&
     n5.indexOf('10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Energie.md#1') < n5.indexOf('10_Zakelijk/Voorbeeld/Entiteit - VB.md#2'), n5);
@@ -253,8 +253,8 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   rpcFout = false; T.vergeet();
 
   const srv = fs.readFileSync('server.js', 'utf8');
-  toets('22 server.js: routes (ook zoeken), vaste plek uit de schakelaar, sleutelmasker en kaart mee', /route === 'GET \/app\/brain\/entiteiten' \|\| route\.indexOf\('GET \/app\/brain\/entiteit\/'\) === 0 \|\| route\.indexOf\('GET \/app\/brain\/entiteiten\/zoek\/'\) === 0/.test(srv) && /B\.detail\(id, vast\)/.test(srv) && /B\.zoek\(q, vast\)/.test(srv) &&
-    /const vast = appAfscherm\(a\);   \/\/ wv1901/.test(srv) && !!maskerRegel && /kaart: function \(\) \{ const k = secondbrain && secondbrain\.vers\(false\)/.test(srv));
+  toets('22 server.js: routes (ook zoeken), geen vaste-plekvlag meer, sleutelmasker en kaart mee', /route === 'GET \/app\/brain\/entiteiten' \|\| route\.indexOf\('GET \/app\/brain\/entiteit\/'\) === 0 \|\| route\.indexOf\('GET \/app\/brain\/entiteiten\/zoek\/'\) === 0/.test(srv) && /B\.detail\(id\)/.test(srv) && /B\.zoek\(q\)/.test(srv) &&
+    !/appAfscherm/.test(srv) && !!maskerRegel && /kaart: function \(\) \{ const k = secondbrain && secondbrain\.vers\(false\)/.test(srv));
   toets('23 uitrol.sh, Dockerfile en CI kennen brain-entiteiten', /RELEASE_OPTIONEEL="[^"]*\bbrain-entiteiten\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&
     /COPY brain-entiteiten\.js \/app\/release-bootstrap\/brain-entiteiten\.js/.test(fs.readFileSync('Dockerfile', 'utf8')) && /test\/brain-entiteiten\.sh/.test(fs.readFileSync('.github/workflows/build.yml', 'utf8')));
   fs.rmSync(tmp, { recursive: true, force: true });

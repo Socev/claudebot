@@ -128,16 +128,15 @@ test('lijsten: twijfel oudste eerst en alleen open, filter per postvak; intake m
   assert.deepEqual(l.regels.map((r) => r.mm.stroom).sort(), ['factuur', 'intake', 'twijfel']);
 });
 
-test('afscherming (vaste plek die afschermt): Privé valt weg uit tellers en lijsten', async () => {
+test('wv3446: geen afscherming meer, ook niet met de oude afschermvlag: Privé blijft in tellers en lijsten', async () => {
   const { mm, zet } = mailman();
   vulMailman(zet);
   const { w } = maak({ mailman: () => mm, intake: () => intake({ appWerkstroom: async () => ({ stukken: [Object.assign({}, STUK_TWIJFEL, { bron: 'gmail:david' })], live: {}, entiteiten: [] }) }), facturen: facturen() });
-  const t = await w.tellers({ afscherm: true });
-  assert.deepEqual(t.tellers.twijfel, { wacht: 1, per: { 'gmail-groenhouten': 1 } });
-  assert.deepEqual(t.postvakken.map((p) => p.id), ['gmail:groenhouten']);
+  const t = await w.tellers({ afscherm: true }), t0 = await w.tellers({});
+  assert.deepEqual(t, t0);
+  assert.ok(t.postvakken.some((p) => p.id === 'gmail:david'));
   const l = await w.lijst('binnen', null, { afscherm: true });
-  assert.ok(l.regels.every((r) => r.postvak !== 'gmail:david'));
-  assert.deepEqual((await w.lijst('twijfel', 'gmail-david', { afscherm: true })).regels, []);
+  assert.ok(l.regels.some((r) => r.postvak === 'gmail:david'));
 });
 
 test('paden: alleen kleine letters en bekende stappen; hooguit 200 regels', async () => {

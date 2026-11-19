@@ -101,8 +101,8 @@ if (V) {
 function r2(x) { return Math.round(x * 100) / 100; }
 // server.js en uitrol
 const srv = fs.readFileSync('server.js', 'utf8'), uit = fs.readFileSync('uitrol.sh', 'utf8'), dock = fs.readFileSync('Dockerfile', 'utf8');
-toets('server.js: POST /app/financien/vermogen in de routetabel, achter appPriveDicht en appTeller; app-vermogen in BANK_LOKAAL, niet in BANK_OPDRACHTEN',
-  /route === 'POST \/app\/financien\/vermogen'\) return appFinVermogen/.test(srv) && /async function appFinVermogen[\s\S]{0,300}appPriveDicht\(a, 'financien'\)/.test(srv) && /appTeller\('fin-vermogen'/.test(srv) &&
+toets('server.js: POST /app/financien/vermogen in de routetabel, zonder vaste-plekweigering (wv3446), achter appTeller; app-vermogen in BANK_LOKAAL, niet in BANK_OPDRACHTEN',
+  /route === 'POST \/app\/financien\/vermogen'\) return appFinVermogen/.test(srv) && /async function appFinVermogen\(/.test(srv) && !/appPriveDicht/.test(srv) && /appTeller\('fin-vermogen'/.test(srv) &&
   /const BANK_LOKAAL = \[[^\]]*'app-vermogen'/.test(srv) && !/const BANK_OPDRACHTEN = \[[^\]]*'app-vermogen'/.test(srv), null);
 toets('uitrol.sh en Dockerfile kennen financien-vermogen.js', /RELEASE_OPTIONEEL="[^"]*financien-vermogen\.js/.test(uit) && /COPY financien-vermogen\.js /.test(dock), null);
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');

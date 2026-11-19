@@ -260,10 +260,10 @@ function kaal(w) {
       .map(function (n) { return { type: n.type, disabled: !!n.disabled, parameters: n.type === 'n8n-nodes-base.scheduleTrigger' ? n.parameters : undefined }; }) };
 }
 // stand(o): o.workflows = de actieve n8n-workflows uit de API ([{id, name, active, nodes}], kaal of volledig) of null bij een meetfout;
-// o.hartslag = rijen van mk_hartslag_stand of machinekamer.hartslag, of null; o.nu (ms); o.vast (vaste plek: geen sessie/skill/bron).
+// o.hartslag = rijen van mk_hartslag_stand of machinekamer.hartslag, of null; o.nu (ms). Op elk apparaat alles (wv3446: vaste-plektak weg).
 function stand(o) {
   o = o || {};
-  const nu = o.nu || Date.now(), vast = !!o.vast;
+  const nu = o.nu || Date.now();
   if (!Array.isArray(o.workflows)) o = Object.assign({}, o, { workflows: null });   // een vreemde vorm telt als niet gemeten (Opus-review #5)
   if (!Array.isArray(o.hartslag)) o = Object.assign({}, o, { hartslag: null });
   const wf = {};
@@ -296,19 +296,16 @@ function stand(o) {
       actief: w.n8n ? (o.workflows ? !!(live && live.active) : null) : true,
       model: w.model, uitkomst: w.uitkomst, uitzetbaar: w.uitzetbaar !== false, status: status, laatst: laatst, hartslag: slagen,
       manager: w.manager || null, n8n: w.n8n || null,
-      // wv1733 (OVIS M4b): schakelaar. kan = wat de knop mag (leeg op een vaste plek, buiten n8n of als de stand niet leesbaar is)
+      // wv1733 (OVIS M4b): schakelaar. kan = wat de knop mag (leeg buiten n8n of als de stand niet leesbaar is)
       schakelaar: sk ? { stand: sk.stand, sinds: sk.sinds || null, tot: sk.tot || null } : null,
       // geen knop voor wat zonder rij al uit staat in n8n (zou toch 409 geven; Opus-review KAN-4)
-      kan: vast || !w.n8n || !sch ? [] : sk ? ['aan'] : (o.workflows && !(live && live.active)) ? [] : (w.uitzetbaar === false ? ['pauze'] : ['uit']) };
-    if (!vast) { k.sessie = w.sessie || null; k.skill = w.skill || null; k.bron = w.bron || null; }
-    else { k.uitkomst = ''; k.n8n = null; }   // vaste plek: geen beschrijving en geen id's (zoals de ringkaart, Fable wv888 #4)
+      kan: !w.n8n || !sch ? [] : sk ? ['aan'] : (o.workflows && !(live && live.active)) ? [] : (w.uitzetbaar === false ? ['pauze'] : ['uit']) };
+    k.sessie = w.sessie || null; k.skill = w.skill || null; k.bron = w.bron || null;
     return k;
   });
   const groepen = {};
   SOORTEN.forEach(function (s) { groepen[s] = kaarten.filter(function (k) { return k.soort === s; }); });
-  let c = check(o.workflows, o.hartslag, o.schakelaars);
-  if (vast) c = { n8n_actief: c.n8n_actief, ontbreekt: c.ontbreekt && c.ontbreekt.map(function () { return { id: '', naam: '' }; }),
-    niet_actief: c.niet_actief && c.niet_actief.map(function () { return { id: '', naam: '' }; }), hartslag_zonder_werker: c.hartslag_zonder_werker && c.hartslag_zonder_werker.map(function () { return ''; }) };
+  const c = check(o.workflows, o.hartslag, o.schakelaars);
   return { groepen: groepen, overig: { aantal: OVERIG.length, per_soort: telPer(OVERIG) }, check: c,
     fout: { n8n: o.workflows ? null : 'het rooster uit n8n is nu niet leesbaar', hartslag: o.hartslag ? null : 'de hartslag is nu niet leesbaar',
       schakelaar: sch ? null : 'de schakelaarstand is nu niet leesbaar' } };

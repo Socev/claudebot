@@ -79,12 +79,12 @@ toets('8d geen app-beurt (Telegram, agent, heartbeat): geen veld', L.toets({ sch
 const PRIVE = ['financien', 'gezondheid', 'pot-afschriften', 'mediatheek'];
 const A = { id: 'apparaat-a', soort: 'reist' }, B = { id: 'apparaat-b', soort: 'reist' }, V = { id: 'apparaat-v', soort: 'vast' };
 const w = { scherm: 'bandjes', focus: null, vorm: 'wissel' };
-toets('9 het typende apparaat krijgt het veld (vers: wissel)', JSON.stringify(L.voorApparaat(w, A.id, A, PRIVE, true)) === '{"scherm":"bandjes","focus":null,"vorm":"wissel"}');
-toets('9b ANDER APPARAAT krijgt het veld niet', L.voorApparaat(w, A.id, B, PRIVE, true) === null);
-toets('9c niet vers = kaartlink', L.voorApparaat(w, A.id, A, PRIVE, false).vorm === 'link');
-toets('9d vaste plek: nooit naar een privé-module', L.voorApparaat({ scherm: 'financien', focus: null, vorm: 'wissel' }, V.id, V, PRIVE, true) === null);
-toets('9e vaste plek: niet-privé mag', L.voorApparaat(w, V.id, V, PRIVE, true).vorm === 'wissel');
-toets('9f geen apparaat / geen veld = null', L.voorApparaat(w, A.id, null, PRIVE, true) === null && L.voorApparaat(null, A.id, A, PRIVE, true) === null);
+toets('9 het typende apparaat krijgt het veld (vers: wissel)', JSON.stringify(L.voorApparaat(w, A.id, A, true)) === '{"scherm":"bandjes","focus":null,"vorm":"wissel"}');
+toets('9b ANDER APPARAAT krijgt het veld niet', L.voorApparaat(w, A.id, B, true) === null);
+toets('9c niet vers = kaartlink', L.voorApparaat(w, A.id, A, false).vorm === 'link');
+toets('9d wv3446: vaste plek mag ook naar een privé-module', L.voorApparaat({ scherm: 'financien', focus: null, vorm: 'wissel' }, V.id, V, true).vorm === 'wissel');
+toets('9e vaste plek: niet-privé mag', L.voorApparaat(w, V.id, V, true).vorm === 'wissel');
+toets('9f geen apparaat / geen veld = null', L.voorApparaat(w, A.id, null, true) === null && L.voorApparaat(null, A.id, A, true) === null);
 toets('9g stuurbaar bevat geen privé-loze machinekamer', L.STUURBAAR.indexOf('machinekamer') < 0 && L.STUURBAAR.indexOf('hoofd') < 0);
 
 // ── koppeling in server.js (functies los in een vm) ──
@@ -102,8 +102,8 @@ const ctx = vm.createContext({ require, fs, path, __dirname: process.cwd(), cons
   appStuur: function (res, st, j) { gestuurd.push({ st: st, j: j }); }, appWeiger: function (res, st, f) { gestuurd.push({ st: st, fout: f }); },
   appNietGezien: function () { return false; }, appGezienDoor: function () {}, appVraagVan: function () { return null; },
   appBeantwoord: function () { return null; }, appVraagGevoelig: function () { return true; } });
-vm.runInContext(konst('APP_JOB_RE') + konst('APP_PRIVE_MODULES').replace(/\/\/.*$/, '') + konst('APP_VAST_AFSCHERMEN') +
-  ['appAfscherm', 'appUitvoer', 'appOpenModule', 'appOpenKnip', 'appOpenGemaaktZet', 'appOpenGemaaktVan', 'appOpenNaRun', 'appOpenVoor', 'appOpenUitslag', 'appUitslag', 'appOntmasker'].map(fn).join('\n') +
+vm.runInContext(konst('APP_JOB_RE') + konst('APP_PRIVE_MODULES').replace(/\/\/.*$/, '') +
+  ['appUitvoer', 'appOpenModule', 'appOpenKnip', 'appOpenGemaaktZet', 'appOpenGemaaktVan', 'appOpenNaRun', 'appOpenVoor', 'appOpenUitslag', 'appUitslag', 'appOntmasker'].map(fn).join('\n') +
   '\n' + konst('APP_OPEN_VERS_MS') + konst('APP_OPEN_GEMAAKT_MS') + 'let appOpenMod = null, appOpenGezocht = false;\n' +
   'this.T = { appUitslag, appOpenNaRun, appOpenKnip, appOpenGemaaktZet, appOntmasker, appOpenVoor, jobs };', ctx);
 const T = ctx.T;
@@ -178,7 +178,7 @@ toets('16 Dockerfile, uitrol.sh en build.yml kennen app-open.js',
 {
   const o = T.appOpenVoor({ scherm: 'financien', focus: null, vorm: 'wissel' }, V.id, V, true), m = T.appOpenVoor({ scherm: 'financien', focus: null, vorm: 'wissel' }, A.id, A, true);
   toets('17a wv1901: vaste plek krijgt ook een privé-App (zoals meereizend)', !!o && o.scherm === 'financien' && o.vorm === 'wissel' && !!m && m.scherm === 'financien', { o: o, m: m });
-  toets('17b wv1901: schakelaar staat uit en appAfscherm is de enige weg naar de privé-lijst', /^const APP_VAST_AFSCHERMEN = false;$/m.test(src) && /appAfscherm\(a\) \? APP_PRIVE_MODULES : \[\]/.test(fn('appOpenVoor')));
+  toets('17b wv3446: geen afscherm-schakelaar meer en appOpenVoor geeft geen privé-lijst door', !/APP_VAST_AFSCHERMEN|appAfscherm/.test(src) && /L\.voorApparaat\(open, beurtApparaat, a, vers\)/.test(fn('appOpenVoor')));
 }
 toets('17 geen ROOD-logregels uit de koppeling', !logs.some((l) => /^FOUT/.test(l)), logs.filter((l) => /^FOUT/.test(l)));
 console.log((fouten ? 'ROOD' : 'GROEN') + ': ' + goed + ' groen, ' + fouten + ' rood');

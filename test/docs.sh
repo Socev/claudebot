@@ -78,7 +78,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   r = await app('bewaar', { pad: '01_Ontwikkeling/Fm.md', versie: bt.j.versie, md: 'vast\n' }, tel.vast);
   toets('vaste plek: bewerk alleen lezen, bewaar 403', b.status === 200 && !b.j.bewerkbaar && r.status === 403, [b.j.reden, r]);
   r = await app('bewaar', { pad: '20_Prive/Notitie.md', versie: '0'.repeat(32), md: 'x' }, tel.vast);
-  toets('vaste plek: privé = 404', r.status === 404, r);
+  toets('wv3446: privé niet meer verborgen met de vast-vlag; schrijven blijft dicht = 403', r.status === 403, r);
   // onderhoud en grendel
   onderhoud = true; r = await app('bewaar', { pad: '01_Ontwikkeling/Fm.md', versie: bt.j.versie, md: 'x\n' }); onderhoud = false;
   toets('onderhoudsstand = 423', r.status === 423, r);

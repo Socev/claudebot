@@ -12,8 +12,8 @@
 //   (fd 3/4) en zoekt in /dev/fd/N: een map die socev intussen hernoemt of door een link vervangt, volgen we niet. grep -r volgt geen
 //   symlinks onderweg (#1);
 // - pagina's lezen (kop, updated) alleen via vault-veilig.lees (O_NOFOLLOW, map op zijn plek);
-// - elke regel gaat door secondbrain.masker vóór het model (sleutels; op een vaste plek ook IBAN en BSN) (#3, #4);
-// - vaste plek: alleen 10_Zakelijk, zonder personeelsmappen (gelijk aan Second Brain P2) (#3);
+// - elke regel gaat door secondbrain.masker vóór het model (sleutels) (#3, #4);
+// - geen afscherming per apparaat: een vaste plek zoekt dezelfde wortels als de telefoon (wv1901; tak weg in wv3446, David 19-11: "NERGENS");
 // - geen bestand uit de vault wordt uitgevoerd: de woordenlijst wordt hier als pagina gelezen en ontleed (woordenlijst.py-regels), niet
 //   als script gestart (een socev-schrijfbare vaultmap kan .claude vervangen);
 // - het model heeft geen tools; een pagina met een instructie kan hooguit een fout antwoord geven, en de natoets weigert getallen, IBAN's,
@@ -27,8 +27,8 @@
 //   (soorten), er geen zoekwoord zonder treffer was (genegeerd), de lijst niet afgekapt is en er een rij met score ≥ 0,9 is (of 'mijn' +
 //   soort en alleen eigen entiteiten). Natoets: elke waarde staat nu letterlijk (natNorm) op zijn bronpagina (gelezen via vault-veilig) en
 //   die pagina mag op dit apparaat; één waarde die niet klopt = hele laag 1 weg, door naar laag 2 (nooit stil een deel tonen).
-// - Laag 2, tekstindex (opt.index: python3 -I zoekindex.py zoek, ± 2 s, geen shell): de blokken per pagina (delen) gaan op een vaste plek
-//   nogmaals door de paginaregel, elke regel door het masker, dan dezelfde modelvraag, hetzelfde schema en dezelfde natoets als laag 3.
+// - Laag 2, tekstindex (opt.index: python3 -I zoekindex.py zoek, ± 2 s, geen shell): de blokken per pagina (delen) gaan nogmaals
+//   door de paginaregel, elke regel door het masker, dan dezelfde modelvraag, hetzelfde schema en dezelfde natoets als laag 3.
 //   Index ontbreekt, onleesbaar of ouder dan 48 u = laag 3, en de dekkingsregel zegt dat.
 // - Laag 3, het grep-pad hieronder, als laag 2 niets of te weinig gaf (model "geen" of natoets).
 // Elk antwoord krijgt een dekkingsregel in gewone taal (dekking_regel; in de tekst of de melding), afgekapt is nooit "niet gevonden".
@@ -47,15 +47,11 @@ const MAX_REGELS = 40, MAX_CONTEXT = 8 * 1024, MAX_REGEL = 300, KOP_REGELS = 25,
 const MAX_BLOK_REGELS = 24, MAX_BLOK = 2048, MAX_BLOK_EERST = 800, MAX_ALINEA_REGELS = 6;
 const GREP_MS = 3000, GREP_MAX_UIT = 4 * 1024 * 1024, GREP_PER_BESTAND = 200;
 const WORTELS = ['10_Zakelijk', '20_Prive'];
-const WORTELS_VAST = ['10_Zakelijk'];
 // wv1931 (David 28-10: "Jij schermt af wat ik al heb"): Gezondheid, Gesprekken en Notulen zijn Davids eigen pagina's en horen in de snelle
 // laag. Bronnen, raw_input, Conversaties en Archief blijven erbuiten omdat het ruwe kopieën zijn van wat al op de pagina's staat
 // (snelheid en ruis, geen afscherming); Zoek breder (vault-rag) en Socev doorzoeken ze wel.
 const NIET_MAP = ['Bronnen', 'raw_input', 'Conversaties', 'Archief', 'Skills', '_INBOX', 'Vervallen',
   '.obsidian', '.git', '.trash', 'node_modules'];
-// vaste plek met de schakelaar op afschermen (wv1901): zoals isVastDicht in secondbrain.js; Gesprekken (ook met hoofdletter, grep
-// --exclude-dir is hoofdlettergevoelig) en Notulen hier, want NIET_MAP sluit ze niet meer uit (gedrag op de vaste plek gelijk aan vóór wv1931)
-const NIET_MAP_VAST = ['Medewerkers', 'medewerkers', 'Personeel', 'personeel', 'Gesprekken', 'gesprekken', 'Notulen', 'Financieel', 'Financien', 'Financiën'];
 const NIET_BESTAND = ['AGENTS.md', 'CLAUDE.md', 'CLAUDE.local.md', '*.conflict*', '*conflict*.md'];
 const WOORDENLIJST = '00_Systeem/Woordenlijst.md';
 // wv1788: lagen 1 en 2
@@ -264,7 +260,6 @@ const MELDING = {
 const WORTEL_NAAM = { '10_Zakelijk': 'Zakelijk', '20_Prive': 'Privé' };
 const BLOK_DICHT = /voorgesteld|wachtwoord|password|passwd|pincode|\bpin\b|token|secret|api[-_ ]?key|sleutel|credential|inloggegevens/i;
 const DOORZOCHT = 'Ik zocht in Zakelijk en Privé (ook notulen, gesprekken en gezondheid), niet in ruwe bronnen, conversaties, archief en systeempagina\'s.';
-const DOORZOCHT_VAST = 'Ik zocht op dit apparaat alleen in Zakelijk (zonder personeel en financiën), niet in bronnen, notulen, gesprekken en archief.';
 const VOLLEDIG = 'Vraag het Socev voor een volledige zoektocht.';
 const pag = function (n) { return n + (n === 1 ? ' pagina' : ' pagina\'s'); };
 function dekkingZin(d) {
@@ -276,8 +271,8 @@ function dekkingZin(d) {
       (d.regels_mee < d.regels ? ', maar niet elke treffer' : ', van sommige alleen een deel');
   return kern + (d.afgekapt || d.bestand_vol ? ', en ik kon niet alles doorzoeken' : '') + mis + '.';
 }
-function meldingVoor(soort, d, vast) {
-  const waar = vast ? DOORZOCHT_VAST : DOORZOCHT;
+function meldingVoor(soort, d) {
+  const waar = DOORZOCHT;
   if (soort === 'leeg') return d && (d.afgekapt || d.bestand_vol || d.ontbreekt || d.onleesbaar) ? 'Niets gevonden in wat ik kon doorzoeken. ' + dekkingZin(d) + ' ' + waar + ' ' + VOLLEDIG
     : 'Niets gevonden. ' + waar;
   if (!d) return MELDING[soort] || null;
@@ -293,12 +288,6 @@ const PAD_OK = function (pad) {
   return typeof pad === 'string' && pad.length < 400 && /\.md$/i.test(pad) && !/(^|\/)\.\.?(\/|$)/.test(pad) && pad.indexOf('\0') < 0 &&
     WORTELS.some(function (w) { return pad.indexOf(w + '/') === 0; });
 };
-// Mag een vaste plek deze pagina zien? (gelijk aan WORTELS_VAST + NIET_MAP_VAST hier en isVastDicht in secondbrain.js)
-function vastOpen(pad, isVastDicht) {
-  if (!PAD_OK(pad) || pad.indexOf(WORTELS_VAST[0] + '/') !== 0 || isVastDicht(pad)) return false;
-  const mappen = pad.split('/').slice(0, -1).map(function (d) { return d.normalize('NFC').toLowerCase(); });
-  return !NIET_MAP_VAST.some(function (m) { return mappen.indexOf(m.normalize('NFC').toLowerCase()) >= 0; });
-}
 // Eén regel in gewone taal over wat elke laag doorzocht (David 25-10: "zoeken en DENKEN dat je alles kreeg, is schadelijk"). l = {feitenlijst,
 // tekstindex, zoektocht}; metZoektocht = false als de melding de zoektocht al beschrijft (meldingVoor). Leeg als er niets te zeggen valt.
 const tijdKort = function (ms) {
@@ -365,7 +354,7 @@ function queryRunVan(r, o) {
   // "geen" na een geraakte grens of met onbekeken kandidaten in welke laag ook = onvolledig (afgekapt is nooit "niet gevonden")
   const ergensGrens = onvolledig(l);
   const uitkomst = r.soort === 'antwoord' ? 'antwoord' : r.soort === 'fout' ? 'fout' : (ergensGrens || truncated ? 'onvolledig' : 'geen');
-  const uit = { kanaal: 'zoek_snel', vraag_sha: o.sha, scope: { vast: !!r.vast, wortels: r.vast ? WORTELS_VAST : WORTELS }, coverage: coverage,
+  const uit = { kanaal: 'zoek_snel', vraag_sha: o.sha, scope: { vast: false, wortels: WORTELS }, coverage: coverage,
     rows_matched: matched, rows_returned: returned, truncated: uitkomst !== 'geen' && !!(truncated || (uitkomst === 'onvolledig')), uitkomst: uitkomst,
     bron_laag: laag, duur_ms: num(r.ms && r.ms.totaal),
     // gemist = laag 1 vond niets en laag 2/3 wel een antwoord (ontwerp § 4: leerbron voor de nachtronde)
@@ -382,14 +371,12 @@ function maak(opt) {
   const VAULT = opt.vault;
   const fout = opt.fout || function () {};
   const claude = opt.claude;                       // (systeem, prompt, schema) -> {ok, data, verbruik}
-  const bsnMasker = opt.bsnMasker || null;
   const grepBin = opt.grep || 'grep';
   const nu = opt.nu || Date.now;
   const VV = opt.vv || require('./vault-veilig.js');
   // wv3438 (afspraak David 19-11: niet filteren): Zoek snel is Davids eigen zoeken; de strenge poortstand van wv3405 is eraf (masker zoals vóór 19-11)
   const masker = opt.masker || require('./secondbrain.js').masker;
-  const isVastDicht = opt.isVastDicht || require('./secondbrain.js').isVastDicht;
-  // wv1788: laag 1 = opt.feiten(vraag, vast) → Promise<jsonb van public.sb_zoek_identifier>; laag 2 = opt.index { cmd, args, db } (args vóór
+  // wv1788: laag 1 = opt.feiten(vraag) → Promise<jsonb van public.sb_zoek_identifier>; laag 2 = opt.index { cmd, args, db } (args vóór
   // 'zoek', bv. ['-I', '<release>/…/zoekindex.py']). Ontbreekt een van beide, dan slaat zoek() die laag over (zoals vóór wv1788).
   const feiten = typeof opt.feiten === 'function' ? opt.feiten : null;
   const index = opt.index && opt.index.cmd && opt.index.db ? opt.index : null;
@@ -432,9 +419,9 @@ function maak(opt) {
     });
   }
 
-  function openWortels(vast) {
+  function openWortels() {
     const uit = [];
-    (vast ? WORTELS_VAST : WORTELS).forEach(function (w) {
+    WORTELS.forEach(function (w) {
       const abs = path.join(VAULT, w);
       let fd = null;
       try {
@@ -446,14 +433,14 @@ function maak(opt) {
     return uit;
   }
 
-  function grep(gr, vast) {
+  function grep(gr) {
     return new Promise(function (klaar) {
-      const wortels = openWortels(vast);
+      const wortels = openWortels();
       if (!wortels.length) return klaar({ regels: [], fout: 'geen zoekmap' });
       const pats = [];
       gr.forEach(function (g) { g.varianten.forEach(function (v) { pats.push(patroon(v)); }); });
       const args = ['-r', '-I', '-n', '-i', '-E', '-s', '--include=*.md', '-m', String(GREP_PER_BESTAND)];
-      NIET_MAP.concat(vast ? NIET_MAP_VAST : []).forEach(function (m) { args.push('--exclude-dir=' + m); });
+      NIET_MAP.forEach(function (m) { args.push('--exclude-dir=' + m); });
       NIET_BESTAND.forEach(function (b) { args.push('--exclude=' + b); });
       args.push('-e', pats.join('|'), '--');
       const stdio = ['ignore', 'pipe', 'pipe'];
@@ -479,7 +466,6 @@ function maak(opt) {
           if (!w) return;
           const pad = w.wortel + '/' + m[2];
           if (/(^|\/)\.\.(\/|$)/.test(pad)) return;
-          if (vast && isVastDicht(pad)) return;
           regels.push({ pad: pad, nr: Number(m[3]), tekst: m[4] });
         });
         // wv3423 (B80): exit 2 = grep kon iets niet lezen (map of bestand); telt als grens, nooit als "niets gevonden"
@@ -551,7 +537,7 @@ function maak(opt) {
     while (tot + 1 < lijnen.length && zelfde(lijnSoort(lijnen[tot + 1]))) tot++;
     return [van, tot];
   }
-  function context(gr, regels, vast, gv) {
+  function context(gr, regels, gv) {
     gv = gv || {};
     const perPad = new Map(), perBestand = new Map();
     regels.forEach(function (r) {
@@ -604,7 +590,7 @@ function maak(opt) {
       x.bytes = 0;
     });
     // eerst maskeren, dan inkorten: anders knipt kort() een BSN of IBAN tot een stuk dat het masker niet meer herkent (review wv1289 #3)
-    const regelTekst = function (t) { return kort(masker(String(t).replace(/\r$/, ''), vast, bsnMasker), gr); };
+    const regelTekst = function (t) { return kort(masker(String(t).replace(/\r$/, '')), gr); };
     // Neem het blok rond treffer r mee (tot maxBlok bytes; een tweede aanroep vult het blok verder aan); false als de treffer zelf niet past.
     function neemBlok(x, r, maxBlok) {
       const i = r.nr - 1;
@@ -676,7 +662,7 @@ function maak(opt) {
     let vol = 0;
     perBestand.forEach(function (n) { if (n >= GREP_PER_BESTAND) vol++; });
     // een zoekmap die niet geopend kon worden (niet op zijn plek), telt als grens en wordt genoemd (review #4)
-    const ontbreekt = Array.isArray(gv.wortels) ? (vast ? WORTELS_VAST : WORTELS).filter(function (w) { return gv.wortels.indexOf(w) < 0; }) : [];
+    const ontbreekt = Array.isArray(gv.wortels) ? WORTELS.filter(function (w) { return gv.wortels.indexOf(w) < 0; }) : [];
     const dekking = { paginas: paginas.length, paginas_mee: paginasMee, regels: regelsTotaal, regels_mee: regelsMee,
       afgekapt: !!gv.afgekapt || undefined, bestand_vol: vol || undefined, ontbreekt: ontbreekt.length ? ontbreekt.length : undefined, onleesbaar: !!gv.onleesbaar || undefined,
       ontbreekt_naam: ontbreekt.length ? ontbreekt.map(function (w) { return WORTEL_NAAM[w] || 'een deel'; }).join(' en ') : undefined };
@@ -695,11 +681,11 @@ function maak(opt) {
   const eenRegel = function (t, max) { return String(t == null ? '' : t).replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max); };
   const bronVan = function (pad, tekst) { return { pad: pad, naam: pad.split('/').pop().replace(/\.md$/i, ''), updated: updatedVan(tekst || leesPagina(pad)) }; };
 
-  async function laag1(vraag, vast) {
+  async function laag1(vraag) {
     if (!feiten) return null;
     const t0 = nu();
     let r;
-    try { r = await metTijd(feiten(vraag, vast), l1Ms); } catch (e) { fout('zoek-snel-feiten', e); return { stand: 'fout', ms: nu() - t0 }; }
+    try { r = await metTijd(feiten(vraag), l1Ms); } catch (e) { fout('zoek-snel-feiten', e); return { stand: 'fout', ms: nu() - t0 }; }
     if (!r || typeof r !== 'object' || !Array.isArray(r.rijen)) return { stand: 'fout', ms: nu() - t0 };
     const getal = function (v) { return typeof v === 'number' && isFinite(v) && v >= 0 ? v : Number(v) >= 0 ? Number(v) : 0; };
     const rijen = r.rijen.filter(function (x) { return x && typeof x.waarde === 'string' && x.waarde.trim(); });
@@ -731,7 +717,7 @@ function maak(opt) {
     let mis = 0, nieuwer = 0, einde = 0;
     rijen.forEach(function (x) {
       const pad = x.pagina;
-      if (!PAD_OK(pad) || (vast && !vastOpen(pad, isVastDicht))) { mis++; return; }
+      if (!PAD_OK(pad)) { mis++; return; }
       if (!paginas.has(pad)) {
         const t = leesPagina(pad);
         let m = null;
@@ -739,7 +725,7 @@ function maak(opt) {
         paginas.set(pad, { tekst: t, lijnen: t ? t.split(/\r?\n/) : [], norm: t ? natNorm(t) : '', mtime: m });
       }
       const p = paginas.get(pad), n = natNorm(x.waarde);
-      if (!p.norm || !n || masker(x.waarde, vast, bsnMasker) !== x.waarde) { mis++; return; }
+      if (!p.norm || !n || masker(x.waarde) !== x.waarde) { mis++; return; }
       if (gevuld && p.mtime && p.mtime > gevuld) { nieuwer++; return; }
       const nr = Number(x.regel);
       if (Number.isInteger(nr) && nr >= 1 && nr <= p.lijnen.length) {
@@ -782,18 +768,18 @@ function maak(opt) {
     const bronnen = [];
     paginas.forEach(function (p, pad) { if (bronnen.length < 8) bronnen.push(bronVan(pad, p.tekst)); });
     info.antwoord = true;
-    return Object.assign(info, { uit: { tekst: masker(tekst, vast, bsnMasker), waarden: waarden, bronnen: bronnen } });
+    return Object.assign(info, { uit: { tekst: masker(tekst), waarden: waarden, bronnen: bronnen } });
   }
 
   // ── wv1788 laag 2: de tekstindex (python3 -I zoekindex.py zoek; geen shell, argumenten als lijst, vraag als --vraag=…) ──
-  function indexZoek(vraag, vast) {
+  function indexZoek(vraag) {
     return new Promise(function (klaar) {
       if (!index) return klaar(null);
       const t0 = nu();
       let st = null;
       try { st = fs.statSync(index.db); } catch (e) { return klaar({ stand: 'ontbreekt', ms: 0 }); }
       if (!st.isFile()) return klaar({ stand: 'ontbreekt', ms: 0 });
-      const args = (index.args || []).concat(['zoek', '--db', index.db, '--vraag=' + vraag]).concat(vast ? ['--vast'] : []);
+      const args = (index.args || []).concat(['zoek', '--db', index.db, '--vraag=' + vraag]);
       let k, uit = '', klaarGemeld = false;
       const eind = function (x) { if (klaarGemeld) return; klaarGemeld = true; x.ms = nu() - t0; klaar(x); };
       try { k = spawn(index.cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH || '/usr/bin:/bin', LC_ALL: 'C.UTF-8' } }); }
@@ -815,12 +801,12 @@ function maak(opt) {
       });
     });
   }
-  // De context van laag 2: per stuk de paginaregel (wortels, ..; op een vaste plek vastOpen), regels zonder "voorgesteld" en zonder
+  // De context van laag 2: per stuk de paginaregel (wortels, ..), regels zonder "voorgesteld" en zonder
   // wachtwoord-/sleutelwoord, elke regel door het masker. Zelfde vorm als context(): "### pad (kop)\nnr: tekst".
   // Opus-diffreview MOET 1: de index kan tot 48 u oud zijn. Elke pagina wordt nu gelezen (vault-veilig); is ze weg, ná de bouw gewijzigd,
   // of klopt een "nr: tekst"-regel niet meer met de echte regel, dan telt ze als verouderd en slaat zoek() laag 2 over (laag 3 zoekt live).
   // MOET 4: een stuk onder een kop met een wachtwoord-/sleutelwoord gaat niet mee (het grep-pad neemt daar ook alleen de trefregel).
-  function context2(j, vast, gebouwd) {
+  function context2(j, gebouwd) {
     const delen = Array.isArray(j.delen) ? j.delen : [];
     const blokken = [], volgorde = [], echt = new Map();
     let weg = 0, bytes = 0, vol = false, verouderd = 0, dicht = 0;
@@ -828,7 +814,7 @@ function maak(opt) {
     delen.forEach(function (d) {
       const pad = d && d.pad;
       const mappen = PAD_OK(pad) ? pad.split('/').slice(0, -1) : [];
-      if (!PAD_OK(pad) || mappen.some(function (m) { return NIET_MAP.indexOf(m) >= 0; }) || (vast && !vastOpen(pad, isVastDicht)) ||
+      if (!PAD_OK(pad) || mappen.some(function (m) { return NIET_MAP.indexOf(m) >= 0; }) ||
           NIET_BESTAND.some(function (b) { return b.indexOf('*') < 0 ? pad.split('/').pop() === b : /conflict/i.test(pad.split('/').pop()); })) { weg++; return; }
       if (BLOK_DICHT.test(String(d.kop || ''))) { dicht++; return; }
       if (!echt.has(pad)) {
@@ -845,9 +831,9 @@ function maak(opt) {
         return m && Number(m[1]) >= 1 && Number(m[1]) <= e.lijnen.length && e.lijnen[Number(m[1]) - 1].trim() === m[2].trim();
       });
       if (!klopt) { if (!oud.has(pad)) { oud.add(pad); verouderd++; } return; }
-      const regels = ruw.filter(function (l) { return !BLOK_DICHT.test(l); }).map(function (l) { return masker(l, vast, bsnMasker); });
+      const regels = ruw.filter(function (l) { return !BLOK_DICHT.test(l); }).map(function (l) { return masker(l); });
       if (!regels.length) return;
-      const blok = '### ' + pad + (d.kop ? ' (' + masker(eenRegel(d.kop, 200), vast, bsnMasker) + ')' : '') + '\n' + regels.join('\n');
+      const blok = '### ' + pad + (d.kop ? ' (' + masker(eenRegel(d.kop, 200)) + ')' : '') + '\n' + regels.join('\n');
       const b = Buffer.byteLength(blok);
       if (bytes + b > MAX_CONTEXT + 1024) { vol = true; return; }
       bytes += b; blokken.push(blok);
@@ -858,9 +844,8 @@ function maak(opt) {
   }
 
   // Eén modelvraag op een context (laag 2 en 3): zelfde systeemtekst, schema en natoets. Geeft { soort, tekst, waarden, bronnen, reden, … }.
-  async function modelAntwoord(vraag, gelezenUit, ctxTekst, ctxBronnen, vast) {
+  async function modelAntwoord(vraag, gelezenUit, ctxTekst, ctxBronnen) {
     const paden = ctxBronnen.map(function (b) { return b.pad; });
-    // ook in de prompt alleen wat dit apparaat mag zien (Fable diffreview #4: geen privénaam uit de woordenlijst op een vaste plek)
     const prompt = 'VRAAG VAN DAVID: ' + vraag + '\n' +
       (gelezenUit.length ? 'GELEZEN ALS (woordenlijst): ' + gelezenUit.map(function (x) { return x.term + ' → ' + x.naam; }).join('; ') + '\n' : '') +
       'TOEGESTANE BRONNEN: ' + paden.join(' | ') + '\n' +
@@ -876,9 +861,9 @@ function maak(opt) {
     }
     const d = r.data;
     const soort = ['antwoord', 'geen', 'handeling'].indexOf(d.soort) >= 0 ? d.soort : 'geen';
-    const tekst = masker(String(d.tekst || '').replace(/\s+/g, ' ').trim().slice(0, 400), vast, bsnMasker);
+    const tekst = masker(String(d.tekst || '').replace(/\s+/g, ' ').trim().slice(0, 400));
     const ruweWaarden = (Array.isArray(d.waarden) ? d.waarden : []).slice(0, 12).filter(function (w) { return w && typeof w.waarde === 'string' && w.waarde.trim(); })
-      .map(function (w) { return { label: String(w.label || '').replace(/\s+/g, ' ').trim().slice(0, 40), waarde: masker(w.waarde.trim().slice(0, 120), vast, bsnMasker) }; });
+      .map(function (w) { return { label: String(w.label || '').replace(/\s+/g, ' ').trim().slice(0, 40), waarde: masker(w.waarde.trim().slice(0, 120)) }; });
     const bron = bronOp((Array.isArray(d.bronnen) ? d.bronnen : []).filter(function (p) { return paden.indexOf(p) >= 0; }).slice(0, 5));
     if (soort !== 'antwoord') {
       const geenTekst = soort === 'geen' && natoets({ tekst: tekst }, ctxTekst).ok ? tekst : '';   // ook "niet gevonden" verzint geen getal
@@ -902,14 +887,13 @@ function maak(opt) {
   async function zoek(vraagRuw, o) {
     o = o || {};
     const t0 = nu();
-    const vast = !!o.vast;
     const vraag = String(vraagRuw == null ? '' : vraagRuw).replace(/\s+/g, ' ').trim().slice(0, MAX_VRAAG);
     const lagen = {}, ms = {};
     let verbruik = null, termen = [];
     const uit = function (soort, x) {
       ms.totaal = nu() - t0;
       const r = Object.assign({ soort: soort, vraag: vraag, tekst: '', waarden: [], bronnen: [], gelezen_als: [], melding: MELDING[soort] || null,
-        reden: null, ms: ms, vast: vast || undefined }, x || {});
+        reden: null, ms: ms }, x || {});
       if (soort === 'handeling' || !vraag) return r;
       r.lagen = lagen; r.termen = termen;
       if (verbruik) r.verbruik = verbruik;
@@ -918,7 +902,6 @@ function maak(opt) {
       // voor een app die hem zelf onder het antwoord zet (toon_dekking), zodat "Kopieer alles" alleen het antwoord neemt
       const metLagen = !!(lagen.feitenlijst || lagen.tekstindex);
       r.dekking_regel = dekkingRegel(lagen, true) || undefined;
-      if (r.dekking_regel && vast) r.dekking_regel = r.dekking_regel.replace(/\.$/, '') + ' · op dit apparaat alleen Zakelijk.';
       if (metLagen && r.dekking_regel) {
         if (soort === 'antwoord') {
           const meer = r.laag === 'identifier' ? !!lagen.feitenlijst.afgekapt : r.laag === 'tekstindex' ? !lagen.tekstindex.volledig : !(lagen.zoektocht && lagen.zoektocht.volledig);
@@ -947,31 +930,29 @@ function maak(opt) {
     termen = gr.map(function (g) { return g.term; });
     const gelezen = [];
     gr.forEach(function (g) { g.gelezen.forEach(function (x) { if (!gelezen.some(function (y) { return y.naam === x.naam; })) gelezen.push(x); }); });
-    // op een vaste plek geen privépagina's of personeel in "gelezen als"
-    const gelezenUit = gelezen.filter(function (x) { return !vast || !x.pagina || !isVastDicht(x.pagina); })
-      .map(function (x) { return { term: x.term, naam: x.naam }; });
+    const gelezenUit = gelezen.map(function (x) { return { term: x.term, naam: x.naam }; });
 
     // ── laag 1 ──
-    const l1 = await laag1(vraag, vast);
+    const l1 = await laag1(vraag);
     if (l1) { ms.feiten = l1.ms; const u1 = l1.uit; delete l1.uit; delete l1.ms; lagen.feitenlijst = l1;
       if (u1) return uit('antwoord', { laag: 'identifier', tekst: u1.tekst, tekst_kaal: u1.tekst, waarden: u1.waarden, bronnen: u1.bronnen, melding: null, gelezen_als: gelezenUit }); }
     if (!gr.length) return uit('geen', { reden: 'geen zoektermen', melding: MELDING.leeg });
 
     // ── laag 2 ──
-    const l2 = await indexZoek(vraag, vast);
+    const l2 = await indexZoek(vraag);
     if (l2) {
       ms.index = l2.ms;
       const info = { stand: l2.stand, leeftijd_u: l2.leeftijd_u, gebouwd: l2.gebouwd };
       lagen.tekstindex = info;
       if (l2.stand === 'ok') {
         const dk = l2.j.dekking || {};
-        const c2 = context2(l2.j, vast, l2.gebouwd);
+        const c2 = context2(l2.j, l2.gebouwd);
         Object.assign(info, { paginas: Number(dk.paginas) || 0, paginas_mee: c2.bronnen.length, blokken: Number(dk.blokken) || 0, blokken_mee: Number(dk.blokken_mee) || 0,
           afgekapt: !!dk.afgekapt, weg: c2.weg || undefined, dicht: c2.dicht || undefined });
         info.volledig = !info.afgekapt && !c2.vol && !c2.weg && !c2.dicht && info.paginas_mee >= info.paginas && info.blokken_mee >= info.blokken;
         if (c2.verouderd) { info.stand = 'verouderd'; info.verouderd = c2.verouderd; info.volledig = false; }
         else if (c2.bronnen.length) {
-          const m = await modelAntwoord(vraag, gelezenUit, c2.tekst, c2.bronnen, vast);
+          const m = await modelAntwoord(vraag, gelezenUit, c2.tekst, c2.bronnen);
           ms.model = m.model_ms; verbruik = telOp(verbruik, m.verbruik);
           if (m.soort === 'antwoord') return uit('antwoord', { laag: 'tekstindex', tekst: m.tekst, tekst_kaal: m.tekst, waarden: m.waarden, weggelaten: m.weggelaten,
             bronnen: m.bronnen, melding: null, gelezen_als: gelezenUit });
@@ -985,23 +966,23 @@ function maak(opt) {
 
     // ── laag 3: het grep-pad ──
     const g0 = nu();
-    const gv = await grep(gr, vast);
-    const ctx = context(gr, gv.regels, vast, gv);
+    const gv = await grep(gr);
+    const ctx = context(gr, gv.regels, gv);
     ms.zoek = nu() - g0;
     const dk = ctx.dekking;
     lagen.zoektocht = dk;
     // grep kon niet zoeken (geen zoekmap, start mislukt): fout, nooit "niets gevonden" (diffreview ZOU 7)
     if (gv.fout) return uit('fout', { laag: 'volledig', reden: gv.fout, melding: MELDING.fout, dekking: dk, gelezen_als: gelezenUit });
-    if (!ctx.bronnen.length) return uit('geen', { laag: 'volledig', reden: 'geen treffers', melding: meldingVoor('leeg', dk, vast), dekking: dk, gelezen_als: gelezenUit });
-    const m = await modelAntwoord(vraag, gelezenUit, ctx.tekst, ctx.bronnen, vast);
+    if (!ctx.bronnen.length) return uit('geen', { laag: 'volledig', reden: 'geen treffers', melding: meldingVoor('leeg', dk), dekking: dk, gelezen_als: gelezenUit });
+    const m = await modelAntwoord(vraag, gelezenUit, ctx.tekst, ctx.bronnen);
     ms.model = (ms.model || 0) + m.model_ms; verbruik = telOp(verbruik, m.verbruik);
     const basis = { laag: 'volledig', dekking: dk, gelezen_als: gelezenUit, reden: m.reden || null };
     if (m.soort === 'fout') return uit('fout', Object.assign(basis, { bronnen: m.bronnen, melding: MELDING.fout }));
-    if (m.soort === 'handeling') return uit('handeling', Object.assign(basis, { melding: meldingVoor('handeling', dk, vast) }));
+    if (m.soort === 'handeling') return uit('handeling', Object.assign(basis, { melding: meldingVoor('handeling', dk) }));
     if (m.soort === 'geen') {
       // een "geen" van het model na een geraakte grens is "niet in wat ik bekeek", nooit "niet gevonden" (wv1289)
       return uit('geen', Object.assign(basis, { tekst: m.tekst || '', bronnen: m.bronnen, natoets_mis: m.natoets_mis, model_tekst: m.model_tekst,
-        melding: meldingVoor(m.onzeker ? 'onzeker' : 'geen', dk, vast) }));
+        melding: meldingVoor(m.onzeker ? 'onzeker' : 'geen', dk) }));
     }
     // na de natoets: is niet alles bekeken (grens, of pagina's buiten de band van de beste treffers; review #5), dan zegt het antwoord dat er
     // meer kan staan (de app toont tekst; kopiëren neemt hem mee). Met lagen 1/2 doet uit() dat via de dekkingsregel.
@@ -1016,5 +997,5 @@ function maak(opt) {
 
 module.exports = { maak: maak, termenUit: termenUit, natoets: natoets, natNorm: natNorm, harde: harde, woordenlijstGroepen: woordenlijstGroepen,
   woordenlijstVarianten: woordenlijstVarianten, wSoort: wSoort, HANDELING: HANDELING, SYSTEEM: SYSTEEM, schema: schema, MELDING: MELDING,
-  NIET_MAP: NIET_MAP, NIET_MAP_VAST: NIET_MAP_VAST, MAX_VRAAG: MAX_VRAAG, meldingVoor: meldingVoor, MAX_PAGINAS: MAX_PAGINAS,
-  dekkingRegel: dekkingRegel, queryRunVan: queryRunVan, onvolledig: onvolledig, vastOpen: vastOpen, INDEX_MAX_UUR: INDEX_MAX_UUR, L1_SCORE: L1_SCORE };
+  NIET_MAP: NIET_MAP, MAX_VRAAG: MAX_VRAAG, meldingVoor: meldingVoor, MAX_PAGINAS: MAX_PAGINAS,
+  dekkingRegel: dekkingRegel, queryRunVan: queryRunVan, onvolledig: onvolledig, INDEX_MAX_UUR: INDEX_MAX_UUR, L1_SCORE: L1_SCORE };

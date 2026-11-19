@@ -144,7 +144,7 @@ function maak(opt) {
   }
   const koers = function (s) { const k = getal(s && s.dollars_per_euro); return k && k > 0.5 && k < 3 ? k : null; };
 
-  function klusUit(k, vast, dpe) {
+  function klusUit(k, dpe) {
     const usd = getal(k.usd);
     const eur = getal(k.eur) != null ? getal(k.eur) : (usd != null && dpe ? usd / dpe : null);
     const soort = soortVan(k.soort);
@@ -152,8 +152,8 @@ function maak(opt) {
     return {
       datum: DATUM.test(String(k.datum || '')) ? String(k.datum) : null,
       soort: soort, soort_naam: soortNaam(soort), groep: groepVan(soort),
-      onderdeel: vast && gesprek ? null : onderdeelVan(k.onderdeel),
-      wv: wvVan(k.wv), label: vast || gesprek ? null : labelVan(k.klus_label),
+      onderdeel: onderdeelVan(k.onderdeel),
+      wv: wvVan(k.wv), label: gesprek ? null : labelVan(k.klus_label),
       model: modelVan(k.model), account: k.account === 1 || k.account === 2 ? k.account : null,
       begin: typeof k.begin === 'string' && !isNaN(Date.parse(k.begin)) ? new Date(k.begin).toISOString() : null,
       duur_min: getal(k.duur_min), calls: getal(k.calls), startcontext: getal(k.startcontext), eindcontext: getal(k.eindcontext),
@@ -164,7 +164,6 @@ function maak(opt) {
 
   // Het overzicht: per soort, per dag (gestapeld in vaste groepen), top 10 duurste klussen, gewoontesignalen.
   function stand(o) {
-    const vast = !!(o && o.vast);
     let s;
     try { s = samenvatting(); }
     catch (e) { return { ok: true, leeg: true, fout: 'De tokenboekhouding is nu niet te lezen.', tank: o && o.tank ? o.tank : null }; }
@@ -192,7 +191,7 @@ function maak(opt) {
       return { datum: String(r.datum), eur: rond(som, 2), delen: delen };
     }).sort(function (a, b) { return a.datum < b.datum ? -1 : 1; });
     const duurste = (Array.isArray(s.duurste_klussen) ? s.duurste_klussen : []).slice(0, 10).filter(function (k) { return k && typeof k === 'object'; })
-      .map(function (k) { const x = klusUit(k, vast, dpe); delete x.eur_ruw; return x; });
+      .map(function (k) { const x = klusUit(k, dpe); delete x.eur_ruw; return x; });
     const sig = s.signalen || {};
     const signalen = SIGNAAL_VOLGORDE.map(function (n) {
       const r = heeft(sig, n) && sig[n] ? sig[n] : {};
@@ -256,7 +255,7 @@ function maak(opt) {
       };
     })();
     return {
-      ok: true, vaste_plek: vast,
+      ok: true, vaste_plek: false,
       gemeten_op: typeof s.gegenereerd_op === 'string' && !isNaN(Date.parse(s.gegenereerd_op)) ? new Date(s.gegenereerd_op).toISOString() : null,
       periode: { van: DATUM.test(String(per.van)) ? per.van : null, tot: DATUM.test(String(per.tot)) ? per.tot : null, dagen: getal(per.dagen) },
       dollars_per_euro: dpe,
@@ -271,7 +270,6 @@ function maak(opt) {
 
   // De klussen van één dag, duurste eerst, met een optelling per soort. null = ongeldige datum.
   function dag(datum, o) {
-    const vast = !!(o && o.vast);
     if (!DATUM.test(String(datum || ''))) return null;
     let dpe = null;
     try { dpe = koers(samenvatting()); } catch (e) { dpe = null; }
@@ -284,7 +282,7 @@ function maak(opt) {
     String(t).split('\n').forEach(function (r) {
       if (!r.trim()) return;
       if (++regels > REGELS_MAX) { teVeel++; return; }
-      try { const j = JSON.parse(r); if (j && typeof j === 'object' && !Array.isArray(j)) alle.push(klusUit(j, vast, dpe)); else kapot++; } catch (e) { kapot++; }
+      try { const j = JSON.parse(r); if (j && typeof j === 'object' && !Array.isArray(j)) alle.push(klusUit(j, dpe)); else kapot++; } catch (e) { kapot++; }
     });
     // duurste eerst op dezelfde maat als de optelling (euro; zonder koers de dollar), ongerond opgeteld (Opus-review #8)
     const maat = function (k) { return k.eur_ruw != null ? k.eur_ruw : (k.usd || 0); };
@@ -300,7 +298,7 @@ function maak(opt) {
     const soorten = Object.keys(per).map(function (k) { const p = per[k]; p.eur = eurOnbekend ? null : rond(p.eur, 2); p.usd = rond(p.usd, 2); return p; })
       .sort(function (a, b) { return eurOnbekend ? b.usd - a.usd : b.eur - a.eur; });
     alle.forEach(function (k) { delete k.eur_ruw; });
-    return { ok: true, datum: datum, vaste_plek: vast, aantal: alle.length + teVeel, kapot: kapot, te_veel_regels: teVeel,
+    return { ok: true, datum: datum, vaste_plek: false, aantal: alle.length + teVeel, kapot: kapot, te_veel_regels: teVeel,
       eur: eurOnbekend ? null : rond(eurSom, 2),
       soorten: soorten, klussen: alle.slice(0, DAG_MAX), afgekapt: alle.length > DAG_MAX ? alle.length - DAG_MAX : 0, bron: 'tokenboekhouding' };
   }

@@ -5918,18 +5918,12 @@ const APP_VAST = path.join(APP_DATA, 'vast.json');                // wv1051 (OVI
 const APP_APPS_VOLGORDE = path.join(APP_DATA, 'apps-volgorde.json');   // wv2479: Apps-overzicht — eigen volgorde, favorieten, sortering (alleen App-id's)
 const APP_WERKRUIMTES = path.join(APP_DATA, 'werkruimtes.json');   // wv2929: eigen werkruimtes (sets tabs + indeling; alleen id's)
 const APP_APPS_GEOPEND = path.join(APP_DATA, 'apps-geopend.json');     // wv2479: openingen per App per dag (alleen aantallen, 120 dagen)
-// § 4.3: de ene lijst privé-App-id's (catalogus src/modules.ts). Alleen als een vaste plek afschermt (APP_VAST_AFSCHERMEN, sinds wv1901
-// uit): dan weigeren de routes hieronder en gaat vast.json daar zonder deze id's naar de app (geen privé-App in het menu).
+// § 4.3: de ene lijst privé-App-id's (catalogus src/modules.ts); alleen nog een lijst (Apps-overzicht, Brain), geen afscherming.
 const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften', 'mediatheek'];   // wv1269: Mediatheek (20_Prive)
-// wv1901 (David 28-10-2026 16:51: "ik wil op ALLE pc's toegang tot ALLES"): een vaste plek schermt voor David niets meer af; hij ziet
-// daar hetzelfde als op zijn telefoon. Wat blijft (beveiliging, geen afscherming): invoerslot, sessie (BSN-masker op invoer weg sinds wv1931),
-// APP_BEHEER_ROUTES (een gevoelige Ja telt sinds wv2356 wél, met verse vingerafdruk: APP_VAST_JA_DICHT). Eén schakelaar: true = het oude
-// afschermen (terugrol). Ontwerp: vault 01_Ontwikkeling/Vaste plek - alles open (ontwerp 28-10-2026).md
-const APP_VAST_AFSCHERMEN = false;
-function appAfscherm(a) {
-  return APP_VAST_AFSCHERMEN && !!(a && a.soort === 'vast');
-}
-function appPriveDicht(a, id) { return appAfscherm(a) && APP_PRIVE_MODULES.indexOf(id) >= 0; }
+// wv1901 (David 28-10-2026 16:51: "ik wil op ALLE pc's toegang tot ALLES") en wv3446 (David 19-11-2026 18:20: "dat soort filtering doe je
+// niet meer. NERGENS."): een vaste plek schermt voor David niets af; hij ziet daar hetzelfde als op zijn telefoon. De oude
+// afscherm-schakelaar van wv1901 en al zijn takken zijn weg (wv3446; Fable register-zoek § 9: aanzetten lekte of verborg half). Wat blijft is beveiliging, geen afscherming: invoerslot, sessie, APP_BEHEER_ROUTES en de verse vingerafdruk per
+// gevoelige Ja (APP_VAST_JA_DICHT hieronder). Ontwerp: vault 01_Ontwikkeling/Vaste plek - alles open (ontwerp 28-10-2026).md
 // wv2356 (David 4-11-2026 08:04: "Tuurlijk moet dat op elke pc kunnen!"): een gevoelige Ja telt ook vanaf een apparaat met een vaste plek,
 // met dezelfde eisen als op de telefoon: open invoerslot (de telefoon zegt dat David daar is), een verse vingerafdruk met de passkey van DIT
 // apparaat (Windows Hello op de pc), verbruikt per Ja, en dezelfde audit. Geldt voor de Poortwachter-Ja (knop-ja-vers), AIX plaatsen,
@@ -9350,20 +9344,18 @@ const APP_BROED_WACHT_MAX = 5;
 appStaat.broedZonderKaart = appStaat.broedZonderKaart || new Set();
 const appWachtOpDavid = function (w) { return w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')); };
 function appBroedWacht(w, vj, a, vandaag) {
-  const vast = appAfscherm(a);   // wv1901
-  // diffreview wv891 #3: op een vaste plek geen vrije tekst van de rij (de kaart erachter kan privé zijn); de app zegt dan "Een privé-punt"
-  const los = vast ? null : appKort(appVjGewoon(String(w.geblokkeerd_door || '').replace(/^\s*david\s*:?\s*/i, '')), 160) || 'wacht op jou';
+  const los = appKort(appVjGewoon(String(w.geblokkeerd_door || '').replace(/^\s*david\s*:?\s*/i, '')), 160) || 'wacht op jou';
   if (!vj) return [{ wv: w.id, titel: los, punt: null, stand: 'onbekend' }];
   const bij = vj.filter(function (p) { return ((p.herkomst && Array.isArray(p.herkomst.wv)) ? p.herkomst.wv : []).some(function (n) { return Number(n) === Number(w.id); }); })
     .sort(function (x, y) { return y.id - x.id; });
   const zicht = bij.filter(function (p) { return appVjZichtbaar(p, vandaag); });
   const vorm = function (p, stand) {
-    return vast && p.prive === true ? { wv: w.id, titel: null, punt: null, stand: 'prive' } : { wv: w.id, titel: appKort(appVjGewoon(p.titel), 120), punt: stand === 'open' ? p.id : null, stand: stand };
+    return { wv: w.id, titel: appKort(appVjGewoon(p.titel), 120), punt: stand === 'open' ? p.id : null, stand: stand };
   };
-  // Fable wv891 #3: alle zichtbare kaarten van de rij (hooguit 3), een privé-kaart op een vaste plek één keer
+  // Fable wv891 #3: alle zichtbare kaarten van de rij (hooguit 3)
   let uit = zicht.length ? zicht.slice(0, 3).map(function (p) { return vorm(p, 'open'); }) : bij.length ? [vorm(bij[0], 'beantwoord')] : null;
   if (uit) appStaat.broedZonderKaart.delete(w.id);   // diffreview #4: verliest hij later weer zijn kaart, dan opnieuw één logregel
-  if (uit) return uit.filter(function (x, i) { return x.stand !== 'prive' || uit.findIndex(function (y) { return y.stand === 'prive'; }) === i; });
+  if (uit) return uit;
   if (!appStaat.broedZonderKaart.has(w.id)) { appStaat.broedZonderKaart.add(w.id); logError('app-broedstoof', new Error('wv' + w.id + ' wacht op David zonder open Voor jou-kaart')); }
   return [{ wv: w.id, titel: los, punt: null, stand: 'geen' }];
 }
@@ -9485,14 +9477,12 @@ async function appBriefingRoute(req, res, a) {
       } catch (e) { logError('app-briefing', e); return appStuur(res, 200, { ok: true, briefing: null, fout: 'de briefing is nu niet te lezen' }); }
     }
   }
-  appStuur(res, 200, { ok: true, briefing: appBriefingVoor(b, a), vaste_plek: appAfscherm(a), fout: null });
+  appStuur(res, 200, { ok: true, briefing: appBriefingVoor(b), fout: null });
 }
-// wv594: tekst (de hele briefing, voor Lees in Voor jou) en audio ({job_id, n, naam} van de gesproken briefing) alleen op een
-// meereizend apparaat; op een vaste plek alleen de kop (Fable wv891 #5).
-function appBriefingVoor(b, a) {
+// wv594: tekst (de hele briefing, voor Lees in Voor jou) en audio ({job_id, n, naam} van de gesproken briefing), op elk apparaat (wv1901/wv3446).
+function appBriefingVoor(b) {
   if (!b) return null;
   const { stem, tekst, ...kaal } = b;
-  if (appAfscherm(a)) return Object.assign({}, kaal, { regels: [], tekst: null, audio: null });   // wv1901
   return Object.assign({}, kaal, { tekst: tekst || null, audio: appBriefingAudio(stem) });
 }
 function appBriefingAudio(stem) {
@@ -9899,7 +9889,7 @@ const APP_DRAAD_ZIN = {
   afwerk: 'wacht op de lopende afwerkklus', mislukt: 'mislukt', machinekamer: 'wacht op de machinekamer', onbekend: 'wacht op de tikker',
   // wv1853: een rij op "David: …" zonder open kaart is geen "wacht op jou"
   vrijgave: 'je reageerde; de klus gaat zo verder', geen_kaart: 'wacht op jou, maar er staat geen kaart open; de machinekamer ruimt dit op',
-  kaart_onbekend: 'de kaarten zijn nu niet te lezen', ronde: 'je kaart is dicht; de Voor jou-ronde (07:15 of 17:15) zet de klus verder', prive: 'een privé-punt; open Voor jou op je telefoon' };
+  kaart_onbekend: 'de kaarten zijn nu niet te lezen', ronde: 'je kaart is dicht; de Voor jou-ronde (07:15 of 17:15) zet de klus verder' };
 const APP_DRAAD_DAG = ['zo', 'ma', 'di', 'wo', 'do', 'vr', 'za'];
 function appDraadKlok(t) {
   const d = new Date(t);
@@ -9957,18 +9947,15 @@ function appDraadReden(w, poort, byId, reg, nu) {
 // hem "wacht op jou"; later = in de wacht tot die dag; gedaan = komt vrij (appVjVrijgeefLater of de ronde); geen kaart = vastgelopen.
 function appDraadKaart(w, vj, a, vandaag, nu) {
   if (!vj) return { stand: 'onbekend' };
-  const vast = appAfscherm(a);   // wv1901
   const bw = appBroedWacht(w, vj, a, vandaag);
   const open = bw.filter(function (x) { return x.stand === 'open' && x.punt != null; })[0];
   if (open) return { stand: 'open', punt: open.punt };
   const bij = vj.filter(function (p) { return ((p.herkomst && Array.isArray(p.herkomst.wv)) ? p.herkomst.wv : []).some(function (n) { return Number(n) === Number(w.id); }); })
     .sort(function (x, y) { return y.id - x.id; });
-  // review wv1853 #4: "privé" alleen als die privé-kaart echt open staat (appBroedWacht zegt het ook bij een dichte)
-  if (vast && bij.some(function (p) { return p.prive === true && appVjZichtbaar(p, vandaag); })) return { stand: 'prive' };
   // review #6: samengevoegd → de open kaart waarin hij opging
   const doel = bij.filter(function (p) { return p.status === 'samengevoegd' && p.samengevoegd_in; })
     .map(function (p) { return vj.filter(function (q) { return q.sleutel === p.samengevoegd_in && appVjZichtbaar(q, vandaag); })[0]; }).filter(Boolean)[0];
-  if (doel) return vast && doel.prive === true ? { stand: 'prive' } : { stand: 'open', punt: doel.id };
+  if (doel) return { stand: 'open', punt: doel.id };
   const later = bij.filter(function (p) { return p.status === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(p.later_tot || '')); })[0];
   if (later) return { stand: 'later', tot: later.later_tot };
   // review #3: "gaat zo verder" alleen na Davids eigen Gedaan-tik van < 1 dag (dat geeft appVjVrijgeefLater vrij); anders de ronde
@@ -10034,9 +10021,8 @@ function appDradenUit(inv) {
       const k = kaartVan[w.id];
       if (k.stand === 'open') { d = basis(w, 'wacht_op_jou', null); d.sinds = d.aangemaakt; d.punt = k.punt; uit.wacht_op_jou.push(d); return; }
       if (k.stand === 'geen') { d = basis(w, 'vastgelopen', { code: 'geen_kaart', zin: APP_DRAAD_ZIN.geen_kaart }); d.sinds = t(w.bijgewerkt); uit.vastgelopen.push(d); return; }
-      const code = k.stand === 'later' ? 'later' : k.stand === 'gedaan' ? 'vrijgave' : k.stand === 'ronde' ? 'ronde' : k.stand === 'prive' ? 'prive' : 'kaart_onbekend';
+      const code = k.stand === 'later' ? 'later' : k.stand === 'gedaan' ? 'vrijgave' : k.stand === 'ronde' ? 'ronde' : 'kaart_onbekend';
       d = basis(w, 'in_de_wacht', { code: code, zin: code === 'later' ? 'op later gezet tot ' + appVjDag(k.tot) : APP_DRAAD_ZIN[code] });
-      if (code === 'prive') d.onderwerp = 'Een privé-punt';
       d.sinds = code === 'later' ? t(k.tot + 'T07:00:00+01:00') : t(w.bijgewerkt);
       uit.in_de_wacht.push(d); return;
     }
@@ -11310,14 +11296,13 @@ async function appAutokastje(req, res) {
 // voorwerkpagina's uit `00_Systeem/Voorwerk/`. Alles alleen in het geheugen van de pod (3 min, alle apparaten delen het), niets op
 // schijf; de app houdt het alleen in het geheugen (§ 4.11). Omschrijvingen van afspraken en de inhoud van concepten komen niet mee.
 // Agendatitels komen volledig mee: de app leest alleen David, en naar hem toe filteren we nooit op mogelijke patiëntgegevens
-// (wv576, David 16-10: "Jij moet NOOIT dingen filteren naar mij toe"; was Fable-review wv136 #2). Op een apparaat met een vaste
-// plek geen Gezin/Schapies en geen concepten (#5).
+// (wv576, David 16-10: "Jij moet NOOIT dingen filteren naar mij toe"; was Fable-review wv136 #2). Ook op een apparaat met een vaste
+// plek alles, ook Gezin/Schapies en concepten (wv1901/wv3446).
 const APP_VANDAAG_CACHE_MS = 3 * 60 * 1000;   // n8n bewaart elke run van de Agenda-API met inhoud (Fable-review wv136 #1): zuinig lezen
 const APP_AGENDA_WF = process.env.APP_AGENDA_WF || 'JD0yNxPq79jXk25J';          // AI - Agenda-Wachter API (alleen lezen)
 const APP_PORTIE_TABEL = process.env.APP_PORTIE_TABEL || 'jTz5tgWWPhkFz9Be';    // n8n Data Table voorwerk_portie
 const APP_VOORWERK_DIR = path.join(process.env.APP_VAULT_DIR || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', '00_Systeem', 'Voorwerk');
 const APP_VOORWERK_MAX = 64 * 1024;
-const APP_AGENDA_PRIVE = /^(gezin|schapies)$/i;
 const APP_GMAIL_CONCEPTEN = 'https://mail.google.com/mail/?authuser=d.schaap@gmail.com#drafts';
 
 function appYmd(t) {   // lokale kalenderdag (Europe/Amsterdam) als JJJJ-MM-DD
@@ -11498,11 +11483,8 @@ async function appVandaagRoute(req, res, a) {
   res._app.stil = true;   // de app leest bij openen en op Ververs
   let d;
   try { d = await appVandaag(); } catch (e) { logError('app-vandaag', e); return appWeiger(res, 503, 'je dag is nu niet te lezen', 'vandaag fout'); }
-  const vast = appAfscherm(a);   // wv1901
-  const zonderPrive = function (l) { return l.filter(function (x) { return !APP_AGENDA_PRIVE.test(x.kalender); }); };
-  appStuur(res, 200, { ok: true, vandaag: d.vandaag, morgen: d.morgen,
-    agenda: d.agenda && vast ? { vandaag: zonderPrive(d.agenda.vandaag), morgen: zonderPrive(d.agenda.morgen) } : d.agenda,
-    acties: appActiesNu(d.acties), concepten: vast ? null : d.concepten, voorwerk: d.voorwerk, vaste_plek: vast,
+  appStuur(res, 200, { ok: true, vandaag: d.vandaag, morgen: d.morgen, agenda: d.agenda,
+    acties: appActiesNu(d.acties), concepten: d.concepten, voorwerk: d.voorwerk,
     fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
 }
 
@@ -11595,7 +11577,7 @@ async function appActieRoute(req, res, a, d) {
 // via mk_voor_jou_status, met compare-and-set op de status die de app zag (Fable M5). Register en Todoist raakt de pod niet; de
 // beheerronde opent bij Gedaan de werkvoorraadrij met niet_voor +15 min (Fable M4), dus een ↩️ binnen de minuut start nooit een
 // agent. Uitzondering sinds wv506: bij Niet meer nodig zet de pod na de ↩️-minuut de rij erachter op vervallen (appVjDoorzetLater). wv404 (David 10-10, herziet M8): een besluit krijgt in de details Ja / Nee / Anders onder de volledige vraag en
-// het voorstel; de druk gaat door appKnop (zelfde vingerafdruk, rij, idempotentie in vragen.json), zie appVoorJouKnop. Privé-punten (kolom prive) niet op een apparaat met een vaste plek (M6). In de lijst geen bewijs, herkomst of
+// het voorstel; de druk gaat door appKnop (zelfde vingerafdruk, rij, idempotentie in vragen.json), zie appVoorJouKnop. Privé-punten (kolom prive) op elk apparaat (wv1901/wv3446). In de lijst geen bewijs, herkomst of
 // meting; die alleen in de details. Teksten staan al gefilterd in de tabel (voor_jou_tekst_ok); de pod houdt alleen sleutelachtige
 // registertekst tegen, nooit tekst die op een patiënt lijkt (wv576, David 16-10: naar hem toe nooit filteren).
 const APP_VJ_CACHE_MS = 60 * 1000;
@@ -11675,7 +11657,7 @@ function appVjZichtbaar(p, vandaag) { return p.status === 'open' || (p.status ==
 function appVjDichtbij(p, vandaag) { return /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) && p.deadline <= appYmdPlus(vandaag, 1); }   // deadline ≤ 48 u: vandaag, morgen of al over tijd
 // wv1706 (OVIS M3b, ontwerplijnen § 3.4/§ 4.1): het doel van een kaart naar de app — module = catalogus-id, doel = { scherm, focus }.
 // Alleen vaste vormen (id's van kleine letters, focus "<soort>:<waarde>" zonder spaties, hooguit 100 tekens); al het andere = geen doel
-// (de app laat de kaart dan groeien in Overzicht). Op een vaste plek nooit een doel naar een privé-module (APP_PRIVE_MODULES, § 4.3).
+// (de app laat de kaart dan groeien in Overzicht). Op elk apparaat hetzelfde doel, ook naar een privé-module (wv1901/wv3446).
 const APP_VJ_MODULE_RE = /^[a-z][a-z0-9-]{1,39}$/;
 const APP_VJ_FOCUS_RE = /^[a-z][a-z-]{0,19}:[A-Za-z0-9._:\/-]{1,80}$/;
 function appVjDoel(p, a) {
@@ -11684,9 +11666,6 @@ function appVjDoel(p, a) {
   const d = h.doel && typeof h.doel === 'object' && !Array.isArray(h.doel) ? h.doel : null;
   const scherm = d && typeof d.scherm === 'string' && APP_VJ_MODULE_RE.test(d.scherm) ? d.scherm : null;
   const focus = scherm && typeof d.focus === 'string' && APP_VJ_FOCUS_RE.test(d.focus) ? d.focus : null;
-  const vast = appAfscherm(a);   // wv1901
-  const prive = function (id) { return !!id && APP_PRIVE_MODULES.indexOf(id) >= 0; };
-  if (vast && (prive(m) || prive(scherm))) return { module: null, doel: null };   // review wv1706 #2: ook het privé-id niet
   return { module: m, doel: scherm ? { scherm: scherm, focus: focus } : null };
 }
 async function appVjPunten() {
@@ -11874,7 +11853,6 @@ function appVjVoorwaardeStart(poging) {
   if (t && t.unref) t.unref();
 }
 if (APP_ECHT) appVjVoorwaardeStart(0);
-function appVjVoorApparaat(punten, a) { const vast = appAfscherm(a); return punten.filter(function (p) { return !(vast && p.prive === true); }); }
 function appVjKort(p, vandaag) {
   return { id: p.id, soort: ['doen', 'besluit', 'proef'].indexOf(p.soort) >= 0 ? p.soort : 'doen', titel: appKort(appVjGewoon(p.titel), 120), regel2: appVjRegel2(p, vandaag),
     deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) ? p.deadline : null, dichtbij: appVjDichtbij(p, vandaag),
@@ -11884,7 +11862,7 @@ function appVjKort(p, vandaag) {
 // Telling voor /app/nieuw en Agents: zichtbare punten (en hoeveel met een deadline binnen 48 u) voor dit apparaat
 async function appVjTelling(a) {
   const vandaag = appYmd(Date.now());
-  const z = appVjVoorApparaat(await appVjPunten(), a).filter(function (p) { return appVjZichtbaar(p, vandaag); });
+  const z = (await appVjPunten()).filter(function (p) { return appVjZichtbaar(p, vandaag); });
   return { open: z.length, dichtbij: z.filter(function (p) { return appVjDichtbij(p, vandaag); }).length };
 }
 // ↩️ alleen op het apparaat dat koos (Fable wv335 #4): een ander apparaat ziet het punt gewoon als gesloten
@@ -11902,7 +11880,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   let punten;
   try { punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appStuur(res, 200, { ok: true, punten: [], later: [], meer: 0, fout: 'de lijst is nu niet te lezen' }); }
   const nu = Date.now(), vandaag = appYmd(nu);
-  const eigen = appVjVoorApparaat(punten, a);
+  const eigen = punten;
   const zichtbaar = eigen.filter(function (p) { return appVjZichtbaar(p, vandaag); }).slice(0, APP_VJ_MAX);
   // Net gekozen (↩️ nog mogelijk): blijft een minuut in de lijst, met de nieuwe stand
   const net = eigen.filter(function (p) { return !appVjZichtbaar(p, vandaag) && appVjTerugMs(p.id, nu, a.id) > 0; });
@@ -11931,12 +11909,12 @@ async function appVoorJouRoute(req, res, a, kanaal) {
     .map(function (p) { return { id: p.id, titel: appKort(p.titel, 120), status: p.status, t: p.gesloten_op, beantwoord: appVjBeantwoordKort(p, vr, af.map) }; });
   // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten).
   // wv926 (Fable-diffreview #1): alleen op GET /app/voor-jou/kanaal (sinds wv946 de enige weg van de app); /app/voor-jou blijft zoals main.
-  const basisAntwoord = { ok: true, punten: lijst, later: later, afgehandeld: afgehandeld, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: appAfscherm(a),
+  const basisAntwoord = { ok: true, punten: lijst, later: later, afgehandeld: afgehandeld, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5),
     bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null };
   if (!kanaal) return appStuur(res, 200, basisAntwoord);
   let moet = null, moetFout = null;
-  // review wv594 #1: ontdubbelen tegen ALLE kaarten (ook privé, die een vaste plek niet toont); op een vaste plek geen hoofdkanaal
-  try { moet = (await appMoetIets(punten, nu, af)).filter(function (m) { return !(appAfscherm(a) && m.kanaal === 'hoofd'); }); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
+  // review wv594 #1: ontdubbelen tegen ALLE kaarten
+  try { moet = await appMoetIets(punten, nu, af); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
   const sleutels = [];
   lijst.forEach(function (p) { sleutels.push('k:' + p.id); if (p.deadline && p.deadline < vandaag) sleutels.push('k:' + p.id + ':over'); });
   (moet || []).forEach(function (m) { sleutels.push(m.punt); });
@@ -12153,7 +12131,7 @@ async function appTeLezen(a, moet, nu) {
   const g = appGezienDavid();
   const moetJobs = new Set((moet || []).map(function (m) { return m.job_id; }));
   const uit = teLezenMod.uit({ per: per, klussen: klussen, staat: appTeLezenStaat(), tabs: g ? g.tabs : {}, inBeeld: g ? g.punten : {},
-    vraag: appTeLezenVraag, moet: moetJobs, vast: appAfscherm(a), nu: nu });
+    vraag: appTeLezenVraag, moet: moetJobs, nu: nu });
   // gezien-david.json onleesbaar: dan geen tabtijden, dus antwoorden die David misschien al zag; zeg dat (de app toont geen getal)
   return Object.assign(uit, { fout: klussen === null ? 'de rapporten van je klussen zijn nu niet te lezen' : null, gezien_bekend: !!g });
 }
@@ -12162,7 +12140,6 @@ async function appTeLezen(a, moet, nu) {
 async function appTeLezenZet(req, res, a, d) {
   if (!teLezenMod) return appWeiger(res, 404, 'onbekend', 'te-lezen module');
   const kanaal = String((d && d.kanaal) || ''), job = String((d && d.job_id) || ''), actie = String((d && d.actie) || '');
-  if (appAfscherm(a) && kanaal === 'hoofd') return appWeiger(res, 403, 'niet op een vaste plek', 'te-lezen vast hoofd');
   if (!appTeller('telezen', APP_TE_LEZEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens te-lezen');
   let bestaat = null;
   if (actie === 'bewaar' && teLezenMod.JOB_RE.test(job) && (kanaal === 'hoofd' || kanaal === 'machinekamer')) {
@@ -12513,7 +12490,7 @@ async function appVoorJouDetail(req, res, a, idTekst) {
   if (!appTeller('vjdetail', APP_VJ_DETAIL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur; probeer het straks', 'grens details');
   let punten;
   try { punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen', 'voor-jou lezen'); }
-  const p = appVjVoorApparaat(punten, a).find(function (x) { return x.id === Number(idTekst); });
+  const p = punten.find(function (x) { return x.id === Number(idTekst); });
   if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'voor-jou ' + idTekst + ' weg');
   const nu = Date.now(), vandaag = appYmd(nu);
   const h = p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
@@ -12563,7 +12540,7 @@ async function appVoorJouKeuze(req, res, a, d) {
   if (!appTeller('voorjou', APP_VJ_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_VJ_PER_UUR + ')', 'grens voor-jou');
   let punten;
   try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
-  const p = appVjVoorApparaat(punten, a).find(function (x) { return x.id === id; });
+  const p = punten.find(function (x) { return x.id === id; });
   if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'voor-jou ' + id + ' weg');
   let body;
   const t = appStaat.vjTerug[id];
@@ -12719,7 +12696,7 @@ async function appVoorJouWoord(req, res, a, d) {
   if (!appTeller('swkeuze', SW_KEUZE_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + SW_KEUZE_PER_UUR + ')', 'grens sw-woord');
   let punten;
   try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
-  const p = appVjVoorApparaat(punten, a).find(function (x) { return x.id === id; });
+  const p = punten.find(function (x) { return x.id === id; });
   const kenmerk = p ? appSwKenmerk(p) : null;
   if (!p || !kenmerk) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'sw-woord ' + id + ' weg');
   const r = await appSwPy(['keuze', '--vault', APP_VJ_VAULT, '--kenmerk', kenmerk, '--sleutel', sleutel, '--kies', kies, '--door', 'app ' + String(a.id || '').slice(0, 12)]);
@@ -12760,7 +12737,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   if (!appTeller('voorjou', APP_VJ_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_VJ_PER_UUR + ')', 'grens voor-jou');   // Fable wv404 #9
   let punten;
   try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
-  const p = appVjVoorApparaat(punten, a).find(function (x) { return x.id === id; });
+  const p = punten.find(function (x) { return x.id === id; });
   if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'voor-jou ' + id + ' weg');
   if (p.soort !== 'besluit') return appWeiger(res, 400, 'alleen een besluit heeft Ja / Nee / Anders', 'voor-jou knop geen besluit');
   const rv = await appVjRegisterVraag(p);
@@ -12941,7 +12918,7 @@ async function appAnders(req, res, reg, a, s, d) {
     if (!Number.isInteger(id) || id < 1 || id > 999999999) return appWeiger(res, 400, 'ongeldige knop', 'anders kaart id');
     let punten;
     try { punten = await appVjPuntenVers(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
-    const p = appVjVoorApparaat(punten, a).find(function (x) { return x.id === id; });
+    const p = punten.find(function (x) { return x.id === id; });
     if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'anders kaart ' + id + ' weg');
     const rv = await appVjRegisterVraag(p);
     let gekRij = null;
@@ -13050,8 +13027,6 @@ const APP_ACTIE_STATE_TABEL = process.env.APP_ACTIE_STATE_TABEL || 'vNAY2dVRpSx1
 const APP_CORR_STATE_TABEL = process.env.APP_CORR_STATE_TABEL || 'pnX6vvg2iv256HAB';
 // Todoist-project Privé. De Inbox niet: daar staan ook de werktaken (label socev; gemeten 10-10), en de regeltekst staat op een vaste
 // plek toch al in het actielijstje
-const APP_TODOIST_PRIVE = (process.env.APP_TODOIST_PRIVE || '6gH8FwGg4FjJgHcF').split(',');
-const APP_ENTITEIT_PRIVE = /(^|[^a-z])(priv[eé]|gezin|gambia|thuis|persoonlijk)/i;   // gemeten 9-10: 'Prive', 'Prive/Gambia', 'Prive/Shizzle'
 // Zoals appKort, maar regels blijven (een Todoist-beschrijving is vaak een lijstje)
 function appVjRegels(s, n) {
   s = String(s == null ? '' : s).replace(/\r/g, '').replace(/[\u0000-\u0009\u000b-\u001f\u007f]+/g, ' ').replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -13069,7 +13044,7 @@ async function appVandaagActieDetail(req, res, a, rest) {
   res._app.stil = true;
   const m = /^(\d{4}-\d{2}-\d{2})\/([1-9]|10)$/.exec(rest);
   if (!m) return appWeiger(res, 404, 'onbekend', 'actie-detail pad');
-  const datum = m[1], positie = Number(m[2]), vast = appAfscherm(a);   // wv1901
+  const datum = m[1], positie = Number(m[2]);
   if (!appTeller('vjdetail', APP_VJ_DETAIL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur; probeer het straks', 'grens details');
   let rijen;
   try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-actie-detail', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen', 'actie-detail lezen'); }
@@ -13084,7 +13059,6 @@ async function appVandaagActieDetail(req, res, a, rest) {
     if (bron === 'todoist' && /^[A-Za-z0-9]{6,40}$/.test(sl)) {
       const t = await appTodoistTaak(sl);
       if (!t) uit.fout = 'deze Todoist-taak bestaat niet meer (afgevinkt of verwijderd)';
-      else if (vast && APP_TODOIST_PRIVE.indexOf(String(t.project_id || '')) >= 0) uit.prive = true;
       else {
         const tekst = appSleutelMasker(t.content || ''), besch = appSleutelMasker(t.description || '');
         uit.tekst = appKort(appVjOpmaakWeg(tekst), 500); uit.toelichting = besch ? appVjRegels(besch, 1500) : null;
@@ -13096,7 +13070,6 @@ async function appVandaagActieDetail(req, res, a, rest) {
     } else if (bron === 'actie_state' && /^[A-Za-z0-9._-]{3,120}$/.test(sl)) {
       const r = (await appN8nRijen(APP_ACTIE_STATE_TABEL, { type: 'and', filters: [{ columnName: 'actie_id', condition: 'eq', value: sl }] }, 1))[0];
       if (!r) uit.fout = 'dit actiepunt staat niet meer in de bewaking';
-      else if (vast && APP_ENTITEIT_PRIVE.test(String(r.entiteit || ''))) uit.prive = true;
       else {
         uit.tekst = appKort(appSleutelMasker(r.actie), 1000);
         const pg = /([^\/|,]+?)\.md\b/.exec(String(r.bron || ''));
@@ -13109,7 +13082,6 @@ async function appVandaagActieDetail(req, res, a, rest) {
       const r = (await appN8nRijen(APP_CORR_STATE_TABEL, { type: 'and', filters: [{ columnName: 'thread_id', condition: 'eq', value: sl }] }, 1))[0];
       const maten = r && /doktersmaten/i.test(String(r.bron || ''));
       if (!r) uit.fout = 'deze mail staat niet meer in de bewaking';
-      else if (vast && !maten) uit.prive = true;
       else {   // Fable wv335 #1: ook de naam door de sleuteltoets
         uit.onderwerp = appKort(appSleutelMasker(r.onderwerp), 300); uit.aan = r.tegenpartij ? appKort(appSleutelMasker(r.tegenpartij), 160) : null;
         uit.op = /^\d{4}-\d{2}-\d{2}/.test(String(r.verzonden_op || '')) ? String(r.verzonden_op).slice(0, 10) : null;
@@ -13120,8 +13092,7 @@ async function appVandaagActieDetail(req, res, a, rest) {
       }
     } else uit.fout = 'van deze bron heb ik geen details';
   } catch (e) { logError('app-actie-detail', e); uit.fout = 'de bron is nu niet te lezen; probeer het zo opnieuw'; }
-  if (uit.prive) { uit.tekst = null; uit.toelichting = null; uit.link = null; uit.link_tekst = null; uit.onderwerp = null; uit.aan = null; }
-  res._app.reden = 'actie-detail ' + datum + '#' + positie + (uit.verborgen ? ' verborgen' : uit.prive ? ' prive' : uit.fout ? ' fout' : '');
+  res._app.reden = 'actie-detail ' + datum + '#' + positie + (uit.verborgen ? ' verborgen' : uit.fout ? ' fout' : '');
   appStuur(res, 200, uit);
 }
 
@@ -13626,8 +13597,7 @@ async function appPraktijkenRoute(req, res, a) {
 
 // ── App Financiën (wv771; bouwplan idee 16 § 11): privégeld, alleen lezen ──
 // Eén route zonder parameters. Het bankkind (bank-lezer.js app-financien, lokaal: geen kluis, geen bankopvraag) bouwt het antwoord veld
-// voor veld op (financien-app.js); hier alleen doorgeven. Op een vaste plek alleen als die afschermt (APP_VAST_AFSCHERMEN, sinds wv1901
-// uit) 200 met vaste_plek en een zin (Fable wv771 #15); anders zoals overal. Wél een auditregel per keer openen (route, apparaat,
+// voor veld op (financien-app.js); hier alleen doorgeven, op elk apparaat (wv1901/wv3446). Wél een auditregel per keer openen (route, apparaat,
 // status; geen inhoud): één verzoek geeft het hele privé-overzicht (Fable #14). 60 s in het geheugen tegen Ververs-spam en als terugval
 // als de database even bezet is (bankronde); niets op schijf. Grens 20 s (Fable #13).
 const APP_FIN_CACHE_MS = 60000, APP_FIN_MAX_MS = 20000, APP_FIN_TERUGVAL_MS = 30 * 60000;
@@ -13663,7 +13633,6 @@ function appFinSamen(basis, d, v) {
 }
 async function appFinancien(req, res, a) {
   res._app.reden = 'financien';
-  if (appPriveDicht(a, 'financien')) return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'Financiën staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' });
   const nu = Date.now();
   if (appFinCache && nu - appFinCache.op < APP_FIN_CACHE_MS) return appStuur(res, 200, appFinSamen({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString() }, appFinCache.d, appFinVault(nu)));
   let r;
@@ -13690,7 +13659,6 @@ async function appFinancien(req, res, a) {
 const APP_FIN_REK_PER_UUR = 60;
 async function appFinRekening(req, res, a, d) {
   res._app.reden = 'financien-rekening';
-  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'financien vast');
   const q = {};
   if (!/^[a-f0-9]{16}$/.test(String(d.id || ''))) return appWeiger(res, 400, 'onbekende rekening', 'fin-rekening id');
   q.id = String(d.id);
@@ -13748,7 +13716,6 @@ async function appFinBankRoute(res, opdracht, invoer, naam) {
 }
 async function appFinBoekingen(req, res, a, d) {
   res._app.reden = 'financien-boekingen';
-  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-boekingen vast');
   const q = appFinFilter(d);
   if (!q) return appWeiger(res, 400, 'onbekend filter', 'fin-boekingen filter');
   if (!appTeller('fin-boekingen', APP_FIN_BOEK_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak opgevraagd dit uur', 'grens fin-boekingen');
@@ -13760,7 +13727,6 @@ async function appFinBoekingen(req, res, a, d) {
 }
 async function appFinStroom(req, res, a, d) {
   res._app.reden = 'financien-stroom';
-  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-stroom vast');
   if (!/^[a-f0-9]{16}$/.test(String(d.id || ''))) return appWeiger(res, 400, 'onbekende tegenpartij', 'fin-stroom id');
   if (d.stroom !== null && ['leven', 'inkomen', 'verschuiven', 'intern'].indexOf(d.stroom) < 0) return appWeiger(res, 400, 'onbekende stroom', 'fin-stroom stroom');
   if (d.subsoort != null && !/^[a-z_]{1,20}$/.test(String(d.subsoort))) return appWeiger(res, 400, 'onbekende subsoort', 'fin-stroom subsoort');
@@ -13788,7 +13754,6 @@ function appFinReizenLijst() {
 }
 async function appFinReizen(req, res, a, d) {
   res._app.reden = 'financien-reizen';
-  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-reizen vast');
   if (d.reis != null && !/^[0-9a-f]{12}$/.test(String(d.reis))) return appWeiger(res, 400, 'onbekende reis', 'fin-reizen id');
   if (!appTeller('fin-reizen', APP_FIN_REIS_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak opgevraagd dit uur', 'grens fin-reizen');
   let lijst = null;
@@ -13802,7 +13767,6 @@ async function appFinReizen(req, res, a, d) {
 }
 async function appFinReislabel(req, res, a, d) {
   res._app.reden = 'financien-reislabel';
-  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-reislabel vast');
   if (!/^[0-9a-f]{12}$/.test(String(d.reis || ''))) return appWeiger(res, 400, 'onbekende reis', 'fin-reislabel reis');
   if (!Number.isSafeInteger(d.nr) || d.nr <= 0) return appWeiger(res, 400, 'onbekende boeking', 'fin-reislabel nr');
   if (d.keuze !== null && d.keuze !== 'erbij' && d.keuze !== 'eraf') return appWeiger(res, 400, 'onbekende keuze', 'fin-reislabel keuze');
@@ -13822,7 +13786,6 @@ async function appFinReislabel(req, res, a, d) {
 const APP_FIN_VERMOGEN_PER_UUR = 300;
 async function appFinVermogen(req, res, a, d) {
   res._app.reden = 'financien-vermogen';
-  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-vermogen vast');
   if (!appTeller('fin-vermogen', APP_FIN_VERMOGEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak opgevraagd dit uur', 'grens fin-vermogen');
   const j = await appFinBankRoute(res, 'app-vermogen', {}, 'fin-vermogen');
   if (!j || j.ok !== true) return;
@@ -13841,7 +13804,6 @@ async function appFinVermogen(req, res, a, d) {
 const APP_FIN_CORR_PER_UUR = 60, APP_FIN_NAAM_PER_UUR = 60, APP_FIN_REGELS_PER_UUR = 300;
 async function appFinCorrigeer(req, res, a, d, route) {
   res._app.reden = 'financien-corrigeer';
-  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-corrigeer vast');
   const tekst = function (x, n) { return x == null ? null : typeof x === 'string' && x.length <= n ? x : undefined; };
   let q;
   if (route === 'POST /app/financien/regels') {
@@ -13896,7 +13858,6 @@ function appFinVooruit() {
 }
 async function appFinDoel(req, res, a, d) {
   res._app.reden = 'financien-doel';
-  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-doel vast');
   const V = appFinVooruit();
   if (!V) return appWeiger(res, 503, 'Financiën wordt net bijgewerkt; probeer het over een paar minuten', 'fin-doel oud');
   if (d.actie !== 'nieuw' && d.actie !== 'weg') return appWeiger(res, 400, 'onbekende actie', 'fin-doel actie');
@@ -13940,7 +13901,6 @@ function appFinPlan() {
 }
 async function appFinPotje(req, res, a, d) {
   res._app.reden = 'financien-potje';
-  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'fin-potje vast');
   const P = appFinPlan();
   if (!P) return appWeiger(res, 503, 'Financiën wordt net bijgewerkt; probeer het over een paar minuten', 'fin-potje oud');
   if (d.actie !== 'zet' && d.actie !== 'weg') return appWeiger(res, 400, 'onbekende actie', 'fin-potje actie');
@@ -14003,7 +13963,6 @@ async function appGezondheid(req, res, a, route) {
   res._app.reden = route === 'GET /app/gezondheid' ? 'gezondheid' : 'gezondheid genoom';
   const gezondheid = gezondheidMod();
   if (!gezondheid) return appWeiger(res, 404, 'Gezondheid zit niet in deze versie van de pod', 'gezondheid ontbreekt');
-  if (appPriveDicht(a, 'gezondheid')) return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'Gezondheid staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' });
   const nu = Date.now(), c = appGezCache[route];
   if (c && nu - c.op < APP_GEZ_CACHE_MS) return appStuur(res, 200, Object.assign({}, c.j, { vaste_plek: false, bijgewerkt: new Date(c.op).toISOString() }));
   let r;
@@ -14080,7 +14039,6 @@ function potAfAntwoord(j) {
 }
 async function appPotAfschriften(req, res, a) {
   res._app.reden = 'pot-afschriften';
-  if (appPriveDicht(a, 'pot-afschriften')) return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'POT-afschriften staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek (er staan salarisgegevens in).' });
   if (!potAfAan()) return appWeiger(res, 503, 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten', 'pot uit');
   let r;
   try { r = await bankKind(['pot-afschrift-maanden'], {}, POT_AF_MAX_MS); } catch (e) { r = null; }
@@ -14113,7 +14071,6 @@ function potAfMaandUit(res, d) {
   return maand;
 }
 async function appPotMaak(req, res, a, d) {
-  if (appAfscherm(a)) return appWeiger(res, 403, 'POT-afschriften kan niet vanaf een pc met een vaste plek; gebruik je telefoon of laptop', 'pot vast');
   const maand = potAfMaandUit(res, d); if (!maand) return;
   if (!potAfAan()) return appWeiger(res, 503, 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten', 'pot uit');
   if (potAfBezig) return appWeiger(res, 409, 'er wordt al een afschrift gemaakt; probeer het zo nog eens', 'pot bezig');
@@ -14126,7 +14083,6 @@ async function appPotMaak(req, res, a, d) {
   appStuur(res, 200, { ok: true, afschrift: potAfAntwoord(j) });
 }
 async function appPotBestand(req, res, a, rest) {
-  if (appAfscherm(a)) return appWeiger(res, 403, 'POT-afschriften kan niet vanaf een pc met een vaste plek', 'pot vast');
   const m0 = /^(\d{4}-(?:0[1-9]|1[0-2]))\/(mt940|pdf)$/.exec(rest);
   if (!m0) return appWeiger(res, 404, 'onbekend', 'pot bestand pad');
   if (!appTeller('bestand', APP_BESTAND_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel downloads dit uur (max ' + APP_BESTAND_PER_UUR + ')', 'grens bestand');
@@ -14217,7 +14173,6 @@ function potAfFacTekst(f, sha, modus) {
   return null;
 }
 async function appPotConcept(req, res, a, s, d) {
-  if (appAfscherm(a)) return appWeiger(res, 403, 'een mailconcept klaarzetten kan niet vanaf een pc met een vaste plek; gebruik je telefoon of laptop', 'pot vast');
   const maand = potAfMaandUit(res, d); if (!maand) return;
   if (!potAfAan()) return appWeiger(res, 503, 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten', 'pot uit');
   if (potAfBezig) return appWeiger(res, 409, 'er wordt al een afschrift gemaakt; probeer het zo nog eens', 'pot bezig');
@@ -14519,12 +14474,10 @@ async function appProjectenRoute(req, res, a) {
   res._app.stil = true;   // de app leest bij openen en op Ververs
   let d;
   try { d = appProjecten(); } catch (e) { logError('app-projecten', e); return appWeiger(res, 503, 'de projecten zijn nu niet te lezen', 'projecten fout'); }
-  const vast = appAfscherm(a);   // wv1901
   const per = {};
   APP_PROJ_ENT.forEach(function (e) { per[e.code] = { code: e.code, naam: e.naam, prive: !!e.prive, deadlines: [], later: 0, verlopen: 0, lopend: [] }; });
-  const zicht = function (e) { return !(vast && per[e].prive); };
+  const zicht = function (e) { return true; };
   d.deadlines.forEach(function (x) {
-    if (vast && x.hr) return;   // Fable wv373 M4: geen medewerkersregels op een praktijk-pc
     x.ents.forEach(function (e) {
       if (!zicht(e)) return;
       const p = per[e];
@@ -14534,14 +14487,14 @@ async function appProjectenRoute(req, res, a) {
       p.deadlines.push({ datum: x.datum, dagen: x.dagen, titel: x.titel, actie: x.actie, bron: x.bron.pad || x.bron.naam ? { naam: x.bron.naam, pad: x.bron.pad } : null });
     });
   });
-  if (!vast) d.lopend.forEach(function (x) { x.ents.forEach(function (e) { per[e].lopend.push({ titel: x.titel, tekst: x.tekst, bron: x.bron }); }); });
+  d.lopend.forEach(function (x) { x.ents.forEach(function (e) { per[e].lopend.push({ titel: x.titel, tekst: x.tekst, bron: x.bron }); }); });
   const lijst = APP_PROJ_ENT.map(function (e) { return per[e.code]; }).filter(function (e) { return zicht(e.code) && (e.deadlines.length || e.lopend.length); });
   const metLink = function (b) { return b ? { naam: b.naam, link: null } : null; };
   lijst.forEach(function (e) {
     e.deadlines = e.deadlines.map(function (x) { return Object.assign({}, x, { bron: metLink(x.bron) }); });
     e.lopend = e.lopend.map(function (x) { return Object.assign({}, x, { bron: metLink(x.bron) }); });
   });
-  appStuur(res, 200, { ok: true, vaste_plek: vast, vandaag: d.vandaag, entiteiten: lijst, fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
+  appStuur(res, 200, { ok: true, vandaag: d.vandaag, entiteiten: lijst, fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
 }
 
 // ── Werkkamer-tegels zonder taalmodel (wv561, 19-10-2026; akkoord David 19-10 17:40, app-knop) ──────────────────────
@@ -15794,9 +15747,7 @@ async function appSleutelLijst() {
   return { sleutels: uit, fouten: fouten };
 }
 async function appSleutels(req, res, a) {
-  // Fable-review wv157 K5: een werk-pc kreeg geen inventaris van sleutelnamen; sinds wv1901 alleen nog als de vaste plek afschermt
-  // wv1901: de lijst (namen, nooit waarden) ook op een vaste plek; vast blijft het echte soort (vervangen en weggooien zijn beheer)
-  if (appAfscherm(a)) return appStuur(res, 200, { ok: true, sleutels: [], fouten: [], vast: true, primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
+  // wv1901/wv3446: de lijst (namen, nooit waarden) op elk apparaat; vast blijft het echte soort (vervangen en weggooien zijn beheer)
   const l = await appSleutelLijst();
   appStuur(res, 200, { ok: true, sleutels: l.sleutels, fouten: l.fouten, vast: appVastBeheerDicht(a), primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
 }
@@ -18081,7 +18032,6 @@ function appVastModule() {
 function appVastRoute(req, res, a, d) {
   const L = appVastModule();
   if (!L) return appWeiger(res, 404, 'onbekend', 'vast ontbreekt');
-  const vp = appAfscherm(a);   // wv1901: alleen als de vaste plek afschermt een deel van de lijst (en dan niet vastzetten)
   let j = null;
   try { j = appLeesStreng(APP_VAST, null); }
   catch (e) {   // Fable diff #5: kapot = apart zetten (één keer loggen, met de hand te herstellen), dan de standaard
@@ -18090,10 +18040,10 @@ function appVastRoute(req, res, a, d) {
   }
   const nu = L.uitBestand(j);
   const antwoord = function (lijst, standaard) {
-    appStuur(res, 200, { ok: true, vast: L.voorApparaat(lijst, vp, APP_PRIVE_MODULES), standaard: standaard, vaste_plek: vp, per_plek: 5 });
+    appStuur(res, 200, { ok: true, vast: lijst.slice(), standaard: standaard, per_plek: 5 });
   };
   if (req.method !== 'POST') { res._app.reden = 'vast'; res._app.stil = true; return antwoord(nu.lijst, nu.standaard); }   // de app vraagt dit om de paar minuten
-  const u = L.pas(nu.lijst, d, vp);
+  const u = L.pas(nu.lijst, d);
   if (!u.ok) return appWeiger(res, u.status, u.fout, u.reden);
   res._app.reden = 'vast ' + d.actie + ' ' + String(d.scherm).slice(0, 40) + (u.veranderd ? '' : ' (al zo)');
   if (!u.veranderd) return antwoord(nu.lijst, nu.standaard);
@@ -18116,7 +18066,6 @@ function appAppsVandaag() { return new Date().toLocaleDateString('en-CA', { time
 function appAppsVolgordeRoute(req, res, a, d) {
   const L = appVastModule();
   if (!L || typeof L.volgordePas !== 'function') return appWeiger(res, 404, 'onbekend', 'volgorde ontbreekt');
-  const vp = appAfscherm(a);
   let j = null;
   try { j = appLeesStreng(APP_APPS_VOLGORDE, null); }
   catch (e) {   // kapot = apart zetten (zoals vast.json) en de standaard tonen
@@ -18126,12 +18075,11 @@ function appAppsVolgordeRoute(req, res, a, d) {
   const nu = L.volgordeUitBestand(j, appVastLijstVoorVolgorde(L));
   const antwoord = function (stand, status, extra) {
     const m = L.meest(appAppsTelling(L), appAppsVandaag());
-    if (vp) APP_PRIVE_MODULES.forEach(function (id) { delete m.score[id]; });   // review wv2479 MOET 1: ook geen gebruik van een privé-App
-    appStuur(res, status || 200, Object.assign({ ok: status ? false : true }, L.volgordeVoorApparaat(stand, vp, APP_PRIVE_MODULES),
-      { bekend: vp ? L.APP_IDS.filter(function (id) { return APP_PRIVE_MODULES.indexOf(id) < 0; }) : L.APP_IDS, max: L.VOLGORDE_MAX, meest: m, vaste_plek: vp }, extra || {}));
+    appStuur(res, status || 200, Object.assign({ ok: status ? false : true }, L.volgordeVoorApparaat(stand),
+      { bekend: L.APP_IDS, max: L.VOLGORDE_MAX, meest: m }, extra || {}));
   };
   if (req.method !== 'POST') { res._app.reden = 'apps-volgorde'; res._app.stil = true; return antwoord(nu); }
-  const u = L.volgordePas(nu, d, vp);
+  const u = L.volgordePas(nu, d);
   if (!u.ok && u.status === 409) { res._app.reden = u.reden; return antwoord(nu, 409, { fout: u.fout }); }   // de app neemt de stand van nu over
   if (!u.ok) return appWeiger(res, u.status, u.fout, u.reden);
   res._app.reden = 'apps-volgorde ' + d.sortering + (u.veranderd ? '' : ' (al zo)');
@@ -18142,11 +18090,10 @@ function appAppsVolgordeRoute(req, res, a, d) {
 }
 // wv2929 (OVIS als besturingssysteem, fase 4): GET/POST /app/werkruimtes. Logica in app-vast.js (werkruimtesUitBestand, werkruimtePas,
 // werkruimtesVoorApparaat); hier lezen, schrijven (atomisch, alleen dit proces) en antwoorden, zoals de Apps-volgorde. werkruimtes.json:
-// { versie, bijgewerkt, sets: { <id>: { tabs, naast } } } (alleen id's). Op een vaste plek: lezen zonder privé-App, bewaren 403.
+// { versie, bijgewerkt, sets: { <id>: { tabs, naast } } } (alleen id's). Op elk apparaat hetzelfde (wv3446).
 function appWerkruimtesRoute(req, res, a, d) {
   const L = appVastModule();
   if (!L || typeof L.werkruimtePas !== 'function') return appWeiger(res, 404, 'onbekend', 'werkruimtes ontbreekt');
-  const vp = appAfscherm(a);
   let j = null;
   try { j = appLeesStreng(APP_WERKRUIMTES, null); }
   catch (e) {
@@ -18155,10 +18102,10 @@ function appWerkruimtesRoute(req, res, a, d) {
   }
   const nu = L.werkruimtesUitBestand(j);
   const antwoord = function (stand, status, extra) {
-    appStuur(res, status || 200, Object.assign({ ok: status ? false : true }, L.werkruimtesVoorApparaat(stand, vp, APP_PRIVE_MODULES), { vaste_plek: vp }, extra || {}));
+    appStuur(res, status || 200, Object.assign({ ok: status ? false : true }, L.werkruimtesVoorApparaat(stand), extra || {}));
   };
   if (req.method !== 'POST') { res._app.reden = 'werkruimtes'; res._app.stil = true; return antwoord(nu); }
-  const u = L.werkruimtePas(nu, d, vp);
+  const u = L.werkruimtePas(nu, d);
   if (!u.ok && u.status === 409) { res._app.reden = u.reden; return antwoord(nu, 409, { fout: u.fout }); }
   if (!u.ok) return appWeiger(res, u.status, u.fout, u.reden);
   res._app.reden = 'werkruimte ' + d.id + (d.set === null ? ' standaard' : '') + (u.veranderd ? '' : ' (al zo)');
@@ -18235,7 +18182,7 @@ function appOpenNaRun(jobId, j, r) {
 function appOpenVoor(open, beurtApparaat, a, vers) {
   const L = appOpenModule();
   if (!L || !open) return undefined;
-  try { return L.voorApparaat(open, beurtApparaat, a, appAfscherm(a) ? APP_PRIVE_MODULES : [], vers) || undefined; } catch (e) { logError('app-open', e); return undefined; }   // wv1901: privé-lijst alleen bij afschermen
+  try { return L.voorApparaat(open, beurtApparaat, a, vers) || undefined; } catch (e) { logError('app-open', e); return undefined; }   // wv3446: geen privé-lijst meer
 }
 // /app/uitslag: een wissel gaat één keer naar het typende apparaat (Fable diff #7: herladen binnen de 2 min is geen tweede wissel)
 function appOpenUitslag(j, a) {
@@ -20297,14 +20244,13 @@ async function appMailman(req, res, a, s, d, route) {
 // wv2029 (David 30-10: "Ik wil sowieso de mail rechts als voorbeeld bij verwerken, en ook als we een regel aanmaken obv die mail"): één mail
 // van een MailMan-besluit lezen via het bestaande lees-luik (mail_lezen van AI - Agenda-Wachter API; Doktersmaten met account dm), alleen
 // op Davids tik. Kop en platte tekst (≤ 12.000 tekens, zoals het luik hem geeft) gaan alleen naar de App: niets op schijf, niets in het
-// log (alleen "mailman mail"), geen bijlagen openen (alleen de soorten uit het logboek). Afgeschermd apparaat: geen privépost.
+// log (alleen "mailman mail"), geen bijlagen openen (alleen de soorten uit het logboek).
 // wv2218 (Mail-laag stap 3, David 1-11-2026 16:59 keuze 1): Apps › Mail — de lijst Jij · Socev deed · Weggezet per zaak (Gmail-draad) uit het
 // zaakregister van mailman.js (zakenLijst). Alleen lezen, apparaatsleutel (geen vingerafdruk: dezelfde gegevens als Apps › MailMan),
-// geen Gmail-actie. Afgeschermd apparaat: geen privépost (alles in deze lijst is privé). Geen 'stil': elke opening is een auditregel (B3.6).
+// geen Gmail-actie. Geen 'stil': elke opening is een auditregel (B3.6).
 const MAIL_ZAKEN_UUR = 600;
 function appMailZaken(req, res, a, route) {
   if (!mailman || typeof mailman.zakenLijst !== 'function') return appWeiger(res, 404, 'De mail-lijst zit niet in deze versie van de pod', 'mail ontbreekt');
-  if (appAfscherm(a)) return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'mail afgeschermd');
   appStaat.tellers['mail-zaken'] = appStaat.tellers['mail-zaken'] || [];
   if (!appTeller('mail-zaken', MAIL_ZAKEN_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens mail zaken');
   const m = /^GET \/app\/mail\/zaken\/([a-z]+)\/(\d+)$/.exec(route);
@@ -20337,7 +20283,6 @@ async function appMailmanMail(res, a, d) {
   let b = null;
   try { b = typeof mailman.mailBron === 'function' ? mailman.mailBron(d.id) : null; } catch (e) { logError('mailman-mail', e); }
   if (!b) return appWeiger(res, 404, 'Deze mail is niet (meer) te lezen', 'mailman mail onbekend');
-  if (appAfscherm(a) && b.postvak === 'gmail:david') return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'mailman mail afgeschermd');
   appStaat.tellers['mailman-mail'] = appStaat.tellers['mailman-mail'] || [];
   if (!appTeller('mailman-mail', MAILMAN_MAIL_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens mailman mail');
   let vol;
@@ -20542,7 +20487,6 @@ function mailVoorwerkInfo() { if (!mailVoorwerk) return { aan: false, module: fa
 const MAIL_VOORWERK_UUR = { toon: 600, maak: 10, gmail: 20 };
 async function appMailVoorwerk(req, res, a, d, route) {
   if (!mailVoorwerk) return appWeiger(res, 404, 'Voorwerk zit niet in deze versie van de pod', 'voorwerk ontbreekt');
-  if (appAfscherm(a)) return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'voorwerk afgeschermd');
   const soort = route === 'POST /app/mail/voorwerk' ? 'toon' : route.slice('POST /app/mail/voorwerk/'.length);
   const tel = 'mail-voorwerk-' + soort;
   appStaat.tellers[tel] = appStaat.tellers[tel] || [];
@@ -20563,7 +20507,7 @@ if (mailVoorwerk && SERVER_ECHT) {
 // "01_Ontwikkeling/OVIS Mail - opnieuw bekeken (Fable 5.2, 14-11-2026).md"). Hier alleen de koppeling: het leesluik (mail_lijst,
 // mail_gesprek, mail_bijlage; alleen lezen), MailMans zaakregister (mailLaag, mailRegel, mailNaar), het voorwerk (lijst, kandidaat), de
 // patiëntpoort, de datumdetector en Todoist (één taak op Davids tik met het bestaande token). Mailtekst gaat alleen door het geheugen naar
-// de App: niets op schijf, in het log alleen de route en de map (nooit de zoekvraag, een onderwerp of tekst). Afgeschermd apparaat: niets.
+// de App: niets op schijf, in het log alleen de route en de map (nooit de zoekvraag, een onderwerp of tekst).
 const mailApp = (function () {
   const p = path.join(__dirname, 'mail-app.js');
   if (!fs.existsSync(p) || !mailman || typeof mailman.mailLaag !== 'function') return null;
@@ -20636,7 +20580,6 @@ async function mailAppTodoist(body) {
 const MAIL_APP_UUR = { lijst: 900, gesprek: 600, bijlage: 120, 'todo/voorstel': 60, todo: 30, naar: 60, wijzig: 300, buiten: 300, 'buiten/klaar': 120 };
 async function appMailApp(req, res, a, d, route) {
   if (!mailApp) return appWeiger(res, 404, 'De Mail-App zit niet in deze versie van de pod', 'mail-app ontbreekt');
-  if (appAfscherm(a)) return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'mail-app afgeschermd');
   const soort = route.slice('POST /app/mail/'.length);
   const tel = 'mail-app-' + soort;
   appStaat.tellers[tel] = appStaat.tellers[tel] || [];
@@ -22537,7 +22480,7 @@ async function appManagers(req, res, a, d, route) {
     let sb = null, fout = null;
     try { sb = await appSbRpc('mk_managers_stand', { p_managers: MANAGERS_MOD.rpcInvoer() }); }
     catch (e) { logError('app-managers', e); fout = 'bevindingen en hartslag zijn nu niet leesbaar'; }
-    return appStuur(res, 200, { ok: true, managers: managers.stand(sb, { vast: appAfscherm(a) }), fout: fout, vast: appAfscherm(a) });   // wv1901
+    return appStuur(res, 200, { ok: true, managers: managers.stand(sb), fout: fout });
   }
   if (route === 'POST /app/managers/ronde') {
     if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
@@ -22665,9 +22608,8 @@ async function appRingkaart(req, res, a) {
   if (!ringkaart) return appWeiger(res, 404, 'De ringkaart zit niet in deze versie van de pod', 'ringkaart ontbreekt');
   appStaat.tellers.ringkaart = appStaat.tellers.ringkaart || [];
   if (!appTeller('ringkaart', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ringkaart');
-  const vast = appAfscherm(a);   // wv1901
   let uit;
-  try { uit = ringkaart.stand(await ringkaartRijen(), vast); }
+  try { uit = ringkaart.stand(await ringkaartRijen()); }
   catch (e) { logError('app-ringkaart', e); return appWeiger(res, 500, 'fout op de pod', 'ringkaart uitzondering'); }
   res._app.stil = true;
   return appStuur(res, 200, uit);
@@ -22702,17 +22644,16 @@ async function appTokens(req, res, a, route) {
   if (!tokenteller) return appWeiger(res, 404, 'De TokenCounter zit niet in deze versie van de pod', 'tokenteller ontbreekt');
   appStaat.tellers.tokens = appStaat.tellers.tokens || [];
   if (!appTeller('tokens', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens tokens');
-  const vast = appAfscherm(a);   // wv1901
   let uit;
   try {
     if (route === 'GET /app/tokens/openai') {   // wv2078: OpenAI-blok op de Verbruikspagina (alleen getallen)
       uit = typeof openaiVerbruik === 'function' ? openaiVerbruik() : null;
       if (!uit) return appWeiger(res, 404, 'De OpenAI-teller zit niet in deze versie van de pod', 'openai-verbruik ontbreekt');
     }
-    else if (route === 'GET /app/tokens') { uit = tokenteller.stand({ vast: vast, tank: await tokentellerTank() }); if (uit && typeof openaiAppRegel === 'function') uit.openai = openaiAppRegel(); }   // wv2055: regel OpenAI deze maand
+    else if (route === 'GET /app/tokens') { uit = tokenteller.stand({ tank: await tokentellerTank() }); if (uit && typeof openaiAppRegel === 'function') uit.openai = openaiAppRegel(); }   // wv2055: regel OpenAI deze maand
     else {
       const m = /^GET \/app\/tokens\/dag\/(\d{4}-\d{2}-\d{2})$/.exec(route);
-      uit = m ? tokenteller.dag(m[1], { vast: vast }) : null;
+      uit = m ? tokenteller.dag(m[1], {}) : null;
       if (!uit) return appWeiger(res, 404, 'onbekend', 'tokens route');
     }
   } catch (e) { logError('app-tokens', e); return appWeiger(res, 500, 'fout op de pod', 'tokens uitzondering'); }
@@ -22760,7 +22701,7 @@ async function appWerkers(req, res, a) {
     const wf = await werkersWorkflows();
     const hs = typeof ringkaartRijen === 'function' ? await ringkaartRijen() : null;
     const sk = await werkersSchakelaars(false);   // wv1733
-    uit = WERKERS_MOD.stand({ workflows: wf, hartslag: hs, schakelaars: sk, vast: appAfscherm(a) });   // wv1901
+    uit = WERKERS_MOD.stand({ workflows: wf, hartslag: hs, schakelaars: sk });
     // wv1901: alles zichtbaar; schakelen is beheer. Sinds wv2547 ook op een vaste plek (verse vingerafdruk), behalve als APP_VAST_BEHEER_DICHT
     if (appVastBeheerDicht(a)) Object.keys(uit.groepen || {}).forEach(function (g) { (uit.groepen[g] || []).forEach(function (k) { k.kan = []; }); });
     const c = uit.check;
@@ -22768,7 +22709,7 @@ async function appWerkers(req, res, a) {
       niet_actief: c.niet_actief ? c.niet_actief.length : null, hartslag_zonder_werker: c.hartslag_zonder_werker ? c.hartslag_zonder_werker.length : null };
   } catch (e) { logError('app-werkers', e); return appWeiger(res, 500, 'fout op de pod', 'werkers uitzondering'); }
   res._app.stil = true;   // de app ververst zolang de Ploeg in beeld is
-  return appStuur(res, 200, Object.assign({ ok: true, vast: appAfscherm(a) }, uit));
+  return appStuur(res, 200, Object.assign({ ok: true }, uit));
 }
 function werkersInfo() { return { aan: !!WERKERS_MOD, werkers: WERKERS_MOD ? WERKERS_MOD.WERKERS.length : 0, laatst: werkersLaatst }; }
 // ── wv1733 (OVIS M4b): schakelaar per werker (ontwerplijnen § 6.2) ──
@@ -22933,7 +22874,7 @@ async function appIntakeTelling(req, res, a) {
   appStaat.tellers.intake = appStaat.tellers.intake || [];
   if (!appTeller('intake', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens intake');
   let uit;
-  try { uit = await T.telling(appAfscherm(a)); }   // wv1901
+  try { uit = await T.telling(); }
   catch (e) { logError('app-intake', e); return appWeiger(res, 500, 'fout op de pod', 'intake uitzondering'); }
   res._app.stil = true;
   return appStuur(res, 200, uit);
@@ -22959,7 +22900,7 @@ async function appWerkstroom(req, res, a, route) {
   appStaat.tellers.werkstroom = appStaat.tellers.werkstroom || [];
   if (!appTeller('werkstroom', 900, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens werkstroom');
   let r;
-  try { r = await werkstroom.app(route, { afscherm: appAfscherm(a), wie: a.naam || a.id }); }   // wv1901
+  try { r = await werkstroom.app(route, { wie: a.naam || a.id }); }
   catch (e) { logError('app-werkstroom', e); return appWeiger(res, 500, 'fout op de pod', 'werkstroom uitzondering'); }
   if (r.status === 200) res._app.stil = true;
   else res._app.reden = 'werkstroom: ' + String(r.j && r.j.fout || '').slice(0, 60);
@@ -22971,7 +22912,7 @@ async function appWerkstroom(req, res, a, route) {
 // GET /app/brain/entiteiten: lijst uit het OVIS-register (RPC ovis_register_lees) plus de privépersonen uit 20_Prive (wv1930);
 // GET /app/brain/entiteiten/zoek/<woorden>: de stamboom op naam (wv1930); GET /app/brain/entiteit/<sleutel, 12 hex uit de lijst>: de hele
 // pagina (zonder frontmatter, met het sleutelmasker), Wat OVIS weet (kenmerken, facturen, deadlines) en bij een persoon het Dossier. Alleen
-// lezen. wv1930: geen afscherming naar David (bouwplan 29-10-2026); de vaste-plekschakelaar (wv1901) in brain-entiteiten.js. Ontbreekt brain-entiteiten.js in de release (terugrol), dan 404 en toont de app
+// lezen. wv1930: geen afscherming naar David (bouwplan 29-10-2026; vaste-plektak weg in wv3446). Ontbreekt brain-entiteiten.js in de release (terugrol), dan 404 en toont de app
 // "komt eraan".
 const BRAIN_ENT_MOD = (function () { const p = path.join(__dirname, 'brain-entiteiten.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('brain-entiteiten', e); return null; } })();
 let brainEnt = null;
@@ -22993,17 +22934,16 @@ async function appBrainEntiteiten(req, res, a, route) {
   if (!B) return appWeiger(res, 404, 'Entiteiten & Personen zit niet in deze versie van de pod', 'brain-entiteiten ontbreekt');
   appStaat.tellers['brain-entiteiten'] = appStaat.tellers['brain-entiteiten'] || [];
   if (!appTeller('brain-entiteiten', 900, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens brain-entiteiten');
-  const vast = appAfscherm(a);   // wv1901
   try {
-    if (route === 'GET /app/brain/entiteiten') { const uit = await B.lijst(vast); res._app.stil = true; return appStuur(res, 200, uit); }
+    if (route === 'GET /app/brain/entiteiten') { const uit = await B.lijst(); res._app.stil = true; return appStuur(res, 200, uit); }
     if (route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) {   // wv1930: stamboom alleen via zoeken
       const q = route.slice('GET /app/brain/entiteiten/zoek/'.length);
       if (!/^[a-z0-9-]{2,40}$/.test(q) || typeof B.zoek !== 'function') return appWeiger(res, 400, 'geen geldige zoekterm', 'brain-entiteiten zoek');
-      const uit = await B.zoek(q, vast); res._app.stil = true; return appStuur(res, 200, uit);
+      const uit = await B.zoek(q); res._app.stil = true; return appStuur(res, 200, uit);
     }
     const id = route.slice('GET /app/brain/entiteit/'.length);   // sleutel uit de lijst (12 hex; APP_ROUTE_RE laat geen knoop-id door)
     if (!/^[0-9a-f]{12}$/.test(id)) return appWeiger(res, 400, 'geen geldige sleutel', 'brain-entiteit sleutel');
-    const r = await B.detail(id, vast);
+    const r = await B.detail(id);
     if (r.status === 200) res._app.stil = true; else res._app.reden = 'brain-entiteit ' + r.status;
     return appStuur(res, r.status, r.j);
   } catch (e) { logError('app-brain-entiteiten', e); return appWeiger(res, 503, 'het register is nu niet te lezen', 'brain-entiteiten fout'); }
@@ -23015,8 +22955,8 @@ async function appBrainEntiteiten(req, res, a, route) {
 // (.md, bron_soort: mediatheek) naast elk bestand in 20_Prive; 20_Prive/Mediatheek.md is de kaft (volgorde en uitleg). Logica en
 // padcontrole in mediatheek.js (alleen bestanden uit `bestanden:` van een geldige beschrijving, in dezelfde map, onder 20_Prive, vaste
 // extensies, realpath, geen symlink of hardlink, ≤ 20 MB; een kapotte beschrijving = "te herstellen", de rest blijft). Hier: GET /app/mediatheek (lijst, stil bij 200) en GET /app/mediatheek/bestand/<id> (base64 in JSON, zoals
-// /app/bestand: de app speelt het af als blob, dus geen Range nodig, ook niet in Safari). Privé-module: op een vaste plek open, het bestand
-// onder het invoerslot (wv1901; dicht alleen als APP_VAST_AFSCHERMEN aan staat). Ontbreekt mediatheek.js in de release (terugrol), dan 404 en /health.mediatheek.aan=false.
+// /app/bestand: de app speelt het af als blob, dus geen Range nodig, ook niet in Safari). Privé-module: op elk apparaat open, het bestand
+// onder het invoerslot (wv1901/wv3446). Ontbreekt mediatheek.js in de release (terugrol), dan 404 en /health.mediatheek.aan=false.
 const MEDIATHEEK_MOD = (function () { const p = path.join(__dirname, 'mediatheek.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('mediatheek', e); return null; } })();
 const mediatheek = (function () { try { return MEDIATHEEK_MOD ? MEDIATHEEK_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT, fout: logError }) : null; } catch (e) { logError('mediatheek', e); return null; } })();
 let mediatheekBezig = 0;
@@ -23027,9 +22967,6 @@ function mediatheekInfo() {
 async function appMediatheek(req, res, a, route) {
   if (!mediatheek) return appWeiger(res, 404, 'De Mediatheek zit niet in deze versie van de pod', 'mediatheek ontbreekt');
   const lijst = route === 'GET /app/mediatheek';
-  if (appPriveDicht(a, 'mediatheek'))
-    return lijst ? appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'De Mediatheek staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' })
-      : appWeiger(res, 403, 'niet op een apparaat met een vaste plek', 'mediatheek vaste plek');
   if (!appTeller('mediatheek', 300, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 300)', 'grens mediatheek');
   if (lijst) {
     let r;
@@ -23383,7 +23320,7 @@ const secondbrain = (function () {
       lees: function (p) { return VV().lees(p, 'utf8'); }, wijzig: function (p, f) { return VV().wijzig(p, f); },
       versieDir: path.join(SB_DIR, 'versies'),
       // wv2077: Brain › Zoeken zet de pagina van een partij of persoon uit Entiteiten & Personen bovenaan (zelfde grens per apparaat)
-      entiteiten: function (q, vast) { const B = brainEntMaak(); return B && typeof B.naamTreffers === 'function' ? B.naamTreffers(q, vast) : []; },   // zonder module: geen groep, geen fout
+      entiteiten: function (q) { const B = brainEntMaak(); return B && typeof B.naamTreffers === 'function' ? B.naamTreffers(q) : []; },   // zonder module: geen groep, geen fout
       onderhoud: function () { try { return !!onderhoud.stand().aan; } catch (e) { return true; } },
       grendelVrij: function () {
         try { return require('child_process').spawnSync('flock', ['-n', ONDERHOUD_LOCK, 'true'], { timeout: 2000 }).status === 0; }
@@ -23417,7 +23354,7 @@ async function appSecondBrain(req, res, a, d, route) {
   if (route === 'POST /app/secondbrain/zoek' && d && d.betekenis && !appTeller('secondbrain-betekenis', 60, 3600000))
     return appWeiger(res, 429, 'zoeken op betekenis te vaak dit uur (max 60); het gewone zoeken werkt nog', 'grens secondbrain-betekenis');
   let r;
-  try { r = await secondbrain.app(route, d || {}, { vast: appAfscherm(a) }); }   // wv1901
+  try { r = await secondbrain.app(route, d || {}, {}); }
   catch (e) { logError('app-secondbrain', e); return appWeiger(res, 500, 'fout op de pod', 'secondbrain uitzondering'); }
   const actie = route === 'GET /app/secondbrain' ? 'kaart' : route.slice('POST /app/secondbrain/'.length);
   const au = r.audit || {};
@@ -23492,8 +23429,8 @@ const docsDelen = (function () {
   if (!fs.existsSync(p) || !secondbrain || typeof secondbrain.bron !== 'function') return null;
   try {
     const S = require(path.join(__dirname, 'secondbrain.js'));
-    // wv1901: de pagina lezen volgt de schakelaar (ctx.afscherm); ctx.vast blijft het echte soort voor "niet delen vanaf een vaste plek"
-    const bron = function (pad, ctx) { return secondbrain.bron(pad, Object.assign({}, ctx, { vast: !!(ctx && ctx.afscherm) })); };
+    // wv3446: de pagina lezen kent geen vaste-plekafscherming meer; ctx.vast blijft het echte soort voor "niet delen vanaf een vaste plek"
+    const bron = function (pad, ctx) { return secondbrain.bron(pad, {}); };
     return require(p).maak({ dir: DOCS_DIR, vault: VAULT, host: DOCS_HOST, fout: typeof foutOfKapot === 'function' ? foutOfKapot : logError, bron: bron, access: docsAccess,
       masker: S.masker, isVastDicht: S.isVastDicht, isVerborgen: S.isVerborgen, bsnMasker: function (t) { return appBsnMasker(t); },
       lees: function (x) { return VV().lees(x, 'utf8'); },
@@ -25329,7 +25266,7 @@ async function appDocs(req, res, a, s, d, route) {
   const versVoor = route === 'POST /app/docs/delen' ? s.vers_tot : null;
   if (versVoor !== null) s.vers_tot = 0;
   let r;
-  try { r = await docsDelen.app(route, d || {}, { vast: appVastBeheerDicht(a), afscherm: appAfscherm(a) }); }   // wv1901; wv2547: delen ook op een vaste plek (verse vingerafdruk)
+  try { r = await docsDelen.app(route, d || {}, { vast: appVastBeheerDicht(a) }); }   // wv2547: delen ook op een vaste plek (verse vingerafdruk)
   catch (e) { if (versVoor !== null && s.vers_tot === 0) s.vers_tot = versVoor; logError('app-docs', e); return appWeiger(res, 500, 'fout op de pod', 'docs uitzondering'); }
   if (versVoor !== null && r.status !== 200 && s.vers_tot === 0) s.vers_tot = versVoor;   // elke geslaagde deling een eigen vingerafdruk
   const actie = route === 'GET /app/docs/gedeeld' ? 'gedeeld' : route.slice('POST /app/docs/'.length);
@@ -25881,7 +25818,7 @@ const zoekSnel = (function () {
     const z = m.maak({ vault: VAULT, fout: logError, bsnMasker: function (t) { return appBsnMasker(t); },
       claude: function (systeem, prompt, schema) { return harvesterClaude(systeem, prompt, schema, { timeoutMs: ZOEK_SNEL_MODEL_MS }); },
       feiten: process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE
-        ? function (vraag, vast) { return zoekSnelRpc('sb_zoek_identifier', { p_vraag: vraag, p_max: 20, p_vast: !!vast }, ZOEK_SNEL_RPC_MS); } : null,
+        ? function (vraag) { return zoekSnelRpc('sb_zoek_identifier', { p_vraag: vraag, p_max: 20, p_vast: false }, ZOEK_SNEL_RPC_MS); } : null,
       index: ZOEK_SNEL_INDEX_DB ? { cmd: process.env.ZOEK_SNEL_INDEX_CMD || 'python3', args: process.env.ZOEK_SNEL_INDEX_CMD ? [ZOEK_SNEL_INDEX_SCRIPT] : ['-I', ZOEK_SNEL_INDEX_SCRIPT],
         db: ZOEK_SNEL_INDEX_DB } : null,
       feitenStempel: ZOEK_SNEL_STEMPEL });
@@ -25960,7 +25897,7 @@ function zoekSnelStaart() {
 async function zoekSnelVoer(a, id, vraag, toonDekking) {
   const t0 = Date.now();
   let r;
-  try { r = await zoekSnel.zoek(vraag, { vast: appAfscherm(a) }); }   // wv1901
+  try { r = await zoekSnel.zoek(vraag, {}); }
   catch (e) { logError('zoek-snel', e); r = null; }
   if (!r) r = { soort: 'fout', vraag: vraag, tekst: '', waarden: [], bronnen: [], gelezen_als: [], melding: 'Zoek snel lukte nu niet.', reden: 'uitzondering', ms: {} };
   const ms = Date.now() - t0;
@@ -25969,7 +25906,7 @@ async function zoekSnelVoer(a, id, vraag, toonDekking) {
   const gelogd = await appLogSchrijf('hoofd', { t: new Date().toISOString(), getypt: new Date(t0).toISOString(), job_id: id, soort: 'zoek', apparaat: a.id, tekst: vraag,
     antwoord: zoekSnelTekst(r), ok: r.soort !== 'fout', fout: r.soort === 'fout' ? String(r.reden || 'fout').slice(0, 200) : undefined, bestanden: [],
     zoek: { uitkomst: r.soort, reden: r.reden || undefined, ms: ms, zoek_ms: r.ms.zoek, model_ms: r.ms.model, account: v.account, kosten: v.kosten, tokens_uit: v.uit,
-      bronnen: (r.bronnen || []).map(function (b) { return b.pad; }), weggelaten: r.weggelaten || undefined, natoets_mis: r.natoets_mis || undefined, vast: appAfscherm(a) || undefined,
+      bronnen: (r.bronnen || []).map(function (b) { return b.pad; }), weggelaten: r.weggelaten || undefined, natoets_mis: r.natoets_mis || undefined,
       dekking: r.dekking || undefined, laag: r.laag || undefined, feiten_ms: r.ms.feiten, index_ms: r.ms.index,
       lagen: zoekSnelLagenTelling(r.lagen) } });   // wv1289: alleen tellingen (pagina's/regels, grens), geen inhoud; wv1788: per laag idem
   zoekSnelRegelZet(r);
@@ -29608,7 +29545,6 @@ function ahTwaalf() {   // laatste 12 maanden incl. de lopende (bonnen zijn per 
 const AH_KOPPEL_PER_UUR = 10;
 async function appFinAh(req, res, a, d, route) {
   res._app.reden = 'financien-ah';
-  if (appPriveDicht(a, 'financien')) return appWeiger(res, 403, 'Financiën staat alleen op je telefoon of een meereizend apparaat', 'financien vast');
   const A = ahM();
   if (!A) return appWeiger(res, 404, 'de AH-koppeling zit nog niet in deze versie van de pod', 'ah ontbreekt');
   if (route === 'GET /app/financien/ah') {

@@ -10,7 +10,7 @@
 //   antwoord — Davids eigen getypte beurt met een antwoord, zolang hij dat gesprek ná het antwoord niet zag; een knopdruk alleen bij een
 //              fout of een bestand (wv3093, knopTelt).
 //   bewaard  — wat David in het gesprek bewaarde (14 dagen na het bewaren).
-// Nooit: een bericht met een vraag (die staat in Moet iets of als kaart), Telegram-beurten, zoekvragen; op een vaste plek geen hoofdkanaal.
+// Nooit: een bericht met een vraag (die staat in Moet iets of als kaart), Telegram-beurten, zoekvragen.
 
 const DAG = 86400000;
 const AUTO_MS = 7 * DAG;          // vanzelf erin: 7 dagen (± 17 per dag; 14 dagen zou ± 240 punten worden)
@@ -91,14 +91,13 @@ function zet(staat, d, nu, bestaat) {
 // De lijst. o = {per: {hoofd: [...], machinekamer: [...]} (app-log, met de nog niet gelogde beurten), klussen: {job: {...}} | null
 // (null = onleesbaar: geen klus-punten in de machinekamer), staat, tabs: {kanaal: iso} (gezien door David), vraag: fn(x, kanaal) -> bool,
 // moet: Set van job_ids die nu in Moet iets staan (ook een bewaard bericht dan niet: review wv2245 MOET 1), inBeeld: {sleutel: iso}
-// (gezien-david.json punten: telt voor 'nieuw', het getal; MOET 2), vast: vaste plek, nu}.
+// (gezien-david.json punten: telt voor 'nieuw', het getal; MOET 2), nu}. Op elk apparaat alle kanalen (wv3446).
 // Tijden: x.t in het app-log is de afloop van de beurt (het antwoord); x.getypt de typtijd (review MOET 3: t is de goede).
 function uit(o) {
   const nu = o.nu, staat = staatNorm(o.staat, nu), sinds = Date.parse(staat.sinds), tabs = o.tabs && typeof o.tabs === 'object' ? o.tabs : {};
   const vraag = typeof o.vraag === 'function' ? o.vraag : function () { return false; };
   const punten = [], afgevinkt = [], gehad = {};
   KANALEN.forEach(function (kanaal) {
-    if (o.vast && kanaal === 'hoofd') return;
     ((o.per && o.per[kanaal]) || []).forEach(function (x) {
       if (!x || !JOB_RE.test(String(x.job_id || '')) || gehad[x.job_id]) return;
       if (x.soort === 'telegram' || x.soort === 'zoek') return;
@@ -137,7 +136,7 @@ function uit(o) {
   return { punten: punten.slice(0, MAX), meer: Math.max(0, punten.length - MAX), ongezien: punten.length,
     nieuw: punten.filter(function (p) { return !inBeeld[p.sleutel]; }).length,
     // diffreview wv2245 MOET 2: welke berichten bewaard zijn (het gesprek toont dan ★ Bewaard, ook na herladen en op een ander apparaat)
-    bewaard: Object.keys(staat.bewaard).filter(function (j) { return !(o.vast && staat.bewaard[j].kanaal === 'hoofd'); }).sort(),
+    bewaard: Object.keys(staat.bewaard).sort(),
     afgevinkt: afgevinkt.slice(0, AFGEVINKT_MAX).map(function (p) { return { sleutel: p.sleutel, soort: p.soort, kanaal: p.kanaal, job_id: p.job_id, t: p.t, titel: p.titel, van: p.van, knop: p.knop, gezien: p.gezien, bericht: p.bericht.slice(0, 600) }; }) };
 }
 // De agentklussen waarvan server.js de herkomst moet opvragen (machinekamer, bron agentrapport, binnen het venster).

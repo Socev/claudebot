@@ -38,11 +38,11 @@ for (const d of [null, [], { versie: '1', volgorde: [], favorieten: [], sorterin
   r = L.volgordePas(nu1, d, false);
   toets('8 ongeldig → 400: ' + JSON.stringify(d), !r.ok && r.status === 400, r);
 }
-r = L.volgordePas(nu1, { versie: 1, volgorde: [], favorieten: [], sortering: 'eigen' }, true);
-toets('9 vaste plek die afschermt: 403', !r.ok && r.status === 403);
+r = L.volgordePas(nu1, { versie: 1, volgorde: [], favorieten: [], sortering: 'eigen' });
+toets('9 wv3446: geen 403 meer voor een vaste plek (de functie kent geen apparaat)', L.volgordePas.length === 2 && r.status !== 403, r);
 const vb = L.naarBestand(nu1, '2026-11-05T14:00:00Z');
 toets('10 op schijf alleen versie, bijgewerkt, volgorde, favorieten, sortering', Object.keys(vb).sort().join() === 'bijgewerkt,favorieten,sortering,versie,volgorde', vb);
-toets('11 vaste plek: privé-App eruit', L.volgordeVoorApparaat({ versie: 2, volgorde: ['financien', 'mail'], favorieten: ['gezondheid'], sortering: 'eigen' }, true, ['financien', 'gezondheid']).volgorde.join() === 'mail');
+toets('11 wv3446: elk apparaat ziet ook de privé-App', L.volgordeVoorApparaat({ versie: 2, volgorde: ['financien', 'mail'], favorieten: ['gezondheid'], sortering: 'eigen' }).volgorde.join() === 'financien,mail');
 
 // ── logica: telling ──
 const laatst = new Map();
@@ -70,7 +70,7 @@ toets('18 na 14 dagen klaar; 30 dagen oud telt half', m.klaar === true && m.scor
 const src = fs.readFileSync('server.js', 'utf8');
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'appsvolgorde-'));
 const a0 = src.indexOf('let appVastMod = null;'), b0 = src.indexOf('// ── einde socev-app poort', a0);
-const p0 = src.indexOf('const APP_PRIVE_MODULES'), p1 = src.indexOf('\n', src.indexOf('function appPriveDicht', p0));
+const p0 = src.indexOf('const APP_PRIVE_MODULES'), p1 = src.indexOf('\n', p0);
 toets('19 blokken gevonden', a0 > 0 && b0 > a0 && p0 > 0);
 function lees(f, leeg) { let t; try { t = fs.readFileSync(f, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return leeg; throw e; } return JSON.parse(t); }
 let schrijfTel = 0, antw = [], flog = [];
@@ -116,7 +116,7 @@ const dag = Object.keys(tel.dagen)[0];
 toets('25 geopend: geteld, tweede binnen een minuut (ander apparaat) niet, onbekend 400; stil', antw[0].o.geteld === true && antw[1].o.geteld === false && antw[2].st === 400 && tel.dagen[dag].facturen === 1 && rs._app.stil === true, { antw, tel });
 toets('25b in het bestand geen apparaat of inhoud', Object.keys(tel).sort().join() === 'dagen,sinds,versie' && Object.keys(tel.dagen[dag]).join() === 'facturen', tel);
 
-toets('25c review MOET 1: afgeschermde vaste plek krijgt geen privé-id in bekend of meest', /bekend: vp \? L\.APP_IDS\.filter/.test(src) && /if \(vp\) APP_PRIVE_MODULES\.forEach\(function \(id\) \{ delete m\.score\[id\]; \}\)/.test(src));
+toets('25c wv3446: bekend = alle App-id\'s, meest ongefilterd (geen vaste-plektak meer)', /bekend: L\.APP_IDS, max:/.test(src) && !/APP_PRIVE_MODULES\.forEach\(function \(id\) \{ delete m\.score\[id\]; \}\)/.test(src));
 // ── wv3069: App Projecten weg; een bewaarde of meegestuurde 'projecten' valt stil weg ──
 toets('29 wv3069 projecten niet meer in APP_IDS, wel in APP_VERVALLEN', L.APP_IDS.indexOf('projecten') < 0 && L.APP_VERVALLEN.indexOf('projecten') >= 0);
 const vb29 = L.volgordeUitBestand({ versie: 4, volgorde: ['pma', 'projecten', 'mail'], favorieten: ['projecten', 'pot'], sortering: 'eigen' }, []);

@@ -134,8 +134,8 @@ if (R) {
 }
 // server.js: routes, poort, grenzen
 const srv = fs.readFileSync('server.js', 'utf8');
-toets('server.js: POST /app/financien/reizen en /reislabel in de routetabel, reislabel in de glijroutes, achter appPriveDicht en appTeller', /route === 'POST \/app\/financien\/reizen'\) return appFinReizen/.test(srv) && /route === 'POST \/app\/financien\/reislabel'\) return appFinReislabel/.test(srv) &&
-  /APP_GLIJD_ROUTES\.add\('POST \/app\/financien\/reislabel'\)/.test(srv) && /async function appFinReizen[\s\S]{0,300}appPriveDicht\(a, 'financien'\)/.test(srv) && /async function appFinReislabel[\s\S]{0,300}appPriveDicht\(a, 'financien'\)/.test(srv) &&
+toets('server.js: POST /app/financien/reizen en /reislabel in de routetabel, reislabel in de glijroutes, zonder vaste-plekweigering (wv3446), achter appTeller', /route === 'POST \/app\/financien\/reizen'\) return appFinReizen/.test(srv) && /route === 'POST \/app\/financien\/reislabel'\) return appFinReislabel/.test(srv) &&
+  /APP_GLIJD_ROUTES\.add\('POST \/app\/financien\/reislabel'\)/.test(srv) && /async function appFinReizen\(/.test(srv) && !/appPriveDicht/.test(srv) && /async function appFinReislabel\(/.test(srv) && !/appPriveDicht/.test(srv) &&
   /appTeller\('fin-reizen'/.test(srv) && /appTeller\('fin-reislabel'/.test(srv), null);
 toets('server.js: app-reizen/app-reislabel in BANK_LOKAAL, niet in BANK_OPDRACHTEN (niet via /smal/bank); reizen uit Tripper zonder pad', /const BANK_LOKAAL = \[[^\]]*'app-reizen', 'app-reislabel'/.test(srv) && !/const BANK_OPDRACHTEN = \[[^\]]*'app-reis/.test(srv) &&
   /function appFinReizenLijst[\s\S]{0,500}return \{ id: String\(r\.id\), titel: String\(r\.titel \|\| ''\)\.slice\(0, 120\), van: r\.van, tot: r\.tot, soort: r\.soort \|\| null, stand: r\.stand \|\| null \}/.test(srv), null);

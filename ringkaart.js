@@ -113,9 +113,9 @@ function wachterNaam(omschrijving, component) {
 }
 
 // Rijen van mk_hartslag_stand → [{c, naam, oordeel, min, drempel, laatst}]. Proefrijen weg. Dubbele naam → component erachter.
-function wachters(rijen, vast) {
+function wachters(rijen) {
   const l = (Array.isArray(rijen) ? rijen : []).filter(function (r) { return r && r.component && !/proef/i.test(r.component); }).map(function (r) {
-    return { c: String(r.component).slice(0, 60), naam: vast ? String(r.component).slice(0, 60) : wachterNaam(r.omschrijving, r.component),
+    return { c: String(r.component).slice(0, 60), naam: wachterNaam(r.omschrijving, r.component),
       oordeel: ['vers', 'te_laat', 'nooit', 'onbeoordeelbaar'].indexOf(r.oordeel) >= 0 ? r.oordeel : 'onbeoordeelbaar',
       min: typeof r.minuten_sinds === 'number' ? r.minuten_sinds : null, drempel: typeof r.drempel_min === 'number' ? r.drempel_min : null,
       laatst: r.laatste_ronde ? new Date(r.laatste_ronde).toISOString() : null };
@@ -146,16 +146,16 @@ function maak(opt) {
     kanaalBuf = { m: m, l: l };
     return l;
   }
-  // rijen: uitkomst van mk_hartslag_stand (of null bij een fout); vast: vaste plek
-  function stand(rijen, vast) {
+  // rijen: uitkomst van mk_hartslag_stand (of null bij een fout). Op elk apparaat alles (wv3446: vaste-plektak weg).
+  function stand(rijen) {
     const s = skills(), k = kanalen();
     const fout = {};
     if (!s) fout.skills = 'de skills zijn nu niet te lezen';
     if (!k) fout.kanalen = 'het capaciteitenregister is nu niet te lezen';
     if (!rijen) fout.wachters = 'de hartslag van de wachters is nu niet te lezen';
-    return { ok: true, vaste_plek: !!vast,
-      wachters: rijen ? wachters(rijen, vast) : [],
-      skills: (s || []).map(function (x) { return { n: x.n, zin: vast ? null : x.zin, uit: x.uit }; }),
+    return { ok: true, vaste_plek: false,
+      wachters: rijen ? wachters(rijen) : [],
+      skills: (s || []).map(function (x) { return { n: x.n, zin: x.zin, uit: x.uit }; }),
       kanalen: k || [], fout: Object.keys(fout).length ? fout : null };
   }
   return { stand: stand, skills: skills, kanalen: kanalen };

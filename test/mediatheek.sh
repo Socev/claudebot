@@ -286,9 +286,8 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const ctx = vm.createContext({ require, process: { env: { APP_VAULT_DIR: V } }, __dirname: process.cwd(), path, fs, console, VAULT: '/bestaat/niet',
     logError: () => {}, appTeller: () => true,
     appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Object, JSON, String });
-  // wv1901: de echte privélijst, schakelaar, appAfscherm en appPriveDicht uit server.js (staan buiten dit blok)
-  const prive = /^const APP_PRIVE_MODULES = [^\n]*\n/m.exec(src)[0] + /^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] +
-    /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0] + /^function appPriveDicht\([^\n]*\n/m.exec(src)[0];
+  // wv1901/wv3446: de echte privélijst uit server.js (staat buiten dit blok); afscherm-schakelaar en appPriveDicht zijn weg
+  const prive = /^const APP_PRIVE_MODULES = [^\n]*\n/m.exec(src)[0];
   vm.runInContext(prive + src.slice(hb, he) + ';globalThis.__mt = { appMediatheek, mediatheekInfo };', ctx, { filename: 'server.js#mediatheek' });
   const r1 = { _app: {} };
   await ctx.__mt.appMediatheek({}, r1, { soort: 'meereizend' }, 'GET /app/mediatheek');
