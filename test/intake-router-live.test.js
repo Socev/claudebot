@@ -891,3 +891,82 @@ test('wv1276 review: kern — datumKop: JSON-strings, NEL weg', () => {
   assert.match(tekst, /\n  - \{tekst: "a b \\"c\\" \\\\ d: \{e\}", start: "2026-11-03", rol: "afspraak", zekerheid: "hoog"\}\n/);
   assert.ok(!/\u0085/.test(tekst));
 });
+
+// ── wv3395 (actieplan Fable-reviews 19-11, A22 en A14) ── alle namen, getallen en brieven verzonnen ──
+const BRIEF_D = {
+  specialist: 'Geachte collega,\nHartelijk dank voor uw verwijzing van de heer Jan Pietersma. Hij werd gezien op de polikliniek cardiologie.\nAnamnese: sinds enkele weken hartkloppingen. Diagnose: atriumfibrilleren. Beleid: start metoprolol 50 mg 1 dd.\nMet collegiale groet,\ndr. K. Voorbeeld, cardioloog',
+  seh: 'SEH-bericht Ziekenhuis Voorbeeldstad\nNaam: Karin de Wit\nReden van komst: val van de fiets.\nDiagnose: distale radiusfractuur rechts. Behandeling: gipsspalk, paracetamol 1000 mg zo nodig.\nControle op de gipskamer over een week.',
+  geb_jj: 'Mevrouw A. Jansen, geb. 12-03-58\nUitslag bloedonderzoek van 14 november: Hb 7,9 mmol/l, kreatinine 85, eGFR 70.\nGraag bespreken op het spreekuur.',
+  opname: 'Geachte collega,\nHierbij bericht ik u dat uw patiënte mevrouw S. Bakker vandaag is opgenomen op de afdeling interne geneeskunde in verband met een pneumonie.\nMet vriendelijke groet,\nafdeling interne geneeskunde',
+};
+test('wv3395 A22 proef D: vier briefvormen zonder geboortedatum (vierjarig) of "Betreft" krijgen een marker; gewone post niet', () => {
+  const eigen = poort.maakEigen(null, {}), nu = Date.parse('2026-11-19T12:00:00Z');
+  const B = (t) => poort.beoordeel({ teksten: [t] }, { eigen, nu });
+  const W = (t) => { const b = B(t); return R.markerWeging({ soorten: b.soorten, personen: poort._intern.personen(poort._intern.stukken([t]), eigen, nu), teksten: [t] }); };
+  for (const [k, t] of Object.entries(BRIEF_D)) assert.equal(B(t).tegenhouden, true, k);
+  // hard (stil buiten de Brain): "uw patiënte" + naam; de andere drie zacht (met label: HAGRO-post en contracten noemen ook mensen bij naam)
+  assert.deepEqual(W(BRIEF_D.opname).waarom, ['patientbrief']);
+  assert.equal(W(BRIEF_D.specialist).hard, false); assert.equal(W(BRIEF_D.seh).hard, false); assert.equal(W(BRIEF_D.geb_jj).hard, false);
+  // Fable-review: het korte jaar ook na "geboortedatum:", een weekdag vóór de naam is geen aanhef, achternaam in hoofdletters telt
+  assert.equal(B('Mevrouw A. Jansen, geboortedatum: 12-03-58\nUitslag bloedonderzoek: Hb 7,9 mmol/l, kreatinine 85, spreekuur').tegenhouden, true);
+  assert.equal(B('Geachte collega,\nOp dinsdag de heer Jan Pietersma gezien op de polikliniek. Anamnese: hoest. Diagnose: bronchitis.\nMet collegiale groet').regel, 9);
+  assert.equal(B('Geachte collega,\nHierbij bericht ik u dat uw patiënte mevrouw S. BAKKER is opgenomen op de afdeling.').regel, 9);
+  // een naam ver na "uw patiënt" (contactpersoon van het ziekenhuis) maakt het niet hard
+  assert.equal(W('Geachte collega,\nU kunt uw patiënt voortaan verwijzen naar onze polikliniek. Voor vragen: mevrouw J. de Vries, verpleegkundig specialist.').hard, false);
+  // Davids eigen geboortedatum in de korte vorm telt als eigen, niet als vreemd
+  const SL = 'proefsleutel-'.padEnd(40, 'x'), hm = (x) => crypto.createHmac('sha256', SL).update(x).digest('hex');
+  const eigenL = poort.maakEigen(SL, { geboortedatum: [hm('1961-04-03')] });
+  const pe = poort._intern.personen(poort._intern.stukken(['Dhr. D. Proef, geb. 03-04-61, uitslag bloedonderzoek']), eigenL, nu);
+  assert.equal(pe.eigen_geb, 1); assert.equal(pe.vreemd_geb, 0);
+  // niet: aanhef van de lezer, t.a.v., personeelspost, HAGRO-overleg met één klinische term, losse dd-mm-jj briefdatum, lang beleidsstuk
+  for (const t of [
+    'Geachte mevrouw Jansen,\nUw afspraak op het spreekuur van dinsdag is verzet. De diagnose volgt later.\nMet vriendelijke groet',
+    'T.a.v. de heer P. de Groot\nFactuur nascholing diagnose en behandelplan, 2 dagdelen.',
+    'Betreft: mevrouw K. de Vries\nHierbij bevestigen wij uw verlof van 1 tot 5 november.',
+    'Geachte collega\'s,\nDe heer Jansen van de zorgverzekeraar komt op het HAGRO-overleg vertellen over de nieuwe afspraken voor de huisartsenpost.\nMet collegiale groet',
+    'Geachte collega\'s,\nDe heer Jansen komt op het overleg over de huisartsenpost, triage en het spreekuur.\nMet collegiale groet',
+    'Datum 12-03-25\nBeste David, de vergadering van de heer P. de Groot over het rooster is verplaatst.',
+    'Beleidsnotitie (verzonnen). De heer P. de Groot opende. ' + 'Over diagnose, behandelplan, triage en consultatie op het spreekuur. '.repeat(150),
+  ]) assert.equal(B(t).tegenhouden, false, t.slice(0, 40));
+});
+
+// Proef F: een PDF van 30 pagina's met een BSN op pagina 25. De ontvangstlaag (40 p.) zag het BSN, de router-bbox (20 p.) niet.
+function bbox(t) { return '<page>' + t.split(/\s+/).filter(Boolean).map(function (w, j) { return '<word xMin="' + (10 + (j % 8) * 60) + '" yMin="' + (10 + Math.floor(j / 8) * 12) + '" xMax="' + (60 + (j % 8) * 60) + '" yMax="' + (20 + Math.floor(j / 8) * 12) + '">' + w + '</word>'; }).join('') + '</page>'; }
+const JAAR_P20 = 'Jaarverslag stichting voorbeeld (verzonnen). Hoofdstuk 1 tot en met 20 over gebouwen, roosters en financiën van het afgelopen jaar.';
+const JAAR_P25 = JAAR_P20 + '\fBijlage 3, pagina 25 (verzonnen): lijst deelnemers. BSN: 123456782';
+async function proefF(extra, paginas, ingang) {
+  const E = omgeving(Object.assign({ markerStand: () => 'door', paginas: async () => paginas, pdfBbox: async () => bbox(JAAR_P20) }, extra));
+  const id = E.zet({ marker: ingang || 'gemarkeerd', soorten: ['bsn'], meta: { van: 'stichting@voorbeeld.example', onderwerp: 'Jaarverslag', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('stichting@voorbeeld.example', 'Jaarverslag', 'Beste David, hierbij het jaarverslag van de stichting. Groet, Anne (verzonnen).') },
+      { deel: 'b1', rol: 'bijlage', naam: 'Jaarverslag.pdf', mime: 'application/pdf', bytes: '%PDF-1.4 jaarverslag' }] });
+  await E.r.ronde();
+  const w = E.db.prepare("SELECT uitkomst, bewijs FROM besluit WHERE stuk_id = ? AND stap = 'marker_weging'").get(id);
+  const ls = E.db.prepare('SELECT staat FROM live_stuk WHERE stuk_id = ?').get(id);
+  const uit = { weging: w && w.uitkomst, waarom: w ? JSON.parse(w.bewijs).waarom : null, staat: ls && ls.staat, bestanden: E.bestanden(), jev: E.tel.jev.length };
+  // Fable-review MOET 1: het hele stuk in de app openen gaat ook bij een lang PDF
+  const st = await E.r.appStuk({ stuk_id: id });
+  uit.app = st && st.status;
+  E.r.sluit();
+  return uit;
+}
+test('wv3395 A14 proef F: BSN op p. 25 dat de ontvangstlaag zag houdt het stuk hard buiten de Brain', async () => {
+  // (1) de poort leest alle tekstpagina's: de router ziet het BSN zelf
+  const P30 = (p25) => Array.from({ length: 30 }, (_, i) => i === 24 ? p25 : 'Pagina ' + (i + 1) + ' van het jaarverslag (verzonnen), tekst over roosters.').join('\f') + '\f';
+  const a = await proefF({ pdfPoort: async () => P30('Bijlage 3, pagina 25 (verzonnen): lijst deelnemers. BSN: 123456782') }, 30);
+  assert.equal(a.app, 200, JSON.stringify(a));
+  assert.equal(a.weging, 'hard'); assert.ok(a.waarom.includes('bsn'), a.waarom); assert.equal(a.staat, 'bewaard'); assert.deepEqual(a.bestanden, []); assert.equal(a.jev, 0);
+  // (2) volledig lezen lukt niet (geen pdfPoort of mislukt): het BSN van de ontvangstlaag telt hard
+  const b = await proefF({ pdfPoort: async () => null }, 30);
+  assert.equal(b.weging, 'hard'); assert.deepEqual(b.waarom, ['ingang_onvolledig']); assert.equal(b.staat, 'bewaard'); assert.deepEqual(b.bestanden, []);
+  const c = await proefF({}, 30);
+  assert.equal(c.weging, 'hard'); assert.deepEqual(c.waarom, ['ingang_onvolledig']);
+  // een lege (scan)pagina tussen de tekstpagina's: niet volledig gelezen, dus het BSN van de ontvangstlaag telt hard
+  const e = await proefF({ pdfPoort: async () => P30('') }, 30);
+  assert.equal(e.weging, 'hard'); assert.deepEqual(e.waarom, ['ingang_onvolledig']);
+  // de ontvangstlaag paste zelf de eigen-uitzondering toe (marker 'geen'): geen ingang_onvolledig (Fable-review ZOU 5)
+  const g = await proefF({ pdfPoort: async () => null }, 30, 'geen');
+  assert.ok(!(g.waarom || []).includes('ingang_onvolledig'), JSON.stringify(g));
+  // (3) volledig gelezen en de router vindt geen BSN (vals-positief uit ruwe mailbytes, 3-11): blijft zacht en gaat door met label
+  const d = await proefF({ pdfPoort: async () => { throw new Error('mag niet: 1 pagina'); } }, 1);
+  assert.equal(d.weging, 'zacht'); assert.equal(d.staat, 'klaar'); assert.ok(d.bestanden.length > 0);
+});
