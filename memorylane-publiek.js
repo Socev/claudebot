@@ -39,6 +39,7 @@ const MLD = require('./memorylane-delen.js');
 
 const KRINGEN = MLD.PKRINGEN;
 const RONDE_MS = 15 * 60000, LOG_MS = 5 * 60000, HOUDBAAR_MS = 24 * 3600000, NOOD_MS = 25000;   // A08: zo lang wacht de app op D1
+const HERPROBEER_MS = 5 * 60000, MELD_MS = 45 * 60000;   // A25: deels mislukte ronde opnieuw na 5 min; storing na 45 min één box-rij
 const FOTO_BUDGET_MS = 40000, FOTO_TEGELIJK = 3, BATCH = 40, FOTO_MAX_TIK = 40;
 // wv2943: bezoekers krijgen hooguit de eerste 300 foto's van een album (de pod geeft Davids app er nu 500); de opnamedag komt per ronde
 // bij hooguit DAG_PER_RONDE al geplaatste foto's (± 23.000 bij de invoering: 50 D1-aanroepen per kring per ronde, binnen de Cloudflare-rem)
@@ -244,41 +245,61 @@ function maak(o) {
   // ── de straat per kring ──
   let wens = null;   // kring → { huizen: Map(pid → {hid, open, json}), details: Map, gevels: Map(pid → {hid, hash}), fotos: Map(fid → {hid, pid, asset, volg, ratio}) }
   const videoKan = typeof ml.videoBestand === 'function' && ml.info && (function () { try { const i = ml.info(); return !!(i && i.video && i.video.ffmpeg); } catch (e) { return false; } })();
+  // A25 (Fable-review 19-11, memorylane § 3 en § 5): een fout bij één huis sluit dat huis en de ronde gaat door; een album dat Immich nu niet
+  // geeft, houdt alleen de foto's van dát huis vast (onvolledig per huis, niet meer per kring).
   async function wensVan(k) {
-    const w = { huizen: new Map(), details: new Map(), gevels: new Map(), fotos: new Map(), tegen: 0 };
+    const w = { huizen: new Map(), details: new Map(), gevels: new Map(), fotos: new Map(), tegen: 0, onvolledig: new Set(), fouten: 0 };
     for (const x of ml.publiekLijst(k)) {
       const pid = pidVan(k, x.hid);
-      if (!x.open) { w.huizen.set(pid, { hid: x.hid, open: 0, json: JSON.stringify(dichtItem(k, x.hid, x.jaar)) }); continue; }
-      const dt = ml.detail(x.hid, { kring: k });
-      if (dt.status !== 200 || !dt.body || !dt.body.herinnering) { w.huizen.set(pid, { hid: x.hid, open: 0, json: JSON.stringify(dichtItem(k, x.hid, null)) }); continue; }
-      const det = detailItem(pid, dt.body.herinnering);
-      if (raak(det)) { w.tegen++; w.huizen.set(pid, { hid: x.hid, open: 0, json: JSON.stringify(dichtItem(k, x.hid, (det.datum.match(/^1\|(\d{4})/) || [])[1] || null)) }); continue; }
-      w.huizen.set(pid, { hid: x.hid, open: 1, json: JSON.stringify(lijstItem(pid, x.item)) });
-      w.details.set(pid, { hid: x.hid, json: JSON.stringify(det) });
-      if (x.item.album && x.item.album.status === 'actief') {
-        let f = null;
-        try { f = await ml.fotos(x.hid, { kring: k }); } catch (e) { fout('mlp-fotos', e); }
-        if (!f || f.status !== 200) { w.onvolledig = true; continue; }   // Immich even weg: deze ronde niets van dit album weghalen
-        let volg = 0;
-        // wv2938: een video alleen als de pod video's kan omzetten (ml.videoBestand); anders blijft hij buiten, zoals eerst
-        // wv2943: per foto alleen de opnamedag erbij (geen plaats, tijd of favoriet: David beslist later over de plaats voor bezoekers)
-        for (const ft of (f.body.fotos || []).slice(0, MAX_PUBLIEK_FOTOS)) {
-          if (!ft || typeof ft.id !== 'string' || (!ft.beeld && !videoKan)) continue;
-          w.fotos.set(fidVan(k, x.hid, ft.id), { hid: x.hid, pid, asset: ft.id, volg: volg++, ratio: typeof ft.ratio === 'number' ? ft.ratio : null, video: !ft.beeld,
-            dag: typeof ft.dag === 'string' && DAG_RE.test(ft.dag) ? ft.dag : null });
-        }
-        const gv = f.body.album && f.body.album.gevel;
-        w.gevels.set(pid, { hid: x.hid, hash: 'foto:' + (gv || '') });
-      } else if (x.item.plaatje) w.gevels.set(pid, { hid: x.hid, hash: 'plaatje' });
+      const dicht = (jaar) => w.huizen.set(pid, { hid: x.hid, open: 0, json: JSON.stringify(dichtItem(k, x.hid, jaar)) });
+      if (x.fout) { w.fouten++; dicht(null); continue; }   // pagina onleesbaar in publiekLijst: dicht
+      if (!x.open) { dicht(x.jaar); continue; }
+      try { await huisWens(k, x, pid, w, dicht); }
+      catch (e) {
+        fout('mlp-huis', e); w.fouten++;
+        w.details.delete(pid); w.gevels.delete(pid); w.onvolledig.delete(pid);
+        for (const [fid, f] of w.fotos) if (f.pid === pid) w.fotos.delete(fid);
+        dicht(null);
+      }
     }
     return w;
+  }
+  async function huisWens(k, x, pid, w, dicht) {
+    const dt = ml.detail(x.hid, { kring: k });
+    if (dt.status !== 200 || !dt.body || !dt.body.herinnering) return dicht(null);
+    const det = detailItem(pid, dt.body.herinnering);
+    if (raak(det)) { w.tegen++; return dicht((det.datum.match(/^1\|(\d{4})/) || [])[1] || null); }
+    const huis = { hid: x.hid, open: 1, json: JSON.stringify(lijstItem(pid, x.item)) }, detail = { hid: x.hid, json: JSON.stringify(det) };
+    if (x.item.album && x.item.album.status === 'actief') {
+      let f = null;
+      try { f = await ml.fotos(x.hid, { kring: k }); } catch (e) { fout('mlp-fotos', e); }
+      if (!f || f.status !== 200) { w.huizen.set(pid, huis); w.details.set(pid, detail); w.onvolledig.add(pid); return; }   // Immich even weg: van dit album deze ronde niets weghalen
+      const fotos = [];
+      let volg = 0;
+      // wv2938: een video alleen als de pod video's kan omzetten (ml.videoBestand); anders blijft hij buiten, zoals eerst
+      // wv2943: per foto alleen de opnamedag erbij (geen plaats, tijd of favoriet: David beslist later over de plaats voor bezoekers)
+      for (const ft of (f.body.fotos || []).slice(0, MAX_PUBLIEK_FOTOS)) {
+        if (!ft || typeof ft.id !== 'string' || (!ft.beeld && !videoKan)) continue;
+        fotos.push([fidVan(k, x.hid, ft.id), { hid: x.hid, pid, asset: ft.id, volg: volg++, ratio: typeof ft.ratio === 'number' ? ft.ratio : null, video: !ft.beeld,
+          dag: typeof ft.dag === 'string' && DAG_RE.test(ft.dag) ? ft.dag : null }]);
+      }
+      const gv = f.body.album && f.body.album.gevel;
+      w.huizen.set(pid, huis); w.details.set(pid, detail);
+      for (const [fid, v] of fotos) w.fotos.set(fid, v);
+      w.gevels.set(pid, { hid: x.hid, hash: 'foto:' + (gv || '') });
+      return;
+    }
+    w.huizen.set(pid, huis); w.details.set(pid, detail);
+    if (x.item.plaatje) w.gevels.set(pid, { hid: x.hid, hash: 'plaatje' });
   }
 
   // R2-sleutels (vast schema; geen titels of ids van de pod)
   const r2f = (k, fid, m) => 'f/' + k + '/' + fid + '/' + m;
   const r2g = (k, pid) => 'g/' + k + '/' + pid;
 
-  async function rondeKring(k, w) {
+  // A25: eerst sluiten (alle kringen), dan vullen. sluitKring schrijft blok, dicht en losse foto's weg in een eigen D1-batch; vulKring daarna
+  // de nieuwe en gewijzigde huizen en het R2-opruimen. Faalt het vullen, dan is het sluiten al gebeurd.
+  async function sluitKring(k, w) {
     const nu0 = q.obj.all(k), heb = new Map(nu0.map((r) => [r.sleutel, r]));
     const batch = [], naD1 = [], r2weg = [];
     // huizen die niet meer open zijn (dicht of weg): eerst blok, dan rijen weg
@@ -299,7 +320,7 @@ function maak(o) {
     for (const r of nu0) {
       if (r.sleutel.startsWith('f:')) {
         const fid = r.sleutel.slice(2), x = JSON.parse(r.hash);
-        const weg = !w.fotos.has(fid) && (dichtGaan.has(x.pid) || !w.onvolledig);
+        const weg = !w.fotos.has(fid) && (dichtGaan.has(x.pid) || !w.onvolledig.has(x.pid));
         if (!weg) continue;
         if (!dichtGaan.has(x.pid)) batch.push({ sql: 'DELETE FROM foto WHERE kring = ? AND fid = ?', params: [k, fid] }, { sql: 'DELETE FROM video WHERE kring = ? AND fid = ?', params: [k, fid] });
         r2weg.push({ sleutel: r.sleutel, keys: [r2f(k, fid, 'k'), r2f(k, fid, 'g')].concat(x.v ? [r2f(k, fid, 'v')] : []), pid: x.pid });
@@ -307,10 +328,18 @@ function maak(o) {
       if (r.sleutel.startsWith('g:')) {
         const pid = r.sleutel.slice(2), g = w.gevels.get(pid);
         if (g && g.hash === JSON.parse(r.hash).bron) continue;
+        if (w.onvolledig.has(pid) && !dichtGaan.has(pid)) continue;   // A25: album nu niet te lezen = gevel laten staan
         if (!dichtGaan.has(pid)) batch.push({ sql: 'DELETE FROM gevel WHERE kring = ? AND pid = ?', params: [k, pid] });
         r2weg.push({ sleutel: r.sleutel, keys: [r2g(k, pid)], pid });
       }
     }
+    if (batch.length) await d1(batch);
+    for (const f of naD1) f();
+    return { nu0, heb, dichtGaan, r2weg };
+  }
+  async function vulKring(k, w, c) {
+    const { heb, dichtGaan, r2weg } = c;
+    const batch = [], naD1 = [];
     // nieuwe of gewijzigde huizen en details
     for (const [pid, h] of w.huizen) {
       const hs = sha256(h.json);
@@ -354,7 +383,7 @@ function maak(o) {
     if (pidsKlaar.size) for (const r of q.obj.all(k)) { if (r.sleutel.startsWith('f:')) rest.add(JSON.parse(r.hash).pid); else if (r.sleutel.startsWith('g:')) rest.add(r.sleutel.slice(2)); }
     const blokWeg = [...pidsKlaar].filter((pid) => !rest.has(pid) && !w.details.has(pid));
     if (blokWeg.length) await d1(blokWeg.map((pid) => ({ sql: 'DELETE FROM blok WHERE kring = ? AND pid = ?', params: [k, pid] })));
-    return { huizen: w.huizen.size, open: w.details.size, dicht_gegaan: dichtGaan.size, tegen: w.tegen };
+    return { huizen: w.huizen.size, open: w.details.size, dicht_gegaan: dichtGaan.size, tegen: w.tegen, onvolledig: w.onvolledig.size, fouten: w.fouten };
   }
 
   // foto's en gevels uploaden (begrensd per tik)
@@ -451,6 +480,9 @@ function maak(o) {
     return rijen.length;
   }
 
+  // A25: storingsstand die tikken zonder ronde overleeft (een tik zonder ronde zegt niets over albums of kringen)
+  const staat = { fout: null, onvolledig: 0, huis_fouten: 0, bezoekers_fout: false };
+  let misBij = -1, herprobeerNa = 0;   // A25: wijzigingsstand van de laatste deels mislukte ronde en wanneer die opnieuw mag
   let bezig = false, laatsteRonde = 0, laatsteLog = 0, laatst = null, wijziging = 1, gedaan = 0;   // review MOET 4: teller i.p.v. vlag
   async function tik(dwing) {
     if (bezig) return { bezig: true };
@@ -459,28 +491,74 @@ function maak(o) {
     try {
       await zorgSchema();
       if (stand('noodstop_d1') !== (stand('noodstop') === '1' ? '1' : '0')) await noodNaarD1();   // A08: zelfde rij als de directe noodstop
-      uit.bezoekers = await bezoekersSync();
-      for (let ronde = 0; ronde < 3 && (dwing || wijziging !== gedaan || nu() - laatsteRonde >= RONDE_MS); ronde++) {
+      // A25: een onleesbare bezoekerspagina houdt de rondes (en dus het intrekken) niet meer tegen; D1 houdt dan de vorige lijst
+      try { uit.bezoekers = await bezoekersSync(); } catch (e) { fout('mlp-bezoekers', e); uit.bezoekers_fout = true; }
+      staat.bezoekers_fout = !!uit.bezoekers_fout;
+      // A25 (review ZOU 1): na een deels mislukte ronde wacht dezelfde wijzigingsstand HERPROBEER_MS; een nieuwe wijziging (of dwing) gaat meteen
+      for (let ronde = 0; ronde < 3 && (dwing || wijziging !== gedaan || nu() - laatsteRonde >= RONDE_MS) && (dwing || misBij !== wijziging || nu() >= herprobeerNa); ronde++) {
         dwing = false;
         const start = wijziging;
-        const nw = {}, tel = {};
-        for (const k of KRINGEN) nw[k] = await wensVan(k);
-        wens = nw;
-        for (const k of KRINGEN) tel[k] = await rondeKring(k, nw[k]);
+        const nw = {}, tel = {}, c = {}, mis = new Set();
+        // A25: per kring vangen; eerst sluiten in alle kringen, dan vullen. Een kring die faalt krijgt geen nieuwe houdbaarheid (na 24 uur dicht).
+        for (const k of KRINGEN) { try { nw[k] = await wensVan(k); } catch (e) { fout('mlp-wens', e); mis.add(k); } }
+        wens = nw;   // een kring zonder wens: uploads daar overgeslagen
+        for (const k of KRINGEN) if (nw[k]) { try { c[k] = await sluitKring(k, nw[k]); } catch (e) { fout('mlp-sluit', e); mis.add(k); } }
+        for (const k of KRINGEN) if (c[k]) { try { tel[k] = await vulKring(k, nw[k], c[k]); } catch (e) { fout('mlp-vul', e); mis.add(k); } }
+        uit.ronde = tel;
+        uit.onvolledig = KRINGEN.reduce((n, k) => n + (nw[k] ? nw[k].onvolledig.size : 0), 0);
+        uit.huis_fouten = KRINGEN.reduce((n, k) => n + (nw[k] ? nw[k].fouten : 0), 0);
+        staat.onvolledig = uit.onvolledig; staat.huis_fouten = uit.huis_fouten; staat.fout = mis.size ? 'kring ' + [...mis].join(',') : null;
+        const goed = KRINGEN.filter((k) => tel[k]);
         const cats = Object.keys(o.categorieen || {}).filter((id) => !o.categorieen[id].gevoelig).map((id) => ({ id, naam: String(o.categorieen[id].naam), gevoelig: false }));
         await d1([{ sql: 'INSERT INTO stand (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde', params: ['categorieen', JSON.stringify(cats)] }]);
-        await d1(KRINGEN.map((k) => ({ sql: 'INSERT INTO publicatie (kring, versie, geldig_tot) VALUES (?, 1, ?) ON CONFLICT (kring) DO UPDATE SET versie = versie + 1, geldig_tot = excluded.geldig_tot',
+        if (goed.length) await d1(goed.map((k) => ({ sql: 'INSERT INTO publicatie (kring, versie, geldig_tot) VALUES (?, 1, ?) ON CONFLICT (kring) DO UPDATE SET versie = versie + 1, geldig_tot = excluded.geldig_tot',
           params: [k, nu() + HOUDBAAR_MS] })));
-        laatsteRonde = nu(); gedaan = start; uit.ronde = tel;   // kwam er tijdens de ronde een wijziging bij, dan meteen nog een ronde
-        q.standZet.run('laatste_ronde', iso(nu()));
         vulWachtrij();
+        if (mis.size) {   // A25: deels mislukt: wat lukte staat, over HERPROBEER_MS opnieuw; laatste_ronde blijft staan (bewaak() meldt na MELD_MS)
+          uit.fout = staat.fout; misBij = wijziging; herprobeerNa = nu() + HERPROBEER_MS; break;
+        }
+        laatsteRonde = nu(); gedaan = start; misBij = -1;   // kwam er tijdens de ronde een wijziging bij, dan meteen nog een ronde
+        q.standZet.run('laatste_ronde', iso(nu()));
       }
       if (wachtrij.length) await uploads();
       if (nu() - laatsteLog >= LOG_MS) { uit.log = await logOphalen(); laatsteLog = nu(); }
       uit.wachtrij = wachtrij.length;
-    } catch (e) { fout('mlp-tik', e); uit.fout = String(e && e.message || e).replace(/[^\w .:-]/g, '').slice(0, 80); }
+    } catch (e) { fout('mlp-tik', e); uit.fout = String(e && e.message || e).replace(/[^\w .:-]/g, '').slice(0, 80); staat.fout = uit.fout; }
     finally { bezig = false; laatst = uit; }
+    bewaak();
     return uit;
+  }
+
+  // A25: één box-rij per storing (geen herhaling) als de tik na MELD_MS nog fout geeft, een album onleesbaar blijft, of de laatste volledige
+  // ronde ouder is dan MELD_MS (ook als de tik hangt: server.js roept bewaak() elke minuut los van de tik aan). Weer goed = stil terug.
+  // Alleen aantallen, nooit titels of namen.
+  const gestart = nu();
+  function storing() {
+    const lr = Date.parse(stand('laatste_ronde') || ''), oud = nu() - (isNaN(lr) ? gestart : lr) >= MELD_MS;
+    const x = staat, st = [];
+    if (oud) st.push('laatste volledige ronde ' + (isNaN(lr) ? 'nog nooit sinds de start' : Math.round((nu() - lr) / 60000) + ' min geleden'));
+    if (x.fout) st.push('tik geeft een fout');
+    if (x.onvolledig) st.push(x.onvolledig + ' album(s) niet te lezen (die foto\'s worden niet ingetrokken)');
+    if (x.huis_fouten) st.push(x.huis_fouten + ' huis/huizen met een fout (dicht gezet)');
+    if (x.bezoekers_fout) st.push('bezoekerslijst niet te lezen (oude lijst blijft gelden)');
+    return { oud, st };
+  }
+  function bewaak() {
+    try {
+      const { oud, st } = storing();
+      if (!st.length) { if (stand('storing_sinds')) q.standZet.run('storing_sinds', ''); if (stand('storing_gemeld')) q.standZet.run('storing_gemeld', ''); return null; }
+      if (!stand('storing_sinds')) q.standZet.run('storing_sinds', iso(nu()));
+      if (stand('storing_gemeld')) return 'gemeld';
+      if (!oud && nu() - Date.parse(stand('storing_sinds')) < MELD_MS) return 'wacht';
+      if (!o.box) return 'geen box';
+      const t = new Date(nu()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+      o.box('\n## [direct] ' + t + ' — MemoryLane buiten: intrekken loopt niet volledig (pod, automatisch, A25)\n- status: open\n- van: pod:memorylane-publiek (bewaak, één rij per storing)\n' +
+        '- wat: ' + st.join('; ') + ' (sinds ' + stand('storing_sinds').slice(0, 16).replace('T', ' ') + ' UTC)\n' +
+        '- gevolg: wat David uit de straat haalt kan buiten zichtbaar blijven; na 24 uur zonder volledige ronde gaat de kring vanzelf dicht\n' +
+        '- meten: /health → memorylane_publiek (fout, onvolledig, huis_fouten, bezoekers_fout, laatste_ronde); pod-log mlp-*\n');
+      q.standZet.run('storing_gemeld', iso(nu()));
+      return 'gemeld';
+    } catch (e) { fout('mlp-bewaak', e); return 'fout'; }
   }
 
   // ── voor de app ──
@@ -535,9 +613,10 @@ function maak(o) {
     return uit;
   }
   function health() { return { aan: true, laatste_ronde: stand('laatste_ronde'), wachtrij: wachtrij.length, bezoekers: Number(stand('bezoekers_n') || 0), noodstop: stand('noodstop') === '1', noodstop_buiten: stand('noodstop_d1') === '1', fout: laatst && laatst.fout ? true : false, fotos: fotoTel,
+    onvolledig: staat.onvolledig, huis_fouten: staat.huis_fouten, bezoekers_fout: staat.bezoekers_fout, storing: staat.fout ? true : false, storing_gemeld: stand('storing_gemeld') || null,
     video: Object.assign({ kan: videoKan, mb_buiten: Math.round(videoBytes() / 1e6), budget_mb: Math.round(budget / 1e6) }, videoTel) }; }
   function markeerVuil() { wijziging++; }
-  return { tik, info, gezien, noodstop, health, markeerVuil, _pidVan: pidVan, _fidVan: fidVan, _persoonVan: persoonVan, _dichtItem: dichtItem, _wens: () => wens };
+  return { tik, bewaak, info, gezien, noodstop, health, markeerVuil, _pidVan: pidVan, _fidVan: fidVan, _persoonVan: persoonVan, _dichtItem: dichtItem, _wens: () => wens };
 }
 
 module.exports = { maak, strip, stripJpeg, stripWebp, lijstItem, detailItem, adresHash, LIJST_VELDEN, DETAIL_VELDEN, D1_SCHEMA, KRINGEN, FOTO_MAX_TIK, VIDEO_BUDGET };

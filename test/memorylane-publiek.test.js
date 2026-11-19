@@ -119,7 +119,8 @@ function omgeving(opt) {
   };
   const r2 = { put: async (k, b, m) => { if (st.r2Wacht) await st.r2Wacht; if (st.r2Uit) throw new Error('R2 put HTTP 500'); st.r2.set(k, { b: Buffer.from(b), m }); },
     del: async (k) => { if (st.r2Uit) throw new Error('R2 del HTTP 500'); st.r2.delete(k); } };
-  const pub = MP.maak({ db: ing._db, ml, vault, vv: VV, dir: hdir, d1, r2, categorieen: H.CATEGORIEEN, nu: () => klok.t, videoBudget: opt && opt.budget, dagPerRonde: opt && opt.dagPerRonde, d1Nood: opt && opt.d1Nood, noodMs: opt && opt.noodMs, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)) });
+  st.box = [];
+  const pub = MP.maak({ db: ing._db, ml, vault, vv: VV, dir: hdir, d1, r2, categorieen: H.CATEGORIEEN, nu: () => klok.t, box: (t) => st.box.push(t), videoBudget: opt && opt.budget, dagPerRonde: opt && opt.dagPerRonde, d1Nood: opt && opt.d1Nood, noodMs: opt && opt.noodMs, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)) });
   const ins = ing._db.prepare("INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES (?, 'los', ?, ?, 0, 'actief', ?, ?)");
   function album(hid, cat, titel, wanneer) {
     const t = '2026-11-01T10:00:00Z';
@@ -421,6 +422,108 @@ test('A08 dicht en open vlak na elkaar: de laatste keuze wint in D1, ook als de 
     const [ua, ub] = await Promise.all([a, b]);
     assert.strictEqual(noodD1(o), '1', 'D1 eindigt dicht'); assert.strictEqual(ub.bevestigd, true); assert.strictEqual(ua.bevestigd, false, 'open is ingehaald');
     assert.strictEqual(o.pub.info().noodstop, true);
+  } finally { o.sluit(); }
+});
+
+// A25 (Fable-review 19-11, memorylane § 3 en § 5): intrekken gaat altijd door, ook als de bezoekerslijst of één album faalt; één melding.
+test('A25 bezoekerspagina kapot en één album faalt: een ander huis gaat toch dicht, een foto uit een ander album wordt ingetrokken; één box-rij', async () => {
+  const o = await opgezet();
+  try {
+    await o.pub.tik(true);
+    const albumVan = (h) => o.im.albums.find((x) => x.id === o.ing._db.prepare('SELECT album_id FROM ml_album WHERE hid = ?').get(h).album_id);
+    const pfA = o.pub._pidVan('familie', A), pfB = o.pub._pidVan('familie', B), pfD = o.pub._pidVan('familie', D);
+    const fotosVan = (k, p) => o.rijen('foto', k).filter((r) => r.pid === p).length;
+    assert.strictEqual(fotosVan('familie', pfA), 2); assert.strictEqual(fotosVan('familie', pfB), 2); assert.ok(o.rijen('detail', 'familie').some((r) => r.pid === pfD));
+    const gevelA = [...o.st.r2.keys()].filter((k) => k === 'g/familie/' + pfA).length;
+    // storingen: bezoekerspagina onleesbaar (map i.p.v. bestand), album A geeft een fout
+    const pag = path.join(o.vault, M.BEZOEKERS_PAGINA); fs.rmSync(pag); fs.mkdirSync(pag);
+    const echtFotos = o.ml.fotos;
+    o.ml.fotos = async (hid, opt) => (hid === A ? { status: 503, body: { ok: false } } : echtFotos(hid, opt));
+    // David: D uit familie, en één foto uit het album van B
+    assert.strictEqual(o.ml.kring(D, { kring: 'familie', aan: false }).status, 200);
+    albumVan(B).assets.shift();
+    o.klok.t += 11 * 60000; await o.ml.fotoSync(true);
+    o.pub.markeerVuil();
+    const u = await o.pub.tik();
+    assert.ok(!o.rijen('detail', 'familie').some((r) => r.pid === pfD), 'D is dicht in familie ondanks de kapotte bezoekerspagina');
+    assert.strictEqual(fotosVan('familie', pfD), 0);
+    assert.strictEqual(fotosVan('familie', pfB), 1, 'de foto uit het album van B is ingetrokken ondanks het falende album A');
+    assert.strictEqual(fotosVan('familie', pfA), 2, 'album A faalt: zijn foto\'s blijven (Immich even weg = niets weghalen)');
+    assert.strictEqual([...o.st.r2.keys()].filter((k) => k === 'g/familie/' + pfA).length, gevelA, 'en zijn gevel ook');
+    assert.strictEqual(o.rijen('bezoeker').length, 3, 'de vorige bezoekerslijst blijft gelden');
+    assert.ok(u.bezoekers_fout && u.onvolledig >= 1 && !u.fout, JSON.stringify(u));
+    const h = o.pub.health(); assert.ok(h.bezoekers_fout && h.onvolledig >= 1);
+    // melding: niet meteen, wel na 45 min, en één keer
+    assert.strictEqual(o.st.box.length, 0, 'korte storing: stil');
+    for (let i = 0; i < 6; i++) { o.klok.t += 10 * 60000; await o.pub.tik(); }
+    assert.strictEqual(o.st.box.length, 1, 'na 45 min één box-rij');
+    assert.ok(/MemoryLane buiten/.test(o.st.box[0]) && !/Proef|Kornelis|Zomervakantie|voorbeeld\.invalid/.test(o.st.box[0]), 'alleen aantallen, geen titels of namen');
+    for (let i = 0; i < 6; i++) { o.klok.t += 10 * 60000; await o.pub.tik(); o.pub.bewaak(); }
+    assert.strictEqual(o.st.box.length, 1, 'nooit twee keer dezelfde melding');
+    // hersteld: stil terug; een nieuwe storing daarna meldt weer één keer
+    fs.rmdirSync(pag); o.zetLijst('bevestigd'); o.ml.fotos = echtFotos;
+    o.klok.t += 16 * 60000; await o.pub.tik();
+    assert.strictEqual(o.pub.health().storing_gemeld, null);
+    assert.strictEqual(o.st.box.length, 1);
+  } finally { o.sluit(); }
+});
+
+test('A25 één huis dat een fout geeft gaat dicht en de rest van de ronde gaat door; een hangende tik geeft na 45 min één melding (laatste ronde te oud)', async () => {
+  const o = await opgezet();
+  try {
+    await o.pub.tik(true);
+    const pfB = o.pub._pidVan('familie', B), pfD = o.pub._pidVan('familie', D);
+    const echtDetail = o.ml.detail;
+    o.ml.detail = (hid, opt) => { if (hid === B) throw new Error('nep: pagina onleesbaar'); return echtDetail(hid, opt); };
+    assert.strictEqual(o.ml.kring(D, { kring: 'familie', aan: false }).status, 200);
+    o.pub.markeerVuil();
+    const u = await o.pub.tik();
+    assert.ok(!u.fout && u.huis_fouten >= 1, JSON.stringify(u));
+    assert.ok(!o.rijen('detail', 'familie').some((r) => r.pid === pfB), 'B (fout) is dicht');
+    assert.strictEqual(o.rijen('foto', 'familie').filter((r) => r.pid === pfB).length, 0);
+    assert.ok(!o.rijen('detail', 'familie').some((r) => r.pid === pfD), 'D is ook dicht (de ronde ging door)');
+    assert.ok(o.rijen('detail', 'familie').some((r) => r.pid === o.pub._pidVan('familie', A)), 'A blijft open');
+    assert.ok(!o.fouten.some((f) => /Proef|Zomervakantie|Kornelis/.test(f)), 'geen titels in de fouten');
+    o.ml.detail = echtDetail;
+    o.klok.t += 16 * 60000; await o.pub.tik();
+    assert.ok(o.rijen('detail', 'familie').some((r) => r.pid === pfB), 'weer leesbaar = weer open');
+    // publiekLijst: één onleesbare pagina (map i.p.v. bestand) = dat huis dicht met fout, de rest van de lijst blijft
+    const pagB = path.join(o.vault, M.MAP, B + '.md'), inhoud = fs.readFileSync(pagB); fs.rmSync(pagB); fs.mkdirSync(pagB);
+    const l = o.ml.publiekLijst('familie');
+    assert.ok(l.some((x) => x.hid === B && x.fout && !x.open) && l.some((x) => x.hid === A && x.open), JSON.stringify(l.map((x) => [x.hid, x.open, !!x.fout])));
+    o.pub.markeerVuil(); await o.pub.tik();
+    assert.ok(!o.rijen('detail', 'familie').some((r) => r.pid === pfB));
+    fs.rmdirSync(pagB); fs.writeFileSync(pagB, inhoud);
+    // laatste ronde te oud (tik hangt): bewaak() meldt één keer
+    o.st.box.length = 0;
+    o.klok.t += 50 * 60000;
+    assert.strictEqual(o.pub.bewaak(), 'gemeld'); assert.strictEqual(o.pub.bewaak(), 'gemeld');
+    assert.strictEqual(o.st.box.length, 1); assert.ok(/laatste volledige ronde/.test(o.st.box[0]));
+  } finally { o.sluit(); }
+});
+
+test('A25 één kring faalt in D1: de andere kring sluit en wordt verlengd, de foute niet; zelfde wijziging pas na 5 min opnieuw (review ZOU 1)', async () => {
+  const o = await opgezet();
+  try {
+    await o.pub.tik(true);
+    const pubVan = (k) => o.rijen('publicatie').find((r) => r.kring === k);
+    const shz0 = pubVan('shizzle').geldig_tot;
+    o.st.hook = (batch) => { if (batch.some((q) => q.params.includes('shizzle') && /INTO huis|FROM huis|INTO detail|FROM detail|INTO blok/.test(q.sql))) throw new Error('D1 gaf HTTP 500'); };
+    assert.strictEqual(o.ml.kring(D, { kring: 'familie', aan: false }).status, 200);
+    assert.strictEqual(o.ml.kring(D, { kring: 'shizzle', aan: false }).status, 200);
+    o.pub.markeerVuil(); o.klok.t += 60000;
+    const u = await o.pub.tik();
+    assert.strictEqual(u.fout, 'kring shizzle', JSON.stringify(u));
+    assert.ok(!o.rijen('detail', 'familie').some((r) => r.pid === o.pub._pidVan('familie', D)), 'familie sluit gewoon');
+    assert.strictEqual(pubVan('shizzle').geldig_tot, shz0, 'shizzle krijgt geen nieuwe houdbaarheid');
+    assert.ok(pubVan('familie').geldig_tot > shz0);
+    o.klok.t += 60000;
+    assert.strictEqual((await o.pub.tik()).ronde, undefined, 'zelfde wijziging: niet elke minuut opnieuw');
+    o.st.hook = null; o.klok.t += 5 * 60000;
+    const u3 = await o.pub.tik();
+    assert.ok(u3.ronde && !u3.fout, JSON.stringify(u3));
+    assert.ok(!o.rijen('detail', 'shizzle').some((r) => r.pid === o.pub._pidVan('shizzle', D)), 'na 5 min ook shizzle dicht');
+    assert.ok(pubVan('shizzle').geldig_tot > shz0);
   } finally { o.sluit(); }
 });
 
