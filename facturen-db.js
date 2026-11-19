@@ -1296,6 +1296,28 @@ CREATE TRIGGER IF NOT EXISTS betaal_verzending_vooruit BEFORE UPDATE ON betaal_v
   BEGIN SELECT RAISE(ABORT, 'betaal_verzending: alleen vooruit'); END;
 `;
 
+/*
+ * wv3452 (Fable-review facturen-kern M3 / facturen-bank M2): een koppeling bankregel ↔ factuur los kunnen maken. Elke ontkoppeling krijgt een
+ * rij die blijft (geen DELETE, geen UPDATE): het spoor van wat er los ging (bron/methode van de koppeling, betaalspoor voor en na) en meteen de
+ * afwijsrij voor de bankcontrole, die dit paar daarna niet opnieuw automatisch koppelt of voorstelt. Koppelt David het paar later zelf weer,
+ * dan staat de koppeling er gewoon (koppelIntern kijkt hier niet naar).
+ */
+const M27 = `
+CREATE TABLE IF NOT EXISTS ontkoppeling (
+  id INTEGER PRIMARY KEY,
+  transactie TEXT NOT NULL REFERENCES bank_transactie(id),
+  factuur TEXT NOT NULL REFERENCES factuur(id),
+  bron TEXT NOT NULL CHECK (bron IN ('auto','mens')),
+  methode TEXT CHECK (methode IS NULL OR length(methode) <= 40),
+  betaalspoor_voor TEXT, betaalspoor_na TEXT,
+  alleen_eigenaar INTEGER NOT NULL DEFAULT 0 ${BOOL('alleen_eigenaar')},
+  wie TEXT NOT NULL, wanneer TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ontkoppeling_paar ON ontkoppeling (transactie, factuur);
+CREATE TRIGGER IF NOT EXISTS ontkoppeling_blijft BEFORE DELETE ON ontkoppeling BEGIN SELECT RAISE(ABORT, 'ontkoppeling: rijen blijven'); END;
+CREATE TRIGGER IF NOT EXISTS ontkoppeling_vast BEFORE UPDATE ON ontkoppeling BEGIN SELECT RAISE(ABORT, 'ontkoppeling: rijen blijven'); END;
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -1322,13 +1344,14 @@ const MIGRATIES = [
   { versie: 24, naam: "creditcard: kaart_bestand.formaat ook 'ics_pdf' (rekeningoverzicht als PDF, wv2958)", fn: (db) => M24(db) },
   { versie: 25, naam: "factuur: status 'concept_verwijderd' (Gmail-concept door David weggegooid, wv3074)", fn: (db) => M25(db) },
   { versie: 26, naam: 'betaalverzoek naar Cynthia (nogbetalen@): betaal_verzending (wv3369)', sql: M26 },
+  { versie: 27, naam: 'koppeling bankregel ↔ factuur los maken: ontkoppeling (spoor + afwijsrij voor de bankcontrole, wv3452)', sql: M27 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
   'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel', 'afzender_regel',
   'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso', 'paypal_regel', 'boekstuk_verzending', 'boekstuk_vrijgave', 'sepa_verzending',
-  'betaal_verzending'];
+  'betaal_verzending', 'ontkoppeling'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 

@@ -63,7 +63,7 @@ const ROUTES = {
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'feit', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering',
     'betaaldatum', 'sepa-batch', 'sepa-bestand', 'sepa-specificatie', 'regel', 'regel-weg', 'afzender-voorstel', 'maand-specificatie', 'bank-keuze',
-    'leverancier/verzendwijze', 'bevestig-groep', 'koppel-zeker', 'naar-cynthia'],
+    'leverancier/verzendwijze', 'bevestig-groep', 'koppel-zeker', 'naar-cynthia', 'ontkoppel'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (sinds wv2547 ook vanaf een vaste plek, onder het invoerslot) én die hier een verse vingerafdruk vragen.
 const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus', 'POST /app/facturen/leverancier/verzendwijze'];
@@ -482,6 +482,12 @@ function betalen(fdb, r, nu, nogBetalen) {
   return Object.assign({ te_betalen: teBetalen, ingevoerd_niet_gezien: ingevoerd, geblokkeerd }, isEig(r) ? { sepa: sepaOverzicht(fdb, nu) } : {},
     isEig(r) && r.ingang === 'app' ? { nogbetalen: { aan: nogBetalen === 'auto' } } : {});
 }
+// wv3452: hoe een koppeling ontstond, in gewone taal (Bankcontrole › Gekoppeld)
+function KOPPEL_HOE(k) {
+  if (k.bron === 'mens') return 'door jou gekoppeld';
+  return { iban_bedrag: 'automatisch: bekende rekening en hetzelfde bedrag', kenmerk: 'automatisch: factuurnummer of kenmerk', sepa_batch: 'automatisch: eigen batch',
+    sepa_e2e: 'automatisch: eigen betaling uit een batch', incasso: 'automatisch: incasso', valuta: 'automatisch: betaling in vreemde valuta' }[k.methode] || 'automatisch';
+}
 function bank(fdb, r, nu) {
   const vandaag = dagAmsterdam(nu), maand = vandaag.slice(0, 7);
   const [sf, sp] = eigenaarFilter(r, 's');
@@ -546,7 +552,15 @@ function bank(fdb, r, nu) {
   const feitGroep = fdb.db.prepare("SELECT status, count(*) AS n FROM feit WHERE substr(wanneer, 1, 7) = ? GROUP BY status").all(maand);
   if (isEig(r)) for (const g of feitGroep) geleerd_regels.push({ tekst: g.status === 'bevestigd' ? g.n + (g.n === 1 ? ' rekening' : ' rekeningen') + ' vastgelegd als rekening van een leverancier (uit de bankhistorie).'
     : g.n + (g.n === 1 ? ' rekeningkaart' : ' rekeningkaarten') + ' afgewezen; nabellen blijft nodig en de kaart komt niet terug.', aantal: g.n, soort: 'feit_' + g.status, entiteit: null });
-  return { signalen: open.map((x) => signaalKort(x, fdb)), geleerd: geleerd.slice(0, 50).map((x) => signaalKort(x)), geleerd_regels, voorstellen, feiten: feitKaarten(fdb, r, nu),
+  // wv3452 (Fable-review M3): wat de bankcontrole of David de laatste 60 dagen koppelde, om een verkeerde koppeling los te maken (alleen de eigenaar;
+  // terugboekingen niet: die horen bij hun signaal). Hooguit 50, nieuwste eerst.
+  const gekoppeld = !isEig(r) ? [] : fdb.db.prepare("SELECT k.transactie, k.factuur, k.bron, k.methode, k.wanneer FROM koppeling k JOIN bank_transactie t ON t.id = k.transactie " +
+    "WHERE coalesce(k.methode, '') <> 'sepa_terug' AND t.verwijderd_op IS NULL AND (k.wanneer >= ? OR t.boekdatum >= ?) ORDER BY k.wanneer DESC, k.id DESC LIMIT 50")
+    .all(K.plusDagen(vandaag, -60), K.plusDagen(vandaag, -60)).map((k) => {
+      const f = fq.get(k.factuur, ...fp);
+      return f ? { transactie: txKort(tx.get(k.transactie)), factuur: kortMetNaam(f), bron: k.bron, methode: k.methode, wanneer: k.wanneer, hoe: KOPPEL_HOE(k) } : null;
+    }).filter(Boolean);
+  return { signalen: open.map((x) => signaalKort(x, fdb)), geleerd: geleerd.slice(0, 50).map((x) => signaalKort(x)), geleerd_regels, voorstellen, feiten: feitKaarten(fdb, r, nu), gekoppeld,
     weken: Object.values(weken).sort((a, b) => (a.week < b.week ? -1 : 1)), zonder_factuur: ZONDER_FACTUUR.aan };
 }
 function t2(a, b) { return JSON.stringify([a || null, b]); }
@@ -2477,6 +2491,9 @@ function koppelIntern(fdb, r, txId, fId, volledig, nu) {
   const f = D.factuurVoorKern(fdb, fId);
   if (!f || !magFactuur(r, f)) weiger(404, 'factuur niet gevonden');
   if (f.entiteit !== t.entiteit) weiger(409, 'bankregel en factuur horen bij een andere entiteit');
+  // wv3452 (Fable-review M3): een bijschrijving is geen betaling van een factuur, behalve bij een creditnota (geld terug). Een terugboeking van een
+  // eigen batch hoort bij het signaal Teruggeboekt (terug_koppelen), niet hier.
+  if (Number(t.bedrag_centen) > 0 && !K.isCreditnota(f)) weiger(409, 'dit is een bijschrijving; die telt niet als betaling van deze factuur');
   const wanneer = nuIso(nu);
   const n = fdb.db.prepare("INSERT INTO koppeling (transactie, factuur, bron, methode, zekerheid, volledig, alleen_eigenaar, wie, wanneer) VALUES (?, ?, 'mens', 'handmatig', 1, ?, ?, ?, ?) ON CONFLICT DO NOTHING")
     .run(t.id, f.id, volledig ? 1 : 0, t.alleen_eigenaar || f.alleen_eigenaar || f.patientkenmerk ? 1 : 0, r.wie, wanneer).changes;
@@ -2488,6 +2505,55 @@ function koppelIntern(fdb, r, txId, fId, volledig, nu) {
   }
   if (n) D.audit(fdb, { wie: r.wie, wat: 'koppelen', object_soort: 'koppeling', object_id: t.id + ':' + f.id, entiteit: f.entiteit, na: { volledig: !!volledig, betaalspoor: spoor }, wanneer });
   return { nieuw: n === 1, betaalspoor: spoor };
+}
+/*
+ * wv3452 (Fable-review facturen-kern M3 / facturen-bank M2; voorwaarde voor fase 3 van "naar Cynthia", ontwerp 19-11 § 4): een koppeling
+ * bankregel ↔ factuur losmaken. Alleen David in zijn eigen app, met een verse vingerafdruk. De koppeling gaat weg (naast de bankluis-vervanging
+ * de enige DELETE op koppeling), met een rij in ontkoppeling (blijft; tegelijk de afwijsrij: de bankcontrole legt dit paar niet opnieuw) en een
+ * auditrij. Hangt er daarna netto geen betaling meer aan de factuur en stond hij op betaald_gezien, dan gaat het betaalspoor terug zoals het
+ * stond (kern betaalspoorNaOntkoppel). Een terugboeking (methode sepa_terug) maak je hier niet los: die heft een betaling op en hoort bij het
+ * signaal Teruggeboekt. Daarna in dezelfde transactie de bankcontrole: het factuursignaal (nieuwe sleutel na_los) en zo nodig de juiste betaling.
+ */
+function laatsteSpoorwissel(fdb, factuurId) {
+  const a = fdb.db.prepare("SELECT na FROM audit WHERE object_soort = 'factuur' AND object_id = ? AND wat IN ('betaalspoor_toch_incasso','betaalspoor_toch_zelf_betalen','betaalspoor_teruggeboekt') " +
+    'ORDER BY wanneer DESC, id DESC LIMIT 1').get(factuurId);
+  const na = a ? json(a.na, {}) || {} : {};
+  return typeof na.betaalspoor === 'string' ? na.betaalspoor : null;
+}
+function ontkoppel(fdb, r, d, nu, o) {
+  eisEigenaar(r);
+  if (r.ingang !== 'app') weiger(403, 'losmaken doet David in zijn eigen app');
+  const txId = String(d.transactie || ''), fId = String(d.factuur || '');
+  if (!ID_RE.test(txId) || !ID_RE.test(fId)) weiger(400, 'transactie en factuur nodig');
+  const vooraf = fdb.db.prepare('SELECT methode FROM koppeling WHERE transactie = ? AND factuur = ?').get(txId, fId);   // weigeren zonder de vingerafdruk te verbruiken
+  if (!vooraf) weiger(404, 'deze koppeling bestaat niet (meer); ververs de lijst');
+  if (vooraf.methode === 'sepa_terug') weiger(409, 'dit is een terugboeking; die maak je hier niet los (zie het signaal Teruggeboekt)');
+  if (!o || !o.versOk()) weiger(403, 'bevestig met je vingerafdruk', { vers_nodig: true });
+  o.versVerbruik();
+  return D.transactie(fdb, function () {
+    const k = fdb.db.prepare('SELECT * FROM koppeling WHERE transactie = ? AND factuur = ?').get(txId, fId);
+    const t = fdb.db.prepare('SELECT * FROM bank_transactie WHERE id = ?').get(txId);
+    const f = D.factuurVoorKern(fdb, fId);
+    if (!k || !t || !f) weiger(404, 'deze koppeling bestaat niet (meer); ververs de lijst');
+    if (k.methode === 'sepa_terug') weiger(409, 'dit is een terugboeking; die maak je hier niet los (zie het signaal Teruggeboekt)');
+    const wanneer = nuIso(nu);
+    fdb.db.prepare('DELETE FROM koppeling WHERE id = ?').run(k.id);
+    let na = f.betaalspoor;
+    if (f.betaalspoor === 'betaald_gezien' && fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j !== 1) {
+      na = K.betaalspoorNaOntkoppel(f, laatsteSpoorwissel(fdb, f.id));
+      if (fdb.db.prepare("UPDATE factuur SET betaalspoor = ?, betaald_gezien_op = NULL, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND betaalspoor = 'betaald_gezien'")
+        .run(na, wanneer, f.id).changes !== 1) weiger(409, 'de factuur is intussen gewijzigd; ververs de lijst');
+    }
+    fdb.db.prepare('INSERT INTO ontkoppeling (transactie, factuur, bron, methode, betaalspoor_voor, betaalspoor_na, alleen_eigenaar, wie, wanneer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(t.id, f.id, k.bron, k.methode == null ? null : kort(k.methode, 40), f.betaalspoor == null ? null : f.betaalspoor, na == null ? null : na,
+        k.alleen_eigenaar || t.alleen_eigenaar || f.alleen_eigenaar || f.patientkenmerk ? 1 : 0, r.wie, wanneer);
+    D.audit(fdb, { wie: r.wie, wat: 'ontkoppelen', object_soort: 'koppeling', object_id: t.id + ':' + f.id, entiteit: f.entiteit,
+      voor: { bron: k.bron, methode: k.methode, betaalspoor: f.betaalspoor }, na: { betaalspoor: na }, wanneer });
+    const c = bankcontroleToepassen(fdb, nu);
+    const nf = D.factuurVoorKern(fdb, f.id);
+    return { transactie: t.id, factuur: f.id, betaalspoor_voor: f.betaalspoor, betaalspoor: nf.betaalspoor,
+      controle: { koppelingen: c.koppelingen, signalen: c.signalen, betaald_gezien: c.betaald_gezien } };
+  });
 }
 // Bankregel weghalen (Is hetzelfde bij mogelijk dubbel geüpload): nooit een gekoppelde; sluit ook de open signalen en voorstellen van die post.
 function transactieWeg(fdb, r, txId, nu) {
@@ -2794,6 +2860,7 @@ function bankcontroleToepassen(fdb, nu) {
     opdrachten: fdb.db.prepare('SELECT id, factuur, entiteit, status, poging FROM opdracht WHERE factuur IS NOT NULL').all(),
     bestaandeSignalen: fdb.db.prepare('SELECT sleutel, status, sluimer_tot FROM signaal').all(),
     afgewezenVoorstellen: fdb.db.prepare("SELECT sleutel FROM voorstel WHERE status = 'afgewezen'").all().map((v) => v.sleutel),
+    ontkoppeld: fdb.db.prepare('SELECT id, transactie, factuur, wanneer FROM ontkoppeling').all(),   // wv3452: door David losgemaakt → niet opnieuw
     verzamelTel: verzamelTellingen(fdb), verzamelNaam, geen_factuur_signaal: ZONDER_FACTUUR.aan,   // wv2260
     sepa: sepaVoorControle(fdb, nuIso(Date.parse(van + 'T00:00:00Z'))),   // wv1405: eigen batches (PmtInfId + totaal)
     afwijkend: afwijkendVoorControle(fdb, vandaag),   // wv1326: incasso's ruim boven hun gebruikelijke band (alleen na de startdatum)
@@ -3915,6 +3982,10 @@ function bankluisRonde(fdb, o) {
             fdb.db.prepare('DELETE FROM koppeling WHERE transactie = ? AND factuur = ?').run(t.id, x.factuur);
             tel.verplaatst++;
           }
+          // wv3452: een losgemaakt paar blijft los, ook als de bank de post vervangt (kopie van de afwijsrij met hetzelfde tijdstip: geen nieuw signaal)
+          fdb.db.prepare('INSERT INTO ontkoppeling (transactie, factuur, bron, methode, betaalspoor_voor, betaalspoor_na, alleen_eigenaar, wie, wanneer) ' +
+            'SELECT ?, o.factuur, o.bron, o.methode, o.betaalspoor_voor, o.betaalspoor_na, o.alleen_eigenaar, o.wie, o.wanneer FROM ontkoppeling o WHERE o.transactie = ? ' +
+            'AND NOT EXISTS (SELECT 1 FROM ontkoppeling x WHERE x.transactie = ? AND x.factuur = o.factuur AND x.wanneer = o.wanneer)').run(nieuw.id, t.id, nieuw.id);
         } else if (kop.length) fouten.push({ wat: 'vervangen', melding: 'een gekoppelde post is vervangen zonder opvolger; koppeling blijft staan' });
         sluitVanTransactie(fdb, t.id, 'bankluis', wanneer);
       }
@@ -4270,6 +4341,7 @@ function maak(opties) {
         case 'koppel-zeker': { const j = koppelZeker(fdb, r, d, nu, vo); return ok(j, 'koppel-zeker ' + j.gekoppeld.length + '/' + (j.gekoppeld.length + j.geweigerd.length)); }   // wv2661
         case 'terugdraaien': return ok(terugdraaien(fdb, r, d, nu), 'terugdraaien ' + kort(d.id, 16));
         case 'naar-cynthia': { const j = naarCynthia(fdb, r, d, nu, vo); return ok(j, 'naar-cynthia ' + kort(d.id, 16) + (j.opnieuw ? ' opnieuw' : '')); }   // wv3372
+        case 'ontkoppel': { const j = ontkoppel(fdb, r, d, nu, vo); return ok(j, 'ontkoppel ' + kort(d.factuur, 16) + ' ' + j.betaalspoor_voor + '>' + j.betaalspoor); }   // wv3452
         case 'nagebeld': return ok(nagebeld(fdb, r, d, nu, vo), 'nagebeld ' + kort(d.id, 16));
         case 'geen-factuur': return ok(gebeurtenisRoute(fdb, r, d, 'geen_factuur', nu));
         case 'toch-factuur': return ok(gebeurtenisRoute(fdb, r, d, 'toch_factuur', nu));

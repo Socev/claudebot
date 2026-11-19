@@ -1399,7 +1399,8 @@ function dubbelGeupload(transacties) {
 /*
  * De bankcontrole over de hele stand (puur; F2 roept hem na elke upload en bankluis-ronde aan).
  * inv = { vandaag, transacties, facturen, leveranciers, uitzonderingen, entiteiten, rekeningen, koppelingen, opdrachten, bestaandeSignalen,
- *         afgewezenVoorstellen, koersen, afwijkend (wv1326: kandidaten uit facturen-validatie.afwijkendeIncassos) }.
+ *         afgewezenVoorstellen, koersen, afwijkend (wv1326: kandidaten uit facturen-validatie.afwijkendeIncassos),
+ *         ontkoppeld (wv3452: [{ id, transactie, factuur, wanneer }] — door David losgemaakte paren: nooit opnieuw automatisch of als voorstel) }.
  *   transacties: genormaliseerd + { id, bestand, bestand_op? }; facturen: { id, entiteit, leverancier, nummer, kenmerk, incl (centen,
  *   creditnota negatief), valuta, incl_eur?, iban, factuurdatum, vervaldatum, betaalwijze, betaalspoor, status, ingevoerd_op, dubbel_van?,
  *   patientkenmerk?, alleen_eigenaar? }; koppelingen: { transactie, factuur, bron ('auto'|'mens'), methode? }.
@@ -1464,6 +1465,15 @@ function bankcontrole(inv) {
   const isPrive = (f) => !!f && (f.entiteit === 'prive' || !!f.prive || !!f.alleen_eigenaar || !!f.patientkenmerk);
   const eigenaarVan = (tx, fids) => !!(tx && tx.alleen_eigenaar) || (fids || []).some((id) => isPrive(fMap.get(id)));
   const afgewezen = new Set(inv.afgewezenVoorstellen || []);
+  // wv3452 (Fable-review M3): een paar dat David losmaakte, koppelt de controle niet opnieuw (ook niet als voorstel of terugboeking); het
+  // factuursignaal krijgt na de laatste ontkoppeling een eigen sleutel (een eerder vanzelf gesloten "te betalen, niet betaald" houdt hem anders tegen)
+  const losPaar = new Set(), losLaatst = new Map();
+  for (const o of inv.ontkoppeld || []) {
+    losPaar.add(o.transactie + '|' + o.factuur);
+    const w = String(o.wanneer || '').replace(/\D/g, '').slice(0, 17);   // tijdstip, niet het rij-id: een kopie (bankluis-vervanging) geeft geen nieuwe sleutel
+    if (w && !(losLaatst.get(o.factuur) >= w)) losLaatst.set(o.factuur, w);
+  }
+  const los = (txId, fids) => (fids || []).some((fid) => losPaar.has(txId + '|' + fid));
   const uit = { koppelingen: [], voorstellen: [], uitzonderingen: [], betaalspoor: [], signalen: [], heropenen: [] };
   const signalen = [];
   /*
@@ -1552,7 +1562,7 @@ function bankcontrole(inv) {
   for (const tx of txs) {
     if (richtingVan(tx) !== 'bij') continue;
     const k = terugKand(tx);
-    if (!k) continue;
+    if (!k || los(tx.id, [k.factuur])) continue;
     const al = txFacturen.get(tx.id) || [];
     const eigen = (betaald.get(k.factuur) || []).some((e) => e.tx === tx.id && e.methode === TERUG);
     if (al.length && !eigen) continue;   // met de hand aan iets anders gekoppeld: daar blijft hij
@@ -1582,7 +1592,7 @@ function bankcontrole(inv) {
       }
       continue;
     }
-    if (!k || k.ter_bevestiging) continue;
+    if (!k || k.ter_bevestiging || los(tx.id, k.facturen)) continue;
     const eigenaar = eigenaarVan(tx, k.facturen);
     for (const fid of k.facturen) {
       uit.koppelingen.push({ transactie: tx.id, factuur: fid, bron: 'auto', methode: k.methode, zekerheid: k.zekerheid, alleen_eigenaar: eigenaar });
@@ -1603,7 +1613,7 @@ function bankcontrole(inv) {
   // gekoppeld staan (natoets wv798 #1).
   const ronde1 = (tx) => {
     if (txFacturen.has(tx.id) || uitzonderingVoor(tx, ctx)) return;
-    const kand = matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx);
+    const kand = matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx).filter((x) => !los(tx.id, x.facturen));
     const k = kand[0];
     if (!k || k.ter_bevestiging) return;
     if (!k.facturen.every((fid) => fMap.has(fid) && (tegenpartijGeborgd(tx, fMap.get(fid), ctx) || eigenBetaling(tx, fMap.get(fid), k, ctx)))) return;
@@ -1712,7 +1722,7 @@ function bankcontrole(inv) {
     // wv1317: eerst alle wensen verzamelen; daarna krijgt elke factuur hooguit één open voorstel (de beste betaling, dan de dichtstbijzijnde)
     const sk = sepaKand(tx);
     const kand = (sk && !sk.dubbel && sk.ter_bevestiging ? [sk] : []).concat(matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx))
-      .map((k) => Object.assign({ sleutel: voorstelSleutel(tx.id, k.facturen) }, k)).filter((k) => !afgewezen.has(k.sleutel));
+      .map((k) => Object.assign({ sleutel: voorstelSleutel(tx.id, k.facturen) }, k)).filter((k) => !afgewezen.has(k.sleutel) && !los(tx.id, k.facturen));
     if (kand.length) { wensen.push({ tx, kand, basis }); continue; }
     // wv2260: inv.geen_factuur_signaal === false (facturen.js ZONDER_FACTUUR) maakt geen "afschrijving zonder factuur" meer; zonder vlag ongewijzigd
     if (inv.geen_factuur_signaal !== false && richtingVan(tx) === 'af' && dagenTussen(tx.boekdatum, vandaag) > 7) signalen.push(maakSignaal('geen_factuur', basis));
@@ -1762,7 +1772,8 @@ function bankcontrole(inv) {
     if ((terugSig.get(f.id) || []).some((sl) => bestaandOpen.has(sl) || !bestaandSleutel.has(sl))) continue;
     const l = levVan(f.leverancier, ctx);
     const basis = { facturen: [f.id], entiteit: f.entiteit, naam: l ? l.naam : null, leverancier: f.leverancier || null, bedrag_centen: teBetalen(f),
-      datum: f.vervaldatum || null, alleen_eigenaar: isPrive(f), sleutel_extra: terug.length ? 'na_terug=' + terug[terug.length - 1] : undefined };
+      datum: f.vervaldatum || null, alleen_eigenaar: isPrive(f),
+      sleutel_extra: [terug.length ? 'na_terug=' + terug[terug.length - 1] : '', losLaatst.has(f.id) ? 'na_los=' + losLaatst.get(f.id) : ''].filter(Boolean).join(';') || undefined };
     let verval = f.vervaldatum && isIsoDatum(f.vervaldatum) ? f.vervaldatum : (f.factuurdatum && isIsoDatum(f.factuurdatum) ? plusDagen(f.factuurdatum, 14) : null);
     // wv1415 (diffreview ZOU 3): na een terugboeking telt de termijn opnieuw, vanaf twee weken na de terugboeking
     if (terug.length) { const tb = plusDagen(txMap.get(terug[terug.length - 1]).boekdatum, 14); if (!verval || tb > verval) verval = tb; }
