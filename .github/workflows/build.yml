@@ -444,6 +444,11 @@ jobs:
       - name: "bewaker-wees-proef (wv3398, achtergebleven proefkopie gemeld)"
         if: ${{ !cancelled() }}
         run: bash test/bewaker-wees-proef.sh
+      # wv3424 (actieplan B81): meld.js — een box-schrijf of symlink die de grens overschrijdt landt niet later (kindproces + SIGKILL),
+      # herkansing met vast kenmerk (één rij), seintje ook in de stille uren naar bericht.py (die houdt het vast tot 07:00).
+      - name: "meld-module (wv3424, box-rij zonder late landing, herkansing, nachtseintje)"
+        if: ${{ !cancelled() }}
+        run: bash test/meld-module.sh
       # Vault zonder symlinks (wv900): vault-veilig.js/vault_veilig.py — link op de doelnaam, map-symlink, hangende link, vaste tmp-namen,
       # fifo, ACL-masker, flock; potVzRegister uit server.js in een vm; geen vaste tmp-naam of append op een vaultpad meer in server.js.
       - name: "vault-veilig (wv900, geen symlink volgen in de vault)"

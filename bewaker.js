@@ -121,6 +121,13 @@ for (let i = 2; i < process.argv.length - 1; i++) if (process.argv[i].startsWith
 const SERVER = parseInt(arg['server-pid'] || '', 10);
 const POORT = parseInt(arg.poort || process.env.PORT || '8080', 10);
 if (!(SERVER > 1)) { process.stderr.write('bewaker: --server-pid ontbreekt\n'); process.exit(2); }
+// wv3424 (B81): één meldmodule met schijfdruk.js (box-rij via vault-veilig in een kindproces met herkansing, seintje via bericht.py,
+// symlink zonder late landing). Ontbreekt meld.js in de release, dan logt de bewaker dat en bewaakt hij verder zonder te melden.
+let meld = null;
+try {
+  meld = require(process.env.BEWAKER_MELD || path.join(__dirname, 'meld.js')).maak({ box: BOX, bericht: BERICHT, log: (r) => log(r),
+    kindMs: getal('BEWAKER_BOX_MS', 30000), linkMs: C.fs, logBestand: LOG });
+} catch (e) { meld = null; }
 
 // ── hulpjes ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 const mono = () => Number(process.hrtime.bigint() / 1000000n);
@@ -263,20 +270,20 @@ function recenteIngrepen(s) {
 const CURRENT = path.join(APP_ROOT, 'current');
 const VORIGE = path.join(APP_ROOT, 'vorige');
 const leesLink = (p) => metGrens(fsp.readlink(p), C.fs, null);
-async function zetLink(p, doel) {
-  const tmp = p + '.bewaker-' + process.pid;
-  return metGrens(fsp.unlink(tmp).catch(() => {}).then(() => fsp.symlink(doel, tmp)).then(() => fsp.rename(tmp, p)).then(() => true), C.fs, false);
-}
+// wv3424 (B81): in een kindproces via meld.js; na de time-out SIGKILL, dus geen late landing van een "mislukte" omzetting.
+async function zetLink(p, doel) { return meld ? meld.zetLink(p, doel) : false; }
 async function beschermVorige() {
   const cur = await leesLink(CURRENT), vor = await leesLink(VORIGE);
   if (!cur || !vor || cur === vor) return null;
   // Alleen als current nog naar de release van MIJN server wijst: zette een uitrol intussen een nieuwe release neer,
   // dan is vorige het vangnet voor die release en blijft hij staan (Fable wv701-code #2).
   if (cur !== path.join('releases', SHA)) { await log('vorige niet aangeraakt: current wijst naar ' + cur + ', niet naar mijn release ' + SHA + ' (uitrol bezig?)'); return null; }
-  if (!(await zetLink(VORIGE, cur))) { await log('LET OP: kon vorige niet tijdelijk op current zetten - een trage herstart kan nu terugflippen'); return null; }
+  // wv3424: eerst het voornemen vastleggen. Landt een omzetting die "mislukte" toch nog (een rename die al onderweg was), dan zet
+  // oudHerstel/herstelVorige hem later terug; landde hij niet, dan ziet herstelVorige dat vorige nog de oude is.
   const s = await leesStaat();
   s.vorige_herstel = { current: cur, vorige: vor, tijd: Date.now() };
   await schrijfStaat(s);
+  if (!(await zetLink(VORIGE, cur))) { await log('LET OP: kon vorige niet tijdelijk op current zetten - een trage herstart kan nu terugflippen'); return null; }
   await log('vorige tijdelijk -> ' + cur + ' (was ' + vor + '): een vastloper is geen oordeel over de release');
   return s.vorige_herstel;
 }
@@ -285,7 +292,8 @@ async function herstelVorige(h) {
   if (!h) return 'niet nodig';
   const cur = await leesLink(CURRENT), vor = await leesLink(VORIGE);
   let uitkomst;
-  if (cur !== h.current || vor !== h.current) uitkomst = 'niet teruggezet: de links veranderden intussen (current ' + cur + ', vorige ' + vor + ')';
+  if (vor === h.vorige) uitkomst = 'niet nodig: vorige wijst al naar ' + h.vorige;
+  else if (cur !== h.current || vor !== h.current) uitkomst = 'niet teruggezet: de links veranderden intussen (current ' + cur + ', vorige ' + vor + ')';
   else if (!(await metGrens(fsp.stat(path.join(APP_ROOT, h.vorige, 'server.js')).then(() => true), C.fs, false))) uitkomst = 'niet teruggezet: ' + h.vorige + ' bestaat niet meer';
   else uitkomst = (await zetLink(VORIGE, h.vorige)) ? 'vorige -> ' + h.vorige + ' (teruggezet)' : 'terugzetten mislukte';
   const s = await leesStaat();
@@ -639,29 +647,23 @@ function stilleUren() {
     : parseInt(amsterdam().slice(11, 13), 10);
   return uur >= 23 || uur < 7;
 }
-// Rij bovenaan de box, vóór de eerste echte rij (zelfde anker als bankBoxRij), tmp met punt ervoor + rename (Fable #8).
-async function boxRij(titel, velden) {
-  const t = await lees(BOX);
-  if (!t) { await log('LET OP: box ' + BOX + ' niet leesbaar - geen rij geschreven'); return false; }
-  const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
-  if (!eerste) { await log('LET OP: geen anker in de box - geen rij geschreven'); return false; }
+// wv3424 (actieplan Fable 19-11 B81): box-rij en seintje via meld.js, dezelfde module als schijfdruk.js. De rij gaat via vault-veilig
+// (mapgrendel, opnieuw lezen) in een kindproces dat na de time-out SIGKILL krijgt: een "mislukte" schrijf landt niet later met oude
+// inhoud (18-11: 3x). Vast kenmerk per incident; mislukt de eerste poging, dan herkanst een losgekoppeld proces tot 24 u. Het seintje gaat
+// ook in de stille uren naar bericht.py: die en de pod houden het tot 07:00 vast (eerder gooide de bewaker het weg).
+async function boxRij(titel, velden, kenmerk) {
   const rij = '\n## [direct] ' + amsterdam().slice(0, 16) + ' — ' + titel + '\n' +
     velden.map((v) => '- ' + v[0] + ': ' + eenRegel(v[1], 1500)).join('\n') + '\n';
-  const ok = await schrijfAtomair(BOX, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
-  await log(ok ? 'rij in de box: ' + titel : 'LET OP: box schrijven mislukte');
+  const k = 'bewaker-' + (kenmerk || crypto.createHash('sha1').update(titel + '|' + Date.now() + '|' + process.pid).digest('hex').slice(0, 12));
+  if (!meld) { await log('LET OP: meld.js ontbreekt - geen box-rij (' + titel + ')'); return false; }
+  const ok = await meld.boxRij(rij, k);
+  if (ok) await log('rij in de box: ' + titel + ' (' + k + ')');
   return ok;
 }
 function seintje(tekst, sleutel) {
-  if (stilleUren()) return log('stille uren (23:00-07:00): geen seintje, alleen de box');
-  return new Promise(function (resolve) {
-    let p;
-    try {
-      p = spawn('python3', [BERICHT, '--klasse', 'normaal', '--sleutel', sleutel, tekst], { stdio: 'ignore', env: process.env });
-    } catch (e) { log('seintje niet te starten: ' + e.message).then(resolve); return; }
-    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch (e) {} }, 120000);
-    p.on('error', (e) => { clearTimeout(t); log('seintje faalde: ' + e.message).then(resolve); });
-    p.on('exit', (code) => { clearTimeout(t); log('seintje via bericht.py: exit ' + code).then(resolve); });
-  });
+  if (!meld) return log('LET OP: meld.js ontbreekt - geen seintje');
+  if (stilleUren()) log('stille uren (23:00-07:00): seintje naar bericht.py, die houdt het tot 07:00 vast');
+  return meld.bericht(tekst, sleutel);
 }
 function minuten(s) { const m = Math.max(1, Math.round(s / 60)); return m + (m === 1 ? ' minuut' : ' minuten'); }
 function tijdKort(ms) { return amsterdam(new Date(ms)).slice(11, 16); }
@@ -781,7 +783,7 @@ async function overweeg(stil) {
       ['status', 'open'], ['van', 'bewaker.js (levensbewaking wv701, release ' + SHA + ')'],
       ['gemeten', 'geen antwoord op /health/publiek sinds ' + tijdKort(laatsteOkWand) + ' (' + Math.round(stil / 1000) + ' s, ' + missers + ' missers); ouder van server ' + SERVER + ' is pid ' + (st && st.ppid) + ' (' + eenRegel(String(sup || '?').replace(/\0/g, ' '), 80) + ')'],
       ['gevolg als er niets gebeurt', 'de pod blijft stil tot iemand hem herstart'],
-      ['voorstel', 'procesboom nakijken (ps -ef); zo nodig David vragen de pod te herstarten']]);
+      ['voorstel', 'procesboom nakijken (ps -ef); zo nodig David vragen de pod te herstarten']], 'geen-sup-' + SERVER);
     await seintje('De server reageert al ' + Math.round(stil / 60000) + ' minuten niet en ik kan hem niet zelf herstarten. Herstart de pod in Olares als ik over een paar minuten nog niet antwoord.', 'bewaker-geen-sup-' + SERVER);
     return;
   }
@@ -811,7 +813,7 @@ async function overweeg(stil) {
       ['status', 'open'], ['van', 'bewaker.js (levensbewaking wv701, release ' + SHA + ')'],
       ['gemeten', 'geen antwoord sinds ' + tijdKort(laatsteOkWand) + ' (' + Math.round(stil / 1000) + ' s); eerdere herstarts om ' + recent.map(tijdKort).join(', ') + ' (supervisor.log, bin/bewaker-bewijs-*.json)'],
       ['gevolg als er niets gebeurt', 'de pod blijft stil tot David herstart of tot het uur om is (dan herstart de bewaker weer)'],
-      ['voorstel', 'oorzaak met voorrang (wv700); de momentopnamen naast elkaar leggen']]);
+      ['voorstel', 'oorzaak met voorrang (wv700); de momentopnamen naast elkaar leggen']], 'rem-' + s.rem_gemeld);
     await seintje('De server hangt voor de ' + (recent.length + 1) + 'e keer binnen een uur. Ik herstart hem niet meer vanzelf; herstart de pod in Olares als ik over een kwartier nog niet antwoord.', 'bewaker-rem-' + s.rem_gemeld);
     return;
   }
@@ -889,7 +891,7 @@ async function ingreepKern(stil, s, n) {
       '; stoppen: ' + uitkomst + (kinderen.length ? '; losse kinderen gestopt: ' + kinderen.join(', ') : '') + '; ' + uitslag + (flip ? '; ' + flip : '') + '; ' + herstel],
     ['verloren', verloren + (beurtWeg ? '; een app-beurt die toen liep, vangt server.js na de herstart op (beurt-lopend.json, wv716: antwoord alsnog in de app of een regel "verloren"); een Telegram-beurt niet (n8n krijgt /result found:false); agents rondt de weesafhandeling af' : '')],
     ['gevolg als er niets gebeurt', 'de bewaker vangt het op (hooguit ' + C.remMax + '×/uur), maar de oorzaak blijft en elke keer gaat een lopend antwoord verloren'],
-    ['voorstel', 'momentopname naast wv700 leggen (JS-stapel, CPU, threads); bij een herhaling de oorzaak met voorrang']]);
+    ['voorstel', 'momentopname naast wv700 leggen (JS-stapel, CPU, threads); bij een herhaling de oorzaak met voorrang']], 'ingreep-' + stempel);
   let tekst;
   if (uitkomst === 'blijft') tekst = 'De server hangt en laat zich niet stoppen. Herstart de pod in Olares, dan kijk ik daarna wat er was.';
   else if (!gestopt && terug) tekst = null;   // herstelde zelf: alleen de box (stilte is de default)
@@ -924,7 +926,7 @@ async function schijfRij(u, stilWas, okWas) {
     ['gemeten', 'geen antwoord op /health/publiek van ' + tijdKort(okWas) + ' tot ' + tijdKort(Date.now()) + ' (' + duur + ' s); bewijs: ' + u.wat +
       (u.laatst && u.laatst !== u.wat ? '; laatst: ' + u.laatst : '') + '; geen herstart (plafond ' + Math.round((C.grens + C.schijfPlafond) / 60000) + ' min stilte)'],
     ['gevolg als er niets gebeurt', 'niets extra: de server liep zelf weer; lopende beurten bleven heel'],
-    ['voorstel', 'geen; bij herhaling de schijf van Olares nakijken (00_Systeem/Schijf van Olares.md)']]);
+    ['voorstel', 'geen; bij herhaling de schijf van Olares nakijken (00_Systeem/Schijf van Olares.md)']], 'schijf-' + s.schijf_rij);
 }
 
 // Een vorige-herstel dat bleef staan (bewaker stierf halverwege een ingreep): terugzetten als de links nog kloppen.
