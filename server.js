@@ -21435,6 +21435,50 @@ function avgSpiegelRonde(ctx) {
     k.on('close', function (code, sig) { af(code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code); });
   });
 }
+// ── Takeout-wachter (wv3304, fase 3 van vault "01_Ontwikkeling/Takeout naar de NAS - plan (Fable 5.2, 14-11-2026).md" § 3) ──
+// Nachtketen-stap: één keer per nacht mk-scripts/takeout-nas/wachter.py (geen taalmodel; waarom en regels in het script): klaar-mail van
+// Google Takeout (leesluik, alleen lezen) + Drive-lijst (rclone lsjson --hash) → opdracht-<export>.json in het brugmapje naar de NAS;
+// stand.json van de NAS lezen; Drive-ruimte meten (rclone about). Box-regels in rij #takeout-nas en Voor jou-kaarten (herkomst.module
+// takeout-nas) zet het script zelf, één keer per gebeurtenis. Droog: nooit iets in Drive schrijven of opruimen. 04:40: vóór de NAS-run
+// van 05:30, zodat een nieuwe controlelijst dezelfde nacht klaarligt. Zelfde vorm als avgSpiegelRonde: harde grens in het kind (coreutils
+// timeout doodt de hele groep), uitvoer naar een bestand; een fout meldt de keten (meldtZelf false). Script weg = al_gedaan.
+const TAKEOUT_WACHTER_SCRIPT = '/opt/data/mk-scripts/takeout-nas/wachter.py';
+const TAKEOUT_WACHTER_UIT = '/opt/data/scripts-staat/takeout-wachter/laatste.jsonl';
+const TAKEOUT_WACHTER_MAX_S = 300;
+function takeoutWachterRonde(ctx) {
+  return new Promise(function (resolve) {
+    if (!fs.existsSync(TAKEOUT_WACHTER_SCRIPT)) return resolve({ ok: true, al_gedaan: true, detail: { niet_aanwezig: true } });
+    const t0 = Date.now();
+    let klaar = false, k, fd = null, vangnet = null;
+    const groep = function (sig) { try { process.kill(-k.pid, sig); } catch (e) { try { k.kill(sig); } catch (e2) {} } };
+    try {
+      fs.mkdirSync(path.dirname(TAKEOUT_WACHTER_UIT), { recursive: true, mode: 0o700 });
+      try { fs.unlinkSync(TAKEOUT_WACHTER_UIT); } catch (e) {}
+      fd = fs.openSync(TAKEOUT_WACHTER_UIT, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+      k = spawn('timeout', ['-k', '15', String(TAKEOUT_WACHTER_MAX_S), 'python3', '-I', TAKEOUT_WACHTER_SCRIPT], { cwd: '/tmp', env: process.env, stdio: ['ignore', fd, 'ignore'], detached: true });
+    } catch (e) { return resolve({ ok: false, reden: 'start: ' + String(e && e.message || e).slice(0, 80) }); }
+    finally { if (fd !== null) { try { fs.closeSync(fd); } catch (e) {} } }
+    if (k.pid && ctx && typeof ctx.opSpawn === 'function') { try { ctx.opSpawn(k.pid); } catch (e) {} }
+    vangnet = setTimeout(function () { groep('SIGKILL'); }, (TAKEOUT_WACHTER_MAX_S + 45) * 1000);
+    const af = function (code, fout) {
+      if (klaar) return; klaar = true; clearTimeout(vangnet);
+      let j = null;
+      try { const r = fs.readFileSync(TAKEOUT_WACHTER_UIT, 'utf8').slice(-20000).trim().split('\n').pop(); j = JSON.parse(r); } catch (e) {}
+      const d = { ms: Date.now() - t0 };
+      if (j && typeof j === 'object') {
+        d.nieuw = Array.isArray(j.opdracht_nieuw) ? j.opdracht_nieuw.length : undefined;
+        d.box = typeof j.box === 'number' ? j.box : undefined;
+        d.kaarten = Array.isArray(j.kaarten) ? j.kaarten.length : undefined;
+        d.vrij_gb = typeof j.vrij_bytes === 'number' ? Math.round(j.vrij_bytes / 1e9) : undefined;
+        if (j.fout || (Array.isArray(j.fouten) && j.fouten.length)) d.fout = String(j.fout || j.fouten.join('; ')).slice(0, 160);
+      }
+      if (code === 0) return resolve({ ok: true, detail: d });
+      resolve({ ok: false, reden: fout ? 'start: ' + fout : (code === 124 || code === 137) ? 'tijdslimiet ' + TAKEOUT_WACHTER_MAX_S + ' s' : 'exit ' + code + (d.fout ? ' (' + d.fout.slice(0, 80) + ')' : ''), detail: d });
+    };
+    k.on('error', function (e) { af(127, String(e && e.message || e).slice(0, 80)); });
+    k.on('close', function (code, sig) { af(code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code); });
+  });
+}
 // ── Nachtketen (wv1868, SB2 fase 3d; ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase 3 intake, nachtketen en schrijvers (ontwerp
 // 28-10-2026).md" § 4; logica en waarom in nachtketen.js) ──
 // Elke minuut (echte pod, rol primair, vlag aan). Stappen in volgorde; elke stap gebruikt hetzelfde object en dezelfde stempel als zijn oude
@@ -21588,6 +21632,9 @@ const nachtketen = (function () {
         if (!boxArchief) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
         return boxArchief.ronde(ctx);
       } },
+      // wv3304: Takeout-wachter (klaar-mail + Drive → controlelijst voor de NAS, stand.json lezen, Drive-ruimte); kindproces met eigen harde
+      // grens (300 s); vóór de NAS-run van 05:30. Een fout meldt alleen de keten (box-rij), meldingen per export zet het script zelf.
+      { naam: 'takeout-wachter', start_na: [4, 40], limiet_min: 6, pogingen: 2, meldtZelf: false, doe: function (ctx) { return takeoutWachterRonde(ctx); } },
       { naam: 'sb2-feitenlijst', start_na: [5, 0], na: ['bibliothecaris'], limiet_min: 7, pogingen: 2, meldtZelf: true,
         voorwaarde: nachtN8nVoorwaarde([NACHT_N8N.rawInput, NACHT_N8N.teams, NACHT_N8N.whatsapp], [6, 40], true), doe: nachtDagStap(sb2Feitenlijst) },
       { naam: 'sb2-zoekindex', na: ['sb2-feitenlijst'], limiet_min: 15, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekindex) },
