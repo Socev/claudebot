@@ -7,13 +7,15 @@
 # Er gaat nooit beeldinhoud of een bestandsnaam naar stdout of een log, alleen formaat en afmetingen.
 #
 #   neem <in> <uit-zonder-ext> <max_mp>   invoer: echte type uit de bytes (JPEG/PNG/WEBP), volledig decoderen, grens 50 MP;
-#                                         groter dan max_mp: rechtop zetten (EXIF) en verkleinen tot max_mp (PNG, of JPEG 95 bij
-#                                         een JPEG-bron) naar <uit>.<ext>; anders niets schrijven (het origineel blijft zoals het kwam)
+#                                         altijd (wv3407, B155) rechtop zetten (EXIF), groter dan max_mp verkleinen tot max_mp, en opnieuw
+#                                         schrijven uit alleen de pixels (PNG, of JPEG 95 bij een JPEG-bron; geen EXIF/GPS, XMP, ICC) naar
+#                                         <uit>.<ext>; kop nagelopen, blijft er metadata in dan geweigerd
 #   uit <in> <uit.jpg> <max_mp> <max_bytes>  uitvoer van ComfyUI: decoderen, hooguit max_mp; groter dan max_bytes: JPEG 92 naar <uit.jpg>
 #   pijp-neem <max_mp> | pijp-uit <max_mp> <max_bytes> | pijp-voor <soort> | pijp-toon <px>   (wv2984, OVIS Imagine)
 #                                         zelfde standen zonder bestand: de bytes komen op stdin, het (nieuwe) beeld gaat naar fd 3,
 #                                         JSON op stdout. Niets op schijf (incognito). pijp-toon = weergaveversie: rechtop, ≤ px, JPEG 85.
-#                                         Schrijft pijp-neem/-uit niets naar fd 3, dan blijft het beeld zoals het kwam.
+#                                         pijp-neem schrijft altijd een kaal beeld naar fd 3 (zoals neem). Schrijft pijp-uit niets naar fd 3,
+#                                         dan blijft het beeld zoals het kwam.
 #   pijp-pakket <max_mp> <ref_mp> | pijp-naad <x> <y> <b> <h> | pijp-snij <x> <y> <b> <h> <draai>   (wv3021, OVIS Imagine fase 2)
 #   pijp-maat <kort> <lang_max> <veelvoud>   (wv3266, Laat bewegen: exacte maat voor de videoflow, PNG)
 #                                         pakket: stdin = rijtje [4 bytes lengte][bytes]: beeld, masker (lengte 0 = geen), 0-2 voorbeelden.
@@ -141,20 +143,10 @@ def pijp(a):
         im, formaat = open_beeld(io.BytesIO(data))
         b, h = im.size
     if a[0] == "pijp-neem" and len(a) == 2:
-        max_mp = float(a[1])
-        if b * h / 1e6 <= max_mp:
-            lever(formaat=formaat, breed=b, hoog=h, verkleind=False)
-        im = ImageOps.exif_transpose(im)
-        f = (max_mp * 1e6 / (im.size[0] * im.size[1])) ** 0.5
-        nb, nh = max(1, int(im.size[0] * f)), max(1, int(im.size[1] * f))
-        while nb * nh > max_mp * 1e6:
-            nb, nh = max(1, nb - 1), max(1, nh - 1)
-        im = im.convert("RGBA" if im.mode in ("RGBA", "LA", "P") and formaat != "JPEG" else "RGB").resize((nb, nh), Image.LANCZOS)
-        if formaat == "JPEG":
-            im.save(uit, "JPEG", quality=95)
-            lever(formaat=formaat, breed=b, hoog=h, verkleind=True, nieuw_breed=nb, nieuw_hoog=nh, ext="jpg")
-        im.save(uit, "PNG")
-        lever(formaat=formaat, breed=b, hoog=h, verkleind=True, nieuw_breed=nb, nieuw_hoog=nh, ext="png")
+        # wv3407 (B155): altijd opnieuw geschreven uit alleen de pixels, ook onder de grens (geen EXIF/GPS naar ComfyUI)
+        data_uit, ext, nb, nh, kleiner = neem_kaal(im, formaat, float(a[1]))
+        uit.write(data_uit)
+        lever(formaat=formaat, breed=b, hoog=h, verkleind=kleiner, herschreven=True, nieuw_breed=nb, nieuw_hoog=nh, ext=ext)
     if a[0] == "pijp-uit" and len(a) == 3:
         if b * h > float(a[1]) * 1e6:
             klaar(2, ok=False, reden="resultaat groter dan %s megapixel" % a[1], breed=b, hoog=h)
@@ -394,6 +386,59 @@ def schoon_jpeg(im, zijde, kwaliteit):
     return data, kaal.size
 
 
+PNG_META = (b"eXIf", b"tEXt", b"iTXt", b"zTXt", b"iCCP", b"tIME")
+
+
+def png_brokken(b):
+    # chunk-typen van een PNG; None als het geen nette PNG is
+    if b[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    i, uit = 8, []
+    while i + 8 <= len(b):
+        lengte = int.from_bytes(b[i:i + 4], "big")
+        uit.append(b[i + 4:i + 8])
+        if b[i + 4:i + 8] == b"IEND":
+            break
+        i += 12 + lengte
+    return uit
+
+
+def neem_kaal(im, formaat, max_mp):
+    # wv3407 (B155): invoer voor ComfyUI. Eerst rechtop (EXIF-oriëntatie toepassen), dan hooguit max_mp, dan een nieuw beeld uit
+    # alleen de pixels (geen info: geen EXIF/GPS, XMP, ICC, tekstvelden). JPEG-bron → JPEG 95, anders PNG (alfa blijft).
+    # Daarna de kop nagelopen; blijft er metadata in, dan geweigerd. → (bytes, ext, breed, hoog, verkleind)
+    import io
+    from PIL import Image, ImageOps
+    im = ImageOps.exif_transpose(im)
+    nb, nh = im.size
+    kleiner = nb * nh > max_mp * 1e6
+    if kleiner:
+        f = (max_mp * 1e6 / (nb * nh)) ** 0.5
+        nb, nh = max(1, int(nb * f)), max(1, int(nh * f))
+        while nb * nh > max_mp * 1e6:   # afronden mag de grens nooit overschrijden
+            nb, nh = max(1, nb - 1), max(1, nh - 1)
+    # alfa blijft, ook een tRNS-kleur bij RGB/L/P (Codex MOET 1, wv3407)
+    modus = "RGBA" if (im.mode in ("RGBA", "LA", "P", "PA") or "transparency" in im.info) and formaat != "JPEG" else "RGB"
+    im = im.convert(modus)
+    if kleiner:
+        im = im.resize((nb, nh), Image.LANCZOS)
+    kaal = Image.frombytes(modus, im.size, im.tobytes())
+    buf = io.BytesIO()
+    if formaat == "JPEG":
+        kaal.save(buf, "JPEG", quality=95)
+        data, ext = buf.getvalue(), "jpg"
+        seg = jpeg_segmenten(data)
+        schoon = seg is not None and not any(m in (0xE1, 0xE2, 0xED) for m in seg)
+    else:
+        kaal.save(buf, "PNG")
+        data, ext = buf.getvalue(), "png"
+        br = png_brokken(data)
+        schoon = br is not None and not any(c in PNG_META for c in br)
+    if not schoon:
+        klaar(2, ok=False, reden="metadata bleef in het beeld")
+    return data, ext, kaal.size[0], kaal.size[1], kleiner
+
+
 def splat_voor(in_map, uit_map):
     from PIL import Image, ImageOps
     Image.MAX_IMAGE_PIXELS = int(DECODE_MAX_MP * 1_000_000)
@@ -445,27 +490,15 @@ def main(a):
     if a and a[0].startswith("pijp-"):
         pijp(a)
     if len(a) == 4 and a[0] == "neem":
-        from PIL import Image, ImageOps
+        # wv3407 (B155): altijd opnieuw geschreven uit alleen de pixels, ook onder de grens (geen EXIF/GPS naar ComfyUI)
         im, formaat = open_beeld(a[1])
         b, h = im.size
-        mp = b * h / 1e6
-        max_mp = float(a[3])
-        if mp <= max_mp:
-            klaar(0, ok=True, formaat=formaat, breed=b, hoog=h, verkleind=False)
-        im = ImageOps.exif_transpose(im)
-        f = (max_mp * 1e6 / (im.size[0] * im.size[1])) ** 0.5
-        nb, nh = max(1, int(im.size[0] * f)), max(1, int(im.size[1] * f))
-        while nb * nh > max_mp * 1e6:   # afronden mag de grens nooit overschrijden
-            nb, nh = max(1, nb - 1), max(1, nh - 1)
-        im = im.convert("RGBA" if im.mode in ("RGBA", "LA", "P") and formaat != "JPEG" else "RGB").resize((nb, nh), Image.LANCZOS)
-        if formaat == "JPEG":
-            uit, ext = a[2] + ".jpg", "jpg"
-            im.save(uit, "JPEG", quality=95)
-        else:
-            uit, ext = a[2] + ".png", "png"
-            im.save(uit, "PNG")
-        os.chmod(uit, 0o600)
-        klaar(0, ok=True, formaat=formaat, breed=b, hoog=h, verkleind=True, nieuw_breed=nb, nieuw_hoog=nh, ext=ext)
+        data_uit, ext, nb, nh, kleiner = neem_kaal(im, formaat, float(a[3]))
+        uit = a[2] + "." + ext
+        fd = os.open(uit, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data_uit)
+        klaar(0, ok=True, formaat=formaat, breed=b, hoog=h, verkleind=kleiner, herschreven=True, nieuw_breed=nb, nieuw_hoog=nh, ext=ext)
     if len(a) == 5 and a[0] == "uit":
         im, formaat = open_beeld(a[1])
         b, h = im.size

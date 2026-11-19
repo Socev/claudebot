@@ -903,13 +903,13 @@ function maak(deps) {
       if (!r.ok) { opruim(); return { status: 400, fout: 'foto geweigerd: ' + r.reden }; }
       const fmt = { JPEG: 'jpg', PNG: 'png', WEBP: 'webp' }[r.formaat];
       if (fmt !== soort) { opruim(); return { status: 415, fout: 'foto geweigerd: de inhoud past niet bij het bestandstype' }; }
-      let invoer = bron, ext = soort, b = r.breed, h = r.hoog, noot = null;
-      if (r.verkleind) {
-        ext = r.ext === 'jpg' ? 'jpg' : 'png'; invoer = path.join(map, 'klein.' + ext); b = r.nieuw_breed; h = r.nieuw_hoog;
-        if (!fs.existsSync(invoer)) { opruim(); return { status: 500, fout: 'verkleinen van de foto lukte niet' }; }
-        fs.rmSync(bron, { force: true });
-        noot = 'foto verkleind van ' + mpTekst(r.breed, r.hoog) + ' naar ' + mpTekst(b, h) + ' (grens voor deze stand: ' + String(grens).replace('.', ',') + ' MP)';
-      }
+      // wv3407 (B155): neem schrijft altijd een nieuw, kaal beeld (rechtop, zonder EXIF/GPS); de bron met metadata gaat nooit naar ComfyUI
+      if (r.herschreven !== true) { opruim(); return { status: 500, fout: 'de foto kon niet klaargezet worden' }; }
+      const ext = r.ext === 'jpg' ? 'jpg' : 'png', invoer = path.join(map, 'klein.' + ext), b = r.nieuw_breed, h = r.nieuw_hoog;
+      let noot = null;
+      fs.rmSync(bron, { force: true });
+      if (!fs.existsSync(invoer)) { opruim(); return { status: 500, fout: 'de foto kon niet klaargezet worden' }; }
+      if (r.verkleind) noot = 'foto verkleind van ' + mpTekst(r.breed, r.hoog) + ' naar ' + mpTekst(b, h) + ' (grens voor deze stand: ' + String(grens).replace('.', ',') + ' MP)';
       fs.renameSync(invoer, path.join(map, 'invoer.' + ext));
       if (bronNoot) noot = noot ? bronNoot + '; ' + noot : bronNoot;
       const bb = { veld: v.naam, breed: b, hoog: h, ext: ext, verkleind: !!r.verkleind, grens_mp: grens };
@@ -1198,8 +1198,8 @@ function maak(deps) {
     if (f.uitvoer === 'video' && videoLoopt()) return { status: 409, fout: 'er wordt al een filmpje gemaakt; wacht tot dat klaar is' };   // wv3266: na de await opnieuw
     if (telt && vandaagN() >= GRENS.per_dag) return { status: 429, fout: 'vandaag al ' + GRENS.per_dag + ' bewerkingen gemaakt; morgen weer' };
     if (st.rij.length >= GRENS.rij) return { status: 429, fout: 'er staan al ' + GRENS.rij + ' taken in de rij; wacht tot er een klaar is' };
-    const bytes = metBeeld ? (r.verkleind ? r.bytes : o.beeld) : null;
-    if (metBeeld && !bytes) return { status: 500, fout: 'verkleinen van het beeld lukte niet' };
+    const bytes = metBeeld && r.herschreven === true ? r.bytes : null;   // wv3407 (B155): altijd het kale beeld, nooit o.beeld met EXIF/GPS
+    if (metBeeld && !bytes) return { status: 500, fout: 'het beeld kon niet klaargezet worden' };
     if (f.status === 'proef') {
       if (!ctx.versOk()) return { status: 403, fout: 'deze bewerking is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
       ctx.versVerbruik();
@@ -1210,7 +1210,7 @@ function maak(deps) {
     const t = { id: hex16(), beurt_id: beurt, geheugen: true, geheim: geheim, flow: f.id, titel: f.titel, motor: f.motor, uitvoer: f.uitvoer,
       status: 'wacht', fase: 'in de rij', procent: null, gemaakt: new Date(klok()).toISOString(), velden: w.waarden, bestanden: [],
       proef: f.status === 'proef', apparaat: String(o.apparaat || ''), model: f.ai_model || null,
-      beeld: metBeeld ? { veld: v.naam, breed: r.verkleind ? r.nieuw_breed : r.breed, hoog: r.verkleind ? r.nieuw_hoog : r.hoog, ext: r.verkleind ? r.ext : soort,
+      beeld: metBeeld ? { veld: v.naam, breed: r.nieuw_breed, hoog: r.nieuw_hoog, ext: r.ext === 'jpg' ? 'jpg' : 'png',
         verkleind: !!r.verkleind, grens_mp: grens } : null,
       _in: bytes, _uit: [], _tekst: null, _klaar: o.klaar };
     if (v) t.velden[v.naam] = '(foto)';
