@@ -32,8 +32,40 @@ Image.new('RGB', (1200, 800), (200, 10, 10)).save(os.path.join(d, 'uit-goed.png'
 Image.new('RGB', (5000, 4000), (0, 0, 0)).save(os.path.join(d, 'uit-te-groot.png'))
 Image.frombytes('RGB', (2300, 2300), os.urandom(2300 * 2300 * 3)).save(os.path.join(d, 'uit-zwaar.png'), compress_level=1)
 Image.new('RGB', (640, 480), (10, 200, 10)).save(os.path.join(d, 'goed.webp'))
+# wv3407 (B155): links rood, rechts blauw; EXIF met oriëntatie 6 (90° met de klok mee) en een verzonnen GPS-plek + merk
+from PIL import PngImagePlugin
+def gps_exif():
+    ex = Image.Exif()
+    ex[0x0112] = 6
+    ex[0x010E] = 'NEPMERK-B155'
+    g = ex.get_ifd(0x8825)
+    g[1] = 'N'; g[2] = (52.0, 7.0, 13.0); g[3] = 'E'; g[4] = (5.0, 13.0, 1.0)
+    return ex.tobytes()
+for naam, fmt, kw in (('gps.jpg', 'JPEG', {'quality': 92}), ('gps.png', 'PNG', {}), ('gps.webp', 'WEBP', {'quality': 90})):
+    im = Image.new('RGB', (600, 400), (0, 0, 255))
+    im.paste((255, 0, 0), (0, 0, 300, 400))
+    if fmt == 'PNG':
+        i = PngImagePlugin.PngInfo(); i.add_text('Comment', 'NEPMERK-B155')
+        kw = {'pnginfo': i}
+    im.save(os.path.join(d, naam), fmt, exif=gps_exif(), **kw)
 `, B]);
 const lees = (n) => fs.readFileSync(path.join(B, n));
+const GPS = { jpg: lees('gps.jpg'), png: lees('gps.png'), webp: lees('gps.webp') };
+// wv3407: wat zit er in een beeld: formaat, maat, EXIF/GPS/tekst, kleur boven en onder in het midden (oriëntatie toegepast?)
+function ontleed(buf) {
+  const f = path.join(W, 'o-' + crypto.randomBytes(4).toString('hex')); fs.writeFileSync(f, buf);
+  try {
+    return JSON.parse(execFileSync('python3', ['-I', '-c', `
+import sys, json
+from PIL import Image
+raw = open(sys.argv[1], 'rb').read()
+im = Image.open(sys.argv[1]); ex = im.getexif()
+rgb = im.convert('RGB'); w, h = rgb.size
+print(json.dumps({'fmt': im.format, 'b': w, 'h': h, 'exif': len(ex) > 0 or 'exif' in im.info, 'gps': len(ex.get_ifd(0x8825)) > 0,
+  'merk': b'NEPMERK' in raw, 'tekst': any(k in raw for k in (b'tEXt', b'iTXt', b'zTXt', b'eXIf', b'Exif')),
+  'boven': rgb.getpixel((w // 2, 5)), 'onder': rgb.getpixel((w // 2, h - 6))}))`, f]).toString());
+  } finally { fs.rmSync(f, { force: true }); }
+}
 const KLEIN = lees('klein.png'), GROOT = lees('groot.jpg'), GIF = lees('dier.gif'), BOM = lees('bom.png'), WEBP = lees('goed.webp');
 const KAPOT = GROOT.subarray(0, Math.floor(GROOT.length / 3));
 const UIT = { goed: lees('uit-goed.png'), groot: lees('uit-te-groot.png'), zwaar: lees('uit-zwaar.png') };
@@ -67,6 +99,7 @@ const comfy = http.createServer((req, res) => {
       if (C.andereNaam && naam === 'fotoherstel-invoer.png' && sha(inhoud) !== LEEG_SHA) naam = 'fotoherstel-invoer (1).png';
       const u = { naam, subfolder: fd.get('subfolder'), type: fd.get('type'), overwrite: fd.get('overwrite'), sha: sha(inhoud), lengte: inhoud.length };
       C.uploads.push(u); C.bestanden[u.subfolder + '/' + naam] = inhoud;
+      if (u.sha !== LEEG_SHA) C.laatsteFoto = inhoud;   // wv3407: de echte invoer, vóór de 1×1
       return stuur(200, { name: naam, subfolder: u.subfolder, type: 'input' });
     }
     if (req.url === '/object_info') return stuur(200, OI);
@@ -189,7 +222,46 @@ const comfy = http.createServer((req, res) => {
   beurt = nb(); zetUp(beurt, WEBP, 'x.webp');
   r = await S.maak({ flow: 'foto-proef', beurt_id: beurt, velden: { foto: { n: 1 } } }, ctx);
   t = await wacht(r.taak.id);
-  toets('3 webp onder de grens: ongewijzigd door', t.status === 'klaar' && !t.beeld.verkleind && bewaard[t.id].bestanden.some((b) => b.naam === 'voor.webp'), t);
+  toets('3 webp onder de grens: niet verkleind, kaal herschreven als PNG (wv3407)', t.status === 'klaar' && !t.beeld.verkleind && t.beeld.breed === 640 && t.beeld.hoog === 480 && bewaard[t.id].bestanden.some((b) => b.naam === 'voor.png'), t);
+
+  // 3b. wv3407 (B155): een foto onder de grens met EXIF (GPS, oriëntatie 6) gaat rechtop en zonder metadata naar ComfyUI
+  for (const [ext, fmt] of [['jpg', 'JPEG'], ['png', 'PNG'], ['webp', 'PNG']]) {
+    const o0 = ontleed(GPS[ext]);
+    if (!o0.gps || !o0.merk || o0.b !== 600) toets('3b proefbeeld ' + ext + ' draagt GPS en merk', false, o0);
+    beurt = nb(); zetUp(beurt, GPS[ext], 'gps.' + ext); C.laatsteFoto = null;
+    r = await S.maak({ flow: 'foto-proef', beurt_id: beurt, velden: { foto: { n: 1 } } }, ctx);
+    t = await wacht(r.taak.id);
+    const o1 = C.laatsteFoto ? ontleed(C.laatsteFoto) : null;
+    toets('3b ' + ext + ' onder de grens: naar ComfyUI zonder EXIF, GPS of merk (' + fmt + ')', t.status === 'klaar' && o1 && o1.fmt === fmt && !o1.exif && !o1.gps && !o1.merk && !o1.tekst, o1);
+    toets('3b ' + ext + ': oriëntatie toegepast (staand 400×600, rood boven), taak toont de rechtop-maten', o1 && o1.b === 400 && o1.h === 600 && o1.boven[0] > 200 && o1.boven[2] < 60 && o1.onder[2] > 200 && t.beeld.breed === 400 && t.beeld.hoog === 600 && !t.beeld.verkleind, { o1, beeld: t.beeld });
+    const vb = bewaard[t.id] && bewaard[t.id].bestanden.find((b) => /^voor\./.test(b.naam));
+    const ov = vb ? ontleed(fs.readFileSync(path.join(BEWAAR, t.id, 'b', String(vb.n)))) : null;
+    toets('3b ' + ext + ': voor-bestand ook zonder EXIF/GPS', ov && !ov.exif && !ov.gps && !ov.merk, ov);
+  }
+  // 3d. wv3407 (Codex MOET 1): een PNG met tRNS-transparantie (RGB en L) houdt zijn doorzichtige pixels
+  {
+    const f = path.join(W, 'trns'); fs.mkdirSync(f, { recursive: true });
+    execFileSync('python3', ['-I', '-c', `
+import sys, os
+from PIL import Image
+im = Image.new('RGB', (300, 200), (0, 0, 0)); im.paste((200, 50, 50), (100, 50, 200, 150)); im.save(os.path.join(sys.argv[1], 'rgb.png'), transparency=(0, 0, 0))
+im = Image.new('L', (300, 200), 0); im.paste(180, (100, 50, 200, 150)); im.save(os.path.join(sys.argv[1], 'l.png'), transparency=0)
+`, f]);
+    for (const n of ['rgb.png', 'l.png']) {
+      const p = require('child_process').spawnSync('python3', ['-I', path.join(process.cwd(), 'studio-beeld.py'), 'pijp-neem', '4'], { input: fs.readFileSync(path.join(f, n)), stdio: ['pipe', 'pipe', 'ignore', 'pipe'] });
+      const q = path.join(f, 'uit-' + n); fs.writeFileSync(q, p.output[3] || Buffer.alloc(0));
+      let a = null; try { a = execFileSync('python3', ['-I', '-c', 'import sys\nfrom PIL import Image\nim = Image.open(sys.argv[1])\nprint(im.mode, im.getpixel((5, 5))[3], im.getpixel((150, 100))[3])', q]).toString().trim(); } catch (e) {}
+      toets('3d pijp-neem ' + n + ' met tRNS: RGBA, rand doorzichtig, midden dekkend', p.status === 0 && a === 'RGBA 0 255', a);
+    }
+    fs.rmSync(f, { recursive: true, force: true });
+  }
+  // 3c. wv3407: de pijpweg (Imagine) idem — pijp-neem levert altijd een kaal beeld op fd 3
+  for (const ext of ['jpg', 'png']) {
+    const p = require('child_process').spawnSync('python3', ['-I', path.join(process.cwd(), 'studio-beeld.py'), 'pijp-neem', '4'], { input: GPS[ext], stdio: ['pipe', 'pipe', 'ignore', 'pipe'] });
+    let j = null; try { j = JSON.parse(String(p.stdout).trim()); } catch (e) {}
+    const o2 = p.output[3] && p.output[3].length ? ontleed(p.output[3]) : null;
+    toets('3c pijp-neem ' + ext + ' onder de grens: kaal, rechtop, niet verkleind', p.status === 0 && j && j.herschreven === true && j.verkleind === false && j.nieuw_breed === 400 && j.nieuw_hoog === 600 && o2 && !o2.exif && !o2.gps && !o2.merk && !o2.tekst && o2.b === 400 && o2.boven[0] > 200, { j, o2 });
+  }
 
   // 4. weigeren vóór de rij: upload blijft staan, geen restbestanden, niets naar ComfyUI
   const weiger = async (naam, bytes, re, st) => {
