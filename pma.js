@@ -112,7 +112,10 @@ const KOP_ZONDER = KOP_DATA.filter((k) => k !== 'patientnummer');
 const ZONDER = '';
 const NIET = 'niet in deze export';
 const ZIP_MAX = 8 * 1024 * 1024;            // één ZIP (een jaar Tolgaarde ± 1,2 MB)
-const UITGEPAKT_MAX = 200 * 1024 * 1024;    // samen uitgepakt (een jaar ± 27 MB); daarboven weigeren (ZIP-bom)
+const UITGEPAKT_MAX = 60 * 1024 * 1024;     // samen uitgepakt (een jaar ± 27 MB); daarboven weigeren (ZIP-bom). wv3409: was 200 MB; een
+                                            // kleine ZIP vol ';' kostte dan GB's geheugen (Fable-review 19-11, P3)
+const LEEG_MAX = 100;                       // wv3409: lege regels achter elkaar (een echte export heeft er hooguit één aan het eind)
+const VELD_MAX = 1000;                      // wv3409: tekens per veld (omschrijving hooguit 300); langer = meteen weigeren tijdens het splitsen
 const WACHT_MS = 24 * 3600 * 1000;          // een gecontroleerde ZIP blijft een dag in wacht/
 const KLEIN = 5;                            // patiëntaantallen onder de vijf: "< 5"
 
@@ -157,28 +160,45 @@ function leesZip(buf) {
 }
 
 // ── CSV (';', velden tussen aanhalingstekens met "" als aanhalingsteken; CRLF of LF) ──
-function splitsCsv(tekst) {
-  const rijen = []; let rij = [], veld = '', i = 0, inQ = false, wasQ = false;
+// wv3409: opt.maxVelden, opt.maxVeld en opt.maxRijen breken af bij de eerste te brede rij of het eerste te lange veld; met opt.rij(rij, index) gaat elke rij
+// meteen naar de lezer en bewaart splitsCsv niets (de lezer weigert de eerste foute rij, dus een bestand vol lege of halve rijen kost geen geheugen).
+// Lege regels aan het eind vallen weg; een lege regel gevolgd door een gevulde komt gewoon door (als rij [''], die de lezer weigert).
+function splitsCsv(tekst, opt) {
+  const o = opt || {}, maxVelden = o.maxVelden || Infinity, maxVeld = o.maxVeld || Infinity, maxRijen = o.maxRijen || Infinity, perRij = o.rij;
+  const rijen = []; let rij = [], veld = '', i = 0, inQ = false, wasQ = false, nRij = 0, leeg = 0;
   const n = tekst.length;
+  const waar = () => 'regel ' + (nRij + leeg + 1);
+  const klaar = (r) => {
+    if (r.length === 1 && r[0] === '') { if (++leeg > LEEG_MAX) throw new LeesFout(waar() + ': meer dan ' + LEEG_MAX + ' lege regels achter elkaar'); return; }
+    for (; leeg > 0; leeg--) { if (nRij >= maxRijen) throw new LeesFout('meer dan ' + maxRijen + ' regels'); if (perRij) perRij([''], nRij); else rijen.push(['']); nRij++; }
+    if (nRij >= maxRijen) throw new LeesFout('meer dan ' + maxRijen + ' regels');
+    if (perRij) perRij(r, nRij); else rijen.push(r);
+    nRij++;
+  };
+  const erbij = () => {
+    if (rij.length >= maxVelden) throw new LeesFout(waar() + ': meer dan ' + maxVelden + ' velden');
+    rij.push(veld); veld = ''; wasQ = false;
+  };
   while (i < n) {
     const c = tekst[i];
+    if (veld.length > maxVeld) throw new LeesFout(waar() + ': een veld is langer dan ' + maxVeld + ' tekens');
     if (inQ) {
       if (c === '"') { if (tekst[i + 1] === '"') { veld += '"'; i += 2; continue; } inQ = false; i++; continue; }
       veld += c; i++; continue;
     }
-    if (c === '"') { if (veld !== '' || wasQ) throw new LeesFout('regel ' + (rijen.length + 1) + ': aanhalingsteken midden in een veld'); inQ = true; wasQ = true; i++; continue; }
-    if (c === ';') { rij.push(veld); veld = ''; wasQ = false; i++; continue; }
+    if (c === '"') { if (veld !== '' || wasQ) throw new LeesFout(waar() + ': aanhalingsteken midden in een veld'); inQ = true; wasQ = true; i++; continue; }
+    if (c === ';') { erbij(); i++; continue; }
     if (c === '\r' || c === '\n') {
-      rij.push(veld); veld = ''; wasQ = false; rijen.push(rij); rij = [];
+      erbij(); const r = rij; rij = []; klaar(r);
       if (c === '\r' && tekst[i + 1] === '\n') i++;
       i++; continue;
     }
-    if (wasQ) throw new LeesFout('regel ' + (rijen.length + 1) + ': tekst na een aanhalingsteken');
+    if (wasQ) throw new LeesFout(waar() + ': tekst na een aanhalingsteken');
     veld += c; i++;
   }
   if (inQ) throw new LeesFout('het bestand eindigt midden in een veld');
-  if (veld !== '' || rij.length) { rij.push(veld); rijen.push(rij); }
-  while (rijen.length && rijen[rijen.length - 1].length === 1 && rijen[rijen.length - 1][0] === '') rijen.pop();
+  if (veld.length > maxVeld) throw new LeesFout(waar() + ': een veld is langer dan ' + maxVeld + ' tekens');
+  if (veld !== '' || rij.length) { erbij(); const r = rij; rij = []; klaar(r); }
   return rijen;
 }
 function utf8(buf, naam) {
@@ -214,7 +234,7 @@ function leesExport(zipBuf, pseudo) {
   if (info.length !== 1 || data.length !== 1 || bestanden.length !== 2) {
     throw new LeesFout('de ZIP moet precies export_info.csv en één …_PMA_VERRICHTING.csv bevatten (nu: ' + bestanden.map((b) => b.naam.replace(/^.*_(PMA_[A-Z]+\.csv)$/, '…_$1')).join(', ') + ')');
   }
-  const ir = splitsCsv(utf8(info[0].data, 'export_info.csv'));
+  const ir = splitsCsv(utf8(info[0].data, 'export_info.csv'), { maxVelden: KOP_INFO.length, maxVeld: VELD_MAX, maxRijen: 2 });
   if (ir.length !== 2 || ir[0].join(';') !== KOP_INFO.join(';') || ir[1].length !== KOP_INFO.length) throw new LeesFout('export_info.csv heeft niet de bekende kolommen');
   const [agb, exd, bg, ed, , set, soortExp] = ir[1];
   const pr = PRAKTIJKEN[agb];
@@ -224,16 +244,19 @@ function leesExport(zipBuf, pseudo) {
   const exportdatum = datum(exd, 'export_info: exportdatum'), begin = datum(bg, 'export_info: begin periode'), eind = datum(ed, 'export_info: eind periode');
   if (begin > eind) throw new LeesFout('export_info: begin ligt na het eind');
   if (eind > exportdatum) throw new LeesFout('export_info: de periode loopt door na de exportdatum');
-  const rijen = splitsCsv(utf8(data[0].data, 'het verrichtingenbestand'));
-  const kop = rijen.length ? rijen[0].join(';') : '';
-  const metPatient = kop === KOP_DATA.join(';');
-  if (!metPatient && kop !== KOP_ZONDER.join(';')) throw new LeesFout('het verrichtingenbestand heeft niet de bekende kolommen');
-  const nKol = metPatient ? KOP_DATA.length : KOP_ZONDER.length;
+  // wv3409: elke rij gaat tijdens het splitsen meteen door de controle; de eerste foute rij breekt af (geen lijst van alle rijen vooraf)
   const inschrijf = [], regels = [];
   const volgI = new Map(), volgR = new Map();
-  let voorlopig = 0, gelijk = 0;
-  for (let r = 1; r < rijen.length; r++) {
-    const v = rijen[r], wat = 'regel ' + (r + 1);
+  let voorlopig = 0, gelijk = 0, metPatient = null, nKol = 0;
+  splitsCsv(utf8(data[0].data, 'het verrichtingenbestand'), { maxVelden: KOP_DATA.length, maxVeld: VELD_MAX, rij: (v, r) => {
+    if (r === 0) {
+      const kop = v.join(';');
+      metPatient = kop === KOP_DATA.join(';');
+      if (!metPatient && kop !== KOP_ZONDER.join(';')) throw new LeesFout('het verrichtingenbestand heeft niet de bekende kolommen');
+      nKol = metPatient ? KOP_DATA.length : KOP_ZONDER.length;
+      return;
+    }
+    const wat = 'regel ' + (r + 1);
     if (v.length !== nKol) throw new LeesFout(wat + ': ' + v.length + ' velden in plaats van ' + nKol);
     const [pnr, code, oms, type, ragb, reg, soort, tar, bd, fd] = metPatient ? v.slice(1) : [null].concat(v.slice(1));
     if (metPatient && !/^\d{1,20}$/.test(pnr)) throw new LeesFout(wat + ': patiëntnummer niet in de bekende vorm');
@@ -262,7 +285,8 @@ function leesExport(zipBuf, pseudo) {
       regels.push({ sleutel: sha(inhoud + '\u0001' + n).slice(0, 32), dag, patient, code: code || null, omschrijving: oms, type, reg_agb: ragb || null,
         registreerder: reg, tarief_cent: tc, factuurdatum: fdag, volgnr: n, voorlopig: vl });
     }
-  }
+  } });
+  if (metPatient === null) throw new LeesFout('het verrichtingenbestand heeft niet de bekende kolommen');
   return { praktijk: pr.code, praktijk_naam: pr.naam, agb, exportdatum, begin, eind, gegevensset: set, inschrijf, regels, voorlopig, gelijk, met_patient: metPatient };
 }
 
