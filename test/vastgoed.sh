@@ -3,7 +3,7 @@
 # server.js (één GET en precies vier POST-routes achter de app-poort, glijden, /health.vastgoed, ververs alleen primair, geen inhoud in de log),
 # uitrol.sh en APP_IDS, de module (test/vastgoed.test.js, verzonnen dossier uit test/vastgoed-maak.js) en de gedeelde bronnenlaag
 # (test/vastgoed-laag.py: osint.py vastgoed zonder netwerk, lek- en afrondeisen).
-# Kruisproef: KRUIS=1 bash test/vastgoed.sh — zesentwintig kopieën (elf fase 1, elf fase 2 wv3102, vier wv3131) met één fout erin (in de werkboom, zie mk-geheugen osint-kruisproef-in-werkboom);
+# Kruisproef: KRUIS=1 bash test/vastgoed.sh — drieëndertig kopieën (elf fase 1, elf fase 2 wv3102, vier wv3131, zeven A15) met één fout erin (in de werkboom, zie mk-geheugen osint-kruisproef-in-werkboom);
 # elke kopie moet rood geven.
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -86,6 +86,16 @@ if [ "${KRUIS:-0}" = 1 ]; then
   kruis vastgoed.js "      if (bank.ok) {
         db.prepare(\`DELETE FROM reeks WHERE herkomst = 'bank'\`).run();" "      db.prepare(\`DELETE FROM reeks WHERE herkomst = 'bank'\`).run();
       if (bank.ok) {" "onleesbare bank wist de vorige servicekosten"
-  [ $k = 0 ] && echo "GROEN kruisproef: alle tweeëntwintig rood" || f=1
+  # A15 (Fable-review 19-11): vaste vorm en nooit vanzelf wissen
+  kruis vastgoed.js "const md = lees(n); if (!vasteVorm(md)) continue;
+    const b = leesBox(md);" "const md = lees(n);
+    const b = leesBox(md);" "box-pagina zonder Kerngegevens telt als box"
+  kruis vastgoed.js "if (!boxen.some((x) => x.sleutel === b.sleutel)) boxen.push(" "boxen.push(" "twee pagina's voor dezelfde box"
+  kruis vastgoed.js "objecten.push(Object.assign(w, { dossier: \`\${HUIS}/\${n}\`, sleutel: 'woning' })); break;" "objecten.push(Object.assign(w, { dossier: \`\${HUIS}/\${n}\`, sleutel: 'woning' }));" "tweede woningpagina telt ook"
+  kruis vastgoed.js "if (bewaart) {" "if (false) {" "object met openbare feiten of bevestigde WOZ wordt gewist"
+  kruis vastgoed.js "dossier_op = excluded.dossier_op, weg_op = NULL\`)" "dossier_op = excluded.dossier_op\`)" "teruggekeerd object blijft gemarkeerd"
+  kruis vastgoed.js "const actief = u.objecten.filter((x) => !x.weg_op);" "const actief = u.objecten;" "gemarkeerd object laat elke opening het dossier lezen"
+  kruis vastgoed.js "db.prepare(\"SELECT 1 FROM pragma_table_info('object') WHERE name = 'weg_op'\").get() ? n('object', ' WHERE weg_op IS NOT NULL') : 0" "n('object', ' WHERE weg_op IS NOT NULL')" "/health faalt op een databank van vóór A15"
+  [ $k = 0 ] && echo "GROEN kruisproef: alle drieëndertig rood" || f=1
 fi
 exit $f
