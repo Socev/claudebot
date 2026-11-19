@@ -211,7 +211,17 @@ function startKind() {
   log('kind gestart (pid ' + k.pid + ') vanaf release ' + path.basename(map));
   levend.add(k);
 
-  k.on('exit', function (code, signaal) {
+  // Codex MOET 1 (wv3420): een mislukte spawn (EAGAIN, ENOMEM) geeft 'error' en mogelijk nooit 'exit'. Dan blijft k anders
+  // eeuwig in `levend` en wacht elke volgende start voor altijd. Zonder pid is er geen proces: behandelen als een crash.
+  // Eén afhandeling per kind, ook als 'exit' na 'error' toch nog komt.
+  k.on('error', function (e) {
+    log('kind (pid ' + (k.pid || '-') + ') fout: ' + (e && e.code || (e && e.message) || 'onbekend'));
+    if (!k.pid) naStop(null, 'spawnfout');
+  });
+  k.on('exit', function (code, signaal) { naStop(code, signaal); });
+  function naStop(code, signaal) {
+    if (k.afgehandeld) return;
+    k.afgehandeld = true;
     levend.delete(k);
     // wv3420 (B60): alleen het HUIDIGE kind. De late exit van een vervangen of al opgegeven kind mag de verwijzing naar
     // zijn opvolger niet wissen en geen herstart of crashtelling geven (18-11: daardoor een tweede server.js).
@@ -229,7 +239,7 @@ function startKind() {
     // zichzelf met 0. Niet tellen als crash, niet uitstellen.
     if (signaal === 'SIGTERM' || code === 0) { herstartNa(500); return; }
     verwerkCrash();
-  });
+  }
   return k;
 }
 

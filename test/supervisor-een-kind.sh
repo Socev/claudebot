@@ -102,7 +102,7 @@ for i in $(seq 1 120); do kill -0 "$SB" 2>/dev/null || { wait "$SB"; RC=$?; brea
 [ "$RC" = "leeft" ] && kill -9 "$SB" 2>/dev/null
 kill "$BEZET" 2>/dev/null
 echo "--- B server.js op bezette poort: uitkomst $RC ---"; grep -a 'listen\|stopt\|EADDRINUSE' "$B/uit.log" "$B"/socev-app-proef-*/bin/api.log 2>/dev/null | tail -3 | sed 's/^/  /'
-if [ "$RC" != "leeft" ] && [ "$RC" != "0" ]; then groen "B server.js op bezette poort stopte zelf (exit $RC)"; else rood "B server.js op bezette poort: $RC (verwacht exit ≠ 0 binnen 30 s)"; fi
+if [ "$RC" = "98" ] && grep -aq 'fout waar=listen .*EADDRINUSE' "$B/uit.log" "$B"/socev-app-proef-*/bin/api.log 2>/dev/null; then groen "B server.js op bezette poort stopte zelf (exit $RC)"; else rood "B server.js op bezette poort: $RC (verwacht exit 98 met EADDRINUSE in het log, binnen 30 s)"; fi
 
 # ── C ───────────────────────────────────────────────────────────────────────
 budget() {   # $1 = map, $2 = TERUGFLIP_HERSTEL_MS, $3 = wachttijd na eerste terugflip (s)
