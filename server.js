@@ -16139,7 +16139,8 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'ghawa-deel',           // wv2889: Delen met ECG, slot 2 (iemand erbij/eraf); machinekamer, archief
   'personeelsscherm',     // wv3020: aanvraag extra pagina / publicatie Personeelsscherm; machinekamer, archief
   'onderhoud',            // wv1271: onderhoudsstand vault > 2 uur, één alarm; machinekamer, archief
-  'facturen-sepa-door']);  // wv2465: SEPA-batch Tolgaarde zelf naar nogbetalen@; hoofdkanaal, soort dag (zet de aanroep zelf)
+  'facturen-sepa-door',   // wv2465: SEPA-batch Tolgaarde zelf naar nogbetalen@; hoofdkanaal, soort dag (zet de aanroep zelf)
+  'facturen-nogbetalen']);  // wv3369: betaalverzoek naar Cynthia (nogbetalen@) niet of onzeker verstuurd, dagplafond; hoofdkanaal, soort dag
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
 const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
@@ -18507,7 +18508,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), boekstuk: typeof bsInfo === 'function' ? bsInfo() : undefined, sepa_door: typeof sdInfo === 'function' ? sdInfo() : undefined, waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel, jaaropgaaf: !!docplanJaaropgaaf } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), boekstuk: typeof bsInfo === 'function' ? bsInfo() : undefined, sepa_door: typeof sdInfo === 'function' ? sdInfo() : undefined, nogbetalen: typeof nbInfo === 'function' ? nbInfo() : undefined, waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel, jaaropgaaf: !!docplanJaaropgaaf } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -18746,7 +18747,8 @@ async function appFacturen(req, res, a, s, d, route) {
   const r = facturenRoutes.app(fdb, { methode: req.method, pad: pad, d: d || {}, rol: rol, primair: rolPrimair(),
     versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; },
     uploadNeem: function (b, n) { return facturenUploadNeem(a, b, n); }, bankluisPad: FACTUREN_BANKLUIS, pdfTekst: facturenPdfTekst,   // wv2958
-    sepaDoor: typeof sdModus === 'function' ? sdModus() : null });   // wv2465
+    sepaDoor: typeof sdModus === 'function' ? sdModus() : null,   // wv2465
+    nogBetalen: typeof nbModus === 'function' && nbAan() ? nbModus() : null });   // wv3369: alleen 'auto' maakt een rij
   if (req.method === 'GET' && pad.indexOf('/app/facturen/document/') !== 0 && r.status === 200) res._app.stil = true;
   if (req.method !== 'GET' && r.status === 200) facturenKaartPlan(3000);   // wv1705: verzamelkaart bijwerken (bevestigen, terugdraaien, upload)
   // wv2025: na een nieuwe batch (bestand gemaakt) het concept met de specificatie op de achtergrond; het antwoord wacht er niet op
@@ -29345,7 +29347,10 @@ function potVzInfo() {
 const POT_VZ_GEHEIM_NAAM = 'n8n_verzender_versturen_secret';
 // sha256 van de jsCode van de Code-knoop Toetsen in AI - Facturen-verzender, zoals gepubliceerd door wv921. Wijkt de workflow af, dan
 // verstuurt de pod niets en wordt alles concept (Fable #10). Bewuste wijziging aan de verzender = deze waarde mee wijzigen (nieuw image).
-const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '509d97e44222f962dd6c286fa211ae82b60b06092222a29b6c909797a7984cf7';
+const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '0c4122194217e0bfaa93e312d98f3bb55798d16eef9a0984e0a2b804b2752c98';
+// wv3369: de Toetsen-code van wv2480 (zonder bron nogbetalen) blijft gelden voor pot, boekstuk, sepa en facturen zolang image en workflow niet op
+// dezelfde minuut wisselen; bron nogbetalen eist de nieuwe. Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
+const POT_VZ_TOETSEN_DIRECT = '509d97e44222f962dd6c286fa211ae82b60b06092222a29b6c909797a7984cf7';
 // wv2480: de Toetsen-code van wv2465 (bron sepa, zonder direct uit Facturen) blijft gelden voor pot, boekstuk en sepa zolang image en workflow
 // niet op dezelfde minuut wisselen; bron facturen (direct) eist de nieuwe. Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
 const POT_VZ_TOETSEN_SEPA = '6edfee1f08f03f851ba596c9c59f644694951e0894c0c3d43766f7d205746cb6';
@@ -29357,6 +29362,8 @@ const POT_VZ_TOETSEN_SHA_VORIG = '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7
 const POT_VZ_TOETSEN_BOEKSTUK = '8fec24893c22a23d54e56d8749b6c186d63897634e9e10608f97ee6336ddbcbb';
 function potVzToetsenMag(ts, bron) {
   if (ts === POT_VZ_TOETSEN_SHA) return true;
+  if (bron === 'nogbetalen') return false;   // wv3369: alleen met de nieuwe Toetsen-code
+  if (ts === POT_VZ_TOETSEN_DIRECT) return true;
   if (bron === 'facturen') return false;   // wv2480: direct uit Facturen alleen met de nieuwe Toetsen-code
   if (ts === POT_VZ_TOETSEN_SEPA) return true;
   if (bron === 'sepa') return false;
@@ -29895,6 +29902,124 @@ function sdInfo() {
 }
 setInterval(function () { sdTik().catch(function (e) { logError('facturen-sepa-door', e); }); }, SD_TIK_MS).unref();
 
+// ── wv3369: betaalverzoek naar Cynthia (nogbetalen@) na Davids Bevestigen (David 19-11-2026 12:17; Ja met verse vingerafdruk 12:58) ─────────
+// Grondwet 1, registerrij nogbetalen-cynthia. De logica en de staat staan in facturen.js (nogBetalen: rij in betaal_verzending, gemaakt in de
+// transactie van Bevestigen, verstuur_na = die van de boekhouder-opdracht). Hier: elke 5 minuten (en na een herstart) de rijen op 'wacht' met
+// verstuur_na voorbij afwerken, alleen op de primaire kant. Versturen via AI - Facturen-verzender bron nogbetalen met het eigen verzendgeheim
+// van pot (geen nieuw geheim), alleen tussen 07:00 en 23:00, alleen als de gepubliceerde Toetsen-code bron nogbetalen kent en de noodstop
+// (APP_UIT, per rij gelezen; Fable-review verzenden 4) niet aan staat. Geen Gmail-concept als terugval (David wil geen concepten; een concept
+// dat later alsnog verstuurd wordt is een dubbelrisico): zeker niet verstuurd = 'mislukt' + één regel aan David, geen automatische
+// herkansing (Fable-review facturen-kern M1); geen antwoord = 'onzeker': nooit opnieuw, één regel aan David. Dagplafond 25 (facturen.js, in de
+// transactie van de claim): daarboven wacht de rij tot de volgende dag, met één regel aan David per dag. Schakelaar FACTUREN_NOGBETALEN:
+// alleen 'auto' maakt rijen en verstuurt; al het andere (ook leeg) = uit.
+const NB_TIK_MS = 5 * 60 * 1000;
+const nbStaat = { bezig: false, laatste: null, uitkomst: null, fouten_op_rij: 0, plafond_gemeld: null, verzender_gemeld: null };
+function nbModus() { return String(process.env.FACTUREN_NOGBETALEN || '').trim().toLowerCase() === 'auto' ? 'auto' : 'uit'; }
+function nbAan() { return !!facturenRoutes && !!facturenRoutes.nogBetalen && SERVER_ECHT && rolPrimair() && nbModus() === 'auto'; }
+function nbNoodstop() { try { return fs.existsSync(APP_UIT); } catch (e) { return true; } }
+async function nbBericht(tekst) {
+  const r = await berichtIntern({ kanaal: 'hoofd', bron: 'facturen-nogbetalen', klasse: 'normaal', soort: 'dag', tekst: tekst, sleutel: 'facturen-nogbetalen-' + crypto.createHash('sha256').update(tekst).digest('hex').slice(0, 16) });
+  if (!r || r.status !== 200) throw berichtFout(r);
+}
+function nbMeld(tekst) { nbBericht(tekst).catch(function (e) { logError('facturen-nogbetalen', e); }); }
+function nbUit(fdb, id, van, naar, velden) {
+  const ok = facturenRoutes.nogBetalen.uitkomst(fdb, id, van, naar, velden, Date.now());
+  if (!ok) logError('facturen-nogbetalen', new Error('rij ' + id + ' stond niet op ' + van + ' (naar ' + naar + ')'));
+  return ok;
+}
+function nbWie(v) { return 'Het betaalverzoek voor ' + (v.onderwerp ? '"' + String(v.onderwerp).replace(/^NOG BETALEN - /, '').slice(0, 90) + '"' : 'een factuur') + ' (kenmerk …' + String(v.ref || v.factuur || '').slice(-6) + ')'; }
+// Eén rij. → 'wacht' | 'al' | 'plafond' | 'vervallen' | 'mislukt' | 'verstuurd' | 'onzeker'
+async function nbEen(fdb, rij) {
+  if (nbNoodstop()) return 'wacht';   // per rij: een noodstop midden in de ronde houdt de rest tegen
+  const v = facturenRoutes.nogBetalen.voorbereid(fdb, rij.id, { nu: Date.now() });
+  if (!v) return 'al';
+  if (v.actie === 'plafond') return 'plafond';
+  if (v.actie === 'niet') {
+    if (v.status === 'mislukt') nbMeld('Een factuur die je bevestigde als zelf te betalen ging niet naar Cynthia (nogbetalen@): ' + v.reden + '. Stuur hem zelf door of laat hem op je betaallijst staan.');
+    return v.status;
+  }
+  // allowlist-toets vóór de aanroep (de verzender toetst nog eens): alleen het ene adres
+  if (!facturenRoutes.nogBetalen.aanOk(v.aan)) { nbUit(fdb, v.id, 'verzenden', 'mislukt', { reden: 'ander adres dan nogbetalen@' }); return 'mislukt'; }
+  let a;
+  try { a = await potVzVerstuur({ bron: 'nogbetalen', modus: 'versturen', ref: v.ref, aan: facturenRoutes.nogBetalen.AAN, onderwerp: v.onderwerp, bericht: v.bericht, van: SD_VAN,
+    bijlagen: v.bijlagen.map(function (b) { return { naam: b.naam, mime: b.mime, bytes: b.bytes }; }) }); }
+  catch (e) { a = e && e.zekerNietVerstuurd ? { status: -1, j: { ok: false, code: e.code || 'vooraf', fout: String(e.message || '').slice(0, 80) } } : { status: 0, j: null }; }
+  const j = a && a.j;
+  if (a && a.status === 200 && j && j.ok === true && typeof j.message_id === 'string' && j.message_id) {
+    nbUit(fdb, v.id, 'verzenden', 'verstuurd', { message_id: j.message_id, verzonden_op: new Date().toISOString() });
+    schrijfLog(nu() + ' facturen-nogbetalen verstuurd ' + velden({ rij: v.id, let_op: v.let_op.length, bijlagen: v.bijlagen.length }));
+    return 'verstuurd';
+  }
+  // zeker niet verstuurd: vóór de aanroep, een weigering van Toetsen (4xx) of Gmail weigerde het concept → mislukt (geen herkansing)
+  const zeker = a && j && j.ok === false && (a.status === -1 || (a.status >= 400 && a.status < 500) || (a.status === 502 && j.code === 'gmail_concept'));
+  const code = (a ? a.status : '?') + (j && j.code ? ' ' + String(j.code).slice(0, 30) : '');
+  if (zeker) {
+    nbUit(fdb, v.id, 'verzenden', 'mislukt', { reden: 'de verzender verstuurde niet (' + (a.status === -1 ? 'vooraf' : code) + ')' });
+    nbMeld(nbWie(v) + ' ging niet naar Cynthia: de verzender verstuurde niet (' + (a.status === -1 ? 'vooraf' : code) + '). Er is niets verstuurd; stuur de factuur zelf door. Ik probeer het niet opnieuw.');
+    return 'mislukt';
+  }
+  nbUit(fdb, v.id, 'verzenden', 'onzeker', { reden: 'geen bevestiging van de verzender (' + code + ')' });
+  nbMeld('Niet zeker of ' + nbWie(v).charAt(0).toLowerCase() + nbWie(v).slice(1) + ' naar Cynthia (nogbetalen@) ging: de verzender gaf geen bevestiging. Kijk in Gmail bij Verzonden; ik stuur hem niet nog eens.');
+  return 'onzeker';
+}
+async function nbTik() {
+  if (!nbAan()) return;
+  if (nbStaat.bezig) return;
+  const fdb = facturenOpen();
+  if (!fdb) return;
+  nbStaat.bezig = true;
+  try {
+    // halverwege gestopt (herstart tijdens de aanroep) → onzeker, één regel, nooit opnieuw
+    for (const h of facturenRoutes.nogBetalen.hangend(fdb, Date.now())) {
+      if (nbUit(fdb, h.id, 'verzenden', 'onzeker', { reden: 'de pod stopte midden in het versturen' }))
+        nbMeld('Niet zeker of een betaalverzoek (kenmerk …' + String(h.factuur).slice(-6) + ') naar Cynthia (nogbetalen@) ging: de pod stopte midden in het versturen. Kijk in Gmail bij Verzonden; ik stuur hem niet nog eens.');
+    }
+    const t = Date.now();
+    const open = facturenRoutes.nogBetalen.open(fdb, t);
+    if (open.length && !nbNoodstop() && sdVenster(t)) {
+      let ok = false;
+      try { ok = await potVzVerzenderOk('nogbetalen'); } catch (e) { ok = false; }
+      let geheim = null;
+      if (ok) { try { geheim = await potVzVerzendGeheim(); } catch (e) { geheim = null; } }
+      if (!ok || !geheim) {
+        // niet versturen; de rij blijft wachten (na 36 uur: mislukt + regel, in facturen.js). Eén regel per dag.
+        const dag = new Date(t).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+        if (nbStaat.verzender_gemeld !== dag && open.some(function (r) { return t - Date.parse(r.aangemaakt_op) > 3 * 3600000; })) {
+          nbStaat.verzender_gemeld = dag;
+          nbMeld('Betaalverzoeken naar Cynthia (nogbetalen@) wachten: ' + (!ok ? 'de verzender kent ze nog niet of wijkt af van de pod' : 'het verzendgeheim is niet te lezen') + '. Er is niets verstuurd; ik meld het de machinekamer.');
+        }
+        // langer dan 36 uur gewacht: niet meer "binnen het uur" → mislukt + één regel (facturen.js zet de reden; er gaat niets weg)
+        for (const r of open) if (t - Date.parse(r.aangemaakt_op) > facturenRoutes.nogBetalen.MAX_UUR * 3600000) {
+          const v = facturenRoutes.nogBetalen.voorbereid(fdb, r.id, { nu: t });
+          if (v && v.actie === 'niet' && v.status === 'mislukt') nbMeld('Een factuur die je bevestigde als zelf te betalen ging niet naar Cynthia (nogbetalen@): ' + v.reden + '. Stuur hem zelf door of laat hem op je betaallijst staan.');
+        }
+      } else {
+        for (const rij of open) {
+          const st = await nbEen(fdb, rij);
+          if (st === 'plafond') {
+            const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+            if (nbStaat.plafond_gemeld !== dag) { nbStaat.plafond_gemeld = dag; nbMeld('Vandaag gingen er al ' + facturenRoutes.nogBetalen.PER_DAG + ' betaalverzoeken naar Cynthia (het dagplafond). De rest gaat morgen vanaf 07:00.'); }
+            break;
+          }
+          if (st !== 'wacht' && st !== 'al') { nbStaat.uitkomst = { rij: rij.id, stap: st, op: new Date().toISOString() }; schrijfLog(nu() + ' facturen-nogbetalen ' + velden({ rij: rij.id, stap: st })); }
+          if (st === 'wacht') break;   // noodstop
+        }
+      }
+    }
+    nbStaat.laatste = new Date().toISOString(); nbStaat.fouten_op_rij = 0;
+  } catch (e) {
+    nbStaat.fouten_op_rij++;
+    logError('facturen-nogbetalen', e);
+  } finally { nbStaat.bezig = false; }
+}
+function nbInfo() {
+  try {
+    const f = facturenOpen();
+    return Object.assign({ aan: nbAan(), modus: nbModus(), noodstop: nbNoodstop(), laatste_tik: nbStaat.laatste, fouten_op_rij: nbStaat.fouten_op_rij, uitkomst: nbStaat.uitkomst },
+      f && facturenRoutes && facturenRoutes.nogBetalen ? facturenRoutes.nogBetalen.info(f, Date.now()) : {});
+  } catch (e) { return { fout: String(e && e.message || e).slice(0, 80) }; }
+}
+setInterval(function () { nbTik().catch(function (e) { logError('facturen-nogbetalen', e); }); }, NB_TIK_MS).unref();
 
 // Eenmalige vrijgave: kaart (machinekamer via POST /facturen/boekstuk {actie: 'kaart'}), knoproute (appVoorJouKnop, zoals potVzKnopVoor)
 async function bsKaartZet(fdb, voorbeeld) {

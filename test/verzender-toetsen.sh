@@ -248,6 +248,72 @@ const een = [{ naam: 'SLOEL - 2026033 - Huisartsenpraktijk Korte Geer.pdf', byte
   toets('Tel verstuurd: facturen telt niet in sd.pot; antwoord met message_id en token', tv.sd.pot.length === 0 && tv.u.ok === true && tv.u.modus === 'versturen' && tv.u.message_id === 'm1' && tv.u.token === 'FV0123456789abcdef', tv);
   tv = telDraai('pot');
   toets('Tel verstuurd: pot telt wel', tv.sd.pot.length === 1, tv.sd);
+  tv = telDraai('nogbetalen');
+  toets('Tel verstuurd: nogbetalen telt niet in sd.pot (eigen dagteller; Fable-review verzenden 9)', tv.sd.pot.length === 0 && tv.u.ok === true, tv.sd);
+  // ── wv3369: bron nogbetalen (één adres: nogbetalen@, 0 of 1 bijlage pdf/xml, kenmerk NB + 16 hex in het bericht, 07–23 elke dag, 30 per Amsterdamse dag) ──
+  const NB = 'NB0123456789abcdef';
+  const nbB = (x) => Object.assign({ secret: NIEUW, bron: 'nogbetalen', modus: 'versturen', ref: NB, aan: 'nogbetalen@huisartsentolgaarde.nl', onderwerp: 'NOG BETALEN - Groenhouten - Voorbeeld BV € 412,80 - uiterlijk 3-12',
+    bericht: 'Voorbeeld BV\n€ 412,80\n\nFactuur in de bijlage. Kenmerk ' + NB, van: '"David Schaap" <dokterschaap@gmail.com>' }, x);
+  const fpdf = [{ naam: 'Voorbeeld factuur.pdf', bytes: PDF }];
+  let sdN = { pot: Array.from({ length: 24 }, () => DO - 1000) };   // gedeeld pot-plafond vol: raakt nogbetalen niet
+  r = await draai(nbB(), fpdf, { nu: DO, sd: sdN });
+  toets('nogbetalen + eigen geheim + nogbetalen@ + één pdf → in orde, pad pot, ook als het gedeelde pot-plafond vol is', r.json.toets.fout === null && r.json.toets.pad === 'pot' && r.json.toets.aantal === 1 && r.json.aan === 'nogbetalen@huisartsentolgaarde.nl' && r.json.ref === NB && r.json.van === '"David Schaap" <dokterschaap@gmail.com>', r.json.toets);
+  toets('nogbetalen: telt in de eigen dagteller, niet in sd.pot', sdN.nogbetalen.length === 1 && sdN.pot.length === 24, sdN);
+  r = await draai(nbB({ onderwerp: 'NOG BETALEN - LET OP - x' }), [], { nu: DO });
+  toets('nogbetalen zonder bijlage (patiëntkenmerk) → in orde, geen props', r.json.toets.fout === null && r.json.toets.aantal === 0 && r.json.toets.props === '', r.json.toets);
+  r = await draai(nbB({ onderwerp: 'PROEF - NOG BETALEN - Groenhouten - x' }), fpdf, { nu: DO });
+  toets('nogbetalen: onderwerp "PROEF - NOG BETALEN - …" → in orde', r.json.toets.fout === null, r.json.toets);
+  r = await draai(nbB(), fpdf, { nu: ZA });
+  toets('nogbetalen op zaterdagavond 21:30 → in orde (elke dag 07–23)', r.json.toets.fout === null, r.json.toets);
+  for (const [wat, t] of [['06:59', Date.parse('2026-11-05T05:59:00Z')], ['23:00', Date.parse('2026-11-05T22:00:00Z')]]) {
+    r = await draai(nbB(), fpdf, { nu: t });
+    toets('nogbetalen buiten 07–23 (' + wat + ') → 409 buiten_venster', r.json.toets.status === 409 && r.json.toets.code === 'buiten_venster', r.json.toets);
+  }
+  for (const aan of ['facturen@huisartsentolgaarde.nl', 'd.schaap+facturentest@gmail.com', 'nogbetalen@huisartsentolgaarde.nl.voorbeeld.invalid', 'a.schaap@actasynergia.nl']) {
+    r = await draai(nbB({ aan }), fpdf, { nu: DO });
+    toets('nogbetalen: ander adres (' + aan + ') → 403 witte_lijst', r.json.toets.status === 403 && r.json.toets.code === 'witte_lijst' && !r.binary, r.json.toets);
+  }
+  r = await draai(nbB({ aan: 'nogbetalen@huisartsentolgaarde.nl, nogbetalen@huisartsentolgaarde.nl' }), fpdf, { nu: DO });
+  toets('nogbetalen: twee adressen → 400', r.json.toets.status === 400 && r.json.toets.code === 'aan', r.json.toets);
+  for (const k of ['cc', 'bcc', 'thread_id', 'antwoord_aan', 'token']) {
+    r = await draai(nbB({ [k]: k === 'token' ? 'FV0123456789abcdef' : 'iemand@voorbeeld.invalid' }), fpdf, { nu: DO });
+    toets('nogbetalen: ' + k + ' → 400', r.json.toets.status === 400 && r.json.toets.code === 'veld' && !r.binary, r.json.toets);
+  }
+  r = await draai(nbB({ secret: OUD }), fpdf, { nu: DO });
+  toets('nogbetalen met het oude geheim → 401', r.json.toets.status === 401 && r.json.toets.code === 'secret', r.json.toets);
+  r = await draai(nbB({ modus: 'concept' }), fpdf, { nu: DO });
+  toets('nogbetalen met modus concept → geweigerd, geen pad pot', r.json.toets.fout !== null && r.json.toets.pad !== 'pot', r.json.toets);
+  r = await draai(nbB({ van: 'iemand@voorbeeld.invalid' }), fpdf, { nu: DO });
+  toets('nogbetalen: andere afzender → 400', r.json.toets.status === 400 && r.json.toets.code === 'van', r.json.toets);
+  r = await draai(nbB({ ref: 'NB0123' }), fpdf, { nu: DO });
+  toets('nogbetalen: ongeldige ref → 400', r.json.toets.status === 400 && r.json.toets.code === 'ref', r.json.toets);
+  r = await draai(nbB({ onderwerp: 'Betaalverzoek x' }), fpdf, { nu: DO });
+  toets('nogbetalen: onderwerp zonder "NOG BETALEN - " → 400', r.json.toets.status === 400 && r.json.toets.code === 'onderwerp', r.json.toets);
+  r = await draai(nbB({ onderwerp: 'NOG BETALEN - x\nBcc: y' }), fpdf, { nu: DO });
+  toets('nogbetalen: onderwerp met regeleinde → 400', r.json.toets.status === 400 && r.json.toets.code === 'onderwerp', r.json.toets);
+  r = await draai(nbB({ bericht: 'Kenmerk NB0000000000000000' }), fpdf, { nu: DO });
+  toets('nogbetalen: bericht noemt het kenmerk niet → 400', r.json.toets.status === 400 && r.json.toets.code === 'bericht', r.json.toets);
+  r = await draai(nbB(), [fpdf[0], { naam: 'tweede.pdf', bytes: PDF }], { nu: DO });
+  toets('nogbetalen: twee bijlagen → 400', r.json.toets.status === 400 && r.json.toets.code === 'bijlagen', r.json.toets);
+  r = await draai(nbB(), [{ naam: 'x.940', bytes: Buffer.from(':20:') }], { nu: DO });
+  toets('nogbetalen: MT940 → 400', r.json.toets.status === 400 && r.json.toets.code === 'bijlagen', r.json.toets);
+  r = await draai(nbB(), [{ naam: 'x.pdf', bytes: Buffer.from('MZ..') }], { nu: DO });
+  toets('nogbetalen: .pdf zonder %PDF → 400', r.json.toets.status === 400 && r.json.toets.code === 'bijlagen', r.json.toets);
+  r = await draai(nbB(), fpdf, { nu: DO, sd: { nogbetalen: Array.from({ length: 30 }, () => DO - 1000) } });
+  toets('nogbetalen: plafond 30 per Amsterdamse dag → 429', r.json.toets.status === 429 && r.json.toets.code === 'plafond', r.json.toets);
+  r = await draai(nbB(), fpdf, { nu: DO, sd: { nogbetalen: Array.from({ length: 30 }, () => DO - 14 * 3600000) } });
+  toets('nogbetalen: 30 van gisteren tellen vandaag niet → in orde', r.json.toets.fout === null, r.json.toets);
+  r = await draai(nbB(), fpdf, { nu: DO, code: code.replace('const VERSTUREN_NOGBETALEN = true;', 'const VERSTUREN_NOGBETALEN = false;') });
+  toets('nogbetalen: VERSTUREN_NOGBETALEN uit → 409', r.json.toets.status === 409 && r.json.toets.code === 'versturen_uit', r.json.toets);
+  // proef: alleen de testalias, eigen teller van 3 per dag
+  r = await draai(nbB({ bron: 'nogbetalen_proef', aan: 'd.schaap+facturentest@gmail.com', onderwerp: 'PROEF - NOG BETALEN - x' }), fpdf, { nu: DO });
+  toets('nogbetalen_proef naar de testalias → in orde, pad pot', r.json.toets.fout === null && r.json.toets.pad === 'pot', r.json.toets);
+  r = await draai(nbB({ bron: 'nogbetalen_proef' }), fpdf, { nu: DO });
+  toets('nogbetalen_proef naar nogbetalen@ → 403 (alleen de testalias)', r.json.toets.status === 403 && r.json.toets.code === 'witte_lijst', r.json.toets);
+  r = await draai(nbB({ bron: 'nogbetalen_proef', aan: 'd.schaap+facturentest@gmail.com' }), fpdf, { nu: DO, sd: { nbproef: [DO - 1, DO - 2, DO - 3] } });
+  toets('nogbetalen_proef: 4e op een dag → 429', r.json.toets.status === 429, r.json.toets);
+  r = await draai(nbB({ bron: 'sepa' }), fpdf, { nu: DO });
+  toets('bron sepa met een nogbetalen-verzoek → geweigerd (sepa blijft streng)', r.json.toets.fout !== null, r.json.toets);
   const sj = fs.readFileSync('server.js', 'utf8');
   const m = /const POT_VZ_TOETSEN_SHA = process\.env\.POT_VZ_TOETSEN_SHA_TOETS \|\| '([0-9a-f]{64})'/.exec(sj);
   toets('POT_VZ_TOETSEN_SHA in server.js = sha256 van dit bestand', m && m[1] === crypto.createHash('sha256').update(code).digest('hex'), m && m[1]);
