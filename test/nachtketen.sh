@@ -293,11 +293,29 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     toets('avg-spiegel: knipsel gevonden in server.js', b > 0 && e > b);
     const nep = path.join(d, 'avg-nep.py');
     const knip = sv.slice(b, e).replace("'/opt/data/mk-scripts/avg-spiegel/spiegel.py'", JSON.stringify(nep)).replace("'/opt/data/scripts-staat/avg-spiegel/laatste.jsonl'", JSON.stringify(path.join(d, 'avg-staat', 'laatste.jsonl'))).replace('AVG_SPIEGEL_MAX_S = 240', 'AVG_SPIEGEL_MAX_S = 1') + '\n;({ avgSpiegelRonde });';
-    const mk = () => vm.runInContext(knip, vm.createContext({ fs: fs, path: path, spawn: require('child_process').spawn, process: process, setTimeout: setTimeout, clearTimeout: clearTimeout, JSON: JSON, String: String, Array: Array, Date: Date, Promise: Promise })).avgSpiegelRonde;
+    const boxRijen = []; let boxLukt = true;   // wv3399: nep-box (ovisBoxRij) en nepklok
+    const mk = () => vm.runInContext(knip, vm.createContext({ fs: fs, path: path, spawn: require('child_process').spawn, process: process, setTimeout: setTimeout, clearTimeout: clearTimeout, JSON: JSON, String: String, Array: Array, Date: Date, Promise: Promise,
+      ovisAms: () => ({ klok: '2026-11-19 04:00' }), ovisBoxRij: (t) => { if (!boxLukt) return false; boxRijen.push(t); return true; } })).avgSpiegelRonde;
     let pids = [];
     fs.writeFileSync(nep, 'import json,sys\nprint(json.dumps({"praktijk":"tolgaarde","ok":True,"commit":"abc1234","overgeslagen":[]}))\nprint(json.dumps({"praktijk":"groenhouten","ok":True,"overgeslagen":[{"bestand":"x","reden":"y"}]}))\nsys.exit(0)\n');
     let r = await mk()({ opSpawn: (pid) => pids.push(pid) });
     toets('avg-spiegel: exit 0 → ok met stand per praktijk en opSpawn', r.ok === true && r.detail.praktijken.tolgaarde === 'gepusht abc1234' && r.detail.praktijken.groenhouten === 'gelijk, 1 niet mee' && pids.length === 1, r);
+    // wv3399 (B13): niet mee = één box-rij, niet elke nacht opnieuw; mislukte box = morgen opnieuw; lege lijst = stil
+    toets('avg-spiegel: niet mee → één box-rij [log] met bestand en reden (wv3399)', r.detail.niet_mee_gemeld === true && boxRijen.length === 1 && /^\n## \[log\] 2026-11-19 04:00 — AVG-spiegel: 1 bestand\(en\) niet naar GitHub/.test(boxRijen[0]) && /groenhouten: x \(y\)/.test(boxRijen[0]), [r.detail, boxRijen]);
+    r = await mk()({});
+    toets('avg-spiegel: zelfde lijst de volgende nacht → geen nieuwe rij (grondwet 10)', r.ok === true && r.detail.niet_mee_gemeld === false && boxRijen.length === 1, [r.detail, boxRijen.length]);
+    fs.writeFileSync(nep, 'import json,sys\nprint(json.dumps({"praktijk":"groenhouten","ok":True,"overgeslagen":[{"bestand":"x","reden":"y"},{"bestand":"scan.pdf","reden":"geen leesbare tekst"}]}))\n');
+    boxLukt = false; r = await mk()({});
+    toets('avg-spiegel: box lukt niet → null, vingerafdruk niet bijgewerkt', r.ok === true && r.detail.niet_mee_gemeld === null && boxRijen.length === 1, r.detail);
+    boxLukt = true; r = await mk()({});
+    toets('avg-spiegel: daarna wél → nieuwe rij met beide bestanden', r.detail.niet_mee_gemeld === true && boxRijen.length === 2 && /2 bestand\(en\)/.test(boxRijen[1]) && /scan\.pdf/.test(boxRijen[1]), [r.detail, boxRijen[1]]);
+    fs.writeFileSync(nep, 'import json,sys\nprint(json.dumps({"praktijk":"groenhouten","ok":True,"overgeslagen":[]}))\n');
+    r = await mk()({});
+    toets('avg-spiegel: lege lijst → geen rij', r.detail.niet_mee_gemeld === false && boxRijen.length === 2, r.detail);
+    fs.writeFileSync(nep, 'import json,sys\nprint(json.dumps({"ok":True,"overgeslagen":"onderhoudsstand"}))\n');
+    r = await mk()({});
+    toets('avg-spiegel: onderhoudsstand → geen vergelijking', r.ok === true && r.detail.niet_mee_gemeld === undefined && boxRijen.length === 2, r.detail);
+    fs.writeFileSync(nep, 'import json,sys\nprint(json.dumps({"praktijk":"tolgaarde","ok":True,"commit":"abc1234","overgeslagen":[]}))\nprint(json.dumps({"praktijk":"groenhouten","ok":True,"overgeslagen":[{"bestand":"x","reden":"y"}]}))\nsys.exit(0)\n');
     const um = fs.statSync(path.join(d, 'avg-staat', 'laatste.jsonl')).mode & 0o777, mm = fs.statSync(path.join(d, 'avg-staat')).mode & 0o777;
     toets('avg-spiegel: uitvoer in een bestand 0600 in een map 0700 (geen pipe: wees na herstart zonder EPIPE)', um === 0o600 && mm === 0o700, [um.toString(8), mm.toString(8)]);
     fs.writeFileSync(nep, 'import json,sys\nprint(json.dumps({"praktijk":"tolgaarde","ok":False,"fout":"git push: geweigerd"}))\nsys.exit(1)\n');

@@ -21676,6 +21676,9 @@ const boxArchief = (function () {
 // procesgroep en stuurt bij verloop TERM (na 15 s KILL) aan de hele groep, ook git-kinderen, en ook als de pod intussen herstartte (de keten
 // wacht dan op die wees, dus begrensd). Uitvoer naar een bestand, niet naar een pipe: een wees na een herstart krijgt anders EPIPE (MOET 1).
 // Een Node-timer met ruimte erboven is alleen nog een vangnet. Script weg = al_gedaan (niet in deze pod).
+// wv3399 (B13): "N niet mee" was een stille ok (het verwerkingsregister ontbrak zo 12 dagen in beide repo's). Nu één box-rij zodra de lijst
+// van wat niet meegaat verandert (vingerafdruk in niet-mee.json naast de uitvoer; dezelfde lijst elke nacht = geen nieuwe rij, grondwet 10);
+// de vingerafdruk wordt pas bewaard als de rij in de box staat. Lege lijst: vingerafdruk leeg, geen rij.
 const AVG_SPIEGEL_SCRIPT = '/opt/data/mk-scripts/avg-spiegel/spiegel.py';
 const AVG_SPIEGEL_UIT = '/opt/data/scripts-staat/avg-spiegel/laatste.jsonl';
 const AVG_SPIEGEL_MAX_S = 240;
@@ -21697,22 +21700,40 @@ function avgSpiegelRonde(ctx) {
     const af = function (code, fout) {
       if (klaar) return; klaar = true; clearTimeout(vangnet);
       let uit = ''; try { uit = fs.readFileSync(AVG_SPIEGEL_UIT, 'utf8').slice(0, 20000); } catch (e) {}
-      const per = {};
+      const per = {}, nietMee = [];
       uit.split('\n').forEach(function (r) {
         let j = null; try { j = JSON.parse(r); } catch (e) { return; }
         if (!j || typeof j !== 'object') return;
         if (j.overgeslagen === 'onderhoudsstand') { per._ = 'onderhoudsstand'; return; }
         if (typeof j.praktijk !== 'string') return;
+        if (j.ok && Array.isArray(j.overgeslagen)) j.overgeslagen.forEach(function (o) { if (o && typeof o === 'object') nietMee.push(j.praktijk.slice(0, 20) + ': ' + String(o.bestand || '?').slice(0, 120) + ' (' + String(o.reden || '?').slice(0, 80) + ')'); });
         per[j.praktijk.slice(0, 20)] = j.ok ? (j.commit ? 'gepusht ' + String(j.commit).slice(0, 12) : 'gelijk') + (Array.isArray(j.overgeslagen) && j.overgeslagen.length ? ', ' + j.overgeslagen.length + ' niet mee' : '')
           : 'fout: ' + String(j.fout || '?').slice(0, 80);
       });
       const d = { ms: Date.now() - t0, praktijken: per };
+      if (code === 0 && !per._) d.niet_mee_gemeld = avgSpiegelNietMee(nietMee.sort());   // hele lijst vergelijken; alleen de boxtekst is begrensd (Codex ZOU 1)
       if (code === 0) return resolve({ ok: true, detail: d });
       resolve({ ok: false, reden: fout ? 'start: ' + fout : (code === 124 || code === 137) ? 'tijdslimiet ' + AVG_SPIEGEL_MAX_S + ' s' : 'exit ' + code, detail: d });
     };
     k.on('error', function (e) { af(127, String(e && e.message || e).slice(0, 80)); });
     k.on('close', function (code, sig) { af(code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code); });
   });
+}
+// → true als er een nieuwe box-rij staat, false als de lijst gelijk bleef of leeg is, null als de rij niet in de box kwam (morgen opnieuw)
+function avgSpiegelNietMee(lijst) {
+  const vp = path.join(path.dirname(AVG_SPIEGEL_UIT), 'niet-mee.json');
+  let oud = null; try { oud = JSON.parse(fs.readFileSync(vp, 'utf8')).lijst; } catch (e) {}
+  const bewaar = function () { try { const tmp = vp + '.tmp'; fs.writeFileSync(tmp, JSON.stringify({ lijst: lijst }), { mode: 0o600 }); fs.renameSync(tmp, vp); } catch (e) {} };
+  if (JSON.stringify(oud || []) === JSON.stringify(lijst)) { if (oud === null) bewaar(); return false; }
+  if (!lijst.length) { bewaar(); return false; }
+  const t = ovisAms();
+  const ok = ovisBoxRij('\n## [log] ' + t.klok + ' — AVG-spiegel: ' + lijst.length + ' bestand(en) niet naar GitHub (automatisch, wv3399) #avg-spiegel\n- status: open\n- van: pod (nachtketen, avg-spiegel)\n' +
+    '- gemeten: ' + lijst.join('; ').slice(0, 1500) + '.\n' +
+    '- gevolg als er niets gebeurt: deze stukken ontbreken in de privé-repo van de praktijk, dus ook in Davids kopie. Dezelfde lijst geeft geen nieuwe rij.\n' +
+    '- voorstel: per bestand kijken of de weigering terecht is (mogelijk BSN, scan zonder tekst, extensie); zo nodig de bron of de regel in mk-scripts/avg-spiegel/spiegel.py aanpassen.\n');
+  if (!ok) return null;
+  bewaar();
+  return true;
 }
 // ── Takeout-wachter (wv3304, fase 3 van vault "01_Ontwikkeling/Takeout naar de NAS - plan (Fable 5.2, 14-11-2026).md" § 3) ──
 // Nachtketen-stap: één keer per nacht mk-scripts/takeout-nas/wachter.py (geen taalmodel; waarom en regels in het script): klaar-mail van
