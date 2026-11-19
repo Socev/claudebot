@@ -485,8 +485,12 @@ async function haalTransacties(s, rek, van) {
     archiefBij(s, rek.hash, lijst, { volledigVanaf: sleutel ? null : van });
   }
   const o = s.opgehaald[rek.hash] = s.opgehaald[rek.hash] || {};
-  o.transacties = new Date().toISOString();
-  if (!o.vanaf || van < o.vanaf) o.vanaf = van;
+  // A10 (Fable-review 19-11): alleen een volledige opvraag schuift het venster op. Afgekapt (nog een continuation_key) = het
+  // stuk tussen 'van' en de afkap is niet binnen; zonder stempel vraagt de volgende ronde hetzelfde bereik opnieuw (vanafVoor).
+  if (!sleutel) {
+    o.transacties = new Date().toISOString();
+    if (!o.vanaf || van < o.vanaf) o.vanaf = van;
+  }
   return { aantal: lijst.length, paginas: paginas, afgekapt: !!sleutel };
 }
 
@@ -564,8 +568,10 @@ async function haalTransactiesBunq(s, rek, van, ctx) {
   const lijst = bunqMod.eenvoudig(r.posten, schoon);
   cacheBij(rek.hash, lijst, null);
   archiefBij(s, rek.hash, lijst, null);
-  if (!verlengen) o.transacties = new Date().toISOString();
   const af = r.afgekapt || r.fout;
+  // A10: het venster (o.transacties, basis van vanafVoor in de ronde) alleen opschuiven na een volledige opvraag; afgekapt of
+  // een fout halverwege → de volgende ronde vraagt hetzelfde bereik opnieuw (de cache heeft het opgehaalde deel al).
+  if (!verlengen && !af) o.transacties = new Date().toISOString();
   if (!af) { if (!o.vanaf || van < o.vanaf || verlengen) o.vanaf = van; if (verlengen || !o.bunq_terug || van <= o.vanaf) delete o.bunq_terug; }
   else if (r.oudste_id && (verlengen || !o.vanaf || (r.oudste_dag && r.oudste_dag < o.vanaf))) {
     // De cache loopt nu aaneengesloten tot de oudste opgehaalde post; daar gaat de volgende verlenging verder. Ook als er al een
@@ -1087,7 +1093,12 @@ const opdrachten = {
           rondeTel(s, h, soort);
           try {
             if (soort === 'saldo') await haalSaldo(s, rek);
-            else tel.transacties.posten += (await haalTransacties(s, rek, vanafVoor(o))).aantal;
+            else {
+              const rt = await haalTransacties(s, rek, vanafVoor(o));
+              tel.transacties.posten += rt.aantal;
+              // A10: afgekapt = venster niet opgeschoven; zichtbaar als fout (box-rij 1×/dag, geen hartslag) i.p.v. een stil gat
+              if (rt.afgekapt) fout('enablebanking', 'afgekapt', 'meer dan ' + MAX_PAGINAS + " pagina's transacties in één opvraag; het venster blijft staan en de volgende ronde vraagt hetzelfde bereik opnieuw");
+            }
             tel[soort].bank++;
           } catch (e) {
             const f = await ebDuid(rek, e);
@@ -1120,7 +1131,11 @@ const opdrachten = {
           if (vers(o.transacties)) { tel.transacties.vers++; continue; }
           if (!rondeMag(s, h, 'transacties')) { tel.transacties.grens++; continue; }
           rondeTel(s, h, 'transacties');
-          try { tel.transacties.posten += (await haalTransactiesBunq(s, rek, vanafVoor(o), ctx)).aantal; tel.transacties.bank++; }
+          try {
+            const rt = await haalTransactiesBunq(s, rek, vanafVoor(o), ctx);
+            tel.transacties.posten += rt.aantal; tel.transacties.bank++;
+            if (rt.afgekapt) fout('bunq', 'afgekapt', 'te veel posten in één opvraag (paginagrens); het venster blijft staan en de volgende ronde vraagt hetzelfde bereik opnieuw');
+          }
           catch (e) {
             const f = bqDuid(e);
             tel.transacties.fout++; fout('bunq', f.reden, f.tekst);
@@ -1161,9 +1176,12 @@ const opdrachten = {
       const box = [];
       s.ronde.box = s.ronde.box || {};
       fouten.forEach(function (f) {
-        if (f.bron !== 'enablebanking' || (f.reden !== 'sleutel' && f.reden !== 'toestemming')) return;
-        if (s.ronde.box[f.reden] === vandaag) return;
-        s.ronde.box[f.reden] = vandaag;
+        // A10: ook een afgekapte opvraag (beide bronnen), anders blijft een venster dat niet opschuift onzichtbaar
+        const afk = f.reden === 'afgekapt';
+        if (!afk && (f.bron !== 'enablebanking' || (f.reden !== 'sleutel' && f.reden !== 'toestemming'))) return;
+        const sl = afk ? f.bron + '-afgekapt' : f.reden;
+        if (s.ronde.box[sl] === vandaag) return;
+        s.ronde.box[sl] = vandaag;
         box.push({ bron: f.bron, reden: f.reden, tekst: f.tekst });
       });
       if (box.length) naarServer._box_ronde = box;
