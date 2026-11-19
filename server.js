@@ -2525,7 +2525,7 @@ function dbVraag() {
   basis.terug = dbTerug.laatste_iso ? { laatste: dbTerug.laatste_iso, uitkomst: dbTerug.uitkomst, id: dbTerug.id, fout: dbTerug.fout, bezig: dbTerug.bezig } : null;
   // wv3416 (B35): zonder socket ook de reservestand verversen (anders toont /health de laatste goede meting), en de wacht laten tellen
   if (socket) dbReserveVraag();
-  else { dbReserve = { gemeten: basis.gemeten, fout: 'geen databanksocket' }; dbReserveWacht(); }
+  else { dbReserve = { gemeten: basis.gemeten, fout: 'geen databanksocket' }; basis.reserve = dbReserve; dbReserveWacht(); }
   basis.reserve_wacht = dbReserveWachtStand();
   let klaar = false;
   const einde = function (luik) { if (klaar) return; klaar = true; dbStand = Object.assign(basis, { luik: luik }); };
@@ -2588,7 +2588,7 @@ function dbReserveVraag() {
 const DB_RESERVE_WACHT_PAD = serverPad('db_reserve_wacht', process.env.DB_RESERVE_WACHT, '/opt/data/scripts-staat/db-reserve-wacht.json', serverProefDeel('db-reserve-wacht.json'));
 const DB_RESERVE_WW = process.env.DB_RESERVE_WW || '/opt/data/.pg/reserve.wachtwoord';
 const DB_RESERVE_UIT = process.env.DB_TUNNEL_UIT || '/opt/data/pg-reserve-uit';
-let dbReserveWachtStaat = null, dbReserveWachtMod = null;
+let dbReserveWachtStaat = null, dbReserveWachtMod = null, dbReserveWachtSchijf = null;   // Schijf: laatst geslaagd weggeschreven tekst
 function dbReserveWachtBedoeld() {
   if (SERVER_ECHT !== true) return false;
   try { if (!rolPrimair()) return false; } catch (e) { return false; }
@@ -2598,15 +2598,19 @@ function dbReserveWacht() {
   try {
     if (!dbReserveWachtBedoeld()) return;
     if (!dbReserveWachtMod) dbReserveWachtMod = require(path.join(__dirname, 'db-reserve-wacht.js'));
-    if (!dbReserveWachtStaat) { try { dbReserveWachtStaat = JSON.parse(fs.readFileSync(DB_RESERVE_WACHT_PAD, 'utf8')); } catch (e) { dbReserveWachtStaat = {}; } }
+    if (!dbReserveWachtStaat) {
+      try { const t = fs.readFileSync(DB_RESERVE_WACHT_PAD, 'utf8'); dbReserveWachtStaat = JSON.parse(t); dbReserveWachtSchijf = JSON.stringify(dbReserveWachtStaat); }
+      catch (e) { dbReserveWachtStaat = {}; }
+    }
     const nuMs = Date.now(), uit = dbReserveWachtMod.stap(dbReserveWachtStaat, dbReserve, nuMs);
-    const veranderd = JSON.stringify(uit.staat) !== JSON.stringify(dbReserveWachtStaat);
     if (uit.melden.length) {
       if (ovisBoxRij(dbReserveWachtMod.boxRij(uit.melden, nuMs)) !== true) return;   // niet geschreven: staat niet bijwerken, volgende minuut opnieuw
       schrijfLog(nu() + ' db-reserve-wacht box-rij ' + uit.melden.map(function (m) { return m.soort; }).join(','));
     }
     dbReserveWachtStaat = uit.staat;
-    if (veranderd) { const t = DB_RESERVE_WACHT_PAD + '.tmp'; fs.writeFileSync(t, JSON.stringify(dbReserveWachtStaat), { mode: 0o600 }); fs.renameSync(t, DB_RESERVE_WACHT_PAD); }
+    // Codex MOET 2: schrijven tot het gelukt is (ook als de staat sindsdien niet meer verandert), anders meldt een herstart opnieuw
+    const tekst = JSON.stringify(dbReserveWachtStaat);
+    if (tekst !== dbReserveWachtSchijf) { const t = DB_RESERVE_WACHT_PAD + '.tmp'; fs.writeFileSync(t, tekst, { mode: 0o600 }); fs.renameSync(t, DB_RESERVE_WACHT_PAD); dbReserveWachtSchijf = tekst; }
   } catch (e) { logError('db-reserve-wacht', e); }
 }
 function dbReserveWachtStand() {

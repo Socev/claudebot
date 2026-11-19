@@ -42,7 +42,11 @@ function stap(staat, meting, nu) {
   const sinds = Object.assign({}, oud.sinds || {}), gemeld = {};
   Object.keys(oud.gemeld || {}).forEach(function (s) { gemeld[s] = Object.assign({}, oud.gemeld[s]); });
   const a = afwijkingen(meting), melden = [];
+  // Codex MOET 1: een mislukte meting zegt niets over verbinding, slot, archief of pg_wal: die soorten blijven staan zoals ze waren
+  // (geen herstel, geen nieuwe start, geen rij); alleen 'meting' telt dan. Herstel bestaat alleen na een geslaagde meting.
+  const metingFout = !!a.meting;
   Object.keys(DREMPEL_MS).forEach(function (s) {
+    if (metingFout && s !== 'meting') return;
     if (!a[s]) {
       delete sinds[s];
       if (gemeld[s]) {

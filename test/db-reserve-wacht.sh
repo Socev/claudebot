@@ -68,6 +68,12 @@ if (W) {
   toets('A meetfout 25 min: stil', r.n === 0);
   r = loop({}, function () { return { gemeten: 'x', fout: 'sb-sql faalde' }; }, 0, 40);
   toets('A meetfout 40 min: één rij (meting)', r.n === 1 && r.rijen[0][0].soort === 'meting');
+  const mf = { gemeten: 'x', fout: 'sb-sql faalde' };
+  r = loop({}, function (m) { return m % 20 === 19 ? mf : dicht; }, 0, 40);
+  toets('A tunnel dicht met elke 20 min een meetfout: toch één rij na 30 min (Codex MOET 1)', r.n === 1 && r.rijen[0][0].soort === 'niet_verbonden');
+  r = loop({}, function (m) { return m < 35 ? dicht : gezond; }, 0, 35);
+  r = loop(r.staat, function (m) { return m === 40 ? mf : dicht; }, 35, 100);
+  toets('A gemeld + meetfout tussendoor: geen schijnherstel (sinds blijft), geen tweede rij', r.n === 0 && !r.staat.gemeld.niet_verbonden.hersteld && r.staat.sinds.niet_verbonden === START);
   const tekst = W.boxRij([{ soort: 'niet_verbonden', tekst: 'de R230 leest niet mee', sinds: START }], START + 30 * MIN);
   toets('A box-rij: kop in boxformaat, status open', /^\n## \[direct\] 2026-11-19 11:30 — Databankreserve R230: niet verbonden/.test(tekst) && /\n- status: open\n/.test(tekst));
 }
@@ -114,6 +120,17 @@ else {
   c.boxFaalt = false;
   for (let m = 0; m < 10; m++) c.minuut(dicht);
   toets('B box weer schrijfbaar: precies één rij', c.box.length === 1);
+  // Codex MOET 2: wegschrijven faalt één keer net na de rij → volgende minuut alsnog op schijf, herstart meldt niet opnieuw
+  fs.unlinkSync(env.DB_RESERVE_WACHT);
+  c = lijm({ t: START, env: env });
+  const echtRename = fs.renameSync; let faal = 0;
+  for (let m = 0; m < 30; m++) c.minuut(dicht);
+  fs.renameSync = function () { faal++; fs.renameSync = echtRename; throw new Error('nep schrijffout'); };
+  c.minuut(dicht); c.minuut(dicht);
+  toets('B schrijffout na de rij: één rij, daarna toch op schijf', c.box.length === 1 && faal === 1 && !!JSON.parse(fs.readFileSync(env.DB_RESERVE_WACHT, 'utf8')).gemeld.niet_verbonden);
+  c = lijm({ t: START + 32 * MIN, env: env });
+  for (let m = 0; m < 10; m++) c.minuut(dicht);
+  toets('B herstart na schrijffout: geen tweede rij', c.box.length === 0);
   fs.unlinkSync(env.DB_RESERVE_WACHT);
   fs.writeFileSync(env.DB_TUNNEL_UIT, '');
   c = lijm({ t: START, env: env });
@@ -137,15 +154,15 @@ else {
   const sb = {
     fs: { statSync: function () { throw Object.assign(new Error('weg'), { code: 'ENOENT' }); }, existsSync: function () { return true; } },
     process: { env: {} }, Date: Date, Object: Object, JSON: JSON, String: String,
-    http: { get: function () { return { on: function () {} }; } },
+    http: { get: function () { return { on: function (n, f) { if (n === 'error') f({ code: 'ECONNREFUSED' }); } }; } },
     dbTunnelStand: function () { return { aan: false }; }, dbTerug: {}, dbReserve: { gemeten: '2026-11-18T00:00:00.000Z', verbonden: true },
     dbReserveVraag: function () { gewacht.push('vraag'); }, dbReserveWacht: function () { gewacht.push('wacht'); }, dbReserveWachtStand: function () { return null; },
     dbStand: null,
   };
   vm.createContext(sb);
-  vm.runInContext(src.slice(a, b) + '\nthis.vraag = dbVraag; this.lees = function () { return dbReserve; };', sb);
+  vm.runInContext(src.slice(a, b) + '\nthis.vraag = dbVraag; this.lees = function () { return dbStand && dbStand.reserve; };', sb);
   const voor = Date.now(); sb.vraag();
-  const r = sb.lees();
+  const r = sb.lees();   // Codex ZOU 1: wat /health echt toont (dbStand.reserve), niet alleen de variabele
   toets('C geen socket: db.reserve ververst (verse gemeten, fout geen databanksocket)', r && r.fout === 'geen databanksocket' && Date.parse(r.gemeten) >= voor - 1000);
   toets('C geen socket: wacht telt mee, geen SQL', gewacht.indexOf('wacht') >= 0 && gewacht.indexOf('vraag') < 0);
 }
