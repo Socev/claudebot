@@ -316,6 +316,32 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     toets('server.js: avg-spiegel in de keten om 04:00, kindstap, meldt via de keten (meldtZelf false) (wv2526)', /naam: 'avg-spiegel', start_na: \[4, 0\], limiet_min: 5, pogingen: 2, meldtZelf: false, doe: function \(ctx\) \{ return avgSpiegelRonde\(ctx\); \}/.test(sv) && !/naam: 'avg-spiegel'[^\n]*inProces/.test(sv));
   }
 
+  // 12c. wv3304: takeoutWachterRonde uit server.js als echt kindproces (nepscript): exit 0 met samenvatting, exit 1 met fout, script weg
+  {
+    const vm = require('vm');
+    const b = sv.indexOf('const TAKEOUT_WACHTER_SCRIPT'), e = sv.indexOf('\n// ── Nachtketen', b);
+    toets('takeout-wachter: knipsel gevonden in server.js', b > 0 && e > b);
+    const nep = path.join(d, 'takeout-nep.py');
+    const knip = sv.slice(b, e).replace("'/opt/data/mk-scripts/takeout-nas/wachter.py'", JSON.stringify(nep)).replace("'/opt/data/scripts-staat/takeout-wachter/laatste.jsonl'", JSON.stringify(path.join(d, 'tw-staat', 'laatste.jsonl'))).replace('TAKEOUT_WACHTER_MAX_S = 300', 'TAKEOUT_WACHTER_MAX_S = 1') + '\n;({ takeoutWachterRonde });';
+    const mk = () => vm.runInContext(knip, vm.createContext({ fs: fs, path: path, spawn: require('child_process').spawn, process: process, setTimeout: setTimeout, clearTimeout: clearTimeout, JSON: JSON, String: String, Array: Array, Date: Date, Promise: Promise, Math: Math })).takeoutWachterRonde;
+    let pids = [];
+    fs.writeFileSync(nep, 'import json,sys\nprint(json.dumps({"ok":True,"opdracht_nieuw":["20261205T101500Z"],"box":2,"kaarten":[],"vrij_bytes":2402286077207,"fouten":[]}))\nsys.exit(0)\n');
+    let r = await mk()({ opSpawn: (pid) => pids.push(pid) });
+    toets('takeout-wachter: exit 0 → ok met samenvatting en opSpawn', r.ok === true && r.detail.nieuw === 1 && r.detail.box === 2 && r.detail.kaarten === 0 && r.detail.vrij_gb === 2402 && pids.length === 1, r);
+    const um = fs.statSync(path.join(d, 'tw-staat', 'laatste.jsonl')).mode & 0o777, mm = fs.statSync(path.join(d, 'tw-staat')).mode & 0o777;
+    toets('takeout-wachter: uitvoer in een bestand 0600 in een map 0700', um === 0o600 && mm === 0o700, [um.toString(8), mm.toString(8)]);
+    fs.writeFileSync(nep, 'import json,sys\nprint(json.dumps({"ok":False,"fout":"MeetFout: rclone lsjson exit 1"}))\nsys.exit(1)\n');
+    r = await mk()({});
+    toets('takeout-wachter: exit 1 → ok false met de fout in de reden', r.ok === false && /^exit 1 \(MeetFout: rclone/.test(r.reden), r);
+    fs.writeFileSync(nep, 'import time\ntime.sleep(30)\n');
+    const t0 = Date.now(); r = await mk()({});
+    toets('takeout-wachter: tijdslimiet → ok false (tijdslimiet)', r.ok === false && /^tijdslimiet/.test(r.reden) && Date.now() - t0 < 10000, r);
+    fs.unlinkSync(nep);
+    r = await mk()({});
+    toets('takeout-wachter: script weg → al_gedaan', r.ok === true && r.al_gedaan === true, r);
+    toets('server.js: takeout-wachter in de keten om 04:40, kindstap, meldt via de keten (meldtZelf false) (wv3304)', /naam: 'takeout-wachter', start_na: \[4, 40\], limiet_min: 6, pogingen: 2, meldtZelf: false, doe: function \(ctx\) \{ return takeoutWachterRonde\(ctx\); \}/.test(sv) && !/naam: 'takeout-wachter'[^\n]*inProces/.test(sv));
+  }
+
   // 13. het echte keten-blok uit server.js in een vm met nep-objecten: één hele nacht, elke stap roept het juiste object met de juiste vorm
   {
     const vm = require('vm');
@@ -345,6 +371,7 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
       sb2SynapsenAan: () => plAan, sb2SynapsenRonde: async () => { roep.push('synapsen'); return { ok: true, detail: { synapsen: 2 } }; },   // wv2022
       sb2BerichtenAan: () => plAan, sb2BerichtenRonde: async () => { roep.push('berichten'); return { ok: true, detail: {} }; },   // wv2383
       avgSpiegelRonde: async (c) => { roep.push('avg:' + c.datum + ':' + typeof c.opSpawn); return { ok: true, detail: { praktijken: {} } }; },   // wv2526
+      takeoutWachterRonde: async (c) => { roep.push('takeout:' + c.datum + ':' + typeof c.opSpawn); return { ok: true, detail: {} }; },   // wv3304
       weerOchtend: { doe: async (c) => { roep.push('weer:' + c.ams.datum + ':' + c.ams.uur + ':' + c.ams.min); return { ok: true, detail: { treffers: [] } }; } },   // wv2389
       promedicoBotsingen: { doe: async (c) => { roep.push('botsingen:' + c.ams.datum + ':' + c.ams.uur + ':' + c.ams.min); return { ok: true, detail: {} }; } },   // wv3145
       contactringen: { doe: async (c) => { roep.push('contactringen:' + c.ams.datum + ':' + c.ams.uur + ':' + c.ams.min); return { ok: true, detail: {} }; } },   // wv2894
@@ -384,15 +411,19 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     toets('vm: box-archief niet vóór 04:20 (wv2902)', roep.length === 0, roep);
     await zetT(4, 20, 2);
     toets('vm: box-archief om 04:20 met de ketendatum (wv2902)', roep.join('|') === 'boxarchief:2026-11-11', roep);
+    roep.length = 0; await zetT(4, 39, 2);
+    toets('vm: takeout-wachter niet vóór 04:40 (wv3304)', roep.length === 0, roep);
+    await zetT(4, 40, 2);
+    toets('vm: takeout-wachter om 04:40 met opSpawn (wv3304)', roep.join('|') === 'takeout:2026-11-11:function', roep);
     roep.length = 0; await zetT(5, 0, 6);
     toets('vm: zoeken wacht op raw_input/Teams/WhatsApp (via de API) en loopt dan feitenlijst → zoekindex → zoekleer', ['vNsdkyTQIaGhU0Fj', 'vmFrhWxNc7KrpdIL', 'agntIie8d9mqOlm6'].every(id => roep.indexOf('n8n:/workflows/' + id) >= 0) &&
       roep.filter(x => !/^n8n:/.test(x)).join('|') === 'feitenlijst:2026-11-11:function|zoekindex:2026-11-11:function|zoekleer:2026-11-11:function|datumcontrole:2026-11-11:function', roep);
     roep.length = 0; await zetT(6, 35, 3);
     toets('vm: kalender 06:35; weer-ochtend nog niet vóór 06:40 (wv2389), keten nog open', roep.join('|') === 'kalender:2026-11-11:function', roep);
     roep.length = 0; await zetT(6, 40, 4);   // wv2894: één tik meer voor contactringen
-    toets('vm: weer-ochtend om 06:40 met de NL-klok, dan contactringen (wv2894), daarna afgesloten met één hartslag sb2_nachtketen (25 klaar, 0 bevindingen), geen box', roep.join('|') === 'weer:2026-11-11:6:40|contactringen:2026-11-11:6:40|rpc:mk_hartslag_stempel:sb2_nachtketen:25:0', roep);
+    toets('vm: weer-ochtend om 06:40 met de NL-klok, dan contactringen (wv2894), daarna afgesloten met één hartslag sb2_nachtketen (26 klaar, 0 bevindingen), geen box', roep.join('|') === 'weer:2026-11-11:6:40|contactringen:2026-11-11:6:40|rpc:mk_hartslag_stempel:sb2_nachtketen:26:0', roep);
     const inf = K2.nachtketenInfo();
-    toets('vm: /health-info zonder inhoud: stand per stap, lopend 0, afgesloten', inf.lopend === 0 && !!inf.afgesloten && Object.keys(inf.stappen).length === 25 && inf.stappen['sb2-steekwoorden'] === 'klaar:al_gedaan' && inf.stappen['intake-publicatie'] === 'klaar:al_gedaan' && inf.stappen['intake-voorstel'] === 'klaar:al_gedaan' && inf.stappen['sb2-berichten'] === 'klaar:al_gedaan' && inf.stappen['sb2-synapsen'] === 'klaar:al_gedaan' && inf.stappen['sb2-proefloper'] === 'klaar:al_gedaan' && Object.entries(inf.stappen).every(([k, x]) => x === 'klaar' || k === 'sb2-steekwoorden' || k === 'intake-publicatie' || k === 'intake-voorstel' || k === 'sb2-berichten' || k === 'sb2-synapsen' || k === 'sb2-proefloper'), inf);
+    toets('vm: /health-info zonder inhoud: stand per stap, lopend 0, afgesloten', inf.lopend === 0 && !!inf.afgesloten && Object.keys(inf.stappen).length === 26 && inf.stappen['sb2-steekwoorden'] === 'klaar:al_gedaan' && inf.stappen['intake-publicatie'] === 'klaar:al_gedaan' && inf.stappen['intake-voorstel'] === 'klaar:al_gedaan' && inf.stappen['sb2-berichten'] === 'klaar:al_gedaan' && inf.stappen['sb2-synapsen'] === 'klaar:al_gedaan' && inf.stappen['sb2-proefloper'] === 'klaar:al_gedaan' && Object.entries(inf.stappen).every(([k, x]) => x === 'klaar' || k === 'sb2-steekwoorden' || k === 'intake-publicatie' || k === 'intake-voorstel' || k === 'sb2-berichten' || k === 'sb2-synapsen' || k === 'sb2-proefloper'), inf);
     // wv1430: tweede nacht met de schakelaar aan — sb2-steekwoorden loopt na zoekleer, vóór de kalender van 06:35
     swAan = true; plAan = true; roep.length = 0;
     const zetT2 = async (u, m, n) => { tijd = { datum: '2026-11-12', uur: u, min: m }; for (let i = 0; i < (n || 4); i++) await tikk(); };
@@ -400,12 +431,12 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     toets('vm: schakelaar aan — proefloper ná de publicatie (wv1963)', roep.indexOf('publicatie') >= 0 && roep.indexOf('proefloper:2026-11-12:function') > roep.indexOf('publicatie'), roep);
     toets('vm: schakelaar aan — synapsen ná de voorstelservice en vóór de proefloper (wv2022)', roep.indexOf('voorstel') >= 0 && roep.indexOf('synapsen') > roep.indexOf('voorstel') && roep.indexOf('proefloper:2026-11-12:function') > roep.indexOf('synapsen'), roep);
     toets('vm: schakelaar aan — berichten ná de voorstelservice en vóór de synapsen (wv2383)', roep.indexOf('berichten') > roep.indexOf('voorstel') && roep.indexOf('synapsen') > roep.indexOf('berichten'), roep);
-    await zetT2(3, 30, 2); await zetT2(3, 45, 4); await zetT2(3, 50, 3); await zetT2(4, 0, 2); await zetT2(4, 20, 2);   // wv2526: avg-spiegel; wv2902: box-archief
+    await zetT2(3, 30, 2); await zetT2(3, 45, 4); await zetT2(3, 50, 3); await zetT2(4, 0, 2); await zetT2(4, 20, 2); await zetT2(4, 40, 2);   // wv2526: avg-spiegel; wv2902: box-archief; wv3304: takeout-wachter
     roep.length = 0; await zetT2(5, 0, 8);
     toets('vm: schakelaar aan — feitenlijst → zoekindex → zoekleer → steekwoorden (via socev-run-object)', roep.filter(x => !/^n8n:/.test(x)).join('|') === 'feitenlijst:2026-11-12:function|zoekindex:2026-11-12:function|zoekleer:2026-11-12:function|datumcontrole:2026-11-12:function|steekwoorden:2026-11-12:function', roep);
     toets('vm: steekwoorden wacht op de n8n-run van de nachtconsolidatie', roep.indexOf('n8n:/workflows/lKcF3Oxt8WVeELPJ') >= 0 && roep.indexOf('n8n:/workflows/lKcF3Oxt8WVeELPJ') < roep.indexOf('steekwoorden:2026-11-12:function'), roep);
     roep.length = 0; await zetT2(6, 35, 3); await zetT2(6, 40, 4);
-    toets('vm: tweede nacht: kalender, weer-ochtend, contactringen, daarna hartslag (25 klaar)', roep.join('|') === 'kalender:2026-11-12:function|weer:2026-11-12:6:40|contactringen:2026-11-12:6:40|rpc:mk_hartslag_stempel:sb2_nachtketen:25:0', roep);
+    toets('vm: tweede nacht: kalender, weer-ochtend, contactringen, daarna hartslag (26 klaar)', roep.join('|') === 'kalender:2026-11-12:function|weer:2026-11-12:6:40|contactringen:2026-11-12:6:40|rpc:mk_hartslag_stempel:sb2_nachtketen:26:0', roep);
     toets('vm: nachtAmsVan zet UTC om naar Nederlandse tijd (winter +1)', JSON.stringify(K2.nachtAmsVan('2026-11-11T04:00:31Z')) === '{"datum":"2026-11-11","uur":5,"min":0}');
     ctx.jobs.x = { status: 'running', chat_id: '40687' };
     toets('vm: lopende /run-beurt in 40687 = nachtrij bezig', K2.nachtrijPodBezig() === true);
