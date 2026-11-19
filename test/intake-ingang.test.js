@@ -549,7 +549,7 @@ test('marker: patientpoort-2.0 op de 23 toetsgevallen', () => {
     ['BSN na 250.000 tekens', { teksten: ['x '.repeat(125000) + '\nBSN: 123456782'] }, geen, true],
   ];
   assert.strictEqual(G.length, 23);
-  assert.strictEqual(P.VERSIE, 'patientpoort-2.1');
+  assert.strictEqual(P.VERSIE, 'patientpoort-2.0');
   const fout = G.filter(([n, stuk, e, v]) => P.beoordeel(stuk, { eigen: e, nu: Date.parse('2026-10-25T12:00:00Z') }).tegenhouden !== v).map((x) => x[0]);
   assert.deepStrictEqual(fout, []);
 });
@@ -566,7 +566,7 @@ test('marker in de ingang: telstand schrijft zoals nu, legt alleen soorten vast,
     assert.strictEqual(await o.ing.markeer(r.j.stuk_id), null);    // draaide al ná het antwoord (of nu): niet opnieuw
     await new Promise((x) => setTimeout(x, 50));
     const s = o.ing._db.prepare('SELECT * FROM stuk WHERE stuk_id = ?').get(r.j.stuk_id);
-    assert.strictEqual(s.marker_patient, 'gemarkeerd'); assert.strictEqual(s.marker_versie, 'patientpoort-2.1');
+    assert.strictEqual(s.marker_patient, 'gemarkeerd'); assert.strictEqual(s.marker_versie, 'patientpoort-2.0');
     const soorten = JSON.parse(s.marker_soorten);
     assert.ok(soorten.includes('bsn') || soorten.includes('brieftaal'), soorten.join(','));
     assert.ok(!/Proefpersoon|111222333|ferrofumaraat/.test(s.marker_soorten), 'geen tekst of waarden in het logboek');

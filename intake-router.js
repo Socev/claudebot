@@ -98,11 +98,7 @@ function markerWeging(x) {
   // zonder lezing van de personen (geen eigen-lijst te laden): elk BSN-kenmerk telt als vreemd (veilige kant)
   const vreemdBsn = p ? p.vreemd_bsn > 0 : (s.has('bsn') || s.has('bsn_los'));
   if (vreemdBsn && (s.has('bsn') || patientKenmerk)) waarom.push('bsn');
-  const vreemdDatum = p ? (p.vreemd_geb > 0 || p.vreemd_persoon_datum > 0) : (s.has('geboortedatum') || s.has('persoon_datum'));
-  // wv3395 (Fable 9-11 #1): een bij naam genoemde persoon direct na "uw patiënt(e)" ("uw patiënte mevrouw S. Bakker") of naast
-  // arts-aan-arts-brieftaal telt als vreemde persoon; naast alleen "geachte collega", een naamveld of een geboortedatum blijft het zacht
-  // (label): HAGRO-post, personeelscontracten en ziekenhuismededelingen noemen ook mensen bij naam (Fable-review wv3395 ZOU 4)
-  const vreemdPersoon = s.has('betreft_persoon') || vreemdDatum || s.has('uw_patient_naam') || (s.has('persoon_naam') && s.has('brieftaal'));
+  const vreemdPersoon = s.has('betreft_persoon') || (p ? (p.vreemd_geb > 0 || p.vreemd_persoon_datum > 0) : (s.has('geboortedatum') || s.has('persoon_datum')));
   if (teksten.some(function (t) { return HIS_NUMMER.test(t); }) || (vreemdPersoon && teksten.some(function (t) { return PATIENTNUMMER.test(t); }))) waarom.push('patientnummer');
   const dom = String(x.afzender_domein || '').toLowerCase();
   const bron = s.has('verwijsbericht') || s.has('brieftaal') || (!!dom && PATIENT_BRON_DOMEIN.some(function (d) { return dom === d || dom.endsWith('.' + d); }));
@@ -1230,19 +1226,7 @@ function maak(o) {
           if (opt.geenOcr) return { ocr_nodig: true };
           const ot = await ocrIn(s.stuk_id, p, km, opt.werk); if (ot) { t = ot; regels = tekstRegels(ot); ocr = true; deels = paginas == null || paginas > OCR_PAGINAS; }
         }
-        // wv3395 (A14, Fable 9-11 #6): de poort leest alle tekstpagina's van een lang stuk (los van de 20 pagina's van de router);
-        // lukt dat volledig, dan telt het stuk voor de marker als volledig gelezen (poortVolledig) en weegt de marker de hele tekst
-        if (zonderWit(t) >= TEKST_MIN) {
-          const r = { x: x(t, regels), ocr, deels };
-          if (deels && !ocr && opt.poort && o.pdfPoort) {
-            let vol = null; try { vol = await o.pdfPoort(p); } catch (e) { vol = null; }
-            // Fable-review KAN 7: volledig = elke pagina heeft tekst (een scanpagina tussen tekstpagina's is niet gelezen, N3) en het
-            // aantal pagina's klopt; anders blijft het deel 'niet volledig' (zoals vóór wv3395)
-            const pag = typeof vol === 'string' ? vol.replace(/\f\s*$/, '').split('\f') : [];
-            if (pag.length && (paginas == null || pag.length >= paginas) && pag.every(function (x) { return zonderWit(x) >= 20; })) { r.x.poort = vol; r.poortVolledig = true; }
-          }
-          return r;
-        }
+        if (zonderWit(t) >= TEKST_MIN) return { x: x(t, regels), ocr, deels };
         return { onleesbaar: true, ocr };
       }
       if (/^image\/(jpeg|png|gif|webp)$/.test(km) && o.ocr) {
@@ -1259,7 +1243,6 @@ function maak(o) {
       return { onleesbaar: true };
     } catch (e) { return e && e.code === 'ENOENT' ? { ontbreekt: true } : { onleesbaar: true }; }
   }
-  function poortTekst(d) { return typeof d.poort === 'string' ? d.poort : d.tekst; }   // wv3395: de marker leest de volledige poorttekst
   function voegDeelToe(uit, d, r) {
     if (!r || r.overslaan) return;
     if (r.ocr) uit.ocr++;
@@ -1269,12 +1252,11 @@ function maak(o) {
     if (r.mail) uit.mail = r.mail;
     if (r.lijf) uit.lijf = true;
     if (r.deels) uit.deels.push(d.deel);
-    if (r.deels && !r.poortVolledig && uit.poortDeels) uit.poortDeels.push(d.deel);   // wv3395: niet volledig door de poort gelezen
   }
-  async function lokaleTekst(s, delen, opt) {
-    const uit = { delen: [], onleesbaar: [], ontbreekt: [], deels: [], poortDeels: [], ocr: 0, mail: null };
+  async function lokaleTekst(s, delen) {
+    const uit = { delen: [], onleesbaar: [], ontbreekt: [], deels: [], ocr: 0, mail: null };
     const alleenRep = alleenRepVan(s, delen);
-    for (const d of delen) voegDeelToe(uit, d, await leesDeel(s, d, alleenRep, { poort: !!(opt && opt.poort) }));
+    for (const d of delen) voegDeelToe(uit, d, await leesDeel(s, d, alleenRep));
     return uit;
   }
   const werkInGebruik = new Set();   // OCR-werkmappen die nu lopen (de ronde ruimt ze niet op; wv2004: appStuk leest naast de ronde)
@@ -1360,8 +1342,8 @@ function maak(o) {
       const eerder = db.prepare(`SELECT DISTINCT o2.stuk_id FROM onderdeel o1 JOIN onderdeel o2 ON o2.sha256 = o1.sha256 AND o2.stuk_id <> o1.stuk_id
         JOIN stuk s2 ON s2.stuk_id = o2.stuk_id WHERE o1.stuk_id = ? AND o1.rol <> 'representatie' AND s2.aangemaakt < ? LIMIT 5`).all(s.stuk_id, s.aangemaakt).map(function (r) { return r.stuk_id; });
       B('ontvangst', 'ontvangen', null, { profiel: s.profiel, bron: s.bron, onderdelen: delen.filter(function (d) { return d.rol !== 'representatie'; }).length, zelfde_document_eerder: eerder });
-      const lt = await lokaleTekst(s, delen, { poort: true });   // wv3395: alleen hier leest de poort alle tekstpagina's
-      B('lokale_tekst', lt.ontbreekt.length ? 'origineel_ontbreekt' : (lt.onleesbaar.length ? 'deels' : 'gelezen'), null, { delen: lt.delen.length, onleesbaar: lt.onleesbaar.length, ocr: lt.ocr, deels: lt.deels.length, poort_deels: lt.poortDeels.length, ontbreekt: lt.ontbreekt.length, lijf_van_representatie: !!lt.lijf });
+      const lt = await lokaleTekst(s, delen);
+      B('lokale_tekst', lt.ontbreekt.length ? 'origineel_ontbreekt' : (lt.onleesbaar.length ? 'deels' : 'gelezen'), null, { delen: lt.delen.length, onleesbaar: lt.onleesbaar.length, ocr: lt.ocr, deels: lt.deels.length, ontbreekt: lt.ontbreekt.length, lijf_van_representatie: !!lt.lijf });
       if (lt.ontbreekt.length) { status = 'origineel_ontbreekt'; sam = { profiel: s.profiel, bron: s.bron, ontbreekt: lt.ontbreekt.length }; }
       if (!lt.ontbreekt.length) {
         // stap 3: marker (ontvangstlaag + eigen lokale tekst, ook OCR)
@@ -1376,8 +1358,8 @@ function maak(o) {
           // een deel uit OCR sluit de uitzondering uit
           const arM = lt.mail && lt.mail.ar.length ? lt.mail.ar : (meta.authentication_results ? [meta.authentication_results] : []);
           const dkimM = s.profiel === 'mail@1' ? dkimUitslag(arM, vanAdres, { authserv: 'mx.google.com' }) : null;
-          eigen = o.marker.beoordeel({ teksten: lt.delen.map(poortTekst).concat(vrij), bijlagenamen: namen, onderwerp,
-            afzender: dkimM && dkimM.uitgelijnd ? vanAdres : '', leesbaar: lt.onleesbaar.length || lt.poortDeels.length ? false : undefined,
+          eigen = o.marker.beoordeel({ teksten: lt.delen.map(function (d) { return d.tekst; }).concat(vrij), bijlagenamen: namen, onderwerp,
+            afzender: dkimM && dkimM.uitgelijnd ? vanAdres : '', leesbaar: lt.onleesbaar.length || lt.deels.length ? false : undefined,
             scan: s.profiel === 'scansnap@1', ocr: !!lt.ocr }, {});
         }
         const routerMarker = !eigen ? 'niet_gedraaid' : (!eigen.tegenhouden ? 'geen' : (eigen.regel === 6 ? 'niet_te_lezen' : 'gemarkeerd'));
@@ -1397,18 +1379,11 @@ function maak(o) {
         if (marker !== 'geen' && !naKeuze) {
           let pers = null;
           // review MOET 1: dezelfde teksten als de marker (delen + vrije velden + onderwerp), anders mist de weging een BSN in het onderwerp
-          const wTeksten = lt.delen.map(poortTekst).concat(db.prepare('SELECT omschrijving, waarde FROM vrij_veld WHERE stuk_id = ?').all(s.stuk_id).map(function (v) { return v.omschrijving + ': ' + (v.waarde || ''); })).concat(onderwerp ? [onderwerp] : []);
+          const wTeksten = lt.delen.map(function (d) { return d.tekst; }).concat(db.prepare('SELECT omschrijving, waarde FROM vrij_veld WHERE stuk_id = ?').all(s.stuk_id).map(function (v) { return v.omschrijving + ': ' + (v.waarde || ''); })).concat(onderwerp ? [onderwerp] : []);
           try { if (eigen && o.marker._intern && o.marker.laadEigen) pers = o.marker._intern.personen(o.marker._intern.stukken(wTeksten), o.marker.laadEigen()); } catch (e) { pers = null; }
           const dkimW = s.profiel === 'mail@1' ? dkimUitslag(lt.mail && lt.mail.ar.length ? lt.mail.ar : (meta.authentication_results ? [meta.authentication_results] : []), vanAdres, { authserv: 'mx.google.com' }) : null;
           weging = markerWeging({ soorten: eigen ? eigen.soorten : [], personen: pers, teksten: wTeksten, afzender_domein: dkimW && dkimW.uitgelijnd ? domeinVan(vanAdres) : '' });
           if (ion) weging = { hard: true, waarom: weging.waarom.concat(['ion_melding']) };
-          // wv3395 (A14, Fable 19-11 N1): zag de ontvangstlaag een BSN of patiënt + geboortedatum en las de poort het stuk niet volledig
-          // (deel niet gelezen, onleesbaar of geen eigen marker), dan hard: wat de router niet las kan hij niet ontkrachten. Volledig
-          // gelezen stukken blijven op de router-eigen lezing (de vals-positieven van 3-11 kwamen uit ruwe mailbytes)
-          const ingangHard = (safeJson(s.marker_soorten) || []).filter(function (x) { return x === 'bsn' || x === 'patient_geboortedatum'; });
-          if (ingangHard.length && ingang && ingang !== 'geen' && (!eigen || lt.poortDeels.length || lt.onleesbaar.length) && weging.waarom.indexOf('ingang_onvolledig') < 0) {
-            weging = { hard: true, waarom: weging.waarom.concat(['ingang_onvolledig']) };
-          }
           const st = markerStand();
           B('marker_weging', weging.hard ? 'hard' : 'zacht', null, { waarom: weging.waarom, stand: st, live: !!live });
           if (live && st === 'door') {
@@ -2951,7 +2926,7 @@ function maak(o) {
       if (rest > 0) await Promise.race([Promise.all(open.map(function (x) { return x.wacht || Promise.resolve(); })), new Promise(function (r) { const t = setTimeout(r, rest); if (t.unref) t.unref(); })]);
       await new Promise(function (r) { setImmediate(r); });   // de .then hierboven
     }
-    const lt = { delen: [], onleesbaar: [], ontbreekt: [], deels: [], poortDeels: [], ocr: 0, mail: null };
+    const lt = { delen: [], onleesbaar: [], ontbreekt: [], deels: [], ocr: 0, mail: null };
     const wacht = [];
     const volg = [];   // volgorde van de onderdelen, met de wachtende ertussen
     for (const x of per) {

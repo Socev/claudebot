@@ -19753,8 +19753,6 @@ function intakeRouterHaal() {
   try {
     intakeRouterMod = require(p).maak({ dir: INTAKE_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       pdfBbox: function (pad) { return intakeProces('pdftotext', ['-q', '-bbox', '-l', '20', '-enc', 'UTF-8', pad, '-'], { ms: 30000 }); },
-      // wv3395 (A14): alleen voor de patiëntpoort alle tekstpagina's van een lang PDF (> 20 p.); afgekapt (4e6 tekens) of mislukt = null (niet volledig)
-      pdfPoort: async function (pad) { const t = await intakeProces('pdftotext', ['-q', '-enc', 'UTF-8', pad, '-'], { ms: 60000 }); return typeof t === 'string' && t.length < 4e6 ? t : null; },
       paginas: async function (pad) { const t = await intakeProces('pdfinfo', [pad], { ms: 15000 }); const m = t && /^Pages:\s+(\d+)/m.exec(t); return m ? Number(m[1]) : null; },
       ocr: intakeOcr, docx: intakeDocx, pdfSchaduw: pdfSchaduw,   // wv1431: schaduw PDF-lezer (alleen beoordeelde stukken)
       pdfLees: pdfLeesIntake,   // wv1921: PDF-lezer live (markdown in het kennisbestand; lokale tekst als terugval)
