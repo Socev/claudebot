@@ -12,6 +12,9 @@ docker run -d --name $C -e RW="$RW" --entrypoint /bin/bash "$IMAGE" -c 'mkdir -p
 for i in $(seq 1 60); do docker exec $C grep -q "init-SQL toegepast" /opt/data/pg/db-wacht.log 2>/dev/null && break; sleep 1; done
 docker exec $C cat /opt/data/pg/db-wacht.log 2>/dev/null | tail -5
 docker exec $C grep -q "init-SQL toegepast" /opt/data/pg/db-wacht.log; ok $? "db-wacht: initdb, postgres op, init-SQL toegepast"
+# B103 (Codex MOET 1): de stand van db-wacht (root schrijft de eerste, pg de rest) is leesbaar voor claude via groep pgsock
+for i in $(seq 1 20); do docker exec -u claude $C grep -q '"stand":"draait"' /run/pgstand/stand 2>/dev/null && break; sleep 1; done
+docker exec -u claude $C grep -q '"stand":"draait"' /run/pgstand/stand; ok $? "db-wacht-stand draait, leesbaar als claude (groep pgsock)"
 U=$(docker exec -u claude $C sh -c "echo \"select current_user as u, (select rolsuper from pg_roles where rolname = current_user) as su, (select count(*) from pg_extension where extname in ('vector','pg_trgm','pgcrypto','uuid-ossp','pg_stat_statements'))::int as ext, (select count(*) from pg_proc where pronamespace = 'vault'::regnamespace)::int as kluis, (select usename from pg_stat_activity where pid = pg_backend_pid()) as via\" | /app/sb-sql" 2>&1)
 echo "  sb-sql: $U"
 [ "$U" = '[{"u":"postgres","su":false,"ext":5,"kluis":3,"via":"postgres"}]' ]; ok $? "sb-sql als claude: rol postgres, geen superuser, 5 extensies, 3 kluisfuncties"
