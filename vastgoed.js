@@ -28,12 +28,12 @@
 const fs = require('fs');
 const path = require('path');
 
-const SCHEMA_VERSIE = 2;   // 2 = fase 2 (wv3102): leningdeel, woz_eigen; reeksen lening/restschuld/verbouwing/servicekosten/stroom
+const SCHEMA_VERSIE = 3;   // 2 = fase 2 (wv3102): leningdeel, woz_eigen; reeksen lening/restschuld/verbouwing/servicekosten/stroom; 3 = object.weg_op (A15)
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT);
 CREATE TABLE IF NOT EXISTS object (id INTEGER PRIMARY KEY AUTOINCREMENT, sleutel TEXT NOT NULL UNIQUE, soort TEXT NOT NULL CHECK (soort IN ('woning','garagebox')),
   naam TEXT NOT NULL, adres TEXT, dossier TEXT NOT NULL, vbo TEXT NOT NULL DEFAULT '[]', pand TEXT NOT NULL DEFAULT '[]', percelen TEXT NOT NULL DEFAULT '[]',
-  woz_nr TEXT, zoek TEXT, punt TEXT, bag_gemeten TEXT, volgorde INTEGER NOT NULL DEFAULT 0, dossier_op TEXT, extern_op TEXT, bron_stand TEXT NOT NULL DEFAULT '{}');
+  woz_nr TEXT, zoek TEXT, punt TEXT, bag_gemeten TEXT, volgorde INTEGER NOT NULL DEFAULT 0, dossier_op TEXT, extern_op TEXT, bron_stand TEXT NOT NULL DEFAULT '{}', weg_op TEXT);
 CREATE TABLE IF NOT EXISTS feit (id INTEGER PRIMARY KEY AUTOINCREMENT, object INTEGER NOT NULL REFERENCES object(id), herkomst TEXT NOT NULL CHECK (herkomst IN ('dossier','extern')),
   rubriek TEXT NOT NULL, veld TEXT NOT NULL, waarde TEXT NOT NULL, peildatum TEXT, bron TEXT NOT NULL, licentie TEXT, url TEXT, soort TEXT, opgehaald TEXT NOT NULL, volgorde INTEGER NOT NULL DEFAULT 0,
   groep TEXT);
@@ -455,10 +455,23 @@ function leesDossierMap(vault) {
   try { namen = fs.readdirSync(huis).filter((n) => n.endsWith('.md') && !n.startsWith('.')).sort(); } catch (e) { throw new Fout(503, 'het huisdossier in de vault is niet te lezen'); }
   const lees = (n) => { try { return fs.readFileSync(path.join(huis, n), 'utf8'); } catch (e) { return ''; } };
   const objecten = [];
-  for (const n of namen.filter((x) => /^Woning\b/.test(x))) objecten.push(Object.assign(leesWoning(lees(n)), { dossier: `${HUIS}/${n}`, sleutel: 'woning' }));
-  const boxen = namen.filter((x) => /^Garagebox/i.test(x)).map((n) => Object.assign(leesBox(lees(n)), { dossier: `${HUIS}/${n}` }));
-  boxen.sort((a, b) => Number((a.zoek || {}).toevoeging || 999) - Number((b.zoek || {}).toevoeging || 999));
-  boxen.forEach((b, i) => { b.sleutel = 'box-' + (b.zoek ? b.zoek.toevoeging : String(i + 1)); });
+  // A15 (Fable-review 19-11): een pagina is pas een object bij de vaste vorm: een kop "## Kerngegevens" plus een adres of BAG-nummer (woning)
+  // of een adres met huisnummer-toevoeging of een kadastrale aanduiding (box). Een overzichtspagina als "Garageboxen.md" is dus geen derde box.
+  // Meer woningpagina's: de eerste die voldoet telt. Twee pagina's voor dezelfde box: de eerste.
+  const vasteVorm = (md) => sectie(md, 'Kerngegevens').trim() !== '';
+  for (const n of namen.filter((x) => /^Woning\b/.test(x))) {
+    const md = lees(n); if (!vasteVorm(md)) continue;
+    const w = leesWoning(md); if (!w.adres && !w.vbo.length) continue;
+    objecten.push(Object.assign(w, { dossier: `${HUIS}/${n}`, sleutel: 'woning' })); break;
+  }
+  const boxen = [];
+  for (const n of namen.filter((x) => /^Garagebox/i.test(x))) {
+    const md = lees(n); if (!vasteVorm(md)) continue;
+    const b = leesBox(md); if (!b.zoek && !b.complex) continue;
+    b.sleutel = 'box-' + (b.zoek ? b.zoek.toevoeging : b.complex.index);
+    if (!boxen.some((x) => x.sleutel === b.sleutel)) boxen.push(Object.assign(b, { dossier: `${HUIS}/${n}` }));
+  }
+  boxen.sort((a, b) => Number(a.sleutel.slice(4)) - Number(b.sleutel.slice(4)));
   for (const b of boxen) {   // het grondperceel van het complex staat soms alleen op de pagina van de andere box
     if (!b.percelen.length && b.complex) {
       const ander = boxen.find((x) => x !== b && x.percelen.length && x.complex && x.complex.gemeente === b.complex.gemeente && x.complex.sectie === b.complex.sectie && x.complex.nummer === b.complex.nummer);
@@ -585,6 +598,7 @@ function maak(o) {
       if (nieuw) { try { fs.chmodSync(dbPad, 0o600); } catch (e) { /* al gezet */ } }
       db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE;');
       db.exec(SCHEMA);
+      if (!db.prepare("SELECT 1 FROM pragma_table_info('object') WHERE name = 'weg_op'").get()) db.exec('ALTER TABLE object ADD COLUMN weg_op TEXT');   // A15
       db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde").run(String(SCHEMA_VERSIE));
     }
     return db;
@@ -639,7 +653,7 @@ function maak(o) {
         db.prepare(`INSERT INTO object (sleutel, soort, naam, adres, dossier, vbo, pand, percelen, woz_nr, zoek, volgorde, dossier_op) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(sleutel) DO UPDATE SET soort = excluded.soort, naam = excluded.naam, adres = excluded.adres, dossier = excluded.dossier,
           vbo = CASE WHEN excluded.vbo = '[]' AND object.soort = 'garagebox' THEN object.vbo ELSE excluded.vbo END, pand = excluded.pand, percelen = excluded.percelen,
-          woz_nr = excluded.woz_nr, zoek = excluded.zoek, volgorde = excluded.volgorde, dossier_op = excluded.dossier_op`)
+          woz_nr = excluded.woz_nr, zoek = excluded.zoek, volgorde = excluded.volgorde, dossier_op = excluded.dossier_op, weg_op = NULL`)
           .run(x.sleutel, x.soort, x.naam, x.adres, x.dossier, JSON.stringify(x.vbo), JSON.stringify(x.pand), JSON.stringify(x.percelen), x.woz_nr, x.zoek ? JSON.stringify(x.zoek) : null, i, op);
         ids[x.sleutel] = db.prepare('SELECT id FROM object WHERE sleutel = ?').get(x.sleutel).id;
       });
@@ -706,14 +720,20 @@ function maak(o) {
         geld.tibber = { ok: true, op, maanden: stroom.maanden.length };
       } else geld.tibber = Object.assign({}, oudGeld.tibber || {}, { ok: false, mislukt_op: op, reden: stroom.ok ? (stroom.stand === 'leeg' ? 'nog geen verbruik' : 'meer dan één Tibber-woning') : stroom.reden });
       db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('geld', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde").run(JSON.stringify(geld));
-      // objecten die niet meer in het dossier staan: weg, met al hun gegevens
+      // objecten die niet meer in het dossier staan (pagina weg of hernoemd). A15: nooit vanzelf wissen wat niet uit het dossier komt
+      // (openbare feiten, beelden, een door David bevestigde WOZ, leningdelen): zo'n object krijgt weg_op en blijft staan tot iemand het opruimt.
+      // Alleen een object zonder zulke gegevens gaat weg.
       const nog = Object.values(ids);
-      for (const r of db.prepare('SELECT id FROM object').all()) if (!nog.includes(r.id)) {
+      let weg = 0;
+      for (const r of db.prepare('SELECT id, weg_op FROM object').all()) if (!nog.includes(r.id)) {
+        const bewaart = [["feit", " AND herkomst = 'extern'"], ['beeld', ''], ['woz_eigen', ''], ['leningdeel', '']]
+          .some(([t, w]) => db.prepare(`SELECT 1 FROM ${t} WHERE object = ?${w} LIMIT 1`).get(r.id));
+        if (bewaart) { db.prepare('UPDATE object SET weg_op = ?, volgorde = ? WHERE id = ?').run(r.weg_op || op, 1000 + r.id, r.id); weg++; continue; }
         for (const t of ['feit', 'reeks', 'gebeurtenis', 'beeld', 'leningdeel', 'woz_eigen']) db.prepare(`DELETE FROM ${t} WHERE object = ?`).run(r.id);
         db.prepare('UPDATE aanroep SET object = NULL WHERE object = ?').run(r.id);
         db.prepare('DELETE FROM object WHERE id = ?').run(r.id);
       }
-      return { objecten: d.objecten.length, feiten: nf, reeksen: nr, gebeurtenissen: ng, stukken: d.stukken.length, verbouwkosten: nk,
+      return { objecten: d.objecten.length, niet_in_dossier: weg, feiten: nf, reeksen: nr, gebeurtenissen: ng, stukken: d.stukken.length, verbouwkosten: nk,
         hypotheek: !!geld.hypotheek.ok, bank: !!geld.bank.ok, tibber: !!geld.tibber.ok };
     }, true);
   }
@@ -806,9 +826,10 @@ function maak(o) {
         const gebeurtenissen = db.prepare("SELECT datum, titel, soort, pagina FROM gebeurtenis WHERE object = ? ORDER BY datum = '', datum").all(obj.id);
         const beelden = db.prepare('SELECT volgorde, soort, titel, jaar, bron, opgehaald FROM beeld WHERE object = ? ORDER BY volgorde').all(obj.id);
         const stand = dossierstand(obj, feiten, reeksen, stukken, nu());
+        if (obj.weg_op) stand.ontbreekt.unshift(`Niet meer in het dossier sinds ${nlDag(obj.weg_op.slice(0, 10))}: de pagina is weg of hernoemd; wat hier staat blijft bewaard tot iemand het opruimt`);
         return { id: obj.id, sleutel: obj.sleutel, soort: obj.soort, naam: obj.naam, adres: obj.adres, dossier: obj.dossier, vbo: JSON.parse(obj.vbo || '[]'),
           percelen: JSON.parse(obj.percelen || '[]'), punt: obj.punt ? JSON.parse(obj.punt) : null, bag_gemeten: obj.bag_gemeten ? JSON.parse(obj.bag_gemeten) : null,
-          dossier_op: obj.dossier_op, extern_op: obj.extern_op, bron_stand: (() => { try { return JSON.parse(obj.bron_stand || '{}'); } catch (e) { return {}; } })(), feiten, reeksen, stukken, gebeurtenissen, beelden, stand,
+          dossier_op: obj.dossier_op, weg_op: obj.weg_op || null, extern_op: obj.extern_op, bron_stand: (() => { try { return JSON.parse(obj.bron_stand || '{}'); } catch (e) { return {}; } })(), feiten, reeksen, stukken, gebeurtenissen, beelden, stand,
           indicatie: obj.soort === 'woning' ? indicatie(reeksen, index) : null, leningdelen,
           vve: obj.soort === 'garagebox' ? ((geld.bank || {}).boxen || {})[obj.sleutel] || null : null };
       });
@@ -866,8 +887,9 @@ function maak(o) {
         let u = overzicht();
         if (u.leeg) { leesDossier(); u = overzicht(); }   // eerste opening: het dossier inlezen (alleen de vault, niets naar buiten)
         else {   // fase 2: bank, Tibber en hypotheek lopen door; lees opnieuw als de laatste lezing ouder is dan een dag (alleen lokaal lezen)
-          const oud = u.objecten.map((x) => (x.dossier_op ? new Date(x.dossier_op).getTime() : 0)).reduce((a, b) => Math.min(a, b), Infinity);
-          if (!u.objecten.length || nu().getTime() - oud > GELD_DAG_MS) { try { leesDossier(); u = overzicht(); } catch (e) { /* de vorige stand blijft */ } }
+          const actief = u.objecten.filter((x) => !x.weg_op);   // A15: een gemarkeerd object houdt zijn oude dossier_op; niet elke opening opnieuw lezen
+          const oud = actief.map((x) => (x.dossier_op ? new Date(x.dossier_op).getTime() : 0)).reduce((a, b) => Math.min(a, b), Infinity);
+          if (!actief.length || nu().getTime() - oud > GELD_DAG_MS) { try { leesDossier(); u = overzicht(); } catch (e) { /* de vorige stand blijft */ } }
         }
         return { status: 200, body: u, reden: 'vastgoed overzicht' };
       }
@@ -889,7 +911,7 @@ function maak(o) {
       const ok = (x) => (x ? !!x.ok : null);
       return { aan: true, databank: true, bronnen: !!bronnen, objecten: n('object'), feiten: n('feit'), feiten_extern: n('feit', " WHERE herkomst = 'extern'"), reeksen: n('reeks'),
         stukken: n('stuk'), beelden: n('beeld'), aanroepen: n('aanroep'), laatst_extern: (db.prepare('SELECT MAX(extern_op) AS t FROM object').get() || {}).t || null,
-        leningdelen: n('leningdeel'), woz_eigen: n('woz_eigen'), reeksen_bank: n('reeks', " WHERE herkomst = 'bank'"), reeksen_tibber: n('reeks', " WHERE herkomst = 'tibber'"),
+        objecten_weg: db.prepare("SELECT 1 FROM pragma_table_info('object') WHERE name = 'weg_op'").get() ? n('object', ' WHERE weg_op IS NOT NULL') : 0, leningdelen: n('leningdeel'), woz_eigen: n('woz_eigen'), reeksen_bank: n('reeks', " WHERE herkomst = 'bank'"), reeksen_tibber: n('reeks', " WHERE herkomst = 'tibber'"),
         geld: { hypotheek: ok(geld.hypotheek), bank: ok(geld.bank), tibber: ok(geld.tibber) } };
     }, false);
   }

@@ -452,3 +452,85 @@ test('review wv3102: restschuld € 0 telt (MOET 1); tabel en grafiek dezelfde v
   const s = V.stroomMaanden([{ home_id: 'h', maand: '2026-09', kwh: 360, kosten: 50, uren: 720, kosten_uren: 700 }, { home_id: 'h', maand: '2026-08', kwh: 1, kosten: 2, uren: 744, kosten_uren: 744 }]);
   assert.deepStrictEqual(s.maanden.map((m) => [m.maand, m.kosten, m.volledig]), [['2026-09', null, true], ['2026-08', 2, true]]);
 });
+
+// A15 (Fable-review 19-11): een pagina is pas een object bij de vaste vorm, en een object wordt nooit vanzelf gewist als het iets bewaart
+const OVERZICHT = `# Garageboxen\n\nOverzicht van de boxen in het complex.\n\n| Box | Adres |\n|---|---|\n| 7 | Hofstraat 110-7 |\n| 12 | Hofstraat 110-12 |\n\n## VvE\n\n- [[10_Zakelijk/_Gedeeld/Relaties/VvE GaragePark Proef|VvE GaragePark Proef]]\n`;
+
+test('A15 dossierlezer: overzichtspagina, tweede woningpagina, kopie van een box en een box zonder adres worden geen object', () => {
+  const t = fs.mkdtempSync(path.join(os.tmpdir(), 'vastgoed-a15-'));
+  try {
+    const vault = M.maakVault(path.join(t, 'vault')), huis = path.join(vault, '20_Prive', 'Huis');
+    fs.writeFileSync(path.join(huis, 'Garageboxen.md'), OVERZICHT);
+    fs.writeFileSync(path.join(huis, 'Garagebox Zkopie (box 7).md'), M.BOX1);
+    fs.writeFileSync(path.join(huis, 'Garagebox nog te kopen.md'), '# Garagebox nog te kopen\n\n## Kerngegevens\n\n| Item | Waarde |\n|---|---|\n| Prijs | € 30.000 |\n');
+    fs.writeFileSync(path.join(huis, 'Woning A - oude notities.md'), '# Woning, oude notities\n\nLos lijstje.\n');
+    fs.writeFileSync(path.join(huis, 'Woning B - zonder adres.md'), '# Woning\n\n## Kerngegevens\n\n- **Type:** proef.\n');
+    const d = V.leesDossierMap(vault);
+    assert.deepStrictEqual(d.objecten.map((o) => [o.sleutel, o.dossier.replace(/^.*\//, '')]),
+      [['woning', 'Woning Hofstraat 110.md'], ['box-7', 'Garagebox Proefpark (box 7).md'], ['box-12', 'Garagebox-Hofstraat-110-12.md']]);
+    assert.ok(!d.verbouwingen.some((v) => /Garagebox|Woning/.test(v.pagina)), 'overzichts- of woningpagina telt als verbouwing');
+  } finally { fs.rmSync(t, { recursive: true, force: true }); }
+});
+
+test('A15 hernoemde pagina: object met openbare feiten, beelden of bevestigde WOZ blijft (gemarkeerd), leeg object gaat weg, terugzetten ontmarkeert', async () => {
+  const t = fs.mkdtempSync(path.join(os.tmpdir(), 'vastgoed-a15b-'));
+  const vault = M.maakVault(path.join(t, 'vault')), huis = path.join(vault, '20_Prive', 'Huis');
+  let klok = new Date('2026-11-14T12:00:00Z');
+  const m = V.maak({ map: path.join(t, 'data'), vault, bronnen: M.nepBronnen(), nu: () => klok });
+  try {
+    const [, b7] = (await m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten;
+    assert.strictEqual((await m.app({ pad: '/app/vastgoed/ververs', methode: 'POST', body: { id: b7.id } })).status, 200);
+    m.wozVastleggen({ id: b7.id, jaar: 2026, waarde: 41000 }, null);
+    fs.writeFileSync(path.join(huis, 'Garageboxen.md'), OVERZICHT);
+    fs.renameSync(path.join(huis, 'Garagebox Proefpark (box 7).md'), path.join(huis, 'Box 7 (oud).md'));
+    fs.renameSync(path.join(huis, 'Garagebox-Hofstraat-110-12.md'), path.join(huis, 'Box 12 (oud).md'));   // box 12: niets opgehaald, niets bevestigd
+    const r = await m.app({ pad: '/app/vastgoed/dossier', methode: 'POST' });
+    assert.strictEqual(r.status, 200); assert.strictEqual(r.body.gelezen.niet_in_dossier, 1);
+    let u = (await m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten;
+    assert.deepStrictEqual(u.map((o) => [o.sleutel, !!o.weg_op]), [['woning', false], ['box-7', true]]);
+    const w7 = u[1];
+    assert.strictEqual(w7.id, b7.id);
+    assert.match(w7.stand.ontbreekt[0], /^Niet meer in het dossier sinds 14-11-2026: /);
+    assert.ok(w7.feiten.filter((f) => f.herkomst === 'extern').length > 0);
+    assert.ok(w7.beelden.length > 0);
+    assert.deepStrictEqual(reeks(w7, 'woz'), [['2025-01-01', 41000]]);
+    let i = m.info();
+    assert.deepStrictEqual([i.objecten, i.objecten_weg, i.woz_eigen], [2, 1, 1]);
+    // dag-grens: het gemarkeerde object (oude dossier_op) laat niet elke opening het dossier opnieuw lezen
+    klok = new Date('2026-11-16T12:00:00Z');
+    await m.app({ pad: '/app/vastgoed', methode: 'GET' });   // > 1 dag: opnieuw gelezen
+    const p = path.join(huis, 'Woning Hofstraat 110.md');
+    fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace('**Bouwjaar 1985.**', '**Bouwjaar 1986.**'));
+    u = (await m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten;
+    assert.strictEqual(u[0].feiten.find((f) => f.herkomst === 'dossier' && f.veld === 'Bouwjaar').waarde, '1985', 'dossier bij elke opening opnieuw gelezen');
+    assert.match(u[1].stand.ontbreekt[0], /^Niet meer in het dossier sinds 14-11-2026: /);   // de eerste datum blijft
+    // pagina terug: hetzelfde object, markering weg, WOZ en openbare feiten nog daar
+    fs.renameSync(path.join(huis, 'Box 7 (oud).md'), path.join(huis, 'Garagebox Proefpark (box 7).md'));
+    await m.app({ pad: '/app/vastgoed/dossier', methode: 'POST' });
+    u = (await m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten;
+    assert.deepStrictEqual(u.map((o) => [o.sleutel, o.id === b7.id, !!o.weg_op]), [['woning', false, false], ['box-7', true, false]]);
+    assert.ok(!u[1].stand.ontbreekt.some((x) => /^Niet meer in het dossier/.test(x)));
+    i = m.info();
+    assert.deepStrictEqual([i.objecten, i.objecten_weg, i.woz_eigen], [2, 0, 1]);
+  } finally { fs.rmSync(t, { recursive: true, force: true }); }
+});
+
+test('A15 bestaande databank zonder kolom weg_op: /health en het overzicht werken alleen-lezen, schrijven zet de kolom erbij (schema 3)', async () => {
+  const t = fs.mkdtempSync(path.join(os.tmpdir(), 'vastgoed-a15c-'));
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    const vault = M.maakVault(path.join(t, 'vault'));
+    const maak = () => V.maak({ map: path.join(t, 'data'), vault, bronnen: M.nepBronnen(), nu: () => new Date('2026-11-14T12:00:00Z') });
+    maak().leesDossier();
+    const db = new DatabaseSync(path.join(t, 'data', 'vastgoed.sqlite'));
+    db.exec('ALTER TABLE object DROP COLUMN weg_op'); db.close();   // de stand van vóór A15
+    const m = maak();
+    assert.deepStrictEqual([m.info().objecten, m.info().objecten_weg], [3, 0]);   // alleen lezen, kolom ontbreekt nog
+    const r = await m.app({ pad: '/app/vastgoed', methode: 'GET' });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    assert.deepStrictEqual(r.body.objecten.map((o) => o.weg_op), [null, null, null]);
+    await m.app({ pad: '/app/vastgoed/dossier', methode: 'POST' });
+    const db2 = new DatabaseSync(path.join(t, 'data', 'vastgoed.sqlite'), { readOnly: true });
+    assert.ok(db2.prepare("SELECT 1 FROM pragma_table_info('object') WHERE name = 'weg_op'").get()); db2.close();
+  } finally { fs.rmSync(t, { recursive: true, force: true }); }
+});
