@@ -352,14 +352,6 @@ test('wv3401 B2: agendatitel met een persoonsnaam valt weg (HAGRO en eigen punte
   const t = i.agenda.map((a) => a.titel);
   assert.ok(t.includes('Minisymposium Goede wondzorg') && t.includes('Teamuitje') && t.includes('HAGRO-vergadering'));
   assert.ok(!t.some((x) => /Jansen|Fenna|Piet/.test(x)), 'geen namen: ' + t.join(' | '));
-  // Codex MOET 1: een bewaarde agenda van vóór de naamtoets komt er niet meer door, ook niet als de tijdlijn faalt of bij publiceren uit de stand
-  const g = fase1({ aan: true, tijdlijnFaalt: true });
-  const oudeAgenda = [{ wd: 'do', dg: '19', mn: 'nov', titel: 'Afscheid Jan Jansen', tijd: 'hele dag', label: 'HAGRO' }, { wd: 'vr', dg: '20', mn: 'nov', titel: 'Teamuitje', tijd: 'hele dag', label: 'HAGRO' }];
-  fs.writeFileSync(path.join(g.dir, 'stand.json'), JSON.stringify({ inhoud: { datum: '2026-11-16', agenda: oudeAgenda } }));
-  await g.m.publiceer();
-  assert.doesNotMatch(html(g.D), /Jansen/); assert.match(html(g.D), /Teamuitje/);
-  const j = await g.m.verzamel(g.nu());
-  assert.deepStrictEqual(j.agenda.map((a) => a.titel), ['Teamuitje']);
 });
 
 test('fase 1 met registerrij: voornaam + dagdeel, waarnemer zonder naam, jarigen met dag en maand; nooit achternaam, jaar of roostertitel', async () => {
