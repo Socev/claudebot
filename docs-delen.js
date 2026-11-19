@@ -13,7 +13,7 @@
 // Poort vóór elke deling (grondwet 2 en 3; review #8):
 // - nooit te delen: alles wat op een vaste plek dicht of verborgen is (Privé, Gesprekken, personeel, bronnen), 00_Systeem, Beveiliging,
 //   dossier-, patiënt-, personeels- en gespreksmappen, en de pagina's die Socev zelf bijhoudt;
-// - het masker van secondbrain.js met IBAN en BSN aan, op de gerenderde tekst incl. titel, linklabels en linkadressen: treffer = weigeren;
+// - het masker van secondbrain.js in de strenge poortstand (geheimen.js, wv3405) met IBAN en BSN aan, op de gerenderde tekst incl. titel, linklabels en linkadressen: treffer = weigeren;
 // - namen (contactenlijst + medewerkerspagina's, zoals socev-site namenpoort.js toetsProza): de App toont de namen en David bevestigt
 //   expliciet (niet zelf weghalen: geheugen publiceren-niet-zelf-sanitiseren). Is de namenlijst niet te lezen, dan is de poort dicht.
 // Slug alleen willekeurig (geen naam in de URL). Register /opt/data/docs/gedeeld.json (0600): pad-HMAC ↔ slug, soort, titel, sinds, sha256.
@@ -301,7 +301,10 @@ function render(md, bestandsnaam) {
     (POD_FAVICON ? '<link rel="icon" type="image/png" sizes="32x32" href="' + POD_FAVICON + '">\n' : '') + '<style>' + STIJL + '</style>\n' +
     '</head>\n<body>\n<main class="wrap">\n' + body + '\n</main>\n</body>\n</html>\n';
   const zichtbaar = ontEsc(body.replace(/<br>/g, '\n').replace(/<\/(p|h\d|li|tr|td|th|div|blockquote|pre)>/g, '\n').replace(/<[^>]+>/g, ' ')).replace(/[ \t]+/g, ' ');
-  return { titel: titel, body: body, html: html, zichtbaar: zichtbaar, hrefs: hrefs,
+  // wv3405 (A32): dezelfde tekst met tabelcellen naast elkaar (| a | b |), alleen voor de poort: anders staan "Wachtwoord" en de waarde in de
+  // zichtbare tekst op twee regels en ziet het masker het paar niet (Fable register-zoek § 1, tabelcel)
+  const rijen = ontEsc(body.replace(/<br>/g, '\n').replace(/<\/(td|th)>/g, ' | ').replace(/<\/(p|h\d|li|tr|div|blockquote|pre)>/g, '\n').replace(/<[^>]+>/g, ' ')).replace(/[ \t]+/g, ' ');
+  return { titel: titel, body: body, html: html, zichtbaar: zichtbaar, rijen: rijen, hrefs: hrefs,
     sha: crypto.createHash('sha256').update(html, 'utf8').digest('hex') };
 }
 
@@ -470,9 +473,10 @@ function maak(opt) {
     if (nooit) return { status: 403, j: { ok: false, fout: nooit, kan_niet: true }, audit: audit, b: b };
     const r = render(b.tekst, b.p);
     if (Buffer.byteLength(r.html, 'utf8') > MAX_HTML) return { status: 413, j: { ok: false, fout: 'deze pagina is te groot om te delen', kan_niet: true }, audit: audit, b: b };
-    const proef = r.titel + '\n' + r.zichtbaar + '\n' + r.hrefs.join('\n');
-    if (opt.masker(proef, false, null) !== proef) return { status: 422, j: { ok: false, fout: 'er staat iets in dat op een sleutel lijkt; zo\'n pagina deel je niet', kan_niet: true }, audit: audit, b: b };
-    if (opt.masker(proef, true, opt.bsnMasker) !== proef) return { status: 422, j: { ok: false, fout: 'er staat een IBAN of een BSN-achtig nummer in; zo\'n pagina deel je niet', kan_niet: true }, audit: audit, b: b };
+    const proef = r.titel + '\n' + r.zichtbaar + '\n' + r.hrefs.join('\n') + '\n' + r.rijen;
+    // wv3405 (A32): strenge poortstand van het masker (4e argument), ook korte wachtwoorden, tabelcel, URL met inlog, token na een /
+    if (opt.masker(proef, false, null, true) !== proef) return { status: 422, j: { ok: false, fout: 'er staat iets in dat op een sleutel lijkt; zo\'n pagina deel je niet', kan_niet: true }, audit: audit, b: b };
+    if (opt.masker(proef, true, opt.bsnMasker, true) !== proef) return { status: 422, j: { ok: false, fout: 'er staat een IBAN of een BSN-achtig nummer in; zo\'n pagina deel je niet', kan_niet: true }, audit: audit, b: b };
     let gevonden;
     try { gevonden = namenIn(namenSet(), r.titel + '\n' + r.zichtbaar + '\n' + r.hrefs.join('\n')); }   // ook een naam in een linkadres (…/in/jan-klaassen)
     catch (e) { fout('docs-namen', e); return { status: 503, j: { ok: false, fout: 'de namencontrole werkt nu niet; delen kan pas weer als die werkt' }, audit: audit, b: b }; }

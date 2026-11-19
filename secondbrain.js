@@ -63,38 +63,11 @@ const DOMEINEN = ['Tolgaarde', 'Groenhouten', 'HAGRO', 'POT', 'DBH', 'Holding', 
   'Privé', 'Ontwikkeling', 'Systeem', 'Gesprekken', 'Cijfer-Meester', 'Vault', 'Overig'];
 
 // ── masker (P5) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
-const WEG = '[sleutel weggelaten]';
-const heeftLetterEnCijfer = (s) => /[A-Za-z]/.test(s) && /[0-9]/.test(s);
-function willekeurig(tok) {
-  const stukken = tok.match(/[A-Za-z0-9]{20,}/g) || [];
-  return stukken.some(function (x) { return heeftLetterEnCijfer(x) && (x.match(/[A-Za-z](?=[0-9])|[0-9](?=[A-Za-z])/g) || []).length >= 4; });
-}
-function masker(t, vast, bsnMasker) {
-  let s = String(t == null ? '' : t);
-  s = s.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, WEG);
-  s = s.replace(/eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]*){0,2}/g, WEG);
-  s = s.replace(/github_pat_[A-Za-z0-9_]{20,}/gi, WEG);
-  s = s.replace(/gh[pousr]_[A-Za-z0-9]{20,}/gi, WEG);
-  s = s.replace(/sk-[A-Za-z0-9_-]{20,}/gi, WEG);
-  s = s.replace(/xox[baprs]-[A-Za-z0-9-]{6,}/gi, WEG);
-  s = s.replace(/[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}/g, WEG);
-  s = s.replace(/AIza[0-9A-Za-z_-]{30,}/g, WEG);
-  s = s.replace(/ya29\.[0-9A-Za-z_-]{20,}/g, WEG);
-  s = s.replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, WEG);
-  s = s.replace(/hooks\.slack\.com\/services\/[A-Za-z0-9\/_-]+/gi, 'hooks.slack.com/services/' + WEG);
-  s = s.replace(/(discord(?:app)?\.com\/api\/webhooks\/)[A-Za-z0-9\/_-]+/gi, function (m, a) { return a + WEG; });
-  s = s.replace(/(bearer\s+)([A-Za-z0-9+\/=._-]{16,})/gi, function (m, a) { return a + WEG; });
-  s = s.replace(/((?:service_role|anon[_-]?key|api[_-]?key|token|password|passwd|wachtwoord)["'`]?\s*[:=]\s*["'`]?)([^\s"'`]{16,})/gi, function (m, a) { return a + WEG; });
-  // naam-route: secret/geheim/sleutel als naamdeel, waarde ≥ 12 tekens met letters én cijfers en geen omgevingsnaam (HOOFDLETTERS_ONDER)
-  s = s.replace(/((?<![A-Za-z0-9_.-])["'`]?[A-Za-z0-9_.-]*(?:secret(?!ar)|geheim|sleutel)[A-Za-z0-9_.-]*["'`]?\s*[:=]\s*["'`]?)([^\s"'`]{12,})/gi,
-    function (m, a, w) { return heeftLetterEnCijfer(w) && !/^[A-Z0-9_]+$/.test(w) && w.indexOf(WEG) < 0 ? a + WEG : m; });
-  // kale tokens (Fable M1): een reeks [A-Za-z0-9_-] met daarin een stuk van 20+ letters/cijfers dat vaak wisselt tussen letter en
-  // cijfer (willekeurig, zoals een sleutel of hash); niet direct na een / (pad in een URL) en niet binnen [[ ]]. Namen als
-  // `mk_werkvoorraad_tik_wv427` of `n8n-backup-2026-10-22` blijven staan (korte stukken), een UUID ook.
-  s = s.replace(/(\[\[[^\]\n]*\]\])|(^|[^A-Za-z0-9_\-\/])([A-Za-z0-9_-]{20,})(?![A-Za-z0-9_-])/g, function (m, wiki, voor, tok) {
-    if (wiki) return wiki;
-    return willekeurig(tok) ? voor + WEG : m;
-  });
+// Sinds wv3405 (A32 deel 1) staat de patroonlijst in geheimen.js (één lijst voor alle filters). Weergave (streng weg) = precies het masker van
+// vóór wv3405: app-weergave en de schrijfpoorten van de vault. streng = poortstand voor alles wat het huis verlaat (Zoek snel-model, Docs › Delen).
+const GEHEIMEN = require('./geheimen.js');
+function masker(t, vast, bsnMasker, streng) {
+  let s = GEHEIMEN.maskeer(t, { streng: streng === true }).tekst;
   if (vast) {
     // IBAN, ook in kleine letters en uit andere landen (Fable diffreview K3): landcode, controlegetal, blokken van vier
     s = s.replace(/\b[A-Za-z]{2}[0-9]{2}(?: ?[A-Za-z0-9]{4}){2,7}(?: ?[A-Za-z0-9]{1,4})?\b/g, function (m) { return /[0-9]{6}/.test(m.replace(/ /g, '')) ? '[IBAN weggelaten]' : m; });
@@ -102,6 +75,8 @@ function masker(t, vast, bsnMasker) {
   }
   return s;
 }
+// Strenge poortstand (wv3405): zelfde handtekening als masker, voor plekken die een masker als functie doorgeven.
+function maskerStreng(t, vast, bsnMasker) { return masker(t, vast, bsnMasker, true); }
 
 // Markeringen van gegenereerde blokken (<!-- sb:generated id="…" content_hash="<64 hex>" begin --> en … eind -->) zijn voor de
 // scripts, niet voor de lezer: zonder dit toonde react-markdown ze als tekst en maakte het masker van de hash "[sleutel weggelaten]"
@@ -915,5 +890,5 @@ function maak(opt) {
     _los: function (doel, bron, md) { return los(doel, bron, md, vers(false)); } };
 }
 
-module.exports = { maak: maak, masker: masker, zonderMarkeringen: zonderMarkeringen, linksIn: linksIn, domeinVan: domeinVan, isVastDicht: isVastDicht, isVerborgen: isVerborgen,
+module.exports = { maak: maak, masker: masker, maskerStreng: maskerStreng, zonderMarkeringen: zonderMarkeringen, linksIn: linksIn, domeinVan: domeinVan, isVastDicht: isVastDicht, isVerborgen: isVerborgen,
   DOMEINEN: DOMEINEN, KAART_VERS_MS: KAART_VERS_MS };

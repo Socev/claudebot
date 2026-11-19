@@ -233,6 +233,7 @@ COPY studio.js /app/release-bootstrap/studio.js
 COPY bandjes.js /app/release-bootstrap/bandjes.js
 COPY harvester.js /app/release-bootstrap/harvester.js
 COPY secondbrain.js /app/release-bootstrap/secondbrain.js
+COPY geheimen.js /app/release-bootstrap/geheimen.js
 COPY docs-delen.js /app/release-bootstrap/docs-delen.js
 COPY zoek-snel.js /app/release-bootstrap/zoek-snel.js
 COPY jev-pod.js /app/release-bootstrap/jev-pod.js
