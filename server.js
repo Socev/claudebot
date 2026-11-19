@@ -4546,7 +4546,11 @@ function accountInfo() {
 }
 // Meting van account 2 elke 10 minuten (wegschrijven alleen op de primaire kant; meetTank toetst dat zelf). Geeft de tikker zijn verse
 // meting in machinekamer.tankmeting_2 zonder n8n-wijziging; een mislukte meting laat de vorige staan.
+// B63 (actieplan Fable 19-11): staat de schakelaar op 1 (abonnement 2 bewust uit, vervalt ± 21-11), dan niet meten. Anders meldt de
+// inlogwachter na elke herstart opnieuw 'token geweigerd' (tokenStaat zit alleen in het geheugen) voor een abonnement dat uit staat.
+// Gaat de schakelaar terug op 2, dan meet de volgende ronde weer (bestand wordt per ronde gelezen, geen herstart nodig).
 function account2MeetRonde() {
+  if (accountStand().agents !== 2) return;
   account2Token().then(function (tok) { if (tok) return meetTank(2); }).catch(function (e) { logError('account2-meting', e); });
 }
 
