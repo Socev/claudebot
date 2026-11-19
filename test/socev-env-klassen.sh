@@ -252,7 +252,7 @@ rpc.listen(0, '127.0.0.1', async function () {
     const g2 = await req('POST', '/smal/vault-zoek', { secret: SMAL, query: 'wie regelt de verzekering', max_num_results: 500 });
     const aiSearch = cfVragen.slice(nCf0).filter((c) => /ai-search/.test(c.url || '')).length;
     // wv3295: zoeken op betekenis via de eigen databank (vaultzoek.js); hier is er geen databank → 502 met vaste fout, nooit AI Search
-    toets('G /smal/vault-zoek: eigen databank, geen AI Search-aanroep (zonder databank 502)', aiSearch === 0 && g2._status === 502 && /eigen databank/.test(g2.fout || ''), JSON.stringify(g2).slice(0, 200));
+    toets('G /smal/vault-zoek: eigen databank, nooit AI Search (hier zonder vaultzoek.js 503, zonder databank 502)', aiSearch === 0 && (g2._status === 503 || g2._status === 502) && /zoeken op betekenis/.test(g2.fout || ''), JSON.stringify(g2).slice(0, 200));
     const nCf = cfVragen.length;
     const schrijf = ['DELETE FROM reeks', 'WITH a AS (SELECT 1) DELETE FROM reeks', 'SELECT 1; DROP TABLE reeks', 'INSERT INTO reeks VALUES (1)', 'select 1;\nupdate reeks set bedrag=0',
       'PRAGMA table_info(reeks)', 'REPLACE INTO reeks VALUES (1)', 'ATTACH DATABASE x AS y', ''];
