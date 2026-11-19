@@ -30,6 +30,9 @@ docker exec -u claude $C /usr/lib/postgresql/17/bin/psql -X -h /run/pg -U pgbaas
 docker exec $C grep -q "reserve-SQL toegepast" /opt/data/pg/db-wacht.log; ok $? "init-reserve.sql toegepast"
 R=$(docker exec -u claude $C sh -c "echo \"select (select rolreplication::text||rolsuper::text||rolcanlogin::text from pg_roles where rolname='reserve') as r, (select count(*) from pg_replication_slots where slot_name='r230' and slot_type='physical')::int as s\" | /app/sb-sql" 2>&1)
 [ "$R" = '[{"r":"truefalsetrue","s":1}]' ]; ok $? "rol reserve (replication, geen superuser) + slot r230 ($R)"
+# wv3408 (B01): slotruimte voor dagen R230-uitval (64GB) en geen geforceerde segmentwissel per minuut (300 s)
+W=$(docker exec -u claude $C sh -c "echo \"select (select setting from pg_settings where name='max_slot_wal_keep_size') as keep, (select setting from pg_settings where name='archive_timeout') as at\" | /app/sb-sql" 2>&1)
+[ "$W" = '[{"keep":"65536","at":"300"}]' ]; ok $? "wv3408: max_slot_wal_keep_size 64GB, archive_timeout 300 s ($W)"
 docker exec -e PGPASSWORD="$RW" $C /usr/lib/postgresql/17/bin/psql -X -At "host=127.0.0.1 user=reserve replication=true dbname=postgres" -c IDENTIFY_SYSTEM >/dev/null 2>&1; ok $? "replicatie als reserve via 127.0.0.1 met wachtwoord"
 docker exec -e PGPASSWORD="$RW" $C /usr/lib/postgresql/17/bin/psql -X -At "host=127.0.0.1 user=reserve dbname=postgres" -c 'select 1' >/dev/null 2>&1; [ $? != 0 ]; ok $? "reserve kan geen gewone databankverbinding openen"
 docker exec -e PGPASSWORD=fout $C /usr/lib/postgresql/17/bin/psql -X -At "host=127.0.0.1 user=reserve replication=true dbname=postgres" -c IDENTIFY_SYSTEM >/dev/null 2>&1; [ $? != 0 ]; ok $? "fout wachtwoord geweigerd"
