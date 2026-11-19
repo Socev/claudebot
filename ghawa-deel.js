@@ -441,8 +441,12 @@ function maak(o) {
   const G = o.ghawa || require('./ghawa.js'), S = o.stichting || require('./ghawa-stichting.js');
   const { DatabaseSync } = require('node:sqlite');
   const fout = (l, e) => { if (o.fout) o.fout(l, e); };
-  const open = (lezen) => { const db = new DatabaseSync(o.dbPad, lezen ? { readOnly: true } : {}); db.exec('PRAGMA busy_timeout = 5000'); return db; };
-  { const db = open(false); try { db.exec(LOKAAL_SCHEMA); try { db.exec('ALTER TABLE deel_kijker ADD COLUMN weg_bevestigd TEXT'); } catch (e) { /* bestaat al */ } } finally { db.close(); } }
+  const busy = Number(o.busyMs) > 0 ? Math.floor(Number(o.busyMs)) : 5000;   // de toets zet hem korter (slotproef)
+  const open = (lezen) => { const db = new DatabaseSync(o.dbPad, lezen ? { readOnly: true } : {}); db.exec('PRAGMA busy_timeout = ' + busy); return db; };
+  { const db = open(false); try { db.exec(LOKAAL_SCHEMA); try { db.exec('ALTER TABLE deel_kijker ADD COLUMN weg_bevestigd TEXT'); } catch (e) { /* bestaat al */ }
+    // wv3404 (A31, Fable-review 19-11 M4): weer toelaten en weer aanzetten worden herhaald tot D1 ze bevestigt; bestaande kijkers gelden als bevestigd
+    try { db.exec('ALTER TABLE deel_kijker ADD COLUMN erbij_bevestigd TEXT'); db.exec('UPDATE deel_kijker SET erbij_bevestigd = op WHERE weg_op IS NULL'); } catch (e) { /* bestaat al */ }
+    for (const k of ['open_op', 'open_bevestigd']) try { db.exec('ALTER TABLE deel_obj ADD COLUMN ' + k + ' TEXT'); } catch (e) { /* bestaat al */ } } finally { db.close(); } }
   const metDb = (fn) => { const db = open(false); try { return fn(db); } finally { db.close(); } };
   const stand = (k) => metDb((db) => { const r = db.prepare('SELECT waarde FROM deel_stand WHERE sleutel = ?').get(k); return r ? r.waarde : null; });
   const standZet = (k, v) => metDb((db) => db.prepare('INSERT INTO deel_stand (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde').run(k, String(v)));
@@ -539,32 +543,55 @@ function maak(o) {
   }
   let schemaKlaar = false;
   async function zorgSchema() { if (!schemaKlaar) { await d1(D1_SCHEMA.map((sql) => ({ sql, params: [] }))); schemaKlaar = true; } }
+  // wv3404 (A31, Fable-review 19-11 M6): dichter maken (uit, iemand eraf, noodstop aan) gaat BUITEN de wachtrij meteen naar D1, ook als er een ronde
+  // loopt, en telt niet mee voor de grens per ronde. Veilig naast een lopende ronde: elke publicatie en elke kijker-INSERT is voorwaardelijk op
+  // "geen blok", en D1 voert batches één voor één uit.
+  async function d1Nu(batch) {
+    if (!schemaKlaar) { await o.d1(D1_SCHEMA.map((sql) => ({ sql, params: [] }))); schemaKlaar = true; }
+    return o.d1(batch);
+  }
+  async function d1Rij(batch) { await zorgSchema(); return d1(batch); }
+  // strikt oplopende tijd voor blok-rijen en heropen-momenten: weer aanzetten haalt alleen een blok weg dat OUDER is dan de knop (op < t), zodat
+  // een heropen die laat aankomt of later herhaald wordt nooit een nieuwere intrekking ongedaan maakt
+  let klokLaatst = 0;
+  const klok = () => { const t = Math.max(Math.floor(nu()), klokLaatst + 1); klokLaatst = t; return t; };
+  // wat David dichtzette maar nog niet in de lokale databank vastligt (databankslot): het geheugen gaat voor de lokale stand, de tik legt het vast
+  const uitGeheugen = new Set(), kijkerGeheugen = new Map();
+  let wilNood = null;
+  const noodGewenst = () => (wilNood !== null ? wilNood : stand('noodstop') === '1');
 
-  // intrekken: eerst de blijvende blok-rij, dan de inhoud weg; bevestigd = D1 gaf succes
-  async function sluitOnderdeel(id, reden) {
-    await zorgSchema();
-    const t = nu();
-    metDb((db) => db.prepare('INSERT INTO deel_obj (onderdeel, dicht) VALUES (?, ?) ON CONFLICT (onderdeel) DO UPDATE SET dicht = excluded.dicht, dicht_bevestigd = NULL').run(id, iso(t)));
-    await d1([{ sql: 'INSERT INTO blok (soort, sleutel, op) VALUES (?, ?, ?) ON CONFLICT (soort, sleutel) DO UPDATE SET op = excluded.op', params: ['onderdeel', id, t] },
-      { sql: 'DELETE FROM deel WHERE onderdeel = ?', params: [id] }, { sql: 'DELETE FROM publicatie WHERE onderdeel = ?', params: [id] }]);
-    metDb((db) => db.prepare('UPDATE deel_obj SET hash = NULL, stukken = NULL, dicht_bevestigd = ? WHERE onderdeel = ?').run(iso(nu()), id));
+  // intrekken: eerst buiten (blijvende blok-rij + inhoud weg in één batch), pas daarna lokaal en in een eigen try; bevestigd = D1 gaf succes.
+  // Mislukt D1, dan blijft de lokale rij open (dicht zonder dicht_bevestigd) en herhaalt de tik hem; mislukt lokaal, dan houdt uitGeheugen hem vast.
+  async function sluitOnderdeel(id, reden, direct) {
+    const t = klok();
+    let fd = null;
+    try {
+      await (direct ? d1Nu : d1Rij)([{ sql: 'INSERT INTO blok (soort, sleutel, op) VALUES (?, ?, ?) ON CONFLICT (soort, sleutel) DO UPDATE SET op = excluded.op', params: ['onderdeel', id, t] },
+        { sql: 'DELETE FROM deel WHERE onderdeel = ?', params: [id] }, { sql: 'DELETE FROM publicatie WHERE onderdeel = ?', params: [id] }]);
+    } catch (e) { fd = e; }
+    try {
+      metDb((db) => db.prepare('INSERT INTO deel_obj (onderdeel, dicht, dicht_bevestigd) VALUES (?, ?, ?) ON CONFLICT (onderdeel) DO UPDATE SET dicht = excluded.dicht, dicht_bevestigd = excluded.dicht_bevestigd, open_op = NULL, open_bevestigd = NULL' +
+        (fd ? '' : ', hash = NULL, stukken = NULL')).run(id, iso(t), fd ? null : iso(nu())));
+    } catch (e) { fout('ghawa-deel-lokaal', e); uitGeheugen.add(id); if (!fd) return { ok: true, onderdeel: id, reden: reden || 'uit', lokaal: false }; }
+    if (fd) throw fd;
     return { ok: true, onderdeel: id, reden: reden || 'uit' };
   }
-  async function heropenOnderdeel(id) {
-    await zorgSchema();
-    await d1([{ sql: 'DELETE FROM blok WHERE soort = ? AND sleutel = ?', params: ['onderdeel', id] }]);
-    metDb((db) => db.prepare('UPDATE deel_obj SET dicht = NULL, dicht_bevestigd = NULL WHERE onderdeel = ?').run(id));
+  // weer aanzetten: alleen een blok van vóór de knop (t) weg; herhaald door de tik tot D1 het bevestigt (open_op zonder open_bevestigd)
+  async function heropenOnderdeel(id, t) {
+    await d1Rij([{ sql: 'DELETE FROM blok WHERE soort = ? AND sleutel = ? AND op < ?', params: ['onderdeel', id, t] }]);
+    metDb((db) => db.prepare('UPDATE deel_obj SET dicht = NULL, dicht_bevestigd = NULL, open_bevestigd = ? WHERE onderdeel = ? AND open_op = ?').run(iso(nu()), id, iso(t)));
   }
-  async function kijkerD1(hash, erbij, rol) {
-    await zorgSchema();
-    if (erbij) await d1([{ sql: 'DELETE FROM blok WHERE soort = ? AND sleutel = ?', params: ['bezoeker', hash] },
-      { sql: 'INSERT INTO bezoeker (hash, rol) VALUES (?, ?) ON CONFLICT (hash) DO UPDATE SET rol = excluded.rol', params: [hash, rol] }]);
-    else await d1([{ sql: 'INSERT INTO blok (soort, sleutel, op) VALUES (?, ?, ?) ON CONFLICT (soort, sleutel) DO UPDATE SET op = excluded.op', params: ['bezoeker', hash, nu()] },
+  // erbij: blok van vóór het toelaten (t) weg en de kijker erin, maar alleen zonder (nieuwer) blok; eraf: meteen en buiten de wachtrij
+  async function kijkerD1(hash, erbij, rol, t) {
+    if (erbij) await d1Rij([{ sql: 'DELETE FROM blok WHERE soort = ? AND sleutel = ? AND op < ?', params: ['bezoeker', hash, t] },
+      { sql: "INSERT INTO bezoeker (hash, rol) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM blok WHERE soort = 'bezoeker' AND sleutel = ?) ON CONFLICT (hash) DO UPDATE SET rol = excluded.rol", params: [hash, rol, hash] }]);
+    else await d1Nu([{ sql: 'INSERT INTO blok (soort, sleutel, op) VALUES (?, ?, ?) ON CONFLICT (soort, sleutel) DO UPDATE SET op = excluded.op', params: ['bezoeker', hash, klok()] },
       { sql: 'DELETE FROM bezoeker WHERE hash = ?', params: [hash] }]);
   }
+  // noodstop aan: buiten de wachtrij; uit: in de wachtrij (gewoon naar buiten). De lokale bevestiging staat los van D1.
+  const noodBatch = (aan) => [{ sql: 'INSERT INTO stand (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde', params: ['noodstop', aan ? '1' : '0'] }];
   async function noodD1(aan) {
-    await zorgSchema();
-    await d1([{ sql: 'INSERT INTO stand (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde', params: ['noodstop', aan ? '1' : '0'] }]);
+    await (aan ? d1Nu : d1Rij)(noodBatch(aan));
     standZet('noodstop_d1', aan ? '1' : '0');
   }
   function signaal(id, tekst) {   // één regel in Vraagt aandacht (ghawa.js toont de tabel signaal); nooit de treffer zelf
@@ -596,13 +623,13 @@ function maak(o) {
     await d1(ids.map((id) => ({ sql: "UPDATE publicatie SET geldig_tot = ? WHERE onderdeel = ? AND NOT EXISTS (SELECT 1 FROM blok WHERE soort = 'onderdeel' AND sleutel = ?)", params: [t + HOUDBAAR_MS, id, id] })));
     metDb((db) => { const u = db.prepare('UPDATE deel_obj SET vers_op = ? WHERE onderdeel = ?'); for (const id of ids) u.run(iso(t), id); });
   }
-  const isAan = (id) => stand('aan:' + id) === '1';
+  const isAan = (id) => !uitGeheugen.has(id) && stand('aan:' + id) === '1';
 
   // de gewone ronde: schakelaars vlak vóór de batch opnieuw gelezen
   async function ronde() {
     await zorgSchema();
     const uit = { gezet: [], dicht: [], vers: [], poort: [], blok: null };
-    const nood = stand('noodstop') === '1';
+    const nood = noodGewenst();
     if (stand('noodstop_d1') !== (nood ? '1' : '0')) await noodD1(nood);
     await bezoekersSync();
     const aan = IDS.filter(isAan);
@@ -632,8 +659,9 @@ function maak(o) {
       if (!doc) continue;
       const tr = poort(doc, b.poortL);
       if (tr.length) {
-        standZet('aan:' + id, '0');
+        uitGeheugen.add(id);
         await sluitOnderdeel(id, 'poort');
+        standZet('aan:' + id, '0'); uitGeheugen.delete(id);
         signaal(id, 'Delen met ECG: ' + naamNl(id) + ' is dichtgezet; de poort vond iets dat niet naar buiten mag (' + tr.slice(0, 3).map((t) => t.plek + ' ' + t.reden).join('; ') + '). Zet het pas weer aan als dat eruit is.');
         uit.poort.push(id); continue;
       }
@@ -648,12 +676,12 @@ function maak(o) {
     return uit;
   }
   async function bezoekersSync() {
-    const w = metDb((db) => db.prepare('SELECT hash, rol FROM deel_kijker WHERE weg_op IS NULL ORDER BY hash').all()).map((r) => ({ hash: r.hash, rol: r.rol }));
+    const w = metDb((db) => db.prepare('SELECT hash, rol FROM deel_kijker WHERE weg_op IS NULL ORDER BY hash').all()).map((r) => ({ hash: r.hash, rol: r.rol })).filter((r) => !kijkerGeheugen.has(r.hash));
     const h = sha256(JSON.stringify(w));
     if (stand('bezoekers_hash') === h) return false;
-    const weg = metDb((db) => db.prepare('SELECT hash FROM deel_kijker WHERE weg_op IS NOT NULL').all()).map((r) => r.hash);
+    const weg = [...new Set([...metDb((db) => db.prepare('SELECT hash FROM deel_kijker WHERE weg_op IS NOT NULL').all()).map((r) => r.hash), ...kijkerGeheugen.keys()])];
     const batch = [];
-    for (const x of weg) batch.push({ sql: 'INSERT INTO blok (soort, sleutel, op) VALUES (?, ?, ?) ON CONFLICT (soort, sleutel) DO NOTHING', params: ['bezoeker', x, nu()] }, { sql: 'DELETE FROM bezoeker WHERE hash = ?', params: [x] });
+    for (const x of weg) batch.push({ sql: 'INSERT INTO blok (soort, sleutel, op) VALUES (?, ?, ?) ON CONFLICT (soort, sleutel) DO NOTHING', params: ['bezoeker', x, klok()] }, { sql: 'DELETE FROM bezoeker WHERE hash = ?', params: [x] });
     batch.push({ sql: 'DELETE FROM bezoeker WHERE hash NOT IN (' + (w.map(() => '?').join(', ') || "''") + ')', params: w.map((r) => r.hash) });
     for (const r of w) batch.push({ sql: "INSERT INTO bezoeker (hash, rol) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM blok WHERE soort = 'bezoeker' AND sleutel = ?) ON CONFLICT (hash) DO UPDATE SET rol = excluded.rol", params: [r.hash, r.rol, r.hash] });
     await d1(batch);
@@ -672,7 +700,7 @@ function maak(o) {
       let doc = null; try { doc = JSON.parse(json); } catch (e) { doc = null; }
       const tr = doc ? poort(doc, p) : [{ plek: '', reden: 'kapot' }];
       if (tr.length || IDS.indexOf(id) < 0) {
-        standZet('aan:' + id, '0'); await sluitOnderdeel(id, 'teruglezen');
+        uitGeheugen.add(id); await sluitOnderdeel(id, 'teruglezen'); standZet('aan:' + id, '0'); uitGeheugen.delete(id);
         signaal(id, 'Delen met ECG: ' + naamNl(id) + ' is dichtgezet bij de dagelijkse controle van wat buiten staat (' + tr.slice(0, 3).map((t) => t.plek + ' ' + t.reden).join('; ') + ').');
         uit.dicht.push(id);
       } else uit.ok.push(id);
@@ -706,31 +734,77 @@ function maak(o) {
     } catch (e) { fout('ghawa-deel-tik', e); }
     return null;
   }
+  // wv3404: wat tijdens een databankslot alleen in het geheugen kwam (uit, iemand eraf, noodstop) alsnog buiten bevestigen en lokaal vastleggen
+  async function vastleggen() {
+    if (wilNood !== null) {
+      const w = wilNood;
+      if (w && stand('noodstop_d1') !== '1') await noodD1(true);
+      standZet('noodstop', w ? '1' : '0');
+      if (wilNood === w) wilNood = null;
+    }
+    let fe = null;   // elk item een eigen try: één mislukt item houdt de rest niet tegen
+    for (const id of [...uitGeheugen]) {
+      try {
+        const ob = metDb((db) => db.prepare('SELECT dicht FROM deel_obj WHERE onderdeel = ?').get(id));
+        if (!ob || !ob.dicht) { const r = await sluitOnderdeel(id, 'opnieuw', true); if (r.lokaal === false) continue; }
+        if (!uitGeheugen.has(id)) continue;   // tussendoor weer aangezet
+        standZet('aan:' + id, '0');
+        uitGeheugen.delete(id);
+      } catch (e) { fe = fe || e; }
+    }
+    for (const [hash, k] of [...kijkerGeheugen]) {
+      try {
+        if (!k.buiten) { await kijkerD1(hash, false); k.buiten = iso(nu()); }
+        if (kijkerGeheugen.get(hash) !== k) continue;   // tussendoor weer toegelaten
+        metDb((db) => db.prepare('UPDATE deel_kijker SET weg_op = ?, weg_bevestigd = ? WHERE hash = ?').run(k.op, k.buiten, hash));
+        standZet('bezoekers_hash', '');
+        kijkerGeheugen.delete(hash);
+      } catch (e) { fe = fe || e; }
+    }
+    if (fe) throw fe;
+  }
   async function tik(dwing) {
     const u = { op: iso(nu()) }, fouten = [];
     const stap = async (naam, fn) => { try { await fn(); } catch (e) { fout('ghawa-deel-tik', e); fouten.push(naam + ': ' + foutReden(e)); } };
-    let rust = false;
+    let rust = false, heropend = false;
+    // wv3404: eerst wat alleen in het geheugen staat (dichtgezet tijdens een databankslot) alsnog buiten en lokaal vastleggen
+    await stap('geheugen', vastleggen);
     await stap('stand', async () => {
-      rust = !IDS.some(isAan) && !metDb((db) => db.prepare('SELECT 1 FROM deel_obj LIMIT 1').get()) && !metDb((db) => db.prepare('SELECT 1 FROM deel_kijker LIMIT 1').get()) && stand('noodstop') !== '1' && stand('noodstop_d1') !== '1';
+      rust = !uitGeheugen.size && !kijkerGeheugen.size && wilNood === null && !IDS.some(isAan) && !metDb((db) => db.prepare('SELECT 1 FROM deel_obj LIMIT 1').get()) && !metDb((db) => db.prepare('SELECT 1 FROM deel_kijker LIMIT 1').get()) && stand('noodstop') !== '1' && stand('noodstop_d1') !== '1';
     });
-    if (!rust && !fouten.length) {
-      // intrekkingen die nog niet bevestigd zijn: elke minuut opnieuw, vooraan
+    if (!rust && !fouten.some((f) => /^stand:/.test(f))) {
+      // intrekkingen die nog niet bevestigd zijn: elke minuut opnieuw, buiten de wachtrij (wv3404)
       await stap('intrekken', async () => {
         const open1 = metDb((db) => db.prepare('SELECT onderdeel FROM deel_obj WHERE dicht IS NOT NULL AND dicht_bevestigd IS NULL').all()).map((r) => r.onderdeel);
-        for (const id of open1) await inRij(() => sluitOnderdeel(id, 'opnieuw'), true);
+        for (const id of open1) await sluitOnderdeel(id, 'opnieuw', true);
       });
-      // review wv2889 ronde 1 MOET 2: ook een noodstop of iemand eraf die D1 nog niet bevestigde, elke minuut opnieuw en vooraan
+      // review wv2889 ronde 1 MOET 2: ook een noodstop of iemand eraf die D1 nog niet bevestigde, elke minuut opnieuw (dicht buiten de wachtrij)
       await stap('noodstop', async () => {
-        const nood = stand('noodstop') === '1';
-        if (stand('noodstop_d1') !== (nood ? '1' : '0') && (nood || stand('noodstop_d1') === '1')) await inRij(() => noodD1(nood), true);
+        const nood = noodGewenst();
+        if (stand('noodstop_d1') !== (nood ? '1' : '0') && (nood || stand('noodstop_d1') === '1')) await (nood ? noodD1(true) : inRij(() => noodD1(false), true));
       });
       await stap('kijker', async () => {
         for (const r of metDb((db) => db.prepare('SELECT hash FROM deel_kijker WHERE weg_op IS NOT NULL AND weg_bevestigd IS NULL').all())) {
-          await inRij(() => kijkerD1(r.hash, false), true);
+          await kijkerD1(r.hash, false);
           metDb((db) => db.prepare('UPDATE deel_kijker SET weg_bevestigd = ? WHERE hash = ? AND weg_op IS NOT NULL').run(iso(nu()), r.hash));
         }
       });
-      if (dwing || (vuil !== gedaan && nu() - laatsteRonde >= RONDE_MS) || nu() - laatsteRonde >= VERS_MS) {
+      // wv3404 (A31, Fable-review 19-11 M4): weer aanzetten en weer toelaten die D1 nog niet bevestigde, elke minuut opnieuw (in de wachtrij)
+      await stap('heropen', async () => {
+        for (const r of metDb((db) => db.prepare('SELECT onderdeel, open_op FROM deel_obj WHERE open_op IS NOT NULL AND open_bevestigd IS NULL').all())) {
+          if (!isAan(r.onderdeel)) continue;
+          await inRij(() => heropenOnderdeel(r.onderdeel, Date.parse(r.open_op)), true); vuil++; heropend = true;   // dan meteen de eerste push
+        }
+      });
+      await stap('erbij', async () => {
+        for (const r of metDb((db) => db.prepare('SELECT hash, rol, op FROM deel_kijker WHERE weg_op IS NULL AND erbij_bevestigd IS NULL').all())) {
+          if (kijkerGeheugen.has(r.hash)) continue;
+          await inRij(() => kijkerD1(r.hash, true, r.rol, Date.parse(r.op)), true);
+          metDb((db) => db.prepare('UPDATE deel_kijker SET erbij_bevestigd = ? WHERE hash = ? AND weg_op IS NULL AND op = ?').run(iso(nu()), r.hash, r.op));
+          standZet('bezoekers_hash', '');
+        }
+      });
+      if (dwing || heropend || (vuil !== gedaan && nu() - laatsteRonde >= RONDE_MS) || nu() - laatsteRonde >= VERS_MS) {
         await stap('ronde', async () => { const start = vuil; u.ronde = await inRij(ronde); laatsteRonde = nu(); gedaan = start; });
       }
       await stap('terug', async () => {
@@ -750,42 +824,67 @@ function maak(o) {
   // ── voor de app (Apps › GHAWA › Delen met ECG) ──
   async function schakel(id, aan) {
     if (IDS.indexOf(id) < 0) return { status: 404, body: { ok: false, fout: 'onbekend onderdeel' } };
-    if (!aan) {   // uit: meteen, vooraan, bevestigd
-      standZet('aan:' + id, '0');
-      try { await inRij(() => sluitOnderdeel(id, 'uit'), true); return { status: 200, body: { ok: true, dicht: true } }; }
-      catch (e) { fout('ghawa-deel-uit', e); return { status: 200, body: { ok: true, dicht: false, fout: 'nog niet dicht; de pod probeert het elke minuut opnieuw' } }; }
+    if (!aan) {   // uit: eerst buiten (meteen, buiten de wachtrij), daarna lokaal in een eigen try; het geheugen houdt het vast tot de tik het vastlegt
+      uitGeheugen.add(id);
+      let dicht = true;
+      try { await sluitOnderdeel(id, 'uit', true); } catch (e) { fout('ghawa-deel-uit', e); dicht = false; }
+      try { standZet('aan:' + id, '0'); if (metDb((db) => db.prepare('SELECT dicht FROM deel_obj WHERE onderdeel = ?').get(id) || {}).dicht) uitGeheugen.delete(id); } catch (e) { fout('ghawa-deel-lokaal', e); }
+      return { status: 200, body: dicht ? { ok: true, dicht: true } : { ok: true, dicht: false, fout: 'nog niet dicht; de pod probeert het elke minuut opnieuw' } };
     }
     // aan: eerst het pakket door de poort; rood = blijft dicht
     const x = lees(), b = bouw(x);
     const doc = b.pakket[id];
     const tr = doc ? poort(doc, b.poortL) : [];
     if (tr.length) return { status: 409, body: { ok: false, fout: 'Dit onderdeel haalt de poort niet (' + tr.slice(0, 3).map((t) => t.plek + ' ' + t.reden).join('; ') + '); het blijft dicht.' } };
-    standZet('aan:' + id, '1'); signaalDicht(id);
+    const t = klok();
+    standZet('aan:' + id, '1'); uitGeheugen.delete(id);
+    metDb((db) => db.prepare('INSERT INTO deel_obj (onderdeel, open_op) VALUES (?, ?) ON CONFLICT (onderdeel) DO UPDATE SET open_op = excluded.open_op, open_bevestigd = NULL').run(id, iso(t)));
+    signaalDicht(id);
     vuil++;
-    try { await inRij(() => heropenOnderdeel(id), true); await inRij(ronde); laatsteRonde = nu(); return { status: 200, body: { ok: true, aan: true, leeg: !doc } }; }
+    try { await inRij(() => heropenOnderdeel(id, t), true); await inRij(ronde); laatsteRonde = nu(); return { status: 200, body: { ok: true, aan: true, leeg: !doc } }; }
     catch (e) { fout('ghawa-deel-aan', e); return { status: 200, body: { ok: true, aan: true, fout: 'staat aan; de eerste push volgt binnen een paar minuten' } }; }
   }
+  // wv3404 (A31, Fable-review 19-11 M6): noodstop aan = eerst D1 (buiten de wachtrij, wacht niet op een lopende ronde), daarna lokaal in een eigen try;
+  // een databankslot houdt hem dus niet meer tegen. Uit (weer open) blijft lokaal eerst en in de wachtrij.
   async function noodstop(aan) {
-    standZet('noodstop', aan ? '1' : '0');
-    try { await inRij(() => noodD1(aan), true); return { status: 200, body: { ok: true, noodstop: aan, bevestigd: true } }; }
-    catch (e) { fout('ghawa-deel-nood', e); return { status: 200, body: { ok: true, noodstop: aan, bevestigd: false, fout: 'nog niet bevestigd; de pod probeert het elke minuut opnieuw' } }; }
+    const nietB = { status: 200, body: { ok: true, noodstop: aan, bevestigd: false, fout: 'nog niet bevestigd; de pod probeert het elke minuut opnieuw' } };
+    if (aan) {
+      wilNood = true;
+      let buiten = true;
+      try { await d1Nu(noodBatch(true)); } catch (e) { fout('ghawa-deel-nood', e); buiten = false; }
+      try { standZet('noodstop', '1'); if (buiten) standZet('noodstop_d1', '1'); if (wilNood === true) wilNood = null; } catch (e) { fout('ghawa-deel-lokaal', e); }
+      return buiten ? { status: 200, body: { ok: true, noodstop: true, bevestigd: true } } : nietB;
+    }
+    standZet('noodstop', '0'); wilNood = null;
+    try { await inRij(() => noodD1(false), true); return { status: 200, body: { ok: true, noodstop: false, bevestigd: true } }; }
+    catch (e) { fout('ghawa-deel-nood', e); return nietB; }
   }
   async function kijkerErbij(b, door) {
     const naam = String(b && b.naam || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 60);
     const adres = String(b && b.adres || '').normalize('NFC').trim().toLowerCase();
     if (naam.length < 2 || !/^[^\s@<>"]{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,24}$/.test(adres)) return { status: 400, body: { ok: false, fout: 'naam en een geldig mailadres nodig' } };
     const rol = b && b.rol === 'eigenaar' ? 'eigenaar' : 'ecg';
-    const h = adresHash(adres);
-    metDb((db) => db.prepare('INSERT INTO deel_kijker (hash, naam, adres, rol, op, door) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (hash) DO UPDATE SET naam = excluded.naam, rol = excluded.rol, op = excluded.op, door = excluded.door, weg_op = NULL, weg_bevestigd = NULL')
-      .run(h, naam, adres, rol, iso(nu()), String(door || '').slice(0, 40)));
-    try { await inRij(() => kijkerD1(h, true, rol), true); standZet('bezoekers_hash', ''); } catch (e) { fout('ghawa-deel-kijker', e); }
+    const h = adresHash(adres), t = klok(), op = iso(t);
+    metDb((db) => db.prepare('INSERT INTO deel_kijker (hash, naam, adres, rol, op, door) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (hash) DO UPDATE SET naam = excluded.naam, rol = excluded.rol, op = excluded.op, door = excluded.door, weg_op = NULL, weg_bevestigd = NULL, erbij_bevestigd = NULL')
+      .run(h, naam, adres, rol, op, String(door || '').slice(0, 40)));
+    kijkerGeheugen.delete(h);
+    try {   // lukt D1 nu niet, dan herhaalt de tik het tot het bevestigd is (wv3404, M4)
+      await inRij(() => kijkerD1(h, true, rol, t), true);
+      metDb((db) => db.prepare('UPDATE deel_kijker SET erbij_bevestigd = ? WHERE hash = ? AND weg_op IS NULL AND op = ?').run(iso(nu()), h, op)); standZet('bezoekers_hash', '');
+    } catch (e) { fout('ghawa-deel-kijker', e); }
     return { status: 200, body: { ok: true, hash: h, rol, toegang_nodig: true } };
   }
   async function kijkerEraf(hash) {
     if (!/^[0-9a-f]{64}$/.test(String(hash || ''))) return { status: 400, body: { ok: false, fout: 'onbekend' } };
-    metDb((db) => db.prepare('UPDATE deel_kijker SET weg_op = ?, weg_bevestigd = NULL WHERE hash = ?').run(iso(nu()), hash));
-    try { await inRij(() => kijkerD1(hash, false), true); metDb((db) => db.prepare('UPDATE deel_kijker SET weg_bevestigd = ? WHERE hash = ?').run(iso(nu()), hash)); standZet('bezoekers_hash', ''); return { status: 200, body: { ok: true, dicht: true } }; }
-    catch (e) { fout('ghawa-deel-kijker', e); return { status: 200, body: { ok: true, dicht: false, fout: 'nog niet dicht; de pod probeert het elke minuut opnieuw' } }; }
+    // wv3404 (A31): eerst buiten (meteen, buiten de wachtrij), daarna lokaal in een eigen try; het geheugen houdt het vast tot de tik het vastlegt
+    const k = { op: iso(nu()), buiten: null };
+    kijkerGeheugen.set(hash, k);
+    try { await kijkerD1(hash, false); k.buiten = iso(nu()); } catch (e) { fout('ghawa-deel-kijker', e); }
+    try {
+      metDb((db) => db.prepare('UPDATE deel_kijker SET weg_op = ?, weg_bevestigd = ? WHERE hash = ?').run(k.op, k.buiten, hash)); standZet('bezoekers_hash', '');
+      if (kijkerGeheugen.get(hash) === k) kijkerGeheugen.delete(hash);
+    } catch (e) { fout('ghawa-deel-lokaal', e); }
+    return { status: 200, body: k.buiten ? { ok: true, dicht: true } : { ok: true, dicht: false, fout: 'nog niet dicht; de pod probeert het elke minuut opnieuw' } };
   }
   function tekstBesluit(hash, besluit, door, opties) {
     opties = opties || {};
@@ -820,7 +919,7 @@ function maak(o) {
     const uniek = new Map(); for (const t of b.nieuw) if (!uniek.has(t.hash)) uniek.set(t.hash, t);
     const tellen = metDb((db) => db.prepare('SELECT besluit, count(*) n FROM deel_tekst GROUP BY besluit').all());
     return {
-      site: 'https://ghawa.socev.dev', noodstop: stand('noodstop') === '1', onderdelen,
+      site: 'https://ghawa.socev.dev', noodstop: noodGewenst(), onderdelen,
       kijkers: kijkers.map((k) => { const l = log.filter((r) => r.hash === k.hash); return { hash: k.hash, naam: k.naam, adres: k.adres, rol: k.rol, sinds: k.op, laatst: l.length ? l[0].op : null }; }),
       teksten: [...uniek.values()].slice(0, 200).map((t) => ({ hash: t.hash, tekst: t.tekst, onderdeel: t.onderdeel, waar: t.waar, poort_ok: t.poort_ok })),
       teksten_aantal: uniek.size, teksten_besluit: Object.fromEntries(tellen.map((r) => [r.besluit, r.n])),
@@ -834,7 +933,7 @@ function maak(o) {
   }
   function health() {
     let aan = 0; try { aan = IDS.filter(isAan).length; } catch (e) { aan = -1; }
-    return { aan: true, onderdelen_aan: aan, noodstop: stand('noodstop') === '1', laatste_push: stand('laatste_push'), laatste_ronde: stand('laatste_ronde'),
+    return { aan: true, onderdelen_aan: aan, noodstop: noodGewenst(), laatste_push: stand('laatste_push'), laatste_ronde: stand('laatste_ronde'),
       laatste_terug: stand('laatste_terug'), kijkers: Number(stand('bezoekers_n') || 0), fout: !!(laatst && laatst.fout), fout_sinds: stand('fout_sinds') || null };
   }
   function markeerVuil() { vuil++; }

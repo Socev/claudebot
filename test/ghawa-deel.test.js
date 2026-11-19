@@ -21,6 +21,7 @@ function nepD1() {
   const log = [];
   const f = async (batch) => {
     if (f.traag) await new Promise((r) => setTimeout(r, f.traag));
+    if (f.voor) await f.voor(batch);   // wv3404: een toets kan een batch laten wachten (poort)
     if (f.stuk) throw new Error('D1 weg');
     db.exec('BEGIN');
     try {
@@ -58,7 +59,7 @@ function omgeving(opties) {
   const v1 = vault();
   const d1 = nepD1();
   let nu = NU;
-  const m = D.maak({ dbPad: fx.db, vault: v1, d1, nu: () => nu, fout: (opties && opties.fout) || (() => {}) });
+  const m = D.maak({ dbPad: fx.db, vault: v1, d1, nu: () => nu, fout: (opties && opties.fout) || (() => {}), busyMs: opties && opties.busyMs });
   return { fx, d1, m, vault: v1, sql: () => new DatabaseSync(fx.db), zetNu: (t) => { nu = t; } };
 }
 async function alleAan(o, ids) {
@@ -481,4 +482,109 @@ test('wv3394 B54: D1 24 uur onbereikbaar → precies één melding (pas na 24 u,
   const u = await o.m.tik(true);
   assert.ok(!u.fout && !u.melden, JSON.stringify(u));
   assert.strictEqual(o.m.health().fout_sinds, null, 'hersteld: teller weg');
+});
+
+// ── wv3404 (actieplan Fable-reviews 19-11, A31: ghawa § M6 + M4) ──
+const slaap = (ms) => new Promise((r) => setTimeout(r, ms));
+function slot(o) { const db = o.sql(); db.exec('PRAGMA busy_timeout = 0'); db.exec('BEGIN IMMEDIATE'); return () => { db.exec('ROLLBACK'); db.close(); }; }   // schrijfslot op de lokale databank
+const d1Stand = (o) => (o.d1.db.prepare("SELECT waarde FROM stand WHERE sleutel = 'noodstop'").get() || {}).waarde;
+const blokD1 = (o, soort, k) => !!o.d1.db.prepare('SELECT 1 FROM blok WHERE soort = ? AND sleutel = ?').get(soort, k);
+
+test('wv3404 A31 slotproef: met een schrijfslot op de lokale databank gaan noodstop, uit en iemand eraf toch meteen naar D1; de tik legt het daarna lokaal vast', async () => {
+  const o = omgeving({ busyMs: 50 });
+  await keurAlles(o); await alleAan(o, ['funds']); await o.m.ronde();
+  const k = await o.m.kijkerErbij({ naam: 'Proef Kijker', adres: 'kijker@voorbeeld.invalid' }, 'toets');
+  assert.ok(deelVan(o, 'funds') && o.d1.db.prepare('SELECT 1 FROM bezoeker WHERE hash = ?').get(k.body.hash));
+  const los = slot(o);
+  let n;
+  try {
+    n = await o.m.noodstop(true);
+    assert.strictEqual(n.body.bevestigd, true, JSON.stringify(n.body));
+    assert.strictEqual(d1Stand(o), '1', 'noodstop buiten ondanks het slot');
+    assert.strictEqual(o.m.health().noodstop, true, 'de app ziet hem aan');
+    const u = await o.m.schakel('funds', false);
+    assert.strictEqual(u.body.dicht, true, JSON.stringify(u.body));
+    assert.strictEqual(deelVan(o, 'funds'), null); assert.ok(blokD1(o, 'onderdeel', 'funds'));
+    const w = await o.m.kijkerEraf(k.body.hash);
+    assert.strictEqual(w.body.dicht, true, JSON.stringify(w.body));
+    assert.ok(!o.d1.db.prepare('SELECT 1 FROM bezoeker WHERE hash = ?').get(k.body.hash)); assert.ok(blokD1(o, 'bezoeker', k.body.hash));
+    assert.strictEqual(o.m.staat().onderdelen.find((x) => x.id === 'funds').aan, false, 'het geheugen gaat voor de lokale stand');
+  } finally { los(); }
+  const t = await o.m.tik(true);
+  assert.ok(!t.fout, JSON.stringify(t));
+  const db = o.sql();
+  assert.strictEqual(db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'aan:funds'").get().waarde, '0');
+  assert.strictEqual(db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'noodstop'").get().waarde, '1');
+  assert.ok(db.prepare("SELECT dicht_bevestigd FROM deel_obj WHERE onderdeel = 'funds'").get().dicht_bevestigd);
+  assert.ok(db.prepare('SELECT weg_op FROM deel_kijker WHERE hash = ?').get(k.body.hash).weg_op);
+  db.close();
+  assert.strictEqual(deelVan(o, 'funds'), null, 'de ronde heropent niets'); assert.strictEqual(d1Stand(o), '1');
+  assert.ok(!o.d1.db.prepare('SELECT 1 FROM bezoeker WHERE hash = ?').get(k.body.hash));
+});
+
+test('wv3404 A31: noodstop, uit en iemand eraf wachten niet op een lopende ronde; de late push van die ronde heropent niets', async () => {
+  const o = omgeving();
+  await keurAlles(o); await alleAan(o, ['funds']); await o.m.ronde();
+  const k = await o.m.kijkerErbij({ naam: 'Proef Kijker', adres: 'kijker@voorbeeld.invalid' }, 'toets');
+  let open; const poort = new Promise((r) => { open = r; });
+  o.d1.voor = (batch) => (batch.some((q) => /^INSERT INTO deel /.test(q.sql)) ? poort : null);   // de ronde hangt op zijn push
+  let db = o.sql(); db.prepare("UPDATE deel_obj SET hash = 'x' WHERE onderdeel = 'funds'").run(); db.close();
+  const r = o.m.ronde();
+  await slaap(20);
+  const binnen = (p) => Promise.race([p, slaap(1000).then(() => 'hangt')]);
+  const n = await binnen(o.m.noodstop(true));
+  assert.notStrictEqual(n, 'hangt', 'noodstop wacht op de ronde');
+  assert.strictEqual(d1Stand(o), '1');
+  const u = await binnen(o.m.schakel('funds', false));
+  assert.notStrictEqual(u, 'hangt', 'uit wacht op de ronde'); assert.strictEqual(u.body.dicht, true);
+  const w = await binnen(o.m.kijkerEraf(k.body.hash));
+  assert.notStrictEqual(w, 'hangt', 'eraf wacht op de ronde'); assert.strictEqual(w.body.dicht, true);
+  open(); await r; o.d1.voor = null;
+  assert.strictEqual(deelVan(o, 'funds'), null, 'late push blijft buiten');
+  assert.strictEqual(o.d1.db.prepare("SELECT count(*) n FROM publicatie WHERE onderdeel = 'funds'").get().n, 0);
+  await o.m.tik(true);
+  assert.strictEqual(deelVan(o, 'funds'), null);
+});
+
+test('wv3404 A31 (M4): weer aanzetten en weer toelaten tijdens een D1-storing slagen in een volgende tik', async () => {
+  const o = omgeving();
+  await keurAlles(o); await alleAan(o, ['funds']); await o.m.ronde();
+  const k = await o.m.kijkerErbij({ naam: 'Proef Kijker', adres: 'kijker@voorbeeld.invalid' }, 'toets');
+  await o.m.schakel('funds', false); await o.m.kijkerEraf(k.body.hash);
+  o.d1.stuk = true;
+  const a = await o.m.schakel('funds', true);
+  assert.ok(a.body.fout, JSON.stringify(a.body));
+  await o.m.kijkerErbij({ naam: 'Proef Kijker', adres: 'kijker@voorbeeld.invalid' }, 'toets');
+  o.d1.stuk = false;
+  assert.ok(blokD1(o, 'onderdeel', 'funds') && blokD1(o, 'bezoeker', k.body.hash), 'nog dicht na de storing');
+  const t = await o.m.tik();
+  assert.ok(!t.fout, JSON.stringify(t));
+  assert.ok(!blokD1(o, 'onderdeel', 'funds'), 'onderdeel heropend'); assert.ok(deelVan(o, 'funds'), 'en gepusht');
+  assert.ok(!blokD1(o, 'bezoeker', k.body.hash), 'kijker weer toegelaten'); assert.ok(o.d1.db.prepare('SELECT 1 FROM bezoeker WHERE hash = ?').get(k.body.hash));
+  const db = o.sql();
+  assert.ok(db.prepare("SELECT open_bevestigd FROM deel_obj WHERE onderdeel = 'funds'").get().open_bevestigd);
+  assert.ok(db.prepare('SELECT erbij_bevestigd FROM deel_kijker WHERE hash = ?').get(k.body.hash).erbij_bevestigd);
+  db.close();
+  const n0 = o.d1.log.length; await o.m.tik();
+  assert.ok(!o.d1.log.slice(n0).some((q) => /DELETE FROM blok/.test(q.sql)), 'bevestigd = niet opnieuw');
+});
+
+test('wv3404 A31: een heropen die laat aankomt maakt een nieuwere intrekking niet ongedaan (onderdeel en kijker)', async () => {
+  const o = omgeving();
+  await keurAlles(o); await alleAan(o, ['funds']); await o.m.ronde();
+  const k = await o.m.kijkerErbij({ naam: 'Proef Kijker', adres: 'kijker@voorbeeld.invalid' }, 'toets');
+  await o.m.schakel('funds', false); await o.m.kijkerEraf(k.body.hash);
+  let open; const poort = new Promise((r) => { open = r; });
+  o.d1.voor = (batch) => (batch.some((q) => /^DELETE FROM blok/.test(q.sql)) ? poort : null);   // weer aan / erbij blijft onderweg hangen
+  const aanP = o.m.schakel('funds', true);
+  const bijP = o.m.kijkerErbij({ naam: 'Proef Kijker', adres: 'kijker@voorbeeld.invalid' }, 'toets');
+  await slaap(20);
+  assert.strictEqual((await o.m.schakel('funds', false)).body.dicht, true);   // David bedenkt zich: meteen buiten
+  assert.strictEqual((await o.m.kijkerEraf(k.body.hash)).body.dicht, true);
+  open(); await aanP; await bijP; o.d1.voor = null;
+  assert.ok(blokD1(o, 'onderdeel', 'funds'), 'blok blijft'); assert.strictEqual(deelVan(o, 'funds'), null);
+  assert.ok(blokD1(o, 'bezoeker', k.body.hash), 'kijker-blok blijft'); assert.ok(!o.d1.db.prepare('SELECT 1 FROM bezoeker WHERE hash = ?').get(k.body.hash));
+  await o.m.tik(true);
+  assert.ok(blokD1(o, 'onderdeel', 'funds') && blokD1(o, 'bezoeker', k.body.hash), 'ook na de tik dicht');
+  assert.strictEqual(deelVan(o, 'funds'), null);
 });
