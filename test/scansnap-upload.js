@@ -5,8 +5,15 @@ const fs = require('fs'), path = require('path'), os = require('os'), vm = requi
 const bron = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const a = bron.indexOf('\nfunction appStartBeurt('), b = bron.indexOf('\nfunction appStartFout(');
 if (a < 0 || b < a) { console.log('ROOD  appStartBeurt niet gevonden in server.js'); process.exit(1); }
-const ci = bron.indexOf('\nfunction codeIdVanKanaal('), codeIdRegel = ci < 0 ? '' : bron.slice(ci, bron.indexOf('\n', ci + 1));
-if (!codeIdRegel) { console.log('ROOD  codeIdVanKanaal niet gevonden in server.js'); process.exit(1); }
+// wv2968: sinds wv3243 is codeIdVanKanaal meerregelig en roept appStartBeurt ook codeDraadVanKanaal aan; knip elke helper heel (één regel of tot '\n}\n')
+function knipFunctie(naam) {
+  const i = bron.indexOf('\nfunction ' + naam + '(');
+  if (i < 0) return '';
+  const e1 = bron.indexOf('\n', i + 1), eerste = bron.slice(i, e1).replace(/\/\/.*$/, '').trim();
+  return eerste.endsWith('}') ? bron.slice(i, e1) : bron.slice(i, bron.indexOf('\n}\n', i + 1) + 2);
+}
+const codeIdRegel = ['codeIdVanKanaal', 'codeDraadVanKanaal'].map(knipFunctie).join('\n');
+if (!knipFunctie('codeIdVanKanaal') || !knipFunctie('codeDraadVanKanaal')) { console.log('ROOD  codeIdVanKanaal/codeDraadVanKanaal niet gevonden in server.js'); process.exit(1); }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'wv1409-'));
 let rood = 0;
 const toets = (naam, ok) => { console.log((ok ? 'GROEN ' : 'ROOD  ') + naam); if (!ok) rood++; };
