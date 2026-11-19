@@ -40,10 +40,11 @@ setTimeout(() => {
 `, { mode: 0o755 });
 
 const rapporten = [];
-let week1 = '0.40', tankRijen = [], koppen = 'beide', weiger = new Set();   // koppen: beide | zonder5h (Anthropic sinds 31-10-2026) | alleen7d | zonder7d   // nep-tank van account 1 (headers zoals /v1/messages) en wat de pod naar de RPC's schrijft
+let meet2 = 0; let week1 = '0.40', tankRijen = [], koppen = 'beide', weiger = new Set();   // koppen: beide | zonder5h (Anthropic sinds 31-10-2026) | alleen7d | zonder7d   // nep-tank van account 1 (headers zoals /v1/messages) en wat de pod naar de RPC's schrijft
 const hook = http.createServer((req, res) => { let b = ''; req.on('data', (c) => b += c); req.on('end', () => {
   if (req.url === '/v1/messages') {
     const tokAcc = /NEP2/.test(String(req.headers.authorization)) ? 2 : 1;   // wv2748: inlog geweigerd per account
+    if (tokAcc === 2) meet2++;   // B63: telt elke meetaanroep met het token van account 2
     if (weiger.has(tokAcc)) { res.writeHead(401, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'OAuth access token is invalid.' } })); }
     const r7 = Math.floor(Date.now() / 1000) + 3 * 86400;
     const k = { 'anthropic-ratelimit-unified-5h-utilization': '0.10', 'anthropic-ratelimit-unified-7d-utilization': week1,
@@ -244,6 +245,34 @@ function stop(srv) { try { process.kill(-srv.p.pid, 'SIGKILL'); } catch (e) {} }
     toets('I herstel: meting weer ok en inlog-stand leeg', i3.ok === true && i4.ok === true && h.accounts.inlog['1'] === null && h.accounts.inlog['2'] === null, JSON.stringify(h.accounts.inlog));
     toets('I herstel staat in het log', /"soort":"inlog-hersteld"/.test(fs.readFileSync(path.join(iw.d, 'api.log'), 'utf8')));
     stop(iw);
+
+    // J. B63 (actieplan Fable 19-11): schakelaar op 1 -> de meetklok meet account 2 niet, ook niet na een herstart; dus geen
+    //    401-melding (box-rij, bericht aan David) voor een abonnement dat bewust uit staat. Token 2 wordt geweigerd (verlopen abonnement).
+    const jBer = path.join(W, 'bericht-j.log');
+    fs.writeFileSync(path.join(W, 'bin', 'nep-bericht-j'), 'import json, sys\nopen(' + JSON.stringify(jBer) + ', "a").write(json.dumps(sys.argv[1:]) + "\\n")\n', { mode: 0o755 });
+    const jEnv = { CLAUDE_OAUTH_TOKEN_2: T2, ACCOUNT2_MEET: '1', TOKEN_WACHT_PROEF: path.join(W, 'bin', 'nep-bericht-j'), TOKEN_DAVID_NA_PROEF_MS: '0' };
+    const jPoort = vrijePoort();
+    let j = maakServer('s8', jPoort, jEnv); alle.push(j);
+    fs.mkdirSync(path.join(j.d, 'vault', '00_Systeem', 'Meldingen'), { recursive: true });
+    fs.copyFileSync('vault-veilig.js', path.join(j.d, 'vault-veilig.js'));
+    fs.writeFileSync(path.join(j.d, 'vault', '00_Systeem', 'Meldingen', 'machinekamer.md'), '# Box\n');
+    fs.writeFileSync(path.join(j.d, 'claude-accounts.json'), '{"agents":1}');
+    weiger = new Set([2]); tankRijen = []; meet2 = 0;
+    await wachtOp(j); await slaap(2500);
+    stop(j); await slaap(300);
+    j = maakServer('s8', jPoort, jEnv); alle.push(j); await wachtOp(j); await slaap(2500);   // herstart: meldstaat leeg
+    h = await req(j, 'GET', '/health');
+    const jBox = fs.readFileSync(path.join(j.d, 'vault', '00_Systeem', 'Meldingen', 'machinekamer.md'), 'utf8');
+    toets('J schakelaar 1: geen meetaanroep met token 2 (start + herstart)', meet2 === 0, 'meet2=' + meet2);
+    toets('J schakelaar 1: niets naar mk_tank2_schrijf', !tankRijen.some((x) => x.rpc === 'mk_tank2_schrijf'), JSON.stringify(tankRijen));
+    toets('J schakelaar 1: geen geweigerd-stand voor account 2', h.accounts && h.accounts.agents_op === 1 && h.accounts.inlog && h.accounts.inlog['2'] === null, JSON.stringify(h.accounts && h.accounts.inlog));
+    toets('J schakelaar 1: geen box-rij en geen bericht over account 2', !/Claude-inlog account 2/.test(jBox) && !fs.existsSync(jBer), jBox.slice(0, 200));
+    // Terug naar 2 (zonder herstart): de volgende ronde meet weer. De klok tikt elke 10 min; de foutroute van een agent roept de ronde ook aan.
+    fs.writeFileSync(path.join(j.d, 'claude-accounts.json'), '{"agents":2}');
+    weiger = new Set(); meet2 = 0;
+    const jt = await req(j, 'GET', '/tank?account=2&verversen=1');
+    toets('J schakelaar terug op 2: /tank?account=2 meet weer', jt.ok === true && meet2 >= 1, JSON.stringify(jt).slice(0, 160));
+    stop(j);
 
     // F. geen token 2 (geen env, geen kluisroute): agents op 1, /tank?account=2 geeft 503 met reden, /tank zonder account ongemoeid
     const g = maakServer('s4', vrijePoort(), {}); alle.push(g); await wachtOp(g);
