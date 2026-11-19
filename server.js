@@ -2620,6 +2620,80 @@ function dbReserveWachtStand() {
 }
 /* dbReserveWacht:einde */
 if (SERVER_ECHT === true) { setTimeout(dbVraag, 8000).unref(); setInterval(dbVraag, 60 * 1000).unref(); }
+// wv3418 (actieplan Fable 19-11, B39): de bedoelde versie. uitrol.sh schrijft bij elke omzetting <APP_ROOT>/gewenst ({sha, tijd, door,
+// reden}); /health toont het als `gewenst` naast `versie`. Staat er 10 min lang een andere versie dan bedoeld (stille terugflip door de
+// supervisor na een schijfhapering, halve stand, bootstrap uit het image), dan één box-rij per verschil (sleutel gewenst>draait): geen
+// herhaling zolang het blijft, opnieuw meldbaar zodra het verschil eerst weg was. Gemeld en sinds staan in een klein bestand, zodat een
+// herstart niet opnieuw meldt. Alleen de echte release op de primaire kant. Geen gewenst-bestand = niets te vergelijken (stil).
+// test/gewenst-wacht.sh knipt het blok tussen de markers.
+/* gewenstWacht:begin */
+const GEWENST_PAD = serverPad('gewenst', process.env.GEWENST_PAD || (process.env.APP_ROOT ? path.join(process.env.APP_ROOT, 'gewenst') : ''), '/opt/data/app/gewenst', serverProefDeel('gewenst'));
+const GEWENST_WACHT_PAD = serverPad('gewenst_wacht', process.env.GEWENST_WACHT, '/opt/data/scripts-staat/gewenst-wacht.json', serverProefDeel('gewenst-wacht.json'));
+const GEWENST_DREMPEL_MS = 10 * 60 * 1000;
+let gewenstStaat = null, gewenstSchijf = null;   // { sinds: { sleutel, op } | null, gemeld: sleutel | null }; Schijf: laatst weggeschreven tekst
+function gewenstDraait() { return String(process.env.RELEASE_SHA || process.env.IMAGE_SHA || ''); }
+function gewenstLees() {   // null = geen bestand; { fout } = niet te lezen of kapot (telt niet als verschil)
+  let t;
+  try { t = fs.readFileSync(GEWENST_PAD, 'utf8'); } catch (e) { return e && e.code === 'ENOENT' ? null : { fout: 'onleesbaar' }; }
+  try {
+    const j = JSON.parse(t);
+    if (j && typeof j.sha === 'string' && /^[0-9a-f]{7,40}$/.test(j.sha)) {
+      return { sha: j.sha, tijd: typeof j.tijd === 'string' ? j.tijd.slice(0, 40) : null, door: typeof j.door === 'string' ? j.door.slice(0, 40) : null,
+        reden: typeof j.reden === 'string' ? j.reden.slice(0, 120) : null };
+    }
+  } catch (e) {}
+  return { fout: 'kapot' };
+}
+function gewenstGelijk(a, b) { if (!a || !b) return false; const n = Math.min(a.length, b.length); return n >= 7 && a.slice(0, n) === b.slice(0, n); }
+function gewenstStap(staat, g, draait, nuMs) {   // → { staat, melden: null | { sleutel, sinds } }
+  const s = { sinds: (staat && staat.sinds) || null, gemeld: (staat && staat.gemeld) || null };
+  if (!g || g.fout) return { staat: s, melden: null };
+  if (gewenstGelijk(g.sha, draait)) return { staat: { sinds: null, gemeld: null }, melden: null };
+  const sleutel = g.sha + '>' + (draait || 'onbekend');
+  if (!s.sinds || s.sinds.sleutel !== sleutel) s.sinds = { sleutel: sleutel, op: nuMs };
+  if (s.gemeld === sleutel || nuMs - s.sinds.op < GEWENST_DREMPEL_MS) return { staat: s, melden: null };
+  return { staat: s, melden: { sleutel: sleutel, sinds: s.sinds.op } };
+}
+function gewenstKlok(ms) { return new Date(ms).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16); }
+function gewenstBoxRij(g, draait, sinds, nuMs) {
+  return '\n## [direct] ' + gewenstKlok(nuMs) + ' — Pod draait ' + (draait || 'onbekend') + ', bedoeld is ' + g.sha + ' (automatisch, wv3418)\n' +
+    '- status: open\n- van: pod server.js (gewenst-wacht; één rij per verschil, geen herhaling zolang het blijft)\n' +
+    '- gemeten: ' + GEWENST_PAD + ' zegt ' + g.sha + ' (gezet ' + (g.tijd || '?') + ' door ' + (g.door || '?') + (g.reden ? ', ' + g.reden : '') +
+    '); /health versie is ' + (draait || 'onbekend') + ', zo sinds ' + gewenstKlok(sinds) + '. /health gewenst toont de stand.\n' +
+    '- gevolg als er niets gebeurt: de pod draait andere (meestal oudere) code dan bedoeld; wat sinds die uitrol gebouwd is, staat niet live.\n' +
+    '- voorstel: bin/supervisor.log en bin/uitrol.log nakijken (terugflip na een schijfhapering? halve stand? bootstrap uit het image?); ' +
+    'daarna opnieuw uitrollen met ' + g.sha + ', of bewust de draaiende sha uitrollen zodat die de bedoelde wordt.\n';
+}
+function gewenstWacht() {
+  try {
+    if (SERVER_ECHT !== true) return;
+    try { if (!rolPrimair()) return; } catch (e) { return; }
+    if (!gewenstStaat) {
+      try { const t = fs.readFileSync(GEWENST_WACHT_PAD, 'utf8'); gewenstStaat = JSON.parse(t) || {}; gewenstSchijf = JSON.stringify(gewenstStaat); }
+      catch (e) { gewenstStaat = {}; }
+    }
+    const nuMs = Date.now(), g = gewenstLees(), draait = gewenstDraait(), uit = gewenstStap(gewenstStaat, g, draait, nuMs);
+    gewenstStaat = uit.staat;
+    if (uit.melden) {
+      if (ovisBoxRij(gewenstBoxRij(g, draait, uit.melden.sinds, nuMs)) === true) {
+        gewenstStaat.gemeld = uit.melden.sleutel;
+        schrijfLog(nu() + ' gewenst-wacht box-rij ' + uit.melden.sleutel);
+      }   // niet geschreven: gemeld blijft leeg, de volgende minuut opnieuw
+    }
+    const tekst = JSON.stringify(gewenstStaat);
+    if (tekst !== gewenstSchijf) { const t = GEWENST_WACHT_PAD + '.tmp'; fs.writeFileSync(t, tekst, { mode: 0o600 }); fs.renameSync(t, GEWENST_WACHT_PAD); gewenstSchijf = tekst; }
+  } catch (e) { logError('gewenst-wacht', e); }
+}
+function gewenstInfo() {   // /health: null = geen gewenst-bestand
+  const g = gewenstLees();
+  if (!g) return null;
+  if (g.fout) return { fout: g.fout };
+  const s = gewenstStaat || {};
+  return { sha: g.sha, tijd: g.tijd, door: g.door, reden: g.reden, gelijk: gewenstGelijk(g.sha, gewenstDraait()),
+    verschil_sinds: s.sinds ? new Date(s.sinds.op).toISOString() : null, gemeld: s.gemeld || null };
+}
+/* gewenstWacht:einde */
+if (SERVER_ECHT === true) { setTimeout(gewenstWacht, 30 * 1000).unref(); setInterval(gewenstWacht, 60 * 1000).unref(); }
 // wv716 (ontwerp wv703 D, Fable: bouwen): geheugen en lusvertraging van dit proces op /health.proces (niet op /health/publiek).
 // monitorEventLoopDelay is één libuv-timer (20 ms) met een histogram; elke volle minuut uitlezen en leegmaken, en de waarden van
 // die minuut tonen. Meet een sluipende JS-lus of GC-druk (de minuut vóór een syscall-hang blijft leeg); de bewaker neemt het
@@ -4581,6 +4655,7 @@ function handleRequest(req, res) {
       // onderscheiden.
       versie: process.env.RELEASE_SHA || process.env.IMAGE_SHA || 'onbekend',
       image_versie: process.env.IMAGE_SHA || 'onbekend',
+      gewenst: gewenstInfo(),   // wv3418 (B39): de bedoelde versie volgens uitrol.sh (sha, tijd, gelijk aan versie?, verschil_sinds, gemeld); null = geen gewenst-bestand
       jobs: Object.keys(jobs).length, chats: Object.keys(chatSessions).length,
       // Wat een uitrol nu zou afbreken (28-9-2026). Een herstart midden in een beurt, of vlak ná een beurt maar vóór
       // n8n het resultaat ophaalde, laat het antwoord stil verdwijnen (27-9 22:42, machinekamer-executie 44316).
