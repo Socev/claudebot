@@ -146,7 +146,7 @@ function leesIcsCsv(bytes) {
  * wv2958 (David 12-11-2026): het maandelijkse ICS-rekeningoverzicht als PDF. De tekst komt van de beller (pdftotext -layout, via io in
  * server.js of het machinekamer-gereedschap); deze functie is puur. Opbouw (gemeten op een echt overzicht, Mastercard Business, 1 blad):
  * kop "rekeningoverzicht" + "International Card Services", een regel "Datum / ICS-klantnummer / Volgnummer / Bladnummer" met eronder
- * "03 november 2026   770.1580.0012   11   1 van 1", een regel "Vorig openstaand saldo / Totaal credit / Totaal debet / Nieuw openstaand
+ * "03 november 2026   123.4567.8901   11   1 van 1", een regel "Vorig openstaand saldo / Totaal credit / Totaal debet / Nieuw openstaand
  * saldo" met eronder vier eurobedragen (saldi met debet/credit), dan per kaart "Card-nummer: ************1234" en de regels
  * "05 okt   06 okt   NAAM   PLAATS   LND   9,00 USD   8,26 debet" (vreemde valuta optioneel, eronder "Wisselkoers USD 1.08959").
  * Het overzicht is de maand van de overzichtsdatum (zoals "Maand/jaar rekeningoverzicht" in de CSV); het jaar van een regel volgt uit die

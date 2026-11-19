@@ -110,7 +110,7 @@ function maskeer(s) {   // elke cijferreeks van ≥ 8 cijfers → … + laatste 
   return String(s).replace(/\d{8,}/g, (m) => '…' + m.slice(-4));
 }
 function cijfersAaneen(s) { return String(s).replace(/(\d)[ .\-\/](?=\d)/g, '$1'); }
-function naamRe(naam) {   // "Lamin M. Manneh" → /(?<!\p{L})Lamin\s+M\.?\s+Manneh(?!\p{L})/giu (hoofdletterongevoelig, punten en spaties los)
+function naamRe(naam) {   // "Jan K. Voorbeeld" → /(?<!\p{L})Jan\s+K\.?\s+Voorbeeld(?!\p{L})/giu (hoofdletterongevoelig, punten en spaties los)
   const delen = String(naam).normalize('NFC').trim().split(/[\s.]+/).filter(Boolean).map(esc);
   return new RegExp('(?<![\\p{L}\\p{N}])' + delen.join('[\\s.]*\\s*') + '\\.?(?![\\p{L}\\p{N}])', 'giu');
 }
@@ -128,7 +128,7 @@ function chequeNamen(oms) {   // "… PAID TO X Y", "PAID IFO X", "IFO X, …", 
   }
   return uit;
 }
-function varianten(naam) {   // "Lamin M. Manneh" → ook "Lamin Manneh" (middelste initialen weg)
+function varianten(naam) {   // "Jan K. Voorbeeld" → ook "Jan Voorbeeld" (middelste initialen weg)
   const d = String(naam).trim().split(/\s+/);
   if (d.length < 3) return [];
   const kern = [d[0]].concat(d.slice(1, -1).filter((x) => x.replace(/\./g, '').length > 2), [d[d.length - 1]]);
@@ -172,8 +172,18 @@ function lijstenVan(db, vault, S) {
   for (const r of a('SELECT DISTINCT rekening AS x FROM bankregel_ecg UNION SELECT DISTINCT van FROM geldstroom UNION SELECT DISTINCT naar FROM geldstroom')) cijf(r.x);
   for (const r of a('SELECT DISTINCT rekening AS x FROM afschrift')) cijf(r.x);
   for (const r of a('SELECT toelichting AS x FROM instelling')) for (const m of String(r.x || '').match(/\d{8,}/g) || []) rekeningen.add(m);
+  // rekeningnummers van ECG staan alleen op de pod (instelling rekeningen_ecg, nummer → GMD/EUR; wv3388): label en poortlijst
+  const rekLabels = [];
+  for (const r of a("SELECT waarde AS x FROM instelling WHERE sleutel IN ('rekeningen_ecg', 'rekeningen_ghawa')")) {
+    let j = null; try { j = JSON.parse(r.x); } catch (e) { j = null; }
+    if (!j || typeof j !== 'object' || Array.isArray(j)) continue;
+    for (const [nr, soort] of Object.entries(j)) {
+      cijf(nr);
+      if (/^(GMD|EUR)$/.test(soort) && /^\d{6,}$/.test(nr)) rekLabels.push([new RegExp(esc(nr)), 'ECG ' + soort + ' account']);
+    }
+  }
   for (const r of a("SELECT DISTINCT tegenrekening AS x FROM bankregel_ghawa")) { const iban = String(r.x || '').replace(/\s+/g, '').toUpperCase(); if (/^[A-Z]{2}\d{2}[A-Z0-9]{8,}$/.test(iban)) cijf(iban.slice(4)); }
-  return { prive: [...prive], personen, variant, delen: [...delen], rekeningen: [...rekeningen] };
+  return { prive: [...prive], personen, variant, delen: [...delen], rekeningen: [...rekeningen], rekLabels };
 }
 
 // ── poort: alleen tekstwaarden; getallen apart ──
@@ -232,7 +242,7 @@ function maakLabels(l, sleutel) {
     tekst: (s) => { let t = String(s); for (const v of vervang) t = t.replace(v.re, v.label); return t; },
   };
 }
-const REK_LABEL = [[/6240042907|\bGMD\b.*ECG|ECG.*\bGMD\b|^GMD\b/i, 'ECG GMD account'], [/6240042909|ECG EUR|^EUR\b/i, 'ECG EUR account'],
+const REK_LABEL = [[/\bGMD\b.*ECG|ECG.*\bGMD\b|^GMD\b/i, 'ECG GMD account'], [/ECG EUR|^EUR\b/i, 'ECG EUR account'],   // nummers: lijstenVan().rekLabels
   [/GHAWA/i, 'GHAWA (NL)'], [/Wilde Ganzen/i, 'Wilde Ganzen']];
 function rekLabel(v, extra) {
   if (v == null || v === '') return null;
@@ -299,7 +309,7 @@ function ghawaBlok(rijen, vorigeGiften, stand, vorigeGroepen) {
 
 // ── pakketten ──
 function bouwPakketten(x) {
-  // x: { k (bereken), d (leesData), rijen {…}, stichting, lab, goed (Map hash→besluit), mijlpalen, gedeeldeOverleggen (Set), blok, stand }
+  // x: { k (bereken), d (leesData), rijen {…}, stichting, lab, goed (Map hash→besluit), mijlpalen, gedeeldeOverleggen (Set), blok, stand, rekLabels (uit lijstenVan) }
   const nieuw = [];
   const tekst = (v, onderdeel, waar) => {
     if (v == null || v === '') return null;
@@ -365,15 +375,15 @@ function bouwPakketten(x) {
       lines: regels.map((g) => { const kk = regelK.get(g.id) || {}; return { id: g.id, activity: g.activiteit, item: tekst(g.post, id, 'line ' + g.id), qty: g.aantal == null ? null : ref(g.aantal, id, 'line ' + g.id + ' qty'),
         price: g.prijs_cent, budget: g.begroot_cent, realised: kk.gerealiseerd || 0, open: kk.open == null ? null : kk.open, status: tekst(g.status, id, 'line ' + g.id + ' status') }; }),
       expenditures: r.uitgaven.filter((u) => rIds.has(u.regel)).map((u) => ({ id: u.id, date: datum(u.datum), line: u.regel, description: tekst(u.omschrijving, id, 'expenditure ' + u.id),
-        reference: ref(u.referentie, id, 'expenditure ' + u.id + ' reference'), gmd: u.gmd_cent, paid_from: rekLabel(u.betaald_van), method: tekst(u.betaalwijze, id, 'expenditure ' + u.id + ' method'),
+        reference: ref(u.referentie, id, 'expenditure ' + u.id + ' reference'), gmd: u.gmd_cent, paid_from: rekLabel(u.betaald_van, x.rekLabels), method: tekst(u.betaalwijze, id, 'expenditure ' + u.id + ' method'),
         cheque: ref(u.cheque, id, 'expenditure ' + u.id + ' cheque'), evidence: tekst(u.bewijs, id, 'expenditure ' + u.id + ' evidence') })) };
   }
   // ECG accounts
   pakket.accounts = { as_of: asOf,
     balances: [{ account: 'ECG GMD account', currency: 'GMD', balance: k.ecg.gmd.saldo, date: k.ecg.gmd.datum }, { account: 'ECG EUR account', currency: 'EUR', balance: k.ecg.eur.saldo, date: k.ecg.eur.datum }],
-    bank: r.bank.map((b) => ({ account: b.munt === 'GMD' ? 'ECG GMD account' : b.munt === 'EUR' ? 'ECG EUR account' : rekLabel(b.rekening), date: datum(b.datum), reference: ref(b.referentie, 'accounts', 'bank reference'),
+    bank: r.bank.map((b) => ({ account: b.munt === 'GMD' ? 'ECG GMD account' : b.munt === 'EUR' ? 'ECG EUR account' : rekLabel(b.rekening, x.rekLabels), date: datum(b.datum), reference: ref(b.referentie, 'accounts', 'bank reference'),
       amount: b.bedrag_cent, currency: b.munt, balance: b.saldo_cent, kind: tekst(b.soort, 'accounts', 'bank kind'), cheque: ref(b.cheque, 'accounts', 'bank cheque'), payee: b.begunstigde ? x.lab.payee(b.begunstigde) : null })),
-    flows: r.stromen.map((s) => ({ id: s.id, date: datum(s.datum), kind: tekst(s.soort, 'accounts', 'flow ' + s.id), from: rekLabel(s.van), to: rekLabel(s.naar), eur: s.eur_cent, gmd: s.gmd_cent,
+    flows: r.stromen.map((s) => ({ id: s.id, date: datum(s.datum), kind: tekst(s.soort, 'accounts', 'flow ' + s.id), from: rekLabel(s.van, x.rekLabels), to: rekLabel(s.naar, x.rekLabels), eur: s.eur_cent, gmd: s.gmd_cent,
       rate: s.eur_cent && s.gmd_cent ? Math.round((s.gmd_cent / s.eur_cent) * 100) / 100 : null, reference: ref(s.referentie, 'accounts', 'flow ' + s.id + ' reference'), purpose: tekst(s.doel, 'accounts', 'flow ' + s.id + ' purpose') })) };
   // Funds (alleen Grant / Sponsor / Own funds)
   pakket.funds = { as_of: asOf, funds: r.fondsen.filter((f) => /^(grant|sponsor|own funds)$/i.test(String(f.soort || ''))).map((f) => ({ id: f.id, giver: tekst(f.gever, 'funds', 'fund ' + f.id),
@@ -475,7 +485,7 @@ function maak(o) {
     const sb = ghawaBlok(x.ghawaRijen, x.vorig, st, x.groepen);
     const blok = sb.mag ? sb.blok : x.blokOud;
     sb.nieuw = sb.mag && JSON.stringify(sb.blok) !== JSON.stringify(x.blokOud);
-    const b = bouwPakketten({ k: x.k, d: x.d, rijen: x.rijen, stichting: x.stichting, lab, goed: x.goed, mijlpalen: x.mp.rijen, gedeeldeOverleggen: x.gedeeld, blok, personenSoort: x.personenSoort });
+    const b = bouwPakketten({ k: x.k, d: x.d, rijen: x.rijen, stichting: x.stichting, lab, goed: x.goed, mijlpalen: x.mp.rijen, gedeeldeOverleggen: x.gedeeld, blok, personenSoort: x.personenSoort, rekLabels: x.l.rekLabels });
     const p = poortLijsten(x.l);
     // een nieuwe tekst die zelf de poort niet haalt, kan David niet delen
     for (const t of b.nieuw) t.poort_ok = poortTekst(t.tekst, p) === null;
@@ -783,5 +793,5 @@ function maak(o) {
     staat, health, markeerVuil, _lees: lees, _bouw: bouw, _rij: inRij, _zet: zet };
 }
 
-module.exports = { maak, varianten, poort, poortTekst, poortLijsten, lijstenVan, maakLabels, ghawaBlok, bouwPakketten, mijlpalenEngels, maskeer, chequeNamen, adresHash,
+module.exports = { maak, rekLabel, varianten, poort, poortTekst, poortLijsten, lijstenVan, maakLabels, ghawaBlok, bouwPakketten, mijlpalenEngels, maskeer, chequeNamen, adresHash,
   eindVorigeMaand, technischOk, DEEL_KOLOMMEN, D1_SCHEMA, IDS, ONDERDELEN, PENDING, HOLD, GIFT };
