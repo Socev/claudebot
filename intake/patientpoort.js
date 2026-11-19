@@ -19,6 +19,10 @@
  *   6. bijlage zonder leesbare tekst, ook niet na OCR (leesbaar: false)                               → tegen (fail-closed)
  *   7. leeg geboortedatumveld + "patiënt" (enkelvoud) + medisch kenmerk                               → tegen
  *   8. "patiënt" (enkelvoud) + medische termen: ≥ 3 bij een scan, ≥ 4 bij digitale tekst tot briefomvang → tegen
+ *   9. (wv3395, Fable 9-11 #1) een bij naam genoemde persoon ("de heer J. Pietersma", "uw patiënte mevrouw S. Bakker", "Naam: K. de Wit")
+ *      in een brief: direct na "uw patiënt(e)" of met brieftaal + een medisch kenmerk; met arts-aan-arts-taal aan één collega (geachte
+ *      collega, collegiale groet) + ≥ 2 klinische termen; of als naamveld + ≥ 3 klinische termen, steeds tot briefomvang           → tegen
+ *   Geboortedatum telt ook met een tweecijferig jaar direct na een geboortelabel ("geb. 12-03-58", "geboortedatum: 12-03-58").
  * Uitzondering (Davids eigen medische post), alleen als ALLES klopt: Davids eigen BSN staat erin (of zijn eigen
  * geboortedatum en de afzender staat op de lijst eigen zorgverleners), en er staat geen enkel ander BSN, geen andere
  * geboortedatum en geen andere naam + oude datum in. Waarden staan als HMAC-SHA256 met een sleutel op de pod (sha256 van een
@@ -29,7 +33,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const K = require(process.env.FACTUREN_KERN || require('path').join(__dirname, '..', 'facturen-kern.js'));
 
-const VERSIE = 'patientpoort-2.0';
+const VERSIE = 'patientpoort-2.1';
 const MIN_TEKST = 40;
 const STUK = 150000;       // facturen-kern.schoon kapt op 200.000 tekens: per 150.000 opknippen (Fable #11)
 const OVERLAP = 400;
@@ -37,6 +41,17 @@ const BRIEF_MAX = 8000;     // tekens zonder witruimte: een brief van 1–3 pagi
 const DATUM_BRON = '(\\d{4}-\\d{1,2}-\\d{1,2}|\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{4}|\\d{1,2}\\s+[a-z]{3,9}\\.?\\s+\\d{4})';
 const GEB_LABEL = '(geboortedatum|geboortedat\\.?|geb\\.?\\s?dat(?:um|\\.)?|geboren(?:\\s+op)?|geb\\.?)';
 const GEBOORTE = new RegExp('\\b' + GEB_LABEL + '\\s?[:.]?\\s?' + DATUM_BRON, 'gi');
+// wv3395: tweecijferig jaar alleen direct na "geb."/"geboren" (een losse dd-mm-jj is meestal een briefdatum)
+const GEB_KORT = new RegExp('\\b' + GEB_LABEL + '\\s?[:.]?\\s?(\\d{1,2})[-/.](\\d{1,2})[-/.](\\d{2})(?!\\d)', 'gi');
+// wv3395: een bij naam genoemde persoon. Aanspreking + (voorletters/voornaam) + achternaam met hoofdletter, niet als aanhef van de lezer
+// ("Geachte mevrouw X", "t.a.v. de heer X"); of een naamveld aan het begin van een regel ("Naam: K. de Wit", "Patiënte: Bakker").
+const AANSPREEK_NAAM = /(^|[^A-Za-zÀ-ÿ])([Mm]evrouw|[Mm]evr\.|[Mm]w\.|[Dd]e heer|[Dd]hr\.)[ \t]+(?:[A-Z][a-zà-ÿ]*\.?[ \t]*){0,3}(?:(?:van|de|der|den|ter|ten|te|het|la|le|el|da|di|du)[ \t]+){0,3}[A-Z][A-Za-zà-ÿ'’-]{1,}/g;
+const AANHEF_VOOR = /(?:^|[^a-zà-ÿ])(geachte|beste|lieve|hallo|t\.?\s?a\.?\s?v\.?|ter\s+attentie\s+van)\s*:?\s*$|^\s*(aan|dag)\s*:?\s*$/i;
+const NAAM_VELD = /^[ \t]*([Nn]aam(?:[ \t]+(?:pati[eë]nt(?:e)?|cli[eë]nt(?:e)?))?|[Pp]ati[eë]nt(?:e)?|[Cc]li[eë]nt(?:e)?)[ \t]*:[ \t]*(?:[A-Z][a-zà-ÿ]*\.?[ \t]*){0,3}(?:(?:van|de|der|den|ter|ten|te|het)[ \t]+){0,3}[A-Z][A-Za-zà-ÿ'’-]{1,}/m;
+const COLLEGA = /^(geachte collega|collegiale )/;
+const COLLEGAS = /\bgeachte\s+collega['’]?s\b/i;   // rondmail aan meer collega's (HAGRO) telt niet als arts-aan-arts-brief voor regel 9
+// "uw patiënte mevrouw S. Bakker": de naam in dezelfde zin, binnen 40 tekens na "uw/onze patiënt(e)" (Fable-review wv3395 ZOU 4b)
+const UW_PATIENT_NAAM = /\b(uw|onze)\s+pati[eë]nt(e)?\b(?![(e])[^\n.!?;]{0,40}?(?:[Mm]evrouw|[Mm]evr\.|[Mm]w\.|[Dd]e heer|[Dd]hr\.)[ \t]+(?:[A-Z][a-zà-ÿ]*\.?[ \t]*){0,3}(?:(?:van|de|der|den|ter|ten|te|het)[ \t]+){0,3}[A-Z][A-Za-zà-ÿ'’-]{1,}/;
 const GEB_VELD = /\b(geboortedatum|geboortedat\.?|geb\.?\s?dat(?:um|\.)?)(?![a-z])/i;
 const BSN_KAND = /(?<![\dA-Za-z.,])(\d{9}|\d{4}[ .]\d{2}[ .]\d{3}|\d{3}[ .]\d{3}[ .]\d{3})(?![\dA-Za-z]|[.,]\d)/g;
 // Aanspreking + (naam) + kale datum op dezelfde regel: "Dhr. J. Jansen (12-03-1958)". Telt als persoonskenmerk als de datum
@@ -62,6 +77,8 @@ const MEDISCH = new RegExp('\\b(' + [
   // brieftaal tussen artsen
   'geachte\\s+collega', 'collegiale\\s+(groet|groeten|hoogachting)', 'lichamelijk\\s+onderzoek', 'aanvullend\\s+onderzoek',
   'klinische\\s+opname', 'opgenomen\\s+op\\s+de\\s+afdeling',
+  // wv3395: SEH- en opnamebericht
+  'seh(-?bericht)?', 'spoedeisende\\s+hulp', 'reden\\s+van\\s+komst', 'opnamebericht', 'ontslagbericht',
   // dosering en lab
   '\\d\\s*dd\\s*\\d', '\\d+\\s?mg\\b', 'hb', 'kreatinine', 'egfr', 'mmol(/l)?', 'hba1c', 'crp',
   // GGZ en jeugd
@@ -103,6 +120,21 @@ function zonderIban(t) {
   for (const i of K.ibansIn(t, { alle: true })) t = t.slice(0, i.positie) + ' '.repeat(i.lengte) + t.slice(i.positie + i.lengte);
   return t;
 }
+// "geb. 12-03-58" → 1958-03-12 (een jaar dat nog moet komen hoort bij de vorige eeuw); ongeldig = null (telt dan als vreemd)
+function kortJaar(m, nu) {
+  const nuJ = new Date(nu || Date.now()).getUTCFullYear(), jj = Number(m[4]);
+  const j = 2000 + jj <= nuJ ? 2000 + jj : 1900 + jj;
+  return K.leesDatum(m[2] + '-' + m[3] + '-' + j);
+}
+function persoonMetNaam(d) {
+  let m; AANSPREEK_NAAM.lastIndex = 0;
+  while ((m = AANSPREEK_NAAM.exec(d))) {
+    const begin = m.index + m[1].length;
+    const voor = d.slice(Math.max(0, d.lastIndexOf('\n', begin - 1) + 1, begin - 40), begin);
+    if (!AANHEF_VOOR.test(voor)) return true;
+  }
+  return false;
+}
 function jaarGeleden(nu) { const d = new Date(nu || Date.now()); d.setUTCFullYear(d.getUTCFullYear() - 1); return d.toISOString().slice(0, 10); }
 
 // Alle persoonskenmerken, eigen en vreemd gescheiden. Tekst gaat niet terug.
@@ -122,6 +154,8 @@ function personen(delen, eigen, nu) {
     const z = zonderAccenten(t);
     GEBOORTE.lastIndex = 0;
     while ((m = GEBOORTE.exec(z))) { const d = K.leesDatum(m[2]); if (d && eigen.h && eigen.geb.has(eigen.h(d))) uit.eigen_geb++; else uit.vreemd_geb++; }
+    GEB_KORT.lastIndex = 0;
+    while ((m = GEB_KORT.exec(z))) { const d = kortJaar(m, nu); if (d && eigen.h && eigen.geb.has(eigen.h(d))) uit.eigen_geb++; else uit.vreemd_geb++; }
     PERSOON_DATUM.lastIndex = 0;
     while ((m = PERSOON_DATUM.exec(z))) {
       const d = K.leesDatum(m[2]); if (!d || d >= grens) continue;
@@ -151,6 +185,10 @@ function beoordeel(stuk, opties) {
   for (const d of delen) {
     const z = zonderAccenten(d);
     GEBOORTE.lastIndex = 0; if (GEBOORTE.test(z)) s.add('geboortedatum');
+    GEB_KORT.lastIndex = 0; if (GEB_KORT.test(z)) s.add('geboortedatum');
+    if (persoonMetNaam(d)) s.add('persoon_naam');
+    if (UW_PATIENT_NAAM.test(d)) { s.add('persoon_naam'); s.add('uw_patient_naam'); }
+    if (NAAM_VELD.test(d)) { s.add('persoon_naam'); s.add('naam_veld'); }
     if (GEB_VELD.test(z)) s.add('geboortedatum_veld');
     if (BRIEF_STERK.test(d)) s.add('brieftaal');
     if (BETREFT_PERSOON.test(d)) s.add('betreft_persoon');
@@ -168,6 +206,10 @@ function beoordeel(stuk, opties) {
   if (stuk.leesbaar === false) s.add('onleesbaar');
 
   const lengte = delen.reduce((n, d) => n + d.replace(/\s/g, '').length, 0);
+  const collega = [...med].some((x) => COLLEGA.test(x));
+  const collegaBrief = collega && !delen.some((d) => COLLEGAS.test(d));
+  const klinisch = [...med].filter((x) => !COLLEGA.test(x)).length;
+  if (collega) s.add('collega_brief');
   const medisch = s.has('medisch') || s.has('uw_patient') || s.has('verwijsbericht');
   const persoon = s.has('geboortedatum') || s.has('bsn_los') || s.has('persoon_datum');
   const enkel = s.has('patient_woord');
@@ -181,12 +223,14 @@ function beoordeel(stuk, opties) {
   else if (s.has('geboortedatum_veld') && enkel && medisch) regel = 7;
   // Digitaal alleen bij een brief-lengte: beleidsstukken van HAGRO en Tolgaarde (12–37k tekens) haalden ≥ 4 termen (meting 24-10).
   else if (enkel && (stuk.scan ? s.has('medisch_3') : (s.has('medisch_4') && lengte <= BRIEF_MAX))) regel = 8;
+  // wv3395: bij naam genoemde persoon in een brief over zorg (tot briefomvang; lange beleidsstukken noemen ook mensen)
+  else if (s.has('persoon_naam') && lengte <= BRIEF_MAX && (((s.has('uw_patient_naam') || s.has('brieftaal')) && medisch)
+    || (collegaBrief && klinisch >= 2) || (s.has('naam_veld') && klinisch >= 3))) regel = 9;
 
   let eigenUitz = false;
   // wv1920 (Fable-review): nooit bij een deel zonder leesbare tekst of uit OCR/scan (een tweede persoon kan onleesbaar of verhaspeld zijn),
   // en nooit bij arts-aan-arts-taal ("bovengenoemde patiënt", "uw patiënt", "geachte collega", "collegiale groet"): die staat niet in
   // Davids eigen post, wel in een specialistenbrief over een patiënt die toevallig dezelfde geboortedatum heeft.
-  const collega = [...med].some((x) => x === 'geachte collega' || /^collegiale /.test(x));
   if (regel && !s.has('onleesbaar') && !stuk.scan && !stuk.ocr && !s.has('brieftaal') && !s.has('uw_patient') && !collega) {
     // afzender als kaal adres of "Naam <adres>"; alles anders (twee adressen, geen @) = geen domein
     const af = String(stuk.afzender || '').trim().toLowerCase(), hoek = /^[^<>@]*<([^<>\s]+)>$/.exec(af), adres = hoek ? hoek[1] : af;
