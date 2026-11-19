@@ -149,6 +149,43 @@ const goedModel = { prompts: [], antwoord: function () { return { ok: true, data
   toets('twee keer fout: ronde mislukt met regel, geen bericht', M.berichten.length === 0 && L3.log.zoek.length === 3 && /^Nieuwsbrief-bloemlezing mislukt: ronde faalde in de pod: timeout/.test(uk2.j.regel), { j: uk2.j, zoek: L3.log.zoek.length });
   fs.rmSync(dir4, { recursive: true, force: true });
 
+  // ── 7b. B17 (Fable-review 19-11): pod herstart tijdens een ronde → niet de uitkomst van vorige week teruggeven ──
+  const dir5 = fs.mkdtempSync(path.join(os.tmpdir(), 'nb5-'));
+  const OUD = { geslaagd: true, proef: false, begin: '2026-10-31T08:15:00.000Z', gelezen: 4, punten: 2 };
+  fs.writeFileSync(path.join(dir5, 'staat.json'), JSON.stringify({ laatste_ronde: '2026-10-31T08:16:00.000Z', gezien: {}, uitkomst: OUD }));
+  const hang = async function () { return new Promise(function () {}); };          // ronde blijft hangen (pod gaat zo "herstarten")
+  M = maakNb(dir5, hang, goedModel);
+  M.nb.rondeStart({});
+  const herstart = maakNb(dir5, maakLuik(POST).luik, goedModel);                     // nieuwe instantie = pod na herstart, lege `laatste`
+  const uk3 = herstart.nb.rondeUitkomst();
+  toets('herstart tijdens ronde: niet de oude uitkomst, maar onbekend met regel', uk3.j.uitkomst === null && uk3.j.bezig === false &&
+    /^Nieuwsbrief-bloemlezing: uitkomst onbekend/.test(uk3.j.regel || '') && uk3.j.begin === '2026-11-07T08:15:00.000Z', uk3.j);
+  // zonder lopende ronde (gewone herstart tussen twee weken): de laatst vastgelegde uitkomst blijft, zonder regel
+  const dir6 = fs.mkdtempSync(path.join(os.tmpdir(), 'nb6-'));
+  fs.writeFileSync(path.join(dir6, 'staat.json'), JSON.stringify({ laatste_ronde: '2026-10-31T08:16:00.000Z', gezien: {}, uitkomst: OUD }));
+  const uk4 = maakNb(dir6, maakLuik(POST).luik, goedModel).nb.rondeUitkomst();
+  toets('herstart zonder lopende ronde: vastgelegde uitkomst, geen regel', uk4.j.uitkomst && uk4.j.uitkomst.begin === OUD.begin && uk4.j.regel === null, uk4.j);
+  // ronde die wél afrondt: daarna na herstart de nieuwe uitkomst, geen regel
+  M = maakNb(dir6, maakLuik(POST).luik, goedModel);
+  M.nb.rondeStart({});
+  for (let i = 0; i < 100 && M.nb.rondeUitkomst().j.bezig; i++) await new Promise(function (r) { setTimeout(r, 10); });
+  const uk5 = maakNb(dir6, maakLuik(POST).luik, goedModel).nb.rondeUitkomst();
+  toets('afgeronde ronde, dan herstart: uitkomst van deze ronde, geen regel', uk5.j.uitkomst && uk5.j.uitkomst.geslaagd === true &&
+    uk5.j.uitkomst.begin === '2026-11-07T08:15:00.000Z' && uk5.j.regel === null && !fs.existsSync(path.join(dir6, 'lopend.json')), uk5.j);
+  // mislukte ronde, dan herstart: niet de oude geslaagde uitkomst
+  const dir7 = fs.mkdtempSync(path.join(os.tmpdir(), 'nb7-'));
+  fs.writeFileSync(path.join(dir7, 'staat.json'), JSON.stringify({ laatste_ronde: '2026-10-31T08:16:00.000Z', gezien: {}, uitkomst: OUD }));
+  M = maakNb(dir7, maakLuik(POST).luik, goedModel, false);                            // bezorging mislukt
+  M.nb.rondeStart({});
+  for (let i = 0; i < 100 && M.nb.rondeUitkomst().j.bezig; i++) await new Promise(function (r) { setTimeout(r, 10); });
+  const uk6 = maakNb(dir7, maakLuik(POST).luik, goedModel).nb.rondeUitkomst();
+  toets('mislukte ronde, dan herstart: onbekend met regel', uk6.j.uitkomst === null && /uitkomst onbekend/.test(uk6.j.regel || ''), uk6.j);
+  // proef raakt de staat niet (ook geen lopend.json)
+  const dir8 = fs.mkdtempSync(path.join(os.tmpdir(), 'nb8-'));
+  maakNb(dir8, hang, goedModel).nb.rondeStart({ proef: true });
+  toets('proef schrijft geen lopend.json', !fs.existsSync(path.join(dir8, 'lopend.json')) && !fs.existsSync(path.join(dir8, 'staat.json')));
+  [dir5, dir6, dir7, dir8].forEach(function (d) { fs.rmSync(d, { recursive: true, force: true }); });
+
   // ── 8. server.js-koppeling ──
   const s = fs.readFileSync('server.js', 'utf8');
   toets('server.js: nieuwsbrief-luik met eigen time-out 60 s', /luik: function \(b\) \{ return appAgendaApi\(b, \{ timeoutMs: 60000 \}\); \}/.test(s) && /AbortSignal\.timeout\(ms\)/.test(s));

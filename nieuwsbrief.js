@@ -110,6 +110,10 @@ function maak(o) {
   function mkdir() { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); try { fs.chmodSync(dir, 0o700); } catch (e) {} }
   function staatLees() { try { const j = JSON.parse(fs.readFileSync(STAAT, 'utf8')); return j && typeof j === 'object' ? j : {}; } catch (e) { return {}; } }
   function staatSchrijf(s) { mkdir(); const t = STAAT + '.tmp'; fs.writeFileSync(t, JSON.stringify(s), { mode: 0o600 }); fs.renameSync(t, STAAT); }
+  // B17 (Fable-review 19-11): begin van de lopende echte ronde op schijf, zodat de uitkomst na een podherstart niet die van vorige week is.
+  const LOPEND = path.join(dir, 'lopend.json');
+  function lopendLees() { try { const j = JSON.parse(fs.readFileSync(LOPEND, 'utf8')); return j && typeof j.begin === 'string' ? j : null; } catch (e) { return null; } }
+  function lopendSchrijf(begin) { try { mkdir(); const t = LOPEND + '.tmp'; fs.writeFileSync(t, JSON.stringify({ begin: begin }), { mode: 0o600 }); fs.renameSync(t, LOPEND); } catch (e) { fout('nieuwsbrief-lopend', e); } }
 
   // Eén zoekvraag; bij een fout (gemeten 7-11: TimeoutError onder last) één keer opnieuw, daarna faalt de ronde eerlijk.
   async function zoekVraag(s, e) {
@@ -165,6 +169,7 @@ function maak(o) {
         alle.forEach(function (m) { if (!(bericht && bericht.leesFout && bericht.leesFout.has(m.id))) nieuw[m.id] = String(m.dag_lokaal || lokaleDag(klok())).slice(0, 10); });
         uitkomst.geslaagd = true;
         staatSchrijf({ laatste_ronde: nu, gezien: nieuw, uitkomst: uitkomst });
+        try { fs.unlinkSync(LOPEND); } catch (e) {}
       }
       uitkomst.geslaagd = true;
       if (o.hartslag && !proef) { try { await o.hartslag(uitkomst.gelezen, uitkomst.punten); uitkomst.hartslag = true; } catch (e) { fout('nieuwsbrief-hartslag', e); uitkomst.hartslag = false; } }
@@ -251,6 +256,7 @@ function maak(o) {
     bezig = true;
     laatste = { begin: new Date(klok()).toISOString(), eind: null, uitkomst: null };
     const l = laatste;
+    if (!(r && r.proef)) lopendSchrijf(l.begin);
     ronde(r).then(function (u) { l.uitkomst = u; })
       .catch(function (e) { fout('nieuwsbrief-ronde', e); l.uitkomst = { geslaagd: false, fout: 'ronde faalde in de pod: ' + String(e && e.message || e).replace(/\d{6,}/g, '#').slice(0, 120) }; })
       .finally(function () { l.eind = new Date(klok()).toISOString(); bezig = false; });
@@ -259,13 +265,19 @@ function maak(o) {
   // Voor n8n: alleen aantallen en foutreden; regel = wat de machinekamer krijgt (of null).
   function rondeUitkomst() {
     const l = laatste;
-    const u = l ? l.uitkomst : (staatLees().uitkomst || null);
-    let regel = null;
+    let u = l ? l.uitkomst : (staatLees().uitkomst || null);
+    let regel = null, begin = l ? l.begin : (u && u.begin) || null;
+    // Na een herstart (geen `laatste`): de vastgelegde uitkomst telt alleen als hij van de laatst gestarte ronde is (of later).
+    const lp = l ? null : lopendLees();
+    if (lp && !(u && Date.parse(u.begin) >= Date.parse(lp.begin))) {
+      u = null; begin = lp.begin;
+      regel = 'Nieuwsbrief-bloemlezing: uitkomst onbekend (ronde van ' + lp.begin.slice(0, 16).replace('T', ' ') + 'Z niet afgerond of mislukt, de pod is tussendoor herstart); de bloemlezing van deze week ontbreekt mogelijk.';
+    }
     if (u && !u.geslaagd) regel = 'Nieuwsbrief-bloemlezing mislukt: ' + String(u.fout || 'onbekend').slice(0, 200);
     else if (u && u.afgekapt) regel = 'Nieuwsbrief-bloemlezing: meer dan 25 nieuwsbrieven binnen 5 minuten, niet alles opgehaald.';
     if (bezig && l && klok() - Date.parse(l.begin) > HANG_MIN * 60000) regel = 'Nieuwsbrief-bloemlezing hangt (bezig sinds ' + l.begin.slice(11, 16) + 'Z).';
     const kort = u ? Object.assign({}, u) : null;
-    return { status: 200, j: { ok: true, bezig: bezig, begin: l ? l.begin : (u && u.begin) || null, eind: l ? l.eind : null, uitkomst: kort, regel: regel } };
+    return { status: 200, j: { ok: true, bezig: bezig, begin: begin, eind: l ? l.eind : null, uitkomst: kort, regel: regel } };
   }
   function health() { const s = staatLees(); return { aan: true, laatste_ronde: s.laatste_ronde || null, bezig: bezig }; }
   return { ronde: ronde, rondeStart: rondeStart, rondeUitkomst: rondeUitkomst, health: health, mkdir: mkdir, opmaak: opmaak };
