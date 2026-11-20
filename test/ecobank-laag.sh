@@ -174,6 +174,7 @@ const M = {
       __dirname: process.cwd(), process: { env: env, execPath: process.execPath },
       appAgendaApi: async function (body) {
         if (LL.faal) throw new Error('agenda-luik http 503');
+        if (body.actie === 'mail_zoeken' && LL.melding) { LL.zoek.push(body.query); return { aantal: 0, mails: [], melding: 'fout bij zoeken: Forbidden', fout: 'mail_zoeken mislukt: Forbidden' }; }   // zoals het lees-luik bij een kapotte inlog
         if (body.actie === 'mail_zoeken') {
           LL.zoek.push(body.query);
           if (!/^from:noreply@ecobank\.com subject:"Transaction Notification on A\/C" after:\d{4}\/\d{2}\/\d{2} before:\d{4}\/\d{2}\/\d{2}$/.test(body.query)) return { mails: [] };
@@ -183,6 +184,7 @@ const M = {
       const l = mails.filter((x) => x.dag_lokaal >= v && x.dag_lokaal < t).map((x) => ({ id: x.id, van: x.van, onderwerp: x.onderwerp, datum: x.datum, dag_lokaal: x.dag_lokaal, snippet: '' }));
           return { aantal: l.length, mails: l };
         }
+        if (body.actie === 'mail_lezen' && LL.leesFaal === body.id) { LL.lees.push(body.id); throw new Error('mail_lezen http 502'); }
         if (body.actie === 'mail_lezen') { LL.lees.push(body.id); const x = mails.find((y) => y.id === body.id); return x ? Object.assign({}, x) : { id: body.id, van: VAN, onderwerp: OND, datum: '2026-10-02T10:00:00.000Z', tekst: 'onleesbaar' }; }
         throw new Error('onbekende actie ' + body.actie);
       },
@@ -236,6 +238,42 @@ const M = {
     const r6 = await h.ecobankNaBankRonde();
     toets('server: lees-luik weg → ok false, geen uitzondering', r6.ok === false && /503/.test(r6.fout), r6);
     LL.faal = false;
+    // ── wv3557 (actieplan 2B14, Fable-review R2-55): venster = laatste geslaagde ronde min 1 dag, minstens ECOBANK_RONDE_DAGEN, hooguit 90 ──
+    const dagNL = (ms) => new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    const plus = (ymd, n) => { const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+    const zetRonde = (iso) => { const a = A.open(BD2); try { E.metaZet(a, 'ecobank_ronde_op', iso); } finally { a.db.close(); } };
+    const leesRonde = () => { const a = A.open(BD2); try { const r = a.db.prepare("SELECT waarde FROM meta WHERE sleutel = 'ecobank_ronde_op'").get(); return r ? r.waarde : null; } finally { a.db.close(); } };
+    const negen = new Date(Date.now() - 9 * 86400000).toISOString();
+    zetRonde(negen);
+    const r7 = await h.ecobankNaBankRonde();
+    toets('wv3557 server: laatste geslaagde ronde 9 dagen terug → venster vanaf die dag min 1 (10 dagen), niet 5', r7.ok === true && r7.van === plus(dagNL(Date.parse(negen)), -1) && r7.van <= plus(vandaag, -9), { van: r7.van, vandaag });
+    toets('wv3557 server: geslaagde ronde zet ecobank_ronde_op op nu', Date.now() - Date.parse(leesRonde() || 0) < 120000, leesRonde());
+    const r8 = await h.ecobankNaBankRonde();
+    toets('wv3557 server: direct daarna weer minstens 5 dagen terug', r8.ok === true && r8.van === plus(vandaag, -5), r8.van);
+    zetRonde(negen);
+    LL.melding = true;
+    const r9 = await h.ecobankNaBankRonde();
+    toets('wv3557 server: lees-luik meldt een zoekfout (bv. Gmail-inlog kapot) → ronde telt niet als geslaagd, ecobank_ronde_op blijft staan', r9.melding === true && leesRonde() === negen, { r9, op: leesRonde() });
+    const r10 = await h.ecobankNaBankRonde();
+    toets('wv3557 server: volgende ronde kijkt nog steeds terug vanaf de laatste geslaagde', r10.van === r7.van, { van: r10.van });
+    LL.melding = false;
+    const d8 = plus(vandaag, -8), MND = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const oud8 = mail({ oms: 'MOBILE AIRTIME TOPUP', val: 'GMD', bedrag: '5.00', saldo: '9,395.00', dag: d8.slice(8) + '-' + MND[Number(d8.slice(5, 7)) - 1] + '-' + d8.slice(0, 4), ts: d8 + 'T10:00:00.000Z', ref: 'I00test000000008' }); oud8.dag_lokaal = d8;
+    mails.push(oud8);
+    LL.leesFaal = oud8.id;
+    const r10b = await h.ecobankNaBankRonde();
+    toets('wv3557 server: mail van 8 dagen terug niet te openen → ronde telt niet als geslaagd, ecobank_ronde_op blijft staan', r10b.lees_fout === 1 && leesRonde() === negen, { r10b, op: leesRonde() });
+    LL.leesFaal = null;
+    const r10c = await h.ecobankNaBankRonde();
+    toets('wv3557 server: volgende ronde probeert die mail opnieuw en bewaart hem', r10c.ok === true && r10c.van === r7.van && r10c.nieuw === 1 && Date.now() - Date.parse(leesRonde() || 0) < 120000, { r10c, op: leesRonde() });
+    zetRonde(new Date(Date.now() - 200 * 86400000).toISOString());
+    const r11 = await h.ecobankNaBankRonde();
+    toets('wv3557 server: na 200 dagen stilstand hooguit 90 dagen terug, en dat staat in de uitkomst', r11.ok === true && r11.van === plus(vandaag, -90) && r11.venster_begrensd === true, { van: r11.van, b: r11.venster_begrensd });
+    zetRonde('rommel');
+    const r12 = await h.ecobankNaBankRonde();
+    toets('wv3557 server: onleesbare ronde-stempel → gewoon 5 dagen', r12.ok === true && r12.van === plus(vandaag, -5), r12.van);
+    const r13 = await h.bankSmal({ opdracht: 'ecobank-ronde', secret: SECRET, van: '2026-09-01' });
+    toets('wv3557 server: handmatige van (machinekamer) gaat nog altijd voor', r13.j.van === '2026-09-01', r13.j.van);
     const br = ssrc.slice(ssrc.indexOf('async function bankRonde('), ssrc.indexOf('let bankRondeLaatste'));
     toets('server: bankRonde roept de Ecobank-ronde aan en vangt een fout af', /ecobankNaBankRonde\(\)/.test(br) && /catch \(e\) \{ logError\('ecobank-ronde'/.test(br));
     toets('server: GET /app/financien geeft het blok gambia door', /'fouten', 'gambia'(, '[a-z_]+')*\]\.forEach/.test(ssrc));

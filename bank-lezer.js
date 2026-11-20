@@ -1259,7 +1259,7 @@ const opdrachten = {
     const r = E.csvBij(x.a, geheim.bestanden, typeof geheim.bron === 'string' ? geheim.bron : 'csv');
     return Object.assign({ ok: !r.fouten.length }, r, { stand: E.stand(x.a) });
   },
-  async 'ecobank-bekend'() { const x = archiefOpen(), E = ecobankModule(); return { ok: true, mail_ids: E.bekend(x.a), verwerkt_ids: E.verwerkt(x.a) }; },   // wv2259: verwerkt_ids = alleen ecobank_tx (MailMan)
+  async 'ecobank-bekend'() { const x = archiefOpen(), E = ecobankModule(); return { ok: true, mail_ids: E.bekend(x.a), verwerkt_ids: E.verwerkt(x.a), ronde_op: E.metaLees(x.a, 'ecobank_ronde_op') }; },   // wv3557: ronde_op = laatste geslaagde ronde (venster)   // wv2259: verwerkt_ids = alleen ecobank_tx (MailMan)
   async 'ecobank-bij'() {
     const x = archiefOpen(), E = ecobankModule();
     if (!Array.isArray(geheim.posten)) throw new Weigering('posten ontbreken');
