@@ -79,9 +79,43 @@ function maak(o) {
   const hangend = {};         // naam -> true zolang een in-process stap na zijn time-out nog niet terug is
 
   function pad(datum) { return path.join(staatMap, datum + '.json'); }
-  function lees(datum) {
-    try { const s = JSON.parse(fs.readFileSync(pad(datum), 'utf8')); return s && typeof s === 'object' && s.stappen ? s : null; } catch (e) { return null; }
+  // 2B09 (Fable-review sb2-nacht M1): alleen ENOENT is "geen staat". Elke andere leesfout (EIO, EACCES, kapotte JSON, verkeerde vorm) gooit
+  // ONLEESBAAR: vóór het einde begon de keten anders opnieuw (stappen dubbel), erna gebeurde er stil niets.
+  function onleesbaarFout(code, oorzaak) {
+    const e = new Error('staat onleesbaar (' + code + ')' + (oorzaak && oorzaak.message ? ': ' + String(oorzaak.message).slice(0, 80) : ''));
+    e.code = 'ONLEESBAAR'; e.oorzaak = code; return e;
   }
+  function lees(datum) {
+    let tekst, s;
+    try { tekst = fs.readFileSync(pad(datum), 'utf8'); }
+    catch (e) { if (e && e.code === 'ENOENT') return null; throw onleesbaarFout((e && e.code) || 'leesfout', e); }
+    try { s = JSON.parse(tekst); } catch (e) { throw onleesbaarFout('json', e); }
+    if (!s || typeof s !== 'object' || !s.stappen || typeof s.stappen !== 'object') throw onleesbaarFout('vorm');
+    return s;
+  }
+  // één logregel (en één fout) per datum en oorzaak, niet elke minuut
+  const onleesbaarGelogd = {};
+  function meldOnleesbaar(datum, e, waar) {
+    const code = (e && e.oorzaak) || (e && e.code) || 'onbekend';
+    if (onleesbaarGelogd[datum + ':' + code]) return;
+    onleesbaarGelogd[datum + ':' + code] = true;
+    log('nachtketen staat=onleesbaar datum=' + datum + ' code=' + code + ' waar=' + waar + ' (tik overgeslagen; geen nieuwe stap tot de staat weer leesbaar is)');
+    fout('nachtketen-staat', e);
+  }
+  // ná het einde: één box-rij per datum; het merkbestand houdt dat over een herstart heen vast (lukt schrijven niet: alleen in het geheugen)
+  // (review MOET 2: pas als gemeld tellen als boxRij lukte; mislukt = merkbestand weg, volgende tik opnieuw)
+  const naEindeGemeld = {};
+  function boxOnleesbaar(datum, e) {
+    if (naEindeGemeld[datum] || !o.boxRij) return;
+    const merk = path.join(staatMap, datum + '.onleesbaar');
+    let merkGezet = false;
+    try { fs.writeFileSync(merk, iso(nu()) + '\n', { mode: 0o600, flag: 'wx' }); merkGezet = true; }
+    catch (x) { if (x && x.code === 'EEXIST') { naEindeGemeld[datum] = true; return; } }
+    const f = { naam: 'staatbestand', reden: 'onleesbaar (' + ((e && e.oorzaak) || 'onbekend') + '); keten van vannacht niet afgesloten' };
+    try { o.boxRij({ datum: datum, klaar: 0, fouten: [f], meld: [f], onvolledig: null, stappen: {} }); naEindeGemeld[datum] = true; }
+    catch (x) { fout('nachtketen-box', x); if (merkGezet) { try { fs.unlinkSync(merk); } catch (y) {} } }
+  }
+  const uitgesteld = [];   // uitkomsten die niet in de staat konden (onleesbaar): de eerstvolgende leesbare tik schrijft ze alsnog
   function schrijf(s) {
     fs.mkdirSync(staatMap, { recursive: true, mode: 0o700 });
     const tmp = pad(s.datum) + '.' + crypto.randomBytes(4).toString('hex') + '.nieuw';
@@ -101,7 +135,12 @@ function maak(o) {
   }
 
   // Sluit de stap af (alleen als het token nog van deze ronde is: een late uitkomst na fout:tijd schrijft niets)
+  // 2B09: is de staat onleesbaar, dan gaat de uitkomst in `uitgesteld`; de tik schrijft hem pas als het bestand weer te lezen is
   function rond(datum, stap, token, r, notitie) {
+    const doe = function () { rondIn(datum, stap, token, r, notitie); };
+    try { doe(); } catch (e) { if (!e || e.code !== 'ONLEESBAAR') throw e; meldOnleesbaar(datum, e, 'rond ' + stap.naam); uitgesteld.push({ datum: datum, doe: doe }); }
+  }
+  function rondIn(datum, stap, token, r, notitie) {
     const s = lees(datum);
     const st = s && s.stappen[stap.naam];
     if (!st || st.token !== token) return;
@@ -188,19 +227,42 @@ function maak(o) {
     if (huidig) {
       if (huidig.inProces && t - huidig.start > huidig.limietMs) {
         const h = huidig; huidig = null; hangend[h.naam] = true;
+        const tijdOp = function () {
         const s = lees(h.datum), st = s && s.stappen[h.naam];
         if (st && st.token === h.token) {
           delete st.token; st.stand = 'fout'; st.reden = 'tijd'; st.meld = true; st.eind = iso(t); st.ms = t - h.start; delete st.opnieuw_na;
           schrijf(s);
           log('nachtketen stap=' + h.naam + ' stand=fout reden=tijd');
         }
+        };
+        try { tijdOp(); } catch (e) { if (e && e.code !== 'ONLEESBAAR') throw e; meldOnleesbaar(h.datum, e, 'tijd ' + h.naam); uitgesteld.push({ datum: h.datum, doe: tijdOp }); }
       }
       return { bezig: huidig ? huidig.naam : null };
     }
     const a = ams();
     if (!a || !DATUM_RE.test(a.datum)) return null;
-    let s = lees(a.datum);
     const m = minuten(a);
+    // eerst wat nog niet weggeschreven kon (rond / time-out). Van vandaag en nog onleesbaar: tik overslaan. Van een andere datum (review
+    // MOET 1): blokkeert vandaag niet; nog onleesbaar = vervallen (die nacht is voorbij), met een logregel.
+    for (let i = 0; i < uitgesteld.length;) {
+      const u = uitgesteld[i];
+      try { u.doe(); uitgesteld.splice(i, 1); }
+      catch (e) {
+        if (!e || e.code !== 'ONLEESBAAR') { uitgesteld.splice(i, 1); throw e; }
+        if (u.datum === a.datum) { meldOnleesbaar(a.datum, e, 'uitgesteld'); if (m >= einde) boxOnleesbaar(a.datum, e); return { wacht: 'staat onleesbaar' }; }
+        uitgesteld.splice(i, 1);
+        log('nachtketen uitgesteld vervallen datum=' + u.datum + ' (staat nog onleesbaar, nacht voorbij)');
+      }
+    }
+    let s;
+    try {
+      s = lees(a.datum);
+    } catch (e) {
+      if (!e || e.code !== 'ONLEESBAAR') throw e;
+      meldOnleesbaar(a.datum, e, 'tik');
+      if (m >= einde) boxOnleesbaar(a.datum, e);
+      return { wacht: 'staat onleesbaar' };
+    }
     if (m >= einde) {
       if (!s || s.afgesloten) return null;   // ZOU 11: geen staat van vandaag = niets starten, niets melden
       const reden = onderhoud() ? 'onderhoud' : 'te-laat';
@@ -252,13 +314,14 @@ function maak(o) {
         catch (e) { v = { wacht: 'voorwaarde: ' + String(e && e.message || e).slice(0, 80) }; }
         if (huidig) return { bezig: huidig.naam };   // een andere tik startte intussen
         if (!v.ga) {
-          const x = lees(a.datum) || s;
+          let x;
+          try { x = lees(a.datum) || s; } catch (e) { if (!e || e.code !== 'ONLEESBAAR') throw e; meldOnleesbaar(a.datum, e, 'voorwaarde ' + stap.naam); return { wacht: 'staat onleesbaar' }; }
           x.stappen[stap.naam] = Object.assign({}, x.stappen[stap.naam] || {}, { stand: 'opnieuw', reden: 'wacht: ' + String(v.wacht || '').slice(0, 100), opnieuw_na: iso(t + wachtNa) });
           if (!x.stappen[stap.naam].poging) x.stappen[stap.naam].poging = 0;
           schrijf(x); s = x;
           continue;
         }
-        s = lees(a.datum) || s;
+        try { s = lees(a.datum) || s; } catch (e) { if (!e || e.code !== 'ONLEESBAAR') throw e; meldOnleesbaar(a.datum, e, 'voorwaarde ' + stap.naam); return { wacht: 'staat onleesbaar' }; }
       }
       start(s, stap, a, v.notitie || null, v.onvolledig || null).catch(function (e) { fout('nachtketen-start', e); if (huidig && huidig.naam === stap.naam) huidig = null; });
       return { gestart: stap.naam };
@@ -269,11 +332,12 @@ function maak(o) {
 
   function info() {
     const a = ams && ams();
-    const s = a && DATUM_RE.test(a.datum) ? lees(a.datum) : null;
+    let s = null, onleesbaar = null;
+    try { s = a && DATUM_RE.test(a.datum) ? lees(a.datum) : null; } catch (e) { if (!e || e.code !== 'ONLEESBAAR') throw e; onleesbaar = e.oorzaak; }   // 2B09: /health blijft antwoorden (uitrol.sh telt lopend)
     const kort = {};
     if (s) Object.keys(s.stappen).forEach(function (n) { const st = s.stappen[n]; kort[n] = st.stand + (st.reden ? ':' + String(st.reden).slice(0, 40) : '') + (st.al_gedaan ? ':al_gedaan' : ''); });
     return { aan: true, lopend: huidig ? 1 : 0, stap: huidig ? huidig.naam : null, hangend: Object.keys(hangend), datum: s ? s.datum : (a && a.datum) || null,
-      stappen: kort, afgesloten: s ? s.afgesloten || null : null, samenvatting: s ? s.samenvatting || null : null, pauze_sinds: s ? s.pauze_sinds || null : null };
+      stappen: kort, afgesloten: s ? s.afgesloten || null : null, samenvatting: s ? s.samenvatting || null : null, pauze_sinds: s ? s.pauze_sinds || null : null, onleesbaar: onleesbaar, uitgesteld: uitgesteld.length };
   }
 
   return { tik: tik, info: info, _lees: lees };
