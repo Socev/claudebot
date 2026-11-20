@@ -25664,7 +25664,7 @@ function doorgeefHerken(rij, vz, bericht) {
 // wv3316 (OVIS Code fase 3, § 5d.2): hoort het verzoek bij één app, dan zet Socev in hetzelfde bericht het kenmerk #app:<id of naam>
 // (bv. #app:texere of #app:"OVIS Texere"). Alleen een exacte treffer in het register telt (code-apps.js appVanNaam); twee verschillende
 // kenmerken, een onbekende naam of geen register = geen app (de rij blijft in de machinekamer, zoals vroeger).
-const DOORGEEF_APP_RE_G = /#app:(?:"([^"\n]{1,60})"|([A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9-]{0,40}))/g;
+const DOORGEEF_APP_RE_G = /#app:(?:"([^"\n]{1,60})"|((?:[Oo][Vv][Ii][Ss][ \t]+)?[A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9-]{0,40}))/g;   // "OVIS <naam>" mag zonder aanhalingstekens
 function doorgeefApp(bericht) {
   if (typeof CODE_APPS === 'undefined' || !CODE_APPS) return null;
   const ids = new Set();

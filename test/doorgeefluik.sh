@@ -256,6 +256,7 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
   ctx.CODE_APPS = require('./code-apps.js');
   toets('9 #app:texere, #app:"OVIS Texere", #app:Facturen → texere / texere / facturen', H('x #app:texere') === 'texere' && H('x #app:"OVIS Texere"') === 'texere' && H('x #app:Facturen') === 'facturen');
   toets('9 verzonnen app, twee verschillende kenmerken, geen kenmerk → geen app', H('x #app:onzin') === null && H('x #app:texere #app:facturen') === null && H('x #app:texere #app:onzin') === null && H('x #mk-werklijst') === null);
+  toets('9 #app:OVIS Scherm en #app:OVIS Texere zonder aanhalingstekens; #app:OVIS alleen = geen app', H('x #app:OVIS Scherm') === 'personeelsscherm' && H('x #app:OVIS Texere\n') === 'texere' && H('x #app:OVIS') === null);
   toets('9 hetzelfde kenmerk twee keer telt als één', H('x #app:texere en nog eens #app:texere') === 'texere');
   const h9 = HK({ kanaal: 'hoofd' }, 'Zal ik dit op de werklijst van de machinekamer zetten: zinnen in Texere sneller #app:texere?', 'VRAAG AAN DAVID: … #mk-werklijst #app:texere');
   toets('9 herkennen: app erbij en het kenmerk niet in de vraagzin', h9 && h9.app === 'texere' && h9.zin === 'zinnen in Texere sneller', h9);
