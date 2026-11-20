@@ -152,6 +152,64 @@ const stand = (k, n) => { const s = k._lees(klok.datum); return s && s.stappen[n
   let fout1 = null; try { K.maak({ staatMap: map, stappen: [stap('a', { na: ['b'] }), stap('b')], ams: () => klok }); } catch (e) { fout1 = e.message; }
   toets('stap die op een latere of onbekende stap wacht: geweigerd', /wacht op onbekende/.test(fout1 || ''), fout1);
 
+  // 7b. 2B09 (Fable-review sb2-nacht M1): een leesfout op het staatbestand is geen "geen staat". Alleen ENOENT begint vers; EIO/EACCES of
+  // kapotte JSON = tik overslaan, één logregel; een uitkomst die niet in de staat kon, wordt bij de volgende leesbare tik alsnog geschreven;
+  // ná het einde één box-rij (ook na een herstart niet opnieuw).
+  const echtRead = fs.readFileSync; let kapotPad = null;
+  fs.readFileSync = function (p) { if (kapotPad && String(p) === kapotPad) { const e = new Error('EIO: i/o error, read'); e.code = 'EIO'; throw e; } return echtRead.apply(fs, arguments); };
+  try {
+    klok = { datum: '2026-11-10', uur: 1, min: 0 }; map = path.join(d, 'k15');
+    const pad15 = path.join(map, '2026-11-10.json');
+    x = maakKeten(map, [stap('a', { start_na: [1, 0] }), stap('b', { na: ['a'] })]);
+    await tikTot(x.k); toets('2B09: a klaar vóór de leesfout', stand(x.k, 'a') === 'klaar' && teller.a === 1, x.k._lees(klok.datum));
+    kapotPad = pad15; vooruit(1); r = await tikTot(x.k, 3);
+    toets('2B09: EIO vóór 07:40 → a loopt niet nog eens, tik overgeslagen', teller.a === 1 && teller.b === 0 && r && r.wacht === 'staat onleesbaar', [teller, r]);
+    toets('2B09: één logregel staat=onleesbaar code=EIO (niet elke tik)', x.log.filter(l => /staat=onleesbaar.*code=EIO/.test(l)).length === 1, x.log);
+    const inf15 = x.k.info();
+    toets('2B09: info() blijft antwoorden (lopend 0, onleesbaar EIO)', inf15.lopend === 0 && inf15.onleesbaar === 'EIO', inf15);
+    kapotPad = null; r = await tikTot(x.k, 2);
+    toets('2B09: weer leesbaar → b loopt, a niet opnieuw, afgesloten', teller.a === 1 && teller.b === 1 && x.hart.length === 1, [teller, x.log]);
+    // leesfout precies bij het wegschrijven van de uitkomst (rond)
+    klok = { datum: '2026-11-11', uur: 1, min: 0 }; map = path.join(d, 'k16');
+    const pad16 = path.join(map, '2026-11-11.json');
+    x = maakKeten(map, [stap('a', { start_na: [1, 0], doe: async () => { teller.a++; kapotPad = pad16; return { ok: true }; } }), stap('b', { na: ['a'] })]);
+    await tikTot(x.k, 3);
+    toets('2B09: uitkomst niet weg te schrijven → geen nieuwe start', teller.a === 1 && teller.b === 0, teller);
+    kapotPad = null; await tikTot(x.k);
+    toets('2B09: volgende leesbare tik schrijft de uitkomst alsnog (a klaar, één keer)', stand(x.k, 'a') === 'klaar' && teller.a === 1, x.k._lees(klok.datum));
+    await tikTot(x.k, 2);
+    toets('2B09: daarna gewoon door (b), afgesloten', teller.b === 1 && x.hart.length === 1, [teller, x.log]);
+    // kapotte JSON: ook geen verse start
+    klok = { datum: '2026-11-12', uur: 1, min: 0 }; map = path.join(d, 'k17');
+    x = maakKeten(map, [stap('a', { start_na: [1, 0] }), stap('b', { start_na: [1, 0] })]);
+    await tikTot(x.k); fs.writeFileSync(path.join(map, '2026-11-12.json'), '{"datum":"2026-11-12","stap');
+    r = await tikTot(x.k, 2);
+    toets('2B09: kapotte JSON → geen verse keten (a niet nog eens), logregel code=json', teller.a === 1 && teller.b === 0 && r && r.wacht === 'staat onleesbaar' && x.log.some(l => /staat=onleesbaar.*code=json/.test(l)), [teller, x.log]);
+    // ná het einde: één box-rij, ook na een herstart (nieuw proces, zelfde map) niet nog eens
+    zet(7, 45); r = await tikTot(x.k, 2);
+    toets('2B09: na 07:40 met onleesbare staat → één box-rij met de oorzaak', x.box.length === 1 && x.box[0].meld.length === 1 && /onleesbaar \(json\)/.test(x.box[0].meld[0].reden) && r && r.wacht === 'staat onleesbaar', [x.box, r]);
+    const y = maakKeten(map, [stap('a', { start_na: [1, 0] }), stap('b', { start_na: [1, 0] })]);
+    await tikTot(y.k, 2);
+    toets('2B09: herstart na 07:40 → geen tweede box-rij (grondwet 10)', y.box.length === 0 && teller.a === 0 && fs.existsSync(path.join(map, '2026-11-12.onleesbaar')), y.box);
+    // review MOET 1: een uitgestelde uitkomst van gisteren (bestand blijft kapot) blokkeert de nacht van vandaag niet
+    klok = { datum: '2026-11-13', uur: 1, min: 0 }; map = path.join(d, 'k18');
+    const pad18 = path.join(map, '2026-11-13.json');
+    x = maakKeten(map, [stap('a', { start_na: [1, 0], doe: async () => { teller.a++; kapotPad = pad18; return { ok: true }; } })]);
+    await tikTot(x.k, 2);
+    klok = { datum: '2026-11-14', uur: 1, min: 0 }; vooruit(1440); await tikTot(x.k, 2);
+    toets('2B09: uitgesteld van gisteren blokkeert vandaag niet (a draait op 14-11), logregel vervallen', teller.a === 2 && stand(x.k, 'a') === 'klaar' && x.log.some(l => /uitgesteld vervallen datum=2026-11-13/.test(l)), [teller, x.log]);
+    kapotPad = null;
+    // review MOET 2: mislukte box-rij telt niet als gemeld; volgende tik opnieuw, daarna niet meer
+    klok = { datum: '2026-11-15', uur: 7, min: 45 }; map = path.join(d, 'k19'); fs.mkdirSync(map, { mode: 0o700 });
+    fs.writeFileSync(path.join(map, '2026-11-15.json'), 'kapot');
+    let boxPoging = 0;
+    x = maakKeten(map, [stap('a', { start_na: [1, 0] })], { boxRij: (s) => { boxPoging++; if (boxPoging === 1) throw new Error('box dicht'); x.box.push(s); } });
+    await tikTot(x.k);
+    toets('2B09: box-rij mislukt → geen merkbestand', boxPoging === 1 && x.box.length === 0 && !fs.existsSync(path.join(map, '2026-11-15.onleesbaar')), boxPoging);
+    await tikTot(x.k, 3);
+    toets('2B09: volgende tik meldt alsnog, daarna niet meer', boxPoging === 2 && x.box.length === 1 && fs.existsSync(path.join(map, '2026-11-15.onleesbaar')), boxPoging);
+  } finally { fs.readFileSync = echtRead; }
+
   // 8. n8nKlaar met een nep-API
   const a = { datum: '2026-10-29', uur: 5, min: 50 };
   const amsVan = (iso) => { const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})/.exec(iso); return m ? { datum: m[1], uur: +m[2], min: +m[3] } : null; };   // nep: ISO = NL-tijd
