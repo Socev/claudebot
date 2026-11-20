@@ -621,7 +621,7 @@ toets('wv3064 tweede Maak van dezelfde versie vervangt de bewaarde (één map, g
 bestandWeg = true;   // wv3064: markeren na 30 dagen = uit de eigen bewaarplek
 r = await app('POST /app/bandjes/status', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: bu.versie, tekst_hash: bu.tekst_hash, job: lb3.job });
 bestandWeg = false;
-toets('wv3064 na markeren: bewaarde werkversie opgeruimd (staat nu in het archief)', r.status === 200 && OP.werkversie('tolgaarde', 'tg-buiten') === null && !fs.existsSync(WV) && R2.bewaardBestand(lb3.job, 1) === null, r);
+toets('wv3064 na markeren: bewaarde werkversie opgeruimd (staat nu in het archief)', r.status === 200 && OP.werkversie('tolgaarde', 'tg-buiten') === null && !fs.existsSync(WV) && OP.werkBestand(lb3.job, 1) === null, r);
 bu = await herlees();
 const iso = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
 const basis3 = 'tg-buiten-v3-' + iso;
@@ -635,6 +635,38 @@ const amd = fs.readFileSync(path.join(ARCH, basis3 + '.md'), 'utf8');
 toets('wv830 archief-md: frontmatter, tekst als citaat, spreektekst, links naar de wav-bestanden met volledig pad', /^---\ntype: bandje-archief\npraktijk: Tolgaarde\nbandje: tg-buiten\nversie: 3\n/.test(amd) && amd.includes('> Versie vier, tijdens het maken.') &&
   amd.includes('**Spreektekst**') && amd.includes('![[10_Zakelijk/Tolgaarde/Telefoon/Archief/' + basis3 + '-telefoon-ulaw.wav]]') && amd.includes('[[10_Zakelijk/Tolgaarde/Telefoon/Bandjes]]'), amd);
 toets('wv830 archief: geen tijdelijk bestand achtergebleven', fs.readdirSync(path.join(D2, 'tmp')).length === 0, fs.readdirSync(path.join(D2, 'tmp')));
+// wv3544 (Fable-review 2B57): in de centrale, werkversie opgeruimd, Bestanden leeg → het geluid komt uit het archief (zelfde job/n)
+bestandWeg = true;
+{ const gw = await app('GET /app/bandjes', {});
+  const gb = gw.j.praktijken[0].bandjes.find((x) => x.id === 'tg-buiten');
+  const bw = gb.bewaard;
+  const namen = bewaard[lb3.job].bestanden.map((x) => x.n + ':' + x.naam).join(',');
+  toets('wv3544 GET: bandje in de centrale draagt bewaard uit het archief (job uit laatste bestand, v3, zelfde n/naam als Bestanden, geen pad)',
+    !!bw && bw.bron === 'archief' && bw.job === lb3.job && bw.versie === 3 && bw.tekst_hash === bu.tekst_hash && bw.bestanden.map((x) => x.n + ':' + x.naam).join(',') === namen &&
+    !JSON.stringify(bw).includes(W), bw);
+  const alle = bewaard[lb3.job].bestanden.every((x) => { const a = R2.bewaardBestand(lb3.job, x.n); return a && a.naam === x.naam && fs.readFileSync(a.pad).equals(fs.readFileSync(path.join(BEWAAR, lb3.job, 'b', String(x.n)))); });
+  toets('wv3544 bewaardBestand: elk bestand van die job byte-gelijk uit het archief; onbekende n of job = null', alle && R2.bewaardBestand(lb3.job, 9) === null && R2.bewaardBestand('ffffffffffffffff', 1) === null); }
+{ // verkeerde versie in de archief-md (v2 i.p.v. v3): niets koppelen
+  const f = path.join(ARCH, basis3 + '.md'), oud = fs.readFileSync(f, 'utf8');
+  fs.writeFileSync(f, oud.replace(/^versie: 3$/m, 'versie: 2'));
+  const gw = await app('GET /app/bandjes', {});
+  const gb = gw.j.praktijken[0].bandjes.find((x) => x.id === 'tg-buiten');
+  toets('wv3544 archief-md met een andere versie dan "in centrale": geen geluid gekoppeld', gb.bewaard === null && R2.bewaardBestand(lb3.job, 1) === null, gb.bewaard);
+  fs.writeFileSync(f, oud.replace(/^job: .*$/m, 'job: —'));
+  toets('wv3544 archief-md zonder job (migratie): geen geluid gekoppeld', R2.bewaardBestand(lb3.job, 1) === null);
+  fs.writeFileSync(f, oud);
+  const wav = path.join(ARCH, basis3 + '-luister.wav'), buit = path.join(W, 'buiten.wav');
+  fs.writeFileSync(buit, 'geheim'); fs.renameSync(wav, wav + '.x'); fs.symlinkSync(buit, wav);
+  const bb = R2.bewaardBestand(lb3.job, bewaard[lb3.job].bestanden.find((x) => x.naam === 'bandje.wav').n);
+  toets('wv3544 archiefbestand dat een symlink is: hele archief niet gekoppeld (nummering zou verschuiven)', bb === null && R2.bewaardBestand(lb3.job, 1) === null, bb);
+  fs.unlinkSync(wav); fs.renameSync(wav + '.x', wav);
+  // Codex MOET 1: ontbreekt het eerste bestand in de sortering (PCM), dan niet de µ-law op n 1 zetten
+  const pcm = path.join(ARCH, basis3 + '-telefoon-pcm.wav'); fs.renameSync(pcm, pcm + '.x');
+  const gw2 = await app('GET /app/bandjes', {});
+  toets('wv3544 archief met een ontbrekend bestand dat de .md noemt: niets gekoppeld', gw2.j.praktijken[0].bandjes.find((x) => x.id === 'tg-buiten').bewaard === null && R2.bewaardBestand(lb3.job, 1) === null && R2.bewaardBestand(lb3.job, 2) === null);
+  fs.renameSync(pcm + '.x', pcm);
+  toets('wv3544 alles terug: weer gekoppeld', !!R2.bewaardBestand(lb3.job, 2)); }
+bestandWeg = false;
 r = await app('POST /app/bandjes/status', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: bu.versie, tekst_hash: bu.tekst_hash });
 toets('wv830 nog eens markeren: 409 staat al in de centrale', r.status === 409 && /al in de centrale/.test(r.j.fout), r);
 // opnieuw genereren na het markeren = een nieuwe werkversie v4; nog eens genereren blijft v4

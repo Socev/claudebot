@@ -682,6 +682,61 @@ function maak(deps) {
     }
     return null;
   }
+  // ── geluid van wat in de centrale staat (wv3544, Fable-review 2B57) ──
+  // Na "Staat in centrale" ruimt de bewaarplek op en na 30 dagen is Bestanden leeg; het geluid staat dan alleen nog in het archief.
+  // Zonder deze terugval zei de app "niet meer bewaard, maak opnieuw (kost credits)". Alleen het archief waar het register naar wijst
+  // ("in centrale: vN sinds …, [[…/Archief/<id>-vN-<datum>]]"), en alleen als de .md dezelfde versie en een job heeft. De nummering is
+  // die van Bestanden (op naam gesorteerd, zoals appBewaar), zodat job/n hetzelfde bestand blijft, ook in een nog open scherm.
+  // { job, versie, tekst_hash, bestanden: [{ n, naam, grootte, pad }] } of null
+  function archiefVan(pr, b) {
+    if (!b || !Object.hasOwn(PRAKTIJKEN, pr) || !ID_RE.test(String(b.id))) return null;
+    const v = Number(b.centrale_versie);
+    if (!Number.isInteger(v) || v < 1) return null;
+    const vaultMap = path.posix.join(path.posix.dirname(PRAKTIJKEN[pr].pad), 'Archief');
+    const m = /\[\[([^\]|#]+)\]\]/.exec(String(b.in_centrale || ''));
+    if (!m || path.posix.dirname(m[1]) !== vaultMap) return null;
+    const basis = path.posix.basename(m[1]);
+    const bm = new RegExp('^' + String(b.id) + '-v(\\d+)-\\d{4}-\\d{2}-\\d{2}(-\\d+)?$').exec(basis);
+    if (!bm || Number(bm[1]) !== v) return null;
+    const map = path.join(path.dirname(pad(pr)), 'Archief');
+    let md;
+    try { md = VV.lees(path.join(map, basis + '.md'), 'utf8', { max: 256 * 1024 }); } catch (e) { return null; }
+    const fm = /^---\n([\s\S]*?)\n---/.exec(md);
+    const veld = function (k) { const x = fm && new RegExp('^' + k + ': *(.*)$', 'm').exec(fm[1]); return x ? x[1].trim() : ''; };
+    if (!fm || veld('type') !== 'bandje-archief' || veld('bandje') !== String(b.id) || Number(veld('versie')) !== v) return null;
+    const job = veld('job');
+    if (!/^[a-f0-9]{16}$/.test(job)) return null;   // migratie zonder job (v1 van 22-10): geen geluid om te koppelen
+    // Codex MOET 1: de nummering moet die van Bestanden blijven. Daarom precies de bestanden die de .md noemt (zoveel als er bij het archiveren
+    // waren); ontbreekt er één of is het geen gewoon bestand (symlink), dan niets koppelen in plaats van de nummers te laten verschuiven.
+    const best = [];
+    let heel = true;
+    ARCHIEF_BESTANDEN.forEach(function (x) {
+      if (md.indexOf('![[' + vaultMap + '/' + basis + x[1] + ']]') < 0) return;
+      const p = path.join(map, basis + x[1]);
+      try { const st = fs.lstatSync(p); if (st.isFile()) best.push({ naam: x[0], grootte: st.size, pad: p }); else heel = false; } catch (e) { heel = false; }
+    });
+    if (!heel || !best.length) return null;
+    best.sort(function (a, c) { return a.naam < c.naam ? -1 : a.naam > c.naam ? 1 : 0; });
+    best.forEach(function (x, i) { x.n = i + 1; });
+    const th = veld('tekst_hash');
+    return { job: job, versie: v, tekst_hash: /^[a-f0-9]{16}$/.test(th) ? th : null, bestanden: best };
+  }
+  // Het bestand n van job uit het archief van wat nu in de centrale staat: { naam, pad } of null.
+  function archiefBestand(job, n) {
+    if (!/^[a-f0-9]{16}$/.test(String(job)) || !Number.isInteger(n)) return null;
+    for (const pr of Object.keys(PRAKTIJKEN)) {
+      let l;
+      try { l = lees(pr); } catch (e) { continue; }
+      for (const b of (l && l.bandjes) || []) {
+        if (String(b.in_centrale || '').indexOf('[[') < 0) continue;
+        const a = archiefVan(pr, b);
+        if (!a || a.job !== job) continue;
+        const x = a.bestanden.find(function (y) { return y.n === n; });
+        return x ? { naam: x.naam, pad: x.pad } : null;
+      }
+    }
+    return null;
+  }
   // Brak een vervanging af tussen de twee renames (proces gestopt), dan ontbreekt de map zelf maar staat er een …nieuw- (volledig: meta.json
   // wordt als laatste geschreven) of een …oud-. Zet de jongste volledige …nieuw- terug, anders de jongste …oud-. Brak hij af vóór de eerste
   // rename (map = vorige job, …nieuw- = de job uit het register), dan wisselt de …nieuw- alsnog in (Codex ronde 2).
@@ -781,6 +836,7 @@ function maak(deps) {
     inCentrale: inCentrale,
     schrijfArchief: schrijfArchief,   // ook voor de eenmalige migratie (wv830)
     werkversie: werkversie, bewaarWerkversie: bewaarWerkversie, ruimWerkversie: ruimWerkversie, werkBestand: werkBestand, werkRonde: werkRonde,   // wv3064
+    archiefVan: archiefVan, archiefBestand: archiefBestand,   // wv3544
     werkPad: WERK,
     pad: pad,
     archiefMap: function (pr) { return PRAKTIJKEN[pr] ? path.join(path.dirname(pad(pr)), 'Archief') : null; },
@@ -923,14 +979,16 @@ function routes(deps) {
   function praktijkUit(l) {
     return { id: l.praktijk, naam: l.naam || (PRAKTIJKEN[l.praktijk] && PRAKTIJKEN[l.praktijk].naam), instellingen: l.instellingen || {},
       praktijkstem: praktijkstem(l.instellingen),
-      bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { spreektekst: spreekVan(b, l.instellingen), bewaard: bewaardUit(l.praktijk, b.id) }); }),   // wv803; wv3064 bewaard
+      bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { spreektekst: spreekVan(b, l.instellingen), bewaard: bewaardUit(l.praktijk, b) }); }),   // wv803; wv3064 bewaard; wv3544 of uit het archief
       dicht: l.dicht || null, fouten: l.fouten || [], conflicten: l.conflicten || [], teruggezet: l.teruggezet || [], ontbreekt: l.ontbreekt === true };
   }
-  // wv3064: het bewaarde geluid van de werkversie (zonder paden) of null
-  function bewaardUit(pr, id) {
+  // wv3064: het bewaarde geluid van de werkversie (zonder paden) of null. wv3544: geen werkversie bewaard, dan het geluid van wat in de
+  // centrale staat uit het archief (bron 'archief'); de app speelt en downloadt dat via dezelfde job/n als in Bestanden.
+  function bewaardUit(pr, b) {
     let w = null;
-    try { w = S.werkversie ? S.werkversie(pr, id) : null; } catch (e) { w = null; }
-    return w ? { job: w.job, versie: w.versie, tekst_hash: w.tekst_hash, bewaard_op: w.bewaard_op,
+    try { w = S.werkversie ? S.werkversie(pr, b.id) : null; } catch (e) { w = null; }
+    if (!w) { try { const a = S.archiefVan ? S.archiefVan(pr, b) : null; if (a) w = Object.assign({ bewaard_op: null, bron: 'archief' }, a); } catch (e) { w = null; } }
+    return w ? { job: w.job, versie: w.versie, tekst_hash: w.tekst_hash, bewaard_op: w.bewaard_op, bron: w.bron || 'werkversie',
       bestanden: w.bestanden.map(function (x) { return { n: x.n, naam: x.naam, grootte: x.grootte }; }) } : null;
   }
   // wv3064: eerst Bestanden (30 dagen), dan de eigen bewaarplek van die job
@@ -1185,7 +1243,12 @@ function routes(deps) {
     return uit;
   }
   // wv3064: GET /app/bestand/<job>/<n> als Bestanden de job niet meer heeft
-  function bewaardBestand(job, n) { try { return S.werkBestand ? S.werkBestand(job, n) : null; } catch (e) { return null; } }
+  function bewaardBestand(job, n) {
+    let x = null;
+    try { x = S.werkBestand ? S.werkBestand(job, n) : null; } catch (e) { x = null; }
+    if (!x) { try { x = S.archiefBestand ? S.archiefBestand(job, n) : null; } catch (e) { x = null; } }   // wv3544
+    return x;
+  }
   return { app: app, smal: smal, naKlaar: naKlaar, health: health, stemmen: stemmen, ronde: ronde, bewaardBestand: bewaardBestand };
 }
 
