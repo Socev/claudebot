@@ -24686,10 +24686,17 @@ const nzaWachter = (function () {
       argv: ['python3', '-I', script, 'ronde'] }) : null;
   } catch (e) { logError('nza-wachter', new Error('laden faalde')); return null; }
 })();
+// wv3473/wv3483 (Fable-review NZa H1, 20-11-2026): de wachter week voor ELKE OVIS-tik (ovisLoopt.nu niet leeg). ovisTik en deze tik zijn
+// allebei setInterval 5 min vanaf dezelfde start en Node vuurt gelijke timers in volgorde van zetten: de OVIS-tik zette ovisLoopt.nu dus
+// telkens net vóór deze tik (0 van 20 door in de nabootsing; sinds 15-11 geen enkele klokronde). Nu, zoals de andere dagrondes
+// (sb2ZoekKlokTik): alleen wijken voor de onderhoudsstand, de OVIS-nachtronde en de Bibliothecaris. De dagcompilatie (ovisLoopt.nu 'dag'/
+// 'kaarten'/'tik') leest de vault alleen en schrijft naar de databank; wachter.py schrijft nieuwe bestanden atomair (vault_veilig.schrijf,
+// tmp + rename) en de box met één append: samenlopen geeft geen half bestand. Toets: test/nza-wachter-klok.sh.
+function nzaWachterMag(stand, loopt) { return !stand.aan && loopt !== 'nacht' && loopt !== 'bibliothecaris'; }
 async function nzaWachterTik() {
   if (!nzaWachter || !SERVER_ECHT || !rolPrimair()) return;
   try {
-    const u = await nzaWachter.tik({ ams: ovisAms(), mag: function () { return !onderhoud.stand().aan && !(typeof ovisLoopt !== 'undefined' && ovisLoopt.nu); } });
+    const u = await nzaWachter.tik({ ams: ovisAms(), mag: function () { return nzaWachterMag(onderhoud.stand(), typeof ovisLoopt !== 'undefined' ? ovisLoopt.nu : null); } });
     if (u) schrijfLog(nu() + ' nza-wachter ' + velden({ exit: u.exit, ms: u.ms }));
   } catch (e) { logError('nza-wachter-tik', new Error('tik faalde')); }
 }
