@@ -100,11 +100,12 @@ function bouwHtml({ gemaakt, houdbaar_tot, leeg, logoSvg, inhoud, toon }) {
   const csp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; connect-src 'none'";
   const klokScript = `(function(){var T=${Number(houdbaar_tot)};var D=['zondag','maandag','dinsdag','woensdag','donderdag','vrijdag','zaterdag'],M=['januari','februari','maart','april','mei','juni','juli','augustus','september','oktober','november','december'];
 function z(n){return(n<10?'0':'')+n}function s(){var e=document.getElementById('doek');if(e){var f=Math.min(innerWidth/1920,innerHeight/1080);e.style.transform='scale('+f+')';}}s();addEventListener('resize',s);
+function p(){var A=document.getElementById('agenda');A=A&&A.parentNode&&A.parentNode.parentNode;if(!A||A.getAttribute('data-pas')||!A.clientHeight)return;var T=A.querySelectorAll('.tt'),i,g;for(i=0;i<T.length;i++){g=44;while(T[i].scrollHeight>T[i].clientHeight+1&&g>30){g-=2;T[i].style.fontSize=g+'px';}}g=44;while(A.scrollHeight>A.clientHeight+1&&g>26){g-=2;for(i=0;i<T.length;i++){if((parseFloat(T[i].style.fontSize)||44)>g)T[i].style.fontSize=g+'px';}}A.setAttribute('data-pas','1');}
 function t(){var n=new Date();var k=document.getElementById('klok'),w=document.getElementById('wd'),d=document.getElementById('dag');if(k)k.textContent=z(n.getHours())+':'+z(n.getMinutes());if(w)w.textContent=D[n.getDay()];if(d)d.textContent=n.getDate()+' '+M[n.getMonth()];
 if(n.getTime()>T){document.body.className='oud';}
 var P=document.querySelectorAll('.paneel');if(P.length>1){var L=[],S=0,i;for(i=0;i<P.length;i++){var x=+P[i].getAttribute('data-tot')||0;if(x&&n.getTime()>x){P[i].classList.remove('aan');continue;}var u=+P[i].getAttribute('data-s')||20;L.push([P[i],S,u]);S+=u;}
 var q=Math.floor(n.getTime()/1000)%S,c=Math.floor(n.getTime()/1000/S);for(i=0;i<L.length;i++){L[i][0].classList.toggle('aan',q>=L[i][1]&&q<L[i][1]+L[i][2]);
-var B=L[i][0].querySelectorAll('.blad');for(var j=0;j<B.length;j++){B[j].classList.toggle('aan',j===c%B.length);}}}}t();setInterval(t,1000);})();`;
+var B=L[i][0].querySelectorAll('.blad');for(var j=0;j<B.length;j++){B[j].classList.toggle('aan',j===c%B.length);}}}p();}t();setInterval(t,1000);})();`;
   if (leeg) {
     return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta http-equiv="refresh" content="60"><title>OVIS Scherm</title>
 <style>*{cursor:none!important}html,body{margin:0;height:100%;background:#000;color:#444;font-family:'Liberation Sans',Arial,Helvetica,sans-serif;overflow:hidden}#doek{position:relative;width:1920px;height:1080px;transform-origin:0 0;background:#000}#klok{position:absolute;right:38px;bottom:38px;font-size:46px}#dag,#wd{display:none}</style></head>
@@ -176,7 +177,7 @@ html,body{margin:0;height:100%;background:#fff;color:#5B5C60;font-family:'Libera
 .rij{display:flex;align-items:center;gap:30px;padding:15px 0;border-bottom:2px solid #D9DADC}
 .dat{width:200px;flex:none;display:flex;align-items:baseline;gap:8px;color:#3E3F42}.dat .wd{font-size:28px;color:#88898C;font-weight:bold;width:42px}
 .dat .dg{font-size:56px;font-weight:bold;line-height:1;width:66px}.dat .mn{font-size:28px;font-weight:bold}
-.wat{flex:1;min-width:0}.tt{font-size:44px;font-weight:bold;color:#3E3F42;line-height:1.15;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sub{font-size:30px;margin-top:2px}
+.wat{flex:1;min-width:0}.tt{font-size:44px;font-weight:bold;color:#3E3F42;line-height:1.15;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}.sub{font-size:30px;margin-top:2px}
 .chip{display:inline-block;font-size:22px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;padding:5px 14px;border-radius:999px;border:2px solid #D9DADC;color:#88898C;white-space:nowrap}.chip.a{border-color:#ED1C24;color:#ED1C24}
 .niets{font-size:40px;color:#88898C;padding:30px 0}
 .voet{margin-top:auto;padding-top:20px;font-size:24px;color:#88898C}
@@ -195,7 +196,7 @@ html,body{margin:0;height:100%;background:#fff;color:#5B5C60;font-family:'Libera
 <body data-soort="scherm" data-gemaakt="${Number(gemaakt)}" data-houdbaar="${Number(houdbaar_tot)}">
 <div id="doek"><div class="rail">${logo}<div><div id="wd">${esc(i.wd_tekst || '')}</div><div id="dag">${esc(i.dag_tekst || '')}</div><div id="klok">${esc(i.klok_tekst || '')}</div></div>
 ${weerHtml}${persBlok('Artsen vandaag', i.artsen, 'Geen rooster bekend', 5)}${persBlok('Jarig deze week', i.jarig, 'Niemand jarig deze week', Math.max(2, 6 - Math.min(5, (i.artsen || []).length)))}</div>
-<div class="podium"><section class="paneel${zicht === 0 ? ' aan' : ''}" data-s="${INFO_HOOFD_S}"><div class="ph"><h1>Komende weken</h1><div class="lab">Agenda</div></div>${agHtml}
+<div class="podium"><section class="paneel${zicht === 0 ? ' aan' : ''}" data-s="${INFO_HOOFD_S}"><div class="ph"><h1 id="agenda">Komende weken</h1><div class="lab">Agenda</div></div>${agHtml}
 <div class="voet">Bijgewerkt ${esc(amsTekst(gemaakt))}</div></section>${infoHtml}<p class="oud-tekst">Dit scherm wordt bijgewerkt.</p></div></div>
 <script>${klokScript}</script></body></html>`;
 }
@@ -215,9 +216,9 @@ const JARIG_DAGEN = 7;
 const INHOUD_MS = 30 * 60000;          // inhoud opnieuw verzamelen
 const WEER_MS = 2 * UUR;               // weer hooguit elke 2 uur ophalen (≤ 12 per dag)
 const WEER_OUD_MS = 12 * UUR;          // ouder weer valt weg
-// wv3438 (afspraak David 19-11: niet filteren, B31): geen woord- of naamfilter meer op agendatitels; een lange titel wordt ingekort, niet weggelaten
-const TITEL_MAX = 70;
-const titelKort = (t) => (t.length > TITEL_MAX ? t.slice(0, TITEL_MAX - 1).trimEnd() + '…' : t);
+// wv3438 (afspraak David 19-11: niet filteren, B31): geen woord- of naamfilter meer op agendatitels.
+// wv3560 (2B20): ook geen knip meer; de volle titel gaat de envelop in en loopt op de tv over twee regels (.tt line-clamp 2);
+// past hij daar niet, dan zet het schermscript p() die titel kleiner (≥ 30 px) en, als het vak overloopt, alle titels (≥ 26 px).
 // fase 2 (wv3015)
 const VOLLE_NAAM_ZIN = 'artsen van vandaag (voor- en achternaam';   // staat deze zin in de registertekst, dan volle naam
 const INFO_ZIN = 'infoschermen) alleen na Davids knop';             // staat deze zin in de registertekst, dan infoschermen (met Ja per set; Fable ZOU 3)
@@ -484,14 +485,14 @@ function agendaPunten(rijen, vandaag, eigen) {
     const r = tijdlijnRij(r0);
     if (!r || r.status !== 'actief' || !(r.feed === 'google-hagro' || r.sync_agenda === 'hagro')) continue;
     if (!r.begin_datum || r.begin_datum < vandaag) continue;
-    const t = titelKort(String(r.titel || '').replace(/\s+/g, ' ').trim());
+    const t = String(r.titel || '').replace(/\s+/g, ' ').trim();
     if (!t) continue;
     uit.push({ datum: r.begin_datum, sort: r.begin_datum + (r.hele_dag ? '00:00' : hhmmAms(r.begin_tijd)), titel: t,
       tijd: r.hele_dag ? 'hele dag' : hhmmAms(r.begin_tijd) + (r.eind_tijd ? '–' + hhmmAms(r.eind_tijd) : ''), label: 'HAGRO' });
   }
   for (const e of Array.isArray(eigen) ? eigen : []) {
     if (!e || !/^\d{4}-\d{2}-\d{2}$/.test(e.datum || '') || e.datum < vandaag || e.datum > plusDag(vandaag, AGENDA_DAGEN)) continue;
-    const t = titelKort(String(e.titel || '').replace(/\s+/g, ' ').trim());
+    const t = String(e.titel || '').replace(/\s+/g, ' ').trim();
     if (!t) continue;
     const tijd = /^\d{2}:\d{2}$/.test(e.tijd || '') ? e.tijd : 'hele dag';
     uit.push({ datum: e.datum, sort: e.datum + (tijd === 'hele dag' ? '00:00' : tijd), titel: t, tijd, label: 'Praktijk' });
