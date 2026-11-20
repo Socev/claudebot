@@ -163,7 +163,7 @@ const C = {
   postnlInt: /\b([A-Z]{2}\d{9}NL)\b/,
   dhl: /\b(JJD\d{14,26}|JVGL\d{10,26}|JD\d{18})\b/,
   ups: /\b(1Z[0-9A-Z]{16})\b/,
-  dragonfly: /\b(AMZNL\d{9,15})\b/,
+  dragonfly: /\b(AMZNL\d{9,15}|INTRA\d{9,16}DFY)\b/,   // wv3535: INTRA…DFY = zending van Intrapost die Dragonfly bezorgt
   dpd: /\b(0\d{13}|\d{14})\b/,
   gls: /\b(\d{11,12})\b/,
 };
@@ -201,7 +201,7 @@ const DETAIL_ONDERWERP = [
   [/(sorteercentrum|sorting cent(er|re)|sortierzentrum|verteilzentrum|distributiecentrum)/i, 'Bij het sorteercentrum'],
   [/(hebben (je|jouw|uw) (pakket|zending) ontvangen|opgehaald door (de )?(bezorger|vervoerder))/i, 'Bij de bezorger'],
   [/(klaar voor verzending|ready to ship)/i, 'Klaar voor verzending'],
-  [/(bij (de |je |jouw )?buren|neighbou?rs?\b|nachbar)/i, 'Bij de buren'],
+  [/(bij (de |je |jouw |uw )?buren|neighbou?rs?\b|nachbar)/i, 'Bij de buren'],   // wv3535: ook "bij uw buren" (Dragonfly)
   [/(brievenbus|letterbox|briefkasten)/i, 'In de brievenbus'],
 ];
 const DETAIL_TEKST = [
@@ -249,6 +249,22 @@ function adresUit(tekst) {
   return beste ? schoon(beste, 120) : null;
 }
 
+// wv3535 (meting 20-11): de Dragonfly-mail "bij je buren afgeleverd" noemt de code nergens leesbaar; hij staat alleen als "sub" in het token van de
+// links (context=<kop>.<inhoud>.<handtekening>, inhoud = base64url-json). Alleen een geldige Dragonfly-code komt eruit; het token wordt niet bewaard.
+function dragonflyTokenCode(tekst) {
+  const re = /context=eyJ[A-Za-z0-9_-]{5,400}\.(eyJ[A-Za-z0-9_-]{5,2000})/g;
+  let m, n = 0;
+  while ((m = re.exec(String(tekst || ''))) && n++ < 10) {
+    try { const sub = JSON.parse(Buffer.from(m[1], 'base64url').toString('utf8')).sub; if (typeof sub === 'string' && DRAGONFLY_CODE.test(sub)) return sub; } catch (e) { /* geen json */ }
+  }
+  return null;
+}
+// woorden van een winkelnaam om rijen van dezelfde winkel te herkennen (samenWinkel, Intrapost-mail in de winkelrij)
+function winkelWoorden(s) {
+  return String(s || '').toLowerCase().replace(/\.(nl|com|de|be|eu)\b/g, '').split(/[^a-z0-9à-ÿ]+/)
+    .filter((w) => w.length >= 3 && !['www', 'shop', 'the', 'van', 'b.v', 'bv', 'store', 'online', 'webshop', 'nederland'].includes(w));
+}
+
 /*
  * herken({van, onderwerp, tekst, datum}) → null (geen pakje) of
  *   { sleutel, vervoerder, code, bestelnr, winkel, omschrijving, stand, verwacht_dag, verwacht_van, verwacht_tot, pc, adres, detail }
@@ -277,7 +293,8 @@ function herken(m) {
     dagTekst = stand === 'vandaag' ? 'vandaag' : (/(?:verwacht|bezorgmoment)[^\n]{0,40}\n?\s*([^\n]{0,60})/i.exec(tekst) || [])[1] || null;
   } else if (op(dom, 'dhlecommerce.nl', 'dhlparcel.nl', 'dhl.com', 'dhl.nl', 'dhl.de')) {
     vervoerder = 'dhl';
-    const k = /\(([0-9A-Z]{10,30})\)\s*$/.exec(ond) || C.dhl.exec(alles) || C.s3.exec(alles);
+    // wv3535 (meting 20-11): DHL Paket (dhl.de) mailt in het Engels zonder code in het onderwerp; de code staat in de volglink (piececode= of pid=)
+    const k = /\(([0-9A-Z]{10,30})\)\s*$/.exec(ond) || C.dhl.exec(alles) || C.s3.exec(alles) || /[?&](?:piececode|pid)=([0-9A-Z]{10,30})\b/i.exec(tekst);
     code = k ? k[1].toUpperCase() : null;
     const w = /pakket\s+[0-9A-Z]{10,30}\s+van\s+(.+?)\s+(?:op de stoep|bij je|aan|naar)\b/i.exec(tekst);
     winkel = w ? w[1] : null;
@@ -310,8 +327,8 @@ function herken(m) {
   } else if (op(dom, 'dragonflyinternational.com', 'dragonflyshipping.nl')) {
     vervoerder = 'dragonfly';
     const k = C.dragonfly.exec(alles);
-    code = k ? k[1] : null;
-    winkel = 'Amazon';
+    code = k ? k[1] : (dragonflyTokenCode(tekst) || null);
+    winkel = code && /^INTRA/.test(code) ? null : 'Amazon';   // wv3535: INTRA = Intrapost (afzender uit de Intrapost-mail, zie koppelIntra)
     stand = standUit(ond);
     dagTekst = stand === 'vandaag' ? 'vandaag' : null;
   } else if (op(dom, 'fedex.com')) {
@@ -336,12 +353,16 @@ function herken(m) {
     // wv3011: Intrapost stuurt namens de afzender (zoals een zorgleverancier) een volgbericht met een eigen zendingnummer (jaar/nummer); de
     // bezorging gaat via een vervoerder (gemeten 9-11: GLS, mailde een dag later). Dus een winkelrij "onderweg" met de afzender als winkel,
     // die opgaat in het pakje van de vervoerder zodra die mailt (samenWinkel). Postcode en adres uit het onderwerp worden niet bewaard.
+    // wv3535 (meting 20-11): sinds 11-2026 ook het bestelnummer van de winkel ("Track & Trace ORD12345 <postcode> <plaats> (Winkel)"); dat
+    // nummer is gelijk aan dat in de bestelmail, zodat de Intrapost-mail in die winkelrij opgaat (verwerkMail, zelfde bestelnr en winkel).
     const n = /track\s*&(?:amp;)?\s*trace\s+(\d{4})\/(\d{3,10})\b/i.exec(ond) || /zending\s+(\d{4})\/(\d{3,10})\b/i.exec(tekst);
-    if (!n) return null;
+    const o = n ? null : /track\s*&(?:amp;)?\s*trace\s+([A-Z]{0,5}\d{3,12})\b/i.exec(ond) || /zending\s+([A-Z]{1,5}\d{3,12})\b/i.exec(tekst);
+    if (!n && !o) return null;
+    const nr = n ? n[1] + '-' + n[2] : o[1].toUpperCase();
     const w = /\(([^()]{2,80})\)\s*$/.exec(ond);
     const afz = w ? w[1].replace(/[\s.,]*\b(B\.?\s?V|N\.?\s?V)\b[\s.]*$/i, '').trim() : '';
     return {
-      sleutel: 'winkel:' + dom + ':' + n[1] + '-' + n[2], vervoerder: 'winkel', code: null, bestelnr: n[1] + '-' + n[2], winkel: netjes(afz) || 'Intrapost', omschrijving: null,
+      sleutel: 'winkel:' + dom + ':' + nr, vervoerder: 'winkel', code: null, bestelnr: nr, winkel: netjes(afz) || 'Intrapost', omschrijving: null, via: 'intrapost',
       stand: 'onderweg', verwacht_dag: null, verwacht_van: null, verwacht_tot: null, pc: null, tijd: isFinite(tms) ? new Date(tms).toISOString() : null,
       adres: adresUit(tekst), detail: detailUit(ond, tekst),   // wv3062
     };
@@ -368,7 +389,7 @@ function herken(m) {
     }
     if (!code) {
       const k = C.dhl.exec(alles) || C.ups.exec(alles) || C.dragonfly.exec(alles);
-      if (k) { code = k[1]; vervoerder = /^1Z/.test(code) ? 'ups' : /^AMZNL/.test(code) ? 'dragonfly' : 'dhl'; }
+      if (k) { code = k[1]; vervoerder = /^1Z/.test(code) ? 'ups' : /^(AMZNL|INTRA)/.test(code) ? 'dragonfly' : 'dhl'; }
     }
     if (!code) {
       const k = C.s3.exec(alles) || C.postnlInt.exec(alles);
@@ -408,7 +429,7 @@ function herken(m) {
 }
 
 // ── volgen bij de vervoerder (alleen openbare pagina's, gemeten 6-11-2026; GOFO en Dragonfly 14-11-2026, wv3078) ──
-const GOFO_CODE = /^GF[A-Z]{2}\d{10,20}$/, DRAGONFLY_CODE = /^AMZNL\d{9,15}$/;
+const GOFO_CODE = /^GF[A-Z]{2}\d{10,20}$/, DRAGONFLY_CODE = /^(?:AMZNL\d{9,15}|INTRA\d{9,16}DFY)$/;   // wv3535: INTRA gemeten 20-11 (zelfde volgvraag)
 function volgAdressen(z, postcodes) {
   const c = encodeURIComponent(z.code || '');
   if (!z.code) return [];
@@ -569,11 +590,12 @@ CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT NOT NULL)
 `;
 // wv3011: verandert de herkenning, verhoog dan dit getal. Bij de eerste opening daarna vergeet de module welke mails "geen pakje" waren,
 // zodat de ronden ze (binnen de 21 dagen van de kandidaten, 20 per ronde) één keer opnieuw lezen; herkende mails blijven staan.
-const HERKEN_VERSIE = '3';   // wv3062: adres en tussenstand uit de mail
+const HERKEN_VERSIE = '4';   // wv3062: adres en tussenstand uit de mail; wv3535: DHL Paket (dhl.de), Intrapost ORD-nummer, Dragonfly INTRA en code uit het token
 // wv3062: kolommen die er later bij kwamen (bestaande banken krijgen ze bij open() via ALTER TABLE). adres = straat + plaats uit de mail (alleen
 // voor het scherm), stand_detail = tussenstand uit de jongste mail, geleverd_hand = David tikte "Is geleverd" (tijd; NULL = teruggedraaid),
 // aanvul = versie waarmee de open pakjes van vóór deze kolommen één keer hun jongste mails opnieuw lieten lezen.
-const EXTRA_KOLOMMEN = ['adres TEXT', 'stand_detail TEXT', 'geleverd_hand TEXT', 'aanvul TEXT'];
+// wv3535: via = 'intrapost' als een Intrapost-mail in deze rij kwam (koppelt het Dragonfly-pakje met een INTRA-code aan de winkel)
+const EXTRA_KOLOMMEN = ['adres TEXT', 'stand_detail TEXT', 'geleverd_hand TEXT', 'aanvul TEXT', 'via TEXT'];
 const AANVUL_VERSIE = '1';
 const VERVOERDER_DOMEINEN = ['postnl.nl', 'dhl.com', 'dhl.nl', 'dhl.de', 'dhlecommerce.nl', 'dhlparcel.nl', 'dpd.nl', 'dpd.com', 'dpd.de', 'dpdgroup.com', 'gls-info.nl',
   'gls-group.eu', 'gls-group.com', 'gls.nl', 'gls-netherlands.com', 'ups.com', 'dragonflyinternational.com', 'dragonflyshipping.nl', 'fedex.com', 'gofo.com', 'gofoexpress.nl'];
@@ -605,6 +627,8 @@ function maak(o) {
     db.exec(SCHEMA);
     const kol = new Set(db.prepare('PRAGMA table_info(zending)').all().map((k) => k.name));
     EXTRA_KOLOMMEN.forEach((k) => { if (!kol.has(k.split(' ')[0])) db.exec('ALTER TABLE zending ADD COLUMN ' + k); });
+    // wv3535: tot 20-11 kreeg elk Dragonfly-pakje de winkel Amazon, ook een INTRA-zending van Intrapost (die kwam zo ten onrechte bij een Amazon-bestelling)
+    db.exec("UPDATE zending SET winkel = NULL WHERE vervoerder = 'dragonfly' AND code LIKE 'INTRA%' AND winkel = 'Amazon'");
     const hv = db.prepare("SELECT waarde FROM meta WHERE sleutel = 'herken_versie'").get();
     if (!hv || hv.waarde !== HERKEN_VERSIE) {
       db.exec('DELETE FROM mail WHERE zending_id IS NULL');
@@ -637,12 +661,30 @@ function maak(o) {
     // een 3S-code die eerst als 'onbekend' binnenkwam en nu bij een vervoerder hoort (of andersom): dezelfde rij. wv3011: ook 'anders' (code uit
     // de winkelmail zonder vervoerder; gemeten 13-11: winkelmail en FedEx-mail van één zending werden twee rijen)
     if (!z && h.code) z = d.prepare("SELECT * FROM zending WHERE code = ? AND (vervoerder IN ('onbekend', 'anders') OR ? IN ('onbekend', 'anders'))").get(h.code, h.vervoerder);
+    // wv3535: de Intrapost-mail noemt het bestelnummer van de winkel: dan gaat hij op in de winkelrij met dat nummer (en een woord van de winkelnaam gelijk)
+    if (!z && h.via === 'intrapost' && h.bestelnr) {
+      const ww = winkelWoorden(h.winkel);
+      z = d.prepare("SELECT * FROM zending WHERE vervoerder = 'winkel' AND bestelnr = ? AND sleutel <> ?").all(h.bestelnr, h.sleutel)
+        .find((r) => winkelWoorden(r.winkel).some((x) => ww.includes(x))) || null;
+    }
     const tijd = h.tijd || nu;
+    // wv3535: een Dragonfly-pakje met een INTRA-code komt van Intrapost; de winkel staat in de Intrapost-mail van 4 dagen ervoor tot 1 dag erna (alleen
+    // als dat er precies één is). Zo gaat de bestelling van die winkel in dit pakje op (samenWinkel). De andere richting: koppelIntra hieronder.
+    const intraWinkel = (t) => {
+      const van = new Date(Date.parse(t) - 5 * DAG).toISOString(), tot = new Date(Date.parse(t) + 5 * DAG).toISOString();
+      // een winkel die al bij een ander INTRA-pakje uit dezelfde dagen hoort, telt niet mee
+      const al = new Set(d.prepare("SELECT winkel FROM zending WHERE vervoerder = 'dragonfly' AND code LIKE 'INTRA%' AND code <> ? AND winkel IS NOT NULL AND eerste >= ? AND eerste <= ?")
+        .all(String(h.code), van, tot).map((x) => String(x.winkel).toLowerCase()));
+      const r = d.prepare("SELECT winkel FROM zending WHERE via = 'intrapost' AND verborgen IS NULL AND winkel IS NOT NULL AND mail_tijd >= ? AND mail_tijd <= ?").all(
+        new Date(Date.parse(t) - 4 * DAG).toISOString(), new Date(Date.parse(t) + DAG).toISOString()).filter((x) => !al.has(String(x.winkel).toLowerCase()));
+      return r.length === 1 ? r[0].winkel : null;
+    };
+    if (h.vervoerder === 'dragonfly' && /^INTRA/.test(String(h.code)) && !h.winkel && !(z && z.winkel)) h.winkel = intraWinkel(z && z.eerste < tijd ? z.eerste : tijd);
     if (!z) {
       const id = idVan(h.sleutel);
       d.prepare(`INSERT INTO zending (id, sleutel, vervoerder, code, bestelnr, winkel, omschrijving, pc, stand_mail, mail_tijd, verwacht_dag, verwacht_van, verwacht_tot, eerste, bijgewerkt,
-        adres, stand_detail, aanvul) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, h.sleutel, h.vervoerder, h.code, h.bestelnr, h.winkel, h.omschrijving, h.pc, h.stand, tijd,
-        h.verwacht_dag, h.verwacht_van, h.verwacht_tot, tijd, nu, h.adres || null, h.detail || null, AANVUL_VERSIE);
+        adres, stand_detail, aanvul, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, h.sleutel, h.vervoerder, h.code, h.bestelnr, h.winkel, h.omschrijving, h.pc, h.stand, tijd,
+        h.verwacht_dag, h.verwacht_van, h.verwacht_tot, tijd, nu, h.adres || null, h.detail || null, AANVUL_VERSIE, h.via || null);
       z = { id };
     } else {
       const nieuwer = !z.mail_tijd || tijd >= z.mail_tijd;
@@ -652,10 +694,18 @@ function maak(o) {
       // bezorgd blijft bezorgd: een oudere mail die later binnenkomt zet de stand niet terug
       const stand = nieuwer && !(z.stand_mail === 'bezorgd' && RANG[h.stand] < RANG.bezorgd) ? h.stand : z.stand_mail;
       d.prepare(`UPDATE zending SET sleutel = ?, vervoerder = ?, winkel = COALESCE(winkel, ?), omschrijving = COALESCE(omschrijving, ?), pc = COALESCE(pc, ?),
-        stand_mail = ?, mail_tijd = ?, verwacht_dag = ?, verwacht_van = ?, verwacht_tot = ?, eerste = MIN(eerste, ?), bijgewerkt = ?, adres = ?, stand_detail = ? WHERE id = ?`).run(
+        stand_mail = ?, mail_tijd = ?, verwacht_dag = ?, verwacht_van = ?, verwacht_tot = ?, eerste = MIN(eerste, ?), bijgewerkt = ?, adres = ?, stand_detail = ?, via = COALESCE(via, ?) WHERE id = ?`).run(
         sleutel, vervoerder, h.winkel, h.omschrijving, h.pc, stand, nieuwer ? tijd : z.mail_tijd,
         nieuwer && h.verwacht_dag ? h.verwacht_dag : z.verwacht_dag, nieuwer && h.verwacht_dag ? h.verwacht_van : z.verwacht_van, nieuwer && h.verwacht_dag ? h.verwacht_tot : z.verwacht_tot,
-        tijd, nu, (nieuwer ? h.adres || z.adres : z.adres || h.adres) || null, (nieuwer ? h.detail : z.stand_detail) || null, z.id);
+        tijd, nu, (nieuwer ? h.adres || z.adres : z.adres || h.adres) || null, (nieuwer ? h.detail : z.stand_detail) || null, h.via || null, z.id);
+    }
+    // wv3535 koppelIntra: kwam de Intrapost-mail ná het Dragonfly-pakje binnen, dan krijgt dat pakje alsnog de winkel (precies één INTRA-pakje zonder
+    // winkel, eerste mail van 1 dag vóór tot 4 dagen na deze mail)
+    if (h.via === 'intrapost' && h.winkel) {
+      const r = d.prepare("SELECT id FROM zending WHERE vervoerder = 'dragonfly' AND code LIKE 'INTRA%' AND winkel IS NULL AND verborgen IS NULL AND eerste >= ? AND eerste <= ?").all(
+        new Date(Date.parse(tijd) - DAG).toISOString(), new Date(Date.parse(tijd) + 4 * DAG).toISOString());
+      const ww = d.prepare('SELECT winkel FROM zending WHERE id = ?').get(z.id);
+      if (r.length === 1 && ww && ww.winkel) d.prepare('UPDATE zending SET winkel = ? WHERE id = ?').run(ww.winkel, r[0].id);
     }
     d.prepare('INSERT OR REPLACE INTO mail (gmail_id, zending_id, tijd, gezien) VALUES (?, ?, ?, ?)').run(String(m.gmail_id), z.id, iso(m.datum), nu);
     return z.id;
@@ -855,8 +905,7 @@ function maak(o) {
   // daarna meldt: eerste mail van de vervoerder tussen 1 dag vóór en 14 dagen na de bestelmail; bij meer pakjes het eerste. Elk pakje neemt
   // hooguit één bestelling op (review Codex MOET 1: anders verdwijnen losse bestellingen van één winkel in één pakje). Alleen weergave.
   function samenWinkel(ws, wn) {
-    const woorden = (s) => String(s || '').toLowerCase().replace(/\.(nl|com|de|be|eu)\b/g, '').split(/[^a-z0-9à-ÿ]+/)
-      .filter((w) => w.length >= 3 && !['www', 'shop', 'the', 'van', 'b.v', 'bv', 'store', 'online', 'webshop', 'nederland'].includes(w));
+    const woorden = winkelWoorden;
     const weg = new Set(), bezet = new Set();
     ws.filter((w) => wn.has(w.id)).sort((a, b) => String(a.eerste) < String(b.eerste) ? -1 : 1).forEach((w) => {
       const ww = woorden(w.winkel), t = Date.parse(w.eerste);

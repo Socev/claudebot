@@ -205,6 +205,73 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
     toets('2b volg Dragonfly: GET zonder body, kaart toont "Ontvangen door Dragonfly"', uitD === 'ok' && vraag[vraag.length - 1][1] === null && kaartD && kaartD.stand_tekst === 'Ontvangen door Dragonfly', kaartD);
     M8.sluit(); fs.rmSync(W8, { recursive: true, force: true });
   }
+  // ── 1c. wv3535 (hermeting 20-11): DHL Paket (dhl.de, Engels), Intrapost met het bestelnummer, Dragonfly INTRA-code en code alleen in het token ──
+  {
+    const tok = (sub) => 'eyJhbGciOiJSUzI1NiJ9.' + Buffer.from(JSON.stringify({ sub, aud: 'CSAT' })).toString('base64url') + '.ProefHandtekening';
+    const IC = 'INTRA0000001112DFY';
+    h = P.herken(mail('"DHL Paket" <noreply@dhl.de>', 'Your E-commerce Proefwinkel Service GmbH shipment is on its way',
+      'your **E-commerce Proefwinkel Service GmbH **package has been handed over to us\n[{PACKAGE_IDENTIFIER}](\nhttps://custcomm.dhl.de/go/9/X.html?piececode=CJ111222333DE\n)\n<a href="https://my.dhlecommerce.nl/go-track-trace?pid=CJ111222333DE">Tracking Link</a>'));
+    toets('1c DHL Paket (dhl.de, Engels): code uit de volglink, onderweg', h && h.vervoerder === 'dhl' && h.code === 'CJ111222333DE' && h.stand === 'onderweg', h);
+    h = P.herken(mail('"Team Intrapost" <noreply@intrapost-mailer.nl>', 'Track & Trace ORD12345 ' + PC + ' PROEFSTAD (Proefleverancier)',
+      'Hierbij ontvangt u de Track & Trace link voor het volgen van uw zending ORD12345 naar het volgende adres:\nProefpraktijk\nProefstraat 3\n' + PC + ' PROEFSTAD\nU kunt uw pakket volgen via https://vindmijnzending.nl/zoeken/AbCdEf123 .'));
+    toets('1c Intrapost met bestelnummer (ORD…): winkelrij onderweg, bestelnr, via intrapost, geen postcode', h && h.vervoerder === 'winkel' && h.bestelnr === 'ORD12345' && h.winkel === 'Proefleverancier'
+      && h.via === 'intrapost' && h.stand === 'onderweg' && !JSON.stringify(h).includes(PC), h);
+    toets('1c Intrapost: oude vorm (jaar/nummer) werkt nog, postcode is geen nummer', (P.herken(mail('Team Intrapost <noreply@intrapost-mailer.nl>', 'Track & Trace 2026/12345 ' + PC + ' PROEFSTAD (X)', '')) || {}).bestelnr === '2026-12345'
+      && P.herken(mail('Team Intrapost <noreply@intrapost-mailer.nl>', 'Track & Trace ' + PC + ' PROEFSTAD (X)', 'geen nummer')) === null);
+    h = P.herken(mail('Dragonfly Notification <notifications@nl.dragonflyinternational.com>', 'We hebben je pakket ontvangen!', 'Trackingcode # ' + IC + '\nWe hebben je pakket met trackingcode ' + IC + ' ontvangen'));
+    toets('1c Dragonfly INTRA-code: dragonfly, code, winkel leeg (niet Amazon)', h && h.vervoerder === 'dragonfly' && h.code === IC && h.winkel === null && h.stand === 'onderweg', h);
+    const buren = 'WE HEBBEN JE PAKKET VANDAAG OM 17:48 BIJ JE BUREN AFGELEVERD.\n[https://n.proef/CL0/https:%2F%2Fdragonflyshipping.nl%2Fnl%2Fsurveys%2Fbezorging%2F%3Fcontext=' + tok(IC) + '%26rating=1/1/x]';
+    h = P.herken(mail('Dragonfly Notification <notifications@nl.dragonflyinternational.com>', 'Wij hebben uw pakket bij uw buren afgeleverd!', buren));
+    toets('1c Dragonfly "bij uw buren afgeleverd": code uit het token, bezorgd, tussenstand Bij de buren', h && h.code === IC && h.stand === 'bezorgd' && h.detail === 'Bij de buren', h);
+    toets('1c Dragonfly-token zonder geldige code of kapot = geen pakje', P.herken(mail('Dragonfly <notifications@nl.dragonflyinternational.com>', 'Wij hebben uw pakket bij uw buren afgeleverd!', 'context=' + tok('IETS ANDERS'))) === null
+      && P.herken(mail('Dragonfly <notifications@nl.dragonflyinternational.com>', 'Wij hebben uw pakket bij uw buren afgeleverd!', 'context=eyJhbGciOi.eyJrommel!!.x')) === null);
+    toets('1c volgadres Dragonfly ook voor INTRA…DFY, niet voor INTRA zonder DFY', P.volgAdressen({ vervoerder: 'dragonfly', code: IC }, []).length === 1 && P.volgAdressen({ vervoerder: 'dragonfly', code: 'INTRA0000001112' }, []).length === 0);
+    toets('1c Amazon-Dragonfly (AMZNL) houdt winkel Amazon', (P.herken(mail('Dragonfly <notifications@nl.dragonflyinternational.com>', 'We bezorgen je pakket vandaag', 'Trackingcode # AMZNL000001112223')) || {}).winkel === 'Amazon');
+    // opslag: bestelling → Dragonfly-pakje → Intrapost-mail (de volgorde van 18/19-11 bij het herlezen) → buren-mail; en DHL Paket bij een bestaand DHL-pakje
+    const W3 = fs.mkdtempSync(path.join(os.tmpdir(), 'pakjes-'));
+    let nu3 = Date.parse('2026-11-20T09:00:00Z');
+    const M3 = P.maak({ dir: W3, nu: () => nu3 });
+    const best = M3.verwerkMail({ gmail_id: 'b1', van: 'Proefleverancier <info@proefleverancier.nl>', onderwerp: 'Bevestiging van uw bestelling ORD12345',
+      tekst: 'Bedankt voor uw bestelling.\nOrdernummer: ORD12345\nVerzendkosten: € 6,95\nBezorgadres: Proefstraat 3', datum: '2026-11-09T15:00:00Z' });
+    const df = M3.verwerkMail({ gmail_id: 'd1', van: 'Dragonfly Notification <notifications@nl.dragonflyinternational.com>', onderwerp: 'We hebben je pakket ontvangen!', tekst: 'Trackingcode # ' + IC, datum: '2026-11-19T03:52:00Z' });
+    const ip = M3.verwerkMail({ gmail_id: 'i1', van: '"Team Intrapost" <noreply@intrapost-mailer.nl>', onderwerp: 'Track & Trace ORD12345 ' + PC + ' PROEFSTAD (Proefleverancier)',
+      tekst: 'uw zending ORD12345 naar het volgende adres', datum: '2026-11-18T18:08:00Z' });
+    const bu = M3.verwerkMail({ gmail_id: 'd2', van: 'Dragonfly Notification <notifications@nl.dragonflyinternational.com>', onderwerp: 'Wij hebben uw pakket bij uw buren afgeleverd!', tekst: buren, datum: '2026-11-19T16:49:00Z' });
+    let l3 = M3.lijst([]).body, alle3 = l3.lopend.concat(l3.eerder);
+    const kd = alle3.find((p) => p.vervoerder === 'Dragonfly');
+    toets('1c Intrapost-mail gaat op in de bestelling met hetzelfde nummer (geen tweede winkelrij)', best && ip === best && bu === df, [best, ip, df, bu]);
+    toets('1c Dragonfly-pakje krijgt de winkel van de Intrapost-mail en de bestelling gaat erin op: één kaart, bezorgd bij de buren',
+      kd && kd.winkel === 'Proefleverancier' && kd.stand === 'bezorgd' && kd.stand_detail === 'Bij de buren' && kd.bestelnr === 'ORD12345' && kd.samen_id === best
+      && !alle3.some((p) => p.vervoerder === 'Nog geen bezorger'), alle3);
+    // andere volgorde: eerst Intrapost, dan het Dragonfly-pakje
+    M3.verwerkMail({ gmail_id: 'b2', van: 'Proefzorg <info@proefzorg.nl>', onderwerp: 'Bevestiging van uw bestelling ORD77777', tekst: 'Ordernummer: ORD77777\nVerzendkosten: € 6,95', datum: '2026-11-14T10:00:00Z' });
+    M3.verwerkMail({ gmail_id: 'i2', van: 'Team Intrapost <noreply@intrapost-mailer.nl>', onderwerp: 'Track & Trace ORD77777 ' + PC + ' PROEFSTAD (Proefzorg B.V.)', tekst: '', datum: '2026-11-19T18:00:00Z' });
+    M3.verwerkMail({ gmail_id: 'd3', van: 'Dragonfly <notifications@nl.dragonflyinternational.com>', onderwerp: 'We bezorgen je pakket vandaag', tekst: 'Trackingcode # INTRA0000009998DFY', datum: '2026-11-20T08:00:00Z' });
+    l3 = M3.lijst([]).body; alle3 = l3.lopend.concat(l3.eerder);
+    const kd2 = alle3.find((p) => p.code === 'INTRA0000009998DFY');
+    toets('1c eerst Intrapost, dan Dragonfly: ook gekoppeld (winkel Proefzorg, bestelling opgegaan)', kd2 && kd2.winkel === 'Proefzorg' && kd2.bestelnr === 'ORD77777' && !alle3.some((p) => p.vervoerder === 'Nog geen bezorger'), alle3);
+    // DHL Paket-mail bij een DHL-pakje dat al bezorgd is: zelfde rij, blijft bezorgd, eerste mail eerder
+    const dh = M3.verwerkMail({ gmail_id: 'h1', van: 'DHL eCommerce <noreply@dhlecommerce.nl>', onderwerp: 'Je pakket is bezorgd (CJ111222333DE)', tekst: 'Bezorgd.', datum: '2026-11-17T18:06:00Z' });
+    const dh2 = M3.verwerkMail({ gmail_id: 'h2', van: '"DHL Paket" <noreply@dhl.de>', onderwerp: 'Your E-commerce Proefwinkel Service GmbH shipment is on its way', tekst: 'https://x.dhl.de/go?piececode=CJ111222333DE', datum: '2026-11-16T10:36:00Z' });
+    l3 = M3.lijst([]).body; alle3 = l3.lopend.concat(l3.eerder);
+    const kh = alle3.find((p) => p.code === 'CJ111222333DE');
+    toets('1c DHL Paket-mail komt bij hetzelfde DHL-pakje, oudere mail zet bezorgd niet terug', dh && dh2 === dh && kh && kh.stand === 'bezorgd' && kh.eerste === '2026-11-16T10:36:00.000Z', kh);
+    // punt 4: bezorgd-mail ná de laatste volgvraag ("vandaag") wint op het scherm
+    const dv = M3.verwerkMail({ gmail_id: 'v1', van: 'DHL eCommerce <noreply@dhlecommerce.nl>', onderwerp: 'We staan vandaag voor de deur tussen 17.30 - 21.30 uur (JVGL0000111122223333)', tekst: '', datum: '2026-11-20T05:00:00Z' });
+    const { DatabaseSync } = require('node:sqlite');
+    const raw = new DatabaseSync(path.join(W3, 'pakjes.sqlite'));
+    raw.prepare("UPDATE zending SET stand_volg = 'vandaag', gevolgd = 'dhl', volg_tekst = 'Bezorger is onderweg', ververst = '2026-11-20T08:14:00.000Z' WHERE id = ?").run(dv);
+    M3.verwerkMail({ gmail_id: 'v2', van: 'DHL eCommerce <noreply@dhlecommerce.nl>', onderwerp: 'Je pakket is bezorgd (JVGL0000111122223333)', tekst: '', datum: '2026-11-20T08:19:00Z' });
+    const kv = M3.lijst([]).body.lopend.find((p) => p.code === 'JVGL0000111122223333');
+    toets('1c bezorgd-mail na de laatste volgvraag ("vandaag") = scherm toont bezorgd', kv && kv.stand === 'bezorgd', kv);
+    // oude rijen: een INTRA-pakje dat vóór wv3535 de winkel Amazon kreeg, verliest die bij de volgende opening
+    raw.prepare("UPDATE zending SET winkel = 'Amazon' WHERE code = 'INTRA0000009998DFY'").run();
+    raw.close(); M3.sluit();
+    const M3b = P.maak({ dir: W3, nu: () => nu3 });
+    const kd3 = M3b.lijst([]).body.lopend.concat(M3b.lijst([]).body.eerder).find((p) => p.code === 'INTRA0000009998DFY');
+    toets('1c oude INTRA-rij met winkel Amazon: winkel weg bij openen', kd3 && kd3.winkel !== 'Amazon', kd3);
+    M3b.sluit(); fs.rmSync(W3, { recursive: true, force: true });
+  }
   // ── 3. opslag, ronde en lijst ──
   const W = fs.mkdtempSync(path.join(os.tmpdir(), 'pakjes-'));
   fs.writeFileSync(path.join(W, 'config.json'), JSON.stringify({ postcodes: [PC] }));
