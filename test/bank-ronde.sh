@@ -353,6 +353,44 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
     u = await h.bankRonde();
     toets('pod: geen rekeningen → niet geslaagd (leeg), geen hartslag', !u.geslaagd && u.hartslag === false && HS.length === hs0 && u.fouten.some((f) => f.reden === 'leeg'), u);
     fs.writeFileSync(STAND, standBewaar, { mode: 0o600 }); fs.writeFileSync(path.join(BD, 'bunq', 'staat.json'), staatBewaar, { mode: 0o600 });
+    // ── 2A03 (Fable-review bank-lezers M1/M2): beschadigde koppelbestanden niet stil leeg overschrijven ──
+    nulTellers(); zetStand((s) => { delete s.ronde.box; });
+    fs.rmSync(path.join(BD, 'bunq', 'staat.json'));
+    u = await h.bankRonde();
+    toets('2A03: bunq-staat weg, bunq-rekeningen bekend → niet geslaagd, fout bunq/staat, geen hartslag', !u.geslaagd && u.hartslag === false && u.fouten.some((f) => f.bron === 'bunq' && f.reden === 'staat'), u);
+    toets('2A03: bunq-staat weg → box-rij', /## \[direct\] [^\n]*bunq: staat\.json ontbreekt of is onleesbaar/.test(fs.readFileSync(BOX, 'utf8')), null);
+    fs.writeFileSync(path.join(BD, 'bunq', 'staat.json'), '{"half', { mode: 0o600 });
+    nulTellers(); zetStand((s) => { delete s.ronde.box; });
+    u = await h.bankRonde();
+    toets('2A03: bunq-staat half → niet geslaagd, fout bunq/staat, bestand onaangeroerd', !u.geslaagd && u.fouten.some((f) => f.bron === 'bunq' && f.reden === 'staat') &&
+      fs.readFileSync(path.join(BD, 'bunq', 'staat.json'), 'utf8') === '{"half', u);
+    fs.writeFileSync(path.join(BD, 'bunq', 'staat.json'), staatBewaar, { mode: 0o600 });
+    {
+      const standGoed = fs.readFileSync(STAND), half = standGoed.subarray(0, Math.floor(standGoed.length / 2));
+      fs.writeFileSync(STAND, half, { mode: 0o600 });
+      let rr = await draai(['toestemming'], G);
+      toets('2A03: half stand.json + toestemming → weigert, stand.json niet overschreven', rr.j && rr.j.ok === false && /bankstand onleesbaar/.test(rr.j.fout) && Buffer.compare(fs.readFileSync(STAND), half) === 0, rr.j);
+      const kopie = fs.readdirSync(BD).filter((n) => /^stand\.json\.kapot-[0-9a-f]{12}$/.test(n));
+      toets('2A03: kopie van het kapotte bestand bewaard (600, zelfde inhoud)', kopie.length === 1 && Buffer.compare(fs.readFileSync(path.join(BD, kopie[0])), half) === 0 &&
+        (fs.statSync(path.join(BD, kopie[0])).mode & 0o777) === 0o600, kopie);
+      const hs1 = HS.length;
+      u = await h.bankRonde();
+      const tel = () => (fs.readFileSync(BOX, 'utf8').match(/stand\.json onleesbaar, bankronde staat stil/g) || []).length;
+      toets('2A03: ronde met half stand.json → niet ok, geen hartslag, één box-rij, bestand niet overschreven', !u.ok && u.hartslag === false && HS.length === hs1 && tel() === 1 &&
+        Buffer.compare(fs.readFileSync(STAND), half) === 0, u);
+      await h.bankRonde();
+      toets('2A03: tweede ronde dezelfde dag → geen tweede box-rij, één kopie', tel() === 1 && fs.readdirSync(BD).filter((n) => /^stand\.json\.kapot-/.test(n)).length === 1, tel());
+      toets('2A03: foutmelding zonder inhoud van stand.json (vaste reden)', /bankstand onleesbaar \(geen geldige JSON\)/.test(rr.j.fout) && !/sess-|versie|rekeningen"/.test(JSON.stringify(rr.j)) &&
+        !/sess-|"versie/.test(fs.readFileSync(BOX, 'utf8')), rr.j);
+      fs.writeFileSync(STAND, '[]', { mode: 0o600 });
+      rr = await draai(['toestemming'], G);
+      toets('2A03: stand.json geen object → weigert', rr.j && rr.j.ok === false && /bankstand onleesbaar/.test(rr.j.fout), rr.j);
+      fs.renameSync(STAND, STAND + '.weg');
+      rr = await draai(['toestemming'], G);
+      toets('2A03: stand.json ontbreekt → lege stand, ok', rr.j && rr.j.ok === true && Array.isArray(rr.j.sessies) && rr.j.sessies.length === 0, rr.j);
+      fs.rmSync(STAND, { force: true }); fs.renameSync(STAND + '.weg', STAND); fs.writeFileSync(STAND, standGoed, { mode: 0o600 });
+      fs.readdirSync(BD).filter((n) => /^stand\.json\.kapot-/.test(n)).forEach((n) => fs.rmSync(path.join(BD, n)));
+    }
     // oude hoofdregel (> 14 u) niet meer sturen; bij herkoppelen gewist
     { const kp = path.join(BD, 'kaarten.json'), kk = JSON.parse(fs.readFileSync(kp, 'utf8'));
       kk._hoofd = { tekst: 'oud', sinds: new Date(Date.now() - 15 * 3600000).toISOString(), bank: 'ABN AMRO' }; fs.writeFileSync(kp, JSON.stringify(kk));

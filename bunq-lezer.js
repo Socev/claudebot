@@ -73,9 +73,13 @@ function padToets(methode, padQuery, userId) {
 // ── staat ───────────────────────────────────────────────────────────────────
 function staatPad(bankDir) { return path.join(bankDir, 'bunq', 'staat.json'); }
 function staatLees(bankDir) {
-  let s;
-  try { s = JSON.parse(fs.readFileSync(staatPad(bankDir), 'utf8')); } catch (e) { return null; }
-  if (!s || !s.private_key_pem || !s.installation_token || !s.server_public_key || !s.user_id) return null;
+  // 2A03 (Fable-review bank-lezers M2): alleen "bestaat niet" = niet ingericht (null). Onleesbaar of onvolledig weigert, zodat
+  // de ronde het als fout ziet in plaats van stil zonder bunq "geslaagd" te melden.
+  let ruw, s;
+  try { ruw = fs.readFileSync(staatPad(bankDir), 'utf8'); }
+  catch (e) { if (e && e.code === 'ENOENT') return null; throw new BunqWeigering('bunq-staat niet te lezen (' + String(e && e.code || 'fout') + ')'); }
+  try { s = JSON.parse(ruw); } catch (e) { throw new BunqWeigering('bunq-staat onleesbaar (geen geldige JSON); niets overschreven'); }
+  if (!s || !s.private_key_pem || !s.installation_token || !s.server_public_key || !s.user_id) throw new BunqWeigering('bunq-staat onvolledig (sleutelpaar, installatie of gebruiker ontbreekt)');
   return s;
 }
 

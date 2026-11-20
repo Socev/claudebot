@@ -240,10 +240,29 @@ async function metSlot(fn) {
   const vers = setInterval(function () { try { const n = new Date(); fs.utimesSync(SLOT, n, n); } catch (e) {} }, 60000);
   try { return await fn(); } finally { clearInterval(vers); try { fs.unlinkSync(SLOT); } catch (e) {} }
 }
+// 2A03 (Fable-review bank-lezers M1): alleen "bestaat niet" is een lege stand. Een half geschreven, onleesbaar of vreemd
+// bestand weigert (Weigering, ok:false) en krijgt een kopie ernaast; vroeger gaf elke fout een lege stand die de eerstvolgende
+// standSchrijf over alle toestemmingen, labels en ophaalstempels heen zette. server.js zet bij de ronde één box-rij per dag.
+function standLeeg() { return { versie: 1, wachtend: {}, sessies: {}, rekeningen: {}, tellers: { dag: '', per: {} }, opgehaald: {} }; }
+// reden is altijd een vaste tekst of een fs-foutcode: een JSON-parsemelding kan een stuk van stand.json bevatten (review 2A03 MOET 1)
+function standKapot(ruw, reden) {
+  let kopie = null;
+  if (ruw) {
+    const naam = 'stand.json.kapot-' + crypto.createHash('sha256').update(ruw).digest('hex').slice(0, 12);
+    try { fs.writeFileSync(path.join(BANK_DIR, naam), ruw, { mode: 0o600, flag: 'wx' }); kopie = naam; }
+    catch (x) { kopie = x && x.code === 'EEXIST' ? naam : null; }
+  }
+  naarServer._stand_kapot = { reden: reden, kopie: kopie };
+  return new Weigering('bankstand onleesbaar (' + reden + '); niets overschreven' + (kopie ? ', kopie ' + kopie : ', geen kopie mogelijk') +
+    '. Bankopvragen staan stil tot de machinekamer stand.json herstelt.');
+}
 function standLees() {
-  let s = {};
-  try { s = JSON.parse(fs.readFileSync(STAND, 'utf8')); } catch (e) {}
-  return Object.assign({ versie: 1, wachtend: {}, sessies: {}, rekeningen: {}, tellers: { dag: '', per: {} }, opgehaald: {} }, s);
+  let ruw, s;
+  try { ruw = fs.readFileSync(STAND); }
+  catch (e) { if (e && e.code === 'ENOENT') return standLeeg(); throw standKapot(null, /^E[A-Z]{2,12}$/.test(String(e && e.code)) ? e.code : 'leesfout'); }
+  try { s = JSON.parse(ruw.toString('utf8')); } catch (e) { throw standKapot(ruw, 'geen geldige JSON'); }
+  if (!s || typeof s !== 'object' || Array.isArray(s)) throw standKapot(ruw, 'geen object');
+  return Object.assign(standLeeg(), s);
 }
 function standSchrijf(s) {
   mapKlaar();
@@ -1114,6 +1133,9 @@ const opdrachten = {
       // ── bunq ──
       let bunqN = 0;
       if (!ctx && bunqCtxFout) fout('bunq', 'staat', 'bunq-staat onleesbaar: ' + bunqCtxFout);
+      // 2A03 (M2): bunq-rekeningen bekend maar geen bunq-staat = geen stille "geslaagd" met bevroren bunq-saldi
+      else if (!ctx && Object.keys(s.rekeningen).some(function (h) { return s.rekeningen[h] && s.rekeningen[h].bron === 'bunq'; }))
+        fout('bunq', 'staat', 'bunq-staat (bunq/staat.json) ontbreekt terwijl er bunq-rekeningen bekend zijn; bunq-saldi en -transacties worden niet ververst');
       if (ctx && !bunqKan(ctx)) fout('bunq', 'sleutel', 'bunq-sleutel nu niet beschikbaar (kluis bunq_api_key)');
       else if (ctx) {
         let stop = false, bh = bunqRekeningen(s);
@@ -1177,9 +1199,9 @@ const opdrachten = {
       s.ronde.box = s.ronde.box || {};
       fouten.forEach(function (f) {
         // A10: ook een afgekapte opvraag (beide bronnen), anders blijft een venster dat niet opschuift onzichtbaar
-        const afk = f.reden === 'afgekapt';
-        if (!afk && (f.bron !== 'enablebanking' || (f.reden !== 'sleutel' && f.reden !== 'toestemming'))) return;
-        const sl = afk ? f.bron + '-afgekapt' : f.reden;
+        const afk = f.reden === 'afgekapt', bstaat = f.bron === 'bunq' && f.reden === 'staat';   // 2A03: ook bunq-staat weg/onleesbaar
+        if (!afk && !bstaat && (f.bron !== 'enablebanking' || (f.reden !== 'sleutel' && f.reden !== 'toestemming'))) return;
+        const sl = afk ? f.bron + '-afgekapt' : bstaat ? 'bunq-staat' : f.reden;
         if (s.ronde.box[sl] === vandaag) return;
         s.ronde.box[sl] = vandaag;
         box.push({ bron: f.bron, reden: f.reden, tekst: f.tekst });
