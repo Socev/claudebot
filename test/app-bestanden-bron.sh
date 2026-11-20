@@ -8,6 +8,7 @@
 #      markeringen ([AUTO], (getypt) [APP], [Systeem: …]), opmaak en links, één lang woord
 #   t  beurt met label via appBewaar: meta.json heeft label, de lijst toont het; beurt zonder label: label null (kop zoals nu)
 #   p  processJob geeft het label alleen mee bij een getypt app-bericht of de telefoon (niet bij een knop of Telegram)
+#   v  wv3547: de lijst kent geen grens van 200 klussen; alles binnen de bewaartermijn, niets daarbuiten
 # Gebruik: bash test/app-bestanden-bron.sh [server.js]   (kruisproef: met de server.js van main hoort het rood te zijn)
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -119,6 +120,25 @@ const R = function () { return { _app: {} }; };
     res = R(); await ctx.appBestanden({}, res);
     const te = res.obj.items.find(function (x) { return x.job_id === jobE; });
     toets('t4 lijst kapt op codepunten (80 emoji, geen halve)', te && Array.from(te.label).length === 80 && te.label === '😀'.repeat(80), te && te.label.length);
+    // v (wv3547, actieplan 2B15): de lijst toont de hele bewaartermijn, ook als er meer dan 200 klussen zijn (verzonnen klussen, 230 stuks
+    // verspreid over 29 dagen); de oudste staat erin, een klus van 31 dagen niet
+    let jv = 0;
+    function zetOud(dagenTerug) {
+      const job = 'cccccccccccc' + String(++jv).padStart(4, '0');
+      const t = new Date(Date.now() - dagenTerug * 86400e3), d = path.join(DIR, t.toISOString().slice(0, 10), job);
+      fs.mkdirSync(path.join(d, 'b'), { recursive: true }); fs.writeFileSync(path.join(d, 'b', '1'), 'v' + jv);
+      fs.writeFileSync(path.join(d, 'meta.json'), JSON.stringify({ job_id: job, soort: 'agent', kanaal: null, app: true, label: 'david:proef ' + jv, ok: true,
+        op: t.toISOString(), bestanden: [{ n: 1, naam: 'v' + jv + '.pdf', grootte: 2 }], overgeslagen: 0, vol: false, rapport: false }));
+      return job;
+    }
+    const veel = []; for (let k = 0; k < 230; k++) veel.push(zetOud(1 + k * 28 / 230));
+    const oudste = zetOud(29.5), teOud = zetOud(31);
+    ctx.appStaat.bestandenIndex = null;
+    res = R(); await ctx.appBestanden({}, res);
+    const ids = new Set(((res.obj && res.obj.items) || []).map(function (x) { return x.job_id; }));
+    toets('v1 meer dan 200 klussen: alle 231 binnen de termijn in de lijst', veel.every(function (j) { return ids.has(j); }) && ids.has(oudste), ids.size);
+    toets('v2 klus van 31 dagen niet (bewaartermijn)', !ids.has(teOud));
+    toets('v3 jongste eerst, oudste achteraan', res.obj.items[res.obj.items.length - 1].job_id === oudste, res.obj.items[res.obj.items.length - 1].job_id);
     toets('geen logError', ctx.FOUTEN.length === 0, ctx.FOUTEN);
   } catch (e) { toets('geen uitzondering', false, String(e && e.stack || e)); }
   fs.rmSync(W, { recursive: true, force: true });
