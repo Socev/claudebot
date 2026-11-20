@@ -27047,6 +27047,10 @@ function smalSqlLezend(q) {
   const t = String(q || '').trim().replace(/;\s*$/, '');
   if (!t || t.length > 20000 || t.indexOf(';') >= 0) return false;
   if (!/^(select|with)\b/i.test(t)) return false;
+  // wv3539 (Fable-review fin-datahub H1): commentaar kon REPLACE en INTO scheiden (REPLACE/**/INTO, REPLACE --x⏎INTO). Daarom geen
+  // commentaar, en replace alleen als functie (replace( of replace (); REPLACE als opdracht eist INTO erna, nooit een haakje.
+  if (/--|\/\*/.test(t)) return false;
+  if (/\breplace\b(?!\s*\()/i.test(t)) return false;
   return !/\b(insert|update|delete|replace\s+into|drop|alter|create|attach|detach|vacuum|reindex|pragma|analyze|savepoint|release|rollback|commit|begin)\b/i.test(t);
 }
 function smalKind(cmd, args, invoer, maxMs, env) {
@@ -27218,7 +27222,7 @@ async function smalActie(actie, d, wie) {
   }
   if (actie === 'fin-sql') {
     if (!process.env.CLOUDFLARE_API_TOKEN) return { status: 503, j: { ok: false, fout: 'geen Cloudflare-sleutel op de pod' } };
-    if (!smalSqlLezend(d.sql)) return { status: 403, j: { ok: false, fout: 'alleen lezen: één SELECT of WITH, zonder schrijfwoorden; laden gaat via de machinekamer' } };
+    if (!smalSqlLezend(d.sql)) return { status: 403, j: { ok: false, fout: 'alleen lezen: één SELECT of WITH, zonder commentaar (-- of /*) en zonder schrijfwoorden (replace alleen als functie); laden gaat via de machinekamer' } };
     const params = Array.isArray(d.params) ? d.params.slice(0, 200).map(function (v) { return (v == null || typeof v === 'number' || typeof v === 'boolean') ? v : String(v); }) : [];
     const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/d1/database/' + SMAL_FIN_DB + '/query',
       { sql: String(d.sql).trim().replace(/;\s*$/, ''), params: params });

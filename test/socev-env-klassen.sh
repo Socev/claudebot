@@ -255,9 +255,14 @@ rpc.listen(0, '127.0.0.1', async function () {
     toets('G /smal/vault-zoek: eigen databank, nooit AI Search (hier zonder vaultzoek.js 503, zonder databank 502)', aiSearch === 0 && (g2._status === 503 || g2._status === 502) && /zoeken op betekenis/.test(g2.fout || ''), JSON.stringify(g2).slice(0, 200));
     const nCf = cfVragen.length;
     const schrijf = ['DELETE FROM reeks', 'WITH a AS (SELECT 1) DELETE FROM reeks', 'SELECT 1; DROP TABLE reeks', 'INSERT INTO reeks VALUES (1)', 'select 1;\nupdate reeks set bedrag=0',
-      'PRAGMA table_info(reeks)', 'REPLACE INTO reeks VALUES (1)', 'ATTACH DATABASE x AS y', ''];
+      'PRAGMA table_info(reeks)', 'REPLACE INTO reeks VALUES (1)', 'ATTACH DATABASE x AS y', '',
+      // wv3539 (Fable-review fin-datahub H1): commentaar tussen REPLACE en INTO, en commentaar überhaupt
+      'WITH x AS (SELECT 1) REPLACE/**/INTO reeks(a) SELECT 1 FROM x', 'WITH x AS (SELECT 1) REPLACE --x\nINTO reeks(a) SELECT 1 FROM x',
+      'WITH x AS (SELECT 1) REPLACE\tINTO reeks(a) SELECT 1 FROM x', 'SELECT 1 -- gewoon commentaar', 'SELECT /* c */ 1'];
     const gw = []; for (const q of schrijf) gw.push((await req('POST', '/smal/fin-sql', { secret: SMAL, sql: q }))._status);
     toets('G /smal/fin-sql: elke schrijf- of beheeropdracht 403, niets naar D1', gw.every((x) => x === 403) && cfVragen.length === nCf, gw.join(','));
+    const g3b = await req('POST', '/smal/fin-sql', { secret: SMAL, sql: "SELECT replace (rubriek,'a','b') FROM reeks" });
+    toets('G /smal/fin-sql: replace (…) met spatie is ook een functie en gaat door (wv3539)', g3b._status === 200, String(g3b._status));
     const g3 = await req('POST', '/smal/fin-sql', { secret: SMAL, sql: "SELECT jaar, replace(rubriek,'_',' ') r FROM reeks WHERE entiteit=? ;", params: ['TG'] });
     const cd = cfVragen[cfVragen.length - 1] || {};
     toets('G /smal/fin-sql: SELECT (ook met replace()) en params gaan door naar D1 fin', g3._status === 200 && g3.success === true && /\/d1\/database\/ffcb09ad/.test(cd.url) && cd.body.params[0] === 'TG' && !/;/.test(cd.body.sql), JSON.stringify(cd).slice(0, 200));
