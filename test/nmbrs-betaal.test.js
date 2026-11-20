@@ -433,3 +433,30 @@ test('wv3232 oude SEPA-rij wordt opnieuw gelezen; taak 403 → blijvend; bankrek
     assert.equal((await kind(o.dir, 'betaalbestand', ARG({ formaat: 'csv' }))).code, 'controle');
   } finally { o.sluit(); }
 });
+
+// ── actieplan 2B13 (Fable-review R2-46): één kapotte tekenverwijzing breekt de ronde niet meer af ──────────────────────
+test('2B13 tekenverwijzing buiten Unicode (&#x110000; / &#1114112;) → geen RangeError; in employeeid of een sleutelveld onleesbaar', () => {
+  for (const ref of ['&#x110000;', '&#1114112;', '&#xFFFFFFFFFF;', '&#99999999999999999999;']) {
+    let r;
+    assert.doesNotThrow(() => { r = B.leesRunOutput(runOutput([{ id: '1' + ref, bank: '1.00' }, { id: E(2), bank: '1500.00' }])); }, ref);
+    assert.equal(r.ok, true); assert.equal(r.onleesbaar, true, ref); assert.equal(r.per[E(2)].bank, 150000);
+  }
+  const r2 = B.leesRunOutput(RO3().replace('<year>2026</year>', '<year>2026&#x110000;</year>'));
+  assert.equal(r2.ok, true); assert.equal(r2.onleesbaar, true, 'kapotte verwijzing in jaar/periode/run: dubbel-controle niet te omzeilen');
+  assert.equal(B.leesRunOutput(runOutput([{ id: E(1), bank: '10.00' }, { id: E(1), bank: '10.00' }]).replace('<runnumber>12</runnumber>', '<runnumber>12&#x110000;</runnumber>')).onleesbaar, true);
+  assert.equal(B.leesRunOutput(runOutput([{ id: E(1), bank: '1.0&#x110000;' }])).onleesbaar, true);
+  // geldige verwijzingen blijven werken
+  assert.equal(B.leesRunOutput(runOutput([{ id: 'e&#x30;1', bank: '&#49;.00' }])).per['e01'].bank, 100);
+});
+
+test('2B13 ronde: run output met &#x110000; → ronde loopt door (ok), lijst afgekeurd als onleesbaar, geen bestand', async () => {
+  const M = { log: [], doc202: 0, ro: () => RO3().replace('<employeeid>' + E(1), '<employeeid>' + E(1) + '&#x110000;'), ibans: [I1, I2, I3] };
+  const o = await opzet(M);
+  try {
+    const r = await kind(o.dir, 'ronde', INV(), o.env);
+    assert.equal(r && r.ok, true, JSON.stringify(r));
+    const x = (await kind(o.dir, 'betaallijst', {})).lijsten[0];
+    assert.equal(x.status, 'afgekeurd'); assert.ok(x.hard.some((h) => /niet \(helemaal\) te lezen/.test(h)), JSON.stringify(x.hard));
+    assert.equal((await kind(o.dir, 'betaalbestand', ARG({ formaat: 'csv' }))).code, 'controle');
+  } finally { o.sluit(); }
+});
