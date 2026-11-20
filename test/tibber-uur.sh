@@ -108,6 +108,26 @@ srv.listen(0, '127.0.0.1', async function () {
     const v = T0.venster(d, M.eind);
     toets('venster heelt een gat van 4 dagen (≥ 96+24, ≤ 744)', v >= 120 && v <= 130, v);
     toets('venster hooguit 744', T0.venster(d, M.eind + 90 * 86400000) === 744);
+    // 4b. wv3482: een los leeg uur van 5 dagen oud tussen gevulde uren → venster vanaf dat uur; jonger dan 12 u of ouder dan 31 d telt niet
+    const iso = (t) => new Date(t).toISOString().replace('Z', '+00:00');
+    const dv = T0.dbOpen(path.join(W, 'venster'));
+    for (let i = 40 * 24; i >= 1; i--) dv.prepare('insert or replace into verbruik values(?,?,?,?,?,?,?,?)').run(HOME_ID, iso(M.eind - i * 3600000), 'x', 1, 0.3, 0.3, 0.05, 'EUR');
+    toets('venster (wv3482): alles gevuld → 72', T0.venster(dv, M.eind) === 72, T0.venster(dv, M.eind));
+    dv.prepare('update verbruik set kwh = null where van = ?').run(iso(M.eind - 120 * 3600000));
+    toets('venster (wv3482): leeg uur van 5 dagen → 120 + 24', T0.venster(dv, M.eind) === 144, T0.venster(dv, M.eind));
+    dv.prepare('update verbruik set kwh = null where van = ?').run(iso(M.eind - 300 * 3600000));
+    toets('venster (wv3482): het oudste lege uur telt (300 + 24)', T0.venster(dv, M.eind) === 324, T0.venster(dv, M.eind));
+    dv.exec('update verbruik set kwh = 1');
+    dv.prepare('update verbruik set kwh = null where van = ?').run(iso(M.eind - 33 * 24 * 3600000));
+    dv.prepare('update verbruik set kwh = null where van = ?').run(iso(M.eind - 6 * 3600000));
+    toets('venster (wv3482): leeg uur ouder dan 31 d of jonger dan 12 u telt niet', T0.venster(dv, M.eind) === 72, T0.venster(dv, M.eind));
+    // prijs-upsert: een gevulde prijs blijft staan als Tibber null geeft (bevinding 9)
+    const PV = '2026-11-08T00:00:00.000+01:00';
+    T0.opslaan(dv, [{ id: HOME_ID, consumption: { nodes: [] }, currentSubscription: { priceInfo: { today: [{ startsAt: PV, total: 0.31, energy: 0.2, tax: 0.11, level: 'NORMAL' }] } } }]);
+    T0.opslaan(dv, [{ id: HOME_ID, consumption: { nodes: [] }, currentSubscription: { priceInfo: { today: [{ startsAt: PV, total: null, energy: null, tax: 0.12, level: null }] } } }]);
+    const pr = dv.prepare('select totaal, energie, belasting, niveau from prijs where van = ?').get(PV);
+    toets('prijs (wv3482): null overschrijft geen gevulde prijs, een nieuwe waarde wel', pr && pr.totaal === 0.31 && pr.energie === 0.2 && pr.belasting === 0.12 && pr.niveau === 'NORMAL', pr);
+    dv.close();
 
     // 5. lopende maand t/m gisteren, ook met de zomertijdwissel
     const W2 = path.join(W, 'm'); const dm = T0.dbOpen(W2);
@@ -157,7 +177,7 @@ srv.listen(0, '127.0.0.1', async function () {
     let primair = true;
     const g = { require, fs, path, crypto, Buffer, console, URL, URLSearchParams, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, spawn, VAULT: W, __dirname: process.cwd(),
       process: { env: penv, execPath: process.execPath, pid: process.pid },
-      reqPath: (req) => req.url, schrijfLog: (x) => logs.push(x), nu: () => '2026-11-08 08:00:00', velden: (o) => Object.keys(o).filter((k) => o[k] != null && o[k] !== '').map((k) => k + '=' + o[k]).join(' '),
+      reqPath: (req) => req.url, SERVER_ECHT: false, schrijfLog: (x) => logs.push(x), nu: () => '2026-11-08 08:00:00', velden: (o) => Object.keys(o).filter((k) => o[k] != null && o[k] !== '').map((k) => k + '=' + o[k]).join(' '),
       logError: (wat, e) => logs.push('fout ' + wat + ' ' + (e && e.message)), rolPrimair: () => primair,
       VV: () => ({ lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: (p, t) => fs.writeFileSync(p, t) }), bankPagina: () => {},
       fetch: async function (url, o) {

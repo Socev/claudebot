@@ -9,18 +9,20 @@ const begin = SRC.indexOf('// ── wv3460: Homey (Athom MCP, alleen lezen)'), 
 assert.ok(begin > 0 && eind > begin);
 const BLOK = SRC.slice(begin, eind);
 
-function omgeving(open, pagina, dir) {
+function omgeving(open, pagina, dir, extra) {
+  extra = extra || {};
   const geroepen = [];
   const mod = { stateOpen: function (dir, s) { return s === open; }, terug: async function (deps, s, c, f) { geroepen.push({ s: s, c: c, f: f }); return { soort: 'gekoppeld' }; },
-    ronde: async function () { return { ok: true, tools: 0 }; }, vaultBlok: function () { return '<!-- homey-fase:begin -->\nX\n<!-- homey-fase:einde -->'; },
+    ronde: extra.ronde || async function () { return { ok: true, tools: 0 }; }, vaultBlok: function () { return '<!-- homey-fase:begin -->\nX\n<!-- homey-fase:einde -->'; },
     blokZet: function (p, b) { return /homey-fase:begin -->[\s\S]*homey-fase:begin/.test(p) ? null : p + '\n' + b; }, linkMaak: function () { return { url: 'x', geldig_tot: 'y' }; } };
   const ctx = { require: function (p) { if (/homey\.js$/.test(p)) return mod; return require(p); }, process: { env: { HOMEY_DIR: dir || '/tmp/homey-route-proef' } }, path: path, fs: fs,
     __dirname: '/x', reqPath: function (req) { return new URL(req.url, 'http://x').pathname; }, rolPrimair: function () { return true; },
     bankPagina: function (res, status, kop) { res.writeHead(status, {}); res.end(kop); }, schrijfLog: function () {}, nu: function () { return ''; }, velden: function () { return ''; },
     logError: function () {}, tibberMgmt: async function () { throw new Error('geen kluis in de toets'); }, smalKind: async function () { return { code: 0, stdout: '{}' }; },
-    VV: function () { return { lees: function () { return ''; }, schrijf: function () {}, wijzig: function (p, fn) { const n = fn(pagina.tekst); if (n == null) return false; pagina.tekst = n; pagina.pad = p; return true; } }; }, VAULT: '/tmp', SERVER_ECHT: false, Date: Date, JSON: JSON, URL: URL, URLSearchParams: URLSearchParams, String: String, Error: Error };
+    VV: function () { return { lees: function () { return extra.box ? extra.box.tekst : ''; }, schrijf: function (p, t) { if (extra.box) extra.box.tekst = t; }, wijzig: function (p, fn) { const n = fn(pagina.tekst); if (n == null) return false; pagina.tekst = n; pagina.pad = p; return true; } }; }, VAULT: '/tmp', SERVER_ECHT: false, Date: extra.Date || Date, JSON: JSON, URL: URL, URLSearchParams: URLSearchParams, String: String, Error: Error };
   vm.createContext(ctx);
-  vm.runInContext(BLOK + '\n;this.homeyTerug = homeyTerug; this.homeyIsPad = homeyIsPad; this.homeyVaultSchrijf = homeyVaultSchrijf;', ctx);
+  vm.runInContext(BLOK + '\n;this.homeyTerug = homeyTerug; this.homeyIsPad = homeyIsPad; this.homeyVaultSchrijf = homeyVaultSchrijf; this.homeyTik = homeyTik;' +
+    ' this.homeyStand = function () { return { volgende: homeyVolgende, herpogingen: homeyHerpogingen, reeks: homeyMisReeks }; };', ctx);
   return { ctx: ctx, geroepen: geroepen };
 }
 function verzoek(methode, url, body, type) {
@@ -81,5 +83,47 @@ test('dagtabel (wv3462): één keer per dag, dwingen mag, half blok = niets en b
   pagina.tekst += '\n<!-- homey-fase:begin -->\n';
   const c = o2.ctx.homeyVaultSchrijf(true);
   assert.strictEqual(c.ok, false); assert.match(c.fout, /markers/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('wv3482: mislukte leesronde na 10 min opnieuw, hooguit 3 keer; gat pas na 3 op rij in de box, 1× per dag', async function () {
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'homey-tik-'));
+  fs.writeFileSync(path.join(dir, 'gekoppeld.json'), '{}');
+  let klok = Date.parse('2026-11-20T17:00:00Z');
+  class NepDate extends Date { constructor(...a) { if (a.length) super(...a); else super(klok); } static now() { return klok; } }
+  const uitslagen = [], gestart = [];
+  const box = { tekst: '# Box\n\n## [direct] 2026-11-20 08:00 — oud\n- status: open\n' };
+  const o = omgeving(S, { tekst: '' }, dir, { Date: NepDate, box: box, ronde: async function (deps, soort) { gestart.push(klok); return uitslagen.shift() || { ok: true, minuten: 60 }; } });
+  const tik = async function () { const p = o.ctx.homeyTik(); if (p) await p; };
+  const MIN = 60000;
+  // eerste ronde: gat
+  uitslagen.push({ ok: false, reden: 'gat', fout: 'alle fasereeksen leeg' }, { ok: false, reden: 'gat', fout: 'x' }, { ok: false, reden: 'gat', fout: 'x' }, { ok: false, reden: 'gat', fout: 'x' });
+  await tik();
+  assert.strictEqual(gestart.length, 1);
+  klok += 5 * MIN; await tik(); assert.strictEqual(gestart.length, 1, 'na 5 min nog niet');
+  klok += 5 * MIN; await tik(); assert.strictEqual(gestart.length, 2, 'na 10 min herpoging 1');
+  assert.ok(box.tekst.indexOf('homey-gat-') < 0, 'na 2 mislukkingen nog geen boxrij');
+  klok += 10 * MIN; await tik(); assert.strictEqual(gestart.length, 3, 'herpoging 2');
+  assert.strictEqual((box.tekst.match(/homey-gat-2026-11-20/g) || []).length, 1, 'na 3 op rij één boxrij');
+  assert.match(box.tekst, /3 rondes op rij mislukt/);
+  klok += 10 * MIN; await tik(); assert.strictEqual(gestart.length, 4, 'herpoging 3');
+  assert.strictEqual((box.tekst.match(/homey-gat-2026-11-20/g) || []).length, 1, 'niet nog eens dezelfde dag');
+  assert.strictEqual(o.ctx.homeyStand().reeks, 4);
+  klok += 10 * MIN; await tik(); assert.strictEqual(gestart.length, 4, 'na 3 herpogingen terug op het uurritme');
+  klok = Date.parse('2026-11-20T17:55:00Z') - 1; await tik(); assert.strictEqual(gestart.length, 4);
+  klok += 1; await tik(); assert.strictEqual(gestart.length, 5, '55 min na de gewone poging');
+  assert.strictEqual(o.ctx.homeyStand().reeks, 0, 'gelukt zet de reeks terug');
+  klok += 10 * MIN; await tik(); assert.strictEqual(gestart.length, 5, 'na een gelukte ronde geen herpoging');
+  // dode koppeling: geen herpoging
+  klok += 45 * MIN; uitslagen.push({ ok: false, reden: 'dood', fout: 'koppeling dood' });
+  await tik(); assert.strictEqual(gestart.length, 6);
+  klok += 10 * MIN; await tik(); assert.strictEqual(gestart.length, 6, 'dood: niet na 10 min opnieuw');
+  assert.strictEqual(o.ctx.homeyStand().reeks, 1, 'dood telt als mislukking');
+  klok += 50 * MIN; await tik(); assert.strictEqual(gestart.length, 7); assert.strictEqual(o.ctx.homeyStand().reeks, 0);
+  // netwerk: 2 keer mis en dan gelukt → geen boxrij voor netwerk
+  klok += 55 * MIN; uitslagen.push({ ok: false, reden: 'netwerk', fout: 'n' }, { ok: false, reden: 'netwerk', fout: 'n' });
+  await tik(); klok += 10 * MIN; await tik(); klok += 10 * MIN; await tik();
+  assert.strictEqual(gestart.length, 10);
+  assert.ok(box.tekst.indexOf('homey-netwerk-') < 0, 'twee netwerkfouten en dan gelukt: stil');
   fs.rmSync(dir, { recursive: true, force: true });
 });

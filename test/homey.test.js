@@ -233,4 +233,43 @@ test('lees: dongle + laadpaal per minuut, gat bij -32602, geen namen opgeslagen,
   const r2 = await H.ronde(kindDeps(dir, kluis), 'lees');
   assert.strictEqual(r2.minuten, 0);
   assert.strictEqual(H.metingLees(dir, '2026-11-20').standen.length, 2, 'mislukte ronde schrijft geen stand');
+  // wv3482: het gekozen dongle-id staat vast (alleen het id)
+  assert.strictEqual(H.vastLees(dir), DONGLE);
+  assert.deepStrictEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(dir, 'dongle.json'), 'utf8'))).sort(), ['id', 'sinds']);
+});
+
+test('wv3482: dongle eist afnamestand; vast id blijft zolang het bestaat', function () {
+  const H = laad();
+  const fase = { 'measure_current.phase1': 5, 'measure_current.phase2': 5, 'measure_current.phase3': 5, 'measure_power.phase1': 1100, 'measure_power.phase2': 1100, 'measure_power.phase3': 1100 };
+  const LADER3 = '22222222-2222-4222-8222-222222222222', ANDER = '33333333-3333-4333-8333-333333333333';
+  const devs = [{ id: LADER3, type: 'other', state: Object.assign({ measure_power: 3300 }, fase) },
+    { id: DONGLE, type: 'sensor', state: Object.assign({ 'meter_power.imported': 1000, 'meter_power.imported_today': 4.2 }, fase) },
+    { id: ANDER, type: 'sensor', state: Object.assign({ 'meter_power.imported': 5 }, fase) }];
+  const k1 = H.apparatenKies(devs, null);
+  assert.strictEqual(k1.dongle, DONGLE, '3-fase lader zonder afnamestand telt niet als aansluiting');
+  assert.strictEqual(k1.vast, false);
+  assert.strictEqual(k1.stand.import_vandaag_kwh, 4.2);
+  const k2 = H.apparatenKies(devs, ANDER);
+  assert.strictEqual(k2.dongle, ANDER, 'vast id wint zolang het in de lijst staat'); assert.strictEqual(k2.vast, true);
+  const k3 = H.apparatenKies([{ id: ANDER, type: 'sensor' }].concat(devs.slice(0, 2)), ANDER);
+  assert.strictEqual(k3.dongle, ANDER, 'ook zonder state'); assert.strictEqual(k3.stand.import_kwh, null);
+  assert.strictEqual(H.apparatenKies(devs.slice(0, 2), ANDER).dongle, DONGLE, 'vast id weg → opnieuw kiezen');
+  assert.strictEqual(H.apparatenKies(devs.slice(0, 1), null).dongle, null);
+});
+
+test('wv3482: teruglevering verbergt geen piek; kWh uit de dagteller', function () {
+  const H = laad();
+  assert.strictEqual(H.grootst(1, -22), -22); assert.strictEqual(H.grootst(-22, 1), -22); assert.strictEqual(H.grootst(null, -3), -3); assert.strictEqual(H.grootst(4, -4), 4);
+  const t0 = '2026-11-20T11:00:00.000Z', t1 = '2026-11-20T11:00:05.000Z';
+  const pm = H.perMinuut({ a1: [{ t: t0, v: 1 }, { t: t1, v: -22 }], a2: [{ t: t0, v: 3 }, { t: t1, v: 2 }], a3: [{ t: t0, v: 0 }, { t: t1, v: 0 }],
+    w1: [{ t: t0, v: 200 }, { t: t1, v: -5000 }], w2: [{ t: t0, v: 700 }, { t: t1, v: 600 }], w3: [{ t: t0, v: 100 }, { t: t1, v: 100 }], ev: [{ t: t0, v: -1 }, { t: t1, v: 0 }] });
+  const r = pm['2026-11-20']['12:00'];
+  assert.deepStrictEqual(r.slice(0, 6), [-22, 3, 0, -5000, 700, 100]);
+  assert.strictEqual(r[6], 1000, 'Wtotaal blijft de hoogste som'); assert.strictEqual(r[7], 0, 'laadpaal blijft de hoogste');
+  const s = H.dagSamenvat({ dag: '2026-11-20', m: { '12:00': r, '12:01': [26, 1, 1, null, null, null, null, null], '12:02': [-27, 1, 1, null, null, null, null, null] },
+    standen: [{ t: '2026-11-20T00:10:00Z', import_kwh: 100, import_vandaag_kwh: 0.2 }, { t: '2026-11-20T22:10:00Z', import_kwh: 112, import_vandaag_kwh: 12.04 }, { t: '2026-11-20T22:30:00Z', import_kwh: 112.3 }] });
+  assert.deepStrictEqual(s.max_a, [-27, 3, 1]); assert.strictEqual(s.max_a_om[0], '12:02');
+  assert.deepStrictEqual(s.boven_20, [3, 0, 0]); assert.deepStrictEqual(s.boven_25, [2, 0, 0]);
+  assert.strictEqual(s.kwh, 12, 'laatste dagteller, niet laatste − eerste (11,8 of 12,3)');
+  assert.strictEqual(H.dagSamenvat({ dag: '2026-11-20', m: {}, standen: [{ import_kwh: 1 }, { import_kwh: 5 }] }).kwh, null, 'zonder dagteller geen schatting');
 });
