@@ -29138,7 +29138,7 @@ async function homeyRondeDraai(bron, soort) {
         fs.renameSync(tmp, p); }
       catch (e) { logError('homey-ronde-json', e); }
     }
-    if (u.ok !== true && ['grant', 'kluis', 'client', 'token'].indexOf(u.reden) >= 0) homeyBoxRij(u.reden, u.fout);
+    if (u.ok !== true && ['grant', 'kluis', 'client', 'token', 'mcp', 'http', 'dongle'].indexOf(u.reden) >= 0) homeyBoxRij(u.reden, u.fout);   // wv3462: ook leesfouten (1× per dag per reden)
     else if (u.nood) homeyBoxRij('kluis', u.fout);
     return u;
   } finally { homeyBezig = false; }

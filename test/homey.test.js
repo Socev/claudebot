@@ -10,6 +10,7 @@ const { spawn } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'homey.js');
 const ID = 'proefclient-123456', GEHEIM = 'proefgeheim-abcdefghijklmnop';
 const DONGLE = '80384a32-0cff-4fb6-9299-cea1a9b59712', LAADPAAL = '569b0ee1-bda5-4342-b92d-dcfdc3c50ffb';
+let fout32603 = false;
 let poort, server, gezien = [], refreshGeldig = new Set(), codeGeldig = new Set(['proefcode-1']), roteren = true;
 
 function sseVan(j) { return 'event: message\ndata: ' + JSON.stringify(j) + '\n\n'; }
@@ -49,6 +50,7 @@ test.before(async function () {
               'measure_current.phase1': 3, 'measure_current.phase2': 2, 'measure_current.phase3': 3, 'measure_power.phase1': 700, 'measure_power.phase2': 500, 'measure_power.phase3': 800 } },
             { id: LAADPAAL, name: 'Proeflader', zone: 'Thuis', type: 'evcharger', state: { evcharger_charging: true, measure_power: 7000, measure_current: 32, evcharger_charging_state: 'plugged_in_charging' } }] } } }));
           if (m.params.name === 'get_insights_log_entries_number') {
+            if (fout32603 && /phase2$/.test(a.logId)) return res.end(sseVan({ jsonrpc: '2.0', id: m.id, error: { code: -32603, message: 'intern' } }));
             if (/phase3$/.test(a.logId) && /measure_power/.test(a.logId)) return res.end(sseVan({ jsonrpc: '2.0', id: m.id, error: { code: -32602, message: 'Invalid structured content' } }));
             const cap = a.logId.split(':').pop();
             const v = cap === 'measure_current.phase1' ? [10, 22, 26] : cap === 'energy_power' ? [0, 7000, 7100] : cap.startsWith('measure_power') ? [500, 600, 700] : [1, 2, 3];
@@ -222,8 +224,13 @@ test('lees: dongle + laadpaal per minuut, gat bij -32602, geen namen opgeslagen,
   assert.strictEqual(H.blokZet(p1, blok), p1, 'tweede keer gelijk');
   assert.strictEqual(p1.split('<!-- homey-fase:begin -->').length, 2);
   assert.strictEqual(H.blokZet(p1 + '\n<!-- homey-fase:begin -->\n', blok), null, 'dubbel blok: niet raden');
+  // een andere MCP-fout dan -32602 laat de ronde falen (review ZOU 1)
+  fout32603 = true;
+  const rf = await H.ronde(kindDeps(dir, kluis), 'lees');
+  fout32603 = false;
+  assert.strictEqual(rf.ok, false); assert.strictEqual(rf.reden, 'mcp');
   // tweede ronde vloeit samen (zelfde minuten, geen dubbele tellingen)
   const r2 = await H.ronde(kindDeps(dir, kluis), 'lees');
   assert.strictEqual(r2.minuten, 0);
-  assert.strictEqual(H.metingLees(dir, '2026-11-20').standen.length, 2);
+  assert.strictEqual(H.metingLees(dir, '2026-11-20').standen.length, 2, 'mislukte ronde schrijft geen stand');
 });

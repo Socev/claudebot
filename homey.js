@@ -279,7 +279,7 @@ async function rpc(token, staat, methode, params, id) {
   if (r.sessie && /^[\x21-\x7e]{1,200}$/.test(r.sessie)) staat.sessie = r.sessie;
   const a = rpcUit(r.tekst, r.type, id);
   if (!a) throw new HomeyFout('mcp', 'MCP ' + methode + ': geen antwoord met id ' + id);
-  if (a.error) throw new HomeyFout('mcp', 'MCP ' + methode + ': fout ' + String(a.error.code || '') + ' ' + tekst(String(a.error.message || ''), 80));
+  if (a.error) { const f = new HomeyFout('mcp', 'MCP ' + methode + ': fout ' + String(a.error.code || '') + ' ' + tekst(String(a.error.message || ''), 80)); f.rpcCode = a.error.code; throw f; }
   return a.result || {};
 }
 function toolKort(t) {
@@ -403,10 +403,11 @@ async function kindLees(invoer, dir) {
     try {
       const res = await rpc(token, staat, 'tools/call', { name: 'get_insights_log_entries_number', arguments: { logId: 'homey:device:' + id + ':' + cap, resolution: RESOLUTIE } }, n++);
       reeksen[naam] = gestructureerd(res, 'entries').slice(0, 5000);
-    } catch (e) { if (e.reden === 'mcp') gaten.push(naam); else throw e; }   // -32602: Athom weigert een reeks met een lege waarde
+    } catch (e) { if (e.reden === 'mcp' && e.rpcCode === -32602) gaten.push(naam); else throw e; }   // alleen -32602: Athom weigert een reeks met een lege waarde (review ZOU 1)
   };
   for (const k of Object.keys(logs)) await haal(k, keus.dongle, logs[k]);
   if (keus.laadpaal) await haal('ev', keus.laadpaal, 'energy_power');
+  if (Object.keys(logs).every(function (k) { return gaten.indexOf(k) >= 0; })) throw new HomeyFout('gat', 'alle fasereeksen van het laatste uur leeg (dongle offline?)');
   const nu = new Date().toISOString();
   const stand = Object.assign({}, keus.stand, { laadpaal: keus.laad });
   const nieuw = metingVoegToe(dir, perMinuut(reeksen), stand, nu);
