@@ -28338,11 +28338,15 @@ async function paypalNaBankRonde() {
 // zijn twee Gambiaanse rekeningen (EUR en GMD). Ecobank heeft geen koppeling; elke mutatie geeft een mail met bedrag en saldo erna.
 // HOE. Zelfde route als de PayPal-laag: mail_zoeken + mail_lezen van het lees-luik (alleen lezen), ecobank-mail.js leesMail (vaste regels,
 // geen taalmodel), bank-lezer.js ecobank-bij bewaart in de transactiedatabase (tabel ecobank_tx). Alleen nieuwe mails worden geopend.
-// Ronde: na elke bank-ronde (07:00 en 18:00) de laatste ECOBANK_RONDE_DAGEN dagen; de eerste ronde (tabel leeg) leest de hele historie
-// vanaf ECOBANK_HISTORIE_VAN; opnieuw vanaf een datum alleen machinekamer (bank.py ecobank-ronde van=…).
+// Ronde: na elke bank-ronde (07:00 en 18:00) vanaf de dag van de laatste geslaagde ronde min 1 dag (meta ecobank_ronde_op), minstens
+// ECOBANK_RONDE_DAGEN en hooguit ECOBANK_RONDE_MAX_DAGEN terug (wv3557, actieplan 2B14: lag de pod, het lees-luik of de Gmail-inlog langer
+// dan 5 dagen stil, dan werden die mails nooit meer gelezen). Geslaagd = niet afgekapt, geen melding van het lees-luik (een kapotte inlog
+// geeft een lege lijst mét melding) en geen mail die niet te openen was (review Codex MOET 1). De eerste ronde (tabel leeg) leest de hele historie vanaf ECOBANK_HISTORIE_VAN; opnieuw vanaf een
+// datum alleen machinekamer (bank.py ecobank-ronde van=…).
 // Niets wordt gelabeld, gelezen gemarkeerd of gearchiveerd; er gaat niets naar Ecobank. Uitkomst alleen als aantallen (log, n8n).
 const ECOBANK_QUERY = 'from:noreply@ecobank.com subject:"Transaction Notification on A/C"';
 const ECOBANK_RONDE_DAGEN = 5;
+const ECOBANK_RONDE_MAX_DAGEN = 90;   // wv3557: langer stil → venster_begrensd in de uitkomst (log); het gat daarvoor via ecobank-ronde van=…
 const ECOBANK_HISTORIE_VAN = '2023-01-01';   // eerste ronde (nog niets bewaard): de hele historie één keer (Ecobank-mails sinds 2023, meldingen sinds 21-4-2026)
 const ECOBANK_BATCH = 60;   // posten per kindproces (± 400 bytes per post; stdin van bank-lezer.js is begrensd op 64 KB)
 let ecobankBezig = false;
@@ -28361,6 +28365,16 @@ async function ecobankZoek(van, tot, uit, diepte) {
   if (mails.length >= 25) uit.afgekapt = true;
   mails.forEach(function (m) { if (m && typeof m.id === 'string' && !uit.mails.has(m.id)) uit.mails.set(m.id, m); });
 }
+// wv3557: begindag van de ronde uit de laatste geslaagde ronde (ISO-tijd; null of rommel → gewoon ECOBANK_RONDE_DAGEN)
+function ecobankVanaf(vandaag, rondeOp) {
+  const min = paypalPlusDagen(vandaag, -ECOBANK_RONDE_DAGEN), grens = paypalPlusDagen(vandaag, -ECOBANK_RONDE_MAX_DAGEN);
+  const t = Date.parse(typeof rondeOp === 'string' ? rondeOp : '');
+  if (!Number.isFinite(t)) return { van: min };
+  const van = paypalPlusDagen(new Date(t).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), -1);
+  if (van >= min) return { van: min };
+  if (van < grens) return { van: grens, begrensd: true };
+  return { van: van };
+}
 async function ecobankRonde(o) {
   if (ecobankBezig) return { ok: false, fout: 'er loopt al een Ecobank-ronde' };
   ecobankBezig = true;
@@ -28370,7 +28384,8 @@ async function ecobankRonde(o) {
     const vandaag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
     const bek = await bankKind(['ecobank-bekend']);
     if (!bek.j || bek.j.ok !== true || !Array.isArray(bek.j.mail_ids)) return { ok: false, fout: 'database niet leesbaar: ' + String((bek.j && bek.j.fout) || 'ecobank-bekend faalde').slice(0, 120) };
-    const van = (o && o.van) || (bek.j.mail_ids.length ? paypalPlusDagen(vandaag, -ECOBANK_RONDE_DAGEN) : ECOBANK_HISTORIE_VAN);
+    const venster = (o && o.van) ? { van: o.van } : bek.j.mail_ids.length ? ecobankVanaf(vandaag, bek.j.ronde_op) : { van: ECOBANK_HISTORIE_VAN };
+    const van = venster.van;
     const bekend = new Set(bek.j.mail_ids);
     const zoek = { mails: new Map(), afgekapt: false, melding: false };
     let s = paypalPlusDagen(van, -1);
@@ -28398,7 +28413,7 @@ async function ecobankRonde(o) {
     for (let i = 0; i < Math.max(posten.length, 1); i += ECOBANK_BATCH) delen.push(posten.slice(i, i + ECOBANK_BATCH));
     for (let i = 0; i < delen.length; i++) {
       const laatste = i === delen.length - 1;
-      const r = await bankKind(['ecobank-bij'], { posten: delen[i], fouten: laatste ? fouten : [], ronde: laatste && !zoek.afgekapt });
+      const r = await bankKind(['ecobank-bij'], { posten: delen[i], fouten: laatste ? fouten : [], ronde: laatste && !zoek.afgekapt && !zoek.melding && !leesFout });
       if (!r.j || r.j.ok !== true) return { ok: false, fout: 'bewaren faalde: ' + String((r.j && r.j.fout) || 'ecobank-bij faalde').slice(0, 120), gelezen: nieuw.length };
       ['nieuw', 'al_bekend', 'geweigerd'].forEach(function (k) { bewaard[k] += (r.j.bewaard && r.j.bewaard[k]) || 0; });
       if (laatste) stand = r.j.stand || null;
@@ -28412,7 +28427,7 @@ async function ecobankRonde(o) {
     // Meer dan 25 mails op één dag: wat gelezen is staat erin, maar de ronde telt niet als geslaagd (review gpt-5.5 MOET 2)
     if (zoek.afgekapt) return { ok: false, fout: 'meer dan 25 Ecobank-mails op één dag: niet alles gelezen', gevonden: passend.length, nieuw: bewaard.nieuw, afgekapt: true };
     // alleen aantallen terug (geen bedragen, saldi, namen of mailinhoud)
-    return { ok: true, van: van, gevonden: passend.length, al_bekend: passend.length - nieuw.length, gelezen: nieuw.length - leesFout,
+    return { ok: true, van: van, venster_begrensd: venster.begrensd || undefined, gevonden: passend.length, al_bekend: passend.length - nieuw.length, gelezen: nieuw.length - leesFout,
       lees_fout: leesFout || undefined, niet_uitgelezen: fouten.length || undefined, afgekapt: zoek.afgekapt || undefined, melding: zoek.melding || undefined,
       bewaard: bewaard, nieuw: bewaard.nieuw, stand: stand, duur_s: Math.round((Date.now() - begin) / 100) / 10 };
   } catch (e) {
@@ -28424,7 +28439,7 @@ async function ecobankRonde(o) {
 async function ecobankNaBankRonde() {
   const r = await ecobankRonde({});
   schrijfLog(nu() + ' bank ' + velden({ opdracht: 'ecobank-ronde', ok: !!r.ok, gevonden: r.gevonden, gelezen: r.gelezen, nieuw: r.nieuw, niet_uitgelezen: r.niet_uitgelezen,
-    lees_fout: r.lees_fout, afgekapt: r.afgekapt, melding: r.melding, fout: r.ok ? undefined : r.fout }));
+    lees_fout: r.lees_fout, afgekapt: r.afgekapt, melding: r.melding, van: r.van, venster_begrensd: r.venster_begrensd, fout: r.ok ? undefined : r.fout }));
   if (r.ok && r.niet_uitgelezen) {
     try {
       const vandaag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });

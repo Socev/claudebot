@@ -408,4 +408,4 @@ function stand(a) {
     rekeningen: rekeningen(a).length, niet_gelezen: ng.length };
 }
 
-module.exports = { afzenderAdres, leesMail, isMelding, controleer, schema, bij, bekend, verwerkt, volgorde, overzicht, stand, metaZet, LET_OP, leesCsv, csvBij, csvVolgorde };
+module.exports = { afzenderAdres, leesMail, isMelding, controleer, schema, bij, bekend, verwerkt, volgorde, overzicht, stand, metaZet, metaLees, LET_OP, leesCsv, csvBij, csvVolgorde };
