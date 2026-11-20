@@ -27379,6 +27379,7 @@ function bankEnv() {
   if (process.env.BUNQ_MAX_PAGINAS) e.BUNQ_MAX_PAGINAS = process.env.BUNQ_MAX_PAGINAS;
   return e;
 }
+let bankStandKapotDag = null;   // 2A03
 async function bankKind(args, extra, maxMs) {
   let w = { sleutel: '', app_id: '', bunq_sleutel: '' };
   if (BANK_LOKAAL.indexOf(args[0]) < 0) {
@@ -27405,6 +27406,11 @@ async function bankKind(args, extra, maxMs) {
     }
     if (j._box && typeof j._box === 'object') bankBoxRij(j._box);
     if (typeof j._archief_fout === 'string') bankArchiefFout(j._archief_fout);   // wv687: archieffout breekt de opvraag niet, maar moet wel zichtbaar zijn
+    // 2A03: stand.json onleesbaar → bank-lezer weigert (niets overschreven, kopie ernaast); hooguit één box-rij per dag (geheugen van de pod)
+    if (j._stand_kapot && j.ok === false) {
+      const dagNu = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+      if (bankStandKapotDag !== dagNu) { bankStandKapotDag = dagNu; bankBoxRij({ bron: 'stand', tekst: j.fout }); }
+    }
     // wv685: de box-melding van de ronde schrijft bankRonde zelf, ná de kaartstap, met de uitkomst erin (Fable wv685 #9)
     if (Array.isArray(j._box_ronde)) box = j._box_ronde.slice(0, 4).filter(function (m) { return m && typeof m === 'object'; });
     Object.keys(j).forEach(function (k) { if (k[0] === '_') delete j[k]; });
@@ -27477,6 +27483,16 @@ function bankBoxRij(m) {
       '- gemeten: ' + String(m.tekst || '').slice(0, 200) + '\n' +
       '- gevolg als er niets gebeurt: de cache en Davids bankvragen werken door, maar de database (`/opt/data/bank/transacties.sqlite`) loopt achter; zoek/maand/intern missen nieuwe posten.\n' +
       '- voorstel: `python3 .claude/skills/bank-lezen/bank.py archief` (API_SECRET) en api.log (`bank-archief fout=`) nalopen; schijf, rechten (600) en schema nagaan. Na herstel haalt de volgende ronde de cache incrementeel in (migreerCache).\n'
+      : m.bron === 'stand' ? '\n## [direct] ' + tijd + ' — bankkoppelingen: stand.json onleesbaar, bankronde staat stil (bankluis, automatisch)\n' +
+      '- status: open\n- van: pod bank-ronde (bank-lezer.js standLees weigert sinds 2A03 in plaats van leeg te overschrijven; hooguit 1×/dag)\n' +
+      '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 240) + '\n' +
+      '- gevolg als er niets gebeurt: geen nieuwe saldi of transacties (ABN en bunq) en Financiën kan niet corrigeren; toestemmingen, labels en ophaalstempels staan nog in het kapotte bestand en de kopie ernaast.\n' +
+      '- voorstel: `/opt/data/bank/stand.json` en de kopie `stand.json.kapot-<hash>` bekijken (JSON herstellen, of de versie uit de nachtelijke podstaat-bundel `podstaat/bank/stand.json` terugzetten, 600); nooit leeg laten: een ontbrekend bestand betekent opnieuw koppelen.\n'
+      : m.bron === 'bunq' && m.reden === 'staat' ? '\n## [direct] ' + tijd + ' — bunq: staat.json ontbreekt of is onleesbaar, bunq-saldi bevriezen (bank-ronde, automatisch)\n' +
+      '- status: open\n- van: pod bank-ronde (bank-lezer.js ronde; 2A03; hooguit 1×/dag)\n' +
+      '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: Socev ziet geen nieuwe bunq-standen of -transacties; de ronde meldt niet geslaagd en de hartslag bank-ronde blijft uit.\n' +
+      '- voorstel: `/opt/data/bank/bunq/staat.json` nagaan; terugzetten uit de nachtelijke podstaat-bundel (`podstaat/bank/bunq/staat.json`, 600) of opnieuw registreren met `mk-scripts/bunq/activeer.py <ip>`.\n'
       : m.reden === 'afgekapt' && (m.bron === 'enablebanking' || m.bron === 'bunq') ? '\n## [direct] ' + tijd + ' — ' + (m.bron === 'bunq' ? 'bunq' : 'Enable Banking') + ': transactie-opvraag afgekapt, venster schuift niet op (bank-ronde, automatisch)\n' +
       '- status: open\n- van: pod bank-ronde (bank-lezer.js ronde via POST /bank-ronde; hooguit 1×/dag per bron; A10 actieplan 19-11)\n' +
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
