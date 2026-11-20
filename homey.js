@@ -454,7 +454,7 @@ function vaultBlok(dir, nuIso) {
     const dag = s.dag.slice(8, 10) + '-' + s.dag.slice(5, 7) + (s.dag === vandaag ? ' (t/m ' + s.laatste + ')' : '');
     const maxA = s.max_a.map(function (a) { return a == null ? '–' : String(a); }).join(' / ');
     const fi = s.max_a.reduce(function (b, a, i) { return a != null && (b < 0 || a > s.max_a[b]) ? i : b; }, -1);
-    rijen.push('| ' + dag + ' | ' + Math.round(s.minuten / 6) / 10 + ' u | ' + maxA + (fi >= 0 ? ' (L' + (fi + 1) + ' om ' + s.max_a_om[fi] + ')' : '') + ' | ' +
+    rijen.push('| ' + dag + ' | ' + nlGetal(s.minuten / 60, 1) + ' u | ' + maxA + (fi >= 0 ? ' (L' + (fi + 1) + ' om ' + s.max_a_om[fi] + ')' : '') + ' | ' +
       s.boven_20.join(' / ') + ' | ' + s.boven_25.join(' / ') + ' | ' + (s.piek_w == null ? '–' : nlGetal(s.piek_w / 1000, 1) + ' kW om ' + s.piek_w_om) + ' | ' +
       (s.laad_max_w == null ? '–' : s.laad_min + ' min, piek ' + nlGetal(s.laad_max_w / 1000, 1) + ' kW') + ' | ' + (s.kwh == null ? '–' : nlGetal(s.kwh, 1)) + ' |');
   });
