@@ -22743,7 +22743,13 @@ async function appTokens(req, res, a, route) {
       uit = typeof openaiVerbruik === 'function' ? openaiVerbruik() : null;
       if (!uit) return appWeiger(res, 404, 'De OpenAI-teller zit niet in deze versie van de pod', 'openai-verbruik ontbreekt');
     }
-    else if (route === 'GET /app/tokens') { uit = tokenteller.stand({ tank: await tokentellerTank() }); if (uit && typeof openaiAppRegel === 'function') uit.openai = openaiAppRegel(); }   // wv2055: regel OpenAI deze maand
+    else if (route === 'GET /app/tokens') {
+      const tank = await tokentellerTank();
+      // wv3545 (actieplan 2B33): de stand van de agents-schakelaar erbij, zodat TokenCounter abonnement 2 als gestopt toont zodra
+      // de agents op 1 staan (de pod meet 2 dan niet meer); gekoppeld aan de schakelaar, niet aan een datum. Kopie: de buffer blijft schoon.
+      uit = tokenteller.stand({ tank: tank ? Object.assign({}, tank, { agents_op: accountStand().agents }) : null });
+      if (uit && typeof openaiAppRegel === 'function') uit.openai = openaiAppRegel();   // wv2055: regel OpenAI deze maand
+    }
     else {
       const m = /^GET \/app\/tokens\/dag\/(\d{4}-\d{2}-\d{2})$/.exec(route);
       uit = m ? tokenteller.dag(m[1], {}) : null;
