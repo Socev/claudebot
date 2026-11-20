@@ -14,14 +14,18 @@ function omgeving(open, pagina, dir, extra) {
   const geroepen = [];
   const mod = { stateOpen: function (dir, s) { return s === open; }, terug: async function (deps, s, c, f) { geroepen.push({ s: s, c: c, f: f }); return { soort: 'gekoppeld' }; },
     ronde: extra.ronde || async function () { return { ok: true, tools: 0 }; }, vaultBlok: function () { return '<!-- homey-fase:begin -->\nX\n<!-- homey-fase:einde -->'; },
-    blokZet: function (p, b) { return /homey-fase:begin -->[\s\S]*homey-fase:begin/.test(p) ? null : p + '\n' + b; }, linkMaak: function () { return { url: 'x', geldig_tot: 'y' }; } };
+    blokZet: function (p, b) { return /homey-fase:begin -->[\s\S]*homey-fase:begin/.test(p) ? null : p + '\n' + b; }, linkMaak: function () { return { url: 'x', geldig_tot: 'y' }; }, energieScherm: extra.energieScherm };
   const ctx = { require: function (p) { if (/homey\.js$/.test(p)) return mod; return require(p); }, process: { env: { HOMEY_DIR: dir || '/tmp/homey-route-proef' } }, path: path, fs: fs,
     __dirname: '/x', reqPath: function (req) { return new URL(req.url, 'http://x').pathname; }, rolPrimair: function () { return true; },
     bankPagina: function (res, status, kop) { res.writeHead(status, {}); res.end(kop); }, schrijfLog: function () {}, nu: function () { return ''; }, velden: function () { return ''; },
-    logError: function () {}, tibberMgmt: async function () { throw new Error('geen kluis in de toets'); }, smalKind: async function () { return { code: 0, stdout: '{}' }; },
-    VV: function () { return { lees: function () { return extra.box ? extra.box.tekst : ''; }, schrijf: function (p, t) { if (extra.box) extra.box.tekst = t; }, wijzig: function (p, fn) { const n = fn(pagina.tekst); if (n == null) return false; pagina.tekst = n; pagina.pad = p; return true; } }; }, VAULT: '/tmp', SERVER_ECHT: false, Date: extra.Date || Date, JSON: JSON, URL: URL, URLSearchParams: URLSearchParams, String: String, Error: Error };
+    logError: function (w, e) { if (process.env.TOETS_LOG) console.error(w, e); }, tibberMgmt: async function () { throw new Error('geen kluis in de toets'); }, smalKind: async function () { return { code: 0, stdout: '{}' }; },
+    VV: function () { return { lees: function () { return extra.box ? extra.box.tekst : ''; }, schrijf: function (p, t) { if (extra.box) extra.box.tekst = t; }, wijzig: function (p, fn) { const n = fn(pagina.tekst); if (n == null) return false; pagina.tekst = n; pagina.pad = p; return true; } }; }, VAULT: '/tmp', SERVER_ECHT: false, Date: extra.Date || Date, JSON: JSON, URL: URL, URLSearchParams: URLSearchParams, String: String, Error: Error,
+    // wv3586: App Energie
+    setTimeout: setTimeout, appStaat: { tellers: {} }, appTeller: function () { return true; }, TIBBER_DIR: extra.tibberDir || '/tmp/homey-route-geen-tibber', tibberUurBezig: false,
+    tibberUurScript: function () { return __filename; }, tibberUurDraai: extra.tibberUurDraai,
+    appStuur: function (res, status, obj) { res.status = status; res.obj = obj; }, appWeiger: function (res, status, fout) { res.status = status; res.obj = { ok: false, fout: fout }; } };
   vm.createContext(ctx);
-  vm.runInContext(BLOK + '\n;this.homeyTerug = homeyTerug; this.homeyIsPad = homeyIsPad; this.homeyVaultSchrijf = homeyVaultSchrijf; this.homeyTik = homeyTik;' +
+  vm.runInContext(BLOK + '\n;this.homeyTerug = homeyTerug; this.homeyIsPad = homeyIsPad; this.homeyVaultSchrijf = homeyVaultSchrijf; this.homeyTik = homeyTik; this.appEnergie = appEnergie; this.homeyNuBezigNu = function () { return homeyNuBezig; };' +
     ' this.homeyStand = function () { return { volgende: homeyVolgende, herpogingen: homeyHerpogingen, reeks: homeyMisReeks }; };', ctx);
   return { ctx: ctx, geroepen: geroepen };
 }
@@ -125,5 +129,71 @@ test('wv3482: mislukte leesronde na 10 min opnieuw, hooguit 3 keer; gat pas na 3
   await tik(); klok += 10 * MIN; await tik(); klok += 10 * MIN; await tik();
   assert.strictEqual(gestart.length, 10);
   assert.ok(box.tekst.indexOf('homey-netwerk-') < 0, 'twee netwerkfouten en dan gelukt: stil');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ── wv3586: App Energie ──
+const J = function (x) { return JSON.parse(JSON.stringify(x)); };   // vm-objecten hebben een ander prototype
+function tibberProef(rijen) {
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'energie-tibber-'));
+  const { DatabaseSync } = require('node:sqlite');
+  const d = new DatabaseSync(path.join(dir, 'tibber.sqlite'));
+  d.exec('create table prijs(home_id text, van text, totaal real, energie real, belasting real, niveau text, primary key(home_id, van))');
+  const q = d.prepare('insert into prijs values(?,?,?,?,?,?)');
+  rijen.forEach(function (r) { q.run(r[3] || 'h1', r[0], r[1], null, null, r[2]); });
+  d.close();
+  return dir;
+}
+test('wv3586: GET /app/energie — scherm + prijzen vandaag/morgen; na 13:00 zonder morgen één extra Tibber-ronde per uur', async function () {
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'energie-'));
+  fs.writeFileSync(path.join(dir, 'gekoppeld.json'), '{}');
+  let klok = Date.parse('2026-11-21T13:30:00Z');   // 14:30 NL
+  class NepDate extends Date { constructor(...a) { if (a.length) super(...a); else super(klok); } static now() { return klok; } }
+  const tdir = tibberProef([['2026-11-21T00:00:00.000+01:00', 0.33, 'NORMAL'], ['2026-11-21T14:00:00.000+01:00', 0.41, 'EXPENSIVE'], ['2026-11-20T23:00:00.000+01:00', 0.3, 'NORMAL'], ['2026-11-21T15:00:00.000+01:00', null, null], ['2026-11-21T01:00:00.000+01:00', 0.01, 'CHEAP', 'h0-oude-woning'], ['2026-11-01T01:00:00.000+01:00', 0.2, 'CHEAP', 'h0-oude-woning']]);
+  const tibberRondes = [];
+  const o = omgeving(S, { tekst: '' }, dir, { Date: NepDate, tibberDir: tdir, tibberUurDraai: async function (b) { tibberRondes.push(b); return { ok: true }; } });
+  o.ctx.require = (function (oud) { return function (p) { const m = oud(p); if (/homey\.js$/.test(p)) m.energieScherm = function (d, iso) { return { dag: '2026-11-21', iso: iso, nu: null, dagen: [] }; }; return m; }; })(o.ctx.require);
+  const scherm = function (d, iso) { return { dag: '2026-11-21', iso: iso, nu: null, dagen: [] }; };
+  const o0 = omgeving(S, { tekst: '' }, dir, { Date: NepDate, tibberDir: tdir });
+  const res0 = { _app: {} }; await o0.ctx.appEnergie({}, res0, {}, 'GET /app/energie', {});
+  assert.strictEqual(res0.status, 404, 'homey.js zonder energieScherm: 404');
+  const o2 = omgeving(S, { tekst: '' }, dir, { Date: NepDate, tibberDir: tdir, energieScherm: scherm, tibberUurDraai: async function (b) { tibberRondes.push(b); return { ok: true }; } });
+  const res = { _app: {} }; await o2.ctx.appEnergie({}, res, {}, 'GET /app/energie', {});
+  assert.strictEqual(res.status, 200, JSON.stringify(res.obj));
+  assert.strictEqual(res.obj.ok, true); assert.strictEqual(res.obj.iso, '2026-11-21T13:30:00.000Z');
+  assert.deepStrictEqual(J(res.obj.prijzen.vandaag).map(function (x) { return x.uur + ' ' + x.totaal + ' ' + x.niveau; }), ['00:00 0.33 NORMAL', '14:00 0.41 EXPENSIVE'], 'alleen vandaag, null-prijs weg');
+  assert.deepStrictEqual(J(res.obj.prijzen.morgen), []);
+  assert.strictEqual(res.obj.prijzen.morgen_gevraagd, true); assert.deepStrictEqual(tibberRondes, ['energie-app']);
+  assert.strictEqual(res.obj.koppeling.gekoppeld, true); assert.strictEqual(res._app.stil, true);
+  const resB = { _app: {} }; await o2.ctx.appEnergie({}, resB, {}, 'GET /app/energie', {});
+  assert.strictEqual(resB.obj.prijzen.morgen_gevraagd, false, 'binnen het uur niet nog eens'); assert.strictEqual(tibberRondes.length, 1);
+  klok += 61 * 60000; const resC = { _app: {} }; await o2.ctx.appEnergie({}, resC, {}, 'GET /app/energie', {});
+  assert.strictEqual(tibberRondes.length, 2, 'na een uur wel');
+  klok = Date.parse('2026-11-21T10:00:00Z'); const o3 = omgeving(S, { tekst: '' }, dir, { Date: NepDate, tibberDir: tdir, energieScherm: scherm, tibberUurDraai: async function (b) { tibberRondes.push(b); return { ok: true }; } });
+  const resD = { _app: {} }; await o3.ctx.appEnergie({}, resD, {}, 'GET /app/energie', {});
+  assert.strictEqual(resD.obj.prijzen.morgen_gevraagd, false, 'vóór 13:00 niet'); assert.strictEqual(tibberRondes.length, 2);
+  fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(tdir, { recursive: true, force: true });
+});
+test('wv3586: POST /app/energie/nu — ronde soort nu, hooguit één per 30 s, uurronde wacht', async function () {
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'energie-nu-'));
+  fs.writeFileSync(path.join(dir, 'gekoppeld.json'), '{}');
+  let klok = Date.parse('2026-11-21T16:00:00Z');
+  class NepDate extends Date { constructor(...a) { if (a.length) super(...a); else super(klok); } static now() { return klok; } }
+  const soorten = []; let los = null;
+  const o = omgeving(S, { tekst: '' }, dir, { Date: NepDate, ronde: function (deps, soort) { soorten.push(soort); if (soort === 'nu') return new Promise(function (r) { los = r; }); return Promise.resolve({ ok: true }); }, energieScherm: function () { return { nu: null, dagen: [] }; } });
+  const res = { _app: {} }; const p = o.ctx.appEnergie({}, res, {}, 'POST /app/energie/nu', {});
+  await new Promise(function (r) { setImmediate(r); });
+  assert.deepStrictEqual(soorten, ['nu']);
+  assert.ok(o.ctx.homeyNuBezigNu(), 'momentopname loopt');
+  klok += 60 * 60000; const t = o.ctx.homeyTik(); if (t) await t;
+  assert.deepStrictEqual(soorten, ['nu'], 'uurronde start niet tijdens een momentopname');
+  klok -= 60 * 60000;
+  los({ ok: true, soort: 'nu' }); await p;
+  assert.strictEqual(res.status, 200); assert.deepStrictEqual(J(res.obj.meting), { ok: true, reden: null }); assert.strictEqual(res._app.stil, true);
+  const res2 = { _app: {} }; await o.ctx.appEnergie({}, res2, {}, 'POST /app/energie/nu', {});
+  assert.deepStrictEqual(J(res2.obj.meting), { ok: true, reden: 'kort' }, 'binnen 30 s geen tweede'); assert.strictEqual(soorten.length, 1);
+  klok += 31000; const res3 = { _app: {} }; const p3 = o.ctx.appEnergie({}, res3, {}, 'POST /app/energie/nu', {});
+  await new Promise(function (r) { setImmediate(r); }); los({ ok: false, reden: 'netwerk' }); await p3;
+  assert.deepStrictEqual(J(res3.obj.meting), { ok: false, reden: 'netwerk' }); assert.strictEqual(res3._app.reden, 'energie nu netwerk');
   fs.rmSync(dir, { recursive: true, force: true });
 });

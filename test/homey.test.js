@@ -273,3 +273,59 @@ test('wv3482: teruglevering verbergt geen piek; kWh uit de dagteller', function 
   assert.strictEqual(s.kwh, 12, 'laatste dagteller, niet laatste − eerste (11,8 of 12,3)');
   assert.strictEqual(H.dagSamenvat({ dag: '2026-11-20', m: {}, standen: [{ import_kwh: 1 }, { import_kwh: 5 }] }).kwh, null, 'zonder dagteller geen schatting');
 });
+
+test('wv3586: momentopname nu = alleen list_devices, nu.json alleen getallen', async function () {
+  const H = laad(), dir = map(), start = 'refresh-nu-' + crypto.randomBytes(8).toString('hex');
+  refreshGeldig.add(start);
+  const kluis = { refresh: start };
+  gezien = [];
+  const r = await H.ronde(kindDeps(dir, kluis), 'nu');
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(r.soort, 'nu');
+  const calls = gezien.filter(function (g) { return g.pad === '/'; }).map(function (g) { return JSON.parse(g.body); }).filter(function (m) { return m.method === 'tools/call'; });
+  assert.deepStrictEqual(calls.map(function (m) { return m.params.name; }), ['list_devices'], 'geen Insights bij een momentopname');
+  const ruw = fs.readFileSync(path.join(dir, 'nu.json'), 'utf8');
+  for (const n of ['Proefkind', 'Proefdongle', 'Proefstraat', 'Proeflader', 'Kamer', 'access-', 'refresh-']) assert.ok(!ruw.includes(n), 'geen ' + n + ' in nu.json');
+  assert.strictEqual((fs.statSync(path.join(dir, 'nu.json')).mode & 0o777), 0o600);
+  const j = H.nuLees(dir);
+  assert.deepStrictEqual(Object.keys(j).sort(), ['laadpaal', 'stand', 't']);
+  assert.deepStrictEqual(j.stand.a, [3, 2, 3]);
+  assert.ok(!fs.existsSync(path.join(dir, 'meting')), 'momentopname schrijft geen meting');
+  const e = H.energieScherm(dir, new Date(Date.parse(j.t) + 5000).toISOString());
+  assert.strictEqual(e.nu.bron, 'moment'); assert.deepStrictEqual(e.nu.a, [3, 2, 3]); assert.deepStrictEqual(e.nu.ruimte_a, [22, 23, 22]);
+});
+
+test('wv3586: energieScherm — nu, waarschuwing, dagverloop per 5 min, vorige dagen', function () {
+  const H = laad(), dir = map();
+  fs.mkdirSync(path.join(dir, 'meting'), { recursive: true });
+  const r = function (a1, a2, a3, w, ev) { return [a1, a2, a3, null, null, null, w, ev]; };
+  const dag = { dag: '2026-11-21', m: { '17:00': r(5, 6, 4, 3000, 0), '17:01': r(-21, 6, 4, 3500, 0), '17:04': r(8, 7, 4, 3900, 7000), '17:05': r(9, 26, 4, 9000, 7100), '23:59': r(2, 2, 2, 900, 0) },
+    standen: [{ t: '2026-11-21T16:05:30.000Z', import_vandaag_kwh: 20.4, w: 9000, a: [9, 26, 4], w3: [2000, 6000, 900], laadpaal: { laden: true, w: 7100, a_instelling: 32, kwh: 1, toestand: 'plugged_in_charging' } }] };
+  fs.writeFileSync(path.join(dir, 'meting', '2026-11-21.json'), JSON.stringify(dag));
+  for (let i = 1; i <= 9; i++) {
+    const d = '2026-11-' + String(21 - i).padStart(2, '0');
+    fs.writeFileSync(path.join(dir, 'meting', d + '.json'), JSON.stringify({ dag: d, m: { '18:00': r(10 + i, 3, 3, 4000, 0) }, standen: [] }));
+  }
+  // vandaag 17:06 NL = 16:06Z; stand 30 s oud → waarschuwing rood (L2 26 A, laadpaal laadt)
+  const e = H.energieScherm(dir, '2026-11-21T16:06:00.000Z');
+  assert.strictEqual(e.dag, '2026-11-21');
+  assert.strictEqual(e.nu.bron, 'uur'); assert.strictEqual(e.nu.leeftijd_s, 30);
+  assert.deepStrictEqual(e.nu.niveau, ['ok', 'over', 'ok']); assert.deepStrictEqual(e.nu.ruimte_a, [16, -1, 21]);
+  assert.deepStrictEqual(e.waarschuwing, { niveau: 'rood', fase: 2, a: 26, laadt: true, fasen: [2] });
+  assert.deepStrictEqual(e.vandaag.verloop, [['17:00', -21, 7, 4, 3900, 7000], ['17:05', 9, 26, 4, 9000, 7100], ['23:55', 2, 2, 2, 900, 0]]);
+  assert.strictEqual(e.vandaag.kwh, 20.4); assert.deepStrictEqual(e.vandaag.max_a, [-21, 26, 4]);
+  assert.strictEqual(e.dagen.length, 7, 'hooguit 7 vorige dagen'); assert.strictEqual(e.dagen[0].dag, '2026-11-20'); assert.deepStrictEqual(e.dagen[0].max_a, [11, 3, 3]);
+  // nieuwere momentopname wint; 20 A = krap (oranje); laadpaal laadt zonder krapte = info met ruimte
+  fs.writeFileSync(path.join(dir, 'nu.json'), JSON.stringify({ t: '2026-11-21T16:07:00.000Z', stand: { a: [20, 5, -3], w: 6000, w3: [4600, 1100, -700] }, laadpaal: { laden: true, w: 7000 } }));
+  const e2 = H.energieScherm(dir, '2026-11-21T16:07:10.000Z');
+  assert.strictEqual(e2.nu.bron, 'moment'); assert.deepStrictEqual(e2.waarschuwing, { niveau: 'oranje', fase: 1, a: 20, laadt: true, fasen: [1] });
+  fs.writeFileSync(path.join(dir, 'nu.json'), JSON.stringify({ t: '2026-11-21T16:07:00.000Z', stand: { a: [12, 5, -3] }, laadpaal: { laden: true, w: 7000 } }));
+  assert.deepStrictEqual(H.energieScherm(dir, '2026-11-21T16:07:10.000Z').waarschuwing, { niveau: 'info', laadt: true, ruimte_a: [13, 20, 22] });
+  // oude stand (> 15 min): geen waarschuwing, wel de stand met leeftijd
+  const e3 = H.energieScherm(dir, '2026-11-21T16:30:00.000Z');
+  assert.strictEqual(e3.waarschuwing, null); assert.ok(e3.nu.leeftijd_s > 900);
+  // lege map: niets kapot
+  const leeg = H.energieScherm(map(), '2026-11-21T16:30:00.000Z');
+  assert.strictEqual(leeg.nu, null); assert.strictEqual(leeg.vandaag, null); assert.deepStrictEqual(leeg.dagen, []);
+  assert.strictEqual(H.faseNiveau(19.9), 'ok'); assert.strictEqual(H.faseNiveau(-20), 'krap'); assert.strictEqual(H.faseNiveau(25), 'krap'); assert.strictEqual(H.faseNiveau(25.1), 'over');
+});
