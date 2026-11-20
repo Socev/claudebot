@@ -40,9 +40,13 @@ function centen(s) {
   const c = Number(h) * 100 + Number((d || '').padEnd(2, '0'));
   return neg ? -c : c;
 }
+// actieplan 2B13 (Fable-review R2-46): een tekenverwijzing buiten Unicode (&#x110000;), 0 of een surrogaat wordt het vervangteken (U+FFFD);
+// String.fromCodePoint gooide daar een RangeError die de hele Nmbrs-ronde afbrak. Staat het in een veld dat telt (employeeid, code, bedrag),
+// dan keurt leesRunOutput de lijst af als onleesbaar; de rest van de ronde loopt door.
+function teken(n) { return Number.isInteger(n) && n > 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : '\uFFFD'; }
 function ont(s) {
-  return String(s).replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&#x([0-9a-f]+);/gi, (m, h) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (m, d) => String.fromCodePoint(Number(d))).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+  return String(s).replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&#x([0-9a-f]+);/gi, (m, h) => teken(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (m, d) => teken(Number(d))).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'").replace(/&amp;/g, '&').trim();
 }
 // Eerste element met deze lokale naam (zonder namespace-voorvoegsel), of null. pad = ['Cdtr','Nm'] zoekt Nm binnen Cdtr.
@@ -217,6 +221,8 @@ function leesRunOutput(tekst) {
     if (!/^[0-9A-Za-z-]{1,64}$/.test(id)) { onleesbaar = true; continue; }
     // review wv3232 MOET 2: twee reports voor dezelfde medewerker, periode, jaar en run = dubbel salaris; hard
     const k = id + '|' + ['year', 'period', 'runnumber'].map((n) => ont(el(r, [n]) || '')).join('|');
+    // 2B13: een kapotte tekenverwijzing in jaar/periode/run zou de dubbel-controle hieronder kunnen omzeilen (andere sleutel): onleesbaar
+    if (k.includes('\uFFFD')) { onleesbaar = true; continue; }
     if (sleutels.has(k)) dubbel = true;
     sleutels.add(k);
     for (const l of alle(r, 'line')) {

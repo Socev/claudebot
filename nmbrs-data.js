@@ -623,7 +623,9 @@ async function betaalRonde(L, d, cid, jaar, invoer, uit) {
       uit.betaal.opnieuw += blijvend ? 0 : 1;
       continue;
     }
-    const ro = doc.tekst == null ? { ok: false, fout: 'niet uit te pakken' } : B.leesRunOutput(doc.tekst);
+    // actieplan 2B13: een onverwachte fout bij het lezen keurt deze ene lijst af (onleesbaar), niet de hele ronde
+    let ro;
+    try { ro = doc.tekst == null ? { ok: false, fout: 'niet uit te pakken' } : B.leesRunOutput(doc.tekst); } catch (e) { ro = { ok: false, fout: 'lezen mislukt' }; }
     const sam = B.regelsUitRun(ro, { medewerkers: mws, ibans: ibans });
     const c = B.controleRun(ro, sam, { in_run: inRun, definitief: r.x.locked === true, met_iban: ibans !== null });
     const status = c.hard.length ? 'afgekeurd' : ibans === null ? 'wacht_iban' : 'klaar';
