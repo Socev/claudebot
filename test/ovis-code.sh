@@ -11,6 +11,8 @@
 #  E. echte server.js-kopie met nep-claude: /run zonder pod-geheim 401, /run en /agent (Socev-sleutel) met chat_id ovis-code-<id> 400,
 #     geen claude-start, niets in het logboek van het kanaal; /health.ovis_code.aan. Kruisproef: zonder de /run-weigering start de beurt,
 #     maar smal (geen beheersleutel in de omgeving) en niet in het logboek.
+#  G. wv3316 (fase 3): agentrapport van een rij met app-label → app-gesprek code-<id>; mislukt → ook één regel machinekamer; zonder app,
+#     met een vraag of bij een bezorgfout → machinekamer (kruisproeven: zonder omleiding / zonder terugval).
 # Raakt niets buiten een wegwerpmap. Gebruik: bash test/ovis-code.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -45,6 +47,10 @@ toets('A label → app op voorvoegsel + "-" of einde', C.appVanLabel('machinekam
 toets('A kanaal/sessie exact: hoofdletter, leeg, verzonnen = null', C.idVanKanaal('code-texere') === 'texere' && C.idVanKanaal('code-Texere') === null &&
   C.idVanKanaal('code-') === null && C.idVanKanaal('code-onzin') === null && C.idVanSessie('ovis-code-pot') === 'pot' && C.idVanSessie('ovis-code-') === null &&
   C.idVanSessie('ovis-code-POT') === null && C.idVanSessie('ovis-code-pot ') === null);
+toets('A wv3316 labelVoorApp: voor elke app valt machinekamer:<vv>-proef weer bij die app; verzonnen id = null', C.APPS.every((a) => C.appVanLabel(C.labelVoorApp(a.id, 'proef')) === a.id) && C.labelVoorApp('onzin', 'x') === null);
+toets('A wv3316 appVanNaam: id of naam exact (zonder OVIS, accenten, haakjes); anders null', C.appVanNaam('texere') === 'texere' && C.appVanNaam('OVIS Texere') === 'texere' && C.appVanNaam('Financiën') === 'financien' &&
+  C.appVanNaam('Pod') === 'pod' && C.appVanNaam('tex') === null && C.appVanNaam('') === null && C.appVanNaam('Facturen en zo') === null);
+toets('A wv3316 appVanAgentLabel: wvNNN na machinekamer: telt niet mee', C.appVanAgentLabel('machinekamer:wv3235 pot-nmbrs') === 'pot' && C.appVanAgentLabel('machinekamer:wv1 onzin') === null && C.appVanAgentLabel('machinekamer:wvx texere') === null);
 const kop = C.kop('pot', '/x/pot');
 toets('A kop uit de release noemt registerrijen en "vraagt Davids Ja"', /pot-sloel-notas/.test(kop) && /vraagt altijd Davids Ja/.test(kop) && /De vraag van David:$/.test(kop));
 
@@ -305,6 +311,80 @@ await draai(zonderPoort, 'zonder', async function (req, d) {
   for (let i = 0; i < 60 && !s; i++) { s = spawns().find((x) => /PROEF-ZONDER-POORT/.test(x.prompt)); if (!s) await slaap(200); }
   toets('E kruisproef: die beurt draait smal (geen SUPABASE_SERVICE_ROLE) en schrijft niets in een code-logboek', !!s && s.env.indexOf('SUPABASE_SERVICE_ROLE') < 0 && geenLog(d), s && s.env.filter((k) => /SUPABASE|N8N_API/.test(k)));
 });
+// ── G. wv3316 (fase 3): agentrapport van een app-klus → app-gesprek; fout → ook één regel machinekamer; zonder app → machinekamer ──
+// G1 puur (vm-knipsel berichtAppDoel), G2 echte server.js-kopie met een gezaaid agentregister en POST /bericht (de route van n8n).
+{
+  const gCode = SRC.match(/const BERICHT_APP_MISLUKT_RE = [^\n]*\n/)[0] + knip('berichtAppDoel');
+  const gCtx = vm.createContext({}); vm.runInContext(gCode + '\nthis.f = berichtAppDoel;', gCtx);
+  const f = gCtx.f;
+  const reg = { a1: { label: 'machinekamer:wv12 texere-zinnen', ok: true }, a2: { label: 'machinekamer:wv13 bundel nacontroles', ok: true },
+    a3: { label: 'machinekamer:wv14 texere-x', ok: false, error: 'afgebroken-bovengrens' }, a4: { label: 'socev:wv15 texere-x', ok: true }, a5: { label: 'machinekamer:texere-y', ok: true } };
+  const d1 = f('machinekamer', 'agentrapport', 'a1', '🤖 Agentrapport — wv12 texere-zinnen\n\nKlaar.', false, reg, C);
+  toets('G1 rij met app-label (ook met wvNNN ervoor) → code-texere, niet mislukt', d1 && d1.kanaal === 'code-texere' && d1.mislukt === false, d1);
+  toets('G1 label zonder app, onbekende agent, socev:-route, ander kanaal of bron → null', f('machinekamer', 'agentrapport', 'a2', 'x', false, reg, C) === null &&
+    f('machinekamer', 'agentrapport', 'onbekend', 'x', false, reg, C) === null && f('machinekamer', 'agentrapport', 'a4', 'x', false, reg, C) === null &&
+    f('hoofd', 'agentrapport', 'a1', 'x', false, reg, C) === null && f('machinekamer', 'foutmelder', 'a1', 'x', false, reg, C) === null && f('machinekamer', 'agentrapport', '', 'x', false, reg, C) === null);
+  toets('G1 rapport met een vraag blijft in de machinekamer (Voor jou leest alleen hoofd/machinekamer)', f('machinekamer', 'agentrapport', 'a1', 'x', true, reg, C) === null);
+  toets('G1 zonder register (CODE_APPS null) → null', f('machinekamer', 'agentrapport', 'a1', 'x', false, reg, null) === null);
+  toets('G1 mislukt: ok false/fout in het register, of kop "Agent mislukt", tussenstand, bovengrens in de tekst', f('machinekamer', 'agentrapport', 'a3', 'x', false, reg, C).mislukt === true &&
+    f('machinekamer', 'agentrapport', 'a5', '⚠️ Agent mislukt — texere-y\n\nFout: x', false, reg, C).mislukt === true &&
+    f('machinekamer', 'agentrapport', 'a5', '🤖 Agentrapport — texere-y\n\nLET OP: tussenstand — de agent stopte', false, reg, C).mislukt === true &&
+    f('machinekamer', 'agentrapport', 'a5', '🤖 Agentrapport — texere-y\n\nDe opdracht is afgebroken op de absolute bovengrens: hij liep 180 minuten.', false, reg, C).mislukt === true);
+  const dubbel = JSON.parse(JSON.stringify(C.APPS)); dubbel.find((a) => a.id === 'pot').voorvoegsels.push('texere-zinnen');
+  const C2 = Object.assign({}, C, { appVanAgentLabel: (l) => { const r = String(l).replace(/^(machinekamer:)wv\d+ /, '$1').replace(/^machinekamer:/, ''); const raak = dubbel.filter((a) => a.voorvoegsels.some((p) => r === p || r.indexOf(p + '-') === 0)); return raak.length === 1 ? raak[0].id : null; } });
+  toets('G1 label dat bij twee apps past (fout register) → null', f('machinekamer', 'agentrapport', 'a1', 'x', false, reg, C2) === null);
+}
+{
+  const nuIso = new Date().toISOString();
+  const zaai = function (d) {
+    fs.mkdirSync(path.join(d, 'home'), { recursive: true });
+    fs.writeFileSync(path.join(d, 'home', 'agent_jobs.json'), JSON.stringify({
+      'aaaaaaaaaaaa0001': { job_id: 'aaaaaaaaaaaa0001', label: 'machinekamer:wv9001 crisis-proef', status: 'done', ok: true, started: Date.now() - 60000, ended: Date.now(), rapport: 'verzonden' },
+      'aaaaaaaaaaaa0002': { job_id: 'aaaaaaaaaaaa0002', label: 'machinekamer:wv9002 crisis-fout', status: 'done', ok: false, error: 'afgebroken-bovengrens', started: Date.now() - 60000, ended: Date.now(), rapport: 'verzonden' },
+      'aaaaaaaaaaaa0003': { job_id: 'aaaaaaaaaaaa0003', label: 'machinekamer:wv9003 bundel nacontroles', status: 'done', ok: true, started: Date.now() - 60000, ended: Date.now(), rapport: 'verzonden' } }));
+  };
+  const leesLog = (d, k) => { try { return fs.readFileSync(path.join(d, 'app-log', k + '.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse); } catch (e) { return []; } };
+  const bericht = (req, job, tekst, extra) => req('POST', '/bericht', Object.assign({ secret: 'proef', kanaal: 'machinekamer', bron: 'agentrapport', klasse: 'normaal', tekst: tekst, agent_job: job, sleutel: 'g2:' + job + ':' + tekst.length }, extra || {}));
+  const g2 = async function (bron, naam, fn) { zaai(path.join(E, naam)); await draai(bron, naam, fn); };
+  await g2(SRC, 'g2-echt', async function (req, d) {
+    const b1 = await bericht(req, 'aaaaaaaaaaaa0001', '🤖 Agentrapport — wv9001 crisis-proef\n\nAlles klaar.');
+    toets('G2 /bericht met app-klus: 200', b1._status === 200 && b1.ok === true, b1);
+    toets('G2 rapport staat in code-crisis en niet in de machinekamer', leesLog(d, 'code-crisis').some((x) => x.job_id === b1.id && x.bron === 'agentrapport' && /Alles klaar/.test(x.antwoord)) &&
+      !leesLog(d, 'machinekamer').some((x) => x.job_id === b1.id), { code: leesLog(d, 'code-crisis').length, mk: leesLog(d, 'machinekamer').length });
+    const b2 = await bericht(req, 'aaaaaaaaaaaa0002', '⚠️ Agent mislukt — wv9002 crisis-fout\n\nFout: afgebroken-bovengrens');
+    const mk2 = leesLog(d, 'machinekamer');
+    toets('G2 mislukte app-klus: rapport in code-crisis én één regel in de machinekamer (bron ovis-code, verwijzing)', leesLog(d, 'code-crisis').some((x) => x.job_id === b2.id) &&
+      mk2.filter((x) => x.agent_job === 'aaaaaaaaaaaa0002').length === 1 && mk2.some((x) => x.bron === 'ovis-code' && x.app === 'crisis' && /^⚠️ Agent mislukt — wv9002 crisis-fout — het hele rapport staat in OVIS Code › OVIS Crisis\.$/.test(x.antwoord)), mk2);
+    const b3 = await bericht(req, 'aaaaaaaaaaaa0003', '🤖 Agentrapport — wv9003 bundel nacontroles\n\nGelijk.');
+    toets('G2 rij zonder app: rapport in de machinekamer (ongewijzigd)', leesLog(d, 'machinekamer').some((x) => x.job_id === b3.id && x.bron === 'agentrapport'), b3);
+    const b4 = await bericht(req, 'aaaaaaaaaaaa0001', '🤖 Agentrapport — wv9001 crisis-proef\n\nVRAAG AAN DAVID: Mag de proef blijven staan?', { sleutel: 'g2-vraag' });
+    toets('G2 app-rapport met een vraag: in de machinekamer (Voor jou blijft de plek voor vragen)', leesLog(d, 'machinekamer').some((x) => x.job_id === b4.id && x.vraag_hash), b4);
+    const api = fs.readFileSync(path.join(d, 'api.log'), 'utf8');
+    toets('G2 api.log: één regel "ovis-code rapport" per omgeleid rapport', (api.match(/ ovis-code rapport bericht=/g) || []).length === 2, (api.match(/ovis-code rapport[^\n]*/g) || []));
+    // bezorgfout: het app-log van crisis is een map → appendFile faalt → het hele rapport naar de machinekamer
+    fs.mkdirSync(path.join(d, 'app-log', 'code-crisis.jsonl.x'), { recursive: true });
+    fs.renameSync(path.join(d, 'app-log', 'code-crisis.jsonl'), path.join(d, 'app-log', 'code-crisis.bewaard'));
+    fs.mkdirSync(path.join(d, 'app-log', 'code-crisis.jsonl'));
+    const b5 = await bericht(req, 'aaaaaaaaaaaa0001', '🤖 Agentrapport — wv9001 crisis-proef\n\nTweede rapport.', { sleutel: 'g2-terugval' });
+    toets('G2 bezorgfout bij de app: 200 en het hele rapport in de machinekamer (verdwijnt nooit)', b5._status === 200 && leesLog(d, 'machinekamer').some((x) => x.job_id === b5.id && /Tweede rapport/.test(x.antwoord)), b5);
+    toets('G2 bezorgfout: api.log "ovis-code rapport-terugval"', / ovis-code rapport-terugval bericht=/.test(fs.readFileSync(path.join(d, 'api.log'), 'utf8')));
+  });
+  // kruisproef: zonder de terugval verdwijnt het rapport bij een bezorgfout (500 naar n8n, niets in de machinekamer)
+  const zonderTerugval = SRC.replace('  if (!goed && appDoel) {   // wv3316', '  if (false && !goed && appDoel) {   // wv3316');
+  toets('G kruisproef: terugval uit de kopie gehaald', zonderTerugval !== SRC);
+  await g2(zonderTerugval, 'g2-zonder', async function (req, d) {
+    fs.mkdirSync(path.join(d, 'app-log', 'code-crisis.jsonl'), { recursive: true });
+    const b = await bericht(req, 'aaaaaaaaaaaa0001', '🤖 Agentrapport — wv9001 crisis-proef\n\nDerde.', { sleutel: 'g2-zonder' });
+    toets('G kruisproef: zonder terugval niet in de machinekamer (de toets bijt)', b._status !== 200 && !leesLog(d, 'machinekamer').some((x) => /Derde/.test(x.antwoord || '')), b);
+  });
+  // kruisproef: zonder omleiding komt het app-rapport in de machinekamer
+  const zonderOmleiding = SRC.replace("let doelKanaal = appDoel ? appDoel.kanaal : kanaal;", "let doelKanaal = kanaal; appDoel = null;");
+  toets('G kruisproef: omleiding uit de kopie gehaald', zonderOmleiding !== SRC);
+  await g2(zonderOmleiding, 'g2-zonder2', async function (req, d) {
+    const b = await bericht(req, 'aaaaaaaaaaaa0001', '🤖 Agentrapport — wv9001 crisis-proef\n\nVierde.', { sleutel: 'g2-zonder2' });
+    toets('G kruisproef: zonder omleiding staat het app-rapport in de machinekamer (de toets bijt)', leesLog(d, 'machinekamer').some((x) => x.job_id === b.id) && leesLog(d, 'code-crisis').length === 0, b);
+  });
+}
 rpc.close();
 fs.rmSync(W, { recursive: true, force: true }); fs.rmSync(E, { recursive: true, force: true });
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');

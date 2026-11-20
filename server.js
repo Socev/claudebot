@@ -9083,7 +9083,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   // wv1267: het doorgeefluik zet de rij pas als de [KNOP]-beurt echt start (review #2: vervalt hij in de rij, dan geen rij); de
   // systeemregel komt achter de staart van bijStart. doorgeefKnop wijst nooit af en duurt hooguit DOORGEEF_WACHT_MS.
   const bijStartMet = !luik ? bijStart : function () {
-    return Promise.all([Promise.resolve().then(bijStart).catch(function (e) { logError('app-bij-start', e); return ''; }), doorgeefKnop(sleutel, jobId, hash, luik.zin, drukT)])
+    return Promise.all([Promise.resolve().then(bijStart).catch(function (e) { logError('app-bij-start', e); return ''; }), doorgeefKnop(sleutel, jobId, hash, luik.zin, drukT, luik.app)])
       .then(function (x) { return (x[0] || '') + (x[1] || ''); });
   };
   const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', job_id: jobId2, bijStart: bijStartMet, bijVerval: bijVerval, knop_sleutel: sleutel,
@@ -16646,6 +16646,29 @@ function berichtNaElkaar(id, fn) {
   return p;
 }
 
+// ── wv3316 (OVIS Code fase 3, bouwplan § 5d.4): een agentrapport van een rij met app-label landt in het app-gesprek ──
+// Alleen bron agentrapport in kanaal machinekamer met een agent_job uit het agentregister waarvan het label bij precies één app uit het
+// register past (code-apps.js appVanAgentLabel; geen of twee treffers = machinekamer). Een rapport met een VRAAG AAN DAVID blijft in de
+// machinekamer: Voor jou › Moet iets leest alleen hoofd en machinekamer, en Voor jou is de ene plek voor vragen (§ 5d.5). Een mislukte,
+// afgebroken, op de bovengrens of als tussenstand gestopte klus gaat óók als één regel naar de machinekamer. Lukt het schrijven in het
+// app-log niet, dan gaat het hele rapport naar de machinekamer zoals vroeger (een rapport verdwijnt nooit). Puur: getoetst in
+// test/ovis-code.sh (vm-knipsel).
+const BERICHT_APP_MISLUKT_RE = /^\s*⚠️ Agent mislukt|LET OP: tussenstand|afgebroken op de (?:absolute )?bovengrens/;
+function berichtAppDoel(kanaal, bron, agentJob, tekst, vraag, reg, register) {
+  if (kanaal !== 'machinekamer' || bron !== 'agentrapport' || !agentJob || vraag || !register) return null;
+  const e = reg && Object.prototype.hasOwnProperty.call(reg, agentJob) ? reg[agentJob] : null;
+  if (!e || typeof e.label !== 'string') return null;
+  const id = register.appVanAgentLabel(e.label), a = id ? register.app(id) : null;
+  if (!a) return null;
+  return { id: id, naam: a.naam, kanaal: register.kanaal(id), mislukt: e.ok === false || !!e.error || BERICHT_APP_MISLUKT_RE.test(String(tekst || '')) };
+}
+// nu() is in berichtNieuw geschaduwd door de lokale const nu (Date.now()); dit is dezelfde logtijd
+function berichtLogTijd() { return nu(); }
+// De ene regel in de machinekamer bij een mislukte app-klus: de kopregel van het rapport en waar het hele rapport staat.
+function berichtAppMisluktRegel(tekst, naam) {
+  const kop = String(tekst || '').split('\n').map(function (r) { return r.trim(); }).filter(Boolean)[0] || 'Agent mislukt';
+  return appEenRegel(kop, 200) + ' — het hele rapport staat in OVIS Code › ' + appEenRegel(naam, 60) + '.';
+}
 async function berichtNieuw(res, d) {
   const kanaal = String(d.kanaal || ''), bron = String(d.bron || ''), klasse = String(d.klasse || 'normaal');
   if (!BERICHT_KANALEN[kanaal]) return berichtStuur(res, 400, { ok: false, fout: 'onbekend kanaal' });
@@ -16703,6 +16726,11 @@ async function berichtNieuw(res, d) {
     }
   }
   const vsl = vraag ? id + ':' + vraag.hash : null;
+  // wv3316: agentrapport van een app-klus → het app-gesprek (code-<id>); vraag = machinekamer (zie berichtAppDoel)
+  let appDoel = null;
+  try { appDoel = berichtAppDoel(kanaal, bron, agentJob, tekst, !!vraag, typeof agentsReg === 'object' ? agentsReg : null, CODE_APPS); }
+  catch (e) { logError('bericht-app', e); appDoel = null; }
+  let doelKanaal = appDoel ? appDoel.kanaal : kanaal;
   const soort = meldSoort(kanaal, bron, klasse, !!vraag, !!ag, opKaart && d.soort === 'vraag' ? undefined : d.soort), seintje = meldSeintje(kanaal, soort);   // wv804 (ontwerp § 1)
   if (vraag) {
     const gev = appGevoelig(vraag.tekst);
@@ -16716,21 +16744,34 @@ async function berichtNieuw(res, d) {
     agk[id].knoppen[ag.soort] = { nonce: ag.nonce, verloopt: ag.verloopt, stand: 'open', sinds: null, pagina: null, uitkomst: null };
     if (!appAgendaKnoppenBewaar()) { delete agk[id]; return berichtStuur(res, 500, { ok: false, fout: 'agendaknop niet op te slaan', terugval: true }); }
   }
-  const goed = await appLogSchrijf(kanaal, { t: t, job_id: id, soort: 'socev', bron: bron, klasse: klasse, tekst: '', antwoord: tekst, ok: true,
-    vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, bron_job: bronJob, bestanden: [], meld: soort });   // wv804: meld = soort (fase 4 c)
+  const regel = { t: t, job_id: id, soort: 'socev', bron: bron, klasse: klasse, tekst: '', antwoord: tekst, ok: true,
+    vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, bron_job: bronJob, bestanden: [], meld: soort };   // wv804: meld = soort (fase 4 c)
+  let goed = await appLogSchrijf(doelKanaal, regel);
+  if (!goed && appDoel) {   // wv3316: bezorging bij de app mislukt → het hele rapport naar de machinekamer, zoals vroeger
+    logError('bericht-app', new Error('app-log ' + doelKanaal + ' niet schrijfbaar; rapport naar de machinekamer'));
+    schrijfLog(berichtLogTijd() + ' ovis-code rapport-terugval ' + velden({ bericht: id, app: appDoel.id, agent: agentJob }));
+    appDoel = null; doelKanaal = kanaal;
+    goed = await appLogSchrijf(kanaal, regel);
+  }
+  if (goed && appDoel && appDoel.mislukt) {   // wv3316: een mislukte app-klus ook als één regel in de machinekamer
+    const goed2 = await appLogSchrijf(kanaal, { t: t, job_id: crypto.randomBytes(8).toString('hex'), soort: 'socev', bron: 'ovis-code', klasse: klasse, tekst: '',
+      antwoord: berichtAppMisluktRegel(tekst, appDoel.naam), ok: true, agent_job: agentJob, app: appDoel.id, bestanden: [], meld: 'archief' });
+    if (!goed2) logError('bericht-app', new Error('foutregel in de machinekamer niet geschreven (' + appDoel.id + ')'));
+  }
+  if (appDoel) schrijfLog(berichtLogTijd() + ' ovis-code rapport ' + velden({ bericht: id, app: appDoel.id, agent: agentJob, mislukt: appDoel.mislukt ? 'ja' : 'nee' }));
   if (!goed) {
     if (vsl) { try { const v = appVragen(); delete v[vsl]; appVragenSchrijf(v); } catch (e) { logError('bericht-vragen', e); } }
     if (ag) { delete agk[id]; appAgendaKnoppenBewaar(); }   // wv315
     return berichtStuur(res, 500, { ok: false, fout: 'app-log niet schrijfbaar', terugval: true });
   }
-  idx[id] = { t: t, kanaal: kanaal, bron: bron, klasse: klasse, soort: soort, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, push: null, getikt: null, naar_telegram: vraag && d.knoppen !== true ? t : null, knoppen: d.knoppen === true };
+  idx[id] = { t: t, kanaal: doelKanaal, bron: bron, klasse: klasse, soort: soort, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, push: null, getikt: null, naar_telegram: vraag && d.knoppen !== true ? t : null, knoppen: d.knoppen === true };
   const plan = berichtPushPlan(id, kanaal, klasse, seintje);   // bewaart de index
   if (!idx[id].push) berichtIndexBewaar();
   const gewenst = berichtPushGewenst();
   // wv452 (Fable KAN 3): het actielijstje van 07:05 zegt "de knoppen staan in Voor jou"; de rijen staan dan al open (n8n markeert ze vóór
   // dit bericht), dus het geheugen van Vandaag (3 min) weg, anders toont Ververs nog "nog niet verstuurd" zonder knoppen
   if (bron === 'actielijst' && appStaat.vandaag) appStaat.vandaag.data = null;
-  res._log = { bericht: id, kanaal: kanaal, bron: bron, klasse: klasse, soort: soort, agenda: ag ? ag.soort : undefined, op_kaart: opKaart ? opKaart.sleutel : undefined };
+  res._log = { bericht: id, kanaal: doelKanaal, bron: bron, klasse: klasse, soort: soort, agenda: ag ? ag.soort : undefined, op_kaart: opKaart ? opKaart.sleutel : undefined };
   berichtStuur(res, 200, { ok: true, id: id, vraag: !!vraag && d.knoppen === true, push: { gewenst: gewenst, gestart: plan.direct }, uitgesteld: plan.uitgesteld, app_actief: berichtAppActief(),
     agenda: ag ? true : undefined, soort: soort, seintje: seintje, op_kaart: opKaart ? opKaart.sleutel : undefined });
   if (plan.direct && plan.gebundeld) setTimeout(function () { berichtBundelAf(kanaal); }, 0);   // Fable wv292 #3: met de wachtende mee
@@ -25617,8 +25658,20 @@ function doorgeefHerken(rij, vz, bericht) {
   if (!rij || rij.kanaal !== 'hoofd' || rij.soort !== undefined) return null;
   const m = DOORGEEF_VRAAG_RE.exec(String(vz || ''));
   if (!m || String(bericht || '').indexOf(DOORGEEF_KENMERK) < 0) return null;
-  const zin = m[1].split(DOORGEEF_KENMERK).join(' ').replace(/[*_]+/g, ' ').replace(/\s+/g, ' ').replace(/[\s?]+$/, '').trim();
-  return zin ? { zin: zin } : null;
+  const zin = m[1].split(DOORGEEF_KENMERK).join(' ').replace(DOORGEEF_APP_RE_G, ' ').replace(/[*_]+/g, ' ').replace(/\s+/g, ' ').replace(/[\s?]+$/, '').trim();
+  return zin ? { zin: zin, app: doorgeefApp(bericht) } : null;
+}
+// wv3316 (OVIS Code fase 3, § 5d.2): hoort het verzoek bij één app, dan zet Socev in hetzelfde bericht het kenmerk #app:<id of naam>
+// (bv. #app:texere of #app:"OVIS Texere"). Alleen een exacte treffer in het register telt (code-apps.js appVanNaam); twee verschillende
+// kenmerken, een onbekende naam of geen register = geen app (de rij blijft in de machinekamer, zoals vroeger).
+const DOORGEEF_APP_RE_G = /#app:(?:"([^"\n]{1,60})"|([A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9-]{0,40}))/g;
+function doorgeefApp(bericht) {
+  if (typeof CODE_APPS === 'undefined' || !CODE_APPS) return null;
+  const ids = new Set();
+  String(bericht || '').replace(DOORGEEF_APP_RE_G, function (m, q, w) { ids.add(CODE_APPS.appVanNaam(q || w) || '?'); return m; });
+  if (ids.size !== 1) return null;
+  const id = Array.from(ids)[0];
+  return id === '?' ? null : id;
 }
 // Eerst normaliseren (onzichtbare tekens weg, NFKC, alle regeleinden -> \n), dan sleutels en BSN maskeren, dan markeringen (review #6/#7).
 const DOORGEEF_REGEL_RE = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/g;
@@ -25672,7 +25725,7 @@ function doorgeefOpdracht(o) {
       'niets naar buiten, niet Davids mail/agenda/gegevens, geen patiëntgegevens, geen beveiliging, niets verwijderen, geen nieuw groot onderdeel; ' +
       'werkregel David 5-11-2026): bouw het en meld het achteraf in één regel. Raakt het een van die uitzonderingen: zet het bouwen als werkvoorraadrij ' +
       'geblokkeerd met een Voor jou-kaart "Mag ik dit bouwen?" (soort besluit) en zet de vraag in Open vragen aan David. Is (a) te vaag of in strijd ' +
-      'met (b), stel dan één VRAAG AAN DAVID in je rapport. Rapport naar de machinekamer: hooguit 900 tekens, platte tekst.',
+      'met (b), stel dan één VRAAG AAN DAVID in je rapport. Rapport (de pod bezorgt het in de machinekamer, of bij een app in OVIS Code): hooguit 900 tekens, platte tekst.',
     '',
     '(a) Vraagzin (Socev, door David met Ja goedgekeurd):',
     doorgeefCiteer(doorgeefSchoon(o.zin)),
@@ -25714,16 +25767,20 @@ async function doorgeefZetNu(o) {
     const j = jobs[o.jobId];
     const tVraag = (vr && Date.parse(vr.t)) || (j && j.done_at) || o.tDruk;
     const woorden = doorgeefWoorden(items, tVraag);
-    const label = 'machinekamer:doorgegeven-' + dag + '-' + o.hash + '-' + o.jobId.slice(0, 6);
+    const rest = 'doorgegeven-' + dag + '-' + o.hash + '-' + o.jobId.slice(0, 6);
+    // wv3316: met een app uit het register het voorvoegsel van die app (machinekamer:<voorvoegsel>-doorgegeven-…): het rapport landt in OVIS Code
+    const appLabel = o.app && typeof CODE_APPS !== 'undefined' && CODE_APPS ? CODE_APPS.labelVoorApp(o.app, rest) : null;
+    const label = appLabel && CODE_APPS.appVanLabel(appLabel) === o.app ? appLabel : 'machinekamer:' + rest;
     const prompt = doorgeefOpdracht({ zin: o.zin, woorden: woorden, hash: o.hash, jobId: o.jobId, tDruk: o.tDruk });
     const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: label, p_prompt: prompt, p_status: 'open',
       p_samenvatting: 'Doorgegeven door David: ' + appEenRegel(doorgeefSchoon(o.zin), 180), p_notitie: 'doorgeefluik: app-Ja ' + o.hash + ' (beurt ' + o.jobId + ')' });
     if (!z || !z.ok || !z.id) return { ok: false, reden: 'de werkvoorraad gaf geen rij terug' };
     const nu = Date.now();
     Object.keys(st.rijen).forEach(function (k) { if (!st.rijen[k] || nu - Date.parse(st.rijen[k].t) > DOORGEEF_BEWAAR_MS) delete st.rijen[k]; });
-    st.rijen[o.sleutel] = { t: new Date(o.tDruk).toISOString(), dag: dag, id: z.id, label: label, bestond: !!z.bestond, woorden: woorden.length };
+    const appId = label === 'machinekamer:' + rest ? null : o.app;
+    st.rijen[o.sleutel] = { t: new Date(o.tDruk).toISOString(), dag: dag, id: z.id, label: label, bestond: !!z.bestond, woorden: woorden.length, app: appId || undefined };
     try { appSchrijfJson(DOORGEEF_STAAT, st); } catch (e) { logError('doorgeefluik', e); }
-    return { ok: true, id: z.id, bestond: !!z.bestond, woorden: woorden.length };
+    return { ok: true, id: z.id, bestond: !!z.bestond, woorden: woorden.length, app: appId || null };
   } catch (e) {
     logError('doorgeefluik', e);
     return { ok: false, reden: /http 400/.test(String(e && e.message)) ? 'de werkvoorraad weigerde de opdracht (de machinekamer kijkt het na)'
@@ -25740,6 +25797,7 @@ async function doorgeefMeld(u, zin) {
   try { const d = await appSbRpc('mk_werkvoorraad_stand', {}); stand = d && d.stand; } catch (e) { logError('doorgeefluik', e); }
   const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'doorgeefluik', klasse: 'normaal', sleutel: 'doorgeefluik:' + u.id,
     tekst: 'Op de werklijst gezet (wv' + u.id + ', van David via Socev): ' + appEenRegel(doorgeefSchoon(zin), 300) + ' — ' + doorgeefStartTekst(stand) + '.' +
+      (u.app && CODE_APPS && CODE_APPS.app(u.app) ? ' Staat nu bij OVIS Code › ' + CODE_APPS.app(u.app).naam + '; het rapport landt daar.' : '') +   // wv3316
       (u.herkomst ? '' : ' Let op: herkomst david niet gezet; zet hem met werkvoorraad.py herkomst --id ' + u.id + ' --david.') });
   if (r.status !== 200) logError('doorgeefluik', new Error('bericht gaf ' + r.status));
   return r;
@@ -25749,12 +25807,13 @@ function doorgeefStaart(u) {
   if (!u) return '';
   if (u.uit) return '\n[Systeem: het doorgeefluik naar de machinekamer staat uit; deze vraag is NIET op de werklijst gezet. Zeg dat in één zin tegen David, laat je box-rij staan, en stel tot nader order geen vraag met #mk-werklijst meer.]';
   if (u.ok) return '\n[Systeem: door de pod op de werklijst van de machinekamer gezet' + (u.al || u.bestond ? ' (stond er al)' : '') + '. Zeg David in één zin dat het erop staat; ' +
-    'de machinekamer begint met een ontwerp of meting en meldt zich in de machinekamer. Werk er zelf niet aan; zet je box-rij op doorgegeven.]';
+    (u.app && typeof CODE_APPS !== 'undefined' && CODE_APPS && CODE_APPS.app(u.app) ? 'het hoort bij de app ' + CODE_APPS.app(u.app).naam + ': het rapport komt in OVIS Code bij die app. '   // wv3316
+      : 'de machinekamer begint met een ontwerp of meting en meldt zich in de machinekamer. ') + 'Werk er zelf niet aan; zet je box-rij op doorgegeven.]';
   return '\n[Systeem: NIET op de werklijst gezet: ' + appEenRegel(u.reden || 'onbekende fout', 160) + '. Zeg dat in één zin tegen David; je box-rij blijft staan en de machinekamer leest hem bij haar volgende beurt.]';
 }
 // Vanuit appKnop, na een geslaagde start van de [KNOP]-beurt. Geeft een belofte van de staart die nooit afwijst en hooguit DOORGEEF_WACHT_MS duurt.
-function doorgeefKnop(sleutel, jobId, hash, zin, tDruk) {
-  const zet = doorgeefZet({ sleutel: sleutel, jobId: jobId, hash: hash, zin: zin, tDruk: tDruk }).catch(function (e) { logError('doorgeefluik', e); return { ok: false, reden: 'interne fout' }; });
+function doorgeefKnop(sleutel, jobId, hash, zin, tDruk, app) {
+  const zet = doorgeefZet({ sleutel: sleutel, jobId: jobId, hash: hash, zin: zin, tDruk: tDruk, app: app || null }).catch(function (e) { logError('doorgeefluik', e); return { ok: false, reden: 'interne fout' }; });
   zet.then(function (u) {
     appStaat.doorgeefLaatst = { t: new Date().toISOString(), uitkomst: u.uit ? 'uit' : u.ok ? (u.al || u.bestond ? 'stond er al' : 'gezet') : 'niet gezet' };
     schrijfLog(nu() + ' doorgeefluik ' + velden({ vraag: hash, uitkomst: appStaat.doorgeefLaatst.uitkomst, rij: u.id || '-' }));
