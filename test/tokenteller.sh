@@ -209,6 +209,7 @@ toets('10c teller tokens', /appTeller\('tokens', 600, 3600000\)/.test(b));
 toets('10d stil bij 200', /res\._app\.stil = true;\s*return appStuur\(res, 200, uit\)/.test(b));
 toets('10e wv3446: geen vaste-plekvlag meer', !/appAfscherm|vast: vast/.test(b) && /tokenteller\.stand\(\{ tank:/.test(b) && /dag\(m\[1\], \{\}\)/.test(b));
 toets('10f vault-veilig doorgegeven', /vv: VV\(\)/.test(b));
+toets('10m wv3545: tank krijgt de agents-schakelaar (kopie, niet de buffer)', /Object\.assign\(\{\}, tank, \{ agents_op: accountStand\(\)\.agents \}\)/.test(b));
 toets('10l tank: één lopende lezing gedeeld', /if \(tokentellerTankBezig\) return tokentellerTankBezig;/.test(b));
 toets('10g /health.tokenteller', /tokenteller: typeof tokenteller !== 'undefined' && !!tokenteller/.test(src));
 toets('10h tokenteller.js in RELEASE_OPTIONEEL', /^RELEASE_OPTIONEEL="[^"]*\btokenteller\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));
