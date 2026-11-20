@@ -47,10 +47,21 @@ function schoon(t, max) {
     .replace(/[|<>`\[\]*_#]/g, ' ')
     .replace(/\s+/g, ' ').trim().slice(0, max).trim();
 }
-// Hooguit n zinnen (kort = twee zinnen).
+// Hooguit n zinnen (kort = twee zinnen). Een zin eindigt op . ! of ? gevolgd door witruimte of het einde; een punt in een
+// versienummer ("n8n 3.0", "2.1.323") of na een afkorting ("o.a.", "bv.", "d.w.z.") is geen zinseinde. Er valt nooit tekst
+// vóór de eerste zin weg: minder dan n zinseinden = de hele tekst (de aanroeper begrenst de lengte). wv3536: de oude regex begon
+// na "3." opnieuw, zodat "Overstappen naar n8n 3.0 kan …" "0 kan …" werd.
+const AFKORTING = /^(?:[a-z]\.){2,}$|^(?:bv|bijv|bijvoorbeeld|enz|etc|incl|excl|ca|nl|resp|vgl|zgn|evt|nr|dhr|mevr|dr|drs|ir|ing|mr|prof|jl|st|vs|max|min|ong)\.$/;
 function zinnen(t, n) {
-  const m = String(t).match(/[^.!?]+[.!?]+(\s|$)|[^.!?]+$/g) || [];
-  return m.slice(0, n).join('').trim();
+  const s = String(t == null ? '' : t).trim(), re = /[.!?]+(?=\s|$)/g;
+  let m, tel = 0;
+  while ((m = re.exec(s))) {
+    const eind = m.index + m[0].length;
+    const woord = (s.slice(0, eind).match(/\S+$/) || [''])[0].replace(/^[("'«‘“]+/, '').toLowerCase();
+    if (m[0] === '.' && AFKORTING.test(woord)) continue;
+    if (++tel >= n) return s.slice(0, eind).trim();
+  }
+  return s;
 }
 const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
 // Entiteiten één keer, alleen de standaard + numeriek (Fable #9): geen recursieve expansie, geen eigen DOCTYPE-entiteiten.
