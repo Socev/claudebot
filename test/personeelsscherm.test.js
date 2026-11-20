@@ -1061,11 +1061,21 @@ test('wv3154 kop en samenvatting altijd ge-escaped; app-voorbeeld zonder bericht
   assert.match(l, /Nog geen berichten/);
 });
 
-test('wv3438: agendatitel met volle naam komt op de tv; een lange titel wordt ingekort, niet weggelaten', () => {
+test('wv3438 + wv3560: agendatitel met volle naam komt op de tv; een lange titel komt helemaal in de envelop (geen knip, geen weglaten)', () => {
   const P = require('../personeelsscherm.js');
   const rij = (titel, d) => ({ feed: 'google-hagro', sync_agenda: 'hagro', soort: 'afspraak', titel, status: 'actief', event_id: d, hele_dag: true, begin_datum: '2026-11-2' + d, entiteiten: [{ naam: 'Iemand', rol: 'betreft' }] });
   const lang = 'Afscheid Jan Jansen en Piet de Vries van de huisartsenpraktijk met een hele lange titel erachteraan';
   const a = P._t.agendaPunten([rij('Afscheid Jan Jansen', 1), rij('Patiëntenraad ziekenhuis overleg', 2), rij(lang, 3)], '2026-11-20', []);
   assert.deepStrictEqual(a.map((x) => x.titel).slice(0, 2), ['Afscheid Jan Jansen', 'Patiëntenraad ziekenhuis overleg']);
-  assert.ok(a[2].titel.length === 70 && a[2].titel.endsWith('…') && a[2].titel.startsWith('Afscheid Jan Jansen en Piet'), a[2].titel);
+  assert.strictEqual(a[2].titel, lang);
+  // wv3560 (2B20): 90 tekens, HAGRO én eigen praktijkpunt: volledig in agendaPunten en in de HTML; titelvak over twee regels, met pasvorm-script
+  const t90 = 'Minisymposium Goede oncologische zorg in de eerste lijn voor de regio Eemland en omstreken';
+  assert.strictEqual(t90.length, 90);
+  const b = P._t.agendaPunten([rij(t90, 4)], '2026-11-20', [{ datum: '2026-11-25', titel: '  ' + t90 + '  ', tijd: '12:30' }]);
+  assert.deepStrictEqual(b.map((x) => x.titel), [t90, t90]);
+  const h = P.bouwHtml({ gemaakt: Date.parse('2026-11-20T09:00:00Z'), houdbaar_tot: Date.parse('2026-11-21T09:00:00Z'), leeg: false, inhoud: { agenda: b } });
+  assert.strictEqual(h.split('<div class="tt">' + t90 + '</div>').length, 3, 'volle titel twee keer in de HTML');
+  assert.doesNotMatch(h, /oncologisc…/);
+  assert.match(h, /\.tt\{[^}]*-webkit-line-clamp:2/); assert.doesNotMatch(h, /\.tt\{[^}]*nowrap/);
+  assert.match(h, /<section class="paneel aan" data-s="\d+"><div class="ph"><h1 id="agenda">Komende weken<\/h1>/); assert.match(h, /function p\(\)/);
 });
