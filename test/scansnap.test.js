@@ -30,7 +30,7 @@ function omgeving() {
     pdftekst: async (p) => { const b = fs.readFileSync(p).toString('latin1'); const m = /TEKST:([\s\S]*)$/.exec(b); return m ? m[1] : ''; },
     stuur: (res, status, obj) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); } });
   const kaarten = [], box = [], model = [], lijst = {};
-  const cfg = { intake: ing, dir, remote: 'gdrive:ScanSnap', rclone: path.join(ROOT, 'test', 'nep-rclone.js'), pdfinfo: 'false',
+  const cfg = { intake: ing, dir, vault, remote: 'gdrive:ScanSnap', rclone: path.join(ROOT, 'test', 'nep-rclone.js'), pdfinfo: 'false',
     pdftekst: async (p) => { const b = fs.readFileSync(p).toString('latin1'); const m = /TEKST:([\s\S]*)$/.exec(b); return m ? m[1] : ''; },
     marker: P, nu: () => klok.t, fout: () => {},
     model: async (sys, prompt) => { model.push(prompt); return { ok: true, data: /vader/.test(prompt)
@@ -42,7 +42,7 @@ function omgeving() {
   const ss = S.maak(cfg);
   fs.writeFileSync(path.join(dir, 'scansnap.json'), '{"aan": true}');
   const zet = (id, naam, buf, modTijd, md5) => { fs.writeFileSync(path.join(drive, 'top', id), buf); fs.writeFileSync(path.join(drive, 'top', id + '.json'), JSON.stringify({ Name: naam, ModTime: modTijd, md5 })); };
-  return { basis, dir, drive, ing, ss, klok, kaarten, box, model, lijst, zet, cfg,
+  return { basis, dir, vault, drive, ing, ss, klok, kaarten, box, model, lijst, zet, cfg,
     log: () => fs.readFileSync(path.join(drive, 'log'), 'utf8'), sluit: () => { ing.sluit(); fs.rmSync(basis, { recursive: true, force: true }); } };
 }
 
@@ -115,12 +115,12 @@ test('knop: alleen eigen kaarten; Ja geeft een kopie + keuze bij de start, terug
     const bewaar = () => db.prepare('SELECT bewaar_tot FROM blob WHERE sha256 = ?').get(ja.upload.lijst[0].n).bewaar_tot;
     assert.strictEqual(rij().keuze, null, 'nog niet gekozen vóór de start');
     ja.bijStart();
-    assert.strictEqual(rij().keuze, 'ja'); assert.strictEqual(Date.parse(bewaar()), o.klok.t + 14 * 86400000);
+    assert.strictEqual(rij().keuze, 'ja'); assert.strictEqual(bewaar(), null, 'Ja: geen termijn, pas weg na bewijs van plaatsing (2A06)');
     ja.bijVerval();
     assert.strictEqual(rij().keuze, null); assert.strictEqual(bewaar(), null);
     const nee = o.ss.knop(k1.sleutel, 'nee');
     assert.strictEqual(nee.upload, null); assert.match(nee.context, /weggooien/);
-    nee.bijStart(); assert.strictEqual(rij().keuze, 'nee');
+    nee.bijStart(); assert.strictEqual(rij().keuze, 'nee'); assert.strictEqual(Date.parse(bewaar()), o.klok.t + 14 * 86400000, 'Nee: 14 dagen');
     // gemarkeerd: Ja = lezen → geen bestand voor Socev; de pod vraagt het model en zet een nieuwe kaart
     const lees = o.ss.knop(k2.sleutel, 'ja');
     assert.strictEqual(lees.upload, null); assert.match(lees.context, /leest hem zelf/);
@@ -137,6 +137,47 @@ test('knop: alleen eigen kaarten; Ja geeft een kopie + keuze bij de start, terug
     await o.ss.tik();
     assert.deepStrictEqual(fs.readdirSync(path.join(o.drive, 'prullenbak')), [ID1 + '.pdf']);
     assert.match(o.log(), /deletefile --drive-use-trash=true gdrive:ScanSnap\/_opgehaald\//);
+  } finally { o.sluit(); }
+});
+
+test('afgebroken beurt (2A06): na 14 dagen blijft een gekozen scan staan tot hij aantoonbaar geplaatst is; één box-rij; daarna pas weg', async () => {
+  const o = omgeving();
+  try {
+    o.zet(ID1, 'a.pdf', PDF(POST), '2026-10-26T16:53:02Z');                                         // voorstel: mailen naar je vader
+    o.zet(ID3, 'c.pdf', PDF('Huurcontract garage, opgezegd en afgehandeld.'), '2026-10-26T16:55:00Z');   // voorstel: archiveren
+    await o.ss.tik();
+    assert.strictEqual(o.kaarten.length, 2);
+    const db = o.ing._db;
+    const rij = (id) => db.prepare('SELECT * FROM scansnap WHERE drive_id = ?').get(id);
+    const blob = (id) => db.prepare('SELECT b.* FROM blob b JOIN onderdeel d ON d.sha256 = b.sha256 WHERE d.stuk_id = ?').get(rij(id).stuk_id);
+    const naam = (id) => db.prepare('SELECT naam FROM onderdeel WHERE stuk_id = ?').get(rij(id).stuk_id).naam;
+    // David tikt Ja op beide; de beurt start (keuze telt) en breekt af: niets geplaatst
+    for (const k of o.kaarten) o.ss.knop(k.sleutel, 'ja').bijStart();
+    assert.strictEqual(rij(ID1).keuze, 'ja'); assert.strictEqual(rij(ID3).keuze, 'ja');
+    o.klok.t += 15 * 86400000;
+    await o.ing.ronde(); await o.ss.tik(); await o.ing.ronde();
+    assert.deepStrictEqual(fs.readdirSync(path.join(o.drive, 'prullenbak')), [], 'Drive-kopie blijft');
+    assert.strictEqual(blob(ID1).weg, null, 'blob op de pod blijft (1)'); assert.strictEqual(blob(ID3).weg, null, 'blob op de pod blijft (3)');
+    const rijen = () => o.box.filter((b) => /niet aantoonbaar geplaatst/.test(b));
+    assert.strictEqual(rijen().length, 1, 'één box-rij');
+    assert.ok(rijen()[0].includes(ID1) && rijen()[0].includes(ID3));
+    assert.ok(!rijen()[0].includes('Belasting') && !rijen()[0].includes('Huurcontract'), 'geen inhoud in de box');
+    // later tikken: geen tweede box-rij, nog steeds niets weg
+    o.klok.t += 2 * 3600000;
+    await o.ss.tik(); await o.ing.ronde();
+    assert.strictEqual(rijen().length, 1); assert.deepStrictEqual(fs.readdirSync(path.join(o.drive, 'prullenbak')), []);
+    // Socev zet ze alsnog neer: de archiefscan byte-gelijk in de vault (andere naam), de vaderbrief als bijlage van een mailconcept
+    const bron = path.join(o.vault, '20_Prive', 'Bronnen'); fs.mkdirSync(bron, { recursive: true });
+    fs.copyFileSync(o.ing.blobVan(rij(ID3).stuk_id).pad, path.join(bron, 'Huurcontract garage.pdf'));
+    const reg = path.join(o.vault, '01_Ontwikkeling', '0b-werkmap'); fs.mkdirSync(reg, { recursive: true });
+    fs.writeFileSync(path.join(reg, 'conceptregister.jsonl'), JSON.stringify({ aangemaakt: new Date(o.klok.t - 3600000).toISOString(), concept_id: 'r-1', aan: 'vader@voorbeeld.invalid', bijlagen: [naam(ID1)] }) + '\n');
+    o.klok.t += 2 * 3600000;
+    const u = await o.ss.tik(); await o.ing.ronde();
+    assert.strictEqual(u.drive_weg, 2, JSON.stringify(u));
+    assert.deepStrictEqual(fs.readdirSync(path.join(o.drive, 'prullenbak')).sort(), [ID1 + '.pdf', ID3 + '.pdf']);
+    assert.notStrictEqual(blob(ID1).weg, null); assert.notStrictEqual(blob(ID3).weg, null);
+    assert.match(rij(ID1).geplaatst, / concept$/); assert.match(rij(ID3).geplaatst, / vault$/);
+    assert.strictEqual(rijen().length, 1, 'nog steeds één box-rij');
   } finally { o.sluit(); }
 });
 

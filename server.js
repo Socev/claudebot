@@ -20997,7 +20997,7 @@ const scansnap = (function () {
   const p = path.join(__dirname, 'scansnap.js');
   if (!intake || !fs.existsSync(p)) return null;
   try {
-    return require(p).maak({ intake: intake, dir: INTAKE_DIR, remote: process.env.SCANSNAP_REMOTE || 'gdrive:ScanSnap', pdftekst: intakePdfTekst,
+    return require(p).maak({ intake: intake, dir: INTAKE_DIR, vault: VAULT, remote: process.env.SCANSNAP_REMOTE || 'gdrive:ScanSnap', pdftekst: intakePdfTekst,   // vault: 2A06, bewijs van plaatsing
       marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       model: function (systeem, prompt, schema) { return harvesterClaude(systeem, prompt, schema, { timeoutMs: 180000 }); },
       kaartZet: async function (p) { const r = await appSbRpc('mk_voor_jou_zet', { p: p }); appStaat.vjCache = null; if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet'); return r; },
