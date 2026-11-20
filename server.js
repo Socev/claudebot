@@ -10473,7 +10473,9 @@ async function appBestanden(req, res) {
   try { items = appBestandenIndex(); } catch (e) { logError('app-bestanden', e); return appWeiger(res, 503, 'de bestandenlijst is nu niet leesbaar', 'index'); }
   let perJob = {};
   try { const wv = await appWerkvoorraad(); ((wv && wv.items) || []).forEach(function (w) { if (w.job_id) perJob[w.job_id] = w; }); } catch (e) { perJob = {}; }
-  const lijst = appBestandenZichtbaar(items).filter(function (m) { return m.bestanden && m.bestanden.length; }).slice(0, 200).map(function (m) {   // wv2663
+  // wv3547 (actieplan 2B15): de hele bewaartermijn, geen grens van 200 klussen meer; anders vielen klussen van vóór ± 3-11 uit de lijst en
+  // zei de kaartlink naar zo'n werkbestand ten onrechte "opgeruimd" (gemeten 20-11: 356 klussen binnen 30 dagen, lijst ± 140 kB, 31 ms)
+  const lijst = appBestandenZichtbaar(items).filter(function (m) { return m.bestanden && m.bestanden.length; }).map(function (m) {   // wv2663
     const w = perJob[m.job_id];
     return { job_id: m.job_id, soort: m.soort, kanaal: m.kanaal, app: m.app, op: m.op,
       label: m.soort === 'agent' ? ((w && w.samenvatting) ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(m.label)) : m.soort === 'socev' ? 'bericht · ' + String(m.label || '').slice(0, 40)
