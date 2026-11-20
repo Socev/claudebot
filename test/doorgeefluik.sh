@@ -25,7 +25,7 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
   toets('0 bron doorgeefluik in BERICHT_BRONNEN', /'doorgeefluik',\s+\/\/ wv1267/.test(src));
   toets('0 health kent doorgeefluik', /doorgeefluik: typeof doorgeefInfo === 'function' \? doorgeefInfo\(\)/.test(src));
   toets('0 appKnop: alleen Ja, geen kaart; rij pas bij de start van de beurt (in bijStart)', /const luik = keuze === 'ja' && !kaart && vb && typeof doorgeefHerken === 'function'/.test(knopSrc) &&
-    (knopSrc.match(/doorgeefKnop\(/g) || []).length === 1 && /const bijStartMet = !luik \? bijStart : function \(\) \{\n    return Promise\.all\(\[[^\n]*doorgeefKnop\(sleutel, jobId, hash, luik\.zin, drukT\)\]\)/.test(knopSrc) &&
+    (knopSrc.match(/doorgeefKnop\(/g) || []).length === 1 && /const bijStartMet = !luik \? bijStart : function \(\) \{\n    return Promise\.all\(\[[^\n]*doorgeefKnop\(sleutel, jobId, hash, luik\.zin, drukT, luik\.app\)\]\)/.test(knopSrc) &&
     /bijStart: bijStartMet,/.test(knopSrc));
 
   // ── nagebootste omgeving ──
@@ -208,10 +208,10 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
   // ── schakelaar uit ──
   fs.writeFileSync(SCH, '{"aan": false}');
   const qu = vraag('hoofd', VR.replace('Mediatheek', 'Uit-proef'));
-  const nRpc2 = rpc.length;
+  const nRpc2 = rpc.length, nPrU = prompts.length;   // wv3316: relatief (blok 9 voegt een prompt toe)
   await druk(qu, 'ja');
-  await wachtPrompt(8);
-  toets('schakelaar uit: geen RPC, systeemregel "staat uit"', rpc.length === nRpc2 && /\[Systeem: het doorgeefluik naar de machinekamer staat uit; deze vraag is NIET op de werklijst gezet\./.test(prompts[7].prompt), prompts[7]);
+  await wachtPrompt(nPrU + 1);
+  toets('schakelaar uit: geen RPC, systeemregel "staat uit"', rpc.length === nRpc2 && /\[Systeem: het doorgeefluik naar de machinekamer staat uit; deze vraag is NIET op de werklijst gezet\./.test(prompts[nPrU].prompt), prompts[nPrU]);
   fs.writeFileSync(SCH, '{kapot');
   toets('schakelaar onleesbaar = uit', D.doorgeefInfo().aan === false);
   fs.writeFileSync(SCH, '{"aan": true}');
@@ -248,6 +248,29 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
 
   // ── time-out: de beurt wacht hooguit 20 s (hier verkort te zien aan de race; echte grens in de code) ──
   toets('time-out: race met DOORGEEF_WACHT_MS = 20 s in de code', /DOORGEEF_WACHT_MS = 20000/.test(src) && /Promise\.race\(\[zet, wacht\]\)/.test(src));
+
+  fs.writeFileSync(SCH, '{"aan": true}'); fs.writeFileSync(STAAT, '{"rijen": {}}'); rpcFout = null; rpcTraag = 0;
+  // ── (9) wv3316 (OVIS Code fase 3): #app:<id of naam> in hetzelfde bericht → rij met het voorvoegsel van die app ──
+  const H = vm.runInContext('doorgeefApp', ctx), HK = vm.runInContext('doorgeefHerken', ctx);
+  toets('9 zonder register (CODE_APPS ontbreekt): geen app', H('… #mk-werklijst #app:texere') === null);
+  ctx.CODE_APPS = require('./code-apps.js');
+  toets('9 #app:texere, #app:"OVIS Texere", #app:Facturen → texere / texere / facturen', H('x #app:texere') === 'texere' && H('x #app:"OVIS Texere"') === 'texere' && H('x #app:Facturen') === 'facturen');
+  toets('9 verzonnen app, twee verschillende kenmerken, geen kenmerk → geen app', H('x #app:onzin') === null && H('x #app:texere #app:facturen') === null && H('x #app:texere #app:onzin') === null && H('x #mk-werklijst') === null);
+  toets('9 hetzelfde kenmerk twee keer telt als één', H('x #app:texere en nog eens #app:texere') === 'texere');
+  const h9 = HK({ kanaal: 'hoofd' }, 'Zal ik dit op de werklijst van de machinekamer zetten: zinnen in Texere sneller #app:texere?', 'VRAAG AAN DAVID: … #mk-werklijst #app:texere');
+  toets('9 herkennen: app erbij en het kenmerk niet in de vraagzin', h9 && h9.app === 'texere' && h9.zin === 'zinnen in Texere sneller', h9);
+  const nWv9 = wv.length, nBer9 = berichten.length;
+  const q9 = vraag('hoofd', 'VRAAG AAN DAVID: Zal ik dit op de werklijst van de machinekamer zetten: zinnen in Texere sneller?\n#mk-werklijst #app:texere');
+  const nPr9 = prompts.length;
+  res = await druk(q9, 'ja');
+  await wachtPrompt(nPr9 + 1); await wachtBericht(nBer9 + 1);
+  const r9 = wv[nWv9];
+  toets('9 knop: rij met label machinekamer:texere-doorgegeven-… (valt bij precies die app)', r9 && /^machinekamer:texere-doorgegeven-\d{4}-\d\d-\d\d-[0-9a-f]{8}-[0-9a-f]{6}$/.test(r9.label) && ctx.CODE_APPS.appVanLabel(r9.label) === 'texere', r9 && r9.label);
+  toets('9 regel in de machinekamer noemt OVIS Code › OVIS Texere', berichten.length === nBer9 + 1 && /Staat nu bij OVIS Code › OVIS Texere; het rapport landt daar\.$/.test(berichten[nBer9].tekst), berichten.slice(nBer9));
+  toets('9 systeemregel naar Socev noemt de app', /het hoort bij de app OVIS Texere: het rapport komt in OVIS Code bij die app\./.test(prompts[prompts.length - 1].prompt), prompts[prompts.length - 1].prompt.slice(-400));
+  const z9 = await D.doorgeefZet({ sleutel: 'f9f9f9f9f9f9f9f9:9f9f9f9f', jobId: 'f9f9f9f9f9f9f9f9', hash: '9f9f9f9f', zin: 'iets', tDruk: Date.now(), app: 'onzin' });
+  toets('9 onbekende app in doorgeefZet: gewoon machinekamer:doorgegeven-…, geen app', z9.ok && !z9.app && /^machinekamer:doorgegeven-/.test(wv[wv.length - 1].label), { z9, l: wv[wv.length - 1].label });
+  delete ctx.CODE_APPS;
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

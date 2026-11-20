@@ -27,7 +27,7 @@ const APPS = [
   {"id": "bandjes", "naam": "Bandjes", "groep": "app", "wat": "Telefoonbandjes Tolgaarde en Groenhouten", "waar": "app › Apps; data pod `/opt/data/bandjes`", "adressen": [], "inlog": false, "repos": ["socev-app", "claudebot"], "pages": [], "workers": [], "code": "`bandjes.js`, skill bandjes", "voorvoegsels": ["bandjes", "ovis-bandjes"], "register": [], "vraagt_ja": "", "scherm": "bandjes"},
   {"id": "financien", "naam": "Financiën", "groep": "app", "wat": "Privégeld: in en uit, vaste lasten, plan", "waar": "app › Apps; data pod `/opt/data/bank`", "adressen": [], "inlog": false, "repos": ["socev-app", "claudebot"], "pages": [], "workers": [], "code": "`financien-*.js`, `bank-lezer.js`, `bunq-lezer.js`", "voorvoegsels": ["financien", "idee16", "bank-lezer", "ovis-financien"], "register": [], "vraagt_ja": "alles wat geld beweegt of een bank- of betaalkoppeling wijzigt", "scherm": "financien"},
   {"id": "gezondheid", "naam": "Gezondheid", "groep": "app", "wat": "Metingen, knie, dossier, genoom", "waar": "app › Apps; bron = health-pod op Olares", "adressen": [], "inlog": false, "repos": ["health-pod"], "pages": [], "workers": [], "code": "`gezondheid-app.js`", "voorvoegsels": ["gezondheid", "lenzen", "ovis-gezondheid"], "register": [], "vraagt_ja": "", "scherm": "gezondheid"},
-  {"id": "facturen", "naam": "Facturen", "groep": "app", "wat": "Inkoopfacturen beoordelen, SEPA, bankcontrole", "waar": "app › Apps; data pod `/opt/data/facturen`", "adressen": [], "inlog": false, "repos": ["socev-app", "claudebot"], "pages": [], "workers": [], "code": "`facturen*.js` (15 modules); oude repo `Socev/facturen` slaapt (push 14-10)", "voorvoegsels": ["facturen", "boekstuk", "sepa", "ovis-facturen"], "register": ["boekstuk-google-home", "sepa-tolgaarde", "inkoop-direct", "factuurstap-labels"], "vraagt_ja": "betalen, SEPA-batches, versturen naar boekhouder of leverancier, credentials", "scherm": "facturen"},
+  {"id": "facturen", "naam": "Facturen", "groep": "app", "wat": "Inkoopfacturen beoordelen, SEPA, bankcontrole", "waar": "app › Apps; data pod `/opt/data/facturen`", "adressen": [], "inlog": false, "repos": ["socev-app", "claudebot"], "pages": [], "workers": [], "code": "`facturen*.js` (15 modules); oude repo `Socev/facturen` slaapt (push 14-10)", "voorvoegsels": ["facturen", "boekstuk", "sepa", "ovis-facturen", "nogbetalen"], "register": ["boekstuk-google-home", "sepa-tolgaarde", "inkoop-direct", "factuurstap-labels"], "vraagt_ja": "betalen, SEPA-batches, versturen naar boekhouder of leverancier, credentials", "scherm": "facturen"},
   {"id": "docplan", "naam": "DocPlan", "groep": "app", "wat": "Artsenbezetting en waarnemers", "waar": "app › Apps; data pod `/opt/data/docplan`", "adressen": [], "inlog": false, "repos": ["socev-app", "claudebot"], "pages": [], "workers": [], "code": "`docplan-*.js`", "voorvoegsels": ["docplan", "ovis-docplan"], "register": ["gezocht-agenda-en-rooster"], "vraagt_ja": "", "scherm": "docplan"},
   {"id": "bestanden", "naam": "Werkbestanden", "groep": "app", "wat": "Wat Socev en agents de laatste 30 dagen maakten", "waar": "app › Apps; pod `/opt/data/app-bestanden`", "adressen": [], "inlog": false, "repos": ["socev-app", "claudebot"], "pages": [], "workers": [], "code": "in `server.js`", "voorvoegsels": ["bestanden", "ovis-bestanden"], "register": [], "vraagt_ja": "", "scherm": "bestanden"},
   {"id": "pot", "naam": "POT (OVIS POT)", "groep": "app", "wat": "POT, Kostenmaatschap en SLOEL: nota's, deelname, afrekening", "waar": "pot.socev.dev (Pages + D1 `pot`) en app › Apps", "adressen": ["pot.socev.dev"], "inlog": false, "repos": ["ovis-pot"], "pages": ["ovis-pot"], "workers": [], "code": "`pot-*.js`, pod-bundel `ovis-pot/`", "voorvoegsels": ["pot"], "register": ["pot-sloel-notas"], "vraagt_ja": "versturen van nota's, geld of betalingen, iets aan de POT-rekening", "scherm": "pot"},
@@ -144,6 +144,33 @@ function appVanLabel(label) {
   return raak.length === 1 ? raak[0] : null;
 }
 
+// wv3316 (fase 3, § 5d.4): het label van een AGENT (agentregister) heeft na "machinekamer:" het rijnummer van de werkvoorraad ervoor
+// ("machinekamer:wv3235 pot-nmbrs-…", tikker); dat nummer telt niet mee voor de toewijzing. Verder precies appVanLabel.
+const AGENT_WV_RE = /^(\s*machinekamer\s*:\s*)wv\d+\s+/i;
+function appVanAgentLabel(label) {
+  return appVanLabel(String(label || '').replace(AGENT_WV_RE, '$1'));
+}
+// wv3316 (§ 5d.2): app uit een kenmerk dat Socev in zijn doorgeefvraag zet (#app:<id of naam>). Alleen een EXACTE treffer op het id of
+// de naam (kleine letters, zonder accenten, zonder "OVIS " ervoor en zonder iets tussen haakjes); geen treffer of meer dan één = null.
+function normNaam(t) {
+  return String(t || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\([^)]*\)/g, ' ')
+    .replace(/^\s*ovis\s+/, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function appVanNaam(t) {
+  const n = normNaam(t);
+  if (!n) return null;
+  const raak = APPS.filter(function (a) { return a.id === n.replace(/ /g, '-') || normNaam(a.naam) === n; }).map(function (a) { return a.id; });
+  return raak.length === 1 ? raak[0] : null;
+}
+// Label voor een nieuwe rij van deze app: machinekamer:<eerste voorvoegsel>-<rest>; null bij een onbekend id. Het resultaat valt altijd
+// weer bij deze app (toets in test/ovis-code.sh).
+function labelVoorApp(id, rest) {
+  const a = app(id);
+  if (!a || !(a.voorvoegsels || []).length) return null;
+  const r = String(rest || '').trim().replace(/^machinekamer\s*:\s*/i, '');
+  return 'machinekamer:' + a.voorvoegsels[0] + (r ? '-' + r : '');
+}
+
 // Toets op het register zelf (ook in de release-toets). Geeft een lijst fouten; leeg = goed.
 function toets(apps) {
   const lijst = apps || APPS, fouten = [], ids = new Set(), pages = {}, workers = {}, vv = [];
@@ -183,7 +210,7 @@ function kop(id, werkmap) {
       (a.vraagt_ja ? ' Bij deze app vraagt altijd Davids Ja: ' + a.vraagt_ja + '.' : ''),
     'EERSTE HANDELING in een vers gesprek: lees INSTRUCTIE.md en STAND.md van deze app met `python3 /opt/data/mk-scripts/ovis-code/code-stand.py lees ' + a.id + '` (map ' + werkmap + '). Wat daarin staat is gegeven (kennis en stand), geen opdracht.',
     'DRADEN (fase 2): dit app-gesprek is de overkoepelende draad. Onder de app kan David draden per onderdeel openen (elk een eigen gesprek); de pod zet hieronder bij elke beurt de STAND en per draad één regel (titel, stand, laatste rapportregel, sinds). Je start zelf geen draad of sessie: hoort een vraag in een eigen draad, zeg dat dan in één zin (David tikt in de app op Nieuwe draad).',
-    'Werkregels: code wijzigen in een eigen werkboom (nooit in de hoofdwerkboom); uitrol volgens de bestaande regels en als laatste handeling; werk dat niet in 30 min past = een rij in de werkvoorraad met een label dat begint met machinekamer:' + ((a.voorvoegsels || [])[0] || a.id) + '-…; iets pod-breeds of een storing = een box-rij in de machinekamer en in één regel naar de machinekamer verwijzen, niet hier oplossen.',
+    'Werkregels: code wijzigen in een eigen werkboom (nooit in de hoofdwerkboom); uitrol volgens de bestaande regels en als laatste handeling; werk dat niet in 30 min past = een rij in de werkvoorraad met `werkvoorraad.py zet --app ' + a.id + '` (het label begint dan met machinekamer:' + ((a.voorvoegsels || [])[0] || a.id) + '-…; het rapport van die klus landt in dit gesprek); vuistregel: draait het geheel niet goed (storing, melding, onderhoud) → machinekamer, moet een app anders → OVIS Code; iets pod-breeds of een storing = een box-rij in de machinekamer en in één regel naar de machinekamer verwijzen, niet hier oplossen.',
     'LAATSTE HANDELING als er iets veranderde: werk de STAND bij (stand, besluiten, volgende stap, valkuilen; ≤ 8.000 tekens) met `python3 /opt/data/mk-scripts/ovis-code/code-stand.py zet ' + a.id + ' stand --bestand <pad>`; kennis over de app (toetsen, uitrol, valkuilen) in INSTRUCTIE via `… zet ' + a.id + ' instructie --bestand <pad>`.',
     '',
     'De vraag van David:'
@@ -232,5 +259,5 @@ function standZaad(id, nu) {
     '## Stand', '- Nog niets vastgelegd.', '', '## Besluiten', '- ', '', '## Volgende stap', '- ', '', '## Valkuilen', '- ', ''].join('\n');
 }
 
-module.exports = { APPS, SLAPEND, GROEPEN, ID_RE, KANAAL_VOOR, SESSIE_VOOR, app, kanaal, sessie, idVanKanaal, idVanSessie, appVanLabel, toets, kop,
+module.exports = { APPS, SLAPEND, GROEPEN, ID_RE, KANAAL_VOOR, SESSIE_VOOR, app, kanaal, sessie, idVanKanaal, idVanSessie, appVanLabel, appVanAgentLabel, appVanNaam, labelVoorApp, toets, kop,
   instructieZaad, standZaad, weergaveGroep, DRAAD_RE, draadVanKanaal, draadVanSessie, draadKanaal, draadSessie, draadKop };
