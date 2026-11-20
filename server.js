@@ -4172,6 +4172,14 @@ let tankCache = { tijd: 0, data: null };
 const TOKEN_DAVID_NA_MS = (!SERVER_ECHT && Number(process.env.TOKEN_DAVID_NA_PROEF_MS) >= 0 && process.env.TOKEN_DAVID_NA_PROEF_MS) ? Number(process.env.TOKEN_DAVID_NA_PROEF_MS) : 30 * 60 * 1000;
 const tokenStaat = { 1: null, 2: null };
 function tokenMeldMag() { return (SERVER_ECHT || !!process.env.TOKEN_WACHT_PROEF) && rolPrimair(); }
+// Actieplan 2B07 (wv3551, Fable-review sleutelbos): claude_code_oauth_token staat op APP_SLEUTEL_PORTAAL_KLUIS, dus in Sleutelbos niet te
+// vervangen (403); de melding wijst naar het sleutelportaal zelf, met de link. Het tweede abonnement kan wél in Sleutelbos.
+const SLEUTELPORTAAL_URL = 'https://claudebot.primumnonnocere.olares.com/sleutels';
+function tokenDavidTekst(account, hm) {
+  return account === 1
+    ? 'Claude weigert sinds ' + hm + ' de inlog van Socev (je eigen abonnement): Socev, de app en de nachtrondes staan stil. Maak op je laptop een nieuw token met "claude setup-token" (ingelogd met je eigen Claude-account), zet het in het sleutelportaal bij claude_code_oauth_token (in Sleutelbos kan dit token niet) en herstart daarna de pod in Olares. Sleutelportaal: ' + SLEUTELPORTAAL_URL
+    : 'Claude weigert sinds ' + hm + ' de inlog van het tweede abonnement (drsocev@gmail.com); de achtergrondagents draaien nu op je eigen abonnement. Is dat abonnement nog actief, maak dan een nieuw token met "claude setup-token" (ingelogd als drsocev@gmail.com) en zet het in Sleutelbos bij claude_oauth_token_2; herstarten hoeft niet.';
+}
 function tokenGeweigerd(account, http, soort) {
   const nu = Date.now();
   const s = tokenStaat[account] || (tokenStaat[account] = { sinds: nu, box_dag: null, david_gemeld: false });
@@ -4187,16 +4195,14 @@ function tokenGeweigerd(account, http, soort) {
       '- gevolg als er niets gebeurt: ' + (account === 1 ? 'Socev, de app, de machinekamer en de nachtrondes denken niet meer (allemaal account 1).' :
         'agents vallen terug op account 1 en eten Davids reserve op.') + ' David krijgt na ' + Math.round(TOKEN_DAVID_NA_MS / 60000) + ' min één bericht.\n' +
       '- voorstel: nieuw token met `claude setup-token` (' + (account === 1 ? 'Davids eigen Claude-account' : 'drsocev@gmail.com') + ') → kluis ' +
-      (account === 1 ? '`claude_code_oauth_token` + podherstart' : '`claude_oauth_token_2` (geen herstart)') + '; Sleutelregister vervangen_op bijwerken.\n');
+      (account === 1 ? '`claude_code_oauth_token` via het sleutelportaal + podherstart' : '`claude_oauth_token_2` (geen herstart)') + '; Sleutelregister vervangen_op bijwerken.\n');
   }
   const uur = Number(new Date(nu).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false }));
   // Review wv2748 MOET 1: 'gemeld' pas na een geslaagde bericht.py (exit 0); mislukt het, dan opnieuw bij een volgende 401, hooguit eens per TOKEN_DAVID_NA_MS.
   if (!s.david_gemeld && !s.bericht_bezig && nu - s.sinds >= TOKEN_DAVID_NA_MS && nu - (s.poging_t || 0) >= TOKEN_DAVID_NA_MS && uur >= 7 && uur < 23) {
     s.bericht_bezig = true; s.poging_t = nu;
     const hm = new Date(s.sinds).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const tekst = account === 1
-      ? 'Claude weigert sinds ' + hm + ' de inlog van Socev (je eigen abonnement): Socev, de app en de nachtrondes staan stil. Maak op je laptop een nieuw token met "claude setup-token" (ingelogd met je eigen Claude-account), zet het in Sleutelbos bij claude_code_oauth_token en herstart daarna de pod in Olares.'
-      : 'Claude weigert sinds ' + hm + ' de inlog van het tweede abonnement (drsocev@gmail.com); de achtergrondagents draaien nu op je eigen abonnement. Is dat abonnement nog actief, maak dan een nieuw token met "claude setup-token" (ingelogd als drsocev@gmail.com) en zet het in Sleutelbos bij claude_oauth_token_2; herstarten hoeft niet.';
+    const tekst = tokenDavidTekst(account, hm);
     try {
       const k = spawn('python3', [(!SERVER_ECHT && process.env.TOKEN_WACHT_PROEF) || '/opt/data/mk-scripts/bericht.py', '--klasse', 'normaal', '--sleutel', 'inlog-account-' + account, tekst],
         { detached: true, stdio: 'ignore', env: process.env });
