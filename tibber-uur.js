@@ -10,12 +10,12 @@
  *  1. Module (require): venster(), opslaan(), maandSom(), alleenLezen() — voor de toets en voor het kind.
  *  2. Kindproces: node tibber-uur.js uur. Stdin {sleutel} (leessleutel tibber_lezen, door server.js uit de kluis); omgeving alleen
  *     PATH/HOME/TZ/LANG/TIBBER_DIR. Eén vaste GraphQL-leesquery (Q_UUR) op api.tibber.com/v1-beta/gql: per woning de laatste N uren
- *     (72..744; venster na het laatste gevulde uur + 24, dus een gat van een paar dagen heelt vanzelf) en de prijzen van vandaag/morgen.
+ *     (72..744; venster na het laatste gevulde uur + 24, of vanaf het oudste lege uur van de laatste 31 dagen (wv3482), dus een gat heelt vanzelf) en de prijzen van vandaag/morgen.
  *     Stdout: één JSON-regel zonder sleutel en zonder bedragen.
  *
  * GRENZEN. Eén fetch (gql), POST alleen op <basis>/v1-beta/gql, redirects uit; een querytekst met mutation of subscription wordt
  * geweigerd (zelfde regel als tibber-lees.py). Toetsbasis (TIBBER_GQL_BASIS) alleen http://127.0.0.1:<poort>. Opslag: dezelfde
- * tabellen verbruik en prijs (schema van wv2584), upsert; een gevuld uur wordt nooit door een leeg uur (consumption null) overschreven.
+ * tabellen verbruik en prijs (schema van wv2584), upsert; een gevuld uur of een gevulde prijs wordt nooit door null overschreven.
  */
 const fs = require('fs'), path = require('path');
 
@@ -83,12 +83,22 @@ const HOME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function getal(x) { return typeof x === 'number' && isFinite(x) ? x : null; }
 
 // Hoeveel uren vragen: vanaf het laatste uur met een kWh-waarde + 24 uur marge, minstens 72, hooguit 744 (één verzoek).
+// wv3482 (Fable-review energie, bevinding 8): én vanaf het oudste uur dat nog leeg is (kwh null), ouder dan 12 uur en jonger dan 31 dagen.
+// Anders blijft een los leeg uur ouder dan ± 3 dagen nooit meer opgevraagd zodra latere uren gevuld zijn ("1 uur ontbreekt nog").
+const LEEG_MIN_MS = 12 * 3600000, LEEG_MAX_MS = 31 * 86400000;
 function venster(d, nuMs) {
+  const nu = nuMs || Date.now();
   const r = d.prepare('select van from verbruik where kwh is not null order by van desc limit 200').all();
   let laatste = null;
   r.forEach(function (x) { const t = Date.parse(x.van); if (isFinite(t) && (laatste == null || t > laatste)) laatste = t; });
   if (laatste == null) return MAX_UREN;
-  return Math.max(MIN_UREN, Math.min(MAX_UREN, Math.ceil(((nuMs || Date.now()) - laatste) / 3600000) + 24));
+  let vanaf = laatste;
+  // van is ISO met offset; een tekstgrens van 32 dagen terug (UTC-datum) is ruim genoeg, het precieze venster volgt uit Date.parse
+  d.prepare('select van from verbruik where kwh is null and van >= ?').all(new Date(nu - LEEG_MAX_MS - 86400000).toISOString().slice(0, 10)).forEach(function (x) {
+    const t = Date.parse(x.van);
+    if (isFinite(t) && nu - t > LEEG_MIN_MS && nu - t <= LEEG_MAX_MS && t < vanaf) vanaf = t;
+  });
+  return Math.max(MIN_UREN, Math.min(MAX_UREN, Math.ceil((nu - vanaf) / 3600000) + 24));
 }
 
 function opslaan(d, homes) {
@@ -96,7 +106,9 @@ function opslaan(d, homes) {
     'kwh = coalesce(excluded.kwh, verbruik.kwh), kosten = case when excluded.kwh is null then verbruik.kosten else excluded.kosten end, ' +
     'eenheidsprijs = coalesce(excluded.eenheidsprijs, verbruik.eenheidsprijs), eenheidsprijs_btw = coalesce(excluded.eenheidsprijs_btw, verbruik.eenheidsprijs_btw), ' +
     'valuta = coalesce(excluded.valuta, verbruik.valuta)');
-  const p = d.prepare('insert or replace into prijs values(?,?,?,?,?,?)');
+  // wv3482 (bevinding 9): upsert met coalesce, zoals verbruik; een gevulde prijs wordt nooit door null overschreven
+  const p = d.prepare('insert into prijs values(?,?,?,?,?,?) on conflict(home_id, van) do update set totaal = coalesce(excluded.totaal, prijs.totaal), ' +
+    'energie = coalesce(excluded.energie, prijs.energie), belasting = coalesce(excluded.belasting, prijs.belasting), niveau = coalesce(excluded.niveau, prijs.niveau)');
   const t = { woningen: 0, uren: 0, gevuld: 0, leeg: 0, prijzen: 0, overgeslagen: 0 };
   d.exec('begin');
   try {

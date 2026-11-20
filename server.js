@@ -29121,6 +29121,7 @@ function homeyBoxRij(reden, tekst) {
     const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
     const voorstel = reden === 'grant' ? 'koppeling dood (verlopen, ingetrokken of al gebruikt). Nieuwe inloglink: `POST /smal/homey {opdracht: link}` (API_SECRET) en die als Voor jou-kaart aan David geven. Niet herhalen tot David opnieuw inlogde.'
       : reden === 'kluis' ? 'het nieuwe refresh token staat als noodkopie in `/opt/data/homey/refresh.nood` (600); de volgende ronde zet hem eerst in de kluis. Kluis nagaan; daarna `POST /smal/homey {opdracht: meet}`.'
+      : reden === 'gat' ? 'de dongle gaf het laatste uur geen enkele fasewaarde (offline, stroomloos of uit Homey). Homey-app: staat de Energy Dongle online? Daarna `POST /smal/homey {opdracht: lees}`.'
       : 'api.log `homey` en `POST /smal/homey {opdracht: stand}` nalopen.';
     const rij = '\n## [direct] ' + tijd + ' — Homey (MCP): ' + String(tekst || reden).replace(/[\r\n]+/g, ' ').slice(0, 90) + ' (pod, automatisch) #homey\n' +
       '- status: open\n- van: pod homey (server.js, wv3460; hooguit 1× per dag per reden; kenmerk ' + kenmerk + ')\n' +
@@ -29128,6 +29129,8 @@ function homeyBoxRij(reden, tekst) {
     VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
   } catch (e) { logError('homey-box', e); }
 }
+const HOMEY_MELD_NA_REEKS = ['gat', 'netwerk', 'kind'];
+let homeyMisReeks = 0;   // mislukte rondes op rij (in het geheugen; een herstart begint opnieuw te tellen)
 async function homeyRondeDraai(bron, soort) {
   if (!homeyMod) return { ok: false, fout: 'homey.js zit niet in deze release' };
   if (homeyBezig) return { ok: false, reden: 'bezig', fout: 'er loopt al een Homey-ronde' };
@@ -29145,7 +29148,10 @@ async function homeyRondeDraai(bron, soort) {
         fs.renameSync(tmp, p); }
       catch (e) { logError('homey-ronde-json', e); }
     }
+    // wv3482 (Fable-review energie, bevinding 4): gat (dongle geeft niets), netwerk en kind pas na 3 mislukte rondes op rij; 'bezig' telt niet mee
+    if (u.reden !== 'bezig') homeyMisReeks = u.ok === true ? 0 : homeyMisReeks + 1;
     if (u.ok !== true && ['grant', 'kluis', 'client', 'token', 'mcp', 'http', 'dongle'].indexOf(u.reden) >= 0) homeyBoxRij(u.reden, u.fout);   // wv3462: ook leesfouten (1× per dag per reden)
+    else if (u.ok !== true && HOMEY_MELD_NA_REEKS.indexOf(u.reden) >= 0 && homeyMisReeks >= 3) homeyBoxRij(u.reden, homeyMisReeks + ' rondes op rij mislukt: ' + String(u.fout || u.reden));
     else if (u.nood) homeyBoxRij('kluis', u.fout);
     return u;
   } finally { homeyBezig = false; }
@@ -29172,11 +29178,13 @@ async function homeySmal(d, wie) {
 }
 // wv3462 (20-11-2026): fasemeting. WAAROM. Bij laden + koken klapt thuis de fasezekering (3 × 25 A); de Homey Energy Dongle meet per fase.
 // HOE. homeyTik (elke 5 min) start hooguit één leesronde per 55 min (Insights 'lastHour' = 5-s-waarden van het laatste uur; per minuut
-// de hoogste naar HOMEY_DIR/meting). Ook een mislukte poging telt als ronde (geen herhaling elke 5 min; de boxrij zit in homeyRondeDraai).
+// de grootste naar HOMEY_DIR/meting). wv3482: lastHour is het enige venster, dus een mislukte ronde komt na ± 10 min terug (hooguit 3
+// herpogingen per uur; niet bij een dode of ontbrekende koppeling); de boxrij zit in homeyRondeDraai.
 // Eén keer per NL-dag (vanaf 01:00) zet homeyVaultSchrijf de tabel van de laatste 14 dagen tussen de markers op de energiepagina.
-const HOMEY_LEES_MS = 55 * 60 * 1000;
+const HOMEY_LEES_MS = 55 * 60 * 1000, HOMEY_HERPOGING_MS = 10 * 60 * 1000, HOMEY_HERPOGING_MAX = 3;
+const HOMEY_GEEN_HERPOGING = ['dood', 'grant', 'client', 'sleutel', 'toestemming'];   // opnieuw proberen helpt niet: wacht op een inlog of de kluis
 const HOMEY_P_ENERGIE = '20_Prive/Financien/Energieverbruik thuis (Tibber).md';
-let homeyLeesPoging = 0;
+let homeyLeesPoging = 0, homeyVolgende = 0, homeyHerpogingen = 0;
 function homeyVaultStaat() { try { return JSON.parse(fs.readFileSync(path.join(HOMEY_DIR, 'vault.json'), 'utf8')); } catch (e) { return null; } }
 function homeyVaultSchrijf(dwing) {
   if (!homeyMod || typeof homeyMod.vaultBlok !== 'function') return { ok: false, fout: 'homey.js zonder dagtabel' };
@@ -29194,11 +29202,21 @@ function homeyVaultSchrijf(dwing) {
     return { ok: true, dag: nl.slice(0, 10) };
   } catch (e) { logError('homey-vault', e); return { ok: false, fout: String(e && e.message || e).slice(0, 120) }; }
 }
+// Na een leesronde: wanneer de volgende. Gelukt → over HOMEY_LEES_MS; mislukt → over HOMEY_HERPOGING_MS, hooguit HOMEY_HERPOGING_MAX keer
+// achter elkaar, daarna terug op het uurritme (gerekend vanaf de laatste gewone poging).
+function homeyNaLees(u, t) {
+  if (u && u.ok === true) { homeyHerpogingen = 0; homeyVolgende = t + HOMEY_LEES_MS; return; }
+  if (u && HOMEY_GEEN_HERPOGING.indexOf(u.reden) < 0 && homeyHerpogingen < HOMEY_HERPOGING_MAX) { homeyHerpogingen++; homeyVolgende = t + HOMEY_HERPOGING_MS; return; }
+  homeyHerpogingen = 0; homeyVolgende = Math.max(t + HOMEY_HERPOGING_MS, homeyLeesPoging + HOMEY_LEES_MS);
+}
 function homeyTik() {
-  if (!homeyMod || homeyBezig || !rolPrimair() || Date.now() - homeyLeesPoging < HOMEY_LEES_MS) return;
+  if (!homeyMod || homeyBezig || !rolPrimair() || Date.now() < homeyVolgende) return;
   if (!fs.existsSync(path.join(HOMEY_DIR, 'gekoppeld.json'))) return;
-  homeyLeesPoging = Date.now();
-  homeyRondeDraai('uur', 'lees').then(function (u) { if (u && u.ok === true) homeyVaultSchrijf(false); }).catch(function (e) { logError('homey-lees', e); });
+  const t = Date.now();
+  if (!homeyHerpogingen) homeyLeesPoging = t;   // begin van een uurvenster; herpogingen schuiven het niet op
+  homeyVolgende = t + HOMEY_LEES_MS;   // tot de ronde terug is: geen tweede start
+  return homeyRondeDraai('uur', 'lees').then(function (u) { homeyNaLees(u, t); if (u && u.ok === true) homeyVaultSchrijf(false); })
+    .catch(function (e) { homeyNaLees({ ok: false, reden: 'fout' }, t); logError('homey-lees', e); });
 }
 if (homeyMod && SERVER_ECHT) { setTimeout(homeyTik, 4 * 60000).unref(); setInterval(homeyTik, 5 * 60000).unref(); }
 // Terugkeer na Davids inlog. Athom levert code en state als form_post (POST, application/x-www-form-urlencoded); GET met query ook.

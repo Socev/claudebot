@@ -277,7 +277,7 @@ srv.listen(0, '127.0.0.1', async function () {
         SUPABASE_URL: 'https://abcdef.supabase.co', SUPABASE_MCP_TOKEN: 'pat-geheim', ANDERE_SLEUTEL: 'mag-niet-mee' }, execPath: process.execPath, pid: process.pid },
       reqPath: (req) => { const i = req.url.indexOf('?'); return i < 0 ? req.url : req.url.slice(0, i); },
       schrijfLog: (r) => logs.push(r), nu: () => '2026-11-07 12:00:00', velden: (o) => Object.keys(o).filter((k) => o[k] != null && o[k] !== '').map((k) => k + '=' + o[k]).join(' '),
-      logError: (w, e) => logs.push('fout ' + w + ' ' + (e && e.name)), rolPrimair: () => true,
+      logError: (w, e) => logs.push('fout ' + w + ' ' + (e && e.name)), rolPrimair: () => true, SERVER_ECHT: false,
       VV: () => ({ lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: (p, t) => fs.writeFileSync(p, t) }),
       bankPagina: (res, st, kop, tekst) => { res.writeHead(st, {}); res.end(kop + ': ' + tekst); },
       fetch: async function (url, o) {

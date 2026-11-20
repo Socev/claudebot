@@ -29,7 +29,8 @@
  *
  * OPSLAG. HOMEY_DIR (700): states.json (sha256 van de state, 72 uur, eenmalig), refresh.nood (alleen tussen verversen en kluis),
  * dood.json (sha van een dood token), ronde.lock, tools.json (namen, korte omschrijving, hints, invoerveldnamen; geen tokens),
- * meting/<JJJJ-MM-DD>.json (per minuut [A1,A2,A3,W1,W2,W3,Wtotaal,Wlaadpaal], standen, laadpaal; 600).
+ * meting/<JJJJ-MM-DD>.json (per minuut [A1,A2,A3,W1,W2,W3,Wtotaal,Wlaadpaal], standen, laadpaal; 600), dongle.json (het vaste
+ * dongle-id, wv3482). Per fase per minuut de grootste absolute waarde met teken (wv3482); Wtotaal en laadpaal de hoogste.
  */
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
 
@@ -237,7 +238,7 @@ async function ronde(deps, soort) {
     uit.geroteerd = !!(nieuw && nieuw !== refresh);
     uit.verloopt_s = v.j.verloopt_s || null;
     const r = await deps.kind(soort === 'lees' ? 'lees' : 'meet', { access: v.j._access });
-    const j = r.j || { ok: false, fout: 'meten gaf geen JSON (exit ' + r.code + ')' };
+    const j = r.j || { ok: false, reden: 'kind', fout: 'meten gaf geen JSON (exit ' + r.code + ')' };   // wv3482: ook een gestopt kind heeft een reden
     return Object.assign(uit, j, { begin: uit.begin, geroteerd: uit.geroteerd, nood_hersteld: uit.nood_hersteld, verloopt_s: uit.verloopt_s });
   } catch (e) {
     return Object.assign(uit, { reden: e.reden || 'fout', fout: String(e && e.message || e).slice(0, 200), nood: e.reden === 'kluis' ? true : undefined });
@@ -318,19 +319,27 @@ const NL = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam', year
 function nlMinuut(t) { const s = NL.format(new Date(t)); return { dag: s.slice(0, 10), mm: s.slice(11, 16) }; }
 function getal(v) { return typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 1000) / 1000 : null; }
 function hoogst(a, b) { return a == null ? b : b == null ? a : Math.max(a, b); }
+// wv3482 (Fable-review energie, bevinding 7): per fase telt de grootste absolute waarde, met teken; -22 A (teruglevering) belast de
+// zekering even zwaar als +22 A en mag niet achter +1 A verdwijnen. Bij gelijke grootte blijft de eerste staan.
+function grootst(a, b) { return a == null ? b : b == null ? a : Math.abs(b) > Math.abs(a) ? b : a; }
+function kolomMax(i) { return i < 6 ? grootst : hoogst; }   // [A1,A2,A3,W1,W2,W3] grootst; Wtotaal en laadpaal hoogst
 function gestructureerd(res, sleutel) {
   const sc = res && res.structuredContent;
   if (res && res.isError) throw new HomeyFout('mcp', 'MCP-tool gaf een fout');
   if (!sc || !Array.isArray(sc[sleutel])) throw new HomeyFout('mcp', 'MCP-tool zonder ' + sleutel);
   return sc[sleutel];
 }
-// Kies uit list_devices de dongle (heeft alle zes fasewaarden) en de laadpaal (type evcharger). Alleen id's en getallen gaan verder.
-function apparatenKies(devs) {
-  const dongle = devs.find(function (d) { return d && UUID.test(String(d.id)) && d.state && FASE_CAPS.every(function (c) { return getal(d.state[c]) != null; }); }) || null;
+// Kies uit list_devices de dongle en de laadpaal (type evcharger). Alleen id's en getallen gaan verder.
+// wv3482 (bevinding 6): de dongle heeft alle zes fasewaarden ÉN een afnamestand (meter_power.imported); een 3-fase laadpaal of omvormer
+// meldt wel fasewaarden maar geen netafname. Het gekozen id (vast, uit HOMEY_DIR/dongle.json) blijft gelden zolang het in de lijst staat.
+function isDongle(d) { return !!(d && UUID.test(String(d.id)) && d.state && getal(d.state['meter_power.imported']) != null && FASE_CAPS.every(function (c) { return getal(d.state[c]) != null; })); }
+function apparatenKies(devs, vast) {
+  const vastDev = typeof vast === 'string' && UUID.test(vast) ? devs.find(function (d) { return d && d.id === vast; }) || null : null;
+  const dongle = vastDev || devs.find(isDongle) || null;
   const laad = devs.find(function (d) { return d && UUID.test(String(d.id)) && d.type === 'evcharger' && d.state; }) || null;
-  const st = function (d, c) { return d ? getal(d.state[c]) : null; };
+  const st = function (d, c) { return d && d.state ? getal(d.state[c]) : null; };
   return {
-    dongle: dongle ? dongle.id : null, laadpaal: laad ? laad.id : null,
+    dongle: dongle ? dongle.id : null, laadpaal: laad ? laad.id : null, vast: !!vastDev,
     stand: dongle ? { import_kwh: st(dongle, 'meter_power.imported'), export_kwh: st(dongle, 'meter_power.exported'), import_vandaag_kwh: st(dongle, 'meter_power.imported_today'),
       export_vandaag_kwh: st(dongle, 'meter_power.exported_today'), tarief: st(dongle, 'current_tariff'), w: st(dongle, 'measure_power'),
       a: [1, 2, 3].map(function (i) { return st(dongle, 'measure_current.phase' + i); }), w3: [1, 2, 3].map(function (i) { return st(dongle, 'measure_power.phase' + i); }) } : null,
@@ -347,7 +356,7 @@ function perMinuut(reeksen) {
     const k = nlMinuut(t);
     const dag = uit[k.dag] || (uit[k.dag] = {});
     const r = dag[k.mm] || (dag[k.mm] = [null, null, null, null, null, null, null, null]);
-    r[i] = hoogst(r[i], v);
+    r[i] = kolomMax(i)(r[i], v);
   };
   ['a1', 'a2', 'a3', 'w1', 'w2', 'w3'].forEach(function (n, i) {
     (reeksen[n] || []).forEach(function (e) {
@@ -375,7 +384,7 @@ function metingVoegToe(dir, perDag, stand, nuIso) {
     Object.keys(perDag[dag]).forEach(function (mm) {
       const r = perDag[dag][mm], o = j.m[mm];
       if (!o) nieuw++;
-      j.m[mm] = o ? o.map(function (x, i) { return hoogst(x, r[i]); }) : r;
+      j.m[mm] = o ? o.map(function (x, i) { return kolomMax(i)(x, r[i]); }) : r;
     });
     metingSchrijf(dir, dag, j);
   });
@@ -387,6 +396,9 @@ function metingVoegToe(dir, perDag, stand, nuIso) {
   }
   return nieuw;
 }
+function vastPad(dir) { return path.join(dir, 'dongle.json'); }
+function vastLees(dir) { try { const j = JSON.parse(fs.readFileSync(vastPad(dir), 'utf8')); return j && UUID.test(String(j.id)) ? j.id : null; } catch (e) { return null; } }
+function vastZet(dir, id) { mapKlaar(dir); const tmp = vastPad(dir) + '.' + process.pid + '.tmp'; fs.writeFileSync(tmp, JSON.stringify({ id: id, sinds: new Date().toISOString() }), { mode: 0o600 }); fs.renameSync(tmp, vastPad(dir)); }
 async function kindLees(invoer, dir) {
   const token = invoer.access;
   if (typeof token !== 'string' || !TOKEN_VORM.test(token)) throw new HomeyFout('token', 'geen access token');
@@ -395,8 +407,10 @@ async function kindLees(invoer, dir) {
   if (typeof init.protocolVersion === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(init.protocolVersion)) staat.protocol = init.protocolVersion;
   await rpc(token, staat, 'notifications/initialized', null, null);
   let n = 2;
-  const keus = apparatenKies(gestructureerd(await rpc(token, staat, 'tools/call', { name: 'list_devices', arguments: {} }, n++), 'devices'));
-  if (!keus.dongle) throw new HomeyFout('dongle', 'geen apparaat met stroom en vermogen per fase gevonden');
+  const vast = vastLees(dir);
+  const keus = apparatenKies(gestructureerd(await rpc(token, staat, 'tools/call', { name: 'list_devices', arguments: {} }, n++), 'devices'), vast);
+  if (!keus.dongle) throw new HomeyFout('dongle', 'geen apparaat met afnamestand en stroom en vermogen per fase gevonden');
+  if (keus.dongle !== vast) vastZet(dir, keus.dongle);
   const logs = { a1: 'measure_current.phase1', a2: 'measure_current.phase2', a3: 'measure_current.phase3', w1: 'measure_power.phase1', w2: 'measure_power.phase2', w3: 'measure_power.phase3' };
   const reeksen = {}, gaten = [];
   const haal = async function (naam, id, cap) {
@@ -411,7 +425,7 @@ async function kindLees(invoer, dir) {
   const nu = new Date().toISOString();
   const stand = Object.assign({}, keus.stand, { laadpaal: keus.laad });
   const nieuw = metingVoegToe(dir, perMinuut(reeksen), stand, nu);
-  const hoogste = [1, 2, 3].map(function (i) { return (reeksen['a' + i] || []).reduce(function (m, e) { return hoogst(m, getal(e && e.v)); }, null); });
+  const hoogste = [1, 2, 3].map(function (i) { return (reeksen['a' + i] || []).reduce(function (m, e) { return grootst(m, getal(e && e.v)); }, null); });
   return { ok: true, soort: 'lees', tijd: nu, minuten: nieuw, gaten: gaten, nu_a: keus.stand.a, uur_max_a: hoogste, laadpaal: !!keus.laadpaal,
     laden: !!(keus.laad && keus.laad.laden) };
 }
@@ -428,16 +442,18 @@ function dagSamenvat(j) {
     for (let i = 0; i < 3; i++) {
       const a = r[i];
       if (a == null) continue;
-      if (s.max_a[i] == null || a > s.max_a[i]) { s.max_a[i] = a; s.max_a_om[i] = mm; }
-      if (a >= WAARSCHUW_A) s.boven_20[i]++;
-      if (a > ZEKERING_A) s.boven_25[i]++;
+      if (s.max_a[i] == null || Math.abs(a) > Math.abs(s.max_a[i])) { s.max_a[i] = a; s.max_a_om[i] = mm; }   // wv3482: grootte telt, teken blijft
+      if (Math.abs(a) >= WAARSCHUW_A) s.boven_20[i]++;
+      if (Math.abs(a) > ZEKERING_A) s.boven_25[i]++;
     }
     if (r[6] != null && (s.piek_w == null || r[6] > s.piek_w)) { s.piek_w = r[6]; s.piek_w_om = mm; }
     if (r[7] != null && r[7] >= 1000) s.laad_min++;
     s.laad_max_w = hoogst(s.laad_max_w, r[7]);
   });
-  const st = (j.standen || []).filter(function (x) { return x && typeof x.import_kwh === 'number'; });
-  if (st.length >= 2) s.kwh = Math.round((st[st.length - 1].import_kwh - st[0].import_kwh) * 10) / 10;
+  // wv3482 (bevinding 3): de dagteller van de dongle (import_vandaag_kwh) van de laatste stand, niet laatste − eerste import_kwh
+  // (dat miste de uren vóór de eerste en na de laatste ronde). Mist hooguit het stuk na de laatste ronde van de dag.
+  const st = (j.standen || []).filter(function (x) { return x && typeof x.import_vandaag_kwh === 'number'; });
+  if (st.length) s.kwh = Math.round(st[st.length - 1].import_vandaag_kwh * 10) / 10;
   return s;
 }
 function nlGetal(v, d) { return v == null ? '–' : (Math.round(v * 10 ** d) / 10 ** d).toFixed(d).replace('.', ','); }
@@ -453,7 +469,7 @@ function vaultBlok(dir, nuIso) {
     if (!s.minuten) return;
     const dag = s.dag.slice(8, 10) + '-' + s.dag.slice(5, 7) + (s.dag === vandaag ? ' (t/m ' + s.laatste + ')' : '');
     const maxA = s.max_a.map(function (a) { return a == null ? '–' : String(a); }).join(' / ');
-    const fi = s.max_a.reduce(function (b, a, i) { return a != null && (b < 0 || a > s.max_a[b]) ? i : b; }, -1);
+    const fi = s.max_a.reduce(function (b, a, i) { return a != null && (b < 0 || Math.abs(a) > Math.abs(s.max_a[b])) ? i : b; }, -1);
     rijen.push('| ' + dag + ' | ' + nlGetal(s.minuten / 60, 1) + ' u | ' + maxA + (fi >= 0 ? ' (L' + (fi + 1) + ' om ' + s.max_a_om[fi] + ')' : '') + ' | ' +
       s.boven_20.join(' / ') + ' | ' + s.boven_25.join(' / ') + ' | ' + (s.piek_w == null ? '–' : nlGetal(s.piek_w / 1000, 1) + ' kW om ' + s.piek_w_om) + ' | ' +
       (s.laad_max_w == null ? '–' : s.laad_min + ' min, piek ' + nlGetal(s.laad_max_w / 1000, 1) + ' kW') + ' | ' + (s.kwh == null ? '–' : nlGetal(s.kwh, 1)) + ' |');
@@ -461,7 +477,7 @@ function vaultBlok(dir, nuIso) {
   const bij = NL.format(new Date(nuIso));
   return [BLOK_BEGIN,
     'Bron: Homey Energy Dongle op de slimme meter (3-fase, hoofdzekering ' + ZEKERING_A + ' A) en de laadpaal in Homey; elk uur het laatste uur per 5 seconden,',
-    'per minuut de hoogste waarde. ' + WAARSCHUW_A + ' A = 80 % van de zekering. Alleen lezen; Socev schakelt niets. Bijgewerkt ' + bij + '.',
+    'per minuut de grootste waarde (negatief = teruglevering, telt even zwaar). ' + WAARSCHUW_A + ' A = 80 % van de zekering. Alleen lezen; Socev schakelt niets. Bijgewerkt ' + bij + '.',
     '',
     '| Dag | Gemeten | Hoogste stroom L1 / L2 / L3 (A) | Minuten ≥ ' + WAARSCHUW_A + ' A (L1/L2/L3) | Minuten > ' + ZEKERING_A + ' A | Piek totaal | Laadpaal (≥ 1 kW) | Afname kWh |',
     '|---|---|---|---|---|---|---|---|'].concat(rijen.length ? rijen : ['| – | nog geen meting | | | | | | |']).concat([BLOK_EINDE]).join('\n');
@@ -511,4 +527,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { REDIRECT, METHODEN, LEESLIJST, leesToets, perMinuut, apparatenKies, dagSamenvat, vaultBlok, blokZet, metingLees, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodWis, doodLees, verzoekToets, rpcUit, sha, HomeyFout };
+module.exports = { REDIRECT, METHODEN, LEESLIJST, leesToets, perMinuut, apparatenKies, grootst, vastLees, dagSamenvat, vaultBlok, blokZet, metingLees, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodWis, doodLees, verzoekToets, rpcUit, sha, HomeyFout };
