@@ -7,10 +7,14 @@
  *  1. ophalen: rclone lsjson van gdrive:ScanSnap (alleen de map zelf); pdf/jpg ouder dan 5 min, ≤ 25 MB; downloaden op Drive-ID
  *     (backend copyid), grootte + md5 gelijk aan de lijst; intern aanleveren aan de Intake-kern (profiel scansnap@1, alleen intern,
  *     blob alleen op de pod, geen termijn tot de keuze); blob op de pod nagemeten (sha256) → in Drive verplaatst naar
- *     ScanSnap/_opgehaald/<ID>.<ext> (backend moveid). Pas 14 dagen na Davids keuze gaat die kopie naar de Drive-prullenbak.
+ *     ScanSnap/_opgehaald/<ID>.<ext> (backend moveid). Pas 14 dagen na Davids keuze gaat die kopie naar de Drive-prullenbak, en bij
+ *     Ja/Anders pas als de scan aantoonbaar geplaatst is (2A06, 20-11-2026; zie nalopen).
  *  2. kaarten: marker (patientpoort) → bij 'geen' één modelaanroep zonder gereedschap voor omschrijving + voorstel; gemarkeerd of
  *     onleesbaar: geen model, een kaart "mag Socev hem lezen?". Per scan één Voor jou-kaart (besluit, privé → hoofdkanaal).
- *  3. nalopen: kaart dicht zonder knop → één box-rij; Drive-kopie 14 dagen na de keuze naar de prullenbak.
+ *  3. nalopen: kaart dicht zonder knop → één box-rij; 14 dagen na de keuze: Nee (of Ja op 'weggooien') → blob en Drive-kopie weg;
+ *     Ja/Anders → eerst toetsen of de sha256 byte-gelijk in de vault staat of de scannaam als bijlage in het conceptregister; zo niet:
+ *     alles blijft staan en één box-rij (een afgebroken beurt mag geen origineel kosten). Kolom geplaatst = '<iso> vault|concept|niet_nodig'
+ *     (of met de hand '<iso> handmatig'); pas daarna gaan blob en Drive-kopie weg.
  * De knop (server.js appVoorJouKnop): knop(sleutel, keuze) uit de eigen tabel (nooit uit de kaarttekst); Ja/Anders geven Socev een kopie
  * van de scan in zijn invoermap; de keuze telt pas als de beurt start (bijStart) en gaat terug als hij vervalt (bijVerval).
  * Geen inhoud, bestandsnaam of tekst in logs of box-rijen: alleen Drive-ID's, stuk-id's en aantallen.
@@ -31,7 +35,7 @@ const ROUTES = ['archiveren', 'verwerken', 'doorsturen', 'weggooien'];
 const SCHEMA_SQL = `CREATE TABLE IF NOT EXISTS scansnap (drive_id TEXT PRIMARY KEY, ext TEXT NOT NULL, stuk_id TEXT, sha256 TEXT, grootte INTEGER,
   md5 TEXT, drive_tijd TEXT, paginas INTEGER, status TEXT NOT NULL, gezien TEXT NOT NULL, verplaatst TEXT, kaart TEXT, kaart_soort TEXT,
   kaart_op TEXT, voorstel TEXT, model_pogingen INTEGER NOT NULL DEFAULT 0, lezen_ok INTEGER NOT NULL DEFAULT 0, keuze TEXT, keuze_op TEXT,
-  drive_weg TEXT, zonder_keuze TEXT, gemeld TEXT);
+  drive_weg TEXT, zonder_keuze TEXT, gemeld TEXT, geplaatst TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS scansnap_kaart ON scansnap (kaart);`;
 
 function iso(ms) { return new Date(ms).toISOString(); }
@@ -59,6 +63,7 @@ function maak(o) {
   const nu = typeof o.nu === 'function' ? o.nu : Date.now;
   const db = o.intake._db;
   db.exec(SCHEMA_SQL);
+  if (!db.prepare('PRAGMA table_info(scansnap)').all().some((c) => c.name === 'geplaatst')) db.exec('ALTER TABLE scansnap ADD COLUMN geplaatst TEXT');   // 2A06
   const SCHAKELAAR = path.join(o.dir, 'scansnap.json');
   const TMP = path.join(o.dir, 'tmp');
   fs.mkdirSync(TMP, { recursive: true, mode: 0o700 });
@@ -69,6 +74,9 @@ function maak(o) {
   const fouten = {};                 // drive-id → opeenvolgende download/verplaats-fouten (geheugen; na 3: één box-rij)
   const modelDag = { d: '', n: 0 };
   let storingGemeld = '';
+  let zoekOp = -Infinity;            // laatste zoektocht naar plaatsing (hooguit eens per uur, alleen als er iets te toetsen is)
+  const VAULT = o.vault || null;
+  const REGISTER = o.conceptregister || (VAULT ? path.join(VAULT, '01_Ontwikkeling', '0b-werkmap', 'conceptregister.jsonl') : null);
 
   const q = {
     rij: db.prepare('SELECT * FROM scansnap WHERE drive_id = ?'),
@@ -86,7 +94,9 @@ function maak(o) {
     lezen: db.prepare("UPDATE scansnap SET lezen_ok = 1, kaart = NULL, kaart_soort = NULL, kaart_op = NULL, keuze = NULL, keuze_op = NULL, model_pogingen = 0 WHERE drive_id = ?"),
     metKaartOpen: db.prepare("SELECT * FROM scansnap WHERE kaart IS NOT NULL AND keuze IS NULL AND zonder_keuze IS NULL"),
     zonderKeuze: db.prepare('UPDATE scansnap SET zonder_keuze = ? WHERE drive_id = ?'),
-    driveWeg: db.prepare("SELECT * FROM scansnap WHERE keuze IS NOT NULL AND keuze != 'lezen' AND keuze_op < ? AND verplaatst IS NOT NULL AND drive_weg IS NULL LIMIT 20"),
+    teToetsen: db.prepare("SELECT * FROM scansnap WHERE keuze IS NOT NULL AND keuze != 'lezen' AND keuze_op < ? AND geplaatst IS NULL AND drive_weg IS NULL ORDER BY keuze_op"),   // geen LIMIT: onbewezen rijen blokkeren de rest niet (review MOET 1)
+    geplaatst: db.prepare('UPDATE scansnap SET geplaatst = ? WHERE drive_id = ?'),
+    driveWeg: db.prepare("SELECT * FROM scansnap WHERE keuze IS NOT NULL AND keuze != 'lezen' AND geplaatst IS NOT NULL AND verplaatst IS NOT NULL AND drive_weg IS NULL LIMIT 20"),
     driveWegZet: db.prepare('UPDATE scansnap SET drive_weg = ? WHERE drive_id = ?'),
     stuk: db.prepare('SELECT stuk_id, status, marker_patient, marker_soorten FROM stuk WHERE stuk_id = ?'),
   };
@@ -319,6 +329,71 @@ function maak(o) {
     }
   }
 
+  // ── 2A06: pas weg na bewijs van plaatsing ──
+  function leesVoorstel(r) { try { return r.voorstel ? JSON.parse(r.voorstel) : null; } catch (e) { return null; } }
+  function plaatsingNodig(kz, v) { return kz === 'anders' || (kz === 'ja' && !(v && v.route === 'weggooien')); }
+  function scanNaam(r) { return 'Scan ' + naamTijd(r.drive_tijd) + '.' + (r.ext === 'jpeg' ? 'jpg' : r.ext); }   // zoals haal() hem noemt
+  async function vaultHashes(groottes) {   // sha256 van elke pdf/jpg in de vault met een gezochte grootte (mappen met een punt overgeslagen)
+    const uit = new Set();
+    if (!VAULT) return uit;
+    const stapel = [VAULT];
+    while (stapel.length) {
+      const map = stapel.pop();
+      let lijst;
+      try { lijst = await fs.promises.readdir(map, { withFileTypes: true }); } catch (e) { continue; }
+      for (const d of lijst) {
+        if (d.name.startsWith('.')) continue;
+        const p = path.join(map, d.name);
+        if (d.isDirectory()) { stapel.push(p); continue; }
+        if (!d.isFile() || !/\.(pdf|jpe?g)$/i.test(d.name)) continue;
+        try {
+          const st = await fs.promises.stat(p);
+          if (!groottes.has(st.size)) continue;
+          uit.add(crypto.createHash('sha256').update(await fs.promises.readFile(p)).digest('hex'));
+        } catch (e) { /* weg of onleesbaar: telt niet */ }
+      }
+    }
+    return uit;
+  }
+  function conceptBijlagen() {
+    const uit = new Set();
+    let t = '';
+    try { t = fs.readFileSync(REGISTER, 'utf8'); } catch (e) { return uit; }
+    for (const regel of t.split('\n')) {
+      let j; try { j = JSON.parse(regel); } catch (e) { continue; }
+      if (!j || typeof j !== 'object') continue;
+      if (Array.isArray(j.bijlagen)) j.bijlagen.forEach((n) => { if (typeof n === 'string') uit.add(n); });
+      if (typeof j.outdir_bestand === 'string') uit.add(j.outdir_bestand);
+    }
+    return uit;
+  }
+  async function toetsPlaatsing(uit) {
+    const rijen = q.teToetsen.all(iso(nu() - BEWAAR_MS));
+    if (!rijen.length) return;
+    const nodig = [];
+    for (const r of rijen) {
+      if (plaatsingNodig(r.keuze, leesVoorstel(r))) nodig.push(r);
+      else q.geplaatst.run(iso(nu()) + ' niet_nodig', r.drive_id);   // Nee of Ja op 'weggooien': Davids keuze, na 14 dagen weg
+    }
+    if (!nodig.length || nu() - zoekOp < 3600000) return;
+    zoekOp = nu();
+    const hashes = await vaultHashes(new Set(nodig.map((r) => r.grootte).filter((g) => g > 0)));
+    const bijlagen = conceptBijlagen();
+    const niet = [];
+    for (const r of nodig) {
+      if (r.sha256 && hashes.has(r.sha256)) q.geplaatst.run(iso(nu()) + ' vault', r.drive_id);
+      else if (r.drive_tijd && bijlagen.has(scanNaam(r))) q.geplaatst.run(iso(nu()) + ' concept', r.drive_id);
+      else niet.push(r);
+    }
+    uit.niet_geplaatst = niet.length;
+    const nieuw = niet.filter((r) => !(r.gemeld || '').split(' ').includes('niet_geplaatst'));
+    for (const r of nieuw) q.gemeld.run(((r.gemeld || '') + ' niet_geplaatst').trim(), r.drive_id);
+    if (nieuw.length) box(nieuw.length + ' gekozen scan(s) niet aantoonbaar geplaatst', [
+      'gemeten: ' + nieuw.map((r) => 'Drive-ID ' + r.drive_id + ' (stuk ' + r.stuk_id + ', keuze ' + r.keuze + ' ' + klokKort(r.keuze_op) + ')').join('; ') +
+        ': de keuze is ouder dan 14 dagen, maar de sha256 staat niet in de vault en de scannaam niet als bijlage in het conceptregister. Blob op de pod en Drive-kopie (ScanSnap/_opgehaald) blijven staan.',
+      'voorstel: nagaan wat de knopbeurt deed (afgebroken?) en de scan alsnog laten plaatsen; was het bewust niet bewaren, of verstuurd zonder registerregel, zet dan in tabel scansnap (intake.sqlite) geplaatst = \'<datum> handmatig\': de volgende tik gaan blob en Drive-kopie weg.']);
+  }
+
   async function nalopen(uit) {
     const open = q.metKaartOpen.all();
     if (open.length && o.kaartLijst) {
@@ -331,7 +406,9 @@ function maak(o) {
           'voorstel: David vragen wat ermee moet, of de kaart heropenen (tabel scansnap: kaart, kaart_op en zonder_keuze leeg zetten → nieuwe kaart).']);
       }
     }
-    for (const r of q.driveWeg.all(iso(nu() - BEWAAR_MS))) {
+    await toetsPlaatsing(uit);
+    for (const r of q.driveWeg.all()) {
+      if (r.stuk_id) { try { o.intake.bewaarNa(r.stuk_id, nu() - 1000); } catch (e) { if (o.fout) o.fout('scansnap-bewaar', e); } }   // blob: volgende Intake-ronde
       const x = await rc(['deletefile', '--drive-use-trash=true', remote + '/_opgehaald/' + r.drive_id + '.' + r.ext], 60000);
       if (x.ok || /not found|doesn't exist|object not found/i.test(x.err)) { q.driveWegZet.run(iso(nu()), r.drive_id); uit.drive_weg = (uit.drive_weg || 0) + 1; }
     }
@@ -366,7 +443,8 @@ function maak(o) {
     const kz = keuze === 'ja' ? (soort === 'lezen' ? 'lezen' : 'ja') : keuze === 'nee' ? 'nee' : 'anders';
     const vast = ' Vaste routes: archiveren = het bestand als bron bij de entiteit (map Bronnen, volgens de bronnenconventie van de vault, met een korte bronnotitie), niet verwerken; ' +
       'verwerken = het bestand in de raw_input van de entiteit (de nachtverwerking archiveert het); doorsturen = Gmail-concept met het bestand als bijlage (skill mailconcept-aanmaken, adres via contacten-opzoeken), NIET in de vault, David verstuurt zelf; weggooien = niets doen. ' +
-      'Blijkt het een stuk over een patiënt van de praktijk (niet David of zijn gezin), zet het dan niet in de vault en vraag David eerst. De pod bewaart de scan nog 14 dagen; daarna staat hij alleen nog waar jij hem neerzet.';
+      'Blijkt het een stuk over een patiënt van de praktijk (niet David of zijn gezin), zet het dan niet in de vault en vraag David eerst. ' +
+      'De pod houdt de scan vast tot hij hem terugvindt: zet het bestand ongewijzigd neer (zelfde bytes, de naam mag anders) en noteer bij een mailconcept de bestandsnaam onder bijlagen in het conceptregister; daarna staat hij alleen nog waar jij hem neerzet.';
     let context;
     if (!b && kz !== 'nee' && kz !== 'lezen') {
       context = '(ScanSnap-scan ' + r.stuk_id + ': het bestand staat niet (meer) op deze kant van de pod. Doe niets met deze keuze; zeg David in één zin dat het nu niet lukt en dat de machinekamer het oppakt.)';
@@ -386,7 +464,8 @@ function maak(o) {
         const t = nu();
         if (kz === 'lezen') { q.lezen.run(r.drive_id); setTimeout(function () { tik().catch(function () {}); }, 5000).unref(); return; }
         q.keuze.run(kz, iso(t), r.drive_id);
-        try { o.intake.bewaarNa(r.stuk_id, t + BEWAAR_MS); } catch (e) { if (o.fout) o.fout('scansnap-bewaar', e); }
+        // Nee (of Ja op 'weggooien'): termijn van 14 dagen. Ja/Anders: geen termijn; nalopen laat hem pas gaan als hij aantoonbaar geplaatst is (2A06)
+        try { o.intake.bewaarNa(r.stuk_id, plaatsingNodig(kz, v) ? null : t + BEWAAR_MS); } catch (e) { if (o.fout) o.fout('scansnap-bewaar', e); }
       },
       bijVerval: function () {
         if (kz === 'lezen') return;
