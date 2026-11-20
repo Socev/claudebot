@@ -948,7 +948,21 @@ function dropJob(id) {
   delete jobs[id];
 }
 let chatSessions = {};
-try { chatSessions = JSON.parse(fs.readFileSync(SESS_FILE, 'utf8')); } catch (e) { chatSessions = {}; }
+// wv3548 (actieplan 2B04, Fable-review hoofdkanaal M1): een onleesbaar gespreksregister begon vroeger stil met nul sessies (hoofd,
+// machinekamer, wachters: alle gesprekken opnieuw). Nu een logregel en een kopie van het oude bestand
+// (chat_sessions.json.onleesbaar-<ms>), zoals agent_jobs.json (wv223); de eerste saveSessions schrijft daarna een vers register.
+try {
+  const r = JSON.parse(fs.readFileSync(SESS_FILE, 'utf8'));
+  if (!r || typeof r !== 'object' || Array.isArray(r)) { const f = new Error('register is geen object'); f.name = 'Vormfout'; throw f; }
+  chatSessions = r;
+} catch (e) {
+  chatSessions = {};
+  if (e.code !== 'ENOENT') {
+    let bewaard = null;
+    try { bewaard = SESS_FILE + '.onleesbaar-' + Date.now(); fs.copyFileSync(SESS_FILE, bewaard); } catch (e2) { bewaard = null; }
+    schrijfLog(nu() + ' fout ' + velden({ waar: 'sessies-onleesbaar', name: e.name, code: e.code, bewaard: bewaard ? path.basename(bewaard) : 'nee' }));
+  }
+}
 function lopendeJobs() {
   const nu = Date.now(); let beurten = 0, onopgehaald = 0, agentJobs = 0;
   for (const id in jobs) {
@@ -961,7 +975,13 @@ function lopendeJobs() {
   // agents alleen agents.kwetsbaar telt.
   return { beurten: beurten + wees, onopgehaald: onopgehaald, wees: wees, gesprekken: beurten - agentJobs + wees };
 }
-function saveSessions() { try { fs.writeFileSync(SESS_FILE, JSON.stringify(chatSessions)); } catch (e) {} }
+// wv3548 (2B04): atomair via tmp + rename, zoals saveAgents. In place schrijven liet bij een schijffout, uitrol of SIGKILL midden in de
+// schrijfactie een half register achter (en de fout werd stil geslikt); nu blijft het vorige goede bestand staan en komt er een logregel.
+function saveSessions() {
+  const tmp = SESS_FILE + '.tmp' + process.pid;
+  try { fs.writeFileSync(tmp, JSON.stringify(chatSessions)); fs.renameSync(tmp, SESS_FILE); }
+  catch (e) { logError('sessies-schrijven', e); try { fs.unlinkSync(tmp); } catch (e2) {} }
+}
 
 // ── v2: register van achtergrondagents (overleeft een containerherstart) ───
 // Werkvoorraad-jobs (label <prefix>:wv<id> …) blijven 48 u na afloop buiten de trim van 50: valt er een weg vóór de
