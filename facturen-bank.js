@@ -845,15 +845,24 @@ function eigenBetaling(tx, f, k, ctx) {
 }
 // Stukken van de omschrijving en het kenmerk, elk genormaliseerd (alleen letters en cijfers). Een factuurnummer moet een heel stuk zijn
 // (geen deel van een langer getal); een lang betalingskenmerk (≥ 12) mag ook met spaties ertussen staan.
+// David 20-11-2026 (Nmbrs, Holding): het machtigingskenmerk van een incasso is een klant- of contractnummer, geen factuurverwijzing. Zet de
+// leverancier datzelfde nummer als "kenmerk" op zijn factuur, dan noemde elke maandincasso die factuur en werd elke maand een "dubbel
+// betaald" (13 meldingen over een jaar). Een factuurkenmerk gelijk aan de machtiging telt daarom niet; het factuurnummer wel (review).
+// De bankluis plakt soms "Omschrijving:" aan de machtiging.
+function machtigingStuk(tx) {
+  const m = String((tx && tx.machtiging) || '').replace(/omschrijving:?\s*$/i, '').trim().split(/\s+/)[0];
+  return normNummer(m);
+}
 function referentieStukken(tx) {
   const t = [tx.omschrijving, tx.kenmerk].filter(Boolean).join(' ');
   const stukken = new Set(t.split(/[\s,;:/()]+/).map(normNummer).filter(Boolean));
-  return { stukken, plat: normNummer(t) || '' };
+  return { stukken, plat: normNummer(t) || '', mach: tx.is_incasso ? machtigingStuk(tx) : null };
 }
 function noemtFactuur(ref, f) {
-  for (const w of [f.nummer, f.kenmerk]) {
+  for (const [veld, w] of [['nummer', f.nummer], ['kenmerk', f.kenmerk]]) {
     const n = normNummer(w);
     if (!n || n.length < 3 || !/\d/.test(n)) continue;
+    if (veld === 'kenmerk' && ref.mach && n === ref.mach) continue;
     if (ref.stukken.has(n)) return true;
     if (n.length >= 12 && /^\d+$/.test(n) && ref.plat.indexOf(n) >= 0) return true;
   }

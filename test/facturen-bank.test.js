@@ -1561,3 +1561,33 @@ test('wv2445 bankluis: SEPA Batch van ABN via Enable Banking → kenmerk = PmtIn
   assert.deepEqual(r.koppelingen.map((k) => [k.transactie, k.factuur, k.methode]).sort(), [[af.id, F1, 'sepa_batch'], [af.id, F2, 'sepa_batch']].sort());
   assert.equal(r.voorstellen.length, 0);
 });
+
+// David 20-11-2026: het klantnummer van de leverancier staat als kenmerk op de factuur én als machtiging in elke maandincasso
+test('maandincasso met het klantnummer (machtiging) als factuurkenmerk: geen dubbel betaald, ook niet in de bankluis-vorm', () => {
+  const f = fac({ id: 'mk1', leverancier: 'lc', nummer: '20269990001', kenmerk: '499001', incl: 605, betaalwijze: 'incasso', betaalspoor: 'betaald_gezien',
+    factuurdatum: '2026-10-18', vervaldatum: '2026-11-01' });
+  const maand = (d, mach) => tx({ boekdatum: d, bedrag_centen: -605, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000301', tegenpartij_iban: LEV.C,
+    omschrijving: '499001 2026' + d.replace(/-/g, '').slice(2), machtiging: mach || '499001' });
+  const gekoppeld = maand('2026-10-09', '499001Omschrijving:');
+  const oud = ['2025-11-13', '2026-01-12', '2026-05-05', '2026-09-15'].map((d) => maand(d));
+  const na = maand('2026-11-10');
+  const r = controle({ transacties: oud.concat([gekoppeld, na]), facturen: [f], koppelingen: [{ transactie: gekoppeld.id, factuur: 'mk1', bron: 'mens', methode: 'handmatig', volledig: true }] });
+  assert.deepEqual(r.signalen.filter((s) => s.soort === 'dubbel_betaald'), []);
+  assert.equal(B.referentieStukken(gekoppeld).mach, '499001');
+  assert.equal(B.referentieStukken(Object.assign({}, na, { is_incasso: false, machtiging: null })).mach, null);
+  // review: is de machtiging toevallig gelijk aan het factuurnummer, dan blijft dat nummer een verwijzing
+  const kort = fac({ id: 'mk2', leverancier: 'lc', nummer: '499001', incl: 605, betaalwijze: 'incasso', betaalspoor: 'betaald_gezien', factuurdatum: '2026-10-18', vervaldatum: '2026-11-01' });
+  const r4 = controle({ transacties: [gekoppeld, na], facturen: [kort], koppelingen: [{ transactie: gekoppeld.id, factuur: 'mk2', bron: 'mens', methode: 'handmatig', volledig: true }] });
+  assert.deepEqual(soorten(r4), ['dubbel_betaald']);
+  const beide = Object.assign({}, kort, { id: 'mk3', kenmerk: '499001' });
+  const r5 = controle({ transacties: [gekoppeld, na], facturen: [beide], koppelingen: [{ transactie: gekoppeld.id, factuur: 'mk3', bron: 'mens', methode: 'handmatig', volledig: true }] });
+  assert.deepEqual(soorten(r5), ['dubbel_betaald']);
+  // een echte tweede betaling die het factuurnummer noemt, ná de factuurdatum, blijft dubbel betaald
+  const tweede = tx({ boekdatum: '2026-10-25', bedrag_centen: -605, tegenpartij_iban: LEV.C, omschrijving: 'factuur 20269990001' });
+  const r2 = controle({ transacties: [gekoppeld, tweede], facturen: [f], koppelingen: [{ transactie: gekoppeld.id, factuur: 'mk1', bron: 'mens', methode: 'handmatig', volledig: true }] });
+  assert.deepEqual(soorten(r2), ['dubbel_betaald']);
+  // review: een vooruitbetaling die het factuurnummer noemt, ruim vóór de factuurdatum, telt ook als tweede betaling
+  const vooraf = tx({ boekdatum: '2026-09-20', bedrag_centen: -605, tegenpartij_iban: LEV.C, omschrijving: 'factuur 20269990001' });
+  const r3 = controle({ transacties: [vooraf, gekoppeld], facturen: [f], koppelingen: [{ transactie: gekoppeld.id, factuur: 'mk1', bron: 'mens', methode: 'handmatig', volledig: true }] });
+  assert.deepEqual(soorten(r3), ['dubbel_betaald']);
+});
