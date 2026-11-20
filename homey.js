@@ -237,7 +237,7 @@ async function ronde(deps, soort) {
     noodWis(dir);
     uit.geroteerd = !!(nieuw && nieuw !== refresh);
     uit.verloopt_s = v.j.verloopt_s || null;
-    const r = await deps.kind(soort === 'lees' ? 'lees' : 'meet', { access: v.j._access });
+    const r = await deps.kind(soort === 'lees' ? 'lees' : soort === 'nu' ? 'nu' : 'meet', { access: v.j._access });   // wv3586: nu = momentopname voor de App Energie
     const j = r.j || { ok: false, reden: 'kind', fout: 'meten gaf geen JSON (exit ' + r.code + ')' };   // wv3482: ook een gestopt kind heeft een reden
     return Object.assign(uit, j, { begin: uit.begin, geroteerd: uit.geroteerd, nood_hersteld: uit.nood_hersteld, verloopt_s: uit.verloopt_s });
   } catch (e) {
@@ -429,6 +429,93 @@ async function kindLees(invoer, dir) {
   return { ok: true, soort: 'lees', tijd: nu, minuten: nieuw, gaten: gaten, nu_a: keus.stand.a, uur_max_a: hoogste, laadpaal: !!keus.laadpaal,
     laden: !!(keus.laad && keus.laad.laden) };
 }
+// ── wv3586: momentopname voor de App Energie (alleen list_devices; geen Insights) ─────────────────────────────────────
+// Alleen als David het scherm open heeft (server.js: hooguit één per 30 s). Schrijft de laatste stand (alleen getallen van dongle en
+// laadpaal) naar HOMEY_DIR/nu.json; geen namen, geen zones, geen andere apparaten.
+function nuPad(dir) { return path.join(dir, 'nu.json'); }
+function nuLees(dir) { try { const j = JSON.parse(fs.readFileSync(nuPad(dir), 'utf8')); return j && typeof j.t === 'string' && j.stand ? j : null; } catch (e) { return null; } }
+async function kindNu(invoer, dir) {
+  const token = invoer.access;
+  if (typeof token !== 'string' || !TOKEN_VORM.test(token)) throw new HomeyFout('token', 'geen access token');
+  const staat = { sessie: null, protocol: PROTOCOL };
+  const init = await rpc(token, staat, 'initialize', { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: 'Socev', version: '1.0' } }, 1);
+  if (typeof init.protocolVersion === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(init.protocolVersion)) staat.protocol = init.protocolVersion;
+  await rpc(token, staat, 'notifications/initialized', null, null);
+  const vast = vastLees(dir);
+  const keus = apparatenKies(gestructureerd(await rpc(token, staat, 'tools/call', { name: 'list_devices', arguments: {} }, 2), 'devices'), vast);
+  if (!keus.dongle) throw new HomeyFout('dongle', 'geen apparaat met afnamestand en stroom en vermogen per fase gevonden');
+  if (keus.dongle !== vast) vastZet(dir, keus.dongle);
+  const t = new Date().toISOString();
+  const j = { t: t, stand: keus.stand, laadpaal: keus.laad };
+  mapKlaar(dir);
+  const tmp = nuPad(dir) + '.' + process.pid + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(j), { mode: 0o600 });
+  fs.renameSync(tmp, nuPad(dir));
+  return { ok: true, soort: 'nu', tijd: t };
+}
+// ── wv3586: wat het scherm Energie toont (puur rekenwerk op HOMEY_DIR; server.js voegt de Tibber-prijzen toe) ─────────────
+const BLOK_MIN = 5;   // dagverloop per 5 minuten
+function faseNiveau(a) { return a == null ? null : Math.abs(a) > ZEKERING_A ? 'over' : Math.abs(a) >= WAARSCHUW_A ? 'krap' : 'ok'; }
+function dagVerloop(j) {
+  const blok = {};
+  Object.keys(j.m || {}).forEach(function (mm) {
+    if (!/^\d{2}:\d{2}$/.test(mm)) return;
+    const min = Number(mm.slice(0, 2)) * 60 + Number(mm.slice(3, 5)), b = min - (min % BLOK_MIN);
+    const k = String(Math.floor(b / 60)).padStart(2, '0') + ':' + String(b % 60).padStart(2, '0');
+    const r = j.m[mm], o = blok[k] || (blok[k] = [null, null, null, null, null]);
+    for (let i = 0; i < 3; i++) o[i] = grootst(o[i], getal(r[i]));
+    o[3] = hoogst(o[3], getal(r[6])); o[4] = hoogst(o[4], getal(r[7]));
+  });
+  return Object.keys(blok).sort().map(function (k) { return [k].concat(blok[k]); });   // [hh:mm, A1, A2, A3, Wtotaal, Wlaadpaal]
+}
+function laadKort(l) {
+  if (!l) return null;
+  return { laden: l.laden === true, w: getal(l.w), a_instelling: getal(l.a_instelling), toestand: typeof l.toestand === 'string' ? l.toestand.replace(/[^a-z_]/g, '').slice(0, 30) : null };
+}
+function energieScherm(dir, nuIso) {
+  const nuMs = Date.parse(nuIso) || Date.now();
+  const vandaag = nlMinuut(nuMs).dag;
+  let dagen = [];
+  try { dagen = fs.readdirSync(path.join(dir, 'meting')).filter(function (f) { return /^\d{4}-\d{2}-\d{2}\.json$/.test(f); }).map(function (f) { return f.slice(0, 10); }).sort().reverse(); } catch (e) {}
+  const jv = metingLees(dir, vandaag);
+  // "nu": de verste van momentopname (nu.json) en de laatste stand van de uurronde
+  let nu = null;
+  const n = nuLees(dir);
+  if (n) nu = { t: n.t, bron: 'moment', stand: n.stand, laadpaal: n.laadpaal };
+  const laatsteDag = jv || (dagen.length ? metingLees(dir, dagen[0]) : null);
+  const st = laatsteDag && Array.isArray(laatsteDag.standen) && laatsteDag.standen.length ? laatsteDag.standen[laatsteDag.standen.length - 1] : null;
+  if (st && (!nu || Date.parse(st.t) > Date.parse(nu.t))) nu = { t: st.t, bron: 'uur', stand: st, laadpaal: st.laadpaal };
+  let nuUit = null;
+  if (nu && nu.stand) {
+    const a = (Array.isArray(nu.stand.a) ? nu.stand.a : []).slice(0, 3).map(getal);
+    while (a.length < 3) a.push(null);
+    const niveaus = a.map(faseNiveau);
+    nuUit = { tijd: nu.t, bron: nu.bron, leeftijd_s: Math.max(0, Math.round((nuMs - Date.parse(nu.t)) / 1000)), a: a, niveau: niveaus,
+      w: getal(nu.stand.w), w3: (Array.isArray(nu.stand.w3) ? nu.stand.w3 : []).slice(0, 3).map(getal),
+      ruimte_a: a.map(function (x) { return x == null ? null : Math.round((ZEKERING_A - Math.abs(x)) * 10) / 10; }),
+      kwh_vandaag: getal(nu.stand.import_vandaag_kwh), laadpaal: laadKort(nu.laadpaal) };
+  }
+  // waarschuwing: alleen als het speelt, alleen uit de gemeten stand (geen voorspelling)
+  let waarschuwing = null;
+  if (nuUit && nuUit.leeftijd_s <= 15 * 60) {
+    const krap = [0, 1, 2].filter(function (i) { return nuUit.niveau[i] === 'krap' || nuUit.niveau[i] === 'over'; });
+    const laadt = !!(nuUit.laadpaal && nuUit.laadpaal.laden);
+    if (krap.length) {
+      const i = krap.reduce(function (b, x) { return Math.abs(nuUit.a[x]) > Math.abs(nuUit.a[b]) ? x : b; }, krap[0]);
+      waarschuwing = { niveau: krap.some(function (x) { return nuUit.niveau[x] === 'over'; }) ? 'rood' : 'oranje', fase: i + 1, a: nuUit.a[i], laadt: laadt, fasen: krap.map(function (x) { return x + 1; }) };
+    } else if (laadt) waarschuwing = { niveau: 'info', laadt: true, ruimte_a: nuUit.ruimte_a };
+  }
+  const samen = jv ? dagSamenvat(jv) : null;
+  const vorige = dagen.filter(function (d) { return d !== vandaag; }).slice(0, 7).map(function (d) {
+    const j = metingLees(dir, d); if (!j) return null;
+    const s = dagSamenvat(j); if (!s.minuten) return null;
+    return { dag: s.dag, minuten: s.minuten, max_a: s.max_a, max_a_om: s.max_a_om, boven_20: s.boven_20, boven_25: s.boven_25, piek_w: s.piek_w, piek_w_om: s.piek_w_om, laad_min: s.laad_min, laad_max_w: s.laad_max_w, kwh: s.kwh };
+  }).filter(Boolean);
+  return { zekering_a: ZEKERING_A, waarschuw_a: WAARSCHUW_A, dag: vandaag, nu: nuUit, waarschuwing: waarschuwing,
+    vandaag: samen ? { minuten: samen.minuten, eerste: samen.eerste, laatste: samen.laatste, max_a: samen.max_a, max_a_om: samen.max_a_om, boven_20: samen.boven_20,
+      boven_25: samen.boven_25, piek_w: samen.piek_w, piek_w_om: samen.piek_w_om, laad_min: samen.laad_min, laad_max_w: samen.laad_max_w, kwh: samen.kwh, verloop: dagVerloop(jv) } : null,
+    dagen: vorige };
+}
 // ── dagtabel voor de energiepagina (server.js schrijft; hier alleen tekst) ──────────────────────────────────────────────
 const BLOK_BEGIN = '<!-- homey-fase:begin -->', BLOK_EINDE = '<!-- homey-fase:einde -->';
 const KOP = '## Fasebelasting thuis uit Homey (automatisch, sinds 20-11-2026)';
@@ -497,7 +584,8 @@ async function kind(opdracht, invoer, dir) {
   if (opdracht === 'stand') return kindStand(dir);
   if (opdracht === 'meet') return kindMeet(invoer, dir);
   if (opdracht === 'lees') return kindLees(invoer, dir);
-  if (opdracht !== 'wissel' && opdracht !== 'ververs') throw new HomeyFout('opdracht', 'opdracht: wissel, ververs, meet, lees, stand');
+  if (opdracht === 'nu') return kindNu(invoer, dir);   // wv3586
+  if (opdracht !== 'wissel' && opdracht !== 'ververs') throw new HomeyFout('opdracht', 'opdracht: wissel, ververs, meet, lees, nu, stand');
   const id = String(invoer.client_id || ''), geheim = String(invoer.client_secret || '');
   if (!id || !geheim) throw new HomeyFout('sleutel', 'client-id of -secret ontbreekt');
   let form;
@@ -527,4 +615,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { REDIRECT, METHODEN, LEESLIJST, leesToets, perMinuut, apparatenKies, grootst, vastLees, dagSamenvat, vaultBlok, blokZet, metingLees, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodWis, doodLees, verzoekToets, rpcUit, sha, HomeyFout };
+module.exports = { energieScherm, faseNiveau, dagVerloop, nuLees, REDIRECT, METHODEN, LEESLIJST, leesToets, perMinuut, apparatenKies, grootst, vastLees, dagSamenvat, vaultBlok, blokZet, metingLees, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodWis, doodLees, verzoekToets, rpcUit, sha, HomeyFout };

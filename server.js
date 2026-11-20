@@ -15387,6 +15387,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route.indexOf('GET /app/promedico/') === 0) return typeof appPromedico === 'function' ? appPromedico(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'promedico');   // wv3143: Promedico-laag in Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
+        if (route === 'GET /app/energie' || route === 'POST /app/energie/nu') return typeof appEnergie === 'function' ? appEnergie(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'energie');   // wv3586: OVIS Energie (Homey + Tibber, alleen lezen)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
         if (route === 'GET /app/osint' || route === 'POST /app/osint/zoek' || route === 'POST /app/osint/bestand' || route === 'GET /app/osint/instelling' || route === 'POST /app/osint/instelling' || route === 'GET /app/osint/grafiek') return typeof appOsint === 'function' ? appOsint(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'osint');   // wv2698: + bestand, instelling, grafiek   // wv2694: OVIS OSINT (logboek, zoeken)
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
@@ -29338,7 +29339,7 @@ function homeyNaLees(u, t) {
   homeyHerpogingen = 0; homeyVolgende = Math.max(t + HOMEY_HERPOGING_MS, homeyLeesPoging + HOMEY_LEES_MS);
 }
 function homeyTik() {
-  if (!homeyMod || homeyBezig || !rolPrimair() || Date.now() < homeyVolgende) return;
+  if (!homeyMod || homeyBezig || homeyNuBezig || !rolPrimair() || Date.now() < homeyVolgende) return;   // wv3586: niet tijdens een momentopname van de App
   if (!fs.existsSync(path.join(HOMEY_DIR, 'gekoppeld.json'))) return;
   const t = Date.now();
   if (!homeyHerpogingen) homeyLeesPoging = t;   // begin van een uurvenster; herpogingen schuiven het niet op
@@ -29347,6 +29348,97 @@ function homeyTik() {
     .catch(function (e) { homeyNaLees({ ok: false, reden: 'fout' }, t); logError('homey-lees', e); });
 }
 if (homeyMod && SERVER_ECHT) { setTimeout(homeyTik, 4 * 60000).unref(); setInterval(homeyTik, 5 * 60000).unref(); }
+// ── wv3586 (David 20-11-2026 16:38, Ja 16:48): OVIS Energie — App Energie (Homey-fasemeting + Tibber-uurprijs), alleen lezen ──────────
+// WAAROM. Thuis klapt de hoofdzekering (3 × 25 A) bij laden + koken; David wil op zijn telefoon zien hoe vol elke fase nu is, wat de
+// laadpaal doet, het dagverloop en de stroomprijs. HOE. GET /app/energie rekent uit HOMEY_DIR (homey.js energieScherm, puur) en leest de
+// uurprijzen read-only uit TIBBER_DIR/tibber.sqlite. POST /app/energie/nu = momentopname (homey.js soort 'nu': alleen list_devices, de
+// getallen van dongle en laadpaal naar HOMEY_DIR/nu.json), hooguit één per 30 s, alleen als het scherm open is; niet tegelijk met de
+// uurronde (bestandsslot + homeyNuBezig). Morgenprijzen: na 13:00 zonder prijzen voor morgen start één extra Tibber-uurronde (≤ 1 per uur).
+// Niets schakelt; bouwplan vault 01_Ontwikkeling/OVIS Energie - app (bouwplan 20-11-2026).md.
+let homeyNuBezig = null, homeyNuLaatst = 0, energieMorgenPoging = 0;
+const HOMEY_NU_MS = 30 * 1000;
+function homeyNuDraai() {
+  if (!homeyMod) return Promise.resolve({ ok: false, reden: 'module' });
+  if (!rolPrimair()) return Promise.resolve({ ok: false, reden: 'reserve' });
+  if (!fs.existsSync(path.join(HOMEY_DIR, 'gekoppeld.json'))) return Promise.resolve({ ok: false, reden: 'toestemming' });
+  if (homeyNuBezig) return homeyNuBezig;
+  if (homeyBezig) return Promise.resolve({ ok: false, reden: 'bezig' });
+  if (Date.now() - homeyNuLaatst < HOMEY_NU_MS) return Promise.resolve({ ok: true, reden: 'kort' });
+  homeyNuLaatst = Date.now();
+  homeyNuBezig = homeyMod.ronde(homeyDeps(), 'nu').then(function (r) {
+    const u = homeySchoon(r);
+    schrijfLog(nu() + ' homey ' + velden({ opdracht: 'nu', bron: 'app', ok: u.ok === true, reden: u.reden || undefined, geroteerd: u.geroteerd || undefined, nood: u.nood || undefined }));
+    if (u.ok !== true && u.reden === 'grant') homeyBoxRij('grant', u.fout);   // de uurronde ziet daarna alleen nog 'dood'
+    else if (u.nood) homeyBoxRij('kluis', u.fout);
+    return u;
+  }).catch(function (e) { logError('homey-nu', e); return { ok: false, reden: 'fout' }; })
+    .finally(function () { homeyNuBezig = null; });
+  return homeyNuBezig;
+}
+function energieNlDag(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
+// Uurprijzen (Tibber, totaal per kWh) van vandaag en morgen, read-only. → { vandaag: [{uur, totaal, niveau}], morgen: [...] }
+function energiePrijzen(nuMs) {
+  const uit = { vandaag: [], morgen: [] };
+  const f = path.join(TIBBER_DIR, 'tibber.sqlite');
+  if (!fs.existsSync(f)) return uit;
+  const dagen = { vandaag: energieNlDag(nuMs), morgen: energieNlDag(nuMs + 86400000) };
+  let db = null;
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    db = new DatabaseSync(f, { readOnly: true });
+    db.exec('pragma busy_timeout = 3000');
+    // review ZOU 1: één woning (die met de jongste prijs); nu staat er één in de tabel (gemeten 20-11)
+    const h = db.prepare('select home_id from prijs where totaal is not null order by van desc limit 1').get();
+    if (!h) return uit;
+    const q = db.prepare('select van, totaal, niveau from prijs where home_id = ? and substr(van, 1, 10) = ? and totaal is not null order by van');
+    Object.keys(dagen).forEach(function (k) {
+      q.all(h.home_id, dagen[k]).forEach(function (r) {
+        const t = Date.parse(r.van);
+        if (!isFinite(t) || energieNlDag(t) !== dagen[k] || typeof r.totaal !== 'number') return;
+        const uur = new Date(t).toLocaleTimeString('sv-SE', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+        uit[k].push({ uur: uur, van: r.van, totaal: Math.round(r.totaal * 10000) / 10000, niveau: typeof r.niveau === 'string' ? r.niveau.replace(/[^A-Z_]/g, '').slice(0, 20) : null });
+      });
+    });
+  } catch (e) { logError('energie-prijzen', e); }
+  finally { try { if (db) db.close(); } catch (e) {} }
+  return uit;
+}
+// Na 13:00 zonder prijzen voor morgen: één extra Tibber-uurronde op de achtergrond (hooguit één per uur; de ochtendronde is te vroeg)
+function energieMorgenMisschien(prijzen, nuMs) {
+  try {
+    const uur = Number(new Date(nuMs).toLocaleTimeString('sv-SE', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }));
+    if (uur < 13 || (prijzen.morgen && prijzen.morgen.length) || nuMs - energieMorgenPoging < 3600000) return false;
+    if (typeof tibberUurDraai !== 'function' || tibberUurBezig || !rolPrimair() || !fs.existsSync(tibberUurScript())) return false;
+    energieMorgenPoging = nuMs;
+    tibberUurDraai('energie-app').catch(function (e) { logError('energie-morgen', e); });
+    return true;
+  } catch (e) { logError('energie-morgen', e); return false; }
+}
+appStaat.tellers.energie = [];
+appStaat.tellers.energie_nu = [];
+async function appEnergie(req, res, a, route, d) {
+  if (!homeyMod || typeof homeyMod.energieScherm !== 'function') return appWeiger(res, 404, 'Energie zit niet in deze versie van de pod', 'energie ontbreekt');
+  if (!appTeller('energie', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens energie');
+  let meting = null;
+  if (route === 'POST /app/energie/nu') {
+    if (!appTeller('energie_nu', 150, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 150)', 'grens energie nu');
+    const r = await Promise.race([homeyNuDraai(), new Promise(function (ok) { setTimeout(function () { ok({ ok: false, reden: 'traag' }); }, 20000).unref(); })]);
+    meting = { ok: r.ok === true, reden: r.reden || null };
+  }
+  const nuMs = Date.now();
+  let body;
+  try { body = homeyMod.energieScherm(HOMEY_DIR, new Date(nuMs).toISOString()); }
+  catch (e) { logError('energie', e); return appWeiger(res, 503, 'Energie kon de meting nu niet lezen; probeer het zo opnieuw', 'energie fout'); }
+  body.prijzen = energiePrijzen(nuMs);
+  body.prijzen.morgen_gevraagd = energieMorgenMisschien(body.prijzen, nuMs);
+  const r = homeyRondeLees();
+  body.koppeling = { gekoppeld: fs.existsSync(path.join(HOMEY_DIR, 'gekoppeld.json')), ronde: r ? { tijd: r.eind || null, ok: r.ok === true } : null };
+  if (meting) body.meting = meting;
+  if (!meting || meting.ok) res._app.stil = true;
+  else res._app.reden = 'energie nu ' + String(meting.reden || 'fout').slice(0, 20);
+  return appStuur(res, 200, Object.assign({ ok: true }, body));
+}
+// ── einde OVIS Energie ──
 // Terugkeer na Davids inlog. Athom levert code en state als form_post (POST, application/x-www-form-urlencoded); GET met query ook.
 function homeyTerug(req, res) {
   const kaal404 = function () { if (!res.headersSent) { res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('niet gevonden'); } };
