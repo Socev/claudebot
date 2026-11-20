@@ -628,6 +628,10 @@ jobs:
       - name: "ghawa-seintje (wv2930, Delen met ECG: iemand erbij naar de werkvoorraad)"
         if: ${{ !cancelled() }}
         run: node --test test/ghawa-seintje.test.js
+      # wv3588: Besluitenpagina (App Besluiten): antwoorden bewaren, gevoelige Ja = verse vingerafdruk, kwartierronde naar de werkvoorraad.
+      - name: "besluiten (wv3588, Besluitenpagina: voorstellen uit de reviews)"
+        if: ${{ !cancelled() }}
+        run: node --test test/besluiten.test.js
       # OVIS OSINT (wv2694): osint.py — centrale poort vóór elke externe aanroep (BSN-/HIS-vorm → niets, herkomst mogelijk medisch → alleen
       # eigen bronnen, persoon alleen met doel en Davids vraag), logboek in osint.sqlite (0600) telt hetzelfde; zonder netwerk (OSINT_NEP_NET).
       - name: "osint (wv2694, OVIS OSINT-poort)"

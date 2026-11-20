@@ -15387,6 +15387,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
         if (route.indexOf('GET /app/promedico/') === 0) return typeof appPromedico === 'function' ? appPromedico(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'promedico');   // wv3143: Promedico-laag in Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
+        if (route === 'GET /app/besluiten' || route === 'POST /app/besluiten/antwoord') return typeof appBesluiten === 'function' ? appBesluiten(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'besluiten');   // wv3588: Besluitenpagina (reviews 19–21-11)
         if (route === 'GET /app/energie' || route === 'POST /app/energie/nu') return typeof appEnergie === 'function' ? appEnergie(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'energie');   // wv3586: OVIS Energie (Homey + Tibber, alleen lezen)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
         if (route === 'GET /app/osint' || route === 'POST /app/osint/zoek' || route === 'POST /app/osint/bestand' || route === 'GET /app/osint/instelling' || route === 'POST /app/osint/instelling' || route === 'GET /app/osint/grafiek') return typeof appOsint === 'function' ? appOsint(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'osint');   // wv2698: + bestand, instelling, grafiek   // wv2694: OVIS OSINT (logboek, zoeken)
@@ -29439,6 +29440,75 @@ async function appEnergie(req, res, a, route, d) {
   return appStuur(res, 200, Object.assign({ ok: true }, body));
 }
 // ── einde OVIS Energie ──
+// ── wv3588 (David 20-11-2026 23:57): Besluitenpagina — App Besluiten, alle voorstellen uit de reviews stap voor stap Ja / Nee / toelichting ──
+// WAAROM en werking in besluiten.js. GET /app/besluiten = scherm (voorstellen + antwoorden), POST /app/besluiten/antwoord = één antwoord
+// (zetten, wijzigen, wissen). Een Ja op een gevoelig voorstel (geld, versturen, verwijderen) eist een verse vingerafdruk (zoals een gevoelige
+// Ja in Voor jou) en verbruikt die. Elk kwartier (echte pod, rol primair) biedt besluitenTik de rustige, nieuwe antwoorden als één
+// werkvoorraadrij aan de machinekamer aan; een fout één keer per soort per dag in de box.
+const BESLUITEN_DIR = typeof serverPad === 'function' ? serverPad('besluiten_dir', process.env.BESLUITEN_DIR, '/opt/data/besluiten', serverProefDeel('besluiten')) : (process.env.BESLUITEN_DIR || '/opt/data/besluiten');
+let besluitenMod = null;
+try { besluitenMod = require(path.join(__dirname, 'besluiten.js')); } catch (e) { besluitenMod = null; }
+appStaat.tellers.besluiten = [];
+appStaat.tellers.besluiten_antwoord = [];
+const besluitenStand = { laatste_ok: null, laatste_fout: null, reden: null, gemeld: {} };
+function besluitenFoutTekst(e) { return String(e && e.message || e || 'onbekend').replace(/[^\p{L}\p{N} ._:()'-]/gu, ' ').slice(0, 120); }
+function appBesluiten(req, res, a, s, route, d) {
+  if (!besluitenMod) return appWeiger(res, 404, 'Besluiten zit niet in deze versie van de pod', 'besluiten ontbreekt');
+  if (route === 'GET /app/besluiten') {
+    if (!appTeller('besluiten', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens besluiten');
+    let body;
+    try { body = besluitenMod.scherm(BESLUITEN_DIR); }
+    catch (e) {
+      if (e && e.code === 'ENOENT') return appStuur(res, 200, { ok: true, leeg: true, telling: { totaal: 0, beantwoord: 0 }, voorstellen: [] });
+      logError('besluiten', e); return appWeiger(res, 503, 'De besluitenlijst kon niet gelezen worden; de machinekamer kijkt ernaar', 'besluiten lees');
+    }
+    res._app.reden = 'besluiten ' + body.telling.beantwoord + '/' + body.telling.totaal;
+    return appStuur(res, 200, body);
+  }
+  // POST /app/besluiten/antwoord
+  if (!appTeller('besluiten_antwoord', 1500, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens besluiten antwoord');
+  const inv = d && typeof d === 'object' ? d : {};
+  let gevoelig = false;
+  try { gevoelig = besluitenMod.vraagtVingerafdruk(BESLUITEN_DIR, inv.nr, String(inv.keuze || '')); }
+  catch (e) { logError('besluiten', e); return appWeiger(res, 503, 'De besluitenlijst kon niet gelezen worden', 'besluiten lees'); }
+  if (gevoelig) {
+    if (!appVersOk(a, s)) { res._app.reden = 'besluit gevoelig, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig deze Ja met je vingerafdruk', vers_nodig: true }); }
+    s.vers_tot = 0;   // één vingerafdruk = één gevoelige Ja
+  }
+  let r;
+  try { r = besluitenMod.antwoord(BESLUITEN_DIR, inv, new Date().toISOString(), String(a && (a.naam || a.id) || '').slice(0, 40)); }
+  catch (e) { logError('besluiten', e); return appWeiger(res, 503, 'Je antwoord kon niet bewaard worden; probeer het zo opnieuw', 'besluiten schrijf'); }
+  if (!r.ok) return appStuur(res, r.status || 400, { ok: false, fout: r.fout, huidig: r.huidig || null });
+  res._app.reden = 'besluit ' + r.voorstel + ' ' + (r.antwoord ? r.antwoord.keuze : 'gewist') + (gevoelig ? ' (vingerafdruk)' : '');
+  return appStuur(res, 200, { ok: true, nr: Number(r.voorstel), antwoord: r.antwoord });
+}
+let besluitenLoopt = false;
+async function besluitenTik() {
+  if (!besluitenMod || besluitenLoopt || !rolPrimair()) return;
+  besluitenLoopt = true;
+  try {
+    const u = await besluitenMod.ronde({ dir: BESLUITEN_DIR, nu: function () { return Date.now(); },
+      zet: async function (p) {
+        const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: p.label, p_prompt: mkBlokVoor(p.prompt), p_status: 'open', p_volgorde: 15, p_max_minuten: 120,
+          p_samenvatting: p.samenvatting, p_notitie: 'pod wv3588: besluitenpagina' }, 20000);
+        if (!z || !z.ok || !z.id) throw new Error('werkvoorraad gaf geen rij terug');
+        try { await appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' }); } catch (e) { logError('besluiten', e); }
+        return { id: z.id, bestond: !!z.bestond };
+      } });
+    besluitenStand.laatste_ok = new Date().toISOString(); besluitenStand.reden = null;
+    if (u && u.aangeboden) schrijfLog(nu() + ' besluiten: ' + u.aangeboden + ' antwoord(en) aangeboden in rij ' + u.rij + (u.bestond ? ' (bestond)' : ''));
+  } catch (e) {
+    logError('besluiten', e);
+    besluitenStand.laatste_fout = new Date().toISOString(); besluitenStand.reden = besluitenFoutTekst(e);
+    const sleutel = (e && e.code === 'KAPOT' ? 'kapot' : 'zet') + ':' + new Date().toISOString().slice(0, 10);
+    if (!besluitenStand.gemeld[sleutel]) {
+      besluitenStand.gemeld[sleutel] = true;
+      try { ovisBoxRij('Besluitenpagina (wv3588): antwoorden konden niet aan de machinekamer aangeboden worden: ' + besluitenStand.reden + '. De antwoorden zelf staan in ' + BESLUITEN_DIR + '/antwoorden.json; de pod probeert het elk kwartier opnieuw. #besluitenpagina'); } catch (x) { logError('besluiten', x); }
+    }
+  } finally { besluitenLoopt = false; }
+}
+if (besluitenMod && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setTimeout(function () { besluitenTik(); }, 240000).unref(); setInterval(function () { besluitenTik(); }, 15 * 60000).unref(); }
+// ── einde Besluitenpagina ──
 // Terugkeer na Davids inlog. Athom levert code en state als form_post (POST, application/x-www-form-urlencoded); GET met query ook.
 function homeyTerug(req, res) {
   const kaal404 = function () { if (!res.headersSent) { res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('niet gevonden'); } };
