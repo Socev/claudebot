@@ -219,7 +219,7 @@ test('lees: dongle + laadpaal per minuut, gat bij -32602, geen namen opgeslagen,
   assert.deepStrictEqual(s.max_a, [26, 3, 3]); assert.deepStrictEqual(s.boven_20, [2, 0, 0]); assert.deepStrictEqual(s.boven_25, [1, 0, 0]);
   assert.strictEqual(s.laad_min, 2);
   const blok = H.vaultBlok(dir, '2026-11-20T06:00:00.000Z');
-  assert.match(blok, /\| 20-11 \(t\/m 06:01\) \| 0 u \| 26 \/ 3 \/ 3 \(L1 om 06:01\) \| 2 \/ 0 \/ 0 \| 1 \/ 0 \/ 0 \|/);
+  assert.match(blok, /\| 20-11 \(t\/m 06:01\) \| 0,0 u \| 26 \/ 3 \/ 3 \(L1 om 06:01\) \| 2 \/ 0 \/ 0 \| 1 \/ 0 \/ 0 \|/);
   const p1 = H.blokZet('# Pagina\n\ntekst\n', blok);
   assert.strictEqual(H.blokZet(p1, blok), p1, 'tweede keer gelijk');
   assert.strictEqual(p1.split('<!-- homey-fase:begin -->').length, 2);
