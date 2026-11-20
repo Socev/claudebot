@@ -200,6 +200,44 @@ SHA="$(git -C "$BRON_REPO" rev-parse --verify --quiet "origin/${REF}^{commit}" \
 KORT="${SHA:0:12}"
 DOEL="$RELEASES/$KORT"
 
+# ── 1a. bestandslijst ook uit de commit zelf (wv3464, 20-11-2026) ─────────────────────────────────────────────────────────
+# Dit script draait uit de werkboom (vaak $BRON_REPO/uitrol.sh), de inhoud komt uit $SHA. Stond de werkboom achter op origin/main,
+# dan kende dit script een nieuw bestand nog niet en ging het stil niet mee: homey.js in ec273d1/53c5738 (19-11, /homey/terug 404),
+# gemeten 22 van 474 releases sinds 19-8 (financien-*, ghawa-bij, voorwerk-*, beleggen-nieuws, nmbrs-betaal, lees-of-weiger ...).
+# Daarom de lijsten van de commit erbij (vereniging): een naam die niet in de commit staat, slaat stap 2 toch over, dus een terugrol
+# naar een oudere commit verandert niets. Namen uit de commit alleen als platte bestands-/mapnaam (geen /, geen ..).
+commit_lijst(){ git -C "$BRON_REPO" show "$SHA:uitrol.sh" 2>/dev/null | sed -n "s/^$1=\"\\([^\"]*\\)\"\$/\\1/p" | tail -1; }
+lijst_erbij(){ local naam="$1" eigen="$2" n uit="" extra=""
+  for n in $(commit_lijst "$naam"); do
+    case " $eigen " in (*" $n "*) continue ;; esac
+    case "$n" in ([A-Za-z0-9]*) ;; (*) log "LET OP: $naam van $KORT noemt '$n' - overgeslagen" >&2; continue ;; esac
+    case "$n" in (*[!A-Za-z0-9._-]*|*..*) log "LET OP: $naam van $KORT noemt '$n' - overgeslagen" >&2; continue ;; esac
+    extra="$extra $n"
+  done
+  [ -n "$extra" ] && log "lijst uit commit $KORT: $naam +${extra# } (de werkboom-uitrol.sh kende ze niet)" >&2
+  printf '%s' "$eigen$extra"; }
+RELEASE_BESTANDEN="$(lijst_erbij RELEASE_BESTANDEN "$RELEASE_BESTANDEN")"
+RELEASE_OPTIONEEL="$(lijst_erbij RELEASE_OPTIONEEL "$RELEASE_OPTIONEEL")"
+RELEASE_MAPPEN="$(lijst_erbij RELEASE_MAPPEN "$RELEASE_MAPPEN")"
+# (log gaat via tee ook naar stdout: binnen $(...) dus naar stderr, anders komt de logregel in de lijst.)
+# Welke bestanden uit de lijsten staan in de commit maar niet in map $1? (stap 2 en de nacontrole; wv3464 vangnet)
+ontbrekend(){ local b f m
+  for b in $RELEASE_BESTANDEN $RELEASE_OPTIONEEL; do
+    git -C "$BRON_REPO" cat-file -e "$SHA:$b" 2>/dev/null && [ ! -f "$1/$b" ] && printf '%s ' "$b"; done
+  for m in $RELEASE_MAPPEN; do
+    for f in $(git -C "$BRON_REPO" ls-tree -r --name-only "$SHA" -- "$m/" 2>/dev/null); do
+      case "$f" in (*.js|*.mjs|*.json) [ -f "$1/$f" ] || printf '%s ' "$f" ;; esac; done; done; return 0; }
+# Een release die er al staat maar iets mist (gebouwd door een achterlopend script), wordt opnieuw gebouwd, behalve als hij draait.
+ONVOLLEDIG=""
+if [ -f "$DOEL/server.js" ]; then
+  ONVOLLEDIG="$(ontbrekend "$DOEL")"
+  if [ -n "$ONVOLLEDIG" ]; then
+    if [ "$(readlink "$CURRENT" 2>/dev/null)" = "releases/$KORT" ]; then log "LET OP: draaiende release $KORT mist ${ONVOLLEDIG% } - niet aangeraakt (zie de nacontrole)"
+    else log "release $KORT stond er al maar mist ${ONVOLLEDIG% } - opnieuw bouwen"; fi
+  fi
+fi
+DRAAIT_ONVOLLEDIG=""; [ -n "$ONVOLLEDIG" ] && [ "$(readlink "$CURRENT" 2>/dev/null)" = "releases/$KORT" ] && DRAAIT_ONVOLLEDIG="$ONVOLLEDIG"
+
 # ── 1b. datakaart-poort (wv844, Data Manager; Fable-review wv844 #1) ────────────────────────────────────────────────────
 # Nieuwe opslag bestaat pas met een regel in 00_Systeem/datakaart.json. Een .sqlite/.jsonl-basisnaam in de release-bestanden
 # van deze commit (.sqlite, .sqlite3, .jsonl; bewust geen .db: dat matcht ook JS als `this.db`) die NIET in de draaiende release staat en ook in geen `pod_bestanden` van de Datakaart, stopt de uitrol.
@@ -208,7 +246,7 @@ DOEL="$RELEASES/$KORT"
 DATAKAART="${UITROL_DATAKAART_PAD:-/opt/data/AI_SecondBrain/00_Systeem/datakaart.json}"
 if [ "${UITROL_DATAKAART:-1}" = "0" ]; then
   log "datakaart-poort UIT (UITROL_DATAKAART=0)"
-elif [ -f "$DOEL/server.js" ]; then
+elif [ -f "$DOEL/server.js" ] && [ -z "$ONVOLLEDIG" ]; then
   log "datakaart-poort: release $KORT stond er al (terugrol of herhaling) - niet getoetst"
 elif [ ! -f "$DATAKAART" ]; then
   log "datakaart-poort: $DATAKAART ontbreekt (uitwijkkant?) - niet getoetst"
@@ -231,7 +269,7 @@ if [ "${UITROL_POORT_ALLEEN:-0}" = "1" ]; then log "poort-alleen: gestopt na de 
 # ── 2. release neerzetten ───────────────────────────────────────────────────
 # Eerst in een tijdelijke map bouwen en daarna hernoemen: een half uitgepakte
 # release mag nooit onder een naam staan waar `current` naar kan gaan wijzen.
-if [ -f "$DOEL/server.js" ]; then
+if [ -f "$DOEL/server.js" ] && { [ -z "$ONVOLLEDIG" ] || [ -n "$DRAAIT_ONVOLLEDIG" ]; }; then
   log "release $KORT staat er al - opnieuw gebruiken"
 else
   TMP="$DOEL.bezig.$$"
@@ -265,8 +303,16 @@ else
   done
   [ -s "$TMP/server.js" ] || fout "server.js is leeg in commit $KORT"
   node --check "$TMP/server.js" || fout "server.js van $KORT komt de syntaxcontrole niet door"
-  mv "$TMP" "$DOEL"
-  log "release $KORT klaargezet"
+  MIST="$(ontbrekend "$TMP")"; [ -z "$MIST" ] || fout "release $KORT mist na het bouwen ${MIST% } - niet klaargezet"
+  if [ -d "$DOEL" ]; then   # wv3464: onvolledige oude bouw vervangen (niet de draaiende, zie 1a); kort gat in de naam, nooit half
+    mv -T "$DOEL" "$DOEL.onvolledig.$$" || fout "kon de onvolledige release $KORT niet opzij zetten"
+    mv -T "$TMP" "$DOEL" || fout "kon de nieuwe bouw van $KORT niet neerzetten (de oude staat in $DOEL.onvolledig.$$)"
+    rm -rf "$DOEL.onvolledig.$$"
+    log "release $KORT opnieuw klaargezet (was onvolledig)"
+  else
+    mv "$TMP" "$DOEL"
+    log "release $KORT klaargezet"
+  fi
 fi
 
 # ── 2b. wachten tot het rustig is (28-9-2026, akkoord David) ─────────────────
@@ -372,6 +418,12 @@ if [ "$HUIDIG" = "releases/$KORT" ]; then
   # wv3418 (B39, review M4): de symlink zegt niets over wat draait. Halve stand (current omgezet, oud kind leeft nog) = exit 1.
   if [ "${UITROL_NACONTROLE:-1}" = "1" ] && ! wacht_op_versie "$KORT"; then
     fout "current wijst al naar $KORT, maar /health toont na ${NC_MAX}s versie ${STAND%% *} (halve stand: het oude kind draait nog, of terugflip/trage start; zie supervisor.log) - niet uitgerold"
+  fi
+  if [ -n "$DRAAIT_ONVOLLEDIG" ]; then   # wv3464 vangnet: de draaiende release mist bestanden die de commit wel heeft
+    box_rij "Uitrol: draaiende release $KORT mist ${DRAAIT_ONVOLLEDIG% }" \
+      "uitrol.sh (wv3464): releases/$KORT draait, maar ${DRAAIT_ONVOLLEDIG% } staat wel in commit $KORT en niet in de release (gebouwd door een achterlopend uitrol.sh). Niet aangeraakt omdat hij draait." \
+      "open — uitrol.sh $(date '+%-d-%-m %H:%M')" "de routes/onderdelen in die bestanden geven 404 of staan uit tot de volgende uitrol; herstel: volgende commit uitrollen, of de bestanden met git show in de release zetten en het kind herstarten."
+    fout "current wijst al naar $KORT, maar die release mist ${DRAAIT_ONVOLLEDIG% } (rij in de box)"
   fi
   log "current wijst al naar $KORT - niets om te doen"
   exit 0
