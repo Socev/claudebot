@@ -9,6 +9,7 @@ const { spawn } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'homey.js');
 const ID = 'proefclient-123456', GEHEIM = 'proefgeheim-abcdefghijklmnop';
+const DONGLE = '80384a32-0cff-4fb6-9299-cea1a9b59712', LAADPAAL = '569b0ee1-bda5-4342-b92d-dcfdc3c50ffb';
 let poort, server, gezien = [], refreshGeldig = new Set(), codeGeldig = new Set(['proefcode-1']), roteren = true;
 
 function sseVan(j) { return 'event: message\ndata: ' + JSON.stringify(j) + '\n\n'; }
@@ -40,6 +41,21 @@ test.before(async function () {
         if (m.method === 'tools/list') return res.end(sseVan({ jsonrpc: '2.0', id: m.id, result: { tools: [
           { name: 'list_devices', description: 'Lijst apparaten', annotations: { readOnlyHint: true }, inputSchema: { type: 'object', properties: { zone: {} } } },
           { name: 'set_capability', description: 'Zet iets <script>', annotations: { readOnlyHint: false, destructiveHint: false }, inputSchema: { type: 'object', properties: { device: {}, value: {} } } }] } }));
+        if (m.method === 'tools/call') {
+          const a = m.params.arguments;
+          if (m.params.name === 'list_devices') return res.end(sseVan({ jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: 'x' }], structuredContent: { devices: [
+            { id: '11111111-1111-4111-8111-111111111111', name: 'Lamp Proefkind', zone: 'Kamer Proefkind', type: 'light', state: { measure_power: 4 } },
+            { id: DONGLE, name: 'Proefdongle Proefstraat 1', zone: 'Thuis', type: 'sensor', state: { 'meter_power.imported': 1000.5, 'meter_power.exported': 3, 'measure_power': 2000,
+              'measure_current.phase1': 3, 'measure_current.phase2': 2, 'measure_current.phase3': 3, 'measure_power.phase1': 700, 'measure_power.phase2': 500, 'measure_power.phase3': 800 } },
+            { id: LAADPAAL, name: 'Proeflader', zone: 'Thuis', type: 'evcharger', state: { evcharger_charging: true, measure_power: 7000, measure_current: 32, evcharger_charging_state: 'plugged_in_charging' } }] } } }));
+          if (m.params.name === 'get_insights_log_entries_number') {
+            if (/phase3$/.test(a.logId) && /measure_power/.test(a.logId)) return res.end(sseVan({ jsonrpc: '2.0', id: m.id, error: { code: -32602, message: 'Invalid structured content' } }));
+            const cap = a.logId.split(':').pop();
+            const v = cap === 'measure_current.phase1' ? [10, 22, 26] : cap === 'energy_power' ? [0, 7000, 7100] : cap.startsWith('measure_power') ? [500, 600, 700] : [1, 2, 3];
+            return res.end(sseVan({ jsonrpc: '2.0', id: m.id, result: { structuredContent: { entries: [
+              { t: '2026-11-20T05:00:00.000Z', v: v[0] }, { t: '2026-11-20T05:00:05.000Z', v: v[1] }, { t: '2026-11-20T05:01:00.000Z', v: v[2] }] } } }));
+          }
+        }
         return res.end(sseVan({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'onbekend' } }));
       }
       res.writeHead(404); res.end();
@@ -74,7 +90,20 @@ test('poort: alleen POST op token en MCP met leesmethoden', function () {
   const H = laad(), b = process.env.HOMEY_BASIS;
   assert.ok(H.verzoekToets('POST', b + '/oauth2/token'));
   assert.ok(H.verzoekToets('POST', b + '/', { jsonrpc: '2.0', method: 'tools/list', id: 1 }));
-  for (const m of ['tools/call', 'resources/read', 'prompts/get', 'initialize ']) assert.throws(function () { H.verzoekToets('POST', b + '/', { jsonrpc: '2.0', method: m, id: 1 }); }, /niet toegestaan/);
+  // wv3462: tools/call alleen met de vaste leeslijst en precies de argumentvorm
+  const roep = function (params) { return H.verzoekToets('POST', b + '/', { jsonrpc: '2.0', method: 'tools/call', id: 1, params: params }); };
+  assert.ok(roep({ name: 'list_devices', arguments: {} }));
+  assert.ok(roep({ name: 'get_insights_log_entries_number', arguments: { logId: 'homey:device:' + DONGLE + ':measure_current.phase2', resolution: 'lastHour' } }));
+  assert.ok(roep({ name: 'get_insights_log_entries_number', arguments: { logId: 'homey:device:' + LAADPAAL + ':energy_power', resolution: 'lastHour' } }));
+  for (const p of [undefined, null, [], { name: 'list_devices' }, { name: 'list_devices', arguments: { homeyId: 'x' } }, { name: 'list_devices', arguments: {}, extra: 1 },
+    { name: 'set_devices_capabilities_values', arguments: {} }, { name: 'start_flow', arguments: {} }, { name: 'set_mood', arguments: {} }, { name: 'list_flows', arguments: {} },
+    { name: 'get_insights_log_entries_number', arguments: { logId: 'homey:device:' + DONGLE + ':onoff', resolution: 'lastHour' } },
+    { name: 'get_insights_log_entries_number', arguments: { logId: 'homey:device:' + DONGLE + ':measure_current.phase1', resolution: 'last2Years' } },
+    { name: 'get_insights_log_entries_number', arguments: { logId: 'homey:device:' + DONGLE + ':measure_current.phase1', resolution: 'lastHour', homeyId: 'x' } },
+    { name: 'get_insights_log_entries_number', arguments: { logId: 'homey:app:com.tibber:x', resolution: 'lastHour' } }]) {
+    assert.throws(function () { roep(p); }, /niet toegestaan/, JSON.stringify(p));
+  }
+  for (const m of ['resources/read', 'prompts/get', 'initialize ']) assert.throws(function () { H.verzoekToets('POST', b + '/', { jsonrpc: '2.0', method: m, id: 1 }); }, /niet toegestaan/);
   assert.throws(function () { H.verzoekToets('POST', b + '/', [{ jsonrpc: '2.0', method: 'tools/list', id: 1 }]); }, /niet toegestaan/);
   assert.throws(function () { H.verzoekToets('GET', b + '/oauth2/token'); }, /niet toegestaan/);
   assert.throws(function () { H.verzoekToets('POST', b + '/oauth2/client'); }, /niet toegestaan/);
@@ -164,4 +193,37 @@ test('foute client: geen tokens, reden client', async function () {
   d.kluisLees = async function () { return { client_id: ID, client_secret: 'fout-geheim-000000', refresh: kluis.refresh }; };
   const r = await H.ronde(d);
   assert.strictEqual(r.reden, 'client');
+});
+
+test('lees: dongle + laadpaal per minuut, gat bij -32602, geen namen opgeslagen, dagtabel', async function () {
+  const H = laad(), dir = map(), start = 'refresh-lees-' + crypto.randomBytes(8).toString('hex');
+  refreshGeldig.add(start);
+  const kluis = { refresh: start };
+  gezien = [];
+  const r = await H.ronde(kindDeps(dir, kluis), 'lees');
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.deepStrictEqual(r.gaten, ['w3']);
+  assert.strictEqual(r.laden, true);
+  const calls = gezien.filter(function (g) { return g.pad === '/'; }).map(function (g) { return JSON.parse(g.body); }).filter(function (m) { return m.method === 'tools/call'; });
+  assert.deepStrictEqual(calls.map(function (m) { return m.params.name; }), ['list_devices'].concat(Array(7).fill('get_insights_log_entries_number')));
+  const j = H.metingLees(dir, '2026-11-20');
+  assert.ok(j, 'meting van 20-11 (06:00 NL)');
+  assert.deepStrictEqual(j.m['06:00'], [22, 2, 2, 600, 600, null, null, 7000]);
+  assert.deepStrictEqual(j.m['06:01'], [26, 3, 3, 700, 700, null, null, 7100]);
+  const ruw = fs.readdirSync(path.join(dir, 'meting')).map(function (f) { return fs.readFileSync(path.join(dir, 'meting', f), 'utf8'); }).join('');
+  for (const n of ['Proefkind', 'Proefdongle', 'Proefstraat', 'Proeflader', 'Kamer', 'access-', 'refresh-']) assert.ok(!ruw.includes(n), 'geen ' + n + ' in de opslag');
+  assert.strictEqual((fs.statSync(path.join(dir, 'meting')).mode & 0o777), 0o700);
+  const s = H.dagSamenvat(j);
+  assert.deepStrictEqual(s.max_a, [26, 3, 3]); assert.deepStrictEqual(s.boven_20, [2, 0, 0]); assert.deepStrictEqual(s.boven_25, [1, 0, 0]);
+  assert.strictEqual(s.laad_min, 2);
+  const blok = H.vaultBlok(dir, '2026-11-20T06:00:00.000Z');
+  assert.match(blok, /\| 20-11 \(t\/m 06:01\) \| 0 u \| 26 \/ 3 \/ 3 \(L1 om 06:01\) \| 2 \/ 0 \/ 0 \| 1 \/ 0 \/ 0 \|/);
+  const p1 = H.blokZet('# Pagina\n\ntekst\n', blok);
+  assert.strictEqual(H.blokZet(p1, blok), p1, 'tweede keer gelijk');
+  assert.strictEqual(p1.split('<!-- homey-fase:begin -->').length, 2);
+  assert.strictEqual(H.blokZet(p1 + '\n<!-- homey-fase:begin -->\n', blok), null, 'dubbel blok: niet raden');
+  // tweede ronde vloeit samen (zelfde minuten, geen dubbele tellingen)
+  const r2 = await H.ronde(kindDeps(dir, kluis), 'lees');
+  assert.strictEqual(r2.minuten, 0);
+  assert.strictEqual(H.metingLees(dir, '2026-11-20').standen.length, 2);
 });

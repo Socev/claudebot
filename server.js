@@ -29098,8 +29098,9 @@ function homeyRondeLees() { try { return JSON.parse(fs.readFileSync(path.join(HO
 function homeyInfo() {
   const r = homeyRondeLees();
   let gekoppeld = null; try { gekoppeld = JSON.parse(fs.readFileSync(path.join(HOMEY_DIR, 'gekoppeld.json'), 'utf8')).tijd || null; } catch (e) {}
-  return { module: !!homeyMod, gekoppeld: gekoppeld, laatste: r ? { tijd: r.eind || null, ok: r.ok === true, reden: r.reden || undefined, tools: r.tools, alleen_lezen: r.alleen_lezen } : null,
-    nood: fs.existsSync(path.join(HOMEY_DIR, 'refresh.nood')) };
+  return { module: !!homeyMod, gekoppeld: gekoppeld, laatste: r ? { tijd: r.eind || null, ok: r.ok === true, soort: r.soort || 'meet', reden: r.reden || undefined, tools: r.tools, alleen_lezen: r.alleen_lezen,
+    minuten: r.minuten, gaten: r.gaten && r.gaten.length ? r.gaten : undefined } : null,
+    nood: fs.existsSync(path.join(HOMEY_DIR, 'refresh.nood')), vault: homeyVaultStaat() };
 }
 function homeyBoxRij(reden, tekst) {
   try {
@@ -29120,17 +29121,20 @@ function homeyBoxRij(reden, tekst) {
     VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
   } catch (e) { logError('homey-box', e); }
 }
-async function homeyRondeDraai(bron) {
+async function homeyRondeDraai(bron, soort) {
   if (!homeyMod) return { ok: false, fout: 'homey.js zit niet in deze release' };
   if (homeyBezig) return { ok: false, reden: 'bezig', fout: 'er loopt al een Homey-ronde' };
   homeyBezig = true;
+  soort = soort === 'lees' ? 'lees' : 'meet';
   try {
-    const u = homeySchoon(await homeyMod.ronde(homeyDeps()));
+    const u = homeySchoon(await homeyMod.ronde(homeyDeps(), soort));
     u.eind = new Date().toISOString();
-    schrijfLog(nu() + ' homey ' + velden({ opdracht: 'meet', bron: bron, ok: u.ok === true, reden: u.reden, tools: u.tools, alleen_lezen: u.alleen_lezen, geroteerd: u.geroteerd, nood: u.nood || undefined }));
+    schrijfLog(nu() + ' homey ' + velden({ opdracht: soort, bron: bron, ok: u.ok === true, reden: u.reden, tools: u.tools, minuten: u.minuten, gaten: u.gaten && u.gaten.length ? u.gaten.join('+') : undefined, geroteerd: u.geroteerd, nood: u.nood || undefined }));
     if (u.reden !== 'bezig') {
-      try { const p = path.join(HOMEY_DIR, 'ronde.json'), tmp = p + '.' + process.pid + '.tmp';
-        fs.writeFileSync(tmp, JSON.stringify({ eind: u.eind, ok: u.ok === true, reden: u.reden || null, fout: u.ok === true ? null : String(u.fout || '').slice(0, 160), tools: u.tools, alleen_lezen: u.alleen_lezen, server: u.server, verloopt_s: u.verloopt_s, geroteerd: u.geroteerd }), { mode: 0o600 });
+      try { const p = path.join(HOMEY_DIR, 'ronde.json'), tmp = p + '.' + process.pid + '.tmp', vorig = homeyRondeLees() || {};
+        fs.writeFileSync(tmp, JSON.stringify({ eind: u.eind, soort: soort, ok: u.ok === true, reden: u.reden || null, fout: u.ok === true ? null : String(u.fout || '').slice(0, 160),
+          tools: soort === 'meet' ? u.tools : vorig.tools, alleen_lezen: soort === 'meet' ? u.alleen_lezen : vorig.alleen_lezen, server: soort === 'meet' ? u.server : vorig.server,
+          minuten: u.minuten, gaten: u.gaten, verloopt_s: u.verloopt_s, geroteerd: u.geroteerd }), { mode: 0o600 });
         fs.renameSync(tmp, p); }
       catch (e) { logError('homey-ronde-json', e); }
     }
@@ -29151,13 +29155,45 @@ async function homeySmal(d, wie) {
     schrijfLog(nu() + ' homey ' + velden({ opdracht: 'link' }));
     return { status: 200, j: { ok: true, url: l.url, geldig_tot: l.geldig_tot } };
   }
-  if (opdracht === 'meet') { const u = await homeyRondeDraai('machinekamer'); return { status: u.reden === 'bezig' ? 409 : 200, j: u }; }
+  if (opdracht === 'meet' || opdracht === 'lees') { const u = await homeyRondeDraai('machinekamer', opdracht); return { status: u.reden === 'bezig' ? 409 : 200, j: u }; }
+  if (opdracht === 'vault') { const v = homeyVaultSchrijf(true); return { status: v.ok ? 200 : 409, j: v }; }
   if (opdracht === 'stand') {
     const s = await homeyKind('stand', {});
     return { status: 200, j: Object.assign({ ok: !!(s.j && s.j.ok) }, homeySchoon(s.j), { info: homeyInfo() }) };
   }
-  return { status: 400, j: { ok: false, fout: 'opdracht: link, meet, stand' } };
+  return { status: 400, j: { ok: false, fout: 'opdracht: link, meet, lees, vault, stand' } };
 }
+// wv3462 (20-11-2026): fasemeting. WAAROM. Bij laden + koken klapt thuis de fasezekering (3 × 25 A); de Homey Energy Dongle meet per fase.
+// HOE. homeyTik (elke 5 min) start hooguit één leesronde per 55 min (Insights 'lastHour' = 5-s-waarden van het laatste uur; per minuut
+// de hoogste naar HOMEY_DIR/meting). Ook een mislukte poging telt als ronde (geen herhaling elke 5 min; de boxrij zit in homeyRondeDraai).
+// Eén keer per NL-dag (vanaf 01:00) zet homeyVaultSchrijf de tabel van de laatste 14 dagen tussen de markers op de energiepagina.
+const HOMEY_LEES_MS = 55 * 60 * 1000;
+const HOMEY_P_ENERGIE = '20_Prive/Financien/Energieverbruik thuis (Tibber).md';
+let homeyLeesPoging = 0;
+function homeyVaultStaat() { try { return JSON.parse(fs.readFileSync(path.join(HOMEY_DIR, 'vault.json'), 'utf8')); } catch (e) { return null; } }
+function homeyVaultSchrijf(dwing) {
+  if (!homeyMod || typeof homeyMod.vaultBlok !== 'function') return { ok: false, fout: 'homey.js zonder dagtabel' };
+  const nuIso = new Date().toISOString(), nl = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const vorig = homeyVaultStaat();
+  if (!dwing && ((vorig && vorig.dag === nl.slice(0, 10)) || Number(nl.slice(11, 13)) < 1)) return { ok: false, fout: 'vandaag al geschreven' };
+  let z = null;
+  try {
+    const blok = homeyMod.vaultBlok(HOMEY_DIR, nuIso);
+    const ok = VV().wijzig(path.join(VAULT, HOMEY_P_ENERGIE), function (pagina) { z = homeyMod.blokZet(pagina, blok); return z; }, { krimpGrens: true });
+    if (!ok || z == null) { if (z == null) homeyBoxRij('vault', 'dagtabel niet gezet: markers op de energiepagina half of dubbel'); return { ok: false, fout: z == null ? 'markers half of dubbel' : 'pagina veranderde tijdens schrijven' }; }
+    const p = path.join(HOMEY_DIR, 'vault.json'), tmp = p + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ dag: nl.slice(0, 10), tijd: nuIso }), { mode: 0o600 }); fs.renameSync(tmp, p);
+    schrijfLog(nu() + ' homey ' + velden({ opdracht: 'vault', ok: true }));
+    return { ok: true, dag: nl.slice(0, 10) };
+  } catch (e) { logError('homey-vault', e); return { ok: false, fout: String(e && e.message || e).slice(0, 120) }; }
+}
+function homeyTik() {
+  if (!homeyMod || homeyBezig || !rolPrimair() || Date.now() - homeyLeesPoging < HOMEY_LEES_MS) return;
+  if (!fs.existsSync(path.join(HOMEY_DIR, 'gekoppeld.json'))) return;
+  homeyLeesPoging = Date.now();
+  homeyRondeDraai('uur', 'lees').then(function (u) { if (u && u.ok === true) homeyVaultSchrijf(false); }).catch(function (e) { logError('homey-lees', e); });
+}
+if (homeyMod && SERVER_ECHT) { setTimeout(homeyTik, 4 * 60000).unref(); setInterval(homeyTik, 5 * 60000).unref(); }
 // Terugkeer na Davids inlog. Athom levert code en state als form_post (POST, application/x-www-form-urlencoded); GET met query ook.
 function homeyTerug(req, res) {
   const kaal404 = function () { if (!res.headersSent) { res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('niet gevonden'); } };

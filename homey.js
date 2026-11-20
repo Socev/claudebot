@@ -15,12 +15,21 @@
  *     (refresh → tokens), meet (MCP initialize + tools/list; de lijst naar HOMEY_DIR/tools.json), stand (lokaal).
  *
  * ALLEEN LEZEN, HARD. Eén fetch, in roep(), altijd eerst door verzoekToets: POST alleen op /oauth2/token of op het MCP-adres, en op
- * het MCP-adres alleen de JSON-RPC-methoden initialize, notifications/initialized en tools/list. tools/call kan deze release dus niet:
- * geen apparaat lezen of schakelen, geen Flow of Mood. Een leeslijst van tools (vaste namen) komt pas na het meten van de toollijst,
- * in een eigen bouwstap met review. Redirects uit. Een toetsbasis mag alleen http://127.0.0.1:<poort> zijn.
+ * het MCP-adres alleen de JSON-RPC-methoden initialize, notifications/initialized, tools/list en tools/call. tools/call alleen via
+ * leesToets (wv3462): de vaste leeslijst list_devices (zonder argumenten) en get_insights_log_entries_number (precies logId +
+ * resolution 'lastHour', logId alleen fasestroom/-vermogen of energy_power van één apparaat). Geen schakelen, geen Flow, Mood of
+ * variabele, geen ander argument (ook geen homeyId: Athom neemt dan de eerste Homey). Redirects uit. Toetsbasis alleen 127.0.0.1.
+ *
+ * FASEMETING (wv3462, 20-11-2026). Gemeten 20-11: de Homey Energy Dongle geeft per fase stroom (A, hele getallen), vermogen (W) en
+ * belasting (%, t.o.v. de hoofdzekering 25 A); Insights 'lastHour' = één waarde per 5 s (720 punten); 'last24Hours' = 5 min en faalt
+ * bij Athom zodra er één lege waarde in zit (MCP -32602, o.a. van vóór de aansluiting). Daarom: opdracht lees, één keer per uur (de
+ * pod-tik), het laatste uur van 3 × stroom + 3 × vermogen per fase en het laadpaalvermogen, per minuut de hoogste waarde naar
+ * HOMEY_DIR/meting/<dag>.json (overlap vloeit samen). Plus de meterstanden van de dongle en de laadpaalstand uit list_devices.
+ * Alleen getallen en apparaat-id's; geen namen van apparaten, zones of personen (list_devices bevat die wel: blijft in het kind).
  *
  * OPSLAG. HOMEY_DIR (700): states.json (sha256 van de state, 72 uur, eenmalig), refresh.nood (alleen tussen verversen en kluis),
- * dood.json (sha van een dood token), ronde.lock, tools.json (namen, korte omschrijving, hints, invoerveldnamen; geen tokens).
+ * dood.json (sha van een dood token), ronde.lock, tools.json (namen, korte omschrijving, hints, invoerveldnamen; geen tokens),
+ * meting/<JJJJ-MM-DD>.json (per minuut [A1,A2,A3,W1,W2,W3,Wtotaal,Wlaadpaal], standen, laadpaal; 600).
  */
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
 
@@ -38,7 +47,10 @@ const BASIS = basis(process.env.HOMEY_BASIS, 'https://mcp.athom.com');
 const TOKEN_PAD = '/oauth2/token';
 const MCP_PAD = '/';
 const AUTHORIZE = 'https://mcp.athom.com/oauth2/authorise';
-const METHODEN = new Set(['initialize', 'notifications/initialized', 'tools/list']);
+const METHODEN = new Set(['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
+const LEESLIJST = Object.freeze(['list_devices', 'get_insights_log_entries_number']);
+const RESOLUTIE = 'lastHour';
+const LOG_VORM = /^homey:device:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(measure_current\.phase[123]|measure_power\.phase[123]|energy_power)$/;
 const PROTOCOL = '2025-06-18';
 
 class HomeyFout extends Error { constructor(reden, uitleg, status) { super(uitleg || reden); this.reden = reden; this.status = status || null; } }
@@ -51,7 +63,18 @@ function verzoekToets(methode, url, rpc) {
   if (u.pathname === TOKEN_PAD) { if (rpc) throw new HomeyFout('pad', 'geen JSON-RPC op het tokenendpoint'); return u.href; }
   if (u.pathname !== MCP_PAD) throw new HomeyFout('pad', 'Homey-pad niet toegestaan');
   if (!rpc || typeof rpc !== 'object' || Array.isArray(rpc) || rpc.jsonrpc !== '2.0' || !METHODEN.has(rpc.method)) throw new HomeyFout('pad', 'MCP-methode niet toegestaan');
+  if (rpc.method === 'tools/call') leesToets(rpc.params);
   return u.href;
+}
+// tools/call alleen met een naam uit LEESLIJST en precies deze argumentvorm (wv3462).
+function gewoon(o) { return !!o && typeof o === 'object' && !Array.isArray(o) && Object.getPrototypeOf(o) === Object.prototype; }
+function leesToets(p) {
+  const nee = function () { throw new HomeyFout('pad', 'MCP-tool niet toegestaan'); };
+  if (!gewoon(p) || Object.keys(p).sort().join(',') !== 'arguments,name' || LEESLIJST.indexOf(p.name) < 0 || !gewoon(p.arguments)) nee();
+  const a = p.arguments, k = Object.keys(a).sort().join(',');
+  if (p.name === 'list_devices') { if (k !== '') nee(); return true; }
+  if (k !== 'logId,resolution' || a.resolution !== RESOLUTIE || typeof a.logId !== 'string' || !LOG_VORM.test(a.logId)) nee();
+  return true;
 }
 function slaap(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 // SSE of JSON → het JSON-RPC-antwoord met dit id (of null)
@@ -189,7 +212,7 @@ async function kluisBewaar(deps, waarde) {
   }
   throw new HomeyFout('kluis', 'nieuw token niet in de kluis: ' + laatste);
 }
-async function ronde(deps) {
+async function ronde(deps, soort) {
   const dir = deps.dir, uit = { ok: false, begin: new Date().toISOString() };
   if (!slotNeem(dir)) return Object.assign(uit, { reden: 'bezig', fout: 'er loopt al een Homey-ronde' });
   try {
@@ -213,7 +236,7 @@ async function ronde(deps) {
     noodWis(dir);
     uit.geroteerd = !!(nieuw && nieuw !== refresh);
     uit.verloopt_s = v.j.verloopt_s || null;
-    const r = await deps.kind('meet', { access: v.j._access });
+    const r = await deps.kind(soort === 'lees' ? 'lees' : 'meet', { access: v.j._access });
     const j = r.j || { ok: false, fout: 'meten gaf geen JSON (exit ' + r.code + ')' };
     return Object.assign(uit, j, { begin: uit.begin, geroteerd: uit.geroteerd, nood_hersteld: uit.nood_hersteld, verloopt_s: uit.verloopt_s });
   } catch (e) {
@@ -288,6 +311,167 @@ async function kindMeet(invoer, dir) {
   fs.renameSync(tmp, p);
   return uit;
 }
+// ── fasemeting (wv3462) ───────────────────────────────────────────────────────────────────────────────────────────────
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const FASE_CAPS = ['measure_current.phase1', 'measure_current.phase2', 'measure_current.phase3', 'measure_power.phase1', 'measure_power.phase2', 'measure_power.phase3'];
+const NL = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+function nlMinuut(t) { const s = NL.format(new Date(t)); return { dag: s.slice(0, 10), mm: s.slice(11, 16) }; }
+function getal(v) { return typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 1000) / 1000 : null; }
+function hoogst(a, b) { return a == null ? b : b == null ? a : Math.max(a, b); }
+function gestructureerd(res, sleutel) {
+  const sc = res && res.structuredContent;
+  if (res && res.isError) throw new HomeyFout('mcp', 'MCP-tool gaf een fout');
+  if (!sc || !Array.isArray(sc[sleutel])) throw new HomeyFout('mcp', 'MCP-tool zonder ' + sleutel);
+  return sc[sleutel];
+}
+// Kies uit list_devices de dongle (heeft alle zes fasewaarden) en de laadpaal (type evcharger). Alleen id's en getallen gaan verder.
+function apparatenKies(devs) {
+  const dongle = devs.find(function (d) { return d && UUID.test(String(d.id)) && d.state && FASE_CAPS.every(function (c) { return getal(d.state[c]) != null; }); }) || null;
+  const laad = devs.find(function (d) { return d && UUID.test(String(d.id)) && d.type === 'evcharger' && d.state; }) || null;
+  const st = function (d, c) { return d ? getal(d.state[c]) : null; };
+  return {
+    dongle: dongle ? dongle.id : null, laadpaal: laad ? laad.id : null,
+    stand: dongle ? { import_kwh: st(dongle, 'meter_power.imported'), export_kwh: st(dongle, 'meter_power.exported'), import_vandaag_kwh: st(dongle, 'meter_power.imported_today'),
+      export_vandaag_kwh: st(dongle, 'meter_power.exported_today'), tarief: st(dongle, 'current_tariff'), w: st(dongle, 'measure_power'),
+      a: [1, 2, 3].map(function (i) { return st(dongle, 'measure_current.phase' + i); }), w3: [1, 2, 3].map(function (i) { return st(dongle, 'measure_power.phase' + i); }) } : null,
+    laad: laad ? { laden: laad.state.evcharger_charging === true, w: st(laad, 'measure_power'), a_instelling: st(laad, 'measure_current'), kwh: st(laad, 'meter_power'),
+      toestand: typeof laad.state.evcharger_charging_state === 'string' ? laad.state.evcharger_charging_state.replace(/[^a-z_]/g, '').slice(0, 30) : null } : null,
+  };
+}
+// Reeksen (per log [{t, v}]) → per NL-dag per minuut [A1,A2,A3,W1,W2,W3,Wtotaal,Wlaadpaal] met de hoogste waarde in die minuut.
+// Wtotaal = hoogste som van de drie fasevermogens op hetzelfde 5-s-tijdstip.
+function perMinuut(reeksen) {
+  const uit = {}, som = {};
+  const zet = function (t, i, v) {
+    if (v == null || !Number.isFinite(Date.parse(t))) return;
+    const k = nlMinuut(t);
+    const dag = uit[k.dag] || (uit[k.dag] = {});
+    const r = dag[k.mm] || (dag[k.mm] = [null, null, null, null, null, null, null, null]);
+    r[i] = hoogst(r[i], v);
+  };
+  ['a1', 'a2', 'a3', 'w1', 'w2', 'w3'].forEach(function (n, i) {
+    (reeksen[n] || []).forEach(function (e) {
+      const v = getal(e && e.v); zet(e && e.t, i, v);
+      if (i >= 3 && v != null) { const s = som[e.t] || (som[e.t] = [0, 0]); s[0] += v; s[1]++; }
+    });
+  });
+  Object.keys(som).forEach(function (t) { if (som[t][1] === 3) zet(t, 6, Math.round(som[t][0])); });
+  (reeksen.ev || []).forEach(function (e) { zet(e && e.t, 7, getal(e && e.v)); });
+  return uit;
+}
+function metingPad(dir, dag) { return path.join(dir, 'meting', dag + '.json'); }
+function metingLees(dir, dag) { try { const j = JSON.parse(fs.readFileSync(metingPad(dir, dag), 'utf8')); return j && j.m ? j : null; } catch (e) { return null; } }
+function metingSchrijf(dir, dag, j) {
+  mapKlaar(path.join(dir, 'meting'));
+  const p = metingPad(dir, dag), tmp = p + '.' + process.pid + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(j), { mode: 0o600 });
+  fs.renameSync(tmp, p);
+}
+function metingVoegToe(dir, perDag, stand, nuIso) {
+  let nieuw = 0;
+  Object.keys(perDag).forEach(function (dag) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dag)) return;
+    const j = metingLees(dir, dag) || { dag: dag, m: {}, standen: [] };
+    Object.keys(perDag[dag]).forEach(function (mm) {
+      const r = perDag[dag][mm], o = j.m[mm];
+      if (!o) nieuw++;
+      j.m[mm] = o ? o.map(function (x, i) { return hoogst(x, r[i]); }) : r;
+    });
+    metingSchrijf(dir, dag, j);
+  });
+  if (stand) {
+    const dag = nlMinuut(nuIso).dag;
+    const j = metingLees(dir, dag) || { dag: dag, m: {}, standen: [] };
+    j.standen = (j.standen || []).concat([Object.assign({ t: nuIso }, stand)]).slice(-48);
+    metingSchrijf(dir, dag, j);
+  }
+  return nieuw;
+}
+async function kindLees(invoer, dir) {
+  const token = invoer.access;
+  if (typeof token !== 'string' || !TOKEN_VORM.test(token)) throw new HomeyFout('token', 'geen access token');
+  const staat = { sessie: null, protocol: PROTOCOL };
+  const init = await rpc(token, staat, 'initialize', { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: 'Socev', version: '1.0' } }, 1);
+  if (typeof init.protocolVersion === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(init.protocolVersion)) staat.protocol = init.protocolVersion;
+  await rpc(token, staat, 'notifications/initialized', null, null);
+  let n = 2;
+  const keus = apparatenKies(gestructureerd(await rpc(token, staat, 'tools/call', { name: 'list_devices', arguments: {} }, n++), 'devices'));
+  if (!keus.dongle) throw new HomeyFout('dongle', 'geen apparaat met stroom en vermogen per fase gevonden');
+  const logs = { a1: 'measure_current.phase1', a2: 'measure_current.phase2', a3: 'measure_current.phase3', w1: 'measure_power.phase1', w2: 'measure_power.phase2', w3: 'measure_power.phase3' };
+  const reeksen = {}, gaten = [];
+  const haal = async function (naam, id, cap) {
+    try {
+      const res = await rpc(token, staat, 'tools/call', { name: 'get_insights_log_entries_number', arguments: { logId: 'homey:device:' + id + ':' + cap, resolution: RESOLUTIE } }, n++);
+      reeksen[naam] = gestructureerd(res, 'entries').slice(0, 5000);
+    } catch (e) { if (e.reden === 'mcp') gaten.push(naam); else throw e; }   // -32602: Athom weigert een reeks met een lege waarde
+  };
+  for (const k of Object.keys(logs)) await haal(k, keus.dongle, logs[k]);
+  if (keus.laadpaal) await haal('ev', keus.laadpaal, 'energy_power');
+  const nu = new Date().toISOString();
+  const stand = Object.assign({}, keus.stand, { laadpaal: keus.laad });
+  const nieuw = metingVoegToe(dir, perMinuut(reeksen), stand, nu);
+  const hoogste = [1, 2, 3].map(function (i) { return (reeksen['a' + i] || []).reduce(function (m, e) { return hoogst(m, getal(e && e.v)); }, null); });
+  return { ok: true, soort: 'lees', tijd: nu, minuten: nieuw, gaten: gaten, nu_a: keus.stand.a, uur_max_a: hoogste, laadpaal: !!keus.laadpaal,
+    laden: !!(keus.laad && keus.laad.laden) };
+}
+// ── dagtabel voor de energiepagina (server.js schrijft; hier alleen tekst) ──────────────────────────────────────────────
+const BLOK_BEGIN = '<!-- homey-fase:begin -->', BLOK_EINDE = '<!-- homey-fase:einde -->';
+const KOP = '## Fasebelasting thuis uit Homey (automatisch, sinds 20-11-2026)';
+const WAARSCHUW_A = 20, ZEKERING_A = 25;
+function dagSamenvat(j) {
+  const ks = Object.keys(j.m || {}).sort();
+  const s = { dag: j.dag, minuten: ks.length, eerste: ks[0] || null, laatste: ks[ks.length - 1] || null, max_a: [null, null, null], max_a_om: [null, null, null],
+    boven_20: [0, 0, 0], boven_25: [0, 0, 0], piek_w: null, piek_w_om: null, laad_min: 0, laad_max_w: null, kwh: null };
+  ks.forEach(function (mm) {
+    const r = j.m[mm];
+    for (let i = 0; i < 3; i++) {
+      const a = r[i];
+      if (a == null) continue;
+      if (s.max_a[i] == null || a > s.max_a[i]) { s.max_a[i] = a; s.max_a_om[i] = mm; }
+      if (a >= WAARSCHUW_A) s.boven_20[i]++;
+      if (a > ZEKERING_A) s.boven_25[i]++;
+    }
+    if (r[6] != null && (s.piek_w == null || r[6] > s.piek_w)) { s.piek_w = r[6]; s.piek_w_om = mm; }
+    if (r[7] != null && r[7] >= 1000) s.laad_min++;
+    s.laad_max_w = hoogst(s.laad_max_w, r[7]);
+  });
+  const st = (j.standen || []).filter(function (x) { return x && typeof x.import_kwh === 'number'; });
+  if (st.length >= 2) s.kwh = Math.round((st[st.length - 1].import_kwh - st[0].import_kwh) * 10) / 10;
+  return s;
+}
+function nlGetal(v, d) { return v == null ? '–' : (Math.round(v * 10 ** d) / 10 ** d).toFixed(d).replace('.', ','); }
+function vaultBlok(dir, nuIso) {
+  let dagen = [];
+  try { dagen = fs.readdirSync(path.join(dir, 'meting')).filter(function (f) { return /^\d{4}-\d{2}-\d{2}\.json$/.test(f); }).sort().reverse().slice(0, 14); } catch (e) {}
+  const vandaag = nlMinuut(nuIso).dag;
+  const rijen = [];
+  dagen.forEach(function (f) {
+    const j = metingLees(dir, f.slice(0, 10));
+    if (!j) return;
+    const s = dagSamenvat(j);
+    if (!s.minuten) return;
+    const dag = s.dag.slice(8, 10) + '-' + s.dag.slice(5, 7) + (s.dag === vandaag ? ' (t/m ' + s.laatste + ')' : '');
+    const maxA = s.max_a.map(function (a) { return a == null ? '–' : String(a); }).join(' / ');
+    const fi = s.max_a.reduce(function (b, a, i) { return a != null && (b < 0 || a > s.max_a[b]) ? i : b; }, -1);
+    rijen.push('| ' + dag + ' | ' + Math.round(s.minuten / 6) / 10 + ' u | ' + maxA + (fi >= 0 ? ' (L' + (fi + 1) + ' om ' + s.max_a_om[fi] + ')' : '') + ' | ' +
+      s.boven_20.join(' / ') + ' | ' + s.boven_25.join(' / ') + ' | ' + (s.piek_w == null ? '–' : nlGetal(s.piek_w / 1000, 1) + ' kW om ' + s.piek_w_om) + ' | ' +
+      (s.laad_max_w == null ? '–' : s.laad_min + ' min, piek ' + nlGetal(s.laad_max_w / 1000, 1) + ' kW') + ' | ' + (s.kwh == null ? '–' : nlGetal(s.kwh, 1)) + ' |');
+  });
+  const bij = NL.format(new Date(nuIso));
+  return [BLOK_BEGIN,
+    'Bron: Homey Energy Dongle op de slimme meter (3-fase, hoofdzekering ' + ZEKERING_A + ' A) en de laadpaal in Homey; elk uur het laatste uur per 5 seconden,',
+    'per minuut de hoogste waarde. ' + WAARSCHUW_A + ' A = 80 % van de zekering. Alleen lezen; Socev schakelt niets. Bijgewerkt ' + bij + '.',
+    '',
+    '| Dag | Gemeten | Hoogste stroom L1 / L2 / L3 (A) | Minuten ≥ ' + WAARSCHUW_A + ' A (L1/L2/L3) | Minuten > ' + ZEKERING_A + ' A | Piek totaal | Laadpaal (≥ 1 kW) | Afname kWh |',
+    '|---|---|---|---|---|---|---|---|'].concat(rijen.length ? rijen : ['| – | nog geen meting | | | | | | |']).concat([BLOK_EINDE]).join('\n');
+}
+function blokZet(pagina, blok) {
+  const t = String(pagina), b = t.indexOf(BLOK_BEGIN), e = t.indexOf(BLOK_EINDE);
+  if (b >= 0 && e > b && t.indexOf(BLOK_BEGIN, b + 1) < 0) return t.slice(0, b) + blok + t.slice(e + BLOK_EINDE.length);
+  if (b >= 0 || e >= 0) return null;   // half of dubbel blok: niet raden
+  return t.replace(/\s*$/, '') + '\n\n' + KOP + '\n\n' + blok + '\n';
+}
+
 function kindStand(dir) {
   let t = null; try { t = JSON.parse(fs.readFileSync(path.join(dir, 'tools.json'), 'utf8')); } catch (e) {}
   return { ok: true, nood: !!noodLees(dir), dood: !!doodLees(dir), tools: t ? { tijd: t.tijd, server: t.server, aantal: t.tools, alleen_lezen: t.alleen_lezen, namen: (t.lijst || []).map(function (x) { return x.naam; }) } : null };
@@ -295,7 +479,8 @@ function kindStand(dir) {
 async function kind(opdracht, invoer, dir) {
   if (opdracht === 'stand') return kindStand(dir);
   if (opdracht === 'meet') return kindMeet(invoer, dir);
-  if (opdracht !== 'wissel' && opdracht !== 'ververs') throw new HomeyFout('opdracht', 'opdracht: wissel, ververs, meet, stand');
+  if (opdracht === 'lees') return kindLees(invoer, dir);
+  if (opdracht !== 'wissel' && opdracht !== 'ververs') throw new HomeyFout('opdracht', 'opdracht: wissel, ververs, meet, lees, stand');
   const id = String(invoer.client_id || ''), geheim = String(invoer.client_secret || '');
   if (!id || !geheim) throw new HomeyFout('sleutel', 'client-id of -secret ontbreekt');
   let form;
@@ -325,4 +510,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { REDIRECT, METHODEN, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodWis, doodLees, verzoekToets, rpcUit, sha, HomeyFout };
+module.exports = { REDIRECT, METHODEN, LEESLIJST, leesToets, perMinuut, apparatenKies, dagSamenvat, vaultBlok, blokZet, metingLees, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodWis, doodLees, verzoekToets, rpcUit, sha, HomeyFout };
