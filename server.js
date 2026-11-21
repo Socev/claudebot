@@ -6062,6 +6062,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/sleutels/nieuw', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/te-lezen']);   // wv2245: afvinken of bewaren = David die leest   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });
+APP_GLIJD_ROUTES.add('POST /app/briefing/punt');   // wv3685: een tik onder een briefingpunt = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/voor-jou/woord');   // wv3250: een steekwoordkeuze is David die werkt   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
 APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
@@ -9756,7 +9757,7 @@ async function appBriefingLaad() {
   const l = await appLogLees('hoofd');
   for (let i = l.length - 1; i >= 0; i--) {
     const x = l[i];
-    if (x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse !== 'stil' && x.ok !== false && /^[a-f0-9]{16}$/.test(String(x.job_id || '')) && String(x.antwoord || '').trim()) { b = appBriefingVorm(x); b.tekst = appMoetBericht(x.antwoord); break; }
+    if (x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse !== 'stil' && x.ok !== false && /^[a-f0-9]{16}$/.test(String(x.job_id || '')) && String(x.antwoord || '').trim()) { b = appBriefingVorm(x); b.tekst = appMoetBericht(x.antwoord); b.p = appBriefingPuntenVan(b.tekst, b.dag); break; }
   }
   // wv594: de gesproken briefing (stille 🔊-regel, bron briefing) van dezelfde dag, jongste eerst; het bestand zoekt de route per verzoek op
   const stem = [];
@@ -9774,8 +9775,8 @@ async function appBriefingRoute(req, res, a) {
 // wv594: tekst (de hele briefing, voor Lees in Voor jou) en audio ({job_id, n, naam} van de gesproken briefing), op elk apparaat (wv1901/wv3446).
 function appBriefingVoor(b) {
   if (!b) return null;
-  const { stem, tekst, ...kaal } = b;
-  return Object.assign({}, kaal, { tekst: tekst || null, audio: appBriefingAudio(stem) });
+  const { stem, tekst, p, ...kaal } = b;
+  return Object.assign({}, kaal, { tekst: tekst || null, audio: appBriefingAudio(stem) }, appBriefingPuntenVoor(b));
 }
 function appBriefingAudio(stem) {
   for (const job of stem || []) {
@@ -9785,6 +9786,94 @@ function appBriefingAudio(stem) {
     if (i >= 0) return { job_id: job, n: Number(m.bestanden[i].n) > 0 ? Number(m.bestanden[i].n) : i + 1, naam: m.bestanden[i].naam };   // review #9
   }
   return null;
+}
+// ── wv3685 (besluitenpagina nr 367 = 3C67, David Ja 21-11 12:41): één tik per punt van het ochtendbericht ──
+// GET /app/briefing geeft naast de tekst: blokken (tekst en punten in volgorde), punten (aantal) en standen ({id: gedaan|later|
+// klopt_niet}); geen bolletjes = null, de app toont dan de tekst zoals altijd. Het punt-model staat in briefing-punten.js.
+// POST /app/briefing/punt {dag, id, stand: gedaan|later|klopt_niet|open}: legt alleen vast (APP_DATA/briefing-punten.json, 14 dagen);
+// er wordt niets verstuurd of gepland. Gedaan en Klopt niet van de briefing van dag D gaan als één rij bron 'briefing_correctie'
+// (datum D+1, upsert op bron) in ochtend_buffer; de Dagelijkse briefing van D+1 meldt die punten dan niet opnieuw als open. Alles per
+// tik in één keten (geen twee schrijvers op het bestand). Lukt de rij niet, dan staat de tik er wel (buffer.ok false) en probeert
+// de volgende GET /app/briefing het opnieuw.
+const BP = (function () { try { return require(path.join(__dirname, 'briefing-punten.js')); } catch (e) { console.error('briefing-punten.js:', e.message); return null; } })();
+const APP_BRIEFING_PUNTEN = path.join(APP_DATA, 'briefing-punten.json');
+const APP_BRIEFING_PUNT_PER_UUR = 200;
+const APP_BRIEFING_PUNT_ID = /^p[a-f0-9]{12}(-\d{1,3})?$/;
+const BRIEFING_CORRECTIE_FILTER = { type: 'and', filters: [{ columnName: 'bron', condition: 'eq', value: 'briefing_correctie' }] };
+let appBriefingPuntKeten = Promise.resolve();
+function appBriefingVaultBestaat(pad) {
+  try { return fs.existsSync(path.join(VAULT, pad + '.md')) || fs.existsSync(path.join(VAULT, pad)); } catch (e) { return false; }
+}
+function appBriefingPuntenVan(tekst, dag) {
+  if (!BP) return null;
+  try { return BP.punten(tekst, dag, { bestaat: appBriefingVaultBestaat }); } catch (e) { logError('briefing-punten', e); return null; }
+}
+function appBriefingPuntenLees() {
+  const m = appLeesStreng(APP_BRIEFING_PUNTEN, { versie: 1, edities: {} });
+  if (!m.edities || typeof m.edities !== 'object') m.edities = {};
+  return m;
+}
+function appBriefingPuntenVoor(b) {
+  if (!BP || !b.p || !b.p.punten.length) return { blokken: null, punten: null, standen: null };
+  let standen = null;
+  try {
+    const m = appBriefingPuntenLees(), sl = BP.editieSleutel('briefing', b.dag), e = m.edities[sl];
+    standen = BP.standenVan(m, sl);
+    if (e && e.buffer && e.buffer.ok === false && !appStaat.briefingDoorBezig) {   // eerder mislukt: nog eens, buiten deze leesbeurt
+      appStaat.briefingDoorBezig = true;
+      const deze = appBriefingPuntKeten.then(function () { return appBriefingCorrectieDoor(b.dag); });
+      appBriefingPuntKeten = deze.catch(function () {}).then(function () { appStaat.briefingDoorBezig = false; });
+    }
+  } catch (e) { logError('briefing-punten', e); standen = null; }
+  return { blokken: b.p.blokken, punten: b.p.punten.length, standen: standen };
+}
+async function appBriefingCorrectieRij(datum, tekst) {
+  const body = { filter: BRIEFING_CORRECTIE_FILTER, data: { bron: 'briefing_correctie', datum: datum, tekst: tekst }, returnData: true };
+  const poging = function () { return appN8nZend('POST', '/data-tables/' + APP_MELD_TABEL + '/rows/upsert', body); };
+  await poging().catch(function () { return new Promise(function (ok) { setTimeout(ok, 2000); }).then(poging); });
+  const j = await appN8nZend('GET', '/data-tables/' + APP_MELD_TABEL + '/rows?limit=5&filter=' + encodeURIComponent(JSON.stringify(BRIEFING_CORRECTIE_FILTER)));
+  const l = (Array.isArray(j && j.data) ? j.data : []).filter(function (r) { return r && r.bron === 'briefing_correctie' && r.datum === datum && String(r.tekst || '') === tekst; });
+  if (!l.length) throw new Error('rij na het schrijven niet teruggelezen');
+}
+// alleen binnen appBriefingPuntKeten aanroepen; geeft true als de rij voor morgen klopt
+async function appBriefingCorrectieDoor(dag) {
+  const sl = BP.editieSleutel('briefing', dag);
+  let ok = true;
+  try { await appBriefingCorrectieRij(BP.volgendeDag(dag), BP.correctieTekst(appBriefingPuntenLees(), sl, dag)); }
+  catch (e) { ok = false; logError('briefing-correctie', e); }
+  try {
+    const m = appBriefingPuntenLees();
+    if (m.edities[sl]) { m.edities[sl].buffer = { ok: ok, t: new Date().toISOString() }; appSchrijfJson(APP_BRIEFING_PUNTEN, m); }
+  } catch (e) { logError('briefing-punten', e); }
+  return ok;
+}
+async function appBriefingPuntRoute(req, res, a, d) {
+  if (!BP) return appWeiger(res, 503, 'nu niet beschikbaar', 'briefing-punten.js');
+  const dag = String(d.dag || ''), id = String(d.id || '');
+  const stand = d.stand === null || d.stand === undefined || d.stand === 'open' ? null : String(d.stand);
+  if (!APP_DAG_RE.test(dag) || !APP_BRIEFING_PUNT_ID.test(id) || (stand !== null && BP.STANDEN.indexOf(stand) < 0)) return appWeiger(res, 400, 'ongeldig verzoek', 'briefing-punt velden');
+  if (!appTeller('briefingpunt', APP_BRIEFING_PUNT_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens briefing-punt');
+  let b;
+  try { b = await appBriefingLaad(); } catch (e) { logError('app-briefing', e); return appWeiger(res, 503, 'de briefing is nu niet te lezen', 'app-log'); }
+  if (!b || b.dag !== dag || !b.p) return appWeiger(res, 404, 'dit is niet meer de briefing van vandaag; herlaad', 'briefing-punt dag');
+  const punt = b.p.punten.find(function (x) { return x.id === id; });
+  if (!punt) return appWeiger(res, 404, 'punt niet gevonden; herlaad', 'briefing-punt id');
+  const sl = BP.editieSleutel('briefing', dag);
+  const deze = appBriefingPuntKeten.then(async function () {
+    const m = BP.snoei(appBriefingPuntenLees(), Date.now(), 14);
+    const oud = BP.zetStand(m, sl, punt, stand, Date.now());
+    const telt = function (x) { return x === 'gedaan' || x === 'klopt_niet'; };
+    const raakt = oud !== stand && (telt(oud) || telt(stand));
+    if (raakt) m.edities[sl].buffer = { ok: false, t: new Date().toISOString() };
+    appSchrijfJson(APP_BRIEFING_PUNTEN, m);
+    const morgen = raakt ? await appBriefingCorrectieDoor(dag) : null;
+    return { standen: BP.standenVan(appBriefingPuntenLees(), sl), morgen: morgen };
+  });
+  appBriefingPuntKeten = deze.catch(function () {});
+  let r;
+  try { r = await deze; } catch (e) { logError('briefing-punten', e); return appWeiger(res, 500, 'opslaan lukte niet; tik nog eens', 'briefing-punten.json schrijven'); }
+  res._app.reden = 'briefingpunt ' + (stand || 'open') + (r.morgen === false ? ' (rij voor morgen mislukt)' : '');
+  appStuur(res, 200, { ok: true, id: id, stand: stand, standen: r.standen, morgen: r.morgen });
 }
 
 // ── fase 5a: tabs Agents en Bestanden (wv98, 8-10-2026; bouwplan § 4.7 en § 4.9) ──
@@ -15745,6 +15834,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/zoek-snel/treffers') return typeof appZoekSnelTreffers === 'function' ? appZoekSnelTreffers(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'zoek-snel treffers');   // wv3682
         if (route === 'GET /app/broedstoof') return appBroedstoof(req, res, a);   // wv891: apparaat (privé-kaart op een vaste plek)
         if (route === 'GET /app/briefing') return appBriefingRoute(req, res, a);   // wv891
+        if (route === 'POST /app/briefing/punt') return appBriefingPuntRoute(req, res, a, d);   // wv3685
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
         if (route === 'POST /app/broedstoof/knop') return appBroedstoofKnop(req, res, reg, a, s, d);   // wv3731
         if (route === 'GET /app/agents') return appAgents(req, res, a);
