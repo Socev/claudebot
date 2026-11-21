@@ -18954,6 +18954,14 @@ function facturenDirectBox(j) {
 function facturenIo() {
   return { luik: appAgendaApi, luikBytes: facturenLuikBytes, verzender: facturenVerzender, pdfSchaduw: pdfSchaduw, pdfLive: pdfLive,   // wv1431: schaduw PDF-lezer; wv1921: live
     directKlaar: facturenDirectKlaar,   // wv2480
+    // wv3660: lokale OCR van een scan zonder model (pdftoppm + tesseract, hooguit 3 pagina's, tijdelijk bestand 0600, meteen weg; niets naar buiten)
+    ocrLokaal: function (bytes) { return pdfTijdelijk(bytes, async function (f, map) {
+      const r = await intakeProces('pdftoppm', ['-q', '-r', '200', '-l', '3', '-png', f, path.join(map, 'p')], { ms: 45000 });   // review ZOU 4: kortere grenzen
+      if (r == null) return { ok: false };
+      const delen = [];
+      for (const n of fs.readdirSync(map).filter(function (x) { return /^p.*\.png$/.test(x); }).sort()) { const t = await intakeProces('tesseract', [path.join(map, n), 'stdout', '-l', 'nld+eng', '--psm', '3'], { ms: 45000 }); if (t) delen.push(t); }
+      return delen.length ? { ok: true, tekst: delen.join('\n') } : { ok: false };
+    }); },
     intake: { lijst: async function (max) { const ir = facturenIntakeRouter(); return ir && typeof ir.facturenAangeboden === 'function' ? ir.facturenAangeboden(max) : []; },
       uitkomst: async function (id, versie, r) { const ir = facturenIntakeRouter(); if (!ir || typeof ir.facturenUitkomst !== 'function') throw new Error('intake-router niet geladen'); return ir.facturenUitkomst(id, versie, r); } },
     knoopVoor: async function (x) { const ir = facturenIntakeRouter(); return ir && typeof ir.knoopVoor === 'function' ? ir.knoopVoor(x) : null; } };
