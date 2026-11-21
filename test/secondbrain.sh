@@ -519,6 +519,39 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('12 lees-of-weiger.js gaat mee in de release (uitrol.sh + Dockerfile)', /^RELEASE_OPTIONEEL="[^"]*\blees-of-weiger\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY lees-of-weiger\.js \/app\/release-bootstrap\/lees-of-weiger\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
     toets('12 geen vault, geen oude kaart: geen kaart (niet een lege)', !sbC.vers(true) && sbC.health().knopen === 0 && !!sbC.health().bouw_fout); }
 
+  // ── 13. wv3608 (actieplan 3B25): per dag tellen waar een geopende pagina vandaan kwam; alleen aantallen, geen pad ──
+  { const DH = path.join(W, 'staat-herkomst');
+    let klok = Date.UTC(2026, 10, 20, 22, 30);   // 20-11 23:30 Amsterdamse tijd
+    const sH = S.maak({ vault: V, dir: DH, nu: () => klok, herkomstSchrijfMs: 60000 }); sH.mkdir();
+    const opn = (h, p) => sH.app('POST /app/secondbrain/open', Object.assign({ pad: p || 'index.md' }, h === undefined ? {} : { herkomst: h }), {});
+    await opn('kaart'); await opn('kaart'); await opn('zoeken'); await opn('bladeren');
+    await opn('kaart', 'Bestaat/niet.md');   // 404: telt niet
+    await opn(); await opn('onzin'); await opn(['kaart']);   // geen of onbekende herkomst: telt niet
+    const h1 = sH.health().herkomst || {};
+    toets('13 telling per herkomst vandaag (alleen geslaagde opening met bekende herkomst)', JSON.stringify(h1.vandaag) === JSON.stringify({ kaart: 2, zoeken: 1, bladeren: 1 }), h1);
+    klok += 60 * 60000;   // 21-11 00:30: nieuwe dag (Amsterdam)
+    await opn('link'); await opn('kaart');
+    const h2 = sH.health().herkomst;
+    toets('13 nieuwe dag na middernacht NL; laatste 7 dagen opgeteld', JSON.stringify(h2.vandaag) === JSON.stringify({ link: 1, kaart: 1 }) && h2.dagen7.kaart === 3 && h2.dagen7.zoeken === 1 && h2.dagen7.link === 1, h2);
+    sH._herkomstNu();
+    let hj = null; for (let i = 0; i < 50 && !hj; i++) { await new Promise((r) => setTimeout(r, 20)); try { hj = fs.readFileSync(path.join(DH, 'herkomst.json'), 'utf8'); } catch (e) {} }
+    const st = fs.statSync(path.join(DH, 'herkomst.json'));
+    toets('13 herkomst.json 0600, alleen dagen en aantallen (geen pad of naam)', (st.mode & 0o777) === 0o600 && JSON.stringify(JSON.parse(hj)) === JSON.stringify({ '2026-11-20': { kaart: 2, zoeken: 1, bladeren: 1 }, '2026-11-21': { link: 1, kaart: 1 } }) && !/index|\.md/.test(hj), hj);
+    const sH2 = S.maak({ vault: V, dir: DH, nu: () => klok });
+    const srt = (o) => JSON.stringify(Object.keys(o || {}).sort().map((k) => [k, o[k]]));
+    toets('13 telling overleeft een herstart', srt(sH2.health().herkomst.dagen7) === srt(h2.dagen7), sH2.health().herkomst);
+    klok += 8 * 86400000;
+    toets('13 na 8 dagen: vandaag leeg, oude dagen buiten de week', JSON.stringify(sH2.health().herkomst) === JSON.stringify({ vandaag: {}, dagen7: {} }), sH2.health().herkomst);
+    klok += 120 * 86400000; await sH2.app('POST /app/secondbrain/open', { pad: 'index.md', herkomst: 'terug' }, {}); sH2._herkomstNu();
+    let hj2 = ''; for (let i = 0; i < 50; i++) { await new Promise((r) => setTimeout(r, 20)); hj2 = fs.readFileSync(path.join(DH, 'herkomst.json'), 'utf8'); if (/terug/.test(hj2)) break; }
+    toets('13 dagen ouder dan 120 dagen vallen weg', Object.keys(JSON.parse(hj2)).length === 1 && /terug/.test(hj2), hj2); }
+    // review ZOU 2: rond de klokwissel (25-10-2026) telt de week zeven kalenderdagen
+    const DZ = path.join(W, 'staat-herkomst-zomer'); fs.mkdirSync(DZ, { recursive: true });
+    fs.writeFileSync(path.join(DZ, 'herkomst.json'), JSON.stringify({ '2026-10-19': { kaart: 100 }, '2026-10-20': { kaart: 1 }, '2026-10-26': { zoeken: 1 } }));
+    const sZ = S.maak({ vault: V, dir: DZ, nu: () => Date.UTC(2026, 9, 26, 22, 30) });   // 26-10 23:30 Amsterdam (wintertijd)
+    const srtZ = (o) => JSON.stringify(Object.keys(o || {}).sort().map((k) => [k, o[k]]));
+    toets('13 week rond de klokwissel: 20-10 t/m 26-10, niet 19-10', srtZ(sZ.health().herkomst.dagen7) === srtZ({ kaart: 1, zoeken: 1 }), sZ.health().herkomst);
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

@@ -206,6 +206,63 @@ function maak(opt) {
   const PARSER = crypto.createHash('sha256').update(linksIn.toString()).digest('hex').slice(0, 16);
   let linkCacheSchijf = null;   // sha256 van wat er op schijf staat (niet opnieuw schrijven als er niets veranderde)
 
+  // wv3608 (actieplan 3B25, Fable-review brein-graaf idee 6): per dag tellen waar een geopende pagina vandaan kwam, zodat te zien is of de
+  // kaart (Overzicht) gebruikt wordt naast Bladeren, Zoeken en links. Alleen aantallen per dag en herkomst: geen pad, naam of apparaat.
+  // herkomst.json (0600) naast kaart.json, 120 dagen. Een ontbrekende of onbekende herkomst (oude app, andere aanroeper) telt niet.
+  // Schrijven gebundeld en asynchroon (hooguit eens per 30 s), zodat een pagina openen nooit op de schijf wacht; een podherstart kost
+  // hooguit de laatste 30 s aan tellingen. Te lezen in /health (secondbrain.herkomst: vandaag en de laatste 7 dagen).
+  const HERKOMSTEN = ['kaart', 'bladeren', 'zoeken', 'link', 'app', 'terug', 'herstel', 'venster', 'anders'];
+  const HERKOMST_DAGEN = 120, HERKOMST_SCHRIJF_MS = opt.herkomstSchrijfMs || 30000;
+  let herkomstT = null, herkomstTimer = null, herkomstSchrijft = false, herkomstVuil = false;
+  function herkomstDag(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
+  // review: kalenderdagen terug vanaf de Amsterdamse datum (n × 24 u mist rond een klokwissel een dag)
+  function herkomstDagMin(dag, n) { const [j, m, d] = dag.split('-').map(Number); return new Date(Date.UTC(j, m - 1, d - n)).toISOString().slice(0, 10); }
+  function herkomstLees() {
+    if (herkomstT) return herkomstT;
+    herkomstT = {};
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(DIR, 'herkomst.json'), 'utf8'));
+      if (j && typeof j === 'object' && !Array.isArray(j)) for (const dag of Object.keys(j)) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dag) || !j[dag] || typeof j[dag] !== 'object') continue;
+        const r = {};
+        for (const h of HERKOMSTEN) if (Number.isInteger(j[dag][h]) && j[dag][h] > 0) r[h] = j[dag][h];
+        herkomstT[dag] = r;
+      }
+    } catch (e) { /* geen of onleesbaar bestand: vers beginnen */ }
+    return herkomstT;
+  }
+  function herkomstSchrijf() {
+    herkomstTimer = null;
+    if (herkomstSchrijft) { herkomstVuil = true; return; }
+    herkomstSchrijft = true; herkomstVuil = false;
+    const doel = path.join(DIR, 'herkomst.json'), tmp = doel + '.tmp' + process.pid;
+    fs.promises.writeFile(tmp, JSON.stringify(herkomstT), { mode: 0o600 })
+      .then(function () { return fs.promises.rename(tmp, doel); })
+      .catch(function (e) { fout('secondbrain-herkomst', e); })
+      .then(function () { herkomstSchrijft = false; if (herkomstVuil && !herkomstTimer) herkomstPlan(); });
+  }
+  function herkomstPlan() {
+    if (herkomstTimer) return;
+    herkomstTimer = setTimeout(herkomstSchrijf, HERKOMST_SCHRIJF_MS);
+    if (herkomstTimer.unref) herkomstTimer.unref();
+  }
+  function telHerkomst(h) {
+    if (typeof h !== 'string' || HERKOMSTEN.indexOf(h) < 0) return false;
+    const t = herkomstLees(), n = nu(), dag = herkomstDag(n);
+    t[dag] = t[dag] || {};
+    t[dag][h] = (t[dag][h] || 0) + 1;
+    const grens = herkomstDagMin(dag, HERKOMST_DAGEN);
+    for (const d of Object.keys(t)) if (d < grens) delete t[d];
+    herkomstPlan();
+    return true;
+  }
+  function herkomstStand() {
+    const t = herkomstLees(), vandaag = herkomstDag(nu()), van = herkomstDagMin(vandaag, 6);
+    const week = {};
+    for (const d of Object.keys(t)) if (d >= van && d <= vandaag) for (const h of Object.keys(t[d])) week[h] = (week[h] || 0) + t[d][h];
+    return { vandaag: Object.assign({}, t[vandaag] || {}), dagen7: week };
+  }
+
   function mkdir() {
     try { fs.mkdirSync(DIR, { recursive: true, mode: 0o700 }); fs.chmodSync(DIR, 0o700); } catch (e) { fout('secondbrain-dir', e); }
   }
@@ -483,6 +540,7 @@ function maak(opt) {
     const terug = [];
     k.bestanden.forEach(function (b) { if (b.l.indexOf(z.i) >= 0) terug.push(b.p); });
     terug.sort(function (a, b) { return a.split('/').pop().localeCompare(b.split('/').pop(), 'nl'); });
+    telHerkomst(d && d.herkomst);   // wv3608: alleen een geslaagde opening telt
     return { status: 200, audit: audit(z.b), j: { ok: true, pad: z.b.p, domein: z.b.d, gewijzigd: new Date(z.b.m).toISOString(),
       grootte: z.b.g, eigenschappen: fm ? eigenschappen(fm, ctx) : [], md: masker(zonderMarkeringen(t)), doelen: doelen, terug: terug.slice(0, 200),
       terug_n: terug.length } };
@@ -892,11 +950,12 @@ function maak(opt) {
       gebouwd: k && k.op ? new Date(k.op).toISOString() : null, duur_ms: k ? k.duur : null, nacht: laatsteNacht,
       gelezen: k && typeof k.gelezen === 'number' ? k.gelezen : null, hergebruik: k ? k.hergebruik || 0 : 0,   // wv2607: linkcache zichtbaar
       overgeslagen: overgeslagen.length, overgeslagen_mappen: overgeslagen.slice(0, 5).map(function (x) { return x.pad.split('/').slice(0, 2).join('/') + ' (' + x.code + ')'; }),   // wv3423 (B80)
-      bouw_fout: bouwFout };
+      bouw_fout: bouwFout, herkomst: herkomstStand() };   // wv3608
   }
 
   return { mkdir: mkdir, laadBewaard: laadBewaard, app: app, health: health, vers: vers, koppelNaam: koppelNaam, nacht: nacht, bron: bron,
-    _los: function (doel, bron, md) { return los(doel, bron, md, vers(false)); } };
+    _los: function (doel, bron, md) { return los(doel, bron, md, vers(false)); },
+    _herkomstNu: function () { if (herkomstTimer) { clearTimeout(herkomstTimer); herkomstSchrijf(); } } };   // wv3608: alleen voor de toets
 }
 
 module.exports = { maak: maak, masker: masker, maskerStreng: maskerStreng, zonderMarkeringen: zonderMarkeringen, linksIn: linksIn, domeinVan: domeinVan, isVastDicht: isVastDicht, isVerborgen: isVerborgen,
