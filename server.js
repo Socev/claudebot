@@ -17269,7 +17269,10 @@ async function appAgendaKnopN8n(body) {
 const SMS_WF = process.env.SMS_WF || '9aiWD9tXz448nS7E';   // AI - SMS Gateway, webhookknoop "SMS Verzenden"
 const SMS_KNOP_MS = 12 * 3600 * 1000;
 const SMS_N8N_MS = 45 * 1000;
-const smsTik = (function () { try { return require(path.join(__dirname, 'sms-tik.js')); } catch (e) { logError('sms-tik', e); return null; } })();
+const smsTik = (function () {   // typeof: de poorttoets laadt dit blok los in een vm zonder require/__dirname (dan stil null: sms = 503)
+  if (typeof require !== 'function' || typeof __dirname !== 'string') return null;
+  try { return require(path.join(__dirname, 'sms-tik.js')); } catch (e) { logError('sms-tik', e); return null; }
+})();
 const smsPassen = smsTik ? smsTik.passen({ nu: Date.now, toeval: function () { return crypto.randomBytes(16).toString('hex'); } }) : null;
 const smsWacht = new Map();   // nonce -> voorstel, alleen tijdens de eigen /bericht-aanroep van smsVoorstel
 function smsWachtNeem(nonce) { const v = smsWacht.get(nonce); smsWacht.delete(nonce); return v || null; }
