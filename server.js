@@ -12219,6 +12219,19 @@ async function appTeLezen(a, moet, nu) {
 // de audit. Op een vaste plek niets uit het hoofdkanaal (zoals Moet iets). Bewaren alleen van een bericht dat in dat gesprek staat.
 async function appTeLezenZet(req, res, a, d) {
   if (!teLezenMod) return appWeiger(res, 404, 'onbekend', 'te-lezen module');
+  // wv3678 (nr 130, 2C30): {items: [{job_id, kanaal}], actie: gezien|terug} = "Alles gezien" of Zet terug in één aanroep (telt één keer)
+  if (d && Array.isArray(d.items) && typeof teLezenMod.zetVeel === 'function') {
+    const actieV = String(d.actie || '');
+    if (!appTeller('telezen', APP_TE_LEZEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens te-lezen');
+    let staatV;
+    try { staatV = appLeesStreng(APP_TE_LEZEN, {}); } catch (e) { logError('te-lezen', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen', 'te-lezen staat'); }
+    const zv = teLezenMod.zetVeel(staatV, d.items, actieV, Date.now());
+    if (zv.fout) return appWeiger(res, 400, zv.fout, 'te-lezen veel ' + actieV);
+    try { appSchrijfJson(APP_TE_LEZEN, zv.staat); } catch (e) { logError('te-lezen', e); return appWeiger(res, 500, 'opslaan lukte niet', 'te-lezen schrijven'); }
+    if (res._app) res._app.reden = 'te-lezen ' + actieV + ' alle ' + d.items.length;
+    return appStuur(res, 200, { ok: true, actie: actieV, aantal: d.items.length,
+      job_ids: d.items.map(function (i) { return String(i.job_id); }) });
+  }
   const kanaal = String((d && d.kanaal) || ''), job = String((d && d.job_id) || ''), actie = String((d && d.actie) || '');
   if (!appTeller('telezen', APP_TE_LEZEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens te-lezen');
   let bestaat = null;

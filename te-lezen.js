@@ -88,6 +88,21 @@ function zet(staat, d, nu, bestaat) {
   return { staat: staatNorm(s, nu) };
 }
 
+// wv3678 (besluitenpagina nr 130, 2C30: "Alles gezien" met Zet terug): N berichten in één aanroep op gezien of terug. Alleen gezien|terug,
+// 1..VEEL_MAX stuks; één ongeldig item = de hele aanroep geweigerd (niets half geschreven).
+const VEEL_MAX = 50;
+function zetVeel(staat, items, actie, nu) {
+  if (actie !== 'gezien' && actie !== 'terug') return { fout: 'onbekende actie' };
+  if (!Array.isArray(items) || !items.length || items.length > VEEL_MAX) return { fout: 'ongeldig bericht' };
+  let s = staatNorm(staat, nu);
+  for (const it of items) {
+    const z = zet(s, { job_id: it && it.job_id, kanaal: it && it.kanaal, actie: actie }, nu, null);
+    if (z.fout) return z;
+    s = z.staat;
+  }
+  return { staat: s };
+}
+
 // De lijst. o = {per: {hoofd: [...], machinekamer: [...]} (app-log, met de nog niet gelogde beurten), klussen: {job: {...}} | null
 // (null = onleesbaar: geen klus-punten in de machinekamer), staat, tabs: {kanaal: iso} (gezien door David), vraag: fn(x, kanaal) -> bool,
 // moet: Set van job_ids die nu in Moet iets staan (ook een bewaard bericht dan niet: review wv2245 MOET 1), inBeeld: {sleutel: iso}
@@ -148,5 +163,5 @@ function klusJobs(per, nu) {
   return Array.from(s).sort();
 }
 
-module.exports = { uit: uit, zet: zet, staatNorm: staatNorm, klusTelt: klusTelt, knopTelt: knopTelt, klusJobs: klusJobs,
+module.exports = { uit: uit, zet: zet, zetVeel: zetVeel, VEEL_MAX: VEEL_MAX, staatNorm: staatNorm, klusTelt: klusTelt, knopTelt: knopTelt, klusJobs: klusJobs,
   AUTO_MS: AUTO_MS, BEWAAR_OUD_MS: BEWAAR_OUD_MS, BEWAAR_MS: BEWAAR_MS, LOG_MS: LOG_MS, MAX: MAX, JOB_RE: JOB_RE };

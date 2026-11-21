@@ -129,6 +129,17 @@ toets('12d het getal telt de knopantwoorden niet mee', u12.ongezien === 3 && u12
 const st12 = { sinds: iso(NU - D), gezien: {}, bewaard: { [k1.job_id]: { kanaal: 'hoofd', op: iso(NU - 1000) } } };
 toets('12e een knopantwoord dat David zelf bewaarde: wel (als bewaard)', T.uit({ per: { hoofd: [k1] }, klussen, staat: st12, tabs: {}, vraag, nu: NU }).punten.some((p) => p.job_id === k1.job_id && p.soort === 'bewaard'));
 toets('12f knopTelt alleen op velden: ok false of een niet-lege bestandenlijst', T.knopTelt({ ok: false }) && T.knopTelt({ bestanden: ['a'] }) && !T.knopTelt({ ok: true, bestanden: [] }) && !T.knopTelt({ antwoord: 'storing: VRAAG' }));
+// ── 13. wv3678 (nr 130, 2C30): "Alles gezien" / Zet terug in één aanroep ──
+const v13 = [{ job_id: r1.job_id, kanaal: 'machinekamer' }, { job_id: g12.job_id, kanaal: 'machinekamer' }, { job_id: k1.job_id, kanaal: 'hoofd' }];
+const z13 = T.zetVeel({ sinds: iso(NU - D) }, v13, 'gezien', NU);
+toets('13a drie berichten in één keer op gezien', !z13.fout && v13.every((i) => z13.staat.gezien[i.job_id] === iso(NU)), z13);
+const z13b = T.zetVeel(z13.staat, v13.slice(0, 2), 'terug', NU + 1000);
+toets('13b Zet terug van twee: die twee weer te lezen, de derde blijft gezien', !z13b.fout && !z13b.staat.gezien[r1.job_id] && !z13b.staat.gezien[g12.job_id] && !!z13b.staat.gezien[k1.job_id]);
+const z13c = T.zetVeel(z13.staat, [v13[0], { job_id: 'niet-geldig', kanaal: 'hoofd' }], 'terug', NU);
+toets('13c één ongeldig item: hele aanroep geweigerd', z13c.fout === 'ongeldig bericht' && !z13c.staat);
+toets('13d bewaar/niet-bewaren in bulk: geweigerd; leeg en meer dan VEEL_MAX: geweigerd', T.zetVeel({}, v13, 'bewaar', NU).fout === 'onbekende actie'
+  && T.zetVeel({}, [], 'gezien', NU).fout === 'ongeldig bericht' && T.zetVeel({}, Array.from({ length: T.VEEL_MAX + 1 }, () => v13[0]), 'gezien', NU).fout === 'ongeldig bericht');
+toets('13e verkeerd gesprek in bulk: geweigerd', T.zetVeel({}, [{ job_id: r1.job_id, kanaal: 'socev' }], 'gezien', NU).fout === 'onbekend gesprek');
 // ── 10. koppeling in server.js en de release ──
 const S = fs.readFileSync('server.js', 'utf8'), UR = fs.readFileSync('uitrol.sh', 'utf8');
 toets('10a route POST /app/te-lezen bestaat en glijdt (David die leest), niet in APP_SLOT_VRIJ', /route === 'POST \/app\/te-lezen'\) return appTeLezenZet/.test(S) && /'POST \/app\/aanwezig', 'POST \/app\/te-lezen'\]\)/.test(S) && !/APP_SLOT_VRIJ = new Set\(\[[^\]]*te-lezen/.test(S));
@@ -136,6 +147,7 @@ toets('10b te_lezen alleen in /app/voor-jou/kanaal, en de t:-sleutels gaan mee i
 toets('10c te-lezen.js staat in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bte-lezen\.js\b/.test(UR));
 toets('10d module laadt geen netwerk-, proces- of bestandsmodule', !/require\(/.test(fs.readFileSync('te-lezen.js', 'utf8').replace(/^\s*\/\/.*$/gm, '')));
 toets('10e wv3446: hoofdkanaal niet meer geweigerd per apparaat', !/te-lezen vast hoofd/.test(S) && !/appAfscherm/.test(S));
+toets('10f wv3678: bulkpad staat in appTeLezenZet (alleen tekstcontrole; het gedrag toetst UI-blok wv3678)', /Array\.isArray\(d\.items\) && typeof teLezenMod\.zetVeel === 'function'/.test(S) && /teLezenMod\.zetVeel\(staatV, d\.items, actieV/.test(S));
 console.log(`\nte-lezen: ${goed} groen, ${fouten} rood`);
 process.exit(fouten ? 1 : 0);
 JS
