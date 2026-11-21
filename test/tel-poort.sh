@@ -102,7 +102,7 @@ const ctxGlobals = () => ({ require, fs, path, crypto, Buffer, console, URL, set
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-const EXPORT = '\n;globalThis.__h = { handleApp, appIsPad, handleTel, telIsPad, telStaat, appStaat, appNoodstop, appAan, appOntmasker, telAfsluiten, telSpreektekst, telOpname, telInfo, appInfo, telOpruim, TEL_ROUTE_RE, telMerkAgent, telZelfStart, telZelfNaRun, telAanwezig, telBelletje, agentsReg, TEL_ZELF_AANKONDIGING };';
+const EXPORT = '\n;globalThis.__h = { handleApp, appIsPad, handleTel, telIsPad, telStaat, appStaat, appNoodstop, appAan, appOntmasker, telAfsluiten, telSpreektekst, telOpname, telInfo, appInfo, telOpruim, TEL_ROUTE_RE, telMerkAgent, telZelfStart, telZelfNaRun, telAanwezig, telBelletje, agentsReg, TEL_ZELF_AANKONDIGING, telOnderwegVelden, __zet: function (n, f) { globalThis[n] = f; } };';
 function laad() { const c = vm.createContext(ctxGlobals()); vm.runInContext(blok + EXPORT, c, { filename: 'server.js#app' }); return c.__h; }
 let H = laad();
 let srv = http.createServer((q, s) => { if (H.telIsPad(q)) return H.handleTel(q, s); if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
@@ -643,6 +643,76 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('6 wv1035: "VRAAG AAN DAVID: geen." -> geen "ik heb een vraag"', H.telSpreektekst('Klaar.\n\n**VRAAG AAN DAVID:** geen.') === 'Klaar.' && /Ik heb een vraag voor je in de app\.$/.test(H.telSpreektekst('Klaar.\n\nVRAAG AAN DAVID: Zal ik verder?')), JSON.stringify([H.telSpreektekst('Klaar.\n\n**VRAAG AAN DAVID:** geen.'), H.telSpreektekst('Klaar.\n\nVRAAG AAN DAVID: Zal ik verder?')]));
     toets('6 spreektekst: oude regel "Verder in Telegram" knipt nog (wv571)', H.telSpreektekst('Kern.\n\nVerder in Telegram:\n- bedrag') === 'Kern.', H.telSpreektekst('Kern.\n\nVerder in Telegram:\n- bedrag'));
     toets('6 geen onverwachte fouten in logError', !logs.some((l) => !/^(app-|tel-whisper|tel-deel)/.test(l) || /uitzondering/.test(l)), logs);
+
+    // ── 8. Onderweg naast Tasker (wv3700) ──
+    H.appStaat.tellers['tel-koppel'] = []; H.appStaat.tellers['tel-codes'] = []; H.appStaat.tellers['tel-beurt'] = []; H.appStaat.tellers['tel-beurtdag'] = [];
+    for (const k of Object.keys(ketens)) delete ketens[k];   // de beurt van de nagebootste crash (6) hangt nog in de keten
+    const koppel = async (body, ct) => { const sx = sessie(PIXEL, 'credP', true); const c = (await app('POST', '/app/tel/koppelcode', {}, { apparaat: PIXEL, sessie: sx })).j.code;
+      return verzoek('POST', '/tel/koppel', ct ? { 'content-type': ct } : {}, body(c)); };
+    const kT = await koppel((c) => c);
+    const kO = await koppel((c) => JSON.stringify({ code: c, app: 'onderweg' }), 'application/json');
+    const TK = kT.j.sleutel, OW = kO.j.sleutel;
+    toets('8 Tasker (kale code) en Onderweg (app onderweg) allebei gekoppeld', kT.status === 200 && kO.status === 200 && TK && OW && TK !== OW, { t: kT.j, o: kO.j });
+    toets('8 Onderweg-koppeling trekt Tasker niet in', (await tel('GET', '/tel/uit', { sleutel: TK })).status === 200 && (await tel('GET', '/tel/uit', { sleutel: OW })).status === 200);
+    toets('8 Telegram noemt de app Onderweg', st.telegram.some((t) => /de app Onderweg op de telefoon is gekoppeld/.test(t)), st.telegram.slice(-2));
+    let reg8 = JSON.parse(fs.readFileSync(path.join(DATA, 'tel-apparaten.json'), 'utf8'));
+    toets('8 register: één actieve Tasker- en één actieve Onderweg-rij', reg8.apparaten.filter((x) => x.actief && x.soort === 'onderweg').length === 1 && reg8.apparaten.filter((x) => x.actief && x.soort !== 'onderweg').length === 1, reg8.apparaten.map((x) => [x.naam, x.soort, x.actief]));
+    const kT2 = await koppel((c) => JSON.stringify({ code: c }), 'application/json');
+    toets('8 Tasker opnieuw koppelen (zonder app): oude Tasker 401, Onderweg blijft (Codex MOET 2)', kT2.status === 200 && (await tel('GET', '/tel/uit', { sleutel: TK })).status === 401 && (await tel('GET', '/tel/uit', { sleutel: OW })).status === 200);
+    const TK2 = kT2.j.sleutel;
+    const kO2 = await koppel((c) => JSON.stringify({ code: c, app: 'onderweg' }), 'application/json');
+    toets('8 Onderweg opnieuw koppelen: oude Onderweg 401, Tasker blijft', kO2.status === 200 && (await tel('GET', '/tel/uit', { sleutel: OW })).status === 401 && (await tel('GET', '/tel/uit', { sleutel: TK2 })).status === 200);
+    const OW2 = kO2.j.sleutel;
+    const kX = await koppel((c) => JSON.stringify({ code: c, app: 'iets-anders' }), 'application/json');
+    toets('8 onbekende app telt als Tasker', kX.status === 200 && (await tel('GET', '/tel/uit', { sleutel: TK2 })).status === 401 && (await tel('GET', '/tel/uit', { sleutel: OW2 })).status === 200);
+    const TK3 = kX.j.sleutel;
+    // voorjou
+    Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
+    r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: TK3 });
+    toets('8 voorjou met een Tasker-sleutel: 404', r.status === 404, r.j);
+    r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: OW2 });
+    toets('8 voorjou zonder app-sessie: 423', r.status === 423 && /Socev-app/.test(r.j.fout), r.j);
+    r = await tel('GET', '/tel/uit?lijst=iets', { sleutel: OW2 });
+    toets('8 onbekende lijst: 400', r.status === 400, r.j);
+    sessie(PIXEL, 'credP', false);
+    H.__zet('appVjPunten', async () => [
+      { id: 11, sleutel: 'k11', soort: 'besluit', status: 'open', titel: 'Zal ik **iets** doen?', herkomst: {} },
+      { id: 12, sleutel: 'k12', soort: 'doen', status: 'open', titel: 'Klusje', herkomst: {} },
+      { id: 13, sleutel: 'k13', soort: 'besluit', status: 'gedaan', titel: 'Al dicht?', herkomst: {} }]);
+    r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: OW2 });
+    toets('8 voorjou: alleen open besluitkaarten, zonder opmaak', r.status === 200 && Array.isArray(r.j.voorjou) && r.j.voorjou.length === 1 && r.j.voorjou[0].id === 11 && !/\*\*/.test(r.j.voorjou[0].titel) && r.j.voorjou[0].vraag, r.j);
+    toets('8 voorjou zet geen hartslag en geen plek', !H.telStaat.plek[H.telStaat.soort ? Object.keys(H.telStaat.soort).find((k) => H.telStaat.soort[k] === 'onderweg') : ''], H.telStaat.plek);
+    H.__zet('appVjPunten', async () => { throw new Error('databank weg'); });
+    r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: OW2 });
+    toets('8 voorjou als de lijst niet te lezen is: 503', r.status === 503, r.j);
+    // beurt via Onderweg: verstaan, tekst, wedervraag, rest; Tasker krijgt de extra velden niet
+    r = await tel('POST', '/tel/beurt', { sleutel: OW2, ct: 'text/plain', body: 'Wat staat er vandaag in mijn agenda?' });
+    toets('8 beurt via Onderweg: 202 met verstaan', r.status === 202 && r.j.verstaan === 'Wat staat er vandaag in mijn agenda?', r.j);
+    const id8O = r.j.id; await tik();
+    afmaken[id8O]('Je hebt om 10 uur overleg. Zal ik het verzetten?\n\nVerder in de app:\n- details');
+    await tik();
+    r = await tel('GET', '/tel/uit', { sleutel: OW2 });
+    toets('8 uitgifte voor Onderweg: tekst, wedervraag ja, rest ja, knopvraag nee', r.j.id === id8O && /10 uur overleg/.test(r.j.tekst) && !/details/.test(r.j.tekst) && r.j.wedervraag === 'ja' && r.j.rest === 'ja' && r.j.knopvraag === 'nee', r.j);
+    await tel('POST', '/tel/gespeeld/' + id8O, { sleutel: OW2 });
+    r = await tel('POST', '/tel/beurt', { sleutel: TK3, ct: 'text/plain', body: 'vraag via Tasker' });
+    toets('8 beurt via Tasker: 202 zonder verstaan', r.status === 202 && r.j.verstaan === undefined, r.j);
+    const id8T = r.j.id; await tik();
+    afmaken[id8T]('Klaar.\n\nVRAAG AAN DAVID: Zal ik verder?'); await tik();
+    r = await tel('GET', '/tel/uit', { sleutel: OW2 });
+    toets('8 antwoord op de Tasker-vraag gaat niet naar Onderweg', !r.j.id, r.j);
+    r = await tel('GET', '/tel/uit', { sleutel: TK3 });
+    toets('8 uitgifte voor Tasker: zonder tekst/wedervraag (zoals voorheen)', r.j.id === id8T && r.j.tekst === undefined && r.j.wedervraag === undefined, r.j);
+    await tel('POST', '/tel/gespeeld/' + id8T, { sleutel: TK3 });
+    toets('8 knopvraag-veld: vaste vraagzin = knopvraag ja, geen wedervraag', (function () { const v = H.telOnderwegVelden({ soort: 'antwoord', spreek: H.telSpreektekst('Klaar.\n\nVRAAG AAN DAVID: Zal ik verder?') }); return v.knopvraag === 'ja' && v.wedervraag === 'nee'; })());
+    // telActief: wie plek Auto meldt gaat voor, bij gelijkspel Onderweg
+    await tel('GET', '/tel/uit?plek=Auto', { sleutel: TK3 });
+    await tel('GET', '/tel/uit?plek=Thuis', { sleutel: OW2 });
+    toets('8 zelf-belletje: Tasker als alleen die plek Auto meldt', H.telAanwezig().ok && H.telAanwezig().t.soort !== 'onderweg', H.telAanwezig());
+    await tel('GET', '/tel/uit?plek=Auto', { sleutel: OW2 });
+    toets('8 zelf-belletje: Onderweg als beide in de auto zijn', H.telAanwezig().ok && H.telAanwezig().t.soort === 'onderweg', H.telAanwezig());
+    const inf8 = H.telInfo();
+    toets('8 /health: Tasker-versie blijft, Onderweg apart', inf8.gekoppeld === true && inf8.onderweg && inf8.onderweg.luistert === true, inf8);
+    toets('8 geen onverwachte fouten (wv3700)', !logs.some((l) => /tel-voorjou/.test(l) && !/databank weg/.test(l)), logs.filter((l) => /tel-voorjou/.test(l)));
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }
   srv.close();
   // ── 7. echte SIGTERM op een kindproces ──

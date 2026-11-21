@@ -17482,6 +17482,10 @@ function berichtInfo() {
 //   GET  /tel/uit?wacht=0-50       lange vraag (ook de hartslag): {id, soort, delen, aankondigen, bezig} of {bezig}
 //   GET  /tel/deel/<id>/<n>        WAV van deel n (Gemini-stem, zoals /app/voorlees); n = 0 = alleen de aankondiging
 //   POST /tel/gespeeld/<id>        afgeleverd; idempotent, nooit opnieuw
+// wv3700 (21-11-2026, app Onderweg, bouwplan vault 01_Ontwikkeling/Onderweg - native app in plaats van Tasker): koppelen met
+// {"code","app":"onderweg"} geeft een eigen sleutel naast die van Tasker (intrekken alleen binnen dezelfde soort); voor een
+// Onderweg-sleutel krijgt de uitgifte tekst/wedervraag/knopvraag/rest en het 202-antwoord 'verstaan', en geeft
+// GET /tel/uit?lijst=voorjou de open Ja/Nee-kaarten (alleen lezen; zelfde pad zodat tunnel en Access niet veranderen).
 // Sloten, in deze volgorde: noodstop (/opt/data/tel-uit of app-uit) -> 503; passieve kant -> 503; Access-bewijs van de
 // eigen Access-app (eigen aud, common_name = client-id van servicetoken "tasker-pixel") -> 403; apparaatsleutel
 // (Authorization: Bearer, alleen sha256 in tel-apparaten.json, 90 dagen) -> 401. /tel/beurt daarnaast alleen als de Pixel
@@ -17526,7 +17530,7 @@ const TEL_AFZEGGEN = 'Dat is niet gelukt. Kijk even in de app.';
 appStaat.tellers['tel-alles'] = []; appStaat.tellers['tel-beurt'] = []; appStaat.tellers['tel-beurtdag'] = []; appStaat.tellers['tel-koppel'] = [];
 appStaat.tellers['tel-codes'] = []; appStaat.tellers['tel-delen'] = [];
 const telStaat = { code: null, polls: {}, hartslag: {}, audio: {}, delen: {}, rij: null, inBehandeling: 0, voorAuth: { minuut: 0, n: 0, overgeslagen: 0 }, gestopt: false,
-  plek: {}, zelf: { merk: 0, merk_mis: 0, hint: 0, items: 0, niet_aanwezig: 0, niets: 0, dubbel: 0 }, telefoon: {} };   // wv275; telefoon: wv622
+  plek: {}, zelf: { merk: 0, merk_mis: 0, hint: 0, items: 0, niet_aanwezig: 0, niets: 0, dubbel: 0 }, telefoon: {}, soort: {} };   // soort: wv3700 (apparaat-id -> tasker|onderweg)   // wv275; telefoon: wv622
 
 function telUit() { return fs.existsSync(TEL_UIT) || fs.existsSync(APP_UIT); }
 function telConfig() {
@@ -17586,6 +17590,17 @@ function telSessieOk(t) {
   return Object.keys(appStaat.sessies).some(function (h) { const s = appStaat.sessies[h]; return s && s.apparaat === t.app_apparaat && nu <= s.tot; });
 }
 function telLuistert(id) { return !!id && Date.now() - (telStaat.hartslag[id] || 0) < TEL_HARTSLAG_MS; }
+// wv3700: een registerrij zonder soort is Tasker (alles van vóór Onderweg)
+function telSoort(x) { return x && x.soort === 'onderweg' ? 'onderweg' : 'tasker'; }
+// wv3700: extra velden voor Onderweg (Tasker krijgt ze niet): de spreektekst, of hij op een wedervraag eindigt, of er een Ja/Nee-vraag
+// in de app staat, en of er een deel "Verder in de app" was
+function telOnderwegVelden(x) {
+  const s = String(x.spreek || '');
+  const knop = /(^|\n)Ik heb een vraag voor je in [^\n]*\.$/.test(s);
+  const kern = s.replace(/(^|\n)Ik heb een vraag voor je in [^\n]*\.$/, '').trim();
+  return { tekst: s.slice(0, 2000), wedervraag: (x.soort === 'antwoord' || x.soort === 'zelf') && /\?["'”’)]*$/.test(kern) ? 'ja' : 'nee',
+    knopvraag: knop ? 'ja' : 'nee', rest: x.rest ? 'ja' : 'nee' };
+}
 
 // ── uit-rij: per beurt één item; op schijf (zonder audio) zodat een herstart geen antwoord kwijtraakt ──
 function telRij() {
@@ -17684,8 +17699,9 @@ function telUitgifte(x) {
   else x.lease_tot = Date.now() + TEL_LEASE_MS;
   x.uitgegeven = (x.uitgegeven || 0) + 1; x.uitgifte_t = Date.now();   // uitgifte_t: wv622 (vrijgeven na een netwerkgat)
   telRijBewaar();
-  return { ok: true, id: x.id, soort: x.soort, onderwerp: x.onderwerp || '', delen: telDelen(x).length, aankondigen: x.aankondiging ? 'ja' : 'nee', bezig: telBezig(x.apparaat),
+  const uit = { ok: true, id: x.id, soort: x.soort, onderwerp: x.onderwerp || '', delen: telDelen(x).length, aankondigen: x.aankondiging ? 'ja' : 'nee', bezig: telBezig(x.apparaat),
     rest_s: Math.max(0, Math.round((x.tot - Date.now()) / 1000)) };   // wv275: Tasker laat %SocevWacht zo lang staan (Fable diff 2e ronde A)
+  return telStaat.soort[x.apparaat] === 'onderweg' ? Object.assign(uit, telOnderwegVelden(x)) : uit;   // wv3700
 }
 function telWek(apparaat) {
   if (!telStaat.polls[apparaat]) return;
@@ -17700,6 +17716,7 @@ function telNaBeurt(jobId, antwoord, ok) {
   const nu = Date.now();
   x.soort = ok && antwoord ? 'antwoord' : 'fout';
   x.spreek = x.soort === 'fout' ? TEL_AFZEGGEN : telSpreektekst(antwoord);
+  x.rest = x.soort !== 'fout' && /^[^\S\n]*[*_]*Verder in (de app|Telegram)\s*:/im.test(String(antwoord || ''));   // wv3700: Onderweg toont "Lees de rest"
   x.t_klaar = nu; x.tot = nu + TEL_TTL_MS; delete telStaat.delen[x.id]; delete telStaat.audio[x.id];
   const jr = typeof jobs !== 'undefined' && jobs[jobId] && jobs[jobId].result;
   x.k = x.k || {};
@@ -17781,6 +17798,7 @@ function handleTel(req, res) {
       if (!ap.t) return weg(401, ap.verlopen ? 'sleutel verlopen; koppel de telefoon opnieuw in de app' : 'niet toegestaan', ap.fout);
       const t = ap.t;
       res._tel.voorAuth = false; res._tel.apparaat = t.id;
+      telStaat.soort[t.id] = telSoort(t);   // wv3700
       if (!appTeller('tel-alles', TEL_VERZOEKEN_PER_UUR, 3600000)) return weg(429, 'te veel verzoeken', 'grens alles');
       if (route === 'POST /tel/beurt') return telBeurt(req, res, t);
       req.resume();
@@ -17809,8 +17827,11 @@ function telKoppel(req, res) {
   if (!appTeller('tel-koppel', TEL_KOPPEL_PER_UUR, 3600000)) { req.resume(); return telWeiger(res, 429, 'te veel pogingen dit uur', 'grens koppel'); }
   telKlein(req, function (fout, tekst) {
     if (fout) return telWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
-    let code = '';
-    try { const j = JSON.parse(tekst); code = String(j && typeof j === 'object' ? j.code : j); } catch (e) { code = String(tekst); }
+    let code = '', soort = 'tasker';
+    try {
+      const j = JSON.parse(tekst); code = String(j && typeof j === 'object' ? j.code : j);
+      if (j && typeof j === 'object' && j.app === 'onderweg') soort = 'onderweg';   // wv3700; zonder app = Tasker (Codex MOET 2)
+    } catch (e) { code = String(tekst); }
     code = code.replace(/[\s"'-]/g, '');
     const k = telStaat.code;
     if (!k || Date.now() > k.tot) { telStaat.code = null; return telWeiger(res, 401, 'geen geldige koppelcode; maak een nieuwe in de app', 'geen code'); }
@@ -17824,15 +17845,16 @@ function telKoppel(req, res) {
     const sleutel = crypto.randomBytes(32).toString('hex'), id = crypto.randomBytes(8).toString('hex'), nu = new Date();
     let reg;
     try { reg = telRegister(); } catch (e) { logError('tel-register', e); return telWeiger(res, 503, 'telefoonregister onleesbaar; vraag de machinekamer', 'register kapot'); }
-    // één telefoon: opnieuw koppelen maakt elke oude sleutel ongeldig
-    reg.apparaten.forEach(function (x) { if (x.actief) { x.actief = false; x.sleutel_hash = null; x.ingetrokken_op = nu.toISOString(); x.ingetrokken_door = 'opnieuw gekoppeld'; } });
+    // één sleutel per soort (wv3700: Tasker en Onderweg naast elkaar): opnieuw koppelen maakt alleen de oude sleutel van dezelfde soort ongeldig
+    const weg = [];
+    reg.apparaten.forEach(function (x) { if (x.actief && telSoort(x) === soort) { x.actief = false; x.sleutel_hash = null; x.ingetrokken_op = nu.toISOString(); x.ingetrokken_door = 'opnieuw gekoppeld'; weg.push(x.id); } });
     reg.apparaten = reg.apparaten.filter(function (x) { return Date.now() - Date.parse(x.ingetrokken_op || x.gekoppeld || 0) < 90 * 86400000; });
-    reg.apparaten.push({ id: id, naam: 'Pixel (Tasker)', sleutel_hash: appSha(sleutel), app_apparaat: k.app_apparaat, gekoppeld: nu.toISOString(),
+    reg.apparaten.push({ id: id, naam: soort === 'onderweg' ? 'Pixel (Onderweg)' : 'Pixel (Tasker)', soort: soort, sleutel_hash: appSha(sleutel), app_apparaat: k.app_apparaat, gekoppeld: nu.toISOString(),
       verloopt: new Date(nu.getTime() + TEL_SLEUTEL_MS).toISOString(), actief: true });
     try { appSchrijfJson(TEL_REGISTER, reg); } catch (e) { logError('tel-register-schrijf', e); return telWeiger(res, 503, 'opslaan op de pod mislukte; probeer het opnieuw', 'register schrijven'); }
-    Object.keys(telStaat.polls).forEach(function (a) { telAntwoordPoll(a, { ok: true, bezig: 'nee', reden: 'opnieuw gekoppeld' }); });
-    res._tel.voorAuth = false; res._tel.apparaat = id; res._tel.reden = 'gekoppeld';
-    appTelegram('Socev-app: Tasker op de telefoon is gekoppeld (spraak in de auto). Niet jij? /app-noodstop en meld het de machinekamer.');
+    weg.forEach(function (a) { telAntwoordPoll(a, { ok: true, bezig: 'nee', reden: 'opnieuw gekoppeld' }); });
+    res._tel.voorAuth = false; res._tel.apparaat = id; res._tel.reden = 'gekoppeld (' + soort + ')';
+    appTelegram('Socev-app: ' + (soort === 'onderweg' ? 'de app Onderweg' : 'Tasker') + ' op de telefoon is gekoppeld (spraak in de auto). Niet jij? /app-noodstop en meld het de machinekamer.');
     telStuur(res, 200, { ok: true, sleutel: sleutel, cf_id: tok.client_id, cf_geheim: tok.client_secret, apparaat: id, verloopt: reg.apparaten[reg.apparaten.length - 1].verloopt });
   });
 }
@@ -17904,7 +17926,7 @@ function telBeurt(req, res, t) {
       telRij().push({ id: st.job_id, apparaat: t.id, soort: 'bezig', t_start: Date.now(), tot: Date.now() + TEL_TTL_MS, k: k });
       telRijBewaar();
       res._tel.reden = 'beurt ' + st.job_id;
-      telStuur(res, 202, { ok: true, id: st.job_id });
+      telStuur(res, 202, Object.assign({ ok: true, id: st.job_id }, telSoort(t) === 'onderweg' ? { verstaan: tekst.slice(0, 600) } : {}));   // wv3700
     })().catch(function (e) { logError('tel-beurt', e); telWeiger(res, 500, 'fout op de pod', 'uitzondering beurt'); }).finally(klaar);
   });
 }
@@ -17913,6 +17935,7 @@ function telUitRoute(req, res, t) {
   const q = new URLSearchParams(String(req.url || '').split('?')[1] || '');
   const w = q.has('wacht') ? Number(q.get('wacht')) : 0;
   if (!Number.isInteger(w) || w < 0 || w > TEL_WACHT_MAX_S) return telWeiger(res, 400, 'wacht moet 0 tot ' + TEL_WACHT_MAX_S + ' zijn', 'wacht');
+  if (q.has('lijst')) return q.get('lijst') === 'voorjou' ? telVoorJou(req, res, t) : telWeiger(res, 400, 'onbekende lijst', 'lijst');   // wv3700
   res._tel.stil = true;   // de hartslag (± 1 per minuut) niet in het auditlog; alleen weigeringen
   telStaat.hartslag[t.id] = Date.now();
   // wv275: Tasker v6 meldt zijn plek mee (&plek=%SocevPlek); ongezet stuurt Tasker de letterlijke naam = niet Auto
@@ -17957,6 +17980,34 @@ function telTelefoonMeldt(t, q) {
   }
 }
 
+// wv3700: de open Ja/Nee-kaarten voor Onderweg, zoals de app ze toont (zelfde vraagtekst en voorstel; al beantwoord of elders = weg).
+// Alleen lezen: een keuze in Onderweg gaat als gewone autobeurt naar Socev en is nooit een knopdruk. Alleen voor een Onderweg-sleutel,
+// met dezelfde app-sessie-eis als /tel/beurt.
+const TEL_VOORJOU_PER_UUR = 60;
+const TEL_VOORJOU_MAX = 10;
+appStaat.tellers['tel-voorjou'] = [];
+async function telVoorJou(req, res, t) {
+  if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'voorjou: geen onderweg-sleutel');
+  if (!telSessieOk(t)) return telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (voorjou)');
+  if (!appTeller('tel-voorjou', TEL_VOORJOU_PER_UUR, 3600000)) return telWeiger(res, 429, 'te vaak dit uur', 'grens voorjou');
+  if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (voorjou)');
+  let punten, afMap = {};
+  try { punten = await appVjPunten(); } catch (e) { logError('tel-voorjou', e); return telWeiger(res, 503, 'de lijst is nu niet te lezen', 'voorjou lezen'); }
+  try { afMap = (await appVjAfgeleid(punten, Date.now())).map || {}; } catch (e) { logError('tel-voorjou', e); }
+  const vandaag = appYmd(Date.now()), lijst = [];
+  const open = punten.filter(function (p) { return p && p.soort === 'besluit' && appVjZichtbaar(p, vandaag); });
+  for (const p of open) {
+    if (lijst.length >= TEL_VOORJOU_MAX) break;
+    let k;
+    try { k = appVjKnopVorm(appVjKnopStand(p, await appVjRegisterVraag(p), afMap)); } catch (e) { logError('tel-voorjou', e); continue; }
+    if (!k.kan) continue;
+    lijst.push({ id: p.id, titel: appKort(appVjGewoon(appVjOpmaakWeg(p.titel)), 160), vraag: k.vraag ? appKort(k.vraag, 600) : null, voorstel: k.voorstel ? appKort(k.voorstel, 400) : null,
+      deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) ? p.deadline : null });
+  }
+  res._tel.reden = 'voorjou ' + lijst.length;
+  telStuur(res, 200, { ok: true, voorjou: lijst });
+}
+
 async function telDeel(req, res, t, id, n) {
   const x = telRij().find(function (y) { return y.id === id && y.apparaat === t.id; });
   if (!x || x.soort === 'bezig' || x.gespeeld || Date.now() > x.tot) return telWeiger(res, 404, 'geen deel', 'onbekend item');
@@ -17999,13 +18050,15 @@ function telGespeeld(req, res, t, id) {
 // ── in de app: ⚙ → Telefoon (koppelcode alleen op de Pixel met een verse vingerafdruk) ──
 function telAppStand(req, res, a) {
   let t = null, fout = null;
-  try { t = telRegister().apparaten.find(function (x) { return x.actief; }) || null; } catch (e) { fout = 'register onleesbaar'; }
+  let lijst = [];
+  try { lijst = telRegister().apparaten.filter(function (x) { return x && x.actief; }); t = lijst.find(function (x) { return telSoort(x) === 'tasker'; }) || lijst[0] || null; } catch (e) { fout = 'register onleesbaar'; }
   const k = telStaat.code && Date.now() < telStaat.code.tot ? telStaat.code : null;
   appStuur(res, 200, { ok: true, ingericht: telIngericht(), uit: telUit(), fout: fout,
     gekoppeld: !!t, sinds: t ? t.gekoppeld : null, verloopt: t ? t.verloopt : null,
     laatst_gezien: t && telStaat.hartslag[t.id] ? new Date(telStaat.hartslag[t.id]).toISOString() : null, luistert: t ? telLuistert(t.id) : false,
     code_open: !!k && k.app_apparaat === a.id, code_tot: k && k.app_apparaat === a.id ? new Date(k.tot).toISOString() : null,
-    mag_koppelen: a.goedkeurder === true && appSysteem(req) === 'Android' });
+    mag_koppelen: a.goedkeurder === true && appSysteem(req) === 'Android',
+    apparaten: lijst.map(function (x) { return { naam: x.naam, soort: telSoort(x), gekoppeld: x.gekoppeld, verloopt: x.verloopt, luistert: telLuistert(x.id) }; }) });   // wv3700
 }
 function telAppKoppelcode(req, res, reg, a, s) {
   if (!telIngericht()) return appWeiger(res, 503, 'de telefoonkoppeling is op de pod nog niet ingericht', 'tel niet ingericht');
@@ -18046,12 +18099,15 @@ function telAppOntkoppel(req, res, a, s) {
 }
 function telInfo() {
   let t = null, kapot = false;
-  try { t = telRegister().apparaten.find(function (x) { return x.actief; }) || null; } catch (e) { kapot = true; }
+  let act = [];
+  try { act = telRegister().apparaten.filter(function (x) { return x && x.actief; }); t = act.find(function (x) { return telSoort(x) === 'tasker'; }) || act[0] || null; } catch (e) { kapot = true; }
+  const ow = act.find(function (x) { return telSoort(x) === 'onderweg'; }) || null;   // wv3700
   let rij = [];
   try { rij = telRij(); } catch (e) {}
   return { ingericht: telIngericht(), uit: telUit(), register: kapot ? 'kapot' : 'ok', gekoppeld: !!t, verloopt: t ? t.verloopt : null,
     luistert: t ? telLuistert(t.id) : false, lange_vragen: Object.keys(telStaat.polls).length,
-    tasker_versie: t && telStaat.telefoon[t.id] ? telStaat.telefoon[t.id].versie : null,   // wv622: &v= van de lus (null = v6 of ouder)
+    tasker_versie: t && telSoort(t) === 'tasker' && telStaat.telefoon[t.id] ? telStaat.telefoon[t.id].versie : null,   // wv622: &v= van de lus (null = v6 of ouder)
+    onderweg: ow ? { verloopt: ow.verloopt, luistert: telLuistert(ow.id), versie: telStaat.telefoon[ow.id] ? telStaat.telefoon[ow.id].versie : null } : null,   // wv3700
     beurten_lopend: rij.filter(function (x) { return x.soort === 'bezig'; }).length, items_klaar: rij.filter(function (x) { return x.soort !== 'bezig' && !x.gespeeld; }).length,
     zelf: Object.assign({ aanwezig: (function () { try { const w = telAanwezig(); return w.ok ? 'ja' : w.reden; } catch (e) { return 'fout'; } })() }, telStaat.zelf) };
 }
@@ -18091,7 +18147,19 @@ const TEL_ZELF_HINT = '[AUTO-RAPPORT] David gaf deze opdracht uit de auto en zit
   'onder een eigen regel "Verder in de app:". Antwoord NIETS als dit niets voor David verandert.\n\n';
 
 function telZelfLog(o) { try { appAuditRegel(TEL_AUDIT, Object.assign({ route: 'zelf' }, o)); } catch (e) { logError('tel-zelf-log', e); } }
-function telActief() { try { return telRegister().apparaten.find(function (x) { return x && x.actief; }) || null; } catch (e) { return null; } }
+function telActief() {
+  try {
+    const act = telRegister().apparaten.filter(function (x) { return x && x.actief; });
+    if (act.length < 2) return act[0] || null;
+    // wv3700 (Fable: twee luisteraars): Tasker en Onderweg naast elkaar. Wie luistert en plek Auto meldt gaat voor (bij gelijkspel
+    // Onderweg), dan wie het laatst luisterde; antwoorden op een eigen vraag gaan altijd naar het apparaat dat vroeg.
+    const nu = Date.now();
+    const auto = function (x) { const p = telStaat.plek[x.id]; return telLuistert(x.id) && p && p.auto && nu - p.t <= TEL_PLEK_MAX_MS ? 1 : 0; };
+    return act.slice().sort(function (a, b) {
+      return (auto(b) - auto(a)) || ((telLuistert(b.id) ? 1 : 0) - (telLuistert(a.id) ? 1 : 0)) || ((telSoort(b) === 'onderweg' ? 1 : 0) - (telSoort(a) === 'onderweg' ? 1 : 0)) || ((telStaat.hartslag[b.id] || 0) - (telStaat.hartslag[a.id] || 0));
+    })[0];
+  } catch (e) { return null; }
+}
 // Zit David nu met de telefoon in de auto? Alle drie: de lus leeft, de telefoon zelf meldt plek Auto (≤ 3 min), app-sessie dit dagdeel.
 function telAanwezig() {
   if (telUit()) return { ok: false, reden: 'uit' };
@@ -18240,7 +18308,7 @@ function telZelfNaRun(runJobId) {
   if (rij.some(function (x) { return x.id === id; })) { telStaat.zelf.dubbel++; return klaar('al in de rij'); }
   if (rij.filter(function (x) { return x.soort === 'zelf' && x.apparaat === w.t.id && !x.gespeeld && nu < x.tot; }).length >= TEL_ZELF_MAX_OPEN) return klaar('rij vol');
   // k_gelogd: buiten de kostenmeting van /tel-beurten (wv339)
-  const x = { id: id, apparaat: w.t.id, soort: 'zelf', spreek: telSpreektekst(out), aankondiging: TEL_ZELF_AANKONDIGING,
+  const x = { id: id, apparaat: w.t.id, soort: 'zelf', spreek: telSpreektekst(out), rest: /^[^\S\n]*[*_]*Verder in (de app|Telegram)\s*:/im.test(out), aankondiging: TEL_ZELF_AANKONDIGING,
     t_start: nu, t_klaar: nu, tot: nu + TEL_ZELF_TTL_MS, k_gelogd: 'nvt' };
   rij.push(x);
   telRijBewaar();
