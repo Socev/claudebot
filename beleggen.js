@@ -537,6 +537,12 @@ function bereken(data, vandaag) {
   for (const g of groepen) if (!groepMetRegel(g)) sig({ sleutel: 'dagboek:' + g.eerste, soort: 'dagboek', titel: 'Transactie zonder dagboekregel: ' + g.naam,
     wat: 'Op ' + g.datum + ' ' + (g.erbij ? 'kwam er ' : 'ging er ') + g.aantal.replace('.', ',') + ' ' + g.naam + (g.erbij ? ' bij' : ' af') + (g.leden.length > 1 ? ' (' + g.leden.length + ' orders).' : '.'),
     raakt: g.naam, transactie: g.eerste, transacties: g.leden, plan: 'Na een transactie schrijf je één keer waarom.', keuzes: ['dagboek', 'niets'] });
+  // wv3758: een aankoopmail van DEGIRO die de mailronde niet kon lezen (nooit geraden); de export vult het gat
+  for (const t of data.mail_verschil || []) sig({ sleutel: 'mailverschil:' + t.sleutel, soort: 'mail', titel: 'Aankoop uit je mail staat niet in je export: ' + t.naam,
+    wat: 'Op ' + t.datum + ' las ik deze transactie uit je DEGIRO-mail, maar je Transacties-export over die dagen heeft hem niet. Kijk in DEGIRO welke klopt.',
+    raakt: t.naam, transactie: t.sleutel, plan: 'De export per kwartaal is de controle op wat uit je mail kwam.', keuzes: ['niets'] });
+  for (const m of data.mail_fout || []) sig({ sleutel: 'mailfout:' + m.gmail_id, soort: 'mail', titel: 'Een aankoopmail van DEGIRO kon ik niet lezen',
+    wat: 'Mail van ' + (m.mail_datum || 'onbekende datum') + '. Lees je Transacties-export van DEGIRO in, dan staat de aankoop er alsnog in.', plan: 'Aankopen komen vanzelf uit je DEGIRO-mail; de export is de controle.', keuzes: ['niets'] });
   for (const d of data.dagboek) {
     for (const [m, veldNaam] of [[6, 'terugblik6'], [12, 'terugblik12']]) {
       const op = plusMaanden(d.datum, m);
@@ -766,6 +772,20 @@ function geldOverzicht(x) {
       } else if (OVERIG_KOSTEN_RE.test(o) && !GEEN_OVERIG_RE.test(o)) { if (eur) u.kosten_overig_cent += -m; else u.kosten_zonder++; }
     }
     u.ingelegd_cent = stort ? som : null;   // geen enkele storting in het overzicht = niet vast te stellen (export begint later dan je eerste storting)
+    if (stort) u.ingelegd_bron = 'export';
+  }
+  // wv3758 (L12): stortingen en opnames uit de bank-lezer (storting = negatieve bankpost). Review MOET 2: de bank vervangt het rekeningoverzicht
+  // nooit; met een overzicht tellen alleen bankposten NA zijn laatste dag mee (aansluiten op het overzicht), zonder overzicht de bank vanaf zijn
+  // eerste post (de tegel zegt "sinds <datum>"). Een overzicht zonder storting blijft "niet vast te stellen".
+  const bank = Array.isArray(x.bank) ? x.bank.filter((b) => b && b.datum && Number.isInteger(b.cent)) : [];
+  if (bank.length && (!reken.length || u.ingelegd_cent != null)) {
+    const na = reken.length ? bank.filter((b) => b.datum > u.ingelegd_tot) : bank;
+    if (na.length) {
+      u.ingelegd_cent = (u.ingelegd_cent || 0) + na.reduce((s, b) => s - b.cent, 0);
+      u.ingelegd_bank = na.length;
+      u.ingelegd_bron = reken.length ? 'export+bank' : 'bank';
+      for (const b of na) { if (!u.ingelegd_van || b.datum < u.ingelegd_van) u.ingelegd_van = b.datum; if (!u.ingelegd_tot || b.datum > u.ingelegd_tot) u.ingelegd_tot = b.datum; }
+    }
   }
   if (tx.length) {
     const fx = x.autofx || new Map();
@@ -982,6 +1002,8 @@ function maak(o) {
   const vaultSchrijf = typeof o.vaultSchrijf === 'function' ? o.vaultSchrijf : null;
   const vandaagF = o.vandaag || vandaagNl;
   let vaultOk = null, laatsteVault = null, gemigreerd = false;
+  // wv3758: stortingen naar DEGIRO uit de bank-lezer (server.js leest de bankdatabank alleen-lezen); een fout = geen bankposten (nooit raden)
+  function bankStortingen() { if (typeof o.bankStortingen !== 'function') return null; try { return o.bankStortingen(); } catch (e) { return null; } }
   function open(alleenLezen) {
     const { DatabaseSync } = require('node:sqlite');
     const map = path.dirname(dbPad);
@@ -1026,11 +1048,17 @@ function maak(o) {
     d.dagboek = db.prepare('SELECT * FROM dagboek ORDER BY datum DESC, id DESC').all().map((r) => Object.assign({}, r));
     d.volglijst = db.prepare('SELECT id, naam, code, thema, waarom, wanneer, op FROM volglijst WHERE weg = 0 ORDER BY id').all().map((r) => Object.assign({}, r));
     for (const r of db.prepare('SELECT sleutel, keuze, tot FROM signaal_keuze').all()) d.keuzes[r.sleutel] = { keuze: r.keuze, tot: r.tot };
-    d.bestanden = db.prepare('SELECT id, soort, naam, datum_bestand, op, rijen, nieuw FROM bestand ORDER BY id DESC LIMIT 10').all().map((r) => Object.assign({}, r));
+    // wv3758: een transactie uit Davids DEGIRO-mail is intern ook een 'bestand' (naam mail:<id>); het vak "Je bestanden uit DEGIRO" toont alleen exports
+    d.bestanden = db.prepare("SELECT id, soort, naam, datum_bestand, op, rijen, nieuw FROM bestand WHERE coalesce(naam, '') NOT LIKE 'mail:%' ORDER BY id DESC LIMIT 10").all().map((r) => Object.assign({}, r));
+    d.uit_mail = db.prepare("SELECT COUNT(*) AS n, MAX(op) AS op FROM bestand WHERE naam LIKE 'mail:%'").get();
+    d.uit_mail = { aantal: d.uit_mail.n, op: d.uit_mail.op || null };
+    d.mail_verschil = mailVerschil(db);
+    d.mail_fout = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mailtx'").get()
+      ? db.prepare("SELECT gmail_id, mail_datum FROM mailtx WHERE uitkomst = 'fout' ORDER BY op DESC LIMIT 5").all().map((r) => Object.assign({}, r)) : [];
     // wv3031: per DEGIRO-export (portefeuille, transacties, rekening) het laatst ingelezen bestand, los van de 10 hierboven (geen bedragen)
     d.exports = { portefeuille: null, transacties: null, rekening: null };
-    for (const r of db.prepare('SELECT soort, MAX(op) AS op, COUNT(*) AS n FROM bestand GROUP BY soort').all()) {
-      if (r.soort in d.exports) d.exports[r.soort] = { op: r.op, aantal: r.n, datum_bestand: (db.prepare('SELECT datum_bestand FROM bestand WHERE soort = ? ORDER BY op DESC, id DESC LIMIT 1').get(r.soort) || {}).datum_bestand || null };
+    for (const r of db.prepare("SELECT soort, MAX(op) AS op, COUNT(*) AS n FROM bestand WHERE coalesce(naam, '') NOT LIKE 'mail:%' GROUP BY soort").all()) {
+      if (r.soort in d.exports) d.exports[r.soort] = { op: r.op, aantal: r.n, datum_bestand: (db.prepare("SELECT datum_bestand FROM bestand WHERE soort = ? AND coalesce(naam, '') NOT LIKE 'mail:%' ORDER BY op DESC, id DESC LIMIT 1").get(r.soort) || {}).datum_bestand || null };
     }
     const m = Object.fromEntries(db.prepare("SELECT sleutel, waarde FROM meta WHERE sleutel IN ('stand_datum', 'stand_bron')").all().map((r) => [r.sleutel, r.waarde]));
     d.stand_datum = m.stand_datum || null; d.stand_bron = m.stand_bron || null;
@@ -1102,6 +1130,27 @@ function maak(o) {
       for (const [k, v] of l) if (v != null && !m.has(k)) m.set(k, v);
     }
     return m;
+  }
+  // wv3758 kwartaalcontrole: een transactie die uit Davids DEGIRO-mail kwam en binnen de datums van een later ingelezen transacties-export valt,
+  // maar daar niet in staat = verschil (zichtbaar als signaal; niets gewist). Exports opnieuw gelezen met dezelfde cache op sha256.
+  const exportCache = new Map();
+  function mailVerschil(db) {
+    const mailTx = db.prepare("SELECT t.sleutel, t.datum, t.naam FROM transactie t JOIN bestand b ON b.id = t.bestand_id WHERE b.naam LIKE 'mail:%'").all();
+    if (!mailTx.length) return [];
+    const exps = [];
+    for (const r of db.prepare("SELECT id, sha256 FROM bestand WHERE soort = 'transacties' AND coalesce(naam, '') NOT LIKE 'mail:%' ORDER BY id").all()) {
+      let e = exportCache.get(r.sha256);
+      if (!e) {
+        try { const x = leesBestand(db.prepare('SELECT inhoud FROM bestand WHERE id = ?').get(r.id).inhoud); if (x.soort !== 'transacties' || !x.rijen.length) continue;
+          const ds = x.rijen.map((y) => y.datum).sort(); e = { van: ds[0], tot: ds[ds.length - 1], sl: new Set(x.rijen.map((y) => y.sleutel)) }; }
+        catch (err) { continue; }
+        if (exportCache.size >= 200) exportCache.clear();
+        exportCache.set(r.sha256, e);
+      }
+      exps.push(e);
+    }
+    return mailTx.filter((t) => { const binnen = exps.filter((e) => t.datum >= e.van && t.datum <= e.tot); return binnen.length && !binnen.some((e) => e.sl.has(t.sleutel)); })
+      .map((t) => ({ sleutel: t.sleutel, datum: t.datum, naam: t.naam }));
   }
   // Wat de ochtendronde nodig heeft: posities (ISIN, naam, valuta; geen aantallen of bedragen), bedrijven om vanzelf een kaartje voor te maken
   // (geen kaartje en niet door David uitgezet), en de codes die al gevonden zijn.
@@ -1204,11 +1253,11 @@ function maak(o) {
       if (vandaagW) for (const p of k.posities) { const x = vandaagW.posities[p.sleutel]; const r = p.isin && rk.reeks[p.isin]; if (x && x.koers && r) x.reeks = r.filter((y) => y.valuta === x.valuta && y.datum < vandaag).slice(-30).map((y) => ({ datum: y.datum, slot: y.slot })); }
       const as = aankoopStand(d.transacties);
       const geld = geldOverzicht({ rekening: db ? db.prepare('SELECT datum, omschrijving, mutatie_cent, mutatie_valuta FROM rekening').all() : [], transacties: d.transacties,
-        autofx: autofxUit(db), vandaag: vandaagW, wissels: rk.wissels, gerealiseerd: { cent: as.gerealiseerd_cent, onbekend: as.gerealiseerd_onbekend } });
+        bank: bankStortingen(), autofx: autofxUit(db), vandaag: vandaagW, wissels: rk.wissels, gerealiseerd: { cent: as.gerealiseerd_cent, onbekend: as.gerealiseerd_onbekend } });
       for (const p of k.posities) delete p._ruw;
       return { ok: true, vandaag, vragen: VRAGEN, antwoorden: d.antwoorden, regels: d.regels, versies: d.versies, stand: { datum: d.stand_datum, bron: d.stand_bron,
         verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig, historie: historieUit(db), onvolledig: !!d.aankoop_onvolledig, vandaag: vandaagW, daglijn: lijn }, geld, transacties: d.transacties, dagboek, volglijst: volg,
-        signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, exports: d.exports, rekening_rijen: d.rekening_rijen, stortingen: d.stortingen,
+        signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, exports: d.exports, rekening_rijen: d.rekening_rijen, stortingen: d.stortingen, uit_mail: d.uit_mail || { aantal: 0, op: null },
         soort_namen: SOORT_NAAM, vault: { ok: vaultOk, op: laatsteVault }, bedrijven,
         beursgang_klaar: Object.keys(d.keuzes).filter((x) => x.startsWith('beursgang:')).map((x) => x.slice(10)) };   // wv3727: afgeronde beursgangen (code)
     }, false);

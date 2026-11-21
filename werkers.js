@@ -137,6 +137,8 @@ const POD = [
   // wv3190 (DM12, 16-11-2026): pod-klokken en weekreeksen in de werkvoorraad die al stempelden zonder werker
   { id: 'beleggen-nieuws', naam: 'OVIS Beleggen (nieuws ophalen + weekbericht)', soort: 'routine', module: 'financien', trigger: 'pod-tijdklok', rooster: 'elke dag 06:40 (ophalen), zondag 09:00 (weekronde)',
     model: 'claude-sonnet-5-5', hartslag: ['beleggen-ophaal'], uitkomst: 'weekbericht aan David (hoofd) + box-rij bij een bron die drie dagen faalt', bron: 'server.js beleggenNieuwsTik → beleggen-nieuws.js (wv2993)' },
+  { id: 'beleggen-mail', naam: 'OVIS Beleggen (aankopen uit de DEGIRO-mail + ochtendvraag)', soort: 'routine', module: 'financien', trigger: 'pod-tijdklok', rooster: 'elk uur 07–23 (mail lezen), 08–21 één ochtendvraag per dag na een aankoop',
+    model: 'geen', hartslag: [], uitkomst: 'transactie in Beleggen; vraag "waarom?" aan David (hoofd)', bron: 'server.js beleggenMailTik → beleggen-mail.js (wv3758)' },
   { id: 'ovis-nza-wachter', naam: 'OVIS NZa-wachter', soort: 'wachter', trigger: 'pod-tijdklok', rooster: 'elke dag één ronde tussen 07:50 en 09:49',
     model: 'geen', hartslag: ['ovis-nza-wachter'], uitkomst: 'NZa-bibliotheek + index, Nieuw op het scherm; bericht aan David alleen bij een nieuwe beschikking, beleidsregel, bezwaarbeslissing of CBb-uitspraak',
     bron: 'server.js nzaWachterTik → mk-scripts/ovis-nza/wachter.py ronde (wv3113)' },

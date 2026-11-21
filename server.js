@@ -16697,6 +16697,7 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'weer-avond',           // wv2605: avondseintje bij vroeg vertrek (gladheid/storm/onweer/KNMI 05:00–08:00 morgen); hoofdkanaal, soort dag
   'nieuwsbrief',          // wv2190: wekelijkse bloemlezing uit de nieuwsbrieven (za 09:15, AI - Nieuwsbrief-bloemlezing); hoofdkanaal, soort dag
   'beleggen-week',        // wv2993: OVIS Beleggen weekbericht (zondag 09:00; alleen aantallen, geen namen of bedragen); hoofdkanaal, soort dag
+  'beleggen-waarom',      // wv3758: OVIS Beleggen ochtendvraag na een aankoop uit de DEGIRO-mail (08–21, één per dag; productnaam, geen bedragen); hoofdkanaal, soort dag
   'dagsamenvatting',      // wv589: dagsamenvatting "Gebeurd" 07:15 (idee 13 § 4.6): machinekamer, geen MELD_SOORT-regel = archief, geen seintje
   // wv3238: deze bronnen riepen berichtIntern al aan maar stonden hier niet (400 'onbekende bron', stil weggevallen; gemeten 16-11).
   // test/bericht-bronnen.sh toetst elke letterlijke bron/soort in een berichtIntern-aanroep tegen deze lijst en MELD_SOORTEN.
@@ -16714,7 +16715,7 @@ const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
 // in Telegram tikte David 17 van 18 regels aan (mediaan 7 min), in de app 28 van 80 (mediaan 289 min).
 // wv3719 (3C04, David Ja 21-11 13:22): heartbeat = dag. 11 van de 19 heartbeat-berichten (afval, "morgen laatste dag") kwamen
 // als archief binnen, zonder seintje. Een stille ronde (NIETS) komt hier nooit: de n8n-Heartbeat stuurt dan niets.
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'pot-loonrun': 'dag' };
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'beleggen-waarom': 'dag', 'pot-loonrun': 'dag' };
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
@@ -25120,9 +25121,25 @@ const BELEGGEN_DB = process.env.BELEGGEN_DB || '/opt/data/beleggen/beleggen.sqli
 const beleggenApp = (function () {
   const p = path.join(__dirname, 'beleggen.js');
   if (!fs.existsSync(p)) return null;
-  try { return require(p).maak({ dbPad: BELEGGEN_DB, vaultSchrijf: function (rel, tekst) { VV().schrijf(path.join(VAULT, rel), tekst); } }); }
+  try { return require(p).maak({ dbPad: BELEGGEN_DB, vaultSchrijf: function (rel, tekst) { VV().schrijf(path.join(VAULT, rel), tekst); }, bankStortingen: beleggenBankStortingen }); }
   catch (e) { logError('beleggen', new Error('laden faalde')); return null; }
 })();
+// wv3758 (besluitenpagina nr 912 = L12): stortingen naar en opnames van DEGIRO uit de bank-lezer, alleen lezen (zelfde poort als vastgoed.js,
+// wv3102): geboekte EUR-posten met tegenpartij flatex/degiro op eigen rekeningen (niet POT, niet extern). Storting = negatieve post. Fout = null.
+function beleggenBankStortingen() {
+  const pad = path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite');
+  if (!fs.existsSync(pad)) return null;
+  let db;
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    db = new DatabaseSync(pad, { readOnly: true });
+    return db.prepare(`SELECT t.datum AS datum, t.bedrag AS bedrag FROM transacties t JOIN rekeningen r ON r.rek = t.rek WHERE t.status = 'booked' AND t.vervangen_door IS NULL
+      AND coalesce(r.eigenaar, '') NOT IN ('POT', 'extern') AND coalesce(t.valuta, 'EUR') = 'EUR' AND t.datum IS NOT NULL
+      AND (lower(coalesce(t.tegenpartij, '')) LIKE '%flatex%' OR lower(coalesce(t.tegenpartij, '')) LIKE '%degiro%') ORDER BY t.datum LIMIT 2000`).all()
+      .map(function (r) { return { datum: String(r.datum).slice(0, 10), cent: Math.round(Number(r.bedrag) * 100) }; }).filter(function (r) { return Number.isInteger(r.cent) && r.cent !== 0; });
+  } catch (e) { return null; }
+  finally { try { if (db) db.close(); } catch (e) { /* al dicht */ } }
+}
 async function appBeleggen(req, res, a, route, d) {
   if (!beleggenApp) return appWeiger(res, 404, 'Beleggen zit niet in deze versie van de pod', 'beleggen ontbreekt');
   if (!appTeller('beleggen', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens beleggen');
@@ -25158,6 +25175,7 @@ function beleggenInfo() {
   let i;
   try { i = beleggenApp.info(); } catch (e) { return { aan: true, fout: true }; }
   if (beleggenNieuws) { try { i.weekbericht = beleggenNieuws.info(); } catch (e) { i.weekbericht = { aan: true, fout: true }; } }
+  if (beleggenMail) { try { i.mail = beleggenMail.info(); } catch (e) { i.mail = { aan: true, fout: true }; } }
   return i;
 }
 // ── wv2993: OVIS Beleggen fase 2 — weekbericht met nieuws (ontwerp mk-scripts/ovis-beleggen/fase2/ontwerp-fase2.md; David Ja 13-11 08:36:
@@ -25200,6 +25218,32 @@ async function beleggenNieuwsTik() {
   beleggenPeilTik();   // wv3757: na de koersronde, ook als die faalde (dan de laatst bekende koers met markering)
 }
 if (beleggenNieuws && SERVER_ECHT) { setInterval(function () { beleggenNieuwsTik(); }, 5 * 60000).unref(); }
+// wv3758 (besluitenpagina nr 912 = L12, David Ja 21-11 13:19 met vingerafdruk): Beleggen zonder huiswerk. beleggen-mail.js leest de
+// transactiebevestigingen van DEGIRO via het lees-luik (alleen lezen; hooguit eens per uur 07–23) en zet ze via de bestaande invoer in Beleggen;
+// de ochtend na een aankoop één vraag in het gesprek (berichtIntern, bron beleggen-waarom, sleutel per dag, 08–21). Nooit DEGIRO, nooit handelen.
+// Log: alleen aantallen. Ontwerp + review: mk-scripts/wv3758/ontwerp.md.
+const beleggenMail = (function () {
+  const p = path.join(__dirname, 'beleggen-mail.js');
+  if (!beleggenApp || !fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ beleggen: beleggenApp,
+      luik: function (body) { return appAgendaApi(body, { timeoutMs: 60000 }); },
+      bericht: async function (tekst, sleutel) {
+        const r = await berichtIntern({ kanaal: 'hoofd', bron: 'beleggen-waarom', klasse: 'normaal', soort: 'dag', tekst: tekst, sleutel: sleutel });
+        return { ok: !!(r && r.status === 200 && r.j && r.j.ok) };
+      },
+      log: function (o) { schrijfLog(nu() + ' beleggen-mail ' + velden(o)); } });
+  } catch (e) { logError('beleggen-mail', new Error('laden faalde')); return null; }
+})();
+let beleggenMailBezig = false;
+async function beleggenMailTik() {
+  if (!beleggenMail || !SERVER_ECHT || !rolPrimair() || beleggenMailBezig) return;
+  beleggenMailBezig = true;
+  try { await beleggenMail.tik(); }
+  catch (e) { logError('beleggen-mail', new Error('tik faalde')); }   // geen inhoud in de log
+  finally { beleggenMailBezig = false; }
+}
+if (beleggenMail && SERVER_ECHT) { setInterval(function () { beleggenMailTik(); }, 5 * 60000).unref(); }
 // wv3756 (besluitenpagina nr 908 = L08, David Ja 21-11 13:18): Socev kan erbij in het gewone gesprek (skill beleggen). Zelfde databank en
 // berekening als het scherm; alleen lezen en een dagboekregel (vaultpagina Dagboek via vault-veilig, zoals de app). Socev draait als gebruiker
 // socev zonder kluis: deze route vraagt alleen de agent-sleutel, geen nieuwe sleutel. Alleen de bekende velden gaan door (de secret niet).

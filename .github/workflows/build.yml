@@ -603,6 +603,10 @@ jobs:
       - name: "beleggen-nieuws (wv2993, OVIS Beleggen weekbericht)"
         if: ${{ !cancelled() }}
         run: bash test/beleggen-nieuws.sh
+      # wv3758: OVIS Beleggen zonder huiswerk — aankopen uit de DEGIRO-mail (zelfde sleutel als de export), ochtendvraag, stortingen uit de bank (verzonnen mails).
+      - name: "beleggen-mail (wv3758, OVIS Beleggen zonder huiswerk)"
+        if: ${{ !cancelled() }}
+        run: bash test/beleggen-mail.sh
       # wv2991: OVIS Personeelsscherm fase 0 — proefscherm tekenen, koppelen met IP-eis, intrekken, tik en meldingen (nep-D1, nep-Cloudflare).
       - name: "personeelsscherm (wv2991, OVIS Personeelsscherm fase 0)"
         if: ${{ !cancelled() }}
