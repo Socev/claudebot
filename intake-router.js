@@ -1063,6 +1063,7 @@ function webInhoud(x) {
 /*
  * SYSTEEM (wv2004; Davids Anders 29-10 22:47: "Systeempost moet echt verwerkt worden, niet alleen opgeborgen"). Per stuk één oordeel
  * "actie nodig? ja/nee + waarom". Vaste signalen (hieronder) altijd; het model (o.systeemOordeel) alleen als Jev onder de drempel bleef.
+ * Ook voor een stuk dat David na de patiëntmarker vrijgaf (wv3774: geen patiëntrem vóór het model, Davids afspraak 21-11).
  * Een signaal in het ONDERWERP telt als ja; alleen in de tekst = nee met "nalezen" (nieuwsbrieven noemen prijzen en storingen in de voet).
  */
 const SYSTEEM_SIGNAAL = [   // volgorde = voorrang
@@ -1875,7 +1876,7 @@ function maak(o) {
       const tekst = tekstDelen.map(function (x) { return x.tekst; }).join('\n');
       k.systeem = { onderwerp, van: (meta.van_naam ? meta.van_naam + ' ' : '') + '<' + adresVan(meta.van || '') + '>', van_adres: adresVan(meta.van || ''), dkim: sam.dkim || null,
         jev: sam.jev || null, na_keuze: !!sam.na_keuze, oordeel: systeemOordeelRegels({ onderwerp, tekst }),
-        model: !!o.systeemOordeel && sam.jev === 'onder' && !sam.na_keuze };   // review ZOU 3: niet voor een vrijgegeven markerstuk
+        model: !!o.systeemOordeel && sam.jev === 'onder' };   // wv3774 (David 21-11): ook een vrijgegeven markerstuk krijgt het modeloordeel; Jev onder blijft de eis
     }
     return [k].concat(uit);
   }
