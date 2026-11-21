@@ -35,6 +35,51 @@ const VOORSTEL_RE = /^\*\*Voorstel van Socev\*\*\s*(.*)$/i;
 const SPREEK_RE = /^\*\*Spreektekst\*\*\s*(.*)$/i;
 const SPREEK_MAX = SPREEK.MAX;   // uitgeschreven nummers maken de spreektekst ± 2× zo lang als de tekst
 
+// ── wv3768 (besluitenpagina nr 191 = 2C91 b+d, David Ja 21-11-2026 13:18; Fable-review "Een 9 - bandjes" idee 6 en 12) ──
+// (b) "gevraagd door: Naam <adres>": wie om het bandje vroeg (David in de app, of de skill bandjes via /smal). Bij "Staat in de centrale"
+// zet de pod een Gmail-CONCEPT aan die persoon (nooit versturen; David verstuurt). (d) "aangeleverd: <datum> · [[bron]]": het huidige
+// geluid dat David in de app aanleverde; de pod bewaart het in de Bronnen-map van de praktijk en zet het uitschrift als VOORSTEL.
+const MAIL_RE = /^[^@\s<>(),;:"'\\[\]]{1,64}@[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+$/i;
+// "Naam <adres>" of een kaal adres → { naam, mail } of null ("—" of leeg = niemand)
+function vragerVan(w) {
+  const t = String(w || '').trim();
+  if (!t || /^[—–-]$/.test(t)) return null;
+  const m = /^(.*?)\s*<([^<>\s]+)>\s*$/.exec(t);
+  const mail = (m ? m[2] : t).trim(), naam = (m ? m[1] : '').replace(/["']/g, '').trim();
+  return mail.length <= 120 && MAIL_RE.test(mail) ? { naam: naam.slice(0, GRENS.naam), mail: mail.toLowerCase() } : null;
+}
+// Schrijver (strikt): naam ≤ 60 tekens zonder <>", adres verplicht en geldig; allebei leeg = wissen ("—").
+function vragerRegel(naam, mail) {
+  const n = eenRegel(naam, GRENS.naam * 2).replace(/[<>"';]/g, '').trim().slice(0, GRENS.naam), a = eenRegel(mail, 200).toLowerCase();
+  if (!n && !a) return { waarde: '—' };
+  if (!a || a.length > 120 || !MAIL_RE.test(a)) return { fout: 'vul een geldig mailadres in (naam mag erbij)' };
+  return { waarde: n ? n + ' <' + a + '>' : '<' + a + '>' };
+}
+// Het conceptantwoord aan de vrager (collega: "Hoi …", "Groet, David"; skill mijn-mailstem § collega). Alleen praktijktekst, geen patiënten.
+function terugmeldMail(prNaam, b, vrager, klok) {
+  const voornaam = String(vrager && vrager.naam || '').split(/\s+/)[0] || '';
+  return { onderwerp: 'Bandje ' + b.naam + ' (' + prNaam + ') staat in de centrale',
+    bericht: (voornaam ? 'Hoi ' + voornaam + ',' : 'Hoi,') + '\n\n' +
+      'Het bandje "' + b.naam + '" van ' + prNaam + ' is aangepast: de nieuwe versie staat sinds ' + vandaag(klok) + ' in de telefooncentrale.\n\n' +
+      'Dit is de tekst:\n\n' + normTekst(b.tekst) + '\n\n' +
+      'Hoor je iets wat niet klopt, laat het me weten.\n\nGroet,\nDavid' };
+}
+// Geluid herkennen op de eerste bytes (niet op naam of type van de browser). Gemeten 21-11 (wv3768): Whisper via Cloudflare verstaat WAV
+// PCM 16 kHz, PCM 8 kHz en µ-law 8 kHz (de telefoonversie) even goed; MPEG4/AAC, 3GPP en MP3 slikt hij ook (wv172, 9-10).
+function audioSoort(b) {
+  if (!Buffer.isBuffer(b) || b.length < 64) return null;
+  const a = function (i, n) { return b.toString('latin1', i, i + n); };
+  if (a(0, 4) === 'RIFF' && a(8, 4) === 'WAVE') return { ext: 'wav', type: 'audio/wav' };
+  if (a(0, 3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)) return { ext: 'mp3', type: 'audio/mpeg' };
+  if (a(4, 4) === 'ftyp') return /^3g/.test(a(8, 3)) ? { ext: '3gp', type: 'audio/3gpp' } : { ext: 'm4a', type: 'audio/mp4' };
+  if (a(0, 4) === 'OggS') return { ext: 'ogg', type: 'audio/ogg' };
+  if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return { ext: 'webm', type: 'audio/webm' };
+  return null;
+}
+const AANLEVER_MAX = 15 * 1024 * 1024;   // een bandje is hooguit een paar minuten; ruim onder de uploadgrens (20 MB) en de grens van Whisper
+const AANLEVER_PER_UUR = 10;
+const UITSCHRIJF_HINT = 'Tolgaarde, Groenhouten, huisartsenpraktijk, huisartsenpost, doktersassistente, spoedlijn, receptenlijn, keuzemenu';
+
 function schoon(t, max) {
   return String(t == null ? '' : t).replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f‪-‮⁦-⁩]/g, '').slice(0, max);
 }
@@ -147,6 +192,7 @@ function bandjeUit(b) {
   return { id: b.id, naam: b.naam, menu: v.menu || '', wanneer: v.wanneer || '', tijdvensters: v.tijdvensters || '', stem: v.stem || 'praktijkstem',
     versie: b.versie, tekst: b.tekst, onbekend: b.onbekend, tekst_hash: b.hash, status: v.status || '', laatste_bestand: v['laatste bestand'] || '',
     in_centrale: v['in centrale'] || '', gehoord: v.gehoord || '', bron: v.bron || '', aandachtspunt: v.aandachtspunt || '', voorstel: b.voorstel, spreek_eigen: b.spreek || null,
+    vrager: vragerVan(v['gevraagd door']), aangeleverd: /^[—–-]?$/.test(String(v.aangeleverd || '').trim()) ? '' : v.aangeleverd,   // wv3768
     // wv830: versiemodel (zie werkNummer); werkversie = null als de tekst die van de centrale is
     centrale_versie: centraleVersie(v), werkversie: b.versie > centraleVersie(v) ? b.versie : null, volgende_versie: werkNummer(b), kan_centrale: kanCentrale(b) };
 }
@@ -386,7 +432,7 @@ function gelijkTrekken(md, voorvoegsel, id, o, klok) {
   return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)), oude_hash: b.hash };
 }
 // Losse velden (laatste bestand, in centrale, status) — alleen deze sleutels.
-const VRIJE_VELDEN = ['laatste bestand', 'in centrale', 'status', 'stem', 'gehoord'];   // wv3723: gehoord (belkaart)
+const VRIJE_VELDEN = ['laatste bestand', 'in centrale', 'status', 'stem', 'gehoord', 'gevraagd door', 'aangeleverd'];   // wv3723: gehoord (belkaart); wv3768: vrager, aanlevering
 function zetVelden(md, voorvoegsel, id, velden, verwacht, klok) {
   const p = parse(md, voorvoegsel);
   if (p.fouten.length) return { status: 409, fout: 'de registerpagina is niet in orde: ' + p.fouten.join('; ') };
@@ -899,8 +945,25 @@ function maak(deps) {
     if (r.status === 200) r.archief = ar.vaultBasis + '.md';
     return r;
   }
+  // wv3768 (d): het aangeleverde geluid in de Bronnen-map van de praktijk (zoals de opnames van 22-10), nooit overschrijven (bezet = -2,
+  // -3 …), 0644. Geeft { vaultPad, naam } of { fout }. Naam kort gehouden: het veld "aangeleverd" (hooguit 160 tekens) linkt ernaar.
+  function bewaarAanlevering(pr, b, bytes, ext) {
+    if (!Object.hasOwn(PRAKTIJKEN, pr) || !/^(wav|mp3|m4a|3gp|ogg|webm)$/.test(String(ext))) return { fout: 'onbekend formaat' };
+    const vaultMap = path.posix.join(path.posix.dirname(path.posix.dirname(PRAKTIJKEN[pr].pad)), 'Bronnen');
+    const map = path.join(VAULT, vaultMap);
+    const kortNaam = String(b.naam || b.id).normalize('NFC').replace(/[\\/:*?"<>|#^\[\]\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 30).trim() || b.id;
+    const basis = PRAKTIJKEN[pr].naam + ' - ' + vandaagIso(klok) + ' - Telefoonbandje ' + kortNaam + ' (aangeleverd';
+    let naam = basis + ').' + ext, n = 2;
+    try {
+      fs.mkdirSync(map, { recursive: true, mode: 0o755 });
+      while (fs.existsSync(path.join(map, naam))) { naam = basis + ' ' + (n++) + ').' + ext; if (n > 50) return { fout: 'te veel aanleveringen op één dag' }; }
+      VV.schrijf(path.join(map, naam), bytes, { modus: 0o644 });   // wv900: getoetste vaultmap, eigen tmp + rename
+    } catch (e) { fout('bandjes-aanlever', e); return { fout: 'het geluid kon niet in de Second Brain bewaard worden' }; }
+    return { vaultPad: vaultMap + '/' + naam, naam: naam };
+  }
   return {
     lees: lees,
+    bewaarAanlevering: bewaarAanlevering,   // wv3768
     alles: function () { return { praktijken: Object.keys(PRAKTIJKEN).map(lees) }; },
     zetTekst: function (pr, id, o) { return muteer(pr, 'tekst', function (md, vv) { return zetTekst(md, vv, id, o, klok); }); },
     zetVoorstel: function (pr, id, o) { return muteer(pr, 'voorstel', function (md, vv) { return zetVoorstel(md, vv, id, o, klok); }); },
@@ -1078,7 +1141,7 @@ function routes(deps) {
   function praktijkUit(l) {
     return { id: l.praktijk, naam: l.naam || (PRAKTIJKEN[l.praktijk] && PRAKTIJKEN[l.praktijk].naam), instellingen: l.instellingen || {},
       praktijkstem: praktijkstem(l.instellingen),
-      bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { spreektekst: spreekVan(b, l.instellingen), bewaard: bewaardUit(l.praktijk, b), gelijk_kan: gelijkKan(l.praktijk, b, l.instellingen) }); }),   // wv3723 gelijk_kan   // wv803; wv3064 bewaard; wv3544 of uit het archief
+      bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { spreektekst: spreekVan(b, l.instellingen), bewaard: bewaardUit(l.praktijk, b), gelijk_kan: gelijkKan(l.praktijk, b, l.instellingen), terugmelding: terugVan(l.praktijk, b) }); }),   // wv3768 terugmelding   // wv3723 gelijk_kan   // wv803; wv3064 bewaard; wv3544 of uit het archief
       dicht: l.dicht || null, fouten: l.fouten || [], conflicten: l.conflicten || [], teruggezet: l.teruggezet || [], ontbreekt: l.ontbreekt === true };
   }
   // wv3064: het bewaarde geluid van de werkversie (zonder paden) of null. wv3544: geen werkversie bewaard, dan het geluid van wat in de
@@ -1100,6 +1163,58 @@ function routes(deps) {
     return w && w.job === job ? w.bestanden.map(function (x) { return { n: x.n, naam: x.naam, pad: x.pad }; }) : bs;
   }
   function ronde() { return S.werkRonde ? S.werkRonde(deps.bestandVan) : null; }
+
+  // ── wv3768 (b): terugmelden aan wie om het bandje vroeg ──
+  // Stand per praktijk/bandje/versie in <dir>/terugmeld.json (0600): { aangevraagd } zolang het mailluik niet bevestigde, daarna
+  // { concept_op, aan }. Geen tweede concept door een dubbele druk of een verloren antwoord (zoals het POT-afschrift, Fable wv787 #14).
+  const TERUG_STAND = path.join(deps.dir, 'terugmeld.json');
+  const TERUG_ONZEKER_MS = 24 * 3600 * 1000;
+  function terugLees() { try { const j = JSON.parse(fs.readFileSync(TERUG_STAND, 'utf8')); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; } catch (e) { return {}; } }
+  function terugZet(k, w) {
+    const st = terugLees();
+    if (w === null) delete st[k]; else st[k] = w;
+    const sleutels = Object.keys(st);
+    if (sleutels.length > 300) sleutels.sort(function (a, b) { return String(st[a].concept_op || st[a].aangevraagd || '').localeCompare(String(st[b].concept_op || st[b].aangevraagd || '')); }).slice(0, sleutels.length - 300).forEach(function (x) { delete st[x]; });
+    const tmp = TERUG_STAND + '.' + process.pid;
+    try { fs.mkdirSync(deps.dir, { recursive: true, mode: 0o700 }); fs.writeFileSync(tmp, JSON.stringify(st), { mode: 0o600 }); fs.renameSync(tmp, TERUG_STAND); return true; }
+    catch (e) { fout('bandjes-terugmeld-stand', e); try { fs.unlinkSync(tmp); } catch (e2) {} return false; }
+  }
+  function terugSleutel(pr, b) { return pr + '/' + b.id + '/v' + b.centrale_versie; }
+  // Voor de app: de stand bij de versie die nu in de centrale staat (zonder concept-id)
+  // Codex MOET 2: alleen de stand van de vrager van nu (een andere vrager = nog geen concept aan die persoon)
+  function terugVan(pr, b) {
+    if (!(b.centrale_versie >= 1)) return null;
+    const s = terugLees()[terugSleutel(pr, b)];
+    return s && b.vrager && s.aan === b.vrager.mail ? { versie: b.centrale_versie, status: s.concept_op ? 'klaar' : 'aangevraagd', op: s.concept_op || s.aangevraagd || null, aan: s.aan || null } : null;
+  }
+  // b = het bandje zoals het nu in het register staat (bandjeUit), net in de centrale (versie = centrale_versie). → { status: geen | klaar |
+  // mislukt | onzeker, naam, reden?, al? }. Nooit versturen: het mailluik maakt alleen een concept in Davids Gmail.
+  async function terugmeld(pr, prNaam, b, o) {
+    const vr = b.vrager;
+    if (!vr) return { status: 'geen' };
+    const naam = vr.naam || vr.mail;
+    if (!(b.centrale_versie >= 1) || b.versie !== b.centrale_versie || !b.tekst) return { status: 'mislukt', naam: naam, reden: 'het conceptantwoord hoort bij de versie in de centrale; er is intussen een nieuwe tekst' };
+    if (typeof deps.mailConcept !== 'function') return { status: 'mislukt', naam: naam, reden: 'het mailluik zit niet in deze versie van de pod' };
+    const k = terugSleutel(pr, b);
+    const st0 = terugLees()[k];
+    const st = st0 && st0.aan === vr.mail ? st0 : null;   // Codex MOET 2: de stand geldt per ontvanger
+    if (st && st.concept_op && !(o && o.nogmaals)) return { status: 'klaar', al: true, naam: naam, op: st.concept_op };
+    if (st && st.aangevraagd && !st.concept_op && !(o && o.nogmaals) && klok() - Date.parse(st.aangevraagd) < TERUG_ONZEKER_MS)
+      return { status: 'onzeker', naam: naam, op: st.aangevraagd, reden: 'er is al een conceptantwoord aangevraagd, maar Gmail bevestigde het niet; kijk eerst bij Concepten' };
+    // Codex MOET 1: eerst de aanvraag duurzaam vastleggen; lukt dat niet, dan geen concept (anders bij een volle schijf een dubbel concept)
+    if (!terugZet(k, { aangevraagd: new Date(klok()).toISOString(), aan: vr.mail })) return { status: 'mislukt', naam: naam, reden: 'de pod kon de aanvraag niet vastleggen; probeer het straks opnieuw' };
+    const m = terugmeldMail(prNaam, b, vr, klok);
+    let r;
+    try { r = await deps.mailConcept({ aan: vr.mail, onderwerp: m.onderwerp, bericht: m.bericht }); } catch (e) { fout('bandjes-terugmeld', e); r = { ok: false, zeker: false, reden: 'geen antwoord van het mailluik' }; }
+    if (r && r.ok === true) {
+      terugZet(k, { concept_op: new Date(klok()).toISOString(), aan: vr.mail });
+      log('bandjes terugmeld concept ' + pr + '/' + b.id + ' v' + b.centrale_versie);   // geen adres of tekst in het log
+      return { status: 'klaar', naam: naam, op: new Date(klok()).toISOString() };
+    }
+    if (r && r.zeker) { terugZet(k, null); return { status: 'mislukt', naam: naam, reden: String(r.reden || 'het mailluik nam het concept niet aan').slice(0, 160) }; }
+    return { status: 'onzeker', naam: naam, reden: 'geen bevestiging van Gmail; misschien staat het concept er toch. Kijk eerst bij Concepten' };
+  }
+  const aanleverTel = [];
   // wv782: de ElevenLabs-stemmen komen uit de registers (praktijkstem eerst, dan `stemmen`); een praktijkstem zonder naam in `stemmen`
   // heet "ElevenLabs-stem"
   function registerStemmen() {
@@ -1142,7 +1257,7 @@ function routes(deps) {
       return { status: 200, j: { ok: true, praktijken: pr, stemmen: await stemmen(), schrijven: !!primair(), stem_standaard: STEM_STANDAARD, grens: GRENS, kosten: kosten,
         spreek: { standaard: SPREEK_STD, grenzen: SPREEK_GRENS, max: SPREEK.MAX } } };
     }
-    const m = /^POST \/app\/bandjes\/(tekst|nieuw|voorstel|instellingen|maak|status|spreektekst|proef|gelijk)$/.exec(route);
+    const m = /^POST \/app\/bandjes\/(tekst|nieuw|voorstel|instellingen|maak|status|spreektekst|proef|gelijk|vrager|terugmeld|aanlever)$/.exec(route);   // wv3768: vrager, terugmeld, aanlever
     if (!m) return { status: 404, j: { ok: false, fout: 'onbekend' } };
     if (!primair()) return { status: 409, j: { ok: false, fout: 'deze kant van Socev is nu passief; bandjes bewaren en maken kan alleen op de actieve kant' } };
     const pr = praktijk(d);
@@ -1192,6 +1307,77 @@ function routes(deps) {
       if (r.status === 200) log('bandjes gelijkgetrokken ' + pr + '/' + id + ' v' + r.bandje.versie);
       return goed(r);
     }
+    if (actie === 'vrager') {
+      // wv3768 (b): wie om dit bandje vroeg (naam + mailadres; allebei leeg = wissen). Een veld, geen tekst: versie en hash blijven
+      const v = vragerRegel(d.naam, d.mail);
+      if (v.fout) return { status: 400, j: { ok: false, fout: v.fout } };
+      const r = goed(S.zetVelden(pr, id, { 'gevraagd door': v.waarde }, null));
+      if (r.status === 200 && r.j.bandje) r.j.bandje.terugmelding = terugVan(pr, r.j.bandje);
+      return r;
+    }
+    if (actie === 'terugmeld') {
+      // wv3768 (b): het conceptantwoord (opnieuw) klaarzetten voor de versie die in de centrale staat; nogmaals = ook als er al een is
+      const l = lees(pr);
+      if (l.status !== 200) return fouts(l);
+      const b = (l.bandjes || []).find(function (x) { return x.id === id; });
+      if (!b) return { status: 404, j: { ok: false, fout: 'dit bandje staat niet in het register' } };
+      if (!(b.centrale_versie >= 1)) return { status: 409, j: { ok: false, fout: 'dit bandje staat nog niet in de centrale' } };
+      if (!b.vrager) return { status: 409, j: { ok: false, fout: 'vul eerst in wie om dit bandje vroeg' } };
+      const u = await terugmeld(pr, l.naam || PRAKTIJKEN[pr].naam, b, { nogmaals: d.nogmaals === true });
+      return { status: 200, j: { ok: true, terugmelding: u, bandje: Object.assign({}, b, { terugmelding: terugVan(pr, b) }) } };
+    }
+    if (actie === 'aanlever') {
+      // wv3768 (d): het huidige geluid van een bandje zonder tekst. Upload van dit apparaat (ctx.neemUpload, zoals Studio) → eerst in de
+      // Bronnen-map van de praktijk (het geluid gaat nooit verloren), dan uitschrijven (Whisper) → VOORSTEL, nooit de tekst zelf.
+      if (typeof deps.uitschrijf !== 'function') return { status: 503, j: { ok: false, fout: 'uitschrijven zit niet in deze versie van de pod' } };
+      if (!ctx || typeof ctx.neemUpload !== 'function') return { status: 503, j: { ok: false, fout: 'aanleveren kan nu niet (geen upload op de pod)' } };
+      const beurt = String(d.beurt_id || ''), n = Number(d.n == null ? 1 : d.n);
+      if (!BEURT_RE.test(beurt) || !Number.isInteger(n) || n < 1) return { status: 400, j: { ok: false, fout: 'beurt_id ontbreekt' } };
+      const l = lees(pr);
+      if (l.status !== 200) return fouts(l);
+      if (l.dicht) return { status: 409, j: { ok: false, fout: l.dicht, dicht: true } };
+      const b = l.bandjes.find(function (x) { return x.id === id; });
+      if (!b) return { status: 404, j: { ok: false, fout: 'dit bandje staat niet in het register' } };
+      if (Number(d.versie) !== b.versie || String(d.tekst_hash || '') !== b.tekst_hash) return { status: 409, j: { ok: false, fout: 'dit bandje is intussen gewijzigd; herlaad', gewijzigd: true } };
+      if (!b.onbekend) return { status: 409, j: { ok: false, fout: 'dit bandje heeft al een tekst; aanleveren is voor een bandje waarvan de tekst nog onbekend is' } };
+      const voorstelVoor = JSON.stringify(b.voorstel || null);
+      const nu = klok();
+      while (aanleverTel.length && nu - aanleverTel[0] > 3600 * 1000) aanleverTel.shift();
+      if (aanleverTel.length >= AANLEVER_PER_UUR) return { status: 429, j: { ok: false, fout: 'hooguit ' + AANLEVER_PER_UUR + ' keer per uur; probeer het straks opnieuw' } };
+      let up = null;
+      try { up = ctx.neemUpload(beurt, n); } catch (e) { up = null; }
+      if (!up || !Buffer.isBuffer(up.bytes)) return { status: 400, j: { ok: false, fout: 'het bestand staat niet (meer) op de pod; kies het opnieuw' } };
+      if (up.bytes.length > AANLEVER_MAX) return { status: 400, j: { ok: false, fout: 'het bestand is te groot (hooguit ' + Math.round(AANLEVER_MAX / 1048576) + ' MB)' } };
+      const soort = audioSoort(up.bytes);
+      if (!soort) return { status: 400, j: { ok: false, fout: 'dit is geen geluidsbestand dat Socev kan uitschrijven (wav, mp3, m4a, ogg of webm)' } };
+      aanleverTel.push(nu);
+      const bw = S.bewaarAanlevering(pr, b, up.bytes, soort.ext);
+      if (bw.fout) return { status: 500, j: { ok: false, fout: bw.fout } };
+      try { if (typeof up.weg === 'function') up.weg(); } catch (e) {}
+      const veld = S.zetVelden(pr, id, { aangeleverd: vandaag(klok) + ' · [[' + bw.vaultPad + ']]' }, { versie: b.versie, tekst_hash: b.tekst_hash });
+      if (veld.status !== 200) fout('bandjes-aanlever-veld', new Error(String(veld.fout || veld.status).slice(0, 100)));
+      log('bandjes aanlever ' + pr + '/' + id + ' ' + soort.ext + ' ' + up.bytes.length + ' bytes');
+      let tekst = '';
+      try { tekst = String(await deps.uitschrijf(up.bytes, UITSCHRIJF_HINT) || ''); }
+      catch (e) { fout('bandjes-uitschrijf', e); return { status: 502, j: { ok: false, bewaard: bw.naam, fout: 'het uitschrijven lukte nu niet; het geluid is wel bewaard in de Second Brain (Bronnen). Socev kan het later uitschrijven' } }; }
+      tekst = normTekst(schoon(tekst, GRENS.tekst * 2)).replace(/[ \t]+/g, ' ').trim();
+      if (!tekst) return { status: 422, j: { ok: false, bewaard: bw.naam, fout: 'Socev verstond niets in dit geluid; het is wel bewaard in de Second Brain (Bronnen)' } };
+      let ingekort = false;
+      if (tekst.length > GRENS.tekst) { tekst = tekst.slice(0, GRENS.tekst).replace(/\s+\S*$/, '') + '…'; ingekort = true; }
+      if (/^\(onbekend\b/i.test(tekst)) tekst = tekst.replace(/^\(/, '');
+      // Codex MOET 3: tijdens het uitschrijven (await) kan de tekst of het voorstel veranderd zijn (skill, ander apparaat): dan niets
+      // overschrijven. Toets en schrijven hieronder lopen zonder await ertussen (muteer is synchroon).
+      let b2 = null;
+      try { const l2 = S.lees(pr); b2 = l2 && l2.status === 200 && !l2.dicht ? (l2.bandjes || []).find(function (x) { return x.id === id; }) : null; } catch (e) { b2 = null; }
+      if (!b2 || b2.versie !== b.versie || b2.tekst_hash !== b.tekst_hash || !b2.onbekend || JSON.stringify(b2.voorstel || null) !== voorstelVoor)
+        return { status: 409, j: { ok: false, gewijzigd: true, bewaard: bw.naam, fout: 'dit bandje is tijdens het uitschrijven gewijzigd; het geluid is wel bewaard in de Second Brain (Bronnen), het voorstel is niet gezet. Herlaad en lever het zo nodig opnieuw aan' } };
+      const r = S.zetVoorstel(pr, id, { tekst: tekst, reden: 'uitgeschreven uit het geluid dat je op ' + vandaag(klok) + ' aanleverde' + (ingekort ? ' (ingekort tot ' + GRENS.tekst + ' tekens)' : '') +
+        '; de uitschrijver kan woorden verkeerd verstaan, lees het na' });
+      if (r.status !== 200) return { status: r.status, j: { ok: false, bewaard: bw.naam, fout: 'uitgeschreven, maar het voorstel kon niet bewaard worden: ' + String(r.fout || '').slice(0, 120) } };
+      const g = goed(r);
+      g.j.bewaard = bw.naam;
+      return g;
+    }
     if (actie === 'spreektekst') {
       // wv803: eigen spreektekst bewaren (string) of terug naar automatisch (null); versie + hash zoals Bewaar
       if (d.spreektekst !== null && typeof d.spreektekst !== 'string') return { status: 400, j: { ok: false, fout: 'spreektekst ontbreekt' } };
@@ -1232,7 +1418,14 @@ function routes(deps) {
         stem: tb ? tb.stem : b.stem, model: tb && tb.model ? tb.model : null, spreektekst: taak && taak.velden && typeof taak.velden.tekst === 'string' ? taak.velden.tekst : spreekVan(b, l.instellingen).tekst });
       if (r.status === 200) log('bandjes in centrale ' + pr + '/' + id + ' v' + v + ' archief=' + r.archief);
       if (r.status === 200 && S.ruimWerkversie) { try { S.ruimWerkversie(pr, id); } catch (e) { fout('bandjes-werkversie-weg', e); } }   // wv3064: staat nu in het archief
-      return r.status === 200 ? (function () { const g = goed(r); g.j.archief = r.archief; return g; })() : fouts(r);
+      if (r.status !== 200) return fouts(r);
+      const g = goed(r);
+      g.j.archief = r.archief;
+      // wv3768 (b): vroeg iemand om dit bandje, dan een Gmail-concept aan die persoon (nooit versturen); mislukt dat, dan staat het bandje
+      // toch in de centrale en kan David het concept met POST …/terugmeld opnieuw laten klaarzetten
+      try { g.j.terugmelding = await terugmeld(pr, l.naam || PRAKTIJKEN[pr].naam, r.bandje, {}); } catch (e) { fout('bandjes-terugmeld', e); g.j.terugmelding = { status: 'mislukt', reden: 'fout op de pod' }; }
+      g.j.bandje.terugmelding = terugVan(pr, r.bandje);
+      return g;
     }
     // maak (en proef, wv803): de tekst komt UIT HET REGISTER, nooit uit de invoer; versie + hash moeten kloppen met wat de app las.
     // Wat naar de stem gaat is de spreektekst (eigen of automatisch, zie spreekVan), per model vertaald; proef = één zin daaruit (index).
@@ -1312,8 +1505,19 @@ function routes(deps) {
       id = n.bandje.id;
     }
     if (!ID_RE.test(id)) return { status: 400, j: { ok: false, fout: 'bandje ontbreekt (id uit het register, of nieuw: { naam })' } };
+    // wv3768 (b): de skill mag meegeven wie erom vroeg ({ naam, mail }); eerst toetsen, dan pas schrijven
+    let vrager = null;
+    if (d.gevraagd_door != null) {
+      const g = d.gevraagd_door && typeof d.gevraagd_door === 'object' ? vragerRegel(d.gevraagd_door.naam, d.gevraagd_door.mail) : { fout: 'gevraagd_door: { naam, mail }' };
+      if (g.fout || g.waarde === '—') return { status: 400, j: { ok: false, fout: 'gevraagd_door: ' + (g.fout || 'mailadres ontbreekt') } };
+      vrager = g.waarde;
+    }
     const r = S.zetVoorstel(pr, id, { tekst: d.tekst, reden: d.reden });
     if (r.status !== 200) return fouts(r);
+    if (vrager) {
+      const rv = S.zetVelden(pr, id, { 'gevraagd door': vrager }, null);
+      if (rv.status === 200) r.bandje = rv.bandje; else fout('bandjes-smal-vrager', new Error(String(rv.fout || rv.status).slice(0, 100)));
+    }
     log('bandjes voorstel praktijk=' + pr + ' bandje=' + id + ' tekens=' + r.bandje.voorstel.tekst.length);
     return { status: 200, j: { ok: true, bandje: r.bandje, link: link(pr, id, true) } };
   }
@@ -1363,7 +1567,7 @@ function routes(deps) {
       let l;
       try { l = lees(pr); } catch (e) { return { id: pr, naam: PRAKTIJKEN[pr].naam, ok: false, dicht: 'onleesbaar', bandjes: [] }; }
       return { id: pr, naam: l.naam || PRAKTIJKEN[pr].naam, ok: l.status === 200 && !l.ontbreekt, dicht: l.dicht || null,
-        bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { gelijk_kan: gelijkKan(pr, b, l.instellingen) }); }) };
+        bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { gelijk_kan: gelijkKan(pr, b, l.instellingen), terugmelding: terugVan(pr, b) }); }) };   // wv3768 terugmelding (belkaart)
     });
   }
   // wv3723: David zette de belkaart op gedaan → "gehoord: vN op <datum>" in het register, alleen als vN nog in de centrale staat
@@ -1379,4 +1583,5 @@ function routes(deps) {
 
 module.exports = { PRAKTIJKEN, GRENS, STEM_STANDAARD, normTekst, tekstHash, parse, bandjeUit, zetTekst, zetVoorstel, haalVoorstelWeg, zetVelden, nieuwBandje,
   centraleVersie, werkNummer, laatsteVan, kanCentrale, zetGemaakt, zetInCentrale,
-  zetInstelling, zetSpreektekst, stemmenLijst, stemmenUit, maak, routes, gelijkTrekken, gelijkFout, kaal };
+  zetInstelling, zetSpreektekst, stemmenLijst, stemmenUit, maak, routes, gelijkTrekken, gelijkFout, kaal,
+  vragerVan, vragerRegel, terugmeldMail, audioSoort };   // wv3768

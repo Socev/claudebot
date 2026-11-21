@@ -80,6 +80,14 @@ function afKaart(pr, prNaam, b, nuKort) {
     meting: kort((nuKort ? nuKort + ': ' : '') + 'versie ' + b.versie + ' is gemaakt maar nog niet als in de centrale gemarkeerd.', 300),
     herkomst: herkomst(pr, b.id) };
 }
+// wv3768 (2C91b): staat het conceptantwoord aan wie erom vroeg in Gmail, dan één stap erbij. Afvinken op de gesprekspagina doet de pod
+// niet: er is geen betrouwbare koppeling tussen een bandje en een actiepunt, dus dat staat hier als regel voor David.
+function terugStap(b) {
+  const t = b && b.terugmelding;
+  if (!t || t.status !== 'klaar' || Number(t.versie) !== Number(b.centrale_versie)) return [];
+  const naam = kort(b.vrager && b.vrager.naam || 'wie erom vroeg', 40);
+  return ['Het conceptantwoord aan ' + naam + ' staat in Gmail bij Concepten: kijk het na en verstuur het. Staat dit bandje nog als actiepunt in een overleg, vink het daar af.'];
+}
 function belKaart(pr, prNaam, b, nuKort) {
   const nummer = NUMMER[pr] || null;
   const wanneer = kort(b.wanneer || '', 120);
@@ -90,7 +98,7 @@ function belKaart(pr, prNaam, b, nuKort) {
     stappen: [
       (nummer ? 'Bel ' + nummer : 'Bel het praktijknummer') + (vensters(b.tijdvensters).length ? ' nu het bandje speelt' : wanneer ? ' als het bandje speelt (' + wanneer + ')' : ' als het bandje speelt') + ' en luister.',
       'Hoor je de nieuwe tekst: zet deze kaart op gedaan.',
-      'Hoor je nog de oude: tik Anders en schrijf wat je hoort.'],
+      'Hoor je nog de oude: tik Anders en schrijf wat je hoort.'].concat(terugStap(b)),
     meting: kort((nuKort ? nuKort + ': ' : '') + 'versie ' + b.centrale_versie + ' staat als in de centrale gemarkeerd; nog niet nagebeld.', 300),
     herkomst: herkomst(pr, b.id) };
 }

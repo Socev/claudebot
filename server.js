@@ -20974,9 +20974,39 @@ const bandjes = (function () {
     const opslag = B.maak({ vault: VAULT, dir: BANDJES_DIR, fout: logError });
     opslag.mkdir();   // /opt/data/bandjes en tmp/ op 0700 (journaal 0600); de registerpagina's blijven 0644
     return B.routes({ opslag: opslag, studio: studio, primair: function () { return rolPrimair(); }, dir: BANDJES_DIR, bestandVan: bandjesBestandVan,   // wv830: archief
-      boxPad: path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError });
+      boxPad: path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError,
+      mailConcept: function (c) { return bandjesMailConcept(c); }, uitschrijf: function (b, hint) { return bandjesUitschrijf(b, hint); } });   // wv3768
   } catch (e) { logError('bandjes', e); return null; }
 })();
+// wv3768 (b): het conceptantwoord via het mailluik (n8n AI - Mailconcept naar Gmail, zelfde webhook als het POT-afschrift en de
+// Facturen-specificatie; skill mailconcept-aanmaken). Alleen een CONCEPT in Davids Gmail; nooit versturen. → { ok, concept_id } of
+// { ok: false, zeker, reden } (zeker = er staat zeker géén concept: 400/401/403, 502 van het luik zelf, of geen luik).
+async function bandjesMailConcept(c) {
+  const geheim = process.env.N8N_WEBHOOK_MAILCONCEPT;
+  if (!geheim || typeof appWebhookUrl !== 'function') return { ok: false, zeker: true, reden: 'het mailluik is op de pod niet ingericht' };
+  const wf = typeof POT_AF_MAILWF === 'string' ? POT_AF_MAILWF : (process.env.POT_AF_MAILWF || 'ruUxLjRmYxgM8jzp');
+  const body = JSON.stringify({ secret: geheim, aan: String(c.aan || ''), onderwerp: String(c.onderwerp || '').slice(0, 150), bericht: String(c.bericht || '').slice(0, 4000) });
+  for (let poging = 0; poging < 2; poging++) {
+    let url;
+    try { url = await appWebhookUrl(wf, null, 'bandjesMailUrl', poging > 0); } catch (e) { return { ok: false, zeker: true, reden: 'het mailluik is niet te vinden' }; }
+    let r;
+    try { r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body, signal: AbortSignal.timeout(25000) }); }
+    catch (e) { return { ok: false, zeker: false, reden: 'geen antwoord van het mailluik' }; }
+    if (r.status === 404 && poging === 0) { try { await r.arrayBuffer(); } catch (e) {} continue; }
+    if (r.status === 400 || r.status === 401 || r.status === 403) return { ok: false, zeker: true, reden: 'het mailluik weigerde het concept (HTTP ' + r.status + ')' };
+    let j = null; try { j = await r.json(); } catch (e) { j = null; }
+    if (r.status === 502 && j && j.ok === false && typeof j.fout === 'string') return { ok: false, zeker: true, reden: 'Gmail weigerde het concept' };
+    if (!r.ok || !j || j.ok !== true || typeof j.concept_id !== 'string') return { ok: false, zeker: false, reden: 'geen bevestiging van het mailluik (HTTP ' + r.status + ')' };
+    return { ok: true, concept_id: j.concept_id };
+  }
+  return { ok: false, zeker: true, reden: 'het mailluik is niet te vinden' };
+}
+// wv3768 (d): uitschrijven met Whisper via Cloudflare Workers AI (appWhisper, dezelfde route als de app-spraak en de aanlevering van
+// 22-10; gemeten 21-11: ook µ-law 8 kHz). Het geluid gaat alleen in dit ene verzoek naar Cloudflare; geen tekst in het log.
+async function bandjesUitschrijf(b, hint) {
+  if (!process.env.CLOUDFLARE_AI_TOKEN_AUTO || typeof appWhisper !== 'function') throw new Error('uitschrijven staat op de pod niet aan');
+  return appWhisper(b, hint);
+}
 // wv830: de bestanden van een Studio-taak in Bestanden (naam → pad), voor het archief bij "Staat in centrale"; null als ze weg zijn.
 // Alleen gewone bestanden onder APP_BESTANDEN_DIR (geen koppeling volgen).
 function bandjesBestandVan(jobId) {
