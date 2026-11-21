@@ -133,6 +133,13 @@ function maak(o) {
     return uit.map(function (r) { return '10_Zakelijk/' + map + '/' + r; });
   }
 
+  // bronpad uit het register alleen als die pagina bestaat (anders een dode verwijzing); anders het register zelf
+  function bestaat(p, anders) {
+    const rel = p ? String(p).replace(/\.md$/, '') + '.md' : null;
+    if (!rel || rel.split('/').indexOf('..') >= 0) return anders;
+    try { return fs.statSync(path.join(vault, rel)).isFile() ? rel : anders; } catch (e) { return anders; }
+  }
+
   function hoortBij(e, fm) {
     const id = fm.entiteit_id;
     const ids = Array.isArray(id) ? id : id ? [id] : [];
@@ -155,13 +162,13 @@ function maak(o) {
     const voeg = function (b) { if (br.length < MAX_BRONNEN) br.push(b); };
     // (a) deadlines -7..+14 dagen
     (proj.deadlines || []).filter(function (x) { return itemBij(e, x) && x.dagen >= -7 && x.dagen <= 14; }).slice(0, 5).forEach(function (x) {
-      voeg({ soort: 'deadline', pad: x.bron && x.bron.pad ? String(x.bron.pad).replace(/\.md$/, '') + '.md' : '00_Systeem/Deadlines.md',
+      voeg({ soort: 'deadline', pad: bestaat(x.bron && x.bron.pad, '00_Systeem/Deadlines.md'),
         titel: kort(x.titel, 80), datum: x.datum, dagen: x.dagen, etiket: x.etiket || 'jij',
         tekst: kort(x.datum + ' (' + (x.dagen < 0 ? -x.dagen + ' dagen geleden' : 'over ' + x.dagen + ' dagen') + ', voor ' + (x.etiket === 'socev' ? 'Socev' : x.etiket === 'info' ? 'ter info' : 'David') + '): ' + x.titel + (x.actie ? ' — ' + x.actie : ''), 360) });
     });
     // (b) lopende zaken uit het werkgeheugen
     (proj.lopend || []).filter(function (x) { return itemBij(e, x); }).slice(0, 4).forEach(function (x) {
-      voeg({ soort: 'lopend', pad: x.bron && x.bron.pad ? String(x.bron.pad).replace(/\.md$/, '') + '.md' : '00_Systeem/actueel.md',
+      voeg({ soort: 'lopend', pad: bestaat(x.bron && x.bron.pad, '00_Systeem/actueel.md'),
         titel: kort(x.titel || 'Lopende zaak', 80), datum: null, tekst: kort((x.titel ? x.titel + ': ' : '') + (x.tekst || ''), 500) });
     });
     // (c)(d)(e) bestanden in de entiteitmap

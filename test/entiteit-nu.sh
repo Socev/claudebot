@@ -45,6 +45,7 @@ const m = N.maak({ vault, staatMap: staat, projecten: () => proj, vandaag: () =>
   toets('TG: eigen Nu-pagina, Entiteit-pagina, raw_input en oud gesprek zijn geen bron', !b.some((x) => /Nu - TG|Entiteit - TG|raw_input|Oud kanaal/.test(x.pad)), b.map((x) => x.pad));
   toets('TG: gesprek leest Lopende onderwerpen + Actiepunten (vervolgregel erbij)', b.some((x) => x.soort === 'gesprek' && /monteur komt 25-11/.test(x.tekst) && /Offerte schoonmaak/.test(x.tekst) && x.actiepunten), b.filter((x) => x.soort === 'gesprek'));
   toets('bron-id\'s B1..Bn op volgorde', b.every((x, i) => x.id === 'B' + (i + 1)));
+  toets('bronpad dat niet bestaat → het register (geen dode verwijzing)', b.find((x) => x.soort === 'deadline').pad === '00_Systeem/Deadlines.md' && b.find((x) => x.soort === 'lopend').pad === '00_Systeem/actueel.md', b.map((x) => x.pad));
   toets('gedeelde map: KM krijgt alleen zijn eigen bestand, POT niet het KM-bestand', m.verzamel(KM, proj, VANDAAG).some((x) => /Kostenmaatschap/.test(x.pad)) && !m.verzamel(POT, proj, VANDAAG).some((x) => /Kostenmaatschap/.test(x.pad)));
   toets('HAGRO: REGIO-deadline met HAGRO in de titel telt mee', m.verzamel(HAGRO, proj, VANDAAG).some((x) => /HAGRO-vergadering/.test(x.titel)));
 
