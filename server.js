@@ -15435,7 +15435,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk' || route === 'GET /app/nza/punten') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen); wv3676: tab Punten
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
-        if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
+        if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0 || route === 'POST /app/kalender/gevonden') return typeof appKalender === 'function' ? appKalender(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv3679: POST = Klopt niet / terug   // wv2333: OVIS Calendar (alleen lezen)
         if (route.indexOf('GET /app/promedico/') === 0) return typeof appPromedico === 'function' ? appPromedico(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'promedico');   // wv3143: Promedico-laag in Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/besluiten' || route === 'POST /app/besluiten/antwoord') return typeof appBesluiten === 'function' ? appBesluiten(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'besluiten');   // wv3588: Besluitenpagina (reviews 19–21-11)
@@ -24202,21 +24202,77 @@ async function appTripper(req, res, a, route) {
 // public.sb_kalender_tijdlijn via appSbRpc (service_role) en geeft alleen de vorm voor de app; de browser krijgt geen databanktoegang.
 //   GET /app/kalender                  vandaag t/m + 30 dagen
 //   GET /app/kalender/<van>/<tot>      YYYY-MM-DD, hooguit 62 dagen
-// Alleen lezen, achter de app-sessie. Titels kunnen namen bevatten: ze gaan alleen in het antwoord, nooit in een log; de audit noemt
+//   GET /app/kalender/gevonden         wv3679: vondsten van de datumdetector (+ 400 dagen) met vindzin; POST { id, oordeel } = Klopt niet / terug
+// Alleen lezen (behalve het oordeel op een vondst), achter de app-sessie. Titels kunnen namen bevatten: ze gaan alleen in het antwoord, nooit in een log; de audit noemt
 // alleen venster, aantal en status. /health.kalender: aan + laatste {op, regels, ms} of {op, fout}. Ontbreekt de module: 404, aan=false.
 const kalenderApp = (function () {
   const p = path.join(__dirname, 'kalender-app.js');
   if (!fs.existsSync(p)) return null;
-  try { return require(p).maak({ rpc: function (fn, body) { return appSbRpc(fn, body, 20000); } }); }
+  try { return require(p).maak({ rpc: function (fn, body) { return appSbRpc(fn, body, 20000); }, stuk: kalenderStuk }); }
   catch (e) { logError('kalender', e); return null; }
 })();
+// wv3679: het kennisbestand van een vondst van de datumdetector (voor de vindzin). Eerst het bronpad uit de vindplaats; staat daar niet
+// (meer) het stuk met dit ovis_stuk, dan zoeken onder dezelfde bovenmap in Bronnen/raw_input (de nacht verhuist stukken), met een index
+// die 15 min meegaat. Alleen lezen, geen symlink volgen (vault-veilig), ≤ 2 MB; een pad met '..' of absoluut = niets.
+const KAL_STUK_MAX = 2 * 1048576;
+let kalStukIndex = null;   // { op, top: Map(top → Map(stuk → rel)) }
+function kalStukLees(rel) {
+  if (typeof rel !== 'string' || !/\.md$/.test(rel) || rel.startsWith('/') || rel.split('/').some(function (x) { return x === '..' || x === '' || x.startsWith('.'); })) return null;
+  try { return VV().lees(path.join(VAULT, rel), 'utf8', { max: KAL_STUK_MAX }); } catch (e) { return null; }
+}
+function kalStukKop(t, stuk) {
+  if (typeof t !== 'string' || !t.startsWith('---\novis_stuk:')) return false;
+  if (!stuk) return true;
+  const e = t.indexOf('\n---', 3);
+  return new RegExp('^ovis_stuk:\\s*"?' + stuk + '"?\\s*$', 'm').test(e > 0 ? t.slice(0, e) : t.slice(0, 4096));
+}
+function kalStukZoek(top, stuk) {
+  if (!kalStukIndex || Date.now() - kalStukIndex.op > 15 * 60000) kalStukIndex = { op: Date.now(), top: new Map() };
+  let idx = kalStukIndex.top.get(top);
+  if (!idx) {
+    idx = new Map();
+    let n = 0;
+    (function loop(rel, diepte, telt) {
+      let namen;
+      try { namen = fs.readdirSync(path.join(VAULT, rel), { withFileTypes: true }); } catch (e) { return; }
+      for (const d of namen) {
+        if (d.name.startsWith('.') || n > 20000) continue;
+        const r = rel + '/' + d.name;
+        if (d.isDirectory()) { if (diepte < 6) loop(r, diepte + 1, telt || d.name === 'raw_input' || d.name === 'Bronnen'); continue; }   // Dirent: een symlink is geen map
+        if (!telt || !d.isFile() || !/\.md$/.test(d.name)) continue;
+        n++;
+        let fd = null;
+        try {
+          fd = fs.openSync(path.join(VAULT, r), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+          if (!fs.fstatSync(fd).isFile()) continue;
+          const b = Buffer.alloc(4096), k = fs.readSync(fd, b, 0, 4096, 0);
+          const m = /^ovis_stuk:\s*"?([A-Za-z0-9_-]{1,80})"?\s*$/m.exec(b.toString('utf8', 0, k));
+          if (m && !idx.has(m[1])) idx.set(m[1], r);
+        } catch (e) { /* onleesbaar: overslaan */ } finally { if (fd !== null) try { fs.closeSync(fd); } catch (e) {} }
+      }
+    })(top, 0, false);
+    kalStukIndex.top.set(top, idx);
+  }
+  return idx.get(stuk) || null;
+}
+function kalenderStuk(bronpad, stuk) {
+  if (stuk != null && !/^[A-Za-z0-9_-]{1,80}$/.test(stuk)) stuk = null;
+  const t = kalStukLees(bronpad);
+  if (t != null && kalStukKop(t, stuk)) return { pad: bronpad, tekst: t };
+  if (!stuk) return null;
+  const top = String(bronpad).split('/')[0];
+  if (!/^[0-9]{2}_[A-Za-z0-9_-]+$/.test(top)) return null;
+  const rel = kalStukZoek(top, stuk);
+  const t2 = rel ? kalStukLees(rel) : null;
+  return t2 != null && kalStukKop(t2, stuk) ? { pad: rel, tekst: t2 } : null;
+}
 function kalenderInfo() { if (!kalenderApp) return { aan: false }; try { return kalenderApp.info(); } catch (e) { return { aan: true, fout: true }; } }
 appStaat.tellers.kalender = [];
-async function appKalender(req, res, a, route) {
+async function appKalender(req, res, a, route, d) {
   if (!kalenderApp) return appWeiger(res, 404, 'Calendar zit niet in deze versie van de pod', 'kalender ontbreekt');
   if (!appTeller('kalender', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens kalender');
   let u;
-  try { u = await kalenderApp.app({ methode: req.method, pad: route.replace(/^[A-Z]+ /, ''), nu: Date.now() }); }
+  try { u = await kalenderApp.app({ methode: req.method, pad: route.replace(/^[A-Z]+ /, ''), nu: Date.now(), body: d }); }   // wv3679: body voor POST /app/kalender/gevonden
   catch (e) { logError('kalender', e); return appWeiger(res, 503, 'De tijdlijn is nu niet te lezen; probeer het zo opnieuw', 'kalender fout'); }
   res._app.reden = String(u.reden || 'kalender').slice(0, 80);
   return appStuur(res, u.status, u.body);

@@ -95,9 +95,63 @@ const rij = (o) => Object.assign({ event_id: 1, begin_datum: '2026-11-04', eind_
   gooit = false; try { await zonderId.app({ methode: 'GET', pad: '/app/kalender', nu: NU }); } catch (e) { gooit = /zonder id of datum/.test(e.message); }
   toets('5d regel zonder id of datum: fout (503), niet stil weg', gooit);
 
+
+  // ── 7. wv3679: Gevonden, nog niet in je agenda (alleen verzonnen proefdata) ──
+  const KOP = '---\novis_stuk: stk_20261101_0000abcd\novis_router: 1\nonderwerp: Proefvergadering\n---\n';
+  const LIJF = 'Beste lezer,\r\n\r\nDe proefvergadering is op dinsdag 24 november om 15.00 uur in zaal 3. Graag tot dan!\r\nGroet 🙂 X';
+  const off = Array.from(LIJF).length && Array.from(LIJF.slice(0, LIJF.indexOf('dinsdag'))).length;
+  let z7 = K.vindzin(KOP + LIJF, off, Array.from('dinsdag 24 november om 15.00 uur').length);
+  toets('7a vindzin: treffer + zin tot de punt (CRLF blijft, offsets in code points)', z7 && z7.treffer === 'dinsdag 24 november om 15.00 uur' && z7.voor === 'De proefvergadering is op ' && z7.na === ' in zaal 3.', z7);
+  const LIJF2 = '🙂🙂 ' + LIJF;   // emoji vóór de treffer: code points ≠ UTF-16-index
+  z7 = K.vindzin(KOP + LIJF2, Array.from(LIJF2.slice(0, LIJF2.indexOf('dinsdag'))).length, 10);
+  toets('7b emoji vóór de treffer: zelfde plek', z7 && z7.treffer === 'dinsdag 24', z7);
+  toets('7c bewerkt stuk (geen cijfer of maand op de plek): geen zin', K.vindzin(KOP + LIJF, 0, 5) === null && K.vindzin('geen kop', 0, 3) === null && K.vindzin(KOP + LIJF, 99999, 3) === null);
+  const lang = 'x'.repeat(400) + ' op 3 december ' + 'y'.repeat(400);
+  z7 = K.vindzin(KOP + lang, 403, 10);
+  toets('7d geen zinsgrens: hooguit 160 tekens per kant met …', z7 && z7.voor.startsWith('…') && z7.na.endsWith('…') && z7.voor.length <= 162 && z7.na.length <= 162, z7);
+  const kand = (o) => Object.assign({ event_id: 501, begin_datum: '2026-11-24', eind_datum: '2026-11-24', hele_dag: false, begin_tijd: '2026-11-24T14:00:00Z', eind_tijd: '2026-11-24T14:00:00Z',
+    titel: 'Afspraak uit: Proefvergadering', soort: 'afspraak', zekerheid: 'redelijk', datum_precisie: 'minuut', access_context: 'zakelijk_intern', aangemaakt: '2026-11-10T07:00:00Z',
+    bron: { bronpad: '10_Proef/Bronnen/stuk.md', stuk: 'stk_20261101_0000abcd', offset: off, lengte: 32, rol: 'afspraak', staat_er: ['deadlines', 'raar'] } }, o);
+  const g = K.gevondenRegel(kand({}));
+  toets('7e vorm: tijd in Amsterdam, onderwerp zonder voorvoegsel, staat_er alleen bekende waarden, geen bron-json', g.begin === '15:00' && g.onderwerp === 'Proefvergadering' && g.zekerheid === 'redelijk'
+    && JSON.stringify(g.staat_er) === '["deadlines"]' && !('bron' in g) && g.gevonden_op === '2026-11-10', g);
+  const tlRij = (o) => K.regel(rij(Object.assign({ begin_datum: '2026-11-24', eind_datum: '2026-11-24' }, o)));
+  toets('7f nu_in: zelfde dag + begintijd in Google = agenda', K.nuIn(g, [tlRij({ hele_dag: false, begin_tijd: '2026-11-24T14:00:00Z', eind_tijd: '2026-11-24T15:00:00Z', titel: 'Iets anders' })]) === 'agenda');
+  toets('7g nu_in: gedeeld woord met Deadlines-regel = deadlines; andere dag of alleen "afspraak" = null',
+    K.nuIn(g, [tlRij({ bron_soort: 'deadline_register', sync_stand: 'geen', titel: 'proefvergadering voorbereiden' })]) === 'deadlines'
+    && K.nuIn(g, [tlRij({ begin_datum: '2026-11-25', eind_datum: '2026-11-25', titel: 'Proefvergadering' })]) === null
+    && K.nuIn(g, [tlRij({ titel: 'Afspraak tandarts' })]) === null);
+  const rpcs = [];
+  const gv = K.maak({ rpc: async (fn, b) => { rpcs.push([fn, b]); if (fn === 'sb_kalender_gevonden') return [kand({}), kand({ event_id: 502, bron: { bronpad: 'weg.md', offset: 1, lengte: 2 } })];
+      if (fn === 'sb_kalender_tijdlijn') return [rij({ begin_datum: '2026-11-24', eind_datum: '2026-11-24', hele_dag: false, begin_tijd: '2026-11-24T14:00:00Z', eind_tijd: '2026-11-24T14:30:00Z' })];
+      if (fn === 'sb_kalender_kandidaat_oordeel') return b.p_event_id === 7 ? { ok: false, fout: 'onbekend' } : b.p_event_id === 8 ? { ok: false, fout: 'status', status: 'actief' } : { ok: true, status: b.p_oordeel === 'terug' ? 'kandidaat' : 'afgewezen' };
+      return []; },
+    stuk: (p, s) => (p === '10_Proef/Bronnen/stuk.md' && s === 'stk_20261101_0000abcd' ? { pad: '10_Proef/Bronnen/Verwerkt/stuk.md', tekst: KOP + LIJF } : null) });
+  u = await gv.app({ methode: 'GET', pad: '/app/kalender/gevonden', nu: NU });
+  toets('7h GET gevonden: venster vandaag + 400, zin + pad erbij, stuk weg = zin null (niet weg), hint agenda; tijdlijn alleen Jij/Gezin',
+    u.status === 200 && rpcs[0][0] === 'sb_kalender_gevonden' && rpcs[0][1].p_van === '2026-11-03' && rpcs[0][1].p_tot === '2027-12-08' && u.body.regels.length === 2
+    && u.body.regels[0].zin && u.body.regels[0].zin.treffer.startsWith('dinsdag') && u.body.regels[0].stuk_pad === '10_Proef/Bronnen/Verwerkt/stuk.md' && u.body.regels[0].nu_in === 'agenda'
+    && u.body.regels[1].zin === null && u.body.regels[1].stuk_pad === null && u.body.meer === false && JSON.stringify(rpcs[1][1].p_voor_wie) === '["david","gezin"]' && !/Proef/.test(u.reden), [u.status, u.body, rpcs]);
+  toets('7i /health.kalender.gevonden: alleen tellingen', gv.info().gevonden.regels === 2 && gv.info().gevonden.zonder_zin === 1 && !/Proef|dinsdag/.test(JSON.stringify(gv.info())));
+  const o1 = await gv.app({ methode: 'POST', pad: '/app/kalender/gevonden', nu: NU, body: { id: 501, oordeel: 'klopt_niet' } });
+  const o2 = await gv.app({ methode: 'POST', pad: '/app/kalender/gevonden', nu: NU, body: { id: 501, oordeel: 'terug' } });
+  toets('7j POST klopt_niet / terug: 200 met status', o1.status === 200 && o1.body.status === 'afgewezen' && o2.body.status === 'kandidaat' && rpcs.some((x) => x[0] === 'sb_kalender_kandidaat_oordeel' && x[1].p_event_id === 501));
+  const n0 = rpcs.length;
+  const o3 = await gv.app({ methode: 'POST', pad: '/app/kalender/gevonden', nu: NU, body: { id: '1; drop', oordeel: 'klopt_niet' } });
+  const o4 = await gv.app({ methode: 'POST', pad: '/app/kalender/gevonden', nu: NU, body: { id: 5, oordeel: 'actief' } });
+  toets('7k ongeldig id of oordeel: 400 zonder databank', o3.status === 400 && o4.status === 400 && rpcs.length === n0);
+  const o5 = await gv.app({ methode: 'POST', pad: '/app/kalender/gevonden', nu: NU, body: { id: 7, oordeel: 'klopt_niet' } });
+  const o6 = await gv.app({ methode: 'POST', pad: '/app/kalender/gevonden', nu: NU, body: { id: 8, oordeel: 'klopt_niet' } });
+  toets('7l onbekend 404, al overgenomen 409', o5.status === 404 && o6.status === 409 && /overgenomen/.test(o6.body.fout));
+  const o7 = await gv.app({ methode: 'POST', pad: '/app/kalender', nu: NU, body: { id: 501, oordeel: 'klopt_niet' } });
+  toets('7m POST op de tijdlijn zelf blijft 404', o7.status === 404);
+  const vol = K.maak({ rpc: async (fn) => (fn === 'sb_kalender_gevonden' ? Array.from({ length: 500 }, (_, i) => kand({ event_id: 1000 + i, bron: {} })) : []) });
+  u = await vol.app({ methode: 'GET', pad: '/app/kalender/gevonden', nu: NU });
+  toets('7n review ZOU 1: 500 rijen = meer: true (niet stil afkappen)', u.status === 200 && u.body.meer === true && u.body.regels.length === 500);
+
   // ── 6. server.js ──
   const src = fs.readFileSync('server.js', 'utf8');
-  toets('6a dispatch GET /app/kalender achter de app-sessie (na Tripper)', src.indexOf("if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function'") > src.indexOf("if (route.indexOf('GET /app/tripper/') === 0)"));
+  toets('6a dispatch GET /app/kalender achter de app-sessie (na Tripper)', src.indexOf("if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0 || route === 'POST /app/kalender/gevonden') return typeof appKalender === 'function' ? appKalender(req, res, a, route, d)") > src.indexOf("if (route.indexOf('GET /app/tripper/') === 0)"));
   toets('6b /health.kalender', /kalender: typeof kalenderInfo === 'function' \? kalenderInfo\(\) : \{ aan: false \}/.test(src));
   toets('6c uitrol-lijst: kalender-app.js optioneel', /RELEASE_OPTIONEEL="[^"]*\bkalender-app\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));
   const hb = src.indexOf('// ── OVIS Calendar in de app (wv2333'), he = src.indexOf('// ── einde OVIS Calendar ──');
@@ -105,11 +159,14 @@ const rij = (o) => Object.assign({ event_id: 1, begin_datum: '2026-11-04', eind_
   toets('6d blokmarkers, tussen Tripper en Shopper (niet in een ander blok)', hb > tb && he > hb && sb > he, [tb, hb, he, sb]);
   const gestuurd = [], fl = [];
   let rpcUit = proef;
-  const ctx = vm.createContext({ require, __dirname: process.cwd(), path, fs, appStaat: { tellers: {} }, Date, String, Object, JSON,
+  const os = require('os');
+  const nepVault = fs.mkdtempSync(path.join(os.tmpdir(), 'kal3679-'));
+  const ctx = vm.createContext({ require, __dirname: process.cwd(), path, fs, appStaat: { tellers: {} }, Date, String, Object, JSON, Buffer, RegExp,
+    VAULT: nepVault, VV: () => require(path.join(process.cwd(), 'vault-veilig.js')),
     logError: (l, e) => fl.push(l + ' ' + (e && e.message)), appTeller: () => true,
     appSbRpc: async (fn, body) => { if (rpcUit instanceof Error) throw rpcUit; return rpcUit; },
     appWeiger: (res, s, f, r) => { res._app.reden = r; gestuurd.push({ s, f }); }, appStuur: (res, s, j) => gestuurd.push({ s, j }) });
-  vm.runInContext(src.slice(hb, he) + ';globalThis.__k = { appKalender, kalenderInfo };', ctx, { filename: 'server.js#kalender' });
+  vm.runInContext(src.slice(hb, he) + ';globalThis.__k = { appKalender, kalenderInfo, kalenderStuk };', ctx, { filename: 'server.js#kalender' });
   const vraag = async (route) => { const res = { _app: {} }; const n = gestuurd.length; await ctx.__k.appKalender({ method: 'GET' }, res, { soort: 'meereizend' }, route); return Object.assign({ app: res._app }, gestuurd[n]); };
   let r = await vraag('GET /app/kalender');
   toets('6e echte blok: 200 met regels; audit-reden zonder titel', r.s === 200 && r.j.regels.length === 4 && !/Proefafspraak/.test(r.app.reden || ''), [r.s, r.app]);
@@ -119,6 +176,22 @@ const rij = (o) => Object.assign({ event_id: 1, begin_datum: '2026-11-04', eind_
   r = await vraag('GET /app/kalender');
   toets('6g databankfout: 503 in gewone taal, log zonder titels', r.s === 503 && /niet te lezen/.test(r.f) && fl.length === 1 && !/Proef/.test(fl[0]), [r, fl]);
   toets('6h /health-info zonder titels', ctx.__k.kalenderInfo().aan === true && !/Proef/.test(JSON.stringify(ctx.__k.kalenderInfo())));
+  // wv3679: kalenderStuk in een nepvault (verzonnen stuk): bronpad eerst, verhuisd stuk via ovis_stuk, nooit buiten de vault of via een symlink
+  fs.mkdirSync(path.join(nepVault, '10_Proef/raw_input'), { recursive: true });
+  fs.mkdirSync(path.join(nepVault, '10_Proef/Bronnen/Verwerkt'), { recursive: true });
+  fs.writeFileSync(path.join(nepVault, '10_Proef/Bronnen/Verwerkt/stuk.md'), KOP + LIJF);
+  fs.writeFileSync(path.join(nepVault, '10_Proef/raw_input/ander.md'), KOP.replace('0000abcd', '1111abcd') + 'x');
+  fs.writeFileSync(path.join(nepVault, 'geheim.md'), KOP + 'geheim');
+  fs.symlinkSync(path.join(nepVault, '10_Proef/Bronnen/Verwerkt/stuk.md'), path.join(nepVault, '10_Proef/raw_input/link.md'));
+  const ks = ctx.__k.kalenderStuk;
+  let k1 = ks('10_Proef/Bronnen/Verwerkt/stuk.md', 'stk_20261101_0000abcd');
+  toets('6i stuk op het bronpad', k1 && k1.pad === '10_Proef/Bronnen/Verwerkt/stuk.md' && k1.tekst === KOP + LIJF);
+  k1 = ks('10_Proef/raw_input/2026-11-01_weg.md', 'stk_20261101_0000abcd');
+  toets('6j verhuisd: gevonden op ovis_stuk onder dezelfde bovenmap', k1 && k1.pad === '10_Proef/Bronnen/Verwerkt/stuk.md', k1);
+  toets('6k ander stuk op het bronpad telt niet; symlink niet gevolgd; .. en absoluut = null',
+    (ks('10_Proef/raw_input/ander.md', 'stk_20261101_0000abcd') || {}).pad === '10_Proef/Bronnen/Verwerkt/stuk.md' && ks('10_Proef/raw_input/link.md', null) === null
+    && ks('10_Proef/../geheim.md', null) === null && ks(path.join(nepVault, 'geheim.md'), null) === null && ks('99_Niets/x.md', 'stk_x') === null);
+  fs.rmSync(nepVault, { recursive: true, force: true });
 
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
