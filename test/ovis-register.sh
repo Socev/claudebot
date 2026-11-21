@@ -673,6 +673,41 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     toets('8 kaart: verschil weg → open kaart dicht met bewijs; andere kaarten ongemoeid', k.dicht.length === 1 && k.dicht[0].sleutel === kp.sleutel && /niet meer/.test(k.dicht[0].bewijs), k);
     k = R.kaartPot({ gemeten: false, verschillen: [] }, { [kp.sleutel]: 'open' }, 'x');
     toets('8 kaart: niet gemeten → niets zetten en niets dicht', k.zet.length === 0 && k.dicht.length === 0);
+    // wv3611 (3B15): David koos het adres al (register vast = stampagina), alleen de POT-app kent het vorige → geen kritieke bevinding, geen kaart
+    { const regV = (contact) => Object.assign(reg(['a', 'b', 'c', 'd']), { contact: contact });
+      const vastA = [{ id: 1, knoop: 'org:a', veld: 'factuuradres', status: 'actief', intrekking: false, waarde: 'factuur@a.test' }];
+      let rv = R.checks(basis(), regV(vastA), [], p2);
+      toets('8 wv3611: gekozen adres, alleen POT-app anders → geen BB3, geteld als overname, geen kaart', potB(rv).length === 0 && rv.tel.pot_overname === 1 && rv.tel.pot_verschil === 0
+        && rv.pot.verschillen.length === 0 && R.kaartPot(rv.pot, {}, 'x').zet.length === 0, [potB(rv), rv.tel, rv.pot]);
+      const kO = R.kaartPot(rv.pot, { [kp.sleutel]: 'open' }, '21-11 02:31');
+      toets('8 wv3611: open oude kaart gaat dicht met "je koos het adres al"', kO.dicht.length === 1 && /koos het adres al/.test(kO.dicht[0].bewijs) && /eerste nota/.test(kO.dicht[0].bewijs), kO);
+      rv = R.checks(basis(), regV(vastA.concat([{ id: 2, knoop: 'org:a', veld: 'factuuradres', status: 'voorgesteld', intrekking: false, waarde: 'ander@a.test' }])), [], p2);
+      toets('8 wv3611: er wacht iets op Davids Ja → gewoon kritiek', potB(rv).some((b) => b.bevinding_id === 'BB3-org:a-pot-factuuradres-P02' && b.ernst === 'serious'), potB(rv));
+      rv = R.checks(basis(), regV([Object.assign({}, vastA[0], { intrekking: true })]), [], p2);
+      toets('8 wv3611: vast adres ingetrokken → gewoon kritiek', potB(rv).some((b) => /pot-factuuradres-P02/.test(b.bevinding_id)), potB(rv));
+      rv = R.checks(basis(), regV([Object.assign({}, vastA[0], { waarde: 'oud@a.test' })]), [], p2);
+      toets('8 wv3611: register vast ≠ stampagina → gewoon kritiek', potB(rv).some((b) => /pot-factuuradres-P02/.test(b.bevinding_id)), potB(rv));
+      const pN = pot({ open: [{ id: 9, nummer: 'SL-0009', praktijk_id: 'P02', status: 'concept', aan: 'nieuw@a.test' }] }); pN.praktijken[1].email = 'nieuw@a.test';
+      rv = R.checks(basis(), regV(vastA), [], pN);
+      toets('8 wv3611: een open nota met een ander adres → gewoon kritiek', potB(rv).some((b) => /pot-factuuradres-P02/.test(b.bevinding_id) && b.ernst === 'serious'), potB(rv));
+      const vastB = [{ id: 3, knoop: 'org:b', veld: 'factuuradres', status: 'actief', intrekking: false, waarde: 'factuur@b.test' }];
+      const bsL = basis(); bsL[1] = pg('b', 'factuur@b.test', ['P04']);
+      rv = R.checks(bsL, regV(vastB), [], pot());
+      toets('8 wv3611: alles gelijk → geen overname geteld', rv.tel.pot_overname === 0 && potB(rv).length === 0, rv.tel);
+    }
+    // wv3611: in de Bibliothecaris gaat de oude kritieke bevinding op opgelost en zegt de zin het
+    { const v = wegwerpVault({ [pad('a')]: org('a', 'factuur@a.test', ['P01', 'P02', 'P03']), [pad('b')]: org('b', 'factuur@b.test', ['P04']), [pad('c')]: org('c', null, ['P09']) });
+      const id = 'BB3-org:a-pot-factuuradres-P02';
+      const n = nepDb({ knopen: [], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [] });
+      const mm = R.maak({ vault: v, sbRpc: n.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: () => {}, nu: () => Date.parse('2026-11-21T01:30:00Z'), pot: { d1: async () => [{ results: p2.praktijken }, { results: [] }] } });
+      await mm.bibliothecaris();
+      const voor = n.db.bevindingen.some((x) => x.bevinding_id === id && x.status === 'open');
+      (n.db.contact = n.db.contact || []).push({ id: 99, knoop: 'org:a', veld: 'factuuradres', status: 'actief', intrekking: false, waarde: 'factuur@a.test' });
+      const b = await mm.bibliothecaris();
+      toets('8 wv3611 biblio: na Davids keuze is de kritieke bevinding opgelost, zin noemt de wachtende nota', voor && !n.db.bevindingen.some((x) => x.bevinding_id === id) && b.opgelost >= 1 && /gekozen adres wacht op de eerste nota/.test(b.zin),
+        [voor, n.db.bevindingen.map((x) => x.bevinding_id + ':' + x.status), b.zin]);
+      fs.rmSync(v, { recursive: true, force: true });
+    }
     toets('8 POT_BEVINDING_RE: herkent plek 4, niet een gewone org met pot in de naam', R.POT_BEVINDING_RE.test('BB3-org:a-pot-factuuradres-P02') && R.POT_BEVINDING_RE.test('BB2-pot-P04-geen-pagina')
       && R.POT_BEVINDING_RE.test('BB5-pot-P04-twee') && R.POT_BEVINDING_RE.test('BB1-org:d-pot-P07') && !R.POT_BEVINDING_RE.test('BB3-org:de-pot-bakker-naam'));
     // de Bibliothecariskaart van de week zegt bij plek 4 iets dat klopt
