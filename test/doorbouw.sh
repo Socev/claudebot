@@ -20,6 +20,7 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
   const b1 = src.indexOf('// ── wv3692 (besluitenpagina nr 420'), b2 = src.indexOf('// ── einde wv3692 ──');
   toets('0 server.js: blok wv3692 gevonden', b1 > s2 && b2 > b1);
   toets('0 server.js: blok Doorgeefluik gevonden', s1 > 0 && s2 > s1);
+  const vraagDbSrc = pak(/\nfunction appDoorbouwVraag\(jobId, vraag, bericht\) \{[\s\S]*?\n\}\n/, 'appDoorbouwVraag');   // wv3810
   const knopSrc = pak(/\nasync function appKnop\(req, res, reg, a, s, d, kaart\) \{[\s\S]*?\n\}\n/, 'appKnop');
   const hulp = ['appOntmasker', 'appElfproef', 'appBsnMasker', 'appEenRegel', 'appVraagUit', 'appVraagLeeg', 'appKnopBevestiging']
     .map(function (n) { return pak(new RegExp('\\nfunction ' + n + '\\([^)]*\\) \\{[\\s\\S]*?\\n\\}\\n'), n); }).join('\n') + '\n' + src.match(/^const APP_VAST_JA_DICHT = (?:true|false);$/m)[0] + '\n' + pak(/\nfunction appVastJaDicht\(a\) \{[^\n]*\}\n/, 'appVastJaDicht') + '';
@@ -83,7 +84,7 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
       setTimeout(function () { Promise.resolve().then(meta.bijStart).then(function (staart) { prompts.push({ id: id, kanaal: kanaal, prompt: tekst + (staart || '') }); }); }, 5);
       return { job_id: id };
     } });
-  vm.runInContext(hulp + '\n' + src.slice(s1, s2) + '\n' + src.slice(b1, b2) + '\n' + knopSrc + '\n;globalThis.__d = { appKnop, doorgeefZet, doorgeefHerken, doorgeefInfo, doorbouwCitaat, doorbouwIs, doorbouwLuikKan, doorbouwKaartRij, doorbouwVastleggen, doorbouwStaart, doorbouwStop, doorbouwStopStaart, DOORBOUW_STOP_RE };', ctx, { filename: 'server.js#doorgeefluik' });
+  vm.runInContext(hulp + '\n' + src.slice(s1, s2) + '\n' + src.slice(b1, b2) + '\n' + knopSrc + '\n' + vraagDbSrc + '\n;globalThis.__d = { appKnop, appDoorbouwVraag, doorbouwVraagVeld, doorgeefZet, doorgeefHerken, doorgeefInfo, doorbouwCitaat, doorbouwIs, doorbouwLuikKan, doorbouwKaartRij, doorbouwVastleggen, doorbouwStaart, doorbouwStop, doorbouwStopStaart, DOORBOUW_STOP_RE };', ctx, { filename: 'server.js#doorgeefluik' });
   const D = ctx.__d;
   ctx.appVraagUit = vm.runInContext('appVraagUit', ctx);
   const A = { id: 'pixel', soort: 'mee' };
@@ -207,6 +208,29 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
   toets('6 detail en 409 geven de knopvorm met doorbouw/stop', /knop: p\.soort === 'besluit' && !sw \? await appVjKnopVormDb\(/.test(src) && /tekst_gewijzigd: true, knop: await appVjKnopVormDb\(p, k\)/.test(src));
   toets('6 Moet iets: doorbouw op de doorgeefvraag', /doorbouw: \(typeof doorbouwLuikKan === 'function' && doorbouwLuikKan\(r, v\.tekst, x\.antwoord\)\) \|\| undefined/.test(src));
   toets('6 mk-tekst: regel Bouw door', /Bouw door \(wv3692\)/.test(fs.readFileSync('mk-tekst.js', 'utf8')));
+
+  // ── (7) wv3810: veld doorbouw voor de vraagknoppen in het gesprek ──
+  fs.writeFileSync(SCH, '{"aan": true}');
+  const VZ7 = 'Zal ik dit op de werklijst van de machinekamer zetten: een Puzzel-app (verzonnen) in Socev-app › Apps?';
+  const VR7 = 'Leuk idee.\n\nVRAAG AAN DAVID: ' + VZ7 + '\n#mk-werklijst';
+  const q7 = vraag('hoofd', VR7);
+  const vr7 = { hash: q7.hash, tekst: ctx.appVraagUit(VR7).tekst };
+  toets('7 open doorgeefvraag, niet gevoelig, luik aan: doorbouw true (geschiedenis en opgehaald antwoord)', D.doorbouwVraagVeld(vragen[q7.job + ':' + q7.hash], vr7.tekst, VR7) === true && D.appDoorbouwVraag(q7.job, vr7, VR7) === true, vr7);
+  const q7b = vraag('hoofd', 'Klaar.\n\nVRAAG AAN DAVID: Zal ik de proefmap (verzonnen) opruimen?');
+  toets('7 gewone vraag: geen veld', D.appDoorbouwVraag(q7b.job, { hash: q7b.hash, tekst: 'Zal ik de proefmap (verzonnen) opruimen?' }, 'x') === undefined);
+  const q7c = vraag('hoofd', VR7.replace('Puzzel-app', 'Mailmachine'), { rij: { gevoelig: true } });
+  toets('7 gevoelige doorgeefvraag: geen veld', D.appDoorbouwVraag(q7c.job, { hash: q7c.hash, tekst: VZ7.replace('Puzzel-app', 'Mailmachine') }, VR7.replace('Puzzel-app', 'Mailmachine')) === undefined);
+  const q7d = vraag('machinekamer', VR7.replace('Puzzel-app', 'Kaartspel'));
+  toets('7 doorgeefzin in de machinekamer: geen veld', D.appDoorbouwVraag(q7d.job, { hash: q7d.hash, tekst: VZ7.replace('Puzzel-app', 'Kaartspel') }, VR7.replace('Puzzel-app', 'Kaartspel')) === undefined);
+  toets('7 zonder #mk-werklijst: geen veld', D.appDoorbouwVraag(q7.job, vr7, VR7.replace('#mk-werklijst', '')) === undefined);
+  toets('7 onbekende vraag: geen veld', D.appDoorbouwVraag('ffffffffffffffff', vr7, VR7) === undefined);
+  fs.writeFileSync(SCH, '{"aan": false}');
+  toets('7 luik uit: geen veld', D.appDoorbouwVraag(q7.job, vr7, VR7) === undefined);
+  fs.writeFileSync(SCH, '{"aan": true}');
+  vragen[q7.job + ':' + q7.hash].antwoord = { keuze: 'ja', t: new Date().toISOString() };
+  toets('7 al beantwoord: geen veld', D.appDoorbouwVraag(q7.job, vr7, VR7) === undefined);
+  toets('7 bron: geschiedenis zet doorbouw op de vraag (niet bij verlopen of Telegram)', /verlopen: verlopen \|\| undefined,\n        doorbouw: !verlopen && !appNaarTelegramNu\(b\) && typeof doorbouwVraagVeld === 'function' \? doorbouwVraagVeld\(bRij, \(appVraagUit\(x\.antwoord\) \|\| \{\}\)\.tekst, x\.antwoord\) : undefined \}/.test(src));
+  toets('7 bron: opgehaald antwoord (appUitslag) zet doorbouw op de vraag', /gevoelig: appVraagGevoelig\(id, vraag\.hash\),\n      doorbouw: typeof doorbouwVraagVeld === 'function' \? appDoorbouwVraag\(id, vraag, out\) : undefined \} : null,/.test(src));
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

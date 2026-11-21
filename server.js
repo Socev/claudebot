@@ -9066,6 +9066,9 @@ function appKnopRijZet(sleutel, jobId, f) {
     f(w[sleutel]); appVragenSchrijf(w);
   } catch (e) { logError('app-vragen', e); }
 }
+function appDoorbouwVraag(jobId, vraag, bericht) {   // wv3810: zie doorbouwVraagVeld
+  try { const v = appVragen()[jobId + ':' + vraag.hash]; return v && !appNaarTelegramNu(v) ? doorbouwVraagVeld(v, vraag.tekst, bericht) : undefined; } catch (e) { return undefined; }
+}
 function appVraagGevoelig(jobId, hash) {
   try { const v = appVragen()[jobId + ':' + hash]; return !v || v.gevoelig !== false; } catch (e) { return true; }
 }
@@ -9093,7 +9096,8 @@ function appUitslag(req, res, reg, a, s, d) {
   const vraag = j.app.vraag !== undefined ? j.app.vraag : appVraagVan(j.app.kanaal, out);
   appStuur(res, 200, { ok: true, gevonden: true, klaar: true, kanaal: j.app.kanaal, job_id: id, gelukt: r.ok !== false,
     antwoord: out, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : null,
-    vraag: vraag ? { hash: vraag.hash, tekst: vraag.tekst, beantwoord: appBeantwoord(id, vraag.hash), gevoelig: appVraagGevoelig(id, vraag.hash) } : null,
+    vraag: vraag ? { hash: vraag.hash, tekst: vraag.tekst, beantwoord: appBeantwoord(id, vraag.hash), gevoelig: appVraagGevoelig(id, vraag.hash),
+      doorbouw: typeof doorbouwVraagVeld === 'function' ? appDoorbouwVraag(id, vraag, out) : undefined } : null,   // wv3810
     bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [],
     open: j.app.open && typeof appOpenUitslag === 'function' ? appOpenUitslag(j, a) : undefined });   // wv1712 (§ 3.6)
 }
@@ -9320,7 +9324,8 @@ async function appGeschiedenis(req, res, reg, a, pad) {
     return { t: x.t, getypt: x.getypt || undefined, antwoord_op: x.antwoord_op || undefined, eigen: x.soort === 'rij-verloren' ? x.apparaat === a.id : undefined,   // wv628
       job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, invoer: Array.isArray(x.invoer) ? x.invoer : [], antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
       vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, naar_telegram: appNaarTelegramNu(b),
-        naar_telegram_onzeker: appNaarTelegramNu(b) && appNaarTelegramVerlopen(b) || undefined, verlopen: verlopen || undefined }
+        naar_telegram_onzeker: appNaarTelegramNu(b) && appNaarTelegramVerlopen(b) || undefined, verlopen: verlopen || undefined,
+        doorbouw: !verlopen && !appNaarTelegramNu(b) && typeof doorbouwVraagVeld === 'function' ? doorbouwVraagVeld(bRij, (appVraagUit(x.antwoord) || {}).tekst, x.antwoord) : undefined }   // wv3810
         : tv ? { hash: tv.hash, tekst: tv.tekst, beantwoord: null, gevoelig: true, naar_telegram: true, verlopen: agNu - Date.parse(x.t) > APP_VRAAG_GELDIG_MS || undefined } : null,
       bestanden: bnamen, bron: bericht ? x.bron || null : undefined, klasse: bericht ? x.klasse || null : undefined, agent_job: bericht ? x.agent_job || null : undefined,
       reactie: reacties && reacties[kanaal + ':' + x.job_id] ? reacties[kanaal + ':' + x.job_id].duim : null,
@@ -27983,6 +27988,11 @@ function doorbouwIs(doorwerk) { return String(doorwerk || '').indexOf(DOORBOUW_P
 // Mag onder deze doorgeefvraag "Ja, en bouw door"? (luik aan, niet gevoelig, echte doorgeefvraag)
 function doorbouwLuikKan(rij, vz, bericht) {
   try { return !!(rij && rij.gevoelig === false && typeof doorgeefHerken === 'function' && doorgeefHerken(rij, vz, bericht) && doorgeefAan()); } catch (e) { return false; }
+}
+// wv3810: veld doorbouw op een vraag in de gesprekgeschiedenis en in het opgehaalde antwoord (vraagknoppen in het hoofdkanaal): true alleen
+// bij een nog open doorgeefvraag waaronder "Ja, en bouw door" kan (zelfde toets als appKnop); anders undefined (veld weg, oude app negeert het).
+function doorbouwVraagVeld(rij, vz, bericht) {
+  try { return rij && !appAntwoord(rij) && doorbouwLuikKan(rij, vz, bericht) ? true : undefined; } catch (e) { return undefined; }
 }
 // De werkvoorraadrij achter een Voor jou-kaart wv<id> als hij geblokkeerd op David wacht; anders null. items = mk_werkvoorraad_stand.items.
 function doorbouwKaartRij(p, items) {
