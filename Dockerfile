@@ -258,6 +258,7 @@ COPY app-vast.js /app/release-bootstrap/app-vast.js
 COPY app-open.js /app/release-bootstrap/app-open.js
 COPY intake-telling.js /app/release-bootstrap/intake-telling.js
 COPY brain-entiteiten.js /app/release-bootstrap/brain-entiteiten.js
+COPY entiteit-nu.js /app/release-bootstrap/entiteit-nu.js
 COPY bank-partij.js /app/release-bootstrap/bank-partij.js
 COPY huisstijl-pod.js /app/release-bootstrap/huisstijl-pod.js
 COPY werkers.js /app/release-bootstrap/werkers.js

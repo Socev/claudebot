@@ -15928,7 +15928,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/werkstroom' || route.indexOf('GET /app/werkstroom/') === 0) return typeof appWerkstroom === 'function' ? appWerkstroom(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'werkstroom');   // wv2002: Werkstroom (alleen lezen)
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk' || route === 'POST /app/intake/geschiedenis' || route === 'POST /app/intake/verwijder' || route === 'POST /app/intake/bundel') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
-        if (route === 'GET /app/brain/entiteiten' || route.indexOf('GET /app/brain/entiteit/') === 0 || route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
+        if (route === 'GET /app/brain/entiteiten' || route === 'GET /app/brain/entiteiten/nu' || route.indexOf('GET /app/brain/entiteit/') === 0 || route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
         if (route === 'POST /app/werkers/schakel') return typeof appWerkerSchakel === 'function' ? appWerkerSchakel(req, res, a, s, d) : appWeiger(res, 404, 'onbekend', 'schakel');   // wv1733 (OVIS M4b): schakelaar per werker
@@ -23075,6 +23075,14 @@ const nachtketen = (function () {
       { naam: 'sb2-zoekleer', na: ['sb2-zoekindex'], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekleer) },
       // wv2839: datumcontrole (meetstand § 2.8) ná de n8n-schrijvers (via sb2-feitenlijst) en ná ovis-deadlines (spiegel + register van vannacht)
       { naam: 'sb2-datumcontrole', start_na: [5, 0], na: ['ovis-deadlines', 'sb2-feitenlijst'], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Datumcontrole) },
+      // wv3715 (3C165, David Ja 21-11): per eigen entiteit "Nu" (3-5 regels met bron) ná het deadline-register en de n8n-consolidaties
+      // (via sb2-feitenlijst, vangnet 06:40); één modelbeurt (harvesterClaude, Sonnet, abonnement). Een fout meldt de keten (box-rij);
+      // gisteren blijft dan staan (de app toont het grijs met de datum).
+      { naam: 'entiteit-nu', start_na: [6, 0], na: ['ovis-deadlines', 'sb2-feitenlijst'], limiet_min: 15, pogingen: 2, inProces: true, meldtZelf: false, doe: async function (ctx) {
+        const m = typeof entiteitNuMaak === 'function' ? entiteitNuMaak() : null;
+        if (!m) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        return m.ronde({ datum: ctx.datum });
+      } },
       { naam: 'ovis-kalender', start_na: [6, 35], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisKalender) },
       // wv2389 (idee 28): weerregel voor de briefing van 07:00; stil bij een fout (ok:true met detail.fout), box-rij pas op de tweede dag
       { naam: 'weer-ochtend', start_na: [6, 40], limiet_min: 3, pogingen: 2, inProces: true, doe: async function (ctx) {
@@ -24027,11 +24035,29 @@ function brainEntMaak() {
     brainEnt = BRAIN_ENT_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT, lees: function (p) { return VV().lees(p, 'utf8'); },
       facturenPad: path.join(FACTUREN_DIR, 'facturen.sqlite'), deadlines: function () { return appProjecten().deadlines; },
       bankPad: path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite'),   // wv3298: blok Bank (alleen lezen)
+      entNu: function (code) { const m = entiteitNuMaak(); return m ? m.vanCode(code) : null; },   // wv3715: "Nu" van vannacht bij een eigen entiteit
       masker: function (t) { return appSleutelMasker(SB_MASKER ? SB_MASKER(t, false) : t); },   // wv1930: het sleutelmasker blijft op alle tekst (ook de naamregels van Second Brain; review ZOU 2)
       kaart: function () { const k = secondbrain && secondbrain.vers(false); return k && Array.isArray(k.bestanden) ? k.bestanden : null; },   // wv1930: privépersonen en Dossier
       rpc: (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE) ? appSbRpc : null });
   } catch (e) { logError('brain-entiteiten', e); }
   return brainEnt;
+}
+// wv3715 (3C165): "Nu" per eigen entiteit (entiteit-nu.js); nachtketenstap 'entiteit-nu', staat in scripts-staat/entiteit-nu, pagina
+// 10_Zakelijk/<map>/Nu - <CODE>.md. Ontbreekt de module (terugrol), dan geen stap (al_gedaan) en geen blok/tegels.
+const ENTITEIT_NU_DIR = serverPad('entiteit-nu', process.env.ENTITEIT_NU_DIR, '/opt/data/scripts-staat/entiteit-nu', serverProefDeel('entiteit-nu'));
+let entiteitNu = null;
+function entiteitNuMaak() {
+  if (entiteitNu) return entiteitNu;
+  const p = path.join(__dirname, 'entiteit-nu.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const v = process.env.APP_VAULT_DIR || VAULT;
+    entiteitNu = require(p).maak({ vault: v, lees: function (x) { return VV().lees(x, 'utf8'); }, projecten: appProjecten, claude: harvesterClaude,
+      modelNaam: HARVESTER_MODEL, staatMap: ENTITEIT_NU_DIR, vandaag: function () { return appYmd(Date.now()); },
+      schrijfVault: function (rel, t) { if (!/^10_Zakelijk\/[A-Za-z_-]+\/Nu - [A-Z]{2,6}\.md$/.test(rel)) throw new Error('pad buiten Nu'); VV().schrijf(path.join(v, rel), t); },
+      fout: logError });
+  } catch (e) { logError('entiteit-nu', e); entiteitNu = null; }
+  return entiteitNu;
 }
 async function appBrainEntiteiten(req, res, a, route) {
   const B = brainEntMaak();
@@ -24040,6 +24066,10 @@ async function appBrainEntiteiten(req, res, a, route) {
   if (!appTeller('brain-entiteiten', 900, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens brain-entiteiten');
   try {
     if (route === 'GET /app/brain/entiteiten') { const uit = await B.lijst(); res._app.stil = true; return appStuur(res, 200, uit); }
+    if (route === 'GET /app/brain/entiteiten/nu') {   // wv3715: tegels op het Overzicht (per eigen entiteit de eerste regel "Nu")
+      if (typeof B.nuTegels !== 'function') return appWeiger(res, 404, 'Nu zit niet in deze versie van de pod', 'entiteit-nu ontbreekt');
+      const uit = await B.nuTegels(); res._app.stil = true; return appStuur(res, 200, uit);
+    }
     if (route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) {   // wv1930: stamboom alleen via zoeken
       const q = route.slice('GET /app/brain/entiteiten/zoek/'.length);
       if (!/^[a-z0-9-]{2,40}$/.test(q) || typeof B.zoek !== 'function') return appWeiger(res, 400, 'geen geldige zoekterm', 'brain-entiteiten zoek');

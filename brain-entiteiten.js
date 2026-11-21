@@ -157,6 +157,13 @@ function maak(o) {
   let bankCache = null;
   const deadlines = typeof o.deadlines === 'function' ? o.deadlines : function () { return null; };
   const nu = typeof o.nu === 'function' ? o.nu : Date.now;
+  const entNu = typeof o.entNu === 'function' ? o.entNu : null;   // wv3715: "Nu" van vannacht per eigen entiteit (code → { datum, regels } | null)
+  function nuVan(code) {
+    if (!entNu) return undefined;
+    let x; try { x = entNu(String(code)) || null; } catch (e) { return null; }
+    if (!x) return null;
+    return Object.assign({}, x, { regels: (x.regels || []).map(function (r) { return Object.assign({}, r, { tekst: masker(String(r.tekst || '')) }); }) });   // sleutelmasker (grondwet 2)
+  }
   const masker = typeof o.masker === 'function' ? o.masker : geenMasker;   // sleutelmasker (grondwet 2), op alle tekst
   const kaart = typeof o.kaart === 'function' ? o.kaart : function () { return null; };   // [{p, s, m}] uit de Second Brain-kaart
   let cache = null, priveCache = null;
@@ -465,6 +472,7 @@ function maak(o) {
       bank: bankVan(k, reg),   // wv3298
       deadlines: deadlinesVan(k, persoon ? { pagina: rel, patronen: pat } : null),
       contact: !persoon ? null : await googleVan(k, reg),   // wv1771
+      nu: eigen ? nuVan(k.id) : undefined,   // wv3715 (3C165): bovenaan de kaart; undefined = oude pod/geen module (geen blok)
       stukken: null,   // komt met OVIS Intake (stap 2); nu nog geen logboek per partij
       register: { concept: !!k.concept, compilatie: k.compilatienummer || null, gecompileerd_op: k.gecompileerd_op || null }, in_register: true };
     return { status: 200, j: { ok: true, vaste_plek: false,
@@ -478,7 +486,19 @@ function maak(o) {
       })) } };
   }
 
-  return { lijst: lijst, zoek: zoek, detail: detail, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; bankCache = null; } };
+  // wv3715 (3C165): tegels voor het Overzicht — per eigen entiteit (niet PRIVE) de eerste regel "Nu", de datum en het aantal regels
+  async function nuTegels() {
+    const reg = await register();
+    const tegels = reg.knopen.filter(function (k) { return zichtbaar(k) && isEigen(k) && String(k.id) !== 'PRIVE'; }).map(function (k) {
+      const n = nuVan(k.id);
+      return { sleutel: sleutelVan(k.id), code: String(k.id), naam: masker(k.naam), datum: n ? n.datum : null, dagen_oud: n ? n.dagen_oud : null,
+        regels: n ? n.regels.length : 0, eerste: n && n.regels[0] ? { soort: n.regels[0].soort, tekst: masker(n.regels[0].tekst) } : null };
+    }).filter(function (t) { return t.datum; });
+    tegels.sort(function (a, b) { return b.regels - a.regels || a.naam.localeCompare(b.naam, 'nl'); });
+    return { ok: true, tegels: tegels, aan: !!entNu };
+  }
+
+  return { lijst: lijst, zoek: zoek, detail: detail, nuTegels: nuTegels, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; bankCache = null; } };
 }
 
 module.exports = { telNl: telNl, maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, zichtbaar: zichtbaar, groepVan: groepVan,

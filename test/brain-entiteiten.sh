@@ -263,7 +263,7 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   toets('24b wv3675: rekeningnummers in de schrijfwijzen onverkort, sleutel nog wel gemaskeerd', Array.isArray(sw) && sw[0].includes(IBAN) && /nl11 test 0000 1111 22/.test(sw[1]) && !JSON.stringify(sw).includes('b'.repeat(40)) && !/\[rekeningnummer\]/.test(JSON.stringify(pb.j)), pb.j && pb.j.weet);
 
   const srv = fs.readFileSync('server.js', 'utf8');
-  toets('22 server.js: routes (ook zoeken), geen vaste-plekvlag meer, sleutelmasker en kaart mee', /route === 'GET \/app\/brain\/entiteiten' \|\| route\.indexOf\('GET \/app\/brain\/entiteit\/'\) === 0 \|\| route\.indexOf\('GET \/app\/brain\/entiteiten\/zoek\/'\) === 0/.test(srv) && /B\.detail\(id\)/.test(srv) && /B\.zoek\(q\)/.test(srv) &&
+  toets('22 server.js: routes (ook zoeken), geen vaste-plekvlag meer, sleutelmasker en kaart mee', /route === 'GET \/app\/brain\/entiteiten' \|\| route === 'GET \/app\/brain\/entiteiten\/nu' \|\| route\.indexOf\('GET \/app\/brain\/entiteit\/'\) === 0 \|\| route\.indexOf\('GET \/app\/brain\/entiteiten\/zoek\/'\) === 0/.test(srv) && /B\.detail\(id\)/.test(srv) && /B\.zoek\(q\)/.test(srv) &&
     !/appAfscherm/.test(srv) && !!maskerRegel && /kaart: function \(\) \{ const k = secondbrain && secondbrain\.vers\(false\)/.test(srv));
   toets('23 uitrol.sh, Dockerfile en CI kennen brain-entiteiten', /RELEASE_OPTIONEEL="[^"]*\bbrain-entiteiten\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&
     /COPY brain-entiteiten\.js \/app\/release-bootstrap\/brain-entiteiten\.js/.test(fs.readFileSync('Dockerfile', 'utf8')) && /test\/brain-entiteiten\.sh/.test(fs.readFileSync('.github/workflows/build.yml', 'utf8')));
