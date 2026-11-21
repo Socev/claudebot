@@ -19254,7 +19254,8 @@ function appWerkruimtesRoute(req, res, a, d) {
   }
   const nu = L.werkruimtesUitBestand(j);
   const antwoord = function (stand, status, extra) {
-    appStuur(res, status || 200, Object.assign({ ok: status ? false : true }, L.werkruimtesVoorApparaat(stand), extra || {}));
+    appStuur(res, status || 200, Object.assign({ ok: status ? false : true }, L.werkruimtesVoorApparaat(stand),
+      typeof L.werkruimteTelling === 'function' ? { gekozen: L.werkruimteTelling(appAppsTelling(L)) } : {}, extra || {}));   // wv3747: keuzes per werkruimte
   };
   if (req.method !== 'POST') { res._app.reden = 'werkruimtes'; res._app.stil = true; return antwoord(nu); }
   const u = L.werkruimtePas(nu, d);

@@ -83,7 +83,7 @@ vm.createContext(ctx);
 // alleen de functies, geen top-level code met andere afhankelijkheden: knip appVastModule en het wv2479-blok
 const knip = (van, tot) => { const i = src.indexOf(van), j = src.indexOf(tot, i); if (i < 0 || j < 0) throw new Error('niet gevonden: ' + van); return src.slice(i, j); };
 vm.runInContext(src.slice(p0, p1) + '\nlet appVastMod = null;\n' + knip('function appVastModule()', 'function appVastRoute(') +
-  knip('function appVastLijstVoorVolgorde(', '\n// ── wv1712') + '\nthis.V = appAppsVolgordeRoute; this.G = appAppsGeopendRoute;', ctx);
+  knip('function appVastLijstVoorVolgorde(', '\n// ── wv1712') + '\nthis.V = appAppsVolgordeRoute; this.G = appAppsGeopendRoute; this.WR = appWerkruimtesRoute;', ctx);
 fs.writeFileSync(ctx.APP_VAST, JSON.stringify({ versie: 1, vast: [{ scherm: 'facturen' }, { scherm: 'kalender' }, { scherm: 'ploeg' }] }));
 const res = () => ({ _app: {} });
 const A = { id: 'telefoon', soort: 'mee' }, B = { id: 'laptop', soort: 'mee' };
@@ -153,6 +153,26 @@ const w31 = L.werkruimtesUitBestand({ versie: 2, sets: { post: { tabs: ['intake'
 toets('31c werkruimte Post van vóór wv3110: mailman weg, naast met één tab vervalt', w31.sets.post.tabs.join() === 'intake,bestanden' && w31.sets.post.naast === null, w31);
 const w31d = L.werkruimtePas(w31, { versie: 2, id: 'post', set: { tabs: ['intake', 'bestanden'], naast: ['intake', 'bestanden'] } }, false);
 toets('31d de nieuwe standaard van Post (intake, bestanden; Mail is een eigen venster) is geldig', w31d.ok === true && w31d.stand.sets.post.tabs.join() === 'intake,bestanden' && w31d.stand.sets.post.naast.join() === 'intake,bestanden', w31d);
+// ── wv3747 (nr 506 = 3C206): het kiezen van een werkruimte telt mee in dezelfde teller ──
+const l32 = new Map();
+let u32 = L.telOpen(L.tellingUitBestand(null), 'werkruimte:praktijk', '2026-11-21', 1000, l32);
+toets('32 werkruimte:praktijk wordt geteld', u32.ok && u32.geteld && u32.t.dagen['2026-11-21']['werkruimte:praktijk'] === 1, u32);
+const u32b = L.telOpen(u32.t, 'werkruimte:praktijk', '2026-11-21', 1000 + 30000, l32);
+toets('32b dubbel binnen een minuut telt één keer', u32b.ok && !u32b.geteld);
+u32 = L.telOpen(u32.t, 'werkruimte:prive', '2026-11-21', 1000 + 30000, l32);
+toets('32c andere werkruimte in dezelfde minuut: wel', u32.geteld && u32.t.dagen['2026-11-21']['werkruimte:prive'] === 1);
+toets('32d onbekende werkruimte en kale werkruimte → 400', ['werkruimte:kelder', 'werkruimte:', 'werkruimte', 'praktijk'].every((x) => L.telOpen(u32.t, x, '2026-11-21', 9e9, new Map()).status === 400));
+toets('32e van schijf blijven werkruimte-tellingen staan, rommel niet', JSON.stringify(L.tellingUitBestand({ sinds: '2026-11-21', dagen: { '2026-11-21': { 'werkruimte:geld': 2, 'werkruimte:x': 1, mail: 1 } } }).dagen) === '{"2026-11-21":{"werkruimte:geld":2,"mail":1}}');
+const m32 = L.meest({ versie: 1, sinds: '2026-11-01', dagen: { '2026-11-21': { 'werkruimte:geld': 5, mail: 1 } } }, '2026-11-21');
+toets('32f meest gebruikt ziet alleen Apps', Object.keys(m32.score).join() === 'mail', m32);
+const w32 = L.werkruimteTelling({ versie: 1, sinds: '2026-11-20', dagen: { '2026-11-20': { 'werkruimte:geld': 2, mail: 4 }, '2026-11-21': { 'werkruimte:geld': 1, 'werkruimte:post': 1 } } });
+toets('32g werkruimteTelling: totaal per werkruimte, alle zes, dagen met een keuze', w32.totaal === 4 && w32.per.geld === 3 && w32.per.post === 1 && w32.per.eigen === 0 && Object.keys(w32.per).length === 6 && w32.dagen === 2 && w32.sinds === '2026-11-20', w32);
+toets('32h werkruimteTelling zonder telling = nullen', L.werkruimteTelling(L.tellingUitBestand(null)).totaal === 0);
+ctx.APP_WERKRUIMTES = path.join(W, 'werkruimtes.json');
+antw = [];
+ctx.G({ method: 'POST' }, res(), A, { id: 'werkruimte:brein' });
+ctx.WR({ method: 'GET' }, res(), A, {});
+toets('32i route: keuze geteld en GET /app/werkruimtes geeft gekozen per werkruimte', antw[0].o.geteld === true && antw[1].st === 200 && antw[1].o.gekozen && antw[1].o.gekozen.per.brein === 1 && antw[1].o.gekozen.totaal === 1 && Array.isArray(antw[1].o.ids), antw);
 // ── bedrading ──
 toets('26 routes in de routetabel', /route === 'GET \/app\/apps-volgorde' \|\| route === 'POST \/app\/apps-volgorde'\) return appAppsVolgordeRoute\(req, res, a, d\)/.test(src) && /route === 'POST \/app\/apps-geopend'\) return appAppsGeopendRoute\(req, res, a, d\)/.test(src));
 toets('27 tellen valt niet onder het invoerslot, rangschikken wel', /const APP_SLOT_VRIJ = new Set\(\[[^\]]*'POST \/app\/apps-geopend'/.test(src) && !/const APP_SLOT_VRIJ = new Set\(\[[^\]]*'POST \/app\/apps-volgorde'/.test(src));

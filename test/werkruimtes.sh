@@ -62,6 +62,7 @@ const ctx = { require: require, path: path, fs: { existsSync: () => true, rename
   appStuur: (res, st, o) => { res._app.status = st; antw.push({ st, o }); }, appWeiger: (res, st, f, reden) => { res._app.reden = reden; antw.push({ st, o: { ok: false, fout: f } }); } };
 vm.createContext(ctx);
 const knip = (van, tot) => { const i = src.indexOf(van), j = src.indexOf(tot, i); if (i < 0 || j < 0) throw new Error('niet gevonden: ' + van); return src.slice(i, j); };
+ctx.appAppsTelling = (M) => M.tellingUitBestand(null);   // wv3747: de route geeft ook de keuzes per werkruimte (teller staat buiten dit knipsel)
 vm.runInContext(src.slice(p0, p1) + '\nlet appVastMod = null;\n' + knip('function appVastModule()', 'function appVastRoute(') +
   knip('function appWerkruimtesRoute(', 'var appAppsLaatst') + '\nthis.R = appWerkruimtesRoute;', ctx);
 const res = () => ({ _app: {} });

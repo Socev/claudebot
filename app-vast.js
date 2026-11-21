@@ -87,6 +87,10 @@ const MEEST_NA_DAGEN = 14;        // "Meest gebruikt" pas na 14 dagen tellen
 const MEEST_HALF_DAGEN = 30;      // een opening telt na 30 dagen half zo zwaar
 
 const isAppId = function (x) { return typeof x === 'string' && APP_IDS.indexOf(x) >= 0; };
+// wv3747 (besluitenpagina nr 506 = 3C206, David Ja 21-11-2026 13:14): het kiezen van een werkruimte telt mee in dezelfde openingsteller,
+// als 'werkruimte:<id>' (geen nieuwe opslag). "Meest gebruikt" kijkt alleen naar App-id's; werkruimteTelling geeft het totaal per werkruimte.
+const WR_TEL = 'werkruimte:';
+const isTelId = function (x) { return isAppId(x) || (typeof x === 'string' && x.indexOf(WR_TEL) === 0 && WERKRUIMTE_IDS.indexOf(x.slice(WR_TEL.length)) >= 0); };
 function idLijst(l) {   // van schijf: alleen bekende id's, zonder dubbele, hooguit VOLGORDE_MAX
   const uit = [];
   (Array.isArray(l) ? l : []).forEach(function (x) { if (isAppId(x) && uit.indexOf(x) < 0 && uit.length < VOLGORDE_MAX) uit.push(x); });
@@ -147,13 +151,13 @@ function tellingUitBestand(j) {
   Object.keys(d).forEach(function (dag) {
     if (!DAG_RE.test(dag) || !d[dag] || typeof d[dag] !== 'object') return;
     const r = {};
-    Object.keys(d[dag]).forEach(function (id) { const n = Number(d[dag][id]); if (isAppId(id) && Number.isSafeInteger(n) && n > 0) r[id] = n; });
+    Object.keys(d[dag]).forEach(function (id) { const n = Number(d[dag][id]); if (isTelId(id) && Number.isSafeInteger(n) && n > 0) r[id] = n; });
     if (Object.keys(r).length) uit.dagen[dag] = r;
   });
   return uit;
 }
 function telOpen(t, id, vandaag, nuMs, laatst) {
-  if (!isAppId(id)) return { ok: false, status: 400, fout: 'onbekende App', reden: 'geopend onbekend' };
+  if (!isTelId(id)) return { ok: false, status: 400, fout: 'onbekende App', reden: 'geopend onbekend' };
   if (!DAG_RE.test(String(vandaag))) return { ok: false, status: 500, fout: 'datum', reden: 'geopend datum' };
   const v = laatst.get(id);
   if (typeof v === 'number' && nuMs - v >= 0 && nuMs - v < TEL_DUBBEL_MS) return { ok: true, geteld: false, t: t };
@@ -174,9 +178,24 @@ function meest(t, vandaag) {
     const oud = nu - dagNr(dag);
     if (oud < 0) return;
     const w = Math.pow(0.5, oud / MEEST_HALF_DAGEN);
-    Object.keys(t.dagen[dag]).forEach(function (id) { score[id] = Math.round(((score[id] || 0) + t.dagen[dag][id] * w) * 1000) / 1000; });
+    Object.keys(t.dagen[dag]).forEach(function (id) { if (!isAppId(id)) return; score[id] = Math.round(((score[id] || 0) + t.dagen[dag][id] * w) * 1000) / 1000; });
   });
   return { klaar: dagen >= MEEST_NA_DAGEN, dagen: dagen, na_dagen: MEEST_NA_DAGEN, score: score };
+}
+
+// wv3747: keuzes per werkruimte uit de openingsteller: { sinds, dagen (aantal dagen met een keuze), totaal, per: { <id>: n } } (alle zes erin)
+function werkruimteTelling(t) {
+  const per = {}; let totaal = 0; const dagen = {};
+  WERKRUIMTE_IDS.forEach(function (id) { per[id] = 0; });
+  Object.keys((t && t.dagen) || {}).forEach(function (dag) {
+    Object.keys(t.dagen[dag]).forEach(function (k) {
+      if (k.indexOf(WR_TEL) !== 0) return;
+      const id = k.slice(WR_TEL.length);
+      if (!(id in per)) return;
+      per[id] += t.dagen[dag][k]; totaal += t.dagen[dag][k]; dagen[dag] = 1;
+    });
+  });
+  return { sinds: (t && t.sinds) || null, dagen: Object.keys(dagen).length, totaal: totaal, per: per };
 }
 
 // ── wv2929 (OVIS als besturingssysteem, fase 4; David Ja 11-11-2026 16:24): eigen werkruimtes (werkruimtes.json naast apps-volgorde.json, één
@@ -259,5 +278,5 @@ function werkruimtesVoorApparaat(stand) {
 
 module.exports = { STANDAARD, MAX, regel, schoon, uitBestand, pas,
   APP_IDS, APP_VERVALLEN, VOLGORDE_MAX, SORTERINGEN, beginFavorieten, volgordeUitBestand, volgordePas, naarBestand, volgordeVoorApparaat,
-  tellingUitBestand, telOpen, meest, TEL_DUBBEL_MS, MEEST_NA_DAGEN,
+  tellingUitBestand, telOpen, meest, werkruimteTelling, TEL_DUBBEL_MS, MEEST_NA_DAGEN,
   WERKRUIMTE_IDS, WERKRUIMTE_PLEKKEN, WERKRUIMTE_MAX, werkruimtesUitBestand, werkruimtePas, werkruimtesNaarBestand, werkruimtesVoorApparaat };   // wv2929
