@@ -6059,7 +6059,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij 
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel/treffers');   // wv3682: de treffers vóór het antwoord = David die typt
 ['laad', 'bewerk', 'nieuw', 'vergelijk', 'uitbreiden', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/uitbreiden', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
-['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
+['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze', 'past'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv3755: past   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag', 'medisch'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
 ['controleer', 'inlees', 'intrek', 'code', 'koppel', 'rol', 'rooster', 'persoon'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt (wv3047: koppel, rol, rooster, persoon)   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
 ['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt; wv3102: + WOZ-beschikking
@@ -15767,7 +15767,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking
         if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk' || route === 'GET /app/nza/punten') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen); wv3676: tab Punten
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
-        if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || route === 'GET /app/beleggen/teller' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
+        if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || route === 'GET /app/beleggen/teller' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze|past)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0 || route === 'POST /app/kalender/gevonden') return typeof appKalender === 'function' ? appKalender(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv3679: POST = Klopt niet / terug   // wv2333: OVIS Calendar (alleen lezen)
         if (route.indexOf('GET /app/promedico/') === 0) return typeof appPromedico === 'function' ? appPromedico(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'promedico');   // wv3143: Promedico-laag in Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
@@ -25191,6 +25191,7 @@ if (GHAWA_TIKKEN) {
 //   GET  /app/beleggen/week                  wv2993: weekberichten (laatste 12), keuzes, herinneringen, gezakte bronnen
 //   GET  /app/beleggen/teller                wv3727: getal op de tegel (open signalen + nieuwe weekkaarten), alleen aantallen
 //   POST /app/beleggen/(bedrijf|week/keuze)  wv2993: kaartje "Nieuws over dit bedrijf"; keuze per weekkaart (niets/dagboek/herinner/ruis/nuttig)
+//   POST /app/beleggen/past                  wv3755: "Past dit?" {naam, bedrag, soort?} → verdeling en lampjes erna, koop ik niet, afkoeltijd, eigen woorden (bewaart niets)
 // Bestand: JSON {naam, tekst, datum?, bewaar} tot 3 MB (doorgeefluik én pod); bewaar:false = proef zonder schrijven. Audit: alleen route + aantallen.
 // Vaultpagina's 20_Prive/Financien/Beleggen/Beleggingsplan.md en Dagboek.md via vault-veilig (de databank is de bron).
 const BELEGGEN_DB = process.env.BELEGGEN_DB || '/opt/data/beleggen/beleggen.sqlite';
@@ -25220,11 +25221,12 @@ async function appBeleggen(req, res, a, route, d) {
   if (!beleggenApp) return appWeiger(res, 404, 'Beleggen zit niet in deze versie van de pod', 'beleggen ontbreekt');
   if (!appTeller('beleggen', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens beleggen');
   const post = route.indexOf('POST ') === 0;
-  if (post && !appTeller('beleggen-schrijf', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens beleggen-schrijf');
+  const leest = route === 'POST /app/beleggen/past';   // wv3755: "Past dit?" rekent alleen (bewaart niets): telt niet als schrijven
+  if (post && !leest && !appTeller('beleggen-schrijf', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens beleggen-schrijf');
   let u;
   try { u = beleggenApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
   catch (e) { logError('beleggen', new Error('route faalde')); return appWeiger(res, 503, 'Beleggen is nu niet te lezen; probeer het zo opnieuw', 'beleggen fout'); }   // geen inhoud in de log
-  if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'beleggen').slice(0, 80);
+  if (u.status === 200 && (!post || leest)) res._app.stil = true; else res._app.reden = String(u.reden || 'beleggen').slice(0, 80);
   return appStuur(res, u.status, u.body);
 }
 // wv3757 (besluit nr 910 / L10, David Ja 21-11 13:19 met vingerafdruk): Beleggen voor Financiën › Vermogen (beleggen.js voorFinancien: waarde van

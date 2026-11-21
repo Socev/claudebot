@@ -12,8 +12,8 @@ if echo "$C" | grep -niE "koersdoel|koopadvies|'kopen'|'verkopen'|\"kopen\"|\"ve
 [ $f = 0 ] && echo "GROEN CI-poort: beleggen.js zonder netwerk, proces, log, handelsknop of DEGIRO-adres"
 grep -q "const beleggenApp = (function () {" server.js || { echo "ROOD  server.js: beleggenApp ontbreekt"; f=1; }
 P=$(grep -oE "POST \\\\/app\\\\/beleggen\\\\/\([a-z|\\\\/]+\)" server.js)
-[ "$P" = 'POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)' ] || { echo "ROOD  server.js: POST-routes van Beleggen zijn niet precies de tien ($P)"; f=1; }   # wv2993: +bedrijf, week/keuze
-grep -qF "['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });" server.js || { echo "ROOD  server.js: Beleggen-routes verlengen de sessie niet"; f=1; }
+[ "$P" = 'POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze|past)' ] || { echo "ROOD  server.js: POST-routes van Beleggen zijn niet precies de elf ($P)"; f=1; }   # wv2993: +bedrijf, week/keuze; wv3755: +past (leest alleen)
+grep -qF "['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze', 'past'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });" server.js || { echo "ROOD  server.js: Beleggen-routes verlengen de sessie niet"; f=1; }
 grep -qF "p === '/app/beleggen/bestand' ? APP_BELEGGEN_MAX_BODY_VROEG" server.js || { echo "ROOD  server.js: bodygrens voor het bestand ontbreekt"; f=1; }
 grep -qE "^\s+beleggen: typeof beleggenInfo === 'function'" server.js || { echo "ROOD  server.js: /health.beleggen ontbreekt"; f=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* beleggen\.js" uitrol.sh || { echo "ROOD  uitrol.sh: beleggen.js niet in RELEASE_OPTIONEEL"; f=1; }
@@ -40,6 +40,7 @@ console.log("GROEN /smal/beleggen: alleen bekende velden door, fout zonder inhou
 ' || f=1
 node --test test/beleggen.test.js 2>&1 | tail -n 12 | grep -E "^# (pass|fail)" ; node --test test/beleggen.test.js >/dev/null 2>&1 || { echo "ROOD  test/beleggen.test.js"; f=1; }
 node --test test/beleggen-dash.test.js >/dev/null 2>&1 && echo "GROEN test/beleggen-dash.test.js (daglijn, wereldindex, geld-tegels; wv3754)" || { echo "ROOD  test/beleggen-dash.test.js"; f=1; }
+node --test test/beleggen-regels.test.js >/dev/null 2>&1 && echo "GROEN test/beleggen-regels.test.js (opbouwfase, Past dit?, eigen woorden bij een daling; wv3755)" || { echo "ROOD  test/beleggen-regels.test.js"; f=1; }
 # wv3757 (nr 910 / L10): waarde op datum, peilwaarde 1 januari, Beleggen in Financiën › Vermogen; koppeling in server.js en de bank-lezer
 node --test test/beleggen-peil.test.js 2>&1 | grep -E "^# (pass|fail)"
 node --test test/beleggen-peil.test.js >/dev/null 2>&1 || { echo "ROOD  test/beleggen-peil.test.js"; node --test test/beleggen-peil.test.js 2>&1 | grep -E "^not ok"; f=1; }
