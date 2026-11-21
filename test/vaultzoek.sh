@@ -122,6 +122,52 @@ try:
 except RuntimeError as e:
     fm = str(e)
 toets('20 psql-fout: alleen exit en SQLSTATE, nooit de invoerrij (review ronde 3 MOET 2)', fm == 'psql exit 3, sqlstate 22P04', fm)
+import urllib.error as _ue
+vz.time.sleep = lambda *a: None
+aanroepen = []
+def _nep400(limiet, gif=()):
+    def f(req, timeout=0):
+        t = _j.loads(req.data)['text']
+        aanroepen.append(len(t))
+        def fout(code, body):
+            return _ue.HTTPError('u', code, 'x', {}, io.BytesIO(body))
+        if sum(len(x) for x in t) > limiet:
+            raise fout(400, b'{"errors":[{"message":"AiError: Max context reached 61400 tokens but model supports only 60000","code":8007}]}')
+        if any(g in x for x in t for g in gif):
+            raise fout(400, b'{"errors":[{"message":"AiError: ongeldige invoer","code":8001}]}')
+        return _R({'result': {'data': [[0.0] * 1024 for _ in t], 'meta': {'cost_metric_value_1': 10 * len(t)}}})
+    return f
+def _brok(i, tekst='x'):
+    return {'hash': '%064x' % i, 'pad': 'p%d.md' % i, 'kop': '', 'tekst': tekst}
+# 21: pakket boven de contextgrens (8007): halveren; alles komt in, niets overgeslagen
+vz.urllib.request.urlopen = _nep400(1000)
+pak = [_brok(i, 'y' * 60) for i in range(50)]
+uit, over = [], []
+vz.embed_pak(pak, uit, over)
+toets('21 HTTP 400 (8007) op een pakket: halveren tot het past; alle 50 brokken ingebed, niets overgeslagen (wv3602)',
+      sum(len(d) for d, *_ in uit) == 50 and not over and len(aanroepen) > 1, [sum(len(d) for d, *_ in uit), len(over), aanroepen])
+# 22: één weigerende brok: alleen die wordt overgeslagen; de rest gaat door; foutregel met body
+vz.urllib.request.urlopen = _nep400(10 ** 9, gif=('GIF',))
+pak = [_brok(i, 'ok') for i in range(9)] + [_brok(99, 'GIF')]
+uit, over = [], []
+vz.embed_pak(pak, uit, over)
+toets('22 één weigerende brok: alleen die overgeslagen, 9 anderen ingebed, foutregel noemt de 400-body',
+      len(over) == 1 and over[0][0]['hash'] == '%064x' % 99 and 'HTTP 400' in over[0][1] and '8001' in over[0][1] and sum(len(d) for d, *_ in uit) == 9, [len(over), over[:1]])
+# 23: alles geweigerd (systeemfout, geen vieze brok): na MAX_OVERGESLAGEN een fout, niet stil exit 0
+vz.urllib.request.urlopen = _nep400(0)
+uit, over = [], []
+try:
+    vz.embed_pak([_brok(i, 'z') for i in range(50)], uit, over); stil = True
+except RuntimeError as e:
+    stil = False; msg = str(e)
+toets('23 elk pakket geweigerd (> %d enkele brokken): RuntimeError met body, geen stille exit 0' % vz.MAX_OVERGESLAGEN, not stil and '8007' in msg, msg if not stil else 'stil')
+# 24: andere fouten (500) en de body in de foutregel; 400-body is gekapt op 200 tekens
+vz.urllib.request.urlopen = lambda req, timeout=0: (_ for _ in ()).throw(_ue.HTTPError('u', 403, 'x', {}, io.BytesIO(b'{"errors":"' + b'q' * 500 + b'"}')))
+try:
+    vz.embed(['x']); m24 = ''
+except RuntimeError as e:
+    m24 = str(e)
+toets('24 HTTP 403: foutregel met status en body (gekapt op 200 tekens), geen halvering', m24.startswith('Workers AI HTTP 403: ') and len(m24) < 260, m24)
 print('%d groen, %d rood' % (goed, fout))
 sys.exit(1 if fout else 0)
 PY
