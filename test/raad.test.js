@@ -57,6 +57,10 @@ function vanIn(f, id) { return f.berichten.filter(function (b) { return b.draad_
 (async function () {
   // 1. kapZinnen
   toets('1 kapZinnen houdt 5 zinnen', R._intern.kapZinnen('A. B. C. D. E. F. G.', 5, 900) === 'A. B. C. D. E.');
+  { const t = 'Het kost 1.800 euro. Per jaar 8.400 euro. Twee. Drie. Vier. Vijf.';
+    toets('1c kapZinnen houdt getallen met punt heel (wv3816)', R._intern.kapZinnen(t, 5, 900) === 'Het kost 1.800 euro. Per jaar 8.400 euro. Twee. Drie. Vier.'); }
+  toets('1d kapZinnen laat tekst zonder slotpunt staan', R._intern.kapZinnen('A. B. C. D. E. en verder', 5, 900) === 'A. B. C. D. E.');
+  toets('1e kapZinnen ≤ n zinnen ongemoeid', R._intern.kapZinnen('Prijs 1.800. Ja!', 5, 900) === 'Prijs 1.800. Ja!');
   toets('1b kapZinnen kapt op tekens', R._intern.kapZinnen('x'.repeat(2000), 5, 900).length <= 900);
 
   // 2. een draad die vóór de start bestond, telt nooit
