@@ -1230,6 +1230,10 @@ function claudeBasisArgs(opts) {
     return ['-p', '--output-format', 'json', '--restricted', '--strict-mcp-config', '--tools', GEREEDSCHAP_LEZEN_TOOLS,
       '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', '--effort', effortVoor(opts)];
   }
+  // wv3824 (nr 452 stap 2): app-beurten (opts.stroom) als stream-json met partial messages, zodat de wachtbel de tekst ziet groeien;
+  // beurt-stroom.js leest het en geeft finalize dezelfde result-regel als --output-format json. Zonder de module: json zoals vroeger.
+  if (opts && opts.stroom && beurtStroom) return ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+    '--permission-mode', 'bypassPermissions', '--effort', effortVoor(opts)];
   return ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--effort', effortVoor(opts)];
 }
 // '' = standaard, 'lezen' = beperkt; null bij een onbekende waarde.
@@ -1623,6 +1627,12 @@ const beurtStappen = (function () {
   if (!fs.existsSync(p)) return null;
   try { return require(p); } catch (e) { logError('beurt-stappen', e); return null; }
 })();
+// wv3824 (nr 452 stap 2): stream-json-lezer voor app-beurten (beurt-stroom.js); optioneel bestand, ontbreekt het dan json zoals vroeger.
+const beurtStroom = (function () {
+  const p = path.join(__dirname, 'beurt-stroom.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p); } catch (e) { logError('beurt-stroom', e); return null; }
+})();
 // Lezer voor een logboek van socev (0600, via de loper) in het formaat van beurtStappen.volg: {buf, grootte}; fout = gooien met code.
 async function loperStappenLees(pad, vanaf, max) {
   const r = await loperOp({ op: 'lees', pad: pad, vanaf: vanaf, max: Math.max(1, max) }, 10000);
@@ -1692,6 +1702,12 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     else weesSpawnMeld(opts, child, eigenId, path.join(projDir, eigenId + '.jsonl'));
     const t0 = Date.now();
     let out = '', err = '', lastStdout = t0, killedReason = null;
+    // wv3824: in stroommodus (args bevatten stream-json) leest beurtStroom stdout regel voor regel; out wordt pas in finalize de result-regel.
+    // progress.deel = tekst van het lopende tekstblok; leeg bij de start (ook de tweede run van de account-2-terugval), kill en finish.
+    const stroom = args.indexOf('stream-json') >= 0;
+    const stroomOpts = { opDeel: function (d) { if (!killedReason && !resolved) progress.deel = d; }, opLeven: function () { lastStdout = Date.now(); } };
+    let lezer = stroom ? beurtStroom.maakLezer(stroomOpts) : null;
+    progress.deel = '';
 
     // Incident 4-10 21:39 (cde3fa2108aef3c2, 1e1e03989a58b11f): de oude heuristiek pinde "het
     // eerste nieuwe .jsonl" en nam zo het transcript van een buurman die in dezelfde tik van 30 s
@@ -1729,6 +1745,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     function killGroup(reason) {
       if (killedReason) return;
       killedReason = reason;
+      progress.deel = '';   // wv3824: een gestopte beurt laat geen half antwoord staan
       sein('SIGTERM');
       setTimeout(function () { sein('SIGKILL'); }, KILL_GRACE_MS);
     }
@@ -1776,6 +1793,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       resolved = true;
       clearInterval(watchdog);
       if (stappenStop) stappenStop();
+      progress.deel = '';   // wv3824: na het einde telt alleen het echte antwoord (of de fout)
       if (r && r.exit_code === undefined) r.exit_code = laatsteCode;
       if (r) { r.account = account; if (fs.existsSync(pinned)) r.eigen_sessie = eigenId; }   // wv781: account + sessie voor de terugval
       resolve(r);
@@ -1783,6 +1801,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     function finalize(code) {
       laatsteCode = code;
       if (resolved) return;
+      if (lezer) { lezer.sluit(); out = lezer.slot(); }   // wv3824: de result-regel (zelfde object als --output-format json) of de niet-JSON-tekst
       try {
         const j = JSON.parse(out);
         const r = { ok: code === 0 && !j.is_error, output: (j.result != null ? j.result : ''), session_id: j.session_id };
@@ -1811,9 +1830,13 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       finish({ ok: code === 0, output: out.trim(), error: err.slice(-1000) });
     }
 
-    child.stdout.on('data', function (d) { out += d; lastStdout = Date.now(); });
+    if (lezer) child.stdout.on('data', function (d) { if (!resolved) lezer.voeg(d); });   // wv3824: lastStdout via opLeven (niet bij ping)
+    else child.stdout.on('data', function (d) { out += d; lastStdout = Date.now(); });
     child.stderr.on('data', function (d) { err += d; });
-    if (viaLoper) child.on('vervang-uit', function (b) { out = b.toString('utf8'); lastStdout = Date.now(); });   // wv715 slot-volg
+    if (viaLoper) child.on('vervang-uit', function (b) {   // wv715 slot-volg
+      if (lezer) lezer = beurtStroom.herlees(lezer, b, stroomOpts); else out = b.toString('utf8');
+      lastStdout = Date.now();
+    });
     // 'close' is de nette route (alle streams leeg); 'exit' + 10 s is de
     // failsafe voor het geval een ontsnapt kindproces de pipes openhoudt.
     child.on('close', function (code) { finalize(code); });
@@ -3148,6 +3171,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     }
     if (j.app) runOpts.opSpawn = function (i) { appLopendSpawn(jobId, i); };
     if (j.app) runOpts.stappen = true;   // wv3693: stappen in de wachtbel   // wv716: pid en transcript in beurt-lopend.json
+    if (j.app) runOpts.stroom = true;    // wv3824: de tekst van het antwoord stroomt in de wachtbel (stream-json; niet bij gereedschap lezen)
     const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, lezen ? base : (managerCwd || space.dir), runOpts);
     if (lezen) r.gereedschap = 'lezen';
     r.files = collectFiles(outdir);
@@ -9096,6 +9120,12 @@ function appVraagGevoelig(jobId, hash) {
   try { const v = appVragen()[jobId + ':' + hash]; return !v || v.gevoelig !== false; } catch (e) { return true; }
 }
 
+// wv3824 (nr 452 stap 2): {deel} voor /app/uitslag zolang de beurt loopt; leeg (oude pod-module weg, geen tekst, alles weggeknipt) = geen veld.
+function appDeelVeld(j) {
+  if (typeof beurtStroom === 'undefined' || !beurtStroom || !j || !j.progress || typeof j.progress.deel !== 'string' || !j.progress.deel) return {};
+  const d = beurtStroom.deelVoorApp(j.progress.deel);
+  return d ? { deel: d } : {};
+}
 function appUitslag(req, res, reg, a, s, d) {
   const id = String(d.job_id || '');
   if (!/^[a-f0-9]{16}$/.test(id)) return appWeiger(res, 400, 'job_id ontbreekt', 'job_id');
@@ -9108,7 +9138,8 @@ function appUitslag(req, res, reg, a, s, d) {
     res._app.stil = true;   // elke 3 s een regel zou de koppelsporen wegspoelen (Fable-review wv56 #7)
     return appStuur(res, 200, { ok: true, gevonden: true, klaar: false, status: j.status, kanaal: j.app.kanaal, gestart: j.app.gestart === true,   // wv628: gestart = niet meer terug te halen
       running_ms: (j.progress && j.progress.running_ms) || 0, last_activity_ms: (j.progress && j.progress.last_activity_ms) || 0,
-      stappen: typeof beurtStappen !== 'undefined' && beurtStappen && j.progress ? beurtStappen.stappenUitslag(j.progress, Date.now()) : [] });   // wv3693: wat Socev nu doet (vaste tabel, geen inhoud)
+      stappen: typeof beurtStappen !== 'undefined' && beurtStappen && j.progress ? beurtStappen.stappenUitslag(j.progress, Date.now()) : [],   // wv3693: wat Socev nu doet (vaste tabel, geen inhoud)
+      ...appDeelVeld(j) });   // wv3824: de tekst tot nu toe van het lopende tekstblok (platte tekst, zonder half getoonde vraag- of markerregel)
   }
   if (!j.opgehaald) j.opgehaald = Date.now();
   // wv1243 (OVIS M1c, ontwerplijnen § 2.5): het gesprek staat op de laptop vast rechts en haalt het antwoord ook op als David elders typt;
