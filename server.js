@@ -4658,6 +4658,7 @@ function handleRequest(req, res) {
       elevenlabs: elevenCreditsInfo(),   // wv2751: credits van Davids ElevenLabs-bundel (gebruikt/limiet/over, rem bij 5 %)
       studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
       pot_verzend: typeof potVzInfo === 'function' ? potVzInfo() : { aan: false },
+      pot_antwoord: typeof potAwInfo === 'function' ? potAwInfo() : { aan: false },   // wv3677: antwoorden op de decembermail (schakelaar, laatste tik, tellingen; geen inhoud)
       pot_maand: typeof potMaandInfo === 'function' ? potMaandInfo() : { aan: false },   // wv2762: OVIS POT maandronde (schakelaar, bundel, laatste tik; geen inhoud)   // wv911: POT-app nota's als Gmail-concept (schakelaar, laatste tik, aantallen; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
@@ -12879,6 +12880,13 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
       : !bs.reden && k.gevoelig ? ' (Boekstuk-vrijgave: de pod legt deze vrijgave zelf vast in de Facturen-databank zodra deze druk is aangenomen; vanaf de 3e van de volgende maand verstuurt de pod het boekstuk op een werkdag tussen 09:00 en 12:00 zelf aan je vader. Jij doet niets en verstuurt niets; bevestig het David in één zin.)'
       : ' (Boekstuk-vrijgave NIET vastgelegd: ' + (bs.reden || 'geen verse vingerafdruk') + '. Het boekstuk blijft elke maand een concept in Gmail. Zeg dat kort; jij verstuurt niets.)');
   }
+  // wv3677: aantal-kaart van pot-antwoord ("Praktijk X geeft N door (mail van d-m). Overnemen?"). De pod schrijft het aantal zelf via de API
+  // van de app (logboek oud → nieuw), alleen als de stand nog is wat de kaart toonde; nooit het taalmodel. Socev hoort wat er gebeurt.
+  let aw = null;
+  if (!pot && !bs && typeof potAwKnopVoor === 'function') {
+    try { aw = await potAwKnopVoor(p.sleutel, keuze); } catch (e) { logError('pot-antwoord-knop', e); aw = null; }
+    if (aw) ctx = context + aw.context;
+  }
   // wv861/wv942: bundelkaart van AIX (sleutel in /opt/data/aix-winkel/bundel.json; startset of weekbundel). De pod plaatst zelf, nooit het taalmodel,
   // en alleen bij een Ja met verse vingerafdruk van telefoon of meereizend apparaat (ideeen.plaatsBundel toetst de bevestiging opnieuw). Nee = bundel dicht, niets geplaatst.
   let ib = null, ctxIb = context;
@@ -12890,7 +12898,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
       : ' (AIX: NIET geplaatst, want deze Ja kwam van een vaste plek. Jij plaatst niets. Laat David op de telefoon drukken: heropen deze kaart met voor-jou-beheer.)');
   // wv1253: OVIS-kaart (herkenningskenmerken, kritiek veld, Bibliothecaris). De pod legt Davids keuze zelf vast via ovis_handvat_activeer
   // (precies de bevroren lijst; nooit het taalmodel); Socev hoort in de staart wat er werkelijk gebeurde.
-  const ov = !pot && !bs && !ib && typeof ovisKaartHerkomst === 'function' && ovisKaartHerkomst(p) ? ovisKnopHaak(p, d.toelichting) : null;
+  const ov = !pot && !bs && !aw && !ib && typeof ovisKaartHerkomst === 'function' && ovisKaartHerkomst(p) ? ovisKnopHaak(p, d.toelichting) : null;
   // wv1343: scankaart van scansnap.js. Alleen uit de eigen tabel van de pod (nooit uit de kaarttekst); Ja/Anders: kopie van de scan in de
   // invoermap van de knopbeurt; de keuze telt bij de start en gaat terug als de druk vervalt.
   let ss = null;
@@ -12921,9 +12929,9 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   }
   // wv921, wv861 en wv1253 sluiten elkaar uit (pot-vrijgave-N, de sleutel in bundel.json, intake-…); de haak van de een of de ander
   const knopRes = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
-    { tekst: tekst, bericht: bericht, inhoudHash: inhoudHash, context: pot || bs ? ctx : ov ? context + ov.context : ctxIb, gevoelig: k.gevoelig || (!pot && !!ib) || !!bs,
+    { tekst: tekst, bericht: bericht, inhoudHash: inhoudHash, context: pot || bs || aw ? ctx : ov ? context + ov.context : ctxIb, gevoelig: k.gevoelig || (!pot && !!ib) || !!bs,
       bijStart: ov ? function (kz, g) { bijStart(kz, g); return ov.staart(a); } : bijStart,
-      naStart: ov ? ov.naStart : pot && !pot.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { potVzVrijgeven(pot.v, kz, gevoeligJa, ap, bevestiging, vraagId); }
+      naStart: aw ? function (kz) { potAwNaStart(aw, kz); } : ov ? ov.naStart : pot && !pot.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { potVzVrijgeven(pot.v, kz, gevoeligJa, ap, bevestiging, vraagId); }
         : bs && !bs.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { bsVrijgeven(bs.v, kz, gevoeligJa, ap, bevestiging, vraagId); }
         : !pot && ib && !ib.afgehandeld ? function (kz, gevoeligJa, ap, bevestiging, vraagId) {
           if (kz === 'nee') { try { ideeen.bundelNee(ib.kaart); } catch (e) { logError('ideeen-plaats', e); } return; }
@@ -30702,6 +30710,117 @@ async function potMaandTik(o) {
   } finally { potMaand.bezig = false; }
 }
 setInterval(function () { potMaandTik().catch(function (e) { logError('pot-maand', e); }); }, POT_MAAND_TIK_MS).unref();
+
+// ── wv3677: OVIS POT — antwoorden op de decembermail als voorstel per praktijk (besluitenpagina nr 134 / 2C34; David Ja 21-11-2026) ──
+// pot-antwoord.js (puur). Elke 30 minuten (07:00–22:00), alleen de primaire pod, schakelaar <POT_MAAND_DIR>/antwoorden-aan: het lees-luik
+// (alleen lezen) zoekt antwoorden van de praktijkadressen uit D1 pot en mails met "1 januari <jaar>"; per praktijk één besluitkaart met
+// oud → nieuw. Davids Ja: de pod schrijft het aantal via de API van de app (bundel ovis-pot/api.mjs, route 'stand') met de mail als bron.
+// Eigen praktijken: het aantal per 1-1 uit OVIS PMA (Promedico-export) zodra die 1-1 dekt. Staat: <POT_MAAND_DIR>/antwoorden.json (600).
+const POT_AW_MOD = (function () { const p = path.join(__dirname, 'pot-antwoord.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('pot-antwoord', e); return null; } })();
+const POT_AW_TIK_MS = 30 * 60 * 1000;
+const potAw = { bezig: false, laatste: null, uitkomst: null, fouten_op_rij: 0, laatste_fout: null, staat: null, box: {} };
+function potAwAan() { return !!POT_AW_MOD && fs.existsSync(path.join(POT_MAAND_DIR, 'antwoorden-aan')); }
+const potAwPad = function () { return path.join(POT_MAAND_DIR, 'antwoorden.json'); };
+function potAwStaat() {
+  if (potAw.staat) return potAw.staat;
+  let t = null;
+  try { t = fs.readFileSync(potAwPad(), 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  potAw.staat = t == null ? {} : JSON.parse(t);   // onleesbaar = gooien: dan geen ronde en geen knop (niets dubbel)
+  return potAw.staat;
+}
+function potAwBewaar() {
+  const p = potAwPad(), tmp = p + '.' + process.pid + '.tmp';
+  fs.mkdirSync(POT_MAAND_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(tmp, JSON.stringify(potAw.staat || {}), { mode: 0o600 });
+  fs.renameSync(tmp, p);
+}
+// Eigen praktijk in OVIS PMA (zelfde naam als in OVIS POT): ingeschreven patiënten op de peildatum = inschrijftarieven per leeftijd (niet de opslag)
+function potAwPma(naam, peildatum) {
+  const pad = path.join(PMA_DIR, 'pma.sqlite');
+  if (!fs.existsSync(pad)) return null;
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(pad, { readOnly: true });
+  try {
+    const pr = db.prepare('SELECT code FROM praktijk WHERE lower(naam) = lower(?)').get(String(naam || ''));
+    if (!pr) return null;
+    const codes = POT_AW_MOD.PMA_CODES;
+    const n = db.prepare('SELECT count(*) AS n FROM inschrijf WHERE praktijk = ? AND peildatum = ? AND code IN (' + codes.map(function () { return '?'; }).join(',') + ')').get(pr.code, peildatum, ...codes).n;
+    if (!n) return null;
+    const e = db.prepare('SELECT e.exportdatum AS d FROM kwartaalbron k JOIN export e ON e.id = k.export_id WHERE k.praktijk = ? AND k.peildatum = ?').get(pr.code, peildatum);
+    return { aantal: Number(n), exportdatum: e && e.d ? String(e.d) : null };
+  } finally { db.close(); }
+}
+function potAwBox(reden, tekst) {
+  const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  if (potAw.box[reden] === dag) return;
+  potAw.box[reden] = dag;
+  const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+  ovisBoxRij('\n## [direct] ' + tijd + ' — OVIS POT antwoorden decembermail: ' + String(reden).slice(0, 40) + ' #pot-antwoord\n- status: open\n- van: pod (server.js potAwTik / pot-antwoord.js, wv3677)\n' +
+    '- wat ik zag: ' + String(tekst).replace(/[\r\n]+/g, ' ').replace(/https?:\/\/\S+/g, '<url>').slice(0, 300) + '\n' +
+    '- voorstel: /health `pot_antwoord` en api.log (`pot-antwoord`) nalopen; staat in ' + potAwPad() + '; uitzetten = `rm ' + path.join(POT_MAAND_DIR, 'antwoorden-aan') + '`. Een aantal met de hand zetten: mk-scripts/wv3677/zet-stand.mts.\n');
+}
+function potAwIo() {
+  return {
+    d1: function (batch) { return potDhD1(batch); },
+    zoek: async function (q) { const j = await appAgendaApi({ actie: 'mail_zoeken', query: q, max: POT_AW_MOD.GRENS.zoekMax }); return j && Array.isArray(j.mails) ? { mails: j.mails, melding: j.melding || null } : { mails: null }; },
+    lees: function (id) { return appAgendaApi({ actie: 'mail_lezen', id: String(id) }); },
+    pma: potAwPma,
+    kaartZet: async function (k) { const r = await appSbRpc('mk_voor_jou_zet', { p: k }); appStaat.vjCache = null; if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet'); return r; },
+    kaartLijst: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); if (!j || !Array.isArray(j.punten)) throw new Error('lijst onleesbaar'); return j.punten; },
+    kaartVervalt: async function (sleutel, van, reden) { await appSbRpc('mk_voor_jou_status', { p_sleutel: sleutel, p_van: van, p_naar: 'vervallen', p_door: 'agent', p_bewijs: 'pot-antwoord: ' + reden, p_reden: 'pot-antwoord: ' + reden }); appStaat.vjCache = null; },
+    schrijfStand: async function (b) {
+      const B = await potMaandBundel();
+      if (!B.api || typeof B.api.schrijf !== 'function' || !POT_MAAND_MOD) throw new Error('bundel ovis-pot ontbreekt');
+      return B.api.schrijf(POT_MAAND_MOD.d1Achtig(function (batch) { return potDhD1(batch); }), 'stand', b, 'David (Socev-kaart)');
+    },
+    box: function (sleutel, k) { potAwBox('anders', 'David koos Anders op kaart ' + sleutel + ' (' + k.praktijk_id + ', ' + k.aantal + ' per 1-1); zijn toelichting staat in de knopbeurt van het hoofdkanaal. Er is niets geschreven.'); },
+    staat: potAwStaat(),
+    bewaar: async function () { potAwBewaar(); },
+  };
+}
+function potAwInfo() {
+  const u = potAw.uitkomst;
+  return { aan: potAwAan(), module: !!POT_AW_MOD, laatste_tik: potAw.laatste, fouten_op_rij: potAw.fouten_op_rij, laatste_fout: potAw.laatste_fout,
+    laatste: u ? { jaar: u.jaar, buiten: !!u.buiten, gelezen: u.gelezen, voorstellen: u.voorstellen, vragen: u.vragen, gelijk: u.gelijk, fouten: u.fouten } : null };
+}
+async function potAwTik(o) {
+  o = o || {};
+  if (potAw.bezig || !potAwAan() || !rolPrimair()) return null;
+  const uur = Number(new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(11, 13));
+  if (!o.nu && (uur < 7 || uur >= 22)) return null;
+  if (!process.env.CLOUDFLARE_API_TOKEN || !process.env.N8N_WEBHOOK_AGENDA_API) { potAwBox('geheim', 'CLOUDFLARE_API_TOKEN of N8N_WEBHOOK_AGENDA_API ontbreekt in de pod'); return null; }
+  potAw.bezig = true;
+  try {
+    const u = await POT_AW_MOD.ronde(potAwIo(), {});
+    potAw.uitkomst = u; potAw.laatste = new Date().toISOString(); potAw.fouten_op_rij = 0;
+    if (!u.buiten && (u.gelezen || u.voorstellen || u.vragen || u.fouten.length))
+      schrijfLog(nu() + ' pot-antwoord ' + velden({ jaar: u.jaar, gelezen: u.gelezen, voorstellen: u.voorstellen, vragen: u.vragen, gelijk: u.gelijk || undefined, niet_relevant: u.niet_relevant || undefined, vervallen: u.vervallen || undefined, fouten: u.fouten.length ? u.fouten.join('+') : undefined }));
+    potAw.fout_rij = u.fouten.length ? (potAw.fout_rij || 0) + 1 : 0;
+    if (potAw.fout_rij === 6) potAwBox('stap', 'de ronde gaf 6 tikken op rij een fout: ' + u.fouten.join(', '));
+    return u;
+  } catch (e) {
+    potAw.fouten_op_rij++; potAw.laatste_fout = new Date().toISOString();
+    logError('pot-antwoord', e);
+    if (potAw.fouten_op_rij === 3) potAwBox('ronde', 'de ronde faalde 3 keer op rij: ' + String(e && e.message || e).slice(0, 160));
+    return null;
+  } finally { potAw.bezig = false; }
+}
+setInterval(function () { potAwTik().catch(function (e) { logError('pot-antwoord', e); }); }, POT_AW_TIK_MS).unref();
+// Knop (appVoorJouKnop): vóór de druk de verse stand lezen; Nee/Anders/Ja pas uitvoeren na een geslaagde start (naStart)
+async function potAwKnopVoor(sleutel, keuze) {
+  if (!POT_AW_MOD || !POT_AW_MOD.SLEUTEL_RE.test(String(sleutel || ''))) return null;
+  return POT_AW_MOD.knopVoor(potAwIo(), sleutel, keuze);
+}
+function potAwNaStart(aw, kz) {
+  aw.uitvoeren(kz).then(function (r) {
+    schrijfLog(nu() + ' pot-antwoord knop ' + velden({ keuze: kz, ok: !!(r && r.ok), reden: r && r.reden ? String(r.reden).slice(0, 80) : undefined }));
+    if (kz === 'ja' && r && !r.ok) {
+      berichtIntern({ kanaal: 'hoofd', bron: 'pot-antwoord', klasse: 'normaal', tekst: 'Het patiëntenaantal kon ik niet overnemen in OVIS POT (' + String(r.reden || 'onbekend').slice(0, 120) + '). Je krijgt een nieuwe kaart met de stand van nu.',
+        sleutel: 'pot-antwoord-mislukt-' + crypto.createHash('sha256').update(String(Date.now())).digest('hex').slice(0, 12) })
+        .then(function (b) { if (!b || b.status !== 200) logError('pot-antwoord', new Error('bericht niet bezorgd')); }).catch(function (e) { logError('pot-antwoord', e); });
+    }
+  }).catch(function (e) { logError('pot-antwoord-knop', e); });
+}
 
 // ── wv2316: boekstuk Google Home Premium Advanced elke maand zelf naar André (David 3-11-2026 15:51; Ja met verse vingerafdruk 16:22) ──────
 // Ontwerp: vault "01_Ontwikkeling/Boekstuk Google Home - maandelijks zelf naar André (ontwerp 3-11-2026).md"; de logica staat in
