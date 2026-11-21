@@ -95,6 +95,86 @@ const SYNONIEM = {
 };
 const FEITWOORD = new Set(Object.keys(SYNONIEM).concat(['datum', 'tarief', 'kosten', 'prijs', 'nummer', 'code', 'adres', 'dagen']));
 
+// ── wv3733 (besluitenpagina nr 354 = 3C54, David Ja 21-11 13:19): nummers, mailadressen en afspraken rechtstreeks uit Contacten en agenda ──
+// 16 van de 27 Zoek snel-vragen gingen over een nummer of adres, en de contactenlijst in de vault stond sinds 1-10 stil; de databank
+// secondbrain.contacten (Google-spiegel, elke nacht) niet. "Nummer van X", "mailadres van X" en "adres van X" komen nu zonder model uit
+// public.sb_contacten_zoek (gemeten 17–44 ms), "wanneer is …" uit de tijdlijn van OVIS Calendar (public.sb_kalender_tijdlijn, 14–43 ms).
+// Naamgenoten: alle treffers (hooguit 5) met de volledige naam. Elk naamwoord moet een woord van de naam raken (begin van het woord), anders
+// telt het contact niet: "adres Tolgaarde" geeft geen thuisadressen van iedereen die bij Tolgaarde werkt. Geen treffer = gewoon door naar de
+// lagen 1–3. Een vraag met een registerwoord (KvK, btw, AGB, IBAN, polis, kenteken, Zorgmail, EDI …) gaat nooit via Contacten: dat zijn
+// feiten van een praktijk of zaak, en die staan in de feitenlijst en op de pagina's.
+const C_MAIL = /(^|[^\p{L}])(e-?mail(?:adres)?|mailadres|mail)([^\p{L}]|$)/iu;
+const C_TEL = /(^|[^\p{L}])(telefoon(?:nummer)?|tel|telnr|mobiel(?:nummer)?|mobieltje|06(?:-?nummer)?|gsm|nummer|belnummer|bellen)([^\p{L}]|$)/iu;
+const C_ADRES = /(^|[^\p{L}])(adres|woonadres|huisadres|postadres|woont)([^\p{L}]|$)/iu;
+const C_NIET = /(^|[^\p{L}])(kvk|btw|agb|bsn|iban|rekening\p{L}*|polis\p{L}*|klant\p{L}*|kenteken\p{L}*|uzi|big|big-nummer|big-registratie|lid|lidnummer|lidmaatschap\p{L}*|factuur\p{L}*|order\p{L}*|zorgmail\p{L}*|edi|edifact|vecozo|huisnummer|pas|paspoort\p{L}*|pasnummer|contract\p{L}*|personeel\p{L}*|dossier\p{L}*|referentie\p{L}*|kenmerk\p{L}*|ip|ip-adres|mac-adres|wifi|pin|pincode|salaris\p{L}*|schaal|uren)([^\p{L}]|$)/iu;
+const C_WOORD = new Set(['telefoon', 'telefoonnummer', 'tel', 'telnr', 'mobiel', 'mobielnummer', 'mobieltje', '06', '06-nummer', '06nummer', 'gsm', 'nummer',
+  'belnummer', 'bellen', 'mail', 'email', 'e-mail', 'mailadres', 'emailadres', 'e-mailadres', 'adres', 'woonadres', 'huisadres', 'postadres', 'woont',
+  'contact', 'contactgegevens', 'gegevens', 'bereik', 'bereiken', 'prive', 'werk', 'zakelijk', 'privé', 'nieuwe', 'nieuw', 'huidige']);
+const A_VRAAG = /(^|[^\p{L}])(wanneer|welke datum|welke dag|hoe laat|datum van)([^\p{L}]|$)/iu;
+const A_WOORD = new Set(['afspraak', 'afspraken', 'agenda', 'gepland', 'volgende', 'eerstvolgende', 'datum', 'dag', 'laat', 'weer', 'komt', 'komende',
+  'begint', 'start', 'is', 'zijn', 'hebben', 'heb']);
+const MOGELIJK_MAX = 5, MOGELIJK_MS = 3000;
+const KAL = (function () { try { return require('./kalender-app.js'); } catch (e) { return null; } })();   // regel(): zelfde lezing van een tijdlijnrij als Apps › Calendar
+const C_MAX = 5, C_LIMIET = 50, A_TERUG = 60, A_VOORUIT = 400, A_MAX = 5, A_RPC_MAX = 1000;
+const A_VOOR_WIE = ['david', 'gezin', 'socev', 'info'];   // zonder 'bezetting' (de roosterdiensten van iedereen: 1.032 rijen in dit venster)
+const nNorm = function (s) { return String(s == null ? '' : s).normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase(); };
+const woordenVan = function (s) { return nNorm(s).split(/[^\p{L}\p{N}]+/u).filter(Boolean); };
+// raakt elk woord van de vraag het begin van een woord van de naam/titel? (een woord van 1–2 tekens alleen als heel woord)
+const alleWoorden = function (termen, tekst) {
+  const hooi = woordenVan(tekst);
+  return termen.length > 0 && termen.every(function (t) { return hooi.some(function (w) { return t.length <= 2 ? w === t : w.indexOf(t) === 0; }); });
+};
+// Welke registervraag is dit? { soort: 'contact', wat: 'tel'|'mail'|'adres', namen } | { soort: 'agenda', woorden } | null
+function registerVraag(vraag) {
+  const v = String(vraag || '');
+  if (C_NIET.test(v)) return null;
+  const woorden = termenUit(v);
+  if (C_MAIL.test(v) || C_TEL.test(v) || C_ADRES.test(v)) {
+    const wat = C_MAIL.test(v) ? 'mail' : C_ADRES.test(v) && !C_TEL.test(v) ? 'adres' : 'tel';
+    // een dubbele naam met streepje ("Jansen-de Vries") telt per deel; tussenvoegsels doen niet mee (de naam in Contacten heeft ze wel)
+    const namen = [];
+    woorden.map(nNorm).filter(function (w) { return !C_WOORD.has(w) && !FEITWOORD.has(w); }).forEach(function (w) {
+      w.split(/[^\p{L}\p{N}]+/u).forEach(function (d) { if (d && /\p{L}/u.test(d) && !W_TUSSEN.has(d) && namen.indexOf(d) < 0) namen.push(d); });
+    });
+    return namen.length >= 1 && namen.length <= 6 ? { soort: 'contact', wat: wat, namen: namen } : null;
+  }
+  if (A_VRAAG.test(v)) {
+    const rest = woorden.map(nNorm).filter(function (w) { return !A_WOORD.has(w) && /\p{L}/u.test(w); });
+    return rest.length >= 1 && rest.length <= 4 ? { soort: 'agenda', woorden: rest } : null;
+  }
+  return null;
+}
+// De waarden van één contact voor de gevraagde soort (letterlijk zoals in Contacten; dubbelen weg).
+function contactWaarden(c, wat) {
+  const uit = [], gezien = new Set();
+  const neem = function (w, sleutel) { w = String(w == null ? '' : w).replace(/\s+/g, ' ').trim(); if (!w || w.length > 120 || gezien.has(sleutel)) return; gezien.add(sleutel); uit.push(w); };
+  if (wat === 'tel') {
+    [c.telefoon_primair].concat(Array.isArray(c.telefoons_e164) ? c.telefoons_e164 : []).forEach(function (t) {
+      const d = String(t == null ? '' : t).replace(/[^0-9]/g, '');
+      if (d.length >= 6) neem(t, d.slice(-9));
+    });
+  } else if (wat === 'mail') {
+    [c.email_primair].concat(Array.isArray(c.emails_plat) ? c.emails_plat : []).forEach(function (m) { if (/@/.test(String(m || ''))) neem(m, String(m).trim().toLowerCase()); });
+  } else {
+    (Array.isArray(c.adressen) ? c.adressen : []).forEach(function (a) {
+      if (!a || typeof a !== 'object') return;
+      const t = a.volledig ? String(a.volledig).replace(/\s*\n\s*/g, ', ') : [a.straat, [a.postcode, a.plaats].filter(Boolean).join(' '), a.land].filter(Boolean).join(', ');
+      neem(t, nNorm(t).replace(/[^\p{L}\p{N}]/gu, ''));
+    });
+  }
+  return uit.slice(0, 3);
+}
+const contactLink = function (c, q) {
+  const m = /^people\/(c[0-9]{1,30})$/.exec(String(c && c.resource_name || ''));
+  return m ? 'https://contacts.google.com/person/' + m[1] : 'https://contacts.google.com/search/' + encodeURIComponent(q);
+};
+const DAG_KORT = ['zo', 'ma', 'di', 'wo', 'do', 'vr', 'za'];
+const datumNl = function (iso) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(iso || ''))) return '';
+  const d = new Date(iso + 'T12:00:00Z');
+  return DAG_KORT[d.getUTCDay()] + ' ' + iso.split('-').reverse().join('-');
+};
+
 // ── woordenlijst (zelfde regels als breed-zoeken/woordenlijst.py: parse_regel, laad_groepen, zoek, soort) ──
 function wNorm(s) {
   s = String(s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/’/g, "'").replace(/\./g, '');
@@ -306,6 +386,14 @@ const tijdKort = function (ms) {
 };
 function dekkingRegel(l, metZoektocht) {
   const delen = [];
+  // wv3733: de registerlaag (Contacten of agenda) eerst; alleen tellingen
+  const rc = l.contacten, ra = l.agenda;
+  if (rc && rc.stand === 'ok') delen.push('contacten: ' + (rc.totaal ? aantal(rc.totaal, 'treffer', 'treffers') + (rc.getoond < rc.totaal ? ', ' + rc.getoond + ' getoond' : '')
+    : rc.namen ? aantal(rc.namen, 'naam', 'namen') + ' zonder deze gegevens' : 'geen naam die past') + (rc.bekeken >= C_LIMIET ? ', niet alle namen bekeken' : ''));
+  else if (rc && rc.stand === 'fout') delen.push('contacten: niet bereikbaar');
+  if (ra && ra.stand === 'ok') delen.push('agenda (' + A_TERUG + ' dagen terug, een jaar vooruit): ' + (ra.totaal ? aantal(ra.totaal, 'afspraak', 'afspraken') +
+    (ra.getoond < ra.totaal ? ', ' + ra.getoond + ' getoond' : '') : 'geen afspraak met deze woorden') + (ra.bekeken >= A_RPC_MAX ? ', niet alles bekeken' : ''));
+  else if (ra && ra.stand === 'fout') delen.push('agenda: niet bereikbaar');
   const f = l.feitenlijst;
   if (f && f.stand === 'ok') {
     let t = 'feitenlijst' + (f.gevuld ? ' (bijgewerkt ' + tijdKort(f.gevuld) + ')' : '') + ': ' + (f.totaal ? aantal(f.totaal, 'feit', 'feiten') : 'geen feit') + ' (van ' + f.feiten_totaal + ')';
@@ -339,6 +427,11 @@ function dekkingRegel(l, metZoektocht) {
 function conclusieVan(r, l) {
   if (!r || !l || (r.soort !== 'antwoord' && r.soort !== 'geen') || r.reden === 'geen zoektermen' || r.reden === 'leeg') return null;
   let laag, volledig;
+  if (r.soort === 'antwoord' && (r.laag === 'contacten' || r.laag === 'agenda')) {   // wv3733: de registerlaag telt met haar eigen tellingen
+    const g = l[r.laag] || {};
+    if (!g.afgekapt) return 'Alles bekeken.';
+    return g.getoond < g.totaal ? 'Er kan meer staan: ' + g.getoond + ' van ' + aantal(g.totaal, 'treffer', 'treffers') + ' getoond.' : 'Er kan meer staan.';
+  }
   if (r.soort === 'antwoord') {
     laag = r.laag === 'identifier' ? 'feitenlijst' : r.laag === 'tekstindex' ? 'tekstindex' : 'zoektocht';
     volledig = laag === 'feitenlijst' ? !!(l.feitenlijst && !l.feitenlijst.afgekapt) : !!(l[laag] && l[laag].volledig);
@@ -382,7 +475,8 @@ function waardeSoort(label, waarde) {
 // (Opus-diffreview wv1788 MOET 3: grep zoekt letterlijk, laag 1 en 2 vinden ook tikfouten en registerfeiten).
 function onvolledig(l) {
   const f = l.feitenlijst, x = l.tekstindex, z = l.zoektocht;
-  return !!(f && (f.stand !== 'ok' || f.afgekapt || (f.totaal > 0 && !f.antwoord))) || !!(x && (x.stand !== 'ok' || !x.volledig)) || !!(z && !z.volledig);
+  return !!(f && (f.stand !== 'ok' || f.afgekapt || (f.totaal > 0 && !f.antwoord))) || !!(x && (x.stand !== 'ok' || !x.volledig)) || !!(z && !z.volledig) ||
+    !!(l.contacten && l.contacten.stand !== 'ok') || !!(l.agenda && l.agenda.stand !== 'ok');   // wv3733: een register dat niet kon
 }
 // De rij voor secondbrain.query_run (public.sb_query_run_zet). o = { sha: sha256(zout ‖ vraag) hex, metVraag: patiëntmarker zag niets }.
 // Zonder vraag ook geen termen en geen bronnen (de databank dwingt dat ook af). Alleen tellingen in coverage, nooit inhoud.
@@ -398,8 +492,13 @@ function queryRunVan(r, o) {
     afgekapt: !!x.afgekapt, leeftijd_u: num(x.leeftijd_u), weg: num(x.weg), verouderd: num(x.verouderd), dicht: num(x.dicht) };
   if (z) coverage.zoektocht = { paginas: num(z.paginas), paginas_mee: num(z.paginas_mee), regels: num(z.regels), regels_mee: num(z.regels_mee),
     grens: !!z.grens, volledig: !!z.volledig };
+  ['contacten', 'agenda'].forEach(function (k) {   // wv3733: alleen tellingen
+    const g = l[k];
+    if (g) coverage[k] = { stand: g.stand, bekeken: num(g.bekeken), totaal: num(g.totaal), getoond: num(g.getoond), afgekapt: !!g.afgekapt };
+  });
   let matched, returned, truncated;
-  if (laag === 'identifier') { matched = num(f.totaal); returned = Math.min(num(f.getoond) || 0, matched || 0); truncated = !!f.afgekapt; }
+  if (laag === 'contacten' || laag === 'agenda') { const g = l[laag]; matched = num(g.totaal); returned = Math.min(num(g.getoond) || 0, matched || 0); truncated = !!g.afgekapt; }
+  else if (laag === 'identifier') { matched = num(f.totaal); returned = Math.min(num(f.getoond) || 0, matched || 0); truncated = !!f.afgekapt; }
   else if (laag === 'tekstindex') { matched = num(x.paginas); returned = Math.min(num(x.paginas_mee) || 0, matched || 0); truncated = !x.volledig; }
   else if (laag === 'volledig') { matched = num(z.paginas); returned = Math.min(num(z.paginas_mee) || 0, matched || 0); truncated = !z.volledig; }
   // "geen" na een geraakte grens of met onbekeken kandidaten in welke laag ook = onvolledig (afgekapt is nooit "niet gevonden")
@@ -407,13 +506,13 @@ function queryRunVan(r, o) {
   const uitkomst = r.soort === 'antwoord' ? 'antwoord' : r.soort === 'fout' ? 'fout' : (ergensGrens || truncated ? 'onvolledig' : 'geen');
   const uit = { kanaal: 'zoek_snel', vraag_sha: o.sha, scope: { vast: false, wortels: WORTELS }, coverage: coverage,
     rows_matched: matched, rows_returned: returned, truncated: uitkomst !== 'geen' && !!(truncated || (uitkomst === 'onvolledig')), uitkomst: uitkomst,
-    bron_laag: laag, duur_ms: num(r.ms && r.ms.totaal),
+    bron_laag: laag === 'contacten' || laag === 'agenda' ? 'identifier' : laag, duur_ms: num(r.ms && r.ms.totaal),
     // gemist = laag 1 vond niets en laag 2/3 wel een antwoord (ontwerp § 4: leerbron voor de nachtronde)
     gemist: r.soort === 'antwoord' && (laag === 'tekstindex' || laag === 'volledig') && !!f && f.stand === 'ok' && !f.totaal };
   if (o.metVraag) {
     uit.vraag = String(r.vraag || '').slice(0, 500);
     uit.termen = (r.termen || []).slice(0, 12).map(function (t) { return String(t).slice(0, 80); });
-    uit.evidence_refs = (r.bronnen || []).slice(0, 12).map(function (b) { return { pad: String(b.pad).slice(0, 300) }; });
+    uit.evidence_refs = (r.bronnen || []).filter(function (b) { return b && b.pad; }).slice(0, 12).map(function (b) { return { pad: String(b.pad).slice(0, 300) }; });
   }
   return uit;
 }
@@ -436,6 +535,12 @@ function maak(opt) {
   // wv3734 (David Ja 21-11, nr 383 = 3C83): stuit een vraag op een pagina die ná de bouw gewijzigd is, dan meldt zoek() dat hier, zodat
   // de pod feitenlijst en tekstindex meteen opnieuw bouwt (begrensd in server.js); de volgende vraag krijgt dan weer de snelle laag.
   const verouderdSein = typeof opt.verouderd === 'function' ? function (laag) { try { opt.verouderd(laag); } catch (e) { fout('zoek-snel-verouderd', e); } } : function () {};
+  // wv3733: de registerlaag (nr 354 = 3C54) en "Mogelijk hier" (nr 338 = 3C38). contacten(q, limiet) → Promise<jsonb van
+  // public.sb_contacten_zoek>; agenda(van, tot, voorWie) → Promise<[rij van public.sb_kalender_tijdlijn]>; betekenis(vraag) →
+  // Promise<{ rijen: [{ pad, nr, kop, tekst, score, via }] }> (vaultzoek.rauw). Ontbreekt er een, dan slaat zoek() dat deel over.
+  const contactenFn = typeof opt.contacten === 'function' ? opt.contacten : null;
+  const agendaFn = typeof opt.agenda === 'function' ? opt.agenda : null;
+  const betekenisFn = typeof opt.betekenis === 'function' ? opt.betekenis : null;
   let wl = null;   // { m, groepen }
 
   function woordenlijst() {
@@ -764,6 +869,115 @@ function maak(opt) {
   const eenRegel = function (t, max) { return String(t == null ? '' : t).replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max); };
   const bronVan = function (pad, tekst) { return { pad: pad, naam: pad.split('/').pop().replace(/\.md$/i, ''), updated: updatedVan(tekst || leesPagina(pad)) }; };
 
+  // ── wv3733 (nr 354 = 3C54): de registerlaag — Contacten en de agenda, zonder model ──
+  // Geeft { info, uit? }: info = tellingen voor de dekkingsregel en query_run (geen inhoud), uit = het antwoord als er een treffer met de
+  // gevraagde waarde is. Een fout of time-out is geen "niets": dan gaan de gewone lagen door en zegt de dekkingsregel dat de bron niet kon.
+  async function laagContact(iv) {
+    const t0 = nu();
+    const q = iv.namen.slice().sort(function (a, b) { return b.length - a.length; })[0];
+    let j;
+    try { j = await metTijd(contactenFn(q, C_LIMIET), l1Ms); } catch (e) { fout('zoek-snel-contacten', e); return { info: { stand: 'fout', ms: nu() - t0 } }; }
+    if (!j || j.ok !== true || !Array.isArray(j.treffers)) return { info: { stand: 'fout', ms: nu() - t0 } };
+    // het naamveld telt; zonder naam (een bedrijfscontact) de organisatie
+    const naamVan = function (c) { return eenRegel(c.weergavenaam || c.organisatie || '', 80); };
+    const kandidaten = j.treffers.filter(function (c) { return c && typeof c === 'object' && alleWoorden(iv.namen, naamVan(c)); });
+    const exact = function (c) { const w = woordenVan(naamVan(c)); return iv.namen.every(function (t) { return w.indexOf(t) >= 0; }) ? 0 : 1; };
+    kandidaten.sort(function (a, b) { return exact(a) - exact(b) || (naamVan(a) < naamVan(b) ? -1 : naamVan(a) > naamVan(b) ? 1 : 0); });
+    const met = kandidaten.map(function (c) { return { c: c, w: contactWaarden(c, iv.wat) }; }).filter(function (x) { return x.w.length; });
+    const info = { stand: 'ok', bekeken: j.treffers.length, namen: kandidaten.length, totaal: met.length, getoond: Math.min(C_MAX, met.length),
+      afgekapt: j.treffers.length >= C_LIMIET || met.length > C_MAX, zonder_waarde: kandidaten.length - met.length, ms: nu() - t0 };
+    if (!met.length) return { info: info };
+    const soortNaam = iv.wat === 'mail' ? 'mailadres' : iv.wat === 'adres' ? 'adres' : 'nummer';
+    const toon = met.slice(0, C_MAX);
+    const wie = function (c) { const n = naamVan(c), o = eenRegel(c.organisatie, 60); return n + (o && nNorm(o) !== nNorm(n) ? ' (' + o + ')' : ''); };
+    let tekst = toon.length === 1 ? wie(toon[0].c) + ': ' + toon[0].w.join(', ') + '.'
+      : toon.length + ' contacten met dit ' + soortNaam + ': ' + toon.map(function (x) { return wie(x.c) + ': ' + x.w.join(', '); }).join('; ') + '.';
+    if (met.length > toon.length) tekst += ' En nog ' + (met.length - toon.length) + ' in je contacten.';
+    if (info.zonder_waarde) tekst += ' ' + info.zonder_waarde + (info.zonder_waarde === 1 ? ' contact met deze naam heeft' : ' contacten met deze naam hebben') + ' geen ' + soortNaam + '.';
+    const waarden = [];
+    toon.forEach(function (x) {
+      x.w.forEach(function (w, i) {
+        if (waarden.length >= 12) return;
+        // Codex MOET 1: ook label en waarde door het geheimenmasker (zoals de tekst)
+        waarden.push({ label: masker((naamVan(x.c).slice(0, 30) + (iv.wat === 'adres' ? ', adres' : '') + (i ? ' (' + (i + 1) + ')' : '')).slice(0, 40)), waarde: masker(w) });
+      });
+    });
+    const bron = { pad: '', naam: 'Google Contacten', updated: null, link: toon.length === 1 ? contactLink(toon[0].c, q) : 'https://contacts.google.com/search/' + encodeURIComponent(q) };
+    return { info: info, uit: { tekst: masker(tekst).slice(0, 900), waarden: waarden, bronnen: [bron] } };
+  }
+  async function laagAgenda(iv) {
+    const t0 = nu();
+    const vandaag = vandaagNl();
+    const dag = function (n) { const d = new Date(vandaag + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+    let rijen;
+    try { rijen = await metTijd(agendaFn(dag(-A_TERUG), dag(A_VOORUIT), A_VOOR_WIE), l1Ms); } catch (e) { fout('zoek-snel-agenda', e); return { info: { stand: 'fout', ms: nu() - t0 } }; }
+    if (!Array.isArray(rijen) || !KAL) return { info: { stand: 'fout', ms: nu() - t0 } };
+    const lijst = rijen.map(function (x) { return x && x.sb_kalender_tijdlijn && !x.event_id ? x.sb_kalender_tijdlijn : x; })
+      .filter(function (x) { return x && typeof x === 'object' && typeof x.titel === 'string'; }).map(KAL.regel);
+    const raak = lijst.filter(function (x) { return x.van && alleWoorden(iv.woorden, x.titel); });
+    // Codex ZOU 1: een afspraak van vandaag waarvan de eindtijd voorbij is, is "eerder", niet "eerstvolgende"
+    const nuTijd = (function () { try { return new Date(nu()).toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); } catch (e) { return '00:00'; } })();
+    const voorbij = function (x) { const eind = x.eind_dag || x.tot || x.van; return eind < vandaag || (eind === vandaag && !x.hele_dag && !!x.eind && x.eind <= nuTijd); };
+    const komend = raak.filter(function (x) { return !voorbij(x); }).sort(function (a, b) { return a.van < b.van ? -1 : a.van > b.van ? 1 : String(a.begin || '') < String(b.begin || '') ? -1 : 1; });
+    const eerder = raak.filter(voorbij).sort(function (a, b) { return a.van > b.van ? -1 : a.van < b.van ? 1 : 0; });
+    const info = { stand: 'ok', bekeken: lijst.length, totaal: raak.length, getoond: Math.min(A_MAX, raak.length),
+      afgekapt: rijen.length >= A_RPC_MAX || raak.length > A_MAX, ms: nu() - t0 };
+    if (!raak.length) return { info: info };
+    // komende eerst (dichtstbij bovenaan); daarna hooguit twee van eerder (recentste eerst), of alleen eerder als er niets meer komt
+    const toon = komend.length ? komend.slice(0, A_MAX).concat(eerder.slice(0, Math.min(2, A_MAX - Math.min(A_MAX, komend.length)))) : eerder.slice(0, A_MAX);
+    const wanneer = function (x) {
+      const meer = x.tot && x.tot > x.van && x.hele_dag ? ' t/m ' + datumNl(x.tot) : '';
+      return datumNl(x.van) + (x.begin ? ' ' + x.begin : '') + meer + (x.eind_dag ? ' t/m ' + datumNl(x.eind_dag) : '');
+    };
+    const stuk = function (x) { return eenRegel(x.titel, 80) + ': ' + wanneer(x) + (x.bron && x.bron.tekst ? ' (' + eenRegel(x.bron.tekst, 40) + ')' : ''); };
+    const k = toon.filter(function (x) { return !voorbij(x); }), e = toon.filter(voorbij);
+    let tekst = (k.length ? (k.length === 1 ? '' : 'Eerstvolgende: ') + k.map(stuk).join('; ') + '.' : 'Niets meer gepland in het komende jaar.') +
+      (e.length ? ' Eerder: ' + e.map(stuk).join('; ') + '.' : '');
+    if (raak.length > toon.length) tekst += ' En nog ' + (raak.length - toon.length) + ' in OVIS Calendar.';
+    const waarden = toon.slice(0, 12).map(function (x) { return { label: masker(eenRegel(x.titel, 40)), waarde: masker(wanneer(x)) }; });   // Codex MOET 1
+    return { info: info, uit: { tekst: masker(tekst).slice(0, 900), waarden: waarden, bronnen: [{ pad: '', naam: 'OVIS Calendar', updated: null, app: 'kalender' }] } };
+  }
+
+  // ── wv3733 (nr 338 = 3C38): bij geen antwoord vanzelf breder zoeken op betekenis — "Mogelijk hier" ──
+  // 7 van de 27 Zoek snel-vragen eindigden zonder antwoord, met alleen "Vraag het Socev". Bij een misser zoekt de pod nu ook op betekenis in
+  // de eigen databank (vaultzoek: vectoren + tekstzoeken, ook bronnen en gesprekken) en geeft de vijf beste plekken (één per pagina) met
+  // de regel waar het brok begint. Ook systeem- en ontwikkelpagina's: "adres sleutelportaal" (een van de 7) staat juist in 01_Ontwikkeling.
+  // Alleen de skills (.claude) en losse bestanden in de vaultwortel (CLAUDE.md, AGENTS.md) blijven buiten de vijf. De vraag wordt al tegelijk met laag 2/3 gestart (± 0,3 s), dus een
+  // misser wacht er niet langer door. Geen model: de stukken zijn tekst van de pagina, door het masker.
+  const MOGELIJK_PAD = /^[^.\/][^\/]*\//;   // een map in de vaultwortel die niet met een punt begint
+  async function mogelijkHier(vraag, al) {
+    if (!betekenisFn) return null;
+    const t0 = nu();
+    let r;
+    try { r = await metTijd(betekenisFn(vraag), MOGELIJK_MS); } catch (e) { fout('zoek-snel-betekenis', e); return { stand: 'fout', lijst: [], ms: nu() - t0 }; }
+    const rijen = r && Array.isArray(r.rijen) ? r.rijen : null;
+    if (!rijen) return { stand: 'fout', lijst: [], ms: nu() - t0 };
+    const gezien = new Set(al || []), lijst = [];
+    rijen.forEach(function (x) {
+      if (lijst.length >= MOGELIJK_MAX || !x || typeof x.pad !== 'string' || gezien.has(x.pad)) return;
+      if (!MOGELIJK_PAD.test(x.pad) || !/\.md$/i.test(x.pad) || /(^|\/)\.\.?(\/|$)/.test(x.pad) || x.pad.indexOf('\0') >= 0 || x.pad.length > 400) return;
+      if (NIET_BESTAND.some(function (b) { return b.indexOf('*') < 0 && x.pad.split('/').pop() === b; })) return;
+      if (x.via !== 'tekst' && !(Number(x.score) >= 0.1)) return;   // zelfde drempel als Brain › Op betekenis
+      gezien.add(x.pad);
+      // de regel waar het brok begint (eerste regel met inhoud die letterlijk op de pagina staat), anders de pagina zonder anker
+      const brok = String(x.tekst || '').split(/\r?\n/).map(function (l) { return l.trim(); }).filter(function (l) { return l && !/^---$/.test(l); });
+      let nr = null, regel = '';
+      const t = leesPagina(x.pad);
+      if (t) {
+        const lijnen = t.split(/\r?\n/);
+        for (const b of brok.slice(0, 6)) {
+          const i = lijnen.findIndex(function (l) { return l.trim() === b; });
+          if (i >= 0) { nr = i + 1; regel = lijnen[i]; break; }
+        }
+      }
+      const stukje = (regel || brok.find(function (l) { return !/^#{1,6}\s/.test(l); }) || brok[0] || '').replace(/\r$/, '');
+      const naam = x.pad.split('/').pop().replace(/\.md$/i, '');
+      lijst.push({ pad: x.pad, naam: /^index$/i.test(naam) ? (x.pad.split('/').slice(-2, -1)[0] || naam).replace(/_/g, ' ') : naam,
+        kop: x.kop ? masker(eenRegel(x.kop, 120)) : undefined, nr: nr || undefined, regel: masker(eenRegel(stukje, 400)).slice(0, MAX_REGEL) });
+    });
+    return { stand: 'ok', lijst: lijst, ms: nu() - t0 };
+  }
+
   async function laag1(vraag) {
     if (!feiten) return null;
     const t0 = nu();
@@ -983,11 +1197,11 @@ function maak(opt) {
       // dekkingsregel: in de tekst van een antwoord, of achter de melding (die de zoektocht al beschrijft) — alleen als laag 1 of 2 meedeed,
       // anders blijft alles zoals vóór wv1788. wv1818: r.los = dezelfde uitslag met de geplakte regel apart (tekst, melding, dekking_regel),
       // voor een app die hem zelf onder het antwoord zet (toon_dekking), zodat "Kopieer alles" alleen het antwoord neemt
-      const metLagen = !!(lagen.feitenlijst || lagen.tekstindex);
+      const metLagen = !!(lagen.feitenlijst || lagen.tekstindex || lagen.contacten || lagen.agenda);   // wv3733: ook de registerlaag
       r.dekking_regel = dekkingRegel(lagen, true) || undefined;
       if (metLagen && r.dekking_regel) {
         if (soort === 'antwoord') {
-          const meer = r.laag === 'identifier' ? !!lagen.feitenlijst.afgekapt : r.laag === 'tekstindex' ? !lagen.tekstindex.volledig : !(lagen.zoektocht && lagen.zoektocht.volledig);
+          const meer = r.laag === 'contacten' || r.laag === 'agenda' ? !!lagen[r.laag].afgekapt : r.laag === 'identifier' ? !!lagen.feitenlijst.afgekapt : r.laag === 'tekstindex' ? !lagen.tekstindex.volledig : !(lagen.zoektocht && lagen.zoektocht.volledig);
           const regel = r.dekking_regel.replace(/\.$/, '') + (meer ? '; er kan meer staan' : '');
           r.tekst = (r.tekst_kaal + ' (' + regel + '.)').slice(0, 900);
           r.los = { tekst: r.tekst_kaal, melding: r.melding, dekking_regel: regel + '.' };
@@ -1027,6 +1241,16 @@ function maak(opt) {
     gr.forEach(function (g) { g.gelezen.forEach(function (x) { if (!gelezen.some(function (y) { return y.naam === x.naam; })) gelezen.push(x); }); });
     const gelezenUit = gelezen.map(function (x) { return { term: x.term, naam: x.naam }; });
 
+    // ── wv3733 (nr 354 = 3C54): registerlaag — "nummer/mailadres/adres van X" uit Contacten, "wanneer is …" uit de agenda (zonder model) ──
+    const iv = registerVraag(vraag);
+    const reg = iv && iv.soort === 'contact' && contactenFn ? await laagContact(iv) : iv && iv.soort === 'agenda' && agendaFn ? await laagAgenda(iv) : null;
+    if (reg) {
+      const naam = iv.soort === 'contact' ? 'contacten' : 'agenda';
+      ms[naam] = reg.info.ms; delete reg.info.ms; lagen[naam] = reg.info;
+      if (reg.uit) return uit('antwoord', { laag: naam, tekst: reg.uit.tekst, tekst_kaal: reg.uit.tekst, waarden: reg.uit.waarden, bronnen: reg.uit.bronnen,
+        melding: null, gelezen_als: gelezenUit });
+    }
+
     // ── laag 1 ──
     const l1 = await laag1(vraag);
     if (l1) { ms.feiten = l1.ms; const u1 = l1.uit; delete l1.uit; delete l1.ms; lagen.feitenlijst = l1;
@@ -1034,55 +1258,75 @@ function maak(opt) {
       if (u1) return uit('antwoord', { laag: 'identifier', tekst: u1.tekst, tekst_kaal: u1.tekst, waarden: u1.waarden, bronnen: u1.bronnen, melding: null, gelezen_als: gelezenUit }); }
     if (!gr.length) return uit('geen', { reden: 'geen zoektermen', melding: MELDING.leeg });
 
-    // ── laag 2 ──
-    const l2 = await indexZoek(vraag);
+    // wv3733 (nr 338 = 3C38): "Mogelijk hier" loopt vanaf hier mee (± 0,3 s); alleen een misser of fout wacht erop
+    const mogP = betekenisFn ? mogelijkHier(vraag) : null;
+    const metMogelijk = async function (soort, x) {
+      if (mogP) {
+        const mg = await mogP;
+        if (mg) {
+          ms.betekenis = mg.ms;
+          const al = (x.bronnen || []).map(function (b) { return b && b.pad; });
+          x.mogelijk = mg.lijst.filter(function (m) { return al.indexOf(m.pad) < 0; }).slice(0, MOGELIJK_MAX);
+          x.mogelijk_stand = mg.stand;
+        }
+      }
+      return uit(soort, x);
+    };
+
+    // ── laag 2 en 3 samen (wv3733, nr 409 = 3C109) ──
+    // Tot wv3733 vroeg laag 2 het model iets op de stukken uit de tekstindex en, bij "geen", laag 3 nóg eens op de vindplaatsen van het
+    // tekstzoeken: de traagste vragen (9–15 s) waren precies die twee modelvragen achter elkaar. Tekstzoeken kost mediaan 0,06 s en de index
+    // 0,13 s; nu lopen ze tegelijk en krijgt het model beide stukken in één vraag (index eerst, dan de vindplaatsen). Zelfde systeemtekst,
+    // schema en natoets (elke waarde letterlijk in de meegegeven tekst). Een verouderde index telt niet mee (zoals vóór wv3733: laag 3 live).
+    const g0 = nu();
+    const beide = await Promise.all([indexZoek(vraag), grep(gr)]);
+    const l2 = beide[0], gv = beide[1];
+    let c2 = null;
     if (l2) {
       ms.index = l2.ms;
       const info = { stand: l2.stand, leeftijd_u: l2.leeftijd_u, gebouwd: l2.gebouwd };
       lagen.tekstindex = info;
       if (l2.stand === 'ok') {
-        const dk = l2.j.dekking || {};
-        const c2 = context2(l2.j, l2.gebouwd);
-        Object.assign(info, { paginas: Number(dk.paginas) || 0, paginas_mee: c2.bronnen.length, blokken: Number(dk.blokken) || 0, blokken_mee: Number(dk.blokken_mee) || 0,
-          afgekapt: !!dk.afgekapt, weg: c2.weg || undefined, dicht: c2.dicht || undefined });
+        const dk2 = l2.j.dekking || {};
+        c2 = context2(l2.j, l2.gebouwd);
+        Object.assign(info, { paginas: Number(dk2.paginas) || 0, paginas_mee: c2.bronnen.length, blokken: Number(dk2.blokken) || 0, blokken_mee: Number(dk2.blokken_mee) || 0,
+          afgekapt: !!dk2.afgekapt, weg: c2.weg || undefined, dicht: c2.dicht || undefined });
         info.volledig = !info.afgekapt && !c2.vol && !c2.weg && !c2.dicht && info.paginas_mee >= info.paginas && info.blokken_mee >= info.blokken;
-        if (c2.verouderd) { info.stand = 'verouderd'; info.verouderd = c2.verouderd; info.volledig = false; verouderdSein('tekstindex'); }
-        else if (c2.bronnen.length) {
-          const m = await modelAntwoord(vraag, gelezenUit, c2.tekst, c2.bronnen);
-          ms.model = m.model_ms; verbruik = telOp(verbruik, m.verbruik);
-          if (m.soort === 'antwoord') return uit('antwoord', { laag: 'tekstindex', tekst: m.tekst, tekst_kaal: m.tekst, waarden: m.waarden, weggelaten: m.weggelaten,
-            bronnen: m.bronnen, melding: null, gelezen_als: gelezenUit });
-          if (m.soort === 'handeling') return uit('handeling', { reden: m.reden, melding: MELDING.handeling, laag: 'tekstindex' });
-          if (m.soort === 'fout') return uit('fout', { laag: 'tekstindex', reden: m.reden, bronnen: m.bronnen, gelezen_als: gelezenUit, melding: MELDING.fout });
-          info.model = m.onzeker ? 'onzeker' : 'geen';
-          if (m.natoets_mis) info.natoets_mis = m.natoets_mis.length;
-        }
+        if (c2.verouderd) { info.stand = 'verouderd'; info.verouderd = c2.verouderd; info.volledig = false; verouderdSein('tekstindex'); c2 = null; }
+        else if (!c2.bronnen.length) c2 = null;
       }
     }
-
-    // ── laag 3: het grep-pad ──
-    const g0 = nu();
-    const gv = await grep(gr);
     const ctx = context(gr, gv.regels, gv);
     ms.zoek = nu() - g0;
     const dk = ctx.dekking;
     lagen.zoektocht = dk;
-    // grep kon niet zoeken (geen zoekmap, start mislukt): fout, nooit "niets gevonden" (diffreview ZOU 7)
-    if (gv.fout) return uit('fout', { laag: 'volledig', reden: gv.fout, melding: MELDING.fout, dekking: dk, gelezen_als: gelezenUit });
-    if (!ctx.bronnen.length) return uit('geen', { laag: 'volledig', reden: 'geen treffers', melding: meldingVoor('leeg', dk), dekking: dk, gelezen_als: gelezenUit });
-    const m = await modelAntwoord(vraag, gelezenUit, ctx.tekst, ctx.bronnen);
-    ms.model = (ms.model || 0) + m.model_ms; verbruik = telOp(verbruik, m.verbruik);
-    const basis = { laag: 'volledig', dekking: dk, gelezen_als: gelezenUit, reden: m.reden || null };
-    if (m.soort === 'fout') return uit('fout', Object.assign(basis, { bronnen: m.bronnen, melding: MELDING.fout }));
-    if (m.soort === 'handeling') return uit('handeling', Object.assign(basis, { melding: meldingVoor('handeling', dk) }));
+    const metGrep = !gv.fout && ctx.bronnen.length > 0;
+    if (gv.fout) { dk.onleesbaar = true; dk.grens = true; dk.volledig = false; }   // tekstzoeken kon niet: nooit "niets gevonden" op de index alleen
+    // grep kon niet zoeken (geen zoekmap, start mislukt) en de index gaf niets: fout, nooit "niets gevonden" (diffreview ZOU 7)
+    if (!c2 && gv.fout) return metMogelijk('fout', { laag: 'volledig', reden: gv.fout, melding: MELDING.fout, dekking: dk, gelezen_als: gelezenUit });
+    if (!c2 && !metGrep) return metMogelijk('geen', { laag: 'volledig', reden: 'geen treffers', melding: meldingVoor('leeg', dk), dekking: dk, gelezen_als: gelezenUit });
+    const ctxBronnen = (c2 ? c2.bronnen : []).slice();
+    if (metGrep) ctx.bronnen.forEach(function (b) { if (!ctxBronnen.some(function (x) { return x.pad === b.pad; })) ctxBronnen.push(b); });
+    const ctxTekst = [c2 ? c2.tekst : '', metGrep ? ctx.tekst : ''].filter(Boolean).join('\n\n');
+    const m = await modelAntwoord(vraag, gelezenUit, ctxTekst, ctxBronnen);
+    ms.model = m.model_ms; verbruik = telOp(verbruik, m.verbruik);
+    if (c2 && m.soort !== 'antwoord' && m.soort !== 'fout') { lagen.tekstindex.model = m.onzeker ? 'onzeker' : 'geen'; if (m.natoets_mis) lagen.tekstindex.natoets_mis = m.natoets_mis.length; }
+    // welke laag gaf het antwoord? Alle bronnen uit de tekstindex = laag 2 (haar dekking telt, zoals vóór wv3733), anders het tekstzoeken
+    const uitIndex = !!c2 && !!(m.bronnen && m.bronnen.length) && m.bronnen.every(function (b) { return c2.bronnen.some(function (x) { return x.pad === b.pad; }); });
+    const laag = uitIndex || !metGrep ? 'tekstindex' : 'volledig';
+    const basis = { laag: laag, dekking: dk, gelezen_als: gelezenUit, reden: m.reden || null };
+    if (m.soort === 'fout') return metMogelijk('fout', Object.assign(basis, { laag: metGrep ? 'volledig' : 'tekstindex', bronnen: m.bronnen, melding: MELDING.fout }));
+    if (m.soort === 'handeling') return uit('handeling', Object.assign(basis, { melding: laag === 'tekstindex' ? MELDING.handeling : meldingVoor('handeling', dk) }));
     if (m.soort === 'geen') {
-      // een "geen" van het model na een geraakte grens is "niet in wat ik bekeek", nooit "niet gevonden" (wv1289)
-      return uit('geen', Object.assign(basis, { tekst: m.tekst || '', bronnen: m.bronnen, natoets_mis: m.natoets_mis, model_tekst: m.model_tekst,
-        melding: meldingVoor(m.onzeker ? 'onzeker' : 'geen', dk) }));
+      // een "geen" van het model na een geraakte grens is "niet in wat ik bekeek", nooit "niet gevonden" (wv1289; uit() via onvolledig())
+      return metMogelijk('geen', Object.assign(basis, { laag: 'volledig', tekst: m.tekst || '', bronnen: m.bronnen, natoets_mis: m.natoets_mis, model_tekst: m.model_tekst,
+        melding: !metGrep && !m.onzeker ? meldingVoor('leeg', dk) : meldingVoor(m.onzeker ? 'onzeker' : 'geen', dk) }));
     }
+    if (laag === 'tekstindex') return uit('antwoord', Object.assign(basis, { tekst: m.tekst, tekst_kaal: m.tekst, waarden: m.waarden, weggelaten: m.weggelaten,
+      bronnen: m.bronnen, melding: null }));
     // na de natoets: is niet alles bekeken (grens, of pagina's buiten de band van de beste treffers; review #5), dan zegt het antwoord dat er
     // meer kan staan (de app toont tekst; kopiëren neemt hem mee). Met lagen 1/2 doet uit() dat via de dekkingsregel.
-    const metLagen = !!(lagen.feitenlijst || lagen.tekstindex);
+    const metLagen = !!(lagen.feitenlijst || lagen.tekstindex || lagen.contacten || lagen.agenda);
     const regelLos = !metLagen && !dk.volledig ? dekkingZin(dk).replace(/\.$/, '') + '; er kan meer staan.' : null;
     const tekstUit = regelLos ? (m.tekst + ' (' + regelLos.replace(/\.$/, '') + '.)').slice(0, 600) : m.tekst;
     return uit('antwoord', Object.assign(basis, { tekst: tekstUit, tekst_kaal: m.tekst, regel_los: regelLos, waarden: m.waarden, weggelaten: m.weggelaten, bronnen: m.bronnen, melding: null }));
@@ -1150,7 +1394,7 @@ function maak(opt) {
   return { zoek: zoek, groepen: groepen, context: context, grep: grep, laag1: laag1, indexZoek: indexZoek, treffers: treffers, zoekwoorden: zoekwoorden };
 }
 
-module.exports = { maak: maak, termenUit: termenUit, natoets: natoets, natNorm: natNorm, harde: harde, woordenlijstGroepen: woordenlijstGroepen,
+module.exports = { maak: maak, registerVraag: registerVraag, contactWaarden: contactWaarden, alleWoorden: alleWoorden, termenUit: termenUit, natoets: natoets, natNorm: natNorm, harde: harde, woordenlijstGroepen: woordenlijstGroepen,
   woordenlijstVarianten: woordenlijstVarianten, wSoort: wSoort, HANDELING: HANDELING, SYSTEEM: SYSTEEM, schema: schema, MELDING: MELDING,
   NIET_MAP: NIET_MAP, MAX_VRAAG: MAX_VRAAG, meldingVoor: meldingVoor, MAX_PAGINAS: MAX_PAGINAS,
   dekkingRegel: dekkingRegel, conclusieVan: conclusieVan, waardeSoort: waardeSoort, zoekwoorden: zoekwoorden, queryRunVan: queryRunVan, onvolledig: onvolledig, INDEX_MAX_UUR: INDEX_MAX_UUR, L1_SCORE: L1_SCORE };

@@ -22060,7 +22060,7 @@ async function harvesterClaude(systeem, prompt, schema, o) {
     HARVESTER_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
     if (tok) env.CLAUDE_CODE_OAUTH_TOKEN = tok;
     const args = ['-p', '--output-format', 'json', '--restricted', '--strict-mcp-config', '--tools', '', '--permission-mode', 'acceptEdits',
-      '--permission-prompts', 'none', '--no-session-persistence', '--model', HARVESTER_MODEL, '--effort', 'low', '--system-prompt', systeem,
+      '--permission-prompts', 'none', '--no-session-persistence', '--model', (o && o.model) || HARVESTER_MODEL, '--effort', 'low', '--system-prompt', systeem,
       '--json-schema', JSON.stringify(schema)];
     let k, uit = '', fout = '';
     try { k = metOomEerst(function () { return spawn(HARVESTER_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); }); }
@@ -27395,6 +27395,17 @@ const zoekSnel = (function () {
         ? function (vraag) { return zoekSnelRpc('sb_zoek_identifier', { p_vraag: vraag, p_max: 20, p_vast: false }, ZOEK_SNEL_RPC_MS); } : null,
       index: ZOEK_SNEL_INDEX_DB ? { cmd: process.env.ZOEK_SNEL_INDEX_CMD || 'python3', args: process.env.ZOEK_SNEL_INDEX_CMD ? [ZOEK_SNEL_INDEX_SCRIPT] : ['-I', ZOEK_SNEL_INDEX_SCRIPT],
         db: ZOEK_SNEL_INDEX_DB } : null,
+      // wv3733 (nr 354 = 3C54): Contacten (Google-spiegel; secret uit het leesluik, zoals de skill contacten-opzoeken) en de agenda-tijdlijn
+      // (zoals Apps › Calendar), beide service_role met dezelfde time-out als laag 1; (nr 338 = 3C38): "Mogelijk hier" via de eigen
+      // betekenis-index (vaultzoek.js, alleen lezen)
+      contacten: process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE && process.env.SUPABASE_RPC_CONTACTEN
+        ? function (q, limiet) { return zoekSnelRpc('sb_contacten_zoek', { p: { secret: process.env.SUPABASE_RPC_CONTACTEN, q: q, limiet: limiet } }, ZOEK_SNEL_RPC_MS); } : null,
+      agenda: process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE
+        ? function (van, tot, voorWie) { return zoekSnelRpc('sb_kalender_tijdlijn', { p_van: van, p_tot: tot, p_voor_wie: voorWie }, ZOEK_SNEL_RPC_MS); } : null,
+      betekenis: function (vraag) {
+        if (typeof vaultzoek === 'undefined' || !vaultzoek) return Promise.reject(new Error('vaultzoek ontbreekt'));
+        return vaultzoek.rauw(vraag, 15);
+      },
       feitenStempel: ZOEK_SNEL_STEMPEL,
       verouderd: function (laag) { if (typeof zoekOverdagVraag === 'function') zoekOverdagVraag(laag); } });   // wv3734: index en feitenlijst meteen opnieuw (begrensd)
     z.queryRunVan = m.queryRunVan;
@@ -27434,7 +27445,8 @@ function zoekSnelTekst(r) {
     return r.tekst + (r.waarden.length ? '\n\n' + r.waarden.map(function (w) { return '- ' + (w.label ? w.label + ': ' : '') + '`' + String(w.waarde).replace(/`/g, "'") + '`'; }).join('\n') : '') +
       (bron ? '\n\nBron: ' + bron : '');
   }
-  return (r.melding || 'Niet gevonden.') + (r.tekst ? ' ' + r.tekst : '') + (bron ? '\n\nKijk zelf: ' + bron : '');
+  const mg = (r.mogelijk || []).map(function (m) { return m.naam; }).join(' · ');   // wv3733 (3C38)
+  return (r.melding || 'Niet gevonden.') + (r.tekst ? ' ' + r.tekst : '') + (bron ? '\n\nKijk zelf: ' + bron : '') + (mg ? '\n\nMogelijk hier: ' + mg : '');
 }
 // Geldig tot de eerstvolgende 03:00 Nederlandse tijd (de nachtreset van de hoofdsessie).
 function zoekSnelTot(t) {
@@ -27484,6 +27496,7 @@ async function zoekSnelVoer(a, id, vraag, toonDekking) {
     zoek: { uitkomst: r.soort, reden: r.reden || undefined, ms: ms, zoek_ms: r.ms.zoek, model_ms: r.ms.model, account: v.account, kosten: v.kosten, tokens_uit: v.uit,
       bronnen: (r.bronnen || []).map(function (b) { return b.pad; }), weggelaten: r.weggelaten || undefined, natoets_mis: r.natoets_mis || undefined,
       dekking: r.dekking || undefined, laag: r.laag || undefined, feiten_ms: r.ms.feiten, index_ms: r.ms.index,
+      register_ms: r.ms.contacten != null ? r.ms.contacten : r.ms.agenda, betekenis_ms: r.ms.betekenis, mogelijk: Array.isArray(r.mogelijk) ? r.mogelijk.length : undefined,   // wv3733
       lagen: zoekSnelLagenTelling(r.lagen) } });   // wv1289: alleen tellingen (pagina's/regels, grens), geen inhoud; wv1788: per laag idem
   zoekSnelRegelZet(r);
   zoekSnelQueryRun(r);   // wv1788: antwoordcontract, na het antwoord; nooit blokkerend
@@ -27494,7 +27507,12 @@ async function zoekSnelVoer(a, id, vraag, toonDekking) {
     dekking_regel: (los ? los.dekking_regel : r.dekking_regel) || null, conclusie: r.conclusie || null,   // wv3722 (3C26)
     zoekwoorden: r.soort !== 'handeling' && r.zoekwoorden || null,   // wv3722 (3C51): voor de brug naar Brain › Zoeken
     // wv3722 (3C116b): nr + regel = waar het antwoord op de bronpagina staat (de app opent de pagina daar en markeert de regel)
-    bronnen: (r.bronnen || []).map(function (b) { return { pad: b.pad, naam: b.naam, updated: b.updated || null, nr: b.nr || undefined, regel: b.regel || undefined }; }), gelezen_als: r.gelezen_als || [],
+    bronnen: (r.bronnen || []).map(function (b) { return { pad: b.pad, naam: b.naam, updated: b.updated || null, nr: b.nr || undefined, regel: b.regel || undefined,
+      // wv3733: een bron buiten de vault — Google Contacten (alleen contacts.google.com) of een App (alleen Calendar)
+      link: typeof b.link === 'string' && /^https:\/\/contacts\.google\.com\/[A-Za-z0-9\/%._-]{1,200}$/.test(b.link) ? b.link : undefined,
+      app: b.app === 'kalender' ? 'kalender' : undefined }; }), gelezen_als: r.gelezen_als || [],
+    // wv3733 (nr 338 = 3C38): bij een misser de vijf beste plekken op betekenis (pad, naam, regel; tik = openen in Brain op die regel)
+    mogelijk: Array.isArray(r.mogelijk) && r.mogelijk.length ? r.mogelijk.map(function (m) { return { pad: m.pad, naam: m.naam, kop: m.kop || undefined, nr: m.nr || undefined, regel: m.regel || '' }; }) : undefined,
     melding: (los ? los.melding : r.melding) || null, ms: ms, gelogd: gelogd } };
 }
 async function appZoekSnel(req, res, a, d) {

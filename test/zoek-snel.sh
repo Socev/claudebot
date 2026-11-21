@@ -386,7 +386,9 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     r9.lagen.feitenlijst.reden === 'natoets' && r9.waarden.every((w) => w.waarde !== 'VERZONNEN-1'), r9);
   toets('9b laag 2: zoekindex met --vraag= en zonder --vast; dekkingsregel noemt beide lagen', ixArgv()[0].indexOf('--vraag=Kenteken van de proefmini?') >= 0 && ixArgv()[0].indexOf('--vast') < 0 &&
     /Feitenlijst: 2 feiten \(van 300\), niet bevestigd op de pagina · tekstindex \(bijgewerkt \d+-\d+ \d\d:\d\d\): 1 van 1 pagina met een treffer bekeken/.test(r9.dekking_regel) && r9.tekst.indexOf(r9.dekking_regel.replace(/\.$/, '')) > 0, r9);
-  toets('9b laag 2: context in de prompt als ### pad (kop), geen grep (ms.zoek leeg)', /### 10_Zakelijk\/Tolgaarde\/Auto - Proefmini\.md \(Proefmini\)\n6: \| Kenteken \| ZZ-999-Z \|/.test(laatsteprompt.prompt) && r9.ms.zoek === undefined, r9.ms);
+  // wv3733 (3C109): index en tekstzoeken lopen tegelijk; het model krijgt beide in één vraag, de stukken uit de index eerst
+  toets('9b laag 2: context in de prompt als ### pad (kop), index vóór het tekstzoeken, één modelvraag', /### 10_Zakelijk\/Tolgaarde\/Auto - Proefmini\.md \(Proefmini\)\n6: \| Kenteken \| ZZ-999-Z \|/.test(laatsteprompt.prompt) &&
+    laatsteprompt.prompt.indexOf('### ') === laatsteprompt.prompt.indexOf('### 10_Zakelijk/Tolgaarde/Auto - Proefmini.md (Proefmini)') && typeof r9.ms.zoek === 'number' && aanroepen === 1, r9.ms);
   q9 = Z.queryRunVan(r9, { sha: 'b'.repeat(64), metVraag: true });
   toets('9b query_run: tekstindex; niet gemist (laag 1 had wel feiten)', q9.bron_laag === 'tekstindex' && q9.gemist === false && q9.uitkomst === 'antwoord' && q9.rows_matched === 1, q9);
   feitenVan = l1([], { soorten: [] });
@@ -446,11 +448,15 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   feitenVan = l1([], { soorten: [] });
   ixZet(ixAntw([deel('10_Zakelijk/Tolgaarde/index.md', 'Hub', [10])]));
   let n9 = 0;
-  antwoordVan = (p) => { n9++; return n9 === 1 ? { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }
-    : { ok: true, data: { soort: 'antwoord', tekst: 'Het btw-nummer is NL863125190B01.', waarden: [{ label: 'BTW', waarde: 'NL863125190B01' }], bronnen: [B] }, verbruik: { kosten: 0.02, uit: 5 } }; };
+  // wv3733 (3C109): niet meer laag 2 "geen" → tweede modelvraag op laag 3, maar één vraag met beide stukken; een bron die alleen het
+  // tekstzoeken vond = laag 'volledig' (zijn dekking telt)
+  let p9f = '';
+  antwoordVan = (p) => { n9++; p9f = p; return { ok: true, data: { soort: 'antwoord', tekst: 'Het btw-nummer is NL863125190B01.', waarden: [{ label: 'BTW', waarde: 'NL863125190B01' }],
+    bronnen: ['10_Zakelijk/Tolgaarde/Notulen/n.md'] }, verbruik: { kosten: 0.02, uit: 5 } }; };
   aanroepen = 0;
   r9 = await z9.zoek('Wat is het btw-nummer van Tolgaarde');
-  toets('9f laag 2 "geen": laag 3 vindt het (twee modelvragen, kosten opgeteld)', r9.soort === 'antwoord' && r9.laag === 'volledig' && aanroepen === 2 && r9.lagen.tekstindex.model === 'geen', r9);
+  toets('9f index en tekstzoeken in één modelvraag; bron alleen uit het tekstzoeken = laag volledig', r9.soort === 'antwoord' && r9.laag === 'volledig' && aanroepen === 1 && n9 === 1 &&
+    /### 10_Zakelijk\/Tolgaarde\/index\.md \(Hub\)/.test(p9f) && /### 10_Zakelijk\/Tolgaarde\/Notulen\/n\.md/.test(p9f), { r9: r9, p: p9f });
   antwoordVan = () => ({ ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } });
   r9 = await z9.zoek('Wat is het btw-nummer van Tolgaarde');
   toets('9f "geen" in alle lagen: melding + dekkingsregel van laag 1 en 2 (de zoektocht staat al in de melding)', r9.soort === 'geen' && /^Niet (gevonden in de|in wat ik bekeek)/.test(r9.melding) &&
@@ -464,9 +470,11 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   toets('9f query_run "geen" na een grens: onvolledig + truncated (databank weigert truncated + geen)', q9.uitkomst === 'onvolledig' && q9.truncated === true, q9);
   antwoordVan = () => ({ ok: false, fout: 'claude gaf geen JSON' });
   r9 = await z9.zoek('Wat is het btw-nummer van Tolgaarde');
-  toets('9f modelfout op laag 2: fout met dekkingsregel, geen tweede modelvraag', r9.soort === 'fout' && r9.laag === 'tekstindex' && /Feitenlijst/.test(r9.melding) && !!r9.dekking_regel, r9);
+  aanroepen = 0;
+  r9 = await z9.zoek('Wat is het btw-nummer van Tolgaarde');
+  toets('9f modelfout: fout met dekkingsregel, geen tweede modelvraag', r9.soort === 'fout' && r9.laag === 'volledig' && aanroepen === 1 && /Feitenlijst/.test(r9.melding) && !!r9.dekking_regel, r9);
   q9 = Z.queryRunVan(r9, { sha: 'c'.repeat(64), metVraag: true });
-  toets('9f query_run fout', q9.uitkomst === 'fout' && q9.bron_laag === 'tekstindex', q9);
+  toets('9f query_run fout', q9.uitkomst === 'fout' && q9.bron_laag === 'volledig', q9);
   feitenVan = l1([], { soorten: [] });
   ixZet(ixAntw([]));
   r9 = await z9.zoek('Wat is de kleur van de zeppelinhangar');
@@ -496,7 +504,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   antwoordVan = (p) => { prompts9h.push(p); return { ok: true, data: { soort: 'antwoord', tekst: 'KvK 84185171.', waarden: [{ label: 'KvK', waarde: '84185171' }], bronnen: [B] } }; };
   r9 = await z9.zoek('kvk van Tolgaarde');
   toets('9h MOET 4: stuk onder een kop met een sleutelwoord gaat niet mee (geteld als dicht, niet volledig)', r9.laag === 'tekstindex' && r9.lagen.tekstindex.dicht === 1 &&
-    r9.lagen.tekstindex.volledig === false && !/Inloggegevens|NL863125190B01/.test(prompts9h[0]) && /84185171/.test(prompts9h[0]) && /met inloggegevens overgeslagen/.test(r9.dekking_regel), { l: r9.lagen.tekstindex, p: prompts9h[0] });
+    r9.lagen.tekstindex.volledig === false && !/Inloggegevens/.test(prompts9h[0]) && !/### [^\n]*\(Hub › Inloggegevens\)/.test(prompts9h[0]) && /84185171/.test(prompts9h[0]) && prompts9h.length === 1 && /met inloggegevens overgeslagen/.test(r9.dekking_regel), { l: r9.lagen.tekstindex, p: prompts9h[0] });
 
   // 9i MOET 2: laag 1 eist de waarde op zijn eigen regel; een eindwoord op die regel zonder einde in de feitenlijst = niet zonder model
   ixZet(ixAntw([]));
@@ -564,6 +572,118 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   r9 = await zLeeg.zoek('Wat is het btw-nummer van Tolgaarde');
   toets('9l ZOU 7: geen zoekmap te openen = fout, nooit "niets gevonden"', r9.soort === 'fout' && r9.melding === Z.MELDING.fout, r9);
   antwoordVan = null;
+
+  // ── 13. wv3733 (nr 354/338/409 = 3C54, 3C38, 3C109): Contacten en agenda zonder model, "Mogelijk hier" bij een misser ──
+  {
+    const rv = (q) => JSON.stringify(Z.registerVraag(q));
+    toets('13a registervraag: nummer/mail/adres van een naam = contact (naamwoorden zonder tussenvoegsel)', rv('nummer van Jan de Vries') === '{"soort":"contact","wat":"tel","namen":["jan","vries"]}' &&
+      rv('mailadres van Piet') === '{"soort":"contact","wat":"mail","namen":["piet"]}' && rv('waar woont Sven') === '{"soort":"contact","wat":"adres","namen":["sven"]}' &&
+      rv('06 van Anne') === '{"soort":"contact","wat":"tel","namen":["anne"]}', [rv('nummer van Jan de Vries'), rv('waar woont Sven')]);
+    toets('13a registerwoord (btw, kvk, Zorgmail, EDI, kenteken, contract, schaal) = nooit Contacten of agenda', ['BTW nummer Tolgaarde', 'zorgmailadres Tolgaarde', 'Edi adres Tolgaarde',
+      'kvk nummer Groenhouten', 'Kenteken van de mini?', 'Wanneer verloopt het contract van Anne?', 'In welke schaal zit Dominique', 'polisnummer van Jansen'].every((q) => Z.registerVraag(q) === null));
+    toets('13a "wanneer …" = agenda met de inhoudswoorden', rv('wanneer is de tandarts') === '{"soort":"agenda","woorden":["tandarts"]}' &&
+      rv('hoe laat is de afspraak bij de kapper') === '{"soort":"agenda","woorden":["kapper"]}' && Z.registerVraag('Wat is het btw-nummer van Tolgaarde') === null);
+
+    let cQ = [], cVan = null, aArg = [], aVan = null, bVan = null, bN = 0;
+    const z13 = Z.maak({ vault: VAULT, claude: nepClaude, bsnMasker: bsn, fout: () => {}, feiten: nepFeiten, index: { cmd: process.execPath, args: [NEP_IX], db: IXDB },
+      contacten: async (q, lim) => { cQ.push({ q, lim }); return cVan(q); }, agenda: async (van, tot, vw) => { aArg.push({ van, tot, vw }); return aVan(); },
+      betekenis: async (v) => { bN++; return bVan(v); } });
+    const C = (x) => Object.assign({ resource_name: 'people/c111', weergavenaam: 'Proef Jansen', organisatie: 'Tolgaarde', email_primair: null, emails_plat: [], telefoon_primair: null,
+      telefoons_e164: [], adressen: [] }, x);
+    cVan = () => ({ ok: true, q: 'jansen', aantal: 3, treffers: [
+      C({ telefoon_primair: '06 11 22 33 44', telefoons_e164: ['+31611223344', '+31335550000'], email_primair: 'proef@voorbeeld.nl' }),
+      C({ resource_name: 'people/c222', weergavenaam: 'Anna Jansen', organisatie: null, telefoon_primair: '06 99 88 77 66', email_primair: 'anna@voorbeeld.nl',
+        adressen: [{ label: 'thuis', straat: 'Proefstraat 1', postcode: '1234 AB', plaats: 'Proefstad', land: null, volledig: null }] }),
+      C({ resource_name: 'people/c333', weergavenaam: 'Piet Proefmans', organisatie: 'Jansen BV', telefoon_primair: '06 55 55 55 55' })] });
+    feitenN = 0; aanroepen = 0; ixZet(ixAntw([]));
+    let r13 = await z13.zoek('nummer van Proef Jansen');
+    toets('13b nummer van een naam: uit Contacten, zonder model en zonder feitenlijst; naam moet passen (geen "Jansen BV"-medewerker)', r13.soort === 'antwoord' && r13.laag === 'contacten' &&
+      aanroepen === 0 && feitenN === 0 && cQ.length === 1 && cQ[0].q === 'jansen' && cQ[0].lim === 50 && /^Proef Jansen \(Tolgaarde\): 06 11 22 33 44, \+31335550000\./.test(r13.tekst) &&
+      r13.waarden.length === 2 && r13.waarden.every((w) => w.soort === 'tel') && r13.waarden[0].doel === 'tel:0611223344', r13);
+    toets('13b bron = Google Contacten met een link naar dat contact; conclusie en regel', r13.bronnen.length === 1 && r13.bronnen[0].naam === 'Google Contacten' &&
+      r13.bronnen[0].link === 'https://contacts.google.com/person/c111' && r13.conclusie === 'Alles bekeken.' && r13.dekking_regel === 'Contacten: 1 treffer.', r13);
+    let q13 = Z.queryRunVan(r13, { sha: 'd'.repeat(64), metVraag: true });
+    toets('13b query_run: register = identifier (databankgrens), coverage.contacten alleen tellingen, geen bron zonder pad', q13.bron_laag === 'identifier' && q13.rows_matched === 1 &&
+      q13.coverage.contacten.totaal === 1 && JSON.stringify(q13.coverage).indexOf('Jansen') < 0 && q13.evidence_refs.length === 0, q13);
+    r13 = await z13.zoek('mailadres van Jansen');
+    toets('13b naamgenoten: alle contacten met die naam en de gevraagde soort (mail), elk met naam', r13.laag === 'contacten' && /^2 contacten met dit mailadres: /.test(r13.tekst) &&
+      r13.waarden.map((w) => w.waarde).join('|') === 'anna@voorbeeld.nl|proef@voorbeeld.nl' && r13.waarden.every((w) => w.soort === 'mail') &&
+      /contacts\.google\.com\/search\/jansen$/.test(r13.bronnen[0].link), r13);
+    r13 = await z13.zoek('adres van Anna Jansen');
+    toets('13b adres: route-knop, label noemt adres', r13.laag === 'contacten' && r13.waarden.length === 1 && r13.waarden[0].waarde === 'Proefstraat 1, 1234 AB Proefstad' &&
+      r13.waarden[0].soort === 'route', r13.waarden);
+    r13 = await z13.zoek('adres van Proef Jansen');
+    toets('13b contact zonder de gevraagde soort: door naar de gewone lagen; regel zegt het', r13.laag !== 'contacten' && r13.lagen.contacten.totaal === 0 &&
+      /Contacten: 1 naam zonder deze gegevens/.test(r13.dekking_regel || r13.melding), { l: r13.lagen.contacten, d: r13.dekking_regel, m: r13.melding });
+    r13 = await z13.zoek('adres van Tolgaarde');
+    toets('13b organisatie alleen telt niet: "adres van Tolgaarde" geeft geen adressen van medewerkers', r13.laag !== 'contacten' && r13.lagen.contacten.namen === 0, r13.lagen.contacten);
+    cVan = () => { throw new Error('rpc http 500'); };
+    r13 = await z13.zoek('nummer van Proef Jansen');
+    toets('13b Contacten niet bereikbaar: gewone lagen, regel "niet bereikbaar", nooit "niets gevonden"', r13.laag !== 'contacten' && r13.lagen.contacten.stand === 'fout' &&
+      !/^Niets gevonden/.test(r13.melding || '') && /Contacten: niet bereikbaar/.test(r13.dekking_regel || ''), r13);
+    cQ = []; r13 = await z13.zoek('BTW nummer Tolgaarde');
+    toets('13b registerwoord: Contacten niet gevraagd', cQ.length === 0 && !r13.lagen.contacten);
+
+    const dagN = (n) => { const d = new Date(new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }) + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+    const E = (x) => Object.assign({ event_id: 1, titel: 'Tandarts Proef', soort: 'afspraak', voor_wie: 'david', hele_dag: false, status: 'actief', bron_soort: 'google', sync_agenda: 'david',
+      sync_stand: 'gespiegeld', zekerheid: 'hoog', entiteiten: [] }, x);
+    aVan = () => [E({ begin_datum: dagN(3), eind_datum: dagN(3), begin_tijd: dagN(3) + 'T13:30:00Z', eind_tijd: dagN(3) + 'T14:00:00Z' }),
+      { sb_kalender_tijdlijn: E({ event_id: 2, begin_datum: dagN(-10), eind_datum: dagN(-10), begin_tijd: dagN(-10) + 'T08:00:00Z', eind_tijd: dagN(-10) + 'T08:30:00Z' }) },
+      E({ event_id: 3, titel: 'Kapper', begin_datum: dagN(1), eind_datum: dagN(1), hele_dag: true })];
+    aanroepen = 0; feitenN = 0;
+    r13 = await z13.zoek('wanneer is de tandarts');
+    const dN = (iso) => ['zo', 'ma', 'di', 'wo', 'do', 'vr', 'za'][new Date(iso + 'T12:00:00Z').getUTCDay()] + ' ' + iso.split('-').reverse().join('-');
+    toets('13c "wanneer is de tandarts": uit de agenda, komende eerst met tijd, dan eerder; zonder model', r13.soort === 'antwoord' && r13.laag === 'agenda' && aanroepen === 0 && feitenN === 0 &&
+      r13.tekst.indexOf('Tandarts Proef: ' + dN(dagN(3)) + ' ') === 0 && / Eerder: Tandarts Proef: /.test(r13.tekst) && r13.tekst.indexOf('Kapper') < 0 && r13.waarden.length === 2 &&
+      r13.bronnen[0].app === 'kalender' && r13.bronnen[0].naam === 'OVIS Calendar', r13);
+    toets('13c venster 60 dagen terug t/m 400 vooruit, zonder de roosterdiensten (bezetting)', aArg[0].van === dagN(-60) && aArg[0].tot === dagN(400) && aArg[0].vw.indexOf('bezetting') < 0 &&
+      aArg[0].vw.indexOf('david') >= 0, aArg[0]);
+    // Codex ZOU 1: een afspraak van vandaag die al voorbij is (eindtijd 00:01) staat onder "Eerder", de volgende is "eerstvolgende"
+    aVan = () => [E({ event_id: 7, begin_datum: dagN(0), eind_datum: dagN(0), begin_tijd: dagN(-1) + 'T23:00:00Z', eind_tijd: dagN(-1) + 'T23:01:00Z' }),
+      E({ event_id: 8, begin_datum: dagN(5), eind_datum: dagN(5), begin_tijd: dagN(5) + 'T09:00:00Z', eind_tijd: dagN(5) + 'T09:30:00Z' })];
+    r13 = await z13.zoek('wanneer is de tandarts');
+    toets('13c afspraak van vandaag die al voorbij is = eerder, niet eerstvolgende', r13.laag === 'agenda' && r13.tekst.indexOf('Tandarts Proef: ' + dN(dagN(5))) === 0 &&
+      r13.tekst.indexOf('Eerder: Tandarts Proef: ' + dN(dagN(0))) > 0, r13.tekst);
+    aVan = () => [E({ titel: 'Tandarts ' + SLEUTEL, begin_datum: dagN(2), eind_datum: dagN(2), hele_dag: true })];
+    r13 = await z13.zoek('wanneer is de tandarts');
+    toets('13c Codex MOET 1: label en waarde door het masker (geen sleutel in waarden of tekst)', r13.laag === 'agenda' && JSON.stringify(r13).indexOf(SLEUTEL) < 0, r13.waarden);
+    aVan = () => [E({ titel: 'Kapper', begin_datum: dagN(1), eind_datum: dagN(1), hele_dag: true })];
+    r13 = await z13.zoek('wanneer is de tandarts');
+    toets('13c geen afspraak met die woorden: door naar de gewone lagen', r13.laag !== 'agenda' && r13.lagen.agenda.totaal === 0 && /agenda \(60 dagen terug, een jaar vooruit\): geen afspraak/i.test(r13.dekking_regel || r13.melding || ''), { d: r13.dekking_regel, m: r13.melding });
+
+    // 13d "Mogelijk hier": alleen bij een misser, vijf plekken op betekenis, geen systeempagina's, regel van de pagina, masker, één aanroep
+    bN = 0;
+    bVan = () => ({ rijen: [
+      { pad: '00_Systeem/Woordenlijst.md', nr: 0, kop: 'Woordenlijst', tekst: '# Woordenlijst', score: 0.9, via: 'vector' },
+      { pad: '20_Prive/Gambia/Bakary Jallow.md', nr: 0, kop: 'Bakary Jallow', tekst: '# Bakary Jallow\ngeboren 17 juli 1985', score: 0.8, via: 'vector' },
+      { pad: '20_Prive/Gambia/Bakary Jallow.md', nr: 1, kop: 'Bakary Jallow', tekst: 'geboren 17 juli 1985', score: 0.7, via: 'vector' },
+      { pad: '10_Zakelijk/Tolgaarde/index.md', nr: 2, kop: 'Hub', tekst: 'api-sleutel van de btw-koppeling: ' + SLEUTEL, score: 0.6, via: 'beide' },
+      { pad: '20_Prive/Auto.md', nr: 0, kop: 'Auto', tekst: 'iets', score: 0.05, via: 'vector' },
+      { pad: '30_Conversaties/x/gesprek.md', nr: 0, kop: null, tekst: 'over de hangar gesproken', score: 0.5, via: 'tekst' },
+      { pad: '.claude/skills/x/SKILL.md', nr: 0, kop: null, tekst: 'skill', score: 0.95, via: 'vector' },
+      { pad: 'CLAUDE.md', nr: 0, kop: null, tekst: 'werkinstructie', score: 0.95, via: 'vector' },
+      { pad: '01_Ontwikkeling/plan.md', nr: 0, kop: null, tekst: 'plan', score: 0.4, via: 'vector' },
+      { pad: '20_Prive/Gezondheid/knie.md', nr: 0, kop: null, tekst: 'knie', score: 0.4, via: 'vector' }] });
+    feitenVan = l1([], { soorten: [] }); ixZet(ixAntw([]));
+    r13 = await z13.zoek('Wat is de kleur van de zeppelinhangar');
+    const mg = r13.mogelijk || [];
+    toets('13d misser: "Mogelijk hier" = vijf plekken op betekenis, één per pagina, in volgorde; ook systeempagina\'s, geen skills/wortelbestanden, niet onder de drempel', r13.soort === 'geen' && bN === 1 &&
+      mg.map((m) => m.pad).join('|') === '00_Systeem/Woordenlijst.md|20_Prive/Gambia/Bakary Jallow.md|10_Zakelijk/Tolgaarde/index.md|30_Conversaties/x/gesprek.md|01_Ontwikkeling/plan.md' && r13.mogelijk_stand === 'ok', mg);
+    toets('13d regel van de pagina (nr) en masker op het stukje', mg[1] && mg[1].nr === 1 && mg[1].regel === '# Bakary Jallow' && mg[2] && mg[2].nr === 11 &&
+      JSON.stringify(mg).indexOf(SLEUTEL) < 0 && mg[3] && mg[3].nr === undefined && mg[3].regel === 'over de hangar gesproken', mg);
+    antwoordVan = (p, s) => ({ ok: true, data: { soort: 'antwoord', tekst: 'Het btw-nummer is NL863125190B01.', waarden: [{ label: 'BTW', waarde: 'NL863125190B01' }], bronnen: [B] } });
+    r13 = await z13.zoek('Wat is het btw-nummer van Tolgaarde');
+    toets('13d bij een antwoord geen "Mogelijk hier"', r13.soort === 'antwoord' && !r13.mogelijk, r13.mogelijk);
+    antwoordVan = () => ({ ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } });
+    bVan = () => ({ rijen: [{ pad: B, nr: 0, kop: 'Hub', tekst: '| KvK | 84185171 |', score: 0.9, via: 'vector' }, { pad: '20_Prive/Auto.md', nr: 0, kop: 'Auto', tekst: '| Kenteken | GJL-11-J |', score: 0.9, via: 'vector' }] });
+    r13 = await z13.zoek('Wat is het btw-nummer van Tolgaarde');
+    toets('13d een pagina die al onder "Kijk zelf" staat komt niet nog eens in "Mogelijk hier"', r13.soort === 'geen' && r13.bronnen.some((b) => b.pad === B) &&
+      (r13.mogelijk || []).every((m) => m.pad !== B) && (r13.mogelijk || []).length === 1, { b: r13.bronnen, m: r13.mogelijk });
+    bVan = () => { throw new Error('vaultzoek ontbreekt'); };
+    r13 = await z13.zoek('Wat is de kleur van de zeppelinhangar');
+    toets('13d betekenis-index kapot: misser blijft een misser, stand fout, geen lijst', r13.soort === 'geen' && r13.mogelijk_stand === 'fout' && (r13.mogelijk || []).length === 0, r13);
+    antwoordVan = null;
+  }
 
   // ── 6. server.js-koppeling (vm, nagebootste omgeving) ──
   const src = fs.readFileSync('server.js', 'utf8');
