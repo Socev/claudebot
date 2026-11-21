@@ -240,6 +240,47 @@ function leesRunOutput(tekst) {
   return { ok: true, rapporten: reps.length, te_veel: reps.length > MAX_REGELS, per, onleesbaar, dubbel };
 }
 /*
+ * wv3662 (David 21-11-2026): ALLE looncomponenten van één run, voor de Holding (één medewerker: de DGA zelf). Zelfde vormcontrole als
+ * leesRunOutput; per report de medewerker, jaar, periode en per regel code, omschrijving en bedrag (centen). Een regel met dezelfde code
+ * binnen één report wordt opgeteld. → { ok, rapporten, reports: [{ id, jaar, periode, regels: [{ code, oms, centen }] }], onleesbaar, dubbel }
+ */
+function leesRunRegels(tekst) {
+  if (typeof tekst !== 'string' || !tekst.trim() || tekst.length > MAX_DOC_BYTES) return { ok: false, fout: 'leeg of te groot' };
+  if (/<!DOCTYPE|<!ENTITY/i.test(tekst)) return { ok: false, fout: 'DOCTYPE/ENTITY in het bestand' };
+  if (!/^\s*(<\?[\s\S]*?\?>\s*)?<reports[\s>]/.test(tekst.replace(/^\uFEFF/, ''))) return { ok: false, fout: 'geen run output (reports)' };
+  const tel = (re) => (tekst.match(re) || []).length;
+  if (!/<\/reports>\s*$/.test(tekst) || tel(/<reports[\s>]/g) !== 1 || tel(/<report[\s>]/g) !== tel(/<\/report>/g) || tel(/<line[\s>]/g) !== tel(/<\/line>/g) ||
+    tel(/<lines[\s>]/g) !== tel(/<\/lines>/g)) return { ok: false, fout: 'run output onvolledig' };
+  const reps = alle(tekst, 'report');
+  if (reps.length !== tel(/<report[\s>]/g)) return { ok: false, fout: 'run output onvolledig' };
+  const reports = [], sleutels = new Set();
+  let onleesbaar = false, dubbel = false;
+  for (const r of reps) {
+    // de regels eerst eruit, zodat employeeid/year/period niet uit een regel komen
+    const kop = r.replace(/<lines[\s>][\s\S]*?<\/lines>/g, '');
+    const e = el(kop, ['employeeid']), id = e == null ? '' : ont(e);
+    const jaar = Number(ont(el(kop, ['year']) || '')), periode = Number(ont(el(kop, ['period']) || ''));
+    if (!/^[0-9A-Za-z-]{1,64}$/.test(id) || !(jaar >= 2000 && jaar <= 2100) || !(periode >= 1 && periode <= 53)) { onleesbaar = true; continue; }
+    const k = id + '|' + jaar + '|' + periode + '|' + ont(el(kop, ['runnumber']) || '');
+    if (k.includes('\uFFFD')) { onleesbaar = true; continue; }
+    if (sleutels.has(k)) dubbel = true;
+    sleutels.add(k);
+    const lijnen = alle(r, 'line');
+    if (lijnen.length > MAX_REGELS) { onleesbaar = true; continue; }
+    const per = new Map();
+    for (const l of lijnen) {
+      const c = el(l, ['code']), v = el(l, ['value']), o = el(l, ['description']);
+      const code = c == null || !/^\s*\d{1,6}\s*$/.test(ont(c)) ? null : Number(ont(c));
+      const cent = v == null ? null : centen(ont(v));
+      if (code === null || !Number.isSafeInteger(cent)) { onleesbaar = true; continue; }
+      const x = per.get(code) || { code, oms: S.tekst(o == null ? '' : ont(o), 80), centen: 0 };
+      x.centen += cent; per.set(code, x);
+    }
+    reports.push({ id, jaar, periode, regels: [...per.values()] });
+  }
+  return { ok: true, rapporten: reps.length, reports, onleesbaar, dubbel };
+}
+/*
  * Regels maken. o = { medewerkers: { id: { persnr, naam } }, ibans: { id: { iban, recent } } of null (geen bankrecht) }.
  * Eén regel per medewerker met Per Bank ≠ 0 (ook negatief: dat keurt de controle af). → { regels: [{ mw, persnr, naam, iban, centen, netto, recent }] }
  */
@@ -366,5 +407,5 @@ function csvBestand(a) {
   return { ok: true, naam: bestandNaam(a.run, a.datum, 'csv'), tekst, type: 'text/csv', aantal: rijen.length, totaal_centen: a.regels.reduce((s, r) => s + r.centen, 0), sha256: S.sha256(tekst) };
 }
 
-module.exports = { ontpak, leesRunOutput, regelsUitRun, controleRegels, controleRun, bestand, csvBestand, naamGewoon, mod97, centen, ibanNorm, maandTekst, bestandNaam, UITLEG,
+module.exports = { ontpak, leesRunOutput, leesRunRegels, regelsUitRun, controleRegels, controleRun, bestand, csvBestand, naamGewoon, mod97, centen, ibanNorm, maandTekst, bestandNaam, UITLEG,
   MAX_REGELS, CODE_BANK, CODE_NETTO };
