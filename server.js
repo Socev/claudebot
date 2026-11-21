@@ -1616,6 +1616,19 @@ function loperSpawn(brein, args, o) {
   verbind(true);
   return k;
 }
+// wv3693 (besluitenpagina nr 452 = 3C152): stappen van een app-beurt ("zoekt in je mail …") uit het sessielogboek; vaste
+// vertaaltabel, nooit inhoud (beurt-stappen.js). Optioneel bestand: ontbreekt het, dan geen stappen (zoals vóór wv3693).
+const beurtStappen = (function () {
+  const p = path.join(__dirname, 'beurt-stappen.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p); } catch (e) { logError('beurt-stappen', e); return null; }
+})();
+// Lezer voor een logboek van socev (0600, via de loper) in het formaat van beurtStappen.volg: {buf, grootte}; fout = gooien met code.
+async function loperStappenLees(pad, vanaf, max) {
+  const r = await loperOp({ op: 'lees', pad: pad, vanaf: vanaf, max: Math.max(1, max) }, 10000);
+  if (!r || !r.ok) throw Object.assign(new Error('loper lees: ' + (r && r.fout)), { code: (r && (r.code || r.fout)) || 'loper' });
+  return { buf: max > 0 ? Buffer.from(r.b64 || '', 'base64') : Buffer.alloc(0), grootte: Number(r.grootte) || 0 };
+}
 function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   // opts: { inactMs, maxMs, progress, vroegMs }  — progress wordt live bijgewerkt zodat
   // /result running_ms en last_activity_ms kan teruggeven. vroegMs (alleen achtergrondagents):
@@ -1669,6 +1682,10 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // transcript compleet); test/cli-dode-pipe.sh herhaalt die meting bij een nieuwe CLI-versie.
     // wv715: smal + stand → als socev via de loper (zelfde contract als een ChildProcess; kill gaat via de loper).
     const projDir = viaLoper ? socevProjectDirFor(cwd) : projectDirFor(cwd);
+    // wv3693: alleen app-beurten (opts.stappen) volgen hun sessielogboek voor de stappen in de wachtbel; stopt in finish(). Vóór de spawn
+    // (Codex ZOU 1): de eerste meting (leespositie = grootte) valt dan vóór de eerste regel van deze beurt.
+    const stappenStop = (opts && opts.stappen && beurtStappen) ? beurtStappen.volg({ pad: path.join(projDir, eigenId + '.jsonl'), progress: progress,
+      vanafMs: Date.now() - 2000, lees: viaLoper ? loperStappenLees : beurtStappen.fsLezer(fs) }) : null;
     const child = viaLoper ? loperSpawn('claude', args, { cwd: cwd, env: env, id: loperJobId(opts) })
       : metOomEerst(function () { return spawn('claude', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); });
     if (viaLoper) child.once('spawn', function () { weesSpawnMeld(opts, child, eigenId, path.join(projDir, eigenId + '.jsonl')); });
@@ -1758,6 +1775,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       if (resolved) return;
       resolved = true;
       clearInterval(watchdog);
+      if (stappenStop) stappenStop();
       if (r && r.exit_code === undefined) r.exit_code = laatsteCode;
       if (r) { r.account = account; if (fs.existsSync(pinned)) r.eigen_sessie = eigenId; }   // wv781: account + sessie voor de terugval
       resolve(r);
@@ -3127,7 +3145,8 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
       runOpts.env = Object.assign({}, runOpts.env || {}, { SOCEV_LOPER_JOB: jobId });
       loperJobmap(base);
     }
-    if (j.app) runOpts.opSpawn = function (i) { appLopendSpawn(jobId, i); };   // wv716: pid en transcript in beurt-lopend.json
+    if (j.app) runOpts.opSpawn = function (i) { appLopendSpawn(jobId, i); };
+    if (j.app) runOpts.stappen = true;   // wv3693: stappen in de wachtbel   // wv716: pid en transcript in beurt-lopend.json
     const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, lezen ? base : (managerCwd || space.dir), runOpts);
     if (lezen) r.gereedschap = 'lezen';
     r.files = collectFiles(outdir);
@@ -9062,7 +9081,8 @@ function appUitslag(req, res, reg, a, s, d) {
   if (j.status !== 'done') {
     res._app.stil = true;   // elke 3 s een regel zou de koppelsporen wegspoelen (Fable-review wv56 #7)
     return appStuur(res, 200, { ok: true, gevonden: true, klaar: false, status: j.status, kanaal: j.app.kanaal, gestart: j.app.gestart === true,   // wv628: gestart = niet meer terug te halen
-      running_ms: (j.progress && j.progress.running_ms) || 0, last_activity_ms: (j.progress && j.progress.last_activity_ms) || 0 });
+      running_ms: (j.progress && j.progress.running_ms) || 0, last_activity_ms: (j.progress && j.progress.last_activity_ms) || 0,
+      stappen: typeof beurtStappen !== 'undefined' && beurtStappen && j.progress ? beurtStappen.stappenUitslag(j.progress, Date.now()) : [] });   // wv3693: wat Socev nu doet (vaste tabel, geen inhoud)
   }
   if (!j.opgehaald) j.opgehaald = Date.now();
   // wv1243 (OVIS M1c, ontwerplijnen § 2.5): het gesprek staat op de laptop vast rechts en haalt het antwoord ook op als David elders typt;
