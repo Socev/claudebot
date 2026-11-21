@@ -5243,6 +5243,23 @@ function handleRequest(req, res) {
 
   // wv3686 (besluit nr 355 = 3C55 stap 1): heartbeat-bericht met "MOMENT: thuis|werk" — is Davids moment er? Puur besluit in
   // heartbeat-moment.js op zijn locatiemeldingen; alleen lezen. Geen antwoord of een fout = n8n stuurt meteen (er valt nooit iets weg).
+  // wv3704 (besluit nr 361 = 3C61, David Ja 21-11 13:11): Socev rekent een voorgesteld agendamoment na vóór het voorstel (agenda's, rooster,
+  // reizen, Promedico, reistijd). Puur rekenen in agenda-narekenen.js; alleen lezen. Ook voor Socev (SOCEV_AGENT_SLEUTEL): geen beheer.
+  if (req.method === 'POST' && req.url === '/agenda/narekenen') {
+    return readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!socevAgentSleutelOk(d.secret)) { const gst = podGeheimStatus(d.secret); if (gst) return weigerGeheim(res, gst); }
+      if (!agendaNarekenen) { res.writeHead(404, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: false, fout: 'niet in deze versie van de pod' })); }
+      agendaNarekenen.narekenen(d).then(function (u) {
+        res._log = { narekenen: u.ok ? (u.delen ? Object.keys(u.delen).join(',') : '') : 'fout' };   // geen titels of tijden in het log
+        res.writeHead(u.ok ? 200 : 400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(u));
+      }, function (e) {
+        logError('agenda-narekenen', e);
+        res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, fout: 'pod kon het niet narekenen' }));
+      });
+    });
+  }
+
   if (req.method === 'POST' && req.url === '/heartbeat/moment') {
     return readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
@@ -25139,6 +25156,17 @@ async function appKalender(req, res, a, route, d) {
 // promedico-betekenis.js leest de staat van de ontvanger (PROMEDICO_AGENDA_DIR/staat.json) ALLEEN-LEZEND en de Google-regels uit dezelfde
 // tijdlijn als de Calendar, en geeft per dag blokken met betekenis/zekerheid/reden, open uren en botsingen. Omschrijvingen, dagnotitie en
 // Google-titels gaan alleen in het antwoord; de audit-reden en /health.promedico_agenda.app noemen alleen venster, aantal dagen en ms.
+// wv3704 (besluit nr 361): narekenen van een agendavoorstel; zelfde Promedico-staat als de Calendar-laag, live agenda via het lees-luik.
+const agendaNarekenen = (function () {
+  const p = path.join(__dirname, 'agenda-narekenen.js');
+  if (!fs.existsSync(p) || !fs.existsSync(path.join(__dirname, 'promedico-betekenis.js'))) return null;
+  try {
+    const staatPad = path.join(process.env.PROMEDICO_AGENDA_DIR || '/opt/data/promedico-agenda', 'staat.json');
+    return require(p).maak({ agenda: function (body) { return appAgendaApi(body, { timeoutMs: 30000 }); },
+      rpc: function (fn, body) { return appSbRpc(fn, body, 20000); },
+      leesPromedico: function () { try { return fs.readFileSync(staatPad, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } } });
+  } catch (e) { logError('agenda-narekenen', e); return null; }
+})();
 const promedicoApp = (function () {
   const p = path.join(__dirname, 'promedico-betekenis.js');
   if (!fs.existsSync(p)) return null;
