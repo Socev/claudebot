@@ -36,7 +36,7 @@
  *   GET  /health  -> status incl. sync-, inbox- en agentinformatie (voor de wachters)
  *
  * Env: VAULT_DIR, REPO_DIR, PORT, API_SECRET, IO_DIR, MAX_FILE_MB,
- *      AGENT_WEBHOOK_URL, AGENT_WEBHOOK_SECRET (nieuw), MAX_AGENTS (default 4; tijdelijk hoger via /opt/data/max-agents.json)
+ *      AGENT_WEBHOOK_URL, AGENT_WEBHOOK_SECRET (nieuw), MAX_AGENTS (default 5 sinds wv3670; tijdelijk hoger via /opt/data/max-agents.json)
  */
 const http = require('http');
 const https = require('https');
@@ -451,7 +451,9 @@ const AGENTS_FILE = path.join(HOME, 'agent_jobs.json');
 const AGENT_WEBHOOK_URL = process.env.AGENT_WEBHOOK_URL || '';
 const AGENT_WEBHOOK_SECRET = process.env.AGENT_WEBHOOK_SECRET || SECRET;
 // wv781 (22-10-2026): 4 i.p.v. 3 sinds het tweede abonnement; gemeten 22-10: pod 2,7 van 16 GB, agent ± 330 MB rss, 2 cores, lus p99 21 ms
-const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || '4', 10) || 4;
+// wv3670 (21-11-2026, David NEE op besluitenpagina nr 7 / C01: na abonnement 2 vier agents tegelijk houden): 5 = 4 werk (tikker
+// max_eigen_normaal 4) + 1 vrije plek voor David/Socev; tikker max_lopend_totaal 5 met reserve overdag 1 laat die plek open.
+const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || '5', 10) || 5;
 // 19-11-2026 (David, app-knop fd9c5a09: "tot 6 agents tegelijk, zolang abonnement 2 nog loopt"): het plafond kan zonder podherstart
 // tijdelijk omhoog via /opt/data/max-agents.json {"max":6,"tot":"<ISO>"}; na "tot" vanzelf terug naar MAX_AGENTS. Alleen 1..8; onleesbaar,
 // zonder geldige "tot" of verlopen = MAX_AGENTS. Een expliciete env MAX_AGENTS (toetsen) gaat altijd voor. Gemeten 19-11: podgrens 16 GB /
