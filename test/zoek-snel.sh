@@ -198,6 +198,41 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   antwoordVan = () => { throw new Error('kapot'); };
   r = await z.zoek('Wat is het btw-nummer van Tolgaarde');
   toets('5 uitzondering in de aanroep: soort fout', r.soort === 'fout', r);
+
+  // ── 12. wv3722 (nr 326/416 = 3C26 + 3C116): conclusie, soort waarde met knop, regel in de bron ──
+  met({ soort: 'antwoord', tekst: 'Tolgaarde: telefoon 033 - 494 12 34, btw NL863125190B01.', waarden: [{ label: 'Telefoon', waarde: '033 - 494 12 34' }, { label: 'BTW-nummer', waarde: 'NL863125190B01' }], bronnen: [B] });
+  r = await z.zoek('Wat is het telefoonnummer van Tolgaarde');
+  toets('12 telefoon krijgt een Bel-knop (tel:), btw-nummer geen knop', r.soort === 'antwoord' && r.waarden[0].soort === 'tel' && r.waarden[0].doel === 'tel:0334941234' && !r.waarden[1].soort && !r.waarden[1].doel, r.waarden);
+  toets('12 bron met regelnummer en regel van de eerste waarde (regel 10 = telefoon)', r.bronnen[0].nr === 10 && /494 12 34/.test(r.bronnen[0].regel), r.bronnen);
+  toets('12 conclusie past bij de dekking van het grep-pad', r.laag === 'volledig' && (r.dekking.volledig ? r.conclusie === 'Alles bekeken.' : /^Er kan meer staan/.test(r.conclusie)), { c: r.conclusie, d: r.dekking });
+  met({ soort: 'antwoord', tekst: 'Het btw-nummer is NL863125190B01.', waarden: [{ label: 'BTW-nummer', waarde: 'NL863125190B01' }], bronnen: [B] });
+  r = await z.zoek('Wat is het btw-nummer van Tolgaarde');
+  toets('12 btw-vraag: bron opent op regel 8 (BTW-nummer), niet op de voorgestelde regel', r.bronnen[0].nr === 8 && /NL863125190B01/.test(r.bronnen[0].regel), r.bronnen);
+  met({ soort: 'antwoord', tekst: 'Het IBAN is NL98 ABNA 0106 4653 17.', waarden: [{ label: 'IBAN', waarde: 'NL98ABNA0106465317' }], bronnen: [B] });
+  r = await z.zoek('Wat is het iban van Tolgaarde');
+  toets('12 waarde zonder spaties vindt de regel met spaties (natNorm)', r.bronnen[0].nr === 9 && !r.waarden[0].soort, r);
+  r = await z.zoek('Wat is het kenteken van de zeppelin xq');
+  toets('12 niets gevonden, alles doorzocht: "Alles bekeken."', r.soort === 'geen' && r.conclusie === 'Alles bekeken.', { s: r.soort, c: r.conclusie, d: r.dekking, m: r.melding });
+  r = await z.zoek('Zet een afspraak met Tolgaarde');
+  toets('12 handeling: geen conclusie', r.soort === 'handeling' && !r.conclusie, r);
+  toets('12 conclusieVan: onvolledig grep-pad = "Er kan meer staan: 5 van 12 pagina\'s bekeken."',
+    Z.conclusieVan({ soort: 'antwoord', laag: 'volledig' }, { zoektocht: { paginas: 12, paginas_mee: 5, volledig: false } }) === "Er kan meer staan: 5 van 12 pagina's bekeken." &&
+    Z.conclusieVan({ soort: 'antwoord', laag: 'volledig' }, { zoektocht: { paginas: 3, paginas_mee: 3, volledig: true } }) === 'Alles bekeken.' &&
+    Z.conclusieVan({ soort: 'antwoord', laag: 'volledig' }, { zoektocht: { paginas: 3, paginas_mee: 3, volledig: false, afgekapt: true } }) === 'Er kan meer staan.' &&
+    Z.conclusieVan({ soort: 'antwoord', laag: 'identifier' }, { feitenlijst: { stand: 'ok', totaal: 7, getoond: 3, afgekapt: true } }) === 'Er kan meer staan: 3 van 7 feiten bekeken.' &&
+    Z.conclusieVan({ soort: 'antwoord', laag: 'tekstindex' }, { tekstindex: { stand: 'ok', paginas: 4, paginas_mee: 4, volledig: true } }) === 'Alles bekeken.' &&
+    Z.conclusieVan({ soort: 'geen' }, { zoektocht: { paginas: 12, paginas_mee: 5, volledig: false } }) === "Er kan meer staan: 5 van 12 pagina's bekeken." &&
+    Z.conclusieVan({ soort: 'fout' }, { zoektocht: { volledig: true } }) === null && Z.conclusieVan({ soort: 'geen', reden: 'geen zoektermen' }, {}) === null);
+  toets('12 zoekwoorden voor Brain › Zoeken: zoektermen zonder vraag- en stopwoorden, namen eerst', Z.zoekwoorden('Wat is het telefoonnummer van Kwartelweide') === 'Kwartelweide telefoonnummer' &&
+    Z.zoekwoorden('Wat is het adres van de tandarts in Leusden') === 'tandarts Leusden adres' && Z.zoekwoorden('telefoonnummer?') === 'telefoonnummer' && r.zoekwoorden === undefined);
+  const ws = (l, w) => (Z.waardeSoort(l, w) || {}).soort || null;
+  toets('12 waardeSoort: tel/mail/link/route en geen knop bij BSN, KvK, IBAN, kenteken, fax, http', ws('Mobiel', '06-12345678') === 'tel' && ws('', '+31 (0)6 1234 5678') === 'tel' &&
+    Z.waardeSoort('', '+31 (0)6 1234 5678').doel === 'tel:+31612345678' && ws('Gambia', '+220 7712345') === 'tel' && ws('Mail', 'info@voorbeeld.nl') === 'mail' &&
+    ws('Website', 'www.voorbeeld.nl') === 'link' && Z.waardeSoort('', 'www.voorbeeld.nl').doel === 'https://www.voorbeeld.nl' && ws('', 'https://voorbeeld.nl/x') === 'link' &&
+    ws('', 'http://onveilig.nl') === null && ws('Adres', 'Dorpsstraat 1, 3831 AA Leusden') === 'route' && ws('Bezoekadres', 'Hoofdweg 12') === 'route' && ws('', 'Hoofdweg 12') === null &&
+    ws('BSN', '123456782') === null && ws('KvK', '12345678') === null && ws('IBAN', 'NL91ABNA0417164300') === null && ws('Kenteken', 'AB-123-C') === null &&
+    ws('Fax', '033 123 45 68') === null && ws('Klantnummer', '0612345678') === null && ws('Datum', '01-02-2026') === null &&
+    /^https:\/\/www\.google\.com\/maps\/dir\/\?api=1&destination=/.test(Z.waardeSoort('Adres', 'Dorpsstraat 1, 3831 AA Leusden').doel));
   met({ soort: 'antwoord', tekst: 'Sevilay Baructu-Aydin is geboren op 24-08-1980.', waarden: [{ label: 'Geboortedatum Sevilay Baructu-Aydin', waarde: '24-08-1980' }], bronnen: ['10_Zakelijk/Groenhouten/Medewerkers/Sevilay Baructu-Aydin.md'] });
   r = await z.zoek('Wat is de geboortedatum van Sev');
   toets('5 Sev: antwoord met "gelezen als" voor de app', r.soort === 'antwoord' && r.gelezen_als.length === 1 && r.gelezen_als[0].naam === 'Sevilay Baructu-Aydin', r);
@@ -595,6 +630,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   modelN = 0;
   const [ra, rb] = await Promise.all([roep(A, { tekst: 'Wat is het btw-nummer van Tolgaarde', zoek_id: id('3') }), roep(A, { tekst: 'Wat is het btw-nummer van Tolgaarde', zoek_id: id('3') })]);
   toets('6 dezelfde zoek_id tegelijk: één modelaanroep, twee keer hetzelfde antwoord', modelN === 1 && ra.status === 200 && rb.status === 200 && ra.j.job_id === rb.j.job_id && (ra.j.al || rb.j.al), { modelN, a: ra.j, b: rb.j });
+  toets('6 wv3722: antwoord met conclusie en bron met regelnummer en regel', typeof ra.j.conclusie === 'string' && ra.j.conclusie.length > 0 && ra.j.bronnen[0].nr === 8 && /NL863125190B01/.test(ra.j.bronnen[0].regel) && ra.j.zoekwoorden === 'Tolgaarde btw-nummer', ra.j);
   res = await roep(A, { tekst: 'Wat is het btw-nummer van Tolgaarde', zoek_id: id('3') });
   toets('6 herhaling na afloop: zelfde antwoord, geen aanroep', res.j.al === true && modelN === 1 && res.j.soort === 'antwoord');
   res = await roep(A2, { tekst: 'Wat is het btw-nummer van Tolgaarde', zoek_id: id('3') });
@@ -638,6 +674,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   toets('11 route: 200, treffers met pad, naam, regelnummer en regel', res.status === 200 && res.j.ok && res.j.stand === 'ok' && res.j.treffers.length > 0 &&
     res.j.treffers.every((t) => typeof t.pad === 'string' && typeof t.naam === 'string' && Number.isInteger(t.nr) && typeof t.regel === 'string'), res.j);
   toets('11 route: Tolgaarde-hub bovenaan, met de btw-regel', res.j.treffers[0].pad === '10_Zakelijk/Tolgaarde/index.md' && /NL863125190B01/.test(res.j.treffers[0].regel), res.j.treffers[0]);
+  toets('11 wv3722: zoekwoorden voor de brug naar Brain › Zoeken', res.j.zoekwoorden === 'Tolgaarde btw-nummer', res.j.zoekwoorden);
   toets('11 route: geen modelaanroep, geen app-log, geen Socev-regel', modelN === modelVoor && log.length === logVoor && S.zoekSnelStaart() === '', { modelN, modelVoor, log: log.length });
   toets('11 route: niets uit Bronnen, AGENTS.md of voorgesteld', !res.j.treffers.some((t) => /Bronnen|AGENTS/.test(t.pad) || /NL000000000B00|NL111111111B11/.test(t.regel)), res.j.treffers);
   toets('11 route: binnen 0,5 s op de pod', res.j.ms < 500, res.j.ms);

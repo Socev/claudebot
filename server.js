@@ -27187,8 +27187,10 @@ async function zoekSnelVoer(a, id, vraag, toonDekking) {
   // niet mee); de oude app en het app-log hierboven houden hem in de tekst. dekking_regel is dan precies wat anders geplakt was (of null).
   const los = toonDekking ? (r.los || { tekst: r.tekst, melding: r.melding, dekking_regel: null }) : null;
   return { status: 200, j: { ok: true, job_id: id, soort: r.soort, tekst: los ? los.tekst : r.tekst, waarden: r.waarden, weggelaten: r.weggelaten || 0, laag: r.laag || null,
-    dekking_regel: (los ? los.dekking_regel : r.dekking_regel) || null,
-    bronnen: (r.bronnen || []).map(function (b) { return { pad: b.pad, naam: b.naam, updated: b.updated || null }; }), gelezen_als: r.gelezen_als || [],
+    dekking_regel: (los ? los.dekking_regel : r.dekking_regel) || null, conclusie: r.conclusie || null,   // wv3722 (3C26)
+    zoekwoorden: r.soort !== 'handeling' && r.zoekwoorden || null,   // wv3722 (3C51): voor de brug naar Brain › Zoeken
+    // wv3722 (3C116b): nr + regel = waar het antwoord op de bronpagina staat (de app opent de pagina daar en markeert de regel)
+    bronnen: (r.bronnen || []).map(function (b) { return { pad: b.pad, naam: b.naam, updated: b.updated || null, nr: b.nr || undefined, regel: b.regel || undefined }; }), gelezen_als: r.gelezen_als || [],
     melding: (los ? los.melding : r.melding) || null, ms: ms, gelogd: gelogd } };
 }
 async function appZoekSnel(req, res, a, d) {
@@ -27248,7 +27250,8 @@ async function appZoekSnelTreffers(req, res, a, d) {
   finally { delete st[a.id]; }
   res._app.reden = 'zoek-snel treffers ' + r.stand + ' ' + r.treffers.length + ' ' + r.ms + ' ms';
   return appStuur(res, 200, { ok: true, stand: r.stand, treffers: r.treffers.map(function (t) { return { pad: t.pad, naam: t.naam, nr: t.nr, regel: t.regel, aantal: t.aantal }; }),
-    paginas: r.paginas, afgekapt: !!r.afgekapt, onleesbaar: !!r.onleesbaar, ms: r.ms });
+    paginas: r.paginas, afgekapt: !!r.afgekapt, onleesbaar: !!r.onleesbaar, ms: r.ms,
+    zoekwoorden: r.stand !== 'handeling' && typeof zoekSnel.zoekwoorden === 'function' ? zoekSnel.zoekwoorden(vraag) || null : null });   // wv3722 (3C51): brug naar Brain › Zoeken
 }
 // ── einde Zoek snel ──
 

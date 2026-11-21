@@ -178,6 +178,12 @@ function termenUit(vraag) {
   const namen = uit.filter(function (w) { return !FEITWOORD.has(w.toLowerCase()); }), feit = uit.filter(function (w) { return FEITWOORD.has(w.toLowerCase()); });
   return namen.concat(feit).slice(0, MAX_TERMEN);
 }
+// wv3722 (nr 351 = 3C51): de woorden voor Brain › Zoeken (dat zoekt pagina's met álle woorden): de zoektermen van de vraag (namen eerst,
+// dan het feitwoord), zonder vraag- en stopwoorden. Gemeten 21-11 op de 27 echte Zoek snel-vragen met een bron: bronpagina bij de
+// treffers 18/27 met gem. 61 pagina's (hele zin: 16/27, 54; alleen de namen: 18/27 maar 373 pagina's).
+function zoekwoorden(vraag) {
+  return termenUit(vraag).join(' ').slice(0, 200);
+}
 const reEsc = function (s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); };
 // Korte termen en codes op woordgrens ("Sev" niet in "Maarsseveen"; Fable #10), langere als deel van een woord (kenteken → kentekens).
 function patroon(v) {
@@ -326,6 +332,51 @@ function dekkingRegel(l, metZoektocht) {
   if (!delen.length) return '';
   const r = delen.join(' · ');
   return r.charAt(0).toUpperCase() + r.slice(1) + '.';
+}
+// ── wv3722 (besluitenpagina nr 326 = 3C26): de conclusie vóór de dekkingsregel, in gewone taal ──
+// "Alles bekeken." of "Er kan meer staan: 5 van 12 pagina's bekeken." Zelfde maatstaf als "; er kan meer staan" (antwoord) en onvolledig()
+// (geen): de laag die het antwoord gaf telt, met haar eigen tellingen. Geen conclusie bij een fout, een handeling of zonder zoektermen.
+function conclusieVan(r, l) {
+  if (!r || !l || (r.soort !== 'antwoord' && r.soort !== 'geen') || r.reden === 'geen zoektermen' || r.reden === 'leeg') return null;
+  let laag, volledig;
+  if (r.soort === 'antwoord') {
+    laag = r.laag === 'identifier' ? 'feitenlijst' : r.laag === 'tekstindex' ? 'tekstindex' : 'zoektocht';
+    volledig = laag === 'feitenlijst' ? !!(l.feitenlijst && !l.feitenlijst.afgekapt) : !!(l[laag] && l[laag].volledig);
+  } else {
+    laag = l.zoektocht ? 'zoektocht' : l.tekstindex ? 'tekstindex' : l.feitenlijst ? 'feitenlijst' : null;
+    if (!laag) return null;
+    volledig = !onvolledig(l);
+  }
+  if (volledig) return 'Alles bekeken.';
+  const x = l[laag] || {};
+  const mee = laag === 'feitenlijst' ? x.getoond : x.paginas_mee, tot = laag === 'feitenlijst' ? x.totaal : x.paginas;
+  if (typeof mee === 'number' && typeof tot === 'number' && tot > 0 && mee < tot)
+    return 'Er kan meer staan: ' + mee + ' van ' + (laag === 'feitenlijst' ? aantal(tot, 'feit', 'feiten') : pag(tot)) + ' bekeken.';
+  return 'Er kan meer staan.';
+}
+// ── wv3722 (nr 416 = 3C116): wat voor waarde is dit, en welke knop hoort erbij (David drukt zelf) ──
+// tel: (bellen), mailto: (mail), route (Google Maps) of een https-link. Geen knop bij nummers die geen telefoon zijn (BSN, KvK, IBAN, ...)
+// en bij twijfel: een verkeerde knop is erger dan geen knop.
+const GEEN_KNOP = /\b(bsn|burgerservice|kvk|btw|vat|iban|rekening|bic|klant|polis|kenteken|agb|uzi|big|lid|dossier|order|factuur|pin|pincode|code|wachtwoord|datum|geboren|referentie|kenmerk|fax|postbus)/i;
+function waardeSoort(label, waarde) {
+  const w = String(waarde == null ? '' : waarde).trim(), l = String(label == null ? '' : label).toLowerCase();
+  if (!w || w.length > 120 || /[<>"\n]/.test(w)) return null;
+  const mail = w.replace(/^mailto:/i, '');
+  if (/^[^\s@<>"'(),;:]+@[^\s@<>"'(),;:]+\.[a-z]{2,}$/i.test(mail)) return { soort: 'mail', doel: 'mailto:' + mail };
+  if (/^https:\/\/[^\s<>"']+$/i.test(w)) return { soort: 'link', doel: w };
+  if (/^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)*\.(nl|com|org|eu|net|gm|be|de|info|io|dev)(\/[^\s<>"']*)?$/i.test(w) && /^www\.|\//i.test(w)) return { soort: 'link', doel: 'https://' + w };
+  if (GEEN_KNOP.test(l)) return null;
+  const cijfers = w.replace(/\(0\)/g, '').replace(/[\s\-.()\/]/g, '');
+  if (/^[+0-9]+$/.test(cijfers) && !/[a-z]/i.test(w)) {
+    const intl = /^(\+|00)[1-9][0-9]{7,13}$/.test(cijfers), nl = /^0[1-9][0-9]{8}$/.test(cijfers), dienst = /^0(800|900|90[69])[0-9]{4,7}$/.test(cijfers);
+    if (intl || nl || dienst) return { soort: 'tel', doel: 'tel:' + cijfers.replace(/^00/, '+') };
+    return null;
+  }
+  if (/\b(ip|mac|web|e-?mail|mail)\b/i.test(l)) return null;
+  const postcode = /\b[1-9][0-9]{3} ?[A-Z]{2}\b/.test(w) && /[a-z]{3}/i.test(w.replace(/\b[1-9][0-9]{3} ?[A-Z]{2}\b/, ''));
+  const adresLabel = /adres|straat|locatie|vestiging|bezoek|ligging|waar/i.test(l) && /[a-z]{3}/i.test(w) && /[0-9]/.test(w);
+  if (postcode || adresLabel) return { soort: 'route', doel: 'https://www.google.com/maps/dir/?api=1&destination=' + encodeURIComponent(w) };
+  return null;
 }
 // Is er iets dat niet bekeken is (afgekapt, kandidaten zonder antwoord, een laag die niet kon)? Dan is "geen" nooit "niet gevonden"
 // (Opus-diffreview wv1788 MOET 3: grep zoekt letterlijk, laag 1 en 2 vinden ook tikfouten en registerfeiten).
@@ -493,6 +544,35 @@ function maak(opt) {
     groep.some(function (g) { return g.varianten.some(function (v) { i = l.indexOf(v.toLowerCase()); return i >= 0; }); });
     const van = Math.max(0, Math.min(i - 80, t.length - MAX_REGEL));
     return (van > 0 ? '…' : '') + t.slice(van, van + MAX_REGEL - 2) + (van + MAX_REGEL - 2 < t.length ? '…' : '');
+  }
+  // wv3722 (nr 416 = 3C116b): de regel in de bron waar het antwoord staat — eerst de regel met (genormaliseerd) een gekopieerde waarde, anders
+  // de regel met de meeste zoektermen; de lopende tekst vóór de frontmatter. nr = regelnummer in het bestand (1 = eerste regel), regel = die
+  // regel gemaskeerd en ingekort (de app zoekt hem op de pagina terug en markeert hem). Niets gevonden = null (de bron opent gewoon bovenaan).
+  function vindRegel(pad, waarden, gr) {
+    if (typeof pad !== 'string' || !/\.md$/i.test(pad) || /(^|\/)\.\.(\/|$)/.test(pad)) return null;
+    const t = leesPagina(pad);
+    if (!t) return null;
+    const lijnen = t.split(/\r?\n/);
+    let fm = 0;
+    if (lijnen[0] === '---') { const e = lijnen.indexOf('---', 1); fm = e > 0 ? e + 1 : 0; }
+    const bruikbaar = function (r) { return !!r.trim() && !/voorgesteld/i.test(r) && !BLOK_DICHT.test(r); };
+    let i = -1;
+    (waarden || []).some(function (w) {
+      const n = natNorm(w && w.waarde);
+      if (n.length < 3) return false;
+      for (let k = fm; k < lijnen.length; k++) if (bruikbaar(lijnen[k]) && natNorm(lijnen[k]).indexOf(n) >= 0) { i = k; return true; }
+      return false;
+    });
+    if (i < 0 && gr && gr.length) {
+      let score = 0;
+      for (let k = fm; k < lijnen.length; k++) {
+        if (!bruikbaar(lijnen[k])) continue;
+        const sc = gr.filter(function (g) { return raakt(lijnen[k], g); }).length;
+        if (sc > score) { score = sc; i = k; }
+      }
+    }
+    if (i < 0) return null;
+    return { nr: i + 1, regel: kort(masker(lijnen[i].replace(/\r$/, '')), gr || []) };
   }
   const raakt = function (tekst, g) {
     const l = String(tekst).toLowerCase();
@@ -889,7 +969,7 @@ function maak(opt) {
     const t0 = nu();
     const vraag = String(vraagRuw == null ? '' : vraagRuw).replace(/\s+/g, ' ').trim().slice(0, MAX_VRAAG);
     const lagen = {}, ms = {};
-    let verbruik = null, termen = [];
+    let verbruik = null, termen = [], grNu = [];
     const uit = function (soort, x) {
       ms.totaal = nu() - t0;
       const r = Object.assign({ soort: soort, vraag: vraag, tekst: '', waarden: [], bronnen: [], gelezen_als: [], melding: MELDING[soort] || null,
@@ -922,11 +1002,23 @@ function maak(opt) {
         }
       } else if (soort === 'antwoord' && x && x.regel_los) r.los = { tekst: r.tekst_kaal, melding: r.melding, dekking_regel: x.regel_los };
       delete r.tekst_kaal; delete r.regel_los;
+      // wv3722: de conclusie vóór de dekkingsregel (3C26), soort waarde met de knop (3C116a) en de regel in de bron (3C116b)
+      const c = conclusieVan(r, lagen);
+      if (c) r.conclusie = c;
+      r.zoekwoorden = zoekwoorden(vraag) || undefined;
+      if (soort === 'antwoord') r.waarden = (r.waarden || []).map(function (w) { const k = waardeSoort(w.label, w.waarde); return k ? Object.assign({}, w, k) : w; });
+      if (r.bronnen && r.bronnen.length) {
+        r.bronnen = r.bronnen.map(function (b) {
+          const g = b && vindRegel(b.pad, soort === 'antwoord' ? r.waarden : [], grNu);
+          return g ? Object.assign({}, b, g) : b;
+        });
+      }
       return r;
     };
     if (!vraag) return uit('geen', { reden: 'leeg', melding: MELDING.leeg });
     if (HANDELING.test(vraag)) return uit('handeling', { reden: 'handelingswoord' });
     const gr = groepen(vraag);
+    grNu = gr;
     termen = gr.map(function (g) { return g.term; });
     const gelezen = [];
     gr.forEach(function (g) { g.gelezen.forEach(function (x) { if (!gelezen.some(function (y) { return y.naam === x.naam; })) gelezen.push(x); }); });
@@ -1051,10 +1143,10 @@ function maak(opt) {
     return { stand: 'ok', treffers: uitLijst, paginas: lijst.length, afgekapt: !!gv.afgekapt || undefined, onleesbaar: !!gv.onleesbaar || undefined, ms: nu() - t0 };
   }
 
-  return { zoek: zoek, groepen: groepen, context: context, grep: grep, laag1: laag1, indexZoek: indexZoek, treffers: treffers };
+  return { zoek: zoek, groepen: groepen, context: context, grep: grep, laag1: laag1, indexZoek: indexZoek, treffers: treffers, zoekwoorden: zoekwoorden };
 }
 
 module.exports = { maak: maak, termenUit: termenUit, natoets: natoets, natNorm: natNorm, harde: harde, woordenlijstGroepen: woordenlijstGroepen,
   woordenlijstVarianten: woordenlijstVarianten, wSoort: wSoort, HANDELING: HANDELING, SYSTEEM: SYSTEEM, schema: schema, MELDING: MELDING,
   NIET_MAP: NIET_MAP, MAX_VRAAG: MAX_VRAAG, meldingVoor: meldingVoor, MAX_PAGINAS: MAX_PAGINAS,
-  dekkingRegel: dekkingRegel, queryRunVan: queryRunVan, onvolledig: onvolledig, INDEX_MAX_UUR: INDEX_MAX_UUR, L1_SCORE: L1_SCORE };
+  dekkingRegel: dekkingRegel, conclusieVan: conclusieVan, waardeSoort: waardeSoort, zoekwoorden: zoekwoorden, queryRunVan: queryRunVan, onvolledig: onvolledig, INDEX_MAX_UUR: INDEX_MAX_UUR, L1_SCORE: L1_SCORE };
