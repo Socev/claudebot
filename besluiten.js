@@ -233,4 +233,100 @@ async function ronde(deps) {
   return { ok: true, aangeboden: gemarkeerd, rij: z && z.id || null, bestond: !!(z && z.bestond), label: label };
 }
 
-module.exports = { scherm, antwoord, vraagtVingerafdruk, ronde, teAanbieden, opdrachtTekst, RUST_MS, BUNDEL_MAX, GRENS, KEUZES };
+// ── wv3714 (besluitenpagina nr 463 = 3C163, David Ja 21-11-2026 13:08): rapportboek per app in OVIS Code ──
+// WAAROM. David wil per app in OVIS Code het cijfer, de voorstellen en hun stand zien en daar meteen Ja of Nee geven. Het antwoord gaat via
+// dezelfde route en opslag als de Besluitenpagina (antwoord() hierboven); hier staat alleen de STAND per voorstel. Ontwerp + Codex-review:
+// mk-scripts/wv3714/ontwerp.md (GO-MET-WIJZIGINGEN; MOET 1 = koppeling ook buiten paginabezoeken bijwerken en eenmalig uit de volledige
+// historie vullen: besluitenTik werkt hem elk kwartier bij, mk-scripts/wv3714/zaai.py vulde hem bij de bouw).
+// Koppeling voorstel → werkvoorraadrij: het veld bron van de rij noemt het nummer ("besluitenpagina nr 122, 191", "besluitenpagina 324/426").
+// mk_werkvoorraad_stand geeft alleen open rijen en die van de laatste 3 dagen; daarom onthoudt de pod elke gekoppelde rij in DIR/koppeling.json
+// (alleen de pod schrijft, atomair, 0600): een klare rij blijft klaar, ook als hij uit het venster valt. Heuristiek: een rij zonder nummer in
+// bron ziet de pod niet (stand blijft te laag, nooit te hoog).
+const BRON_RE = /besluit(?:en)?(?:pagina)?\s*(?:nr\.?\s*)?((?:\d{1,3}(?![\w-])(?:\s*(?:,|\/|\+|&|en\b)\s*)?)+)/gi;
+const BUNDEL_LABEL_RE = /^machinekamer:besluiten-\d/;
+const MEET_RE = /nacontrole|nameting|natoets|nameten/i;
+const STANDEN = ['wacht_op_jou', 'nee', 'bij_machinekamer', 'in_de_rij', 'wordt_gebouwd', 'live', 'nagemeten', 'verwerkt', 'vervallen'];
+
+function nrsUitBron(bron, bekend) {
+  const uit = [];
+  String(bron || '').replace(BRON_RE, function (m, reeks) {
+    String(reeks).split(/[^\d]+/).forEach(function (t) { const n = Number(t); if (Number.isInteger(n) && n > 0 && (!bekend || bekend[String(n)]) && uit.indexOf(n) < 0) uit.push(n); });
+    return m;
+  });
+  return uit;
+}
+function rijKort(w, nrs, nuIso) {
+  return { nrs: nrs, status: String(w.status || ''), soort: w.soort ? String(w.soort) : null, label: String(w.label || '').slice(0, 120),
+    bundel: BUNDEL_LABEL_RE.test(String(w.label || '')), op: nuIso };
+}
+function leesKoppeling(dir) {
+  try { const j = leesStreng(path.join(dir, 'koppeling.json'), { versie: 1, rijen: {} }); return j.rijen && typeof j.rijen === 'object' && !Array.isArray(j.rijen) ? j : { versie: 1, rijen: {} }; }
+  catch (e) { return { versie: 1, rijen: {}, kapot: true }; }   // kapot = opnieuw opbouwen uit het venster (server.js meldt het)
+}
+// Werk het geheugen bij met de rijen uit de werkvoorraad (items van mk_werkvoorraad_stand). Schrijft alleen als er iets veranderde.
+// → { koppeling, gewijzigd, kapot }
+function koppelBij(dir, items, nuIso, voorstellen) {
+  const k = leesKoppeling(dir), kapot = !!k.kapot;
+  delete k.kapot;
+  const bekend = {};
+  (voorstellen || []).forEach(function (v) { bekend[String(v.nr)] = true; });
+  let gewijzigd = kapot;
+  (Array.isArray(items) ? items : []).forEach(function (w) {
+    if (!w || w.id == null) return;
+    const bundel = BUNDEL_LABEL_RE.test(String(w.label || ''));
+    const nrs = bundel ? [] : nrsUitBron(w.bron, bekend);
+    if (!bundel && !nrs.length) return;
+    const oud = k.rijen[String(w.id)];
+    if (oud && oud.status === String(w.status || '') && JSON.stringify(oud.nrs) === JSON.stringify(nrs) && oud.soort === (w.soort ? String(w.soort) : null)) return;
+    k.rijen[String(w.id)] = rijKort(w, nrs, nuIso);
+    gewijzigd = true;
+  });
+  if (gewijzigd) schrijfAtomair(path.join(dir, 'koppeling.json'), k);
+  return { koppeling: k, gewijzigd: gewijzigd, kapot: kapot };
+}
+
+// Stand van één voorstel. rijen = koppeling.rijen; per nr de uitvoerrijen (bundel telt niet).
+function standVan(v, ant, perNr, rijen) {
+  const r = (perNr[String(v.nr)] || []).map(function (id) { return Object.assign({ wv: Number(id) }, rijen[id]); });
+  const kort = r.map(function (x) { return { wv: x.wv, status: x.status, meet: !!(x.soort === 'nacontrole' || MEET_RE.test(x.label)) }; });
+  if (!isOpen(v)) return { stand: 'vervallen', rijen: kort };
+  if (!ant || !ant.keuze) return { stand: 'wacht_op_jou', rijen: kort };
+  if (ant.keuze === 'nee') return { stand: 'nee', rijen: kort };
+  const levend = kort.filter(function (x) { return x.status !== 'vervallen'; });
+  let bouw = levend.filter(function (x) { return !x.meet; });
+  const meet = levend.filter(function (x) { return x.meet; });
+  if (!bouw.length) bouw = meet;
+  if (bouw.some(function (x) { return x.status === 'gestart' || x.status === 'starten'; })) return { stand: 'wordt_gebouwd', rijen: kort };
+  if (bouw.some(function (x) { return x.status === 'open' || x.status === 'geblokkeerd'; })) return { stand: 'in_de_rij', rijen: kort };
+  if (bouw.length && bouw.every(function (x) { return x.status === 'klaar'; })) {
+    return { stand: meet.some(function (x) { return x.status === 'klaar'; }) && bouw !== meet ? 'nagemeten' : 'live', rijen: kort };
+  }
+  // geen eigen klus (of alleen vervallen rijen): hangt af van de kwartierbundel waarin het antwoord zat
+  const b = ant.aangeboden && ant.aangeboden.voor === ant.op && ant.aangeboden.rij != null ? rijen[String(ant.aangeboden.rij)] : null;
+  if (b && (b.status === 'klaar' || b.status === 'vervallen')) return { stand: 'verwerkt', rijen: kort };
+  return { stand: 'bij_machinekamer', rijen: kort };
+}
+// Het scherm (zoals scherm()) met per voorstel stand + rijen, gefilterd op één app (OVIS Code-id) als app gegeven is; plus de cijfers en de
+// telling voor het rapportboek. koppeling = uitkomst van koppelBij (of leesKoppeling).
+function schermMetStand(dir, koppeling, app) {
+  const s = scherm(dir);
+  const v = leesVoorstellen(dir);
+  const ruw = leesAntwoorden(dir).antwoorden;
+  const rijen = (koppeling && koppeling.rijen) || {};
+  const perNr = {};
+  Object.keys(rijen).forEach(function (id) { const x = rijen[id]; if (!x || x.bundel) return; (x.nrs || []).forEach(function (n) { (perNr[String(n)] = perNr[String(n)] || []).push(id); }); });
+  s.voorstellen.forEach(function (x) { const st = standVan(x, ruw[String(x.nr)], perNr, rijen); x.stand = st.stand; x.rijen = st.rijen; });
+  if (!app) return s;
+  const lijst = s.voorstellen.filter(function (x) { return x.app === app; });
+  const open = lijst.filter(isOpen);
+  const tel = { totaal: open.length, beantwoord: 0, ja: 0, nee: 0, anders: 0, wacht: 0, gebouwd: 0, te_bouwen: 0, niet_open: lijst.length - open.length };
+  open.forEach(function (x) {
+    if (x.antwoord) { tel.beantwoord++; tel[x.antwoord.keuze]++; } else tel.wacht++;
+    if (x.antwoord && x.antwoord.keuze !== 'nee') tel.te_bouwen++;
+    if (x.stand === 'live' || x.stand === 'nagemeten') tel.gebouwd++;
+  });
+  const cijfers = v.cijfers && typeof v.cijfers === 'object' && Array.isArray(v.cijfers[app]) ? v.cijfers[app] : [];
+  return { ok: true, app: app, gemaakt: s.gemaakt, telling: tel, cijfers: cijfers, voorstellen: lijst };
+}
+
+module.exports = { scherm, schermMetStand, koppelBij, leesKoppeling, nrsUitBron, standVan, STANDEN, antwoord, vraagtVingerafdruk, ronde, teAanbieden, opdrachtTekst, RUST_MS, BUNDEL_MAX, GRENS, KEUZES };

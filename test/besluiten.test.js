@@ -177,18 +177,22 @@ function serverOmgeving(dir, extra) {
     appVersOk: (a, s) => !!s.vers, appSbRpc: async (naam, p) => { rpc.push([naam, p]); if (extra.rpcFout) throw new Error('rpc 400'); return { ok: true, id: 7001 }; },
     mkBlokVoor: (t) => 'GRONDWET-KERN v1\n\n' + t, ovisBoxRij: (t) => { box.push(t); return true; },
     appStuur: (res, status, obj) => { res.status = status; res.obj = obj; }, appWeiger: (res, status, fout) => { res.status = status; res.obj = { ok: false, fout: fout }; },
-    setTimeout, setInterval, Date, JSON, String, Error, Number, Object };
+    setTimeout, setInterval, Date, JSON, String, Error, Number, Object, fs: fs,
+    // wv3714: werkvoorraad en OVIS Code-register als nep
+    appWerkvoorraad: async () => { if (extra.wvFout) throw new Error('rpc stuk'); return { items: extra.items || [] }; },
+    CODE_APPS: { app: (id) => ({ facturen: { id: 'facturen', naam: 'Facturen', voorvoegsels: ['facturen', 'boekstuk'] }, imagine: { id: 'imagine', naam: 'Imagine', voorvoegsels: ['imagine'] } })[id] || null },
+    Promise };
   vm.createContext(ctx);
-  vm.runInContext(SRC.slice(begin, eind) + '\n;this.appBesluiten = appBesluiten; this.besluitenTik = besluitenTik; this.besluitenStand = besluitenStand;', ctx);
+  vm.runInContext(SRC.slice(begin, eind) + '\n;this.appBesluiten = appBesluiten; this.besluitenTik = besluitenTik; this.besluitenStand = besluitenStand; this.appCodeCijfer = appCodeCijfer;', ctx);
   return { ctx, rpc, box };
 }
 const res = () => ({ _app: {} });
 
 test('server: blok gevonden en laadt', function () { assert.ok(begin > 0 && eind > begin); });
 
-test('server: GET scherm, POST antwoord; gevoelige Ja eist en verbruikt de vingerafdruk', function () {
+test('server: GET scherm, POST antwoord; gevoelige Ja eist en verbruikt de vingerafdruk', async function () {
   const d = map(); const o = serverOmgeving(d);
-  let r = res(); o.ctx.appBesluiten({}, r, { id: 'pixel' }, {}, 'GET /app/besluiten', {});
+  let r = res(); await o.ctx.appBesluiten({}, r, { id: 'pixel' }, {}, 'GET /app/besluiten', {});
   assert.strictEqual(r.status, 200); assert.strictEqual(r.obj.voorstellen.length, 4);
   r = res(); o.ctx.appBesluiten({}, r, { id: 'pixel' }, {}, 'POST /app/besluiten/antwoord', { nr: 1, keuze: 'ja' });
   assert.deepStrictEqual([r.status, r.obj.antwoord.keuze], [200, 'ja']);
@@ -203,9 +207,9 @@ test('server: GET scherm, POST antwoord; gevoelige Ja eist en verbruikt de vinge
   assert.strictEqual(r.status, 404);
 });
 
-test('server: zonder databestand een leeg scherm (geen 503)', function () {
+test('server: zonder databestand een leeg scherm (geen 503)', async function () {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'besluiten-leeg-')); const o = serverOmgeving(d);
-  const r = res(); o.ctx.appBesluiten({}, r, { id: 'pixel' }, {}, 'GET /app/besluiten', {});
+  const r = res(); await o.ctx.appBesluiten({}, r, { id: 'pixel' }, {}, 'GET /app/besluiten', {});
   assert.deepStrictEqual([r.status, r.obj.leeg], [200, true]);
 });
 
@@ -240,4 +244,124 @@ test('Codex ronde 2: voorstellen.json kapot of weg → niets verstuurd of gemark
   fs.writeFileSync(path.join(d, 'voorstellen.json'), goed);
   const r = await B.ronde({ dir: d, nu: () => T0 + B.RUST_MS + 3, zet: async (p) => { gezet.push(p); return { id: 1 }; } });
   assert.strictEqual(r.aangeboden, 1); assert.doesNotMatch(gezet[0].prompt, /LET OP/);
+});
+
+// ── wv3714: rapportboek per app (stand, koppeling, ?app=, Nieuw cijfer vragen) — VERZONNEN voorstellen en rijen ──
+const PROEF2 = [
+  { nr: 1, soort: 'review', onderwerp: 'facturen-kern', titel: 'Proef A', vraag: 'A?', raakt: [], gevoelig: false, app: 'facturen' },
+  { nr: 2, soort: 'een9', onderwerp: 'facturen', titel: 'Proef B', vraag: 'B?', raakt: ['geld'], gevoelig: true, app: 'facturen' },
+  { nr: 3, soort: 'een9', onderwerp: 'facturen', titel: 'Proef C', vraag: 'C?', raakt: [], gevoelig: false, app: 'facturen' },
+  { nr: 4, soort: 'een9', onderwerp: 'facturen', titel: 'Proef D', vraag: 'D?', raakt: [], gevoelig: false, app: 'facturen' },
+  { nr: 5, soort: 'een9', onderwerp: 'facturen', titel: 'Proef E', vraag: 'E?', raakt: [], gevoelig: false, app: 'facturen' },
+  { nr: 6, soort: 'een9', onderwerp: 'facturen', titel: 'Proef F', vraag: 'F?', raakt: [], gevoelig: false, app: 'facturen' },
+  { nr: 7, soort: 'een9', onderwerp: 'facturen', titel: 'Proef G', vraag: 'G?', raakt: [], gevoelig: false, app: 'facturen', vervallen: 'proef' },
+  { nr: 8, soort: 'een9', onderwerp: 'imagine', titel: 'Proef H', vraag: 'H?', raakt: [], gevoelig: false, app: 'imagine' },
+  { nr: 9, soort: 'een9', onderwerp: 'facturen', titel: 'Proef I', vraag: 'I?', raakt: [], gevoelig: false, app: 'facturen' },
+];
+function map2() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'rapportboek-'));
+  fs.writeFileSync(path.join(d, 'voorstellen.json'), JSON.stringify({ versie: 1, gemaakt: '2026-11-21T00:00:00Z', voorstellen: PROEF2,
+    cijfers: { facturen: [{ rapport: '01_Ontwikkeling/x/Een 9 - facturen.md', naam: 'facturen', cijfer: '7,5', doel: '9', datum: '2026-11-20' }] } }));
+  return d;
+}
+const RIJEN = [
+  { id: 101, label: 'machinekamer:facturen-a', status: 'klaar', bron: 'David 21-11 13:18: besluitenpagina nr 2, 3' },
+  { id: 102, label: 'machinekamer:facturen-a-nacontrole', status: 'klaar', soort: 'nacontrole', bron: 'besluitenpagina nr 3' },
+  { id: 103, label: 'machinekamer:facturen-b', status: 'gestart', bron: 'besluitenpagina 4' },
+  { id: 104, label: 'machinekamer:facturen-c', status: 'open', bron: 'besluit nr 5 / 3C113 (21-11-2026)' },
+  { id: 105, label: 'machinekamer:besluiten-20261121130000-3-6', status: 'klaar', bron: null },
+  { id: 106, label: 'machinekamer:iets-anders', status: 'open', bron: 'David 21-11 13:00' },
+  { id: 107, label: 'machinekamer:facturen-d', status: 'open', bron: 'besluitenpagina nr 77' },   // 77 bestaat niet
+];
+
+test('wv3714 nrsUitBron: nummers na besluit(enpagina), geen datum of C-id', function () {
+  assert.deepStrictEqual(B.nrsUitBron('David 21-11 13:18/13:19: besluitenpagina nr 905, 909'), [905, 909]);
+  assert.deepStrictEqual(B.nrsUitBron('x + besluitenpagina 378/466/434/484'), [378, 466, 434, 484]);
+  assert.deepStrictEqual(B.nrsUitBron('besluit nr 413 / 3C113'), [413]);
+  assert.deepStrictEqual(B.nrsUitBron('besluitenpagina nr 14, 15 en 16 (21-11-2026)'), [14, 15, 16]);
+  assert.deepStrictEqual(B.nrsUitBron('besluitenpagina nr 21-11'), []);
+  assert.deepStrictEqual(B.nrsUitBron('besluitenpagina nr 1, 77', { 1: true }), [1]);
+});
+
+test('wv3714 stand per voorstel + telling per app; koppeling onthoudt een klare rij buiten het venster', function () {
+  const d = map2(); const t = '2026-11-21T08:00:00.000Z';
+  B.antwoord(d, { nr: 1, keuze: 'nee' }, t);
+  B.antwoord(d, { nr: 2, keuze: 'ja' }, t);
+  B.antwoord(d, { nr: 3, keuze: 'ja' }, t);
+  B.antwoord(d, { nr: 4, keuze: 'anders', toelichting: 'pas in januari' }, t);
+  B.antwoord(d, { nr: 5, keuze: 'ja' }, t);
+  B.antwoord(d, { nr: 6, keuze: 'ja' }, t);
+  // nr 6 zat in bundel 105 (klaar) zonder eigen klus → verwerkt; nr 9 geen antwoord
+  const st = JSON.parse(fs.readFileSync(path.join(d, 'antwoorden.json'), 'utf8'));
+  st.antwoorden['6'].aangeboden = { voor: st.antwoorden['6'].op, op: t, label: RIJEN[4].label, rij: 105 };
+  fs.writeFileSync(path.join(d, 'antwoorden.json'), JSON.stringify(st));
+  const k1 = B.koppelBij(d, RIJEN, t, PROEF2);
+  assert.strictEqual(k1.gewijzigd, true);
+  assert.deepStrictEqual(Object.keys(k1.koppeling.rijen).sort(), ['101', '102', '103', '104', '105']);
+  assert.strictEqual(B.koppelBij(d, RIJEN, t, PROEF2).gewijzigd, false);   // niets nieuw = niet schrijven
+  const s = B.schermMetStand(d, k1.koppeling, 'facturen');
+  const stand = {}; s.voorstellen.forEach((x) => { stand[x.nr] = x.stand; });
+  assert.deepStrictEqual(stand, { 1: 'nee', 2: 'live', 3: 'nagemeten', 4: 'wordt_gebouwd', 5: 'in_de_rij', 6: 'verwerkt', 7: 'vervallen', 9: 'wacht_op_jou' });
+  assert.deepStrictEqual(s.telling, { totaal: 7, beantwoord: 6, ja: 4, nee: 1, anders: 1, wacht: 1, gebouwd: 2, te_bouwen: 5, niet_open: 1 });
+  assert.strictEqual(s.cijfers[0].cijfer, '7,5');
+  assert.ok(s.voorstellen.every((x) => x.app === 'facturen'));
+  // de telling klopt met antwoorden.json
+  const a = JSON.parse(fs.readFileSync(path.join(d, 'antwoorden.json'), 'utf8')).antwoorden;
+  const open = PROEF2.filter((x) => x.app === 'facturen' && !x.vervallen).map((x) => String(x.nr));
+  assert.strictEqual(open.filter((n) => a[n] && a[n].keuze === 'ja').length, s.telling.ja);
+  // later: rij 101/102 vallen uit het venster (3 dagen), 103 wordt klaar → stand blijft klopen
+  const k2 = B.koppelBij(d, [Object.assign({}, RIJEN[2], { status: 'klaar' })], t, PROEF2);
+  const s2 = B.schermMetStand(d, k2.koppeling, 'facturen');
+  assert.deepStrictEqual(s2.voorstellen.filter((x) => x.nr <= 4).map((x) => x.stand), ['nee', 'live', 'nagemeten', 'live']);
+  // zonder app: alle voorstellen met stand (Besluitenpagina)
+  const s3 = B.schermMetStand(d, k2.koppeling, null);
+  assert.strictEqual(s3.voorstellen.length, PROEF2.length); assert.strictEqual(s3.voorstellen.find((x) => x.nr === 8).stand, 'wacht_op_jou');
+  // kapot geheugen → opnieuw opgebouwd, met vlag
+  fs.writeFileSync(path.join(d, 'koppeling.json'), '{kapot');
+  const k3 = B.koppelBij(d, RIJEN.slice(0, 2), t, PROEF2);
+  assert.deepStrictEqual([k3.kapot, Object.keys(k3.koppeling.rijen).length], [true, 2]);
+  assert.strictEqual((fs.statSync(path.join(d, 'koppeling.json')).mode & 0o777), 0o600);
+});
+
+test('wv3714 server: GET /app/besluiten/app/<id> = rapportboek; onbekende app 400; werkvoorraad stuk = scherm met stand_fout', async function () {
+  const d = map2(); const o = serverOmgeving(d, { items: RIJEN });
+  B.antwoord(d, { nr: 2, keuze: 'ja' }, '2026-11-21T08:00:00.000Z');
+  let r = res(); await o.ctx.appBesluiten({}, r, { id: 'pixel' }, {}, 'GET /app/besluiten/app/facturen', {});
+  assert.strictEqual(r.status, 200); assert.strictEqual(r.obj.app, 'facturen');
+  assert.strictEqual(r.obj.voorstellen.length, 8); assert.strictEqual(r.obj.voorstellen.find((x) => x.nr === 2).stand, 'live');
+  assert.ok(fs.existsSync(path.join(d, 'koppeling.json')));
+  r = res(); await o.ctx.appBesluiten({}, r, { id: 'pixel' }, {}, 'GET /app/besluiten/app/bestaat-niet', {});
+  assert.strictEqual(r.status, 400);
+  r = res(); await o.ctx.appBesluiten({}, r, { id: 'pixel' }, {}, 'GET /app/besluiten', {});
+  assert.deepStrictEqual([r.status, r.obj.voorstellen.length, r.obj.voorstellen.find((x) => x.nr === 2).stand], [200, 9, 'live']);
+  const o2 = serverOmgeving(d, { wvFout: true });
+  r = res(); await o2.ctx.appBesluiten({}, r, { id: 'pixel' }, {}, 'GET /app/besluiten/app/facturen', {});
+  assert.deepStrictEqual([r.status, !!r.obj.stand_fout, r.obj.voorstellen.find((x) => x.nr === 2).stand], [200, true, 'live']);   // uit het geheugen
+  // een Ja vanuit het rapportboek gaat door dezelfde route: zelfde opslag, journaalregel, en in de volgende kwartierbundel
+  r = res(); o.ctx.appBesluiten({}, r, { id: 'pixel' }, {}, 'POST /app/besluiten/antwoord', { nr: 3, keuze: 'ja' });
+  assert.strictEqual(r.status, 200);
+  const regels = fs.readFileSync(path.join(d, 'antwoorden.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.strictEqual(regels[regels.length - 1].nr, 3);
+  const later = Date.now() + B.RUST_MS + 1000;
+  assert.ok(B.teAanbieden(JSON.parse(fs.readFileSync(path.join(d, 'antwoorden.json'), 'utf8')), later).indexOf('3') >= 0);
+});
+
+test('wv3714 server: kwartiertik werkt de koppeling bij, ook zonder paginabezoek (Codex MOET 1)', async function () {
+  const d = map2(); const o = serverOmgeving(d, { items: RIJEN });
+  await o.ctx.besluitenTik();
+  const k = JSON.parse(fs.readFileSync(path.join(d, 'koppeling.json'), 'utf8'));
+  assert.strictEqual(k.rijen['101'].status, 'klaar');
+});
+
+test('wv3714 server: Nieuw cijfer vragen = één rij met app-label, herkomst david, grondwet-blok; onbekende app 400', async function () {
+  const d = map2(); const o = serverOmgeving(d);
+  let r = res(); await o.ctx.appCodeCijfer({}, r, { id: 'pixel' }, { app: 'facturen' });
+  assert.strictEqual(r.status, 200);
+  const z = o.rpc.find((x) => x[0] === 'mk_werkvoorraad_zet')[1];
+  assert.match(z.p_label, /^machinekamer:facturen-een9-cijfer-\d{8}$/);
+  assert.match(z.p_prompt, /^GRONDWET-KERN v1/); assert.match(z.p_prompt, /Een 9 - facturen\.md \(7,5, 2026-11-20\)/);
+  assert.match(z.p_prompt, /--app-bij/);
+  assert.ok(o.rpc.some((x) => x[0] === 'mk_werkvoorraad_herkomst' && x[1].p_herkomst === 'david'));
+  r = res(); await o.ctx.appCodeCijfer({}, r, { id: 'pixel' }, { app: '../x' });
+  assert.strictEqual(r.status, 400);
 });
