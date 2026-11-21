@@ -24839,6 +24839,15 @@ const secondbrain = (function () {
       },
       hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
       inhoud: brainTekst,   // wv3734: pdf en docx op inhoud
+      // wv3735 (3C122): typfouten vergeven via de tekstindex van Zoek snel (zoekindex.py, met de Woordenlijst); zoekSnel staat verderop in
+      // dit bestand en bestaat pas bij de eerste zoekvraag. Index weg, ouder dan 48 u of fout = null (dan zonder).
+      gelijkend: async function (q) {
+        let z = null;
+        try { z = zoekSnel; } catch (e) { return null; }
+        if (!z || typeof z.indexZoek !== 'function') return null;
+        const r = await z.indexZoek(String(q).slice(0, 200));
+        return r && r.stand === 'ok' && r.j ? r.j : null;
+      },
       // wv3295: eigen databank (vaultzoek.js) in plaats van Cloudflare AI Search; zelfde vorm [{key: 'vault/<pad>', text, score}]
       betekenis: async function (q) {
         if (!vaultzoek) return null;
@@ -24875,8 +24884,9 @@ if (secondbrain) setInterval(function () {
 async function appSecondBrain(req, res, a, d, route) {
   if (!secondbrain) return appWeiger(res, 404, 'Second Brain zit niet in deze versie van de pod', 'secondbrain ontbreekt');
   if (!appTeller('secondbrain', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 600)', 'grens secondbrain');
-  if (route === 'POST /app/secondbrain/zoek' && d && d.betekenis && !appTeller('secondbrain-betekenis', 60, 3600000))
-    return appWeiger(res, 429, 'zoeken op betekenis te vaak dit uur (max 60); het gewone zoeken werkt nog', 'grens secondbrain-betekenis');
+  // wv3735 (3C122): Brain › Zoeken vraagt bij elke zoekvraag ook op betekenis (groep Verwant); eigen databank, inbedden in het gratis tegoed: 60 → 200
+  if (route === 'POST /app/secondbrain/zoek' && d && d.betekenis && !appTeller('secondbrain-betekenis', 200, 3600000))
+    return appWeiger(res, 429, 'zoeken op betekenis te vaak dit uur (max 200); het gewone zoeken werkt nog', 'grens secondbrain-betekenis');
   let r;
   try { r = await secondbrain.app(route, d || {}, {}); }
   catch (e) { logError('app-secondbrain', e); return appWeiger(res, 500, 'fout op de pod', 'secondbrain uitzondering'); }

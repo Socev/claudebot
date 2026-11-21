@@ -25,7 +25,8 @@ const KAART_VERS_MS = 120000;       // ouder = opnieuw bouwen bij de volgende vr
 const MAX_MD = 2 * 1024 * 1024;
 const MAX_BESTAND = 20 * 1024 * 1024;
 const MAX_TREFFERS = 40, FRAGMENT = 160, ZOEK_MS = 4000, MAX_Q = 200;
-const MAX_ENT = 8, MIN_TEKST = 10, MAX_LEZEN = 300;   // wv2077: hooguit 8 entiteiten, minstens 10 plekken voor tekstvondsten, 300 tekstvondsten om te rangschikken
+const MAX_ENT = 8, MIN_TEKST = 10, MAX_LEZEN = 300;
+const GELIJKEND_MAX = 12, GELIJKEND_ONDER = 5;   // wv3735: hooguit 12 pagina's uit de tekstindex (tikfouten, Woordenlijst), alleen bij < 5 eigen vondsten   // wv2077: hooguit 8 entiteiten, minstens 10 plekken voor tekstvondsten, 300 tekstvondsten om te rangschikken
 
 // wv1931 (David 28-10: "Jij schermt af wat ik al heb"): geen vaultmap meer verborgen voor David. Beveiliging, Tokens, Vault-RAG,
 // TempFinData, Claude outputs en 0b-werkmap zijn zichtbaar; het sleutelmasker (masker) geldt er zoals overal. Punt-mappen en
@@ -788,6 +789,14 @@ function maak(opt) {
       const woorden = plat(q).split(/\s+/).filter(function (w) { return w.length > 0; }).slice(0, 8);
       const qPlat = woorden.join(' ');
       const t0 = Date.now();
+      // wv3735 (besluitenpagina nr 422 = 3C122, David Ja 21-11 13:20): typfouten vergeven. De tekstindex van Zoek snel (zoekindex.py:
+      // tikfout → dichtstbijzijnde woord uit de vault, varianten uit de Woordenlijst) loopt als apart proces mee terwijl hieronder gezocht
+      // wordt; zijn pagina's die hier niet al gevonden zijn komen achteraan in de tekstgroep (waar 'gelijkend'). Zonder index, te oud of
+      // te traag: gewoon zonder (opt.gelijkend geeft dan null).
+      let gelijkendP = null;
+      if (typeof opt.gelijkend === 'function') {
+        try { gelijkendP = Promise.resolve(opt.gelijkend(q)).catch(function () { return null; }); } catch (e) { gelijkendP = null; }
+      }
       let afgekapt = false;
       const lijst = k.bestanden.filter(past);
       const stamPlat = function (b) { return plat(b.p.split('/').pop().replace(/\.[^.\/]+$/, '')).replace(/[^a-z0-9]+/g, ' ').trim(); };
@@ -879,8 +888,28 @@ function maak(opt) {
         opTekst.push({ b: b, pad: b.p, waar: stuk ? 'inhoud' : 'tekst', groep: 'tekst', fragment: fragment(t, Math.min(vanaf, t.length), ctx), n: n + (x.map === 0 ? 3 : 0), fr: fr ? 1 : 0 });
         if (!fr) gewoon++;
       }
+      // wv3735: de pagina's uit de tekstindex die hierboven niet gevonden zijn (meestal: een typfout of een woord uit de Woordenlijst).
+      // Alleen als hier weinig gevonden is (GELIJKEND_ONDER): de index zoekt elk woord los (of), zodat hij bij een vraag die al goed
+      // vindt vooral ruis toevoegt. Een typfout in één van de woorden geeft hierboven niets (alle woorden moeten erin staan).
+      let gelijkendN = 0;
+      if (gelijkendP && ent.length + opNaam.length + opTekst.filter(function (x) { return x.waar !== 'map'; }).length < GELIJKEND_ONDER) {
+        const gl = await gelijkendP;
+        const pl = gl && Array.isArray(gl.paginas) ? gl.paginas : [];
+        const delen = gl && Array.isArray(gl.delen) ? gl.delen : [];
+        for (const [o, pd] of pl.slice(0, GELIJKEND_MAX).entries()) {
+          const i = k.perPad.get(sleutel(String(pd || '')));
+          if (i === undefined) continue;
+          const b = k.bestanden[i];
+          if (!past(b) || gehad.has(b.p) || opTekst.some(function (x) { return x.pad === b.p; })) continue;
+          gehad.add(b.p);
+          const d = delen.find(function (x) { return x && x.pad === pd && typeof x.tekst === 'string'; });
+          const fr = d ? masker(d.tekst.replace(/^\s*\|?[-:| ]+\|?\s*$/gm, ' ')).replace(/\s+/g, ' ').trim().slice(0, FRAGMENT) : '';
+          opTekst.push({ b: b, pad: b.p, waar: 'gelijkend', groep: 'tekst', fragment: fr, n: -1, gl: 1, o: o });
+          gelijkendN++;
+        }
+      }
       opNaam.sort(function (a, z) { return rang(a.b) - rang(z.b) || a.s - z.s || z.b.m - a.b.m; });
-      opTekst.sort(function (a, z) { return (z.fr || 0) - (a.fr || 0) || rang(a.b) - rang(z.b) || z.n - a.n || z.b.m - a.b.m; });
+      opTekst.sort(function (a, z) { return (a.gl || 0) - (z.gl || 0) || (a.gl ? a.o - z.o : 0) || (z.fr || 0) - (a.fr || 0) || rang(a.b) - rang(z.b) || z.n - a.n || z.b.m - a.b.m; });
       const naamDeel = opNaam.slice(0, MAX_TREFFERS - ent.length - Math.min(opTekst.length, MIN_TEKST));   // de tekstgroep houdt minstens MIN_TEKST plekken
       const alle = ent.concat(naamDeel).concat(opTekst);
       const treffers = alle.slice(0, MAX_TREFFERS).map(function (x) {
@@ -890,7 +919,7 @@ function maak(opt) {
         return t;
       });
       const j = { ok: true, q: q, treffers: treffers, afgekapt: afgekapt || ent.length + opNaam.length + opTekst.length > treffers.length, ms: Date.now() - t0,
-        groepen: { entiteiten: ent.length, paginas: opNaam.length, tekst: opTekst.length } };
+        groepen: { entiteiten: ent.length, paginas: opNaam.length, tekst: opTekst.length, gelijkend: gelijkendN } };
       if (entFout) j.ent_fout = true;
       if (tel) j.tel = tel;
       return { status: 200, j: j };

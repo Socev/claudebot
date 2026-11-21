@@ -448,7 +448,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   // ── 9. server.js ──
   const src = fs.readFileSync('server.js', 'utf8');
   toets('9 dispatch GET /app/secondbrain en POST /app/secondbrain/* via appSecondBrain', /route === 'GET \/app\/secondbrain' \|\| route\.indexOf\('POST \/app\/secondbrain\/'\) === 0\) return typeof appSecondBrain === 'function'/.test(src));
-  toets('9 grens 600/u en betekenis 60/u', /appTeller\('secondbrain', 600, 3600000\)/.test(src) && /appTeller\('secondbrain-betekenis', 60, 3600000\)/.test(src));
+  toets('9 grens 600/u en betekenis 200/u (wv3735)', /appTeller\('secondbrain', 600, 3600000\)/.test(src) && /appTeller\('secondbrain-betekenis', 200, 3600000\)/.test(src));
   toets('9 tellers vooraf in appStaat (anders crasht appTeller)', /tellers: \{[^}]*secondbrain: \[\], 'secondbrain-betekenis': \[\]/.test(src));
   toets('9 glijdroutes: open en zoek', /\['POST \/app\/secondbrain\/open', 'POST \/app\/secondbrain\/zoek'\]\.forEach\(function \(r\) \{ APP_GLIJD_ROUTES\.add\(r\); \}\);/.test(src));
   const slotVrij = /const APP_SLOT_VRIJ = new Set\(\[([^\]]*)\]\)/.exec(src)[1];
@@ -551,6 +551,37 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     const sZ = S.maak({ vault: V, dir: DZ, nu: () => Date.UTC(2026, 9, 26, 22, 30) });   // 26-10 23:30 Amsterdam (wintertijd)
     const srtZ = (o) => JSON.stringify(Object.keys(o || {}).sort().map((k) => [k, o[k]]));
     toets('13 week rond de klokwissel: 20-10 t/m 26-10, niet 19-10', srtZ(sZ.health().herkomst.dagen7) === srtZ({ kaart: 1, zoeken: 1 }), sZ.health().herkomst);
+
+  // wv3735 (3C122): typfouten vergeven via de tekstindex (opt.gelijkend); alleen bij weinig eigen vondsten, achteraan in de tekstgroep
+  { const VG = path.join(W, 'vault-g');
+    const zg = (p, t) => { fs.mkdirSync(path.dirname(path.join(VG, p)), { recursive: true }); fs.writeFileSync(path.join(VG, p), t); };
+    zg('10_Zakelijk/Tolgaarde/Tolgaarde.md', '# Tolgaarde\nHuisartsenpraktijk in Leusden. Telefoon 033-0000000.\n');
+    zg('10_Zakelijk/Tolgaarde/Rooster.md', '# Rooster\nWie werkt waar.\n');
+    zg('20_Prive/Auto.md', '# Auto\nKenteken XX-00-YY.\n');
+    for (let i = 0; i < 6; i++) zg('10_Zakelijk/Map/Kenteken ' + i + '.md', '# k\nkenteken\n');
+    let gevraagd = [];
+    const TOKG = 'abcd_' + 'Qw3rTy7uIo9pAs1dFg5hJk2lZx4cVb6nM8qW0eR';
+    const sg = S.maak({ vault: VG, dir: path.join(W, 'staat-g'), hmac: (p) => 'h' + p.length,
+      gelijkend: async (q) => { gevraagd.push(q); return { paginas: ['10_Zakelijk/Tolgaarde/Tolgaarde.md', 'bestaat/niet.md', '20_Prive/Auto.md', '10_Zakelijk/Tolgaarde/Rooster.md'],
+        delen: [{ pad: '10_Zakelijk/Tolgaarde/Tolgaarde.md', kop: 'Tolgaarde', van: 1, tekst: '# Tolgaarde\nHuisartsenpraktijk in Leusden. ' + TOKG }] }; } });
+    const g1 = await sg.app('POST /app/secondbrain/zoek', { q: 'Tolgarde', soorten: [] }, {});
+    const t1 = g1.j.treffers;
+    toets('14 typfout: de index-pagina\'s komen erbij als tekst/gelijkend, in de volgorde van de index, buiten de kaart weg',
+      t1.map((t) => t.pad).join() === '10_Zakelijk/Tolgaarde/Tolgaarde.md,20_Prive/Auto.md,10_Zakelijk/Tolgaarde/Rooster.md' && t1.every((t) => t.waar === 'gelijkend' && t.groep === 'tekst') && g1.j.groepen.gelijkend === 3 && gevraagd[0] === 'Tolgarde', g1.j);
+    toets('14 fragment uit de index, gemaskeerd', /Huisartsenpraktijk in Leusden/.test(t1[0].fragment) && t1[0].fragment.indexOf(TOKG) < 0 && t1[1].fragment === '', t1[0]);
+    const g2 = await sg.app('POST /app/secondbrain/zoek', { q: 'Tolgarde', soorten: ['pdf'] }, {});
+    const g2b = await sg.app('POST /app/secondbrain/zoek', { q: 'Tolgarde', soorten: ['bronnen'] }, {});
+    toets('14 zelfde filter (soort en plek) op de index-pagina\'s', g2.j.treffers.length === 0 && g2b.j.treffers.length === 0, [g2.j.treffers, g2b.j.treffers]);
+    const g3 = await sg.app('POST /app/secondbrain/zoek', { q: 'kenteken', soorten: [] }, {});
+    toets('14 genoeg eigen vondsten (>= 5): geen index-pagina\'s erbij', g3.j.treffers.every((t) => t.waar !== 'gelijkend') && g3.j.groepen.gelijkend === 0, g3.j.treffers.map((t) => t.waar));
+    const g4 = await sg.app('POST /app/secondbrain/zoek', { q: 'Tolgaarde', soorten: [] }, {});
+    toets('14 eigen vondst eerst, de index vult aan zonder dubbel', g4.j.treffers[0].pad === '10_Zakelijk/Tolgaarde/Tolgaarde.md' && g4.j.treffers[0].waar !== 'gelijkend' &&
+      g4.j.treffers.filter((t) => t.pad === '10_Zakelijk/Tolgaarde/Tolgaarde.md').length === 1, g4.j.treffers);
+    const sg2 = S.maak({ vault: VG, dir: path.join(W, 'staat-g2'), hmac: (p) => 'h' + p.length, gelijkend: async () => { throw new Error('index weg'); } });
+    const g5 = await sg2.app('POST /app/secondbrain/zoek', { q: 'Tolgarde', soorten: [] }, {});
+    const sg3 = S.maak({ vault: VG, dir: path.join(W, 'staat-g3'), hmac: (p) => 'h' + p.length, gelijkend: async () => null });
+    const g6 = await sg3.app('POST /app/secondbrain/zoek', { q: 'Tolgarde', soorten: [] }, {});
+    toets('14 index faalt of geeft niets: gewoon zonder (200, leeg)', g5.status === 200 && g5.j.treffers.length === 0 && g6.status === 200 && g6.j.treffers.length === 0, [g5, g6]); }
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
