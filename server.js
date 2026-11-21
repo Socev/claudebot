@@ -4706,6 +4706,7 @@ function handleRequest(req, res) {
       hartslag_alarm: typeof hartslagAlarmInfo === 'object' ? hartslagAlarmInfo : null,   // wv3484: verlopen hartslag → box (laatste ronde, gemeld, overgeslagen)   // wv3194: inhaal gemiste weekrondes (laatste tik, aantallen deze week, bezig)
       nieuwsbrief: nieuwsbriefInfo(),   // wv2190: nieuwsbrief-bloemlezing (laatste ronde, bezig; geen inhoud)
       te_lezen: { aan: typeof teLezenMod !== 'undefined' && !!teLezenMod },   // wv2245: Te lezen in Voor jou (module in de release)
+      raad: raadInfo(),   // wv3716: raadzaal op het forum (rondes vandaag, draden per status; geen inhoud)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761/wv942: App AIX (laatste lezing, catalogus, plaatsing, uur- en weekronde; geen inhoud)
       aix: typeof aixInfo === 'function' ? aixInfo() : { aan: false },   // wv942: aix.js (sleutel bruikbaar?, laatst bereikbaar, plat sinds; nooit de sleutel)
@@ -5088,6 +5089,19 @@ function handleRequest(req, res) {
           // wv1386: daarna (na elkaar: beide nemen de aanvoergrendel) het ClinPGx-seintje
           .then(function () { return healthPgxSeintje(); }).catch(function (e) { logError('health-pgx-seintje', e); });
       });
+    }); });
+  }
+
+  // ── wv3716: proef van de raadzaal (alleen machinekamer, API_SECRET): de pod begint zelf een draad "Raad (proef): …" in intern ──
+  if (req.method === 'POST' && req.url === '/raad/proef') {
+    return rolPoort(res, function () { readBody(req, async function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      { const gst = podGeheimStatus(d.secret); if (gst) return weigerGeheim(res, gst); }
+      if (!raad) return berichtStuur(res, 404, { ok: false, fout: 'raadzaal zit niet in deze versie (of RAAD_UIT)' });
+      try {
+        if (d.tik === true) return berichtStuur(res, 200, await raad.tik());
+        return berichtStuur(res, 200, await raad.proef(d.vraag));
+      } catch (e) { logError('raad-proef', e); return berichtStuur(res, 500, { ok: false, fout: String(e && e.message || e).slice(0, 120) }); }
     }); });
   }
 
@@ -24794,6 +24808,48 @@ async function vaultzoekTik() {
   } catch (e) { logError('vaultzoek-tik', e); }
 }
 if (vaultzoekRonde && SERVER_ECHT) { setInterval(function () { vaultzoekTik(); }, 5 * 60000).unref(); }
+// ── wv3716: Raadzaal op het forum (besluitenpagina nr 488 = 3C188, David Ja 21-11-2026 13:09) ────────────────────────────────────────
+// Logica in raad.js; ontwerp + Codex-review: /opt/data/mk-scripts/wv3716/ontwerp-raadzaal.md. David begint in het besloten subforum intern
+// een draad "Raad: …" (knop in het forum); deze tik (2 min, alleen primair) laat rekenaar, tegenspreker, broncontroleur (Claude zonder tools,
+// harvesterClaude) en gpt (openai-hulp, afnemer raadzaal) elk ≤ 5 zinnen plaatsen, socev sluit af; één tweede ronde op Davids reactie.
+// Forum via de podsleutel (moderator, `als`), elk bericht met alleen_forum=intern (API weigert 409 daarbuiten). Uit: RAAD_UIT=1 of raad.js weg.
+const RAAD_DIR = serverPad('raad', process.env.RAAD_DIR, '/opt/data/raad', serverProefDeel('raad'));
+const RAAD_FORUM_API = 'https://forum.socev.dev/api/';
+async function raadForum(methode, pad, body) {
+  const sl = process.env.WERKKAMER_SLEUTEL_POD || '';
+  if (!sl) throw new Error('forumsleutel ontbreekt');
+  const r = await fetch(RAAD_FORUM_API + pad, { method: methode, headers: Object.assign({ 'X-Werkkamer-Sleutel': sl }, body ? { 'Content-Type': 'application/json' } : {}),
+    body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(20000) });
+  let j = null; try { j = await r.json(); } catch (e) { j = null; }
+  if (!j) return { ok: false, status: r.status };
+  if (r.status >= 400) return Object.assign({ ok: false, status: r.status }, j);
+  return j;
+}
+const raad = (function () {
+  const p = path.join(__dirname, 'raad.js');
+  if (!fs.existsSync(p) || process.env.RAAD_UIT === '1') return null;
+  try {
+    return require(p).maak({ staatPad: path.join(RAAD_DIR, 'staat.json'), fout: logError, log: function (t) { schrijfLog(nu() + ' ' + t); },
+      claude: harvesterClaude,
+      openai: function (v) { return openaiHulp ? openaiHulp.vraag(v) : Promise.resolve({ ok: false, status: 'openai-hulp ontbreekt' }); },
+      vault: function (q) { return vaultzoek ? vaultzoek.zoekBrain(q) : Promise.resolve([]); },
+      forum: {
+        draden: function (forum) { return raadForum('GET', 'draden?forum=' + encodeURIComponent(forum)); },
+        draad: function (id) { return raadForum('GET', 'draad/' + encodeURIComponent(id) + '?stil=1'); },
+        post: function (id, b) { return raadForum('POST', 'draad/' + encodeURIComponent(id) + '/bericht', b); },
+        nieuw: function (b) { return raadForum('POST', 'draad', b); },
+      } });
+  } catch (e) { logError('raad', e); return null; }
+})();
+async function raadTik() {
+  if (!raad || !SERVER_ECHT || !rolPrimair()) return;
+  try { await raad.tik(); } catch (e) { logError('raad-tik', e); }
+}
+if (raad && SERVER_ECHT) { setTimeout(function () { raadTik(); }, 90000).unref(); setInterval(function () { raadTik(); }, 2 * 60000).unref(); }
+function raadInfo() {
+  if (!raad) return { aan: false };
+  try { return raad.health(); } catch (e) { return { aan: true, fout: true }; }
+}
 function vaultzoekInfo() {
   if (!vaultzoek) return { aan: false };
   const uit = { aan: true, ronde: vaultzoekRonde ? vaultzoekRonde.info() : { aan: false } };
