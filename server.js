@@ -6056,7 +6056,7 @@ const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
 const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // vaste plek: wie bezig is, houdt over de dagdeelgrens heen 5 min glijdend (wv488; was fase 4: 5 min glijdend)
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/rij/terug', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
-  'POST /app/broedstoof/voorrang', 'POST /app/broedstoof/knop', 'POST /app/harvester/broedstoof', 'POST /app/harvester/weg', 'POST /app/harvester/terug', 'POST /app/harvester/bron-nieuw',
+  'POST /app/broedstoof/voorrang', 'POST /app/broedstoof/knop', 'POST /app/agents/rij', 'POST /app/harvester/broedstoof', 'POST /app/harvester/weg', 'POST /app/harvester/terug', 'POST /app/harvester/bron-nieuw',
   'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/sleutels/nieuw', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
@@ -10237,6 +10237,15 @@ async function appAgents(req, res, a) {
   });
   const lopend = agents.filter(function (a) { return a.status === 'loopt' || a.status === 'wacht'; })
     .sort(function (a, b) { return String(a.gestart).localeCompare(String(b.gestart)); });
+  // wv3746 (3C185): bij een lopende klus "meestal ± N min" (mediaan van de geslaagde klussen in het register met dezelfde bovengrens,
+  // anders van alle) en "uiterlijk" = start + bovengrens (max_minuten uit het register)
+  const duurMed = appAgentsDuurMediaan(reg, nu);
+  lopend.forEach(function (x) {
+    const r = reg[x.job_id] || {};
+    const mm = Number(r.max_minuten);
+    x.meestal_min = duurMed.per[mm] != null ? duurMed.per[mm] : duurMed.alle;
+    x.uiterlijk = r.started && mm > 0 ? new Date(r.started + mm * 60000).toISOString() : null;
+  });
   // wv3607 (actieplan 3B06, Fable-review agents idee 6): was .slice(0, 30), stil — op een drukke dag (136 klussen) zag je 's ochtends
   // gistermiddag niet meer. Nu alles wat de laatste 48 uur afrondde (minstens de jongste 30, hooguit het registerplafond) en het
   // totaal in het register, zodat de app zegt hoeveel er nog zijn.
@@ -10268,8 +10277,13 @@ async function appAgents(req, res, a) {
       na: (w.wacht_op || []).map(function (x) { return String(x).replace(/^item:/, 'wv').replace(/^[a-f0-9]{16}$/, 'een lopende agent'); })
         .filter(function (x, i, l) { return l.indexOf(x) === i; }).slice(0, 4),
       wacht_klus: wachtKlus(w), nacontrole: w.soort === 'nacontrole',
-      doorwerk: !!w.doorwerk_opdracht, voorrang: (w.voorrang || 0) > 0 };
+      doorwerk: !!w.doorwerk_opdracht, voorrang: (w.voorrang || 0) > 0,
+      wachters: appAgentsWachters(w.id, wvItems) };   // wv3746 (3C181): wat erop wacht, vóór "Hoeft niet meer"
   });
+  // wv3746: wat David in de laatste 3 dagen met "Hoeft niet meer" schrapte (Zet terug). Alleen de knopregel in de notitie telt.
+  const geschrapt = wvItems.filter(function (w) { return w.status === 'vervallen' && APP_AGENTS_WEG_RE.test(String(w.notitie || '')); })
+    .sort(function (x, y) { return String(y.klaar_op || '').localeCompare(String(x.klaar_op || '')); }).slice(0, 20)
+    .map(function (w) { return { wv: w.id, label: w.samenvatting ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(w.label), op: w.klaar_op || null }; });
   const wachtOpDavid = wvItems.filter(function (w) { return w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')); })
     .slice(0, 20).map(function (w) {
       return { wv: w.id, label: w.samenvatting ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(w.label),
@@ -10301,7 +10315,67 @@ async function appAgents(req, res, a) {
   }
   appStuur(res, 200, { ok: true, max: maxAgents(), lopend: lopend, rij: rij, rij_totaal: open.length, wacht_op_david: wachtOpDavid,
     voor_jou: voorJou, wacht_op_david_los: los, recent: recent, recent_totaal: afgerond.length, recent_uren: APP_AGENTS_RECENT_MS / 3600000, ruimte: ru, fout: fout,
-    gevraagd: gevraagd, gevraagd_dagen: 3 });
+    gevraagd: gevraagd, gevraagd_dagen: 3, geschrapt: geschrapt, knoppen: true });
+}
+// ── wv3746 (besluitenpagina nr 481 = 3C181 + nr 485 = 3C185, David Ja 21-11-2026 13:14) ──
+// Mediaan looptijd (minuten, afgerond) van de geslaagde klussen in het register, per bovengrens (≥ 10 klussen) en van alle; 1 min onthouden.
+const APP_AGENTS_MED_MIN = 10;
+function appAgentsDuurMediaan(reg, nu) {
+  const c = appStaat.agentsDuurMed;
+  if (c && nu - c.op < 60000) return c.d;
+  const med = function (l) { if (l.length < APP_AGENTS_MED_MIN) return null; l.sort(function (x, y) { return x - y; }); const m = l.length >> 1; return Math.max(1, Math.round((l.length % 2 ? l[m] : (l[m - 1] + l[m]) / 2) / 60000)); };
+  const alle = [], per = {};
+  Object.keys(reg || {}).forEach(function (k) {
+    const r = reg[k] || {};
+    if (r.status !== 'done' || !r.ok || !(r.started > 0) || !(r.ended > r.started)) return;
+    const d = r.ended - r.started;
+    alle.push(d);
+    const mm = Number(r.max_minuten);
+    if (mm > 0) (per[mm] = per[mm] || []).push(d);
+  });
+  const d = { alle: med(alle), per: {} };
+  Object.keys(per).forEach(function (k) { const m = med(per[k]); if (m != null) d.per[k] = m; });
+  appStaat.agentsDuurMed = { op: nu, d: d };
+  return d;
+}
+// Open of geblokkeerde rijen die op rij id wachten (item:id in wacht_op): hooguit 5 met titel, en het aantal
+function appAgentsWachters(id, items) {
+  const l = (items || []).filter(function (x) { return x && (x.status === 'open' || x.status === 'geblokkeerd') && x.id !== id && Array.isArray(x.wacht_op) && x.wacht_op.indexOf('item:' + id) >= 0; });
+  return { n: l.length, eerste: l.slice(0, 5).map(function (x) { return { wv: x.id, label: x.samenvatting ? String(x.samenvatting).slice(0, 160) : appLabelGewoon(x.label) }; }) };
+}
+const APP_AGENTS_WEG_RE = /app \([^)]{0,80}\): Hoeft niet meer/;
+const APP_AGENTS_STUUR_PER_UUR = 40;
+const APP_AGENTS_STUUR_FOUT = {
+  onbekend: [404, 'deze klus staat niet (meer) in de werkvoorraad'],
+  status: [409, 'deze klus is al gestart of klaar; ververs de lijst'],
+  nacontrole: [409, 'een korte nacontrole gaat mee in de controleronde (08:30, 13:30, 18:30); Nu doen kan daar niet'],
+  datum: [400, 'kies een datum na nu en binnen 400 dagen'],
+  'niet-via-knop': [409, 'alleen een klus die je zelf met Hoeft niet meer schrapte kan terug'],
+  veranderd: [409, 'deze klus is sinds het schrappen veranderd; vraag de machinekamer'] };
+// POST /app/agents/rij {wv, actie: nu|schuif|weg|terug, niet_voor?}: één tik op een rij in Agents › In de rij. Alles in één
+// databankfunctie (mk_werkvoorraad_app_stuur: rij op slot, alleen open/geblokkeerd, wachters omhangen vóór vervallen, logboek).
+// Sessie, invoerslot, alleen de primaire kant, 40 per uur.
+async function appAgentsRij(req, res, a, d) {
+  const wv = d.wv, actie = String(d.actie || '');
+  if (typeof wv !== 'number' || !Number.isInteger(wv) || wv < 1 || wv > 1e9 || ['nu', 'schuif', 'weg', 'terug'].indexOf(actie) < 0) return appWeiger(res, 400, 'ongeldig verzoek', 'agentsrij velden');
+  let nv = null;
+  if (actie === 'schuif') {
+    const t = typeof d.niet_voor === 'string' && d.niet_voor.length <= 40 ? Date.parse(d.niet_voor) : NaN;
+    if (!isFinite(t)) return appWeiger(res, 400, 'kies een datum', 'agentsrij datum');
+    nv = new Date(t).toISOString();
+  }
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
+  if (!appTeller('agentsrij', APP_AGENTS_STUUR_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_AGENTS_STUUR_PER_UUR + ')', 'grens agentsrij');
+  let r;
+  try { r = await appSbRpc('mk_werkvoorraad_app_stuur', { p_id: wv, p_actie: actie, p_door: String(a.naam || a.id || 'app').slice(0, 40), p_niet_voor: nv }, 15000); }
+  catch (e) { logError('app-agentsrij', e); return appWeiger(res, 502, 'dat lukte nu niet; probeer het zo nog eens', 'agentsrij rpc'); }
+  appStaat.wvCache = null;   // de volgende lezing toont de nieuwe stand
+  if (!r || r.ok !== true) {
+    const f = APP_AGENTS_STUUR_FOUT[r && r.fout] || [502, 'dat lukte nu niet; probeer het zo nog eens'];
+    return appWeiger(res, f[0], f[1], 'agentsrij wv' + wv + ' ' + actie + ': ' + String((r && r.fout) || 'onbekend antwoord').slice(0, 40));
+  }
+  res._app.reden = 'agentsrij wv' + wv + ' ' + actie + (r.wachters ? ' (' + r.wachters + ' wachters)' : '');
+  appStuur(res, 200, { ok: true, wv: wv, actie: actie, status: r.status || null, wachters: Number(r.wachters) || 0 });
 }
 // ── wv1029: idee 14 fase 2 — klussen als tabjes in de machinekamer (ontwerp "Machinekamer - parallelle draden" § 4.3.2 a) ──
 // Eén draad = één werkvoorraadrij met label machinekamer:. Rapport → draad via (1) het wv-nummer in het registerlabel, (2)
@@ -15838,6 +15912,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
         if (route === 'POST /app/broedstoof/knop') return appBroedstoofKnop(req, res, reg, a, s, d);   // wv3731
         if (route === 'GET /app/agents') return appAgents(req, res, a);
+        if (route === 'POST /app/agents/rij') return appAgentsRij(req, res, a, d);   // wv3746: Nu doen / Schuif op / Hoeft niet meer / Zet terug
         if (route === 'GET /app/draden') return appDraden(req, res, a);   // wv1029: klussen als tabjes (idee 14 fase 2)
         if (route === 'GET /app/code/apps') return CODE_WERK ? appCodeApps(req, res, a) : appWeiger(res, 404, 'onbekend', 'code uit');   // wv3227
         if (route === 'POST /app/code/nieuw') return CODE_WERK ? appCodeNieuw(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'code uit');   // wv3227
