@@ -24907,7 +24907,11 @@ function beleggenInfo() {
 // seintje via berichtIntern (bron beleggen-week, soort dag, sleutel per ISO-week), box-rij bij een bron die drie dagen faalt, hartslag
 // 'beleggen-ophaal'. Eigen klok zoals weerAvondTik: elke 5 min, alleen echte pod met rol primair; werk alleen 06:40 (ophalen, eens per dag) en
 // zondag 09:00 (weekronde); seintje alleen 07:00–22:00. Log: alleen aantallen (geen bedrijfsnamen, koppen of bedragen).
+// wv3728 (besluit nr 138 / 2C38, David Ja 21-11 met vingerafdruk): de ochtendronde haalt eerst slotkoersen (api.nasdaq.com, onofficieel; alleen
+// beurscode + datum), de ECB-wisselkoers en zoekt beurscode + SEC-nummer (efts.sec.gov, alleen de kale bedrijfsnaam); kaartjes gaan vanzelf aan.
+// Op een dag waarop de ochtendronde al liep (na een uitrol) doet de eerste tik alleen de koersronde. GET /app/beleggen geeft stand.vandaag.
 const BELEGGEN_UA = 'OVIS-Beleggen/1 (+https://socev.dev)';
+const BELEGGEN_KOERS_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36';   // wv3728
 const beleggenNieuws = (function () {
   const p = path.join(__dirname, 'beleggen-nieuws.js');
   if (!beleggenApp || !fs.existsSync(p)) return null;
@@ -24915,6 +24919,8 @@ const beleggenNieuws = (function () {
     const H = require(path.join(__dirname, 'harvester.js'));
     return require(p).maak({ beleggen: beleggenApp, leesFeed: H.leesFeed,
       haal: async function (url, accept) { const r = await H.veiligHaal(url, { ua: BELEGGEN_UA }, accept); return r.body; },
+      // wv3728: slotkoersen (api.nasdaq.com hangt zonder browser-UA, gemeten 21-11); zelfde poort (https/443, openbaar adres, grenzen); alleen beurscode + datum in het adres
+      haalKoers: async function (url, accept) { const r = await H.veiligHaal(url, { ua: BELEGGEN_KOERS_UA }, accept); return r.body; },
       claude: harvesterClaude, klok: ovisAms,
       bericht: async function (tekst, sleutel) {
         const r = await berichtIntern({ kanaal: 'hoofd', bron: 'beleggen-week', klasse: 'normaal', soort: 'dag', tekst: tekst, sleutel: sleutel });

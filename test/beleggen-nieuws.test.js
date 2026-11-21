@@ -70,6 +70,7 @@ function wereld(o) {
       for (const k of w.kapot) if (h.includes(k)) throw new Error('http 503');
       for (const [k, v] of Object.entries(w.haalExtra)) if (url.includes(k)) return typeof v === 'function' ? v(url) : v;
       if (h === 'data.sec.gov') return /CIK0001045810/.test(url) ? fx('sec-chips.json') : /CIK0002130357/.test(url) ? secJson('Voorbeeld AI', [['S-1/A', '2026-11-10']]) : secJson('x', []);
+      if (h === 'efts.sec.gov') return JSON.stringify({ hits: { hits: [] } });   // wv3728: beurscode-zoeker (koersronde) vindt hier niets
       if (h === 'clinicaltrials.gov') return CT;
       if (h === 'eutils.ncbi.nlm.nih.gov') return JSON.stringify({ esearchresult: { count: '7' } });
       if (h === 'news.google.com') {

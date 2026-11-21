@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const SCHEMA_VERSIE = 2;
+const SCHEMA_VERSIE = 3;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT);
 CREATE TABLE IF NOT EXISTS plan_antwoord (vraag INTEGER PRIMARY KEY CHECK (vraag BETWEEN 1 AND 14), tekst TEXT, waarden TEXT,
@@ -59,6 +59,17 @@ CREATE TABLE IF NOT EXISTS week (iso_week TEXT PRIMARY KEY, van TEXT NOT NULL, t
   verder TEXT NOT NULL, belang TEXT NOT NULL, model TEXT NOT NULL, gemeld_op TEXT, bericht_id TEXT);
 CREATE TABLE IF NOT EXISTS week_keuze (iso_week TEXT NOT NULL, bedrijf TEXT NOT NULL, keuze TEXT NOT NULL CHECK (keuze IN ('niets','dagboek','herinner','ruis','nuttig')),
   tot TEXT, op TEXT NOT NULL, PRIMARY KEY (iso_week, bedrijf));
+`;
+
+// Schemaversie 3 (wv3728, besluit nr 138 / 2C38, David Ja 21-11 13:18): dagkoersen. koers = slotkoers per ISIN per beursdag (tekst, punt als
+// decimaalteken) met de valuta van de bron; wissel = ECB-referentiekoers (vreemde valuta per euro) per dag; koerscode = de beurscode en het
+// SEC-nummer die de ochtendronde zelf opzocht (per bedrijfsleutel, ook een mislukte zoektocht met datum); bedrijf_uit = Davids "Geen nieuws meer"
+// (dan zet de ochtendronde het kaartje niet opnieuw vanzelf aan). Alleen nieuwe tabellen: CREATE IF NOT EXISTS = de migratie.
+const SCHEMA_3 = `
+CREATE TABLE IF NOT EXISTS koers (isin TEXT NOT NULL, datum TEXT NOT NULL, slot TEXT NOT NULL, valuta TEXT NOT NULL, bron TEXT NOT NULL, op TEXT NOT NULL, PRIMARY KEY (isin, datum));
+CREATE TABLE IF NOT EXISTS wissel (valuta TEXT NOT NULL, datum TEXT NOT NULL, per_eur TEXT NOT NULL, op TEXT NOT NULL, PRIMARY KEY (valuta, datum));
+CREATE TABLE IF NOT EXISTS koerscode (sleutel TEXT PRIMARY KEY, code TEXT, cik TEXT, naam_bron TEXT, op TEXT NOT NULL, fout TEXT);
+CREATE TABLE IF NOT EXISTS bedrijf_uit (sleutel TEXT PRIMARY KEY, op TEXT NOT NULL);
 `;
 
 // ── de veertien vragen (plan § 1.7); velden = wat de app narekent ──
@@ -567,6 +578,61 @@ function dagboekGroepen(transacties) {
   return uit.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));
 }
 
+// wv3728 (nr 138 / 2C38): waarde van vandaag uit de dagkoersen die de ochtendronde ophaalt. Per positie: aantal × laatste slotkoers, omgerekend met
+// de ECB-koers van die dag (of de laatste ervóór); de vorige beursdag op dezelfde manier ("sinds gisteren"); aankoopwaarde uit de transacties.
+// Geen koers, een koers in een andere valuta dan de positie, of geen wisselkoers = die positie "zonder koers" (niet raden); het totaal staat er
+// alleen als elke positie een koers heeft. Valt de bron weg, dan blijft de laatst bekende koers staan met zijn datum (oud = ouder dan 4 dagen).
+// koersen: { isin: [{ datum, slot, valuta }] nieuwste eerst }; wissels: { valuta: [{ datum, per_eur }] nieuwste eerst }; aankoop: { sleutel: cent }.
+const KOERS_OUD_DAGEN = 4;
+function wisselOp(wissels, valuta, datum) {
+  if (valuta === 'EUR') return 1;
+  const r = (wissels[valuta] || []).find((x) => x.datum <= datum);
+  const n = r ? Number(r.per_eur) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+function waardeVandaag(posities, koersen, wissels, aankoop, vandaag) {
+  const effect = posities.filter((p) => p.regelsoort === 'effect');
+  if (!effect.length) return null;
+  const per = {};
+  let totaal = 0, vorig = 0, kost = 0, zonder = 0, zonderVorig = 0, zonderKost = 0, oudste = null, nieuwste = null, wisselDatum = null;
+  for (const p of effect) {
+    const n = Number(p.aantal);
+    const ks = (p.isin && koersen[p.isin]) || [];
+    const k0 = ks[0];
+    const reden = !p.isin ? 'geen ISIN' : !k0 ? 'nog geen koers' : !Number.isFinite(n) || n <= 0 ? 'geen aantal' : p.valuta && k0.valuta !== p.valuta ? 'koers in ' + k0.valuta + ', positie in ' + p.valuta : null;
+    const fx0 = reden ? null : wisselOp(wissels, k0.valuta, k0.datum);
+    if (reden || fx0 == null) { zonder++; zonderVorig++; per[p.sleutel] = { reden: reden || 'geen wisselkoers' }; continue; }
+    const w0 = Math.round((n * Number(k0.slot) / fx0) * 100);
+    const k1 = ks[1], fx1 = k1 ? wisselOp(wissels, k1.valuta, k1.datum) : null;
+    const w1 = k1 && fx1 != null && k1.valuta === k0.valuta ? Math.round((n * Number(k1.slot) / fx1) * 100) : null;
+    const a = aankoop[p.sleutel] != null ? aankoop[p.sleutel] : null;
+    per[p.sleutel] = { koers: k0.slot, valuta: k0.valuta, datum: k0.datum, waarde_cent: w0, vorige_datum: k1 ? k1.datum : null, vorige_cent: w1, aankoop_cent: a };
+    totaal += w0;
+    if (w1 == null) zonderVorig++; else vorig += w1;
+    if (a == null) zonderKost++; else kost += a;
+    if (!oudste || k0.datum < oudste) oudste = k0.datum;
+    if (!nieuwste || k0.datum > nieuwste) nieuwste = k0.datum;
+    if (k0.valuta !== 'EUR') { const r = (wissels[k0.valuta] || []).find((x) => x.datum <= k0.datum); if (r && (!wisselDatum || r.datum < wisselDatum)) wisselDatum = r.datum; }
+  }
+  const alle = zonder === 0;
+  return { volledig: alle, zonder_koers: zonder, koers_datum: oudste, koers_datum_nieuwste: nieuwste, wissel_datum: wisselDatum,
+    oud: !!(oudste && vandaag && oudste < plusDagen(vandaag, -KOERS_OUD_DAGEN)),
+    waarde_cent: alle ? totaal : null, gisteren_cent: alle && zonderVorig === 0 ? vorig : null, verschil_dag_cent: alle && zonderVorig === 0 ? totaal - vorig : null,
+    aankoop_cent: alle && zonderKost === 0 ? kost : null, verschil_aankoop_cent: alle && zonderKost === 0 ? totaal - kost : null, posities: per };
+}
+// Aankoopwaarde per positie uit de transacties, alleen als het aantal uit de transacties gelijk is aan het aantal in de stand (anders onbekend).
+function aankoopPer(posities, transacties) {
+  const a = aankoopStand(transacties);
+  const uit = {};
+  for (const p of posities) {
+    if (p.regelsoort !== 'effect') continue;
+    if (p.bron === 'aankoop') { if (!p.onvolledig) uit[p.sleutel] = p.waarde_eur_cent; continue; }
+    const x = a.posities.find((y) => y.sleutel === p.sleutel);
+    if (x && !x.onvolledig && Math.abs(Number(x.aantal) - Number(p.aantal)) < 1e-6) uit[p.sleutel] = x.waarde_eur_cent;
+  }
+  return uit;
+}
+
 // wv3030: stand uit transacties zolang er geen portefeuille en geen handpositie is (een ingelezen portefeuille of handpositie gaat altijd voor).
 // Per ISIN (anders naam): aantal en aankoopwaarde incl. kosten; een verkoop haalt naar rato aankoopwaarde weg (gemiddelde kostprijs). Geen koersen:
 // dit is de waarde bij aankoop, niet de huidige waarde. Ontbreekt een totaal of verkoopt een rij meer dan er was, dan 'onvolledig' (niet raden).
@@ -659,6 +725,7 @@ function maak(o) {
       db.exec('PRAGMA foreign_keys = ON;');
       db.exec(SCHEMA);
       db.exec(SCHEMA_2);
+      db.exec(SCHEMA_3);
       db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde WHERE CAST(meta.waarde AS INTEGER) < CAST(excluded.waarde AS INTEGER)").run(String(SCHEMA_VERSIE));
       gemigreerd = true;
     }
@@ -724,6 +791,99 @@ function maak(o) {
     }
     return uit;
   }
+  // ── wv3728: dagkoersen (de ochtendronde in beleggen-nieuws.js haalt op; hier alleen lezen en schrijven) ──
+  function koersenUit(db) {
+    const koersen = {}, wissels = {};
+    if (!db) return { koersen, wissels };
+    for (const r of db.prepare('SELECT isin, datum, slot, valuta FROM koers ORDER BY isin, datum DESC').all()) {
+      const l = koersen[r.isin] || (koersen[r.isin] = []);
+      if (l.length < 10) l.push({ datum: r.datum, slot: r.slot, valuta: r.valuta });
+    }
+    for (const r of db.prepare('SELECT valuta, datum, per_eur FROM wissel ORDER BY valuta, datum DESC').all()) {
+      const l = wissels[r.valuta] || (wissels[r.valuta] = []);
+      if (l.length < 40) l.push({ datum: r.datum, per_eur: r.per_eur });
+    }
+    return { koersen, wissels };
+  }
+  // Wat de ochtendronde nodig heeft: posities (ISIN, naam, valuta; geen aantallen of bedragen), bedrijven om vanzelf een kaartje voor te maken
+  // (geen kaartje en niet door David uitgezet), en de codes die al gevonden zijn.
+  function koersData() {
+    return metDb((db) => {
+      const d = metAankoop(leesAlles(db));
+      const k = bereken(d, vandaagF());
+      const posities = k.posities.filter((p) => p.isin).map((p) => ({ sleutel: p.sleutel, isin: p.isin, naam: p.naam, zoeknaam: kaleNaam(p.naam), valuta: p.valuta || null }));
+      const uit = db ? new Set(db.prepare('SELECT sleutel FROM bedrijf_uit').all().map((r) => r.sleutel)) : new Set();
+      const bedrijven = bedrijvenUit(db, d, k).filter((b) => !b.kaartje && !uit.has(b.sleutel))
+        .map((b) => ({ sleutel: b.sleutel, naam: b.naam, bron: b.bron, code: b.voorstel.code, namen: b.voorstel.namen }));
+      const codes = {};
+      if (db) for (const r of db.prepare('SELECT sleutel, code, cik, op, fout FROM koerscode').all()) codes[r.sleutel] = { code: r.code, cik: r.cik, op: r.op, fout: r.fout };
+      // ook voor posities mét kaartje (door David ingesteld) is een beurscode nodig voor de koers: neem die van het kaartje als er nog geen is
+      if (db) for (const r of db.prepare('SELECT sleutel, code, cik FROM bedrijf').all()) if (!codes[r.sleutel] && r.code) codes[r.sleutel] = { code: r.code, cik: r.cik, op: null, fout: null, kaartje: true };
+      // review ZOU 2: kaartjes zonder SEC-nummer of zonder beurscode (eerdere zoektocht faalde, of David vulde ze niet in) worden opnieuw gezocht
+      const aanvullen = db ? db.prepare('SELECT sleutel, naam, namen, code FROM bedrijf WHERE cik IS NULL OR code IS NULL').all().map((r) => ({ sleutel: r.sleutel, naam: r.naam, namen: JSON.parse(r.namen), code: r.code })) : [];
+      return { posities, bedrijven, aanvullen, codes, valuta: [...new Set(posities.map((p) => p.valuta).filter((v) => v && v !== 'EUR'))] };
+    }, false) || { posities: [], bedrijven: [], aanvullen: [], codes: {}, valuta: [] };
+  }
+  const RE_SLOT = /^\d{1,9}(\.\d{1,8})?$/;
+  const RE_DAG = /^\d{4}-\d{2}-\d{2}$/;
+  // { codes: [{ sleutel, code, cik, naam_bron, fout }], koersen: [{ isin, datum, slot, valuta, bron }], wissels: [{ valuta, datum, per_eur }] }
+  function zetKoersen(x) {
+    const op = nuIso();
+    const tel = { codes: 0, koersen: 0, wissels: 0, geweigerd: 0 };
+    metDb((db) => {
+      const sc = db.prepare('INSERT INTO koerscode (sleutel, code, cik, naam_bron, op, fout) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(sleutel) DO UPDATE SET code = excluded.code, cik = excluded.cik, naam_bron = excluded.naam_bron, op = excluded.op, fout = excluded.fout');
+      for (const c of x.codes || []) {
+        if (!/^(isin|naam):|^volg:\d+$/.test(String(c.sleutel || ''))) { tel.geweigerd++; continue; }
+        const code = c.code && /^[A-Z0-9][A-Z0-9.-]{0,11}$/.test(c.code) ? c.code : null, cik = c.cik && /^\d{10}$/.test(c.cik) ? c.cik : null;
+        sc.run(c.sleutel, code, cik, c.naam_bron ? String(c.naam_bron).slice(0, 120) : null, op, c.fout ? String(c.fout).slice(0, 80) : null); tel.codes++;
+      }
+      const sk = db.prepare('INSERT INTO koers (isin, datum, slot, valuta, bron, op) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(isin, datum) DO UPDATE SET slot = excluded.slot, valuta = excluded.valuta, bron = excluded.bron, op = excluded.op');
+      const vorige = db.prepare('SELECT slot, valuta FROM koers WHERE isin = ? AND datum < ? ORDER BY datum DESC LIMIT 1');
+      for (const k of (x.koersen || []).slice().sort((a, b) => (a.datum < b.datum ? -1 : 1))) {
+        if (!RE_ISIN.test(String(k.isin)) || !RE_DAG.test(String(k.datum)) || !RE_SLOT.test(String(k.slot)) || !(Number(k.slot) > 0) || !RE_VALUTA.test(String(k.valuta))) { tel.geweigerd++; continue; }
+        // vangnet tegen een verkeerde koers (andere aandelenklasse, splitsing, fout in de bron): meer dan een factor 2 t.o.v. de vorige dag = weigeren
+        const v = vorige.get(k.isin, k.datum);
+        if (v && (v.valuta !== k.valuta || Number(k.slot) > 2 * Number(v.slot) || Number(k.slot) < Number(v.slot) / 2)) { tel.geweigerd++; continue; }
+        sk.run(k.isin, k.datum, String(k.slot), k.valuta, String(k.bron || 'onbekend').slice(0, 20), op); tel.koersen++;
+      }
+      const sw = db.prepare('INSERT INTO wissel (valuta, datum, per_eur, op) VALUES (?, ?, ?, ?) ON CONFLICT(valuta, datum) DO UPDATE SET per_eur = excluded.per_eur, op = excluded.op');
+      for (const w of x.wissels || []) {
+        if (!RE_VALUTA.test(String(w.valuta)) || w.valuta === 'EUR' || !RE_DAG.test(String(w.datum)) || !RE_SLOT.test(String(w.per_eur)) || !(Number(w.per_eur) > 0)) { tel.geweigerd++; continue; }
+        sw.run(w.valuta, w.datum, String(w.per_eur), op); tel.wissels++;
+      }
+      // bewaren: koersen en wisselkoersen 400 dagen
+      db.prepare('DELETE FROM koers WHERE datum < ?').run(plusDagen(vandaagF(), -400));
+      db.prepare('DELETE FROM wissel WHERE datum < ?').run(plusDagen(vandaagF(), -400));
+    }, true);
+    return tel;
+  }
+  function vulBedrijfAan(sl, x) {
+    const code = x.code && /^[A-Z0-9][A-Z0-9.-]{0,11}$/.test(x.code) ? x.code : null, cik = x.cik && /^\d{10}$/.test(x.cik) ? x.cik : null;
+    return metDb((db) => db.prepare('UPDATE bedrijf SET code = COALESCE(code, ?), cik = COALESCE(cik, ?) WHERE sleutel = ?').run(code, cik, String(sl)).changes, true);
+  }
+  // Kaartje "Nieuws over dit bedrijf" vanzelf aan (wv3728): alleen voor een bedrijf zonder kaartje dat David niet uitzette; namen = het voorstel
+  // van de app, beurscode en SEC-nummer uit de zoektocht (mag leeg). Een bestaand kaartje (door David ingesteld) blijft onaangeroerd.
+  function zetAutoBedrijven(lijst) {
+    let n = 0;
+    metDb((db) => {
+      const uit = new Set(db.prepare('SELECT sleutel FROM bedrijf_uit').all().map((r) => r.sleutel));
+      for (const b of lijst || []) {
+        const sl = String(b.sleutel || '');
+        if (!/^(isin|naam):|^volg:\d+$/.test(sl) || uit.has(sl) || db.prepare('SELECT 1 FROM bedrijf WHERE sleutel = ?').get(sl)) continue;
+        let naam = null;
+        if (sl.startsWith('volg:')) { const r = db.prepare('SELECT naam FROM volglijst WHERE id = ? AND weg = 0').get(Number(sl.slice(5))); naam = r && r.naam; }
+        else naam = naamVan(db, sl);
+        if (!naam) continue;
+        const namen = [...new Set((b.namen || []).map((x) => String(x).trim()).filter((x) => x.length >= 2 && x.length <= 60))].slice(0, 8);
+        if (!namen.length) continue;
+        const code = b.code && /^[A-Z0-9][A-Z0-9.-]{0,11}$/.test(b.code) ? b.code : null, cik = b.cik && /^\d{10}$/.test(b.cik) ? b.cik : null;
+        const belang = BELANG_RE.test(namen.join(' ') + ' ' + naam) ? 1 : 0;
+        db.prepare('INSERT INTO bedrijf (sleutel, naam, namen, code, cik, sponsor, producten, belang, op) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)').run(sl, naam, JSON.stringify(namen), code, cik, '[]', belang, nuIso());
+        n++;
+      }
+    }, true);
+    return n;
+  }
   function overzicht() {
     return metDb((db) => {
       const d = metAankoop(leesAlles(db));
@@ -731,10 +891,13 @@ function maak(o) {
       const k = bereken(d, vandaag);
       const volg = d.volglijst.map((v) => Object.assign({}, v, { vroegst: d.regels.afkoel_dagen != null ? plusDagen(v.op.slice(0, 10), d.regels.afkoel_dagen) : null }));
       const dagboek = d.dagboek.map((x) => Object.assign({}, x, { terugblik6_op: plusMaanden(x.datum, 6), terugblik12_op: plusMaanden(x.datum, 12) }));
-      const bedrijven = bedrijvenUit(db, d, k).map((b) => ({ sleutel: b.sleutel, naam: b.naam, bron: b.bron, kaartje: b.kaartje, voorstel: b.voorstel }));
+      const uitSet = db ? new Set(db.prepare('SELECT sleutel FROM bedrijf_uit').all().map((r) => r.sleutel)) : new Set();
+      const bedrijven = bedrijvenUit(db, d, k).map((b) => ({ sleutel: b.sleutel, naam: b.naam, bron: b.bron, kaartje: b.kaartje, voorstel: b.voorstel, uit: uitSet.has(b.sleutel) }));   // wv3728: uit = Davids "Geen nieuws meer"
+      const kd = koersenUit(db);
+      const vandaagW = waardeVandaag(k.posities, kd.koersen, kd.wissels, aankoopPer(d.posities, d.transacties), vandaag);   // wv3728: waarde van vandaag
       for (const p of k.posities) delete p._ruw;
       return { ok: true, vandaag, vragen: VRAGEN, antwoorden: d.antwoorden, regels: d.regels, versies: d.versies, stand: { datum: d.stand_datum, bron: d.stand_bron,
-        verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig, historie: historieUit(db), onvolledig: !!d.aankoop_onvolledig }, transacties: d.transacties, dagboek, volglijst: volg,
+        verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig, historie: historieUit(db), onvolledig: !!d.aankoop_onvolledig, vandaag: vandaagW }, transacties: d.transacties, dagboek, volglijst: volg,
         signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, exports: d.exports, rekening_rijen: d.rekening_rijen, stortingen: d.stortingen,
         soort_namen: SOORT_NAAM, vault: { ok: vaultOk, op: laatsteVault }, bedrijven,
         beursgang_klaar: Object.keys(d.keuzes).filter((x) => x.startsWith('beursgang:')).map((x) => x.slice(10)) };   // wv3727: afgeronde beursgangen (code)
@@ -1052,7 +1215,11 @@ function maak(o) {
       if (sl.startsWith('volg:')) { const r = db.prepare('SELECT naam FROM volglijst WHERE id = ? AND weg = 0').get(Number(sl.slice(5))); naam = r && r.naam; }
       else naam = naamVan(db, sl);
       if (!naam) throw new Fout(404, 'bedrijf niet gevonden in je stand of volglijst');
-      if (b.actie === 'weg') { db.prepare('DELETE FROM bedrijf WHERE sleutel = ?').run(sl); return { reden: 'beleggen bedrijf weg' }; }
+      if (b.actie === 'weg') {   // wv3728: uit blijft uit (de ochtendronde zet het kaartje niet opnieuw vanzelf aan)
+        db.prepare('DELETE FROM bedrijf WHERE sleutel = ?').run(sl);
+        db.prepare('INSERT INTO bedrijf_uit (sleutel, op) VALUES (?, ?) ON CONFLICT(sleutel) DO UPDATE SET op = excluded.op').run(sl, nuIso());
+        return { reden: 'beleggen bedrijf weg' };
+      }
       if (b.actie !== 'zet') throw new Fout(400, 'actie: zet of weg');
       const namen = [...new Set(lijstVan(b.namen))];
       if (!namen.length) throw new Fout(400, 'minstens één schrijfwijze van de naam');
@@ -1069,6 +1236,14 @@ function maak(o) {
       db.prepare('INSERT INTO bedrijf (sleutel, naam, namen, code, cik, sponsor, producten, belang, op) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(sleutel) DO UPDATE SET ' +
         'naam = excluded.naam, namen = excluded.namen, code = excluded.code, cik = excluded.cik, sponsor = excluded.sponsor, producten = excluded.producten, belang = excluded.belang, op = excluded.op')
         .run(sl, naam, JSON.stringify(namen), code, cik, sponsor, JSON.stringify(producten), belang, nuIso());
+      db.prepare('DELETE FROM bedrijf_uit WHERE sleutel = ?').run(sl);   // wv3728: weer aan
+      // review wv3728 MOET 2: een beurscode die David zelf zet gaat voor op de gevonden code; bij een andere code vervallen de oude koersen
+      if (code && sl.startsWith('isin:')) {
+        const oud = db.prepare('SELECT code FROM koerscode WHERE sleutel = ?').get(sl);
+        if (oud && oud.code && oud.code !== code) db.prepare('DELETE FROM koers WHERE isin = ?').run(sl.slice(5));
+        db.prepare('INSERT INTO koerscode (sleutel, code, cik, naam_bron, op, fout) VALUES (?, ?, ?, NULL, ?, NULL) ON CONFLICT(sleutel) DO UPDATE SET code = excluded.code, cik = COALESCE(excluded.cik, koerscode.cik), fout = NULL, op = excluded.op')
+          .run(sl, code, cik, nuIso());
+      }
       return { reden: 'beleggen bedrijf' };
     }, true);
   }
@@ -1164,10 +1339,12 @@ function maak(o) {
       const n = (t) => db.prepare('SELECT COUNT(*) AS n FROM ' + t).get().n;
       return { aan: true, databank: true, posities: n('positie'), transacties: n('transactie'), rekening: n('rekening'), dagboek: n('dagboek'), volglijst: n('volglijst'),
         planversies: n('planversie'), vault_ok: vaultOk, schema: Number((db.prepare("SELECT waarde FROM meta WHERE sleutel = 'schema'").get() || {}).waarde) || null,
-        nieuws: { bedrijven: n('bedrijf'), regels: n('nieuws'), weken: n('week'), bronnen_gezakt: db.prepare('SELECT COUNT(*) AS n FROM nieuws_bron WHERE gezakt = 1').get().n } };
+        nieuws: { bedrijven: n('bedrijf'), regels: n('nieuws'), weken: n('week'), bronnen_gezakt: db.prepare('SELECT COUNT(*) AS n FROM nieuws_bron WHERE gezakt = 1').get().n },
+        koersen: { regels: n('koers'), wissels: n('wissel'), codes: n('koerscode'), uit: n('bedrijf_uit'),
+          laatste: (db.prepare('SELECT MAX(datum) AS d FROM koers').get() || {}).d || null } };   // wv3728: alleen aantallen en een datum
     }, false);
   }
-  return { app, info, _overzicht: overzicht, nieuwsData, metDb, vandaag: vandaagF };
+  return { app, info, _overzicht: overzicht, nieuwsData, koersData, zetKoersen, zetAutoBedrijven, vulBedrijfAan, metDb, vandaag: vandaagF };
 }
 
-module.exports = { maak, leesBestand, bereken, aankoopStand, regelsUit, VRAGEN, LeesFout, ANTHROPIC_ZIN, plusMaanden };
+module.exports = { maak, leesBestand, bereken, aankoopStand, waardeVandaag, aankoopPer, regelsUit, VRAGEN, LeesFout, ANTHROPIC_ZIN, plusMaanden };

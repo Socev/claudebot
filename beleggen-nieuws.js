@@ -124,7 +124,75 @@ const FEEDS = [
   { bron: 'fd', url: 'https://fd.nl/?rss', hard: false, product: false },
   { bron: 'stat', url: 'https://www.statnews.com/feed/', hard: false, product: false },
 ];
-const BRON_NAAM = { sec: 'SEC', clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed', fda: 'FDA', ema: 'EMA', afm: 'AFM', nos: 'NOS', fd: 'FD', stat: 'STAT', gnews: 'Google Nieuws' };
+const BRON_NAAM = { koers: 'Nasdaq (slotkoersen)', ecb: 'ECB (wisselkoers)', sec_zoek: 'SEC (beurscode zoeken)', sec: 'SEC', clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed', fda: 'FDA', ema: 'EMA', afm: 'AFM', nos: 'NOS', fd: 'FD', stat: 'STAT', gnews: 'Google Nieuws' };
+
+// ── wv3728 (besluit nr 138 / 2C38, David Ja 21-11 13:18 met vingerafdruk): dagkoersen en vanzelf nieuws ──
+// Elke ochtend (en één keer direct na een uitrol op een dag zonder koersronde): (1) beurscode en SEC-nummer zelf opzoeken voor elke positie en
+// volglijstregel zonder code (SEC-bedrijfszoeker efts.sec.gov; alleen de kale bedrijfsnaam gaat de deur uit), (2) slotkoersen van de afgelopen
+// dagen per beurscode (api.nasdaq.com, onofficieel; alleen de beurscode en een begindatum gaan de deur uit), (3) de ECB-wisselkoers per vreemde
+// valuta, (4) een kaartje "Nieuws over dit bedrijf" voor elk bedrijf zonder kaartje dat David niet uitzette. Geen aantallen of bedragen naar
+// buiten; de waarde rekent beleggen.js op de pod uit. Alleen Amerikaanse beurscodes in USD (de bron geeft alleen die); een positie in een andere
+// valuta blijft "zonder koers". Valt een bron uit, dan blijft de laatst bekende koers met zijn datum staan; na drie dagen een box-rij (zoals nieuws).
+const KOERS = { dagen: 12, code_opnieuw_dagen: 7, valuta: 'USD' };
+const RECHTSVORM = /\b(INC|INCORPORATED|CORP|CORPORATION|CO|COMPANY|NV|N V|SA|SE|AG|PLC|LTD|LIMITED|HOLDINGS?|GROUP|A\/S|AS|ASA|AB|SPA|BV|PBC|LLC|LP|CLASS [A-C]|CL [A-C]|ADR|ORD|REG|SHS|THE)\b/g;
+function kaal(n) { return String(n || '').toUpperCase().replace(/&/g, ' AND ').replace(/[,.()'’]/g, ' ').replace(RECHTSVORM, ' ').replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim(); }
+// SEC-bedrijfszoeker: { hits: { hits: [{ _id: '1045810', _source: { entity: 'NVIDIA CORP (NVDA)', tickers: 'NVDA' } }] } }.
+// Met een code van David: de treffer waarvan de beurscodes die code bevatten. Zonder code: dezelfde kale naam (geen "lijkt op"), met beurscode.
+function secZoek(tekst, naam, code) {
+  let j; try { j = JSON.parse(tekst); } catch (e) { return { fout: 'geen JSON' }; }
+  const hits = (j && j.hits && Array.isArray(j.hits.hits) ? j.hits.hits : []).slice(0, 25);
+  const doel = kaal(naam);
+  for (const h of hits) {
+    const src = h && h._source || {};
+    const tickers = String(src.tickers || '').split(',').map((x) => x.trim().toUpperCase()).filter((x) => /^[A-Z0-9][A-Z0-9.-]{0,11}$/.test(x));
+    const id = String(h && h._id || '');
+    if (!tickers.length || !/^\d{1,10}$/.test(id)) continue;
+    const ent = String(src.entity || '').replace(/\s*\([^)]*\)\s*$/, '');
+    if (code ? !tickers.includes(String(code).toUpperCase()) : kaal(ent) !== doel) continue;
+    // review wv3728 MOET 1: meer beurscodes onder één SEC-nummer (aandelenklassen, ADR naast gewoon aandeel) en geen code van David = welke klasse
+    // David heeft is niet vast te stellen → geen beurscode (dus geen koers), wel het SEC-nummer voor het nieuws. David kan de code zelf zetten.
+    if (!code && tickers.length > 1) return { code: null, cik: id.padStart(10, '0'), naam_bron: ent.slice(0, 120), fout: 'meer aandelenklassen' };
+    return { code: code ? String(code).toUpperCase() : tickers[0], cik: id.padStart(10, '0'), naam_bron: ent.slice(0, 120) };
+  }
+  return null;
+}
+// Een naam in hoofdletters uit DEGIRO ("NVIDIA") staat in krantenkoppen als "Nvidia"; K1 is hoofdlettergevoelig, dus de titelvorm erbij
+// (woorden van vijf letters of meer; kortere zijn meestal afkortingen zoals ASML). Gemeten 21-11: 2 → 5 van 134 koppen.
+function metTitelvorm(namen) {
+  const uit = [];
+  for (const n of namen || []) {
+    uit.push(n);
+    if (/[a-z]/.test(n) || !/[A-Z]{5}/.test(n)) continue;
+    uit.push(String(n).replace(/[A-Z]{5,}/g, (w) => w[0] + w.slice(1).toLowerCase()));
+  }
+  return [...new Set(uit)].slice(0, 8);
+}
+// Nasdaq: { data: { symbol, tradesTable: { rows: [{ date: '11/20/2026', close: '$125.53' }] } } } → [{ datum, slot }] (alleen afgesloten dagen < vandaag)
+function slotUit(t) { const s = String(t == null ? '' : t).trim().replace(/^\$/, '').replace(/,/g, ''); return /^\d{1,9}(\.\d{1,8})?$/.test(s) && Number(s) > 0 ? s : null; }
+function nasdaqRijen(tekst, code, vandaag) {
+  let j; try { j = JSON.parse(tekst); } catch (e) { return null; }
+  const d = j && j.data;
+  if (!d || String(d.symbol || '').toUpperCase() !== String(code).toUpperCase() || !d.tradesTable || !Array.isArray(d.tradesTable.rows)) return null;
+  const uit = [];
+  for (const r of d.tradesTable.rows.slice(0, 40)) {
+    const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(r && r.date || ''));
+    const slot = slotUit(r && r.close);
+    if (!m || !slot) continue;
+    const datum = m[3] + '-' + m[1] + '-' + m[2];
+    if (datum < vandaag) uit.push({ datum, slot });
+  }
+  return uit;
+}
+// ECB (csvdata): kolommen TIME_PERIOD en OBS_VALUE; vreemde valuta per euro
+function ecbRijen(csv) {
+  const r = String(csv || '').replace(/\r/g, '').split('\n').filter(Boolean);
+  if (r.length < 2) return null;
+  const kop = r[0].split(','), iT = kop.indexOf('TIME_PERIOD'), iV = kop.indexOf('OBS_VALUE');
+  if (iT < 0 || iV < 0) return null;
+  const uit = [];
+  for (const l of r.slice(1, 60)) { const c = l.split(','); if (/^\d{4}-\d{2}-\d{2}$/.test(c[iT]) && /^\d{1,6}(\.\d{1,8})?$/.test(c[iV]) && Number(c[iV]) > 0) uit.push({ datum: c[iT], per_eur: c[iV] }); }
+  return uit;
+}
 
 // ── weekronde: prompt en schema ──
 const SYSTEEM = [
@@ -189,7 +257,8 @@ function maak(o) {
   const hartslag = typeof o.hartslag === 'function' ? o.hartslag : async function () {};
   const pauze = typeof o.pauze === 'function' ? o.pauze : (ms) => new Promise((r) => setTimeout(r, ms));
   const nuIso = typeof o.nuIso === 'function' ? o.nuIso : () => new Date().toISOString();
-  let bezig = false, laatste = { ophaal: null, week: null, meld: null };
+  const haalKoers = typeof o.haalKoers === 'function' ? o.haalKoers : haal;   // wv3728: Nasdaq wil een browser-UA (server.js)
+  let bezig = false, laatste = { ophaal: null, week: null, meld: null, koers: null };
 
   const meta = (db, k) => { const r = db.prepare('SELECT waarde FROM meta WHERE sleutel = ?').get(k); return r ? r.waarde : null; };
   const zetMeta = (db, k, w) => db.prepare('INSERT INTO meta (sleutel, waarde) VALUES (?, ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde').run(k, w);
@@ -204,20 +273,122 @@ function maak(o) {
     return woordRe(namen, 'iu');
   }
 
-  // ── ophaalronde (dagelijks, geen taalmodel) ──
-  async function ophaal(vandaag) {
-    const data = B.nieuwsData();
-    const bs = actieve(data);
-    const t0 = Date.now();
-    const tel = { bedrijven: bs.length, aanvragen: 0, fouten: 0, nieuw: 0, reclame: 0, bronnen: {} };
-    const nieuw = [];
+  // per ronde: tellers + stand per bron (ok/fout) + één vraagfunctie; de bronstand gaat naar nieuws_bron (box-rij na drie foutdagen)
+  function ronde(tel) {
     const stand = {};   // per bron: { ok, fout, laatste }
     const noteer = (bron, ok, fout) => { const s = stand[bron] || (stand[bron] = { ok: 0, fout: 0, laatste: null }); if (ok) s.ok++; else { s.fout++; s.laatste = fout; } };
-    async function vraag(bron, url, accept) {
+    // lees(t) (wv3728, review ZOU 1): inhoud controleren vóór de bron als 'ok' telt; null = onleesbaar = bronfout (box na drie dagen)
+    async function vraag(bron, url, accept, metHaal, lees) {
       tel.aanvragen++;
-      try { const t = await haal(url, accept); noteer(bron, true); return t; }
+      let t;
+      try { t = await (metHaal || haal)(url, accept); }
       catch (e) { tel.fouten++; noteer(bron, false, String(e && e.message || e).replace(/https?:\/\/\S+/g, '').slice(0, 60)); return null; }
+      if (typeof lees !== 'function') { noteer(bron, true); return t; }
+      const x = lees(t);
+      if (x == null) { tel.fouten++; noteer(bron, false, 'onleesbaar antwoord'); return null; }
+      noteer(bron, true); return x;
     }
+    return { stand, noteer, vraag };
+  }
+  function schrijfBronnen(db, stand, vandaag, meldingen) {
+    const w = isoWeek(vandaag).week;
+    for (const [bron, s] of Object.entries(stand)) {
+      db.prepare('INSERT INTO nieuws_bron (bron) VALUES (?) ON CONFLICT(bron) DO NOTHING').run(bron);
+      if (s.ok) db.prepare('UPDATE nieuws_bron SET laatst_ok = ?, fouten_op_rij = 0, laatste_fout = NULL WHERE bron = ?').run(vandaag, bron);
+      else {
+        db.prepare('UPDATE nieuws_bron SET fouten_op_rij = fouten_op_rij + 1, laatste_fout = ? WHERE bron = ?').run(s.laatste, bron);
+        const r = db.prepare('SELECT fouten_op_rij, gemeld_week FROM nieuws_bron WHERE bron = ?').get(bron);
+        if (r.fouten_op_rij >= GRENS.fouten_box && r.gemeld_week !== w) { meldingen.push({ bron, fout: s.laatste, n: r.fouten_op_rij }); db.prepare('UPDATE nieuws_bron SET gemeld_week = ? WHERE bron = ?').run(w, bron); }
+      }
+    }
+  }
+  function boxMeldingen(meldingen) {
+    for (const m of meldingen) {
+      const ok = boxRij('## [log] ' + nuIso().slice(0, 16).replace('T', ' ') + ' — OVIS Beleggen: ' + (m.bron === 'koers' || m.bron === 'ecb' || m.bron === 'sec_zoek' ? 'koersbron ' : 'nieuwsbron ') + (BRON_NAAM[m.bron] || m.bron) + ' faalt ' + m.n + ' dagen op rij #ovis-beleggen\n' +
+        '- van: beleggen-nieuws.js (pod, wv2993/wv3728); laatste fout: ' + (m.fout || 'onbekend') + '. De andere bronnen lopen door; de app toont de laatst bekende koers met datum; herstel gaat stil. Geen bedrijfsnamen in deze rij.\n\n');
+      if (!ok) log({ soort: 'box', bron: m.bron, ok: false });
+    }
+  }
+
+  // ── wv3728: koersronde (beurscodes zoeken, slotkoersen, wisselkoers, kaartjes vanzelf aan); geen taalmodel ──
+  async function koersronde(vandaag, r, tel) {
+    const kt = { posities: 0, gezocht: 0, gevonden: 0, koersen: 0, wissels: 0, kaartjes: 0, geweigerd: 0 };
+    const kd = typeof B.koersData === 'function' ? B.koersData() : null;
+    if (!kd) return kt;
+    kt.posities = kd.posities.length;
+    const codes = [], vondst = {};
+    const bekend = (sl) => (vondst[sl] && (vondst[sl].code || vondst[sl].cik) ? vondst[sl] : null) || (kd.codes[sl] && (kd.codes[sl].code || kd.codes[sl].cik) ? kd.codes[sl] : null);
+    // zoeken: nog geen koerscode-rij, of een kaartje met code maar zonder zoektocht (dan alleen het SEC-nummer erbij), of eens per week opnieuw zonder code
+    const moetZoeken = (sl) => { const c = kd.codes[sl]; return !c || c.kaartje || (!c.code && (!c.op || String(c.op).slice(0, 10) <= plusDagen(vandaag, -KOERS.code_opnieuw_dagen))); };
+    const zoek = new Map();
+    for (const p of kd.posities) zoek.set(p.sleutel, { sleutel: p.sleutel, naam: p.zoeknaam || p.naam, code: null });
+    for (const b of kd.bedrijven.concat(kd.aanvullen || [])) { const z = zoek.get(b.sleutel); if (z) z.code = z.code || b.code || null; else zoek.set(b.sleutel, { sleutel: b.sleutel, naam: (b.namen && b.namen[0]) || b.naam, code: b.code || null }); }
+    for (const z of zoek.values()) {
+      if (!moetZoeken(z.sleutel) || !kaal(z.naam)) continue;
+      kt.gezocht++;
+      const v = await r.vraag('sec_zoek', 'https://efts.sec.gov/LATEST/search-index?keysTyped=' + encodeURIComponent(kaal(z.naam).toLowerCase()), 'application/json', null,
+        (t) => { const x = secZoek(t, z.naam, z.code); return x && x.fout === 'geen JSON' ? null : { x }; });
+      if (v == null) continue;                           // bron faalt of onleesbaar: morgen opnieuw (geen 'niet gevonden' wegschrijven)
+      // review MOET 2: een beurscode op Davids kaartje gaat voor op wat de zoeker vindt (ook als de zoeker hem niet kent)
+      const eigen = kd.codes[z.sleutel] && kd.codes[z.sleutel].kaartje ? kd.codes[z.sleutel].code : null;
+      if (eigen) v.x = Object.assign({}, v.x || {}, { code: eigen, fout: null });
+      codes.push(v.x ? Object.assign({ sleutel: z.sleutel }, v.x) : { sleutel: z.sleutel, fout: 'niet gevonden' });
+      if (v.x) { vondst[z.sleutel] = v.x; if (v.x.code) kt.gevonden++; }
+      await pauze(200);
+    }
+    const koersen = [];
+    const valuta = new Set(kd.valuta);
+    for (const p of kd.posities) {
+      const c = bekend(p.sleutel);
+      // alleen USD-posities met een Amerikaanse ISIN (de bron geeft Amerikaanse noteringen in USD; review MOET 1: geen buitenlands aandeel op een ADR-koers)
+      if (!c || !c.code || !/^US/.test(p.isin) || (p.valuta && p.valuta !== KOERS.valuta)) continue;
+      const rijen = await r.vraag('koers', 'https://api.nasdaq.com/api/quote/' + encodeURIComponent(c.code) + '/historical?assetclass=stocks&fromdate=' + plusDagen(vandaag, -KOERS.dagen) + '&todate=' + vandaag + '&limit=20', 'application/json', haalKoers,
+        (t) => nasdaqRijen(t, c.code, vandaag));
+      if (rijen == null) continue;
+      for (const x of rijen) koersen.push({ isin: p.isin, datum: x.datum, slot: x.slot, valuta: KOERS.valuta, bron: 'nasdaq' });
+      valuta.add(KOERS.valuta);
+      await pauze(200);
+    }
+    const wissels = [];
+    for (const v of valuta) {
+      if (!/^[A-Z]{3}$/.test(v) || v === 'EUR') continue;
+      const rijen = await r.vraag('ecb', 'https://data-api.ecb.europa.eu/service/data/EXR/D.' + v + '.EUR.SP00.A?lastNObservations=15&format=csvdata', 'text/csv', null, (t) => { const x = ecbRijen(t); return x && x.length ? x : null; });
+      if (rijen == null) continue;
+      for (const x of rijen) wissels.push({ valuta: v, datum: x.datum, per_eur: x.per_eur });
+    }
+    const z = B.zetKoersen({ codes, koersen, wissels });
+    kt.koersen = z.koersen; kt.wissels = z.wissels; kt.geweigerd = z.geweigerd;
+    // review ZOU 2: een kaartje zonder SEC-nummer of beurscode (zoektocht faalde eerder) krijgt wat nu gevonden is; wat er al staat blijft
+    for (const b of kd.aanvullen || []) { const c = vondst[b.sleutel]; if (c && (c.cik || c.code)) B.vulBedrijfAan(b.sleutel, { code: c.code || null, cik: c.cik || null }); }
+    kt.kaartjes = B.zetAutoBedrijven(kd.bedrijven.map((b) => { const c = bekend(b.sleutel) || {}; return { sleutel: b.sleutel, namen: metTitelvorm(b.namen), code: c.code || b.code || null, cik: c.cik || null }; }));
+    schrijf((db) => zetMeta(db, 'koers_dag', vandaag));
+    laatste.koers = { op: nuIso(), posities: kt.posities, koersen: kt.koersen, wissels: kt.wissels, kaartjes: kt.kaartjes };
+    log({ soort: 'koers', posities: kt.posities, gezocht: kt.gezocht, gevonden: kt.gevonden, koersen: kt.koersen, wissels: kt.wissels, kaartjes: kt.kaartjes, geweigerd: kt.geweigerd, fouten: tel.fouten });
+    return kt;
+  }
+  // los (na een uitrol op een dag waarop de ochtendronde al liep): alleen de koersronde, met zijn eigen bronstand
+  async function koersAlleen(vandaag) {
+    const tel = { aanvragen: 0, fouten: 0 };
+    const r = ronde(tel);
+    const kt = await koersronde(vandaag, r, tel);
+    const meldingen = [];
+    schrijf((db) => schrijfBronnen(db, r.stand, vandaag, meldingen));
+    boxMeldingen(meldingen);
+    return Object.assign(kt, { aanvragen: tel.aanvragen, fouten: tel.fouten });
+  }
+
+  // ── ophaalronde (dagelijks, geen taalmodel) ──
+  async function ophaal(vandaag) {
+    const t0 = Date.now();
+    const tel = { bedrijven: 0, aanvragen: 0, fouten: 0, nieuw: 0, reclame: 0, bronnen: {} };
+    const r = ronde(tel);
+    const stand = r.stand, noteer = r.noteer, vraag = r.vraag;
+    try { tel.koers = await koersronde(vandaag, r, tel); }   // wv3728: eerst koersen en kaartjes, dan het nieuws (ook voor de nieuwe kaartjes)
+    catch (e) { tel.koers = { fout: true }; log({ soort: 'koers', ok: false }); }
+    const data = B.nieuwsData();
+    const bs = actieve(data);
+    tel.bedrijven = bs.length;
+    const nieuw = [];
     const van = plusDagen(vandaag, -GRENS.sec_dagen);
     const zet = (b, r) => {
       const titel = schoonTitel(r.titel);
@@ -326,7 +497,6 @@ function maak(o) {
       }
     }
     // wegschrijven + bronstand + nachtveeg (> 120 dagen)
-    const w = isoWeek(vandaag).week;
     const meldingen = [];
     schrijf((db) => {
       const st = db.prepare('INSERT OR IGNORE INTO nieuws (sleutel, bedrijf, bron, bronsleutel, hard, koppeling, soort, achtergrond, datum, titel, link, eerst_gezien) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
@@ -336,22 +506,10 @@ function maak(o) {
         if (u.changes) tel.nieuw++; else bij.run(r.titel, r.sleutel);
       }
       db.prepare('DELETE FROM nieuws WHERE eerst_gezien < ?').run(plusDagen(vandaag, -GRENS.bewaar_dagen));
-      for (const [bron, s] of Object.entries(stand)) {
-        db.prepare('INSERT INTO nieuws_bron (bron) VALUES (?) ON CONFLICT(bron) DO NOTHING').run(bron);
-        if (s.ok) db.prepare('UPDATE nieuws_bron SET laatst_ok = ?, fouten_op_rij = 0, laatste_fout = NULL WHERE bron = ?').run(vandaag, bron);
-        else {
-          db.prepare('UPDATE nieuws_bron SET fouten_op_rij = fouten_op_rij + 1, laatste_fout = ? WHERE bron = ?').run(s.laatste, bron);
-          const r = db.prepare('SELECT fouten_op_rij, gemeld_week FROM nieuws_bron WHERE bron = ?').get(bron);
-          if (r.fouten_op_rij >= GRENS.fouten_box && r.gemeld_week !== w) { meldingen.push({ bron, fout: s.laatste, n: r.fouten_op_rij }); db.prepare('UPDATE nieuws_bron SET gemeld_week = ? WHERE bron = ?').run(w, bron); }
-        }
-      }
+      schrijfBronnen(db, stand, vandaag, meldingen);
       zetMeta(db, 'nieuws_ophaal_dag', vandaag);
     });
-    for (const m of meldingen) {
-      const ok = boxRij('## [log] ' + nuIso().slice(0, 16).replace('T', ' ') + ' — OVIS Beleggen: nieuwsbron ' + (BRON_NAAM[m.bron] || m.bron) + ' faalt ' + m.n + ' dagen op rij #ovis-beleggen\n' +
-        '- van: beleggen-nieuws.js (pod, wv2993); laatste fout: ' + (m.fout || 'onbekend') + '. De andere bronnen lopen door; herstel gaat stil. Geen bedrijfsnamen in deze rij.\n\n');
-      if (!ok) log({ soort: 'box', bron: m.bron, ok: false });
-    }
+    boxMeldingen(meldingen);
     for (const [bron, s] of Object.entries(stand)) tel.bronnen[bron] = s.ok ? 'ok' : 'fout';
     tel.ms = Date.now() - t0;
     laatste.ophaal = { op: nuIso(), bedrijven: tel.bedrijven, aanvragen: tel.aanvragen, fouten: tel.fouten, nieuw: tel.nieuw };
@@ -531,10 +689,11 @@ function maak(o) {
     try {
       const k = klok();
       const minuut = k.uur * 60 + k.min;
-      const st = lees((db) => ({ dag: meta(db, 'nieuws_ophaal_dag'), week: meta(db, 'nieuws_week_klaar') })) || {};
+      const st = lees((db) => ({ dag: meta(db, 'nieuws_ophaal_dag'), week: meta(db, 'nieuws_week_klaar'), koers: meta(db, 'koers_dag') })) || {};
       const w = isoWeek(k.datum).week;
       const weekNu = weekdag(k.datum) === MOMENT.week_dag && minuut >= MOMENT.week && st.week !== w;
       if ((minuut >= MOMENT.ophaal && st.dag !== k.datum) || (weekNu && st.dag !== k.datum)) uit.ophaal = await ophaal(k.datum);
+      else if (minuut >= MOMENT.ophaal && st.koers !== k.datum) uit.koers = await koersAlleen(k.datum);   // wv3728: na een uitrol op een dag waarop de ronde al liep
       if (weekNu) uit.week = await weekronde(k.datum);
       uit.meld = await meld(k);
     } finally { bezig = false; }
@@ -543,9 +702,9 @@ function maak(o) {
   function info() {
     const st = lees((db) => ({ dag: meta(db, 'nieuws_ophaal_dag'), week: meta(db, 'nieuws_week_klaar'),
       fouten: db.prepare('SELECT COUNT(*) AS n FROM nieuws_bron WHERE fouten_op_rij > 0').get().n })) || {};
-    return { aan: true, laatste_ophaaldag: st.dag || null, laatste_week: st.week || null, bronnen_met_fout: st.fouten || 0, ophaal: laatste.ophaal, weekronde: laatste.week, meld: laatste.meld };
+    return { aan: true, laatste_ophaaldag: st.dag || null, laatste_week: st.week || null, bronnen_met_fout: st.fouten || 0, ophaal: laatste.ophaal, weekronde: laatste.week, meld: laatste.meld, koers: laatste.koers };
   }
-  return { tik, ophaal, weekronde, meld, info };
+  return { tik, ophaal, koersAlleen, weekronde, meld, info };
 }
 
-module.exports = { maak, schoonReden, heeftCijfer, modelZinOk, isReclame, maakKoppel, clusters, isoWeek, woordRe, maakPrompt, BELANG_ZIN, SYSTEEM, SCHEMA, FEEDS, GRENS, MOMENT };
+module.exports = { maak, metTitelvorm, secZoek, nasdaqRijen, ecbRijen, kaal, KOERS, schoonReden, heeftCijfer, modelZinOk, isReclame, maakKoppel, clusters, isoWeek, woordRe, maakPrompt, BELANG_ZIN, SYSTEEM, SCHEMA, FEEDS, GRENS, MOMENT };

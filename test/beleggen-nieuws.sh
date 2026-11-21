@@ -27,6 +27,10 @@ if echo "$B" | grep -nE "logError\([^)]*(e\.message|String\(e|tekst|titel)"; the
 [ $f = 0 ] && echo "GROEN koppeling: server.js (UA zonder adres, klok, bron, routes), harvester.js, uitrol.sh"
 node --test test/beleggen-nieuws.test.js 2>&1 | grep -E "^# (pass|fail)"
 node --test test/beleggen-nieuws.test.js >/dev/null 2>&1 || { echo "ROOD  test/beleggen-nieuws.test.js"; node --test test/beleggen-nieuws.test.js 2>&1 | grep -E "^not ok" ; f=1; }
+# wv3728: dagkoersen en kaartjes vanzelf (koersronde, waarde van vandaag, uitval, uit blijft uit, alleen codes naar buiten)
+grep -qF "haalKoers: async function (url, accept) { const r = await H.veiligHaal(url, { ua: BELEGGEN_KOERS_UA }, accept); return r.body; }," server.js || { echo "ROOD  server.js: koersen niet via veiligHaal"; f=1; }
+node --test test/beleggen-koers.test.js 2>&1 | grep -E "^# (pass|fail)"
+node --test test/beleggen-koers.test.js >/dev/null 2>&1 || { echo "ROOD  test/beleggen-koers.test.js"; node --test test/beleggen-koers.test.js 2>&1 | grep -E "^not ok" ; f=1; }
 
 # ── kruisproef: regel weg → rood (elk punt uit ontwerp § 6) ──
 [ "${KRUIS:-1}" = 0 ] && exit $f
@@ -58,6 +62,19 @@ const M = [
   ['ophalen eens per dag', 'n', "(minuut >= MOMENT.ophaal && st.dag !== k.datum)", "(minuut >= MOMENT.ophaal)"],
   ['nachtveeg 120 dagen', 'n', "db.prepare('DELETE FROM nieuws WHERE eerst_gezien < ?')", "db.prepare('SELECT 1 FROM nieuws WHERE eerst_gezien < ?')"],
   ['kern krijgt geen nieuws', 'b', "      if (p.soort === 'kern') continue;\n      lijst.push(", "      lijst.push("],
+  ['wv3728 alleen afgesloten beursdagen', 'n', "if (datum < vandaag) uit.push({ datum, slot });", "uit.push({ datum, slot });"],
+  ['wv3728 factor-2-vangnet', 'b', "if (v && (v.valuta !== k.valuta || Number(k.slot) > 2 * Number(v.slot) || Number(k.slot) < Number(v.slot) / 2)) { tel.geweigerd++; continue; }", ""],
+  ['wv3728 uit blijft uit', 'b', " || uit.has(sl) || db.prepare('SELECT 1 FROM bedrijf WHERE sleutel = ?').get(sl)) continue;", " || db.prepare('SELECT 1 FROM bedrijf WHERE sleutel = ?').get(sl)) continue;"],
+  ['wv3728 valuta van de positie', 'b', ": p.valuta && k0.valuta !== p.valuta ? 'koers in '", ": false ? 'koers in '"],
+  ['wv3728 wisselkoers niet van na de koersdatum', 'b', "const r = (wissels[valuta] || []).find((x) => x.datum <= datum);", "const r = (wissels[valuta] || [])[0];"],
+  ['wv3728 code van David hoort bij de treffer', 'n', "if (code ? !tickers.includes(String(code).toUpperCase()) : kaal(ent) !== doel) continue;", "if (!code && kaal(ent) !== doel) continue;"],
+  ['wv3728 koersronde na uitrol één keer', 'n', "else if (minuut >= MOMENT.ophaal && st.koers !== k.datum)", "else if (minuut >= MOMENT.ophaal)"],
+  ['wv3728 MOET 1 aandelenklassen', 'n', "if (!code && tickers.length > 1) return", "if (false) return"],
+  ['wv3728 MOET 1 alleen US-ISIN', 'n', "if (!c || !c.code || !/^US/.test(p.isin) ||", "if (!c || !c.code ||"],
+  ['wv3728 MOET 2 code van David vervangt koersen', 'b', "if (oud && oud.code && oud.code !== code) db.prepare('DELETE FROM koers WHERE isin = ?').run(sl.slice(5));", ""],
+  ['wv3728 ZOU 1 inhoud vóór ok', 'n', "if (x == null) { tel.fouten++; noteer(bron, false, 'onleesbaar antwoord'); return null; }", "if (x == null) { noteer(bron, true); return null; }"],
+  ['wv3728 ZOU 2 aanvullen', 'n', "if (c && (c.cik || c.code)) B.vulBedrijfAan(", "if (false) B.vulBedrijfAan("],
+  ['wv3728 titelvorm', 'n', "uit.push(String(n).replace(/[A-Z]{5,}/g, (w) => w[0] + w.slice(1).toLowerCase()));", ""],
   ['Ruis telt één keer per kaart', 'b', "const telt = (b.keuze === 'ruis') - (!!oud && oud.keuze === 'ruis');", "const telt = b.keuze === 'ruis' ? 1 : 0;"],
 ];
 const dir = process.argv[2];
@@ -74,7 +91,7 @@ k=0
 while IFS=$'\t' read -r i wie naam p; do
   if [ "$wie" = FOUT ]; then echo "ROOD  kruisproef $naam"; f=1; continue; fi
   if [ "$wie" = n ]; then e="BN_JS=$p"; else cp "$p" beleggen.kruis.js; e="BL_JS=$PWD/beleggen.kruis.js"; fi
-  if env "$e" node --test test/beleggen-nieuws.test.js >/dev/null 2>&1; then echo "ROOD  kruisproef bleef groen: $naam"; f=1; else k=$((k + 1)); fi
+  if env "$e" node --test test/beleggen-nieuws.test.js test/beleggen-koers.test.js >/dev/null 2>&1; then echo "ROOD  kruisproef bleef groen: $naam"; f=1; else k=$((k + 1)); fi
   rm -f beleggen.kruis.js
 done < "$K/lijst"
 echo "GROEN kruisproef: $k van $(wc -l < "$K/lijst") regels weg → rood"
