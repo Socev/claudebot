@@ -1250,7 +1250,10 @@ function maak(o) {
     return metDb((db) => {
       const d = metAankoop(leesAlles(db));
       const k = bereken(d, vandaagF());
-      const posities = k.posities.filter((p) => p.isin).map((p) => ({ sleutel: p.sleutel, isin: p.isin, naam: p.naam, zoeknaam: kaleNaam(p.naam), valuta: p.valuta || null }));
+      // wv3777: de beurs waar David het laatst handelde (DEGIRO-code uit de transacties, bv. EAM) → welke Euronext-beurs de koers geeft
+      const beurs = {};
+      if (db) for (const r of db.prepare("SELECT isin, beurs FROM transactie WHERE isin IS NOT NULL AND beurs IS NOT NULL AND beurs <> '' ORDER BY datum DESC, tijd DESC").all()) if (!beurs[r.isin]) beurs[r.isin] = String(r.beurs).toUpperCase().slice(0, 8);
+      const posities = k.posities.filter((p) => p.isin).map((p) => ({ sleutel: p.sleutel, isin: p.isin, naam: p.naam, zoeknaam: kaleNaam(p.naam), valuta: p.valuta || null, beurs: beurs[p.isin] || null }));
       const uit = db ? new Set(db.prepare('SELECT sleutel FROM bedrijf_uit').all().map((r) => r.sleutel)) : new Set();
       const bedrijven = bedrijvenUit(db, d, k).filter((b) => !b.kaartje && !uit.has(b.sleutel))
         .map((b) => ({ sleutel: b.sleutel, naam: b.naam, bron: b.bron, code: b.voorstel.code, namen: b.voorstel.namen }));

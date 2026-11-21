@@ -22,6 +22,12 @@ function nasdaq(code, rijen) {
 }
 const ecb = (rijen) => 'KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE,OBS_STATUS\n' + rijen.map(([d, v]) => 'EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,' + d + ',' + v + ',A').join('\n') + '\n';
 
+// wv3777: Euronext-CSV en "Trading information"-blok in de vorm die 21-11 gemeten is (dd/mm/jjjj; ETF-rijen hebben een tiende kolom vwap)
+const euCsv = (isin, rijen) => '\uFEFF"Historical Data"\n"From 2026-09-22 to 2026-11-21"\n' + isin + '\nDate;Open;High;Low;Last;Close;"Number of Shares";"Number of Trades";Turnover\n' +
+  rijen.map(([d, c]) => d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4) + ';' + c + ';' + c + ';' + c + ';' + c + ';' + c + ';1000;10;1000;' + c).join('\n') + (rijen.length ? '\n' : '');
+const euBlok = (v) => '<div class="card"><h3>Trading Information</h3><table><tr><td>Trading currency</td><td><strong>' + v + '</strong></td></tr><tr><td>Ticker ETF</td><td>VBWE</td></tr></table></div>';
+const EU_ISIN = 'IE0000000013', EU_AANTAL = '7.13', EU_KOERS = '113.31';
+
 function wereld(o) {
   o = o || {};
   const map = fs.mkdtempSync(path.join(os.tmpdir(), 'bl-koers-'));
@@ -30,6 +36,15 @@ function wereld(o) {
   w.P = (pad, body) => { const u = w.m.app({ methode: 'POST', pad: '/app/beleggen/' + pad, body }); assert.strictEqual(u.status, 200, pad + ': ' + JSON.stringify(u.body)); return u.body; };
   w.nasdaq = nasdaq('VBCX', [['2026-11-21', '$999.99'], ['2026-11-20', '$271.83'], ['2026-11-19', '$1,250.00'.replace('1,250.00', '250.00')], ['2026-11-18', '$260.10']]);
   w.ecb = ecb([['2026-11-20', '1.0968'], ['2026-11-19', '1.1000'], ['2026-11-18', '1.0900']]);
+  // wv3777: Euronext per ISIN-MIC; standaard nergens genoteerd (lege CSV met kop)
+  w.eu = {}; w.euValuta = {};
+  w.euronext = (url) => {
+    const u = new URL(url);
+    const m = /\/getFullDownloadAjax\/([A-Z0-9]{12})-([A-Z]{4})$/.exec(u.pathname), v = /\/STOCK\/([A-Z0-9]{12})-([A-Z]{4})\/fs_tradinginfo_block$/.exec(u.pathname);
+    if (m) return typeof w.eu[m[1] + '-' + m[2]] === 'string' ? w.eu[m[1] + '-' + m[2]] : euCsv(m[1], w.eu[m[1] + '-' + m[2]] || []);
+    if (v) { const c = w.euValuta[v[1] + '-' + v[2]] || 'EUR'; return c === '-' ? '<div></div>' : euBlok(c); }
+    return 'onbekend';
+  };
   const haal = async (url) => {
     w.uit.push(url);
     const h = new URL(url).hostname;
@@ -37,6 +52,7 @@ function wereld(o) {
     if (h === 'efts.sec.gov') { const q = new URL(url).searchParams.get('keysTyped'); return /chips/.test(q) ? EFTS_CHIPS : /ai/.test(q) ? EFTS_AI : efts([]); }
     if (h === 'api.nasdaq.com') return w.nasdaq;
     if (h === 'data-api.ecb.europa.eu') return w.ecb;
+    if (h === 'live.euronext.com') return w.euronext(url);   // wv3777
     if (h === 'data.sec.gov') return JSON.stringify({ filings: { recent: { form: [], filingDate: [] } } });
     return '<?xml version="1.0"?><rss version="2.0"><channel><title>x</title></channel></rss>';
   };
@@ -231,4 +247,119 @@ test('lezers: SEC-zoeker, Nasdaq, ECB', () => {
   assert.deepStrictEqual(N.ecbRijen(ecb([['2026-11-20', '1.0968']])), [{ datum: '2026-11-20', per_eur: '1.0968' }]);
   assert.strictEqual(N.ecbRijen('iets anders'), null);
   assert.deepStrictEqual(N.metTitelvorm(['NVIDIA', 'ASML', 'Voorbeeld']), ['NVIDIA', 'Nvidia', 'ASML', 'Voorbeeld']);
+});
+
+// ── wv3777: posities in euro via Euronext ──
+function metEuPositie(beurs) {
+  const w = wereld();
+  w.P('transactie', { actie: 'zet', richting: 'erbij', datum: '2026-11-14', naam: 'VOORBEELD WERELD ETF', isin: EU_ISIN, aantal: EU_AANTAL, koers: EU_KOERS, valuta: 'EUR', waarde_eur: '807.90', kosten_eur: '1' });
+  if (beurs) w.m.metDb((db) => db.prepare('UPDATE transactie SET beurs = ? WHERE isin = ?').run(beurs, EU_ISIN), true);
+  return w;
+}
+const euUit = (w) => w.uit.filter((u) => u.includes('live.euronext.com'));
+
+test('wv3777: positie in euro (beurs EAM) krijgt de slotkoers van Euronext Amsterdam; totaal Waarde vandaag weer compleet; uitgaand alleen ISIN-beurs + datum', async () => {
+  const w = metEuPositie('EAM');
+  w.eu[EU_ISIN + '-XAMS'] = [['2026-11-21', '999.00'], ['2026-11-20', '113.31'], ['2026-11-19', '115.00'], ['2026-11-18', '114.20']];
+  await w.n.ophaal(w.vandaag);
+  const v = w.get().stand.vandaag;
+  assert.strictEqual(v.volledig, true, JSON.stringify(v.posities));
+  const p = v.posities['isin:' + EU_ISIN];
+  assert.deepStrictEqual([p.koers, p.valuta, p.datum], ['113.31', 'EUR', '2026-11-20'], 'afgesloten beursdag, geen rij van vandaag');
+  assert.strictEqual(p.waarde_cent, Math.round(7.13 * 113.31 * 100), 'euro: geen wisselkoers nodig');
+  assert.strictEqual(p.vorige_cent, Math.round(7.13 * 115 * 100));
+  const bron = w.m.metDb((db) => db.prepare('SELECT DISTINCT bron FROM koers WHERE isin = ?').all(EU_ISIN).map((r) => r.bron), false);
+  assert.deepStrictEqual(bron, ['euronext:XAMS']);
+  const uit = euUit(w);
+  assert.strictEqual(uit.length, 2, 'één CSV + één valutablok: ' + uit.join(' '));
+  for (const u of uit) {
+    const x = new URL(u);
+    assert.ok(x.pathname.endsWith('/' + EU_ISIN + '-XAMS') || x.pathname.endsWith('/' + EU_ISIN + '-XAMS/fs_tradinginfo_block'), x.pathname);
+    for (const [k, val] of x.searchParams) assert.ok(!/\d/.test(val) || /^\d{4}-\d{2}-\d{2}$/.test(val), 'alleen datums als getal: ' + k + '=' + val);
+  }
+  const alles = uit.join(' ');   // (de bedrijfsnaam gaat al sinds wv3728 naar de SEC-zoeker en de nieuwsbronnen; Euronext krijgt alleen de ISIN)
+  for (const geheim of [EU_AANTAL, EU_KOERS, '807', 'WERELD', 'VOORBEELD', AANTAL, KOERS]) assert.ok(!alles.includes(geheim), 'lekt ' + geheim);
+  assert.ok(w.koersUA, 'via haalKoers (browser-UA, zelfde poort)');
+  assert.ok(new URL(uit[0]).searchParams.get('startdate') <= '2026-09-22', 'eerste keer ± 2 maanden (koerslijntje)');
+  const k = w.log.find((x) => x.soort === 'koers'); assert.strictEqual(k.eu, 1);
+  // wv3754: de vergelijking met het wereldindexfonds blijft lopen
+  assert.ok(w.uit.some((u) => u.includes('/URTH/')));
+});
+
+test('wv3777: andere Euronext-beurs uit DEGIRO (EPA → Parijs eerst); onbekende beurs → Amsterdam, dan Parijs; nergens = zonder koers, geen bronfout', async () => {
+  const a = metEuPositie('EPA');
+  a.eu[EU_ISIN + '-XPAR'] = [['2026-11-20', '113.31']];
+  await a.n.ophaal(a.vandaag);
+  assert.ok(euUit(a)[0].includes(EU_ISIN + '-XPAR'), 'eerst de eigen beurs');
+  assert.strictEqual(a.get().stand.vandaag.posities['isin:' + EU_ISIN].koers, '113.31');
+  const b = metEuPositie('XET');
+  b.eu[EU_ISIN + '-XPAR'] = [['2026-11-20', '113.40']];
+  await b.n.ophaal(b.vandaag);
+  assert.deepStrictEqual(euUit(b).map((u) => /-(X[A-Z]{3})/.exec(u)[1]), ['XAMS', 'XPAR', 'XPAR'], 'Amsterdam leeg → Parijs, valuta van Parijs');
+  assert.strictEqual(b.get().stand.vandaag.posities['isin:' + EU_ISIN].koers, '113.40');
+  const c = metEuPositie(null);
+  await c.n.ophaal(c.vandaag);
+  assert.strictEqual(euUit(c).length, 2, 'Amsterdam en Parijs geprobeerd, geen valutavraag');
+  const v = c.get().stand.vandaag;
+  assert.strictEqual(v.volledig, false); assert.strictEqual(v.posities['isin:' + EU_ISIN].reden, 'nog geen koers');
+  assert.ok(!c.m.metDb((db) => db.prepare("SELECT 1 FROM nieuws_bron WHERE bron = 'koers_eu' AND fouten_op_rij > 0").get(), false), 'niet genoteerd ≠ bronfout');
+  assert.strictEqual(c.log.find((x) => x.soort === 'koers').eu_niet, 1);
+});
+
+test('wv3777: valuta uit de bron — Euronext zegt USD bij een positie in euro → geen koers (geweigerd); geen valuta in het blok = bronfout', async () => {
+  const w = metEuPositie('EAM');
+  w.eu[EU_ISIN + '-XAMS'] = [['2026-11-20', '120.00']]; w.euValuta[EU_ISIN + '-XAMS'] = 'USD';
+  await w.n.ophaal(w.vandaag);
+  assert.strictEqual(w.get().stand.vandaag.posities['isin:' + EU_ISIN].reden, 'nog geen koers');
+  assert.strictEqual(w.log.find((x) => x.soort === 'koers').eu_valuta, 1);
+  assert.ok(!euUit(w).some((u) => u.includes('-XPAR')), 'niet verder zoeken op een andere beurs');
+  const z = metEuPositie('EAM');
+  z.eu[EU_ISIN + '-XAMS'] = [['2026-11-20', '120.00']]; z.euValuta[EU_ISIN + '-XAMS'] = '-';
+  await z.n.ophaal(z.vandaag);
+  assert.strictEqual(z.get().stand.vandaag.posities['isin:' + EU_ISIN].reden, 'nog geen koers', 'geen valuta = geen koers raden');
+  assert.ok(z.m.metDb((db) => db.prepare("SELECT 1 FROM nieuws_bron WHERE bron = 'koers_eu_valuta' AND fouten_op_rij = 1").get(), false), 'telt als bronfout');
+});
+
+test('wv3777: Euronext valt uit → laatst bekende koers met datum blijft; onleesbaar = bronfout zonder andere beurs; na drie dagen één box-rij; factor-2-vangnet', async () => {
+  const w = metEuPositie('EAM');
+  w.eu[EU_ISIN + '-XAMS'] = [['2026-11-20', '113.31'], ['2026-11-19', '115.00']];
+  await w.n.ophaal(w.vandaag);
+  for (const [dag, fout] of [['2026-11-22', 'kapot'], ['2026-11-23', 'onleesbaar'], ['2026-11-24', 'kapot']]) {
+    w.vandaag = dag; w.uit.length = 0;
+    if (fout === 'kapot') w.kapot.add('euronext'); else { w.kapot.delete('euronext'); w.eu[EU_ISIN + '-XAMS'] = 'Sorry, we are down'; }
+    await w.n.ophaal(w.vandaag);
+    assert.strictEqual(euUit(w).length, 1, dag + ': na een fout geen tweede beurs of valutavraag');
+    const p = w.get().stand.vandaag.posities['isin:' + EU_ISIN];
+    assert.deepStrictEqual([p.koers, p.datum], ['113.31', '2026-11-20'], dag + ': laatst bekende koers');
+  }
+  const box = w.box.filter((t) => /Euronext/.test(t));
+  assert.strictEqual(box.length, 1, 'na drie foutdagen één box-rij'); assert.ok(!box[0].includes('WERELD'), 'geen namen in de box');
+  // herstel; dan een koers die meer dan een factor 2 afwijkt → geweigerd
+  w.kapot.delete('euronext'); w.vandaag = '2026-11-26';
+  w.eu[EU_ISIN + '-XAMS'] = [['2026-11-25', '11.33'], ['2026-11-24', '114.00']];
+  await w.n.ophaal(w.vandaag);
+  const p = w.get().stand.vandaag.posities['isin:' + EU_ISIN];
+  assert.deepStrictEqual([p.koers, p.datum], ['114.00', '2026-11-24'], 'factor 10 lager = geweigerd, de dag ervoor telt');
+});
+
+test('wv3777: een positie in euro met een Amerikaanse ISIN, of in een andere valuta, gaat niet naar Euronext', async () => {
+  const w = wereld();
+  w.P('transactie', { actie: 'zet', richting: 'erbij', datum: '2026-11-14', naam: 'VOORBEELD ZWITSER', isin: 'CH0000000016', aantal: '1', koers: '10', valuta: 'CHF', waarde_eur: '10', kosten_eur: '0' });
+  w.P('transactie', { actie: 'zet', richting: 'erbij', datum: '2026-11-14', naam: 'VOORBEELD AMERIKA IN EURO', isin: 'US0000000033', aantal: '1', koers: '10', valuta: 'EUR', waarde_eur: '10', kosten_eur: '0' });
+  await w.n.ophaal(w.vandaag);
+  assert.strictEqual(euUit(w).length, 0, 'CHF en US-ISIN in euro: geen Euronext');
+  assert.strictEqual(w.get().stand.vandaag.posities['isin:US0000000033'].reden, 'nog geen koers');
+});
+
+test('wv3777: lezers Euronext', () => {
+  assert.deepStrictEqual(N.euronextRijen(euCsv(EU_ISIN, [['2026-11-21', '1.00'], ['2026-11-20', '1,234.50'.replace(',', '')]]), EU_ISIN, '2026-11-21'), [{ datum: '2026-11-20', slot: '1234.50' }]);
+  assert.strictEqual(N.euronextRijen(euCsv('IE0000000021', [['2026-11-20', '1']]), EU_ISIN, '2026-11-21'), null, 'andere ISIN in de echo = onleesbaar');
+  assert.strictEqual(N.euronextRijen('<html>Access denied</html>', EU_ISIN, '2026-11-21'), null);
+  assert.strictEqual(N.euronextRijen(euCsv(EU_ISIN, []).replace(';Close;', ';Slot;'), EU_ISIN, '2026-11-21'), null, 'geen Close-kolom = onleesbaar');
+  assert.deepStrictEqual(N.euronextRijen(euCsv(EU_ISIN, []), EU_ISIN, '2026-11-21'), [], 'niet genoteerd = leeg, geen fout');
+  assert.deepStrictEqual(N.euronextRijen(euCsv(EU_ISIN, [['2026-11-20', '-3'], ['2026-11-19', 'n/a'], ['2026-11-18', '5']]), EU_ISIN, '2026-11-21'), [{ datum: '2026-11-18', slot: '5' }]);
+  assert.strictEqual(N.euronextValuta(euBlok('EUR')), 'EUR'); assert.strictEqual(N.euronextValuta(euBlok('USD')), 'USD');
+  assert.strictEqual(N.euronextValuta('<div>\n</div>'), null); assert.strictEqual(N.euronextValuta(euBlok('euro')), null);
+  assert.deepStrictEqual(N.euMics('EAM'), ['XAMS', 'XPAR']); assert.deepStrictEqual(N.euMics('epa'), ['XPAR', 'XAMS']); assert.deepStrictEqual(N.euMics('MIL'), ['MTAA', 'XAMS', 'XPAR']);
+  assert.deepStrictEqual(N.euMics('XET'), ['XAMS', 'XPAR']); assert.deepStrictEqual(N.euMics(null), ['XAMS', 'XPAR']);
 });

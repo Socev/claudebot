@@ -124,15 +124,15 @@ const FEEDS = [
   { bron: 'fd', url: 'https://fd.nl/?rss', hard: false, product: false },
   { bron: 'stat', url: 'https://www.statnews.com/feed/', hard: false, product: false },
 ];
-const BRON_NAAM = { koers: 'Nasdaq (slotkoersen)', ecb: 'ECB (wisselkoers)', sec_zoek: 'SEC (beurscode zoeken)', sec: 'SEC', clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed', fda: 'FDA', ema: 'EMA', afm: 'AFM', nos: 'NOS', fd: 'FD', stat: 'STAT', gnews: 'Google Nieuws' };
+const BRON_NAAM = { koers: 'Nasdaq (slotkoersen)', koers_eu: 'Euronext (slotkoersen)', koers_eu_valuta: 'Euronext (handelsvaluta)', ecb: 'ECB (wisselkoers)', sec_zoek: 'SEC (beurscode zoeken)', sec: 'SEC', clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed', fda: 'FDA', ema: 'EMA', afm: 'AFM', nos: 'NOS', fd: 'FD', stat: 'STAT', gnews: 'Google Nieuws' };
 
 // ── wv3728 (besluit nr 138 / 2C38, David Ja 21-11 13:18 met vingerafdruk): dagkoersen en vanzelf nieuws ──
 // Elke ochtend (en één keer direct na een uitrol op een dag zonder koersronde): (1) beurscode en SEC-nummer zelf opzoeken voor elke positie en
 // volglijstregel zonder code (SEC-bedrijfszoeker efts.sec.gov; alleen de kale bedrijfsnaam gaat de deur uit), (2) slotkoersen van de afgelopen
 // dagen per beurscode (api.nasdaq.com, onofficieel; alleen de beurscode en een begindatum gaan de deur uit), (3) de ECB-wisselkoers per vreemde
 // valuta, (4) een kaartje "Nieuws over dit bedrijf" voor elk bedrijf zonder kaartje dat David niet uitzette. Geen aantallen of bedragen naar
-// buiten; de waarde rekent beleggen.js op de pod uit. Alleen Amerikaanse beurscodes in USD (de bron geeft alleen die); een positie in een andere
-// valuta blijft "zonder koers". Valt een bron uit, dan blijft de laatst bekende koers met zijn datum staan; na drie dagen een box-rij (zoals nieuws).
+// buiten; de waarde rekent beleggen.js op de pod uit. Amerikaanse beurscodes in USD via Nasdaq; posities in euro via Euronext (wv3777, zie EU);
+// een positie in een andere valuta blijft "zonder koers". Valt een bron uit, dan blijft de laatst bekende koers met zijn datum staan; na drie dagen een box-rij (zoals nieuws).
 const KOERS = { dagen: 12, eerste_dagen: 60, eerste_onder: 20, code_opnieuw_dagen: 7, valuta: 'USD' };
 // wv3754 (L05): zolang er voor een ISIN minder dan 20 dagkoersen zijn, haalt de ronde ± 2 maanden op (koerslijntje per positie en daglijn vanaf de
 // eerste dag); daarna de gewone 12 dagen. Plus het wereldindexfonds (URTH, MSCI World) als vergelijking: alleen die vaste code gaat de deur uit.
@@ -194,6 +194,44 @@ function ecbRijen(csv) {
   const uit = [];
   for (const l of r.slice(1, 60)) { const c = l.split(','); if (/^\d{4}-\d{2}-\d{2}$/.test(c[iT]) && /^\d{1,6}(\.\d{1,8})?$/.test(c[iV]) && Number(c[iV]) > 0) uit.push({ datum: c[iT], per_eur: c[iV] }); }
   return uit;
+}
+
+// ── wv3777 (vervolg op wv3728, besluit nr 138): slotkoersen voor posities in euro (Europese aandelen en ETF's) via Euronext ──
+// Gemeten 21-11 vanaf de pod: live.euronext.com geeft per ISIN + beurs (MIC) een CSV met dagkoersen (GET, geen sleutel; ISIN-MIC en twee datums in
+// het adres, niets anders) en een blok "Trading information" met de handelsvaluta. Yahoo 429, Stooq 404, Börse Frankfurt {}, onvista-historie 403.
+// Beurs: de DEGIRO-beurscode uit Davids transacties (EAM, EPA, ...) → MIC; onbekend of geen Euronext-beurs = Amsterdam, dan Parijs (zelfde ISIN, in
+// euro; de koers komt dan van een andere beurs dan waar David kocht, de bron zegt welke). Alleen de valuta die de bron zelf noemt telt.
+const EU = { mic: { EAM: 'XAMS', EPA: 'XPAR', EBR: 'XBRU', ELI: 'XLIS', MIL: 'MTAA', EDB: 'XMSM', OSL: 'XOSL' }, terugval: ['XAMS', 'XPAR'], valuta: 'EUR' };
+const RE_ISIN_EU = /^[A-Z]{2}[A-Z0-9]{9}[0-9]$/;
+function euMics(beurs) { const m = EU.mic[String(beurs || '').toUpperCase()]; return [...new Set((m ? [m] : []).concat(EU.terugval))].slice(0, 3); }
+// CSV: regel 1 "Historical Data", regel 2 "From .. to ..", regel 3 = de ISIN (echo), regel 4 kop (Date;...;Close;...), daarna dd/mm/jjjj;...
+// Een ISIN die op deze beurs niet genoteerd is: zelfde kop, geen rijen (= [] en geen bronfout). Geen echo van de ISIN of geen kop = null (bronfout).
+function euronextRijen(tekst, isin, vandaag) {
+  const r = String(tekst == null ? '' : tekst).replace(/^\uFEFF/, '').replace(/\r/g, '').split('\n').map((x) => x.trim()).filter(Boolean);
+  const iIsin = r.slice(0, 5).findIndex((x) => x.replace(/"/g, '') === String(isin));
+  if (iIsin < 0) return null;
+  const kopI = r.findIndex((x, i) => i > iIsin && /^"?Date"?;/.test(x));
+  if (kopI < 0) return null;
+  const kop = r[kopI].split(';').map((x) => x.replace(/"/g, '').trim());
+  const iD = kop.indexOf('Date'), iC = kop.indexOf('Close');
+  if (iD !== 0 || iC < 1) return null;
+  const uit = [];
+  for (const l of r.slice(kopI + 1, kopI + 81)) {
+    const c = l.split(';');
+    const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(c[iD] || '').trim());
+    const slot = slotUit(c[iC]);
+    if (!m || !slot) continue;
+    const datum = m[3] + '-' + m[2] + '-' + m[1];
+    if (datum >= vandaag) continue;                      // alleen afgesloten beursdagen
+    uit.push({ datum, slot });
+  }
+  return uit;
+}
+// Blok "Trading information": "Trading currency EUR". Leeg blok (niet genoteerd) of geen valuta = null.
+function euronextValuta(html) {
+  const t = String(html == null ? '' : html).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+  const m = /Trading currency ([A-Z]{3})\b/.exec(t);
+  return m ? m[1] : null;
 }
 
 // ── weekronde: prompt en schema ──
@@ -306,8 +344,8 @@ function maak(o) {
   }
   function boxMeldingen(meldingen) {
     for (const m of meldingen) {
-      const ok = boxRij('## [log] ' + nuIso().slice(0, 16).replace('T', ' ') + ' — OVIS Beleggen: ' + (m.bron === 'koers' || m.bron === 'ecb' || m.bron === 'sec_zoek' ? 'koersbron ' : 'nieuwsbron ') + (BRON_NAAM[m.bron] || m.bron) + ' faalt ' + m.n + ' dagen op rij #ovis-beleggen\n' +
-        '- van: beleggen-nieuws.js (pod, wv2993/wv3728); laatste fout: ' + (m.fout || 'onbekend') + '. De andere bronnen lopen door; de app toont de laatst bekende koers met datum; herstel gaat stil. Geen bedrijfsnamen in deze rij.\n\n');
+      const ok = boxRij('## [log] ' + nuIso().slice(0, 16).replace('T', ' ') + ' — OVIS Beleggen: ' + (m.bron === 'koers' || m.bron === 'koers_eu' || m.bron === 'koers_eu_valuta' || m.bron === 'ecb' || m.bron === 'sec_zoek' ? 'koersbron ' : 'nieuwsbron ') + (BRON_NAAM[m.bron] || m.bron) + ' faalt ' + m.n + ' dagen op rij #ovis-beleggen\n' +
+        '- van: beleggen-nieuws.js (pod, wv2993/wv3728/wv3777); laatste fout: ' + (m.fout || 'onbekend') + '. De andere bronnen lopen door; de app toont de laatst bekende koers met datum; herstel gaat stil. Geen bedrijfsnamen in deze rij.\n\n');
       if (!ok) log({ soort: 'box', bron: m.bron, ok: false });
     }
   }
@@ -341,6 +379,8 @@ function maak(o) {
     const koersen = [];
     const valuta = new Set(kd.valuta);
     for (const p of kd.posities) {
+      // wv3777: positie in euro (niet-Amerikaanse ISIN) → Euronext; geen beurscode nodig, de ISIN is de sleutel
+      if (euRoute(p)) { await euKoers(p, ((kd.aantal_koersen || {})[p.isin] || 0) < KOERS.eerste_onder ? KOERS.eerste_dagen : KOERS.dagen, vandaag, r, kt, koersen); continue; }
       const c = bekend(p.sleutel);
       // alleen USD-posities met een Amerikaanse ISIN (de bron geeft Amerikaanse noteringen in USD; review MOET 1: geen buitenlands aandeel op een ADR-koers)
       if (!c || !c.code || !/^US/.test(p.isin) || (p.valuta && p.valuta !== KOERS.valuta)) continue;
@@ -374,8 +414,30 @@ function maak(o) {
     kt.kaartjes = B.zetAutoBedrijven(kd.bedrijven.map((b) => { const c = bekend(b.sleutel) || {}; return { sleutel: b.sleutel, namen: metTitelvorm(b.namen), code: c.code || b.code || null, cik: c.cik || null }; }));
     schrijf((db) => zetMeta(db, 'koers_dag', vandaag));
     laatste.koers = { op: nuIso(), posities: kt.posities, koersen: kt.koersen, wissels: kt.wissels, kaartjes: kt.kaartjes };
-    log({ soort: 'koers', posities: kt.posities, gezocht: kt.gezocht, gevonden: kt.gevonden, koersen: kt.koersen, wissels: kt.wissels, kaartjes: kt.kaartjes, geweigerd: kt.geweigerd, fouten: tel.fouten });
+    log({ soort: 'koers', posities: kt.posities, gezocht: kt.gezocht, gevonden: kt.gevonden, eu: kt.eu || 0, eu_niet: kt.eu_niet || 0, eu_valuta: kt.geweigerd_valuta || 0, koersen: kt.koersen, wissels: kt.wissels, kaartjes: kt.kaartjes, geweigerd: kt.geweigerd, fouten: tel.fouten });
     return kt;
+  }
+  // wv3777: Euronext voor posities in euro. Per beurs (eigen DEGIRO-beurs eerst, dan Amsterdam, Parijs) de CSV; de eerste met rijen wint, dan de
+  // handelsvaluta van precies die beurs. Valuta ≠ euro (of ≠ de valuta van de positie) = geen koers (geweigerd, geen bronfout). Geen enkele beurs
+  // met rijen = niet genoteerd op Euronext: zonder koers, geen bronfout. Onleesbaar antwoord = bronfout (box na drie dagen, laatst bekende koers blijft).
+  function euRoute(p) { return RE_ISIN_EU.test(String(p.isin || '')) && !/^US/.test(p.isin) && (!p.valuta || p.valuta === EU.valuta); }
+  async function euKoers(p, dagen, vandaag, r, kt, koersen) {
+    for (const mic of euMics(p.beurs)) {
+      const id = encodeURIComponent(p.isin + '-' + mic);
+      const rijen = await r.vraag('koers_eu', 'https://live.euronext.com/en/ajax/AwlHistoricalPrice/getFullDownloadAjax/' + id + '?format=csv&decimal_separator=.&date_form=d/m/Y&op=&adjusted=N&base100=&startdate=' + plusDagen(vandaag, -dagen) + '&enddate=' + vandaag,
+        'text/csv', haalKoers, (t) => euronextRijen(t, p.isin, vandaag));
+      await pauze(200);
+      if (rijen == null) return;                         // bronfout: niet verder proberen op een andere beurs (dat zou een fout verbergen)
+      if (!rijen.length) continue;                       // niet genoteerd op deze beurs (of geen handel in de periode)
+      const valuta = await r.vraag('koers_eu_valuta', 'https://live.euronext.com/en/ajax/getFactsheetInfoBlock/STOCK/' + id + '/fs_tradinginfo_block', 'text/html', haalKoers, (t) => euronextValuta(t));
+      await pauze(200);
+      if (valuta == null) return;                        // wel koersen, geen leesbare valuta: bronfout (eigen bronnaam, anders telt de geslaagde CSV hem weg), geen koers raden
+      if (valuta !== EU.valuta || (p.valuta && p.valuta !== valuta)) { kt.geweigerd_valuta = (kt.geweigerd_valuta || 0) + 1; return; }
+      for (const x of rijen) koersen.push({ isin: p.isin, datum: x.datum, slot: x.slot, valuta, bron: 'euronext:' + mic });
+      kt.met_koers = (kt.met_koers || 0) + 1; kt.eu = (kt.eu || 0) + 1;
+      return;
+    }
+    kt.eu_niet = (kt.eu_niet || 0) + 1;
   }
   // los (na een uitrol op een dag waarop de ochtendronde al liep): alleen de koersronde, met zijn eigen bronstand
   async function koersAlleen(vandaag) {
@@ -718,4 +780,4 @@ function maak(o) {
   return { tik, ophaal, koersAlleen, weekronde, meld, info };
 }
 
-module.exports = { maak, metTitelvorm, secZoek, nasdaqRijen, ecbRijen, kaal, KOERS, schoonReden, heeftCijfer, modelZinOk, isReclame, maakKoppel, clusters, isoWeek, woordRe, maakPrompt, BELANG_ZIN, SYSTEEM, SCHEMA, FEEDS, GRENS, MOMENT };
+module.exports = { maak, metTitelvorm, secZoek, nasdaqRijen, ecbRijen, euronextRijen, euronextValuta, euMics, EU, kaal, KOERS, schoonReden, heeftCijfer, modelZinOk, isReclame, maakKoppel, clusters, isoWeek, woordRe, maakPrompt, BELANG_ZIN, SYSTEEM, SCHEMA, FEEDS, GRENS, MOMENT };

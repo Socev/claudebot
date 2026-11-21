@@ -75,6 +75,16 @@ const M = [
   ['wv3728 ZOU 1 inhoud vóór ok', 'n', "if (x == null) { tel.fouten++; noteer(bron, false, 'onleesbaar antwoord'); return null; }", "if (x == null) { noteer(bron, true); return null; }"],
   ['wv3728 ZOU 2 aanvullen', 'n', "if (c && (c.cik || c.code)) B.vulBedrijfAan(", "if (false) B.vulBedrijfAan("],
   ['wv3728 titelvorm', 'n', "uit.push(String(n).replace(/[A-Z]{5,}/g, (w) => w[0] + w.slice(1).toLowerCase()));", ""],
+  ['wv3777 Euronext: positie in euro', 'n', "if (euRoute(p)) {", "if (false) {"],
+  ['wv3777 Euronext: alleen afgesloten beursdagen', 'n', "if (datum >= vandaag) continue;", ""],
+  ['wv3777 Euronext: ISIN-echo', 'n', "if (iIsin < 0) return null;", ""],
+  ['wv3777 Euronext: eigen beurs eerst', 'n', "(m ? [m] : [])", "[]"],
+  ['wv3777 Euronext: bronfout stopt (geen andere beurs)', 'n', "if (rijen == null) return;", "if (rijen == null) continue;"],
+  ['wv3777 Euronext: valuta uit de bron', 'n', "if (valuta !== EU.valuta || (p.valuta && p.valuta !== valuta)) {", "if (false) {"],
+  ['wv3777 Euronext: geen valuta = niet raden', 'n', "return m ? m[1] : null;", "return m ? m[1] : 'EUR';"],
+  ['wv3777 Euronext: valutabron eigen naam', 'n', "r.vraag('koers_eu_valuta', ", "r.vraag('koers_eu', "],
+  ['wv3777 Euronext: geen US-ISIN', 'n', "&& !/^US/.test(p.isin) && (!p.valuta", "&& (!p.valuta"],
+  ['wv3777 beurs uit de transacties', 'b', "if (!beurs[r.isin]) beurs[r.isin] = ", "if (false) beurs[r.isin] = "],
   ['Ruis telt één keer per kaart', 'b', "const telt = (b.keuze === 'ruis') - (!!oud && oud.keuze === 'ruis');", "const telt = b.keuze === 'ruis' ? 1 : 0;"],
 ];
 const dir = process.argv[2];
