@@ -193,7 +193,11 @@ test('veiligheid: md5 wijkt af → niet aangeleverd; storing → één box-rij p
     await o.ss.tik(); await o.ss.tik();
     assert.strictEqual(o.box.filter((b) => /Drive-map niet te lezen/.test(b)).length, 1);
     const t = o.ss._toetsVoorstel;
-    assert.strictEqual(t({ omschrijving: 'mail naar a@b.nl', route: 'archiveren', entiteit: 'prive', reden: '', patientdocument: false }), null);
+    // wv3675b: mailadres, link en lang nummer blijven staan (verzonnen gegevens)
+    const ad = t({ omschrijving: 'mail naar a@b.invalid', route: 'archiveren', entiteit: 'prive', reden: 'kenmerk 1234567890, zie https://voorbeeld.invalid', patientdocument: false });
+    assert.deepStrictEqual([ad.omschrijving, ad.reden], ['mail naar a@b.invalid', 'kenmerk 1234567890, zie https://voorbeeld.invalid']);
+    const ao = t({ omschrijving: 'Brief', route: 'doorsturen', entiteit: 'prive', ontvanger: 'x@y.invalid', reden: '', patientdocument: false });
+    assert.ok(ao && ao.ontvanger === null, 'ontvanger met adres valt weg, voorstel blijft');
     assert.strictEqual(t({ omschrijving: 'x', route: 'hack', entiteit: 'prive', reden: '', patientdocument: false }), null);
     // wv3675 (2C12): bij een patiëntkenmerk blijft de omschrijving staan, alleen de vlag gaat mee (verzonnen naam)
     const pv = t({ omschrijving: 'Verwijsbrief Proefje Verzonnen', route: 'doorsturen', entiteit: 'tolgaarde', ontvanger: 'je collega', reden: 'gaat over Proefje', patientdocument: true });
