@@ -4,7 +4,7 @@
 //     het eerste gesprek uit het register (code-apps.js) en toetst vóór elke beurt eigenaar, rechten, symlinks en harde links (zelfde
 //     toets als het machinekamer-geheugen, mk-tekst.js geheugenToets). Niet in orde = de beurt start NIET (review MOET 1, dicht).
 //  2. Stand-meting (uurstap): GitHub-repolijst, Cloudflare Pages en Workers → stand.json (laatste push, laatste productie-uitrol,
-//     main verder dan live). Fout = de vorige stand blijft staan, met de vorige meettijd en de fout erbij; nooit een verzonnen stand.
+//     main verder dan live: alleen Pages echt gemeten; Worker = niet_gemeten + commits op main sinds de uitrol). Fout = de vorige stand blijft staan, met de vorige meettijd en de fout erbij; nooit een verzonnen stand.
 //  3. Opbouw van GET /app/code/apps: register zonder interne paden + stand + open klussen per app (op label-voorvoegsel) + gesprek.
 // Geen netwerk buiten api.github.com en api.cloudflare.com; alleen lezen.
 'use strict';
@@ -307,9 +307,27 @@ function maak(o) {
           catch (e) { main[repo] = null; }
         }
       }
+      // Worker: Cloudflare geeft geen commit, dus "main verder" is niet te meten. Wel geteld: commits op de hoofdtak ná de uitrol
+      // (sinds wanneer), alleen als de repo ruim (> 10 min) na de uitrol een push kreeg; zo'n push kan ook een andere tak of een
+      // ander onderdeel van dezelfde repo zijn (3B21, R2-50: 6 valse waarschuwingen, 85–1.341 uur).
+      const wacht = {};
+      for (const a of C.APPS) {
+        if ((a.pages || []).some(function (x) { return pages[x]; })) continue;
+        const wn = (a.workers || []).filter(function (x) { return workers[x]; })[0], r = (a.repos || [])[0];
+        if (!wn || !r || !repos[r] || wacht[wn] !== undefined) continue;
+        const push = Date.parse(repos[r].push), op = Date.parse(workers[wn].op);
+        if (!(isFinite(push) && isFinite(op) && push - op > 10 * 60 * 1000)) continue;
+        try {
+          const l = await haalJson('https://api.github.com/repos/Socev/' + encodeURIComponent(r) + '/commits?sha=' + encodeURIComponent(repos[r].branch) +
+            '&since=' + encodeURIComponent(new Date(op).toISOString()) + '&per_page=100', ghKop);
+          const laatste = Array.isArray(l) && l.length ? l[l.length - 1] : null;
+          wacht[wn] = Array.isArray(l) ? { aantal: l.length, meer: l.length >= 100,
+            sinds: l.length < 100 && laatste && laatste.commit && laatste.commit.committer ? laatste.commit.committer.date || null : null } : null;
+        } catch (e) { wacht[wn] = null; }
+      }
       const inReg = { pages: new Set(), workers: new Set(), repos: new Set(C.SLAPEND) };
       C.APPS.forEach(function (a) { (a.pages || []).forEach(function (x) { inReg.pages.add(x); }); (a.workers || []).forEach(function (x) { inReg.workers.add(x); }); (a.repos || []).forEach(function (x) { inReg.repos.add(x); }); });
-      const s = { gemeten: t0, poging: t0, fout: null, repos: repos, pages: pages, workers: workers, main: main,
+      const s = { gemeten: t0, poging: t0, fout: null, repos: repos, pages: pages, workers: workers, main: main, wacht: wacht,
         onbekend: { pages: Object.keys(pages).filter(function (x) { return !inReg.pages.has(x); }), workers: Object.keys(workers).filter(function (x) { return !inReg.workers.has(x); }),
           repos: Object.keys(repos).filter(function (x) { return !inReg.repos.has(x); }) } };
       standSchrijf(s);
@@ -335,8 +353,13 @@ function maak(o) {
     const wn = (a.workers || []).filter(function (x) { return s.workers && s.workers[x]; })[0];
     if (wn) {
       const w = s.workers[wn], r = (a.repos || [])[0], push = r && s.repos && s.repos[r] ? Date.parse(s.repos[r].push) : NaN, op = Date.parse(w.op);
-      // Worker: geen commit in de API; "verder" = push ruim (> 10 min) na de laatste uitrol (benadering, zo benoemd in de app)
-      return { soort: 'worker', naam: wn, op: w.op || null, commit: null, main_verder: isFinite(push) && isFinite(op) ? push - op > 10 * 60 * 1000 : null };
+      // Worker: geen commit in de API, dus main_verder is niet gemeten (null; alleen Pages vergelijkt echt). Kwam er ruim (> 10 min)
+      // na de uitrol een push, dan niet_gemeten: laatste push + commits op de hoofdtak sinds de uitrol (aantal, sinds) uit de meting;
+      // 0 commits op de hoofdtak = niets te melden. Geen telling (oude stand, GitHub-fout) = aantal null.
+      const wt = s.wacht && s.wacht[wn] ? s.wacht[wn] : null;
+      const later = isFinite(push) && isFinite(op) && push - op > 10 * 60 * 1000 && !(wt && wt.aantal === 0);
+      return { soort: 'worker', naam: wn, op: w.op || null, commit: null, main_verder: null,
+        niet_gemeten: later ? { push: s.repos[r].push, aantal: wt ? wt.aantal : null, meer: !!(wt && wt.meer), sinds: wt ? wt.sinds || null : null } : null };
     }
     return null;
   }
