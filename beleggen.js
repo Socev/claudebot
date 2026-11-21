@@ -1136,7 +1136,10 @@ function maak(o) {
     d.versies = db.prepare('SELECT versie, op, wat FROM planversie ORDER BY versie DESC LIMIT 20').all().map((r) => Object.assign({}, r));
     d.posities = db.prepare('SELECT sleutel, regelsoort, naam, isin, aantal, koers, valuta, lokaal_cent, waarde_eur_cent, bron FROM positie').all().map((r) => Object.assign({}, r));
     for (const r of db.prepare('SELECT sleutel, soort FROM positie_soort').all()) d.soorten[r.sleutel] = r.soort;
-    d.transacties = db.prepare('SELECT sleutel, datum, tijd, naam, isin, aantal, koers, valuta, waarde_eur_cent, wisselkoers, kosten_eur_cent, totaal_eur_cent, bron FROM transactie ORDER BY datum DESC, tijd DESC').all().map((r) => Object.assign({}, r));
+    // wv3783: herkomst voor het scherm ("uit je mail"): de eerste bron wint (INSERT OR IGNORE), dus een mailtransactie blijft 'mail' ook na de export
+    d.transacties = db.prepare("SELECT t.sleutel, t.datum, t.tijd, t.naam, t.isin, t.aantal, t.koers, t.valuta, t.waarde_eur_cent, t.wisselkoers, t.kosten_eur_cent, t.totaal_eur_cent, t.bron, " +
+      "CASE WHEN t.bron = 'hand' THEN 'hand' WHEN coalesce(b.naam, '') LIKE 'mail:%' THEN 'mail' ELSE 'export' END AS herkomst " +
+      'FROM transactie t LEFT JOIN bestand b ON b.id = t.bestand_id ORDER BY t.datum DESC, t.tijd DESC').all().map((r) => Object.assign({}, r));
     d.dagboek = db.prepare('SELECT * FROM dagboek ORDER BY datum DESC, id DESC').all().map((r) => Object.assign({}, r));
     d.volglijst = db.prepare('SELECT id, naam, code, thema, waarom, wanneer, op FROM volglijst WHERE weg = 0 ORDER BY id').all().map((r) => Object.assign({}, r));
     for (const r of db.prepare('SELECT sleutel, keuze, tot FROM signaal_keuze').all()) d.keuzes[r.sleutel] = { keuze: r.keuze, tot: r.tot };

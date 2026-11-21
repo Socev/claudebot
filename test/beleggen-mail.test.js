@@ -75,6 +75,7 @@ test('mailronde: twee mails → twee transacties; tweede ronde en dezelfde mail 
   let o = app.app({ pad: '/app/beleggen', methode: 'GET' }).body;
   assert.strictEqual(o.transacties.length, 2);
   assert.strictEqual(o.uit_mail.aantal, 2);
+  assert.ok(o.transacties.every((t) => t.herkomst === 'mail'), 'wv3783: herkomst mail');
   assert.strictEqual(o.exports.transacties, null, 'een mail is geen export in het vak "Je bestanden uit DEGIRO"');
   assert.ok(o.bestanden.every((b) => !String(b.naam).startsWith('mail:')));
   assert.ok(o.open_punten.some((p) => p.soort === 'dagboek'), 'dagboekpunt na een aankoop uit de mail');
@@ -93,6 +94,15 @@ test('mailronde: twee mails → twee transacties; tweede ronde en dezelfde mail 
   assert.strictEqual(o.transacties.length, 2);
   assert.strictEqual(o.geld.kosten_valuta_cent, 69);
   assert.ok(!o.signalen.some((s) => s.soort === 'mail'), 'export bevestigt de mail: geen verschil');
+  assert.ok(o.transacties.every((t) => t.herkomst === 'mail'), 'wv3783: de eerste bron (mail) blijft staan na de export');
+});
+
+test('wv3783: herkomst export en hand', () => {
+  const app = nieuweApp();
+  app.app({ pad: '/app/beleggen/bestand', methode: 'POST', body: { naam: 'Transactions.csv', tekst: EXPORT, bewaar: true } });
+  app.app({ pad: '/app/beleggen/transactie', methode: 'POST', body: { actie: 'zet', naam: 'Voorbeeld Hand NV', datum: '2026-11-01', richting: 'erbij', aantal: '1', koers: '10', valuta: 'EUR' } });
+  const o = app.app({ pad: '/app/beleggen', methode: 'GET' }).body;
+  assert.deepStrictEqual(o.transacties.map((t) => t.herkomst), ['export', 'export', 'hand']);
 });
 
 test('onleesbare mail → fout + signaal, geen transactie; luikmelding → geen stempel', async () => {
