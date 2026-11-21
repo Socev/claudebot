@@ -32,7 +32,7 @@ function kamer(o) {
       return { ok: true, data: o.uitvoer || { vraag: 'Of je het formulier tekent vóór vrijdag.', voorstel: 'Tekenen en terugsturen; het concept bevestigt dat.', antwoord_nodig: true,
         concept: 'Hoi,\n\nPrima, ik teken het en stuur het [nog in te vullen: dag] terug.\n\nGroet,\nDavid', invullen: ['wanneer je het terugstuurt'] } };
     },
-    stem: function () { return '# Mijn mailstem\nKort en direct.'; },
+    stem: function () { return o.stem != null ? o.stem : '# Mijn mailstem\nKort en direct.'; },
     concept: async function (body) { st.concept.push(body); return o.conceptAntw || { status: 200, j: { ok: true, concept_id: 'r-123', thread_id: body.thread_id } }; },
     register: function (r) { st.register.push(r); },
   };
@@ -222,4 +222,19 @@ test('wv3092 conceptKlaar: alleen concepten die in hun eigen Gmail-draad kwamen,
   assert.deepEqual(los.vw.conceptKlaar(), [], 'los concept (andere draad): geen label');
   klok += 15 * 86400000;
   try { assert.deepEqual(k.vw.conceptKlaar(), [], 'na 14 dagen niet meer'); } finally { klok -= 15 * 86400000; }
+});
+
+test('mailstem: een schrijfgids van ruim 9.000 tekens komt heel door, slot incluis (3B04); de echte gids past onder de grens', async () => {
+  const lang = '# Mijn mailstem\n' + 'Regel over toon en lengte.\n'.repeat(420) + 'SLOT-REGEL: één onderwerp per mail, handtekening per praktijk, emoji alleen bij bekenden.';
+  assert.ok(lang.length > 11000);
+  const k = kamer({ stem: lang });
+  await k.vw.tik();
+  assert.equal(k.st.model, 1);
+  assert.match(k.st.systeem, /SLOT-REGEL: één onderwerp per mail/, 'het slot van de gids valt niet weg');
+  assert.ok(V._grenzen.STEM_MAX >= 16000);
+  const echt = '/opt/data/AI_SecondBrain/.claude/skills/mijn-mailstem/SKILL.md';
+  if (fs.existsSync(echt)) {
+    const s = fs.readFileSync(echt, 'utf8'); const i = s.indexOf('# Mijn mailstem');
+    assert.ok(i >= 0 && s.slice(i).length <= V._grenzen.STEM_MAX, 'de echte schrijfgids (' + (s.length - i) + ' tekens) past onder STEM_MAX');
+  }
 });

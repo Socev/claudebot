@@ -43,7 +43,7 @@ const BEWAAR_MS = 14 * DAG;              // zelfde 14-dagenregel als MailMan
 const TIK_MAX = 2, DAG_MAX = 15;         // automatisch per tik en per dag
 const VRAAG_MIN = 0.6, SYSTEEM_MAX = 0.5, INJECTIE_MAX = 0.5;
 const POGINGEN = 2, HERKANS_MS = 3600000;
-const TEKST_MAX = 10000, STEM_MAX = 9000;
+const TEKST_MAX = 10000, STEM_MAX = 16000;   // schrijfgids mijn-mailstem is ± 9.200 tekens; 9.000 kapte het slot stil af (3B04, 21-11-2026)
 const UUR_VAN = 7, UUR_TOT = 22;
 const OPEN_RE = /\[\s*nog in te vullen/i;
 
@@ -528,4 +528,4 @@ function maak(io) {
 }
 
 module.exports = { maak, kandidaat, schoon, schoonStap1, schoonStap3, conceptOnderwerp, gevoeligTekst, SCHEMA, SCHEMA_STAP1, SCHEMA_STAP3, SYSTEEM, SYSTEEM_STAP1, SYSTEEM_STAP2, VERSIE, VERSIE2, OPEN_RE,
-  _grenzen: { TIK_MAX, DAG_MAX, LEEFTIJD_MS, VRAAG_MIN, ONDERZOEK_DAG_MAX, USD_DAG_MAX, AANWIJZING_MAX } };
+  _grenzen: { STEM_MAX, TIK_MAX, DAG_MAX, LEEFTIJD_MS, VRAAG_MIN, ONDERZOEK_DAG_MAX, USD_DAG_MAX, AANWIJZING_MAX } };
