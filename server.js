@@ -4693,7 +4693,8 @@ function handleRequest(req, res) {
       werkers: typeof werkersInfo === 'function' ? werkersInfo() : { aan: false },   // wv1707 (OVIS M4a): Ploeg-register (aantal werkers, laatste n8n-lezing, check-aantallen; geen namen)
       mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },
       pot_app: typeof potAppInfo === 'function' ? potAppInfo() : { aan: false },   // wv1894: OVIS POT (lezen)   // wv1269: App Mediatheek (aantallen, geen inhoud)
-      weekinhaal: typeof weekinhaalInfo === 'function' ? weekinhaalInfo() : { aan: false },   // wv3194: inhaal gemiste weekrondes (laatste tik, aantallen deze week, bezig)
+      weekinhaal: typeof weekinhaalInfo === 'function' ? weekinhaalInfo() : { aan: false },
+      hartslag_alarm: typeof hartslagAlarmInfo === 'object' ? hartslagAlarmInfo : null,   // wv3484: verlopen hartslag → box (laatste ronde, gemeld, overgeslagen)   // wv3194: inhaal gemiste weekrondes (laatste tik, aantallen deze week, bezig)
       nieuwsbrief: nieuwsbriefInfo(),   // wv2190: nieuwsbrief-bloemlezing (laatste ronde, bezig; geen inhoud)
       te_lezen: { aan: typeof teLezenMod !== 'undefined' && !!teLezenMod },   // wv2245: Te lezen in Voor jou (module in de release)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
@@ -22367,6 +22368,52 @@ async function weekinhaalTik() {
   try { weekinhaal.opruimen(); } catch (e) {}
 }
 if (weekinhaal && SERVER_ECHT) { setTimeout(function () { weekinhaalTik(); }, 240000).unref(); setInterval(function () { weekinhaalTik(); }, 15 * 60000).unref(); }
+// wv3484 (21-11-2026): alarm op een verlopen hartslag. De NZa-wachter lag 15-11 t/m 20-11 stil zonder dat iemand het zag: het oordeel
+// te_laat stond alleen op de Ringkaart, de Stiltewachter (n8n) bewaakt alleen zijn eigen watchlist. Elk kwartier (echte pod, rol
+// primair, noodrem HARTSLAG_ALARM=0): mk_hartslag_stand lezen, de watchlist van de Stiltewachter (Data Table stilte_state) lezen, en
+// hartslag-alarm.js (puur) zegt welke component net te laat is (één box-rij), weer op tijd is of dicht ging (één regel). Geen bericht
+// aan David; de machinekamer beslist. Staat in klokken/hartslag-alarm.json, zodat een herstart niet opnieuw meldt. Watchlist niet
+// leesbaar: de laatst gelezen lijst uit de staat; nooit gelezen: niets overslaan (een dubbele box-rij is goedkoper dan stilte).
+// test/hartslag-alarm.sh knipt het blok tussen de markers.
+/* hartslagAlarm:begin */
+const HARTSLAG_ALARM_PAD = path.join(KLOKKEN_DIR, 'hartslag-alarm.json');
+let hartslagAlarmMod = null, hartslagAlarmStaat = null, hartslagAlarmSchijf = null, hartslagAlarmBezig = false;
+const hartslagAlarmInfo = { laatste_iso: null, gemeten: null, fout: null, overgeslagen: null, gemeld: null };
+async function hartslagAlarmTik() {
+  if (SERVER_ECHT !== true || process.env.HARTSLAG_ALARM === '0' || hartslagAlarmBezig) return;
+  try { if (!rolPrimair()) return; } catch (e) { return; }
+  hartslagAlarmBezig = true;
+  try {
+    if (!hartslagAlarmMod) hartslagAlarmMod = require(path.join(__dirname, 'hartslag-alarm.js'));
+    if (!hartslagAlarmStaat) {
+      try { const t = fs.readFileSync(HARTSLAG_ALARM_PAD, 'utf8'); hartslagAlarmStaat = JSON.parse(t); hartslagAlarmSchijf = t; }
+      catch (e) { if (e && e.code !== 'ENOENT') throw e; hartslagAlarmStaat = {}; }   // onleesbaar: niet leeg beginnen (zou alles opnieuw melden)
+    }
+    let rijen = null, fout = null;
+    try { rijen = await appSbRpc('mk_hartslag_stand', {}, 15000); } catch (e) { fout = 'hartslag: ' + String(e && e.message || e).slice(0, 120); }
+    let stilte = Array.isArray(hartslagAlarmStaat.stilte) ? hartslagAlarmStaat.stilte : null, stilteOp = hartslagAlarmStaat.stilte_op || null;
+    try {
+      const s = hartslagAlarmMod.stilteComponenten(await appN8nRijen(APP_STILTE_TABEL, null, 100));
+      if (s) { stilte = s; stilteOp = new Date().toISOString(); }   // Codex MOET 1: ook een lege lijst overnemen (alles uit = niets overslaan)
+    } catch (e) { fout = (fout ? fout + '; ' : '') + 'watchlist: ' + String(e && e.message || e).slice(0, 80); }
+    const nuMs = Date.now(), uit = hartslagAlarmMod.stap(hartslagAlarmStaat, rijen, stilte, nuMs);
+    if (uit.melden.length) {
+      if (ovisBoxRij(hartslagAlarmMod.boxTekst(uit.melden, nuMs)) !== true) { hartslagAlarmInfo.fout = 'box-rij niet geschreven'; return; }   // staat niet bijwerken: volgende ronde opnieuw
+      schrijfLog(nu() + ' hartslag-alarm box ' + uit.melden.map(function (m) { return m.soort + ':' + m.component; }).join(','));
+    }
+    hartslagAlarmStaat = Object.assign({}, uit.staat, { stilte: stilte, stilte_op: stilteOp });
+    const tekst = JSON.stringify(hartslagAlarmStaat);
+    if (tekst !== hartslagAlarmSchijf) {
+      fs.mkdirSync(KLOKKEN_DIR, { recursive: true });
+      const t = HARTSLAG_ALARM_PAD + '.tmp'; fs.writeFileSync(t, tekst, { mode: 0o600 }); fs.renameSync(t, HARTSLAG_ALARM_PAD); hartslagAlarmSchijf = tekst;
+    }
+    Object.assign(hartslagAlarmInfo, { laatste_iso: new Date(nuMs).toISOString(), gemeten: uit.gemeten, fout: fout,
+      overgeslagen: stilte ? stilte.length : 0, gemeld: Object.keys(uit.staat.gemeld).sort() });
+  } catch (e) { hartslagAlarmInfo.fout = String(e && e.message || e).slice(0, 160); logError('hartslag-alarm', e); }
+  finally { hartslagAlarmBezig = false; }
+}
+/* hartslagAlarm:einde */
+if (SERVER_ECHT === true) { setTimeout(function () { hartslagAlarmTik(); }, 300000).unref(); setInterval(function () { hartslagAlarmTik(); }, 15 * 60000).unref(); }
 // ── wv2016 (SB2 fase 6b): maandklok van de herstelproef (waarom, moment en proefdag in sb2-nacht.js maakMaandRonde) ──
 // Elke 5 min (echte pod, rol primair, schakelaar aan): vanaf de eerste zondag van de maand 10:00–22:59 (inhalen tot 2 dagen later), één
 // ronde per maand op de kopie van de 1e: socev-run --naam sb2-herstelproef --max-min 30 -- herstelproef.py draai --dag <JJJJ-MM-01> --klok.
