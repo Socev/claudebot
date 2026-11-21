@@ -19096,6 +19096,7 @@ function facturenDirectBox(j) {
         : v.direct_terug + ' directe verzending(en) geweigerd door de verzender vóór Gmail en als concept klaargezet') + '; zie het besluitspoor (verzendwijze) bij de factuur en /health facturen.koerier.' });
   } catch (e) { logError('facturen-direct-box', e); }
 }
+const facturenHerleesClaude = new Map();   // wv3738: sha256 → { op, p } — lopende Claude-lezing van de knop Opnieuw lezen (alleen in het geheugen)
 function facturenIo() {
   return { luik: appAgendaApi, luikBytes: facturenLuikBytes, verzender: facturenVerzender, pdfSchaduw: pdfSchaduw, pdfLive: pdfLive,   // wv1431: schaduw PDF-lezer; wv1921: live
     directKlaar: facturenDirectKlaar,   // wv2480
@@ -19206,23 +19207,48 @@ async function appFacturen(req, res, a, s, d, route) {
   }
   // wv3701: knop Opnieuw lezen bij een scan — eerst dezelfde poort als de route (eigenaar, Beoordelen, PDF zonder tekstlaag), dan de lokale OCR
   // (pdftoppm + tesseract op de pod, geen taalmodel, niets naar buiten); de tekst gaat als ocrTekst naar de route, nooit uit het verzoek zelf
-  let ocrTekst;
+  let ocrTekst, modelKandidaat;
   if (req.method === 'POST' && pad === '/app/facturen/herlees' && rolPrimair() === true && typeof facturenRoutes.herleesBytes === 'function') {
     const st = facturenRoutes.herleesBytes(fdb, rol, d || {});
     if (!st || st.status) { res._app.reden = 'facturen herlees ' + (st ? st.status : 500); return appStuur(res, st ? st.status : 500, st ? st.j : { ok: false, fout: 'onbekend' }); }
-    // review ZOU 5 / KAN 10: OCR liep maar las niets → '' (422: vul zelf in); fout of langer dan 80 s → geen tekst (503: later opnieuw)
-    let o = null, tm = null;
-    try { o = await Promise.race([facturenIo().ocrLokaal(st.bytes), new Promise(function (k) { tm = setTimeout(function () { k(null); }, 80000); })]); }
-    catch (e) { logError('facturen-herlees-ocr', e); o = null; }
-    finally { if (tm) clearTimeout(tm); }
-    if (o && typeof o === 'object') ocrTekst = o.ok && typeof o.tekst === 'string' ? o.tekst : '';
+    // wv3738 (David 21-11 13:44): eerst de PDF-lezer (Claude) via dezelfde live-route als de koerier (pdfLive: patiëntregel, dag- en maandgrens),
+    // alleen als de factuur geen patiëntkenmerk heeft en niet alleen voor de eigenaar is; de lokale tekst van de lezer is de controle.
+    // Dicht, uit, terugval of langer dan 90 s → de lokale OCR hieronder, zoals voorheen.
+    // Review ZOU 3: één lezing per stuk tegelijk (facturenHerleesClaude); duurt hij langer dan 90 s, dan 503 "nog bezig" en pakt de volgende
+    // klik de uitkomst op (geen tweede betaalde aanroep, en geen OCR-terugval terwijl het stuk al bij Claude ligt). Na 10 min vervalt hij.
+    if (st.claude_mag === true && st.sha256) {
+      for (const [k2, v2] of facturenHerleesClaude) if (Date.now() - v2.op > 10 * 60000) facturenHerleesClaude.delete(k2);
+      let e = facturenHerleesClaude.get(st.sha256);
+      if (!e) {
+        e = { op: Date.now() };
+        e.p = Promise.resolve().then(function () { return pdfLive({ soort: 'facturen', bericht: st.bericht || null, overgeslagen: 0,
+          documenten: [{ sha256: st.sha256, naam: st.naam, mime: 'application/pdf', bytes: st.bytes, patientkenmerk_koerier: false }] }); })
+          .catch(function (err) { logError('facturen-herlees-claude', err); return null; });
+        facturenHerleesClaude.set(st.sha256, e);
+      }
+      let x = null, tc = null, verlopen = false;
+      try { x = await Promise.race([e.p, new Promise(function (k) { tc = setTimeout(function () { verlopen = true; k(null); }, 90000); })]); }
+      finally { if (tc) clearTimeout(tc); }
+      if (verlopen) { res._app.reden = 'facturen herlees 503 claude bezig'; return appStuur(res, 503, { ok: false, fout: 'Claude leest dit stuk nog; probeer het over een minuut opnieuw' }); }
+      facturenHerleesClaude.delete(st.sha256);
+      const pd = x && x.open && x.perDoc ? x.perDoc[st.sha256] : null;
+      if (pd && pd.kandidaat && typeof pd.ocr_tekst === 'string') { modelKandidaat = pd.kandidaat; ocrTekst = pd.ocr_tekst; }
+    }
+    if (modelKandidaat === undefined) {
+      // review ZOU 5 / KAN 10: OCR liep maar las niets → '' (422: vul zelf in); fout of langer dan 80 s → geen tekst (503: later opnieuw)
+      let o = null, tm = null;
+      try { o = await Promise.race([facturenIo().ocrLokaal(st.bytes), new Promise(function (k) { tm = setTimeout(function () { k(null); }, 80000); })]); }
+      catch (e) { logError('facturen-herlees-ocr', e); o = null; }
+      finally { if (tm) clearTimeout(tm); }
+      if (o && typeof o === 'object') ocrTekst = o.ok && typeof o.tekst === 'string' ? o.tekst : '';
+    }
   }
   const r = facturenRoutes.app(fdb, { methode: req.method, pad: pad, d: d || {}, rol: rol, primair: rolPrimair(),
     versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; },
     uploadNeem: function (b, n) { return facturenUploadNeem(a, b, n); }, bankluisPad: FACTUREN_BANKLUIS, pdfTekst: facturenPdfTekst,   // wv2958
     sepaDoor: typeof sdModus === 'function' ? sdModus() : null,   // wv2465
     nogBetalen: typeof nbModus === 'function' && nbAan() ? nbModus() : null,   // wv3369: alleen 'auto' maakt een rij
-    ocrTekst: ocrTekst });   // wv3701
+    ocrTekst: ocrTekst, modelKandidaat: modelKandidaat });   // wv3701, wv3738
   if (req.method === 'GET' && pad.indexOf('/app/facturen/document/') !== 0 && r.status === 200) res._app.stil = true;
   if (req.method !== 'GET' && r.status === 200) facturenKaartPlan(3000);   // wv1705: verzamelkaart bijwerken (bevestigen, terugdraaien, upload)
   // wv2025: na een nieuwe batch (bestand gemaakt) het concept met de specificatie op de achtergrond; het antwoord wacht er niet op

@@ -461,8 +461,17 @@ function maak(o) {
       let x = null;
       try { x = await o.ocr(bytes, ocrPag); } catch (e) { x = null; }
       if (!x || !Array.isArray(x.per) || x.per.length !== ocrPag.length) return { ok: false, reden: 'ocr_mislukt', paginas: n };
-      if (x.per.some(function (y) { return typeof y !== 'string' || zonderWit(y) < TEKST_MIN; })) return { ok: false, reden: 'ocr_leeg', paginas: n };
+      if (x.per.some(function (y) { return typeof y !== 'string'; })) return { ok: false, reden: 'ocr_mislukt', paginas: n };
       ocr = x.per.join('\n');
+      // wv3738: een OCR-pagina met te weinig tekst blijft 'ocr_leeg' (Intake en de Intake-schaduw sluiten dan), maar de aanroeper krijgt wat er
+      // wél gelezen is mee als `deel`, zodat poortFacturen de patiëntregels erop kan draaien (zie daar). `heel`: minstens één pagina is op
+      // zichzelf leesbaar (tekstlaag plus OCR van die pagina ≥ TEKST_MIN); ruis van losse pagina's telt niet op (review wv3738 MOET 1).
+      if (x.per.some(function (y) { return zonderWit(y) < TEKST_MIN; })) {
+        const deel = t + '\n' + ocr;
+        let heel = false;
+        for (let p = 1; p <= n; p++) { const i = ocrPag.indexOf(p); if (zonderWit(pag[p - 1]) + (i >= 0 ? zonderWit(x.per[i]) : 0) >= TEKST_MIN) heel = true; }
+        return { ok: false, reden: 'ocr_leeg', paginas: n, deel: { tekst: deel, paginas: n, ocr_paginas: ocrPag.length, heel, leeg: x.per.filter(function (y) { return zonderWit(y) < TEKST_MIN; }).length } };
+      }
     }
     const alles = t + (ocr ? '\n' + ocr : '');
     if (zonderWit(alles) < TEKST_MIN) return { ok: false, reden: 'onleesbaar', paginas: n };
@@ -491,9 +500,16 @@ function maak(o) {
       if (d.patientkenmerk_koerier) return dicht('koerier_kenmerk');
       const isPdf = Buffer.isBuffer(d.bytes) && d.bytes.subarray(0, 5).toString('latin1') === '%PDF-';
       if (isPdf) {
-        const l = await lokaalLezen(d.bytes);
+        let l = await lokaalLezen(d.bytes);
+        // wv3738 (David 21-11-2026: "prima naar Anthropic … als die beter kan extraheren"): een scan waarvan de lokale OCR op een of meer
+        // pagina's te weinig tekst gaf, gaat toch naar Claude (die leest het beeld zelf beter dan tesseract), mits minstens één pagina op
+        // zichzelf leesbaar is (≥ TEKST_MIN tekens; ruis van losse pagina's telt niet op) en beide patiëntregels op de gelezen tekst niets
+        // vinden (hieronder, voor het hele bericht). Een stuk zonder leesbare pagina, mislukte OCR of meer dan OCR_MAX te OCR'en pagina's blijft
+        // dicht. Alleen Facturen (live en de Facturen-schaduw); Intake ongewijzigd. Een in een UBL ingebedde PDF blijft dicht bij ocr_leeg.
+        let zwak = false;
+        if (!l.ok && l.reden === 'ocr_leeg' && l.deel && l.deel.heel === true && zonderWit(l.deel.tekst) >= TEKST_MIN) { l = Object.assign({ ok: true }, l.deel); zwak = true; }
         if (!l.ok) return dicht(l.reden);
-        teksten.push(l.tekst); perDoc[d.sha256] = { tekst: l.tekst, paginas: l.paginas };
+        teksten.push(l.tekst); perDoc[d.sha256] = zwak ? { tekst: l.tekst, paginas: l.paginas, ocr_zwak: true } : { tekst: l.tekst, paginas: l.paginas };
         if (l.ocr_paginas) scan = true;
       } else if (typeof d.ubl_xml === 'string') {
         teksten.push(ublTekst(d.ubl_xml));
@@ -616,7 +632,8 @@ function maak(o) {
       const r = await lees(d.bytes, { aanroeper: 'facturen', entiteiten: job.entiteiten || [], lokaleTekst: ld.tekst, paginas: ld.paginas });
       if (!r.ok) { lv.facturen.terugval++; continue; }
       lv.facturen.gelezen++;
-      perDoc[d.sha256] = { kandidaat: kandidaat(r.r), ocr_tekst: ld.tekst, controle: r.controle.vlaggen };
+      if (ld.ocr_zwak) lv.facturen.ocr_zwak = (lv.facturen.ocr_zwak || 0) + 1;   // wv3738: gelezen terwijl de lokale OCR niet elke pagina las
+      perDoc[d.sha256] = { kandidaat: kandidaat(r.r), ocr_tekst: ld.tekst, controle: r.controle.vlaggen, ocr_zwak: !!ld.ocr_zwak };
     }
     return { open: true, perDoc };
   }

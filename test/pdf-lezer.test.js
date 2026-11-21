@@ -270,12 +270,40 @@ test('patiëntregel Facturen (B2/B3): kenmerk, scan zonder of met deels OCR, mis
   assert.equal((await half.poortFacturen({ overgeslagen: 0, documenten: [scan] })).reden, 'ocr_mislukt', 'deels gelezen = dicht');
   const elf = Object.assign({}, scan, { bytes: nepPdf(new Array(11).fill('')), tekst: '' });
   assert.equal((await l.poortFacturen({ overgeslagen: 0, documenten: [elf] })).reden, 'ocr_deels');
-  // review wv1431 MOET 1: lege of ruis-OCR op een beeldpagina telt niet als gelezen, ook als de andere pagina genoeg tekst heeft
+  // review wv1431 MOET 1 → wv3738 (David 21-11-2026): lege of ruis-OCR op een beeldpagina telt nog steeds niet als gelezen (lokaalLezen zegt
+  // ocr_leeg, Intake sluit), maar Facturen laat het stuk toch naar Claude als de rest leesbaar is en beide patiëntregels daar niets vinden
   const gemengd = Object.assign({}, scan, { bytes: nepPdf([FACTUUR[0], '']) });
   for (const t of ['', '| ~ . ,', '   \n  ']) {
     const lg = lezer(api, { ocr: async (b, p) => ({ per: p.map(() => t) }) });
-    assert.equal((await lg.poortFacturen({ overgeslagen: 0, documenten: [gemengd] })).reden, 'ocr_leeg', JSON.stringify(t));
+    const ll = await lg.lokaalLezen(gemengd.bytes);
+    assert.deepEqual([ll.ok, ll.reden, ll.deel && ll.deel.leeg], [false, 'ocr_leeg', 1], JSON.stringify(t));
+    const pz = await lg.poortFacturen({ overgeslagen: 0, documenten: [gemengd] });
+    assert.equal(pz.open, true, JSON.stringify(t));
+    assert.equal(pz.perDoc[gemengd.sha256].ocr_zwak, true);
+    assert.match(pz.perDoc[gemengd.sha256].tekst, /Zwaluwstaartvlinder/);
   }
+  // … maar niet als het leesbare deel patiënttaal of een BSN draagt, niet als er in het geheel te weinig te lezen is, en niet bij mislukte OCR
+  const lg0 = lezer(api, { ocr: async (b, p) => ({ per: p.map(() => '') }) });
+  const metBsn = Object.assign({}, scan, { bytes: nepPdf([FACTUUR[0] + '\nBSN: 111222333', '']) });
+  assert.deepEqual(await lg0.poortFacturen({ overgeslagen: 0, documenten: [metBsn] }).then((x) => [x.open, x.reden]), [false, 'kenmerk']);
+  const metBrief = Object.assign({}, scan, { bytes: nepPdf(['Geachte collega, wij zagen bovengenoemde patiënt op de polikliniek. Diagnose volgt; medicatie aangepast, uitslag lab volgt.', '']) });
+  assert.equal((await lg0.poortFacturen({ overgeslagen: 0, documenten: [metBrief] })).open, false, 'patiëntpoort op het leesbare deel');
+  const metOnderwerp = await lg0.poortFacturen({ overgeslagen: 0, bericht: { onderwerp: 'Patiënt geboortedatum 01-02-1950 BSN 111222333' }, documenten: [gemengd] });
+  assert.equal(metOnderwerp.open, false, 'onderwerp telt mee');
+  assert.equal((await lg0.poortFacturen({ overgeslagen: 0, documenten: [scan] })).reden, 'ocr_leeg', 'helemaal niets leesbaars → dicht');
+  const weinig = Object.assign({}, scan, { bytes: nepPdf(['Totaal 10,00', '']) });
+  assert.equal((await lg0.poortFacturen({ overgeslagen: 0, documenten: [weinig] })).reden, 'ocr_leeg', 'minder dan 40 tekens in het geheel → dicht');
+  // review wv3738 MOET 1: ruis van losse pagina's telt niet op tot een leesbaar stuk (6 × 7 tekens, 2 × 25 tekens → dicht)
+  for (const [aantal, ruis] of [[6, 'abc def g'], [2, 'x'.repeat(25)]]) {
+    const lr = lezer(api, { ocr: async (b, p) => ({ per: p.map(() => ruis) }) });
+    const veel = Object.assign({}, scan, { bytes: nepPdf(new Array(aantal).fill('')) });
+    assert.equal((await lr.poortFacturen({ overgeslagen: 0, documenten: [veel] })).reden, 'ocr_leeg', aantal + ' pagina\'s ruis');
+  }
+  // twee stukken in één bericht: het zwakke is schoon, het andere draagt een kenmerk → het hele bericht dicht
+  const tweeKenmerk = await lg0.poortFacturen({ overgeslagen: 0, documenten: [gemengd, pdf([FACTUUR[0] + '\nBSN: 111222333'])] });
+  assert.deepEqual([tweeKenmerk.open, tweeKenmerk.reden], [false, 'kenmerk']);
+  const nulPag = lezer(api, { ocr: async (b, p) => ({ per: p.map(() => null) }) });
+  assert.equal((await nulPag.poortFacturen({ overgeslagen: 0, documenten: [gemengd] })).reden, 'ocr_mislukt', 'een pagina zonder OCR-uitkomst = mislukt');
   // ZOU 3: een beeld op een pagina met genoeg tekst wordt ook geOCR'd; pagina-einden ≠ pdfinfo, afgekapte tekst of pdfimages kapot → dicht
   const gevraagd = [];
   const metBeeld = lezer(api, { beeldPaginas: async () => [1], ocr: async (b, p) => { gevraagd.push(...p); return { per: p.map(() => 'Geachte collega, wij zagen bovengenoemde patiënt op de polikliniek; medicatie en uitslag lab volgen.') }; } });
@@ -421,6 +449,17 @@ test('live (wv1921): standaard uit; per aanroeper aan; Facturen geeft een kandid
   assert.equal(d.open, false);
   assert.deepEqual(d.perDoc, {});
   assert.equal(api.verzoeken.length, voor);
+  // wv3738: een scan met een lege OCR-pagina naast een leesbare → toch gelezen, gemarkeerd als ocr_zwak en geteld; Intake leest hem niet
+  const lz = lezer(api, { ocr: async (b, p) => ({ per: p.map(() => '') }) }, { live: { facturen: true, intake: true } });
+  const bz = nepPdf([FACTUUR[0], '']), shaZ = 'e'.repeat(64);
+  const rz = await lz.liveFacturen({ overgeslagen: 0, entiteiten: ENT, documenten: [{ sha256: shaZ, naam: 's.pdf', mime: 'application/pdf', bytes: bz }] });
+  assert.equal(rz.open, true);
+  assert.equal(rz.perDoc[shaZ].ocr_zwak, true);
+  assert.equal(rz.perDoc[shaZ].kandidaat.live, true);
+  assert.equal(lz.health().live_stand.facturen.ocr_zwak, 1);
+  assert.equal(r.perDoc[sha].ocr_zwak, false, 'een gewone PDF is niet zwak');
+  const iz = await lz.leesIntake(bz, { entiteiten: ENT });
+  assert.equal(iz.ok, false, 'Intake blijft dicht bij een lege OCR-pagina');
   // Intake: markdown
   api.antwoord = () => ({ json: Object.assign({}, ANTWOORD, { markdown: '# Factuur VB-2026-0412\n\nLeverancier A B.V. — totaal € 1.428,50, merkwoord Zwaluwstaartvlinder', categorie_voorstel: 'facturen', samenvatting: 'Factuur.' }) });
   const m = await l.leesIntake(b, { entiteiten: ENT });

@@ -30,7 +30,7 @@ function opzet() {
   t.call = (rest, d, x) => {
     x = x || {};
     return routes.app(fdb, { methode: x.methode || 'POST', pad: '/app/facturen/' + rest, d: d || {}, rol: x.rol || eig, primair: true, nu: NU,
-      versOk: () => false, versVerbruik: () => {}, ocrTekst: x.ocrTekst });
+      versOk: () => false, versVerbruik: () => {}, ocrTekst: x.ocrTekst, modelKandidaat: x.modelKandidaat });
   };
   // een scan (PDF zonder tekstlaag) in Beoordelen, zoals de koerier hem vóór wv3660 zonder lezing achterliet
   t.scan = (o) => {
@@ -134,7 +134,107 @@ test('server.js: lokale OCR vóór de route, tekst alleen via ocrTekst van de se
   const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
   assert.match(src, /pad === '\/app\/facturen\/herlees' && rolPrimair\(\) === true && typeof facturenRoutes\.herleesBytes === 'function'/);
   assert.match(src, /Promise\.race\(\[facturenIo\(\)\.ocrLokaal\(st\.bytes\)/);
-  assert.match(src, /ocrTekst: ocrTekst \}\);   \/\/ wv3701/);
+  assert.match(src, /ocrTekst: ocrTekst, modelKandidaat: modelKandidaat \}\);   \/\/ wv3701, wv3738/);
+  // wv3738: eerst de PDF-lezer via pdfLive (zelfde route als de koerier), alleen met claude_mag; de lokale OCR alleen als Claude niets gaf
+  const blok = src.slice(src.indexOf("pad === '/app/facturen/herlees' && rolPrimair()"), src.indexOf('const r = facturenRoutes.app(fdb, { methode: req.method'));
+  assert.match(blok, /if \(st\.claude_mag === true && st\.sha256\) \{/);
+  assert.match(blok, /return pdfLive\(\{ soort: 'facturen'/);
+  assert.match(blok, /Promise\.race\(\[e\.p, /);
+  assert.match(blok, /patientkenmerk_koerier: false/);
+  assert.match(blok, /if \(modelKandidaat === undefined\) \{/);
+  assert.ok(blok.indexOf('pdfLive(') < blok.indexOf('ocrLokaal('), 'Claude eerst, OCR als terugval');
+  // review ZOU 3: één lezing per stuk; na 90 s een 503 "nog bezig" (geen OCR-terugval), daarna pakt de volgende klik de uitkomst op
+  assert.match(blok, /let e = facturenHerleesClaude\.get\(st\.sha256\);/);
+  assert.match(blok, /if \(verlopen\) \{[^\n]*appStuur\(res, 503,/);
+  assert.match(src, /^const facturenHerleesClaude = new Map\(\);/m);
+});
+
+// ── wv3738: de knop vraagt eerst de PDF-lezer (Claude); de kandidaat komt van server.js, nooit uit het verzoek ──
+const MK = { live: true, soort_stuk: 'factuur', factuurnummer: 'HL-2026-0013', factuurdatum: '2026-11-19', vervaldatum: '2026-12-19', kenmerk: null, valuta: 'EUR',
+  bedrag_excl: '100.00', btw: '21.00', bedrag_incl: '121.00', iban: null, leverancier_naam: 'Leverancier Herlees B.V.', leverancier_kvk: '99100077', leverancier_btw: null,
+  entiteit_hint: '', leesbaarheid: 'goed' };
+test('wv3738: met een kandidaat van de PDF-lezer → reden "gelezen door Claude, de lokale OCR is de controle", besluit en audit zeggen Claude', () => {
+  const t = opzet(), s = t.scan();
+  const b = t.routes.herleesBytes(t.fdb, t.eig, { id: s.id });
+  assert.equal(b.claude_mag, true); assert.equal(b.sha256, s.sha256); assert.equal(b.naam, 'scan.pdf');
+  const r = t.call('herlees', { id: s.id, versie: 1 }, { ocrTekst: INKOOP, modelKandidaat: MK });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(r.j.door, 'claude');
+  const f = t.f(s.id);
+  assert.ok(f.redenen.includes('Scan: velden gelezen door Claude, de lokale OCR is de controle'), JSON.stringify(f.redenen));
+  assert.ok(!f.redenen.some((x) => /velden lokaal gelezen \(OCR\)|met de hand invullen/.test(x)), JSON.stringify(f.redenen));
+  assert.equal(f.nummer, 'HL-2026-0013'); assert.equal(f.incl, 12100);
+  const bs = t.fdb.db.prepare("SELECT veld, bron, toelichting FROM besluit WHERE factuur = ? AND stap = 'herlezen'").all(s.id);
+  assert.ok(bs.length && bs.every((x) => /Claude/.test(x.toelichting)), JSON.stringify(bs));
+  const nr = bs.find((x) => x.veld === 'nummer');
+  assert.deepEqual([nr.bron, /door Claude/.test(nr.toelichting)], ['model', true], 'nummer komt van Claude: bron model');
+  for (const x of bs) assert.equal(x.bron === 'model', /door Claude/.test(x.toelichting), 'bron en toelichting horen bij elkaar: ' + JSON.stringify(x));
+  assert.match(t.fdb.db.prepare("SELECT na FROM audit WHERE object_id = ? AND wat = 'factuur_herlezen'").get(s.id).na, /Claude \+ lokale OCR/);
+});
+test('wv3738: kandidaat in de body telt niet; een niet-live kandidaat telt niet (lokale OCR)', () => {
+  const t = opzet(), s = t.scan();
+  const r = t.call('herlees', { id: s.id, modelKandidaat: MK }, { ocrTekst: INKOOP });
+  assert.equal(r.status, 200); assert.equal(r.j.door, 'ocr');
+  assert.ok(!t.f(s.id).redenen.some((x) => /Claude/.test(x)));
+  const s2 = t.scan({ naam: 'b' });
+  const r2 = t.call('herlees', { id: s2.id }, { ocrTekst: INKOOP, modelKandidaat: Object.assign({}, MK, { live: false }) });
+  assert.equal(r2.j.door, 'ocr');
+});
+test('wv3738: patiëntkenmerk of alleen-eigenaar → claude_mag false en een kandidaat wordt geweigerd; kenmerk in de lokale tekst → kandidaat niet gebruikt', () => {
+  const t = opzet(), s = t.scan();
+  t.fdb.db.prepare('UPDATE factuur SET alleen_eigenaar = 1 WHERE id = ?').run(s.id);
+  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: s.id }).claude_mag, false);
+  assert.equal(t.call('herlees', { id: s.id }, { ocrTekst: INKOOP, modelKandidaat: MK }).status, 409);
+  assert.equal(t.call('herlees', { id: s.id }, { ocrTekst: INKOOP }).status, 200, 'lokale OCR mag wel');
+  const p = t.scan({ naam: 'p' });
+  t.fdb.db.prepare('UPDATE document SET patientkenmerk = 1 WHERE id = ?').run(p.doc);
+  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: p.id }).claude_mag, false, 'kenmerk op het document');
+  assert.equal(t.call('herlees', { id: p.id }, { ocrTekst: INKOOP, modelKandidaat: MK }).status, 409, 'review KAN 5: documentkenmerk ook in het slot');
+  const q = t.scan({ naam: 'q' });
+  t.fdb.db.prepare('UPDATE factuur SET patientkenmerk = 1 WHERE id = ?').run(q.id);
+  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: q.id }).claude_mag, false);
+  assert.equal(t.call('herlees', { id: q.id }, { ocrTekst: INKOOP, modelKandidaat: MK }).status, 409, 'factuurkenmerk');
+  // review ZOU 2: een ander stuk uit hetzelfde bericht met kenmerk → ook deze scan niet naar Claude
+  const ber = D.nieuwId();
+  const bron = t.fdb.db.prepare('SELECT id FROM bron LIMIT 1').get() || (D.voegToe(t.fdb, 'bron', { id: D.nieuwId(), soort: 'intake', naam: 'intake:proef', actief: 1 }), t.fdb.db.prepare('SELECT id FROM bron LIMIT 1').get());
+  D.voegToe(t.fdb, 'bericht', { id: ber, bron: bron.id, message_id: 'proef-' + ber, afzender: 'a@voorbeeld.invalid', onderwerp: 'scans', ontvangen_op: new Date(NU).toISOString() });
+  const m1 = t.scan({ naam: 'm1' }), m2 = t.scan({ naam: 'm2' });
+  t.fdb.db.prepare('UPDATE factuur SET bericht = ? WHERE id IN (?, ?)').run(ber, m1.id, m2.id);
+  t.fdb.db.prepare('UPDATE document SET bericht = ? WHERE id IN (?, ?)').run(ber, m1.doc, m2.doc);
+  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: m1.id }).claude_mag, true, 'schoon bericht');
+  assert.deepEqual(t.routes.herleesBytes(t.fdb, t.eig, { id: m1.id }).bericht, { afzender: 'a@voorbeeld.invalid', onderwerp: 'scans' });
+  t.fdb.db.prepare('UPDATE document SET patientkenmerk = 1 WHERE id = ?').run(m2.doc);
+  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: m1.id }).claude_mag, false, 'buurdocument met kenmerk');
+  t.fdb.db.prepare('UPDATE document SET patientkenmerk = 0 WHERE id = ?').run(m2.doc);
+  t.fdb.db.prepare("UPDATE factuur SET alleen_eigenaar = 1, status = 'geen_factuur' WHERE id = ?").run(m2.id);
+  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: m1.id }).claude_mag, false, 'buurfactuur alleen-eigenaar');
+  const k = t.scan({ naam: 'k' });
+  const r = t.call('herlees', { id: k.id }, { ocrTekst: INKOOP + '\nBetreft: BSN 111222333', modelKandidaat: MK });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(r.j.door, 'ocr', 'de kern zet de kandidaat uit bij een kenmerk');
+  const f = t.f(k.id);
+  assert.equal(f.alleen_eigenaar, true);
+  assert.ok(!f.redenen.some((x) => /gelezen door Claude/.test(x)), JSON.stringify(f.redenen));
+});
+test('wv3738 KAN 6: eerst Claude, dan een OCR-terugval die iets vult → geen tweede scanreden naast die van Claude', () => {
+  const t = opzet(), s = t.scan();
+  const MK2 = Object.assign({}, MK, { bedrag_incl: '', bedrag_excl: '', btw: '' });
+  assert.equal(t.call('herlees', { id: s.id }, { ocrTekst: INKOOP.replace('Totaal incl. btw: EUR 121,00', ''), modelKandidaat: MK2 }).status, 200);
+  const r = t.call('herlees', { id: s.id }, { ocrTekst: INKOOP });
+  assert.equal(r.status, 200, JSON.stringify(r.j)); assert.ok(r.j.velden.includes('incl'), JSON.stringify(r.j.velden));
+  const rd = t.f(s.id).redenen;
+  assert.ok(rd.includes('Scan: velden gelezen door Claude, de lokale OCR is de controle'), JSON.stringify(rd));
+  assert.ok(!rd.some((x) => /^Scan zonder tekstlaag:/.test(x)), JSON.stringify(rd));
+});
+test('wv3738: al alles ingevuld, Claude leest voor het eerst → reden toch bijgewerkt (één schrijfbeurt)', () => {
+  const t = opzet(), s = t.scan();
+  assert.equal(t.call('herlees', { id: s.id }, { ocrTekst: INKOOP }).status, 200);
+  const v = t.f(s.id).versie;
+  const r = t.call('herlees', { id: s.id, versie: v }, { ocrTekst: INKOOP, modelKandidaat: MK });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.ok(t.f(s.id).redenen.includes('Scan: velden gelezen door Claude, de lokale OCR is de controle'));
+  const v2 = t.f(s.id).versie;
+  assert.equal(t.call('herlees', { id: s.id, versie: v2 }, { ocrTekst: INKOOP, modelKandidaat: MK }).j.versie, v2, 'tweede keer: niets nieuws, niets geschreven');
 });
 
 // ── review Fable (wv3701): MOET 1, ZOU 2–4, KAN 7–8 ──
