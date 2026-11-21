@@ -9070,6 +9070,11 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   const toel = String(d.toelichting == null ? '' : d.toelichting).replace(/\r\n?/g, '\n').trim();
   if (keuze === 'anders' && !toel) return appWeiger(res, 400, 'typ je toelichting', 'geen toelichting');
   if (toel.length > 4000) return appWeiger(res, 413, 'toelichting te lang', 'te lang');
+  // wv3692: "Ja, en bouw door" = Ja met doorbouw: true. Alleen bij Ja; waar het niet kan 400 (nooit stil een gewone Ja)
+  if (d.doorbouw != null && d.doorbouw !== true && d.doorbouw !== false) return appWeiger(res, 400, 'ongeldige knop', 'knop doorbouw veld');
+  const doorbouw = d.doorbouw === true;
+  if (doorbouw && keuze !== 'ja') return appWeiger(res, 400, 'bouw door hoort bij Ja', 'doorbouw zonder ja');
+  if (doorbouw && kaart && kaart.doorbouw !== true) return appWeiger(res, 400, '"Ja, en bouw door" kan niet op deze kaart; kies Ja', 'doorbouw kaart kan niet');
   const sleutel = jobId + ':' + hash;
   let v;
   try { v = appVragen(); } catch (e) { logError('app-vragen', e); return appWeiger(res, 503, 'vragenregister onleesbaar; vraag de machinekamer', 'vragen kapot'); }
@@ -9096,6 +9101,8 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   const vz = (vb && vb.tekst) || '(vraagzin niet leesbaar in het bericht)';
   // wv1267: doorgeefluik. Ja op "Zal ik dit op de werklijst van de machinekamer zetten: …" met #mk-werklijst (alleen hoofdkanaal, geen kaart)
   const luik = keuze === 'ja' && !kaart && vb && typeof doorgeefHerken === 'function' ? doorgeefHerken(rij, vb.tekst, vb.bericht) : null;
+  if (doorbouw && !kaart && !(luik && typeof doorbouwLuikKan === 'function' && doorbouwLuikKan(rij, vb.tekst, vb.bericht))) { terug(); return appWeiger(res, 400, '"Ja, en bouw door" kan alleen onder de vraag om iets op de werklijst te zetten; kies Ja', 'doorbouw geen luik'); }   // wv3692
+  if (doorbouw && gevoeligJa) { terug(); return appWeiger(res, 400, 'bij versturen, verwijderen, geld of agenda kan "bouw door" niet; kies Ja', 'doorbouw gevoelig'); }
   if (!(await appMagBeurt(res, rij.kanaal, true))) return terug();
   // Fable-diffreview wv405 #2: een getypt bericht dat nog zijn chat_log-rij schrijft (startend, hooguit APP_CHATLOG_WACHT_MS)
   // staat nog niet in de wachtrij; eerst dat bericht erin, dan pas deze druk erachter (anders draait het getypte bericht met
@@ -9114,12 +9121,12 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   const waarIn = kaart ? 'op de Voor jou-kaart in de app (Overzicht, ' + kanaalNaam + ')' : 'in de app (' + kanaalNaam + ')';
   const tekst = (keuze === 'anders'
     ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
-    : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)') + (kaart && kaart.context ? '\n' + kaart.context : '');
+    : '[KNOP] David drukte ' + (keuze === 'nee' ? (kaart && kaart.stop ? 'STOP (knop Stop = Nee)' : 'NEE') : doorbouw ? 'JA, EN BOUW DOOR (knop "' + DOORBOUW_KNOP + '")' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)') + (kaart && kaart.context ? '\n' + kaart.context : '');
   const chatId = APP_KANALEN[rij.kanaal];
   // wv405: loopt er al een beurt in dit gesprek (app of Telegram), dan komt deze erachter; de app toont dan "staat in de rij"
   const inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
   const drukT = Date.now();
-  const antwoord = { keuze: keuze, t: new Date(drukT).toISOString(), apparaat: a.id, vingerafdruk: gevoeligJa || undefined,
+  const antwoord = { keuze: keuze, t: new Date(drukT).toISOString(), apparaat: a.id, vingerafdruk: gevoeligJa || undefined, doorbouw: doorbouw || undefined, stop: (keuze === 'nee' && kaart && kaart.stop) || undefined,   // wv3692
     kaart_hash: kaart && /^[a-f0-9]{64}$/.test(String(kaart.inhoudHash || '')) ? kaart.inhoudHash : undefined };   // wv3010
   const jobId2 = crypto.randomBytes(8).toString('hex');   // vooraf, zodat de druk in één schrijfactie aan zijn beurt vastzit
   v[sleutel].antwoord = Object.assign({ job: jobId2, gestart: false }, antwoord);
@@ -9142,7 +9149,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
     return appChatLogVoor(rij.kanaal, [
       { rol: 'socev', tekst: vb ? vb.bericht : vz, ts: nu - 1 },
       { rol: 'david', ts: nu, bevestiging: appKnopBevestiging(keuze, gevoeligJa, a, !!kaart),
-        tekst: (keuze === 'anders' ? 'Anders' : keuze === 'nee' ? 'Nee' : 'Ja') + ' (knop ' + (kaart ? 'op een Voor jou-kaart ' : '') + 'in de app' + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
+        tekst: (keuze === 'anders' ? 'Anders' : keuze === 'nee' ? (kaart && kaart.stop ? 'Stop' : 'Nee') : doorbouw ? 'Ja, en bouw door' : 'Ja') + ' (knop ' + (kaart ? 'op een Voor jou-kaart ' : '') + 'in de app' + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
           (keuze === 'anders' ? ' — toelichting: ' + appOntmasker(toel) : '') + '\n(vraag-id ' + hash + ')' }])
       .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); })
       .then(function (st) {
@@ -9158,12 +9165,12 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   // wv1267: het doorgeefluik zet de rij pas als de [KNOP]-beurt echt start (review #2: vervalt hij in de rij, dan geen rij); de
   // systeemregel komt achter de staart van bijStart. doorgeefKnop wijst nooit af en duurt hooguit DOORGEEF_WACHT_MS.
   const bijStartMet = !luik ? bijStart : function () {
-    return Promise.all([Promise.resolve().then(bijStart).catch(function (e) { logError('app-bij-start', e); return ''; }), doorgeefKnop(sleutel, jobId, hash, luik.zin, drukT, luik.app)])
+    return Promise.all([Promise.resolve().then(bijStart).catch(function (e) { logError('app-bij-start', e); return ''; }), doorgeefKnop(sleutel, jobId, hash, luik.zin, drukT, luik.app, doorbouw)])
       .then(function (x) { return (x[0] || '') + (x[1] || ''); });
   };
   const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', job_id: jobId2, bijStart: bijStartMet, bijVerval: bijVerval, knop_sleutel: sleutel,
     upload: kaart && kaart.upload ? kaart.upload : undefined,   // wv1343: scankaart geeft Socev de scan mee (kopie)
-    tekst: (keuze === 'ja' ? '✓ Ja' + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? '✗ Nee' : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
+    tekst: (keuze === 'ja' ? (doorbouw ? '✓ Ja, en bouw door' : '✓ Ja') + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? (kaart && kaart.stop ? '■ Stop' : '✗ Nee') : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
   if (!st.job_id) {
     // niet gestart: de vraag is dan ook niet beantwoord, en de vingerafdruk niet gebruikt
     try { const w = appVragen(); if (w[sleutel]) { w[sleutel].antwoord = null; appVragenSchrijf(w); } } catch (e) { logError('app-vragen', e); }
@@ -9172,6 +9179,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   }
   res._app.reden = 'knop ' + keuze + (gevoeligJa ? ' (vingerafdruk)' : '') + ' ' + hash + ' -> ' + st.job_id + (inRij ? ' (in de rij)' : '');
   if (luik) res._app.reden += ' doorgeefluik';   // wv1267
+  if (doorbouw) res._app.reden += ' doorbouw';   // wv3692
   // wv921: pas ná een geslaagde appStartBeurt (Fable #3); de haak beslist zelf of deze druk iets vastlegt
   if (kaart && kaart.naStart) { try { kaart.naStart(keuze, gevoeligJa, a, appKnopBevestiging(keuze, gevoeligJa, a, true), hash); } catch (e) { logError('app-voor-jou', e); } }
   appStuur(res, 200, { ok: true, job_id: st.job_id, beantwoord: antwoord, in_rij: inRij });
@@ -12540,7 +12548,8 @@ function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs
         let wv = false;
         v.tekst.replace(APP_MOET_WV_RE, function (m, n) { if (t < kaartWv[n]) wv = true; return m; });   // alleen de vraagzin: een rapport noemt vaak tientallen wv-nummers
         if (wv || (x.agent_job && t < kaartJob[x.agent_job])) return;
-        uit.push(Object.assign({ punt: 'v:' + id, soort: 'vraag', hash: x.vraag_hash, tekst: v.tekst, gevoelig: r.gevoelig !== false, bericht: appMoetBericht(x.antwoord), afgekapt: appMoetAf(x.antwoord) }, basis));
+        uit.push(Object.assign({ punt: 'v:' + id, soort: 'vraag', hash: x.vraag_hash, tekst: v.tekst, gevoelig: r.gevoelig !== false, bericht: appMoetBericht(x.antwoord), afgekapt: appMoetAf(x.antwoord),
+          doorbouw: (typeof doorbouwLuikKan === 'function' && doorbouwLuikKan(r, v.tekst, x.antwoord)) || undefined }, basis));   // wv3692
         return;
       }
       const dag = x.meld ? x.meld === 'dag' : x.klasse === 'dringend';
@@ -13021,7 +13030,7 @@ function appVjKnopStand(p, rv, afgeleid) {
   else if (rv && !rv.leesbaar) waaromNiet = 'de vraag is nu niet te lezen; probeer het straks';
   else if (rv && rv.dubbel) waaromNiet = 'deze kaart wijst naar meer dan één vraag; antwoord in het gesprek';   // wv621
   else if (tekst.length + (voorstel ? voorstel.length : 0) > APP_VJ_VRAAG_MAX) waaromNiet = 'deze vraag is te lang voor een knop; antwoord in het gesprek';
-  else if (!tekst.trim() || (!q && !/\?$/.test(tekst))) waaromNiet = 'deze kaart heeft geen vraag';   // Fable wv404 #5: een titel zonder vraagteken is geen vraag
+  else if (!tekst.trim() || (!q && !/\?$/.test(tekst) && !(typeof doorbouwStopSleutel === 'function' && doorbouwStopSleutel(p.sleutel)))) waaromNiet = 'deze kaart heeft geen vraag';   // wv3692: mededeling doorbouw-<rij> heeft Stop/Anders   // Fable wv404 #5: een titel zonder vraagteken is geen vraag
   else if (!/^[a-z0-9][a-z0-9_-]{1,60}$/.test(String(p.sleutel || ''))) waaromNiet = 'deze kaart heeft een onverwachte sleutel; antwoord in het gesprek';   // Fable wv404 #2
   return { p: p, rv: rv, ks: ks, gek: gekBruik ? gek : null, gekRij: gekRij, eigenOud: eigenOud, beantwoord: beantwoord, elders: beantwoord ? null : elders, knopBewijs: knopBewijs,
     tekstId: appVjFnv(tekst + '\n' + (voorstel || '') + '\n' + (q ? q.regSleutel : 'kaart') + '\n' + kanaal + '\n' + (gev !== null)),
@@ -13039,6 +13048,14 @@ function appVjGewoon(t) {
 function appVjKnopVorm(k) {
   return { vraag_id: k.gek ? k.gek.split(':')[1] : k.ks.hash, tekst_id: k.tekstId, kanaal: k.kanaal, gevoelig: k.gevoelig, vraag: k.waaromNiet ? null : k.tekst, voorstel: k.waaromNiet ? null : k.voorstel,
     beantwoord: k.beantwoord, elders: k.elders, kan: !k.beantwoord && !k.elders && !k.waaromNiet, waarom_niet: k.beantwoord || k.elders ? null : k.waaromNiet };
+}
+// wv3692: knopvorm met "Ja, en bouw door" (doorbouw) of Stop/Anders (stop, mededeling doorbouw-<rij>)
+async function appVjKnopVormDb(p, k) {
+  const v = appVjKnopVorm(k);
+  if (typeof doorbouwStopSleutel !== 'function') return v;   // release zonder het blok wv3692
+  if (doorbouwStopSleutel(p.sleutel)) v.stop = true;
+  else if (v.kan && await doorbouwKaartKan(p, k)) v.doorbouw = true;
+  return v;
 }
 async function appVoorJouDetail(req, res, a, idTekst) {
   res._app.stil = true;
@@ -13078,7 +13095,7 @@ async function appVoorJouDetail(req, res, a, idTekst) {
     waarom: p.waarom ? appKort(appVjGewoon(p.waarom), 600) : null, stappen: stappen, herkomst: herkomst, vraag: vraag,
     meting: p.meting ? appKort(appVjGewoon(p.meting), 400) : null, laatst_gemeten: p.laatst_gemeten || null,
     bewijs: p.bewijs ? appKort(appVjGewoon(p.bewijs), 400) : null, gesloten_door: p.gesloten_door || null, gesloten_op: p.gesloten_op || null,
-    terug_ms: appVjTerugMs(p.id, nu, a.id), knop: p.soort === 'besluit' && !sw ? appVjKnopVorm(appVjKnopStand(p, rv, (await appVjAfgeleid(punten, nu)).map)) : undefined }));   // wv1018
+    terug_ms: appVjTerugMs(p.id, nu, a.id), knop: p.soort === 'besluit' && !sw ? await appVjKnopVormDb(p, appVjKnopStand(p, rv, (await appVjAfgeleid(punten, nu)).map)) : undefined }));   // wv1018, wv3692
 }
 // POST /app/voor-jou/keuze {id, van, keuze: gedaan|later|vervallen|terug, tot?}. Onder het invoerslot (niet in APP_SLOT_VRIJ),
 // sessie glijdt, alleen de primaire kant, 60 per uur, auditregel zonder tekst. ↩️ alleen binnen een minuut na een keuze op deze pod.
@@ -13303,7 +13320,18 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   if (k.waaromNiet) { res._app.reden = 'voor-jou knop kan niet #' + id; return appStuur(res, 409, { ok: false, fout: k.waaromNiet }); }
   // Fable wv404 #1: de Ja hangt aan precies de tekst die David zag; is de vraag (of het voorstel, de rij, het kanaal) intussen anders, dan
   // eerst opnieuw lezen
-  if (tekstId !== k.tekstId) { res._app.reden = 'voor-jou knop tekst gewijzigd #' + id; return appStuur(res, 409, { ok: false, fout: 'de vraag is intussen veranderd; lees hem opnieuw', tekst_gewijzigd: true, knop: appVjKnopVorm(k) }); }
+  if (tekstId !== k.tekstId) { res._app.reden = 'voor-jou knop tekst gewijzigd #' + id; return appStuur(res, 409, { ok: false, fout: 'de vraag is intussen veranderd; lees hem opnieuw', tekst_gewijzigd: true, knop: await appVjKnopVormDb(p, k) }); }
+  // wv3692: Stop-mededeling (geen Ja) en "Ja, en bouw door" (alleen waar de pod het aanbiedt; nooit stil een gewone Ja)
+  const stopM = typeof doorbouwStopSleutel === 'function' && doorbouwStopSleutel(p.sleutel) ? /(\d+)$/.exec(String(p.sleutel)) : null, stopRij = stopM ? Number(stopM[1]) : null;
+  if (stopRij && keuze === 'ja') return appWeiger(res, 400, 'deze mededeling heeft geen Ja; kies Stop of Anders', 'doorbouw-stop ja');
+  if (d.doorbouw != null && d.doorbouw !== true && d.doorbouw !== false) return appWeiger(res, 400, 'ongeldige knop', 'voor-jou doorbouw veld');
+  let dbRij = null;
+  if (d.doorbouw === true) {
+    if (keuze !== 'ja') return appWeiger(res, 400, 'bouw door hoort bij Ja', 'doorbouw zonder ja');
+    appStaat.wvCache = null;
+    dbRij = typeof doorbouwKaartKan === 'function' ? await doorbouwKaartKan(p, k) : null;
+    if (!dbRij) return appWeiger(res, 400, '"Ja, en bouw door" kan niet (meer) op deze kaart; kies Ja', 'doorbouw kaart kan niet #' + id);
+  }
   let jobId, hash;
   if (k.gek) { jobId = k.gek.split(':')[0]; hash = k.gek.split(':')[1]; }
   else {
@@ -13401,6 +13429,31 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
         bijVerval: function () { try { ss.bijVerval(); } catch (e) { logError('scansnap-knop', e); } } });
     await knopSs;
     if (res._app) res._app.reden = 'voor-jou knop #' + id + ' scansnap ' + (res._app.reden || '');
+    return;
+  }
+  // wv3692: "Ja, en bouw door" op een kaart wv<id> en Stop/Anders op de mededeling doorbouw-<rij> (beide geen pot/bs/aix/ovis/scan/herinnering)
+  if (dbRij || stopRij) {
+    const dbStart = bijStart;
+    // review r2 MOET 1: Stop gebeurt hier, vóór en los van de [KNOP]-beurt (start die niet, dan is de klus toch tegengehouden)
+    const stopU = stopRij && keuze === 'nee' ? await doorbouwStop(stopRij) : null;
+    const dbCtx = dbRij ? ' (wv3692: David koos "' + DOORBOUW_KNOP + '" op deze kaart; de pod legt dat vast als doorwerk-opdracht op wv' + dbRij.id + ', zie de systeemregel onderaan.)'
+      : ' (wv3692: dit is de doorbouw-mededeling van wv' + stopRij + ' ("ik bouw nu door"); de knop Nee heet daar Stop, Anders = bijsturen. Bij Anders blijft de kaart open met Stop: verwerk Davids ' +
+        'toelichting in de klus (werkvoorraad.py aanvul --prompt-erbij op de volgende open rij van die klus, of een eigen vervolgrij met --ouder-job) en werk het plan op dezelfde kaart bij met doorbouw.py meld.)';
+    const knopDb = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting, doorbouw: dbRij ? true : undefined },
+      { tekst: tekst, bericht: bericht, inhoudHash: inhoudHash, context: context + dbCtx, gevoelig: k.gevoelig, doorbouw: !!dbRij, stop: !!stopRij,
+        bijStart: function (kz, g) {
+          // review r2 MOET 2: Anders op de mededeling sluit hem niet en laat Stop staan (antwoord in vragen.json weer leeg)
+          if (stopRij && kz === 'anders') {
+            try { const v = appVragen(), sl = jobId + ':' + hash; if (v[sl]) { v[sl].antwoord = null; appVragenSchrijf(v); } } catch (e) { logError('doorbouw', e); }
+            return undefined;
+          }
+          dbStart(kz, g);
+          if (dbRij && kz === 'ja') return doorbouwVastleggen(dbRij.id, hash, Date.now()).then(doorbouwStaart);
+          if (stopU) return Promise.resolve(doorbouwStopStaart(stopU));
+          return undefined;
+        } });
+    await knopDb;
+    if (res._app) res._app.reden = 'voor-jou knop #' + id + (stopRij ? ' doorbouw-stop ' : ' doorbouw ') + (res._app.reden || '');
     return;
   }
   // wv921, wv861 en wv1253 sluiten elkaar uit (pot-vrijgave-N, de sleutel in bundel.json, intake-…); de haak van de een of de ander
@@ -27232,6 +27285,12 @@ function doorgeefOpdracht(o) {
       'werkregel David 5-11-2026): bouw het en meld het achteraf in één regel. Raakt het een van die uitzonderingen: zet het bouwen als werkvoorraadrij ' +
       'geblokkeerd met een Voor jou-kaart "Mag ik dit bouwen?" (soort besluit) en zet de vraag in Open vragen aan David. Is (a) te vaag of in strijd ' +
       'met (b), stel dan één VRAAG AAN DAVID in je rapport. Rapport (de pod bezorgt het in de machinekamer, of bij een app in OVIS Code): hooguit 900 tekens, platte tekst.',
+    // wv3692: David koos "Ja, en bouw door tot ik het kan proberen"
+    ...(o.doorbouw ? ['\nBOUW DOOR (wv3692): David drukte niet op Ja maar op "' + DOORBOUW_KNOP + '". De pod zette dat als doorwerk-opdracht op deze rij; ' +
+      'vervolgrijen met --ouder-job erven hem. Stel na ontwerp en review GEEN vraag "Mag ik dit bouwen?" of "zo bouwen?", ook niet bij een nieuw groot ' +
+      'onderdeel, beveiliging of Davids gegevens: zet in plaats daarvan de mededeling met python3 /opt/data/mk-scripts/doorbouw.py meld --rij <deze rij> ' +
+      '--onderwerp "<kort>" --plan "<wat je gaat bouwen, gewone taal>" (David krijgt Stop en Anders) en bouw door tot David het kan proberen. ' +
+      'Blijft altijd een eigen kaart met vingerafdruk: alles wat verstuurt, betaalt, verwijdert, een afspraak maakt of credentials raakt. De review vóór bouwen (grondwet regel 4) blijft.'] : []),
     '',
     '(a) Vraagzin (Socev, door David met Ja goedgekeurd):',
     doorgeefCiteer(doorgeefSchoon(o.zin)),
@@ -27277,16 +27336,17 @@ async function doorgeefZetNu(o) {
     // wv3316: met een app uit het register het voorvoegsel van die app (machinekamer:<voorvoegsel>-doorgegeven-…): het rapport landt in OVIS Code
     const appLabel = o.app && typeof CODE_APPS !== 'undefined' && CODE_APPS ? CODE_APPS.labelVoorApp(o.app, rest) : null;
     const label = appLabel && CODE_APPS.appVanLabel(appLabel) === o.app ? appLabel : 'machinekamer:' + rest;
-    const prompt = doorgeefOpdracht({ zin: o.zin, woorden: woorden, hash: o.hash, jobId: o.jobId, tDruk: o.tDruk });
+    const prompt = doorgeefOpdracht({ zin: o.zin, woorden: woorden, hash: o.hash, jobId: o.jobId, tDruk: o.tDruk, doorbouw: o.doorbouw === true });
     const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: label, p_prompt: prompt, p_status: 'open',
       p_samenvatting: 'Doorgegeven door David: ' + appEenRegel(doorgeefSchoon(o.zin), 180), p_notitie: 'doorgeefluik: app-Ja ' + o.hash + ' (beurt ' + o.jobId + ')' });
     if (!z || !z.ok || !z.id) return { ok: false, reden: 'de werkvoorraad gaf geen rij terug' };
+    const db = o.doorbouw === true && !z.bestond ? await doorbouwVastleggen(z.id, o.hash, o.tDruk) : null;   // wv3692
     const nu = Date.now();
     Object.keys(st.rijen).forEach(function (k) { if (!st.rijen[k] || nu - Date.parse(st.rijen[k].t) > DOORGEEF_BEWAAR_MS) delete st.rijen[k]; });
     const appId = label === 'machinekamer:' + rest ? null : o.app;
     st.rijen[o.sleutel] = { t: new Date(o.tDruk).toISOString(), dag: dag, id: z.id, label: label, bestond: !!z.bestond, woorden: woorden.length, app: appId || undefined };
     try { appSchrijfJson(DOORGEEF_STAAT, st); } catch (e) { logError('doorgeefluik', e); }
-    return { ok: true, id: z.id, bestond: !!z.bestond, woorden: woorden.length, app: appId || null };
+    return { ok: true, id: z.id, bestond: !!z.bestond, woorden: woorden.length, app: appId || null, doorbouw: db };
   } catch (e) {
     logError('doorgeefluik', e);
     return { ok: false, reden: /http 400/.test(String(e && e.message)) ? 'de werkvoorraad weigerde de opdracht (de machinekamer kijkt het na)'
@@ -27304,6 +27364,7 @@ async function doorgeefMeld(u, zin) {
   const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'doorgeefluik', klasse: 'normaal', sleutel: 'doorgeefluik:' + u.id,
     tekst: 'Op de werklijst gezet (wv' + u.id + ', van David via Socev): ' + appEenRegel(doorgeefSchoon(zin), 300) + ' — ' + doorgeefStartTekst(stand) + '.' +
       (u.app && CODE_APPS && CODE_APPS.app(u.app) ? ' Staat nu bij OVIS Code › ' + CODE_APPS.app(u.app).naam + '; het rapport landt daar.' : '') +   // wv3316
+      (u.doorbouw ? (u.doorbouw.ok ? ' David koos "Ja, en bouw door" (doorwerk vastgelegd).' : ' David koos "Ja, en bouw door", maar vastleggen mislukte: ' + u.doorbouw.reden + '; zet hem met werkvoorraad.py doorwerk.') : '') +   // wv3692
       (u.herkomst ? '' : ' Let op: herkomst david niet gezet; zet hem met werkvoorraad.py herkomst --id ' + u.id + ' --david.') });
   if (r.status !== 200) logError('doorgeefluik', new Error('bericht gaf ' + r.status));
   return r;
@@ -27314,12 +27375,13 @@ function doorgeefStaart(u) {
   if (u.uit) return '\n[Systeem: het doorgeefluik naar de machinekamer staat uit; deze vraag is NIET op de werklijst gezet. Zeg dat in één zin tegen David, laat je box-rij staan, en stel tot nader order geen vraag met #mk-werklijst meer.]';
   if (u.ok) return '\n[Systeem: door de pod op de werklijst van de machinekamer gezet' + (u.al || u.bestond ? ' (stond er al)' : '') + '. Zeg David in één zin dat het erop staat; ' +
     (u.app && typeof CODE_APPS !== 'undefined' && CODE_APPS && CODE_APPS.app(u.app) ? 'het hoort bij de app ' + CODE_APPS.app(u.app).naam + ': het rapport komt in OVIS Code bij die app. '   // wv3316
-      : 'de machinekamer begint met een ontwerp of meting en meldt zich in de machinekamer. ') + 'Werk er zelf niet aan; zet je box-rij op doorgegeven.]';
+      : 'de machinekamer begint met een ontwerp of meting en meldt zich in de machinekamer. ') + 'Werk er zelf niet aan; zet je box-rij op doorgegeven.' +
+      (u.doorbouw ? (u.doorbouw.ok ? ' David koos "Ja, en bouw door": er komt geen "zo bouwen?"-kaart meer, wel een mededeling met Stop.' : ' (David koos "Ja, en bouw door", maar dat is niet vastgelegd; de machinekamer kijkt het na.)') : '') + ']';
   return '\n[Systeem: NIET op de werklijst gezet: ' + appEenRegel(u.reden || 'onbekende fout', 160) + '. Zeg dat in één zin tegen David; je box-rij blijft staan en de machinekamer leest hem bij haar volgende beurt.]';
 }
 // Vanuit appKnop, na een geslaagde start van de [KNOP]-beurt. Geeft een belofte van de staart die nooit afwijst en hooguit DOORGEEF_WACHT_MS duurt.
-function doorgeefKnop(sleutel, jobId, hash, zin, tDruk, app) {
-  const zet = doorgeefZet({ sleutel: sleutel, jobId: jobId, hash: hash, zin: zin, tDruk: tDruk, app: app || null }).catch(function (e) { logError('doorgeefluik', e); return { ok: false, reden: 'interne fout' }; });
+function doorgeefKnop(sleutel, jobId, hash, zin, tDruk, app, doorbouw) {
+  const zet = doorgeefZet({ sleutel: sleutel, jobId: jobId, hash: hash, zin: zin, tDruk: tDruk, app: app || null, doorbouw: doorbouw === true }).catch(function (e) { logError('doorgeefluik', e); return { ok: false, reden: 'interne fout' }; });
   zet.then(function (u) {
     appStaat.doorgeefLaatst = { t: new Date().toISOString(), uitkomst: u.uit ? 'uit' : u.ok ? (u.al || u.bestond ? 'stond er al' : 'gezet') : 'niet gezet' };
     schrijfLog(nu() + ' doorgeefluik ' + velden({ vraag: hash, uitkomst: appStaat.doorgeefLaatst.uitkomst, rij: u.id || '-' }));
@@ -27330,6 +27392,108 @@ function doorgeefKnop(sleutel, jobId, hash, zin, tDruk, app) {
   return Promise.race([zet, wacht]).then(function (u) { clearTimeout(tm); return doorgeefStaart(u); });
 }
 // ── einde Doorgeefluik ──
+
+// ── wv3692 (besluitenpagina nr 420 = 3C120, David Ja 21-11-2026 12:42): "Ja, en bouw door tot ik het kan proberen" ──
+// Ontwerp: mk-scripts/wv3692/ontwerp.md (Codex-review). Meting: op 37 kaarten "… zo bouwen?" zei David 29x Ja, 7x Anders, nooit Nee; hij
+// stuurt bij maar houdt bijna nooit tegen: een rem (Stop) past beter dan een poort (nog een Ja-kaart).
+// - Knop: naast "Ja" een tweede Ja "Ja, en bouw door" onder (a) de doorgeefvraag van Socev (#mk-werklijst, appKnop) en (b) een Voor jou-
+//   besluitkaart wv<id> waarvan de rij geblokkeerd op David wacht. Nooit bij een gevoelige vraag (vingerafdruk-Ja: versturen, verwijderen,
+//   geld, agenda, grondwet). De pod beslist (doorbouw op de knop / op het Moet iets-punt); een doorbouw waar het niet kan = 400, nooit
+//   stil een gewone Ja.
+// - Vastlegging (deterministisch, geen taalmodel): bij de start van de [KNOP]-beurt de doorwerk-opdracht op de rij met een vast citaat
+//   (DOORBOUW_CITAAT); werkvoorraad.py/de databank accepteren dat als citaat van David (datum op/na 11-10-2026), vervolgrijen erven hem.
+// - De machinekamer (mk-tekst.js, doorgeefluik-opdracht) ziet die doorwerk-opdracht en zet na ontwerp + review geen "zo bouwen?"-kaart maar
+//   een mededelingskaart doorbouw-<rij> (mk-scripts/doorbouw.py meld) met de knoppen Stop en Anders, en bouwt door.
+// - Stop (Nee op kaart doorbouw-<rij>): de pod zelf zet alle open/geblokkeerde rijen van de keten (de rij + afstammelingen via ouder_id) op
+//   vervallen, stopt een gestarte rij van de keten (jobs[..].progress.stoppen) en zet die ook op vervallen, haalt de doorwerk-opdracht eraf;
+//   daarna gewoon de [KNOP]-beurt in de machinekamer met wat er gebeurde. Anders = de gewone Anders-route.
+const DOORBOUW_KNOP = 'Ja, en bouw door tot ik het kan proberen';
+const DOORBOUW_PREFIX = '"' + DOORBOUW_KNOP + '"';
+const DOORBOUW_STOP_RE = /^doorbouw-([1-9]\d{0,8})$/;
+const DOORBOUW_TWEEDE_MS = Number(process.env.DOORBOUW_TWEEDE_MS) || 30000;
+function doorbouwCitaat(hash, ms) {
+  const d = new Date(ms);
+  let dmy;
+  try { const p = d.toLocaleDateString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', year: 'numeric' }).split(/\D+/).filter(Boolean); dmy = p[0] + '-' + p[1] + '-' + p[2]; }
+  catch (e) { dmy = d.getUTCDate() + '-' + (d.getUTCMonth() + 1) + '-' + d.getUTCFullYear(); }
+  return DOORBOUW_PREFIX + ' (knop in de app, vraag-id ' + hash + ') — David ' + dmy + ' ' + appKlok(d.toISOString());
+}
+function doorbouwStopSleutel(sl) { return DOORBOUW_STOP_RE.test(String(sl || '')); }
+function doorbouwIs(doorwerk) { return String(doorwerk || '').indexOf(DOORBOUW_PREFIX) === 0; }
+// Mag onder deze doorgeefvraag "Ja, en bouw door"? (luik aan, niet gevoelig, echte doorgeefvraag)
+function doorbouwLuikKan(rij, vz, bericht) {
+  try { return !!(rij && rij.gevoelig === false && typeof doorgeefHerken === 'function' && doorgeefHerken(rij, vz, bericht) && doorgeefAan()); } catch (e) { return false; }
+}
+// De werkvoorraadrij achter een Voor jou-kaart wv<id> als hij geblokkeerd op David wacht; anders null. items = mk_werkvoorraad_stand.items.
+function doorbouwKaartRij(p, items) {
+  const m = /^wv([1-9]\d{0,8})$/.exec(String(p && p.sleutel || ''));
+  if (!m || !Array.isArray(items)) return null;
+  const w = items.find(function (x) { return Number(x.id) === Number(m[1]); });
+  return w && w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')) ? w : null;
+}
+async function doorbouwKaartKan(p, k) {
+  if (!p || p.soort !== 'besluit' || !k || k.gevoelig || k.waaromNiet || k.beantwoord || k.elders) return null;
+  if (!/^wv[1-9]\d{0,8}$/.test(String(p.sleutel || ''))) return null;
+  let items = null;
+  try { const wv = await appWerkvoorraad(); items = (wv && wv.items) || null; } catch (e) { logError('doorbouw', e); return null; }
+  return doorbouwKaartRij(p, items);
+}
+// Legt de machtiging vast op rij id. Geeft {ok, id} of {ok: false, id, reden}; werpt nooit.
+async function doorbouwVastleggen(id, hash, ms) {
+  try {
+    const r = await appSbRpc('mk_werkvoorraad_doorwerk', { p_id: Number(id), p_opdracht: doorbouwCitaat(hash, ms) });
+    appStaat.wvCache = null;
+    schrijfLog(nu() + ' doorbouw ' + velden({ rij: id, vraag: hash, uitkomst: r && r.ok === true ? 'vastgelegd' : 'geweigerd' }));
+    return r && r.ok === true ? { ok: true, id: Number(id) } : { ok: false, id: Number(id), reden: appEenRegel(String((r && r.fout) || 'geweigerd'), 160) };
+  } catch (e) { logError('doorbouw', e); return { ok: false, id: Number(id), reden: appEenRegel(String(e && e.message || e), 120) }; }
+}
+function doorbouwStaart(u) {
+  if (!u) return '';
+  return u.ok ? '\n[Systeem (wv3692): David koos "' + DOORBOUW_KNOP + '". De pod legde dat vast als doorwerk-opdracht op werkvoorraadrij wv' + u.id +
+      ' (vervolgrijen met --ouder-job erven hem). Geef de rij vrij zoals bij een Ja. Na ontwerp en review komt er geen "zo bouwen?"-kaart meer maar de mededeling met Stop (doorbouw.py meld); uitzonderingen (versturen, betalen, verwijderen, afspraak, credentials) blijven een eigen kaart.]'
+    : '\n[Systeem (wv3692): David koos "' + DOORBOUW_KNOP + '", maar de pod kon dat NIET vastleggen op wv' + u.id + ' (' + u.reden + '). Zet het zelf met werkvoorraad.py doorwerk --id ' + u.id +
+      ' --opdracht \'' + DOORBOUW_PREFIX + ' (knop in de app) — David <d-m-jjjj>\' en meld het in de box.]';
+}
+// Stop: de keten van rij `rij` tegenhouden. Werpt nooit; geeft een samenvatting.
+async function doorbouwStop(rij, tweede) {
+  const uit = { rij: rij, vervallen: [], gestopt: [], al_af: [], fout: [] };
+  let items = [];
+  try { appStaat.wvCache = null; const d = await appSbRpc('mk_werkvoorraad_stand', {}); items = (d && d.items) || []; }
+  catch (e) { logError('doorbouw', e); uit.fout.push('werkvoorraad niet te lezen'); return uit; }
+  const ids = new Set([Number(rij)]);
+  for (let groei = true; groei;) {
+    groei = false;
+    items.forEach(function (x) { if (!ids.has(Number(x.id)) && x.ouder_id != null && ids.has(Number(x.ouder_id))) { ids.add(Number(x.id)); groei = true; } });
+  }
+  const keten = items.filter(function (x) { return ids.has(Number(x.id)); });
+  if (!keten.length) uit.fout.push('rij wv' + rij + ' niet in de werkvoorraad');
+  for (const x of keten) {
+    const st = String(x.status || '');
+    try {
+      if (st === 'gestart') {
+        const j = x.job_id && jobs[x.job_id];
+        if (j && j.status !== 'done' && j.progress && typeof j.progress.stoppen === 'function') { j.progress.stoppen(); uit.gestopt.push(Number(x.id)); }
+      }
+      if (st === 'open' || st === 'geblokkeerd' || st === 'gestart') {
+        await appSbRpc('mk_werkvoorraad_bijwerk', { p_id: Number(x.id), p_status: 'vervallen', p_geblokkeerd_door: null, p_notitie: 'Stop van David (doorbouw-mededeling, wv3692)', p_volgorde: null, p_niet_voor: null });
+        uit.vervallen.push(Number(x.id));
+      } else uit.al_af.push(Number(x.id));
+      if (doorbouwIs(x.doorwerk_opdracht)) await appSbRpc('mk_werkvoorraad_doorwerk', { p_id: Number(x.id), p_opdracht: null });
+    } catch (e) { logError('doorbouw', e); uit.fout.push('wv' + x.id + ': ' + appEenRegel(String(e && e.message || e), 80)); }
+  }
+  appStaat.wvCache = null;
+  schrijfLog(nu() + ' doorbouw-stop ' + velden({ rij: rij, vervallen: uit.vervallen.join(',') || '-', gestopt: uit.gestopt.join(',') || '-', fout: uit.fout.length, ronde: tweede ? 2 : 1 }));
+  // review r3 (restrisico): een gestopte agent kan net vóór zijn stop nog een vervolgrij gezet hebben; na 30 s nog één ronde over de keten
+  if (!tweede && uit.gestopt.length) { const t = setTimeout(function () { doorbouwStop(rij, true).catch(function (e) { logError('doorbouw', e); }); }, DOORBOUW_TWEEDE_MS); if (t && t.unref) t.unref(); }
+  return uit;
+}
+function doorbouwStopStaart(u) {
+  const l = function (a) { return a.length ? a.map(function (n) { return 'wv' + n; }).join(', ') : 'geen'; };
+  return '\n[Systeem (wv3692): David drukte STOP op de doorbouw-mededeling van wv' + u.rij + '. De pod deed dit al zelf: op vervallen ' + l(u.vervallen) +
+    '; lopende agent gestopt bij ' + l(u.gestopt) + '; al afgerond ' + l(u.al_af) + (u.fout.length ? '; NIET gelukt: ' + u.fout.join('; ') : '') +
+    '. Zet niets opnieuw in gang. Ruim een halve worktree van die klus op (niet uitrollen), zet de box-rij op gestopt en meld David in één regel wat er al af of uitgerold was.]';
+}
+// ── einde wv3692 ──
 
 // ── Zoek snel (wv1252, 24/25-10-2026; ontwerp "01_Ontwikkeling/Snelle feitvragen - ontwerp (24-10-2026).md" § 7, Fable vooraf § 7.7) ──
 // David (24-10 23:41): een "Zoek snel"-veld achter het OVIS-logo, Sonnet zonder skills, alleen in de Brain, antwoord kopieerbaar. Logica in

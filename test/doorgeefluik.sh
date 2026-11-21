@@ -25,7 +25,7 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
   toets('0 bron doorgeefluik in BERICHT_BRONNEN', /'doorgeefluik',\s+\/\/ wv1267/.test(src));
   toets('0 health kent doorgeefluik', /doorgeefluik: typeof doorgeefInfo === 'function' \? doorgeefInfo\(\)/.test(src));
   toets('0 appKnop: alleen Ja, geen kaart; rij pas bij de start van de beurt (in bijStart)', /const luik = keuze === 'ja' && !kaart && vb && typeof doorgeefHerken === 'function'/.test(knopSrc) &&
-    (knopSrc.match(/doorgeefKnop\(/g) || []).length === 1 && /const bijStartMet = !luik \? bijStart : function \(\) \{\n    return Promise\.all\(\[[^\n]*doorgeefKnop\(sleutel, jobId, hash, luik\.zin, drukT, luik\.app\)\]\)/.test(knopSrc) &&
+    (knopSrc.match(/doorgeefKnop\(/g) || []).length === 1 && /const bijStartMet = !luik \? bijStart : function \(\) \{\n    return Promise\.all\(\[[^\n]*doorgeefKnop\(sleutel, jobId, hash, luik\.zin, drukT, luik\.app, doorbouw\)\]\)/.test(knopSrc) &&
     /bijStart: bijStartMet,/.test(knopSrc));
 
   // ── nagebootste omgeving ──
