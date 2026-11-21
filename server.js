@@ -17288,7 +17288,7 @@ async function berichtNieuw(res, d) {
   const agk = ag ? appAgendaKnoppen() : null;
   if (ag) {
     agk[id] = { kanaal: kanaal, t: t, knoppen: {} };
-    agk[id].knoppen[ag.soort] = { nonce: ag.nonce, verloopt: ag.verloopt, stand: 'open', sinds: null, pagina: null, uitkomst: null };
+    agk[id].knoppen[ag.soort] = appAgendaKnopNieuw(ag, d.tekst);   // wv3687: met kaart-hash als n8n die meegaf
     if (smsV) agk[id].sms = smsV;   // wv3664: de ✅ verstuurt dan deze sms (appSmsKnop) in plaats van Agenda-knoppen aan te roepen
     if (!appAgendaKnoppenBewaar()) { delete agk[id]; return berichtStuur(res, 500, { ok: false, fout: 'agendaknop niet op te slaan', terugval: true }); }
   }
@@ -17703,7 +17703,24 @@ function appAgendaUitBericht(x, nu) {
   if (APP_AGENDA_SOORTEN.indexOf(x.soort) < 0) return 'agenda.soort is uitvoeren of ongedaan';
   if (typeof x.verloopt !== 'number' || !Number.isFinite(x.verloopt)) return 'agenda.verloopt is een tijd in ms';
   if (x.verloopt < nu - APP_AGENDA_MARGE_MS || x.verloopt > nu + APP_AGENDA_VOORUIT_MS) return 'agenda.verloopt ligt buiten het venster';
-  return { nonce: x.nonce, soort: x.soort, verloopt: Math.round(x.verloopt) };
+  // wv3687 (besluit nr 369): een agendakaart (voorstel = kaart) heeft een kaart-hash van n8n; alleen bij uitvoeren
+  if (x.hash !== undefined && (typeof x.hash !== 'string' || !/^[0-9a-f]{64}$/.test(x.hash) || x.soort !== 'uitvoeren')) return 'agenda.hash is 64 hex en alleen bij uitvoeren';
+  const r = { nonce: x.nonce, soort: x.soort, verloopt: Math.round(x.verloopt) };
+  if (x.hash !== undefined) r.hash = x.hash;
+  return r;
+}
+// wv3687 (besluit nr 369 / 3C69): een knop bij een nieuw bericht. Bij een agendakaart bewaart de pod de kaart-hash van n8n en de sha256
+// van de kaarttekst zoals hij die kreeg (vóór elke bewerking); bij de ✅ gaan beide mee terug (appAgendaKnopBody), zodat n8n alleen
+// uitvoert wat letterlijk op de kaart stond.
+function appAgendaKnopNieuw(ag, tekstRuw) {
+  const K = { nonce: ag.nonce, verloopt: ag.verloopt, stand: 'open', sinds: null, pagina: null, uitkomst: null };
+  if (ag.hash) { K.hash = ag.hash; K.th = crypto.createHash('sha256').update(String(tekstRuw), 'utf8').digest('hex'); }
+  return K;
+}
+function appAgendaKnopBody(K, keuze) {
+  const b = { n: K.nonce, a: keuze };
+  if (typeof K.hash === 'string' && typeof K.th === 'string') { b.h = K.hash; b.t = K.th; }
+  return b;
 }
 // In het geheugen, op schijf na elke wijziging (zoals berichten.json). Kapot = leeg en gelogd, zonder de inhoud: een
 // JSON-fout van Node citeert het bestand, en daar staan nonces in.
@@ -17872,7 +17889,7 @@ async function appAgendaRoute(req, res, a, s, d) {
   }
   if (!appKnopSleutel()) { terug(); return appWeiger(res, 503, 'de agendaknoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'agenda geen sleutel'); }
   let j = null, fout = null;
-  try { j = await appAgendaKnopN8n({ n: K.nonce, a: keuze }); } catch (x) { fout = x; }
+  try { j = await appAgendaKnopN8n(appAgendaKnopBody(K, keuze)); } catch (x) { fout = x; }   // wv3687: h en t bij een kaart
   const pagina = j && typeof j.pagina === 'string' ? j.pagina : '';
   // Opnieuw opzoeken na het wachten (de cache kan intussen herladen zijn); de bezig-stand van déze druk wordt de uitkomst
   const e2 = appAgendaKnoppen()[id] || e, K2 = appAgendaKnop(id, knop) || K;
