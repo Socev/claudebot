@@ -17824,8 +17824,14 @@ function appAgendaVorm(e, nu) {
   return { knoppen: APP_AGENDA_SOORTEN.filter(function (k) { return e.knoppen[k] && typeof e.knoppen[k] === 'object'; }).map(function (k) {
     const K = e.knoppen[k], v = Number(K.verloopt), bezig = appAgendaBezig(K, nu);
     return { knop: k, open: !bezig && K.stand !== 'klaar' && Number.isFinite(v) && nu < v + APP_AGENDA_MARGE_MS, verloopt: Number.isFinite(v) ? new Date(v).toISOString() : null,
-      pagina: bezig ? 'bezig' : typeof K.pagina === 'string' ? K.pagina : null, uitkomst: typeof K.uitkomst === 'string' ? K.uitkomst : null };
+      pagina: bezig ? 'bezig' : typeof K.pagina === 'string' ? K.pagina : null, uitkomst: typeof K.uitkomst === 'string' ? K.uitkomst : null,
+      link: K.pagina === 'uitgevoerd' ? appAgendaLink(K.link) : null };   // wv3703
   }) };
+}
+// wv3703 (besluit nr 353, David Ja 21-11-2026): de Google-link van de afspraak die n8n na een ✅ meegeeft; alleen de bekende vorm,
+// anders geen link (nooit verzinnen of doorgeven wat n8n niet als afspraaklink herkende).
+function appAgendaLink(x) {
+  return typeof x === 'string' && /^https:\/\/www\.google\.com\/calendar\/event\?eid=[A-Za-z0-9_-]{8,200}$/.test(x) ? x : null;
 }
 // Tekst van n8n (zelfde zin als het Telegram-bericht, mogelijk met HTML) als platte regel.
 function appAgendaPlat(t) {
@@ -17992,6 +17998,7 @@ async function appAgendaRoute(req, res, a, s, d) {
     return appStuur(res, 409, { ok: false, al_afgehandeld: true, fout: 'Al afgehandeld: ' + K2.uitkomst, melding: 'Al afgehandeld: ' + K2.uitkomst, agenda: appAgendaVorm(e2) });
   }
   K2.stand = 'klaar'; K2.sinds = null; K2.pagina = pagina; K2.uitkomst = uitkomst;
+  K2.link = pagina === 'uitgevoerd' ? appAgendaLink(j.link) : null;   // wv3703 (besluit nr 353): Open in Google Agenda
   // Na plaatsen of wijzigen maakt n8n een ongedaan-rij: ↩️ bij hetzelfde bericht, 24 u (ook na een ↩️ die zelf weer een wijziging was)
   if (typeof j.ongedaan_nonce === 'string' && APP_AGENDA_NONCE_RE.test(j.ongedaan_nonce))
     e2.knoppen.ongedaan = { nonce: j.ongedaan_nonce, verloopt: Date.now() + APP_AGENDA_ONGEDAAN_MS, stand: 'open', sinds: null, pagina: null, uitkomst: knop === 'ongedaan' ? uitkomst : null };
