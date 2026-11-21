@@ -18495,7 +18495,7 @@ const studio = (function () {
       log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError,
       // wv2614: Immich als bron en bestemming. Getter: immichMl staat verderop in dit bestand (pas bij een verzoek opgehaald, geen TDZ bij laden)
       immich: function () { try { return immichMl; } catch (e) { return null; } }, leesBewaard: appStudioLeesBewaard,
-      naKlaar: function (t) { return bandjes ? bandjes.naKlaar(t) : null; },   // wv743: register bijwerken na een bandje
+      naKlaar: function (t) { const u = bandjes ? bandjes.naKlaar(t) : null; if (t && t.bron && t.bron.soort === 'bandje' && typeof bandjesKaartStraks === 'function') bandjesKaartStraks(); return u; },   // wv3723: kaart kort na Maak   // wv743: register bijwerken na een bandje
       // wv3272: Foto's → 3D — box-rij bij een netwerkafwijking of een 3D-app die niet stopt; het voorbeeld in Bestanden wissen met de scène
       box: function (kop, regels) { return werkerBoxRij(kop, regels); }, wisBewaard: appStudioWisBewaard,
       merk: path.join(IMAGINE_DIR, 'incognito-merk.json') });   // wv2984: OVIS Imagine incognito (alleen prompt-id's; herstart-opruiming)
@@ -19660,7 +19660,7 @@ async function facturenKaartRonde() {
 // Mini-app Bandjes: het register van de telefoonbandjes (vault 10_Zakelijk/{Tolgaarde,Groenhouten}/Telefoon/Bandjes.md) lezen en
 // bewerken, en een bandje laten inspreken via de Studio-motorlaag (zelfde wachtrij, grenzen, vingerafdruk-regel en Bestanden). Alle
 // logica staat in bandjes.js (register, journaal, routes) en audio.js (telefoonversie, via studio.js); hier alleen de koppeling:
-// routes GET /app/bandjes en POST /app/bandjes/{tekst,nieuw,voorstel,instellingen,maak,status,spreektekst,proef} (wv803) na de app-poort, POST
+// routes GET /app/bandjes en POST /app/bandjes/{tekst,nieuw,voorstel,instellingen,maak,status,spreektekst,proef,gelijk} (wv803; gelijk wv3723) na de app-poort, POST
 // /smal/bandjes/voorstel (API-geheim of Socev-sleutel; de skill bandjes), het BSN-masker op een vaste plek en /health.bandjes.
 // Schrijven alleen op de primaire kant. Ontbreekt bandjes.js in de release (terugrol), dan 404 en bandjes.aan=false in /health.
 const BANDJES_DIR = serverPad('bandjes', process.env.BANDJES_DIR, '/opt/data/bandjes', serverProefDeel('bandjes'));
@@ -19689,13 +19689,14 @@ function bandjesBestandVan(jobId) {
 }
 function bandjesInfo() {
   if (!bandjes) return { aan: false };
-  try { return bandjes.health(); } catch (e) { return { aan: true, fout: true }; }
+  try { return Object.assign(bandjes.health(), typeof bandjesKaartStaat === 'object' && bandjesKaartStaat.laatste ? { kaart: bandjesKaartStaat.laatste } : {}); } catch (e) { return { aan: true, fout: true }; }   // wv3723: kaart = laatste kaartronde (tellingen)
 }
 async function appBandjes(req, res, a, s, d, route) {
   if (!bandjes) return appWeiger(res, 404, 'Bandjes zit niet in deze versie van de pod', 'bandjes ontbreekt');
   // wv1931: geen BSN-masker meer (Davids eigen tekst); de app waarschuwt bij een BSN-achtig getal, want deze tekst gaat de telefoonlijn op
   if (route === 'GET /app/bandjes') res._app.stil = true;
   const r = await bandjes.app(route, d || {}, appStudioCtx(a, s));
+  if (r.status === 200 && (route === 'POST /app/bandjes/status' || route === 'POST /app/bandjes/gelijk' || route === 'POST /app/bandjes/tekst') && typeof bandjesKaartStraks === 'function') bandjesKaartStraks();   // wv3723
   if (r.status !== 200) res._app.reden = 'bandjes: ' + String(r.j && r.j.fout || '').slice(0, 60);
   else if (route !== 'GET /app/bandjes') res._app.reden = 'bandjes ' + route.slice('POST /app/bandjes/'.length) + ' ' + String(d && d.praktijk || '').slice(0, 12) + ' ' + String(d && d.bandje || '').slice(0, 34);
   return appStuur(res, r.status, r.j);
@@ -19713,6 +19714,47 @@ function bandjesWerkRonde() {
 }
 setTimeout(bandjesWerkRonde, 2 * 60 * 1000).unref();
 setInterval(bandjesWerkRonde, 60 * 60 * 1000).unref();
+// wv3723 (2C22 + 2C91c, David Ja 21-11 13:18): afmaakkaart per gemaakt bandje dat nog niet in de centrale staat, belkaart "Hoor je de
+// nieuwe?" op het eerste speelmoment na de markering; bandjes-kaart.js beslist, hier lezen en uitvoeren (door agent). Elk half uur, 3 min
+// na de start en kort na Maak of Staat in de centrale. Alleen op de primaire kant.
+const bandjesKaartMod = (function () { try { return fs.existsSync(path.join(__dirname, 'bandjes-kaart.js')) ? require('./bandjes-kaart.js') : null; } catch (e) { logError('bandjes-kaart', e); return null; } })();
+const bandjesKaartStaat = { bezig: false, opnieuw: false, laatste: null };
+async function bandjesKaartRonde() {
+  if (!bandjes || !bandjes.kaartStand || !bandjesKaartMod || !rolPrimair()) return null;
+  if (bandjesKaartStaat.bezig) { bandjesKaartStaat.opnieuw = true; return null; }
+  bandjesKaartStaat.bezig = true;
+  const uit = { gezet: 0, heropend: 0, dicht: 0, gehoord: 0, fouten: 0 };
+  try {
+    const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
+    if (!j || !Array.isArray(j.punten)) throw new Error('kaartenlijst onleesbaar');
+    const punten = j.punten.map(function (p) { return { sleutel: p.sleutel, status: p.status, gesloten_door: p.gesloten_door }; });
+    const pl = bandjesKaartMod.plan({ praktijken: bandjes.kaartStand(), punten: punten, nu: Date.now(), nuKort: bankNuKort() });
+    for (const k of pl.zet) { try { const r = await appSbRpc('mk_voor_jou_zet', { p: k }); if (r && r.sleutel) uit.gezet++; else uit.fouten++; } catch (e) { uit.fouten++; logError('bandjes-kaart', e); } }
+    for (const o of pl.open) {
+      try { const r = await appSbRpc('mk_voor_jou_status', { p_sleutel: o.sleutel, p_van: o.van, p_naar: 'open', p_door: 'agent', p_reden: 'bandjes-kaart: bandje weer klaar voor de centrale' }); if (r && r.ok === true) uit.heropend++; }
+      catch (e) { uit.fouten++; logError('bandjes-kaart', e); }
+    }
+    for (const d of pl.dicht) {
+      try {
+        const r = await appSbRpc('mk_voor_jou_status', { p_sleutel: d.sleutel, p_van: d.van, p_naar: d.samengevoegd_in ? 'samengevoegd' : 'gedaan', p_door: 'agent', p_bewijs: d.bewijs,
+          p_samengevoegd_in: d.samengevoegd_in || null, p_reden: 'bandjes-kaart' });
+        if (r && r.ok === true) uit.dicht++;
+      } catch (e) { uit.fouten++; logError('bandjes-kaart', e); }
+    }
+    for (const g of pl.gehoord) { try { const r = bandjes.zetGehoord(g.praktijk, g.bandje, g.versie); if (r && r.status === 200) uit.gehoord++; } catch (e) { uit.fouten++; logError('bandjes-kaart', e); } }
+    if (uit.gezet || uit.heropend || uit.dicht) appStaat.vjCache = null;
+    if (uit.gezet || uit.heropend || uit.dicht || uit.gehoord || uit.fouten) schrijfLog(nu() + ' bandjes-kaart ' + JSON.stringify(uit));
+    bandjesKaartStaat.laatste = Object.assign({ op: new Date().toISOString() }, uit);
+    return uit;
+  } catch (e) { logError('bandjes-kaart', e); bandjesKaartStaat.laatste = { op: new Date().toISOString(), fout: true }; return null; }
+  finally {
+    bandjesKaartStaat.bezig = false;
+    if (bandjesKaartStaat.opnieuw) { bandjesKaartStaat.opnieuw = false; setTimeout(bandjesKaartRonde, 5000).unref(); }
+  }
+}
+function bandjesKaartStraks() { setTimeout(function () { bandjesKaartRonde().catch(function () {}); }, 3000).unref(); }
+setTimeout(bandjesKaartStraks, 3 * 60 * 1000).unref();
+setInterval(function () { bandjesKaartRonde().catch(function () {}); }, 30 * 60 * 1000).unref();
 
 // ── Facturen-app, smalle ingang voor de praktijkmanager (wv856, F6, 23-10-2026; bouwplan § 4.3 en § 7) ──
 // /fac/* = de eigen pod-ingang van facturen.socev.dev (eigen Access-app met Google-login, eigen doorgeef-Function, eigen servicetoken en

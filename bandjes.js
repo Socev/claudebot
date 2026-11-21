@@ -146,7 +146,7 @@ function bandjeUit(b) {
   const v = b.velden;
   return { id: b.id, naam: b.naam, menu: v.menu || '', wanneer: v.wanneer || '', tijdvensters: v.tijdvensters || '', stem: v.stem || 'praktijkstem',
     versie: b.versie, tekst: b.tekst, onbekend: b.onbekend, tekst_hash: b.hash, status: v.status || '', laatste_bestand: v['laatste bestand'] || '',
-    in_centrale: v['in centrale'] || '', bron: v.bron || '', aandachtspunt: v.aandachtspunt || '', voorstel: b.voorstel, spreek_eigen: b.spreek || null,
+    in_centrale: v['in centrale'] || '', gehoord: v.gehoord || '', bron: v.bron || '', aandachtspunt: v.aandachtspunt || '', voorstel: b.voorstel, spreek_eigen: b.spreek || null,
     // wv830: versiemodel (zie werkNummer); werkversie = null als de tekst die van de centrale is
     centrale_versie: centraleVersie(v), werkversie: b.versie > centraleVersie(v) ? b.versie : null, volgende_versie: werkNummer(b), kan_centrale: kanCentrale(b) };
 }
@@ -339,8 +339,58 @@ function zetSpreektekst(md, voorvoegsel, id, o, klok) {
   const uit = klaar(zetUpdated(vervangSectie(p, b, herschrijfSectie(p, b, { spreek: { tekst: n, kop: kop } })), klok));
   return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)) };
 }
+// wv3723 (2C91a, David Ja 21-11 13:18): de tekst gelijktrekken met wat al is ingesproken, zonder opnieuw te maken. Kan alleen als het
+// gemaakte bandje bij de tekst van nu hoort (kanCentrale), er een voorstel ligt, en dat voorstel precies de spreektekst oplevert waarmee
+// het geluid gemaakt is: de automatische spreektekst van het voorstel (met de uitspraaklijst) = de spreektekst die Maak nu zou gebruiken
+// (eigen of automatisch). Dan zegt het geluid al wat het voorstel schrijft. o: { versie, tekst_hash, spreek_na_maak } (spreek_na_maak = het
+// journaal zag een spreektekstwijziging na het laatste maken: dan weten we niet meer wat de stem zei, dus nee). Het voorstel wordt de
+// tekst; versie en status blijven (geen nieuw geluid), "laatste bestand" en de eigen spreektekst krijgen de nieuwe tekst-hash, zodat de
+// koppeling tekst ↔ geluid (kanCentrale, de knop Staat in de centrale) blijft kloppen. De tekst van de centrale gaat zoals bij Bewaar
+// naar de versiegeschiedenis.
+// De woorden die de stem zegt, zonder pauzes of tags (spreektekst met [pauze], of de modeltekst met [pause]/<break> uit de Studio-taak)
+function kaal(t) { return SPREEK.naarModel(String(t || '').replace(/\[\s*(?:long\s+)?pause\s*\]/gi, ' ').replace(/<break\b[^>]{0,80}>/gi, ' '), null).replace(/\s+/g, ' ').trim(); }
+// gezegd = de tekst die werkelijk naar de stem ging (velden.tekst van de Studio-taak van het laatste bestand; het sterkste bewijs). Zonder
+// taak: de spreektekst die Maak nu zou gebruiken, alleen als het journaal na het laatste maken geen spreektekstwijziging zag.
+// u = een bandje zoals bandjeUit het geeft (ook zo in GET /app/bandjes)
+function gelijkFout(u, inst, spreekNaMaak, gezegd) {
+  if (!u.voorstel) return 'er ligt geen voorstel';
+  if (u.voorstel.tekst === u.tekst) return 'het voorstel is gelijk aan de tekst';
+  if (!u.kan_centrale) return 'dit kan alleen bij een gemaakt bandje dat nog niet in de centrale staat';
+  const nieuw = kaal(SPREEK.afleiden(u.voorstel.tekst, inst && inst.uitspraak));
+  if (typeof gezegd === 'string') {
+    if (!nieuw || kaal(gezegd) !== nieuw) return 'het voorstel klinkt anders dan het gemaakte bandje; neem het over en druk op Maak';
+    return null;
+  }
+  if (spreekNaMaak) return 'de spreektekst is na het maken nog gewijzigd; neem het voorstel over en druk op Maak';
+  const nu = kaal(spreekVan(u, inst).tekst);
+  if (!nu || nu !== nieuw) return 'het voorstel klinkt anders dan het gemaakte bandje; neem het over en druk op Maak';
+  return null;
+}
+function gelijkTrekken(md, voorvoegsel, id, o, klok) {
+  const p = parse(md, voorvoegsel);
+  if (p.fouten.length) return { status: 409, fout: 'de registerpagina is niet in orde: ' + p.fouten.join('; ') };
+  const b = zoek(p, id);
+  if (!b) return { status: 404, fout: 'dit bandje staat niet in het register' };
+  if (Number(o.versie) !== b.versie || String(o.tekst_hash || '') !== b.hash) return { status: 409, fout: 'dit bandje is intussen gewijzigd; herlaad', gewijzigd: true };
+  const f = gelijkFout(bandjeUit(b), p.instellingen, !!o.spreek_na_maak, typeof o.gezegd === 'string' ? o.gezegd : undefined);
+  if (f) return { status: 409, fout: f };
+  const t = toetsTekst(b.voorstel.tekst);
+  if (t.fout) return { status: 400, fout: t.fout };
+  const nieuweHash = tekstHash(t.tekst);
+  const lbOud = String(b.velden['laatste bestand'] || '');
+  const lbNieuw = lbOud.replace('tekst ' + b.hash, 'tekst ' + nieuweHash);
+  if (lbNieuw === lbOud) return { status: 409, fout: 'het laatste bestand noemt de tekst niet; maak het opnieuw' };
+  const w = { velden: { 'laatste bestand': lbNieuw }, tekst: t.tekst, voorstel: null };
+  if (b.spreek && b.spreek.bij === b.hash) w.spreek = { tekst: b.spreek.tekst, kop: '(bij v' + b.versie + ', tekst ' + nieuweHash + ', ' + vandaag(klok) + ', gelijkgetrokken met het gemaakte bandje)' };
+  let regels = vervangSectie(p, b, herschrijfSectie(p, b, w));
+  const n = centraleVersie(b.velden);
+  const alGehad = new RegExp('^### ' + b.id + ' v' + n + ' — ', 'm').test(md);
+  if (n >= 1 && !alGehad && !b.onbekend) regels = voegGeschiedenisToe(regels, ['### ' + b.id + ' v' + n + ' — vervangen ' + vandaag(klok)].concat(citaat(b.tekst)));
+  const uit = klaar(zetUpdated(regels, klok));
+  return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)), oude_hash: b.hash };
+}
 // Losse velden (laatste bestand, in centrale, status) — alleen deze sleutels.
-const VRIJE_VELDEN = ['laatste bestand', 'in centrale', 'status', 'stem'];
+const VRIJE_VELDEN = ['laatste bestand', 'in centrale', 'status', 'stem', 'gehoord'];   // wv3723: gehoord (belkaart)
 function zetVelden(md, voorvoegsel, id, velden, verwacht, klok) {
   const p = parse(md, voorvoegsel);
   if (p.fouten.length) return { status: 409, fout: 'de registerpagina is niet in orde: ' + p.fouten.join('; ') };
@@ -806,6 +856,34 @@ function maak(deps) {
     });
     return uit;
   }
+  // wv3723: wijzigde de pod de spreektekst van dit bandje ná het laatste maken (journaal: spreektekst na gemaakt/velden)? Geen enkel
+  // maakspoor in het journaal maar wel een spreektekstwijziging = ook ja (niet na te gaan wat de stem zei).
+  function spreekNaMaak(pr, id) {
+    let t = '';
+    try { t = fs.readFileSync(JOURNAAL, 'utf8'); } catch (e) { return false; }
+    let gemaakt = '', spreek = '';
+    t.split('\n').forEach(function (r) {
+      if (!r) return;
+      try { const j = JSON.parse(r); if (j.praktijk !== pr || j.bandje !== id) return; if (j.actie === 'gemaakt' || j.actie === 'velden') gemaakt = j.tijd > gemaakt ? j.tijd : gemaakt; else if (j.actie === 'spreektekst') spreek = j.tijd > spreek ? j.tijd : spreek; } catch (e) {}
+    });
+    return !!spreek && !(gemaakt && spreek < gemaakt);
+  }
+  // wv3723: de bewaarde werkversie hoort na het gelijktrekken bij de nieuwe tekst-hash (meta.json, zelfde job)
+  function werkHash(pr, id, oud, nieuw) {
+    const d = werkMap(pr, id);
+    if (!d) return false;
+    try {
+      const f = path.join(d, 'meta.json');
+      if (!fs.lstatSync(f).isFile()) return false;
+      const m = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (!m || m.tekst_hash !== oud) return false;
+      m.tekst_hash = nieuw;
+      const tmp = f + '.' + process.pid + '-' + klok();
+      fs.writeFileSync(tmp, JSON.stringify(m), { mode: 0o600, flag: 'wx' });
+      fs.renameSync(tmp, f);
+      return true;
+    } catch (e) { if (!e || e.code !== 'ENOENT') fout('bandjes-werkversie-hash', e); return false; }
+  }
   function inCentrale(pr, id, a) {
     const l = lees(pr);
     if (l.status !== 200) return l;
@@ -842,6 +920,14 @@ function maak(deps) {
     archiefMap: function (pr) { return PRAKTIJKEN[pr] ? path.join(path.dirname(pad(pr)), 'Archief') : null; },
     nieuw: function (pr, o) { return muteer(pr, 'nieuw', function (md, vv) { return nieuwBandje(md, vv, o, klok); }); },
     zetSpreektekst: function (pr, id, o) { return muteer(pr, 'spreektekst', function (md, vv) { return zetSpreektekst(md, vv, id, o, klok); }); },
+    spreekNaMaak: spreekNaMaak,   // wv3723
+    gelijk: function (pr, id, o) {   // wv3723: tekst gelijktrekken met het gemaakte geluid; daarna de hash in de bewaarde werkversie mee
+      const na = spreekNaMaak(pr, id);
+      let oud = null;
+      const r = muteer(pr, 'gelijk', function (md, vv) { const x = gelijkTrekken(md, vv, id, Object.assign({}, o, { spreek_na_maak: na }), klok); oud = x.oude_hash || null; return x; });
+      if (r.status === 200 && oud) werkHash(pr, id, oud, r.bandje.tekst_hash);
+      return r;
+    },
     zetInstelling: function (pr, k, w) { return muteer(pr, 'instellingen', function (md, vv) { return zetInstelling(md, vv, k, w, klok); }); },
     mkdir: function () { mkdir(DIR); mkdir(path.join(DIR, 'tmp')); try { fs.chmodSync(DIR, 0o700); fs.chmodSync(path.join(DIR, 'tmp'), 0o700); } catch (e) {} },
     journaalPad: JOURNAAL,
@@ -976,10 +1062,27 @@ function routes(deps) {
   function lees(pr) { const l = S.lees(pr); boxMeld(l); return l; }
   // De praktijkstem uit het register; staat er (nog) geen geldige stem-id, dan de gratis proefstem.
   function praktijkstem(inst) { const w = String(inst && inst.praktijkstem || ''); return STEM_RE.test(w) ? w : STEM_STANDAARD; }
+  // wv3723: de tekst die bij het maken werkelijk naar de stem ging (Studio-taak van het laatste bestand), of undefined als die taak er niet
+  // (meer) is of niet bij dit bandje hoort
+  function gezegdVan(pr, id, job) {
+    let t = null;
+    try { t = deps.studio && deps.studio.taak && /^[a-f0-9]{16}$/.test(String(job)) ? deps.studio.taak(job) : null; } catch (e) { t = null; }
+    const b = t && t.bron;
+    if (!b || b.soort !== 'bandje' || b.praktijk !== pr || b.bandje !== id || b.proef || t.status !== 'klaar') return undefined;
+    return t.velden && typeof t.velden.tekst === 'string' ? t.velden.tekst : undefined;
+  }
+  function gelijkKan(pr, b, inst) {
+    if (!b.voorstel || !b.kan_centrale) return false;
+    try {
+      const lb = laatsteVan(b.laatste_bestand);
+      const gezegd = lb ? gezegdVan(pr, b.id, lb.job) : undefined;
+      return !gelijkFout(b, inst, gezegd === undefined && S.spreekNaMaak ? S.spreekNaMaak(pr, b.id) : false, gezegd);
+    } catch (e) { return false; }
+  }
   function praktijkUit(l) {
     return { id: l.praktijk, naam: l.naam || (PRAKTIJKEN[l.praktijk] && PRAKTIJKEN[l.praktijk].naam), instellingen: l.instellingen || {},
       praktijkstem: praktijkstem(l.instellingen),
-      bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { spreektekst: spreekVan(b, l.instellingen), bewaard: bewaardUit(l.praktijk, b) }); }),   // wv803; wv3064 bewaard; wv3544 of uit het archief
+      bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { spreektekst: spreekVan(b, l.instellingen), bewaard: bewaardUit(l.praktijk, b), gelijk_kan: gelijkKan(l.praktijk, b, l.instellingen) }); }),   // wv3723 gelijk_kan   // wv803; wv3064 bewaard; wv3544 of uit het archief
       dicht: l.dicht || null, fouten: l.fouten || [], conflicten: l.conflicten || [], teruggezet: l.teruggezet || [], ontbreekt: l.ontbreekt === true };
   }
   // wv3064: het bewaarde geluid van de werkversie (zonder paden) of null. wv3544: geen werkversie bewaard, dan het geluid van wat in de
@@ -1043,7 +1146,7 @@ function routes(deps) {
       return { status: 200, j: { ok: true, praktijken: pr, stemmen: await stemmen(), schrijven: !!primair(), stem_standaard: STEM_STANDAARD, grens: GRENS, kosten: kosten,
         spreek: { standaard: SPREEK_STD, grenzen: SPREEK_GRENS, max: SPREEK.MAX } } };
     }
-    const m = /^POST \/app\/bandjes\/(tekst|nieuw|voorstel|instellingen|maak|status|spreektekst|proef)$/.exec(route);
+    const m = /^POST \/app\/bandjes\/(tekst|nieuw|voorstel|instellingen|maak|status|spreektekst|proef|gelijk)$/.exec(route);
     if (!m) return { status: 404, j: { ok: false, fout: 'onbekend' } };
     if (!primair()) return { status: 409, j: { ok: false, fout: 'deze kant van Socev is nu passief; bandjes bewaren en maken kan alleen op de actieve kant' } };
     const pr = praktijk(d);
@@ -1083,6 +1186,15 @@ function routes(deps) {
       // alleen "laten liggen": overnemen bestaat alleen in de app (zet de tekst in het vak); pas Bewaar schrijft (Fable #11)
       if (d.keuze !== 'laat') return { status: 400, j: { ok: false, fout: 'alleen laten liggen kan hier; overnemen gaat via Bewaar' } };
       return goed(S.haalVoorstelWeg(pr, id));
+    }
+    if (actie === 'gelijk') {
+      // wv3723 (2C91a): het voorstel wordt de tekst zonder opnieuw te maken, alleen als het gemaakte geluid dat al zegt (gelijkFout)
+      const l0 = lees(pr);
+      const b0 = l0.status === 200 ? (l0.bandjes || []).find(function (x) { return x.id === id; }) : null;
+      const lb0 = b0 ? laatsteVan(b0.laatste_bestand) : null;
+      const r = S.gelijk(pr, id, { versie: d.versie, tekst_hash: d.tekst_hash, gezegd: lb0 ? gezegdVan(pr, id, lb0.job) : undefined });
+      if (r.status === 200) log('bandjes gelijkgetrokken ' + pr + '/' + id + ' v' + r.bandje.versie);
+      return goed(r);
     }
     if (actie === 'spreektekst') {
       // wv803: eigen spreektekst bewaren (string) of terug naar automatisch (null); versie + hash zoals Bewaar
@@ -1249,9 +1361,26 @@ function routes(deps) {
     if (!x) { try { x = S.archiefBestand ? S.archiefBestand(job, n) : null; } catch (e) { x = null; } }   // wv3544
     return x;
   }
-  return { app: app, smal: smal, naKlaar: naKlaar, health: health, stemmen: stemmen, ronde: ronde, bewaardBestand: bewaardBestand };
+  // wv3723: de stand voor de kaartronde (bandjes-kaart.js); ok = gelezen en aanwezig, dicht = niets aan de kaarten veranderen
+  function kaartStand() {
+    return Object.keys(PRAKTIJKEN).map(function (pr) {
+      let l;
+      try { l = lees(pr); } catch (e) { return { id: pr, naam: PRAKTIJKEN[pr].naam, ok: false, dicht: 'onleesbaar', bandjes: [] }; }
+      return { id: pr, naam: l.naam || PRAKTIJKEN[pr].naam, ok: l.status === 200 && !l.ontbreekt, dicht: l.dicht || null,
+        bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { gelijk_kan: gelijkKan(pr, b, l.instellingen) }); }) };
+    });
+  }
+  // wv3723: David zette de belkaart op gedaan → "gehoord: vN op <datum>" in het register, alleen als vN nog in de centrale staat
+  function zetGehoord(pr, id, versie) {
+    if (!Object.hasOwn(PRAKTIJKEN, pr) || !ID_RE.test(String(id)) || !primair()) return { status: 409, fout: 'niet nu' };
+    const l = S.lees(pr);
+    const b = l && l.status === 200 && !l.dicht ? (l.bandjes || []).find(function (x) { return x.id === id; }) : null;
+    if (!b || b.centrale_versie !== versie) return { status: 409, fout: 'staat niet (meer) zo in de centrale' };
+    return S.zetVelden(pr, id, { gehoord: 'v' + versie + ' op ' + vandaag(klok) + ' (David belde na)' }, { versie: b.versie, tekst_hash: b.tekst_hash });
+  }
+  return { app: app, smal: smal, naKlaar: naKlaar, health: health, stemmen: stemmen, ronde: ronde, bewaardBestand: bewaardBestand, kaartStand: kaartStand, zetGehoord: zetGehoord };
 }
 
 module.exports = { PRAKTIJKEN, GRENS, STEM_STANDAARD, normTekst, tekstHash, parse, bandjeUit, zetTekst, zetVoorstel, haalVoorstelWeg, zetVelden, nieuwBandje,
   centraleVersie, werkNummer, laatsteVan, kanCentrale, zetGemaakt, zetInCentrale,
-  zetInstelling, zetSpreektekst, stemmenLijst, stemmenUit, maak, routes };
+  zetInstelling, zetSpreektekst, stemmenLijst, stemmenUit, maak, routes, gelijkTrekken, gelijkFout, kaal };
