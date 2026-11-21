@@ -9523,29 +9523,31 @@ function appBriefingVorm(x) {
   }).slice(0, APP_BRIEFING_REGELS).map(function (r) { return appKort(appBriefingPlat(r.replace(/^[-*]\s+/, '• ')), 200); });
   return { job_id: x.job_id, t: x.t, dag: appYmd(Date.parse(x.t)), kop: kop, regels: regels };
 }
-async function appBriefingRoute(req, res, a) {
-  res._app.stil = true;
+// wv3770: het laden van de jongste briefing (tekst + stem van dezelfde dag) is gedeeld met /tel/uit?lijst=dagbericht (Onderweg).
+// Geeft b (of null als er geen is); gooit bij een leesfout.
+async function appBriefingLaad() {
   let st = null;
   try { st = fs.statSync(appLogPad('hoofd')); } catch (e) { if (!(e && e.code === 'ENOENT')) logError('app-briefing', e); }
+  if (!st) return null;
+  const c = appStaat.briefing;
+  if (c && c.mtime === st.mtimeMs && c.size === st.size) return c.b;
   let b = null;
-  if (st) {
-    const c = appStaat.briefing;
-    if (c && c.mtime === st.mtimeMs && c.size === st.size) b = c.b;
-    else {
-      try {
-        const l = await appLogLees('hoofd');
-        for (let i = l.length - 1; i >= 0; i--) {
-          const x = l[i];
-          if (x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse !== 'stil' && x.ok !== false && /^[a-f0-9]{16}$/.test(String(x.job_id || '')) && String(x.antwoord || '').trim()) { b = appBriefingVorm(x); b.tekst = appMoetBericht(x.antwoord); break; }
-        }
-        // wv594: de gesproken briefing (stille 🔊-regel, bron briefing) van dezelfde dag, jongste eerst; het bestand zoekt de route per verzoek op
-        const stem = [];
-        if (b) l.forEach(function (x) { if (x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse === 'stil' && APP_JOB_RE.test(String(x.job_id || '')) && appYmd(Date.parse(x.t)) === b.dag) stem.unshift(x.job_id); });
-        if (b) b.stem = stem;
-        appStaat.briefing = { mtime: st.mtimeMs, size: st.size, b: b };
-      } catch (e) { logError('app-briefing', e); return appStuur(res, 200, { ok: true, briefing: null, fout: 'de briefing is nu niet te lezen' }); }
-    }
+  const l = await appLogLees('hoofd');
+  for (let i = l.length - 1; i >= 0; i--) {
+    const x = l[i];
+    if (x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse !== 'stil' && x.ok !== false && /^[a-f0-9]{16}$/.test(String(x.job_id || '')) && String(x.antwoord || '').trim()) { b = appBriefingVorm(x); b.tekst = appMoetBericht(x.antwoord); break; }
   }
+  // wv594: de gesproken briefing (stille 🔊-regel, bron briefing) van dezelfde dag, jongste eerst; het bestand zoekt de route per verzoek op
+  const stem = [];
+  if (b) l.forEach(function (x) { if (x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse === 'stil' && APP_JOB_RE.test(String(x.job_id || '')) && appYmd(Date.parse(x.t)) === b.dag) stem.unshift(x.job_id); });
+  if (b) b.stem = stem;
+  appStaat.briefing = { mtime: st.mtimeMs, size: st.size, b: b };
+  return b;
+}
+async function appBriefingRoute(req, res, a) {
+  res._app.stil = true;
+  let b = null;
+  try { b = await appBriefingLaad(); } catch (e) { logError('app-briefing', e); return appStuur(res, 200, { ok: true, briefing: null, fout: 'de briefing is nu niet te lezen' }); }
   appStuur(res, 200, { ok: true, briefing: appBriefingVoor(b), fout: null });
 }
 // wv594: tekst (de hele briefing, voor Lees in Voor jou) en audio ({job_id, n, naam} van de gesproken briefing), op elk apparaat (wv1901/wv3446).
@@ -17672,7 +17674,19 @@ function telOnderwegVelden(x) {
   const knop = /(^|\n)Ik heb een vraag voor je in [^\n]*\.$/.test(s);
   const kern = s.replace(/(^|\n)Ik heb een vraag voor je in [^\n]*\.$/, '').trim();
   return { tekst: s.slice(0, 2000), wedervraag: (x.soort === 'antwoord' || x.soort === 'zelf') && /\?["'”’)]*$/.test(kern) ? 'ja' : 'nee',
-    knopvraag: knop ? 'ja' : 'nee', rest: x.rest ? 'ja' : 'nee' };
+    knopvraag: knop ? 'ja' : 'nee', rest: x.rest ? 'ja' : 'nee', vraagzin: knop && x.vraag ? String(x.vraag).slice(0, TEL_VRAAGZIN_MAX) : '' };
+}
+// wv3770: de zin van de VRAAG AAN DAVID-regel (zelfde knip als telSpreektekst: alleen vóór "Verder in de app:"), zonder opmaak.
+const TEL_VRAAGZIN_MAX = 300;
+function telVraagzin(antwoord) {
+  let t = String(antwoord || '').replace(/\r\n?/g, '\n');
+  const m = /^[^\S\n]*[*_]*Verder in (de app|Telegram)\s*:/im.exec(t);
+  if (m) t = t.slice(0, m.index);
+  let zin = null;
+  t.replace(/^[^\S\n]*[*_]*VRAAG AAN DAVID:[*_]*(.*)$/gm, function (r, z) { if (!zin && !appVraagLeeg(z)) zin = z; return ''; });
+  if (!zin) return null;
+  zin = zin.replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\((?:[^)]*)\)/g, '$1').replace(/\s+/g, ' ').trim();
+  return zin ? zin.slice(0, TEL_VRAAGZIN_MAX) : null;
 }
 
 // ── uit-rij: per beurt één item; op schijf (zonder audio) zodat een herstart geen antwoord kwijtraakt ──
@@ -17790,6 +17804,7 @@ function telNaBeurt(jobId, antwoord, ok) {
   x.soort = ok && antwoord ? 'antwoord' : 'fout';
   x.spreek = x.soort === 'fout' ? TEL_AFZEGGEN : telSpreektekst(antwoord);
   x.rest = x.soort !== 'fout' && /^[^\S\n]*[*_]*Verder in (de app|Telegram)\s*:/im.test(String(antwoord || ''));   // wv3700: Onderweg toont "Lees de rest"
+  x.vraag = x.soort !== 'fout' ? telVraagzin(antwoord) : null;   // wv3770: het autodashboard toont de Ja/Nee-vraag met JA / NEE
   x.t_klaar = nu; x.tot = nu + TEL_TTL_MS; delete telStaat.delen[x.id]; delete telStaat.audio[x.id];
   const jr = typeof jobs !== 'undefined' && jobs[jobId] && jobs[jobId].result;
   x.k = x.k || {};
@@ -18008,7 +18023,11 @@ function telUitRoute(req, res, t) {
   const q = new URLSearchParams(String(req.url || '').split('?')[1] || '');
   const w = q.has('wacht') ? Number(q.get('wacht')) : 0;
   if (!Number.isInteger(w) || w < 0 || w > TEL_WACHT_MAX_S) return telWeiger(res, 400, 'wacht moet 0 tot ' + TEL_WACHT_MAX_S + ' zijn', 'wacht');
-  if (q.has('lijst')) return q.get('lijst') === 'voorjou' ? telVoorJou(req, res, t) : telWeiger(res, 400, 'onbekende lijst', 'lijst');   // wv3700
+  if (q.has('lijst')) {   // wv3700 voorjou, wv3770 dagbericht
+    if (q.get('lijst') === 'voorjou') return telVoorJou(req, res, t);
+    if (q.get('lijst') === 'dagbericht') return telDagbericht(req, res, t, q.get('audio') === '1');
+    return telWeiger(res, 400, 'onbekende lijst', 'lijst');
+  }
   res._tel.stil = true;   // de hartslag (± 1 per minuut) niet in het auditlog; alleen weigeringen
   telStaat.hartslag[t.id] = Date.now();
   // wv275: Tasker v6 meldt zijn plek mee (&plek=%SocevPlek); ongezet stuurt Tasker de letterlijke naam = niet Auto
@@ -18059,6 +18078,39 @@ function telTelefoonMeldt(t, q) {
 const TEL_VOORJOU_PER_UUR = 60;
 const TEL_VOORJOU_MAX = 10;
 appStaat.tellers['tel-voorjou'] = [];
+// wv3770 (fase 2a, Fable-ZOU uit de planreview): het dagbericht zonder ± 20 s wachten. De pod bewaart elke ochtend de ingesproken
+// briefing als mp3 (Werkbestanden, bron briefing, stille 🔊-regel). Alleen een Onderweg-sleutel, met dezelfde app-sessie-eis als
+// /tel/beurt en Voor jou. Zonder audio=1: {dagbericht: {dag, grootte} | null}; met audio=1 de mp3 zelf. Alleen van vandaag.
+const TEL_DAGBERICHT_PER_UUR = 30;
+const TEL_DAGBERICHT_MAX = 15 * 1024 * 1024;
+async function telDagberichtBestand() {
+  const b = await appBriefingLaad();
+  if (!b || b.dag !== appYmd(Date.now())) return null;
+  const a = appBriefingAudio(b.stem);
+  if (!a || !/\.mp3$/i.test(String(a.naam || ''))) return null;
+  const m = appBewaardVan(a.job_id);
+  const bb = m && Array.isArray(m.bestanden) ? m.bestanden.find(function (f) { return f && f.n === a.n; }) : null;
+  const p = appBestandPad(m, bb);
+  if (!p) return null;
+  return { dag: b.dag, pad: p, grootte: Number(bb.grootte) || 0 };
+}
+async function telDagbericht(req, res, t, audio) {
+  if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'dagbericht: geen onderweg-sleutel');
+  if (!telSessieOk(t)) return telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (dagbericht)');
+  if (!appTeller('tel-dagbericht', TEL_DAGBERICHT_PER_UUR, 3600000)) return telWeiger(res, 429, 'te vaak dit uur', 'grens dagbericht');
+  if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (dagbericht)');
+  let d = null;
+  try { d = await telDagberichtBestand(); } catch (e) { logError('tel-dagbericht', e); return telWeiger(res, 503, 'het dagbericht is nu niet te lezen', 'dagbericht lezen'); }
+  if (!audio) { res._tel.reden = 'dagbericht ' + (d ? 'ja' : 'nee'); return telStuur(res, 200, { ok: true, dagbericht: d ? { dag: d.dag, grootte: d.grootte } : null }); }
+  if (!d) return telWeiger(res, 404, 'nog geen dagbericht van vandaag', 'dagbericht: geen');
+  let buf;
+  try { buf = await appLeesEcht(d.pad); } catch (e) { logError('tel-dagbericht', e); return telWeiger(res, 503, 'het dagbericht is nu niet te lezen', 'dagbericht lezen'); }
+  if (buf.length > TEL_DAGBERICHT_MAX || buf.length < 4) return telWeiger(res, 503, 'het dagbericht is nu niet te lezen', 'dagbericht grootte');
+  res._tel.reden = 'dagbericht audio'; res._tel.s = null;
+  if (res.headersSent) return;
+  res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': buf.length, 'Cache-Control': 'no-store' });
+  res.end(buf);
+}
 async function telVoorJou(req, res, t) {
   if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'voorjou: geen onderweg-sleutel');
   if (!telSessieOk(t)) return telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (voorjou)');

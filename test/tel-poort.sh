@@ -102,7 +102,7 @@ const ctxGlobals = () => ({ require, fs, path, crypto, Buffer, console, URL, set
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-const EXPORT = '\n;globalThis.__h = { handleApp, appIsPad, handleTel, telIsPad, telStaat, appStaat, appNoodstop, appAan, appOntmasker, telAfsluiten, telSpreektekst, telOpname, telInfo, appInfo, telOpruim, TEL_ROUTE_RE, telMerkAgent, telZelfStart, telZelfNaRun, telAanwezig, telBelletje, agentsReg, TEL_ZELF_AANKONDIGING, telOnderwegVelden, __zet: function (n, f) { globalThis[n] = f; } };';
+const EXPORT = '\n;globalThis.__h = { handleApp, appIsPad, handleTel, telIsPad, telStaat, appStaat, appNoodstop, appAan, appOntmasker, telAfsluiten, telSpreektekst, telOpname, telInfo, appInfo, telOpruim, TEL_ROUTE_RE, telMerkAgent, telZelfStart, telZelfNaRun, telAanwezig, telBelletje, agentsReg, TEL_ZELF_AANKONDIGING, telOnderwegVelden, telVraagzin, appBriefingLaad, __zet: function (n, f) { globalThis[n] = f; } };';
 function laad() { const c = vm.createContext(ctxGlobals()); vm.runInContext(blok + EXPORT, c, { filename: 'server.js#app' }); return c.__h; }
 let H = laad();
 let srv = http.createServer((q, s) => { if (H.telIsPad(q)) return H.handleTel(q, s); if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
@@ -712,6 +712,58 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('8 zelf-belletje: Onderweg als beide in de auto zijn', H.telAanwezig().ok && H.telAanwezig().t.soort === 'onderweg', H.telAanwezig());
     const inf8 = H.telInfo();
     toets('8 /health: Tasker-versie blijft, Onderweg apart', inf8.gekoppeld === true && inf8.onderweg && inf8.onderweg.luistert === true, inf8);
+    // ── 8b. wv3770: dagbericht zonder wachten en de vraagzin voor het autodashboard ──
+    H.appStaat.tellers['tel-alles'] = [];
+    r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: TK3 });
+    toets('8b dagbericht met een Tasker-sleutel: 404', r.status === 404, r.j);
+    Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
+    r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: OW2 });
+    toets('8b dagbericht zonder app-sessie: 423', r.status === 423 && /Socev-app/.test(r.j.fout), r.j);
+    sessie(PIXEL, 'credP', false);
+    const ymd = (t) => new Date(t).toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
+    const HOOFD = path.join(LOGDIR, 'hoofd.jsonl');
+    fs.mkdirSync(LOGDIR, { recursive: true });
+    const hoofdVoor = fs.existsSync(HOOFD) ? fs.readFileSync(HOOFD, 'utf8') : '';
+    r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: OW2 });
+    toets('8b geen briefing: dagbericht null', r.status === 200 && r.j.ok === true && r.j.dagbericht === null, r.j);
+    r = await tel('GET', '/tel/uit?lijst=dagbericht&audio=1', { sleutel: OW2 });
+    toets('8b geen briefing: audio 404 met zin', r.status === 404 && /dagbericht/.test(r.j.fout), r.j);
+    // briefing van gisteren met stem: telt niet
+    const BEW = path.join(W, 'bew'), MP3 = Buffer.concat([Buffer.from('ID3'), crypto.randomBytes(5000)]);
+    const zetBriefing = (t, jobT, jobS, naam) => {
+      fs.appendFileSync(HOOFD, JSON.stringify({ soort: 'socev', bron: 'briefing', klasse: 'normaal', job_id: jobT, t: new Date(t).toISOString(), antwoord: '**🌅 Ochtendbericht**\n\n**Goedemorgen David, proefdag**\n- Om 9 uur overleg.' }) + '\n' +
+        JSON.stringify({ soort: 'socev', bron: 'briefing', klasse: 'stil', job_id: jobS, t: new Date(t + 30000).toISOString(), antwoord: '🔊 Ochtendbriefing' }) + '\n');
+      const d = path.join(BEW, ymd(t), jobS); fs.mkdirSync(path.join(d, 'b'), { recursive: true });
+      fs.writeFileSync(path.join(d, 'b', '1'), MP3);
+      fs.writeFileSync(path.join(d, 'meta.json'), JSON.stringify({ job_id: jobS, soort: 'socev', kanaal: 'hoofd', label: 'briefing', ok: true, op: new Date(t + 30000).toISOString(), bestanden: [{ n: 1, naam: naam, grootte: MP3.length }] }));
+      H.appStaat.bestandenIndex = null;
+    };
+    zetBriefing(Date.now() - 26 * 3600000, 'a1a1a1a1a1a1a1a1', 'b1b1b1b1b1b1b1b1', 'ochtendbriefing-gisteren.mp3');
+    r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: OW2 });
+    toets('8b alleen een dagbericht van gisteren: null', r.status === 200 && r.j.dagbericht === null, r.j);
+    zetBriefing(Date.now() - 60000, 'a2a2a2a2a2a2a2a2', 'b2b2b2b2b2b2b2b2', 'ochtendbriefing-vandaag.mp3');
+    r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: OW2 });
+    toets('8b dagbericht van vandaag: dag en grootte, geen pad of job', r.status === 200 && r.j.dagbericht && r.j.dagbericht.dag === ymd(Date.now()) && r.j.dagbericht.grootte === MP3.length && !/bew|b2b2|pad/.test(JSON.stringify(r.j)), r.j);
+    r = await tel('GET', '/tel/uit?lijst=dagbericht&audio=1', { sleutel: OW2 });
+    toets('8b audio=1: de mp3 zelf, audio/mpeg', r.status === 200 && /audio\/mpeg/.test(r.ct) && Buffer.compare(r.b, MP3) === 0, { status: r.status, ct: r.ct, n: r.b && r.b.length });
+    toets('8b de app-route /app/briefing gebruikt dezelfde lader (stem van vandaag)', (await H.appBriefingLaad()).stem[0] === 'b2b2b2b2b2b2b2b2');
+    H.appStaat.tellers['tel-dagbericht'] = Array(40).fill(Date.now());
+    r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: OW2 });
+    toets('8b grens per uur: 429', r.status === 429, r.j);
+    H.appStaat.tellers['tel-dagbericht'] = [];
+    fs.writeFileSync(HOOFD, hoofdVoor);
+    // vraagzin
+    const A1 = 'Klaar.\n\n**VRAAG AAN DAVID:** Zal ik de **afspraak** verzetten?\n\nVerder in de app:\n- details';
+    const v1 = H.telOnderwegVelden({ soort: 'antwoord', spreek: H.telSpreektekst(A1), vraag: H.telVraagzin(A1) });
+    toets('8b vraagzin: zonder opmaak, knopvraag ja', v1.knopvraag === 'ja' && v1.vraagzin === 'Zal ik de afspraak verzetten?', v1);
+    toets('8b vraagzin: "geen" telt niet, na "Verder in de app" telt niet', H.telVraagzin('Klaar.\n\nVRAAG AAN DAVID: geen.') === null && H.telVraagzin('Klaar.\n\nVerder in de app:\nVRAAG AAN DAVID: Zal ik?') === null);
+    toets('8b vraagzin leeg zonder knopvraag', H.telOnderwegVelden({ soort: 'antwoord', spreek: 'Klaar.', vraag: 'Zal ik?' }).vraagzin === '');
+    r = await tel('POST', '/tel/beurt', { sleutel: OW2, ct: 'text/plain', body: 'Moet ik nog iets?' });
+    const id8V = r.j.id; await tik();
+    afmaken[id8V]('Eén ding.\n\nVRAAG AAN DAVID: Zal ik de mail klaarzetten?'); await tik();
+    r = await tel('GET', '/tel/uit', { sleutel: OW2 });
+    toets('8b uitgifte voor Onderweg: vraagzin bij een knopvraag', r.j.id === id8V && r.j.knopvraag === 'ja' && r.j.vraagzin === 'Zal ik de mail klaarzetten?', r.j);
+    await tel('POST', '/tel/gespeeld/' + id8V, { sleutel: OW2 });
     toets('8 geen onverwachte fouten (wv3700)', !logs.some((l) => /tel-voorjou/.test(l) && !/databank weg/.test(l)), logs.filter((l) => /tel-voorjou/.test(l)));
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }
   srv.close();
