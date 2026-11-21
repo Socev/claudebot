@@ -238,6 +238,7 @@ COPY lees-of-weiger.js /app/release-bootstrap/lees-of-weiger.js
 COPY docs-delen.js /app/release-bootstrap/docs-delen.js
 COPY zoek-snel.js /app/release-bootstrap/zoek-snel.js
 COPY zoek-overal.js /app/release-bootstrap/zoek-overal.js
+COPY zoek-snel-leer.js /app/release-bootstrap/zoek-snel-leer.js
 COPY jev-pod.js /app/release-bootstrap/jev-pod.js
 COPY gezondheid-app.js /app/release-bootstrap/gezondheid-app.js
 COPY financien-vault.js /app/release-bootstrap/financien-vault.js

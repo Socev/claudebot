@@ -6129,7 +6129,8 @@ APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij 
 ['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2717: zelf corrigeren = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel/treffers');   // wv3682: de treffers vóór het antwoord = David die typt
-APP_GLIJD_ROUTES.add('POST /app/zoek-snel/overal');   // wv3742: de andere bronnen tegelijk met de treffers = David die typt
+APP_GLIJD_ROUTES.add('POST /app/zoek-snel/overal');
+APP_GLIJD_ROUTES.add('POST /app/zoek-snel/gekozen');   // wv3743: een tik op een waarde = David die iets doet   // wv3742: de andere bronnen tegelijk met de treffers = David die typt
 ['laad', 'bewerk', 'nieuw', 'vergelijk', 'uitbreiden', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/uitbreiden', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze', 'past'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv3755: past   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag', 'medisch'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
@@ -6316,7 +6317,7 @@ function appBeheerVanafVast(route, a, d) {
 // voor het doorgeefluik (intern, doorgeefSchoon) en de vaste-plekschakelaar van Second Brain/Docs/Zoek snel (wv1901).
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], docs: [], managers: [], 'zoek-snel': [], 'zoek-snel-treffers': [], 'zoek-snel-overal': [], mediatheek: [], 'mediatheek-bestand': [], ghawa: [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], docs: [], managers: [], 'zoek-snel': [], 'zoek-snel-treffers': [], 'zoek-snel-overal': [], 'zoek-snel-gekozen': [], mediatheek: [], 'mediatheek-bestand': [], ghawa: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -13569,6 +13570,20 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   // geen tekst. De keuze telt bij de start en gaat terug als de druk vervalt.
   let hr = null;
   try { hr = !pot && !bs && !ib && !ov && !ss && typeof herinneringen !== 'undefined' && herinneringen ? herinneringen.knop(p.sleutel, keuze) : null; } catch (e) { logError('ramble-knop', e); hr = null; }
+  // wv3743: de weekkaart van Zoek snel ("N antwoorden uit Zoek snel — voortaan meteen?"). Alleen uit de eigen, bevroren lijst; de keuze telt bij de
+  // start en gaat terug als de druk vervalt (zoals de markerkaart hierboven). Socev krijgt geen waarden.
+  let zl = null;
+  try { zl = !pot && !bs && !ib && !ov && !ss && !hr && typeof zoekSnelLeer !== 'undefined' && zoekSnelLeer ? zoekSnelLeer.knop(p.sleutel, keuze, d.toelichting) : null; } catch (e) { logError('zoek-snel-leer-knop', e); zl = null; }
+  if (zl) {
+    const zlStart = bijStart;
+    const knopZl = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
+      { tekst: tekst, bericht: bericht, inhoudHash: inhoudHash, context: context + zl.context, gevoelig: k.gevoelig,
+        bijStart: function (kz, g) { try { zl.bijStart(); } catch (e) { logError('zoek-snel-leer-knop', e); } return zlStart(kz, g); },
+        bijVerval: function () { try { zl.bijVerval(); } catch (e) { logError('zoek-snel-leer-knop', e); } } });
+    await knopZl;
+    if (res._app) res._app.reden = 'voor-jou knop #' + id + ' zoek-snel-leer ' + (res._app.reden || '');
+    return;
+  }
   if (hr) {
     const hrStart = bijStart;
     const knopHr = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
@@ -16134,6 +16149,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/zoek') return appZoek(req, res, a, d);   // wv350
         if (route === 'POST /app/zoek-snel') return typeof appZoekSnel === 'function' ? appZoekSnel(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'zoek-snel');   // wv1252
         if (route === 'POST /app/zoek-snel/treffers') return typeof appZoekSnelTreffers === 'function' ? appZoekSnelTreffers(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'zoek-snel treffers');   // wv3682
+        if (route === 'POST /app/zoek-snel/gekozen') return typeof appZoekSnelGekozen === 'function' ? appZoekSnelGekozen(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'zoek-snel gekozen');   // wv3743
         if (route === 'POST /app/zoek-snel/overal') return typeof appZoekSnelOveral === 'function' ? appZoekSnelOveral(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'zoek-snel overal');   // wv3742
         if (route === 'GET /app/broedstoof') return appBroedstoof(req, res, a);   // wv891: apparaat (privé-kaart op een vaste plek)
         if (route === 'GET /app/briefing') return appBriefingRoute(req, res, a);   // wv891
@@ -22575,6 +22591,7 @@ async function ovisBiblioRonde(t, s) {
   if ((b.nieuw_box != null ? b.nieuw_box : b.nieuw) > 0) ovisBoxRij(OVIS_MOD.boxRij(b, t.klok));   // wv1009: wat de Voor jou-ronde zelf rechtzet niet in de box
   ovisLoopt.nu = 'kaarten';
   try { await ovisKaartenZet(['kritiek', 'bundel', 'biblio', 'feit']); } catch (e) { logError('ovis-kaarten', e); }   // wv1253; wv1789: + feitkaart
+  try { const zk = await zoekSnelLeerKaart(); if (zk) ovisStaatZet({ zoek_leer_kaart: Object.assign({ t: new Date().toISOString() }, zk) }); } catch (e) { logError('zoek-snel-leer-kaart', e); }   // wv3743
   try { const pk = await ovisPotKaarten(b); if (pk) ovisStaatZet({ pot_kaarten: Object.assign({ t: new Date().toISOString() }, pk) }); } catch (e) { logError('ovis-pot-kaart', e); }   // wv981
   try { const fk = await ovisFinKaarten(b); if (fk) ovisStaatZet({ fin_kaarten: Object.assign({ t: new Date().toISOString() }, fk) }); } catch (e) { logError('ovis-fin-kaart', e); }   // wv1012
   return { ok: true, open: b.open, nieuw: b.nieuw };
@@ -27866,11 +27883,72 @@ const zoekSnel = (function () {
         return vaultzoek.rauw(vraag, 15);
       },
       feitenStempel: ZOEK_SNEL_STEMPEL,
+      // wv3743 (nr 472 = 3C172): laag 0 = wat David koos en op de Zoek snel-kaart bevestigde (zoek-snel-leer.js; anker nagekeken in zoek-snel.js)
+      geleerd: function (vraag) { return zoekSnelLeer ? zoekSnelLeer.geleerd(vraag) : null; },
+      geleerdWeg: function (id) { if (zoekSnelLeer) zoekSnelLeer.weg(id); },
       verouderd: function (laag) { if (typeof zoekOverdagVraag === 'function') zoekOverdagVraag(laag); } });   // wv3734: index en feitenlijst meteen opnieuw (begrensd)
     z.queryRunVan = m.queryRunVan;
     return z;
   } catch (e) { logError('zoek-snel', e); return null; }
 })();
+// wv3743 (besluitenpagina nr 472 = 3C172, David Ja 21-11 13:20): Zoek snel leert van wat David kopieert. Logica en waarom in zoek-snel-leer.js;
+// ontwerp + Codex-review (r1/r2 NO-GO verwerkt, r3 GO): mk-scripts/wv3743/ontwerp.md. Hier de koppeling: POST /app/zoek-snel/gekozen (de tik
+// op een waarde-chip; de pod neemt vraag, waarde en bron uit zijn EIGEN antwoord van die zoek_id), de weekkaart in de OVIS-kaartenronde
+// (02:31, naast de feitkaart) en de knop op die kaart (appVoorJouKnop). Opslag alleen op de pod (APP_DATA/zoek-snel-geleerd.json, 0600);
+// api.log en /health alleen aantallen. Ontbreekt zoek-snel-leer.js in de release, dan 404 op de route en geen laag 0.
+const ZOEK_SNEL_GELEERD = process.env.ZOEK_SNEL_GELEERD || path.join(APP_DATA, 'zoek-snel-geleerd.json');
+const zoekSnelLeer = (function () {
+  const p = path.join(__dirname, 'zoek-snel-leer.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ bestand: ZOEK_SNEL_GELEERD, fout: logError,
+      eruitUit: function (t, n) { return typeof OVIS_MOD !== 'undefined' && OVIS_MOD && typeof OVIS_MOD.eruitUit === 'function' ? OVIS_MOD.eruitUit(t, n) : null; } });
+  } catch (e) { logError('zoek-snel-leer', e); return null; }
+})();
+async function appZoekSnelGekozen(req, res, a, d) {
+  if (!zoekSnel || !zoekSnelLeer || typeof zoekSnel.bronAnker !== 'function') return appWeiger(res, 404, 'Zoek snel leert niet in deze versie van de pod', 'zoek-snel gekozen ontbreekt');
+  if (!zoekSnelAan()) { res._app.reden = 'zoek-snel uit'; return appStuur(res, 409, { ok: false, uit: true, fout: 'Zoek snel staat uit' }); }
+  const id = String(d.zoek_id || '');
+  if (!APP_JOB_RE.test(id)) return appWeiger(res, 400, 'zoek_id ontbreekt', 'zoek-snel gekozen id');
+  const i = Number(d.i);
+  if (!Number.isInteger(i) || i < 0 || i > 19) return appWeiger(res, 400, 'waarde ontbreekt', 'zoek-snel gekozen i');
+  if (!appTeller('zoek-snel-gekozen', 2 * ZOEK_SNEL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens zoek-snel gekozen');
+  const e = appStaat.zoekSnel && appStaat.zoekSnel.ids[id];
+  if (!e || e.apparaat !== a.id || Date.now() - e.t > ZOEK_SNEL_HERHAAL_MS) { res._app.reden = 'zoek-snel gekozen onbekend'; return appStuur(res, 200, { ok: true, geleerd: false, reden: 'onbekend' }); }
+  let r = null;
+  try { r = await e.p; } catch (err) { r = null; }
+  const j = r && r.j, w = j && Array.isArray(j.waarden) ? j.waarden[i] : null;
+  if (!j || !j.ok || j.soort !== 'antwoord' || !w || typeof w.waarde !== 'string') { res._app.reden = 'zoek-snel gekozen geen waarde'; return appStuur(res, 200, { ok: true, geleerd: false, reden: 'geen waarde' }); }
+  let pad = null, anker = null;
+  for (const b of (Array.isArray(j.bronnen) ? j.bronnen : [])) {
+    if (!b || typeof b.pad !== 'string' || b.link || b.app) continue;
+    const an = zoekSnel.bronAnker(b.pad, w.waarde);
+    if (an) { pad = b.pad; anker = an; break; }
+  }
+  let u;
+  if (!anker) u = { ok: false, reden: 'niet op de bronpagina' };
+  else {
+    try { u = zoekSnelLeer.gekozen({ vraag: e.vraag, waarde: w.waarde, label: w.label, pad: pad, laag: j.laag, soort: j.soort, anker: anker }); }
+    catch (err) { logError('zoek-snel-leer', err); return appStuur(res, 500, { ok: false, fout: 'fout op de pod' }); }
+  }
+  res._app.reden = 'zoek-snel gekozen ' + (u.ok ? u.status : u.reden);
+  return appStuur(res, 200, { ok: true, geleerd: !!u.ok, reden: u.ok ? undefined : u.reden });
+}
+// De weekkaart (OVIS-kaartenronde 02:31). Eén per ISO-week, alleen als er iets te leren viel; status uit Voor jou voor een kaart die nog open staat.
+async function zoekSnelLeerKaart() {
+  if (!zoekSnelLeer) return null;
+  const lijst = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
+  const status = {};
+  ((lijst && lijst.punten) || []).forEach(function (x) { status[x.sleutel] = x.status; });
+  const k = zoekSnelLeer.kaart(status);
+  if (!k.kaart) return { reden: k.reden };
+  const r = await appSbRpc('mk_voor_jou_zet', { p: k.kaart });
+  appStaat.vjCache = null;
+  if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet');
+  zoekSnelLeer.kaartGezet(k.bevries);
+  schrijfLog(nu() + ' zoek-snel-leer kaart ' + velden({ sleutel: k.bevries.sleutel, stappen: k.bevries.stappen.length }));
+  return { gezet: k.bevries.sleutel, stappen: k.bevries.stappen.length };
+}
 function zoekSnelAan() {
   try { const j = JSON.parse(fs.readFileSync(ZOEK_SNEL_SCHAKELAAR, 'utf8')); return !!(j && j.aan === true); } catch (e) { return false; }
 }
@@ -27878,7 +27956,8 @@ function zoekSnelInfo() {
   const l = appStaat.zoekSnelLaatst || null;
   return { aan: !!zoekSnel && zoekSnelAan(), module: !!zoekSnel, schakelaar: zoekSnelAan(), laatste: l ? { t: l.t, uitkomst: l.uitkomst, ms: l.ms, laag: l.laag || null } : null,
     index_leeftijd_u: zoekSnelIndexLeeftijdU(),   // wv1788: laag van de laatste vraag en leeftijd van de tekstindex (geen inhoud)
-    overdag: typeof zoekOverdag !== 'undefined' ? { aan: zoekOverdag.aan, loopt: zoekOverdag.loopt, laatste: zoekOverdag.laatste } : undefined };   // wv3734
+    overdag: typeof zoekOverdag !== 'undefined' ? { aan: zoekOverdag.aan, loopt: zoekOverdag.loopt, laatste: zoekOverdag.laatste } : undefined,   // wv3734
+    leer: zoekSnelLeer ? zoekSnelLeer.info() : undefined };   // wv3743: alleen aantallen
 }
 // wv1788: per laag alleen getallen, booleans en korte standen (geen soorten-, reden- of inhoudstekst) voor het app-log.
 function zoekSnelLagenTelling(l) {
@@ -28004,7 +28083,7 @@ async function appZoekSnel(req, res, a, d) {
   if (!appTeller('zoek-snel', ZOEK_SNEL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + ZOEK_SNEL_PER_UUR + ')', 'grens zoek-snel');
   st.bezig[a.id] = true;
   const p = zoekSnelVoer(a, id, vraag, d.toon_dekking === true).catch(function (e) { logError('zoek-snel', e); return { status: 500, j: { ok: false, fout: 'fout op de pod' } }; });
-  st.ids[id] = { t: nu, apparaat: a.id, p: p };
+  st.ids[id] = { t: nu, apparaat: a.id, p: p, vraag: vraag };   // wv3743: vraag voor POST /app/zoek-snel/gekozen
   let r;
   try { r = await p; } finally { delete st.bezig[a.id]; }
   res._app.reden = 'zoek-snel ' + String(r.j && r.j.soort || r.status) + ' ' + String(r.j && r.j.ms || 0) + ' ms';

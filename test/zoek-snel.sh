@@ -704,7 +704,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   const SCH = path.join(W, 'zoek-snel.json');
   const log = [], chatlog = [];
   let modelVan = null, modelN = 0;
-  const appStaat = { tellers: { 'zoek-snel': [], 'zoek-snel-treffers': [], 'zoek-snel-overal': [] } };
+  const appStaat = { tellers: { 'zoek-snel': [], 'zoek-snel-treffers': [], 'zoek-snel-overal': [], 'zoek-snel-gekozen': [] } };
   const st = function () { return { _app: {}, status: null, j: null }; };
   const eenRegel = new Function('appOntmasker', 'return ' + /function appEenRegel\(t, max\) \{[\s\S]*?\n\}/.exec(src)[0])(
     new Function('return ' + /function appOntmasker\(t, merk\) \{[\s\S]*?\n\}/.exec(src)[0])());
@@ -722,7 +722,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     appSchrijfJson: (f, d) => fs.writeFileSync(f, JSON.stringify(d)),
     appEenRegel: eenRegel, appTijdKort: (ms) => new Date(ms).toISOString().slice(11, 16),
     harvesterClaude: async (sys, prompt, schema, o) => { modelN++; if (o.timeoutMs !== 20000) return { ok: false, fout: 'time-out niet 20 s' }; return modelVan ? modelVan(prompt, schema) : { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }; } });
-  vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, appZoekSnelTreffers, appZoekSnelOveral, zoekOveral, zoekSnelStaart, zoekSnelTot, zoekSnelInfo, zoekSnelAan, zoekSnel };', ctx, { filename: 'server.js#zoek-snel' });
+  vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, appZoekSnelTreffers, appZoekSnelOveral, appZoekSnelGekozen, zoekSnelLeer, zoekSnelLeerKaart, zoekOveral, zoekSnelStaart, zoekSnelTot, zoekSnelInfo, zoekSnelAan, zoekSnel };', ctx, { filename: 'server.js#zoek-snel' });
   const S = ctx.__z;
   toets('6 module geladen', !!S.zoekSnel);
   const A = { id: 'pixel', soort: 'mee' }, A2 = { id: 'laptop', soort: 'mee' };
@@ -755,6 +755,50 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   toets('6 herhaling na afloop: zelfde antwoord, geen aanroep', res.j.al === true && modelN === 1 && res.j.soort === 'antwoord');
   res = await roep(A2, { tekst: 'Wat is het btw-nummer van Tolgaarde', zoek_id: id('3') });
   toets('6 zelfde zoek_id van een ander apparaat: 409', res.status === 409);
+  // ── 15. wv3743 (nr 472 = 3C172): een tik op een waarde-chip = voorstel; alles uit het eigen antwoord van de pod ──
+  const roepG = async (a, d) => { const r0 = st(); await S.appZoekSnelGekozen({}, r0, a, d); return r0; };
+  res = await roepG(A, { zoek_id: id('3'), i: 0 });
+  toets('15 tik op een waarde: voorstel', res.status === 200 && res.j.geleerd === true, res);
+  const GL = JSON.parse(fs.readFileSync(path.join(AD, 'zoek-snel-geleerd.json'), 'utf8'));
+  toets('15 paar: vraag, waarde, pagina en anker uit het eigen antwoord', GL.paren.length === 1 && GL.paren[0].waarden[0].waarde === 'NL863125190B01' && GL.paren[0].pad === B &&
+    /NL863125190B01/.test(GL.paren[0].waarden[0].anker.regel) && GL.paren[0].vraag === 'Wat is het btw-nummer van Tolgaarde' && GL.paren[0].status === 'voorgesteld', GL);
+  toets('15 opslag 0600', (fs.statSync(path.join(AD, 'zoek-snel-geleerd.json')).mode & 0o777) === 0o600);
+  res = await roepG(A2, { zoek_id: id('3'), i: 0 });
+  toets('15 ander apparaat: niets geleerd', res.status === 200 && res.j.geleerd === false && res.j.reden === 'onbekend', res);
+  res = await roepG(A, { zoek_id: id('3'), i: 4 });
+  toets('15 waarde die niet in het antwoord stond: niets', res.j.geleerd === false && res.j.reden === 'geen waarde', res);
+  res = await roepG(A, { zoek_id: id('8'), i: 0 });
+  toets('15 onbekende zoek_id: niets', res.j.geleerd === false && res.j.reden === 'onbekend', res);
+  res = await roepG(A, { zoek_id: 'kort', i: 0 });
+  toets('15 zoek_id verplicht', res.status === 400);
+  res = await roepG(A, { zoek_id: id('3'), i: 'x' });
+  toets('15 i verplicht', res.status === 400);
+  toets('15 health: leer met alleen aantallen', JSON.stringify(S.zoekSnelInfo().leer) === JSON.stringify({ paren: 1, per_status: { voorgesteld: 1 }, kaarten: 0 }), S.zoekSnelInfo().leer);
+  fs.writeFileSync(SCH, '{"aan": false}');
+  res = await roepG(A, { zoek_id: id('3'), i: 0 });
+  toets('15 schakelaar uit: 409', res.status === 409);
+  fs.writeFileSync(SCH, '{"aan": true}');
+  // weekkaart (stub voor Voor jou) → Ja → dezelfde vraag uit laag 0, zonder model
+  const vj = [];
+  ctx.appSbRpc = async (fn, body) => { vj.push({ fn, body }); if (fn === 'mk_voor_jou_lijst') return { punten: [] }; if (fn === 'mk_voor_jou_zet') return { sleutel: body.p.sleutel }; return null; };
+  ctx.schrijfLog = () => {}; ctx.velden = () => ''; ctx.nu = () => '';
+  const zk = await S.zoekSnelLeerKaart();
+  const kaartP = (vj.find((x) => x.fn === 'mk_voor_jou_zet') || {}).body;
+  toets('15 weekkaart gezet: besluit, 1 stap + 3 knopregels, vraag en waarde zichtbaar', zk && zk.stappen === 1 && kaartP && kaartP.p.soort === 'besluit' && kaartP.p.stappen.length === 4 &&
+    /"Wat is het btw-nummer van Tolgaarde" → BTW-nummer: NL863125190B01 \(index\)/.test(kaartP.p.stappen[0]), { zk, kaartP });
+  toets('15 weekkaart: tweede ronde dezelfde week zet niets', (await S.zoekSnelLeerKaart()).reden === 'deze week al een kaart');
+  const kj = S.zoekSnelLeer.knop(zk.gezet, 'ja', '');
+  kj.bijStart();
+  const regels15 = fs.readFileSync(path.join(AD, 'zoek-snel-regels.json'), 'utf8');
+  modelN = 0;
+  const t15 = Date.now();
+  res = await roep(A, { tekst: 'btw-nummer Tolgaarde?', zoek_id: id('d') });
+  const ms15 = Date.now() - t15;
+  toets('15 na Ja: dezelfde vraag uit laag 0, zonder model, < 200 ms', res.status === 200 && res.j.laag === 'geleerd' && modelN === 0 && res.j.waarden[0].waarde === 'NL863125190B01' && ms15 < 200, { j: res.j, modelN, ms15 });
+  console.log('  (15: na Ja beantwoord in ' + ms15 + ' ms)');
+  toets('15 na Ja: conclusie "Onthouden antwoord"', /^Onthouden antwoord/.test(res.j.conclusie || ''), res.j.conclusie);
+  fs.rmSync(path.join(AD, 'zoek-snel-geleerd.json'));   // de rest van de toets zoals vóór wv3743
+  fs.writeFileSync(path.join(AD, 'zoek-snel-regels.json'), regels15);
   const lopend = roep(A, { tekst: 'Wat is het btw-nummer van Tolgaarde', zoek_id: id('4') });
   res = await roep(A, { tekst: 'Wat is het btw-nummer van Tolgaarde', zoek_id: id('5') });
   await lopend;

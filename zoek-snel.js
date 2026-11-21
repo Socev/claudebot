@@ -427,6 +427,7 @@ function dekkingRegel(l, metZoektocht) {
 function conclusieVan(r, l) {
   if (!r || !l || (r.soort !== 'antwoord' && r.soort !== 'geen') || r.reden === 'geen zoektermen' || r.reden === 'leeg') return null;
   let laag, volledig;
+  if (r.soort === 'antwoord' && r.laag === 'geleerd') return 'Onthouden antwoord' + (r.bevestigd_op ? ' (je zei Ja op ' + datumNl(new Date(r.bevestigd_op).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' })).replace(/^\S+ /, '') + ')' : '') + '.';   // wv3743
   if (r.soort === 'antwoord' && (r.laag === 'contacten' || r.laag === 'agenda')) {   // wv3733: de registerlaag telt met haar eigen tellingen
     const g = l[r.laag] || {};
     if (!g.afgekapt) return 'Alles bekeken.';
@@ -506,7 +507,8 @@ function queryRunVan(r, o) {
   const uitkomst = r.soort === 'antwoord' ? 'antwoord' : r.soort === 'fout' ? 'fout' : (ergensGrens || truncated ? 'onvolledig' : 'geen');
   const uit = { kanaal: 'zoek_snel', vraag_sha: o.sha, scope: { vast: false, wortels: WORTELS }, coverage: coverage,
     rows_matched: matched, rows_returned: returned, truncated: uitkomst !== 'geen' && !!(truncated || (uitkomst === 'onvolledig')), uitkomst: uitkomst,
-    bron_laag: laag === 'contacten' || laag === 'agenda' ? 'identifier' : laag, duur_ms: num(r.ms && r.ms.totaal),
+    bron_laag: laag === 'contacten' || laag === 'agenda' || laag === 'geleerd' ? 'identifier' : laag,   // wv3743: geleerd = zonder model, zoals de feitenlijst
+    duur_ms: num(r.ms && r.ms.totaal),
     // gemist = laag 1 vond niets en laag 2/3 wel een antwoord (ontwerp § 4: leerbron voor de nachtronde)
     gemist: r.soort === 'antwoord' && (laag === 'tekstindex' || laag === 'volledig') && !!f && f.stand === 'ok' && !f.totaal };
   if (o.metVraag) {
@@ -541,6 +543,9 @@ function maak(opt) {
   const contactenFn = typeof opt.contacten === 'function' ? opt.contacten : null;
   const agendaFn = typeof opt.agenda === 'function' ? opt.agenda : null;
   const betekenisFn = typeof opt.betekenis === 'function' ? opt.betekenis : null;
+  // wv3743: laag 0 = geleerd(vraag) → { id, waarden: [{ waarde, label, anker }], pad, bevestigd_op } | null; geleerdWeg(id) als het anker niet meer klopt
+  const geleerdFn = typeof opt.geleerd === 'function' ? opt.geleerd : null;
+  const geleerdWegFn = typeof opt.geleerdWeg === 'function' ? opt.geleerdWeg : null;
   let wl = null;   // { m, groepen }
 
   function woordenlijst() {
@@ -681,6 +686,73 @@ function maak(opt) {
     }
     if (i < 0) return null;
     return { nr: i + 1, regel: kort(masker(lijnen[i].replace(/\r$/, '')), gr || []) };
+  }
+  // ── wv3743 (nr 472 = 3C172): het bronanker van een waarde die David koos, en de toets of het nog klopt (Codex r1 MOET 2) ──
+  // Anker = de regel op de bronpagina waarop de waarde letterlijk staat + de dichtstbijzijnde kop erboven (de entiteit of het veld). Een regel
+  // met "voorgesteld", een sleutelwoord of een eindwoord (vorige, oud, vervallen …) is nooit een anker.
+  function paginaLijnen(pad) {
+    if (!PAD_OK(pad)) return null;
+    const t = leesPagina(pad);
+    if (!t) return null;
+    const lijnen = t.split(/\r?\n/).map(function (r) { return r.replace(/\r$/, ''); });
+    let fm = 0;
+    if (lijnen[0] === '---') { const e = lijnen.indexOf('---', 1); fm = e > 0 ? e + 1 : 0; }
+    return { lijnen: lijnen, fm: fm };
+  }
+  // r2 MOET 1: de hele koppenstructuur boven de regel (## Organisatie › ### IBAN), niet alleen de dichtstbijzijnde kop
+  const kopBoven = function (lijnen, k, fm) {
+    const pad = []; let niveau = 7;
+    for (let j = k - 1; j >= fm && niveau > 1; j--) {
+      const m = /^(#{1,6})\s/.exec(lijnen[j]);
+      if (m && m[1].length < niveau) { niveau = m[1].length; pad.unshift(lijnen[j].trim()); }
+    }
+    return pad.join(' › ');
+  };
+  const ankerRegelOk = function (r) { return !!r.trim() && !/voorgesteld/i.test(r) && !BLOK_DICHT.test(r) && !EINDWOORD.test(r); };
+  function bronAnker(pad, waarde) {
+    const p = paginaLijnen(pad), n = natNorm(waarde);
+    if (!p || n.length < 3) return null;
+    for (let k = p.fm; k < p.lijnen.length; k++) {
+      if (natNorm(p.lijnen[k]).indexOf(n) < 0) continue;
+      if (!ankerRegelOk(p.lijnen[k])) return null;   // de eerste regel met de waarde telt; is die twijfelachtig, dan geen voorstel
+      return { regel: p.lijnen[k].trim().slice(0, 400), kop: kopBoven(p.lijnen, k, p.fm).slice(0, 600), nr: k + 1 };
+    }
+    return null;
+  }
+  // Klopt elk anker nog: dezelfde regel (letterlijk) onder dezelfde kop, met de waarde erin? → { nr } van het eerste anker, of null.
+  function ankerKlopt(pad, waarden) {
+    const p = paginaLijnen(pad);
+    if (!p || !Array.isArray(waarden) || !waarden.length) return null;
+    let eerste = null;
+    for (const w of waarden) {
+      const a = w && w.anker, n = natNorm(w && w.waarde);
+      if (!a || !a.regel || n.length < 3) return null;
+      let hit = -1;
+      for (let k = p.fm; k < p.lijnen.length; k++) {
+        if (p.lijnen[k].trim() !== a.regel) continue;
+        if (kopBoven(p.lijnen, k, p.fm).slice(0, 600) !== (a.kop || '')) continue;
+        if (natNorm(p.lijnen[k]).indexOf(n) < 0 || !ankerRegelOk(p.lijnen[k])) continue;
+        hit = k; break;
+      }
+      if (hit < 0) return null;
+      if (eerste === null) eerste = { nr: hit + 1, regel: kort(masker(p.lijnen[hit]), []) };
+    }
+    return eerste;
+  }
+  // Laag 0: een door David bevestigd antwoord (zoek-snel-leer.js), alleen als de ankers nog kloppen; anders vergeten en gewoon zoeken.
+  function laagGeleerd(vraag) {
+    if (!geleerdFn) return null;
+    let g = null;
+    try { g = geleerdFn(vraag); } catch (e) { fout('zoek-snel-leer', e); return null; }
+    if (!g || !g.pad) return null;
+    const t0 = nu();
+    const a = ankerKlopt(g.pad, g.waarden);
+    if (!a) { try { if (geleerdWegFn) geleerdWegFn(g.id); } catch (e) { fout('zoek-snel-leer', e); } return { weg: true, ms: nu() - t0 }; }
+    const waarden = g.waarden.map(function (w) { return { label: w.label || '', waarde: masker(w.waarde) }; });
+    const tekst = waarden.map(function (w) { return (w.label ? w.label + ': ' : '') + w.waarde; }).join(' · ');
+    const naam = path.basename(g.pad, '.md');
+    return { ms: nu() - t0, uit: { tekst: tekst, waarden: waarden, bronnen: [{ pad: g.pad, naam: naam, nr: a.nr, regel: a.regel }],
+      bevestigd_op: g.bevestigd_op || null } };
   }
   const raakt = function (tekst, g) {
     const l = String(tekst).toLowerCase();
@@ -1241,6 +1313,11 @@ function maak(opt) {
     gr.forEach(function (g) { g.gelezen.forEach(function (x) { if (!gelezen.some(function (y) { return y.naam === x.naam; })) gelezen.push(x); }); });
     const gelezenUit = gelezen.map(function (x) { return { term: x.term, naam: x.naam }; });
 
+    // ── wv3743 (nr 472 = 3C172): laag 0 — een antwoord dat David koos en op de Zoek snel-kaart bevestigde (anker nagekeken) ──
+    const l0 = laagGeleerd(vraag);
+    if (l0) { ms.geleerd = l0.ms;
+      if (l0.uit) return uit('antwoord', { laag: 'geleerd', tekst: l0.uit.tekst, tekst_kaal: l0.uit.tekst, waarden: l0.uit.waarden, bronnen: l0.uit.bronnen,
+        melding: null, gelezen_als: gelezenUit, bevestigd_op: l0.uit.bevestigd_op, regel_los: 'De regel op de bronpagina is net nagekeken.' }); }
     // ── wv3733 (nr 354 = 3C54): registerlaag — "nummer/mailadres/adres van X" uit Contacten, "wanneer is …" uit de agenda (zonder model) ──
     const iv = registerVraag(vraag);
     const reg = iv && iv.soort === 'contact' && contactenFn ? await laagContact(iv) : iv && iv.soort === 'agenda' && agendaFn ? await laagAgenda(iv) : null;
@@ -1391,7 +1468,8 @@ function maak(opt) {
     return { stand: 'ok', treffers: uitLijst, paginas: lijst.length, afgekapt: !!gv.afgekapt || undefined, onleesbaar: !!gv.onleesbaar || undefined, ms: nu() - t0 };
   }
 
-  return { zoek: zoek, groepen: groepen, context: context, grep: grep, laag1: laag1, indexZoek: indexZoek, treffers: treffers, zoekwoorden: zoekwoorden };
+  return { zoek: zoek, groepen: groepen, context: context, grep: grep, laag1: laag1, indexZoek: indexZoek, treffers: treffers, zoekwoorden: zoekwoorden,
+    bronAnker: bronAnker, ankerKlopt: ankerKlopt };   // wv3743
 }
 
 module.exports = { maak: maak, registerVraag: registerVraag, contactWaarden: contactWaarden, alleWoorden: alleWoorden, termenUit: termenUit, natoets: natoets, natNorm: natNorm, harde: harde, woordenlijstGroepen: woordenlijstGroepen,
