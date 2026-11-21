@@ -583,6 +583,68 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     const g6 = await sg3.app('POST /app/secondbrain/zoek', { q: 'Tolgarde', soorten: [] }, {});
     toets('14 index faalt of geeft niets: gewoon zonder (200, leeg)', g5.status === 200 && g5.j.treffers.length === 0 && g6.status === 200 && g6.j.treffers.length === 0, [g5, g6]); }
 
+  // ── 15. wv3717 (3C205): "Wat speelt" — deadlines ≤ 14 d, vannacht vastgelegd (dagverslag), bronverkeer deze week; alle namen verzonnen ──
+  { const VW = path.join(W, 'vault-w');
+    const zw = (p, t) => { fs.mkdirSync(path.dirname(path.join(VW, p)), { recursive: true }); fs.writeFileSync(path.join(VW, p), t); };
+    const klokW = Date.UTC(2026, 10, 21, 9, 0);   // za 21-11-2026 10:00 Amsterdam
+    zw('10_Zakelijk/Tolgaarde/Proefcontract.md', '# a\n'); zw('10_Zakelijk/Tolgaarde/Proefrooster.md', '# b\n'); zw('20_Prive/Proefreis.md', '# c\n');
+    zw('10_Zakelijk/HAGRO/Proefoverleg.md', '# d\n'); zw('10_Zakelijk/Groenhouten/Proefpand.md', '# e\n'); zw('00_Systeem/Deadlines.md', '# dl\n');
+    zw('01_Ontwikkeling/Proefplan.md', '# f\n');
+    for (let i = 0; i < 25; i++) zw('20_Prive/Veel/Pagina ' + i + '.md', '# p\n');
+    zw('00_Systeem/Logboek/2026-11-20.md', '# Logboek\n## Besproken\n- [[10_Zakelijk/Groenhouten/Proefpand]] hoort hier niet\n## Vastgelegd\n' +
+      '- Getekend proefcontract → [[10_Zakelijk/Tolgaarde/Proefcontract]] en [[00_Systeem/Deadlines]]\n- Plan → [[01_Ontwikkeling/Proefplan]]\n' +
+      '- Reisje **bijgewerkt** → [[Proefreis|de reis]]\n- Gesprekspagina\'s: zonder link\n## Niet bewaard\n- [[10_Zakelijk/HAGRO/Proefoverleg]]\n');
+    zw('00_Systeem/Logboek/2026-11-19.md', '# oud\n## Vastgelegd\n- Oud → [[10_Zakelijk/HAGRO/Proefoverleg]]\n');
+    // bronverkeer: 3 gesprekken deze week naar Proefoverleg, 1 naar Proefrooster, 4 oude (buiten de week) naar Proefpand, 3 zonder datum
+    for (const d of ['2026-11-15', '2026-11-18', '2026-11-21']) zw('30_Conversaties/WhatsApp/Groep - ' + d + '.md', '[[Proefoverleg]] [[Proefoverleg]]' + (d === '2026-11-18' ? ' [[Proefrooster]]' : '') + '\n');
+    zw('30_Conversaties/WhatsApp/Groep - 2026-11-14.md', '[[Proefrooster]]\n'); zw('30_Conversaties/WhatsApp/Groep - 2026-11-22.md', '[[Proefrooster]]\n');   // net buiten de week, en morgen
+    for (const d of ['2026-11-01', '2026-11-02', '2026-11-03', '2026-11-14']) zw('10_Zakelijk/Groenhouten/Bronnen/GH - ' + d + ' - brief.md', '[[Proefpand]]\n');
+    for (let i = 0; i < 3; i++) zw('raw_input/zonder datum ' + i + '.md', '[[Proefpand]]\n');
+    zw('30_Conversaties/Teams/Kanaal - 2026-11-20.md', '[[00_Systeem/Deadlines]] [[Proefplan]]\n');
+    zw('30_Conversaties/Teams/Kanaal2 - 2026-11-20.md', '[[00_Systeem/Deadlines]] [[Proefplan]]\n');
+    zw('30_Conversaties/Teams/Kanaal3 - 2026-11-20.md', '[[00_Systeem/Deadlines]] [[Proefplan]]\n');
+    let dlW = [
+      { datum: '2026-11-21', dagen: 0, titel: 'Proefdeadline vandaag', bron: { pad: '10_Zakelijk/Tolgaarde/Proefcontract' } },
+      { datum: '2026-12-05', dagen: 14, titel: 'Proefdeadline grens', bron: { pad: 'Proefrooster' } },
+      { datum: '2026-12-06', dagen: 15, titel: 'Te laat', bron: { pad: '20_Prive/Proefreis' } },
+      { datum: '2026-11-20', dagen: -1, titel: 'Verlopen', bron: { pad: '20_Prive/Proefreis' } },
+      { datum: '2026-11-25', dagen: 4, titel: 'Systeem', bron: { pad: '00_Systeem/Deadlines' } },
+      { datum: '2026-11-26', dagen: 5, titel: 'Bestaat niet', bron: { pad: 'Nergens' } },
+      { datum: '2026-11-27', dagen: 6, titel: 'Tweede op dezelfde pagina', bron: { pad: 'Proefcontract' } },
+      { datum: '2026-11-28', dagen: 7, titel: 'In een bron', bron: { pad: '10_Zakelijk/Groenhouten/Bronnen/GH - 2026-11-01 - brief' } },
+    ];
+    const sw = S.maak({ vault: VW, dir: path.join(W, 'staat-w'), nu: () => klokW, deadlines: () => dlW });
+    const w1 = await sw.app('POST /app/secondbrain/vandaag', {}, {});
+    const pw = (p) => (w1.j.items.find((x) => x.p === p) || { redenen: [] }).redenen;
+    toets('15 status 200, dag en logboek van gisteren', w1.status === 200 && w1.j.dag === '2026-11-21' && w1.j.bronnen.logboek === '2026-11-20' && w1.j.bronnen.deadlines === 'ok', w1.j);
+    toets('15 deadline vandaag en precies over 14 dagen licht op, één reden per pagina (de vroegste)',
+      pw('10_Zakelijk/Tolgaarde/Proefcontract.md').filter((r) => r.soort === 'deadline').map((r) => r.tekst).join() === 'deadline vandaag: Proefdeadline vandaag' &&
+      /^deadline 5-12: Proefdeadline grens$/.test((pw('10_Zakelijk/Tolgaarde/Proefrooster.md').find((r) => r.soort === 'deadline') || {}).tekst), w1.j.items);
+    toets('15 geen deadline na 14 dagen, verlopen, in 00_Systeem, onbekend of in een bron', !pw('20_Prive/Proefreis.md').some((r) => r.soort === 'deadline') &&
+      !w1.j.items.some((x) => /^00_Systeem|Bronnen/.test(x.p)) && w1.j.tel.deadline === 2 && w1.j.totaal.deadline === 6, [w1.j.tel, w1.j.totaal]);
+    toets('15 nacht: alleen sectie Vastgelegd van gisteren, wat vóór de pijl, alias en 00/01 eruit',
+      pw('10_Zakelijk/Tolgaarde/Proefcontract.md').some((r) => r.tekst === 'vannacht bijgewerkt: Getekend proefcontract') &&
+      pw('20_Prive/Proefreis.md').some((r) => r.tekst === 'vannacht bijgewerkt: Reisje bijgewerkt') &&
+      !w1.j.items.some((x) => /Proefplan|Proefpand/.test(x.p)) && !pw('10_Zakelijk/HAGRO/Proefoverleg.md').some((r) => r.soort === 'nacht') && w1.j.tel.nacht === 2, w1.j.items);
+    toets('15 verkeer: 3 gesprekken deze week (dubbele link telt één keer), niet oud, niet zonder datum, drempel 3',
+      pw('10_Zakelijk/HAGRO/Proefoverleg.md').map((r) => r.tekst).join() === 'deze week in 3 bronnen en gesprekken genoemd' &&
+      !pw('10_Zakelijk/Tolgaarde/Proefrooster.md').some((r) => r.soort === 'verkeer') && !w1.j.items.some((x) => /Proefpand/.test(x.p)) && w1.j.tel.verkeer === 1, w1.j.items);
+    toets('15 elke pagina heeft een reden, domein mee', w1.j.items.length === 4 && w1.j.items.every((x) => x.redenen.length && typeof x.d === 'number' && x.d >= 0), w1.j.items);
+    // meer dan 20: deadlines gaan voor, hooguit 10 deadlines, totaal blijft eerlijk
+    dlW = Array.from({ length: 25 }, (_, i) => ({ datum: '2026-11-2' + (i % 9), dagen: i % 9, titel: 'Veel ' + i, bron: { pad: '20_Prive/Veel/Pagina ' + i } }));
+    fs.writeFileSync(path.join(VW, '00_Systeem/Deadlines.md'), '# dl gewijzigd\n');
+    const w2 = await sw.app('POST /app/secondbrain/vandaag', {}, {});
+    toets('15 plafond: 10 deadlines (vroegste eerst), totaal 25, hooguit 20 bolletjes', w2.j.tel.deadline === 10 && w2.j.totaal.deadline === 25 && w2.j.items.length <= 20 &&
+      w2.j.items.filter((x) => x.redenen[0].soort === 'deadline').every((x) => /deadline (vandaag|morgen|2[23]-11):/.test(x.redenen[0].tekst)), [w2.j.tel, w2.j.items.map((x) => x.redenen[0].tekst)]);
+    const sw2 = S.maak({ vault: VW, dir: path.join(W, 'staat-w2'), nu: () => klokW, deadlines: () => { throw new Error('register weg'); } });
+    const w3 = await sw2.app('POST /app/secondbrain/vandaag', {}, {});
+    toets('15 register onleesbaar: rest werkt, bron zegt het', w3.status === 200 && w3.j.tel.deadline === 0 && w3.j.tel.nacht === 2 && /niet te lezen/.test(w3.j.bronnen.deadlines), w3.j);
+    const sw3 = S.maak({ vault: VW, dir: path.join(W, 'staat-w3'), nu: () => klokW + 86400000 });   // zondag: geen logboek van za 21-11
+    const w4 = await sw3.app('POST /app/secondbrain/vandaag', {}, {});
+    toets('15 geen dagverslag van gisteren: geen nacht (niet terugvallen op eergisteren), geen deadlinebron', w4.status === 200 && w4.j.tel.nacht === 0 && w4.j.bronnen.logboek === null &&
+      w4.j.bronnen.deadlines === 'niet beschikbaar', w4.j); }
+  toets('15 server.js geeft de deadlines van Projecten mee', /deadlines: function \(\) \{ const p = appProjecten\(\); return p && Array\.isArray\(p\.deadlines\) \? p\.deadlines : null; \}/.test(fs.readFileSync('server.js', 'utf8')));
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

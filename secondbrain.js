@@ -956,6 +956,108 @@ function maak(opt) {
   }
   function koppelNaam(naam) { const m = koppel(); return m.get(normNaam(naam)) || null; }
 
+  // ── wv3717 (besluitenpagina nr 505 = 3C205, David Ja 21-11-2026 13:09; Fable-review brein-graaf idee 14): "Wat speelt" ──
+  // De laag van vandaag op de kaart: hooguit 20 pagina's die oplichten, elk met de reden(en) waarom. Drie bronnen, alle drie alleen lezen:
+  //  1. deadline: het deadline-register (00_Systeem/Deadlines.md, via opt.deadlines = de lezer van Projecten in server.js), deadlines
+  //     vandaag t/m over 14 dagen, op de pagina uit de kolom Bron (opgelost zoals een wikilink vanuit Deadlines.md);
+  //  2. nacht: het dagverslag van de nachtconsolidatie (00_Systeem/Logboek/<gisteren>.md, sectie "## Vastgelegd": "wat → [[pagina]]");
+  //     de mtime van de vault zelf is te ruis (linkcheck, dumps, herinrichting november), het verslag zegt wat Socev bewust vastlegde;
+  //  3. verkeer: hoeveel bronnen en gesprekken (verborgen deel van de kaart) met een datum van de laatste 7 dagen in de bestandsnaam naar
+  //     een pagina linken (de mtime van bronnen is door de herinrichting onbruikbaar; Fable-review idee 10). Vanaf 3, de drukste 4.
+  // Hooguit 10 + 6 + 4 = 20. `totaal` zegt hoeveel er in elke bron waren (meer deadlines dan er oplichten: de app zegt dat erbij).
+  // 00_Systeem en 01_Ontwikkeling lichten nooit op (techniek, geen onderwerp van David). Geen pagina zonder reden; bij meer dan 20 gaan
+  // deadlines voor, dan de nacht, dan het verkeer. Uitkomst per kaartbouw + dag in het geheugen (het register en het verslag op mtime).
+  const VANDAAG_MAX = 20, VANDAAG_DL_DAGEN = 14, VANDAAG_DL_MAX = 10, VANDAAG_NACHT_MAX = 6, VANDAAG_VERKEER_MAX = 4, VANDAAG_VERKEER_MIN = 3;
+  const BRONDATUM = /(20\d\d)-(\d\d)-(\d\d)/;
+  let vandaagCache = null;   // { sleutel, j }
+  const vandaagUit = function (p) { return /^(00_Systeem|01_Ontwikkeling)\//.test(p); };
+  const kortTekst = function (s, n) { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1).replace(/\s+\S*$/, '') + '…' : s; };
+  const platTekst = function (s) { return String(s || '').replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2').replace(/\[\[([^\]]+)\]\]/g, function (m, x) { return x.split('/').pop(); }).replace(/[*_`]/g, '').trim(); };
+  const dagNl = function (ymd) { return Number(ymd.slice(8, 10)) + '-' + Number(ymd.slice(5, 7)); };
+  function logboekPad(vandaagYmd) { return '00_Systeem/Logboek/' + herkomstDagMin(vandaagYmd, 1) + '.md'; }
+  function nachtRegels(k, vandaagYmd) {
+    const rel = logboekPad(vandaagYmd), uit = [];
+    let t;
+    try { t = fs.readFileSync(path.join(VAULT, rel), 'utf8'); } catch (e) { return { pad: null, regels: uit }; }
+    const sectie = t.split(/^## Vastgelegd\s*$/m)[1];
+    if (sectie === undefined) return { pad: rel, regels: uit };
+    sectie.split(/^## /m)[0].split(/\r?\n/).forEach(function (r) {
+      if (!/^\s*[-*] /.test(r)) return;
+      const ruw = r.replace(/^\s*[-*] /, ''), pijl = ruw.indexOf('→');
+      const wat = kortTekst(platTekst(pijl >= 0 ? ruw.slice(0, pijl) : ruw), 70);
+      linksIn(pijl >= 0 ? ruw.slice(pijl) : ruw).forEach(function (l) {
+        if (l.md || l.embed) return;
+        const lr = los(l.doel, rel, false, k);
+        if (lr && lr.i !== undefined) uit.push({ i: lr.i, wat: wat });
+      });
+    });
+    return { pad: rel, regels: uit };
+  }
+  function vandaag(ctx) {
+    const k = vers(false);
+    if (!k) return { status: 503, j: { ok: false, fout: 'de kaart is nu niet te bouwen' } };
+    const dag = herkomstDag(nu()), lb = logboekPad(dag);
+    const mt = function (rel) { try { return fs.statSync(path.join(VAULT, rel)).mtimeMs; } catch (e) { return 0; } };
+    let dl = null, dlFout = null;
+    try { dl = opt.deadlines ? opt.deadlines() : null; } catch (e) { dlFout = 'het deadline-register is nu niet te lezen'; fout('secondbrain-vandaag', e); }
+    const sleutel = [k.op, dag, mt(lb), mt('00_Systeem/Deadlines.md'), dl ? dl.length : -1].join('|');
+    if (vandaagCache && vandaagCache.sleutel === sleutel) return { status: 200, j: vandaagCache.j };
+    const per = new Map(), volg = [];
+    const telt = function (i) { const b = k.bestanden[i]; return b && !b.v && b.s === 'md' && !vandaagUit(b.p); };
+    const voeg = function (i, reden) {
+      let x = per.get(i);
+      if (!x) { if (volg.length >= VANDAAG_MAX) return false; x = { i: i, redenen: [] }; per.set(i, x); volg.push(x); }
+      if (!x.redenen.some(function (r) { return r.soort === reden.soort; })) x.redenen.push(reden);
+      return true;
+    };
+    // 1. deadlines (vandaag t/m 14 dagen), vroegste eerst; één reden per pagina (de vroegste)
+    let nDl = 0, totDl = 0;
+    if (Array.isArray(dl)) {
+      totDl = dl.filter(function (x) { return x && typeof x.dagen === 'number' && x.dagen >= 0 && x.dagen <= VANDAAG_DL_DAGEN; }).length;
+      dl.filter(function (x) { return x && typeof x.dagen === 'number' && x.dagen >= 0 && x.dagen <= VANDAAG_DL_DAGEN && x.bron && typeof x.bron.pad === 'string' && x.bron.pad; })
+        .sort(function (a, b) { return a.dagen - b.dagen; })
+        .forEach(function (x) {
+          if (nDl >= VANDAAG_DL_MAX) return;
+          const lr = los(x.bron.pad, '00_Systeem/Deadlines.md', false, k);
+          if (!lr || lr.i === undefined || !telt(lr.i) || (per.get(lr.i) && per.get(lr.i).redenen.some(function (r) { return r.soort === 'deadline'; }))) return;
+          const wanneer = x.dagen === 0 ? 'vandaag' : x.dagen === 1 ? 'morgen' : dagNl(x.datum);
+          if (voeg(lr.i, { soort: 'deadline', tekst: 'deadline ' + wanneer + ': ' + kortTekst(x.titel, 90), datum: x.datum })) nDl++;
+        });
+    }
+    // 2. vannacht vastgelegd (dagverslag van gisteren)
+    const nr = nachtRegels(k, dag);
+    let nNacht = 0;
+    nr.regels.forEach(function (x) {
+      if (nNacht >= VANDAAG_NACHT_MAX || !telt(x.i) || (per.get(x.i) && per.get(x.i).redenen.some(function (r) { return r.soort === 'nacht'; }))) return;
+      if (voeg(x.i, { soort: 'nacht', tekst: 'vannacht bijgewerkt' + (x.wat ? ': ' + x.wat : '') })) nNacht++;
+    });
+    // 3. bronverkeer deze week
+    const van = herkomstDagMin(dag, 6), tel = new Map();
+    k.bestanden.forEach(function (b) {
+      if (!b.v) return;
+      const m = BRONDATUM.exec(b.p.split('/').pop());
+      if (!m || m[0] < van || m[0] > dag) return;
+      const gezien = new Set();
+      for (const j of b.l) { if (gezien.has(j) || !telt(j)) continue; gezien.add(j); tel.set(j, (tel.get(j) || 0) + 1); }
+    });
+    let nVerkeer = 0;
+    Array.from(tel).filter(function (x) { return x[1] >= VANDAAG_VERKEER_MIN; })
+      .sort(function (a, b) { return b[1] - a[1] || (k.bestanden[a[0]].p < k.bestanden[b[0]].p ? -1 : 1); })
+      .forEach(function (x) {
+        if (nVerkeer >= VANDAAG_VERKEER_MAX) return;
+        if (voeg(x[0], { soort: 'verkeer', tekst: 'deze week in ' + x[1] + ' bronnen en gesprekken genoemd', n: x[1] })) nVerkeer++;
+      });
+    const items = volg.map(function (x) { const b = k.bestanden[x.i]; return { p: b.p, d: DOMEINEN.indexOf(b.d), redenen: x.redenen }; });
+    const tellen = function (s) { return items.filter(function (x) { return x.redenen.some(function (r) { return r.soort === s; }); }).length; };
+    const j = { ok: true, dag: dag, bijgewerkt: new Date(k.op).toISOString(), items: items,
+      tel: { deadline: tellen('deadline'), nacht: tellen('nacht'), verkeer: tellen('verkeer') },
+      totaal: { deadline: totDl, nacht: new Set(nr.regels.filter(function (x) { return telt(x.i); }).map(function (x) { return x.i; })).size,
+        verkeer: Array.from(tel.values()).filter(function (n) { return n >= VANDAAG_VERKEER_MIN; }).length },
+      bronnen: { deadlines: Array.isArray(dl) ? 'ok' : (dlFout || 'niet beschikbaar'), logboek: nr.pad ? nr.pad.split('/').pop().replace(/\.md$/, '') : null } };
+    vandaagCache = { sleutel: sleutel, j: j };
+    return { status: 200, j: j };
+  }
+
   function nacht(datum) {
     if (laatsteNacht === datum) return false;
     laatsteNacht = datum;
@@ -980,6 +1082,7 @@ function maak(opt) {
     ctx = ctx || {};
     if (route === 'GET /app/secondbrain') return kaartVoor(ctx, false);
     if (route === 'POST /app/secondbrain/kaart') return kaartVoor(ctx, !!(d && d.alles));
+    if (route === 'POST /app/secondbrain/vandaag') return vandaag(ctx);   // wv3717: "Wat speelt"
     if (route === 'POST /app/secondbrain/open') return open(d, ctx);
     if (route === 'POST /app/secondbrain/bestand') return bestand(d, ctx);
     if (route === 'POST /app/secondbrain/zoek') return zoek(d, ctx);

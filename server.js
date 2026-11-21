@@ -24941,6 +24941,8 @@ const secondbrain = (function () {
       },
       hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
       inhoud: brainTekst,   // wv3734: pdf en docx op inhoud
+      // wv3717 "Wat speelt": de deadlines zoals Projecten ze leest (Deadlines.md, gesloten rijen eruit, dagen vanaf vandaag); null = niet te lezen
+      deadlines: function () { const p = appProjecten(); return p && Array.isArray(p.deadlines) ? p.deadlines : null; },
       // wv3735 (3C122): typfouten vergeven via de tekstindex van Zoek snel (zoekindex.py, met de Woordenlijst); zoekSnel staat verderop in
       // dit bestand en bestaat pas bij de eerste zoekvraag. Index weg, ouder dan 48 u of fout = null (dan zonder).
       gelijkend: async function (q) {
