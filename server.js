@@ -29940,6 +29940,9 @@ async function nmbrsRondeDraai(opdracht, bron) {
       try { const v = await nmbrsVaultNa(false); u.vault = { ok: v.ok, dossiers: v.dossiers, verloop: v.verloop, gelijk: v.gelijk, ontbreekt: v.ontbreekt, fout: v.fout }; }   // wv2799
       catch (e) { logError('nmbrs-vault', e); }
     }
+    if (u.ok === true && opdracht === 'ronde') {   // wv3662: laadvergoeding (Nmbrs) naast de laadschatting (Tibber) op de energiepagina
+      try { const l = await nmbrsLaadNa(); u.laad = { ok: l.ok, blok: l.blok, signaal: l.signaal }; } catch (e) { logError('nmbrs-laad', e); }
+    }
     if (u.ok === true && opdracht === 'ronde') {   // wv3208: nieuwe POT-betaallijst → één melding in de app
       try { const b = await nmbrsBetaalNa(); u.betaal_gemeld = b.nieuw || 0; } catch (e) { logError('pot-loonrun', e); }
     }
@@ -29948,6 +29951,32 @@ async function nmbrsRondeDraai(opdracht, bron) {
     }
     return u;
   } finally { nmbrsRondeBezig = false; }
+}
+// wv3662 (David 21-11-2026, app-knop): Davids laadvergoeding als DGA (Nmbrs looncode 5122 van de Holding, nmbrs-data.js dgaRonde) naast de
+// laadschatting uit Tibber. Het kind rekent (nmbrs-laad.js); hier het blok op de energiepagina (alleen tussen bestaande markeringen) en bij
+// een NIEUW signaal (laatste drie volle maanden > 20 % verschil) één bericht in de machinekamer, per venster één keer (laad_signaal).
+const NMBRS_LAAD_PAGINA = path.join('20_Prive', 'Financien', 'Energieverbruik thuis (Tibber).md');
+async function nmbrsLaadNa() {
+  const s = await nmbrsKind('laad', { tibber: path.join(TIBBER_DIR, 'tibber.sqlite'), tijd: new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16) });
+  if (!s.j || s.j.ok !== true) return { ok: false, fout: s.j && s.j.fout ? String(s.j.fout).slice(0, 120) : 'laad-kind faalde' };
+  const uit = { ok: true, blok: 'gelijk', signaal: s.j.signaal_nieuw ? 'nieuw' : (s.j.vergelijk && s.j.vergelijk.signaal ? 'al gemeld' : 'geen') };
+  try {
+    const LA = require(path.join(__dirname, 'nmbrs-laad.js'));
+    const b = String(s.j.blok || '');
+    if (b.indexOf(LA.BLOK_BEGIN) !== 0 || b.length > 20000) uit.blok = 'geweigerd';
+    else if (VV().wijzig(path.join(VAULT, NMBRS_LAAD_PAGINA), function (t) { return LA.blokZet(t, b); }, { krimpGrens: true })) uit.blok = 'bijgewerkt';
+  } catch (e) { uit.blok = e && e.code === 'ENOENT' ? 'pagina ontbreekt' : 'fout'; if (uit.blok === 'fout') logError('nmbrs-laad-blok', e); }
+  if (s.j.signaal_nieuw && s.j.venster) {
+    const v = s.j.vergelijk || {}, eu = function (x) { return '€ ' + Number(x || 0).toFixed(2).replace('.', ','); };
+    const tekst = 'Nmbrs: laadvergoeding wijkt meer dan 20 % af van het geschatte thuisladen\n' +
+      '- ' + s.j.venster.replace('..', ' t/m ') + ': vergoed ' + eu(v.vergoed) + ' (Netto Vergoeding, Holding), geschat ' + eu(v.geschat) + ' (' + (v.afwijking_pct > 0 ? '+' : '') + v.afwijking_pct + ' %)\n' +
+      '- tabel per maand: energiepagina in de vault (§ Thuisladen); de schatting zat in mei/juni 5–15 % te hoog';
+    const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'nmbrs', klasse: 'normaal', tekst: tekst, sleutel: 'nmbrs-laad:' + s.j.venster });
+    if (r.status === 200) { await nmbrsKind('laadgemeld', { venster: s.j.venster }); uit.signaal = 'gemeld'; }
+    else { logError('nmbrs-laad', berichtFout(r)); uit.signaal = 'niet bezorgd'; }
+  }
+  schrijfLog(nu() + ' nmbrs ' + velden({ opdracht: 'laad', blok: uit.blok, signaal: uit.signaal }));
+  return uit;
 }
 // Na de ochtend-bankronde (bankRondeStart, los): één keer per dag, alleen vóór 12:00; zonder toestemming stil (geen netwerk).
 function nmbrsNaBankRonde() {
@@ -29992,6 +30021,11 @@ async function nmbrsSmal(d, wie) {
     if (nmbrsRondeBezig) return { status: 409, j: { ok: false, fout: 'er loopt een Nmbrs-ronde' } };
     const v = await nmbrsVaultNa(d.droog === true);
     return { status: v.ok ? 200 : 500, j: v };
+  }
+  if (opdracht === 'laad') {   // wv3662: blok laadvergoeding + signaal nu bijwerken (machinekamer)
+    if (nmbrsRondeBezig) return { status: 409, j: { ok: false, fout: 'er loopt een Nmbrs-ronde; probeer het straks' } };
+    const l = await nmbrsLaadNa();
+    return { status: l.ok ? 200 : 500, j: l };
   }
   if (opdracht === 'pot') {   // wv2800: de POT-koppeling nu draaien (machinekamer); zelfde schakelaar als na de ronde
     if (nmbrsRondeBezig) return { status: 409, j: { ok: false, fout: 'er loopt een Nmbrs-ronde; probeer het straks' } };

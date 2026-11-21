@@ -81,6 +81,9 @@ const DOC_PAD = PADEN_GET.findIndex(function (r) { return r.re.test('/api/docume
 const Q_VORM = { pageNumber: /^[1-9]\d{0,2}$/, pageSize: /^(100|[1-9]\d?)$/, year: /^20\d\d$/, period: /^([1-9]|[1-4]\d|5[0-3])$/, wageCodes: /^(9880|9900)$/ };
 const Q_HERHAAL = new Set(['wageCodes']);   // wv3232: mag vaker voorkomen (elke code één keer)
 const TAKEN = new Set();   // taskIds die dit proces zelf van journalsemployee of de run output kreeg
+// wv3662: de run output ZONDER looncodefilter alleen voor dit ene bedrijf (de Holding, precies één medewerker: de DGA), alleen zolang
+// dgaRonde het zet (per verzoek; daarna weer null). Elk ander bedrijf blijft op 9880/9900.
+let DGA_BEDRIJF = null;
 function verzoekToets(methode, url) {
   let u;
   try { u = new URL(url); } catch (e) { throw new NmbrsFout('pad', 'Nmbrs-adres niet toegestaan'); }
@@ -101,7 +104,8 @@ function verzoekToets(methode, url) {
     gezien.add(sl);
   }
   // review wv3232 ZOU 1: de run output alleen MET year en beide looncodes (zonder filter geeft Nmbrs alle looncomponenten van iedereen)
-  if (/\/wagecodes\/xml$/.test(u.pathname) && !(gezien.has('year') && gezien.has('wageCodes=9880') && gezien.has('wageCodes=9900'))) throw new NmbrsFout('pad', 'run output alleen met year en de looncodes 9880 en 9900');
+  const dgaVrij = DGA_BEDRIJF !== null && u.pathname.split('/')[3] === DGA_BEDRIJF && gezien.size === 1 && gezien.has('year');   // wv3662
+  if (/\/wagecodes\/xml$/.test(u.pathname) && !dgaVrij && !(gezien.has('year') && gezien.has('wageCodes=9880') && gezien.has('wageCodes=9900'))) throw new NmbrsFout('pad', 'run output alleen met year en de looncodes 9880 en 9900');
   return u.href;
 }
 function slaap(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
@@ -382,7 +386,11 @@ function db(dir) {
     'formaat text, aantal integer, totaal_centen integer, medewerkers_run integer, controle text, dbtr_iban text, sha text, gemeld text, gedownload text, gewijzigd text);' +
     // wv3228: wanneer een loonrun voor het eerst gezien, vergrendeld en voor medewerkers zichtbaar was (meting: komt locked op tijd?)
     'create table if not exists runstaat (run text primary key, bedrijf text not null, eerst text not null, locked_sinds text, zichtbaar_sinds text, documenten_sinds text);' +
-    'create table if not exists betaalregel (run text not null, volg integer not null, e2e text, naam text not null, iban text not null, centen integer not null, oms text, primary key (run, volg)) without rowid;');
+    'create table if not exists betaalregel (run text not null, volg integer not null, e2e text, naam text not null, iban text not null, centen integer not null, oms text, primary key (run, volg)) without rowid;' +
+    // wv3662: Davids eigen looncomponenten als DGA (Holding, één medewerker): per run de leesstand, per run/jaar/periode/looncode het bedrag
+    'create table if not exists dga_run (run text primary key, bedrijf text not null, status text not null, pogingen integer not null default 0, opgehaald text, definitief integer, aantal integer, fout text);' +
+    'create table if not exists laad_signaal (venster text primary key, eerst text not null, gemeld text);' +
+    'create table if not exists dga_regel (run text not null, jaar integer not null, periode integer not null, code integer not null, oms text not null, centen integer not null, primary key (run, jaar, periode, code)) without rowid;');
   try { fs.chmodSync(p, 0o600); } catch (e) {}
   return d;
 }
@@ -660,6 +668,114 @@ async function betaalRonde(L, d, cid, jaar, invoer, uit) {
     if (!ro.ok) (uit.betaal.vorm = uit.betaal.vorm || []).push(Object.assign({ nummer: Number(r.x.number) || null }, doc.vorm || {}));   // alleen de vorm, nooit inhoud
   }
 }
+// wv3662 (David 21-11-2026, app-knop): Davids EIGEN looncomponenten als DGA, om te beginnen de vergoeding voor thuisladen. Alleen het bedrijf
+// met entiteit HOLD, alleen als dat in deze ronde precies één medewerker heeft en dat dezelfde is als in de eigen kopie; dan de run output
+// zonder looncodefilter (alle codes van die ene persoon). Alleen de reports met precies dat employeeId worden bewaard; de rest valt weg.
+// Geen IBAN, geen andere medewerkers. Nieuwste ongelezen runs eerst, open (niet vergrendelde) runs elke ronde opnieuw tot ze vast staan.
+const DGA_PER_RONDE = 8;
+async function dgaRonde(L, d, cid, jaar, invoer, uit, werknemers) {
+  const ent = d.prepare('select entiteit from bedrijf_entiteit where bedrijf = ?').get(cid);
+  if (!ent || ent.entiteit !== 'HOLD') return;
+  uit.dga = { recht: invoer.doc === true, gelezen: 0, afgekeurd: 0, opnieuw: 0 };
+  if (invoer.doc !== true) return;
+  const ids = (Array.isArray(werknemers) ? werknemers : []).map(function (e) { return idVan(e && e.employeeId); });
+  const eigen = lid(d, 'select id from medewerker where bedrijf = ?', [cid]).map(function (m) { return m.id; });
+  if (ids.length !== 1 || !ids[0] || eigen.length !== 1 || eigen[0] !== ids[0]) { uit.dga.fout = 'niet precies één medewerker'; return; }
+  const dga = ids[0];
+  const kand = lid(d, 'select l.id, l.data, g.status, g.pogingen, g.definitief from loonrun l left join dga_run g on g.run = l.id where l.bedrijf = ?', [cid])
+    .map(function (r) { return { id: r.id, x: JSON.parse(r.data), g: r.status ? r : null }; })
+    // review wv3662 MOET 1: ook een afgekeurde run opnieuw zolang hij open is (Nmbrs kan hem nog herstellen)
+    .filter(function (r) { return r.x.year >= jaar - 1 && (!r.g || r.g.status === 'opnieuw' || ((r.g.status === 'ok' || r.g.status === 'afgekeurd') && r.g.definitief !== 1)); })
+    .sort(function (a, c) { const na = !a.g || a.g.status !== 'ok', nc = !c.g || c.g.status !== 'ok'; if (na !== nc) return na ? -1 : 1; return (c.x.year * 100 + (c.x.number || 0)) - (a.x.year * 100 + (a.x.number || 0)); })
+    .slice(0, DGA_PER_RONDE);
+  if (!kand.length) return;
+  const B = require('./nmbrs-betaal.js');
+  for (const r of kand) {
+    let doc;
+    try {
+      DGA_BEDRIJF = cid;
+      const t = await L.haal('/api/companies/' + cid + '/runs/' + r.id + '/wagecodes/xml?' + new URLSearchParams({ year: String(r.x.year) }).toString());
+      DGA_BEDRIJF = null;
+      doc = await taakDocument(L, t, B);
+    } catch (e) { DGA_BEDRIJF = null; if (e.reden === 'token' || e.reden === 'grens') throw e; doc = { status: 'netwerk' }; }
+    const stamp = new Date().toISOString();
+    if (doc.status !== 'ok') {
+      if (r.g && r.g.status === 'ok') { uit.dga.fout = (uit.dga.fout || 0) + 1; continue; }   // een open run houdt zijn vorige lezing
+      const code = Number((/:(\d{3})/.exec(doc.status) || [])[1]);
+      const pog = (r.g ? r.g.pogingen || 0 : 0) + 1;
+      const blijvend = (code >= 400 && code < 500 && code !== 429) || pog >= MAX_POGINGEN;
+      d.prepare("insert into dga_run (run, bedrijf, status, pogingen, fout) values (?, ?, ?, ?, ?) on conflict (run) do update set status = excluded.status, pogingen = excluded.pogingen, fout = excluded.fout")
+        .run(r.id, cid, blijvend ? 'blijvend' : 'opnieuw', pog, String(doc.status).slice(0, 40));
+      uit.dga.opnieuw += blijvend ? 0 : 1;
+      continue;
+    }
+    let ro;
+    try { ro = doc.tekst == null ? { ok: false, fout: 'niet uit te pakken' } : B.leesRunRegels(doc.tekst); } catch (e) { ro = { ok: false, fout: 'lezen mislukt' }; }
+    // gemeten 21-11-2026: de run output van de Holding bevat naast de DGA nog één persoon die /employees niet noemt. Die reports gaan
+    // hier weg (alleen in het geheugen van dit kind gezien, nooit bewaard of geteld per persoon); alleen het aantal runs waarin dat speelde.
+    const eigen = ro.ok ? ro.reports.filter(function (x) { return x.id === dga; }) : [];
+    if (ro.ok && eigen.length < ro.reports.length) uit.dga.met_ander = (uit.dga.met_ander || 0) + 1;
+    const fout = !ro.ok ? String(ro.fout || 'onleesbaar') : ro.onleesbaar ? 'onleesbaar' : ro.dubbel ? 'dubbel' : !eigen.length ? 'geen eigen report' : null;
+    d.exec('begin immediate');
+    try {
+      if (fout) {
+        // niets van deze run bewaren (ook geen oude regels: die kunnen niet meer kloppen); de vorm zonder inhoud in fout
+        d.prepare('delete from dga_regel where run = ?').run(r.id);
+        d.prepare("insert into dga_run (run, bedrijf, status, pogingen, opgehaald, definitief, aantal, fout) values (?, ?, 'afgekeurd', 0, ?, ?, 0, ?) on conflict (run) do update set " +
+          'status = excluded.status, pogingen = 0, opgehaald = excluded.opgehaald, definitief = excluded.definitief, aantal = 0, fout = excluded.fout').run(r.id, cid, stamp, r.x.locked === true ? 1 : 0, fout.slice(0, 40));
+      } else {
+        d.prepare('delete from dga_regel where run = ?').run(r.id);
+        const zet = d.prepare('insert into dga_regel (run, jaar, periode, code, oms, centen) values (?, ?, ?, ?, ?, ?) on conflict (run, jaar, periode, code) do update set centen = dga_regel.centen + excluded.centen');
+        let n = 0;
+        eigen.forEach(function (x) { x.regels.forEach(function (g) { zet.run(r.id, x.jaar, x.periode, g.code, g.oms, g.centen); n++; }); });
+        d.prepare("insert into dga_run (run, bedrijf, status, pogingen, opgehaald, definitief, aantal, fout) values (?, ?, 'ok', 0, ?, ?, ?, null) on conflict (run) do update set " +
+          'status = excluded.status, pogingen = 0, opgehaald = excluded.opgehaald, definitief = excluded.definitief, aantal = excluded.aantal, fout = null').run(r.id, cid, stamp, r.x.locked === true ? 1 : 0, n);
+      }
+      d.exec('commit');
+    } catch (e) { d.exec('rollback'); throw e; }
+    if (fout) uit.dga.afgekeurd++; else uit.dga.gelezen++;
+  }
+}
+// wv3662: laadvergoeding (Nmbrs, looncode 5122 van de Holding) per maand naast de laadschatting uit Tibber (nmbrs-laad.js). Lokaal: Tibber
+// alleen lezen (pad van de pod, naam tibber.sqlite). → { maanden, vergoed, vergelijk, blok, signaal_nieuw, venster }; geen andere looncodes.
+function kindLaad(invoer, dir) {
+  const LA = require('./nmbrs-laad.js');
+  const tp = String(invoer.tibber || '');
+  if (!path.isAbsolute(tp) || path.basename(tp) !== 'tibber.sqlite' || !fs.existsSync(tp)) return { ok: false, fout: 'tibber.sqlite niet gevonden' };
+  const nuMaand = /^\d{4}-\d{2}$/.test(String(invoer.nu_maand || '')) ? invoer.nu_maand : new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 7);
+  const { DatabaseSync } = require('node:sqlite');
+  let t = null, rijen;
+  try {
+    t = new DatabaseSync(tp, { readOnly: true }); t.exec('pragma busy_timeout = 3000');
+    // review wv3662 MOET 2: één woning (die met het jongste verbruik; gemeten 21-11: er is er één), nooit woningen door elkaar
+    const h = t.prepare('select home_id from verbruik where kwh is not null order by van desc limit 1').get();
+    rijen = h ? t.prepare('select van, kwh, kosten from verbruik where home_id = ? and kwh is not null order by van').all(h.home_id) : [];
+  }
+  finally { try { if (t) t.close(); } catch (e) {} }
+  const maanden = LA.schatting(rijen);
+  const d = db(dir);
+  try {
+    const vergoed = {};
+    lid(d, "select r.jaar, r.periode, sum(r.centen) as c from dga_regel r join dga_run g on g.run = r.run and g.status = 'ok' join bedrijf_entiteit e on e.bedrijf = g.bedrijf and e.entiteit = 'HOLD' " +
+      "join bedrijf b on b.id = g.bedrijf and b.periode_soort = 'month' where r.code = ? group by r.jaar, r.periode", [LA.LAAD_CODE])
+      .forEach(function (x) { if (x.periode >= 1 && x.periode <= 12) vergoed[x.jaar + '-' + String(x.periode).padStart(2, '0')] = Number(x.c); });
+    const v = LA.vergelijk(maanden, vergoed, nuMaand);
+    const venster = v.compleet ? v.venster[0] + '..' + v.venster[2] : null;
+    let nieuw = false;
+    if (v.signaal && venster) {
+      d.prepare('insert or ignore into laad_signaal (venster, eerst) values (?, ?)').run(venster, new Date().toISOString());
+      nieuw = !d.prepare('select gemeld from laad_signaal where venster = ?').get(venster).gemeld;
+    }
+    return { ok: true, maanden: maanden, vergoed: vergoed, vergelijk: v, venster: venster, signaal_nieuw: nieuw,
+      blok: LA.blok({ maanden: maanden, vergoed: vergoed, vergelijk: v, nuMaand: nuMaand, tijd: String(invoer.tijd || new Date().toISOString()) }) };
+  } finally { d.close(); }
+}
+function kindLaadGemeld(invoer, dir) {
+  if (!/^\d{4}-\d{2}\.\.\d{4}-\d{2}$/.test(String(invoer.venster || ''))) return { ok: false, fout: 'venster ontbreekt' };
+  const d = db(dir);
+  try { const r = d.prepare('update laad_signaal set gemeld = ? where venster = ? and gemeld is null').run(new Date().toISOString(), invoer.venster); return { ok: true, gemeld: r.changes }; }
+  finally { d.close(); }
+}
 // regels niet langer bewaren dan nodig (de lijst zelf blijft, zonder namen en rekeningnummers)
 function betaalBewaar(d) {
   d.prepare("delete from betaalregel where run in (select run from betaallijst where coalesce(opgehaald, gewijzigd) < ?)").run(new Date(Date.now() - BETAAL_BEWAAR_DAGEN * 86400000).toISOString());
@@ -816,6 +932,7 @@ async function kindLees(invoer, dir, peil) {
       }
     }
     await betaalRonde(L, d, cid, jaar, invoer, uit);   // wv3208
+    await dgaRonde(L, d, cid, jaar, invoer, uit, lijsten.employees);   // wv3662
   }
   uit.vragen = L.vragen;
   uit.eindpunten = L.eindpunten;
@@ -1460,6 +1577,8 @@ async function kind(opdracht, invoer, dir) {
   if (opdracht === 'betaalbestand') return kindBetaalbestand(invoer, dir);
   if (opdracht === 'betaalgemeld') return kindBetaalgemeld(invoer, dir);
   if (opdracht === 'stand') return kindStand(dir);
+  if (opdracht === 'laad') return kindLaad(invoer, dir);   // wv3662
+  if (opdracht === 'laadgemeld') return kindLaadGemeld(invoer, dir);
   if (opdracht === 'pot') return kindPot(dir);
   if (opdracht === 'pma') return kindPma(dir);   // wv3047
   if (opdracht === 'signalen') return kindSignalen(invoer, dir);
@@ -1505,4 +1624,5 @@ if (require.main === module) {
 }
 
 module.exports = { SCOPES, SCOPES_BASIS, SCOPES_DOC, SCOPES_BANK, SCOPES_V13, REDIRECT, linkMaak, stateOpen, stateNeem, ronde, terug, slotNeem, slotLos, noodLees, noodSchrijf, noodWis, doodLees, doodZet, verzoekToets, kies, scopesExact,
+  dgaRonde, nieuweLezer, db, kindLaad, kindLaadGemeld,   // wv3662 (toets)
   sha, xmlBoom, journaalRegels, ibanKeuze, signalenBereken, caoBlokken, periodeStart, NmbrsFout, vaultBereken, blokZet, vaultPadGoed, BLOK_BEGIN, BLOK_EIND, dagUren };
