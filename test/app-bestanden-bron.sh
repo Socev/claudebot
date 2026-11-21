@@ -75,6 +75,16 @@ const R = function () { return { _app: {} }; };
     toets('b7 geen bestaand veld weg', Object.values(per).length === 10 && Object.values(per).every(function (x) { return velden.every(function (v) { return v in x; }); }), per[J.beurtHoofd]);
     toets('b8 bestaande labels ongewijzigd (studio, bericht, agent)', per[J.studio].label === 'Studio · flux-schets' && per[J.socevHoofd].label === 'bericht · agentrapport' && per[J.agentMk].label === ctx.appLabelGewoon('machinekamer:wv1 iets'),
       [per[J.studio].label, per[J.socevHoofd].label, per[J.agentMk].label]);
+    // r: wv3730 (2C81c) rapport ja/nee alleen bij een agentklus met een bewaard rapport
+    {
+      const jr = zet('agent', null, 'machinekamer:wv2 met rapport', { rapport: true }), js = zet('socev', 'hoofd', 'agentrapport', { rapport: true });
+      ctx.appStaat.bestandenIndex = null;
+      const rr = R(); await ctx.appBestanden({}, rr);
+      const pr = {}; rr.obj.items.forEach(function (x) { pr[x.job_id] = x; });
+      toets('r1 agent met rapport: rapport true; agent zonder: false; bericht met rapport-vlag: false', pr[jr] && pr[jr].rapport === true && pr[J.agentMk].rapport === false && pr[js].rapport === false,
+        [pr[jr] && pr[jr].rapport, pr[J.agentMk].rapport, pr[js] && pr[js].rapport]);
+      fs.rmSync(path.join(DIR, dag, jr), { recursive: true }); fs.rmSync(path.join(DIR, dag, js), { recursive: true }); ctx.appStaat.bestandenIndex = null;
+    }
     toets('t1 beurt met label: kop = de vraag; beurt zonder label: null', per[J.beurtLabel].label === 'Maak een offerte-overzicht van de telefooncentrales' && per[J.beurtHoofd].label === null,
       [per[J.beurtLabel].label, per[J.beurtHoofd].label]);
     // l: appBeurtLabel

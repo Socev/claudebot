@@ -10529,7 +10529,8 @@ async function appBestanden(req, res) {
         : (m.soort === 'beurt' && m.label) ? Array.from(String(m.label)).slice(0, APP_BEURT_LABEL_MAX).join('') : null,   // wv707; wv3061: beurt = begin van Davids vraag
       bron: appBestandBron(m),   // wv3061: Van wie (socev | machinekamer | studio)
       bestanden: m.bestanden.map(function (b) { return { n: b.n, naam: appVeiligeNaam(b.naam, new Set()), grootte: b.grootte }; }),
-      overgeslagen: m.overgeslagen || 0, vol: m.vol === true, na_herstart: m.na_herstart === true };
+      overgeslagen: m.overgeslagen || 0, vol: m.vol === true, na_herstart: m.na_herstart === true,
+      rapport: m.soort === 'agent' && !!m.rapport };   // wv3730 (2C81c): knop "Lees het rapport" bij een agentklus
   });
   appStuur(res, 200, { ok: true, items: lijst, bewaar_dagen: Math.round(APP_BESTANDEN_MS / 86400000) });
 }
