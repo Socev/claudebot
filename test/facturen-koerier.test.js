@@ -893,7 +893,7 @@ test('Intake → koerier: aangeboden stuk wordt bericht (bron intake:gmail:david
   assert.deepEqual(F.mailStappen(t.fdb).filter((x) => x.gmail_id === '19a2b3c4d5e6f7a8'), [{ gmail_id: '19a2b3c4d5e6f7a8', stap: 'is_betaald' }]);
 });
 
-test('Intake → koerier: pdf al via het verzamelpostvak binnen → al_in_facturen (dubbel op sha256, geen tweede factuur); wv3762: ook Claude zonder Jev onder en na "gewoon verwerken"', async () => {
+test('Intake → koerier: pdf al via het verzamelpostvak binnen → al_in_facturen (dubbel op sha256, geen tweede factuur); geen model zonder Jev onder; wv3762: wel na "gewoon verwerken"', async () => {
   const t = opzet(), g = nepGmail();
   const bytes = Z.pdf(['Leverancier A B.V.', 'Factuur', 'Factuurnummer: DUBBEL-0001', 'Factuurdatum: 20-10-2026', 'Totaal incl. btw: EUR 12,00', 'Huisartsenpraktijk Tolgaarde B.V.']);
   const st = D.stukSchrijf(t.fdb, bytes);
@@ -904,7 +904,7 @@ test('Intake → koerier: pdf al via het verzamelpostvak binnen → al_in_factur
   assert.equal(u.intake.ok, true, JSON.stringify(u.intake));
   assert.deepEqual(n.uitkomsten.map((x) => x.r.uitkomst).sort(), ['al_in_facturen', 'facturen:1']);
   assert.equal(t.n("SELECT count(*) AS n FROM factuur WHERE nummer = 'DUBBEL-0001'"), 0);
-  assert.deepEqual(n.live, [1, 1], 'wv3762: de PDF-lezer ook zonder Jev onder de drempel en na gewoon verwerken (geen patiëntrem)');
+  assert.deepEqual(n.live, [1], 'geen PDF-lezer zonder Jev onder de drempel (injectie); wv3762: wel na gewoon verwerken (geen patiëntrem)');
   assert.equal(t.fdb.db.prepare("SELECT bron_link FROM bericht WHERE message_id = '29a2b3c4d5e6f7a8'").get().bron_link, null, 'alleen voor Davids privé-Gmail een link');
   assert.equal(t.n("SELECT count(*) AS n FROM bron WHERE soort = 'intake'"), 2);
 });
@@ -1283,7 +1283,7 @@ test('wv3660: Intake-scan zonder kandidaat van Claude → lokale OCR als voorste
   const u = await KO.ronde(t.fdb, io(g), { nu: NU, klok: () => NU });
   assert.equal(u.intake.ok, true, JSON.stringify(u.intake));
   assert.deepEqual(ocrGevraagd.sort(), ['GH-SCAN', 'IN-SCAN'], 'alleen scans krijgen OCR, geen PDF met tekstlaag');
-  assert.deepEqual(n.live, [1, 1, 1], 'wv3762: Claude gevraagd voor alle drie (Jev boven en na gewoon verwerken remmen niet); de nep geeft niets terug');
+  assert.deepEqual(n.live, [1], 'wv3762: Claude gevraagd na gewoon verwerken (Jev onder); niet bij Jev boven (injectie); de nep geeft niets terug');
   const fb = (mid) => t.fdb.db.prepare('SELECT f.* FROM factuur f JOIN bericht b ON b.id = f.bericht WHERE b.message_id = ?').get(mid);
   const gh = fb('69a2b3c4d5e6f7a8'), inn = fb('79a2b3c4d5e6f7a8');
   assert.equal(gh.status, 'geen_factuur'); assert.match(JSON.parse(gh.redenen)[0], /uitgaande factuur van/);
@@ -1300,7 +1300,7 @@ test('wv3660: Intake-scan zonder kandidaat van Claude → lokale OCR als voorste
   assert.equal(fb('a9a2b3c4d5e6f7a8').alleen_eigenaar, 0, 'leesbare vrijgegeven factuur blijft in de betaalstroom');
   // wv3762: Claude leest een vrijgegeven scan die de pod zelf niet kon lezen → velden van Claude; de vlag alleen-eigenaar blijft (geen rem)
   const bCl = Z.pdf(['ONLEESBAAR-2']);
-  const n3 = nepIntake([intakeStuk('stk_20261121_0000ffff', bCl, { jev: 'boven', na_keuze: true, bron_id: 'b9a2b3c4d5e6f7a8' })]);
+  const n3 = nepIntake([intakeStuk('stk_20261121_0000ffff', bCl, { jev: 'onder', na_keuze: true, bron_id: 'b9a2b3c4d5e6f7a8' })]);
   await KO.ronde(t.fdb, Object.assign(n3.io(g), { ocrLokaal: async () => ({ ok: false }),
     pdfLive: async (x) => ({ open: true, perDoc: { [x.documenten[0].sha256]: { kandidaat: { live: true, soort_stuk: 'factuur', factuurnummer: 'CLAUDE-0001' }, ocr_tekst: '' } } }) }), { nu: NU + 2 * MIN, klok: () => NU + 2 * MIN });
   const cl = fb('b9a2b3c4d5e6f7a8');

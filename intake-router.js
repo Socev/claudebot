@@ -27,7 +27,7 @@
  *   lokale tekst beslissen (I3: de letterlijk-toets sluit modeluitvoer uit); een vastgehouden stuk gaat nooit mee.
  * LIVE PDF-lezer (wv1921): bij het schrijven van het kennisbestand vraagt de router per PDF-onderdeel o.pdfLees(pad) (pdf-lezer.js: eigen
  *   lezing per pagina als controle, dan Claude) en zet hij Claude's markdown in plaats van de pdftotext-tekst; lukt dat niet, dan
- *   blijft de lokale tekst. Sinds wv3762 voor elk stuk dat in het kennisbestand komt (ook met marker, na 'toch verwerken' of Jev boven).
+ *   blijft de lokale tekst. Sinds wv3762 voor elk stuk dat in het kennisbestand komt (ook met marker of na 'toch verwerken'), alleen met Jev onder de drempel.
  *   De beslissingen (soort, afzender, entiteit, regels) blijven op de lokale tekst.
  * STUK OPHALEN EN SYSTEEM (wv2004, bouwplan vault "01_Ontwikkeling/OVIS Intake - stuk ophalen en bestemming Systeem (bouwplan 29-10-2026).md").
  *   appStuk heeft een tijdsbudget (12 s): wat OCR nodig heeft leest de pod op de achtergrond (één tegelijk); de tekst blijft alleen in het
@@ -1752,9 +1752,10 @@ function maak(o) {
       uit.push(w); bijNamen.push({ naam: d.naam, bestand: path.basename(w.pad) });
     }
     const tekstDelen = lt.delen.filter(function (d) { return d.rol !== 'representatie' || lt.lijf; }).map(function (d) { return { deel: d.deel, rol: d.rol, naam: d.naam, tekst: d.tekst }; });
-    // wv3762 (David 21-11-2026 14:00): Claude leest ook een stuk met een (vrijgegeven) marker, na "gewoon verwerken" of met Jev boven de drempel;
-    // dit stuk komt hoe dan ook in het kennisbestand, de lezer kiest alleen wie de tekst leest (geen patiëntrem vóór het model).
-    if (o.pdfLees) {
+    // wv3762 (David 21-11-2026 14:00): Claude leest ook een stuk met een (vrijgegeven) patiëntmarker of na "gewoon verwerken"; dit stuk komt
+    // hoe dan ook in het kennisbestand, de lezer kiest alleen wie de tekst leest (geen patiëntrem vóór het model). Jev (injectiedetector,
+    // beveiliging) blijft: alleen met een Jev-uitslag onder de drempel.
+    if (o.pdfLees && sam.jev === 'onder') {
       for (const d of tekstDelen) {
         const od = delen.find(function (x) { return x.deel === d.deel; });
         if (!od || String(od.mime || '').toLowerCase() !== 'application/pdf') continue;

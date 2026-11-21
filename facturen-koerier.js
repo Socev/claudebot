@@ -16,7 +16,7 @@
  * van de kern door aan io.pdfSchaduw (server.js → pdf-lezer.js, K1: via io, zoals pdftotext). Die bepaalt zelf of het bericht naar Claude
  * mag (sinds wv3762 zonder patiëntregel) en logt alleen velden en verschilvlaggen. Niets in de app verandert; een fout daar raakt de ronde niet.
  * LIVE PDF-lezer (wv1921): staat Facturen live in pdf-lezer.json, dan leest Claude elke PDF VÓÓR de transactie (io.pdfLive; sinds
- * wv3762 zonder patiëntrem, ook bij een kenmerk of na "gewoon verwerken"); per document gaan model_kandidaat en de lokale tekst (ook OCR) als controle mee de kern in, en vallen daarna weg. Geen
+ * wv3762 zonder patiëntrem, ook bij een kenmerk of na "gewoon verwerken"; een Intake-stuk alleen met Jev onder de drempel); per document gaan model_kandidaat en de lokale tekst (ook OCR) als controle mee de kern in, en vallen daarna weg. Geen
  * antwoord, uit of het rondebudget op: de kern leest zoals voorheen alleen de tekstregels.
  *
  * NIET ONDERHANDELBAAR. Niets gaat naar buiten zonder dat een mens Bevestigen klikte (alleen opdrachten uit de wachtrij, na verstuur_na).
@@ -850,8 +850,10 @@ async function leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel) {
   if (documenten.length && s.mailtekst && isDoorgestuurd({ van: s.van, onderwerp: s.onderwerp }, eigen)) { const a = oorspronkelijkeAfzender(s.mailtekst); if (a) afzender = a; }
   const ruw = new Map();
   for (const d of documenten) { const st = D.stukSchrijf(fdb, d._bytes); d.sha256 = st.sha256; ruw.set(d.sha256, d._bytes); delete d._bytes; }
-  // wv3762 (David 21-11-2026 14:00): Claude leest ook een stuk met Jev boven de drempel of na "gewoon verwerken" (geen patiëntrem vóór het model)
-  if (documenten.length) tel.claude += await pdfLive(io, { afzender, onderwerp: s.onderwerp }, documenten, ruw, 0, o);
+  // wv3762 (David 21-11-2026 14:00): Claude leest ook een stuk na "gewoon verwerken" van de patiëntmarker (geen patiëntrem vóór het model).
+  // Jev (injectiedetector, beveiliging) blijft: zonder Jev-uitslag onder de drempel geen model, zoals de kennislens.
+  const model = s.jev === 'onder';
+  if (documenten.length && model) tel.claude += await pdfLive(io, { afzender, onderwerp: s.onderwerp }, documenten, ruw, 0, o);
   if (documenten.length) await ocrZonderModel(io, documenten, ruw, o);   // wv3660/wv3762: scan zonder (bruikbare) lokale tekst → lokale OCR
   // wv3660: een scan die David vrijgaf na de patiëntmarker van Intake ("gewoon verwerken") en die Facturen zelf niet kon lezen (geen OCR-tekst):
   // alleen de eigenaar. Een leesbaar stuk toetst de kern zelf (review ZOU 3: anders viel elke vrijgegeven inkoopfactuur uit de betaalstroom).
@@ -871,7 +873,7 @@ async function leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel) {
     vf = v.facturen;
   });
   if (al) { tel.al_ingelezen++; return 'al_ingelezen'; }
-  if (vf) schaduwPdf(fdb, io, nieuwId, { afzender, onderwerp: s.onderwerp }, documenten, ruw, vf, 0);
+  if (vf && model) schaduwPdf(fdb, io, nieuwId, { afzender, onderwerp: s.onderwerp }, documenten, ruw, vf, 0);
   for (const d of documenten) { d.tekst = null; d.ubl_xml = null; d.ocr_tekst = null; d.model_kandidaat = null; }
   ruw.clear();
   tel.ingelezen++;
