@@ -18,7 +18,8 @@
 //   rekening-courant: € 0 vóór het eerste boekjaar (alleen als eind − mutatie van dat jaar 0 geeft), dan de jaarrekeningstand RC Holding
 //               (trap; maand onvolledig: het deel bij Tolgaarde staat er niet per jaar in, review MOET 2); vanaf de bijgewerkt-datum van de
 //               besluitpagina het totaal van die pagina (incl. Tolgaarde), zoals het punt.
-//   totaal      bank (vrij) + woning − hypotheek − woninglening − rc. Ontbreekt de bank, de woning of de hypotheek (of een Holding-schuld):
+//   beleggen    wv3757: Beleggen per maandeinde (aantal × laatst bekende slotkoers; beleggen.js waardeOp), vanaf de eerste transactie.
+//   totaal      bank (vrij) + woning − hypotheek − woninglening − rc + beleggen. Ontbreekt de bank, de woning of de hypotheek (of een Holding-schuld):
 //               geen totaal, wel de delen. Ontbreekt alleen een rekening of het Tolgaarde-deel: totaal van wat bekend is, onvolledig met lijst.
 //   lopend      de lopende maand = precies het punt van Overzicht (vermogenPunt in financien-overzicht.js): de laatste stip = de tegel.
 //   Holding     eigen vermogen per jaarrekening (trap, boekwaarde), aparte lijn, nooit opgeteld.
@@ -104,7 +105,12 @@ function verloop(A, a, o) {
   const v = blok('vault', function () { return FV.lees(o.vault); }) || {};
   const hyp = v.hypotheek || null, dga = v.dga || null;
   const L = O.liquide(o.saldi || (o.saldiRijen ? F.blokSaldi(a, o.saldiRijen) : null));
-  const punt = O.vermogenPunt({ v: v, sal: L.sal, liq: L.liq, vault: o.vault, FV: FV, nu: nu, blok: blok });
+  const punt = O.vermogenPunt({ v: v, sal: L.sal, liq: L.liq, vault: o.vault, FV: FV, nu: nu, blok: blok, beleggen: o.beleggen });
+  // wv3757 (nr 910 / L10): Beleggen per maandeinde (beleggen.js voorFinancien via server.js; vanaf de eerste transactie of stand). Telt mee in het
+  // totaal; een maand na de eerste transactie zonder waarde = onvolledig (beleggingen); vóór de eerste transactie: geen beleggingen bekend, niets.
+  const bel = o.beleggen && typeof o.beleggen === 'object' ? o.beleggen : null;
+  const belM = bel && bel.maanden && typeof bel.maanden === 'object' ? bel.maanden : {};
+  const belEerste = bel && typeof bel.eerste === 'string' ? bel.eerste.slice(0, 7) : null;
   const reks = blok('bank', function () { return rekeningen(a, { saldiRijen: o.saldiRijen, F: F, O: O }); }) || [];
   const woning = blok('woning', function () { return O.leesWoning(o.vault, FV); });
   const hold = blok('holding', function () { return O.leesHolding(o.vault, FV); });
@@ -163,20 +169,31 @@ function verloop(A, a, o) {
     // Holding apart
     const h = trap(holdStanden, eind);
     x.holding = h ? h.stand : null; x.holding_jaar = h ? h.jaar : null;
-    x.totaal = x.ontbreekt.length ? null : r2(x.vrij + x.woning - x.hypotheek - x.woninglening - x.rc);
+    // beleggingen (wv3757)
+    if (belEerste && m >= belEerste) {
+      const b = belM[m];
+      x.beleggen = b && typeof b.bedrag === 'number' && Number.isFinite(b.bedrag) ? b.bedrag : null;
+      if (x.beleggen == null) x.onvolledig.push('beleggingen (geen koers)');
+      else if (b.volledig !== true) x.onvolledig.push('beleggingen (niet alles bekend)');
+    }
+    x.totaal = x.ontbreekt.length ? null : r2(x.vrij + x.woning - x.hypotheek - x.woninglening - x.rc + (x.beleggen || 0));
     x.volledig = x.totaal != null && !x.onvolledig.length;
     maanden.push(x);
   }
   // de lopende maand = het punt van Overzicht
   const pv = punt.prive, deel = function (re) { const d = pv.delen.find(function (x) { return re.test(x.tekst); }); return d ? d : null; };
+  const db = deel(/^beleggingen/i);   // wv3757
   const dv = deel(/^vrij beschikbaar/i), dw = deel(/^woning/i), dh = deel(/^hypotheek/i), dl = deel(/^woninglening/i), dr = deel(/^rekening-courant/i);
   const nk = function (re) { const d = (pv.niet_meegeteld || []).find(function (x) { return re.test(x.tekst); }); return d ? d.bedrag : null; };
-  maanden.push({ m: mNu, lopend: true, totaal: pv.bedrag, volledig: pv.bedrag != null, ontbreekt: pv.ontbreekt.slice(), onvolledig: [],
+  // review MOET 2: onvolledige beleggingen maken ook de lopende maand onvolledig (zoals de maanden ervóór)
+  const belPunt = pv.beleggen && pv.beleggen.punt, belOnv = !!(belPunt && !belPunt.volledig);   // ronde 2: ook als er (nog) geen regel is
+  maanden.push({ m: mNu, lopend: true, totaal: pv.bedrag, volledig: pv.bedrag != null && !belOnv, ontbreekt: pv.ontbreekt.slice(), onvolledig: belOnv ? ['beleggingen (niet alles bekend)'] : [],
     vrij: dv ? dv.bedrag : null, stand_van: dv ? dv.op : null, kinderen: nk(/kinder/i), gambia: nk(/gambia/i), overig: L.sal ? r2(L.liq.anders) : null,
     woning: dw ? dw.bedrag : null, woning_op: dw ? dw.op : null, hypotheek: dh ? -dh.bedrag : null, hypotheek_bron: dh ? 'bank' : null,
     woninglening: dl ? -dl.bedrag : null, woninglening_bron: dl ? 'jaarrekening ' + String(dl.op).slice(0, 4) : null,
     rc: dr ? -dr.bedrag : null, rc_bron: dr ? 'besluit' : null,
-    holding: punt.holding ? punt.holding.eigen_vermogen : null, holding_jaar: punt.holding ? punt.holding.jaar : null });
+    holding: punt.holding ? punt.holding.eigen_vermogen : null, holding_jaar: punt.holding ? punt.holding.jaar : null,
+    beleggen: db ? db.bedrag : (belEerste ? null : undefined) });
   const metTotaal = maanden.filter(function (x) { return x.totaal != null; });
   return {
     ok: true, peildatum: nu, maanden: maanden, fouten: fouten,
@@ -186,7 +203,7 @@ function verloop(A, a, o) {
       holding: dga ? dga.bron.data || null : null, besluit: dga ? dga.bron.pagina : null, besluit_op: rcOp, kerncijfers: hold ? hold.bron : null,
     },
     bank_kwaliteit: { rekeningen: reks.length, meerduidig: reks.reduce(function (s, r) { return s + (r.meerduidig || 0); }, 0), breuk: reks.reduce(function (s, r) { return s + (r.breuk || 0); }, 0) },
-    uitleg: 'Stand op de laatste dag van elke maand, zichtbare rekeningen. Woning op de taxatie van dat moment (trap, een schatting); hypotheek uit je eigen Excel-model en vanaf de bankstand die stand; woninglening en rekening-courant per jaarrekening. De Holding is een aparte lijn (boekwaarde per jaarrekening) en telt nooit mee. Onvolledig = niet alle delen bekend (staat erbij wat ontbreekt); geen totaal waar de bank, de woning of de hypotheek ontbreekt.',
+    uitleg: 'Stand op de laatste dag van elke maand, zichtbare rekeningen. Woning op de taxatie van dat moment (trap, een schatting); hypotheek uit je eigen Excel-model en vanaf de bankstand die stand; woninglening en rekening-courant per jaarrekening. De Holding is een aparte lijn (boekwaarde per jaarrekening) en telt nooit mee. Beleggingen (vanaf je eerste transactie) op de laatst bekende slotkoers van die maand. Onvolledig = niet alle delen bekend (staat erbij wat ontbreekt); geen totaal waar de bank, de woning of de hypotheek ontbreekt.',
   };
 }
 

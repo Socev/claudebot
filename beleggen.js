@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const SCHEMA_VERSIE = 3;
+const SCHEMA_VERSIE = 4;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT);
 CREATE TABLE IF NOT EXISTS plan_antwoord (vraag INTEGER PRIMARY KEY CHECK (vraag BETWEEN 1 AND 14), tekst TEXT, waarden TEXT,
@@ -70,6 +70,14 @@ CREATE TABLE IF NOT EXISTS koers (isin TEXT NOT NULL, datum TEXT NOT NULL, slot 
 CREATE TABLE IF NOT EXISTS wissel (valuta TEXT NOT NULL, datum TEXT NOT NULL, per_eur TEXT NOT NULL, op TEXT NOT NULL, PRIMARY KEY (valuta, datum));
 CREATE TABLE IF NOT EXISTS koerscode (sleutel TEXT PRIMARY KEY, code TEXT, cik TEXT, naam_bron TEXT, op TEXT NOT NULL, fout TEXT);
 CREATE TABLE IF NOT EXISTS bedrijf_uit (sleutel TEXT PRIMARY KEY, op TEXT NOT NULL);
+`;
+
+// Schemaversie 4 (wv3757, besluit nr 910 / L10, David Ja 21-11 13:19 met vingerafdruk): de peilwaarde op 1 januari voor de aangifte. Eén rij per
+// peildatum, één keer vastgelegd en nooit overschreven (INSERT … ON CONFLICT DO NOTHING); inhoud = de hele berekening (posities, koersdatum per
+// positie, markeringen, dividend en kosten van het jaar ervóór) als JSON. Eigen registratie voor David: niets gaat naar de Belastingdienst of een broker.
+const SCHEMA_4 = `
+CREATE TABLE IF NOT EXISTS peil (peildatum TEXT PRIMARY KEY, waarde_cent INTEGER, effecten_cent INTEGER, cash_cent INTEGER, volledig INTEGER NOT NULL CHECK (volledig IN (0,1)),
+  markering TEXT NOT NULL, inhoud TEXT NOT NULL, bron TEXT NOT NULL, op TEXT NOT NULL);
 `;
 
 // ── de veertien vragen (plan § 1.7); velden = wat de app narekent ──
@@ -776,6 +784,116 @@ function geldOverzicht(x) {
   return u;
 }
 
+// wv3757 (besluit nr 910 / L10, David Ja 21-11 13:19 met vingerafdruk): waarde op een datum, voor Financiën › Vermogen en de peilwaarde op
+// 1 januari. Aantal per positie: met een ingelezen portefeuille (of handstand) de stand van die dag, teruggerekend of doorgerekend met de
+// transacties ertussen; zonder portefeuille de som van de transacties tot en met de datum. Koers: de laatst bekende vóór of op de datum, de
+// nieuwste van drie bronnen (dagkoers uit de ochtendronde; de koers van de portefeuille; de koers van een eigen transactie), alleen in de valuta
+// van de positie; wisselkoers ECB op de koersdatum of ervóór, anders die van de portefeuille of de transactie. Elke koers die geen dagkoers is
+// of ouder dan 4 dagen krijgt een markering met zijn datum (valt de koersbron uit, dan blijft de laatst bekende staan, zichtbaar). Geen koers
+// = die positie "zonder koers" (niet raden); contant bij DEGIRO alleen uit de portefeuille of handstand (uit het rekeningoverzicht is de
+// volgorde binnen een tijdstip niet vast). kAt(isin, datum) → { datum, slot, valuta } | null; wAt(valuta, datum) → { datum, per_eur } | null.
+const PEIL_OUD_DAGEN = 4;
+const nlDag = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(String(d)) ? Number(d.slice(8, 10)) + '-' + Number(d.slice(5, 7)) + '-' + d.slice(0, 4) : String(d));   // tekst voor David: d-m-jjjj
+const txSleutel = (t) => (t.isin ? 'isin:' + t.isin : 'naam:' + String(t.naam).toLowerCase());
+function waardeOp(d, kAt, wAt, datum) {
+  const portef = (d.stand_bron === 'bestand' || d.stand_bron === 'hand') && !!d.stand_datum;
+  const per = new Map(), markering = [], zonder = [];
+  const pos = (sl, x) => { let p = per.get(sl); if (!p) { p = { sleutel: sl, naam: x.naam, isin: x.isin || null, valuta: x.valuta || null, aantal: 0, hand: null, port: null }; per.set(sl, p); } return p; };
+  let txOnvolledig = false;
+  if (portef) {
+    for (const p of d.posities) {
+      if (p.regelsoort !== 'effect') continue;
+      const n = Number(p.aantal), q = pos(p.sleutel, p);
+      if (p.aantal != null && Number.isFinite(n) && n > 0) { q.aantal += n; if (Number(p.koers) > 0) q.port = p; }
+      else q.hand = p;   // handpositie zonder aantal: alleen de ingevoerde waarde
+    }
+    for (const t of d.transacties) {
+      const n = Number(t.aantal);
+      if (!Number.isFinite(n) || !n) continue;
+      if (t.datum > d.stand_datum && t.datum <= datum) pos(txSleutel(t), t).aantal += n;
+      else if (t.datum > datum && t.datum <= d.stand_datum) pos(txSleutel(t), t).aantal -= n;
+    }
+  } else {
+    const a = aankoopStand(d.transacties.filter((t) => t.datum <= datum));
+    txOnvolledig = a.onvolledig;
+    for (const p of a.posities) pos(p.sleutel, p).aantal = Number(p.aantal);
+  }
+  if (txOnvolledig) markering.push('transacties onvolledig (een verkoop zonder bekende aankoop of een rij zonder totaal)');
+  const posities = [];
+  let effecten = 0, oudste = null;
+  for (const p of per.values()) {
+    if (p.hand && !p.aantal) {
+      if (d.stand_datum <= datum) { posities.push({ sleutel: p.sleutel, naam: p.naam, isin: p.isin, aantal: null, koers: null, valuta: 'EUR', koers_datum: d.stand_datum, koers_bron: 'handinvoer', wissel: 1, waarde_cent: p.hand.waarde_eur_cent, markering: ['eigen invoer van ' + nlDag(d.stand_datum)] }); effecten += p.hand.waarde_eur_cent; }
+      else zonder.push({ naam: p.naam, reden: 'eigen invoer van na de datum' });
+      continue;
+    }
+    if (p.aantal < -1e-9) { zonder.push({ naam: p.naam, reden: 'aantal klopt niet (meer verkocht dan bekend)' }); continue; }
+    if (Math.abs(p.aantal) < 1e-9) continue;
+    const kand = [];
+    const k = p.isin ? kAt(p.isin, datum) : null;
+    if (k) kand.push({ datum: k.datum, slot: k.slot, valuta: k.valuta, bron: 'dagkoers', fx: null });
+    if (p.port && d.stand_datum <= datum) kand.push({ datum: d.stand_datum, slot: p.port.koers, valuta: p.port.valuta, bron: 'portefeuille', fx: p.port.lokaal_cent && p.port.waarde_eur_cent ? p.port.lokaal_cent / p.port.waarde_eur_cent : null });
+    const t = d.transacties.filter((x) => txSleutel(x) === p.sleutel && x.datum <= datum && Number(x.koers) > 0).sort((a, b) => (a.datum + (a.tijd || '') < b.datum + (b.tijd || '') ? 1 : -1))[0];
+    if (t) kand.push({ datum: t.datum, slot: t.koers, valuta: t.valuta, bron: 'transactie', fx: Number(t.wisselkoers) > 0 ? Number(t.wisselkoers) : null });
+    const goed = kand.filter((x) => Number(x.slot) > 0 && (!p.valuta || !x.valuta || x.valuta === p.valuta));
+    goed.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));   // stabiel: bij gelijke datum gaat de dagkoers voor
+    const c = goed[0];
+    if (!c) { zonder.push({ naam: p.naam, reden: kand.length ? 'koers in een andere valuta' : 'geen koers bekend' }); continue; }
+    const val = c.valuta || p.valuta || 'EUR';
+    let fx = null, wd = null;
+    if (val === 'EUR') fx = 1;
+    else { const w = wAt(val, c.datum); if (w && Number(w.per_eur) > 0) { fx = Number(w.per_eur); wd = w.datum; } else if (c.fx > 0) { fx = c.fx; wd = c.datum; } }
+    if (fx == null) { zonder.push({ naam: p.naam, reden: 'geen wisselkoers' }); continue; }
+    const w = Math.round((p.aantal * Number(c.slot) / fx) * 100);
+    const m = [];
+    if (c.bron !== 'dagkoers') m.push('geen dagkoers: koers uit ' + (c.bron === 'transactie' ? 'je eigen transactie' : 'je portefeuille') + ' van ' + nlDag(c.datum));
+    else if (c.datum < plusDagen(datum, -PEIL_OUD_DAGEN)) m.push('laatst bekende koers is van ' + nlDag(c.datum));
+    posities.push({ sleutel: p.sleutel, naam: p.naam, isin: p.isin, aantal: String(Number(p.aantal.toFixed(6))), koers: String(c.slot), valuta: val, koers_datum: c.datum, koers_bron: c.bron,
+      wissel: fx, wissel_datum: wd, waarde_cent: w, markering: m });
+    effecten += w;
+    if (!oudste || c.datum < oudste) oudste = c.datum;
+  }
+  let cash = null, cashDatum = null;
+  let cashOnzeker = false;
+  if (portef && d.stand_datum <= datum) {
+    cash = d.posities.filter((p) => p.regelsoort === 'cash').reduce((s, p) => s + (p.waarde_eur_cent || 0), 0); cashDatum = d.stand_datum;
+    // review MOET 1: na de portefeuille-datum kan contant veranderd zijn (aankoop, verkoop, storting, dividend); niet bijrekenen, wel zeggen
+    const na = (x) => x > d.stand_datum && x <= datum;
+    cashOnzeker = d.transacties.some((t) => na(t.datum)) || (d.rekening_datums || []).some(na);
+    if (cashOnzeker) markering.push('contant bij DEGIRO kan veranderd zijn: je portefeuille is van ' + nlDag(d.stand_datum) + ', daarna zijn er nog mutaties');
+    else if (d.stand_datum < plusDagen(datum, -PEIL_OUD_DAGEN)) markering.push('contant bij DEGIRO volgens je portefeuille van ' + nlDag(d.stand_datum));
+  } else if (posities.length || zonder.length) markering.push(portef ? 'contant bij DEGIRO op deze datum niet bekend (je portefeuille is van later)' : 'contant bij DEGIRO niet bekend (lees je portefeuille-export in)');
+  for (const p of posities) for (const x of p.markering) markering.push(p.naam + ': ' + x);
+  for (const z of zonder) markering.push(z.naam + ': ' + z.reden + ', niet meegeteld');
+  return { datum, aantal_bron: portef ? (d.stand_bron === 'hand' ? 'handstand' : 'portefeuille') + ' van ' + nlDag(d.stand_datum) : 'transacties', posities, zonder,
+    effecten_cent: effecten, cash_cent: cash, cash_datum: cashDatum, waarde_cent: effecten + (cash || 0), koers_datum: oudste,
+    volledig: !zonder.length && !txOnvolledig && !cashOnzeker && (cash != null || (!posities.length && !portef)), markering };
+}
+// Dividend en kosten van een kalenderjaar (voor de peilwaarde): dividend en dividendbelasting uit het rekeningoverzicht (per valuta en in euro
+// met de ECB-koers van die dag); kosten = transactiekosten uit de transacties + overige kosten uit het rekeningoverzicht (aansluitingskosten e.d.;
+// transactiekosten daar niet nog eens). rekening_tot = de laatste dag in het rekeningoverzicht (wat daarna kwam, staat er niet in).
+function jaarGeld(rekening, transacties, jaar, wAt) {
+  const j = String(jaar), inJaar = (x) => String(x.datum).slice(0, 4) === j;
+  const uit = { jaar: Number(jaar), dividend_cent: 0, dividendbelasting_cent: 0, kosten_transacties_cent: 0, kosten_overig_cent: 0, per_valuta: {}, zonder_wissel: 0,
+    rekening_tot: rekening.reduce((m, r) => (r.datum > m ? r.datum : m), '') || null };
+  const tel = (soort, r) => {
+    const v = r.mutatie_valuta || 'EUR';
+    const pv = uit.per_valuta[v] || (uit.per_valuta[v] = { dividend_cent: 0, dividendbelasting_cent: 0, kosten_overig_cent: 0 });
+    pv[soort] += r.mutatie_cent;
+    if (v === 'EUR') { uit[soort] += r.mutatie_cent; return; }
+    const w = wAt(v, r.datum);
+    if (w && Number(w.per_eur) > 0) uit[soort] += Math.round(r.mutatie_cent / Number(w.per_eur)); else uit.zonder_wissel++;
+  };
+  for (const r of rekening) {
+    if (!inJaar(r) || typeof r.mutatie_cent !== 'number') continue;
+    const o = String(r.omschrijving || '').toLowerCase();
+    if (/dividendbelasting|dividend tax|withholding/.test(o)) tel('dividendbelasting_cent', r);
+    else if (/dividend/.test(o)) tel('dividend_cent', r);
+    else if (/kosten|fee|aansluit|connection/.test(o) && !/transactiekosten|transaction|autofx/.test(o)) tel('kosten_overig_cent', r);   // review ronde 2: AutoFX zit al in de transactiekosten
+  }
+  for (const t of transacties) if (inJaar(t) && typeof t.kosten_eur_cent === 'number') uit.kosten_transacties_cent += t.kosten_eur_cent;
+  return uit;
+}
 // wv3030: stand uit transacties zolang er geen portefeuille en geen handpositie is (een ingelezen portefeuille of handpositie gaat altijd voor).
 // Per ISIN (anders naam): aantal en aankoopwaarde incl. kosten; een verkoop haalt naar rato aankoopwaarde weg (gemiddelde kostprijs). Geen koersen:
 // dit is de waarde bij aankoop, niet de huidige waarde. Ontbreekt een totaal of verkoopt een rij meer dan er was, dan 'onvolledig' (niet raden).
@@ -880,6 +998,7 @@ function maak(o) {
       db.exec(SCHEMA_3);
       // wv3756 (review MOET 1): richting (koop/verkoop) bij een dagboekregel zonder transactie, zodat hij later alleen aan die richting hangt
       if (!db.prepare("SELECT 1 FROM pragma_table_info('dagboek') WHERE name = 'richting'").get()) db.exec('ALTER TABLE dagboek ADD COLUMN richting TEXT');
+      db.exec(SCHEMA_4);
       db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde WHERE CAST(meta.waarde AS INTEGER) < CAST(excluded.waarde AS INTEGER)").run(String(SCHEMA_VERSIE));
       gemigreerd = true;
     }
@@ -903,7 +1022,7 @@ function maak(o) {
     d.versies = db.prepare('SELECT versie, op, wat FROM planversie ORDER BY versie DESC LIMIT 20').all().map((r) => Object.assign({}, r));
     d.posities = db.prepare('SELECT sleutel, regelsoort, naam, isin, aantal, koers, valuta, lokaal_cent, waarde_eur_cent, bron FROM positie').all().map((r) => Object.assign({}, r));
     for (const r of db.prepare('SELECT sleutel, soort FROM positie_soort').all()) d.soorten[r.sleutel] = r.soort;
-    d.transacties = db.prepare('SELECT sleutel, datum, tijd, naam, isin, aantal, koers, valuta, waarde_eur_cent, kosten_eur_cent, totaal_eur_cent, bron FROM transactie ORDER BY datum DESC, tijd DESC').all().map((r) => Object.assign({}, r));
+    d.transacties = db.prepare('SELECT sleutel, datum, tijd, naam, isin, aantal, koers, valuta, waarde_eur_cent, wisselkoers, kosten_eur_cent, totaal_eur_cent, bron FROM transactie ORDER BY datum DESC, tijd DESC').all().map((r) => Object.assign({}, r));
     d.dagboek = db.prepare('SELECT * FROM dagboek ORDER BY datum DESC, id DESC').all().map((r) => Object.assign({}, r));
     d.volglijst = db.prepare('SELECT id, naam, code, thema, waarom, wanneer, op FROM volglijst WHERE weg = 0 ORDER BY id').all().map((r) => Object.assign({}, r));
     for (const r of db.prepare('SELECT sleutel, keuze, tot FROM signaal_keuze').all()) d.keuzes[r.sleutel] = { keuze: r.keuze, tot: r.tot };
@@ -1660,10 +1779,90 @@ function maak(o) {
         planversies: n('planversie'), vault_ok: vaultOk, schema: Number((db.prepare("SELECT waarde FROM meta WHERE sleutel = 'schema'").get() || {}).waarde) || null,
         nieuws: { bedrijven: n('bedrijf'), regels: n('nieuws'), weken: n('week'), bronnen_gezakt: db.prepare('SELECT COUNT(*) AS n FROM nieuws_bron WHERE gezakt = 1').get().n },
         koersen: { regels: n('koers'), wissels: n('wissel'), codes: n('koerscode'), uit: n('bedrijf_uit'),
-          laatste: (db.prepare('SELECT MAX(datum) AS d FROM koers').get() || {}).d || null } };   // wv3728: alleen aantallen en een datum
+          laatste: (db.prepare('SELECT MAX(datum) AS d FROM koers').get() || {}).d || null },   // wv3728: alleen aantallen en een datum
+        peil: { aantal: n('peil'), laatste: (db.prepare('SELECT MAX(peildatum) AS d FROM peil').get() || {}).d || null } };   // wv3757
     }, false);
   }
-  return { app, gesprek, info, _overzicht: overzicht, nieuwsData, koersData, zetKoersen, zetAutoBedrijven, vulBedrijfAan, metDb, vandaag: vandaagF };
+  // ── wv3757 (nr 910 / L10): waarde op een datum (Financiën › Vermogen) en de peilwaarde op 1 januari (alleen lezen, behalve de peil-rij) ──
+  function opDatum(db, datum) {
+    const d = leesAlles(db);
+    d.rekening_datums = db.prepare('SELECT DISTINCT datum FROM rekening').all().map((r) => r.datum);   // review MOET 1: mutaties na de portefeuille
+    const kq = db.prepare('SELECT datum, slot, valuta FROM koers WHERE isin = ? AND datum <= ? ORDER BY datum DESC LIMIT 1');
+    const wq = db.prepare('SELECT datum, per_eur FROM wissel WHERE valuta = ? AND datum <= ? ORDER BY datum DESC LIMIT 1');
+    const kAt = (i, x) => kq.get(i, x) || null, wAt = (v, x) => wq.get(v, x) || null;
+    return { d, kAt, wAt, w: waardeOp(d, kAt, wAt, datum) };
+  }
+  function waardeOpDatum(datum) {
+    if (!RE_DAG.test(String(datum))) throw new Error('datum als jjjj-mm-dd');
+    if (!fs.existsSync(dbPad)) return null;
+    return metDb((db) => (db ? opDatum(db, datum).w : null), false);
+  }
+  const PEIL_VELDEN = 'peildatum, waarde_cent, effecten_cent, cash_cent, volledig, markering, bron, op';
+  function peilRij(r) {
+    let m = []; try { m = JSON.parse(r.markering); } catch (e) { m = []; }
+    return { peildatum: r.peildatum, waarde_cent: r.waarde_cent, effecten_cent: r.effecten_cent, cash_cent: r.cash_cent, volledig: r.volledig === 1, markering: m, bron: r.bron, op: r.op };
+  }
+  // Eén keer vastleggen, nooit overschrijven. bron: 'januari' (de stap in de ochtendtik) of 'proef'. Dividend en kosten van het jaar vóór de peildatum.
+  function peilVastleggen(peildatum, bron) {
+    if (!RE_DAG.test(String(peildatum))) throw new Error('peildatum als jjjj-mm-dd');
+    return metDb((db) => {
+      const al = db.prepare('SELECT ' + PEIL_VELDEN + ' FROM peil WHERE peildatum = ?').get(peildatum);
+      if (al) return { nieuw: false, peil: peilRij(al) };
+      const x = opDatum(db, peildatum);
+      const rek = db.prepare('SELECT datum, omschrijving, mutatie_cent, mutatie_valuta FROM rekening').all();
+      const geld = jaarGeld(rek, x.d.transacties, Number(peildatum.slice(0, 4)) - 1, x.wAt);
+      const inhoud = { waarde: x.w, jaar: geld, transacties_tot: x.d.transacties.reduce((m, t) => (t.datum > m ? t.datum : m), '') || null,
+        uitleg: 'Waarde bij DEGIRO op ' + peildatum + ': aantal × de laatst bekende slotkoers vóór of op die dag, in euro met de ECB-wisselkoers van de koersdatum. ' +
+          'Dividend en kosten van ' + geld.jaar + ' uit je eigen exports. Eigen registratie; laat de aangifte door je adviseur toetsen.' };
+      const r = db.prepare('INSERT INTO peil (peildatum, waarde_cent, effecten_cent, cash_cent, volledig, markering, inhoud, bron, op) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(peildatum) DO NOTHING')
+        .run(peildatum, x.w.waarde_cent, x.w.effecten_cent, x.w.cash_cent, x.w.volledig ? 1 : 0, JSON.stringify(x.w.markering), JSON.stringify(inhoud), String(bron || 'januari').slice(0, 20), nuIso());
+      return { nieuw: r.changes === 1, peil: peilRij(db.prepare('SELECT ' + PEIL_VELDEN + ' FROM peil WHERE peildatum = ?').get(peildatum)) };
+    }, true);
+  }
+  function peilen(db) { return db ? db.prepare('SELECT ' + PEIL_VELDEN + ' FROM peil ORDER BY peildatum DESC LIMIT 20').all().map(peilRij) : []; }
+  function peilInhoud(peildatum) {
+    if (!fs.existsSync(dbPad)) return null;
+    return metDb((db) => { const r = db && db.prepare('SELECT inhoud FROM peil WHERE peildatum = ?').get(String(peildatum)); return r ? JSON.parse(r.inhoud) : null; }, false);
+  }
+  // De stap in de ochtendtik (server.js, na de koersronde): van 1 t/m 15 januari, zolang de peilwaarde van dit jaar er nog niet is (een pod die op
+  // 1 januari uit stond, haalt hem in; de koers blijft die van vóór of op 1 januari). Zonder databank niets (geen lege databank maken).
+  function peilTik(vandaag) {
+    const v = vandaag || vandaagF(), pd = v.slice(0, 4) + '-01-01';
+    if (v > v.slice(0, 4) + '-01-15' || !fs.existsSync(dbPad)) return { niets: true };
+    if (metDb((db) => !!(db && db.prepare('SELECT 1 FROM peil WHERE peildatum = ?').get(pd)), false)) return { al: true };
+    return peilVastleggen(pd, 'januari');
+  }
+  // Voor Financiën (bank-lezer via server.js): de waarde van vandaag, per maandeinde sinds de eerste transactie of stand, en de peilwaarden. Euro's.
+  function voorFinancien(o) {
+    const vandaag = (o && o.vandaag) || vandaagF();
+    if (!fs.existsSync(dbPad)) return null;
+    return metDb((db) => {
+      if (!db) return null;
+      const e = (c) => (c == null ? null : Math.round(c) / 100);
+      const nu = opDatum(db, vandaag), w = nu.w;
+      const volgende = (Number(vandaag.slice(0, 4)) + 1) + '-01-01';
+      // review ZOU 1 (ronde 2): dividend en kosten van het jaar vóór de peildatum telkens opnieuw uit de exports van nu (een later ingelezen
+      // rekeningoverzicht telt dan mee); de waarde op de peildatum blijft de bevroren rij. rekening_tot zegt tot wanneer het overzicht loopt.
+      const rek = db.prepare('SELECT datum, omschrijving, mutatie_cent, mutatie_valuta FROM rekening').all();
+      const jaarVan = (pd) => { const j = jaarGeld(rek, nu.d.transacties, Number(pd.slice(0, 4)) - 1, nu.wAt);
+        return { jaar: j.jaar, dividend: e(j.dividend_cent), dividendbelasting: e(j.dividendbelasting_cent), kosten: e(j.kosten_transacties_cent + j.kosten_overig_cent), zonder_wissel: j.zonder_wissel, rekening_tot: j.rekening_tot }; };
+      const uit = { vandaag, peilen: peilen(db).map((p) => ({ peildatum: p.peildatum, bedrag: e(p.waarde_cent), effecten: e(p.effecten_cent), cash: e(p.cash_cent), volledig: p.volledig, markering: p.markering, op: p.op, jaar: jaarVan(p.peildatum) })),
+        volgende_peil: volgende, punt: null, maanden: {} };
+      const eerste = [nu.d.stand_datum].concat(nu.d.transacties.map((t) => t.datum)).filter(Boolean).sort()[0] || null;
+      if (!eerste) return uit;
+      uit.eerste = eerste;
+      uit.punt = { bedrag: e(w.waarde_cent), effecten: e(w.effecten_cent), cash: e(w.cash_cent), cash_datum: w.cash_datum, koers_datum: w.koers_datum, volledig: w.volledig,
+        posities: w.posities.length, zonder_koers: w.zonder.length, markering: w.markering.slice(0, 20), aantal_bron: w.aantal_bron };
+      for (let m = eerste.slice(0, 7); m < vandaag.slice(0, 7); ) {
+        const d = new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0)).toISOString().slice(0, 10);
+        const x = waardeOp(nu.d, nu.kAt, nu.wAt, d);
+        uit.maanden[m] = { bedrag: x.posities.length || x.cash_cent != null ? e(x.waarde_cent) : (x.zonder.length ? null : 0), volledig: x.volledig, gemarkeerd: x.markering.length > 0 };
+        const n = new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 1)).toISOString().slice(0, 7); m = n;
+      }
+      return uit;
+    }, false);
+  }
+  return { app, gesprek, info, _overzicht: overzicht, nieuwsData, koersData, zetKoersen, zetAutoBedrijven, vulBedrijfAan, metDb, vandaag: vandaagF, waardeOpDatum, peilVastleggen, peilTik, peilInhoud, voorFinancien };
 }
 
-module.exports = { maak, leesBestand, bereken, zoekVorm, pastNaam, aankoopStand, waardeVandaag, aankoopPer, daglijn, geldOverzicht, WERELD, regelsUit, VRAGEN, LeesFout, ANTHROPIC_ZIN, plusMaanden };
+module.exports = { maak, leesBestand, bereken, zoekVorm, pastNaam, aankoopStand, waardeVandaag, aankoopPer, daglijn, geldOverzicht, WERELD, waardeOp, jaarGeld, regelsUit, VRAGEN, LeesFout, ANTHROPIC_ZIN, plusMaanden };

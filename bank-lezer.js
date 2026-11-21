@@ -1281,7 +1281,7 @@ const opdrachten = {
   async 'app-financien'() { const x = archiefKlaar(); let P = null; try { P = paypalModule(); } catch (e) { P = null; }
     // wv2258: blok saldi = de bewaarde stand per rekening (tabel saldo, zoals bank.py saldo die leest); geen bankopvraag, geen slot nodig
     let saldi = null; try { saldi = db().prepare('SELECT rek, json, opgehaald FROM saldo').all(); } catch (e) { saldi = null; }
-    const uit = Object.assign({ ok: true, bron: 'archief' }, require(path.join(__dirname, 'financien-app.js')).bereken(x.A, x.a, { paypal: P, saldi: saldi || [] }));
+    const uit = Object.assign({ ok: true, bron: 'archief' }, require(path.join(__dirname, 'financien-app.js')).bereken(x.A, x.a, { paypal: P, saldi: saldi || [], beleggen: geheim.beleggen || null }));   // wv3757: + Beleggen (van server.js)
     if (!saldi) { uit.saldi = null; uit.fouten = (uit.fouten || []).concat(['saldi']); }
     // wv2202: tabblad Gambia (Ecobank uit de mails); een fout hier maakt alleen dat blok leeg
     try { const g = ecobankModule().overzicht(x.a, { max: 30 }); uit.gambia = { rekeningen: g.rekeningen, transacties: g.transacties, ronde_op: g.ronde_op, let_op: g.let_op_ecobank }; }
@@ -1472,7 +1472,7 @@ const opdrachten = {
     const x = archiefKlaar();
     let saldi = null; try { saldi = db().prepare('SELECT rek, json, opgehaald FROM saldo').all(); } catch (e) { saldi = null; }
     try { return require(path.join(__dirname, 'financien-vermogen.js')).verloop(x.A, x.a, { nu: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), saldiRijen: saldi || [],
-      vault: process.env.VAULT_DIR || '/opt/data/AI_SecondBrain' }); }
+      vault: process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', beleggen: geheim.beleggen || null }); }   // wv3757: + Beleggen (van server.js)
     catch (e) { throw new Weigering(e.message); }
   },
   // wv2717 (idee 6 uit Sure): zelf corrigeren in de App. stdin {corrigeer: {actie: 'zet'|'terug'|'naam'|'lijst', …}}; alles via

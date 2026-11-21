@@ -40,4 +40,13 @@ console.log("GROEN /smal/beleggen: alleen bekende velden door, fout zonder inhou
 ' || f=1
 node --test test/beleggen.test.js 2>&1 | tail -n 12 | grep -E "^# (pass|fail)" ; node --test test/beleggen.test.js >/dev/null 2>&1 || { echo "ROOD  test/beleggen.test.js"; f=1; }
 node --test test/beleggen-dash.test.js >/dev/null 2>&1 && echo "GROEN test/beleggen-dash.test.js (daglijn, wereldindex, geld-tegels; wv3754)" || { echo "ROOD  test/beleggen-dash.test.js"; f=1; }
+# wv3757 (nr 910 / L10): waarde op datum, peilwaarde 1 januari, Beleggen in Financiën › Vermogen; koppeling in server.js en de bank-lezer
+node --test test/beleggen-peil.test.js 2>&1 | grep -E "^# (pass|fail)"
+node --test test/beleggen-peil.test.js >/dev/null 2>&1 || { echo "ROOD  test/beleggen-peil.test.js"; node --test test/beleggen-peil.test.js 2>&1 | grep -E "^not ok"; f=1; }
+grep -qF "bankKind(['app-financien'], typeof beleggenFinInvoer === 'function' ? beleggenFinInvoer() : {}" server.js || { echo "ROOD  server.js: app-financien krijgt Beleggen niet mee"; f=1; }
+grep -qF "appFinBankRoute(res, 'app-vermogen', typeof beleggenFinInvoer === 'function' ? beleggenFinInvoer() : {}" server.js || { echo "ROOD  server.js: app-vermogen krijgt Beleggen niet mee"; f=1; }
+grep -qE "^\s+beleggenPeilTik\(\);" server.js || { echo "ROOD  server.js: peilstap niet in de ochtendtik"; f=1; }
+[ "$(grep -c "beleggen: geheim.beleggen || null" bank-lezer.js)" = 2 ] || { echo "ROOD  bank-lezer.js: Beleggen niet doorgegeven (app-financien en app-vermogen)"; f=1; }
+grep -qF "beleggen: o.beleggen || null" financien-app.js || { echo "ROOD  financien-app.js: Beleggen niet naar het overzicht"; f=1; }
+[ $f = 0 ] && echo "GROEN wv3757: peil, Financiën-koppeling"
 exit $f

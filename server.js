@@ -13988,7 +13988,7 @@ async function appFinancien(req, res, a) {
   const nu = Date.now();
   if (appFinCache && nu - appFinCache.op < APP_FIN_CACHE_MS) return appStuur(res, 200, appFinSamen({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString() }, appFinCache.d, appFinVault(nu)));
   let r;
-  try { r = await bankKind(['app-financien'], {}, APP_FIN_MAX_MS); } catch (e) { logError('app-financien', new Error('bankkind faalde')); r = null; }
+  try { r = await bankKind(['app-financien'], typeof beleggenFinInvoer === 'function' ? beleggenFinInvoer() : {}, APP_FIN_MAX_MS); } catch (e) { logError('app-financien', new Error('bankkind faalde')); r = null; }   // wv3757: + Beleggen
   const j = r && r.j;
   if (!j || j.ok !== true) {
     // een oudere bank-lezer.js kent de opdracht niet (gebruik: …): de pod wordt bijgewerkt (Fable #12)
@@ -14139,7 +14139,7 @@ const APP_FIN_VERMOGEN_PER_UUR = 300;
 async function appFinVermogen(req, res, a, d) {
   res._app.reden = 'financien-vermogen';
   if (!appTeller('fin-vermogen', APP_FIN_VERMOGEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak opgevraagd dit uur', 'grens fin-vermogen');
-  const j = await appFinBankRoute(res, 'app-vermogen', {}, 'fin-vermogen');
+  const j = await appFinBankRoute(res, 'app-vermogen', typeof beleggenFinInvoer === 'function' ? beleggenFinInvoer() : {}, 'fin-vermogen');   // wv3757: + Beleggen per maandeinde
   if (!j || j.ok !== true) return;
   res._app.stil = true;
   return appStuur(res, 200, { ok: true, peildatum: j.peildatum || null, maanden: Array.isArray(j.maanden) ? j.maanden : [], eerste_totaal: j.eerste_totaal || null,
@@ -25134,6 +25134,25 @@ async function appBeleggen(req, res, a, route, d) {
   if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'beleggen').slice(0, 80);
   return appStuur(res, u.status, u.body);
 }
+// wv3757 (besluit nr 910 / L10, David Ja 21-11 13:19 met vingerafdruk): Beleggen voor Financiën › Vermogen (beleggen.js voorFinancien: waarde van
+// vandaag, per maandeinde en de peilwaarden; alleen lezen). Gaat via stdin naar de bank-lezer (financien-overzicht vermogenPunt, financien-vermogen
+// verloop). Geen databank of een fout = zonder Beleggen (Financiën werkt gewoon door). Geen bedragen in de log.
+function beleggenVoorFin() {
+  if (!beleggenApp || typeof beleggenApp.voorFinancien !== 'function') return null;
+  try { return beleggenApp.voorFinancien({}); } catch (e) { logError('beleggen-fin', new Error('lezen faalde')); return null; }
+}
+function beleggenFinInvoer() { const b = beleggenVoorFin(); return b ? { beleggen: b } : {}; }   // zonder Beleggen: dezelfde lege invoer als vóór wv3757
+// wv3757: de peilwaarde op 1 januari. Na de ochtendronde (06:40, koersen van de laatste beursdag) van 1 t/m 15 januari zolang hij er niet is;
+// één keer vastgelegd, nooit overschreven (beleggen.js peilTik). Log: alleen datum, volledig en het aantal markeringen.
+function beleggenPeilTik() {
+  if (!beleggenApp || typeof beleggenApp.peilTik !== 'function') return;
+  try {
+    const k = ovisAms();
+    if (k.uur * 60 + k.min < 6 * 60 + 40) return;
+    const p = beleggenApp.peilTik(k.datum);
+    if (p && p.nieuw) schrijfLog(nu() + ' beleggen-peil ' + velden({ peildatum: p.peil.peildatum, volledig: p.peil.volledig, markeringen: p.peil.markering.length }));
+  } catch (e) { logError('beleggen-peil', new Error('peil faalde')); }
+}
 function beleggenInfo() {
   if (!beleggenApp) return { aan: false };
   let i;
@@ -25178,6 +25197,7 @@ async function beleggenNieuwsTik() {
   try { await beleggenNieuws.tik(); }
   catch (e) { logError('beleggen-nieuws', new Error('tik faalde')); }   // geen inhoud in de log
   finally { beleggenNieuwsBezig = false; }
+  beleggenPeilTik();   // wv3757: na de koersronde, ook als die faalde (dan de laatst bekende koers met markering)
 }
 if (beleggenNieuws && SERVER_ECHT) { setInterval(function () { beleggenNieuwsTik(); }, 5 * 60000).unref(); }
 // wv3756 (besluitenpagina nr 908 = L08, David Ja 21-11 13:18): Socev kan erbij in het gewone gesprek (skill beleggen). Zelfde databank en

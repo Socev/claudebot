@@ -399,7 +399,25 @@ function liquide(saldi) {
   });
   return { sal: sal, liq: liq };
 }
-// o: { v (FV.lees), sal, liq (liquide), vault, FV, nu, blok }; geeft { prive, holding } zoals uit.vermogen, met _woning en _hold voor het verloop (niet in het antwoord)
+// wv3757: het Beleggen-blok uit server.js (beleggen.js voorFinancien) → de regel voor Vermogen privé en wat de App erbij toont (peilwaarde).
+function beleggenDeel(b) {
+  if (!b || typeof b !== 'object') return null;
+  const getal = function (x) { return typeof x === 'number' && Number.isFinite(x) ? r2(x) : null; };
+  const dag = function (x) { return typeof x === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(x) ? x : null; };
+  const tekst = function (l) { return Array.isArray(l) ? l.filter(function (x) { return typeof x === 'string'; }).map(function (x) { return x.slice(0, 160); }).slice(0, 20) : []; };
+  const p = b.punt && typeof b.punt === 'object' ? b.punt : null;
+  const peilen = Array.isArray(b.peilen) ? b.peilen.slice(0, 20).filter(function (x) { return x && dag(x.peildatum); }).map(function (x) {
+    const j = x.jaar && typeof x.jaar === 'object' ? x.jaar : null;
+    return { peildatum: x.peildatum, bedrag: getal(x.bedrag), volledig: x.volledig === true, markering: tekst(x.markering), op: typeof x.op === 'string' ? x.op.slice(0, 30) : null,
+      jaar: j && Number.isInteger(j.jaar) ? { jaar: j.jaar, dividend: getal(j.dividend), dividendbelasting: getal(j.dividendbelasting), kosten: getal(j.kosten), zonder_wissel: j.zonder_wissel | 0, rekening_tot: dag(j.rekening_tot) } : null }; }) : [];
+  const info = { peilen: peilen, volgende_peil: dag(b.volgende_peil), punt: p ? { bedrag: getal(p.bedrag), effecten: getal(p.effecten), cash: getal(p.cash), cash_datum: dag(p.cash_datum),
+    koers_datum: dag(p.koers_datum), volledig: p.volledig === true, posities: p.posities | 0, zonder_koers: p.zonder_koers | 0, markering: tekst(p.markering) } : null };
+  const bedrag = p ? getal(p.bedrag) : null;
+  const deel = bedrag != null && (bedrag !== 0 || (p.posities | 0) > 0) ? { tekst: 'Beleggingen bij DEGIRO (laatst bekende koers' + (info.punt.volledig ? '' : ', onvolledig') + ')',
+    bedrag: bedrag, bron: 'Beleggen', op: info.punt.koers_datum || null, let_op: info.punt.markering.length ? info.punt.markering : undefined } : null;
+  return { deel: deel, info: info };
+}
+// o: { v (FV.lees), sal, liq (liquide), vault, FV, nu, blok, beleggen? }; geeft { prive, holding } zoals uit.vermogen, met _woning en _hold voor het verloop (niet in het antwoord)
 function vermogenPunt(o) {
   const v = o.v || {}, hyp = v.hypotheek || null, dga = v.dga || null, sal = o.sal, liq = o.liq, nu = o.nu, FV = o.FV;
   const blok = o.blok || function (n, f) { try { return f(); } catch (e) { return null; } };
@@ -416,12 +434,17 @@ function vermogenPunt(o) {
     wl ? { tekst: 'Woninglening van de Holding', bedrag: -wl.stand, bron: dga.bron.data || dga.bron.pagina, op: wl.jaar + '-12-31' } : null,
     rc != null ? { tekst: 'Rekening-courant met Holding en Tolgaarde (schuld)', bedrag: -rc, bron: dga.bron.pagina, op: dga.bron.pagina_bijgewerkt || null } : null,
   ].filter(Boolean);
+  // wv3757 (besluit nr 910 / L10): Beleggen als eigen regel (DEGIRO, waarde uit Beleggen › dagkoersen; server.js geeft hem mee, alleen lezen).
+  // Geen Beleggen-databank of nog niets belegd = geen regel en niets "ontbreekt"; posities zonder koers tellen niet mee (staat in de markering).
+  const bel = beleggenDeel(o.beleggen);
+  if (bel && bel.deel) delen.push(bel.deel);
   const mist = [!sal && 'saldi', !woning && 'woning', schuld == null && 'hypotheek', !wl && 'woninglening', rc == null && 'rekening-courant'].filter(Boolean);
   return {
     prive: { bedrag: mist.length ? null : r2(delen.reduce(function (s, x) { return s + x.bedrag; }, 0)), delen: delen, ontbreekt: mist,
       woz: woz ? { jaar: woz.jaar, waarde: woz.woz } : null,
       niet_meegeteld: sal ? [{ tekst: 'Kinderrekeningen', bedrag: r2(liq.kinderen) }, { tekst: 'Gambia-rekeningen (geoormerkt)', bedrag: r2(liq.geoormerkt) }] : [],
-      uitleg: 'Woning op de laatste taxatie (een schatting, geen marktwaarde van nu); de Holding telt hier niet mee.' },
+      uitleg: 'Woning op de laatste taxatie (een schatting, geen marktwaarde van nu); de Holding telt hier niet mee.' + (bel && bel.deel ? ' Beleggingen op de laatst bekende slotkoers (Beleggen).' : ''),
+      beleggen: bel ? bel.info : null },
     holding: hold ? holdingBlok(hold, rc, nu) : null,
   };
 }
@@ -491,7 +514,7 @@ function overzicht(A, a, o) {
       .concat(liq.anders ? [{ tekst: 'Overige rekeningen (eigenaar onbekend)', bedrag: r2(liq.anders), aantal: liq.rekeningen.anders.length }] : []),
     uitleg: 'Saldo van de rekeningen van David en de gedeelde rekeningen, gedeeld door wat jullie gemiddeld per maand uitgeven zonder de eenmalige grote posten.' } : null;
   // vermogen: privé en Holding apart (wv2716: in vermogenPunt, ook het laatste punt van het vermogensverloop)
-  uit.vermogen = vermogenPunt({ v: v, sal: sal, liq: liq, vault: o.vault, FV: FV, nu: nu, blok: blok });
+  uit.vermogen = vermogenPunt({ v: v, sal: sal, liq: liq, vault: o.vault, FV: FV, nu: nu, blok: blok, beleggen: o.beleggen });   // wv3757: + Beleggen
   // trend: 24 maanden vrij per maand (alleen volledige maanden; woning en Holding niet als maandtrend, review ZOU 1)
   // wv3137: jaarposten aan inkomen (dividend) gelijk verdeeld over de maanden van hun blok van 12 volledige maanden (de laatste 12 = het venster
   // van de kerngetallen, daarvóór de 12 ervoor); de som per blok blijft gelijk aan wat er echt binnenkwam. inkomen en vrij blijven de echte
@@ -703,5 +726,5 @@ function regelsHerleiden(a) {
   return uit;
 }
 
-module.exports = { liquide: liquide, vermogenPunt: vermogenPunt, leesWoning: leesWoning, leesHolding: leesHolding, groepVan: groepVan, boekingen: boekingen, regelsHerleiden: regelsHerleiden, tpWoorden: tpWoorden, zonderIban: zonderIban, overzicht: overzicht, boekingenLijst: boekingenLijst, stroomZet: stroomZet, indelen: indelen, sleutelVan: sleutelVan, idVan: idVan, box2: box2, geldigTot: geldigTot, holdingBlok: holdingBlok,
+module.exports = { liquide: liquide, vermogenPunt: vermogenPunt, beleggenDeel: beleggenDeel, leesWoning: leesWoning, leesHolding: leesHolding, groepVan: groepVan, boekingen: boekingen, regelsHerleiden: regelsHerleiden, tpWoorden: tpWoorden, zonderIban: zonderIban, overzicht: overzicht, boekingenLijst: boekingenLijst, stroomZet: stroomZet, indelen: indelen, sleutelVan: sleutelVan, idVan: idVan, box2: box2, geldigTot: geldigTot, holdingBlok: holdingBlok,
   GEMENGD: GEMENGD, ENTITEIT: ENTITEIT, STROMEN: STROMEN, SUBSOORT: SUBSOORT, TARIEVEN: TARIEVEN, EENMALIG_GRENS: EENMALIG_GRENS, EIGENAREN: EIGENAREN, uitgaven: uitgaven, mediaan: mediaan };
