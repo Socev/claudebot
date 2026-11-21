@@ -136,6 +136,25 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     const r3f = await z2.zoek('Wat weet je van zzproefwoordqq');
     toets('3b weer leesbaar: gewoon "Niets gevonden." met volledige dekking', r3f.dekking && !r3f.dekking.onleesbaar && /^Niets gevonden\. /.test(r3f.melding), r3f); }
 
+  // ── 3b. wv3682 (3C40): treffers() zonder model ──
+  {
+    const n0 = aanroepen;
+    const t1 = await z.treffers('btw Tolgaarde');
+    toets('3b treffers: hub eerst, regel met het btw-nummer, beste per pagina', t1.stand === 'ok' && t1.treffers[0].pad === '10_Zakelijk/Tolgaarde/index.md' && /NL863125190B01/.test(t1.treffers[0].regel) &&
+      new Set(t1.treffers.map((t) => t.pad)).size === t1.treffers.length, t1);
+    toets('3b treffers: geen modelaanroep', aanroepen === n0);
+    toets('3b treffers: Bronnen, AGENTS.md en voorgesteld blijven buiten; notulen wel', !t1.treffers.some((t) => /Bronnen|AGENTS/.test(t.pad)) &&
+      !t1.treffers.some((t) => /NL000000000B00/.test(t.regel)) && t1.treffers.some((t) => t.pad === '10_Zakelijk/Tolgaarde/Notulen/n.md'), t1.treffers);
+    const t2 = await z.treffers('api-sleutel btw-koppeling Tolgaarde');
+    toets('3b treffers: regel door het masker (sleutel niet zichtbaar)', t2.treffers.length > 0 && !t2.treffers.some((t) => t.regel.indexOf(SLEUTEL) >= 0), t2.treffers);
+    const t3 = await z.treffers('geboortedatum Sev');
+    toets('3b treffers: woordenlijst werkt (Sev → Sevilay), BSN gemaskeerd', t3.treffers.some((t) => /Sevilay/.test(t.pad)) && !t3.treffers.some((t) => /123456782/.test(t.regel)), t3.treffers);
+    const t4 = await z.treffers('kenteken');
+    toets('3b treffers: symlinks en Conversaties niet gevolgd', !t4.treffers.some((t) => /LEKT|GESPREK/.test(t.regel)) && t4.treffers.some((t) => /GJL-11-J/.test(t.regel)), t4.treffers);
+    toets('3b treffers: handeling geeft niets', (await z.treffers('Stuur Tolgaarde een mail')).stand === 'handeling');
+    toets('3b treffers: hooguit max', (await z.treffers('Tolgaarde', { max: 1 })).treffers.length === 1);
+  }
+
   // ── 4. vaste plek (wv3446: de oude vlag verandert niets meer; David 19-11: niet filteren) ──
   const r4 = await z.zoek('Wat is de geboortedatum van Sev', { vast: true });
   const r4n = await z.zoek('Wat is de geboortedatum van Sev');
@@ -530,7 +549,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   const SCH = path.join(W, 'zoek-snel.json');
   const log = [], chatlog = [];
   let modelVan = null, modelN = 0;
-  const appStaat = { tellers: { 'zoek-snel': [] } };
+  const appStaat = { tellers: { 'zoek-snel': [], 'zoek-snel-treffers': [] } };
   const st = function () { return { _app: {}, status: null, j: null }; };
   const eenRegel = new Function('appOntmasker', 'return ' + /function appEenRegel\(t, max\) \{[\s\S]*?\n\}/.exec(src)[0])(
     new Function('return ' + /function appOntmasker\(t, merk\) \{[\s\S]*?\n\}/.exec(src)[0])());
@@ -548,7 +567,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     appSchrijfJson: (f, d) => fs.writeFileSync(f, JSON.stringify(d)),
     appEenRegel: eenRegel, appTijdKort: (ms) => new Date(ms).toISOString().slice(11, 16),
     harvesterClaude: async (sys, prompt, schema, o) => { modelN++; if (o.timeoutMs !== 20000) return { ok: false, fout: 'time-out niet 20 s' }; return modelVan ? modelVan(prompt, schema) : { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }; } });
-  vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, zoekSnelStaart, zoekSnelTot, zoekSnelInfo, zoekSnelAan, zoekSnel };', ctx, { filename: 'server.js#zoek-snel' });
+  vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, appZoekSnelTreffers, zoekSnelStaart, zoekSnelTot, zoekSnelInfo, zoekSnelAan, zoekSnel };', ctx, { filename: 'server.js#zoek-snel' });
   const S = ctx.__z;
   toets('6 module geladen', !!S.zoekSnel);
   const A = { id: 'pixel', soort: 'mee' }, A2 = { id: 'laptop', soort: 'mee' };
@@ -608,6 +627,34 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   appStaat.tellers['zoek-snel'] = new Array(60).fill(Date.now());
   res = await roep(A, { tekst: 'Wat is het btw-nummer van Tolgaarde', zoek_id: id('8') });
   toets('6 grens 60 per uur: 429', res.status === 429);
+
+  // ── 11. wv3682 (3C40): de treffers vóór het antwoord, route POST /app/zoek-snel/treffers ──
+  toets('11 dispatch en glijdroute treffers', /if \(route === 'POST \/app\/zoek-snel\/treffers'\) return typeof appZoekSnelTreffers === 'function' \? appZoekSnelTreffers\(req, res, a, d\)/.test(src) &&
+    /APP_GLIJD_ROUTES\.add\('POST \/app\/zoek-snel\/treffers'\)/.test(src) && /'zoek-snel-treffers': \[\][,}]/.test(src));
+  const roepT = async (a, d) => { const res = st(); await S.appZoekSnelTreffers({}, res, a, d); return res; };
+  S.zoekSnelStaart();   // eerdere regels leeg
+  const logVoor = log.length, modelVoor = modelN;
+  res = await roepT(A, { tekst: 'Wat is het btw-nummer van Tolgaarde' });
+  toets('11 route: 200, treffers met pad, naam, regelnummer en regel', res.status === 200 && res.j.ok && res.j.stand === 'ok' && res.j.treffers.length > 0 &&
+    res.j.treffers.every((t) => typeof t.pad === 'string' && typeof t.naam === 'string' && Number.isInteger(t.nr) && typeof t.regel === 'string'), res.j);
+  toets('11 route: Tolgaarde-hub bovenaan, met de btw-regel', res.j.treffers[0].pad === '10_Zakelijk/Tolgaarde/index.md' && /NL863125190B01/.test(res.j.treffers[0].regel), res.j.treffers[0]);
+  toets('11 route: geen modelaanroep, geen app-log, geen Socev-regel', modelN === modelVoor && log.length === logVoor && S.zoekSnelStaart() === '', { modelN, modelVoor, log: log.length });
+  toets('11 route: niets uit Bronnen, AGENTS.md of voorgesteld', !res.j.treffers.some((t) => /Bronnen|AGENTS/.test(t.pad) || /NL000000000B00|NL111111111B11/.test(t.regel)), res.j.treffers);
+  toets('11 route: binnen 0,5 s op de pod', res.j.ms < 500, res.j.ms);
+  res = await roepT(A, { tekst: 'Zet een afspraak met Tolgaarde' });
+  toets('11 handeling: 200, stand handeling, geen treffers', res.status === 200 && res.j.stand === 'handeling' && res.j.treffers.length === 0, res.j);
+  res = await roepT(A, { tekst: '   ' });
+  toets('11 lege vraag: 400', res.status === 400);
+  res = await roepT(A, { tekst: 'x'.repeat(201) });
+  toets('11 vraag > 200 tekens: 413', res.status === 413);
+  fs.writeFileSync(SCH, '{"aan": false}');
+  res = await roepT(A, { tekst: 'btw Tolgaarde' });
+  toets('11 schakelaar uit: 409', res.status === 409 && res.j.uit === true);
+  fs.writeFileSync(SCH, '{"aan": true}');
+  appStaat.tellers['zoek-snel-treffers'] = new Array(120).fill(Date.now());
+  res = await roepT(A, { tekst: 'btw Tolgaarde' });
+  toets('11 grens 120 per uur: 429', res.status === 429);
+  appStaat.tellers['zoek-snel-treffers'] = [];
 
   // ── 10. server.js met de lagen (wv1788): RPC feitenlijst, tekstindex, query_run na het antwoord, zout, patiëntmarker, /health, nachtklokken ──
   const ZOUT = path.join(W, 'zoutmap', 'zout');

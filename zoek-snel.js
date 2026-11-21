@@ -992,7 +992,66 @@ function maak(opt) {
     return uit('antwoord', Object.assign(basis, { tekst: tekstUit, tekst_kaal: m.tekst, regel_los: regelLos, waarden: m.waarden, weggelaten: m.weggelaten, bronnen: m.bronnen, melding: null }));
   }
 
-  return { zoek: zoek, groepen: groepen, context: context, grep: grep, laag1: laag1, indexZoek: indexZoek };
+  // wv3682 (besluitenpagina nr 340 = 3C40, David Ja 21-11 12:41): eerst de treffers, dan het antwoord. David keek meestal 5 s naar
+  // "Zoekt in het Brein…" terwijl tekstzoeken mediaan 0,06 s kost en het model 5,3 s. treffers() is alleen het grep-pad van laag 3
+  // (zelfde wortels, uitsluitingen, varianten en masker), zonder model en zonder paginaleesactie: per pagina de beste regel, op dezelfde
+  // volgorde als context() (titel/alias eerst, dan meeste termen, dan beste regel). De app vraagt dit naast POST /app/zoek-snel en toont
+  // de lijst tot het antwoord er is; het antwoord zelf blijft precies zoals het was (deze functie raakt zoek() niet).
+  async function treffers(vraagRuw, o) {
+    o = o || {};
+    const max = Math.max(1, Math.min(12, Number(o.max) || 8));
+    const t0 = nu();
+    const vraag = String(vraagRuw == null ? '' : vraagRuw).replace(/\s+/g, ' ').trim().slice(0, MAX_VRAAG);
+    const leeg = function (stand, x) { return Object.assign({ stand: stand, treffers: [], paginas: 0, ms: nu() - t0 }, x || {}); };
+    if (!vraag) return leeg('leeg');
+    if (HANDELING.test(vraag)) return leeg('handeling');
+    const gr = groepen(vraag);
+    if (!gr.length) return leeg('geen zoektermen');
+    const gv = await grep(gr);
+    if (gv.fout) return leeg('fout');
+    const perPad = new Map();
+    gv.regels.forEach(function (r) {
+      if (/voorgesteld/i.test(r.tekst)) return;   // zoals context(); de regel zelf gaat door het masker (geen woordfilter, David 19-11)
+      let x = perPad.get(r.pad);
+      if (!x) {
+        const delen = r.pad.split('/'), naam = delen[delen.length - 1].replace(/\.md$/i, ''), map = delen[delen.length - 2] || '';
+        const over = gr.map(function (g) { return isVariant(naam, g) || (/^index$/i.test(naam) && isVariant(map.replace(/_/g, ' '), g)); });
+        const inPad = gr.map(function (g) { return raakt(delen.join(' ').replace(/_/g, ' ').replace(/\.md$/i, ''), g); });
+        x = { pad: r.pad, naam: naam, over: over, inPad: inPad, entiteit: over.some(Boolean), titel: over.some(Boolean), termen: new Set(), beste: null, n: 0 };
+        perPad.set(r.pad, x);
+      }
+      let n = 0, alleenPad = 0, exact = false;
+      const kopOfAlias = /^\s*(?:aliases|alias|title|titel)\s*:/i.test(r.tekst) || /^#\s/.test(r.tekst);
+      gr.forEach(function (g, i) {
+        if (raakt(r.tekst, g)) { n++; x.termen.add(i); if (kopOfAlias) x.titel = true; if (r.tekst.toLowerCase().indexOf(g.term.toLowerCase()) >= 0) exact = true; }
+        else if (x.inPad[i]) alleenPad++;
+      });
+      if (!n) return;
+      x.n++;
+      const score = n * 10 + alleenPad * 6 + (x.entiteit ? 5 : 0) + (exact ? 3 : 0);
+      // een frontmatterregel (aliases, tags) is zelden wat David wil lezen: een inhoudsregel met dezelfde score gaat voor
+      const fm = /^[A-Za-z_][\w-]*\s*:/.test(r.tekst) && !/^#/.test(r.tekst);
+      if (!x.beste || score > x.beste.score || (score === x.beste.score && x.beste.fm && !fm)) x.beste = { nr: r.nr, tekst: r.tekst, score: score, fm: fm };
+    });
+    const lijst = [];
+    perPad.forEach(function (x) {
+      if (!x.beste) return;
+      gr.forEach(function (g, i) { if (x.over[i] || x.inPad[i]) x.termen.add(i); });
+      lijst.push(x);
+    });
+    lijst.sort(function (a, b) {
+      return (b.titel ? 1 : 0) - (a.titel ? 1 : 0) || b.termen.size - a.termen.size || b.beste.score - a.beste.score || b.n - a.n ||
+        (a.pad < b.pad ? -1 : a.pad > b.pad ? 1 : 0);
+    });
+    const uitLijst = lijst.slice(0, max).map(function (x) {
+      // een index-pagina heet naar haar map ("Tolgaarde", niet "index")
+      const naam = /^index$/i.test(x.naam) ? (x.pad.split('/').slice(-2, -1)[0] || x.naam).replace(/_/g, ' ') : x.naam;
+      return { pad: x.pad, naam: naam, nr: x.beste.nr, regel: kort(masker(String(x.beste.tekst).replace(/\r$/, '')), gr), aantal: x.n };
+    });
+    return { stand: 'ok', treffers: uitLijst, paginas: lijst.length, afgekapt: !!gv.afgekapt || undefined, onleesbaar: !!gv.onleesbaar || undefined, ms: nu() - t0 };
+  }
+
+  return { zoek: zoek, groepen: groepen, context: context, grep: grep, laag1: laag1, indexZoek: indexZoek, treffers: treffers };
 }
 
 module.exports = { maak: maak, termenUit: termenUit, natoets: natoets, natNorm: natNorm, harde: harde, woordenlijstGroepen: woordenlijstGroepen,

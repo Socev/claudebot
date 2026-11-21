@@ -6055,6 +6055,7 @@ APP_GLIJD_ROUTES.add('POST /app/financien/potje');   // wv2706: potje zetten of 
 APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij een reis tikken = David die werkt
 ['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2717: zelf corrigeren = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
+APP_GLIJD_ROUTES.add('POST /app/zoek-snel/treffers');   // wv3682: de treffers vóór het antwoord = David die typt
 ['laad', 'bewerk', 'nieuw', 'vergelijk', 'uitbreiden', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/uitbreiden', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag', 'medisch'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
@@ -6241,7 +6242,7 @@ function appBeheerVanafVast(route, a, d) {
 // voor het doorgeefluik (intern, doorgeefSchoon) en de vaste-plekschakelaar van Second Brain/Docs/Zoek snel (wv1901).
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], docs: [], managers: [], 'zoek-snel': [], mediatheek: [], 'mediatheek-bestand': [], ghawa: [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], docs: [], managers: [], 'zoek-snel': [], 'zoek-snel-treffers': [], mediatheek: [], 'mediatheek-bestand': [], ghawa: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -15463,6 +15464,7 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/geschiedenis/') === 0) return appGeschiedenis(req, res, reg, a, route.slice('GET /app/geschiedenis/'.length));
         if (route === 'POST /app/zoek') return appZoek(req, res, a, d);   // wv350
         if (route === 'POST /app/zoek-snel') return typeof appZoekSnel === 'function' ? appZoekSnel(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'zoek-snel');   // wv1252
+        if (route === 'POST /app/zoek-snel/treffers') return typeof appZoekSnelTreffers === 'function' ? appZoekSnelTreffers(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'zoek-snel treffers');   // wv3682
         if (route === 'GET /app/broedstoof') return appBroedstoof(req, res, a);   // wv891: apparaat (privé-kaart op een vaste plek)
         if (route === 'GET /app/briefing') return appBriefingRoute(req, res, a);   // wv891
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
@@ -26702,6 +26704,29 @@ async function appZoekSnel(req, res, a, d) {
   try { r = await p; } finally { delete st.bezig[a.id]; }
   res._app.reden = 'zoek-snel ' + String(r.j && r.j.soort || r.status) + ' ' + String(r.j && r.j.ms || 0) + ' ms';
   return appStuur(res, r.status, r.j);
+}
+// wv3682 (besluitenpagina nr 340 = 3C40, David Ja 21-11 12:41): de treffers vóór het antwoord. De app stuurt deze vraag tegelijk met
+// POST /app/zoek-snel; hier alleen het grep-pad (zoek-snel.js treffers(): geen model, geen app-log, geen query_run, geen Socev-regel),
+// zodat de pagina's met hun beste regel binnen ± 0,3 s op het scherm staan. Zelfde poort, schakelaar en vraaggrens als Zoek snel; een eigen
+// grens (2 × die van Zoek snel per uur) en hooguit één tegelijk per apparaat. api.log ziet alleen aantal en duur.
+const ZOEK_SNEL_TREFFERS_PER_UUR = 2 * ZOEK_SNEL_PER_UUR;
+async function appZoekSnelTreffers(req, res, a, d) {
+  if (!zoekSnel || typeof zoekSnel.treffers !== 'function') return appWeiger(res, 404, 'Zoek snel zit niet in deze versie van de pod', 'zoek-snel treffers ontbreekt');
+  if (!zoekSnelAan()) { res._app.reden = 'zoek-snel uit'; return appStuur(res, 409, { ok: false, uit: true, fout: 'Zoek snel staat uit', melding: 'Zoek snel staat uit.' }); }
+  const vraag = String(d.tekst == null ? '' : d.tekst).replace(/\s+/g, ' ').trim();
+  if (!vraag) return appWeiger(res, 400, 'typ een vraag', 'zoek-snel treffers leeg');
+  if (vraag.length > ZOEK_SNEL_MAX) return appWeiger(res, 413, 'vraag te lang (max ' + ZOEK_SNEL_MAX + ' tekens)', 'zoek-snel treffers te lang');
+  const st = appStaat.zoekSnelTreffers = appStaat.zoekSnelTreffers || {};
+  if (st[a.id]) return appWeiger(res, 429, 'er loopt al een zoekvraag; even geduld', 'zoek-snel treffers bezig');
+  if (!appTeller('zoek-snel-treffers', ZOEK_SNEL_TREFFERS_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + ZOEK_SNEL_TREFFERS_PER_UUR + ')', 'grens zoek-snel treffers');
+  st[a.id] = true;
+  let r;
+  try { r = await zoekSnel.treffers(vraag, { max: 8 }); }
+  catch (e) { logError('zoek-snel-treffers', e); r = { stand: 'fout', treffers: [], paginas: 0, ms: 0 }; }
+  finally { delete st[a.id]; }
+  res._app.reden = 'zoek-snel treffers ' + r.stand + ' ' + r.treffers.length + ' ' + r.ms + ' ms';
+  return appStuur(res, 200, { ok: true, stand: r.stand, treffers: r.treffers.map(function (t) { return { pad: t.pad, naam: t.naam, nr: t.nr, regel: t.regel, aantal: t.aantal }; }),
+    paginas: r.paginas, afgekapt: !!r.afgekapt, onleesbaar: !!r.onleesbaar, ms: r.ms });
 }
 // ── einde Zoek snel ──
 
